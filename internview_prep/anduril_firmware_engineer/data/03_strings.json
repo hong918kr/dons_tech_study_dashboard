@@ -1,0 +1,617 @@
+{
+  "id": "strings",
+  "order": 3,
+  "range": "Q26-40",
+  "icon": "🔤",
+  "title_en": "String Functions",
+  "title_ko": "문자열 함수",
+  "summary_ko": "strlen/strcpy/strncpy/strcat/strcmp/strstr/strchr/atoi/itoa, 대소문자 변환, 단어 뒤집기, 중복 제거, 회문, strtok(static 상태), 축소판 sprintf를 libc 없이 직접 재구현한다. 핵심은 포인터 순회, 버퍼 안전, 널 종료, 엣지케이스 방어.",
+  "summary_en": "Reimplement core libc string functions from scratch: strlen/strcpy/strncpy/strcat/strcmp/strstr/strchr/atoi/itoa, case conversion, reverse_words, remove_duplicates, palindrome, strtok (static state), and a tiny sprintf. Emphasis on pointer traversal, buffer safety, null-termination, and edge cases.",
+  "anduril_relevance_ko": "펌웨어에선 <string.h>가 있어도 바운드 검사가 없어 오버플로/널 미종료가 실무 최다 버그다. 인터뷰어는 한 줄짜리 재구현을 시켜놓고 NULL·빈 문자열·버퍼 경계·오버플로·종료 널 같은 엣지케이스를 파고든다. 드론/자율체에서는 명령 파싱, 텔레메트리·로그 포맷팅, NMEA/AT 커맨드 처리에 문자열이 쓰이며, 힙이 없거나 제한적이라 고정 버퍼 + 직접 포맷팅(tiny sprintf)과 상태 있는 토크나이저 이해가 실제로 필요하다.",
+  "concepts": [
+    {
+      "term": "null-termination",
+      "ko": "C 문자열은 '\\0'로 끝나며 길이를 저장하지 않음 → 매번 스캔, 종료 널 누락은 OOB read",
+      "en": "C strings end with '\\0'; length isn't stored, so missing the terminator causes OOB reads"
+    },
+    {
+      "term": "buffer safety",
+      "ko": "dest 버퍼 크기는 호출자 책임. strcpy/strcat은 검사하지 않아 오버플로 주범",
+      "en": "Destination size is the caller's responsibility; strcpy/strcat don't check, the top overflow source"
+    },
+    {
+      "term": "strncpy trap",
+      "ko": "src>=n이면 널 종료 안 됨; 짧으면 나머지를 '\\0'로 패딩",
+      "en": "No NUL if src>=n; pads remainder with '\\0' when src is shorter"
+    },
+    {
+      "term": "unsigned char compare",
+      "ko": "strcmp는 unsigned char로 비교해야 고바이트에서 부호가 뒤집히지 않음",
+      "en": "Compare as unsigned char so high bytes don't flip the sign of the result"
+    },
+    {
+      "term": "strtok static state",
+      "ko": "static 포인터로 위치 기억 → 스레드 안전 X, 재진입 X, 원본 파괴",
+      "en": "Static pointer remembers position: not thread-safe, not reentrant, destroys input"
+    },
+    {
+      "term": "atoi overflow",
+      "ko": "표준은 오버플로 시 UB; INT_MAX/INT_MIN으로 saturate가 안전",
+      "en": "Standard atoi is UB on overflow; saturating to INT_MAX/INT_MIN is safe"
+    },
+    {
+      "term": "INT_MIN abs",
+      "ko": "-INT_MIN은 오버플로 → unsigned 승격 후 -(long)n 처리",
+      "en": "-INT_MIN overflows; promote to unsigned via -(long)n"
+    },
+    {
+      "term": "in-place reverse",
+      "ko": "reverse_words = 전체 뒤집기 → 각 단어 되뒤집기(추가 버퍼 0)",
+      "en": "reverse_words = reverse whole, then reverse each word (zero extra buffer)"
+    }
+  ],
+  "study_note_md": "# 03. String Functions (문자열 함수) · Q26-40 🔤\n\n> libc 문자열 함수를 **직접** 재구현하는 드릴. Anduril 펌웨어 인터뷰의 단골 —\n> \"표준 라이브러리 없이 이거 짜보세요\"는 사실상 **포인터 + 버퍼 안전 + 널 종료**를\n> 제대로 이해하는지 보는 시험이다.\n\n---\n\n## 왜 이 토픽이 인터뷰에 나오나\n\n- 임베디드/펌웨어에서 `<string.h>`는 흔하지만, **바운드 검사가 없다**. 실무 버그의 상당수가\n  strcpy/strcat 오버플로, strncpy 널 미종료, strtok 재진입 문제에서 나온다.\n- 인터뷰어는 `my_strcpy` 한 줄짜리를 시켜놓고 **엣지케이스**(NULL, 빈 문자열, 버퍼 경계,\n  오버플로, 종료 널)를 파고든다. \"이거 언제 깨지나요?\"가 진짜 질문이다.\n- 드론/자율체 펌웨어에서 문자열은 **명령 파싱, 텔레메트리 포맷팅, 로그, NMEA/AT 커맨드**\n  등에 쓰인다. 힙이 없거나 제한적이라 **고정 버퍼 + 직접 포맷팅**이 기본이다.\n\n---\n\n## 핵심 개념 치트시트\n\n| 개념 | 요점 |\n|---|---|\n| **null-termination** | C 문자열은 `'\\0'`로 끝난다. 길이는 저장 안 됨 → 매번 스캔. 종료 널 빼먹으면 OOB read. |\n| **buffer safety** | dest 버퍼 크기는 **호출자 책임**. `strcpy`/`strcat`은 검사 안 함 → 오버플로 주범. |\n| **strncpy 함정** | src ≥ n 이면 **널 종료 안 됨**. 짧으면 나머지를 `'\\0'`로 패딩(성능 비용). |\n| **unsigned char 비교** | `strcmp`는 `unsigned char`로 비교해야 부호 있는 char 에서 결과 부호가 뒤집히지 않음. |\n| **strtok 상태** | `static` 포인터로 위치 기억 → **스레드 안전 X, 재진입 X**. 원본 문자열을 파괴(널 삽입). |\n| **overflow(atoi)** | 표준 `atoi`는 오버플로 시 UB. 안전하게 **INT_MAX/INT_MIN saturate** 권장. |\n| **INT_MIN abs** | `-INT_MIN`은 오버플로. `unsigned`로 승격 후 `-(long)n` 처리. |\n| **in-place 기법** | reverse_words = 전체 뒤집기 → 각 단어 되뒤집기. 추가 버퍼 0. |\n\n---\n\n## 문제별 요점 & 함정\n\n### 26-29. strlen / strcpy / strncpy / strcat\n- `strlen`: 포인터 차(`p - s`)로 O(n).\n- `strcpy`: `while ((*d++ = *src++));` — 널까지 복사되고 0이 루프를 끝냄.\n- `strncpy`: **libc 시맨틱을 정확히** — 짧으면 널 패딩, 길면 종료 안 함. 인터뷰에서 이걸\n  물어보면 \"그래서 저는 항상 `dst[n-1]='\\0'`를 직접 넣습니다\"라고 답하면 가점.\n- `strcat`: dest 끝(`while(*d) d++;`)까지 간 뒤 거기서부터 복사. **매번 dest 전체 스캔**\n  → 반복 strcat 은 O(n²)(이른바 \"Shlemiel the painter\").\n\n### 30-32. strcmp / strstr / strchr\n- `strcmp`: 마지막에 `(unsigned char)*s1 - (unsigned char)*s2`.\n- `strstr`: 순진한 O(n·m). 빈 needle → haystack 반환(libc 규약).\n- `strchr`: `c`는 `int`지만 `char`로 캐스팅해 비교. `c=='\\0'`이면 **종료 널 주소** 반환.\n\n### 33-34. atoi / itoa\n- `atoi`: 공백 skip → 부호 → 숫자. 오버플로 **saturate**. 반복마다 clamp 하면 long long 도 안전.\n- `itoa`: base 2..16. 뒤에서부터 자리수 뽑아 `tmp`에 담고 **뒤집어** 복사. `INT_MIN`은\n  `unsigned`로 처리. base 10 에서만 부호.\n\n### 35-38. case / reverse_words / remove_duplicates / palindrome\n- 대소문자: ASCII 범위 체크 후 `± ('a'-'A')`. (로케일/UTF-8 은 범위 밖.)\n- reverse_words: **전체 뒤집고 → 단어별 되뒤집기**. 공백 위치 보존, 추가 메모리 없음.\n- remove_duplicates: `bool seen[256]` 룩업 + write-index compaction, O(n).\n- palindrome: 투 포인터 `i<j`. 빈 문자열은 회문으로 간주.\n\n### 39. strtok\n```c\nstatic char *save = NULL;      // ← 상태 유지의 핵심\nif (str) save = str;\n// 앞쪽 구분자 skip → 토큰 시작 → 다음 구분자를 '\\0'로 잘라내고 save 전진\n```\n- **원본을 파괴**하고 **static** 을 쓴다 → 멀티스레드/중첩 토큰화에서 깨짐.\n  실무 대안: `strtok_r`(reentrant), 또는 직접 인덱스 관리.\n\n### 40. tiny sprintf\n- `va_list` / `va_start` / `va_arg` / `va_end`. `%d %u %x %X %c %s %%` 지원.\n- `%d` 음수는 `-` 출력 후 `unsigned`로 승격(`-(long)v`)해서 자리수 처리.\n- 반환값은 **쓴 문자 수(널 제외)**. 실무판은 반드시 **버퍼 크기 인자**(snprintf류)를 받아야 안전.\n\n---\n\n## 인터뷰 팔로업 (자주 나오는 꼬리질문)\n\n1. **\"strcpy 어디서 깨지나요?\"** → dest 버퍼가 src+1 보다 작으면 오버플로. NULL 포인터. 겹치는 메모리(overlap)는 memmove 영역.\n2. **\"strncpy 는 왜 위험?\"** → 널 종료를 보장 안 함. 이후 strlen/printf 가 OOB read.\n3. **\"strtok 를 ISR/스레드에서 쓰면?\"** → static 상태 공유로 레이스. strtok_r 써야 함.\n4. **\"atoi vs strtol?\"** → strtol 은 에러/오버플로/진법/끝 포인터를 알려줌. 실무는 strtol.\n5. **\"반복 strcat 이 느린 이유?\"** → 매번 끝을 다시 찾음 → O(n²). 끝 포인터를 유지하면 O(n).\n6. **\"UTF-8 이면?\"** → 바이트 길이 ≠ 문자 수. tolower/upper 는 ASCII 전용.\n\n---\n\n## 빌드 & 실행\n\n```sh\n# 연습(직접 채우기)\ncc -std=c11 -Wall -Wextra problems/03_strings.c -o /tmp/andb_strings && /tmp/andb_strings\n# 정답 확인\ncc -std=c11 -Wall -Wextra solutions/03_strings.c -o /tmp/andb_strings && /tmp/andb_strings\n# 또는\nmake prob N=03_strings      #  연습\nmake sol  N=03_strings      #  정답 (전부 PASS)\n```\n\n> **핵심 한 줄**: C 문자열 함수의 90%는 \"포인터로 널까지 스캔 + 버퍼 크기는 내 책임 +\n> 종료 널 잊지 마라\"로 요약된다. 나머지는 엣지케이스 방어다.\n",
+  "problems": [
+    {
+      "num": 26,
+      "slug": "my_strlen",
+      "title_ko": "문자열 길이",
+      "title_en": "String length",
+      "difficulty": "easy",
+      "tags": [
+        "pointers",
+        "scan"
+      ],
+      "prompt_ko": "널 종료 문자열의 길이(널 제외)를 반환하라.",
+      "prompt_en": "Return the length of a NUL-terminated string, excluding the terminator.",
+      "signature": "size_t my_strlen(const char *s)",
+      "examples": [
+        {
+          "in": "\"hello\"",
+          "out": "5"
+        },
+        {
+          "in": "\"\"",
+          "out": "0"
+        }
+      ],
+      "hints": [
+        "원본 포인터를 보존하고 별도 포인터로 순회하라.",
+        "'\\0'를 만나면 멈춘다.",
+        "포인터 차이가 곧 길이다."
+      ],
+      "solution": "size_t my_strlen(const char *s) {\n    const char *p = s;\n    while (*p) p++;\n    return (size_t)(p - s);\n}",
+      "explanation_ko": "포인터 p를 널까지 전진시키고 p-s로 길이를 구한다. 길이 정보를 저장하지 않는 C 문자열의 본질.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "s가 NULL이면 역참조 크래시(실무는 방어).",
+        "길이를 캐싱하지 않아 반복 호출 시 매번 O(n)."
+      ],
+      "anduril_context": "텔레메트리/로그 버퍼에서 문자열 크기 계산, 전송 길이 산정."
+    },
+    {
+      "num": 27,
+      "slug": "my_strcpy",
+      "title_ko": "문자열 복사",
+      "title_en": "String copy",
+      "difficulty": "easy",
+      "tags": [
+        "pointers",
+        "buffer-safety"
+      ],
+      "prompt_ko": "src(널 포함)를 dest로 복사하고 dest를 반환하라. 버퍼 크기는 호출자 책임.",
+      "prompt_en": "Copy src (including NUL) into dest and return dest.",
+      "signature": "char *my_strcpy(char *dest, const char *src)",
+      "examples": [
+        {
+          "in": "dest,\"abc\"",
+          "out": "dest==\"abc\""
+        }
+      ],
+      "hints": [
+        "`while ((*d++ = *src++));` 한 줄로 가능.",
+        "대입식의 값이 복사된 문자 → 0이면 종료.",
+        "dest 원본 포인터를 반환용으로 보관."
+      ],
+      "solution": "char *my_strcpy(char *dest, const char *src) {\n    char *d = dest;\n    while ((*d++ = *src++))\n        ;\n    return dest;\n}",
+      "explanation_ko": "대입식 (*d++ = *src++)의 결과가 복사된 문자다. '\\0'을 복사하는 순간 값 0이 되어 루프가 끝난다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "dest 버퍼가 작으면 오버플로(검사 없음).",
+        "src와 dest가 겹치면 UB → memmove 영역.",
+        "dest/src NULL 미방어."
+      ],
+      "anduril_context": "고정 크기 명령/설정 버퍼에 문자열 세팅. 오버플로가 실무 최다 버그."
+    },
+    {
+      "num": 28,
+      "slug": "my_strncpy",
+      "title_ko": "제한 복사",
+      "title_en": "Bounded copy",
+      "difficulty": "medium",
+      "tags": [
+        "buffer-safety",
+        "null-termination"
+      ],
+      "prompt_ko": "최대 n바이트 복사. src가 짧으면 나머지를 '\\0'로 패딩, src가 n 이상이면 널 종료하지 않는다(libc 시맨틱).",
+      "prompt_en": "Copy at most n bytes; pad with '\\0' if src is shorter; do NOT NUL-terminate if src length >= n.",
+      "signature": "char *my_strncpy(char *dest, const char *src, size_t n)",
+      "examples": [
+        {
+          "in": "dest,\"ab\",5",
+          "out": "\"ab\\0\\0\\0\""
+        },
+        {
+          "in": "dest,\"abcdef\",3",
+          "out": "\"abc\"(종료 안 됨)"
+        }
+      ],
+      "hints": [
+        "복사 루프와 패딩 루프를 나눠라.",
+        "src가 먼저 끝나면 남은 자리를 0으로 채운다.",
+        "src가 n 이상이면 널을 넣지 않는다 — 이게 함정."
+      ],
+      "solution": "char *my_strncpy(char *dest, const char *src, size_t n) {\n    size_t i = 0;\n    for (; i < n && src[i] != '\\0'; i++) dest[i] = src[i];\n    for (; i < n; i++) dest[i] = '\\0';\n    return dest;\n}",
+      "explanation_ko": "libc strncpy는 널 종료를 보장하지 않는다. 짧으면 0 패딩, 길면 잘리되 종료 안 함. 안전하려면 호출자가 dest[n-1]='\\0'을 직접 넣어야 한다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "src>=n일 때 널 미종료 → 이후 strlen/printf가 OOB read.",
+        "0 패딩 때문에 큰 n에 성능 비용.",
+        "'안전한 strcpy'로 오해하기 쉬움."
+      ],
+      "anduril_context": "고정 필드(예: 콜사인, 장비 ID)로 문자열 복사 시. 널 미종료 함정 필수 인지."
+    },
+    {
+      "num": 29,
+      "slug": "my_strcat",
+      "title_ko": "문자열 이어붙이기",
+      "title_en": "String concatenate",
+      "difficulty": "easy",
+      "tags": [
+        "pointers",
+        "buffer-safety"
+      ],
+      "prompt_ko": "dest 끝에 src를 이어붙이고 dest를 반환하라.",
+      "prompt_en": "Append src to the end of dest and return dest.",
+      "signature": "char *my_strcat(char *dest, const char *src)",
+      "examples": [
+        {
+          "in": "\"hello\",\"world\"",
+          "out": "\"helloworld\""
+        }
+      ],
+      "hints": [
+        "먼저 dest의 '\\0' 위치로 이동.",
+        "그 자리부터 strcpy와 동일하게 복사.",
+        "반복 strcat은 O(n²)임에 유의."
+      ],
+      "solution": "char *my_strcat(char *dest, const char *src) {\n    char *d = dest;\n    while (*d) d++;\n    while ((*d++ = *src++))\n        ;\n    return dest;\n}",
+      "explanation_ko": "dest 끝(널)을 찾은 뒤 그 지점부터 src를 복사한다. 매 호출마다 dest 전체를 다시 스캔하므로 반복 이어붙이기는 O(n²)('Shlemiel the painter').",
+      "complexity": "O(n+m) time, O(1) space",
+      "pitfalls": [
+        "dest 버퍼가 총합보다 작으면 오버플로.",
+        "반복 strcat의 O(n²) 성능 함정.",
+        "dest가 널 종료 안 됐으면 끝을 못 찾음."
+      ],
+      "anduril_context": "로그 라인/텔레메트리 문자열 조립. 끝 포인터를 유지해 O(n)로 만드는 게 실무 팁."
+    },
+    {
+      "num": 30,
+      "slug": "my_strcmp",
+      "title_ko": "문자열 비교",
+      "title_en": "String compare",
+      "difficulty": "easy",
+      "tags": [
+        "comparison",
+        "signedness"
+      ],
+      "prompt_ko": "사전식 비교. <0 / 0 / >0을 반환하라.",
+      "prompt_en": "Lexicographic compare; return <0, 0, or >0.",
+      "signature": "int my_strcmp(const char *s1, const char *s2)",
+      "examples": [
+        {
+          "in": "\"abc\",\"abd\"",
+          "out": "negative"
+        },
+        {
+          "in": "\"abc\",\"abc\"",
+          "out": "0"
+        }
+      ],
+      "hints": [
+        "두 문자가 같고 널이 아닌 동안 전진.",
+        "멈춘 지점의 문자 차이를 반환.",
+        "unsigned char로 캐스팅해 비교하라."
+      ],
+      "solution": "int my_strcmp(const char *s1, const char *s2) {\n    while (*s1 && (*s1 == *s2)) { s1++; s2++; }\n    return (int)(unsigned char)*s1 - (int)(unsigned char)*s2;\n}",
+      "explanation_ko": "첫 불일치 지점에서 unsigned char 값의 차이를 반환한다. signed char로 비교하면 0x80 이상 바이트에서 결과 부호가 뒤집힐 수 있어 unsigned가 정답.",
+      "complexity": "O(min(n,m)) time, O(1) space",
+      "pitfalls": [
+        "signed char 비교 시 고바이트에서 부호 오류.",
+        "길이만 다른 경우('abc' vs 'ab')는 '\\0'-문자 차이로 자연히 처리됨."
+      ],
+      "anduril_context": "명령어/토큰 매칭, 프로토콜 키워드 비교(예: AT 커맨드 디스패치)."
+    },
+    {
+      "num": 31,
+      "slug": "my_strstr",
+      "title_ko": "부분 문자열 탐색",
+      "title_en": "Substring search",
+      "difficulty": "medium",
+      "tags": [
+        "search",
+        "pointers"
+      ],
+      "prompt_ko": "haystack에서 needle의 첫 등장 포인터를 반환. 없으면 NULL, 빈 needle이면 haystack.",
+      "prompt_en": "Return pointer to first occurrence of needle in haystack; NULL if none; empty needle -> haystack.",
+      "signature": "char *my_strstr(const char *haystack, const char *needle)",
+      "examples": [
+        {
+          "in": "\"hello world\",\"world\"",
+          "out": "\"world\""
+        },
+        {
+          "in": "\"abc\",\"xyz\"",
+          "out": "NULL"
+        }
+      ],
+      "hints": [
+        "각 시작 위치에서 needle 전체를 맞춰본다.",
+        "needle을 끝까지 소진하면 매칭 성공.",
+        "빈 needle은 haystack 반환(libc 규약)."
+      ],
+      "solution": "char *my_strstr(const char *haystack, const char *needle) {\n    if (*needle == '\\0') return (char *)haystack;\n    for (; *haystack; haystack++) {\n        const char *h = haystack, *n = needle;\n        while (*h && *n && *h == *n) { h++; n++; }\n        if (*n == '\\0') return (char *)haystack;\n    }\n    return NULL;\n}",
+      "explanation_ko": "haystack의 각 위치를 후보 시작점으로 두고 needle을 맞춰본다. needle이 '\\0'까지 소진되면 매칭. 순진한 O(n·m)이며 KMP로 O(n+m) 개선 가능(팔로업).",
+      "complexity": "O(n·m) time, O(1) space",
+      "pitfalls": [
+        "빈 needle 규약 누락.",
+        "const 입력에 char* 반환(libc처럼 캐스팅 필요).",
+        "성능 최적화(KMP/Boyer-Moore) 질문 대비."
+      ],
+      "anduril_context": "노이즈 바이트 스트림에서 프레임 헤더/마커 탐색, 로그 grep."
+    },
+    {
+      "num": 32,
+      "slug": "my_strchr",
+      "title_ko": "문자 탐색",
+      "title_en": "Character search",
+      "difficulty": "easy",
+      "tags": [
+        "search",
+        "edge-case"
+      ],
+      "prompt_ko": "s에서 문자 c의 첫 등장 포인터. c는 char로 취급하며, c=='\\0'이면 종료 널의 주소를 반환.",
+      "prompt_en": "First occurrence of c in s; c is treated as char; c=='\\0' returns address of the terminating NUL.",
+      "signature": "char *my_strchr(const char *s, int c)",
+      "examples": [
+        {
+          "in": "\"abc\",'b'",
+          "out": "\"bc\""
+        },
+        {
+          "in": "\"abc\",'z'",
+          "out": "NULL"
+        }
+      ],
+      "hints": [
+        "c를 char로 캐스팅해 비교.",
+        "루프는 '\\0' 전까지 순회.",
+        "c=='\\0'이면 종료 널 위치를 반환해야 함."
+      ],
+      "solution": "char *my_strchr(const char *s, int c) {\n    char target = (char)c;\n    while (*s) {\n        if (*s == target) return (char *)s;\n        s++;\n    }\n    return (target == '\\0') ? (char *)s : NULL;\n}",
+      "explanation_ko": "문자열을 순회하며 일치를 찾는다. c가 널 문자인 특수 케이스는 종료 널의 주소를 반환하는 libc 규약을 지킨다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "c=='\\0' 케이스 누락(가장 흔한 실수).",
+        "int c를 그대로 비교하면 부호/폭 이슈."
+      ],
+      "anduril_context": "구분자/개행 위치 찾기, 파서에서 다음 필드 경계 탐색."
+    },
+    {
+      "num": 33,
+      "slug": "my_atoi",
+      "title_ko": "문자열→정수",
+      "title_en": "ASCII to int",
+      "difficulty": "medium",
+      "tags": [
+        "parsing",
+        "overflow"
+      ],
+      "prompt_ko": "앞 공백 skip, 선택적 부호, 십진 숫자를 파싱. 오버플로는 INT_MAX/INT_MIN으로 saturate.",
+      "prompt_en": "Skip leading whitespace, optional sign, parse decimal digits; saturate on overflow.",
+      "signature": "int my_atoi(const char *str)",
+      "examples": [
+        {
+          "in": "\"  -42\"",
+          "out": "-42"
+        },
+        {
+          "in": "\"9999999999\"",
+          "out": "INT_MAX"
+        }
+      ],
+      "hints": [
+        "공백 → 부호 → 숫자 순서로 처리.",
+        "누산은 long long, 매 반복 clamp.",
+        "비숫자를 만나면 멈춘다."
+      ],
+      "solution": "int my_atoi(const char *str) {\n    if (!str) return 0;\n    const char *p = str;\n    while (*p==' '||*p=='\\t'||*p=='\\n'||*p=='\\r'||*p=='\\v'||*p=='\\f') p++;\n    int sign = 1;\n    if (*p=='+'||*p=='-') { if (*p=='-') sign = -1; p++; }\n    long long acc = 0;\n    while (*p>='0' && *p<='9') {\n        acc = acc*10 + (*p-'0');\n        if (sign==1 && acc > INT_MAX) return INT_MAX;\n        if (sign==-1 && -acc < INT_MIN) return INT_MIN;\n        p++;\n    }\n    return (int)(sign*acc);\n}",
+      "explanation_ko": "공백/부호/숫자를 순서대로 처리한다. 표준 atoi는 오버플로 시 UB지만, 매 반복 clamp로 INT_MAX/INT_MIN에 saturate해 안전하게 만든다. long long 누산도 조기 반환으로 오버플로 안 남.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "오버플로 미처리 시 UB.",
+        "부호/공백 순서 실수.",
+        "실무는 오류를 알려주는 strtol 선호."
+      ],
+      "anduril_context": "명령 인자/설정값 파싱, 텍스트 프로토콜의 수치 필드 해석."
+    },
+    {
+      "num": 34,
+      "slug": "my_itoa",
+      "title_ko": "정수→문자열",
+      "title_en": "Int to ASCII",
+      "difficulty": "medium",
+      "tags": [
+        "conversion",
+        "edge-case"
+      ],
+      "prompt_ko": "정수 n을 base(2..16) 문자열로 s에 쓰고 s를 반환. base 10에서만 음수 부호를 붙인다.",
+      "prompt_en": "Convert n to a base(2..16) string in s and return s. Minus sign only for base 10.",
+      "signature": "char *my_itoa(int n, char *s, int base)",
+      "examples": [
+        {
+          "in": "255,buf,16",
+          "out": "\"ff\""
+        },
+        {
+          "in": "-45,buf,10",
+          "out": "\"-45\""
+        }
+      ],
+      "hints": [
+        "뒤에서부터 자리수를 뽑아 임시 버퍼에 담고 뒤집어라.",
+        "INT_MIN은 unsigned로 승격해 처리.",
+        "base 범위/0 케이스를 먼저 처리."
+      ],
+      "solution": "char *my_itoa(int n, char *s, int base) {\n    if (base < 2 || base > 16) { s[0] = '\\0'; return s; }\n    static const char digits[] = \"0123456789abcdef\";\n    bool neg = false;\n    unsigned int u;\n    if (base == 10 && n < 0) { neg = true; u = (unsigned int)(-(long)n); }\n    else u = (unsigned int)n;\n    char tmp[35];\n    int i = 0;\n    if (u == 0) tmp[i++] = '0';\n    while (u) { tmp[i++] = digits[u % (unsigned)base]; u /= (unsigned)base; }\n    int j = 0;\n    if (neg) s[j++] = '-';\n    while (i > 0) s[j++] = tmp[--i];\n    s[j] = '\\0';\n    return s;\n}",
+      "explanation_ko": "u%base로 최하위 자리부터 뽑아 tmp에 역순으로 담고, 마지막에 뒤집어 s에 쓴다. INT_MIN은 -(long)n으로 unsigned에 안전히 담아 abs 오버플로를 피한다. 비-10진수는 비트패턴을 그대로 unsigned 처리.",
+      "complexity": "O(log n) time, O(1) space",
+      "pitfalls": [
+        "INT_MIN에서 -n 오버플로(unsigned 승격 필요).",
+        "n==0 케이스 누락 시 빈 문자열.",
+        "자리수 뒤집기 잊음.",
+        "버퍼 크기 부족(2진수는 최대 32자리)."
+      ],
+      "anduril_context": "레지스터 값/에러 코드를 hex 문자열로 로깅, 텔레메트리 포맷."
+    },
+    {
+      "num": 35,
+      "slug": "str_case",
+      "title_ko": "대소문자 변환",
+      "title_en": "Case conversion",
+      "difficulty": "easy",
+      "tags": [
+        "ascii",
+        "in-place"
+      ],
+      "prompt_ko": "ASCII 기준으로 문자열을 in-place 소문자/대문자로 변환하라.",
+      "prompt_en": "In-place ASCII lower/upper case conversion.",
+      "signature": "void str_to_lower(char *s); void str_to_upper(char *s)",
+      "examples": [
+        {
+          "in": "\"ABC\"",
+          "out": "\"abc\" (lower)"
+        },
+        {
+          "in": "\"abc\"",
+          "out": "\"ABC\" (upper)"
+        }
+      ],
+      "hints": [
+        "대상 범위(A-Z / a-z)만 변환.",
+        "차이값은 'a'-'A' = 32.",
+        "비알파벳/숫자는 건드리지 않는다."
+      ],
+      "solution": "void str_to_lower(char *s) {\n    for (; *s; s++) if (*s >= 'A' && *s <= 'Z') *s = (char)(*s + ('a' - 'A'));\n}\nvoid str_to_upper(char *s) {\n    for (; *s; s++) if (*s >= 'a' && *s <= 'z') *s = (char)(*s - ('a' - 'A'));\n}",
+      "explanation_ko": "알파벳 범위 안에서만 32(=`'a'-'A'`)를 더하거나 빼서 변환한다. ASCII 전용이며 로케일/UTF-8은 범위 밖.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "범위 검사 없이 무조건 ±32 하면 숫자/기호 깨짐.",
+        "UTF-8 멀티바이트에는 부적합.",
+        "<ctype.h> tolower는 int/EOF 계약 주의."
+      ],
+      "anduril_context": "명령 파서에서 대소문자 무시 매칭, 사용자 입력 정규화."
+    },
+    {
+      "num": 36,
+      "slug": "reverse_words",
+      "title_ko": "단어 뒤집기",
+      "title_en": "Reverse words",
+      "difficulty": "medium",
+      "tags": [
+        "in-place",
+        "two-pointer"
+      ],
+      "prompt_ko": "문자열의 단어 순서를 in-place로 뒤집어라.",
+      "prompt_en": "Reverse the order of words in place.",
+      "signature": "void reverse_words(char *s)",
+      "examples": [
+        {
+          "in": "\"hello world\"",
+          "out": "\"world hello\""
+        },
+        {
+          "in": "\"a b c d\"",
+          "out": "\"d c b a\""
+        }
+      ],
+      "hints": [
+        "먼저 문자열 전체를 뒤집는다.",
+        "그다음 각 단어를 다시 뒤집는다.",
+        "공백을 단어 경계로 사용."
+      ],
+      "solution": "static void reverse_range(char *s, size_t lo, size_t hi) {\n    while (lo < hi) { char t = s[lo]; s[lo] = s[hi]; s[hi] = t; lo++; hi--; }\n}\nvoid reverse_words(char *s) {\n    size_t len = my_strlen(s);\n    if (len == 0) return;\n    reverse_range(s, 0, len - 1);\n    size_t start = 0;\n    for (size_t i = 0; i <= len; i++) {\n        if (i == len || s[i] == ' ') {\n            if (i > start) reverse_range(s, start, i - 1);\n            start = i + 1;\n        }\n    }\n}",
+      "explanation_ko": "전체를 뒤집으면 단어 순서는 맞지만 각 단어의 글자가 거꾸로다. 그래서 각 단어를 다시 뒤집는다. 추가 버퍼 없이 O(n), 공백 위치도 보존.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "빈 문자열/단일 단어 엣지케이스.",
+        "연속 공백/앞뒤 공백 처리 방침 명확히.",
+        "len-1 언더플로(size_t) 주의 → len==0 조기 반환."
+      ],
+      "anduril_context": "간단한 명령 라인 토큰 재배열, 로그 필드 순서 뒤집기 데모."
+    },
+    {
+      "num": 37,
+      "slug": "remove_duplicates",
+      "title_ko": "중복 문자 제거",
+      "title_en": "Remove duplicates",
+      "difficulty": "medium",
+      "tags": [
+        "hash-set",
+        "in-place"
+      ],
+      "prompt_ko": "이미 등장한 문자를 제거하고 첫 등장만 유지하라(in-place).",
+      "prompt_en": "Remove characters already seen, keeping only the first occurrence (in place).",
+      "signature": "void remove_duplicates(char *s)",
+      "examples": [
+        {
+          "in": "\"banana\"",
+          "out": "\"ban\""
+        },
+        {
+          "in": "\"aaaa\"",
+          "out": "\"a\""
+        }
+      ],
+      "hints": [
+        "bool seen[256] 룩업 배열 사용.",
+        "read/write 두 인덱스로 compaction.",
+        "마지막에 '\\0'로 종료."
+      ],
+      "solution": "void remove_duplicates(char *s) {\n    bool seen[256] = { false };\n    size_t w = 0;\n    for (size_t r = 0; s[r]; r++) {\n        unsigned char c = (unsigned char)s[r];\n        if (!seen[c]) { seen[c] = true; s[w++] = s[r]; }\n    }\n    s[w] = '\\0';\n}",
+      "explanation_ko": "256칸 bool 배열로 각 바이트를 봤는지 O(1)에 판단하고, write 인덱스로 유지할 문자만 앞으로 당긴다(compaction). 전체 O(n), 추가 메모리는 고정 256B.",
+      "complexity": "O(n) time, O(1) space (고정 256B)",
+      "pitfalls": [
+        "char 인덱싱 시 부호 확장 → unsigned char 캐스팅 필수.",
+        "종료 널을 마지막에 다시 넣어야 함.",
+        "순서 유지 요구를 놓치기 쉬움."
+      ],
+      "anduril_context": "센서 ID/채널 집합 중복 제거, 간단한 dedup 유틸."
+    },
+    {
+      "num": 38,
+      "slug": "is_palindrome",
+      "title_ko": "회문 검사",
+      "title_en": "Palindrome check",
+      "difficulty": "easy",
+      "tags": [
+        "two-pointer"
+      ],
+      "prompt_ko": "문자열이 회문인지 검사하라(문자 그대로 비교).",
+      "prompt_en": "Check whether a string is a palindrome (as-is).",
+      "signature": "bool is_palindrome(const char *s)",
+      "examples": [
+        {
+          "in": "\"level\"",
+          "out": "true"
+        },
+        {
+          "in": "\"abc\"",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "양 끝에서 좁혀오는 투 포인터.",
+        "i<j인 동안 s[i]==s[j] 확인.",
+        "빈 문자열은 회문으로 간주."
+      ],
+      "solution": "bool is_palindrome(const char *s) {\n    size_t len = my_strlen(s);\n    if (len == 0) return true;\n    size_t i = 0, j = len - 1;\n    while (i < j) {\n        if (s[i] != s[j]) return false;\n        i++; j--;\n    }\n    return true;\n}",
+      "explanation_ko": "양 끝 포인터를 가운데로 좁히며 대칭을 확인한다. 하나라도 다르면 즉시 false. 정규화(대소문자/공백 무시)는 팔로업으로 확장 가능.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "빈 문자열/한 글자 엣지케이스.",
+        "len==0에서 len-1 언더플로 주의.",
+        "대소문자/영숫자 정규화 요구 시 tolower+skip 필요."
+      ],
+      "anduril_context": "간단한 대칭 검증, 프로토콜 magic 패턴 확인 데모."
+    },
+    {
+      "num": 39,
+      "slug": "my_strtok",
+      "title_ko": "토큰 분리",
+      "title_en": "Tokenize",
+      "difficulty": "hard",
+      "tags": [
+        "static-state",
+        "stateful"
+      ],
+      "prompt_ko": "strtok을 재구현하라. 첫 호출은 str, 이후는 NULL로 이어서 토큰화한다. static 상태를 유지하며 원본을 파괴한다.",
+      "prompt_en": "Reimplement strtok using static state; first call passes str, subsequent calls pass NULL.",
+      "signature": "char *my_strtok(char *str, const char *delim)",
+      "examples": [
+        {
+          "in": "\"a,b,c\" / \",\"",
+          "out": "\"a\",\"b\",\"c\""
+        },
+        {
+          "in": "\",,x,,yy,,\" / \",\"",
+          "out": "\"x\",\"yy\""
+        }
+      ],
+      "hints": [
+        "static char* 로 다음 시작 위치를 기억.",
+        "앞쪽 구분자를 skip한 뒤 토큰 시작.",
+        "다음 구분자를 '\\0'로 바꾸고 포인터를 그 다음으로 전진."
+      ],
+      "solution": "static bool in_delim(char c, const char *delim) {\n    for (; *delim; delim++) if (c == *delim) return true;\n    return false;\n}\nchar *my_strtok(char *str, const char *delim) {\n    static char *save = NULL;\n    if (str) save = str;\n    if (!save) return NULL;\n    while (*save && in_delim(*save, delim)) save++;\n    if (*save == '\\0') { save = NULL; return NULL; }\n    char *token = save;\n    while (*save && !in_delim(*save, delim)) save++;\n    if (*save) { *save = '\\0'; save++; }\n    return token;\n}",
+      "explanation_ko": "static 포인터 save가 다음 탐색 위치를 기억한다. 앞쪽 구분자를 건너뛰어 토큰 시작을 찾고, 토큰 끝의 구분자를 '\\0'로 덮어써 잘라낸 뒤 save를 전진시킨다. 원본 문자열을 파괴하고 static을 쓰므로 스레드 안전하지 않고 재진입 불가.",
+      "complexity": "O(n) total time, O(1) space",
+      "pitfalls": [
+        "static 상태 → 멀티스레드/중첩 토큰화에서 레이스.",
+        "원본 문자열을 변경(리터럴 전달 시 크래시).",
+        "연속/앞뒤 구분자 처리 누락.",
+        "실무는 strtok_r 사용."
+      ],
+      "anduril_context": "명령/설정 라인 파싱(예: CSV 형태 파라미터, NMEA 필드 분리)."
+    },
+    {
+      "num": 40,
+      "slug": "my_sprintf",
+      "title_ko": "축소판 sprintf",
+      "title_en": "Tiny sprintf",
+      "difficulty": "hard",
+      "tags": [
+        "varargs",
+        "formatting"
+      ],
+      "prompt_ko": "축소판 sprintf를 구현하라. 최소 %d %u %x %X %c %s %% 지원, 쓴 문자 수(널 제외)를 반환한다.",
+      "prompt_en": "Implement a tiny sprintf supporting at least %d %u %x %X %c %s %%; return count written.",
+      "signature": "int my_sprintf(char *str, const char *format, ...)",
+      "examples": [
+        {
+          "in": "buf,\"num=%d\",123",
+          "out": "buf==\"num=123\", 7"
+        },
+        {
+          "in": "buf,\"0x%X\",4093",
+          "out": "\"0xFFD\""
+        }
+      ],
+      "hints": [
+        "va_start/va_arg/va_end로 가변 인자 처리.",
+        "정수는 뒤집힌 임시 버퍼에 담아 출력하는 헬퍼로.",
+        "%d 음수는 '-' 먼저, 그다음 unsigned로 승격."
+      ],
+      "solution": "static int emit_uint(char *out, unsigned int v, unsigned base, bool upper) {\n    char tmp[32];\n    const char *digs = upper ? \"0123456789ABCDEF\" : \"0123456789abcdef\";\n    int i = 0;\n    if (v == 0) tmp[i++] = '0';\n    while (v) { tmp[i++] = digs[v % base]; v /= base; }\n    int n = 0;\n    while (i > 0) out[n++] = tmp[--i];\n    return n;\n}\nint my_sprintf(char *str, const char *format, ...) {\n    va_list ap; va_start(ap, format);\n    char *out = str;\n    for (const char *f = format; *f; f++) {\n        if (*f != '%') { *out++ = *f; continue; }\n        f++;\n        switch (*f) {\n            case 'd': { int v = va_arg(ap, int); unsigned int mag;\n                if (v < 0) { *out++ = '-'; mag = (unsigned int)(-(long)v); }\n                else mag = (unsigned int)v;\n                out += emit_uint(out, mag, 10, false); break; }\n            case 'u': out += emit_uint(out, va_arg(ap, unsigned int), 10, false); break;\n            case 'x': out += emit_uint(out, va_arg(ap, unsigned int), 16, false); break;\n            case 'X': out += emit_uint(out, va_arg(ap, unsigned int), 16, true);  break;\n            case 'c': *out++ = (char)va_arg(ap, int); break;\n            case 's': { const char *sv = va_arg(ap, const char *);\n                if (!sv) sv = \"(null)\";\n                while (*sv) *out++ = *sv++; break; }\n            case '%': *out++ = '%'; break;\n            case '\\0': f--; break;\n            default: *out++ = '%'; *out++ = *f; break;\n        }\n    }\n    *out = '\\0';\n    va_end(ap);\n    return (int)(out - str);\n}",
+      "explanation_ko": "format를 훑다가 '%'를 만나면 지정자에 따라 va_arg로 인자를 꺼내 변환한다. 정수는 emit_uint 헬퍼가 자리수를 역순으로 뽑아 뒤집어 쓴다. %d 음수는 '-'를 먼저 찍고 unsigned로 승격해 자리수를 만든다. 반환값은 쓴 문자 수(널 제외).",
+      "complexity": "O(출력 길이) time, O(1) space",
+      "pitfalls": [
+        "버퍼 크기 미검사 → 오버플로. 실무는 snprintf류로 크기 인자 필수.",
+        "char/short 가변 인자는 int로 승격됨(va_arg(int)).",
+        "포맷 문자열 끝의 잘린 '%' 처리.",
+        "미지원 지정자 처리 방침."
+      ],
+      "anduril_context": "힙/전체 printf 없는 환경에서 텔레메트리/로그 문자열 포맷팅."
+    }
+  ]
+}

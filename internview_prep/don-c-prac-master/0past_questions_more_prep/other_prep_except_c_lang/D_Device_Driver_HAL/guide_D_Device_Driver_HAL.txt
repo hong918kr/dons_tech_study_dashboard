@@ -1,0 +1,287 @@
+# D 블럭: Device Driver & HAL 확장 실전 문제 세트
+
+임베디드/펌웨어 실무에서 자주 마주치는 디바이스 드라이버, HAL(Hardware Abstraction Layer), 전원/상태 관리, 오류 복구, 동적 리소스 관리 등 핵심 경로를 다룹니다.  
+아래는 실제 MCU/SoC/자동차/SSD/네트워크 환경에서 빈출하는 실전 문제와 헤더/시그니처 템플릿입니다.
+
+---
+
+## 문제 목록
+
+1. **SPI DMA 기반 블록 전송 드라이버 (sync/async + callback)**
+    - 동기/비동기 전송, DMA 연동, 완료 콜백, 에러 처리
+
+2. **I2C 오류 복구 (bus hang, clock pulse recovery)**
+    - 버스 점유/락업 복구, clock pulse, 소프트 reset
+
+3. **Power State Machine (RUN/IDLE/SLEEP/DEEP) + 진입/이탈 훅**
+    - 상태 전이, 진입/이탈 콜백, 조건부 전환
+
+4. **Driver probe()/remove() 프레임 (리소스 할당 실패 롤백)**
+    - 초기화/해제, 단계별 롤백, 에러 경로 방어
+
+5. **Watchdog pet scheduling + window violation 검출**
+    - 주기적 pet, 윈도우 위반 감지, 경고/리셋
+
+6. **Hotplug/Detach 지원 드라이버 프레임**
+    - 동적 디바이스 연결/해제, 리소스 할당/해제, 이벤트 콜백
+
+7. **Interrupt-driven Device Driver Skeleton**
+    - ISR 등록/해제, 인터럽트 핸들러, 상태 플래그, 동기화
+
+8. **Multi-instance Driver (동일 디바이스 여러 개 관리)**
+    - 인스턴스별 상태/리소스, 동적 할당, 인덱스/핸들 관리
+
+9. **Device Power Management (runtime suspend/resume)**
+    - 사용량 refcount, 자동 suspend/resume, 클럭/전원 제어
+
+10. **Device Error Recovery (reset, re-enumeration, fallback)**
+    - 에러 감지, 소프트/하드 reset, fallback 경로
+
+---
+
+## 헤더/시그니처 템플릿
+
+### 1. SPI DMA 기반 블록 전송 드라이버
+
+```c
+#ifndef SPI_DMA_DRV_H
+#define SPI_DMA_DRV_H
+#include <stdint.h>
+#include <stddef.h>
+
+typedef void (*spi_dma_cb_t)(void* ctx, int status);
+
+typedef struct {
+    uint8_t* tx_buf;
+    uint8_t* rx_buf;
+    size_t len;
+    spi_dma_cb_t cb;
+    void* ctx;
+    volatile int busy;
+} spi_dma_xfer_t;
+
+void spi_dma_init(void);
+int  spi_dma_transfer(spi_dma_xfer_t* xfer); // 비동기
+int  spi_dma_transfer_sync(uint8_t* tx, uint8_t* rx, size_t len, uint32_t timeout_ms); // 동기
+void spi_dma_isr_handler(void); // DMA 완료/에러 ISR에서 호출
+#endif
+```
+
+---
+
+### 2. I2C 오류 복구 (bus hang, clock pulse recovery)
+
+```c
+#ifndef I2C_RECOVERY_H
+#define I2C_RECOVERY_H
+#include <stdint.h>
+
+typedef struct {
+    volatile uint8_t busy;
+    volatile uint8_t error;
+} i2c_bus_t;
+
+void i2c_bus_init(i2c_bus_t* bus);
+int  i2c_bus_recover(i2c_bus_t* bus); // clock pulse, stop, 소프트 reset
+int  i2c_transfer(i2c_bus_t* bus, uint8_t addr, uint8_t* tx, int txlen, uint8_t* rx, int rxlen, uint32_t timeout);
+#endif
+```
+
+---
+
+### 3. Power State Machine (RUN/IDLE/SLEEP/DEEP) + 진입/이탈 훅
+
+```c
+#ifndef POWER_STATE_H
+#define POWER_STATE_H
+#include <stdint.h>
+
+typedef enum { PWR_RUN, PWR_IDLE, PWR_SLEEP, PWR_DEEP } power_state_t;
+
+typedef struct {
+    power_state_t state;
+    void (*on_enter[4])(void);
+    void (*on_exit[4])(void);
+} power_mgr_t;
+
+void power_mgr_init(power_mgr_t* m);
+int  power_mgr_set_state(power_mgr_t* m, power_state_t new_state);
+power_state_t power_mgr_get_state(const power_mgr_t* m);
+#endif
+```
+
+---
+
+### 4. Driver probe()/remove() 프레임 (리소스 할당 실패 롤백)
+
+```c
+#ifndef DRIVER_PROBE_H
+#define DRIVER_PROBE_H
+#include <stdint.h>
+
+typedef struct {
+    int resource1;
+    int resource2;
+    int resource3;
+    // ... 기타 리소스
+} my_driver_t;
+
+int my_driver_probe(my_driver_t* drv);   // 단계별 할당, 실패시 롤백
+void my_driver_remove(my_driver_t* drv); // 전체 해제
+#endif
+```
+
+---
+
+### 5. Watchdog pet scheduling + window violation 검출
+
+```c
+#ifndef WATCHDOG_MGR_H
+#define WATCHDOG_MGR_H
+#include <stdint.h>
+
+typedef struct {
+    uint32_t last_pet_tick;
+    uint32_t window_min;
+    uint32_t window_max;
+    uint8_t  violation;
+} watchdog_mgr_t;
+
+void watchdog_mgr_init(watchdog_mgr_t* w, uint32_t min, uint32_t max);
+void watchdog_pet(watchdog_mgr_t* w, uint32_t now_tick);
+int  watchdog_check_violation(watchdog_mgr_t* w, uint32_t now_tick);
+#endif
+```
+
+---
+
+### 6. Hotplug/Detach 지원 드라이버 프레임
+
+```c
+#ifndef HOTPLUG_DRV_H
+#define HOTPLUG_DRV_H
+#include <stdint.h>
+
+typedef void (*hotplug_cb_t)(int dev_id, int event);
+
+typedef struct {
+    int dev_id;
+    int attached;
+    hotplug_cb_t cb;
+} hotplug_dev_t;
+
+void hotplug_dev_init(hotplug_dev_t* d, int dev_id, hotplug_cb_t cb);
+void hotplug_attach(hotplug_dev_t* d);
+void hotplug_detach(hotplug_dev_t* d);
+#endif
+```
+
+---
+
+### 7. Interrupt-driven Device Driver Skeleton
+
+```c
+#ifndef INTR_DRV_H
+#define INTR_DRV_H
+#include <stdint.h>
+
+typedef struct {
+    int irq_num;
+    volatile int irq_flag;
+    void (*handler)(void*);
+    void* ctx;
+} intr_drv_t;
+
+void intr_drv_init(intr_drv_t* d, int irq_num, void (*handler)(void*), void* ctx);
+void intr_drv_enable(intr_drv_t* d);
+void intr_drv_disable(intr_drv_t* d);
+void intr_drv_isr(intr_drv_t* d);
+#endif
+```
+
+---
+
+### 8. Multi-instance Driver (동일 디바이스 여러 개 관리)
+
+```c
+#ifndef MULTI_INST_DRV_H
+#define MULTI_INST_DRV_H
+#include <stdint.h>
+
+#define MAX_INST 8
+
+typedef struct {
+    int id;
+    int state;
+    void* resource;
+} dev_inst_t;
+
+typedef struct {
+    dev_inst_t inst[MAX_INST];
+    int count;
+} dev_mgr_t;
+
+void dev_mgr_init(dev_mgr_t* m);
+int  dev_mgr_add(dev_mgr_t* m, int id, void* resource);
+int  dev_mgr_remove(dev_mgr_t* m, int id);
+dev_inst_t* dev_mgr_get(dev_mgr_t* m, int id);
+#endif
+```
+
+---
+
+### 9. Device Power Management (runtime suspend/resume)
+
+```c
+#ifndef DEV_PWR_MGMT_H
+#define DEV_PWR_MGMT_H
+#include <stdint.h>
+
+typedef struct {
+    int usage_count;
+    int suspended;
+} dev_pwr_t;
+
+void dev_pwr_init(dev_pwr_t* p);
+void dev_pwr_get(dev_pwr_t* p);
+void dev_pwr_put(dev_pwr_t* p);
+void dev_pwr_suspend(dev_pwr_t* p);
+void dev_pwr_resume(dev_pwr_t* p);
+#endif
+```
+
+---
+
+### 10. Device Error Recovery (reset, re-enumeration, fallback)
+
+```c
+#ifndef DEV_ERR_RECOV_H
+#define DEV_ERR_RECOV_H
+#include <stdint.h>
+
+typedef struct {
+    int error_count;
+    int last_error;
+    int reset_pending;
+} dev_err_t;
+
+void dev_err_init(dev_err_t* e);
+void dev_err_report(dev_err_t* e, int err_code);
+void dev_err_reset(dev_err_t* e);
+int  dev_err_should_fallback(dev_err_t* e);
+#endif
+```
+
+---
+
+## 연습 포인트 요약
+
+- SPI/I2C: DMA 연동, 동기/비동기, 에러 복구, 콜백 구조
+- Power: 상태 전이, 진입/이탈 훅, 조건부 전환, runtime suspend/resume
+- Driver: probe/remove, 단계별 롤백, 리소스 관리, hotplug, multi-instance
+- Watchdog: window 감시, 주기적 pet, 위반 감지/리셋
+- Interrupt: ISR 등록/해제, 플래그, 동기화
+- Error Recovery: reset, fallback, 에러 카운트
+
+필요 시 각 항목별 구현/테스트 템플릿도 추가 제공 가능.  
+원하는 번호를 지정하면 skeleton 코드/테스트 하네스 제공 가능.

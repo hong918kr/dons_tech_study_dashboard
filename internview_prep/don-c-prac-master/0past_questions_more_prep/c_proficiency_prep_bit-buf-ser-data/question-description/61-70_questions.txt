@@ -1,0 +1,252 @@
+// 61. 간단 명령 파서(키워드+인자)
+/*
+설명:
+임베디드 CLI, UART 명령, 디버그 콘솔 등에서 키워드와 인자를 파싱하는 간단 명령 파서가 필요합니다.
+공백, 따옴표, 에러 리포트 등 robust한 토크나이저/파서가 요구됩니다.
+예시 상황:
+- UART로 "set led 1" 명령 수신 및 파싱
+- 부트로더/테스트 모드에서 명령어 해석
+요구사항:
+- 공백/탭/CRLF 구분자 처리
+- 따옴표(")로 감싼 인자 지원
+- 최대 인자 개수/길이 제한
+- 에러 리포트(오버플로, 잘못된 구문)
+- 명령/인자 구조체 반환
+*/
+#ifndef SIMPLE_CMD_PARSER_H
+#define SIMPLE_CMD_PARSER_H
+#include <stddef.h>
+#define CMD_MAX_ARGS 8
+#define CMD_MAX_LEN  32
+typedef struct {
+    char cmd[CMD_MAX_LEN];
+    char* argv[CMD_MAX_ARGS];
+    int argc;
+} simple_cmd_t;
+int simple_cmd_parse(const char* line, simple_cmd_t* out);
+#endif
+
+// 62. 환경 의존 HAL 인터페이스
+/*
+설명:
+임베디드 소프트웨어에서 하드웨어 추상화 계층(HAL)은 이식성과 테스트 용이성을 위해 필수적입니다.
+GPIO, UART, I2C 등 다양한 하드웨어를 추상화하고, 모킹/테스트를 위한 인터페이스 설계가 중요합니다.
+예시 상황:
+- 보드별 GPIO 핀맵 차이 대응
+- 유닛 테스트에서 HAL 모킹
+요구사항:
+- GPIO/UART/I2C HAL 인터페이스 구조체
+- 함수 포인터 기반 추상화
+- 에러 코드/상태 반환
+- 모킹/테스트 구현 예시
+*/
+#ifndef HAL_IFACE_H
+#define HAL_IFACE_H
+#include <stdint.h>
+typedef struct {
+    int (*gpio_write)(int pin, int val);
+    int (*gpio_read)(int pin);
+    int (*uart_send)(const uint8_t* data, size_t len);
+    int (*uart_recv)(uint8_t* data, size_t len);
+    int (*i2c_write)(uint8_t addr, const uint8_t* data, size_t len);
+    int (*i2c_read)(uint8_t addr, uint8_t* data, size_t len);
+} hal_iface_t;
+#endif
+
+// 63. 논블로킹 I/O 버퍼링
+/*
+설명:
+임베디드 네트워크, UART, 파일 I/O 등에서 논블로킹(부분 전송) 처리가 필요합니다.
+EAGAIN/WOULDBLOCK, 재시도 정책, 버퍼 관리 등 robust한 설계가 요구됩니다.
+예시 상황:
+- TCP 소켓 send/recv 반복
+- UART DMA 송수신 버퍼 관리
+요구사항:
+- send/recv API: 부분 전송 반환
+- EAGAIN/WOULDBLOCK 처리
+- 내부 버퍼 상태 추적
+- 재시도/타임아웃 정책
+*/
+#ifndef NONBLOCK_IO_H
+#define NONBLOCK_IO_H
+#include <stddef.h>
+#include <stdint.h>
+typedef struct {
+    uint8_t* buf;
+    size_t cap;
+    size_t head, tail;
+} nbio_buf_t;
+int nbio_send(nbio_buf_t* b, const uint8_t* data, size_t len);
+int nbio_recv(nbio_buf_t* b, uint8_t* data, size_t len);
+int nbio_status(const nbio_buf_t* b);
+#endif
+
+// 64. 패킷 재조립기(Fragmentation)
+/*
+설명:
+네트워크, 무선, CAN 등에서 분할 전송된 패킷을 시퀀스/오프셋 기반으로 재조립해야 합니다.
+타임아웃, 최대 조각 개수, 완성 콜백 등 robust한 구현이 요구됩니다.
+예시 상황:
+- BLE/LoRaWAN 조각 패킷 재조립
+- CAN FD 멀티프레임 메시지
+요구사항:
+- 시퀀스/오프셋 기반 조각 관리
+- 최대 조각 개수/버퍼 크기 제한
+- 타임아웃/오래된 조각 삭제
+- 완성 시 콜백 호출
+*/
+#ifndef PKT_REASSEMBLY_H
+#define PKT_REASSEMBLY_H
+#include <stddef.h>
+#include <stdint.h>
+typedef void (*pkt_reassembly_cb_t)(const uint8_t* pkt, size_t len, void* user);
+typedef struct pkt_reassembly pkt_reassembly_t;
+pkt_reassembly_t* pkt_reassembly_create(size_t max_frags, size_t max_len, pkt_reassembly_cb_t cb, void* user);
+void pkt_reassembly_destroy(pkt_reassembly_t* r);
+int pkt_reassembly_feed(pkt_reassembly_t* r, uint16_t seq, uint16_t offset, const uint8_t* data, size_t len, uint32_t now_tick);
+void pkt_reassembly_timeout(pkt_reassembly_t* r, uint32_t now_tick, uint32_t timeout_ticks);
+#endif
+
+// 65. 소형 스택 할당기(아레나)
+/*
+설명:
+임베디드에서 동적 할당 대신, bump-pointer 방식의 스택(아레나) 할당기를 사용하면 예측 가능한 메모리 사용이 가능합니다.
+정렬 보장, free-all, 재설정 등 robust한 구현이 요구됩니다.
+예시 상황:
+- 임시 버퍼, 파싱 중간 데이터 할당
+- RTOS 없는 환경에서 동적 메모리 대체
+요구사항:
+- bump-pointer alloc/free-all
+- 정렬 보장(alignof)
+- 재설정(reset) API
+- 오버플로 방지
+*/
+#ifndef ARENA_ALLOC_H
+#define ARENA_ALLOC_H
+#include <stddef.h>
+typedef struct {
+    uint8_t* base;
+    size_t cap;
+    size_t offset;
+} arena_t;
+void arena_init(arena_t* a, uint8_t* buf, size_t cap);
+void* arena_alloc(arena_t* a, size_t size, size_t align);
+void  arena_reset(arena_t* a);
+#endif
+
+// 66. 가비지 없는 메시지 포맷터
+/*
+설명:
+임베디드에서 메시지 포맷 시, 미리 길이를 계산해 버퍼를 할당하고, 두 단계로 안전하게 포맷팅해야 합니다.
+실패 안전, 오버플로 방지, 재진입성 등 robust한 설계가 요구됩니다.
+예시 상황:
+- 네트워크 패킷/로그 메시지 포맷
+- BLE 광고 데이터 조립
+요구사항:
+- 길이 사전 계산 API
+- 실제 포맷 API(길이 초과 시 실패)
+- 실패 안전(부분 기록 없음)
+- 재진입성
+*/
+#ifndef GARBAGELESS_FMT_H
+#define GARBAGELESS_FMT_H
+#include <stddef.h>
+size_t msgfmt_calc_len(const char* fmt, ...);
+int    msgfmt_write(char* buf, size_t buflen, const char* fmt, ...);
+#endif
+
+// 67. 스택 사용량 측정(워터마크)
+/*
+설명:
+임베디드에서 스택 오버플로 방지와 최적화를 위해, 미리 패턴을 채워두고 남은 스택 사용량을 측정하는 워터마크 기법이 널리 쓰입니다.
+초기화, 샘플링, 문서화 등 robust한 구현이 요구됩니다.
+예시 상황:
+- RTOS 태스크별 스택 사용량 측정
+- 부트로더/펌웨어 스택 마진 확인
+요구사항:
+- 스택 패턴 채움/초기화
+- 사용량 샘플링 함수
+- 워터마크 값 반환
+- 문서화(사용법/제약)
+*/
+#ifndef STACK_WATERMARK_H
+#define STACK_WATERMARK_H
+#include <stddef.h>
+void stack_watermark_init(uint8_t* stack, size_t size, uint8_t pattern);
+size_t stack_watermark_used(const uint8_t* stack, size_t size, uint8_t pattern);
+#endif
+
+// 68. ISR-세이프 API 설계
+/*
+설명:
+임베디드에서 인터럽트(IRQ) 컨텍스트에서 호출 가능한 API는 제한적입니다.
+ISR-safe 함수 설계, 금지 호출 문서화, lock-free/비동기 처리 등 robust한 설계가 요구됩니다.
+예시 상황:
+- UART 수신 인터럽트에서 큐에 데이터 push
+- 타이머 인터럽트에서 플래그 set
+요구사항:
+- ISR-safe 함수/비-safe 함수 구분
+- 금지 호출(블로킹, 동적 할당 등) 문서화
+- lock-free/atomic 연산 활용
+- 문서화(사전/사후 조건)
+*/
+#ifndef ISR_SAFE_API_H
+#define ISR_SAFE_API_H
+#include <stdint.h>
+void isr_safe_flag_set(volatile uint32_t* flag);
+int  isr_safe_queue_push(volatile uint8_t* buf, size_t cap, volatile size_t* head, uint8_t val);
+#endif
+
+// 69. 지연 실행 디퍼드 큐
+/*
+설명:
+임베디드에서 인터럽트에서 바로 처리하지 않고, 메인 루프에서 나중에 실행할 작업을 큐에 등록하는 디퍼드 큐가 널리 쓰입니다.
+경계/드롭 정책, 우선순위(선택), lock-free 등 robust한 구현이 요구됩니다.
+예시 상황:
+- 센서 인터럽트에서 데이터 처리 요청 등록
+- 타이머 만료 후 작업 예약
+요구사항:
+- 고정 크기 디퍼드 큐
+- 오버플로 시 드롭/에러 반환
+- ISR/메인루프 분리
+- (선택) 우선순위 지원
+*/
+#ifndef DEFERRED_QUEUE_H
+#define DEFERRED_QUEUE_H
+#include <stddef.h>
+typedef void (*deferred_cb_t)(void*);
+typedef struct {
+    deferred_cb_t cb;
+    void* user;
+} deferred_task_t;
+#define DEFERRED_QUEUE_CAP 16
+typedef struct {
+    deferred_task_t tasks[DEFERRED_QUEUE_CAP];
+    volatile size_t head, tail;
+} deferred_queue_t;
+void deferred_queue_init(deferred_queue_t* q);
+int  deferred_queue_push(deferred_queue_t* q, deferred_cb_t cb, void* user); // ISR safe
+int  deferred_queue_pop(deferred_queue_t* q, deferred_cb_t* cb, void** user); // Main loop
+#endif
+
+// 70. 간단 소프트 CRC 가속(루프 언롤)
+/*
+설명:
+임베디드에서 소프트웨어 CRC 계산을 빠르게 하기 위해, 루프 언롤링 등 최적화가 자주 사용됩니다.
+코드 크기와 속도 트레이드오프, 표준 벡터 일치, 이식성 등이 중요합니다.
+예시 상황:
+- 대용량 데이터 블록 CRC
+- 통신 패킷 무결성 검증
+요구사항:
+- CRC8/16/32 함수(루프 언롤/일반)
+- 코드 크기 vs 속도 비교
+- 표준 테스트 벡터 일치
+- 이식성(엔디안 등)
+*/
+#ifndef FAST_CRC_H
+#define FAST_CRC_H
+#include <stddef.h>
+#include <stdint.h>
+uint16_t fast_crc16(const uint8_t* data, size_t len, uint16_t init);
+uint32_t fast_crc32(const uint8_t* data, size_t len, uint32_t init);
+#endif

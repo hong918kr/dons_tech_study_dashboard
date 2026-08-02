@@ -1,0 +1,424 @@
+{
+  "id": "bit_basics",
+  "order": 1,
+  "range": "Q1-10",
+  "icon": "🔧",
+  "title_en": "Bit Manipulation Basics",
+  "title_ko": "비트 조작 기초",
+  "summary_ko": "MCU 레지스터 조작의 기본기: 비트 set/clear/toggle/test, 니블 스왑, 패리티, 최하위 비트 트릭, 부호 판별, 분기 없는 절대값.",
+  "summary_en": "Foundational MCU register manipulation: set/clear/toggle/test bits, nibble swap, parity, lowest-set-bit tricks, sign checks, and branchless abs.",
+  "anduril_relevance_ko": "디바이스 드라이버는 결국 메모리 맵드 레지스터에 마스크를 씌워 비트를 조작하는 일이다. 비행 컨트롤러의 GPIO/타이머/센서 상태 레지스터 read-modify-write, ESC 폴트 플래그 판독, 텔레메트리 패킷 패리티 검사가 전부 여기서 출발한다. 화이트보드에서 UB 감각(1u<<31, 시프트 폭)과 2의 보수 이해를 확인하는 단골 문제.",
+  "concepts": [
+    {
+      "term": "Set/Clear/Toggle",
+      "ko": "v |= (1u<<n) / v &= ~(1u<<n) / v ^= (1u<<n)",
+      "en": "OR to set, AND with inverted mask to clear, XOR to toggle a bit"
+    },
+    {
+      "term": "Test bit",
+      "ko": "(v >> n) & 1u 또는 v & (1u<<n) 로 판독, !=0 으로 bool 변환",
+      "en": "Read a bit; convert to bool with != 0"
+    },
+    {
+      "term": "1u vs 1",
+      "ko": "리터럴을 unsigned 로. 1<<31 은 부호비트 UB",
+      "en": "Use unsigned literal; 1<<31 is signed-overflow UB"
+    },
+    {
+      "term": "Shift width",
+      "ko": "시프트 폭이 타입 폭(32) 이상이면 UB — guard 필요",
+      "en": "Shifting by >= type width is UB; guard it"
+    },
+    {
+      "term": "v & (v-1)",
+      "ko": "최하위 1비트 하나 제거 (Kernighan popcount)",
+      "en": "Clear the lowest set bit"
+    },
+    {
+      "term": "v & (-v)",
+      "ko": "최하위 1비트만 남기기 (~v+1, 2의 보수)",
+      "en": "Isolate the lowest set bit"
+    },
+    {
+      "term": "(a^b) < 0",
+      "ko": "XOR 부호비트로 부호 다름 판별",
+      "en": "Opposite-sign test via XOR sign bit"
+    },
+    {
+      "term": "Branchless abs",
+      "ko": "(v ^ mask) - mask, mask=부호비트 확장. INT32_MIN 주의",
+      "en": "Branchless absolute value; INT32_MIN not representable"
+    }
+  ],
+  "study_note_md": "# 01. 비트 조작 기초 (Bit Manipulation Basics) 🔧\n\n> MCU 레지스터 조작(register manipulation)의 기본 어휘. 드론 펌웨어에서 GPIO,\n> 타이머, ADC, 통신 페리페럴(SPI/I2C/UART) 레지스터의 특정 비트를 켜고·끄고·읽는\n> 일은 매 제어 루프마다 수백 번 일어난다. 이 10개는 그 \"손가락 근육\"이다.\n\n---\n\n## 왜 Anduril 펌웨어 인터뷰에 나오나\n\n- 디바이스 드라이버는 결국 **메모리 맵드 레지스터(memory-mapped register)** 에 마스크를\n  씌워 비트를 조작하는 일이다. `GPIOA->BSRR |= (1 << pin)` 같은 코드가 곧 `set_bit`.\n- 화이트보드에서 \"레지스터의 3번 비트만 켜라\", \"부호 없이 절대값 구해라(분기 없이)\",\n  \"패리티 비트 계산해라\" 같은 문제로 **UB 감각과 2의 보수 이해**를 본다.\n- 실기체 예: 비행 컨트롤러의 IMU 인터럽트 상태 레지스터 폴링, 모터 ESC의 폴트 플래그\n  비트 판독, 텔레메트리 패킷의 패리티 검사.\n\n---\n\n## 핵심 치트시트 (cheatsheet)\n\n| 연산 | 관용구 (idiom) | 메모 |\n|------|----------------|------|\n| Set bit n | `v \\|=  (1u << n)` | OR |\n| Clear bit n | `v &= ~(1u << n)` | 반전 마스크 AND |\n| Toggle bit n | `v ^=  (1u << n)` | XOR |\n| Test bit n | `(v >> n) & 1u` 또는 `v & (1u<<n)` | !=0 으로 bool 변환 |\n| 최하위 1비트 지우기 | `v & (v - 1)` | popcount 루프에 사용 |\n| 최하위 1비트만 남기기 | `v & (-v)` = `v & (~v + 1)` | isolate LSB |\n| 부호 다름? | `(a ^ b) < 0` | 부호비트(MSB) 비교 |\n| 분기 없는 abs | `(v ^ (v>>31)) - (v>>31)` | 아래 UB 주의 |\n\n---\n\n## 문제별 요점\n\n### 1–4. Set / Clear / Toggle / Test\n```c\nvalue |  (1u << bit);   // set\nvalue & ~(1u << bit);   // clear\nvalue ^  (1u << bit);   // toggle\nvalue &  (1u << bit);   // test (0 or non-zero)\n```\n**가장 흔한 함정:** `1 << bit` 는 `int`(부호 있음) 리터럴이라 `bit == 31`이면\n부호비트를 건드려 **UB**. 항상 `1u`(또는 `1UL`)로 쓴다. 또 `bit >= 32`면\n시프트 폭이 타입 폭 이상이라 그 자체가 UB — 드라이버 코드에선 방어적으로 guard.\n\n### 5. swap_nibbles\n```c\n(uint8_t)((value << 4) | (value >> 4));\n```\n`uint8_t`는 연산 시 `int`로 승격되므로 `value << 4`의 상위 비트가 살아있다.\n반드시 `(uint8_t)` 캐스트로 잘라준다. (BCD 코덱, LED 세그먼트 매핑에 흔함.)\n\n### 6. parity_even — 짝수 패리티\n1의 개수가 **짝수면 true**(0개도 짝수). 순진한 루프도 되지만 **XOR-folding**이\n브랜치리스 O(log n):\n```c\nvalue ^= value >> 16;\nvalue ^= value >> 8;\nvalue ^= value >> 4;\nvalue ^= value >> 2;\nvalue ^= value >> 1;\nreturn (value & 1u) == 0u;   // 최하위=1 이면 1의 개수 홀수\n```\n> 원본 소스의 주석/기대값이 서로 어긋나 있었다(어떤 곳은 0, 어떤 곳은 1).\n> 여기서는 **\"짝수 개 → true\"** 로 정의를 고정했다. `parity_even(0x5)` = 1이 2개 = **true**.\n\n### 7. clear_lsb — `v & (v-1)`\n1을 빼면 최하위 1은 0이 되고 그 아래는 전부 1로 바뀐다. AND 하면 그 자리만 지워진다.\n`v == 0`이면 `0u - 1 = 0xFFFFFFFF`, `0 & ... = 0` 이라 안전. Brian Kernighan\npopcount의 핵심 스텝.\n\n### 8. rightmost_set_bit — `v & (-v)`\n2의 보수에서 `-v == ~v + 1`. AND 하면 최하위 1비트만 남는다. **unsigned에서\n`0u - v`로 쓰면** 부정(negation) wrap이 well-defined. 인터럽트 우선순위에서\n\"가장 낮은 대기 IRQ\" 뽑기 같은 데 쓴다.\n\n### 9. is_opposite_sign — `(a ^ b) < 0`\n부호가 다르면 XOR의 MSB(부호비트)가 1 → 음수. 0은 부호비트 0이라 양수 취급.\n분기·곱셈 없이 한 줄.\n\n### 10. abs_no_branch\n```c\nuint32_t uv = (uint32_t)value;\nuint32_t mask = 0u - (uv >> 31);   // 음수면 0xFFFFFFFF, 양수면 0\nreturn (int32_t)((uv ^ mask) - mask);\n```\n`value >> 31`(signed)은 음수 우측 시프트라 **구현 정의(implementation-defined)**.\n그래서 unsigned로 부호비트를 뽑아 `0u - bit`로 마스크를 만들고, 전 과정을\nunsigned로 계산해 **signed overflow UB를 회피**한다.\n**주의:** `INT32_MIN`의 절대값은 `int32_t`로 표현 불가 → 그대로 `INT32_MIN` 반환(수학적 오류지만 UB는 아님).\n\n---\n\n## 인터뷰 팔로업 (follow-ups)\n\n- **\"왜 `1` 대신 `1u`?\"** → 31번 비트 시프트 시 부호비트 UB 회피.\n- **\"`bit`가 32 이상이면?\"** → 시프트 폭 ≥ 타입 폭은 UB. guard 하거나 문서화.\n- **\"`x & (x-1) == 0`은 무엇을 판별?\"** → 2의 거듭제곱(또는 0) 여부.\n- **\"popcount는?\"** → `while(v){ v &= v-1; cnt++; }` (set 비트 수만큼 반복) 또는 하드웨어 `__builtin_popcount`.\n- **\"volatile 레지스터에 read-modify-write 할 때 주의점?\"** → 컴파일러 재정렬/최적화 방지 위해 `volatile`, ISR과 공유 시 원자성(레지스터 세트/클리어 전용 레지스터 BSRR 사용) 고려.\n\n## 흔한 버그 (gotchas)\n\n- `1 << 31` 부호 UB, `1 << 32` 폭 초과 UB.\n- `uint8_t` 니블 스왑에서 캐스트 누락 → 상위 비트 잔존.\n- signed `>>`를 논리 시프트로 착각(구현 정의).\n- `abs(INT32_MIN)` 오버플로.\n- 패리티 정의(짝수=true vs 홀수=true) 혼동 — 반드시 명세를 물어라.\n",
+  "problems": [
+    {
+      "num": 1,
+      "slug": "set_bit",
+      "title_ko": "특정 비트 설정(Set)",
+      "title_en": "Set a specific bit",
+      "difficulty": "easy",
+      "tags": [
+        "register",
+        "mask",
+        "gpio"
+      ],
+      "prompt_ko": "value 의 bit 번째 비트를 1로 설정해 반환하라. bit >= 32 는 UB 이므로 방어하라.",
+      "prompt_en": "Set bit `bit` of `value` to 1 and return the result. Guard bit >= 32 (shift-width UB).",
+      "signature": "uint32_t set_bit(uint32_t value, uint8_t bit)",
+      "examples": [
+        {
+          "in": "set_bit(0x00, 3)",
+          "out": "0x8"
+        },
+        {
+          "in": "set_bit(0x00, 31)",
+          "out": "0x80000000"
+        }
+      ],
+      "hints": [
+        "OR 연산으로 원하는 비트만 1로 만든다.",
+        "마스크는 (1u << bit).",
+        "bit >= 32u 이면 그대로 value 반환(no-op)."
+      ],
+      "solution": "uint32_t set_bit(uint32_t value, uint8_t bit) {\n    if (bit >= 32u) return value;\n    return value | (1u << bit);\n}",
+      "explanation_ko": "OR 는 대응 비트가 1이면 결과도 1, 나머지는 원본 유지. (1u<<bit) 로 해당 자리에만 1을 세워 OR 하면 그 비트만 켜진다. 1u 로 써야 bit==31 에서 부호비트 UB 를 피한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "1 (signed) 로 쓰면 1<<31 부호 UB",
+        "bit>=32 시프트 폭 초과 UB"
+      ],
+      "anduril_context": "GPIO 출력 세트: GPIOA->BSRR = (1u<<pin) 처럼 핀 활성화."
+    },
+    {
+      "num": 2,
+      "slug": "clear_bit",
+      "title_ko": "특정 비트 클리어(Clear)",
+      "title_en": "Clear a specific bit",
+      "difficulty": "easy",
+      "tags": [
+        "register",
+        "mask"
+      ],
+      "prompt_ko": "value 의 bit 번째 비트를 0으로 클리어해 반환하라.",
+      "prompt_en": "Clear bit `bit` of `value` to 0 and return the result.",
+      "signature": "uint32_t clear_bit(uint32_t value, uint8_t bit)",
+      "examples": [
+        {
+          "in": "clear_bit(0xFF, 4)",
+          "out": "0xEF"
+        }
+      ],
+      "hints": [
+        "반전 마스크가 필요하다.",
+        "~(1u << bit) 는 해당 비트만 0, 나머지 1.",
+        "AND 로 그 비트만 끈다."
+      ],
+      "solution": "uint32_t clear_bit(uint32_t value, uint8_t bit) {\n    if (bit >= 32u) return value;\n    return value & ~(1u << bit);\n}",
+      "explanation_ko": "~(1u<<bit) 는 해당 위치만 0이고 나머지가 1인 마스크. AND 하면 그 비트만 0으로 떨어지고 나머지는 유지된다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "~ 를 빼먹고 그냥 AND 하면 반대로 나머지가 다 지워짐",
+        "부호/시프트 폭 UB"
+      ],
+      "anduril_context": "인터럽트 플래그 클리어, 페리페럴 enable 비트 off."
+    },
+    {
+      "num": 3,
+      "slug": "toggle_bit",
+      "title_ko": "특정 비트 토글(Toggle)",
+      "title_en": "Toggle a specific bit",
+      "difficulty": "easy",
+      "tags": [
+        "register",
+        "xor"
+      ],
+      "prompt_ko": "value 의 bit 번째 비트를 반전해 반환하라.",
+      "prompt_en": "Flip bit `bit` of `value` and return the result.",
+      "signature": "uint32_t toggle_bit(uint32_t value, uint8_t bit)",
+      "examples": [
+        {
+          "in": "toggle_bit(0x10, 4)",
+          "out": "0x0"
+        },
+        {
+          "in": "toggle_bit(0x00, 4)",
+          "out": "0x10"
+        }
+      ],
+      "hints": [
+        "XOR 은 같은 비트와 연산 시 반전.",
+        "마스크는 (1u << bit)."
+      ],
+      "solution": "uint32_t toggle_bit(uint32_t value, uint8_t bit) {\n    if (bit >= 32u) return value;\n    return value ^ (1u << bit);\n}",
+      "explanation_ko": "XOR 은 1과 만나면 반전, 0과 만나면 유지. 마스크의 해당 자리만 1이므로 그 비트만 상태가 뒤집힌다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "부호/시프트 폭 UB",
+        "두 번 토글하면 원상복귀(속성 활용/함정)"
+      ],
+      "anduril_context": "LED heartbeat 토글, 디버그 핀 스트로브."
+    },
+    {
+      "num": 4,
+      "slug": "is_bit_set",
+      "title_ko": "특정 비트 확인(Test)",
+      "title_en": "Test if a bit is set",
+      "difficulty": "easy",
+      "tags": [
+        "register",
+        "polling"
+      ],
+      "prompt_ko": "value 의 bit 번째 비트가 1이면 true 를 반환하라.",
+      "prompt_en": "Return true if bit `bit` of `value` is set.",
+      "signature": "bool is_bit_set(uint32_t value, uint8_t bit)",
+      "examples": [
+        {
+          "in": "is_bit_set(0x10, 4)",
+          "out": "true"
+        },
+        {
+          "in": "is_bit_set(0x10, 3)",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "AND 로 해당 비트만 추출.",
+        "결과를 != 0 으로 명시 변환해 bool 로."
+      ],
+      "solution": "bool is_bit_set(uint32_t value, uint8_t bit) {\n    if (bit >= 32u) return false;\n    return (value & (1u << bit)) != 0u;\n}",
+      "explanation_ko": "value & (1u<<bit) 는 그 비트가 1이면 (1<<bit), 아니면 0. bool 반환이라 !=0 으로 0/1 로 정규화한다(bit>0 자리를 그냥 bool 캐스트하면 값이 커도 true 지만 명시성이 떨어짐).",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "bool 반환에 int 마스크 그대로 넣으면 컴파일러/린트 경고 가능",
+        "시프트 폭 UB"
+      ],
+      "anduril_context": "센서 DATA_READY 비트 폴링, ESC 폴트 플래그 판독."
+    },
+    {
+      "num": 5,
+      "slug": "swap_nibbles",
+      "title_ko": "니블 스왑",
+      "title_en": "Swap nibbles",
+      "difficulty": "easy",
+      "tags": [
+        "nibble",
+        "byte",
+        "cast"
+      ],
+      "prompt_ko": "바이트의 상위 4비트와 하위 4비트를 맞바꿔 반환하라.",
+      "prompt_en": "Swap the upper and lower 4-bit nibbles of a byte.",
+      "signature": "uint8_t swap_nibbles(uint8_t value)",
+      "examples": [
+        {
+          "in": "swap_nibbles(0xAB)",
+          "out": "0xBA"
+        },
+        {
+          "in": "swap_nibbles(0x0F)",
+          "out": "0xF0"
+        }
+      ],
+      "hints": [
+        "상위로 올릴 니블은 << 4, 내릴 니블은 >> 4.",
+        "OR 로 합친다.",
+        "uint8_t 승격 때문에 (uint8_t) 캐스트로 상위 비트를 자른다."
+      ],
+      "solution": "uint8_t swap_nibbles(uint8_t value) {\n    return (uint8_t)((value << 4) | (value >> 4));\n}",
+      "explanation_ko": "value<<4 는 하위 니블을 상위로, value>>4 는 상위 니블을 하위로 옮긴다. uint8_t 는 연산 시 int 로 승격되어 <<4 의 상위 비트가 살아있으므로 (uint8_t) 로 하위 8비트만 취한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "캐스트 누락 시 상위 비트 잔존으로 값 오염",
+        "16/32비트로 확장하면 마스크 필요"
+      ],
+      "anduril_context": "BCD 코덱, 세븐세그먼트 매핑, 바이트 내 필드 재배치."
+    },
+    {
+      "num": 6,
+      "slug": "parity_even",
+      "title_ko": "짝수 패리티",
+      "title_en": "Even parity",
+      "difficulty": "medium",
+      "tags": [
+        "parity",
+        "xor-fold",
+        "popcount"
+      ],
+      "prompt_ko": "value 의 1비트 개수가 짝수면 true(0개도 짝수), 홀수면 false 를 반환하라.",
+      "prompt_en": "Return true if the number of set bits is EVEN (zero counts as even).",
+      "signature": "bool parity_even(uint32_t value)",
+      "examples": [
+        {
+          "in": "parity_even(0x5)",
+          "out": "true (1이 2개)"
+        },
+        {
+          "in": "parity_even(0x7)",
+          "out": "false (3개)"
+        }
+      ],
+      "hints": [
+        "순진하게 비트를 하나씩 XOR 누적해도 된다.",
+        "브랜치리스: 상위 절반을 하위로 XOR-fold 반복.",
+        "최종 최하위 비트가 1이면 1의 개수가 홀수."
+      ],
+      "solution": "bool parity_even(uint32_t value) {\n    value ^= value >> 16;\n    value ^= value >> 8;\n    value ^= value >> 4;\n    value ^= value >> 2;\n    value ^= value >> 1;\n    return (value & 1u) == 0u;\n}",
+      "explanation_ko": "XOR 은 교환·결합법칙이 성립하고 1 XOR 1 = 0 이므로 전체 비트를 XOR 로 접으면 최하위 비트에 1의 개수의 홀짝(패리티)이 모인다. 절반씩 접어 O(log n). 최하위=1 이면 홀수 → 짝수 판정은 그 반대.",
+      "complexity": "O(1) time (32비트 고정, 5 스텝), O(1) space",
+      "pitfalls": [
+        "패리티 정의(짝수=true vs 홀수=true) 명세 확인 필수",
+        "원본 소스는 기대값이 서로 어긋나 있었음 — 여기선 짝수=true 로 고정"
+      ],
+      "anduril_context": "UART 프레임 패리티 비트, 텔레메트리/통신 링크 오류 검출."
+    },
+    {
+      "num": 7,
+      "slug": "clear_lsb",
+      "title_ko": "최하위 설정 비트 클리어",
+      "title_en": "Clear lowest set bit",
+      "difficulty": "easy",
+      "tags": [
+        "bit-trick",
+        "kernighan"
+      ],
+      "prompt_ko": "가장 낮은 설정 비트(LSB) 하나를 0으로 만들어 반환하라.",
+      "prompt_en": "Clear the lowest set bit of value.",
+      "signature": "uint32_t clear_lsb(uint32_t value)",
+      "examples": [
+        {
+          "in": "clear_lsb(0x18)",
+          "out": "0x10"
+        },
+        {
+          "in": "clear_lsb(0x1)",
+          "out": "0x0"
+        }
+      ],
+      "hints": [
+        "value 에서 1을 빼면 어떤 비트가 바뀌나 관찰.",
+        "value & (value-1)."
+      ],
+      "solution": "uint32_t clear_lsb(uint32_t value) {\n    return value & (value - 1u);\n}",
+      "explanation_ko": "value-1 은 최하위 1을 0으로, 그 아래 0들을 1로 바꾼다. AND 하면 최하위 1 자리만 지워지고 나머지는 유지. value==0 이면 0u-1=0xFFFFFFFF, 0&... =0 이라 안전.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "부호 있는 타입에서 0-1 은 UB 아님이나 해석 주의",
+        "이 트릭 반복으로 popcount 구현 가능"
+      ],
+      "anduril_context": "set 비트 순회 popcount, 대기 이벤트 마스크 소비."
+    },
+    {
+      "num": 8,
+      "slug": "rightmost_set_bit",
+      "title_ko": "최하위 1비트 분리",
+      "title_en": "Isolate lowest set bit",
+      "difficulty": "easy",
+      "tags": [
+        "bit-trick",
+        "twos-complement"
+      ],
+      "prompt_ko": "가장 오른쪽 1비트만 남기고 나머지는 0으로 만들어 반환하라.",
+      "prompt_en": "Return only the lowest set bit of value.",
+      "signature": "uint32_t rightmost_set_bit(uint32_t value)",
+      "examples": [
+        {
+          "in": "rightmost_set_bit(0x18)",
+          "out": "0x8"
+        },
+        {
+          "in": "rightmost_set_bit(0x80000000)",
+          "out": "0x80000000"
+        }
+      ],
+      "hints": [
+        "2의 보수에서 -v = ~v + 1.",
+        "value & (-value).",
+        "unsigned 부정은 0u - value 로 명시하면 wrap 이 정의됨."
+      ],
+      "solution": "uint32_t rightmost_set_bit(uint32_t value) {\n    return value & (uint32_t)(0u - value);\n}",
+      "explanation_ko": "-value 는 최하위 1비트 아래는 0, 그 위는 value 의 반전 형태가 되어, AND 하면 최하위 1비트만 공통으로 살아남는다. unsigned 부정(0u-value)은 well-defined wrap.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "signed 로 -INT_MIN 하면 UB — unsigned 로 계산",
+        "value==0 이면 0 반환(정상)"
+      ],
+      "anduril_context": "가장 낮은 대기 IRQ 선택, 스케줄러 ready 마스크에서 최우선 태스크 추출."
+    },
+    {
+      "num": 9,
+      "slug": "is_opposite_sign",
+      "title_ko": "부호 다름 판별",
+      "title_en": "Opposite signs",
+      "difficulty": "easy",
+      "tags": [
+        "sign",
+        "xor",
+        "branchless"
+      ],
+      "prompt_ko": "두 정수의 부호가 서로 다르면 true 를 반환하라(분기 없이).",
+      "prompt_en": "Return true if a and b have opposite signs, without branching.",
+      "signature": "bool is_opposite_sign(int32_t a, int32_t b)",
+      "examples": [
+        {
+          "in": "is_opposite_sign(-5, 7)",
+          "out": "true"
+        },
+        {
+          "in": "is_opposite_sign(0, -1)",
+          "out": "true"
+        }
+      ],
+      "hints": [
+        "부호는 최상위 비트(MSB)에 있다.",
+        "XOR 하면 부호가 다를 때만 MSB=1.",
+        "결과가 음수인지 보면 된다."
+      ],
+      "solution": "bool is_opposite_sign(int32_t a, int32_t b) {\n    return (a ^ b) < 0;\n}",
+      "explanation_ko": "부호가 다르면 두 부호비트 중 정확히 하나가 1이라 XOR 의 MSB=1 → 결과가 음수. 0은 부호비트 0이라 양수로 취급된다. 비교/곱셈 없이 한 줄.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "(a^b) 를 unsigned 로 다루면 <0 항상 false — signed 유지",
+        "0 의 부호 취급 정의를 물어라"
+      ],
+      "anduril_context": "PID 제어 오차 부호 전환 감지, 짐벌/모터 방향 반전 검출."
+    },
+    {
+      "num": 10,
+      "slug": "abs_no_branch",
+      "title_ko": "분기 없는 절대값",
+      "title_en": "Branchless absolute value",
+      "difficulty": "medium",
+      "tags": [
+        "abs",
+        "branchless",
+        "twos-complement"
+      ],
+      "prompt_ko": "분기문 없이 정수의 절대값을 반환하라.",
+      "prompt_en": "Compute |value| without branching.",
+      "signature": "int32_t abs_no_branch(int32_t value)",
+      "examples": [
+        {
+          "in": "abs_no_branch(-123)",
+          "out": "123"
+        },
+        {
+          "in": "abs_no_branch(123)",
+          "out": "123"
+        }
+      ],
+      "hints": [
+        "부호비트를 전 비트로 확장한 mask 를 만든다(음수면 -1, 양수면 0).",
+        "(v ^ mask) - mask.",
+        "signed >> 는 구현 정의 — unsigned 로 mask 를 만들어 UB 회피."
+      ],
+      "solution": "int32_t abs_no_branch(int32_t value) {\n    uint32_t uv   = (uint32_t)value;\n    uint32_t mask = 0u - (uv >> 31);\n    return (int32_t)((uv ^ mask) - mask);\n}",
+      "explanation_ko": "mask 는 음수면 0xFFFFFFFF(-1), 양수면 0. 음수면 (v ^ -1) - (-1) = ~v + 1 = -v = |v|, 양수면 (v ^ 0) - 0 = v. 부호비트를 unsigned 시프트로 뽑고 전 과정을 unsigned 로 계산해 signed overflow UB 를 피한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "signed value>>31 은 구현 정의(논리 시프트 가정 위험)",
+        "INT32_MIN 은 절대값 표현 불가 — 결과가 그대로 INT32_MIN"
+      ],
+      "anduril_context": "센서 오차 크기 계산, DSP 필터에서 부호 없는 크기 비교(연산 지연 균일화)."
+    }
+  ]
+}

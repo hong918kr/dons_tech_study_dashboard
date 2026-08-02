@@ -1,0 +1,442 @@
+{
+  "id": "data_processing",
+  "order": 8,
+  "range": "Q86-95",
+  "icon": "📡",
+  "title_en": "Data Processing & Protocols",
+  "title_ko": "데이터 처리 & 프로토콜",
+  "summary_ko": "텔레메트리 무결성(XOR/sum8 체크섬, CRC-16 LUT), 프레이밍/파싱(바이너리 패킷, NMEA GPS), FPU 없는 수치처리(고정소수점 Q포맷, 이동평균 필터), 대역폭 절약(RLE, base64), 바이트 패턴 탐색(KMP)을 C로 직접 구현한다. 핵심은 오류 검출력, 버퍼 경계, 오버플로, 부분 프레임 방어.",
+  "summary_en": "Implement telemetry integrity (XOR/sum8 checksums, table-driven CRC-16), framing/parsing (binary packets, NMEA GPS), FPU-free math (fixed-point Q-format, moving-average filter), bandwidth savers (RLE, base64), and byte-pattern search (KMP). Emphasis on error-detection strength, buffer bounds, overflow, and partial-frame defense.",
+  "anduril_relevance_ko": "드론/자율체는 노이즈 있는 RF·시리얼 링크로 텔레메트리와 명령을 주고받는다. 비트 하나가 뒤집혀도 잘못된 명령이 실행되면 안 되므로 checksum/CRC 무결성이 필수다. MCU엔 FPU가 없거나 느려 PID 게인·필터 계수를 고정소수점(Q포맷)으로 돌리고, IMU/기압계 노이즈는 이동평균(SMA)으로 죽인다. 좁은 대역폭엔 RLE/base64로 페이로드를 줄이거나 텍스트 채널에 싣는다. 인터뷰어는 프레이밍(start/len/CRC/end), 엔디안, 오버플로, 버퍼 경계, 부분 프레임 재동기화를 파고든다. NMEA GPS 파싱과 XMODEM CRC는 실무 그 자체다.",
+  "concepts": [
+    {
+      "term": "XOR checksum",
+      "ko": "가장 싼 검사. 자리바뀜·짝수개 비트오류 못 잡음. NMEA가 사용.",
+      "en": "Cheapest check; misses transpositions and even-count bit errors. Used by NMEA."
+    },
+    {
+      "term": "CRC-16 LUT",
+      "ko": "다항식 나눗셈을 256엔트리 테이블로 바이트당 1회 조회. 실무는 const로 플래시에 구움.",
+      "en": "Polynomial division via a 256-entry table, one lookup per byte; baked as const in flash."
+    },
+    {
+      "term": "LUT 생성",
+      "ko": "table[i]=(i<<8)를 8번 나눈 잔여(MSB-first). init/reflect/poly로 변종 다수.",
+      "en": "table[i] = remainder of (i<<8) after 8 divisions (MSB-first); variants differ by init/reflect/poly."
+    },
+    {
+      "term": "framing",
+      "ko": "[start][len][payload][CRC][end]. 마커·길이·체크섬으로 경계와 무결성 확인.",
+      "en": "[start][len][payload][CRC][end]: markers, length and checksum bound and verify a frame."
+    },
+    {
+      "term": "Q format",
+      "ko": "값=raw/2^q. 덧셈은 그대로, 곱셈은 int64 곱 후 >>q로 스케일 복원.",
+      "en": "value = raw/2^q; add directly, multiply via int64 product then >>q to rescale."
+    },
+    {
+      "term": "moving average",
+      "ko": "창 W의 SMA. 지연 ~ W/2. 스트리밍이면 running sum으로 O(1) 갱신.",
+      "en": "SMA of window W; lag ~ W/2; O(1) update with a running sum when streaming."
+    },
+    {
+      "term": "RLE",
+      "ko": "[value][count]. count 8비트면 255에서 분할. 무런 데이터는 2배 팽창.",
+      "en": "[value][count]; splits at 255 for 8-bit count; runless data expands ~2x."
+    },
+    {
+      "term": "base64",
+      "ko": "3바이트->4문자(6비트씩), = 패딩, 크기 +33%. 텍스트 채널용.",
+      "en": "3 bytes -> 4 chars (6 bits each), '=' padding, +33% size; for text channels."
+    },
+    {
+      "term": "KMP",
+      "ko": "LPS(prefix-suffix) 테이블로 실패 시 되돌아갈 위치를 미리 계산 -> O(n+m).",
+      "en": "LPS (prefix-suffix) table precomputes fallback positions, giving O(n+m) search."
+    }
+  ],
+  "study_note_md": "# 08. Data Processing & Protocols (데이터 처리 & 프로토콜) · Q86-95 📡\n\n> 링크 위로 **바이트를 안전하게 주고받는** 드릴. 텔레메트리 무결성(checksum/CRC),\n> 프레이밍/파싱, 제어루프 수치처리(fixed-point, moving-average), 대역폭 절약\n> (RLE/base64), 바이트 스트림 패턴 탐색(KMP). Anduril 펌웨어 인터뷰의\n> \"RF/시리얼 링크로 프레임을 받는데 깨진 걸 어떻게 걸러내나?\" 유형.\n\n---\n\n## 왜 이 토픽이 인터뷰에 나오나\n\n- 드론/자율체는 **노이즈 있는 RF·시리얼 링크**로 텔레메트리와 명령을 주고받는다.\n  비트 하나가 뒤집혀도 잘못된 명령이 실행되면 안 되므로 **checksum/CRC 무결성**이 필수다.\n- MCU엔 **FPU가 없거나 느리다**. PID 게인·필터 계수는 **고정소수점(Q 포맷)**으로 돌린다.\n  이동평균(SMA)은 센서(IMU/기압계) 노이즈를 죽이는 가장 값싼 필터다.\n- 대역폭이 좁으니 **RLE/base64** 같은 인코딩으로 페이로드를 줄이거나 텍스트 채널에 싣는다.\n- 프레이밍(start/end 마커, length, CRC)과 **파서**(NMEA GPS 등)는 실무 그 자체다.\n  인터뷰어는 여기서 **엔디안, 오버플로, 버퍼 경계, 부분 프레임(partial frame)**을 파고든다.\n\n---\n\n## 핵심 개념 치트시트\n\n| 개념 | 요점 |\n|---|---|\n| **XOR checksum** | 가장 싼 검사. 비트 오류 검출력 약함(짝수개 오류/자리바뀜 못 잡음). NMEA가 사용. |\n| **additive sum8** | 바이트 합의 하위 8비트. XOR보다 낫지만 여전히 약함. wrap-around는 `uint8_t`가 알아서. |\n| **CRC-16** | 다항식 나눗셈. **LUT**로 바이트당 1회 조회 → 빠름. 오류 검출력 월등. init/reflect/poly로 변종 다수. |\n| **LUT 생성** | `table[i]` = `(i<<8)`를 8번 나눈 잔여(MSB-first). 실무는 **const로 미리 구워** 플래시에 둔다. |\n| **framing** | `[start][len][payload][CRC][end]`. 마커·길이·체크섬으로 프레임 경계와 무결성 확인. |\n| **Q 포맷** | `값 = raw / 2^q`. 덧셈은 그대로, 곱셈은 `>>q`로 스케일 복원(중간연산 int64). |\n| **SMA** | 창 W의 단순이동평균. 지연(lag) ≈ W/2. 스트리밍이면 running sum으로 O(1) 갱신. |\n| **RLE** | `[value][count]`. count 8비트면 255에서 분할. 최악의 경우 **2배로 커짐**(무런 데이터). |\n| **base64** | 3바이트→4문자(6비트씩). `=` 패딩. 크기 **+33%**. 텍스트 채널 전송용. |\n| **KMP** | LPS(prefix-suffix) 테이블로 실패 시 되돌아갈 위치를 미리 계산 → O(n+m). |\n\n---\n\n## 문제별 요점 & 함정\n\n### 86. NMEA 파싱 (nmea_validate / nmea_get_field)\n- NMEA-0183: `$GPGGA,123519,4807.038,N,...*47`. 체크섬 = `$`와 `*` 사이 **XOR**, 뒤에 2자리 hex.\n- validate: `$`로 시작 → `*` 찾기 → 사이 XOR → 뒤 2 hex와 비교. **널 종료 넘어 읽지 않도록** short-circuit.\n- get_field: 콤마로 분리, field 0 = talker+type(`GPGGA`). `*`/CRLF/`\\0`에서 종료.\n- 함정: 종료자 뒤 hex 두 자리 접근 시 OOB. `hexval('\\0')`이 -1을 반환하도록 해 방어.\n\n### 87-88. XOR / sum8 체크섬\n- 둘 다 O(n), 상태 1바이트. `NULL` 안전. `uint8_t` 누산이 자연 mod-256.\n- 함정: **검출력**을 물어보면 \"자리바뀜(transposition)·짝수개 비트오류 취약 → 실무는 CRC\" 라고 답.\n\n### 89. CRC-16 (LUT)\n- CRC-16/XMODEM(poly `0x1021`, init `0x0000`, MSB-first, 무반사)이 대표적. 표준 검증: `\"123456789\"`→`0x31C3`.\n- LUT 생성:\n  ```c\n  for (i in 0..255) { crc = i<<8; repeat 8: crc = (crc&0x8000)?(crc<<1)^0x1021:(crc<<1); table[i]=crc; }\n  ```\n- 갱신: `crc = (crc<<8) ^ table[((crc>>8) ^ byte) & 0xFF];`\n- 함정: LSB-first(reflected) 변종(MODBUS 등)은 테이블 생성·갱신식이 다르다. **어느 CRC인지 먼저 확정**.\n\n### 90. 바이너리 패킷 파싱\n- 여기선 최소판: `start=0xAA`, `end=0xBB`, `len>=2`. 실전은 **length + CRC(#89)**를 더한다.\n- 함정: **partial frame**(스트림 중간부터 도착)·마커가 페이로드에 우연히 나타남 → byte stuffing/escape 필요.\n\n### 91. 고정소수점 (Q 포맷)\n- `값 = raw / 2^q`. **덧셈**: 같은 Q라 raw끼리 더함(오버플로 방지 int64 + 포화).\n- **곱셈**: `(int64)a*b`는 Q(2q) → `>>q`로 복원. 반올림은 `+ 2^(q-1)` 후 시프트.\n- 함정: 곱에서 int32끼리 곱하면 오버플로 → **반드시 int64 중간연산**. 음수 산술 시프트는 구현 정의(실무 컴파일러는 산술 시프트).\n\n### 92. 이동평균 (SMA)\n- `out[i] = mean(in[i-W+1..i])`, 초반부는 있는 만큼. 지연 ≈ W/2.\n- 스트리밍이면 `sum += new - old`로 **O(1)** 갱신(원형버퍼로 old 관리). 여기선 명확성 위해 O(n·W).\n- 함정: `size_t` 언더플로(`i-W+1`) → `i+1>=W` 가드. 정수 평균이면 반올림/버림 정책 명시.\n\n### 93. RLE\n- `[value][count]` 쌍. count 8비트 → **255에서 분할**. 반환=쓴 바이트 수, 버퍼 부족/홀수 길이면 0.\n- 함정: **최악의 경우 팽창**(교대 데이터는 2배). 실무는 escape/RLE 플래그로 팽창 방지.\n\n### 94. base64\n- 3바이트(24비트)→4문자(6비트씩), 부족분 `=` 패딩. 크기 +33%. 디코드 표로 역변환.\n- 함정: 입력 길이 4의 배수 아님/불량 문자 → 실패 반환. 패딩 개수로 출력 길이 계산.\n\n### 95. 패턴 탐색 (KMP)\n- LPS 테이블로 불일치 시 되돌아갈 위치를 미리 계산 → **O(n+m)**, 백트래킹 없음.\n- 빈 패턴은 0, 패턴>데이터는 -1. LPS는 **고정 버퍼**(bounded)로 힙 회피, 초과 시 naive fallback.\n- 함정: naive는 `0xAAAA...`처럼 반복 접두사에서 O(n·m). KMP의 이득이 여기서 나온다.\n\n---\n\n## 인터뷰 팔로업 (자주 나오는 꼬리질문)\n\n1. **\"XOR/sum 체크섬은 뭘 못 잡나?\"** → 자리바뀜, 짝수개 비트오류. 그래서 CRC.\n2. **\"CRC 테이블을 런타임에 만들까 굽어둘까?\"** → 플래시에 `const`로 미리 구워 부팅·연산 비용 제거.\n3. **\"엔디안은?\"** → 멀티바이트 필드(길이/CRC)는 프로토콜이 정한 바이트 순서로 직렬화. `htons`류/수동 시프트.\n4. **\"partial frame/재동기화는?\"** → 링버퍼에 모으고 start 마커로 재동기, length로 끝 확인, CRC로 검증.\n5. **\"float 대신 fixed 왜?\"** → FPU 없음/결정성/속도. 단 오버플로·정밀도 관리 부담.\n6. **\"SMA vs EMA?\"** → EMA(지수이동평균)는 상태 1개·곱셈 2번으로 O(1), 버퍼 불필요. SMA는 창 안 모든 샘플 동일가중.\n7. **\"RLE가 언제 나쁜가?\"** → 무런(노이즈) 데이터에서 2배 팽창. 헤더로 raw/compressed 선택.\n\n---\n\n## 빌드 & 실행\n\n```sh\n# 연습(직접 채우기)\ncc -std=c11 -Wall -Wextra problems/08_data_processing.c -o /tmp/andb_data_processing && /tmp/andb_data_processing\n# 정답 확인 (전부 PASS)\ncc -std=c11 -Wall -Wextra solutions/08_data_processing.c -o /tmp/andb_data_processing && /tmp/andb_data_processing\n# 또는\nmake prob N=08_data_processing      #  연습\nmake sol  N=08_data_processing      #  정답\n```\n\n> **핵심 한 줄**: \"링크는 언젠가 비트를 뒤집는다.\" 그래서 **체크섬/CRC로 걸러내고,\n> 프레이밍으로 경계를 잡고, FPU 없이 fixed-point로 계산하고, 좁은 대역폭엔 인코딩을 쓴다.\"\n",
+  "problems": [
+    {
+      "num": 86,
+      "slug": "nmea_parse",
+      "title_ko": "NMEA 문장 파싱",
+      "title_en": "NMEA sentence parse",
+      "difficulty": "medium",
+      "tags": [
+        "protocol",
+        "parsing",
+        "checksum"
+      ],
+      "prompt_ko": "NMEA-0183 GPS 문장을 다룬다. 체크섬은 '$'와 '*' 사이 모든 바이트의 XOR이며 뒤에 2자리 hex로 붙는다. nmea_validate는 구조와 체크섬이 맞으면 true. nmea_get_field는 idx번째 콤마 필드(field 0 = 'GPGGA')를 out에 복사하고 길이를 반환, 오류 시 -1.",
+      "prompt_en": "Parse NMEA-0183 GPS sentences. Checksum = XOR of bytes between '$' and '*' followed by 2 hex digits. nmea_validate returns true on valid structure+checksum; nmea_get_field copies the idx-th comma field into out, returns its length or -1.",
+      "signature": "bool nmea_validate(const char *s); int nmea_get_field(const char *s, size_t idx, char *out, size_t out_max)",
+      "examples": [
+        {
+          "in": "\"$GPGGA,123519,...,*47\"",
+          "out": "nmea_validate -> true"
+        },
+        {
+          "in": "get_field(...,1)",
+          "out": "\"123519\", returns 6"
+        }
+      ],
+      "hints": [
+        "'$' 다음부터 '*'까지 XOR을 누산하라.",
+        "종료 널을 넘어 hex 두 자리를 읽지 않도록 short-circuit (hexval('\\0')=-1).",
+        "필드는 ','로 분리, '*'/CRLF/'\\0'에서 종료. field 0은 '$' 다음 첫 콤마 전까지."
+      ],
+      "solution": "static int hexval(char c){\n    if(c>='0'&&c<='9')return c-'0';\n    if(c>='a'&&c<='f')return c-'a'+10;\n    if(c>='A'&&c<='F')return c-'A'+10;\n    return -1;\n}\nbool nmea_validate(const char *s){\n    if(!s||s[0]!='$')return false;\n    uint8_t sum=0; size_t i=1;\n    for(;s[i]&&s[i]!='*';i++) sum^=(uint8_t)s[i];\n    if(s[i]!='*')return false;\n    int hi=hexval(s[i+1]); if(hi<0)return false;\n    int lo=hexval(s[i+2]); if(lo<0)return false;\n    return sum==(uint8_t)((hi<<4)|lo);\n}\nint nmea_get_field(const char *s,size_t idx,char *out,size_t out_max){\n    if(!s||!out||out_max==0||s[0]!='$')return -1;\n    const char *p=s+1; size_t cur=0;\n    for(;;){\n        const char *start=p;\n        while(*p&&*p!=','&&*p!='*'&&*p!='\\r'&&*p!='\\n')p++;\n        size_t flen=(size_t)(p-start);\n        if(cur==idx){\n            if(flen+1>out_max)return -1;\n            memcpy(out,start,flen); out[flen]='\\0'; return (int)flen;\n        }\n        if(*p==','){p++;cur++;continue;}\n        return -1;\n    }\n}",
+      "explanation_ko": "validate는 '$'로 시작해 '*'까지 XOR을 누산하고 뒤 2 hex와 비교한다. hi 검사를 통과했을 때만 s[i+2]에 접근하므로 널 종료를 넘어가지 않는다. get_field는 '$' 다음부터 콤마 카운트를 세며 원하는 필드를 만나면 널 종료해 복사한다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "종료자 뒤 hex 두 자리 접근 시 OOB(short-circuit로 방어).",
+        "out 버퍼가 필드+널보다 작을 때 미검사.",
+        "field 0(talker+type) 경계 처리 실수."
+      ],
+      "anduril_context": "GPS 모듈 UART 스트림에서 위치/시각 필드 추출과 무결성 검증."
+    },
+    {
+      "num": 87,
+      "slug": "xor_checksum",
+      "title_ko": "XOR 체크섬",
+      "title_en": "XOR checksum",
+      "difficulty": "easy",
+      "tags": [
+        "checksum",
+        "integrity"
+      ],
+      "prompt_ko": "data의 모든 바이트를 XOR한 8비트 체크섬을 반환하라(초기값 0, NULL 안전).",
+      "prompt_en": "Return the 8-bit XOR of all bytes (init 0, NULL-safe).",
+      "signature": "uint8_t xor_checksum(const uint8_t *data, size_t len)",
+      "examples": [
+        {
+          "in": "{0x01,0x02,0x03},3",
+          "out": "0x00"
+        },
+        {
+          "in": "{0x7E},1",
+          "out": "0x7E"
+        }
+      ],
+      "hints": [
+        "누산 변수 0에서 시작.",
+        "각 바이트를 ^= 로 누적.",
+        "NULL이면 0 반환."
+      ],
+      "solution": "uint8_t xor_checksum(const uint8_t *data, size_t len){\n    uint8_t c=0;\n    if(!data)return 0;\n    for(size_t i=0;i<len;i++) c^=data[i];\n    return c;\n}",
+      "explanation_ko": "XOR은 결합·교환법칙이 성립해 순서 무관하게 누적한다. 같은 값을 두 번 XOR하면 상쇄되므로 검출력이 약하다(자리바뀜/짝수 오류 취약).",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "자리바뀜·짝수개 비트오류를 못 잡음 → 실무는 CRC.",
+        "NULL 미방어.",
+        "signed char로 받으면 부호확장 이슈."
+      ],
+      "anduril_context": "NMEA·간단 프레임의 저비용 무결성 검사."
+    },
+    {
+      "num": 88,
+      "slug": "sum8_checksum",
+      "title_ko": "8비트 additive 체크섬",
+      "title_en": "8-bit additive checksum",
+      "difficulty": "easy",
+      "tags": [
+        "checksum",
+        "wrap-around"
+      ],
+      "prompt_ko": "바이트 합의 하위 8비트(자연 wrap-around)를 반환하라.",
+      "prompt_en": "Return the low 8 bits of the byte sum (natural wrap-around).",
+      "signature": "uint8_t sum8_checksum(const uint8_t *data, size_t len)",
+      "examples": [
+        {
+          "in": "{0x01,0x02,0x03},3",
+          "out": "0x06"
+        },
+        {
+          "in": "{0xFF,0x01},2",
+          "out": "0x00"
+        }
+      ],
+      "hints": [
+        "uint8_t 누산 변수가 자동으로 mod 256.",
+        "int로 받고 &0xFF 해도 동일.",
+        "NULL이면 0."
+      ],
+      "solution": "uint8_t sum8_checksum(const uint8_t *data, size_t len){\n    uint8_t s=0;\n    if(!data)return 0;\n    for(size_t i=0;i<len;i++) s=(uint8_t)(s+data[i]);\n    return s;\n}",
+      "explanation_ko": "uint8_t 덧셈은 256에서 자연스럽게 wrap-around한다. XOR보다 오류 검출이 약간 낫지만 여전히 자리바뀜에 취약하다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "오버플로를 UB로 오해(uint 산술은 정의됨).",
+        "부호 있는 타입 누산 시 오버플로 UB.",
+        "여전히 약한 검출력."
+      ],
+      "anduril_context": "Intel HEX·간단 텍스트 프로토콜의 체크섬 필드."
+    },
+    {
+      "num": 89,
+      "slug": "crc16_lut",
+      "title_ko": "CRC-16 (룩업 테이블)",
+      "title_en": "CRC-16 (lookup table)",
+      "difficulty": "hard",
+      "tags": [
+        "crc",
+        "lookup-table",
+        "integrity"
+      ],
+      "prompt_ko": "CRC-16/XMODEM(poly 0x1021, init 0x0000, MSB-first, 무반사)을 256엔트리 LUT로 구현하라. table[i]=(i<<8)를 8번 다항식 나눗셈한 잔여.",
+      "prompt_en": "Implement CRC-16/XMODEM (poly 0x1021, init 0x0000, MSB-first, no reflection) via a 256-entry LUT.",
+      "signature": "uint16_t crc16_lut(const uint8_t *data, size_t len)",
+      "examples": [
+        {
+          "in": "\"123456789\",9",
+          "out": "0x31C3"
+        },
+        {
+          "in": "{0x01,0x02,0x03},3",
+          "out": "0x6131"
+        }
+      ],
+      "hints": [
+        "테이블: crc=i<<8; 8번 { crc = (crc&0x8000)?(crc<<1)^0x1021:(crc<<1); }",
+        "갱신: crc = (crc<<8) ^ table[((crc>>8)^byte)&0xFF];",
+        "테이블은 static으로 1회 생성(실무는 const로 미리 구움)."
+      ],
+      "solution": "static uint16_t g_crc_table[256];\nstatic bool g_crc_ready=false;\nstatic void crc16_build_table(void){\n    for(int i=0;i<256;i++){\n        uint16_t crc=(uint16_t)(i<<8);\n        for(int b=0;b<8;b++)\n            crc=(crc&0x8000)?(uint16_t)((crc<<1)^0x1021):(uint16_t)(crc<<1);\n        g_crc_table[i]=crc;\n    }\n    g_crc_ready=true;\n}\nuint16_t crc16_lut(const uint8_t *data, size_t len){\n    if(!g_crc_ready) crc16_build_table();\n    uint16_t crc=0x0000;\n    if(!data)return crc;\n    for(size_t i=0;i<len;i++)\n        crc=(uint16_t)((crc<<8) ^ g_crc_table[((crc>>8)^data[i])&0xFF]);\n    return crc;\n}",
+      "explanation_ko": "LUT의 각 엔트리는 상위 바이트에 정렬한 입력을 미리 8번 나눈 잔여다. 실행 시에는 현재 CRC 상위 바이트와 새 바이트를 XOR한 인덱스로 테이블을 조회해 한 번에 8비트를 처리한다. 표준 검증 벡터 '123456789'→0x31C3로 구현 정확성을 확인한다.",
+      "complexity": "O(n) time, O(1) space (테이블 512B)",
+      "pitfalls": [
+        "LSB-first(reflected) 변종과 혼동 → 생성/갱신식 다름.",
+        "poly/init/reflect 파라미터 확정 안 함.",
+        "16비트 시프트에서 상위 비트 유실(uint16_t 캐스팅)."
+      ],
+      "anduril_context": "MAVLink·XMODEM·무선 프레임의 CRC 무결성 검사."
+    },
+    {
+      "num": 90,
+      "slug": "parse_packet",
+      "title_ko": "바이너리 패킷 파싱",
+      "title_en": "Binary packet parse",
+      "difficulty": "easy",
+      "tags": [
+        "framing",
+        "protocol"
+      ],
+      "prompt_ko": "프레임 [0xAA start][payload...][0xBB end]의 최소 유효성을 검사하라. 길이>=2이고 양끝 마커가 맞으면 true.",
+      "prompt_en": "Validate a minimal framed packet: start=0xAA, end=0xBB, len>=2.",
+      "signature": "bool parse_packet(const uint8_t *data, size_t len)",
+      "examples": [
+        {
+          "in": "{0xAA,0x01,0x02,0x03,0xBB},5",
+          "out": "true"
+        },
+        {
+          "in": "{0xAB,...},3",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "최소 길이 2 확인.",
+        "data[0]==0xAA, data[len-1]==0xBB.",
+        "실전은 length+CRC를 추가."
+      ],
+      "solution": "#define PKT_START 0xAA\n#define PKT_END   0xBB\nbool parse_packet(const uint8_t *data, size_t len){\n    if(!data||len<2)return false;\n    if(data[0]!=PKT_START)return false;\n    if(data[len-1]!=PKT_END)return false;\n    return true;\n}",
+      "explanation_ko": "start/end 마커와 최소 길이로 프레임 경계를 확인하는 최소판이다. 실전 프레임은 여기에 length 필드와 CRC(#89)를 더해 무결성까지 검증한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "partial frame(스트림 중간부터 도착) 미고려.",
+        "마커가 페이로드에 우연 등장 → byte stuffing 필요.",
+        "len<2에서 data[len-1] 언더플로."
+      ],
+      "anduril_context": "UART/RF 링크의 프레임 동기화·경계 검출 1단계."
+    },
+    {
+      "num": 91,
+      "slug": "fixed_point",
+      "title_ko": "고정소수점 연산 (Q포맷)",
+      "title_en": "Fixed-point arithmetic (Q-format)",
+      "difficulty": "medium",
+      "tags": [
+        "fixed-point",
+        "no-fpu",
+        "overflow"
+      ],
+      "prompt_ko": "값=raw/2^q인 Q포맷. fixed_add는 raw끼리 더하고(오버플로 방지+포화), fixed_mul은 int64 곱 후 >>q로 스케일 복원(반올림+포화).",
+      "prompt_en": "Q-format fixed point (value = raw/2^q). add = a+b (saturating); mul = (int64)a*b >> q with rounding+saturation.",
+      "signature": "int32_t fixed_add(int32_t a, int32_t b, uint8_t q); int32_t fixed_mul(int32_t a, int32_t b, uint8_t q)",
+      "examples": [
+        {
+          "in": "fixed_add(256,128,8)",
+          "out": "384 (1.0+0.5)"
+        },
+        {
+          "in": "fixed_mul(256,128,8)",
+          "out": "128 (1.0*0.5)"
+        }
+      ],
+      "hints": [
+        "덧셈: 같은 Q라 raw끼리 더한다. int64로 받아 int32 범위로 포화.",
+        "곱셈: (int64)a*b는 Q(2q) → >>q로 복원.",
+        "반올림은 시프트 전 +2^(q-1). q==0/과대 q 가드."
+      ],
+      "solution": "int32_t fixed_add(int32_t a, int32_t b, uint8_t q){\n    (void)q;\n    int64_t s=(int64_t)a+(int64_t)b;\n    if(s>INT32_MAX)s=INT32_MAX;\n    if(s<INT32_MIN)s=INT32_MIN;\n    return (int32_t)s;\n}\nint32_t fixed_mul(int32_t a, int32_t b, uint8_t q){\n    int64_t p=(int64_t)a*(int64_t)b;\n    if(q>0&&q<63) p+=(int64_t)1<<(q-1);\n    if(q<63) p>>=q; else p=0;\n    if(p>INT32_MAX)p=INT32_MAX;\n    if(p<INT32_MIN)p=INT32_MIN;\n    return (int32_t)p;\n}",
+      "explanation_ko": "덧셈은 스케일이 같아 raw끼리 더하되 int64 중간연산으로 오버플로를 막고 int32로 포화한다. 곱셈은 두 Q수의 곱이 Q(2q)가 되므로 >>q로 원래 스케일을 복원하며, 시프트 전 절반(2^(q-1))을 더해 반올림한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "int32끼리 곱하면 오버플로 → 반드시 int64 중간연산.",
+        "반올림 생략 시 누적 편향(bias).",
+        "음수 산술 우측 시프트는 구현정의(실무는 산술 시프트)."
+      ],
+      "anduril_context": "FPU 없는 MCU의 PID 게인·필터 계수·센서 스케일링."
+    },
+    {
+      "num": 92,
+      "slug": "moving_average",
+      "title_ko": "이동평균 필터",
+      "title_en": "Moving-average filter",
+      "difficulty": "medium",
+      "tags": [
+        "filter",
+        "dsp",
+        "smoothing"
+      ],
+      "prompt_ko": "창 크기 window의 단순이동평균(SMA) 시리즈를 out에 쓴다. out[i]=mean(in[i-window+1..i]), 초반부는 있는 만큼 평균.",
+      "prompt_en": "Write the simple moving average (window) series to out; out[i]=mean over available samples up to i.",
+      "signature": "void moving_average(const float *in, size_t len, size_t window, float *out)",
+      "examples": [
+        {
+          "in": "{1,2,3,4,5},5,3",
+          "out": "{1, 1.5, 2, 3, 4}"
+        }
+      ],
+      "hints": [
+        "창 시작 = (i+1>=window) ? i+1-window : 0 (size_t 언더플로 방어).",
+        "창 안 샘플 합/개수로 평균.",
+        "스트리밍이면 running sum으로 O(1) 갱신."
+      ],
+      "solution": "void moving_average(const float *in, size_t len, size_t window, float *out){\n    if(!in||!out||window==0)return;\n    for(size_t i=0;i<len;i++){\n        size_t start=(i+1>=window)?(i+1-window):0;\n        float sum=0.0f; size_t cnt=0;\n        for(size_t j=start;j<=i;j++){ sum+=in[j]; cnt++; }\n        out[i]=sum/(float)cnt;\n    }\n}",
+      "explanation_ko": "각 위치 i에서 최근 window개(부족하면 있는 만큼) 샘플의 평균을 낸다. 지연(lag)은 대략 window/2. 스트리밍 환경에선 sum += new - old로 O(1) 갱신하고 old는 원형버퍼로 관리하는 것이 정석이다.",
+      "complexity": "O(n*window) time (running sum이면 O(n)), O(1) space",
+      "pitfalls": [
+        "size_t 언더플로(i-window+1) → i+1>=window 가드.",
+        "window==0/NULL 미방어.",
+        "정수 평균이면 반올림/버림 정책 필요."
+      ],
+      "anduril_context": "IMU·기압계·전류 센서의 노이즈 스무딩(제어루프 전처리)."
+    },
+    {
+      "num": 93,
+      "slug": "rle",
+      "title_ko": "RLE 압축/해제",
+      "title_en": "RLE compress/decompress",
+      "difficulty": "medium",
+      "tags": [
+        "compression",
+        "buffer-safety"
+      ],
+      "prompt_ko": "[value][count] 쌍 RLE. count는 1..255(긴 런은 분할). 반환=쓴 바이트 수, out 부족/형식 오류(홀수 길이) 시 0.",
+      "prompt_en": "RLE as [value][count] pairs (count<=255, long runs split). Return bytes written; 0 on buffer overflow / malformed (odd) input.",
+      "signature": "size_t rle_compress(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_max); size_t rle_decompress(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_max)",
+      "examples": [
+        {
+          "in": "compress {0xAA,0xAA,0xAA,0xBB}",
+          "out": "{0xAA,3,0xBB,1}, 4"
+        },
+        {
+          "in": "decompress {0xAA,3,0xBB,1}",
+          "out": "{0xAA,0xAA,0xAA,0xBB}, 4"
+        }
+      ],
+      "hints": [
+        "같은 값 런을 세되 255에서 끊는다.",
+        "쌍 쓰기 전 out_max 여유(o+2) 확인.",
+        "해제는 in_len이 짝수여야 함(형식 검사)."
+      ],
+      "solution": "size_t rle_compress(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_max){\n    if(!in||!out)return 0;\n    size_t o=0,i=0;\n    while(i<in_len){\n        uint8_t v=in[i]; size_t run=1;\n        while(i+run<in_len&&in[i+run]==v&&run<255) run++;\n        if(o+2>out_max)return 0;\n        out[o++]=v; out[o++]=(uint8_t)run; i+=run;\n    }\n    return o;\n}\nsize_t rle_decompress(const uint8_t *in, size_t in_len, uint8_t *out, size_t out_max){\n    if(!in||!out)return 0;\n    if(in_len%2!=0)return 0;\n    size_t o=0;\n    for(size_t i=0;i<in_len;i+=2){\n        uint8_t v=in[i],run=in[i+1];\n        if(o+run>out_max)return 0;\n        for(uint8_t k=0;k<run;k++) out[o++]=v;\n    }\n    return o;\n}",
+      "explanation_ko": "압축은 연속 동일 바이트의 길이를 세어 [값][개수]로 쓰되 8비트 카운트 한계인 255에서 분할한다. 해제는 쌍을 읽어 개수만큼 값을 복제한다. 두 함수 모두 쓰기 전 출력 버퍼 여유를 확인해 오버플로를 막는다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "카운트 255 초과 미분할 → 데이터 손상.",
+        "무런(교대) 데이터는 2배 팽창.",
+        "해제 시 홀수 길이·버퍼 오버플로 미검사."
+      ],
+      "anduril_context": "희소 비트맵·상태 로그·프레임 버퍼의 저비용 압축."
+    },
+    {
+      "num": 94,
+      "slug": "base64",
+      "title_ko": "Base64 인코딩/디코딩",
+      "title_en": "Base64 encode/decode",
+      "difficulty": "medium",
+      "tags": [
+        "encoding",
+        "protocol"
+      ],
+      "prompt_ko": "표준 base64('=' 패딩). 3바이트→4문자. 반환=출력 길이(널 제외). 버퍼 부족/불량 입력(4의 배수 아님·불량 문자) 시 0.",
+      "prompt_en": "Standard base64 with '=' padding. 3 bytes -> 4 chars. Return output length (excl. NUL); 0 on short buffer / malformed input.",
+      "signature": "size_t base64_encode(const uint8_t *in, size_t in_len, char *out, size_t out_max); size_t base64_decode(const char *in, size_t in_len, uint8_t *out, size_t out_max)",
+      "examples": [
+        {
+          "in": "encode \"Man\"",
+          "out": "\"TWFu\", 4"
+        },
+        {
+          "in": "decode \"TWE=\"",
+          "out": "{'M','a'}, 2"
+        }
+      ],
+      "hints": [
+        "인코드: 3바이트를 24비트로 모아 6비트씩 4조각.",
+        "남은 1/2바이트는 '=' 패딩.",
+        "디코드: 역변환 표, '='는 0으로 취급하되 해당 바이트는 출력 안 함."
+      ],
+      "solution": "static const char B64E[]=\n  \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";\nstatic int b64dec1(char c){\n    if(c>='A'&&c<='Z')return c-'A';\n    if(c>='a'&&c<='z')return c-'a'+26;\n    if(c>='0'&&c<='9')return c-'0'+52;\n    if(c=='+')return 62;\n    if(c=='/')return 63;\n    return -1;\n}\nsize_t base64_encode(const uint8_t *in, size_t in_len, char *out, size_t out_max){\n    if(!in||!out)return 0;\n    size_t olen=4*((in_len+2)/3);\n    if(out_max<olen+1)return 0;\n    size_t o=0,i=0;\n    while(i+3<=in_len){\n        uint32_t v=((uint32_t)in[i]<<16)|((uint32_t)in[i+1]<<8)|in[i+2];\n        out[o++]=B64E[(v>>18)&63]; out[o++]=B64E[(v>>12)&63];\n        out[o++]=B64E[(v>>6)&63];  out[o++]=B64E[v&63]; i+=3;\n    }\n    size_t rem=in_len-i;\n    if(rem==1){ uint32_t v=(uint32_t)in[i]<<16;\n        out[o++]=B64E[(v>>18)&63]; out[o++]=B64E[(v>>12)&63];\n        out[o++]='='; out[o++]='='; }\n    else if(rem==2){ uint32_t v=((uint32_t)in[i]<<16)|((uint32_t)in[i+1]<<8);\n        out[o++]=B64E[(v>>18)&63]; out[o++]=B64E[(v>>12)&63];\n        out[o++]=B64E[(v>>6)&63];  out[o++]='='; }\n    out[o]='\\0'; return o;\n}\nsize_t base64_decode(const char *in, size_t in_len, uint8_t *out, size_t out_max){\n    if(!in||!out)return 0;\n    if(in_len==0||in_len%4!=0)return 0;\n    size_t pad=0;\n    if(in[in_len-1]=='=')pad++;\n    if(in[in_len-2]=='=')pad++;\n    size_t olen=in_len/4*3-pad;\n    if(out_max<olen)return 0;\n    size_t o=0;\n    for(size_t i=0;i<in_len;i+=4){\n        int a=b64dec1(in[i]),b=b64dec1(in[i+1]);\n        int c=(in[i+2]=='=')?0:b64dec1(in[i+2]);\n        int d=(in[i+3]=='=')?0:b64dec1(in[i+3]);\n        if(a<0||b<0||c<0||d<0)return 0;\n        uint32_t v=((uint32_t)a<<18)|((uint32_t)b<<12)|((uint32_t)c<<6)|(uint32_t)d;\n        if(o<olen) out[o++]=(uint8_t)((v>>16)&0xFF);\n        if(in[i+2]!='='&&o<olen) out[o++]=(uint8_t)((v>>8)&0xFF);\n        if(in[i+3]!='='&&o<olen) out[o++]=(uint8_t)(v&0xFF);\n    }\n    return o;\n}",
+      "explanation_ko": "인코드는 3바이트(24비트)를 모아 6비트씩 잘라 표로 문자화하고, 남는 1/2바이트는 '=' 패딩한다. 디코드는 4문자를 24비트로 복원해 원 바이트를 뽑되 패딩 위치의 바이트는 출력하지 않는다. 입력 길이 4의 배수·불량 문자를 검사한다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "입력 길이 4의 배수/불량 문자 미검사.",
+        "패딩 개수로 출력 길이 계산 실수.",
+        "out 버퍼 크기 미검사(널 종료 자리 포함)."
+      ],
+      "anduril_context": "텍스트 전용 채널(로그/JSON/AT)로 바이너리 페이로드 전송."
+    },
+    {
+      "num": 95,
+      "slug": "search_pattern",
+      "title_ko": "바이트 패턴 탐색 (KMP)",
+      "title_en": "Byte-pattern search (KMP)",
+      "difficulty": "hard",
+      "tags": [
+        "search",
+        "kmp",
+        "string"
+      ],
+      "prompt_ko": "data 안에서 pattern의 첫 등장 인덱스를 반환. 없으면 -1, 빈 패턴이면 0. KMP(LPS 테이블)로 O(n+m).",
+      "prompt_en": "Return first index of pattern in data, or -1; empty pattern -> 0. KMP with LPS table, O(n+m).",
+      "signature": "ssize_t search_pattern(const uint8_t *data, size_t len, const uint8_t *pattern, size_t pat_len)",
+      "examples": [
+        {
+          "in": "{01,02,03,04}, {02,03}",
+          "out": "1"
+        },
+        {
+          "in": "not found",
+          "out": "-1"
+        }
+      ],
+      "hints": [
+        "LPS[i] = pattern[0..i]의 최장 proper prefix=suffix 길이.",
+        "불일치 시 q=lps[q-1]로 되돌아간다(백트래킹 없음).",
+        "LPS는 고정 버퍼(bounded)로 힙 회피, 초과 시 naive fallback."
+      ],
+      "solution": "#define KMP_MAX_PAT 256\nssize_t search_pattern(const uint8_t *data, size_t len,\n                       const uint8_t *pattern, size_t pat_len){\n    if(pat_len==0)return 0;\n    if(!data||!pattern)return -1;\n    if(pat_len>len)return -1;\n    if(pat_len<=KMP_MAX_PAT){\n        size_t lps[KMP_MAX_PAT]; lps[0]=0; size_t k=0;\n        for(size_t i=1;i<pat_len;i++){\n            while(k>0&&pattern[i]!=pattern[k]) k=lps[k-1];\n            if(pattern[i]==pattern[k]) k++;\n            lps[i]=k;\n        }\n        size_t q=0;\n        for(size_t i=0;i<len;i++){\n            while(q>0&&data[i]!=pattern[q]) q=lps[q-1];\n            if(data[i]==pattern[q]) q++;\n            if(q==pat_len)return (ssize_t)(i-pat_len+1);\n        }\n        return -1;\n    }\n    for(size_t i=0;i+pat_len<=len;i++){\n        size_t j=0;\n        while(j<pat_len&&data[i+j]==pattern[j]) j++;\n        if(j==pat_len)return (ssize_t)i;\n    }\n    return -1;\n}",
+      "explanation_ko": "LPS 테이블은 각 접두사에서 '접두사이면서 접미사'인 최장 길이를 담는다. 매칭 실패 시 이 값으로 패턴 포인터를 되돌려 이미 일치한 접두사를 재활용하므로 텍스트 포인터를 절대 뒤로 돌리지 않아 O(n+m)이다. 반복 접두사(예: 0xAAAA...)에서 naive 대비 큰 이득.",
+      "complexity": "O(n+m) time, O(m) space (LPS, 상한 버퍼)",
+      "pitfalls": [
+        "빈 패턴/패턴>데이터 엣지케이스.",
+        "LPS 구축의 while 되돌림 로직 실수.",
+        "힙 없이 LPS 저장 → 상한/VLA/naive fallback 결정 필요."
+      ],
+      "anduril_context": "노이즈 바이트 스트림에서 프레임 sync 워드·매직 마커 탐색."
+    }
+  ]
+}

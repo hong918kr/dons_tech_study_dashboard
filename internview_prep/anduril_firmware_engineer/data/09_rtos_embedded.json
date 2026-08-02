@@ -1,0 +1,346 @@
+{
+  "id": "rtos_embedded",
+  "order": 9,
+  "range": "Q96-102",
+  "icon": "⏱️",
+  "title_en": "RTOS & Embedded Systems Concepts",
+  "title_ko": "RTOS & 임베디드 개념",
+  "summary_ko": "워치독 타이머, 협력형 라운드로빈 스케줄러, ISR↔main 공유자원 레이스와 임계구역/_Atomic 수정, 우선순위 역전과 상속/천장, 인터럽트 지연 경계, MMIO volatile 접근, malloc 없는 소프트웨어 타이머 휠까지 — 실시간 펌웨어의 핵심 개념을 호스트에서 코드로 증명한다.",
+  "summary_en": "Watchdog timer, cooperative round-robin scheduler, ISR↔main shared-resource race with critical-section/_Atomic fixes, priority inversion with inheritance/ceiling, interrupt-latency bounding, MMIO volatile access, and a no-malloc software timer wheel — the core real-time firmware concepts proven in host-runnable code.",
+  "anduril_relevance_ko": "드론 FCS/무장 시스템은 경성 실시간이라 '인터럽트가 얼마나 늦을 수 있나', '우선순위 역전을 어떻게 없애나', '워치독으로 hang 을 어떻게 복구하나'를 정량적으로 답해야 한다. 센서 ISR↔제어 루프 데이터 공유의 레이스를 만들고 고치는 능력, MMIO volatile 관용구, 힙 없는 타이머/스케줄러 구현은 방산 펌웨어 인터뷰의 단골이자 실무 그 자체다.",
+  "concepts": [
+    {
+      "term": "watchdog (pat/kick)",
+      "ko": "정기적 reload 없으면 리셋 → hang 자동 복구",
+      "en": "down-counter; miss the periodic reload and it resets the system"
+    },
+    {
+      "term": "cooperative scheduler",
+      "ko": "함수 포인터+주기, now%period==0 실행, 선점 없음",
+      "en": "function-pointer tasks + periods; run when now%period==0, no preemption"
+    },
+    {
+      "term": "critical section (IRQ mask)",
+      "ko": "save/restore 로 RMW 보호, 중첩 안전",
+      "en": "disable IRQ around RMW; save/restore is nesting-safe"
+    },
+    {
+      "term": "_Atomic",
+      "ko": "단일 워드 RMW 를 불가분하게(멀티코어 안전)",
+      "en": "make a single-word RMW indivisible, multicore-safe"
+    },
+    {
+      "term": "priority inversion",
+      "ko": "저 보유→고 블록→중이 선점→고 무한대기",
+      "en": "low holds lock, medium preempts, high starves"
+    },
+    {
+      "term": "priority inheritance/ceiling",
+      "ko": "보유자를 최고 대기자/천장으로 승격 → 역전 경계",
+      "en": "raise holder to highest waiter/ceiling to bound inversion"
+    },
+    {
+      "term": "interrupt latency",
+      "ko": "sync+임계구역+상위ISR+문맥+prologue, 임계구역 최소화",
+      "en": "sum of contributors; minimizing the disable-window is the lever"
+    },
+    {
+      "term": "MMIO volatile",
+      "ko": "레지스터 접근 제거/캐시/재정렬 방지, 폴링 필수",
+      "en": "prevent elision/caching/reorder on register access; needed for polling"
+    },
+    {
+      "term": "timer wheel",
+      "ko": "slot=(now+delay)%N, rounds=(delay-1)/N, 정적 풀",
+      "en": "hashed timing wheel with rounds counter, static pool, O(1) insert"
+    }
+  ],
+  "study_note_md": "# 09. RTOS & 임베디드 개념 (RTOS & Embedded Systems) — Q96~Q102 ⏱️\n\n> 자료구조/알고리즘이 아니라 **실시간 시스템의 개념**을 코드로 증명하는 파트.\n> 워치독, 협력형 스케줄러, ISR 공유자원 보호, 우선순위 역전, 인터럽트 지연,\n> MMIO volatile, 타이머 휠 — Anduril 류 방산/드론 펌웨어 인터뷰의 \"말로 설명하고\n> 화이트보드로 증명하라\"는 단골 주제들이다.\n\n---\n\n## 왜 Anduril 펌웨어 인터뷰에 나오나\n\n- 드론 FCS/무장 시스템은 **경성 실시간(hard real-time)**. \"인터럽트가 늦으면 왜\n  안 되나, 얼마나 늦을 수 있나\"를 정량적으로 답할 수 있어야 한다 (Q99, Q100).\n- 센서 ISR ↔ 제어 루프(main) 데이터 공유는 매 프로젝트에 있다. **레이스를 만들고\n  고칠 수 있나**가 실전 실력의 척도 (Q98).\n- 워치독(Q96)은 안전(safety) 필수. \"행(hang)에서 어떻게 자동 복구하나\"는 항상 나온다.\n- RTOS 없이 도는 소형 MCU(센서 허브, ESC)도 많다 → **협력형 스케줄러/타이머 휠**을\n  직접 짤 수 있어야 한다 (Q97, Q102).\n- MMIO `volatile`(Q101)을 빼먹어 폴링 루프가 무한루프로 최적화되는 버그는 신입이\n  반드시 한 번 겪는 통과의례. 인터뷰어가 즐겨 묻는다.\n\n---\n\n## 핵심 개념 치트시트\n\n| 개념 | 한 줄 요약 |\n|------|-----------|\n| Watchdog | down-counter. 정기적 `pat`(reload) 없으면 0 도달 → 리셋. 행 자동 복구. |\n| 협력형 스케줄러 | 함수 포인터 + 주기. `now % period == 0` 이면 실행. 선점 없음(짧게 반환). |\n| 임계구역(IRQ 마스킹) | `s=save(); disable; RMW; restore(s);` — 저장/복원이라 **중첩 안전**. |\n| `_Atomic` | 단일 워드 RMW 를 불가분하게. 멀티코어/멀티스레드 lost update 방지. |\n| 우선순위 역전 | 저(低)가 자원 보유 → 고(高) 블록 → 중(中)이 저를 선점 → 고 무한 대기. |\n| 우선순위 상속 | 보유자를 대기자 최고 우선순위로 **일시 승격** → 역전 구간 경계(bounded). |\n| 인터럽트 지연 | sync+임계구역+상위ISR+문맥저장+prologue. **임계구역 최소화**가 핵심 레버. |\n| MMIO `volatile` | 컴파일러의 제거/캐시/재정렬 방지. 폴링 루프 필수. |\n| 타이머 휠 | `slot=(now+delay)%N`, `rounds=(delay-1)/N`. O(1) 등록, tick당 슬롯만 순회. |\n\n---\n\n## (Q96) 워치독 타이머\n\n```c\nvoid wdt_tick(wdt_t *w) {\n    if (!w || w->expired) return;                 // 만료 후 래치\n    if (w->counter == 0 || --w->counter == 0) {   // timeout==0 즉시 만료 엣지 포함\n        w->expired = true;\n        if (w->cb) w->cb(w->ctx);                 // 실제로는 시스템 리셋\n    }\n}\nvoid wdt_pat(wdt_t *w) { if (w && !w->expired) w->counter = w->timeout; }\n```\n\n- **pat(=kick/feed)** 은 \"나 살아있다\" 신호. main 루프가 정상이면 주기적으로 호출.\n- 만료는 **한 번만** 콜백을 부르고 래치(latch)한다 → 실제 HW 리셋의 단발성 모방.\n- **함정**: pat 을 ISR 안에서 하면 main 이 죽어도 워치독이 계속 리로드되어 무용지물.\n  \"정상 경로가 진짜로 돌 때만\" pat 해야 한다(예: 여러 태스크의 완료 플래그를 AND).\n\n---\n\n## (Q97) 협력형 라운드로빈 스케줄러\n\n```c\nvoid sched_run_tick(scheduler_t *s) {\n    s->now++;\n    for (size_t i = 0; i < s->count; ++i)\n        if (s->now % s->tasks[i].period == 0) {   // 주기 도래\n            s->tasks[i].runs++;\n            s->tasks[i].fn(s->tasks[i].ctx);      // 등록 순서(라운드로빈)로 실행\n        }\n}\n```\n\n- **협력형(cooperative)**: 선점이 없으므로 각 태스크는 **짧게 실행 후 반환**해야 한다.\n  블로킹/긴 루프 하나가 전체를 멈춘다. → 상태 머신으로 잘게 쪼개는 습관.\n- period=1,2,3 을 6 tick 돌리면 6,3,2 회 실행. 결정론적.\n- **RTOS 와 차이**: 우선순위/선점/블로킹이 없다. 단순·결정론적·저오버헤드가 장점.\n\n---\n\n## (Q98) ISR ↔ main 공유 자원 — 레이스와 수정\n\n### 레이스는 진짜다 (재현)\n\n```c\nuint32_t tmp = shared.value;   // main 이 0 을 읽음\n/* --- 여기서 ISR 발생: shared.value += 100  → 100 --- */\nshared.value = tmp + 1;        // main 이 1 을 씀 → ISR 의 +100 유실!\n```\n\nRMW(read-modify-write)는 원자적이지 않다. 읽기와 쓰기 사이에 ISR 이 끼면 갱신이 사라진다.\n\n### 해법 A — 임계구역(인터럽트 마스킹), 중첩 안전 관용구\n\n```c\nuint32_t s = irq_save();   // prev = PRIMASK; __disable_irq(); return prev;\n/* 임계구역: 이 사이엔 ISR 이 못 들어온다 (RMW 불가분) */\nshared.value++;\nirq_restore(s);            // PRIMASK = prev  ← 무조건 enable 이 아니라 \"이전 값\"!\n```\n\n- **왜 save/restore 인가**: 무조건 `enable` 로 복원하면, 이미 마스킹된 상위 구역에서\n  호출했을 때 임계구역을 조기에 열어버린다. 이전 값 복원이라야 **중첩(nesting) 안전**.\n- 임계구역은 **최대한 짧게**. 길면 인터럽트 지연(Q100)이 늘어난다.\n\n### 해법 B — `_Atomic` (단일 워드)\n\n```c\natomic_fetch_add_explicit(&counter, 1, memory_order_relaxed);\n```\n\n- 카운터 하나 증가처럼 **단일 워드 RMW** 는 원자 연산 하나로 끝. 멀티코어에서도 안전.\n- 여러 변수의 일관성(불변식)을 지켜야 하면 원자 하나로는 부족 → 임계구역/락 필요.\n- 단일코어 베어메탈에서 ISR↔main 한 워드 공유는 `volatile` + \"쓰기 순서 보장\"으로도\n  전통적으로 충분하지만, 멀티코어/컴파일러 재정렬을 고려하면 `_Atomic` 이 이식성 정답.\n\n---\n\n## (Q99) 우선순위 역전 & 상속/천장\n\n### 무엇이 문제인가\n\n우선순위 H > M > L (단일 CPU, 선점형).\n\n1. L 이 공유자원 R 을 잠그고 임계구역 실행 중.\n2. H 가 R 을 원해 **블록**됨 (L 보유).\n3. R 과 **무관한** M 이 ready → M(2) > L(1) 이라 M 이 L 을 선점.\n4. → H 는 M 이 끝날 때까지 대기. **중간 우선순위가 고우선순위를 무한정 지연**(역전!).\n\n> 실제 사례: **1997 Mars Pathfinder** 가 이 버그로 반복 리셋. VxWorks 의 우선순위\n> 상속을 켜서 원격 패치로 해결.\n\n### 해법 1 — 우선순위 상속 (Priority Inheritance)\n\n```c\nint pi_effective_priority(int base, const int *waiters, size_t n) {\n    int eff = base;\n    for (size_t i = 0; i < n; ++i) if (waiters[i] > eff) eff = waiters[i];\n    return eff;   // 보유자를 \"최고 대기자\" 우선순위로 일시 승격\n}\n```\n\n- L 이 H 의 우선순위를 물려받아 M 보다 높아짐 → L 이 즉시 R 을 마치고 반납 → H 진행.\n- H 의 대기 시간이 **\"L 의 임계구역 잔여분\"으로 경계**된다 (bounded).\n- 본 세트의 `simulate_h_finish()`: 상속 없음이면 H 가 **11 tick**에, 상속이면 **6 tick**에\n  완료 → 역전이 정량적으로 사라짐을 보인다.\n\n### 해법 2 — 우선순위 천장 (Priority Ceiling Protocol)\n\n```c\nint pcp_ceiling(const int *user_prios, size_t n);  // 자원 사용 태스크 중 최고 우선순위\n```\n\n- 자원을 잠그는 순간 보유자를 **자원의 천장 우선순위**로 즉시 올린다.\n- 상속보다 강한 보장: **교착(deadlock) 예방** + 태스크당 최대 1회 블로킹(chained blocking 방지).\n\n---\n\n## (Q100) 인터럽트 지연 (Interrupt Latency)\n\n```c\nworst_case = sync            // 현재 명령/파이프라인 동기화 완료\n           + disable_window  // 인터럽트가 disable 됐던 최장 임계구역  ← 우리가 통제!\n           + higher_isr      // 먼저 처리되는 상위/동급 우선순위 ISR 합\n           + context_save    // CPU 상태 스태킹(문맥 저장)\n           + isr_prologue;   // 벡터 페치 + 핸들러 진입\n```\n\n- **줄일 수 있는 가장 큰 레버 = `disable_window`**: 임계구역(인터럽트 마스킹 구간)을\n  짧게. `max_disable_window()` 로 여러 임계구역 중 최장을 찾아 그게 경계값이 된다.\n- ISR 은 **짧게**: 무거운 일은 플래그만 세우고 main/하위 우선순위로 defer (top/bottom half).\n- 실시간 검증: `worst_case + ISR_실행시간 <= deadline` (`meets_deadline`).\n- **오버플로 주의**: 기여 요소 합산은 포화 덧셈(saturating)으로 UB 회피.\n- 측정 팁: 단조 시계(`CLOCK_MONOTONIC`)로 임계구역/ISR 길이를 실측해 경계를 근거화.\n  (실 타깃에선 GPIO 토글 + 로직 애널라이저, DWT 사이클 카운터 사용)\n\n---\n\n## (Q101) 메모리맵 레지스터 접근 — `volatile`\n\n```c\n#define UART_SR (*(volatile uint32_t *)0x40011000u)   // 실제 타깃\nwhile (!(UART_SR & TXE)) { }   // volatile 없으면 컴파일러가 \"안 변하는 값\"으로 보고\n                               // 조건을 한 번만 읽어 무한루프로 최적화!  ← 대표 버그\n```\n\n- `volatile` = \"이 메모리는 내가 모르는 사이 바뀔 수 있다\" → 컴파일러가 **매 접근마다\n  실제 메모리를 읽고/쓰고, 순서를 유지, 제거하지 않음**.\n- 필드 수정(RMW)은 **읽고-마스크-쓰기**: `v &= ~mask; v |= (val<<shift)&mask;`\n  (shift ≥ 32 은 UB → 반드시 가드).\n- **함정**: `volatile` 은 원자성/메모리배리어를 보장하지 **않는다**. ISR 공유엔\n  `volatile` + 임계구역/`_Atomic` 을 함께 써야 한다 (Q98).\n- **함정**: 32비트 레지스터를 바이트 단위로 접근하면 안 되는 주변장치가 있다 →\n  접근 폭(access width)을 데이터시트대로.\n\n---\n\n## (Q102) 소프트웨어 타이머 휠 (malloc 없이)\n\n```c\n// 등록: delay tick 뒤 만료\nslot   = (now + delay) % TW_SLOTS;\nrounds = (delay - 1) / TW_SLOTS;   // 그 슬롯을 몇 바퀴 더 지나야 하나\n\n// tick: 현재 슬롯만 순회\nnow++; s = now % TW_SLOTS;\nfor (각 타이머 in slot[s])\n    if (rounds == 0) 발동 + 반납;   // 정확히 now == 등록시각+delay 에 발동\n    else             rounds--;\n```\n\n- **왜 휠인가**: 단순 리스트는 tick 마다 전체를 스캔(O(n)). 휠은 **해당 슬롯만** 본다.\n  등록 O(1), tick당 O(슬롯 내 타이머 수). 대량 타이머에 유리 (Linux 커널이 사용).\n- `rounds` 공식 `(delay-1)/N` 검증: delay<N → 0(이번 바퀴), delay=N → 0(첫 통과에 발동),\n  delay=2N → 1. off-by-one 주의.\n- **노드는 정적 풀 + free-list** (힙 없음, 결정론적) — Q75 와 동일 임베디드 관용구.\n- **함정**: 콜백 안에서 타이머를 재등록/취소할 때 순회 리스트가 깨지지 않게\n  **먼저 unlink 후 콜백** 호출 (본 구현이 그 순서).\n\n---\n\n## 인터뷰 팔로업 & 임베디드 함정 모음\n\n- **Q. 워치독 pat 을 어디서?** → 정상 경로가 실제로 돈다는 증거가 모일 때만. ISR 단독 pat 금지.\n- **Q. `_Atomic` vs 임계구역?** → 단일 워드면 원자, 여러 변수 불변식이면 임계구역/락.\n- **Q. 왜 IRQ 복원이 save/restore?** → 중첩 임계구역에서 조기 enable 방지.\n- **Q. 우선순위 역전을 어떻게 없애나?** → 상속(경계) 또는 천장(교착 예방+1회 블로킹).\n- **Q. 인터럽트 지연을 어떻게 줄이나?** → 임계구역·ISR 최소화, 무거운 일은 defer.\n- **Q. `volatile` 이면 스레드 안전?** → 아니다. 원자성/배리어 없음. 별도 보호 필요.\n- **함정: 협력형 스케줄러에서 한 태스크가 블로킹** → 전체 정지. 상태머신으로 분할.\n- **함정: 타이머 휠 rounds off-by-one** → `(delay-1)/N` 로 검증.\n- **함정: ISR 과 main 이 같은 free-list/버퍼 공유** → 경쟁. SPSC 설계 또는 임계구역.\n\n---\n\n## 복잡도 요약\n\n| 연산 | 시간 | 공간 |\n|------|------|------|\n| wdt_tick / wdt_pat | O(1) | O(1) |\n| sched_run_tick | O(태스크 수) | O(1) |\n| irq_save / restore | O(1) | O(1) |\n| atomic_add | O(1) | O(1) |\n| pi_effective_priority / pcp_ceiling | O(대기자/사용자 수) | O(1) |\n| irq_latency_wc | O(1) | O(1) |\n| reg_* (MMIO) | O(1) | O(1) |\n| tw_start | O(1) | O(1) (정적 풀) |\n| tw_tick | O(슬롯 내 타이머 수) | O(1) |\n",
+  "problems": [
+    {
+      "num": 96,
+      "slug": "watchdog_timer",
+      "title_ko": "워치독 타이머 (pat / tick / expired)",
+      "title_en": "Watchdog timer (pat / tick / reset)",
+      "difficulty": "easy",
+      "tags": [
+        "watchdog",
+        "safety",
+        "down-counter",
+        "callback"
+      ],
+      "prompt_ko": "down-counter 워치독을 시뮬레이션한다. wdt_pat 은 카운터를 timeout 으로 재장전하고, wdt_tick 은 카운터를 감소시키다 0 도달 시 리셋 콜백을 1회 발동하고 expired 로 래치한다. 만료 후 pat/tick 은 무시.",
+      "prompt_en": "Simulate a down-counter watchdog. wdt_pat reloads the counter to timeout; wdt_tick decrements and, on reaching 0, fires the reset callback once and latches expired. After expiry, pat/tick are ignored.",
+      "signature": "void wdt_pat(wdt_t *w); void wdt_tick(wdt_t *w); bool wdt_expired(const wdt_t *w);",
+      "examples": [
+        {
+          "in": "timeout=3; tick,tick,pat,tick,tick,tick",
+          "out": "reset fires once on the last tick"
+        },
+        {
+          "in": "timeout=0; tick",
+          "out": "fires immediately"
+        }
+      ],
+      "hints": [
+        "tick: expired 면 즉시 return.",
+        "counter==0 이거나 --counter==0 이면 콜백 + expired=true (timeout 0 엣지 포함).",
+        "pat 은 !expired 일 때만 counter=timeout."
+      ],
+      "solution": "void wdt_pat(wdt_t *w) {\n    if (!w || w->expired) return;\n    w->counter = w->timeout;\n}\nvoid wdt_tick(wdt_t *w) {\n    if (!w || w->expired) return;\n    if (w->counter == 0 || --w->counter == 0) {\n        w->expired = true;\n        if (w->cb) w->cb(w->ctx);   // 실제로는 시스템 리셋\n    }\n}\nbool wdt_expired(const wdt_t *w) {\n    return w ? w->expired : true;\n}",
+      "explanation_ko": "워치독은 감소 카운터다. 정상 경로가 주기적으로 pat(reload) 하면 0 에 도달하지 않는다. main 이 hang 되어 pat 이 멈추면 카운터가 0 이 되어 리셋(여기선 콜백)이 발동해 자동 복구한다. 만료를 래치해 콜백이 한 번만 불리게 한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "pat 을 ISR 단독에서 호출 → main 죽어도 계속 리로드되어 무용지물",
+        "만료 후에도 콜백 반복 발동(래치 누락)",
+        "timeout==0 엣지 미처리"
+      ],
+      "anduril_context": "FCS/무장 MCU 의 hang 자동 복구. 태스크 완료 플래그를 AND 해서만 pat."
+    },
+    {
+      "num": 97,
+      "slug": "cooperative_scheduler",
+      "title_ko": "협력형 라운드로빈 스케줄러",
+      "title_en": "Cooperative round-robin scheduler",
+      "difficulty": "easy",
+      "tags": [
+        "scheduler",
+        "function-pointer",
+        "round-robin",
+        "bare-metal"
+      ],
+      "prompt_ko": "함수 포인터 태스크와 주기(period)를 갖는 협력형 스케줄러. 매 tick 마다 now 를 올리고 now % period == 0 인 태스크를 등록 순서대로 실행한다. period==0/NULL/테이블 초과 등록은 거부.",
+      "prompt_en": "A cooperative scheduler of function-pointer tasks with periods. Each tick advances now and runs tasks whose now % period == 0 in registration order. Reject period==0/NULL/over-capacity.",
+      "signature": "bool sched_add_task(scheduler_t *s, sched_task_fn fn, uint32_t period, void *ctx); void sched_run_tick(scheduler_t *s);",
+      "examples": [
+        {
+          "in": "periods 1,2,3 over 6 ticks",
+          "out": "run counts 6,3,2"
+        },
+        {
+          "in": "add period=0",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "add: !fn || period==0 || count>=MAX → false.",
+        "run_tick: now++ 먼저, 그 다음 검사.",
+        "now % period == 0 이면 runs++ 후 fn(ctx)."
+      ],
+      "solution": "bool sched_add_task(scheduler_t *s, sched_task_fn fn, uint32_t period, void *ctx) {\n    if (!s || !fn || period == 0 || s->count >= SCHED_MAX) return false;\n    sched_task_t *t = &s->tasks[s->count++];\n    t->fn = fn; t->period = period; t->ctx = ctx; t->runs = 0;\n    return true;\n}\nvoid sched_run_tick(scheduler_t *s) {\n    if (!s) return;\n    s->now++;\n    for (size_t i = 0; i < s->count; ++i)\n        if (s->now % s->tasks[i].period == 0) {\n            s->tasks[i].runs++;\n            s->tasks[i].fn(s->tasks[i].ctx);\n        }\n}",
+      "explanation_ko": "RTOS 없이 도는 소형 시스템의 정석. now 를 누적하고 주기 나눗셈으로 도래 여부를 판단한다. 선점이 없으므로 각 태스크는 짧게 실행하고 반환해야 한다(cooperative). 결정론적이고 오버헤드가 작다.",
+      "complexity": "add O(1), run_tick O(태스크 수)",
+      "pitfalls": [
+        "긴/블로킹 태스크 하나가 전체 정지 → 상태머신으로 분할",
+        "now++ 순서 실수로 첫 tick 누락",
+        "period==0 나눗셈 미방지"
+      ],
+      "anduril_context": "센서 허브/ESC 등 RTOS 없는 MCU 의 주기 태스크(텔레메트리 10Hz, 제어 1kHz)."
+    },
+    {
+      "num": 98,
+      "slug": "isr_shared_resource",
+      "title_ko": "ISR↔main 공유 자원 보호 (임계구역 & _Atomic)",
+      "title_en": "Protect ISR↔main shared resource",
+      "difficulty": "medium",
+      "tags": [
+        "isr",
+        "race-condition",
+        "critical-section",
+        "atomic",
+        "volatile"
+      ],
+      "prompt_ko": "read-modify-write 도중 ISR 이 끼면 갱신이 유실되는 레이스를 재현하고, (A) 인터럽트 마스킹 임계구역(save/restore, 중첩 안전)과 (B) _Atomic 으로 고친다. irq_save 는 이전 상태를 반환하고 irq_restore 는 그 값으로 복원해야 한다.",
+      "prompt_en": "Reproduce the lost-update race when an ISR interrupts a read-modify-write, then fix it with (A) an interrupt-masking critical section (save/restore, nesting-safe) and (B) _Atomic. irq_save returns the previous state; irq_restore restores exactly that value.",
+      "signature": "uint32_t irq_save(void); void irq_restore(uint32_t saved); void isr_fire(shared_t *r); void atomic_add_u32(_Atomic uint32_t *c, uint32_t v);",
+      "examples": [
+        {
+          "in": "racy RMW with ISR between read and write",
+          "out": "ISR update lost (value==1, not 101)"
+        },
+        {
+          "in": "same RMW inside irq_save/restore",
+          "out": "value==101 (no loss)"
+        }
+      ],
+      "hints": [
+        "irq_save: prev=g_primask; g_primask=1; return prev; (무조건 enable 아님!)",
+        "irq_restore: g_primask=saved; → 중첩 임계구역에서 조기 enable 방지.",
+        "atomic_add_u32: atomic_fetch_add_explicit(c, v, memory_order_relaxed)."
+      ],
+      "solution": "static volatile uint32_t g_primask = 0;   // 0=enable, 1=disable\nuint32_t irq_save(void) {\n    uint32_t prev = g_primask;\n    g_primask = 1;             // disable\n    return prev;\n}\nvoid irq_restore(uint32_t saved) {\n    g_primask = saved;         // 이전 상태로 (중첩 안전)\n}\nvoid isr_fire(shared_t *r) {\n    if (r) r->value += ISR_DELTA;\n}\nvoid atomic_add_u32(_Atomic uint32_t *c, uint32_t v) {\n    atomic_fetch_add_explicit(c, v, memory_order_relaxed);\n}",
+      "explanation_ko": "RMW 는 원자적이 아니라서 읽기와 쓰기 사이에 ISR 이 끼면 그 갱신이 덮여 사라진다. 임계구역은 그 구간 동안 인터럽트를 막아 RMW 를 불가분하게 만든다. save/restore 방식이라 이미 마스킹된 곳에서 중첩 호출해도 안전하다. 단일 워드라면 _Atomic 한 번으로 멀티코어까지 커버된다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "irq_restore 를 무조건 enable 로 → 중첩 임계구역 조기 개방",
+        "volatile 만 믿고 원자성 가정 (volatile≠atomic)",
+        "임계구역이 길어 인터럽트 지연 증가"
+      ],
+      "anduril_context": "IMU/UART RX ISR 이 갱신하는 카운터/상태를 제어 루프가 읽는 모든 곳."
+    },
+    {
+      "num": 99,
+      "slug": "priority_inversion",
+      "title_ko": "우선순위 역전 & 상속/천장",
+      "title_en": "Priority inversion & inheritance/ceiling",
+      "difficulty": "hard",
+      "tags": [
+        "priority-inversion",
+        "priority-inheritance",
+        "priority-ceiling",
+        "rtos",
+        "real-time"
+      ],
+      "prompt_ko": "우선순위 역전(저가 자원 보유 → 고 블록 → 중이 저를 선점 → 고 무한 대기)을 결정론적 시뮬레이터로 보이고, 우선순위 상속(보유자를 최고 대기자로 승격)과 천장 프로토콜(자원 사용자 중 최고 우선순위)의 핵심 primitive 를 구현한다.",
+      "prompt_en": "Demonstrate priority inversion (low holds resource → high blocks → medium preempts low → high waits unbounded) with a deterministic simulator, and implement the core primitives of priority inheritance (raise holder to the highest waiter) and the ceiling protocol (highest priority among resource users).",
+      "signature": "int pi_effective_priority(int base, const int *waiters, size_t n); int pcp_ceiling(const int *user_prios, size_t n);",
+      "examples": [
+        {
+          "in": "pi_effective_priority(1, [3], 1)",
+          "out": "3"
+        },
+        {
+          "in": "simulate: no-inheritance vs inheritance",
+          "out": "H finishes at 11 vs 6"
+        }
+      ],
+      "hints": [
+        "pi_effective_priority: base 와 모든 waiters 의 최댓값.",
+        "상속으로 보유자가 M 보다 높아지면 즉시 자원 반납 → H 대기 경계.",
+        "pcp_ceiling: 자원 사용 태스크 우선순위들의 최댓값 (NULL/0 → 0)."
+      ],
+      "solution": "int pi_effective_priority(int base, const int *waiters, size_t n) {\n    int eff = base;\n    if (waiters)\n        for (size_t i = 0; i < n; ++i)\n            if (waiters[i] > eff) eff = waiters[i];\n    return eff;   // 보유자를 최고 대기자로 일시 승격\n}\nint pcp_ceiling(const int *user_prios, size_t n) {\n    if (!user_prios || n == 0) return 0;\n    int c = user_prios[0];\n    for (size_t i = 1; i < n; ++i)\n        if (user_prios[i] > c) c = user_prios[i];\n    return c;\n}",
+      "explanation_ko": "역전의 근본 원인은 '자원과 무관한 중간 우선순위 태스크'가 자원 보유자(저우선순위)를 선점하는 것이다. 상속은 보유자를 대기자 최고 우선순위로 잠시 올려 중간 태스크가 끼지 못하게 하고, 그 결과 고우선순위의 대기 시간이 '보유자의 임계구역 잔여분'으로 경계된다. 천장 프로토콜은 잠그는 순간 천장으로 올려 교착까지 예방한다. Mars Pathfinder(1997) 가 이 버그의 유명 사례.",
+      "complexity": "primitives O(대기자/사용자 수), 시뮬레이터 O(스케줄 길이)",
+      "pitfalls": [
+        "상속 없이 우선순위 락만 쓰면 chained/무한 블로킹",
+        "역전을 데드락과 혼동 (역전은 진행은 하되 지연)",
+        "천장 계산에 자원 미사용 태스크를 포함"
+      ],
+      "anduril_context": "공유 SPI 버스/뮤텍스를 여러 우선순위 태스크가 다툴 때 마감 보장(RTOS mutex 의 PI 옵션)."
+    },
+    {
+      "num": 100,
+      "slug": "interrupt_latency",
+      "title_ko": "인터럽트 지연 시간 (worst-case & 경계)",
+      "title_en": "Interrupt latency (worst-case & bounding)",
+      "difficulty": "medium",
+      "tags": [
+        "interrupt-latency",
+        "real-time",
+        "critical-section",
+        "wcet",
+        "saturating-add"
+      ],
+      "prompt_ko": "최악 인터럽트 지연을 기여 요소(sync, disable_window, higher_isr, context_save, isr_prologue)의 포화 덧셈으로 계산하고, 여러 임계구역 중 최장(=disable_window 경계값)을 구하며, 최악 지연+ISR 실행시간이 마감을 만족하는지 판단한다.",
+      "prompt_en": "Compute worst-case interrupt latency as a saturating sum of contributors (sync, disable_window, higher_isr, context_save, isr_prologue), find the longest critical section (the disable_window bound), and decide whether worst latency + ISR exec time meets a deadline.",
+      "signature": "uint32_t irq_latency_wc(const irq_latency_t *m); uint32_t max_disable_window(const uint32_t *cs, size_t n); bool meets_deadline(uint32_t wc_latency, uint32_t isr_exec, uint32_t deadline);",
+      "examples": [
+        {
+          "in": "sync2+disable40+higher15+ctx12+prologue6",
+          "out": "75"
+        },
+        {
+          "in": "meets_deadline(75, 30, 100)",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "포화 덧셈으로 합산(오버플로 시 UINT32_MAX).",
+        "max_disable_window: 배열 최댓값.",
+        "meets_deadline: sat_add(latency, exec) <= deadline."
+      ],
+      "solution": "static uint32_t sat_add(uint32_t a, uint32_t b) {\n    uint32_t s = a + b;\n    return (s < a) ? UINT32_MAX : s;   // overflow 포화\n}\nuint32_t irq_latency_wc(const irq_latency_t *m) {\n    if (!m) return 0;\n    uint32_t t = 0;\n    t = sat_add(t, m->sync);\n    t = sat_add(t, m->disable_window);\n    t = sat_add(t, m->higher_isr);\n    t = sat_add(t, m->context_save);\n    t = sat_add(t, m->isr_prologue);\n    return t;\n}\nuint32_t max_disable_window(const uint32_t *cs, size_t n) {\n    if (!cs) return 0;\n    uint32_t m = 0;\n    for (size_t i = 0; i < n; ++i) if (cs[i] > m) m = cs[i];\n    return m;\n}\nbool meets_deadline(uint32_t wc, uint32_t isr_exec, uint32_t deadline) {\n    return sat_add(wc, isr_exec) <= deadline;\n}",
+      "explanation_ko": "인터럽트 지연은 여러 원인의 합이다. 이 중 펌웨어가 직접 통제하는 가장 큰 레버는 '인터럽트를 막아 둔 임계구역 길이(disable_window)'다. 임계구역과 ISR 본문을 짧게 유지하면 최악 지연이 줄어 마감을 만족시킬 수 있다. 합산은 포화 덧셈으로 오버플로 UB 를 피한다.",
+      "complexity": "wc O(1), max O(n)",
+      "pitfalls": [
+        "긴 임계구역으로 disable_window 폭증",
+        "합산 오버플로 UB (포화 처리 필요)",
+        "ISR 본문에 무거운 작업 → higher_isr 및 지연 증가"
+      ],
+      "anduril_context": "제어 루프 타이머/센서 인터럽트의 지터/마감 예산 산정, 임계구역 길이 상한 설정."
+    },
+    {
+      "num": 101,
+      "slug": "mmio_volatile",
+      "title_ko": "메모리맵 레지스터 접근 (volatile)",
+      "title_en": "Memory-mapped register access (volatile)",
+      "difficulty": "medium",
+      "tags": [
+        "mmio",
+        "volatile",
+        "register",
+        "bitfield",
+        "polling"
+      ],
+      "prompt_ko": "volatile 포인터로 주변장치 레지스터를 읽고/쓰고, 비트 셋/클리어(RMW), 비트필드 수정(마스크·시프트), 플래그 폴링을 구현한다. shift>=32 는 UB 이므로 가드하고, 폴링은 volatile 재-읽기로 최적화 제거를 막는다.",
+      "prompt_en": "Read/write peripheral registers through volatile pointers, set/clear bits (RMW), modify a bitfield (mask+shift), and poll a flag. Guard shift>=32 (UB) and rely on volatile re-reads so the poll loop is not optimized away.",
+      "signature": "uint32_t reg_read(const volatile uint32_t *reg); void reg_set_bits(volatile uint32_t *reg, uint32_t mask); void reg_modify_field(volatile uint32_t *reg, uint32_t mask, uint32_t shift, uint32_t val); bool reg_poll_flag(const volatile uint32_t *reg, uint32_t mask, uint32_t max_iters);",
+      "examples": [
+        {
+          "in": "modify_field(CR, 0xF00, 8, 0xA)",
+          "out": "(CR>>8)&0xF == 0xA"
+        },
+        {
+          "in": "poll_flag when clear, max_iters=100",
+          "out": "false (timeout)"
+        }
+      ],
+      "hints": [
+        "set/clear: *reg |= mask / *reg &= ~mask.",
+        "modify_field: v &= ~mask; v |= (val<<shift)&mask; (shift>=32 가드).",
+        "poll: for i<max_iters: if ((*reg & mask)==mask) return true."
+      ],
+      "solution": "uint32_t reg_read(const volatile uint32_t *reg) { return reg ? *reg : 0; }\nvoid reg_write(volatile uint32_t *reg, uint32_t val) { if (reg) *reg = val; }\nvoid reg_set_bits(volatile uint32_t *reg, uint32_t mask) { if (reg) *reg |= mask; }\nvoid reg_clear_bits(volatile uint32_t *reg, uint32_t mask) { if (reg) *reg &= ~mask; }\nvoid reg_modify_field(volatile uint32_t *reg, uint32_t mask, uint32_t shift, uint32_t val) {\n    if (!reg || shift >= 32) return;          // shift>=32 는 UB\n    uint32_t v = *reg;\n    v &= ~mask;\n    v |= (val << shift) & mask;\n    *reg = v;\n}\nbool reg_poll_flag(const volatile uint32_t *reg, uint32_t mask, uint32_t max_iters) {\n    if (!reg) return false;\n    for (uint32_t i = 0; i < max_iters; ++i)\n        if ((*reg & mask) == mask) return true;   // volatile: 매 반복 실제 재-읽기\n    return false;\n}",
+      "explanation_ko": "volatile 은 컴파일러에게 '이 메모리는 프로그램 밖에서 바뀔 수 있다'고 알려 접근을 제거·캐시·재정렬하지 못하게 한다. 이게 없으면 상태 폴링 루프가 '값이 안 변한다'는 가정으로 무한루프로 최적화될 수 있다. 필드 수정은 읽고-마스크로 지우고-시프트해 채우는 RMW 다. volatile 은 원자성/배리어를 보장하지 않으므로 ISR 공유엔 별도 보호가 필요하다.",
+      "complexity": "O(1) (poll O(max_iters))",
+      "pitfalls": [
+        "volatile 누락 → 폴링 루프 최적화로 무한루프",
+        "shift>=32 시 UB (가드 필요)",
+        "volatile=atomic 로 오해 (배리어/원자성 없음)"
+      ],
+      "anduril_context": "STM32/FPGA 주변장치(UART/SPI/타이머) 레지스터 드라이버, 상태 비트 폴링."
+    },
+    {
+      "num": 102,
+      "slug": "timer_wheel",
+      "title_ko": "소프트웨어 타이머 휠 (malloc 없이)",
+      "title_en": "Software timer wheel (no malloc)",
+      "difficulty": "hard",
+      "tags": [
+        "timer-wheel",
+        "no-heap",
+        "free-list",
+        "callback",
+        "scheduling"
+      ],
+      "prompt_ko": "TW_SLOTS 슬롯 해시 타이밍 휠. delay tick 뒤 만료할 타이머를 slot=(now+delay)%N, rounds=(delay-1)/N 으로 배치하고, tick 마다 현재 슬롯만 순회해 rounds==0 이면 발동+반납, 아니면 rounds--. 노드는 정적 풀+free-list(힙 없음).",
+      "prompt_en": "A TW_SLOTS-slot hashed timing wheel. Place a timer due in delay ticks at slot=(now+delay)%N, rounds=(delay-1)/N; each tick scan only the current slot, firing timers with rounds==0 (and recycling them) else decrement rounds. Nodes come from a static pool + free-list (no heap).",
+      "signature": "int tw_start(timer_wheel_t *w, uint32_t delay, tw_cb cb, void *ctx); void tw_tick(timer_wheel_t *w);",
+      "examples": [
+        {
+          "in": "start delays 1,3,8,9,16; run 16 ticks",
+          "out": "each fires exactly at tick==delay"
+        },
+        {
+          "in": "start 17th timer (pool=16)",
+          "out": "-1 (exhausted)"
+        }
+      ],
+      "hints": [
+        "tw_start: free-list 에서 노드 하나 떼어 slot/rounds 계산 후 슬롯 리스트 앞에 삽입.",
+        "rounds=(delay-1)/TW_SLOTS 로 off-by-one 회피.",
+        "tw_tick: 이중 포인터로 슬롯 리스트 순회, 발동 전에 unlink 하고 free-list 반납."
+      ],
+      "solution": "int tw_start(timer_wheel_t *w, uint32_t delay, tw_cb cb, void *ctx) {\n    if (!w || !cb || delay == 0) return -1;\n    int idx = tw_alloc(w);\n    if (idx < 0) return -1;                       // 풀 고갈\n    uint32_t slot = (w->now + delay) % TW_SLOTS;\n    w->pool[idx].active = true;\n    w->pool[idx].rounds = (delay - 1) / TW_SLOTS;\n    w->pool[idx].cb = cb; w->pool[idx].ctx = ctx;\n    w->pool[idx].next = w->slots[slot];\n    w->slots[slot] = idx;\n    return idx;\n}\nvoid tw_tick(timer_wheel_t *w) {\n    if (!w) return;\n    w->now++;\n    uint32_t s = w->now % TW_SLOTS;\n    int *pp = &w->slots[s];\n    while (*pp != -1) {\n        int idx = *pp;\n        if (w->pool[idx].rounds == 0) {\n            tw_cb cb = w->pool[idx].cb; void *ctx = w->pool[idx].ctx;\n            *pp = w->pool[idx].next;   // unlink (next 는 release 전에 읽음)\n            tw_release(w, idx);\n            cb(ctx);                   // 발동\n        } else {\n            w->pool[idx].rounds--;\n            pp = &w->pool[idx].next;\n        }\n    }\n}",
+      "explanation_ko": "단순 타이머 리스트는 tick 마다 전체를 스캔하지만, 휠은 타이머를 만료 슬롯에 해싱해 tick 당 해당 슬롯만 본다(등록 O(1)). rounds 는 그 슬롯을 몇 바퀴 더 지나야 하는지로, (delay-1)/N 이라야 off-by-one 이 안 난다. 노드는 정적 풀+free-list 로 힙 없이 O(1) 할당/반납해 결정론적이다. 콜백에서 재등록해도 안전하도록 발동 전에 unlink 한다.",
+      "complexity": "tw_start O(1), tw_tick O(슬롯 내 타이머 수), 공간 O(1) 정적 풀",
+      "pitfalls": [
+        "rounds off-by-one ((delay)/N 로 잘못 두면 한 바퀴 늦게 발동)",
+        "unlink 전에 콜백 호출 → 리스트 훼손",
+        "ISR 와 main 이 같은 휠 공유 시 경쟁 (임계구역 필요)"
+      ],
+      "anduril_context": "타임아웃/재전송 타이머(링크 프로토콜), 주기 이벤트 스케줄링을 힙 없이(MISRA)."
+    }
+  ]
+}

@@ -1,0 +1,208 @@
+
+
+# C 블럭: Interrupt / DMA / Deferred Work 실전 문제 세트
+
+임베디드/펌웨어 실무에서 자주 마주치는 인터럽트, DMA, 캐시 일관성, 디퍼드 워크(Deferred Procedure Call) 등 핵심 경로를 다룹니다.  
+아래는 실제 MCU/SoC/SSD/네트워크/자동차 환경에서 빈출하는 실전 문제와 헤더/시그니처 템플릿입니다.
+
+---
+
+## 문제 목록
+
+1. **DMA Descriptor Ring 관리**
+   - OWN 플래그, wrap-around, partial completion 콜백, 에러 복구
+2. **ISR → DPC(Deferred Procedure Call) 큐**
+   - 우선순위 기반, lock-free, 오버플로 방지
+3. **Cache Coherency API**
+   - invalidate/clean, region alignment 검사, DMA-safe API
+4. **GPIO Edge Interrupt Debounce**
+   - 하드웨어+소프트 조합, glitch 방지, 최소 pulse width
+5. **Timer Capture / Pulse Width 측정**
+   - 오버플로 stitching, edge pair 매칭, 캡처 버퍼
+6. **DMA Linked List/Scatter-Gather**
+   - 다중 버퍼, 체인 완료 콜백, 에러 중단 처리
+7. **Interrupt Nesting/Preemption 관리**
+   - 우선순위, nesting depth, critical section 보호
+8. **Deferred Work Queue (SoftIRQ/Tasklet 스타일)**
+   - ISR context → Task context 안전 이관, 우선순위/latency 관리
+9. **DMA Double Buffering**
+   - Ping-pong 버퍼, underrun/overrun 방지, 상태 전이
+10. **Interrupt Latency 측정/로깅**
+    - 타임스탬프, ISR 진입/이탈, worst-case 기록
+
+
+---
+
+## 10. DMA Descriptor Ring 관리
+
+**설명:**  
+DMA 기반 데이터 송수신(예: 네트워크, 저장장치, 센서 등)에서, 여러 개의 버퍼를 링(원형) 구조로 관리하며, 각 디스크립터의 OWN 플래그(1=DMA, 0=CPU), wrap-around, partial completion, 에러 복구를 효율적으로 처리해야 한다.
+
+**요구사항:**  
+- OWN 플래그로 DMA/CPU 소유권 구분  
+- 링 구조 wrap-around  
+- partial completion 콜백  
+- 에러 발생 시 복구 경로  
+- 경계 체크 및 오버플로 방지
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef DMA_RING_H
+#define DMA_RING_H
+#include <stdint.h>
+#include <stddef.h>
+
+#define DMA_RING_SIZE 64
+
+typedef struct {
+    volatile uint32_t own;   // 1=DMA, 0=CPU
+    uint32_t len;
+    uint8_t* buf;
+    uint32_t err;
+} dma_desc_t;
+
+typedef struct {
+    dma_desc_t desc[DMA_RING_SIZE];
+    uint32_t head; // CPU 소비자
+    uint32_t tail; // DMA 생산자
+} dma_ring_t;
+
+void dma_ring_init(dma_ring_t* r, uint8_t* bufs[], uint32_t lens[]);
+int  dma_ring_submit(dma_ring_t* r, uint8_t* buf, uint32_t len);
+int  dma_ring_poll(dma_ring_t* r, void (*on_complete)(uint8_t*, uint32_t, uint32_t err));
+#endif
+```
+
+---
+
+## 11. ISR → DPC(Deferred Procedure Call) 큐
+
+**설명:**  
+ISR(인터럽트 서비스 루틴)에서 빠르게 이벤트를 큐에 넣고, 실제 처리는 Task/Thread context에서 Deferred Procedure Call(DPC)로 처리한다.  
+우선순위 기반, lock-free, 오버플로 방지 구조가 필요하다.
+
+**요구사항:**  
+- ISR-safe enqueue  
+- 우선순위 기반 fetch  
+- lock-free 구조  
+- 오버플로 방지  
+- Task context에서 안전하게 fetch
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef DPC_QUEUE_H
+#define DPC_QUEUE_H
+#include <stdint.h>
+
+#define DPC_QUEUE_MAX 32
+
+typedef void (*dpc_fn_t)(void*);
+
+typedef struct {
+    dpc_fn_t fn;
+    void* arg;
+    uint8_t prio;
+} dpc_item_t;
+
+typedef struct {
+    volatile uint32_t head;
+    volatile uint32_t tail;
+    dpc_item_t buf[DPC_QUEUE_MAX];
+} dpc_queue_t;
+
+void dpc_queue_init(dpc_queue_t* q);
+int  dpc_queue_post_isr(dpc_queue_t* q, dpc_fn_t fn, void* arg, uint8_t prio); // ISR safe
+int  dpc_queue_fetch(dpc_queue_t* q, dpc_item_t* out); // Task context
+#endif
+```
+
+---
+
+## 12. 캐시 일관성 API 설계 (invalidate / clean / region alignment 검사)
+
+**설명:**  
+DMA와 CPU가 메모리를 공유할 때, 캐시 일관성 문제를 방지하기 위해 invalidate/clean 연산과 DMA-safe API를 제공해야 한다.  
+영역 정렬(region alignment) 검사도 필요하다.
+
+**요구사항:**  
+- invalidate/clean API  
+- region alignment 검사  
+- DMA 전/후 안전 API  
+- 방향(송신/수신) 구분
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef CACHE_COHERENCY_H
+#define CACHE_COHERENCY_H
+#include <stdint.h>
+#include <stddef.h>
+
+int cache_invalidate(void* addr, size_t len); // region alignment 검사
+int cache_clean(void* addr, size_t len);
+int cache_dma_prepare(void* addr, size_t len, int dir); // 0=to device, 1=from device
+#endif
+```
+
+---
+
+## 13. GPIO Edge Interrupt Debounce (하드웨어 + 소프트 조합)
+
+**설명:**  
+노이즈가 많은 환경에서 GPIO 엣지 인터럽트가 glitch에 의해 다중 발생하는 것을 방지하기 위해, 소프트웨어 debounce(최소 pulse width 보장)와 하드웨어 필터를 조합한다.
+
+**요구사항:**  
+- 최소 pulse width 보장  
+- last_tick, last_state 추적  
+- glitch 방지  
+- 하드웨어+소프트 조합 구조
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef GPIO_DEBOUNCE_H
+#define GPIO_DEBOUNCE_H
+#include <stdint.h>
+
+typedef struct {
+    uint32_t last_tick;
+    uint32_t min_interval_ticks;
+    uint8_t  last_state;
+} gpio_debounce_t;
+
+void gpio_debounce_init(gpio_debounce_t* d, uint32_t min_interval_ticks);
+int  gpio_debounce_on_edge(gpio_debounce_t* d, uint8_t new_state, uint32_t now_tick);
+#endif
+```
+
+---
+
+## 14. 타이머 캡처/펄스 폭 측정 모듈 (overflow stitching)
+
+**설명:**  
+외부 신호의 펄스 폭, 주기, 캡처 타이밍을 측정할 때, 타이머 오버플로우를 stitching(연결)하여 정확한 시간 측정이 가능해야 한다.
+
+**요구사항:**  
+- 캡처 버퍼  
+- 오버플로우 stitching  
+- edge pair 매칭  
+- 펄스 폭 계산  
+- 경계/에러 방지
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef TIMER_CAPTURE_H
+#define TIMER_CAPTURE_H
+#include <stdint.h>
+
+#define CAPTURE_BUF_SIZE 16
+
+typedef struct {
+    uint32_t buf[CAPTURE_BUF_SIZE];
+    uint8_t  head, tail;
+    uint32_t last_overflow_tick;
+} timer_capture_t;
+
+void timer_capture_init(timer_capture_t* c);
+void timer_capture_on_edge(timer_capture_t* c, uint32_t tick, int overflow);
+int  timer_capture_get_pulse(timer_capture_t* c, uint32_t* width_out);
+#endif
+```

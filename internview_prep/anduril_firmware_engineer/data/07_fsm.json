@@ -1,0 +1,458 @@
+{
+  "id": "fsm",
+  "order": 7,
+  "range": "Q76-85",
+  "icon": "🚦",
+  "title_en": "Finite State Machines",
+  "title_ko": "유한 상태 기계 (FSM)",
+  "summary_ko": "임베디드 제어 흐름의 뼈대: 버튼 디바운스, 함수 포인터 상태 테이블, UART 패킷 파서(SYNC/LEN/DATA/CHECKSUM), 신호등, Mealy vs Moore, 계층적 상태(HSM), entry/exit 액션, guard 조건, 이벤트 큐, 타임아웃.",
+  "summary_en": "The backbone of embedded control flow: button debounce, function-pointer state table, UART packet parser (SYNC/LEN/DATA/CHECKSUM), traffic light, Mealy vs Moore, hierarchical state machines, entry/exit actions, guard conditions, event queue, and timeout events.",
+  "anduril_relevance_ko": "드론 펌웨어의 통신 링크는 링 버퍼로 바이트를 모아 FSM 으로 프레임을 조립한다 — UART 패킷 파서 FSM(재동기화·길이검증·checksum 폐기)은 국방/드론 펌웨어 면접의 단골이다. 비행 모드 관리(ARMED 하위 TAKEOFF/MISSION/RTL), 어디서든 가로채는 FAILSAFE 는 HSM 버블링의 전형이고, 링크 유실/센서 무응답은 타임아웃 FSM 으로 안전 상태 복귀를 유도한다. FSM 은 입력→출력이 결정적이라 단위 테스트/HIL 에 잘 맞아 '검증 가능한 펌웨어' 를 중시하는 Anduril 과 직결된다.",
+  "concepts": [
+    {
+      "term": "3 styles",
+      "ko": "switch(≤5상태) / 함수포인터 테이블(확장) / 2D 전이표",
+      "en": "switch, function-pointer table, or 2D transition table"
+    },
+    {
+      "term": "Moore",
+      "ko": "출력=f(상태). 상태 많음, 레지스터드, 글리치 없음",
+      "en": "Output is a function of state only; more states, glitch-free"
+    },
+    {
+      "term": "Mealy",
+      "ko": "출력=f(상태,입력). 상태 적음, 조합, 즉각 반응",
+      "en": "Output depends on state+input; fewer states, faster"
+    },
+    {
+      "term": "HSM bubbling",
+      "ko": "자식 미처리 이벤트를 부모 superstate 로 위임 → 공통 전이 중복 제거",
+      "en": "Unhandled child events bubble to parent superstate"
+    },
+    {
+      "term": "UART framing",
+      "ko": "SYNC→LEN(검증)→DATA(러닝XOR)→CHECKSUM, 완료 후 재동기화",
+      "en": "SYNC->LEN(validate)->DATA(running XOR)->CHECKSUM, then resync"
+    },
+    {
+      "term": "Length validation",
+      "ko": "원격 len 을 1..MAX 로 검증해 data[] 오버플로 방지",
+      "en": "Validate remote length to prevent buffer overflow"
+    },
+    {
+      "term": "entry/exit",
+      "ko": "exit(old)→상태변경→entry(new), 자기전이 무동작",
+      "en": "exit(old)->change->entry(new); self-transition no-op"
+    },
+    {
+      "term": "guard",
+      "ko": "부수효과 없는 순수 술어로 같은 이벤트를 분기",
+      "en": "Pure side-effect-free predicate branching the same event"
+    },
+    {
+      "term": "event queue",
+      "ko": "ISR push / main pop → FSM 디커플, 짧은 ISR",
+      "en": "ISR pushes, main pops; decouples FSM from ISR"
+    },
+    {
+      "term": "timeout",
+      "ko": "무활동 tick 누적 limit 도달 시 TIMEOUT → 워치독/복구",
+      "en": "Idle ticks reaching limit -> TIMEOUT; watchdog/recovery"
+    }
+  ],
+  "study_note_md": "# 🚦 유한 상태 기계 (Finite State Machine, FSM) — Q76~85\n\n> 임베디드 펌웨어의 **제어 흐름 뼈대**. 버튼 디바운스, 프로토콜 파서, 통신 링크,\n> 모터/미션 상태, 워치독까지 — \"지금 무슨 상태이고, 이 입력에 어떻게 반응하나\"를\n> 명시적으로 표로 만든 것이 FSM 이다. Anduril 같은 국방/드론 펌웨어 면접에서\n> **UART 패킷 파서 FSM** 은 거의 단골. 링 버퍼(이전 토픽)로 바이트를 모으고,\n> FSM 으로 프레임을 조립한다.\n\n---\n\n## 1. FSM 란 무엇인가\n\n유한한 **상태(state)** 집합 + **전이(transition)** 규칙 + (선택) **동작(action)**.\n매 tick 또는 매 이벤트마다: `현재상태 × 입력 -> 다음상태 (+ 출력/동작)`.\n\n세 가지 구현 스타일:\n\n| 스타일 | 언제 | 장단점 |\n|---|---|---|\n| **switch/case** | 상태 ≤ 5~6개 | 가장 명료, 디버깅 쉬움. 커지면 case 폭발 |\n| **함수 포인터 테이블** | 상태 많음 / 런타임 재구성 | `table[state](evt)` O(1) 디스패치, 확장 쉬움 |\n| **상태 전이 표(2D)** | 규칙이 데이터로 표현 | `next[state][evt]`, 매우 조밀하지만 action 얹기 번거로움 |\n\n---\n\n## 2. Mealy vs Moore ⭐ (개념 단골)\n\n| | **Moore** | **Mealy** |\n|---|---|---|\n| 출력 | `f(상태)` — 상태만의 함수 | `f(상태, 입력)` — 상태+입력 |\n| 상태 수 | 보통 더 많음 (출력용 상태 필요) | 더 적음 |\n| 타이밍 | 출력이 **레지스터드**(클럭 동기), 1클럭 지연 가능, **글리치 없음** | **조합 출력**, 더 빠름, 입력 글리치가 출력에 샐 수 있음 |\n| 예 | \"11 검출됨\" 전용 상태 S2 를 두고 출력=1 | S1 에서 입력 1 오면 즉시 출력=1 |\n\n> **한 줄 답변**: \"Moore 는 출력이 상태만의 함수라 글리치가 없고 예측 가능하지만\n> 상태가 더 필요하다. Mealy 는 상태+입력이라 같은 동작을 더 적은 상태로 하고\n> 반응이 한 박자 빠르지만, 입력 글리치가 출력에 반영될 수 있다.\"\n\n이 문제 세트(Q80)는 overlapping **\"11\" 검출기**를 Moore(3상태)·Mealy(2상태)\n양쪽으로 구현해 같은 검출 벡터가 나오는지 비교한다.\n\n---\n\n## 3. 계층적 상태 기계 (HSM) — 개념 (Q81)\n\n상태가 많아지면 **공통 전이**가 중복된다(예: 어느 상태에서든 POWER_OFF → OFF).\nHSM 은 상태를 **중첩(superstate/substate)** 시켜, 자식이 처리 못 한 이벤트를\n**부모로 버블링**한다. 공통 동작을 부모 한 곳에만 쓰면 되므로 중복 제거.\n\n```\n   [ON]  (superstate)  ── EVT_POWER 를 여기서 처리 → OFF\n    ├─ IDLE  ── EVT_START → RUN\n    └─ RUN   ── EVT_STOP  → IDLE\n   [OFF]     ── EVT_POWER → IDLE\n```\n\n- RUN 에서 `EVT_POWER` → RUN 은 모름 → **부모 ON 이 처리** → OFF (버블링).\n- IDLE 에서 `EVT_START` → 자식이 직접 처리 (leaf).\n- UML statechart, QP/QF 프레임워크의 핵심 개념.\n\n---\n\n## 4. 실무 FSM 4대 요소\n\n### (a) entry / exit action (Q82)\n상태 **진입 시 entry**, **이탈 시 exit** 액션 자동 호출.\n리소스 init/cleanup(타이머 시작/정지, DMA enable/disable)을 전이 로직과 분리 →\n상태를 추가해도 대칭적으로 관리, 누락 방지.\n```\n전이(old→new):  exit(old)  →  state=new  →  entry(new)\n자기전이(new==old): 무동작 (또는 정책에 따라 재진입)\n```\n\n### (b) guard condition (Q83)\n같은 이벤트라도 **조건(guard)** 에 따라 다른 전이.\n```\nIDLE + RUN 이벤트:  value > 0 ?  → RUN\n                                  → ERROR\n```\nguard 는 부수효과 없는 **순수 술어**여야 한다(면접 팁: guard 안에서 상태 바꾸지 말 것).\n\n### (c) event queue (Q84)\n**ISR 이 이벤트를 큐에 push, main loop 가 pop 해서 FSM 주입.**\nISR 문맥에서 무거운 FSM 로직을 떼어내 → 짧은 ISR + 결정적 처리 + 재진입 안전.\n원형 버퍼(이전 토픽)가 그대로 이벤트 큐가 된다. full 이면 push 거부(또는 오버런 정책).\n\n### (d) timeout event (Q85)\nACTIVE 상태에서 일정 tick 동안 활동이 없으면 TIMEOUT 으로 → **무응답 감지/복구**.\n워치독, 링크 유실(link loss), 핸드셰이크 타임아웃의 전형. `event=1`(활동)이면\n타이머 리셋, `0`(무활동)이면 증가시켜 limit 도달 시 전이.\n\n---\n\n## 5. UART 패킷 파서 FSM ⭐⭐ (Q78 — 이 토픽의 핵심)\n\n바이트 스트림에서 프레임을 뽑아내는 **바이트 단위 FSM**. 드론 텔레메트리/명령\n링크의 심장. 프레임:\n\n```\n[0xAA sync][ len (1..MAX) ][ data × len ][ checksum = XOR(data) ]\n```\n\n```\n IDLE  ──(byte==0xAA)──▶ LEN\n LEN   ──(1..MAX)──────▶ DATA        (그 외 길이는 폐기 → IDLE)\n DATA  ──(idx==len)────▶ CKSUM       (각 바이트 저장 + 러닝 XOR)\n CKSUM ──(match)───────▶ IDLE + 패킷 완료(good++)\n       ──(mismatch)────▶ IDLE + bad++\n```\n\n**설계 포인트 (면접에서 파고드는 곳):**\n\n- **재동기화(resync)**: IDLE 에서 sync 바이트 아니면 그냥 버린다 → 스트림 중간\n  진입/노이즈에도 다음 프레임을 잡는다.\n- **길이 검증**: `len` 을 그대로 믿지 말 것. `1..MAX` 범위 밖이면 폐기해야\n  **버퍼 오버플로**를 막는다 (`data[idx++]` 가 배열을 넘지 않도록).\n- **checksum/CRC**: 예제는 XOR(간단). 실무는 CRC-16/CRC-32. 불일치 시 프레임\n  폐기 + 통계 카운트(bad_packets).\n- **back-to-back / partial**: 한 바이트씩 들어오는(부분 수신) 상황에서도 상태가\n  보존돼야 하고, 패킷이 끝나면 곧장 다음 sync 를 받을 수 있어야 한다.\n- **payload 소비**: 완료 시 `out_data/out_len` 에 복사해 호출자가 안전하게\n  꺼내가도록. 다음 패킷이 조립 버퍼를 덮어써도 무방.\n\n> 확장 질문: \"escape/byte-stuffing(SLIP, HDLC)은?\", \"가변 길이 필드/타입-길이-값\n> (TLV)은?\", \"CRC 를 스트리밍으로 갱신하려면?\", \"sync 가 payload 에 나타나면?\"\n> → 길이 프리픽스 방식은 payload 안의 0xAA 를 신경 안 써도 된다(길이만큼만 읽으므로).\n\n---\n\n## 6. 버튼 디바운싱 FSM (Q76)\n\n기계식 접점은 누를/뗄 때 수 ms 채터링. **N개 연속 동일 샘플**로 확정하는 4-상태 FSM:\n\n```\n RELEASED ──high──▶ BOUNCE_PRESS ──(N tick 연속 high)──▶ PRESSED\n PRESSED  ──low ──▶ BOUNCE_RELEASE ──(N tick 연속 low)──▶ RELEASED\n BOUNCE_* 중 반대 입력 → 글리치로 판단, 원래 상태 복귀 (카운트 취소)\n```\n\n- `pressed`(bool) 만 확정된 출력 → 상위 로직은 채터링을 못 본다.\n- 대안: **시프트 레지스터/카운터 적분기** (raw 를 `history<<=1|bit`, 특정 패턴이면 확정).\n- 인터뷰 팁: \"몇 tick? 샘플 주기?\" → 접점 안정화 시간(예 5~20ms) / 폴링 주기로 산정.\n\n---\n\n## 7. 신호등 FSM (Q79) — 타이머 기반 실시간 제어\n\n각 상태가 **자기 지속시간(tick)** 을 가지고 `RED→GREEN→YELLOW→RED` 순환.\n```\ntl_tick(): if (--timer <= 0) { 다음 상태로 전이; timer = 다음상태_지속시간; }\n```\n확장: 보행자 버튼(비동기 이벤트 삽입), 야간 점멸(모드 전환) → HSM 으로 승격하기 좋은 예.\n\n---\n\n## 8. 인터뷰 팔로업 (follow-ups)\n\n- **\"switch vs 함수 포인터 테이블, 언제?\"** → 상태 적고 명료함 우선이면 switch,\n  상태 많거나 런타임 재구성/플러그인이면 테이블.\n- **\"Mealy 를 Moore 로 바꾸면?\"** → 출력 조합을 상태로 흡수(상태 수 증가), 출력 1클럭 지연.\n- **\"UART 파서에서 길이 검증 왜 필수?\"** → 신뢰 못 할 `len` 으로 `data[]` 오버플로 → 원격 취약점.\n- **\"ISR 에서 FSM 을 직접 돌리면?\"** → ISR 길어지고 재진입/우선순위 문제 → event queue 로 디커플.\n- **\"상태 폭발(state explosion) 대응?\"** → HSM(계층화), 직교 영역(orthogonal region), 상태 변수 분리.\n- **\"FSM 테스트 전략?\"** → 입력 시퀀스 → 상태/출력 벡터를 골든값과 비교(이 하네스가 그 방식).\n\n---\n\n## 9. 흔한 버그 체크리스트 (gotchas)\n\n- [ ] UART: `len` 미검증 → `data[idx++]` 배열 오버플로.\n- [ ] UART: 완료 후 IDLE 복귀 안 해서 다음 프레임 못 잡음(재동기화 실패).\n- [ ] 디바운스: BOUNCE_* 에서 반대 입력 시 카운트 리셋/취소 누락 → 글리치 통과.\n- [ ] entry/exit: 자기전이(new==old)에서 exit/entry 를 또 호출(정책 미정) → 리소스 이중 해제.\n- [ ] guard: guard 안에서 부수효과(상태 변경) → 재현 불가 버그.\n- [ ] event queue: full/empty 판정 오류, ISR↔main `volatile`/원자성 누락.\n- [ ] timeout: 활동(event=1) 시 타이머 리셋 누락 → 정상인데 타임아웃.\n- [ ] 상태 enum 에 `default` 없어 미정의 상태에서 침묵 → 방어적 `default` 로 안전상태 복귀.\n\n---\n\n## 10. Anduril / 드론 펌웨어 맥락\n\n- **통신 링크 파서**: MAVLink 유사 텔레메트리/명령 프레이밍을 바이트 FSM 으로 파싱.\n  링 버퍼(RX ISR) → FSM(main) → 명령 디스패치. 경합/저하 환경에서 **재동기화**와\n  **CRC 폐기** 가 곧 링크 견고성.\n- **미션/모드 상태 관리**: DISARMED→ARMED→TAKEOFF→MISSION→RTL→LAND 를 HSM 으로.\n  FAILSAFE 는 어느 상태에서든 부모가 가로채는 전형적 버블링.\n- **워치독/타임아웃**: 링크 유실·센서 무응답 시 TIMEOUT → 안전 상태(hover/RTL) 복귀.\n- **디바운스/GPIO 이벤트**: 물리 스위치, 세이프티 인터록 확정.\n- **테스트 가능성**: FSM 은 입력→출력이 결정적이라 단위 테스트와 HIL 에 잘 맞는다 —\n  Anduril 이 중시하는 \"검증 가능한 펌웨어\" 와 직결.\n",
+  "problems": [
+    {
+      "num": 76,
+      "slug": "button_debounce_fsm",
+      "title_ko": "버튼 디바운싱 FSM",
+      "title_en": "Button debouncing FSM",
+      "difficulty": "medium",
+      "tags": [
+        "switch",
+        "gpio",
+        "debounce"
+      ],
+      "prompt_ko": "4-상태 switch FSM 으로 버튼을 디바운스하라. N개 연속 동일 샘플로 press/release 를 확정하고, BOUNCE 중 반대 입력은 글리치로 취소한다. pressed(bool) 이 확정 출력.",
+      "prompt_en": "Debounce a button with a 4-state switch FSM. Confirm press/release after N consecutive equal samples; cancel on an opposite sample during BOUNCE. pressed(bool) is the debounced output.",
+      "signature": "void button_fsm_update(button_fsm_t *fsm, bool gpio_high)",
+      "examples": [
+        {
+          "in": "ticks=2, seq 0 1 1 1 1 0 0 0",
+          "out": "pressed: 0 0 0 1 1 1 1 0"
+        },
+        {
+          "in": "single spike 1,0 (ticks=3)",
+          "out": "pressed=false"
+        }
+      ],
+      "hints": [
+        "상태: RELEASED, BOUNCE_PRESS, PRESSED, BOUNCE_RELEASE.",
+        "BOUNCE_PRESS 에서 high 유지 시 ++counter>=ticks 로 PRESSED 확정.",
+        "BOUNCE_* 중 반대 입력이면 원래 상태로 되돌려 카운트 취소."
+      ],
+      "solution": "void button_fsm_update(button_fsm_t *fsm, bool gpio_high) {\n    if (!fsm) return;\n    switch (fsm->state) {\n        case BTN_RELEASED:\n            if (gpio_high) { fsm->state = BTN_BOUNCE_PRESS; fsm->counter = 0; }\n            break;\n        case BTN_BOUNCE_PRESS:\n            if (gpio_high) {\n                if (++fsm->counter >= fsm->ticks) { fsm->state = BTN_PRESSED; fsm->pressed = true; }\n            } else { fsm->state = BTN_RELEASED; }\n            break;\n        case BTN_PRESSED:\n            if (!gpio_high) { fsm->state = BTN_BOUNCE_RELEASE; fsm->counter = 0; }\n            break;\n        case BTN_BOUNCE_RELEASE:\n            if (!gpio_high) {\n                if (++fsm->counter >= fsm->ticks) { fsm->state = BTN_RELEASED; fsm->pressed = false; }\n            } else { fsm->state = BTN_PRESSED; }\n            break;\n    }\n}",
+      "explanation_ko": "RELEASED/PRESSED 는 안정 상태, BOUNCE_* 는 확정 대기 상태다. 대기 중 같은 입력이 ticks 번 연속되면 확정 전이하고, 반대 입력이 한 번이라도 오면 글리치로 보고 안정 상태로 되돌려 카운터를 무효화한다. 상위 로직은 pressed 만 보므로 채터링을 관측하지 못한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "BOUNCE 중 반대 입력 시 카운트 취소 누락 → 글리치 통과",
+        "ticks/샘플 주기 산정 없이 임의값 사용",
+        "counter 를 확정 시 리셋 안 해 다음 전이 오작동"
+      ],
+      "anduril_context": "세이프티 인터록 스위치, 물리 arm/disarm 버튼 등 기계 접점 확정."
+    },
+    {
+      "num": 77,
+      "slug": "func_ptr_state_table",
+      "title_ko": "함수 포인터 배열 FSM",
+      "title_en": "Function-pointer state table FSM",
+      "difficulty": "easy",
+      "tags": [
+        "function-pointer",
+        "table",
+        "dispatch"
+      ],
+      "prompt_ko": "상태별 핸들러를 함수 포인터 배열에 담아 table[state](input) 로 디스패치하라. 각 핸들러는 다음 상태를 반환한다. 모터 IDLE/RUN/STOP.",
+      "prompt_en": "Dispatch via a function-pointer array: table[state](input). Each handler returns the next state. Motor IDLE/RUN/STOP.",
+      "signature": "motor_state_t motor_fsm_dispatch(motor_fsm_t *fsm, motor_input_t in)",
+      "examples": [
+        {
+          "in": "IDLE + IN_START",
+          "out": "M_RUN"
+        },
+        {
+          "in": "RUN + IN_STOP",
+          "out": "M_STOP"
+        },
+        {
+          "in": "STOP + IN_RESET",
+          "out": "M_IDLE"
+        }
+      ],
+      "hints": [
+        "핸들러 시그니처: motor_state_t (*)(motor_input_t).",
+        "init 에서 table[M_IDLE]=h_idle 처럼 연결.",
+        "dispatch: state = table[state](in)."
+      ],
+      "solution": "static motor_state_t h_idle(motor_input_t in){ return (in==IN_START)?M_RUN :M_IDLE; }\nstatic motor_state_t h_run (motor_input_t in){ return (in==IN_STOP) ?M_STOP:M_RUN;  }\nstatic motor_state_t h_stop(motor_input_t in){ return (in==IN_RESET)?M_IDLE:M_STOP; }\n\nvoid motor_fsm_init(motor_fsm_t *fsm){\n    if (!fsm) return;\n    fsm->state = M_IDLE;\n    fsm->table[M_IDLE]=h_idle; fsm->table[M_RUN]=h_run; fsm->table[M_STOP]=h_stop;\n}\n\nmotor_state_t motor_fsm_dispatch(motor_fsm_t *fsm, motor_input_t in){\n    if (!fsm) return M_IDLE;\n    fsm->state = fsm->table[fsm->state](in);\n    return fsm->state;\n}",
+      "explanation_ko": "현재 상태를 인덱스로 핸들러를 O(1) 로 골라 호출한다. 상태를 추가하려면 핸들러 함수와 테이블 한 줄만 늘리면 되므로 switch 폭발이 없다. 각 핸들러가 '다음 상태' 만 반환하도록 하면 전이 규칙이 함수별로 국소화된다.",
+      "complexity": "O(1) time, O(states) space (table)",
+      "pitfalls": [
+        "table 초기화 누락 → NULL 함수 포인터 호출 크래시",
+        "입력값을 인덱스로 그대로 써서 범위 밖 접근",
+        "상태 enum 에 M_COUNT 안 두어 배열 크기 하드코딩"
+      ],
+      "anduril_context": "명령 디스패처, 페이로드/짐벌 모드 상태, 플러그인형 상태 로직."
+    },
+    {
+      "num": 78,
+      "slug": "uart_packet_parser_fsm",
+      "title_ko": "UART 패킷 파서 FSM",
+      "title_en": "UART packet parser FSM",
+      "difficulty": "hard",
+      "tags": [
+        "protocol",
+        "parser",
+        "checksum",
+        "framing"
+      ],
+      "prompt_ko": "바이트 스트림 파서. 프레임 [0xAA][len(1..MAX)][data x len][XOR checksum]. 바이트마다 호출하며, 정상 패킷이 완성되면 true 를 반환하고 out_data/out_len 을 채운다. 길이 검증, 재동기화, checksum 불일치 통계 포함.",
+      "prompt_en": "Byte-stream parser. Frame [0xAA][len(1..MAX)][data x len][XOR checksum]. Called per byte; return true when a valid packet completes, filling out_data/out_len. Include length validation, resync, and bad-checksum stats.",
+      "signature": "bool uart_parse_byte(uart_parser_t *p, uint8_t byte)",
+      "examples": [
+        {
+          "in": "AA 03 11 22 33 00",
+          "out": "true, payload 11 22 33"
+        },
+        {
+          "in": "AA 02 01 02 FF (cksum should be 03)",
+          "out": "false, bad_packets=1"
+        }
+      ],
+      "hints": [
+        "상태: IDLE, LEN, DATA, CKSUM.",
+        "LEN 에서 1..MAX 범위 밖이면 IDLE 로 폐기 (오버플로 방지).",
+        "DATA 에서 러닝 XOR, idx==len 이면 CKSUM 으로.",
+        "CKSUM 에서 항상 IDLE 로 복귀 후 match 면 good++, 아니면 bad++."
+      ],
+      "solution": "bool uart_parse_byte(uart_parser_t *p, uint8_t byte){\n    if (!p) return false;\n    switch (p->state){\n        case P_IDLE:\n            if (byte == 0xAA) p->state = P_LEN;\n            break;\n        case P_LEN:\n            if (byte >= 1 && byte <= UART_MAX_DATA){\n                p->len = byte; p->idx = 0; p->checksum = 0; p->state = P_DATA;\n            } else { p->state = P_IDLE; }\n            break;\n        case P_DATA:\n            p->data[p->idx++] = byte;\n            p->checksum ^= byte;\n            if (p->idx >= p->len) p->state = P_CKSUM;\n            break;\n        case P_CKSUM:\n            p->state = P_IDLE;\n            if (byte == p->checksum){\n                memcpy(p->out_data, p->data, p->len);\n                p->out_len = p->len; p->good_packets++;\n                return true;\n            }\n            p->bad_packets++;\n            break;\n    }\n    return false;\n}",
+      "explanation_ko": "IDLE 은 sync(0xAA)를 만날 때까지 바이트를 버려 스트림 중간에서도 재동기화한다. LEN 에서 길이를 1..MAX 로 검증해 data[] 오버플로를 막는다(신뢰 못 할 원격 값 방어). DATA 는 저장하며 러닝 XOR 을 갱신하고, len 개를 다 받으면 CKSUM 에서 무결성을 검사한다. 완료 시 out 버퍼로 복사해 조립 버퍼와 분리하고, 어느 경우든 IDLE 로 돌아가 다음 프레임을 곧장 받는다.",
+      "complexity": "O(1) per byte, O(MAX) space",
+      "pitfalls": [
+        "len 미검증 → data[idx++] 배열 오버플로(원격 취약점)",
+        "완료 후 IDLE 복귀 누락 → 재동기화 실패",
+        "checksum 초기화(=0)를 LEN 에서 안 해 이전 값 잔존",
+        "부분 수신(바이트 단위)에서 상태 보존 실패"
+      ],
+      "anduril_context": "드론 텔레메트리/명령 링크 프레이밍, MAVLink 유사 파서, GPS/IMU 시리얼 스트림."
+    },
+    {
+      "num": 79,
+      "slug": "traffic_light_fsm",
+      "title_ko": "신호등 제어 FSM",
+      "title_en": "Traffic-light FSM",
+      "difficulty": "easy",
+      "tags": [
+        "timer",
+        "real-time",
+        "cycle"
+      ],
+      "prompt_ko": "타이머 기반 신호등. RED->GREEN->YELLOW->RED 순환, 각 상태는 자기 지속시간(tick)을 가진다. tl_tick() 이 매 tick 카운트다운하고 0 도달 시 다음 상태로 전이+타이머 재장전.",
+      "prompt_en": "Timer-based traffic light. RED->GREEN->YELLOW->RED, each with its own duration. tl_tick() counts down and transitions + reloads on reaching 0.",
+      "signature": "void tl_tick(tl_fsm_t *fsm)",
+      "examples": [
+        {
+          "in": "red2 green2 yellow1, tick x6",
+          "out": "R G G Y R R"
+        }
+      ],
+      "hints": [
+        "--timer <= 0 이면 전이.",
+        "전이 시 다음 상태의 지속시간으로 timer 재장전.",
+        "default 케이스로 안전 상태(RED) 복귀."
+      ],
+      "solution": "void tl_tick(tl_fsm_t *fsm){\n    if (!fsm) return;\n    if (--fsm->timer <= 0){\n        switch (fsm->state){\n            case TL_RED:    fsm->state = TL_GREEN;  fsm->timer = fsm->green_t;  break;\n            case TL_GREEN:  fsm->state = TL_YELLOW; fsm->timer = fsm->yellow_t; break;\n            case TL_YELLOW: fsm->state = TL_RED;    fsm->timer = fsm->red_t;    break;\n            default:        fsm->state = TL_RED;    fsm->timer = fsm->red_t;    break;\n        }\n    }\n}",
+      "explanation_ko": "각 상태가 지속시간 카운터를 가지고, 매 tick 감소하다 0 이하가 되면 순환 순서의 다음 상태로 넘어가며 그 상태의 지속시간으로 타이머를 재장전한다. default 는 손상된 상태값을 안전 상태(RED)로 복구한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "타이머 재장전 누락 → 다음 tick 바로 재전이",
+        "전이 순서 실수(RED 다음 YELLOW 등)",
+        "default 없어 미정의 상태에서 멈춤"
+      ],
+      "anduril_context": "주기적 시퀀서, LED 상태 표시, 타임슬롯 스케줄러의 기본형."
+    },
+    {
+      "num": 80,
+      "slug": "mealy_vs_moore",
+      "title_ko": "Mealy vs Moore ('11' 검출기)",
+      "title_en": "Mealy vs Moore ('11' detector)",
+      "difficulty": "medium",
+      "tags": [
+        "mealy",
+        "moore",
+        "sequence-detector",
+        "concept"
+      ],
+      "prompt_ko": "overlapping '11' 검출기를 Moore(출력=f(상태), 3상태)와 Mealy(출력=f(상태,입력), 2상태)로 각각 구현하라. 두 step 함수 모두 (전이 후 기준) 출력을 반환.",
+      "prompt_en": "Implement an overlapping '11' detector as both Moore (output=f(state), 3 states) and Mealy (output=f(state,input), 2 states). Both step functions return the output.",
+      "signature": "int moore_step(moore_fsm_t *m, int bit); int mealy_step(mealy_fsm_t *m, int bit)",
+      "examples": [
+        {
+          "in": "in = 0 1 1 0 1 1 1",
+          "out": "both: 0 0 1 0 0 1 1"
+        }
+      ],
+      "hints": [
+        "Moore: S0->S1->S2, 출력 = (state==S2). 겹침 위해 S2 에서 1이면 S2 유지.",
+        "Mealy: S0->S1, 출력 = (state==S1 && bit==1).",
+        "같은 검출 벡터가 나오지만 Mealy 는 상태가 하나 적다."
+      ],
+      "solution": "int moore_step(moore_fsm_t *m, int bit){\n    if (!m) return 0;\n    switch (m->state){\n        case MO_S0: m->state = bit?MO_S1:MO_S0; break;\n        case MO_S1: m->state = bit?MO_S2:MO_S0; break;\n        case MO_S2: m->state = bit?MO_S2:MO_S0; break;\n    }\n    return (m->state==MO_S2)?1:0;\n}\n\nint mealy_step(mealy_fsm_t *m, int bit){\n    if (!m) return 0;\n    int out = 0;\n    switch (m->state){\n        case ME_S0: m->state = bit?ME_S1:ME_S0; out = 0; break;\n        case ME_S1: out = bit?1:0; m->state = bit?ME_S1:ME_S0; break;\n    }\n    return out;\n}",
+      "explanation_ko": "Moore 는 '11 을 봤다' 라는 전용 상태 S2 를 두고 출력을 상태만의 함수로 낸다 — 상태가 하나 더 필요하지만 출력이 상태에 고정돼 예측 가능/글리치 없음. Mealy 는 S1(1을 하나 봄)에서 입력이 1이면 그 자리에서 출력 1을 내므로 상태 2개로 충분하고 반응이 즉각적이다. 겹침 검출을 위해 검출 후에도 마지막 1을 S1/S2 로 유지한다.",
+      "complexity": "O(1) per input, O(1) space",
+      "pitfalls": [
+        "Mealy 출력을 전이 후 상태로 계산해 한 박자 밀림",
+        "겹침(overlap) 처리 안 해 '111' 에서 검출 누락",
+        "Moore 에서 S2->(0)->S0 재시작 안 하면 오검출"
+      ],
+      "anduril_context": "비트 스트림 패턴/프리앰블 검출, 시리얼 프로토콜 sync 워드 인식."
+    },
+    {
+      "num": 81,
+      "slug": "hierarchical_state_machine",
+      "title_ko": "계층적 상태 기계 (HSM)",
+      "title_en": "Hierarchical state machine (HSM)",
+      "difficulty": "medium",
+      "tags": [
+        "hsm",
+        "superstate",
+        "event-bubbling",
+        "concept"
+      ],
+      "prompt_ko": "leaf 상태 OFF / (superstate ON 내부) IDLE, RUN. leaf 가 처리 못한 이벤트는 부모 ON 으로 버블링. EVT_POWER: OFF->IDLE(leaf), IDLE/RUN->OFF(부모). START/STOP 은 leaf 특화. 처리 레벨을 반환하라.",
+      "prompt_en": "Leaf states OFF / (inside superstate ON) IDLE, RUN. Unhandled leaf events bubble to parent ON. EVT_POWER: OFF->IDLE(leaf), IDLE/RUN->OFF(parent). START/STOP are leaf-specific. Return where handled.",
+      "signature": "hsm_disp_t hsm_dispatch(hsm_t *h, hsm_evt_t e)",
+      "examples": [
+        {
+          "in": "RUN + EVT_POWER",
+          "out": "DISP_PARENT, state=OFF"
+        },
+        {
+          "in": "IDLE + EVT_START",
+          "out": "DISP_LEAF, state=RUN"
+        }
+      ],
+      "hints": [
+        "먼저 leaf(현재 상태)에서 이벤트 처리 시도.",
+        "leaf 가 처리 안 하면(break) 부모 ON 로 위임.",
+        "부모 ON 은 IDLE/RUN 에서 EVT_POWER 를 잡아 OFF 로."
+      ],
+      "solution": "hsm_disp_t hsm_dispatch(hsm_t *h, hsm_evt_t e){\n    if (!h) return DISP_UNHANDLED;\n    switch (h->state){\n        case ST_OFF:\n            if (e==EVT_POWER){ h->state=ST_IDLE; return DISP_LEAF; }\n            return DISP_UNHANDLED;\n        case ST_IDLE:\n            if (e==EVT_START){ h->state=ST_RUN; return DISP_LEAF; }\n            break;\n        case ST_RUN:\n            if (e==EVT_STOP){ h->state=ST_IDLE; return DISP_LEAF; }\n            break;\n    }\n    if (h->state==ST_IDLE || h->state==ST_RUN){\n        if (e==EVT_POWER){ h->state=ST_OFF; return DISP_PARENT; }\n    }\n    return DISP_UNHANDLED;\n}",
+      "explanation_ko": "디스패치는 자식(leaf) 핸들러를 먼저 시도하고, 처리하지 못하면 부모 superstate 로 올라가 위임한다. EVT_POWER 같은 공통 이벤트를 부모 한 곳에만 정의하면 IDLE·RUN 각각에 중복 작성할 필요가 없다 — 이것이 HSM 이 상태 폭발을 줄이는 핵심. 반환값(LEAF/PARENT/UNHANDLED)으로 어느 레벨이 처리했는지 검증한다.",
+      "complexity": "O(depth) per event, O(1) space",
+      "pitfalls": [
+        "버블링 없이 각 상태에 공통 전이 중복 작성",
+        "부모/자식 처리 우선순위 혼동",
+        "진짜 HSM 은 entry/exit 를 조상 경로까지 실행 — 단순화 주의"
+      ],
+      "anduril_context": "비행 모드 상태(ARMED 하위 TAKEOFF/MISSION/RTL), FAILSAFE 를 부모가 가로채는 구조."
+    },
+    {
+      "num": 82,
+      "slug": "entry_exit_actions",
+      "title_ko": "entry/exit 액션 FSM",
+      "title_en": "Entry/exit action FSM",
+      "difficulty": "easy",
+      "tags": [
+        "entry-exit",
+        "action",
+        "lifecycle"
+      ],
+      "prompt_ko": "전이 시 exit(old)->entry(new) 를 자동 호출하라. 자기전이(new==old)는 무동작. 액션은 trace 문자열에 토큰을 남긴다(진입 대문자, 이탈 소문자).",
+      "prompt_en": "On transition, call exit(old)->entry(new) automatically. Self-transition (new==old) is a no-op. Actions append tokens to a trace (entry uppercase, exit lowercase).",
+      "signature": "void eea_transition(eea_fsm_t *f, eea_state_t next)",
+      "examples": [
+        {
+          "in": "init; ->RUN ->STOP ->IDLE",
+          "out": "trace 'IiRrSsI'"
+        },
+        {
+          "in": "->same state",
+          "out": "no tokens"
+        }
+      ],
+      "hints": [
+        "init 은 초기 상태의 entry 만 호출('I').",
+        "state != next 일 때만 exit->전이->entry.",
+        "제공된 eea_entry/eea_exit 헬퍼를 사용."
+      ],
+      "solution": "void eea_init(eea_fsm_t *f){\n    if (!f) return;\n    f->state = E_IDLE; f->trace[0]='\\0'; f->trace_len = 0;\n    eea_entry(f, E_IDLE);\n}\n\nvoid eea_transition(eea_fsm_t *f, eea_state_t next){\n    if (!f || next >= E_COUNT) return;\n    if (f->state != next){\n        eea_exit(f, f->state);\n        f->state = next;\n        eea_entry(f, next);\n    }\n}",
+      "explanation_ko": "전이는 반드시 exit(현재)->상태변경->entry(다음) 순서로 일어난다. 이 순서 덕분에 이전 상태의 정리(타이머 정지, DMA off)가 새 상태의 준비보다 먼저 실행돼 리소스가 겹치지 않는다. 자기전이에서 exit/entry 를 또 부르면 리소스를 이중으로 건드릴 수 있어 무동작으로 둔다(정책에 따라 재진입 허용도 가능).",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "자기전이에서 exit/entry 재실행 → 이중 해제/재초기화",
+        "exit/entry 순서 뒤바뀜 → 리소스 겹침",
+        "init 에서 초기 상태 entry 누락"
+      ],
+      "anduril_context": "상태별 타이머/DMA/센서 전원 관리, 모드 전환 시 리소스 lifecycle 자동화."
+    },
+    {
+      "num": 83,
+      "slug": "guard_conditions",
+      "title_ko": "guard 조건 FSM",
+      "title_en": "Guard condition FSM",
+      "difficulty": "easy",
+      "tags": [
+        "guard",
+        "condition",
+        "branch"
+      ],
+      "prompt_ko": "IDLE 에서 RUN 이벤트 시 guard(value>0)로 분기: 참이면 RUN, 거짓이면 ERROR. RESET 이벤트는 어디서든 IDLE 로. 전이 후 상태를 반환.",
+      "prompt_en": "On RUN event in IDLE, branch by guard (value>0): RUN if true, else ERROR. RESET returns to IDLE from anywhere. Return resulting state.",
+      "signature": "guard_state_t guard_update(guard_fsm_t *f, guard_evt_t ev)",
+      "examples": [
+        {
+          "in": "value=0, GEV_RUN",
+          "out": "G_ERROR"
+        },
+        {
+          "in": "value=5, GEV_RUN",
+          "out": "G_RUN"
+        }
+      ],
+      "hints": [
+        "guard 는 부수효과 없는 순수 술어(value>0).",
+        "IDLE 에서만 RUN 이벤트를 분기.",
+        "RUN/ERROR 에서 RESET -> IDLE."
+      ],
+      "solution": "guard_state_t guard_update(guard_fsm_t *f, guard_evt_t ev){\n    if (!f) return G_IDLE;\n    switch (f->state){\n        case G_IDLE:\n            if (ev==GEV_RUN)\n                f->state = (f->value > 0) ? G_RUN : G_ERROR;\n            break;\n        case G_RUN:\n        case G_ERROR:\n            if (ev==GEV_RESET) f->state = G_IDLE;\n            break;\n    }\n    return f->state;\n}",
+      "explanation_ko": "같은 RUN 이벤트라도 guard(value>0)의 참/거짓에 따라 전이 대상이 갈린다. guard 는 상태를 바꾸지 않는 순수 조건이어야 재현성이 보장된다. RESET 은 RUN·ERROR 어디서든 IDLE 로 복귀시키는 공통 전이다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "guard 안에서 부수효과(상태 변경) → 재현 불가 버그",
+        "guard 실패 경로(ERROR) 누락",
+        "여러 guard 우선순위/배타성 미정의"
+      ],
+      "anduril_context": "arm 조건 검사(배터리/GPS lock/센서 healthy), 안전 조건 만족 시에만 상태 진입."
+    },
+    {
+      "num": 84,
+      "slug": "event_queue_fsm",
+      "title_ko": "이벤트 큐 FSM",
+      "title_en": "Event-queue FSM",
+      "difficulty": "medium",
+      "tags": [
+        "event-queue",
+        "circular-buffer",
+        "isr-decouple"
+      ],
+      "prompt_ko": "원형 버퍼 이벤트 큐(push/pop, full/empty)와 이를 소비하는 FSM 을 구현하라. ISR 이 push, main 이 pop 해서 FSM 에 주입하는 디커플 패턴. IDLE/RUN/ERROR 전이.",
+      "prompt_en": "Implement a circular-buffer event queue (push/pop, full/empty) and an FSM that consumes it. ISR pushes, main pops and feeds the FSM. IDLE/RUN/ERROR transitions.",
+      "signature": "bool evq_push(event_queue_t*, event_t); bool evq_pop(event_queue_t*, event_t*); q_state_t evq_fsm_handle(evq_fsm_t*, const event_t*)",
+      "examples": [
+        {
+          "in": "START ERROR STOP START STOP",
+          "out": "final state Q_IDLE"
+        },
+        {
+          "in": "push 8 into size-8, then 9th",
+          "out": "9th rejected"
+        }
+      ],
+      "hints": [
+        "count 필드로 full(==SIZE)/empty(==0) 판정.",
+        "head 는 쓰기, tail 은 읽기, 각각 %SIZE wrap.",
+        "FSM: IDLE:START->RUN, RUN:STOP->IDLE|ERROR->ERROR, ERROR:STOP->IDLE."
+      ],
+      "solution": "bool evq_push(event_queue_t *q, event_t ev){\n    if (!q || q->count == EVQ_SIZE) return false;\n    q->buffer[q->head] = ev;\n    q->head = (q->head + 1) % EVQ_SIZE;\n    q->count++;\n    return true;\n}\nbool evq_pop(event_queue_t *q, event_t *out){\n    if (!q || !out || q->count == 0) return false;\n    *out = q->buffer[q->tail];\n    q->tail = (q->tail + 1) % EVQ_SIZE;\n    q->count--;\n    return true;\n}\nq_state_t evq_fsm_handle(evq_fsm_t *f, const event_t *ev){\n    if (!f || !ev) return Q_IDLE;\n    switch (f->state){\n        case Q_IDLE:  if (ev->type==EV_START) f->state=Q_RUN; break;\n        case Q_RUN:   if (ev->type==EV_STOP) f->state=Q_IDLE;\n                      else if (ev->type==EV_ERROR) f->state=Q_ERROR; break;\n        case Q_ERROR: if (ev->type==EV_STOP) f->state=Q_IDLE; break;\n    }\n    return f->state;\n}",
+      "explanation_ko": "큐는 head(생산)와 tail(소비)를 %SIZE 로 순환시키고 count 로 full/empty 를 구분한다. ISR 은 짧게 push 만 하고, 무거운 FSM 로직은 main loop 에서 pop 후 실행해 ISR 지연과 재진입 문제를 없앤다(디커플). FSM 은 이벤트 타입에 따라 상태를 옮긴다.",
+      "complexity": "push/pop O(1), O(SIZE) space",
+      "pitfalls": [
+        "full/empty 판정 오류(head==tail 모호성)",
+        "ISR↔main 공유 시 volatile/원자성 누락",
+        "pop out 포인터 NULL 미검사",
+        "오버런 정책(거부 vs 덮어쓰기) 미정의"
+      ],
+      "anduril_context": "UART/센서 ISR 이 이벤트를 큐잉, 제어 루프 FSM 이 비동기 처리 — ISR 디커플의 정석."
+    },
+    {
+      "num": 85,
+      "slug": "timeout_event_fsm",
+      "title_ko": "타임아웃 이벤트 FSM",
+      "title_en": "Timeout event FSM",
+      "difficulty": "easy",
+      "tags": [
+        "timeout",
+        "watchdog",
+        "recovery"
+      ],
+      "prompt_ko": "ACTIVE 상태에서 limit tick 동안 활동(event=1)이 없으면 TIMEOUT 으로. event=1 은 타이머 리셋, 0 은 무활동 tick. TIMEOUT 에서 event=1 이면 ACTIVE 로 복구. 전이 후 상태 반환.",
+      "prompt_en": "In ACTIVE, if no activity (event=1) for limit ticks -> TIMEOUT. event=1 resets timer, 0 is an idle tick. From TIMEOUT, event=1 recovers to ACTIVE. Return resulting state.",
+      "signature": "to_state_t timeout_update(timeout_fsm_t *f, int event)",
+      "examples": [
+        {
+          "in": "limit=3, events 0 1 0 0 0",
+          "out": "IDLE ACTIVE ACTIVE ACTIVE TIMEOUT"
+        },
+        {
+          "in": "continuous 1 0 1 0...",
+          "out": "never TIMEOUT"
+        }
+      ],
+      "hints": [
+        "IDLE: event==1 -> ACTIVE, timer=0.",
+        "ACTIVE: event==0 이면 ++timer>=limit -> TIMEOUT, event==1 이면 timer=0.",
+        "TIMEOUT: event==1 -> ACTIVE(복구)."
+      ],
+      "solution": "to_state_t timeout_update(timeout_fsm_t *f, int event){\n    if (!f) return TO_IDLE;\n    switch (f->state){\n        case TO_IDLE:\n            if (event==1){ f->state=TO_ACTIVE; f->timer=0; }\n            break;\n        case TO_ACTIVE:\n            if (event==0){ if (++f->timer >= f->limit) f->state=TO_TIMEOUT; }\n            else { f->timer = 0; }\n            break;\n        case TO_TIMEOUT:\n            if (event==1){ f->state=TO_ACTIVE; f->timer=0; }\n            break;\n    }\n    return f->state;\n}",
+      "explanation_ko": "ACTIVE 에서 활동(event=1)이 오면 타이머를 0 으로 리셋하고, 무활동 tick(0)이 쌓여 limit 에 도달하면 TIMEOUT 으로 전이한다. TIMEOUT 은 무응답을 나타내며 활동이 재개되면 ACTIVE 로 복구한다. 워치독/링크 유실 감지의 기본 골격이다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "활동 시 timer 리셋 누락 → 정상인데 타임아웃",
+        "limit off-by-one(>= vs >)",
+        "TIMEOUT 에서 복구 경로 누락 → 영구 정지"
+      ],
+      "anduril_context": "링크 유실/센서 무응답 감지 후 FAILSAFE(hover/RTL), 핸드셰이크 타임아웃, 워치독."
+    }
+  ]
+}

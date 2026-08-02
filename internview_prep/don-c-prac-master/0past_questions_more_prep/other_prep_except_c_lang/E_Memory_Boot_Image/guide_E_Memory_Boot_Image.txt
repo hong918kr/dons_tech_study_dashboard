@@ -1,0 +1,202 @@
+# E 블럭: Memory / Boot / Image 관리 실전 문제 세트
+
+임베디드/펌웨어 실무에서 자주 마주치는 메모리 배치, 부트 시퀀스, 펌웨어 이미지 관리, 안전 업데이트, secure boot 등  
+실제 MCU/SoC/SSD/네트워크/자동차 환경에서 빈출하는 실전 문제와 헤더/시그니처 템플릿입니다.  
+모든 문제는 15~30분 내 구현/설계/시그니처 초안이 가능하도록 설계되었습니다.
+
+---
+
+## 문제 목록 및 상세
+
+---
+
+### 1. Linker script 설계 연습: .text/.data/.bss/.noinit/.fast (SRAM bank 배치 가정)
+
+**상황/스토리:**  
+MCU/SoC에서 코드(.text), 초기화 데이터(.data), 미초기화(.bss/.noinit), 빠른 SRAM(.fast) 등 여러 메모리 영역을 효율적으로 배치해야 한다.  
+부트/업데이트/저전력/성능 요구에 따라 섹션별 배치와 속성, 오버플로 방지, alignment, bank별 분리 등이 필요하다.
+
+**요구사항:**  
+- .text/.data/.bss/.noinit/.fast 등 섹션 분리  
+- SRAM bank별 배치  
+- 오버플로/정렬/속성(RO/RW/ZI) 명시  
+- 부트로더/메인 구분  
+- 링커스크립트 주석 포함
+
+**헤더/시그니처 템플릿:**  
+(링커스크립트 예시, C 헤더는 필요시 메모리 map 구조체 등 추가)
+
+```ld
+/* example.ld */
+MEMORY
+{
+  FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 512K
+  SRAM1 (rwx) : ORIGIN = 0x20000000, LENGTH = 64K
+  SRAM2 (rwx) : ORIGIN = 0x20010000, LENGTH = 64K
+  FAST  (rwx) : ORIGIN = 0x20020000, LENGTH = 16K
+}
+
+SECTIONS
+{
+  .text : { *(.text*) } > FLASH
+  .data : AT (ADDR(.text) + SIZEOF(.text)) { *(.data*) } > SRAM1
+  .bss  : { *(.bss*) } > SRAM1
+  .noinit (NOLOAD) : { *(.noinit*) } > SRAM2
+  .fast : { *(.fast*) } > FAST
+}
+```
+
+---
+
+### 2. MPU region planner (겹침 검증, 접근 플래그)
+
+**상황/스토리:**  
+RTOS/펌웨어에서 MPU(Memory Protection Unit)로 각 영역의 접근 권한을 설정할 때, 영역 겹침(overlap) 검증과 접근 플래그(RW/X/No-Exec 등) 관리가 필요하다.
+
+**요구사항:**  
+- 영역 등록/삭제  
+- 겹침(overlap) 검증  
+- 접근 플래그(RW/X/No-Exec)  
+- 최대 region 수 제한  
+- 설정/검증 API
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef MPU_PLANNER_H
+#define MPU_PLANNER_H
+#include <stdint.h>
+
+#define MPU_MAX_REGIONS 8
+
+typedef struct {
+    uint32_t base;
+    uint32_t size;
+    uint32_t flags; // bit0:RW, bit1:X, bit2:No-Exec 등
+} mpu_region_t;
+
+typedef struct {
+    mpu_region_t regions[MPU_MAX_REGIONS];
+    uint8_t count;
+} mpu_planner_t;
+
+void mpu_planner_init(mpu_planner_t* p);
+int  mpu_add_region(mpu_planner_t* p, uint32_t base, uint32_t size, uint32_t flags);
+int  mpu_remove_region(mpu_planner_t* p, uint32_t base);
+int  mpu_check_overlap(const mpu_planner_t* p, uint32_t base, uint32_t size);
+#endif
+```
+
+---
+
+### 3. A/B firmware slot + rollback flag 관리
+
+**상황/스토리:**  
+OTA/펌웨어 업데이트에서 A/B 슬롯 구조를 사용해, 업데이트 실패 시 안전하게 롤백할 수 있도록 플래그/상태를 관리한다.
+
+**요구사항:**  
+- A/B 슬롯 상태 구조  
+- 롤백 플래그/커밋 마커  
+- 부트 시 활성 슬롯 선택  
+- 업데이트/커밋/롤백 API  
+- 플래시/EEPROM 연동
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef FW_SLOT_H
+#define FW_SLOT_H
+#include <stdint.h>
+
+typedef enum { SLOT_A, SLOT_B } fw_slot_t;
+
+typedef struct {
+    fw_slot_t active;
+    uint8_t   rollback_flag;
+    uint8_t   commit_flag;
+} fw_slot_state_t;
+
+void fw_slot_init(fw_slot_state_t* s);
+int  fw_slot_set_active(fw_slot_state_t* s, fw_slot_t slot);
+int  fw_slot_commit(fw_slot_state_t* s);
+int  fw_slot_rollback(fw_slot_state_t* s);
+#endif
+```
+
+---
+
+### 4. Secure boot hash + manifest 검증 (SHA256 stub, version anti-rollback)
+
+**상황/스토리:**  
+부트로더에서 펌웨어 이미지의 무결성/정합성을 검증하기 위해, SHA256 해시와 manifest(버전, 길이, CRC 등) 체크, anti-rollback(버전 다운그레이드 방지) 기능이 필요하다.
+
+**요구사항:**  
+- SHA256 해시(stub 또는 외부 라이브러리)  
+- manifest 구조체(버전, CRC, 길이 등)  
+- anti-rollback(최신 버전 기록)  
+- 검증/실패시 에러 코드 반환
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef SECURE_BOOT_H
+#define SECURE_BOOT_H
+#include <stdint.h>
+
+typedef struct {
+    uint32_t version;
+    uint32_t length;
+    uint32_t crc;
+    uint8_t  hash[32];
+} fw_manifest_t;
+
+int sha256_stub(const void* data, uint32_t len, uint8_t* out32);
+int fw_manifest_check(const fw_manifest_t* m, const void* fw, uint32_t fw_len, uint32_t min_version);
+#endif
+```
+
+---
+
+### 5. Heap fragmentation inspection 유틸 (연속 free 블록 통계)
+
+**상황/스토리:**  
+임베디드 시스템에서 동적 할당(heap) 사용 시, free 블록의 단편화(fragmentation) 상태를 진단하고, 연속 free 블록 통계, 최대/최소/평균 길이 등을 산출한다.
+
+**요구사항:**  
+- heap 블록 구조체  
+- free 블록 탐색  
+- 연속 free 블록 통계(최대/최소/평균)  
+- 단편화 지표 산출  
+- 진단/리포트 API
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef HEAP_INSPECT_H
+#define HEAP_INSPECT_H
+#include <stdint.h>
+
+typedef struct heap_blk {
+    uint32_t size;
+    uint8_t  free;
+    struct heap_blk* next;
+} heap_blk_t;
+
+typedef struct {
+    uint32_t total_free;
+    uint32_t max_free;
+    uint32_t min_free;
+    uint32_t avg_free;
+    uint32_t free_count;
+} heap_stat_t;
+
+void heap_inspect(heap_blk_t* head, heap_stat_t* stat);
+#endif
+```
+
+---
+
+## 연습 포인트 요약
+
+- Linker/MPU: 메모리 배치, 접근 권한, 오버플로/겹침 검증
+- Boot/Image: A/B 슬롯, 롤백, 커밋, secure hash, anti-rollback
+- Heap: 단편화 진단, free 블록 통계, 동적 할당 안전성
+
+필요 시 각 항목별 구현/테스트 템플릿도 추가 제공 가능.  
+원하는 번호를 지정하면 skeleton 코드/테스트 하네스 제공 가능.

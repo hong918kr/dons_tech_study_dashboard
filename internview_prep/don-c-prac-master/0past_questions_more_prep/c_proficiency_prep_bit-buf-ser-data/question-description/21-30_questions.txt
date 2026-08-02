@@ -1,0 +1,262 @@
+// 21. 안전한 문자열 빌더
+/*
+설명:
+임베디드 장치에서 로그 메시지, 진단 문자열, 네트워크 패킷 조립 등에서 동적 문자열을 안전하게 생성해야 할 때가 많습니다.
+표준 sprintf/snprintf는 버퍼 오버플로 위험이 있고, 반복적으로 문자열을 붙일 때 매번 길이 계산이 번거롭습니다.
+이 빌더는 내부 버퍼 크기를 넘지 않으면서, 여러 번 append를 안전하게 지원해야 합니다.
+예시 상황:
+- UART 로그 버퍼에 여러 센서 값을 포맷해서 붙이기
+- BLE 광고 패킷 조립
+요구사항:
+- NUL-종단 보장
+- append 시 남은 공간만큼만 기록, 잘린 경우 전체 길이 반환
+- 길이 초과 시 오버플로 방지
+- reset API 제공
+- snprintf 기반 구현, va_list 지원
+*/
+#ifndef SAFE_STRBUILDER_H
+#define SAFE_STRBUILDER_H
+#include <stddef.h>
+#include <stdarg.h>
+typedef struct {
+    char* buf;
+    size_t cap;
+    size_t len;
+} safe_strbuilder_t;
+void safe_strbuilder_init(safe_strbuilder_t* sb, char* buf, size_t cap);
+size_t safe_strbuilder_append(safe_strbuilder_t* sb, const char* fmt, ...);
+size_t safe_strbuilder_appendv(safe_strbuilder_t* sb, const char* fmt, va_list ap);
+void safe_strbuilder_reset(safe_strbuilder_t* sb);
+#endif
+
+// 22. 소형 INI 파서
+/*
+설명:
+임베디드 장치의 설정(예: 네트워크, 센서 파라미터, 진단 모드 등)을 텍스트 파일(ini)로 저장/로드하는 경우가 많습니다.
+메모리 제약 환경에서, 섹션/키/값을 빠르게 파싱하고, 주석/공백/중복 키 처리 등도 필요합니다.
+예시 상황:
+- SD카드/EEPROM에서 설정값 읽기
+- 부트로더/펌웨어에서 설정값 동적 적용
+요구사항:
+- [section] 구문, key=value 파싱
+- #, ; 주석 무시
+- 공백/빈줄 무시
+- 중복 키/섹션 처리(마지막 값 우선)
+- 버퍼 소유권 명확화(복사/포인터)
+- 메모리 해제 API 제공
+*/
+#ifndef MINI_INI_H
+#define MINI_INI_H
+#include <stddef.h>
+typedef struct mini_ini mini_ini_t;
+mini_ini_t* mini_ini_parse(const char* text, size_t len);
+const char* mini_ini_get(mini_ini_t* ini, const char* section, const char* key);
+void mini_ini_free(mini_ini_t* ini);
+#endif
+
+// 23. 키-값 KV 바이너리 포맷
+/*
+설명:
+센서 데이터, 이벤트 로그, 설정 등에서 고정 길이 key(2B), 길이(2B), 값(가변) 구조의 바이너리 레코드를 연속 저장하는 경우가 많습니다.
+빠른 검색, 손상 데이터 방어, 부분 파싱 등이 필요합니다.
+예시 상황:
+- 플래시/EEPROM에 이벤트 로그 저장
+- CAN 진단 메시지 파싱
+요구사항:
+- key로 빠른 검색(find), 전체 순회(scan)
+- 레코드 길이/버퍼 경계 체크
+- 손상/불완전 레코드 방어
+- value는 버퍼 내 포인터(복사 X)
+*/
+#ifndef KV_BIN_H
+#define KV_BIN_H
+#include <stddef.h>
+#include <stdint.h>
+typedef struct {
+    uint16_t key;
+    uint16_t len;
+    const uint8_t* value;
+} kv_bin_rec_t;
+int kv_bin_find(const uint8_t* buf, size_t buflen, uint16_t key, kv_bin_rec_t* rec);
+int kv_bin_scan(const uint8_t* buf, size_t buflen, kv_bin_rec_t* rec, size_t* offset);
+#endif
+
+// 24. 슬라이딩 윈도우 평균/최댓값
+/*
+설명:
+센서 노이즈 필터링, 이상치 감지, 신호 처리 등에서 최근 N개 값의 평균/최댓값을 빠르게 구해야 합니다.
+단순 합산/최댓값은 느리므로, O(1) 알고리즘(누산기, 덱 등) 활용이 필요합니다.
+예시 상황:
+- 온도 센서 이동평균
+- 진동 신호의 최근 최대값
+요구사항:
+- 윈도우 크기 N 지정
+- O(1) push/get
+- 평균: 누적합/순환버퍼
+- 최댓값: 덱(deque) 활용
+- 초기화/리셋 지원
+*/
+#ifndef SLIDING_WIN_H
+#define SLIDING_WIN_H
+#include <stddef.h>
+typedef struct sliding_win_avg sliding_win_avg_t;
+typedef struct sliding_win_max sliding_win_max_t;
+void sliding_win_avg_init(sliding_win_avg_t* win, size_t window);
+void sliding_win_avg_push(sliding_win_avg_t* win, int val);
+double sliding_win_avg_get(const sliding_win_avg_t* win);
+void sliding_win_max_init(sliding_win_max_t* win, size_t window);
+void sliding_win_max_push(sliding_win_max_t* win, int val);
+int sliding_win_max_get(const sliding_win_max_t* win);
+#endif
+
+// 25. 소프트웨어 타이머(틱 기반)
+/*
+설명:
+RTOS 없는 MCU에서 여러 개의 타이머(예: 100ms마다 LED, 1s마다 센서 측정 등)를 관리해야 할 때,
+하드웨어 타이머 인터럽트에서 tick을 받아 소프트웨어 타이머를 관리합니다.
+랩어라운드, 콜백, 취소 등 robust한 구현이 필요합니다.
+예시 상황:
+- 주기적 센서 측정
+- 통신 타임아웃
+요구사항:
+- 다중 타이머 등록/취소
+- tick 랩어라운드 안전
+- 최소 힙/타이머 휠 등 효율적 구조
+- 콜백 함수, 사용자 데이터
+- 타이머 파괴자 제공
+*/
+#ifndef SOFT_TIMER_H
+#define SOFT_TIMER_H
+#include <stddef.h>
+#include <stdint.h>
+typedef struct soft_timer soft_timer_t;
+typedef void (*soft_timer_cb_t)(void*);
+soft_timer_t* soft_timer_create(uint32_t now, uint32_t tick_hz);
+int soft_timer_start(soft_timer_t* t, uint32_t delay_ticks, soft_timer_cb_t cb, void* user);
+void soft_timer_tick(soft_timer_t* t, uint32_t now);
+void soft_timer_cancel(soft_timer_t* t, soft_timer_cb_t cb, void* user);
+void soft_timer_destroy(soft_timer_t* t);
+#endif
+
+// 26. Hamming(7,4) 코딩
+/*
+설명:
+노이즈 많은 환경(UART, RF 등)에서 단일 비트 오류를 검출/정정할 수 있는 Hamming(7,4) 코드를 구현합니다.
+4비트 데이터 → 7비트 코드로 인코딩, 1비트 오류까지 정정.
+예시 상황:
+- 무선 센서 데이터 송수신
+- 플래시 메모리 오류 정정
+요구사항:
+- 인코딩: 4비트 데이터 → 7비트 코드
+- 디코딩: 7비트 코드 → 4비트 데이터, 오류 위치 반환
+- 패리티 비트 계산
+- 단일 비트 오류 정정
+*/
+#ifndef HAMMING74_H
+#define HAMMING74_H
+#include <stdint.h>
+uint8_t hamming74_encode(uint8_t nibble);
+int hamming74_decode(uint8_t code, uint8_t* nibble);
+#endif
+
+// 27. 파리티 비트 계산기(짝/홀/스틱)
+/*
+설명:
+통신 프로토콜(UART, CAN 등)에서 패리티 비트(짝수/홀수/고정)를 계산해야 합니다.
+빠른 계산을 위해 테이블/비트트윗 등 최적화도 필요합니다.
+예시 상황:
+- UART 송수신 패리티 체크
+- 데이터 무결성 검증
+요구사항:
+- 8/16/32비트 입력 지원
+- 짝수/홀수/스틱 패리티
+- 테이블/비트 연산 두 방식
+- 경계값 테스트
+*/
+#ifndef PARITY_H
+#define PARITY_H
+#include <stdint.h>
+uint8_t parity_even(uint32_t v);
+uint8_t parity_odd(uint32_t v);
+uint8_t parity_stick(uint32_t v, uint8_t stick);
+#endif
+
+// 28. 비트 리버설(reverse bits)
+/*
+설명:
+센서 데이터, CRC, 암호화 등에서 비트 순서를 뒤집어야 하는 경우가 있습니다.
+하드웨어 없이 소프트웨어로 8/16/32/64비트 리버스 구현.
+예시 상황:
+- SPI, I2C 등 LSB/MSB 변환
+- CRC/해시 프리프로세싱
+요구사항:
+- 8/16/32/64비트 지원
+- 룩업 테이블/수학적 알고리즘 두 방식
+- 속도/코드크기 비교
+- 경계값 테스트
+*/
+#ifndef BITREV_H
+#define BITREV_H
+#include <stdint.h>
+uint8_t  bitrev8(uint8_t v);
+uint16_t bitrev16(uint16_t v);
+uint32_t bitrev32(uint32_t v);
+uint64_t bitrev64(uint64_t v);
+#endif
+
+// 29. 우선순위 큐(이진 힙)
+/*
+설명:
+임베디드 스케줄러, 이벤트 처리, 경로 탐색 등에서 우선순위 큐가 필요합니다.
+고정/가변 용량, push/pop/decrease-key(선택) 지원.
+예시 상황:
+- 실시간 태스크 스케줄링
+- 센서 이벤트 우선순위 처리
+요구사항:
+- 이진 힙 기반
+- push/pop/peek
+- decrease-key(선택)
+- 용량 초과/언더플로 처리
+- 바운드 체크
+*/
+#ifndef BINHEAP_H
+#define BINHEAP_H
+#include <stddef.h>
+typedef struct binheap binheap_t;
+binheap_t* binheap_create(size_t cap);
+void binheap_destroy(binheap_t* h);
+int binheap_push(binheap_t* h, int val);
+int binheap_pop(binheap_t* h, int* val);
+int binheap_peek(const binheap_t* h, int* val);
+int binheap_decrease_key(binheap_t* h, size_t idx, int new_val); // 선택
+size_t binheap_size(const binheap_t* h);
+#endif
+
+// 30. 이벤트 큐(링버퍼 기반)
+/*
+설명:
+인터럽트(생산자)와 메인 루프(소비자) 간 이벤트 전달에 lock-free SPSC 큐가 널리 쓰입니다.
+메모리 장벽, 오버플로/언더플로, ISR 안전성 등도 중요합니다.
+예시 상황:
+- UART 수신 인터럽트 → 메인 루프
+- 센서 이벤트 → 처리 태스크
+요구사항:
+- SPSC lock-free
+- 메모리 장벽(volatile, barrier) 주석
+- 오버플로/언더플로 방지
+- 크기/상태 조회 API
+- ISR/메인루프 분리
+*/
+#ifndef EVENT_QUEUE_H
+#define EVENT_QUEUE_H
+#include <stddef.h>
+#include <stdint.h>
+typedef struct {
+    uint32_t events[32];
+    size_t head, tail;
+} event_queue_t;
+void event_queue_init(event_queue_t* q);
+int  event_queue_push(event_queue_t* q, uint32_t event); // ISR safe
+int  event_queue_pop(event_queue_t* q, uint32_t* event); // Main loop
+size_t event_queue_size(const event_queue_t* q);
+#endif

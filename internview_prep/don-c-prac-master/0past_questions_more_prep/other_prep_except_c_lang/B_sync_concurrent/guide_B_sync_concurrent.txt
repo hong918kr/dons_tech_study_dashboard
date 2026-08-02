@@ -1,0 +1,435 @@
+# RTOS & 스케줄링(A 블럭) 실전 문제 세트
+
+목표: RTOS / Bare-metal 환경에서 공통적으로 마주치는 경합 해결 패턴을 짧은 구현(15–30m)으로 연습.  
+초점: ISR ↔ Task 경계, 메모리 장벽, 대기 최소화, 원자성(atomic), 공정성(fairness), 자원 회수(safe reclamation) 기초.
+
+문제 목록(밀도↑ 우선순위 구성):
+1. Counting Semaphore (ISR-safe give, timeout 있는 take, 공정 큐)
+2. Binary Semaphore (fast path atomic, pending list)
+3. Ticket Lock vs TAS Spin Lock (차이 측정용 인터페이스)
+4. Recursive Mutex vs Non-Recursive Mutex (오용 검출)
+5. Priority Inheritance Mutex Skeleton (간소화 버전)
+6. Readers–Writers Lock (Writer 우선 정책)
+7. Sense-Reversing Barrier (정적 태스크 수)
+8. Condition Wait Primitive (조건 + mutex 조합, spurious 대비)
+9. Lock-free MPSC Ring Buffer (다중 생산자 → 단일 소비자)
+10. SPSC Cache-Friendly Ring (memory barrier 주석 강조)
+11. Hazard Pointer Skeleton (단일 도메인, 슬롯 재사용)
+12. Atomic Refcounted Object (finalizer 호출 보장)
+13. Work Queue / Deferred Executor (여러 생산자 enqueue, 단일 소비자 실행)
+14. Atomic Bitset Operations (test/set/clear/ffz/find-first-set)
+15. Epoch-Based Reclamation Mini (박스 구조체 retire 큐)
+
+(필요 시 9~15 중 선택 축소 가능)
+
+아래는 헤더/시그니처 템플릿. 플랫폼별 memory barrier는 추상화 매크로 사용.
+
+# 연습 포인트 요약
+
+- 1,2: 세마포어 → 대기 큐, ISR 안전 give, timeout 경로.
+- 3: 공정성(ticket) vs 단순성(TAS) → 캐시 invalidation 이해.
+- 4: 재귀 뮤텍스 남용 탐지, 비재귀 대비 차이.
+- 5: PI 간소화 → waiters priority bitmap 추적 후 복원.
+- 6: Writer starvation 방지 vs latency tradeoff.
+- 7: Barrier sense flip → false wake 방지.
+- 8: 조건 대기 설계 → predicate 재확인 패턴.
+- 9/10: Lock-free 큐 → 다중 생산 vs 단일 소비 memory ordering.
+- 11: Hazard pointer 기본 슬롯 + retire 스캔.
+- 12: Refcount 경합/ABA 방지 없이 기본 패턴 + destroy 타이밍.
+- 13: Work queue (MPSC)로 ISR/deferred 작업 전달.
+- 14: Atomic bitset → ID allocator, 리소스 매핑에 활용.
+- 15: Epoch 기반 안전 해제 skeleton → 늦은 회수 전략.
+
+원하는 항목 구현 상세 또는 테스트 하네스 필요 시 번호 지정 요청.
+
+---
+
+## 1. 고정 우선순위 프리엠프 스케줄러 (Ready Bitmap O(1) + Time Slice)
+
+**설명:**  
+임베디드 RTOS에서 여러 태스크를 우선순위 기반으로 스케줄링할 때, Ready Bitmap을 활용해 O(1)로 가장 높은 우선순위 태스크를 선택하고, Time Slice(할당 시간) 기반 선점(preemption)을 지원해야 한다.
+
+**요구사항:**  
+- 태스크 등록/삭제, 상태(READY/BLOCKED/SLEEPING/RUNNING) 관리  
+- Ready Bitmap 기반 O(1) 우선순위 선택  
+- Time Slice 만료 시 동일 우선순위 내에서 라운드로빈  
+- Tick ISR에서 wake/sleep 처리  
+- 태스크 구조체/스케줄러 구조체 분리
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef FP_SCHEDULER_H
+#define FP_SCHEDULER_H
+#include "rtos_types.h"
+
+#define RTOS_MAX_TASKS      16
+#define RTOS_MAX_PRIORITIES 32
+
+typedef enum { TASK_READY, TASK_BLOCKED, TASK_SLEEPING, TASK_RUNNING } task_state_t;
+
+typedef void (*task_entry_t)(void*);
+
+typedef struct {
+    uint8_t       used;
+    uint8_t       prio;          // 0 = highest
+    task_state_t  state;
+    rtos_tick_t   wake_tick;
+    task_entry_t  entry;
+    void*         arg;
+    void*         sp;
+    char          name[12];
+    uint32_t      time_slice_rem;
+} rtos_task_t;
+
+typedef struct {
+    rtos_task_t tasks[RTOS_MAX_TASKS];
+    uint32_t    ready_bitmap;
+    uint8_t     current_tid;
+    uint32_t    default_time_slice;
+} fp_sched_t;
+
+void fp_sched_init(fp_sched_t* s, uint32_t default_time_slice);
+int  fp_task_create(fp_sched_t* s, const char* name, task_entry_t fn, void* arg, uint8_t prio);
+void fp_task_block(fp_sched_t* s, int tid);
+void fp_task_wake(fp_sched_t* s, int tid);
+void fp_task_sleep_until(fp_sched_t* s, int tid, rtos_tick_t wake_tick);
+void fp_tick_isr(fp_sched_t* s, rtos_tick_t now);
+int  fp_schedule(fp_sched_t* s);
+rtos_task_t* fp_current(fp_sched_t* s);
+#endif
+```
+
+---
+
+## 2. Priority Inversion 재현 + Mutex Priority Inheritance 구현
+
+**설명:**  
+우선순위 역전(Priority Inversion) 상황을 재현하고, 이를 해결하기 위한 Priority Inheritance(P.I.)가 적용된 Mutex를 설계한다.
+
+**요구사항:**  
+- 태스크 우선순위/뮤텍스 소유자 추적  
+- 뮤텍스 대기 큐/우선순위 상승/복원  
+- get_prio/set_prio 콜백으로 외부 태스크 우선순위 조작  
+- 데드락/오용 방지
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef PI_MUTEX_H
+#define PI_MUTEX_H
+#include "rtos_types.h"
+
+typedef struct {
+    uint8_t locked;
+    uint8_t owner_tid;
+    uint32_t original_owner_prio;
+    uint32_t wait_mask;
+} pi_mutex_t;
+
+void pi_mutex_init(pi_mutex_t* m);
+int  pi_mutex_lock(pi_mutex_t* m, int tid, uint8_t (*get_prio)(int), int (*set_prio)(int,uint8_t));
+int  pi_mutex_unlock(pi_mutex_t* m, int tid, int (*set_prio)(int,uint8_t));
+#endif
+```
+
+---
+
+## 3. Tickless Idle 계산기 (다음 만료까지 슬립 길이 산출 + 보정)
+
+**설명:**  
+RTOS에서 불필요한 tick을 줄이기 위해, 다음 이벤트까지의 슬립 길이를 계산하고, 실제 슬립 후 tick 보정이 필요하다.
+
+**요구사항:**  
+- 모든 대기중 태스크/타이머의 가장 빠른 wake_tick 계산  
+- 슬립 안전 마진/최대 슬립 제한  
+- 슬립 후 tick 누락 보정
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef TICKLESS_IDLE_H
+#define TICKLESS_IDLE_H
+#include "rtos_types.h"
+
+typedef struct {
+    rtos_tick_t next_wake_tick;
+    rtos_tick_t safety_margin;
+    rtos_tick_t max_sleep_ticks;
+} tickless_ctx_t;
+
+rtos_tick_t tickless_compute_sleep(tickless_ctx_t* c, rtos_tick_t now, rtos_tick_t earliest_wake);
+void tickless_account(rtos_tick_t slept, rtos_tick_t* now_mut);
+#endif
+```
+
+---
+
+## 4. Deadline/Latency 모니터 (미스/지터 통계)
+
+**설명:**  
+주기 태스크의 deadline miss, 지터, worst lateness 등 실시간성 통계를 수집한다.
+
+**요구사항:**  
+- 태스크별 주기/데드라인/통계 구조  
+- release/complete 시점 기록  
+- miss/lateness/jitter 통계  
+- 통계 리포트 API
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef DEADLINE_MONITOR_H
+#define DEADLINE_MONITOR_H
+#include "rtos_types.h"
+
+#define DL_MAX_TASKS 16
+
+typedef struct {
+    uint8_t used;
+    rtos_tick_t period;
+    rtos_tick_t next_release;
+    rtos_tick_t deadline;
+    uint32_t miss_count;
+    rtos_tick_t worst_lateness;
+    rtos_tick_t total_jitter;
+    uint32_t sample_count;
+} dl_task_stat_t;
+
+typedef struct {
+    dl_task_stat_t stats[DL_MAX_TASKS];
+} dl_monitor_t;
+
+void dl_monitor_init(dl_monitor_t* m);
+int  dl_monitor_register(dl_monitor_t* m, int tid, rtos_tick_t period, rtos_tick_t deadline);
+void dl_on_release(dl_monitor_t* m, int tid, rtos_tick_t now);
+void dl_on_complete(dl_monitor_t* m, int tid, rtos_tick_t now);
+void dl_report(const dl_monitor_t* m);
+#endif
+```
+
+---
+
+## 5. EDF( Earliest Deadline First ) 미니 스케줄러 (타임휠 없는 소수 태스크)
+
+**설명:**  
+실시간 태스크 집합에서 가장 이른 데드라인을 가진 태스크를 선택하는 EDF 스케줄러를 구현한다.
+
+**요구사항:**  
+- 태스크별 abs_deadline/period/next_release 관리  
+- release/complete API  
+- 가장 이른 데드라인 태스크 선택
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef EDF_SCHED_H
+#define EDF_SCHED_H
+#include "rtos_types.h"
+
+#define EDF_MAX_TASKS 12
+
+typedef struct {
+    uint8_t  used;
+    uint8_t  runnable;
+    rtos_tick_t abs_deadline;
+    rtos_tick_t period;
+    rtos_tick_t next_release;
+} edf_task_t;
+
+typedef struct {
+    edf_task_t tasks[EDF_MAX_TASKS];
+    int current_tid;
+} edf_sched_t;
+
+void edf_init(edf_sched_t* s);
+int  edf_add_task(edf_sched_t* s, rtos_tick_t first_release, rtos_tick_t period);
+void edf_release(edf_sched_t* s, int tid, rtos_tick_t now);
+int  edf_pick_next(edf_sched_t* s);
+void edf_complete(edf_sched_t* s, int tid, rtos_tick_t now);
+#endif
+```
+
+---
+
+## 6. Rate Monotonic 설정 검증기 (주기 집합 → utilization/부정합 탐지)
+
+**설명:**  
+주기 태스크 집합의 실행시간/주기를 받아, RM 스케줄러에서 스케줄 가능 여부(이론적 bound)와 utilization을 계산한다.
+
+**요구사항:**  
+- 태스크별 WCET/주기 입력  
+- utilization 계산  
+- Liu & Layland bound 비교  
+- 결과 구조체 반환
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef RM_ANALYZER_H
+#define RM_ANALYZER_H
+#include "rtos_types.h"
+
+typedef struct {
+    rtos_tick_t C;
+    rtos_tick_t T;
+} rm_task_param_t;
+
+typedef struct {
+    float utilization;
+    int   schedulable_bound;
+} rm_result_t;
+
+rm_result_t rm_analyze(const rm_task_param_t* tasks, size_t count);
+#endif
+```
+
+---
+
+## 7. 소프트웨어 타이머 서비스(최소 힙 기반) + Tick ISR 연계
+
+**설명:**  
+여러 개의 소프트웨어 타이머를 최소 힙 구조로 관리하고, Tick ISR에서 만료/콜백을 처리한다.
+
+**요구사항:**  
+- 타이머 등록/취소/주기/만료 관리  
+- 최소 힙 기반 만료 우선순위  
+- Tick ISR에서 만료 타이머 콜백  
+- 타이머 구조체/매니저 분리
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef SW_TIMER_H
+#define SW_TIMER_H
+#include "rtos_types.h"
+
+#define SW_TIMER_MAX 32
+typedef void (*sw_timer_cb_t)(void*);
+
+typedef struct {
+    uint8_t      used;
+    rtos_tick_t  expire_tick;
+    rtos_tick_t  period;
+    sw_timer_cb_t cb;
+    void*        arg;
+} sw_timer_t;
+
+typedef struct {
+    sw_timer_t timers[SW_TIMER_MAX];
+    int heap[SW_TIMER_MAX];
+    size_t heap_size;
+} sw_timer_mgr_t;
+
+void sw_timer_init(sw_timer_mgr_t* m);
+int  sw_timer_start(sw_timer_mgr_t* m, rtos_tick_t now, rtos_tick_t delay, rtos_tick_t period, sw_timer_cb_t cb, void* arg);
+int  sw_timer_stop(sw_timer_mgr_t* m, int id);
+void sw_timer_tick(sw_timer_mgr_t* m, rtos_tick_t now);
+#endif
+```
+
+---
+
+## 8. 이벤트 플래그(Event Group) ANY/ALL Wait + Timeout
+
+**설명:**  
+여러 태스크가 이벤트 비트 그룹을 기다릴 때, ANY/ALL 조건과 타임아웃을 지원하는 이벤트 그룹을 구현한다.
+
+**요구사항:**  
+- 비트 단위 set/clear  
+- ANY/ALL 조건 대기  
+- 타임아웃 지원  
+- ISR/Task context 분리
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef EVENT_GROUP_H
+#define EVENT_GROUP_H
+#include "rtos_types.h"
+
+typedef struct {
+    volatile uint32_t bits;
+} event_group_t;
+
+void event_group_init(event_group_t* g);
+void event_group_set(event_group_t* g, uint32_t mask);
+void event_group_clear(event_group_t* g, uint32_t mask);
+
+int  event_group_wait_any(event_group_t* g, uint32_t mask, rtos_tick_t start, rtos_tick_t timeout_ticks, rtos_tick_t (*get_tick)(void));
+int  event_group_wait_all(event_group_t* g, uint32_t mask, rtos_tick_t start, rtos_tick_t timeout_ticks, rtos_tick_t (*get_tick)(void));
+
+#endif
+```
+
+---
+
+## 9. Priority Aging / Starvation 완화 전략 삽입용 Hook
+
+**설명:**  
+장기 대기 태스크의 starvation을 완화하기 위해, 대기 시간에 따라 우선순위를 일시적으로 상승시키는 aging hook을 구현한다.
+
+**요구사항:**  
+- 태스크별 대기 시간/기본 우선순위/현재 우선순위  
+- 임계치 초과 시 우선순위 boost  
+- 정책 적용/리셋 API
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef AGING_HOOK_H
+#define AGING_HOOK_H
+#include "rtos_types.h"
+
+typedef struct {
+    uint32_t wait_ticks;
+    uint8_t  base_prio;
+    uint8_t  current_prio;
+} aging_task_info_t;
+
+void aging_on_wait_tick(aging_task_info_t* info);
+void aging_apply_policy(aging_task_info_t* info, uint32_t threshold, uint8_t boost_limit);
+void aging_reset(aging_task_info_t* info);
+#endif
+```
+
+---
+
+## 10. 런타임 Trace & CPU 점유율 샘플러 (주기적 accounting)
+
+**설명:**  
+태스크 전환/이벤트 발생 시 타임스탬프와 이벤트를 기록하고, 태스크별 CPU 점유율을 주기적으로 샘플링한다.
+
+**요구사항:**  
+- 이벤트 로그 버퍼  
+- 태스크별 누적 실행 시간  
+- 스위치/스냅샷 API  
+- 점유율 계산
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef RUNTIME_TRACE_H
+#define RUNTIME_TRACE_H
+#include "rtos_types.h"
+
+#define TRACE_MAX_EVENTS 256
+
+typedef struct {
+    rtos_tick_t ts;
+    uint8_t     event_id;
+    uint8_t     arg;
+} trace_event_t;
+
+typedef struct {
+    trace_event_t buf[TRACE_MAX_EVENTS];
+    uint16_t head;
+    uint16_t count;
+} trace_log_t;
+
+typedef struct {
+    uint64_t run_ticks_acc[RTOS_MAX_TASKS];
+    rtos_tick_t last_switch_tick;
+    int last_tid;
+} cpu_account_t;
+
+void trace_init(trace_log_t* t);
+void trace_log(trace_log_t* t, rtos_tick_t now, uint8_t event_id, uint8_t arg);
+
+void cpu_account_init(cpu_account_t* a);
+void cpu_account_on_switch(cpu_account_t* a, rtos_tick_t now, int new_tid);
+void cpu_account_snapshot(const cpu_account_t* a, rtos_tick_t window, float* out_percent, size_t task_count);
+#endif
+```
+
+

@@ -1,0 +1,250 @@
+// 31. 고정소수점 PID 컨트롤러
+/*
+설명:
+저가형 MCU 기반의 모터/온도/압력 제어 등에서 부동소수점 연산 없이 PID 제어기를 구현해야 하는 상황이 많습니다.
+Q16.16 또는 Q8.8 등 고정소수점 연산을 사용해, 실시간 제어 루프에서 빠르고 예측 가능한 동작을 보장해야 합니다.
+예시 상황:
+- DC 모터 속도/위치 제어
+- 온도 유지 PID 루프
+요구사항:
+- Q 포맷(예: Q16.16) 고정소수점 연산
+- anti-windup(적분 포화 방지)
+- 미분 필터(노이즈 억제)
+- 출력 포화(상/하한)
+- 파라미터/상태 구조체 분리
+- 초기화/리셋 API
+*/
+#ifndef FIXED_PID_H
+#define FIXED_PID_H
+#include <stdint.h>
+typedef int32_t q16_16_t;
+typedef struct {
+    q16_16_t kp, ki, kd;
+    q16_16_t out_min, out_max;
+    q16_16_t integrator;
+    q16_16_t prev_error;
+    q16_16_t prev_deriv;
+} fixed_pid_t;
+void fixed_pid_init(fixed_pid_t* pid, q16_16_t kp, q16_16_t ki, q16_16_t kd, q16_16_t out_min, q16_16_t out_max);
+void fixed_pid_reset(fixed_pid_t* pid);
+q16_16_t fixed_pid_update(fixed_pid_t* pid, q16_16_t setpoint, q16_16_t measurement);
+#endif
+
+// 32. 신호 디바운서
+/*
+설명:
+기계식 버튼, 릴레이 등에서 접점 튐(bounce) 현상으로 인해 신호가 불안정하게 여러 번 변하는 것을 방지해야 합니다.
+임베디드 시스템에서는 소프트웨어적으로 시간 기반 또는 카운터 기반 디바운싱이 널리 사용됩니다.
+예시 상황:
+- 사용자 버튼 입력 처리
+- 릴레이 상태 감지
+요구사항:
+- 시간 기반(샘플 주기, 안정 시간)과 카운터 기반(연속 N회) 두 방식 제공
+- 상태 변화 감지(pressed/released)
+- 초기화/리셋 API
+- 디바운스 파라미터 구조체화
+*/
+#ifndef DEBOUNCE_H
+#define DEBOUNCE_H
+#include <stdint.h>
+typedef struct {
+    uint8_t stable_state;
+    uint8_t counter;
+    uint8_t threshold;
+} debounce_counter_t;
+void debounce_counter_init(debounce_counter_t* db, uint8_t threshold);
+uint8_t debounce_counter_update(debounce_counter_t* db, uint8_t raw_state);
+
+typedef struct {
+    uint8_t stable_state;
+    uint32_t last_change_tick;
+    uint32_t debounce_ticks;
+} debounce_time_t;
+void debounce_time_init(debounce_time_t* db, uint32_t debounce_ticks);
+uint8_t debounce_time_update(debounce_time_t* db, uint8_t raw_state, uint32_t now_tick);
+#endif
+
+// 33. 이동 평균 필터(박스/EMA)
+/*
+설명:
+센서 노이즈 제거, 신호 평활화 등에 이동 평균 필터가 널리 쓰입니다.
+박스(SMA)와 지수(EMA) 방식 모두 임베디드에서 자주 사용됩니다.
+예시 상황:
+- 온도/압력/조도 센서 신호 평활화
+- ADC 입력 노이즈 저감
+요구사항:
+- 박스(SMA): 순환 버퍼, 오버플로 방지
+- EMA: alpha 파라미터, 정수화 전략
+- 초기화/리셋 API
+- 최근 평균값 반환
+*/
+#ifndef MOVING_AVG_H
+#define MOVING_AVG_H
+#include <stddef.h>
+#include <stdint.h>
+typedef struct {
+    int32_t* buf;
+    size_t window, pos, count;
+    int64_t sum;
+} sma_filter_t;
+void sma_init(sma_filter_t* f, int32_t* buf, size_t window);
+void sma_reset(sma_filter_t* f);
+void sma_push(sma_filter_t* f, int32_t val);
+int32_t sma_get(const sma_filter_t* f);
+
+typedef struct {
+    int32_t avg;
+    uint8_t alpha_q8; // 0~255 (Q0.8)
+} ema_filter_t;
+void ema_init(ema_filter_t* f, uint8_t alpha_q8);
+void ema_reset(ema_filter_t* f);
+void ema_push(ema_filter_t* f, int32_t val);
+int32_t ema_get(const ema_filter_t* f);
+#endif
+
+// 34. 선형 보간기
+/*
+설명:
+센서 캘리브레이션, 테이블 기반 변환 등에서 입력값에 대해 선형 보간을 수행해야 하는 경우가 많습니다.
+임베디드 환경에서는 LUT(lookup table)와 선형 보간을 조합해 빠르고 정확한 변환이 필요합니다.
+예시 상황:
+- 온도 센서 ADC → 섭씨 변환
+- PWM duty → 실제 전압 변환
+요구사항:
+- 입력/출력 쌍 테이블(LUT)
+- 범위 밖 입력 처리(클램프/익스폴레이션)
+- 정수/고정소수점 지원
+- 보간 함수 API
+*/
+#ifndef LIN_LUT_H
+#define LIN_LUT_H
+#include <stddef.h>
+#include <stdint.h>
+typedef struct {
+    int32_t x;
+    int32_t y;
+} lut_point_t;
+int32_t lin_lut_interp(const lut_point_t* table, size_t n, int32_t x);
+#endif
+
+// 35. CRC32(폴리 0xEDB88320)
+/*
+설명:
+대용량 데이터, 파일 전송, 플래시 무결성 검증 등에서 CRC32가 널리 사용됩니다.
+임베디드에서는 표 기반/비표 기반, 리플렉션, 초기값/최종 XOR 등 다양한 옵션을 지원해야 합니다.
+예시 상황:
+- 펌웨어 이미지 무결성 체크
+- 파일 시스템 블록 검증
+요구사항:
+- 표 기반/비표 기반 선택
+- 리플렉션/초기값/최종 XOR 옵션
+- 누적(스트리밍) 처리
+- 표준 테스트 벡터 일치
+*/
+#ifndef CRC32_H
+#define CRC32_H
+#include <stddef.h>
+#include <stdint.h>
+uint32_t crc32(const uint8_t* data, size_t len, uint32_t init, int reflect, uint32_t final_xor);
+#endif
+
+// 36. Murmur3 32-bit 해시
+/*
+설명:
+임베디드 환경에서 빠르고 충돌이 적은 비암호학 해시가 필요할 때 Murmur3가 널리 쓰입니다.
+엔디안 이슈, 스트리밍 처리 등도 고려해야 합니다.
+예시 상황:
+- 해시 테이블 키 해싱
+- 데이터 블록 무결성 체크
+요구사항:
+- Murmur3 32-bit 구현
+- 엔디안 안전 처리
+- 스트리밍(부분 입력) 지원
+- 표준 테스트 벡터 일치
+*/
+#ifndef MURMUR3_H
+#define MURMUR3_H
+#include <stddef.h>
+#include <stdint.h>
+uint32_t murmur3_32(const uint8_t* data, size_t len, uint32_t seed);
+#endif
+
+// 37. Jenkins one-at-a-time 해시
+/*
+설명:
+간단하고 빠른 해시가 필요한 임베디드 환경에서 Jenkins 해시가 자주 사용됩니다.
+입력 데이터에 따라 일관된 해시값을 반환해야 하며, 단위 테스트 벡터와의 일치도 중요합니다.
+예시 상황:
+- 문자열/키 해싱
+- 작은 데이터 블록 무결성 체크
+요구사항:
+- Jenkins one-at-a-time 해시 구현
+- 입력 길이/값에 따른 일관성
+- 표준 테스트 벡터 일치
+*/
+#ifndef JENKINS_H
+#define JENKINS_H
+#include <stddef.h>
+#include <stdint.h>
+uint32_t jenkins_oaathash(const uint8_t* data, size_t len);
+#endif
+
+// 38. 안전 메모리 이동(memmove)
+/*
+설명:
+중첩된 메모리 영역 복사 시, 데이터 손상 없이 안전하게 이동해야 합니다.
+임베디드에서는 표준 memmove가 없는 경우도 많으므로, 직접 구현이 필요합니다.
+예시 상황:
+- 버퍼 내 데이터 이동(삽입/삭제)
+- 플래시/EEPROM 블록 이동
+요구사항:
+- 중첩 영역 안전 처리(앞/뒤 복사)
+- 성능 vs 단순성(루프/블록 복사)
+- 표준 memmove와 동작 일치
+*/
+#ifndef SAFE_MEMMOVE_H
+#define SAFE_MEMMOVE_H
+#include <stddef.h>
+void* safe_memmove(void* dest, const void* src, size_t n);
+#endif
+
+// 39. 안전 문자열 복사(strlcpy 유사)
+/*
+설명:
+임베디드에서 문자열 복사 시, 버퍼 오버플로와 NUL 미종단 문제를 방지해야 합니다.
+strncpy는 NUL 보장이 없으므로, strlcpy와 유사한 안전 복사가 필요합니다.
+예시 상황:
+- UART 명령 파싱 결과 복사
+- 설정값 문자열 저장
+요구사항:
+- NUL-종단 보장
+- 반환값: 전체 복사 시도 길이
+- 길이 초과 시 잘림
+- 표준 strlcpy와 동작 일치
+*/
+#ifndef SAFE_STRLCPY_H
+#define SAFE_STRLCPY_H
+#include <stddef.h>
+size_t safe_strlcpy(char* dst, const char* src, size_t dstsize);
+#endif
+
+// 40. 고정 길이 포맷터(ftoa/itoa)
+/*
+설명:
+임베디드에서 실수/정수 값을 문자열로 변환할 때, 고정 길이 버퍼에 안전하게 포맷해야 합니다.
+음수, 경계값, 소수점 자리수 등 다양한 케이스를 정확히 처리해야 합니다.
+예시 상황:
+- 센서 값 문자열 변환(UART, LCD 출력)
+- 로그/진단 메시지 포맷
+요구사항:
+- 정수/실수(고정 소수점) 지원
+- 음수/경계값 처리
+- 버퍼 길이 초과 방지
+- 반환값: 실제 기록 길이
+*/
+#ifndef FIXED_FORMAT_H
+#define FIXED_FORMAT_H
+#include <stddef.h>
+size_t fixed_itoa(int val, char* buf, size_t buflen);
+size_t fixed_ftoa(double val, char* buf, size_t buflen, int precision);
+#endif

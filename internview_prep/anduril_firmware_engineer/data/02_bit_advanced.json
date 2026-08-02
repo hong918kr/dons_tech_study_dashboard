@@ -1,0 +1,626 @@
+{
+  "id": "bit_advanced",
+  "order": 2,
+  "range": "Q11-25",
+  "icon": "🧮",
+  "title_en": "Bit Manipulation Advanced",
+  "title_ko": "비트 조작 심화",
+  "summary_ko": "레지스터 필드, 엔디안, gray code, popcount, 회전 등 드론 펌웨어의 저수준 비트 연산 15문제. 시프트 UB 가드가 핵심.",
+  "summary_en": "15 low-level bit-manipulation problems (register fields, endianness, gray code, popcount, rotation) with a focus on avoiding shift UB.",
+  "anduril_relevance_ko": "Anduril FW 인터뷰는 하드웨어 레지스터 read/modify/write, MAVLink류 프로토콜의 network byte order 변환, 엔코더 gray code 디코딩, 활성 채널 popcount 같은 실무 비트 연산을 직접 손코딩시킨다. 특히 rotate/시프트의 UB(k>=width)와 레지스터 필드 마스킹 정확성이 드론 비행제어/센서 드라이버 신뢰성에 직결된다.",
+  "concepts": [
+    {
+      "term": "shift UB",
+      "ko": "시프트량이 타입 폭(32) 이상이면 정의되지 않은 동작 — rotate/필드에서 반드시 가드",
+      "en": "Shifting by >= type width is undefined behavior; guard rotate and field ops."
+    },
+    {
+      "term": "n & (n-1)",
+      "ko": "최하위 set bit 제거 — popcount와 2의 거듭제곱 판정의 뿌리",
+      "en": "Clears the lowest set bit; basis of popcount and power-of-two test."
+    },
+    {
+      "term": "field mask",
+      "ko": "(1u<<width)-1 로 width개의 1 생성 (width<32에서만 안전)",
+      "en": "(1u<<width)-1 builds a width-bit mask; safe only for width<32."
+    },
+    {
+      "term": "read-modify-write",
+      "ko": "필드 갱신은 clear(& ~mask) 후 삽입(| value) — MMIO면 volatile+race 주의",
+      "en": "Update a field by clearing then OR-ing; MMIO needs volatile and race care."
+    },
+    {
+      "term": "endianness",
+      "ko": "network(big) vs host(ARM little) 바이트 순서 — 프로토콜 파싱 필수",
+      "en": "Byte order network(big) vs host(little); essential for protocol parsing."
+    },
+    {
+      "term": "gray code",
+      "ko": "연속 값이 1비트만 다름 (n^(n>>1)) — 엔코더 전이 오류 방지",
+      "en": "Adjacent values differ by one bit; prevents encoder transition glitches."
+    },
+    {
+      "term": "rotate",
+      "ko": "밀려난 비트를 반대편으로 넣기; k&=31 정규화 + k==0 가드",
+      "en": "Bits wrap around; normalize k&=31 and guard k==0."
+    },
+    {
+      "term": "SWAR",
+      "ko": "마스크 병렬 처리로 반복문 없이 O(1) (reverseBits, popcount)",
+      "en": "Parallel masked ops give O(1) without loops (reverseBits, popcount)."
+    }
+  ],
+  "study_note_md": "# 비트 조작 심화 (Bit Manipulation Advanced) — Q11-25 🧮\n\n> 레지스터 필드, 프로토콜 바이트 순서, 엔코더 gray code, popcount 등 드론/무기체계 펌웨어의 저수준 비트 연산 총정리. Anduril FW 인터뷰 단골 주제.\n\n---\n\n## 0. 왜 이게 인터뷰에 나오나\n\n임베디드/펌웨어는 결국 **레지스터에 비트를 쓰고, 버스에서 바이트를 읽는** 일이다. Anduril 같은 방산 드론 회사의 FW 인터뷰에서는:\n\n- **하드웨어 레지스터 필드** read/modify/write (`set_field`/`get_field`)\n- **프로토콜 파서** — MAVLink/커스텀 텔레메트리의 network byte order 처리 (`swap_endian32`)\n- **엔코더/ADC** — 기계식 회전 엔코더의 gray code 디코딩\n- **상태 비트마스크** — 활성 채널 수 세기 (`hamming_weight`)\n- **버퍼/DMA 정렬** — 2의 거듭제곱 크기 정렬 (`next_power_of_two`)\n\n이 15문제는 그 근육을 만드는 드릴이다.\n\n---\n\n## 1. 반드시 기억할 UB(정의되지 않은 동작) 함정\n\nC에서 **시프트량이 타입 폭 이상이면 UB**다. 32비트에서:\n\n```c\nuint32_t x;\nx >> 32;   // UB! (0 이 아님)\nx << 32;   // UB!\n1u << 32;  // UB!\n```\n\n이 때문에 원본 코드의 두 버그가 나온다:\n\n| 함수 | 원본 버그 | 수정 |\n|------|-----------|------|\n| `rotate_left/right` | `k==0` 이면 `n >> (32-0)` = `n >> 32` UB. `k>=32` 도 UB. | `k &= 31; if(k==0) return n;` |\n| `next_power_of_two` | 스텁 미구현 (`if(n==0){} return 0;`) | 채움-후-+1 알고리즘 |\n| `prev_power_of_two` | `p<<=1` 루프가 `n>=2^31` 에서 오버플로 → 무한루프 | 최상위 비트만 남기는 비트 채움 |\n| `width==32` 필드 | `(1u<<32)-1` UB | `width>=32 ? 0xFFFFFFFF : ...` 분기 |\n\n---\n\n## 2. 문제별 핵심\n\n### 11. reverseBits — 비트 순서 뒤집기\n```c\nuint32_t reverseBits(uint32_t n) {\n    n = ((n >> 1) & 0x55555555u) | ((n & 0x55555555u) << 1);\n    n = ((n >> 2) & 0x33333333u) | ((n & 0x33333333u) << 2);\n    n = ((n >> 4) & 0x0F0F0F0Fu) | ((n & 0x0F0F0F0Fu) << 4);\n    n = ((n >> 8) & 0x00FF00FFu) | ((n & 0x00FF00FFu) << 8);\n    n = (n >> 16) | (n << 16);\n    return n;\n}\n```\n- **반복문 방식**은 코드가 단순(32회 루프), **SWAR**는 O(1) 상수 시간이라 임베디드에서 선호.\n- lookup table(256B)은 빠르지만 작은 MCU에선 ROM 부담.\n\n### 12. hamming_weight (popcount)\n```c\nwhile (n) { n &= (n - 1); count++; }   // Kernighan: 1의 개수만큼만 반복\n```\n- GCC/Clang은 `__builtin_popcount` 제공(하드웨어 popcnt 명령). 인터뷰에선 손으로.\n\n### 13. is_power_of_two\n```c\nreturn n && !(n & (n - 1));   // 0 을 반드시 걸러라!\n```\n- 함정: `n==0` 이면 `!(0 & -1)` = true 가 되어버림 → `n &&` 필수.\n\n### 14. swap_odd_even_bits\n```c\nreturn ((n & 0xAAAAAAAAu) >> 1) | ((n & 0x55555555u) << 1);\n```\n\n### 15-17. extract / set / invert bit range (`[start, end]` 포함)\n```c\nuint8_t width = end - start + 1;\nuint32_t mask = (width >= 32) ? 0xFFFFFFFFu : (((1u << width) - 1u) << start);\n// extract: (n & mask) >> start\n// set:     (n & ~mask) | ((value << start) & mask)\n// invert:  n ^ mask\n```\n- **핵심 마스크 관용구**: `(1u << width) - 1` = width개의 1. `width==32` 만 분기.\n\n### 18. next / prev power of two\n```c\nuint32_t next_power_of_two(uint32_t n) {   // 올림\n    if (n == 0) return 1;\n    n--; n|=n>>1; n|=n>>2; n|=n>>4; n|=n>>8; n|=n>>16;\n    return n + 1;\n}\nuint32_t prev_power_of_two(uint32_t n) {   // 내림 = 최상위 set bit\n    if (n == 0) return 0;\n    n|=n>>1; n|=n>>2; n|=n>>4; n|=n>>8; n|=n>>16;\n    return n - (n >> 1);\n}\n```\n- `n--` 을 먼저 하는 이유: 이미 2의 거듭제곱이면 자기 자신을 반환하기 위해.\n- `next`: `n > 2^31` 이면 결과가 32비트 초과 → 0 오버플로 (호출측 책임).\n\n### 19. xor_swap\n```c\nif (a == NULL || b == NULL || a == b) return;   // a==b 가드 필수 (0 됨)\n*a ^= *b; *b ^= *a; *a ^= *b;\n```\n- 실무에선 임시변수가 더 빠르고 안전. **인터뷰 트릭**으로만 의미.\n\n### 20. rotate_left / rotate_right\n```c\nuint32_t rotate_left(uint32_t n, uint8_t k) {\n    k &= 31u; if (k == 0) return n;\n    return (n << k) | (n >> (32 - k));\n}\n```\n- **원본 버그**: `k==0`/`k>=32` UB. `k &= 31` + `k==0` early return 으로 해결.\n\n### 21. swap_endian32 (프로토콜 byte order!)\n```c\nreturn ((n>>24)&0xFF) | ((n>>8)&0xFF00) | ((n<<8)&0xFF0000) | ((n<<24)&0xFF000000);\n```\n- network(big-endian) ↔ host(대개 little-endian ARM). `__builtin_bswap32` 도 있음.\n\n### 22. get_field / set_field (레지스터 비트필드)\n```c\nuint32_t get_field(uint32_t reg, uint8_t pos, uint8_t width) {\n    uint32_t fm = (width>=32) ? 0xFFFFFFFFu : ((1u<<width)-1u);\n    return (reg >> pos) & fm;\n}\nuint32_t set_field(uint32_t reg, uint8_t pos, uint8_t width, uint32_t value) {\n    uint32_t fm = (width>=32) ? 0xFFFFFFFFu : ((1u<<width)-1u);\n    uint32_t mask = fm << pos;\n    return (reg & ~mask) | ((value << pos) & mask);\n}\n```\n- C의 `struct` bit-field 대신 직접 마스킹 → 이식성/명확성. MMIO는 `volatile` 필수(실무).\n\n### 23-24. gray code (엔코더 오류 방지)\n```c\nuint32_t binary_to_gray(uint32_t n) { return n ^ (n >> 1); }\nuint32_t gray_to_binary(uint32_t n) {\n    uint32_t res = n;\n    while (n >>= 1) res ^= n;\n    return res;\n}\n```\n- 연속 값이 **정확히 1비트만** 바뀜 → 기계식 엔코더 전이 오류 최소화.\n\n### 25. mul_pow2 / div_pow2\n```c\nuint32_t mul_pow2(uint32_t n, uint8_t k) { return (k>=32) ? 0u : (n << k); }\nuint32_t div_pow2(uint32_t n, uint8_t k) { return (k>=32) ? 0u : (n >> k); }\n```\n- **부호없는** 값에만 안전. 음수 나눗셈은 산술 시프트라 `-1 >> 1 == -1`(0 아님) → 별개 함정.\n\n---\n\n## 3. 인터뷰 팔로우업 (자주 나오는 꼬리질문)\n\n1. **\"popcount를 O(1)로 하려면?\"** → SWAR 병렬 합산 또는 하드웨어 `popcnt`/`__builtin_popcount`.\n2. **\"rotate가 왜 UB가 될 수 있나?\"** → `n >> (32-k)` 에서 `k==0` → shift by 32. `k &= 31` 로 정규화하되 `k==0` 별도 처리.\n3. **\"endianness를 런타임에 어떻게 감지?\"** → `union { uint32_t u; uint8_t b[4]; }` 로 `b[0]` 확인.\n4. **\"MMIO 레지스터 read/modify/write의 위험?\"** → 비원자적. ISR/DMA와 race → `volatile` + 인터럽트 마스킹 or 하드웨어 bit-band(Cortex-M).\n5. **\"gray code를 왜 쓰나?\"** → 다중 비트 동시 전이 시 중간 글리치 값 방지 (엔코더, 클럭 도메인 크로싱 FIFO 포인터).\n6. **\"`n & (n-1)` 의 의미는?\"** → 최하위 set bit 하나 제거. popcount, is_power_of_two 둘 다 여기서 파생.\n\n---\n\n## 4. 치트시트\n\n| 관용구 | 의미 |\n|--------|------|\n| `n & (n-1)` | 최하위 1비트 제거 |\n| `n & -n` | 최하위 1비트만 남김 (isolate) |\n| `n \\| (n-1)` | 최하위 0비트들 채움 |\n| `n && !(n & (n-1))` | 2의 거듭제곱 판정 |\n| `(1u << w) - 1` | w개의 1 마스크 (w<32 만!) |\n| `x ^ (x>>1)` | binary → gray |\n| `k &= 31` | 회전량 mod 32 정규화 |\n\n빌드/실행:\n```sh\ncc -std=c11 -Wall -Wextra 02_bit_advanced.c -o /tmp/andb_bit_advanced && /tmp/andb_bit_advanced\n```\n",
+  "problems": [
+    {
+      "num": 11,
+      "slug": "reverse-bits",
+      "title_ko": "비트 순서 뒤집기",
+      "title_en": "reverseBits",
+      "difficulty": "medium",
+      "tags": [
+        "bit-reverse",
+        "SWAR",
+        "O(1)"
+      ],
+      "prompt_ko": "32비트 정수의 비트 순서를 MSB<->LSB로 완전히 뒤집어라.",
+      "prompt_en": "Reverse the full bit order of a 32-bit integer (MSB<->LSB).",
+      "signature": "uint32_t reverseBits(uint32_t n)",
+      "examples": [
+        {
+          "in": "0xF0F0F0F0",
+          "out": "0x0F0F0F0F"
+        },
+        {
+          "in": "1",
+          "out": "0x80000000"
+        }
+      ],
+      "hints": [
+        "반복문: 32번 돌며 res<<1, res|=(n&1), n>>1.",
+        "더 빠르게: 1-2-4-8-16 단위 그룹을 마스크로 병렬 교환(SWAR).",
+        "SWAR는 반복문 없이 O(1) 상수 시간 — 임베디드에서 선호."
+      ],
+      "solution": "uint32_t reverseBits(uint32_t n) {\n    n = ((n >> 1) & 0x55555555u) | ((n & 0x55555555u) << 1);\n    n = ((n >> 2) & 0x33333333u) | ((n & 0x33333333u) << 2);\n    n = ((n >> 4) & 0x0F0F0F0Fu) | ((n & 0x0F0F0F0Fu) << 4);\n    n = ((n >> 8) & 0x00FF00FFu) | ((n & 0x00FF00FFu) << 8);\n    n = (n >> 16) | (n << 16);\n    return n;\n}",
+      "explanation_ko": "인접 비트 쌍부터 시작해 그룹 크기를 2배씩 키우며 좌우를 맞바꾼다. 각 단계는 마스크 AND 후 시프트로 두 반쪽을 교환. 5단계로 32비트 전체가 뒤집힌다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "반복문 방식은 정답이지만 32회 루프로 느림",
+        "부호있는 int로 하면 산술 시프트 함정 — uint32_t 사용"
+      ],
+      "anduril_context": "SPI/센서 스트림에서 LSB-first 하드웨어 데이터를 MSB-first로 정렬할 때."
+    },
+    {
+      "num": 12,
+      "slug": "hamming-weight",
+      "title_ko": "해밍 가중치 (popcount)",
+      "title_en": "hamming_weight",
+      "difficulty": "easy",
+      "tags": [
+        "popcount",
+        "kernighan",
+        "bitcount"
+      ],
+      "prompt_ko": "정수에서 1로 설정된 비트의 개수를 세라.",
+      "prompt_en": "Count the number of set bits (Hamming weight / popcount).",
+      "signature": "uint32_t hamming_weight(uint32_t n)",
+      "examples": [
+        {
+          "in": "0xF0F0F0F0",
+          "out": "16"
+        },
+        {
+          "in": "0",
+          "out": "0"
+        }
+      ],
+      "hints": [
+        "단순: n의 LSB를 확인하고 오른쪽 시프트 반복.",
+        "Kernighan: n &= (n-1) 은 최하위 1비트를 지운다.",
+        "그러면 1의 개수만큼만 루프가 돈다 (조기 종료)."
+      ],
+      "solution": "uint32_t hamming_weight(uint32_t n) {\n    uint32_t count = 0;\n    while (n) { n &= (n - 1); count++; }\n    return count;\n}",
+      "explanation_ko": "n & (n-1) 은 가장 낮은 1비트를 0으로 바꾼다. 이를 0이 될 때까지 반복하면 set bit 수만큼만 순회하므로 32회 고정 루프보다 빠르다.",
+      "complexity": "O(set bits) time, O(1) space",
+      "pitfalls": [
+        "빌트인 __builtin_popcount 가 있지만 인터뷰에선 직접 구현 요구",
+        "부호있는 타입에서 n>>1 하면 sign extension 위험"
+      ],
+      "anduril_context": "활성 채널/센서 비트마스크에서 켜진 개수 카운팅, 에러정정 코드의 해밍 거리."
+    },
+    {
+      "num": 13,
+      "slug": "is-power-of-two",
+      "title_ko": "2의 거듭제곱 판정",
+      "title_en": "is_power_of_two",
+      "difficulty": "easy",
+      "tags": [
+        "power-of-two",
+        "bit-trick"
+      ],
+      "prompt_ko": "주어진 부호없는 정수가 2의 거듭제곱인지 판정하라. (0은 false)",
+      "prompt_en": "Check if an unsigned integer is a power of two (0 is false).",
+      "signature": "bool is_power_of_two(uint32_t n)",
+      "examples": [
+        {
+          "in": "16",
+          "out": "true"
+        },
+        {
+          "in": "18",
+          "out": "false"
+        },
+        {
+          "in": "0",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "2의 거듭제곱은 비트가 정확히 1개.",
+        "n & (n-1) 로 최하위 1비트를 지우면 0 이 되어야 한다.",
+        "n==0 을 반드시 별도로 걸러라 (!(0 & -1) 은 true)."
+      ],
+      "solution": "bool is_power_of_two(uint32_t n) {\n    return n && !(n & (n - 1));\n}",
+      "explanation_ko": "2^k 는 단 하나의 set bit를 가진다. n & (n-1) 은 그 비트를 지워 0을 만든다. n==0 은 비트가 없으므로 n && 로 명시적으로 배제한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "n==0 가드 누락 — 가장 흔한 버그",
+        "n-1 언더플로 걱정은 불필요 (unsigned, n!=0 보장됨)"
+      ],
+      "anduril_context": "DMA 버퍼/정렬 크기 검증, 링버퍼 용량이 2의 거듭제곱인지 확인해 & 마스크 최적화."
+    },
+    {
+      "num": 14,
+      "slug": "swap-odd-even-bits",
+      "title_ko": "홀수/짝수 비트 스왑",
+      "title_en": "swap_odd_even_bits",
+      "difficulty": "easy",
+      "tags": [
+        "mask",
+        "swap"
+      ],
+      "prompt_ko": "짝수 위치 비트와 홀수 위치 비트를 서로 교환하라.",
+      "prompt_en": "Swap adjacent even-position and odd-position bits.",
+      "signature": "uint32_t swap_odd_even_bits(uint32_t n)",
+      "examples": [
+        {
+          "in": "0xAAAAAAAA",
+          "out": "0x55555555"
+        },
+        {
+          "in": "0x55555555",
+          "out": "0xAAAAAAAA"
+        }
+      ],
+      "hints": [
+        "짝수 비트 마스크는 0x55555555, 홀수 비트 마스크는 0xAAAAAAAA.",
+        "홀수 비트를 오른쪽으로 1칸, 짝수 비트를 왼쪽으로 1칸.",
+        "두 결과를 OR."
+      ],
+      "solution": "uint32_t swap_odd_even_bits(uint32_t n) {\n    return ((n & 0xAAAAAAAAu) >> 1) | ((n & 0x55555555u) << 1);\n}",
+      "explanation_ko": "0xAAAA...는 홀수 인덱스(1,3,5..) 비트, 0x5555...는 짝수 인덱스 비트를 고른다. 각각 반대 방향으로 1비트 이동 후 합치면 인접 쌍이 교환된다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "마스크 방향 헷갈림 — 0xA는 1010, 상위(홀수)쪽",
+        "시프트 후 OR 대신 XOR 쓰면 오답"
+      ],
+      "anduril_context": "특정 인터리브된 센서 데이터 포맷 재배열, 비트평면 조작."
+    },
+    {
+      "num": 15,
+      "slug": "extract-bit-range",
+      "title_ko": "비트 범위 추출",
+      "title_en": "extract_bit_range",
+      "difficulty": "easy",
+      "tags": [
+        "mask",
+        "field",
+        "shift"
+      ],
+      "prompt_ko": "비트 [start, end] (end 포함)를 추출해 LSB 정렬로 반환하라.",
+      "prompt_en": "Extract bits [start, end] inclusive, right-aligned.",
+      "signature": "uint32_t extract_bit_range(uint32_t n, uint8_t start, uint8_t end)",
+      "examples": [
+        {
+          "in": "0xF0F0, 4, 7",
+          "out": "0xF"
+        },
+        {
+          "in": "0x12345678, 0, 31",
+          "out": "0x12345678"
+        }
+      ],
+      "hints": [
+        "width = end - start + 1.",
+        "마스크 = ((1u<<width)-1) << start.",
+        "width==32 이면 1u<<32 는 UB → 분기로 0xFFFFFFFF 처리."
+      ],
+      "solution": "uint32_t extract_bit_range(uint32_t n, uint8_t start, uint8_t end) {\n    uint8_t width = (uint8_t)(end - start + 1);\n    uint32_t mask = (width >= 32) ? 0xFFFFFFFFu\n                                  : (((1u << width) - 1u) << start);\n    return (n & mask) >> start;\n}",
+      "explanation_ko": "width개의 1을 만들어(2^width-1) start만큼 밀어 마스크 생성. AND로 범위만 남기고 start만큼 오른쪽으로 밀어 LSB 정렬.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "width==32 시 1u<<32 UB",
+        "start+width>32 오버시프트",
+        "end<start 방어는 호출측 계약"
+      ],
+      "anduril_context": "레지스터에서 상태/모드 필드 추출, 패킹된 텔레메트리 언패킹."
+    },
+    {
+      "num": 16,
+      "slug": "set-bit-range",
+      "title_ko": "비트 범위 설정",
+      "title_en": "set_bit_range",
+      "difficulty": "medium",
+      "tags": [
+        "mask",
+        "field",
+        "read-modify-write"
+      ],
+      "prompt_ko": "비트 [start, end]에 value를 기록하고 나머지 비트는 보존하라.",
+      "prompt_en": "Write value into bits [start, end], preserving the rest.",
+      "signature": "uint32_t set_bit_range(uint32_t n, uint8_t start, uint8_t end, uint32_t value)",
+      "examples": [
+        {
+          "in": "0x0000, 4, 7, 0xF",
+          "out": "0xF0"
+        },
+        {
+          "in": "0xFFFF, 4, 7, 0x0",
+          "out": "0xFF0F"
+        }
+      ],
+      "hints": [
+        "마스크를 만들고 기존 비트를 clear: n & ~mask.",
+        "value를 start만큼 밀고 mask로 잘라서 OR.",
+        "value가 범위를 넘어도 mask가 초과 비트를 제거한다."
+      ],
+      "solution": "uint32_t set_bit_range(uint32_t n, uint8_t start, uint8_t end, uint32_t value) {\n    uint8_t width = (uint8_t)(end - start + 1);\n    uint32_t field = (width >= 32) ? 0xFFFFFFFFu : ((1u << width) - 1u);\n    uint32_t mask  = field << start;\n    return (n & ~mask) | ((value << start) & mask);\n}",
+      "explanation_ko": "read-modify-write의 정석. ~mask로 대상 필드만 0으로 지우고, value를 자리로 옮겨 mask로 잘라 OR. 나머지 비트는 & ~mask 에서 보존된다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "value를 mask로 안 자르면 인접 필드 오염",
+        "clear 단계 누락 시 OR로 잔여 비트 남음",
+        "MMIO면 volatile + non-atomic race 주의"
+      ],
+      "anduril_context": "하드웨어 레지스터의 특정 제어 필드만 갱신 (모터 PWM 모드, GPIO 설정)."
+    },
+    {
+      "num": 17,
+      "slug": "invert-bit-range",
+      "title_ko": "비트 범위 반전",
+      "title_en": "invert_bit_range",
+      "difficulty": "easy",
+      "tags": [
+        "mask",
+        "xor",
+        "toggle"
+      ],
+      "prompt_ko": "비트 [start, end]만 토글(반전)하고 나머지는 그대로 두라.",
+      "prompt_en": "Toggle only bits [start, end], leaving the rest unchanged.",
+      "signature": "uint32_t invert_bit_range(uint32_t n, uint8_t start, uint8_t end)",
+      "examples": [
+        {
+          "in": "0xF0F0, 4, 7",
+          "out": "0xF000"
+        },
+        {
+          "in": "0x0, 0, 31",
+          "out": "0xFFFFFFFF"
+        }
+      ],
+      "hints": [
+        "토글은 XOR와 마스크 조합.",
+        "마스크 = ((1u<<width)-1) << start.",
+        "n ^ mask 로 해당 비트만 반전."
+      ],
+      "solution": "uint32_t invert_bit_range(uint32_t n, uint8_t start, uint8_t end) {\n    uint8_t width = (uint8_t)(end - start + 1);\n    uint32_t mask = (width >= 32) ? 0xFFFFFFFFu\n                                  : (((1u << width) - 1u) << start);\n    return n ^ mask;\n}",
+      "explanation_ko": "XOR의 성질: 1과 XOR하면 반전, 0과 XOR하면 유지. mask가 1인 범위만 뒤집힌다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "width==32 UB 가드",
+        "AND/OR로 착각하면 토글이 아닌 clear/set"
+      ],
+      "anduril_context": "상태 플래그 토글, 특정 GPIO 그룹 반전, 테스트용 비트 뒤집기."
+    },
+    {
+      "num": 18,
+      "slug": "power-of-two-round",
+      "title_ko": "가장 가까운 2의 거듭제곱 (올림/내림)",
+      "title_en": "next/prev_power_of_two",
+      "difficulty": "medium",
+      "tags": [
+        "power-of-two",
+        "bit-fill",
+        "rounding"
+      ],
+      "prompt_ko": "n 이상의 최소 2의 거듭제곱(올림)과 n 이하의 최대 2의 거듭제곱(내림)을 구하라.",
+      "prompt_en": "Round up/down to the nearest power of two.",
+      "signature": "uint32_t next_power_of_two(uint32_t n); uint32_t prev_power_of_two(uint32_t n)",
+      "examples": [
+        {
+          "in": "next(17)",
+          "out": "32"
+        },
+        {
+          "in": "prev(17)",
+          "out": "16"
+        },
+        {
+          "in": "next(0)",
+          "out": "1"
+        }
+      ],
+      "hints": [
+        "next: n-- 후 하위 비트를 모두 1로 채우고(n|=n>>1..>>16) +1.",
+        "n-- 을 먼저 하는 이유: 이미 2^k이면 자기 자신 반환.",
+        "prev: 하위비트 채운 뒤 n - (n>>1) 로 최상위 비트만 남긴다."
+      ],
+      "solution": "uint32_t next_power_of_two(uint32_t n) {\n    if (n == 0) return 1;\n    n--;\n    n |= n >> 1; n |= n >> 2; n |= n >> 4;\n    n |= n >> 8; n |= n >> 16;\n    return n + 1;\n}\nuint32_t prev_power_of_two(uint32_t n) {\n    if (n == 0) return 0;\n    n |= n >> 1; n |= n >> 2; n |= n >> 4;\n    n |= n >> 8; n |= n >> 16;\n    return n - (n >> 1);\n}",
+      "explanation_ko": "OR-시프트 반복은 최상위 1비트 아래를 전부 1로 채운다. next는 +1로 다음 자리올림을 만들고, prev는 채운 값에서 절반을 빼 최상위 비트만 남긴다. 원본의 prev는 p<<=1 루프라 n>=2^31에서 오버플로 무한루프 버그가 있어 비트채움으로 교체.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "next(n): n>2^31 이면 32비트 초과로 0 오버플로 (문서화 필요)",
+        "원본 prev의 곱셈 루프는 대입력에서 무한루프",
+        "n-- 누락 시 이미 2^k인 입력이 2배로 올라감"
+      ],
+      "anduril_context": "메모리 풀/버퍼 크기 정렬(17바이트 -> 32바이트 할당), 해시테이블 버킷 크기."
+    },
+    {
+      "num": 19,
+      "slug": "xor-swap",
+      "title_ko": "임시변수 없는 XOR 스왑",
+      "title_en": "xor_swap",
+      "difficulty": "easy",
+      "tags": [
+        "xor",
+        "swap",
+        "pointer"
+      ],
+      "prompt_ko": "임시 변수 없이 두 정수를 XOR로 교환하라.",
+      "prompt_en": "Swap two integers via XOR without a temporary variable.",
+      "signature": "void xor_swap(uint32_t *a, uint32_t *b)",
+      "examples": [
+        {
+          "in": "a=5, b=7",
+          "out": "a=7, b=5"
+        }
+      ],
+      "hints": [
+        "*a ^= *b; *b ^= *a; *a ^= *b; 순서.",
+        "a와 b가 같은 주소면 0이 되어버린다 — 반드시 가드.",
+        "NULL 포인터도 방어."
+      ],
+      "solution": "void xor_swap(uint32_t *a, uint32_t *b) {\n    if (a == NULL || b == NULL || a == b) return;\n    *a ^= *b;\n    *b ^= *a;   /* = (a^b)^b = a */\n    *a ^= *b;   /* = (a^b)^a = b */\n}",
+      "explanation_ko": "XOR의 가역성(x^y^y=x)을 3단계로 이용. 두 번째 줄에서 *b가 원래 *a가 되고, 세 번째 줄에서 *a가 원래 *b가 된다. 같은 주소면 첫 줄에서 0이 되어 값 손실 -> a==b 가드 필수.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "a==b 앨리어싱 시 데이터 소실 (가장 유명한 함정)",
+        "NULL 역참조",
+        "실무에선 임시변수가 더 빠르고 안전 — 트릭용"
+      ],
+      "anduril_context": "레지스터 제약 극한 최적화 어셈블리 관용구, 인터뷰 단골. 실무 코드엔 잘 안 씀."
+    },
+    {
+      "num": 20,
+      "slug": "rotate",
+      "title_ko": "비트 회전 (좌/우)",
+      "title_en": "rotate_left/rotate_right",
+      "difficulty": "medium",
+      "tags": [
+        "rotate",
+        "shift",
+        "UB-guard"
+      ],
+      "prompt_ko": "32비트 값을 k비트 좌/우로 회전하라 (밀려난 비트는 반대쪽 끝으로).",
+      "prompt_en": "Rotate a 32-bit value left/right by k bits (bits wrap around).",
+      "signature": "uint32_t rotate_left(uint32_t n, uint8_t k); uint32_t rotate_right(uint32_t n, uint8_t k)",
+      "examples": [
+        {
+          "in": "rol(0x80000001, 1)",
+          "out": "0x00000003"
+        },
+        {
+          "in": "ror(0x80000001, 1)",
+          "out": "0xC0000000"
+        }
+      ],
+      "hints": [
+        "rol = (n<<k) | (n>>(32-k)).",
+        "k==0 이면 n>>32 는 UB! 조기 반환.",
+        "k>=32 도 UB -> k &= 31 로 정규화."
+      ],
+      "solution": "uint32_t rotate_left(uint32_t n, uint8_t k) {\n    k &= 31u;\n    if (k == 0) return n;\n    return (n << k) | (n >> (32 - k));\n}\nuint32_t rotate_right(uint32_t n, uint8_t k) {\n    k &= 31u;\n    if (k == 0) return n;\n    return (n >> k) | (n << (32 - k));\n}",
+      "explanation_ko": "회전은 한쪽으로 민 비트를 반대쪽에서 다시 넣는 것. 두 시프트를 OR로 합친다. 핵심은 32-k 시프트가 k==0/k>=32 에서 UB가 되는 점 — k&=31 과 k==0 early return 으로 방어. 원본 코드의 대표 버그.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "k==0 -> n>>32 UB (원본 버그)",
+        "k>=32 미정규화 UB",
+        "return 문 누락(원본은 res 계산만 하고 return 없음)"
+      ],
+      "anduril_context": "CRC/해시(SHA, ChaCha) 라운드 함수, 스크램블러, 암호 프리미티브."
+    },
+    {
+      "num": 21,
+      "slug": "swap-endian32",
+      "title_ko": "엔디안 변환 (바이트 순서)",
+      "title_en": "swap_endian32",
+      "difficulty": "easy",
+      "tags": [
+        "endianness",
+        "byte-order",
+        "protocol"
+      ],
+      "prompt_ko": "32비트 값의 바이트 순서를 반전하라 (big<->little).",
+      "prompt_en": "Reverse the byte order of a 32-bit value (big<->little endian).",
+      "signature": "uint32_t swap_endian32(uint32_t n)",
+      "examples": [
+        {
+          "in": "0x12345678",
+          "out": "0x78563412"
+        },
+        {
+          "in": "0x000000FF",
+          "out": "0xFF000000"
+        }
+      ],
+      "hints": [
+        "4바이트를 각각 반대 위치로 옮긴다.",
+        "각 바이트를 시프트 후 0xFF 계열 마스크로 자른다.",
+        "__builtin_bswap32 도 있지만 손으로 구현."
+      ],
+      "solution": "uint32_t swap_endian32(uint32_t n) {\n    return ((n >> 24) & 0x000000FFu) |\n           ((n >> 8)  & 0x0000FF00u) |\n           ((n << 8)  & 0x00FF0000u) |\n           ((n << 24) & 0xFF000000u);\n}",
+      "explanation_ko": "byte0<->byte3, byte1<->byte2 를 맞바꾼다. 바깥 두 바이트는 24비트, 안쪽 두 바이트는 8비트씩 이동하고 각자 마스크로 다른 바이트 오염을 막는다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "마스크 누락 시 부호확장/중첩 오염",
+        "host가 이미 big-endian이면 불필요 — union으로 런타임 감지 가능"
+      ],
+      "anduril_context": "MAVLink/네트워크 프로토콜 파싱 — network byte order(big) 를 ARM host(little)로 변환."
+    },
+    {
+      "num": 22,
+      "slug": "bitfield-get-set",
+      "title_ko": "레지스터 비트필드 read/write",
+      "title_en": "get_field/set_field",
+      "difficulty": "medium",
+      "tags": [
+        "register",
+        "bitfield",
+        "MMIO"
+      ],
+      "prompt_ko": "pos에서 width비트 크기의 필드를 읽고(get) 쓰라(set).",
+      "prompt_en": "Read/write a width-bit field located at bit position pos.",
+      "signature": "uint32_t get_field(uint32_t reg, uint8_t pos, uint8_t width); uint32_t set_field(uint32_t reg, uint8_t pos, uint8_t width, uint32_t value)",
+      "examples": [
+        {
+          "in": "get(0xF0F0,4,4)",
+          "out": "0xF"
+        },
+        {
+          "in": "set(0x0000,4,4,0xF)",
+          "out": "0xF0"
+        }
+      ],
+      "hints": [
+        "field mask = (1u<<width)-1 (width<32).",
+        "get: (reg>>pos) & fieldmask.",
+        "set: (reg & ~(fieldmask<<pos)) | ((value<<pos)&(fieldmask<<pos))."
+      ],
+      "solution": "uint32_t get_field(uint32_t reg, uint8_t pos, uint8_t width) {\n    uint32_t fm = (width >= 32) ? 0xFFFFFFFFu : ((1u << width) - 1u);\n    return (reg >> pos) & fm;\n}\nuint32_t set_field(uint32_t reg, uint8_t pos, uint8_t width, uint32_t value) {\n    uint32_t fm = (width >= 32) ? 0xFFFFFFFFu : ((1u << width) - 1u);\n    uint32_t mask = fm << pos;\n    return (reg & ~mask) | ((value << pos) & mask);\n}",
+      "explanation_ko": "C struct bit-field 대신 직접 마스킹으로 이식성/명확성 확보. get은 필드를 LSB로 내려 마스크, set은 read-modify-write (기존 clear 후 OR).",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "width==32 시 1u<<32 UB",
+        "실제 MMIO는 volatile 필요 + ISR race",
+        "value가 width 초과 시 mask로 잘라야 인접 필드 안전"
+      ],
+      "anduril_context": "STM32/Cortex-M 주변장치 레지스터 (타이머 프리스케일러, ADC 채널, GPIO 모드) 필드 조작."
+    },
+    {
+      "num": 23,
+      "slug": "binary-to-gray",
+      "title_ko": "이진수 -> 그레이 코드",
+      "title_en": "binary_to_gray",
+      "difficulty": "easy",
+      "tags": [
+        "gray-code",
+        "encoder",
+        "xor"
+      ],
+      "prompt_ko": "이진수를 그레이 코드로 변환하라 (연속 값이 1비트만 다름).",
+      "prompt_en": "Convert binary to Gray code.",
+      "signature": "uint32_t binary_to_gray(uint32_t n)",
+      "examples": [
+        {
+          "in": "0b1011",
+          "out": "0b1110"
+        }
+      ],
+      "hints": [
+        "공식은 한 줄이다.",
+        "각 비트를 바로 위 비트와 XOR.",
+        "gray = n ^ (n>>1)."
+      ],
+      "solution": "uint32_t binary_to_gray(uint32_t n) {\n    return n ^ (n >> 1);\n}",
+      "explanation_ko": "그레이 코드의 각 비트 = 원본 비트 XOR 상위 비트. n>>1 로 상위 비트를 정렬해 XOR하면 인접 값이 정확히 1비트만 다른 코드가 나온다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "역변환과 혼동 금지 (역은 누적 XOR 필요)"
+      ],
+      "anduril_context": "기계식 회전 엔코더/앱솔루트 엔코더 위치 인코딩, CDC FIFO 포인터."
+    },
+    {
+      "num": 24,
+      "slug": "gray-to-binary",
+      "title_ko": "그레이 코드 -> 이진수",
+      "title_en": "gray_to_binary",
+      "difficulty": "medium",
+      "tags": [
+        "gray-code",
+        "encoder",
+        "xor-scan"
+      ],
+      "prompt_ko": "그레이 코드를 이진수로 역변환하라.",
+      "prompt_en": "Convert Gray code back to binary.",
+      "signature": "uint32_t gray_to_binary(uint32_t n)",
+      "examples": [
+        {
+          "in": "0b1110",
+          "out": "0b1011"
+        }
+      ],
+      "hints": [
+        "역변환은 누적 XOR이 필요.",
+        "res=n; 그다음 n을 계속 오른쪽 시프트하며 res에 XOR.",
+        "while (n >>= 1) res ^= n;"
+      ],
+      "solution": "uint32_t gray_to_binary(uint32_t n) {\n    uint32_t res = n;\n    while (n >>= 1) res ^= n;\n    return res;\n}",
+      "explanation_ko": "각 이진 비트는 자신 이상의 그레이 비트들의 XOR 누적이다. n을 오른쪽으로 밀며 XOR를 누적하면 상위->하위로 전파되어 원본 이진수를 복원한다.",
+      "complexity": "O(log n) time, O(1) space",
+      "pitfalls": [
+        "단순 n^(n>>1) 로는 역변환 안 됨 (그건 정변환)",
+        "while 조건에서 대입=비교 혼동 주의"
+      ],
+      "anduril_context": "엔코더에서 읽은 그레이 코드를 각도/위치 정수로 디코딩."
+    },
+    {
+      "num": 25,
+      "slug": "shift-mul-div",
+      "title_ko": "시프트로 곱셈/나눗셈",
+      "title_en": "mul_pow2/div_pow2",
+      "difficulty": "easy",
+      "tags": [
+        "shift",
+        "optimization",
+        "power-of-two"
+      ],
+      "prompt_ko": "2^k 곱셈/나눗셈을 시프트로 구현하라.",
+      "prompt_en": "Multiply/divide by 2^k using shifts.",
+      "signature": "uint32_t mul_pow2(uint32_t n, uint8_t k); uint32_t div_pow2(uint32_t n, uint8_t k)",
+      "examples": [
+        {
+          "in": "mul(3,2)",
+          "out": "12"
+        },
+        {
+          "in": "div(12,2)",
+          "out": "3"
+        }
+      ],
+      "hints": [
+        "곱은 왼쪽 시프트, 나눗셈은 오른쪽 시프트.",
+        "k>=32 는 UB -> 가드.",
+        "부호없는 값에만 안전."
+      ],
+      "solution": "uint32_t mul_pow2(uint32_t n, uint8_t k) {\n    return (k >= 32) ? 0u : (n << k);\n}\nuint32_t div_pow2(uint32_t n, uint8_t k) {\n    return (k >= 32) ? 0u : (n >> k);\n}",
+      "explanation_ko": "n<<k = n*2^k, n>>k = n/2^k (부호없는 floor). k>=32 는 시프트 UB라 0으로 가드. 음수(signed)는 산술 시프트로 -1>>1==-1 이 되어 나눗셈 의미가 깨지므로 unsigned 전제.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "k>=32 UB 가드 누락",
+        "signed 음수에서 >> 는 구현정의/산술 시프트",
+        "mul 오버플로는 wrap-around (unsigned)"
+      ],
+      "anduril_context": "DSP/고정소수점 스케일링, 나눗셈기 없는 MCU에서 2^k 스케일 최적화."
+    }
+  ]
+}

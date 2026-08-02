@@ -1,0 +1,598 @@
+{
+  "id": "memory",
+  "order": 4,
+  "range": "Q41-55",
+  "icon": "🧠",
+  "title_en": "Memory & Pointers",
+  "title_ko": "메모리 & 포인터",
+  "summary_ko": "mem* 계열 직접 구현(memmove 겹침 안전 포함), 포인터 스왑/문자열 뒤집기, 그리고 const/volatile/함수 포인터 디스패치/정적 메모리 풀/dangling/void*/구조체 패딩/포인터 배열 vs 배열 포인터를 돌아가는 데모로 정리한 임베디드 C 핵심 세트.",
+  "summary_en": "Hand-rolled mem* functions (overlap-safe memmove included), pointer swaps, and runnable demos of const/volatile/function-pointer dispatch/static allocator/dangling/void*/struct padding/pointer-vs-array-pointer.",
+  "anduril_relevance_ko": "드론/자율 시스템 펌웨어는 힙을 거의 안 쓰고 고정 버퍼 위에서 동작한다. DMA/이중버퍼/패킷 재조립에서 memmove 겹침과 정렬, 메모리맵 레지스터/ISR 플래그의 volatile, 명령 디코더의 함수 포인터 테이블, 결정적 정적 할당기가 실무 그 자체다. 면접관은 '왜 unsigned 비교? 왜 뒤에서 복사? 패딩 몇 바이트?'를 근거까지 파고든다.",
+  "concepts": [
+    {
+      "term": "memmove 복사 방향",
+      "ko": "dest>src면 뒤에서부터, dest<src면 앞에서부터. 겹침 안전의 핵심.",
+      "en": "Copy back-to-front when dest>src, else front-to-back."
+    },
+    {
+      "term": "memcmp unsigned 비교",
+      "ko": "반드시 unsigned char로 비교해야 0x80 vs 0x01 부호가 맞다.",
+      "en": "Compare as unsigned char so byte sign is correct."
+    },
+    {
+      "term": "const 위치",
+      "ko": "const int*=값 읽기전용, int* const=포인터 고정. * 기준 좌/우.",
+      "en": "pointer-to-const vs const-pointer; const left/right of *."
+    },
+    {
+      "term": "volatile",
+      "ko": "매 접근 실제 메모리 재로드. HW 레지스터/ISR 플래그. 원자성은 보장 안 함.",
+      "en": "Forces re-read each access; not atomicity."
+    },
+    {
+      "term": "함수 포인터 디스패치",
+      "ko": "typedef한 함수 포인터 배열로 O(1) 분기. 인덱스 범위 검사 필수.",
+      "en": "Function-pointer table for O(1) branch; bounds-check the index."
+    },
+    {
+      "term": "정적 풀 할당기",
+      "ko": "블록 헤더+first-fit+split+coalesce. 정렬 필수. 결정적 할당.",
+      "en": "Header+first-fit+split+coalesce over a fixed pool."
+    },
+    {
+      "term": "dangling 방어",
+      "ko": "free 후 포인터를 NULL로. 지역변수 주소 반환 금지.",
+      "en": "NULL the pointer after free; never return local addresses."
+    },
+    {
+      "term": "구조체 패딩",
+      "ko": "멤버는 정렬 경계에, 큰 멤버부터 두면 패딩 최소.",
+      "en": "Members align to size; order big-to-small to shrink padding."
+    }
+  ],
+  "study_note_md": "# 04. 메모리 & 포인터 (Memory & Pointers) — Q41–55 🧠\n\n> Anduril 펌웨어 인터뷰의 **가장 기초이자 가장 자주 파고드는** 영역.\n> `mem*` 계열 직접 구현, 포인터 조작, 그리고 `const`/`volatile`/함수 포인터/\n> 정적 할당기 같은 **임베디드 C 정통 개념**을 \"돌아가는 데모 + 정확한 설명\"으로 정리한다.\n>\n> 빌드: `cc -std=c11 -Wall -Wextra solutions/04_memory.c -o /tmp/andb_memory && /tmp/andb_memory`\n\n---\n\n## 왜 이 주제가 Anduril에서 중요한가\n\n- 드론/자율 시스템 펌웨어는 **힙을 거의 안 쓰고** 고정 버퍼 위에서 돈다 → `memcpy/memmove`,\n  정적 풀 할당기, 정렬(alignment)이 실무 그 자체.\n- **DMA 버퍼, 이중 버퍼(ping-pong), 패킷 재조립**에서 `memmove` 겹침 처리와 정렬은 단골.\n- **메모리맵 레지스터/ISR 공유 플래그**는 `volatile` 없이는 최적화로 사라진다 → 버그.\n- 명령 디코더/프로토콜 핸들러는 **함수 포인터 디스패치 테이블**로 짠다.\n- 면접관은 \"동작\"에서 멈추지 않고 **왜 unsigned로 비교? 왜 뒤에서부터 복사? 패딩은 몇 바이트?**\n  를 계속 파고든다. 근거를 말로 설명할 수 있어야 한다.\n\n---\n\n## mem* 계열 — 구현 핵심\n\n| 함수 | 한 줄 요약 | 반드시 짚을 것 |\n|------|-----------|---------------|\n| `my_memset` | n바이트를 `(unsigned char)c`로 채움 | `c`는 하위 1바이트만. `void*`→`unsigned char*` 캐스팅 |\n| `my_memcpy` | 겹침 **미보장** 복사 | `restrict`로 non-overlap 계약. dest 반환 |\n| `my_memmove` | 겹쳐도 안전 | **dest>src면 뒤에서부터**, dest<src면 앞에서부터 |\n| `my_memcmp` | 첫 불일치 부호 | **반드시 unsigned char로 비교** (0x80 vs 0x01) |\n| `my_memchr` | 첫 바이트 위치 | 못 찾으면 NULL. const 벗겨 반환 |\n\n### memmove 방향 결정 — 이게 핵심 함정\n\n```c\nvoid *my_memmove(void *dest, const void *src, size_t n) {\n    unsigned char *d = dest;\n    const unsigned char *s = src;\n    if (d == s || n == 0) return dest;\n    if (d < s) {                       // 앞→뒤: dest가 src보다 앞이면 안전\n        for (size_t i = 0; i < n; ++i) d[i] = s[i];\n    } else {                           // 뒤→앞: dest가 src 뒤와 겹칠 때 원본 보존\n        for (size_t i = n; i > 0; --i) d[i-1] = s[i-1];\n    }\n    return dest;\n}\n```\n\n- `memcpy`로 겹친 영역을 복사하면 **UB**. 실제로 뒤쪽이 먼저 덮여 원본이 깨진다.\n- \"왜 memcpy는 restrict인가?\" → 컴파일러가 겹침 없다고 가정하고 벡터화/재정렬 최적화를 하기 때문.\n\n### memcmp 부호 함정\n\n```c\nreturn (int)a[i] - (int)b[i];   // a,b는 unsigned char*. signed char면 0x80이 음수가 됨\n```\n\n---\n\n## 개념 문제 — 데모로 이해하기\n\n### 48. `const` 위치별 의미 (오른쪽→왼쪽으로 읽기)\n\n```c\nconst int *p;        // p가 가리키는 int는 읽기전용. p는 재지정 가능.   (pointer-to-const)\nint * const p;       // p 자체가 const. *p는 수정 가능, p 재지정 불가.  (const pointer)\nconst int * const p; // 둘 다 불가.\n```\n\n- 읽는 법: `const` 왼쪽에 타입이 있으면 그 값이 const, `*` 오른쪽에 `const`면 포인터가 const.\n- 임베디드에서 `const volatile uint32_t *` = **읽기전용 상태 레지스터**(내가 못 쓰지만 HW가 바꿈).\n\n### 49. `volatile` — HW 레지스터 / ISR / 폴링\n\n```c\nbool wait_ready(volatile const uint32_t *status, uint32_t mask, int max_iters) {\n    for (int i = 0; i < max_iters; ++i)\n        if (*status & mask) return true;   // volatile: 매 반복 실제 메모리 재로드\n    return false;\n}\n```\n\n- `volatile` 없으면 컴파일러가 `*status`를 **한 번만 읽고 레지스터에 캐싱** → 무한 루프 or 값 안 바뀜.\n- 쓰는 곳: ① 메모리맵 주변장치 레지스터, ② ISR과 main이 공유하는 플래그, ③ 하드웨어가 바꾸는 메모리.\n- ⚠️ `volatile`은 **원자성/메모리 순서를 보장하지 않는다**. 멀티코어 동기화는 atomic/배리어가 필요.\n  (single-writer ISR 플래그 정도에만 안전.)\n\n### 50. 함수 포인터 디스패치 테이블\n\n```c\ntypedef int32_t (*alu_fn_t)(int32_t, int32_t);\nint32_t dispatch(uint8_t opcode, int32_t a, int32_t b) {\n    static const alu_fn_t table[] = { op_add, op_sub, op_mul, op_and };\n    if (opcode >= sizeof table / sizeof table[0]) return INT32_MIN;  // 범위 방어\n    return table[opcode](a, b);\n}\n```\n\n- `switch`보다 확장성 좋고 O(1) 분기. 명령 디코더/프로토콜 커맨드 핸들러 패턴.\n- **반드시 인덱스 범위 체크** — 안 하면 임의 코드 실행/크래시.\n\n### 51. 정적 메모리 풀 malloc/free\n\n- 아이디어: `static uint8_t pool[N]` 위에 **블록 헤더(size, used, next)** + first-fit + split + free 시 인접 병합(coalesce).\n- 왜? 임베디드는 힙 파편화/비결정성을 싫어함. 정적 풀은 **결정적**이고 컴파일 타임에 크기 확정.\n- 함정: **정렬**(payload를 8/16바이트 경계로), split 최소 블록 크기, free 시 coalesce 안 하면 파편화.\n\n### 52. Dangling pointer (허상 포인터)\n\n```c\nvoid safe_free(void **pp) {       // free 후 즉시 NULL 로 → 이후 사용/이중free 차단\n    if (!pp || !*pp) return;\n    free(*pp);\n    *pp = NULL;\n}\n```\n\n- 원인: ① `free` 후 그 포인터 사용, ② **지역변수 주소 반환**, ③ 이중 free.\n- 방어: free 즉시 NULL, 소유권 명확히, 지역변수 주소 절대 반환 금지.\n\n### 53. `void*` — 타입 소거(generic)\n\n```c\nvoid generic_swap(void *a, void *b, size_t size) {\n    unsigned char *pa = a, *pb = b;\n    for (size_t i = 0; i < size; ++i) { unsigned char t = pa[i]; pa[i] = pb[i]; pb[i] = t; }\n}\n```\n\n- `void*`는 타입 정보를 버린 \"주소만\". 크기를 따로 넘겨줘야 함(`qsort` 시그니처가 그 예).\n- 안전 규칙: **정확한 원래 타입으로만 다시 캐스팅**. `void*` 산술은 표준 C에서 불가(GCC 확장뿐).\n\n### 54. 구조체 패딩 / 정렬\n\n```c\nstruct Unpacked  { uint8_t a; uint32_t b; uint8_t c; }; // 1 +3pad +4 +1 +3pad = 12\nstruct Reordered { uint32_t b; uint8_t a; uint8_t c; }; // 4 +1 +1 +2pad       = 8\n```\n\n- 각 멤버는 **자기 크기(정렬 요구)의 배수 주소**에 놓임 → 사이/끝에 padding.\n- 구조체 전체 크기는 **가장 큰 멤버 정렬의 배수**(배열로 놓을 때 정렬 유지).\n- 최적화: **큰 멤버부터 배치**하면 패딩 최소. 와이어 포맷은 `#pragma pack`/직렬화로 강제(단, 정렬 안 된 접근은 일부 MCU에서 fault).\n\n### 55. 포인터 배열 vs 배열 포인터\n\n```c\nint *pa[4];      // 포인터 4개를 원소로 갖는 \"배열\"        (array of pointers)\nint (*pp)[4];    // \"int[4] 배열 전체\"를 가리키는 \"포인터\"  (pointer to array)\n```\n\n- `int (*pp)[4] = &arr;` 이면 `(*pp)[i]`로 접근. `pp+1`은 **16바이트**(int[4] 하나) 점프.\n- 문자열 테이블(`char *argv[]`)이 대표적 포인터 배열. 2D 배열 파라미터 전달엔 배열 포인터.\n\n---\n\n## 인터뷰 팔로업 (실제로 자주 나오는 것)\n\n- \"`memcpy`와 `memmove` 차이? 언제 어느 걸?\" → 겹침 가능성 있으면 무조건 `memmove`.\n- \"`memcpy`를 워드 단위로 최적화하려면?\" → 정렬 확인 후 `uint32_t/uint64_t` 단위 복사 + 잔여 바이트 처리.\n- \"`volatile`이 스레드 동기화에 충분한가?\" → **아니다.** atomic/뮤텍스/배리어 필요.\n- \"이 구조체 `sizeof`는?\" → 멤버 정렬 규칙으로 손으로 계산 시연.\n- \"정적 할당기에서 파편화를 어떻게 줄이나?\" → coalesce, size class, 고정 블록 풀.\n- \"dangling을 어떻게 예방?\" → free 후 NULL, 소유권 규칙, 지역 주소 반환 금지, sanitizer(ASan).\n\n## 자주 나오는 버그 / 함정 체크리스트\n\n- [ ] `memcmp`를 `signed char`로 비교 (부호 뒤집힘)\n- [ ] `memmove`에서 방향 안 나눔 (겹침 시 데이터 손상)\n- [ ] `memset`의 `c`를 int 전체로 씀 (하위 1바이트만 유효)\n- [ ] 디스패치 테이블 **인덱스 범위 미검사**\n- [ ] ISR 공유 플래그에 `volatile` 누락\n- [ ] free 후 포인터 재사용 / 이중 free\n- [ ] 구조체 패딩을 무시하고 `sizeof` 대신 멤버 합으로 계산\n- [ ] `n == 0` / `NULL` 인자 미방어\n",
+  "problems": [
+    {
+      "num": 41,
+      "slug": "my_memset",
+      "title_ko": "my_memset 구현",
+      "title_en": "Implement my_memset",
+      "difficulty": "easy",
+      "tags": [
+        "mem*",
+        "byte-fill"
+      ],
+      "prompt_ko": "s의 앞 n바이트를 (unsigned char)c 값으로 채우고 s를 반환하라.",
+      "prompt_en": "Fill the first n bytes of s with (unsigned char)c and return s.",
+      "signature": "void *my_memset(void *s, int c, size_t n)",
+      "examples": [
+        {
+          "in": "my_memset(buf, 0xAA, 4)",
+          "out": "buf = {AA,AA,AA,AA}"
+        }
+      ],
+      "hints": [
+        "void*를 unsigned char*로 캐스팅해 바이트 단위로 접근.",
+        "c는 하위 1바이트만 유효 — (unsigned char)c로 잘라 쓴다.",
+        "계약상 dest(s)를 그대로 반환한다."
+      ],
+      "solution": "void *my_memset(void *s, int c, size_t n) {\n    unsigned char *p = (unsigned char *)s;\n    unsigned char v = (unsigned char)c;\n    for (size_t i = 0; i < n; ++i) p[i] = v;\n    return s;\n}",
+      "explanation_ko": "메모리는 바이트 배열이므로 unsigned char*로 보고 v를 n번 쓴다. c를 int로 그대로 쓰면 안 되고 하위 1바이트만 유효하다는 점이 포인트.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "c 전체를 쓰려 함 (하위 1바이트만 유효)",
+        "n==0/NULL 미고려",
+        "반환값을 void로 두어 dest 반환 계약 위반"
+      ],
+      "anduril_context": "DMA/센서 버퍼를 0 또는 패턴으로 초기화, 패킷 페이로드 클리어."
+    },
+    {
+      "num": 42,
+      "slug": "my_memcpy",
+      "title_ko": "my_memcpy 구현",
+      "title_en": "Implement my_memcpy",
+      "difficulty": "easy",
+      "tags": [
+        "mem*",
+        "copy",
+        "restrict"
+      ],
+      "prompt_ko": "src의 n바이트를 dest로 복사(영역 겹침 미보장)하고 dest를 반환하라.",
+      "prompt_en": "Copy n bytes from src to dest (no overlap) and return dest.",
+      "signature": "void *my_memcpy(void *restrict dest, const void *restrict src, size_t n)",
+      "examples": [
+        {
+          "in": "my_memcpy(dst, \"abcdef\", 4)",
+          "out": "dst[0..3] = \"abcd\""
+        }
+      ],
+      "hints": [
+        "바이트 단위로 앞에서부터 복사.",
+        "restrict = dest/src가 겹치지 않는다는 약속(최적화 허용).",
+        "dest 반환."
+      ],
+      "solution": "void *my_memcpy(void *restrict dest, const void *restrict src, size_t n) {\n    unsigned char *d = (unsigned char *)dest;\n    const unsigned char *s = (const unsigned char *)src;\n    for (size_t i = 0; i < n; ++i) d[i] = s[i];\n    return dest;\n}",
+      "explanation_ko": "겹침이 없다고 가정하므로 앞에서부터 단순 복사. restrict 덕분에 컴파일러가 벡터화 등 공격적 최적화를 할 수 있다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "겹치는 영역에 memcpy 사용 → UB",
+        "src를 const로 안 받음",
+        "워드 정렬 최적화 시 잔여 바이트 처리 누락"
+      ],
+      "anduril_context": "정렬된 프레임/레지스터 블록을 이중 버퍼로 옮길 때."
+    },
+    {
+      "num": 43,
+      "slug": "my_memmove",
+      "title_ko": "my_memmove 구현 (겹침 안전)",
+      "title_en": "Implement my_memmove (overlap-safe)",
+      "difficulty": "medium",
+      "tags": [
+        "mem*",
+        "overlap",
+        "copy-direction"
+      ],
+      "prompt_ko": "영역이 겹쳐도 올바르게 n바이트를 복사하라. dest>src면 뒤에서부터, dest<src면 앞에서부터.",
+      "prompt_en": "Copy n bytes correctly even when regions overlap.",
+      "signature": "void *my_memmove(void *dest, const void *src, size_t n)",
+      "examples": [
+        {
+          "in": "buf=\"abcdef\"; my_memmove(buf+2, buf, 4)",
+          "out": "\"ababcd\""
+        }
+      ],
+      "hints": [
+        "겹치면 복사 방향이 결과를 좌우한다.",
+        "dest<src: 앞→뒤가 안전. dest>src: 뒤→앞이 안전.",
+        "dest==src 또는 n==0이면 조기 반환."
+      ],
+      "solution": "void *my_memmove(void *dest, const void *src, size_t n) {\n    unsigned char *d = (unsigned char *)dest;\n    const unsigned char *s = (const unsigned char *)src;\n    if (d == s || n == 0) return dest;\n    if (d < s) { for (size_t i = 0; i < n; ++i) d[i] = s[i]; }\n    else       { for (size_t i = n; i > 0; --i) d[i-1] = s[i-1]; }\n    return dest;\n}",
+      "explanation_ko": "dest가 src보다 앞이면 앞에서 복사해도 아직 안 읽은 뒤쪽 원본이 안전. dest가 뒤면 뒤에서부터 복사해야 아직 안 읽은 앞쪽 원본이 안전하다. 방향을 나누는 게 핵심.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "방향 분기 없이 항상 앞에서 복사 → 겹침 시 손상",
+        "포인터 대소 비교를 서로 다른 객체에 적용",
+        "n==0 미처리"
+      ],
+      "anduril_context": "링버퍼 재정렬, 인플레이스 프레임 시프트, 패킷 헤더 스트립."
+    },
+    {
+      "num": 44,
+      "slug": "my_memcmp",
+      "title_ko": "my_memcmp 구현",
+      "title_en": "Implement my_memcmp",
+      "difficulty": "easy",
+      "tags": [
+        "mem*",
+        "compare",
+        "unsigned"
+      ],
+      "prompt_ko": "앞 n바이트를 unsigned char로 비교해 첫 불일치의 부호(<0/0/>0)를 반환하라.",
+      "prompt_en": "Compare n bytes as unsigned char; return the sign of the first difference.",
+      "signature": "int my_memcmp(const void *s1, const void *s2, size_t n)",
+      "examples": [
+        {
+          "in": "my_memcmp(\"abc\", \"abd\", 3)",
+          "out": "< 0 (음수)"
+        }
+      ],
+      "hints": [
+        "반드시 unsigned char로 비교해야 부호가 정확하다.",
+        "첫 불일치에서 즉시 차이를 반환.",
+        "끝까지 같으면 0."
+      ],
+      "solution": "int my_memcmp(const void *s1, const void *s2, size_t n) {\n    const unsigned char *a = (const unsigned char *)s1;\n    const unsigned char *b = (const unsigned char *)s2;\n    for (size_t i = 0; i < n; ++i)\n        if (a[i] != b[i]) return (int)a[i] - (int)b[i];\n    return 0;\n}",
+      "explanation_ko": "signed char로 비교하면 0x80(-128) 같은 값이 음수가 되어 부호가 뒤집힌다. unsigned char로 승격 후 빼면 표준이 요구하는 부호가 나온다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "signed char 비교로 부호 뒤집힘",
+        "차이 대신 -1/1 하드코딩",
+        "n==0 시 0 반환 안 함"
+      ],
+      "anduril_context": "체크섬/매직바이트 비교, 설정 블록 동일성 검사."
+    },
+    {
+      "num": 45,
+      "slug": "my_memchr",
+      "title_ko": "my_memchr 구현",
+      "title_en": "Implement my_memchr",
+      "difficulty": "easy",
+      "tags": [
+        "mem*",
+        "search"
+      ],
+      "prompt_ko": "앞 n바이트에서 (unsigned char)c가 처음 나오는 위치의 포인터를 반환하고, 없으면 NULL.",
+      "prompt_en": "Return pointer to first (unsigned char)c within n bytes, else NULL.",
+      "signature": "void *my_memchr(const void *s, int c, size_t n)",
+      "examples": [
+        {
+          "in": "my_memchr(\"abcabc\", 'b', 6)",
+          "out": "&s[1]"
+        }
+      ],
+      "hints": [
+        "바이트 단위로 스캔.",
+        "c는 (unsigned char)로 비교.",
+        "못 찾으면 NULL, 찾으면 const를 벗겨 void*로 반환."
+      ],
+      "solution": "void *my_memchr(const void *s, int c, size_t n) {\n    const unsigned char *p = (const unsigned char *)s;\n    unsigned char v = (unsigned char)c;\n    for (size_t i = 0; i < n; ++i)\n        if (p[i] == v) return (void *)(p + i);\n    return NULL;\n}",
+      "explanation_ko": "strchr과 달리 NUL에서 멈추지 않고 정확히 n바이트만 본다. 이진 데이터(프레임 구분자 탐색)에 적합.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "NUL에서 멈춤(그건 strchr)",
+        "범위 n을 넘어 탐색",
+        "const 반환 캐스팅 누락으로 경고"
+      ],
+      "anduril_context": "바이트 스트림에서 프레임 시작/구분자(sync byte) 탐색."
+    },
+    {
+      "num": 46,
+      "slug": "swap_int",
+      "title_ko": "포인터로 정수 스왑",
+      "title_en": "Swap ints via pointers",
+      "difficulty": "easy",
+      "tags": [
+        "pointer",
+        "swap"
+      ],
+      "prompt_ko": "포인터로 두 정수를 교환하라. 같은 주소를 넘겨도 안전해야 한다.",
+      "prompt_en": "Swap two ints through pointers; must be alias-safe.",
+      "signature": "void swap_int(int32_t *a, int32_t *b)",
+      "examples": [
+        {
+          "in": "a=1,b=2; swap_int(&a,&b)",
+          "out": "a=2, b=1"
+        }
+      ],
+      "hints": [
+        "임시 변수를 쓰는 게 가장 명확·안전.",
+        "XOR 스왑은 a==b일 때 0이 되어 위험.",
+        "a==b면 조기 반환."
+      ],
+      "solution": "void swap_int(int32_t *a, int32_t *b) {\n    if (a == b) return;\n    int32_t tmp = *a; *a = *b; *b = tmp;\n}",
+      "explanation_ko": "포인터 역참조로 값 교환. XOR 트릭은 성능 이점도 없고 aliasing에서 버그가 나므로 임시변수가 정석.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "XOR 스왑에서 a==b 미처리로 0됨",
+        "NULL 미방어",
+        "값이 아닌 포인터를 교환"
+      ],
+      "anduril_context": "이중 버퍼 포인터 스왑(ping-pong), 정렬 루프."
+    },
+    {
+      "num": 47,
+      "slug": "reverse_string",
+      "title_ko": "문자열 in-place 뒤집기",
+      "title_en": "Reverse string in place",
+      "difficulty": "easy",
+      "tags": [
+        "pointer",
+        "string",
+        "two-pointer"
+      ],
+      "prompt_ko": "NUL 종료 문자열을 추가 버퍼 없이 제자리에서 뒤집어라.",
+      "prompt_en": "Reverse a NUL-terminated string in place.",
+      "signature": "void reverse_string(char *s)",
+      "examples": [
+        {
+          "in": "\"hello\"",
+          "out": "\"olleh\""
+        }
+      ],
+      "hints": [
+        "먼저 길이를 구한다.",
+        "양끝 투 포인터로 교환하며 가운데로 수렴.",
+        "빈 문자열/NULL/한 글자 엣지케이스."
+      ],
+      "solution": "void reverse_string(char *s) {\n    if (s == NULL) return;\n    size_t len = 0; while (s[len]) ++len;\n    for (size_t i = 0, j = (len ? len-1 : 0); i < j; ++i, --j) {\n        char t = s[i]; s[i] = s[j]; s[j] = t;\n    }\n}",
+      "explanation_ko": "투 포인터로 i<j 동안 교환. len==0일 때 len-1 언더플로우(size_t는 unsigned)를 피하려 j 초기화를 방어한다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "len==0에서 len-1 언더플로우(거대한 j)",
+        "NUL을 포함해 뒤집음",
+        "NULL 미방어"
+      ],
+      "anduril_context": "엔디안 변환 보조, 표시용 문자열 처리."
+    },
+    {
+      "num": 48,
+      "slug": "const_pointer",
+      "title_ko": "const 위치별 의미 실증",
+      "title_en": "const int* vs int* const",
+      "difficulty": "medium",
+      "tags": [
+        "concept",
+        "const",
+        "pointer"
+      ],
+      "prompt_ko": "const int*(값 읽기전용), int* const(포인터 고정), const int* const(둘 다)의 차이를 코드로 실증하라. int* const로 값 수정, const int*로 재지정을 보이고 합(49)을 반환.",
+      "prompt_en": "Demonstrate the three const placements; return 49.",
+      "signature": "int demo_pointer_const(void)",
+      "examples": [
+        {
+          "in": "demo_pointer_const()",
+          "out": "49"
+        }
+      ],
+      "hints": [
+        "오른쪽→왼쪽으로 선언을 읽는다.",
+        "int* const cp=&x; *cp=42; 는 OK, cp=&y;는 컴파일 에러.",
+        "const int* pc=&x; pc=&y;는 OK, *pc=1;은 에러."
+      ],
+      "solution": "int demo_pointer_const(void) {\n    int x = 10, y = 7;\n    int *const cp = &x;   // 포인터 고정, *cp 수정 가능\n    *cp = 42;\n    const int *pc = &x;   // 값 읽기전용, 재지정 가능\n    pc = &y;\n    return *cp + *pc;     // 42 + 7 = 49\n}",
+      "explanation_ko": "const가 * 왼쪽이면 가리키는 값이 const, * 오른쪽이면 포인터가 const. int* const는 값 수정 가능/재지정 불가, const int*는 그 반대.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "선언 읽는 방향 혼동",
+        "const volatile 조합(읽기전용 HW 레지스터)을 놓침",
+        "top-level vs low-level const 혼동"
+      ],
+      "anduril_context": "읽기전용 상태 레지스터는 const volatile uint32_t*, 고정 LUT 테이블은 const 포인터."
+    },
+    {
+      "num": 49,
+      "slug": "volatile_poll",
+      "title_ko": "volatile — HW 레지스터 폴링",
+      "title_en": "volatile HW register poll",
+      "difficulty": "medium",
+      "tags": [
+        "concept",
+        "volatile",
+        "ISR",
+        "hardware"
+      ],
+      "prompt_ko": "mask 비트가 set될 때까지 최대 max_iters회 status를 폴링한다. set이면 true, timeout이면 false. status는 volatile로 매 접근 재로드.",
+      "prompt_en": "Poll *status until (*status & mask) or timeout; volatile forces re-read.",
+      "signature": "bool wait_ready(volatile const uint32_t *status, uint32_t mask, int max_iters)",
+      "examples": [
+        {
+          "in": "ready=0x1; wait_ready(&ready,0x1,10)",
+          "out": "true"
+        }
+      ],
+      "hints": [
+        "volatile 없으면 컴파일러가 *status를 캐싱해 무한루프.",
+        "매 반복 (*status & mask) 검사.",
+        "NULL이면 false."
+      ],
+      "solution": "bool wait_ready(volatile const uint32_t *status, uint32_t mask, int max_iters) {\n    if (status == NULL) return false;\n    for (int i = 0; i < max_iters; ++i)\n        if ((*status & mask) != 0u) return true;\n    return false;\n}",
+      "explanation_ko": "volatile은 '값이 코드 밖(HW/ISR)에서 바뀔 수 있으니 매번 실제 메모리를 읽어라'는 지시. 없으면 최적화가 첫 읽기값을 레지스터에 고정해 버린다. 단, 원자성/순서는 보장하지 않는다.",
+      "complexity": "O(max_iters) time, O(1) space",
+      "pitfalls": [
+        "volatile 누락 → 최적화로 캐싱/무한루프",
+        "volatile을 스레드 동기화용으로 오해(원자성 X)",
+        "타임아웃 없이 무한 폴링"
+      ],
+      "anduril_context": "메모리맵 주변장치 상태 비트 폴링, ISR-main 공유 플래그, DMA 완료 대기."
+    },
+    {
+      "num": 50,
+      "slug": "dispatch_table",
+      "title_ko": "함수 포인터 디스패치 테이블",
+      "title_en": "Function-pointer dispatch table",
+      "difficulty": "medium",
+      "tags": [
+        "concept",
+        "function-pointer",
+        "dispatch"
+      ],
+      "prompt_ko": "opcode(0=ADD,1=SUB,2=MUL,3=AND)로 ALU 함수를 골라 a,b에 적용. 함수 포인터 배열 사용, 잘못된 opcode는 INT32_MIN.",
+      "prompt_en": "Dispatch a,b through a function-pointer table indexed by opcode.",
+      "signature": "int32_t dispatch(uint8_t opcode, int32_t a, int32_t b)",
+      "examples": [
+        {
+          "in": "dispatch(2,3,4)",
+          "out": "12"
+        },
+        {
+          "in": "dispatch(99,1,1)",
+          "out": "INT32_MIN"
+        }
+      ],
+      "hints": [
+        "typedef int32_t (*alu_fn_t)(int32_t,int32_t);",
+        "static const 배열에 함수들을 나열.",
+        "인덱스 범위를 반드시 검사."
+      ],
+      "solution": "typedef int32_t (*alu_fn_t)(int32_t, int32_t);\nstatic int32_t op_add(int32_t a,int32_t b){return a+b;}\nstatic int32_t op_sub(int32_t a,int32_t b){return a-b;}\nstatic int32_t op_mul(int32_t a,int32_t b){return a*b;}\nstatic int32_t op_and(int32_t a,int32_t b){return a&b;}\nint32_t dispatch(uint8_t opcode, int32_t a, int32_t b) {\n    static const alu_fn_t table[] = { op_add, op_sub, op_mul, op_and };\n    if (opcode >= sizeof table / sizeof table[0]) return INT32_MIN;\n    return table[opcode](a, b);\n}",
+      "explanation_ko": "switch 대신 함수 포인터 배열로 O(1) 분기. 명령/커맨드 핸들러 확장이 쉽다. 인덱스 범위 검사를 빼면 배열 밖 함수 포인터 호출로 임의 실행/크래시.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "인덱스 범위 미검사 → 임의 함수 포인터 호출",
+        "테이블 크기를 하드코딩(sizeof로 계산할 것)",
+        "함수 시그니처 불일치"
+      ],
+      "anduril_context": "프로토콜 커맨드 핸들러, 상태머신 액션 테이블, opcode 디코더."
+    },
+    {
+      "num": 51,
+      "slug": "static_pool",
+      "title_ko": "정적 메모리 풀 malloc/free",
+      "title_en": "Static memory pool malloc/free",
+      "difficulty": "hard",
+      "tags": [
+        "concept",
+        "allocator",
+        "static",
+        "alignment"
+      ],
+      "prompt_ko": "힙 없이 static 배열 위에서 first-fit 할당기를 구현하라. 블록 헤더(size/used/next)+split+free 시 인접 병합(coalesce). size==0/공간부족은 NULL, free(NULL)은 no-op.",
+      "prompt_en": "First-fit allocator over a fixed static pool; free coalesces adjacent blocks.",
+      "signature": "void *static_malloc(size_t size); void static_free(void *ptr)",
+      "examples": [
+        {
+          "in": "p=static_malloc(100)",
+          "out": "풀 내부 정렬된 포인터"
+        },
+        {
+          "in": "static_malloc(POOL_SIZE*2)",
+          "out": "NULL"
+        }
+      ],
+      "hints": [
+        "static uint8_t pool[N]을 하나의 free 블록으로 초기화.",
+        "요청 크기를 8바이트로 정렬, 남으면 split.",
+        "free는 used=false 후 인접 free 블록을 coalesce."
+      ],
+      "solution": "#define POOL_SIZE 1024u\n#define ALIGN 8u\ntypedef struct blk { size_t size; bool used; struct blk *next; } blk_t;\nstatic _Alignas(16) uint8_t g_pool[POOL_SIZE];\nstatic blk_t *g_head = NULL;\nstatic size_t align_up(size_t v,size_t a){return (v+(a-1))&~(a-1);}\nstatic void pool_init(void){ g_head=(blk_t*)(void*)g_pool; g_head->size=POOL_SIZE-sizeof(blk_t); g_head->used=false; g_head->next=NULL; }\nvoid *static_malloc(size_t size){\n    if(!g_head) pool_init();\n    if(size==0) return NULL;\n    size=align_up(size,ALIGN);\n    for(blk_t *b=g_head;b;b=b->next){\n        if(b->used||b->size<size) continue;\n        if(b->size>=size+sizeof(blk_t)+ALIGN){\n            blk_t *nb=(blk_t*)(void*)((uint8_t*)b+sizeof(blk_t)+size);\n            nb->size=b->size-size-sizeof(blk_t); nb->used=false; nb->next=b->next;\n            b->size=size; b->next=nb;\n        }\n        b->used=true; return (uint8_t*)b+sizeof(blk_t);\n    }\n    return NULL;\n}\nstatic void pool_coalesce(void){\n    for(blk_t *b=g_head;b&&b->next;){\n        if(!b->used&&!b->next->used){ b->size+=sizeof(blk_t)+b->next->size; b->next=b->next->next; }\n        else b=b->next;\n    }\n}\nvoid static_free(void *ptr){\n    if(!ptr) return;\n    blk_t *b=(blk_t*)(void*)((uint8_t*)ptr-sizeof(blk_t));\n    b->used=false; pool_coalesce();\n}",
+      "explanation_ko": "풀 전체를 하나의 free 블록으로 시작. malloc은 first-fit으로 충분한 free 블록을 찾아 필요시 split. free는 헤더를 되짚어 used를 내리고 인접 free 블록을 병합해 파편화를 줄인다. 정렬(_Alignas, align_up)이 핵심.",
+      "complexity": "O(blocks) per malloc/free, O(1) extra space",
+      "pitfalls": [
+        "정렬 무시로 unaligned 접근 fault",
+        "split 최소 블록 미검사로 헤더가 payload보다 커짐",
+        "free 시 coalesce 누락 → 파편화",
+        "free(NULL)/이중free 미방어"
+      ],
+      "anduril_context": "힙 금지 환경의 결정적 할당, 패킷 풀/버퍼 풀, 부트로더."
+    },
+    {
+      "num": 52,
+      "slug": "dangling_pointer",
+      "title_ko": "Dangling pointer 방어",
+      "title_en": "Dangling pointer defense",
+      "difficulty": "easy",
+      "tags": [
+        "concept",
+        "memory-safety",
+        "double-free"
+      ],
+      "prompt_ko": "**pp를 받아 실제 free 후 *pp=NULL로 만들어 dangling/이중free를 차단하는 안전 idiom을 구현하라.",
+      "prompt_en": "free(*pp) then set *pp=NULL to prevent dangling/double-free.",
+      "signature": "void safe_free(void **pp)",
+      "examples": [
+        {
+          "in": "safe_free(&p)",
+          "out": "p == NULL (free됨)"
+        }
+      ],
+      "hints": [
+        "pp와 *pp의 NULL을 방어.",
+        "free 후 *pp=NULL.",
+        "이후 이중 호출도 no-op이 되어야 함."
+      ],
+      "solution": "void safe_free(void **pp) {\n    if (pp == NULL || *pp == NULL) return;\n    free(*pp);\n    *pp = NULL;\n}",
+      "explanation_ko": "dangling은 해제된 메모리를 가리키는 포인터. free 직후 NULL로 만들면 이후 사용은 즉시 NULL 크래시(디버깅 쉬움)로 드러나고 이중 free도 막힌다. 포인터의 포인터를 받아야 호출자 변수를 실제로 NULL로 바꿀 수 있다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "값 포인터만 받으면 호출자 변수가 안 바뀜",
+        "지역변수 주소 반환(또 다른 dangling 원인)",
+        "free 후 재사용/이중 free"
+      ],
+      "anduril_context": "동적 자원 해제 규칙, RAII 없는 C에서의 소유권 관리."
+    },
+    {
+      "num": 53,
+      "slug": "generic_swap",
+      "title_ko": "void* 제네릭 swap",
+      "title_en": "void* generic swap",
+      "difficulty": "medium",
+      "tags": [
+        "concept",
+        "void-pointer",
+        "generic"
+      ],
+      "prompt_ko": "임의 타입/크기 객체를 size 바이트만큼 바이트 단위로 교환하라(void* 사용).",
+      "prompt_en": "Swap two objects of arbitrary size byte-by-byte via void*.",
+      "signature": "void generic_swap(void *a, void *b, size_t size)",
+      "examples": [
+        {
+          "in": "generic_swap(&x,&y,sizeof x) (int,double,struct)",
+          "out": "두 객체 값 교환"
+        }
+      ],
+      "hints": [
+        "void*를 unsigned char*로 캐스팅.",
+        "임시버퍼 없이 바이트별로 세 줄 교환.",
+        "a==b/NULL 방어."
+      ],
+      "solution": "void generic_swap(void *a, void *b, size_t size) {\n    if (a == b || a == NULL || b == NULL) return;\n    unsigned char *pa = (unsigned char *)a, *pb = (unsigned char *)b;\n    for (size_t i = 0; i < size; ++i) {\n        unsigned char t = pa[i]; pa[i] = pb[i]; pb[i] = t;\n    }\n}",
+      "explanation_ko": "void*는 타입을 지운 '주소만'이라 크기를 따로 받아야 한다(qsort 시그니처와 같은 발상). 바이트 단위 교환이면 int/double/struct 무엇이든 동작한다.",
+      "complexity": "O(size) time, O(1) space",
+      "pitfalls": [
+        "void* 산술(표준 C 아님)",
+        "고정 크기 임시버퍼로 큰 객체 오버플로",
+        "겹치는 a,b(같은 객체) 미고려"
+      ],
+      "anduril_context": "제네릭 자료구조(정렬/큐)의 요소 교환, 타입 무관 유틸."
+    },
+    {
+      "num": 54,
+      "slug": "struct_padding",
+      "title_ko": "구조체 패딩/정렬",
+      "title_en": "Struct padding / alignment",
+      "difficulty": "medium",
+      "tags": [
+        "concept",
+        "alignment",
+        "padding",
+        "layout"
+      ],
+      "prompt_ko": "멤버 순서가 sizeof를 바꾼다. Unpacked{u8,u32,u8}의 sizeof(12), Reordered{u32,u8,u8}의 sizeof(8), offsetof(Unpacked,b)(4)를 반환하는 함수를 구현하라.",
+      "prompt_en": "Return sizeof/offsetof values that reflect padding/alignment rules.",
+      "signature": "size_t sizeof_unpacked(void); size_t sizeof_reordered(void); size_t offset_of_b_unpacked(void)",
+      "examples": [
+        {
+          "in": "sizeof_unpacked()",
+          "out": "12"
+        },
+        {
+          "in": "sizeof_reordered()",
+          "out": "8"
+        }
+      ],
+      "hints": [
+        "각 멤버는 자기 정렬(크기)의 배수 주소에 놓인다.",
+        "구조체 크기는 최대 멤버 정렬의 배수로 올림.",
+        "sizeof/offsetof를 직접 반환하면 됨."
+      ],
+      "solution": "struct Unpacked  { uint8_t a; uint32_t b; uint8_t c; }; // 1+3+4+1+3 = 12\nstruct Reordered { uint32_t b; uint8_t a; uint8_t c; }; // 4+1+1+2  = 8\nsize_t sizeof_unpacked(void)      { return sizeof(struct Unpacked); }\nsize_t sizeof_reordered(void)     { return sizeof(struct Reordered); }\nsize_t offset_of_b_unpacked(void) { return offsetof(struct Unpacked, b); }",
+      "explanation_ko": "u8,u32,u8 순이면 a 뒤 3바이트 패딩(b를 4정렬), c 뒤 3바이트 패딩(구조체를 4의 배수로)으로 12. 큰 멤버부터(u32,u8,u8) 두면 끝 2바이트 패딩만 남아 8. 순서만 바꿔 33% 절약.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "멤버 합으로 크기 계산(패딩 무시)",
+        "packed 구조체의 unaligned 접근 fault(일부 MCU)",
+        "ABI/컴파일러별 차이 무시"
+      ],
+      "anduril_context": "와이어 프로토콜/레지스터 맵 레이아웃, 메시지 구조체 크기 최적화."
+    },
+    {
+      "num": 55,
+      "slug": "ptr_array_vs_array_ptr",
+      "title_ko": "포인터 배열 vs 배열 포인터",
+      "title_en": "Pointer array vs array pointer",
+      "difficulty": "medium",
+      "tags": [
+        "concept",
+        "pointer",
+        "array"
+      ],
+      "prompt_ko": "int (*p)[4](배열 포인터)로 (*p)[i]를 반환하고, const char *const *arr(NULL 종료 포인터 배열)의 원소 개수를 반환하라.",
+      "prompt_en": "Deref an array-pointer and count a NULL-terminated pointer array.",
+      "signature": "int deref_array_pointer(int (*p)[4], size_t i); size_t count_strings(const char *const *arr)",
+      "examples": [
+        {
+          "in": "arr={10,20,30,40}; deref_array_pointer(&arr,2)",
+          "out": "30"
+        },
+        {
+          "in": "count_strings({\"IMU\",\"GPS\",\"BARO\",NULL})",
+          "out": "3"
+        }
+      ],
+      "hints": [
+        "int (*p)[4]는 int[4] 전체를 가리킴 → (*p)[i].",
+        "int *pa[4]는 포인터 4개의 배열(다른 것).",
+        "NULL 종료 표는 NULL 만날 때까지 카운트."
+      ],
+      "solution": "int deref_array_pointer(int (*p)[4], size_t i) {\n    if (p == NULL || i >= 4) return -1;\n    return (*p)[i];\n}\nsize_t count_strings(const char *const *arr) {\n    if (arr == NULL) return 0;\n    size_t n = 0; while (arr[n] != NULL) ++n; return n;\n}",
+      "explanation_ko": "int (*p)[4]는 배열 포인터라 p+1이 16바이트(int[4]) 점프하고 (*p)[i]로 접근. int *pa[4]는 포인터들의 배열(argv 같은 문자열 테이블). 선언에서 ()의 위치가 의미를 가른다.",
+      "complexity": "deref O(1), count O(n)",
+      "pitfalls": [
+        "int *p[4]와 int (*p)[4] 혼동",
+        "괄호 없이 우선순위 오해",
+        "NULL 종료 없는 배열을 카운트(오버런)"
+      ],
+      "anduril_context": "센서/명령 이름 테이블(포인터 배열), 2D 배열 파라미터 전달(배열 포인터)."
+    }
+  ]
+}

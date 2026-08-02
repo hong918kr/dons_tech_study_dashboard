@@ -1,0 +1,395 @@
+# J 블럭: Callback / FSM / 구성 실전 문제 세트
+
+임베디드/펌웨어 실무에서 자주 마주치는 콜백 관리, 상태기계(FSM), 동적 구성/핫리로드, 상태 저장 등  
+실제 MCU/SoC/네트워크/자동차/센서 환경에서 빈출하는 실전 문제와 헤더/시그니처 템플릿입니다.  
+모든 문제는 15~30분 내 구현/설계/시그니처 초안이 가능하도록 설계되었습니다.
+
+---
+
+## 문제 목록 및 상세
+
+---
+
+### 1. Hierarchical FSM (상위 상태 공통 처리 + 전이 guard)
+
+**상황/스토리:**  
+자동차 ECU, 네트워크 프로토콜, 센서 상태기 등에서 복잡한 상태 전이와 상위/하위 상태의 공통 처리가 필요하다.  
+예를 들어, "ACTIVE" 상태 아래에 "SUB1", "SUB2" 하위 상태가 있고, 전이마다 guard(조건)와 entry/exit 훅이 필요하다.
+
+**요구사항:**  
+- 계층적 상태기계(상위/하위 상태)  
+- 상태별 entry/exit 훅  
+- 전이 guard 함수  
+- 이벤트 기반 전이  
+- 상태/이벤트/guard/action 구조 분리
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef HIER_FSM_H
+#define HIER_FSM_H
+#include <stdint.h>
+
+typedef enum { S_IDLE, S_ACTIVE, S_ERROR, S_SUB1, S_SUB2 } fsm_state_t;
+typedef enum { E_NONE, E_START, E_STOP, E_ERR, E_TIMEOUT } fsm_event_t;
+
+typedef struct hier_fsm hier_fsm_t;
+typedef int (*fsm_guard_fn)(hier_fsm_t*, fsm_event_t);
+typedef void (*fsm_hook_fn)(hier_fsm_t*);
+
+struct hier_fsm {
+    fsm_state_t state;
+    fsm_hook_fn on_entry[5];
+    fsm_hook_fn on_exit[5];
+    fsm_guard_fn guard[5][5];
+    void* user;
+};
+
+void fsm_init(hier_fsm_t* f, fsm_state_t init);
+int  fsm_handle_event(hier_fsm_t* f, fsm_event_t e);
+#endif
+```
+
+---
+
+### 2. Callback registry with priority & reentrancy block
+
+**상황/스토리:**  
+센서 이벤트, 통신 스택, 전원 관리 등에서 여러 콜백을 우선순위별로 등록하고, 중첩 호출(재진입) 방지(예: 무한루프, 스택 오버플로)도 필요하다.
+
+**요구사항:**  
+- 콜백 등록/해제  
+- 우선순위 기반 호출  
+- 중첩 호출 방지(in_call 플래그)  
+- 최대 콜백 수 제한  
+- 전체 콜백 일괄 호출
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef CALLBACK_REG_H
+#define CALLBACK_REG_H
+#include <stdint.h>
+
+#define MAX_CB 8
+
+typedef int (*cb_fn_t)(void* ctx);
+
+typedef struct {
+    cb_fn_t fn;
+    void* ctx;
+    uint8_t prio;
+    uint8_t in_call;
+} cb_entry_t;
+
+typedef struct {
+    cb_entry_t entries[MAX_CB];
+    uint8_t count;
+} cb_registry_t;
+
+void cb_registry_init(cb_registry_t* r);
+int  cb_register(cb_registry_t* r, cb_fn_t fn, void* ctx, uint8_t prio);
+int  cb_unregister(cb_registry_t* r, cb_fn_t fn, void* ctx);
+int  cb_invoke_all(cb_registry_t* r);
+#endif
+```
+
+---
+
+### 3. Configuration hot-reload diff 적용기
+
+**상황/스토리:**  
+네트워크 장비, IoT 게이트웨이 등에서 런타임 중 설정 변경이 발생할 때, 변경된 필드만 반영하고, 필요시 롤백도 지원해야 한다.
+
+**요구사항:**  
+- 설정 구조체 diff 계산  
+- 변경 필드만 반영  
+- 롤백 지원  
+- 변경 마스크 관리  
+- 적용/복원 API
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef CONFIG_HOTRELOAD_H
+#define CONFIG_HOTRELOAD_H
+#include <stdint.h>
+
+typedef struct {
+    int param1;
+    int param2;
+    int param3;
+    // ... 추가 필드
+} config_t;
+
+typedef struct {
+    uint32_t changed_mask;
+    config_t old_cfg;
+    config_t new_cfg;
+} config_diff_t;
+
+void config_diff(const config_t* old, const config_t* new, config_diff_t* diff);
+int  config_apply_diff(config_t* target, const config_diff_t* diff);
+void config_rollback(config_t* target, const config_diff_t* diff);
+#endif
+```
+
+---
+
+### 4. State persistence delta encoding
+
+**상황/스토리:**  
+센서/장치 상태를 플래시에 저장할 때, 전체를 저장하지 않고 변경된 필드만 delta로 저장/복원, CRC로 무결성도 보장한다.
+
+**요구사항:**  
+- 변경 필드 bitmap  
+- delta만 저장/복원  
+- CRC 포함  
+- encode/apply/check API
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef STATE_DELTA_H
+#define STATE_DELTA_H
+#include <stdint.h>
+
+typedef struct {
+    uint32_t field_mask;
+    uint8_t  data[32];
+    uint32_t crc;
+} state_delta_t;
+
+int  state_delta_encode(const void* old, const void* new, state_delta_t* delta, size_t sz);
+int  state_delta_apply(void* target, const state_delta_t* delta, size_t sz);
+int  state_delta_crc_check(const state_delta_t* delta, size_t sz);
+#endif
+```
+
+---
+
+### 5. Event dispatcher (동적 이벤트 타입/핸들러 매핑)
+
+**상황/스토리:**  
+동적 이벤트(예: 센서, 통신, 타이머 등)에 대해 타입별로 핸들러를 등록/해제하고, 이벤트 발생 시 동적으로 디스패치한다.
+
+**요구사항:**  
+- 이벤트 타입별 핸들러 등록/해제  
+- 동적 디스패치  
+- 최대 이벤트 타입 제한  
+- 핸들러 미등록시 예외 처리
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef EVENT_DISPATCH_H
+#define EVENT_DISPATCH_H
+#include <stdint.h>
+
+#define MAX_EVT_TYPE 16
+
+typedef int (*evt_handler_t)(void* arg);
+
+typedef struct {
+    evt_handler_t handler[MAX_EVT_TYPE];
+} evt_dispatcher_t;
+
+void evt_dispatcher_init(evt_dispatcher_t* d);
+int  evt_register(evt_dispatcher_t* d, uint8_t evt_type, evt_handler_t fn);
+int  evt_unregister(evt_dispatcher_t* d, uint8_t evt_type);
+int  evt_dispatch(evt_dispatcher_t* d, uint8_t evt_type, void* arg);
+#endif
+```
+
+---
+
+### 6. Simple timer-driven FSM (timeout/이벤트 기반 전이)
+
+**상황/스토리:**  
+타임아웃 기반 상태 전이(예: 통신 타임아웃, 센서 측정 FSM 등)에서, 상태별 타이머 관리와 이벤트 기반 전이가 필요하다.
+
+**요구사항:**  
+- 상태별 타이머 만료/이벤트 전이  
+- 상태별 콜백  
+- 타이머 만료/이벤트 입력 API  
+- 상태/이벤트 enum 분리
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef TIMER_FSM_H
+#define TIMER_FSM_H
+#include <stdint.h>
+
+typedef enum { T_IDLE, T_WAIT, T_DONE } t_fsm_state_t;
+typedef enum { T_EVT_START, T_EVT_TIMEOUT, T_EVT_DONE } t_fsm_evt_t;
+
+typedef struct {
+    t_fsm_state_t state;
+    uint32_t timer_expiry;
+    void (*on_state)(t_fsm_state_t, void*);
+    void* user;
+} timer_fsm_t;
+
+void timer_fsm_init(timer_fsm_t* f, void (*on_state)(t_fsm_state_t, void*), void* user);
+void timer_fsm_event(timer_fsm_t* f, t_fsm_evt_t evt, uint32_t now);
+#endif
+```
+
+---
+
+### 7. Callback chaining (연쇄 호출, 실패시 중단)
+
+**상황/스토리:**  
+여러 콜백을 체인으로 등록해 순차 실행, 중간에 실패(에러 리턴)시 중단/롤백이 필요한 상황(예: 센서 초기화, 파이프라인 처리 등).
+
+**요구사항:**  
+- 콜백 체인 등록/실행  
+- 순차 실행, 실패시 중단  
+- 최대 체인 길이 제한  
+- 실행 결과 반환
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef CB_CHAIN_H
+#define CB_CHAIN_H
+#include <stdint.h>
+
+#define MAX_CHAIN 8
+
+typedef int (*chain_fn_t)(void*);
+
+typedef struct {
+    chain_fn_t chain[MAX_CHAIN];
+    uint8_t count;
+} cb_chain_t;
+
+void cb_chain_init(cb_chain_t* c);
+int  cb_chain_add(cb_chain_t* c, chain_fn_t fn);
+int  cb_chain_run(cb_chain_t* c, void* arg); // 실패시 중단
+#endif
+```
+
+---
+
+### 8. Deferred callback queue (ISR-safe enqueue, task context 실행)
+
+**상황/스토리:**  
+ISR에서 콜백을 큐에 안전하게 등록하고, 실제 실행은 task context에서 처리(예: 센서 인터럽트 → 데이터 처리).
+
+**요구사항:**  
+- ISR-safe enqueue  
+- task context fetch/실행  
+- 오버플로 방지  
+- 최대 큐 길이 제한
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef DEFERRED_CBQ_H
+#define DEFERRED_CBQ_H
+#include <stdint.h>
+
+#define DEFERRED_CBQ_MAX 16
+
+typedef void (*deferred_cb_t)(void*);
+
+typedef struct {
+    deferred_cb_t fn;
+    void* arg;
+} deferred_cbq_item_t;
+
+typedef struct {
+    volatile uint8_t head, tail;
+    deferred_cbq_item_t buf[DEFERRED_CBQ_MAX];
+} deferred_cbq_t;
+
+void deferred_cbq_init(deferred_cbq_t* q);
+int  deferred_cbq_post_isr(deferred_cbq_t* q, deferred_cb_t fn, void* arg);
+int  deferred_cbq_fetch(deferred_cbq_t* q, deferred_cbq_item_t* out);
+#endif
+```
+
+---
+
+### 9. Configurable state transition table (테이블 기반 FSM)
+
+**상황/스토리:**  
+상태/이벤트/액션 테이블 기반 FSM을 동적으로 수정/확장(예: 통신 프로토콜, 장치 상태기 등).
+
+**요구사항:**  
+- 상태/이벤트/액션 테이블  
+- 동적 테이블 수정  
+- 상태/이벤트 enum 분리  
+- 액션 함수 포인터
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef TABLE_FSM_H
+#define TABLE_FSM_H
+#include <stdint.h>
+
+#define MAX_STATES 8
+#define MAX_EVENTS 8
+
+typedef int (*fsm_action_t)(void*);
+
+typedef struct {
+    uint8_t next_state;
+    fsm_action_t action;
+} fsm_table_entry_t;
+
+typedef struct {
+    fsm_table_entry_t table[MAX_STATES][MAX_EVENTS];
+    uint8_t state;
+} table_fsm_t;
+
+void table_fsm_init(table_fsm_t* f, uint8_t init_state);
+int  table_fsm_handle(table_fsm_t* f, uint8_t event, void* arg);
+#endif
+```
+
+---
+
+### 10. Persistent callback subscription (비휘발성 등록/복원)
+
+**상황/스토리:**  
+콜백 등록 정보를 플래시에 저장/복원, CRC와 버전 관리로 무결성 보장(예: OTA 후 자동 복원, 설정 유지 등).
+
+**요구사항:**  
+- 콜백 등록 정보 플래시 저장/복원  
+- CRC, 버전 관리  
+- 등록/해제 API  
+- 최대 등록 수 제한
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef PERSIST_CB_H
+#define PERSIST_CB_H
+#include <stdint.h>
+
+#define MAX_PERSIST_CB 8
+
+typedef struct {
+    uint32_t id;
+    uint32_t version;
+    uint32_t crc;
+} persist_cb_meta_t;
+
+typedef struct {
+    persist_cb_meta_t meta[MAX_PERSIST_CB];
+    uint8_t count;
+} persist_cb_store_t;
+
+int persist_cb_save(const persist_cb_store_t* s, void* flash_addr);
+int persist_cb_load(persist_cb_store_t* s, const void* flash_addr);
+int persist_cb_register(persist_cb_store_t* s, uint32_t id, uint32_t version);
+int persist_cb_unregister(persist_cb_store_t* s, uint32_t id);
+#endif
+```
+
+---
+
+## 연습 포인트 요약
+
+- FSM: 계층/테이블 기반, guard, entry/exit, 타임아웃, 동적 전이
+- Callback: 우선순위, 중첩 방지, 체인, 연기 실행, 비휘발성 등록
+- Config: diff/핫리로드, delta encoding, 롤백, CRC
+- Dispatcher: 동적 이벤트 타입/핸들러 매핑, 등록/해제
+- ISR-safe: 콜백 큐, task context 실행, 오버플로 방지
+
+필요 시 각 항목별 구현/테스트 템플릿도 추가 제공 가능.  
+원하는 번호를 지정하면 skeleton 코드/테스트 하네스 제공 가능.

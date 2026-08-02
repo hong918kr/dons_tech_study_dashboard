@@ -1,0 +1,440 @@
+{
+  "id": "anduril_signature",
+  "order": 10,
+  "range": "Q1-9",
+  "icon": "🎯",
+  "title_en": "Anduril Signature & Drone-Flavored",
+  "title_ko": "안두릴 실전 & 드론 응용",
+  "summary_ko": "실제 재현된 Anduril 2문항(my_atoi 오버플로 클램핑, reverseBits 기본+O(log n) 최적화)에서 출발해 드론 펌웨어 감각의 6문제를 붙였다: 레지스터 RMW, UART 링버퍼(SPSC), CRC-8 프레임 검증, IMU 상보 필터, GPIO 디바운스, 스틱->PWM 매핑.",
+  "summary_en": "Two real reproduced Anduril questions (my_atoi with overflow clamping, reverseBits basic + O(log n)) plus six drone-firmware problems: register RMW, UART SPSC ring buffer, CRC-8 frame validation, IMU complementary filter, GPIO debounce, and stick-to-PWM mapping.",
+  "anduril_relevance_ko": "my_atoi와 reverseBits는 Anduril 리크루터 스크린에서 실제로 재현된 문제로, 파싱 견고성과 비트 조작을 동시에 본다. 나머지 6개는 드론/TRS 펌웨어의 일상 패턴(MMIO 필드 설정, UART ISR-main 링버퍼, 텔레메트리 CRC, IMU 자세 추정, 스위치 디바운스, 액추에이터 출력)으로 UB 회피/정수 안전/volatile/ISR 공유/경계 포화 감각을 검증한다.",
+  "concepts": [
+    {
+      "term": "Overflow pre-check",
+      "ko": "곱셈 전 result>INT_MAX/10 검사로 클램핑",
+      "en": "Clamp before multiply to avoid signed-overflow UB"
+    },
+    {
+      "term": "(unsigned char) cast",
+      "ko": "isspace/isdigit에 음수 char 넘기면 UB",
+      "en": "ctype funcs require unsigned char"
+    },
+    {
+      "term": "Mask/shift reverse",
+      "ko": "블록 16->8->4->2->1 스왑, 0xAA/0x55 등",
+      "en": "Divide-and-conquer bit reversal masks"
+    },
+    {
+      "term": "Register RMW",
+      "ko": "(reg&~mask)|((v<<sh)&mask) 필드만 교체",
+      "en": "Read-modify-write one field, preserve rest"
+    },
+    {
+      "term": "SPSC ring",
+      "ko": "head=생산자, tail=소비자, 한 칸 희생, 데이터->인덱스 순서",
+      "en": "Lock-free single producer/consumer FIFO"
+    },
+    {
+      "term": "CRC-8 poly 0x07",
+      "ko": "바이트 XOR 후 8회 시프트/폴리XOR, (uint8_t)캐스트",
+      "en": "Bytewise CRC, cast to keep 8 bits"
+    },
+    {
+      "term": "Complementary filter",
+      "ko": "a*gyro + (1-a)*accel, a=0.98",
+      "en": "Cheap gyro/accel sensor fusion"
+    },
+    {
+      "term": "Debounce shift-reg",
+      "ko": "history=(h<<1)|raw, 0xFF/0x00로 확정",
+      "en": "8-sample history debounce"
+    },
+    {
+      "term": "Clamp then scale",
+      "ko": "포화 먼저, 스케일 나중 (오버플로 방지)",
+      "en": "Saturate before mapping to PWM"
+    }
+  ],
+  "study_note_md": "# 10. Anduril 시그니처 & 드론 응용 (Signature & Drone-Flavored) 🎯\n\n> 실제로 재현된 Anduril 인터뷰 2문항(`my_atoi`, `reverseBits`)을 정석대로 다듬고,\n> Anduril TRS(트래킹·무선·센서) 펌웨어 감각의 드론 문제 6개를 붙였다.\n> 화이트보드에서 \"이거 그대로 나온다\" 급의 실전 세트.\n\n---\n\n## 왜 이 토픽이 Anduril 펌웨어 인터뷰의 핵심인가\n\n- `my_atoi` / `reverseBits` 는 **실제 리크루터 스크린에서 재현된 문제**다. 파싱 견고성\n  (오버플로/NULL/부호)과 비트 조작(마스크·시프트) 두 축을 한 번에 본다.\n- 나머지 6개는 드론 펌웨어의 \"매일 쓰는\" 패턴: 레지스터 RMW, UART 링버퍼,\n  CRC 프레임 검증, IMU 센서 퓨전, 스위치 디바운스, 액추에이터 출력 매핑.\n- 공통 관심사: **UB 회피**(시프트폭·부호 오버플로·NULL), **정수 안전**, **volatile/ISR\n  공유**, **경계·포화 처리**. 인터뷰어가 진짜 보는 것은 결과가 아니라 이 감각이다.\n\n---\n\n## 문제별 핵심\n\n### Q1. `my_atoi` — 오버플로 클램핑 파서\n순서: **공백 스킵 → 부호 1개 → 숫자 변환(첫 비숫자에서 정지) → 오버플로 클램핑**.\n```c\nif (result > INT_MAX/10 || (result == INT_MAX/10 && digit > INT_MAX%10))\n    return (sign == 1) ? INT_MAX : INT_MIN;   // 곱하기 *전에* 선검사\n```\n- **핵심 트릭**: `result*10 + digit` 를 실제로 하기 전에 오버플로를 판정한다.\n  `result > INT_MAX/10` 이거나, 같을 때 마지막 자리 `digit > INT_MAX%10 (=7)`.\n- `INT_MIN` 도 이 하나의 검사로 커버된다 — 음수 크기는 `INT_MAX+1` 이지만\n  부호를 마지막에 곱하므로 크기 기준으로 클램핑하면 `-2147483648` 이 정확히 나온다.\n- **함정**: `isspace(str[i])` 에 음수 `char` 를 넘기면 UB → `isspace((unsigned char)str[i])`.\n- **함정**: `\"+-2\"` 는 부호 뒤 비숫자라 0. NULL/빈문자열/숫자없음 전부 0.\n\n### Q2. `reverseBits` — 기본 루프 O(32)\n```c\nreversed = (reversed << 1) | (n & 1u);  n >>= 1;   // 32회\n```\nLSB 를 하나씩 뽑아 `reversed` 위쪽으로 밀어넣는다. `1u` (unsigned) 필수.\n\n### Q3. `reverseBitsOptimized` — 분할정복 O(log n)\n\"인접 블록 스왑\"을 블록 크기 **16→8→4→2→1** 로 반씩 줄이며 5단계.\n```c\nn = (n >> 16) | (n << 16);                                // 16비트\nn = ((n & 0xFF00FF00u)>>8)  | ((n & 0x00FF00FFu)<<8);     // 8비트(바이트)\nn = ((n & 0xF0F0F0F0u)>>4)  | ((n & 0x0F0F0F0Fu)<<4);     // 4비트(니블)\nn = ((n & 0xCCCCCCCCu)>>2)  | ((n & 0x33333333u)<<2);     // 2비트\nn = ((n & 0xAAAAAAAAu)>>1)  | ((n & 0x55555555u)<<1);     // 1비트\n```\n- **마스크 읽는 법**: `0xAAAA...` = 홀수 위치 비트, `0x5555...` = 짝수 위치 비트.\n  각 단계는 좌/우 절반을 골라 서로 반대로 시프트해 자리를 교환한다.\n- 루프·분기 없음 → 파이프라인 친화적. 인터뷰 팔로업: \"왜 5단계?\" → `log2(32)=5`.\n\n### Q4. `reg_set_field` — 레지스터 read-modify-write\n```c\nnew = (reg & ~mask) | ((value << shift) & mask);\n```\n- 다른 필드를 **건드리지 않고** 한 필드만 교체하는 임베디드 정석. I2C 디바이스\n  설정 레지스터, MMIO 주변장치 제어의 기본.\n- `& mask` 로 value 의 넘치는 비트를 절삭 → 이웃 필드 오염 방지.\n- `shift >= 32` 는 시프트폭 UB → 가드. 실무에선 `volatile` 레지스터를 읽고 쓴다.\n\n### Q5. UART 링버퍼 — SPSC (ISR 생산 / main 소비)\n- **UART RX ISR** 가 `put`, **main loop** 가 `get`. head 는 생산자만, tail 은\n  소비자만 쓴다 → 단일코어 베어메탈에선 락 없이 안전.\n- power-of-two 크기 + `& (SIZE-1)` 마스킹, `head==tail` = empty, 한 칸 희생.\n- **순서 규칙**: 데이터 먼저 쓰고 인덱스 나중에 공개. 멀티코어면 acquire/release\n  원자연산 필요(→ 05번 토픽 SPSC 참조), 단일코어면 `volatile` + 순서로 충분.\n\n### Q6. CRC-8 + 프레임 검증 (MAVLink 풍)\n```c\ncrc ^= byte; for(8) crc = (crc & 0x80) ? (crc<<1)^0x07 : (crc<<1);\n```\n- 프레임: `[START 0xFE][len][payload...][crc]`. crc 는 **START 제외** `{len+payload}`.\n- 검증 3종: 시작 바이트, 길이 필드 일관성(`len+3==total`), 후미 CRC 일치.\n- 알려진 벡터: `CRC-8/SMBUS(\"123456789\") = 0xF4` — 구현 검산에 쓴다.\n- **함정**: `crc << 1` 은 `int` 승격되므로 `(uint8_t)` 캐스트로 잘라야 8비트 유지.\n\n### Q7. IMU 상보 필터 (complementary filter)\n```c\nangle = alpha*(prev + gyro_rate*dt) + (1 - alpha)*accel_angle;\n```\n- 자이로 적분: 단기 정확·장기 드리프트. 가속도계: 장기 정확·단기 노이즈.\n  둘을 1차 필터로 섞는다. `alpha ≈ 0.98` (자이로에 무게, 저주파는 accel 보정).\n- `alpha=1` → 순수 gyro, `alpha=0` → 순수 accel. 칼만필터의 값싼 대체제로\n  드론 자세 추정(pitch/roll)에 광범위하게 쓴다.\n- 팔로업: \"고정소수점으로 바꾸면?\" → `alpha` 를 Q15 정수로, 곱셈 후 `>>15`.\n\n### Q8. GPIO 디바운스 — 시프트 레지스터\n```c\nhistory = (history<<1) | raw;\nif (history==0xFF) state=true; else if (history==0x00) state=false; // else hold\n```\n- 기계식 스위치 채터(bounce)를 8샘플 히스토리로 제거. 연속 8회 동일해야 확정.\n- 카운터/적분기 방식보다 코드가 짧고 노이즈 내성 직관적. 폴링 tick 마다 호출.\n- 팔로업: \"샘플 주기 vs 바운스 시간?\" → 8*Ts 가 바운스 최대 지속(~수 ms)보다 커야.\n\n### Q9. `stick_to_pwm` — 포화 매핑\n```c\nif (stick<-1000) stick=-1000; if (stick>1000) stick=1000;\nreturn 1500 + stick/2;   // [-1000,1000] -> [1000,2000] us\n```\n- RC 스틱 → ESC/서보 PWM 펄스폭. 중립 1500us, 범위 밖은 **포화(clamp)**.\n- **먼저 클램프 후 스케일** — 순서가 뒤바뀌면 오버플로/래핑 위험.\n- 팔로업: \"데드밴드는?\" → 중립 근처 `|stick|<D` 를 0 으로. \"역방향 채널?\" → 부호 반전.\n\n---\n\n## 인터뷰 팔로업 (follow-ups)\n\n- **\"`my_atoi` 오버플로를 곱셈 후에 검사하면?\"** → 이미 UB 발생(signed overflow). 반드시 사전 검사.\n- **\"`reverseBits` 를 8비트 룩업 테이블로?\"** → 256엔트리 테이블 4번 조합, 초고속. 트레이드오프는 메모리.\n- **\"레지스터 RMW 가 ISR 과 경합하면?\"** → read-modify-write 는 원자적이지 않다. BSRR 같은 set/clear 전용 레지스터 또는 임계구역.\n- **\"링버퍼 full/empty 를 count 로?\"** → count 를 양쪽이 쓰면 경합. SPSC 는 인덱스만으로 판별(한 칸 희생).\n- **\"CRC 대신 체크섬?\"** → 체크섬은 비트 교환/버스트 에러 취약. CRC 가 검출력 우수.\n- **\"상보필터 vs 칼만?\"** → 칼만이 최적이지만 튜닝·연산 비쌈. 상보필터는 1곱셈으로 충분히 좋음.\n\n## 흔한 버그 (gotchas)\n\n- `isspace`/`isdigit` 에 음수 char → `(unsigned char)` 캐스트 누락.\n- `1 << 31`, `crc << 1` 부호/승격 문제 → `1u`, `(uint8_t)` 캐스트.\n- 시프트폭 `>= 32` UB (Q3/Q4).\n- 링버퍼 인덱스 공개 순서 뒤집기 → 소비자가 미완성 데이터를 봄.\n- PWM 매핑에서 클램프 전 스케일 → 정수 오버플로.\n- 디바운스 히스토리 폭과 샘플 주기 미스매치 → 여전히 채터.\n",
+  "problems": [
+    {
+      "num": 1,
+      "slug": "my_atoi",
+      "title_ko": "문자열을 int로 (오버플로 클램핑)",
+      "title_en": "String to int with overflow clamping",
+      "difficulty": "medium",
+      "tags": [
+        "parsing",
+        "overflow",
+        "robustness",
+        "atoi"
+      ],
+      "prompt_ko": "선행 공백을 스킵하고 선택적 부호(+/-)를 읽은 뒤 연속된 숫자만 변환한다. 첫 비숫자에서 멈추고, 오버플로 시 INT_MAX/INT_MIN으로 클램핑한다. NULL/빈 문자열/숫자 없음은 0.",
+      "prompt_en": "Skip leading whitespace, read an optional sign, then convert consecutive digits, stopping at the first non-digit. Clamp overflow to INT_MAX/INT_MIN. NULL/empty/no-digits return 0.",
+      "signature": "int my_atoi(const char *str)",
+      "examples": [
+        {
+          "in": "my_atoi(\"   -42\")",
+          "out": "-42"
+        },
+        {
+          "in": "my_atoi(\"4193 with words\")",
+          "out": "4193"
+        },
+        {
+          "in": "my_atoi(\"2147483648\")",
+          "out": "2147483647 (INT_MAX)"
+        },
+        {
+          "in": "my_atoi(NULL)",
+          "out": "0"
+        }
+      ],
+      "hints": [
+        "isspace/isdigit 인자는 (unsigned char)로 캐스팅한다 (음수 char UB).",
+        "부호는 최대 1개만 허용하고, 이후 첫 비숫자에서 정지한다.",
+        "result*10+digit를 실제로 계산하기 *전에* 오버플로를 선검사한다.",
+        "검사식: result > INT_MAX/10 || (result==INT_MAX/10 && digit>INT_MAX%10)."
+      ],
+      "solution": "int my_atoi(const char *str) {\n    if (str == NULL) return 0;\n    int i = 0;\n    while (isspace((unsigned char)str[i])) i++;   // 1) 공백\n    int sign = 1;\n    if (str[i] == '+' || str[i] == '-') {          // 2) 부호\n        if (str[i] == '-') sign = -1;\n        i++;\n    }\n    int result = 0;\n    while (isdigit((unsigned char)str[i])) {        // 3) 숫자\n        int digit = str[i] - '0';\n        if (result > INT_MAX/10 ||                  // 4) 곱셈 전 오버플로 선검사\n            (result == INT_MAX/10 && digit > INT_MAX%10))\n            return (sign == 1) ? INT_MAX : INT_MIN;\n        result = result*10 + digit;\n        i++;\n    }\n    return result * sign;\n}",
+      "explanation_ko": "공백->부호->숫자 순으로 파싱한다. 핵심은 곱셈을 하기 전에 오버플로를 판정하는 것: result가 INT_MAX/10보다 크거나, 같을 때 다음 자릿수가 INT_MAX%10(=7)을 넘으면 클램핑한다. 부호를 마지막에 곱하므로 음수 방향은 자동으로 INT_MIN으로 클램핑된다. isspace/isdigit에 음수 char를 넘기면 UB라 unsigned char로 캐스팅한다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "곱셈 후 오버플로 검사 -> 이미 signed overflow UB",
+        "isspace/isdigit에 음수 char 전달 -> UB (unsigned char 캐스트 필요)",
+        "부호 여러 개(\"+-2\") 허용 실수 -> 0이어야 함",
+        "NULL 미처리 -> 크래시"
+      ],
+      "anduril_context": "명령/설정 문자열 파싱, 시리얼 콘솔 인자 파싱, 텔레메트리 텍스트 필드 변환에서 견고한 정수 파서가 필요하다."
+    },
+    {
+      "num": 2,
+      "slug": "reverse_bits",
+      "title_ko": "32비트 순서 반전 (기본 루프)",
+      "title_en": "Reverse 32 bits (basic loop)",
+      "difficulty": "easy",
+      "tags": [
+        "bit-manipulation",
+        "loop"
+      ],
+      "prompt_ko": "32비트 정수의 비트 순서를 완전히 뒤집어 반환한다. LSB가 MSB가 되도록.",
+      "prompt_en": "Reverse the bit order of a 32-bit integer (LSB becomes MSB).",
+      "signature": "uint32_t reverseBits(uint32_t n)",
+      "examples": [
+        {
+          "in": "reverseBits(0x00000001)",
+          "out": "0x80000000"
+        },
+        {
+          "in": "reverseBits(0x00000005)",
+          "out": "0xA0000000"
+        }
+      ],
+      "hints": [
+        "reversed를 왼쪽으로 시프트하며 n의 LSB를 하나씩 붙인다.",
+        "(reversed<<1)|(n&1u), 그리고 n>>=1을 32회.",
+        "리터럴은 반드시 1u (unsigned)."
+      ],
+      "solution": "uint32_t reverseBits(uint32_t n) {\n    uint32_t reversed = 0;\n    for (int i = 0; i < 32; i++) {\n        reversed = (reversed << 1) | (n & 1u);\n        n >>= 1;\n    }\n    return reversed;\n}",
+      "explanation_ko": "매 반복에서 reversed를 한 칸 왼쪽으로 밀고 n의 최하위 비트를 그 빈자리에 넣는다. n은 오른쪽으로 밀어 다음 비트를 노출한다. 32회 반복하면 첫 비트가 최상위로, 마지막 비트가 최하위로 이동해 완전히 반전된다.",
+      "complexity": "O(1) time (32 fixed), O(1) space",
+      "pitfalls": [
+        "1 (signed) 사용 시 부호비트 문제",
+        "루프 횟수를 비트폭과 다르게 잡음"
+      ],
+      "anduril_context": "비트 스트림 프로토콜(LSB-first vs MSB-first) 변환, SPI/센서에서 엔디안/비트오더 정렬."
+    },
+    {
+      "num": 3,
+      "slug": "reverse_bits_optimized",
+      "title_ko": "32비트 순서 반전 (분할정복 O(log n))",
+      "title_en": "Reverse 32 bits (divide & conquer)",
+      "difficulty": "medium",
+      "tags": [
+        "bit-manipulation",
+        "mask-shift",
+        "divide-and-conquer"
+      ],
+      "prompt_ko": "reverseBits와 같은 결과를, 루프/분기 없이 마스크/시프트 5단계로 계산한다. 블록 크기를 16->8->4->2->1로 반씩 줄이며 인접 블록을 교환한다.",
+      "prompt_en": "Same result as reverseBits but branchless: swap adjacent bit-blocks halving size 16->8->4->2->1.",
+      "signature": "uint32_t reverseBitsOptimized(uint32_t n)",
+      "examples": [
+        {
+          "in": "reverseBitsOptimized(0x00000001)",
+          "out": "0x80000000"
+        },
+        {
+          "in": "reverseBitsOptimized(0xDEADBEEF)",
+          "out": "reverseBits(0xDEADBEEF)와 동일"
+        }
+      ],
+      "hints": [
+        "먼저 상/하위 16비트를 교환: (n>>16)|(n<<16).",
+        "마스크로 좌/우 절반을 골라 반대 방향으로 시프트해 교환.",
+        "0xAAAA..=홀수위치, 0x5555..=짝수위치, 0xCC/0x33=2비트, 0xF0/0x0F=니블.",
+        "총 5단계 (log2 32 = 5)."
+      ],
+      "solution": "uint32_t reverseBitsOptimized(uint32_t n) {\n    n = (n >> 16) | (n << 16);\n    n = ((n & 0xFF00FF00u) >> 8)  | ((n & 0x00FF00FFu) << 8);\n    n = ((n & 0xF0F0F0F0u) >> 4)  | ((n & 0x0F0F0F0Fu) << 4);\n    n = ((n & 0xCCCCCCCCu) >> 2)  | ((n & 0x33333333u) << 2);\n    n = ((n & 0xAAAAAAAAu) >> 1)  | ((n & 0x55555555u) << 1);\n    return n;\n}",
+      "explanation_ko": "각 단계는 특정 크기의 인접 블록을 통째로 스왑한다. 16비트 반쪽을 먼저 바꾸고, 그 안에서 바이트, 니블, 2비트, 1비트 순으로 절반씩 좁혀 간다. 마스크로 좌/우 절반을 분리해 한쪽은 오른쪽으로, 다른쪽은 왼쪽으로 같은 폭만큼 시프트한 뒤 OR로 합친다. 분기/루프가 없어 파이프라인 친화적이다.",
+      "complexity": "O(log n)=5 steps, O(1) space",
+      "pitfalls": [
+        "마스크 상수 오타 (0xCCCC vs 0x3333 등)",
+        "시프트 폭과 마스크 블록 크기 불일치",
+        "리터럴에 u 접미사 누락"
+      ],
+      "anduril_context": "고속 DSP/비트리버설(FFT bit-reversal), 프로토콜 비트오더 변환에서 사이클 절약."
+    },
+    {
+      "num": 4,
+      "slug": "reg_set_field",
+      "title_ko": "레지스터 필드 read-modify-write",
+      "title_en": "Register field read-modify-write",
+      "difficulty": "easy",
+      "tags": [
+        "register",
+        "mask",
+        "i2c",
+        "mmio",
+        "rmw"
+      ],
+      "prompt_ko": "mask로 지정된 비트 필드만 value로 교체하고 나머지 비트는 보존한다. value는 shift만큼 밀어 필드 위치에 맞추고, 넘치는 비트는 mask로 절삭한다. shift>=32는 원본을 그대로 반환.",
+      "prompt_en": "Replace only the masked field with value (positioned by shift), preserving other bits; truncate overflow via mask. shift>=32 returns reg unchanged.",
+      "signature": "uint32_t reg_set_field(uint32_t reg, uint32_t mask, uint8_t shift, uint32_t value)",
+      "examples": [
+        {
+          "in": "reg_set_field(0xFF, 0x30, 4, 0x2)",
+          "out": "0xEF"
+        },
+        {
+          "in": "reg_set_field(0xAA, 0x0F, 0, 0x5)",
+          "out": "0xA5"
+        }
+      ],
+      "hints": [
+        "필드를 먼저 0으로: reg & ~mask.",
+        "value를 위치로: (value<<shift) & mask.",
+        "두 결과를 OR로 합친다.",
+        "shift>=32u는 시프트폭 UB -> 가드."
+      ],
+      "solution": "uint32_t reg_set_field(uint32_t reg, uint32_t mask, uint8_t shift, uint32_t value) {\n    if (shift >= 32u) return reg;                 // 시프트폭 가드\n    uint32_t placed = (value << shift) & mask;    // 필드 위치로, 넘침 절삭\n    return (reg & ~mask) | placed;                // 필드 클리어 후 OR\n}",
+      "explanation_ko": "read-modify-write의 정석. reg & ~mask로 대상 필드 비트만 0으로 만들고, (value<<shift)&mask로 새 값을 필드 위치에 정렬하며 mask로 넘치는 비트를 잘라낸다. 마지막에 OR로 합치면 나머지 비트는 전혀 건드리지 않고 필드만 바뀐다. shift>=32는 UB라 방어한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "value의 넘치는 비트를 mask로 절삭 안 함 -> 이웃 필드 오염",
+        "shift>=32 시프트폭 UB",
+        "ISR과 공유되는 실제 레지스터는 RMW가 비원자적 -> 경합"
+      ],
+      "anduril_context": "I2C 센서/PMIC 설정 레지스터, STM32 GPIO MODER/타이머 CCMR 같은 MMIO 필드를 이웃 비트 안 건드리고 설정."
+    },
+    {
+      "num": 5,
+      "slug": "uart_ring_buffer",
+      "title_ko": "UART 링버퍼 (ISR 생산 / main 소비, SPSC)",
+      "title_en": "UART ring buffer (SPSC)",
+      "difficulty": "medium",
+      "tags": [
+        "ring-buffer",
+        "spsc",
+        "uart",
+        "isr",
+        "lock-free"
+      ],
+      "prompt_ko": "단일 생산자(UART RX ISR) / 단일 소비자(main loop) 바이트 링버퍼. put은 가득 차면 false, get은 비면 false. power-of-two 크기 + 마스킹, head==tail=empty, 한 칸 희생(용량 SIZE-1).",
+      "prompt_en": "Single-producer (UART RX ISR) / single-consumer (main) byte ring. put returns false when full, get false when empty. Pow2 size + masking, one slot sacrificed.",
+      "signature": "bool uart_rb_put(uart_rb_t *rb, uint8_t byte); bool uart_rb_get(uart_rb_t *rb, uint8_t *out);",
+      "examples": [
+        {
+          "in": "15개 put 후 16번째 put",
+          "out": "false (full)"
+        },
+        {
+          "in": "put(1..15) 후 get 반복",
+          "out": "1,2,...,15 (FIFO)"
+        }
+      ],
+      "hints": [
+        "인덱스 마스킹: idx & (SIZE-1) (SIZE는 2의 거듭제곱).",
+        "next=(head+1)&mask; next==tail이면 full.",
+        "head==tail이면 empty.",
+        "데이터를 먼저 쓰고 인덱스를 나중에 갱신(공개)한다."
+      ],
+      "solution": "bool uart_rb_put(uart_rb_t *rb, uint8_t byte) {\n    if (!rb) return false;\n    uint32_t next = (rb->head + 1u) & (URB_SIZE - 1u);\n    if (next == (rb->tail & (URB_SIZE - 1u))) return false;  // full\n    rb->buf[rb->head & (URB_SIZE - 1u)] = byte;              // 1) 데이터\n    rb->head = next;                                         // 2) 인덱스 공개\n    return true;\n}\nbool uart_rb_get(uart_rb_t *rb, uint8_t *out) {\n    if (!rb || !out) return false;\n    if ((rb->head & (URB_SIZE-1u)) == (rb->tail & (URB_SIZE-1u))) return false; // empty\n    *out = rb->buf[rb->tail & (URB_SIZE - 1u)];\n    rb->tail = (rb->tail + 1u) & (URB_SIZE - 1u);\n    return true;\n}",
+      "explanation_ko": "생산자(ISR)는 head만, 소비자(main)는 tail만 쓴다. 서로 상대 인덱스는 읽기만 하므로 단일코어에선 락이 필요 없다. full/empty를 count 없이 head/tail 관계로만 판별하려고 한 칸을 희생한다(head+1==tail=full). 데이터를 먼저 버퍼에 쓰고 그 다음 head를 갱신해야, 소비자가 미완성 슬롯을 읽지 않는다. 멀티코어에선 acquire/release 원자연산이 추가로 필요하다.",
+      "complexity": "O(1) per op, O(SIZE) space",
+      "pitfalls": [
+        "인덱스 먼저 갱신 후 데이터 쓰기 -> 소비자가 쓰레기 읽음",
+        "count 공유 -> 양쪽이 써서 경합",
+        "SIZE가 2의 거듭제곱이 아니면 마스킹 불가",
+        "head/tail을 volatile로 안 두면 컴파일러가 캐싱"
+      ],
+      "anduril_context": "UART/시리얼 RX ISR이 바이트를 밀어넣고 main loop가 파싱. 임베디드에서 가장 흔한 ISR-main 파이프라인."
+    },
+    {
+      "num": 6,
+      "slug": "crc8_frame_validate",
+      "title_ko": "CRC-8 텔레메트리 프레임 검증",
+      "title_en": "CRC-8 telemetry frame validation",
+      "difficulty": "medium",
+      "tags": [
+        "crc",
+        "checksum",
+        "telemetry",
+        "mavlink",
+        "framing"
+      ],
+      "prompt_ko": "CRC-8(poly 0x07, init 0x00, MSB-first)을 구현하고, [START 0xFE][len][payload...][crc] 프레임을 검증한다. crc는 START를 제외한 {len+payload} 위에서 계산. 시작바이트/길이일관성/crc가 모두 맞아야 true.",
+      "prompt_en": "Implement CRC-8 (poly 0x07) and validate a [START 0xFE][len][payload][crc] frame; CRC covers len+payload (excluding START).",
+      "signature": "uint8_t crc8(const uint8_t *data, size_t len); bool frame_validate(const uint8_t *frame, size_t total_len);",
+      "examples": [
+        {
+          "in": "crc8(\"123456789\", 9)",
+          "out": "0xF4"
+        },
+        {
+          "in": "올바른 프레임",
+          "out": "true, crc 1비트 손상 -> false"
+        }
+      ],
+      "hints": [
+        "각 바이트를 crc에 XOR한 뒤 8회: MSB가 1이면 (crc<<1)^0x07, 아니면 crc<<1.",
+        "crc<<1은 int로 승격되므로 (uint8_t) 캐스트로 잘라라.",
+        "프레임 검증: frame[0]==0xFE, frame[1]+3==total_len.",
+        "crc8(&frame[1], total_len-2)가 frame[total_len-1]과 같아야 한다."
+      ],
+      "solution": "uint8_t crc8(const uint8_t *data, size_t len) {\n    uint8_t crc = 0x00;\n    if (!data) return crc;\n    for (size_t i = 0; i < len; i++) {\n        crc ^= data[i];\n        for (int b = 0; b < 8; b++)\n            crc = (crc & 0x80u) ? (uint8_t)((crc<<1)^0x07u) : (uint8_t)(crc<<1);\n    }\n    return crc;\n}\nbool frame_validate(const uint8_t *frame, size_t total_len) {\n    if (!frame || total_len < 3) return false;\n    if (frame[0] != 0xFEu) return false;\n    size_t payload_len = frame[1];\n    if (payload_len + 3u != total_len) return false;\n    return crc8(&frame[1], total_len - 2) == frame[total_len - 1];\n}",
+      "explanation_ko": "CRC-8은 각 입력 바이트를 상위 8비트에 XOR한 뒤 8번의 시프트-조건부-폴리XOR로 나머지를 갱신한다(다항식 나눗셈). crc<<1이 int로 승격되므로 uint8_t 캐스트로 8비트를 유지한다. 프레임 검증은 시작바이트, 길이 필드 일관성, 후미 CRC 세 가지를 확인한다. CRC는 START 바이트를 빼고 len+payload 위에서 계산한다.",
+      "complexity": "O(n) time (8 bits/byte), O(1) space",
+      "pitfalls": [
+        "crc<<1 캐스트 누락 -> 상위 비트 잔존으로 값 오염",
+        "CRC 범위에 START를 포함/제외 혼동",
+        "길이 필드 검증 누락 -> 버퍼 오버리드",
+        "체크섬(단순 합)과 CRC 혼동 -> 버스트 에러 검출 약화"
+      ],
+      "anduril_context": "MAVLink/사설 텔레메트리 프레임 무결성 검사, 무선 링크에서 손상된 패킷 폐기."
+    },
+    {
+      "num": 7,
+      "slug": "complementary_filter",
+      "title_ko": "IMU 상보 필터 (기울기 추정)",
+      "title_en": "IMU complementary filter (tilt)",
+      "difficulty": "medium",
+      "tags": [
+        "sensor-fusion",
+        "imu",
+        "filter",
+        "float"
+      ],
+      "prompt_ko": "자이로 적분과 가속도계 각도를 1차 상보 필터로 융합한다: angle = alpha*(prev + gyro_rate*dt) + (1-alpha)*accel_angle. alpha는 보통 0.98.",
+      "prompt_en": "Fuse gyro integration and accelerometer angle: angle = alpha*(prev + gyro_rate*dt) + (1-alpha)*accel_angle.",
+      "signature": "float complementary_filter(float prev_angle, float gyro_rate, float accel_angle, float dt, float alpha)",
+      "examples": [
+        {
+          "in": "alpha=1, prev=10, rate=2, dt=0.01",
+          "out": "10.02 (순수 gyro)"
+        },
+        {
+          "in": "alpha=0",
+          "out": "accel_angle 그대로"
+        }
+      ],
+      "hints": [
+        "자이로 추정 = prev_angle + gyro_rate*dt (고주파, 드리프트).",
+        "가속도 각도 = accel_angle (저주파, 노이즈).",
+        "두 항을 alpha, (1-alpha)로 가중합.",
+        "alpha=1이면 순수 gyro, 0이면 순수 accel."
+      ],
+      "solution": "float complementary_filter(float prev_angle, float gyro_rate,\n                           float accel_angle, float dt, float alpha) {\n    float gyro_est = prev_angle + gyro_rate * dt;\n    return alpha * gyro_est + (1.0f - alpha) * accel_angle;\n}",
+      "explanation_ko": "자이로 적분은 단기적으로 정확하지만 시간이 지나면 드리프트가 쌓인다(고역통과 성격). 가속도계는 중력 벡터로 절대 각도를 주지만 진동 노이즈가 크다(저역통과 성격). alpha로 자이로에 무게를 두어 짧은 시간엔 자이로를 따르고, (1-alpha)로 가속도계를 조금씩 섞어 저주파 드리프트를 보정한다. 칼만필터의 저렴한 근사.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "alpha 부호/위치 혼동 ((1-alpha)를 gyro에 곱하는 실수)",
+        "dt 단위 불일치 (ms vs s)",
+        "고정소수점 이식 시 스케일/오버플로",
+        "accel_angle 계산에서 atan2 인자 순서"
+      ],
+      "anduril_context": "드론 자세(pitch/roll) 추정, 짐벌/카메라 안정화의 값싼 센서 퓨전."
+    },
+    {
+      "num": 8,
+      "slug": "gpio_debounce",
+      "title_ko": "GPIO 디바운스 (시프트 레지스터)",
+      "title_en": "GPIO debounce (shift register)",
+      "difficulty": "easy",
+      "tags": [
+        "gpio",
+        "debounce",
+        "shift-register",
+        "polling"
+      ],
+      "prompt_ko": "매 tick 원시 샘플을 8비트 히스토리에 밀어넣는다. history==0xFF(연속 8회 high)면 눌림 확정, 0x00이면 뗌 확정, 그 사이 바운싱에는 직전 확정 상태를 유지한다. 디바운스된 상태를 반환.",
+      "prompt_en": "Shift each raw sample into an 8-bit history; 0xFF=pressed, 0x00=released, otherwise hold previous. Return debounced state.",
+      "signature": "bool debounce_update(debounce_t *d, bool raw)",
+      "examples": [
+        {
+          "in": "8회 연속 true",
+          "out": "true (pressed)"
+        },
+        {
+          "in": "눌린 상태에서 1회 glitch low",
+          "out": "true 유지"
+        }
+      ],
+      "hints": [
+        "history = (history<<1) | (raw?1:0).",
+        "history==0xFF -> state=true.",
+        "history==0x00 -> state=false.",
+        "그 외에는 state를 그대로 둔다(hold)."
+      ],
+      "solution": "bool debounce_update(debounce_t *d, bool raw) {\n    if (!d) return false;\n    d->history = (uint8_t)((d->history << 1) | (raw ? 1u : 0u));\n    if (d->history == 0xFFu)      d->state = true;   // 안정적 눌림\n    else if (d->history == 0x00u) d->state = false;  // 안정적 뗌\n    // else: 바운싱 -> 이전 상태 유지\n    return d->state;\n}",
+      "explanation_ko": "기계식 스위치는 접점이 붙고 떨어질 때 수 ms 동안 채터(bounce)한다. 8샘플 히스토리를 시프트 레지스터로 유지하고, 최근 8회가 모두 1일 때만 눌림, 모두 0일 때만 뗌으로 확정한다. 중간의 짧은 glitch는 0xFF/0x00 조건을 못 만들어 무시되므로 이전 안정 상태가 유지된다. 카운터/적분기 방식보다 코드가 짧고 직관적이다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "history<<1 캐스트 누락 (uint8_t 승격)",
+        "샘플 주기 * 8이 바운스 지속보다 짧으면 여전히 채터",
+        "hold 로직 누락 -> 중간 상태에서 튐"
+      ],
+      "anduril_context": "물리 버튼/스위치/엔드스톱 입력의 채터 제거, 폴링 tick마다 호출."
+    },
+    {
+      "num": 9,
+      "slug": "stick_to_pwm",
+      "title_ko": "스틱 입력 -> PWM 모터 명령 (포화 매핑)",
+      "title_en": "Stick to PWM command (saturating map)",
+      "difficulty": "easy",
+      "tags": [
+        "mapping",
+        "clamp",
+        "pwm",
+        "actuator",
+        "saturation"
+      ],
+      "prompt_ko": "RC 스틱 [-1000..+1000]을 PWM 펄스폭 [1000us..2000us]로 선형 매핑한다. 중립(0)=1500us. 범위 밖 입력은 포화(clamp). pwm = 1500 + stick/2.",
+      "prompt_en": "Map RC stick [-1000..+1000] to PWM [1000..2000] us, neutral=1500; clamp out-of-range.",
+      "signature": "uint16_t stick_to_pwm(int16_t stick)",
+      "examples": [
+        {
+          "in": "stick_to_pwm(0)",
+          "out": "1500"
+        },
+        {
+          "in": "stick_to_pwm(5000)",
+          "out": "2000 (clamp)"
+        }
+      ],
+      "hints": [
+        "먼저 stick을 [-1000,1000]으로 클램프한다.",
+        "그 다음 스케일: 1500 + stick/2.",
+        "클램프를 스케일보다 먼저 해야 오버플로가 없다."
+      ],
+      "solution": "uint16_t stick_to_pwm(int16_t stick) {\n    if (stick < -1000) stick = -1000;   // 하한 포화\n    if (stick >  1000) stick =  1000;   // 상한 포화\n    return (uint16_t)(1500 + stick / 2);\n}",
+      "explanation_ko": "RC 스틱 값을 ESC/서보가 이해하는 PWM 펄스폭으로 변환한다. 반드시 먼저 범위를 클램프한 뒤 스케일해야 정수 오버플로나 범위 밖 출력을 막을 수 있다. 중립 1500us를 기준으로 스틱의 절반을 더해 [-1000,1000]을 [1000,2000]으로 대칭 매핑한다.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "클램프 전에 스케일 -> 오버플로/래핑",
+        "중립/범위 상수 오프바이원",
+        "데드밴드/역채널 요구를 놓침"
+      ],
+      "anduril_context": "조종 입력->ESC/서보 출력 매핑, 액추에이터 명령 포화로 하드웨어 보호."
+    }
+  ]
+}

@@ -1,0 +1,439 @@
+{
+  "id": "circular_buffer",
+  "order": 5,
+  "range": "Q56-65",
+  "icon": "🔄",
+  "title_en": "Circular / Ring Buffer",
+  "title_ko": "원형 버퍼 (링 버퍼)",
+  "summary_ko": "고정 크기 배열을 논리적으로 원형으로 써서 head(쓰기)·tail(읽기) 두 인덱스로 O(1) push/pop 하는 FIFO. 임베디드 최다 빈출 자료구조로, 핵심은 full/empty 구분(count 필드 / 한 칸 희생 / 자유증가 인덱스)과 동시성(SPSC 무락 ISR↔main, MPMC mutex+condvar)이다.",
+  "summary_en": "A fixed-size array used logically as a circle, giving O(1) FIFO push/pop via a write index (head) and read index (tail). The most common embedded data structure; the real depth lies in distinguishing full vs empty (count field / sacrificed slot / free-running indices) and in concurrency (lock-free SPSC for ISR-to-main, mutex+condvar for MPMC).",
+  "anduril_relevance_ko": "Anduril 펌웨어 인터뷰에서 링 버퍼는 최다 빈출 자료구조로 명시된다(회사 후기 다수). UART/RS422 로 들어오는 MAVLink 유사 텔레메트리·GPS·IMU 바이트 스트림이 RX ISR(생산자)에서 링 버퍼에 쌓이고 main loop(소비자)가 꺼내 FSM 파서로 프레임을 조립하는 구조가 드론 펌웨어의 표준 파이프라인이다. 400Hz IMU→100Hz 제어 루프처럼 레이트가 다른 producer/consumer 를 디커플링하고, 넘칠 때 덮어쓰기+drop 카운터로 최신 비행 데이터를 보존한다. 온사이트에서는 'volatile 이 왜 필요한가', '무락이 왜 성립하는가', '링크 저하(degraded/contested) 시 버퍼가 어떻게 우아하게 저하되는가(overrun 정책)'까지 파고든다.",
+  "concepts": [
+    {
+      "term": "head / tail",
+      "ko": "head=다음에 쓸 자리(생산자), tail=다음에 읽을 자리(소비자). 끝에서 0으로 되돌아온다(wrap-around).",
+      "en": "head is the next write slot (producer); tail is the next read slot (consumer); both wrap to 0 at the end."
+    },
+    {
+      "term": "full vs empty",
+      "ko": "head==tail 은 empty·full 둘 다 가능 → 구분법 3가지: ①count 필드 ②한 칸 희생(용량 size-1) ③자유증가 인덱스(count=head-tail).",
+      "en": "head==tail is ambiguous; resolve with a count field, by sacrificing one slot (capacity size-1), or with free-running indices (count = head - tail)."
+    },
+    {
+      "term": "% vs & mask",
+      "ko": "size 가 2의 거듭제곱이면 (idx & (size-1)) 로 나눗셈(%) 없이 감싼다 — ISR 지연 예산에 유리.",
+      "en": "When size is a power of two, wrap with (idx & (size-1)) instead of modulo, saving a division in the ISR path."
+    },
+    {
+      "term": "SPSC 무락(lock-free)",
+      "ko": "생산자만 head, 소비자만 tail 을 써서 write-write 경합이 없다 → 락 불필요. ISR↔main 정석. 멀티코어는 acquire/release atomics 필요.",
+      "en": "Producer writes only head, consumer only tail, so there is no write-write contention and no lock is needed; the canonical ISR-to-main pattern. Multicore needs acquire/release atomics."
+    },
+    {
+      "term": "volatile vs atomic",
+      "ko": "volatile 은 컴파일러의 캐시/재정렬만 막고 원자성·메모리순서는 보장하지 않는다. 멀티코어 무락엔 원자연산/배리어가 필요.",
+      "en": "volatile only blocks compiler caching/reordering; it guarantees neither atomicity nor memory ordering. Lock-free on multicore needs atomics/barriers."
+    },
+    {
+      "term": "MPMC mutex+condvar",
+      "ko": "다중 생산자/소비자는 mutex 로 임계구역 보호, full/empty 대기는 condition variable. while(조건) cond_wait 로 spurious wakeup 방어.",
+      "en": "Multi-producer/consumer guards the critical section with a mutex and waits on condition variables; use a while loop around cond_wait to survive spurious wakeups."
+    },
+    {
+      "term": "오버런(overrun) 정책",
+      "ko": "꽉 찼을 때 거부(push false) vs 덮어쓰기(최신 우선, drop 카운터). 데이터 종류마다 다르게.",
+      "en": "On full: reject (push returns false) or overwrite oldest (latest-wins with a drop counter); policy differs per data type."
+    },
+    {
+      "term": "정적 할당",
+      "ko": "버퍼 저장소를 외부 정적 배열로 받아 heap/malloc 을 피한다 — 임베디드 관례.",
+      "en": "Take storage as an external static array to avoid heap/malloc, per embedded practice."
+    }
+  ],
+  "study_note_md": "# 🔄 원형 버퍼 / 링 버퍼 (Circular / Ring Buffer) — Q56~65\n\n> 임베디드 인터뷰에서 **가장 자주 나오는 단일 자료구조**. UART/SPI 수신, 로깅,\n> 센서 스트림, 오디오 DMA — 고정 크기 메모리 위에서 producer/consumer 를 잇는\n> FIFO 는 전부 링 버퍼다. \"구현해봐\"는 기본, 진짜 난이도는 **동시성(ISR ↔ main)**\n> 과 **full/empty 구분**에서 갈린다.\n\n---\n\n## 1. 핵심 아이디어\n\n고정 크기 배열을 **논리적으로 원형**으로 쓴다. 두 인덱스:\n\n- `head` (write / 생산자): 다음에 **쓸** 자리\n- `tail` (read / 소비자): 다음에 **읽을** 자리\n\n인덱스가 끝에 도달하면 0 으로 되돌아온다(**wrap-around**). 그래서 `push`/`pop`\n모두 데이터 이동 없이 **O(1)**. 힙도, memmove 도 없다 — 임베디드에 완벽.\n\n```\nsize = 8\n idx: 0   1   2   3   4   5   6   7\n     [ ] [4] [5] [6] [7] [ ] [ ] [ ]\n          ^tail            ^head\n```\n\n### wrap-around 하는 법\n\n```c\nhead = (head + 1) % size;          // 일반\nhead = (head + 1) & (size - 1);    // size 가 2의 거듭제곱일 때 (빠름)\n```\n\n---\n\n## 2. Full vs Empty — 인터뷰의 핵심 함정\n\n`head == tail` 은 **비었을 때**도 **꽉 찼을 때**도 발생한다. 구분하는 3가지 방법:\n\n| 방법 | full 판정 | empty 판정 | 용량 | 비고 |\n|---|---|---|---|---|\n| **① count 필드** | `count == size` | `count == 0` | `size` | 가장 직관적. 단, count 를 양쪽이 갱신하면 동시성 문제 |\n| **② 한 칸 희생** | `(head+1)%size == tail` | `head == tail` | `size-1` | count 불필요 → **SPSC 무락**에 이상적 |\n| **③ 자유 증가(free-running) 인덱스** | `head-tail == size` | `head == tail` | `size` | head/tail 을 마스킹 안 하고 계속 증가, 접근 시 `& mask`. count 필드 없이 전용량 |\n\n> **면접 답변 팁**: \"count 를 쓰면 간단하지만 SPSC 무락에서는 count 를 양쪽이\n> 써서 경합이 생긴다. 그래서 무락 버전은 한 칸을 희생하거나(②) 자유 증가\n> 인덱스(③)를 쓴다\"고 말하면 깊이가 드러난다.\n\n### ③ 자유 증가 트릭이 왜 안전한가\n\n`head`, `tail` 을 `uint32_t` 로 계속 증가시키고 버퍼 인덱스는 `head & mask`\n로만 계산한다. `count = head - tail` 은 **부호 없는 뺄셈**이라 `head` 가\n2³²에서 랩되어도 정확하다(예: `head=1, tail=0xFFFFFFFF` → `count=2`). 단\n`size <= 2³¹` 이어야 하고 **size 는 2의 거듭제곱**이어야 마스킹이 성립한다.\n\n```c\nbool is_pow2(uint32_t x) { return x && (x & (x - 1)) == 0; }\n```\n\n---\n\n## 3. SPSC 무락(lock-free) — ISR ↔ main 정석 패턴 ⭐\n\n임베디드에서 제일 중요한 그림: **UART RX ISR 이 생산자, main loop 가 소비자.**\n\n```\n   [UART 하드웨어] --IRQ--> [RX ISR: spsc_push()] --ring--> [main: spsc_pop()] --> 파싱\n        생산자 1개                                    소비자 1개\n```\n\n**왜 락이 필요 없나?**\n\n- 생산자(ISR)만 `head` 를 **쓴다**. 소비자(main)만 `tail` 을 **쓴다**.\n- 서로 상대 인덱스는 **읽기만** 한다 → **write-write 경합이 구조적으로 없다.**\n- 그래서 mutex 불필요. ISR 안에서 절대 락을 잡으면 안 되므로(우선순위 역전/\n  데드락) 이 성질이 결정적이다.\n\n**주의 (이식성):**\n\n- **단일코어 베어메탈**: `head`/`tail` 을 `volatile` 로 두고 \"**데이터를 먼저 쓰고\n  그 다음 인덱스를 증가**\" 순서만 지키면 전통적으로 충분하다. (컴파일러 재정렬만\n  막으면 됨. 단일코어라 하드웨어 재정렬로 인한 문제는 없음.)\n- **멀티코어(SMP)**: CPU 메모리 재정렬 때문에 `volatile` 만으로는 부족.\n  **acquire/release 원자연산**(C11 `<stdatomic.h>` 또는 하드웨어 배리어)이 필요.\n  - producer: `head` relaxed load(내 것) → `tail` **acquire** load(상대 것) →\n    데이터 쓰기 → `head` **release** store.\n  - consumer: `tail` relaxed load → `head` **acquire** load → 데이터 읽기 →\n    `tail` **release** store.\n  - release store 는 \"데이터 쓰기가 인덱스 공개보다 먼저 보이도록\" 보장하고,\n    acquire load 는 짝을 이뤄 반대편이 그 순서를 관측하게 한다.\n\n```c\n// producer (한 스레드만)\nuint32_t h = atomic_load_explicit(&q->head, memory_order_relaxed);\nuint32_t t = atomic_load_explicit(&q->tail, memory_order_acquire);\nif (((h + 1) & q->mask) == (t & q->mask)) return false;   // full (한 칸 희생)\nq->buf[h & q->mask] = data;                                // 1) 데이터 먼저\natomic_store_explicit(&q->head, h + 1, memory_order_release); // 2) 인덱스 공개\n```\n\n---\n\n## 4. MPMC — 다중 생산자/소비자 (mutex + condvar)\n\n생산자·소비자가 **여럿**이면 `head`/`tail`/`count` 를 모두 여러 스레드가 갱신 →\n무락 SPSC 트릭이 깨진다. 이때는 정직하게 **mutex 로 임계구역 보호**:\n\n```c\nvoid mpmc_push(mpmc_t *q, uint8_t data) {\n    pthread_mutex_lock(&q->m);\n    while (q->count == q->size)                 // ← if 아니라 while!\n        pthread_cond_wait(&q->not_full, &q->m);\n    q->buf[q->head] = data;\n    q->head = (q->head + 1) % q->size;\n    q->count++;\n    pthread_cond_signal(&q->not_empty);\n    pthread_mutex_unlock(&q->m);\n}\n```\n\n- **`while` (not `if`)**: `pthread_cond_wait` 는 **spurious wakeup**(엉뚱한 깨어남)\n  이 가능하고, 깨어난 뒤 다른 스레드가 먼저 슬롯을 채갔을 수도 있으니 조건을\n  **재확인**해야 한다.\n- `cond_wait` 는 대기 중 mutex 를 **자동으로 놓았다가** 깨어날 때 다시 잡는다.\n- 넣은 뒤 `not_empty` 를 signal, 뺀 뒤 `not_full` 을 signal.\n\n블로킹이 싫으면 락드(locked) but non-blocking `try_push`/`try_pop` 으로 만들 수도\n있고, 진짜 고성능이면 MPMC 무락 큐(예: Michael-Scott, LMAX Disruptor)를 쓰지만\n인터뷰에선 mutex+condvar 로 충분하다.\n\n---\n\n## 5. 오버런(overrun) 정책\n\n버퍼가 꽉 찼는데 새 데이터가 오면?\n\n- **거부(reject)**: `push` 가 false 반환 — 기본. 손실을 상위에서 감지.\n- **덮어쓰기(overwrite)**: 가장 오래된 것을 버리고 `tail` 도 밀기 — 실시간 센서/\n  오디오처럼 \"최신값이 더 중요\"할 때. 오버런 카운터를 두어 몇 개 잃었는지 기록.\n\n> 드론 텔레메트리에서 링크가 느려 버퍼가 넘칠 때: 로그는 덮어쓰기 + drop 카운터,\n> 제어 명령은 거부 후 에러 처리 — **데이터 종류마다 정책이 다르다**는 점을 언급.\n\n---\n\n## 6. 인터뷰 팔로업(follow-up) 대비\n\n- **\"volatile 이 왜 필요?\"** → ISR 이 바꾸는 값을 main 이 레지스터에 캐시하지\n  못하게. 단, `volatile` 은 **원자성·메모리순서를 보장하지 않는다**(멀티코어에선\n  atomics 필요).\n- **\"count 를 안 쓰고 full/empty 구분?\"** → 한 칸 희생(②) 또는 자유 증가(③).\n- **\"인덱스를 왜 % 대신 & mask?\"** → `%` 는 나눗셈(수십 사이클), 2의 거듭제곱이면\n  `& (size-1)` 한 사이클. ISR 지연 예산에 유리.\n- **\"size 가 2의 거듭제곱 아니면?\"** → `%` 로 폴백하거나, 마스킹 변형을 못 씀.\n- **\"버퍼 크기 산정?\"** → 최악 인입률 × 소비자 최대 지연(latency). UART 라면\n  보드레이트·인터럽트 지연·main loop 주기로 계산.\n- **\"멀티코어에서 이 SPSC 안전?\"** → acquire/release 없으면 아니오. 배리어 필요.\n\n---\n\n## 7. 흔한 버그 체크리스트\n\n- [ ] `size == 0` 에서 `% size` → **0으로 나누기**. init 에서 방어.\n- [ ] full 인데 덮어써서 소비자 데이터 손상.\n- [ ] `head==tail` 을 무조건 empty 로 처리 → 꽉 찬 걸 비었다고 오판(count/희생칸 없을 때).\n- [ ] MPMC 에서 `if (count==0) cond_wait` (while 아님) → spurious wakeup 시 빈 큐 pop.\n- [ ] SPSC 에서 `count` 를 양쪽이 갱신 → 경합. (무락이라며 count 쓰면 모순)\n- [ ] 인덱스 증가 후 데이터 쓰기(순서 뒤바뀜) → 소비자가 쓰레기 읽음. **데이터 먼저.**\n- [ ] pop 의 `out`/`cb` NULL 미검사 → 크래시.\n\n---\n\n## 8. 이 문제 세트 (Q56~65)\n\n| # | 함수 | 스타일 | 포인트 |\n|---|---|---|---|\n| 56 | `cb_init` | count 기반 | 초기화, NULL 방어 |\n| 57 | `cb_push` | count 기반 | full 시 거부, wrap-around |\n| 58 | `cb_pop` | count 기반 | FIFO, empty 시 false |\n| 59 | `cb_is_empty` | count 기반 | `count==0` |\n| 60 | `cb_is_full` | count 기반 | `count==size` |\n| 61 | `cb_count` | count 기반 | O(1) 개수 |\n| 62 | `cb_flush` | count 기반 | 인덱스 리셋 |\n| 63 | `cbp2_*` | pow2 마스킹 | 자유 증가 + `& mask`, 전용량 |\n| 64 | `spsc_*` | 무락 SPSC | acquire/release, ISR↔main |\n| 65 | `mpmc_*` | mutex+condvar | while-wait, spurious wakeup |\n\n---\n\n## 9. Anduril / 드론 펌웨어 맥락\n\n- **UART/RS422 수신**: MAVLink 유사 텔레메트리·GPS·IMU 바이트 스트림이 RX ISR\n  로 들어와 링 버퍼에 쌓이고, main loop 의 FSM 파서가 꺼내 프레임을 조립한다.\n  (다음 토픽인 프로토콜 파싱 FSM 과 직결.)\n- **센서 → 제어 루프**: 400Hz IMU 샘플을 링 버퍼로 100Hz 제어 루프에 전달,\n  레이트가 다른 producer/consumer 를 디커플링.\n- **로깅/블랙박스**: 넘칠 때 덮어쓰기 + drop 카운터로 최신 비행 데이터 보존.\n- **경합(contested)·저하(degraded) 환경**: 링크가 끊겨 소비자가 느려질 때 버퍼가\n  어떻게 우아하게 저하(graceful degradation)되는가 — 오버런 정책 설계가 곧\n  실패 모드 사고다. Anduril 이 온사이트에서 즐겨 파고드는 지점.\n```\n",
+  "problems": [
+    {
+      "num": 56,
+      "slug": "cb_init",
+      "title_ko": "원형 버퍼 초기화",
+      "title_en": "Initialize ring buffer",
+      "difficulty": "easy",
+      "tags": [
+        "ring-buffer",
+        "init",
+        "embedded"
+      ],
+      "prompt_ko": "cb 를 주어진 buffer/size 로 초기화하고 head=tail=count=0 으로 리셋한다. cb 가 NULL 이면 아무 것도 하지 않는다.",
+      "prompt_en": "Initialize the ring buffer with external storage and capacity; reset head/tail/count. No-op if cb is NULL.",
+      "signature": "void cb_init(cb_t *cb, uint8_t *buffer, size_t size)",
+      "examples": [
+        {
+          "in": "cb_init(&cb, buf, 8)",
+          "out": "count=0, is_empty=true"
+        }
+      ],
+      "hints": [
+        "head/tail/count 를 모두 0 으로.",
+        "buffer 포인터와 size 를 저장(heap 할당 없음 — 정적 저장소를 받는다).",
+        "NULL 방어를 습관화."
+      ],
+      "solution": "void cb_init(cb_t *cb, uint8_t *buffer, size_t size) {\n    if (!cb) return;\n    cb->buffer = buffer;\n    cb->size = size;\n    cb->head = cb->tail = cb->count = 0;\n}",
+      "explanation_ko": "구조체 필드만 세팅하는 O(1) 초기화. 저장소는 외부에서 받아 heap 을 피한다(임베디드 정적 할당 관례). NULL 방어로 방어적 프로그래밍.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "size=0 을 그대로 두면 이후 % size 에서 0 나누기 — 사용 측에서 크기>0 보장 필요.",
+        "NULL cb 미검사 시 크래시."
+      ],
+      "anduril_context": "드론 부팅 시 UART RX 링 버퍼를 정적 배열로 한 번 초기화."
+    },
+    {
+      "num": 57,
+      "slug": "cb_push",
+      "title_ko": "push / enqueue",
+      "title_en": "Push / enqueue",
+      "difficulty": "easy",
+      "tags": [
+        "ring-buffer",
+        "enqueue",
+        "wrap-around"
+      ],
+      "prompt_ko": "head 위치에 data 를 쓰고 head 를 랩어라운드 증가시키며 count++. 가득 차 있으면(또는 cb NULL) 덮어쓰지 말고 false 반환.",
+      "prompt_en": "Enqueue one byte at head; advance head with wrap-around; increment count. Return false if full (or cb NULL) without overwriting.",
+      "signature": "bool cb_push(cb_t *cb, uint8_t data)",
+      "examples": [
+        {
+          "in": "빈 버퍼 push(5)",
+          "out": "true, count=1"
+        },
+        {
+          "in": "가득 찬 버퍼 push(9)",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "cb_is_full 로 먼저 확인.",
+        "head = (head+1) % size 로 감싼다.",
+        "성공 시에만 count++."
+      ],
+      "solution": "bool cb_push(cb_t *cb, uint8_t data) {\n    if (!cb || cb_is_full(cb)) return false;\n    cb->buffer[cb->head] = data;\n    cb->head = (cb->head + 1) % cb->size;\n    cb->count++;\n    return true;\n}",
+      "explanation_ko": "head 는 '다음에 쓸 자리'. 데이터 저장 후 모듈로로 감싸 원형성을 유지. count 를 늘려 full/empty 판정을 O(1) 로.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "full 인데 덮어쓰면 아직 안 읽은 소비자 데이터 파괴.",
+        "count 갱신 누락 시 full/empty 오판.",
+        "% 0 방지(size>0)."
+      ],
+      "anduril_context": "UART RX ISR 이 수신 바이트를 링 버퍼에 push."
+    },
+    {
+      "num": 58,
+      "slug": "cb_pop",
+      "title_ko": "pop / dequeue",
+      "title_en": "Pop / dequeue",
+      "difficulty": "easy",
+      "tags": [
+        "ring-buffer",
+        "dequeue",
+        "FIFO"
+      ],
+      "prompt_ko": "tail 위치의 값을 *out 에 담고 tail 을 랩어라운드 증가, count--. 비어 있으면(또는 cb/out NULL) false.",
+      "prompt_en": "Dequeue one byte into *out in FIFO order; advance tail; decrement count. Return false if empty (or cb/out NULL).",
+      "signature": "bool cb_pop(cb_t *cb, uint8_t *out)",
+      "examples": [
+        {
+          "in": "[1,2,3] pop",
+          "out": "*out=1, true"
+        },
+        {
+          "in": "빈 버퍼 pop",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "cb_is_empty 로 먼저 확인.",
+        "tail 위치를 읽고 tail=(tail+1)%size.",
+        "out 이 NULL 인지도 검사."
+      ],
+      "solution": "bool cb_pop(cb_t *cb, uint8_t *out) {\n    if (!cb || !out || cb_is_empty(cb)) return false;\n    *out = cb->buffer[cb->tail];\n    cb->tail = (cb->tail + 1) % cb->size;\n    cb->count--;\n    return true;\n}",
+      "explanation_ko": "tail 은 '다음에 읽을 자리'. FIFO 순서 보장. 읽은 뒤 감싸고 count 감소. push 와 대칭.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "empty 미검사 시 쓰레기/과거 데이터 반환.",
+        "out NULL 역참조 크래시.",
+        "count 언더플로(unsigned) 주의."
+      ],
+      "anduril_context": "main loop 가 링 버퍼에서 바이트를 꺼내 프로토콜 파서(FSM)로 공급."
+    },
+    {
+      "num": 59,
+      "slug": "cb_is_empty",
+      "title_ko": "비었는가?",
+      "title_en": "Is empty?",
+      "difficulty": "easy",
+      "tags": [
+        "ring-buffer",
+        "predicate"
+      ],
+      "prompt_ko": "원소가 하나도 없으면 true. cb 가 NULL 이면 안전하게 true.",
+      "prompt_en": "Return true if the buffer holds no elements (true also if cb is NULL).",
+      "signature": "bool cb_is_empty(const cb_t *cb)",
+      "examples": [
+        {
+          "in": "init 직후",
+          "out": "true"
+        },
+        {
+          "in": "1개 push 후",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "count 필드로 O(1).",
+        "NULL 은 빈 것으로 취급."
+      ],
+      "solution": "bool cb_is_empty(const cb_t *cb) {\n    if (!cb) return true;\n    return cb->count == 0;\n}",
+      "explanation_ko": "count 필드 덕분에 head/tail 비교 없이 즉시 판정. count 방식의 장점.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "count 없이 head==tail 만으로 판정하면 full 과 구분 불가.",
+        "NULL 처리 누락."
+      ],
+      "anduril_context": "제어 루프가 새 센서 샘플 유무를 매 주기 확인."
+    },
+    {
+      "num": 60,
+      "slug": "cb_is_full",
+      "title_ko": "가득 찼는가?",
+      "title_en": "Is full?",
+      "difficulty": "easy",
+      "tags": [
+        "ring-buffer",
+        "predicate"
+      ],
+      "prompt_ko": "count == size 이면 true. cb 가 NULL 이면 false.",
+      "prompt_en": "Return true if count == size; false if cb is NULL.",
+      "signature": "bool cb_is_full(const cb_t *cb)",
+      "examples": [
+        {
+          "in": "size 8 에 8개 push 후",
+          "out": "true"
+        },
+        {
+          "in": "7개일 때",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "count == size 비교.",
+        "NULL 은 full 아님(false)."
+      ],
+      "solution": "bool cb_is_full(const cb_t *cb) {\n    if (!cb) return false;\n    return cb->count == cb->size;\n}",
+      "explanation_ko": "count 방식은 full 을 size 와의 단순 비교로 판정 — 한 칸 희생 트릭이 불필요.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "head==tail 을 full 로 오판(empty 와 혼동).",
+        "off-by-one 으로 한 칸 못 쓰거나 오버런."
+      ],
+      "anduril_context": "ISR 이 push 전 오버런 여부를 확인해 drop 카운터를 올릴지 결정."
+    },
+    {
+      "num": 61,
+      "slug": "cb_count",
+      "title_ko": "현재 원소 수",
+      "title_en": "Element count",
+      "difficulty": "easy",
+      "tags": [
+        "ring-buffer",
+        "accessor"
+      ],
+      "prompt_ko": "저장된 원소 수를 반환. cb 가 NULL 이면 0.",
+      "prompt_en": "Return the number of stored elements (0 if cb is NULL).",
+      "signature": "size_t cb_count(const cb_t *cb)",
+      "examples": [
+        {
+          "in": "3개 저장",
+          "out": "3"
+        },
+        {
+          "in": "빈 버퍼",
+          "out": "0"
+        }
+      ],
+      "hints": [
+        "count 필드를 그대로 반환.",
+        "NULL → 0."
+      ],
+      "solution": "size_t cb_count(const cb_t *cb) {\n    return cb ? cb->count : 0;\n}",
+      "explanation_ko": "count 필드를 유지하므로 개수 조회가 O(1). 인덱스 뺄셈조차 불필요.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "count 없이 (head-tail+size)%size 로 계산할 때 부호/랩 실수."
+      ],
+      "anduril_context": "버퍼 점유율을 텔레메트리로 보고해 백프레셔(backpressure) 판단."
+    },
+    {
+      "num": 62,
+      "slug": "cb_flush",
+      "title_ko": "flush (논리적 비우기)",
+      "title_en": "Flush",
+      "difficulty": "easy",
+      "tags": [
+        "ring-buffer",
+        "reset"
+      ],
+      "prompt_ko": "데이터는 지우지 않고 head/tail/count 만 0 으로 리셋. cb 가 NULL 이면 무시.",
+      "prompt_en": "Logically empty the buffer by resetting indices and count (data left intact). No-op if cb is NULL.",
+      "signature": "void cb_flush(cb_t *cb)",
+      "examples": [
+        {
+          "in": "2개 있는 버퍼 flush",
+          "out": "is_empty=true, count=0"
+        }
+      ],
+      "hints": [
+        "head=tail=count=0.",
+        "실제 바이트를 0 으로 지울 필요 없음(논리적)."
+      ],
+      "solution": "void cb_flush(cb_t *cb) {\n    if (!cb) return;\n    cb->head = cb->tail = cb->count = 0;\n}",
+      "explanation_ko": "인덱스만 리셋하면 논리적으로 빈 상태가 된다. memset 불필요 — O(1).",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "동시성 환경에서 소비자가 읽는 중 flush 하면 경합 — 락/정지 하에 호출해야.",
+        "민감 데이터라면 논리 flush 로는 안 지워짐(보안)."
+      ],
+      "anduril_context": "링크 재동기화(resync)나 파서 리셋 시 수신 버퍼를 비운다."
+    },
+    {
+      "num": 63,
+      "slug": "cbp2_masking",
+      "title_ko": "2의 거듭제곱 마스킹 변형",
+      "title_en": "Power-of-two masking variant",
+      "difficulty": "medium",
+      "tags": [
+        "ring-buffer",
+        "bit-mask",
+        "power-of-two",
+        "free-running"
+      ],
+      "prompt_ko": "용량이 2의 거듭제곱인 링 버퍼. head/tail 을 자유 증가(free-running)시키고 접근 시에만 & mask 로 감싼다. % 대신 AND 한 번. count = head-tail(부호없는 뺄셈), full=(count==size), empty=(head==tail). init 은 size 가 2의 거듭제곱이 아니면 false. slot 낭비 없이 전용량 사용.",
+      "prompt_en": "Ring buffer whose capacity is a power of two: free-running head/tail masked with & (size-1) on access, replacing modulo. count = head - tail (unsigned), full when count==size, empty when head==tail. init returns false for non-pow2 size. Uses full capacity, no wasted slot.",
+      "signature": "bool cbp2_init(cbp2_t*, uint8_t*, uint32_t size); uint32_t cbp2_count(const cbp2_t*); bool cbp2_push(cbp2_t*, uint8_t); bool cbp2_pop(cbp2_t*, uint8_t*)",
+      "examples": [
+        {
+          "in": "cbp2_init(&q,buf,4)",
+          "out": "true"
+        },
+        {
+          "in": "cbp2_init(&q,buf,3)",
+          "out": "false (non-pow2)"
+        },
+        {
+          "in": "size4 에 4 push",
+          "out": "모두 성공(전용량), 5번째 false"
+        }
+      ],
+      "hints": [
+        "2의 거듭제곱 검사: (size & (size-1)) == 0 (size>0).",
+        "인덱스는 마스킹하지 말고 계속 증가시키고, buf[head & mask] 로만 접근.",
+        "count = head - tail 은 unsigned 라 랩되어도 정확.",
+        "full 은 count==size, empty 는 head==tail."
+      ],
+      "solution": "bool cbp2_init(cbp2_t *q, uint8_t *buf, uint32_t size) {\n    if (!q || !buf) return false;\n    if (size < 2 || (size & (size - 1)) != 0) return false;  // pow2\n    q->buf = buf; q->size = size; q->mask = size - 1;\n    q->head = q->tail = 0;\n    return true;\n}\nuint32_t cbp2_count(const cbp2_t *q) {\n    return q ? q->head - q->tail : 0;   // unsigned 뺄셈\n}\nbool cbp2_push(cbp2_t *q, uint8_t data) {\n    if (!q || cbp2_count(q) == q->size) return false;\n    q->buf[q->head & q->mask] = data;   // % 대신 & mask\n    q->head++;\n    return true;\n}\nbool cbp2_pop(cbp2_t *q, uint8_t *out) {\n    if (!q || !out || q->head == q->tail) return false;\n    *out = q->buf[q->tail & q->mask];\n    q->tail++;\n    return true;\n}",
+      "explanation_ko": "인덱스를 마스킹하지 않고 자유 증가시키면 head==tail 은 오직 empty 만 의미하고(뺄셈으로 개수를 알 수 있으므로 full 과 혼동 없음), 별도 count 필드 없이 전용량을 쓴다. 버퍼 접근만 & mask 로 하니 나눗셈(%) 대신 AND 한 사이클로 끝나 ISR 지연 예산에 유리.",
+      "complexity": "O(1) time, O(1) space",
+      "pitfalls": [
+        "size 가 2의 거듭제곱이 아니면 & mask 가 틀린 인덱스를 준다 — init 에서 반드시 검사.",
+        "인덱스를 매번 마스킹해 저장하면 count=head-tail 트릭이 깨진다(감싼 값끼리 빼면 부호 오류).",
+        "size 가 2^31 초과면 count 뺄셈이 오버플로."
+      ],
+      "anduril_context": "고속 UART/SPI DMA 링 버퍼 — % 를 피해 ISR 을 최소 사이클로 유지."
+    },
+    {
+      "num": 64,
+      "slug": "spsc_lockfree",
+      "title_ko": "SPSC 무락(lock-free) 링 버퍼",
+      "title_en": "SPSC lock-free ring buffer",
+      "difficulty": "hard",
+      "tags": [
+        "ring-buffer",
+        "lock-free",
+        "SPSC",
+        "atomics",
+        "ISR",
+        "concurrency"
+      ],
+      "prompt_ko": "단일 생산자/단일 소비자 전용 무락 링. 생산자만 head 를 store, 소비자만 tail 을 store → write-write 경합 없음 → 락 불필요. 사용 가능 용량 = size-1(한 칸 희생). 멀티코어 재정렬 방지를 위해 C11 acquire/release 원자연산 사용: push 는 데이터를 먼저 쓰고 head 를 release store, pop 은 head 를 acquire load 로 확인 후 데이터를 읽고 tail 을 release store.",
+      "prompt_en": "Lock-free single-producer/single-consumer ring: producer only stores head, consumer only stores tail, so there is no write-write contention and no lock is needed. Usable capacity = size-1 (one slot sacrificed). Use C11 acquire/release atomics to prevent multicore reordering: publish data before advancing head (release), read peer index with acquire.",
+      "signature": "bool spsc_init(spsc_t*, uint8_t*, uint32_t size); bool spsc_push(spsc_t*, uint8_t); bool spsc_pop(spsc_t*, uint8_t*)",
+      "examples": [
+        {
+          "in": "size 4",
+          "out": "최대 3개 저장, 4번째 push false"
+        },
+        {
+          "in": "ISR push / main pop",
+          "out": "락 없이 안전"
+        }
+      ],
+      "hints": [
+        "각 인덱스를 '한 스레드만 쓴다'는 게 무락의 핵심 — count 를 공유하면 깨진다.",
+        "full 은 한 칸 희생: ((head+1)&mask)==(tail&mask). empty 는 head==tail.",
+        "producer: head relaxed load, tail acquire load, 데이터 쓰기, head release store.",
+        "consumer: tail relaxed load, head acquire load, 데이터 읽기, tail release store."
+      ],
+      "solution": "bool spsc_init(spsc_t *q, uint8_t *buf, uint32_t size) {\n    if (!q || !buf || size < 2 || (size & (size-1))) return false;\n    q->buf = buf; q->size = size; q->mask = size - 1;\n    atomic_init(&q->head, 0u); atomic_init(&q->tail, 0u);\n    return true;\n}\nbool spsc_push(spsc_t *q, uint8_t data) {   // 생산자 컨텍스트만\n    if (!q) return false;\n    uint32_t h = atomic_load_explicit(&q->head, memory_order_relaxed);\n    uint32_t t = atomic_load_explicit(&q->tail, memory_order_acquire);\n    if (((h + 1) & q->mask) == (t & q->mask)) return false;   // full\n    q->buf[h & q->mask] = data;                                // 1) 데이터\n    atomic_store_explicit(&q->head, h + 1, memory_order_release); // 2) 공개\n    return true;\n}\nbool spsc_pop(spsc_t *q, uint8_t *out) {   // 소비자 컨텍스트만\n    if (!q || !out) return false;\n    uint32_t t = atomic_load_explicit(&q->tail, memory_order_relaxed);\n    uint32_t h = atomic_load_explicit(&q->head, memory_order_acquire);\n    if (h == t) return false;                                  // empty\n    *out = q->buf[t & q->mask];\n    atomic_store_explicit(&q->tail, t + 1, memory_order_release);\n    return true;\n}",
+      "explanation_ko": "생산자와 소비자가 서로 다른 인덱스만 '쓰고' 상대 것은 '읽기만' 하므로 mutex 없이도 데이터 레이스가 없다. ISR 안에서는 절대 락을 잡으면 안 되므로(우선순위 역전/데드락) 이 무락 성질이 UART RX ISR↔main 파이프라인에 필수다. release store 는 '데이터 쓰기가 인덱스 공개보다 먼저 관측되게', 짝을 이루는 acquire load 는 '반대편이 그 순서를 보게' 보장한다. 단일코어 베어메탈이라면 atomics 대신 volatile head/tail + 접근 순서(데이터 먼저)만으로도 전통적으로 충분.",
+      "complexity": "O(1) time, O(1) space, lock-free (wait-free 는 아님)",
+      "pitfalls": [
+        "count 를 공유 갱신하면 무락이 깨진다 — 그래서 한 칸 희생 방식을 쓴다.",
+        "데이터보다 인덱스를 먼저 증가시키면 소비자가 쓰레기를 읽는다 — 반드시 데이터 먼저, 인덱스(release) 나중.",
+        "멀티코어에서 acquire/release(또는 배리어) 없이 volatile 만 쓰면 재정렬로 깨진다.",
+        "생산자·소비자가 각각 1개라는 전제가 무너지면(예: 2 생산자) 즉시 불안전."
+      ],
+      "anduril_context": "UART/RS422 RX ISR(생산자)이 바이트를 넣고 main loop(소비자)가 빼는 정석 임베디드 파이프라인 — Anduril 링버퍼 질문의 핵심."
+    },
+    {
+      "num": 65,
+      "slug": "mpmc_mutex_condvar",
+      "title_ko": "MPMC 블로킹 큐 (mutex+condvar)",
+      "title_en": "MPMC blocking queue",
+      "difficulty": "hard",
+      "tags": [
+        "ring-buffer",
+        "MPMC",
+        "mutex",
+        "condition-variable",
+        "concurrency"
+      ],
+      "prompt_ko": "다중 생산자/다중 소비자 블로킹 큐. head/tail/count 를 여럿이 갱신하므로 mutex 로 임계구역 전체를 보호. 가득 차면 not_full 조건변수에서 대기, 비면 not_empty 에서 대기. spurious wakeup 대비 반드시 while 루프로 조건 재확인. 성공 후 반대편 조건변수를 signal.",
+      "prompt_en": "Blocking multi-producer/multi-consumer queue. Guard the whole critical section with a mutex; wait on not_full while the buffer is full and on not_empty while empty (in a while loop to survive spurious wakeups); signal the opposite condvar after mutating.",
+      "signature": "void mpmc_init(mpmc_t*, uint8_t*, size_t size); void mpmc_push(mpmc_t*, uint8_t); uint8_t mpmc_pop(mpmc_t*); void mpmc_destroy(mpmc_t*)",
+      "examples": [
+        {
+          "in": "버퍼 full 에서 push",
+          "out": "소비자가 pop 할 때까지 스레드가 잠듦"
+        },
+        {
+          "in": "2P/2C",
+          "out": "합계/개수 보존"
+        }
+      ],
+      "hints": [
+        "mutex_lock → while(full) cond_wait(not_full, m) → 수정 → signal(not_empty) → unlock.",
+        "cond_wait 는 대기 중 mutex 를 자동으로 놓았다 다시 잡는다.",
+        "if 가 아니라 while: spurious wakeup + 다른 스레드가 슬롯을 채감.",
+        "pop 은 대칭: while(empty) cond_wait(not_empty, m), signal(not_full)."
+      ],
+      "solution": "void mpmc_init(mpmc_t *q, uint8_t *buf, size_t size) {\n    q->buf = buf; q->size = size; q->head = q->tail = q->count = 0;\n    pthread_mutex_init(&q->m, NULL);\n    pthread_cond_init(&q->not_full, NULL);\n    pthread_cond_init(&q->not_empty, NULL);\n}\nvoid mpmc_push(mpmc_t *q, uint8_t data) {\n    pthread_mutex_lock(&q->m);\n    while (q->count == q->size)\n        pthread_cond_wait(&q->not_full, &q->m);   // while!\n    q->buf[q->head] = data;\n    q->head = (q->head + 1) % q->size;\n    q->count++;\n    pthread_cond_signal(&q->not_empty);\n    pthread_mutex_unlock(&q->m);\n}\nuint8_t mpmc_pop(mpmc_t *q) {\n    pthread_mutex_lock(&q->m);\n    while (q->count == 0)\n        pthread_cond_wait(&q->not_empty, &q->m);\n    uint8_t data = q->buf[q->tail];\n    q->tail = (q->tail + 1) % q->size;\n    q->count--;\n    pthread_cond_signal(&q->not_full);\n    pthread_mutex_unlock(&q->m);\n    return data;\n}\nvoid mpmc_destroy(mpmc_t *q) {\n    pthread_mutex_destroy(&q->m);\n    pthread_cond_destroy(&q->not_full);\n    pthread_cond_destroy(&q->not_empty);\n}",
+      "explanation_ko": "여러 스레드가 동시에 head/tail/count 를 갱신하므로 SPSC 무락 트릭이 성립하지 않는다. mutex 로 직렬화하고, 버퍼가 가득/비었을 때 바쁜 대기(busy-wait) 대신 조건변수로 잠들어 CPU 를 양보한다. while 루프는 (1) pthread_cond_wait 의 spurious wakeup, (2) 깨어난 사이 다른 스레드가 상태를 바꿔버린 경우를 모두 방어한다. cond_wait 진입 시 mutex 를 자동으로 해제하므로 다른 스레드가 진입해 상태를 바꾸고 signal 할 수 있다.",
+      "complexity": "O(1) time per op (락 경합 제외), O(1) space",
+      "pitfalls": [
+        "if (count==0) cond_wait — while 아님 → spurious wakeup 시 빈 큐에서 pop.",
+        "signal 대상 조건변수를 반대로(넣고 not_full signal) → 대기 스레드가 안 깨어남.",
+        "cond_wait 를 락 밖에서 호출 → 미정의 동작.",
+        "ISR 에서 mutex 사용 금지 — MPMC 블로킹 큐는 스레드 컨텍스트 전용."
+      ],
+      "anduril_context": "여러 태스크가 공유 로그/텔레메트리 큐에 동시에 쓰는 RTOS 멀티스레드 환경(예: 지상국 소프트웨어, 다중 센서 융합 노드)."
+    }
+  ]
+}

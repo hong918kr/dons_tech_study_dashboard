@@ -1,0 +1,212 @@
+# G 블럭: Sliding Window ARQ & Fragment Reassembly (프로토콜 설계 사고) 실전 문제 세트
+
+임베디드/펌웨어/네트워크 장비에서 자주 마주치는 신뢰성 전송, 재전송, 조각화/재조립, 흐름제어, 혼잡제어 등  
+실제 MCU/SoC/네트워크/무선/산업용 환경에서 빈출하는 실전 문제와 헤더/시그니처 템플릿입니다.  
+모든 문제는 15~30분 내 구현/설계/시그니처 초안이 가능하도록 설계되었습니다.
+
+---
+
+## 문제 목록 및 상세
+
+---
+
+### 1. Sliding Window ARQ (Automatic Repeat reQuest) 기본 구조
+
+**상황/스토리:**  
+무선/유선 통신에서 패킷 손실/중복/지연이 발생할 수 있으므로, 송신자는 윈도우 기반으로 여러 패킷을 보내고, 수신자는 ACK/NACK을 통해 신뢰성 보장.  
+송신 윈도우 관리, 재전송 타이머, 중복/순서 오류 처리 등.
+
+**요구사항:**  
+- 송신 윈도우 (send_base, next_seq, window_size)  
+- 수신 윈도우 (expected_seq, window_size)  
+- ACK/NACK 처리  
+- 재전송 타이머  
+- 중복/순서 오류 방지  
+- 최대 시퀀스 wrap-around
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef SLIDING_ARQ_H
+#define SLIDING_ARQ_H
+#include <stdint.h>
+
+#define ARQ_MAX_WINDOW 8
+#define ARQ_MAX_SEQ    32
+
+typedef struct {
+    uint8_t data[128];
+    uint8_t len;
+    uint8_t seq;
+} arq_pkt_t;
+
+typedef struct {
+    arq_pkt_t window[ARQ_MAX_WINDOW];
+    uint8_t   send_base;
+    uint8_t   next_seq;
+    uint8_t   window_size;
+    uint8_t   max_seq;
+    uint32_t  timer[ARQ_MAX_WINDOW];
+} arq_sender_t;
+
+typedef struct {
+    uint8_t   expected_seq;
+    uint8_t   window_size;
+    uint8_t   max_seq;
+    uint8_t   recv_bitmap; // bitmask for out-of-order
+    arq_pkt_t buffer[ARQ_MAX_WINDOW];
+} arq_receiver_t;
+
+void arq_sender_init(arq_sender_t* s, uint8_t window_size, uint8_t max_seq);
+int  arq_send(arq_sender_t* s, const uint8_t* data, uint8_t len);
+void arq_on_ack(arq_sender_t* s, uint8_t ack_seq);
+void arq_sender_tick(arq_sender_t* s, uint32_t now, void (*retransmit)(arq_pkt_t*));
+
+void arq_receiver_init(arq_receiver_t* r, uint8_t window_size, uint8_t max_seq);
+int  arq_on_recv(arq_receiver_t* r, const arq_pkt_t* pkt, void (*send_ack)(uint8_t));
+int  arq_recv_deliver(arq_receiver_t* r, uint8_t* out, uint8_t* len);
+#endif
+```
+
+---
+
+### 2. Fragmented Reassembly + Reorder Window + Selective ACK
+
+**상황/스토리:**  
+MTU 제한, 무선/네트워크 환경에서 큰 메시지를 여러 fragment로 나눠 전송, 수신 측에서는 순서/중복/결손 fragment를 재조립해야 한다.  
+Selective ACK bitmap으로 누락 fragment만 재전송 요청.
+
+**요구사항:**  
+- fragment 구조체 (msg_id, frag_idx, frag_cnt, data)  
+- reassembly buffer, reorder window  
+- selective ACK bitmap  
+- timeout/flush/중복 방지  
+- 완성 시 upper layer 전달
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef FRAG_REASSEMBLY_H
+#define FRAG_REASSEMBLY_H
+#include <stdint.h>
+
+#define FRAG_MAX_CNT 16
+#define FRAG_BUF_SZ  1024
+
+typedef struct {
+    uint32_t msg_id;
+    uint8_t  frag_idx;
+    uint8_t  frag_cnt;
+    uint8_t  data[64];
+    uint8_t  len;
+} frag_pkt_t;
+
+typedef struct {
+    uint32_t msg_id;
+    uint8_t  total_frags;
+    uint8_t  received_bitmap; // bitmask
+    uint8_t  timeout;
+    uint8_t  buf[FRAG_BUF_SZ];
+    uint8_t  frag_len[FRAG_MAX_CNT];
+} frag_reasm_t;
+
+void frag_reasm_init(frag_reasm_t* r);
+int  frag_reasm_on_frag(frag_reasm_t* r, const frag_pkt_t* pkt);
+int  frag_reasm_is_complete(const frag_reasm_t* r);
+int  frag_reasm_get(frag_reasm_t* r, uint8_t* out, uint16_t* len);
+uint8_t frag_reasm_missing_bitmap(const frag_reasm_t* r);
+#endif
+```
+
+---
+
+### 3. Congestion Window (AIMD) 시뮬레이터
+
+**상황/스토리:**  
+TCP/무선 프로토콜 등에서 혼잡 제어를 위해 AIMD(Additive Increase, Multiplicative Decrease) 알고리즘을 사용.  
+ACK/패킷손실 이벤트에 따라 윈도우 크기 조절.
+
+**요구사항:**  
+- 윈도우 크기 증가/감소  
+- ACK/LOSS 이벤트 처리  
+- min/max 윈도우 제한  
+- 시뮬레이터 API
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef CONGESTION_AIMD_H
+#define CONGESTION_AIMD_H
+#include <stdint.h>
+
+typedef struct {
+    float cwnd;
+    float ssthresh;
+    float min_cwnd;
+    float max_cwnd;
+    float ai_step;
+    float md_factor;
+} aimd_ctrl_t;
+
+void aimd_init(aimd_ctrl_t* c, float min_cwnd, float max_cwnd, float ai_step, float md_factor);
+void aimd_on_ack(aimd_ctrl_t* c);
+void aimd_on_loss(aimd_ctrl_t* c);
+#endif
+```
+
+---
+
+### 4. 초경량 Pub/Sub (topic hash, retain last payload, QoS 0/1 단순화)
+
+**상황/스토리:**  
+센서/노드/게이트웨이 등에서 경량 Pub/Sub 메시징을 구현.  
+토픽별로 마지막 payload 유지, QoS 0/1(최소/최대 1회 전달) 지원.
+
+**요구사항:**  
+- 토픽 해시/매핑  
+- 마지막 payload retain  
+- QoS 0/1 구분  
+- 구독/발행/전달 API  
+- 최대 토픽/구독자 제한
+
+**헤더/시그니처 템플릿:**
+```c
+#ifndef PUBSUB_LITE_H
+#define PUBSUB_LITE_H
+#include <stdint.h>
+
+#define MAX_TOPICS 8
+#define MAX_SUBS   8
+#define MAX_PAYLOAD 64
+
+typedef void (*ps_cb_t)(const char* topic, const uint8_t* payload, uint8_t len, void* ctx);
+
+typedef struct {
+    char topic[16];
+    uint8_t last_payload[MAX_PAYLOAD];
+    uint8_t last_len;
+    ps_cb_t subs[MAX_SUBS];
+    void*   sub_ctx[MAX_SUBS];
+    uint8_t sub_qos[MAX_SUBS];
+    uint8_t sub_count;
+} ps_topic_t;
+
+typedef struct {
+    ps_topic_t topics[MAX_TOPICS];
+    uint8_t topic_count;
+} ps_mgr_t;
+
+void ps_init(ps_mgr_t* m);
+int  ps_subscribe(ps_mgr_t* m, const char* topic, ps_cb_t cb, void* ctx, uint8_t qos);
+int  ps_publish(ps_mgr_t* m, const char* topic, const uint8_t* payload, uint8_t len, uint8_t qos);
+#endif
+```
+
+---
+
+## 연습 포인트 요약
+
+- Sliding ARQ: 윈도우 관리, 재전송, wrap, 중복/순서/ACK 처리
+- Fragment: 조각화/재조립, bitmap, selective ACK, timeout
+- Congestion: AIMD, 윈도우 증감, 혼잡 이벤트
+- Pub/Sub: 토픽 해시, retain, QoS, 구독/발행
+
+필요 시 각 항목별 구현/테스트 템플릿도 추가 제공 가능.  
+원하는 번호를 지정하면 skeleton 코드/테스트 하네스 제공 가능.
