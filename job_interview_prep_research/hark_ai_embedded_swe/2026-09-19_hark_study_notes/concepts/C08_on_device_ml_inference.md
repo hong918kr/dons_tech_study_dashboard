@@ -1,0 +1,991 @@
+# C08. 온디바이스 ML 추론 — wake word 모델을 MCU의 메모리·레이턴시·전력 예산 안에 넣는 법
+
+> **이 노트를 다 읽으면**: 오디오 → 특징 → 모델 → 판정 파이프라인을 화이트보드에 그릴 수 있다 · INT8 양자화 수식(scale/zero_point)을 손으로 계산할 수 있다 · TFLite Micro로 모델을 올리고 tensor arena 크기와 추론 cycle을 측정할 수 있다 · AI 팀과 "메모리·레이턴시 예산"을 숫자로 협상할 수 있다
+> **JD 연결**: "Collaborate with the on-device AI team to support model inference within memory and latency budgets" · "the runtime environment that hosts on-device intelligence" · 우대 "Exposure to ML inference runtimes on embedded platforms"
+> **Don 기준 난이도**: SRAM 배치·DMA·링버퍼·cycle 측정은 이미 안다 / 양산 추론 런타임(TFLM), 양자화 수학, 오디오 특징 추출, NPU 오프로드는 새로 배운다
+
+---
+
+## 0. 큰 그림
+
+Hark 같은 always-on 음성 AI 기기를 예로 들면, "사용자가 말을 걸었다"는 사실을 알아차리는 첫 단계는 거의 항상 **저전력 MCU**가 맡는다. 큰 SoC(Cortex-A + DSP/NPU)를 계속 켜 두면 배터리가 하루를 못 버티기 때문이다. MCU는 마이크를 계속 듣고, 작은 모델(keyword spotting, KWS)로 wake word를 찾고, 찾으면 SoC를 깨운다. 아래 구조는 이 노트 전체에서 쓰는 **추정 예시**다(Hark의 실제 구조는 공개되지 않았다).
+
+```
+            ┌────────────────────── always-on 도메인 (수 mW 이하) ──────────────────────┐
+ PDM mic ──►│ PDM/I2S ─DMA─► 오디오 링버퍼 ─► 특징 추출 ─► KWS 모델 ─► 후처리/판정       │
+ (1~2개)    │ periph        (pre-roll 1~2s)  (log-mel)    (INT8,TFLM)  (smoothing,      │
+            │                                                          threshold)       │
+            │  Cortex-M4F/M55 MCU (예: Ambiq Apollo 계열), RTOS                          │
+            └──────────────────────────────────────────┬──────────────────────────────────┘
+                                                       │ ① GPIO wake IRQ
+                                                       │ ② pre-roll 오디오 (SPI/공유메모리)
+                                                       ▼
+            ┌────────────────────── on-demand 도메인 (수백 mW~W) ───────────────────────┐
+            │ Cortex-A SoC (Android/Linux) + DSP/NPU                                    │
+            │   2단계 검증(더 큰 KWS) → ASR/speech 모델 → 에이전트/클라우드              │
+            └───────────────────────────────────────────────────────────────────────────┘
+```
+
+펌웨어 엔지니어가 이 그림에서 책임지는 것은 "모델 자체"가 아니라 **모델이 사는 집**이다. 마이크 드라이버, DMA, 버퍼, 특징 추출 코드, 런타임(TFLM) 통합, 메모리 배치, 스케줄링, 전력 상태, SoC 깨우기 프로토콜, 모델 OTA가 모두 펌웨어의 몫이다. JD가 "runtime environment that hosts on-device intelligence"라고 부르는 것이 바로 이것이다.
+
+### 0.1 이 노트의 순서
+
+1. 파이프라인 전체와 단계별 비용
+2. 오디오 입력: I2S/PDM DMA double buffering
+3. 특징 추출(log-mel)과 training/serving skew
+4. 양자화를 처음부터(INT8, scale, zero_point, requantization)
+5. TFLite Micro 구조와 코드(tensor arena, op resolver, interpreter)
+6. 커널 가속: CMSIS-NN, DSP 확장/Helium, NPU(Ethos-U), SoC DSP
+7. 메모리 예산: flash/XIP vs SRAM, arena, 모델 residency
+8. 레이턴시 예산과 프로파일링(DWT CYCCNT)
+9. 캐시와 DMA coherency
+10. SoC + MCU 분담과 깨우기 프로토콜
+11. 펌웨어 엔지니어 vs ML 엔지니어 역할 경계
+
+---
+
+## 1. Wake word / speech 파이프라인
+
+### 1.1 단계별 정의
+
+| 단계 | 입력 → 출력 | 하는 일 | 주 비용 |
+|---|---|---|---|
+| 캡처 | 마이크 → PCM 샘플 | PDM 비트스트림을 decimation 해서 16kHz/16-bit PCM으로 | 주변장치 + DMA (CPU 거의 0) |
+| 버퍼링 | PCM → 링버퍼 | 최근 1~2초를 보관(pre-roll) | SRAM (16kHz × 2B × 2s = 64KB) |
+| 특징 추출 | 30ms 창 → 40개 특징 | window → FFT → power → mel filterbank → log → 양자화 | CPU (FFT) |
+| 추론 | 특징 행렬 → class 점수 | CNN/DS-CNN 등 | CPU/NPU MAC, arena SRAM |
+| 후처리 | 점수 시퀀스 → 판정 | 여러 프레임 평균, threshold, refractory 기간 | 무시할 수준 |
+| 액션 | 판정 → 이벤트 | SoC 깨우기, pre-roll 전송 | IPC, 전력 상태 전환 |
+
+### 1.2 시간 축으로 본 파이프라인
+
+TFLM의 `micro_speech` 예제를 기준으로 하면, 1초 분량의 오디오를 **30ms 창, 20ms 간격(stride)** 으로 잘라 **49개 프레임 × 40개 특징**의 행렬을 만들고, 이것을 모델에 넣는다. 새 20ms가 들어올 때마다 가장 오래된 프레임 하나를 버리고 새 프레임 하나를 추가한다(슬라이딩 윈도우).
+
+```
+시간 ──►  0ms      20ms     40ms     60ms          ...              1000ms
+오디오    |========|========|========|========  ...  ========|
+프레임0   [--30ms--]
+프레임1            [--30ms--]
+프레임2                     [--30ms--]
+...
+                                              특징 행렬 (49 × 40, int8)
+                                              ┌──────────────────┐
+  새 프레임이 오면 한 줄 밀고(shift) 맨 끝에 추가 │ f0  f1 ... f39   │ ← 가장 오래됨
+                                              │ ...              │
+                                              │ f0  f1 ... f39   │ ← 방금 계산
+                                              └──────────────────┘
+                                                      │ 20ms마다(또는 N 프레임마다) Invoke()
+                                                      ▼
+                                              [silence, unknown, "yes", "no"] 점수
+```
+
+핵심 제약: **20ms마다 새 프레임이 온다면, 특징 추출 + 추론은 평균적으로 20ms 안에 끝나야 한다.** 그렇지 않으면 링버퍼가 밀리고 결국 오버런된다. 이것이 레이턴시 예산의 출발점이다(8절).
+
+### 1.3 왜 2단계(cascade)인가
+
+MCU의 작은 모델은 false accept(엉뚱한 소리에 깨어남)가 있을 수밖에 없다. 그래서 흔한 구조는 **1단계: MCU 초저전력 KWS(recall 높게)** → **2단계: SoC의 더 큰 모델로 재검증(precision 높게)** 이다. 1단계가 틀려도 SoC가 잠깐 켜졌다 다시 자는 비용만 든다. 펌웨어 입장에서 이 구조는 "1단계 threshold를 얼마로 둘지 = 전력(false wake 횟수)과 사용자 경험(놓침)의 trade-off"라는 제품 결정으로 이어진다.
+
+> **Don 경험과 연결**: SSD에서 빠른 경로(HW 가속, fast path)가 대부분을 처리하고 예외만 FW slow path로 넘기는 구조와 같다. 싼 단계가 대부분을 거르고, 비싼 단계는 드물게만 켠다.
+
+---
+
+## 2. 오디오 입력: I2S/PDM DMA double buffering
+
+### 2.1 데이터량 계산
+
+16kHz, 16-bit, mono 기준:
+
+- 초당 16,000 샘플 × 2바이트 = **32,000 B/s**
+- 20ms stride = 320 샘플 = **640 바이트**
+- 30ms 창 = 480 샘플 = 960 바이트
+
+작은 숫자지만 **끊기면 안 된다**는 것이 중요하다. 샘플을 하나라도 잃으면 특징이 왜곡되고, 학습 때 본 적 없는 입력이 된다.
+
+### 2.2 ping-pong(double buffer) 구조
+
+DMA가 버퍼 A를 채우는 동안 CPU는 버퍼 B를 처리한다. 대부분의 MCU DMA는 **half-transfer / transfer-complete 인터럽트**나 링크드 디스크립터로 이걸 지원한다(이름과 방식은 벤더마다 다름).
+
+```
+DMA 쓰기 위치:  [ A 채움 ][ B 채움 ][ A 채움 ][ B 채움 ] ...
+                        ▲         ▲         ▲
+                   half IRQ   full IRQ   half IRQ
+CPU 처리:                 [ A 처리 ][ B 처리 ][ A 처리 ] ...
+                        │◄─ 처리 시간은 반드시 버퍼 하나 채우는 시간(20ms)보다 짧아야 ─►│
+```
+
+### 2.3 코드: ISR → task 전달 (FreeRTOS)
+
+아래는 DMA half/full 콜백에서 **데이터를 복사하지 않고** 어느 절반이 준비됐는지만 task에 알리는 패턴이다. DMA 레지스터 부분은 가상의 HAL 함수로 표시했다.
+
+```c
+#include <stdint.h>
+#include "FreeRTOS.h"
+#include "task.h"
+
+#define FRAME_SAMPLES   320u                 /* 20 ms @ 16 kHz */
+#define DMA_SAMPLES     (2u * FRAME_SAMPLES) /* ping + pong */
+
+/* DMA가 쓰는 버퍼. 캐시가 있는 코어라면 32바이트(캐시 라인) 정렬 필수 (9절) */
+static int16_t s_dma_buf[DMA_SAMPLES] __attribute__((aligned(32)));
+
+static TaskHandle_t s_kws_task;
+static volatile uint32_t s_ready_half;   /* 0 = 앞 절반, 1 = 뒤 절반 */
+static volatile uint32_t s_overrun;      /* task가 프레임을 놓친 횟수 */
+
+/* 가상의 벤더 HAL 함수 — 실제 이름은 벤더 SDK마다 다름 */
+extern int  audio_dma_irq_is_half(void);  /* half-transfer 이벤트면 1 */
+extern void audio_dma_irq_clear(void);
+
+void AUDIO_DMA_IRQHandler(void)
+{
+    BaseType_t woken = pdFALSE;
+    s_ready_half = audio_dma_irq_is_half() ? 0u : 1u;   /* DMA가 방금 다 채운 절반 */
+    audio_dma_irq_clear();
+    vTaskNotifyGiveFromISR(s_kws_task, &woken);         /* 알림 값 +1 */
+    portYIELD_FROM_ISR(woken);
+}
+
+static void kws_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint32_t n = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  /* 잠들었다가 값을 0으로 가져감 */
+        if (n > 1u) {
+            s_overrun += n - 1u;          /* 알림이 2개 이상 쌓였음 = 처리 지연으로 프레임 놓침 */
+        }
+        const int16_t *pcm = &s_dma_buf[s_ready_half * FRAME_SAMPLES];
+        /* 1) pcm 320샘플을 pre-roll 링버퍼에 복사 (DMA가 이 절반을 다시 덮기 전에!)
+           2) 특징 1프레임 계산 → 특징 행렬 shift & append
+           3) 필요하면 Invoke() */
+        (void)pcm;
+    }
+}
+```
+
+한 줄씩 보면:
+
+- `FRAME_SAMPLES`를 stride(20ms)와 같게 두면 "DMA 절반 = 특징 1프레임"이 되어 로직이 단순해진다. 30ms 창은 직전 프레임의 뒤 10ms와 합쳐서 만든다.
+- `aligned(32)`는 Cortex-M7처럼 D-cache가 있는 코어에서 캐시 라인 단위 invalidate가 옆 변수를 망가뜨리지 않게 하기 위함이다(9절).
+- ISR은 **어느 절반이 찼는지 기록하고 알림만 보낸다.** 데이터 복사도 계산도 하지 않는다.
+- `vTaskNotifyGiveFromISR`는 task의 알림 값을 1 올리는 가벼운 세마포어처럼 동작하고, `portYIELD_FROM_ISR`는 더 높은 우선순위 task가 깨어났으면 ISR 종료 직후 바로 전환하게 한다.
+- `ulTaskNotifyTake(pdTRUE, ...)`는 알림 값을 반환하면서 0으로 지운다. 반환값이 2 이상이면 task가 늦어서 알림이 쌓였다는 뜻, 즉 **프레임을 놓쳤다**. 이 `s_overrun` 카운터가 양산에서 **레이턴시 예산 초과를 감지하는 telemetry**가 된다.
+- 반대로 task는 DMA가 다음 절반을 채우는 20ms 안에 이 절반을 링버퍼로 옮겨야 한다. 그래서 복사를 루프 맨 앞에 둔다.
+- task는 `ulTaskNotifyTake(pdTRUE, ...)`로 잠든다. 오디오가 없으면 CPU는 idle → tickless sleep으로 들어갈 수 있다.
+
+### 2.4 흔한 함정
+
+- ISR 안에서 FFT나 `Invoke()`를 부르는 것. ISR 지연이 수 ms가 되어 다른 모든 인터럽트(BLE 등)가 망가진다.
+- DMA 버퍼를 task 스택에 두는 것. task가 끝나거나 스택이 재사용되면 DMA가 엉뚱한 메모리를 덮어쓴다.
+- 마이크 클럭(PDM CLK)과 기대 샘플레이트가 어긋나는 것. 예를 들어 1.024MHz PDM clock / 64 decimation = 16kHz인데, 클럭 트리 설정 실수로 15.6kHz가 되면 모델 정확도가 조용히 떨어진다. **스코프로 PDM CLK를 한 번 재 보는 것**이 bring-up 체크 항목이다.
+
+> **Don 경험과 연결**: SSD의 호스트 DMA 데이터 경로와 같은 문제다. 다른 점은 오디오는 "재시도"가 없다는 것. NVMe는 에러 나면 명령을 재전송하지만 마이크 샘플은 한 번 놓치면 끝이다. 그래서 **overrun 카운터를 반드시 둔다.**
+
+---
+
+## 3. 특징 추출(log-mel)과 training/serving skew
+
+### 3.1 왜 원시 오디오를 바로 넣지 않나
+
+1초 오디오는 16,000개 숫자다. 이걸 그대로 넣으면 모델이 커진다. 사람 음성의 정보는 주파수 스펙트럼의 모양(포먼트)에 있으므로, 먼저 **짧은 구간의 주파수 에너지 분포**로 바꾸면 데이터가 40배 가까이 줄고 모델이 작아진다.
+
+### 3.2 단계
+
+```
+480 샘플(30ms) ─► window(Hann) ─► 512-pt FFT ─► |X|² (power) ─► mel filterbank(40개)
+   ─► log ─► (noise reduction / gain control, 구현마다 다름) ─► int8 양자화 ─► 40개 특징
+```
+
+- **window**: 창 경계에서 신호가 뚝 끊기면 FFT에 가짜 고주파가 생긴다(spectral leakage). Hann 창으로 양 끝을 부드럽게 0으로 만든다.
+- **FFT**: 512점 실수 FFT → 257개 주파수 bin(0~8kHz).
+- **mel filterbank**: 사람 귀처럼 저주파는 촘촘하게, 고주파는 넓게 묶는 삼각 필터 40개. 257 bin → 40 값.
+- **log**: 소리 크기의 dynamic range를 압축. 조용한 소리와 큰 소리의 차이를 곱셈이 아닌 덧셈 관계로 만든다.
+
+### 3.3 코드: CMSIS-DSP로 power spectrum까지
+
+```c
+#include "arm_math.h"      /* CMSIS-DSP */
+
+#define N_FFT 512
+
+static arm_rfft_fast_instance_f32 s_rfft;
+static float32_t s_frame[N_FFT];        /* 입력(윈도우 적용 후), 0-padding 포함 */
+static float32_t s_spec[N_FFT];         /* 복소 출력: [Re0, Re(N/2), Re1, Im1, ...] */
+static float32_t s_power[N_FFT / 2];
+
+void fe_init(void)
+{
+    (void)arm_rfft_fast_init_f32(&s_rfft, N_FFT);   /* 반환값 ARM_MATH_SUCCESS 확인 권장 */
+}
+
+void fe_power_spectrum(const int16_t *pcm, uint32_t n, const float32_t *hann)
+{
+    for (uint32_t i = 0; i < N_FFT; i++) {
+        s_frame[i] = (i < n) ? ((float32_t)pcm[i] / 32768.0f) * hann[i] : 0.0f;
+    }
+    arm_rfft_fast_f32(&s_rfft, s_frame, s_spec, 0);      /* 0 = forward FFT */
+    /* s_spec[0]=DC 실수부, s_spec[1]=Nyquist 실수부가 packing 되어 있음 */
+    arm_cmplx_mag_squared_f32(s_spec, s_power, N_FFT / 2);
+    s_power[0] = s_spec[0] * s_spec[0];                  /* DC bin을 올바르게 다시 계산 */
+}
+```
+
+- `arm_rfft_fast_f32`는 입력 버퍼를 **덮어쓸 수 있다**(CMSIS-DSP 문서에 입력이 수정된다고 되어 있음). 원본이 필요하면 복사본을 넘긴다.
+- 출력 첫 두 칸이 DC와 Nyquist의 실수부로 packing되는 것은 CMSIS-DSP real FFT의 형식이다. 그대로 `mag_squared`를 돌리면 bin 0이 틀어지므로 따로 고친다.
+- FPU가 없는 코어(M0+)라면 `arm_rfft_q15` 같은 fixed-point 버전을 쓴다.
+
+### 3.4 가장 중요한 함정: training/serving skew
+
+모델은 **학습 때 쓴 특징 추출 코드(보통 Python/TensorFlow)** 로 만든 입력을 기준으로 학습됐다. MCU의 C 구현이 조금이라도 다르면(창 길이, FFT 크기, mel 필터 경계, log의 epsilon, 양자화 범위) 모델은 "본 적 없는 입력"을 받는다. 증상은 크래시가 아니라 **정확도가 조용히 몇 % 떨어지는 것**이라 찾기 어렵다.
+
+해결책은 **bit-exact 검증**이다.
+
+1. ML 팀에서 WAV 파일 수십 개와 Python 특징 출력(int8 배열)을 golden 벡터로 받는다.
+2. 같은 WAV를 PC 빌드된 C 특징 추출기(또는 보드에서 UART로 주입)에 넣는다.
+3. 프레임별로 비교해 최대 오차가 0(또는 ±1 LSB 이내)인지 CI에서 확인한다.
+
+TFLM 저장소의 `micro_speech` 예제가 특징 추출 자체를 작은 TFLite 모델(audio preprocessor)로 만들어 같은 코드로 학습·추론을 하는 이유도 이 skew를 없애기 위해서다.
+
+> **Don 경험과 연결**: pre-silicon FPGA 결과와 post-silicon 결과를 golden 벡터로 비교하던 것과 같은 방법론이다. "모델 정확도가 이상하다"는 버그가 들어오면 제일 먼저 특징 벡터를 golden과 비교한다.
+
+---
+
+## 4. 양자화를 처음부터
+
+### 4.1 왜 양자화하나 — 하드웨어 이유 세 가지
+
+| 이유 | float32 | int8 | 효과 |
+|---|---|---|---|
+| 메모리 | 가중치 1개 4바이트 | 1바이트 | flash와 SRAM이 4배 줄어든다 |
+| 연산 | FPU 필요, SIMD 폭 작음 | 32비트 레지스터에 4개, SIMD MAC | Cortex-M4 SMLAD는 16비트 곱 2개를 한 명령에, Helium은 128비트에 int8 16개 |
+| 전력 | 데이터 이동 많음 | 적음 | DRAM/SRAM 접근이 에너지의 큰 부분이라 바이트 수가 곧 전력 |
+
+NPU(Ethos-U 등)는 대부분 **int8(과 int16) 전용**이라 float 모델은 아예 올라가지 않는다.
+
+### 4.2 affine 양자화 수식
+
+실수 값 r을 정수 q로 표현할 때 TFLite는 다음 관계를 쓴다.
+
+```
+r = scale × (q − zero_point)
+
+q = clamp( round(r / scale) + zero_point , −128, 127 )     (int8)
+```
+
+- `scale`: 정수 1칸이 실수로 얼마인가(양수 float).
+- `zero_point`: 실수 0.0이 어떤 정수로 표현되는가. 0.0이 **정확히** 표현되어야 zero-padding, ReLU가 오차 없이 된다.
+
+### 4.3 손으로 한 번 계산하기
+
+어떤 activation 텐서의 실수 범위가 [−2.0, 6.0]이라고 하자. int8 범위는 [−128, 127], 256칸이다.
+
+```
+scale      = (6.0 − (−2.0)) / 255 = 8.0 / 255 ≈ 0.031373
+zero_point = −128 − round(−2.0 / scale) = −128 − round(−63.75) = −128 + 64 = −64
+
+r = 0.0  → q = round(0 / 0.031373) + (−64) = −64            (0이 정확히 −64)
+r = 1.0  → q = round(31.875) − 64 = 32 − 64 = −32
+          되돌리면 r' = 0.031373 × (−32 + 64) = 1.0039     (오차 0.0039 = 양자화 오차)
+r = 7.0  → q = round(223.1) − 64 = 159 → clamp → 127         (범위 밖은 포화)
+```
+
+범위를 넓게 잡으면 포화는 줄지만 scale이 커져서 작은 값의 정밀도가 떨어진다. 이 범위를 정하는 것이 **calibration**(대표 데이터로 activation 범위 측정)이다.
+
+### 4.4 TFLite의 int8 규칙 (full integer quantization)
+
+| 대상 | 방식 | zero_point | 비고 |
+|---|---|---|---|
+| 가중치(conv, FC) | symmetric, **per-channel**(conv) | 0 | 출력 채널마다 scale이 따로 있다 |
+| activation | asymmetric, per-tensor | −128~127 중 하나 | calibration으로 범위 결정 |
+| bias | int32 | 0 | scale = input_scale × weight_scale |
+
+가중치를 symmetric(zero_point=0)으로 두는 이유는 곱셈 안쪽에서 zero_point 보정 항을 없애 커널을 빠르게 만들기 위해서다. 자세한 규칙은 TensorFlow 문서의 "Quantization specification"에 있다(참고 자료).
+
+### 4.5 정수만으로 곱셈을 하는 법: requantization
+
+FC 레이어 하나의 출력은 실수로 `y = Σ w·x + b`다. 수식에 양자화를 대입하면
+
+```
+s_y (q_y − z_y) = Σ s_w q_w · s_x (q_x − z_x) + s_b q_b
+
+q_y = z_y + (s_w · s_x / s_y) × [ Σ q_w (q_x − z_x) + q_b ]
+            └──── M ────┘       └────── int32 누산기 acc ──────┘
+```
+
+`acc`는 int8 × int8을 int32로 더한 값이라 정수 연산이다. 문제는 실수 배율 `M`(보통 0과 1 사이)이다. MCU는 이걸 **fixed-point 곱 + shift**로 바꾼다: `M = M0 × 2^(−shift)`, `M0`는 [0.5, 1) 범위의 Q31 정수. TFLite/CMSIS-NN은 각 레이어의 `M0`, `shift`를 **미리 계산해 두고**(TFLM에서는 `Prepare` 단계) 런타임에는 정수 곱과 shift만 한다.
+
+```c
+#include <stdint.h>
+
+/* (a × b × 2) 의 상위 32비트를 반올림해 돌려준다: Q31 × Q31 → Q31 */
+static int32_t sat_round_doubling_high_mul(int32_t a, int32_t b)
+{
+    if (a == INT32_MIN && b == INT32_MIN) return INT32_MAX;   /* 유일한 overflow 경우 */
+    int64_t ab = (int64_t)a * (int64_t)b;
+    int64_t nudge = (ab >= 0) ? (1LL << 30) : (1 - (1LL << 30));
+    return (int32_t)((ab + nudge) / (1LL << 31));
+}
+
+/* 오른쪽 shift + 반올림 (round half away from zero) */
+static int32_t rounding_rshift(int32_t x, int shift)
+{
+    if (shift <= 0) return x;
+    int32_t mask = (int32_t)((1u << shift) - 1u);
+    int32_t rem = x & mask;
+    int32_t threshold = (mask >> 1) + ((x < 0) ? 1 : 0);
+    return (x >> shift) + ((rem > threshold) ? 1 : 0);
+}
+
+/* acc(int32) → int8 출력 */
+int8_t requantize(int32_t acc, int32_t m0_q31, int shift, int32_t out_zp)
+{
+    int32_t v = rounding_rshift(sat_round_doubling_high_mul(acc, m0_q31), shift);
+    v += out_zp;
+    if (v < -128) v = -128;
+    if (v > 127)  v = 127;
+    return (int8_t)v;
+}
+```
+
+- `sat_round_doubling_high_mul`: gemmlowp에서 온 연산으로, CMSIS-NN과 TFLM reference 커널이 같은 의미의 함수를 쓴다(이름은 구현마다 다르다). Q31끼리 곱하면 결과는 Q62이고, 2배 하고 상위 32비트를 가져오면 다시 Q31이 된다.
+- `rounding_rshift`: 단순 `>>`는 음수에서 내림이 되어 오차가 한쪽으로 쌓인다. 그래서 반올림을 따로 한다. 음수의 `>>`는 C에서 구현 정의 동작이지만 ARM GCC/Clang은 산술 shift다.
+- 마지막 clamp는 ReLU6 같은 activation을 합쳐서(fused activation) 범위를 더 좁히는 데도 쓰인다.
+- 이 코드를 직접 쓸 일은 드물다. 중요한 것은 **"양자화 모델의 추론은 정수 MAC + 레이어당 한 번의 requantize"** 라는 구조를 이해하는 것이다. 그래서 cycle의 대부분은 MAC 루프에 있다.
+
+### 4.6 PTQ vs QAT, INT4
+
+- **PTQ(post-training quantization)**: 학습 끝난 float 모델을 대표 데이터 수백 개로 calibration해서 변환. 쉽지만 작은 모델에서는 정확도가 몇 % 떨어질 수 있다.
+- **QAT(quantization-aware training)**: 학습 중에 양자화 오차를 흉내 내서(fake quant) 모델이 적응하게 한다. 정확도 손실이 작다. ML 팀의 일이지만, 펌웨어는 "타깃이 per-channel int8을 지원하는지, int16 activation이 필요한지" 같은 제약을 알려줘야 한다.
+- **INT4**: 가중치를 4비트로 줄이는 방식은 큰 모델(SoC의 LLM/ASR)에서 흔하다. MCU 런타임과 NPU의 INT4 지원 여부는 버전·벤더마다 다르므로 반드시 확인한다.
+
+---
+
+## 5. TensorFlow Lite for Microcontrollers (TFLM)
+
+### 5.1 설계 철학
+
+TFLM은 **OS 없이도 도는** TFLite 인터프리터다. 특징:
+
+- 동적 메모리 할당(`malloc`)을 쓰지 않는다. 사용자가 준 **하나의 큰 바이트 배열(tensor arena)** 안에서 모든 것을 해결한다.
+- 모델은 `.tflite` FlatBuffer 그대로 flash에 두고, 파싱 없이 제자리에서 읽는다(zero-copy).
+- 필요한 op만 등록해서(op resolver) 쓰지 않는 커널 코드를 링크하지 않는다.
+- 커널은 reference 구현이 기본이고, `OPTIMIZED_KERNEL_DIR=cmsis_nn` 등으로 최적화 커널을 끼운다.
+
+### 5.2 객체 관계
+
+```
+flash (.rodata)                           SRAM
+┌──────────────────────┐        ┌──────────────── tensor_arena[] ────────────────┐
+│ g_model[] (.tflite)  │        │ [head: non-persistent]      [tail: persistent] │
+│  - 그래프(op 목록)    │        │  activation 텐서들          TfLiteTensor 메타,  │
+│  - 가중치 int8        │        │  (수명 겹치지 않으면 재사용)  op별 user data,    │
+│  - quant 파라미터     │        │  scratch 버퍼               quant 파라미터 등   │
+└─────────┬────────────┘        └───────────────▲────────────────────────────────┘
+          │ tflite::GetModel()                    │ AllocateTensors()가 배치
+          ▼                                       │
+   const tflite::Model* ──► tflite::MicroInterpreter ◄── MicroMutableOpResolver<N>
+                              │ input(0) / Invoke() / output(0)
+```
+
+- **persistent 영역**: 추론 내내 살아 있어야 하는 것(텐서 구조체, 커널의 사전 계산 값).
+- **non-persistent 영역**: activation. 메모리 planner(기본 `GreedyMemoryPlanner`)가 텐서들의 수명(어느 op에서 생기고 어느 op에서 마지막으로 쓰이는지)을 보고 **겹치지 않는 텐서끼리 같은 주소를 재사용**한다. 그래서 arena 크기는 "모든 activation의 합"이 아니라 대략 **"동시에 살아 있는 activation의 최대 합"**이다.
+
+### 5.3 코드: 인터프리터 설정 (C++)
+
+아래는 현재 TFLM 저장소(github.com/tensorflow/tflite-micro) 기준의 API다. 예전 버전에 있던 `ErrorReporter` 인자는 제거되었고 로그는 `MicroPrintf`를 쓴다.
+
+```cpp
+#include <cstdint>
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/micro/micro_log.h"
+#include "tensorflow/lite/micro/system_setup.h"
+#include "tensorflow/lite/schema/schema_generated.h"
+
+#include "kws_model_data.h"   // extern const unsigned char g_kws_model[]; (xxd -i 로 생성)
+
+namespace {
+constexpr int kNumOps = 5;
+constexpr size_t kArenaSize = 30 * 1024;              // 처음엔 넉넉히, 측정 후 줄인다
+alignas(16) uint8_t g_arena[kArenaSize];              // .bss에 둔다. 16바이트 정렬
+
+const tflite::Model* g_model = nullptr;
+tflite::MicroInterpreter* g_interp = nullptr;
+TfLiteTensor* g_in = nullptr;
+TfLiteTensor* g_out = nullptr;
+}  // namespace
+
+extern "C" int kws_init(void)
+{
+    tflite::InitializeTarget();                         // 타깃별 초기화(로그 UART 등)
+
+    g_model = tflite::GetModel(g_kws_model);            // FlatBuffer를 제자리에서 해석
+    if (g_model->version() != TFLITE_SCHEMA_VERSION) {
+        MicroPrintf("schema %d != %d", g_model->version(), TFLITE_SCHEMA_VERSION);
+        return -1;
+    }
+
+    static tflite::MicroMutableOpResolver<kNumOps> resolver;   // 쓸 op만 등록
+    if (resolver.AddConv2D() != kTfLiteOk) return -2;
+    if (resolver.AddDepthwiseConv2D() != kTfLiteOk) return -2;
+    if (resolver.AddFullyConnected() != kTfLiteOk) return -2;
+    if (resolver.AddReshape() != kTfLiteOk) return -2;
+    if (resolver.AddSoftmax() != kTfLiteOk) return -2;
+
+    static tflite::MicroInterpreter interp(g_model, resolver, g_arena, kArenaSize);
+    g_interp = &interp;
+
+    if (g_interp->AllocateTensors() != kTfLiteOk) {    // arena가 부족하면 여기서 실패
+        MicroPrintf("AllocateTensors failed");
+        return -3;
+    }
+    MicroPrintf("arena used: %u / %u bytes",
+                (unsigned)g_interp->arena_used_bytes(), (unsigned)kArenaSize);
+
+    g_in = g_interp->input(0);
+    g_out = g_interp->output(0);
+    if (g_in->type != kTfLiteInt8 || g_out->type != kTfLiteInt8) return -4;
+    return 0;
+}
+
+// features: 이미 int8로 양자화된 49×40 특징
+extern "C" int kws_run(const int8_t* features, size_t n, int8_t* scores, size_t n_scores)
+{
+    if (n != g_in->bytes || n_scores > g_out->bytes) return -1;
+    for (size_t i = 0; i < n; ++i) g_in->data.int8[i] = features[i];
+
+    if (g_interp->Invoke() != kTfLiteOk) return -2;
+
+    for (size_t i = 0; i < n_scores; ++i) scores[i] = g_out->data.int8[i];
+    return 0;
+}
+```
+
+한 줄씩:
+
+- `alignas(16) uint8_t g_arena[...]`: arena는 **전역/정적**이어야 한다(스택에 두면 스택 오버플로). TFLM은 arena 내부를 정렬해서 쓰지만 시작 주소를 정렬해 두면 낭비가 줄고, 일부 커널/NPU가 16바이트 정렬을 요구한다.
+- `tflite::GetModel()`: 복사 없이 flash 상의 배열을 `const tflite::Model*`로 본다. 모델 배열도 정렬(`alignas(16)`)해 두는 것이 안전하다.
+- `version() != TFLITE_SCHEMA_VERSION`: 변환기와 런타임의 스키마가 맞는지 확인. 모델 OTA를 할 때 이 검사가 첫 방어선이다.
+- `MicroMutableOpResolver<kNumOps>`: 템플릿 인자는 등록할 op의 최대 개수. 모델에 있는데 등록 안 한 op가 있으면 `AllocateTensors()`(정확히는 그 안의 op 초기화)에서 실패하고 로그에 op 이름이 나온다. 전체 op를 다 넣는 `AllOpsResolver`는 코드 크기가 커서 양산에는 쓰지 않는다(최신 버전에서는 사용을 권장하지 않는다).
+- `static tflite::MicroInterpreter interp(...)`: 인터프리터도 정적으로 둔다. 함수가 끝나도 살아 있어야 하기 때문이다.
+- `AllocateTensors()`: 메모리 planner가 arena에 모든 텐서를 배치하고 각 op의 `Prepare`를 호출한다(requantize 배율 계산 등). **여기서만 무거운 일이 일어나고 `Invoke()`는 할당을 하지 않는다.** 그래서 부팅 때 한 번 호출한다.
+- `arena_used_bytes()`: 실제로 쓴 바이트 수. 이 값 + 여유분(보통 수 %~몇 KB, 정렬·버전 차이 대비)으로 `kArenaSize`를 줄인다.
+- `g_in->bytes`, `g_in->data.int8`: 입력 텐서의 바이트 수와 버퍼 포인터. 입력 양자화 파라미터는 `g_in->params.scale`, `g_in->params.zero_point`에 있다. 특징 추출기가 float을 만든다면 4.2절 수식으로 int8로 바꾼다.
+- 복사 대신 특징 추출기가 `g_in->data.int8`에 **직접 쓰게** 하면 1,960바이트 복사를 아낄 수 있다(단, `Invoke()` 도중에는 쓰면 안 된다).
+
+### 5.4 op별 시간 측정: MicroProfiler
+
+TFLM은 `tflite::MicroProfiler`(`tensorflow/lite/micro/micro_profiler.h`)를 인터프리터 생성자의 profiler 인자로 넘기면 op별 tick을 기록한다. tick 원천은 타깃의 `micro_time` 구현이고, Cortex-M에서는 보통 DWT CYCCNT를 연결한다(8절). 결과는 `Log()` 또는 `LogTicksPerTagCsv()`로 출력한다. "어느 레이어가 느린가"를 ML 팀에 숫자로 돌려줄 수 있는 가장 빠른 방법이다.
+
+### 5.5 흔한 함정
+
+- **arena가 부족**: `AllocateTensors()` 실패. 로그에 필요한 바이트가 찍힌다. 가장 흔한 bring-up 오류다.
+- **op 버전 불일치**: 새 TensorFlow 변환기가 만든 op 버전을 오래된 TFLM이 모르면 실패. 변환기 버전과 TFLM 커밋을 함께 고정(pin)한다.
+- **입력 양자화 파라미터 무시**: float 특징을 그냥 `(int8_t)` 캐스팅하면 결과가 엉망이다. 반드시 scale/zero_point로 변환한다.
+- **arena를 다른 용도와 공유**: 추론이 끝난 뒤 arena 영역을 오디오 버퍼로 쓰는 식의 최적화는 가능하지만, persistent 영역을 덮으면 다음 `Invoke()`가 조용히 틀린 답을 낸다. 공유한다면 non-persistent 부분만, 그리고 문서화한다.
+
+> **Don 경험과 연결**: arena는 SSD FW에서 부팅 때 한 번 정적으로 잘라 쓰는 buffer pool과 같다. "런타임 malloc 금지, 부팅 시 한 번 할당, 사용량 high-water mark 측정"이라는 규칙이 똑같다.
+
+---
+
+## 6. 커널 가속: CMSIS-NN, DSP 확장, NPU, SoC DSP
+
+### 6.1 연산 장치 비교
+
+| 방식 | 예 | MAC 처리량(대략) | 장점 | 단점 |
+|---|---|---|---|---|
+| 스칼라 C (reference 커널) | 모든 Cortex-M | 낮음 | 이식성, 정확성 기준 | 느림 |
+| DSP 확장 SIMD | Cortex-M4/M7/M33의 SMLAD 등 | 사이클당 16비트 MAC 2개 수준 | 추가 HW 없음, CMSIS-NN이 활용 | 여전히 CPU 시간 소모 |
+| Helium(MVE) | Cortex-M55/M85 | 128비트 벡터, int8 기준 훨씬 높음 | CPU 명령어라 프로그래밍 쉬움 | 코어 자체가 필요 |
+| micro NPU | Arm Ethos-U55/U65/U85 | U55는 구성에 따라 사이클당 32~256 MAC | 에너지 효율 최고 | 지원 op 제한, 오프라인 컴파일(Vela) 필요 |
+| SoC DSP/NPU | Qualcomm Hexagon 등 | 매우 높음 | 큰 모델 가능 | SoC를 깨워야 함(전력 큼), 벤더 툴체인 |
+
+수치는 설계 초기 감을 잡는 용도다. 실제는 메모리 대역폭, 레이어 모양, 캐시에 따라 크게 달라지므로 **반드시 타깃에서 측정**한다.
+
+### 6.2 CMSIS-NN
+
+Arm이 제공하는 int8/int16 신경망 커널 라이브러리다. `arm_convolve_s8`, `arm_depthwise_conv_s8`, `arm_fully_connected_s8` 같은 함수가 있고, 코어에 따라 DSP 확장 또는 Helium 명령을 쓴다. TFLM은 빌드 옵션으로 CMSIS-NN 커널을 끼운다.
+
+```sh
+# TFLM 저장소 루트에서 (Makefile 빌드 예시)
+make -f tensorflow/lite/micro/tools/make/Makefile \
+  TARGET=cortex_m_generic TARGET_ARCH=cortex-m4+fp \
+  OPTIMIZED_KERNEL_DIR=cmsis_nn microlite
+```
+
+같은 모델이라도 reference 커널 대비 CMSIS-NN 커널이 몇 배 빠른 것이 보통이다. 펌웨어 엔지니어의 첫 번째 "공짜 최적화"다. 단, 결과가 reference와 bit-exact인지 테스트로 확인한다(CMSIS-NN은 TFLite reference와 일치하도록 설계되어 있다).
+
+### 6.3 Ethos-U NPU 흐름
+
+```
+float 모델 ─(TF 변환기, int8 PTQ/QAT)─► model.tflite
+          ─(Vela 컴파일러)─► model_vela.tflite
+                              ├─ NPU가 지원하는 연속 op들 → 하나의 "ethos-u" custom op (명령 스트림)
+                              └─ 지원 안 되는 op → 그대로 남아 CPU(TFLM/CMSIS-NN)에서 실행
+런타임: TFLM + resolver.AddEthosU() + Ethos-U 드라이버(IRQ, 캐시, 메모리 영역 설정)
+```
+
+펌웨어 관점에서 챙길 것:
+
+- **fallback op**: Vela 리포트에서 CPU로 떨어진 op를 확인한다. NPU와 CPU를 왔다 갔다 하면 그 경계마다 데이터 이동이 생겨 느려진다. ML 팀에 "이 op를 NPU 지원 op로 바꿔 달라"고 요청하는 것이 협업의 핵심이다.
+- **메모리 영역**: NPU는 AXI 마스터로 직접 메모리를 읽는다. 가중치가 flash(느림)에 있는지 SRAM(빠름)에 있는지에 따라 성능이 크게 바뀐다. 캐시가 있는 시스템에서는 CPU가 쓴 입력을 NPU가 읽기 전에 clean해야 한다(9절).
+- **전력**: NPU는 추론할 때만 켜고 끝나면 power gating. 켜고 끄는 시간까지 레이턴시 예산에 넣는다.
+
+### 6.4 Ambiq 같은 초저전력 MCU
+
+Ambiq Apollo 계열은 subthreshold 공정으로 active 전류를 크게 낮춘 MCU로, 세대에 따라 Cortex-M4F(Apollo4 등) 또는 Helium이 있는 Cortex-M55(Apollo5 계열)를 쓴다(정확한 코어·메모리 크기는 제품마다 다르므로 데이터시트 확인). Ambiq은 자체 SDK와 TFLM 포트, 모델 예제를 제공한다. 핵심 개념은 같다: **MRAM/flash에 가중치, SRAM에 arena, DMA로 오디오, 쓰지 않는 SRAM bank는 끄기.**
+
+> **Don 경험과 연결**: SSD 컨트롤러의 HW 가속기(ECC, 암호화 엔진)에 작업을 넘기고 FW는 디스크립터와 완료 인터럽트만 관리하던 것과 같다. NPU도 "명령 스트림 + 메모리 영역 + IRQ + 캐시 관리"라는 드라이버 문제다.
+
+---
+
+## 7. 메모리 예산
+
+### 7.1 무엇이 어디에 가나
+
+| 항목 | 성격 | 보통 위치 | 크기 감 (작은 KWS 예시) |
+|---|---|---|---|
+| 모델 가중치 + 그래프 | 읽기 전용, 큼 | 내부 flash/MRAM (XIP) 또는 외부 QSPI/OSPI flash | 수십 KB (micro_speech급은 약 20KB 수준) |
+| tensor arena | 읽기/쓰기, 매 추론 | 내부 SRAM (가능하면 TCM) | 수~수십 KB |
+| 특징 행렬 | 읽기/쓰기 | SRAM | 49 × 40 = 1,960 B |
+| 오디오 DMA 버퍼 | DMA 쓰기 | SRAM (DMA가 접근 가능한 bank) | 2 × 640 B |
+| pre-roll 링버퍼 | 계속 덮어씀 | SRAM | 1~2초 = 32~64KB |
+| FFT 작업 버퍼 | 임시 | SRAM (arena와 시간 분리 가능) | 수 KB |
+| TFLM 코드 + 커널 | 코드 | flash | 수십 KB (등록한 op 수에 비례) |
+| RTOS, 스택, BLE 등 나머지 | | | 나머지 전부 |
+
+### 7.2 메모리 맵 예시 (가상의 MCU: 2MB flash, 512KB SRAM)
+
+```
+0x0000_0000 ┌───────────────────────────┐  내부 flash / MRAM (XIP)
+            │ bootloader (MCUboot 등)    │
+            │ app: .text  (RTOS, BLE,   │
+            │      TFLM, CMSIS-NN)      │
+            │ app: .rodata              │
+            │   g_kws_model[] 64KB ◄────┼── 가중치: 읽기만 하므로 flash에서 직접 실행/읽기
+            │ OTA slot B / model slot   │
+0x0020_0000 └───────────────────────────┘
+
+0x1000_0000 ┌───────────────────────────┐  TCM / 빠른 SRAM (예: 64KB)
+            │ g_arena[] 40KB   ◄────────┼── 매 추론 수백만 번 접근: 가장 빠른 메모리에
+            │ ISR 스택, hot 코드(옵션)    │
+            └───────────────────────────┘
+0x2000_0000 ┌───────────────────────────┐  일반 SRAM (DMA 접근 가능)
+            │ 오디오 DMA ping-pong 1.3KB │
+            │ pre-roll 링버퍼 64KB       │
+            │ BLE 스택 / RTOS heap       │
+            │ task 스택들                │
+            │ (미사용 bank → 전원 끔)     │  ← retention 끄면 deep sleep 전류 감소
+            └───────────────────────────┘
+```
+
+주소와 크기는 설명용 가상 값이다. 실제로는 링커 스크립트에 섹션을 정의하고 배치한다.
+
+```ld
+MEMORY
+{
+  FLASH (rx)  : ORIGIN = 0x00000000, LENGTH = 2048K
+  TCM   (rwx) : ORIGIN = 0x10000000, LENGTH = 64K
+  SRAM  (rwx) : ORIGIN = 0x20000000, LENGTH = 448K
+}
+
+SECTIONS
+{
+  .tensor_arena (NOLOAD) : ALIGN(16)
+  {
+    *(.tensor_arena)
+  } > TCM
+}
+```
+
+```cpp
+// C++ 쪽: arena를 위 섹션에 배치 (NOLOAD라 부팅 시 0 초기화 비용도 없다)
+alignas(16) __attribute__((section(".tensor_arena"))) uint8_t g_arena[40 * 1024];
+```
+
+`NOLOAD`는 startup 코드가 이 영역을 복사/초기화하지 않게 한다. arena는 `AllocateTensors()`가 채우므로 초기값이 필요 없다.
+
+### 7.3 flash XIP vs SRAM에 가중치 두기
+
+| 선택 | 장점 | 단점 | 언제 |
+|---|---|---|---|
+| 내부 flash XIP | SRAM 0 사용, 부팅 즉시 사용 | flash wait state로 느릴 수 있음(캐시/prefetch로 완화) | 대부분의 MCU KWS |
+| 외부 QSPI/OSPI flash XIP | 큰 모델 가능 | 대역폭 낮음, 외부 flash 전력 | 큰 모델, 가끔만 실행 |
+| 부팅 시 SRAM으로 복사 | 가장 빠름 | SRAM 소모, 복사 시간, retention 전력 | 작고 매우 자주 도는 레이어 |
+| 필요할 때 SRAM으로 streaming(DMA) | SRAM 절약 + 속도 절충 | 구현 복잡, 레이어별 DMA 스케줄링 | NPU 시스템에서 흔함 |
+
+### 7.4 모델 residency
+
+"모델이 어디에, 언제 올라와 있나"를 결정하는 것이 residency다.
+
+- **항상 상주(always resident)**: wake word 모델. 가중치는 flash에, arena는 전용 SRAM. deep sleep 중에도 arena의 persistent 영역은 retention하거나, 깨어날 때 `AllocateTensors()`를 다시 부른다(무엇이 더 싼지는 측정해서 결정: retention 전류 vs 재초기화 cycle).
+- **필요할 때 로드(on demand)**: 2단계 검증 모델, 제스처 모델 등. arena를 여러 모델이 **시간적으로 나눠 쓰는** 설계가 가능하다(동시에 두 모델을 돌리지 않는다는 보장이 필요).
+- **SoC로 이관**: MCU에 안 들어가는 모델은 SoC가 맡는다. 결정 기준은 "호출 빈도 × SoC 깨우는 에너지"다.
+
+### 7.5 예산 협상 예시
+
+AI 팀: "새 KWS 모델은 가중치 180KB, arena 96KB가 필요하다." 펌웨어는 이렇게 답한다.
+
+1. 현재 SRAM 여유: 512KB − (BLE 110KB + RTOS/스택 60KB + 오디오 70KB + 기타 40KB) = 232KB. arena 96KB는 들어가지만 TCM(64KB)에는 안 들어가 일반 SRAM에 가야 한다 → 측정 결과 cycle이 약 X% 증가(숫자는 측정으로).
+2. 가중치 180KB는 flash XIP로 가능. OTA slot 크기도 함께 늘려야 하는지 확인.
+3. 제안: arena가 64KB 이하가 되도록 가장 큰 activation 레이어의 채널 수를 줄여 줄 수 있는가? 또는 pre-roll을 2초 → 1.5초로 줄여 16KB 확보.
+
+이처럼 **"안 된다"가 아니라 숫자와 대안을 주는 것**이 JD의 "support model inference within memory and latency budgets"의 실제 의미다.
+
+---
+
+## 8. 레이턴시 예산과 프로파일링
+
+### 8.1 예산 세우기
+
+KWS의 레이턴시는 두 종류다.
+
+- **처리량 제약(real-time)**: 20ms마다 오는 프레임을 평균 20ms 안에 처리해야 한다. 넘으면 overrun.
+- **응답 레이턴시(사용자 체감)**: wake word를 말한 끝에서 기기가 반응하기까지. 예를 들어 300ms 목표라면 = 후처리 smoothing 창 + 추론 + SoC wake + UI 반응.
+
+```
+20ms 프레임 예산 (가상의 Cortex-M4F @ 96MHz = 1,920,000 cycles / 20ms)
+┌──────────────────────────────────────────────────────────────┐
+│ 특징 추출 (FFT 512 + mel)          ~ 0.15M cycles  ████        │
+│ Invoke() (예: 5M MAC 모델, N프레임마다 1번 → 프레임당 환산)      │
+│                                     ~ 1.0M cycles  █████████████████████ │
+│ BLE / 기타 task 여유 (최소 20~30%)  ~ 0.5M cycles  ██████████   │
+│ idle → sleep                        나머지                    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+숫자는 예시다. 계산 방법이 중요하다.
+
+```
+필요 cycle ≈ MAC 수 ÷ (사이클당 유효 MAC)
+예) 5,000,000 MAC ÷ 1 MAC/cycle(가정, CMSIS-NN on M4) = 5M cycles
+    96MHz에서 5M cycles = 52ms  → 매 20ms 추론은 불가
+    대안: ① 추론을 매 프레임이 아니라 3프레임(60ms)마다 → 평균 17ms/20ms, 여유 부족
+          ② 클럭을 192MHz로 → 26ms, 3프레임마다면 여유 충분 (대신 active 전력 증가)
+          ③ 모델 MAC를 절반으로 (ML 팀과 협상)
+          ④ Helium/NPU 코어로 이동
+```
+
+또 한 가지: **추론 주기를 늘리면 응답 레이턴시가 늘어난다.** 60ms마다 추론하면 최악의 경우 60ms 늦게 감지한다. 이런 trade-off를 표로 만들어 제품/AI 팀과 결정한다.
+
+### 8.2 DWT CYCCNT로 cycle 측정
+
+Cortex-M3/M4/M7/M33/M55 등(ARMv7-M, ARMv8-M Mainline)은 DWT 유닛에 32비트 cycle 카운터 `CYCCNT`가 있다. **Cortex-M0/M0+(ARMv6-M)와 M23에는 없다** — 그때는 SysTick이나 하드웨어 타이머를 쓴다.
+
+```c
+#include <stddef.h>
+#include <stdint.h>
+#include "device.h"   /* 벤더 디바이스 헤더: core_cm4.h 등 CMSIS-Core 포함 */
+
+static inline void cyccnt_init(void)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;   /* DWT/ITM 블록 전원·클럭 enable */
+#if defined(__CORTEX_M) && (__CORTEX_M == 7U)
+    DWT->LAR = 0xC5ACCE55u;   /* 일부 Cortex-M7 구현은 DWT 소프트웨어 lock 해제 필요 (구현마다 다름) */
+#endif
+    DWT->CYCCNT = 0u;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;              /* 카운터 시작 */
+}
+
+static inline uint32_t cyccnt_now(void) { return DWT->CYCCNT; }
+
+/* 사용 예 */
+extern int kws_run(const int8_t *f, size_t n, int8_t *s, size_t ns);  /* 5.3절 */
+
+uint32_t profile_invoke(const int8_t *feat, size_t n, int8_t *scores, size_t ns)
+{
+    uint32_t t0 = cyccnt_now();
+    (void)kws_run(feat, n, scores, ns);
+    uint32_t dt = cyccnt_now() - t0;   /* unsigned 뺄셈이라 한 번의 wrap-around는 자동 처리 */
+    return dt;                          /* 초 = dt / SystemCoreClock */
+}
+```
+
+- `CoreDebug->DEMCR`의 `TRCENA` 비트: DWT와 ITM을 켜는 스위치. 디버거가 붙어 있으면 이미 켜져 있어서 "디버거 있을 땐 되는데 단독 실행하면 CYCCNT가 0"이라는 버그가 흔하다. 코드에서 직접 켜야 한다.
+- CMSIS 6부터는 `CoreDebug`가 deprecated이고 `DCB->DEMCR`와 `DCB_DEMCR_TRCENA_Msk`를 쓴다. 쓰는 CMSIS 버전의 헤더를 확인한다.
+- `DWT->LAR`: Cortex-M7 일부 구현에서 DWT 레지스터가 잠겨 있어 먼저 `0xC5ACCE55`를 써야 한다. 모든 칩에 필요하지는 않다(벤더마다 다름).
+- 32비트 카운터는 96MHz에서 약 44.7초마다 wrap된다. 짧은 구간 측정에서는 unsigned 뺄셈이 wrap을 한 번까지 처리해 준다.
+- 주의: **CYCCNT는 코어가 sleep(WFI)하는 동안 멈추거나 동작이 구현마다 다르다.** 추론 시간 측정에는 문제없지만 "wall-clock"으로 쓰면 안 된다.
+
+### 8.3 GPIO 토글 + 스코프 (Don이 가장 잘하는 방법)
+
+cycle 카운터 말고도, `Invoke()` 앞뒤로 GPIO를 올렸다 내리고 로직 분석기나 스코프로 보면 **주기, jitter, 다른 인터럽트와의 겹침**이 한눈에 보인다. 전류 프로브를 같이 걸면 "추론 1회당 에너지(µJ)"를 직접 잴 수 있다.
+
+```
+GPIO_INFER  ____|‾‾‾‾‾‾‾‾‾‾‾‾‾|__________________|‾‾‾‾‾‾‾‾‾‾‾‾‾|______
+GPIO_FEAT   _|‾‾|________________|‾‾|____________|‾‾|____________
+I_core      ‾‾‾‾███████████████‾‾‾‾‾▁▁▁▁▁▁▁▁▁▁▁▁▁▁███████████████▁▁▁
+               ◄── 12ms ───►        sleep 전류       에너지 = ∫ V·I dt
+            0ms                     20ms                             40ms
+```
+
+### 8.4 흔한 함정
+
+- 첫 번째 `Invoke()`만 재고 판단하는 것. 캐시가 차갑다(cold). 수십 번 돌린 평균과 최악값(worst case)을 같이 본다.
+- 디버그 빌드(-O0)로 측정하는 것. 최적화 레벨에 따라 몇 배 차이가 난다. 양산 빌드 옵션으로 잰다.
+- 인터럽트를 끈 채 측정해서 실제보다 좋게 나오는 것. 실제 조건(BLE 연결 중 등)에서 최악값을 잰다.
+
+---
+
+## 9. 캐시와 DMA coherency
+
+Cortex-M7/M55/M85처럼 D-cache가 있는 코어에서는 DMA와 CPU가 같은 메모리를 볼 때 **캐시가 거짓말을 할 수 있다.**
+
+```
+[DMA → 메모리 → CPU] 방향 (오디오 수신)
+  DMA가 SRAM에 새 샘플을 씀  ──►  CPU가 읽음  ──►  캐시에 옛날 값이 있으면 옛날 값을 읽는다!
+  해결: 읽기 전에 해당 주소 범위를 invalidate
+
+[CPU → 메모리 → DMA/NPU] 방향 (NPU 입력, SPI 송신)
+  CPU가 씀 (write-back 캐시에만 있고 SRAM엔 아직 없음) ──► DMA/NPU가 SRAM을 읽음 → 옛날 값!
+  해결: DMA 시작 전에 clean
+```
+
+```c
+#include "device.h"   /* core_cm7.h 포함 */
+
+/* DMA가 방금 채운 절반을 CPU가 읽기 전 */
+void audio_half_ready(int16_t *half, uint32_t bytes)
+{
+    SCB_InvalidateDCache_by_Addr((void *)half, (int32_t)bytes);   /* 32B 정렬·배수여야 안전 */
+    /* 이제 half[]를 읽는다 */
+}
+
+/* CPU가 만든 입력을 NPU/DMA가 읽기 전 */
+void npu_input_ready(int8_t *in, uint32_t bytes)
+{
+    SCB_CleanDCache_by_Addr((void *)in, (int32_t)bytes);
+    /* 이제 NPU/DMA 시작 */
+}
+```
+
+- invalidate는 **캐시 라인(Cortex-M7은 32바이트) 단위**로 동작한다. 버퍼가 라인 경계에 정렬되어 있지 않으면 옆에 있던 변수의 dirty 데이터까지 버려진다. 그래서 2.3절에서 `aligned(32)`와 32바이트 배수 크기를 썼다.
+- 간단한 대안: DMA 버퍼를 MPU로 non-cacheable 영역에 두거나, 캐시가 적용되지 않는 TCM에 둔다. 성능과 단순함의 trade-off다.
+- 가중치를 flash XIP로 읽을 때 I/D-cache가 켜져 있는지에 따라 추론 속도가 크게 달라진다. bring-up 때 캐시 enable 여부를 가장 먼저 확인한다.
+
+> **Don 경험과 연결**: Cortex-R8 SSD FW에서 호스트 DMA 버퍼의 cache maintenance를 다뤘다면 완전히 같은 문제다. 면접에서 "DMA + 캐시" 버그 경험을 이야기하면 ML 경험이 없어도 이 영역의 신뢰를 얻는다.
+
+---
+
+## 10. SoC + MCU 분담과 깨우기 프로토콜
+
+### 10.1 누가 무엇을 하나 (예시 구조)
+
+| 기능 | MCU (always-on) | SoC (on-demand) |
+|---|---|---|
+| 마이크 캡처, pre-roll | 항상 | 깨어난 뒤 인수 |
+| 1단계 KWS | 항상 | — |
+| 2단계 검증, ASR | — | 깨어난 뒤 |
+| 센서 허브(IMU 제스처 등) | 항상 | 결과만 받음 |
+| 전원 상태 결정 | SoC를 깨우는 주체 | 다시 잠드는 결정 |
+
+### 10.2 깨우기 시퀀스
+
+```
+MCU                                     SoC
+ │ KWS 점수 > threshold (N프레임 연속)      │ (suspend, 수 mW)
+ │── WAKE GPIO ↑ ───────────────────────►│ wake IRQ → resume 시작
+ │   pre-roll 계속 쌓음                    │ (resume 수십~수백 ms, SoC마다 다름)
+ │◄─────────────────── READY (IPC/GPIO) ─│
+ │── pre-roll 1.5s + 이후 실시간 스트림 ──►│ SPI/I2S/공유메모리
+ │                                       │ 2단계 KWS 검증
+ │◄──────────── REJECT (false wake) ─────│ → 다시 suspend, MCU는 계속 청취
+ │   또는 ACCEPT → 대화 세션, MCU는 스트리밍 유지
+```
+
+설계 포인트:
+
+- **pre-roll이 필요한 이유**: SoC가 깨어나는 동안 사용자는 이미 말을 계속하고 있다. wake word 자체와 바로 뒤의 명령("... 날씨 알려줘")을 잃지 않으려면 MCU가 과거 1~2초를 들고 있다가 넘겨야 한다.
+- **timeout과 재시도**: SoC가 READY를 안 주면? MCU는 일정 시간 후 WAKE를 내리고 에러 카운터를 올린다. SoC가 hang된 경우 MCU가 SoC를 리셋할 권한이 있는지도 설계 항목이다.
+- **false wake 통계**: 하루 몇 번 SoC를 깨웠고 몇 번 reject됐는지 telemetry로 남긴다. 이게 1단계 threshold 튜닝과 배터리 수명 추정의 근거가 된다.
+- **wake 레이턴시 예산**: 사용자가 느끼는 반응 = MCU 감지 지연 + SoC resume + 2단계 추론. SoC resume이 가장 크므로, MCU 쪽 수 ms 최적화보다 SoC resume 경로가 더 중요할 때가 많다.
+
+### 10.3 전력 관점
+
+1단계를 MCU에서 하는 이유를 숫자로 말할 수 있어야 한다. 예를 들어(가상의 수치) MCU KWS가 평균 1mW, SoC를 계속 켜 두는 것이 100mW라면, false wake가 하루 20번 × 2초씩이어도 SoC 추가 에너지는 작다. 반대로 threshold를 낮춰 false wake가 시간당 수십 번이 되면 MCU 분담의 이점이 사라진다. 이 계산은 C05(저전력) 노트의 배터리 수명 계산과 연결된다.
+
+---
+
+## 11. 펌웨어 엔지니어 vs ML 엔지니어 역할 경계
+
+| 영역 | ML 엔지니어 | 펌웨어 엔지니어 | 함께 |
+|---|---|---|---|
+| 데이터·학습 | 데이터 수집, 모델 구조, 학습, 정확도 | 기기에서 녹음한 실제 데이터 수집 경로 제공 | 기기 마이크 특성 반영 |
+| 양자화 | PTQ/QAT, calibration | 타깃 지원 dtype/op 목록 제공 | 정확도 vs 크기 결정 |
+| 특징 추출 | 학습용 Python 구현 | C 구현, bit-exact 검증 | golden 벡터 합의 |
+| 런타임 | — | TFLM/벤더 런타임 통합, op resolver, arena, 커널 선택 | op 지원 범위 |
+| 성능 | 모델 MAC 수 | cycle/에너지 측정, 레이어별 프로파일 리포트 | 예산 표 유지 |
+| 시스템 | — | DMA, RTOS task, 전력 상태, SoC wake, IPC | 레이턴시 목표 |
+| 배포 | 모델 버전 | 모델 OTA, 스키마·op 버전 검사, 롤백 | 호환성 정책 |
+| 양산 | — | factory에서 마이크 calibration, KWS self-test | 필드 정확도 모니터링 |
+
+한 문장으로: **ML 엔지니어는 "무엇을 계산할지", 펌웨어 엔지니어는 "그 계산을 이 하드웨어에서 제시간에, 적은 전력으로, 안전하게 돌리는 방법"을 책임진다.** 경계에서 가장 흔한 갈등은 "PC에서는 정확도 95%인데 기기에서는 88%"이고, 원인은 대개 특징 추출 skew, 마이크 게인/calibration, 양자화, 실제 소음 환경 중 하나다. 펌웨어는 이 중 앞의 둘을 데이터로 배제해 줄 수 있어야 한다.
+
+---
+
+## 12. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| tensor arena를 함수 지역 변수로 선언 | 부팅 직후 HardFault 또는 랜덤 오동작 | 수십 KB가 task 스택에 올라가 오버플로 | 정적/전역 + 전용 섹션 배치 |
+| arena 크기를 추측으로 고정 | `AllocateTensors()` 실패, 또는 SRAM 낭비 | 실제 사용량 미측정 | `arena_used_bytes()` 측정 후 여유분 추가 |
+| 모델에 있는 op를 resolver에 등록 안 함 | 초기화 실패, 로그에 op 이름 | 모델 업데이트 후 새 op 추가 | 모델 OTA 전 CI에서 resolver 검증 |
+| 입력 양자화 파라미터 무시 | 추론은 도는데 결과가 항상 같은 class | float 특징을 그냥 캐스팅 | `params.scale`/`zero_point`로 변환 |
+| C 특징 추출이 Python과 미묘하게 다름 | 기기 정확도만 몇 % 낮음 | training/serving skew | golden 벡터 bit-exact 테스트 |
+| DMA 버퍼 캐시 관리 누락 | 가끔 오디오에 이전 조각이 섞임, 정확도 저하 | stale cache line | invalidate/clean, 32B 정렬, 또는 non-cacheable |
+| ISR에서 추론 호출 | BLE 끊김, 다른 인터럽트 지연 | 수 ms짜리 ISR | ISR은 알림만, 처리는 task |
+| TRCENA를 코드에서 안 켬 | 디버거 없을 때 CYCCNT가 0 | 디버거가 대신 켜 줬던 것 | 초기화에서 DEMCR.TRCENA 설정 |
+| reference 커널로 빌드 | 예산 초과, 배터리 급감 | 최적화 커널 미사용 | CMSIS-NN/NPU 경로로 빌드 |
+| 추론 주기를 늘려 예산을 맞춤 | 응답 느림, 짧은 단어 놓침 | 레이턴시 trade-off 무시 | 표로 정리해 제품 결정으로 |
+
+---
+
+## 13. 면접에서 이렇게 말한다
+
+**Q.** How would you fit a keyword-spotting model on an MCU with a tight memory budget?
+
+**A.** 가중치는 읽기 전용이니 flash XIP에 두고 SRAM은 쓰지 않는다. SRAM에는 tensor arena만 두는데, 크기는 추측하지 않고 `AllocateTensors()` 뒤 `arena_used_bytes()`로 재서 여유분만 더한다. arena는 activation의 수명이 겹치지 않으면 재사용되므로 "가장 큰 연속 레이어 쌍"이 크기를 결정한다. 그래도 넘치면 ML 팀과 그 레이어 채널 수를 줄이거나, pre-roll 버퍼 같은 다른 사용처를 줄인다.
+
+**English**: I keep the weights in flash and execute them in place, so they cost no SRAM. The only big SRAM user is the tensor arena, and I size it by measurement: call AllocateTensors, read arena_used_bytes, add a small margin. Because the planner reuses buffers whose lifetimes don't overlap, the arena is set by the largest pair of adjacent activations, so if it doesn't fit, I go back to the ML team with that specific layer and a number.
+
+**Q.** Explain INT8 quantization to me like I'm a firmware engineer.
+
+**A.** 실수 r을 `r = scale × (q − zero_point)`로 int8 q에 매핑한다. 가중치는 zero_point 0인 symmetric per-channel, activation은 asymmetric per-tensor. 레이어 안에서는 int8 × int8을 int32로 누적하고, 레이어 끝에서 미리 계산한 fixed-point 배율과 shift로 한 번 requantize해서 다시 int8로 만든다. 메모리 4배 절감, SIMD MAC 사용, NPU 호환이 이유다.
+
+**English**: Each real value is represented as scale times (q minus zero point). Weights are symmetric per channel, activations are asymmetric per tensor. Inside a layer everything is int8 multiply, int32 accumulate; at the end of the layer there's one requantization step, a fixed-point multiply and a shift that were precomputed offline. So it's pure integer math: four times less memory, SIMD MACs on the CPU, and it's what NPUs like Ethos-U require.
+
+**Q.** The model is 95% accurate on the PC but only 88% on the device. How do you debug it?
+
+**A.** 먼저 입력을 의심한다. 같은 WAV를 기기 특징 추출기와 Python 특징 추출기에 넣고 int8 특징을 비교한다(training/serving skew). 다음은 입력 양자화 파라미터 적용이 맞는지, 그다음 마이크 게인·샘플레이트(스코프로 PDM CLK 확인)·DMA overrun 카운터를 본다. 이게 다 깨끗하면 기기에서 녹음한 실제 오디오를 ML 팀에 넘겨 도메인 차이인지 판단하게 한다.
+
+**English**: I suspect the input pipeline before the model. First I feed the same WAV files through the Python front end and the on-device C front end and diff the int8 features frame by frame. Then I check that the input quantization parameters are applied, that the sample rate is really 16 kHz on the scope, and that the DMA overrun counter is zero. Only when the features are bit-exact do I hand real device recordings to the ML team to look at domain mismatch.
+
+**Q.** How do you measure inference latency and where the time goes?
+
+**A.** Cortex-M4 이상이면 DWT CYCCNT를 켜서(DEMCR.TRCENA, CYCCNTENA) `Invoke()` 앞뒤를 잰다. 레이어별로는 TFLM `MicroProfiler`를 cycle 카운터에 연결한다. 실제 시스템 동작은 GPIO 토글 + 로직 분석기, 에너지는 전류 프로브를 같이 걸어 추론 1회당 µJ로 본다. 최적화 빌드, warm cache, BLE 등 실제 부하가 있는 상태에서 평균과 최악값을 모두 기록한다.
+
+**English**: For cycle counts I enable the DWT cycle counter and bracket Invoke. For per-layer breakdown I plug the cycle counter into TFLM's MicroProfiler. For system behavior I toggle a GPIO around inference and look at it on a logic analyzer next to the other interrupts, and with a current probe I get energy per inference. I always measure the release build under realistic load and report both average and worst case.
+
+**Q.** Why run wake word on an MCU instead of the main SoC?
+
+**A.** 전력이다. always-on 경로는 하루 24시간 도니까 평균 전력이 배터리 수명을 결정한다. MCU는 수백 µW~1mW대로 들을 수 있지만 SoC는 깨어 있기만 해도 수십~수백 mW다. 그래서 MCU가 1단계로 recall 높게 거르고, SoC는 깨어난 뒤 큰 모델로 2단계 검증을 한다. MCU는 pre-roll을 들고 있다가 넘겨서 wake word와 명령을 잃지 않게 한다.
+
+**English**: It's an energy argument. The always-on path runs 24/7, so its average power dominates battery life. An MCU can listen for well under a milliwatt, while an application SoC burns tens to hundreds of milliwatts just being awake. So the MCU does a high-recall first stage, wakes the SoC over a GPIO, and streams a pre-roll buffer so the SoC's larger second-stage model can verify the keyword without losing the start of the command.
+
+**Q.** What's your role versus the ML engineer's when deploying a model?
+
+**A.** ML 엔지니어는 무엇을 계산할지(구조, 학습, 양자화, 정확도), 나는 그걸 이 하드웨어에서 제시간에 적은 전력으로 안전하게 돌리는 것(런타임 통합, 메모리 배치, DMA, 스케줄링, 전력 상태, 모델 OTA)을 맡는다. 경계에서 내가 주는 것은 op 지원 목록, 메모리·cycle 예산표, 레이어별 프로파일, bit-exact 특징 검증이다.
+
+**English**: The ML engineer owns what gets computed: architecture, training, quantization and accuracy. I own running it on this hardware on time, within power, and safely: runtime integration, memory placement, DMA and scheduling, power states, and model updates. At the boundary I give them concrete inputs: the supported op list, a memory and cycle budget table, per-layer profiles, and a bit-exact check of the feature front end.
+
+**Q.** I have no ML runtime experience — how would I say that? (Don 본인용)
+
+**A.** 숨기지 않고 전이 가능한 부분을 붙인다: "양산 FW에서 SRAM 예산, 정적 buffer pool, DMA와 캐시 관리, cycle 단위 성능 튜닝을 했다. 모델 추론은 그 위에 올라가는 워크로드이고, TFLM으로 KWS 예제를 올려 arena와 cycle을 측정해 봤다."
+
+**English**: I haven't shipped an ML runtime, but the hard parts are the ones I've done for years in production firmware: fixed SRAM budgets, static buffer pools, DMA with cache maintenance, and cycle-level performance tuning. To close the gap I brought up TensorFlow Lite Micro's keyword-spotting example on a Cortex-M board and measured the arena and the per-layer cycles myself.
+
+---
+
+## 14. 직접 해보기
+
+### 실습 1: TFLM `hello_world`를 PC에서 돌리고 arena 측정
+
+```sh
+git clone https://github.com/tensorflow/tflite-micro.git
+cd tflite-micro
+make -f tensorflow/lite/micro/tools/make/Makefile test_hello_world_test
+# 예제 코드(tensorflow/lite/micro/examples/hello_world/)를 열어
+# AllocateTensors() 뒤에 arena_used_bytes()를 MicroPrintf로 출력하도록 바꾸고 다시 빌드
+```
+
+목표: 인터프리터 생성 → `AllocateTensors()` → `Invoke()` 흐름을 코드로 한 번 따라가 보고, arena를 일부러 줄여 실패 로그를 본다.
+
+### 실습 2: `micro_speech`를 Cortex-M 에뮬레이터/보드에서
+
+```sh
+# 저장소 안의 micro_speech 예제 테스트를 호스트에서
+make -f tensorflow/lite/micro/tools/make/Makefile test_micro_speech_test
+# Cortex-M 타깃으로 라이브러리 빌드 (CMSIS-NN 커널 사용)
+make -f tensorflow/lite/micro/tools/make/Makefile \
+  TARGET=cortex_m_generic TARGET_ARCH=cortex-m4+fp OPTIMIZED_KERNEL_DIR=cmsis_nn microlite
+```
+
+목표: reference 빌드와 CMSIS-NN 빌드의 코드 크기(`arm-none-eabi-size`)와, 보드가 있다면 `Invoke()` cycle을 비교한다. 보드가 없다면 Arm의 Corstone-300 FVP(`TARGET=cortex_m_corstone_300`)로 Cortex-M55 + Ethos-U55 환경을 무료로 시뮬레이션할 수 있다(TFLM 문서 참고).
+
+### 실습 3: DWT 프로파일링 + GPIO 토글 (nRF52840 DK + Zephyr)
+
+```sh
+west init -m https://github.com/zephyrproject-rtos/zephyr zp && cd zp && west update
+# Zephyr는 TFLM을 optional module로 제공한다
+west config manifest.project-filter -- +tflite-micro && west update
+west build -b nrf52840dk/nrf52840 samples/modules/tflite-micro/hello_world
+west flash
+```
+
+목표: 샘플의 `Invoke()` 앞뒤에 8.2절 `cyccnt_init()`/`cyccnt_now()`와 GPIO 토글을 넣고, 로직 분석기로 주기를 본다. (nRF52840은 Cortex-M4F라 CYCCNT가 있다. 보드 이름 형식은 Zephyr 버전에 따라 `nrf52840dk_nrf52840`일 수 있다.)
+
+### 실습 4: 양자화 손계산 스크립트
+
+Python으로 [−2, 6] 범위 텐서의 scale/zero_point를 계산하고, 4.5절 `requantize()` C 코드를 PC에서 컴파일해 float 결과와 비교한다. 오차 분포를 보면 "양자화 오차 = ±scale/2"가 몸에 익는다.
+
+---
+
+## 15. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| KWS | Keyword Spotting | wake word 등 정해진 단어를 찾는 작은 분류 모델 |
+| pre-roll | 사전 녹음 버퍼 | 감지 이전 1~2초 오디오. SoC에 넘겨 앞부분 손실 방지 |
+| log-mel | 로그 멜 스펙트럼 | FFT 파워를 mel 필터로 묶고 log 취한 음성 특징 |
+| training/serving skew | 학습/실행 불일치 | 학습 때와 기기에서 입력 처리 방식이 달라 정확도 저하 |
+| scale / zero_point | 양자화 파라미터 | `r = scale × (q − zero_point)` |
+| per-channel | 채널별 양자화 | conv 출력 채널마다 다른 scale |
+| requantization | 재양자화 | int32 누산을 fixed-point 곱과 shift로 int8로 되돌림 |
+| PTQ / QAT | 학습 후 / 학습 중 양자화 | 간단함 vs 정확도 |
+| TFLM | TensorFlow Lite for Microcontrollers | malloc 없는 MCU용 TFLite 인터프리터 |
+| tensor arena | 텐서 메모리 풀 | 사용자가 준 정적 배열, 모든 텐서가 여기 배치 |
+| op resolver | 연산자 등록기 | 모델이 쓰는 커널만 링크하도록 등록 |
+| MicroInterpreter | TFLM 인터프리터 | 모델 + resolver + arena로 추론 실행 |
+| CMSIS-NN | Arm NN 커널 라이브러리 | Cortex-M용 최적화 int8/int16 커널 |
+| CMSIS-DSP | Arm DSP 라이브러리 | FFT, 필터, 행렬 등 |
+| Helium (MVE) | M-profile Vector Extension | Cortex-M55/M85의 128비트 SIMD |
+| Ethos-U | Arm micro NPU | Cortex-M 옆에 붙는 int8/int16 가속기 |
+| Vela | Ethos-U 컴파일러 | tflite 모델을 NPU 명령 스트림으로 변환 |
+| XIP | Execute In Place | flash에서 복사 없이 직접 읽기/실행 |
+| residency | 상주 정책 | 모델을 언제, 어느 메모리에 올려 두나 |
+| DWT CYCCNT | cycle 카운터 | DWT의 32비트 코어 클럭 카운터 |
+| MAC | Multiply-Accumulate | 신경망 연산량의 기본 단위 |
+| false accept / reject | 오인식 / 놓침 | KWS 품질 지표, threshold로 trade-off |
+
+---
+
+## 16. 요약 & 체크리스트
+
+온디바이스 추론에서 펌웨어의 일은 모델을 만드는 것이 아니라 모델이 사는 집을 만드는 것이다. 오디오는 DMA ping-pong으로 끊김 없이 받고, 특징 추출은 학습 코드와 bit-exact로 맞추고, 모델은 INT8로 양자화되어 가중치는 flash에서 XIP로, activation은 SRAM의 정적 tensor arena에서 재사용된다. TFLM은 `GetModel` → `MicroMutableOpResolver` → `MicroInterpreter` → `AllocateTensors` → `Invoke` 순서이고, arena 크기는 `arena_used_bytes()`로 측정한다. 레이턴시는 "프레임 주기 안에 끝나는가"와 "사용자가 느끼는 반응"의 두 예산으로 나누고, DWT CYCCNT와 GPIO 토글로 측정한다. 캐시가 있으면 DMA/NPU 버퍼의 clean/invalidate를 잊지 않는다. MCU는 1단계 KWS와 pre-roll을 맡고 SoC를 깨운다. 이 모든 것을 숫자로 AI 팀과 협상하는 것이 JD가 말하는 협업이다.
+
+- [ ] 마이크 → PDM/I2S → DMA → 특징 → 모델 → 판정 → SoC wake 파이프라인을 화이트보드에 그릴 수 있다
+- [ ] 16kHz/16-bit 오디오의 초당 바이트, 20ms 프레임 크기, pre-roll 메모리를 암산할 수 있다
+- [ ] [−2, 6] 같은 범위에서 scale과 zero_point를 손으로 계산할 수 있다
+- [ ] int8 × int8 → int32 누산 → requantize 구조를 설명할 수 있다
+- [ ] TFLM 초기화 코드를 API 이름 틀리지 않고 쓸 수 있다
+- [ ] arena가 무엇이고 크기를 어떻게 정하는지, 왜 activation 합보다 작은지 설명할 수 있다
+- [ ] 메모리 맵에 가중치, arena, DMA 버퍼, pre-roll을 배치하고 이유를 말할 수 있다
+- [ ] MAC 수와 클럭으로 추론 시간을 추정하고 예산 초과 시 대안 4가지를 말할 수 있다
+- [ ] DWT CYCCNT 초기화 3줄과 "디버거 없을 때 0" 함정을 설명할 수 있다
+- [ ] DMA + D-cache에서 clean과 invalidate를 언제 쓰는지 말할 수 있다
+
+## 참고 자료
+
+- [TensorFlow Lite for Microcontrollers 저장소](https://github.com/tensorflow/tflite-micro)
+- [LiteRT for Microcontrollers 시작 가이드](https://ai.google.dev/edge/litert/microcontrollers/get_started)
+- [TFLM micro_speech 예제](https://github.com/tensorflow/tflite-micro/tree/main/tensorflow/lite/micro/examples/micro_speech)
+- [TensorFlow Lite 8-bit quantization specification](https://ai.google.dev/edge/litert/models/quantization_spec)
+- [CMSIS-NN 저장소](https://github.com/ARM-software/CMSIS-NN)
+- [CMSIS-DSP 저장소](https://github.com/ARM-software/CMSIS-DSP)
+- [CMSIS 6 문서 (Core, DWT/DCB 레지스터)](https://arm-software.github.io/CMSIS_6/latest/General/index.html)
+- [Arm Ethos-U Vela 컴파일러](https://pypi.org/project/ethos-u-vela/)
+- [Arm Ethos-U55 제품 페이지](https://developer.arm.com/Processors/Ethos-U55)
+- [Zephyr TFLite Micro 샘플](https://docs.zephyrproject.org/latest/samples/modules/tflite-micro/hello_world/README.html)
+- [Hello Edge: Keyword Spotting on Microcontrollers (Zhang et al., arXiv:1711.07128)](https://arxiv.org/abs/1711.07128)
+- [Jacob et al., Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference (arXiv:1712.05877)](https://arxiv.org/abs/1712.05877)
+- [ARMv7-M Architecture Reference Manual (DWT, 디버그)](https://developer.arm.com/documentation/ddi0403/latest/)
+- [Ambiq neuralSPOT (Ambiq MCU용 AI SDK)](https://github.com/AmbiqAI/neuralSPOT)

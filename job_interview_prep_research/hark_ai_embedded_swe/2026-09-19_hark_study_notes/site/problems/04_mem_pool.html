@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>04. 고정 크기 블록 memory pool allocator</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="problems/04_mem_pool">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">코딩 문제 · 04. 고정 크기 블록 memory pool allocator</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">코딩 문제 · Problems</div>
+      <h1>04. 고정 크기 블록 memory pool allocator</h1>
+      <div class="meta"><span>10분 읽기</span><span>120줄</span><span>7개 절</span></div>
+    </div>
+    <blockquote><p><strong>주제</strong>: 정적 메모리 관리 · intrusive free list · O(1) alloc/free · <strong>난이도</strong>: 중급 · <strong>목표 시간</strong>: 35분 <strong>해설은 보지 말 것</strong>: 먼저 <code>starters/04_mem_pool.c</code>를 채워 <code>make run N=04</code>로 통과시킨다.</p></blockquote>
+<h2 id="면접관의-문장">면접관의 문장<a class="anchor" href="#면접관의-문장" aria-label="link">#</a></h2>
+<p>"Our firmware has a hard rule: no <code>malloc</code> after boot. But we still need to hand out buffers at runtime — audio frames coming off the I2S DMA, BLE packets, log records. They're all the same size, 64 bytes, and there are never more than a few dozen of them live at once.</p>
+<p>Write me a fixed-block memory pool. The caller gives you a static byte array at init time and you carve it into equal-sized blocks. <code>alloc</code> hands out one block, <code>free</code> gives it back. Both have to be O(1) — I want to be able to call them from an ISR, so no loops and no searching.</p>
+<p>Don't add a separate metadata array; use the free blocks themselves to hold your bookkeeping. And tell me what happens when somebody frees a pointer twice, or frees a pointer that never came from your pool."</p>
+<h2 id="요구사항">요구사항<a class="anchor" href="#요구사항" aria-label="link">#</a></h2>
+<ol><li><code>pool_init(p, storage, storage_bytes)</code>는 caller가 준 저장소를 <code>POOL_BLOCK_SIZE</code>(64) 바이트 블록으로 자르고 전부 free list에 엮는다. 만들 수 있는 블록 수는 <code>storage_bytes / sizeof(pool_block_t)</code>이다.</li><li><code>pool_init</code>은 다음 경우 <code>-1</code>을 돌려주고 pool을 만들지 않는다: <code>p</code> 또는 <code>storage</code>가 NULL, <code>storage</code> 시작 주소가 <code>alignof(max_align_t)</code>의 배수가 아님, 블록을 하나도 만들 수 없음(<code>n == 0</code>), 블록 수가 <code>POOL_MAX_BLOCKS</code>(64) 초과. 성공하면 <code>0</code>.</li><li><code>pool_alloc</code>은 블록 한 개의 시작 주소를 돌려준다. 남은 블록이 없으면 <code>NULL</code>. 내부에 반복문이 있으면 안 된다.</li><li><code>pool_alloc</code>이 돌려주는 주소는 항상 <code>alignof(max_align_t)</code> 배수여야 한다. caller가 그 블록을 <code>double</code>이나 <code>uint64_t</code> 배열로 캐스팅해도 정렬 위반이 없어야 한다.</li><li>반환된 블록은 <code>POOL_BLOCK_SIZE</code> 바이트 전체를 caller가 써도 된다. 이웃 블록이나 pool 내부 상태를 침범하면 안 된다.</li><li><code>pool_free(p, ptr)</code>의 반환값은 정확히 이렇다. <code>POOL_OK</code>(0)은 정상 반납, <code>ptr == NULL</code>인 no-op도 여기에 포함된다. <code>POOL_ERR_FOREIGN</code>(-1)은 이 pool의 블록 시작 주소가 아닌 포인터다. <code>POOL_ERR_DOUBLE</code>(-2)은 이미 free 상태인 블록의 재반납이다.</li><li><code>POOL_ERR_FOREIGN</code>으로 거부해야 하는 것은 세 가지다. pool 범위 밖 주소, 블록 중간을 가리키는 주소(<code>base + 1</code>, <code>base + 8</code> 등), 마지막 블록 바로 뒤의 one-past-end 주소.</li><li>거부된 <code>pool_free</code> 호출은 <code>used</code>, <code>high_water</code>, free list 중 무엇도 바꾸지 않아야 한다. 특히 double free가 free list에 같은 블록을 두 번 넣으면 안 된다.</li><li>free는 LIFO다. 방금 반납한 블록이 다음 <code>pool_alloc</code>에서 그대로 나온다.</li><li>회계 함수 넷을 제공한다. <code>pool_capacity</code>는 총 블록 수, <code>pool_used</code>는 현재 나가 있는 수, <code>pool_available</code>은 <code>capacity - used</code>, <code>pool_high_water</code>는 <code>used</code>의 역대 최댓값이다. <code>high_water</code>는 free를 해도 내려가지 않는다.</li><li><code>pool_owns(p, ptr)</code>는 부수효과 없이 소유 여부만 <code>1</code>/<code>0</code>으로 판정한다.</li><li>전부 alloc하고 전부 free하는 사이클을 100번 돌려도 용량이 줄지 않아야 한다. 즉 단편화가 0이다.</li></ol>
+<h2 id="인터페이스">인터페이스<a class="anchor" href="#인터페이스" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">c</span><pre><code>#define POOL_BLOCK_SIZE  64u
+#define POOL_MAX_BLOCKS  64u
+
+#define POOL_OK           0
+#define POOL_ERR_FOREIGN (-1)
+#define POOL_ERR_DOUBLE  (-2)
+
+/* free일 때는 링크, 사용 중일 때는 payload. max_align_t로 정렬을 끌어올린다. */
+typedef union pool_block {
+    union pool_block *next;
+    max_align_t       align_dummy;
+    unsigned char     data[POOL_BLOCK_SIZE];
+} pool_block_t;
+
+#define POOL_BITMAP_WORDS ((POOL_MAX_BLOCKS + 31u) / 32u)
+
+typedef struct {
+    pool_block_t *blocks;
+    pool_block_t *free_head;
+    uint32_t      capacity;
+    uint32_t      used;
+    uint32_t      high_water;
+    uint32_t      in_use[POOL_BITMAP_WORDS];
+} pool_t;
+
+/* caller 저장소 선언용 */
+#define POOL_STORAGE(name, nblocks) static pool_block_t name[(nblocks)]
+
+int      pool_init(pool_t *p, void *storage, size_t storage_bytes);
+void    *pool_alloc(pool_t *p);
+int      pool_free(pool_t *p, void *ptr);
+int      pool_owns(const pool_t *p, const void *ptr);
+
+uint32_t pool_capacity(const pool_t *p);
+uint32_t pool_used(const pool_t *p);
+uint32_t pool_available(const pool_t *p);
+uint32_t pool_high_water(const pool_t *p);</code></pre></figure>
+<h2 id="제약">제약<a class="anchor" href="#제약" aria-label="link">#</a></h2>
+<ul class="tasks"><li><code>malloc</code>, <code>calloc</code>, <code>realloc</code>, <code>free</code>, VLA, <code>alloca</code> 전부 금지. 메모리는 caller가 준 저장소가 전부다.</li><li>블록당 별도 메타데이터 배열을 두지 않는다. free 블록 안에 링크를 저장하는 intrusive free list여야 한다. 사용 중인 블록의 오버헤드는 0바이트다.</li><li><code>pool_alloc</code>과 <code>pool_free</code>는 반복문 없이 상수 시간. pool이 비었든 꽉 찼든 실행 사이클 수가 같아야 한다.</li><li><code>pool_init</code>만 예외적으로 블록 수에 비례하는 반복문을 가진다(부팅 때 한 번).</li><li>공유 상태(<code>free_head</code>, <code>used</code>, <code>high_water</code>, <code>in_use</code>)는 ISR과 task가 동시에 만질 수 있다고 가정한다. 갱신 구간은 <code>CRIT_ENTER()</code> / <code>CRIT_EXIT()</code> 매크로로 감싼다. 타깃에서는 PRIMASK 저장/복원, host 테스트에서는 no-op이다.</li><li>하드웨어·RTOS 헤더 금지. C11 표준 라이브러리만 쓴다.</li><li><code>cc -std=c11 -Wall -Wextra -O2</code>에서 경고 0개.</li></ul>
+<h2 id="예시-동작">예시 동작<a class="anchor" href="#예시-동작" aria-label="link">#</a></h2>
+<p>블록 4개짜리 pool에서 일어나는 일을 순서대로 적으면 이렇다.</p>
+<figure class="code"><pre><code>pool_init(p, storage, 4*64)   -&gt; 0     free: [0]-&gt;[1]-&gt;[2]-&gt;[3]-&gt;NULL   used=0 hw=0
+a = pool_alloc(p)             -&gt; &amp;b[0] free: [1]-&gt;[2]-&gt;[3]-&gt;NULL        used=1 hw=1
+b = pool_alloc(p)             -&gt; &amp;b[1] free: [2]-&gt;[3]-&gt;NULL             used=2 hw=2
+c = pool_alloc(p)             -&gt; &amp;b[2] free: [3]-&gt;NULL                  used=3 hw=3
+pool_free(p, b)               -&gt; 0     free: [1]-&gt;[3]-&gt;NULL             used=2 hw=3
+d = pool_alloc(p)             -&gt; &amp;b[1] free: [3]-&gt;NULL                  used=3 hw=3   (LIFO: b가 그대로 돌아옴)
+e = pool_alloc(p)             -&gt; &amp;b[3] free: NULL                       used=4 hw=4
+f = pool_alloc(p)             -&gt; NULL  free: NULL                       used=4 hw=4   (고갈)
+pool_free(p, a)               -&gt; 0     free: [0]-&gt;NULL                  used=3 hw=4
+pool_free(p, a)               -&gt; -2    free: [0]-&gt;NULL                  used=3 hw=4   (double free, 상태 불변)
+pool_free(p, (char*)c + 8)    -&gt; -1    free: [0]-&gt;NULL                  used=3 hw=4   (블록 중간)
+pool_free(p, &amp;stack_var)      -&gt; -1    free: [0]-&gt;NULL                  used=3 hw=4   (범위 밖)
+pool_free(p, NULL)            -&gt; 0     free: [0]-&gt;NULL                  used=3 hw=4   (no-op)</code></pre></figure>
+<p><code>hw</code>는 <code>high_water</code>다. <code>used</code>가 4까지 갔던 기록이 free 이후에도 남는 것을 확인하라.</p>
+<h2 id="스스로-점검할-질문">스스로 점검할 질문<a class="anchor" href="#스스로-점검할-질문" aria-label="link">#</a></h2>
+<ol class="tasks"><li>free 블록 안에 <code>next</code> 포인터를 저장해도 안전한 이유는 무엇인가? 그 블록을 누군가 아직 읽고 있으면 어떻게 되나?</li><li><code>POOL_BLOCK_SIZE</code>를 60으로 바꾸면 어디서 무엇이 깨지는가? <code>_Static_assert</code> 중 어느 것이 먼저 걸리나?</li><li><code>max_align_t</code> 멤버를 union에서 빼면 어떤 caller가 언제 죽는가? 그 버그는 x86 host 테스트에서 재현되는가?</li><li>double free 감지를 bitmap 대신 "free list를 훑어서 이미 있는지 본다"로 구현하면 무엇을 잃는가?</li><li><code>pool_free</code>의 유효성 검사가 잡지 못하는 잘못된 사용은 무엇인가?</li><li><code>used</code>를 <code>uint32_t</code> 하나로 관리할 때, alloc이 task에서 free가 ISR에서 동시에 일어나면 <code>used++</code>와 <code>used--</code>가 왜 위험한가?</li><li><code>high_water</code>를 로그로 뽑아 pool 크기를 정한다면, 어떤 상황의 데이터를 모아야 믿을 수 있는 숫자가 되나?</li><li><code>pool_alloc</code>이 반환한 블록의 내용은 무엇인가? caller가 초기화 없이 읽으면 무슨 값을 보게 되나?</li></ol>
+<h2 id="follow-up-면접관이-이어서-물을-것">follow-up (면접관이 이어서 물을 것)<a class="anchor" href="#follow-up-면접관이-이어서-물을-것" aria-label="link">#</a></h2>
+<ol><li>"Now the buffers aren't all the same size. How do you extend this?"</li><li>"Can you do this without disabling interrupts? What breaks if you try a lock-free stack here?"</li><li>"How would you detect a caller writing past the end of its block?"</li><li>"The pool runs out at 3am in the field. What does your firmware do, and how do you find out about it the next morning?"</li><li>"Why is <code>malloc</code> actually a problem here? Give me a concrete failure, not just 'fragmentation'."</li></ol>
+    <div class="nav"><a class="prev" href="03_reg_bitfield.html"><span class="dir">← 이전</span><span class="nm">03. 레지스터 비트필드 매크로와 read-modify-write</span></a><a class="next" href="05_uart_parser.html"><span class="dir">다음 →</span><span class="nm">05. UART 패킷 파서 FSM + 체크섬</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#면접관의-문장">면접관의 문장</a></li><li class="l2"><a href="#요구사항">요구사항</a></li><li class="l2"><a href="#인터페이스">인터페이스</a></li><li class="l2"><a href="#제약">제약</a></li><li class="l2"><a href="#예시-동작">예시 동작</a></li><li class="l2"><a href="#스스로-점검할-질문">스스로 점검할 질문</a></li><li class="l2"><a href="#follow-up-면접관이-이어서-물을-것">follow-up (면접관이 이어서 물을 것)</a></li></ol></aside>
+</div><script>
+const KEY='hark_notes_read_v1', TKEY='hark_notes_theme', CKEY='hark_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

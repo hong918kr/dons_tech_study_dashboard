@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>01. ISR-safe SPSC ring buffer — 해설</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="drills/01_spsc_ring_isr">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">코딩 해설 노트 · 01. ISR-safe SPSC ring buffer — 해설</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">코딩 해설 노트 · Walkthroughs</div>
+      <h1>01. ISR-safe SPSC ring buffer — 해설</h1>
+      <div class="meta"><span>39분 읽기</span><span>500줄</span><span>25개 절</span></div>
+    </div>
+    <blockquote><p><strong>문제</strong>: <a href="../problems/01_spsc_ring_isr.html">problems/01_spsc_ring_isr.md</a> · <strong>답안</strong>: <code>solutions/01_spsc_ring_isr.c</code> <strong>이 노트를 다 읽으면</strong>: (1) head/tail의 writer를 한 명으로 고정하는 것이 왜 lock을 대신하는지 그림으로 설명할 수 있고, (2) free-running index와 2의 거듭제곱 마스킹이 full/empty 구분과 wrap을 동시에 해결하는 과정을 손으로 그릴 수 있고, (3) <code>volatile</code>로는 부족하고 release/acquire가 필요한 이유를 깨지는 인터리빙까지 들어 설명할 수 있다.</p></blockquote>
+<hr>
+<h2 id="0-한-문장으로">0. 한 문장으로<a class="anchor" href="#0-한-문장으로" aria-label="link">#</a></h2>
+<p><code>head</code>는 producer만 쓰고 <code>tail</code>은 consumer만 쓰게 만들면 두 index 모두 writer가 한 명뿐이라 경쟁이 사라지고, index를 자르지 않고 계속 증가시키면서 접근할 때만 <code>&amp; (RB_SIZE-1)</code>로 마스킹하면 wrap과 full/empty 구분이 공짜로 따라온다.</p>
+<hr>
+<h2 id="1-왜-이-자료구조-패턴이-필요한가-하드웨어에서-출발">1. 왜 이 자료구조/패턴이 필요한가 — 하드웨어에서 출발<a class="anchor" href="#1-왜-이-자료구조-패턴이-필요한가-하드웨어에서-출발" aria-label="link">#</a></h2>
+<p>UART로 초당 115200 bit가 들어오면 한 바이트가 약 87 us마다 도착한다. UART 주변장치의 RX FIFO는 보통 1~16 바이트라, 이 FIFO가 차기 전에 CPU가 꺼내지 않으면 overrun 에러가 나고 바이트가 사라진다. 그런데 main loop는 센서를 읽고 DSP를 돌리고 BLE 스택을 처리하느라 수 ms 동안 돌아오지 않을 수 있다. 87 us와 수 ms 사이의 간극을 메우는 물건이 필요하고, 그게 ring buffer다.</p>
+<figure class="code"><pre><code>  Companion SoC   UART    MCU
+  +-----------+  115200  +--------------+  IRQ   +------------------+
+  | audio/AI  |---------&gt;| RX FIFO (8B) |-------&gt;| UART RX ISR      | producer
+  +-----------+          +--------------+        | rb_put()  87 us  |
+                                                 +--------+---------+
+                                                          v
+                                                 +------------------+
+                                                 | ringbuf_t (256B) | 완충 지대
+                                                 +--------+---------+
+                                                          v
+                                                 +------------------+
+                                                 | main loop 파서   | consumer
+                                                 | rb_get()   수 ms |
+                                                 +------------------+</code></pre></figure>
+<p>같은 구조가 기기 안에서 반복된다. 오디오 기기는 I2S/PDM DMA가 채운 샘플 블록을 처리 task에 넘길 때, 로그는 아무 문맥에서나 불리는 <code>log_write()</code>와 낮은 우선순위 flush task 사이에서, 센서는 FIFO watermark 인터럽트가 긁어 온 샘플을 모아 둘 때 쓴다. SSD/NVMe의 submission/completion queue와 doorbell도 같은 원리다. 그래서 이 문제가 임베디드 코딩 면접 1순위다. 자료구조 자체는 쉽고, 면접관이 실제로 보는 것은 <strong>동시성 추론</strong>이다. 핵심 비대칭을 먼저 못 박자.</p>
+<ul><li>producer(ISR)는 <strong>기다릴 수 없다</strong>. full이면 블로킹이 아니라 드롭이다. ISR이 스핀하면 다른 인터럽트가 막히고 시스템이 죽는다.</li><li>producer는 consumer를 <strong>언제든 선점한다</strong>. consumer가 <code>rb_get</code> 한가운데 있어도 ISR이 끼어든다. 반대는 없다.</li></ul>
+<hr>
+<h2 id="2-먼저-그림으로-이해하기">2. 먼저 그림으로 이해하기<a class="anchor" href="#2-먼저-그림으로-이해하기" aria-label="link">#</a></h2>
+<p><code>RB_SIZE == 8</code>로 줄여서 그린다. 위 줄은 배열 index, 그 아래는 내용, 그 아래에 <code>H</code>(head 물리 위치)와 <code>T</code>(tail 물리 위치)를 찍고, 오른쪽에 free-running index의 실제 값을 적는다.</p>
+<p><strong>(1) 초기 상태와 첫 세 번의 put.</strong> <code>head == tail == 0</code>이면 <code>count = 0 - 0 = 0</code>, 비어 있다. 여기서 <code>rb_put('A')</code>, <code>rb_put('B')</code>, <code>rb_put('C')</code>를 한다. 매번 <code>buf[head &amp; 7]</code>에 <strong>데이터를 먼저 쓰고</strong> 그 다음에 head를 올린다. 이 순서가 이 문제의 전부다.</p>
+<figure class="code"><pre><code>  idx : 0  1  2  3  4  5  6  7
+  buf : A  B  C  .  .  .  .  .          head = 3
+        ^        ^                      tail = 0
+        T        H                      count = 3 - 0 = 3</code></pre></figure>
+<p><strong>(2) <code>rb_get(&amp;x)</code>.</strong> <code>x</code>에 <code>buf[0 &amp; 7]</code>인 <code>'A'</code>를 먼저 복사하고 그 다음에 tail을 1로 올린다. 여기서도 데이터가 먼저, index가 나중이다. 배열의 <code>'A'</code>는 지우지 않는다. 의미 없는 쓰기이고, tail이 지나간 칸은 그냥 "producer가 다시 써도 되는 칸"이 된다.</p>
+<figure class="code"><pre><code>  idx : 0  1  2  3  4  5  6  7
+  buf : A  B  C  .  .  .  .  .          head = 3
+           ^     ^                      tail = 1
+           T     H                      count = 3 - 1 = 2
+             (A는 남아 있지만 죽은 값)</code></pre></figure>
+<p><strong>(3) 물리적 wrap과 full.</strong> 계속 넣어 head가 8이 되면 <code>8 &amp; 7 == 0</code>이라 물리적으로 배열 처음으로 돌아온다. free-running index는 8인데 물리 위치는 0이다. 이 둘을 구분해서 보는 것이 이 구현을 이해하는 전부다. 한 번 더 넣어 <code>buf[9 &amp; 7]</code>까지 채우면 <code>count == 9 - 1 == 8 == RB_SIZE</code>, 즉 full이다.</p>
+<figure class="code"><pre><code>  idx : 0  1  2  3  4  5  6  7
+  buf : I  B  C  D  E  F  G  H          head = 9   (물리 1)
+           ^                            tail = 1   (물리 1)
+           TH                           count = 9 - 1 = 8 = FULL
+
+  비교:  empty 는 head = 1, tail = 1  -&gt;  차이 0
+         full  은 head = 9, tail = 1  -&gt;  차이 8
+         물리 위치는 둘 다 1 로 같고, 잘리지 않은 index 의 차이만 다르다.</code></pre></figure>
+<p>여기가 결정적인 대목이다. <strong>full일 때도 empty일 때도 <code>H</code>와 <code>T</code>의 물리 위치가 같다.</strong> 그래서 index를 잘라 버리는 흔한 구현은 한 칸을 비워 두고 <code>RB_SIZE-1</code>개만 쓴다. free-running index가 있으면 그럴 필요가 없다.</p>
+<p><strong>(4) index 자체의 wrap.</strong> <code>head</code>가 <code>0xFFFFFFFF</code>를 넘어가면 0이 된다. 그래도 <code>head - tail</code>은 정확하다. unsigned 산술이 modulo 2^32로 정의돼 있기 때문이다.</p>
+<figure class="code"><pre><code>  head = 0xFFFFFFFE, tail = 0xFFFFFFFA  -&gt;  count = 4
+  put 을 세 번 더 하면 head = 0x00000001  (0xFFFFFFFF 를 넘어감)
+      count = 0x00000001 - 0xFFFFFFFA
+            = 0x100000001 - 0xFFFFFFFA   (2^32 를 빌려온다)  =  7   (정확)</code></pre></figure>
+<p>115200 baud로 하루 종일 받아도 32-bit index가 한 바퀴 도는 데 4.3일이 걸리고, 한 바퀴 돌아도 위처럼 문제가 없다.</p>
+<p><strong>(5) <code>rb_write</code>가 쪼개지는 모습.</strong> head=tail=6인 빈 버퍼에 5바이트를 쓰면 배열 끝을 넘는다. 연속으로 쓸 수 있는 길이는 <code>RB_SIZE - (head &amp; 7) = 8 - 6 = 2</code>이므로 memcpy를 두 번 한다.</p>
+<figure class="code"><pre><code>  src = [p q r s t]
+  1차 memcpy: &amp;buf[6] &lt;- "p q"      (first = 2)
+  2차 memcpy: &amp;buf[0] &lt;- "r s t"    (n - first = 3)
+
+  idx : 0  1  2  3  4  5  6  7
+  buf : r  s  t  .  .  .  p  q      head = 11  (마지막에 한 번만 6 -&gt; 11)
+        ^        ^        ^         tail = 6
+        |        H        T         count = 11 - 6 = 5
+        (물리적으로는 뒤에서 앞으로 이어진다)</code></pre></figure>
+<p>head를 바이트마다 올리지 않고 <strong>마지막에 한 번만</strong> 올리는 것이 핵심이다. 중간에 올리면 consumer가 아직 다 쓰지도 않은 영역을 유효 데이터로 읽는다.</p>
+<hr>
+<h2 id="3-잘못된-구현부터-보기">3. 잘못된 구현부터 보기<a class="anchor" href="#3-잘못된-구현부터-보기" aria-label="link">#</a></h2>
+<h3 id="3-1-순진한-버전-공유-count">3.1 순진한 버전: 공유 <code>count</code><a class="anchor" href="#3-1-순진한-버전-공유-count" aria-label="link">#</a></h3>
+<p>교과서 ring buffer는 보통 이렇게 생겼다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 깨지는 코드 — 절대 이렇게 쓰지 말 것 */
+typedef struct {
+    uint8_t  buf[RB_SIZE];
+    uint32_t head, tail;
+    uint32_t count;      /* &lt;-- producer 도 쓰고 consumer 도 쓴다 */
+} bad_rb_t;
+
+bool bad_put(bad_rb_t *rb, uint8_t b)      /* ISR에서 호출 */
+{
+    if (rb-&gt;count == RB_SIZE) return false;
+    rb-&gt;buf[rb-&gt;head] = b;
+    rb-&gt;head = (rb-&gt;head + 1u) % RB_SIZE;
+    rb-&gt;count++;                            /* read-modify-write */
+    return true;
+}
+
+/* bad_get 은 대칭이다. tail 을 올리고 count-- 를 한다 (역시 RMW). */</code></pre></figure>
+<p><code>count</code>를 두면 full과 empty를 구분하기 쉽다. 그런데 <code>count</code>는 <strong>두 문맥이 모두 쓰는 변수</strong>이고, <code>count--</code>는 하나의 연산처럼 보이지만 기계어로는 <code>LDR</code> / <code>SUBS</code> / <code>STR</code> 세 단계다. ISR은 그 사이 어디에서든 끼어든다. 시작 상태 <code>count == 5</code>에서의 인터리빙이다.</p>
+<figure class="code"><pre><code>  시간  main loop (bad_get)              UART ISR (bad_put)           메모리의 count
+  ----  ------------------------------   --------------------------   --------------
+   t0   LDR r0, [count]   -&gt; r0 = 5                                         5
+   t1   SUBS r0, r0, #1   -&gt; r0 = 4                                         5
+   t2        --- 인터럽트 발생, main loop 선점당함 ---
+   t3                                    LDR r1, [count] -&gt; r1 = 5          5
+   t4                                    ADDS r1, r1, #1 -&gt; r1 = 6          5
+   t5                                    STR r1, [count]                    6
+   t6                                    (buf 에 1바이트 써 둠)             6
+   t7        --- ISR 리턴, main loop 재개 ---
+   t8   STR r0, [count]                                                     4   &lt;-- !!</code></pre></figure>
+<p><code>t8</code>에서 main loop가 레지스터에 들고 있던 4를 그대로 덮어쓴다. ISR이 만든 6이 사라졌고, 실제로는 5개가 들어 있는데 <code>count</code>는 4라고 말한다. <strong>한 바이트가 영원히 유실된다.</strong> 게다가 오차가 누적된다. 1000번 중 한 번만 일어나도 장시간 돌리면 <code>count</code>는 계속 작아지다 0에 도달하고, <code>bad_get</code>이 영원히 empty를 돌려주면서 파서가 멈춘다. 필드에서는 "몇 시간 돌리면 UART가 먹통이 된다, 리셋하면 멀쩡하다"로 보고되고, 디버거를 붙여 멈추면 타이밍이 바뀌어 사라진다. 가장 비싼 종류의 버그다.</p>
+<p><strong>교훈 1: 두 문맥이 모두 쓰는 변수를 만들지 마라.</strong> <code>count</code>를 없애고 <code>head - tail</code>로 계산하면 이 경쟁 자체가 존재하지 않는다.</p>
+<h3 id="3-2-두-번째-실수-rb_size로-index를-잘라-버리기">3.2 두 번째 실수: <code>% RB_SIZE</code>로 index를 잘라 버리기<a class="anchor" href="#3-2-두-번째-실수-rb_size로-index를-잘라-버리기" aria-label="link">#</a></h3>
+<p><code>count</code>를 없애고 <code>head</code>, <code>tail</code>만 남겼다고 하자. 그런데 <code>rb-&gt;head = (rb-&gt;head + 1u) % RB_SIZE;</code>처럼 index를 매번 잘라 버리면 <code>head == tail</code>이 empty도 되고 full도 된다. 2장 그림 (3)이 그대로 이 문제다. 보통 한 칸을 비워 두는 것으로 우회한다.</p>
+<figure class="code"><pre><code>  한 칸 비우는 방식:  full 조건 = ((head + 1) &amp; (RB_SIZE-1)) == tail
+  idx : 0  1  2  3  4  5  6  7
+  buf : I  B  C  D  E  F  G  .      head = 7, tail = 0 (둘 다 물리 위치)
+        T                       H   idx 7 은 영원히 안 쓴다 -&gt; 용량 7/8</code></pre></figure>
+<p>동작은 한다. 하지만 256바이트 버퍼가 255바이트가 되고, <code>% RB_SIZE</code>는 크기가 2의 거듭제곱이 아니면 나눗셈 명령을 부른다. Cortex-M0/M0+에는 하드웨어 나눗셈기가 없어 컴파일러가 <code>__aeabi_uidivmod</code> 호출을 넣고, ISR 안에서 수십 사이클이 날아간다. <strong>교훈 2: index를 자르지 말고 free-running으로 두고, 접근할 때만 마스킹하라.</strong> 그러면 용량 전부를 쓰고, 나눗셈도 사라지고, <code>head - tail</code>이 곧 개수가 된다.</p>
+<h3 id="3-3-세-번째-실수-순서가-뒤집히는-것-volatile로는-못-막는다">3.3 세 번째 실수: 순서가 뒤집히는 것 — <code>volatile</code>로는 못 막는다<a class="anchor" href="#3-3-세-번째-실수-순서가-뒤집히는-것-volatile로는-못-막는다" aria-label="link">#</a></h3>
+<p>구조는 맞다고 하자(<code>count</code> 없음, free-running index, 마스킹). 그런데 이렇게 썼다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* buf[] 는 volatile 이 아니고, head/tail 만 volatile 이다 */
+bool weak_put(weak_rb_t *rb, uint8_t b)
+{
+    uint32_t h = rb-&gt;head, t = rb-&gt;tail;
+    if ((uint32_t)(h - t) == RB_SIZE) return false;
+    rb-&gt;buf[h &amp; (RB_SIZE - 1u)] = b;    /* (A) 일반 변수 쓰기 */
+    rb-&gt;head = h + 1u;                  /* (B) volatile 쓰기 */
+    return true;
+}</code></pre></figure>
+<p><code>volatile</code>은 "이 변수 접근을 지우지도, 합치지도, 레지스터로 대체하지도 마라"만 약속한다. <strong>일반 변수와의 상대적 순서는 약속하지 않는다.</strong> 표준은 volatile 접근끼리의 순서만 보장하고 <code>buf[]</code>는 volatile이 아니므로, 컴파일러는 (A)와 (B)를 바꿔도 된다. 버퍼가 비어 있고 head=tail=0인 상태에서 순서가 뒤집혔을 때의 인터리빙이다.</p>
+<figure class="code"><pre><code>  시간  UART ISR (weak_put, 재배치됨)        main loop (weak_get)
+  ----  ---------------------------------   ---------------------------------
+   t0   rb-&gt;head = 1            (B 먼저!)
+   t1        --- ISR 이 여기서 끝나거나, 더 높은 우선순위 IRQ 에 선점됨 ---
+   t2                                       t=0, h=1  -&gt;  h != t 이므로 비지 않음
+   t3                                       *out = buf[0]  &lt;-- 아직 안 쓴 칸!
+   t4                                       rb-&gt;tail = 1
+   t5   rb-&gt;buf[0] = b          (A 나중)                 &lt;-- 너무 늦었다</code></pre></figure>
+<p><code>t3</code>에서 consumer가 읽은 것은 정확히 한 바퀴 전의 죽은 바이트다(2장 그림 (2)에서 읽은 칸을 지우지 않았으니까). 패킷 파서 입장에서는 멀쩡해 보이는 바이트라 CRC가 깨지기 전까지 알아채지도 못한다. 같은 일이 consumer 쪽에서도 일어난다. tail 갱신이 데이터 읽기보다 먼저 보이면 producer가 아직 읽지도 않은 칸을 덮어쓴다.</p>
+<p>consumer가 <code>tail</code>을 먼저 올리고 <code>*out = buf[...]</code>를 나중에 하면, 그 사이에 끼어든 ISR이 공간이 생긴 줄 알고 그 칸을 새 바이트로 덮어쓴다. 원래 읽어야 했던 오래된 바이트가 사라지고 최신 바이트가 두 번 나온다.</p>
+<p><strong>교훈 3: 필요한 것은 "접근을 지우지 마라"가 아니라 "두 접근의 순서를 유지하라"다.</strong> 그게 release/acquire이고 C11에서는 <code>_Atomic</code> + <code>memory_order_release</code> / <code>memory_order_acquire</code>로 표현한다.</p>
+<hr>
+<h2 id="4-한-줄씩-만들기">4. 한 줄씩 만들기<a class="anchor" href="#4-한-줄씩-만들기" aria-label="link">#</a></h2>
+<h3 id="4-1-단계-1-자료구조에서-경쟁을-없앤다-두-문맥이-함께-쓰는-변수-제거">4.1 단계 1 — 자료구조에서 경쟁을 없앤다 (두 문맥이 함께 쓰는 변수 제거)<a class="anchor" href="#4-1-단계-1-자료구조에서-경쟁을-없앤다-두-문맥이-함께-쓰는-변수-제거" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>#define RB_SIZE 256u
+_Static_assert((RB_SIZE &amp; (RB_SIZE - 1u)) == 0u, "RB_SIZE must be power of 2");
+
+typedef struct {
+    uint8_t buf[RB_SIZE];
+    _Atomic uint32_t head;    /* producer(ISR)만 store 한다 */
+    _Atomic uint32_t tail;    /* consumer(task)만 store 한다 */
+    uint32_t         dropped; /* full 때문에 버린 바이트. producer만 만진다 */
+} ringbuf_t;</code></pre></figure>
+<ul><li><code>_Static_assert</code>가 "2의 거듭제곱" 전제를 컴파일 타임에 강제한다. 없으면 마스킹이 조용히 틀린 index를 만들고 버퍼는 쓰레기를 뱉으면서 동작하는 척한다.</li><li><code>_Atomic uint32_t</code>는 tearing 방지와 <code>memory_order</code>를 붙일 자리를 준다. Cortex-M에서 정렬된 32-bit 접근은 원래 single-copy atomic이라 전자는 공짜고, 우리가 실제로 사는 것은 후자다. <code>dropped</code>는 producer만 읽고 쓰므로 <code>_Atomic</code>이 아니다.</li><li>주석의 "만 store 한다"가 이 구현의 계약 전체다. 이 줄을 어기면 3.1의 <code>count</code> 경쟁이 그대로 돌아온다.</li></ul>
+<h3 id="4-2-단계-2-개수를-뺄셈으로-구한다-full-empty를-저장하지-말고-계산">4.2 단계 2 — 개수를 뺄셈으로 구한다 (full/empty를 저장하지 말고 계산)<a class="anchor" href="#4-2-단계-2-개수를-뺄셈으로-구한다-full-empty를-저장하지-말고-계산" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static inline uint32_t rb_count(const ringbuf_t *rb)
+{
+    uint32_t h = atomic_load_explicit(&amp;rb-&gt;head, memory_order_acquire);
+    uint32_t t = atomic_load_explicit(&amp;rb-&gt;tail, memory_order_acquire);
+    return h - t;
+}
+
+static inline uint32_t rb_space(const ringbuf_t *rb)   { return RB_SIZE - rb_count(rb); }
+static inline bool     rb_is_empty(const ringbuf_t *rb){ return rb_count(rb) == 0u; }
+static inline bool     rb_is_full(const ringbuf_t *rb) { return rb_count(rb) == RB_SIZE; }</code></pre></figure>
+<ul><li><code>h - t</code>에 캐스팅도 조건문도 없다. <code>uint32_t</code> 뺄셈이 modulo 2^32라서 2장 그림 (4)의 index wrap이 자동으로 처리된다. <code>if (h &lt; t)</code> 같은 보정을 넣는 순간 오히려 틀린다.</li><li>저장된 <code>count</code> 필드가 없으니 3.1의 lost update가 구조적으로 불가능하다. 돌려주는 값은 <strong>호출한 쪽 기준의 안전한 추정치</strong>다. producer가 부르면 "공간이 적어도 이만큼"이 보장되고(consumer는 tail을 올리기만 하니 공간은 늘기만 한다), consumer가 부르면 "적어도 이만큼은 읽을 수 있다"가 보장된다. 양쪽 다 자기에게 불리한 쪽으로만 틀린다.</li></ul>
+<h3 id="4-3-단계-3-producer-데이터-먼저-index-나중-3-3의-재배치를-막는다">4.3 단계 3 — producer: 데이터 먼저, index 나중 (3.3의 재배치를 막는다)<a class="anchor" href="#4-3-단계-3-producer-데이터-먼저-index-나중-3-3의-재배치를-막는다" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static inline bool rb_put(ringbuf_t *rb, uint8_t b)
+{
+    uint32_t h = atomic_load_explicit(&amp;rb-&gt;head, memory_order_relaxed);
+    uint32_t t = atomic_load_explicit(&amp;rb-&gt;tail, memory_order_acquire);
+    if ((uint32_t)(h - t) == RB_SIZE) {
+        rb-&gt;dropped++;
+        return false;
+    }
+    rb-&gt;buf[h &amp; (RB_SIZE - 1u)] = b;
+    atomic_store_explicit(&amp;rb-&gt;head, h + 1u, memory_order_release);
+    return true;
+}</code></pre></figure>
+<ul><li><code>head</code>는 나만 쓰는 값이라 <code>relaxed</code>로 읽는다. 내가 마지막에 쓴 값을 내가 읽는 것이라 동기화가 끼어들 여지가 없고, acquire를 붙이면 효과 없이 배리어 비용만 낸다.</li><li><code>tail</code>은 상대가 쓴 값이라 <code>acquire</code>로 읽는다. acquire load는 "뒤의 접근이 이 load보다 앞으로 옮겨지지 않는다"를 보장하므로, consumer가 tail을 올리기 전에 끝낸 데이터 읽기가 내 눈에 보이고 그 칸을 덮어써도 안전해진다.</li><li>full 검사는 <code>&gt;=</code>가 아니라 <code>==</code>로 충분하다. <code>head</code>가 <code>tail</code>을 앞지르려면 full인데도 put이 성공해야 하는데 바로 이 검사가 그걸 막기 때문이다. <code>==</code>가 성립한다는 사실 자체가 불변식이다.</li><li><code>rb-&gt;buf[...] = b;</code>가 release store보다 <strong>위에</strong> 있다는 것이 이 함수의 전부다. <code>memory_order_release</code>는 "이 store 앞의 모든 접근이 이 store보다 먼저 보인다"이고, consumer의 acquire load와 짝을 이뤄 release-acquire 쌍이 된다. relaxed로 바꾸면 3.3의 첫 타임라인이 그대로 재현된다.</li><li>루프가 없다. 분기 하나, 마스킹(2의 거듭제곱이라 <code>AND</code> 한 번) 하나, store 두 개. ISR에 적합하다.</li></ul>
+<h3 id="4-4-단계-4-consumer-producer의-거울상">4.4 단계 4 — consumer: producer의 거울상<a class="anchor" href="#4-4-단계-4-consumer-producer의-거울상" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static inline bool rb_get(ringbuf_t *rb, uint8_t *out)
+{
+    uint32_t t = atomic_load_explicit(&amp;rb-&gt;tail, memory_order_relaxed);
+    uint32_t h = atomic_load_explicit(&amp;rb-&gt;head, memory_order_acquire);
+    if (h == t) {
+        return false;
+    }
+    *out = rb-&gt;buf[t &amp; (RB_SIZE - 1u)];
+    atomic_store_explicit(&amp;rb-&gt;tail, t + 1u, memory_order_release);
+    return true;
+}</code></pre></figure>
+<ul><li>역할이 정확히 뒤집혔다. 내 변수(<code>tail</code>)는 relaxed, 상대 변수(<code>head</code>)는 acquire, 내 index 갱신은 release.</li><li>비교는 반드시 <strong>이미 읽어 둔 지역 변수</strong>로 한다. 여기서 <code>rb_count()</code>를 다시 부르면 head/tail을 한 번 더 읽게 되고, 그 사이 ISR이 끼어들어 검사한 값과 아래에서 쓰는 값이 달라진다.</li><li>empty일 때 <code>*out</code>을 건드리지 않는 것은 계약이다. 호출부가 실패 시 이전 값을 유지하는 패턴을 쓸 수 있어야 한다.</li><li><code>*out = buf[...]</code>가 release store보다 위에 있다. 없으면 producer가 아직 안 읽은 칸을 덮어쓰는 3.3의 두 번째 경합이 생긴다. 읽은 칸을 0으로 지우지 않는 것은 의미 없는 쓰기이기 때문이고, 민감한 데이터라면 지울 이유가 생기지만 그건 별개의 요구사항이다.</li></ul>
+<h3 id="4-5-단계-5-bulk-바이트마다가-아니라-마지막에-한-번만-publish">4.5 단계 5 — bulk: 바이트마다가 아니라 마지막에 한 번만 publish<a class="anchor" href="#4-5-단계-5-bulk-바이트마다가-아니라-마지막에-한-번만-publish" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static inline uint32_t rb_write(ringbuf_t *rb, const uint8_t *src, uint32_t n)
+{
+    uint32_t h    = atomic_load_explicit(&amp;rb-&gt;head, memory_order_relaxed);
+    uint32_t t    = atomic_load_explicit(&amp;rb-&gt;tail, memory_order_acquire);
+    uint32_t free = RB_SIZE - (uint32_t)(h - t);
+    if (n &gt; free) { rb-&gt;dropped += (n - free); n = free; }
+    if (n == 0u)  { return 0u; }
+
+    uint32_t off   = h &amp; (RB_SIZE - 1u);   /* 물리 위치 */
+    uint32_t first = RB_SIZE - off;        /* 끝까지 연속 길이 */
+    if (first &gt; n) { first = n; }
+    memcpy(&amp;rb-&gt;buf[off], src, first);
+    if (n &gt; first) { memcpy(&amp;rb-&gt;buf[0], src + first, n - first); }
+
+    atomic_store_explicit(&amp;rb-&gt;head, h + n, memory_order_release);
+    return n;
+}</code></pre></figure>
+<ul><li><code>free</code>로 <code>n</code>을 먼저 잘라 부분 성공을 허용한다. UART 드라이버에는 "8바이트 중 3바이트만 들어갔다"가 "실패"보다 유용하다.</li><li><code>off</code>는 물리 위치, <code>first</code>는 배열 끝까지의 연속 길이다(2장 그림 (5)). <code>if (first &gt; n) first = n;</code>을 빼먹으면 두 번째 memcpy의 길이 <code>n - first</code>가 unsigned로 wrap 해 거대한 값이 되고 메모리를 밟는다.</li><li>memcpy는 최대 두 번이다(<code>n &lt;= RB_SIZE</code>라 배열을 한 바퀴 넘게 돌 수 없다). release store가 딱 하나뿐인 것이 bulk 버전의 존재 이유다. 256바이트를 <code>rb_put</code> 256번으로 넣으면 ARMv7-M에서 <code>DMB</code>가 256번 나갈 수도 있다. <code>rb_read</code>는 거울상이라 <code>tail</code>을 relaxed, <code>head</code>를 acquire로 읽고, memcpy 방향만 반대로 한 뒤 마지막에 <code>tail += n</code>을 release로 store 한다.</li></ul>
+<hr>
+<h2 id="5-전체-코드-읽기">5. 전체 코드 읽기<a class="anchor" href="#5-전체-코드-읽기" aria-label="link">#</a></h2>
+<p><code>solutions/01_spsc_ring_isr.c</code>는 1절 자료구조, 2절 <code>rb_init</code>, 3절 관찰 함수(<code>rb_count</code> / <code>rb_space</code> / <code>rb_is_empty</code> / <code>rb_is_full</code>), 4절 producer(<code>rb_put</code> / <code>rb_write</code>), 5절 consumer(<code>rb_get</code> / <code>rb_read</code>), 6절 별칭(<code>rb_push</code> / <code>rb_pop</code>), 7절 테스트 순서다. 4장에서 만든 조각이 그대로 들어가 있다.</p>
+<p><code>rb_init</code>은 <code>atomic_init</code>으로 head/tail/dropped를 0으로 만들고 <code>buf[]</code>는 건드리지 않는다. <code>atomic_init</code>은 <code>atomic_store</code>와 달리 <strong>다른 문맥이 아직 이 객체를 보지 못한 시점에만</strong> 쓰는 비원자적 초기화다. 그래서 <code>rb_init</code>은 인터럽트를 켜기 전에, 즉 producer가 존재하기 전에 불려야 한다. 이미 ISR이 돌고 있는 버퍼를 리셋하는 것은 그 자체가 경쟁이다. <code>rb_push</code> / <code>rb_pop</code>은 S01 드릴의 <code>rb_put</code> / <code>rb_get</code>을 문제 지문의 이름으로도 부를 수 있게 한 얇은 별칭이라 동작이 완전히 같다.</p>
+<p>테스트 9개가 각각 무엇을 잡는지.</p>
+<div class="tw"><table><thead><tr><th>테스트</th><th>잡아내는 버그</th></tr></thead><tbody><tr><td><code>test_init_empty</code></td><td>초기화 누락, empty일 때 <code>out</code>을 건드리는 구현</td></tr><tr><td><code>test_fifo_order</code></td><td>LIFO로 잘못 만든 구현, 별칭 연결 오류</td></tr><tr><td><code>test_full_behaviour</code></td><td>한 칸 비워 두기(용량 255), full일 때 덮어쓰기, <code>dropped</code> 미증가</td></tr><tr><td><code>test_wrap_around_buffer</code></td><td>마스킹 실수, 버퍼 끝에서의 off-by-one</td></tr><tr><td><code>test_index_overflow</code></td><td><code>h - t</code>에 부호 있는 비교나 <code>if (h &lt; t)</code> 보정을 넣은 구현</td></tr><tr><td><code>test_bulk_write_read</code></td><td>공간보다 많이 요청했을 때의 오버런, <code>dropped</code> 누락</td></tr><tr><td><code>test_bulk_split_at_wrap</code></td><td><code>first = n</code> 클램프 누락, 두 번째 memcpy 길이 계산 오류</td></tr><tr><td><code>test_interleaved_producer_consumer</code></td><td>속도가 다른 두 문맥에서의 누락·중복(1000라운드)</td></tr><tr><td>(<code>test_index_overflow</code> 는 테스트 전용으로 head/tail 을 <code>0xFFFFFFF8</code> 로 직접 옮긴다)</td><td>4.3일을 기다리지 않고 2^32 경계를 검증하는 유일한 방법</td></tr></tbody></table></div>
+<hr>
+<h2 id="6-동시성-메모리-관점">6. 동시성·메모리 관점<a class="anchor" href="#6-동시성-메모리-관점" aria-label="link">#</a></h2>
+<h3 id="6-1-왜-lock이-필요-없는가-소유권-그림">6.1 왜 lock이 필요 없는가 — 소유권 그림<a class="anchor" href="#6-1-왜-lock이-필요-없는가-소유권-그림" aria-label="link">#</a></h3>
+<figure class="code"><pre><code>                store(쓰기)          load(읽기)
+  head          producer ONLY        producer(relaxed) / consumer(acquire)
+  tail          consumer ONLY        consumer(relaxed) / producer(acquire)
+  buf[head..]   producer ONLY        (아직 게시되지 않은 빈 칸)
+  buf[tail..]   consumer ONLY        (게시된 데이터 칸)</code></pre></figure>
+<p>lock이 막아 주는 것은 "두 문맥이 같은 위치에 동시에 쓰는 일"과 "RMW가 쪼개지는 일"인데, 이 구현에는 둘 다 없다.</p>
+<ul><li>store 하는 문맥이 둘인 변수가 하나도 없다. 따라서 3.1의 lost update가 불가능하다. <code>head = h + 1</code>은 RMW처럼 보이지만 <code>h</code>는 내가 아까 읽은 내 값이고 그 사이 아무도 <code>head</code>를 바꾸지 않으므로 단순 store다. 반면 <code>count--</code>는 상대도 쓰는 값을 읽어 고치는 진짜 RMW였다.</li><li><code>buf[]</code>도 영역이 겹치지 않는다. producer는 head가 가리키는 빈 칸만, consumer는 tail이 가리키는 채워진 칸만 만지고, 그 경계는 각자 자기 것만 올리는 index가 정한다. 남는 문제는 <strong>순서</strong>뿐이고, 그건 release/acquire가 해결한다.</li></ul>
+<h3 id="6-2-release-acquire-쌍이-하는-일">6.2 release-acquire 쌍이 하는 일<a class="anchor" href="#6-2-release-acquire-쌍이-하는-일" aria-label="link">#</a></h3>
+<figure class="code"><pre><code>  producer (ISR)                          consumer (main loop)
+  ----------------------                  --------------------------
+  buf[h &amp; MASK] = b;     ----+  이 쓰기가 아래보다 먼저 보인다
+  store_release(head, h+1) --+----------&gt; h = load_acquire(head)
+                                          |  이 읽기가 아래보다 먼저 일어난다
+                                          +--&gt; *out = buf[t &amp; MASK];</code></pre></figure>
+<p>release store는 그 <strong>앞의</strong> 접근이 뒤로 새지 않게 하고, acquire load는 그 <strong>뒤의</strong> 접근이 앞으로 새지 않게 한다. 둘이 같은 변수(<code>head</code>)에 대해 짝을 이루면 consumer가 새 head를 본 순간 producer가 그 전에 한 모든 쓰기를 본다(happens-before). <code>tail</code>에 대해서도 대칭으로 같은 쌍이 성립하고, 그쪽은 "producer가 새 tail을 봤다면 consumer는 그 칸을 이미 다 읽은 뒤다"를 보장해 덮어쓰기를 안전하게 만든다.</p>
+<h3 id="6-3-volatile은-무엇을-하고-무엇을-안-하는가">6.3 <code>volatile</code>은 무엇을 하고 무엇을 안 하는가<a class="anchor" href="#6-3-volatile은-무엇을-하고-무엇을-안-하는가" aria-label="link">#</a></h3>
+<figure class="code"><pre><code>  volatile 이 하는 것                volatile 이 안 하는 것
+  -------------------------------    ---------------------------------------
+  접근을 지우거나 합치지 않는다      일반 변수와의 순서를 지키지 않는다
+  레지스터에 캐싱하지 않는다         store buffer 를 비우거나 cache 를 다루지 않는다
+  volatile 접근끼리는 순서 유지      원자성을 주지 않는다 (v++ 은 여전히 RMW)</code></pre></figure>
+<p>즉 <code>volatile</code>은 MMIO 레지스터 접근이나 <code>while (!isr_done_flag);</code> 같은 폴링에는 맞는 도구지만, "데이터와 index 사이의 순서"라는 우리 문제에는 맞지 않는다.</p>
+<h3 id="6-4-실제-하드웨어에서-저-배리어는-무엇이-되는가">6.4 실제 하드웨어에서 저 배리어는 무엇이 되는가<a class="anchor" href="#6-4-실제-하드웨어에서-저-배리어는-무엇이-되는가" aria-label="link">#</a></h3>
+<ul class="tasks"><li><strong>단일 코어 Cortex-M4/M33의 ISR과 task</strong>: 같은 코어에서 돌고, 코어는 자기 관점의 프로그램 순서를 뒤집지 않는다. 진짜로 필요한 것은 <strong>컴파일러 배리어</strong>뿐이다. 그래도 GCC/Clang은 ARMv7-M에서 release store 앞에 <code>DMB</code>를 넣는 경우가 많다. 몇 사이클짜리 보험이라 ISR 예산에 보통 문제가 안 되고, ARMv8-M Mainline이면 <code>STL</code>/<code>LDA</code> 단일 명령으로 더 싸게 처리된다.</li><li><strong>DMA가 버퍼를 읽거나 쓰는 경우</strong>: DMA는 프로그램 순서를 모르는 별도 bus master라 <code>DMB</code>가 진짜로 필요하다. Cortex-M7처럼 D-cache가 있으면 배리어로도 부족해 <code>SCB_CleanDCache_by_Addr</code> / <code>SCB_InvalidateDCache_by_Addr</code>가 따라오고, 버퍼를 cache line(보통 32바이트) 경계에 정렬하고 크기도 line 배수로 맞춰야 이웃 데이터가 같이 날아가지 않는다. 듀얼 코어 공유 SRAM도 같은 이유로 배리어와 캐시 관리가 둘 다 필요하고, 공유 영역은 보통 MPU로 non-cacheable하게 잡는다.</li><li><strong>tearing</strong>: 정렬된 32-bit 접근은 Cortex-M에서 single-copy atomic이라 index가 반쯤 읽히지 않는다. index를 <code>uint64_t</code>로 만들었다면 32-bit 접근 두 번으로 쪼개지고, 그 사이 인터럽트가 끼면 앞뒤 절반이 다른 시점의 값이 된다.</li></ul>
+<h3 id="6-5-producer가-둘이-되면-무엇이-깨지는가">6.5 producer가 둘이 되면 무엇이 깨지는가<a class="anchor" href="#6-5-producer가-둘이-되면-무엇이-깨지는가" aria-label="link">#</a></h3>
+<p>우선순위가 다른 두 ISR이 모두 <code>rb_put</code>을 부르면 <code>head = h + 1</code>이 더 이상 "내 값을 내가 쓰는 것"이 아니다. 진짜 RMW가 되고 3.1의 그림이 돌아온다.</p>
+<figure class="code"><pre><code>  시간  ISR-A (낮은 우선순위)             ISR-B (높은 우선순위)      head
+  ----  ------------------------------   -----------------------    ----
+   t0   h = load(head) -&gt; 10                                         10
+   t1   buf[10 &amp; MASK] = 'x'                                         10
+   t2        --- ISR-B 가 ISR-A 를 선점 ---
+   t3                                    h = load(head) -&gt; 10        10
+   t4                                    buf[10 &amp; MASK] = 'y'  &lt;--!  10
+   t5                                    store(head, 11)             11
+   t6        --- ISR-A 재개 ---
+   t7   store(head, 11)                                              11</code></pre></figure>
+<p>두 ISR이 같은 슬롯 10에 썼고(<code>'x'</code>가 <code>'y'</code>로 덮였다) head는 11로 한 번만 올라갔다. 바이트 하나가 조용히 사라진다. 고치는 방법은 셋이다.</p>
+<ul><li>producer 구간을 짧은 critical section으로 감싼다. Cortex-M이면 PRIMASK로 전부 막기보다 BASEPRI로 해당 우선순위 이하만 막는 것이 낫다.</li><li><code>head</code>를 CAS(<code>LDREX</code>/<code>STREX</code>, C11의 <code>atomic_compare_exchange_weak</code>)로 예약한다. 다만 "예약됐지만 아직 안 쓴 슬롯"이 생겨 consumer가 그걸 기다리게 만드는 상태가 추가로 필요해 구현이 확 복잡해진다.</li><li>가장 실용적인 답: <strong>producer마다 ring buffer를 하나씩 준다.</strong> consumer가 여러 버퍼를 돌아가며 비우면 lock도 CAS도 없이 SPSC 성질이 유지된다.</li></ul>
+<p>consumer가 둘이 되는 경우도 대칭으로 깨진다. 두 task가 같은 바이트를 읽고 tail을 각자 올린다.</p>
+<hr>
+<h2 id="7-흔한-실수와-증상">7. 흔한 실수와 증상<a class="anchor" href="#7-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>공유 <code>count</code> 필드를 둔다</td><td>몇 시간 뒤 수신이 멈춘다. 리셋하면 정상</td><td><code>count++</code>/<code>count--</code>가 RMW라 lost update</td><td><code>count</code>를 없애고 <code>head - tail</code>로 계산</td></tr><tr><td>index를 <code>% RB_SIZE</code>로 자른다</td><td>full과 empty를 구분 못 해 데이터가 통째로 사라지거나 무한 empty</td><td>물리 위치가 같은 두 상태</td><td>free-running index + 접근 시 마스킹</td></tr><tr><td><code>RB_SIZE</code>가 2의 거듭제곱이 아니다</td><td>특정 index에서만 엉뚱한 칸을 읽는다</td><td><code>h &amp; (SIZE-1)</code>이 틀린 index를 만든다</td><td><code>_Static_assert</code>로 컴파일 타임에 막는다</td></tr><tr><td><code>head</code>만 <code>volatile</code>로 선언한다</td><td><code>-O0</code>에서는 되고 <code>-O2</code>에서 간헐적으로 깨진다</td><td><code>buf[]</code>와의 상대 순서가 보장되지 않는다</td><td><code>_Atomic</code> + release/acquire</td></tr><tr><td>데이터 쓰기 전에 index를 올린다</td><td>수신 스트림에 한 바퀴 전 바이트가 섞인다. CRC 에러</td><td>publish가 데이터보다 먼저 보인다</td><td>데이터 먼저, index 나중 (4.3)</td></tr><tr><td>bulk에서 <code>first = n</code> 클램프를 빼먹는다</td><td>즉시 메모리 손상, 하드폴트</td><td><code>n - first</code>가 unsigned로 wrap</td><td><code>if (first &gt; n) first = n;</code></td></tr><tr><td>full일 때 ISR이 스핀하며 기다린다</td><td>시스템 전체가 멈춘다. watchdog 리셋</td><td>ISR이 consumer를 기다리는데 consumer는 선점당해 있다</td><td>드롭하고 <code>dropped</code> 증가, 나중에 보고</td></tr><tr><td><code>rb_count()</code>를 검사와 접근에 두 번 부른다</td><td>드물게 empty 버퍼를 읽거나 full에 쓴다</td><td>두 호출 사이에 ISR이 끼어든다</td><td>한 번 읽은 지역 변수로 검사와 접근을 모두 처리</td></tr><tr><td>DMA/듀얼코어인데 배리어만 넣는다</td><td>첫 몇 바이트가 오래된 값</td><td>cache가 낀다</td><td>clean/invalidate + cache line 정렬</td></tr></tbody></table></div>
+<hr>
+<h2 id="8-직접-확인하기">8. 직접 확인하기<a class="anchor" href="#8-직접-확인하기" aria-label="link">#</a></h2>
+<figure class="code"><pre><code>cd coding
+make sol N=01     # 모범답안. ok 9줄 + ALL TESTS PASSED
+make run N=01     # 내 구현. 채우기 전에는 첫 assert 에서 멈춘다</code></pre></figure>
+<p>볼 것은 <code>ok</code> 줄 9개와 마지막 <code>ALL TESTS PASSED</code>이고, 경고는 한 줄도 나오면 안 된다. 그리고 일부러 깨뜨려 본다.</p>
+<ul><li><strong>한 칸을 낭비해 보기</strong>: <code>rb_put</code>의 full 조건을 <code>== RB_SIZE - 1u</code>로 바꾸면 <code>test_full_behaviour</code>가 256번째 put에서 실패한다. 256바이트에서는 0.4% 손실이지만 8슬롯짜리 오디오 프레임 큐에서는 12.5%다.</li><li><strong>wrap 보정을 넣어 보기</strong>: <code>rb_count</code>를 <code>return (h &gt;= t) ? (h - t) : (t - h);</code>로 바꾸면 평범한 테스트는 다 통과하는데 <code>test_index_overflow</code>만 실패한다. "그럴듯해 보이는 보정"이 4.3일에 한 번 터지는 버그를 심는다.</li><li><strong>순서를 뒤집어 보기</strong>: <code>rb_put</code>에서 데이터 쓰기와 release store의 순서를 바꿔도 테스트는 <strong>통과한다</strong>. 단일 스레드라 재배치가 드러나지 않기 때문이다. 교훈은 "단위 테스트로는 메모리 순서 버그를 못 잡는다"이고, 진짜로 잡으려면 두 스레드 + ThreadSanitizer(<code>-fsanitize=thread</code>)가 필요하다.</li><li><strong>마스크를 깨뜨려 보기</strong>: <code>RB_SIZE</code>를 200으로 바꾸면 <code>_Static_assert</code>가 컴파일을 막는다. 그 assert를 지우고 빌드하면 <code>test_wrap_around_buffer</code>가 실패한다. 컴파일 타임 검사 한 줄이 런타임 미스터리 하나를 없앤다.</li></ul>
+<hr>
+<h2 id="9-면접에서-말하기">9. 면접에서 말하기<a class="anchor" href="#9-면접에서-말하기" aria-label="link">#</a></h2>
+<p><strong>한국어 설명 흐름</strong> (2분 안에)</p>
+<ol class="tasks"><li>구조: 고정 크기 바이트 배열 하나에 index 두 개. head는 ISR만, tail은 task만 쓴다.</li><li>lock이 없어도 되는 이유: 각 index의 writer가 한 명이라 RMW 경쟁이 없다. 공유 count를 두는 순간 깨진다고 덧붙인다.</li><li>index 설계: 자르지 않고 32-bit로 계속 증가시키고 접근할 때만 마스킹한다. 그래서 <code>head - tail</code>이 그대로 개수고, wrap을 넘어서도 정확하고, 한 칸 낭비 없이 전부 쓴다. 크기는 2의 거듭제곱이어야 하고 <code>_Static_assert</code>로 막는다.</li><li>순서와 실무 디테일: 양쪽 다 데이터 먼저 index 나중, <code>volatile</code>로는 부족한 이유를 한 문장으로. full이면 ISR은 드롭하고 카운터를 올린다. 단일 코어에서는 사실상 컴파일러 배리어지만 DMA나 듀얼코어면 <code>DMB</code>와 캐시 관리가 진짜로 필요하다.</li></ol>
+<p><strong>그대로 쓸 영어 문장 5개</strong></p>
+<ol class="tasks"><li>"Head is written only by the ISR and tail only by the task, so each index has exactly one writer and I don't need a lock."</li><li>"I keep the indices free-running as 32-bit counters and mask on access, so head minus tail is the fill level even across the 2^32 wrap, and I get to use every slot instead of wasting one."</li><li>"The producer writes the data first and then publishes head with a release store; the consumer reads head with acquire before touching the payload — that pairing is what gives me happens-before."</li><li>"Volatile alone isn't enough here: it stops the compiler from eliding the access, but it says nothing about the ordering between the payload write and the index update."</li><li>"On a single-core Cortex-M this is effectively a compiler barrier, but it becomes a real DMB — plus cache clean and invalidate on an M7 — the moment DMA or a second core touches the buffer."</li></ol>
+<p><strong>화이트보드에 그릴 순서</strong></p>
+<ol><li>칸 8개짜리 배열을 그리고 <code>H</code>, <code>T</code>를 같은 자리에 찍는다. "이게 empty다." 3개를 채워 <code>H</code>를 옮기고, 1개를 빼서 <code>T</code>를 옮긴다.</li><li><code>H</code>를 배열 끝까지 밀어 앞으로 넘긴 뒤 <code>H</code>와 <code>T</code>가 같은 칸에 오는 두 경우를 나란히 그린다. "물리 위치만 보면 구분이 안 된다." 옆에 <code>head = 9</code>, <code>tail = 1</code>을 쓰고 <code>9 - 1 = 8 = SIZE</code>라고 적는다. "그래서 안 자른다."</li><li>마지막에 producer와 consumer를 세로 두 줄로 그리고 <code>buf 쓰기 -&gt; head publish</code>, <code>head 읽기 -&gt; buf 읽기</code>를 화살표로 잇는다. 화살표 위에 <code>release</code>와 <code>acquire</code>라고 쓴다.</li></ol>
+<hr>
+<h2 id="10-follow-up-답안">10. follow-up 답안<a class="anchor" href="#10-follow-up-답안" aria-label="link">#</a></h2>
+<p><strong>1. "What changes if a second ISR also writes into this buffer?"</strong> <code>head</code> 갱신이 진짜 read-modify-write가 되면서 SPSC 가정이 깨진다. 우선순위가 다른 두 ISR은 서로 선점하므로 6.5의 인터리빙이 그대로 발생한다. 두 ISR이 같은 슬롯에 쓰고 head는 한 번만 올라가 바이트가 유실된다. 선택지는 세 가지다. BASEPRI로 해당 우선순위 구간만 막는 짧은 critical section, <code>LDREX</code>/<code>STREX</code> CAS로 슬롯을 예약하는 방식(예약과 게시가 분리되면서 consumer 쪽 상태가 복잡해진다), 그리고 실무에서 가장 흔한 답인 producer마다 버퍼를 하나씩 주고 consumer가 돌아가며 비우는 방식이다. 마지막 것이 SPSC 성질을 유지하면서 코드도 제일 단순하다.</p>
+<p><strong>2. "The DMA controller wants to write directly into the buffer. What API do you need to add?"</strong> DMA는 연속된 물리 영역에만 쓸 수 있으므로 "지금 head부터 몇 바이트를 연속으로 쓸 수 있는가"를 돌려주는 API가 필요하다. <code>uint32_t rb_claim(rb, uint8_t **ptr)</code>처럼 포인터와 길이를 주고, DMA 완료 인터럽트에서 <code>rb_commit(rb, n)</code>이 실제로 전송된 만큼 head를 release store로 올린다. 길이는 <code>min(free, RB_SIZE - (head &amp; MASK))</code>다. wrap 지점에서는 한 번의 DMA로 다 못 채우므로 두 번으로 나누거나, 링을 두 블록으로 보고 핑퐁으로 돌린다. 그리고 DMA는 별도 bus master라 여기서는 <code>DMB</code>가 진짜로 필요하고, D-cache가 있는 코어라면 <code>rb_commit</code> 전에 invalidate가 들어간다. 버퍼는 cache line 경계에 정렬한다.</p>
+<p><strong>3. "I want to queue fixed-size records so a reader never sees half a record."</strong> 두 가지 길이 있다. 하나는 바이트 링을 유지하되 슬롯 단위로 바꾸는 것이다. <code>uint8_t buf[]</code> 대신 <code>record_t buf[N_SLOTS]</code>를 두고 index를 레코드 단위로 센다. <code>N_SLOTS</code>가 2의 거듭제곱이면 마스킹이 그대로 통하고, 레코드 전체를 쓴 다음 head를 한 번 올리니 부분 노출이 원천적으로 없다. 다른 하나는 가변 길이를 지원해야 할 때인데, 길이 프리픽스를 붙여 바이트 링에 넣고 <code>rb_write</code>로 헤더와 페이로드를 한 번에 게시한다. 이때 레코드가 wrap을 가로지르면 길이 필드 자체가 쪼개질 수 있으므로, 남은 공간이 레코드보다 작으면 끝을 패딩으로 버리고 처음부터 쓰는 규칙을 둔다. 고정 크기로 갈 수 있으면 고정 크기가 항상 더 낫다.</p>
+<p><strong>4. "How do you wake the consumer task, and how do you avoid waking it once per byte?"</strong> FreeRTOS면 ISR에서 <code>vTaskNotifyGiveFromISR()</code>를 부르고 <code>portYIELD_FROM_ISR(xHigherPriorityTaskWoken)</code>으로 마무리한다. Zephyr면 <code>k_sem_give()</code>이고 ISR에서 호출해도 안전하다. 바이트마다 깨우면 context switch 비용이 데이터 처리 비용을 넘어서고 배터리 기기에서는 전력 문제가 된다. 세 가지 방법을 섞는다. UART의 idle line 인터럽트나 RX FIFO watermark를 써서 여러 바이트가 모였을 때만 인터럽트가 나게 하고, 링버퍼 점유율이 임계치를 넘을 때만 알림을 보내고, 짧은 타임아웃 타이머로 데이터가 적게 와도 결국은 처리되게 보장한다. 참고로 Zephyr에는 이미 <code>ring_buf</code> API가 있어서 실제 프로젝트라면 그걸 먼저 검토한다.</p>
+<p><strong>5. "Two different cores sharing SRAM, one of them has a data cache. What breaks and what do you add?"</strong> 세 가지가 동시에 문제가 된다. 첫째, 두 코어는 서로의 프로그램 순서를 보장받지 못하므로 컴파일러 배리어로는 부족하고 진짜 <code>DMB</code>가 필요하다. release/acquire로 짜 두면 컴파일러가 알아서 넣어 준다. 둘째, 캐시 일관성이 하드웨어로 유지되지 않는 조합이면 한쪽이 쓴 데이터가 자기 캐시에만 남는다. 공유 영역을 MPU로 non-cacheable하게 잡는 것이 가장 단순한 해법이고, 성능이 필요하면 clean/invalidate를 명시적으로 넣되 cache line 경계에 맞춰 버퍼를 정렬한다. 셋째, 두 코어의 워드 크기나 구조체 패딩이 다르면 <code>ringbuf_t</code>의 레이아웃 자체가 어긋나므로 공유 구조체는 고정 폭 타입만 쓰고 정렬을 명시한다. 그리고 한쪽 코어가 리셋되는 경우를 생각해서 매직 넘버와 버전 필드를 헤더에 두는 것이 보통이다.</p>
+<hr>
+<h2 id="11-요약-체크리스트">11. 요약 &amp; 체크리스트<a class="anchor" href="#11-요약-체크리스트" aria-label="link">#</a></h2>
+<p>핵심 세 줄로 줄이면 이렇다.</p>
+<ul><li><strong>소유권</strong>: head는 producer만, tail은 consumer만 store 한다. 공유 <code>count</code>를 두는 순간 lock이 필요해진다.</li><li><strong>index</strong>: 자르지 말고 32-bit free-running으로 두고 접근할 때만 <code>&amp; (SIZE-1)</code>. 그래서 <code>head - tail</code>이 개수고, wrap도 full/empty도 공짜로 해결된다.</li><li><strong>순서</strong>: 양쪽 다 데이터 먼저, index 나중. <code>volatile</code>이 아니라 release/acquire다.</li></ul>
+<ul class="tasks"><li class="task"><label><input type="checkbox" > 빈 화면에서 10분 안에 <code>ringbuf_t</code>, <code>rb_init</code>, <code>rb_put</code>, <code>rb_get</code>, <code>rb_count</code>를 쓸 수 있다.</label></li><li class="task"><label><input type="checkbox" > 왜 lock이 필요 없는지를 "각 index의 writer가 한 명"이라는 문장으로 설명할 수 있다.</label></li><li class="task"><label><input type="checkbox" > 공유 <code>count</code>가 깨지는 인터리빙을 t0부터 t8까지 표로 그릴 수 있다.</label></li><li class="task"><label><input type="checkbox" > full과 empty에서 물리 위치가 같아지는 그림을 그리고, free-running index가 그걸 어떻게 구분하는지 보일 수 있다. <code>RB_SIZE</code>가 2의 거듭제곱이어야 하는 이유와 <code>_Static_assert</code>도 함께 말할 수 있다.</label></li><li class="task"><label><input type="checkbox" > <code>volatile</code>이 보장하는 것과 보장하지 않는 것을 각각 한 문장으로 말할 수 있다.</label></li><li class="task"><label><input type="checkbox" > release store와 acquire load가 짝을 이뤄 happens-before를 만드는 과정을 화살표로 그릴 수 있고, 단일 코어와 DMA·듀얼코어에서 그것이 각각 무엇으로 컴파일되는지 안다.</label></li><li class="task"><label><input type="checkbox" > bulk write가 memcpy 두 번으로 쪼개지는 이유와 head를 한 번만 올려야 하는 이유를 안다.</label></li><li class="task"><label><input type="checkbox" > producer가 둘이 되면 무엇이 깨지는지, 그리고 세 가지 해법을 댈 수 있다.</label></li><li class="task"><label><input type="checkbox" > <code>make sol N=01</code>이 <code>ALL TESTS PASSED</code>를 찍는 것을 직접 확인했다.</label></li></ul>
+    <div class="nav"><a class="next" href="02_i2s_pingpong.html"><span class="dir">다음 →</span><span class="nm">02. I2S DMA 핑퐁 버퍼 핸드오프 — 해설</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-한-문장으로">0. 한 문장으로</a></li><li class="l2"><a href="#1-왜-이-자료구조-패턴이-필요한가-하드웨어에서-출발">1. 왜 이 자료구조/패턴이 필요한가 — 하드웨어에서 출발</a></li><li class="l2"><a href="#2-먼저-그림으로-이해하기">2. 먼저 그림으로 이해하기</a></li><li class="l2"><a href="#3-잘못된-구현부터-보기">3. 잘못된 구현부터 보기</a></li><li class="l3"><a href="#3-1-순진한-버전-공유-count">3.1 순진한 버전: 공유 count</a></li><li class="l3"><a href="#3-2-두-번째-실수-rb_size로-index를-잘라-버리기">3.2 두 번째 실수: % RB_SIZE로 index를 잘라 버리기</a></li><li class="l3"><a href="#3-3-세-번째-실수-순서가-뒤집히는-것-volatile로는-못-막는다">3.3 세 번째 실수: 순서가 뒤집히는 것 — volatile로는 못 막는다</a></li><li class="l2"><a href="#4-한-줄씩-만들기">4. 한 줄씩 만들기</a></li><li class="l3"><a href="#4-1-단계-1-자료구조에서-경쟁을-없앤다-두-문맥이-함께-쓰는-변수-제거">4.1 단계 1 — 자료구조에서 경쟁을 없앤다 (두 문맥이 함께 쓰는 변수 제거)</a></li><li class="l3"><a href="#4-2-단계-2-개수를-뺄셈으로-구한다-full-empty를-저장하지-말고-계산">4.2 단계 2 — 개수를 뺄셈으로 구한다 (full/empty를 저장하지 말고 계산)</a></li><li class="l3"><a href="#4-3-단계-3-producer-데이터-먼저-index-나중-3-3의-재배치를-막는다">4.3 단계 3 — producer: 데이터 먼저, index 나중 (3.3의 재배치를 막는다)</a></li><li class="l3"><a href="#4-4-단계-4-consumer-producer의-거울상">4.4 단계 4 — consumer: producer의 거울상</a></li><li class="l3"><a href="#4-5-단계-5-bulk-바이트마다가-아니라-마지막에-한-번만-publish">4.5 단계 5 — bulk: 바이트마다가 아니라 마지막에 한 번만 publish</a></li><li class="l2"><a href="#5-전체-코드-읽기">5. 전체 코드 읽기</a></li><li class="l2"><a href="#6-동시성-메모리-관점">6. 동시성·메모리 관점</a></li><li class="l3"><a href="#6-1-왜-lock이-필요-없는가-소유권-그림">6.1 왜 lock이 필요 없는가 — 소유권 그림</a></li><li class="l3"><a href="#6-2-release-acquire-쌍이-하는-일">6.2 release-acquire 쌍이 하는 일</a></li><li class="l3"><a href="#6-3-volatile은-무엇을-하고-무엇을-안-하는가">6.3 volatile은 무엇을 하고 무엇을 안 하는가</a></li><li class="l3"><a href="#6-4-실제-하드웨어에서-저-배리어는-무엇이-되는가">6.4 실제 하드웨어에서 저 배리어는 무엇이 되는가</a></li><li class="l3"><a href="#6-5-producer가-둘이-되면-무엇이-깨지는가">6.5 producer가 둘이 되면 무엇이 깨지는가</a></li><li class="l2"><a href="#7-흔한-실수와-증상">7. 흔한 실수와 증상</a></li><li class="l2"><a href="#8-직접-확인하기">8. 직접 확인하기</a></li><li class="l2"><a href="#9-면접에서-말하기">9. 면접에서 말하기</a></li><li class="l2"><a href="#10-follow-up-답안">10. follow-up 답안</a></li><li class="l2"><a href="#11-요약-체크리스트">11. 요약 &amp; 체크리스트</a></li></ol></aside>
+</div><script>
+const KEY='hark_notes_read_v1', TKEY='hark_notes_theme', CKEY='hark_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

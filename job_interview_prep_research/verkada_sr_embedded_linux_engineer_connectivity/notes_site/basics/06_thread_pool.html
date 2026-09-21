@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>06. Worker pool + graceful shutdown — 동시성 버그는 종료 코드에 산다</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+
+.check{margin:26px 0;border:1px solid var(--line);border-radius:12px;background:var(--paper);overflow:hidden}
+.check-h{font-size:12px;letter-spacing:.06em;color:var(--accent);padding:10px 16px;
+         border-bottom:1px solid var(--line);background:var(--accent-soft)}
+details.qa{border-bottom:1px solid var(--line)}
+details.qa:last-child{border-bottom:0}
+details.qa summary{list-style:none;cursor:pointer;display:flex;gap:12px;align-items:flex-start;
+                   padding:13px 16px;font-family:var(--serif);font-size:16px;line-height:1.55}
+details.qa summary::-webkit-details-marker{display:none}
+.qn{font-family:var(--mono);font-size:11px;color:var(--muted);padding-top:4px;min-width:24px}
+.qt{flex:1}
+.rv{font-family:var(--sans);font-size:11px;color:var(--accent);border:1px solid var(--accent);
+    border-radius:999px;padding:2px 9px;white-space:nowrap;margin-top:2px}
+details.qa[open] .rv{background:var(--accent);color:#fff}
+details.qa[open] .rv::after{content:""}
+.ans{padding:2px 16px 14px 52px}
+.ans p{font-size:15.5px;line-height:1.7;margin:0 0 10px}
+section.chapter{scroll-margin-top:70px}
+.ch-foot{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;
+         margin:40px 0 10px;padding:18px 20px;border:1px dashed var(--line);border-radius:12px}
+.ch-foot .done{font:inherit;font-size:14px;padding:9px 16px;border-radius:999px;cursor:pointer;
+               border:1.5px solid var(--ok);background:transparent;color:var(--ok)}
+.ch-foot .done.on{background:var(--ok);color:#fff}
+.ch-foot a.nx{font-family:var(--serif);font-size:15px;text-decoration:none}
+aside li.ch a{font-weight:600;color:var(--ink)}
+aside li.ch.done a::before{content:"✓ ";color:var(--ok)}
+aside li.sub{display:none;padding-left:14px;font-size:12.5px}
+aside li.sub.show{display:block}
+.resume{font:inherit;font-size:13px;margin-top:16px;padding:9px 16px;border-radius:999px;cursor:pointer;
+        border:1.5px solid var(--accent);background:var(--accent);color:#fff}
+#chprog{font-size:12px;color:var(--muted);white-space:nowrap}
+</style></head>
+<body data-note="basics/06_thread_pool">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">기초 노트 · 06. Worker pool + graceful shutdown — 동시성 버그는 종료 코드에 산다</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">기초 노트 · Foundations</div>
+      <h1>06. Worker pool + graceful shutdown — 동시성 버그는 종료 코드에 산다</h1>
+      <div class="meta"><span>15분 읽기</span><span>300줄</span><span>14개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong></p>
+<ul><li>워커 풀의 제출/실행/종료 경로를 락 규칙과 함께 직접 쓸 수 있다</li><li>drain 종료와 즉시 종료의 차이, 그리고 각각이 필요한 상황을 구분할 수 있다</li><li>종료에서 터지는 edge case 다섯 가지를 먼저 꺼내 말할 수 있다</li></ul>
+<p><strong>선행</strong>: <code>00_start_here</code> 의 §4 조건 변수, §7 종료와 정리. <code>01_bounded_queue</code> 가 이 풀의 큐 부분이다.</p>
+<p><strong>연습</strong>: <code>make run N=06</code> (내 구현) · <code>make sol N=06</code> (모범답안) · <code>make tsan N=06</code></p></blockquote>
+<hr>
+<h2 id="0-한-문장으로">0. 한 문장으로<a class="anchor" href="#0-한-문장으로" aria-label="link">#</a></h2>
+<p><strong>워커 풀은 "일감 큐 + 고정된 스레드 N개"이고, 어려운 부분은 만드는 쪽이 아니라 끝내는 쪽이다.</strong> 게이트웨이의 로그 업로드·설정 동기화·헬스체크를 스레드를 매번 만들지 않고 처리하는 구조이며, 재부팅·워치독 상황에서 깔끔히 멈출 수 있어야 한다.</p>
+<hr>
+<h2 id="1-왜-필요한가-비유로-시작">1. 왜 필요한가 — 비유로 시작<a class="anchor" href="#1-왜-필요한가-비유로-시작" aria-label="link">#</a></h2>
+<p>식당 주방에 요리사 4명이 있다. 주문표를 한 장 뽑아 요리하고, 끝나면 다시 줄을 본다. 줄이 비면 팔짱 끼고 기다린다(= <code>cond_wait</code>). 문제는 영업 종료다.</p>
+<figure class="code"><pre><code> DRAIN (정상 재부팅) "새 주문은 안 받고, 꽂힌 주문표는 다 만들고 퇴근합니다"
+ STOP  (워치독/긴급)  "지금 불 위에 있는 것만 끝내고 나머지 주문표는 버립니다"
+ 잘못된 마감          사장이 불만 끄고 나감 → 자던 요리사는 영원히 주방에 남음
+                      = broadcast를 안 해서 워커가 cond_wait에서 못 깨어난 상태</code></pre></figure>
+<p>베어메탈 대응: 태스크 큐에서 잡을 뽑아 도는 스케줄러 루프와 같다. <code>pthread_join</code> 을 빼먹고 큐를 <code>free</code> 하면 use-after-free다.</p>
+<hr>
+<h2 id="2-알아야-할-개념">2. 알아야 할 개념<a class="anchor" href="#2-알아야-할-개념" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>한 줄 정의</th><th>왜 존재하나</th><th>Don이 아는 것과의 대응</th></tr></thead><tbody><tr><td>thread pool</td><td>미리 만든 스레드 N개가 큐에서 일을 뽑아 처리</td><td>스레드 생성 비용과 개수 폭발을 막는다</td><td>고정 태스크 슬롯</td></tr><tr><td><code>TaskFn</code></td><td><code>void (*)(void *)</code> 함수 포인터</td><td>큐에 "무슨 일"을 담기 위해</td><td>콜백 테이블, ISR 벡터</td></tr><tr><td>graceful shutdown</td><td>진행 중인 것을 존중하며 멈추기(drain)</td><td>끊긴 업로드는 데이터 손상</td><td>안전한 리셋 시퀀스</td></tr><tr><td><code>pthread_join</code></td><td>그 스레드가 끝날 때까지 기다림</td><td>자원 해제 시점을 정하기 위해</td><td>태스크 종료 확인 플래그</td></tr><tr><td><code>broadcast</code> vs <code>signal</code></td><td>전부 깨움 vs 하나만 깨움</td><td>종료는 전부 깨워야 한다</td><td>이벤트 플래그 전체 세트</td></tr></tbody></table></div>
+<hr>
+<h2 id="3-문제-읽기">3. 문제 읽기<a class="anchor" href="#3-문제-읽기" aria-label="link">#</a></h2>
+<p>요구를 쪼개면 상태 머신이 바로 나온다.</p>
+<ol><li><strong>종료 모드가 둘</strong> → 불리언으로 부족하다. <code>POOL_RUNNING / POOL_DRAIN / POOL_STOP</code> 세 상태.</li><li><strong>drain은 남은 작업 실행</strong> → 워커의 종료 조건이 "큐가 비었다 <strong>또는</strong> STOP"이다.</li><li><strong>즉시 종료는 큐 폐기</strong> → 버린 개수를 <code>discarded</code> 로 세야 불변식이 성립한다.</li><li><strong>종료 후 submit 거부</strong> → <code>pool_submit</code> 이 <code>false</code> 를 돌려주고 <code>rejected</code> 를 센다.</li><li><strong>자원 해제는 join 후</strong> → <code>pool_shutdown</code> 이 join까지 끝내고 반환한다.</li></ol>
+<figure class="code"><span class="lang">c</span><pre><code>typedef struct {
+    pthread_t      *workers;
+    size_t          nworkers;
+    Task           *q;
+    size_t          cap, head, count;
+    PoolState       state;
+    unsigned long   executed, rejected, discarded;
+    pthread_mutex_t m;
+    pthread_cond_t  work, slot;
+} Pool;</code></pre></figure>
+<p>조건 변수가 둘인 이유는 대기 이유가 둘이기 때문이다. 워커는 "일감이 없어서"(<code>work</code>), 제출자는 "자리가 없어서"(<code>slot</code>) 기다린다. 하나로 합치면 깨워야 할 쪽을 못 깨워 hang할 수 있다. <code>executed</code>/<code>rejected</code>/<code>discarded</code> 는 05의 <code>dropped</code> 와 같다 — 세어두지 않으면 종료를 증명할 수 없다.</p>
+<hr>
+<h2 id="4-단계별로-만들기">4. 단계별로 만들기<a class="anchor" href="#4-단계별로-만들기" aria-label="link">#</a></h2>
+<h3 id="4-1-워커가-일감을-꺼내는-부분-종료-판정이-여기-있다">4-1. 워커가 일감을 꺼내는 부분 — 종료 판정이 여기 있다<a class="anchor" href="#4-1-워커가-일감을-꺼내는-부분-종료-판정이-여기-있다" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static bool pool_take(Pool *p, Task *out)
+{
+    pthread_mutex_lock(&amp;p-&gt;m);
+    while (p-&gt;count == 0 &amp;&amp; p-&gt;state == POOL_RUNNING)
+        pthread_cond_wait(&amp;p-&gt;work, &amp;p-&gt;m);</code></pre></figure>
+<p>대기 조건은 "일감이 없고 <strong>아직 running이면</strong>" 잔다는 뜻이다. DRAIN이나 STOP으로 바뀌면 이 <code>while</code> 이 거짓이 되므로 broadcast로 깨어난 워커는 다시 자지 않는다. <code>&amp;&amp; p-&gt;state == POOL_RUNNING</code> 이 빠지면 종료를 알려도 워커가 계속 잠들어 join이 안 끝난다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>    if (p-&gt;count == 0 || p-&gt;state == POOL_STOP) {
+        if (p-&gt;state == POOL_STOP) {           /* 남은 작업은 버린다 */
+            p-&gt;discarded += p-&gt;count;
+            p-&gt;count = 0;
+        }
+        pthread_mutex_unlock(&amp;p-&gt;m);
+        return false;                          /* 워커 종료 */
+    }</code></pre></figure>
+<p>여기가 두 종료 모드를 가르는 조건이다. "큐가 비었거나 <strong>또는</strong> STOP"이므로, DRAIN 상태에서 일이 남아 있으면 둘 다 거짓이라 계속 일한다 — 이것이 drain이다. STOP이면 즉시 <code>false</code> 이고 남은 <code>count</code> 를 <code>discarded</code> 에 더한 뒤 0으로 만든다(먼저 도착한 워커가 비우므로 중복이 없다). <code>discarded</code> 를 안 세면 <code>executed + discarded == submitted</code> 가 깨진다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>    *out = p-&gt;q[p-&gt;head];
+    p-&gt;head = (p-&gt;head + 1) % p-&gt;cap;
+    p-&gt;count--;
+    p-&gt;executed++;
+    pthread_mutex_unlock(&amp;p-&gt;m);
+    pthread_cond_signal(&amp;p-&gt;slot);
+    return true;
+}</code></pre></figure>
+<p>일감을 복사해 나오고 자리가 <strong>하나</strong> 났으니 <code>slot</code> 에 <code>signal</code> 로 충분하다(05의 배치 pop과 대비된다).</p>
+<h3 id="4-2-일감-실행은-반드시-락-밖에서">4-2. 일감 실행은 반드시 락 밖에서<a class="anchor" href="#4-2-일감-실행은-반드시-락-밖에서" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static void *worker_main(void *arg)
+{
+    Pool *p = arg;
+    Task t;
+    while (pool_take(p, &amp;t))
+        t.fn(t.arg);                           /* 작업 실행은 반드시 락 밖에서 */
+    return NULL;
+}</code></pre></figure>
+<p><code>pool_take</code> 는 락을 잡았다 놓고 나오므로 <code>t.fn(t.arg)</code> 는 락 없이 실행된다. 이게 절대적인 이유는 셋이다.</p>
+<ol><li><strong>병렬성</strong>: 락을 쥔 채 실행하면 워커 4개여도 한 번에 하나만 일한다. 풀을 만든 의미가 없다.</li><li><strong>데드락</strong>: 일감이 그 안에서 <code>pool_submit</code> 을 부르면 같은 mutex를 다시 잠그려다 데드락한다.</li><li><strong>지연</strong>: 일감이 1초 걸리면 그동안 제출자도 다른 워커도 큐에 접근하지 못한다.</li></ol>
+<p><strong>락은 자료구조를 만지는 동안만 잡고 사용자 코드를 부를 때는 잡지 않는다</strong> — 콜백을 부르는 모든 코드의 규칙이다.</p>
+<h3 id="4-3-제출-두-번-검사한다">4-3. 제출 — 두 번 검사한다<a class="anchor" href="#4-3-제출-두-번-검사한다" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>bool pool_submit(Pool *p, TaskFn fn, void *arg)
+{
+    pthread_mutex_lock(&amp;p-&gt;m);
+    if (p-&gt;state != POOL_RUNNING) {            /* 종료 중에는 새 작업 거부 */
+        p-&gt;rejected++;
+        pthread_mutex_unlock(&amp;p-&gt;m);
+        return false;
+    }
+    while (p-&gt;count == p-&gt;cap &amp;&amp; p-&gt;state == POOL_RUNNING)
+        pthread_cond_wait(&amp;p-&gt;slot, &amp;p-&gt;m);    /* 큐가 차면 제출자가 기다린다 */
+    if (p-&gt;state != POOL_RUNNING) {
+        p-&gt;rejected++;
+        pthread_mutex_unlock(&amp;p-&gt;m);
+        return false;
+    }</code></pre></figure>
+<p>상태 검사가 <strong>두 번</strong> 나온다. 처음 것은 "이미 종료 중인 풀에 제출"을, 두 번째 것은 "기다리는 동안 종료가 시작된 경우"를 막는다. <code>cond_wait</code> 은 락을 놓고 자므로 깨어나면 항상 다시 검사한다. 두 번째 검사가 없으면 종료 중인 큐에 일감이 들어가 실행되지도 <code>discarded</code> 로 세어지지도 않아 불변식이 깨진다. <code>rejected</code> 를 세는 것도 "왜 이 작업이 실행 안 됐지?"의 유일한 단서라 설계의 일부다.</p>
+<p>그 아래는 05의 push와 같다. <code>p-&gt;q[(p-&gt;head + p-&gt;count) % p-&gt;cap] = (Task){ fn, arg };</code> 로 꼬리에 넣고 <code>p-&gt;count++</code>, unlock 뒤 <code>pthread_cond_signal(&amp;p-&gt;work)</code>. 일감 하나면 워커 하나만 깨우면 된다 — <code>broadcast</code> 면 4명이 깨어나 3명은 헛걸음한다(thundering herd).</p>
+<h3 id="4-4-종료-상태-broadcast-join-free-순서">4-4. 종료 — 상태, broadcast, join, free 순서<a class="anchor" href="#4-4-종료-상태-broadcast-join-free-순서" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>void pool_shutdown(Pool *p, bool drain)
+{
+    pthread_mutex_lock(&amp;p-&gt;m);
+    p-&gt;state = drain ? POOL_DRAIN : POOL_STOP;
+    pthread_mutex_unlock(&amp;p-&gt;m);
+    /* 잠든 워커와 제출자를 모두 깨운다 — signal이면 하나만 깨어나 hang */
+    pthread_cond_broadcast(&amp;p-&gt;work);
+    pthread_cond_broadcast(&amp;p-&gt;slot);
+
+    for (size_t i = 0; i &lt; p-&gt;nworkers; i++)
+        pthread_join(p-&gt;workers[i], NULL);     /* join 후에만 자원 해제 */
+
+    free(p-&gt;workers);
+    free(p-&gt;q);
+    pthread_mutex_destroy(&amp;p-&gt;m);
+    pthread_cond_destroy(&amp;p-&gt;work);
+    pthread_cond_destroy(&amp;p-&gt;slot);
+}</code></pre></figure>
+<p>순서가 곧 정확성이다. 네 단계를 하나라도 바꾸면 버그가 난다.</p>
+<ol><li><strong>상태 변경은 락 안에서.</strong> 락 밖에서 쓰면 워커가 <code>while</code> 조건을 평가하는 순간과 겹쳐 data race다.</li><li><strong>broadcast는 양쪽 다.</strong> <code>work</code> 만 깨우면 <code>slot</code> 에서 자던 제출자가 남고, <code>signal</code> 이면 워커 1명만 깨어나 나머지는 join에서 영원히 멈춘다.</li><li><strong>join은 모든 워커에 대해.</strong> 하나라도 빼먹으면 그 스레드가 아래에서 <code>free</code> 한 메모리를 계속 만진다.</li><li><strong>free는 join 뒤에.</strong> 순서를 바꾸면 100% use-after-free다. ASan이 잡아주지만 이 순서는 외워두는 편이 낫다.</li></ol>
+<hr>
+<h2 id="5-전체-흐름-따라가기">5. 전체 흐름 따라가기<a class="anchor" href="#5-전체-흐름-따라가기" aria-label="link">#</a></h2>
+<p>STOP 모드 종료를 워커 2명 기준으로 따라간다.</p>
+<figure class="code"><pre><code> main                      W1                  W2              state   count
+ ---------------------------------------------------------------------------
+ submit × 10               task A 실행 중      cond_wait       RUNNING    9
+ shutdown(drain=false)
+   lock/state=STOP/unlock                                      STOP       9
+   broadcast(work, slot)                       깨어남 → take():
+   join(W1) 대기           task A 끝           state==STOP, count 이미 0
+                           take(): state==STOP → return false → 종료
+                           discarded += 9, count = 0          STOP       0
+   join(W1)/join(W2) 반환  return false → 종료
+   free(workers), free(q)</code></pre></figure>
+<p><code>discarded += 9</code> 를 먼저 도달한 워커가 처리하고 <code>count</code> 를 0으로 만든다는 점이 포인트다 — 두 워커가 각각 9씩 더하면 <code>executed + discarded == submitted</code> 가 깨진다. DRAIN 모드면 <code>state == POOL_STOP</code> 이 거짓이라 워커들이 큐가 빌 때까지 일하고, <code>count == 0</code> 이 된 순간에야 나간다.</p>
+<hr>
+<h2 id="6-흔한-실수와-증상">6. 흔한 실수와 증상<a class="anchor" href="#6-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>왜</th><th>고치는 법</th></tr></thead><tbody><tr><td>종료 시 <code>signal</code> 사용</td><td><code>pthread_join</code> 에서 영구 hang</td><td>워커 하나만 깨어나고 나머지는 계속 잠</td><td><code>broadcast</code> 를 양쪽 조건 변수에</td></tr><tr><td>join 전에 <code>free</code></td><td>세그폴트, ASan use-after-free</td><td>워커가 해제된 큐를 접근</td><td>join 전부 끝낸 뒤 free</td></tr><tr><td>락 잡은 채 <code>t.fn()</code> 호출</td><td>워커 N개인데 처리량이 1개분, 또는 데드락</td><td>사용자 코드가 같은 락을 다시 잡을 수 있다</td><td><code>pool_take</code> 에서 락을 놓고 나온 뒤 실행</td></tr><tr><td>종료 후 submit을 조용히 무시</td><td>작업이 사라졌는데 원인 불명</td><td>반환값도 카운터도 없음</td><td><code>false</code> 반환 + <code>rejected++</code></td></tr><tr><td><code>pool_shutdown</code> 두 번 호출</td><td>double free, 이미 join한 스레드 join</td><td>이 구현은 shutdown과 destroy가 붙어 있다</td><td>아래 설명대로 분리 + <code>state</code> 로 멱등화</td></tr><tr><td>오래 걸리는 blocking 작업</td><td>종료가 몇 초씩 지연</td><td>실행 중 작업은 끝까지 기다린다</td><td>작업에 cancel 플래그를 넘겨 스스로 빠져나오게</td></tr></tbody></table></div>
+<p>표의 마지막 두 줄은 따로 볼 값어치가 있다.</p>
+<p><strong>blocking 작업과 종료 지연.</strong> 실행 중인 일감은 끝까지 실행되므로 소켓 <code>recv</code> 에서 30초를 기다리면 종료도 30초 걸린다. 해법은 풀이 아니라 일감 쪽이다 — 취소 플래그(self-pipe / eventfd)를 인자로 넘겨 스스로 빠져나오게 하거나, 소켓이면 타임아웃 또는 <code>shutdown(fd, SHUT_RDWR)</code> 로 깨운다.</p>
+<p><strong>shutdown 두 번 호출.</strong> 이 파일의 <code>pool_shutdown</code> 은 종료와 자원 해제를 한꺼번에 하므로 두 번 부르면 이미 join한 스레드를 다시 join하고 이미 <code>free</code> 한 포인터를 다시 <code>free</code> 한다 — UB다. 테스트 case 3 주석도 <code>shutdown이 자원을 해제했으므로 여기서 submit하면 UAF</code> 라고 짚는다. 실무 API는 <code>pool_shutdown()</code>(상태만 바꾸고 join, 여러 번 안전)과 <code>pool_destroy()</code>(해제, 한 번)로 나누고, 멱등성은 <code>if (p-&gt;state != POOL_RUNNING) { unlock; return; }</code> 로 확보한다.</p>
+<hr>
+<h2 id="7-직접-확인하기">7. 직접 확인하기<a class="anchor" href="#7-직접-확인하기" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">sh</span><pre><code>make sol N=06</code></pre></figure>
+<figure class="code"><pre><code>drain : submitted=5000 executed=5000 counter=5000 discarded=0
+stop  : submitted=2000 executed=1947 discarded=53
+06 PASS</code></pre></figure>
+<p>첫 줄이 drain의 정의 그 자체다. 5000개 제출, 5000개 실행, 폐기 0. <code>counter</code> 가 <code>executed</code> 와 일치한다는 건 큐 통계와 실제 실행이 어긋나지 않았다는 뜻이다. 둘째 줄은 즉시 종료다. <code>1947 + 53 == 2000</code> — <strong>실행됐거나 버려졌거나 둘 중 하나이고 사라진 건 없다.</strong> 합이 안 맞으면 <code>assert(p2.executed + p2.discarded == submitted)</code> 가 터진다.</p>
+<p><code>make tsan N=06</code> 은 깨끗해야 한다. 공유 상태가 전부 <code>p-&gt;m</code> 안에서만 접근되기 때문이다. 경고가 나온다면 카운터를 락 밖에서 읽었거나 <code>p-&gt;state</code> 를 락 없이 검사한 것이다. <code>main</code> 이 shutdown 반환 후 <code>p.executed</code> 를 읽는 건 안전하다 — <strong>join의 happens-before가 락을 대신한다.</strong></p>
+<hr>
+<h2 id="8-면접에서-말하기">8. 면접에서 말하기<a class="anchor" href="#8-면접에서-말하기" aria-label="link">#</a></h2>
+<ul><li>워커 풀 자체는 bounded queue에 스레드 N개를 붙인 것이고, 어려운 건 종료 경로다.</li><li>종료 모드를 drain과 immediate로 나눈다. 정상 재부팅은 남은 작업을 처리하고, 워치독은 진행 중인 것만 끝낸다.</li><li>종료 신호는 반드시 broadcast다. signal이면 잠든 워커 중 하나만 깨어나고 나머지는 join에서 멈춘다.</li><li>일감 함수는 락을 놓고 호출한다. 안 그러면 병렬성이 사라지고, 일감이 다시 submit하면 데드락이다.</li><li>종료 후 제출은 false로 거부하고 rejected를, 버려진 작업은 discarded를 센다. blocking 작업은 종료를 지연시키므로 작업 쪽에 취소 신호를 전달한다.</li></ul>
+<ul class="tasks"><li>The pool is a bounded queue plus N worker threads; the interesting part is shutdown, not dispatch.</li><li>I support two modes: drain, which finishes queued work for a clean reboot, and immediate, which finishes only in-flight tasks.</li><li>Shutdown must broadcast, not signal — a signal wakes one worker and the rest stay blocked, so join hangs forever.</li><li>Tasks run with the mutex released. Holding it would serialize the workers and would deadlock if a task submitted more work.</li><li>Submits after shutdown are rejected and counted, discarded tasks are counted too, and a long blocking task delays shutdown unless I pass a cancellation signal into the task.</li></ul>
+<hr>
+<h2 id="9-요약-체크리스트">9. 요약 &amp; 체크리스트<a class="anchor" href="#9-요약-체크리스트" aria-label="link">#</a></h2>
+<p>워커 풀은 세 상태(<code>RUNNING</code>/<code>DRAIN</code>/<code>STOP</code>)와 두 조건 변수(<code>work</code>/<code>slot</code>)로 굴러간다. 워커는 "일감이 없고 running이면" 자고, 깨어나서 "비었거나 STOP이면" 종료한다. 종료는 락 안에서 상태 변경 → 양쪽 broadcast → 전부 join → free 순서이며 이 순서가 곧 안전성이다. 일감은 락 밖에서 실행하고, 거부·폐기는 카운터로 남겨 <code>executed + discarded == submitted</code> 를 검증한다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" > 세 가지 상태와 각 상태에서 워커가 하는 일, 조건 변수를 두 개 쓰는 이유를 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > 종료에서 <code>signal</code> 대신 <code>broadcast</code> 를 쓰는 이유를 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > 상태 변경 → broadcast → join → free 순서를 외우고 각 단계의 이유를 안다</label></li><li class="task"><label><input type="checkbox" > 일감을 락 밖에서 실행해야 하는 이유를 세 가지 댈 수 있다</label></li><li class="task"><label><input type="checkbox" > shutdown을 두 번 불러도 안전하게 만들려면 무엇을 바꿔야 하는지 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > blocking 작업이 종료를 지연시킬 때의 해법을 설명할 수 있다</label></li></ul>
+    <div class="nav"><a class="prev" href="05_drop_policy_queue.html"><span class="dir">← 이전</span><span class="nm">05. Backpressure &amp; drop policy — 링크가 끊겨도 죽지 않는 텔레메트리 큐</span></a><a class="next" href="07_periodic_timer.html"><span class="dir">다음 →</span><span class="nm">07. 주기 실행 + 취소 가능한 대기 — drift 없이 100ms마다, 종료는 즉시</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-한-문장으로">0. 한 문장으로</a></li><li class="l2"><a href="#1-왜-필요한가-비유로-시작">1. 왜 필요한가 — 비유로 시작</a></li><li class="l2"><a href="#2-알아야-할-개념">2. 알아야 할 개념</a></li><li class="l2"><a href="#3-문제-읽기">3. 문제 읽기</a></li><li class="l2"><a href="#4-단계별로-만들기">4. 단계별로 만들기</a></li><li class="l3"><a href="#4-1-워커가-일감을-꺼내는-부분-종료-판정이-여기-있다">4-1. 워커가 일감을 꺼내는 부분 — 종료 판정이 여기 있다</a></li><li class="l3"><a href="#4-2-일감-실행은-반드시-락-밖에서">4-2. 일감 실행은 반드시 락 밖에서</a></li><li class="l3"><a href="#4-3-제출-두-번-검사한다">4-3. 제출 — 두 번 검사한다</a></li><li class="l3"><a href="#4-4-종료-상태-broadcast-join-free-순서">4-4. 종료 — 상태, broadcast, join, free 순서</a></li><li class="l2"><a href="#5-전체-흐름-따라가기">5. 전체 흐름 따라가기</a></li><li class="l2"><a href="#6-흔한-실수와-증상">6. 흔한 실수와 증상</a></li><li class="l2"><a href="#7-직접-확인하기">7. 직접 확인하기</a></li><li class="l2"><a href="#8-면접에서-말하기">8. 면접에서 말하기</a></li><li class="l2"><a href="#9-요약-체크리스트">9. 요약 &amp; 체크리스트</a></li></ol></aside>
+</div><script>
+const KEY='vk_notes_read_v1', TKEY='vk_notes_theme', CKEY='vk_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

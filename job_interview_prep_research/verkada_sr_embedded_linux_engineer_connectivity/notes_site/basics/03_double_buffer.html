@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>03. Double buffering — 락으로 데이터가 아니라 '소유권'을 지킨다</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+
+.check{margin:26px 0;border:1px solid var(--line);border-radius:12px;background:var(--paper);overflow:hidden}
+.check-h{font-size:12px;letter-spacing:.06em;color:var(--accent);padding:10px 16px;
+         border-bottom:1px solid var(--line);background:var(--accent-soft)}
+details.qa{border-bottom:1px solid var(--line)}
+details.qa:last-child{border-bottom:0}
+details.qa summary{list-style:none;cursor:pointer;display:flex;gap:12px;align-items:flex-start;
+                   padding:13px 16px;font-family:var(--serif);font-size:16px;line-height:1.55}
+details.qa summary::-webkit-details-marker{display:none}
+.qn{font-family:var(--mono);font-size:11px;color:var(--muted);padding-top:4px;min-width:24px}
+.qt{flex:1}
+.rv{font-family:var(--sans);font-size:11px;color:var(--accent);border:1px solid var(--accent);
+    border-radius:999px;padding:2px 9px;white-space:nowrap;margin-top:2px}
+details.qa[open] .rv{background:var(--accent);color:#fff}
+details.qa[open] .rv::after{content:""}
+.ans{padding:2px 16px 14px 52px}
+.ans p{font-size:15.5px;line-height:1.7;margin:0 0 10px}
+section.chapter{scroll-margin-top:70px}
+.ch-foot{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;
+         margin:40px 0 10px;padding:18px 20px;border:1px dashed var(--line);border-radius:12px}
+.ch-foot .done{font:inherit;font-size:14px;padding:9px 16px;border-radius:999px;cursor:pointer;
+               border:1.5px solid var(--ok);background:transparent;color:var(--ok)}
+.ch-foot .done.on{background:var(--ok);color:#fff}
+.ch-foot a.nx{font-family:var(--serif);font-size:15px;text-decoration:none}
+aside li.ch a{font-weight:600;color:var(--ink)}
+aside li.ch.done a::before{content:"✓ ";color:var(--ok)}
+aside li.sub{display:none;padding-left:14px;font-size:12.5px}
+aside li.sub.show{display:block}
+.resume{font:inherit;font-size:13px;margin-top:16px;padding:9px 16px;border-radius:999px;cursor:pointer;
+        border:1.5px solid var(--accent);background:var(--accent);color:#fff}
+#chprog{font-size:12px;color:var(--muted);white-space:nowrap}
+</style></head>
+<body data-note="basics/03_double_buffer">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">기초 노트 · 03. Double buffering — 락으로 데이터가 아니라 '소유권'을 지킨다</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">기초 노트 · Foundations</div>
+      <h1>03. Double buffering — 락으로 데이터가 아니라 '소유권'을 지킨다</h1>
+      <div class="meta"><span>19분 읽기</span><span>299줄</span><span>16개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong></p>
+<ul><li>생산자를 한 번도 블록시키지 않으면서 소비자가 tearing 없는 프레임만 보게 만들 수 있다</li><li>"락은 데이터가 아니라 소유권을 보호한다"는 설계를 코드로 옮길 수 있다</li><li>버퍼 개수와 drop 정책의 관계를 설명하고, triple buffering 이 왜 필요한지 말할 수 있다</li></ul>
+<p><strong>선행</strong>: <code>00_start_here</code> 의 §3 (mutex), §6 (실시간 데이터 전달 패턴), <code>01_bounded_queue</code> <strong>연습</strong>: <code>make run N=03</code> (내 구현) · <code>make sol N=03</code> (모범답안) · <code>make tsan N=03</code></p></blockquote>
+<hr>
+<h2 id="0-한-문장으로">0. 한 문장으로<a class="anchor" href="#0-한-문장으로" aria-label="link">#</a></h2>
+<p><strong>버퍼 두 개를 번갈아 쓰면서, 생산자가 한쪽을 채우는 동안 소비자는 다른 쪽을 읽게 하는 패턴(ping-pong)</strong> 이다. 리크루터 메일에 주제가 직접 적혀 있고, 센서 프레임이나 카메라 프레임처럼 "최신값만 맞으면 되는 데이터"를 실시간 경로에서 넘길 때 쓴다.</p>
+<hr>
+<h2 id="1-왜-필요한가-비유로-시작">1. 왜 필요한가 — 비유로 시작<a class="anchor" href="#1-왜-필요한가-비유로-시작" aria-label="link">#</a></h2>
+<p>칠판이 두 개 있다. 선생님(생산자)은 한 칠판에 글을 쓰고 학생(소비자)은 다른 칠판을 읽는다. 선생님이 다 쓰면 두 칠판을 <strong>바꾼다</strong>. 학생이 읽는 도중에 선생님이 그 칠판을 지우고 새로 쓰는 일은 절대 없으므로, 학생은 <strong>반쯤 지워진 글</strong>을 볼 일이 없다.</p>
+<figure class="code"><pre><code>   상태 A                          swap             상태 B
+  ┌──────────┐ ┌──────────┐               ┌──────────┐ ┌──────────┐
+  │ WRITER   │ │ READER   │   ────────▶   │ READER   │ │ WRITER   │
+  │ buf0 채움 │ │ buf1 읽음 │               │ buf0 읽음 │ │ buf1 채움 │
+  └──────────┘ └──────────┘               └──────────┘ └──────────┘</code></pre></figure>
+<p>베어메탈에서 이미 해 본 것이다. <strong>ping-pong DMA</strong> — DMA 가 buf[0] 을 채우는 동안 CPU 가 buf[1] 을 처리하고, 완료 인터럽트에서 디스크립터를 바꿔 끼운다. 여기서 달라지는 건 "완료 인터럽트" 자리에 <strong>mutex 로 보호되는 인덱스 교체</strong>가 들어간다는 것뿐이다.</p>
+<p><strong>왜 그냥 큐(문제 01)를 안 쓰나?</strong> 프레임이 512바이트~수 MB 라 큐에 넣으려면 <strong>복사</strong>를 해야 하는데 그 비용이 크고, 소비자가 느려서 큐가 차면 01은 생산자를 <strong>블록</strong>시킨다. 센서/DMA 는 기다릴 수 없다 — 프레임이 밀리면 하드웨어 오버런이 난다. 그래서 요구가 이렇게 바뀐다. <strong>복사하지 않는다. 생산자는 절대 기다리지 않는다. 소비자가 못 따라오면 중간 프레임은 버린다 — 어차피 필요한 건 최신 프레임이다.</strong></p>
+<hr>
+<h2 id="2-알아야-할-개념">2. 알아야 할 개념<a class="anchor" href="#2-알아야-할-개념" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>한 줄 정의</th><th>왜 존재하나 / 내가 아는 것과의 대응</th></tr></thead><tbody><tr><td>tearing</td><td>절반만 갱신된 데이터를 읽는 것</td><td>프레임 앞은 새 값, 뒤는 옛 값. 화면 찢김의 그 tearing</td></tr><tr><td>소유권(ownership)</td><td>이 버퍼를 지금 만질 자격이 누구에게 있는가</td><td>락이 보호하는 진짜 대상. DMA 디스크립터 소유 비트와 같은 개념</td></tr><tr><td>publish</td><td>다 채운 버퍼를 "이제 읽어도 된다"고 공개하는 것</td><td>02의 release store 와 같은 역할, 여기서는 mutex 가 대신한다</td></tr><tr><td>drop</td><td>소비되지 못한 프레임을 버리는 것</td><td>반드시 <strong>센다</strong>. 조용히 버리면 현장에서 원인 추적이 불가능</td></tr><tr><td>latest-only</td><td>최신값만 의미 있는 데이터</td><td>RSRP 같은 신호 품질, 온도, 카메라 프레임</td></tr><tr><td>ping-pong / triple buffering</td><td>버퍼 2개를 번갈아 씀 / 3개로 늘려 writer 가 막히지 않게 함</td><td>DMA ping-pong 과 동일. <code>NBUF</code> 를 3으로 바꾸면 이 코드가 그대로 된다</td></tr></tbody></table></div>
+<h3 id="핵심-아이디어-락은-데이터가-아니라-소유권을-지킨다">핵심 아이디어: 락은 데이터가 아니라 소유권을 지킨다<a class="anchor" href="#핵심-아이디어-락은-데이터가-아니라-소유권을-지킨다" aria-label="link">#</a></h3>
+<p>보통 배우는 방식은 "공유 데이터를 락으로 감싸라"다. 그대로 하면 <code>lock(); memcpy(dst, src, 512); unlock();</code> 이 되고, 생산자와 소비자가 서로를 <strong>복사 시간만큼</strong> 기다린다. 프레임이 커질수록 나빠진다.</p>
+<p>이 문제의 답은 다르다. <strong>데이터는 락 밖에서 만지고, 락 안에서는 인덱스 몇 개만 바꾼다.</strong> 락은 "지금 이 버퍼를 누가 소유하는가"만 지킨다. 소유권이 겹치지 않으면 데이터 접근은 애초에 동시에 일어나지 않으므로 보호할 필요가 없다. 임계구역은 인덱스 두세 개를 바꾸는 것뿐이라 수 나노초다. 각 버퍼는 항상 셋 중 하나의 상태다.</p>
+<figure class="code"><pre><code>              write_begin          commit         read_acquire
+   ┌────────┐ ──────────▶ ┌────────┐ ────────▶ ┌───────┐ ──────────▶ ┌────────┐
+   │  FREE  │             │ WRITER │           │ READY │             │ READER │
+   └────────┘             └────────┘           └───────┘             └────────┘
+       ▲  ▲                 채우는 중           publish됨              읽는 중
+       │  └──── write_begin 이 훔침 (drop) ────────┘                      │
+       └──────────────────── read_release ────────────────────────────────┘</code></pre></figure>
+<hr>
+<h2 id="3-문제-읽기">3. 문제 읽기<a class="anchor" href="#3-문제-읽기" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>요구</th><th>설계에 주는 제약</th></tr></thead><tbody><tr><td>tearing 절대 금지</td><td>reader 가 들고 있는 버퍼는 writer 가 <strong>절대</strong> 건드리지 않는다</td></tr><tr><td>생산자 블로킹 금지</td><td><code>db_write_begin</code> 은 <strong>항상 성공</strong> → 쓸 곳이 없으면 뭔가를 버린다</td></tr><tr><td>복사 금지</td><td>버퍼 <strong>포인터</strong>를 넘긴다. 데이터 write/read 는 락 밖에서</td></tr><tr><td>최신 프레임만 필요</td><td>오래된 READY 는 덮어써도 된다. 대신 카운트한다. 소비할 게 없으면 <code>db_read_acquire</code> 는 블로킹 없이 <code>NULL</code> 반환</td></tr></tbody></table></div>
+<figure class="code"><span class="lang">c</span><pre><code>typedef struct {
+    Frame           buf[NBUF];
+    int             write_idx;      /* writer 소유 버퍼, 없으면 -1 */
+    int             ready_idx;      /* publish된 최신 버퍼, 없으면 -1 */
+    int             reader_idx;     /* reader 대여 중 버퍼, 없으면 -1 */
+    unsigned long   dropped;        /* 소비되지 못하고 버려진 프레임 수 */
+    pthread_mutex_t m;
+} DoubleBuf;</code></pre></figure>
+<p>인덱스 세 개가 그대로 세 가지 소유 상태다(<code>-1</code> 은 "해당 없음"). <code>dropped</code> 를 구조체 필드로 들고 있는 것도 설계의 일부다 — <strong>버릴 거면 반드시 센다.</strong> <strong>불변식</strong>은 이렇다.</p>
+<figure class="code"><pre><code>  write_idx, ready_idx, reader_idx 는 서로 같을 수 없다 (-1 제외)
+  reader_idx 가 가리키는 버퍼는 writer 가 절대 쓰지 않는다   ← tearing 방지의 전부
+  세 인덱스와 dropped 는 오직 m 을 잡은 상태에서만 읽고 쓴다
+  생산자는 하나뿐이다 (write_idx 가 하나이므로)</code></pre></figure>
+<p>API 가 <strong>획득/반납 쌍</strong>으로 되어 있는 것 자체가 소유권 이전을 표현한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>Frame *db_write_begin(DoubleBuf *db);   /* writer: 채울 버퍼 확보(항상 성공) */
+void   db_write_commit(DoubleBuf *db);  /* writer: publish */
+Frame *db_read_acquire(DoubleBuf *db);  /* reader: 최신 프레임 대여, 없으면 NULL */
+void   db_read_release(DoubleBuf *db);  /* reader: 반납 */</code></pre></figure>
+<hr>
+<h2 id="4-단계별로-만들기">4. 단계별로 만들기<a class="anchor" href="#4-단계별로-만들기" aria-label="link">#</a></h2>
+<h3 id="4-1-초기화-1-이-기본값">4.1 초기화 — <code>-1</code> 이 기본값<a class="anchor" href="#4-1-초기화-1-이-기본값" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>void db_init(DoubleBuf *db)
+{
+    memset(db, 0, sizeof *db);
+    db-&gt;write_idx = db-&gt;ready_idx = db-&gt;reader_idx = -1;
+    pthread_mutex_init(&amp;db-&gt;m, NULL);
+}</code></pre></figure>
+<p><code>memset</code> 으로 0 을 채운 <strong>다음</strong> 세 인덱스를 <code>-1</code> 로 덮는다. 0 은 유효한 버퍼 번호라서 "없음"을 뜻할 수 없기 때문이다. <code>memset</code> 뒤에 <code>pthread_mutex_init</code> 을 부르는 순서도 중요하다 — 반대로 하면 초기화된 mutex 를 0 으로 밀어 버린다.</p>
+<h3 id="4-2-write_begin-빈-버퍼를-찾고-없으면-ready-를-희생시킨다">4.2 write_begin — 빈 버퍼를 찾고, 없으면 READY 를 희생시킨다<a class="anchor" href="#4-2-write_begin-빈-버퍼를-찾고-없으면-ready-를-희생시킨다" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>Frame *db_write_begin(DoubleBuf *db)
+{
+    pthread_mutex_lock(&amp;db-&gt;m);
+    int idx = -1;
+    for (int i = 0; i &lt; NBUF; i++) {              /* 아무도 소유하지 않은 버퍼 */
+        if (i != db-&gt;ready_idx &amp;&amp; i != db-&gt;reader_idx) { idx = i; break; }
+    }
+    if (idx &lt; 0) {
+        /* reader가 하나, READY가 하나를 차지 → READY를 희생시킨다.
+         * (절대 reader 버퍼는 건드리지 않는다: 그게 tearing의 원인) */
+        idx = db-&gt;ready_idx;
+        db-&gt;ready_idx = -1;
+        db-&gt;dropped++;
+    }
+    db-&gt;write_idx = idx;
+    pthread_mutex_unlock(&amp;db-&gt;m);
+    return &amp;db-&gt;buf[idx];                          /* 데이터 write는 락 밖에서 */
+}</code></pre></figure>
+<p>먼저 <code>ready_idx</code> 도 <code>reader_idx</code> 도 아닌 버퍼, 즉 <strong>FREE 버퍼</strong>를 찾는다. <code>write_idx</code> 를 검사하지 않아도 되는 이유는 생산자가 하나뿐이라 이 함수에 들어온 시점에 <code>write_idx == -1</code> 이 보장되기 때문이다(직전 commit 이 <code>-1</code> 로 되돌린다). <code>NBUF == 2</code> 에서 FREE 가 없다는 건 <strong>reader 가 하나, READY 가 하나</strong>를 차지했다는 뜻이다. 생산자는 기다릴 수 없으므로 둘 중 하나를 빼앗아야 하는데 선택지는 하나뿐이다. reader 버퍼를 빼앗으면 소비자가 읽는 중에 데이터가 바뀐다 = <strong>tearing</strong>, 절대 금지. READY 버퍼를 빼앗으면 아직 아무도 안 읽은 프레임 하나가 사라진다 = <strong>drop</strong>, 허용. 요구사항이 *최신 프레임만 필요*이므로 정확히 옳은 선택이고, 대신 <code>dropped++</code> 로 <strong>반드시 센다</strong>.</p>
+<p>마지막 줄이 이 설계의 요점이다. <strong>버퍼 포인터를 반환하고 락을 놓는다.</strong> 호출자는 락 밖에서 느긋하게 512바이트를 채우고, 그동안 소비자는 자유롭게 다른 버퍼를 읽는다. <strong><code>db-&gt;write_idx = idx;</code> 를 빼먹으면</strong> commit 이 <code>-1</code> 을 publish 해서 소비자가 영원히 프레임을 못 받는다.</p>
+<h3 id="4-3-write_commit-인덱스-두-개-옮기는-게-전부">4.3 write_commit — 인덱스 두 개 옮기는 게 전부<a class="anchor" href="#4-3-write_commit-인덱스-두-개-옮기는-게-전부" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>void db_write_commit(DoubleBuf *db)
+{
+    pthread_mutex_lock(&amp;db-&gt;m);
+    if (db-&gt;ready_idx &gt;= 0)
+        db-&gt;dropped++;                             /* 소비 전에 더 새 프레임이 나옴 */
+    db-&gt;ready_idx  = db-&gt;write_idx;                /* publish */
+    db-&gt;write_idx  = -1;
+    pthread_mutex_unlock(&amp;db-&gt;m);
+}</code></pre></figure>
+<p>이 줄 이후로 그 버퍼는 writer 소유가 아니다. <code>if (db-&gt;ready_idx &gt;= 0) db-&gt;dropped++;</code> 는 <strong>다른 종류의 drop</strong> 이다 — 소비자가 가져가기 전에 더 새로운 프레임이 완성돼 옛 READY 가 밀려난 경우다. 4.2의 drop 이 "쓸 곳이 없어서 빼앗은 것"이라면 이건 "더 새 게 나와서 밀려난 것"이고, 둘 다 세야 <code>read + dropped + leftover == 생산한 프레임 수</code> 가 맞는다.</p>
+<p>여기서 조용히 일어나는 중요한 일이 하나 있다. 생산자는 <strong>락 밖에서</strong> 512바이트를 썼는데 소비자가 그 데이터를 제대로 볼까? 본다. 생산자의 데이터 write 는 이 함수의 <code>pthread_mutex_lock</code> 보다 앞에 있고, <code>unlock</code> 은 release 로 동작하며, 소비자는 <code>db_read_acquire</code> 에서 <strong>같은 mutex 를</strong> lock(acquire) 한다. 그래서 "unlock 이전에 쓴 모든 것"이 "lock 이후"에 보인다(<code>00_start_here</code> §3). 02에서 손으로 짜야 했던 release/acquire 짝을 여기서는 <strong>mutex 가 공짜로 해 준다.</strong></p>
+<h3 id="4-4-read_acquire-ready-를-reader-소유로-이전">4.4 read_acquire — READY 를 reader 소유로 이전<a class="anchor" href="#4-4-read_acquire-ready-를-reader-소유로-이전" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>Frame *db_read_acquire(DoubleBuf *db)
+{
+    Frame *f = NULL;
+    pthread_mutex_lock(&amp;db-&gt;m);
+    if (db-&gt;reader_idx &lt; 0 &amp;&amp; db-&gt;ready_idx &gt;= 0) {
+        db-&gt;reader_idx = db-&gt;ready_idx;            /* READY를 reader 소유로 이전 */
+        db-&gt;ready_idx  = -1;
+        f = &amp;db-&gt;buf[db-&gt;reader_idx];
+    }
+    pthread_mutex_unlock(&amp;db-&gt;m);
+    return f;
+}</code></pre></figure>
+<p>조건이 둘이다. <code>reader_idx &lt; 0</code> 은 "이미 하나 대여 중이면 또 빌려주지 않는다"(안 그러면 반납 짝이 안 맞는다), <code>ready_idx &gt;= 0</code> 은 "publish 된 게 있어야 한다"이다. 그리고 <code>db-&gt;ready_idx = -1;</code> 이 핵심이다. READY 에서 빼내는 순간 writer 가 이 버퍼를 빼앗을 후보에서 사라진다. <strong>이 한 줄이 tearing 을 막는다.</strong> 가져갈 게 없으면 <code>NULL</code> 을 반환하고 <strong>블로킹하지 않는다</strong>. 그다음은 호출자 몫이다 — 테스트는 폴링하지만 실제 코드라면 condvar 로 재우는 게 맞다(테스트 주석도 그렇게 적혀 있다).</p>
+<h3 id="4-5-read_release-반납">4.5 read_release — 반납<a class="anchor" href="#4-5-read_release-반납" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>void db_read_release(DoubleBuf *db)
+{
+    pthread_mutex_lock(&amp;db-&gt;m);
+    db-&gt;reader_idx = -1;                           /* 다시 free 상태로 */
+    pthread_mutex_unlock(&amp;db-&gt;m);
+}</code></pre></figure>
+<p>한 줄이지만 <strong>빼먹으면 곧바로 망가진다.</strong> <code>reader_idx</code> 가 계속 잡혀 있으면 writer 는 매 프레임 READY 를 빼앗아야 하고(<code>dropped</code> 폭증), <code>db_read_acquire</code> 는 <code>reader_idx &lt; 0</code> 조건 때문에 영원히 <code>NULL</code> 을 반환한다 — <strong>완전한 stall</strong> 이다. 락 없이 대입만 해도 될 것 같지만 안 된다. 그 대입이 writer 에게 보이는 시점이 보장되지 않고, TSan 은 정확히 여기에 data race 를 보고한다.</p>
+<hr>
+<h2 id="5-전체-흐름-따라가기">5. 전체 흐름 따라가기<a class="anchor" href="#5-전체-흐름-따라가기" aria-label="link">#</a></h2>
+<p><code>NBUF = 2</code> 에서 소비자가 느릴 때다. 표기는 <code>W</code>=writer 소유, <code>R</code>=ready, <code>C</code>=reader 소유.</p>
+<figure class="code"><pre><code> 시간 ↓  생산자                         소비자              buf0   buf1   dropped
+  t0     write_begin → idx 0            (없음)              W      -        0
+  t1     seq=1, memset (락 밖)                              W      -        0
+  t2     write_commit → ready=0                             R      -        0
+  t3                                    read_acquire → 0    C      -        0
+  t4     write_begin → idx 1 (FREE)                         C      W        0
+  t5     seq=2, memset (락 밖)                              C      W        0
+  t6     write_commit → ready=1                             C      R        0
+  t7     write_begin: FREE 없음!                            C      R        0
+  t8       → ready(1) 을 빼앗음         (아직 seq=1 읽는 중) C      W        1
+  t9     seq=3, memset (락 밖)                              C      W        1
+  t10    write_commit → ready=1                             C      R        1
+  t11                                   read_release        -      R        1
+  t12                                   read_acquire → 1    -      C        1</code></pre></figure>
+<p>t8 이 이 문제의 전부다. 생산자는 <strong>기다리지 않았고</strong>, 소비자가 읽던 buf0 은 <strong>건드리지 않았고</strong>, 대신 아직 아무도 안 읽은 seq=2 프레임을 버리고 카운트했다. 소비자는 t12 에서 seq=1 다음에 seq=3 을 받는다 — 프레임은 건너뛰었지만 <strong>찢어지지는 않았다.</strong> <code>NBUF</code> 를 3으로 바꾸면 t7 에서 세 번째 FREE 버퍼가 있어 drop 이 사라진다. 이게 <strong>triple buffering</strong> 이고, 이 코드는 상수 하나만 바꾸면 그대로 동작한다(<code>#define NBUF 2 /* 3으로 바꾸면 그대로 triple buffering이 된다 */</code>). 트레이드오프는 명확하다 — 메모리 한 프레임분을 더 쓰는 대신 drop 을 줄이고, 대신 latency 가 한 프레임 늘어날 수 있다. "메모리 vs 최신성"의 선택이고, 면접에서 이렇게 정리해 말하면 좋다.</p>
+<hr>
+<h2 id="6-흔한-실수와-증상">6. 흔한 실수와 증상<a class="anchor" href="#6-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>왜</th><th>고치는 법</th></tr></thead><tbody><tr><td>락 안에서 프레임을 복사</td><td>동작은 맞지만 느리고 생산자가 밀림</td><td>임계구역에 512바이트 memcpy 가 들어감</td><td>포인터만 넘기고 데이터는 락 밖에서</td></tr><tr><td>writer 가 reader 버퍼를 빼앗음</td><td><code>torn &gt; 0</code>, 프레임 앞뒤 값이 다름</td><td>읽는 중에 덮어씀 = tearing</td><td>FREE 가 없으면 <strong>READY</strong> 를 희생</td></tr><tr><td><code>read_acquire</code> 에서 <code>ready_idx = -1</code> 생략</td><td>간헐적 tearing</td><td>writer 가 여전히 그 버퍼를 후보로 봄</td><td>대여 시 READY 에서 반드시 뺀다</td></tr><tr><td><code>db_read_release</code> 누락</td><td><code>dropped</code> 폭증 후 완전 stall</td><td><code>reader_idx</code> 가 영원히 잡혀 있음</td><td>acquire/release 를 쌍으로</td></tr><tr><td>인덱스를 락 없이 수정</td><td>TSan data race, 드물게 두 인덱스가 같아짐</td><td>가시성·원자성 없음</td><td>세 인덱스 전부 락 안에서만</td></tr><tr><td>drop 을 세지 않음</td><td>현장에서 "프레임이 튄다"를 설명 못 함</td><td>증거가 없음</td><td><code>dropped</code> 카운터 + 텔레메트리</td></tr><tr><td><code>db_write_begin</code> 이 실패 가능</td><td>생산자가 재시도/블로킹 → 하드웨어 오버런</td><td>실시간 제약 위반</td><td>항상 성공하도록 drop 정책 내장</td></tr></tbody></table></div>
+<hr>
+<h2 id="7-직접-확인하기">7. 직접 확인하기<a class="anchor" href="#7-직접-확인하기" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">sh</span><pre><code>make sol N=03</code></pre></figure>
+<figure class="code"><pre><code>frames=20000 read=103 dropped=19897 leftover=0 torn=0 ooo=0
+03 PASS</code></pre></figure>
+<p>숫자를 읽는 법은 이렇다.</p>
+<ul><li><code>torn=0</code> — <strong>가장 중요한 값.</strong> 프레임이 하나도 찢어지지 않았다. 0 이 아니면 설계가 틀렸다.</li><li><code>ooo=0</code> — out of order 가 없다. 항상 최신 프레임만 오므로 seq 는 단조 증가해야 한다.</li><li><code>read=103</code>, <code>dropped=19897</code> — <strong>실행할 때마다 크게 달라진다.</strong> 소비자가 프레임마다 512바이트를 전부 검사하느라 생산자보다 훨씬 느려서 대부분이 버려진다. <strong>정상이고 의도된 동작</strong>이다(TSan 빌드에서는 상대 속도가 달라져 <code>read=226</code> 같은 값이 나온다). <code>leftover</code> 는 마지막 프레임이 publish 된 직후 소비자가 종료했으면 1 이다.</li></ul>
+<p>검증의 핵심은 self test 가 프레임 전체를 같은 값으로 채운다는 데 있다(<code>memset(f-&gt;data, (int)(s &amp; 0xFF), FRAME_LEN);</code>). 소비자는 512바이트가 전부 기대값과 같은지 확인하므로, 중간에 writer 가 끼어들어 덮어썼다면 앞뒤 값이 달라져 <strong>tearing 이 반드시 검출된다.</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>unsigned char expect = (unsigned char)(f-&gt;seq &amp; 0xFF);
+for (int i = 0; i &lt; FRAME_LEN; i++) {
+    if (f-&gt;data[i] != expect) { g_torn++; break; }
+}</code></pre></figure>
+<p>마지막 <code>assert(g_read_ok + g_db.dropped + leftover == NFRAMES);</code> 는 회계가 맞는지 본다. <strong>생산한 모든 프레임은 읽혔거나, 버려졌거나, 마지막으로 남아 있다</strong> — 셋 중 하나여야 하고 합이 정확히 맞아야 한다. drop 카운터가 한 군데라도 빠지면 이 assert 가 잡아낸다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>make tsan N=03</code></pre></figure>
+<p>모범답안은 깨끗하다. 인덱스 수정을 락 밖으로 빼거나 <code>db_read_release</code> 의 락을 지우면 <code>WARNING: ThreadSanitizer: data race</code> 가 <code>reader_idx</code> 나 <code>ready_idx</code> 를 지목하며 뜬다.</p>
+<hr>
+<h2 id="8-면접에서-말하기">8. 면접에서 말하기<a class="anchor" href="#8-면접에서-말하기" aria-label="link">#</a></h2>
+<ul><li>"락으로 데이터를 보호하지 않고 <strong>버퍼 소유권</strong>을 보호합니다. 임계구역은 인덱스 몇 개를 바꾸는 것뿐이고, 실제 프레임 read/write 는 락 밖에서 일어납니다. 복사가 없습니다."</li><li>"각 버퍼는 항상 writer 소유, READY, reader 소유 셋 중 하나입니다. reader 가 들고 있는 버퍼는 writer 가 절대 건드리지 않습니다. 그 규칙 하나가 tearing 을 막습니다."</li><li>"생산자는 절대 블록하지 않습니다. 쓸 버퍼가 없으면 아직 소비되지 않은 READY 를 버리고 카운터를 올립니다. 최신 프레임만 의미 있는 데이터라 옳은 선택이고, drop 은 반드시 세서 텔레메트리로 올립니다."</li><li>"버퍼가 2개면 reader 가 하나를 들고 있을 때 drop 이 생기고, 3개로 늘리면 writer 가 막히지 않습니다 — 메모리 한 프레임 대 drop 의 트레이드오프고 이 코드는 상수 하나로 바뀝니다. 데이터를 락 밖에서 쓰는데도 안전한 이유는 commit 의 unlock 과 acquire 의 lock 이 같은 mutex 라 happens-before 가 성립하기 때문입니다."</li></ul>
+<ul><li>"The lock protects buffer <strong>ownership</strong>, not the frame data. The critical section is just a couple of index assignments, so it's nanoseconds and there is no copy."</li><li>"Every buffer is in exactly one of three states: owned by the writer, ready, or owned by the reader. The writer never touches the buffer the reader holds — that's the whole tearing guarantee."</li><li>"The writer never blocks. If no free buffer exists it sacrifices the un-consumed ready buffer and increments a drop counter, which we export as telemetry."</li><li>"With two buffers a slow reader forces drops; a third buffer removes them at the cost of one more frame of memory. Writing the payload outside the lock is still safe because commit's unlock and acquire's lock are on the same mutex, so there's a happens-before edge."</li></ul>
+<hr>
+<h2 id="9-요약-체크리스트">9. 요약 &amp; 체크리스트<a class="anchor" href="#9-요약-체크리스트" aria-label="link">#</a></h2>
+<p>double buffering 은 "실시간 생산자는 기다릴 수 없다"는 제약에서 출발한 설계다. 데이터를 락으로 감싸는 대신 <strong>소유권</strong>을 락으로 관리하고, 버퍼 포인터를 넘겨 복사를 없애고, 쓸 곳이 없으면 reader 버퍼가 아니라 READY 버퍼를 희생하고, 버린 개수를 반드시 센다. 세 인덱스(<code>write_idx</code> / <code>ready_idx</code> / <code>reader_idx</code>)가 곧 세 가지 소유 상태이고, <code>NBUF</code> 를 3으로 올리면 그대로 triple buffering 이 된다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" > 세 가지 소유 상태와 각 상태 전이 함수를 그림으로 그릴 수 있다</label></li><li class="task"><label><input type="checkbox" > "락은 데이터가 아니라 소유권을 보호한다"를 한 문장으로 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > FREE 가 없을 때 READY 를 버리고 reader 버퍼는 안 건드리는 이유를 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > drop 이 두 군데(<code>write_begin</code>, <code>write_commit</code>)에서 발생하는 이유를 각각 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > 락 밖에서 쓴 데이터가 소비자에게 보이는 이유를 mutex 의 happens-before 로 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > double 과 triple buffering 의 트레이드오프를 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > <code>make sol N=03</code> 에서 <code>torn=0 ooo=0</code> 을 직접 확인했다</label></li></ul>
+    <div class="nav"><a class="prev" href="02_spsc_ring.html"><span class="dir">← 이전</span><span class="nm">02. Lock-free SPSC ring buffer — 베어메탈 링버퍼를 C11 atomics 로 다시 쓰기</span></a><a class="next" href="04_seqlock_latest.html"><span class="dir">다음 →</span><span class="nm">04. Latest-value 공유 (seqlock) — writer는 절대 블록되지 않는다</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-한-문장으로">0. 한 문장으로</a></li><li class="l2"><a href="#1-왜-필요한가-비유로-시작">1. 왜 필요한가 — 비유로 시작</a></li><li class="l2"><a href="#2-알아야-할-개념">2. 알아야 할 개념</a></li><li class="l3"><a href="#핵심-아이디어-락은-데이터가-아니라-소유권을-지킨다">핵심 아이디어: 락은 데이터가 아니라 소유권을 지킨다</a></li><li class="l2"><a href="#3-문제-읽기">3. 문제 읽기</a></li><li class="l2"><a href="#4-단계별로-만들기">4. 단계별로 만들기</a></li><li class="l3"><a href="#4-1-초기화-1-이-기본값">4.1 초기화 — -1 이 기본값</a></li><li class="l3"><a href="#4-2-write_begin-빈-버퍼를-찾고-없으면-ready-를-희생시킨다">4.2 write_begin — 빈 버퍼를 찾고, 없으면 READY 를 희생시킨다</a></li><li class="l3"><a href="#4-3-write_commit-인덱스-두-개-옮기는-게-전부">4.3 write_commit — 인덱스 두 개 옮기는 게 전부</a></li><li class="l3"><a href="#4-4-read_acquire-ready-를-reader-소유로-이전">4.4 read_acquire — READY 를 reader 소유로 이전</a></li><li class="l3"><a href="#4-5-read_release-반납">4.5 read_release — 반납</a></li><li class="l2"><a href="#5-전체-흐름-따라가기">5. 전체 흐름 따라가기</a></li><li class="l2"><a href="#6-흔한-실수와-증상">6. 흔한 실수와 증상</a></li><li class="l2"><a href="#7-직접-확인하기">7. 직접 확인하기</a></li><li class="l2"><a href="#8-면접에서-말하기">8. 면접에서 말하기</a></li><li class="l2"><a href="#9-요약-체크리스트">9. 요약 &amp; 체크리스트</a></li></ol></aside>
+</div><script>
+const KEY='vk_notes_read_v1', TKEY='vk_notes_theme', CKEY='vk_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

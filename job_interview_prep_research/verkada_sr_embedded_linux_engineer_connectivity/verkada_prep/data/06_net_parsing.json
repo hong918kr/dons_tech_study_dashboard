@@ -1,0 +1,529 @@
+{
+  "id": "net_parsing",
+  "order": 6,
+  "range": "Q49-58",
+  "icon": "🌐",
+  "track": "core",
+  "title_en": "Networking & Protocol Parsing",
+  "title_ko": "네트워크 · 프로토콜 파싱",
+  "summary_ko": "IPv4/CIDR 비트 연산, 로그에서 IP 추출, RFC 1071 인터넷 체크섬, hex dump, AT 커맨드 응답 FSM, 셀룰러 신호 품질 변환, TLV 길이-접두 프레이밍, SLIP 바이트 스터핑을 소켓 없이 순수 함수로 구현한다. 인터뷰 채점 포인트는 알고리즘이 아니라 실패 경로다 — 엄격한 입력 검증, 버퍼 계약, 부분 수신 재개, 적대적 길이 필드 방어, 그리고 '모름'과 '나쁨'의 구분.",
+  "summary_en": "Implement IPv4/CIDR bit math, IP extraction from logs, the RFC 1071 Internet checksum, a hexdump formatter, an AT-command response FSM, cellular signal-quality conversion, TLV length-prefixed framing and SLIP byte stuffing — all as pure functions over buffers, no sockets. The graded part is the failure path: strict validation, buffer contracts, resumable stream parsing and hostile-input defense.",
+  "verkada_relevance_ko": "Connectivity 팀의 일상 도메인 그 자체다. GC31-E 셀룰러 게이트웨이는 LTE 모뎀과 AT 커맨드로 대화하고(+CSQ/+CREG/+COPS/+CGDCONT), 듀얼 nano SIM 자동 failover 를 신호 품질 등급으로 판단하며, 캐리어가 주는 CGNAT 100.64/10 주소 때문에 아웃바운드 터널+keepalive 구조를 강제당한다. 실제 후보자 후기에서 보고된 코딩 문제가 문자 그대로 \"Extract IP Addresses\" 였고, 라운드 하나는 \"누군가를 연결시키고 Verkada 제품을 트러블슈팅하라\" 였다 — MTU 블랙홀, 169.254 link-local, +CEREG stat 코드 같은 현장 지식이 그대로 평가 대상이다. 동시에 리크루터가 명시한 네 번째 주제 '모듈하고 테스트 가능한 임베디드 소프트웨어 설계' 를 가장 깔끔하게 보여줄 수 있는 세트이기도 하다: 이 로직은 전부 소켓·하드웨어 없이 버퍼 위 순수 함수로 쪼개져 잘린 입력과 악의적 길이를 유닛 테스트로 재현할 수 있다. I/O 는 가장자리에만 둔다.",
+  "concepts": [
+    {
+      "term": "dotted-quad / uint32",
+      "ko": "\"a.b.c.d\"를 (a<<24)|(b<<16)|(c<<8)|d 로. 상위 바이트가 첫 옥텟.",
+      "en": "Pack a dotted quad into a host-order uint32, first octet in the high byte."
+    },
+    {
+      "term": "leading-zero octal trap",
+      "ko": "선행 0을 허용하면 \"010.1.1.1\"이 8진수로 8.1.1.1 이 된다 — ACL/SSRF 우회 취약점.",
+      "en": "Allowing leading zeros lets \"010.1.1.1\" parse as octal 8.1.1.1 — a real ACL/SSRF bypass."
+    },
+    {
+      "term": "prefix mask / shift UB",
+      "ko": "상위 p비트 마스크. p==0 은 특수 처리 — 32비트 값의 32비트 시프트는 C 표준상 UB.",
+      "en": "Top-p-bits mask; special-case p==0 because shifting a 32-bit value by 32 is UB in C."
+    },
+    {
+      "term": "CGNAT 100.64.0.0/10",
+      "ko": "캐리어 대형 NAT 대역. 공인 IP가 아니라 인바운드 연결 불가 → 아웃바운드 터널+keepalive 구조가 강제된다.",
+      "en": "Carrier-grade NAT range: not publicly routable, so devices must hold an outbound tunnel with keepalives."
+    },
+    {
+      "term": "network byte order (htonl/ntohl)",
+      "ko": "네트워크=빅엔디안. 바이트를 (p[0]<<8)|p[1] 로 직접 조립하면 호스트 엔디안과 무관해진다.",
+      "en": "Network order is big-endian; assembling bytes by hand makes the code host-endian independent."
+    },
+    {
+      "term": "Internet checksum (RFC 1071)",
+      "ko": "16비트 1의 보수 합의 보수. 캐리를 되돌려 넣어 순서 무관·증분 갱신 가능. 검증 시 0.",
+      "en": "One's-complement sum of 16-bit words; end-around carry makes it order-independent and incrementally updatable, and verification yields zero."
+    },
+    {
+      "term": "AT command / URC",
+      "ko": "모뎀은 CRLF 텍스트로 답한다. 정보 응답(+CSQ 등)과 최종 결과(OK/ERROR)는 별개의 줄.",
+      "en": "Modems answer in CRLF text; informational responses (+CSQ...) and final results (OK/ERROR) are separate lines."
+    },
+    {
+      "term": "RSSI/RSRP/RSRQ, CSQ 99",
+      "ko": "dBm=-113+2*rssi(0~31). 99는 '모름'이지 '최악'이 아니다 — 혼동하면 SIM failover 무한 루프.",
+      "en": "dBm = -113 + 2*rssi for 0..31; 99 means unknown, not worst — confusing them makes dual-SIM failover loop forever."
+    },
+    {
+      "term": "length-prefixed framing (TLV)",
+      "ko": "[type][len][payload]. 길이 상한 강제와 size_t 오버플로 회피(뺄셈 비교)가 필수.",
+      "en": "[type][len][payload]; must enforce a length cap and compare with subtraction to avoid size_t overflow."
+    },
+    {
+      "term": "SLIP / COBS byte stuffing",
+      "ko": "구분자를 이스케이프해 경계를 만든다. SLIP 최악 2n+2, COBS 최악 n/254+1(상한 보장).",
+      "en": "Escape the delimiter to create frame boundaries: SLIP costs at worst 2n+2, COBS a bounded n/254+1."
+    },
+    {
+      "term": "MTU / PMTUD black hole",
+      "ko": "핑은 되는데 큰 전송만 멈추면 ICMP 'Frag Needed' 차단. MSS clamping 또는 MTU 하향.",
+      "en": "Ping works but bulk transfers hang when ICMP 'fragmentation needed' is filtered; fix with MSS clamping or a lower MTU."
+    },
+    {
+      "term": "stream decoder invariants",
+      "ko": "(1) 부족하면 오프셋 전진 금지 (2) 길이 상한 강제 (3) 더하기 대신 빼기로 경계 비교.",
+      "en": "Never advance the offset on short input, always cap the declared length, and bounds-check with subtraction."
+    }
+  ],
+  "study_note_md": "# 🌐 네트워크 · 프로토콜 파싱 (Networking & Protocol Parsing) — Q49-Q58\n\n> Connectivity 팀이 매일 만지는 바로 그 영역. 셀룰러 모뎀(AT 커맨드), IP 주소·서브넷,\n> 시리얼 링크 위 프레이밍, 체크섬. 실제 후기에서 보고된 코딩 문제가 문자 그대로\n> **\"Extract IP Addresses\"** 였고, 라운드 하나는 **\"제품을 연결시키고 트러블슈팅하라\"** 였다.\n> 전부 소켓 없이 **버퍼 위의 순수 함수**로 쪼갤 수 있다 — 그래서 유닛 테스트가 가능하다.\n\n---\n\n## 1. 핵심 아이디어\n\n이 세트를 한 문장으로: **\"바이트 스트림을 의미 있는 구조로 바꾸되, 입력이 잘리거나\n악의적이거나 말이 안 될 때도 안전하게 실패하라.\"**\n\n인터뷰어가 보는 것은 파싱 알고리즘이 아니라 **실패 경로**다.\n\n| 축 | 질문 | 이 세트에서 |\n|---|---|---|\n| **엄격함** | \"01.2.3.4 는 받나요?\" | Q49 — 선행 0 = 8진 해석 = ACL 우회 취약점 |\n| **버퍼 안전** | \"출력 버퍼가 작으면?\" | Q50, Q54 — 잘라 쓰지 말고 -1, 항상 널 종료 |\n| **부분 입력** | \"read()가 절반만 줬다면?\" | Q55, Q57 — 상태를 들고 재개, 오프셋 전진 금지 |\n| **적대적 입력** | \"len 필드에 0xFFFF가 오면?\" | Q57 — 정책 상한, size_t 오버플로 회피 |\n| **모름 vs 나쁨** | \"+CSQ 99는 최악인가요?\" | Q56 — UNKNOWN ≠ POOR (틀리면 SIM 무한 스왑) |\n\n---\n\n## 2. IPv4 / CIDR 비트 연산 정리\n\n### 2.1 dotted-quad ↔ uint32\n\n```c\n// \"a.b.c.d\" -> (a<<24)|(b<<16)|(c<<8)|d   (host order 정수, 상위 = 첫 옥텟)\nip = (ip << 8) | octet;     // 옥텟마다 8비트 밀어넣기\n// 역변환\nuint8_t a = (ip >> 24) & 0xFF;  // 이하 16, 8, 0\n```\n\n### 2.2 프리픽스 마스크 — **/0 이 함정이다**\n\n```c\nuint32_t cidr_mask(unsigned p) {\n    if (p == 0)  return 0u;              // 0xFFFFFFFF << 32 는 UB!\n    if (p >= 32) return 0xFFFFFFFFu;\n    return 0xFFFFFFFFu << (32 - p);\n}\n```\n\n> C 표준: 시프트량이 피연산자 비트폭 이상이면 **정의되지 않은 동작**. x86에서는\n> 시프트량이 32로 mod 되어 `0xFFFFFFFF` 가 나오고(= 완전히 틀린 답), ARM에서는 0이\n> 나오는 식으로 아키텍처마다 다르다. **면접에서 이걸 먼저 언급하면 즉시 가점이다.**\n\n### 2.3 서브넷 계산 치트시트\n\n| prefix | mask | 호스트 수 | 흔한 용도 |\n|---|---|---|---|\n| /8  | 255.0.0.0 | 16,777,214 | `10.0.0.0/8` 사설 |\n| /10 | 255.192.0.0 | 4,194,302 | `100.64.0.0/10` **CGNAT** |\n| /12 | 255.240.0.0 | 1,048,574 | `172.16.0.0/12` 사설 |\n| /16 | 255.255.0.0 | 65,534 | `192.168.0.0/16` 사설, `169.254.0.0/16` link-local |\n| /24 | 255.255.255.0 | 254 | 전형적 LAN 세그먼트 |\n| /31 | 255.255.255.254 | 2 | 포인트-투-포인트 링크 (RFC 3021) |\n| /32 | 255.255.255.255 | 1 | 호스트 라우트 |\n\n```c\nuint32_t net       = ip & mask;\nuint32_t broadcast = ip | ~mask;\nuint32_t hosts     = (p >= 31) ? (1u << (32 - p)) : (1u << (32 - p)) - 2;  // net/bcast 제외\nbool     same_net  = ((a ^ b) & mask) == 0;   // XOR 트릭: 상위 p 비트가 같은가\n```\n\n### 2.4 알아둘 특수 대역\n\n- `0.0.0.0/8` — \"this network\" / wildcard bind\n- `127.0.0.0/8` — loopback\n- `169.254.0.0/16` — **link-local (APIPA)**. DHCP 실패의 지문. 게이트웨이 트러블슈팅에서\n  \"IP가 169.254.x.x면 DHCP 서버를 못 찾은 것\"은 반드시 말할 수 있어야 한다.\n- `224.0.0.0/4` — multicast (mDNS `224.0.0.251`, 카메라 디스커버리)\n- `100.64.0.0/10` — **CGNAT**. 캐리어가 주는 이 주소는 공인 IP가 아니다.\n\n---\n\n## 3. 엔디안 (htonl / ntohl)\n\n**네트워크 바이트 오더 = 빅엔디안.** 호스트(x86, ARM 리틀엔디안)와 다르다.\n\n```c\nuint32_t net_order = htonl(host_order);   // host-to-network long  (32비트)\nuint16_t net_port  = htons(1883);         // host-to-network short (16비트)\nuint32_t host      = ntohl(net_order);\n```\n\n| | 리틀엔디안 호스트 | 빅엔디안(네트워크) |\n|---|---|---|\n| `0x0A000007` 메모리 배치 | `07 00 00 0A` | `0A 00 00 07` |\n| `htonl` 이 하는 일 | 바이트 스왑 | no-op |\n\n### 실무에서 중요한 세 가지\n\n1. **`htonl` 은 \"빅엔디안으로 바꿔라\"가 아니라 \"네트워크 오더로 바꿔라\"다.** 빅엔디안\n   머신에서는 아무것도 안 한다. 그래서 `htonl` 을 쓴 코드는 이식 가능하다.\n2. **직접 조립하면 htonl 이 필요 없다.** Q53 의 체크섬과 Q57 의 길이 필드는\n   `(p[0] << 8) | p[1]` 로 바이트에서 값을 만든다 — **호스트 엔디안과 완전히 무관**하다.\n   임베디드 프로토콜 코드는 이 스타일이 안전하다(구조체 캐스팅은 정렬·패딩 문제까지 딸려온다).\n3. **구조체를 패킷에 그대로 캐스팅하지 마라.** 패딩, 정렬(unaligned access가 ARM에서\n   fault), 엔디안 세 가지가 동시에 터진다. `memcpy` + 명시적 바이트 조립이 정답.\n\n```c\n// 나쁨: 정렬/패딩/엔디안 세 겹의 지뢰\nstruct hdr *h = (struct hdr *)buf;      // 패딩·정렬·엔디안이 한꺼번에 터진다\n// 좋음: 명시적, 이식 가능, 정렬 무관\nuint16_t len = ((uint16_t)buf[1] << 8) | buf[2];\n```\n\n---\n\n## 4. 인터넷 체크섬 (RFC 1071) 원리\n\n**16비트 1의 보수 합의 1의 보수.**\n\n```c\nuint32_t sum = 0;\nwhile (len > 1) { sum += (p[0] << 8) | p[1]; p += 2; len -= 2; }\nif (len == 1)     sum += p[0] << 8;                 // 홀수 = 상위 바이트로 패딩\nwhile (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);  // 캐리 fold\nreturn ~sum & 0xFFFF;\n```\n\n### 왜 이렇게 생겼나\n\n- **1의 보수 합**은 캐리를 버리지 않고 하위로 되돌린다(end-around carry). 덕분에\n  **덧셈 순서·워드 경계와 무관**하다 → 라우터가 헤더 한 필드(TTL)만 바꿔도\n  전체 재계산 없이 **증분 갱신**이 가능하다 (RFC 1624).\n- **검증 성질**: 체크섬 필드에 결과를 넣고 다시 계산하면 **0** 이 나온다.\n  수신측은 `checksum(buf) == 0` 한 줄이면 끝 — 이게 이 알고리즘의 존재 이유다.\n- 결과가 0x0000 이면 UDP에서는 0xFFFF 로 전송한다(0 = \"체크섬 미사용\" 의미이므로).\n\n### 검출력 비교 — 면접에서 물어보는 지점\n\n| 방식 | 비용 | 검출 못 하는 것 |\n|---|---|---|\n| XOR (NMEA) | 가장 쌈 | 짝수 개 비트 뒤집힘, 바이트 자리바꿈 |\n| **Internet checksum** | 쌈, 증분 갱신 가능 | **워드 자리바꿈(transposition)**, 상쇄되는 오류쌍 |\n| CRC-16/32 | LUT 256엔트리 | 버스트 오류에 강함 — 링크 계층이 쓰는 이유 |\n| SHA/HMAC | 비쌈 | 위·변조 방어 (체크섬은 **보안이 아니다**) |\n\n> 말할 문장: \"체크섬은 **우발적 손상** 탐지용이지 위변조 방어가 아닙니다. 링크 계층 CRC와\n> TLS가 각각 다른 층에서 다른 일을 합니다.\"\n\n---\n\n## 5. AT 커맨드 치트시트\n\n모뎀은 CRLF 로 감싼 텍스트로 대답한다: `<CR><LF>응답<CR><LF>` 그리고 최종 결과\n`OK` 또는 `ERROR`. **응답과 최종 결과는 별개의 줄**이라는 게 파서 설계의 출발점이다.\n\n| 커맨드 | 뜻 | 응답 예 | 해석 |\n|---|---|---|---|\n| `AT` | 살아있나 | `OK` | 기본 헬스체크 |\n| `ATE0` | 에코 끄기 | `OK` | **파서 첫 줄에 명령 에코가 섞이는 원인** |\n| `AT+CPIN?` | SIM 상태 | `+CPIN: READY` | `SIM PIN` = PIN 필요, `ERROR` = SIM 없음 |\n| `AT+CSQ` | 신호 품질 | `+CSQ: 23,99` | rssi 0~31(99=모름), ber 0~7(99=모름) |\n| `AT+CREG?` | 2G/3G 등록 | `+CREG: 0,5` | `<n>,<stat>` |\n| `AT+CEREG?` | **LTE 등록** | `+CEREG: 0,1` | LTE는 CEREG 를 봐야 한다 |\n| `AT+COPS?` | 접속 사업자 | `+COPS: 0,0,\"T-Mobile\",7` | 마지막 = AcT(7 = E-UTRAN/LTE) |\n| `AT+COPS=?` | 사업자 스캔 | 리스트 | **수십 초 블록** — 타임아웃 넉넉히 |\n| `AT+CGDCONT?` | PDP 컨텍스트 | `+CGDCONT: 1,\"IP\",\"apn.carrier.com\"` | APN 설정 확인 |\n| `AT+CGDCONT=1,\"IP\",\"apn\"` | APN 설정 | `OK` | 잘못된 APN = 등록은 되는데 데이터 안 됨 |\n| `AT+CGPADDR=1` | 할당된 IP | `+CGPADDR: 1,\"100.83.12.7\"` | `100.64/10` 이면 **CGNAT** |\n| `AT+CFUN=1,1` | 모뎀 리셋 | `OK` 후 재부팅 | 최후의 수단 |\n\n### `<stat>` 값 (CREG/CEREG) — 외워둘 것\n\n| 값 | 의미 |\n|---|---|\n| 0 | 미등록, 검색 안 함 |\n| **1** | **등록됨, 홈 네트워크** ✅ |\n| 2 | 미등록, **검색 중** (여기서 오래 머물면 안테나/대역 문제) |\n| 3 | **등록 거부** (SIM/가입 문제 — 재시도해도 소용없다) |\n| 4 | 알 수 없음 |\n| **5** | **등록됨, 로밍** ✅ |\n\n### CSQ → dBm\n\n```\ndBm = -113 + 2 * rssi        // rssi 0..31\n  0 -> -113 dBm  (최악)\n 10 ->  -93 dBm\n 23 ->  -67 dBm  (좋음)\n 31 ->  -51 dBm  (최상)\n 99 -> 측정 불가 (안테나 미연결 / 검색 중)\n```\n\nLTE에서는 RSSI 대신 **RSRP**(-140 ~ -44 dBm, 셀 참조신호 세기)와\n**RSRQ**(-20 ~ -3 dB, 품질/간섭)를 본다. 전파가 세도(RSRP 좋음) 간섭이 심하면\n(RSRQ 나쁨) 처리량이 바닥난다 — **\"막대기 꽉 찼는데 느려요\"의 정체**다.\n\n> **99를 -113으로 취급하는 버그**가 실무 단골이다. GC31-E 듀얼 SIM failover가\n> \"모름\"을 \"최악\"으로 읽으면 부팅 직후 매번 SIM을 스왑하고, 스왑하면 다시 모름이 되어\n> **무한 루프**에 빠진다. UNKNOWN은 별도 상태여야 하고, 스왑 판단에는 **히스테리시스**\n> (예: \"3회 연속 POOR일 때만 스왑, 복귀는 GOOD 이상일 때\")가 필요하다.\n\n---\n\n## 6. 프레이밍 방식 비교\n\n시리얼/TCP 는 **스트림**이라 \"메시지 경계\"가 없다. 경계를 만드는 방법은 셋뿐이다.\n\n| 방식 | 오버헤드 | 장점 | 단점 |\n|---|---|---|---|\n| **길이 접두 (TLV)** | 고정 2~4B | 파싱 O(1), 미리 할당 가능, 페이로드 투명 | **길이 필드가 깨지면 스트림 전체가 미아**. 재동기 어려움 |\n| **구분자 (CRLF, `\\0`)** | 1~2B | 사람이 읽기 쉬움, 재동기 쉬움 | 페이로드에 구분자가 못 들어감 → 이스케이프 필요 |\n| **SLIP** (RFC 1055) | 최악 2n+2 | 구현 10줄, 상태 없음, 재동기 즉시 | 크기 최대 2배, 길이를 미리 모름 |\n| **COBS** | **최악 n/254+1** | 0x00 을 완전히 제거, 오버헤드 상한 보장 | 인코딩이 덜 직관적, 전체 블록 필요 |\n| **HDLC/PPP** | 프레임당 ~6B | CRC + 주소/제어, 검증된 표준 | 무겁다 |\n\n### 언제 뭘 쓰나 (면접 답변 템플릿)\n\n- **TLV**: 메시지가 크고 링크가 신뢰할 만할 때(TCP 위, 내부 IPC). 반드시\n  **max_len 정책 상한**과 **매직/sync 워드**를 같이 둬서 깨졌을 때 재동기 가능하게.\n- **SLIP/COBS**: 잡음 있는 raw UART. **재동기 가능성**이 길이 효율보다 중요할 때.\n  COBS는 오버헤드 상한이 0.4%로 보장되어 SLIP보다 우월 — 최신 설계의 기본값.\n- **CRLF 구분자**: AT 커맨드처럼 상대가 정해놨을 때. 선택의 여지가 없다.\n\n```\nTLV : [type][len_hi][len_lo][payload...]\nSLIP: C0 ...payload(C0->DB DC, DB->DB DD)... C0\nCOBS: [code][data...] 반복, 0x00 이 절대 안 나오므로 0x00 이 프레임 구분자\n```\n\n### 스트림 디코더의 불변식 3가지 (Q57의 핵심)\n\n1. 바이트가 모자라면 **오프셋을 전진시키지 않는다** — 호출자가 남은 꼬리를 보관해\n   다음 `read()` 와 이어붙일 수 있어야 한다.\n2. **길이 상한을 정책으로 강제한다** — 0xFFFF 를 그대로 믿으면 64KB 할당 또는\n   영원한 대기. 이건 DoS 벡터다.\n3. **`off + hdr + len` 을 더해서 비교하지 않는다** — `size_t` 오버플로. 항상\n   `avail - hdr < len` 처럼 **뺄셈**으로 비교한다.\n\n---\n\n## 7. MTU / PMTUD / CGNAT — 연결 트러블슈팅 개념\n\n### MTU\n\n- 이더넷 기본 **1500B**. LTE 는 보통 **1430~1500**, 캐리어/터널마다 다르다.\n- 캡슐화가 MTU를 깎는다: IPsec −~60B, WireGuard −60B, PPPoE −8B, GRE −24B.\n- MTU 초과 패킷은 **단편화(fragment)** 되거나, DF 비트가 있으면 폐기되고\n  **ICMP Type 3 Code 4 \"Fragmentation Needed\"** 가 돌아온다.\n\n### PMTUD 블랙홀 — 필드 현장 단골 증상\n\n> \"핑은 되는데 큰 파일 전송/TLS 핸드셰이크만 멈춘다.\"\n\n원인: 중간 방화벽이 ICMP를 막아 \"Fragmentation Needed\"가 송신자에게 도달하지 못함.\n송신자는 계속 큰 패킷을 보내고, 그것들은 조용히 사라진다.\n대응: **MSS clamping**(`MSS = MTU − 40`), 인터페이스 MTU 하향(1400 등),\nPMTUD 대신 **PLPMTUD**(RFC 4821) 사용.\n\n```\n증상 매트릭스\n  ping OK / DNS OK / 대용량 전송 hang   -> MTU 블랙홀\n  ping OK / DNS 실패                    -> DNS 설정·UDP 53 차단\n  IP가 169.254.x.x                      -> DHCP 실패 (link-local 폴백)\n  IP가 100.64.x.x                       -> CGNAT — 인바운드 불가는 정상\n  +CEREG: 0,2 에서 안 넘어감            -> 안테나/대역/커버리지\n  +CEREG: 0,3                           -> SIM 가입/요금제 거부 (재시도 무의미)\n  +CSQ: 99,99                           -> 안테나 미연결 또는 모뎀 검색 중\n```\n\n### CGNAT (Carrier-Grade NAT, 100.64.0.0/10)\n\n캐리어가 공인 IPv4 부족으로 가입자에게 사설 대역을 준다.\n\n- **인바운드 연결 불가** → 게이트웨이에 직접 SSH/HTTP 접속 불가.\n- 그래서 Verkada 같은 클라우드 관리 제품은 **기기가 클라우드로 아웃바운드 연결을\n  열어두고 유지**하는 구조(persistent outbound tunnel)를 쓴다. Command에서\n  원격 power-cycle 이 가능한 이유가 이것이다.\n- NAT 매핑은 **유휴 시 타임아웃**(보통 30초~5분)된다 → **keepalive** 필수.\n  keepalive가 없으면 \"클라우드에는 연결됐다고 뜨는데 명령이 안 내려간다\".\n- 인터뷰에서: \"오프라인 30분이면 자가 재부팅\"(GW31-E)은 이 계열 문제의\n  최후 방어선이다. 그 앞에 **키프얼라이브 + 지수 백오프 재연결 + 링크 품질 로깅**이 있어야 한다.\n\n---\n\n## 8. 흔한 함정 (인터뷰 감점 포인트)\n\n| 함정 | 무슨 일이 나나 |\n|---|---|\n| `0xFFFFFFFF << 32` | **UB**. /0 CIDR 에서 아키텍처마다 다른 답 |\n| `atoi`/`sscanf` 로 IP 파싱 | 선행 0·범위·꼬리 쓰레기를 전부 통과시킴 |\n| `inet_addr` 사용 | 실패값이 `(in_addr_t)-1` = 유효 주소 255.255.255.255 와 구분 불가. `inet_pton` 을 쓸 것 |\n| 선행 0 허용 | 8진 해석 → `010.1.1.1` 이 8.1.1.1 로. SSRF/ACL 우회 |\n| `strcpy`/`sprintf` 로 IP 포맷 | 오버플로. 최소 **16바이트**(`INET_ADDRSTRLEN`) 필요 |\n| 부분 기록 후 실패 반환 | 호출자가 잘린 문자열을 쓴다. 로컬에 만들고 크기 확인 후 복사 |\n| 줄 단위 파싱을 `read()` 단위로 가정 | UART는 아무데서나 자른다. **상태 있는 FSM**이 답 |\n| 과도한 줄에서 버퍼 오버런 | 넘치면 플래그만 세우고 버린 뒤 **다음 종결자에서 복구** |\n| `len` 필드를 그대로 믿음 | 0xFFFF → 자원 고갈. **정책 상한 필수** |\n| `off + 3 + len` 비교 | `size_t` 오버플로 → 경계 검사 통과. 뺄셈으로 비교 |\n| NEED_MORE 인데 off 전진 | 데이터 유실. 스트림 재조립이 영영 깨짐 |\n| `+CSQ: 99` 를 -113dBm 으로 | UNKNOWN ≠ POOR. SIM failover 무한 루프 |\n| 히스테리시스 없는 failover | 경계값 근처에서 SIM 플래핑 |\n| 체크섬을 보안으로 착각 | 체크섬은 **우발적 손상** 탐지용 |\n| 패킷 버퍼를 구조체로 캐스팅 | 패딩 + 정렬(ARM fault) + 엔디안 3중 지뢰 |\n| `ctype.h` 에 `char` 직접 전달 | 음수 char → UB. `(unsigned char)` 캐스팅 또는 직접 구현 |\n\n---\n\n## 9. 면접에서 말할 것 (한국어 + 영어)\n\n### 파서의 엄격함\n\n- 🇰🇷 \"IPv4 파서는 엄격해야 합니다. 선행 0을 허용하면 `010.1.1.1` 이 8진수로 8.1.1.1 이\n  되어 ACL 우회에 쓰입니다. 그래서 `inet_addr` 이 아니라 `inet_pton` 을 쓰거나 직접 짭니다.\"\n- 🇺🇸 \"The IPv4 parser has to be strict. If you allow leading zeros, `010.1.1.1` can be\n  read as octal and become 8.1.1.1 — that's a real ACL-bypass vector. That's why I use\n  `inet_pton`, never `inet_addr`, or hand-roll it.\"\n\n### /0 시프트 UB\n\n- 🇰🇷 \"prefix 0은 특수 처리합니다. 32비트 값을 32비트 시프트하는 건 C에서 정의되지 않은\n  동작이라 x86과 ARM이 다른 답을 냅니다.\"\n- 🇺🇸 \"I special-case a prefix length of zero — shifting a 32-bit value by 32 is undefined\n  behavior in C, and x86 and ARM genuinely disagree on the result.\"\n\n### 스트림 디코더\n\n- 🇰🇷 \"UART 읽기는 메시지 경계를 존중하지 않습니다. 그래서 파서를 호출 사이에 상태를\n  유지하는 FSM으로 만들고, 바이트가 모자라면 오프셋을 전진시키지 않고 NEED_MORE 를\n  돌려줍니다 — 호출자가 남은 꼬리를 다음 읽기와 이어붙일 수 있도록요.\"\n- 🇺🇸 \"A UART read doesn't respect message boundaries, so the parser is a state machine\n  that survives across calls. When the buffer is short I return NEED_MORE *without*\n  advancing the offset, so the caller can keep the tail and concatenate the next read.\"\n\n### 적대적 입력\n\n- 🇰🇷 \"길이 필드는 신뢰하지 않습니다. 정책 상한을 넘으면 프레임을 버리고 재동기화합니다.\n  그리고 `off + hdr + len` 처럼 더해서 비교하지 않습니다 — size_t 오버플로로 경계 검사를\n  통과해버리니까요. 항상 뺄셈으로 비교합니다.\"\n- 🇺🇸 \"I never trust a length field. If it exceeds the policy cap I drop the frame and\n  resync. And I compare with subtraction, never `off + hdr + len` — that addition can\n  wrap a size_t and sail straight past the bounds check.\"\n\n### 체크섬\n\n- 🇰🇷 \"인터넷 체크섬은 1의 보수 합이라 캐리를 되돌려 넣습니다. 그래서 덧셈 순서에\n  무관하고, 라우터가 TTL만 바꿔도 증분 갱신이 가능합니다. 수신측은 체크섬 필드를 포함해\n  다시 계산해서 0이 나오는지만 보면 됩니다.\"\n- 🇺🇸 \"The Internet checksum is a one's-complement sum, so carries wrap around. That makes\n  it order-independent and lets a router update it incrementally when it just decrements\n  the TTL. The receiver only has to recompute over the whole thing and check it comes out zero.\"\n\n### 신호 품질 / failover\n\n- 🇰🇷 \"`+CSQ: 99` 는 최악이 아니라 '모름'입니다. 이걸 -113dBm 으로 매핑하면 듀얼 SIM\n  failover가 부팅마다 SIM을 스왑하고, 스왑하면 다시 모름이 되어 무한 루프에 빠집니다.\n  UNKNOWN 은 별도 상태로 두고, 스왑에는 N회 연속 조건과 히스테리시스를 겁니다.\"\n- 🇺🇸 \"`+CSQ: 99` means *unknown*, not *worst*. Map it to -113 dBm and your dual-SIM\n  failover swaps on every boot, and the swap makes it unknown again — an infinite loop.\n  I keep UNKNOWN as its own state and gate the swap behind N consecutive poor samples\n  plus hysteresis on the way back.\"\n\n### 트러블슈팅 스토리텔링\n\n- 🇰🇷 \"핑은 되는데 큰 전송만 멈추면 거의 항상 MTU 블랙홀입니다. 중간 방화벽이 ICMP\n  'Fragmentation Needed' 를 막아 PMTUD가 실패한 거고, MSS clamping 이나 MTU 하향으로 뚫습니다.\"\n- 🇺🇸 \"Ping works but large transfers hang — that's almost always an MTU black hole.\n  A middlebox is dropping the ICMP 'fragmentation needed', so PMTUD never completes.\n  I fix it with MSS clamping or by lowering the interface MTU.\"\n\n- 🇰🇷 \"기기 IP가 100.64.x.x 면 CGNAT 입니다. 인바운드가 원천적으로 불가하니 기기가\n  클라우드로 아웃바운드 터널을 열어두고 keepalive 로 NAT 매핑을 살려둬야 합니다.\"\n- 🇺🇸 \"If the device gets a 100.64.x.x address it's behind carrier-grade NAT — inbound is\n  simply impossible. The device has to hold an outbound tunnel open and keepalive it,\n  or the NAT mapping ages out and the cloud thinks it's connected when it isn't.\"\n\n### 테스트 가능성 (모듈성 — 리크루터 메일 4번 항목)\n\n- 🇰🇷 \"이 로직은 전부 소켓 없이 버퍼 위의 순수 함수로 쪼갰습니다. 그래서 모뎀 하드웨어\n  없이도 잘린 입력, 쓰레기 바이트, 악의적 길이를 유닛 테스트로 재현할 수 있습니다.\n  I/O는 가장자리에만 둡니다.\"\n- 🇺🇸 \"All of this is pure functions over buffers — no sockets. That means I can unit-test\n  truncated input, garbage bytes and hostile length fields without any modem hardware.\n  I/O stays at the edges.\"\n\n---\n\n## 10. 체크리스트\n\n- [ ] `ipv4_parse` 를 보지 않고 10분 안에, 선행 0/범위/점 개수/꼬리 쓰레기 전부 막고 작성\n- [ ] `cidr_mask(0)` 이 왜 특수 처리가 필요한지 UB 용어로 설명\n- [ ] 사설 대역 3개 + CGNAT + link-local 대역을 prefix 까지 암송\n- [ ] \"Extract IP Addresses\" 를 경계/오탐 규칙까지 설명하며 화이트보드에 작성\n- [ ] RFC 1071 체크섬을 fold 포함해 작성하고 \"검증하면 0\" 성질을 증명\n- [ ] `htonl` 을 쓰는 코드와 바이트 직접 조립 코드의 차이를 설명\n- [ ] AT: `CPIN?` → `CSQ` → `CEREG?` → `COPS?` → `CGDCONT?` → `CGPADDR` 순서의\n      트러블슈팅 시퀀스를 이유와 함께 말하기\n- [ ] `<stat>` 1/2/3/5 의 의미와 각각의 대응 조치\n- [ ] CSQ 0/23/31/99 를 dBm 으로 즉답, 99가 UNKNOWN 인 이유 설명\n- [ ] 길이접두 vs 구분자 vs SLIP vs COBS 의 오버헤드와 재동기 특성 비교\n- [ ] 스트림 디코더 불변식 3개(off 불변 / 길이 상한 / 뺄셈 비교) 암송\n- [ ] SLIP 인코드/디코드를 5분 안에 작성, 최악 크기 2n+2 설명\n- [ ] MTU 블랙홀 증상 → 원인 → 조치를 30초 안에 설명\n- [ ] CGNAT 에서 왜 아웃바운드 터널 + keepalive 구조가 되는지 설명\n- [ ] 위 모든 로직이 하드웨어 없이 테스트 가능한 이유를 \"I/O는 가장자리에\" 로 요약\n",
+  "problems": [
+    {
+      "num": 49,
+      "slug": "ipv4_parse",
+      "title_ko": "IPv4 문자열 → uint32_t (엄격 파서)",
+      "title_en": "Strict IPv4 string to uint32",
+      "difficulty": "medium",
+      "tags": [
+        "ipv4",
+        "parsing",
+        "validation",
+        "security"
+      ],
+      "prompt_ko": "\"a.b.c.d\" 를 host order uint32(상위 바이트=첫 옥텟)로 변환한다. 엄격해야 한다: 선행 0(\"01.2.3.4\"), 255 초과, 점 개수 오류(\"1.2.3\"/\"1.2.3.4.5\"), 빈 옥텟(\"1..2.3\"), 선행 공백, 꼬리 쓰레기(\"1.2.3.4x\"), NULL 을 전부 거부한다.",
+      "prompt_en": "Strictly parse a dotted-quad IPv4 into a host-order uint32. Reject leading zeros, octets above 255, wrong dot counts, empty octets, leading whitespace and trailing junk.",
+      "signature": "bool ipv4_parse(const char *s, uint32_t *out)",
+      "examples": [
+        {
+          "in": "\"10.0.0.7\"",
+          "out": "true, *out == 0x0A000007"
+        },
+        {
+          "in": "\"01.2.3.4\"",
+          "out": "false (선행 0)"
+        },
+        {
+          "in": "\"256.1.1.1\"",
+          "out": "false (범위 초과)"
+        }
+      ],
+      "hints": [
+        "옥텟 4개를 루프로 처리하고 매번 `ip = (ip << 8) | v` 로 누적하라.",
+        "선행 0 검사는 첫 문자가 '0' 인데 그 다음도 숫자인 경우다 — \"0\" 단독은 유효하다.",
+        "루프를 빠져나온 뒤 `octets == 4 && *p == '\\0'` 를 반드시 확인하라. 이 한 줄이 \"1.2.3\" 과 \"1.2.3.4x\" 를 동시에 막는다."
+      ],
+      "solution": "bool ipv4_parse(const char *s, uint32_t *out) {\n    if (!s || !out) return false;\n\n    uint32_t ip = 0;\n    int octets = 0;\n    const char *p = s;\n\n    for (;;) {\n        if (!is_dig(*p)) return false;            // 빈 옥텟 / 비숫자 / 선행 공백 거부\n        if (*p == '0' && is_dig(p[1])) return false;  // 선행 0 거부 (\"0\" 자체는 허용)\n\n        unsigned v = 0;\n        int digits = 0;\n        while (is_dig(*p)) {\n            v = v * 10u + (unsigned)(*p - '0');\n            if (++digits > 3 || v > 255u) return false;   // 범위 초과 즉시 탈출\n            p++;\n        }\n        ip = (ip << 8) | v;\n        if (++octets > 4) return false;\n\n        if (*p == '.') {\n            if (octets == 4) return false;        // \"1.2.3.4.5\"\n            p++;\n            continue;\n        }\n        break;\n    }\n    if (octets != 4 || *p != '\\0') return false;  // \"1.2.3\", \"1.2.3.4x\"\n    *out = ip;\n    return true;\n}",
+      "explanation_ko": "옥텟 단위로 손으로 파싱하면 세 가지 검증을 자연스럽게 끼워 넣을 수 있다. (1) 숫자가 아니면 즉시 실패 → 빈 옥텟과 선행 공백이 동시에 막힌다. (2) 첫 문자가 '0' 인데 뒤에 숫자가 더 있으면 실패 → 8진 해석 취약점 차단. (3) 누적 중 v > 255 또는 자릿수 > 3 이면 즉시 탈출 → 정수 오버플로 자체가 불가능하다. 마지막에 octets==4 와 널 종료를 같이 확인해 점 개수와 꼬리 쓰레기를 한 번에 잡는다. sscanf(\"%d.%d.%d.%d\") 로는 이 중 어느 것도 잡히지 않는다.",
+      "complexity": "O(n), n<=15, 추가 메모리 없음",
+      "pitfalls": [
+        "sscanf/atoi 로 파싱 — 선행 0·꼬리 쓰레기·범위를 전부 통과시킨다",
+        "inet_addr 사용 — 실패값 (in_addr_t)-1 이 유효 주소 255.255.255.255 와 구분되지 않는다 (inet_pton 을 쓸 것)",
+        "octets 카운트만 세고 문자열 끝(*p=='\\0')을 확인하지 않아 \"1.2.3.4x\" 통과",
+        "옥텟 값을 int 로 쌓고 마지막에만 범위 검사 — 자릿수 제한이 없으면 오버플로 가능"
+      ],
+      "verkada_context": "게이트웨이가 Command/DHCP/모뎀에서 받은 주소 문자열을 신뢰 경계에서 받아들이는 지점. 느슨한 파서는 ACL 우회로 이어진다."
+    },
+    {
+      "num": 50,
+      "slug": "ipv4_format",
+      "title_ko": "uint32_t → IPv4 문자열 (버퍼 안전)",
+      "title_en": "uint32 to IPv4 string, bounds-safe",
+      "difficulty": "easy",
+      "tags": [
+        "ipv4",
+        "formatting",
+        "buffer-safety"
+      ],
+      "prompt_ko": "ip 를 \"a.b.c.d\" 로 포맷해 out 에 기록한다. 성공하면 기록한 문자 수(널 제외), 버퍼 부족/NULL/out_sz==0 이면 -1. 부분 기록은 금지 — 먼저 로컬에 만들고 크기를 확인한 뒤 복사하며, 실패해도 out 은 널 종료시킨다.",
+      "prompt_en": "Format a host-order uint32 as a dotted quad; return the number of characters written or -1 if it would not fit. Never leave a truncated address behind.",
+      "signature": "int ipv4_format(uint32_t ip, char *out, size_t out_sz)",
+      "examples": [
+        {
+          "in": "0x0A000007, out_sz 16",
+          "out": "\"10.0.0.7\", 반환 8"
+        },
+        {
+          "in": "0xFFFFFFFF, out_sz 8",
+          "out": "-1, out[0]=='\\0'"
+        }
+      ],
+      "hints": [
+        "최대 길이는 \"255.255.255.255\" + 널 = 16바이트다 (INET_ADDRSTRLEN).",
+        "옥텟 하나를 최대 3자리로 찍는 작은 헬퍼를 먼저 만들어라 — 100 이상, 10 이상 순으로 자리 판단.",
+        "로컬 tmp[16] 에 전부 만든 뒤 `k + 1 > out_sz` 를 검사하고 memcpy 한다. 그래야 실패 시 out 이 오염되지 않는다."
+      ],
+      "solution": "static size_t u8_to_dec(uint8_t v, char *dst) {   // dst 최소 3바이트, 널 미기록\n    size_t k = 0;\n    if (v >= 100) dst[k++] = (char)('0' + v / 100);\n    if (v >= 10)  dst[k++] = (char)('0' + (v / 10) % 10);\n    dst[k++] = (char)('0' + v % 10);\n    return k;\n}\n\nint ipv4_format(uint32_t ip, char *out, size_t out_sz) {\n    if (!out || out_sz == 0) return -1;\n\n    char tmp[IPV4_STR_MAX];\n    size_t k = 0;\n    for (int i = 3; i >= 0; i--) {\n        k += u8_to_dec((uint8_t)((ip >> (i * 8)) & 0xFFu), tmp + k);\n        if (i) tmp[k++] = '.';\n    }\n    tmp[k] = '\\0';\n\n    if (k + 1 > out_sz) { out[0] = '\\0'; return -1; }   // 잘라 쓰지 않는다\n    memcpy(out, tmp, k + 1);\n    return (int)k;\n}",
+      "explanation_ko": "핵심은 알고리즘이 아니라 계약이다. 출력 버퍼가 작을 때 '쓸 수 있는 만큼 쓰고 -1' 을 반환하면 호출자가 잘린 주소를 그대로 로그에 남기거나 비교에 쓴다. 그래서 (1) 항상 크기가 보장된 로컬 버퍼(16바이트)에 먼저 만들고, (2) 총 길이를 안 뒤에 한 번에 복사하고, (3) 실패 경로에서도 out[0]='\\0' 을 넣어 호출자가 쓰레기를 읽지 않게 한다. snprintf 를 써도 되지만 반환값이 '잘리지 않았다면 필요했을 길이' 라는 점을 정확히 설명할 수 있어야 한다.",
+      "complexity": "O(1) — 최대 15문자",
+      "pitfalls": [
+        "sprintf/strcpy 사용 → 오버플로",
+        "버퍼가 작을 때 부분 기록 후 -1 반환",
+        "실패 경로에서 out 을 널 종료하지 않아 호출자가 미초기화 스택을 읽음",
+        "버퍼를 15바이트로 잡음 — 널까지 16바이트 필요",
+        "snprintf 반환값을 '기록한 바이트 수' 로 오해 (잘림 시 더 큰 값을 돌려준다)"
+      ],
+      "verkada_context": "진단 로그, Command 업링크 JSON, CLI 출력 등 주소를 문자열로 뱉는 모든 지점에서 초당 수십 번 호출된다."
+    },
+    {
+      "num": 51,
+      "slug": "cidr_match",
+      "title_ko": "CIDR 매칭 (/0 경계 포함)",
+      "title_en": "CIDR membership test",
+      "difficulty": "medium",
+      "tags": [
+        "cidr",
+        "bitwise",
+        "undefined-behavior",
+        "routing"
+      ],
+      "prompt_ko": "cidr_mask(prefix) 는 상위 prefix 비트만 1인 마스크를 만든다 — prefix==0 은 반드시 특수 처리해야 한다(32비트 값의 32비트 시프트는 UB). cidr_parse 는 \"a.b.c.d/p\" 를 엄격히 파싱해 마스크 적용된 네트워크와 prefix 를 돌려준다. cidr_contains 는 (ip & mask) == net 을 검사한다.",
+      "prompt_en": "Build a prefix mask (special-casing prefix 0, since a 32-bit shift by 32 is UB), parse \"a.b.c.d/p\" strictly, and test membership with (ip & mask) == net.",
+      "signature": "uint32_t cidr_mask(unsigned prefix); bool cidr_parse(const char *s, uint32_t *net_out, unsigned *prefix_out); bool cidr_contains(const char *cidr, uint32_t ip)",
+      "examples": [
+        {
+          "in": "cidr_contains(\"10.0.0.0/8\", 0x0A010203)",
+          "out": "true"
+        },
+        {
+          "in": "cidr_contains(\"0.0.0.0/0\", 아무 IP)",
+          "out": "true (기본 라우트)"
+        },
+        {
+          "in": "cidr_parse(\"10.0.0.0/33\", ...)",
+          "out": "false"
+        }
+      ],
+      "hints": [
+        "마스크는 0xFFFFFFFF << (32 - p) 지만 p==0 에서 이 식은 쓸 수 없다.",
+        "IP 부분은 Q49 의 ipv4_parse 를 재사용하라 — 슬래시 앞을 로컬 버퍼(16바이트 미만 검사 후)에 복사하면 된다.",
+        "prefix 파싱도 엄격해야 한다: \"/08\" 은 거부, 두 자리 초과 거부, p>32 거부, 꼬리 쓰레기 거부."
+      ],
+      "solution": "uint32_t cidr_mask(unsigned prefix) {\n    if (prefix == 0)  return 0u;                  // 0xFFFFFFFF << 32 는 UB\n    if (prefix >= 32) return 0xFFFFFFFFu;\n    return 0xFFFFFFFFu << (32u - prefix);\n}\n\nbool cidr_parse(const char *s, uint32_t *net_out, unsigned *prefix_out) {\n    if (!s || !net_out || !prefix_out) return false;\n\n    const char *slash = strchr(s, '/');\n    if (!slash) return false;                     // prefix 는 필수\n\n    size_t iplen = (size_t)(slash - s);\n    if (iplen == 0 || iplen >= IPV4_STR_MAX) return false;\n\n    char ipbuf[IPV4_STR_MAX];\n    memcpy(ipbuf, s, iplen);\n    ipbuf[iplen] = '\\0';\n\n    uint32_t ip;\n    if (!ipv4_parse(ipbuf, &ip)) return false;    // 옥텟 규칙은 Q49 를 재사용\n\n    const char *q = slash + 1;\n    if (!is_dig(*q)) return false;                // \"10.0.0.0/\" 거부\n    if (*q == '0' && is_dig(q[1])) return false;  // \"/08\" 거부\n    unsigned pfx = 0;\n    int digits = 0;\n    while (is_dig(*q)) {\n        pfx = pfx * 10u + (unsigned)(*q - '0');\n        if (++digits > 2 || pfx > 32u) return false;\n        q++;\n    }\n    if (*q != '\\0') return false;                 // 꼬리 쓰레기 거부\n\n    *prefix_out = pfx;\n    *net_out    = ip & cidr_mask(pfx);\n    return true;\n}\n\nbool cidr_contains(const char *cidr, uint32_t ip) {\n    uint32_t net;\n    unsigned pfx;\n    if (!cidr_parse(cidr, &net, &pfx)) return false;\n    uint32_t m = cidr_mask(pfx);\n    return (ip & m) == net;\n}",
+      "explanation_ko": "면접에서 이 문제의 진짜 채점 포인트는 /0 하나다. `0xFFFFFFFFu << 32` 는 C 표준에서 정의되지 않은 동작이고, x86 은 시프트량을 32로 mod 해서 0xFFFFFFFF 를 내놓고(= 완전히 반대 결과) ARM 은 0을 내놓는 식으로 실제로 답이 갈린다. 두 번째 포인트는 파서 재사용 — IP 부분 검증을 다시 짜면 Q49 와 규칙이 어긋나 버그가 생긴다. 세 번째는 net_out 에 마스크를 적용해 돌려주는 것: \"10.1.2.3/8\" 같은 입력을 정규화해 두면 이후 비교가 단순해진다. 부수 효과로 (a ^ b) & mask == 0 이라는 '같은 서브넷인가' 트릭도 같이 설명하면 좋다.",
+      "complexity": "O(len) 파싱, 매칭은 O(1) 비트 연산",
+      "pitfalls": [
+        "prefix 0 에서 32비트 시프트 UB",
+        "prefix 33 이상을 32로 클램프해 조용히 통과시킴",
+        "\"10.0.0.0\" 처럼 슬래시 없는 입력을 /32 로 관대하게 해석",
+        "\"/08\" 같은 선행 0 prefix 허용",
+        "IP 부분 검증을 따로 짜서 Q49 와 규칙이 갈림"
+      ],
+      "verkada_context": "게이트웨이가 LAN(사설 대역)과 WAN(CGNAT 100.64/10, 공인)을 구분하고 카메라 트래픽을 어느 인터페이스로 내보낼지 판단하는 라우팅 로직의 심장."
+    },
+    {
+      "num": 52,
+      "slug": "ipv4_extract_all",
+      "title_ko": "로그 줄에서 IPv4 전부 추출",
+      "title_en": "Extract all IPv4 addresses from a log line",
+      "difficulty": "medium",
+      "tags": [
+        "parsing",
+        "strings",
+        "false-positives",
+        "reported-question"
+      ],
+      "prompt_ko": "로그 한 줄을 훑어 유효한 IPv4 를 모두 찾는다. 반환값은 찾은 총 개수(잘림 여부를 호출자가 알 수 있게)이고, out 에는 최대 max_out 개만 기록한다. [0-9.] 덩어리를 통째로 잘라 엄격 파서에 넘겨 \"1.2.3.4.5\" 를 자동 탈락시키고, 덩어리 양옆이 영숫자면 거부해 \"v1.2.3.4\"/\"1.2.3.4a\" 오탐을 막는다.",
+      "prompt_en": "Scan a log line, collect every valid IPv4, return the total found and store at most max_out. Reject version-string false positives by requiring non-alphanumeric boundaries.",
+      "signature": "size_t ipv4_extract_all(const char *line, uint32_t *out, size_t max_out)",
+      "examples": [
+        {
+          "in": "\"conn from 10.0.0.7 to 8.8.8.8 ok\"",
+          "out": "2개"
+        },
+        {
+          "in": "\"192.168.0.1:8080 -> 172.16.5.4/24\"",
+          "out": "2개 (구분자 뒤도 허용)"
+        },
+        {
+          "in": "\"fw v1.2.3.4 build 1.2.3.4a\"",
+          "out": "0개 (버전 문자열)"
+        }
+      ],
+      "hints": [
+        "숫자를 만나면 [0-9.] 가 이어지는 동안 끝까지 전진해 '덩어리' 를 만들어라.",
+        "덩어리를 쪼개서 직접 검증하지 말고, 통째로 Q49 의 엄격 파서에 넘겨라 — \"1.2.3.4.5\" 와 \"01.2.3.4\" 가 공짜로 걸러진다.",
+        "덩어리 안쪽에서 다시 스캔을 시작하면 안 된다(i = j 로 통째 소비). 그리고 양옆 문자가 영숫자인지 검사해 버전 문자열을 배제하라."
+      ],
+      "solution": "size_t ipv4_extract_all(const char *line, uint32_t *out, size_t max_out) {\n    if (!line) return 0;\n\n    size_t found = 0;\n    size_t i = 0;\n    while (line[i] != '\\0') {\n        if (!is_dig(line[i])) { i++; continue; }\n\n        size_t j = i;\n        while (line[j] != '\\0' && (is_dig(line[j]) || line[j] == '.')) j++;\n\n        bool left_ok  = (i == 0) || !is_alnum_c(line[i - 1]);\n        bool right_ok = (line[j] == '\\0') || !is_alnum_c(line[j]);\n        size_t len    = j - i;\n\n        if (left_ok && right_ok && len < IPV4_STR_MAX) {\n            char tok[IPV4_STR_MAX];\n            memcpy(tok, line + i, len);\n            tok[len] = '\\0';\n            uint32_t ip;\n            if (ipv4_parse(tok, &ip)) {\n                if (out && found < max_out) out[found] = ip;\n                found++;\n            }\n        }\n        i = j;   // 덩어리 전체를 소비 — 안쪽에서 다시 시작하지 않는다\n    }\n    return found;\n}",
+      "explanation_ko": "실제 보고된 면접 문제이고, 제출이 갈리는 지점은 알고리즘이 아니라 '무엇을 IP 로 볼 것인가' 를 말로 정의하느냐다. 구현의 핵심은 두 가지. (1) 토큰화를 먼저 하고 검증은 Q49 에 위임한다 — 덩어리를 통째로 넘기므로 점 5개, 선행 0, 범위 초과가 전부 자동으로 탈락한다. 직접 옥텟을 세다 보면 \"1.2.3.4.5\" 에서 앞 4개만 뽑아버리는 고전 버그가 난다. (2) 경계 규칙: 덩어리 양옆이 영숫자면 거부 → \"v1.2.3.4\" 같은 버전 문자열은 막으면서 \"192.168.0.1:8080\", \"10.0.0.0/8\", \"10.0.0.1,\" 는 통과시킨다. 반환값을 '기록한 개수' 가 아니라 '찾은 총 개수' 로 두면 호출자가 버퍼 잘림을 감지할 수 있다.",
+      "complexity": "O(n) 한 번 스캔, 추가 메모리 O(1) (16바이트 토큰 버퍼)",
+      "pitfalls": [
+        "\"1.2.3.4.5\" 에서 앞 4옥텟만 뽑아 오탐",
+        "덩어리 안쪽에서 스캔을 재개해 같은 주소를 여러 번 세거나 부분 매칭",
+        "경계 검사를 안 해 \"v1.2.3.4\" 같은 버전 문자열을 잡음",
+        "max_out 을 넘길 때 그대로 써서 버퍼 오버런",
+        "'기록한 개수' 만 반환해 호출자가 잘림을 모름"
+      ],
+      "verkada_context": "\"Extract IP Addresses\" 는 이 포지션에서 실제로 보고된 코딩 문제다. 현장에서는 모뎀/커널 로그에서 주소를 뽑아 연결 이력을 재구성하는 진단 도구가 된다."
+    },
+    {
+      "num": 53,
+      "slug": "inet_checksum",
+      "title_ko": "인터넷 체크섬 (RFC 1071)",
+      "title_en": "Internet checksum (RFC 1071)",
+      "difficulty": "medium",
+      "tags": [
+        "checksum",
+        "endianness",
+        "integrity",
+        "rfc1071"
+      ],
+      "prompt_ko": "버퍼를 빅엔디안 16비트 워드로 더하고, 넘친 캐리를 하위로 접고(fold), 비트 반전해 반환한다. 홀수 길이면 마지막 바이트를 상위 바이트로 패딩한다. 바이트를 직접 조립하므로 호스트 엔디안과 무관하다. 성질: 체크섬을 버퍼 뒤에 빅엔디안으로 붙여 다시 계산하면 0 이 나온다.",
+      "prompt_en": "One's-complement sum of 16-bit big-endian words with end-around carry, then inverted; an odd trailing byte pads into the high half. Recomputing over the buffer with the checksum appended yields zero.",
+      "signature": "uint16_t inet_checksum(const void *data, size_t len)",
+      "examples": [
+        {
+          "in": "{00 01 f2 03 f4 f5 f6 f7}",
+          "out": "0x220d (RFC 1071 예제)"
+        },
+        {
+          "in": "버퍼 + 체크섬(BE) 재계산",
+          "out": "0x0000"
+        }
+      ],
+      "hints": [
+        "32비트 누산기에 (p[0]<<8)|p[1] 를 더하면 캐리가 상위 16비트에 쌓인다.",
+        "fold 는 `while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);` — 한 번으로 부족할 수 있어 while 이다.",
+        "홀수 길이의 마지막 바이트는 하위가 아니라 **상위** 바이트로 들어간다 (p[0] << 8). 하위에 넣으면 값이 달라진다."
+      ],
+      "solution": "uint16_t inet_checksum(const void *data, size_t len) {\n    const uint8_t *p = (const uint8_t *)data;\n    uint32_t sum = 0;\n\n    while (len > 1) {\n        sum += ((uint32_t)p[0] << 8) | (uint32_t)p[1];\n        p   += 2;\n        len -= 2;\n    }\n    if (len == 1) sum += (uint32_t)p[0] << 8;     // 홀수 바이트는 상위로 패딩\n\n    while (sum >> 16) sum = (sum & 0xFFFFu) + (sum >> 16);   // 캐리 fold\n    return (uint16_t)(~sum & 0xFFFFu);\n}",
+      "explanation_ko": "1의 보수 합은 캐리를 버리지 않고 하위로 되돌린다(end-around carry). 이 성질 덕분에 덧셈 순서와 워드 경계에 무관해지고, 라우터가 TTL 한 필드만 바꿔도 전체를 다시 계산하지 않고 증분 갱신할 수 있다(RFC 1624). 수신측 검증이 `checksum(buf) == 0` 한 줄로 끝나는 것도 여기서 나온다 — x + ~x = 0xFFFF 이고 1의 보수 산술에서 0xFFFF 는 0(negative zero)이기 때문이다. 코드가 바이트를 직접 (p[0]<<8)|p[1] 로 조립하므로 htons/ntohs 도, 구조체 캐스팅도, 정렬 가정도 필요 없다 — 임베디드 프로토콜 코드가 지켜야 할 기본 자세다. 한계도 같이 말해야 한다: 워드 자리바꿈을 못 잡고, 위변조 방어는 전혀 아니다.",
+      "complexity": "O(n), 추가 메모리 O(1)",
+      "pitfalls": [
+        "fold 를 if 한 번으로 처리 (긴 버퍼에서 캐리가 두 번 넘칠 수 있다)",
+        "홀수 마지막 바이트를 하위 바이트로 패딩",
+        "uint16_t 누산기 사용 — 캐리가 사라진다",
+        "uint16_t* 로 캐스팅해 순회 — 정렬 위반(ARM fault) + 엔디안 의존",
+        "체크섬을 무결성이 아닌 보안 수단으로 설명"
+      ],
+      "verkada_context": "게이트웨이가 직접 만들거나 검증하는 IP/UDP/ICMP 헤더, 그리고 자체 텔레메트리 프레임의 무결성 검사. 잡음 있는 셀룰러 링크에서 조용한 손상을 잡아내는 최소 장치."
+    },
+    {
+      "num": 54,
+      "slug": "hexdump_line",
+      "title_ko": "hex dump 유틸 (offset | hex | ascii)",
+      "title_en": "Hex dump line formatter",
+      "difficulty": "easy",
+      "tags": [
+        "debugging",
+        "formatting",
+        "buffer-safety"
+      ],
+      "prompt_ko": "hexdump -C 형식으로 한 줄을 만든다: 소문자 hex 오프셋 8자리 + 2칸 + 8바이트(\"xx \") + 1칸 + 8바이트 + 1칸 + \"|\" + ASCII + \"|\". len<16 이면 hex 칸은 공백 패딩하고 ASCII 는 있는 만큼만. 0x20~0x7E 밖은 '.'. 반환값은 기록 길이, 실패 시 -1.",
+      "prompt_en": "Render one hexdump -C style line: 8-digit offset, 16 hex bytes with a gap after the 8th, then the printable-ASCII gutter. Pad short lines, return the length or -1.",
+      "signature": "int hexdump_line(char *out, size_t out_sz, size_t offset, const uint8_t *data, size_t len)",
+      "examples": [
+        {
+          "in": "offset 0x10, 바이트 00..0f",
+          "out": "\"00000010  00 01 ... 0e 0f  |................|\" (78자)"
+        },
+        {
+          "in": "len 17",
+          "out": "-1"
+        }
+      ],
+      "hints": [
+        "`\"0123456789abcdef\"` 룩업 테이블로 니블 두 개를 찍는 게 가장 짧다.",
+        "hex 칸은 값이 없어도 항상 3칸(또는 8번째 뒤 4칸)을 차지해야 ASCII 열이 정렬된다.",
+        "Q50 과 같은 패턴: 로컬 tmp 에 만들고 총 길이를 확인한 뒤 복사, 실패해도 out[0]='\\0'."
+      ],
+      "solution": "int hexdump_line(char *out, size_t out_sz,\n                 size_t offset, const uint8_t *data, size_t len) {\n    if (!out || out_sz == 0) return -1;\n    if (len > HEXDUMP_BYTES_PER_LINE) { out[0] = '\\0'; return -1; }\n    if (len > 0 && !data)             { out[0] = '\\0'; return -1; }\n\n    static const char HEX[] = \"0123456789abcdef\";\n    char tmp[HEXDUMP_LINE_MAX];\n    size_t k = 0;\n\n    for (int sh = 28; sh >= 0; sh -= 4)           // 오프셋 8자리 (하위 32비트)\n        tmp[k++] = HEX[(offset >> sh) & 0xFu];\n    tmp[k++] = ' ';\n    tmp[k++] = ' ';\n\n    for (size_t c = 0; c < HEXDUMP_BYTES_PER_LINE; c++) {\n        if (c < len) {\n            tmp[k++] = HEX[(data[c] >> 4) & 0xFu];\n            tmp[k++] = HEX[data[c] & 0xFu];\n        } else {\n            tmp[k++] = ' ';\n            tmp[k++] = ' ';\n        }\n        tmp[k++] = ' ';\n        if (c == 7) tmp[k++] = ' ';               // 8바이트마다 한 칸 더\n    }\n    tmp[k++] = ' ';                               // hex 영역과 ASCII 영역 구분\n\n    tmp[k++] = '|';\n    for (size_t c = 0; c < len; c++) {\n        uint8_t b = data[c];\n        tmp[k++] = (b >= 0x20 && b <= 0x7E) ? (char)b : '.';\n    }\n    tmp[k++] = '|';\n    tmp[k]   = '\\0';\n\n    if (k + 1 > out_sz) { out[0] = '\\0'; return -1; }\n    memcpy(out, tmp, k + 1);\n    return (int)k;\n}",
+      "explanation_ko": "구현 난이도는 낮지만 필드에서 가장 자주 쓰는 도구다. 채점 포인트는 세 가지. (1) 고정폭 유지 — 짧은 줄에서도 hex 칸을 공백으로 패딩해야 여러 줄을 나란히 놓았을 때 ASCII 열이 정렬되고 눈으로 패턴을 찾을 수 있다. (2) 출력 버퍼 계약 — Q50 과 동일하게 로컬에 만들고 크기 확인 후 복사, 실패해도 널 종료. (3) 비출력 문자 처리 — 0x20~0x7E 만 그대로 찍고 나머지는 '.' 로. 여기서 char 의 부호를 신경 쓰지 않으면 0x80 이상이 음수가 되어 비교가 깨진다(uint8_t 로 다룰 것).",
+      "complexity": "O(1) — 항상 16바이트 이하, 출력 78바이트 이하",
+      "pitfalls": [
+        "짧은 줄에서 hex 칸 패딩을 안 해 ASCII 열이 어긋남",
+        "char 가 signed 라서 0x80 이상 바이트가 음수로 비교됨",
+        "출력 버퍼 크기 확인 없이 기록 (78+1 바이트 필요)",
+        "offset 을 %p 나 가변 폭으로 찍어 줄마다 폭이 달라짐",
+        "len>16 을 조용히 16으로 잘라 데이터 손실을 숨김"
+      ],
+      "verkada_context": "모뎀이 뱉은 이상한 바이트, 깨진 프레임, 예상치 못한 URC 를 눈으로 확인하는 유일한 수단. 필드 트러블슈팅 로그의 기본 포맷."
+    },
+    {
+      "num": 55,
+      "slug": "at_parser_fsm",
+      "title_ko": "AT 커맨드 응답 파서 FSM",
+      "title_en": "AT command response parser FSM",
+      "difficulty": "hard",
+      "tags": [
+        "fsm",
+        "uart",
+        "streaming",
+        "at-commands",
+        "modem"
+      ],
+      "prompt_ko": "모뎀 UART 는 '줄' 이 아니라 바이트를 흘린다. \"+CSQ: 2\" / \"3,99\\r\\nOK\\r\" / \"\\n\" 처럼 아무데서나 잘려도 동작하는, 호출 사이에 상태를 유지하는 파서를 만든다. '\\r' 또는 '\\n' 이 줄 종결자이고 빈 줄은 버린다. 줄이 버퍼를 넘으면 AT_KIND_OVERFLOW 로 보고하고 다음 종결자까지 버린 뒤 복구한다. 분류: OK / ERROR·+CME ERROR·+CMS ERROR / '+' 시작=URC / 그 외=INFO.",
+      "prompt_en": "Build a resumable line assembler for modem UART output: split on CR or LF across arbitrary chunk boundaries, drop empty lines, report over-long lines as OVERFLOW and resync, and classify each complete line.",
+      "signature": "void at_init(at_parser_t *p); size_t at_feed(at_parser_t *p, const char *chunk, size_t n, at_line_t *out, size_t max_out)",
+      "examples": [
+        {
+          "in": "feed(\"+CSQ: 23,99\\r\\nOK\\r\\n\")",
+          "out": "2줄: {URC, \"+CSQ: 23,99\"}, {OK, \"OK\"}"
+        },
+        {
+          "in": "feed(\"+CRE\") 후 feed(\"G: 0,5\\r\")",
+          "out": "0줄, 그 다음 1줄 {URC, \"+CREG: 0,5\"}"
+        },
+        {
+          "in": "200바이트 'A' 후 \"\\r\\n\"",
+          "out": "1줄 {OVERFLOW}"
+        }
+      ],
+      "hints": [
+        "파서 구조체에 누적 버퍼와 길이, 그리고 '이미 넘쳤다' 플래그를 둔다.",
+        "넘쳤을 때 즉시 방출하면 안 된다 — 플래그만 세우고 바이트를 버리다가 다음 종결자에서 OVERFLOW 로 한 번만 보고하고 복구한다.",
+        "CRLF 는 종결자 두 개가 연달아 오는 것이므로 빈 줄이 생긴다. `len == 0 && !overflow` 면 그냥 무시하면 된다."
+      ],
+      "solution": "static bool starts_with(const char *s, const char *pre) {\n    return strncmp(s, pre, strlen(pre)) == 0;\n}\n\nvoid at_init(at_parser_t *p) {\n    if (!p) return;\n    p->len = 0;\n    p->overflow = false;\n    p->buf[0] = '\\0';\n}\n\nstatic at_kind_t at_classify(const char *line) {\n    if (strcmp(line, \"OK\") == 0)    return AT_KIND_OK;\n    if (strcmp(line, \"ERROR\") == 0) return AT_KIND_ERROR;\n    if (starts_with(line, \"+CME ERROR\") || starts_with(line, \"+CMS ERROR\"))\n        return AT_KIND_ERROR;\n    if (line[0] == '+') return AT_KIND_URC;\n    return AT_KIND_INFO;\n}\n\nstatic void at_emit(at_parser_t *p, at_line_t *out, size_t max_out, size_t *count) {\n    if (p->len == 0 && !p->overflow) return;      // 빈 줄은 무시 (CRLF 연속)\n\n    p->buf[p->len] = '\\0';\n    if (out && *count < max_out) {\n        at_line_t *L = &out[*count];\n        L->kind = p->overflow ? AT_KIND_OVERFLOW : at_classify(p->buf);\n        memcpy(L->text, p->buf, p->len + 1);\n    }\n    (*count)++;\n    p->len = 0;\n    p->overflow = false;                          // 종결자를 봤으니 복구\n}\n\nsize_t at_feed(at_parser_t *p, const char *chunk, size_t n,\n               at_line_t *out, size_t max_out) {\n    if (!p || (!chunk && n > 0)) return 0;\n\n    size_t count = 0;\n    for (size_t i = 0; i < n; i++) {\n        char c = chunk[i];\n        if (c == '\\r' || c == '\\n') {\n            at_emit(p, out, max_out, &count);\n            continue;\n        }\n        if (p->len + 1 >= AT_LINE_MAX) {          // 널 자리 확보\n            p->overflow = true;                   // 이후 바이트는 버리고 종결자만 기다림\n            continue;\n        }\n        if (!p->overflow) p->buf[p->len++] = c;\n    }\n    return count;\n}",
+      "explanation_ko": "이 문제의 진짜 주제는 AT 커맨드가 아니라 '스트림 위의 재개 가능한 파서' 다. read() 는 메시지 경계를 존중하지 않으므로, 파서는 호출 사이에 부분 줄을 들고 있어야 한다. 설계 결정 세 가지를 말로 정당화할 수 있어야 한다. (1) 종결자를 CR 과 LF 둘 다로 보고 빈 줄을 버리면 CRLF/LF/CR 어느 관례에도 대응된다 — 모뎀마다 다르기 때문이다. (2) 과도한 줄은 잘라서 조용히 넘기지 않고 OVERFLOW 로 **보고**한다 — 조용한 손실이 가장 디버깅하기 어렵다. 그리고 다음 종결자까지 버려 재동기화한다. (3) 반환값을 '완성된 총 줄 수' 로 두어 out 배열이 작을 때 호출자가 유실을 감지할 수 있게 한다. 분류를 별도 순수 함수(at_classify)로 뽑아두면 프로토콜이 늘어날 때 테스트가 쉬워진다.",
+      "complexity": "O(n) per feed, 상태 메모리 O(AT_LINE_MAX) 고정 — 동적 할당 없음",
+      "pitfalls": [
+        "read() 한 번이 한 줄이라고 가정",
+        "CRLF 때문에 빈 줄이 생기는 것을 처리 안 해 유령 줄 방출",
+        "줄이 길면 버퍼 오버런 (널 자리 확보를 잊음)",
+        "오버플로 후 다음 줄부터 복구되지 않아 파서가 영영 망가짐",
+        "명령 에코(ATE0 미설정)를 응답으로 오인",
+        "out 배열이 작을 때 초과분을 조용히 버림"
+      ],
+      "verkada_context": "GC31-E 가 LTE 모뎀과 대화하는 모든 경로. +CSQ/+CREG/+CEREG 같은 비동기 URC 는 명령 응답 사이에 아무 때나 끼어들기 때문에 줄 단위 재조립과 분류가 전제 조건이다."
+    },
+    {
+      "num": 56,
+      "slug": "signal_quality",
+      "title_ko": "신호 품질 변환 (CSQ→dBm, RSRP/RSRQ 등급)",
+      "title_en": "Signal quality conversion and grading",
+      "difficulty": "easy",
+      "tags": [
+        "at-commands",
+        "cellular",
+        "clamping",
+        "failover"
+      ],
+      "prompt_ko": "+CSQ 의 첫 값은 dBm 이 아니라 0~31 인덱스다: dBm = -113 + 2*rssi (99 = 측정 불가). at_parse_csq 로 \"+CSQ: 23,99\" 를 파싱하고, csq_to_dbm 은 0~31 만 true 를 반환하며 99/범위 밖에서는 출력을 건드리지 않는다. csq_grade 에서 99 는 SIG_POOR 가 아니라 SIG_UNKNOWN 이다. RSRP 는 [-140,-44], RSRQ 는 [-20,-3] 으로 클램프한 뒤 등급을 매긴다.",
+      "prompt_en": "Convert AT+CSQ's 0..31 index to dBm (99 means unknown, not worst), clamp RSRP/RSRQ into their valid ranges, and bucket them into quality grades.",
+      "signature": "bool at_parse_csq(const char *line, int *rssi_out, int *ber_out); bool csq_to_dbm(int csq, int *dbm_out); sig_grade_t csq_grade(int csq); sig_grade_t rsrp_grade(int rsrp_dbm); sig_grade_t rsrq_grade(int rsrq_db); int sig_clamp(int v, int lo, int hi)",
+      "examples": [
+        {
+          "in": "csq_to_dbm(23)",
+          "out": "-67 dBm"
+        },
+        {
+          "in": "csq_grade(99)",
+          "out": "SIG_UNKNOWN (SIG_POOR 아님)"
+        },
+        {
+          "in": "rsrp_grade(-200)",
+          "out": "-140 으로 클램프 후 SIG_POOR"
+        }
+      ],
+      "hints": [
+        "매핑은 선형이다: 0 -> -113, 31 -> -51, 한 스텝당 2dB.",
+        "'모름' 을 값으로 표현하려 하지 말고 bool 반환 + 출력 미변경으로 분리하라.",
+        "클램프를 먼저 하고 등급을 매기면 등급 함수에서 범위 검사를 반복할 필요가 없다."
+      ],
+      "solution": "int sig_clamp(int v, int lo, int hi) {\n    if (v < lo) return lo;\n    if (v > hi) return hi;\n    return v;\n}\n\nstatic bool starts_with(const char *s, const char *pre) {\n    return strncmp(s, pre, strlen(pre)) == 0;\n}\n\nbool at_parse_csq(const char *line, int *rssi_out, int *ber_out) {\n    if (!line || !rssi_out || !ber_out) return false;\n    if (!starts_with(line, \"+CSQ:\")) return false;\n\n    const char *p = line + 5;\n    int vals[2];\n    for (int f = 0; f < 2; f++) {\n        while (*p == ' ') p++;\n        if (!is_dig(*p)) return false;\n        int v = 0, digits = 0;\n        while (is_dig(*p)) {\n            v = v * 10 + (*p - '0');\n            if (++digits > 3) return false;       // 3자리 초과는 스펙 위반\n            p++;\n        }\n        vals[f] = v;\n        if (f == 0) {\n            while (*p == ' ') p++;\n            if (*p != ',') return false;\n            p++;\n        }\n    }\n    while (*p == ' ') p++;\n    if (*p != '\\0') return false;                 // 꼬리 쓰레기 거부\n\n    *rssi_out = vals[0];\n    *ber_out  = vals[1];\n    return true;\n}\n\nbool csq_to_dbm(int csq, int *dbm_out) {\n    if (!dbm_out) return false;\n    if (csq < 0 || csq > 31) return false;        // 99 포함 — \"모름\"은 값이 아니다\n    *dbm_out = -113 + 2 * csq;\n    return true;\n}\n\nsig_grade_t csq_grade(int csq) {\n    int dbm;\n    if (!csq_to_dbm(csq, &dbm)) return SIG_UNKNOWN;\n    if (dbm >= -70)  return SIG_EXCELLENT;\n    if (dbm >= -85)  return SIG_GOOD;\n    if (dbm >= -100) return SIG_FAIR;\n    return SIG_POOR;\n}\n\nsig_grade_t rsrp_grade(int rsrp_dbm) {\n    int v = sig_clamp(rsrp_dbm, -140, -44);\n    if (v >= -80)  return SIG_EXCELLENT;\n    if (v >= -90)  return SIG_GOOD;\n    if (v >= -100) return SIG_FAIR;\n    return SIG_POOR;\n}\n\nsig_grade_t rsrq_grade(int rsrq_db) {\n    int v = sig_clamp(rsrq_db, -20, -3);\n    if (v >= -10) return SIG_EXCELLENT;\n    if (v >= -15) return SIG_GOOD;\n    if (v >= -18) return SIG_FAIR;\n    return SIG_POOR;\n}",
+      "explanation_ko": "수식 자체는 한 줄이지만, 이 문제는 '모름(unknown)' 과 '나쁨(poor)' 을 타입으로 구분하는 설계 문제다. +CSQ: 99 를 -113dBm 으로 매핑하는 순간 듀얼 SIM failover 는 부팅마다 SIM 을 스왑하고, 스왑 직후에는 다시 '모름' 이 되므로 무한 루프에 빠진다. 그래서 csq_to_dbm 은 bool 을 반환하고 실패 시 출력을 건드리지 않으며(호출자가 이전 값을 유지할 수 있다), 등급은 SIG_UNKNOWN 을 별도 상태로 둔다. RSRP/RSRQ 는 모뎀이 가끔 스펙 밖 값을 뱉으므로 먼저 유효 범위로 클램프한 뒤 등급을 매긴다 — 클램프와 등급을 분리해두면 둘 다 따로 테스트된다. 면접에서는 여기에 히스테리시스(예: 3회 연속 POOR 일 때만 스왑, 복귀는 GOOD 이상)를 덧붙여 플래핑 방지를 설명하면 좋다.",
+      "complexity": "O(1) 전부, 파싱만 O(len)",
+      "pitfalls": [
+        "99 를 -113dBm 으로 매핑 → failover 무한 루프",
+        "'모름' 을 sentinel 정수(-999 등)로 표현해 산술에 섞여 들어감",
+        "실패 시에도 출력 파라미터를 덮어써 호출자의 직전 값이 사라짐",
+        "히스테리시스 없이 임계값 하나로 SIM 스왑 → 경계에서 플래핑",
+        "LTE 에서 RSSI 만 보고 RSRQ(간섭)를 무시 — '막대기 꽉 찼는데 느림' 의 원인",
+        "+CSQ 응답 파싱에서 꼬리 쓰레기를 허용"
+      ],
+      "verkada_context": "GC31-E 듀얼 nano SIM 자동 failover 의 판단 근거가 정확히 이 등급 위에서 돈다. MT81 트레일러처럼 전력이 귀한 기기에서는 스캔 주기와 스왑 비용도 여기에 얽힌다."
+    },
+    {
+      "num": 57,
+      "slug": "tlv_decoder",
+      "title_ko": "길이-접두(TLV) 프레이밍 디코더",
+      "title_en": "Length-prefixed (TLV) frame decoder",
+      "difficulty": "hard",
+      "tags": [
+        "framing",
+        "streaming",
+        "security",
+        "overflow",
+        "zero-copy"
+      ],
+      "prompt_ko": "프레임 = [type:1][len:2 big-endian][payload:len]. buf[*off..n) 에서 프레임 하나를 꺼낸다. 계약 셋: (1) 바이트가 모자라면 TLV_NEED_MORE 이고 off 를 전진시키지 않는다 (2) len > max_len 이면 TLV_BAD — 0xFFFF 로 자원을 고갈시키는 공격 방어 (3) off + 3 + len 을 더해서 비교하지 않는다 (size_t 오버플로) — 뺄셈으로 비교한다.",
+      "prompt_en": "Pull one length-prefixed frame from a partial buffer. Never advance the offset on NEED_MORE, reject oversized declared lengths, and bounds-check with subtraction to avoid size_t overflow.",
+      "signature": "tlv_status_t tlv_next(const uint8_t *buf, size_t n, size_t *off, tlv_t *out, uint16_t max_len)",
+      "examples": [
+        {
+          "in": "{01 00 02 'h' 'i'}, off 0",
+          "out": "TLV_OK, type=1 len=2 \"hi\", off -> 5"
+        },
+        {
+          "in": "헤더 3바이트 중 2바이트만",
+          "out": "TLV_NEED_MORE, off 불변"
+        },
+        {
+          "in": "{09 FF FF ...}, max_len 256",
+          "out": "TLV_BAD"
+        }
+      ],
+      "hints": [
+        "남은 바이트 수는 n - *off 로 구한다 — 이미 여기서 뺄셈이다.",
+        "헤더(3바이트)조차 없으면 NEED_MORE. 있으면 len 을 읽고 정책 상한을 먼저 검사한다.",
+        "페이로드 검사는 `avail - TLV_HDR_LEN < len` 으로. `*off + 3 + len > n` 은 size_t 가 wrap 되면 통과해버린다."
+      ],
+      "solution": "tlv_status_t tlv_next(const uint8_t *buf, size_t n, size_t *off,\n                      tlv_t *out, uint16_t max_len) {\n    if (!buf || !off || !out) return TLV_BAD;\n    if (*off > n) return TLV_BAD;\n\n    size_t avail = n - *off;                      // 뺄셈 — 오버플로 없음\n    if (avail < TLV_HDR_LEN) return TLV_NEED_MORE;    // 헤더조차 안 왔다\n\n    const uint8_t *h = buf + *off;\n    uint8_t  type = h[0];\n    uint16_t len  = (uint16_t)(((uint16_t)h[1] << 8) | (uint16_t)h[2]);  // BE\n\n    if (len > max_len) return TLV_BAD;            // 악의적/손상된 길이 방어\n\n    if (avail - TLV_HDR_LEN < (size_t)len) return TLV_NEED_MORE;  // 페이로드 미도착\n\n    out->type = type;\n    out->len  = len;\n    out->val  = (len > 0) ? (h + TLV_HDR_LEN) : NULL;\n    *off += TLV_HDR_LEN + (size_t)len;\n    return TLV_OK;\n}",
+      "explanation_ko": "스트림 디코더의 계약을 정확히 지키는지가 전부다. NEED_MORE 에서 off 를 전진시키면 호출자가 남은 꼬리를 보관해 다음 read() 와 이어붙일 수 없고, 프레임 하나가 통째로 유실되며 그 뒤 스트림 전체가 미아가 된다. 그래서 '부족하면 아무것도 소비하지 않는다' 가 불변식이다. 두 번째는 보안: 길이 필드는 네트워크 건너편에서 온 값이므로 신뢰하지 않고 정책 상한(max_len)을 강제한다 — 안 그러면 0xFFFF 하나로 64KB 할당이나 무한 대기를 유발할 수 있다. 세 번째는 정수 오버플로: `*off + 3 + len > n` 처럼 더해서 비교하면 size_t 가 wrap 될 때 경계 검사를 통과해 OOB read 가 난다. 항상 남은 양에서 빼며 비교한다. val 을 복사 없이 buf 안을 가리키게 두면(zero-copy) 할당이 사라지지만, '이 포인터는 buf 가 살아있는 동안만 유효하다' 는 수명 계약을 반드시 문서화해야 한다.",
+      "complexity": "O(1) per frame — 복사 없음(zero-copy), 상태는 호출자의 off 하나",
+      "pitfalls": [
+        "NEED_MORE 인데 off 를 전진시켜 데이터 유실",
+        "`off + hdr + len > n` 으로 비교 → size_t 오버플로로 경계 검사 통과",
+        "len 필드를 그대로 믿고 할당/대기 → DoS",
+        "len==0 프레임을 오류로 처리하거나 무한 루프에 빠짐",
+        "빅엔디안 길이를 memcpy 로 uint16_t 에 복사 (엔디안·정렬 의존)",
+        "zero-copy val 포인터의 수명을 문서화하지 않아 use-after-free"
+      ],
+      "verkada_context": "게이트웨이와 Command 사이, 또는 게이트웨이 내부 프로세스 간 메시지 경계를 만드는 방식. 신뢰 경계 너머에서 오는 길이 필드를 다루므로 방어적 파싱이 필수다."
+    },
+    {
+      "num": 58,
+      "slug": "slip_stuffing",
+      "title_ko": "SLIP 바이트 스터핑 인코드/디코드",
+      "title_en": "SLIP byte stuffing encode/decode",
+      "difficulty": "medium",
+      "tags": [
+        "framing",
+        "slip",
+        "rfc1055",
+        "serial",
+        "round-trip"
+      ],
+      "prompt_ko": "END=0xC0 가 프레임 경계. 페이로드 안의 0xC0 은 0xDB 0xDC 로, 0xDB 은 0xDB 0xDD 로 치환한다. 인코더는 앞뒤로 END 를 붙인다(앞 END = 회선 노이즈를 빈 프레임으로 흘려보내는 재동기화 장치). 최악 크기 2n+2. 디코더는 선행 END 를 건너뛰고 종결 END 에서 멈추며, 잘못된 이스케이프·ESC 로 끝남·종결 END 없음·출력 버퍼 부족은 -1.",
+      "prompt_en": "RFC 1055 byte stuffing: escape END/ESC inside the payload and bracket the frame with END. The decoder skips leading ENDs, stops at the trailing END, and rejects bad escapes, truncated frames and undersized buffers.",
+      "signature": "long slip_encode(const uint8_t *in, size_t n, uint8_t *out, size_t out_sz); long slip_decode(const uint8_t *in, size_t n, uint8_t *out, size_t out_sz)",
+      "examples": [
+        {
+          "in": "encode({C0 01 DB})",
+          "out": "{C0 DB DC 01 DB DD C0}, 7바이트"
+        },
+        {
+          "in": "decode(encode(x))",
+          "out": "x (왕복)"
+        },
+        {
+          "in": "decode({C0 DB 41 C0})",
+          "out": "-1 (잘못된 이스케이프)"
+        }
+      ],
+      "hints": [
+        "인코더는 출력 한 바이트마다 남은 공간을 확인하는 매크로 하나면 충분하다.",
+        "디코더는 선행 END 를 전부 건너뛴 뒤 시작한다 — 빈 프레임(END END)은 노이즈 재동기화의 정상 결과다.",
+        "ESC 를 만나면 다음 바이트가 반드시 있어야 하고 0xDC/0xDD 중 하나여야 한다. 아니면 -1 — 조용히 통과시키면 프레임이 오염된다."
+      ],
+      "solution": "long slip_encode(const uint8_t *in, size_t n, uint8_t *out, size_t out_sz) {\n    if ((!in && n > 0) || !out) return -1;\n\n    size_t k = 0;\n    #define PUT(b) do { if (k >= out_sz) return -1; out[k++] = (uint8_t)(b); } while (0)\n    PUT(SLIP_END);\n    for (size_t i = 0; i < n; i++) {\n        if (in[i] == SLIP_END)      { PUT(SLIP_ESC); PUT(SLIP_ESC_END); }\n        else if (in[i] == SLIP_ESC) { PUT(SLIP_ESC); PUT(SLIP_ESC_ESC); }\n        else                        { PUT(in[i]); }\n    }\n    PUT(SLIP_END);\n    #undef PUT\n    return (long)k;\n}\n\nlong slip_decode(const uint8_t *in, size_t n, uint8_t *out, size_t out_sz) {\n    if ((!in && n > 0) || !out) return -1;\n\n    size_t i = 0;\n    while (i < n && in[i] == SLIP_END) i++;       // 선행 END / 빈 프레임 스킵\n\n    size_t k = 0;\n    while (i < n) {\n        uint8_t b = in[i++];\n        if (b == SLIP_END) {\n            return (long)k;                       // 정상 종료\n        }\n        if (b == SLIP_ESC) {\n            if (i >= n) return -1;                // ESC 로 끝남 = 잘린 프레임\n            uint8_t e = in[i++];\n            if      (e == SLIP_ESC_END) b = SLIP_END;\n            else if (e == SLIP_ESC_ESC) b = SLIP_ESC;\n            else    return -1;                    // 프로토콜 위반\n        }\n        if (k >= out_sz) return -1;               // 목적지 버퍼 부족\n        out[k++] = b;\n    }\n    return -1;                                    // 종결 END 미도착\n}",
+      "explanation_ko": "SLIP 은 30줄짜리지만 프레이밍 설계 전체를 설명하는 데 쓸 수 있다. 길이 접두와 달리 **길이를 미리 알 필요가 없고 상태도 없다** — 대신 최악의 경우 크기가 2n+2 로 두 배가 된다. 앞쪽 END 를 붙이는 이유를 말할 수 있어야 한다: 회선 노이즈로 생긴 쓰레기 바이트가 앞에 붙어도 첫 END 에서 빈 프레임으로 잘려나가 재동기화된다. 디코더 쪽 채점 포인트는 '모호한 입력을 전부 -1 로 만드는가' 다 — ESC 뒤 잘못된 바이트, ESC 로 끝나는 잘린 프레임, 종결 END 가 없는 프레임은 전부 실패여야 한다. 관대하게 통과시키면 손상된 프레임이 상위 계층으로 올라간다. 마지막으로 COBS 와 비교할 수 있어야 한다: COBS 는 오버헤드 상한이 n/254+1 로 보장되어 SLIP 보다 우월하고, 그래서 새 설계의 기본값이다.",
+      "complexity": "encode O(n), 출력 최악 2n+2 / decode O(n), 추가 메모리 없음",
+      "pitfalls": [
+        "출력 버퍼 크기를 n+2 로 잡음 — 최악은 2n+2",
+        "ESC 로 끝나는 잘린 프레임에서 버퍼 밖을 읽음",
+        "잘못된 이스케이프를 관대하게 통과시켜 손상 프레임을 상위로 올림",
+        "종결 END 가 없는 입력을 성공으로 처리",
+        "선행 END(빈 프레임)를 오류로 취급 — 이건 정상적인 재동기화 결과다",
+        "왕복 테스트를 0x00~0xFF 전 바이트로 하지 않아 이스케이프 경로를 놓침"
+      ],
+      "verkada_context": "게이트웨이가 MCU/센서 보드와 raw UART 로 말할 때(공기질 센서 SV 계열처럼) 쓰는 프레이밍. 길이 접두보다 재동기화가 쉬워 잡음 있는 링크에 적합하다."
+    }
+  ]
+}

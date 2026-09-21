@@ -1,0 +1,495 @@
+{
+  "id": "atomics_lockfree",
+  "order": 3,
+  "range": "Q21-30",
+  "icon": "⚛️",
+  "track": "core",
+  "title_en": "Atomics & Lock-free Patterns",
+  "title_ko": "Atomic 연산 & Lock-free",
+  "summary_ko": "C11 `<stdatomic.h>` 로 mutex 없이 스레드 안전을 만드는 패턴 모음. 동시성 버그는 '원자성 부족(lost update)'과 '순서/가시성 부족(재배치)' 두 종류이고, 전자는 fetch_add/CAS 가, 후자는 memory_order 가 해결한다. 인터뷰의 핵심은 코드가 아니라 **왜 이 memory order 인가**를 말로 설명하는 것 — relaxed(통계 카운터), release/acquire(플래그·인덱스·포인터로 데이터 publish), acq_rel(CAS), seq_cst(기본값)의 선택 근거다. `volatile` 이 원자성도 순서도 주지 않는다는 점, seqlock 이 C 표준상 data race 라는 점, ABA 가 왜 생기는지는 거의 확실히 물어본다.",
+  "summary_en": "Thread safety without mutexes using C11 atomics. Concurrency bugs come in two flavours — lost updates (fixed by atomic RMW) and reordering/visibility (fixed by memory_order) — and the interview tests whether you can justify the order you picked: relaxed for statistics, release/acquire to publish data behind a flag, index or pointer, acq_rel for CAS, seq_cst as the safe default. Covers SPSC ring buffers, seqlocks, refcounting and the ABA problem.",
+  "verkada_relevance_ko": "2026-09-15 리크루터 Davis 의 안내 메일이 복습 주제로 mutex·condition variable 과 함께 **\"atomic operations\"를 이름까지 찍어서** 적어줬다. 즉 출제 범위 공지다. Connectivity 팀이 만드는 GC31-E 셀룰러 게이트웨이와 GW31-E Wi-Fi 게이트웨이의 펌웨어에는 mutex 를 쓸 수 없는 자리가 실제로 존재한다 — 모뎀 UART RX 인터럽트(블록 금지), 초당 수만 번 읽히는 링크 상태 스냅샷(RSRP/RSRQ/SIM 슬롯), Command 에서 내려오는 설정의 무중단 교체. 평가 기준이 '설계 결정과 trade-off 의 정당화'와 'concurrent 시스템의 견고성'이므로, lock-free 를 **쓸 줄 아는 것**보다 **언제 쓰면 안 되는지**(스핀락과 배터리, seqlock 과 data race, 근거 없는 lock-free 의 유지보수 비용)를 말하는 쪽이 점수가 높다. 또한 170개국 200만 대 fleet 규모에서는 '가끔 프레임이 비어요' 같은 조용한 손실이 추적 불가능하므로 drop/재시도 카운터를 원자적으로 세는 습관 자체가 설계 역량으로 읽힌다.",
+  "concepts": [
+    {
+      "term": "atomic RMW (fetch_add / CAS)",
+      "ko": "load-modify-store 가 쪼개지지 않는 단일 연산. 비원자 `c++` 는 3단계라 두 스레드 사이에서 증가가 통째로 유실된다(lost update).",
+      "en": "A read-modify-write that cannot be split. A plain `c++` is three steps, so concurrent increments silently lose updates."
+    },
+    {
+      "term": "memory_order_relaxed",
+      "ko": "원자성만 보장하고 다른 메모리 접근과의 순서는 보장하지 않는다. 순수 통계 카운터, 자기만 쓰는 인덱스 읽기, CAS 실패 경로에 쓴다.",
+      "en": "Atomicity only, no ordering with respect to other memory. Use for pure statistics counters, self-owned index loads, and CAS failure paths."
+    },
+    {
+      "term": "acquire / release 짝",
+      "ko": "release store 이전의 모든 쓰기는, 그 값을 acquire load 로 본 스레드에게 반드시 보인다(happens-before). 플래그·인덱스·포인터로 데이터를 publish 할 때의 표준 도구.",
+      "en": "Everything written before a release store is visible to a thread that acquire-loads that value. This pair creates the happens-before edge used to publish data behind a flag, index or pointer."
+    },
+    {
+      "term": "seq_cst",
+      "ko": "기본값. acquire+release 에 더해 모든 seq_cst 연산의 단일 전역 순서까지 보장한다. 확신이 없으면 여기서 시작하고 측정 근거가 생기면 낮춘다.",
+      "en": "The default: acquire+release plus a single total order over all seq_cst operations. Start here when unsure and weaken only with a measurement."
+    },
+    {
+      "term": "volatile 의 한계",
+      "ko": "최적화 억제일 뿐이다. ①원자성 없음 ②volatile 접근끼리의 순서만 지키고 주변 비-volatile 접근은 재배치됨 ③CPU 배리어(DMB)를 내보내지 않음. x86 에서는 우연히 동작해 더 위험하다.",
+      "en": "volatile only prevents compiler caching: no atomicity, no ordering against non-volatile accesses, and no CPU barrier. It appears to work on x86 (TSO), which makes it more dangerous."
+    },
+    {
+      "term": "compare_exchange_weak / strong",
+      "ko": "weak 는 값이 같아도 가짜 실패(spurious failure)가 있지만 ARM LL/SC 에서 더 싸다 → 루프 안에서는 weak. 실패하면 expected 에 현재 값이 자동으로 들어온다(다시 load 금지).",
+      "en": "weak may fail spuriously but is cheaper on LL/SC machines, so use it inside a retry loop. On failure the expected operand is updated with the current value — never re-load."
+    },
+    {
+      "term": "SPSC lock-free ring",
+      "ko": "생산자만 tail 을 쓰고 소비자만 head 를 쓴다 → write-write 경합이 구조적으로 없다. 남은 문제는 순서뿐이고 release/acquire 한 쌍이 해결한다. 한 칸을 비워 full/empty 를 구분.",
+      "en": "Only the producer writes tail and only the consumer writes head, so write-write contention cannot occur; one release/acquire pair fixes ordering. One slot is left empty to distinguish full from empty."
+    },
+    {
+      "term": "power-of-two mask",
+      "ko": "cap 이 2의 거듭제곱이면 `idx & (cap-1)` 은 `idx % cap` 과 동일하고 나눗셈이 없다(ISR 에서 중요). count 는 `(tail-head) & (cap-1)` — 부호 없는 뺄셈이라 랩되어도 정확.",
+      "en": "With a power-of-two capacity, `& (cap-1)` equals `% cap` without a divide, which matters inside an ISR. count = (tail-head) & (cap-1) stays exact across wrap-around."
+    },
+    {
+      "term": "seqlock",
+      "ko": "짝수/홀수 시퀀스로 latest-value 스냅샷을 공유. writer 는 절대 블록되지 않고 reader 가 재시도한다. C 표준상 data race 라 TSan 이 경고하며, 포인터를 담으면 안 된다(POD 전용).",
+      "en": "An even/odd sequence counter publishes a latest-value snapshot; writers never block and readers retry. It is technically a data race under the C model (TSan flags it) and must hold POD only."
+    },
+    {
+      "term": "atomic refcount",
+      "ko": "증가는 relaxed, 감소는 release 로 하고 마지막 참조(fetch_sub 가 1 반환)에서 acquire fence 를 건 뒤 free 한다. release 만으로는 '남의 접근이 나에게 보인다'가 보장되지 않는다.",
+      "en": "Increment relaxed, decrement release; on the last reference insert an acquire fence before free, because release alone does not make other threads' accesses visible to the freeing thread."
+    },
+    {
+      "term": "ABA 문제 / tagged pointer",
+      "ko": "CAS 는 값만 비교하고 이력을 모른다. 노드가 pop 됐다가 다시 push 되면 stale CAS 가 성공해 리스트가 깨진다. 해법: 버전 태그를 포인터와 함께 CAS, hazard pointer/RCU, 또는 그냥 mutex.",
+      "en": "CAS compares a value, not its history: a node popped and pushed back lets a stale CAS succeed and corrupt the list. Fix with a version tag packed next to the pointer, hazard pointers/RCU, or just a mutex."
+    }
+  ],
+  "study_note_md": "# ⚛️ Atomic 연산 & Lock-free (Atomics & Lock-free Patterns) — Q21~30\n\n> 리크루터 Davis의 메일이 복습 주제로 **\"atomic operations\"를 이름까지 찍어서** 알려줬다.\n> 게이트웨이(GC31-E / GW31-E) 펌웨어에서 mutex를 쓸 수 없는 자리 — 모뎀 UART RX ISR,\n> 초당 수만 번 읽히는 링크 상태, 무중단 설정 교체 — 는 전부 atomic + memory order로 푼다.\n> 이 세트의 목표는 코드를 외우는 게 아니라 **\"왜 이 memory order인가\"를 말로 설명**하는 것이다.\n\n---\n\n## 1. 핵심 아이디어\n\n동시성 버그는 두 종류다. atomic은 그 둘을 각각 다른 도구로 막는다.\n\n| 문제 | 증상 | 도구 |\n|---|---|---|\n| **원자성 부족** | `c++`가 load/add/store 3단계라 증가가 유실(lost update) | `atomic_fetch_add`, CAS |\n| **순서/가시성 부족** | 인덱스는 갱신됐는데 데이터가 아직 안 보임 | `memory_order` (acquire/release) |\n\n`volatile`은 **둘 다 해결하지 못한다.** 이건 이 인터뷰에서 거의 확실히 나오는 질문이다.\n\n```\n  writer                        reader\n  ────────                      ────────\n  data = 42;          ①         if (load(flag, ACQUIRE))   ③\n  store(flag,1,RELEASE) ②           use(data);             ④\n\n  release(②) ─── happens-before ───> acquire(③)\n  ⇒ ①은 반드시 ④보다 먼저 보인다.\n```\n\n이 그림 하나가 Q22(stop 플래그), Q25(SPSC 링), Q27/28(seqlock), Q29(refcount)를 전부 설명한다.\n\n---\n\n## 2. memory_order 표 — 이게 이 세트의 전부다\n\n| order | 보장하는 것 | 언제 쓰나 | 이 세트의 예 |\n|---|---|---|---|\n| **relaxed** | 원자성만. 다른 메모리 접근과의 **순서 보장 없음**. 단일 변수의 modification order는 여전히 일관됨 | 순수 통계 카운터, 자기만 쓰는 인덱스 읽기, CAS 실패 경로 | Q21 `ctr_add`, Q25 `load(tail)` (생산자 자신), Q29 `rc_get` |\n| **acquire** (load 전용) | 이 load **이후**의 읽기/쓰기가 앞으로 못 넘어옴. 짝이 되는 release store 이전의 모든 쓰기가 보인다 | 플래그/인덱스/포인터를 **읽어서** 데이터를 쓰려 할 때 | Q22 `stop_requested`, Q24 `spin_lock`, Q25 `ring_pop` |\n| **release** (store 전용) | 이 store **이전**의 읽기/쓰기가 뒤로 못 넘어감. acquire로 이 값을 본 스레드에게 전부 보인다 | 데이터를 다 쓰고 **publish** 할 때 | Q22 `stop_request`, Q24 `spin_unlock`, Q25 `ring_push`, Q29 `rc_put` |\n| **acq_rel** (RMW 전용) | acquire + release 동시에 | 읽고-쓰는 한 연산이 양쪽 다 필요할 때 (락 획득 겸 publish) | Q30 `pool_pop`의 CAS |\n| **seq_cst** (기본값) | 위 전부 + **모든 seq_cst 연산에 대한 단일 전역 순서** | 확신이 없을 때의 기본값. 서로 다른 변수 두 개의 순서까지 필요할 때(Dekker 류) | 이 세트에는 필요 없음 |\n\n### 고르는 법 (30초 규칙)\n\n1. 이 atomic이 **다른 데이터를 publish**하는가? → store는 release, load는 acquire.\n2. **값만 맞으면 되는가**(카운터)? → relaxed.\n3. **모르겠는가?** → seq_cst로 시작하고 근거가 생기면 낮춘다. 면접에서 이 말은 **가점**이다.\n\n> ⚠️ x86(TSO)에서는 acquire/release가 **공짜**(일반 mov)라 잘못 써도 안 터진다. arm64\n> (Cortex-A 급 게이트웨이 SoC)는 weak memory model이라 `ldar/stlr`/`dmb`가 실제로 나간다.\n> **\"x86에서 됐으니 맞다\"는 필드 버그의 표준 레시피다.**\n\n### fence (`atomic_thread_fence`)\n\n변수가 아니라 **코드 지점**에 배리어를 세운다. \"매번 acquire를 거는 대신 마지막 한 번만\"이\n필요할 때 쓴다 → Q27 seqlock write, Q29 refcount free.\n`atomic_signal_fence`는 **컴파일러 배리어일 뿐** CPU 명령이 나가지 않는다.\n\n---\n\n## 3. 패턴별 요점\n\n### 3.1 카운터 (Q21)\n\n```c\natomic_fetch_add_explicit(&c->n, 1, memory_order_relaxed);  // 반환 = 더하기 '직전' 값\n```\n`fetch_*`가 **이전 값**을 준다는 걸 이용하면 \"슬롯 예약\"도 된다(`idx = fetch_add(&tail,1)`).\n\n### 3.2 stop 플래그 (Q22) — volatile 반례\n\n```c\n/* 틀린 코드 */\nvolatile int stop;\nsnprintf(reason, ...);   /* 비-volatile */\nstop = 1;                /* 컴파일러/CPU가 위보다 먼저 보이게 할 수 있다 */\n```\n`volatile`이 지키는 순서는 **volatile 접근끼리**뿐이다. `reason[]` 쓰기는 자유롭게 재배치된다.\n게다가 volatile은 배리어 명령을 내보내지 않으므로 arm64의 store buffer 앞에서 무력하다.\n\n### 3.3 CAS 루프 (Q23) — 모든 lock-free의 기본형\n\n```c\nunsigned cur = atomic_load_explicit(slot, memory_order_relaxed);\nwhile (candidate > cur) {\n    if (atomic_compare_exchange_weak_explicit(slot, &cur, candidate,\n            memory_order_release,   /* 성공 */\n            memory_order_relaxed))  /* 실패 */\n        return true;\n    /* 실패하면 cur에 '현재 값'이 자동으로 들어온다 — 다시 load 하지 말 것 */\n}\nreturn false;\n```\n\n| | weak | strong |\n|---|---|---|\n| 가짜 실패(spurious) | 있음 | 없음 |\n| 비용 | ARM LL/SC에서 더 쌈 | 내부적으로 재시도 루프 |\n| 쓰는 곳 | **루프 안 (거의 항상)** | 루프가 없는 단발 CAS |\n\n### 3.4 스핀락 (Q24) — 그리고 쓰면 안 되는 경우\n\n```c\nwhile (atomic_flag_test_and_set_explicit(&l->held, memory_order_acquire)) { /* spin */ }\n...                                    /* 임계구역: 평범한 데이터도 안전 */\natomic_flag_clear_explicit(&l->held, memory_order_release);\n```\n`atomic_flag`는 C11에서 **항상 lock-free가 보장되는 유일한 타입**이다.\n\n**쓰면 안 되는 경우 (이게 진짜 질문)**\n1. 임계구역이 길거나 그 안에서 블록/시스템콜/`malloc` → CPU를 태운다. 배터리로 도는 MT81 트레일러에서 스핀은 곧 주행거리다.\n2. 단일 코어 + 선점형 스케줄러 → 락 보유자가 선점되면 대기자가 타임슬라이스 전체를 태운다. 최악은 **우선순위 역전**으로 진행이 멈춘다 → mutex + priority inheritance가 정답.\n3. 유저스페이스 Linux에서 경합이 있으면 대개 `pthread_mutex`가 더 빠르다(futex라 무경합은 이미 유저스페이스에서 끝남).\n\n### 3.5 SPSC 링버퍼 (Q25/Q26)\n\n성립 근거 한 문장: **생산자만 tail을 쓰고 소비자만 head를 쓴다 → write-write 경합이 구조적으로 없다.**\n\n```c\nr->buf[t] = b;                                                /* ① 데이터 */\natomic_store_explicit(&r->tail, next, memory_order_release);  /* ② publish */\n```\n- 자기 인덱스는 `relaxed`로 읽어도 된다(나만 쓰니까). 상대 인덱스는 `acquire`.\n- **한 칸 비우기** → `head==tail`=empty, `next==head`=full, 용량 `CAP-1`. count 필드를 두면\n  양쪽이 쓰게 되어 SPSC의 이점이 사라진다.\n- `cap`이 2의 거듭제곱이면 `idx & (cap-1)` == `idx % cap`인데 나눗셈이 없다(ISR에서 중요).\n  `count = (tail - head) & (CAP-1)` — **부호 없는 뺄셈**이라 랩되어도 정확.\n- false sharing: 멀티코어라면 `head`/`tail`을 `_Alignas(64)`로 다른 캐시라인에.\n\n### 3.6 seqlock (Q27/Q28) — 정직함이 점수다\n\n```c\n/* write: 홀수(쓰는 중) → fence → 데이터 → 짝수(완료) */\nstore(seq, v+1, relaxed); atomic_thread_fence(release);\ns->data = *in;\nstore(seq, v+2, release);\n\n/* read: 재시도 루프 */\nfor (;;) {\n    before = load(seq, acquire);\n    if (before & 1) continue;\n    *out = s->data;                      /* 찢어진 값일 수 있다 */\n    atomic_thread_fence(acquire);\n    after = load(seq, relaxed);\n    if (before == after) return;         /* 유효 */\n}\n```\n\n**한계를 먼저 말할 것 (가산점)**\n- `*out = s->data`는 C 표준상 **data race**다. TSan이 정확히 여기를 지적한다 — 버그가 아니라\n  seqlock의 정의다. 실무 해법: ①필드별 relaxed atomic ②커널처럼 `READ_ONCE/WRITE_ONCE`.\n  (solutions/는 TSan 빌드일 때 seqlock **스레드 테스트만** 자동으로 끄고 단일 스레드로 같은\n  불변식을 검증한다. `-DVK_FORCE_SEQLOCK_THREADS`로 켜면 경고를 직접 볼 수 있다.)\n- 데이터에 **포인터/핸들이 있으면 쓰면 안 된다** — 찢어진 포인터를 역참조하면 죽는다. POD 전용.\n- reader starvation → 재시도 상한(`seq_try_read`) + 실패 시 mutex 경로로 fallback.\n- **\"그냥 mutex 쓰면 안 되나?\"의 정답은 '된다, 그리고 대개 그게 맞다'**이다. seqlock은\n  \"읽기가 초당 수만 번이고 writer 지연이 실시간 요구를 깬다\"는 **측정된 근거**가 있을 때만.\n\n### 3.7 refcount (Q29)\n\n```c\natomic_fetch_add_explicit(&c->refs, 1, memory_order_relaxed);   /* get */\n\nif (atomic_fetch_sub_explicit(&c->refs, 1, memory_order_release) == 1) {  /* put */\n    atomic_thread_fence(memory_order_acquire);   /* ★ 이게 없으면 use-after-free */\n    free(c);\n}\n```\n- **증가가 relaxed**: 이미 유효한 참조를 들고 있는 증가라 publish할 게 없다.\n- **감소가 release**: \"이제 안 본다\"를 알리려면 내 접근을 먼저 flush해야 한다.\n- **free 전에 acquire**: release는 \"내 접근이 남에게 보인다\"뿐이다. free하는 쪽은 반대로\n  **\"남들의 접근이 나에게 보인다\"**가 필요하다.\n- 참조 없이 `load(ptr)` → `fetch_add(refs)` 두 줄로 나누면 그 사이에 해제될 수 있다\n  (use-after-free). 닫는 법은 셋뿐: ①짧은 락으로 두 줄 원자화 ②hazard pointer ③RCU/epoch.\n\n### 3.8 ABA와 tagged pointer (Q30)\n\n> T1이 `top == A`를 읽고 선점된 사이, T2가 A를 pop, B를 pop, A를 다시 push한다.\n> top은 다시 A지만 **A->next는 완전히 다른 값**이다. T1의 `CAS(top, A, A->next_old)`는\n> \"값이 같은가\"만 보므로 **성공해버리고** 리스트가 깨진다.\n\n해법 3가지:\n1. **tagged pointer** — (포인터 \\| 버전 카운터)를 한 워드로 묶어 CAS. push/pop마다 tag++.\n   64비트 CAS로 `(32bit index | 32bit tag)`, 또는 DWCAS(x86 `cmpxchg16b`, ARM `CASP`).\n2. **hazard pointer / epoch / RCU** — 재사용 자체를 지연시킨다.\n3. **그냥 mutex** — 임베디드 코드 대부분에서 이게 정답이다.\n\n포인터 대신 **배열 인덱스**를 쓰면 32비트가 남아 태그를 공짜로 얻는다(Q30 구현이 이 방식).\n\n---\n\n## 4. 흔한 함정 (인터뷰 감점 포인트)\n\n1. **`volatile`로 충분하다고 답하기** — 즉사. 원자성도 순서도 보장하지 않는다.\n2. **CAS 실패 후 다시 `atomic_load`** — 실패 시 expected에 현재 값이 이미 실려 있다.\n3. **seqlock read를 `do/while`로 쓰기** — `continue`가 while 조건으로 점프해서 **아직 대입된 적\n   없는 `after`(쓰레기값)**와 비교한다. 운 나쁘면 `*out`을 한 번도 채우지 않고 리턴한다.\n   → `for (;;)` + 명시적 `return`. (흔한 예제 코드에 실제로 박혀 있는 버그)\n4. **seqlock write에서 첫 fence를 빼기** — reader가 '짝수 seq + 반쯤 쓰인 데이터'를 보고 통과한다.\n5. **refcount free 전에 acquire fence 없음** — release만으로는 남의 접근을 못 본다.\n6. **SPSC에 count 필드 추가** — 양쪽이 쓰게 되어 무락이 깨진다.\n7. **`is_pow2(0)`이 true** — `0 & (0-1) == 0`. `x != 0 &&`를 반드시 붙인다.\n8. **가득 찬 링에서 ISR이 재시도/대기** — 인터럽트를 막는다. **drop하고 카운터를 올린다.**\n9. **drop/실패를 조용히 삼키기** — 필드에서 가장 추적하기 어려운 버그다. 반드시 센다.\n10. **근거 없이 lock-free 선택** — \"측정했더니 mutex가 병목이었다\"가 없으면 유지보수 비용만 오른다.\n\n---\n\n## 5. 면접에서 말할 것 (한국어 + English)\n\n**① volatile vs atomic**\n- KO: \"`volatile`은 최적화 억제일 뿐, 원자성도 메모리 순서도 보장하지 않습니다. 공유 상태에는 `_Atomic`과 명시적 memory order를 씁니다.\"\n- EN: *\"`volatile` only stops the compiler from caching a load — it guarantees neither atomicity nor ordering. For shared state I use `_Atomic` with an explicit memory order.\"*\n\n**② acquire/release 한 문장 정의**\n- KO: \"release store 이전의 모든 쓰기는, 그 값을 acquire load로 본 스레드에게 반드시 보입니다. 그 한 쌍이 happens-before를 만듭니다.\"\n- EN: *\"Everything written before a release store becomes visible to any thread that acquire-loads that value. That pair is what creates the happens-before edge.\"*\n\n**③ 왜 relaxed인가**\n- KO: \"이 카운터는 다른 데이터를 publish하지 않고 값만 맞으면 되므로 relaxed로 충분합니다. 배리어 비용을 낼 이유가 없습니다.\"\n- EN: *\"This counter doesn't publish any other data — only the count has to be right — so relaxed is sufficient and I don't pay for a barrier.\"*\n\n**④ SPSC가 무락인 이유**\n- KO: \"생산자만 tail을 쓰고 소비자만 head를 씁니다. write-write 경합이 구조적으로 없으니 남는 문제는 순서뿐이고, 그건 release/acquire 한 쌍으로 끝납니다.\"\n- EN: *\"Only the producer writes tail and only the consumer writes head, so there is no write-write contention by construction. The only remaining problem is ordering, and one release/acquire pair solves it.\"*\n\n**⑤ 스핀락을 안 쓰는 이유**\n- KO: \"임계구역이 길거나 단일 코어에서 선점되면 스핀락은 CPU를 태우고 우선순위 역전을 만듭니다. 그런 경우엔 mutex에 priority inheritance를 씁니다.\"\n- EN: *\"If the critical section is long, or on a single core where the holder can be preempted, a spinlock just burns CPU and invites priority inversion. There I'd use a mutex with priority inheritance.\"*\n\n**⑥ seqlock의 한계를 먼저 말하기**\n- EN: *\"To be upfront: a seqlock is technically a data race under the C memory model — ThreadSanitizer will flag the payload copy. The real-world fixes are per-field relaxed atomics, or the kernel's `READ_ONCE`/`WRITE_ONCE`. And it's POD-only: never put a pointer in the payload.\"*\n\n**⑦ trade-off를 아는 시니어로 들리게**\n- KO: \"기본은 mutex + condition variable입니다. lock-free는 측정된 근거가 있을 때만 씁니다 — 없으면 유지보수 비용만 올라갑니다.\"\n- EN: *\"My default is a mutex and a condition variable. I only reach for lock-free when I have a measurement that says the lock is the bottleneck — otherwise it's just maintenance cost.\"*\n\n**⑧ ABA**\n- EN: *\"CAS only compares the value, not the history. If a node is popped and pushed back, a stale CAS succeeds and corrupts the list. I'd pack a version tag next to the pointer, or avoid reclamation entirely with hazard pointers or RCU.\"*\n\n---\n\n## 6. 체크리스트\n\n- [ ] `volatile`이 보장하는 것/못 하는 것을 3가지로 나눠 말할 수 있다\n- [ ] relaxed / acquire / release / acq_rel / seq_cst를 각각 \"언제 쓰나\"로 설명할 수 있다\n- [ ] release store ↔ acquire load가 happens-before를 만든다는 문장을 영어로 말할 수 있다\n- [ ] CAS 루프를 보지 않고 쓸 수 있고, 실패 시 expected가 갱신된다는 걸 안다\n- [ ] weak vs strong의 차이와 각각의 사용처를 안다\n- [ ] SPSC 링버퍼를 5분 안에 쓰고 \"왜 무락인지\" 한 문장으로 설명한다\n- [ ] 한 칸 비우기 / pow2 마스킹 / unsigned 뺄셈 count를 이유와 함께 말한다\n- [ ] seqlock write/read를 쓰고, **data race라는 한계를 먼저** 말한다\n- [ ] seqlock read를 `for(;;)`로 쓴다 (`do/while` + `continue` 함정을 안다)\n- [ ] refcount에서 감소=release, 마지막에 acquire fence인 이유를 설명한다\n- [ ] ABA 시나리오를 3문장으로 설명하고 해법 3가지를 댄다\n- [ ] \"그냥 mutex 쓰면 안 되나?\"에 **\"됩니다, 그리고 대개 그게 맞습니다\"**로 시작한다\n- [ ] TSan(`-fsanitize=thread`)으로 검증하는 습관을 언급한다\n",
+  "problems": [
+    {
+      "num": 21,
+      "slug": "atomic_counter_relaxed",
+      "title_ko": "atomic 카운터 (relaxed) vs 비원자 카운터",
+      "title_en": "Relaxed atomic counter vs a plain counter",
+      "difficulty": "easy",
+      "tags": [
+        "atomic",
+        "fetch_add",
+        "relaxed",
+        "lost-update"
+      ],
+      "prompt_ko": "`atomic_fetch_add_explicit(..., memory_order_relaxed)` 로 카운터를 구현하라. 반환값은 '더하기 직전 값'이어야 한다. 그리고 비원자 `c++` 의 최악 인터리빙(T1 load → T2 load → T1 store → T2 store)을 지역 변수로 결정적으로 재현해, 증가 2회인데 결과가 start+1 이 되는 lost update 를 보여라.",
+      "prompt_en": "Implement a relaxed atomic counter whose add returns the previous value, then deterministically reproduce the lost update of a non-atomic `++` by simulating the load/load/store/store interleaving with local variables.",
+      "signature": "unsigned long long ctr_add(Counter *c, unsigned long long delta)",
+      "examples": [
+        {
+          "in": "ctr_add(c,5); ctr_add(c,3)",
+          "out": "0, 5 반환 / ctr_get(c)==8"
+        },
+        {
+          "in": "racy_interleave_demo(10)",
+          "out": "11 (증가 2회인데 1회 유실)"
+        },
+        {
+          "in": "atomic_interleave_demo(10)",
+          "out": "12 (유실 없음)"
+        }
+      ],
+      "hints": [
+        "`c++` 는 한 연산이 아니라 load / add / store 세 연산이다.",
+        "통계 카운터는 다른 데이터를 publish 하지 않는다 → 순서 보장이 필요 없다 → relaxed.",
+        "`atomic_fetch_add_explicit(&c->n, delta, memory_order_relaxed)` 는 **더하기 직전 값**을 반환한다."
+      ],
+      "solution": "void ctr_init(Counter *c) {\n    atomic_init(&c->n, 0ull);\n}\n\nunsigned long long ctr_add(Counter *c, unsigned long long delta) {\n    return atomic_fetch_add_explicit(&c->n, delta, memory_order_relaxed);\n}\n\nunsigned long long ctr_get(const Counter *c) {\n    return atomic_load_explicit(&c->n, memory_order_relaxed);\n}\n\nunsigned long long racy_interleave_demo(unsigned long long start) {\n    unsigned long long shared = start;\n    unsigned long long r1, r2;\n    r1 = shared;                 /* T1: load          */\n    r2 = shared;                 /* T2: load (끼어듦) */\n    r1 += 1; shared = r1;        /* T1: add + store   */\n    r2 += 1; shared = r2;        /* T2: add + store   */\n    return shared;               /* start + 1 (1회 유실) */\n}\n\nunsigned long long atomic_interleave_demo(unsigned long long start) {\n    _Atomic unsigned long long shared;\n    atomic_init(&shared, start);\n    atomic_fetch_add_explicit(&shared, 1ull, memory_order_relaxed);  /* T1 전체 */\n    atomic_fetch_add_explicit(&shared, 1ull, memory_order_relaxed);  /* T2 전체 */\n    return atomic_load_explicit(&shared, memory_order_relaxed);      /* start + 2 */\n}",
+      "explanation_ko": "원자성과 순서는 별개의 문제다. 카운터에 필요한 것은 원자성뿐이므로 가장 싼 relaxed 를 고른다 — arm64 에서 배리어 명령이 나가지 않는다. fetch_add 가 '이전 값'을 돌려준다는 성질은 슬롯 예약(`idx = fetch_add(&tail,1)`)에도 그대로 쓰인다. 비원자 버전을 지역 변수로 흉내 낸 이유는 진짜 race 로는 결정적인 테스트를 만들 수 없기 때문이다(그리고 TSan 도 잡는다).",
+      "complexity": "O(1) per op, lock-free (arm64 에서 LDADD 한 명령)",
+      "pitfalls": [
+        "`volatile unsigned c; c++` 로 충분하다고 답하기 — 원자성이 없다.",
+        "relaxed 를 '느슨해서 값이 틀릴 수도 있다'로 오해하기 — 값은 정확하다. 보장되지 않는 건 **다른 메모리 접근과의 순서**뿐이다.",
+        "fetch_add 반환값을 '더한 뒤 값'으로 착각하기."
+      ],
+      "verkada_context": "GC31-E 의 LTE 재연결 횟수, 듀얼 SIM failover 횟수, 링버퍼 drop 카운터 — 여러 스레드가 올리고 텔레메트리로 업로드하는 통계값이 전부 이 패턴이다."
+    },
+    {
+      "num": 22,
+      "slug": "stop_flag_release_acquire",
+      "title_ko": "stop 플래그: release store / acquire load",
+      "title_en": "Stop flag with release/acquire",
+      "difficulty": "easy",
+      "tags": [
+        "atomic",
+        "acquire-release",
+        "volatile",
+        "shutdown"
+      ],
+      "prompt_ko": "종료 사유(reason 문자열 + seq)를 먼저 기록하고 stop 플래그를 `memory_order_release` 로 store 하라. 워커는 `memory_order_acquire` 로 load 해서 true 를 본 순간 reason/seq 가 완성된 상태로 보여야 한다. 같은 구조를 `volatile int` 로 만든 반례도 작성하고, 왜 그것이 틀렸는지 설명하라.",
+      "prompt_en": "Publish a shutdown reason then release-store the stop flag; the worker acquire-loads it and must see the completed payload. Also write the volatile counter-example and explain why it is wrong.",
+      "signature": "void stop_request(StopFlag *f, const char *reason, unsigned seq); bool stop_requested(const StopFlag *f)",
+      "examples": [
+        {
+          "in": "stop_request(f, \"link-down\", 4242)",
+          "out": "stop==true 를 본 워커는 reason==\"link-down\", seq==4242 를 반드시 본다"
+        }
+      ],
+      "hints": [
+        "플래그는 '데이터가 준비됐다'는 신호다 — 데이터를 먼저 쓰고 플래그를 나중에 쓴다.",
+        "store 는 release, load 는 acquire. 이 한 쌍이 happens-before 를 만든다.",
+        "volatile 은 volatile 접근끼리의 순서만 지킨다. reason[] 은 비-volatile 이라 자유롭게 재배치된다."
+      ],
+      "solution": "void stop_init(StopFlag *f) {\n    atomic_init(&f->stop, false);\n    f->reason[0] = '\\0';\n    f->seq = 0;\n}\n\nvoid stop_request(StopFlag *f, const char *reason, unsigned seq) {\n    snprintf(f->reason, sizeof f->reason, \"%s\", reason);\n    f->seq = seq;\n    atomic_store_explicit(&f->stop, true, memory_order_release);\n}\n\nbool stop_requested(const StopFlag *f) {\n    return atomic_load_explicit(&f->stop, memory_order_acquire);\n}",
+      "explanation_ko": "release store 이전의 모든 쓰기는, 그 값을 acquire load 로 본 스레드에게 반드시 보인다. 이것이 acquire/release 의 유일한 정의이자 이 세트 전체(SPSC 링, seqlock, refcount)의 공통 뼈대다. 반대로 volatile 은 ①원자성 ②비-volatile 접근과의 순서 ③CPU 배리어 중 아무것도 주지 않는다. x86(TSO)에서는 store-store 재배치가 없어 우연히 동작하므로, 같은 코드를 Cortex-A 게이트웨이로 옮겼을 때만 터지는 최악의 버그가 된다.",
+      "complexity": "O(1), 무락. arm64 에서 stlr / ldar 한 명령",
+      "pitfalls": [
+        "플래그를 먼저 세우고 데이터를 나중에 쓰기 — 순서가 뒤집히면 acquire/release 가 무의미해진다.",
+        "`volatile bool stop` 으로 충분하다고 답하기 (이 인터뷰의 즉사 함정).",
+        "스핀 루프에 상한이나 sleep 이 없어 CPU 를 태우기 — 배터리 제품에서 치명적.",
+        "acquire load 없이 relaxed 로 읽고 payload 를 읽기 — 플래그만 보이고 데이터는 안 보일 수 있다."
+      ],
+      "verkada_context": "GW31-E 는 '오프라인 30분이면 자가 재부팅'한다. 감시 스레드가 재부팅 사유를 남기고 워커들을 멈추는 경로가 정확히 이 패턴이며, 사유가 안 보이면 필드 디버깅이 불가능해진다."
+    },
+    {
+      "num": 23,
+      "slug": "cas_max_update",
+      "title_ko": "CAS 루프로 최대값 갱신",
+      "title_en": "High-water mark with a CAS loop",
+      "difficulty": "medium",
+      "tags": [
+        "CAS",
+        "compare_exchange_weak",
+        "lock-free",
+        "high-water-mark"
+      ],
+      "prompt_ko": "C11 에는 fetch_max 가 없다. `compare_exchange_weak` 루프로 atomic high-water mark 를 구현하라. candidate 가 현재 값보다 클 때만 갱신하고 true 를 반환한다. CAS 가 실패하면 expected 에 현재 값이 자동으로 들어온다는 규칙을 이용해 루프 안에서 절대 다시 load 하지 말 것.",
+      "prompt_en": "There is no fetch_max in C11 — build one from a compare_exchange_weak loop. On failure the expected operand already holds the current value, so never re-load inside the loop.",
+      "signature": "bool atomic_max_update(_Atomic unsigned *slot, unsigned candidate)",
+      "examples": [
+        {
+          "in": "0 에 5,3,9,9 순서로 적용",
+          "out": "true,false,true,false / 최종 9"
+        },
+        {
+          "in": "4스레드가 1..20000 을 무작위 순서로 밀어넣음",
+          "out": "최종값 20000"
+        }
+      ],
+      "hints": [
+        "CAS 는 '내가 읽은 값이 그대로면 바꿔라'다. 아니면 실패하고 **현재 값을 알려준다**.",
+        "실패 후 다시 `atomic_load` 하면 안 된다 — expected(cur)가 이미 갱신되어 있다.",
+        "성공 order 는 release(내 작업을 함께 publish), 실패 order 는 relaxed(아직 아무것도 publish 안 함). 루프 안이므로 weak."
+      ],
+      "solution": "bool atomic_max_update(_Atomic unsigned *slot, unsigned candidate) {\n    unsigned cur = atomic_load_explicit(slot, memory_order_relaxed);\n    while (candidate > cur) {\n        // 성공: release (이 값 이전의 내 작업을 함께 publish)\n        // 실패: relaxed (아직 아무것도 publish하지 않았다) + cur에 현재값이 실린다\n        if (atomic_compare_exchange_weak_explicit(slot, &cur, candidate,\n                                                  memory_order_release,\n                                                  memory_order_relaxed))\n            return true;\n        /* 실패 → cur는 이미 갱신됨. 다시 load하지 말 것. while 조건이 재검사한다 */\n    }\n    return false;\n}",
+      "explanation_ko": "CAS 루프는 모든 lock-free 알고리즘의 기본형이다. 'load → 새 값 계산 → CAS → 실패하면 재계산'. 여기서 핵심은 두 가지다. ① 실패 시 expected 가 자동 갱신되므로 재-load 는 불필요할 뿐 아니라 경쟁 창을 넓힌다. ② weak 는 값이 같아도 가짜 실패할 수 있지만 ARM 의 LDXR/STXR 에 그대로 매핑되어 더 싸다 — 어차피 루프 안이니 weak 가 정석이고, 루프 없는 단발 CAS 에서만 strong 을 쓴다. lock-free 지만 wait-free 는 아니다(이론상 무한 재시도 가능).",
+      "complexity": "O(1) 기대, 경합 시 재시도. lock-free",
+      "pitfalls": [
+        "실패 후 `cur = atomic_load(slot)` 을 다시 호출 — 불필요하고 창만 넓힌다.",
+        "`while (true)` 로 돌면서 `candidate <= cur` 일 때 빠져나오는 조건을 빼먹기 → 무한 루프.",
+        "weak 의 가짜 실패를 에러로 취급해 false 를 반환하기.",
+        "실패 order 를 성공 order 보다 강하게 주기 (C 표준 위반)."
+      ],
+      "verkada_context": "게이트웨이 텔레메트리의 '최대 큐 깊이', '최대 업로드 지연', '최저 RSRP' 같은 high-water mark. 여러 워커가 동시에 갱신하고 리포트 주기마다 읽어 올린다."
+    },
+    {
+      "num": 24,
+      "slug": "spinlock_atomic_flag",
+      "title_ko": "CAS 스핀락 (atomic_flag)",
+      "title_en": "Spinlock on atomic_flag",
+      "difficulty": "medium",
+      "tags": [
+        "spinlock",
+        "atomic_flag",
+        "acquire-release",
+        "trade-off"
+      ],
+      "prompt_ko": "`atomic_flag` 로 스핀락을 구현하라. lock 은 `test_and_set` 이 false 를 돌려줄 때까지 회전(acquire), unlock 은 `clear`(release). trylock 도 만든다. 그리고 **스핀락을 쓰면 안 되는 경우**를 세 가지 이상 설명하라 — 이쪽이 진짜 질문이다.",
+      "prompt_en": "Implement a spinlock on atomic_flag with acquire on test_and_set and release on clear, plus trylock. Then explain at least three situations where a spinlock is the wrong tool.",
+      "signature": "void spin_lock(SpinLock *l); void spin_unlock(SpinLock *l); bool spin_trylock(SpinLock *l)",
+      "examples": [
+        {
+          "in": "trylock, trylock, unlock, trylock",
+          "out": "true, false, -, true"
+        },
+        {
+          "in": "4스레드 × 100000 회 임계구역 증가",
+          "out": "정확히 400000 (비원자 카운터인데도 안전)"
+        }
+      ],
+      "hints": [
+        "`atomic_flag_test_and_set` 은 **이전 값**을 돌려준다. false 를 받았다면 내가 잡은 것이다.",
+        "lock 은 acquire, unlock 은 release. 그래야 임계구역 안의 평범한 데이터가 보호된다.",
+        "실전 스핀 루프에는 CPU 힌트를 넣는다: ARM `yield`/`wfe`, x86 `pause`."
+      ],
+      "solution": "void spin_init(SpinLock *l) {\n    atomic_flag_clear_explicit(&l->held, memory_order_relaxed);\n}\n\nvoid spin_lock(SpinLock *l) {\n    // test_and_set: 이전 값을 돌려주고 true로 만든다. false를 받으면 내가 잡은 것.\n    while (atomic_flag_test_and_set_explicit(&l->held, memory_order_acquire)) {\n        /* 실전에서는 여기서 CPU 힌트를 준다: ARM `wfe`/`yield`, x86 `pause`.\n         * 이식성 때문에 여기서는 빈 루프로 둔다. */\n    }\n}\n\nbool spin_trylock(SpinLock *l) {\n    return !atomic_flag_test_and_set_explicit(&l->held, memory_order_acquire);\n}\n\nvoid spin_unlock(SpinLock *l) {\n    atomic_flag_clear_explicit(&l->held, memory_order_release);\n}",
+      "explanation_ko": "`atomic_flag` 는 C11 에서 **항상 lock-free 가 보장되는 유일한 타입**이다(나머지는 `ATOMIC_*_LOCK_FREE` 로 확인해야 한다). acquire/release 짝 덕분에 스핀락 안의 비원자 데이터까지 안전해진다 — 락이 동기화 도구인 이유가 정확히 이것이다. 쓰면 안 되는 경우: ①임계구역이 길거나 그 안에서 블록/시스템콜/malloc → CPU 를 태운다(배터리로 도는 MT81 트레일러에서는 곧 주행거리다) ②단일 코어 + 선점형 스케줄러 → 락 보유자가 선점되면 대기자가 타임슬라이스 전체를 태우고, 최악은 우선순위 역전으로 진행 자체가 멈춘다 → mutex + priority inheritance ③유저스페이스 Linux 의 경합 상황 → futex 기반 pthread_mutex 가 대개 더 빠르다.",
+      "complexity": "무경합 O(1), 경합 시 대기 시간만큼 CPU 소모. lock-free 가 아님(스핀락은 blocking)",
+      "pitfalls": [
+        "unlock 을 relaxed 로 하기 → 임계구역의 쓰기가 락 해제 뒤로 새어나간다.",
+        "재진입(recursive) 가능하다고 생각하기 → 같은 스레드가 두 번 잡으면 즉시 데드락.",
+        "임계구역 안에서 malloc/printf/시스템콜 호출.",
+        "스핀 루프에 CPU 힌트(pause/yield) 없이 회전 → 하이퍼스레딩·전력에서 손해.",
+        "ISR 과 태스크 사이에 스핀락을 쓰기 → 단일 코어면 즉시 데드락(태스크가 잡은 락을 ISR 이 기다린다)."
+      ],
+      "verkada_context": "멀티코어 게이트웨이 SoC 에서 수십 나노초짜리 카운터/링크 상태 갱신처럼 아주 짧은 임계구역. 반대로 LTE 업로드나 파일 I/O 가 들어가는 경로는 절대 스핀락이 아니다."
+    },
+    {
+      "num": 25,
+      "slug": "spsc_ring_push_pop",
+      "title_ko": "SPSC 링버퍼 push/pop (release/acquire 짝)",
+      "title_en": "Lock-free SPSC ring buffer",
+      "difficulty": "medium",
+      "tags": [
+        "lock-free",
+        "SPSC",
+        "ring-buffer",
+        "acquire-release",
+        "ISR"
+      ],
+      "prompt_ko": "모뎀 UART RX ISR(생산자 1)과 파서 태스크(소비자 1) 사이의 락 없는 링버퍼를 구현하라. 데이터 쓰기 뒤에 tail 을 release store 하고, 소비자는 tail 을 acquire load 한 뒤 데이터를 읽는다. 한 칸을 비워 full/empty 를 구분한다(용량 CAP-1). 가득 차면 false 를 반환하고 절대 블록하지 않는다.",
+      "prompt_en": "Implement a lock-free single-producer/single-consumer ring: write the byte, then release-store the tail; the consumer acquire-loads the tail before reading. Leave one slot empty so full and empty are distinguishable. Never block — return false when full.",
+      "signature": "bool ring_push(Ring *r, uint8_t b); bool ring_pop(Ring *r, uint8_t *out)",
+      "examples": [
+        {
+          "in": "CAP=64 에 63개 push",
+          "out": "전부 true, 64번째는 false"
+        },
+        {
+          "in": "생산자/소비자 스레드로 50000 바이트 전송",
+          "out": "무손실, FIFO 순서 보존, 체크섬 일치"
+        }
+      ],
+      "hints": [
+        "생산자는 tail 만 store 하고 소비자는 head 만 store 한다 → write-write 경합이 없다.",
+        "자기 인덱스는 relaxed 로 읽어도 된다(나만 쓰니까). 상대 인덱스는 acquire.",
+        "데이터 write 를 **먼저**, 인덱스 publish 를 **나중에**. 순서가 뒤집히면 소비자가 빈 칸을 읽는다."
+      ],
+      "solution": "void ring_init(Ring *r) {\n    atomic_init(&r->head, 0u);\n    atomic_init(&r->tail, 0u);\n}\n\nbool ring_push(Ring *r, uint8_t b) {\n    unsigned t = atomic_load_explicit(&r->tail, memory_order_relaxed); /* 내가 쓴 값 */\n    unsigned next = (t + 1u) & (RING_CAP - 1u);\n    /* 소비자가 얼마나 비웠는지 본다 → acquire (소비자의 buf 읽기 완료를 본다) */\n    if (next == atomic_load_explicit(&r->head, memory_order_acquire))\n        return false;                     /* full */\n\n    r->buf[t] = b;                        /* ① 데이터 먼저 */\n    atomic_store_explicit(&r->tail, next, memory_order_release); /* ② 그 다음 publish */\n    return true;\n}\n\nbool ring_pop(Ring *r, uint8_t *out) {\n    unsigned h = atomic_load_explicit(&r->head, memory_order_relaxed); /* 내가 쓴 값 */\n    /* acquire: tail을 본 뒤에 buf를 읽어야 생산자의 데이터가 보인다 */\n    if (h == atomic_load_explicit(&r->tail, memory_order_acquire))\n        return false;                     /* empty */\n\n    *out = r->buf[h];\n    atomic_store_explicit(&r->head, (h + 1u) & (RING_CAP - 1u),\n                          memory_order_release);\n    return true;\n}",
+      "explanation_ko": "무락이 성립하는 이유를 한 문장으로: **생산자만 tail 을 쓰고 소비자만 head 를 쓰므로 write-write 경합이 구조적으로 없다.** 남는 문제는 순서뿐이고, `buf[t] = b` 다음의 release store 와 소비자의 acquire load 한 쌍이 그것을 해결한다. 이게 없으면 컴파일러나 CPU 가 순서를 바꿔 소비자가 '인덱스는 늘었는데 데이터는 아직 안 쓰인' 상태를 본다. 한 칸을 비워두는 이유는 `head == tail` 이 empty 와 full 둘 다를 뜻하는 모호성을 없애기 위해서다 — count 필드를 두면 양쪽이 쓰게 되어 SPSC 의 이점이 사라진다. ISR 에서 가득 차면 재시도하면 안 되고 drop + 카운터 증가가 정답이다.",
+      "complexity": "push/pop 각각 O(1), 무락(wait-free), 메모리 O(CAP)",
+      "pitfalls": [
+        "`volatile unsigned head/tail` 로 충분하다고 답하기 — 재배치/가시성이 보장되지 않는다.",
+        "인덱스 하나 + count 를 공유하기 → count 를 양쪽이 쓰게 되어 원자 RMW 가 필요해진다.",
+        "가득 찬 상태에서 ISR 이 재시도/대기 → 인터럽트를 막는다. drop 하고 센다.",
+        "데이터 write 와 인덱스 publish 순서를 바꾸기.",
+        "MPSC 로 쓰기 — 생산자가 둘이 되는 순간 이 구현은 깨진다(Vyukov 큐나 생산자별 큐가 필요)."
+      ],
+      "verkada_context": "GC31-E 모뎀 제어 채널(AT 커맨드/URC)과 시리얼 센서 경로. ISR 컨텍스트에서는 mutex 를 잡을 수 없으므로 이 구조가 사실상 유일한 답이다."
+    },
+    {
+      "num": 26,
+      "slug": "ring_count_pow2_mask",
+      "title_ko": "링버퍼 count/full/empty + power-of-two 마스킹",
+      "title_en": "Ring count/full/empty and power-of-two masking",
+      "difficulty": "easy",
+      "tags": [
+        "ring-buffer",
+        "bit-trick",
+        "power-of-two",
+        "embedded"
+      ],
+      "prompt_ko": "`is_pow2`, `idx & (cap-1)` 마스킹, 그리고 `(tail-head) & (CAP-1)` 기반 count/is_empty/is_full 을 구현하라. cap 이 2의 거듭제곱일 때 `&` 가 `%` 와 완전히 동일함을 테스트로 보이고, `is_pow2(0)` 이 false 여야 함에 주의하라.",
+      "prompt_en": "Implement is_pow2, index masking with `& (cap-1)`, and count/empty/full derived from the unsigned difference of the two indices. Show that masking equals modulo for power-of-two capacities, and remember is_pow2(0) is false.",
+      "signature": "bool is_pow2(unsigned x); unsigned ring_mask_index(unsigned idx, unsigned cap); unsigned ring_count(const Ring *r)",
+      "examples": [
+        {
+          "in": "is_pow2(64), is_pow2(63), is_pow2(0)",
+          "out": "true, false, false"
+        },
+        {
+          "in": "ring_mask_index(65, 64)",
+          "out": "1 (== 65 % 64)"
+        },
+        {
+          "in": "3개 push 후 1개 pop",
+          "out": "count == 2, is_empty == false"
+        }
+      ],
+      "hints": [
+        "2의 거듭제곱은 비트가 하나뿐이다 → `x & (x-1) == 0`. 단 0 은 예외이므로 `x != 0 &&` 를 붙인다.",
+        "`%` 는 나눗셈 명령이 없는 MCU 에서 라이브러리 호출이 된다. `&` 는 1사이클.",
+        "count 는 **부호 없는 뺄셈**으로 구한다 — 인덱스가 랩되어도 `(t - h) & mask` 는 정확하다."
+      ],
+      "solution": "bool is_pow2(unsigned x) {\n    return x != 0u && (x & (x - 1u)) == 0u;\n}\n\nunsigned ring_mask_index(unsigned idx, unsigned cap) {\n    return idx & (cap - 1u);\n}\n\nunsigned ring_count(const Ring *r) {\n    unsigned t = atomic_load_explicit(&r->tail, memory_order_acquire);\n    unsigned h = atomic_load_explicit(&r->head, memory_order_acquire);\n    return (t - h) & (RING_CAP - 1u);     /* unsigned 뺄셈 → 랩되어도 정확 */\n}\n\nbool ring_is_empty(const Ring *r) {\n    return ring_count(r) == 0u;\n}\n\nbool ring_is_full(const Ring *r) {\n    return ring_count(r) == RING_CAP - 1u;   /* 한 칸은 항상 비워둔다 */\n}",
+      "explanation_ko": "cap 이 2의 거듭제곱이면 `idx % cap` 과 `idx & (cap-1)` 은 **수학적으로 동일**하다(하위 log2(cap) 비트만 남긴다). ISR 안에서 바이트마다 도는 코드라 이 차이가 실제로 처리량을 바꾼다. count 를 `(tail - head) & (CAP-1)` 로 구하면 인덱스가 uint 범위를 랩해도 결과가 정확한데, 부호 없는 뺄셈이 모듈로 2^32 연산이기 때문이다. 한 칸을 비워두는 설계이므로 full 은 `count == CAP-1` 이다. `is_pow2(0)` 함정은 `0 & (0-1) == 0` 이라 0 을 2의 거듭제곱으로 착각하는 것 — init 에서 cap 을 검증하지 않으면 마스킹 전체가 무너진다.",
+      "complexity": "전부 O(1), 분기·나눗셈 없음",
+      "pitfalls": [
+        "`is_pow2(0)` 이 true 가 되도록 짜기 (`x != 0 &&` 누락).",
+        "cap 이 2의 거듭제곱인지 init 에서 검증하지 않기 → 마스킹이 조용히 틀린 인덱스를 준다.",
+        "count 를 `tail >= head ? tail-head : cap-head+tail` 같은 분기로 짜기 — 랩 케이스에서 틀리기 쉽다.",
+        "한 칸 비우기를 잊고 full 을 `count == CAP` 로 쓰기.",
+        "동시 실행 중 count 를 '정확한 값'으로 믿기 — 스냅샷일 뿐이다(생산자/소비자 각자 자기 쪽에서는 정확)."
+      ],
+      "verkada_context": "RX 링버퍼의 여유 공간을 매 바이트 확인하는 경로. 저전력 MCU(공기질 센서 SV 급)에는 하드웨어 나눗셈기가 없어 `%` 한 번이 수십 사이클이다."
+    },
+    {
+      "num": 27,
+      "slug": "seqlock_write",
+      "title_ko": "seqlock write (홀수/짝수 + release fence)",
+      "title_en": "Seqlock write side",
+      "difficulty": "medium",
+      "tags": [
+        "seqlock",
+        "fence",
+        "latest-value",
+        "real-time"
+      ],
+      "prompt_ko": "링크 상태(RSRP/RSRQ/uptime/SIM 슬롯)를 writer 1개가 갱신한다. seq 를 홀수로 올려 '쓰는 중'을 알리고, release fence 를 건 뒤 데이터를 기록하고, seq 를 짝수로 release store 한다. writer 는 reader 때문에 절대 지연되면 안 된다.",
+      "prompt_en": "One writer publishes a link-status snapshot: bump seq to odd, release-fence, write the payload, then release-store an even seq. The writer must never be delayed by readers.",
+      "signature": "void seq_write(SeqLock *s, const LinkStatus *in)",
+      "examples": [
+        {
+          "in": "init 직후",
+          "out": "seq == 0 (짝수 = 안정)"
+        },
+        {
+          "in": "seq_write 1회",
+          "out": "seq == 2, seq_writing() == false"
+        }
+      ],
+      "hints": [
+        "홀수 = 쓰는 중, 짝수 = 안정. write 1회당 seq 는 정확히 2 증가한다.",
+        "첫 번째 fence 가 없으면 reader 가 '짝수 seq' 를 본 채로 반쯤 쓰인 데이터를 복사하고도 검증을 통과한다.",
+        "마지막 store 는 release — 데이터 기록이 짝수 publish 보다 먼저 보여야 한다."
+      ],
+      "solution": "void seq_init(SeqLock *s) {\n    atomic_init(&s->seq, 0u);\n    memset(&s->data, 0, sizeof s->data);\n}\n\nvoid seq_write(SeqLock *s, const LinkStatus *in) {\n    uint32_t v = atomic_load_explicit(&s->seq, memory_order_relaxed);\n    atomic_store_explicit(&s->seq, v + 1u, memory_order_relaxed);  /* 홀수: 쓰는 중 */\n    atomic_thread_fence(memory_order_release);   /* seq 증가가 데이터보다 먼저 보이게 */\n\n    s->data = *in;                               /* 평범한 쓰기 (여기가 race 지점) */\n\n    /* 데이터 기록이 짝수 publish보다 먼저 보이게 */\n    atomic_store_explicit(&s->seq, v + 2u, memory_order_release);  /* 짝수: 완료 */\n}\n\nbool seq_writing(const SeqLock *s) {\n    return (atomic_load_explicit(&s->seq, memory_order_relaxed) & 1u) != 0u;\n}",
+      "explanation_ko": "seqlock 은 '읽기는 매우 잦고 쓰기는 드문' 상태 공유에서 writer 를 절대 막지 않는 패턴이다(writer 우선 정책, reader 가 재시도한다). 두 개의 배리어가 서로 다른 일을 한다. ① `store(seq, odd, relaxed)` 뒤의 **release fence**: 'seq 가 홀수가 된 사실'이 데이터 기록보다 먼저 보이게 해서, reader 가 진행 중인 쓰기를 놓치지 않게 한다. ② 마지막 **release store**: 데이터 기록이 '짝수 seq publish' 보다 먼저 보이게 한다. 둘 중 하나라도 빠지면 reader 의 검증이 통과하면서도 찢어진 값을 준다. writer 가 여러 명이면 writer 끼리는 mutex 로 직렬화해야 한다 — seqlock 은 reader 를 위한 도구지 writer 를 위한 도구가 아니다.",
+      "complexity": "write O(sizeof payload), 블로킹 없음(wait-free)",
+      "pitfalls": [
+        "첫 release fence 를 빼기 → reader 가 짝수 seq + 반쯤 쓰인 데이터를 보고 통과한다.",
+        "seq 를 1씩만 올려 홀짝 규약을 깨기.",
+        "writer 를 여러 개로 늘리면서 writer 간 직렬화를 안 하기.",
+        "payload 에 포인터/핸들을 넣기 — reader 가 찢어진 포인터를 역참조하면 죽는다. POD 전용.",
+        "payload 를 `_Atomic` 구조체로 만들면 되겠지라고 생각하기 → 큰 구조체는 lock-free 가 아니라 내부 락이 붙는다."
+      ],
+      "verkada_context": "GC31-E 링크 상태(RSRP/RSRQ, SIM 슬롯, uptime)를 1초마다 갱신하는 모뎀 스레드. HTTP 핸들러·CLI·텔레메트리 업로더가 수시로 읽지만 모뎀 스레드는 절대 그들을 기다리면 안 된다."
+    },
+    {
+      "num": 28,
+      "slug": "seqlock_read",
+      "title_ko": "seqlock read (재시도 루프) + data race 한계",
+      "title_en": "Seqlock read side and its data-race caveat",
+      "difficulty": "hard",
+      "tags": [
+        "seqlock",
+        "retry-loop",
+        "data-race",
+        "TSan"
+      ],
+      "prompt_ko": "seq 를 acquire load 해서 홀수면 재시도하고, 데이터를 복사한 뒤 acquire fence 를 걸고 seq 를 다시 읽어 두 값이 같을 때만 유효한 스냅샷으로 인정하는 reader 를 구현하라. 재시도 상한이 있는 `seq_try_read` 도 만든다. 이 코드가 C 표준상 **data race** 이며 TSan 이 경고한다는 사실을 명시적으로 설명할 것.",
+      "prompt_en": "Implement the retry loop: acquire-load seq (retry while odd), copy the payload, acquire-fence, re-load seq, and accept only when both reads match. Add a bounded-retry variant, and state explicitly that this is a data race under the C model that ThreadSanitizer will flag.",
+      "signature": "void seq_read(const SeqLock *s, LinkStatus *out); bool seq_try_read(const SeqLock *s, LinkStatus *out, unsigned max_tries)",
+      "examples": [
+        {
+          "in": "write{-95,95,1,0} 직후 read",
+          "out": "정확히 같은 값"
+        },
+        {
+          "in": "writer 120000회 + reader 3개 동시 실행",
+          "out": "찢어진 스냅샷 0건 (불변식 rsrq == -rsrp)"
+        }
+      ],
+      "hints": [
+        "두 번의 seq 읽기 사이에 데이터를 복사한다. 두 값이 다르면 그 사이에 write 가 있었다는 뜻이다.",
+        "복사한 값이 찢어져 있어도 괜찮다 — 검증에서 걸러지고 버려진다.",
+        "루프를 `do/while` 로 쓰면 안 된다. `continue` 가 while 조건으로 점프해서 아직 대입된 적 없는 `after` 와 비교한다 → `for(;;)` + 명시적 return."
+      ],
+      "solution": "void seq_read(const SeqLock *s, LinkStatus *out) {\n    for (;;) {\n        uint32_t before = atomic_load_explicit(&s->seq, memory_order_acquire);\n        if (before & 1u) continue;               /* 쓰는 중 → 처음부터 다시 */\n\n        *out = s->data;                          /* 찢어진 값일 수 있다 */\n\n        atomic_thread_fence(memory_order_acquire); /* 복사가 after 로드보다 먼저 */\n        uint32_t after = atomic_load_explicit(&s->seq, memory_order_relaxed);\n        if (before == after) return;             /* 같으면 유효한 스냅샷 */\n    }\n}\n\nbool seq_try_read(const SeqLock *s, LinkStatus *out, unsigned max_tries) {\n    for (unsigned i = 0; i < max_tries; i++) {\n        uint32_t before = atomic_load_explicit(&s->seq, memory_order_acquire);\n        if (before & 1u) continue;\n        *out = s->data;\n        atomic_thread_fence(memory_order_acquire);\n        uint32_t after = atomic_load_explicit(&s->seq, memory_order_relaxed);\n        if (before == after) return true;\n    }\n    return false;\n}",
+      "explanation_ko": "reader 는 낙관적으로 읽고 사후 검증한다. 검증이 실패하면 버리고 다시 읽으므로 writer 를 막지 않는다. 정직하게 말해야 할 한계가 세 가지다. ① `*out = s->data` 는 비원자 객체를 writer 와 동시에 접근하므로 C 표준상 **data race** 이고 엄밀히는 UB 다 — `-fsanitize=thread` 로 빌드하면 TSan 이 정확히 이 줄을 지적한다. 실무 해법은 필드별 relaxed atomic 이나 Linux 커널의 READ_ONCE/WRITE_ONCE 다. ② payload 에 포인터가 있으면 찢어진 포인터를 잠시라도 역참조해 죽을 수 있다(POD 전용). ③ writer 가 너무 잦으면 reader 가 굶는다 → 재시도 상한 + mutex fallback. 이 한계들을 면접관이 묻기 전에 먼저 말하는 것이 이 문제의 핵심 득점 포인트다.",
+      "complexity": "경합 없으면 O(sizeof payload) 1회, 경합 시 재시도. reader 는 lock-free 가 아니라 obstruction-free 에 가깝다",
+      "pitfalls": [
+        "`do { ... if (odd) continue; ... } while (before != after);` — `continue` 가 **초기화되지 않은 `after`** 와 비교한다. 운 나쁘면 *out 을 채우지 않고 리턴한다. 흔한 예제 코드의 실제 버그.",
+        "홀수 검사를 빼기 → 진행 중인 write 를 그대로 복사한다.",
+        "두 번째 seq 읽기를 데이터 복사보다 먼저 하기(또는 acquire fence 누락) → 검증이 무의미해진다.",
+        "TSan 경고를 보고 '내 코드가 틀렸다'고 고치려다 seqlock 을 망가뜨리기 — 경고는 설계의 대가다. 스레드 테스트를 격리하거나 suppress 하고 그 사실을 문서화한다.",
+        "재시도 상한 없이 실시간 경로에서 사용."
+      ],
+      "verkada_context": "Command 로 올라가는 게이트웨이 상태 리포트, 로컬 진단 CLI, 웹 핸들러가 동시에 같은 링크 상태를 읽는다. 읽기 빈도가 쓰기보다 수백 배 높아 mutex 라면 모뎀 스레드가 계속 밀린다."
+    },
+    {
+      "num": 29,
+      "slug": "atomic_refcount",
+      "title_ko": "atomic refcount — 마지막 참조에서만 free",
+      "title_en": "Atomic refcount with a release/acquire teardown",
+      "difficulty": "medium",
+      "tags": [
+        "refcount",
+        "release",
+        "acquire-fence",
+        "use-after-free",
+        "RCU"
+      ],
+      "prompt_ko": "불변(immutable) 설정 객체를 refcount 로 관리하라. 증가는 relaxed, 감소는 `fetch_sub(..., memory_order_release)`. 반환값이 1이면 내가 마지막 참조이므로 `atomic_thread_fence(memory_order_acquire)` 를 건 뒤에 free 한다. 왜 release 만으로는 안 되는지 설명할 것.",
+      "prompt_en": "Manage an immutable config object with an atomic refcount: increment relaxed, decrement release, and on the last reference insert an acquire fence before free. Explain why release alone is not enough.",
+      "signature": "void rc_get(RcConfig *c); bool rc_put(RcConfig *c, Counter *freed)",
+      "examples": [
+        {
+          "in": "new → get → put → put",
+          "out": "refs 1→2→1, 마지막 put 에서만 free(true)"
+        },
+        {
+          "in": "4스레드 × 20000 get/put, main 이 참조 1개 유지",
+          "out": "끝나도 refs == 1, 조기 해제 0건"
+        }
+      ],
+      "hints": [
+        "증가는 이미 살아있는 객체에 대한 것이라 publish 할 게 없다 → relaxed.",
+        "감소는 '나는 이제 안 본다'는 알림이다 → 내 접근을 먼저 flush 해야 한다 → release.",
+        "free 하는 쪽은 **남들의 접근이 나에게 보여야** 한다 → acquire. 매번 acq_rel 로 하는 대신 마지막 한 번만 fence 로 건다."
+      ],
+      "solution": "RcConfig *rc_new(uint32_t version, const char *apn) {\n    RcConfig *c = calloc(1, sizeof *c);\n    if (!c) return NULL;\n    atomic_init(&c->refs, 1);                    /* 생성자가 참조 1개를 갖는다 */\n    c->version = version;\n    c->upload_period_ms = version * 10u;         /* 불변식: period == version*10 */\n    snprintf(c->apn, sizeof c->apn, \"%s\", apn);\n    return c;\n}\n\nvoid rc_get(RcConfig *c) {\n    atomic_fetch_add_explicit(&c->refs, 1, memory_order_relaxed);\n}\n\nbool rc_put(RcConfig *c, Counter *freed) {\n    if (atomic_fetch_sub_explicit(&c->refs, 1, memory_order_release) == 1) {\n        /* 내가 마지막 → 다른 스레드의 접근을 모두 본 뒤 해제 */\n        atomic_thread_fence(memory_order_acquire);\n        if (freed) ctr_add(freed, 1ull);\n        free(c);\n        return true;\n    }\n    return false;\n}\n\nint rc_count(const RcConfig *c) {\n    return atomic_load_explicit(&c->refs, memory_order_relaxed);\n}",
+      "explanation_ko": "release 감소만 하면 '내 접근이 다른 스레드에게 보인다'는 보장뿐이다. 그런데 free 하는 스레드에게 필요한 것은 정반대 방향 — '다른 스레드들이 이 객체에 한 모든 접근이 나에게 보인다' 다. 그래서 마지막 참조에서 acquire fence 가 필요하다. `fetch_sub(acq_rel)` 로 매번 acquire 를 거는 것도 맞지만, 빈번한 감소 경로에서 배리어를 아끼려고 '마지막 한 번만 fence' 로 쓰는 것이 Boost/LLVM 의 표준 관용구다. 별도의 함정: 참조를 들고 있지 **않은** 상태에서 `load(ptr)` → `fetch_add(refs)` 두 줄로 나누면 그 사이에 publisher 가 교체 + 마지막 참조 해제를 해버려 이미 free 된 메모리를 건드릴 수 있다. 이 창을 닫는 방법은 ①아주 짧은 락으로 두 줄을 원자화 ②hazard pointer ③RCU/epoch 세 가지뿐이다.",
+      "complexity": "get/put O(1), lock-free. 해제는 마지막 참조 1회",
+      "pitfalls": [
+        "acquire fence 없이 free → 다른 스레드의 마지막 쓰기를 못 본 채 해제(use-after-free 급 버그).",
+        "증가를 seq_cst 로 해서 핫 패스에 배리어를 뿌리기.",
+        "참조 없이 포인터를 읽고 나서 fetch_add 하기 → 그 사이에 해제될 수 있다.",
+        "해제 조건을 `refs == 0` 로 검사하기(감소 후 다시 load) → 두 스레드가 동시에 0 을 보고 double free.",
+        "객체를 mutable 로 두기 — 불변 객체여야 '들고 있는 동안 내용이 안 바뀐다'가 성립한다."
+      ],
+      "verkada_context": "Command 에서 새 설정(APN, WAN 우선순위, 업로드 주기)이 내려올 때 읽는 중인 워커를 멈추지 않고 교체하는 경로. 200만 대 fleet 에서 설정 push 중 재시작은 허용되지 않는다."
+    },
+    {
+      "num": 30,
+      "slug": "aba_tagged_pointer",
+      "title_ko": "ABA 문제와 tagged pointer",
+      "title_en": "The ABA problem and tagged pointers",
+      "difficulty": "hard",
+      "tags": [
+        "ABA",
+        "tagged-pointer",
+        "CAS",
+        "lock-free",
+        "reclamation"
+      ],
+      "prompt_ko": "ABA 문제를 설명하고, (32bit index | 32bit tag) 를 한 워드에 packing 한 배열 freelist 를 64비트 CAS 로 구현하라. push/pop 마다 tag 를 +1 해서, 선점되었던 스레드의 stale CAS 가 인덱스는 같아도 실패하도록 만든다. 단일 스레드만으로 이 시나리오를 결정적으로 검증할 것.",
+      "prompt_en": "Explain ABA, then implement an array freelist whose head packs a 32-bit index with a 32-bit tag into one 64-bit word, bumping the tag on every push/pop so a stale CAS fails even when the index matches. Verify it deterministically single-threaded.",
+      "signature": "bool pool_pop(TaggedPool *p, uint32_t *out_idx); void pool_push(TaggedPool *p, uint32_t idx)",
+      "examples": [
+        {
+          "in": "snap = head; pop A; pop B; push A",
+          "out": "head 의 index 는 다시 A 지만 tag 가 달라 snap != head"
+        },
+        {
+          "in": "stale CAS(head, snap, ...)",
+          "out": "false (태그 덕분에 거부)"
+        }
+      ],
+      "hints": [
+        "CAS 는 '값이 같은가'만 본다. '그 사이에 바뀌었는가'는 모른다.",
+        "포인터 대신 **배열 인덱스**를 쓰면 상위 32비트가 남아 태그를 공짜로 얻는다.",
+        "pop 은 acq_rel CAS(리스트를 읽고 동시에 publish), push 는 release CAS. 실패 order 는 acquire/relaxed."
+      ],
+      "solution": "void pool_init(TaggedPool *p) {\n    atomic_init(&p->head, (uint64_t)0);\n    for (unsigned i = 0; i < POOL_N; i++) p->next[i] = 0u;\n    for (unsigned i = POOL_N; i-- > 0; ) {\n        uint64_t old = atomic_load_explicit(&p->head, memory_order_relaxed);\n        p->next[i] = TAG_IDX1(old);\n        atomic_store_explicit(&p->head, TAG_PACK(i + 1u, TAG_CNT(old) + 1u),\n                              memory_order_relaxed);\n    }\n}\n\nbool pool_pop(TaggedPool *p, uint32_t *out_idx) {\n    uint64_t old = atomic_load_explicit(&p->head, memory_order_acquire);\n    for (;;) {\n        uint32_t i1 = TAG_IDX1(old);\n        if (i1 == 0u) return false;                      /* 비었음 */\n        uint64_t neu = TAG_PACK(p->next[i1 - 1u], TAG_CNT(old) + 1u); /* 태그 +1 */\n        if (atomic_compare_exchange_weak_explicit(&p->head, &old, neu,\n                                                  memory_order_acq_rel,\n                                                  memory_order_acquire)) {\n            *out_idx = i1 - 1u;\n            return true;\n        }\n        /* 실패 → old에 현재 head가 자동으로 실린다. 다시 load하지 않는다. */\n    }\n}\n\nvoid pool_push(TaggedPool *p, uint32_t idx) {\n    uint64_t old = atomic_load_explicit(&p->head, memory_order_relaxed);\n    uint64_t neu;\n    do {\n        p->next[idx] = TAG_IDX1(old);\n        neu = TAG_PACK(idx + 1u, TAG_CNT(old) + 1u);\n    } while (!atomic_compare_exchange_weak_explicit(&p->head, &old, neu,\n                                                    memory_order_release,\n                                                    memory_order_relaxed));\n}\n\nbool pool_stale_cas(TaggedPool *p, uint64_t stale_head, uint64_t desired) {\n    uint64_t expected = stale_head;\n    return atomic_compare_exchange_strong_explicit(&p->head, &expected, desired,\n                                                   memory_order_acq_rel,\n                                                   memory_order_acquire);\n}",
+      "explanation_ko": "ABA 시나리오: T1 이 `top == A` 를 읽고 선점된다. 그 사이 T2 가 A 를 pop, B 를 pop, A 를 다시 push 한다. top 은 다시 A 지만 `A->next` 는 완전히 다른 값이다. T1 이 깨어나 `CAS(top, A, A->next_old)` 를 하면 값이 A 로 같으니 **성공하고** 리스트가 깨진다. 해법은 세 가지다. ①tagged pointer — 포인터(또는 인덱스)와 버전 카운터를 한 워드로 묶어 CAS 하고 매 연산마다 태그를 올린다. 64비트 CAS 로 (32bit index | 32bit tag), 또는 DWCAS(x86 cmpxchg16b, ARM CASP)로 (64bit ptr | 64bit tag). ②hazard pointer / epoch-based reclamation / RCU — 재사용 자체를 지연시켜 ABA 를 원천 차단한다. ③그냥 mutex — 임베디드 코드 대부분에서 이게 정답이고, 면접에서 이 말을 덧붙이면 trade-off 를 아는 사람으로 읽힌다. 태그는 32비트라 이론상 랩될 수 있지만, 랩되는 동안 정확히 같은 인덱스로 돌아올 확률은 실무상 무시된다(그래서 '확률적' 해법이라고 말해야 정확하다).",
+      "complexity": "pop/push O(1) 기대, lock-free. 태그 때문에 head 는 64비트 CAS 가 필요",
+      "pitfalls": [
+        "태그를 올리지 않고 포인터만 CAS → ABA 그대로 노출.",
+        "포인터 하위 비트(정렬 여유)에 태그를 숨기면 비트가 3~4개뿐이라 금방 랩된다 — 인덱스 방식이나 DWCAS 가 안전하다.",
+        "64비트 CAS 가 모든 플랫폼에서 lock-free 라고 가정하기 → `atomic_is_lock_free` 로 확인해야 한다(32비트 MCU 에서는 아님).",
+        "CAS 루프 안에서 `p->next[i-1]` 을 읽는 것이 멀티스레드에서 안전하다고 가정하기 — 이 읽기 자체가 ABA 의 진짜 위험 지점이라 실전에서는 hazard pointer 가 함께 필요하다.",
+        "'lock-free = 항상 더 빠르다' 고 말하기 — 경합이 높으면 재시도 때문에 mutex 보다 느릴 수 있다."
+      ],
+      "verkada_context": "ISR 에서 쓸 수 있는 고정 크기 버퍼 풀(패킷 디스크립터 freelist)처럼 malloc 없이 객체를 재사용하는 구조. 다만 실제 제품 코드에서 먼저 물어볼 것은 '정말 lock-free 가 필요한가' 다."
+    }
+  ]
+}

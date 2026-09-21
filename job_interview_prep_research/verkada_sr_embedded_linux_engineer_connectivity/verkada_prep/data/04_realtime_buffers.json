@@ -1,0 +1,420 @@
+{
+  "id": "realtime_buffers",
+  "order": 4,
+  "range": "Q31-38",
+  "icon": "🎞️",
+  "track": "core",
+  "title_en": "Real-time Buffering (Double/Triple)",
+  "title_ko": "실시간 버퍼링 (더블/트리플 버퍼)",
+  "summary_ko": "센서·프레임처럼 '최신값이 곧 정답'인 데이터를 tearing 없이, 생산자를 막지 않고 전달하는 패턴 모음. 핵심은 락으로 데이터가 아니라 버퍼 소유권(write_idx/ready_idx/reader_idx)을 보호하는 것 — 임계구역은 인덱스 교환뿐이고 프레임 복사는 락 밖에서 일어난다. 더블 → 트리플 확장의 trade-off(메모리 +50% vs writer 무기아), latest-value 슬롯의 mutex vs seqlock 선택, 400Hz→100Hz 레이트 디커플링, DMA ping-pong의 ISR 규율과 캐시 유지, 그리고 지터·누락을 순수 함수로 측정하는 법까지 다룬다.",
+  "summary_en": "Patterns for moving data where only the newest value matters — frames, sensor snapshots — without tearing and without ever blocking the producer. The lock protects buffer ownership, not the payload, so the critical section is a few index assignments. Covers double vs triple buffering trade-offs, mutex vs seqlock latest-value slots, 400Hz-to-100Hz rate decoupling, DMA ping-pong ISR discipline plus cache maintenance, and measuring jitter and dropped frames as a pure function.",
+  "verkada_relevance_ko": "2026-09-15 리크루터 Davis의 안내 메일이 복습 주제로 'real-time data handling patterns (such as double buffering)'를 **이름까지 지목**했다. 4개 항목 중 유일하게 구체적 패턴명이 박혀 있으므로 사실상 출제 예고다. 제품 맥락도 정확히 들어맞는다: MT81 보안 트레일러는 카메라 최대 6대의 프레임을 태양광·배터리 예산 안에서 처리해야 하고, GC31-E 셀룰러 게이트웨이는 LTE 링크 통계·듀얼 SIM failover 상태 같은 작은 스냅샷을 업로드·로컬 UI·BLE 프로비저닝 스레드가 동시에 읽는다(= latest-value 슬롯). GW31-E의 '오프라인 30분이면 자가 재부팅'은 타임스탬프 기반 헬스 판정 그 자체이고, 공기질 센서(SV)의 MCU/FreeRTOS 급 환경은 RAM 예산 때문에 더블 vs 트리플을 실제로 고민해야 하는 자리다. 평가 기준의 '설계 결정과 trade-off의 정당화'는 여기서 메모리 +50%와 지연 +1프레임을 놓고 말로 정당화하는 능력으로 직결되고, 'edge case와 concurrent 시스템의 견고성'은 drop 카운터 분리와 회계 불변식으로 보여준다. 덤으로 Don의 SSD 펌웨어 DMA 완료 인터럽트 경험을 Linux DMA API 어휘로 번역할 기회이기도 하다.",
+  "concepts": [
+    {
+      "term": "buffer ownership",
+      "ko": "버퍼 하나는 언제나 WRITER 소유 / READY / READER 소유 / FREE 중 하나다. 인덱스 3개(write_idx/ready_idx/reader_idx)가 곧 소유권 장부이고, 락은 데이터가 아니라 이 장부를 지킨다.",
+      "en": "Every buffer is in exactly one state: owned by the writer, published (READY), owned by the reader, or free. Three indices are the ledger; the lock protects the ledger, not the data."
+    },
+    {
+      "term": "tearing",
+      "ko": "소비자가 절반만 갱신된 프레임(두 세대가 섞인 데이터)을 보는 것. reader가 대여 중인 버퍼에 writer가 쓰면 발생한다. 페이로드를 self-describing으로 만들면 검출 가능하다.",
+      "en": "The reader observing a half-updated frame — two generations mixed. Caused by the writer touching the buffer the reader holds; detectable with a self-describing payload."
+    },
+    {
+      "term": "latest-wins / drop-oldest",
+      "ko": "실시간 경로에서는 지연 누적이 곧 고장이다. 큐처럼 쌓지 않고 항상 최신 프레임으로 덮어쓰되, 버린 개수를 반드시 카운트해 텔레메트리로 내보낸다.",
+      "en": "In a real-time path, accumulating latency is failure. Overwrite with the newest frame instead of queueing — but always export a dropped-frame counter."
+    },
+    {
+      "term": "double vs triple buffering",
+      "ko": "더블은 READER 1 + READY 1 이면 writer가 굶어 READY를 뺏는다. 트리플은 세 역할이 동시에 성립해 writer가 절대 굶지 않는다. 대가는 메모리 +50%와 지연 최대 +1프레임.",
+      "en": "With two buffers the writer starves when the reader holds one and another is READY. A third buffer removes that at the cost of 50% more memory and up to one extra frame of latency."
+    },
+    {
+      "term": "starve-drop vs overwrite-drop",
+      "ko": "빈 버퍼가 없어 READY를 희생한 drop(starved)과, 소비자가 느려 새 프레임이 이전 READY를 덮은 drop은 원인이 다르다. 카운터를 분리해야 '생산이 빠른가 소비가 느린가'를 텔레메트리로 진단할 수 있다.",
+      "en": "A drop because no buffer was free is a different failure from a drop because the consumer was slow. Separate counters make the cause diagnosable from telemetry alone."
+    },
+    {
+      "term": "accounting invariant",
+      "ko": "consumed + dropped + leftover + inflight == produced. 스케줄링과 무관하게 항상 참이므로 동시성 테스트를 플래키하지 않게 만든다. '읽힌 개수 == N' 같은 단정은 금물.",
+      "en": "consumed + dropped + leftover + inflight == produced — true regardless of scheduling, which is what makes a concurrency test non-flaky. Never assert an exact count."
+    },
+    {
+      "term": "seqlock",
+      "ko": "writer가 seq를 홀수로 올리고 쓰고 짝수로 복귀하는 프로토콜. writer는 절대 막히지 않고 reader는 찢어진 읽기를 감지해 재시도한다. 제약: writer 1명, 포인터 없는 POD 페이로드, reader 재시도 상한 필수.",
+      "en": "The writer bumps a sequence to odd, writes, and bumps back to even; the writer never blocks and readers retry on a torn read. Requires a single writer, a pointer-free POD payload, and a bounded retry loop."
+    },
+    {
+      "term": "relaxed atomic payload",
+      "ko": "seqlock 페이로드를 일반 변수로 두면 '읽고 버리는' 정상 경합이 C 표준상 data race(UB)이고 TSan도 경고한다. _Atomic + memory_order_relaxed + release/acquire fence 로 쓰면 생성 코드는 사실상 같고 UB가 아니다.",
+      "en": "A seqlock's speculative read is a data race (UB) if the payload is a plain variable, and ThreadSanitizer flags it. Relaxed atomics plus release/acquire fences give the same codegen without the UB."
+    },
+    {
+      "term": "rate decoupling (decimation)",
+      "ko": "생산 400Hz → 소비 100Hz 같은 레이트 차이를 흡수하는 4:1 축약. 계단·이벤트 신호는 최신값 채택, 노이즈 있는 연속 신호는 구간 평균. 순수 함수로 분리해 하드웨어 없이 테스트한다.",
+      "en": "Collapsing a fast producer rate into a slower consumer rate: take-latest for step/event signals, block-average for noisy continuous ones — as a pure function so it is testable without hardware."
+    },
+    {
+      "term": "DMA ping-pong + cache maintenance",
+      "ko": "DMA가 한 버퍼를 채우는 동안 CPU가 다른 버퍼를 처리한다. 완료 ISR은 인덱스 교환만 한다. DMA→CPU 전에 cache invalidate, CPU→DMA 전에 clean/flush가 필요하고 버퍼는 캐시 라인 정렬이어야 한다. Linux에서는 dma_map_single / dma_alloc_coherent 가 대신 처리한다.",
+      "en": "DMA fills one buffer while the CPU processes the other; the completion ISR only swaps indices. Invalidate before the CPU reads a DMA-filled buffer, clean before the DMA reads a CPU-filled one, and align buffers to a cache line — dma_map_single / dma_alloc_coherent do this on Linux."
+    }
+  ],
+  "study_note_md": "# 🎞️ 실시간 버퍼링 (더블/트리플 버퍼) (Real-time Buffering (Double/Triple)) — Q31~38\n\n> 리크루터 메일이 복습 주제로 **\"real-time data handling patterns (such as double\n> buffering)\"** 을 대놓고 이름까지 적어줬다. 이 세트는 사실상 **출제 예고편**이다.\n> 핵심 한 줄: **락으로 '데이터'를 보호하지 말고 '버퍼 소유권'을 보호한다.**\n> 생산자(센서/DMA/카메라)는 절대 블로킹되지 않고, 소비자가 느리면 오래된 프레임을\n> 버리되 **반드시 카운트한다**.\n\n---\n\n## 1. 핵심 아이디어\n\n큐(FIFO)와 더블 버퍼는 목적이 다르다.\n\n| | 큐 / 링버퍼 | 더블·트리플 버퍼 |\n|---|---|---|\n| 보존하고 싶은 것 | **모든 항목** (감사 로그, 명령) | **가장 최신 항목** (프레임, 스냅샷) |\n| 가득 차면 | 블록하거나 oldest drop | 항상 최신으로 덮어씀 |\n| 소비자가 느리면 | 지연이 누적된다 (latency 폭발) | 중간 프레임을 건너뛴다 (latency 일정) |\n| 복사 | push/pop마다 데이터 복사 | **복사 0** — 포인터/인덱스만 교환 |\n\n실시간 경로에서 latency 누적은 사실상 고장이다. 3초 전 프레임을 보여줄 바엔 버리는 게\n낫다 — 그래서 \"최신값 우선(latest-wins)\" 버퍼링이다.\n\n### 소유권 모델 — 버퍼는 언제나 셋 중 한 상태\n\n```\n                      mb_write_commit()            mb_read_acquire()\n     ┌──────────┐    ───────────────▶  ┌───────┐  ───────────────▶  ┌──────────┐\n     │  WRITER  │                      │ READY │                    │  READER  │\n     │ 소유     │                      │(publish│                   │  소유    │\n     │write_idx │                      │ 됨)   │                    │reader_idx│\n     └──────────┘                      └───────┘                    └──────────┘\n          ▲                                 │                             │\n          │ mb_write_begin()                │ ◀── 새 프레임이 덮음        │ mb_read_release()\n          │ (FREE를 집는다)                 │     (dropped++)             │\n          │                                 ▼                             ▼\n     ┌────┴──────────────────────────────────────────────────────────────────┐\n     │                              FREE                                      │\n     │        (어느 인덱스에도 잡혀 있지 않은 버퍼 = 아무나 써도 됨)          │\n     └────────────────────────────────────────────────────────────────────────┘\n\n  더블(nbuf=2): READER 1개 + READY 1개면 FREE가 없다\n                → write_begin 이 READY를 희생(dropped++, starved++)\n  트리플(nbuf=3): READER + READY + WRITER 가 동시에 성립 → writer 절대 안 굶음\n```\n\n핵심은 **인덱스 세 개(write_idx / ready_idx / reader_idx)가 곧 소유권 장부**라는 것.\nmutex는 이 장부(int 3개)만 지킨다. 프레임 128B~6MB의 실제 바이트 write/read는\n락 **밖**에서 일어난다 → 임계구역은 수 나노초, 우선순위 역전도 사실상 없다.\n\n```c\nFrame *f = mb_write_begin(&mb);   // 락: 인덱스 교환만 (ns)\nframe_fill(f, seq);               // 락 밖: 진짜 작업 (us~ms)\nmb_write_commit(&mb);             // 락: 인덱스 교환만 (ns)\n```\n\n---\n\n## 2. 더블 vs 트리플 — 무엇을 사느냐\n\n| | 더블 버퍼 (N=2) | 트리플 버퍼 (N=3) |\n|---|---|---|\n| 메모리 | 2× 프레임 | 3× 프레임 (**+50%**) |\n| writer가 막히거나 굶는가 | 굶는다(FREE 없음) → READY를 뺏음 | **절대 안 굶는다** |\n| reader가 든 프레임 | 안전(절대 안 뺏음) | 안전 |\n| 소비자 처리시간 허용치 | **전송 1주기 이내** | 1주기를 넘어도 됨 |\n| 남는 drop 종류 | starve-drop + 덮어쓰기 drop | 덮어쓰기 drop만 |\n| 지연(latency) | 최소 | +0~1 프레임 |\n| 전형적 용도 | DMA ping-pong, MCU (RAM 부족) | GPU/디스플레이, Linux 영상 파이프라인 |\n\n**면접 포인트**: 트리플 버퍼도 drop이 0이 되진 않는다. 없어지는 건 \"writer가 쓸 곳이\n없어 굶는 drop(starved)\"뿐이고, \"소비자가 느려 최신 프레임이 이전 READY를 덮는 drop\"은\n그대로 남는다. **둘을 카운터로 분리하면** 현장에서 \"생산이 빠른가, 소비가 느린가\"를\n텔레메트리만 보고 안다. 그리고 1080p RGB면 N=2는 ~6MB, N=3은 ~9MB — RAM 예산에서\n3MB는 공짜가 아니므로 \"트리플이 항상 정답\"이 아니라 **trade-off를 말해야** 한다.\n\n---\n\n## 3. latest-value 슬롯 — mutex vs seqlock\n\n작은 POD 구조체(링크 통계, 배터리 SoC, GPS fix) 하나만 최신으로 공유할 때는\n버퍼 풀까지 갈 필요가 없다.\n\n| | mutex | seqlock |\n|---|---|---|\n| writer | reader가 잡고 있으면 **막힌다** | **절대 안 막힌다** |\n| reader | 막힐 수 있음 | 막히지 않고 **재시도**한다 |\n| 적합 | 쓰기 잦음 · 페이로드 큼 · 공정성 필요 | **읽기 多 · 쓰기 少 · 페이로드 小** |\n| 제약 | 없음 | writer 1명, 포인터 없는 POD만 |\n| 우선순위 역전 | 가능 (PI mutex 필요) | 구조적으로 없음 |\n| 굶주림 | 없음 | writer가 폭주하면 **reader가 못 읽음** |\n\n```c\n// writer: seq 홀수(진입) → 데이터 → seq 짝수(이탈)\nseq++;  release_fence;  payload = v;  release_fence;  seq++;\n\n// reader: 앞뒤 seq가 같고 짝수일 때만 채택, 아니면 재시도(상한 필수)\ns1 = seq;  if (s1 & 1) retry;\ntmp = payload;  acquire_fence;\nif (seq != s1) retry;   // 읽는 동안 writer가 지나감\n```\n\n> ⚠️ seqlock 페이로드는 반드시 `_Atomic` + `memory_order_relaxed` 로 읽고 쓸 것.\n> 일반 변수로 두면 \"읽고 버리는\" 경합이 알고리즘상 정상이어도 **C 표준상 data\n> race = UB** 이고, ThreadSanitizer도 경고한다. relaxed atomic + fence면 생성\n> 코드는 사실상 같고 UB가 아니다. 이 문장 하나로 memory model 이해도를 보여줄 수 있다.\n>\n> ⚠️ 페이로드에 **포인터가 있으면 seqlock 금지**. 찢어진 포인터를 역참조하면\n> 재시도할 기회조차 없이 죽는다. 그래서 커널 seqlock도 값 스냅샷(`jiffies`,\n> `timekeeper`)에만 쓴다.\n\n---\n\n## 4. 레이트 디커플링 — 400Hz → 100Hz\n\n생산 레이트와 소비 레이트가 다를 때 4:1로 줄이는 두 정책:\n\n| 정책 | 무엇을 하나 | 어울리는 데이터 | 부작용 |\n|---|---|---|---|\n| **latest (take-newest)** | 블록의 마지막 샘플 | 계단·이벤트성: 링크 up/down, 도어 상태, 최신 GPS fix, 재부팅 플래그 | 노이즈·에일리어싱 그대로 통과 |\n| **mean (block average)** | 블록 평균 | 연속 아날로그: RSSI, 온도, 전류, PM2.5 | 엣지가 뭉개짐, 지연 +½블록 |\n\n판단 기준 한 문장: **\"이 신호는 순간값이 의미인가, 추세가 의미인가?\"**\n상태 전이를 놓치면 안 되는 신호에 평균을 쓰면 글리치가 사라져 버린다.\n반대로 노이즈 심한 아날로그에 latest를 쓰면 무작위 한 점이 제어에 들어간다.\n\n구현 디테일(감점 포인트): 합계는 `int64_t` 누적(int32면 오버플로), 반올림은 **0에서 먼\n쪽**으로 통일(C의 `/`는 0쪽 절단이라 음수 편향), 꽉 찬 블록만 처리하고 꼬리는 다음\n호출로(스트리밍 친화). 그리고 이 계산을 **순수 함수**로 뽑아 하드웨어 없이 테스트하는\n것 자체가 메일의 \"modular, testable embedded software\" 항목에 대한 답이다.\n\n---\n\n## 5. DMA ping-pong — ISR에서 하면 안 되는 것\n\n```\n   시각 t0        t1        t2        t3\n   DMA  →buf0     →buf1     →buf0     →buf1\n   CPU            proc buf0 proc buf1 proc buf0\n        ↑ISR      ↑ISR      ↑ISR      ↑ISR   ← 각 ISR이 하는 일: 인덱스 토글뿐\n```\n\n완료 인터럽트에서 하는 일은 **인덱스 교환 한 줄**이다.\n\n- ❌ 데이터 복사 / 파싱 / 필터링 — ISR은 수 µs 안에 끝나야 한다\n- ❌ mutex, malloc, printf 등 블로킹 API — 애초에 호출 불가\n- ✅ `active ^= 1`, `full = done`, 카운터 증가, 태스크 깨우기 시그널만\n\n### ⚠️ 캐시 일관성 (실제 하드웨어에서 \"가끔 깨지는\" 버그의 원흉)\n\nDMA는 CPU 캐시를 우회해 DRAM에 직접 읽고 쓴다. 그래서:\n\n| 방향 | 필요한 것 | 안 하면 |\n|---|---|---|\n| **DMA → CPU** (수신 완료 후 읽기 전) | `invalidate` (오래된 캐시 라인 폐기) | CPU가 **옛날 데이터**를 캐시에서 읽는다 |\n| **CPU → DMA** (송신 버퍼 채운 뒤) | `clean` / `flush` (쓰기 버퍼를 DRAM에 반영) | DMA가 **덜 쓰인 버퍼**를 전송한다 |\n\n버퍼는 **캐시 라인 정렬 + 라인 크기의 배수**여야 한다. 아니면 같은 라인에 얹힌\n인접 변수까지 함께 무효화/플러시되어 \"재현 안 되는\" 데이터 손상이 된다.\n\nLinux에서는 보통 직접 안 한다 — **스트리밍 매핑**(`dma_map_single()` /\n`dma_unmap_single()` / `dma_sync_single_for_cpu|device`)이 방향에 맞춰 대신 해주고,\n**일관 매핑** `dma_alloc_coherent()` 는 아예 논캐시 메모리를 준다. 작고 자주 접근하면\ncoherent, 크고 한 번에 처리하면 streaming. (SSD 펌웨어의 DMA 완료 인터럽트 경험을\n이 어휘로 번역해 말하면 \"임베디드 Linux 경험이 얕다\"는 갭을 그대로 덮을 수 있다.)\n\n---\n\n## 6. 프레임 지터/누락 측정\n\n타임스탬프 배열만 받는 **순수 함수**로 만든다(카메라도 커널도 없이 단위 테스트 가능).\n\n```c\nk = (gap + nominal/2) / nominal;   // 반올림!\nif (k > 1) missed += k - 1;        // k개 주기 = k-1개 누락\n```\n\n**반올림이 핵심**이다. 절단(`gap / nominal`)을 쓰면 14ms 간격(정상 지터 범위)이\n누락 0으로, 19.9ms가 누락 0으로 잡혀 통계가 망가진다. 반올림하면 \"가장 가까운\n주기 배수\"로 해석되어 ±40% 지터에도 오판하지 않는다.\n\n같이 뽑을 값: `max_gap`(최악 지연), `min_gap`, `max_jitter = max|gap−nominal|`, 그리고\n**`nonmonotonic`(시계 역행 횟수)**. 마지막 게 중요하다 — 필드에서는 NTP 점프나\nsuspend/resume으로 타임스탬프가 거꾸로 가고, 이걸 누락과 뒤섞으면 \"밤마다 프레임\n5000개 누락\" 같은 유령 버그 리포트가 나온다. 그래서 실시간 측정은 항상\n`CLOCK_MONOTONIC`이고 절대 `CLOCK_REALTIME`이 아니다.\n\n---\n\n## 7. 흔한 함정 (인터뷰 감점 포인트)\n\n- **락으로 프레임 전체를 감싸기** — 락 안에서 memcpy 하는 순간 실시간성이 죽는다. 락은 인덱스만.\n- **reader가 든 버퍼를 writer가 뺏기** — 그게 정확히 tearing이다. 장부에 reader_idx가 있는 이유.\n- **drop을 조용히 하기** — 카운터 없이 버리면 필드에서 절대 못 잡는다. 반드시 텔레메트리로.\n- **starve-drop과 덮어쓰기 drop을 한 카운터에 합치기** — 원인 진단 불가.\n- **`volatile`로 해결하려 하기** — 최적화 억제일 뿐 원자성도 순서도 없다. 스레드 간에는 `_Atomic`.\n- **seqlock**: reader 재시도 상한 없음(무한 루프) / 페이로드가 일반 변수(UB+TSan) / 페이로드에 포인터(즉사).\n- **평균 누적을 int32로** — 오버플로. 반올림을 0쪽 절단으로 — 음수 편향.\n- **DMA 버퍼 캐시 유지 누락 / 캐시 라인 정렬 안 맞음** — 재현 안 되는 손상.\n- **테스트를 \"읽힌 프레임 수 == N\"으로 단정** — 플래키하다. 대신 불변식 `read + dropped + leftover + inflight == produced`.\n\n---\n\n## 8. 면접에서 말할 것 (한국어 + 영어)\n\n### 설계 선언 (코딩 시작 전 30초)\n- KO: \"락으로 데이터를 보호하지 않고 **버퍼 소유권**을 보호하겠습니다. 임계구역은\n  인덱스 세 개를 바꾸는 것뿐이고, 프레임 복사는 락 밖에서 합니다.\"\n- EN: **\"I protect ownership, not the data. The critical section only swaps three\n  indices — the frame bytes are written and read outside the lock.\"**\n\n### 왜 블로킹하지 않는가\n- KO: \"생산자는 센서 타이밍에 묶여 있어서 소비자를 기다릴 수 없습니다. 그래서\n  `write_begin`은 항상 성공하고, 대신 가장 오래된 프레임을 버리고 카운트합니다.\"\n- EN: \"The producer is bound to sensor timing, so it can never wait on the consumer.\n  `write_begin` always succeeds; if nothing is free I sacrifice the oldest frame\n  and increment a drop counter.\"\n\n### drop은 반드시 관측 가능하게\n- EN: **\"A dropped frame is fine. A silently dropped frame is a bug — I always\n  export it as a counter so the fleet telemetry shows it.\"**\n\n### 더블 vs 트리플 trade-off\n- KO: \"버퍼를 하나 더 두면 writer가 굶는 경우가 사라집니다. 대가는 메모리 50%\n  증가고, 지연은 최대 한 프레임 늘어납니다. RAM 예산에 따라 고르겠습니다.\"\n- EN: \"A third buffer removes the case where the writer has nowhere to write. The\n  price is 50% more memory and up to one extra frame of latency — with 1080p RGB\n  that's 6MB versus 9MB, so on a constrained gateway it's a real decision.\"\n\n### tearing을 어떻게 테스트하나\n- EN: **\"I make the payload self-describing — every byte is derived from the\n  sequence number — so a torn frame is detectable by inspection. Then I assert an\n  invariant instead of a count: frames read plus frames dropped plus what's still\n  in flight must equal frames produced. That test can't be flaky.\"**\n\n### seqlock을 언제 쓰나\n- EN: \"For a small POD snapshot that's read far more often than it's written, I'd\n  use a seqlock so the writer never blocks. It needs a single writer and no\n  pointers in the payload, and the reader must have a retry bound. If either\n  condition fails, I use a mutex — it's simpler and always correct.\"\n\n### ISR / DMA\n- EN: **\"In the completion ISR I only swap indices — no copying, no parsing, no\n  locks. And on real hardware I'd invalidate the cache before the CPU reads a\n  DMA-filled buffer and clean it before the DMA reads a CPU-filled one, with the\n  buffers aligned to a cache line.\"**\n\n### 모를 때\n- EN: \"I haven't wired that specific Linux DMA API in production. The equivalent\n  problem in my SSD firmware work was the NAND DMA completion path — here's how\n  I'd reason about it, and I'd verify the exact `dma_map_single` semantics against\n  the kernel docs before committing.\"\n\n---\n\n## 9. 체크리스트\n\n- [ ] 소유권 4상태(WRITER/READY/READER/FREE) 전이를 손으로 그려 설명할 수 있다\n- [ ] `write_begin`이 블로킹하지 않는 이유 + reader 버퍼를 안 뺏는 이유(tearing)를 말한다\n- [ ] `nbuf`만 3으로 바꿔 트리플이 되게 짜고, 메모리 +50% / 지연 +1프레임을 정당화한다\n- [ ] starve-drop과 덮어쓰기 drop을 분리해 세고, 트리플이 없애는 건 전자뿐임을 안다\n- [ ] 회계 불변식 `read + dropped + leftover + inflight == produced` 를 즉시 쓴다\n- [ ] tearing 검출용 self-describing 페이로드를 설계하고, 카운트가 아닌 불변식으로 단정한다\n- [ ] mutex 슬롯과 seqlock을 둘 다 5분 안에 짜고, 3대 제약(단일 writer/POD/재시도 상한)을 말한다\n- [ ] seqlock 페이로드에 relaxed atomic을 쓰는 이유(UB + TSan)를 설명할 수 있다\n- [ ] latest vs mean 데시메이션을 신호 종류로 나눠 정당화한다 (int64 누적 + 반올림 방향)\n- [ ] ISR 금지 3가지 + DMA 캐시 invalidate/clean 방향 + `dma_alloc_coherent` vs `dma_map_single`\n- [ ] 지터/누락에 반올림을 쓰는 이유와 `CLOCK_MONOTONIC`을 쓰는 이유를 말한다\n- [ ] TSan을 CI에 넣겠다고 먼저 말한다\n",
+  "problems": [
+    {
+      "num": 31,
+      "slug": "mb_write_begin",
+      "title_ko": "더블 버퍼 소유권 모델 (write_begin)",
+      "title_en": "Double-buffer ownership model (write_begin)",
+      "difficulty": "medium",
+      "tags": [
+        "double-buffer",
+        "ownership",
+        "non-blocking",
+        "drop-policy"
+      ],
+      "prompt_ko": "버퍼 풀을 초기화하고(mb_init: nbuf를 [2,MAXBUF]로 클램프, 세 인덱스 -1, mutex 초기화), writer가 채울 FREE 버퍼를 확보하는 mb_write_begin을 구현하라. FREE = ready_idx도 reader_idx도 아닌 인덱스. 절대 블로킹하지 않고 항상 성공해야 한다 — FREE가 없으면 READY를 희생하고 dropped++/starved++. reader가 든 버퍼는 절대 뺏지 않는다(그게 tearing이다).",
+      "prompt_en": "Initialize the buffer pool and implement a non-blocking write_begin that hands the writer a free buffer. If none is free, sacrifice the READY buffer and count the drop; never take the buffer the reader owns.",
+      "signature": "void mb_init(MBuf *mb, int nbuf); Frame *mb_write_begin(MBuf *mb)",
+      "examples": [
+        {
+          "in": "mb_init(&mb,2); write_begin()",
+          "out": "&buf[0], write_idx=0"
+        },
+        {
+          "in": "nbuf=2, ready_idx=0, reader_idx=1 상태에서 write_begin()",
+          "out": "&buf[0], starved=1, dropped+1, ready_idx=-1"
+        }
+      ],
+      "hints": [
+        "버퍼 하나는 언제나 WRITER 소유 / READY / READER 소유 / FREE 중 하나다. 인덱스 3개가 곧 소유권 장부.",
+        "FREE 탐색은 0..nbuf-1 을 돌며 ready_idx도 reader_idx도 아닌 첫 인덱스를 고르면 된다.",
+        "못 찾았다면 reader 1 + READY 1 로 꽉 찬 경우뿐이다 → idx = ready_idx; ready_idx = -1; dropped++; starved++."
+      ],
+      "solution": "void mb_init(MBuf *mb, int nbuf)\n{\n    if (!mb) return;\n    memset(mb, 0, sizeof *mb);\n    if (nbuf < 2)      nbuf = 2;        // 2 미만은 소유권 모델이 성립하지 않는다\n    if (nbuf > MAXBUF) nbuf = MAXBUF;\n    mb->nbuf       = nbuf;\n    mb->write_idx  = -1;\n    mb->ready_idx  = -1;\n    mb->reader_idx = -1;\n    pthread_mutex_init(&mb->m, NULL);\n}\n\nvoid mb_destroy(MBuf *mb)\n{\n    if (!mb) return;\n    pthread_mutex_destroy(&mb->m);\n}\n\nFrame *mb_write_begin(MBuf *mb)\n{\n    if (!mb) return NULL;\n    pthread_mutex_lock(&mb->m);\n    int idx = -1;\n    for (int i = 0; i < mb->nbuf; i++) {          // 아무도 소유하지 않은 버퍼 찾기\n        if (i != mb->ready_idx && i != mb->reader_idx) { idx = i; break; }\n    }\n    if (idx < 0) {\n        // nbuf>=2 이면 여기 도달했다는 건 reader 1 + READY 1 로 꽉 찬 경우뿐이다.\n        // → READY를 희생한다. (reader 버퍼를 뺏으면 tearing)\n        idx = mb->ready_idx;\n        mb->ready_idx = -1;\n        mb->dropped++;\n        mb->starved++;\n    }\n    mb->write_idx = idx;\n    pthread_mutex_unlock(&mb->m);\n    return &mb->buf[idx];                          // 데이터 write는 락 '밖'에서\n}",
+      "explanation_ko": "실시간 생산자(센서/DMA 완료 콜백)는 소비자를 기다릴 수 없으므로 write_begin은 반드시 성공해야 한다. 그래서 '빈 버퍼가 없으면 블록'이 아니라 '가장 오래된 READY를 버린다'가 정책이 된다. reader가 대여 중인 버퍼만은 예외 — 거기에 쓰면 소비자가 반쯤 갱신된 프레임을 보게 되고 그게 tearing이다. 임계구역 안에서 하는 일은 int 대입 몇 줄이고, 실제 프레임 바이트는 반환된 포인터에 락 밖에서 쓴다.",
+      "complexity": "O(nbuf) time (nbuf<=3 이므로 사실상 O(1)), O(nbuf * FRAME_LEN) space",
+      "pitfalls": [
+        "락 안에서 프레임을 memcpy → 임계구역이 수 마이크로초로 늘어나 실시간성이 죽는다.",
+        "빈 버퍼가 없을 때 reader_idx 버퍼를 골라버림 → tearing.",
+        "drop을 조용히 처리(카운터 없음) → 필드에서 절대 진단 못 한다.",
+        "nbuf<2 를 허용 → 소유권 모델이 성립하지 않고 인덱스가 -1로 새어나간다."
+      ],
+      "verkada_context": "GC31-E 게이트웨이의 링크 통계 스냅샷, MT81 트레일러 카메라 프레임처럼 '최신값만 의미 있는' 데이터의 생산 측 표준 패턴."
+    },
+    {
+      "num": 32,
+      "slug": "mb_commit_acquire_release",
+      "title_ko": "소유권 이전 (commit / acquire / release)",
+      "title_en": "Ownership transfer (commit / acquire / release)",
+      "difficulty": "medium",
+      "tags": [
+        "double-buffer",
+        "publish",
+        "non-blocking-read",
+        "mutex"
+      ],
+      "prompt_ko": "write_commit은 writer 소유 버퍼를 READY로 publish한다(직전 READY가 아직 안 읽혔으면 dropped++). read_acquire는 READY를 reader 소유로 옮기고 Frame*를 주되, READY가 없거나 reader가 이미 하나를 들고 있으면 NULL(논블로킹). read_release는 reader_idx를 -1로 되돌린다. 세 함수 모두 임계구역 안에서는 인덱스 대입만 한다.",
+      "prompt_en": "Publish the writer's buffer as READY, lend the READY buffer to the reader (NULL when nothing new or one is already lent out), and return it to the free pool. Each critical section is just a few integer assignments.",
+      "signature": "void mb_write_commit(MBuf *mb); Frame *mb_read_acquire(MBuf *mb); void mb_read_release(MBuf *mb)",
+      "examples": [
+        {
+          "in": "commit 후 acquire",
+          "out": "&buf[ready], ready_idx=-1, reader_idx=그 인덱스"
+        },
+        {
+          "in": "reader가 이미 대여 중일 때 acquire",
+          "out": "NULL (블로킹하지 않음)"
+        }
+      ],
+      "hints": [
+        "commit은 '데이터를 옮기는' 게 아니라 write_idx를 ready_idx로 '이름만 바꾸는' 것이다.",
+        "acquire 조건은 두 개다: reader_idx < 0 (아직 대여 안 함) 그리고 ready_idx >= 0 (새 프레임 있음).",
+        "commit에서 ready_idx가 이미 >=0 이면 그 프레임은 아무도 못 본 채 버려지는 것 → dropped++."
+      ],
+      "solution": "void mb_write_commit(MBuf *mb)\n{\n    if (!mb) return;\n    pthread_mutex_lock(&mb->m);\n    if (mb->write_idx >= 0) {\n        if (mb->ready_idx >= 0)\n            mb->dropped++;                         // 소비 전에 더 새 프레임이 나옴\n        mb->ready_idx = mb->write_idx;             // publish\n        mb->write_idx = -1;\n    }\n    pthread_mutex_unlock(&mb->m);\n}\n\nFrame *mb_read_acquire(MBuf *mb)\n{\n    if (!mb) return NULL;\n    Frame *f = NULL;\n    pthread_mutex_lock(&mb->m);\n    if (mb->reader_idx < 0 && mb->ready_idx >= 0) {\n        mb->reader_idx = mb->ready_idx;            // READY를 reader 소유로 이전\n        mb->ready_idx  = -1;\n        f = &mb->buf[mb->reader_idx];\n    }\n    pthread_mutex_unlock(&mb->m);\n    return f;\n}\n\nvoid mb_read_release(MBuf *mb)\n{\n    if (!mb) return;\n    pthread_mutex_lock(&mb->m);\n    mb->reader_idx = -1;                           // 다시 FREE\n    pthread_mutex_unlock(&mb->m);\n}",
+      "explanation_ko": "세 함수가 하는 일은 소유권 라벨을 옮기는 것뿐이다: WRITER→READY(commit), READY→READER(acquire), READER→FREE(release). 복사가 한 번도 일어나지 않기 때문에 프레임이 6MB여도 임계구역 비용은 동일하다. acquire가 NULL을 돌려주는 논블로킹 설계라 소비자도 자기 루프 주기를 지킬 수 있다(실전에서는 NULL일 때 condvar로 대기하면 폴링을 없앨 수 있다). commit에서의 dropped++는 '소비자가 느려서 프레임이 낡았다'는 신호로, write_begin의 starved와는 원인이 다르다.",
+      "complexity": "세 함수 모두 O(1) time, O(1) space",
+      "pitfalls": [
+        "acquire에서 reader_idx 검사 누락 → 같은 reader가 두 버퍼를 들고 있다고 장부가 착각한다.",
+        "acquire 후 ready_idx를 -1로 안 비움 → writer가 reader 버퍼를 FREE로 오인.",
+        "commit에서 덮어쓴 READY를 dropped에 안 넣음 → 회계 불변식이 깨진다.",
+        "acquire를 블로킹으로 만듦 → 소비자 루프 주기가 생산자에 묶인다."
+      ],
+      "verkada_context": "카메라/센서 스레드가 프레임을 publish하고 업로드 스레드가 '있으면 가져가고 없으면 다른 일'을 하는 게이트웨이 파이프라인 구조."
+    },
+    {
+      "num": 33,
+      "slug": "tearing_and_invariant",
+      "title_ko": "tearing 검출 테스트와 회계 불변식",
+      "title_en": "Tearing detection test and the accounting invariant",
+      "difficulty": "medium",
+      "tags": [
+        "testing",
+        "tearing",
+        "invariant",
+        "threads"
+      ],
+      "prompt_ko": "tearing(절반만 갱신된 프레임)을 검출할 수 있게 프레임을 self-describing으로 만들어라: frame_fill은 seq를 넣고 data 전 바이트를 (seq & 0xFF)로 채운다. frame_is_torn은 한 바이트라도 다르면 true(NULL도 true). 그리고 정지 상태에서 consumed + dropped + leftover(READY 1개) + inflight(WRITER 1개) == produced 를 검사하는 mb_accounting_ok를 구현하라.",
+      "prompt_en": "Make the payload self-describing so a torn frame is detectable, and assert the accounting invariant — every produced frame was either read, dropped, or is still held.",
+      "signature": "void frame_fill(Frame *f, unsigned seq); bool frame_is_torn(const Frame *f); bool mb_accounting_ok(const MBuf *mb, unsigned long produced, unsigned long consumed)",
+      "examples": [
+        {
+          "in": "frame_fill(&f, 0x1234); frame_is_torn(&f)",
+          "out": "false"
+        },
+        {
+          "in": "f.data[64] ^= 0xFF; frame_is_torn(&f)",
+          "out": "true"
+        },
+        {
+          "in": "produced=8000, read=360, dropped=7640, leftover=0",
+          "out": "mb_accounting_ok -> true"
+        }
+      ],
+      "hints": [
+        "테스트가 tearing을 '볼 수 있게' 하려면 페이로드가 자기 자신을 설명해야 한다 — seq에서 유도한 패턴으로 전체를 채운다.",
+        "스레드 테스트에서 '읽힌 프레임 수 == N' 같은 단정은 스케줄링에 의존해 플래키하다. 대신 불변식을 단정한다.",
+        "불변식: consumed + dropped + leftover + inflight == produced. leftover는 ready_idx>=0, inflight는 write_idx>=0 일 때 각각 1."
+      ],
+      "solution": "void frame_fill(Frame *f, unsigned seq)\n{\n    if (!f) return;\n    f->seq = seq;\n    memset(f->data, (int)(seq & 0xFFu), FRAME_LEN); // 전 바이트를 같은 패턴으로\n}\n\nbool frame_is_torn(const Frame *f)\n{\n    if (!f) return true;                            // NULL은 안전하게 \"찢어짐\" 취급\n    unsigned char expect = (unsigned char)(f->seq & 0xFFu);\n    for (int i = 0; i < FRAME_LEN; i++)\n        if (f->data[i] != expect) return true;\n    return false;\n}\n\nbool mb_accounting_ok(const MBuf *mb, unsigned long produced, unsigned long consumed)\n{\n    if (!mb) return false;\n    unsigned long leftover = (mb->ready_idx >= 0) ? 1UL : 0UL;\n    unsigned long inflight = (mb->write_idx  >= 0) ? 1UL : 0UL;\n    return consumed + mb->dropped + leftover + inflight == produced;\n}",
+      "explanation_ko": "동시성 테스트의 핵심은 '결정적으로 참인 명제'를 고르는 것이다. 몇 프레임이 읽혔는지는 OS 스케줄러가 정하므로 단정하면 안 되지만, '생산된 모든 프레임은 읽혔거나 버려졌거나 아직 남아있다'는 스케줄과 무관하게 항상 참이다. tearing 검출은 페이로드를 seq에서 유도해 채우면 O(len) 스캔만으로 가능하다 — 두 세대가 섞이면 반드시 패턴이 깨진다. 이 두 장치 덕에 CI에서 수천 번 돌려도 플래키하지 않다.",
+      "complexity": "frame_fill/frame_is_torn O(FRAME_LEN), mb_accounting_ok O(1)",
+      "pitfalls": [
+        "읽힌 프레임 수를 상수와 비교 → 플래키한 테스트.",
+        "leftover(마지막 READY)와 inflight를 회계에서 빼먹음 → 정상인데 불변식 실패.",
+        "mb_accounting_ok를 스레드가 살아있는 동안 락 없이 호출 → 일관성 없는 장부를 읽는다.",
+        "페이로드를 0으로만 채우면 tearing이 검출되지 않는다(두 세대가 섞여도 같은 값)."
+      ],
+      "verkada_context": "200만 대 fleet에서는 '조용한 프레임 손실'이 최악이다. drop 카운터와 회계 불변식이 곧 현장 디버깅 수단이 된다."
+    },
+    {
+      "num": 34,
+      "slug": "triple_buffer",
+      "title_ko": "트리플 버퍼로 확장 (writer가 굶지 않음)",
+      "title_en": "Extend to triple buffering (the writer never starves)",
+      "difficulty": "medium",
+      "tags": [
+        "triple-buffer",
+        "trade-off",
+        "memory",
+        "latency"
+      ],
+      "prompt_ko": "mb_init(&mb, 3)만으로 트리플 버퍼가 되도록 write_begin이 nbuf를 제대로 쓰게 하라. 그리고 테스트로 보여라: reader가 1개 + READY가 1개여도 세 번째 버퍼가 FREE로 남으므로 starved == 0 이다. 대가(메모리 +50%, 지연 최대 +1프레임)와 여전히 남는 drop(덮어쓰기 drop)을 설명하라.",
+      "prompt_en": "Make the same code triple-buffered by passing nbuf=3, and show with a test that the writer never has to steal the READY buffer. Explain the memory/latency cost and which drops remain.",
+      "signature": "mb_init(&mb, 3)  /* 나머지 API 동일 */",
+      "examples": [
+        {
+          "in": "nbuf=3, reader_idx=0, ready_idx=1 에서 write_begin()",
+          "out": "&buf[2], starved=0"
+        },
+        {
+          "in": "8000프레임 생산자/소비자 스레드 (nbuf=3)",
+          "out": "starved == 0 (항상)"
+        }
+      ],
+      "hints": [
+        "새 함수는 없다 — write_begin의 탐색 루프가 하드코딩된 2가 아니라 mb->nbuf를 쓰고 있으면 끝이다.",
+        "왜 3인가: 동시에 소유될 수 있는 최대 개수가 READER 1 + READY 1 + WRITER 1 = 3 이다.",
+        "트리플이어도 commit에서 '안 읽힌 READY를 덮는 drop'은 남는다. starved(빈 버퍼 없음)와 카운터를 나눠 두면 원인 진단이 된다."
+      ],
+      "solution": "/* 구현 변경 없음: mb_write_begin 의 탐색 루프가 mb->nbuf 를 쓰기 때문에\n * mb_init(&mb, 3) 한 줄로 트리플 버퍼가 된다. 결정적 시나리오: */\nMBuf t1 = {0};\nmb_init(&t1, 3);\nmb_write_begin(&t1); mb_write_commit(&t1);   /* ready = 0        */\nFrame *tr = mb_read_acquire(&t1);            /* reader = 0       */\nmb_write_begin(&t1); mb_write_commit(&t1);   /* ready = 1        */\nFrame *tw = mb_write_begin(&t1);             /* FREE = 2 가 남는다 */\nassert(tw == &t1.buf[2]);\nassert(t1.starved == 0);   /* writer 는 굶지 않는다 */\nassert(tr == &t1.buf[0]); /* reader 가 든 버퍼는 안전 */",
+      "explanation_ko": "더블 버퍼의 구조적 약점은 'READER 1 + READY 1'이면 writer가 쓸 곳이 없다는 것이다. 버퍼를 하나 더 두면 세 역할이 동시에 성립해 writer는 절대 굶지 않는다. 대가는 메모리 +50%(1080p RGB면 ~6MB → ~9MB)와 지연 최대 +1프레임이다. 중요한 건 '트리플이 drop을 0으로 만든다'는 오해를 하지 않는 것 — 소비자가 느리면 여전히 최신 프레임이 이전 READY를 덮는다. 사라지는 건 starve-drop뿐이고, 그래서 두 카운터를 분리해야 '생산이 빠른 것'인지 '소비가 느린 것'인지 텔레메트리만 보고 안다.",
+      "complexity": "시간 동일, 공간 3 * sizeof(Frame) (더블 대비 +50%)",
+      "pitfalls": [
+        "탐색 루프에 버퍼 개수를 하드코딩 → 확장 불가한 설계.",
+        "'트리플이면 프레임을 안 버린다'고 말하기 → 덮어쓰기 drop은 그대로 남는다.",
+        "메모리 trade-off를 말하지 않고 무조건 트리플 추천 → 임베디드 감각 없음으로 보인다.",
+        "N을 4, 5로 늘려 지연만 키우기 — 소유자가 3종류뿐이라 4번째 버퍼는 지연만 늘린다."
+      ],
+      "verkada_context": "RAM이 넉넉한 Linux 게이트웨이 영상 경로는 트리플, RAM이 빠듯한 MCU/FreeRTOS 급 공기질 센서(SV)는 더블 — 같은 코드에 nbuf만 다르게 준다."
+    },
+    {
+      "num": 35,
+      "slug": "latest_value_slot",
+      "title_ko": "latest-value 슬롯: mutex vs seqlock",
+      "title_en": "Latest-value slot: mutex vs seqlock",
+      "difficulty": "hard",
+      "tags": [
+        "seqlock",
+        "atomics",
+        "memory-order",
+        "latest-value",
+        "mutex"
+      ],
+      "prompt_ko": "최신값 하나(링크 통계 스냅샷)를 공유하는 두 구현을 만들어라. (A) mutex 버전 lv_store/lv_load. (B) seqlock 버전 sl_store/sl_load: writer는 seq를 홀수로 올리고 페이로드를 쓰고 짝수로 복귀하며 절대 막히지 않는다. reader는 앞뒤 seq가 같고 짝수일 때만 채택하고 아니면 재시도(상한 SL_MAX_RETRY 필수). 페이로드는 _Atomic + relaxed + fence 로 두어 data race(UB)와 TSan 경고를 피한다. 언제 무엇을 쓸지 설명하라.",
+      "prompt_en": "Publish a single latest value two ways: with a mutex, and with a seqlock whose writer never blocks and whose reader retries a bounded number of times. Say when each one is the right choice.",
+      "signature": "void lv_store(LvMutex*, LinkSample); bool lv_load(LvMutex*, LinkSample*); void sl_store(SeqSlot*, LinkSample); bool sl_load(const SeqSlot*, LinkSample*)",
+      "examples": [
+        {
+          "in": "sl_store(s); sl_load(&out)",
+          "out": "true, out == s, sl_seq() 는 짝수"
+        },
+        {
+          "in": "writer 20000회 / reader 20000회 동시 실행",
+          "out": "찢어진 값 0건 (체크섬 불일치 0)"
+        }
+      ],
+      "hints": [
+        "seqlock 프로토콜: writer는 seq+1(홀수 = 쓰는 중) → 데이터 → seq+2(짝수 = 안정). reader는 s1이 홀수면 재시도.",
+        "reader는 데이터를 먼저 tmp로 읽고, acquire fence 후 seq를 다시 읽어 s1과 같을 때만 채택한다.",
+        "페이로드를 일반 변수로 두면 C 표준상 data race(UB)이고 TSan이 경고한다. _Atomic + memory_order_relaxed 로 읽고 쓰고, 앞뒤를 release/acquire fence로 감싼다. 그리고 reader 루프에는 반드시 재시도 상한을 둔다."
+      ],
+      "solution": "bool sample_consistent(const LinkSample *s)\n{\n    if (!s) return false;\n    return s->check == sample_check(s->ts_us, s->rssi_dbm);\n}\n\nvoid lv_init(LvMutex *lv)\n{\n    if (!lv) return;\n    memset(lv, 0, sizeof *lv);\n    pthread_mutex_init(&lv->m, NULL);\n}\n\nvoid lv_destroy(LvMutex *lv)\n{\n    if (!lv) return;\n    pthread_mutex_destroy(&lv->m);\n}\n\nvoid lv_store(LvMutex *lv, LinkSample s)\n{\n    if (!lv) return;\n    pthread_mutex_lock(&lv->m);\n    lv->v     = s;\n    lv->valid = true;\n    pthread_mutex_unlock(&lv->m);\n}\n\nbool lv_load(LvMutex *lv, LinkSample *out)\n{\n    if (!lv || !out) return false;\n    bool ok;\n    pthread_mutex_lock(&lv->m);\n    ok = lv->valid;\n    if (ok) *out = lv->v;\n    pthread_mutex_unlock(&lv->m);\n    return ok;\n}\n\nvoid sl_init(SeqSlot *sl)\n{\n    if (!sl) return;\n    atomic_init(&sl->seq, 0u);\n    atomic_init(&sl->ts_us, (uint64_t)0);\n    atomic_init(&sl->rssi_dbm, (int32_t)0);\n    atomic_init(&sl->check, sample_check(0, 0));\n}\n\nvoid sl_store(SeqSlot *sl, LinkSample s)\n{\n    if (!sl) return;\n    unsigned s0 = atomic_load_explicit(&sl->seq, memory_order_relaxed);\n    atomic_store_explicit(&sl->seq, s0 + 1u, memory_order_relaxed);   // 홀수 진입\n    atomic_thread_fence(memory_order_release);\n    atomic_store_explicit(&sl->ts_us,    s.ts_us,    memory_order_relaxed);\n    atomic_store_explicit(&sl->rssi_dbm, s.rssi_dbm, memory_order_relaxed);\n    atomic_store_explicit(&sl->check,    s.check,    memory_order_relaxed);\n    atomic_thread_fence(memory_order_release);\n    atomic_store_explicit(&sl->seq, s0 + 2u, memory_order_release);   // 짝수 복귀\n}\n\nbool sl_load(const SeqSlot *sl, LinkSample *out)\n{\n    if (!sl || !out) return false;\n    for (int try_i = 0; try_i < SL_MAX_RETRY; try_i++) {\n        unsigned s1 = atomic_load_explicit(&sl->seq, memory_order_acquire);\n        if (s1 & 1u) continue;                       // writer가 쓰는 중\n        LinkSample tmp;\n        tmp.ts_us    = atomic_load_explicit(&sl->ts_us,    memory_order_relaxed);\n        tmp.rssi_dbm = atomic_load_explicit(&sl->rssi_dbm, memory_order_relaxed);\n        tmp.check    = atomic_load_explicit(&sl->check,    memory_order_relaxed);\n        atomic_thread_fence(memory_order_acquire);\n        unsigned s2 = atomic_load_explicit(&sl->seq, memory_order_relaxed);\n        if (s1 == s2) { *out = tmp; return true; }   // 읽는 동안 안 바뀜 → 채택\n    }\n    return false;                                     // 재시도 상한 초과\n}\n\nunsigned sl_seq(const SeqSlot *sl)\n{\n    if (!sl) return 0u;\n    return atomic_load_explicit(&sl->seq, memory_order_acquire);\n}",
+      "explanation_ko": "mutex 버전은 단순하고 언제나 옳지만 writer가 reader에 막힐 수 있고 우선순위 역전 여지가 있다. seqlock은 writer가 구조적으로 막히지 않아 실시간 생산 경로에 맞는다 — 대신 writer가 하나여야 하고, 페이로드는 포인터 없는 POD여야 하며(찢어진 포인터를 역참조하면 재시도할 기회조차 없다), writer가 폭주하면 reader가 굶을 수 있으니 재시도 상한이 필수다. 선택 기준은 '읽기가 쓰기보다 훨씬 잦고 페이로드가 작은가'다. 페이로드를 relaxed atomic으로 두는 이유를 말할 수 있으면 memory model 이해도가 드러난다.",
+      "complexity": "mutex: O(1) + 락 경합. seqlock: writer O(1) wait-free, reader O(재시도) — 무경합 시 O(1)",
+      "pitfalls": [
+        "reader 재시도 루프에 상한이 없음 → writer 폭주 시 무한 루프.",
+        "seq 홀짝 검사를 빼먹음 → 쓰는 도중 값을 채택.",
+        "데이터를 읽은 뒤 seq를 다시 안 읽음 → 찢어진 값이 그대로 새어나간다.",
+        "페이로드를 일반 변수로 → data race(UB) + TSan 경고.",
+        "페이로드에 포인터/가변 길이 포함 → seqlock으로 쓰면 안 되는 케이스.",
+        "writer가 둘 이상 → seq 프로토콜이 깨진다(writer끼리는 별도 mutex 필요)."
+      ],
+      "verkada_context": "GC31-E의 LTE RSSI/SIM 상태, 배터리 SoC 같은 작은 스냅샷을 여러 스레드(업로드·로컬 UI·BLE 프로비저닝)가 자주 읽는 상황 — 전형적인 읽기 多/쓰기 少."
+    },
+    {
+      "num": 36,
+      "slug": "rate_decoupling",
+      "title_ko": "레이트 디커플링 400Hz → 100Hz (최신값 vs 구간 평균)",
+      "title_en": "Rate decoupling 400Hz -> 100Hz (take-latest vs block average)",
+      "difficulty": "easy",
+      "tags": [
+        "decimation",
+        "pure-function",
+        "testability",
+        "signal"
+      ],
+      "prompt_ko": "400Hz 생산을 100Hz 소비로 줄이는 4:1 데시메이션을 순수 함수로 구현하라. rd_latest는 블록의 마지막 샘플, rd_mean은 블록 평균(int64 누적 + 0에서 먼 쪽 반올림). rd_decimate는 꽉 찬 블록만 처리하고(꼬리는 다음 호출로) out_cap을 넘지 않으며 출력 개수를 반환한다. 어느 정책이 어떤 데이터에 맞는지 설명하라.",
+      "prompt_en": "Decimate a fast stream to a slower consumer rate as a pure function, with take-latest and block-average policies, and justify which signal each one fits.",
+      "signature": "int32_t rd_latest(const int32_t *blk, int n); int32_t rd_mean(const int32_t *blk, int n); int rd_decimate(const int32_t *in, int n_in, int factor, RatePolicy pol, int32_t *out, int out_cap)",
+      "examples": [
+        {
+          "in": "in={10,20,30,40,50,60,70,80}, factor=4, RD_LATEST",
+          "out": "{40, 80} (반환 2)"
+        },
+        {
+          "in": "같은 입력, RD_MEAN",
+          "out": "{25, 65} (반환 2)"
+        },
+        {
+          "in": "in={1000,-1000,1000,-1000}",
+          "out": "mean=0, latest=-1000"
+        }
+      ],
+      "hints": [
+        "순수 함수로 분리해야 하드웨어 없이 단위 테스트가 된다 — 메일의 'modular, testable embedded software' 항목이 이것이다.",
+        "합계는 int64_t로 누적한다. int32 샘플 수천 개면 넘친다.",
+        "C의 정수 나눗셈은 0쪽 절단이라 음수에서 편향된다. 0에서 먼 쪽 반올림: num>=0 이면 (num+den/2)/den, 아니면 (num-den/2)/den."
+      ],
+      "solution": "static int32_t round_div(int64_t num, int64_t den)\n{\n    if (den <= 0) return 0;\n    if (num >= 0) return (int32_t)((num + den / 2) / den);\n    return (int32_t)((num - den / 2) / den);\n}\n\nint32_t rd_latest(const int32_t *blk, int n)\n{\n    if (!blk || n <= 0) return 0;\n    return blk[n - 1];\n}\n\nint32_t rd_mean(const int32_t *blk, int n)\n{\n    if (!blk || n <= 0) return 0;\n    int64_t sum = 0;\n    for (int i = 0; i < n; i++) sum += blk[i];       // int64 누적 → 오버플로 방지\n    return round_div(sum, n);\n}\n\nint rd_decimate(const int32_t *in, int n_in, int factor,\n                RatePolicy pol, int32_t *out, int out_cap)\n{\n    if (!in || !out || n_in <= 0 || factor <= 0 || out_cap <= 0) return 0;\n    int nblocks = n_in / factor;\n    if (nblocks > out_cap) nblocks = out_cap;\n    for (int b = 0; b < nblocks; b++) {\n        const int32_t *blk = in + (size_t)b * (size_t)factor;\n        out[b] = (pol == RD_MEAN) ? rd_mean(blk, factor) : rd_latest(blk, factor);\n    }\n    return nblocks;\n}",
+      "explanation_ko": "정책 선택 기준은 한 문장이다: '이 신호는 순간값이 의미인가, 추세가 의미인가?' 링크 up/down, 도어 상태, 최신 GPS fix처럼 계단·이벤트성 신호에 평균을 쓰면 상태 전이가 뭉개져 사라진다. 반대로 RSSI·온도·전류·PM2.5처럼 노이즈 있는 연속 신호에 latest를 쓰면 무작위 한 점이 제어에 들어가고 에일리어싱이 생긴다. 평균은 노이즈를 억제하는 대신 지연이 블록의 절반만큼 늘어난다. 구현에서는 int64 누적과 반올림 방향, 그리고 꽉 찬 블록만 처리하는 스트리밍 친화적 계약이 실무 감각을 보여준다.",
+      "complexity": "rd_latest O(1), rd_mean O(n), rd_decimate O(n_in)",
+      "pitfalls": [
+        "int32로 합계를 누적 → 오버플로.",
+        "C 기본 나눗셈(0쪽 절단)을 그대로 써서 음수에서 편향.",
+        "꼬리(불완전 블록)를 억지로 평균 → 가중치가 다른 샘플이 섞인다.",
+        "out_cap 검사 누락 → 버퍼 오버런.",
+        "계단 신호에 평균을 적용해 상태 전이를 지워버림."
+      ],
+      "verkada_context": "공기질 센서(SV)의 고속 ADC 샘플을 저속 클라우드 리포팅으로 줄일 때, 그리고 LTE RSSI를 1초 단위 텔레메트리로 압축할 때 그대로 쓰는 계산."
+    },
+    {
+      "num": 37,
+      "slug": "dma_ping_pong",
+      "title_ko": "DMA ping-pong 시뮬레이션 (ISR은 인덱스 교환만)",
+      "title_en": "DMA ping-pong simulation (the ISR only swaps indices)",
+      "difficulty": "hard",
+      "tags": [
+        "dma",
+        "isr",
+        "ping-pong",
+        "cache-coherency",
+        "atomics"
+      ],
+      "prompt_ko": "ping-pong DMA를 시뮬레이션하라. dma_pp_isr_complete는 ISR 컨텍스트이므로 active를 토글하고 방금 끝난 버퍼를 full에 싣는 '인덱스 교환'만 한다 — 데이터 복사·파싱·락 대기 금지. 직전 full을 앱이 못 가져갔으면 overrun++. dma_pp_take는 full을 -1로 교환하며 그 버퍼의 포인터를 준다(복사 없음). 실제 하드웨어의 캐시 invalidate/clean 이슈는 주석으로 설명하라.",
+      "prompt_en": "Simulate ping-pong DMA: the completion ISR only toggles the active index and publishes the finished buffer; the app takes it by pointer, never by copy. Document the cache maintenance required on real hardware.",
+      "signature": "void dma_pp_isr_complete(DmaPP *d); unsigned char *dma_pp_take(DmaPP *d, int *idx_out)",
+      "examples": [
+        {
+          "in": "init; isr_complete()",
+          "out": "active=1, take() -> buf[0]"
+        },
+        {
+          "in": "isr_complete() 두 번 연속 (앱이 안 가져감)",
+          "out": "overrun=1, take() -> buf[1] (최신 우선)"
+        },
+        {
+          "in": "take(buf0) 후 isr_complete()",
+          "out": "active=0 — DMA가 앱의 버퍼를 다시 쓰기 시작한다"
+        }
+      ],
+      "hints": [
+        "ISR에서 금지: 데이터 복사, 파싱, malloc, printf, mutex 등 블로킹 API. 허용: 인덱스 교환, 카운터, 태스크 깨우기 시그널.",
+        "full 을 atomic_exchange 로 다루면 '싣기'와 '직전 값 확인(overrun)'이 한 번에 원자적으로 끝난다.",
+        "버퍼가 2개뿐이면 소비자의 데드라인은 전송 1주기다. 그 안에 처리가 안 끝나면 트리플 버퍼로 가야 한다."
+      ],
+      "solution": "void dma_pp_init(DmaPP *d)\n{\n    if (!d) return;\n    memset(d, 0, sizeof *d);\n    d->active = 0;\n    atomic_init(&d->full, -1);\n    atomic_init(&d->overrun, 0UL);\n    atomic_init(&d->completes, 0UL);\n}\n\nvoid dma_pp_isr_complete(DmaPP *d)\n{\n    if (!d) return;\n    int done   = d->active;\n    d->active  = done ^ 1;                          // 다음 전송은 반대쪽 버퍼로\n    int prev   = atomic_exchange_explicit(&d->full, done, memory_order_acq_rel);\n    if (prev >= 0)                                  // 직전 것을 앱이 못 가져갔다\n        atomic_fetch_add_explicit(&d->overrun, 1UL, memory_order_relaxed);\n    atomic_fetch_add_explicit(&d->completes, 1UL, memory_order_relaxed);\n}\n\nunsigned char *dma_pp_take(DmaPP *d, int *idx_out)\n{\n    if (!d) return NULL;\n    int idx = atomic_exchange_explicit(&d->full, -1, memory_order_acq_rel);\n    if (idx < 0) return NULL;\n    if (idx_out) *idx_out = idx;\n    return d->buf[idx];\n}\n\nint dma_pp_active(const DmaPP *d)\n{\n    return d ? d->active : -1;\n}\n\nunsigned long dma_pp_overrun(const DmaPP *d)\n{\n    return d ? atomic_load_explicit(&d->overrun, memory_order_relaxed) : 0UL;\n}",
+      "explanation_ko": "ISR은 수 마이크로초 안에 끝나야 하고 블로킹 API는 호출조차 불가하므로, 완료 인터럽트가 할 일은 소유권 표시를 바꾸는 것뿐이다. 데이터는 이미 DMA가 DRAM에 써 놨으니 옮길 이유가 없다 — 포인터만 넘긴다. atomic_exchange로 full을 싣고 직전 값을 동시에 확인하면 overrun 판정이 별도 락 없이 원자적으로 끝난다. 버퍼가 2개뿐인 구조의 진짜 계약은 '소비자는 전송 1주기 안에 처리를 끝내야 한다'이고, 그걸 못 지키면 트리플 버퍼(Q34)로 가는 것이 정석이다.",
+      "complexity": "isr_complete / take 모두 O(1), 락 없음 (atomic exchange 1회)",
+      "pitfalls": [
+        "ISR에서 memcpy/파싱 → 인터럽트 지연이 튀고 다음 전송을 놓친다.",
+        "ISR에서 mutex/printf/malloc 호출 → 데드락 또는 즉사.",
+        "overrun을 세지 않음 → 조용한 손실.",
+        "DMA→CPU 전 cache invalidate 누락 → CPU가 캐시의 옛 데이터를 읽는다.",
+        "CPU→DMA 전 cache clean/flush 누락 → DMA가 덜 쓰인 버퍼를 전송한다.",
+        "버퍼가 캐시 라인 정렬/배수가 아님 → 인접 변수까지 무효화되어 재현 불가 손상."
+      ],
+      "verkada_context": "SSD 펌웨어의 NAND DMA 완료 경로와 동일한 구조 — Don의 기존 경험을 Linux DMA API 어휘(dma_map_single / dma_alloc_coherent)로 번역해서 말하면 임베디드 Linux 갭을 덮는다."
+    },
+    {
+      "num": 38,
+      "slug": "jitter_analyze",
+      "title_ko": "프레임 지터/누락 측정 (순수 함수)",
+      "title_en": "Frame jitter / drop measurement (pure function)",
+      "difficulty": "easy",
+      "tags": [
+        "pure-function",
+        "testability",
+        "jitter",
+        "monotonic-clock",
+        "telemetry"
+      ],
+      "prompt_ko": "타임스탬프 배열만 받아 통계를 내는 순수 함수 jitter_analyze를 구현하라. 각 간격 gap = ts[i]-ts[i-1] 에 대해 max_gap/min_gap, max_jitter = max|gap - nominal|, 그리고 k = round(gap/nominal) 로 k>1 이면 missed += k-1. 반올림하는 이유는 정상 범위 지터를 누락으로 오판하지 않기 위해서다. ts가 거꾸로 가면 nonmonotonic++ 로 따로 센다. n<2 · NULL · nominal==0 은 전부 0 결과.",
+      "prompt_en": "Pure function over a timestamp array: estimate missed frames by rounding each gap to the nearest multiple of the nominal period, and report max/min gap, max jitter, and non-monotonic timestamps. Guard every degenerate input.",
+      "signature": "JitterStats jitter_analyze(const unsigned long *ts_us, int n, unsigned long nominal_us)",
+      "examples": [
+        {
+          "in": "ts={0,10000,20000,30000}, nominal=10000",
+          "out": "missed=0, max_jitter=0, n_gaps=3"
+        },
+        {
+          "in": "ts={0,10000,30000,40000}, nominal=10000",
+          "out": "missed=1, max_gap=20000, max_jitter=10000"
+        },
+        {
+          "in": "ts={0,55000}, nominal=10000",
+          "out": "missed=5 (5.5주기 → 반올림 6주기)"
+        }
+      ],
+      "hints": [
+        "절단이 아니라 반올림: k = (gap + nominal/2) / nominal. 그래야 ±40% 지터를 누락으로 세지 않는다.",
+        "k개 주기가 지났다는 건 그 사이 프레임 k-1개가 사라졌다는 뜻이다.",
+        "nominal==0, n<2, ts==NULL 을 먼저 막는다(0 나누기). 그리고 ts[i] < ts[i-1] 은 누락이 아니라 시계 역행이므로 따로 센다."
+      ],
+      "solution": "JitterStats jitter_analyze(const unsigned long *ts_us, int n, unsigned long nominal_us)\n{\n    JitterStats st;\n    memset(&st, 0, sizeof st);\n    if (!ts_us || n < 2 || nominal_us == 0) return st;   // 안전한 0 결과\n\n    unsigned long min_gap = ULONG_MAX;\n    for (int i = 1; i < n; i++) {\n        unsigned long gap;\n        if (ts_us[i] < ts_us[i - 1]) {                   // 시계 역행 / 잘못된 입력\n            st.nonmonotonic++;\n            gap = 0;\n        } else {\n            gap = ts_us[i] - ts_us[i - 1];\n        }\n        st.n_gaps++;\n        if (gap > st.max_gap_us) st.max_gap_us = gap;\n        if (gap < min_gap)       min_gap = gap;\n\n        unsigned long jit = (gap > nominal_us) ? gap - nominal_us : nominal_us - gap;\n        if (jit > st.max_jitter_us) st.max_jitter_us = jit;\n\n        // 간격을 nominal의 몇 배로 볼 것인가 — 반올림\n        unsigned long k = (gap + nominal_us / 2) / nominal_us;\n        if (k > 1) st.missed += k - 1;                   // k개 주기 = k-1개 누락\n    }\n    st.min_gap_us = (st.n_gaps > 0) ? min_gap : 0UL;\n    return st;\n}",
+      "explanation_ko": "측정 로직을 순수 함수로 뽑아야 카메라도 커널도 없이 CI에서 단위 테스트가 된다 — 이게 '모듈성·테스트 가능성'을 코드로 보여주는 방법이다. 계산의 핵심은 반올림이다. 절단을 쓰면 19.9ms 간격(사실상 프레임 하나 누락 직전)이 누락 0으로, 14ms(정상 지터)도 0으로 잡혀 통계가 무의미해진다. 반올림하면 '가장 가까운 주기 배수'로 해석된다. nonmonotonic을 따로 세는 이유는 필드에서 NTP 점프나 suspend/resume으로 타임스탬프가 거꾸로 가기 때문이다. 그래서 실시간 측정은 항상 CLOCK_MONOTONIC을 쓴다.",
+      "complexity": "O(n) time, O(1) space",
+      "pitfalls": [
+        "절단 나눗셈으로 누락 추정 → 정상 지터를 누락으로, 누락 직전을 정상으로 오판.",
+        "nominal==0 / n<2 / NULL 미검사 → 0 나누기 또는 크래시.",
+        "시계 역행을 unsigned 뺄셈으로 처리 → 거대한 gap이 되어 누락 수만 개로 폭발.",
+        "CLOCK_REALTIME 사용 → NTP 점프가 그대로 통계에 섞인다.",
+        "측정 로직을 캡처 루프 안에 인라인 → 테스트 불가."
+      ],
+      "verkada_context": "카메라 프레임 드랍률, GW31-E의 '오프라인 30분이면 자가 재부팅' 같은 헬스 판정, 게이트웨이 heartbeat 간격 감시가 모두 같은 계산이다."
+    }
+  ]
+}

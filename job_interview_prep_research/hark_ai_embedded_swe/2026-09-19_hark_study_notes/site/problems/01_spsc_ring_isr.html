@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>01. ISR-safe SPSC ring buffer</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="problems/01_spsc_ring_isr">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">코딩 문제 · 01. ISR-safe SPSC ring buffer</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">코딩 문제 · Problems</div>
+      <h1>01. ISR-safe SPSC ring buffer</h1>
+      <div class="meta"><span>8분 읽기</span><span>131줄</span><span>7개 절</span></div>
+    </div>
+    <blockquote><p><strong>주제</strong>: 동시성·메모리 · <strong>난이도</strong>: 중급 · <strong>목표 시간</strong>: 25분 <strong>해설은 보지 말 것</strong>: 먼저 <code>starters/01_spsc_ring_isr.c</code>를 채워 <code>make run N=01</code>으로 통과시킨다.</p></blockquote>
+<h2 id="면접관의-문장">면접관의 문장<a class="anchor" href="#면접관의-문장" aria-label="link">#</a></h2>
+<p>"Let's say we have a UART receiving bytes from a companion SoC, and the RX interrupt fires once per byte. The main loop parses those bytes into packets, but it can't keep up in real time — it runs whenever it gets scheduled. Write me a fixed-size byte ring buffer that the ISR writes into and the main loop reads from. Don't disable interrupts, and don't use a mutex. When it's full the ISR should drop the byte and keep going rather than block. Walk me through why this is safe without a lock, and then tell me what you'd change if a second ISR also had to write into it."</p>
+<h2 id="요구사항">요구사항<a class="anchor" href="#요구사항" aria-label="link">#</a></h2>
+<ol><li>버퍼는 고정 크기 바이트 배열이다. 크기는 컴파일 타임 상수 <code>RB_SIZE</code>이고 2의 거듭제곱이어야 한다. 이 조건은 <code>_Static_assert</code>로 컴파일 타임에 강제한다.</li><li>동적 할당 금지. 버퍼는 <code>ringbuf_t</code> 안에 인라인으로 들어 있다.</li><li>producer는 정확히 하나(ISR), consumer는 정확히 하나(main loop)다. <code>head</code>는 producer만 store 하고 <code>tail</code>은 consumer만 store 한다.</li><li>index는 <code>RB_SIZE</code>로 나누거나 자르지 않는다. 32-bit free-running counter로 계속 증가시키고, 배열에 접근할 때만 <code>&amp; (RB_SIZE - 1u)</code>로 자른다.</li><li>따라서 <code>head - tail</code>이 곧 들어 있는 개수다. 이 식은 index가 <code>0xFFFFFFFF</code>를 넘어 0으로 wrap 해도 정확해야 한다.</li><li>한 칸을 비워 두는 방식은 쓰지 않는다. <code>RB_SIZE</code>개 전부를 채울 수 있어야 한다.</li><li><code>rb_put</code>은 full이면 아무것도 쓰지 않고 <code>false</code>를 돌려주며 <code>dropped</code> 카운터를 1 올린다. 버퍼 내용은 그대로 유지된다.</li><li><code>rb_get</code>은 empty면 <code>false</code>를 돌려주고 <code>out</code>이 가리키는 값을 <strong>건드리지 않는다</strong>.</li><li>bulk 버전 <code>rb_write</code> / <code>rb_read</code>는 실제로 처리한 바이트 수를 돌려준다(부분 성공 허용). 공간보다 많이 요청하면 들어가는 만큼만 넣고 나머지는 <code>dropped</code>에 더한다. index는 루프 안에서 한 바이트씩 올리지 말고 <strong>마지막에 딱 한 번</strong> 올린다.</li><li>producer의 쓰기 순서는 "데이터 먼저, <code>head</code> 나중", consumer의 순서는 "데이터 먼저, <code>tail</code> 나중"이어야 한다. 컴파일러와 CPU가 이 순서를 바꾸지 못하게 막는 코드가 들어가야 한다.</li><li>모든 연산은 O(1)이다. 나눗셈이나 모듈로 연산을 쓰지 않는다.</li></ol>
+<h2 id="인터페이스">인터페이스<a class="anchor" href="#인터페이스" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">c</span><pre><code>#define RB_SIZE 256u
+_Static_assert((RB_SIZE &amp; (RB_SIZE - 1u)) == 0u, "RB_SIZE must be power of 2");
+
+typedef struct {
+    uint8_t          buf[RB_SIZE];
+    _Atomic uint32_t head;     /* producer(ISR)만 store */
+    _Atomic uint32_t tail;     /* consumer(task)만 store */
+    uint32_t         dropped;  /* full로 버린 바이트 수 */
+} ringbuf_t;
+
+void     rb_init(ringbuf_t *rb);
+
+/* 관찰 */
+uint32_t rb_count(const ringbuf_t *rb);
+uint32_t rb_space(const ringbuf_t *rb);
+bool     rb_is_empty(const ringbuf_t *rb);
+bool     rb_is_full(const ringbuf_t *rb);
+
+/* producer 쪽 (ISR) */
+bool     rb_put(ringbuf_t *rb, uint8_t b);
+uint32_t rb_write(ringbuf_t *rb, const uint8_t *src, uint32_t n);
+
+/* consumer 쪽 (main loop) */
+bool     rb_get(ringbuf_t *rb, uint8_t *out);
+uint32_t rb_read(ringbuf_t *rb, uint8_t *dst, uint32_t n);
+
+/* 같은 함수의 다른 이름. 면접관이 push/pop이라고 부르면 이쪽을 쓴다. */
+bool     rb_push(ringbuf_t *rb, uint8_t b);
+bool     rb_pop(ringbuf_t *rb, uint8_t *out);</code></pre></figure>
+<h2 id="제약">제약<a class="anchor" href="#제약" aria-label="link">#</a></h2>
+<ul><li><code>malloc</code>, <code>calloc</code>, <code>realloc</code> 금지. 전역/정적 버퍼만 쓴다.</li><li>인터럽트 비활성화(<code>__disable_irq</code>, PRIMASK/BASEPRI 조작) 금지. mutex, spinlock, semaphore 금지.</li><li>나눗셈·모듈로(<code>/</code>, <code>%</code>) 금지. MCU에 하드웨어 나눗셈기가 없을 수 있다.</li><li>C11 표준 라이브러리만 쓴다. 하드웨어 헤더나 RTOS 헤더는 쓰지 않는다. ISR은 설명상의 문맥일 뿐, 테스트는 호스트에서 단일 스레드로 돈다.</li><li><code>rb_put</code> 하나의 실행 경로는 짧아야 한다. ISR 안에서 도는 코드이므로 루프나 블로킹이 있으면 안 된다.</li><li>producer 문맥은 consumer 문맥을 <strong>언제든 선점할 수 있다</strong>고 가정한다. consumer가 <code>rb_get</code> 중간 어디에서 멈춰도 producer가 끼어들어 정상 동작해야 한다.</li></ul>
+<h2 id="예시-동작">예시 동작<a class="anchor" href="#예시-동작" aria-label="link">#</a></h2>
+<p><code>RB_SIZE == 8</code>이라고 가정한 타임라인이다. <code>H</code>는 head, <code>T</code>는 tail의 물리 위치다.</p>
+<figure class="code"><pre><code>초기 (head=0, tail=0, count=0)
+  idx : 0  1  2  3  4  5  6  7
+  buf : .  .  .  .  .  .  .  .
+        HT
+
+rb_put('A'), rb_put('B'), rb_put('C')   -&gt; head=3, count=3
+  buf : A  B  C  .  .  .  .  .
+        T        H
+
+rb_get(&amp;x) -&gt; true, x=='A'              -&gt; tail=1, count=2
+  buf : A  B  C  .  .  .  .  .
+           T     H
+
+8개를 채운 상태 (head=11, tail=3, count=8) -&gt; full
+  buf : I  J  K  D  E  F  G  H
+                 TH
+
+rb_put('L') -&gt; false, dropped=1, 내용 변화 없음</code></pre></figure>
+<p>index 자체의 wrap:</p>
+<figure class="code"><pre><code>head = 0xFFFFFFFE, tail = 0xFFFFFFFA
+  count = 0xFFFFFFFE - 0xFFFFFFFA = 4
+
+rb_put 을 세 번 더 하면 head = 0x00000001
+  count = 0x00000001 - 0xFFFFFFFA = 7   (unsigned 산술이라 정확하다)</code></pre></figure>
+<p>bulk write가 쪼개지는 경우(<code>RB_SIZE == 8</code>, head=6, 5바이트 쓰기):</p>
+<figure class="code"><pre><code>  idx : 0  1  2  3  4  5  6  7
+  buf : .  .  .  .  .  .  .  .
+                          H
+
+  첫 번째 memcpy: idx 6,7   (2바이트)
+  두 번째 memcpy: idx 0,1,2 (3바이트)
+  head는 마지막에 한 번만 6 -&gt; 11</code></pre></figure>
+<h2 id="스스로-점검할-질문">스스로 점검할 질문<a class="anchor" href="#스스로-점검할-질문" aria-label="link">#</a></h2>
+<ol><li><code>head</code>와 <code>tail</code>을 각각 한 명만 쓴다는 사실이 왜 lock을 없애 주는가? 두 명이 쓰는 변수가 하나라도 생기면 무엇이 깨지는가?</li><li>index를 <code>RB_SIZE</code>로 자르지 않고 free-running으로 두면 무엇이 쉬워지는가? "한 칸 비워 두기" 기법과 비교해 어떤 점이 나은가?</li><li><code>RB_SIZE</code>가 2의 거듭제곱이 아니면 정확히 어느 줄이 틀리는가?</li><li><code>volatile</code>만 붙이면 왜 충분하지 않은가? <code>volatile</code>이 보장하는 것과 보장하지 않는 것을 각각 한 문장으로 말해 보라.</li><li><code>rb_put</code>에서 <code>head</code>는 relaxed로 읽고 <code>tail</code>은 acquire로 읽는다. 왜 둘의 강도가 다른가?</li><li>데이터 쓰기와 <code>head</code> 갱신의 순서가 뒤집히면 consumer가 구체적으로 무엇을 보게 되는가? 타임라인으로 그려 보라.</li><li>단일 코어 Cortex-M에서 실제로 필요한 것이 컴파일러 배리어인지 CPU 배리어(<code>DMB</code>)인지, 그리고 그 답이 바뀌는 조건은 무엇인가?</li><li><code>rb_count</code>가 producer 쪽에서 호출될 때와 consumer 쪽에서 호출될 때, 돌려주는 값은 각각 어떤 의미에서 "안전한 추정치"인가?</li></ol>
+<h2 id="follow-up-면접관이-이어서-물을-것">follow-up (면접관이 이어서 물을 것)<a class="anchor" href="#follow-up-면접관이-이어서-물을-것" aria-label="link">#</a></h2>
+<ol class="tasks"><li>"What changes if a second ISR also writes into this buffer?"</li><li>"The DMA controller wants to write directly into the buffer instead of the CPU. What API do you need to add?"</li><li>"This is a byte buffer, but I want to queue fixed-size records so a reader never sees half a record. How do you change it?"</li><li>"How do you wake the consumer task, and how do you avoid waking it once per byte?"</li><li>"Suppose the producer and consumer are on two different cores sharing SRAM, and one of them has a data cache. What breaks and what do you add?"</li></ol>
+    <div class="nav"><a class="prev" href="00_how_to_use.html"><span class="dir">← 이전</span><span class="nm">00. 코딩 연습 사용법 — 먼저 읽기</span></a><a class="next" href="02_i2s_pingpong.html"><span class="dir">다음 →</span><span class="nm">02. I2S DMA 핑퐁 버퍼 핸드오프</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#면접관의-문장">면접관의 문장</a></li><li class="l2"><a href="#요구사항">요구사항</a></li><li class="l2"><a href="#인터페이스">인터페이스</a></li><li class="l2"><a href="#제약">제약</a></li><li class="l2"><a href="#예시-동작">예시 동작</a></li><li class="l2"><a href="#스스로-점검할-질문">스스로 점검할 질문</a></li><li class="l2"><a href="#follow-up-면접관이-이어서-물을-것">follow-up (면접관이 이어서 물을 것)</a></li></ol></aside>
+</div><script>
+const KEY='hark_notes_read_v1', TKEY='hark_notes_theme', CKEY='hark_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

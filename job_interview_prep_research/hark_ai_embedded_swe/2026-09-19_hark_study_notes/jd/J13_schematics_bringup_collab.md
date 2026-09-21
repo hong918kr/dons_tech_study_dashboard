@@ -1,0 +1,651 @@
+# J13. Comfort reading schematics and working alongside hardware engineers during board bring-up
+
+> **분류**: Requirement 6/7 · **관련 개념 노트**: C10 (§8 회로도, §9 bring-up), C03, C05, S06
+> **Don 현재 상태**: ✅ 강함 — "Silicon/system bring up -> NPI -> MP", "SoC verification … I2C, SPI, DMA, PCIe, SRAM/DRAM bring-up", FPGA pre-silicon bring-up, DSO/LA/프로토콜 분석기. **7개 Requirement 중 가장 확실한 강점.**
+> **이 노트를 다 읽으면**: ① 면접관이 회로도 리터러시를 실제로 어떻게 시험하는지 알고 대비한다 · ② bring-up 순서를 막힘없이 암송하고 각 단계의 실패 모드를 댄다 · ③ "HW냐 FW냐"를 증명하는 절차와 하드웨어 버그 리포트 작성법을 갖춘다.
+
+---
+
+## 0. 문장 뜯어보기
+
+| 구(句) | 표면적 의미 | 채용담당자가 이 단어를 고른 이유 |
+|---|---|---|
+| Comfort reading | "편하게 읽는다". expert/design이 아니다 | 회로를 **설계**하라는 게 아니라, 회로도를 펼쳐 놓고 대화가 되고 스스로 답을 찾으라는 뜻 |
+| schematics | 회로도(논리적 연결). 레이아웃/거버가 아님 | 펌웨어가 봐야 할 건 net 연결·핀 배정·전원 레일·풀업 값이다. PCB 배선 임피던스는 다른 직무 |
+| working alongside | "함께 일한다" — 넘기는 게 아니라 옆에서 | **협업이 절반이다.** 증상만 던지고 사라지는 펌웨어 엔지니어를 겪어 봤다는 신호 |
+| hardware engineers | EE. 회로 설계자, SI, 전력, RF | 서로 다른 어휘를 쓰는 사람들과 한 문제를 공유할 수 있는가 |
+| during board bring-up | 새 보드가 처음 전원을 받는 시기 | **가장 비싼 시기다.** 보드가 몇 장뿐이고, 일정이 걸려 있고, 실패가 모호하다 |
+
+> 이 문장은 "회로도 기호를 아나?"가 아니라 **"새 보드가 안 켜질 때 당신이 있으면 더 빨리 켜지나?"**를 묻는다. 그리고 그 판별은 대부분 **과거 사례를 말하게 해서** 한다.
+
+### 0.1 Responsibility 노트와의 역할 분담
+
+이 노트는 **검증 관점**이다. 면접관이 무엇으로 판별하는지, 어떤 증거를 내놓을지 중심이다.
+디버깅 도구 자체(JTAG/SWD 동작, HardFault 해석, 프로브 사용법)는 `J07`·`J14`·`C10 §1~§7`이 다룬다. 여기서는 **회로도와 협업**만 깊게 본다.
+
+---
+
+## 1. Hark에서 실제로 하게 될 일 (추정)
+
+[추정] context 2.7절 기준. Hark는 2026-09 현재 **1세대 기기 EVT 전후 단계**로 추정되고, FW·RF·전력·오디오·햅틱·열 공고가 동시에 열려 있다 [11]. 즉 **이 역할은 입사하자마자 bring-up 한복판에 들어간다.**
+
+| 시기 | 펌웨어가 하는 일 |
+|---|---|
+| 회로도 리뷰 (보드 제작 전) | 핀 배정 검토, 부팅 strap 핀 확인, 테스트 포인트 요청, 디버그 커넥터 확보, I2C 주소 충돌 확인, 전원 시퀀스 요구사항 전달 |
+| 첫 보드 도착 (proto/EVT) | 전원 인가 → 레일 확인 → 디버거 연결 → blink → 주변장치 하나씩 |
+| EVT 안정화 | 보드별 편차 추적, 실패 유닛 격리, 회로 변경(ECO) 반영 |
+| DVT/PVT | 수십~수백 대 규모에서의 통계적 문제, 온도·전압 코너, factory test 연계 (`J06`, `C09`) |
+
+**한 주의 모습** [추정]
+- 월: 새 EVT 리비전 5장 도착. 전원 레일부터 순서대로 재고, SWD가 붙는지 확인, `main` 진입 확인
+- 화: 햅틱 드라이버가 I2C에서 NACK. 회로도에서 그 센서의 전원 레일이 SoC GPIO로 제어되는 스위치 뒤에 있는 걸 발견 → 드라이버 초기화 순서 수정
+- 수: HW 엔지니어와 같은 벤치에서 스코프. 마이크 레일 램프가 PMIC enable보다 늦게 올라오는 걸 같이 확인
+- 목: "보드 3번만 실패" → 부품 편차인지 확인하기 위해 같은 펌웨어로 보드 교차 테스트, 결과를 표로 정리해 HW에 전달
+- 금: ECO 목록 리뷰 미팅. 펌웨어 쪽 요청(테스트 포인트 2개 추가, strap 핀 풀다운 값 변경)을 근거와 함께 제출
+
+> **Hark 기기 특성 때문에 더 중요해지는 것** [추정]: Cellular·Wi-Fi·BT·GNSS·NFC·UWB가 다 들어가는 웨어러블급 보드 [11]는 **전원 레일 수가 많고, 라디오마다 enable/reset 핀이 있고, coex 신호가 보드를 가로지른다.** 이런 보드에서 회로도를 못 읽는 펌웨어 엔지니어는 매번 EE를 불러야 한다.
+
+---
+
+## 2. 핵심 개념 — 펌웨어가 회로도에서 읽어야 하는 것
+
+### 2.1 회로도 문서의 구조
+
+회로도는 보통 여러 페이지고, 페이지마다 기능 블록이 하나다.
+
+```
+ p.1  Block diagram / Revision history / Notes
+ p.2  Power — 입력, PMIC, LDO, 스위치, 시퀀스 타이밍 노트
+ p.3  MCU / SoC core — 전원 핀, 디커플링, 클럭, 리셋, 부팅 strap
+ p.4  Memory (flash, PSRAM)
+ p.5  Sensors (I2C/SPI 버스)
+ p.6  Audio (마이크, 코덱, I2S)
+ p.7  Radio / antenna / coex
+ p.8  Connectors, USB-C, battery, charger
+ p.9  Debug — SWD/JTAG 커넥터, UART 콘솔, 테스트 포인트
+```
+
+**펌웨어가 가장 먼저 펴야 할 페이지는 p.2(전원)와 p.3(부팅)이다.** 대부분의 "안 켜짐"은 여기서 끝난다.
+
+### 2.2 읽어야 하는 8가지 (체크리스트로 외울 것)
+
+| # | 무엇 | 왜 펌웨어 문제인가 | 못 읽으면 생기는 일 |
+|---|---|---|---|
+| 1 | **Power tree** — 어느 레일이 어디서 나오고 무엇을 먹이나 | 드라이버 초기화 순서 = 레일이 살아 있는 순서 | 센서가 NACK. 원인은 코드가 아니라 레일이 아직 꺼져 있음 |
+| 2 | **Enable / reset 핀** — 어느 GPIO가 무엇을 켜나, 극성은 | 부팅 코드가 직접 토글해야 함 | "칩이 응답 안 함" — 사실 리셋에 잡혀 있음 |
+| 3 | **Pull-up / pull-down** — 값과 어느 레일에 물렸나 | I2C 속도·레벨, 부팅 strap의 논리값 | I2C가 400 kHz에서만 깨짐, 부팅 모드가 엉뚱함 |
+| 4 | **Level shifter** — 전압 도메인 경계 | 방향 제어 핀, 양방향 버스 지원 여부 | SPI는 되는데 I2C가 안 됨 (단방향 시프터를 썼다) |
+| 5 | **Strap / boot 핀** — 리셋 시점에 샘플링되는 핀 | 이 핀을 GPIO로 재사용하면 다음 부팅이 깨짐 | 펌웨어 올린 뒤 재부팅 불가 |
+| 6 | **Clock** — 크리스털/오실레이터, 주파수, 부하 커패시터 | 클럭 설정 코드가 실제 부품과 맞아야 함 | UART 보레이트 어긋남, BLE 연결 끊김(32.768 kHz) |
+| 7 | **Test point / debug** — SWD, UART 콘솔, TP 번호 | 측정 가능한 곳이 없으면 디버깅 불가 | bring-up 시간이 몇 배로 |
+| 8 | **Net 이름과 핀 번호** | HW와 대화할 때의 공용 언어 | "3번 핀"이라고 말하는데 서로 다른 커넥터를 봄 |
+
+### 2.3 기호와 표기 — 최소한 이건 즉시 읽는다
+
+```
+  ── 전원 ──────────────────────────────────────────────
+    VBAT ──[ PMIC ]── VDD_3V3 ─┬─ 3V3 rail (always-on)
+                               └─[ LOAD SW ]── VDD_SENS  (GPIO 제어)
+
+  ── 저항/커패시터 ─────────────────────────────────────
+    R12  4.7k        C7  100nF        L3  ferrite bead
+    (R = 저항, C = 커패시터, L = 인덕터, D = 다이오드, Q = 트랜지스터,
+     U = IC, J/P = 커넥터, TP = 테스트포인트, FB = ferrite bead)
+
+  ── 표기 ──────────────────────────────────────────────
+    DNP / NF / NL    : 미실장 (Do Not Populate)
+    NC               : 미연결 (No Connect)  ← 핀 NC와 부품 NC를 혼동 말 것
+    0R               : 0옴 점퍼 (옵션 분기, 전류 측정 지점으로도 쓰임)
+    /RESET, RESET_N, RESET#  : active-low (윗줄·N·# 모두 같은 뜻)
+    <2.3>            : 다른 페이지로 이어지는 net (페이지·좌표 참조)
+```
+
+**전기적 관례**
+- 기호에 작은 원(bubble)이 붙으면 active-low
+- 화살표 net 레이블은 신호가 페이지 밖으로 나감을 의미
+- 같은 이름의 net은 **떨어져 있어도 연결되어 있다** — 회로도에서 선을 따라가려다 실패하는 가장 흔한 이유
+- 디커플링 커패시터는 각 전원 핀 근처에 있고, 값보다 **개수와 배치**가 중요하다(레이아웃 영역)
+
+### 2.4 Power tree — 펌웨어 관점의 유일한 정답 질문
+
+회로도에서 펌웨어가 묻는 질문은 하나다: **"내가 이 칩에 말을 걸려면 무엇이 먼저 켜져 있어야 하나?"**
+
+```
+  VBAT (3.0~4.35V)
+    │
+    ├─[ PMIC U2 ]
+    │     ├── BUCK1 ──> VDD_CORE  0.8V   (SoC core, 항상 on)
+    │     ├── BUCK2 ──> VDD_1V8   1.8V   (I/O, 센서 버스)
+    │     ├── LDO1  ──> VDD_3V3   3.3V   (플래시, 외부 커넥터)
+    │     └── LDO2  ──> VDD_AUD   1.8V   (코덱, EN = GPIO_AUD_EN)
+    │
+    └─[ LOAD SW U7 ]── VDD_SENS  1.8V   (EN = GPIO_SENS_EN, active-high)
+                          └── IMU U11, 기압계 U12   ← I2C0 에 물림
+```
+
+이 그림에서 나오는 펌웨어 결론:
+- `GPIO_SENS_EN`을 올리고 **레귤레이터 상승 시간 + 칩 부팅 시간**을 기다린 뒤에야 I2C0에서 IMU를 읽을 수 있다
+- `VDD_SENS`가 꺼진 상태에서 I2C 풀업이 `VDD_1V8`에 물려 있다면, **꺼진 칩의 ESD 다이오드를 통해 역전류가 흐른다**(back-powering) → 슬립 전류 이상의 고전적 원인
+- 오디오 코덱은 `GPIO_AUD_EN` 이후에만 I2C 설정이 가능하다
+- 전원이 꺼진 칩의 인터페이스 핀을 펌웨어가 하이로 두면 안 된다 → 슬립 전 GPIO를 입력/로우로 정리
+
+**면접에서 쓸 한 문장**: "회로도에서 내가 제일 먼저 하는 일은 power tree를 그려서 드라이버 초기화 순서를 거기에 맞추는 것이다. 내가 만난 bring-up 실패의 상당수는 코드가 아니라 순서 문제였다."
+
+### 2.5 Pull-up 값 — 숫자로 답할 수 있어야 한다
+
+I2C는 open-drain이라 풀업이 필수고, 값이 곧 속도 한계다.
+
+```
+  상승 시간 ≈ 0.8473 × R × C_bus          (10%→90%, RC 1차)
+
+  I2C 규격 최대 상승 시간 (NXP UM10204)
+    Standard-mode  (100 kHz) : 1000 ns
+    Fast-mode      (400 kHz) :  300 ns
+    Fast-mode Plus (1 MHz)   :  120 ns
+```
+
+예: 버스 커패시턴스 100 pF(전형적인 소형 보드), 풀업 4.7 kΩ
+`0.8473 × 4700 × 100e-12 ≈ 398 ns` → **400 kHz에서 규격 위반**. 2.2 kΩ로 내리면 약 186 ns로 통과.
+
+반대 방향의 한계: 풀다운 시 싱크 전류가 3 mA를 넘지 않아야 한다.
+`V / R = 1.8 / 2200 ≈ 0.82 mA` → 여유 있음. 1.8 V에서 470 Ω까지 내려도 3.8 mA로 초과.
+
+**면접 포인트**: "400 kHz로 올렸더니 깨진다"에 대해 **풀업 값과 상승 시간을 계산으로** 답할 수 있으면 회로도 리터러시가 즉시 증명된다. 상세는 `C10 §8.3`.
+
+### 2.6 Level shifter — 가장 흔한 함정
+
+| 유형 | 특징 | 함정 |
+|---|---|---|
+| 저항 분압 | 싸다. 하이→로우만 | 속도 제한. 상승이 느려 SPI에서 실패 |
+| 단방향 버퍼 IC | 방향이 고정 | **I2C에 쓰면 안 된다**(양방향 필요) |
+| 양방향 FET 스위치 (전형적 I2C 레벨 시프터) | 양쪽에 풀업 필요 | 양쪽 풀업이 병렬로 작용 → 실효 저항이 낮아짐. 커패시턴스도 합산 |
+| 오토디렉션 트랜시버 | 방향 자동 감지 | 약한 드라이브·낮은 속도에서 오동작 가능. 데이터시트 조건 확인 |
+| 레벨 트랜슬레이터 + DIR 핀 | 확실함 | **DIR 핀을 펌웨어가 제어해야 한다** — 회로도에서 이걸 놓치면 통신이 한 방향만 됨 |
+
+**펌웨어가 반드시 확인할 것**: 시프터에 **OE(output enable)나 DIR 핀이 GPIO에 물려 있는가.** 물려 있다면 부팅 시 초기화 코드가 필요하고, 슬립 진입/복귀 때도 다뤄야 한다.
+
+### 2.7 Strap / boot 핀 — 한 번 실수하면 보드를 못 켠다
+
+많은 SoC/MCU가 리셋 해제 시점의 특정 핀 레벨로 부팅 소스·모드를 정한다. 이 핀들은 보통 회로도에 **풀업/풀다운 저항 + "BOOT"·"STRAP" 주석**으로 나타난다.
+
+```
+   U1 SoC
+   ┌──────────────┐
+   │ BOOT_SEL0 ●──┼── R21 10k ── GND     (풀다운 = 0)
+   │ BOOT_SEL1 ●──┼── R22 10k ── VDD_1V8 (풀업   = 1)
+   │                     ↑ 리셋 해제 순간에만 샘플링됨
+   │ BOOT_SEL1 은 부팅 후 GPIO_LED 로 재사용            ← 위험 구간
+   └──────────────┘
+```
+
+펌웨어가 저지르는 고전적 사고: 부팅 후 그 핀을 출력으로 바꿔 LED를 구동 → **다음 리셋 때 LED 회로가 핀을 끌어내려 부팅 모드가 바뀜.** 증상은 "펌웨어를 한 번 올리면 그다음부터 안 켜진다"이고, 코드만 보면 절대 안 나온다.
+
+> **벤더 의존**: strap 핀의 개수·이름·샘플링 시점은 칩마다 다르다. ESP32 계열은 strapping pin, ST/NXP는 BOOT0/BOOT1, Qualcomm/Ambiq은 각자 문서를 따른다. **회로도만으로 판단하지 말고 데이터시트의 strap 표를 같이 펴는 게 정답**이다.
+
+### 2.8 Test point와 디버그 커넥터 — 회로도 리뷰에서 펌웨어가 요구할 것
+
+bring-up 속도는 **측정할 수 있는 지점의 수**에 비례한다. 회로도 리뷰에서 펌웨어가 요청해야 할 목록:
+
+- [ ] SWD/JTAG 커넥터 (SWDIO, SWCLK, nRESET, GND, VTref) — Arm 10핀 커넥터가 표준적, `C10 §1.2`
+- [ ] UART 콘솔 TX/RX + GND (가능하면 헤더로)
+- [ ] 각 전원 레일마다 TP 하나
+- [ ] 각 레일의 전류를 재기 위한 0Ω 점퍼 또는 sense 저항
+- [ ] 라디오 enable/reset 핀 TP
+- [ ] I2C SCL/SDA, SPI 4선 TP (LA 클립을 물릴 수 있게)
+- [ ] coex 신호 TP (2.4 GHz 라디오가 여러 개면 필수)
+- [ ] 펌웨어 계측용 여유 GPIO 2~4개 (인터럽트 지연·태스크 타이밍을 스코프로 재는 용도)
+- [ ] 접지 클립 자리 (짧은 그라운드 스프링을 걸 수 있는 넓은 GND)
+
+> **마지막 항목이 의외로 결정적이다.** 여유 GPIO 2개를 토글해서 LA로 보면, ISR 지연·태스크 스케줄링·DMA 완료 시점을 코드 수정 없이 눈으로 볼 수 있다(`C10 §6.3`).
+
+---
+
+## 3. 실무 패턴과 함정
+
+### 3.1 워크드 예제 — "이 회로도 조각을 보고 뭘 확인하겠나"
+
+면접에서 실제로 이런 문제가 나온다. 아래 조각을 놓고 답을 만들어 본다.
+
+```
+                          VDD_1V8                         VDD_3V3
+                             │                               │
+              ┌──────────────┼───────────┐        ┌──────────┼──────────┐
+              │              │           │        │          │          │
+             R31            R32         │        R41        R42         │
+             2.2k           2.2k        │        10k        10k         │
+              │              │           │        │          │          │
+   U1 MCU     │              │      ┌────┴────────┴──┐       │          │
+  ┌────────┐  │              │      │  U5  LEVEL SHIFT│       │          │
+  │ I2C1_SCL├──┴──────────────┼──────┤ A1          B1 ├───────┴──── SCL_3V3 ──┐
+  │ I2C1_SDA├─────────────────┴──────┤ A2          B2 ├────────────  SDA_3V3 ──┤
+  │         │                        │ OE            │                        │
+  │ GPIO_07 ├────────────────────────┤ (active-high) │                        │
+  │         │                        └───────────────┘                        │
+  │ GPIO_11 ├───────── R51 100k ───── GND        ┌───────────────┐            │
+  │  (BOOT_SEL / 부팅 후 STATUS_LED)             │ U9  SENSOR    │            │
+  │         │                                    │  VDD ●────────┼── VDD_SENS │
+  │ GPIO_12 ├─────────────────────────────────── │  SCL ●────────┼────────────┘
+  │         │                          (EN)      │  SDA ●────────┼─────────────
+  │ IRQ_IN  ├───────────────────────────┐        │  INT ●────────┼──┐
+  └────────┘                            │        │  ADDR●───┬────┼──┘
+                                        │        └──────────┼───┘
+                            ┌───────────┴──┐                │
+                            │ U7 LOAD SW   │               GND   (ADDR = 0)
+                  VDD_3V3 ──┤ IN      OUT  ├── VDD_SENS
+                            │ EN           │
+                            └──────────────┘
+                                  TP14 ● (VDD_SENS)
+```
+
+**내가 확인하는 것 — 순서대로**
+
+| # | 확인 | 이유 | 실패 시 증상 |
+|---|---|---|---|
+| 1 | `VDD_SENS`는 `GPIO_12`가 제어하는 load switch 뒤에 있다 | 센서에 말 걸기 전에 `GPIO_12`를 어서트하고 램프+부팅 시간을 기다려야 한다 | I2C NACK. "센서가 죽었다"고 오진 |
+| 2 | load switch EN의 **극성** | active-high인지 회로도 주석/데이터시트로 확인 | 핀을 반대로 몰아 전원이 영원히 꺼짐 |
+| 3 | 레벨 시프터 `U5`의 **OE가 `GPIO_07`**에 물려 있다 | 부팅 시 OE를 어서트하지 않으면 버스가 통째로 끊김 | SCL/SDA가 하이인데 아무도 응답 안 함 |
+| 4 | OE를 언제 올리나 | 양쪽 레일이 다 살아난 뒤에 올려야 한다. 순서가 틀리면 back-powering | 슬립 전류 이상, 또는 시프터 손상 |
+| 5 | **양쪽 풀업이 다 있다** (R31/R32 = 2.2k @1.8V, R41/R42 = 10k @3.3V) | FET형 I2C 시프터는 양쪽 풀업이 필요하지만, 실효 RC는 두 쪽을 합쳐 본다 | 속도 올리면 상승 시간 위반 |
+| 6 | 상승 시간 계산 | 3.3V 쪽 10k는 느리다. 100 pF 가정 시 `0.8473 × 10k × 100p ≈ 847 ns` → **400 kHz 불가, 100 kHz만 가능** | Fast-mode에서 간헐적 실패 → HW에 저항 변경 요청 근거 |
+| 7 | `VDD_SENS`가 꺼졌을 때 SCL/SDA가 3.3V로 풀업되어 있다 | 꺼진 센서 핀으로 역전류 유입 가능 | standby 전류 초과 |
+| 8 | 센서 `ADDR` 핀이 GND → 주소는 데이터시트의 **base 주소** | 같은 버스에 같은 부품이 하나 더 있으면 충돌 | 둘 중 하나만 보이거나 둘 다 이상 |
+| 9 | `INT` 핀 → `IRQ_IN`. **풀업이 회로도에 안 보인다** | 센서 INT가 open-drain이면 외부 풀업 또는 MCU 내부 풀업이 필요 | 인터럽트가 안 뜨거나 부유 상태로 폭주 |
+| 10 | `GPIO_11`이 **BOOT_SEL 겸 STATUS_LED** | 부팅 후 이 핀을 출력으로 쓰면 다음 리셋의 부팅 모드가 바뀔 수 있다 | "한 번 켜지고 다시는 안 켜짐" |
+| 11 | `R51 100k` 풀다운이 약하다 | LED 회로나 누설이 붙으면 strap 레벨이 흔들린다 | 간헐적 부팅 실패, 온도 의존 |
+| 12 | `TP14`가 `VDD_SENS`에 있다 | 측정 가능. 다른 레일에도 TP를 요청해야 함 | 측정 지점이 없으면 추측만 남음 |
+
+**이 조각에서 내가 HW에 보낼 요청 3개** (면접에서 이걸 말하면 "같이 일할 수 있는 사람"이 된다)
+1. `SCL_3V3`/`SDA_3V3` 풀업을 10 kΩ → 2.2 kΩ로 (400 kHz 목표 시 상승 시간 근거 첨부)
+2. 센서 `INT` 라인에 풀업 저항 추가 또는 "MCU 내부 풀업 사용" 명시를 회로도 주석에
+3. `GPIO_11`을 LED로 재사용하지 말고 다른 핀으로 옮기거나, 최소한 strap 샘플링에 영향 없는 버퍼를 넣기
+
+**말로 답하는 30초 버전**
+> First, this sensor isn't on a permanent rail — it's behind a load switch driven by GPIO_12, so my driver has to enable it and wait for the rail plus the sensor's own boot time before the first transaction. Second, the level shifter's output enable is on GPIO_07, so if I don't drive that the whole bus looks dead. Third, the 3.3 volt side pull-ups are 10k, which with a hundred picofarads of bus capacitance gives me roughly 850 nanoseconds of rise time — that's fine at 100 kilohertz but violates fast mode, so if we want 400 kilohertz I'd ask for 2.2k. And GPIO_11 is both a boot strap and the status LED, which is the kind of dual use that makes a board stop booting after you first flash it.
+
+### 3.2 Bring-up 순서 — 암송할 것
+
+면접에서 "새 보드를 받았다. 무엇부터 하나?"는 거의 확정적으로 나온다. **순서가 있다는 사실 자체가 답**이다.
+
+```
+ [0] 전원 인가 전
+     회로도로 power tree 그리기 / strap 핀 표 만들기 / 디버그 핀 확인
+     보드 육안 검사 (실장 누락, 틀어진 부품, 커넥터 방향)
+     전원 입력 저항 측정 — VBAT–GND 단락 여부 (여기서 걸러야 연기가 안 난다)
+
+ [1] 첫 전원 — 전류 제한 전원공급기로
+     전류 제한을 예상 소비의 2배 정도로 걸고 천천히 올린다
+     각 레일을 DMM으로 순서대로 측정 (기대 전압 ±?%)
+     레일 시퀀스는 스코프로 (다채널, 트리거는 enable 신호에)
+     열화상 또는 손등으로 발열 부품 확인
+
+ [2] 클럭과 리셋
+     메인 크리스털/오실레이터 파형 (프로브 용량이 발진을 죽일 수 있으니 주의)
+     32.768 kHz 슬립 클럭 (있다면)
+     RESET_N 이 해제되는지, 레벨이 맞는지
+
+ [3] 디버그 연결
+     SWD/JTAG 프로브 연결 → IDCODE 읽기 성공?
+     실패하면: VTref, GND, SWCLK 배선, strap(디버그 비활성 모드), 리셋 유지 여부
+     RAM에서 돌아가는 최소 코드 실행 → GPIO 토글(blink)
+
+ [4] 부팅 경로
+     플래시 접근 확인 → 링커 스크립트·메모리 맵 검증
+     reset → startup → main 도달. UART 또는 RTT로 첫 로그
+
+ [5] 주변장치 하나씩 — 절대 한꺼번에 켜지 않는다
+     클럭/전원 enable → 레지스터 ID 읽기(WHO_AM_I) → 단일 트랜잭션 → 인터럽트 → DMA
+     각 단계에서 LA로 실제 파형 확인 (코드가 "성공"이라 해도 파형을 본다)
+
+ [6] 시스템 수준
+     전 주변장치 동시 동작, 전류 프로파일, 온도 코너, 장시간 스트레스
+     그리고 이 시점에 factory test 훅을 심기 시작 (C09 / J06)
+```
+
+각 단계의 상세와 실패 패턴 표는 `C10 §9`, `C10 §10`.
+
+### 3.3 "HW냐 FW냐"를 증명하는 절차
+
+bring-up의 절반은 **책임 소재를 빠르게 가르는 일**이다. 여기서 추측으로 싸우면 며칠이 날아간다.
+
+| 기법 | 무엇을 증명하나 |
+|---|---|
+| **보드 교차(swap)** | 같은 펌웨어 + 다른 보드에서 재현되나? → 유닛 특정이면 HW/부품 편차 |
+| **펌웨어 교차** | 같은 보드 + 알려진 좋은 이미지(이전 리비전) → 회귀면 FW |
+| **파형 우선** | 코드가 "성공"이라 해도 SCL/SDA, CS, CLK를 LA로 본다. 파형이 정상인데 응답이 없으면 상대 칩 쪽 |
+| **바이섹션** | 신호를 출발점 → 시프터 전/후 → 커넥터 → 도착점 순으로 측정. 문제가 사라지는 지점이 원인 |
+| **수동 구동** | 펌웨어 대신 디버거로 레지스터를 직접 써서 GPIO 토글. 여전히 안 나오면 HW |
+| **전원 격리** | 해당 레일을 외부 전원으로 직접 공급 → 정상이면 레귤레이터/시퀀스 문제 |
+| **코너 스윕** | 전압·온도를 흔들어 본다. 마진 문제면 코너에서만 나타난다 (Don의 shmoo 경험과 같은 기법) |
+| **통계** | n대 중 몇 대인가. 1/30과 28/30은 완전히 다른 조사 방향 |
+
+**절대 하지 말 것**: "제 코드는 맞습니다"로 시작하기. **"제 쪽에서 이걸 배제했습니다"**로 시작한다.
+
+### 3.4 하드웨어 버그를 리포트하는 법
+
+HW 엔지니어가 펌웨어 엔지니어에게 가장 자주 하는 불평은 "증상만 알려 주고 사라진다"이다. 좋은 리포트의 구조:
+
+```
+ [제목]  EVT2 보드 #3,#7 에서 VDD_SENS 램프가 EN 이후 12 ms 지연 (기대 1 ms)
+
+ 1. 증상       IMU WHO_AM_I 읽기가 부팅 직후 NACK. 100 ms 지연을 넣으면 정상.
+ 2. 범위       EVT2 10장 중 2장. EVT1 에서는 재현 안 됨. 온도 무관.
+ 3. 배제한 것  - 같은 펌웨어로 정상 보드에서 통과 (FW 회귀 아님)
+               - I2C 주소/풀업 동일 (회로도 동일)
+               - 디버거로 수동 레지스터 write 해도 동일 → 코드 경로 아님
+ 4. 측정       스코프 CH1=GPIO_SENS_EN, CH2=VDD_SENS(TP14), 트리거 CH1 rising.
+               정상 보드 1.1 ms, #3 보드 12.4 ms. 캡처 첨부 2장.
+ 5. 가설       load switch U7 의 soft-start 커패시터 값 편차 또는 부품 로트 차이
+ 6. 요청       U7 주변 부품(C41) 실측 / 벤더 로트 확인
+ 7. 임시 우회  펌웨어에서 EN 이후 20 ms 대기 + 재시도 3회.
+               (단, standby 진입/복귀 지연이 늘어나므로 영구 해법은 아님)
+ 8. 영향       MP에서 yield 리스크. DVT 전에 결론 필요.
+```
+
+**이 구조가 좋은 이유**
+- 3번(배제한 것)이 있어서 EE가 "코드 문제 아니냐"로 되묻지 않는다
+- 4번에 **측정 설정과 실측치**가 있어서 재현 가능하다
+- 7번이 있어서 **다른 사람들이 막히지 않고 계속 일한다** — 이게 팀에서 신뢰를 만든다
+- 8번이 있어서 우선순위 판단이 가능하다
+
+### 3.5 HW 엔지니어가 펌웨어에게 실제로 원하는 것
+
+| 원하는 것 | 왜 | 펌웨어가 할 일 |
+|---|---|---|
+| 예측 가능한 테스트 이미지 | 자기 측정 중에 펌웨어가 변하면 비교가 안 됨 | 버전 찍힌 "bring-up 이미지"를 고정해서 공유 |
+| 신호를 원할 때 내보내는 모드 | 스코프로 보려면 반복 파형이 필요 | 테스트 명령으로 I2C 루프, SPI 루프, PWM 고정 출력 제공 |
+| GPIO를 마음대로 토글하는 수단 | 회로 검증에 필수 | UART 셸에 `gpio set/get`, `i2c scan`, `reg read/write` |
+| 정확한 타이밍 정보 | "가끔"은 정보가 아니다 | 타임스탬프 로그, GPIO 계측 핀 |
+| 자기 회로 변경이 반영됐는지 확인 | ECO 후 검증 | 보드 리비전을 펌웨어가 읽어 로그에 찍기 (ID 저항/GPIO strap) |
+| 나쁜 소식을 일찍 | 늦게 알면 보드를 다시 찍어야 함 | 회로도 리뷰 때 요구사항을 문서로 남기기 |
+
+> **가장 값비싼 한 가지**: 위 3~4개를 담은 **bring-up 셸**(UART 명령으로 GPIO/I2C/SPI/레일 상태를 조작·조회)을 보드 도착 전에 미리 만들어 두는 것. 이걸 먼저 준비해 오는 펌웨어 엔지니어는 HW 팀에서 즉시 신뢰를 얻는다. 그리고 이 셸은 나중에 **factory test 펌웨어의 뼈대**가 된다(`J06`, `C09`).
+
+### 3.6 흔한 함정 표
+
+| 함정 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| 전원 순서 무시 | 센서 NACK, 간헐적 | 레일이 아직 안 올라옴 | power tree 기반 초기화 순서 + 램프 대기 |
+| 레벨 시프터 OE 미설정 | 버스 전체 무응답 | OE가 GPIO에 물려 있음 | 부팅 시 OE 어서트, 슬립 시 처리 정의 |
+| 풀업 값 부적합 | 속도 올릴 때만 실패 | 상승 시간 위반 | 계산으로 근거 만들어 ECO 요청 |
+| strap 핀 재사용 | 재플래시 후 부팅 불가 | 리셋 시 샘플링 레벨 변화 | 핀 재배치, 또는 부팅 후에만 출력 전환 + 리셋 전 복원 |
+| 미설정 GPIO 부유 | 슬립 전류 증가, 잡음 | 입력이 중간 전압에서 떠 있음 | 미사용 핀을 입력+풀다운 또는 출력 로우로 |
+| 꺼진 칩 back-powering | standby 전류 초과, 칩이 "반쯤" 살아 있음 | 인터페이스 핀으로 전류 유입 | 전원 off 전에 해당 핀을 로우/입력으로, 또는 시프터 OE로 격리 |
+| 프로브 용량으로 발진 정지 | 크리스털을 재니 클럭이 죽음 | 1x 프로브의 큰 용량 | 10x 이상 프로브, 또는 버퍼된 클럭 출력 지점에서 측정 |
+| 긴 접지 리드 | 링잉·글리치가 보임(실재하지 않음) | 접지 루프 인덕턴스 | 짧은 그라운드 스프링 사용 (`C10 §7.2`) |
+| 보드 리비전 혼동 | "어제 되던 게 안 됨" | EVT1/EVT2 섞임 | 보드에 라벨 + 펌웨어가 리비전 읽어 로깅 |
+| 단일 보드 결론 | 잘못된 수정 후 재발 | 표본 1 | 최소 3장 이상, 통계로 말하기 |
+| 회로도 버전 불일치 | 핀이 안 맞음 | 최신 회로도가 아님 | PDF 리비전/날짜를 항상 확인하고 대화에 명시 |
+
+---
+
+## 4. 리서치 — 근거 자료
+
+| 자료 | 무엇을 담고 있나 | 어디를 읽어야 하나 | URL |
+|---|---|---|---|
+| NXP UM10204 — I2C-bus specification | I2C의 규범. 상승 시간, 전기적 한계, 풀업 계산 | §7 전기 사양(rise time 표), 풀업 저항 절 | https://www.nxp.com/docs/en/user-guide/UM10204.pdf |
+| NXP AN10441 — Level shifting techniques in I2C-bus design | FET 기반 양방향 레벨 시프터의 원리와 조건 | 전체 (짧다) | https://www.nxp.com/search?q=AN10441 |
+| TI — Voltage Level Translation | 시프터 유형 선택 가이드, 방향 제어 | 유형별 비교 | https://www.ti.com/logic-circuit/voltage-level-translation/overview.html |
+| Arm Debug Interface Architecture Specification (ADIv5/v6, IHI0031) | SWD/JTAG 트랜잭션, DP/AP, IDCODE | DP 레지스터, 연결 시퀀스 | https://developer.arm.com/documentation/ihi0031/latest/ |
+| IEEE 1149.1 (JTAG) | boundary scan 규범 | TAP 상태 머신 | https://standards.ieee.org/ieee/1149.1/4484/ |
+| Nordic nRF52840 DK | **실제 공개 회로도·PCB 파일** — 연습 교재로 최고 | 하드웨어 파일 다운로드 → 전원·디버그 페이지 | https://www.nordicsemi.com/Products/Development-hardware/nRF52840-DK |
+| Nordic 개발자 문서 | 하드웨어 설계 가이드, 전원/클럭 요구사항 | nRF52/nRF53 hardware design | https://docs.nordicsemi.com/ |
+| Raspberry Pi 문서 | 공개 회로도 + 전원 설계 노트 (읽기 연습용) | Hardware → schematics | https://www.raspberrypi.com/documentation/ |
+| BeagleBoard | 오픈 하드웨어 회로도·BOM 세트 | 보드별 hardware 문서 | https://www.beagleboard.org/ |
+| KiCad | 무료 EDA. 회로도를 직접 열어 보고 그려 보기 | 회로도 편집기 튜토리얼 | https://www.kicad.org/ |
+| OpenOCD | 오픈소스 디버그 서버 — bring-up 시 IDCODE 확인 | 설정 파일, `targets`/`dap` 명령 | https://openocd.org/ |
+| SEGGER J-Link | 프로브, RTT, 커넥터 핀아웃 | J-Link 문서의 커넥터 핀아웃 절 | https://www.segger.com/products/debug-probes/j-link/ |
+| sigrok / PulseView | 오픈소스 로직 분석기 소프트웨어, 프로토콜 디코더 | 디코더 목록(I2C/SPI/UART) | https://sigrok.org/wiki/PulseView |
+| Saleae | 상용 LA + 디코더. bring-up 표준 장비 | 프로토콜 분석 문서 | https://www.saleae.com/ |
+| IPC | 설계·제조 표준 단체(IPC-2221 등 설계 표준) | 표준 목록 | https://www.ipc.org/ |
+| USB-IF 문서 | USB-C/PD 규격 (충전·CC 핀 이해용) | Type-C 규격 | https://www.usb.org/documents |
+| Espressif 기술 문서 | strapping pin이 명시된 대표 데이터시트 (개념 학습용) | ESP32 datasheet의 strapping pins 절 | https://www.espressif.com/en/support/documents/technical-documents |
+| ST 마이크로컨트롤러 문서 | BOOT0/BOOT1 부팅 모드 표, 레퍼런스 매뉴얼 | Boot configuration 절 | https://www.st.com/en/microcontrollers-microprocessors.html |
+
+**버전·벤더 의존 표시**
+- **strap/boot 핀의 이름·개수·샘플링 시점은 전적으로 칩 의존**이다. ESP32의 strapping pin, ST의 BOOT0, Qualcomm/Ambiq의 자체 방식이 모두 다르다. 반드시 그 칩의 데이터시트를 확인해야 한다.
+- I2C 풀업 계산의 상승 시간 한계는 UM10204 개정판마다 표가 정리돼 있으나 값 자체(1000/300/120 ns)는 안정적이다.
+- Arm 디버그 커넥터 핀아웃은 10핀 0.05인치 Cortex Debug 커넥터가 사실상 표준이지만, 보드마다 커스텀 헤더를 쓰는 경우가 흔하다 — **회로도 p.9를 반드시 확인**.
+- 레벨 시프터 IC의 최대 속도·드라이브 조건은 부품마다 다르다. 데이터시트의 조건(풀업 값, 용량)을 그대로 만족해야 한다.
+
+---
+
+## 5. 예상 면접 질문
+
+| # | 난이도 | 주제 |
+|---|---|---|
+| Q01~Q03 | 기초 | 회로도에서 무엇을 보나, 기호, power tree |
+| Q04~Q06 | 중급 | 풀업 계산, 레벨 시프터, strap 핀 |
+| Q07~Q09 | 중급 | bring-up 순서, 디버거가 안 붙을 때, 주변장치 순서 |
+| Q10~Q12 | 심화 | HW vs FW 증명, 일부 유닛만 실패, 회로도 리뷰 참여 |
+| Q13~Q15 | 협업·행동 | HW 엔지니어와의 충돌, 리포트, 사전 준비 |
+
+### Q01. You get a schematic PDF for a new board. What do you look at first?
+
+**왜 묻나**: 회로도를 "읽는 순서"가 있는지. 이게 있으면 경험자다.
+**30초 답변**: power tree부터 본다. 어떤 레일이 어디서 나오고, 무엇이 그 레일에 물려 있고, 어느 레일이 GPIO로 제어되는지. 그다음 MCU 페이지에서 부팅 strap 핀, 클럭, 리셋을 확인한다. 세 번째로 디버그 페이지 — SWD 커넥터와 UART가 있는지. 그러고 나서 내가 드라이버를 써야 할 버스들(I2C 주소, 풀업 값, 레벨 시프터, 인터럽트 핀)을 본다.
+**English answer**: The power tree first — which rails exist, what generates them, what's on each one, and which rails are switched by a GPIO, because that directly determines my driver initialization order. Then the processor page: boot straps, clock sources, reset. Third, the debug page, to confirm I actually have SWD and a console UART and where the test points are. Only after that do I go look at the peripheral buses — addresses, pull-up values, any level shifters, and where the interrupt lines land. I usually redraw the power tree on one page for myself, because that sheet is what I'll come back to every time something doesn't respond.
+**꼬리질문**
+- "왜 power tree를 다시 그리나?" → 회로도는 여러 페이지에 흩어져 있어 한눈에 순서가 안 보인다. 한 장으로 만들면 초기화 순서가 바로 나온다.
+- "회로도 리비전 관리는?" → PDF의 리비전/날짜를 항상 확인하고, 문제 보고할 때 어느 리비전을 봤는지 명시한다.
+
+### Q02. What does DNP mean, and why would firmware care?
+
+**왜 묻나**: 회로도 관례를 실제로 접해 봤는지 가르는 값싼 질문.
+**30초 답변**: Do Not Populate — 회로도엔 있지만 실장하지 않는 부품이다. 펌웨어가 신경 써야 하는 이유는, 그 자리가 보통 옵션 분기이기 때문이다. 풀업이 DNP면 내부 풀업을 켜야 하고, 0Ω 점퍼가 DNP면 그 경로가 끊겨 있다. 그리고 리비전마다 DNP 목록이 달라지므로, 보드 리비전을 펌웨어가 읽어 로그에 남기는 게 좋다.
+**English answer**: Do Not Populate — the part is drawn but not fitted on that build. It matters to firmware because those positions are usually options. If a pull-up is DNP, I need to enable the internal pull-up or the line floats. If a zero-ohm link is DNP, a path I assumed exists is actually open. And because the DNP list changes between revisions, I make the firmware read a board revision strap and log it, so a bug report always says which build it came from.
+**꼬리질문**
+- "0Ω 저항은 왜 쓰나?" → 옵션 분기, 나중에 잘라서 전류를 재는 지점, 레이아웃상 점퍼.
+- "NC의 두 가지 뜻?" → 부품 자리에서는 Not Connected, 핀 설명에서는 No Connect(연결하지 말 것). 후자를 GND에 묶으면 고장 난다.
+
+### Q03. Explain how a power tree affects your driver code.
+
+**왜 묻나**: 회로도 지식이 코드로 이어지는지.
+**30초 답변**: 초기화 순서가 곧 레일 순서다. 스위치드 레일 뒤에 있는 칩은 enable → 레귤레이터 램프 대기 → 칩 자체 부팅 시간 대기 → 그다음에야 첫 트랜잭션. 반대로 슬립 진입 때는 역순이고, 전원을 끄기 전에 그 칩으로 가는 신호선을 로우나 입력으로 만들어야 back-powering을 막는다. 그리고 레일마다 who-owns-it을 정해 둬야 여러 드라이버가 같은 레일을 껐다 켰다 하지 않는다.
+**English answer**: The rail order becomes my init order. A chip behind a load switch means: assert enable, wait for the regulator ramp, wait for that chip's own boot time, then talk to it — and if I skip the waits I get intermittent NACKs that look like a bus problem. On the way down it's the reverse, and before I cut a rail I drive its interface lines low or to input, otherwise current leaks in through the ESD diodes and the chip stays half alive, which also blows the standby current budget. In a real product I put rails behind a small reference-counted power manager so two drivers sharing a rail don't fight over it.
+**꼬리질문**
+- "램프 대기 시간을 어떻게 정하나?" → 레귤레이터 데이터시트의 soft-start + 실측(스코프)으로 확인하고 마진을 둔다. 하드코딩된 딜레이보다 재시도 + 상한이 안전하다.
+- "back-powering 증상?" → standby 전류 초과, 전원 껐는데 칩이 부분 동작, LED가 희미하게 켜짐.
+
+### Q04. The I2C bus is fine at 100 kHz but fails at 400 kHz. What's your first suspicion?
+
+**왜 묻나**: 계산으로 답할 수 있는지. **이 질문 하나로 회로도 리터러시가 판별된다.**
+**30초 답변**: 상승 시간이다. I2C는 open-drain이라 상승은 풀업 저항과 버스 커패시턴스의 RC로 결정된다. Fast-mode 한계는 300 ns인데, 예를 들어 10 kΩ 풀업에 100 pF면 `0.8473 × 10k × 100p ≈ 850 ns`로 크게 넘는다. 확인은 스코프로 SCL 상승 파형을 보는 것이고, 해결은 풀업을 낮추는 것 — 단 싱크 전류가 3 mA를 넘지 않는 선에서. 버스가 길거나 장치가 많으면 커패시턴스를 줄이거나 버스 버퍼를 쓴다.
+**English answer**: Rise time. I2C only pulls low actively; the rise is an RC from the pull-ups and the bus capacitance. Fast mode allows 300 nanoseconds, and a 10k pull-up with about a hundred picofarads gives you roughly 850, so it works at 100 kilohertz and fails at 400. I'd confirm it on a scope by looking at the SCL edge rather than guessing, then ask for smaller pull-ups — keeping the sink current under the 3 milliamp limit, which at 1.8 volts means I can go down to around 600 ohms but 2.2k is the usual choice. If the capacitance itself is the problem, because the bus is long or has many devices, the fix is a bus buffer instead.
+**꼬리질문**
+- "레벨 시프터가 있으면?" → 양쪽 풀업이 병렬로 작용하고 커패시턴스도 합산된다. 양쪽을 같이 계산해야 한다.
+- "파형이 삼각형처럼 보이면?" → 풀업이 너무 약하거나 용량이 너무 크다. 전형적인 RC 부족 파형.
+
+### Q05. There's a level shifter between the MCU and a sensor. What can go wrong?
+
+**왜 묻나**: 전압 도메인 경계를 실제로 다뤄 봤는지.
+**30초 답변**: 세 가지다. 첫째, 방향 — 단방향 버퍼를 I2C에 쓰면 애초에 동작하지 않고, DIR 핀이 있으면 펌웨어가 제어해야 한다. 둘째, OE(output enable)가 GPIO에 물려 있으면 부팅 시 반드시 어서트해야 하고, 안 하면 버스 전체가 무응답이다. 셋째, FET형 양방향 시프터는 양쪽에 풀업이 필요하고, 그 둘이 실효 RC를 함께 만들기 때문에 속도 계산을 양쪽으로 해야 한다. 여기에 시퀀스 문제까지 — 한쪽 레일만 살아 있으면 역전류가 흐른다.
+**English answer**: Direction, enable, and pull-ups. A unidirectional buffer simply can't work on I2C, and if the part has a direction pin then firmware owns it. If the output enable is tied to a GPIO, I have to assert it during init or the whole bus looks dead, which is a very confusing first symptom. For the common FET-based bidirectional translator, both sides need their own pull-ups, and the two sides together set the effective rise time, so I compute it on both domains rather than just the MCU side. And the rails have to come up in a sane order — with only one side powered you get current flowing backwards through the part.
+**꼬리질문**
+- "SPI는 되는데 I2C만 안 된다면?" → 단방향 시프터를 썼을 가능성이 높다. SPI는 각 선이 단방향이라 통과한다.
+
+### Q06. What are strapping or boot pins, and what's the firmware hazard?
+
+**왜 묻나**: "펌웨어를 한 번 올린 뒤 보드가 안 켜지는" 고전적 사고를 아는지.
+**30초 답변**: 리셋 해제 시점에 샘플링되어 부팅 소스나 모드를 정하는 핀이다. 위험은 이 핀을 부팅 후 일반 GPIO로 재사용할 때 생긴다. LED나 외부 회로가 그 핀을 끌어당기면 다음 리셋에서 부팅 모드가 바뀐다. 증상은 "한 번 켜지고 그 뒤로 안 켜짐"이라 코드만 보면 절대 안 나온다. 예방은 회로도 리뷰 단계에서 strap 핀 목록을 만들어 재사용을 막거나, 어쩔 수 없으면 리셋 전에 원래 상태로 복원하고 외부 회로를 버퍼로 격리하는 것이다.
+**English answer**: They're pins sampled at reset release that select the boot source or mode. The hazard is reuse: once the chip has booted, that pin looks like any other GPIO, so somebody drives an LED with it, and now the LED circuit holds the pin at the wrong level at the next reset and the board won't boot. It presents as a board that works once after flashing and then appears dead, which you can't find by reading code. I handle it by building a strap table from the schematic during review and flagging any reuse, and when reuse is unavoidable, isolating the external circuit with a buffer and restoring the pin state before any commanded reset. The exact pin list is entirely chip-specific, so the datasheet's strapping table has to be open next to the schematic.
+**꼬리질문**
+- "약한 풀다운(100k)이 왜 문제인가?" → 누설이나 인접 회로가 레벨을 흔들 수 있다. strap은 보통 10k급 확실한 값을 쓴다.
+- "부트 모드 전환을 제품에서 쓰려면?" → 테스트 포인트나 공장 fixture 전용으로 두고, 양산 유닛에서는 잠근다(`C07`, `C09`).
+
+### Q07. Walk me through bringing up a brand-new board.
+
+**왜 묻나**: **가장 확정적으로 나오는 질문.** 순서가 있는지, 그리고 위험을 아는지.
+**30초 답변**: §3.2의 7단계를 순서대로 말한다 — 전원 인가 전 준비(회로도로 power tree·strap 표, 육안 검사, VBAT–GND 저항) → 전류 제한 전원으로 첫 인가하고 레일을 순서대로 측정 → 클럭·리셋 확인 → 디버거 연결해 IDCODE, RAM에서 blink → 플래시 부팅 경로와 첫 로그 → 주변장치를 하나씩(전원 → ID 읽기 → 단일 트랜잭션 → 인터럽트 → DMA) → 시스템 수준 동시 동작·전류·온도.
+**English answer**: Before any power: I read the schematic and redraw the power tree, build the strap pin table, check the debug connector, inspect the board visually, and measure resistance from the battery input to ground so I don't let smoke out. Then I power it from a current-limited supply with the limit set near expected draw, and measure each rail in sequence — a scope on the enable signal and the rail shows me the actual ramp order, not the intended one. Next, clocks and reset. Then the debug probe: if I can read the IDCODE, I run a minimal blink out of RAM before I trust flash. After that the boot path proper — flash access, the linker map, reaching main, first console output. Only then peripherals, one at a time: power it, read its ID register, do one transaction, then interrupts, then DMA — and I look at the bus on a logic analyzer even when the code reports success. Finally the system level: everything running together, current profile, temperature corners, long soak.
+**꼬리질문**
+- "왜 주변장치를 한꺼번에 안 켜나?" → 실패가 섞이면 원인 분리가 불가능하다. 그리고 전류 이상의 출처를 못 찾는다.
+- "코드가 성공했다는데도 LA를 보는 이유?" → 드라이버가 ACK를 잘못 해석하거나, 애초에 다른 장치가 응답하는 경우가 있다.
+
+### Q08. The debug probe can't connect to the target. What do you check?
+
+**왜 묻나**: bring-up의 첫 벽. 순서대로 답하면 경험자.
+**30초 답변**: 전원과 접지부터 — VTref가 실제 I/O 전압을 보고 있는지, GND가 공통인지. 그다음 배선과 커넥터 방향, 케이블 길이·클럭 속도를 낮춰 본다. 타깃이 리셋에 잡혀 있지 않은지, 반대로 리셋을 계속 어서트해야 붙는 경우(펌웨어가 바로 슬립에 들거나 디버그 핀을 GPIO로 바꿔 버리는 경우)를 시도한다. strap이 디버그 비활성 모드를 고르고 있는지, 보안 잠금(읽기 보호)이 걸렸는지도 확인한다. 마지막으로 SWCLK/SWDIO를 스코프로 봐서 프로브가 실제로 신호를 내는지 본다.
+**English answer**: Power and ground first: is VTref actually seeing the I/O voltage, and do the probe and target share ground. Then the obvious mechanical things — connector orientation, a cable that's too long, and dropping the clock speed. Next, reset state: the target may be held in reset, or conversely I may need connect-under-reset because the firmware immediately sleeps or reconfigures the debug pins as GPIO. Then the chip-level reasons: a strap selecting a mode with debug disabled, or readout protection latched from a previous image. If all that looks right, I scope SWCLK and SWDIO to confirm the probe is even driving, because a broken adapter looks exactly like a dead target.
+**꼬리질문**
+- "펌웨어가 SWD 핀을 GPIO로 바꿔 버렸다면?" → connect-under-reset, 또는 칩 전체를 mass erase 한 뒤 부팅 초기에 지연을 넣은 복구 이미지를 올린다.
+- "IDCODE는 읽히는데 메모리가 안 읽힌다면?" → 코어가 리셋/슬립 상태이거나 AP 접근이 막힌 것. `C10 §1.4` 참조.
+
+### Q09. How do you prove a problem is hardware and not firmware?
+
+**왜 묻나**: bring-up 협업의 본질. **이 답이 좋으면 Requirement 6은 통과다.**
+**30초 답변**: 교차 실험으로 가른다. 같은 펌웨어를 다른 보드에서 → 유닛 특정이면 HW. 같은 보드에 알려진 좋은 이전 이미지를 → 회귀면 FW. 코드 경로를 아예 빼고 디버거로 레지스터를 직접 써서 재현 → 그래도 나면 HW. 그리고 파형을 본다. 마지막으로 통계 — n대 중 몇 대인지, 온도·전압 코너에서만인지. 결론을 낼 때는 "내 쪽에서 이걸 배제했다"를 먼저 말하고 측정 데이터를 붙인다.
+**English answer**: I try to make the variable exactly one thing. Same firmware on a different board: if it only fails on specific units, it's hardware or component variation. Same board with a known-good earlier image: if that passes, it's a firmware regression and I bisect. Bypass my code entirely by poking registers from the debugger: if it still fails, it isn't my code path. And I always look at the actual waveform, because a driver reporting success tells you nothing about what happened on the wire. Then I get sample size — one out of thirty and twenty-eight out of thirty are completely different investigations — and I sweep voltage and temperature, since margin problems only show at the corners. When I bring it to the hardware engineer I lead with what I've ruled out and the measurements, not with a claim about whose fault it is.
+**꼬리질문**
+- "코너 스윕을 왜 하나?" → 마진 문제는 상온·공칭 전압에서 숨는다. Don의 shmoo 경험이 그대로 적용된다.
+- "결국 양쪽 다 문제였다면?" → 흔하다. 하드웨어 마진이 빠듯한데 펌웨어가 최악 조건으로 쓰고 있는 경우. 양쪽 수정이 답이다.
+
+### Q10. Five out of a hundred EVT boards fail to read an I2C sensor. Where do you start?
+
+**왜 묻나**: 통계적 실패 + 회로도 + 계측을 한꺼번에 묻는 통합 질문.
+**30초 답변**: 먼저 5대에 공통점이 있는지 본다 — 제조 로트, 리비전, 특정 위치. 그다음 그 보드들에서 전원 레일과 램프 타이밍을 재고(레일이 늦게 오면 초기 트랜잭션이 NACK), SCL/SDA 파형을 LA와 스코프로 본다(상승 시간, 글리치, 버스가 로우에 붙어 있는지). 주소 충돌과 풀업 실장 여부를 회로도·보드로 대조한다. 온도·전압을 흔들어 마진 문제인지 확인한다. 펌웨어 쪽 임시 우회(전원 후 대기 연장 + 재시도)를 넣어 다른 사람들이 계속 일하게 하되, 그걸 해법이라 부르지 않는다.
+**English answer**: First I look for what those five share — build lot, board revision, position on the panel — because that usually points straight at the cause. Then on a failing board I measure the rail and its ramp timing against a good one, since a slow rail makes the first transaction NACK and looks like a dead sensor. I capture SCL and SDA on a logic analyzer for the protocol view and on a scope for the edges: rise time, glitches, or a line stuck low from a device mid-transaction. I check for address conflicts and confirm the pull-ups are actually fitted on those units. Then I sweep temperature and voltage, because five percent usually means a margin, not a hard failure. Meanwhile I ship a firmware workaround — longer post-power delay plus bounded retries — so the rest of the team isn't blocked, but I'm explicit that it's a mitigation and the real fix is still open.
+**꼬리질문**
+- "버스가 로우에 붙어 있으면?" → 슬레이브가 트랜잭션 중간에 멈춘 것. SCL을 9펄스 내보내 복구하고 STOP을 발행한다(`C03`). 그리고 왜 그 상태가 됐는지를 따로 조사한다.
+- 시나리오 상세 답안은 `S06 D01`.
+
+### Q11. What do you ask for in a schematic review, before the board is built?
+
+**왜 묻나**: 수동적으로 받기만 하는지, 미리 개입하는지. **시니어리티 판별 질문.**
+**30초 답변**: §2.8 목록을 근거와 함께 요청한다 — 디버그 커넥터와 콘솔 UART, 레일별 테스트 포인트와 전류 측정용 0Ω, 계측용 여유 GPIO 2~4개, 버스 신호에 클립을 물릴 자리, 라디오 enable/reset과 coex 신호 TP. 동시에 내 쪽 검토 결과를 제출한다 — strap 핀 재사용 여부, I2C 주소 충돌, 풀업 값과 목표 속도의 적합성, 레벨 시프터 OE/DIR 핀의 소유권, 보드 리비전을 펌웨어가 읽을 방법. 이걸 보드 제작 전에 하면 리스핀 한 번을 아낀다.
+**English answer**: I treat it as the cheapest debugging I'll ever do. I ask for the things that make bring-up possible: a proper debug connector, a console UART, a test point on every rail plus a zero-ohm link so we can cut it and measure current, two to four spare GPIOs brought to pads so I can instrument interrupt latency and task timing with a logic analyzer, and pads on the bus lines. On radio-heavy boards I ask for test points on the enable, reset and coexistence lines. Going the other way, I hand back my own review: any boot strap that's been reused as a functional GPIO, I2C address collisions, whether the pull-up values support the bus speed we actually want, who owns the level shifter's enable and direction pins, and a way for firmware to read the board revision so every bug report is unambiguous. Catching one of those saves a respin.
+**꼬리질문**
+- "EE가 공간이 없다고 하면?" → 우선순위를 매겨 협상한다. 디버그 커넥터와 레일 TP는 양보하지 않고, 나머지는 패드/비아만이라도 요청한다.
+
+### Q12. You and the hardware engineer disagree about the root cause. What do you do?
+
+**왜 묻나**: 협업 절반의 핵심. "working alongside"가 이 질문으로 검증된다.
+**30초 답변**: 의견 차이를 실험으로 바꾼다. "누가 맞나"가 아니라 "이 가설이 맞으면 무엇이 관측되어야 하나"를 같이 정하고, 그 측정을 함께 한다. 나는 먼저 내 쪽을 배제한 증거를 내놓고, 상대 가설을 반증할 실험도 내가 설계해 본다. 그리고 그 사이 팀이 막히지 않게 임시 우회를 제공한다. 데이터가 상대 편이면 빨리 인정하는 게 장기적으로 훨씬 이득이다.
+**English answer**: I convert the disagreement into an experiment rather than arguing from priors. We agree up front on what each hypothesis predicts we'd measure, and then we take that measurement together at the same bench — that removes most disagreements in about twenty minutes. I come in having already ruled out my own side, and I'll also design the test that would disprove my own theory, because that's what makes the other person trust the process. Meanwhile I provide a firmware workaround so nobody else is blocked while we settle it. And if the data says I was wrong, I say so quickly and in front of the same people, which is the cheapest thing you can do for the next disagreement.
+**꼬리질문**
+- "시간이 없을 때는?" → 우회책을 넣고 리스크를 문서화한 뒤 일정에 조사를 잡는다. 결론 없이 넘어가되 **기록을 남긴다**는 게 핵심이다.
+
+### Q13. How do you write a hardware bug report that actually gets acted on?
+
+**왜 묻나**: 산출물의 질. 실제로 해 본 사람만 구조를 안다.
+**30초 답변**: §3.4 구조 — 증상, 범위(몇 대 중 몇 대, 어느 리비전), **내가 배제한 것**, 측정 설정과 실측치(캡처 첨부), 가설, HW에 부탁하는 구체 행동, 임시 우회, 그리고 일정 영향. 배제 목록과 임시 우회가 있으면 상대가 즉시 일할 수 있다.
+**English answer**: Structure beats prose. Symptom, then scope — how many units out of how many, which revision, does temperature matter. Then a section called what I've ruled out, with the cross-experiments, so the first reply isn't "are you sure it's not the code". Then the measurement: exactly which probes on which nets, the trigger, and the numbers from a good board next to a bad one, with the captures attached. Then my hypothesis, the specific thing I'm asking them to check, the firmware workaround I've already shipped so nobody's blocked, and the schedule impact so it gets the right priority. That last part matters more than people think — hardware teams are triaging too.
+**꼬리질문**
+- "우회책을 넣으면 문제가 묻히지 않나?" → 그래서 우회는 반드시 "임시"로 표시하고, 영향(예: 부팅 20 ms 증가)과 미해결 상태를 같이 기록한다.
+
+### Q14. What do you prepare before the first boards arrive?
+
+**왜 묻나**: 선제성. **여기서 좋은 답이 나오면 "이 사람 오면 bring-up이 빨라진다"가 확정된다.**
+**30초 답변**: bring-up 셸을 미리 만든다 — UART 명령으로 GPIO 읽기/쓰기, I2C 스캔·레지스터 read/write, SPI 트랜잭션, 레일 enable 토글, 보드 리비전 출력. 그리고 회로도에서 뽑은 power tree·strap 표·핀 매핑 헤더. RAM에서 도는 최소 blink 이미지. 로그는 RTT나 UART 중 되는 걸로 바로 나오게. 이걸 준비해 두면 보드 도착 첫날에 전원부터 센서 ID까지 간다.
+**English answer**: A bring-up shell, first. A UART command interface that can read and write GPIOs, scan the I2C bus, read and write device registers, run a SPI transaction, and toggle rail enables — so the hardware engineer can ask me for a repeating waveform and get it in seconds instead of a rebuild. Alongside that, a pin mapping header generated from the schematic, my redrawn power tree, and the strap pin table. A minimal blink image that runs from RAM so I can prove the core is alive before trusting flash. And logging that works on day one, RTT or UART, whichever the board gives me. With that ready, the first day goes from power rails to reading a sensor ID instead of being spent writing scaffolding. It also becomes the skeleton of the factory test firmware later, so the work isn't thrown away.
+**꼬리질문**
+- "그 셸이 양산 이미지에 남으면?" → 분리된 빌드로 관리하거나, 출하 전에 잠근다(`C07` 디버그 포트 잠금, `C09` 출하 전 잠금).
+
+### Q15. Tell me about a time a board didn't work and you found the cause.
+
+**왜 묻나**: **이 항목의 최종 판별은 결국 스토리다.** 구조(STAR)와 계측의 구체성을 본다.
+**30초 답변**: §6.2의 스토리 중 하나를 STAR로. 상황 → 가설 → 측정(어떤 프로브를 어디에) → 발견 → 수정 → 재발 방지. 숫자와 도구 이름을 반드시 넣는다.
+**English answer**: (스토리는 §6.2에서 선택)
+**꼬리질문**
+- "그때 뭘 다르게 했으면 더 빨랐을까?" → 정직하게 하나 말한다. 예: 통계를 더 일찍 잡았어야 했다, 측정 전에 회로도를 더 봤어야 했다.
+
+---
+
+## 6. Don 매핑
+
+### 6.1 레쥬메 근거 (context 3.1절)
+
+| 근거 문장 | 이 요건에서의 쓸모 |
+|---|---|
+| "Silicon/system bring up -> NPI -> MP" | **bring-up 풀사이클** — 이 Requirement의 정중앙 |
+| "SoC verification … I2C, SPI, DMA, PCIe, SRAM/DRAM bring-up" | 버스를 하나씩 살려 본 경험(§3.2 [5]단계) |
+| "root-cause analysis of fundamental and **interface level** failures … when a new chip meets the full HW/SW system" | §3.3 HW vs FW 증명의 직접 증거 |
+| "JTAG, Oscilloscope, Logic Analyzer, Power Analyzer", "DSOs and protocol Analyzer" | 계측 도구를 **실제로** 쓴다는 증거. 말로만 아는 지원자와 구분됨 |
+| FPGA pre-silicon bring-up (Cortex R8/R82/M0+) | 실리콘이 없는 상태에서 부팅을 만든 경험 = 가장 어려운 bring-up |
+| "sign off on hardware safety margins (reliability vs performance/power)" | **HW 팀과 공동 의사결정**을 한 증거 — "working alongside"의 직접 대응 |
+| shmoo·health monitoring, SI 팀 협업 (SK hynix) | 전압·온도 코너 스윕(§3.3 마지막 줄)의 실제 경험 |
+| "designing and leading factory test-node architecture" | bring-up 셸 → factory test로 이어지는 흐름(§3.5)의 증거 |
+
+> **이 요건은 Don의 7개 Requirement 중 가장 강하다.** 다른 항목(RTOS, 무선 스택)에서 방어적이 될 수 있으므로, **면접 초반에 이 주제로 대화를 끌어와 신뢰를 먼저 쌓는 전략**이 유효하다.
+
+### 6.2 STAR 스토리 후보 — 무엇을 어떻게 말할지
+
+**스토리 A — 새 무선 칩의 인터페이스 장애 root cause (Apple)** · `S06 ST1`
+- 상황: 새 무선 실리콘을 출하 플랫폼에 통합. 시스템 레벨에서만 나타나는 인터페이스 장애
+- 구조: 증상 → 가설 → 측정(DSO, 프로토콜 분석기) → HW vs FW 분리 → 원인 → 수정 → 재발 방지
+- 이 요건에 맞춰 강조할 것: **회로도를 펴고 EE와 같은 벤치에서** 좁혀 갔다는 점, 측정 설정을 구체적으로
+- **<확인 필요: 이 사례에서 실제로 회로도를 보고 특정 net/핀을 짚어 원인을 좁힌 구체적 순간이 있는지. 있다면 그 장면 하나를 문장으로 준비할 것 — "회로도에서 ○○가 ○○ 뒤에 있는 걸 보고" 같은 디테일이 이 Requirement를 즉시 통과시킨다.>**
+
+**스토리 B — FPGA pre-silicon bring-up (Solidigm)** · `S06 ST4`
+- 상황: 실리콘 전에 FPGA에서 Cortex-R/M 코어와 주변 IP를 부팅
+- 이 요건에 맞춰 강조할 것: **측정 수단이 거의 없는 상태에서의 절차**, 최소 코드부터 올린 순서, RTL 팀(=HW 대응)과의 협업
+- 좋은 이유: "장비가 없을 때 어떻게 하나"를 보여 주면 회로도 리터러시가 진짜임이 드러난다
+
+**스토리 C — 신뢰성 vs 성능·전력 margin sign-off (Apple)** · `S06 ST3`
+- 이 요건에 맞춰 강조할 것: **HW와 공동으로 기준을 정하고 서명**했다는 점. "working alongside"의 가장 직접적인 증거
+- **<확인 필요: sign-off 과정에서 HW 엔지니어와 의견이 갈린 적이 있는지. 있다면 Q12의 답으로 그대로 쓸 수 있다.>**
+
+**스토리 D — shmoo / SI 팀 협업 (SK hynix)** · `S06 ST7`
+- 이 요건에 맞춰 강조할 것: 전압·온도·타이밍 코너를 스윕해 **마진 문제를 정량화**하고 FW 설정에 반영
+- Q09("HW냐 FW냐")와 Q10("5% 실패")의 뒷받침으로 강력
+
+### 6.3 표현 — 강점을 과장 없이 크게 들리게
+
+| 약한 표현 | 강한 표현 |
+|---|---|
+| "회로도 볼 줄 압니다" | "보드를 받으면 먼저 회로도에서 power tree를 다시 그려 초기화 순서를 맞춥니다" |
+| "디버깅 잘합니다" | "같은 펌웨어로 보드를 교차하고, 디버거로 레지스터를 직접 써서 코드 경로를 배제한 다음 파형을 봅니다" |
+| "HW팀과 일했습니다" | "전력·성능 마진 기준을 HW와 공동으로 정해 sign-off했습니다" |
+| "스코프 씁니다" | "CH1에 enable, CH2에 레일을 물리고 enable rising에 트리거해서 램프 지연을 정상 보드와 비교합니다" |
+| "bring-up 경험 있습니다" | "실리콘이 나오기 전 FPGA에서 Cortex-R 코어를 부팅시켰고, 그 드라이버를 실제 실리콘으로 옮겼습니다" |
+
+### 6.4 갭 — 정직하게 짚어 둘 것
+
+| 갭 | 현실 | 프레이밍 |
+|---|---|---|
+| 컨슈머 웨어러블 폼팩터 경험 | 경력은 엔터프라이즈 SSD + 무선 칩셋. 초소형 배터리 기기 보드는 다름 | "보드 크기와 전력 예산은 다르지만, bring-up 절차와 실패 모드는 같은 물리다. 내가 새로 배울 건 제품 제약이지 방법론이 아니다" |
+| PMIC·충전·배터리 회로 | Power Analyzer 경험은 있으나 PMIC 프로그래밍 경험은 레쥬메에 없음 | **<확인 필요: SSD의 전원 관리(PLP 커패시터, 전원 손실 처리)나 Apple에서 PMIC 관련 작업을 한 적이 있는지. 있으면 강력한 연결고리.>** |
+| 오디오·햅틱 회로 | I2S/오디오 경험 없음 (context 3.1) | "I2S 회로 자체는 클럭·프레임·데이터 3~4선이고, 내가 다룬 동기식 직렬 버스와 같은 범주다. 실제 코덱 경험은 없고 지금 공부 중이다" (`C03` 참조) |
+
+### 6.5 면접 중 이 주제로 대화를 끌어오는 법
+
+무선(J12)이나 RTOS(J11)에서 방어적이 됐을 때, 이렇게 전환한다:
+
+> "I'd add that the part of this role I'd be immediately useful on is the bring-up side. When a new board or a new silicon revision shows up and nothing works, that's been my day job for years — reading the power tree, sequencing the rails, proving whether it's hardware or firmware, and working it at the bench with the EE rather than throwing it over the wall."
+
+**주의**: 남용하지 않는다. 한 번의 전환은 강점 어필이고, 두 번 이상이면 회피로 들린다.
+
+---
+
+## 7. 준비 체크리스트
+
+- [ ] §2.2의 "회로도에서 읽어야 하는 8가지"를 목록으로 암송할 수 있다
+- [ ] §2.4 power tree 예시를 화이트보드에 그리고 초기화 순서를 도출할 수 있다
+- [ ] I2C 상승 시간 계산(`0.8473 × R × C`)과 규격 한계(1000/300/120 ns)를 즉석에서 쓸 수 있다
+- [ ] §3.1 워크드 예제의 12개 확인 항목 중 최소 8개를 스스로 떠올린다
+- [ ] §3.2 bring-up 7단계를 순서대로, 각 단계의 실패 모드 하나씩과 함께 말한다
+- [ ] §3.3 HW vs FW 증명 기법 8개 중 5개 이상을 즉시 댄다
+- [ ] §3.4 하드웨어 버그 리포트 8개 항목 구조를 외운다
+- [ ] Nordic nRF52840 DK 또는 Raspberry Pi 공개 회로도를 실제로 열어 power tree를 한 장으로 그려 본다 (§4 링크)
+- [ ] §6.2 스토리 A와 B를 영어 STAR로 각 2분, 계측 디테일 포함해 말해 본다
+- [ ] §6.4의 <확인 필요> 항목을 자기 기억과 대조해 채우거나 지운다
+- [ ] §6.5 전환 문장을 외운다 (한 번만 쓸 것)
+
+---
+
+## 8. 더 읽기
+
+| 가고 싶은 곳 | 노트 |
+|---|---|
+| 회로도 기호·power tree·풀업 계산·레벨 시프터 상세 | `C10 §8` |
+| bring-up 체크리스트 전체와 실패 패턴 표 | `C10 §9`, `C10 §10` |
+| JTAG/SWD 동작 원리, 프로브가 메모리를 읽는 방법 | `C10 §1`, `C10 §2` |
+| 로직 분석기·오실로스코프 사용법, 프로빙과 접지 | `C10 §6`, `C10 §7` |
+| HardFault 해석, RTT/ITM 로깅 | `C10 §4`, `C10 §5` |
+| I2C 버스 복구(SCL 9펄스), 드라이버 계층 | `C03` |
+| 슬립 전류 누설, GPIO 정리, 전류 측정 도구 | `C05`, `S03 §1` |
+| bring-up 셸 → factory test 펌웨어로의 확장 | `C09`, `J06` |
+| 디버깅 시나리오 답안 (I2C 5% 실패, 스테핑 변경 후 행) | `S06 D01`, `S06 D08`, `S06 D11` |
+| Don의 STAR 스토리 원문 | `S06 §3` |
+| 디버깅 도구·워크플로 (Requirement 7/7) | `J14` |
+| HW-SW 상호작용 디버깅 (Responsibility 7/7) | `J07` |
+| 라디오 칩의 전원·클럭·coex 배선 | `J12 §2.4`, `C06 §10`, `C06 §11` |

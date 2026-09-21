@@ -1,0 +1,436 @@
+{
+  "id": "threads_mutex",
+  "order": 1,
+  "range": "Q1-10",
+  "icon": "🧵",
+  "track": "core",
+  "title_en": "Threads & Mutex Fundamentals",
+  "title_ko": "스레드 & 뮤텍스 기초",
+  "summary_ko": "pthread 스레드 생성/조인부터 mutex 로 불변식을 지키는 법까지, Verkada 인터뷰 1번 주제인 thread safety 의 바닥을 까는 세트. race 를 눈으로 재현하고(Q1), mutex 로 정확한 카운터를 만들고(Q2), 구조체 불변식을 한 임계구역에서 지키고(Q3), 느린 I/O 를 락 밖으로 빼고(Q4), `_locked` 규약으로 중첩 락을 피하고(Q5), TOCTOU 를 없애고(Q6), once/샤딩/rwlock/협조적 종료(Q7~Q10)까지 간다. 인터뷰의 핵심은 '어떤 API 를 고르느냐'가 아니라 '이 락이 무슨 불변식을 지키는지, 임계구역이 왜 이 길이인지'를 말로 정당화하는 것.",
+  "summary_en": "From pthread create/join to protecting invariants with a mutex: the foundation for the interview's first stated topic, thread safety. Reproduce a real race, fix it, shrink the critical section, avoid nested locks and TOCTOU, then cover pthread_once, sharded aggregation, rwlocks and cooperative shutdown. What is graded is the justification, not the API choice.",
+  "verkada_relevance_ko": "2026-09-15 리크루터 메일이 복습 주제 1번으로 \"thread safety in multi-threaded environments\"를, 2번으로 \"synchronization mechanisms (mutexes, condition variables, atomic operations)\"를 명시했다. 이 세트가 그 두 항목의 진입점이다. 제품 맥락도 그대로 맞아떨어진다: GC31-E 셀룰러 게이트웨이 펌웨어는 모뎀 제어(듀얼 SIM failover), 링크 모니터, 802.3bt PoE 컨트롤러(2포트 총 60W 예산), 이벤트 업로더, 로컬 설정 서버가 동시에 돌면서 같은 상태 — 링크 통계, 전력 예산, APN/MTU 설정, 모뎀 핸들 — 를 건드린다. 평가 기준에 적힌 \"edge case 와 concurrent 시스템의 견고성\"은 곧 Q6 의 TOCTOU(60W 한도에 120W 배정 = 실제 전원 차단)와 Q10 의 깔끔한 종료(GW31-E 의 오프라인 30분 자가 재부팅, 원격 power-cycle, OTA 셧다운)로 번역된다. 170개국 200만 대 fleet 에서 '백만 번에 한 번'의 race 는 매일 여러 번 터지므로, TSan·불변식 checker·결정적 테스트를 말할 수 있느냐가 시니어 판정선이다.",
+  "concepts": [
+    {
+      "term": "race condition",
+      "ko": "둘 이상의 스레드가 같은 메모리에 접근하고, 그중 하나 이상이 쓰기이며, 순서를 강제하는 동기화가 없을 때 발생. 셋 중 하나만 없애도 사라진다.",
+      "en": "Two or more threads touch the same memory, at least one writes, and nothing orders them. Remove any one of the three and the race is gone."
+    },
+    {
+      "term": "lost update",
+      "ko": "`counter++` 는 load→modify→store 3단계라 원자적이지 않다. 두 스레드가 같은 값을 읽으면 한쪽 증가가 통째로 사라진다.",
+      "en": "`counter++` is load-modify-store, not atomic; if two threads load the same value one increment disappears entirely."
+    },
+    {
+      "term": "volatile ≠ atomic",
+      "ko": "volatile 은 컴파일러 최적화 억제일 뿐 원자성도 메모리 순서도 보장하지 않는다. MMIO 레지스터용이지 스레드 동기화용이 아니다.",
+      "en": "volatile only suppresses compiler optimization; it guarantees neither atomicity nor ordering. It is for MMIO registers, not thread synchronization."
+    },
+    {
+      "term": "invariant / critical section",
+      "ko": "락은 변수가 아니라 불변식을 보호한다. 임계구역은 불변식이 깨져 있어도 되는 유일한 구간이며, 관련 필드는 한 번의 lock 안에서 함께 갱신·복사한다.",
+      "en": "A lock protects an invariant, not a variable. The critical section is the only place the invariant may be broken; update and copy related fields together."
+    },
+    {
+      "term": "memory visibility",
+      "ko": "mutex 는 상호배제뿐 아니라 가시성도 준다. lock=acquire, unlock=release 로 happens-before 관계가 생겨 캐시·재정렬 문제까지 해결된다.",
+      "en": "A mutex gives visibility as well as mutual exclusion: lock is acquire, unlock is release, so the pair establishes happens-before."
+    },
+    {
+      "term": "_locked suffix convention",
+      "ko": "공개 함수만 락을 잡고, 내부 헬퍼는 `_locked` 접미사로 '호출자가 이미 락을 쥐고 있다'를 표시한다. 복합 연산을 락 1회로 묶을 수 있다.",
+      "en": "Only public functions take the lock; internal helpers carry a `_locked` suffix meaning the caller already holds it, so compound operations need one lock."
+    },
+    {
+      "term": "recursive mutex (안 쓰는 이유)",
+      "ko": "재진입을 허용하면 불변식이 깨진 중간 상태에서 함수가 불릴 수 있고, cond_wait 은 락을 한 번만 놓으므로 condvar 와 섞이지 않으며, 잘못된 락 경계를 숨긴다.",
+      "en": "Recursion lets a function run while the invariant is broken, does not compose with cond_wait (which drops the lock only once), and hides bad lock boundaries."
+    },
+    {
+      "term": "TOCTOU",
+      "ko": "Time-Of-Check-To-Time-Of-Use. 검사와 행동이 서로 다른 임계구역에 있으면 그 사이에 상태가 바뀐다. thread-safe 함수를 조합해도 thread-safe 하지 않다.",
+      "en": "If check and act sit in different critical sections the state can change in between. Composing thread-safe calls does not yield a thread-safe operation."
+    },
+    {
+      "term": "pthread_once",
+      "ko": "lazy 초기화를 정확히 1회만 실행하고, 늦게 온 스레드는 초기화가 끝날 때까지 대기한 뒤 완성된 상태를 본다. DCLP 를 직접 짤 필요가 없다.",
+      "en": "Runs lazy initialization exactly once; late callers block until it finishes and then see the fully-initialized state. No hand-rolled double-checked locking."
+    },
+    {
+      "term": "cooperative shutdown",
+      "ko": "pthread_cancel 대신 stop 플래그 + (condvar broadcast / self-pipe) + join. 종료 순서는 stop → join → destroy.",
+      "en": "Never pthread_cancel: set a stop flag, wake the thread (broadcast or self-pipe), then join. Order: stop, join, destroy."
+    }
+  ],
+  "study_note_md": "# 🧵 스레드 & 뮤텍스 기초 (Threads & Mutex Fundamentals) — Q1~Q10\n\n> 리크루터 메일의 1번 항목이 \"thread safety in multi-threaded environments\"다. 이 세트는\n> 그 바닥을 깐다 — race를 **눈으로 보고**, mutex로 **불변식**을 지키고, 임계구역을 **짧게**\n> 유지하고, 중첩 락·TOCTOU를 피하고, 마지막에 **깔끔하게 종료**하는 것까지. 뒤의\n> condvar/atomic/더블버퍼 세트는 전부 여기 위에 얹힌다.\n\n---\n\n## 1. 핵심 아이디어\n\n**Race condition은 \"두 스레드가 동시에 접근\"해서 생기는 게 아니다.**\n정확히는 ① 둘 이상이 같은 메모리에 접근하고 ② 그중 하나 이상이 쓰기이며\n③ 순서를 강제하는 동기화(happens-before)가 없을 때 생긴다. **셋 중 하나만 없애도 된다** —\n쓰기를 없애거나(불변 데이터), 공유를 없애거나(스레드 로컬 후 병합 = Q8), 순서를\n강제하거나(mutex/atomic/once/join = 나머지 전부).\n\n`counter++` 는 원자적이지 않다. 세 단계다:\n\n```\nldr x0,[counter]  /  add x0,x0,#1  /  str x0,[counter]     ; load → modify → store\n```\n\n두 스레드가 같은 값을 load하면 한쪽 증가가 통째로 사라진다(**lost update**).\nQ1을 실제로 돌리면 80,000번 증가시켰는데 카운터는 4만대가 나온다.\n\n> **`volatile`은 해결책이 아니다.** volatile은 \"컴파일러가 이 접근을 최적화로\n> 지우거나 합치지 말라\"는 뜻일 뿐, **원자성도 메모리 순서도 보장하지 않는다.**\n> MMIO 레지스터용이지 스레드 동기화용이 아니다. Q1이 volatile을 쓰고도 깨지는 게 증거다.\n\n**mutex의 계약**: `lock`은 acquire, `unlock`은 release다. 임계구역은 불변식이 깨져 있어도\n되는 유일한 구간이고, mutex는 상호배제뿐 아니라 **메모리 가시성(memory visibility)** 도\n준다 — lock/unlock 쌍이 happens-before를 만들어 캐시·재정렬 문제까지 해결한다.\n\"mutex를 썼는데 값이 안 보인다\"는 없다. 안 보이면 락을 안 잡은 경로가 있는 것이다.\n\n---\n\n## 2. 주제별 본문\n\n### 2.1 불변식(invariant)을 단위로 잠가라 — Q3\n\n락은 \"변수\"가 아니라 **불변식**을 보호한다. 링크 통계 `{count, sum, min, max}`는\n네 필드가 **같은 순간의 값**이어야 의미가 있다.\n\n```c\nlock(&s->m);                                       // 네 필드를 한 임계구역에서 함께 갱신\ns->count++;  s->sum_ms += rtt_ms;\nif (rtt_ms < s->min_ms) s->min_ms = rtt_ms;\nif (rtt_ms > s->max_ms) s->max_ms = rtt_ms;\nunlock(&s->m);\n```\n\n필드마다 락을 따로 잡거나 snapshot을 나눠 읽으면 `count`는 새 값, `min`은 옛 값인\n**찢어진(torn) 상태**가 나온다. 밖으로 들고 나갈 땐 한 번의 락에서 구조체를 통째로\n복사한다(`ls_snapshot`). 필드별 getter 3개를 이어 부르거나 구조체 포인터를 락 밖으로\n반환하면 같은 버그고, 필드별 mutex는 데드락까지 덤으로 준다.\n\n### 2.2 임계구역은 짧게 — 락 안에서 I/O도 콜백도 금지 — Q4\n\n```c\nlock(&s->m);  update_state(s);  modem_write(s->last);  unlock(&s->m);  // ✗ 락 안에서 I/O\n\nlock(&s->m);  update_state(s);  memcpy(copy, s->last, n);  unlock(&s->m);  // ✓ 복사만\nmodem_write(copy);                                          // 느린 일은 락 밖에서\n```\n\n락 안에서 **사용자 콜백**을 부르면 그 콜백이 같은 락을 다시 잡아 데드락이 난다. 임베디드는\n여기에 **우선순위 역전(priority inversion)** 이 겹친다 — 낮은 우선순위 스레드가 락을 쥔 채\n선점되면 높은 우선순위 스레드가 무한정 막힌다. 규칙: \"임계구역 안에서는 상태 변경만\".\n\n### 2.3 `_locked` 접미사 규약 — 재귀 뮤텍스를 쓰지 않는 이유 — Q5\n\n```c\nstatic void poe_set_port_locked(PoeTable*, int i, int mw);  // 락 없음 — 호출자가 쥐고 있음\nbool poe_set_port(PoeTable *t, int i, int mw)               // 공개 API 만 락을 잡는다\n{ lock(&t->m);  poe_set_port_locked(t, i, mw);  unlock(&t->m); }\n\nbool poe_set_both(PoeTable *t, int a, int b) {              // 락 1번으로 복합 연산\n    lock(&t->m);\n    poe_set_port_locked(t, 0, a);   // ← poe_set_port() 를 부르면 중첩 락!\n    poe_set_port_locked(t, 1, b);\n    unlock(&t->m);\n}\n```\n\n**\"재귀 뮤텍스 쓰면 되잖아요?\"에 대한 답 3가지:** ① 재진입을 허용하면 **불변식이 깨진\n중간 상태**에서 함수가 불릴 수 있고 \"지금 일관된 상태인가?\"라는 질문이 코드에서 사라진다.\n② **condvar와 못 섞인다** — `pthread_cond_wait`은 락을 한 번만 놓으므로 재귀 깊이 2에서\nwait하면 락을 쥔 채 잠든다. ③ 재귀가 필요하다는 건 보통 **락 경계를 잘못 그었다**는 신호다.\n\n진단 팁: 디버그 빌드에서 `PTHREAD_MUTEX_ERRORCHECK`를 쓰면 중첩 락이 조용히 멈추는 대신\n**`EDEADLK`를 반환**한다(Q5 테스트가 확인한다). 릴리스는 기본 mutex로.\n\n### 2.4 TOCTOU — 검사와 행동은 같은 임계구역에 — Q6\n\n```c\nif (budget_has_room(b, mw))   // ✗ 락 잡고 확인 → 놓음\n    budget_add(b, mw);        //   다시 락 잡고 증가 ← 그 사이 남이 다 써 버렸다\n\nlock(&b->m);                                                          // ✓ check + act가\nif (b->used_mw + mw <= b->total_mw) { b->used_mw += mw; ok = true; }  //   한 임계구역 안\nunlock(&b->m);\n```\n\n지독한 이유: 각 연산이 **개별적으로는 완벽히 thread-safe**라서 TSan도 코드 리뷰도 못 잡는다.\n60W 예산에 8개 스레드가 15W씩 요청하면 올바른 구현은 정확히 4개만 성공하지만, TOCTOU\n버전은 최대 8개가 성공해 **120W를 배정**한다 — PoE면 실제로 전원이 죽는다.\n일반화하면 **\"thread-safe한 함수들을 조합해도 thread-safe하지 않다\"**. 원자성이 필요한\n단위가 함수 하나보다 크면, 그 단위를 감싸는 API를 만들어야 한다.\n\n### 2.5 한 번만 초기화 — `pthread_once` — Q7\n\n```c\nstatic pthread_once_t once = PTHREAD_ONCE_INIT;\nModemHandle *modem_get(void) { pthread_once(&once, modem_init_once); return &g_modem; }\n```\n\n`if (!inited) { init(); inited = 1; }` 는 두 스레드가 동시에 `!inited`를 통과한다(포트를 두 번\n열면 두 번째는 실패). **double-checked locking**을 직접 짜려면 `inited`를 atomic(acquire/\nrelease)으로 둬야 하는데 `pthread_once`가 그걸 정확히 해 준다 — 초기화는 1회, 늦게 온\n스레드는 끝날 때까지 **대기**하고 완성된 상태를 본다.\n\n### 2.6 경합 줄이기 — 샤딩 후 병합 — Q8\n\n```c\nlong local = 0;\nfor (long i = 0; i < iters; ++i) local++;                    // 공유 접근 0회\nlock(&g_m);  g_total += local;  g_locks++;  unlock(&g_m);    // 스레드당 락 1회\n```\n\nQ2는 락을 `N*iters`번, Q8은 `N`번 잡는다(테스트가 실제로 락 횟수를 센다). 이득은 락 비용보다\n**캐시 라인 핑퐁**에서 온다 — 여러 코어가 같은 64B 라인을 번갈아 독점하면 매 증가마다 코어\n간 전송이 일어난다. 중간값이 필요 없는 집계(통계, drop 수)는 거의 항상 샤딩이 맞다.\n\n### 2.7 rwlock — 언제 쓰고 언제 안 쓰나 — Q9\n\n| 쓴다 | 쓰지 않는다 |\n|---|---|\n| 읽기:쓰기가 100:1 이상 | 임계구역이 몇 ns — rwlock 오버헤드가 더 크다 |\n| 임계구역이 충분히 길다(문자열 복사 등) | 쓰기가 잦다 → writer starvation |\n| 설정/라우팅 테이블처럼 거의 안 바뀌는 상태 | 값 하나면 `_Atomic`, 또는 RCU·더블버퍼·메시지 전달이 더 낫다 |\n\nPOSIX는 rwlock의 공정성을 **규정하지 않는다**. glibc 기본은 reader 우선이라 reader가\n끊이지 않으면 writer가 굶는다(`..._PREFER_WRITER_NONRECURSIVE_NP`는 **Linux 전용** 확장 —\nmacOS엔 없다. 면접에서 말은 하되 이식 코드엔 쓰지 말 것). 그리고 rwlock은\n**업그레이드(rdlock→wrlock)가 불가능**하다 — 시도하면 데드락이다.\n\n### 2.8 깔끔한 종료 — stop 플래그 + join — Q10\n\n```c\nlock(&w->m);\nbool need_join = w->running;  w->stop = true;  w->running = false;\nunlock(&w->m);                        // ★ 락을 푼 뒤에 join (락 쥔 채 join = 데드락)\nif (need_join) pthread_join(w->th, NULL);\n```\n\n`pthread_cancel`은 쓰지 않는다: 취소 지점이 불분명하고, 잡고 있던 락이 그대로 남고, fd가\n샌다. 임베디드는 항상 **협조적 종료(cooperative shutdown)**. 깨우는 방법은 스레드가\n무엇에 막혀 있느냐에 따라 다르다:\n\n| 막혀 있는 곳 | 깨우는 법 |\n|---|---|\n| 계산 루프 | stop 플래그 폴링 (Q10) |\n| `pthread_cond_wait` | 플래그 세운 뒤 **`broadcast`** (signal 아님 — 대기자가 여럿일 수 있다) |\n| `poll`/`read`/`accept` (소켓·UART) | **self-pipe**: `pipe()` fd를 poll 집합에 넣고 한 바이트 쓴다 (또는 짧은 타임아웃 후 플래그 확인) |\n\n> `eventfd`/`signalfd`/`epoll`은 **Linux 전용**이다. 실제 Verkada 게이트웨이는 Linux라\n> `eventfd`가 정답이지만, 이 연습 코드는 macOS에서 도는 이식 가능한 `pipe()+poll()`로 쓴다.\n\n---\n\n## 3. 흔한 함정 (인터뷰 감점 포인트)\n\n1. **`volatile`로 동기화하려 한다.** 즉시 탈락급. \"원자성도 순서도 보장하지 않는다\"고 말하라.\n2. **읽기를 보호하지 않는다.** 락 없는 `sc_get()`은 stale/torn 값을 본다. 64비트 값을\n   32비트 MCU에서 읽으면 진짜로 반쪽만 읽힌다.\n3. **에러 경로에서 unlock을 빠뜨린다.** `if (err) return -1;`이 락을 쥔 채 나간다\n   → 단일 exit point(`goto out;`) 또는 락 구간을 함수로 분리.\n4. **락 안에서 blocking I/O / malloc / 콜백**(2.2), **재귀 뮤텍스로 중첩 락을 \"해결\"**(2.3),\n   **thread-safe 함수를 조합하면 안전할 거라 착각**(TOCTOU, 2.4).\n5. **락 순서를 정하지 않는다.** 락이 둘 이상이면 전역 순서(ID/주소 순) 고정 또는 `trylock`+백오프.\n6. **detach만 하고 join하지 않는다**(스레드가 아직 쓰는 버퍼를 main이 free한다), **잠긴\n   mutex를 destroy한다**(UB), **초기화 안 된 mutex를 쓴다**. 종료 순서: stop → join → destroy.\n\n---\n\n## 4. 면접에서 말할 것 (한국어 + 영어)\n\n**① 락의 대상은 변수가 아니라 불변식**\n- KO: \"이 mutex가 무엇을 보호하는지 주석으로 적습니다 — 변수 하나가 아니라 count/sum/min/max가 같은 순간의 값이라는 불변식입니다.\"\n- EN: *\"I document what each mutex protects — not a variable, but an invariant: that count, sum, min and max all describe the same instant.\"*\n\n**② 임계구역 최소화**\n- KO: \"락 안에서는 상태 변경만 하고, 느린 I/O나 콜백은 반드시 락을 놓고 호출합니다. 락을 쥔 채 모뎀에 쓰면 모뎀이 느려질 때 파이프라인 전체가 멈춥니다.\"\n- EN: *\"Inside the lock I only mutate state and copy out what I need. Blocking I/O and user callbacks always happen outside — otherwise a slow modem stalls every thread, and a callback that re-enters the lock deadlocks.\"*\n\n**③ TOCTOU**\n- KO: \"검사와 행동은 같은 임계구역 안에 있어야 합니다. 각 함수가 thread-safe해도 둘을 이어 붙이면 thread-safe하지 않습니다 — PoE 예산이면 60W 한도에 120W를 배정하게 됩니다.\"\n- EN: *\"Check and act must be in the same critical section. Composing two thread-safe calls does not give you a thread-safe operation — with a PoE budget that means handing out 120 watts from a 60-watt supply.\"*\n\n**④ 재귀 뮤텍스를 피하는 이유**\n- KO: \"재귀 뮤텍스 대신 `_locked` 접미사 규약을 씁니다. 재귀를 허용하면 불변식이 깨진 중간 상태에서 함수가 불릴 수 있고, condvar와도 섞이지 않습니다.\"\n- EN: *\"Instead of a recursive mutex I use a `_locked` suffix convention. Recursion lets a function run while the invariant is broken, and it doesn't compose with condition variables — cond_wait only drops the lock once.\"*\n\n**⑤ 종료**\n- KO: \"`pthread_cancel`은 쓰지 않습니다. stop 플래그를 세우고, 블로킹 중이면 condvar broadcast나 self-pipe로 깨운 다음 join해서 실제로 끝난 걸 확인하고 자원을 해제합니다.\"\n- EN: *\"I never use pthread_cancel — it leaves locks held and fds leaked. I set a stop flag, wake the thread with a broadcast or a self-pipe write, then join before freeing anything.\"*\n\n**⑥ 검증**\n- KO: \"동시성 코드는 눈으로 검증하지 않습니다. ThreadSanitizer로 돌리고, 불변식을 검사하는 checker 스레드를 테스트에 넣고, 결정적인 단정만 씁니다.\"\n- EN: *\"I don't eyeball concurrency. I run it under ThreadSanitizer, add a checker thread that asserts the invariant while writers run, and keep every assertion deterministic so the test never flakes.\"*\n\n---\n\n## 5. 체크리스트\n\n- [ ] `counter++`가 왜 원자적이 아닌지 3단계(load/modify/store)로 설명할 수 있다\n- [ ] `volatile`이 동기화에 쓸모없는 이유, mutex가 **메모리 가시성**도 준다는 점을 말할 수 있다\n- [ ] 락이 보호하는 것을 \"불변식\" 단위로 말하고, snapshot 함수로 한 번에 복사해 나온다\n- [ ] 락 안에서 I/O·malloc·콜백을 하지 않는다 (우선순위 역전까지 설명 가능)\n- [ ] `_locked` 규약 + 재귀 뮤텍스를 피하는 이유 3가지 + `ERRORCHECK` 진단을 안다\n- [ ] check-then-act를 한 임계구역으로 묶는다 (TOCTOU)\n- [ ] `pthread_once` lazy init(DCLP 직접 금지) / 집계는 스레드 로컬 후 일괄 병합\n- [ ] rwlock을 언제 쓰고 언제 안 쓰는지, upgrade가 왜 불가능한지 말할 수 있다\n- [ ] `pthread_cancel` 대신 stop 플래그 + broadcast/self-pipe + join으로 종료한다\n- [ ] 모든 에러 경로에서 unlock이 되는지 확인하고, 종료는 stop → join → destroy\n- [ ] TSan으로 돌려봤고 의도된 race(Q1)가 어디인지 설명할 수 있다\n\n---\n\n## 6. 실행 메모 & Verkada 맥락\n\n### ⚠️ ThreadSanitizer 실행 시 주의\n\nQ1은 **일부러 race를 만드는 문제**라 TSan이 반드시 경고한다. 그 경고가 나머지 9문제의\n결과를 가리지 않도록 `__has_feature(thread_sanitizer)`로 TSan 빌드를 감지해 **Q1 데모만\n직렬 실행**으로 바꿔 두었다 — 그래서 기본 TSan 실행은 경고 0이다. race를 TSan 리포트로\n직접 보려면 `-DVK_FORCE_RACE=1` 을 붙인다 → `race_worker` 에서 data race 정확히 1건.\n\n### Verkada / 게이트웨이 맥락\n\nGC31-E 게이트웨이 펌웨어에는 최소한 모뎀 제어(듀얼 SIM failover), 링크 모니터(WAN\nRTT), PoE 컨트롤러(60W를 2포트에 배분), 이벤트 업로더, 로컬 설정 서버가 동시에 돈다.\n이들이 **같은 상태**를 건드린다 — 링크 통계, 전력 예산, APN/MTU 설정, 모뎀 핸들.\n\n- **Q3 링크 통계**는 Command 대시보드로 올라간다. 찢어지면 \"평균 RTT가 min보다 작다\"는 불가능한 그래프가 나온다.\n- **Q6 전력 예산**은 안전 문제다. 802.3bt 60W를 초과 배정하면 PSE가 셧다운되고 카메라가 내려간다 — Perpetual PoE를 내세우는 제품에서 가장 나쁜 실패다.\n- **Q4 I/O를 락 밖으로**는 셀룰러 링크가 느려질 때(RSRP 낮음, 재접속 중) 파이프라인 전체가 멈추지 않게 하는 핵심이다.\n- **Q10 깔끔한 종료**는 GW31-E의 \"오프라인 30분이면 자가 재부팅\", 원격 power-cycle, OTA 직전 셧다운 경로 그대로다.\n- 170개국 200만 대 fleet에서 \"백만 번에 한 번\" 나는 race는 **매일 여러 번** 난다 — TSan·불변식 checker·결정적 테스트를 말할 수 있느냐가 갈린다.\n",
+  "problems": [
+    {
+      "num": 1,
+      "slug": "race_demo",
+      "title_ko": "스레드 생성/조인 + race 재현",
+      "title_en": "Create/join threads and reproduce a data race",
+      "difficulty": "easy",
+      "tags": [
+        "pthread_create",
+        "pthread_join",
+        "data-race",
+        "volatile"
+      ],
+      "prompt_ko": "nthreads 개의 스레드를 띄워 각자 iters 번 전역 카운터를 **보호 없이** 증가시키고 전부 join 한다. 동시에 각 스레드는 자기 슬롯(local_done)에도 세어 둔다. join 후 슬롯 합계를 *out_attempts 에 넣고 관측된 공유 카운터를 반환한다. 슬롯 합계는 항상 N*iters 지만 공유 카운터는 그보다 작을 수 있다 — 그게 lost update 다.",
+      "prompt_en": "Spawn N threads that increment a shared counter without any synchronization while counting their own attempts in a private slot; join them all and report both numbers.",
+      "signature": "long race_demo(int nthreads, long iters, long *out_attempts)",
+      "examples": [
+        {
+          "in": "race_demo(4, 20000, &att)",
+          "out": "att == 80000, 반환값은 보통 4만대 (lost update)"
+        }
+      ],
+      "hints": [
+        "pthread_create(&th[i], NULL, worker, &args[i]) 로 띄우고, 별도 루프에서 전부 join 한다. 생성 루프 안에서 바로 join 하면 직렬 실행이라 race 가 안 보인다.",
+        "각 스레드에 **서로 다른** 인자 구조체를 넘겨야 한다. 루프 변수 i 의 주소를 그대로 넘기면 그것부터 race 다.",
+        "공유 카운터는 `g = g + 1` 로 쓰고 volatile 을 붙여 최적화만 막는다. volatile 이 race 를 못 막는다는 게 이 문제의 결론이다."
+      ],
+      "solution": "static void *race_worker(void *p) {\n    RaceArg *a = (RaceArg *)p;\n    for (long i = 0; i < a->iters; ++i) {\n        g_unsafe_counter = g_unsafe_counter + 1;   // ★ 보호 없음 — 의도된 race\n        a->local_done++;\n    }\n    return NULL;\n}\n\n// 반환: 관측된 최종 공유 카운터. *out_attempts: 스레드별로 센 총 증가 시도 횟수.\n// 실패 시 -1.\nlong race_demo(int nthreads, long iters, long *out_attempts) {\n    pthread_t th[MAX_WORKERS];\n    RaceArg   args[MAX_WORKERS];\n    if (nthreads < 1 || nthreads > MAX_WORKERS) return -1;\n\n    g_unsafe_counter = 0;\n    for (int i = 0; i < nthreads; ++i) { args[i].iters = iters; args[i].local_done = 0; }\n\n    int created = 0;\n    for (int i = 0; i < nthreads; ++i) {\n        if (pthread_create(&th[i], NULL, race_worker, &args[i]) != 0) break;\n        created++;\n#if !VK_RACE_CONCURRENT\n        pthread_join(th[i], NULL);   // TSan 빌드: 직렬 실행 → happens-before 성립\n#endif\n    }\n#if VK_RACE_CONCURRENT\n    for (int i = 0; i < created; ++i) pthread_join(th[i], NULL);\n#endif\n    if (created != nthreads) return -1;\n\n    long attempts = 0;\n    for (int i = 0; i < nthreads; ++i) attempts += args[i].local_done;\n    if (out_attempts) *out_attempts = attempts;\n    return g_unsafe_counter;\n}",
+      "explanation_ko": "`++` 는 load→modify→store 3단계라 원자적이지 않다. 두 스레드가 같은 값을 읽으면 한쪽 증가가 사라진다(lost update). 테스트를 결정적으로 만들기 위해 '얼마나 손실됐는가' 대신 '슬롯 합계는 정확히 N*iters', '공유 카운터는 1 이상 attempts 이하'만 단정한다. volatile 을 붙여도 깨지는 것이 핵심 교육 포인트 — volatile 은 최적화 억제일 뿐 원자성도 순서도 주지 않는다.",
+      "complexity": "O(N*iters) time, O(N) space",
+      "pitfalls": [
+        "루프 변수의 주소(&i)를 스레드 인자로 넘긴다 — 그 자체가 race 다. 스레드마다 독립된 인자 구조체를 써라.",
+        "volatile 이 동기화를 해 준다고 답한다 (면접 즉사).",
+        "-O2 에서 컴파일러가 루프를 `g += iters` 로 접어 버려 race 가 안 보일 수 있다. volatile 또는 -O1 로 관측 가능하게 둔다.",
+        "이 문제는 **의도적으로** TSan 경고를 만든다. 나머지 9문제를 가리지 않도록 코드가 TSan 빌드를 감지해 이 데모만 직렬 실행한다(-DVK_FORCE_RACE=1 로 강제 관측 가능)."
+      ],
+      "verkada_context": "게이트웨이의 링크 모니터·모뎀 스레드가 공용 통계 카운터를 락 없이 증가시키면 Command 대시보드의 패킷/에러 수가 조용히 줄어든다."
+    },
+    {
+      "num": 2,
+      "slug": "safe_counter",
+      "title_ko": "mutex로 보호한 카운터",
+      "title_en": "Mutex-protected counter",
+      "difficulty": "easy",
+      "tags": [
+        "mutex",
+        "counter",
+        "thread-safety"
+      ],
+      "prompt_ko": "SafeCounter 를 init/destroy/inc/get 4개 API 로 구현한다. inc 는 락 안에서 1 증가, get 은 **읽기도 락으로** 보호해서 현재 값을 반환(NULL 이면 -1). safe_counter_run(N, iters) 는 N개 스레드가 각각 iters 번 inc 한 뒤 최종값을 반환하며 항상 정확히 N*iters 가 나와야 한다.",
+      "prompt_en": "Implement a mutex-protected counter (init/destroy/inc/get) and a runner that spawns N threads doing iters increments each; the result must be exactly N*iters.",
+      "signature": "void sc_inc(SafeCounter *c); long sc_get(SafeCounter *c); long safe_counter_run(int nthreads, long iters)",
+      "examples": [
+        {
+          "in": "safe_counter_run(4, 20000)",
+          "out": "80000 (항상)"
+        }
+      ],
+      "hints": [
+        "임계구역은 증가 한 줄이면 충분하다. 루프 전체를 감싸면 병렬성이 사라진다.",
+        "읽기도 보호해야 한다. 락 없는 읽기는 stale 값을 보고, 32비트 MCU 에서 64비트 값을 읽으면 진짜로 반쪽만 읽힌다.",
+        "모든 반환 경로에서 unlock 이 되는지 확인하라. 에러 처리 `return` 이 락을 쥔 채 빠져나가는 게 가장 흔한 버그다."
+      ],
+      "solution": "void sc_init(SafeCounter *c) {\n    if (!c) return;\n    c->value = 0;\n    pthread_mutex_init(&c->m, NULL);\n}\n\nvoid sc_destroy(SafeCounter *c) {\n    if (!c) return;\n    pthread_mutex_destroy(&c->m);\n}\n\nvoid sc_inc(SafeCounter *c) {\n    if (!c) return;\n    pthread_mutex_lock(&c->m);\n    c->value++;                      // 임계구역: 딱 이 한 줄\n    pthread_mutex_unlock(&c->m);\n}\n\nlong sc_get(SafeCounter *c) {\n    if (!c) return -1;\n    pthread_mutex_lock(&c->m);        // 읽기도 보호해야 한다 (torn/stale 방지)\n    long v = c->value;\n    pthread_mutex_unlock(&c->m);\n    return v;\n}",
+      "explanation_ko": "mutex 가 lock/unlock 사이를 상호배제로 만들고, 동시에 acquire/release 로 메모리 가시성까지 준다. 그래서 Q1 에서 사라지던 증가가 전부 반영된다. 임계구역을 '증가 한 줄'로 최소화해 경합 구간을 짧게 유지하고, get 도 같은 락으로 보호해 읽는 쪽이 찢어진/오래된 값을 보지 않게 한다. 이 정도 카운터라면 실전에서는 `_Atomic long` + fetch_add 가 더 싸다는 점도 말할 수 있으면 좋다.",
+      "complexity": "O(1) per op, O(1) space",
+      "pitfalls": [
+        "get 을 락 없이 구현한다 (stale/torn read).",
+        "루프 전체를 락으로 감싸 병렬성을 죽인다.",
+        "에러 경로에서 unlock 누락 → 데드락.",
+        "초기화하지 않은 mutex 사용. 정적이면 PTHREAD_MUTEX_INITIALIZER, 동적이면 pthread_mutex_init."
+      ],
+      "verkada_context": "업로드 성공/실패 카운터, 재접속 횟수처럼 여러 스레드가 올리고 텔레메트리 스레드가 읽는 모든 값."
+    },
+    {
+      "num": 3,
+      "slug": "link_stats_invariant",
+      "title_ko": "구조체 불변식 보호 (링크 통계)",
+      "title_en": "Protect a struct invariant (link statistics)",
+      "difficulty": "medium",
+      "tags": [
+        "invariant",
+        "mutex",
+        "snapshot",
+        "torn-read"
+      ],
+      "prompt_ko": "WAN 링크 RTT 통계 {count, sum, min, max} 를 스레드 안전하게 만든다. ls_add 는 **한 번의 lock 안에서** 네 필드를 함께 갱신하고, ls_snapshot 은 **한 번의 lock 안에서** 네 필드를 호출자 구조체로 통째 복사한다(표본 0건이면 min=max=0 으로 정규화). 여러 writer 가 도는 동안 reader 가 `min<=max` 와 `count*min <= sum <= count*max` 를 계속 검사해도 위반이 0건이어야 한다.",
+      "prompt_en": "Make a {count,sum,min,max} statistics struct thread-safe: update all four fields in one critical section and copy all four out in one critical section.",
+      "signature": "void ls_add(LinkStats *s, int rtt_ms); void ls_snapshot(LinkStats *s, LinkStatsView *out)",
+      "examples": [
+        {
+          "in": "add 20, 10, 30 후 snapshot",
+          "out": "{count=3, sum=60, min=10, max=30}"
+        }
+      ],
+      "hints": [
+        "락이 보호하는 것은 변수가 아니라 '네 필드가 같은 순간의 값'이라는 불변식이다.",
+        "필드별 getter 3개를 호출자가 이어 부르게 하지 말고 snapshot 함수 하나로 통합하라.",
+        "구조체 포인터를 락 밖으로 반환하면 결국 락 없는 읽기다. 값 복사본(view struct)을 돌려줘라."
+      ],
+      "solution": "void ls_init(LinkStats *s) {\n    if (!s) return;\n    s->count = 0;\n    s->sum_ms = 0;\n    s->min_ms = INT_MAX;\n    s->max_ms = INT_MIN;\n    pthread_mutex_init(&s->m, NULL);\n}\n\nvoid ls_destroy(LinkStats *s) {\n    if (!s) return;\n    pthread_mutex_destroy(&s->m);\n}\n\nvoid ls_add(LinkStats *s, int rtt_ms) {\n    if (!s) return;\n    pthread_mutex_lock(&s->m);\n    s->count++;\n    s->sum_ms += rtt_ms;\n    if (rtt_ms < s->min_ms) s->min_ms = rtt_ms;\n    if (rtt_ms > s->max_ms) s->max_ms = rtt_ms;\n    pthread_mutex_unlock(&s->m);      // 네 필드가 한 임계구역에서 함께 갱신됨\n}\n\n// 한 번의 lock으로 4개 필드를 통째로 복사한다. 표본이 없으면 min/max = 0.\nvoid ls_snapshot(LinkStats *s, LinkStatsView *out) {\n    if (!s || !out) return;\n    pthread_mutex_lock(&s->m);\n    out->count  = s->count;\n    out->sum_ms = s->sum_ms;\n    out->min_ms = (s->count == 0) ? 0 : s->min_ms;\n    out->max_ms = (s->count == 0) ? 0 : s->max_ms;\n    pthread_mutex_unlock(&s->m);\n}",
+      "explanation_ko": "min/max/count/sum 은 개별 값이 아니라 하나의 관측을 이루는 묶음이다. 갱신이든 조회든 묶음 전체가 같은 임계구역 안에 있어야 '평균이 min 보다 작다' 같은 불가능한 조합이 안 나온다. 표본이 0건일 때 min=INT_MAX 를 그대로 노출하면 호출자가 이상한 값을 보므로 snapshot 에서 0 으로 정규화한다. 테스트는 writer 가 도는 동안 checker 스레드가 불변식을 계속 검증하는 방식이라 결정적이면서도 진짜 동시성을 본다.",
+      "complexity": "O(1) per add/snapshot, O(1) space",
+      "pitfalls": [
+        "필드마다 getter 를 만들고 호출자가 3번 호출 → 필드 간 불일치.",
+        "구조체 포인터를 락 밖으로 반환.",
+        "필드별 mutex → 불일치 + 데드락.",
+        "min/max 초기값을 0 으로 두면 첫 표본이 양수일 때 min 이 영원히 0 에 고정된다."
+      ],
+      "verkada_context": "GC31-E 의 WAN RTT/재접속 통계는 Command 대시보드로 올라간다. 찢어진 값이 올라가면 불가능한 그래프가 그려진다."
+    },
+    {
+      "num": 4,
+      "slug": "shrink_critical_section",
+      "title_ko": "임계구역 최소화 — I/O를 락 밖으로",
+      "title_en": "Shrink the critical section: do I/O outside the lock",
+      "difficulty": "medium",
+      "tags": [
+        "critical-section",
+        "blocking-io",
+        "callback",
+        "priority-inversion"
+      ],
+      "prompt_ko": "로그 싱크의 sink_write 를 리팩터한다. 락 안에서는 상태 갱신(last 문자열, queued++)과 필요한 데이터의 지역 복사만 하고, 락을 푼 뒤 느린 업로드(slow_upload)를 호출한다. 참고용으로 주어진 sink_write_bad 는 락을 쥔 채 업로드한다. 테스트는 가짜 I/O 안에서 같은 mutex 를 trylock 해 '락을 쥔 채 불렸는지'를 실제로 측정한다.",
+      "prompt_en": "Refactor so the slow upload happens after unlocking: inside the lock only mutate state and copy what you need.",
+      "signature": "bool sink_write(LogSink *s, const char *msg)",
+      "examples": [
+        {
+          "in": "sink_write 3회 (단일 스레드)",
+          "out": "락 안에서 실행된 I/O 0회, io_calls==3, queued==3"
+        }
+      ],
+      "hints": [
+        "락 안에서 필요한 것을 지역 배열로 복사하고 unlock 한 뒤에 그 복사본으로 I/O 를 한다.",
+        "복사를 락 밖에서 하면 원래 문제(락 없는 읽기)로 돌아간다. 복사까지가 임계구역이다.",
+        "면접에서 덧붙일 말: 락 안에서 사용자 콜백을 부르면 그 콜백이 같은 락을 다시 잡아 데드락이 나고, 임베디드에서는 우선순위 역전까지 겹친다."
+      ],
+      "solution": "// ★ 좋은 예: 락 안에서는 상태 갱신 + 지역 복사만, I/O는 락 밖에서.\nbool sink_write(LogSink *s, const char *msg) {\n    if (!s || !msg) return false;\n    char copy[64];\n    pthread_mutex_lock(&s->m);\n    snprintf(s->last, sizeof s->last, \"%s\", msg);\n    s->queued++;\n    memcpy(copy, s->last, sizeof copy);   // 락 안에서 스냅샷\n    pthread_mutex_unlock(&s->m);\n\n    slow_upload(s, copy);                 // 락 밖에서 느린 작업\n    return true;\n}",
+      "explanation_ko": "임계구역의 길이는 그대로 시스템 전체의 최대 지연이 된다. 모뎀으로 blocking write 하는 동안 락을 쥐고 있으면 셀룰러가 느려지는 순간 모든 스레드가 그 시간만큼 멈춘다. 해법은 항상 같다 — 락 안에서 '무엇을 할지'를 결정하고 필요한 데이터를 복사한 뒤, 락을 놓고 실제 작업을 한다. 락 안에서 콜백/알림을 부르지 않는다는 규칙도 같은 뿌리다(재진입 데드락).",
+      "complexity": "O(1) 임계구역, I/O 는 락 밖",
+      "pitfalls": [
+        "락 안에서 blocking write / malloc / 로그 flush / 사용자 콜백 호출.",
+        "복사를 락 밖에서 해서 결국 보호되지 않은 읽기가 된다.",
+        "임계구역을 줄이려다 두 개의 임계구역으로 쪼개서 TOCTOU 를 만든다 (Q6 과 함께 생각할 것).",
+        "trylock 기반 측정은 단일 스레드에서만 유효하다 — 다중 스레드에서는 남이 락을 쥐고 있어도 EBUSY 가 난다."
+      ],
+      "verkada_context": "이벤트 업로더가 락을 쥔 채 LTE 로 write 하면 RSRP 가 떨어지는 순간 PoE 제어 스레드까지 같이 멈춘다."
+    },
+    {
+      "num": 5,
+      "slug": "locked_suffix_convention",
+      "title_ko": "중첩 락 방지 — `_locked` 접미사 규약",
+      "title_en": "Avoid nested locking with the `_locked` convention",
+      "difficulty": "medium",
+      "tags": [
+        "nested-lock",
+        "recursive-mutex",
+        "errorcheck",
+        "api-design"
+      ],
+      "prompt_ko": "PoE 포트 전력 테이블에서 total_mw 는 port_mw 합과 항상 같아야 한다. 내부 헬퍼 poe_recompute_locked / poe_set_port_locked 는 락을 잡지 않고(호출자가 이미 쥠), 공개 API poe_set_port / poe_set_both / poe_snapshot 만 락을 잡는다. poe_set_both 는 **락 1회**로 두 포트를 원자 갱신해야 한다. 추가로 poe_relock_errno 는 ERRORCHECK 뮤텍스에서 중첩 락이 EDEADLK 를 돌려주는 것을 보인다.",
+      "prompt_en": "Split lock-taking public functions from lock-free `_locked` helpers so a compound update needs only one lock, and show why a recursive mutex is not the answer.",
+      "signature": "bool poe_set_both(PoeTable *t, int a_mw, int b_mw); int poe_relock_errno(PoeTable *t)",
+      "examples": [
+        {
+          "in": "poe_set_both(&t, 20000, 10000)",
+          "out": "{20000, 10000}, total==30000 (중간 상태 관측 불가)"
+        }
+      ],
+      "hints": [
+        "규약을 이름에 박아 넣어라: `_locked` 로 끝나는 함수는 절대 락을 잡지 않는다.",
+        "poe_set_both 안에서 poe_set_port 를 부르면 중첩 락이다. `_locked` 버전을 불러야 한다.",
+        "디버그 빌드에서 PTHREAD_MUTEX_ERRORCHECK 를 쓰면 중첩 락이 조용히 멈추는 대신 EDEADLK 를 반환한다."
+      ],
+      "solution": "// --- 락 없는 내부 헬퍼들: 호출자가 t->m 을 쥐고 있어야 한다 ---\nstatic void poe_recompute_locked(PoeTable *t) {\n    int sum = 0;\n    for (int i = 0; i < POE_PORTS; ++i) sum += t->port_mw[i];\n    t->total_mw = sum;\n}\n\nstatic void poe_set_port_locked(PoeTable *t, int idx, int mw) {\n    t->port_mw[idx] = mw;\n    poe_recompute_locked(t);\n}\n\n// --- 공개 API: 여기서만 락을 잡는다 ---\nbool poe_set_port(PoeTable *t, int idx, int mw) {\n    if (!t || idx < 0 || idx >= POE_PORTS || mw < 0) return false;\n    pthread_mutex_lock(&t->m);\n    poe_set_port_locked(t, idx, mw);\n    pthread_mutex_unlock(&t->m);\n    return true;\n}\n\n// 두 포트를 한 임계구역에서 원자적으로 바꾼다.\n// ★ 여기서 poe_set_port() 를 부르면 중첩 락 → 데드락(또는 EDEADLK).\n//   `_locked` 버전을 부르기 때문에 안전하다.\nbool poe_set_both(PoeTable *t, int a_mw, int b_mw) {\n    if (!t || a_mw < 0 || b_mw < 0) return false;\n    pthread_mutex_lock(&t->m);\n    poe_set_port_locked(t, 0, a_mw);\n    poe_set_port_locked(t, 1, b_mw);\n    pthread_mutex_unlock(&t->m);\n    return true;\n}\n\nvoid poe_snapshot(PoeTable *t, PoeView *out) {\n    if (!t || !out) return;\n    pthread_mutex_lock(&t->m);\n    for (int i = 0; i < POE_PORTS; ++i) out->port_mw[i] = t->port_mw[i];\n    out->total_mw = t->total_mw;\n    pthread_mutex_unlock(&t->m);\n}\n\n// 교육용: 같은 스레드에서 두 번 lock 하면 ERRORCHECK 뮤텍스는 EDEADLK 를 준다.\n// (기본 뮤텍스였다면 여기서 그냥 멈춘다 = 프로덕션에서 찾기 힘든 행)\nint poe_relock_errno(PoeTable *t) {\n    if (!t) return -1;\n    pthread_mutex_lock(&t->m);\n    int rc = pthread_mutex_lock(&t->m);       // 중첩 락 시도\n    if (rc == 0) pthread_mutex_unlock(&t->m); // 만약 성공했다면(재귀 뮤텍스) 정리\n    pthread_mutex_unlock(&t->m);\n    return rc;\n}",
+      "explanation_ko": "락을 잡는 함수와 잡지 않는 함수를 이름으로 구분하면, 복합 연산을 만들 때 '락을 이미 쥐었나?'를 매번 추론할 필요가 없다. 재귀 뮤텍스는 이 문제를 '해결'하는 대신 감춘다 — 불변식이 깨진 중간 상태에서 함수가 재진입될 수 있고, pthread_cond_wait 은 락을 한 번만 놓으므로 재귀 깊이 2에서는 락을 쥔 채 잠들며, 무엇보다 락 경계 설계가 잘못됐다는 신호를 지워 버린다. 릴리스에서는 기본 mutex, 디버그에서는 ERRORCHECK 로 중첩 락을 즉시 잡는 것이 실전 조합이다.",
+      "complexity": "O(PORTS) per update, O(1) space",
+      "pitfalls": [
+        "공개 함수가 다른 공개 함수를 호출해 중첩 락 → 기본 mutex 면 그 자리에서 행(hang).",
+        "중첩 락을 재귀 뮤텍스로 '해결'한다 (불변식 은폐 + condvar 비호환).",
+        "`_locked` 헬퍼를 락 없이 외부에서 직접 호출한다 — static 으로 숨기고 헤더에 노출하지 말 것.",
+        "해제 순서를 역순으로 하지 않는다 (락이 여러 개일 때 특히)."
+      ],
+      "verkada_context": "PoE 두 포트의 배분을 한 번에 바꾸는 연산. 중간 상태가 보이면 순간적으로 합이 60W 를 넘은 것처럼 읽힌다."
+    },
+    {
+      "num": 6,
+      "slug": "toctou_power_budget",
+      "title_ko": "TOCTOU — PoE 전력 예산 예약",
+      "title_en": "TOCTOU: atomic PoE power budget reservation",
+      "difficulty": "hard",
+      "tags": [
+        "TOCTOU",
+        "check-then-act",
+        "atomicity",
+        "poe"
+      ],
+      "prompt_ko": "총 60W(60000 mW) 예산에서 mw 만큼 예약한다. `used + mw <= total` 검사와 `used += mw` 실행이 **같은 임계구역** 안에 있어야 한다. 8개 스레드가 동시에 15W 씩 요청하면 정확히 4개만 성공하고 used 는 정확히 60000 이어야 한다. 참고용 budget_reserve_toctou 는 검사와 실행 사이에 락을 풀어 최대 8개가 성공(=120W 배정)한다.",
+      "prompt_en": "Reserve power from a shared budget so that check and act happen in one critical section; concurrent requests must never over-commit.",
+      "signature": "bool budget_reserve(PoeBudget *b, int mw)",
+      "examples": [
+        {
+          "in": "total=60000, 8 threads x reserve(15000)",
+          "out": "granted==4, used==60000"
+        }
+      ],
+      "hints": [
+        "검사 결과를 지역 변수에 담아 락을 풀고 다시 잡는 순간 버그다.",
+        "함수 하나가 thread-safe 하다고 두 개를 이어 붙인 것이 thread-safe 한 건 아니다. 원자성이 필요한 단위를 API 로 만들어라.",
+        "release 는 0 밑으로 내려가지 않게 방어하고, mw<=0 같은 인자는 거부한다."
+      ],
+      "solution": "// ★ 좋은 예: 검사와 행동이 한 임계구역\nbool budget_reserve(PoeBudget *b, int mw) {\n    if (!b || mw <= 0) return false;\n    bool ok = false;\n    pthread_mutex_lock(&b->m);\n    if (b->used_mw + mw <= b->total_mw) {   // check\n        b->used_mw += mw;                   // ...and act — 같은 락 안\n        ok = true;\n    }\n    pthread_mutex_unlock(&b->m);\n    return ok;\n}",
+      "explanation_ko": "TOCTOU 는 각 연산이 **개별적으로는 완벽히 thread-safe** 하기 때문에 지독하다 — TSan 도 코드 리뷰도 잡지 못하고, 데이터 레이스가 아니라 논리 레이스다. 검사와 행동을 한 락 안으로 합치면 사라진다. 일반화하면 '원자성이 필요한 단위가 함수 하나보다 크면 그 단위를 감싸는 API 를 제공하라'가 된다. 테스트는 8스레드/15W/60W 조합으로 정답이 정확히 4가 되도록 설계해 결정적이며, 나쁜 버전은 '최소 4개는 성공'이라는 느슨한 상한으로만 단정해 플래키하지 않게 했다.",
+      "complexity": "O(1) per reserve/release",
+      "pitfalls": [
+        "has_room() 과 add() 를 따로 노출해 호출자가 이어 부르게 만든다 — API 설계 자체가 버그다.",
+        "검사 후 락을 풀었다가 다시 잡고 조건을 재확인하지 않는다.",
+        "TSan 이 못 잡으니 안전하다고 결론 내린다 (data race 가 아니라 logic race).",
+        "release 에서 음수 방어를 안 해 예산이 늘어난다."
+      ],
+      "verkada_context": "GC31-E 는 802.3bt 2포트에 총 60W 를 배분한다. 초과 배정하면 PSE 가 셧다운되고 카메라가 내려간다 — Perpetual PoE 를 내세우는 제품에서 최악의 실패다."
+    },
+    {
+      "num": 7,
+      "slug": "pthread_once_lazy_init",
+      "title_ko": "pthread_once 로 스레드 안전 lazy init",
+      "title_en": "Thread-safe lazy init with pthread_once",
+      "difficulty": "easy",
+      "tags": [
+        "pthread_once",
+        "lazy-init",
+        "double-checked-locking"
+      ],
+      "prompt_ko": "modem_get() 은 여러 스레드가 동시에 불러도 초기화 루틴이 **정확히 1회**만 실행되게 하고, 완전히 초기화된 핸들 포인터를 반환한다. `if (!inited) init();` 는 두 스레드가 동시에 통과할 수 있으므로 금지. 8개 스레드가 동시에 호출해도 모두 같은 포인터를 받고 init 호출 횟수는 1 이어야 한다.",
+      "prompt_en": "Return a lazily initialized modem handle such that the init routine runs exactly once even under concurrent first calls.",
+      "signature": "ModemHandle *modem_get(void)",
+      "examples": [
+        {
+          "in": "8 threads call modem_get()",
+          "out": "모두 같은 포인터, init_calls == 1"
+        }
+      ],
+      "hints": [
+        "pthread_once_t 는 반드시 PTHREAD_ONCE_INIT 으로 초기화한 정적 변수여야 한다.",
+        "초기화 루틴은 인자도 반환값도 없다 — 필요한 상태는 파일 스코프 변수에 둔다.",
+        "직접 double-checked locking 을 짜려면 플래그를 _Atomic 으로 두고 acquire/release 를 써야 한다. pthread_once 가 그걸 대신해 준다."
+      ],
+      "solution": "static pthread_once_t g_modem_once  = PTHREAD_ONCE_INIT;\nstatic ModemHandle    g_modem;\nstatic _Atomic int    g_modem_init_calls = 0;\n\nstatic void modem_init_once(void) {\n    atomic_fetch_add(&g_modem_init_calls, 1);\n    g_modem.fd     = 42;\n    g_modem.apn_id = 7;\n    snprintf(g_modem.name, sizeof g_modem.name, \"wwan0\");\n}\n\nModemHandle *modem_get(void) {\n    pthread_once(&g_modem_once, modem_init_once);\n    return &g_modem;\n}\n\nint modem_init_calls(void) { return atomic_load(&g_modem_init_calls); }",
+      "explanation_ko": "pthread_once 는 '정확히 1회 실행' 뿐 아니라 **메모리 순서**까지 보장한다 — 늦게 온 스레드는 초기화가 끝날 때까지 블록되고, 깨어난 뒤 초기화가 쓴 모든 값을 본다. 직접 만든 `if (!inited)` 는 두 스레드가 동시에 통과하는 것(모뎀 포트 두 번 열기 = 두 번째 실패)과, 통과하더라도 초기화 절반만 보이는 것 두 가지가 모두 깨진다. 가능하면 아예 정적 초기화로 락을 없애고, 진짜 lazy 가 필요할 때만 once 를 쓴다.",
+      "complexity": "O(1) amortized — 첫 호출만 초기화 비용",
+      "pitfalls": [
+        "`if (!inited) { init(); inited = 1; }` (두 스레드가 동시 통과 + 절반만 보이는 상태).",
+        "pthread_once_t 를 지역 변수로 두거나 PTHREAD_ONCE_INIT 없이 0 초기화에 의존.",
+        "초기화 루틴 안에서 같은 once 를 다시 호출 → 데드락.",
+        "초기화 실패를 알릴 방법이 없다 — 실패 상태를 전역 errno 필드에 남기고 호출자가 확인하게 설계할 것."
+      ],
+      "verkada_context": "모뎀 제어 fd, BLE 스택 핸들처럼 '처음 쓸 때 한 번만 연다'가 필요한 자원. 두 번 열면 두 번째가 EBUSY 로 실패한다."
+    },
+    {
+      "num": 8,
+      "slug": "shard_and_merge",
+      "title_ko": "스레드별 로컬 집계 후 병합",
+      "title_en": "Per-thread accumulation, then one merge",
+      "difficulty": "medium",
+      "tags": [
+        "contention",
+        "cache-line",
+        "sharding",
+        "aggregation"
+      ],
+      "prompt_ko": "각 스레드가 지역 변수에 iters 번 누적한 뒤, 루프가 끝난 다음에만 전역 락을 **한 번** 잡아 총합에 더한다. 테스트는 결과값뿐 아니라 '총 락 획득 횟수 == 스레드 수'까지 검사한다. Q2 의 구현은 같은 결과를 내지만 락을 N*iters 번 잡는다.",
+      "prompt_en": "Accumulate into a thread-local variable and merge once under the lock; lock acquisitions drop from N*iters to N.",
+      "signature": "long sharded_sum_run(int nthreads, long iters, long *out_locks)",
+      "examples": [
+        {
+          "in": "sharded_sum_run(4, 50000, &locks)",
+          "out": "200000, locks == 4"
+        }
+      ],
+      "hints": [
+        "루프 안에 락이 하나도 없어야 한다. 있으면 Q2 와 같아진다.",
+        "병합 카운터(g_merge_locks)도 같은 락 안에서 올려야 정확하다.",
+        "실행 사이에 전역을 리셋할 때도 락을 잡아라 — 테스트 코드라고 예외는 없다."
+      ],
+      "solution": "static void *shard_worker(void *p) {\n    ShardArg *a = (ShardArg *)p;\n    long local = 0;\n    for (long i = 0; i < a->iters; ++i) local++;   // 공유 상태 접근 0회\n\n    pthread_mutex_lock(&g_merge_m);                // 스레드당 락 1회\n    g_merged_total += local;\n    g_merge_locks++;\n    pthread_mutex_unlock(&g_merge_m);\n    return NULL;\n}\n\n// 반환: 병합된 총합. *out_locks: 총 락 획득 횟수(= nthreads 여야 한다).\nlong sharded_sum_run(int nthreads, long iters, long *out_locks) {\n    pthread_t th[MAX_WORKERS];\n    ShardArg  args[MAX_WORKERS];\n    if (nthreads < 1 || nthreads > MAX_WORKERS) return -1;\n\n    pthread_mutex_lock(&g_merge_m);\n    g_merged_total = 0;\n    g_merge_locks  = 0;\n    pthread_mutex_unlock(&g_merge_m);\n\n    for (int i = 0; i < nthreads; ++i) args[i].iters = iters;\n    for (int i = 0; i < nthreads; ++i) pthread_create(&th[i], NULL, shard_worker, &args[i]);\n    for (int i = 0; i < nthreads; ++i) pthread_join(th[i], NULL);\n\n    pthread_mutex_lock(&g_merge_m);\n    long total = g_merged_total;\n    if (out_locks) *out_locks = g_merge_locks;\n    pthread_mutex_unlock(&g_merge_m);\n    return total;\n}",
+      "explanation_ko": "이득의 대부분은 락 호출 비용이 아니라 **캐시 라인 핑퐁**에서 온다. 여러 코어가 같은 64바이트 라인을 번갈아 독점하면 증가 한 번마다 코어 간 전송이 일어난다. 스레드 로컬에 모으면 그 트래픽이 완전히 사라지고, 마지막에 N번만 동기화한다. 대가는 '읽는 순간의 값이 약간 오래됐다'는 것이므로, 중간값이 필요한 상태(예: 예산 잔량)에는 쓰면 안 되고 통계·drop 카운터처럼 최종 합만 중요한 값에 쓴다. false sharing 을 피하려고 per-thread 슬롯을 캐시 라인 크기로 패딩하는 변형도 같이 말하면 좋다.",
+      "complexity": "O(N*iters) time, 락 획득 O(N)",
+      "pitfalls": [
+        "루프 안에서 전역을 건드려 샤딩의 의미를 없앤다.",
+        "per-thread 슬롯을 배열로 두고 패딩 없이 인접 배치 → false sharing 으로 이득이 사라진다.",
+        "중간값이 필요한 상태(예산, 큐 길이)에 샤딩을 적용한다.",
+        "병합 전에 결과를 읽어 부분 합을 본다 — 반드시 join 후에 읽을 것."
+      ],
+      "verkada_context": "포트/세션마다 도는 패킷·drop 카운터를 스레드 로컬로 모았다가 주기적으로 한 번만 합쳐 Command 로 올린다."
+    },
+    {
+      "num": 9,
+      "slug": "rwlock_config_table",
+      "title_ko": "pthread_rwlock — 설정 테이블",
+      "title_en": "pthread_rwlock for a read-mostly config table",
+      "difficulty": "medium",
+      "tags": [
+        "rwlock",
+        "read-mostly",
+        "starvation",
+        "config"
+      ],
+      "prompt_ko": "WAN 설정 {apn_id, mtu, apn 문자열} 을 rwlock 으로 보호한다. 불변식은 mtu == 1000 + apn_id 이고 apn == \"apn-<id>\". 쓰기는 wrlock 안에서 세 필드를 함께 바꾸고, 읽기는 rdlock 안에서 호출자 버퍼로 복사한다. reader 4개가 도는 동안 writer 가 계속 바꿔도 찢어진 읽기가 0건이어야 한다.",
+      "prompt_en": "Guard a read-mostly config struct with a rwlock: readers take rdlock and copy out, the writer takes wrlock and updates all fields together.",
+      "signature": "void wc_set_apn(WanConfig *c, int apn_id); bool wc_read(WanConfig *c, int *apn_id, int *mtu, char *buf, size_t n)",
+      "examples": [
+        {
+          "in": "wc_set_apn(&c, 4) 후 wc_read",
+          "out": "apn_id=4, mtu=1004, \"apn-4\""
+        }
+      ],
+      "hints": [
+        "rdlock 과 wrlock 은 같은 pthread_rwlock_unlock 으로 푼다.",
+        "읽기도 '세 필드를 한 임계구역에서' 복사해야 한다 — rwlock 을 써도 Q3 의 규칙은 그대로다.",
+        "언제 안 쓰는지도 말할 수 있어야 한다: 임계구역이 몇 ns 면 rwlock 오버헤드가 더 크고, 쓰기가 잦으면 writer starvation 이 난다."
+      ],
+      "solution": "void wc_init(WanConfig *c) {\n    if (!c) return;\n    pthread_rwlock_init(&c->rw, NULL);\n    c->apn_id = 1;\n    c->mtu    = 1001;\n    snprintf(c->apn, sizeof c->apn, \"apn-1\");\n}\n\nvoid wc_destroy(WanConfig *c) {\n    if (!c) return;\n    pthread_rwlock_destroy(&c->rw);\n}\n\n// 쓰기: 세 필드를 한 번의 wrlock 안에서 함께 바꾼다.\nvoid wc_set_apn(WanConfig *c, int apn_id) {\n    if (!c) return;\n    pthread_rwlock_wrlock(&c->rw);\n    c->apn_id = apn_id;\n    c->mtu    = 1000 + apn_id;\n    snprintf(c->apn, sizeof c->apn, \"apn-%d\", apn_id);\n    pthread_rwlock_unlock(&c->rw);\n}\n\n// 읽기: rdlock — 다른 reader와 동시에 들어갈 수 있다. 복사해서 나간다.\nbool wc_read(WanConfig *c, int *apn_id, int *mtu, char *buf, size_t n) {\n    if (!c || !apn_id || !mtu || !buf || n == 0) return false;\n    pthread_rwlock_rdlock(&c->rw);\n    *apn_id = c->apn_id;\n    *mtu    = c->mtu;\n    snprintf(buf, n, \"%s\", c->apn);\n    pthread_rwlock_unlock(&c->rw);\n    return true;\n}",
+      "explanation_ko": "rwlock 은 reader 끼리의 병렬성을 사 오는 대신 mutex 보다 무거운 상태 기계를 쓴다. 그래서 '읽기가 압도적으로 많고 임계구역이 충분히 길 때'만 이득이다. POSIX 는 공정성을 규정하지 않으며 glibc 기본은 reader 우선이라 reader 가 끊이지 않으면 writer 가 굶는다(PREFER_WRITER 계열 속성은 Linux 전용 확장이라 macOS 에는 없다 — 면접에서 말만 하고 이식 코드엔 쓰지 말 것). 또한 rdlock→wrlock 업그레이드는 불가능하다(두 reader 가 동시에 시도하면 데드락). 더 나은 대안이 있는지도 항상 검토한다: 값 하나면 _Atomic, 스냅샷 교체면 더블 버퍼/RCU.",
+      "complexity": "읽기 O(len) 병렬, 쓰기 O(len) 배타",
+      "pitfalls": [
+        "rdlock 을 쥔 채 wrlock 을 시도한다 (업그레이드 불가 → 데드락).",
+        "읽기 결과를 복사하지 않고 내부 포인터를 그대로 돌려준다.",
+        "임계구역이 아주 짧은데 rwlock 을 써서 mutex 보다 느려진다.",
+        "PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP 를 이식 코드에 쓴다 (Linux 전용, macOS 빌드 실패)."
+      ],
+      "verkada_context": "APN/MTU/라우팅 설정은 재부팅 사이 거의 안 바뀌는데 데이터 경로 스레드들이 계속 읽는다. 듀얼 SIM failover 순간에만 writer 가 등장한다."
+    },
+    {
+      "num": 10,
+      "slug": "cancellable_worker",
+      "title_ko": "취소 가능한 워커 — stop 플래그 + join",
+      "title_en": "Cancellable worker: stop flag plus join",
+      "difficulty": "hard",
+      "tags": [
+        "shutdown",
+        "join",
+        "stop-flag",
+        "idempotent"
+      ],
+      "prompt_ko": "워커 스레드를 start / stop_and_join 으로 관리한다. stop 플래그는 mutex 로 보호하고, ticks 는 _Atomic 으로 두어 외부에서 락 없이 관찰한다. stop_and_join 은 락 안에서 플래그를 세운 뒤 **락을 푼 상태에서** join 하고, 이미 멈춘 워커에 다시 불러도 안전(idempotent)해야 하며, 종료 후 재시작도 가능해야 한다. pthread_cancel 은 쓰지 않는다.",
+      "prompt_en": "Start and cleanly stop a worker thread with a mutex-protected stop flag and join; stop_and_join must be idempotent and the worker restartable.",
+      "signature": "bool worker_start(Worker *w); long worker_stop_and_join(Worker *w)",
+      "examples": [
+        {
+          "in": "start → tick 진행 → stop_and_join",
+          "out": "ticks 고정, 두 번 호출해도 같은 값"
+        }
+      ],
+      "hints": [
+        "락을 쥔 채 join 하면 워커가 stop 플래그를 읽으려다 같은 락에서 막혀 데드락이 난다. 'join 필요 여부'를 지역 변수에 담고 unlock 한 뒤 join 하라.",
+        "running 플래그로 이중 start 와 이중 join 을 모두 막는다.",
+        "블로킹 중인 스레드는 플래그만으로는 안 깨어난다 — condvar 면 broadcast, poll/read 면 self-pipe 가 필요하다."
+      ],
+      "solution": "bool worker_should_stop(Worker *w) {\n    if (!w) return true;\n    pthread_mutex_lock(&w->m);\n    bool s = w->stop;\n    pthread_mutex_unlock(&w->m);\n    return s;\n}\n\nlong worker_ticks(Worker *w) { return w ? atomic_load(&w->ticks) : -1; }\n\nstatic void *worker_main(void *p) {\n    Worker *w = (Worker *)p;\n    while (!worker_should_stop(w)) {\n        atomic_fetch_add(&w->ticks, 1L);     // 실제로는 한 프레임 처리\n    }\n    return NULL;\n}\n\nbool worker_start(Worker *w) {\n    if (!w) return false;\n    pthread_mutex_lock(&w->m);\n    if (w->running) { pthread_mutex_unlock(&w->m); return false; }\n    w->stop    = false;\n    w->running = true;\n    pthread_mutex_unlock(&w->m);\n\n    if (pthread_create(&w->th, NULL, worker_main, w) != 0) {\n        pthread_mutex_lock(&w->m);\n        w->running = false;\n        pthread_mutex_unlock(&w->m);\n        return false;\n    }\n    return true;\n}\n\n// stop 플래그를 세우고 join. 이미 멈췄으면 아무것도 하지 않는다. 총 ticks 반환.\nlong worker_stop_and_join(Worker *w) {\n    if (!w) return -1;\n    pthread_mutex_lock(&w->m);\n    bool need_join = w->running;\n    w->stop    = true;\n    w->running = false;\n    pthread_mutex_unlock(&w->m);\n\n    if (need_join) pthread_join(w->th, NULL);   // ★ join 해야 자원 해제가 안전\n    return atomic_load(&w->ticks);\n}",
+      "explanation_ko": "pthread_cancel 은 취소 지점이 구현 정의라 어디서 죽을지 알 수 없고, 잡고 있던 락은 잠긴 채로, 열린 fd 는 열린 채로 남는다. 그래서 임베디드에서는 항상 협조적 종료다 — 플래그를 세우고, 스레드가 무엇에 막혀 있든 깨우고(계산 루프면 폴링, condvar 면 broadcast, poll/read 면 self-pipe 에 한 바이트), join 으로 '진짜 끝났음'을 확인한 뒤에야 자원을 해제한다. 순서는 항상 stop → join → destroy. stop_and_join 을 idempotent 하게 만들면 에러 경로에서 중복 호출돼도 안전하고, 같은 구조로 재시작까지 지원된다.",
+      "complexity": "종료 O(1) + 남은 작업 1회분",
+      "pitfalls": [
+        "락을 쥔 채 pthread_join 호출 → 데드락.",
+        "pthread_cancel 사용 (락/fd 누수).",
+        "join 없이 detach 만 하고 자원을 free → use-after-free.",
+        "stop 플래그를 plain bool 로 두고 락도 atomic 도 없이 읽는다 (컴파일러가 루프 밖으로 호이스팅).",
+        "블로킹 대기 중인 스레드에 플래그만 세우고 깨우지 않는다 — 영원히 join 이 안 끝난다."
+      ],
+      "verkada_context": "GW31-E 의 '오프라인 30분이면 자가 재부팅', Command 의 원격 power-cycle, OTA 직전 셧다운이 전부 이 경로다."
+    }
+  ]
+}

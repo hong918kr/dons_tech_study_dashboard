@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>01. Bounded blocking queue — mutex 1개 + condvar 2개로 스레드를 잇는 법</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+
+.check{margin:26px 0;border:1px solid var(--line);border-radius:12px;background:var(--paper);overflow:hidden}
+.check-h{font-size:12px;letter-spacing:.06em;color:var(--accent);padding:10px 16px;
+         border-bottom:1px solid var(--line);background:var(--accent-soft)}
+details.qa{border-bottom:1px solid var(--line)}
+details.qa:last-child{border-bottom:0}
+details.qa summary{list-style:none;cursor:pointer;display:flex;gap:12px;align-items:flex-start;
+                   padding:13px 16px;font-family:var(--serif);font-size:16px;line-height:1.55}
+details.qa summary::-webkit-details-marker{display:none}
+.qn{font-family:var(--mono);font-size:11px;color:var(--muted);padding-top:4px;min-width:24px}
+.qt{flex:1}
+.rv{font-family:var(--sans);font-size:11px;color:var(--accent);border:1px solid var(--accent);
+    border-radius:999px;padding:2px 9px;white-space:nowrap;margin-top:2px}
+details.qa[open] .rv{background:var(--accent);color:#fff}
+details.qa[open] .rv::after{content:""}
+.ans{padding:2px 16px 14px 52px}
+.ans p{font-size:15.5px;line-height:1.7;margin:0 0 10px}
+section.chapter{scroll-margin-top:70px}
+.ch-foot{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;
+         margin:40px 0 10px;padding:18px 20px;border:1px dashed var(--line);border-radius:12px}
+.ch-foot .done{font:inherit;font-size:14px;padding:9px 16px;border-radius:999px;cursor:pointer;
+               border:1.5px solid var(--ok);background:transparent;color:var(--ok)}
+.ch-foot .done.on{background:var(--ok);color:#fff}
+.ch-foot a.nx{font-family:var(--serif);font-size:15px;text-decoration:none}
+aside li.ch a{font-weight:600;color:var(--ink)}
+aside li.ch.done a::before{content:"✓ ";color:var(--ok)}
+aside li.sub{display:none;padding-left:14px;font-size:12.5px}
+aside li.sub.show{display:block}
+.resume{font:inherit;font-size:13px;margin-top:16px;padding:9px 16px;border-radius:999px;cursor:pointer;
+        border:1.5px solid var(--accent);background:var(--accent);color:#fff}
+#chprog{font-size:12px;color:var(--muted);white-space:nowrap}
+</style></head>
+<body data-note="basics/01_bounded_queue">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">기초 노트 · 01. Bounded blocking queue — mutex 1개 + condvar 2개로 스레드를 잇는 법</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">기초 노트 · Foundations</div>
+      <h1>01. Bounded blocking queue — mutex 1개 + condvar 2개로 스레드를 잇는 법</h1>
+      <div class="meta"><span>18분 읽기</span><span>300줄</span><span>15개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong></p>
+<ul><li>mutex 와 condition variable 로 "가득 차면 기다리고 비면 기다리는" 큐를 처음부터 짤 수 있다</li><li>조건 검사에 <code>while</code> 을 쓰는 이유와 종료할 때 <code>broadcast</code> 를 쓰는 이유를 시나리오로 설명할 수 있다</li><li>소비자가 남은 항목을 다 처리하고 깨끗하게 끝나는 close 프로토콜을 설계할 수 있다</li></ul>
+<p><strong>선행</strong>: <code>00_start_here</code> 의 §3 (mutex), §4 (condition variable), §7 (종료와 정리) <strong>연습</strong>: <code>make run N=01</code> (내 구현) · <code>make sol N=01</code> (모범답안) · <code>make tsan N=01</code></p></blockquote>
+<hr>
+<h2 id="0-한-문장으로">0. 한 문장으로<a class="anchor" href="#0-한-문장으로" aria-label="link">#</a></h2>
+<p><strong>고정 크기 버퍼 하나를 mutex 로 지키고, "안 참"과 "안 빔" 두 조건을 condvar 두 개로 기다리게 만든 큐</strong>다. Verkada GC31-E 게이트웨이에서 도어·센서·모뎀 스레드가 만든 이벤트를 업로더 스레드 하나가 LTE 로 올리는 구조가 정확히 이것이고, 그래서 이 문제가 2차 인터뷰 1순위다.</p>
+<hr>
+<h2 id="1-왜-필요한가-비유로-시작">1. 왜 필요한가 — 비유로 시작<a class="anchor" href="#1-왜-필요한가-비유로-시작" aria-label="link">#</a></h2>
+<p>우편함이 8칸 있다. 우체부(생산자)는 편지를 넣고, 집주인(소비자)은 꺼내 간다.</p>
+<figure class="code"><pre><code>                 8칸짜리 우편함 (cap = 8)
+   우체부 A ─┐    ┌───┬───┬───┬───┬───┬───┬───┬───┐
+   우체부 B ─┼──▶ │ e │ e │ e │   │   │   │   │   │ ──▶ 집주인
+   우체부 C ─┘    └───┴───┴───┴───┴───┴───┴───┴───┘
+                    ▲               ▲
+                   head            tail
+                  (다음에 꺼낼 칸)  (다음에 넣을 칸)   count = 3</code></pre></figure>
+<p><strong>우편함이 꽉 찼을 때 우체부는 뭘 하나?</strong> 편지를 버리거나(drop — 문제 05), 칸이 빌 때까지 기다린다(block). 출입 이벤트는 감사 로그라 하나도 잃으면 안 되므로 <strong>기다린다</strong>를 고른다. 이게 backpressure 다 — 소비자가 느리면 생산자가 저절로 느려진다. <strong>우편함이 비었을 때 집주인은?</strong> 1초마다 열어보면(폴링) CPU와 전력을 낭비하므로 <strong>"편지 오면 깨워달라"고 하고 잔다.</strong> 그게 condition variable 이다.</p>
+<p>베어메탈로 번역하면 우체부는 UART/도어 ISR 이고 집주인은 파서 태스크다. 차이는 여기서 우체부가 <strong>진짜로 잠들 수 있다</strong>는 것 — ISR 안에서는 못 하지만 Linux 스레드에서는 할 수 있고, 그래서 drop 없이 버틸 수 있다.</p>
+<hr>
+<h2 id="2-알아야-할-개념">2. 알아야 할 개념<a class="anchor" href="#2-알아야-할-개념" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>한 줄 정의</th><th>왜 존재하나 / 내가 아는 것과의 대응</th></tr></thead><tbody><tr><td>bounded</td><td>큐 용량에 상한이 있다</td><td>무한 큐는 소비자가 느리면 메모리를 다 먹고 OOM 으로 죽는다</td></tr><tr><td>circular buffer</td><td><code>head</code>/<code>tail</code> 을 <code>% cap</code> 으로 돌리는 배열</td><td>베어메탈 UART 링버퍼와 완전히 같은 것</td></tr><tr><td>mutex</td><td>임계구역 문지기. lock/unlock</td><td><code>__disable_irq()</code> 로 감싸던 구간의 멀티코어 버전</td></tr><tr><td>condition variable</td><td>"조건이 바뀔 때까지 락을 놓고 자는" 대기열</td><td>DMA 완료 플래그를 폴링하던 것을 재우기로 바꾼 것</td></tr><tr><td>spurious wakeup</td><td>아무도 signal 안 했는데 <code>cond_wait</code> 이 반환하는 것</td><td>POSIX 가 허용한다. 그래서 조건 검사는 <code>while</code></td></tr><tr><td>signal vs broadcast</td><td>하나만 깨움 vs 전부 깨움</td><td>항목 1개 추가 = signal, 상태 변화(close) = broadcast</td></tr><tr><td>close 프로토콜</td><td>"더는 안 들어온다"를 알리고 모두 내보내는 절차</td><td>셧다운 시퀀스. 버그가 제일 많이 남는 곳</td></tr></tbody></table></div>
+<p><strong>condvar 는 락이 아니다</strong>는 점만 확실히 하자. condvar 에는 "값"이 없다. 조건은 항상 <code>q-&gt;count == 0</code> 처럼 <strong>mutex 로 보호되는 일반 변수</strong>로 표현하고, condvar 는 그 변수가 바뀌었을 때 잠든 사람을 깨우는 <strong>벨</strong>일 뿐이다.</p>
+<hr>
+<h2 id="3-문제-읽기">3. 문제 읽기<a class="anchor" href="#3-문제-읽기" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>요구</th><th>설계에 주는 제약</th></tr></thead><tbody><tr><td>여러 생산자, 소비자 하나 이상</td><td>인덱스와 count 를 <strong>전부</strong> 한 mutex 안에서 다룬다</td></tr><tr><td>가득 차면 생산자 블록</td><td>"안 참"을 기다릴 condvar <code>not_full</code> 이 필요</td></tr><tr><td>비면 소비자 블록</td><td>"안 빔"을 기다릴 condvar <code>not_empty</code> 가 필요</td></tr><tr><td>close 후 남은 항목은 다 소비</td><td><code>pop</code> 은 "닫힘"이 아니라 <strong>"닫힘 그리고 빔"</strong> 일 때만 실패</td></tr><tr><td>close 후 push 는 거부</td><td><code>push</code> 는 깬 뒤 <code>closed</code> 를 다시 확인해야 한다</td></tr><tr><td>대기 중인 스레드가 전부 빠져나와야</td><td>close 는 두 condvar 모두에 <strong>broadcast</strong></td></tr></tbody></table></div>
+<p>condvar 를 <strong>두 개</strong> 쓰는 이유가 여기서 나온다. 하나로 합치면 "자리가 났다"는 신호에 소비자가, "항목이 생겼다"는 신호에 생산자가 깨어난다. 동작은 하지만(while 이 방어해 준다) 쓸데없이 깨우는 비용이 크다. <strong>기다리는 조건이 다르면 condvar 를 나눈다.</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>typedef struct {
+    AccessEvent    *buf;
+    size_t          cap, head, tail, count;
+    bool            closed;
+    pthread_mutex_t m;
+    pthread_cond_t  not_full, not_empty;
+} BQueue;</code></pre></figure>
+<p><code>count</code> 를 따로 두는 게 포인트다. <code>head == tail</code> 만으로는 "가득 참"과 "빔"을 구분할 수 없다. 02의 링버퍼는 한 칸을 비워서 구분하지만, 여기서는 이미 락을 잡으므로 <code>count</code> 를 그냥 세는 게 제일 읽기 쉽다. <strong>불변식</strong>을 먼저 적어 놓자 — 면접에서는 코드보다 이걸 먼저 말하는 게 낫다.</p>
+<figure class="code"><pre><code>  0 &lt;= count &lt;= cap
+  유효한 항목은 buf[head], buf[head+1], ... 총 count 개 (mod cap)
+  head, tail, count, closed 는 오직 m 을 잡은 상태에서만 읽고 쓴다</code></pre></figure>
+<hr>
+<h2 id="4-단계별로-만들기">4. 단계별로 만들기<a class="anchor" href="#4-단계별로-만들기" aria-label="link">#</a></h2>
+<h3 id="4-1-초기화-셋-다-init-한다">4.1 초기화 — 셋 다 init 한다<a class="anchor" href="#4-1-초기화-셋-다-init-한다" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>int bq_init(BQueue *q, size_t cap)
+{
+    if (cap == 0) return -1;
+    q-&gt;buf = calloc(cap, sizeof *q-&gt;buf);
+    if (!q-&gt;buf) return -1;
+    q-&gt;cap = cap;
+    q-&gt;head = q-&gt;tail = q-&gt;count = 0;
+    q-&gt;closed = false;
+    pthread_mutex_init(&amp;q-&gt;m, NULL);
+    pthread_cond_init(&amp;q-&gt;not_full, NULL);
+    pthread_cond_init(&amp;q-&gt;not_empty, NULL);
+    return 0;
+}</code></pre></figure>
+<p><code>cap == 0</code> 을 막는 이유는 <code>% q-&gt;cap</code> 에서 0 나누기가 나기 때문이다. <code>calloc</code> 실패를 삼키면 나중에 <code>q-&gt;buf[q-&gt;tail]</code> 이 널 포인터 역참조로 터진다. <code>pthread_cond_init(&amp;cv, NULL)</code> 의 두 번째 인자는 속성이고 <code>NULL</code> 이면 기본값이다. <strong>init 을 빼먹으면</strong> 초기화 안 된 mutex 로 lock 하는 셈이라 정의되지 않은 동작이다 — 운 좋으면 즉시 죽고, 운 나쁘면 몇 시간 뒤에 죽는다.</p>
+<h3 id="4-2-push-자리가-날-때까지-기다린다">4.2 push — 자리가 날 때까지 기다린다<a class="anchor" href="#4-2-push-자리가-날-때까지-기다린다" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>bool bq_push(BQueue *q, AccessEvent ev)
+{
+    pthread_mutex_lock(&amp;q-&gt;m);
+    /* while: spurious wakeup + 여러 생산자가 동시에 깨는 경우 방어 */
+    while (q-&gt;count == q-&gt;cap &amp;&amp; !q-&gt;closed)
+        pthread_cond_wait(&amp;q-&gt;not_full, &amp;q-&gt;m);</code></pre></figure>
+<p><code>pthread_mutex_lock</code> 부터 <code>head/tail/count/closed</code> 를 만질 자격이 생긴다. <code>while</code> 의 조건은 "가득 찼고, 아직 안 닫혔다"로, 닫혔으면 기다려도 자리가 안 나므로 즉시 빠져나와야 한다. <code>pthread_cond_wait(&amp;q-&gt;not_full, &amp;q-&gt;m)</code> 은 <strong>락을 놓고</strong> 자고 깨어날 때 <strong>락을 다시 잡고</strong> 돌아온다 — 이 셋이 원자적이라 signal 을 놓치지 않는다.</p>
+<p><code>while</code> 대신 <code>if</code> 를 쓰면? 생산자가 여럿일 때 소비자의 <code>signal(not_full)</code> 하나에 두 생산자가 깨어나는 순간이 온다. 먼저 락을 잡은 쪽이 빈 칸을 채워 다시 <code>count == cap</code> 이 되는데, 둘째는 조건을 다시 안 보고 그대로 덮어쓴다 → <strong>이벤트 하나가 소리 없이 사라진다.</strong></p>
+<h3 id="4-3-push-깬-뒤-closed-재확인-삽입-그리고-unlock-먼저">4.3 push — 깬 뒤 closed 재확인, 삽입, 그리고 unlock 먼저<a class="anchor" href="#4-3-push-깬-뒤-closed-재확인-삽입-그리고-unlock-먼저" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>    if (q-&gt;closed) {                      /* close 이후 push는 거부 */
+        pthread_mutex_unlock(&amp;q-&gt;m);
+        return false;
+    }
+    q-&gt;buf[q-&gt;tail] = ev;
+    q-&gt;tail = (q-&gt;tail + 1) % q-&gt;cap;
+    q-&gt;count++;
+    pthread_mutex_unlock(&amp;q-&gt;m);          /* unlock 먼저 → 깨어난 소비자가 곧장 lock 획득 */
+    pthread_cond_signal(&amp;q-&gt;not_empty);
+    return true;
+}</code></pre></figure>
+<p><code>while</code> 을 빠져나오는 경우는 두 가지다 — 자리가 났거나, 닫혔거나. 그래서 <strong>바로 다음 줄에서 <code>closed</code> 를 다시 확인</strong>한다. 반환값 <code>false</code> 는 "이 이벤트는 큐에 못 들어갔다"는 뜻이고, 버릴지 로그할지는 호출자가 정한다. <strong>여기서 <code>unlock</code> 을 빼먹으면</strong> 그 자리에서 전체가 멈춘다. 에러 경로의 unlock 누락이 동시성 버그 1위라, 중간 <code>return</code> 지점을 손가락으로 짚어 가며 확인하는 습관을 들인다.</p>
+<p>삽입 세 줄 사이에는 불변식이 깨져 있다(값은 들어갔는데 count 는 아직 옛날 값). 그래서 <strong>락 안</strong>이어야 한다. 항목 하나가 생겼으니 소비자 하나만 깨우면 되므로 <code>signal</code> 이다. 순서에도 주목하자 — 락을 쥔 채로 signal 하면 깨어난 소비자가 <code>cond_wait</code> 안에서 락을 다시 잡으려다 <strong>즉시 다시 잠든다</strong>. 둘 다 정확하지만 후자가 빠르고, 면접에서 짚으면 좋은 디테일이다.</p>
+<h3 id="4-4-pop-대칭-그리고-종료-판정">4.4 pop — 대칭, 그리고 종료 판정<a class="anchor" href="#4-4-pop-대칭-그리고-종료-판정" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>bool bq_pop(BQueue *q, AccessEvent *out)
+{
+    pthread_mutex_lock(&amp;q-&gt;m);
+    while (q-&gt;count == 0 &amp;&amp; !q-&gt;closed)
+        pthread_cond_wait(&amp;q-&gt;not_empty, &amp;q-&gt;m);
+
+    if (q-&gt;count == 0) {                  /* closed &amp;&amp; empty → 종료 신호 */
+        pthread_mutex_unlock(&amp;q-&gt;m);
+        return false;
+    }
+    *out = q-&gt;buf[q-&gt;head];
+    q-&gt;head = (q-&gt;head + 1) % q-&gt;cap;
+    q-&gt;count--;
+    pthread_mutex_unlock(&amp;q-&gt;m);
+    pthread_cond_signal(&amp;q-&gt;not_full);
+    return true;
+}</code></pre></figure>
+<p>거의 거울 대칭인데 <strong>한 곳이 다르다</strong>. 종료 판정이 <code>if (q-&gt;closed)</code> 가 아니라 <code>if (q-&gt;count == 0)</code> 이다. <code>while</code> 을 빠져나온 시점에 <code>count == 0</code> 이라면 조건상 반드시 <code>closed</code> 도 참이므로, 이 검사는 곧 <strong>"닫혔고 그리고 비었다"</strong> 를 뜻한다. <code>if (q-&gt;closed) return false;</code> 로 썼다면 close 순간 큐에 남아 있던 이벤트가 그대로 버려진다 — 출입 감사 로그에서는 그게 바로 사고다.</p>
+<h3 id="4-5-close-broadcast-두-번">4.5 close — broadcast 두 번<a class="anchor" href="#4-5-close-broadcast-두-번" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>void bq_close(BQueue *q)
+{
+    pthread_mutex_lock(&amp;q-&gt;m);
+    q-&gt;closed = true;
+    pthread_mutex_unlock(&amp;q-&gt;m);
+    /* 대기 중인 모든 스레드를 깨워야 한다 → signal이 아니라 broadcast */
+    pthread_cond_broadcast(&amp;q-&gt;not_empty);
+    pthread_cond_broadcast(&amp;q-&gt;not_full);
+}</code></pre></figure>
+<p><code>closed</code> 도 공유 변수이므로 <strong>락을 잡고</strong> 바꾼다. 그냥 대입만 하면 자고 있는 스레드가 그 변화를 볼 보장이 없다. <code>broadcast</code> 인 이유는 close 가 <strong>모두에게 해당되는 상태 변화</strong>이기 때문이다. <code>signal</code> 이면 한 명만 깨어나 빠져나오고 나머지는 영원히 자므로 <code>pthread_join</code> 이 끝나지 않는다. 두 condvar 모두 깨워야 한다는 것도 잊기 쉽다 — <code>not_empty</code> 만 깨우면 큐가 가득 찬 채로 <code>not_full</code> 에서 자던 생산자가 남는다.</p>
+<hr>
+<h2 id="5-전체-흐름-따라가기">5. 전체 흐름 따라가기<a class="anchor" href="#5-전체-흐름-따라가기" aria-label="link">#</a></h2>
+<p><code>cap = 2</code> 인 작은 큐로, 생산자 P1/P2 와 소비자 C 가 어떻게 맞물리는지 보자.</p>
+<figure class="code"><pre><code> 시간 ↓  P1                      P2                      C                 count
+  t0    lock                                                                 0
+  t1    count(0)!=cap → 삽입                                                 1
+  t2    unlock + signal(not_empty)
+  t3    lock                                                                 1
+  t4    count(1)!=cap → 삽입                                                 2
+  t5    unlock + signal(not_empty)
+  t6                            lock                                          2
+  t7                            count==cap → cond_wait(not_full)  ← 락 놓고 잠  2
+  t8                                                    lock                  2
+  t9                                                    count!=0 → pop        1
+  t10                                                   unlock + signal(not_full)
+  t11                           깨어남 + 락 재획득                             1
+  t12                           while 재검사: count(1)!=cap → 통과             1
+  t13                           삽입 / unlock / signal(not_empty)             2</code></pre></figure>
+<p>t7 이 핵심이다. P2 는 <strong>락을 쥔 채로 자지 않는다</strong>. <code>cond_wait</code> 이 락을 놓아 주기 때문에 t8 에서 소비자가 락을 잡을 수 있다. 락을 쥔 채로 잤다면 소비자가 영원히 못 들어오고 아무도 자리를 비워주지 못해 <strong>데드락</strong>이다. t12 도 중요하다 — 깨어났다고 바로 삽입하지 않고 <strong>조건을 다시 본다</strong>. 여기서는 통과하지만 생산자가 더 많았다면 다른 생산자가 그 자리를 이미 채웠을 수 있다.</p>
+<p>종료는 이렇게 흐른다.</p>
+<figure class="code"><pre><code> main                                    소비자 C
+ ─────────────────────────────────────   ──────────────────────────────────
+ join(prod) → 생산 끝 / bq_close()
+   closed = true + broadcast(둘 다)  ──▶  깨어남, while: count!=0 → 드레인
+ join(cons)                        ◀──   count==0 → return false → 종료
+ bq_destroy()   ← join 뒤에! 앞이면 use-after-free</code></pre></figure>
+<hr>
+<h2 id="6-흔한-실수와-증상">6. 흔한 실수와 증상<a class="anchor" href="#6-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>왜</th><th>고치는 법</th></tr></thead><tbody><tr><td>조건 검사에 <code>while</code> 대신 <code>if</code></td><td>아주 가끔 count 언더플로, 쓰레기 이벤트, 항목 유실</td><td>깨어났다고 조건이 맞다는 보장이 없다</td><td>항상 <code>while (조건) cond_wait(...)</code></td></tr><tr><td>close 에서 <code>signal</code> 사용</td><td><code>pthread_join</code> 이 안 끝나고 프로그램이 종료 안 됨</td><td>하나만 깨어나고 나머지는 계속 잠</td><td>두 condvar 모두 <code>broadcast</code></td></tr><tr><td><code>pop</code> 종료 조건을 <code>if (q-&gt;closed)</code> 로</td><td>close 시점에 남아 있던 이벤트가 사라짐</td><td>드레인 없이 즉시 종료</td><td><code>if (q-&gt;count == 0)</code> 로 "닫힘 그리고 빔" 검사</td></tr><tr><td>에러/거부 경로에서 <code>unlock</code> 누락</td><td>그 시점부터 전체 정지, CPU 0%</td><td>락이 영원히 잡혀 있음</td><td>모든 <code>return</code> 지점에서 unlock 확인</td></tr><tr><td><code>closed</code> 를 락 없이 수정</td><td>대기 중인 스레드가 close 를 못 봄, 간헐적 hang</td><td>가시성 보장이 없다</td><td>락 잡고 수정 후 broadcast</td></tr><tr><td>condvar 하나로 합침</td><td>동작은 하지만 느리고 엉뚱한 쪽이 깨어남</td><td>기다리는 조건이 둘인데 벨이 하나</td><td><code>not_full</code> / <code>not_empty</code> 분리</td></tr><tr><td><code>join</code> 전에 <code>bq_destroy</code></td><td>간헐적 크래시, TSan/ASan 경고</td><td>아직 도는 스레드가 해제된 mutex 접근</td><td>close → join → destroy 순서 고정</td></tr></tbody></table></div>
+<hr>
+<h2 id="7-직접-확인하기">7. 직접 확인하기<a class="anchor" href="#7-직접-확인하기" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">sh</span><pre><code>make sol N=01</code></pre></figure>
+<figure class="code"><pre><code>consumed=8000 (expect 8000), sum=7996000 (expect 7996000)
+01 PASS</code></pre></figure>
+<p><code>consumed</code> 는 생산자 4개 × 2000개 = 8000. <code>sum</code> 은 seq 합이라 값이 정해져 있다. <strong>개수만 세지 않고 합까지 검증</strong>하는 게 포인트다 — 개수만 맞고 내용이 섞이는 버그를 잡는다. self test 는 큐 용량을 일부러 8로 잡아 블로킹 경로를 반드시 지나가게 만들고(<code>bq_init(&amp;g_q, 8)</code>), 소비자 쪽에는 순서 검증도 넣었다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>assert(ev.seq == last_seq[ev.door_id] + 1);</code></pre></figure>
+<p>생산자별로 seq 가 1씩 증가하는지 본다. 같은 생산자가 넣은 순서는 FIFO 로 보존돼야 하므로, 이게 깨지면 큐가 항목을 건너뛰었거나 덮어썼다는 뜻이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>make tsan N=01</code></pre></figure>
+<p><code>make tsan</code> 은 <code>starters/</code> 가 있으면 <strong>내가 짠 구현</strong>을 검사한다. 통과하면 <code>01 PASS</code> 로 끝나고 경고가 하나도 안 나온다. 락을 빠뜨렸다면 이런 게 뜬다.</p>
+<figure class="code"><pre><code>WARNING: ThreadSanitizer: data race (pid=...)
+  Write of size 8 by thread T2:          #0 bq_push ... 01_bounded_queue.c:72
+  Previous read of size 8 by thread T1:  #0 bq_pop  ... 01_bounded_queue.c:81</code></pre></figure>
+<p>"같은 주소를 두 스레드가 동기화 없이 만졌다"는 뜻이고 두 스택이 정확히 어느 줄인지 알려준다. 결과가 우연히 맞아도 잡아준다는 게 TSan 의 가치다. 프로그램이 끝나지 않고 멈춰 있으면 close/broadcast 쪽 버그다 — <code>Ctrl-C</code> 로 끊고 <code>bq_close</code> 가 두 condvar 모두에 broadcast 하는지부터 본다.</p>
+<hr>
+<h2 id="8-면접에서-말하기">8. 면접에서 말하기<a class="anchor" href="#8-면접에서-말하기" aria-label="link">#</a></h2>
+<ul><li>"mutex 하나로 큐 상태 전체를 보호하고, 기다리는 조건이 둘이라 condvar 를 <code>not_full</code> / <code>not_empty</code> 로 나눴습니다. 조건 검사는 spurious wakeup 때문에 항상 <code>while</code> 입니다."</li><li>"종료는 <code>closed</code> 를 락 안에서 세우고 두 condvar 에 broadcast 합니다. close 는 모두에게 해당되는 상태 변화라 signal 로는 부족합니다."</li><li>"<code>pop</code> 은 '닫혔다'가 아니라 '닫혔고 그리고 비었다'일 때만 실패를 반환합니다. 그래야 close 이후에도 남은 이벤트를 전부 드레인할 수 있습니다."</li><li>"출입 이벤트는 감사 로그라 유실이 곧 사고입니다. 그래서 drop 이 아니라 블로킹으로 backpressure 를 겁니다. 센서 텔레메트리라면 반대로 최신값만 남기는 설계를 택합니다."</li><li>"정리 순서는 close → join → destroy 입니다. join 전에 destroy 하면 use-after-free 입니다."</li></ul>
+<ul><li>"One mutex protects the whole queue state; I use two condition variables because there are two distinct wait conditions — not full and not empty."</li><li>"The predicate is always checked in a <code>while</code> loop, not an <code>if</code> — spurious wakeups are allowed by POSIX, and another thread may have taken the slot before we reacquire the lock."</li><li>"<code>close()</code> sets the flag under the lock and then broadcasts on both condvars. A signal would release only one waiter and the rest would hang in join."</li><li>"<code>pop()</code> returns false only when the queue is closed <strong>and</strong> empty, so consumers drain everything that was already enqueued."</li><li>"Shutdown order is close, join, then destroy — destroying synchronization objects while a thread may still touch them is undefined behavior."</li></ul>
+<hr>
+<h2 id="9-요약-체크리스트">9. 요약 &amp; 체크리스트<a class="anchor" href="#9-요약-체크리스트" aria-label="link">#</a></h2>
+<p>bounded blocking queue 는 동시성 코드의 "Hello, world" 다. 상태 전체를 mutex 하나로 묶고, 기다리는 조건마다 condvar 를 하나씩 붙이고, 조건은 <code>while</code> 로 검사하고, 종료는 플래그 + broadcast + 드레인으로 처리한다. 평가받는 건 코드가 도는지가 아니라 <strong>while, broadcast, 종료 프로토콜, 그리고 "여기서 왜 blocking 이고 저기서는 왜 drop 인가"를 스스로 짚는가</strong>다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" > <code>while (조건) pthread_cond_wait(cv, m)</code> 형태를 손으로 쓸 수 있다</label></li><li class="task"><label><input type="checkbox" > <code>cond_wait</code> 이 락을 놓고 자고 다시 잡고 돌아온다는 걸 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > <code>if</code> 로 썼을 때 깨지는 시나리오를 타임라인으로 그릴 수 있다</label></li><li class="task"><label><input type="checkbox" > close 에서 broadcast 를, push/pop 에서 signal 을 쓰는 기준을 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > <code>pop</code> 의 종료 조건이 <code>count == 0</code> 인 이유를 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > 모든 <code>return</code> 경로에서 unlock 이 되는지 확인하는 습관이 있다</label></li><li class="task"><label><input type="checkbox" > close → join → destroy 순서를 이유와 함께 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > <code>make sol N=01</code> 과 <code>make tsan N=01</code> 을 둘 다 통과시켜 봤다</label></li></ul>
+    <div class="nav"><a class="prev" href="00_start_here.html"><span class="dir">← 이전</span><span class="nm">00. 여기서 시작 — 동시성 기초 총정리</span></a><a class="next" href="02_spsc_ring.html"><span class="dir">다음 →</span><span class="nm">02. Lock-free SPSC ring buffer — 베어메탈 링버퍼를 C11 atomics 로 다시 쓰기</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-한-문장으로">0. 한 문장으로</a></li><li class="l2"><a href="#1-왜-필요한가-비유로-시작">1. 왜 필요한가 — 비유로 시작</a></li><li class="l2"><a href="#2-알아야-할-개념">2. 알아야 할 개념</a></li><li class="l2"><a href="#3-문제-읽기">3. 문제 읽기</a></li><li class="l2"><a href="#4-단계별로-만들기">4. 단계별로 만들기</a></li><li class="l3"><a href="#4-1-초기화-셋-다-init-한다">4.1 초기화 — 셋 다 init 한다</a></li><li class="l3"><a href="#4-2-push-자리가-날-때까지-기다린다">4.2 push — 자리가 날 때까지 기다린다</a></li><li class="l3"><a href="#4-3-push-깬-뒤-closed-재확인-삽입-그리고-unlock-먼저">4.3 push — 깬 뒤 closed 재확인, 삽입, 그리고 unlock 먼저</a></li><li class="l3"><a href="#4-4-pop-대칭-그리고-종료-판정">4.4 pop — 대칭, 그리고 종료 판정</a></li><li class="l3"><a href="#4-5-close-broadcast-두-번">4.5 close — broadcast 두 번</a></li><li class="l2"><a href="#5-전체-흐름-따라가기">5. 전체 흐름 따라가기</a></li><li class="l2"><a href="#6-흔한-실수와-증상">6. 흔한 실수와 증상</a></li><li class="l2"><a href="#7-직접-확인하기">7. 직접 확인하기</a></li><li class="l2"><a href="#8-면접에서-말하기">8. 면접에서 말하기</a></li><li class="l2"><a href="#9-요약-체크리스트">9. 요약 &amp; 체크리스트</a></li></ol></aside>
+</div><script>
+const KEY='vk_notes_read_v1', TKEY='vk_notes_theme', CKEY='vk_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

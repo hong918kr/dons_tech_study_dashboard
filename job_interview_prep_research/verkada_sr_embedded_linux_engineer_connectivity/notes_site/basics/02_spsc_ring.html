@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>02. Lock-free SPSC ring buffer — 베어메탈 링버퍼를 C11 atomics 로 다시 쓰기</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+
+.check{margin:26px 0;border:1px solid var(--line);border-radius:12px;background:var(--paper);overflow:hidden}
+.check-h{font-size:12px;letter-spacing:.06em;color:var(--accent);padding:10px 16px;
+         border-bottom:1px solid var(--line);background:var(--accent-soft)}
+details.qa{border-bottom:1px solid var(--line)}
+details.qa:last-child{border-bottom:0}
+details.qa summary{list-style:none;cursor:pointer;display:flex;gap:12px;align-items:flex-start;
+                   padding:13px 16px;font-family:var(--serif);font-size:16px;line-height:1.55}
+details.qa summary::-webkit-details-marker{display:none}
+.qn{font-family:var(--mono);font-size:11px;color:var(--muted);padding-top:4px;min-width:24px}
+.qt{flex:1}
+.rv{font-family:var(--sans);font-size:11px;color:var(--accent);border:1px solid var(--accent);
+    border-radius:999px;padding:2px 9px;white-space:nowrap;margin-top:2px}
+details.qa[open] .rv{background:var(--accent);color:#fff}
+details.qa[open] .rv::after{content:""}
+.ans{padding:2px 16px 14px 52px}
+.ans p{font-size:15.5px;line-height:1.7;margin:0 0 10px}
+section.chapter{scroll-margin-top:70px}
+.ch-foot{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;
+         margin:40px 0 10px;padding:18px 20px;border:1px dashed var(--line);border-radius:12px}
+.ch-foot .done{font:inherit;font-size:14px;padding:9px 16px;border-radius:999px;cursor:pointer;
+               border:1.5px solid var(--ok);background:transparent;color:var(--ok)}
+.ch-foot .done.on{background:var(--ok);color:#fff}
+.ch-foot a.nx{font-family:var(--serif);font-size:15px;text-decoration:none}
+aside li.ch a{font-weight:600;color:var(--ink)}
+aside li.ch.done a::before{content:"✓ ";color:var(--ok)}
+aside li.sub{display:none;padding-left:14px;font-size:12.5px}
+aside li.sub.show{display:block}
+.resume{font:inherit;font-size:13px;margin-top:16px;padding:9px 16px;border-radius:999px;cursor:pointer;
+        border:1.5px solid var(--accent);background:var(--accent);color:#fff}
+#chprog{font-size:12px;color:var(--muted);white-space:nowrap}
+</style></head>
+<body data-note="basics/02_spsc_ring">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">기초 노트 · 02. Lock-free SPSC ring buffer — 베어메탈 링버퍼를 C11 atomics 로 다시 쓰기</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">기초 노트 · Foundations</div>
+      <h1>02. Lock-free SPSC ring buffer — 베어메탈 링버퍼를 C11 atomics 로 다시 쓰기</h1>
+      <div class="meta"><span>18분 읽기</span><span>285줄</span><span>15개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong></p>
+<ul><li>락 없이 생산자 1 · 소비자 1 이 안전하게 주고받는 링버퍼를 직접 짤 수 있다</li><li>release store 와 acquire load 가 무엇을 보장하는지 "데이터 먼저, 공개는 나중"으로 설명할 수 있다</li><li><code>volatile</code> 로는 왜 안 되는지, 베어메탈에서는 왜 그래도 돌았는지 말할 수 있다</li></ul>
+<p><strong>선행</strong>: <code>00_start_here</code> 의 §5 (원자 연산과 memory order), §6 (실시간 데이터 전달 패턴) <strong>연습</strong>: <code>make run N=02</code> (내 구현) · <code>make sol N=02</code> (모범답안) · <code>make tsan N=02</code></p></blockquote>
+<hr>
+<h2 id="0-한-문장으로">0. 한 문장으로<a class="anchor" href="#0-한-문장으로" aria-label="link">#</a></h2>
+<p><strong>생산자 하나와 소비자 하나가 락 없이 <code>head</code>/<code>tail</code> 인덱스만으로 동기화하는 고정 크기 링버퍼</strong>다. 게이트웨이에서 LTE 모뎀의 UART RX 인터럽트가 바이트를 넣고 AT 응답 파서 태스크가 꺼내는 경로가 바로 이것이고, <strong>ISR 안에서는 mutex 를 쓸 수 없기 때문에</strong> 락이 아닌 atomic 으로 풀어야 한다.</p>
+<hr>
+<h2 id="1-왜-필요한가-이미-만들어-본-것">1. 왜 필요한가 — 이미 만들어 본 것<a class="anchor" href="#1-왜-필요한가-이미-만들어-본-것" aria-label="link">#</a></h2>
+<p>베어메탈에서 UART 링버퍼를 짜 본 적이 있다면 구조는 이미 안다. 달라지는 건 <strong>동기화의 근거</strong>뿐이다.</p>
+<figure class="code"><pre><code>   UART RX ISR (생산자)                          파서 task (소비자)
+   ─────────────────────                         ─────────────────
+        buf[tail] = b                                 b = buf[head]
+        tail++                                        head++
+              │                                             │
+              ▼                                             ▼
+   ┌────┬────┬────┬────┬────┬────┬────┬────┬ ... ┬────┐
+   │ 41 │ 54 │ 0D │ 0A │    │    │    │    │     │    │   RING_CAP = 64
+   └────┴────┴────┴────┴────┴────┴────┴────┴ ... ┴────┘
+     ▲                   ▲
+    head                tail          생산자는 tail 만 쓰고, 소비자는 head 만 쓴다</code></pre></figure>
+<p><strong>왜 락을 안 쓰나?</strong> mutex 는 경쟁이 생기면 호출자를 <strong>재운다</strong>. ISR 은 잠들 수 없다(인터럽트 컨텍스트는 스케줄 대상이 아니다). 사용자 공간이라도 오디오 콜백이나 실시간 스레드에서 블로킹은 곧 글리치다.</p>
+<p><strong>왜 락이 없어도 되나?</strong> 생산자와 소비자가 <strong>서로 다른 변수만 쓰기</strong> 때문이다. 생산자는 <code>tail</code> 만 store 하고 <code>head</code> 는 load 만 한다. 소비자는 그 반대다. 같은 변수에 두 스레드가 동시에 쓰는 일이 원천적으로 없으니 상호배제가 필요 없다. 남는 문제는 하나뿐이다 — <strong>"서로가 상대의 인덱스를 언제, 어떤 순서로 보게 되는가."</strong> 그게 memory order 이야기다.</p>
+<p>이 구조는 <strong>SPSC(Single Producer Single Consumer)</strong> 에서만 성립한다. 생산자가 둘이 되면 <code>tail</code> 에 두 스레드가 쓰게 되어 전부 무너진다. 그때는 CAS 루프나 락으로 가야 한다.</p>
+<hr>
+<h2 id="2-알아야-할-개념">2. 알아야 할 개념<a class="anchor" href="#2-알아야-할-개념" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>한 줄 정의</th><th>왜 존재하나 / 내가 아는 것과의 대응</th></tr></thead><tbody><tr><td>SPSC</td><td>생산자 1, 소비자 1 전용</td><td>이 가정 덕분에 CAS 없이 store/load 만으로 된다</td></tr><tr><td>lock-free</td><td>락 없이 atomic 으로만 진행</td><td>ISR/실시간 경로에서 블로킹이 금지이기 때문</td></tr><tr><td><code>_Atomic</code></td><td>C11 원자 타입. 원자성 + 메모리 순서</td><td>베어메탈에서 쓰던 <code>volatile</code> 의 <strong>제대로 된</strong> 대체품</td></tr><tr><td><code>memory_order_relaxed</code></td><td>원자성만, 순서 보장 없음</td><td>내가 유일한 writer 인 값을 내가 읽을 때</td></tr><tr><td><code>memory_order_acquire</code></td><td>이 load 뒤의 접근이 앞으로 못 넘어옴</td><td>상대가 publish 한 인덱스를 읽을 때</td></tr><tr><td><code>memory_order_release</code></td><td>이 store 앞의 접근이 뒤로 못 넘어감</td><td>데이터를 다 쓰고 인덱스를 공개할 때</td></tr><tr><td>power-of-two mask</td><td><code>% cap</code> 대신 <code>&amp; (cap-1)</code></td><td>나눗셈 제거. 베어메탈에서 쓰던 그 트릭</td></tr><tr><td>한 칸 비우기</td><td>full/empty 구분을 위해 한 슬롯 희생</td><td><code>head == tail</code> 하나로 두 상태를 표현할 수 없어서</td></tr></tbody></table></div>
+<figure class="code"><span class="lang">c</span><pre><code>typedef struct {
+    uint8_t              buf[RING_CAP];
+    _Atomic unsigned     head;             /* 소비자만 store */
+    _Atomic unsigned     tail;             /* 생산자만 store */
+} Ring;</code></pre></figure>
+<p>주석 두 줄이 <strong>불변식</strong>이자 이 설계의 전부다. "누가 무엇을 쓰는가"를 못 박아 두면 나머지는 따라온다. <code>buf</code> 가 atomic 이 아닌 것도 의도적이다 — 인덱스의 release/acquire 가 데이터까지 같이 보호해 주므로 데이터 자체를 atomic 으로 만들 필요가 없다(§4.3).</p>
+<hr>
+<h2 id="3-문제-읽기">3. 문제 읽기<a class="anchor" href="#3-문제-읽기" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>요구</th><th>설계에 주는 제약</th></tr></thead><tbody><tr><td>ISR 에서 호출 가능</td><td>블로킹 금지. mutex, malloc, printf 전부 금지</td></tr><tr><td>생산자 1 / 소비자 1</td><td>각자 자기 인덱스만 store → CAS 불필요</td></tr><tr><td>가득 차면 실패 반환</td><td><code>ring_push</code> 는 <code>bool</code> 반환. 호출자가 drop 정책 결정</td></tr><tr><td>비면 실패 반환</td><td><code>ring_pop</code> 도 <code>bool</code>. 폴링하거나 이벤트로 깨운다</td></tr><tr><td>데이터 순서·내용 보존</td><td>release/acquire 짝이 반드시 필요</td></tr><tr><td>나눗셈 없이</td><td><code>RING_CAP</code> 을 2의 거듭제곱으로 고정</td></tr></tbody></table></div>
+<figure class="code"><span class="lang">c</span><pre><code>#define RING_CAP 64u                       /* power of two */</code></pre></figure>
+<p>2의 거듭제곱이면 <code>x % 64</code> 를 <code>x &amp; 63</code> 으로 바꿀 수 있다. 하드웨어 나눗셈이 없거나 느린 코어에서 ISR 안의 나눗셈은 그 자체로 비용이고, 뒤에서 볼 <code>(t - h) &amp; (RING_CAP - 1u)</code> 같은 <strong>wraparound 계산이 공짜로 맞아떨어진다.</strong></p>
+<hr>
+<h2 id="4-단계별로-만들기">4. 단계별로 만들기<a class="anchor" href="#4-단계별로-만들기" aria-label="link">#</a></h2>
+<h3 id="4-1-초기화-atomic_init">4.1 초기화 — <code>atomic_init</code><a class="anchor" href="#4-1-초기화-atomic_init" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>void ring_init(Ring *r)
+{
+    atomic_init(&amp;r-&gt;head, 0u);
+    atomic_init(&amp;r-&gt;tail, 0u);
+}</code></pre></figure>
+<p><code>_Atomic</code> 변수는 <code>= 0</code> 대신 <code>atomic_init</code> 으로 초기화하는 게 정석이다. <code>atomic_init</code> 은 <strong>동기화를 하지 않는 초기화</strong>라 다른 스레드가 이미 접근 중일 때 쓰면 안 된다. 즉 "스레드를 만들기 전에 한 번" 부르는 함수다.</p>
+<h3 id="4-2-push-내-인덱스는-relaxed-상대-인덱스는-acquire">4.2 push — 내 인덱스는 relaxed, 상대 인덱스는 acquire<a class="anchor" href="#4-2-push-내-인덱스는-relaxed-상대-인덱스는-acquire" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>bool ring_push(Ring *r, uint8_t b)
+{
+    unsigned t = atomic_load_explicit(&amp;r-&gt;tail, memory_order_relaxed); /* 내가 쓴 값 */
+    unsigned next = (t + 1u) &amp; (RING_CAP - 1u);
+    /* 소비자가 얼마나 비웠는지 본다 → acquire */
+    if (next == atomic_load_explicit(&amp;r-&gt;head, memory_order_acquire))
+        return false;                      /* full (한 칸은 항상 비워둔다) */</code></pre></figure>
+<ul><li><code>tail</code> 을 <code>relaxed</code> 로 읽는 이유: <strong><code>tail</code> 을 쓰는 스레드는 나뿐이다.</strong> 내가 쓴 값을 내가 읽는 건 단일 스레드 이야기라 순서를 맞출 상대가 없다. acquire 를 붙여도 틀리진 않지만 공짜 배리어는 없다.</li><li><code>head</code> 를 <code>acquire</code> 로 읽는 이유: <strong>소비자가 publish 한 값</strong>이다. 소비자가 슬롯을 다 읽고 나서 <code>head</code> 를 올렸다는 사실을, 내가 그 슬롯을 덮어쓰기 <strong>전에</strong> 확실히 봐야 한다.</li><li><code>next == head</code> 가 <strong>full 판정</strong>이다. 한 칸을 항상 비워 둔다는 뜻이고, 실제 저장 가능한 최대 개수는 63 이다.</li></ul>
+<p><strong>왜 한 칸을 비우나?</strong> <code>head == tail</code> 이 "비었다"와 "가득 찼다" <strong>둘 다</strong>를 의미하면 구분할 방법이 없다. 선택지는 셋이다 — 별도 <code>count</code> 를 두거나(두 스레드가 같은 변수를 쓰게 되어 SPSC 의 장점이 사라진다), 랩 카운트를 쓰거나, 한 칸을 희생하거나. 64바이트 버퍼에서 1바이트는 싸다.</p>
+<h3 id="4-3-push-데이터-먼저-공개는-나중에">4.3 push — 데이터 먼저, 공개는 나중에<a class="anchor" href="#4-3-push-데이터-먼저-공개는-나중에" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>    r-&gt;buf[t] = b;                         /* 데이터 먼저 */
+    /* release: 위의 데이터 write가 tail publish 이전에 보이도록 보장 */
+    atomic_store_explicit(&amp;r-&gt;tail, next, memory_order_release);
+    return true;
+}</code></pre></figure>
+<p>이 두 줄이 이 문제의 <strong>심장</strong>이다. 소스 순서는 "데이터 → 인덱스"지만, 컴파일러와 CPU 는 서로 다른 주소를 건드리는 두 store 를 <strong>단일 스레드 결과가 같으면</strong> 얼마든지 뒤바꿀 수 있다.</p>
+<figure class="code"><pre><code> 소비자 코어에 실제로 보이는 순서 (release 가 없을 때)
+ ────────────────────────────────────────────────────────
+   tail = next        ← 먼저 보임: "새 바이트가 있다!"
+   buf[t] = b         ← 아직 안 보임
+
+ 소비자:  h != tail → *out = r-&gt;buf[h];     ← 아직 안 써진 옛 값/쓰레기를 읽는다</code></pre></figure>
+<p>증상은 "20만 바이트에 한 번 값이 이상하다"이다. <code>memory_order_release</code> 를 붙이면 <strong>이 store 이전의 모든 메모리 접근이 이 store 보다 뒤로 넘어갈 수 없다.</strong> 그래서 소비자가 새 <code>tail</code> 을 본 순간 <code>buf[t] = b</code> 는 이미 보이는 것이 보장된다.</p>
+<h3 id="4-4-pop-거울-대칭">4.4 pop — 거울 대칭<a class="anchor" href="#4-4-pop-거울-대칭" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>bool ring_pop(Ring *r, uint8_t *out)
+{
+    unsigned h = atomic_load_explicit(&amp;r-&gt;head, memory_order_relaxed);
+    /* acquire: tail을 읽은 뒤 buf를 읽어야 생산자의 데이터가 보인다 */
+    if (h == atomic_load_explicit(&amp;r-&gt;tail, memory_order_acquire))
+        return false;                      /* empty */
+
+    *out = r-&gt;buf[h];
+    atomic_store_explicit(&amp;r-&gt;head, (h + 1u) &amp; (RING_CAP - 1u), memory_order_release);
+    return true;
+}</code></pre></figure>
+<p>같은 규칙의 반대편이다. <code>head</code> 는 내가 쓰는 값이라 <code>relaxed</code>, <code>tail</code> 은 상대가 publish 한 값이라 <code>acquire</code>. <code>*out = r-&gt;buf[h];</code> 가 <strong>acquire load 다음</strong>에 있어야 컴파일러가 버퍼 읽기를 tail 검사보다 먼저 당기지 못한다.</p>
+<p>마지막 <code>head</code> store 에 <code>release</code> 를 쓰는 이유는 덜 분명한데, <strong>생산자가 이 슬롯을 덮어쓰는 것을 막기 위해서</strong>다. "나는 <code>buf[h]</code> 를 다 읽었다"를 publish 하는 것이고 생산자는 acquire 로 그것을 읽는다. 이 release 가 빠지면 생산자가 아직 읽히지 않은 슬롯에 새 바이트를 써 버릴 수 있다. 정리하면 <strong>release/acquire 짝이 이 코드에 두 개</strong> 있다.</p>
+<div class="tw"><table><thead><tr><th>짝</th><th>보호하는 것</th></tr></thead><tbody><tr><td>생산자 <code>store(tail, release)</code> ↔ 소비자 <code>load(tail, acquire)</code></td><td>데이터가 쓰인 뒤에 읽힌다</td></tr><tr><td>소비자 <code>store(head, release)</code> ↔ 생산자 <code>load(head, acquire)</code></td><td>데이터가 읽힌 뒤에 덮어써진다</td></tr></tbody></table></div>
+<h3 id="4-5-count-스냅샷일-뿐이라는-점">4.5 count — 스냅샷일 뿐이라는 점<a class="anchor" href="#4-5-count-스냅샷일-뿐이라는-점" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>unsigned ring_count(const Ring *r)
+{
+    unsigned t = atomic_load_explicit(&amp;r-&gt;tail, memory_order_acquire);
+    unsigned h = atomic_load_explicit(&amp;r-&gt;head, memory_order_acquire);
+    return (t - h) &amp; (RING_CAP - 1u);
+}</code></pre></figure>
+<p><code>t - h</code> 는 <code>unsigned</code> 뺄셈이라 <code>t</code> 가 랩해서 <code>h</code> 보다 작아져도 결과가 맞다. <code>t = 2</code>, <code>h = 62</code> 면 <code>2 - 62</code> 는 unsigned 에서 큰 값이 되지만 <code>&amp; 63</code> 을 하면 4 가 나온다 — 실제로 62, 63, 0, 1 네 칸이 차 있다. <strong>mask 덕분에 wraparound 산술이 공짜로 맞는다.</strong></p>
+<p>주의할 점은 이 값이 <strong>즉시 낡는다</strong>는 것이다. 두 load 사이에도 상대가 인덱스를 움직일 수 있다. 그래서 <code>ring_count</code> 는 텔레메트리/디버깅용이지 제어 판단용이 아니다. "공간이 있으니 push 하겠다"처럼 <strong>검사 후 행동</strong>으로 쓰면 TOCTOU 버그다. 그래서 <code>ring_push</code> 는 <code>ring_count</code> 를 쓰지 않고 자기 안에서 직접 full 을 판정한다.</p>
+<hr>
+<h2 id="5-전체-흐름-따라가기">5. 전체 흐름 따라가기<a class="anchor" href="#5-전체-흐름-따라가기" aria-label="link">#</a></h2>
+<p>빈 링에서 한 바이트가 건너가는 과정이다.</p>
+<figure class="code"><pre><code> 시간 ↓  생산자 (ISR)                        소비자 (task)               head  tail
+  t0                                        load(head,relaxed)=0          0     0
+  t1    load(tail,relaxed)=0                load(tail,acquire)=0          0     0
+  t2    next = 1                            0 == 0 → empty, return false  0     0
+  t3    load(head,acquire)=0                                              0     0
+  t4    1 != 0 → 공간 있음                                                 0     0
+  t5    buf[0] = 0x41           ┐                                         0     0
+  t6    store(tail,1,RELEASE)   ●─── synchronizes-with ──┐                0     1
+  t7                                        load(head,relaxed)=0          0     1
+  t8                                  ○ ◀───┘ load(tail,acquire)=1        0     1
+  t9                                        0 != 1 → 데이터 있음           0     1
+  t10                                       *out = buf[0]  → 0x41 보장    0     1
+  t11                                       store(head,1,RELEASE)         1     1</code></pre></figure>
+<p>t6 의 release 와 t8 의 acquire 가 짝을 이루는 순간, <strong>t5 의 <code>buf[0] = 0x41</code> 이 t10 에서 반드시 보인다</strong>는 보장이 생긴다(happens-before). 이게 "데이터 먼저, 공개는 나중" 이다.</p>
+<p>가득 찬 경우는 이렇다. <code>tail = 63</code>, <code>head = 0</code> 상태에서 <code>next = (63 + 1) &amp; 63 = 0</code> 이고 <code>next == head</code> 이므로 full 이다. <code>buf[63]</code> 은 비어 있지만 쓰지 않는다 — 63개만 저장하고 한 칸은 영원히 비워 둔다. 이게 full 과 empty 를 구분하는 값이다.</p>
+<hr>
+<h2 id="6-흔한-실수와-증상">6. 흔한 실수와 증상<a class="anchor" href="#6-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>왜</th><th>고치는 법</th></tr></thead><tbody><tr><td><code>_Atomic</code> 대신 <code>volatile</code></td><td>200k 바이트에 한 번 값이 깨짐. 멀티코어에서만 재현</td><td><code>volatile</code> 은 재정렬을 막지 않는다</td><td><code>_Atomic</code> + release/acquire</td></tr><tr><td>전부 <code>relaxed</code></td><td>같은 증상. 단일 코어에서는 잘 돌아감</td><td>순서 보장이 없어 인덱스가 데이터보다 먼저 보임</td><td>publish 는 release, 상대 인덱스는 acquire</td></tr><tr><td>데이터 write 를 store 뒤로</td><td>거의 항상 깨짐</td><td>공개 후에 쓰면 소비자가 옛 값을 본다</td><td><code>buf[t] = b;</code> → <code>store(tail, release)</code> 순서</td></tr><tr><td><code>head</code> store 의 release 생략</td><td>아주 드물게 읽는 중에 값이 바뀜</td><td>생산자가 아직 읽히지 않은 슬롯을 덮어씀</td><td><code>store(head, ..., release)</code></td></tr><tr><td>한 칸 비우기를 안 함</td><td>full 인데 empty 로 판단(또는 반대) → 전부 유실</td><td><code>head == tail</code> 이 두 상태를 동시에 의미</td><td><code>next == head</code> 를 full 판정으로</td></tr><tr><td><code>RING_CAP</code> 이 2의 거듭제곱이 아님</td><td>인덱스가 범위를 벗어나거나 count 가 틀림</td><td><code>&amp; (CAP-1)</code> 마스크가 성립하지 않음</td><td>2의 거듭제곱 유지, 아니면 <code>%</code> 사용</td></tr><tr><td>생산자를 2개로 늘림</td><td>바이트 유실/중복, 재현 어려움</td><td>두 스레드가 <code>tail</code> 에 store → SPSC 가정 붕괴</td><td>락이나 CAS 기반 MPSC 로 교체</td></tr></tbody></table></div>
+<hr>
+<h2 id="7-직접-확인하기">7. 직접 확인하기<a class="anchor" href="#7-직접-확인하기" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">sh</span><pre><code>make sol N=02</code></pre></figure>
+<figure class="code"><pre><code>tx_sum=25493856 rx_sum=25493856 retries=66356 final_count=0
+02 PASS</code></pre></figure>
+<p><code>tx_sum</code> 과 <code>rx_sum</code> 이 같다 = 보낸 바이트의 합과 받은 합이 일치한다. <code>final_count=0</code> = 끝났을 때 링이 비어 있다. <code>retries</code> 는 링이 가득 차서 재시도한 횟수라 <strong>실행할 때마다 값이 다르다</strong>(수천~수만). 두 스레드의 상대 속도에 따라 달라지는 것이라 정상이다. 합만 맞고 순서가 틀리는 버그를 잡으려고 매 바이트를 기대값과 비교하는 <code>assert(b == (uint8_t)(expect &amp; 0xFF));</code> 도 들어 있다.</p>
+<p>self test 의 생산자는 실제 ISR 과 다르게 동작한다는 점을 꼭 알아 두자.</p>
+<figure class="code"><span class="lang">c</span><pre><code>while (!ring_push(&amp;g_ring, b)) {  /* 실제 ISR은 drop + 카운트만 한다 */
+    g_dropped++;                  /* 여기선 버리지 않고 재시도 */
+}</code></pre></figure>
+<p>테스트는 합을 검증해야 하므로 재시도하지만, <strong>진짜 UART ISR 은 여기서 재시도하면 안 된다.</strong> ISR 안에서 도는 순간 다음 인터럽트를 놓치고 하드웨어 오버런이 난다. 실제 구현은 <code>if (!ring_push(...)) drop_count++;</code> 로 버리고 즉시 나가야 하며, <code>drop_count</code> 는 텔레메트리로 올려서 "왜 AT 응답이 깨지는가"를 나중에 추적할 수 있게 한다. 면접에서 이 구분을 말하면 크게 먹힌다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>make tsan N=02</code></pre></figure>
+<p>모범답안은 TSan 이 깨끗하다. <strong>TSan 은 atomic 을 이해하기 때문에</strong> release/acquire 로 제대로 묶인 <code>buf</code> 접근에는 경고를 내지 않는다. 반대로 <code>_Atomic</code> 을 <code>volatile</code> 로 바꾸면 <code>WARNING: ThreadSanitizer: data race</code> 가 <code>ring_push</code> 의 <code>buf</code> write 와 <code>ring_pop</code> 의 <code>buf</code> read 를 지목하며 즉시 뜬다. "그 둘 사이에 happens-before 가 없다"는 뜻이고, <code>volatile</code> 이 동기화 도구가 아님을 <strong>도구가 직접 증명해 주는</strong> 실험이라 한 번 해 보는 걸 권한다.</p>
+<hr>
+<h2 id="8-면접에서-말하기">8. 면접에서 말하기<a class="anchor" href="#8-면접에서-말하기" aria-label="link">#</a></h2>
+<ul><li>"SPSC 라서 생산자는 <code>tail</code> 만, 소비자는 <code>head</code> 만 store 합니다. 같은 변수에 동시에 쓰는 일이 없으니 상호배제가 필요 없고, 남는 문제는 가시성 순서뿐이라 atomic 으로 풉니다."</li><li>"생산자는 데이터를 먼저 쓰고 <code>tail</code> 을 release store 로 공개하고, 소비자는 <code>tail</code> 을 acquire load 로 읽습니다. 이 짝이 있어야 소비자가 새 인덱스를 본 순간 데이터도 보입니다."</li><li>"자기 인덱스는 relaxed 로 읽습니다. 그 변수의 writer 가 자기뿐이라 순서를 맞출 상대가 없습니다."</li><li>"<code>volatile</code> 은 컴파일러 최적화만 막고 원자성도 메모리 순서도 주지 않습니다. 베어메탈 단일 코어에서 돌던 건 재정렬이 관찰되지 않았기 때문이지 <code>volatile</code> 이 맞아서가 아닙니다."</li><li>"실제 ISR 은 full 일 때 재시도하지 않고 버리고 카운터를 올립니다. drop 은 반드시 세서 텔레메트리로 올려야 현장에서 링 크기가 부족한지 판단할 수 있습니다."</li></ul>
+<ul><li>"Because it's single-producer single-consumer, each side owns one index — the producer only stores to <code>tail</code>, the consumer only to <code>head</code>. No mutual exclusion is needed."</li><li>"The producer writes the payload first, then publishes the index with a release store; the consumer does an acquire load on that index before touching the buffer. Data first, publish second."</li><li>"The index each side owns is read with relaxed ordering, since that thread is its only writer."</li><li>"<code>volatile</code> only stops the compiler from caching the access. It gives neither atomicity nor ordering, so it cannot replace acquire/release on a multicore SoC."</li><li>"In a real ISR I'd drop on full and bump a counter rather than retry, and export that counter as telemetry."</li></ul>
+<hr>
+<h2 id="9-요약-체크리스트">9. 요약 &amp; 체크리스트<a class="anchor" href="#9-요약-체크리스트" aria-label="link">#</a></h2>
+<p>SPSC 링버퍼는 <strong>"각자 자기 인덱스만 쓴다"</strong> 는 가정 하나로 락을 없앤 구조다. 남는 유일한 문제인 가시성 순서를 release/acquire 짝 <strong>두 개</strong>로 해결한다 — 생산자의 <code>tail</code> publish 와 소비자의 <code>head</code> publish. 용량은 2의 거듭제곱으로 잡아 나눗셈을 없애고, 한 칸을 비워 full 과 empty 를 구분한다. 이 문제는 베어메탈 UART 링버퍼 경험을 "C11 memory model 을 이해한다"는 신호로 바꿔 주는 다리다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" > 생산자/소비자가 각각 어떤 변수를 store 하고 어떤 변수를 load 하는지 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > release/acquire 짝이 왜 두 개인지, 각각 무엇을 보호하는지 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > 자기 인덱스를 <code>relaxed</code> 로 읽어도 되는 이유를 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > release 가 없을 때 깨지는 시나리오를 타임라인으로 그릴 수 있다</label></li><li class="task"><label><input type="checkbox" > 한 칸을 비워 두는 이유와 실제 용량이 63 인 것을 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > <code>(t - h) &amp; (RING_CAP - 1u)</code> 가 wraparound 에서도 맞는 이유를 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > <code>volatile</code> 이 못 하는 세 가지를 댈 수 있다</label></li><li class="task"><label><input type="checkbox" > 생산자가 둘이 되면 왜 무너지는지, 그때 무엇으로 바꿀지 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > <code>make sol N=02</code> 와 <code>make tsan N=02</code> 를 둘 다 통과시켜 봤다</label></li></ul>
+    <div class="nav"><a class="prev" href="01_bounded_queue.html"><span class="dir">← 이전</span><span class="nm">01. Bounded blocking queue — mutex 1개 + condvar 2개로 스레드를 잇는 법</span></a><a class="next" href="03_double_buffer.html"><span class="dir">다음 →</span><span class="nm">03. Double buffering — 락으로 데이터가 아니라 '소유권'을 지킨다</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-한-문장으로">0. 한 문장으로</a></li><li class="l2"><a href="#1-왜-필요한가-이미-만들어-본-것">1. 왜 필요한가 — 이미 만들어 본 것</a></li><li class="l2"><a href="#2-알아야-할-개념">2. 알아야 할 개념</a></li><li class="l2"><a href="#3-문제-읽기">3. 문제 읽기</a></li><li class="l2"><a href="#4-단계별로-만들기">4. 단계별로 만들기</a></li><li class="l3"><a href="#4-1-초기화-atomic_init">4.1 초기화 — atomic_init</a></li><li class="l3"><a href="#4-2-push-내-인덱스는-relaxed-상대-인덱스는-acquire">4.2 push — 내 인덱스는 relaxed, 상대 인덱스는 acquire</a></li><li class="l3"><a href="#4-3-push-데이터-먼저-공개는-나중에">4.3 push — 데이터 먼저, 공개는 나중에</a></li><li class="l3"><a href="#4-4-pop-거울-대칭">4.4 pop — 거울 대칭</a></li><li class="l3"><a href="#4-5-count-스냅샷일-뿐이라는-점">4.5 count — 스냅샷일 뿐이라는 점</a></li><li class="l2"><a href="#5-전체-흐름-따라가기">5. 전체 흐름 따라가기</a></li><li class="l2"><a href="#6-흔한-실수와-증상">6. 흔한 실수와 증상</a></li><li class="l2"><a href="#7-직접-확인하기">7. 직접 확인하기</a></li><li class="l2"><a href="#8-면접에서-말하기">8. 면접에서 말하기</a></li><li class="l2"><a href="#9-요약-체크리스트">9. 요약 &amp; 체크리스트</a></li></ol></aside>
+</div><script>
+const KEY='vk_notes_read_v1', TKEY='vk_notes_theme', CKEY='vk_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

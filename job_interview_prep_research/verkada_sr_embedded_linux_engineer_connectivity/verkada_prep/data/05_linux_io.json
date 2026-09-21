@@ -1,0 +1,500 @@
+{
+  "id": "linux_io",
+  "order": 5,
+  "range": "Q39-48",
+  "icon": "🐧",
+  "track": "core",
+  "title_en": "Embedded Linux I/O & Event Loops",
+  "title_ko": "임베디드 Linux I/O & 이벤트 루프",
+  "summary_ko": "게이트웨이 연결 데몬을 이루는 POSIX I/O 부품 10개를 드릴한다. 부분 I/O·EINTR 루프(read_full/write_full), 논블로킹 fd 와 EAGAIN, poll() 이벤트 루프, self-pipe 로 깨우기, 스트림 라인 프레이밍, 지수 백오프+지터, monotonic deadline, write+fsync+rename 원자적 저장, 시그널 안전 종료, goto cleanup 으로 fd 누수 0. 코드는 macOS 에서도 도는 POSIX 만 쓰고, Linux 전용 epoll/timerfd/signalfd/netlink/systemd watchdog 은 노트에서 이론으로 다뤄 면접 대화에 대비한다.",
+  "summary_en": "Ten drillable POSIX building blocks of a gateway connectivity daemon: partial-I/O and EINTR loops, non-blocking fds and EAGAIN, a poll() event loop, the self-pipe trick, stream line framing, exponential backoff with jitter, monotonic deadlines, crash-safe config saves, signal-safe shutdown, and leak-free error paths. Portable POSIX in code; Linux-specific epoll/timerfd/signalfd/netlink/systemd watchdog covered as theory in the notes.",
+  "verkada_relevance_ko": "직함 자체가 Senior Embedded Linux Engineer (Connectivity) 다 — 이 세트는 '그 일을 실제로 해봤는가'를 가장 직접적으로 묻는 영역이고, Don 에게는 가장 약한 영역이라 우선순위가 높다. GC31-E 셀룰러 게이트웨이(LTE Cat12, 듀얼 SIM 자동 failover)와 GW31-E Wi-Fi 게이트웨이의 연결 데몬은 결국 모뎀 제어 채널·클라우드(Command) 소켓·재연결 타이머·종료 시그널을 한 poll 루프에서 돌리는 프로그램이다. 시스템 디자인 파트에서 '센서 데이터를 게이트웨이에서 클라우드까지' 같은 열린 문제가 나오면 스레드 모델(스레드 대신 fd), 버퍼링, 실패·재연결 정책(백오프+지터), 테스트 전략(모뎀을 pipe 로, 시계를 주입)으로 답해야 한다. 리크루터가 강조한 'modular, testable embedded software' 는 여기서 순수 함수 분리(백오프·라인 파서)와 의존성 주입으로 증명된다. 또 170개국 200만 대 fleet 규모는 thundering herd, 전원 손실 안전, fd 누수 같은 '오래 도는 데몬' 문제를 실제 요구사항으로 만든다.",
+  "concepts": [
+    {
+      "term": "short read / short write",
+      "ko": "read/write 는 요청한 바이트 수를 보장하지 않는다. 짧은 read 는 EOF 신호일 뿐 에러가 아니고, 짧은 write 는 루프로 마저 밀어야 한다.",
+      "en": "read/write may transfer fewer bytes than requested; a short read signals EOF (not an error) and a short write must be looped."
+    },
+    {
+      "term": "EINTR",
+      "ko": "시그널 때문에 시스템콜이 중단됐다는 뜻. 에러가 아니라 '다시 하라'는 신호다. SA_RESTART 를 끄면 poll 이 EINTR 로 즉시 깨어나 종료 플래그를 볼 수 있다.",
+      "en": "A syscall interrupted by a signal — retry, don't fail. Without SA_RESTART, poll() returns EINTR so the loop can check its stop flag."
+    },
+    {
+      "term": "O_NONBLOCK / EAGAIN / EWOULDBLOCK",
+      "ko": "O_NONBLOCK 은 파일 상태 플래그라 반드시 F_GETFL 로 읽어 OR 한 뒤 F_SETFL 해야 접근 모드가 날아가지 않는다(FD_CLOEXEC 는 F_GETFD/F_SETFD 로 다른 네임스페이스). 그 fd 에서 나는 EAGAIN 은 '지금은 데이터(공간)가 없다'는 정상 상태이므로 로그도 재연결도 하지 말고 루프로 복귀한다. 표준상 EWOULDBLOCK 과 같은 값이라는 보장이 없어 둘 다 검사한다.",
+      "en": "O_NONBLOCK is a file status flag — set it with a read-modify-write F_GETFL/F_SETFL (FD_CLOEXEC lives in F_GETFD/F_SETFD). EAGAIN on such an fd means 'not ready right now', a normal condition; check EWOULDBLOCK too for portability."
+    },
+    {
+      "term": "poll vs epoll vs kqueue",
+      "ko": "poll 은 POSIX 표준이고 매 호출 O(n)이라 fd 수십 개 규모(임베디드 데몬)에 최적. epoll 은 관심 집합이 커널에 상주해 fd 수천 개부터 이득(Linux 전용). kqueue 는 BSD/macOS 대응물. 트리거 모드: LT(기본)는 조건이 남아 있으면 계속 보고해 안전하고, ET(EPOLLET)는 변화 순간만 보고하므로 반드시 EAGAIN 까지 전부 읽어야 한다.",
+      "en": "poll is portable and O(n) per call — ideal for a few dozen fds; epoll keeps the interest set in the kernel and wins at thousands of fds; kqueue is the BSD/macOS equivalent. Level-triggered keeps reporting while data remains; edge-triggered (EPOLLET) reports only transitions, so you must drain to EAGAIN."
+    },
+    {
+      "term": "self-pipe trick / eventfd",
+      "ko": "깨우기를 fd 이벤트로 바꿔 poll 집합에 합류시키는 기법. write() 가 async-signal-safe 하므로 시그널 핸들러에서도 안전하다. Linux 에서는 eventfd 가 fd 1개로 같은 일을 한다.",
+      "en": "Turn a wakeup into an fd event so it joins the poll set; write() is async-signal-safe, and Linux's eventfd does the same with a single fd."
+    },
+    {
+      "term": "async-signal-safe / volatile sig_atomic_t",
+      "ko": "시그널 핸들러에서 호출 가능한 함수는 write/_exit/sigaction 등으로 제한된다(printf·malloc 금지 — 재진입 데드락). 핸들러가 건드릴 수 있는 전역은 volatile sig_atomic_t 플래그뿐이다.",
+      "en": "Only a short list of functions (write, _exit, sigaction…) may be called from a handler; the only global it may touch is a volatile sig_atomic_t flag."
+    },
+    {
+      "term": "CLOCK_MONOTONIC deadline",
+      "ko": "타임아웃은 절대 CLOCK_REALTIME 으로 재지 않는다 — NTP 가 시계를 되돌리면 타임아웃이 몇 시간 늘어난다. 절대 deadline 을 잡고 매 회전 남은 시간을 재계산해 poll 에 넘긴다.",
+      "en": "Never measure timeouts with CLOCK_REALTIME (NTP can step it backwards); hold an absolute monotonic deadline and recompute the remaining time each iteration."
+    },
+    {
+      "term": "atomic file replace (write+fsync+rename)",
+      "ko": "같은 디렉토리의 임시 파일에 쓰고 fsync → rename → 디렉토리 fsync. rename 만 POSIX 원자성을 가지므로 독자는 옛 파일 아니면 새 파일만 본다. 전원 손실 안전의 표준 레시피.",
+      "en": "Write a temp file in the same directory, fsync it, rename (the only atomic step), then fsync the directory — the standard power-loss-safe recipe."
+    },
+    {
+      "term": "timerfd / signalfd / netlink (Linux)",
+      "ko": "Linux 의 '모든 게 fd' 철학: 타이머 만료도, 시그널도, 링크 up/down(netlink)도, 파일 변경(inotify)도 fd 이벤트가 되어 같은 epoll/poll 루프에 합류한다. macOS 에는 없으므로 이론으로 알아둔다.",
+      "en": "Linux turns timers, signals, link-state changes (netlink) and file changes (inotify) into fds so they all join the same poll/epoll loop."
+    },
+    {
+      "term": "systemd watchdog (sd_notify)",
+      "ko": "Type=notify + WatchdogSec 유닛에서 데몬은 sd_notify(0,\"WATCHDOG=1\") 을 주기적으로 보내야 한다. 그래서 poll 타임아웃에 상한(cap)을 걸어 유휴 상태에서도 루프가 깨어나게 만든다.",
+      "en": "With Type=notify and WatchdogSec, the daemon must ping sd_notify periodically — which is why the poll timeout needs an upper cap."
+    }
+  ],
+  "study_note_md": "# 🐧 임베디드 Linux I/O & 이벤트 루프 (Embedded Linux I/O & Event Loops) — Q39~48\n\n> 직함이 **Embedded Linux Engineer** 다. GC31-E/GW31-E 게이트웨이의 연결 데몬은\n> 결국 \"모뎀 제어 채널 + 클라우드 소켓 + 재연결 타이머 + 종료 시그널\"을 한 루프에서\n> 돌리는 프로그램이다. 여기가 Don 의 가장 약한 영역이므로 이 노트는 **드릴보다 교육**\n> 비중이 높다. 코드는 macOS 에서 돌도록 POSIX 로 쓰되, 면접에서 말해야 하는\n> **Linux 전용 API(epoll/timerfd/signalfd/systemd)는 아래 이론 절**에서 확실히 잡는다.\n\n---\n\n## 1. 핵심 아이디어 — 게이트웨이 데몬 = 하나의 이벤트 루프\n\n싱글 스레드 + 논블로킹 I/O + 하나의 `poll()`. 스레드를 늘리는 대신 **fd 를 늘린다.**\n락이 없으니 데드락도 없고, 상태가 한 스레드에 모여 있어 테스트하기 쉽다.\n\n```\n                         ┌──────────────── gateway daemon (single thread) ──────────────┐\n  modem /dev/ttyUSB2 ──▶ │ fd0  line-framing reader ──▶ AT 응답 파서                     │\n  cloud TCP socket   ──▶ │ fd1  frame reader        ──▶ Command 프로토콜                 │\n  self-pipe / eventfd──▶ │ fd2  wakeup (cancel, config-changed, 다른 스레드의 요청)       │\n  timerfd (Linux)    ──▶ │ fd3  주기 작업 (없으면 poll timeout 으로 대체)                 │\n                         │                                                              │\n                         │   for(;;) {                                                  │\n                         │     to = poll_timeout_from(next_deadline, WATCHDOG_CAP);     │\n                         │     n  = poll(fds, nfds, to);       ← 유일한 블로킹 지점       │\n                         │     if (n < 0 && errno == EINTR) continue;   // 시그널        │\n                         │     if (g_stop) break;              // 종료 플래그            │\n                         │     if (n == 0) { on_timer(); kick_watchdog(); continue; }   │\n                         │     for each fd with revents: drain until EAGAIN;            │\n                         │   }                                                          │\n                         └──────────────────────────────────────────────────────────────┘\n                                          │\n                              backoff_delay_ms(attempt++) 로 재연결\n```\n\n**한 문장 요약**: 블로킹은 `poll()` 한 곳에서만 일어나고, 나머지는 전부 논블로킹이며,\n\"깨우고 싶으면\" self-pipe 에 1바이트를 쓴다.\n\n---\n\n## 2. 규칙 ① — 부분 I/O 와 EINTR (Q39, Q40)\n\n`read()`/`write()` 는 **요청한 만큼을 약속하지 않는다.**\n\n| 상황 | `read` 리턴 | 의미 | 해야 할 일 |\n|---|---|---|---|\n| 데이터 일부 도착 | `0 < k < n` | short read — **정상** | 남은 만큼 다시 읽거나, 누적 버퍼에 쌓기 |\n| 상대가 close | `0` | EOF | fd 를 poll 집합에서 제거, 재연결 |\n| 논블로킹, 데이터 없음 | `-1`, `EAGAIN`/`EWOULDBLOCK` | **정상** | 루프로 복귀 (에러 로그 금지) |\n| 시그널이 왔다 | `-1`, `EINTR` | 중단됨 | **재시도** |\n| 그 외 | `-1` | 진짜 에러 | 정리 후 보고 |\n\n```c\nssize_t read_full(int fd, void *buf, size_t n) {   // 블로킹 fd 용\n    unsigned char *p = buf; size_t got = 0;\n    while (got < n) {\n        ssize_t k = read(fd, p + got, n - got);\n        if (k < 0) { if (errno == EINTR) continue; return -1; }\n        if (k == 0) break;            // EOF → 짧게 리턴 (에러 아님!)\n        got += (size_t)k;\n    }\n    return (ssize_t)got;\n}\n```\n\n- **`write` 의 부분 쓰기가 더 위험하다.** 소켓/파이프 버퍼가 차면 `write` 는 쓸 수 있는\n  만큼만 쓰고 돌아온다. 루프를 안 돌면 프레임이 반쪽만 나가고, 상대는 영원히 다음\n  프레임을 기다린다 → \"가끔 클라우드 연결이 멈춘다\" 급 버그.\n- `-Wunused-result`: `write()` 리턴값 무시는 컴파일러가 경고한다. 이유가 있다.\n- **논블로킹 fd 에 `read_full` 을 쓰면 안 된다.** EAGAIN 에서 -1 이 되거나, 재시도하면\n  바쁜 대기가 된다. 논블로킹에는 \"EAGAIN 까지 읽고 루프로 복귀\"(`read_nb`)가 맞다.\n\n### O_NONBLOCK 설정의 함정\n\n```c\nfcntl(fd, F_SETFL, O_NONBLOCK);              // ❌ 나머지 플래그를 전부 날림\nint fl = fcntl(fd, F_GETFL, 0);\nfcntl(fd, F_SETFL, fl | O_NONBLOCK);         // ✅ read-modify-write\n```\n`O_NONBLOCK`(파일 상태 플래그, `F_GETFL`)과 `FD_CLOEXEC`(fd 플래그, `F_GETFD`)는\n**다른 네임스페이스**다. 헷갈리면 바로 티가 난다.\n\n> `EAGAIN` 과 `EWOULDBLOCK` 은 Linux/macOS 에서 같은 값이지만 표준은 같다고 보장하지\n> 않는다. `if (errno == EAGAIN || errno == EWOULDBLOCK)` 이 이식성 있는 관용구다.\n\n---\n\n## 3. 규칙 ② — poll vs epoll vs kqueue vs select (Q41)\n\n| | `select` | `poll` | `epoll` (Linux) | `kqueue` (BSD/macOS) |\n|---|---|---|---|---|\n| fd 개수 한계 | `FD_SETSIZE`(보통 1024) | 없음 | 없음 | 없음 |\n| 호출당 비용 | O(n) 복사 + O(n) 스캔 | O(n) 복사 + O(n) 스캔 | **O(활성 fd)** — 관심 집합이 커널에 상주 | O(활성 fd) |\n| 관심 집합 | 매번 재구축(호출이 파괴) | 매번 전달 | `epoll_ctl` 로 1회 등록 | `kevent` changelist |\n| 트리거 모드 | level | level | **level / edge(EPOLLET)** | level / edge |\n| 타임아웃 해상도 | µs (`timeval`) | **ms (int)** | ms (`epoll_wait`) / ns (`epoll_pwait2`) | ns (`timespec`) |\n| 이식성 | 어디나 | **POSIX — 어디나** | Linux 전용 | BSD/macOS 전용 |\n| 적합한 규모 | 레거시 | fd 수십 개 | fd 수천~수만 | 수천~수만 |\n\n**게이트웨이 데몬의 정답은 보통 `poll`** 이다 — fd 가 5~20개라 epoll 의 이점이 없고,\n코드가 짧고 이식성이 있다. epoll 은 fd 수백 개 이상, 즉 서버 쪽 이야기다.\n이 트레이드오프를 말할 수 있는 것 자체가 평가 항목(\"설계 결정의 정당화\")이다.\n\n### epoll 을 쓴다면 반드시 아는 것\n\n```c\nint ep = epoll_create1(EPOLL_CLOEXEC);\nstruct epoll_event ev = { .events = EPOLLIN, .data.fd = sock };\nepoll_ctl(ep, EPOLL_CTL_ADD, sock, &ev);\nint n = epoll_wait(ep, evs, MAXEV, timeout_ms);\n```\n- **Level-triggered(기본)**: 데이터가 남아 있으면 계속 보고. 한 번에 다 안 읽어도 안전.\n- **Edge-triggered(`EPOLLET`)**: 상태가 \"변할 때만\" 보고 → **반드시 논블로킹 + EAGAIN 이\n  날 때까지 전부 읽어야** 한다. 안 그러면 남은 데이터가 영원히 잠긴다. ET 의 이점은\n  동시 접속이 아주 많을 때의 wakeup 감소뿐 — 임베디드 데몬에서 ET 는 보통 과설계다.\n- `EPOLLONESHOT` 은 멀티스레드에서 한 fd 를 한 스레드만 처리하게 할 때.\n\n### poll 루프의 3대 버그\n\n1. **EOF fd 를 안 뺀다** → `POLLHUP` 이 매번 즉시 리턴 → CPU 100% 스핀.\n2. **`revents` 를 `events` 로만 검사한다** → `POLLHUP/POLLERR/POLLNVAL` 은 요청 안 해도\n   올라온다. 이 비트에서도 `read()` 를 해봐야 EOF/에러가 구분된다.\n3. **타임아웃을 재계산 안 한다** → EINTR 로 깰 때마다 타임아웃이 리셋되어 마감이 무한정\n   밀린다. 그래서 `deadline` 을 잡고 매 회전 `ms_remaining()` 을 다시 구한다.\n\n---\n\n## 4. 규칙 ③ — 루프를 깨우는 법 (Q42, Q47)\n\n이벤트 루프의 고전 문제: **poll 안에서 자고 있는데 \"지금 종료해\" 를 어떻게 전하나?**\n전역 플래그만 세우면 poll 이 타임아웃될 때까지 모른다.\n\n**self-pipe trick**: 파이프를 만들어 읽기단을 항상 poll 집합에 넣어두고, 깨우려는\n쪽(다른 스레드 / 시그널 핸들러)이 1바이트를 쓴다.\n\n```c\n// 시그널 핸들러에서 — write 는 async-signal-safe 하다\nstatic void on_sigterm(int s) {\n    (void)s;\n    int save = errno;              // 핸들러는 errno 를 복원해야 한다\n    g_stop = 1;                    // volatile sig_atomic_t\n    write(g_sp.wr, \"x\", 1);        // 루프를 즉시 깨운다\n    errno = save;\n}\n```\n- 양쪽 끝 **O_NONBLOCK**: 파이프가 이미 차 있으면 `EAGAIN` → \"이미 깨울 예정\"이므로 성공.\n- 깬 뒤 **반드시 drain**(EAGAIN 까지 읽기). 안 비우면 level-triggered poll 이 계속 즉시\n  리턴해서 busy loop.\n- **FD_CLOEXEC**: 데몬이 `fork/exec`(pppd, wpa_supplicant 호출 등) 할 때 fd 누수 방지.\n\n| 방법 | 플랫폼 | 비고 |\n|---|---|---|\n| **self-pipe** | 어디나 | fd 2개. 가장 이식성 있음 |\n| `eventfd(0, EFD_NONBLOCK\\|EFD_CLOEXEC)` | Linux | fd **1개**, 8바이트 카운터. self-pipe 의 현대판 |\n| `signalfd` | Linux | 시그널을 **fd 로** 받아 핸들러 자체를 없앤다. 반드시 `pthread_sigmask` 로 먼저 블록 |\n| `pselect`/`ppoll` | POSIX/Linux | 시그널 마스크를 원자적으로 교체 → self-pipe 없이 레이스 회피 |\n\n### 시그널 핸들러에서 허용되는 것 (Q47)\n\n- **async-signal-safe 함수만**: `write`, `_exit`, `sigaction`, `kill`, `read` …\n  **금지**: `printf`, `malloc/free`, `pthread_mutex_lock` — 핸들러가 malloc 중간에\n  끼어들면 힙 락이 재진입되어 그대로 데드락이다.\n- **쓸 수 있는 전역은 `volatile sig_atomic_t` 뿐** (또는 C11 `atomic_int` lock-free).\n  `volatile` 은 \"최적화로 읽기를 생략하지 말라\"일 뿐 원자성도 순서도 보장하지 않는다 —\n  그래서 **플래그 하나**에만 쓴다.\n- `signal()` 말고 **`sigaction()`**: 시맨틱이 이식성 있고 마스크를 지정할 수 있다.\n  `SA_RESTART` 를 **켜지 않아야** `poll` 이 `EINTR` 로 즉시 깨어나 플래그를 본다.\n  (켜면 일부 시스템콜이 자동 재시작되어 종료가 지연된다.)\n- 멀티스레드에서는 시그널이 **아무 스레드에나** 배달된다. 관례: 메인이 아닌 모든 스레드에서\n  `pthread_sigmask(SIG_BLOCK, ...)` 로 막고 전담 스레드 하나가 받는다.\n\n---\n\n## 5. 타이밍 — monotonic, timerfd, watchdog (Q45)\n\n```c\nstruct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);   // ✅\ntime(NULL); gettimeofday(...);                             // ❌ 타임아웃에 쓰지 말 것\n```\n`CLOCK_REALTIME` 은 NTP/사용자가 되돌릴 수 있다. 게이트웨이가 부팅 직후 NTP 동기화로\n시계를 몇 시간 점프시키면 realtime 기반 타임아웃은 그대로 멈춘 것처럼 보인다.\n(참고: Linux `pthread_cond_timedwait` 는 기본이 REALTIME 이라\n`pthread_condattr_setclock(&a, CLOCK_MONOTONIC)` 이 필요하다. macOS 는 그 API 가 없고\n`pthread_cond_timedwait_relative_np` 를 쓴다 — 세트 02 참고.)\n\n| Linux 타이머 방식 | 특징 | 언제 |\n|---|---|---|\n| `poll` timeout | fd 불필요, ms 해상도, **가장 단순** | 타이머가 1~2개 |\n| `timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK)` | 만료가 **fd 의 읽기 이벤트**가 됨 → 루프에 자연스럽게 합류, 놓친 만료 횟수를 read 로 알려줌 | 타이머 여러 개 / 주기 정확도 필요 |\n| `timer_create` + 시그널 | 핸들러 제약이 큼 | 비권장 |\n| 정렬된 deadline 힙 + poll timeout | fd 0개로 타이머 N개 | 타이머 많고 이식성 필요 |\n\n**systemd watchdog** (게이트웨이 데몬은 거의 항상 systemd 유닛이다):\n```ini\n[Service]\nType=notify\nWatchdogSec=30\nRestart=always\n```\n```c\nsd_notify(0, \"READY=1\");           // 기동 완료 보고 (Type=notify)\nsd_notify(0, \"WATCHDOG=1\");        // 루프가 살아 있다는 신호, WatchdogSec/2 마다\n```\n그래서 `poll` 타임아웃에 **상한(cap)** 을 둔다 — 이벤트가 없어도 주기적으로 깨어나\nwatchdog 을 쳐야 하기 때문. `poll_timeout_from(deadline, 10000)` 의 cap 이 그 역할이다.\n하드웨어 watchdog 이면 `/dev/watchdog` 에 주기적으로 쓴다. GW31-E 의\n\"오프라인 30분이면 자가 재부팅\"도 같은 계열의 안전장치다.\n\n---\n\n## 6. 전원 손실 안전 (Q46) — write + fsync + rename\n\n야외 장비는 전원이 예고 없이 끊긴다(PoE 재협상, 태양광 배터리 방전, -25°C 히터 부하).\n설정 파일을 제자리에서 덮어쓰면 **반쪽 파일**로 부팅해 벽돌이 된다.\n\n```\n① mkstemp(\"<path>.tmpXXXXXX\")   ← 반드시 같은 디렉토리(= 같은 파일시스템, rename 은 EXDEV 로 실패)\n② write_full(fd, data, n)\n③ fsync(fd)                     ← 데이터가 실제 미디어에 도달\n④ close(fd)  (+ chmod 0644, mkstemp 는 0600)\n⑤ rename(tmp, path)             ← POSIX 원자성: 독자는 옛 파일 아니면 새 파일만 본다\n⑥ fsync(디렉토리 fd)            ← 빼먹기 쉬움! 없으면 rename 자체가 전원 손실로 사라질 수 있다\n실패 시: unlink(tmp)            ← 쓰레기 누적 금지\n```\n`fsync` 없이 `rename` 만 하면 \"파일 이름은 새 것, 내용은 0바이트\"라는 최악의 상태가 실제로\n나온다(ext4 의 지연 할당). 임베디드에서는 여기에 **A/B 슬롯 + 부팅 카운터**(U-Boot\n`bootcount`/`upgrade_available`)를 더해 OTA 롤백까지 만든다 — follow-up 으로 말할 거리.\n\n---\n\n## 7. Linux 살펴보기 — /proc, /sys, netlink (면접 대화용)\n\n코드로는 안 다루지만 **Embedded Linux Engineer 면접에서 반드시 나온다.**\n\n| 무엇 | 어디서 | 쓰임 |\n|---|---|---|\n| fd 누수 확인 | `ls /proc/<pid>/fd` 개수 세기, `lsof -p` | \"며칠 뒤 EMFILE\" 디버깅의 1단계 |\n| 메모리 | `/proc/<pid>/status` (VmRSS), `smaps_rollup` | 누수/워터마크 |\n| 네트워크 | `/proc/net/dev`, `ss -tanp`, `/sys/class/net/<if>/operstate` | 링크 up/down, WAN failover |\n| 모뎀 | `/dev/ttyUSB*`(AT), `/dev/cdc-wdm*`(QMI/MBIM), ModemManager D-Bus | LTE Cat12, 듀얼 SIM 전환 |\n| GPIO/I2C/전원 | `/sys/class/gpio`(구), **libgpiod `/dev/gpiochip*`(현재 표준)**, `/dev/i2c-*` | PoE 제어, 히터, 센서 |\n| 링크 상태 알림 | **netlink** (`AF_NETLINK`, `RTMGRP_LINK`) — 소켓이므로 **poll 집합에 그대로 합류** | 폴링 없이 캐리어 변화 감지 |\n| 파일 변경 알림 | `inotify` (fd 기반) | 설정 리로드 |\n| 커널 이벤트 | `udev` / `AF_NETLINK NETLINK_KOBJECT_UEVENT` | USB 모뎀 재열거 |\n\n> 포인트: **Linux 의 \"모든 게 fd\" 철학** — 타이머도(timerfd), 시그널도(signalfd),\n> 링크 상태도(netlink), 파일 변경도(inotify) fd 가 되어 같은 `poll/epoll` 루프에\n> 합류한다. 이 한 문장을 말할 수 있으면 \"Linux 를 이해한다\"는 신호가 된다.\n\n---\n\n## 8. 재연결 정책 (Q44)\n\n200만 대가 클라우드 장애 복구 순간 동시에 재접속하면 **thundering herd** 로 복구를 방해한다.\n\n```c\ndelay = min(base * 2^attempt, cap);\ndelay = delay ± (delay * jitter_pct / 100);     // 지터로 흩뿌린다\n```\n- `base=500ms, cap=30s, jitter=20%` 가 실무 기본값. 성공하면 `attempt=0` 으로 리셋.\n- **난수를 함수 안에서 뽑지 말고 인자로 주입**한다 → 순수 함수 → 하드웨어·시간 없이\n  단위 테스트 가능. 이게 리크루터 메일의 \"modular, testable embedded software\" 에 대한\n  가장 직접적인 대답이다(같은 이유로 `now_ms` 도 주입 가능하게 만드는 게 정석).\n- **오버플로 주의**: `1 << attempt` 를 그냥 하면 attempt 가 32 를 넘을 때 UB.\n  cap 에서 먼저 끊거나 64비트로 계산한다.\n\n---\n\n## 9. 흔한 함정 (인터뷰 감점 포인트)\n\n1. `read()` 가 요청한 만큼 읽었다고 가정 — **가장 흔한 감점**.\n2. `EINTR` 을 에러로 처리 → 게이트웨이가 시그널 한 번에 연결을 끊는다.\n3. `EAGAIN` 을 에러 로그로 남김 → 로그가 홍수가 되고 진짜 에러가 묻힌다.\n4. `fcntl(fd, F_SETFL, O_NONBLOCK)` 로 기존 플래그를 날림.\n5. EOF 난 fd 를 poll 집합에 남겨둠 → **CPU 100%**.\n6. poll 타임아웃을 매 회전 재계산하지 않음 → 마감이 무한정 밀림.\n7. 시그널 핸들러에서 `printf`/`malloc` 호출 → 재진입 데드락.\n8. 종료 플래그를 그냥 `int` 로 선언 → `volatile sig_atomic_t` 여야 한다.\n9. self-pipe 를 drain 하지 않음 → busy loop.\n10. 설정 파일 제자리 덮어쓰기 / `fsync` 생략 → 전원 손실에 벽돌.\n11. `close()` 가 EINTR 이라고 재시도 → **다른 스레드가 방금 연 같은 번호의 fd 를 닫는다**\n    (Linux 에서 close 는 EINTR 여도 fd 를 이미 반납했다).\n12. 에러 경로마다 `return` 을 흩뿌려 fd 하나를 빠뜨림 → 며칠 뒤 `EMFILE`.\n13. 타임아웃에 `CLOCK_REALTIME` 사용 → NTP 점프에 멈춤.\n14. edge-triggered epoll 을 쓰면서 EAGAIN 까지 안 읽음 → 데이터가 영원히 잠김.\n\n---\n\n## 10. 면접에서 말할 것 (한국어 + 영어)\n\n**구조를 먼저 선언**\n- \"게이트웨이 데몬은 단일 스레드 이벤트 루프로 잡겠습니다. 모뎀 채널, 클라우드 소켓,\n  깨우기용 self-pipe 를 전부 논블로킹 fd 로 만들고 `poll()` 한 곳에서만 블록합니다.\n  락이 없으니 데드락이 없고 상태가 한 곳에 모여 테스트하기 쉽습니다.\"\n  > *\"I'd model the gateway daemon as a single-threaded event loop: the modem channel,\n  > the cloud socket, and a self-pipe are all non-blocking fds, and `poll()` is the only\n  > place that blocks. No locks means no deadlocks, and all state lives in one place,\n  > which makes it testable.\"*\n\n**poll vs epoll 트레이드오프**\n- \"fd 가 스무 개 남짓이라 `poll` 로 충분하고 이식성도 얻습니다. epoll 은 관심 집합이\n  커널에 상주해 fd 수천 개부터 이득이 납니다. edge-triggered 는 EAGAIN 까지 전부 읽어야\n  해서 실수 여지가 크고, 이 규모에서는 과설계입니다.\"\n  > *\"With ~20 fds, `poll` is enough and stays portable. `epoll` wins once you have\n  > thousands of fds because the interest set lives in the kernel. Edge-triggered mode\n  > requires draining to EAGAIN and is over-engineering at this scale.\"*\n\n**부분 I/O · EINTR**\n- \"`read`/`write` 는 부분 전송이 정상입니다. 짧은 read 는 에러가 아니라 EOF 신호이고,\n  EINTR 은 재시도, EAGAIN 은 루프 복귀입니다. 이 세 가지를 구분하는 게 핵심입니다.\"\n  > *\"Short reads and writes are normal. A short read signals EOF, not an error; EINTR\n  > means retry; EAGAIN means go back to the loop. Distinguishing those three is the job.\"*\n\n**종료**\n- \"SIGTERM 핸들러는 `volatile sig_atomic_t` 플래그를 세우고 self-pipe 에 1바이트를 쓰는\n  것만 합니다. async-signal-safe 하지 않은 일은 전부 루프에서 합니다. `sigaction` 을\n  쓰되 `SA_RESTART` 는 켜지 않아 `poll` 이 EINTR 로 즉시 깨게 합니다.\"\n  > *\"The SIGTERM handler only sets a `volatile sig_atomic_t` and writes one byte to the\n  > self-pipe — everything unsafe happens back in the loop. I use `sigaction` without\n  > `SA_RESTART` so `poll` returns EINTR immediately.\"*\n\n**전원 손실 · 재연결**\n- \"설정은 같은 디렉토리의 임시 파일에 쓰고 fsync 한 뒤 rename 하고, 디렉토리도 fsync 합니다.\n  rename 은 원자적이라 독자는 항상 완전한 파일만 봅니다.\"\n  > *\"I write config to a temp file in the same directory, fsync it, rename it, then\n  > fsync the directory. The rename is atomic, so a reader never sees a half-written file.\"*\n- \"재연결은 지수 백오프에 상한과 지터를 겁니다. 200만 대가 동시에 돌아오면 클라우드가\n  두 번 죽습니다. 난수는 인자로 주입해서 순수 함수로 만들고 단위 테스트합니다.\"\n  > *\"Reconnects use exponential backoff with a cap and jitter — two million gateways\n  > returning at once would take the cloud down twice. I inject the random value so the\n  > policy stays a pure, unit-testable function.\"*\n\n**테스트 전략 (이 팀이 명시한 평가 항목)**\n- \"하드웨어 없이 테스트하기 위해 모뎀을 pipe 로, 시계를 주입 가능한 함수로 바꿉니다.\n  라인 파서와 백오프는 순수 함수라 I/O 없이 테스트하고, 루프는 pipe 양 끝으로 테스트합니다.\"\n  > *\"To test without hardware I replace the modem with a pipe and the clock with an\n  > injectable function. The line parser and the backoff policy are pure functions, so\n  > they're tested with no I/O at all; the loop itself is driven through pipe endpoints.\"*\n\n---\n\n## 11. 체크리스트\n\n- [ ] `read_full`/`write_full` 을 보지 않고 쓸 수 있다 (EINTR·EOF·부분 전송 구분)\n- [ ] `fcntl` read-modify-write 로 `O_NONBLOCK` 을 켤 수 있다 (`F_GETFL` vs `F_GETFD` 구분)\n- [ ] `EAGAIN`/`EWOULDBLOCK`/`EINTR`/`EOF` 네 가지를 각각 어떻게 처리하는지 말할 수 있다\n- [ ] `poll` 루프를 빈 화면에서 작성할 수 있다 (EOF fd 제거, revents 검사, 타임아웃 재계산)\n- [ ] poll vs epoll vs kqueue 표를 말로 설명할 수 있다 (+ LT vs ET)\n- [ ] self-pipe trick 을 3줄로 설명하고, eventfd/signalfd 대안을 말할 수 있다\n- [ ] 시그널 핸들러에서 허용되는 것/금지된 것을 즉답할 수 있다\n- [ ] `sigaction` vs `signal`, `SA_RESTART` 의 효과를 말할 수 있다\n- [ ] 스트림에서 라인/프레임을 조립하는 상태 있는 파서를 쓸 수 있다 (오버플로 복구 포함)\n- [ ] 지수 백오프 + 지터를 오버플로 없이 쓰고, 왜 난수를 주입하는지 설명할 수 있다\n- [ ] `CLOCK_MONOTONIC` 을 쓰는 이유를 말할 수 있다\n- [ ] write+fsync+rename+dir fsync 6단계를 순서대로 말할 수 있다\n- [ ] `goto cleanup` 패턴으로 fd 누수 없는 함수를 쓸 수 있다\n- [ ] `close()` EINTR 을 재시도하면 왜 위험한지 설명할 수 있다\n- [ ] timerfd / signalfd / systemd sd_notify / netlink 를 각각 한 문장으로 설명할 수 있다\n- [ ] `/proc/<pid>/fd` 로 fd 누수를 확인하는 방법을 안다\n",
+  "problems": [
+    {
+      "num": 39,
+      "slug": "read_full_write_full",
+      "title_ko": "read_full / write_full — 부분 I/O + EINTR",
+      "title_en": "read_full / write_full (partial I/O + EINTR)",
+      "difficulty": "easy",
+      "tags": [
+        "posix",
+        "read",
+        "write",
+        "EINTR",
+        "partial-io"
+      ],
+      "prompt_ko": "read()/write() 는 요청한 바이트 수를 보장하지 않는다. n 바이트를 다 옮길 때까지 도는 read_full/write_full 을 구현하라. read_full 은 EOF 를 만나면 지금까지 읽은 수를 리턴한다(짧은 read 는 에러가 아니다). 둘 다 -1/EINTR 은 재시도하고, 그 외 -1 은 실패로 리턴한다.",
+      "prompt_en": "Implement looping read/write helpers that transfer all n bytes, retry on EINTR, and treat a short read as EOF rather than an error.",
+      "signature": "ssize_t read_full(int fd, void *buf, size_t n); ssize_t write_full(int fd, const void *buf, size_t n)",
+      "examples": [
+        {
+          "in": "파이프에 10바이트만 있고 쓰기단 close 후 read_full(fd, buf, 100)",
+          "out": "10 (에러 아님)"
+        },
+        {
+          "in": "64KB 파이프에 256KB 를 write_full",
+          "out": "부분 쓰기를 여러 번 돌아 256KB 전송, 리턴 262144"
+        }
+      ],
+      "hints": [
+        "while (got < n) 루프를 돌면서 read(fd, p + got, n - got) 로 남은 만큼만 요청한다.",
+        "k < 0 && errno == EINTR 은 '시그널에 깨진 것'이므로 continue. 다른 -1 만 실패다.",
+        "read 가 0 이면 EOF — break 해서 got 을 리턴한다(에러로 -1 을 리턴하면 안 된다). write 는 0 을 EOF 로 보지 않고 sent += k 로 계속 민다."
+      ],
+      "solution": "ssize_t read_full(int fd, void *buf, size_t n) {\n    if (!buf && n) { errno = EINVAL; return -1; }\n    unsigned char *p = (unsigned char *)buf;\n    size_t got = 0;\n    while (got < n) {\n        ssize_t k = read(fd, p + got, n - got);\n        if (k < 0) {\n            if (errno == EINTR) continue;   // 시그널에 깨진 것뿐 — 재시도\n            return -1;                      // 진짜 에러\n        }\n        if (k == 0) break;                  // EOF: 짧게 리턴하되 에러 아님\n        got += (size_t)k;\n    }\n    return (ssize_t)got;\n}\n\nssize_t write_full(int fd, const void *buf, size_t n) {\n    if (!buf && n) { errno = EINVAL; return -1; }\n    const unsigned char *p = (const unsigned char *)buf;\n    size_t sent = 0;\n    while (sent < n) {\n        ssize_t k = write(fd, p + sent, n - sent);\n        if (k < 0) {\n            if (errno == EINTR) continue;   // 재시도\n            return -1;\n        }\n        sent += (size_t)k;                  // 부분 쓰기 → 남은 만큼 다시\n    }\n    return (ssize_t)sent;\n}",
+      "explanation_ko": "POSIX 는 read/write 가 요청한 만큼 처리한다고 약속하지 않는다. 파이프·소켓·tty 는 커널 버퍼 한도까지만 옮기고 돌아온다. 그래서 '전부 옮기기'는 라이브러리가 아니라 우리가 루프로 만든다. 세 가지 리턴을 구분하는 게 전부다: k>0(진행), k==0(EOF — read 에서만 의미), k<0 && EINTR(재시도) vs 그 외(실패). 논블로킹 fd 에는 이 함수를 쓰면 안 된다 — EAGAIN 이 실패로 떨어지거나 바쁜 대기가 된다.",
+      "complexity": "O(n) time, O(1) space (호출 횟수는 커널 버퍼 크기에 따라 ceil(n/buf))",
+      "pitfalls": [
+        "read 리턴값을 요청한 n 과 같다고 가정 — 임베디드 인터뷰 최다 감점.",
+        "EINTR 을 에러로 처리해서 시그널 한 번에 연결이 끊긴다.",
+        "포인터를 안 전진시키고 read(fd, buf, n) 을 그대로 반복 → 앞부분을 덮어쓴다.",
+        "write 에서 k == 0 을 EOF 로 오해하고 break → 무한 루프나 조용한 손실.",
+        "논블로킹 fd 에 read_full 을 써서 EAGAIN 에 -1 을 리턴."
+      ],
+      "verkada_context": "모뎀 AT 응답이 여러 번에 나뉘어 도착하거나, 클라우드로 보내는 이벤트 프레임이 소켓 버퍼 한도에서 잘리는 상황 — 게이트웨이 필드 버그 1순위."
+    },
+    {
+      "num": 40,
+      "slug": "set_nonblocking_eagain",
+      "title_ko": "논블로킹 fd 설정 + EAGAIN 처리",
+      "title_en": "Non-blocking fds and EAGAIN",
+      "difficulty": "easy",
+      "tags": [
+        "fcntl",
+        "O_NONBLOCK",
+        "EAGAIN",
+        "event-loop"
+      ],
+      "prompt_ko": "fcntl 로 fd 에 O_NONBLOCK 을 켜되 기존 플래그를 보존하라(F_GETFL → OR → F_SETFL). 그리고 read 결과를 IO_OK / IO_WOULDBLOCK / IO_EOF / IO_ERROR 네 가지로 분류하는 read_nb 를 구현하라. EINTR 은 재시도, EAGAIN 과 EWOULDBLOCK 은 둘 다 검사한다.",
+      "prompt_en": "Turn on O_NONBLOCK with a read-modify-write fcntl, then classify read() results into OK / WOULDBLOCK / EOF / ERROR.",
+      "signature": "int set_nonblocking(int fd); io_res_t read_nb(int fd, void *buf, size_t n, size_t *out_n)",
+      "examples": [
+        {
+          "in": "빈 논블로킹 파이프에서 read_nb",
+          "out": "IO_WOULDBLOCK, *out_n == 0"
+        },
+        {
+          "in": "쓰기단을 close 한 뒤 read_nb",
+          "out": "IO_EOF"
+        }
+      ],
+      "hints": [
+        "fcntl(fd, F_SETFL, O_NONBLOCK) 은 O_RDONLY 같은 기존 플래그를 날린다. 먼저 F_GETFL 로 읽어라.",
+        "read 가 -1 일 때 errno 를 EINTR / EAGAIN|EWOULDBLOCK / 그 외로 나눈다.",
+        "EAGAIN 은 에러가 아니라 '지금은 데이터 없음'이다. 로그를 남기지 말고 루프로 돌아가라. 이미 O_NONBLOCK 이면 F_SETFL 을 생략해 멱등하게 만든다."
+      ],
+      "solution": "typedef enum {\n    IO_OK         =  0,   // out_n 바이트를 읽었다\n    IO_WOULDBLOCK =  1,   // 지금은 데이터 없음 (EAGAIN/EWOULDBLOCK)\n    IO_EOF        =  2,   // 상대가 닫음 (read == 0)\n    IO_ERROR      = -1    // 진짜 에러\n} io_res_t;\n\nint set_nonblocking(int fd) {\n    int flags = fcntl(fd, F_GETFL, 0);\n    if (flags < 0) return -1;\n    if (flags & O_NONBLOCK) return 0;               // 이미 설정 — 멱등\n    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) // '=' 아니고 '|=' 가 핵심\n        return -1;\n    return 0;\n}\n\nio_res_t read_nb(int fd, void *buf, size_t n, size_t *out_n) {\n    if (out_n) *out_n = 0;\n    if (!buf && n) { errno = EINVAL; return IO_ERROR; }\n    for (;;) {\n        ssize_t k = read(fd, buf, n);\n        if (k > 0) { if (out_n) *out_n = (size_t)k; return IO_OK; }\n        if (k == 0) return IO_EOF;\n        if (errno == EINTR) continue;                       // 재시도\n        if (errno == EAGAIN || errno == EWOULDBLOCK)\n            return IO_WOULDBLOCK;                           // 정상 — 루프로 돌아가라\n        return IO_ERROR;\n    }\n}",
+      "explanation_ko": "이벤트 루프의 모든 fd 는 논블로킹이어야 한다. poll 이 '읽을 수 있다'고 해도 스퓨리어스 wakeup 이나 다른 소비자 때문에 막상 read 가 블록될 수 있고, 한 fd 에서 블록되면 루프 전체(= 데몬 전체)가 멈춘다. 플래그 설정은 반드시 read-modify-write 여야 한다. F_GETFL/F_SETFL(파일 상태 플래그, O_NONBLOCK)과 F_GETFD/F_SETFD(fd 플래그, FD_CLOEXEC)는 서로 다른 네임스페이스라는 것도 같이 외운다.",
+      "complexity": "O(1) per call",
+      "pitfalls": [
+        "F_GETFL 없이 F_SETFL 로 덮어써 접근 모드를 날린다.",
+        "EAGAIN 을 에러로 처리해 로그 홍수 + 불필요한 재연결.",
+        "EWOULDBLOCK 을 검사하지 않는다(표준은 EAGAIN 과 같은 값이라고 보장하지 않는다).",
+        "FD_CLOEXEC 를 F_SETFL 로 설정하려다 실패.",
+        "실패 경로에서 *out_n 을 초기화하지 않아 호출자가 쓰레기 값을 쓴다."
+      ],
+      "verkada_context": "모뎀 /dev/ttyUSB*, 클라우드 소켓, self-pipe 를 전부 논블로킹으로 열어 한 fd 의 지연이 루프 전체를 멈추지 않게 한다."
+    },
+    {
+      "num": 41,
+      "slug": "poll_event_loop",
+      "title_ko": "poll() 이벤트 루프 — 2 fd 멀티플렉싱 + 타임아웃",
+      "title_en": "poll()-based event loop over two fds",
+      "difficulty": "medium",
+      "tags": [
+        "poll",
+        "event-loop",
+        "multiplexing",
+        "POLLHUP",
+        "timeout"
+      ],
+      "prompt_ko": "두 fd 를 poll 로 동시에 감시하는 루프를 구현하라. 읽은 바이트를 각각 누적하고, read 가 0 이면 해당 fd 를 EOF 로 표시해 다음 회전의 pollfd 배열에서 제외한다(안 빼면 POLLHUP 으로 CPU 100% 스핀). poll 이 -1/EINTR 이면 재시도, 0(타임아웃)이면 timeouts++ 후 0 을 리턴한다. 두 fd 가 모두 EOF 면 0, 진짜 에러는 -1.",
+      "prompt_en": "Multiplex two fds with poll(): accumulate bytes, drop fds that reach EOF, retry on EINTR, and return on idle timeout.",
+      "signature": "int pump_two(int fd_a, int fd_b, int timeout_ms, pump_t *st)",
+      "examples": [
+        {
+          "in": "a에 \"hello\", b에 \"worldzz\" 쓰고 두 쓰기단 close",
+          "out": "리턴 0, bytes_a=5, bytes_b=7, timeouts=0"
+        },
+        {
+          "in": "두 파이프 모두 비어 있고 열린 채, timeout_ms=60",
+          "out": "약 60ms 뒤 리턴 0, timeouts=1"
+        }
+      ],
+      "hints": [
+        "매 회전마다 pollfd 배열을 다시 만든다. EOF 가 아닌 fd 만 넣고, 어느 슬롯이 a/b 인지 매핑을 기억한다.",
+        "revents 는 events 에 없는 POLLHUP/POLLERR/POLLNVAL 도 올라온다. 이 비트에서도 read 를 해봐야 EOF 인지 에러인지 알 수 있다.",
+        "read 가 0 이면 eof_* 를 세우고 continue — 다음 회전에서 그 fd 를 배열에 넣지 않는 것이 핵심이다. poll 이 -1 이고 errno==EINTR 이면 에러가 아니라 continue."
+      ],
+      "solution": "typedef struct {\n    size_t bytes_a;     // fd_a 에서 읽은 총 바이트\n    size_t bytes_b;     // fd_b 에서 읽은 총 바이트\n    int    timeouts;    // poll 타임아웃 횟수\n    int    eof_a;       // fd_a 가 EOF 인가\n    int    eof_b;       // fd_b 가 EOF 인가\n    int    iters;       // 루프 회전 수 (스핀 감지용)\n} pump_t;\n\nint pump_two(int fd_a, int fd_b, int timeout_ms, pump_t *st) {\n    if (!st) { errno = EINVAL; return -1; }\n    memset(st, 0, sizeof *st);\n\n    while (!(st->eof_a && st->eof_b)) {\n        struct pollfd pfd[2];\n        int slot[2];                    // pfd[i] 가 a(0)인지 b(1)인지\n        int nf = 0;\n        if (!st->eof_a) { pfd[nf].fd = fd_a; pfd[nf].events = POLLIN; pfd[nf].revents = 0; slot[nf] = 0; nf++; }\n        if (!st->eof_b) { pfd[nf].fd = fd_b; pfd[nf].events = POLLIN; pfd[nf].revents = 0; slot[nf] = 1; nf++; }\n\n        st->iters++;\n        int r = poll(pfd, (nfds_t)nf, timeout_ms);\n        if (r < 0) {\n            if (errno == EINTR) continue;        // ① 시그널 — 재시도\n            return -1;\n        }\n        if (r == 0) { st->timeouts++; return 0; } // 유휴 타임아웃 → 상위에서 결정\n\n        for (int i = 0; i < nf; ++i) {\n            // ③ POLLHUP/POLLERR 도 \"읽어봐라\" 신호. read 가 0 또는 -1 로 알려준다.\n            if (!(pfd[i].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) continue;\n            char buf[256];\n            ssize_t k = read(pfd[i].fd, buf, sizeof buf);\n            if (k < 0) {\n                if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;\n                return -1;\n            }\n            if (k == 0) {                        // ② EOF → 배열에서 제외\n                if (slot[i] == 0) st->eof_a = 1; else st->eof_b = 1;\n                continue;\n            }\n            if (slot[i] == 0) st->bytes_a += (size_t)k;\n            else              st->bytes_b += (size_t)k;\n        }\n    }\n    return 0;\n}",
+      "explanation_ko": "게이트웨이 데몬의 심장이다. 블로킹은 poll() 한 곳에서만 일어나고, 깨어나면 준비된 fd 를 처리한 뒤 다시 잔다. 세 가지 규칙을 반드시 지킨다: ① EINTR 은 에러가 아니라 재시도 ② EOF 난 fd 는 즉시 집합에서 제외(level-triggered 라 POLLHUP 이 계속 떠서 스핀한다) ③ revents 는 요청하지 않은 비트도 올라오므로 전부 검사. fd 가 스무 개 남짓인 임베디드 데몬에서는 epoll 대신 poll 이 정답이고, 그 트레이드오프를 말할 수 있는 것이 평가 항목이다.",
+      "complexity": "O(nfds) per wakeup, O(1) space",
+      "pitfalls": [
+        "EOF 난 fd 를 계속 poll 해 POLLHUP 이 즉시 리턴 → CPU 100%.",
+        "revents 를 events 와 같다고 가정해 POLLHUP/POLLERR 를 놓친다.",
+        "poll 의 -1/EINTR 을 에러로 처리해 루프가 종료된다.",
+        "pollfd.revents 를 초기화하지 않거나 이전 값을 재사용한다.",
+        "타임아웃을 절대 시각으로 계산하지 않고 매번 같은 값을 넘겨 마감이 무한정 밀린다."
+      ],
+      "verkada_context": "모뎀 제어 채널과 Command 클라우드 소켓을 한 루프에서 감시하다가, 유휴 타임아웃에 하트비트/watchdog 을 치는 구조 그대로다."
+    },
+    {
+      "num": 42,
+      "slug": "self_pipe_trick",
+      "title_ko": "self-pipe trick — 루프를 즉시 깨우기",
+      "title_en": "The self-pipe trick",
+      "difficulty": "medium",
+      "tags": [
+        "self-pipe",
+        "wakeup",
+        "cancellation",
+        "async-signal-safe",
+        "eventfd"
+      ],
+      "prompt_ko": "poll 안에서 자고 있는 이벤트 루프를 다른 스레드나 시그널 핸들러가 즉시 깨울 수 있게 하는 self-pipe 를 구현하라. sp_init 은 파이프의 양쪽 끝을 O_NONBLOCK + FD_CLOEXEC 로 만들고, sp_notify 는 1바이트를 쓰되 EAGAIN(이미 깨울 이벤트가 밀려 있음)은 성공으로 취급한다. sp_drain 은 EAGAIN 까지 다 읽어 비우고 읽은 바이트 수를 리턴한다.",
+      "prompt_en": "Implement a non-blocking, close-on-exec self-pipe: notify with one byte (EAGAIN means a wakeup is already pending) and drain until EAGAIN.",
+      "signature": "int sp_init(selfpipe_t *sp); int sp_notify(const selfpipe_t *sp); int sp_drain(const selfpipe_t *sp); void sp_close(selfpipe_t *sp)",
+      "examples": [
+        {
+          "in": "sp_notify() 후 poll(rd, POLLIN, 0)",
+          "out": "1 (즉시 깨어남)"
+        },
+        {
+          "in": "sp_notify() 3회 후 sp_drain()",
+          "out": "3, 그 뒤 poll(rd, 0ms) == 0"
+        }
+      ],
+      "hints": [
+        "pipe(fds) 로 만들고 fds[0]=rd, fds[1]=wr. 둘 다 set_nonblocking + FD_CLOEXEC 를 건다.",
+        "notify 는 write(wr, &byte, 1) 한 번. EINTR 은 재시도, EAGAIN/EWOULDBLOCK 은 return 0.",
+        "drain 은 read 가 EAGAIN 을 낼 때까지 루프. 비우지 않으면 level-triggered poll 이 계속 즉시 리턴해 busy loop 가 된다. init 실패 시 이미 연 fd 를 닫고 rd/wr 를 -1 로 되돌린다."
+      ],
+      "solution": "typedef struct { int rd; int wr; } selfpipe_t;\n\nstatic int set_cloexec(int fd) {\n    int f = fcntl(fd, F_GETFD, 0);\n    if (f < 0) return -1;\n    return fcntl(fd, F_SETFD, f | FD_CLOEXEC);\n}\n\nint sp_init(selfpipe_t *sp) {\n    if (!sp) { errno = EINVAL; return -1; }\n    sp->rd = sp->wr = -1;\n    int fds[2];\n    if (pipe(fds) != 0) return -1;\n    sp->rd = fds[0];\n    sp->wr = fds[1];\n    if (set_nonblocking(sp->rd) != 0 || set_nonblocking(sp->wr) != 0 ||\n        set_cloexec(sp->rd)    != 0 || set_cloexec(sp->wr)    != 0) {\n        int save = errno;\n        close(sp->rd); close(sp->wr);\n        sp->rd = sp->wr = -1;\n        errno = save;\n        return -1;\n    }\n    return 0;\n}\n\nint sp_notify(const selfpipe_t *sp) {\n    if (!sp || sp->wr < 0) { errno = EINVAL; return -1; }\n    const unsigned char byte = 'x';\n    for (;;) {\n        ssize_t k = write(sp->wr, &byte, 1);\n        if (k == 1) return 0;\n        if (k < 0 && errno == EINTR) continue;\n        if (k < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))\n            return 0;            // 파이프가 이미 꽉 참 = 이미 깨울 예정 → 성공\n        return -1;\n    }\n}\n\nint sp_drain(const selfpipe_t *sp) {\n    if (!sp || sp->rd < 0) { errno = EINVAL; return -1; }\n    int total = 0;\n    unsigned char buf[64];\n    for (;;) {\n        ssize_t k = read(sp->rd, buf, sizeof buf);\n        if (k > 0) { total += (int)k; continue; }\n        if (k == 0) break;                                   // 쓰기단이 닫힘\n        if (errno == EINTR) continue;\n        if (errno == EAGAIN || errno == EWOULDBLOCK) break;   // 다 비웠다\n        return -1;\n    }\n    return total;\n}\n\nvoid sp_close(selfpipe_t *sp) {\n    if (!sp) return;\n    if (sp->rd >= 0) close(sp->rd);\n    if (sp->wr >= 0) close(sp->wr);\n    sp->rd = sp->wr = -1;\n}",
+      "explanation_ko": "전역 플래그만 세우면 poll 이 타임아웃될 때까지 루프가 모른다. self-pipe 는 '깨우기'를 파일 디스크립터 이벤트로 바꿔 poll 집합에 그대로 합류시키는 고전 기법이다. write() 는 async-signal-safe 하므로 시그널 핸들러에서 호출해도 안전하고, 파이프가 이미 차 있으면 EAGAIN 이 나는데 이는 '이미 깨울 예정'이라는 뜻이므로 성공으로 처리한다(여러 notify 가 하나로 합쳐지는 coalescing 이 오히려 바람직하다). Linux 라면 eventfd(2) 로 fd 하나만 쓰면 되고, 시그널 전용이라면 signalfd/ppoll 이 대안이다.",
+      "complexity": "O(1) notify, O(pending) drain",
+      "pitfalls": [
+        "깬 뒤 파이프를 비우지 않아 poll 이 계속 즉시 리턴 → busy loop.",
+        "notify 를 블로킹 fd 로 해서 파이프가 차면 깨우는 쪽이 멈춘다(최악: 시그널 핸들러 안에서).",
+        "EAGAIN 을 실패로 리턴해 상위가 불필요한 에러 처리를 한다.",
+        "FD_CLOEXEC 를 빼먹어 fork/exec 한 자식(pppd 등)으로 fd 가 샌다.",
+        "핸들러에서 errno 를 저장/복원하지 않아 메인 흐름의 errno 를 오염시킨다."
+      ],
+      "verkada_context": "'지금 재연결해', '설정이 바뀌었다', 'SIGTERM 받았다'를 poll 로 자는 게이트웨이 루프에 즉시 전달하는 수단."
+    },
+    {
+      "num": 43,
+      "slug": "line_framing_reader",
+      "title_ko": "라인 프레이밍 리더 (모뎀 AT 응답)",
+      "title_en": "Stateful line-framing reader",
+      "difficulty": "medium",
+      "tags": [
+        "framing",
+        "parser",
+        "stream",
+        "AT-command",
+        "state"
+      ],
+      "prompt_ko": "스트림에서 완전한 줄만 넘기는 상태 있는 파서를 구현하라. lr_feed 는 임의 크기의 조각을 받아 누적하다가 '\\n' 을 만나면 그 줄을 '\\0' 종료해 콜백으로 넘기고 버퍼를 비운다. 끝의 '\\r'(CRLF)은 제거하고 빈 줄도 유효한 줄이다. 버퍼보다 긴 줄은 dropped++ 후 그 줄 끝까지 버리고 다음 줄부터 정상 복구한다. 리턴 = 이번 호출에서 넘긴 줄 수.",
+      "prompt_en": "Accumulate stream bytes and emit only complete lines: strip CRLF, count and drop over-long lines, and recover cleanly on the next line.",
+      "signature": "int lr_feed(linereader_t *lr, const char *data, size_t n, lr_cb_t cb, void *user)",
+      "examples": [
+        {
+          "in": "feed(\"AT+CS\") 이어서 feed(\"Q\\r\\nOK\\r\\n\")",
+          "out": "0줄, 그 다음 2줄: \"AT+CSQ\", \"OK\""
+        },
+        {
+          "in": "200바이트 'x' 이어서 feed(\"\\r\\nRING\\r\\n\")",
+          "out": "dropped=1, 1줄 \"RING\""
+        }
+      ],
+      "hints": [
+        "TCP/UART 는 메시지가 아니라 바이트 스트림이다 — 리더는 호출 사이에 상태(버퍼 + 길이)를 들고 있어야 한다.",
+        "바이트를 하나씩 보면서 '\\n' 이면 줄 완성, 아니면 buf[len++] = c. 저장 전에 len + 1 < LR_CAP 인지 확인해 '\\0' 자리를 남긴다.",
+        "오버플로는 플래그로 표시하고 그 줄이 끝날 때까지 계속 버린다. '\\n' 을 만나면 플래그와 len 을 리셋해 복구한다. CRLF 는 종료 직전에 buf[len-1]=='\\r' 이면 len-- 로 떼면 된다."
+      ],
+      "solution": "#define LR_CAP 128\ntypedef void (*lr_cb_t)(const char *line, void *user);\n\ntypedef struct {\n    char   buf[LR_CAP];   // 누적 버퍼 ('\\0' 자리 1칸 포함)\n    size_t len;           // 현재 누적 길이\n    int    overflow;      // 현재 줄이 이미 넘쳤는가 (줄 끝까지 버리는 중)\n    int    dropped;       // 버린 줄 수 — 조용한 손실 금지, 반드시 센다\n} linereader_t;\n\nvoid lr_init(linereader_t *lr) {\n    if (!lr) return;\n    lr->len = 0;\n    lr->overflow = 0;\n    lr->dropped = 0;\n    lr->buf[0] = '\\0';\n}\n\nint lr_feed(linereader_t *lr, const char *data, size_t n, lr_cb_t cb, void *user) {\n    if (!lr || (!data && n)) return 0;\n    int lines = 0;\n    for (size_t i = 0; i < n; ++i) {\n        char c = data[i];\n        if (c == '\\n') {\n            if (lr->overflow) {          // 넘친 줄은 통째로 버리고 여기서 복구\n                lr->overflow = 0;\n                lr->len = 0;\n                continue;\n            }\n            size_t len = lr->len;\n            if (len > 0 && lr->buf[len - 1] == '\\r') len--;   // CRLF → CR 떼기\n            lr->buf[len] = '\\0';\n            if (cb) cb(lr->buf, user);\n            lr->len = 0;\n            lines++;\n            continue;\n        }\n        if (lr->len + 1 >= LR_CAP) {     // '\\0' 자리 확보 — 오버런 방지\n            if (!lr->overflow) { lr->overflow = 1; lr->dropped++; }\n            continue;                    // 줄이 끝날 때까지 계속 버린다\n        }\n        lr->buf[lr->len++] = c;\n    }\n    return lines;\n}",
+      "explanation_ko": "스트림 프로토콜의 근본 문제는 '경계가 없다'는 것이다. 모뎀에 AT+CSQ 를 보내면 응답이 '+CSQ: 22,' / '99\\r\\nOK\\r\\n' 처럼 잘려 도착할 수 있고, 반대로 한 번의 read 에 여러 줄이 뭉쳐 올 수도 있다. 그래서 리더는 상태를 들고 완전한 프레임만 상위로 올린다. 실전 요구는 세 가지: CRLF/LF 모두 허용, 오버런 없는 방어(길면 버리되 카운트해서 보고 — 조용한 손실 금지), 다음 줄부터의 복구. 이 함수는 I/O 를 전혀 하지 않아 순수하게 단위 테스트되는 게 설계 포인트다.",
+      "complexity": "O(n) per feed, O(LR_CAP) space",
+      "pitfalls": [
+        "read 한 조각이 곧 한 줄이라고 가정 — 스트림에는 경계가 없다.",
+        "'\\0' 자리를 안 남겨 버퍼 오버런(경계는 len + 1 >= CAP).",
+        "긴 줄이 오면 버퍼를 넘겨 쓰거나, 리더가 영구히 고장 나 이후 줄을 전부 놓친다.",
+        "버린 줄을 세지 않아 조용한 데이터 손실이 된다.",
+        "CRLF 의 '\\r' 을 안 떼서 문자열 비교가 전부 실패한다."
+      ],
+      "verkada_context": "모뎀 AT 응답(+CSQ, +CREG, RING, OK/ERROR)과 장비 로그 라인을 UART/소켓 스트림에서 조립하는 부분 — 듀얼 SIM failover 로직이 이 파서 위에 올라간다."
+    },
+    {
+      "num": 44,
+      "slug": "backoff_with_jitter",
+      "title_ko": "지수 백오프 + 지터 재연결 정책",
+      "title_en": "Exponential backoff with jitter",
+      "difficulty": "easy",
+      "tags": [
+        "backoff",
+        "jitter",
+        "reconnect",
+        "pure-function",
+        "testability"
+      ],
+      "prompt_ko": "재연결 지연을 계산하는 순수 함수를 구현하라. delay = base_ms * 2^attempt 를 cap_ms 에서 클램프하고(attempt 가 커도 오버플로하면 안 된다), jitter_pct 가 0 이 아니면 결과를 [d-span, d+span](span = d*jitter_pct/100) 범위로 흔든다. 난수는 rnd 인자(0..9999)로 주입받는다 — rnd=0 이면 하한, 9999 면 상한.",
+      "prompt_en": "Pure function: exponential backoff clamped at a cap, with injected jitter and no integer overflow.",
+      "signature": "uint32_t backoff_delay_ms(uint32_t attempt, uint32_t base_ms, uint32_t cap_ms, uint32_t jitter_pct, uint32_t rnd)",
+      "examples": [
+        {
+          "in": "attempt=3, base=500, cap=30000, jitter=0",
+          "out": "4000"
+        },
+        {
+          "in": "attempt=3, base=500, cap=30000, jitter=20, rnd=0 / 5000 / 9999",
+          "out": "3200 / 4000 / 4800"
+        }
+      ],
+      "hints": [
+        "2배를 attempt 번 곱하되, cap 에 닿는 순간 루프를 끊으면 오버플로가 원천 차단된다.",
+        "지터 폭 span = d * jitter_pct / 100. 결과 범위는 [d-span, d+span] 이므로 폭은 2*span+1 이다.",
+        "rnd(0..9999)를 그 폭에 선형 매핑: off = (2*span+1) * rnd / 10000, 결과 = d - span + off. 64비트로 계산해 중간 곱셈 오버플로를 피한다."
+      ],
+      "solution": "uint32_t backoff_delay_ms(uint32_t attempt, uint32_t base_ms, uint32_t cap_ms,\n                          uint32_t jitter_pct, uint32_t rnd) {\n    if (base_ms == 0) return 0;\n    if (cap_ms < base_ms) cap_ms = base_ms;\n\n    uint64_t d = base_ms;\n    if (attempt >= 32) {\n        d = cap_ms;                              // 시프트 오버플로 방지\n    } else {\n        for (uint32_t i = 0; i < attempt; ++i) {\n            d <<= 1;\n            if (d >= cap_ms) { d = cap_ms; break; }\n        }\n    }\n    if (d > cap_ms) d = cap_ms;\n    if (jitter_pct == 0) return (uint32_t)d;\n    if (jitter_pct > 100) jitter_pct = 100;\n\n    uint64_t span = d * jitter_pct / 100;        // 편차 반폭\n    if (span == 0) return (uint32_t)d;\n    uint64_t width = 2 * span + 1;               // [d-span, d+span]\n    uint64_t off   = width * (uint64_t)(rnd % 10000u) / 10000u;\n    return (uint32_t)(d - span + off);\n}",
+      "explanation_ko": "200만 대의 게이트웨이가 클라우드 장애 복구 순간 동시에 재접속하면 thundering herd 로 복구 자체를 방해한다. 그래서 지연을 지수적으로 늘리고(부하 감소), 상한을 두고(영원히 안 붙는 상황 방지), 지터로 흩뿌린다(동기화 방지). 설계상 가장 중요한 결정은 난수를 함수 안에서 뽑지 않고 인자로 주입한 것이다 — 그 덕분에 이 정책은 시간도 하드웨어도 없이 완전히 결정적으로 단위 테스트된다. 리크루터 메일의 'modular, testable embedded software' 에 대한 가장 직접적인 대답이다.",
+      "complexity": "O(attempt) (또는 클램프 덕분에 실질 O(log(cap/base))), O(1) space",
+      "pitfalls": [
+        "1 << attempt 를 그대로 써서 attempt >= 32 에서 UB/랩어라운드.",
+        "지터를 곱셈으로 하면서 32비트에서 중간 오버플로.",
+        "지터를 한쪽으로만(0..+pct) 걸어 평균 지연이 커진다(또는 full jitter 인지 equal jitter 인지 근거 없이 고름).",
+        "성공 후 attempt 를 0 으로 리셋하지 않아 계속 최대 지연으로 붙는다.",
+        "난수를 함수 안에서 뽑아 테스트 불가능한 함수가 된다."
+      ],
+      "verkada_context": "Command 클라우드 연결이 끊겼을 때의 재접속 정책. GW31-E 의 '오프라인 30분이면 자가 재부팅'도 같은 정책 계층의 상위 안전장치다."
+    },
+    {
+      "num": 45,
+      "slug": "monotonic_deadline",
+      "title_ko": "monotonic deadline 유틸",
+      "title_en": "Monotonic deadline helpers",
+      "difficulty": "medium",
+      "tags": [
+        "CLOCK_MONOTONIC",
+        "deadline",
+        "timeout",
+        "poll",
+        "watchdog"
+      ],
+      "prompt_ko": "CLOCK_MONOTONIC 기반 시간 유틸 3종을 구현하라. now_ms 는 밀리초를 리턴하고, ms_remaining 은 deadline 까지 남은 ms 를 리턴하되 이미 지났으면 0 으로 클램프한다(poll 에 음수를 주면 무한 대기가 된다). poll_timeout_from 은 남은 시간을 cap_ms 로 상한 클램프해 poll 에 넘길 int 를 만들며, deadline==0 은 '마감 없음'으로 보고 cap_ms 를 리턴한다.",
+      "prompt_en": "Monotonic now/remaining/poll-timeout helpers: clamp the past to zero and cap long waits so the loop still wakes periodically.",
+      "signature": "uint64_t now_ms(void); int64_t ms_remaining(uint64_t deadline_ms); int poll_timeout_from(uint64_t deadline_ms, int cap_ms)",
+      "examples": [
+        {
+          "in": "poll_timeout_from(now_ms() + 100000, 1000)",
+          "out": "1000 (cap 으로 클램프)"
+        },
+        {
+          "in": "ms_remaining(now_ms() - 1000)",
+          "out": "0 (음수 클램프)"
+        }
+      ],
+      "hints": [
+        "clock_gettime(CLOCK_MONOTONIC, &ts) 를 쓰고 tv_sec*1000 + tv_nsec/1000000 으로 합친다. time()/gettimeofday() 는 쓰지 않는다.",
+        "부호 없는 타입끼리 빼기 전에 deadline <= now 인지 먼저 확인한다 — 아니면 언더플로로 거대한 값이 된다.",
+        "poll 은 음수 타임아웃을 '무한 대기'로 해석한다. 지난 마감은 반드시 0(= 즉시 리턴)으로 만들고, cap 으로 상한을 걸어 이벤트가 없어도 주기적으로 깨어나 watchdog 을 치게 한다."
+      ],
+      "solution": "uint64_t now_ms(void) {\n    struct timespec ts;\n    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;\n    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);\n}\n\nint64_t ms_remaining(uint64_t deadline_ms) {\n    uint64_t now = now_ms();\n    if (deadline_ms <= now) return 0;\n    return (int64_t)(deadline_ms - now);\n}\n\nint poll_timeout_from(uint64_t deadline_ms, int cap_ms) {\n    if (cap_ms < 0) cap_ms = 0;\n    if (deadline_ms == 0) return cap_ms;\n    int64_t left = ms_remaining(deadline_ms);\n    if (left > (int64_t)cap_ms) left = cap_ms;\n    if (left < 0) left = 0;\n    return (int)left;\n}",
+      "explanation_ko": "타임아웃에 CLOCK_REALTIME(time/gettimeofday)을 쓰면 NTP 나 사용자가 시계를 되돌릴 때 타임아웃이 몇 시간 늘어난다 — 게이트웨이가 '멈춘 것처럼' 보이는 전형적 필드 버그다. CLOCK_MONOTONIC 은 부팅 이후 단조 증가라 안전하다. 두 번째 포인트는 poll 이 '상대 시간 ms' 를 받는다는 것: 절대 deadline 을 잡아두고 매 회전마다 남은 시간을 다시 계산해야 EINTR 로 깰 때마다 마감이 리셋되는 버그를 막는다. cap 은 systemd WatchdogSec 의 절반쯤으로 잡아 유휴 상태에서도 sd_notify(WATCHDOG=1) 을 놓치지 않게 한다.",
+      "complexity": "O(1)",
+      "pitfalls": [
+        "time()/gettimeofday() 사용 → NTP 점프에 타임아웃이 무너진다.",
+        "부호 없는 뺄셈 언더플로로 '남은 시간'이 4천만 초가 된다.",
+        "지난 마감에 음수를 그대로 poll 에 넘겨 무한 대기.",
+        "루프 안에서 타임아웃을 재계산하지 않아 EINTR 마다 마감이 밀린다.",
+        "cap 을 두지 않아 유휴 시 watchdog 을 놓치고 systemd 가 데몬을 재시작한다."
+      ],
+      "verkada_context": "재연결 백오프 마감, AT 명령 응답 타임아웃, watchdog kick 주기를 하나의 poll 타임아웃으로 합치는 계산부."
+    },
+    {
+      "num": 46,
+      "slug": "atomic_config_save",
+      "title_ko": "원자적 설정 저장 (write + fsync + rename)",
+      "title_en": "Crash-safe config save",
+      "difficulty": "hard",
+      "tags": [
+        "fsync",
+        "rename",
+        "atomicity",
+        "power-loss",
+        "mkstemp"
+      ],
+      "prompt_ko": "전원이 언제 끊겨도 반쪽 파일이 남지 않게 설정을 저장하라. ① 같은 디렉토리에 mkstemp 로 임시 파일 생성 ② write_full ③ fsync(파일) ④ close ⑤ chmod 0644 ⑥ rename(tmp, path) ⑦ 디렉토리를 열어 fsync. 어느 단계에서 실패하든 임시 파일을 unlink 하고 fd 를 닫아야 한다.",
+      "prompt_en": "Write to a temp file in the same directory, fsync, rename, then fsync the directory; clean up the temp file on any failure.",
+      "signature": "int atomic_save(const char *path, const void *data, size_t n)",
+      "examples": [
+        {
+          "in": "atomic_save(p, \"{\\\"v\\\":1}\", 7)",
+          "out": "0, 파일 내용이 정확히 7바이트, 디렉토리에 .tmp 잔존 없음"
+        },
+        {
+          "in": "쓰기 불가 경로로 호출",
+          "out": "-1, 임시 파일도 남기지 않음"
+        }
+      ],
+      "hints": [
+        "임시 파일은 반드시 최종 경로와 같은 디렉토리에 만든다 — 다른 파일시스템이면 rename 이 EXDEV 로 실패한다.",
+        "mkstemp 는 템플릿 문자열을 제자리에서 고치고 0600 으로 만든다. 최종 권한은 rename 전에 chmod 로 맞춘다.",
+        "fsync 는 두 번이다: 파일(내용)과 디렉토리(엔트리). 디렉토리 fsync 를 빼면 rename 자체가 전원 손실로 사라질 수 있다. 실패 처리는 goto cleanup 한 곳에 모으고 errno 를 보존하라."
+      ],
+      "solution": "static const char *dir_of(const char *path, char *out, size_t cap) {\n    const char *slash = strrchr(path, '/');\n    if (!slash) { snprintf(out, cap, \".\"); return out; }\n    size_t len = (size_t)(slash - path);\n    if (len == 0) { snprintf(out, cap, \"/\"); return out; }\n    if (len >= cap) len = cap - 1;\n    memcpy(out, path, len);\n    out[len] = '\\0';\n    return out;\n}\n\nint atomic_save(const char *path, const void *data, size_t n) {\n    if (!path || (!data && n)) { errno = EINVAL; return -1; }\n\n    char tmp[512], dbuf[512];\n    int  fd = -1, dfd = -1, rc = -1, have_tmp = 0;\n\n    if (snprintf(tmp, sizeof tmp, \"%s.tmpXXXXXX\", path) >= (int)sizeof tmp) {\n        errno = ENAMETOOLONG;\n        return -1;\n    }\n    fd = mkstemp(tmp);                      // ① 같은 디렉토리 = 같은 파일시스템\n    if (fd < 0) return -1;\n    have_tmp = 1;\n\n    if (write_full(fd, data, n) != (ssize_t)n) goto cleanup;   // ②\n    if (fsync(fd) != 0)                       goto cleanup;   // ③\n    if (close(fd) != 0) { fd = -1;            goto cleanup; } // ④\n    fd = -1;\n    if (chmod(tmp, 0644) != 0)                goto cleanup;   // mkstemp 는 0600\n    if (rename(tmp, path) != 0)               goto cleanup;   // ⑤ 원자적 교체\n    have_tmp = 0;                             // 이제 tmp 는 존재하지 않는다\n\n    dfd = open(dir_of(path, dbuf, sizeof dbuf), O_RDONLY);    // ⑥\n    if (dfd >= 0) fsync(dfd);\n    rc = 0;\n\ncleanup: {\n        int save = errno;                     // 정리 중 errno 가 덮이지 않게 보존\n        if (fd  >= 0) close(fd);\n        if (dfd >= 0) close(dfd);\n        if (have_tmp) unlink(tmp);            // 실패 시 쓰레기 제거\n        errno = save;\n    }\n    return rc;\n}",
+      "explanation_ko": "야외 장비는 전원이 예고 없이 끊긴다(PoE 재협상, 태양광 배터리 방전, 저온 히터 부하). 설정 파일을 제자리에서 덮어쓰면 반쪽 파일로 부팅해 사실상 벽돌이 된다. POSIX 가 원자성을 보장하는 연산은 rename 이므로, '완성된 파일을 만든 뒤 한 번에 갈아끼운다'가 유일하게 안전한 패턴이다. fsync 를 빼먹으면 ext4 의 지연 할당 때문에 '이름은 새 것, 내용은 0바이트'라는 최악의 상태가 실제로 나온다. 디렉토리 fsync 까지 해야 rename 이 영속화된다. 한 단계 더 나아간 답변은 A/B 슬롯 + 부팅 카운터로 OTA 롤백까지 만드는 것이다.",
+      "complexity": "O(n) 쓰기 + fsync 2회 (I/O 지배)",
+      "pitfalls": [
+        "원본 파일을 O_TRUNC 로 열어 덮어쓴다 — 전원 손실에 즉사.",
+        "fsync 를 생략해 rename 은 됐는데 내용이 0바이트.",
+        "디렉토리 fsync 를 생략해 rename 자체가 유실.",
+        "임시 파일을 /tmp 에 만들어 rename 이 EXDEV 로 실패.",
+        "실패 경로에서 임시 파일을 지우지 않아 .tmpXXXXXX 쓰레기가 쌓인다.",
+        "mkstemp 의 0600 을 그대로 둬서 rename 후 권한이 바뀐다."
+      ],
+      "verkada_context": "게이트웨이의 프로비저닝/네트워크 설정 저장. 야외 IP66 장비에서 전원 손실은 예외가 아니라 상시 조건이다."
+    },
+    {
+      "num": 47,
+      "slug": "signal_safe_shutdown",
+      "title_ko": "시그널 안전 종료 (sig_atomic_t + EINTR)",
+      "title_en": "Signal-safe shutdown",
+      "difficulty": "hard",
+      "tags": [
+        "sigaction",
+        "sig_atomic_t",
+        "EINTR",
+        "async-signal-safe",
+        "graceful-shutdown"
+      ],
+      "prompt_ko": "SIGTERM 류 시그널로 이벤트 루프를 깨끗이 종료시켜라. 핸들러는 volatile sig_atomic_t 플래그를 세우는 일만 한다(async-signal-safe 함수만 호출 가능). 등록은 signal() 이 아니라 sigaction() 으로 하고 SA_RESTART 를 켜지 않아 poll 이 EINTR 로 즉시 깨게 한다. wait_for_stop 은 예산 안에서 fd 를 poll 하며, 루프 상단에서 플래그를 확인(→1), EINTR 이면 카운트 후 재시도, 예산 소진이면 0, fd 가 읽기 가능하면 2 를 리턴한다.",
+      "prompt_en": "Handler sets only a volatile sig_atomic_t; sigaction without SA_RESTART; the poll loop treats EINTR as 'recheck the flag and recompute the timeout'.",
+      "signature": "void on_stop_signal(int signo); int install_stop_handler(int signo); int wait_for_stop(int fd, int budget_ms, int *eintr_count)",
+      "examples": [
+        {
+          "in": "80ms 뒤 SIGALRM 이 오도록 타이머를 걸고 wait_for_stop(fd, 3000, &ec)",
+          "out": "1 리턴, ec >= 1 (poll 이 EINTR 로 깼다)"
+        },
+        {
+          "in": "시그널 없이 wait_for_stop(fd, 80, &ec)",
+          "out": "0 (예산 소진)"
+        }
+      ],
+      "hints": [
+        "핸들러에서 할 수 있는 일은 극히 적다. printf/malloc/mutex 는 금지 — 플래그 하나만 세워라.",
+        "struct sigaction 을 0 으로 밀고 sa_handler 를 세팅, sigemptyset(&sa.sa_mask), sa_flags = 0 (SA_RESTART 금지).",
+        "poll 이 -1 이고 errno == EINTR 이면 에러가 아니다. 카운트만 하고 루프 상단으로 돌아가 플래그를 다시 보고, 남은 시간을 절대 deadline 기준으로 재계산해서 다시 poll 한다."
+      ],
+      "solution": "static volatile sig_atomic_t g_stop = 0;\n\nvoid on_stop_signal(int signo) {\n    (void)signo;\n    g_stop = 1;        // 여기서 하는 일은 이것뿐. (실전에서는 + sp_notify(&g_sp))\n}\n\nint install_stop_handler(int signo) {\n    struct sigaction sa;\n    memset(&sa, 0, sizeof sa);\n    sa.sa_handler = on_stop_signal;\n    sigemptyset(&sa.sa_mask);\n    sa.sa_flags = 0;                   // SA_RESTART 없음 → poll 이 EINTR 로 깬다\n    return sigaction(signo, &sa, NULL);\n}\n\nint wait_for_stop(int fd, int budget_ms, int *eintr_count) {\n    if (eintr_count) *eintr_count = 0;\n    uint64_t deadline = now_ms() + (uint64_t)(budget_ms < 0 ? 0 : budget_ms);\n\n    for (;;) {\n        if (g_stop) return 1;                       // 루프 진입 전에 먼저 확인\n        int to = (int)ms_remaining(deadline);       // 매 회전마다 재계산\n        if (to <= 0) return g_stop ? 1 : 0;\n\n        struct pollfd pf = { fd, POLLIN, 0 };\n        int r = poll(&pf, 1, to);\n        if (r < 0) {\n            if (errno == EINTR) {                   // 시그널로 깼다 — 에러 아님\n                if (eintr_count) (*eintr_count)++;\n                continue;                           // 루프 상단에서 g_stop 검사\n            }\n            return -1;\n        }\n        if (r == 0) return g_stop ? 1 : 0;          // 타임아웃\n        if (pf.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) return 2;\n    }\n}",
+      "explanation_ko": "시그널 핸들러는 프로그램 어느 지점에서든 끼어든다. malloc 중간에 끼어들어 다시 malloc 을 부르면 힙 락 재진입으로 그대로 데드락이다. 그래서 규칙은 '핸들러는 플래그만, 정리는 루프가'다. 플래그 타입은 volatile sig_atomic_t 여야 한다 — volatile 은 최적화로 읽기를 생략하지 말라는 뜻일 뿐 원자성도 메모리 순서도 보장하지 않으므로 플래그 하나에만 쓴다. sigaction 을 쓰는 이유는 이식성 있는 시맨틱과 마스크 지정이고, SA_RESTART 를 끄는 이유는 poll 이 EINTR 로 즉시 깨어나 플래그를 보게 하기 위해서다. 실전에서는 여기에 self-pipe notify 를 더해 EINTR 타이밍에 의존하지 않게 만든다.",
+      "complexity": "O(1) 핸들러, 루프는 깨어난 횟수에 비례",
+      "pitfalls": [
+        "핸들러에서 printf/malloc/pthread_mutex_lock 호출 → 재진입 데드락.",
+        "종료 플래그를 그냥 int 로 선언(volatile sig_atomic_t 여야 한다).",
+        "signal() 사용 — 시맨틱이 플랫폼마다 다르고 마스크를 못 준다.",
+        "SA_RESTART 를 켜서 poll 이 자동 재시작되어 종료가 지연된다.",
+        "EINTR 을 에러로 처리해 루프가 -1 로 죽는다.",
+        "EINTR 후 타임아웃을 재계산하지 않아 마감이 무한정 밀린다.",
+        "멀티스레드에서 어느 스레드가 시그널을 받을지 통제하지 않는다(pthread_sigmask 로 전담 스레드 지정)."
+      ],
+      "verkada_context": "systemd 가 게이트웨이 데몬에 SIGTERM 을 보낸 뒤 TimeoutStopSec 안에 나가야 한다. 그 안에 설정 flush 와 모뎀 세션 정리를 끝내야 다음 부팅이 깨끗하다."
+    },
+    {
+      "num": 48,
+      "slug": "goto_cleanup_no_fd_leak",
+      "title_ko": "에러 경로 정리 — goto cleanup, fd 누수 0",
+      "title_en": "Error-path cleanup without fd leaks",
+      "difficulty": "medium",
+      "tags": [
+        "goto-cleanup",
+        "fd-leak",
+        "close",
+        "EINTR",
+        "resource-management"
+      ],
+      "prompt_ko": "xclose 는 fd<0 이면 0, close 가 EINTR 이면 재시도하지 않고 0 을 리턴한다(fd 는 이미 반납되었으므로 재시도하면 다른 스레드가 방금 연 같은 번호의 fd 를 닫는다). copy_file_prefix 는 src 를 열고 dst 를 O_WRONLY|O_CREAT|O_TRUNC 로 연 뒤 앞 max_bytes 바이트를 복사하되, 모든 실패를 goto cleanup 한 곳으로 모아 fd 와 메모리를 정확히 한 번씩 해제한다.",
+      "prompt_en": "Single-exit goto cleanup so no path leaks an fd, and never retry close() on EINTR.",
+      "signature": "int xclose(int fd); long copy_file_prefix(const char *src, const char *dst, size_t max_bytes)",
+      "examples": [
+        {
+          "in": "존재하지 않는 src 로 400회 호출",
+          "out": "매번 -1, 열린 fd 개수는 전혀 늘지 않음"
+        },
+        {
+          "in": "8바이트 파일을 max_bytes=1MB 로 복사",
+          "out": "8 (EOF 에서 정상 종료)"
+        }
+      ],
+      "hints": [
+        "자원 핸들을 먼저 무효값(-1 / NULL)으로 선언하면 cleanup 에서 '유효한 것만' 해제할 수 있다.",
+        "조기 return 을 흩뿌리지 말고 실패는 전부 goto cleanup 으로 보낸다 — 출구가 하나면 빠뜨릴 수 없다.",
+        "cleanup 안에서 errno 를 저장/복원하지 않으면 close/free 가 호출자의 errno 를 덮어쓴다. 쓰기용 fd 는 close 실패도 실패로 취급해야 데이터 손실을 놓치지 않는다."
+      ],
+      "solution": "int xclose(int fd) {\n    if (fd < 0) return 0;                  // 이미 닫힘/미할당 — no-op\n    int r = close(fd);\n    if (r < 0 && errno == EINTR) return 0; // fd 는 이미 반납됨 → 재시도 금지\n    return r;\n}\n\nlong copy_file_prefix(const char *src, const char *dst, size_t max_bytes) {\n    int            in = -1, out = -1;\n    unsigned char *buf = NULL;\n    long           rc = -1;\n    long           done = 0;\n    const size_t   CHUNK = 4096;\n\n    if (!src || !dst) { errno = EINVAL; goto cleanup; }\n\n    in = open(src, O_RDONLY);\n    if (in < 0) goto cleanup;\n    out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);\n    if (out < 0) goto cleanup;\n    buf = (unsigned char *)malloc(CHUNK);\n    if (!buf) goto cleanup;\n\n    size_t left = max_bytes;\n    while (left > 0) {\n        size_t want = left < CHUNK ? left : CHUNK;\n        ssize_t k = read_full(in, buf, want);\n        if (k < 0) goto cleanup;\n        if (k == 0) break;                           // EOF — 정상 종료\n        if (write_full(out, buf, (size_t)k) != k) goto cleanup;\n        done += (long)k;\n        left -= (size_t)k;\n        if ((size_t)k < want) break;                 // 짧은 read = EOF 도달\n    }\n    rc = done;\n\ncleanup: {\n        int save = errno;\n        free(buf);                 // free(NULL) 은 안전\n        if (xclose(out) != 0) rc = -1;   // 쓰기 파일은 close 에러도 실패로 본다\n        xclose(in);\n        errno = save;\n    }\n    return rc;\n}",
+      "explanation_ko": "C 에는 RAII 도 defer 도 없으므로 관용구는 '단일 출구 + goto cleanup'이다. 오래 도는 데몬에서 fd 누수는 며칠 뒤 EMFILE 로 터지고, 증상('3일마다 죽어요')이 원인에서 멀어 디버깅이 가장 괴로운 종류의 버그다. close 와 EINTR 은 별도의 함정이다: Linux 에서 close 는 EINTR 을 리턴해도 fd 를 이미 반납했기 때문에 재시도하면 그 사이 다른 스레드가 같은 번호로 연 fd 를 닫아버린다. 그래서 close 는 재시도하지 않고, 데이터 무결성이 중요하면 close 전에 fsync 로 에러를 미리 확인한다.",
+      "complexity": "O(max_bytes) 복사, O(1) fd",
+      "pitfalls": [
+        "에러마다 return 을 흩뿌려 fd 하나를 빠뜨린다 → 며칠 뒤 EMFILE.",
+        "close(fd) 를 EINTR 에 재시도해 다른 스레드의 fd 를 닫는다.",
+        "같은 fd 를 두 번 close(이중 해제) — 위와 정확히 같은 위험.",
+        "cleanup 에서 errno 를 덮어써 호출자가 원인을 잃는다.",
+        "쓰기 fd 의 close 리턴값을 무시해 조용한 데이터 손실.",
+        "cleanup 라벨 뒤에 변수 선언을 두어 컴파일 에러(C 에서는 라벨 뒤에 문장이 와야 한다)."
+      ],
+      "verkada_context": "게이트웨이 데몬은 몇 달씩 재시작 없이 돈다. 모뎀 재열거·재연결 경로가 실패할 때마다 fd 를 하나씩 흘리면 결국 EMFILE 로 통신이 끊긴다. /proc/<pid>/fd 로 확인하는 것도 같이 알아둘 것."
+    }
+  ]
+}
