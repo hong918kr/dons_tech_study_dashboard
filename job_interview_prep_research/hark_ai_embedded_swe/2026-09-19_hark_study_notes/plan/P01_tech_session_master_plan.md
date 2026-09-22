@@ -1,6 +1,7 @@
 # P01. 1차 Tech Session 마스터 플랜 — 이 한 판에 집중한다
 
 > **목표**: Hark Embedded Software Engineer **tech session 통과** · **프로세스**: HM 검토 → intro → **tech** → 온사이트 (3단계뿐이라 이 라운드가 관문)
+> **⚡ 2026-09-21 변경**: 공고 제목이 **`Embedded Software Engineer, BSP`** 로 바뀜(본문 동일) → BSP 비중 상향. [BSP 집중 시리즈 B00~B04](../bsp/B00_bsp_overview.html)
 > **조건**: 임베디드 약 5명 채용 중 · 지원자 적음 · base $250K + 사이닝 $100K + equity 제시 · 지인 추천 경로
 > **사용법**: 이 페이지를 매일 열고, 각 항목의 링크를 따라가 보충한다. 링크는 같은 사이트의 노트로 연결된다.
 
@@ -37,6 +38,7 @@ RTOS API를 외운 사람으로 보이려 하지 않는다. 그 경쟁에서는 
 |---|---|---|
 | C / Cortex-M 기본기 | ✅ 강함 (표현만 정리) | [C01 Cortex·부트·툴체인](../concepts/C01_arm_cortex_boot_toolchain.html) · [C02 제약 환경 C/C++](../concepts/C02_c_cpp_constrained.html) |
 | HW/SW 디버깅 | ✅ 최강 — 여기서 점수를 번다 | [J07 디버깅 업무](../jd/J07_debug_hw_sw_tools.html) · [C10 디버깅·bring-up](../concepts/C10_debugging_bringup_schematics.html) |
+| **BSP (제목에 박힌 축)** | 🟡 통째로 소유한 적 없음 — 정확한 좌표 제시 | [B00 개요](../bsp/B00_bsp_overview.html) · [B01 해부](../bsp/B01_bsp_anatomy.html) · [B04 면접](../bsp/B04_bsp_interview.html) |
 | 드라이버 / RTOS | 🟡 갭 — 정직 + 최근 실습 | [C04 RTOS](../concepts/C04_rtos_freertos_zephyr.html) · [J11 RTOS 검증](../jd/J11_rtos_handson.html) |
 | 저전력 / 웨어러블 감각 | 🟡 갭 — 숫자 감각만 만들면 됨 | [C05 저전력·발열](../concepts/C05_low_power_thermal.html) · [J03 전력 업무](../jd/J03_power_thermal_always_on.html) |
 | 오디오 / 온디바이스 AI | ❌ 갭 — 개념만 방어 | [C08 온디바이스 추론](../concepts/C08_on_device_ml_inference.html) · [J05 AI 협업](../jd/J05_on_device_ai_budgets.html) |
@@ -55,6 +57,7 @@ RTOS API를 외운 사람으로 보이려 하지 않는다. 그 경쟁에서는 
 | 4 | 스토리 C: FPGA pre-silicon bring-up | 첫 부팅 실패를 어떻게 좁혔는지, 3분 | [J13 bring-up 협업](../jd/J13_schematics_bringup_collab.html) |
 | 5 | RTOS 정직 스크립트 + 실습 근거 | 5문장. 마지막 문장은 "지금 하고 있는 것" | [J11 §6](../jd/J11_rtos_handson.html) |
 | 6 | 전력 숫자 감각 | mAh → 평균 전류 → 하루 사용 시간을 암산으로 | [S03 계산 연습](../study/S03_power_wireless_qa.html) |
+| 8 | **"BSP를 소유해 본 적 있나?" 답변 스크립트** | 인정 → 인접 경험 → 판단력으로 마무리 | [B00 §3.1](../bsp/B00_bsp_overview.html) · [B04 §11](../bsp/B04_bsp_interview.html) |
 | 7 | 역질문 5개 | 팀 구조·아키텍처에 대한 진짜 궁금증 | 아래 §7.4 |
 
 ---
@@ -69,11 +72,11 @@ RTOS API를 외운 사람으로 보이려 하지 않는다. 그 경쟁에서는 
 |---|---|---|---|
 | **D-7** | [C00 로드맵](../concepts/C00_roadmap.html) 훑기 + 이 페이지 정독 | 스토리 A 초안 작성 → 소리 내어 3회 | 스토리 A 4분 버전 |
 | **D-6** | [J07 디버깅 업무](../jd/J07_debug_hw_sw_tools.html) §2~3 | [S06](../study/S06_debug_scenarios_stories.html) 시나리오 D01~D04 답해 보기 | 디버깅 접근 5단계 암기 |
-| **D-5** | [C01](../concepts/C01_arm_cortex_boot_toolchain.html) 예외·부트 | [S02](../study/S02_drivers_rtos_qa.html) Q01~Q14 | Cortex-M 예외·부트 설명 가능 |
-| **D-4** | [C04 RTOS](../concepts/C04_rtos_freertos_zephyr.html) 스케줄러·동기화 | [J11](../jd/J11_rtos_handson.html) 정직 스크립트 완성 + Zephyr 설치·blinky | 산출물 5 + 보드에서 blinky |
+| **D-5** | **[B01 BSP 해부](../bsp/B01_bsp_anatomy.html)** (C01 내용 포함) | [B04 면접 질문](../bsp/B04_bsp_interview.html) Q01~Q15 | BSP 계층도·bring-up 순서 백지에서 |
+| **D-4** | [C04 RTOS](../concepts/C04_rtos_freertos_zephyr.html) 스케줄러·동기화 | **[B02 Zephyr 보드 포팅](../bsp/B02_zephyr_board_port.html)** — blinky에서 멈추지 말고 devicetree overlay 수정까지 | 산출물 5 + overlay로 핀 바꿔 보기 |
 | **D-3** | [C05 저전력](../concepts/C05_low_power_thermal.html) sleep·wake·전류 | [S03](../study/S03_power_wireless_qa.html) 계산 E1~E2 손으로 | 산출물 6 |
 | **D-2** | [C03 드라이버](../concepts/C03_bsp_peripheral_drivers.html) I2C·SPI·**I2S** | 문제 [01](../problems/01_spsc_ring_isr.html)·[02](../problems/02_i2s_pingpong.html) 손코딩 후 `make run` | 링버퍼·핑퐁 버퍼 백지에서 |
-| **D-1** | [C08](../concepts/C08_on_device_ml_inference.html) + [J05](../jd/J05_on_device_ai_budgets.html) 개념만 | 스토리 A·B·C 연속 리허설 + 역질문 확정 | 전체 리허설 1회 |
+| **D-1** | [B04 면접 질문](../bsp/B04_bsp_interview.html) 나머지 + [B03 방어 범위](../bsp/B03_linux_android_bsp.html) §8 | 스토리 A·B·C 연속 리허설 + 역질문 확정 | 전체 리허설 1회 |
 | **D-0** | 이 페이지 §7~9만 | — | 컨디션 |
 
 ### 3.2 압축 버전
@@ -170,7 +173,7 @@ JD가 "familiarity"라고만 썼다. 스택을 짰다고 하지 않는다. 강�
 2. 오디오 경로(마이크 → 전처리 → wake word)는 어디가 주인인가요?
 3. RTOS와 부트로더는 정해졌나요, 초기 멤버가 정하나요?
 4. 지금 하드웨어는 어느 빌드 단계이고, 첫 양산까지 펌웨어 쪽 최대 리스크는 무엇인가요?
-5. 임베디드를 여러 명 뽑는다고 들었습니다. 자리들이 어떤 축으로 나뉘나요?
+5. 임베디드를 여러 명 뽑는다고 들었습니다. 자리들이 어떤 축으로 나뉘나요? (공고 제목이 BSP로 바뀐 걸 봤습니다)
 
 ---
 
@@ -181,7 +184,7 @@ JD가 "familiarity"라고만 썼다. 스택을 짰다고 하지 않는다. 강�
 | 하지 말 것 | 대신 |
 |---|---|
 | "FreeRTOS/Zephyr로 제품을 출하했다" | "bare-metal 멀티코어에서 같은 문제를 다뤘다" |
-| "BSP를 만들었다" | "실리콘·보드 bring-up과 주변장치 검증을 했다" |
+| "BSP를 만들었다" / "보드를 포팅했다" | "실리콘·보드 bring-up과 주변장치 검증을 했다" ([B00 §3.2](../bsp/B00_bsp_overview.html)) |
 | "BLE/Wi-Fi 스택을 개발했다" | "무선 칩을 시스템에 통합하고 호스트 경계를 디버깅했다" |
 | "OTA 인프라를 구축했다" | "양산 펌웨어의 에러 처리와 telemetry를 설계했다" |
 | Apple 내부 수치·코드네임·툴 이름 | "공개할 수 있는 범위에서 말씀드리면" 하고 구조만 |

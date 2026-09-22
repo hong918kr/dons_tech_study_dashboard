@@ -1,6 +1,7 @@
 # Hark — Embedded Software Engineer · Context
 
 > **최종 갱신**: 2026-09-21 · **상태**: 📞 리크루터 콜 완료 (지원 전)
+> **🧱 BSP 집중**: [B00~B04](2026-09-19_hark_study_notes/site/bsp/B00_bsp_overview.html) — 공고 제목이 BSP로 바뀐 뒤 추가. 기초·Zephyr 실전·Linux/Android·면접 41문항
 > **🧩 코딩 세션**: [Coding Session — 1st tech interview prep](2026-09-19_hark_study_notes/site/coding.html) — 문제 5 · 해설 5 · 답안/뼈대 HTML · `make` 채점
 > **🎯 마스터 플랜**: [1차 tech session D-7 역산 계획](2026-09-19_hark_study_notes/site/plan/P01_tech_session_master_plan.html) — 매일 여는 페이지
 > **📚 스터디 노트**: [2026-09-19_hark_study_notes/site/index.html](2026-09-19_hark_study_notes/site/index.html) — 마스터 플랜 1 + 코딩 연습 5문제(문제·답안·해설) + JD 리서치 15 + 개념 노트 11 + 스터디 노트 6 (총 44편). JD 문장별로 읽으려면 J01~J14, 확인 필요 항목은 J00
@@ -30,6 +31,7 @@
 
 | 항목 | 내용 |
 |---|---|
+| 직함 | **2026-09-21 변경**: `Embedded Software Engineer` → **`Embedded Software Engineer, BSP`** (Greenhouse id 4186968009, 본문 무변경). 같은 날 다른 공고(4201692009, 구 Embedded Application Engineer)가 `Embedded Software Engineer` 이름을 가져감 → 5개 자리를 역할축으로 구분 시작 [확인됨][11] |
 | 팀 / 조직 | Firmware 팀으로 추정. Hardware 팀(새 실리콘·센서 통합), **Agent 팀**(모델 실행·메모리 제약), Product 팀과 직접 협업 [확인됨][JD] |
 | 레벨 | JD에 레벨 없음. 리크루터가 **base $250K 수준 가능**이라고 구두 안내 (2026-09-20) → 밴드 상단 구간 [확인됨·리크루터]. 타이틀/레벨 매핑은 미확인 |
 | 위치 / 근무형태 | San Jose, CA. Adcock의 다른 회사(Figure)와 같은 캠퍼스 [확인됨][4]. 근무형태 미기재, 하드웨어 bring-up 특성상 **onsite 주 5일** 가능성 높음 [추정] |
@@ -275,6 +277,7 @@
 |---|---|---|
 | 2026-09-18 | 컨텍스트 파일 생성 (JD·회사 조사) | Greenhouse API로 JD 원문 확보(JD 갱신일 2026-08-26). 57개 공고 스캔해 하드웨어 구조 단서 수집 |
 | 2026-09-19 | 스터디 노트 사이트 생성 | `2026-09-19_hark_study_notes/` — C00~C10 개념 + S01~S06 드릴, 약 14,600줄. 빌드: `python3 build_notes_site.py` |
+| 2026-09-21 | **공고 제목 BSP로 변경** + BSP 시리즈 5편 작성 | 제목만 변경, 본문 동일. `bsp/B00~B04` 약 2,900줄 — 공식 문서 28건 확인. 마스터 플랜 D-5/D-4/D-1을 BSP 중심으로 교체 |
 | 2026-09-21 | 코딩 세션 HTML 인덱스 | `site/coding.html` — 문제·해설·답안·뼈대 링크 한 페이지. 답안 .c도 HTML로 렌더 |
 | 2026-09-21 | 코딩 연습 세트 5문제 | `coding/` — problems·starters·solutions·notes + Makefile. 모범답안 5개 전부 경고 0개·테스트 통과 (`make all`) |
 | 2026-09-21 | 마스터 플랜 작성 | `plan/P01` — tech session D-7 역산 계획. HM 추정(Xiao Qin, Fitbit/Pixel Watch/Sesame) 반영, 오디오·온디바이스 AI 우선순위 상향 |
