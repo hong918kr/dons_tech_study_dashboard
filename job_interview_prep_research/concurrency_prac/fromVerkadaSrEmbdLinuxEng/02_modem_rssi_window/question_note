@@ -1,0 +1,153 @@
+Modem RSSI — latest value with staleness, and a sliding-window min/max
+Practice problem — Verkada 1st screening type (Part 1 concurrency / Part 2 data structure)
+Modelled on the real 2026-09-25 ALS problem in
+  ../../verkada_sr_embedded_linux_engineer_connectivity/verkada_sep_25_2026_1st_screening_questions/
+
+Files in this folder
+  question_note              this statement
+  modem.h                    vendor header (given, do not modify)
+  main.c                     test harness + fake modem (given, do not modify)
+  rssi_window.h              API the harness calls (you implement it)
+  rssi_window.c              YOUR code — stub with TODOs
+  rssi_window_solution.c     reference: packed atomic publish + monotonic deques
+  main.sh                    ./main.sh   (your code)   |   ./main.sh sol   (reference)
+
+------------------------------------------------------------------------------
+Background
+
+The GC31 cellular gateway keeps a site online over LTE. Firmware has to know the
+current signal quality (to drive the LED bars, to decide when to fail over to
+the second SIM) and also the recent history (the installer app shows "worst
+signal in the last minute" so a tech can tell a marginal mount from a good one).
+
+Signal quality comes from the modem over an AT channel:
+
+    struct RssiSample {
+        int      status;     // MODEM_ERROR / MODEM_BUSY / MODEM_OK
+        int      rssi_dbm;   // received power, dBm, typically -115 .. -55
+        int      sinr_db;    // signal/(interference+noise), dB
+        uint64_t timestamp;  // microseconds, modem_now_us() clock
+    };
+
+    struct RssiSample modem_poll_rssi(void);
+
+Behaviour of that one call:
+
+    status        blocks            payload fields         how often
+    ------------  ----------------  ---------------------  ---------------------
+    MODEM_OK      0 .. 100 ms       fresh, valid           ~half the polls
+    MODEM_BUSY    0 .. 100 ms       GARBAGE                ~half the polls
+                                    ("no new value; the previous one still
+                                      holds")
+    MODEM_ERROR   returns at once   GARBAGE                occasionally (~6%)
+
+    The FIRST call returns MODEM_OK immediately, without blocking.
+    modem_poll_rssi() is NOT thread-safe: static state + its own RNG.
+    Exactly one thread may ever call it.
+
+    Scaled for the exercise: the real AT+CSQ round trip on this module blocks up
+    to ~1 s; here it is 0..100 ms. The "last 60 s" window is compiled as 1.5 s
+    (RSSI_WINDOW_US in rssi_window.h) so that eviction actually happens inside a
+    ~7 second test run. Your code must not assume either number.
+
+A blocking, single-threaded, sometimes-lying vendor call is not something the LED
+task, the failover task and the installer app can each call. Wrap it.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1.  Non-blocking, thread-safe access to the latest value AND to its age.
+
+    int  rssi_init(void);
+    void rssi_deinit(void);
+
+    int  rssi_get_latest(int *dbm, uint64_t *age_us);
+    bool rssi_is_healthy(uint64_t max_age_us);
+
+  rssi_get_latest() returns 0 and fills both out-params, or -1 if nothing has
+  ever been sampled. It must never touch the modem and never block.
+
+  The new part compared with the ALS problem: STALENESS. A value with no age is
+  useless here — "-113 dBm" measured 40 ms ago means "we are on the edge of
+  coverage", the same number measured 9 minutes ago means "the modem stopped
+  answering and nobody noticed". So:
+      * *dbm and *age_us must describe the SAME sample. A reader must not be
+        able to combine a fresh value with an old timestamp, or the other way
+        round, no matter when it reads.
+      * rssi_is_healthy(max_age_us) reports whether the sampler is still alive:
+        a valid sample exists and it is at most max_age_us old.
+
+Part 2.  Sliding window statistics over the last RSSI_WINDOW_US.
+
+    int    rssi_min_in_window(void);
+    int    rssi_max_in_window(void);
+    double rssi_avg_in_window(void);
+
+  min and max must be AMORTISED O(1) per query, not O(number of samples in the
+  window). A plain scan is the obvious first answer and it is the wrong one:
+  the modem can hand you a value every 10 ms, so a 60 s window is 6000 samples,
+  and the installer app polls both metrics several times a second while the
+  radio task is appending. Keep the answer ready instead of recomputing it.
+
+  The structure to reach for: a ring buffer of (timestamp, rssi) plus two
+  MONOTONIC DEQUES of indices into it — one non-decreasing in rssi (its front
+  is the window minimum) and one non-increasing (its front is the maximum).
+  Eviction is by timestamp, at both append time and query time, because samples
+  age out even when nothing new arrives.
+
+  rssi_avg_in_window() is a running sum divided by the count — O(1) as well.
+
+------------------------------------------------------------------------------
+Expected behaviour (what the harness marks PASS/FAIL)
+
+  * Getters called BEFORE rssi_init(): report "no data" (-1 / RSSI_NONE / NAN),
+    do not crash, do not return garbage.
+  * Right after rssi_init() returns, a value already exists and its age is a
+    few ms at most — the first (non-blocking) poll was taken synchronously.
+  * latest value and age match the ground truth the fake modem recorded.
+  * min / max / avg match a brute-force O(n) reference computed from that ground
+    truth, at several instants, including after older samples have been evicted.
+  * The modem dies (the harness makes every poll return MODEM_BUSY): the last
+    good value is still readable with a growing age, rssi_is_healthy(short)
+    flips to false, and once the whole window has aged out min/max return
+    RSSI_NONE and avg returns NAN. Health comes back when the modem recovers.
+  * modem_poll_rssi() is called from exactly one thread, never concurrently.
+  * 4 reader threads for 2 s see no value that the modem never produced, and no
+    getter call takes anywhere near the 100 ms the modem can block for.
+  * After rssi_deinit() the sampler thread is gone: the modem stops being polled,
+    and rssi_deinit() itself returns in well under 500 ms.
+  Last line of the run is either "ALL CHECKS PASSED (0 failed)" or "N CHECK(S)
+  FAILED" (exit status 1). The stub as shipped fails ~12 checks and hangs nowhere.
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for  (answer these on paper before coding)
+
+  1. Why can't rssi_get_latest() just call modem_poll_rssi()? How many threads
+     may call the vendor API, and what breaks if two do?
+  2. What does "non-blocking" mean for a reader here — never waiting on the
+     modem, or never taking a lock at all? Which of your getters still takes a
+     lock, and what is the longest it can be held?
+  3. The reader needs a value and its timestamp TOGETHER. What exactly goes
+     wrong if you keep them in two variables and read them one after the other?
+     Name the failure, and say which direction of skew each interleaving gives.
+  4. You have one 64-bit atomic. What do you pack into it so that a single load
+     yields value + age? What are the limits of that packing (range, resolution,
+     lifetime), and at what point must you move to a seqlock or a double buffer?
+  5. Is a plain `int` load/store atomic on ARM64 in practice? Why is "in
+     practice" not an acceptable answer in C? (tearing, reordering, what the
+     compiler is allowed to do to a non-atomic shared variable)
+  6. Part 2: how much memory does a 60 s window cost if a new value can arrive
+     every 10 ms? What is your capacity, and what do you do when it is full?
+  7. Part 2: why is a scan for min/max wrong at scale, and what is the invariant
+     of the monotonic deque that replaces it? Why is a sample that is smaller
+     than the one before it allowed to delete its predecessor forever?
+  8. Part 2: why TWO deques? What do they store — values or indices — and why?
+     Show that each sample is pushed once and popped at most once (so the
+     per-query cost really is amortised O(1)).
+  9. MODEM_BUSY says "nothing new, the old value still holds"; MODEM_ERROR says
+     "the payload is garbage". What does each one do to the latest value, to the
+     window, and to health? Why must ERROR make you back off?
+ 10. The modem firmware wedges and stops producing values. What should
+     rssi_get_latest(), rssi_is_healthy() and min/max/avg each return, before and
+     after the window has fully aged out? And how do you stop the sampler at
+     shutdown when it may be parked inside a 100 ms vendor call?

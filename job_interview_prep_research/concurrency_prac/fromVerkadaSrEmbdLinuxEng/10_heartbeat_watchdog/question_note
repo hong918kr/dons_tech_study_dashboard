@@ -1,0 +1,153 @@
+Heartbeat watchdog — many writers, one reader (10_heartbeat_watchdog)
+연습 문제 — Verkada 1차 스크리닝 유형 (Part 1 동시성 / Part 2 자료구조)
+
+Files in this folder
+  question_note              this statement
+  hwwdt.h                    vendor header for the SoC watchdog (given, do not modify)
+  watchdog.h                 the API the harness calls (you implement it)
+  watchdog.c                 YOUR code — stub with TODOs
+  watchdog_solution.c        reference solution (Part 2 = min-heap with lazy updates)
+  main.c                     test harness + fake hardware watchdog (given, do not modify)
+  main.sh                    ./main.sh   (your code)  |  ./main.sh sol   (reference)
+
+------------------------------------------------------------------------------
+Background
+
+A Verkada cellular gateway runs a handful of long-lived worker threads: the
+modem manager, the cloud uploader, the PoE controller, a camera prober, a
+config syncer. If one of them wedges — a driver ioctl that never returns, a
+deadlock on the modem AT-command mutex — the box looks alive from the outside
+but has quietly stopped doing its job. The SoC has a hardware watchdog to
+recover from exactly this, and the platform team hands you its driver:
+
+    void     hwwdt_kick(void);                    /* pet the dog             */
+    void     hwwdt_report_fault(uint32_t id);     /* tell the platform who   */
+    uint64_t hwwdt_now_us(void);                  /* shared us clock         */
+
+  hwwdt_kick()          must be called at least once per HWWDT_TIMEOUT_US or
+                        the SoC resets the board. One MMIO write, tens of ns,
+                        callable from any thread — but the register is not a
+                        synchronisation point, so YOU must make sure only one
+                        thread ever writes it.
+  hwwdt_report_fault()  cheap; ends up in a crash log / cloud event. The
+                        harness records every call (time + worker id).
+  HWWDT_TIMEOUT_US      2 s on the real part. THIS EXERCISE SCALES EVERYTHING
+                        20x DOWN — hwwdt.h sets it to 100 ms and the harness
+                        uses 4..500 ms worker deadlines — so a run takes ~4 s
+                        instead of ~80 s. Nothing else about the problem changes.
+
+Note how this is the MIRROR IMAGE of the usual "wrap the blocking vendor call"
+problem. There is no blocking vendor call here. Instead there are MANY WRITERS
+(every worker thread says "I am alive" on its hot path) and exactly ONE READER
+(the thing that decides whether to pet the dog). All the cost must land on the
+reader.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1. Concurrency — make checking in almost free.
+
+      int  wd_init(void);
+      void wd_deinit(void);
+      int  wd_register(const char *name, uint64_t deadline_us);
+      void wd_unregister(int id);
+      void wd_heartbeat(uint32_t worker_id);      /* <-- the hot path */
+
+  wd_heartbeat() is called by every worker inside its main loop, so it must be
+  WAIT-FREE: one relaxed/release atomic store of a timestamp into that worker's
+  own slot. No mutex, no CAS loop, no allocation, nothing that can block — and
+  ideally no cache line shared with another worker (say the words "false
+  sharing" and pad the slots).
+
+  A monitor thread of your own wakes on a TIMED WAIT, works out who is overdue,
+  calls hwwdt_report_fault() for each new death, and kicks the hardware
+  watchdog ONLY IF EVERY REGISTERED WORKER IS HEALTHY. The last part is the
+  whole point of the exercise: a thread that just kicks on a timer keeps the
+  board alive precisely while the rest of the system is dead, which turns the
+  hardware watchdog into a liveness lie. Each death must be reported exactly
+  once, and reported again if the worker recovers and then dies a second time.
+
+Part 2. Data structure — find who expires next without scanning everyone.
+
+      int    wd_next_deadline(uint64_t *when_us);
+      size_t wd_overdue(uint32_t *ids_out, size_t max);
+
+  The naive monitor polls on a fixed period and scans all N workers per tick.
+  Do better: keep the workers in a binary MIN-HEAP keyed by "when does this
+  worker's deadline expire", so the monitor can sleep exactly until the next
+  one, plus an index array (id -> heap position) so a worker's node is found in
+  O(1) and unregister is O(log n) instead of O(n).
+
+  The catch, and the thing to explain out loud: a heartbeat changes a key, but
+  a heartbeat MUST NOT fix the heap — sifting is O(log n) and needs the lock,
+  which puts a lock straight back on the hot path. So use LAZY UPDATES. Work
+  out the invariant that makes them safe (hint: last_seen only moves forward,
+  so a stored key is wrong in only one direction), and then work out why
+  repairing only the ROOT is enough to answer "what is the earliest deadline?"
+  exactly. State the complexity of register / unregister / heartbeat /
+  next_deadline / overdue, and say when you would reach for a TIMER WHEEL
+  instead (and what it costs you).
+
+------------------------------------------------------------------------------
+Expected behaviour (what the harness prints PASS/FAIL for)
+
+  - Empty state: no worker registered -> wd_next_deadline() == -1,
+    wd_overdue() == 0, and the dog IS still kicked (vacuously healthy).
+  - Bad arguments: deadline 0 and a full table return -1; out-of-range ids in
+    wd_heartbeat()/wd_unregister() are ignored, not a crash.
+  - Cost: 8 threads x 40000 calls of wd_heartbeat() vs the same threads doing
+    clock read + lock + store + unlock. The heartbeat must be at least 2.5x
+    cheaper per call (the reference is ~10x: ~7 ns vs ~66 ns).
+  - Part 2: wd_next_deadline() is compared with a brute-force minimum computed
+    by the harness — after registration, after a heartbeat that hands the
+    minimum to a different worker, and after the minimum holder unregisters.
+  - Fault lifecycle: a worker that stops is reported EXACTLY ONCE, within
+    [deadline, deadline + 60 ms] of its last heartbeat; a healthy neighbour is
+    never reported; wd_overdue() names exactly the dead one; after it resumes
+    wd_overdue() is empty again; if it dies a second time it is reported again.
+  - Kick discipline: the fake hwwdt logs every kick with a timestamp. ZERO
+    kicks are allowed while a worker is overdue, and the worst gap between
+    kicks while everyone is healthy must stay inside HWWDT_TIMEOUT_US.
+  - Stress: 8 workers beating every 4..9 ms for ~1.6 s with a 9th worker being
+    registered and unregistered mid-flight; ~25 more next-deadline comparisons
+    against brute force (the lazy-heap correctness test), no spurious faults.
+    Also clean under -fsanitize=thread.
+  - Shutdown: after wd_deinit() no further kick is recorded.
+  Last line is exactly "ALL CHECKS PASSED (0 failed)" or "N CHECK(S) FAILED".
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for   (answer these on paper first)
+
+  1. wd_heartbeat() is on the hot path of five threads. What is wrong with
+     taking a mutex in it — name both the throughput problem and the
+     priority-inversion problem. What exactly does "wait-free" buy you here
+     that "lock-free" does not?
+  2. Your heartbeat is a store of a uint64_t timestamp. Which memory order,
+     and what does the monitor need on the load side? Is relaxed enough? Why
+     is there nothing else to publish alongside the timestamp?
+  3. Thirty-two workers, one `_Atomic uint64_t` each. Draw the cache lines.
+     What happens when eight of them store every 5 ms, and why is the fix
+     "pad to 64 bytes" rather than "use a lock"? Which fields must move out of
+     the hot struct?
+  4. Why is the monitor the ONLY reader, and the only caller of hwwdt_kick()?
+     What covers the monitor's own liveness if IT wedges?
+  5. Why must the kick be conditional on every worker being healthy? Describe
+     the bug in `for(;;){ hwwdt_kick(); sleep(1); }`. How far inside
+     HWWDT_TIMEOUT_US do you kick, and why not right at the edge?
+  6. Part 2: heartbeats change deadlines constantly but must not touch the
+     heap. What is the invariant on a stored key, and why does repairing only
+     the root give you the exact global minimum? What is the amortised cost?
+  7. Part 2: state the complexity of register, unregister, heartbeat,
+     next_deadline and overdue. Where does the id -> heap-index array earn its
+     keep? How does wd_overdue() avoid touching all N entries?
+  8. When is a timer wheel the better structure, and what do you give up
+     (exact next expiry, memory, cascading)? What about a sorted list, or just
+     scanning 32 workers — at what N does the heap start paying for itself?
+  9. Lifetimes: a worker unregisters and its slot is reused by a new worker
+     while the old thread still has one heartbeat in flight. What goes wrong,
+     and how do you make it harmless? What does a freshly registered worker
+     need so it is not declared dead before its first heartbeat?
+ 10. hwwdt_now_us() is gettimeofday(), i.e. not monotonic. What does NTP
+     stepping the clock backwards do to your deadlines, and forwards? What
+     happens on wd_deinit() if the monitor is in the middle of a timed wait,
+     and what must never happen after wd_deinit() returns?

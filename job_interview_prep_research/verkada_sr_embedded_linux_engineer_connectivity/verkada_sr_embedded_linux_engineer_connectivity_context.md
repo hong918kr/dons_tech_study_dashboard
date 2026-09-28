@@ -1,9 +1,12 @@
 # Verkada — Senior Embedded Linux Engineer, Connectivity · Context
 
-> **최종 갱신**: 2026-09-19 · **상태**: 💻 기술 인터뷰 예정 (리크루터 Davis 안내 수신)
+> **최종 갱신**: 2026-09-24 · **상태**: 💻 1차 기술 인터뷰 **2026-09-25 예정**
 > **⚡ 준비 문서**: [verkada_concurrency_top10.md](verkada_concurrency_top10.md) — 빈출 10문제 + 시스템 설계 + 영어 스크립트
 > **🧩 문제 은행**: [verkada_prep/](verkada_prep/README.md) — 8세트 · 78문제 · 592체크 (대시보드 `verkada_prep/index.html`, `make prob N=02_condvar_queues`)
 > **📚 노트 사이트**: [notes_site/index.html](notes_site/index.html) — 기초 노트 11 + 복습 노트 8 (읽기 전용 HTML, 진행률 저장)
+> **🎯 내일 인터뷰 문서**: [2026-09-24_verkada_sep_25_2026_..._1st_tech_interview_prep.html](2026-09-24_verkada_sep_25_2026_senior_embedded_linux_engineer_connectivity_1st_tech_interview_prep.html) — Tier별 예상 문제 11개 + 설계 3제 + 속사포 25 + 치트시트 + 당일 체크리스트
+> **🗺️ 스터디 로드맵**: [2026-09-24_study_roadmap.html](2026-09-24_study_roadmap.html) — 어디서부터 어디까지 (오늘 밤 필수 코스 → 내일 아침 → 장기 코스)
+> **🏠 전체 목차**: [index.html](index.html) — 모든 자료로 가는 랜딩 페이지 (`START_HERE.command` 더블클릭으로도 열림)
 > **🧭 학습 가이드**: [2026-09-19_verkada_concurrency_study_guide.html](2026-09-19_verkada_concurrency_study_guide.html) — JD·메일 4주제를 개념부터 12장으로 (자가 점검 51문항, 장별 완료 체크)
 > **JD**: https://job-boards.greenhouse.io/verkada/jobs/5209588007 · **위치**: San Mateo, CA / **onsite 주 5일** · **연봉 밴드**: $180K–$300K OTE (본문) / $200K–$300K (Greenhouse 메타데이터) + RSU 가능
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
@@ -324,6 +327,8 @@
 | 2026-09-15 | **리크루터 Davis 인터뷰 안내 메일 수신** | 다음 라운드 진출. 2파트(problem solving + system design), 복습 주제 4가지 명시(thread safety / 동기화 / double buffering / 모듈화·테스트 설계). 날짜 미정 |
 | 2026-09-15 | 준비 자료 제작 | `verkada_concurrency_top10.md` + `concurrency_practice/` (10문제 스텁·모범답안, cc -Wall -Wextra 검증, TSan 클린) |
 | 2026-09-19 | 학습 가이드 제작 | `2026-09-19_verkada_concurrency_study_guide.md/.html` — 메일 4주제 + 시스템 설계 + JD 보강을 개념부터 12장, 자가 점검 51문항. 노트 허브 맨 위 카드로 연결 |
+| 2026-09-24 | **1차 기술 인터뷰 D-1 준비 문서 제작** | 인터뷰 2026-09-25. 예상 문제 Tier1 3 / Tier2 4 / Tier3 4, 시스템 설계 3제, 속사포 25문항, 치트시트, 당일 체크리스트. 랜딩 페이지(index.html)와 코드 브라우저(36개 .c) 추가 |
+| 2026-09-24 | 스터디 로드맵 + 실행 진입점 추가 | `2026-09-24_study_roadmap.md/.html` (단계별 링크·체크박스), `START_HERE.command`(더블클릭 실행), 랜딩 페이지에 파일 위치 안내 |
 
 ---
 

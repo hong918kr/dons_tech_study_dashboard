@@ -1,6 +1,8 @@
 # Hark — Embedded Software Engineer · Context
 
-> **최종 갱신**: 2026-09-21 · **상태**: 📞 리크루터 콜 완료 (지원 전)
+> **최종 갱신**: 2026-09-23 · **상태**: 📞 리크루터 콜 완료 (지원 전)
+> **🗺 자리 지도**: [P03 임베디드 7자리](2026-09-19_hark_study_notes/site/plan/P03_embedded_role_map.html) — Embedded Software 팀 5공고(BSP·Systems·Platform·UX·DevOps) + On-Device Models 2공고 비교. BSP 1순위, Systems 2순위
+> **⚡ JD 개정 2026-09-23**: [P02 개정 분석](2026-09-19_hark_study_notes/site/plan/P02_jd_change_2026-09-23.html) — OTA·온디바이스AI·factory test 항목 삭제, FPGA·vendor 통합 신설, 3+ → 5+ yrs, RTOS → eLinux/AOSP 포함
 > **🧱 BSP 집중**: [B00~B04](2026-09-19_hark_study_notes/site/bsp/B00_bsp_overview.html) — 공고 제목이 BSP로 바뀐 뒤 추가. 기초·Zephyr 실전·Linux/Android·면접 41문항
 > **🧩 코딩 세션**: [Coding Session — 1st tech interview prep](2026-09-19_hark_study_notes/site/coding.html) — 문제 5 · 해설 5 · 답안/뼈대 HTML · `make` 채점
 > **🎯 마스터 플랜**: [1차 tech session D-7 역산 계획](2026-09-19_hark_study_notes/site/plan/P01_tech_session_master_plan.html) — 매일 여는 페이지
@@ -18,7 +20,7 @@
 - **채용 상황**: `[확인됨 2026-09-20]` 임베디드 약 5명 추가 채용 중. 오디오·햅틱 펌웨어 공고는 주말 사이 마감(충원 추정), 대신 Audio DSP·특허·통신사 파트너십 법무 자리가 신설 → **1세대 기기가 출시 준비 단계로 이동 중** [추정]
 - **회사**: Figure AI 창업자 Brett Adcock가 2025년 말 자기 돈 $100M으로 세운 **"personal intelligence" AI 랩 + 컨슈머 하드웨어 회사**. 자체 multimodal 모델(speech·vision·persistent memory) + 전용 디바이스를 수직 통합으로 만든다. 2026-05 Series A **$700M, post-money $6B** (Parkway 리드, NVIDIA·AMD·Intel·Qualcomm Ventures 참여) [확인됨][1][2][3]. 첫 제품은 2026-08 발표된 웹 브라우징 에이전트 **Handoff**(소프트웨어), 하드웨어는 아직 미공개 [확인됨][5][6]
 - **역할**: 첫 세대 컨슈머 디바이스의 **MCU/SoC 펌웨어 스택**(board bring-up, BSP, SPI/I2C/UART/I2S 드라이버, RTOS 스케줄링, 저전력, OTA, factory test/calibration)을 맡고, on-device AI 팀의 모델 추론을 메모리·레이턴시 예산 안에 넣도록 지원 [확인됨][JD]
-- **적합도**: ⭐⭐⭐⭐ (4/5). Cortex-M/R bare-metal C/C++, 버스 bring-up, JTAG/스코프 디버깅, **Apple에서 새 무선 실리콘 bring-up → NPI → MP, factory test-node 설계**가 JD 핵심과 거의 1:1로 맞음. 갭은 **상용 RTOS(FreeRTOS/Zephyr) 경험, BLE/Wi-Fi 프로토콜 스택, I2S/오디오, ML 추론 런타임**
+- **적합도**: ⭐⭐⭐⭐½ (4.5/5) `[2026-09-23 JD 개정 반영]` ~~⭐⭐⭐⭐~~. Cortex-M/R bare-metal C/C++, 버스 bring-up, JTAG/스코프 디버깅, **Apple에서 새 무선 실리콘 bring-up → NPI → MP, factory test-node 설계**가 JD 핵심과 거의 1:1로 맞음. 개정 JD에서 OTA·온디바이스 AI·factory test 항목이 빠지고 **FPGA-based system integration**과 **vendor code integration**이 들어와 매칭이 더 좋아짐. 남은 갭은 **임베디드 OS 폭(eLinux/AOSP/RTOS)과 무선 프로토콜 스택**
 - **커리어 방향**: ⭐⭐⭐⭐ (4/5). **on-device AI + 새 AI 하드웨어**를 0→1로 만드는 자리라 피벗 목표(AI accel·on-device·physical AI)에 잘 맞음. 가속기 칩을 직접 설계하는 건 아니지만 "모델을 배터리 기기에 올리는" 제약을 가장 가까이에서 다룸. Adcock 네트워크(Figure 로보틱스)와 연결되는 것도 장점
 - **핵심 어필**: ① Apple Wireless 칩셋 통합: 새 실리콘을 출하 플랫폼에 올리며 PCIe/I2C/SPMI/RFFE 장애 root cause 분석. Hark 첫 기기는 **Cellular·Wi-Fi·BT·GNSS·NFC·UWB**가 다 들어가는 웨어러블급 기기 [확인됨][11] ② bring-up → NPI → MP 풀사이클, **factory test-node 아키텍처** 설계 ↔ JD의 "factory test & calibration firmware", "EVT/DVT/PVT" ③ ARM Cortex R8/R82/M0+ pre/post-silicon bring-up, bare-metal C/C++, JTAG·Trace32·스코프·LA·Power Analyzer
 - **최대 갭/리스크**: 레쥬메에 **RTOS 이름(FreeRTOS/Zephyr)과 BLE/Wi-Fi 스택**이 없음(레쥬메 키워드 문제 + 실제 갭 일부). 회사 리스크: 하드웨어 미출시 초기 단계, **Adcock식 고강도 문화**(Figure 평판·소송 이력), Apple 입사 약 9개월 만의 이직 설명 필요
@@ -38,31 +40,42 @@
 | 연봉 밴드 / Equity | 공고 base **$120,000 – $300,000** [확인됨][JD]. 리크루터 구두 제시: **base $250K + 사이닝 $100K + equity 약 100(단위 미확인)** [확인됨·리크루터 2026-09-20]. equity가 총액인지 연간인지, 주식 수인지 달러인지 확인 필요. $6B 밸류 비상장 주식 → 유동성 불확실 [추정] |
 | 비자 · US Person · 클리어런스 | 요건 없음(컨슈머 제품, ITAR 무관) [확인됨][JD] |
 
-**주요 업무** [확인됨][JD]
+**주요 업무** [확인됨][JD v2 · 2026-09-23 개정]
 - ARM SoC와 MCU를 타깃으로 C/C++ 임베디드 펌웨어 개발·유지보수
-- BSP 개발, 주변장치 드라이버 통합(**SPI, I2C, UART, I2S**), RTOS task 스케줄링 담당
-- always-on 배터리 기기의 **전력 소모·발열** 최적화
-- 현장 업데이트용 **OTA 인프라** 구축·유지
-- on-device AI 팀과 협업해 **메모리·레이턴시 예산 안에서 모델 추론** 지원
-- 양산용 **factory test & calibration 펌웨어** 개발
+- **BSP 개발, board bring-up**, 주변장치 드라이버(SPI, I2C, UART, I2S 등), **시스템 통합**
+- **벤더와 긴밀히 협업해 시스템 통합·검증**
+- **HW/SW 팀과 함께 하드웨어가 스펙대로 제작·동작하는지 확인**
+- always-on 배터리 기기의 전력 소모·발열 최적화
 - logic analyzer, oscilloscope, JTAG로 복잡한 HW-SW 상호작용 디버깅
 
-**필수 자격** [확인됨][JD]
-- 3년 이상 펌웨어/임베디드 개발
+인트로 문장(신규): "from **board bring-up, vendor code integrations**, to custom peripheral drivers and integrations, **FPGA-based system integrations**, and system power and performance improvements"
+
+<details>
+<summary>구 JD(2026-08-26판)에서 삭제된 항목</summary>
+
+- ~~Build and maintain OTA update infrastructure for reliable field updates~~
+- ~~Collaborate with the on-device AI team to support model inference within memory and latency budgets~~
+- ~~Develop factory test and calibration firmware for manufacturing~~
+- ~~"RTOS task scheduling" 표현~~
+
+</details>
+
+**필수 자격** [확인됨][JD v2]
+- **5년 이상**(구 3년) 펌웨어/임베디드 개발
 - 자원이 제한된 환경에서 C 및/또는 C++ 능숙
-- ARM Cortex-M 또는 Cortex-A와 툴체인 경험
-- RTOS 실무 경험(FreeRTOS, Zephyr 등)
+- ARM Cortex-M 또는 Cortex-A 경험 (구 JD의 "associated toolchains" 문구는 삭제)
+- **임베디드 OS 실무 경험 — eLinux, AOSP, VxWorks, RTOS 등** (구 JD는 "RTOS (FreeRTOS, Zephyr)"만)
 - 무선 프로토콜(BLE, Wi-Fi, Thread) 친숙
 - 회로도를 읽고 board bring-up 때 HW 엔지니어와 함께 일하는 데 익숙
 - 임베디드 디버깅 툴과 워크플로 경험
 
-**우대 사항** [확인됨][JD]
+**우대 사항** [확인됨][JD v2] — 4개 모두 변경 없음
 - 배터리 컨슈머 기기 전력 최적화
 - secure boot, firmware signing, hardware root of trust
 - 임베디드 ML 추론 런타임 경험
 - EVT/DVT/PVT를 거쳐 컨슈머 전자제품 출시
 
-**기술 키워드**: `C` `C++` `ARM Cortex-M/A` `BSP` `SPI` `I2C` `UART` `I2S` `FreeRTOS` `Zephyr` `BLE` `Wi-Fi` `Thread` `low power` `thermal` `OTA` `factory test` `calibration` `JTAG` `logic analyzer` `secure boot` `ML inference` `EVT/DVT/PVT`
+**기술 키워드** (v2): `C` `C++` `ARM Cortex-M/A` `BSP` `board bring-up` `vendor integration` `FPGA-based system integration` `SPI` `I2C` `UART` `I2S` `eLinux` `AOSP` `VxWorks` `RTOS` `BLE` `Wi-Fi` `Thread` `low power` `thermal` `JTAG` `logic analyzer` `secure boot` `EVT/DVT/PVT`
 
 ---
 
@@ -277,6 +290,9 @@
 |---|---|---|
 | 2026-09-18 | 컨텍스트 파일 생성 (JD·회사 조사) | Greenhouse API로 JD 원문 확보(JD 갱신일 2026-08-26). 57개 공고 스캔해 하드웨어 구조 단서 수집 |
 | 2026-09-19 | 스터디 노트 사이트 생성 | `2026-09-19_hark_study_notes/` — C00~C10 개념 + S01~S06 드릴, 약 14,600줄. 빌드: `python3 build_notes_site.py` |
+| 2026-09-23 | 임베디드 7자리 비교 분석 | `plan/P03` — Embedded Software 팀이 BSP/Systems/Platform/UX/DevOps 5축으로 확정. 밴드 3형제 동일($120–300K), 리크루터 제시 $250K는 상단 구간 |
+| 2026-09-23 | **JD 본문 전면 개정** (12:38 ET) | OTA·온디바이스AI·factory test 삭제 · vendor 통합·FPGA 통합·board bring-up 신설 · 3+→5+ yrs · RTOS→eLinux/AOSP 포함. 적합도 ⭐4 → ⭐4.5. 분석: `plan/P02` · 같은 날 On-Device AI Inference Engineer → Embedded AI Engineer로 개편 |
+| 2026-09-22 | 임베디드 팀 공고 재편 | ESE(시스템)·ESE Platform(구 OS Architect)·Frontier UX 본문 재작성. 네 공고가 모두 "The Embedded Software team owns..."로 시작 → **팀 구조 = BSP / Platform / Systems / UX** |
 | 2026-09-21 | **공고 제목 BSP로 변경** + BSP 시리즈 5편 작성 | 제목만 변경, 본문 동일. `bsp/B00~B04` 약 2,900줄 — 공식 문서 28건 확인. 마스터 플랜 D-5/D-4/D-1을 BSP 중심으로 교체 |
 | 2026-09-21 | 코딩 세션 HTML 인덱스 | `site/coding.html` — 문제·해설·답안·뼈대 링크 한 페이지. 답안 .c도 HTML로 렌더 |
 | 2026-09-21 | 코딩 연습 세트 5문제 | `coding/` — problems·starters·solutions·notes + Makefile. 모범답안 5개 전부 경고 0개·테스트 통과 (`make all`) |
@@ -368,6 +384,42 @@ You'll own critical pieces of the firmware stack that powers Hark's consumer pro
 
 The US base salary range for this full-time position is between $120,000 - $300,000 annually.
 
+The pay offered for this position may vary based on several individual factors, including job-related knowledge, skills, and experience. The total compensation package may also include additional components/benefits depending on the specific role. This information will be shared if an employment offer is extended.
+
+</details>
+
+---
+
+## 부록 B. JD 원문 v2 (2026-09-23 개정판, 수집 2026-09-23)
+
+<details>
+<summary>펼치기</summary>
+
+About the Role
+The Embedded Software team owns the software running on Hark’s next generation of AI hardware, and we are looking for an Embedded BSP Engineer to join the team.
+You will own critical pieces of the firmware across the stack that powers Hark's consumer products, from board bring-up, vendor code integrations, to custom peripheral drivers and integrations, FPGA-based system integrations, and system power and performance improvements. 
+Responsibilities
+- Develop and maintain embedded firmware in C/C++ targeting ARM-based SoCs and microcontrollers
+- Own BSP development, board bring up, peripheral drivers (SPI, I2C, UART, I2S etc.), and system integration
+- Working closely with vendors on system integration and validation
+- Working with Hardware and Software team to ensure our hardware are built and functioning to the specifications
+- Optimize power consumption and thermal performance for always-on, battery-powered operation
+- Debug complex hardware-software interactions using logic analyzers, oscilloscopes, and JTAG
+Requirements
+- 5+ years of professional firmware or embedded systems development
+- Strong proficiency in C and/or C++ in resource-constrained environments
+- Experience with ARM Cortex-M or Cortex-A processors
+- Hands-on experience with embedded operating systems, such as eLinux, AOSP, VxWorks and RTOSes
+- Familiarity with wireless protocols (BLE, Wi-Fi, or Thread)
+- Comfort reading schematics and working alongside hardware engineers during board bring-up
+- Experience with embedded debugging tools and workflows
+Bonus Qualifications
+- Experience with power optimization for battery-powered consumer devices
+- Familiarity with secure boot, firmware signing, or hardware root of trust
+- Exposure to ML inference runtimes on embedded platforms
+- Experience shipping consumer electronics through EVT/DVT/PVT milestones
+Compensation
+The US base salary range for this full-time position is between $120,000 - $300,000 annually.
 The pay offered for this position may vary based on several individual factors, including job-related knowledge, skills, and experience. The total compensation package may also include additional components/benefits depending on the specific role. This information will be shared if an employment offer is extended.
 
 </details>

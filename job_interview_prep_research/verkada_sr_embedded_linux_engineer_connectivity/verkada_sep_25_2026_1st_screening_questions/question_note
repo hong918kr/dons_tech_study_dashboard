@@ -1,0 +1,124 @@
+Verkada — Senior Embedded Linux Engineer (Connectivity)
+1st technical screening, 2026-09-25 — reconstructed from memory
+Format: CoderPad, C, gcc -O2 -pthread. Part 1 then Part 2 on the same code.
+
+Files in this folder
+  question_note              this statement
+  als.h                      vendor header (given)
+  main.c                     test harness + fake sensor (given; typos from the pad fixed)
+  recent_lux.h               API the harness calls (you implement it)
+  recent_lux.c               YOUR code — stub with TODOs
+  recent_lux_solution.c        reference, Part 2 = (1) circular queue + binary search
+  recent_lux_solution_list.c   Part 2 = (2) linked list
+  recent_lux_solution_rbtree.c Part 2 = (3) red-black tree
+  main.sh                      ./main.sh | sol | list | rbtree | window [sol|list|rbtree]
+  solutions_with_opus.md     detailed solution notes (.html next to it)
+
+------------------------------------------------------------------------------
+Background
+
+Security cameras often have an Ambient Light Sensor (ALS), which measures the
+amount of light around the camera and triggers a "night mode" when the ambient
+light is too low.
+
+You've been given an ALS that reports sensor readings using the following struct:
+
+    struct SensorReading {
+        int      status;     // ERROR / NO_CHANGE / VALID
+        float    lux;
+        uint64_t timestamp;  // time of reading, microseconds (gettimeofday)
+    };
+
+To get a sensor reading, call:
+
+    struct SensorReading read_next_sample();
+
+This function will do one of two things:
+
+  - The amount of light does not change within one second: the sensor returns
+    NO_CHANGE in the status field. A total of one second elapses before the
+    function unblocks.
+
+  - The amount of light does change within one second: the sensor returns
+    VALID in the status field and populates lux and timestamp. A variable
+    amount of time elapses before the function unblocks, between 0 and 1 s.
+
+  Note: the first call to read_next_sample() always returns a valid value
+  without blocking.
+
+  (Seen in the harness, not said out loud: status can also be ERROR, with
+  probability 1/10000 per call, returned immediately with lux/timestamp
+  left uninitialized.)
+
+Working with blocking functions is hard and not thread-friendly, so we want to
+wrap the ALS function in a non-blocking, thread-safe way.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1.
+  Design and implement an API that allows users to read the most recent valid
+  lux value. The API should be non-blocking and thread-safe.
+
+      void  init_recent_lux(void);        // (the pad's stub returned void)
+      float get_most_recent_lux(void);
+
+Part 2.
+  Design and implement an API that allows users to read lux values from any
+  time within the last 10 minutes. Your API should be non-blocking and
+  thread-safe.
+
+      float get_lux_at(uint64_t timestamp);   // timestamp in the same clock
+                                              // as get_timestamp()
+
+  The value "at time t" is the lux of the most recent VALID reading whose
+  timestamp <= t (the light did not change after it, or we would have been
+  told).
+
+  Interviewer's hint during Part 2 (what they said, roughly):
+    "Usually people talk about a CIRCULAR QUEUE first. Then, thinking about
+     it more, a LINKED LIST. And the most optimized one is a RED-BLACK TREE."
+
+    (1) circular queue  fixed memory, O(1) append/evict
+                        - must guess capacity (sensor has no rate limit)
+                        - linear scan O(n)  (binary search -> O(log n) if sorted)
+    (2) linked list     no capacity guess, grows with the data
+                        - O(n) lookup, malloc per sample, cache misses
+    (3) red-black tree  keyed by timestamp: dynamic size AND O(log n)
+                        insert / floor(t) lookup / delete-min eviction,
+                        out-of-order inserts are fine. Linux kernel rbtree:
+                        hrtimers, CFS, epoll.
+    They want the progression and the reason for each step, not one answer.
+
+------------------------------------------------------------------------------
+Expected output (Linux glibc, default rand() seed — what the pad printed)
+
+  lux[1] = 3.943830, should be 3.94383      (right after init)
+  lux[2] = 3.352230, should be 3.35223      (~1.5 s later)
+  lux[3] = 5.539700, should be 5.5397       (~2.5 s after start)
+
+  t: 0, lux: 3.943830      start + 0 ms
+  t: 1, lux: 3.943830      start + 200 ms
+  t: 2, lux: 3.352230      start + 1600 ms   (changed at ~1.40 s)
+  t: 3, lux: 5.539700      start + 2600 ms   (changed at ~1.95 s)
+  t: 4, lux: 5.539700      start + 3100 ms
+
+  macOS libc rand() gives a different sequence, so the reconstructed harness
+  also records every value the fake sensor produced ("ground truth") and
+  prints PASS/FAIL against that instead of the hard-coded numbers.
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for (write your answers before reading the solution)
+
+  1. Why can't get_most_recent_lux() just call read_next_sample()?
+  2. Who calls read_next_sample()? How many threads? Why exactly one?
+  3. What does "non-blocking" mean for a reader — no sensor wait, or no lock at all?
+  4. Part 1: mutex vs atomic. Is a float read/write atomic in C? What makes it so?
+  5. Part 2: how much memory for 10 minutes? What is the worst-case sample rate?
+  6. Part 2: data structure and lookup cost. Walk circular queue -> linked
+     list -> red-black tree: what does each step fix, what does it cost?
+     What if the buffer fills up?
+  7. Part 2: the sample in effect at (now - 10 min) is OLDER than 10 min. Do you keep it?
+  8. What do you return for t in the future, t older than 10 min, or before the first sample?
+  9. What happens on ERROR? On a clock jump (gettimeofday is not monotonic)?
+ 10. Start-up and shutdown: what does a reader see before the first sample? How do you stop the thread?

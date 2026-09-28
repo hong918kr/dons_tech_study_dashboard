@@ -150,6 +150,9 @@ def render(md_lines, toc, used_ids):
             if lang == "check":                         # ---- 자가 점검 카드
                 out.append(render_check(buf))
                 continue
+            if lang == "svg":                           # ---- 다이어그램 (원문 그대로)
+                out.append(f'<figure class="diagram">{chr(10).join(buf)}</figure>')
+                continue
             label = f'<span class="lang">{esc(lang)}</span>' if lang else ""
             out.append(f'<figure class="code">{label}<pre><code>'
                        f'{esc(chr(10).join(buf))}</code></pre></figure>')
@@ -463,7 +466,7 @@ def shell(title, body, js, extra_head=""):
 <html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)}</title>{extra_head}
-<style>{CSS}{GUIDE_CSS}</style></head>
+<style>{CSS}{GUIDE_CSS}{CODE_CSS}</style></head>
 <body>{body}<script>{js}</script></body></html>"""
 
 
@@ -558,11 +561,11 @@ def guide_html(guides):
         return ""
     cards = "".join(
         f'<a class="card" style="border-color:var(--accent)" data-id="guide/{esc(g["file"].stem)}" '
-        f'data-search="{esc(g["title"].lower())} guide 가이드" href="../{esc(g["file"].name)}">'
+        f'data-search="{esc(g["title"].lower())} guide 가이드" '
+        f'href="../{esc(str(g["file"].relative_to(ROOT)))}">'
         f'<div class="ic">🧭</div><h3>{esc(g["title"])}</h3>'
-        f'<p>JD와 리크루터 메일의 4개 주제를 순서대로 — 개념 → 그림 → 핵심 코드 → 자가 점검 → 연습 연결. '
-        f'여기서 시작해서 아래 노트로 내려가면 된다.</p>'
-        f'<div class="foot"><span class="pill pri">여기서 시작</span>'
+        f'<p>{esc(g.get("blurb", ""))}</p>'
+        f'<div class="foot"><span class="pill pri">{esc(g.get("tag", "여기서 시작"))}</span>'
         f'<span class="pill">{g["chapters"]}개 장</span><span class="pill">{g["minutes"]}분</span></div></a>'
         for g in guides)
     return (f'<section class="track"><h2>학습 가이드 <span style="color:var(--muted);font-size:15px">'
@@ -719,7 +722,21 @@ GUIDE_JS = """
 
 
 def guide_files():
-    return sorted(ROOT.glob("20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*study_guide.md"))
+    pats = ("20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*study_guide.md",
+            "20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*prep.md",
+            "20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*roadmap.md",
+            "20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*explainer.md")
+    out = []
+    for pat in pats:
+        out += list(ROOT.glob(pat)) + list(ROOT.glob("*/" + pat))   # 하위 폴더 1단계까지
+    out += list(ROOT.glob("*/dons_next_step.md"))                   # 이름이 고정된 문서
+
+    def rank(f):                                   # 로드맵 → 당일 문서 → 개념 코스
+        s = f.stem
+        order = {"roadmap": 0, "next_step": 1, "explainer": 2, "prep": 3}
+        k = next((v for kk, v in order.items() if s.endswith(kk)), 3)
+        return (k, -ord(s[9]), s)
+    return sorted(set(out), key=rank)
 
 
 def build_guide(md_path):
@@ -797,7 +814,206 @@ def build_guide(md_path):
     out = md_path.with_suffix(".html")
     out.write_text(page, encoding="utf-8")
     print(f"  guide    {md_path.name} → {out.name}  ({len(chapters)}장 · {minutes}분)")
-    return {"title": title_text(h1), "file": out, "minutes": minutes, "chapters": len(chapters)}
+    stem = md_path.stem
+    kind = ("roadmap" if stem.endswith("roadmap") else "prep" if stem.endswith("prep")
+            else "explainer" if stem.endswith("explainer")
+            else "nextstep" if stem == "dons_next_step" else "course")
+    meta = {
+        "roadmap": ("① 읽는 순서", "어디서부터 어디까지 — 오늘 밤 필수 코스, 내일 아침, 직전 5분, "
+                                "그리고 인터뷰 이후 장기 코스까지 단계별 링크와 체크박스."),
+        "prep":    ("② 내일 인터뷰", "인터뷰 당일용. Tier별 예상 문제와 모범 답변, 시스템 설계 3제, "
+                                 "속사포 25문항, 치트시트, 당일 체크리스트."),
+        "course":  ("개념 코스", "JD와 리크루터 메일의 4개 주제를 순서대로 — 개념 → 그림 → 핵심 코드 → "
+                              "자가 점검 → 연습 연결."),
+        "nextstep": ("② 다음 할 일", "9/25에 못 푼 유형의 정체와 반복 연습 계획 — 드릴 방법, 2주 일정, "
+                                  "외울 뼈대 코드, 이번에 놓친 것 체크리스트. 연습 문제 10개로 연결된다."),
+        "explainer": ("실제 출제 문제 풀이", "9/25 스크리닝에서 실제로 나온 ALS 논블로킹 래퍼 문제를 "
+                                        "처음 보는 사람 기준으로 쉽게 — 비유 → 그림 → 짧은 코드 → 경계 조건."),
+    }[kind]
+    return {"title": title_text(h1), "file": out, "minutes": minutes, "chapters": len(chapters),
+            "kind": kind, "tag": meta[0], "blurb": meta[1]}
+
+
+# ----------------------------------------------------------------- 코드 뷰 · 랜딩
+CODE_SETS = [
+    {"key": "bank_problems",  "dir": ROOT / "verkada_prep" / "problems",
+     "title": "문제 은행 · 연습 stub", "hint": "cd verkada_prep && make prob N={stem}"},
+    {"key": "bank_solutions", "dir": ROOT / "verkada_prep" / "solutions",
+     "title": "문제 은행 · 모범답안", "hint": "cd verkada_prep && make sol N={stem}"},
+    {"key": "prac_starters",  "dir": ROOT / "concurrency_practice" / "starters",
+     "title": "10문제 연습 · stub", "hint": "cd concurrency_practice && make run N={num}"},
+    {"key": "prac_solutions", "dir": ROOT / "concurrency_practice" / "solutions",
+     "title": "10문제 연습 · 모범답안", "hint": "cd concurrency_practice && make sol N={num}"},
+    {"key": "screening_0925", "dir": ROOT / "verkada_sep_25_2026_1st_screening_questions",
+     "title": "1차 스크리닝 실제 문제 (09-25) · ALS",
+     "hint": "cd verkada_sep_25_2026_1st_screening_questions && ./main.sh [sol|window]",
+     "files": ["question_note", "als.h", "recent_lux.h", "recent_lux.c",
+               "recent_lux_solution.c", "recent_lux_solution_list.c",
+               "recent_lux_solution_rbtree.c", "main.c", "main.sh"]},
+]
+SCREENING_MD = ROOT / "verkada_sep_25_2026_1st_screening_questions" / "solutions_with_opus.md"
+
+CODE_CSS = """
+.codeview{margin:28px 0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--code-bg)}
+.codeview .cl{display:flex;font-family:var(--mono);font-size:12.5px;line-height:1.62}
+.codeview .cl:target,.codeview .cl:hover{background:var(--accent-soft)}
+.codeview .n{flex:0 0 58px;text-align:right;padding-right:14px;color:var(--muted);
+             user-select:none;border-right:1px solid var(--line)}
+.codeview .t{padding-left:14px;white-space:pre;overflow-x:auto;color:var(--code-ink)}
+.cmdbar{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--paper);
+        border:1px solid var(--line);border-radius:8px;padding:9px 13px;margin:0 0 18px}
+.filelist{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px;margin:14px 0 30px}
+.filelist a{display:flex;justify-content:space-between;gap:10px;text-decoration:none;color:inherit;
+            border:1px solid var(--line);border-radius:10px;padding:11px 14px;background:var(--paper);
+            font-family:var(--mono);font-size:12.5px}
+.filelist a:hover{border-color:var(--accent)}
+.filelist .sz{color:var(--muted)}
+figure.diagram{margin:26px 0;padding:18px 14px;border:1px solid var(--line);border-radius:12px;
+               background:var(--paper);overflow-x:auto;text-align:center}
+figure.diagram svg{max-width:100%;height:auto;color:var(--ink)}
+figure.diagram text{fill:currentColor;font-family:var(--sans);font-size:13px}
+figure.diagram .lbl{font-size:11px;fill:var(--muted)}
+figure.diagram .accent{stroke:var(--accent)}
+figure.diagram .accentf{fill:var(--accent)}
+figure.diagram .muted{stroke:var(--muted)}
+figure.diagram .box{fill:none;stroke:currentColor;stroke-width:1.2}
+figure.diagram .fill-soft{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+figure.diagram .dash{stroke-dasharray:4 3}
+"""
+
+
+def code_page(src, coll, rel_prefix="../.."):
+    lines = src.read_text(encoding="utf-8").splitlines()
+    num = src.stem[:2]
+    hint = coll["hint"].format(stem=src.stem, num=num)
+    rows = "".join(
+        f'<div class="cl" id="L{i}"><span class="n"><a href="#L{i}" '
+        f'style="color:inherit;text-decoration:none">{i}</a></span>'
+        f'<span class="t">{esc(l) or "&nbsp;"}</span></div>'
+        for i, l in enumerate(lines, 1))
+    body = f"""
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="{rel_prefix}/index.html">← 전체 목차</a>
+  <span class="t">{esc(coll["title"])} · {esc(src.name)}</span>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap" style="grid-template-columns:minmax(0,1fr)">
+  <main style="max-width:1000px">
+    <div class="hero">
+      <div class="kicker">{esc(coll["title"])}</div>
+      <h1>{esc(src.name)}</h1>
+      <div class="meta"><span>{len(lines)}줄</span><span>읽기 전용 · 원본은 {esc(str(src.relative_to(ROOT)))}</span></div>
+    </div>
+    <div class="cmdbar">$ {esc(hint)}</div>
+    <div class="codeview">{rows}</div>
+  </main>
+</div>"""
+    return shell(src.name, body, JS_PAGE).replace(
+        "<body>", f'<body data-note="code/{esc(src.stem)}">', 1)
+
+
+def build_code_pages():
+    out_root = OUT / "code"
+    out_root.mkdir(parents=True, exist_ok=True)
+    made, sections = 0, []
+    for coll in CODE_SETS:
+        if not coll["dir"].exists():
+            continue
+        d = out_root / coll["key"]
+        d.mkdir(exist_ok=True)
+        items = []
+        srcs = ([coll["dir"] / f for f in coll["files"] if (coll["dir"] / f).exists()]
+                if "files" in coll else sorted(coll["dir"].glob("*.c")))
+        for src in srcs:
+            page = src.name.replace(".", "_") if "files" in coll else src.stem   # main.c vs main.sh
+            (d / (page + ".html")).write_text(code_page(src, coll), encoding="utf-8")
+            kb = max(1, src.stat().st_size // 1024)
+            items.append(f'<a href="{coll["key"]}/{page}.html">{esc(src.name)}'
+                         f'<span class="sz">{kb} KB</span></a>')
+            made += 1
+        sections.append(f'<h2 id="{coll["key"]}">{esc(coll["title"])}</h2>'
+                        f'<div class="filelist">{"".join(items)}</div>')
+    body = f"""
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 허브</a>
+  <span class="t">문제 · 해답 코드 (읽기 전용)</span>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="hub">
+  <h1>코드 브라우저</h1>
+  <p class="lead">문제 은행과 연습 문제의 C 파일을 브라우저에서 읽는다. 실행은 터미널에서 각 카드 상단의 make 명령으로.</p>
+  {"".join(sections)}
+</div>"""
+    (out_root / "index.html").write_text(shell("코드 브라우저", body, JS_HUB), encoding="utf-8")
+    print(f"  code     {made}개 → notes_site/code/")
+    return made
+
+
+def landing_page(guides, colls, code_n, screening=None):
+    def card(href, icon, title, desc, pills, accent=False):
+        ps = "".join(f'<span class="pill{" pri" if i == 0 and accent else ""}">{esc(x)}</span>'
+                     for i, x in enumerate(pills))
+        style = ' style="border-color:var(--accent)"' if accent else ""
+        return (f'<a class="card"{style} href="{href}" data-search="{esc(title.lower())}">'
+                f'<div class="ic">{icon}</div><h3>{esc(title)}</h3><p>{esc(desc)}</p>'
+                f'<div class="foot">{ps}</div></a>')
+
+    cards = []
+    if screening:
+        cards.append(card(os.path.relpath(screening["file"], ROOT), "🧪",
+                          "1차 스크리닝 실제 문제 (09-25) — ALS 논블로킹 래퍼 풀이",
+                          "실제로 나온 문제 복원 + 하네스 + 모범답안. Part 1 최신 lux(atomic), "
+                          "Part 2 10분 히스토리를 circular queue → linked list → red-black tree 순서로(3개 구현·실측), "
+                          "경계 샘플 함정, 영어 스크립트, follow-up 10문항.",
+                          ["실제 문제", f'{screening["chapters"]}개 장', f'{screening["minutes"]}분'],
+                          accent=True))
+        cards.append(card("notes_site/code/index.html#screening_0925", "📂",
+                          "스크리닝 문제 파일 (문제 · stub · 하네스 · 모범답안)",
+                          "question_note, als.h, recent_lux.c(연습 stub), recent_lux_solution.c, main.c 하네스를 브라우저에서.",
+                          ["코드", "./main.sh sol"]))
+    icons = {"roadmap": "🗺️", "prep": "🎯", "course": "🧭", "explainer": "🔦", "nextstep": "🧪"}
+    for g in guides:
+        cards.append(card(str(g["file"].relative_to(ROOT)), icons.get(g.get("kind"), "📄"),
+                          g["title"], g["blurb"], [g["tag"], f'{g["chapters"]}개 장', f'{g["minutes"]}분'],
+                          accent=g.get("kind") in ("roadmap", "prep", "nextstep")))
+    cards.append(card("verkada_concurrency_top10.html", "⚡", "빈출 10문제 — 해설과 follow-up",
+                      "문제·힌트·해답·흔한 실수·follow-up. 시스템 설계 3제와 영어 스크립트 포함.",
+                      ["문제 해설", "10문제"]))
+    n_notes = sum(len(c["notes"]) for c in colls)
+    cards.append(card("notes_site/index.html", "📚", "노트 허브 — 기초 + 복습",
+                      "동시성을 처음부터 쌓는 기초 노트와, 문제 은행 세트별 복습 노트.",
+                      ["노트", f"{n_notes}편"]))
+    cards.append(card("verkada_prep/index.html", "🧩", "문제 은행 대시보드",
+                      "8세트 78문제. 힌트 3단계와 해답, 진행률 저장. 터미널 드릴과 짝을 이룬다.",
+                      ["드릴", "78문제"]))
+    cards.append(card("notes_site/code/index.html", "💻", "코드 브라우저",
+                      "문제 stub과 모범답안 C 파일을 브라우저에서 읽기. 줄 번호 링크 지원.",
+                      ["소스", f"{code_n}개"]))
+    cards.append(card("verkada_sr_embedded_linux_engineer_connectivity_context.html", "📋",
+                      "회사 · 포지션 컨텍스트",
+                      "Verkada 분석, 적합도, 인터뷰 프로세스, 역질문, 진행 로그.",
+                      ["배경"]))
+
+    body = f"""
+<div class="top"><div class="top-in">
+  <span class="t"><b>Verkada</b> · Senior Embedded Linux Engineer, Connectivity — 인터뷰 준비</span>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="hub">
+  <h1>Verkada 인터뷰 준비</h1>
+  <p class="lead">1차 기술 인터뷰(2파트: problem solving + system design) 대비 자료 전체.
+     <b>내일 보는 문서는 맨 위 🎯 카드</b>, 개념이 흔들리면 🧭 학습 가이드, 손으로 푸는 건 🧩 문제 은행.</p>
+  <div class="cmdbar" style="margin:22px 0 4px">
+    📁 /Users/donh/workspace/dons_tech_study_dashboard/job_interview_prep_research/verkada_sr_embedded_linux_engineer_connectivity/<br>
+    ▶ Finder에서 <b>START_HERE.command</b> 더블클릭하면 이 페이지가 열린다 ·
+    터미널: <b>open index.html</b> · 이 페이지를 즐겨찾기에 두면 나머지는 클릭으로 이동
+  </div>
+  <div class="tools"><input id="q" placeholder="검색 — 예: queue, double buffer, 설계"></div>
+  <section class="track"><div class="grid">{"".join(cards)}</div></section>
+</div>"""
+    (ROOT / "index.html").write_text(shell("Verkada 인터뷰 준비", body, JS_HUB), encoding="utf-8")
+    print(f"  landing  index.html (카드 {len(cards)}개)")
 
 
 def main():
@@ -821,6 +1037,9 @@ def main():
         print(f"  {c['key']:<8} {len(c['notes'])}개 → notes_site/{c['key']}/")
     guides = [build_guide(g) for g in guide_files()]
     (OUT / "index.html").write_text(hub_page(colls, totals, guides), encoding="utf-8")
+    code_n = build_code_pages()
+    screening = build_guide(SCREENING_MD) if SCREENING_MD.exists() else None
+    landing_page(guides, colls, code_n, screening)
     print(f"built {OUT/'index.html'}  (노트 {totals['notes']} · {totals['minutes']}분 · "
           f"{totals['sections']}절)")
     return 0

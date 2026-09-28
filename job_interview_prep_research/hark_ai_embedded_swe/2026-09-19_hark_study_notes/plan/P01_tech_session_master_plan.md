@@ -1,6 +1,8 @@
 # P01. 1차 Tech Session 마스터 플랜 — 이 한 판에 집중한다
 
 > **목표**: Hark Embedded Software Engineer **tech session 통과** · **프로세스**: HM 검토 → intro → **tech** → 온사이트 (3단계뿐이라 이 라운드가 관문)
+> **🗺 자리 지도**: [P03 임베디드 7자리 분석](P03_embedded_role_map.html) — BSP 1순위 · Systems 2순위 · 나머지 5개 제외
+> **⚡ 2026-09-23 JD 개정**: 본문 전면 재작성 → [P02 개정 분석](P02_jd_change_2026-09-23.html) **먼저 읽기**. OTA·AI·factory 항목 삭제, FPGA·vendor 통합 신설, 적합도 ⭐4→⭐4.5
 > **⚡ 2026-09-21 변경**: 공고 제목이 **`Embedded Software Engineer, BSP`** 로 바뀜(본문 동일) → BSP 비중 상향. [BSP 집중 시리즈 B00~B04](../bsp/B00_bsp_overview.html)
 > **조건**: 임베디드 약 5명 채용 중 · 지원자 적음 · base $250K + 사이닝 $100K + equity 제시 · 지인 추천 경로
 > **사용법**: 이 페이지를 매일 열고, 각 항목의 링크를 따라가 보충한다. 링크는 같은 사이트의 노트로 연결된다.
@@ -41,7 +43,9 @@ RTOS API를 외운 사람으로 보이려 하지 않는다. 그 경쟁에서는 
 | **BSP (제목에 박힌 축)** | 🟡 통째로 소유한 적 없음 — 정확한 좌표 제시 | [B00 개요](../bsp/B00_bsp_overview.html) · [B01 해부](../bsp/B01_bsp_anatomy.html) · [B04 면접](../bsp/B04_bsp_interview.html) |
 | 드라이버 / RTOS | 🟡 갭 — 정직 + 최근 실습 | [C04 RTOS](../concepts/C04_rtos_freertos_zephyr.html) · [J11 RTOS 검증](../jd/J11_rtos_handson.html) |
 | 저전력 / 웨어러블 감각 | 🟡 갭 — 숫자 감각만 만들면 됨 | [C05 저전력·발열](../concepts/C05_low_power_thermal.html) · [J03 전력 업무](../jd/J03_power_thermal_always_on.html) |
-| 오디오 / 온디바이스 AI | ❌ 갭 — 개념만 방어 | [C08 온디바이스 추론](../concepts/C08_on_device_ml_inference.html) · [J05 AI 협업](../jd/J05_on_device_ai_budgets.html) |
+| 벤더 협업 · FPGA 시스템 통합 | ✅ **신 JD 신설 항목 — 강점** | [P02 §3.1](P02_jd_change_2026-09-23.html) |
+| 임베디드 OS 폭 (eLinux/AOSP) | 🟡 신 JD에서 확대됨 | [B03 §8 방어 범위](../bsp/B03_linux_android_bsp.html) |
+| 오디오 / 온디바이스 AI | ❌ 갭 — **JD에서 빠짐. 개념만** | [C08 온디바이스 추론](../concepts/C08_on_device_ml_inference.html) · [J05 AI 협업](../jd/J05_on_device_ai_budgets.html) |
 
 ---
 
@@ -53,8 +57,8 @@ RTOS API를 외운 사람으로 보이려 하지 않는다. 그 경쟁에서는 
 |---|---|---|---|
 | 1 | Tell me about yourself — 영어 90초 | 안 보고 말해서 90초 안에 끝남 | [컨텍스트 4.6](../../../hark_ai_embedded_swe_context.html) |
 | 2 | 스토리 A: 인터페이스 장애 root cause | 증상 → 가설 → 측정 → 원인 → 수정 → 재발방지, 4분 | [S06 STAR](../study/S06_debug_scenarios_stories.html) |
-| 3 | 스토리 B: factory test-node 설계 | 무엇을 검사했고 왜 그 항목인지, 3분 | [J06 공장 테스트](../jd/J06_factory_test_calibration.html) |
-| 4 | 스토리 C: FPGA pre-silicon bring-up | 첫 부팅 실패를 어떻게 좁혔는지, 3분 | [J13 bring-up 협업](../jd/J13_schematics_bringup_collab.html) |
+| 3 | 스토리 B: NPI→MP 양산 이관 (구 factory test-node) | JD에서 factory 항목이 빠져 "양산까지 끌고 간 경험"으로 각도 변경, 3분 | [J06 공장 테스트](../jd/J06_factory_test_calibration.html) |
+| 4 | **스토리 C: FPGA 시스템 통합·pre-silicon bring-up** ★승격 | 신 JD 인트로에 "FPGA-based system integrations" 명시. 4분 | [J13 bring-up 협업](../jd/J13_schematics_bringup_collab.html) |
 | 5 | RTOS 정직 스크립트 + 실습 근거 | 5문장. 마지막 문장은 "지금 하고 있는 것" | [J11 §6](../jd/J11_rtos_handson.html) |
 | 6 | 전력 숫자 감각 | mAh → 평균 전류 → 하루 사용 시간을 암산으로 | [S03 계산 연습](../study/S03_power_wireless_qa.html) |
 | 8 | **"BSP를 소유해 본 적 있나?" 답변 스크립트** | 인정 → 인접 경험 → 판단력으로 마무리 | [B00 §3.1](../bsp/B00_bsp_overview.html) · [B04 §11](../bsp/B04_bsp_interview.html) |

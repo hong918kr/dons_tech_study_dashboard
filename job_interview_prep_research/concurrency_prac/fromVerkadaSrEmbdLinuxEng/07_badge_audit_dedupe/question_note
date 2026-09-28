@@ -1,0 +1,177 @@
+Verkada AC42 — badge audit pipeline with duplicate suppression
+Practice problem 07 — Verkada 1st-screening shape (Part 1 concurrency / Part 2 data structure)
+Format: C, cc -std=c11 -O2 -Wall -Wextra -pthread. Part 1 then Part 2 on the same code.
+
+Files in this folder
+  question_note              this statement
+  reader.h                   vendor header (given; do not modify)
+  main.c                     test harness + fake AC42 vendor library (given; do not modify)
+  audit_log.h                the API the harness calls (you implement it)
+  audit_log.c                YOUR code — stub with TODOs
+  audit_log_solution.c       reference solution (open it after you have tried)
+  main.sh                    ./main.sh | ./main.sh sol
+
+------------------------------------------------------------------------------
+Background
+
+The AC42 is a four-door access controller: four card readers, one Linux SoC, one
+tamper-evident audit log that is spooled to the cloud. Every badge presentation
+has to end up in that log, and the door logic needs to ask "did I just see this
+badge somewhere else?" before it unlocks (anti-passback: one card, one person,
+one door at a time).
+
+The vendor library gives you this:
+
+    struct Badge {
+        uint32_t badge_id;
+        uint8_t  door;        /* 0 .. AC42_DOORS-1, AC42_DOORS == 4 */
+        uint64_t timestamp;   /* microseconds, reader_now_us() clock */
+    };
+
+    int  reader_wait_badge(uint8_t door, struct Badge *out);
+    void reader_cancel(uint8_t door);
+    int  audit_store_write(const struct Badge *b);
+    uint64_t reader_now_us(void);
+
+  reader_wait_badge(door, out)
+      Blocks until somebody badges at `door`.
+        0   a badge was read, *out is filled
+        -1  nothing for you. The vendor does NOT say why: it is either a
+            transient read error (~1 call in 64) or your own reader_cancel().
+      PER-DOOR STATE: safe to call concurrently for DIFFERENT doors, undefined
+      behaviour if two threads are inside it for the SAME door. This one
+      sentence decides the thread model — read it twice.
+
+  reader_cancel(door)
+      Makes the in-flight wait, and every later wait for that door, return -1
+      promptly. Sticky; there is no un-cancel. Callable from another thread.
+
+  audit_store_write(b)
+      Appends one record to flash + the cloud spool. Returns 0. SLOW, and NOT
+      thread-safe: it owns one append cursor, so exactly one thread may ever be
+      inside it.
+
+  Scaled delays. In the field a reader waits seconds to minutes for a person and
+  an audit append costs about a second. So the whole thing would take hours to
+  test. The harness scales them down: a badge arrives every 2-9 ms, an append
+  costs 8 ms, and the "nobody is at the door" wait used by the shutdown test is
+  3 s. The ratios are what matter — the readers together produce faster than the
+  store can append, exactly as they do during a shift change.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1.  A multi-producer / single-consumer audit pipeline.
+
+      int  audit_init(void);
+      void audit_deinit(void);
+      int  audit_submit(const struct Badge *b);
+      uint64_t audit_logged(void);
+      uint64_t audit_dropped(void);
+
+  audit_init() owns every thread: one per door (forced by the per-door vendor
+  state) feeding ONE audit logger (forced by the single-cursor store) through a
+  bounded queue built from a mutex and two condition variables.
+
+  audit_submit() is what a door thread calls. It may block while the queue is
+  full, but only for a bounded AUDIT_SUBMIT_WAIT_US — a door thread asleep here
+  is a door that has stopped noticing people. After the deadline, drop the
+  record and count it (audit_dropped()).
+
+  Ordering guarantee you must provide, and the harness checks exactly this:
+  events from the SAME door reach the store in the order that door read them
+  (drops may punch holes, nothing may be reordered or invented); across doors
+  any interleaving is acceptable.
+
+  audit_deinit() must return promptly even though all four producers are parked
+  inside reader_wait_badge(), and must not throw away badges that were already
+  read: cancel the readers, wake every condvar waiter, join the producers, let
+  the logger drain the queue, join it.
+
+Part 2.  Duplicate suppression and recent history — non-blocking, thread-safe.
+
+      int    audit_is_duplicate(uint32_t badge_id, uint64_t now_us,
+                                uint64_t window_us);
+      size_t audit_recent_for_door(uint8_t door, struct Badge *out, size_t max);
+
+  audit_is_duplicate() is on the door-open path, so it must be O(1) average with
+  a bounded worst case. It returns 1 when the badge's most recent LOGGED
+  sighting t satisfies  t <= now_us && now_us - t <= window_us  (both ends
+  inclusive), else 0.
+
+  audit_recent_for_door() returns the last AUDIT_RECENT_PER_DOOR badges at one
+  door, newest first, into the caller's buffer.
+
+  Reference structures (see audit_log.h for the exact capacities):
+    - an open-addressing hash map keyed by badge_id, fixed size, no malloc,
+      with TIME-BASED LAZY EVICTION: a slot whose last sighting is older than
+      AUDIT_DEDUPE_RETENTION_US is handed to the next insert that probes over
+      it. Decide and defend: hash function, collision strategy (linear probing /
+      robin hood / chaining), whether you need tombstones, what the
+      load-factor limit means when you cannot rehash, and what happens when a
+      probe window is completely full.
+    - one fixed ring of the last K badges per door.
+
+------------------------------------------------------------------------------
+Expected behaviour (what the harness prints PASS/FAIL for)
+
+  - empty state right after audit_init(): no history, nothing is a duplicate,
+    bad door / NULL buffer / max == 0 all return 0
+  - 1.2 s of load with 3 extra threads hammering the getters: no torn,
+    out-of-range or misordered record ever comes out, getter latency stays
+    microseconds while the store is busy 8 ms at a time
+  - accounting: produced == logged + dropped, exactly; dropped > 0 with a
+    16-slot queue in front of an 8 ms store
+  - per-door ordering: every logged record is matched against what that door
+    produced, in order; one hole is fine, one swap is a FAIL
+  - vendor contracts: reader_wait_badge() never entered twice for one door,
+    audit_store_write() never entered by a second thread
+  - audit_is_duplicate() vs brute force over everything the store received, for
+    six window sizes, including exactly-at-the-edge, one microsecond inside the
+    edge, window 0, a never-issued badge, and a now_us before the sighting
+  - audit_recent_for_door() vs the store's contents for all four doors, for
+    max < K and max > K
+  - dedupe table: 500 badges, then 500 more a full retention period later must
+    recycle the aged-out slots instead of evicting live ones; then 4096 distinct
+    recent badges into 1024 slots must stay inside capacity, report the forced
+    evictions, keep the most recent badges, and produce no false positives
+  - audit_deinit() while all four producers are parked in the vendor call
+    returns in well under a second, and nothing is written afterwards
+
+  Last line is exactly "ALL CHECKS PASSED (0 failed)" or "N CHECK(S) FAILED".
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for  (answer these on paper before coding)
+
+  1. How many threads, and why exactly that many? Which sentence in reader.h
+     fixes the number of producers, and which one fixes the number of consumers?
+     Why can't one thread poll all four doors?
+  2. Why a bounded queue rather than an unbounded one? What is the failure mode
+     of each when the cloud spool stalls for a minute — and which one still
+     opens doors?
+  3. Two condition variables, not one: what is each one's predicate, and what
+     breaks if you use a single condvar for both? Where is signal correct and
+     where must it be broadcast?
+  4. Per-door order survives but global order does not. Prove the first claim
+     from the structure of the code, and explain exactly where the second one is
+     lost. What would it cost to get a global order by timestamp?
+  5. audit_submit() drops after a bounded wait. Who is allowed to make that
+     policy call, what do you report so the fleet can see it, and what would you
+     do instead if every record were legally required?
+  6. Part 2: why a hash map and not a sorted array or a tree? What do you
+     actually need — point lookup by badge_id, or a range query?
+  7. Part 2: hash the badge_id or mask it? What does a card printer's dense
+     id range do to a table indexed by id & mask, and what does collision
+     handling cost you on the door-open path?
+  8. Part 2: you cannot malloc and you cannot rehash. So what does "load factor
+     0.75" even mean here, what happens when a probe window is full, and why is
+     lazy eviction at insert time better than a sweeper thread on this box?
+     Do you need tombstones, and why not?
+  9. reader_wait_badge() returns -1 for both a read error and your own cancel.
+     How do you tell them apart, and what stops a broken reader from becoming a
+     busy loop? What does a non-monotonic clock (reader_now_us() is
+     gettimeofday) do to your "older than the window" arithmetic?
+ 10. Shutdown: four threads are blocked in a vendor call and one is asleep on a
+     condvar. Write the exact order of operations, and say for each step what
+     would deadlock or lose data if you skipped it. What must audit_submit()
+     return after audit_deinit()?

@@ -1,6 +1,7 @@
 # B00. BSP 집중 — 왜 지금 이걸 파야 하는가
 
 > **시리즈**: BSP 집중 0/4 (지도) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling"
+> **⚡ 2026-09-23 갱신**: JD 본문이 개정되어 BSP·bring-up·vendor·FPGA 중심으로 재편됨 → [P02 분석](../plan/P02_jd_change_2026-09-23.html)
 > **계기**: 2026-09-21, Hark가 이 공고의 제목을 `Embedded Software Engineer` → **`Embedded Software Engineer, BSP`** 로 변경 (본문은 동일)
 > **Don 상태**: 🟡 BSP를 처음부터 소유해 본 적은 없다. 그 아래층(실리콘·주변장치 bring-up)은 강하다
 > **이 노트를 다 읽으면**: BSP가 정확히 무엇을 가리키는지 안다 · 제목 변경이 면접에 무엇을 의미하는지 안다 · 내 경험을 BSP 지도 위 어디에 놓을지 안다

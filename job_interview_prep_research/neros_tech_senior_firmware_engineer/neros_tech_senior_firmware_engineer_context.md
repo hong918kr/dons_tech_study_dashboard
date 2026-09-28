@@ -1,7 +1,8 @@
 # Neros Technologies — Senior Firmware Engineer, Platform · Context
 
-> **최종 갱신**: 2026-09-18 · **상태**: 💻 폰스크린 (리크루터 통과 → HM 기술 인터뷰 당일)
-> 🔥 **오늘: Adam Kibit (Director of Firmware) 45분 기술 인터뷰** → 당일 준비는 `2026-09-18_adam_interview_D-6h_prep.md`, 배경 상세는 `neros_hm_adam_technical_prep_2026-09-18.md` (둘 다 HTML 버전 있음)
+> **최종 갱신**: 2026-09-27 · **상태**: 📞 포지션 전환 제안 · Firmware Test Engineer HM 30분 일정 조율
+> 🔀 **2026-09-27: Talent Coordinator Jazmin Vu 메일 — "Firmware Test Engineer" 포지션으로 다음 단계(HM 30분 Microsoft Teams) 진행.** 가능 날짜 4개 이상 + 시간대를 링크로 제출 요청. 원래 트랙(Principal/Senior Embedded SWE)이 아니라 **테스트 포지션($145.5–204K)** 이라는 점이 핵심 → §8 참고
+> ~~⏳ 2026-09-18(금) Adam Kibit 45분 기술 인터뷰 완료 → 09-25 현재 1주째 연락 없음 → Devin에게 follow-up~~ (09-27 결과 도착: 위 전환). 준비 자료: `2026-09-18_adam_interview_D-6h_prep.md`, `neros_hm_adam_technical_prep_2026-09-18.md`
 > **JD**: https://job-boards.greenhouse.io/nerostechnologies/jobs/5195308007 · **위치**: Torrance, CA / onsite [추정] · **연봉 밴드**: $195,000 – $273,000 base + equity
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
@@ -19,7 +20,10 @@
 - **핵심 어필**: ① NVMe **telemetry** 기반 디버그 기능을 설계해 출시함 (JD의 logging/telemetry 라이브러리와 직결) ② 다른 엔지니어가 쓰는 **test platform SDK/API**를 배포한 경험 ③ Apple에서 칩과 시스템의 경계(PCIe/I2C/SPMI/RFFE)에서 터지는 버그를 루트코즈해 온 경험 = "platform meets consumer" 문제 ④ RF-adjacent firmware (Nice-to-have 항목)
 - **최대 갭/리스크**: (1) Bazel·빌드 시스템 오너십 ❌ (2) Embedded Linux·Yocto ❌ (3) 플랫폼 코드를 여러 팀이 쓰게 유지해 온 **명시적 증거가 약함** (4) **Torrance(LA) 이주** (5) ITAR·US Person 요건 가능성 (6) Apple 재직 ~9개월에 이직하는 걸 어떻게 설명할지
 - **인터뷰 포맷** [확인됨 2026-09-16]: ✅ 리크루터 콜 → **HM Adam Kibit 45분 기술** → 온사이트 (Tour 30분 · **경력 발표 1시간** · 1:1 기술 여러 개: C/C++, **ring buffer**, generic system design)
-- **다음 액션**: ① **Adam(HM) 45분 기술 인터뷰 준비** — HM 준비 노트의 스토리 A·B·C 실제 디테일 채우기 + Board B 변종 구조·MCU↔컴패니언 프로토콜 화이트보드 연습 ② 온사이트 대비: 1시간 발표 초안, ring buffer 맨손 구현, generic system design ③ ~~Bazel 미니 프로젝트~~ → 특정 JD 없는 req로 확인돼 우선순위 하향
+- **🔀 포지션 전환 (2026-09-27)**: Adam 인터뷰 뒤 **Firmware Test Engineer** (JD [17], base **$145.5–204K**) 로 HM 30분 인터뷰 제안. **적합도는 오히려 ⭐⭐⭐⭐** (HIL·테스트 자동화·Python·I2C/SPI/UART·RF 테스트 — 레쥬메와 직결). 대신 ① 밴드 상단 $204K ≈ Don이 말한 최저선 $200K ② 개발→테스트 트랙 = **레벨·커리어 방향 하향** ③ 5+년 "software testing" 요구. 자세한 분석은 **§8**
+- **다음 액션 (2026-09-27)**: ① 일정 링크에 날짜 4개+ 제출 (서두르되, 준비 시간 2~3일 확보되게) ② **제출 전에 Jazmin/Devin에게 확인 질문** — 원래 Senior/Principal 트랙은 closed인지, 레벨·밴드는 어떻게 되는지, 이 HM이 누구인지 ③ 수락 여부 결정 기준 정하기 (§8.4) ④ §8.5 준비 항목
+- ~~다음 액션 (2026-09-22)~~: ① 2026-09-24(목)까지 연락 없으면 리크루터 Devin에게 짧은 follow-up 메일 ② Adam 인터뷰 기억나는 질문을 §6에 기록 ③ 기다리는 동안 온사이트 대비: 경력 발표 1시간 초안, ring buffer 맨손 구현
+- ~~이전 다음 액션 (2026-09-16)~~: ① ~~**Adam(HM) 45분 기술 인터뷰 준비** — HM 준비 노트의 스토리 A·B·C 실제 디테일 채우기 + Board B 변종 구조·MCU↔컴패니언 프로토콜 화이트보드 연습 ② 온사이트 대비: 1시간 발표 초안, ring buffer 맨손 구현, generic system design ③ ~~Bazel 미니 프로젝트~~ → 특정 JD 없는 req로 확인돼 우선순위 하향~~ (인터뷰 완료)
 
 ---
 
@@ -189,7 +193,7 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 ```
 ✅ 리크루터 콜 30m — Devin  [확인됨 2026-09-16 완료]
      포지션: "Principal/Senior Embedded Software Engineer" — 특정 JD 없음
-  → HM 기술 인터뷰 45m — Adam Kibit (Director of Firmware)  [확인됨, 2026-09-18 전후]
+✅ HM 기술 인터뷰 45m — Adam Kibit (Director of Firmware)  [확인됨 2026-09-18 완료 · 09-22 현재 결과 대기]
   → 온사이트  [확인됨 구성]
        ① Tour 30분
        ② 본인 경력 발표 1시간 (가장 큰 challenge, issue resolving/debugging, bring-up 경험)
@@ -311,6 +315,10 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 | 2026-09-16 | HM 준비 노트 작성 | `neros_hm_adam_technical_prep_2026-09-18.md`. Adam = 자동차 임베디드 플랫폼 아키텍트 출신 (JCI IPC·EOL 테스트, Visteon 모듈형 플랫폼, Faraday·Aeris OTA/보안), 2025-05 Neros Director of Firmware 합류. LinkedIn은 열람만 함 |
 | 2026-09-16 | **전용 C 연습 세트 생성** | `practice/` — 4세트 24문제 70체크 (ring/logging, telemetry framing, config store, IPC/budget). Anduril 세트 포맷 그대로(`make prob/sol/test`), 전 solution 경고 0·전 체크 PASS 검증 |
 | 2026-09-15 | 폰스크린 벼락치기 시트 작성 | `neros_phone_screen_prep_2026-09-16.md`. Don이 받은 CEO/CTO 영상 요약 중 **"CEO Saurin Shah"는 오류** — 실제 CEO는 Soren Monroe-Anderson (CTO Olaf Hichwa). Board B·Poka-yoke·Bandit 250km/h 등은 [영상요약·미검증]으로 분류 |
+| 2026-09-18 | **HM Adam Kibit 45분 기술 인터뷰 완료** | 금요일에 진행. 질문 상세는 아직 기록 안 함 (§6) |
+| 2026-09-22 | 결과 대기 · 연락 없음 | 인터뷰 후 영업일 2일째. 09-24(목)까지 무소식이면 리크루터 Devin에게 follow-up 예정 |
+| 2026-09-25 | **1주째 무소식 → Devin에게 follow-up 메일 작성** | 인터뷰 후 정확히 1주(영업일 5일). 답이 없으면 다음 주 수요일(09-30)쯤 한 번 더 확인 |
+| 2026-09-27 | **🔀 Firmware Test Engineer로 전환 제안 — HM 30분 Teams 인터뷰** | Talent Coordinator **Jazmin Vu** 메일. "move you forward … for the Firmware Test Engineer position", HM과 30분 Microsoft Teams, 날짜 4개 이상 + 시간대 제출 요청. Greenhouse JD 4941340007 (updated 2026-09-24), base $145.5–204K. 원래 트랙 결과(불합격/보류)는 메일에 언급 없음 → 확인 필요 |
 
 ---
 
@@ -323,6 +331,77 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 - 잘한 점 / 아쉬운 점:
 - 다음 라운드에 반영할 것:
 -->
+
+### 2026-09-18 · HM 기술 인터뷰 (45분) · 면접관 Adam Kibit (Director of Firmware)
+- 받은 질문: (미기록 — Don에게 확인 필요)
+- 내 답 / 결과: ~~2026-09-22 현재 결과 대기, 연락 없음~~ → 2026-09-27 **Firmware Test Engineer로 방향 전환된 다음 단계** 통보. Senior/Principal 개발 트랙으로는 안 간다는 신호일 가능성이 큼 [추정]. Adam이 Don의 강점을 **테스트·통합·factory test 쪽**으로 읽었을 가능성 [추정]
+- 잘한 점 / 아쉬운 점: (미기록)
+- 다음 라운드에 반영할 것: (미기록)
+
+---
+
+## 8. 🔀 Firmware Test Engineer 트랙 (2026-09-27~)
+
+### 8.1 포지션 요약
+| 항목 | 내용 |
+|---|---|
+| 공고 | **Firmware Test Engineer** — Greenhouse 4941340007, updated 2026-09-24 [17] |
+| 위치 | Torrance, CA (onsite) [17] |
+| 연봉 밴드 | **$145,500 – $204,000 base** + equity [17]. Platform 공고($195–273K)보다 약 $50–70K 낮음 |
+| 다음 라운드 | HM 30분 Microsoft Teams [확인됨 2026-09-27 Jazmin Vu 메일]. HM 이름은 아직 모름 |
+| 조직 추정 | Firmware 조직 안의 테스트/HIL 담당. Adam 산하일 가능성, 또는 조직도에 있던 **HIL Firmware Engineer (12y)** 가 HM일 가능성 [추정] |
+
+**업무**: 드론·GCS 소프트웨어 자동화 테스트 스위트 개발/유지 · 테스트 프레임워크·툴 구축 · **CI/CD에 테스트 통합** · 릴리즈 전 빌드 안정성 모니터링 · 커버리지·테스트 모범사례 · 테스트 문서화 [17]
+
+**필수**: 5+년 software testing (embedded + **HIL**) · **HIL 시스템 구축 경험** · **Python** 테스트 자동화 · I2C/SPI/UART/Ethernet · GitLab CI / Jenkins · Git 워크플로 · 빠른 환경 [17]
+**우대**: C/C++ · Bazel/CMake/make · **RF 제품 테스트** · Betaflight/ExpressLRS/PX4/ArduPilot [17]
+
+### 8.2 적합도 (Don ↔ Test JD)
+| JD 요구사항 | Don 경험 (레쥬메) | 매칭 |
+|---|---|---|
+| 5+년 embedded 테스트 + HIL | Apple factory test-node 아키텍처, SK hynix chip reliability system(NAND/PCIe 3/4/5 커버리지), 챔버 테스트 플랫폼(2018–21). 직함은 FW dev지만 **테스트 인프라 경력 합치면 5년+** | 🟡 (HIL이라는 단어는 없음 → "hardware-in-the-loop"로 프레이밍) |
+| HIL 시스템 구축 | "Designed and built a chip reliability system for high-speed interface testing", 챔버 + eSSD + UART 시퀀스 자동화 = 실제 HW를 루프에 넣은 자동화 | ✅/🟡 |
+| Python 테스트 자동화 | Skills에 Python, "test automation script for a web-based platform", test platform SDK API | ✅ |
+| I2C/SPI/UART/Ethernet | I2C·SPI·UART 모두 레쥬메에 있음 (SoC verification, Apple I2C 루트코즈, UART 시퀀스) | ✅ |
+| GitLab CI / Jenkins | 레쥬메 근거 없음 | ❌ |
+| Git 워크플로 | Git/Perforce | ✅ |
+| (Nice) C/C++ | 7년 embedded C/C++ | ✅ **초과 충족** |
+| (Nice) Bazel/CMake/make | 없음 (make 사용 정도) | 🟡 |
+| (Nice) RF 제품 테스트 | **Apple RF-Hardware Chipset Integration**, RFFE, factory test | ✅ |
+| (Nice) Betaflight/ELRS/PX4 | 없음 | ❌ |
+
+- **적합도 ⭐⭐⭐⭐☆**: Platform 역할보다 훨씬 잘 맞음. 최대 갭은 CI 도구(GitLab CI/Jenkins)와 드론 flight stack 두 가지뿐이고, 둘 다 30분 HM 콜 전에 개념 수준으로 메울 수 있음.
+- **커리어 방향 ⭐⭐☆☆☆**: 개발(owner) → 테스트(validator) 전환. Don의 "직접 소유하는 코드를 만들고 싶다"는 이직 스토리(§4.5)와 **정면으로 충돌**. AI 가속기·robotics FW 개발로 가는 경로에서 한 발 옆길.
+- **보상 리스크**: 밴드 상단 $204K ≈ Don 최저선 $200K. 사실상 **밴드 최상단을 받아야** 기대치 충족. Apple 현재 수준 대비 하향 가능성 [추정].
+
+### 8.3 이 제안을 어떻게 읽을까 [추정]
+- Adam이 Senior/Principal 개발 트랙에는 **"아직 아님"** 으로 판단했지만, 테스트·통합·RF·factory 경험은 높게 봤을 가능성이 가장 큼
+- 다른 가능성: Principal 헤드카운트가 막혔거나, 테스트 쪽이 더 급해서 우선 채우려는 것 (JD가 09-24에 갱신된 점도 이와 맞음)
+- 메일에 원래 포지션 얘기가 전혀 없음 → **먼저 물어봐야 알 수 있음**. 추측으로 결정하지 말 것
+
+### 8.4 결정 포인트 (날짜 제출 전에)
+1. **원래 트랙 상태 확인** — Jazmin(또는 Devin)에게: "Is the Senior/Principal Embedded SWE track closed, or is this in addition to it?"
+2. **레벨·밴드** — "Senior level? Is the $145.5–204K range the full range for this role?" (Don 최저선 $200K와 비교)
+3. **HM이 누구인지** — 이름을 받아 LinkedIn 조사
+4. **내부 이동 가능성** — 테스트로 들어가서 FW 개발로 옮길 수 있는 구조인지는 HM 콜에서 자연스럽게 확인
+5. 판단: 밴드가 $200K 이상 가능 + 개발 기여 여지가 있으면 진행. 아니면 인터뷰는 보되(정보·연습 가치) 기대치는 낮게. **거절하더라도 30분 콜은 저비용이라 받아두는 게 유리** [추정]
+
+**Jazmin 회신 초안 (영어)**
+> Hi Jazmin, thank you — happy to move forward! Before I send my availability, could you share a bit more context? (1) Who is the hiring manager for the Firmware Test Engineer role? (2) Is my candidacy for the Senior/Principal Embedded Software Engineer role still active, or has it been transitioned to this position? (3) Is this role scoped at the senior level, and is the posted $145.5K–$204K the full range? I'll submit my availability through the link shortly. Thanks again! — Don
+
+### 8.5 30분 HM 콜 준비
+- **Tell me about yourself (테스트 버전, 60초)**: "7 years of embedded C firmware, and through all of it I've built the test infrastructure around real hardware — a Python test-platform SDK that ran chamber reliability tests on many SSDs over UART, a chip reliability system covering NAND and PCIe 3/4/5, and now at Apple the factory test-node architecture for RF chipset integration. I'm a firmware engineer who builds HIL, so I can read the code under test, not just the test results."
+- **핵심 스토리 3개**: ① 챔버 테스트 플랫폼 SDK (HIL, Python API, 다른 엔지니어가 사용) ② Apple factory test-node — MP 전에 latent defect를 찾는 stress 시나리오 ③ SK hynix reliability system — 고속 인터페이스 커버리지
+- **예상 질문**
+  - HIL 리그를 처음부터 설계한다면? (DUT FC + 시뮬레이터(SITL/물리 모델) + 센서 주입 + 모터 출력(DShot) 캡처 + 전원 제어 + CI 러너) 
+  - 불안정한(flaky) 테스트는 어떻게 다루나? (재현율 측정, quarantine, 원인 분류: HW/타이밍/환경)
+  - 커밋마다 어떤 테스트를, 야간엔 어떤 테스트를? (smoke vs regression vs soak 계층)
+  - UART/I2C/SPI 통신 테스트는 어떻게 자동화? (protocol analyzer, fault injection, loopback)
+  - GitLab CI 파이프라인 구조: stages, runner에 HW 붙이기(tagged runner), artifacts, 병렬화
+  - RF 제품 테스트 경험 (Apple RF — 딥다이브 대비)
+  - "Why test, you're a developer?" → 정직하게: 테스트 인프라를 만드는 개발자로서 기여 + 코드를 읽는 테스터라는 차별점
+- **보충 공부 (가볍게)**: GitLab CI `.gitlab-ci.yml` 기본, pytest fixture/parametrize, Betaflight SITL / MSP·CRSF 개념, ELRS 개요
+- **역질문**: 현재 HIL 리그는 몇 대·어떤 구성인가 / 테스트가 어느 팀에 리포트하나 / 테스트 엔지니어가 FW 코드를 직접 수정·기여하나 / 필드(우크라이나) 이슈가 테스트로 어떻게 돌아오나
 
 ---
 
@@ -344,8 +423,50 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 14. https://www.neros.tech/articles/neros-closes-75m-series-b-fundraise-led-by-sequoia-capital — Series B (2026-09-14)
 15. https://www.therobotreport.com/red-cat-wins-u-s-army-next-gen-drone-contract-over-skydio/ · https://www.modalai.com/pages/2026-u-s-drone-manufacturers-comprehensive-list — 경쟁 구도 (2026-09-14)
 16. https://www.glassdoor.com/Reviews/Neros-Reviews-E10732288.htm — 리뷰 4.9/5, WLB 4.4 (2026-09-14)
+17. https://job-boards.greenhouse.io/nerostechnologies/jobs/4941340007 — Firmware Test Engineer JD, Greenhouse API updated 2026-09-24 (확인일 2026-09-27)
 
 ---
+
+## 부록 B. Firmware Test Engineer JD 원문 (2026-09-27 수집 · Greenhouse API, updated_at 2026-09-24)
+
+<details>
+<summary>펼치기</summary>
+
+**Firmware Test Engineer** — Torrance, California, United States
+
+What you will be doing
+
+- Automated Test Development: Design, develop, and maintain test suites to validate the Neros drone & ground control software
+- Test Framework Development: Build and enhance automated testing frameworks and tools that facilitate automated testing
+- CI/CD Integration: Integrate automated tests into CI/CD pipelines to enable continuous testing of software
+- Ensure Build Stability: Monitor the test results and ensure the stability of builds before releases
+- Quality Assurance: Contribute to maintaining high-quality software by ensuring comprehensive test coverage, and enforcing testing best practices
+- Documentation: Create and maintain documentation related to automated test cases, test plans, and test results
+
+You should have the following
+
+- 5+ years of software testing with a focus on embedded systems and HIL testing
+- Hands-on experience building, setting up HIL test systems
+- Strong development skills with a scripting language (e.g. Python) for test automation
+- Familiarity with embedded communication protocols - - e.g. I2C, SPI, UART, Ethernet
+- Experience with a CI/CD tools - Gitlab CI, Jenkins
+- Experience using Git including development workflows
+- Ability to thrive in a fast-paced work environment
+
+Nice to have
+
+- Experience with C/C++ is a plus
+- Experience with Bazel, Cmake, make or another embedded build system
+- Experience testing RF products
+- Experience with FPV Drone software including Betaflight, ExpressLRS, PX4, Ardupilot, etc.
+
+US Salary Range
+
+$145,500 - $204,000 USD
+
+(Who we are · EEO 문단은 부록 A와 동일)
+
+</details>
 
 ## 부록 A. JD 원문 (2026-09-14 수집 · Greenhouse API, updated_at 2026-09-11)
 

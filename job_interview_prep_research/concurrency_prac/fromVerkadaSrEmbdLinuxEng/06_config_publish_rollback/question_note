@@ -1,0 +1,150 @@
+Gateway config store — publish by pointer swap, roll back by version
+연습 문제 — Verkada 1차 스크리닝 유형 (Part 1 동시성 / Part 2 자료구조)
+
+Files in this folder
+  question_note              this statement
+  cloudcfg.h                 vendor header (given, do not modify)
+  config_store.h             API the harness calls (you implement it)
+  config_store.c             YOUR code — stub with TODOs
+  config_store_solution.c    reference: immutable configs + atomic pointer swap
+                             + reference counting, history = bounded ring
+  main.c                     test harness + fake cloud SDK (given, do not modify)
+  main.sh                    ./main.sh | sol | tsan [mine|sol] | asan [mine|sol]
+
+------------------------------------------------------------------------------
+Background
+
+A cellular gateway (the box in a trailer or a construction site that backhauls
+the cameras) gets its provisioning record from the cloud: which APN to dial,
+how often to push telemetry, whether LTE or Wi-Fi is the preferred WAN. Every
+subsystem on the box — the telemetry uploader, the modem manager, the failover
+watchdog — reads that config constantly, from its own thread.
+
+The cloud SDK gives you exactly one entry point:
+
+    struct RawConfig {
+        char     apn[32];            // access point name
+        uint32_t upload_period_ms;   // telemetry push interval
+        uint8_t  wan_priority;       // 0 = LTE first, 1 = Wi-Fi first, ...
+        uint32_t version;            // increases on the server
+    };
+
+    int cloudcfg_fetch(struct RawConfig *out);
+
+  behaviour                                            returns   blocks
+  ---------------------------------------------------------------------------
+  config retrieved (often the SAME version as before)     0       0-200 ms
+  WAN link down — *out untouched, happens in BURSTS      -1       0-200 ms
+  ---------------------------------------------------------------------------
+
+  Not thread-safe: it keeps a static session inside. Exactly one thread may
+  ever call it, one call at a time.
+
+  Note: in this practice harness the 0-200 ms block is scaled down to 5-50 ms
+  so the whole run finishes in about 5 s (SPEC 3.1). The harness also runs one
+  phase where the cloud answers instantly and pushes a new version on every
+  poll — still legal vendor behaviour, and the only way to make the race in
+  Part 1 fire often enough to observe.
+
+A subsystem must never sit in a network call to find out what its APN is, and
+must never be handed a half-updated record (a new upload period with the old
+APN would mis-provision the modem). So wrap the SDK.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1.
+  Design and implement an API that lets any number of threads read the current
+  configuration. It must be non-blocking (no network wait) and thread-safe.
+
+      int   config_store_init(void);
+      void  config_store_deinit(void);
+
+      const struct Config *config_acquire(void);
+      void                 config_release(const struct Config *c);
+      uint32_t             config_version(void);
+
+  A reader may hold the pointer it got from config_acquire() for as long as it
+  likes — across any number of newer publishes — and the object it points at
+  must stay valid and unchanged until it calls config_release().
+
+  The interesting part is reclamation. If configs are immutable objects that
+  you publish by swapping a pointer, who frees the old one, and when? And in
+
+      p = current;                    /* step A */
+      claim_a_reference(p);           /* step B */
+
+  what stops the publisher from freeing *p between A and B? Name the three
+  standard answers and say which one belongs on this box, and why.
+
+Part 2.
+  Design and implement version history and rollback. A bad config push is the
+  classic way to brick a fleet, so the box has to be able to go back.
+
+      const struct Config *config_get_version(uint32_t version);
+      int                  config_rollback_to(uint32_t version);
+      size_t               config_history(uint32_t *versions_out, size_t max);
+
+  config_history() reports the remembered versions newest first.
+  config_get_version() returns NULL for a version that was never seen or has
+  already been dropped. config_rollback_to() makes a remembered version
+  current again.
+
+  Memory is fixed on this box, so only the last CONFIG_HISTORY_MAX (= 8)
+  versions are kept and older ones are evicted. Now answer the hard part:
+  what does eviction do about a version a reader is still holding, and what
+  happens when every slot in the history is still referenced?
+
+------------------------------------------------------------------------------
+Expected behaviour (what the harness marks PASS/FAIL)
+
+  - right after init there is already a config, and its version, fields and
+    checksum match what the fake cloud handed out
+  - a reader that borrows a config and holds it through 10+ publishes sees the
+    exact same bytes the whole time, still checksumming, even after that
+    version has been evicted from the history (and is no longer findable)
+  - history is exactly 8 entries, newest first, strictly decreasing, and every
+    listed version can be looked up and matches the cloud record; lookups of
+    evicted and of never-published versions return NULL
+  - rollback moves config_version() and config_acquire() to the older version;
+    rollback to an evicted or unknown version fails and changes nothing
+  - a burst of link-down fetches leaves the last good config in place
+  - allocation accounting: configs get freed as they are evicted, live objects
+    stay bounded, after deinit exactly the still-borrowed config survives, and
+    after the last release allocs == frees (no leaks, no double frees)
+  - getter latency: p50 and p99 of a full getter round are microseconds, not
+    the milliseconds the vendor call costs
+  - 4 readers + 1 publisher for 2 s, then a config storm with concurrent
+    rollbacks, with no torn, invented or freed value ever read
+  - must also be clean under -fsanitize=thread and -fsanitize=address
+    (./main.sh tsan, ./main.sh asan)
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for   (answer these on paper first)
+
+  1. Why can't config_acquire() just call cloudcfg_fetch()? Who calls it, from
+     how many threads, and why exactly one?
+  2. Immutability: why does "build it fully, then publish one pointer" remove
+     the need for a lock on the read side, and what bug does it prevent that a
+     field-by-field update under a mutex does not?
+  3. Reclamation: the publisher cannot free the old config at swap time. What
+     are the owners of one config object, and who ends up calling free()?
+  4. The use-after-free window between loading the current pointer and
+     claiming a reference on it: describe it, then compare the three fixes —
+     a very short mutex, hazard pointers, RCU / epoch reclamation. Which one
+     ships on an embedded gateway, and what would make you change your mind?
+  5. What exactly may the publisher do while holding your lock? (Hint: not
+     fetch, not malloc, not free.) What is the worst time a reader can wait,
+     and is "non-blocking" the same thing as "lock-free"?
+  6. Part 2: why a bounded ring and not a list, a hash table or a tree, for
+     8 entries on this box? What would change your mind at 8000?
+  7. Part 2: eviction vs borrowed references. Why is dropping a version from
+     the ring NOT a free? What is the peak live memory, and what bounds it?
+  8. Part 2: what if the whole ring is still referenced by slow readers — do
+     you evict anyway, block the publisher, or fail the publish? Defend it.
+  9. Errors: the fetch fails in a burst, or returns the same version as last
+     time. What do you publish in each case, and why does publishing the same
+     version again cost more than nothing?
+ 10. Lifetime: a reader is still holding a config when deinit runs. What must
+     config_release() still be allowed to do? And how do you stop a thread
+     that is parked inside a vendor call for 200 ms?

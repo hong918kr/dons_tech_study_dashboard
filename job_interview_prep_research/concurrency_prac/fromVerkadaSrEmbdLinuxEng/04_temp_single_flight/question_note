@@ -1,0 +1,166 @@
+Cached temperature probe with request coalescing ("single flight")
+Practice problem — Verkada 1st-screening shape (Part 1 concurrency / Part 2 data structure)
+Format: one C file, cc -std=c11 -O2 -Wall -Wextra -pthread. Part 1 then Part 2 on the same code.
+
+Files in this folder
+  question_note              this statement
+  tempdev.h                  vendor header (given; do not modify)
+  main.c                     test harness + fake probe (given; do not modify)
+  temp_cache.h               API the harness calls (given)
+  temp_cache.c               YOUR code — stub with TODOs
+  temp_cache_solution.c      reference: single flight (mutex + condvar +
+                             inflight flag + generation) / 60 one-minute
+                             buckets + raw ring for the partial ends
+  main.sh                    ./main.sh | ./main.sh sol | ./main.sh tsan
+
+------------------------------------------------------------------------------
+Background
+
+A Verkada air-quality sensor carries a temperature probe on a slow I2C bus,
+reachable only through a vendor blob:
+
+    int tempdev_read(float *celsius);
+
+    returns      0   *celsius holds a fresh reading
+                -1   the device NACKed the transfer; *celsius untouched
+
+    blocking     ~600 ms on the real part: one long I2C conversion. A NACK is
+                 only discovered when the transaction times out, so a FAILING
+                 read blocks just as long as a good one.
+                 This harness scales that down to 60 ms so the whole suite
+                 finishes in a couple of seconds (and to 250 ms for the two
+                 coalescing phases, to make them about coalescing rather than
+                 about thread-start jitter). Nothing in your code may depend
+                 on the number.
+
+    re-entrancy  STRICTLY ONE CALLER AT A TIME. Two threads inside
+                 tempdev_read() at the same moment interleave their I2C
+                 transactions and corrupt the bus. There is no internal lock.
+                 The fake probe in main.c detects concurrent entry and fails
+                 the run — that is the whole point of the exercise.
+
+Several unrelated subsystems want the temperature: the fan controller wants it
+every few seconds, the MQTT uplink wants it whenever it publishes, a local HTTP
+handler wants it per request, and the web UI polls a history graph. They all
+run on their own threads and none of them may be made to wait 600 ms because
+somebody else already is.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1.
+  Implement an on-demand cached reader:
+
+      int temp_cache_init(void);
+      void temp_cache_deinit(void);
+      int temp_get(float *out, uint64_t max_age_us);
+
+  - If the cached reading is fresher than max_age_us (strictly: age <
+    max_age_us) return it immediately, without touching the bus.
+  - Otherwise refresh. If N threads ask at the same time and all of them need
+    a refresh, EXACTLY ONE tempdev_read() may happen. The other N-1 wait for
+    that result; they must not queue N reads, and they must not be serialised
+    behind each other.
+  - max_age_us == 0 therefore means "force one refresh and give me its
+    result", never "read the device N times".
+  - The refresh can fail. Waiters must not spin or hang. Decide what a caller
+    gets when the refresh NACKed — the last good value flagged as stale, or an
+    error — and document the choice. Do not let a failed refresh turn N
+    waiters into N more vendor reads.
+  - Return codes are in temp_cache.h: TEMP_OK / TEMP_STALE / TEMP_NODATA.
+  - Report counters through temp_cache_stats() so the harness can prove the
+    coalescing actually happened.
+
+  There is no background sampler thread in this problem. Nothing reads the
+  probe except a caller who wants a value.
+
+Part 2.
+  Implement range statistics over the last hour:
+
+      int temp_range_stats(uint64_t t0, uint64_t t1,
+                           float *min, float *max, float *avg);
+      int temp_history_add(uint64_t t_us, float celsius);
+
+  min / max / mean of every recorded sample with t0 <= ts <= t1 (both ends
+  inclusive), over whatever the 1-hour window still holds. Returns 0, or -1
+  when t0 > t1 or the range holds no sample.
+
+  temp_get()'s refresh path records each successful reading itself; the
+  harness also calls temp_history_add() directly to load an hour of history
+  without waiting an hour.
+
+  The cost of a query must be bounded by the WINDOW, not by the number of
+  samples inside it. Reference answer: TEMP_NBUCKETS (60) fixed buckets of
+  TEMP_BUCKET_US (1 minute), each carrying min/max/sum/count, so at most 60
+  O(1) folds per query — plus the raw samples, so the PARTIAL bucket at each
+  end of the range is still exact. Write down, in comments, how this compares
+  with (a) scanning every sample and (b) a sparse table / segment tree, and
+  when each of those is the right call.
+
+------------------------------------------------------------------------------
+Expected behaviour (what main.c turns into PASS/FAIL)
+
+  - init touches no bus at all; a cold cache on a wedged bus -> TEMP_NODATA
+    after exactly one attempted read.
+  - 8 threads released simultaneously onto a stale cache -> exactly ONE
+    tempdev_read(), all 8 get TEMP_OK with the SAME value, stats show 1 leader
+    and 7 coalesced.
+  - The same wave on a wedged bus -> still exactly one read, all 8 get
+    TEMP_STALE with the previous good value, nobody hangs; the next wave after
+    recovery gets one read and a new value.
+  - A fresh cache is served with zero bus traffic; 2000 cache hits cost far
+    less than one vendor read (worst case measured, must be < read/4).
+  - The fake probe fails the run if two threads are ever inside it at once.
+  - Range stats are compared against a brute-force scan of ground truth the
+    harness injected: the whole window, 500 random ranges, and the boundaries
+    (empty history, t0 > t1, entirely in the future, inside the window but
+    before the first sample, t0 == t1, a range that only partly covers the
+    newest bucket, exactly one bucket, a sub-bucket range, samples older than
+    the window). Nothing is hard-coded; the PRNG is a fixed-seed xorshift, not
+    rand().
+  - A full-window query must inspect far fewer raw samples than the window
+    holds (stats.last_scanned), i.e. a brute-force scan does not pass.
+  - 4 threads hammering both APIs for 1.2 s: no value the probe never
+    produced, every range answer still exact, worst temp_get within one vendor
+    read plus slack, worst range query under read/4, and the error path kept
+    warm by a NACK every 7th call.
+  - deinit called while a read is in flight waits for the bus, releases the
+    caller, is idempotent, and temp_get() afterwards returns TEMP_NODATA.
+
+  Last line is exactly "ALL CHECKS PASSED (0 failed)" or "N CHECK(S) FAILED".
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for   (answer these on paper first)
+
+  1. Eight threads want a value and the cache is stale. Why is "each one calls
+     tempdev_read()" wrong on two separate counts, and which of the two does a
+     plain mutex around the vendor call fix — and which does it not?
+  2. Walk the leader/waiter handshake. What exactly does a waiter wait ON?
+     Why is a bare boolean ("a read is in flight") not enough to wake up on,
+     and what does the generation counter buy you? What about spurious wakeups?
+  3. Why must the mutex be released across tempdev_read()? Name the two things
+     that break if you hold it: what happens to a caller who would have been a
+     cache HIT, and what happens to the other seven callers?
+  4. The refresh NACKs. What do the seven waiters get? If a waiter instead
+     "retried by becoming the new leader", what does a wedged bus do to your
+     I2C traffic? Where does the retry policy belong?
+  5. Could you do Part 1 with an atomic value and no condvar? What is the
+     thing an atomic cannot express here? (Hint: sleeping until an event, and
+     naming which event.) When would sem_t or a per-call future be better?
+  6. Part 2: how much memory is one hour? Give the arithmetic for both the
+     aggregates and the raw samples, and say what the worst sample rate is
+     when the device is only read on demand at 60 ms per read.
+  7. Part 2: a range query's two ends land in the middle of a bucket. How do
+     you answer those exactly, and what is the worst-case work in terms of
+     buckets and samples? Why is that bounded by the window and not by n?
+  8. Part 2: compare buckets with (a) scanning all samples and (b) a sparse
+     table or segment tree. What does each fix, what does each cost, and which
+     would you pick if the query were "min over an arbitrary range of the last
+     30 days"?
+  9. gettimeofday is not monotonic. What breaks in the cache freshness test,
+     and what breaks in the bucket index, when the clock steps backwards?
+     What does "age" even mean then?
+ 10. Shutdown: deinit is called while a leader is inside a 600 ms bus
+     transaction and seven waiters are parked. What must deinit do about each
+     of them, in what order, and why can it not just free the state and
+     return? What does a caller arriving after deinit get?

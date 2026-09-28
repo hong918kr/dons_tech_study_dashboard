@@ -1,0 +1,148 @@
+05 — Frame publisher: the latest frame without a copy, plus a short replay
+Practice problem — Verkada 1st-screening shape (Part 1 concurrency / Part 2 data structure)
+
+Files in this folder
+  question_note              this statement
+  capture.h                  vendor header (given, do not modify)
+  main.c                     test harness + fake capture unit (given, do not modify)
+  frame_store.h              the API the harness calls (you implement it)
+  frame_store.c              YOUR code — stub with TODOs
+  frame_store_solution.c     reference: triple buffer + refcounts, replay ring + binary search
+  main.sh                    ./main.sh | ./main.sh sol | ./main.sh tsan [mine|sol]
+
+Teaching point of this one (different from the other nine): BUFFER OWNERSHIP
+WITH BORROWED REFERENCES. The reader gets a pointer into the producer's memory
+and a refcount decides when the producer may reuse it.
+
+------------------------------------------------------------------------------
+Background
+
+A Verkada camera SoC's capture unit hands you finished frames one at a time.
+The stream has several consumers with very different speeds: the motion
+detector wants the newest frame at full rate, the encoder is usually a frame
+behind, and the cloud uploader stalls for tens of milliseconds whenever the
+link hiccups. They all live in the same process.
+
+The vendor gives you exactly one function (capture.h):
+
+    #define FRAME_BYTES       4096      /* small on purpose; a real 4K frame
+                                           is ~8 MB, which is the whole point */
+    #define CAPTURE_PERIOD_US 25000     /* ~40 fps */
+
+    int capture_next_frame(uint8_t *dst, uint64_t *timestamp);
+
+  return 0   Blocked until the next frame was ready (~25 ms, with jitter), then
+             copied FRAME_BYTES into dst and wrote the capture time into
+             *timestamp (microseconds, capture_now_us() clock).
+  return -1  Sensor glitch. Returns immediately, writes nothing. Happens
+             occasionally and means "try again", not "give up".
+
+  It keeps static state and is NOT thread-safe: exactly one thread may call it.
+  While it is running, dst belongs to the sensor — it DMAs the frame in
+  bursts, so anyone reading dst mid-call sees a half-written frame.
+
+Blocking, single-caller, and it owns your buffer for 25 ms at a time. Wrap it
+in something non-blocking and thread-safe that does not copy 8 MB per reader.
+
+  Scaling note: unlike the original ALS problem there is nothing to shrink —
+  25 ms is already short. What IS shrunk is Part 2's window: 2 seconds instead
+  of the 10 s of pre-roll a real camera keeps, so the harness finishes in about
+  4 seconds. Sizes and rules do not change, only the number.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1.  The latest frame, borrowed — not copied.
+
+    const uint8_t *frame_acquire_latest(uint64_t *ts_out);
+    void           frame_release(const uint8_t *frame);
+
+  A reader must get the most recent COMPLETE frame with no copy of
+  FRAME_BYTES, must never see a partially written frame, and must never wait
+  on the sensor. The writer must never wait on a reader: if a reader sits on a
+  frame for 100 ms, the writer keeps capturing and counts dropped frames.
+  Pointers stay valid until the matching frame_release().
+
+    uint64_t frame_dropped_count(void);   /* no free buffer -> frame discarded */
+    uint64_t frame_release_errors(void);  /* foreign pointer / extra release   */
+    size_t   frame_borrowed_count(void);  /* borrows outstanding right now     */
+
+  A dropped frame is dropped completely: it does not appear in Part 2 either.
+
+Part 2.  A short replay buffer (~2 seconds).
+
+    int    frame_at(uint64_t t, uint8_t *dst, uint64_t *actual_ts);
+    size_t frame_count_in(uint64_t t0, uint64_t t1);
+
+  frame_at() copies out the frame in effect at time t — the newest frame whose
+  timestamp <= t — and reports that frame's real timestamp. -1 if t is in the
+  future, older than FRAME_REPLAY_WINDOW_US, or before the oldest frame held.
+  frame_count_in() counts stored frames with t0 <= ts <= t1.
+
+  Memory is NOT free here: FRAME_REPLAY_BYTES_MAX is a hard budget. Do the
+  arithmetic out loud (frames/second x seconds x FRAME_BYTES), pick a capacity,
+  and say what you evict when the budget is reached. Lookups must not be a
+  linear scan.
+
+    size_t frame_replay_bytes(void);      /* must never exceed the budget */
+
+------------------------------------------------------------------------------
+Expected behaviour  (what main.c checks, all against recorded ground truth)
+
+  - A frame is available the moment frame_store_init() returns, with the
+    timestamp the sensor reported, and two acquires of the same frame return
+    the SAME pointer (borrowed, not copied).
+  - 4 reader threads borrow frames for 2 s while the writer runs: every frame
+    handed out must match its own sequence pattern (the fake sensor fills each
+    frame from its sequence number and writes it in two bursts, so a torn
+    frame is detectable), and no frame/timestamp may be invented.
+  - The writer never blocks: with several distinct frames pinned by readers,
+    the sensor keeps being drained and frame_dropped_count() grows instead.
+    Pinned frames stay intact and nothing deadlocks.
+  - Refcount hygiene: releasing twice, or releasing a pointer that was never
+    handed out, is detected and does not corrupt the store; release(NULL) is a
+    no-op; the outstanding-borrow count returns to 0.
+  - Replay matches ground truth: exact timestamp match, a t between two frames
+    returns the older one, t in the future -> -1, t older than the window
+    -> -1, t before the first frame ever captured -> -1, and the frame
+    covering the window edge is still there.
+  - frame_count_in matches ground truth; reversed and future ranges give 0.
+  - Replay memory stays inside the budget.
+  - Both getters stay far under one vendor call (limit 5 ms vs 25 ms).
+  - deinit() joins the writer thread promptly.
+
+  Last line is "ALL CHECKS PASSED (0 failed)" or "N CHECK(S) FAILED".
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for   (answer on paper BEFORE coding)
+
+  1. Why can a reader not just be handed a copy of the frame? Work out the
+     cost: 4 consumers x 30 fps x 8 MB. What does that do to the memory bus?
+  2. How many frame buffers do you need, and what does each extra one buy?
+     Walk double -> triple -> N: what does the third buffer fix, what does it
+     cost, and does it reduce latency or only absorb a stalled reader?
+  3. What exactly makes it safe for the writer to reuse a buffer? Write the
+     predicate. Why is "the newest frame" excluded even at refcount 0?
+  4. What is inside your critical section? How long is it in nanoseconds? Where
+     do the two 4 KiB copies in your design happen, and why not under the lock?
+  5. The uploader stalls for 200 ms holding a frame. Walk through what the
+     writer does on every frame during those 200 ms. Who decides to drop, and
+     what does the reader that wakes up see? Why is blocking the writer wrong
+     even though "it is only 200 ms"?
+  6. Part 2 sizing: frames/second x window x FRAME_BYTES. What do you do when
+     the answer is 640 MB? What is the worst-case frame rate, and what happens
+     if the sensor bursts above nominal?
+  7. Part 2 structure and costs: ring + binary search vs list vs balanced tree.
+     What is O() for append, lookup at t, eviction, and count in a range? Why
+     is a ring the right first answer here when it was only the first step in
+     the ALS problem?
+  8. Eviction: which frame do you drop, and which frame that is OLDER than the
+     window must you keep? Why? And what happens if the slot you are about to
+     recycle is being copied out by a reader right now?
+  9. capture_next_frame() returns -1. What do you do, and why must you not
+     just retry in a tight loop? What if the timestamps go backwards (NTP
+     step) — what breaks, and how do you keep the binary search valid?
+ 10. Start-up and shutdown: what does a reader see before the first frame —
+     NULL, or does init block ~25 ms to get one? What happens to a borrowed
+     pointer when deinit() runs, and how long can join() take when the writer
+     is parked inside the vendor call?

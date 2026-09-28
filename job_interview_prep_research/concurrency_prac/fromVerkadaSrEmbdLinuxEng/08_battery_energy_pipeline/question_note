@@ -1,0 +1,179 @@
+MT81 solar security trailer — battery energy pipeline (rate-limited uploads)
+Practice problem 08 — Verkada 1st-screening shape (Part 1 concurrency / Part 2 data structure)
+Format: one C file you write, gcc/clang -O2 -pthread. Part 1 first, then Part 2 on the same code.
+
+Files in this folder
+  question_note              this statement
+  bms.h                      vendor header (given, do not modify)
+  main.c                     test harness + fake BMS + fake backend (given, do not modify)
+  energy_store.h             API the harness calls (you implement it)
+  energy_store.c             YOUR code — stub with TODOs
+  energy_store_solution.c    reference: token bucket + ring buffer with prefix sums
+  main.sh                    ./main.sh | ./main.sh sol | ./main.sh tsan
+
+------------------------------------------------------------------------------
+Background
+
+An MT81 solar security trailer runs its cameras and its LTE modem off a 24 V
+battery pack that a solar array charges during the day. The battery management
+system (BMS) is the only thing that knows the real power flow, and the fleet
+backend wants two things from every trailer: a live power reading in the console,
+and enough history to answer "how many joules did this trailer deliver between
+14:05 and 14:07?" when somebody is arguing about runtime.
+
+The BMS vendor gives you this:
+
+    struct BmsSample {
+        int      status;      // BMS_OK / BMS_STALE / BMS_ERROR
+        float    volts;
+        float    amps;        // + = discharging into the load, - = solar charging
+        uint64_t timestamp;   // microseconds, same clock as bms_now_us()
+    };
+
+    struct BmsSample bms_read(void);
+
+  status        what happens                                    fields
+  ------------  ----------------------------------------------  ---------------------
+  BMS_OK        blocks until the pack reports, then returns     volts/amps/timestamp
+                                                                are valid
+  BMS_STALE     blocks, then says "same as last time"           volts/amps/timestamp
+                                                                are NOT written
+  BMS_ERROR     returns IMMEDIATELY (transport glitch)          every field is garbage
+
+  - The BMS reports when it feels like it: the blocking time is irregular.
+  - The FIRST call returns immediately with a valid sample.
+  - bms_read() is NOT thread-safe: exactly one thread may be inside it.
+
+The backend upload path is also given:
+
+    int bms_upload(const struct BmsSample *batch, int n);
+
+  Blocks ~3 ms, not thread-safe (one thread only), returns 0 on success. The
+  trailer is on a metered LTE plan, so the fleet contract is a hard ceiling:
+  at most UPLOAD_RATE_PER_SEC upload calls per second, no bursting around it.
+
+  Scaling for this harness (SPEC §3.1): the real BMS reports about once a
+  second; here every BMS interval is divided by ~25, so bms_read() blocks
+  20–60 ms (mean ~40 ms) and a whole run takes about 6–7 seconds. The upload rate
+  limit (5/s), the batch size, the queue depth and the 30-minute history window
+  are NOT scaled — they are in energy_store.h and the harness asserts them.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1.  A two-stage pipeline, non-blocking and thread-safe for callers.
+
+    int  bms_pipeline_init(void);
+    void bms_pipeline_deinit(void);
+    int  bms_get_latest(struct BmsSample *out);   /* 0, or -1 if none yet */
+    struct BmsStats bms_stats(void);
+
+  stage 1 (sampler)  owns bms_read() and publishes the latest reading, so that
+                     bms_get_latest() never waits for the BMS.
+  stage 2 (uploader) consumes samples and uploads them in batches of at most
+                     UPLOAD_BATCH_MAX, RATE LIMITED to UPLOAD_RATE_PER_SEC
+                     upload calls per second. Implement the limit as a TOKEN
+                     BUCKET whose waiting is done with pthread_cond_timedwait()
+                     — not usleep(), not a spin, not a fixed sleep slice.
+                     (macOS has no pthread_condattr_setclock: see SPEC §6, use
+                     pthread_cond_timedwait_relative_np() there.)
+
+  The two stages push against each other: stage 1 produces ~18 samples/s and
+  stage 2 may only absorb UPLOAD_RATE_PER_SEC * UPLOAD_BATCH_MAX = 10/s. The
+  back-pressure must be absorbed BETWEEN the stages — stage 1 must never slow
+  down to stage 2's pace, and must never sit in a lock stage 2 is holding
+  across a network call.
+
+  bms_stats() reports sampled / uploaded / dropped / batches / upload_wait_us /
+  max_publish_us / stale / errors, and must not block. The harness reads it from
+  4 threads while both stages run, and checks that the numbers are consistent
+  (nothing invented: sampled >= uploaded + dropped).
+
+Part 2.  Energy over an arbitrary interval, from the last 30 minutes of samples.
+
+    double energy_joules_between(uint64_t t0, uint64_t t1);
+
+  Instantaneous power is p = volts * amps watts; energy is its integral over
+  time, in joules. Keep the last ENERGY_WINDOW_US (30 min) of (timestamp, power)
+  and answer an arbitrary [t0, t1] in O(log n), not O(n):
+
+    - a ring buffer of samples plus a running PREFIX SUM of trapezoidal energy,
+      so whole segments between t0 and t1 cost ONE subtraction;
+    - binary search for the segment holding t0 and the segment holding t1;
+    - EXACT partial edges: interpolate power at t0 and at t1 instead of
+      snapping to the nearest sample. Mind the case where t0 and t1 land inside
+      the SAME segment — the prefix-sum difference is 0 there, and the answer
+      is not.
+
+  Conventions (energy_store.h spells them out, the harness checks them):
+  t1 <= t0 -> 0; fewer than 2 samples -> 0; the query is clamped to the span
+  actually measured, so a range entirely outside the retained history -> 0.
+
+------------------------------------------------------------------------------
+Expected behaviour (what main.sh checks; the harness derives every expected
+value from what the fake BMS really produced — nothing is hard-coded)
+
+  - a getter called before init, and right after init, behaves (no crash, no
+    invented value, no wait on the BMS);
+  - counters are consistent: sampled >= uploaded + dropped, every uploaded
+    sample is one the BMS really produced, every batch is 1..UPLOAD_BATCH_MAX,
+    and no two threads are ever inside the same vendor call;
+  - the RATE LIMIT is measured: the harness logs every bms_upload() call and
+    asserts that no 1-second window ever holds more than
+    UPLOAD_RATE_PER_SEC + UPLOAD_BURST + 1 of them;
+  - stage 1 is never blocked: the worst publish (everything except bms_read())
+    stays under 10 ms, and samples keep arriving at ~18/s instead of collapsing
+    to the uploader's 10/s ceiling, while the uploader is visibly throttled
+    (upload_wait_us > 0) and the queue is visibly dropping;
+  - energy matches a brute-force reference over the ground truth: whole span,
+    sample-aligned ranges, partial edges, both ends inside one segment, a 1 ms
+    slice, additivity (E(a,m) + E(m,b) == E(a,b)), and every segment one by one;
+  - boundaries: t0 > t1, t0 == t1, empty history, single sample, range before
+    the first sample, range after the last sample, range older than the window;
+  - 4 reader threads for 2 s: no torn or invented values, energy over a range
+    that lies entirely in the past never changes, worst getter latency stays
+    far below both the BMS blocking time and one rate-limit interval;
+  - shutdown: deinit returns promptly (it must WAKE the timed wait, not wait it
+    out), both threads really stop, and the history is still queryable after.
+
+  Last line is exactly "ALL CHECKS PASSED (0 failed)" or "N CHECK(S) FAILED".
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for   (answer these on paper before coding)
+
+  1. Why must stage 1 never block on stage 2? Say concretely what is lost when
+     the sampler is not sitting inside bms_read() at the moment the BMS reports.
+     Why is that different from a slow consumer of a file or a socket?
+  2. Who calls bms_read()? Who calls bms_upload()? Why exactly one thread each,
+     and how can init take the first sample on the caller's thread without
+     breaking that rule?
+  3. Why a TIMED wait? Compare it with (a) usleep() in a loop, (b) a separate
+     timer thread that signals a plain condvar, (c) spinning on the clock. What
+     does each cost you at shutdown, and in wakeups per second?
+  4. Token bucket: derive the bound on uploads in any 1-second window. What does
+     the bucket's capacity buy you, what does it cost, and what should the bucket
+     do after the uploader has been idle for a minute? Why is the capacity not
+     "as many tokens as fit"?
+  5. The hand-off queue is bounded. Full queue: block, drop the oldest, drop the
+     newest, or grow it? Which is right for telemetry and which for a firmware
+     download? Why does the choice here cost no energy accuracy at all?
+  6. Derive the trapezoid rule for one segment. When is a zero-order hold
+     ("power stayed at p_i") the more honest model instead? Why must dt be in
+     seconds, and what units does each factor carry?
+  7. How much memory does 30 minutes cost, and what worst-case sample rate did
+     you assume? Why prefix sums instead of summing the segments on demand, what
+     is the query cost, and what must stay true of the buffer for a binary
+     search to be legal? The sample in effect at (now - 30 min) is OLDER than
+     30 minutes — do you evict it?
+  8. The prefix sum grows forever. What breaks if you accumulate it in a float,
+     and at roughly what magnitude? Name two ways to fix it (Kahan, rebasing)
+     and say why neither is needed here.
+  9. BMS_STALE leaves volts/amps/timestamp unwritten and BMS_ERROR leaves every
+     field garbage. What must the sampler never do with them, and what does an
+     error burst do to your integral — is interpolating across a 2-second hole
+     honest? What about a wall-clock jump backwards?
+ 10. Start-up and shutdown: what does bms_get_latest() return before the first
+     sample? deinit() has to return promptly while one thread is inside a 40 ms
+     vendor call and the other is parked in a 200 ms timed wait — what exactly
+     wakes it, and why must the flag be set before the broadcast, with the lock
+     held? What still has to work after deinit?

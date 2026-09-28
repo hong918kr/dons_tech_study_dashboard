@@ -1,0 +1,176 @@
+GPS fix cache for a Verkada security trailer
+Practice problem — Verkada 1st screening type (Part 1 concurrency / Part 2 data structure)
+
+Files in this folder
+  question_note           this statement
+  gps.h                   vendor header (given; do not modify)
+  main.c                  test harness + fake GPS module (given; do not modify)
+  gps_cache.h             the API the harness calls (you implement it)
+  gps_cache.c             YOUR code — stub with TODOs
+  gps_cache_solution.c    reference: seqlock (Part 1) + ring/binary search/prefix sums (Part 2)
+  main.sh                 ./main.sh | sol | window [mine|sol] | tsan [mine|sol]
+
+------------------------------------------------------------------------------
+Background
+
+A Verkada security trailer is a towable mast with cameras, an LTE modem and a
+GPS module. Fleet Ops needs to know where a trailer is right now, and how far
+it has been dragged in the last ten minutes, so the dashboard can raise a
+"trailer is being stolen" alert.
+
+The GPS vendor gives you exactly one function:
+
+    struct GpsFix {
+        int      status;     // GPS_ERROR / GPS_NO_FIX / GPS_VALID
+        double   lat, lon;   // degrees, WGS-84
+        float    hdop;       // horizontal dilution of precision
+        uint64_t timestamp;  // microseconds, same clock as gps_now_us()
+    };
+
+    struct GpsFix gps_wait_for_fix(void);
+
+It BLOCKS until the module emits its next fix:
+
+    sky visible    blocks 20..90 ms, returns GPS_VALID with a fresh position
+    sky blocked    blocks the full receiver timeout, returns GPS_NO_FIX and
+                   the payload fields are garbage
+    module hiccup  returns GPS_ERROR immediately, payload is garbage
+
+  The FIRST call returns a GPS_VALID fix immediately (the module has a fix
+  cached from cold start).
+
+  It is NOT thread-safe: static first-call flag, static dead-reckoned
+  position, static PRNG. Exactly one thread may ever call it.
+
+  Harness scaling, so the whole run fits in ~7 s: the real receiver timeout is
+  1 s — the fake module in main.c uses 100 ms. The real module errors maybe
+  once in 10000 calls; the fake raises it to 2 % so the path gets exercised.
+
+A dozen application threads (the RTSP pipeline, the geofence evaluator, the
+cloud uplink, the local web UI) all want the position. None of them can afford
+to sit in a 100 ms vendor call. Wrap it.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1.
+  Design and implement a non-blocking, thread-safe way to read the most recent
+  VALID fix.
+
+      int  gps_cache_init(void);
+      void gps_cache_deinit(void);
+      int  gps_get_last_fix(struct GpsFix *out);   /* 0 = filled, -1 = none yet */
+
+  The whole difficulty is in the payload: struct GpsFix is 40 bytes. There is
+  no single atomic store for it, so "publish the latest value" is no longer one
+  line. A reader must get lat, lon, hdop and timestamp FROM THE SAME FIX —
+  never last second's lat paired with this second's lon, because that point is
+  in the wrong county and the geofence fires.
+
+Part 2.
+  Design and implement history queries over the last 10 minutes. Non-blocking
+  and thread-safe as well.
+
+      int    gps_fix_at(uint64_t t, struct GpsFix *out);
+      double gps_distance_travelled(uint64_t t0, uint64_t t1);   /* metres */
+
+  gps_fix_at(t) is the most recent VALID fix with timestamp <= t. (Nothing
+  after it means the trailer had not moved, or the module would have told us.)
+
+  gps_distance_travelled(t0, t1) is the path length over the recorded fixes:
+
+      k0 = first recorded fix with timestamp >= t0
+      k1 = last  recorded fix with timestamp <= t1
+      result = sum of segment_m(fix[k], fix[k+1]) for k in [k0, k1)
+      0.0 if fewer than two fixes fall inside the range   (no interpolation
+                                                           to the endpoints)
+
+  Segment distance is the equirectangular ("flat earth") approximation — the
+  trailer covers a few km, not a great circle, and this is one cos and one
+  sqrt instead of haversine, with no libm-dependent atan2:
+
+      #define DEG2RAD   0.017453292519943295
+      #define EARTH_R_M 6371008.8
+      double dlat = (lat2 - lat1) * DEG2RAD;
+      double dlon = (lon2 - lon1) * DEG2RAD;
+      double latm = (lat1 + lat2) * 0.5 * DEG2RAD;
+      double x    = dlon * cos(latm);
+      segment_m   = EARTH_R_M * sqrt(dlat*dlat + x*x);
+
+  Use exactly that formula; the harness computes its ground truth with it.
+
+  The dashboard polls gps_distance_travelled() once a second for every trailer
+  in the fleet, and there can be 6000 fixes in the window. A range query that
+  walks the range is O(n) — get it to O(log n).
+
+  Return conventions (the harness enforces them):
+      gps_fix_at              -1 if t is in the future, older than the window,
+                              or before the oldest fix you hold
+      gps_distance_travelled  NAN if t0 > t1, t1 is in the future, or t0 is
+                              older than the window;  0.0 if t0 == t1
+
+------------------------------------------------------------------------------
+Expected behaviour  (what main.c prints PASS/FAIL for)
+
+  Part 1   a fix is available the instant gps_cache_init() returns, and it is
+           field-for-field the fix the module emitted; same again after a
+           second of sampling.
+  Part 2   gps_fix_at() at a fix's own timestamp, between two fixes, and at
+           "now"; gps_distance_travelled() over the whole path, each half, and
+           halves-sum-to-whole, all against ground truth the fake module
+           recorded (tolerance 1e-6, since the two sides add in a different
+           order).
+  Bounds   t in the future / older than the window / before the first fix;
+           t0 == t1; t0 > t1; a range holding exactly one fix; a range
+           entirely before the first fix.
+  Safety   4 reader threads for 2 s while the sampler writes. The fake module
+           only emits fixes where lon == -(lat + 85.0) and
+           hdop == (float)(1.0 + 100.0*(lat - 37.0)), so ANY torn struct is
+           caught by arithmetic; (timestamp, lat) is also checked against the
+           recorded set, which catches a torn 64-bit timestamp.
+  Latency  three getter calls in a row, timed. Fewer than 0.1 % of batches may
+           exceed 5 ms (a loaded laptop gets one hiccup, a blocking getter is
+           slow every time), the absolute worst must stay under one vendor
+           block, and the readers must clear 10000 iterations in 2 s. The
+           reference runs ~1 us per batch and ~1.6 M iterations.
+  Shutdown after gps_cache_deinit() the module is no longer read, and the
+           getters are still safe to call.
+
+  ./main.sh window rebuilds with a 1.5 s window and adds eviction checks,
+  including the one at the window's edge (see question 7).
+
+  Last line is exactly "ALL CHECKS PASSED (0 failed)" or "N CHECK(S) FAILED".
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for   (answer these on paper before coding)
+
+  1. Why can't gps_get_last_fix() just call gps_wait_for_fix()? Who calls the
+     vendor function, how many threads, and what in gps.h forces that number?
+  2. struct GpsFix is 40 bytes. Why does the float trick (publish the IEEE-754
+     bits in one _Atomic uint32_t) not generalise here? What does
+     `_Atomic struct GpsFix` actually compile to — check atomic_is_lock_free.
+  3. Enumerate the real options for publishing a multi-field struct: mutex
+     snapshot, seqlock, double buffer + atomic index, RCU-ish pointer swap.
+     Which is your DEFAULT and why? What specifically would make you leave it?
+  4. If you pick a seqlock: draw the odd/even sequence. Where do the two
+     fences go, and what does each one forbid? Why must the payload fields be
+     atomics even though a reader throws torn values away? How can a reader
+     starve, and why is that acceptable (or not) at 10 Hz?
+  5. "Non-blocking" for a reader — does it mean no vendor wait, or no lock at
+     all? Which one does the customer actually care about, and what goes wrong
+     on an RT kernel if a low-priority reader holds the lock the sampler needs?
+  6. Part 2: how much memory is 10 minutes? What is the worst-case fix rate,
+     and what happens when your buffer fills anyway?
+  7. Part 2: the fix in effect at (now - 10 min) is itself OLDER than 10
+     minutes. Do you evict it? What breaks if you do?
+  8. Part 2: distance over a range. Why is summing the segments too slow, and
+     what do you store per fix to make it two binary searches and a
+     subtraction? What happens to those stored values when you evict the tail?
+  9. GPS_ERROR returns instantly — what does your loop do so it is not a spin?
+     GPS_NO_FIX means what about the previously published fix? gps_now_us() is
+     wall clock and NTP can step it backwards: what does that do to a binary
+     search over timestamps, and how do you defend?
+ 10. Start-up and shutdown: what does a reader see before the first fix, and
+     why is taking that first sample on the caller's thread safe? How do you
+     stop a thread that is parked in a 100 ms vendor call, and what may a
+     getter do after deinit?

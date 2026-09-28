@@ -1,0 +1,166 @@
+Tailing a vendor event source that blocks forever — and shutting it down
+Practice problem — Verkada 1st-screening shape (Part 1 concurrency / Part 2 data structure)
+
+Files in this folder
+  question_note              this statement
+  evsrc.h                    vendor header (given; do not modify)
+  main.c                     test harness + fake vendor source (given; do not modify)
+  event_queue.h              the API the harness calls (you implement it)
+  event_queue.c              YOUR code — stub with TODOs
+  event_queue_solution.c     reference: bounded queue + condvar, ring of time buckets
+  main.sh                    ./main.sh | ./main.sh sol | ./main.sh fast [mine|sol]
+
+------------------------------------------------------------------------------
+Background
+
+A Verkada gateway sits on a customer site next to a third-party access-control
+and sensor bridge. The bridge is the only way to learn that a door opened, that
+a camera saw motion, that someone pried a housing open, or that a sensor went
+offline. Our software has to expose those events to everything else on the
+gateway: the uploader, the local rules engine, the health reporter.
+
+The vendor gives us three functions (evsrc.h):
+
+    struct Event { int type; uint32_t device_id; uint64_t timestamp; };
+        type       EV_MOTION / EV_DOOR / EV_TAMPER / EV_OFFLINE
+        timestamp  microseconds, same clock as ev_now_us()
+
+    int evsrc_read_blocking(struct Event *out);
+        0   an event, stored in *out
+       -1   transient vendor error, *out untouched, returns immediately
+       -2   the call was cut short by evsrc_wake()
+
+    void evsrc_wake(void);
+
+  read_next behaviour, in detail:
+
+    no timeout          There is no timeout argument and no non-blocking mode.
+                        On a quiet night this call sits there for minutes.
+    bursty              Events come in bursts: several within one millisecond,
+                        then a gap. You cannot poll your way out of this.
+    not thread-safe     The vendor keeps static state. Exactly ONE thread may
+                        ever be inside evsrc_read_blocking().
+    transient errors    -1 comes back instantly, so a bare retry loop spins a
+                        core at 100%.
+    evsrc_wake()        The one escape hatch, and you have to know to ask for
+                        it: it makes a pending read return -2. It LATCHES —
+                        after it is called every later read returns -2 too —
+                        and there is no un-wake. It exists for shutdown.
+
+  Time compression in the harness: real quiet periods are minutes; the fake
+  vendor uses 20-200 ms gaps (and one forced 2.5 s quiet period during the
+  shutdown test) so the whole run finishes in about 4 seconds.
+
+Blocking, single-threaded and untimed is unusable for the rest of the gateway,
+so wrap it in a non-blocking, thread-safe API.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1.  A non-blocking consumer API over a bounded queue.
+
+      int  evq_init(void);
+      void evq_deinit(void);
+      int  evq_try_pop(struct Event *out);                        /* 0 / -1 */
+      int  evq_pop_timed(struct Event *out, uint64_t timeout_us); /* 0 / -1 */
+      void evq_stats(struct EvqStats *out);
+
+    - try_pop never blocks and never touches the vendor.
+    - pop_timed blocks at most timeout_us; use a condvar, not a sleep-and-poll
+      loop. timeout_us == 0 must behave exactly like try_pop.
+    - The queue is BOUNDED (EVQ_CAPACITY, 16 in the harness). On overflow the
+      policy is explicit: drop the OLDEST event and count the drop in
+      evq_stats(). Silent loss is the thing being tested against.
+    - evq_deinit() must terminate cleanly even though the sampler thread is
+      parked inside evsrc_read_blocking() with no timeout. How do you stop a
+      thread that is blocked in a call that has no timeout? Answer that out
+      loud before you write it. Also: what happens to a consumer that is
+      asleep in evq_pop_timed() when you shut down? deinit must be idempotent.
+
+Part 2.  Time-bucketed counting over the last 5 minutes.
+
+      uint32_t evq_count_since(int type, uint64_t since_us);
+
+    - "How many EV_TAMPER events since 90 seconds ago?" — the health reporter
+      asks this every second, for every type.
+    - Cost must be O(number of buckets), NOT O(number of events), and memory
+      must not grow with the event rate. A tamper storm on eight doors is
+      exactly when someone is querying.
+    - Counted at ingest: an event still counts even if the queue dropped it.
+      "What happened" and "what we processed" are different questions.
+    - Resolution is one bucket wide: the answer includes the whole bucket that
+      contains since_us. Rules: since_us in the future -> 0; since_us older
+      than the window -> clamp to the window start; unknown type -> 0.
+    - Reference answer: a ring of EVQ_NBUCKETS fixed-width buckets
+      (300 x 1 s) with EV_TYPE_COUNT counters each, advanced LAZILY on insert
+      (zero only the buckets you skipped, and memset the whole table if you
+      skipped more than a lap). Insert O(1), query a bounded loop, memory
+      fixed. ./main.sh fast rebuilds with 32 x 20 ms buckets so eviction and
+      the lazy advance actually run inside a 4-second test.
+
+------------------------------------------------------------------------------
+Expected behaviour  (what the harness PASS/FAILs — all against recorded ground
+truth, never hard-coded numbers)
+
+  - Empty state: the harness parks the vendor BEFORE evq_init(), so right
+    after init try_pop returns -1 without blocking, counts are 0, stats are 0,
+    and pop_timed(80 ms) returns -1 after about 80 ms.
+  - FIFO and no loss while the consumer keeps up: the popped sequence is
+    exactly the vendor's first N events, in order, strictly increasing
+    timestamps, and received == popped + dropped + depth at every check.
+  - Drop-oldest: the consumer stalls 700 ms with capacity 16, so drops really
+    happen; the survivors must be the NEWEST events and stats.dropped must
+    account for every missing one exactly.
+  - pop_timed: times out inside a loose band (150 ms measured as 135-500 ms),
+    pop_timed(0) returns at once, and a waiting call returns as soon as an
+    event lands rather than at the deadline.
+  - Part 2 vs brute force: counts for every type and EV_TYPE_ANY compared
+    against an O(events) scan of ground truth, plus bucket edges — since in
+    the future, since older than 5 minutes, since exactly on a bucket edge,
+    one microsecond before that edge, unknown type, and the empty state.
+  - Latency: 4000 count_since() calls must have a worst case far below the
+    vendor's blocking time; 3 readers hammering the getters for 1.2 s must see
+    no invented event, no event delivered twice, no FIFO violation, and a
+    worst-case getter latency under 50 ms.
+  - Shutdown: the harness forces a 2.5 s quiet period, waits 250 ms so the
+    sampler is definitely parked in the vendor call, then times evq_deinit().
+    It FAILS if the join takes more than 400 ms, if any event appears after
+    deinit returned, or if a second evq_deinit() is not a no-op.
+  - Last line is exactly "ALL CHECKS PASSED (0 failed)" or "N CHECK(S) FAILED",
+    and the exit status is non-zero when anything failed.
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for  (answer these on paper before coding)
+
+  1. Who calls evsrc_read_blocking(), and how many threads? Why exactly one,
+     and what are the two independent reasons?
+  2. What does "non-blocking" mean for a consumer here — never waits for the
+     vendor, or never takes a lock at all? Which one are you delivering, and
+     what is the worst case you are promising for try_pop?
+  3. Why a mutex + condvar rather than an atomic or a lock-free ring? What in
+     the API forces a condvar to exist?
+  4. The queue is bounded. What are the three honest overflow policies (block
+     the producer / drop newest / drop oldest), and what does each one do to a
+     gateway whose consumer has fallen behind? Why is blocking the producer the
+     worst choice when the producer is a vendor bridge?
+  5. How do you stop a thread that is parked in a call with no timeout? Write
+     the exact order of operations in evq_deinit(), and say what breaks if you
+     swap any two of them. What if evsrc_wake() had NOT latched — what race
+     appears between "set the flag" and "enter the read", and how would you
+     close it?
+  6. Part 2: how much memory does 5 minutes of history cost if you keep the
+     events, and what is the worst-case event rate? Now the same question for
+     buckets. Which number can you defend to a hardware team?
+  7. Part 2: query cost. Why is O(buckets) the right target, and what is the
+     price you pay for it? What does the caller lose, and how would you choose
+     the bucket width for a health reporter that polls once a second?
+  8. Part 2: who clears a stale bucket, and when? If the gateway saw nothing
+     for eight hours, what does the first event afterwards have to do — and why
+     is "zero every bucket you skipped" a latency bug you must cap?
+  9. A transient -1 comes back instantly. What do you do, and what happens to
+     your CPU budget if you do nothing? What if the vendor returns -1 forever —
+     is that visible to the consumer, and should it be?
+ 10. Lifetime: what does a consumer see between evq_init() and the first event?
+     Why must init NOT prime the state with one synchronous read? What must
+     try_pop and pop_timed do after evq_deinit(), and what must happen to a
+     consumer already asleep in pop_timed when deinit is called?

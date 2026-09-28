@@ -1,0 +1,202 @@
+Wi-Fi scan snapshot + AP ranking table  (GW31-E gateway)
+Practice problem 09 — Verkada 1st-screening shape (Part 1 concurrency / Part 2 data structure)
+
+Files in this folder
+  question_note           this statement
+  wifi.h                  vendor header (given; do not modify)
+  main.c                  test harness + fake radio (given; do not modify)
+  ap_table.h              the API the harness calls (you implement it)
+  ap_table.c              YOUR code — stub with TODOs
+  ap_table_solution.c     reference: 3-slot snapshot + refcount, hash map + min-heap
+  main.sh                 ./main.sh | ./main.sh sol | ./main.sh tsan
+
+------------------------------------------------------------------------------
+Background
+
+The GW31-E is a small Linux gateway that bridges battery sensors to LTE. It
+also carries a Wi-Fi radio, and it periodically scans for access points: the
+roaming logic wants to know which AP to associate with, the cloud agent
+uploads the neighbourhood for site surveys, and the local CLI prints it for
+installers. Several consumers, one radio.
+
+The vendor driver gives you this and nothing else:
+
+    struct ApInfo {
+        uint8_t bssid[6];   /* MAC of the AP — the only stable identity   */
+        char    ssid[33];   /* NUL-terminated, may be empty (hidden SSID) */
+        int8_t  rssi_dbm;   /* signal strength, e.g. -42                  */
+        uint8_t channel;
+    };
+
+    int wifi_scan(struct ApInfo *out, size_t max, size_t *found);
+
+  - BLOCKS for the whole scan: 100-300 ms on real hardware. There is no
+    "start scan / poll for result" pair. You get one blocking call.
+  - Fills up to `max` entries and sets *found to how many APs were SEEN,
+    0..40. The result length CHANGES on every scan: an empty scan (0 APs) is
+    a legal answer, not an error.
+  - *found may be LARGER than max. Only min(*found, max) entries were
+    written; reading past that is on you.
+  - Returns -1 if the radio is BUSY. On -1, `out` and `*found` are
+    unspecified — do not read them. -1 comes back immediately, not after a
+    delay.
+  - NOT thread-safe (static internal state). Exactly ONE caller, ever.
+
+    uint64_t wifi_now_us(void);   /* gettimeofday-based, NOT monotonic */
+
+  Harness scaling: the fake radio in main.c blocks 40-120 ms instead of
+  100-300 ms, and returns BUSY on every 7th call, so the whole run finishes
+  in about 6 s. Everything else behaves as described above.
+
+A blocking, single-caller, variable-length API is not something the rest of
+the daemon can call. Wrap it.
+
+------------------------------------------------------------------------------
+Tasks
+
+Part 1.  Publish the latest scan.
+
+    int    wifi_table_init(void);
+    void   wifi_table_deinit(void);
+    size_t wifi_get_snapshot(struct ApInfo *out, size_t max);
+
+  Any number of threads must be able to ask for the most recent COMPLETE
+  scan at any time. wifi_get_snapshot() must never block on the radio and
+  must never hand back a list stitched together from two different scans, or
+  a list whose count and contents disagree.
+
+  The thing that makes this different from "publish the latest float": the
+  published value is a VARIABLE-LENGTH COLLECTION — a count plus up to 40
+  entries, about 1.6 KB. One atomic word cannot carry it, and copying it
+  under a mutex makes every reader wait for every other reader.
+
+  Before you code, decide between:
+      (a) mutex + memcpy under the lock
+      (b) two or three preallocated buffers + an atomic "current" index +
+          a refcount (or seqlock-style validation)
+      (c) RCU-style: malloc a new buffer, swap the pointer, free the old one
+  and be able to say in one sentence why you rejected two of them.
+
+Part 2.  Which APs are worth connecting to.
+
+    void   wifi_table_observe(const struct ApInfo *aps, size_t n);
+    size_t wifi_top_k(struct ApEntry *out, size_t k);
+    int    wifi_lookup(const uint8_t bssid[6], struct ApEntry *out);
+    size_t wifi_table_count(void);
+    size_t wifi_table_dropped(void);
+
+    struct ApEntry {
+        uint8_t  bssid[6];
+        char     ssid[33];
+        float    rssi_smoothed;   /* EWMA, alpha = AP_EWMA_ALPHA = 1/4 */
+        uint32_t times_seen;
+        uint64_t last_seen_us;
+    };
+
+  Fold every scan into a table keyed by BSSID and answer two questions:
+    - wifi_top_k: the k strongest APs by SMOOTHED rssi, restricted to APs
+      seen within the last 5 minutes (AP_STALE_US), strongest first.
+    - wifi_lookup: one BSSID, O(1) average.
+
+  Constraints that pick the data structure for you:
+    - the key is 6 raw bytes, not an int and not a string
+    - k is small (1..16) and N is the whole table: do NOT sort all N
+    - entries expire on a 5-minute window, and there is no timer thread
+    - no malloc per AP if you can avoid it (embedded target)
+
+  Raw RSSI from a single scan swings 5-10 dB from multipath, so the ranking
+  must be built on the smoothed value, not the last sample. Say why an EWMA
+  beats "keep the last value" and beats "average the last N".
+
+------------------------------------------------------------------------------
+Expected behaviour (what the harness checks)
+
+  Part 1
+    - a snapshot is available immediately after init (init takes one scan
+      synchronously) and is byte-identical to the scan the radio produced
+    - NEVER torn: every AP in one scan carries the same generation tag in
+      its `channel` field, and the harness memcmp's your whole snapshot
+      against the exact bytes of that logged scan
+    - variable length is honoured: an empty scan (0 APs) and a full scan
+      (WIFI_MAX_APS) both come out correctly, and a small `max` is clamped
+    - the snapshot keeps advancing while scans keep coming (>= 10 distinct
+      generations observed in 2 s)
+
+  Part 2
+    - rssi_smoothed, times_seen, last_seen_us and ssid all match a
+      brute-force replay of every scan the radio ever returned
+    - top_k for k = 1, 3, 8, 40, 72 matches the reference ranking exactly,
+      including the tie-break rule; k = 0 returns 0
+    - TIE-BREAK RULE (documented, so the result is deterministic): equal
+      rssi_smoothed -> smaller BSSID first (memcmp ascending). Two APs in
+      the fake environment tie exactly, on purpose.
+    - lookup hits for a known BSSID, misses for an unknown one
+    - after the clock jumps past the 5-minute window: count == 0, lookup
+      misses, top_k returns nothing
+    - offered 1024 distinct APs into a 256-slot table: exactly 256 stored,
+      768 counted as dropped, the stored ones still found, the dropped ones
+      absent
+
+  Both
+    - 4 reader threads for 2 s against a live radio: no torn, invented or
+      misordered value, and lookups actually hit
+    - getter latency, measured alone: no call ever sits through a scan, and
+      over-2 ms calls are under 0.5% (scheduler noise, not design)
+    - after deinit the thread is gone: no further scan happens, and calling
+      deinit twice is safe
+
+  Last line is exactly "ALL CHECKS PASSED (0 failed)" or "N CHECK(S) FAILED".
+
+------------------------------------------------------------------------------
+Things the interviewer is listening for  (answer on paper before coding)
+
+  1. Why can't wifi_get_snapshot() just call wifi_scan()? Who calls it, how
+     many threads, and why exactly one?
+
+  2. The published value is 1.6 KB, not 8 bytes. Walk mutex+memcpy ->
+     double/triple buffer+refcount -> RCU pointer swap: what does each step
+     fix, and what does it cost? Where does the free() problem in the RCU
+     version actually live?
+
+  3. Why THREE buffers rather than two? Describe the case where two
+     buffers make the writer wait for a reader.
+
+  4. In the refcount scheme the reader pins the current slot and then
+     re-reads the current index. Why is that second read necessary? What
+     exactly goes wrong if you drop it?
+
+  5. Which memory orders do you need on the index and on the refcount, and
+     which pair of operations creates the happens-before edge that lets the
+     writer safely overwrite a slot? (Two edges: writer->reader and
+     reader->writer. Name both.)
+
+  6. Hash the 6-byte BSSID. Why not "use the last 4 bytes of the MAC"?
+     Open addressing vs chaining on an embedded target, and what is the
+     worst case for lookup when the table is saturated?
+
+  7. Top-k: why a size-k min-heap instead of sorting all N? Give both
+     complexities and both memory costs, and say why you cannot just sort
+     the hash table in place.
+
+  8. Expiry with no timer thread: what makes a stale entry invisible to
+     readers, and why is overwriting it in place safe when a real delete is
+     not? What happens when the table is full of LIVE entries?
+
+  9. Errors and lifetime: wifi_scan returns -1 — what do you do, and what
+     must you NOT read? What does a reader see before the first scan
+     finishes? wifi_now_us() is not monotonic — where does a backwards clock
+     step hurt, and how do you keep it from looking like "everything
+     expired"?
+
+ 10. Shutdown: the scanner thread is parked inside a 300 ms vendor call.
+     How do you stop it, how long does deinit take, and why can't you just
+     pthread_cancel() it? Should the table stay readable afterwards?
+
+------------------------------------------------------------------------------
+Build
+
+  ./main.sh          main.c + ap_table.c            (your code)
+  ./main.sh sol      main.c + ap_table_solution.c   (reference)
+  ./main.sh tsan     reference under -fsanitize=thread
+
+  cc -std=c11 -O2 -Wall -Wextra -pthread   (macOS clang and Linux gcc)
