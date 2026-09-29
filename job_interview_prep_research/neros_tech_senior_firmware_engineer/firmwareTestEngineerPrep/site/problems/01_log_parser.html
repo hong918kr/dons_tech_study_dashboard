@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>01 · UART 로그 파서 — 레벨 집계 · 에러 추출 · 테스트 결과 요약</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="problems/01_log_parser">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">Python 코딩 문제 · 01 · UART 로그 파서 — 레벨 집계 · 에러 추출 · 테스트 결과 요약</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">Python 코딩 문제 · Python Problems</div>
+      <h1>🐍 01 · UART 로그 파서 — 레벨 집계 · 에러 추출 · 테스트 결과 요약</h1>
+      <div class="meta"><span>6분 읽기</span><span>83줄</span><span>9개 절</span></div>
+    </div>
+    <blockquote><p>DUT가 UART로 뱉은 부트·테스트 로그를 정규식으로 파싱해서 레벨별 개수, 에러 목록, 첫 FAIL 시각, 테스트별 최종 결과를 뽑는다. 노이즈 섞인 줄에 죽지 않는 게 핵심. <code>re</code> · <code>Counter</code> · <code>dict</code>.</p></blockquote>
+<h2 id="왜-나오나">왜 나오나<a class="anchor" href="#왜-나오나" aria-label="link">#</a></h2>
+<ul><li>JD: "Monitor the test results and ensure the stability of builds before releases", "Strong development skills with a scripting language (e.g. Python) for test automation"</li><li>HIL 테스트 결과의 1차 데이터는 대부분 <strong>DUT 시리얼 로그</strong>다. 로그에서 PASS/FAIL과 에러를 뽑아 CI 리포트로 올리는 코드는 테스트 엔지니어가 가장 먼저 짜는 것</li><li>Python 라이브 코딩 첫 문제로 가장 흔한 유형: 문자열 파싱 + dict/Counter 집계. 15분 안에 깔끔하게 끝내는 게 목표</li></ul>
+<h2 id="문제">문제<a class="anchor" href="#문제" aria-label="link">#</a></h2>
+<blockquote><p>"Here's a chunk of serial log from our flight controller during a HIL run. Write a function that summarizes it: how many lines per log level, the list of errors with timestamp and module, the timestamp of the first failing test, and the final result of each test. The UART sometimes gives us garbage, so don't crash on bad lines."</p></blockquote>
+<p>로그 한 줄 형식:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[  1.502000] ERROR imu: WHO_AM_I mismatch 0x00
+[  2.100000] TEST  imu_selftest FAIL</code></pre></figure>
+<ul><li><code>[ts]</code> — 부팅 후 초 (float, 앞에 공백 패딩)</li><li>LEVEL — <code>DEBUG</code> / <code>INFO</code> / <code>WARN</code> / <code>ERROR</code> / <code>TEST</code></li><li>ERROR 줄의 나머지 = <code>module: message</code></li><li>TEST 줄의 나머지 = <code>test_name PASS|FAIL</code></li></ul>
+<p><code>summarize(lines)</code>가 <code>counts</code>, <code>errors</code>, <code>first_fail</code>, <code>tests</code>, <code>malformed</code> 키를 가진 dict를 반환한다. 같은 테스트가 재시도로 여러 번 나오면 <strong>마지막 결과</strong>를 쓴다.</p>
+<h2 id="예시">예시<a class="anchor" href="#예시" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">python</span><pre><code>&gt;&gt;&gt; s = summarize(SAMPLE)
+&gt;&gt;&gt; s["errors"]
+[(1.502, 'imu', 'WHO_AM_I mismatch 0x00'), (3.5, 'rx', 'failsafe entered')]
+&gt;&gt;&gt; s["first_fail"]
+2.1
+&gt;&gt;&gt; s["tests"]
+{'imu_selftest': 'PASS', 'baro_read': 'PASS'}   # imu_selftest는 FAIL 후 재시도 PASS</code></pre></figure>
+<h2 id="엣지-케이스">엣지 케이스<a class="anchor" href="#엣지-케이스" aria-label="link">#</a></h2>
+<ul><li>빈 줄 → 무시 (malformed 아님)</li><li><code>garbage\x00\xff ...</code> 같은 UART 노이즈, <code>[  2.9000</code>처럼 잘린 줄 → <code>malformed += 1</code>, 계속 진행</li><li>TEST 레벨인데 결과 토큰이 없음 → malformed</li><li>ERROR 줄인데 <code>module:</code> 형식이 아님 → module <code>"?"</code>로 두고 메시지 보존</li><li>입력이 빈 리스트 → counts 비어 있음, first_fail <code>None</code></li></ul>
+<h2 id="힌트">힌트<a class="anchor" href="#힌트" aria-label="link">#</a></h2>
+<ol><li>줄 하나를 <code>^\[\s*(ts)\]\s+(LEVEL)\s+(rest)$</code> 로 먼저 쪼갠다. named group(<code>(?P&lt;ts&gt;...)</code>)을 쓰면 <code>m["ts"]</code>로 읽혀서 가독성이 좋다</li><li>정규식은 모듈 레벨에서 <code>re.compile</code> 한 번. 레벨별 세부 파싱(TEST, ERROR)은 두 번째 정규식으로 분리</li><li><code>first_fail</code>은 <code>if ... and first_fail is None:</code> 한 줄. <code>tests[name] = result</code>는 덮어쓰기라서 자동으로 "마지막 결과"가 된다</li></ol>
+<h2 id="풀이-해설">풀이 해설<a class="anchor" href="#풀이-해설" aria-label="link">#</a></h2>
+<ul><li><strong>2단 파싱</strong>: 공통 헤더(<code>[ts] LEVEL</code>)와 레벨별 본문을 분리한다. 로그 포맷이 바뀌면 한 곳만 고치면 된다</li><li><strong>죽지 않는 파서</strong>: 매치 실패 = <code>continue</code>. 실제 HIL에서는 전원 사이클이나 baud 불일치 때 노이즈가 섞이므로, 예외를 던지면 테스트 전체가 무너진다. 대신 <code>malformed</code> 개수를 <strong>메트릭으로 남긴다</strong>. 이 값이 갑자기 늘면 그 자체가 신호(케이블, 접지, baud 문제)</li><li><strong>복잡도</strong>: 줄 수 N에 대해 O(N) 시간. 메모리는 에러 목록과 테스트 수에 비례</li><li><strong>흔한 실수</strong></li><li><code>float("  1.5")</code>는 되지만 <code>[\s*</code>를 빼먹으면 패딩 때문에 매치 실패</li><li><code>line.split()</code>만으로 파싱하면 메시지 안의 공백·콜론에서 깨짐 → 정규식이나 <code>split(maxsplit=...)</code></li><li><code>first_fail</code>을 매번 덮어써서 "마지막 FAIL"이 되는 실수</li><li><code>\x00</code>이 섞인 bytes를 decode할 때 <code>errors="replace"</code>를 안 줘서 UnicodeDecodeError (실제 시리얼에서는 <code>raw.decode("utf-8", errors="replace")</code>)</li></ul>
+<h2 id="말하면서-풀기">말하면서 풀기<a class="anchor" href="#말하면서-풀기" aria-label="link">#</a></h2>
+<ul><li>"I'll split the parsing into two layers: a common header regex for timestamp and level, and then a per-level parser. That way a format change only touches one place."</li><li>"Bad lines shouldn't fail the run. I'll count them as malformed and keep going. That count is also a useful health metric for the serial link."</li><li>"For test results I'll just overwrite in a dict, so a retried test naturally reports its last result. If we care about flakiness, I'd keep the full history instead."</li></ul>
+<h2 id="꼬리-질문">꼬리 질문<a class="anchor" href="#꼬리-질문" aria-label="link">#</a></h2>
+<ul><li>로그가 수 GB라면? → 파일을 줄 단위로 스트리밍(<code>for line in f</code>), 제너레이터로 파이프라인 구성, 결과만 누적</li><li>재시도로 PASS가 됐는데 이걸 PASS로 봐도 되나? → 리포트에서는 "passed on retry"를 따로 표시해 <strong>flaky 후보</strong>로 추적해야 한다 (문제 07과 연결)</li><li>이 결과를 GitLab CI에 어떻게 보여주나? → JUnit XML로 변환해서 <code>artifacts:reports:junit</code></li><li>타임스탬프가 재부팅으로 0으로 돌아가면? → 단조 증가가 깨지는 지점을 부팅 경계로 보고 세션을 나눈다</li><li>여러 DUT 로그가 한 스트림에 섞이면? → 줄마다 DUT ID prefix를 붙이거나 포트별로 따로 읽는다</li></ul>
+<h2 id="파일">파일<a class="anchor" href="#파일" aria-label="link">#</a></h2>
+<ul><li><a href="../code/01_log_parser_starter.html">starter</a> · <a href="../code/01_log_parser_solution.html">모범답안</a></li><li>채점: <code>python3 python/run.py 01</code> (내 풀이) · <code>python3 python/run.py 01 --sol</code> (답안)</li></ul>
+    <div class="nav"><a class="next" href="02_crsf_frame_parser.html"><span class="dir">다음 →</span><span class="nm">02 · CRSF 프레임 파서 — 스트리밍 · CRC-8 · resync</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#왜-나오나">왜 나오나</a></li><li class="l2"><a href="#문제">문제</a></li><li class="l2"><a href="#예시">예시</a></li><li class="l2"><a href="#엣지-케이스">엣지 케이스</a></li><li class="l2"><a href="#힌트">힌트</a></li><li class="l2"><a href="#풀이-해설">풀이 해설</a></li><li class="l2"><a href="#말하면서-풀기">말하면서 풀기</a></li><li class="l2"><a href="#꼬리-질문">꼬리 질문</a></li><li class="l2"><a href="#파일">파일</a></li></ol></aside>
+</div><script>
+const KEY='neros_fte_notes_read_v1', TKEY='neros_fte_notes_theme', CKEY='neros_fte_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

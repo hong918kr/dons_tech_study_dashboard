@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>02 · CRSF 프레임 파서 — 스트리밍 · CRC-8 · resync</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="problems/02_crsf_frame_parser">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">Python 코딩 문제 · 02 · CRSF 프레임 파서 — 스트리밍 · CRC-8 · resync</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">Python 코딩 문제 · Python Problems</div>
+      <h1>🐍 02 · CRSF 프레임 파서 — 스트리밍 · CRC-8 · resync</h1>
+      <div class="meta"><span>8분 읽기</span><span>91줄</span><span>9개 절</span></div>
+    </div>
+    <blockquote><p>ExpressLRS 수신기가 FC로 보내는 CRSF 프레임을, 아무렇게나 잘려 들어오는 바이트 스트림에서 뽑아낸다. CRC-8/DVB-S2 검증, 깨진 프레임에서 1바이트씩 resync, 그리고 16채널 11-bit RC 값 언패킹까지.</p></blockquote>
+<h2 id="왜-나오나">왜 나오나<a class="anchor" href="#왜-나오나" aria-label="link">#</a></h2>
+<ul><li>JD Nice-to-have: "FPV Drone software including Betaflight, <strong>ExpressLRS</strong>", "Experience testing RF products"</li><li>JD 필수: "Familiarity with embedded communication protocols — e.g. I2C, SPI, <strong>UART</strong>"</li><li>HIL에서 테스트 PC는 <strong>가짜 RC 수신기 역할</strong>을 한다. Python이 CRSF 프레임을 만들어 FC UART로 넣고(스틱 입력 주입), FC가 돌려주는 텔레메트리 프레임을 파싱한다. 이 문제는 그 인코더/디코더의 핵심</li><li>"바이트 스트림 → 프레임" 파서는 임베디드 테스트 면접의 단골. bytes/bytearray, 비트 연산, 상태 관리를 한 번에 본다</li></ul>
+<h2 id="문제">문제<a class="anchor" href="#문제" aria-label="link">#</a></h2>
+<blockquote><p>"Our receiver talks CRSF over UART. Write a parser that takes chunks of bytes as they arrive and returns complete, CRC-valid frames. Chunks can split a frame anywhere, and the line can have garbage. If a frame is corrupted, recover and keep going. Then decode the RC channels frame."</p></blockquote>
+<p>프레임 구조 (Betaflight <code>rx/crsf.c</code>, ExpressLRS 문서 기준):</p>
+<div class="tw"><table><thead><tr><th>필드</th><th>크기</th><th>설명</th></tr></thead><tbody><tr><td>sync / address</td><td>1</td><td>FC 방향은 <code>0xC8</code>. 그 외 <code>0xEA</code>(radio), <code>0xEE</code>(TX module), <code>0xEC</code>(receiver)</td></tr><tr><td>length</td><td>1</td><td>뒤따르는 바이트 수 = type + payload + crc = N + 2</td></tr><tr><td>type</td><td>1</td><td><code>0x16</code> RC_CHANNELS_PACKED, <code>0x14</code> LINK_STATISTICS, <code>0x08</code> BATTERY_SENSOR 등</td></tr><tr><td>payload</td><td>N</td><td>타입별</td></tr><tr><td>crc</td><td>1</td><td>CRC-8/DVB-S2 (poly <code>0xD5</code>, init 0) over <strong>type + payload</strong></td></tr></tbody></table></div>
+<ul><li>전체 프레임은 최대 64바이트 → length 최대 62</li><li>RC_CHANNELS_PACKED payload = 22바이트 = 16채널 × 11bit, <strong>LSB-first little-endian 비트 패킹</strong></li><li>채널 값 범위 172~1811, 중앙 992. µs로는 대략 988~2012, 992 → 1500µs</li></ul>
+<p>구현할 것: <code>crc8_dvb_s2(data)</code>, <code>build_frame(type, payload)</code>, <code>CrsfParser.feed(chunk) -&gt; [(addr, type, payload)]</code>, <code>unpack_rc_channels(payload) -&gt; [16 ints]</code></p>
+<h2 id="예시">예시<a class="anchor" href="#예시" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">python</span><pre><code>&gt;&gt;&gt; f = build_frame(0x14, b"\x01\x02\x03")
+&gt;&gt;&gt; f.hex(" ")
+'c8 05 14 01 02 03 ..'          # len = 3 + 2 = 5, 마지막은 CRC
+&gt;&gt;&gt; p = CrsfParser()
+&gt;&gt;&gt; p.feed(f[:3]); p.feed(f[3:])
+[]
+[(200, 20, b'\x01\x02\x03')]
+&gt;&gt;&gt; crc8_dvb_s2(b"123456789") == 0xBC   # 표준 check 값으로 CRC 구현 검증
+True</code></pre></figure>
+<h2 id="엣지-케이스">엣지 케이스<a class="anchor" href="#엣지-케이스" aria-label="link">#</a></h2>
+<ul><li>한 바이트씩 들어와도 결과가 같아야 한다 (chunk 경계 독립성)</li><li>앞에 쓰레기 바이트 → 버리고 <code>dropped</code>로 센다</li><li>sync는 맞는데 length가 0, 1, 63 이상 → 가짜 sync로 보고 1바이트 drop</li><li>CRC 불일치 → <strong>프레임 전체가 아니라 sync 1바이트만</strong> 버리고 재탐색. 깨진 "프레임" 안에 진짜 프레임 시작이 들어 있을 수 있다</li><li>프레임 뒤쪽이 아직 안 왔으면 버퍼에 남겨 두고 다음 <code>feed</code>를 기다린다</li><li>payload 안에 <code>0xC8</code>이 들어 있어도 문제없다 (length로 경계를 정하므로)</li></ul>
+<h2 id="힌트">힌트<a class="anchor" href="#힌트" aria-label="link">#</a></h2>
+<ol><li>내부에 <code>bytearray</code> 버퍼 하나. <code>feed</code>는 붙이고 → <code>while len(buf) &gt;= 2:</code> 루프로 가능한 만큼 뽑는다</li><li>루프 한 바퀴에서 결정은 네 가지뿐: (a) 헤더가 이상함 → drop 1 (b) 아직 다 안 옴 → break (c) CRC 틀림 → drop 1 (d) 성공 → 프레임 떼어 냄</li><li>11bit 언패킹은 <code>int.from_bytes(payload, "little")</code>로 176bit 정수 하나를 만들면 <code>(v &gt;&gt; 11*i) &amp; 0x7FF</code> 한 줄. C처럼 바이트 경계를 계산할 필요가 없다 — Python 정수는 임의 정밀도</li></ol>
+<h2 id="풀이-해설">풀이 해설<a class="anchor" href="#풀이-해설" aria-label="link">#</a></h2>
+<ul><li><strong>상태 = 버퍼 하나</strong>: 별도의 FSM enum 없이 "버퍼 맨 앞이 항상 프레임 후보"라는 불변식 하나로 끝난다. 후보가 틀렸으면 맨 앞 1바이트를 버린다</li><li><strong>왜 1바이트만 버리나</strong>: 노이즈로 가짜 <code>0xC8</code>이 잡혔을 때 length만큼 통째로 버리면, 그 구간에 걸쳐 있던 진짜 프레임까지 잃는다. 1바이트 drop은 최악이 O(N·L)이지만 L ≤ 64라 사실상 O(N)</li><li><strong>CRC 범위</strong>: sync와 length는 CRC에 <strong>포함되지 않는다</strong> (type부터 payload 끝까지). 여기서 틀리는 사람이 많다</li><li><strong>CRC-8/DVB-S2 검증법</strong>: 구현 후 <code>b"123456789"</code> → <code>0xBC</code>인지 확인. 표준 CRC 카탈로그의 check 값이라, 면접에서 "어떻게 CRC 구현이 맞는지 아나?"에 대한 답이 된다</li><li><strong>µs 변환</strong>: <code>(t - 992) * 5/8 + 1500</code>. 172 → 988, 992 → 1500. 1811은 이 식으로 ≈2012 (Betaflight 코드는 약간 다른 계수를 쓴다 [추정])</li><li><strong>흔한 실수</strong></li><li><code>del buf[:n+2]</code> 대신 <code>buf = buf[n+2:]</code>로 매번 새 객체 생성 (동작은 하지만 느림)</li><li><code>&amp; 0xFF</code>를 빼서 CRC가 8bit를 넘어감 — Python 정수는 오버플로가 없다</li><li>버퍼가 부족할 때 <code>break</code> 대신 drop 해 버려서 chunk 경계에서 프레임을 잃음</li></ul>
+<h2 id="말하면서-풀기">말하면서 풀기<a class="anchor" href="#말하면서-풀기" aria-label="link">#</a></h2>
+<ul><li>"I'll keep a bytearray buffer, and the invariant is that the head of the buffer is always a frame candidate. Each loop iteration either rejects one byte, waits for more data, or pops a full frame."</li><li>"On a CRC failure I only drop one byte, not the whole frame, because a real frame header could be inside the corrupted region."</li><li>"To validate my CRC implementation, I'd check it against the standard check value: CRC-8/DVB-S2 of the ASCII string 123456789 is 0xBC."</li><li>"For the 11-bit channels, Python integers are arbitrary precision, so I'll load all 22 bytes as one little-endian integer and shift out 11 bits at a time."</li></ul>
+<h2 id="꼬리-질문">꼬리 질문<a class="anchor" href="#꼬리-질문" aria-label="link">#</a></h2>
+<ul><li>이걸 HIL에서 어떻게 쓰나? → 테스트 PC가 USB-UART로 FC의 RX 포트에 붙어서 <code>build_frame(0x16, pack_rc_channels(sticks))</code>를 약 50~500Hz로 보냄. 스틱을 움직였을 때 FC가 arm/모터 출력을 기대대로 바꾸는지 검증 [추정: 실제 레이트는 ELRS 패킷 레이트 설정에 따라 다름]</li><li>RC 프레임을 <strong>안 보내면</strong> FC는? → failsafe 진입해야 한다. "링크 끊김 → N ms 안에 failsafe" 테스트가 대표적인 HIL 케이스</li><li>CRC 에러율을 링크 품질 메트릭으로 쓸 수 있나? → 유선 UART에서 CRC 에러가 0이 아니면 baud 불일치·배선·접지 문제. 무선 쪽 품질은 LINK_STATISTICS(0x14)의 LQ/RSSI로 본다</li><li>성능이 문제라면? → 파이썬 바이트 루프는 느리므로 <code>bytes.find(0xC8)</code>로 다음 sync까지 한 번에 점프, 또는 CRC 테이블(256 entry) 사용</li><li>CRSF baud는? → Betaflight 기본 420000 baud, ELRS는 더 높게도 설정 가능 [추정]</li></ul>
+<h2 id="파일">파일<a class="anchor" href="#파일" aria-label="link">#</a></h2>
+<ul><li><a href="../code/02_crsf_frame_parser_starter.html">starter</a> · <a href="../code/02_crsf_frame_parser_solution.html">모범답안</a></li><li>채점: <code>python3 python/run.py 02</code> (내 풀이) · <code>python3 python/run.py 02 --sol</code> (답안)</li></ul>
+    <div class="nav"><a class="prev" href="01_log_parser.html"><span class="dir">← 이전</span><span class="nm">01 · UART 로그 파서 — 레벨 집계 · 에러 추출 · 테스트 결과 요약</span></a><a class="next" href="03_msp_codec.html"><span class="dir">다음 →</span><span class="nm">03 · MSP v1 코덱 — Betaflight에 명령 보내고 자세(attitude) 읽기</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#왜-나오나">왜 나오나</a></li><li class="l2"><a href="#문제">문제</a></li><li class="l2"><a href="#예시">예시</a></li><li class="l2"><a href="#엣지-케이스">엣지 케이스</a></li><li class="l2"><a href="#힌트">힌트</a></li><li class="l2"><a href="#풀이-해설">풀이 해설</a></li><li class="l2"><a href="#말하면서-풀기">말하면서 풀기</a></li><li class="l2"><a href="#꼬리-질문">꼬리 질문</a></li><li class="l2"><a href="#파일">파일</a></li></ol></aside>
+</div><script>
+const KEY='neros_fte_notes_read_v1', TKEY='neros_fte_notes_theme', CKEY='neros_fte_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

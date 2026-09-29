@@ -1,6 +1,7 @@
 # Neros Technologies — Senior Firmware Engineer, Platform · Context
 
-> **최종 갱신**: 2026-09-27 · **상태**: 📞 포지션 전환 제안 · Firmware Test Engineer HM 30분 일정 조율
+> **최종 갱신**: 2026-09-29 · **상태**: 💻 Firmware Test Engineer HM **45분** — 2026-10-01(목)
+> 📚 준비 자료: `firmwareTestEngineerPrep/site/index.html` (게임 플랜 → 노트 → Python 문제 11개). 리크루터: Python 질문 나옴
 > 🔀 **2026-09-27: Talent Coordinator Jazmin Vu 메일 — "Firmware Test Engineer" 포지션으로 다음 단계(HM 30분 Microsoft Teams) 진행.** 가능 날짜 4개 이상 + 시간대를 링크로 제출 요청. 원래 트랙(Principal/Senior Embedded SWE)이 아니라 **테스트 포지션($145.5–204K)** 이라는 점이 핵심 → §8 참고
 > ~~⏳ 2026-09-18(금) Adam Kibit 45분 기술 인터뷰 완료 → 09-25 현재 1주째 연락 없음 → Devin에게 follow-up~~ (09-27 결과 도착: 위 전환). 준비 자료: `2026-09-18_adam_interview_D-6h_prep.md`, `neros_hm_adam_technical_prep_2026-09-18.md`
 > **JD**: https://job-boards.greenhouse.io/nerostechnologies/jobs/5195308007 · **위치**: Torrance, CA / onsite [추정] · **연봉 밴드**: $195,000 – $273,000 base + equity
@@ -319,6 +320,8 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 | 2026-09-22 | 결과 대기 · 연락 없음 | 인터뷰 후 영업일 2일째. 09-24(목)까지 무소식이면 리크루터 Devin에게 follow-up 예정 |
 | 2026-09-25 | **1주째 무소식 → Devin에게 follow-up 메일 작성** | 인터뷰 후 정확히 1주(영업일 5일). 답이 없으면 다음 주 수요일(09-30)쯤 한 번 더 확인 |
 | 2026-09-27 | **🔀 Firmware Test Engineer로 전환 제안 — HM 30분 Teams 인터뷰** | Talent Coordinator **Jazmin Vu** 메일. "move you forward … for the Firmware Test Engineer position", HM과 30분 Microsoft Teams, 날짜 4개 이상 + 시간대 제출 요청. Greenhouse JD 4941340007 (updated 2026-09-24), base $145.5–204K. 원래 트랙 결과(불합격/보류)는 메일에 언급 없음 → 확인 필요 |
+| 2026-09-28 | **HM 인터뷰 2026-10-01(목) 확정 · 준비 사이트 생성** | 리크루터: **Python 질문 나옴**. `firmwareTestEngineerPrep/` — 게임 플랜 1 · 노트 7 (JD 해설, HIL, Python, pytest, CI/Git, 프로토콜·드론 스택, 스토리·영어) · Python 문제 11 (starter/답안, 70테스트 PASS). 보기: `firmwareTestEngineerPrep/site/index.html` |
+| 2026-09-29 | **HM 인터뷰 길이 45분으로 확인** | 초대 메일의 30분 → 실제 45분. Python 라이브 코딩(15~20분)이 들어갈 여유가 생김 → 준비 배분에서 코딩 비중 상향 |
 
 ---
 
@@ -348,7 +351,7 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 | 공고 | **Firmware Test Engineer** — Greenhouse 4941340007, updated 2026-09-24 [17] |
 | 위치 | Torrance, CA (onsite) [17] |
 | 연봉 밴드 | **$145,500 – $204,000 base** + equity [17]. Platform 공고($195–273K)보다 약 $50–70K 낮음 |
-| 다음 라운드 | HM 30분 Microsoft Teams [확인됨 2026-09-27 Jazmin Vu 메일]. HM 이름은 아직 모름 |
+| 다음 라운드 | ~~HM 30분~~ → **HM 45분** Microsoft Teams, 2026-10-01(목) [확인됨 2026-09-29 Don]. 초대 메일엔 30분이었음. HM 이름은 아직 모름 |
 | 조직 추정 | Firmware 조직 안의 테스트/HIL 담당. Adam 산하일 가능성, 또는 조직도에 있던 **HIL Firmware Engineer (12y)** 가 HM일 가능성 [추정] |
 
 **업무**: 드론·GCS 소프트웨어 자동화 테스트 스위트 개발/유지 · 테스트 프레임워크·툴 구축 · **CI/CD에 테스트 통합** · 릴리즈 전 빌드 안정성 모니터링 · 커버리지·테스트 모범사례 · 테스트 문서화 [17]
@@ -389,7 +392,7 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 **Jazmin 회신 초안 (영어)**
 > Hi Jazmin, thank you — happy to move forward! Before I send my availability, could you share a bit more context? (1) Who is the hiring manager for the Firmware Test Engineer role? (2) Is my candidacy for the Senior/Principal Embedded Software Engineer role still active, or has it been transitioned to this position? (3) Is this role scoped at the senior level, and is the posted $145.5K–$204K the full range? I'll submit my availability through the link shortly. Thanks again! — Don
 
-### 8.5 30분 HM 콜 준비
+### 8.5 HM 콜 준비 (45분)
 - **Tell me about yourself (테스트 버전, 60초)**: "7 years of embedded C firmware, and through all of it I've built the test infrastructure around real hardware — a Python test-platform SDK that ran chamber reliability tests on many SSDs over UART, a chip reliability system covering NAND and PCIe 3/4/5, and now at Apple the factory test-node architecture for RF chipset integration. I'm a firmware engineer who builds HIL, so I can read the code under test, not just the test results."
 - **핵심 스토리 3개**: ① 챔버 테스트 플랫폼 SDK (HIL, Python API, 다른 엔지니어가 사용) ② Apple factory test-node — MP 전에 latent defect를 찾는 stress 시나리오 ③ SK hynix reliability system — 고속 인터페이스 커버리지
 - **예상 질문**
