@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>객체 풀 (acquire / release + placement new) — 모범답안</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body>
+<div class="top"><div class="top-in">
+  <a class="home" href="../coding.html">← 코딩 세션</a>
+  <span class="t">객체 풀 (acquire / release + placement new) · 모범답안</span>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap"><main>
+  <div class="hero">
+    <div class="kicker">coding/solutions/21_object_pool.cpp</div>
+    <h1>객체 풀 (acquire / release + placement new) — 모범답안</h1>
+    <div class="meta"><span>539줄</span><span>C11</span><span>make sol N=21</span></div>
+  </div>
+  <figure class="code"><span class="lang">cpp</span><pre><code>/* 21_object_pool.cpp — 고정 풀 + placement new (모범답안)
+ *
+ *   make sol N=21
+ *
+ * 빌드: c++ -std=c++17 -Wall -Wextra -O2 -g -fno-exceptions -fno-rtti
+ *
+ * 04_mem_pool.c 와의 차이
+ *   - 04는 "정해진 크기의 raw 블록"을 빌려준다. 생성자·소멸자 개념이 없다.
+ *   - 21은 "T 타입의 객체"를 빌려준다. acquire 가 생성자를, release 가 소멸자를 호출한다.
+ *   - 그래서 21은 어떤 슬롯이 살아 있는지 알아야 한다. 풀이 파괴될 때 남아 있는
+ *     객체의 소멸자를 대신 돌려 주는 것이 04에는 없는 책임이다.
+ *   - free list 자체는 04와 같다. 자유 슬롯 안에 next 포인터를 넣는 intrusive list.
+ *
+ * 해설: notes/L3_embedded_cpp.md §5, §7
+ */
+
+#include &lt;cassert&gt;
+#include &lt;cstddef&gt;
+#include &lt;cstdint&gt;
+#include &lt;cstdio&gt;
+#include &lt;new&gt;
+#include &lt;type_traits&gt;
+#include &lt;utility&gt;
+
+/* ------------------------------------------------------------------ */
+/* 1. release 결과 코드 (04의 POOL_OK/FOREIGN/DOUBLE 와 같은 뜻)       */
+/* ------------------------------------------------------------------ */
+
+enum class Release : int {
+    Ok = 0,        /* 정상 반납. 소멸자가 호출됐다 */
+    Foreign = -1,  /* 이 풀의 객체가 아니다 */
+    DoubleFree = -2 /* 이미 반납된 슬롯이다 */
+};
+
+/* ------------------------------------------------------------------ */
+/* 2. object_pool&lt;T, N&gt;                                                */
+/* ------------------------------------------------------------------ */
+
+template &lt;typename T, std::size_t N&gt;
+class object_pool {
+    static_assert(N &gt; 0u, "용량 0인 풀은 의미가 없다");
+
+    /* 자유 슬롯일 때는 next 링크, 사용 중일 때는 T의 저장소.
+     * union 이므로 사용 중인 객체의 메타데이터 오버헤드는 0바이트다. */
+    union Slot {
+        Slot *next;
+        alignas(T) unsigned char storage[sizeof(T)];
+    };
+
+    static_assert(sizeof(Slot) &gt;= sizeof(T), "슬롯이 T를 담아야 한다");
+    static_assert(alignof(Slot) &gt;= alignof(T), "슬롯 정렬이 T의 요구를 만족해야 한다");
+
+public:
+    using value_type = T;
+
+    object_pool() noexcept
+    {
+        for (std::size_t i = 0u; i + 1u &lt; N; ++i) {
+            slots_[i].next = &amp;slots_[i + 1u];
+            live_[i] = false;
+        }
+        slots_[N - 1u].next = nullptr;
+        live_[N - 1u] = false;
+        free_head_ = &amp;slots_[0];
+    }
+
+    /* 남아 있는 객체를 전부 파괴한다. 반납을 잊은 코드가 있어도 소멸자는 돈다. */
+    ~object_pool() { destroy_all(); }
+
+    /* 풀은 주소로 식별되는 자원이다. 복사·이동하면 이미 배급된 포인터가
+     * 엉뚱한 풀을 가리키게 된다. 전부 금지한다. */
+    object_pool(const object_pool &amp;) = delete;
+    object_pool &amp;operator=(const object_pool &amp;) = delete;
+    object_pool(object_pool &amp;&amp;) = delete;
+    object_pool &amp;operator=(object_pool &amp;&amp;) = delete;
+
+    /* --- 배급 --- */
+
+    /* 자유 슬롯 하나에 T를 생성해서 돌려준다. 비었으면 nullptr.
+     * 인자는 그대로 T의 생성자에 전달된다(복사/이동 오버헤드 없음). O(1). */
+    template &lt;typename... Args&gt;
+    T *acquire(Args &amp;&amp;...args)
+    {
+        if (free_head_ == nullptr) {
+            return nullptr; /* 예외를 못 던지므로 nullptr 이 유일한 통로다 */
+        }
+        Slot *s = free_head_;
+        free_head_ = s-&gt;next; /* 링크를 먼저 떼어낸다 — storage를 덮기 전에! */
+
+        T *obj = ::new (static_cast&lt;void *&gt;(s-&gt;storage)) T(std::forward&lt;Args&gt;(args)...);
+
+        const std::size_t idx = index_of_slot(s);
+        live_[idx] = true;
+        ++used_;
+        if (used_ &gt; high_water_) {
+            high_water_ = used_;
+        }
+        return obj;
+    }
+
+    /* 소멸자를 호출하고 슬롯을 free list 앞에 다시 끼운다. O(1). */
+    Release release(T *p)
+    {
+        if (p == nullptr) {
+            return Release::Ok; /* no-op */
+        }
+        const std::size_t idx = index_of(p);
+        if (idx == N) {
+            return Release::Foreign; /* 범위 밖 · 슬롯 중간 주소 */
+        }
+        if (!live_[idx]) {
+            return Release::DoubleFree; /* 상태를 하나도 바꾸지 않는다 */
+        }
+
+        p-&gt;~T(); /* 소멸자 먼저. 그 다음에 저장소를 링크로 재사용한다 */
+
+        live_[idx] = false;
+        slots_[idx].next = free_head_;
+        free_head_ = &amp;slots_[idx];
+        --used_;
+        return Release::Ok;
+    }
+
+    /* 살아 있는 객체를 인덱스 역순으로 전부 파괴한다(생성 역순에 가까운 순서). */
+    void destroy_all() noexcept
+    {
+        for (std::size_t k = N; k != 0u; --k) {
+            const std::size_t i = k - 1u;
+            if (live_[i]) {
+                object_at(i)-&gt;~T();
+                live_[i] = false;
+                slots_[i].next = free_head_;
+                free_head_ = &amp;slots_[i];
+                --used_;
+            }
+        }
+    }
+
+    /* --- 조회 --- */
+    static constexpr std::size_t capacity() noexcept { return N; }
+    std::size_t used() const noexcept { return used_; }
+    std::size_t available() const noexcept { return N - used_; }
+    std::size_t high_water() const noexcept { return high_water_; }
+
+    /* 부수효과 없이 소유 여부만 판정한다. */
+    bool owns(const T *p) const noexcept { return index_of(p) != N; }
+
+    /* 살아 있는 객체 포인터. 없으면 nullptr. 진단·순회용. */
+    T *live_at(std::size_t i) noexcept
+    {
+        if (i &gt;= N || !live_[i]) {
+            return nullptr;
+        }
+        return object_at(i);
+    }
+
+private:
+    T *object_at(std::size_t i) noexcept
+    {
+        return std::launder(reinterpret_cast&lt;T *&gt;(slots_[i].storage));
+    }
+
+    std::size_t index_of_slot(const Slot *s) const noexcept
+    {
+        return static_cast&lt;std::size_t&gt;(s - &amp;slots_[0]);
+    }
+
+    /* 포인터가 슬롯의 시작 주소인지 본다. 아니면 N을 돌려준다.
+     * 배열 밖 포인터 비교는 엄격히는 미정의지만, 풀 검증에서 관용적으로 쓰는
+     * 방법이다(실 타깃에서는 주소 범위 비교로 그대로 동작한다). */
+    std::size_t index_of(const T *p) const noexcept
+    {
+        if (p == nullptr) {
+            return N;
+        }
+        const unsigned char *base = reinterpret_cast&lt;const unsigned char *&gt;(&amp;slots_[0]);
+        const unsigned char *q = reinterpret_cast&lt;const unsigned char *&gt;(p);
+        if (q &lt; base || q &gt;= base + (N * sizeof(Slot))) {
+            return N; /* 풀 범위 밖 */
+        }
+        const std::size_t off = static_cast&lt;std::size_t&gt;(q - base);
+        if ((off % sizeof(Slot)) != 0u) {
+            return N; /* 슬롯 중간을 가리킨다 */
+        }
+        return off / sizeof(Slot);
+    }
+
+    Slot slots_[N];
+    bool live_[N]; /* 비트맵으로 줄일 수 있다. N바이트 vs N비트의 교환 */
+    Slot *free_head_ = nullptr;
+    std::size_t used_ = 0u;
+    std::size_t high_water_ = 0u;
+};
+
+/* ------------------------------------------------------------------ */
+/* 3. 소멸자를 확인할 수 있는 객체                                      */
+/* ------------------------------------------------------------------ */
+
+/* 오디오 세션 하나. 생성자에서 "채널을 등록"하고 소멸자에서 "해제"한다고 하자.
+ * 소멸자가 확실히 돌지 않으면 채널이 영구히 점유된다 — 이것이 raw 블록 풀과의
+ * 결정적 차이다. */
+static unsigned g_open_channels = 0u;
+static unsigned g_ctor = 0u;
+static unsigned g_copy = 0u;
+static unsigned g_move = 0u;
+static unsigned g_dtor = 0u;
+
+enum { LOG_MAX = 32 };
+static int g_dtor_log[LOG_MAX];
+static unsigned g_dtor_n = 0u;
+
+class Session {
+public:
+    explicit Session(int id, std::uint32_t rate = 48000u) noexcept : id_(id), rate_(rate)
+    {
+        ++g_ctor;
+        ++g_open_channels;
+    }
+    Session(const Session &amp;o) noexcept : id_(o.id_), rate_(o.rate_)
+    {
+        ++g_copy;
+        ++g_open_channels;
+    }
+    Session(Session &amp;&amp;o) noexcept : id_(o.id_), rate_(o.rate_)
+    {
+        o.id_ = -1; /* moved-from 표시. 채널 수는 그대로 옮겨 온 것 */
+        ++g_move;
+        ++g_open_channels;
+    }
+    Session &amp;operator=(const Session &amp;) = delete;
+    Session &amp;operator=(Session &amp;&amp;) = delete;
+
+    ~Session()
+    {
+        if (g_dtor_n &lt; static_cast&lt;unsigned&gt;(LOG_MAX)) {
+            g_dtor_log[g_dtor_n++] = id_;
+        }
+        ++g_dtor;
+        assert(g_open_channels &gt; 0u);
+        --g_open_channels; /* 소멸자가 빠지면 이 값이 0으로 돌아오지 않는다 */
+    }
+
+    int id() const noexcept { return id_; }
+    std::uint32_t rate() const noexcept { return rate_; }
+    void set_rate(std::uint32_t r) noexcept { rate_ = r; }
+
+private:
+    int id_;
+    std::uint32_t rate_;
+};
+
+static_assert(!std::is_trivially_destructible&lt;Session&gt;::value,
+              "소멸자 호출을 세려면 trivial 하지 않아야 한다");
+
+static void reset_counters()
+{
+    g_open_channels = 0u;
+    g_ctor = 0u;
+    g_copy = 0u;
+    g_move = 0u;
+    g_dtor = 0u;
+    g_dtor_n = 0u;
+}
+
+/* ------------------------------------------------------------------ */
+/* 4. 테스트                                                           */
+/* ------------------------------------------------------------------ */
+
+static const std::size_t kCap = 4u;
+using Pool = object_pool&lt;Session, kCap&gt;;
+
+static void test_initial_state(void)
+{
+    reset_counters();
+    Pool pool;
+    assert(pool.capacity() == 4u);
+    assert(pool.used() == 0u);
+    assert(pool.available() == 4u);
+    assert(pool.high_water() == 0u);
+    assert(g_ctor == 0u); /* 저장소는 있지만 객체는 없다 */
+    assert(g_open_channels == 0u);
+    puts("ok  1: 풀 생성만으로는 객체가 만들어지지 않는다 (저장소만 확보)");
+}
+
+static void test_acquire_constructs(void)
+{
+    reset_counters();
+    {
+        Pool pool;
+        Session *a = pool.acquire(11, 44100u);
+        assert(a != nullptr);
+        assert(a-&gt;id() == 11 &amp;&amp; a-&gt;rate() == 44100u);
+        assert(g_ctor == 1u &amp;&amp; g_copy == 0u &amp;&amp; g_move == 0u);
+        assert(g_open_channels == 1u);
+        assert(pool.used() == 1u &amp;&amp; pool.available() == 3u &amp;&amp; pool.high_water() == 1u);
+        assert(pool.owns(a));
+        /* 반환 주소가 T의 정렬 요구를 만족한다 */
+        assert(reinterpret_cast&lt;std::uintptr_t&gt;(a) % alignof(Session) == 0u);
+    }
+    assert(g_dtor == 1u &amp;&amp; g_open_channels == 0u);
+    puts("ok  2: acquire 는 인자를 그대로 넘겨 슬롯 안에서 생성자를 호출한다");
+}
+
+static void test_release_calls_destructor(void)
+{
+    reset_counters();
+    Pool pool;
+    Session *a = pool.acquire(1);
+    assert(g_dtor == 0u);
+
+    assert(pool.release(a) == Release::Ok);
+    assert(g_dtor == 1u);          /* 바로 소멸자가 돌았다 */
+    assert(g_dtor_log[0] == 1);
+    assert(g_open_channels == 0u); /* 채널이 해제됐다 */
+    assert(pool.used() == 0u &amp;&amp; pool.available() == 4u);
+    assert(pool.high_water() == 1u); /* high_water 는 내려가지 않는다 */
+
+    assert(pool.release(nullptr) == Release::Ok); /* no-op */
+    assert(g_dtor == 1u);
+    puts("ok  3: release 가 소멸자를 정확히 1번 호출하고 슬롯을 되돌린다");
+}
+
+static void test_exhaustion(void)
+{
+    reset_counters();
+    Pool pool;
+    Session *p[kCap];
+    for (std::size_t i = 0u; i &lt; kCap; ++i) {
+        p[i] = pool.acquire(static_cast&lt;int&gt;(i));
+        assert(p[i] != nullptr);
+    }
+    assert(pool.used() == 4u &amp;&amp; pool.available() == 0u);
+    assert(g_ctor == 4u);
+
+    /* 고갈: nullptr 이고 생성자는 호출되지 않는다 */
+    assert(pool.acquire(99) == nullptr);
+    assert(g_ctor == 4u);
+    assert(pool.used() == 4u);
+    assert(pool.high_water() == 4u);
+
+    /* 하나 반납하면 다시 배급된다 */
+    assert(pool.release(p[2]) == Release::Ok);
+    Session *q = pool.acquire(99);
+    assert(q != nullptr);
+    assert(q == p[2]); /* LIFO: 방금 반납한 슬롯이 그대로 나온다 */
+    assert(q-&gt;id() == 99);
+    (void)pool.release(q);
+    for (std::size_t i = 0u; i &lt; kCap; ++i) {
+        if (i != 2u) {
+            (void)pool.release(p[i]);
+        }
+    }
+    assert(g_open_channels == 0u);
+    puts("ok  4: 용량 초과는 nullptr(생성자 미호출), 반납 뒤에는 LIFO로 재사용");
+}
+
+static void test_double_release(void)
+{
+    reset_counters();
+    Pool pool;
+    Session *a = pool.acquire(5);
+    assert(pool.release(a) == Release::Ok);
+    assert(g_dtor == 1u);
+
+    /* 두 번째 반납은 거부된다. 소멸자가 두 번 돌면 채널 카운터가 음수가 된다. */
+    assert(pool.release(a) == Release::DoubleFree);
+    assert(g_dtor == 1u);
+    assert(pool.used() == 0u);
+    assert(pool.available() == 4u); /* free list 에 같은 슬롯이 두 번 들어가지 않았다 */
+
+    /* free list 가 망가지지 않았는지: 용량만큼 다시 배급되는지로 확인 */
+    Session *p[kCap];
+    for (std::size_t i = 0u; i &lt; kCap; ++i) {
+        p[i] = pool.acquire(static_cast&lt;int&gt;(i));
+        assert(p[i] != nullptr);
+    }
+    for (std::size_t i = 0u; i &lt; kCap; ++i) {
+        for (std::size_t j = i + 1u; j &lt; kCap; ++j) {
+            assert(p[i] != p[j]); /* 같은 슬롯을 두 번 배급하지 않았다 */
+        }
+    }
+    puts("ok  5: double release 는 -2로 거부, free list 와 카운터가 그대로다");
+}
+
+static void test_foreign_pointer(void)
+{
+    reset_counters();
+    Pool pool;
+    Session *a = pool.acquire(1);
+
+    /* 스택 객체 */
+    Session stack_obj(777);
+    assert(pool.owns(&amp;stack_obj) == false);
+    assert(pool.release(&amp;stack_obj) == Release::Foreign);
+
+    /* 슬롯 중간 주소 */
+    unsigned char *mid = reinterpret_cast&lt;unsigned char *&gt;(a) + 1;
+    assert(pool.release(reinterpret_cast&lt;Session *&gt;(mid)) == Release::Foreign);
+
+    /* 거부된 호출은 아무 상태도 바꾸지 않았다 */
+    assert(g_dtor == 0u);
+    assert(pool.used() == 1u);
+    assert(a-&gt;id() == 1);
+
+    /* one-past-end 주소: 마지막 슬롯 바로 뒤 */
+    Session *rest[kCap - 1u];
+    for (std::size_t i = 0u; i + 1u &lt; kCap; ++i) {
+        rest[i] = pool.acquire(static_cast&lt;int&gt;(100 + i));
+        assert(rest[i] != nullptr);
+    }
+    const std::uintptr_t stride = reinterpret_cast&lt;std::uintptr_t&gt;(rest[0]) -
+                                  reinterpret_cast&lt;std::uintptr_t&gt;(a);
+    unsigned char *one_past = reinterpret_cast&lt;unsigned char *&gt;(rest[kCap - 2u]) + stride;
+    assert(pool.release(reinterpret_cast&lt;Session *&gt;(one_past)) == Release::Foreign);
+    for (std::size_t i = 0u; i + 1u &lt; kCap; ++i) {
+        assert(pool.release(rest[i]) == Release::Ok);
+    }
+
+    assert(pool.release(a) == Release::Ok);
+    puts("ok  6: 외부·중간·one-past-end 주소는 모두 -1로 거부 (소멸자 미호출)");
+}
+
+static void test_pool_destructor_cleans_up(void)
+{
+    reset_counters();
+    {
+        Pool pool;
+        (void)pool.acquire(10);
+        (void)pool.acquire(20);
+        (void)pool.acquire(30); /* 세 개를 반납하지 않고 스코프를 벗어난다 */
+        assert(g_open_channels == 3u);
+        assert(g_dtor == 0u);
+    }
+    /* 풀 소멸자가 남은 3개의 소멸자를 대신 돌렸다 */
+    assert(g_dtor == 3u);
+    assert(g_open_channels == 0u);
+    assert(g_dtor_n == 3u);
+    assert(g_dtor_log[0] == 30 &amp;&amp; g_dtor_log[1] == 20 &amp;&amp; g_dtor_log[2] == 10);
+    puts("ok  7: 풀 소멸자가 반납되지 않은 3개를 인덱스 역순으로 파괴한다");
+}
+
+static void test_move_into_pool(void)
+{
+    reset_counters();
+    {
+        Pool pool;
+        Session tmp(42, 96000u);
+        assert(g_ctor == 1u &amp;&amp; g_open_channels == 1u);
+
+        Session *moved = pool.acquire(std::move(tmp)); /* 이동 생성자 경로 */
+        assert(moved != nullptr);
+        assert(g_move == 1u &amp;&amp; g_copy == 0u);
+        assert(moved-&gt;id() == 42 &amp;&amp; moved-&gt;rate() == 96000u);
+        assert(tmp.id() == -1); /* 원본은 비워졌다 */
+
+        Session src(7);
+        Session *copied = pool.acquire(src); /* 복사 생성자 경로 */
+        assert(copied != nullptr);
+        assert(g_copy == 1u);
+        assert(src.id() == 7); /* 원본 유지 */
+        assert(copied-&gt;id() == 7);
+
+        assert(g_open_channels == 4u); /* tmp, src, 풀 안의 2개 */
+    }
+    /* 생성(모든 종류) 횟수 == 소멸 횟수 */
+    assert(g_ctor + g_copy + g_move == g_dtor);
+    assert(g_open_channels == 0u);
+    puts("ok  8: acquire 가 이동/복사 생성자를 올바르게 골라 호출한다");
+}
+
+static void test_objects_do_not_overlap(void)
+{
+    reset_counters();
+    Pool pool;
+    Session *p[kCap];
+    for (std::size_t i = 0u; i &lt; kCap; ++i) {
+        p[i] = pool.acquire(static_cast&lt;int&gt;(i), 1000u * static_cast&lt;std::uint32_t&gt;(i));
+    }
+    for (std::size_t i = 0u; i &lt; kCap; ++i) {
+        p[i]-&gt;set_rate(0xAAAA0000u + static_cast&lt;std::uint32_t&gt;(i));
+    }
+    for (std::size_t i = 0u; i &lt; kCap; ++i) {
+        assert(p[i]-&gt;id() == static_cast&lt;int&gt;(i));
+        assert(p[i]-&gt;rate() == 0xAAAA0000u + static_cast&lt;std::uint32_t&gt;(i));
+        assert(pool.live_at(i) == p[i]);
+    }
+    pool.destroy_all();
+    assert(pool.used() == 0u);
+    assert(g_dtor == kCap);
+    assert(g_open_channels == 0u);
+    puts("ok  9: 객체들이 서로 침범하지 않고, live_at 로 순회할 수 있다");
+}
+
+static void test_cycles_do_not_leak(void)
+{
+    reset_counters();
+    {
+        Pool pool;
+        for (unsigned round = 0u; round &lt; 100u; ++round) {
+            Session *p[kCap];
+            for (std::size_t i = 0u; i &lt; kCap; ++i) {
+                p[i] = pool.acquire(static_cast&lt;int&gt;(round * 10u + i));
+                assert(p[i] != nullptr);
+            }
+            assert(pool.available() == 0u);
+            for (std::size_t i = 0u; i &lt; kCap; ++i) {
+                assert(pool.release(p[i]) == Release::Ok);
+            }
+            assert(pool.available() == kCap); /* 단편화 0 */
+        }
+        assert(pool.used() == 0u);
+        assert(pool.high_water() == kCap);
+    }
+    assert(g_ctor == 100u * kCap);
+    assert(g_dtor == g_ctor);      /* 생성 == 소멸 */
+    assert(g_open_channels == 0u); /* 자원 누수 0 */
+    puts("ok 10: 100바퀴 acquire/release 후 생성 횟수 == 소멸 횟수, 누수 0");
+}
+
+int main(void)
+{
+    printf("object_pool&lt;Session,4&gt;: sizeof=%zu, Session=%zu, 슬롯당 오버헤드=%zu바이트\n",
+           sizeof(Pool), sizeof(Session),
+           (sizeof(Pool) - (kCap * sizeof(Session))) / kCap);
+
+    test_initial_state();
+    test_acquire_constructs();
+    test_release_calls_destructor();
+    test_exhaustion();
+    test_double_release();
+    test_foreign_pointer();
+    test_pool_destructor_cleans_up();
+    test_move_into_pool();
+    test_objects_do_not_overlap();
+    test_cycles_do_not_leak();
+
+    puts("ALL TESTS PASSED");
+    return 0;
+}
+</code></pre></figure>
+  <div class="nav">
+    <a class="prev" href="../problems/21_object_pool.html"><span class="dir">← 문제</span><span class="nm">객체 풀 (acquire / release + placement new)</span></a>
+    <a class="next" href="../drills/L3_embedded_cpp.html"><span class="dir">해설 →</span><span class="nm">객체 풀 (acquire / release + placement new)</span></a>
+  </div>
+</main></div><script>
+const KEY='hark_notes_read_v1', TKEY='hark_notes_theme', CKEY='hark_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

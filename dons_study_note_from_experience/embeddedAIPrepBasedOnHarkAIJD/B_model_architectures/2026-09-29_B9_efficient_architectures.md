@@ -1,0 +1,1144 @@
+# B9. 효율 아키텍처 — MoE, SSM(Mamba), linear attention, early-exit, cascade
+
+> **이 노트를 다 읽으면**: MoE의 total vs active 파라미터를 계산하고 "연산은 작은데 메모리는 전부"라는 기기 쪽 함정을 숫자로 말할 수 있다 · linear attention과 SSM(Mamba)이 KV-cache 대신 고정 크기 상태를 쓰는 원리를 IIR 필터로 설명할 수 있다 · early-exit과 cascade의 평균 비용을 `E[cost] = c1 + p·c2`로 설계할 수 있다 · 각 기법이 NPU에 잘 맞는지 안 맞는지 이유를 댈 수 있다
+> **JD 연결**: "Co-design model architectures that meet latency, memory, power, bandwidth", "(우대) transformers, KV-cache … lightweight LLM", "hybrid edge-LLM" — study_prep_list **B9** 행: Mixture-of-Experts, State Space Model(Mamba), linear attention, early-exit, cascade 모델 ("차세대 모델과 HW 선정 대화")
+> **Don 기준 난이도**: 상태공간 모델·이산화·IIR 필터·파이프라인 전력 예산은 이미 강함 / 새로 배울 것은 router·gating, attention의 재배열(kernel trick), selective scan, "조건부 계산이 HW에서 왜 불편한가"
+> **선행 노트**: B3 (RNN·streaming state), B4 (attention·KV-cache). 참고: A2 (softmax, Bayes), D5 (KV-cache 크기)
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+B4에서 본 Transformer는 강력하지만 기기에서 비싸다. "비싸다"는 말은 한 가지가 아니다. 기기에서 모델 하나를 돌릴 때 따져야 하는 **비용 축**은 적어도 다섯 개다.
+
+| 비용 축 | 무엇을 세나 | 펌웨어 감각으로 |
+|---|---|---|
+| compute | 토큰(또는 프레임)당 MAC 수 | CPU cycle, DSP MAC 유닛 점유 |
+| weight memory | 상주해야 하는 파라미터 바이트 | flash/DRAM 용량, 이미지 크기 |
+| bandwidth per token | 토큰 하나 만들 때 DRAM에서 읽는 바이트 | 매 루프마다 DMA로 끌어오는 양 |
+| state / KV memory | 시퀀스를 처리하며 들고 있어야 하는 상태 | 링버퍼, 컨텍스트 구조체 크기 |
+| latency | 첫 결과·다음 결과까지 걸리는 시간 | ISR → 응답까지 deadline |
+
+이 노트에서 다루는 다섯 가지 아키텍처는 **각자 다른 축을 줄이는 대신 다른 축을 늘린다**. 공짜는 없다.
+
+- **MoE (Mixture-of-Experts)**: compute를 줄인다. 대신 weight memory는 그대로(또는 더 크게) 든다.
+- **Linear attention**: attention의 T² compute와 KV memory를 T에 대해 고정 크기로 만든다. 대신 정확한 검색(recall) 능력을 잃는다.
+- **SSM (Mamba)**: KV-cache를 고정 크기 상태로 바꾼다. 대신 순차적인 scan이라는 HW가 덜 좋아하는 연산이 생긴다.
+- **Early-exit**: 쉬운 입력에서 depth(층 수)를 덜 쓴다. 대신 latency가 입력마다 달라진다.
+- **Cascade**: 작은 모델로 대부분 처리하고 어려운 것만 큰 모델로 보낸다. 대신 시스템이 복잡해지고, 작은 모델의 confidence가 믿을 만해야 한다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 300">
+<text x="20" y="24" font-size="14">decoder 한 층을 지나는 토큰 하나 — 어느 부품을 무엇으로 바꾸나</text> <rect x="20" y="120" width="80" height="44" rx="6" fill="none" stroke="currentColor"/> <text x="60" y="147" font-size="13" text-anchor="middle">token</text> <line x1="100" y1="142" x2="150" y2="142" stroke="currentColor"/> <polygon points="150,142 142,137 142,147" fill="currentColor"/>
+<rect x="150" y="100" width="170" height="84" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/> <text x="235" y="126" font-size="13" text-anchor="middle">mixer (시퀀스 섞기)</text> <text x="235" y="148" font-size="12" text-anchor="middle">attention: KV-cache ∝ T</text> <text x="235" y="168" font-size="12" text-anchor="middle">→ linear attn / SSM: 고정 상태</text>
+<line x1="320" y1="142" x2="370" y2="142" stroke="currentColor"/> <polygon points="370,142 362,137 362,147" fill="currentColor"/> <rect x="370" y="100" width="170" height="84" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/> <text x="455" y="126" font-size="13" text-anchor="middle">FFN (토큰별 변환)</text>
+<text x="455" y="148" font-size="12" text-anchor="middle">dense: 파라미터 전부 사용</text> <text x="455" y="168" font-size="12" text-anchor="middle">→ MoE: expert k개만 사용</text> <line x1="540" y1="142" x2="590" y2="142" stroke="currentColor"/> <polygon points="590,142 582,137 582,147" fill="currentColor"/> <text x="620" y="147" font-size="13" text-anchor="middle">×L층</text>
+<rect x="150" y="215" width="390" height="36" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2" stroke-dasharray="5 3"/> <text x="345" y="238" font-size="12" text-anchor="middle">early-exit: 중간 층에서 확신하면 남은 층을 건너뜀 (depth 절약)</text> <rect x="150" y="45" width="390" height="36" rx="6" fill="none" stroke="#d0564a" stroke-width="2" stroke-dasharray="5 3"/>
+<text x="345" y="68" font-size="12" text-anchor="middle">cascade: 이 모델 전체를 작은 모델 → 큰 모델 순으로 호출</text> <text x="20" y="285" font-size="12">파랑 = 시퀀스 축 비용(KV, T²) · 주황 = 파라미터 축 비용 · 초록 = 깊이 축 · 빨강 = 시스템 축</text>
+</svg>
+```
+
+그림 1 — decoder 한 층의 두 부품(mixer, FFN)과 그 위의 두 시스템 수준 기법. MoE는 FFN을, linear attention·SSM은 mixer를, early-exit은 층 수를, cascade는 모델 호출 자체를 건드린다.
+
+펌웨어로 비유하면 이렇다. MoE는 "opcode에 따라 handler 하나만 실행하는 dispatch 테이블"이다. 실행되는 코드는 작지만 모든 handler가 flash에 있어야 한다. SSM은 "지난 샘플 전체를 버퍼에 쌓는 FIR" 대신 "상태 몇 개만 들고 가는 IIR"이다. early-exit은 "빠른 경로(fast path)에서 판정이 끝나면 느린 경로를 안 타는 코드"다. cascade는 "저전력 코어가 먼저 보고 필요할 때만 큰 코어를 깨우는 wake 체인"이다.
+
+---
+
+## 1. Mixture-of-Experts (MoE) — 계산은 조금, 파라미터는 많이
+
+### 1.1 직관
+
+B4에서 Transformer 한 층의 파라미터 대부분은 FFN에 있다고 했다(보통 FFN 폭이 모델 폭의 3~4배). MoE는 이 FFN 하나를 **E개의 작은 FFN(expert)** 으로 바꾸고, 토큰마다 **router**가 "이 토큰은 expert 몇 번과 몇 번이 처리해라"를 정한다. 토큰 하나는 E개 중 k개(보통 1~2개)만 지나간다.
+
+- **expert**: 평범한 FFN 하나. `Linear → 활성화 → Linear` (SwiGLU면 행렬 3개).
+- **router (gate)**: `d → E` 크기의 작은 linear layer 하나. 토큰 벡터를 받아 expert별 점수(logit)를 낸다.
+- **top-k gating**: 점수 상위 k개 expert만 골라 그 출력만 가중합한다.
+
+결과: 모델의 **total parameters**(전체 파라미터)는 E배 가까이 커지지만, 토큰 하나가 실제로 쓰는 **active parameters**는 k개 expert분뿐이다. "지식은 많이 저장하되, 한 번에 쓰는 계산은 작게" 하려는 설계다.
+
+### 1.2 정의
+
+```
+p   = softmax(W_r · x)                  W_r ∈ ℝ^{E×d},  p ∈ ℝ^E
+S   = top-k 인덱스 of p                 |S| = k
+g_i = p_i / ∑_{j∈S} p_j   (i ∈ S)        선택된 k개의 가중치를 다시 합 1로
+y   = ∑_{i∈S} g_i · FFN_i(x)
+```
+
+말로 하면: router가 E개 expert에 대한 확률을 내고, 가장 높은 k개만 골라 그 확률을 다시 정규화한 뒤, 그 k개 expert 출력의 가중 평균을 낸다. 나머지 E − k개 expert는 **이 토큰에 대해 아예 계산하지 않는다**.
+
+(재정규화 여부, softmax를 top-k 전에 할지 후에 할지는 모델마다 다르다. 여기서는 가장 흔한 "softmax → top-k → 재정규화"를 쓴다.)
+
+### 1.3 손으로 계산 — top-2 라우팅 한 번
+
+expert 4개, 토큰 하나의 router logit이 `[2.0, 1.0, 0.5, −1.0]`이라고 하자.
+
+```
+exp:      e^2.0 = 7.389   e^1.0 = 2.718   e^0.5 = 1.649   e^-1 = 0.368    합 = 12.124
+softmax:  0.6095          0.2242          0.1360          0.0303
+top-2:    expert 0, expert 1
+재정규화:  0.6095 / 0.8337 = 0.7311,   0.2242 / 0.8337 = 0.2689
+y = 0.7311 · FFN_0(x) + 0.2689 · FFN_1(x)          FFN_2, FFN_3는 실행 안 함
+```
+
+말로 하면: 이 토큰은 expert 0이 73%, expert 1이 27% 비중으로 처리한다. 재미있는 점은 0.7311이 `σ(2.0 − 1.0) = σ(1)`과 같다는 것이다. top-2 재정규화는 선택된 두 logit의 차이에만 의존한다.
+
+### 1.4 코드로 확인 — 아주 작은 top-2 MoE 층
+
+토큰 6개를 expert 4개짜리 top-2 MoE에 넣고, 토큰마다 어떤 expert가 선택되는지와 active 파라미터·MAC을 센다.
+
+```python
+import torch, torch.nn as nn, torch.nn.functional as F
+
+torch.manual_seed(0)
+d, h, E, k, T = 8, 32, 4, 2, 6          # 모델 폭, expert FFN 폭, expert 수, top-k, 토큰 수
+
+class TinyMoE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.router = nn.Linear(d, E, bias=False)                 # d → E 점수
+        self.experts = nn.ModuleList(
+            nn.Sequential(nn.Linear(d, h), nn.ReLU(), nn.Linear(h, d)) for _ in range(E))
+    def forward(self, x):                                         # x: [T, d]
+        probs = F.softmax(self.router(x), dim=-1)                 # [T, E]
+        w, idx = probs.topk(k, dim=-1)                            # 상위 2개 expert
+        w = w / w.sum(-1, keepdim=True)                           # 2개 가중치 재정규화
+        y = torch.zeros_like(x)
+        for e in range(E):                                        # expert별로 모아서 계산
+            tok, slot = (idx == e).nonzero(as_tuple=True)
+            if tok.numel():
+                y[tok] += w[tok, slot, None] * self.experts[e](x[tok])
+        return y, probs, idx, w
+
+moe = TinyMoE()
+y, probs, idx, w = moe(torch.randn(T, d))
+for t in range(T):
+    print(f"token {t}: experts {idx[t].tolist()}  weights {[round(v, 3) for v in w[t].tolist()]}")
+print("tokens per expert:", torch.bincount(idx.flatten(), minlength=E).tolist())
+p_exp = sum(p.numel() for p in moe.experts[0].parameters())
+total = sum(p.numel() for p in moe.parameters())
+active = moe.router.weight.numel() + k * p_exp
+print(f"params total={total}  active/token={active}  ({active/total:.1%})")
+print(f"MAC/token: dense-equivalent(all {E})={E*2*d*h + d*E}  top-{k}={k*2*d*h + d*E}")
+```
+
+```text
+token 0: experts [2, 0]  weights [0.604, 0.396]
+token 1: experts [1, 3]  weights [0.563, 0.437]
+token 2: experts [0, 1]  weights [0.524, 0.476]
+token 3: experts [0, 3]  weights [0.528, 0.472]
+token 4: experts [0, 1]  weights [0.617, 0.383]
+token 5: experts [1, 3]  weights [0.574, 0.426]
+tokens per expert: [4, 4, 1, 3]
+params total=2240  active/token=1136  (50.7%)
+MAC/token: dense-equivalent(all 4)=2080  top-2=1056
+```
+
+출력에서 볼 것: 토큰마다 다른 expert 쌍이 선택된다. 6개 토큰만으로도 **4개 expert가 전부 한 번 이상 쓰였다**(expert 2는 1번뿐). 토큰당 MAC은 네 expert를 다 쓰는 경우의 약 절반(1056 vs 2080)이다. expert당 파라미터는 `8·32 + 32 + 32·8 + 8 = 552`, 전체는 `4·552 + 32(router) = 2240`이다.
+
+구현에서 주목할 점: `forward`는 "토큰 → expert" 순서가 아니라 **"expert별로 그 expert에 배정된 토큰들을 모아서(gather) 한 번에 계산하고 다시 흩뿌린다(scatter)"**. 서버 MoE 커널도 같은 구조다. 이 gather/scatter가 뒤에서 NPU와 궁합이 나쁜 이유가 된다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 300">
+<text x="20" y="22" font-size="14">위 출력의 실제 라우팅 (선 굵기 = 가중치, 파랑 = 1순위, 주황 = 2순위)</text> <line x1="95" y1="55" x2="455" y2="215" stroke="#4a7bd0" stroke-width="3.4"/> <line x1="95" y1="55" x2="455" y2="65" stroke="#e08a3c" stroke-width="2.6"/> <line x1="95" y1="95" x2="455" y2="140" stroke="#4a7bd0" stroke-width="3.3"/>
+<line x1="95" y1="95" x2="455" y2="265" stroke="#e08a3c" stroke-width="2.7"/> <line x1="95" y1="135" x2="455" y2="65" stroke="#4a7bd0" stroke-width="3.1"/> <line x1="95" y1="135" x2="455" y2="140" stroke="#e08a3c" stroke-width="2.9"/> <line x1="95" y1="175" x2="455" y2="65" stroke="#4a7bd0" stroke-width="3.1"/>
+<line x1="95" y1="175" x2="455" y2="265" stroke="#e08a3c" stroke-width="2.9"/> <line x1="95" y1="215" x2="455" y2="65" stroke="#4a7bd0" stroke-width="3.5"/> <line x1="95" y1="215" x2="455" y2="140" stroke="#e08a3c" stroke-width="2.5"/> <line x1="95" y1="255" x2="455" y2="140" stroke="#4a7bd0" stroke-width="3.3"/>
+<line x1="95" y1="255" x2="455" y2="265" stroke="#e08a3c" stroke-width="2.7"/> <circle cx="80" cy="55" r="15" fill="none" stroke="currentColor"/><text x="80" y="60" font-size="12" text-anchor="middle">t0</text> <circle cx="80" cy="95" r="15" fill="none" stroke="currentColor"/><text x="80" y="100" font-size="12" text-anchor="middle">t1</text>
+<circle cx="80" cy="135" r="15" fill="none" stroke="currentColor"/><text x="80" y="140" font-size="12" text-anchor="middle">t2</text> <circle cx="80" cy="175" r="15" fill="none" stroke="currentColor"/><text x="80" y="180" font-size="12" text-anchor="middle">t3</text>
+<circle cx="80" cy="215" r="15" fill="none" stroke="currentColor"/><text x="80" y="220" font-size="12" text-anchor="middle">t4</text> <circle cx="80" cy="255" r="15" fill="none" stroke="currentColor"/><text x="80" y="260" font-size="12" text-anchor="middle">t5</text>
+<rect x="455" y="45" width="100" height="40" rx="5" fill="none" stroke="currentColor"/><text x="505" y="70" font-size="12" text-anchor="middle">expert 0 (4)</text> <rect x="455" y="120" width="100" height="40" rx="5" fill="none" stroke="currentColor"/><text x="505" y="145" font-size="12" text-anchor="middle">expert 1 (4)</text>
+<rect x="455" y="195" width="100" height="40" rx="5" fill="none" stroke="currentColor"/><text x="505" y="220" font-size="12" text-anchor="middle">expert 2 (1)</text> <rect x="455" y="245" width="100" height="40" rx="5" fill="none" stroke="currentColor"/><text x="505" y="270" font-size="12" text-anchor="middle">expert 3 (3)</text>
+<text x="275" y="292" font-size="12" text-anchor="middle">router(d→E) + softmax + top-2 가 이 선들을 토큰마다 새로 정한다</text>
+</svg>
+```
+
+그림 2 — 1.4절 코드 출력의 라우팅을 그대로 그린 것. 괄호 안은 expert가 받은 토큰 수. 토큰 6개 만에 모든 expert가 호출되었다.
+
+### 1.5 total vs active — 가상의 on-device MoE로 계산
+
+작은 장난감이 아니라 LLM 크기로 계산해 보자. 아래 설정은 **설명용 가정**이다(실제 특정 모델이 아니다): 16층, d = 2048, expert당 SwiGLU FFN 폭 5632, expert 8개, top-2.
+
+```python
+# 가상의 MoE 설정 (설명용 가정, 특정 실제 모델 아님)
+L, d, ffn, E, k = 16, 2048, 5632, 8, 2
+attn = 4 * d * d                       # Q,K,V,O 행렬 (MHA 가정)
+expert = 3 * d * ffn                   # SwiGLU FFN = 행렬 3개
+router = d * E
+emb = 32000 * d                        # 임베딩(출력층과 공유 가정)
+total  = L * (attn + E * expert + router) + emb
+active = L * (attn + k * expert + router) + emb
+print(f"total  params = {total/1e9:.2f} B")
+print(f"active params = {active/1e9:.2f} B  ({active/total:.0%} of total)")
+for name, bpp in (("fp16", 2), ("int8", 1), ("int4", 0.5)):
+    print(f"{name}: resident weights = {total*bpp/2**30:5.2f} GiB,"
+          f" weight bytes read/token ≈ {active*bpp/2**30:5.2f} GiB")
+bw = 50e9                              # 가정: 기기 LPDDR 실효 대역폭 50 GB/s
+for n_tok in (1, 4, 16):              # n개 토큰에서 한 층당 한 번이라도 쓰인 expert 수 (균등 라우팅 가정)
+    touched = E * (1 - (1 - k / E) ** n_tok)
+    print(f"{n_tok:2d} tokens → expected experts touched per layer = {touched:.2f} / {E}")
+print(f"int4 decode upper bound ≈ {bw / (active*0.5):.0f} tok/s (weights only, bw=50 GB/s)")
+print(f"dense {total/1e9:.2f}B int4 upper bound ≈ {bw / (total*0.5):.0f} tok/s (same memory, all weights read)")
+```
+
+```text
+total  params = 4.76 B
+active params = 1.44 B  (30% of total)
+fp16: resident weights =  8.87 GiB, weight bytes read/token ≈  2.69 GiB
+int8: resident weights =  4.44 GiB, weight bytes read/token ≈  1.34 GiB
+int4: resident weights =  2.22 GiB, weight bytes read/token ≈  0.67 GiB
+ 1 tokens → expected experts touched per layer = 2.00 / 8
+ 4 tokens → expected experts touched per layer = 5.47 / 8
+16 tokens → expected experts touched per layer = 7.92 / 8
+int4 decode upper bound ≈ 69 tok/s (weights only, bw=50 GB/s)
+dense 4.76B int4 upper bound ≈ 21 tok/s (same memory, all weights read)
+```
+
+출력에서 볼 것은 세 가지다.
+
+1. **연산과 대역폭은 active 기준**이다. decode(한 토큰씩 생성)는 D5에서 본 대로 memory-bound이므로, 토큰당 읽는 바이트가 active 기준(0.67 GiB)이면 같은 메모리를 쓰는 dense 모델(21 tok/s)보다 약 3배 빠를 수 있다(69 tok/s 상한). 이것이 MoE의 장점이다.
+2. **메모리 용량은 total 기준**이다. int4로도 2.22 GiB가 DRAM에 **상주**해야 한다. 1.44B dense 모델이면 0.67 GiB면 된다. 웨어러블급 기기에서 이 차이는 "들어간다 / 안 들어간다"의 차이다.
+3. **토큰이 몇 개만 지나도 거의 모든 expert가 필요하다**. 라우팅이 균등하다고 가정하면 토큰 4개에서 층당 8개 중 5.47개, 16개에서 7.92개가 쓰인다. 즉 "쓰는 expert만 메모리에 올리자"는 전략은 토큰 몇 개만 지나면 무너진다(실제 라우팅은 균등하지 않고 연속 토큰끼리 겹치는 경향도 있어서 조금 나을 수 있지만, 근본 구조는 같다).
+
+공식으로 정리하면:
+
+```
+weight memory   ∝ total  = 공통 + E · expert
+compute / token ∝ active = 공통 + k · expert
+bandwidth/token ≈ active 바이트          (단, 필요한 expert가 이미 DRAM에 있을 때)
+```
+
+실제 공개 모델 예로, Mixtral 8x7B는 expert 8개·top-2 구조로 전체 약 47B, 토큰당 active 약 13B 파라미터다. "7B × 8 = 56B"가 아닌 이유는 attention과 임베딩이 expert 사이에 공유되기 때문이다.
+
+### 1.6 load balancing — router가 한 expert만 편애하면
+
+학습 초기에 router가 우연히 expert 0을 조금 더 좋아하면, expert 0만 gradient를 받아 더 좋아지고, router는 더 expert 0을 고른다. 양의 피드백 루프다. 결국 **expert collapse**: 한두 expert만 일하고 나머지는 놀게 된다. 그러면 MoE가 dense 작은 모델과 다를 바 없어지고, 서버에서는 특정 GPU에 부하가 몰린다.
+
+그래서 학습 loss에 **auxiliary load-balancing loss**를 더한다. Switch Transformer 논문의 형태는 다음과 같다.
+
+```
+L_aux = E · ∑_i f_i · P_i
+f_i = expert i에 실제로 배정된 토큰 비율 (top-k 결과, 미분 불가)
+P_i = expert i에 대한 router 확률의 배치 평균 (미분 가능)
+```
+
+말로 하면: "실제로 많이 배정받는 expert에 대해 router 확률을 낮추는 방향"으로 gradient가 흐른다. 완벽히 균등하면(f_i = P_i = 1/E) 값이 1이고, 한 expert로 완전히 쏠리면 E에 가까워진다. 전체 loss는 `L = L_task + α · L_aux`(α는 0.01 정도의 작은 값)로 쓴다.
+
+```python
+import torch, torch.nn.functional as F
+
+def load_balance_loss(logits, k):
+    """Switch-style aux loss: E · Σ_i f_i · P_i  (균형이면 1.0, 한 expert로 쏠리면 E)"""
+    T, E = logits.shape
+    probs = F.softmax(logits, dim=-1)
+    idx = probs.topk(k, dim=-1).indices
+    f = torch.bincount(idx.flatten(), minlength=E).float() / (T * k)   # 실제 배정 비율
+    P = probs.mean(dim=0)                                              # 평균 router 확률
+    return E * (f * P).sum(), f
+
+torch.manual_seed(0)
+T, E, k = 1000, 4, 1
+balanced  = torch.randn(T, E) * 0.1                   # 거의 균등한 router
+collapsed = balanced + torch.tensor([4.0, 0, 0, 0])   # expert 0만 좋아하는 router
+for name, lg in (("balanced", balanced), ("collapsed", collapsed)):
+    loss, f = load_balance_loss(lg, k)
+    print(f"{name:9s} f={[round(v, 3) for v in f.tolist()]}  aux loss={loss.item():.3f}")
+```
+
+```text
+balanced  f=[0.227, 0.271, 0.235, 0.267]  aux loss=1.000
+collapsed f=[1.0, 0.0, 0.0, 0.0]  aux loss=3.790
+```
+
+출력에서 볼 것: 균형 잡힌 router는 1.000, 쏠린 router는 3.790(최대값 E = 4에 근접)이다. 이 값을 loss에 더해 학습하면 router가 쏠림을 스스로 피한다.
+
+기기 관점 한 줄: load balancing은 "서버 여러 장치에 부하를 고르게"가 원래 목적이지만, 기기에서는 오히려 **균등할수록 모든 expert를 자주 쓰므로 캐싱이 어렵다**. 서버의 목표와 기기의 목표가 어긋나는 지점이다.
+
+### 1.7 기기에서 MoE가 어색한 이유
+
+| 관점 | 서버(배치 큼) | 기기(batch = 1, 메모리 작음) |
+|---|---|---|
+| 메모리 | GPU 여러 장에 expert를 나눠 올림(expert parallelism) | 모든 expert가 한 기기 DRAM에 상주해야 함 → total 기준 |
+| 대역폭 | 배치 안 여러 토큰이 같은 expert를 공유 → 가중치 재사용 | 토큰 하나당 k개 expert를 새로 읽음, 재사용 거의 없음 |
+| 연산 | active 기준으로 절약 → 비용·전력 이득이 큼 | decode는 원래 memory-bound라 연산 절약이 덜 중요할 수 있음 |
+| 제어 흐름 | 커스텀 CUDA 커널로 gather/scatter | NPU 컴파일러는 정적 그래프 선호 → 동적 라우팅이 어려움 |
+| latency | 부하 불균형은 평균으로 희석 | expert가 flash에 있으면 로딩 대기 → tail latency 급증 |
+
+정리: **MoE는 "메모리는 싸고 계산이 비싼" 서버를 위해 설계된 트레이드오프**다. 기기에서는 보통 반대(메모리가 비싸고, decode에서는 대역폭이 병목)라서 같은 total 크기의 이득을 얻기 어렵다. 반대로 "같은 DRAM에 들어가는 모델 중 가장 빠른 것"을 찾는 경우라면 MoE는 토큰당 읽는 바이트가 작아 decode 속도에서 이길 수 있다(1.5절의 69 vs 21 tok/s). 즉 **메모리 용량이 여유 있고 대역폭이 병목인 기기**(예: 폰급 SoC)에서는 고려할 가치가 있다.
+
+**flash offloading (연구 단계)**: expert 대부분을 flash(UFS/NVMe)에 두고, 자주 쓰는 expert만 DRAM에 캐시(LRU 등)하며, 다음 층에서 쓸 expert를 미리 예측해 prefetch하는 연구들이 있다(예: Eliseev & Mazur 2023, "Fast Inference of Mixture-of-Experts Language Models with Offloading"; 관련해서 dense LLM의 FFN 희소성을 이용한 Apple의 "LLM in a flash", 2023). Don의 SSD 경험과 정확히 맞닿는 주제다: flash read latency, 큐 깊이, prefetch 적중률, 읽기 증폭. 다만 이것은 **아직 연구·실험 단계**이며, 웨어러블급 기기에서 표준적으로 쓰는 기법이라고 말할 수는 없다.
+
+```
+flash-offloaded MoE (연구 아이디어)
+ DRAM:  [attention 가중치 전부] [expert 캐시: 슬롯 N개, LRU]
+ flash: [모든 expert]  ──(miss 시 읽기, expert 하나 = 수십 MB)──►  캐시 슬롯
+ router(층 l) 결과 ──► 층 l+1 expert 예측 ──► prefetch 큐   ← SSD 펌웨어의 read-ahead와 같은 문제
+```
+
+### 1.8 흔한 오해
+
+- "8x7B니까 56B" — 공유 부분 때문에 total은 그보다 작다. 반드시 층별로 세라.
+- "active가 작으니 작은 기기에 넣을 수 있다" — 메모리 용량은 total 기준이다.
+- "top-k를 1로 하면 항상 두 배 빠르다" — 품질이 떨어질 수 있고, decode에서 병목이 attention·KV 쪽이면 이득이 작다.
+
+---
+
+## 2. Linear attention — attention을 RNN으로 바꾸는 재배열
+
+### 2.1 softmax attention 비용 복습 (B4)
+
+causal softmax attention에서 t번째 토큰의 출력은:
+
+```
+y_t = ∑_{s≤t} softmax_s(q_t · k_s / √d) · v_s
+```
+
+말로 하면: 현재 query를 **과거 모든 key**와 내적하고, softmax로 가중치를 만들어 **과거 모든 value**를 가중합한다. 그래서 과거 K, V를 전부 들고 있어야 하고(KV-cache, D5), t번째 토큰 계산량은 t에 비례한다. 전체 시퀀스로는 T²이다.
+
+문제의 원인은 softmax다. `exp(q · k)`는 q와 k를 분리할 수 없는 하나의 덩어리라서, "과거 key들을 미리 요약해 두는" 일이 불가능하다.
+
+### 2.2 kernel trick — 행렬곱 순서 바꾸기
+
+아이디어: `exp(q · k)`를 어떤 feature map φ의 내적 `φ(q) · φ(k)`로 **근사하거나 대체**하자. φ는 항상 양수를 내는 함수여야 가중치가 음수가 되지 않는다. Katharopoulos et al. (2020)은 `φ(x) = elu(x) + 1`을 썼다.
+
+그러면 (causal mask를 잠시 빼고 보면):
+
+```
+softmax 대신:   y_t = ∑_s (φ(q_t)·φ(k_s)) v_s / ∑_s φ(q_t)·φ(k_s)
+
+행렬로:        Y = (φ(Q) φ(K)ᵀ) V                  ← [T×d][d×T] = [T×T], 그다음 [T×T][T×dv]
+결합법칙:       Y = φ(Q) (φ(K)ᵀ V)                  ← [d×T][T×dv] = [d×dv], 그다음 [T×d][d×dv]
+```
+
+말로 하면: 행렬곱은 결합법칙이 성립하므로 괄호 위치를 바꿀 수 있다. 앞의 순서는 T×T 행렬을 만들고, 뒤의 순서는 d×dv 크기의 작은 요약 `φ(K)ᵀV`를 먼저 만든다. **softmax가 있으면 이 재배열이 불가능하다**(exp가 행렬곱 사이에 끼어 있으므로). 그래서 softmax를 버리는 것이 핵심이다.
+
+손계산으로 비용을 비교하자. T = 4096, d = dv = 64(head 하나):
+
+```
+(φQ φKᵀ) V :  T·T·d + T·T·dv = 4096² · 128        = 2,147,483,648 MAC
+φQ (φKᵀ V) :  T·d·dv + T·d·dv = 2 · 4096 · 64 · 64 =    33,554,432 MAC
+비율 = T·(d + dv) / (2·d·dv) = 64배
+```
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300">
+<text x="20" y="22" font-size="14">같은 결과, 다른 괄호 (T = 8칸, d = dv = 2칸으로 그림)</text> <text x="20" y="50" font-size="13">softmax 방식: (Q Kᵀ) V — T×T 중간 행렬</text> <rect x="30" y="65" width="20" height="80" fill="#4a7bd0" fill-opacity="0.3" stroke="#4a7bd0"/> <text x="40" y="162" font-size="12" text-anchor="middle">Q</text> <text x="62" y="110" font-size="13">×</text>
+<rect x="75" y="95" width="80" height="20" fill="#4a7bd0" fill-opacity="0.3" stroke="#4a7bd0"/> <text x="115" y="132" font-size="12" text-anchor="middle">Kᵀ</text> <text x="167" y="110" font-size="13">=</text> <rect x="185" y="65" width="80" height="80" fill="#d0564a" fill-opacity="0.3" stroke="#d0564a"/>
+<text x="225" y="162" font-size="12" text-anchor="middle">T×T (∝ T²)</text> <text x="277" y="110" font-size="13">×</text> <rect x="295" y="65" width="20" height="80" fill="#3f9a6b" fill-opacity="0.3" stroke="#3f9a6b"/> <text x="305" y="162" font-size="12" text-anchor="middle">V</text> <text x="360" y="100" font-size="12">메모리: K, V 전부 (T에 비례)</text>
+<text x="360" y="120" font-size="12">연산: T²·(d + dv)</text> <text x="20" y="195" font-size="13">linear 방식: φQ (φKᵀ V) — d×dv 상태</text> <rect x="30" y="225" width="80" height="20" fill="#4a7bd0" fill-opacity="0.3" stroke="#4a7bd0"/> <text x="70" y="262" font-size="12" text-anchor="middle">φKᵀ</text> <text x="122" y="240" font-size="13">×</text>
+<rect x="140" y="205" width="20" height="80" fill="#3f9a6b" fill-opacity="0.3" stroke="#3f9a6b"/> <text x="150" y="298" font-size="12" text-anchor="middle">V</text> <text x="172" y="240" font-size="13">=</text> <rect x="190" y="225" width="20" height="20" fill="#e08a3c" fill-opacity="0.4" stroke="#e08a3c"/> <text x="200" y="262" font-size="12" text-anchor="middle">S</text>
+<text x="222" y="240" font-size="13">→</text> <rect x="245" y="205" width="20" height="80" fill="#4a7bd0" fill-opacity="0.3" stroke="#4a7bd0"/> <text x="255" y="298" font-size="12" text-anchor="middle">φQ</text> <text x="277" y="240" font-size="13">×</text> <rect x="295" y="225" width="20" height="20" fill="#e08a3c" fill-opacity="0.4" stroke="#e08a3c"/>
+<text x="305" y="262" font-size="12" text-anchor="middle">S</text> <text x="360" y="230" font-size="12">메모리: S = d×dv (T와 무관)</text> <text x="360" y="250" font-size="12">연산: 2·T·d·dv (T에 선형)</text>
+</svg>
+```
+
+그림 3 — 결합법칙으로 괄호를 옮기면 T×T 중간 행렬(빨강) 대신 d×dv 요약 S(주황)가 생긴다. 이 S가 곧 RNN의 hidden state다.
+
+### 2.3 causal이면 — recurrent form 유도
+
+생성(decoding)은 causal이어야 한다: t번째 출력은 s ≤ t만 봐야 한다. 합을 t까지만 하면:
+
+```
+y_t = φ(q_t)ᵀ S_t / φ(q_t)ᵀ z_t
+
+S_t = ∑_{s≤t} φ(k_s) v_sᵀ   = S_{t−1} + φ(k_t) v_tᵀ        (d×dv 행렬)
+z_t = ∑_{s≤t} φ(k_s)        = z_{t−1} + φ(k_t)             (d 벡터, 정규화용)
+```
+
+말로 하면: 과거 key·value를 전부 들고 있을 필요 없이, **누적합 S와 z만 갱신**하면 된다. 매 토큰에서 outer product 하나를 더하고, query로 한 번 읽는다. 이것은 정확히 **RNN**이다(B3): 고정 크기 hidden state를 가지고, 입력이 올 때마다 갱신하고, 출력은 상태에서 읽는다. 논문 제목이 "Transformers are RNNs"인 이유다.
+
+펌웨어 비유: KV-cache 방식은 "모든 샘플을 링버퍼에 저장해 두고 매번 전체를 다시 훑는 FIR", linear attention은 "누적기(accumulator) 하나만 갱신하는 적분기"다.
+
+### 2.4 코드로 확인 — parallel form == recurrent form
+
+같은 Q, K, V로 (1) T×T 마스크 행렬을 만드는 parallel form과 (2) 상태 S, z만 쓰는 recurrent form을 계산해 같은지 본다.
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(0)
+T, d, dv = 6, 4, 3
+Q, K, V = rng.standard_normal((T, d)), rng.standard_normal((T, d)), rng.standard_normal((T, dv))
+phi = lambda x: np.where(x > 0, x + 1.0, np.exp(x))      # elu(x)+1 : 항상 양수인 feature map
+
+# (1) parallel form: (φQ φKᵀ ⊙ causal mask) V  — T×T 행렬을 만든다, O(T²)
+A = np.tril(phi(Q) @ phi(K).T)                            # [T, T]
+y_par = (A @ V) / A.sum(axis=1, keepdims=True)
+
+# (2) recurrent form: 고정 크기 상태 S(d×dv), z(d) 만 들고 한 토큰씩, O(T)
+S, z = np.zeros((d, dv)), np.zeros(d)
+y_rec = np.zeros((T, dv))
+for t in range(T):
+    S += np.outer(phi(K[t]), V[t])                        # S_t = S_{t-1} + φ(k_t) v_tᵀ
+    z += phi(K[t])                                        # z_t = z_{t-1} + φ(k_t)
+    y_rec[t] = phi(Q[t]) @ S / (phi(Q[t]) @ z)
+print("max |parallel - recurrent| =", np.abs(y_par - y_rec).max())
+print("state floats =", S.size + z.size, "(T와 무관)   KV-cache floats at T=6 =", T * (d + dv))
+print("y[5] =", np.round(y_rec[5], 4))
+```
+
+```text
+max |parallel - recurrent| = 4.440892098500626e-16
+state floats = 16 (T와 무관)   KV-cache floats at T=6 = 42
+y[5] = [-0.2177 -0.183   0.4426]
+```
+
+출력에서 볼 것: 두 방식의 차이는 float64 반올림 수준(4.4e−16)이다. 즉 **수학적으로 같은 모델을 학습 때는 parallel(GPU에서 행렬곱으로 빠르게), 추론 때는 recurrent(상태만 들고 한 토큰씩)로 돌릴 수 있다**. 상태 크기는 `d·dv + d = 16` floats로 T와 무관하다. KV-cache는 T에 비례해서 커진다.
+
+### 2.5 공짜가 아닌 이유 — 고정 크기 상태의 용량
+
+softmax는 "정확히 그 토큰 하나"에 가중치를 몰아줄 수 있다(뾰족한 분포). 반면 linear attention은 모든 과거를 d×dv 행렬 하나에 **더해서** 저장한다. 저장할 쌍이 상태 차원보다 많아지면 서로 섞인다(crosstalk). 연상 기억(associative recall) 실험으로 확인해 보자: key-value 쌍 T개를 저장한 뒤 key_j로 value_j를 꺼낸다.
+
+```python
+import numpy as np
+
+# associative recall: (key, value) T쌍을 저장한 뒤 key_j로 value_j를 꺼낸다
+rng = np.random.default_rng(0)
+d = 16                                                    # key 차원 = 상태 크기 결정
+def softmax(x): e = np.exp(x - x.max()); return e / e.sum()
+for T in (4, 16, 64, 256):
+    Kk = rng.standard_normal((T, d)); Kk /= np.linalg.norm(Kk, axis=1, keepdims=True)  # 단위 key
+    Vv = rng.standard_normal((T, 1))
+    S = Kk.T @ Vv                                         # linear attention 상태: d×1, T와 무관
+    err_lin, err_sm = [], []
+    for j in range(T):
+        err_lin.append(abs((Kk[j] @ S)[0] - Vv[j, 0]))    # 다른 쌍들의 crosstalk가 섞임
+        w = softmax(20.0 * (Kk @ Kk[j]))                  # softmax attention (KV 전부 보관)
+        err_sm.append(abs((w @ Vv)[0] - Vv[j, 0]))
+    print(f"T={T:3d}  state={d} floats vs KV={T*(d+1):5d} floats | "
+          f"recall err linear={np.mean(err_lin):.3f}  softmax={np.mean(err_sm):.3f}")
+```
+
+```text
+T=  4  state=16 floats vs KV=   68 floats | recall err linear=0.305  softmax=0.000
+T= 16  state=16 floats vs KV=  272 floats | recall err linear=0.465  softmax=0.000
+T= 64  state=16 floats vs KV= 1088 floats | recall err linear=1.621  softmax=0.001
+T=256  state=16 floats vs KV= 4352 floats | recall err linear=3.188  softmax=0.004
+```
+
+출력에서 볼 것: softmax attention은 KV를 전부 들고 있으므로 T가 커져도 거의 정확히 꺼낸다. linear attention은 상태가 16 floats로 고정이라 T가 상태 차원(16)을 넘으면서 오차가 급격히 커진다. 이것이 **linear attention의 근본 trade-off: 메모리는 고정, 대신 정확한 검색(copy, recall) 능력이 약하다**. (단순화를 위해 φ 없이 선형 key를 썼다. φ를 써도 상태 크기가 유한하다는 구조는 같다.)
+
+### 2.6 트레이드오프 정리
+
+| 항목 | softmax attention | linear attention |
+|---|---|---|
+| 토큰당 연산 (decode) | ∝ t (과거 길이) | ∝ d·dv (고정) |
+| 상태 메모리 | KV-cache ∝ T | d×dv 고정 |
+| 학습 병렬성 | 높음 | 높음 (parallel/chunked form) |
+| 정확한 검색·복사 | 강함 | 약함 (상태 용량 한계) |
+| 품질 | 기준 | 같은 크기에서 보통 낮음 → decay·gating·더 큰 상태로 보완 |
+
+실제 후속 연구들(RetNet, RWKV, gated linear attention 계열 등)은 상태에 **감쇠(decay)** 를 넣어 `S_t = γ·S_{t−1} + φ(k_t)v_tᵀ`처럼 오래된 정보를 잊게 하거나, 감쇠를 입력에 따라 바꾸는(gating) 방식으로 품질을 끌어올린다. 이 "감쇠하는 누적 상태"가 바로 다음 절 SSM과 같은 모양이다. (Mamba-2 논문은 이 연결을 "state space duality"로 정리했다.)
+
+---
+
+## 3. State Space Model (SSM) — Don이 이미 아는 IIR 필터
+
+### 3.1 제어이론 그대로
+
+SSM의 출발점은 Don이 학부와 RF 일에서 본 **상태공간 방정식** 그 자체다.
+
+```
+x'(t) = A·x(t) + B·u(t)          x ∈ ℝᴺ : 상태, u : 입력(스칼라 채널 하나)
+y(t)  = C·x(t) (+ D·u(t))        y : 출력
+```
+
+말로 하면: 입력 u가 들어오면 상태 x가 A의 동역학을 따라 변하고, 출력은 상태의 선형 조합이다. 딥러닝 SSM은 이것을 **토큰(또는 오디오 프레임) 시퀀스를 처리하는 층**으로 쓴다. 입력 채널마다(d개) 이런 시스템이 하나씩 붙어 있다고 생각하면 된다.
+
+### 3.2 이산화 — ZOH 유도
+
+시퀀스는 이산 샘플이므로 샘플 간격 Δ로 이산화한다. 입력이 한 샘플 동안 일정하다고 보는 zero-order hold(ZOH)로 스칼라(대각) 경우를 풀면:
+
+```
+x((k+1)Δ) = e^{aΔ} · x(kΔ) + ∫₀^Δ e^{a·s} ds · b · u_k
+          = e^{aΔ} · x_k   + (e^{aΔ} − 1)/a · b · u_k
+
+Ā = e^{aΔ},     B̄ = (e^{aΔ} − 1)/a · b
+x_k = Ā · x_{k−1} + B̄ · u_k,      y_k = c · x_k
+```
+
+말로 하면: 연속시간 pole a는 이산시간 pole `Ā = e^{aΔ}`가 된다(s-평면 → z-평면 매핑 `z = e^{sΔ}`). a가 음수이면 Ā가 0과 1 사이라서 안정하다. **이 식은 1차 IIR 필터(one-pole lowpass)와 완전히 같다.** `x_k = α·x_{k−1} + (1−α)·u_k` 형태의 지수 이동평균(EMA)을 펌웨어에서 수없이 짜 봤을 것이다. b = −a로 두면 정확히 그 식이 된다.
+
+A가 **대각행렬**이면 N개 상태가 서로 독립인 1차 IIR 섹션 N개가 되고, 출력은 그 가중합이다. z-변환으로 쓰면:
+
+```
+H(z) = ∑_{n=1}^{N} c_n · B̄_n / (1 − Ā_n · z⁻¹)
+```
+
+말로 하면: **parallel-form IIR 필터**(부분분수 전개)다. 서로 다른 pole을 가진 IIR 필터는 이 형태로 쓸 수 있다. S4D처럼 A를 복소 대각으로 두면 켤레 pole 쌍이 **감쇠 진동자(resonator)** 가 되어, biquad 필터 뱅크와 같은 모양이 된다.
+
+### 3.3 코드로 확인 — 대각 SSM은 IIR 필터 뱅크이고, convolution과도 같다
+
+pole 4개(시상수 1000/200/50/10 ms)를 가진 대각 SSM을 100 Hz(Δ = 10 ms)로 이산화하고, (1) 한 샘플씩 도는 recurrent 모드와 (2) impulse response로 convolution하는 모드가 같은지 확인한다.
+
+```python
+import numpy as np
+
+# 대각 SSM: x' = a⊙x + b·u,  y = c·x   (상태 N=4, 입력·출력 1채널)
+a = np.array([-1.0, -5.0, -20.0, -100.0])     # 연속시간 pole (1/s) — 모두 음수 = 안정
+b = np.ones(4)
+c = np.array([1.0, 2.0, 5.0, 20.0])
+dt = 0.01                                      # 샘플 간격 Δ = 10 ms
+Abar = np.exp(a * dt)                          # ZOH 이산화: Ā = e^{aΔ}
+Bbar = (Abar - 1.0) / a * b                    # B̄ = (e^{aΔ} − 1)/a · b
+print("discrete poles Ā =", np.round(Abar, 4))
+print("time constants    =", [f"{-1/x*1000:.0f} ms" for x in a])
+
+rng = np.random.default_rng(0)
+u = rng.standard_normal(200)
+x, y_rec = np.zeros(4), []
+for uk in u:                                   # recurrent 모드: 한 샘플씩, 상태 4개만 유지
+    x = Abar * x + Bbar * uk                   # 1-pole IIR 4개가 병렬
+    y_rec.append(c @ x)
+Kker = np.array([c @ (Abar**j * Bbar) for j in range(200)])   # convolution kernel K[j] = c·Ā^j·B̄
+y_conv = np.convolve(u, Kker)[:200]            # convolution 모드: 학습 때 병렬 계산
+print("max |recurrent - convolution| =", np.abs(np.array(y_rec) - y_conv).max())
+print("impulse response K[0:5] =", np.round(Kker[:5], 5))
+print(f"DC gain: discrete Σc·B̄/(1−Ā)={np.sum(c*Bbar/(1-Abar)):.4f}  continuous Σ−c·b/a={np.sum(-c*b/a):.4f}")
+```
+
+```text
+discrete poles Ā = [0.99   0.9512 0.8187 0.3679]
+time constants    = ['1000 ms', '200 ms', '50 ms', '10 ms']
+max |recurrent - convolution| = 2.220446049250313e-16
+impulse response K[0:5] = [0.2012  0.11202 0.07489 0.05761 0.04821]
+DC gain: discrete Σc·B̄/(1−Ā)=1.8500  continuous Σ−c·b/a=1.8500
+```
+
+출력에서 볼 것:
+
+- 이산 pole은 `e^{−0.01} = 0.99`부터 `e^{−1} = 0.3679`까지다. 시상수가 긴 pole일수록 1에 가깝다(오래 기억).
+- recurrent와 convolution의 차이가 2.2e−16이다. **같은 LTI 시스템을 IIR(recurrent)로도, 긴 FIR(convolution with impulse response)로도 계산할 수 있다**. S4는 학습 때 convolution 모드(FFT로 병렬), 추론 때 recurrent 모드를 쓰는 아이디어였다.
+- ZOH는 DC gain을 보존한다: 이산 `B̄/(1−Ā) = −b/a`이므로 양쪽 모두 1.85다. 제어 수업에서 배운 그대로다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300">
+<text x="20" y="24" font-size="14">SSM 상태 4개의 impulse response Āⁿ (각자 1로 정규화) — 기억 길이가 다른 필터 뱅크</text> <line x1="70" y1="250" x2="610" y2="250" stroke="currentColor"/> <line x1="70" y1="250" x2="70" y2="45" stroke="currentColor"/> <text x="70" y="268" font-size="12" text-anchor="middle">0</text> <text x="178" y="268" font-size="12" text-anchor="middle">200 ms</text>
+<text x="286" y="268" font-size="12" text-anchor="middle">400 ms</text> <text x="394" y="268" font-size="12" text-anchor="middle">600 ms</text> <text x="502" y="268" font-size="12" text-anchor="middle">800 ms</text> <text x="610" y="268" font-size="12" text-anchor="middle">1 s</text> <text x="60" y="54" font-size="12" text-anchor="end">1.0</text>
+<text x="60" y="154" font-size="12" text-anchor="end">0.5</text> <text x="60" y="254" font-size="12" text-anchor="end">0</text>
+<polyline fill="none" stroke="#4a7bd0" stroke-width="2.5" points="70.0,50.0 80.8,54.0 91.6,57.8 102.4,61.6 113.2,65.4 124.0,69.0 134.8,72.6 145.6,76.1 156.4,79.6 167.2,82.9 178.0,86.3 188.8,89.5 199.6,92.7 210.4,95.8 221.2,98.8 232.0,101.8 242.8,104.8 253.6,107.6 264.4,110.5 275.2,113.2 286.0,115.9 296.8,118.6 307.6,121.2 318.4,123.7 329.2,126.2 340.0,128.7 350.8,131.1 361.6,133.5 372.4,135.8 383.2,138.0 394.0,140.2 404.8,142.4 415.6,144.5 426.4,146.6 437.2,148.7 448.0,150.7 458.8,152.6 469.6,154.6 480.4,156.5 491.2,158.3 502.0,160.1 512.8,161.9 523.6,163.7 534.4,165.4 545.2,167.0 556.0,168.7 566.8,170.3 577.6,171.9 588.4,173.4 599.2,174.9 610.0,176.4"/>
+<polyline fill="none" stroke="#3f9a6b" stroke-width="2.5" points="70.0,50.0 80.8,69.0 91.6,86.3 102.4,101.8 113.2,115.9 124.0,128.7 134.8,140.2 145.6,150.7 156.4,160.1 167.2,168.7 178.0,176.4 188.8,183.4 199.6,189.8 210.4,195.5 221.2,200.7 232.0,205.4 242.8,209.6 253.6,213.5 264.4,216.9 275.2,220.1 286.0,222.9 296.8,225.5 307.6,227.8 318.4,229.9 329.2,231.9 340.0,233.6 350.8,235.1 361.6,236.6 372.4,237.8 383.2,239.0 394.0,240.0 404.8,241.0 415.6,241.8 426.4,242.6 437.2,243.3 448.0,244.0 458.8,244.5 469.6,245.1 480.4,245.5 491.2,246.0 502.0,246.3 512.8,246.7 523.6,247.0 534.4,247.3 545.2,247.5 556.0,247.8 566.8,248.0 577.6,248.2 588.4,248.4 599.2,248.5 610.0,248.7"/>
+<polyline fill="none" stroke="#e08a3c" stroke-width="2.5" points="70.0,50.0 80.8,115.9 91.6,160.1 102.4,189.8 113.2,209.6 124.0,222.9 134.8,231.9 145.6,237.8 156.4,241.8 167.2,244.5 178.0,246.3 188.8,247.5 199.6,248.4 210.4,248.9 221.2,249.3 232.0,249.5 242.8,249.7 253.6,249.8 264.4,249.9 275.2,249.9 286.0,249.9 296.8,250.0 307.6,250.0"/>
+<polyline fill="none" stroke="#d0564a" stroke-width="2.5" points="70.0,50.0 80.8,222.9 91.6,246.3 102.4,249.5 113.2,249.9 124.0,250.0"/> <text x="440" y="120" font-size="12">τ = 1000 ms (Ā = 0.990)</text> <text x="200" y="185" font-size="12">τ = 200 ms (0.951)</text> <text x="120" y="215" font-size="12">τ = 50 ms (0.819)</text>
+<text x="100" y="240" font-size="12">τ = 10 ms (0.368)</text> <text x="340" y="292" font-size="12" text-anchor="middle">출력 y = ∑ cₙ·(이 곡선들) — 학습은 a, b, c를 정해 "어떤 시간 스케일을 볼지" 고른다</text>
+</svg>
+```
+
+그림 4 — 3.3절 SSM 네 상태의 정규화된 impulse response(51개 점을 실제 계산). 빨강은 10 ms면 사라지고 파랑은 1초 뒤에도 37% 남는다. SSM 층은 이런 지수 감쇠 필터 수십~수천 개의 뱅크다.
+
+### 3.4 C로 — 상태 몇 바이트짜리 스트리밍 필터
+
+같은 SSM을 C로 짜서 impulse response 첫 5개가 numpy와 같은지, step response가 DC gain 1.85로 수렴하는지 확인한다.
+
+```c
+#include <math.h>
+#include <stdio.h>
+
+#define N 4                                  /* 상태 수 = 1-pole IIR 섹션 수 */
+
+typedef struct { float abar[N], bbar[N], c[N], x[N]; } ssm_t;
+
+static void ssm_init(ssm_t *s, const float *a, const float *b, const float *c, float dt) {
+    for (int n = 0; n < N; n++) {
+        s->abar[n] = expf(a[n] * dt);                       /* ZOH: Ā = e^{aΔ} */
+        s->bbar[n] = (s->abar[n] - 1.0f) / a[n] * b[n];     /* B̄ = (Ā−1)/a · b */
+        s->c[n] = c[n];
+        s->x[n] = 0.0f;
+    }
+}
+
+static float ssm_step(ssm_t *s, float u) {   /* 샘플 하나 → 출력 하나, 메모리 고정 */
+    float y = 0.0f;
+    for (int n = 0; n < N; n++) {
+        s->x[n] = s->abar[n] * s->x[n] + s->bbar[n] * u;    /* 곱 2 + 합 1 */
+        y += s->c[n] * s->x[n];
+    }
+    return y;
+}
+
+int main(void) {
+    const float a[N] = {-1.0f, -5.0f, -20.0f, -100.0f}, b[N] = {1, 1, 1, 1};
+    const float c[N] = {1.0f, 2.0f, 5.0f, 20.0f};
+    ssm_t s;
+    ssm_init(&s, a, b, c, 0.01f);
+    printf("impulse:");
+    for (int k = 0; k < 5; k++) printf(" %.5f", ssm_step(&s, k == 0 ? 1.0f : 0.0f));
+    ssm_init(&s, a, b, c, 0.01f);
+    float y = 0.0f;
+    for (int k = 0; k < 2000; k++) y = ssm_step(&s, 1.0f);  /* 20 s step 입력 */
+    printf("\nstep response after 20 s: %.4f\n", y);
+    printf("state bytes: %zu (sequence length와 무관)\n", sizeof s.x);
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 ssm.c -o ssm -lm && ./ssm
+```
+
+```text
+impulse: 0.20120 0.11202 0.07489 0.05761 0.04821
+step response after 20 s: 1.8500
+state bytes: 16 (sequence length와 무관)
+```
+
+출력에서 볼 것: impulse response가 numpy의 `K[0:5]`와 소수 5자리까지 같고, step response는 DC gain 1.85로 수렴한다. 경고 0개로 컴파일된다. 20초 입력을 처리해도 들고 있는 상태는 16바이트다. 실제 SSM 층은 채널 d_inner개 × 상태 N개라서 수백 KB 규모가 되지만(3.8절), **시퀀스 길이에 따라 늘지 않는다**는 성질은 같다.
+
+### 3.5 S4 — 왜 그냥 RNN이 아니라 SSM인가
+
+"그럼 선형 RNN 아니냐?"는 좋은 질문이다. S4 (Gu, Goel, Ré, "Efficiently Modeling Long Sequences with Structured State Spaces", ICLR 2022)의 핵심 아이디어는 세 가지로 요약된다.
+
+- **연속시간에서 출발**: Δ를 바꾸면 같은 파라미터로 다른 샘플레이트를 다룰 수 있고, pole 위치를 안정 영역에 두기 쉽다(a가 음수이면 항상 안정).
+- **특별한 A 초기화 (HiPPO)**: 과거 입력을 다항식 기저로 압축해 기억하도록 설계한 A에서 시작해 아주 긴 의존성을 학습할 수 있었다.
+- **두 가지 계산 모드**: 학습 때는 kernel K를 한 번에 만들어 FFT convolution으로 병렬 처리하고, 추론 때는 recurrent로 상태만 들고 간다(3.3절에서 확인한 등가성).
+
+이후 S4D 같은 후속 연구가 "A를 그냥 대각(복소수)으로 둬도 거의 같은 성능"임을 보여, 오늘날 SSM은 대부분 대각 A를 쓴다. 3.3절의 코드가 곧 S4D의 한 채널이다(실수 pole만 쓴 단순판).
+
+### 3.6 Mamba — selective SSM (입력에 따라 Δ, B, C가 바뀐다)
+
+S4까지의 SSM은 **LTI**(linear time-invariant): Ā, B̄, C가 입력과 무관하게 고정이다. LTI 필터는 "무엇을 기억하고 무엇을 무시할지"를 내용에 따라 고를 수 없다. 잡음 샘플과 중요한 샘플을 똑같이 필터링한다. Mamba (Gu & Dao, 2023, "Mamba: Linear-Time Sequence Modeling with Selective State Spaces")는 이것을 바꿨다.
+
+```
+Δ_t = softplus(W_Δ · x_t + b_Δ)       토큰마다 다른 스텝 크기
+B_t = W_B · x_t,   C_t = W_C · x_t     토큰마다 다른 입력·출력 행렬
+Ā_t = exp(Δ_t · A),   B̄_t ≈ Δ_t · B_t  (A 자체는 고정된 대각, 음수)
+h_t = Ā_t ⊙ h_{t−1} + B̄_t · u_t,      y_t = C_t · h_t
+```
+
+말로 하면: Δ가 **입력에 따라** 바뀐다. Δ가 작으면 `Ā ≈ 1`이라 상태를 그대로 유지하고(입력 무시), Δ가 크면 `Ā ≈ 0`이라 과거를 잊고 현재 입력으로 상태를 덮어쓴다. LSTM(B3)의 forget/input gate와 같은 역할을 **시변 IIR 필터의 pole 위치를 샘플마다 움직이는 것**으로 구현한 셈이다. 제어 용어로는 LTI → LTV(linear time-varying) 시스템이 된다. (위의 `B̄_t ≈ Δ_t·B_t`는 Mamba가 B에 대해 쓰는 단순화된 이산화다.)
+
+손으로 하는 예제: "mark가 붙은 샘플의 값만 기억하고 나머지 잡음은 무시하라"는 과제를 고정 Δ(LTI)와 입력 의존 Δ(selective)로 비교한다. 여기서는 Δ를 학습하는 대신 mark로부터 손으로 정했다.
+
+```python
+import numpy as np
+
+# 과제: 표시(mark=1)가 붙은 샘플의 값만 기억하고, 나머지(잡음)는 무시하라
+u    = np.array([0.3, -0.8, 5.0, 0.4, -0.2, 0.7, -0.5, 0.1, -3.0, 0.6, 0.2, -0.4])
+mark = np.array([0,    0,   1,   0,    0,   0,    0,   0,   1,    0,   0,   0])
+a = -1.0                                        # 연속시간 pole (1개 상태)
+
+def run(delta):                                 # delta: 샘플마다의 Δ_t
+    h, out = 0.0, []
+    for ut, dt in zip(u, delta):
+        Abar = np.exp(a * dt)                   # Δ 작다 → Ā≈1 (그대로 유지)
+        h = Abar * h + (1 - Abar) * ut          # Δ 크다 → Ā≈0 (새 값으로 덮어쓰기)
+        out.append(h)
+    return np.round(out, 2)
+
+print("LTI       (Δ=0.3 고정)   :", run(np.full(len(u), 0.3)))
+delta_sel = np.where(mark == 1, 10.0, 1e-3)     # Mamba식: Δ_t = f(입력) — 여기선 손으로 정함
+print("selective (Δ=f(mark))    :", run(delta_sel))
+```
+
+```text
+LTI       (Δ=0.3 고정)   : [ 0.08 -0.15  1.18  0.98  0.68  0.68  0.38  0.3  -0.55 -0.25 -0.14 -0.2 ]
+selective (Δ=f(mark))    : [ 0.   -0.    5.    5.    4.99  4.99  4.98  4.98 -3.   -3.   -2.99 -2.99]
+```
+
+출력에서 볼 것: LTI 필터는 5.0을 1.18로 뭉개고 이후 잡음에 계속 흔들린다. selective 버전은 mark가 온 순간 5.0으로 덮어쓰고, 이후 잡음 동안 4.98까지 거의 그대로 유지하다가, 다음 mark에서 −3.0으로 바꾼다. 이것이 "selective"의 의미다. 실제 Mamba에서는 `W_Δ`, `W_B`, `W_C`를 학습해서 이 선택을 데이터가 정한다.
+
+대가: 입력 의존이 되면 더 이상 LTI가 아니므로 **3.3절의 convolution 모드(FFT)를 쓸 수 없다**. 학습 때도 recurrence를 계산해야 한다. 그래서 다음 절의 scan이 필요하다.
+
+### 3.7 scan — 순차 recurrence를 병렬로
+
+`h_t = a_t·h_{t−1} + b_t`는 한 단계가 이전 결과를 기다려야 하는 순차 의존이다(B3에서 RNN이 NPU에 불리하다고 한 이유). 하지만 이 recurrence는 **결합법칙이 성립하는 연산**으로 쓸 수 있다.
+
+```
+(a₁, b₁) ∘ (a₂, b₂) = (a₁·a₂,  a₂·b₁ + b₂)
+```
+
+말로 하면: "h → a₁h + b₁ 다음에 h → a₂h + b₂를 적용"하는 것은 "h → (a₁a₂)h + (a₂b₁ + b₂)" 하나로 합칠 수 있다. 결합법칙이 있으면 prefix sum처럼 **parallel scan**으로 log₂(T) 라운드에 계산할 수 있다.
+
+```python
+import numpy as np
+
+# h_t = a_t·h_{t-1} + b_t  를 (a_t, b_t) 쌍의 결합법칙 연산으로 본다
+def combine(p, q):                      # p 다음에 q를 적용한 합성: (a1,b1)∘(a2,b2)
+    return (p[0] * q[0], q[0] * p[1] + q[1])
+
+rng = np.random.default_rng(0)
+T = 8
+a, b = rng.uniform(0.5, 1.0, T), rng.standard_normal(T)
+
+h, seq = 0.0, []                        # (1) 순차: T 단계, 매 단계가 이전 결과를 기다림
+for t in range(T):
+    h = a[t] * h + b[t]; seq.append(h)
+
+elems = list(zip(a, b))                 # (2) Hillis–Steele parallel scan: log2(T)=3 라운드
+step, rounds = 1, 0
+while step < T:
+    elems = [combine(elems[i - step], elems[i]) if i >= step else elems[i] for i in range(T)]
+    step, rounds = step * 2, rounds + 1
+par = [e[1] for e in elems]             # h_0 = 0 이므로 b 성분이 곧 h_t
+print("sequential:", np.round(seq, 4))
+print("parallel  :", np.round(par, 4))
+print(f"rounds = {rounds} (vs {T} sequential steps), max diff = {np.abs(np.array(seq) - par).max():.1e}")
+```
+
+```text
+sequential: [-0.7037 -1.7122 -1.5145 -0.7284 -2.9854 -3.074  -3.7153 -3.9451]
+parallel  : [-0.7037 -1.7122 -1.5145 -0.7284 -2.9854 -3.074  -3.7153 -3.9451]
+rounds = 3 (vs 8 sequential steps), max diff = 4.4e-16
+```
+
+출력에서 볼 것: 8단계 순차 계산과 3라운드 병렬 계산이 같은 결과를 낸다. 각 라운드 안의 combine은 서로 독립이라 SIMD/GPU 스레드로 동시에 돌릴 수 있다. Mamba는 이 scan을 GPU SRAM 안에서 수행하는 전용 커널("hardware-aware")로 학습 속도를 확보했다.
+
+기기 관점 두 가지:
+
+- **decode(토큰 하나씩)** 에서는 scan이 필요 없다. 3.4절 C 코드처럼 `h = Ā⊙h + B̄·u` 한 번이면 된다. 이것은 elementwise 곱·합이라 연산은 작지만 **MAC array(GEMM 유닛)를 쓰지 못하고** 벡터 유닛에서 돈다.
+- **prefill(긴 입력을 한꺼번에)** 에서는 scan이 필요하다. parallel scan은 GEMM이 아니라 NPU 컴파일러가 잘 지원하지 않는 패턴일 가능성이 크다. Mamba-2는 시퀀스를 chunk로 나누어 chunk 안은 행렬곱으로, chunk 사이는 짧은 recurrence로 계산하는 방식을 제안했는데, 이는 행렬 유닛에 더 잘 맞는 방향이다.
+
+### 3.8 KV-cache vs SSM 상태 — 실제 숫자
+
+가정한 1B급 설정(16층, fp16)으로 Transformer KV-cache와 Mamba식 SSM 상태를 비교한다. KV 쪽은 GQA로 KV head 8개·head_dim 64, SSM 쪽은 층당 d_inner = 4096, 상태 N = 16, conv 커널 4를 가정했다(Mamba는 SSM 앞에 짧은 causal conv1d를 두므로 그 버퍼도 상태에 포함된다).
+
+```python
+# 가정한 1B급 설정 (설명용): 16층, fp16(2바이트)
+L, kv_heads, head_dim, B = 16, 8, 64, 2
+kv_per_tok_layer = 2 * kv_heads * head_dim * B          # K와 V
+d_inner, n_state, conv_k = 4096, 16, 4                   # Mamba식 SSM 층의 상태 (가정)
+ssm_layer = (d_inner * n_state + d_inner * (conv_k - 1)) * B
+KiB, MiB = 1024, 1024**2
+print(f"Transformer KV : {L*kv_per_tok_layer/KiB:.0f} KiB per token (all {L} layers)")
+print(f"SSM state      : {L*ssm_layer/MiB:.3f} MiB total, constant")
+print(f"{'T':>6} {'KV (MiB)':>9} {'SSM (MiB)':>10} {'hybrid 4attn+12ssm':>19}")
+for T in (256, 1024, 2048, 4096, 8192):
+    kv = L * kv_per_tok_layer * T / MiB
+    ssm = L * ssm_layer / MiB
+    hyb = (4 * kv_per_tok_layer * T + 12 * ssm_layer) / MiB
+    print(f"{T:6d} {kv:9.1f} {ssm:10.2f} {hyb:19.1f}")
+print("break-even T (KV == SSM state):", round(L * ssm_layer / (L * kv_per_tok_layer)))
+```
+
+```text
+Transformer KV : 32 KiB per token (all 16 layers)
+SSM state      : 2.375 MiB total, constant
+     T  KV (MiB)  SSM (MiB)  hybrid 4attn+12ssm
+   256       8.0       2.38                 3.8
+  1024      32.0       2.38                 9.8
+  2048      64.0       2.38                17.8
+  4096     128.0       2.38                33.8
+  8192     256.0       2.38                65.8
+break-even T (KV == SSM state): 76
+```
+
+출력에서 볼 것: KV-cache는 토큰당 32 KiB씩 늘어 8192 토큰에서 256 MiB가 된다. SSM 상태는 2.375 MiB로 고정이다. 76 토큰을 넘는 순간부터 SSM이 작다. 16층 중 4층만 attention으로 두는 hybrid는 그 사이(8192에서 65.8 MiB)다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 310">
+<text x="20" y="24" font-size="14">상태 메모리 vs 시퀀스 길이 (가정: 16층, fp16, GQA 8×64 / SSM d_inner 4096, N 16)</text> <line x1="70" y1="260" x2="610" y2="260" stroke="currentColor"/> <line x1="70" y1="260" x2="70" y2="40" stroke="currentColor"/> <text x="60" y="264" font-size="12" text-anchor="end">0</text> <text x="60" y="213.7" font-size="12" text-anchor="end">64</text>
+<text x="60" y="163.4" font-size="12" text-anchor="end">128</text> <text x="60" y="113.1" font-size="12" text-anchor="end">192</text> <text x="60" y="62.9" font-size="12" text-anchor="end">256</text> <text x="30" y="150" font-size="12" text-anchor="middle" transform="rotate(-90 30 150)">MiB</text>
+<line x1="70" y1="209.7" x2="610" y2="209.7" stroke="#888" stroke-dasharray="2 4"/> <line x1="70" y1="159.4" x2="610" y2="159.4" stroke="#888" stroke-dasharray="2 4"/> <line x1="70" y1="109.1" x2="610" y2="109.1" stroke="#888" stroke-dasharray="2 4"/> <line x1="70" y1="58.9" x2="610" y2="58.9" stroke="#888" stroke-dasharray="2 4"/>
+<text x="70" y="278" font-size="12" text-anchor="middle">0</text> <text x="205" y="278" font-size="12" text-anchor="middle">2048</text> <text x="340" y="278" font-size="12" text-anchor="middle">4096</text> <text x="475" y="278" font-size="12" text-anchor="middle">6144</text> <text x="610" y="278" font-size="12" text-anchor="middle">8192</text>
+<text x="340" y="298" font-size="12" text-anchor="middle">시퀀스 길이 T (토큰)</text> <polyline fill="none" stroke="#d0564a" stroke-width="2.5" points="70.0,260.0 137.5,234.9 205.0,209.7 272.5,184.6 340.0,159.4 407.5,134.3 475.0,109.1 542.5,84.0 610.0,58.9"/>
+<polyline fill="none" stroke="#e08a3c" stroke-width="2.5" points="70.0,258.6 137.5,252.3 205.0,246.0 272.5,239.7 340.0,233.5 407.5,227.2 475.0,220.9 542.5,214.6 610.0,208.3"/> <line x1="70" y1="258.1" x2="610" y2="258.1" stroke="#3f9a6b" stroke-width="3"/> <text x="440" y="80" font-size="12">Transformer KV: 32 KiB/token → 256 MiB</text>
+<text x="440" y="200" font-size="12">hybrid 4 attn + 12 SSM → 65.8</text> <text x="440" y="250" font-size="12">SSM 상태: 2.375 MiB 고정</text>
+</svg>
+```
+
+그림 5 — 3.8절 출력으로 그린 상태 메모리. 빨강(KV-cache)은 T에 비례해 늘고, 초록(SSM)은 바닥에 붙은 평평한 선이다. 주황(hybrid)은 attention 층 비율만큼 기울기가 줄어든다.
+
+주의할 점: 이것은 **상태(KV) 메모리**만의 비교다. 가중치 메모리와 토큰당 가중치 읽기 바이트는 두 아키텍처가 비슷한 크기라면 비슷하다. 짧은 context(수백 토큰)만 쓰는 기기라면 KV-cache가 원래 작아서 SSM의 이점이 줄어든다. 긴 오디오 스트림이나 긴 대화를 기기에서 유지해야 할 때 차이가 커진다.
+
+### 3.9 hybrid — attention 몇 층 + SSM 여러 층
+
+순수 SSM은 2.5절에서 본 linear attention과 같은 한계(고정 상태로 정확한 검색·복사가 약함)를 가진다. 그래서 최근 경향은 **대부분의 층은 SSM(또는 linear recurrence)으로, 소수의 층만 attention으로** 두는 hybrid다. 예로 AI21의 Jamba(Transformer + Mamba 층 혼합, MoE 포함)와 Google DeepMind의 Griffin(gated linear recurrence + local attention)이 있다. 이런 설계는 "정확한 검색은 소수의 attention 층이, 긴 문맥의 요약은 SSM 층이" 맡는다는 생각이다. 어느 비율이 기기에 최적인지는 모델·작업마다 다르므로, 구체적인 비율을 일반 법칙처럼 말하지 않는 것이 안전하다.
+
+---
+
+## 4. Early-exit — 쉬운 입력은 중간에 내린다
+
+### 4.1 직관
+
+모든 입력이 같은 난이도가 아니다. wake word 검출에서 조용한 방의 소음은 첫 층만 봐도 "아님"이 확실하다. 중간 층마다 작은 분류기(**exit head**)를 붙이고, 그 분류기의 확신(최대 softmax 확률)이 threshold τ 이상이면 **거기서 멈추고 결과를 낸다**. 확신이 없을 때만 다음 층으로 간다.
+
+```
+ 입력 ─► block1 ─► head1 ─ conf ≥ τ ? ─ yes ─► 출력 (MAC 적음)
+                     │ no
+                     ▼
+         block2 ─► head2 ─ conf ≥ τ ? ─ yes ─► 출력
+                     │ no
+                     ▼
+         block3 ─► head3 ────────────────────► 출력 (MAC 전부)
+```
+
+평균 연산량은:
+
+```
+E[MAC] = ∑_i P(exit at i) · MAC_upto(i)
+```
+
+말로 하면: 각 exit까지의 누적 MAC을 "거기서 내린 입력의 비율"로 가중평균한다. 펌웨어로 치면 **fast path / slow path**다. 대부분의 패킷은 fast path에서 처리되고 예외만 slow path로 간다.
+
+### 4.2 코드로 확인 — 체커보드 분류에서 exit 분포와 정확도
+
+2D 5×5 체커보드(칸 색 맞히기)는 칸 중앙 샘플은 쉽고 경계 근처는 어렵다. 폭 16짜리 작은 MLP에 exit 3개를 붙여 세 loss의 합으로 공동 학습하고, τ를 바꾸며 exit 분포·정확도·평균 MAC을 잰다.
+
+```python
+import torch, torch.nn as nn, torch.nn.functional as F
+torch.manual_seed(0)
+H = 16
+def make(n):                                    # 2D 체커보드 5×5칸: 칸 경계 근처가 "어려운" 샘플
+    x = torch.rand(n, 2) * 5 - 2.5
+    y = ((x[:, 0] + 2.5).floor() + (x[:, 1] + 2.5).floor()).long() % 2
+    return x, y
+Xtr, ytr = make(4000); Xte, yte = make(2000)
+
+blocks = nn.ModuleList([nn.Sequential(nn.Linear(2, H), nn.ReLU()),
+                        nn.Sequential(nn.Linear(H, H), nn.ReLU()),
+                        nn.Sequential(nn.Linear(H, H), nn.ReLU(), nn.Linear(H, H), nn.ReLU())])
+heads = nn.ModuleList([nn.Linear(H, 2) for _ in range(3)])          # exit 1, 2, 3
+macs = [2*H + H*2, 2*H + H*H + H*2, 2*H + 3*H*H + H*2]              # 각 exit까지 누적 MAC
+opt = torch.optim.Adam(list(blocks.parameters()) + list(heads.parameters()), lr=3e-3)
+def forward_all(x):
+    outs = []
+    for blk, hd in zip(blocks, heads):
+        x = blk(x); outs.append(hd(x))
+    return outs
+for epoch in range(2000):                                           # 세 exit의 loss 합으로 공동 학습
+    opt.zero_grad(); sum(F.cross_entropy(o, ytr) for o in forward_all(Xtr)).backward(); opt.step()
+
+with torch.no_grad():
+    probs = [F.softmax(o, -1) for o in forward_all(Xte)]
+print("accuracy per exit (모두 끝까지):", [round((p.argmax(-1) == yte).float().mean().item(), 3) for p in probs])
+for tau in (0.7, 0.9, 0.97, 0.995):
+    exit_at = torch.full((len(yte),), 2)
+    for i in (1, 0):                                                # 앞 exit일수록 우선
+        exit_at[probs[i].max(-1).values >= tau] = i
+    pred = torch.stack([p.argmax(-1) for p in probs])[exit_at, torch.arange(len(yte))]
+    frac = torch.bincount(exit_at, minlength=3).float() / len(yte)
+    avg = sum(frac[i].item() * macs[i] for i in range(3)) / macs[2]
+    print(f"τ={tau:5}: exits={[round(v, 2) for v in frac.tolist()]} "
+          f"acc={(pred == yte).float().mean().item():.3f} avg MAC={avg:.0%} of full")
+```
+
+```text
+accuracy per exit (모두 끝까지): [0.683, 0.914, 0.976]
+τ=  0.7: exits=[0.31, 0.56, 0.14] acc=0.927 avg MAC=37% of full
+τ=  0.9: exits=[0.03, 0.56, 0.41] acc=0.974 avg MAC=62% of full
+τ= 0.97: exits=[0.01, 0.37, 0.62] acc=0.975 avg MAC=77% of full
+τ=0.995: exits=[0.0, 0.18, 0.82] acc=0.976 avg MAC=89% of full
+```
+
+출력에서 볼 것:
+
+- exit 1(1층)은 68%, exit 2는 91%, 끝까지 가면 97.6%다. 깊이가 실제로 필요한 과제다.
+- **τ = 0.9에서 정확도 97.4%(끝까지와 0.2%p 차이)를 연산 62%로** 얻는다. 손으로 확인: 누적 MAC은 64, 320, 832이고 `0.03·64 + 0.56·320 + 0.41·832 ≈ 522`, `522/832 ≈ 63%`(비율을 반올림해서 1%p 차이).
+- τ를 낮추면(0.7) 연산은 37%까지 줄지만 exit 1의 과신 때문에 정확도가 92.7%로 떨어진다. τ는 정확도-연산 곡선 위의 한 점을 고르는 손잡이다.
+- 이 코드는 평가 편의를 위해 모든 exit을 다 계산한 뒤 고른다. 실제 기기 코드는 exit에서 **진짜로 멈춰야** 연산이 줄어든다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 300">
+<text x="20" y="22" font-size="14">early-exit 정확도 vs 평균 연산 (4.2절 출력)</text> <line x1="70" y1="250" x2="610" y2="250" stroke="currentColor"/> <line x1="70" y1="250" x2="70" y2="35" stroke="currentColor"/> <text x="60" y="224" font-size="12" text-anchor="end">0.70</text> <text x="60" y="164" font-size="12" text-anchor="end">0.80</text>
+<text x="60" y="104" font-size="12" text-anchor="end">0.90</text> <text x="60" y="44" font-size="12" text-anchor="end">1.00</text> <line x1="70" y1="100" x2="610" y2="100" stroke="#888" stroke-dasharray="2 4"/> <line x1="70" y1="40" x2="610" y2="40" stroke="#888" stroke-dasharray="2 4"/> <text x="70" y="268" font-size="12" text-anchor="middle">0%</text>
+<text x="205" y="268" font-size="12" text-anchor="middle">25%</text> <text x="340" y="268" font-size="12" text-anchor="middle">50%</text> <text x="475" y="268" font-size="12" text-anchor="middle">75%</text> <text x="610" y="268" font-size="12" text-anchor="middle">100%</text> <text x="340" y="290" font-size="12" text-anchor="middle">평균 MAC (끝까지 = 100%)</text>
+<polyline fill="none" stroke="#888" stroke-width="1.5" stroke-dasharray="5 3" points="113.2,230.2 275.2,91.6 610.0,54.4"/> <circle cx="113.2" cy="230.2" r="5" fill="#888"/> <circle cx="275.2" cy="91.6" r="5" fill="#888"/> <circle cx="610.0" cy="54.4" r="5" fill="#888"/> <text x="125" y="226" font-size="12">exit 1만 (0.683)</text>
+<text x="285" y="118" font-size="12">exit 2만 (0.914)</text> <text x="600" y="75" font-size="12" text-anchor="end">끝까지 (0.976)</text> <polyline fill="none" stroke="#4a7bd0" stroke-width="2.5" points="269.8,83.8 404.8,55.6 485.8,55.0 550.6,54.4"/> <circle cx="269.8" cy="83.8" r="5" fill="#4a7bd0"/> <circle cx="404.8" cy="55.6" r="5" fill="#4a7bd0"/>
+<circle cx="485.8" cy="55.0" r="5" fill="#4a7bd0"/> <circle cx="550.6" cy="54.4" r="5" fill="#4a7bd0"/> <text x="230" y="70" font-size="12">τ=0.7</text> <text x="395" y="45" font-size="12">τ=0.9</text> <text x="170" y="160" font-size="12">파랑 = early-exit (τ 변화) · 회색 = 고정 깊이 모델</text>
+</svg>
+```
+
+그림 6 — early-exit(파랑)은 같은 연산에서 고정 깊이 모델(회색 점선)보다 위에 있다. τ = 0.9 점은 연산 62%로 끝까지 간 모델과 거의 같은 정확도다.
+
+### 4.3 기기에서의 장단점
+
+- **평균은 줄지만 최악은 그대로다.** 어려운 입력은 여전히 끝까지 간다. real-time deadline(D6)은 최악 경로로 잡아야 하므로, early-exit은 **latency 보장이 아니라 평균 전력(에너지)** 을 줄이는 기법으로 보는 것이 맞다. 배터리 기기에는 그것만으로도 가치가 크다.
+- **confidence가 믿을 만해야 한다.** 과신하는 exit head는 틀린 답으로 일찍 내린다. A2의 calibration(temperature scaling)이 여기서 쓰인다.
+- **NPU에서는 그래프가 쪼개진다.** "여기서 멈출까?" 분기는 데이터 의존 제어 흐름이다. 보통은 블록별로 서브그래프를 나눠 컴파일하고, 사이에서 CPU가 confidence를 확인해 다음 서브그래프를 호출한다. 호출 오버헤드가 블록 연산보다 크면 이득이 사라진다.
+- **streaming 오디오와 궁합**: 프레임마다 판단하는 KWS 계열에서는 "조용한 프레임은 첫 블록에서 끝"이 자연스럽다. 실제로 이 아이디어는 다음 절 cascade와 경계가 흐리다(early-exit = 한 모델 안의 cascade).
+
+---
+
+## 5. Cascade — 작은 모델 먼저, 불확실하면 큰 모델로
+
+### 5.1 정의와 기대 비용
+
+cascade는 모델 여러 개를 **순서대로** 둔다. 1단(작고 싸다)이 먼저 보고, 확신하면 거기서 끝, 불확실하면 2단(크고 비싸다)으로 넘긴다(escalate).
+
+```
+E[cost] = c1 + p_esc · c2
+3단이면   E[cost] = c1 + p1 · c2 + p1 · p2 · c3
+```
+
+말로 하면: 1단은 항상 돈다. 2단은 escalate 확률 p만큼만 돈다. 비용 c는 에너지(mJ), 지연(ms), 돈(클라우드 요금) 무엇이든 된다. **p를 낮추는 것(1단이 대부분을 처리)과 c1을 낮추는 것(1단이 정말 싸다)** 이 둘 다 필요하다.
+
+기기 예:
+
+| cascade | 1단 | 2단 | 3단 |
+|---|---|---|---|
+| 음성 비서 wake | always-on MCU VAD/KWS | DSP의 더 큰 KWS 검증 | SoC ASR → LLM |
+| 대화 응답 | 기기 SLM | 클라우드 LLM | |
+| 제스처 | IMU 임계값 규칙 | 소형 CNN | |
+
+### 5.2 손계산 — wake 체인의 평균 전력
+
+가정(설명용 숫자): 1단 MCU는 항상 1 mW. 1단이 시간당 20번 trigger(대부분 false wake, A2의 Bayes 참고)하면 2단 DSP 검증기가 30 mW로 1초 돈다. 2단이 시간당 2번 통과시키면 3단 SoC ASR이 300 mW로 5초 돈다.
+
+```
+2단 에너지/시간 = 20 × 30 mW × 1 s  =   600 mJ  → 평균 0.167 mW
+3단 에너지/시간 =  2 × 300 mW × 5 s = 3,000 mJ  → 평균 0.833 mW
+평균 전력 = 1 + 0.167 + 0.833 = 2.0 mW
+
+2단 없이 1단 → 3단 직행:  20 × 300 mW × 5 s = 30,000 mJ → 8.33 mW
+평균 전력 = 1 + 8.33 = 9.33 mW    (약 4.7배)
+```
+
+말로 하면: 중간에 싼 검증 단계 하나를 넣어 비싼 단계의 호출을 20회에서 2회로 줄이면 평균 전력이 4.7배 줄어든다. 여기서 **false wake의 비용**이 드러난다. 1단의 false wake 하나는 "30 mW × 1초"이고, 2단을 통과한 false wake 하나는 "300 mW × 5초"다. A2에서 계산한 FA/hour가 곧 전력 예산 항목이 된다(I3).
+
+### 5.3 코드로 확인 — 기기 SLM → 클라우드 LLM 라우팅 시뮬레이션
+
+질의 난이도가 대부분 쉬운(beta 분포) 음성 비서를 가정한다. 기기 SLM은 어려울수록 틀리고, 자기 난이도와 상관된(하지만 잡음 섞인) confidence를 낸다. confidence가 τ 미만이면 클라우드로 보낸다.
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(0)
+N = 100_000
+c1, c2 = 1.0, 20.0                              # 비용 단위: 기기 SLM 1회 = 1, 클라우드 LLM 1회 = 20 (가정)
+z = rng.beta(1, 3, N)                           # 질의 난이도: 대부분 쉬움 ("타이머 5분")
+slm_ok   = rng.uniform(0, 1, N) < 0.99 - 0.6 * z                 # 작은 모델은 어려울수록 틀림
+cloud_ok = rng.uniform(0, 1, N) < 0.97                           # 큰 모델은 대체로 맞음
+conf = np.clip(1 - z + rng.normal(0, 0.15, N), 0, 1)             # SLM이 내는 confidence (난이도와 상관)
+
+print(f"always SLM  : acc={slm_ok.mean():.3f}  cost/query={c1:.2f}")
+print(f"always cloud: acc={cloud_ok.mean():.3f}  cost/query={c2:.2f}")
+for tau in (0.5, 0.6, 0.7, 0.8):
+    esc = conf < tau                                             # 불확실하면 escalate
+    acc = np.where(esc, cloud_ok, slm_ok).mean()
+    p = esc.mean()
+    sim_cost = (c1 + esc * c2).mean()                            # 시뮬레이션 평균
+    print(f"cascade τ={tau}: p_escalate={p:.3f} acc={acc:.3f} "
+          f"E[cost] sim={sim_cost:.2f} formula c1+p·c2={c1 + p * c2:.2f}")
+```
+
+```text
+always SLM  : acc=0.838  cost/query=1.00
+always cloud: acc=0.970  cost/query=20.00
+cascade τ=0.5: p_escalate=0.159 acc=0.887 E[cost] sim=4.19 formula c1+p·c2=4.19
+cascade τ=0.6: p_escalate=0.255 acc=0.907 E[cost] sim=6.09 formula c1+p·c2=6.09
+cascade τ=0.7: p_escalate=0.384 acc=0.928 E[cost] sim=8.68 formula c1+p·c2=8.68
+cascade τ=0.8: p_escalate=0.540 acc=0.945 E[cost] sim=11.80 formula c1+p·c2=11.80
+```
+
+출력에서 볼 것:
+
+- 시뮬레이션 평균 비용이 공식 `c1 + p·c2`와 정확히 맞는다.
+- τ = 0.5: 질의의 16%만 클라우드로 보내 비용은 항상-클라우드의 21%(4.19 / 20), 정확도는 SLM 단독 83.8% → 88.7%.
+- τ를 올리면 정확도는 97%에 가까워지지만 비용도 빠르게 는다. 97%에 도달하지 못하는 이유는 **confidence가 잡음 섞여 있어서** "SLM이 틀리는데 자신 있는" 질의를 놓치기 때문이다. cascade의 성능 상한은 1단 confidence의 질(calibration)이 정한다.
+- 비용에는 돈만이 아니라 지연(네트워크 왕복), 프라이버시, 오프라인 여부가 들어간다. 이 결정 기준 전체는 L3 hybrid 라우팅에서 다룬다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 260">
+<text x="20" y="22" font-size="14">음성 비서 cascade — 단계마다 호출 빈도가 줄고 단가가 오른다 (5.2절 가정 숫자)</text> <rect x="20" y="70" width="120" height="70" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/> <text x="80" y="95" font-size="13" text-anchor="middle">MCU VAD/KWS</text> <text x="80" y="115" font-size="12" text-anchor="middle">항상 1 mW</text>
+<text x="80" y="132" font-size="12" text-anchor="middle">c1 작음</text> <line x1="140" y1="105" x2="200" y2="105" stroke="currentColor"/> <polygon points="200,105 192,100 192,110" fill="currentColor"/> <text x="170" y="95" font-size="12" text-anchor="middle">20/h</text> <rect x="200" y="70" width="120" height="70" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<text x="260" y="95" font-size="13" text-anchor="middle">DSP 검증 KWS</text> <text x="260" y="115" font-size="12" text-anchor="middle">30 mW × 1 s</text> <text x="260" y="132" font-size="12" text-anchor="middle">평균 0.17 mW</text> <line x1="320" y1="105" x2="380" y2="105" stroke="currentColor"/> <polygon points="380,105 372,100 372,110" fill="currentColor"/>
+<text x="350" y="95" font-size="12" text-anchor="middle">2/h</text> <rect x="380" y="70" width="120" height="70" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/> <text x="440" y="95" font-size="13" text-anchor="middle">SoC ASR + SLM</text> <text x="440" y="115" font-size="12" text-anchor="middle">300 mW × 5 s</text>
+<text x="440" y="132" font-size="12" text-anchor="middle">평균 0.83 mW</text> <line x1="500" y1="105" x2="545" y2="105" stroke="currentColor" stroke-dasharray="4 3"/> <polygon points="545,105 537,100 537,110" fill="currentColor"/> <text x="522" y="95" font-size="12" text-anchor="middle">p_esc</text>
+<rect x="545" y="70" width="100" height="70" rx="6" fill="none" stroke="#d0564a" stroke-width="2"/> <text x="595" y="100" font-size="13" text-anchor="middle">cloud LLM</text> <text x="595" y="120" font-size="12" text-anchor="middle">c2 = 20 × c1</text> <text x="20" y="185" font-size="13">E[cost] = c1 + p1·c2 + p1·p2·c3 + …</text>
+<text x="20" y="210" font-size="12">검증 단계 포함: 평균 2.0 mW · 검증 단계 없이 20/h를 바로 SoC로: 9.33 mW (4.7배)</text> <text x="20" y="235" font-size="12">각 화살표의 빈도 = 앞 단계의 trigger율 — false wake가 곧 뒤 단계의 전력 비용</text>
+</svg>
+```
+
+그림 7 — 4단 cascade. 왼쪽일수록 싸고 자주 돌고, 오른쪽일수록 비싸고 드물게 돈다. 전체 비용은 "각 단 단가 × 그 단에 도달할 확률"의 합이다.
+
+### 5.4 cascade 설계 체크포인트
+
+- **1단은 recall 우선**: 1단에서 놓친(false reject) 것은 뒤에서 되살릴 수 없다. 1단 threshold는 낮게(잘 통과시키게), 거르는 일은 뒤 단이 한다.
+- **단계 간 오류의 상관**: 두 단이 같은 소리에 같이 속으면 FA가 기대만큼 안 줄어든다(A2 9.2절의 독립 가정 경고).
+- **escalate 지연**: 클라우드로 넘기는 결정이 늦으면 사용자는 "기기 SLM 시간 + 클라우드 시간"을 모두 기다린다. 일찍 판단하거나 병렬로 시작(speculative하게 둘 다 시작)하는 설계가 있다.
+- **측정**: 필드 로그로 p_esc를 계속 모니터링한다. 사용자 분포가 바뀌면(새 기능, 새 언어) p_esc가 올라가고 비용이 선형으로 따라 오른다.
+
+---
+
+## 6. 그 밖의 효율 아이디어 (한 문단씩)
+
+**Knowledge distillation (C5)**: 큰 teacher 모델의 출력 분포(soft label)를 작은 student가 따라 하게 학습한다. 아키텍처를 바꾸는 게 아니라 **작은 아키텍처를 더 잘 학습시키는 방법**이라서, 이 노트의 어떤 구조와도 같이 쓴다(예: 큰 Transformer를 teacher로 작은 SSM이나 cascade 1단 모델을 학습). 서버 모델 → 기기 모델 경로의 기본 도구다.
+
+**Speculative decoding (L6)**: 작은 draft 모델이 토큰 여러 개를 빠르게 추측하고, 큰 모델이 그 토큰들을 한 번의 forward로 **병렬 검증**한다. 받아들여진 만큼 큰 모델 호출이 줄어든다. 출력 분포는 큰 모델과 같게 유지된다(Leviathan et al. 2023). cascade와 비슷해 보이지만, cascade는 "작은 모델 답을 그대로 쓸지"를 정하고, speculative decoding은 "큰 모델 답을 더 빨리 얻는" 기법이다. decode가 memory-bound라서 검증 토큰 여러 개를 한 번에 처리해도 가중치 읽기 비용이 거의 같다는 점을 이용한다.
+
+**Sparse attention / sliding window**: 모든 과거 토큰이 아니라 최근 W개(sliding window)나 정해진 패턴(local + 일부 global 토큰)만 보게 한다. KV-cache가 W로 상한이 생겨서 링버퍼로 구현된다(Don에게 가장 익숙한 형태). Mistral 7B가 sliding window attention을 쓴 것이 잘 알려진 예다. 층을 쌓으면 정보가 층마다 W씩 더 멀리 전달되므로 실질 수용 범위는 W보다 넓다.
+
+**Weight sharing**: 여러 층이 같은 가중치를 공유한다(ALBERT의 cross-layer sharing 등). 파라미터 메모리는 줄지만 **연산량은 그대로**다. 기기에서 flash·DRAM 용량이 병목이고 연산 여유가 있을 때 유효하다. 가중치 캐시 재사용이 좋아지는 부수 효과도 있을 수 있다.
+
+**Conditional computation 일반**: MoE와 early-exit은 "입력에 따라 계산 경로를 바꾸는" 조건부 계산의 두 예다. 토큰마다 층을 건너뛸지 정하는 방식(예: Mixture-of-Depths), 입력 해상도를 동적으로 고르는 방식 등도 있다. 공통된 기기 쪽 과제는 같다: **동적 shape와 분기를 정적 그래프 NPU에 어떻게 올리느냐**.
+
+---
+
+## 7. 임베디드 관점에서 다시 보기
+
+### 7.1 NPU에 잘 맞는 것과 안 맞는 것
+
+E5에서 보듯 오늘날 대부분의 edge NPU는 **정적 그래프 + 정적 shape + dense GEMM/conv**에 최적화되어 있다. 컴파일러가 미리 tiling·DMA 스케줄·SRAM 배치를 정하는데, 이것은 "무엇을 언제 계산할지"가 컴파일 타임에 알려져 있어야 가능하다. 이 기준으로 보면(구체적인 지원 여부는 NPU·툴체인·버전마다 다르므로 반드시 해당 벤더 문서로 확인해야 한다):
+
+| 기법 | NPU 궁합 | 이유 | 흔한 우회 |
+|---|---|---|---|
+| MoE | 나쁨 | top-k 결과에 따라 gather/scatter, expert별 배치 크기가 매번 다름 | router만 CPU에서 돌리고 expert를 서브그래프로 호출 / 모든 expert를 다 계산(이득 소멸) |
+| linear attention | 중간 | 투영과 outer product 누적은 GEMM·elementwise로 표현 가능 | decode는 상태 갱신을 작은 GEMV로, prefill은 chunk 단위 행렬곱 |
+| SSM (Mamba) decode | 중간 | 투영(in/out proj)은 dense GEMM이라 잘 맞음, 상태 갱신은 elementwise + exp | 상태 갱신을 벡터 유닛/DSP에서, exp는 LUT |
+| SSM prefill (scan) | 나쁨 가능성 | parallel scan은 GEMM 패턴이 아님, 지원 op 목록에 없을 수 있음 | chunked(행렬곱 형태) 알고리즘 / CPU·DSP에서 순차 |
+| early-exit | 중간 | 데이터 의존 분기 → 그래프 분할 필요 | 블록별 서브그래프 + CPU가 confidence 판정 |
+| cascade | 좋음 | 각 단은 평범한 정적 모델, 분기는 시스템(펌웨어) 레벨 | 단마다 가장 맞는 코어(MCU/DSP/NPU/cloud)에 배치 |
+| sliding window attn | 좋음 | 고정 크기 KV 링버퍼, shape가 고정 | 링버퍼 인덱싱을 펌웨어가 관리 |
+| distillation | 좋음 | 결과가 그냥 작은 dense 모델 | — |
+
+정리: **"계산을 조건부로 건너뛰는" 기법은 NPU 안이 아니라 NPU 바깥(펌웨어·CPU 제어)에서 구현할 때 가장 잘 먹힌다.** cascade가 기기에서 가장 실용적인 이유다. 반대로 SSM·linear attention처럼 "고정 크기 상태로 바꾸는" 기법은 메모리 이득이 확실하지만, 상태 갱신 연산이 NPU의 약한 부분(elementwise, 순차)에 떨어진다. 이 부분은 Don의 DSP 경험이 바로 쓰이는 곳이다: 상태 갱신은 결국 IIR 필터 뱅크이고, Hexagon 같은 DSP의 벡터 유닛은 원래 이런 연산을 잘한다.
+
+### 7.2 비용 축 요약 표
+
+0절의 다섯 축으로 이 노트 전체를 한 표에 모은다(dense Transformer 대비 방향; "↓"는 줄어듦, "↑"는 늘어남, "="는 비슷).
+
+| 아키텍처 | compute/token | weight memory | bandwidth/token | state/KV memory | latency | 대가 |
+|---|---|---|---|---|---|---|
+| MoE | ↓ (active만) | ↑ (total 상주) | ↓ (active만, 캐시 적중 시) | = | 평균↓, flash offload 시 tail↑ | 메모리, 동적 라우팅 |
+| linear attention | ↓ (T 무관) | = | = | ↓ 고정 d×dv | 긴 context에서 ↓ | 정확한 recall 약함 |
+| SSM (Mamba) | ↓ (T 무관) | = | = | ↓ 고정 | 긴 context에서 ↓, 순차 scan | scan의 HW 궁합, recall |
+| hybrid | 중간 | = | = | 중간 (attention 층만 KV) | 중간 | 설계 복잡도 |
+| early-exit | 평균 ↓ | ↑ 약간 (exit head) | 평균 ↓ | = | 평균↓, 최악 = | 가변 latency, calibration |
+| cascade | 평균 ↓ | 단 수만큼 합 | 평균 ↓ | 단별 | 평균↓, escalate 시 ↑ | 시스템 복잡도, 1단 confidence |
+| sliding window | ↓ (W 상한) | = | = | ↓ W 상한 | ↓ | 먼 문맥 직접 참조 불가 |
+
+---
+
+## 8. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| MoE 메모리를 active 파라미터로 예산 | 기기에서 OOM, 또는 swap으로 초당 토큰 급락 | 모든 expert가 상주해야 함 | 메모리는 total, 대역폭·연산은 active로 따로 계산 |
+| 균등 라우팅이면 캐시가 잘 될 거라 기대 | expert 캐시 적중률이 낮고 flash 읽기 폭증 | 토큰 몇 개면 거의 모든 expert가 호출됨 | 실제 라우팅 로그로 재사용 거리 측정, prefetch |
+| load-balancing loss 없이 MoE 학습 | 한두 expert만 쓰이고 품질이 dense 소형 모델 수준 | router 양의 피드백(expert collapse) | aux loss 추가, expert별 배정 비율 모니터링 |
+| linear attention을 softmax attention 대체품으로 그대로 교체 | 긴 문서에서 특정 사실 인용·복사 실패 | 고정 상태 용량 한계(crosstalk) | 감쇠·gating, 일부 층은 attention 유지(hybrid) |
+| SSM 이산화에서 Δ나 pole 부호 실수 | 출력 발산 또는 즉시 0으로 수렴 | a > 0이면 Ā > 1 불안정 | a = −exp(파라미터)로 음수 강제, Ā 범위 assert |
+| SSM 상태를 fp16/int8로 무심코 양자화 | 긴 시퀀스에서 서서히 drift | pole이 1 근처라 누적 오차가 오래 남음(IIR 양자화 문제와 동일) | 상태는 높은 정밀도 유지, pole 양자화 민감도 측정 |
+| early-exit 평가에서 모든 exit를 계산한 채 연산 절약을 보고 | 기기 측정 전력이 줄지 않음 | 실제로 멈추지 않음 / 서브그래프 호출 오버헤드 | 실제 분기 구현 후 전력계로 측정 |
+| early-exit으로 deadline을 맞추려 함 | 어려운 입력에서 deadline miss | 최악 경로는 그대로 | deadline은 full 경로로 잡고, early-exit은 평균 전력용으로 |
+| cascade 1단 threshold를 precision 위주로 | 사용자가 불러도 반응 없음(FRR 증가) | 1단 false reject는 복구 불가 | 1단은 recall 우선, 거르기는 뒤 단 |
+| p_escalate를 출시 후 모니터링 안 함 | 클라우드 비용·지연이 서서히 증가 | 사용자 분포 변화 | p_esc, 단별 호출 수를 telemetry로 수집 |
+
+---
+
+## 9. 면접에서 이렇게 말한다
+
+**Q.** "Total vs active parameters in MoE — why does it matter on device?"
+
+**A.** total은 메모리에 상주해야 하는 양이고, active는 토큰 하나가 실제로 쓰는 양이다. 연산과 decode 시 가중치 읽기 바이트는 active를 따르지만, 메모리 용량은 total을 따른다. 서버에서는 expert를 여러 GPU에 나누고 배치로 재사용하니 이득이 크지만, batch 1인 기기에서는 토큰 몇 개만 지나도 거의 모든 expert가 호출되어 전부 DRAM에 있어야 한다. 그래서 기기에서는 "같은 DRAM에 들어가는 모델 중 decode가 가장 빠른 것"이 필요할 때만 MoE가 의미 있다. flash에서 expert를 불러오는 방식은 아직 연구 단계라고 본다.
+
+> Total parameters set the memory footprint, active parameters set compute and bytes read per token. On a server you shard experts across GPUs and batching gives you reuse, so MoE is a clear win. On a device at batch size one, routing is close to uniform after a handful of tokens, so every expert has to be resident in DRAM even though each token only touches two of them. In my back-of-envelope example, an 8-expert top-2 model had 4.8 billion total but 1.4 billion active parameters: 2.2 GB resident at int4, but only 0.7 GB read per token. So it only makes sense on device when memory capacity is available and bandwidth is the bottleneck. Offloading experts to flash is interesting research, and it looks a lot like SSD read-ahead, but I wouldn't count on it for a product yet.
+
+**Q.** "How does Mamba avoid a KV-cache?"
+
+**A.** Mamba는 attention 대신 state space model을 쓴다. 채널마다 고정 크기 상태를 들고 `h = Ā·h + B̄·u`로 갱신하는데, 이것은 이산화된 선형 시스템, 즉 IIR 필터 뱅크다. 과거는 상태에 요약되므로 시퀀스가 길어져도 메모리가 늘지 않는다. Mamba의 차별점은 Δ, B, C를 입력에 따라 바꾸는 selective 구조라서, 필터 pole을 샘플마다 움직여 무엇을 기억하고 잊을지 고를 수 있다. 대가는 고정 상태의 용량 한계(정확한 recall이 약함)와, 학습·prefill 때 scan이 필요하다는 점이다.
+
+> Instead of attention, each layer runs a state space model: a fixed-size state per channel updated as h equals A-bar times h plus B-bar times the input, which is a discretized linear system, essentially a bank of IIR filters. The past is summarized in that state, so memory is constant in sequence length instead of growing like a KV-cache. What makes Mamba "selective" is that the step size and the B and C matrices depend on the input, so it can decide per token whether to hold its state or overwrite it, like moving the filter poles sample by sample. The trade-offs are a finite state capacity, so exact recall and copying are weaker, which is why hybrids keep a few attention layers, and a scan for prefill, which maps less naturally onto GEMM-oriented NPUs.
+
+**Q.** "Design a cascade for a voice assistant to minimize cost."
+
+**A.** 단계마다 단가가 오르고 호출 빈도가 떨어지도록 쌓는다. always-on MCU의 VAD와 작은 KWS, DSP의 더 큰 검증 KWS, SoC의 ASR과 기기 SLM, 마지막이 클라우드 LLM이다. 기대 비용은 `c1 + p1·c2 + p1·p2·c3 …`이므로 각 단의 escalate 확률을 낮추는 게 핵심이다. 앞 단은 recall 우선으로 두고 false wake는 뒤 단이 거른다. 기기 SLM → 클라우드 라우팅은 confidence threshold로 정하고, calibration이 성능 상한을 정한다. 필드에서는 단별 호출 수와 p_esc를 telemetry로 본다.
+
+> I'd stack stages so that each one is more expensive and invoked less often: an always-on MCU running VAD and a tiny keyword model, a larger verifier on the DSP, ASR plus a small language model on the SoC, and the cloud LLM last. Expected cost is c1 plus p1 times c2 plus p1 p2 times c3, so the lever is each stage's escalation probability. For example, with 20 first-stage triggers an hour, adding a 30-milliwatt one-second verifier that passes only two of them cuts average power from about 9.3 to 2 milliwatts. Early stages are tuned for recall, because a false reject can't be recovered later. The on-device to cloud decision uses a calibrated confidence threshold, and I'd monitor the escalation rate in telemetry since it drives cloud cost linearly.
+
+**Q.** "What are the trade-offs of linear attention?"
+
+**A.** softmax의 exp를 feature map의 내적 `φ(q)·φ(k)`로 바꾸면 행렬곱 괄호를 옮겨 `φ(K)ᵀV`라는 d×dv 요약을 먼저 만들 수 있다. 그러면 연산은 T에 선형, decode 상태는 고정 크기가 되고 사실상 RNN이 된다. 대가는 품질이다. 모든 과거를 고정 크기 행렬에 더해 저장하므로 쌍이 많아지면 crosstalk가 생겨 정확한 검색·복사가 약해진다. 그래서 감쇠·gating을 넣거나 일부 층은 softmax attention을 유지한다.
+
+> Linear attention replaces the softmax kernel with a feature-map dot product, phi of q dot phi of k. Then matrix multiplication is associative, so you can compute phi-K-transpose times V first, a small d by d-v summary, instead of the T by T attention matrix. Cost becomes linear in sequence length, and in causal decoding it's literally an RNN with a fixed-size state. The price is quality: everything is added into one fixed matrix, so once the number of stored items approaches the state dimension you get crosstalk, and exact retrieval or copying degrades. Modern variants add decay and input-dependent gating, and many designs keep a few full attention layers.
+
+**Q.** "When would you use early-exit on a device, and when not?"
+
+**A.** 입력 난이도 분포가 치우쳐 있고(대부분 쉬움) 목표가 평균 전력일 때 쓴다. 중간 exit의 confidence가 threshold를 넘으면 멈추므로, 예제에서는 연산 62%로 정확도 손실 0.2%p였다. 반면 hard real-time deadline을 맞추는 수단은 아니다(최악 경로는 그대로). 또 NPU에서는 그래프를 블록별로 나누고 CPU가 판정해야 해서 호출 오버헤드가 이득보다 크면 쓰지 않는다.
+
+> I'd use it when most inputs are easy and the goal is average energy, not worst-case latency. Each exit head checks a calibrated confidence and stops if it clears a threshold; in a small experiment I got within 0.2 points of full accuracy at about 62 percent of the compute. It doesn't help a hard deadline, because the hardest input still runs the full network. And on an NPU the data-dependent branch forces you to split the graph into sub-graphs with the CPU deciding in between, so if the per-call overhead is comparable to a block's compute, the savings disappear.
+
+**Q.** "An SSM layer is described as an IIR filter bank. Explain."
+
+**A.** 대각 A를 가진 상태공간 모델을 ZOH로 이산화하면 상태마다 `x_k = e^{aΔ}·x_{k−1} + B̄·u_k`라는 1차 IIR 섹션이 되고, 출력은 그 가중합이다. 전달함수는 `∑ c·B̄/(1 − Ā·z⁻¹)`의 parallel-form IIR이다. LTI이면 impulse response로 convolution해도 같은 결과라서 학습은 convolution, 추론은 recurrence로 돌릴 수 있다. 복소 pole이면 감쇠 진동자다. Mamba는 Δ를 입력에 따라 바꾸므로 시변 필터가 된다.
+
+> Take a state space model with diagonal A and discretize it with zero-order hold: each state becomes a first-order IIR section, x of k equals e to the a-delta times x of k minus one plus B-bar times u, and the output is a weighted sum of those states. The transfer function is a parallel-form IIR, a sum of c times B-bar over one minus A-bar z-inverse. If it's time-invariant, convolving with the impulse response gives the same answer, so S4-style models train in convolution mode and run in recurrent mode. Complex poles give you damped resonators. Mamba makes the step size input-dependent, which turns it into a time-varying filter.
+
+---
+
+## 10. 직접 해보기
+
+1. 손계산: expert 16개, top-2, expert 하나 = 파라미터 50M, expert 외 공유 파라미터 = 400M인 MoE의 total과 active 파라미터, int4 상주 메모리를 구하라.
+정답: total = 400M + 16·50M = 1.2B, active = 400M + 2·50M = 500M, int4 상주 = 1.2B × 0.5 B = 600 MB (약 0.56 GiB).
+
+2. 손계산: 균등 라우팅을 가정할 때 expert 16개 top-2 모델에서 토큰 8개가 지나간 뒤 한 층에서 한 번이라도 쓰인 expert의 기대 개수는?
+정답: `16·(1 − (1 − 2/16)^8) = 16·(1 − 0.875^8) ≈ 16·(1 − 0.344) ≈ 10.5`개.
+
+3. 손계산: 연속시간 pole a = −50 /s인 1차 SSM을 16 kHz 오디오(Δ = 62.5 μs)로 ZOH 이산화하면 Ā와 B̄(b = 1)는? 시상수는 몇 샘플인가?
+정답: `Ā = e^{−50·62.5e−6} = e^{−0.003125} ≈ 0.99688`, `B̄ = (Ā − 1)/a ≈ 0.003120/50 ≈ 6.24e−5`, 시상수 = 1/50 s = 20 ms = 320 샘플.
+
+4. 손계산: 3단 cascade에서 c1 = 1, c2 = 10, c3 = 200, p1 = 0.1, p2 = 0.2일 때 E[cost]는? 2단을 빼고 1단 통과분을 바로 3단으로 보내면?
+정답: `1 + 0.1·10 + 0.1·0.2·200 = 1 + 1 + 4 = 6`. 2단 없이: `1 + 0.1·200 = 21` (3.5배).
+
+5. 코드 과제: 3.4절 C 코드에 채널 차원을 추가해 `D = 64` 채널 × `N = 16` 상태의 SSM step을 구현하고, `Ā`를 Q15 고정소수점으로 양자화했을 때 pole 0.999 근처에서 impulse response 오차가 1000 샘플 뒤 얼마나 커지는지 float 버전과 비교하라.
+힌트: pole이 1에 가까울수록 Q15 반올림 오차가 시상수를 크게 바꾼다(0.999 → Q15 32735/32768 ≈ 0.998993). IIR 계수 양자화와 같은 문제다.
+
+6. 코드 과제: 2.4절 linear attention에 감쇠 `S_t = γ·S_{t−1} + φ(k_t)v_tᵀ`(γ = 0.9)를 넣고, parallel form에서는 마스크를 `γ^(t−s)`로 바꿔 두 형태가 여전히 같음을 확인하라. 그다음 2.5절 recall 실험에서 최근 쌍과 오래된 쌍의 오차를 비교하라.
+힌트: `mask[t, s] = γ**(t - s) if s <= t else 0`. 감쇠가 있으면 오래된 쌍은 잊히고, 최근 쌍의 crosstalk는 줄어든다. 정규화 항 z에도 같은 γ를 적용해야 한다.
+
+---
+
+## 11. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| MoE | Mixture-of-Experts | FFN을 여러 expert로 나누고 토큰마다 일부만 실행 |
+| expert | 전문가 FFN | MoE 안의 FFN 하나 |
+| router / gate | 라우터 | 토큰을 어느 expert로 보낼지 점수를 내는 작은 linear 층 |
+| top-k gating | 상위 k 선택 | router 확률 상위 k개 expert만 실행하고 가중합 |
+| total / active params | 전체 / 활성 파라미터 | 상주해야 하는 양 / 토큰 하나가 실제 쓰는 양 |
+| load-balancing loss | 부하 균형 보조 loss | `E·∑ f_i·P_i`, expert collapse 방지 |
+| expert collapse | expert 쏠림 | 소수 expert만 쓰이는 학습 실패 |
+| expert offloading | expert 오프로딩 | expert를 flash에 두고 필요 시 로딩 (연구 단계) |
+| linear attention | 선형 attention | softmax를 `φ(q)·φ(k)`로 바꿔 O(T)·고정 상태로 계산 |
+| feature map φ | 특징 사상 | 양수 출력 함수, 예: elu(x)+1 |
+| SSM | State Space Model | `x' = Ax + Bu, y = Cx`를 이산화한 시퀀스 층 |
+| ZOH | zero-order hold | 샘플 사이 입력을 일정하다고 보는 이산화, `Ā = e^{AΔ}` |
+| S4 / S4D | structured SSM | HiPPO 초기화·convolution 모드 / 대각 A 단순화판 |
+| Mamba | selective SSM | Δ, B, C가 입력에 따라 변하는 SSM + scan |
+| selective | 선택적 | 입력에 따라 기억·망각을 조절하는 시변 동작 |
+| scan | 누적 연산 | prefix-sum 형태의 recurrence 계산, 병렬화 가능 |
+| hybrid | 혼합 아키텍처 | attention 층 일부 + SSM/recurrent 층 다수 |
+| early-exit | 조기 종료 | 중간 exit head가 확신하면 남은 층 생략 |
+| cascade | 계단식 모델 | 작은 모델 → 불확실하면 큰 모델 |
+| escalation probability | 상위 단계 전달 확률 | cascade에서 다음 단으로 넘기는 비율 p |
+| sliding window attention | 슬라이딩 윈도우 attention | 최근 W 토큰만 참조, KV 링버퍼 |
+| speculative decoding | 추측 디코딩 | draft 모델 추측 + 큰 모델 병렬 검증 |
+| conditional computation | 조건부 계산 | 입력에 따라 실행 경로·양이 바뀌는 계산 |
+
+---
+
+## 12. 요약 & 체크리스트
+
+기기에서 모델 비용은 compute, weight memory, bandwidth/token, state/KV memory, latency의 다섯 축으로 나뉘고, 효율 아키텍처는 각자 한 축을 줄이는 대신 다른 축을 늘린다. MoE는 토큰당 active 파라미터만 계산·읽지만 total 파라미터가 전부 상주해야 해서 메모리가 비싼 기기에서는 어색하다. linear attention은 softmax를 feature map 내적으로 바꿔 행렬곱 순서를 바꾸고, 그 결과 고정 크기 상태를 가진 RNN이 되지만 정확한 recall이 약해진다. SSM은 이산화된 상태공간 모델, 곧 IIR 필터 뱅크이며 KV-cache 대신 고정 상태를 들고 간다. Mamba는 Δ, B, C를 입력 의존으로 만들어 무엇을 기억할지 고르고, 대가로 scan이 필요하다. early-exit은 평균 연산을, cascade는 `c1 + p·c2`의 평균 비용을 줄이며, 둘 다 최악 경로는 그대로다. NPU는 정적 dense GEMM을 좋아하므로 조건부 계산은 펌웨어 레벨(cascade)에서 구현할 때 가장 실용적이다.
+
+- [ ] MoE 설정에서 total·active 파라미터와 int4 상주 메모리, 토큰당 읽기 바이트를 손으로 계산할 수 있다
+- [ ] top-2 router의 softmax·재정규화 가중치를 손으로 계산할 수 있다
+- [ ] 균등 라우팅에서 토큰 n개 후 호출된 expert 수 `E·(1 − (1 − k/E)^n)`를 설명할 수 있다
+- [ ] load-balancing loss `E·∑ f_i·P_i`가 균형일 때 1, 쏠릴 때 E에 가까운 이유를 말할 수 있다
+- [ ] linear attention의 parallel form과 recurrent form을 유도하고 같음을 코드로 보일 수 있다
+- [ ] 연속시간 SSM을 ZOH로 이산화하고 1차 IIR 필터와 같은 식임을 보일 수 있다
+- [ ] 대각 SSM의 recurrent 모드와 convolution 모드가 같은 이유를 설명할 수 있다
+- [ ] 주어진 설정에서 KV-cache와 SSM 상태 메모리를 계산하고 break-even 길이를 구할 수 있다
+- [ ] early-exit의 평균 MAC을 exit 분포로 계산하고 τ 선택의 trade-off를 말할 수 있다
+- [ ] 음성 비서 cascade의 평균 전력·비용을 `c1 + p1·c2 + p1·p2·c3`로 설계할 수 있다
+
+## 참고 자료
+
+- Shazeer et al., "Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer", ICLR 2017
+- Fedus, Zoph, Shazeer, "Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity", JMLR 2022 — load-balancing loss
+- Jiang et al., "Mixtral of Experts", 2024 (arXiv:2401.04088)
+- Eliseev & Mazur, "Fast Inference of Mixture-of-Experts Language Models with Offloading", 2023 (arXiv:2312.17238)
+- Alizadeh et al., "LLM in a flash: Efficient Large Language Model Inference with Limited Memory", 2023 (arXiv:2312.11514)
+- Katharopoulos et al., "Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention", ICML 2020
+- Gu, Goel, Ré, "Efficiently Modeling Long Sequences with Structured State Spaces" (S4), ICLR 2022
+- Gu, Gupta, Goel, Ré, "On the Parameterization and Initialization of Diagonal State Space Models" (S4D), NeurIPS 2022
+- Gu & Dao, "Mamba: Linear-Time Sequence Modeling with Selective State Spaces", 2023 (arXiv:2312.00752)
+- Dao & Gu, "Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality" (Mamba-2), ICML 2024
+- Lieber et al., "Jamba: A Hybrid Transformer-Mamba Language Model", 2024; De et al., "Griffin: Mixing Gated Linear Recurrences with Local Attention for Efficient Language Models", 2024
+- Teerapittayanon, McDanel, Kung, "BranchyNet: Fast Inference via Early Exiting from Deep Neural Networks", ICPR 2016
+- Schuster et al., "Confident Adaptive Language Modeling" (CALM), NeurIPS 2022
+- Leviathan, Kalman, Matias, "Fast Inference from Transformers via Speculative Decoding", ICML 2023
+- Hinton, Vinyals, Dean, "Distilling the Knowledge in a Neural Network", 2015
+- Blelloch, "Prefix Sums and Their Applications", 1990 — parallel scan 기초
+- MIT 6.5940 TinyML and Efficient Deep Learning (Song Han) — [efficientml.ai](https://efficientml.ai/)
+- PyTorch 문서: [torch.topk](https://pytorch.org/docs/stable/generated/torch.topk.html)

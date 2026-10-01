@@ -1,0 +1,790 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ch.42 크래시 일관성 — fsck와 저널링(write-ahead logging)</title><style>
+:root{--bg:#faf9f7;--paper:#fff;--ink:#1c1b19;--muted:#6b6862;--line:#e3e0da;
+  --accent:#1f5f8b;--accent-soft:#e8f0f6;--code-bg:#f6f4f0;--code-ink:#2a2724;--ok:#2f7d55;
+  --serif:Georgia,"Apple SD Gothic Neo","Noto Serif KR",serif;
+  --sans:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Segoe UI",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#15171a;--paper:#1c1f23;--ink:#e6e4df;--muted:#9da3a8;--line:#30343a;
+  --accent:#6fb3e0;--accent-soft:#1e2a33;--code-bg:#111316;--code-ink:#e0ddd6;--ok:#63c08c;color-scheme:dark}}
+:root[data-theme=dark]{--bg:#15171a;--paper:#1c1f23;--ink:#e6e4df;--muted:#9da3a8;--line:#30343a;
+  --accent:#6fb3e0;--accent-soft:#1e2a33;--code-bg:#111316;--code-ink:#e0ddd6;--ok:#63c08c;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;gap:12px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+  background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+.wrap{max-width:1180px;margin:0 auto;padding:0 16px;display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:40px}
+main{max-width:780px;padding:36px 0 100px;min-width:0}
+aside{position:sticky;top:60px;padding:36px 0;max-height:calc(100vh - 70px);overflow:auto;align-self:start}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.45}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+.hero{border-bottom:2px solid var(--ink);padding-bottom:20px;margin-bottom:30px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:32px;line-height:1.25;margin:0 0 12px}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:12px;border-top:1px solid var(--line);line-height:1.3}
+main h3{font-family:var(--serif);font-size:18.5px;margin:28px 0 10px;line-height:1.35}
+main p,main li{font-size:16px;line-height:1.72}
+main p{margin:0 0 14px}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+main li{margin:4px 0}
+main li>ul,main li>ol{margin:4px 0 6px}
+code{font-family:var(--mono);font-size:.86em;background:var(--code-bg);padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:15px 17px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:12px 16px;background:var(--accent-soft);border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 6px;font-size:15px}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 20px}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:8px 11px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.03em;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:32px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:56px;padding-top:22px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:13px 15px;background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+.hub{max-width:1180px;margin:0 auto;padding:40px 16px 90px}
+.hub h1{font-size:34px}
+.lead{font-family:var(--serif);font-size:17px;line-height:1.7;color:var(--muted);max-width:720px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:24px 0 8px;padding:14px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:20px 0 22px;flex-wrap:wrap}
+#q{flex:1;min-width:200px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:17px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px}
+.card .no{font-size:11px;letter-spacing:.14em;color:var(--accent);margin-left:6px}
+.card h3{font-family:var(--serif);font-size:17px;margin:8px 0 8px;line-height:1.35}
+.card ul{margin:0 0 10px;padding-left:18px;font-size:13px;line-height:1.55;color:var(--muted)}
+.card .foot{display:flex;gap:10px;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.svg{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);border-radius:10px;overflow-x:auto;text-align:center}
+figure.svg svg{max-width:100%;height:auto}
+details{margin:0 0 14px;border:1px solid var(--line);border-radius:10px;padding:10px 14px;background:var(--paper)}
+details summary{cursor:pointer;font-weight:600}
+details[open] summary{margin-bottom:8px}
+.part{margin:38px 0 10px;display:flex;align-items:baseline;gap:12px;border-bottom:2px solid var(--ink);padding-bottom:6px}
+.part h2{font-family:var(--serif);font-size:24px;margin:0}
+.part span{color:var(--muted);font-size:13px}
+.rows{display:grid;gap:8px}
+.row{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:12px;align-items:center;background:var(--paper);
+  border:1px solid var(--line);border-radius:12px;padding:10px 14px}
+.row.read{border-color:var(--ok)}
+.row .cn{font-family:var(--mono);font-size:13px;color:var(--accent)}
+.row.read .cn::after{content:" ✓";color:var(--ok)}
+.row .tt{font-family:var(--serif);font-size:16px;line-height:1.35}
+.row .tt small{display:block;font-family:var(--sans);font-size:12.5px;color:var(--muted);margin-top:2px}
+.row .ln{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.row .ln a{font-size:12px;text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:3px 10px;white-space:nowrap}
+.row .ln a.ko{background:var(--accent);border-color:var(--accent);color:#fff}
+.row .ln a:hover{border-color:var(--accent)}
+.row.dlg .tt{color:var(--muted);font-size:14.5px}
+.planbox{display:block;margin:18px 0;padding:16px 18px;border:1.5px solid var(--accent);border-radius:14px;background:var(--accent-soft);text-decoration:none;color:var(--ink)}
+.planbox b{font-family:var(--serif);font-size:18px}
+@media (max-width:640px){.row{grid-template-columns:44px minmax(0,1fr)}.row .ln{grid-column:1/-1;justify-content:flex-start}}
+.src{font-size:13px;color:var(--muted);margin-top:40px}
+@media (max-width:900px){.wrap{grid-template-columns:minmax(0,1fr)}aside{display:none}h1{font-size:26px}}
+@media print{.top,aside,.nav,#bar{display:none}.wrap{display:block}body{background:#fff}}
+</style></head><body data-note="C42"><div id="bar"></div><div class="top"><div class="top-in"><a class="home" href="../index.html">← 목차</a><span class="t">Ch.42 크래시 일관성 — fsck와 저널링(write-ahead logging)</span><button class="btn" id="readbtn">읽음 표시</button><button class="btn" id="theme" aria-label="테마 전환">◐</button></div></div>
+<div class="wrap"><main>
+  <div class="hero"><div class="kicker">OSTEP 한국어 노트 · Ch.42 · Part III · 영속성 (Persistence)</div><h1>Ch.42 크래시 일관성 — fsck와 저널링(write-ahead logging)</h1><div class="meta"><span>Crash Consistency: FSCK and Journaling</span><span>원본: notes/2026-09-30_C42_crash_consistency_journaling.md</span><span><a href="../book/C42.html">📖 원문</a></span><span><a href="../../Operating%20Systems%20-%20Three%20Easy%20Pieces.pdf#page=508">PDF p.508</a></span></div></div>
+  <blockquote><p>📖 원문: <a href="../book/C42.html">42. Crash Consistency: FSCK and Journaling</a> · <a href="../../Operating%20Systems%20-%20Three%20Easy%20Pieces.pdf#page=508">PDF p.508</a> · ⏱️ 읽기 약 70분 (C 시뮬레이터 + fsck.py 포함 시 +60분) · 🔗 선행: <a href="C40.html">Ch.40 FS 구현</a>, <a href="C41.html">Ch.41 FFS</a></p></blockquote>
+<h2 id="0-한눈에-보기">0. 한눈에 보기<a class="anchor" href="#0-한눈에-보기" aria-label="link">#</a></h2>
+<blockquote><p><strong>CRUX — "The system may crash or lose power between any two writes, and thus the on-disk state may only partially get updated. After the crash, the system boots and wishes to mount the file system again (in order to access files and such). Given that crashes can occur at arbitrary points in time, how do we ensure the file system keeps the on-disk image in a reasonable state?"</strong> (시스템은 어떤 두 쓰기 사이에서든 크래시하거나 전원을 잃을 수 있고, 그러면 디스크 상태는 일부만 갱신된다. 재부팅 후 FS를 다시 mount 하려 할 때, 크래시가 아무 때나 일어날 수 있다면 디스크 이미지를 어떻게 "말이 되는" 상태로 유지할까?)</p></blockquote>
+<ul><li>파일에 블록 하나 append = <strong>inode, data bitmap, data block 세 블록</strong>을 써야 한다. 디스크는 한 번에 하나씩 쓰므로 그 사이 전원이 나가면 <strong>불일치·공간 누수·쓰레기 데이터</strong>가 생긴다 (<strong>crash-consistency problem</strong>).</li><li>해법 1 <strong>fsck</strong>: 일단 놔두고 재부팅 때 디스크 <strong>전체</strong>를 훑어 메타데이터를 고친다. 동작은 하지만 <strong>O(디스크 크기)</strong> 라 너무 느리고, "메타데이터는 일관된데 데이터는 쓰레기"는 못 고친다.</li><li>해법 2 <strong>저널링(= write-ahead logging)</strong>: 제자리에 덮어쓰기 <strong>전에</strong> 저널에 "할 일"을 먼저 쓴다. <code>TxB + 내용 → (대기) → TxE(커밋) → (대기) → checkpoint → free</code>. 복구는 커밋된 트랜잭션만 <strong>redo</strong> — <strong>O(로그 크기)</strong>.</li><li>비용을 줄인 변형: <strong>metadata(ordered) journaling</strong> — 데이터는 저널에 안 쓰고 <strong>"가리켜지는 것(데이터)을 가리키는 것(inode)보다 먼저"</strong> 쓴다. 까다로운 케이스: <strong>블록 재사용 → revoke 레코드</strong>. 커밋 대기를 없애는 <strong>트랜잭션 체크섬</strong>(ext4).</li><li>그 밖: <strong>soft updates</strong>(쓰기 순서를 정교하게), <strong>COW</strong>(ZFS, LFS), <strong>backpointer 기반 일관성</strong>, <strong>optimistic crash consistency</strong>.</li><li>이 장의 C 코드는 <strong>작은 WAL을 직접 구현하고 모든 단계에서 크래시를 주입</strong>해 위 주장들을 하나하나 확인한다.</li></ul>
+<h2 id="1-5분-복습표">1. 5분 복습표<a class="anchor" href="#1-5분-복습표" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>한 줄 뜻</th><th>예시 / 비유</th></tr></thead><tbody><tr><td>crash-consistency problem</td><td>여러 블록 갱신 중 크래시 → 일부만 반영</td><td>I[v2]만 쓰이고 B[v2]는 안 쓰임</td></tr><tr><td>불일치 (inconsistency)</td><td>FS 자료구조끼리 말이 안 맞음</td><td>inode는 블록 5 사용, bitmap은 free</td></tr><tr><td>space leak</td><td>할당 표시는 됐지만 아무도 안 가리킴</td><td>bitmap만 쓰인 경우</td></tr><tr><td>fsck</td><td>재부팅 시 전체 스캔으로 메타데이터 수리</td><td>"집 전체 뒤져서 열쇠 찾기"</td></tr><tr><td>lost+found</td><td>아무 디렉터리도 안 가리키는 inode를 모으는 곳</td><td>fsck가 고아 inode를 옮김</td></tr><tr><td>journaling / WAL</td><td>덮어쓰기 전에 로그에 먼저 기록</td><td>ext3/4, XFS, NTFS, JFS</td></tr><tr><td>TxB / TxE</td><td>트랜잭션 시작/끝(커밋) 블록, TID 포함</td><td>TxE는 512B 단일 섹터로 원자적</td></tr><tr><td>physical logging</td><td>블록 내용 그대로 로그에</td><td>ext3</td></tr><tr><td>logical logging</td><td>"파일 X에 블록 append" 같은 논리 기록</td><td>공간 절약, 복잡</td></tr><tr><td>checkpoint</td><td>커밋된 내용을 제자리(최종 위치)에 쓰기</td><td>끝나면 로그 공간 해제 가능</td></tr><tr><td>redo logging</td><td>복구 시 커밋된 tx를 순서대로 다시 쓰기</td><td>중복 쓰기는 무해(멱등)</td></tr><tr><td>circular log / journal superblock</td><td>로그 재사용 + 살아 있는 tx 범위 기록</td><td>head/tail 포인터</td></tr><tr><td>data journaling</td><td>메타데이터 + 데이터 모두 저널</td><td>ext3 <code>data=journal</code></td></tr><tr><td>ordered (metadata) journaling</td><td>메타데이터만 저널, 데이터는 커밋 전에 제자리</td><td>ext3/4 <code>data=ordered</code> (기본)</td></tr><tr><td>revoke record</td><td>"이 블록의 옛 로그 내용은 재생하지 마"</td><td>블록 재사용 문제 해결</td></tr><tr><td>write barrier / FLUSH / FUA</td><td>쓰기 순서·영속성을 디바이스에 강제</td><td>디스크 쓰기 캐시 때문에 필요</td></tr><tr><td>transaction checksum</td><td>TxB/TxE에 내용 체크섬 → 한 번에 issue</td><td>ext4 <code>journal_checksum</code></td></tr><tr><td>soft updates / COW / BBC</td><td>쓰기 순서 / 제자리 안 쓰기 / 역포인터</td><td>FreeBSD, ZFS·btrfs, 연구</td></tr></tbody></table></div>
+<h2 id="2-자세한-예-append-하나에-블록-3개-42-1">2. 자세한 예: append 하나에 블록 3개 (42.1)<a class="anchor" href="#2-자세한-예-append-하나에-블록-3개-42-1" aria-label="link">#</a></h2>
+<p>작은 FS: inode bitmap 8비트, data bitmap 8비트, inode 8개(블록 4개에), 데이터 블록 8개. 현재 inode 2번이 할당되어 데이터 블록 4번(Da)을 가리킨다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>I[v1]: owner=remzi, perm=rw, size=1, ptr = 4, null, null, null
+B[v1]: 00001000</code></pre></figure>
+<p>append(4KB) 후 바라는 최종 상태:</p>
+<figure class="code"><span class="lang">text</span><pre><code>I[v2]: size=2, ptr = 4, 5, null, null
+B[v2]: 00001100
+Db   : 데이터 블록 5번의 새 내용</code></pre></figure>
+<p>이 세 블록은 보통 바로 쓰이지 않고 page cache에 5~30초 머물다 FS가 내보낸다(<a href="C40.html">Ch.40</a> write buffering). 그 사이 언제든 크래시가 날 수 있다.</p>
+<h3 id="2-1-크래시-시나리오-6가지-2가지-trivial">2.1 크래시 시나리오 6가지 (+ 2가지 trivial)<a class="anchor" href="#2-1-크래시-시나리오-6가지-2가지-trivial" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>디스크에 도달한 쓰기</th><th>결과</th><th>문제 종류</th></tr></thead><tbody><tr><td>Db만</td><td>아무도 안 가리키는 블록에 데이터 → 쓰기가 없었던 것과 같음</td><td>FS 관점 문제 없음 (사용자 데이터는 잃음)</td></tr><tr><td>I[v2]만</td><td>inode는 블록 5를 가리키는데 bitmap은 free, 블록 5는 옛 쓰레기</td><td><strong>불일치 + 쓰레기 읽기</strong></td></tr><tr><td>B[v2]만</td><td>bitmap은 5 사용 중, 가리키는 inode 없음</td><td><strong>불일치 + space leak</strong></td></tr><tr><td>I[v2] + B[v2]</td><td>메타데이터는 완벽히 일관됨, 그러나 블록 5는 쓰레기</td><td><strong>일관되지만 쓰레기</strong></td></tr><tr><td>I[v2] + Db</td><td>inode가 올바른 데이터를 가리키지만 bitmap은 free</td><td><strong>불일치</strong> (나중에 이중 할당 위험)</td></tr><tr><td>B[v2] + Db</td><td>데이터도 있고 bitmap도 사용 중인데 어느 파일 것인지 모름</td><td><strong>불일치 + leak</strong></td></tr></tbody></table></div>
+<p>아래 10절 코드의 시나리오 B가 이 8가지 조합을 실제로 만들어 mini-fsck로 판정한다.</p>
+<p>이상적으로는 FS를 한 일관된 상태에서 다른 일관된 상태로 <strong>원자적으로</strong> 옮기고 싶다. 하지만 디스크는 한 번에 하나씩만 커밋한다. 이것이 <strong>crash-consistency problem</strong>(또는 consistent-update problem)이다.</p>
+<h2 id="3-해법-1-파일-시스템-검사기-fsck-42-2">3. 해법 1: 파일 시스템 검사기 fsck (42.2)<a class="anchor" href="#3-해법-1-파일-시스템-검사기-fsck-42-2" aria-label="link">#</a></h2>
+<p>"불일치는 일어나게 두고 재부팅 때 고친다"는 게으른 접근. fsck는 mount <strong>전</strong>에 돌며(다른 활동 없음 가정) 다음을 검사한다 (McKusick &amp; Kowalski):</p>
+<ol><li><strong>Superblock</strong>: 크기 &gt; 할당 블록 수 같은 sanity check. 이상하면 <strong>다른 superblock 사본</strong>을 쓴다.</li><li><strong>Free blocks</strong>: inode·간접 블록·이중 간접 블록… 을 전부 훑어 "실제로 할당된 블록" 집합을 만들고 <strong>bitmap을 그에 맞게 재작성</strong> — inode를 신뢰한다. inode bitmap도 같은 방식.</li><li><strong>Inode 상태</strong>: 할당된 inode마다 type 필드가 유효한지 등. 고치기 어려우면 그 inode를 <strong>지우고</strong> bitmap 갱신.</li><li><strong>Inode links</strong>: 루트부터 디렉터리 트리 전체를 돌며 각 inode의 링크 수를 다시 세서 inode의 값과 비교·수정. 할당됐는데 아무 디렉터리도 안 가리키면 <strong>lost+found</strong> 로.</li><li><strong>Duplicates</strong>: 두 inode가 같은 블록을 가리키면 — 명백히 나쁜 inode를 지우거나, 블록을 <strong>복사</strong>해 하나씩 준다.</li><li><strong>Bad blocks</strong>: 파티션 범위 밖을 가리키는 포인터는 그냥 지운다.</li><li><strong>Directory checks</strong>: <code>.</code> 과 <code>..</code> 가 맨 앞인지, 엔트리가 가리키는 inode가 할당됐는지, 디렉터리가 두 번 이상 링크되지 않았는지.</li></ol>
+<p>문제:</p>
+<ul><li>구현이 복잡하다(정확히 만들기 어렵다 — SQCK 논문이 실제 fsck의 버그를 많이 찾았다).</li><li><strong>근본적으로 너무 느리다</strong>: 디스크/RAID가 커지면 수 분~수 시간. 블록 3개 갱신 중 크래시 났는데 디스크 전체를 훑는 건 "침실에서 열쇠를 떨어뜨리고 지하실부터 집 전체를 뒤지는" 꼴.</li><li><strong>I[v2]+B[v2] 케이스(일관되지만 쓰레기)는 못 고친다</strong> — 메타데이터 일관성만 목표다.</li></ul>
+<h2 id="4-해법-2-저널링-write-ahead-logging-42-3">4. 해법 2: 저널링 (write-ahead logging) (42.3)<a class="anchor" href="#4-해법-2-저널링-write-ahead-logging-42-3" aria-label="link">#</a></h2>
+<p>데이터베이스에서 훔쳐 온 아이디어. FS 최초 적용은 <strong>Cedar</strong>(1987), 지금은 ext3/ext4, reiserfs, JFS, XFS, NTFS.</p>
+<p>기본 생각: 제자리 구조를 덮어쓰기 전에, <strong>잘 알려진 다른 곳(log)</strong> 에 "지금부터 할 일"을 메모한다(<strong>write-ahead</strong>). 크래시가 나면 메모를 보고 정확히 무엇을 다시 할지 안다 → 디스크 전체 스캔이 필요 없다. 평상시 약간의 일을 더 해서 복구 때의 일을 크게 줄이는 거래.</p>
+<p>ext3 배치: ext2와 같은 block group들 + <strong>journal</strong>(같은 파티션 안, 다른 디바이스, 또는 파일).</p>
+<figure class="code"><span class="lang">text</span><pre><code>ext2:  Super | Group 0 | Group 1 | ... | Group N
+ext3:  Super | Journal | Group 0 | Group 1 | ... | Group N</code></pre></figure>
+<h3 id="4-1-data-journaling-기본-프로토콜">4.1 data journaling — 기본 프로토콜<a class="anchor" href="#4-1-data-journaling-기본-프로토콜" aria-label="link">#</a></h3>
+<p>append 예제를 저널에 쓰면:</p>
+<figure class="code"><span class="lang">text</span><pre><code>Journal: | TxB(tid=1, 최종주소들) | I[v2] | B[v2] | Db | TxE(tid=1) |</code></pre></figure>
+<ul><li><strong>TxB</strong>: 이 트랜잭션의 정보(블록들의 최종 주소) + <strong>TID</strong>.</li><li>가운데: 블록 내용 그대로 = <strong>physical logging</strong>. (대안 <strong>logical logging</strong>: "파일 X에 Db를 append" — 작지만 복잡.)</li><li><strong>TxE</strong>: 끝 표시 + 같은 TID.</li></ul>
+<p>로그가 안전하게 디스크에 가면 제자리에 덮어쓴다 = <strong>checkpoint</strong>.</p>
+<p><strong>함정: 5블록을 한 번에 내보내면?</strong> 하나의 큰 순차 쓰기로 만들면 빠르겠지만, 디스크는 내부적으로 조각들을 <strong>아무 순서로나</strong> 완료할 수 있다. TxB, I[v2], B[v2], TxE가 먼저 쓰이고 Db가 안 쓰인 채 전원이 나가면:</p>
+<figure class="code"><span class="lang">text</span><pre><code>Journal: | TxB id=1 | I[v2] | B[v2] | ?? | TxE id=1 |</code></pre></figure>
+<p>TxB와 TxE의 TID가 맞으니 <strong>유효한 트랜잭션처럼 보이고</strong>, 복구는 <code>??</code>(이 로그 칸의 옛 내용)를 Db의 최종 위치로 <strong>복사해 버린다</strong>. 사용자 데이터라도 나쁘고, 그게 superblock이었다면 FS가 mount 불가가 된다. (10절 코드 시나리오 C가 정확히 이 상황을 재현한다.)</p>
+<p>그래서 <strong>두 단계로</strong> 쓴다. 그리고 디스크는 <strong>512B 쓰기는 전부 되거나 전혀 안 되거나(원자적)</strong> 를 보장하므로 <strong>TxE를 512B 한 섹터</strong>로 만든다.</p>
+<ol><li><strong>Journal write</strong>: TxB + 메타데이터 + 데이터를 저널에 (한꺼번에 issue 가능). <strong>완료 대기.</strong></li><li><strong>Journal commit</strong>: TxE를 저널에 쓴다. <strong>완료 대기.</strong> → 이제 트랜잭션은 <strong>committed</strong>.</li><li><strong>Checkpoint</strong>: 메타데이터·데이터를 최종 위치에 쓴다.</li></ol>
+<figure class="svg"><svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif" font-size="13">
+  <defs><marker id="C42-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="20" y="22" fill="currentColor" font-weight="bold">Journal</text>
+  <g stroke="currentColor" fill="none">
+    <rect x="20" y="32" width="60" height="40" style="fill:var(--accent-soft)"/>
+    <rect x="80" y="32" width="90" height="40"/>
+    <rect x="80" y="32" width="270" height="40"/>
+    <rect x="80" y="32" width="180" height="40"/>
+    <rect x="80" y="32" width="90" height="40"/>
+    <rect x="350" y="32" width="60" height="40" style="stroke:var(--accent);fill:var(--accent-soft)" stroke-width="2"/>
+    <rect x="410" y="32" width="270" height="40" stroke-dasharray="4 3"/>
+  </g>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="50" y="50">TxB</text><text x="50" y="65" font-size="10">tid=1</text>
+    <text x="125" y="57">I[v2]</text><text x="215" y="57">B[v2]</text><text x="305" y="57">Db</text>
+    <text x="380" y="50" font-weight="bold">TxE</text><text x="380" y="65" font-size="10">512B 원자적</text>
+    <text x="545" y="57" font-size="11">다음 트랜잭션 공간 (circular)</text>
+  </g>
+  <g stroke="#d9534f" stroke-dasharray="6 4" stroke-width="1.5"><path d="M345,82 L345,110"/></g>
+  <g fill="currentColor" font-size="11">
+    <text x="20" y="96">① journal write (TxB+내용 동시 issue) → 완료 대기</text>
+    <text x="352" y="96">② commit: TxE 쓰기 → 완료 대기</text>
+  </g>
+  <text x="352" y="122" fill="#d9534f" font-size="11">↑ 이 선(barrier/FLUSH) 이전이면 복구 시 무시</text>
+  <text x="20" y="190" fill="currentColor" font-weight="bold">File system (최종 위치)</text>
+  <g stroke="currentColor" fill="none">
+    <rect x="60" y="200" width="120" height="40"/>
+    <rect x="230" y="200" width="120" height="40"/>
+    <rect x="400" y="200" width="120" height="40"/>
+  </g>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="120" y="225">inode 블록</text><text x="290" y="225">data bitmap</text><text x="460" y="225">data blk 5</text>
+  </g>
+  <g stroke="currentColor" fill="none" stroke-width="1.4" marker-end="url(#C42-arrow)" style="stroke:var(--accent)">
+    <path d="M125,74 C125,140 120,150 120,198"/>
+    <path d="M215,74 C215,140 290,150 290,198"/>
+    <path d="M305,74 C305,140 460,150 460,198"/>
+  </g>
+  <g fill="currentColor" font-size="11">
+    <text x="20" y="168">③ checkpoint: 최종 위치에 쓰기 (중간에 크래시 → 재생하면 됨, 멱등)</text>
+    <text x="20" y="270">④ free: 나중에 journal superblock 의 tail 을 옮겨 공간 반환</text>
+    <text x="20" y="290">복구 = 저널 스캔 → TxB/TxE(TID, checksum) 맞는 tx만 순서대로 redo</text>
+    <text x="20" y="310">TxE 없는 tx → 그냥 버림 (갱신은 "없었던 일")</text>
+  </g>
+</svg></figure>
+<h3 id="4-2-복구-recovery">4.2 복구 (recovery)<a class="anchor" href="#4-2-복구-recovery" aria-label="link">#</a></h3>
+<ul><li><strong>커밋 전(2단계 완료 전) 크래시</strong>: 그 업데이트는 그냥 <strong>건너뛴다</strong>. 아무 일도 없었던 것.</li><li><strong>커밋 후, checkpoint 완료 전 크래시</strong>: 부팅 때 로그를 스캔해 <strong>커밋된 트랜잭션을 순서대로 다시 쓴다</strong> = <strong>redo logging</strong>.</li><li>checkpoint 도중 크래시도 괜찮다. 최악의 경우 일부 블록이 <strong>한 번 더</strong> 쓰일 뿐이다(같은 내용을 같은 곳에 = 멱등). 복구는 드문 일이니 중복 쓰기는 문제가 안 된다.</li></ul>
+<h3 id="4-3-로그-업데이트-묶기-batching">4.3 로그 업데이트 묶기 (batching)<a class="anchor" href="#4-3-로그-업데이트-묶기-batching" aria-label="link">#</a></h3>
+<p>같은 디렉터리에 file1, file2를 연달아 만들면 inode bitmap, (같은 블록의) inode들, 디렉터리 데이터, 디렉터리 inode를 <strong>두 번씩</strong> 저널에 쓰게 된다. ext3는 업데이트마다 커밋하지 않고 <strong>전역 트랜잭션</strong>에 dirty 블록을 모았다가 (예: 5초마다) 한 번에 커밋한다. 같은 블록의 반복 갱신이 한 번으로 줄어든다.</p>
+<h3 id="4-4-로그를-유한하게-circular-log-journal-superblock">4.4 로그를 유한하게: circular log + journal superblock<a class="anchor" href="#4-4-로그를-유한하게-circular-log-journal-superblock" aria-label="link">#</a></h3>
+<p>로그가 계속 자라면 (1) 복구가 길어지고 (2) 꽉 차면 더 이상 커밋을 못 한다 → FS가 멈춘다. 해법: <strong>checkpoint가 끝난 트랜잭션의 공간을 해제</strong>해 로그를 원형으로 재사용. <strong>journal superblock</strong>(FS superblock과 별개)에 아직 checkpoint 안 된 가장 오래된/최신 트랜잭션을 기록한다.</p>
+<p>최종 data journaling 프로토콜:</p>
+<ol><li><strong>Journal write</strong> → 대기</li><li><strong>Journal commit</strong>(TxE) → 대기</li><li><strong>Checkpoint</strong></li><li><strong>Free</strong>: 나중에 journal superblock 갱신</li></ol>
+<blockquote><p><strong>ASIDE — 쓰기를 디스크에 강제하기.</strong> 옛날엔 A를 쓰고 완료 인터럽트를 받은 뒤 B를 쓰면 순서가 보장됐다. 그런데 디스크에 <strong>쓰기 캐시</strong>(immediate reporting)가 있으면 "완료"가 캐시에 들어갔다는 뜻일 뿐이라 순서가 깨진다. 해법은 캐시 끄기 또는 <strong>write barrier</strong>(배리어 이전 쓰기가 전부 매체에 간 뒤에 이후 쓰기). 그런데 일부 제조사는 "빠른 디스크"처럼 보이려고 <strong>배리어를 무시</strong>한다는 연구가 있다. Kahan: "the fast almost always beats out the slow, even if the fast is wrong."</p></blockquote>
+<blockquote><p><strong>ASIDE — 로그 쓰기 최적화: 트랜잭션 체크섬.</strong> TxB/내용을 쓰고 완료를 기다린 뒤 TxE를 쓰면 보통 <strong>회전 한 바퀴</strong>를 더 기다린다. Prabhakaran의 아이디어: TxB/TxE에 <strong>트랜잭션 내용의 체크섬</strong>을 넣고 <strong>전부 한 번에</strong> 쓴다. 복구 때 계산한 체크섬이 안 맞으면 "쓰는 도중 크래시" → 버린다. 빨라지고, 저널 읽기가 체크섬으로 보호되니 더 안전하다. <strong>ext4</strong>에 들어갔다 (Android 포함 수백만 대).</p></blockquote>
+<h3 id="4-5-metadata-journaling-ordered-mode">4.5 metadata journaling (ordered mode)<a class="anchor" href="#4-5-metadata-journaling-ordered-mode" aria-label="link">#</a></h3>
+<p>data journaling은 <strong>모든 데이터를 두 번 쓴다</strong>(저널 + 제자리). 순차 쓰기는 peak의 절반, 저널↔본체 사이 seek까지. 그래서 더 흔한 건 <strong>ordered journaling(= metadata journaling)</strong>: 사용자 데이터는 저널에 안 쓴다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>Journal: | TxB | I[v2] | B[v2] | TxE |      (Db 는 제자리에만 한 번)</code></pre></figure>
+<p><strong>언제 Db를 써야 하나?</strong> 커밋 <strong>후</strong>에 쓰면: I[v2], B[v2]는 커밋됐는데 Db가 디스크에 못 간 채 크래시 → 복구가 I[v2], B[v2]를 재생해 <strong>메타데이터는 일관되지만 I[v2]가 쓰레기를 가리킨다</strong>. (10절 시나리오 D2 k=4 가 바로 이 결과.)</p>
+<p>그래서 ext3 ordered mode는 <strong>데이터를 먼저</strong> 쓴다:</p>
+<ol><li><strong>Data write</strong>: 데이터를 최종 위치에 (완료 대기는 선택)</li><li><strong>Journal metadata write</strong>: TxB + 메타데이터 → 대기</li><li><strong>Journal commit</strong>: TxE → 대기 (이제 데이터까지 포함해 커밋)</li><li><strong>Checkpoint metadata</strong></li><li><strong>Free</strong></li></ol>
+<blockquote><p><strong>핵심 규칙 — "가리켜지는 객체를 가리키는 객체보다 먼저 써라 (write the pointed-to object before the object with the pointer to it)."</strong> 크래시 일관성의 심장이고, soft updates는 이 규칙을 FS 전체로 확장한 것이다.</p></blockquote>
+<p>정확히는 1과 2를 <strong>동시에 issue</strong> 해도 되고, 진짜 요구 조건은 <strong>1과 2가 모두 완료된 뒤에 3(커밋)을 issue</strong> 하는 것뿐이다.</p>
+<ul><li>NTFS, XFS: <strong>non-ordered</strong> metadata journaling. ext3: <code>data=journal</code> / <code>data=ordered</code> / <code>data=writeback</code>(unordered: 데이터 아무 때나). <strong>모든 모드가 메타데이터 일관성은 지킨다</strong>; 차이는 데이터 의미론.</li></ul>
+<h3 id="4-6-까다로운-경우-블록-재사용과-revoke">4.6 까다로운 경우: 블록 재사용과 revoke<a class="anchor" href="#4-6-까다로운-경우-블록-재사용과-revoke" aria-label="link">#</a></h3>
+<p>Tweedie(ext3 주 개발자): "가장 끔찍한 부분이 뭐냐고? 파일 삭제다. 삭제와 관련된 건 다 털이 숭숭하다… 블록이 지워졌다 재할당되면 무슨 일이 생길지 악몽을 꾼다."</p>
+<p>시나리오 (metadata journaling):</p>
+<ol><li>디렉터리 <code>foo</code> 에 엔트리 추가 → 디렉터리 데이터는 <strong>메타데이터</strong>이므로 저널에 들어감. foo의 데이터는 블록 1000.</li></ol>
+<figure class="code"><span class="lang">text</span><pre><code>Journal: TxB id=1 | I[foo] ptr:1000 | D[foo] final addr:1000 | TxE id=1</code></pre></figure>
+<ol><li>사용자가 <code>foo</code> 안의 모든 것과 <code>foo</code> 자체를 지움 → 블록 1000 해제.</li><li>새 파일 <code>foobar</code> 생성, <strong>블록 1000 재사용</strong>. foobar의 inode는 저널에 들어가지만, foobar의 <strong>데이터는 사용자 데이터라 저널에 안 들어간다</strong>.</li></ol>
+<figure class="code"><span class="lang">text</span><pre><code>Journal: TxB id=1 | I[foo] | D[foo]→1000 | TxE id=1 | TxB id=2 | I[foobar] ptr:1000 | TxE id=2</code></pre></figure>
+<ol><li>크래시. 복구는 로그 전체를 재생 → tx1의 <strong>D[foo](옛 디렉터리 내용)를 블록 1000에 덮어써</strong> foobar의 데이터가 사라진다!</li></ol>
+<p>해법들: 삭제가 저널에서 checkpoint 될 때까지 블록을 재사용하지 않기, 또는 ext3처럼 <strong>revoke 레코드</strong>: 삭제할 때 "블록 1000 revoke"를 저널에 쓴다. 복구는 <strong>먼저 revoke를 모두 스캔</strong>하고, revoke된 블록의 (그보다 오래된) 로그 내용은 <strong>재생하지 않는다</strong>. 10절 시나리오 E가 revoke OFF/ON을 비교한다.</p>
+<h3 id="4-7-타임라인-정리">4.7 타임라인 정리<a class="anchor" href="#4-7-타임라인-정리" aria-label="link">#</a></h3>
+<p>원문 그림 42.1/42.2를 다시 그린 것. 시간은 아래로, <strong>빨간 점선 = 그 위의 쓰기가 모두 완료되어야 아래 쓰기를 issue 할 수 있다</strong>.</p>
+<figure class="svg"><svg viewBox="0 0 710 320" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif" font-size="12">
+  <text x="10" y="18" fill="currentColor" font-weight="bold" font-size="13">Data journaling (그림 42.1)</text>
+  <g fill="currentColor" text-anchor="middle" font-size="11">
+    <text x="45" y="40">TxB</text><text x="105" y="40">내용(메타+데이터)</text><text x="175" y="40">TxE</text><text x="235" y="40">메타(FS)</text><text x="300" y="40">데이터(FS)</text>
+    <text x="45" y="62">issue</text><text x="105" y="62">issue</text>
+    <text x="45" y="84">complete</text><text x="105" y="100">complete</text>
+    <text x="175" y="142">issue</text><text x="175" y="160">complete</text>
+    <text x="235" y="202">issue</text><text x="300" y="202">issue</text>
+    <text x="300" y="220">complete</text><text x="235" y="238">complete</text>
+  </g>
+  <g stroke="#d9534f" stroke-dasharray="6 4" stroke-width="1.4">
+    <path d="M10,118 L340,118"/><path d="M10,178 L340,178"/>
+  </g>
+  <text x="10" y="270" fill="currentColor" font-size="11">데이터가 저널에 한 번, 제자리에 한 번 = 2번 쓰기</text>
+  <g stroke="currentColor" opacity="0.4"><path d="M355,25 L355,300"/></g>
+  <text x="370" y="18" fill="currentColor" font-weight="bold" font-size="13">Metadata (ordered) journaling (그림 42.2)</text>
+  <g fill="currentColor" text-anchor="middle" font-size="11">
+    <text x="405" y="40">TxB</text><text x="470" y="40">내용(메타)</text><text x="535" y="40">TxE</text><text x="600" y="40">메타(FS)</text><text x="665" y="40">데이터(FS)</text>
+    <text x="405" y="62">issue</text><text x="470" y="62">issue</text><text x="665" y="62">issue</text>
+    <text x="665" y="80">complete</text><text x="405" y="98">complete</text><text x="470" y="108">complete</text>
+    <text x="535" y="142">issue</text><text x="535" y="160">complete</text>
+    <text x="600" y="202">issue</text><text x="600" y="220">complete</text>
+  </g>
+  <g stroke="#d9534f" stroke-dasharray="6 4" stroke-width="1.4">
+    <path d="M370,118 L705,118"/><path d="M370,178 L705,178"/>
+  </g>
+  <g fill="currentColor" font-size="11">
+    <text x="370" y="262">데이터 쓰기는 TxB·메타와 동시에 issue 가능,</text>
+    <text x="370" y="278">단 TxE issue 전에 반드시 complete</text>
+    <text x="370" y="296">(완료 시각은 I/O 서브시스템이 정함 — 순서는 점선만 보장)</text>
+  </g>
+</svg></figure>
+<h2 id="5-해법-3-다른-접근들-42-4">5. 해법 3: 다른 접근들 (42.4)<a class="anchor" href="#5-해법-3-다른-접근들-42-4" aria-label="link">#</a></h2>
+<ul><li><strong>Soft Updates</strong> (Ganger &amp; Patt): 모든 쓰기를 <strong>정교하게 순서화</strong>해 디스크가 <strong>절대</strong> 불일치 상태가 되지 않게 한다 (데이터 블록을 inode보다 먼저 등, 모든 구조에 대해 규칙 유도). 저널이 필요 없지만 FS 자료구조를 속속들이 알아야 해서 <strong>매우 복잡</strong>하다 (FreeBSD UFS).</li><li><strong>Copy-on-Write (COW)</strong> (ZFS, btrfs, LFS): 파일·디렉터리를 <strong>제자리에 덮어쓰지 않고</strong> 빈 곳에 새로 쓴 뒤, 여러 업데이트가 끝나면 <strong>루트 포인터를 원자적으로 교체</strong>. 일관성 유지가 단순해진다 → <a href="C43.html">Ch.43 LFS</a>.</li><li><strong>Backpointer-based consistency (BBC)</strong>: 쓰기 순서를 <strong>전혀</strong> 강제하지 않는다. 모든 블록에 <strong>역포인터</strong>(데이터 블록 → 소유 inode)를 둔다. 접근 시 정방향 포인터(inode → 블록)가 가리키는 블록이 다시 그 inode를 가리키면 일관, 아니면 에러. 게으른 크래시 일관성.</li><li><strong>Optimistic crash consistency</strong>: 일반화된 트랜잭션 체크섬 등으로 가능한 한 많은 쓰기를 기다리지 않고 issue하고, 불일치는 감지. 일부 워크로드(fsync 많은)에서 <strong>10배</strong> 빨라지지만, 제대로 하려면 약간 다른 디스크 인터페이스가 필요하다.</li></ul>
+<h2 id="6-요약-42-5">6. 요약 (42.5)<a class="anchor" href="#6-요약-42-5" aria-label="link">#</a></h2>
+<ul><li>fsck는 동작하지만 현대 시스템에서 복구가 너무 느리다.</li><li>저널링은 복구 시간을 <strong>O(볼륨 크기) → O(로그 크기)</strong> 로 줄인다.</li><li>가장 흔한 형태는 <strong>ordered metadata journaling</strong>: 저널 트래픽을 줄이면서 메타데이터와 (합리적인 수준의) 사용자 데이터 일관성을 지킨다.</li></ul>
+<h2 id="7-직접-해보기-작은-wal을-만들고-모든-지점에서-크래시시키기">7. 직접 해보기 — 작은 WAL을 만들고 모든 지점에서 크래시시키기<a class="anchor" href="#7-직접-해보기-작은-wal을-만들고-모든-지점에서-크래시시키기" aria-label="link">#</a></h2>
+<h3 id="7-1-설계">7.1 설계<a class="anchor" href="#7-1-설계" aria-label="link">#</a></h3>
+<ul><li>"디스크" = 64바이트 블록 40개 배열. 0=SB, 1=journal superblock(JSB), 2~17=저널, 19=data bitmap(문자 '0'/'1'), 20=inode 블록(inode 4개), 24~31=데이터 블록 0~7.</li><li>모든 디스크 쓰기를 순서대로 리스트에 담는다. <strong>"k번째 쓰기 직후 크래시" = 초기 이미지에 앞 k개 쓰기만 적용</strong>. 그 이미지에 <code>recover()</code> 를 돌리고 mini-fsck(<code>check()</code>)로 판정한다.</li><li><code>recover()</code>: JSB가 가리키는 위치부터 TxB(magic, 기대 TID) → 내용 n개 → TxE(magic, 같은 TID, <strong>체크섬</strong>) 를 확인하며 커밋된 tx만 수집. 1차 패스로 <strong>revoke</strong> 를 모으고, 2차 패스로 revoke 안 된 블록만 순서대로 redo. 끝나면 JSB를 갱신(로그 비움).</li><li>데이터 블록의 옛 내용은 <code>'x'</code>(쓰레기), 저널 영역의 옛 내용은 <code>'?'</code>, Da=<code>'a'</code>, Db=<code>'b'</code>.</li></ul>
+<h3 id="7-2-코드-code-c42_wal_journal-c">7.2 코드 (<code>code/C42_wal_journal.c</code>)<a class="anchor" href="#7-2-코드-code-c42_wal_journal-c" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>/*
+ * C42_wal_journal.c — 아주 작은 write-ahead log(저널) + 크래시 복구 시뮬레이터
+ *
+ * "디스크" = 메모리 배열. 모든 디스크 쓰기를 순서대로 리스트에 담고,
+ * "k번째 쓰기 직후 전원이 나갔다" = 초기 이미지에 앞의 k개 쓰기만 적용한 상태.
+ * 그 상태에서 recover()(저널 재생)를 돌리고 mini-fsck(check)로 결과를 판정한다.
+ *
+ * 시나리오 (OSTEP 42장 예제: 파일에 블록 하나 append → I[v2], B[v2], Db)
+ *   B. 저널 없이 3개 블록 중 일부만 기록된 8가지 경우
+ *   A. data journaling: 매 단계마다 크래시
+ *   C. TxB..TxE 를 한 번에 내보냈는데 디스크가 순서를 바꿈 (체크섬 없음/있음)
+ *   D. ordered(metadata) journaling + "데이터를 커밋 뒤에 쓰는" 버그 버전
+ *   E. 블록 재사용 + revoke 레코드 (ext3 의 그 악명 높은 케이스)
+ *
+ * build: cc -Wall -Wextra -O0 code/C42_wal_journal.c -o .work/bin/C42_wal_journal
+ */
+#include &lt;stdint.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+#define BS 64      /* 블록 크기(바이트) — 장난감이라 작게 */
+#define NBLK 40
+#define JSB 1      /* 저널 슈퍼블록 */
+#define JSTART 2   /* 저널 영역 2..17 */
+#define JLEN 16
+#define DBMAP 19   /* data bitmap: '0'/'1' 문자 8개 */
+#define INODE 20   /* inode 블록: inode 4개 */
+#define DATA0 24   /* data block 0..7 = 디스크 블록 24..31 */
+
+typedef struct { uint8_t b[NBLK][BS]; } disk_t;
+
+typedef struct { int8_t used, size, ptr[4]; char name[10]; } inode_t; /* 16B */
+typedef struct { char magic[4]; int32_t tid, n; int8_t addr[6], kind[6]; } txb_t;
+typedef struct { char magic[4]; int32_t tid; uint32_t csum; } txe_t;
+typedef struct { char magic[4]; int32_t start, tid; } jsb_t;
+
+enum { K_COPY = 0, K_REVOKE = 1 };
+
+typedef struct { int addr; uint8_t data[BS]; char label[28]; } wr_t;
+typedef struct { wr_t w[64]; int n; } wlist_t;
+
+static void add(wlist_t *wl, int addr, const uint8_t *buf, const char *label) {
+    wr_t *w = &amp;wl-&gt;w[wl-&gt;n++];
+    w-&gt;addr = addr;
+    memcpy(w-&gt;data, buf, BS);
+    snprintf(w-&gt;label, sizeof w-&gt;label, "%s", label);
+}
+
+static uint32_t fnv1a(const uint8_t *p, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i &lt; len; i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+
+/* ---------- 블록 내용 만들기 ---------- */
+static void fill(uint8_t *blk, char c) { memset(blk, c, BS); }
+
+static void mk_jsb(uint8_t *blk, int start, int tid) {
+    jsb_t j = { "JSB", start, tid };
+    memset(blk, 0, BS);
+    memcpy(blk, &amp;j, sizeof j);
+}
+
+static void mk_inode_blk(uint8_t *blk, const inode_t ino[4]) {
+    memset(blk, 0, BS);
+    memcpy(blk, ino, 4 * sizeof(inode_t));
+}
+
+static void get_inodes(const disk_t *d, inode_t ino[4]) {
+    memcpy(ino, d-&gt;b[INODE], 4 * sizeof(inode_t));
+}
+
+/* 트랜잭션 하나를 저널에 기록하는 쓰기들을 wl 에 추가. 다음 저널 위치를 반환 */
+typedef struct { int addr, kind; const uint8_t *data; const char *name; } item_t;
+
+static int journal_tx(wlist_t *wl, int pos, int tid, const item_t *it, int n) {
+    uint8_t blk[BS], content[6 * BS];
+    txb_t b;
+    memset(&amp;b, 0, sizeof b);
+    memcpy(b.magic, "TXB", 4);
+    b.tid = tid;
+    b.n = n;
+    for (int i = 0; i &lt; n; i++) { b.addr[i] = (int8_t)it[i].addr; b.kind[i] = (int8_t)it[i].kind; }
+    memset(blk, 0, BS);
+    memcpy(blk, &amp;b, sizeof b);
+    char lab[28];
+    snprintf(lab, sizeof lab, "J: TxB(tid=%d)", tid);
+    add(wl, pos, blk, lab);
+    for (int i = 0; i &lt; n; i++) {
+        memcpy(content + i * BS, it[i].data, BS);
+        snprintf(lab, sizeof lab, "J: %s", it[i].name);
+        add(wl, pos + 1 + i, it[i].data, lab);
+    }
+    txe_t e = { "TXE", tid, fnv1a(content, (size_t)n * BS) };
+    memset(blk, 0, BS);
+    memcpy(blk, &amp;e, sizeof e);
+    snprintf(lab, sizeof lab, "J: TxE(tid=%d)", tid);
+    add(wl, pos + 1 + n, blk, lab);
+    return pos + 2 + n;
+}
+
+/* ---------- 복구: 저널 스캔 → (revoke 수집) → 재생 ---------- */
+static int recover(disk_t *d, int verify_csum, char *log, size_t loglen) {
+    jsb_t j;
+    memcpy(&amp;j, d-&gt;b[JSB], sizeof j);
+    int pos = j.start, expect = j.tid, ntx = 0, nrev = 0, replayed = 0, skipped = 0;
+    int txpos[8], txtid[8], revaddr[16], revtid[16];
+    const char *why = "end of log";
+    log[0] = 0;
+    while (pos &lt; JSTART + JLEN) {
+        txb_t b;
+        txe_t e;
+        memcpy(&amp;b, d-&gt;b[pos], sizeof b);
+        if (memcmp(b.magic, "TXB", 4) != 0 || b.tid != expect) { why = "no more TxB"; break; }
+        if (pos + 1 + b.n &gt;= JSTART + JLEN) { why = "truncated"; break; }
+        memcpy(&amp;e, d-&gt;b[pos + 1 + b.n], sizeof e);
+        if (memcmp(e.magic, "TXE", 4) != 0 || e.tid != b.tid) { why = "TxE missing (uncommitted)"; break; }
+        if (verify_csum &amp;&amp; fnv1a(d-&gt;b[pos + 1], (size_t)b.n * BS) != e.csum) {
+            why = "checksum MISMATCH -&gt; discard";
+            break;
+        }
+        txpos[ntx] = pos; txtid[ntx] = b.tid; ntx++;
+        for (int i = 0; i &lt; b.n; i++)
+            if (b.kind[i] == K_REVOKE) {
+                int32_t a;
+                memcpy(&amp;a, d-&gt;b[pos + 1 + i], sizeof a);
+                revaddr[nrev] = a; revtid[nrev] = b.tid; nrev++;
+            }
+        pos += b.n + 2;
+        expect++;
+    }
+    for (int t = 0; t &lt; ntx; t++) {
+        txb_t b;
+        memcpy(&amp;b, d-&gt;b[txpos[t]], sizeof b);
+        for (int i = 0; i &lt; b.n; i++) {
+            if (b.kind[i] != K_COPY) continue;
+            int revoked = 0;
+            for (int r = 0; r &lt; nrev; r++)
+                if (revaddr[r] == b.addr[i] &amp;&amp; revtid[r] &gt; txtid[t]) revoked = 1;
+            if (revoked) { skipped++; continue; }
+            memcpy(d-&gt;b[b.addr[i]], d-&gt;b[txpos[t] + 1 + i], BS);
+            replayed++;
+        }
+    }
+    mk_jsb(d-&gt;b[JSB], pos, expect); /* 재생 끝 → 저널 비움 */
+    snprintf(log, loglen, "%d tx committed, %d blk replayed%s%s (stop: %s)", ntx, replayed,
+             skipped ? ", revoked-skip=" : "", skipped ? (skipped == 1 ? "1" : "n") : "", why);
+    return ntx;
+}
+
+/* ---------- mini fsck: append 예제용 (inode 2 + data bitmap + data) ---------- */
+static void check(const disk_t *d, char *out, size_t len) {
+    inode_t ino[4];
+    get_inodes(d, ino);
+    const inode_t *f = &amp;ino[2];
+    char issues[160] = "";
+    int bad = 0, garbage = 0;
+    for (int i = 0; i &lt; 4; i++) {
+        int p = f-&gt;ptr[i];
+        if (p &lt; 0) continue;
+        if (d-&gt;b[DBMAP][p] != '1') {
+            snprintf(issues + strlen(issues), sizeof issues - strlen(issues),
+                     " [inode-&gt;blk%d but bitmap=0]", p);
+            bad = 1;
+        }
+        char c = (char)d-&gt;b[DATA0 + p][0];
+        if (c != 'a' &amp;&amp; c != 'b') garbage = 1;
+    }
+    for (int k = 0; k &lt; 8; k++) {
+        if (d-&gt;b[DBMAP][k] != '1') continue;
+        int pointed = 0;
+        for (int i = 0; i &lt; 4; i++) if (f-&gt;ptr[i] == k) pointed = 1;
+        if (!pointed) {
+            snprintf(issues + strlen(issues), sizeof issues - strlen(issues),
+                     " [bitmap blk%d=1 but no inode -&gt; leak]", k);
+            bad = 1;
+        }
+    }
+    if (bad) snprintf(out, len, "INCONSISTENT%s", issues);
+    else if (garbage) snprintf(out, len, "consistent but GARBAGE (blk5='%c')", d-&gt;b[DATA0 + 5][0]);
+    else if (f-&gt;size == 1) snprintf(out, len, "OK  old state (Da)");
+    else snprintf(out, len, "OK  new state (Da+Db)");
+}
+
+/* ---------- 초기 디스크 이미지 &amp; 새 블록들 ---------- */
+static disk_t base;
+static uint8_t Iv2[BS], Bv2[BS], Db[BS];
+
+static void init_base(void) {
+    memset(&amp;base, 0, sizeof base);
+    for (int i = 0; i &lt; JLEN; i++) fill(base.b[JSTART + i], '?'); /* 예전 저널 찌꺼기 */
+    mk_jsb(base.b[JSB], JSTART, 1);
+    memset(base.b[DBMAP], 0, BS);
+    memcpy(base.b[DBMAP], "00001000", 8);
+    inode_t ino[4];
+    memset(ino, 0, sizeof ino);
+    for (int i = 0; i &lt; 4; i++) for (int k = 0; k &lt; 4; k++) ino[i].ptr[k] = -1;
+    ino[2] = (inode_t){ 1, 1, { 4, -1, -1, -1 }, "file" };
+    mk_inode_blk(base.b[INODE], ino);
+    for (int i = 0; i &lt; 8; i++) fill(base.b[DATA0 + i], 'x'); /* 쓰레기(이전 내용) */
+    fill(base.b[DATA0 + 4], 'a');                          /* Da */
+
+    ino[2] = (inode_t){ 1, 2, { 4, 5, -1, -1 }, "file" };
+    mk_inode_blk(Iv2, ino);
+    memset(Bv2, 0, BS);
+    memcpy(Bv2, "00001100", 8);
+    fill(Db, 'b');
+}
+
+static void apply_prefix(disk_t *d, const wlist_t *wl, int k) {
+    *d = base;
+    for (int i = 0; i &lt; k; i++) memcpy(d-&gt;b[wl-&gt;w[i].addr], wl-&gt;w[i].data, BS);
+}
+
+static void crash_sweep(const char *title, const wlist_t *wl) {
+    printf("\n== %s ==\n", title);
+    printf("%-3s %-22s %-64s %s\n", "k", "last write persisted", "recovery", "fsck result");
+    for (int k = 0; k &lt;= wl-&gt;n; k++) {
+        disk_t d;
+        char rlog[120], res[200];
+        apply_prefix(&amp;d, wl, k);
+        recover(&amp;d, 1, rlog, sizeof rlog);
+        check(&amp;d, res, sizeof res);
+        printf("%-3d %-22s %-64s %s\n", k, k ? wl-&gt;w[k - 1].label : "(nothing)", rlog, res);
+    }
+}
+
+int main(void) {
+    init_base();
+    uint8_t blk[BS];
+
+    /* ---- B. 저널 없음: {Db, I[v2], B[v2]} 의 8가지 부분집합 ---- */
+    printf("== B. no journal: which of the 3 writes reached disk? ==\n");
+    for (int m = 0; m &lt; 8; m++) {
+        disk_t d = base;
+        char res[200];
+        if (m &amp; 1) memcpy(d.b[DATA0 + 5], Db, BS);
+        if (m &amp; 2) memcpy(d.b[INODE], Iv2, BS);
+        if (m &amp; 4) memcpy(d.b[DBMAP], Bv2, BS);
+        check(&amp;d, res, sizeof res);
+        printf("Db=%d I[v2]=%d B[v2]=%d  -&gt; %s\n", m &amp; 1, (m &gt;&gt; 1) &amp; 1, (m &gt;&gt; 2) &amp; 1, res);
+    }
+
+    /* ---- A. data journaling ---- */
+    wlist_t A = { .n = 0 };
+    item_t items[3] = {
+        { INODE, K_COPY, Iv2, "I[v2]" },
+        { DBMAP, K_COPY, Bv2, "B[v2]" },
+        { DATA0 + 5, K_COPY, Db, "Db" },
+    };
+    int next = journal_tx(&amp;A, JSTART, 1, items, 3);
+    add(&amp;A, INODE, Iv2, "CP: I[v2]");
+    add(&amp;A, DBMAP, Bv2, "CP: B[v2]");
+    add(&amp;A, DATA0 + 5, Db, "CP: Db");
+    mk_jsb(blk, next, 2);
+    add(&amp;A, JSB, blk, "free: JSB.start++");
+    crash_sweep("A. data journaling, crash after k-th write", &amp;A);
+
+    /* ---- C. 5블록을 한꺼번에 issue → 디스크가 Db(저널본)를 늦게 씀 ---- */
+    printf("\n== C. TxB,I,B,Db,TxE issued together; disk persisted TxE before J:Db ==\n");
+    {
+        disk_t d = base;
+        char rlog[120], res[200];
+        /* A 리스트의 0..4 중 J:Db(index 3) 만 빠진 채 전원 차단 */
+        for (int i = 0; i &lt; 5; i++)
+            if (i != 3) memcpy(d.b[A.w[i].addr], A.w[i].data, BS);
+        disk_t d2 = d;
+        recover(&amp;d, 0, rlog, sizeof rlog);
+        check(&amp;d, res, sizeof res);
+        printf("no checksum : %-46s -&gt; %s\n", rlog, res);
+        recover(&amp;d2, 1, rlog, sizeof rlog);
+        check(&amp;d2, res, sizeof res);
+        printf("checksum    : %-46s -&gt; %s\n", rlog, res);
+    }
+
+    /* ---- D. ordered (metadata) journaling ---- */
+    wlist_t D = { .n = 0 };
+    add(&amp;D, DATA0 + 5, Db, "Db -&gt; final location");
+    next = journal_tx(&amp;D, JSTART, 1, items, 2); /* I[v2], B[v2] 만 저널 */
+    add(&amp;D, INODE, Iv2, "CP: I[v2]");
+    add(&amp;D, DBMAP, Bv2, "CP: B[v2]");
+    mk_jsb(blk, next, 2);
+    add(&amp;D, JSB, blk, "free: JSB.start++");
+    crash_sweep("D1. ordered journaling (data first), crash after k-th write", &amp;D);
+
+    wlist_t Dbug = { .n = 0 };
+    next = journal_tx(&amp;Dbug, JSTART, 1, items, 2);
+    add(&amp;Dbug, DATA0 + 5, Db, "Db (AFTER commit!)");
+    add(&amp;Dbug, INODE, Iv2, "CP: I[v2]");
+    add(&amp;Dbug, DBMAP, Bv2, "CP: B[v2]");
+    crash_sweep("D2. BUGGY metadata journaling (data after commit)", &amp;Dbug);
+
+    /* ---- E. 블록 재사용 + revoke ---- */
+    printf("\n== E. block reuse: dir foo's block (data6) freed, reused by file foobar ==\n");
+    for (int use_revoke = 0; use_revoke &lt;= 1; use_revoke++) {
+        wlist_t E = { .n = 0 };
+        inode_t ino[4];
+        uint8_t ib1[BS], ib2[BS], ib3[BS], dfoo[BS], dfoobar[BS], rv[BS];
+        memset(ino, 0, sizeof ino);
+        for (int i = 0; i &lt; 4; i++) for (int k = 0; k &lt; 4; k++) ino[i].ptr[k] = -1;
+        ino[1] = (inode_t){ 1, 1, { 6, -1, -1, -1 }, "foo/" };
+        mk_inode_blk(ib1, ino);
+        fill(dfoo, 'D'); /* 디렉터리 내용 = 메타데이터 → 저널에 들어감 */
+        item_t t1[2] = { { INODE, K_COPY, ib1, "I[foo]" }, { DATA0 + 6, K_COPY, dfoo, "D[foo]" } };
+        int p = journal_tx(&amp;E, JSTART, 1, t1, 2);
+        add(&amp;E, INODE, ib1, "CP: I[foo]");
+        add(&amp;E, DATA0 + 6, dfoo, "CP: D[foo]");
+        /* rm -r foo : 블록 6 해제 (+ revoke 레코드) */
+        ino[1] = (inode_t){ 0, 0, { -1, -1, -1, -1 }, "" };
+        mk_inode_blk(ib2, ino);
+        memset(rv, 0, BS);
+        int32_t a = DATA0 + 6;
+        memcpy(rv, &amp;a, sizeof a);
+        item_t t2[2] = { { INODE, K_COPY, ib2, "I[-foo]" }, { 0, K_REVOKE, rv, "REVOKE blk" } };
+        p = journal_tx(&amp;E, p, 2, t2, use_revoke ? 2 : 1);
+        add(&amp;E, INODE, ib2, "CP: I[-foo]");
+        /* foobar 생성: 블록 6 재사용, 사용자 데이터는 저널 안 함(ordered) */
+        fill(dfoobar, 'F');
+        add(&amp;E, DATA0 + 6, dfoobar, "foobar data");
+        ino[3] = (inode_t){ 1, 1, { 6, -1, -1, -1 }, "foobar" };
+        mk_inode_blk(ib3, ino);
+        item_t t3[1] = { { INODE, K_COPY, ib3, "I[foobar]" } };
+        journal_tx(&amp;E, p, 3, t3, 1);
+        add(&amp;E, INODE, ib3, "CP: I[foobar]");
+        /* JSB 는 아직 tx1 을 가리킴 (체크포인트 후 free 전에) → 크래시 */
+        disk_t d;
+        char rlog[120];
+        apply_prefix(&amp;d, &amp;E, E.n);
+        printf("before crash : data6='%c' (foobar)\n", d.b[DATA0 + 6][0]);
+        recover(&amp;d, 1, rlog, sizeof rlog);
+        inode_t after[4];
+        get_inodes(&amp;d, after);
+        printf("revoke=%s : %s\n              -&gt; data6='%c' owner=%s  %s\n", use_revoke ? "ON " : "OFF", rlog,
+               d.b[DATA0 + 6][0], after[3].name,
+               d.b[DATA0 + 6][0] == 'F' ? "OK" : "CORRUPTED: old dir bytes replayed over foobar!");
+    }
+    return 0;
+}</code></pre></figure>
+<h3 id="7-3-실제-출력">7.3 실제 출력<a class="anchor" href="#7-3-실제-출력" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>$ cc -Wall -Wextra -O0 -pthread code/C42_wal_journal.c -o .work/bin/C42_wal_journal &amp;&amp; .work/bin/C42_wal_journal
+== B. no journal: which of the 3 writes reached disk? ==
+Db=0 I[v2]=0 B[v2]=0  -&gt; OK  old state (Da)
+Db=1 I[v2]=0 B[v2]=0  -&gt; OK  old state (Da)
+Db=0 I[v2]=1 B[v2]=0  -&gt; INCONSISTENT [inode-&gt;blk5 but bitmap=0]
+Db=1 I[v2]=1 B[v2]=0  -&gt; INCONSISTENT [inode-&gt;blk5 but bitmap=0]
+Db=0 I[v2]=0 B[v2]=1  -&gt; INCONSISTENT [bitmap blk5=1 but no inode -&gt; leak]
+Db=1 I[v2]=0 B[v2]=1  -&gt; INCONSISTENT [bitmap blk5=1 but no inode -&gt; leak]
+Db=0 I[v2]=1 B[v2]=1  -&gt; consistent but GARBAGE (blk5='x')
+Db=1 I[v2]=1 B[v2]=1  -&gt; OK  new state (Da+Db)
+
+== A. data journaling, crash after k-th write ==
+k   last write persisted   recovery                                                         fsck result
+0   (nothing)              0 tx committed, 0 blk replayed (stop: no more TxB)               OK  old state (Da)
+1   J: TxB(tid=1)          0 tx committed, 0 blk replayed (stop: TxE missing (uncommitted)) OK  old state (Da)
+2   J: I[v2]               0 tx committed, 0 blk replayed (stop: TxE missing (uncommitted)) OK  old state (Da)
+3   J: B[v2]               0 tx committed, 0 blk replayed (stop: TxE missing (uncommitted)) OK  old state (Da)
+4   J: Db                  0 tx committed, 0 blk replayed (stop: TxE missing (uncommitted)) OK  old state (Da)
+5   J: TxE(tid=1)          1 tx committed, 3 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+6   CP: I[v2]              1 tx committed, 3 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+7   CP: B[v2]              1 tx committed, 3 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+8   CP: Db                 1 tx committed, 3 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+9   free: JSB.start++      0 tx committed, 0 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+
+== C. TxB,I,B,Db,TxE issued together; disk persisted TxE before J:Db ==
+no checksum : 1 tx committed, 3 blk replayed (stop: no more TxB) -&gt; consistent but GARBAGE (blk5='?')
+checksum    : 0 tx committed, 0 blk replayed (stop: checksum MISMATCH -&gt; discard) -&gt; OK  old state (Da)
+
+== D1. ordered journaling (data first), crash after k-th write ==
+k   last write persisted   recovery                                                         fsck result
+0   (nothing)              0 tx committed, 0 blk replayed (stop: no more TxB)               OK  old state (Da)
+1   Db -&gt; final location   0 tx committed, 0 blk replayed (stop: no more TxB)               OK  old state (Da)
+2   J: TxB(tid=1)          0 tx committed, 0 blk replayed (stop: TxE missing (uncommitted)) OK  old state (Da)
+3   J: I[v2]               0 tx committed, 0 blk replayed (stop: TxE missing (uncommitted)) OK  old state (Da)
+4   J: B[v2]               0 tx committed, 0 blk replayed (stop: TxE missing (uncommitted)) OK  old state (Da)
+5   J: TxE(tid=1)          1 tx committed, 2 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+6   CP: I[v2]              1 tx committed, 2 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+7   CP: B[v2]              1 tx committed, 2 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+8   free: JSB.start++      0 tx committed, 0 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+
+== D2. BUGGY metadata journaling (data after commit) ==
+k   last write persisted   recovery                                                         fsck result
+0   (nothing)              0 tx committed, 0 blk replayed (stop: no more TxB)               OK  old state (Da)
+1   J: TxB(tid=1)          0 tx committed, 0 blk replayed (stop: TxE missing (uncommitted)) OK  old state (Da)
+2   J: I[v2]               0 tx committed, 0 blk replayed (stop: TxE missing (uncommitted)) OK  old state (Da)
+3   J: B[v2]               0 tx committed, 0 blk replayed (stop: TxE missing (uncommitted)) OK  old state (Da)
+4   J: TxE(tid=1)          1 tx committed, 2 blk replayed (stop: no more TxB)               consistent but GARBAGE (blk5='x')
+5   Db (AFTER commit!)     1 tx committed, 2 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+6   CP: I[v2]              1 tx committed, 2 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+7   CP: B[v2]              1 tx committed, 2 blk replayed (stop: no more TxB)               OK  new state (Da+Db)
+
+== E. block reuse: dir foo's block (data6) freed, reused by file foobar ==
+before crash : data6='F' (foobar)
+revoke=OFF : 3 tx committed, 4 blk replayed (stop: no more TxB)
+              -&gt; data6='D' owner=foobar  CORRUPTED: old dir bytes replayed over foobar!
+before crash : data6='F' (foobar)
+revoke=ON  : 3 tx committed, 3 blk replayed, revoked-skip=1 (stop: no more TxB)
+              -&gt; data6='F' owner=foobar  OK</code></pre></figure>
+<h3 id="7-4-해석">7.4 해석<a class="anchor" href="#7-4-해석" aria-label="link">#</a></h3>
+<ul><li><strong>B (저널 없음)</strong>: 2.1절 표의 6가지 + trivial 2가지가 그대로 나온다. 특히 <code>Db=0 I=1 B=1</code> → <strong>"consistent but GARBAGE"</strong> — fsck가 고칠 수 없는 바로 그 경우다.</li><li><strong>A (data journaling)</strong>: k=0~4(TxE 전)는 전부 <strong>옛 상태</strong>, k=5(TxE가 디스크에 감) 이후는 전부 <strong>새 상태</strong>. 중간 상태가 하나도 없다 = <strong>원자성</strong>. 커밋 지점은 정확히 "TxE 한 섹터가 기록된 순간"이다. k=6~8(checkpoint 도중)은 재생으로 같은 블록을 한 번 더 쓰지만 결과는 같다(멱등). k=9는 JSB가 tx 뒤를 가리키므로 재생할 게 없고 본체가 이미 새 상태.</li><li><strong>C (한꺼번에 issue + 디스크 재정렬)</strong>: 체크섬 없이 TID만 보면 tx가 유효해 보여 <strong>로그 칸의 옛 내용 <code>'?'</code> 가 블록 5에 복사</strong>된다. TxE에 내용 체크섬을 넣으면 <strong>MISMATCH → 버림 → 옛 상태</strong>. ext4 <code>journal_checksum</code> 이 2단계 대기를 없앨 수 있는 이유.</li><li><strong>D1 (ordered)</strong>: 데이터를 먼저 쓰면 어느 k에서도 쓰레기가 없다. k=1은 "Db만 기록" — 2.1절의 첫 번째 행과 같은 무해한 상태.</li><li><strong>D2 (데이터를 커밋 뒤에)</strong>: k=4(커밋 직후)에서 <strong>consistent but GARBAGE</strong>. 메타데이터 일관성은 저널이 지키지만 "가리켜지는 것 먼저" 규칙을 어기면 데이터가 쓰레기가 된다.</li><li><strong>E (revoke)</strong>: revoke 없이 재생하면 tx1의 옛 디렉터리 내용 <code>'D'</code> 가 foobar의 데이터 <code>'F'</code> 를 덮는다 — Tweedie의 악몽. revoke ON이면 tx1의 그 블록 1개를 건너뛴다(<code>revoked-skip=1</code>).</li></ul>
+<h3 id="7-5-fsck-py-시뮬레이터">7.5 fsck.py 시뮬레이터<a class="anchor" href="#7-5-fsck-py-시뮬레이터" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>cd .tools/ostep-homework/file-journaling
+python3 fsck.py -D -p        # 손상 없이, 파일 목록까지</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Final state of file system:
+
+inode bitmap 1000100010000101
+inodes       [d a:0 r:4] [] [] [] [d a:12 r:2] [] [] [] [d a:6 r:2] [] [] [] [] [f a:-1 r:2] [] [f a:-1 r:1] 
+data bitmap  1000001000001000
+data         [(.,0) (..,0) (g,8) (w,4) (m,13) (z,13)] [] [] [] [] [] [(.,8) (..,0) (s,15)] [] [] [] [] [] [(.,4) (..,0)] [] [] [] 
+
+Summary of files, directories::
+  Files:       ['/m', '/z', '/g/s']
+  Directories: ['/', '/g', '/w']</code></pre></figure>
+<p>(<code>ARG</code> 줄 생략.) 읽는 법: 루트(inode 0, 블록 0)에 g(8), w(4), m(13), z(13). <strong>m과 z가 같은 inode 13 → 하드 링크라서 r:2</strong>. 디렉터리의 r은 "2 + 하위 디렉터리 수"처럼 쓰여 루트 r:4 (g, w 두 개).</p>
+<p>이제 손상을 하나씩 넣고 <code>-c</code> 로 정답 확인:</p>
+<figure class="code"><span class="lang">text</span><pre><code>python3 fsck.py -S 1 -c
+CORRUPTION::INODE BITMAP corrupt bit 13
+inode bitmap 1000100010000001          ← bit 13 이 0 인데 inode 13 [f a:-1 r:2] 은 m, z 가 가리킴
+
+python3 fsck.py -S 3 -c
+CORRUPTION::INODE 15 refcnt increased
+inodes ... [f a:-1 r:2]                ← inode 15 (/g/s) 를 가리키는 엔트리는 하나뿐인데 r:2
+
+python3 fsck.py -S 19 -c
+CORRUPTION::INODE 8 refcnt decreased
+inodes ... [d a:6 r:1]                 ← 디렉터리 /g 의 r 이 2 → 1
+
+python3 fsck.py -S 5 -c
+CORRUPTION::INODE 8 with directory [('.', 8), ('..', 0), ('s', 15)]:
+  entry ('s', 15) altered to refer to different name (y)
+data ... [(.,8) (..,0) (y,15)]         ← 이름 s → y</code></pre></figure>
+<p>(출력 일부 발췌, 손상 지점에 <code>←</code> 주석을 덧붙임.) fsck 관점 판정:</p>
+<ul><li><strong>-S 1 (inode bitmap 비트 꺼짐)</strong>: 탐지·수리 가능 — inode를 신뢰해 bitmap을 다시 만든다(3절 2번 단계).</li><li><strong>-S 3 / -S 19 (링크 수 틀림)</strong>: 탐지·수리 가능 — 디렉터리 트리를 돌며 다시 센 값으로 고친다(3절 4번 단계).</li><li><strong>-S 5 (엔트리 이름 변경)</strong>: <strong>탐지 불가</strong> — <code>y</code> 도 완벽히 합법적인 이름이다. 메타데이터가 "일관"되기만 하면 fsck는 그것이 "맞는지"는 모른다. 원문이 말한 fsck의 한계("make sure the file system metadata is internally consistent")를 그대로 보여 준다.</li></ul>
+<h2 id="8-펌웨어-엔지니어의-눈으로">8. 펌웨어 엔지니어의 눈으로<a class="anchor" href="#8-펌웨어-엔지니어의-눈으로" aria-label="link">#</a></h2>
+<ul><li><strong>이 장 전체가 Don의 SSD 전원 손실 복구(SPOR) 그 자체다.</strong> FTL 메타데이터 저널링은 OSTEP의 WAL과 1:1로 대응한다: L2P 매핑 변경을 <strong>delta log(저널)</strong> 로 NAND에 append → 주기적으로 <strong>맵 스냅샷(checkpoint)</strong> → 부팅 시 마지막 스냅샷 로드 + 이후 delta를 <strong>redo</strong>. "커밋 지점 = TxE 한 섹터"에 해당하는 것이 <strong>로그 페이지의 커밋 마커/시퀀스 번호 + CRC</strong>이고, 복구 스캔은 "시퀀스가 연속이고 CRC가 맞는 마지막 페이지"에서 멈춘다 — 7절 <code>recover()</code> 의 <code>expect</code> TID 검사와 체크섬 검사가 정확히 그 로직이다.</li><li><strong>트랜잭션 체크섬 ↔ NAND 페이지 단위 ECC/CRC.</strong> 디스크의 "512B 원자 쓰기" 가정은 NAND에서 깨진다: 전원이 프로그램 도중 나가면 <strong>부분 프로그램된 페이지</strong>가 남고, 심지어 MLC/TLC에서는 <strong>이미 커밋된 짝 페이지(lower page)까지 깨질 수 있다</strong>(paired-page corruption). 그래서 FW는 TxE 원자성을 가정하지 않고 <strong>체크섬 + 시퀀스 번호로 마지막 유효 엔트리를 판정</strong>하고, 커밋 로그를 <strong>SLC 모드 블록</strong>이나 lower page만 쓰는 영역에 두기도 한다.</li><li><strong>ordered mode의 "데이터 먼저" = FTL의 "NAND 프로그램 완료 후 L2P 갱신".</strong> 호스트 데이터 페이지가 NAND에 확실히 프로그램된 다음에야 그 위치를 가리키는 매핑 delta를 로그에 넣는다. 순서를 어기면 복구 후 LBA가 <strong>지워진/옛 페이지</strong>를 가리킨다 — 7.4의 D2 "consistent but GARBAGE"와 동일한 버그 클래스.</li><li><strong>revoke ↔ GC 후 블록 재사용.</strong> GC로 erase된 블록이 재할당됐는데 replay 로그에 "옛 매핑"이 남아 있으면, 재생 시 LBA가 <strong>새 데이터가 들어간 같은 물리 위치를 옛 의미로</strong> 가리키게 된다. FW는 블록마다 <strong>erase/할당 시퀀스 번호</strong>를 두고 "로그 엔트리의 시퀀스 &lt; 블록의 현재 할당 시퀀스면 무시"하는 식으로 revoke와 같은 효과를 낸다.</li><li><strong>write barrier/FLUSH/FUA 무시 = 신뢰의 문제.</strong> OS 저널링은 디바이스가 FLUSH를 정직하게 처리한다고 믿는다. 반대로 SSD FW 입장에서는 <strong>Flush 완료를 보고하기 전에</strong> 쓰기 버퍼 + 관련 매핑 + (필요 시) 로그까지 NAND에 영속화해야 하며, PLP 커패시터가 있으면 "volatile write cache 없음"으로 광고해 FLUSH를 사실상 no-op으로 만들 수 있다. 면접 단골: "Flush를 빨리 처리하려고 무시하면 무슨 일이?" → 바로 이 장의 C 시나리오.</li><li><strong>fsck ↔ FW의 full-scan 복구.</strong> 저널이 깨졌을 때의 최후 수단으로 SSD FW도 <strong>모든 블록의 OOB(spare) 영역에 기록된 LBA + 시퀀스 번호를 스캔해 L2P를 재구성</strong>한다 — fsck처럼 O(용량)이라 수십 초~분이 걸린다. 그래서 정상 경로는 저널(O(로그))이고 full-scan은 비상용. 7.5의 fsck.py <code>-S 5</code> 처럼 "합법적으로 보이는 오류"는 스캔으로도 못 잡는다는 한계도 같다.</li></ul>
+<h2 id="9-면접-질문">9. 면접 질문<a class="anchor" href="#9-면접-질문" aria-label="link">#</a></h2>
+<h3 id="q1-파일-append-하나가-왜-크래시-일관성-문제를-일으키나-가능한-부분-쓰기-결과를-설명하라">Q1. 파일 append 하나가 왜 크래시 일관성 문제를 일으키나? 가능한 부분 쓰기 결과를 설명하라.<a class="anchor" href="#q1-파일-append-하나가-왜-크래시-일관성-문제를-일으키나-가능한-부분-쓰기-결과를-설명하라" aria-label="link">#</a></h3>
+<details>
+<summary>답 보기</summary>
+<p><strong>inode(I[v2]), data bitmap(B[v2]), data block(Db)</strong> 세 블록을 써야 하는데 디스크는 하나씩 커밋한다. Db만 → 무해(데이터만 잃음). I만 → inode↔bitmap <strong>불일치</strong> + 쓰레기 읽기. B만 → <strong>space leak</strong>. I+B → 메타데이터는 <strong>일관되지만 쓰레기</strong>(fsck도 못 고침). I+Db → bitmap 불일치(이중 할당 위험). B+Db → leak + 어느 파일 것인지 모름. 목표는 한 일관 상태에서 다른 일관 상태로의 <strong>원자적</strong> 전이.</p>
+</details>
+<h3 id="q2-저널링-프로토콜을-단계별로-설명하고-각-단계-사이에-왜-대기-barrier-가-필요한가">Q2. 저널링 프로토콜을 단계별로 설명하고, 각 단계 사이에 왜 대기(barrier)가 필요한가?<a class="anchor" href="#q2-저널링-프로토콜을-단계별로-설명하고-각-단계-사이에-왜-대기-barrier-가-필요한가" aria-label="link">#</a></h3>
+<details>
+<summary>답 보기</summary>
+<p>(1) <strong>journal write</strong>: TxB + 내용 → 완료 대기, (2) <strong>commit</strong>: TxE(512B, 원자적) → 완료 대기, (3) <strong>checkpoint</strong>: 최종 위치에 쓰기, (4) <strong>free</strong>: journal superblock 갱신. (1)→(2) 대기가 없으면 디스크가 내부 재정렬로 TxE를 먼저 써서 <strong>TxB·TxE는 맞는데 내용은 쓰레기인 tx</strong>가 재생된다. (2)→(3) 대기가 없으면 커밋 안 된 상태에서 제자리가 바뀌어 원자성이 깨진다. 디스크 쓰기 캐시 때문에 "완료 인터럽트"만으로는 부족하고 <strong>FLUSH/FUA/barrier</strong> 가 필요하다. 복구는 커밋된 tx만 <strong>redo</strong>(멱등).</p>
+</details>
+<h3 id="q3-ext3-4의-data-journal-data-ordered-data-writeback-차이는-기본값이-ordered인-이유는">Q3. ext3/4의 data=journal, data=ordered, data=writeback 차이는? 기본값이 ordered인 이유는?<a class="anchor" href="#q3-ext3-4의-data-journal-data-ordered-data-writeback-차이는-기본값이-ordered인-이유는" aria-label="link">#</a></h3>
+<details>
+<summary>답 보기</summary>
+<p><strong>journal</strong>: 데이터+메타데이터 모두 저널 → 가장 안전, 데이터 <strong>2번 쓰기</strong>. <strong>ordered</strong>: 메타데이터만 저널, 단 <strong>데이터를 커밋 전에 제자리에 완료</strong> → 메타데이터가 쓰레기를 가리키는 일 없음. <strong>writeback</strong>: 메타데이터만 저널, 데이터 순서 무관 → 크래시 후 파일에 옛/쓰레기 데이터가 보일 수 있음. 세 모드 모두 <strong>메타데이터 일관성</strong>은 보장. ordered가 기본인 이유: 쓰기 트래픽 대부분인 데이터를 한 번만 쓰면서 "가리켜지는 것 먼저" 규칙으로 쓰레기 노출을 막는 균형점.</p>
+</details>
+<h3 id="q4-저널링에서-블록-재사용이-왜-문제이고-revoke-레코드는-어떻게-동작하나">Q4. 저널링에서 블록 재사용이 왜 문제이고, revoke 레코드는 어떻게 동작하나?<a class="anchor" href="#q4-저널링에서-블록-재사용이-왜-문제이고-revoke-레코드는-어떻게-동작하나" aria-label="link">#</a></h3>
+<details>
+<summary>답 보기</summary>
+<p>metadata journaling에서 디렉터리 블록(메타데이터) 1000이 tx1에 로그됨 → 디렉터리 삭제로 1000 해제 → 새 파일의 <strong>사용자 데이터</strong>(저널 안 됨)가 1000을 재사용 → 크래시 → 재생이 tx1의 <strong>옛 디렉터리 내용으로 1000을 덮어씀</strong>. ext3는 삭제 시 <strong>revoke 레코드</strong>를 저널에 쓰고, 복구 시 <strong>먼저 revoke를 모두 수집</strong>한 뒤, revoke tx보다 <strong>오래된</strong> tx의 해당 블록은 재생하지 않는다. 대안: 삭제가 checkpoint될 때까지 블록 재사용 금지.</p>
+</details>
+<h3 id="q5-트랜잭션-체크섬은-어떤-문제를-풀고-무엇을-가정하나">Q5. 트랜잭션 체크섬은 어떤 문제를 풀고, 무엇을 가정하나?<a class="anchor" href="#q5-트랜잭션-체크섬은-어떤-문제를-풀고-무엇을-가정하나" aria-label="link">#</a></h3>
+<details>
+<summary>답 보기</summary>
+<p>TxB+내용 완료를 기다렸다가 TxE를 쓰는 <strong>추가 대기(회전 지연)</strong> 를 없앤다. TxE에 트랜잭션 내용의 체크섬을 넣고 <strong>전부 한 번에 issue</strong>; 복구 시 재계산한 값이 다르면 쓰는 도중 크래시로 보고 버린다. 덤으로 저널 읽기 자체가 체크섬으로 보호된다(ext4). 가정: 체크섬 충돌 확률이 무시할 만하고(CRC32c), <strong>checkpoint는 여전히 커밋이 영속화된 뒤</strong>에 해야 한다(그 사이 FLUSH는 필요).</p>
+</details>
+<h3 id="q6-ssd-ftl의-전원-손실-복구를-os-저널링과-비교해-설명해-보라">Q6. SSD FTL의 전원 손실 복구를 OS 저널링과 비교해 설명해 보라.<a class="anchor" href="#q6-ssd-ftl의-전원-손실-복구를-os-저널링과-비교해-설명해-보라" aria-label="link">#</a></h3>
+<details>
+<summary>답 보기</summary>
+<p>같은 구조: 매핑 변경을 <strong>로그(delta)</strong> 로 append, 주기적 <strong>checkpoint(맵 스냅샷)</strong>, 부팅 시 <strong>스냅샷 + delta redo</strong>, 커밋 판정은 <strong>시퀀스 번호 + CRC</strong>. 차이: (1) NAND는 <strong>부분 프로그램/paired page</strong> 때문에 "섹터 원자 쓰기"를 가정 못 함 → 체크섬 필수, (2) "데이터 먼저, 매핑 나중" = ordered mode, (3) GC로 인한 블록 재사용 = revoke 문제 → 블록 할당 시퀀스로 옛 엔트리 무시, (4) 최후 수단은 OOB의 LBA를 스캔하는 full rebuild = fsck. PLP가 있으면 DRAM 상태를 덤프해 복구 경로를 단순화할 수 있다.</p>
+</details>
+<h2 id="10-자가-점검-숙제">10. 자가 점검 &amp; 숙제<a class="anchor" href="#10-자가-점검-숙제" aria-label="link">#</a></h2>
+<h3 id="퀴즈-1-data-journaling에서-txe-쓰기가-끝난-직후-checkpoint-전에-전원이-나갔다-재부팅-후-상태는">퀴즈 1. data journaling에서 TxE 쓰기가 끝난 직후, checkpoint 전에 전원이 나갔다. 재부팅 후 상태는?<a class="anchor" href="#퀴즈-1-data-journaling에서-txe-쓰기가-끝난-직후-checkpoint-전에-전원이-나갔다-재부팅-후-상태는" aria-label="link">#</a></h3>
+<details>
+<summary>답 보기</summary>
+<p><strong>새 상태</strong>. 트랜잭션은 커밋됐으므로 복구가 저널의 I[v2], B[v2], Db를 최종 위치에 redo 한다 (7.3 출력 A의 k=5).</p>
+</details>
+<h3 id="퀴즈-2-ordered-mode에서-데이터-쓰기-완료-를-txb-쓰기-전에-기다릴-필요가-있나">퀴즈 2. ordered mode에서 "데이터 쓰기 완료"를 TxB 쓰기 전에 기다릴 필요가 있나?<a class="anchor" href="#퀴즈-2-ordered-mode에서-데이터-쓰기-완료-를-txb-쓰기-전에-기다릴-필요가-있나" aria-label="link">#</a></h3>
+<details>
+<summary>답 보기</summary>
+<p><strong>없다.</strong> 데이터, TxB, 메타데이터를 동시에 issue해도 된다. 요구 조건은 <strong>TxE(커밋)를 issue하기 전에</strong> 데이터와 저널 내용이 <strong>모두 완료</strong>되는 것뿐이다.</p>
+</details>
+<h3 id="퀴즈-3-저널이-128mb-트랜잭션이-평균-64kb-초당-200개-커밋된다-checkpoint-free-가-전혀-안-되면-몇-초-만에-로그가-차나-fsck-대비-복구-시간의-차원은">퀴즈 3. 저널이 128MB, 트랜잭션이 평균 64KB, 초당 200개 커밋된다. checkpoint/free 가 전혀 안 되면 몇 초 만에 로그가 차나? fsck 대비 복구 시간의 차원은?<a class="anchor" href="#퀴즈-3-저널이-128mb-트랜잭션이-평균-64kb-초당-200개-커밋된다-checkpoint-free-가-전혀-안-되면-몇-초-만에-로그가-차나-fsck-대비-복구-시간의-차원은" aria-label="link">#</a></h3>
+<details>
+<summary>답 보기</summary>
+<p>64KB × 200 = 12.8MB/s → 128MB / 12.8MB/s = <strong>10초</strong>. 그래서 circular log + 주기적 checkpoint가 필수. 복구 시간은 <strong>O(로그 크기)</strong>(최대 128MB 읽기, 수백 ms~수 초) vs fsck <strong>O(볼륨 크기)</strong>(TB급이면 수십 분 이상).</p>
+</details>
+<h3 id="퀴즈-4-fsck가-고칠-수-없는-상황-두-가지를-이-장에서-찾아라">퀴즈 4. fsck가 "고칠 수 없는" 상황 두 가지를 이 장에서 찾아라.<a class="anchor" href="#퀴즈-4-fsck가-고칠-수-없는-상황-두-가지를-이-장에서-찾아라" aria-label="link">#</a></h3>
+<details>
+<summary>답 보기</summary>
+<p>(1) I[v2]+B[v2]만 쓰인 경우: 메타데이터는 일관되지만 데이터가 쓰레기 — fsck는 데이터 내용을 모른다. (2) fsck.py <code>-S 5</code>: 디렉터리 엔트리 이름이 다른 합법적 이름으로 바뀐 경우 — 일관성 위반이 아니므로 탐지 불가. (덤: Db+B만 쓰인 경우 블록은 회수되지만 사용자 데이터는 복구 불가.)</p>
+</details>
+<h3 id="원문-homework-중-꼭-해볼-것">원문 Homework 중 꼭 해볼 것<a class="anchor" href="#원문-homework-중-꼭-해볼-것" aria-label="link">#</a></h3>
+<p>이 판(v0.91) 원문에는 42장 Homework 문항이 없지만, <code>fsck.py</code> README의 흐름대로:</p>
+<ul><li><strong><code>-S</code> 1~20 을 바꿔 가며 <code>-c</code> 없이 손상 찾기</strong>: 비트맵 vs inode vs 디렉터리 중 <strong>무엇을 신뢰해 무엇을 고치는지</strong>(3절의 fsck 단계)를 몸에 익히는 문제.</li><li><strong>같은 <code>-s</code>(파일 시스템)에 다른 <code>-S</code>(손상)</strong>: 어떤 손상은 수리 가능하고(-S 1, 3, 19) 어떤 손상은 탐지조차 안 되는지(-S 5) 분류해 보는 문제.</li><li><strong><code>code/C42_wal_journal.c</code> 수정 과제</strong>: (a) revoke 대신 "checkpoint 전 블록 재사용 금지"로 E를 고쳐 보기, (b) TxE 를 쓰지 않고 TxB 에만 체크섬을 넣으면 무엇이 깨지는지 확인.</li></ul>
+<h2 id="11-다음으로">11. 다음으로<a class="anchor" href="#11-다음으로" aria-label="link">#</a></h2>
+<ul><li>아예 제자리에 쓰지 않는다면? → <a href="C43.html">Ch.43 LFS</a> (COW, 체크포인트 영역 2개, roll-forward)</li><li>크래시가 아니라 디스크가 <strong>조용히 틀린 데이터</strong>를 돌려주면? → <a href="C44.html">Ch.44 데이터 무결성</a></li><li>같은 문제를 SSD 내부에서: → <a href="C0I.html">부록 I Flash SSD</a></li><li>복습: <a href="C40.html">Ch.40 vsfs의 create/write I/O 타임라인</a></li></ul>
+  <div class="nav"><a class="prev" href="C41.html"><span class="dir">← 이전 (k)</span><span class="nm">41. Ch.41 지역성과 FFS — 디스크를 디스크답게 쓰는 파일 시스템</span></a><a class="next" href="C43.html"><span class="dir">다음 (j) →</span><span class="nm">43. Ch.43 로그 구조 파일 시스템(LFS) — 모든 쓰기를 순차 쓰기로</span></a></div>
+</main><aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-한눈에-보기">0. 한눈에 보기</a></li><li class="l2"><a href="#1-5분-복습표">1. 5분 복습표</a></li><li class="l2"><a href="#2-자세한-예-append-하나에-블록-3개-42-1">2. 자세한 예: append 하나에 블록 3개 (42.1)</a></li><li class="l3"><a href="#2-1-크래시-시나리오-6가지-2가지-trivial">2.1 크래시 시나리오 6가지 (+ 2가지 trivial)</a></li><li class="l2"><a href="#3-해법-1-파일-시스템-검사기-fsck-42-2">3. 해법 1: 파일 시스템 검사기 fsck (42.2)</a></li><li class="l2"><a href="#4-해법-2-저널링-write-ahead-logging-42-3">4. 해법 2: 저널링 (write-ahead logging) (42.3)</a></li><li class="l3"><a href="#4-1-data-journaling-기본-프로토콜">4.1 data journaling — 기본 프로토콜</a></li><li class="l3"><a href="#4-2-복구-recovery">4.2 복구 (recovery)</a></li><li class="l3"><a href="#4-3-로그-업데이트-묶기-batching">4.3 로그 업데이트 묶기 (batching)</a></li><li class="l3"><a href="#4-4-로그를-유한하게-circular-log-journal-superblock">4.4 로그를 유한하게: circular log + journal superblock</a></li><li class="l3"><a href="#4-5-metadata-journaling-ordered-mode">4.5 metadata journaling (ordered mode)</a></li><li class="l3"><a href="#4-6-까다로운-경우-블록-재사용과-revoke">4.6 까다로운 경우: 블록 재사용과 revoke</a></li><li class="l3"><a href="#4-7-타임라인-정리">4.7 타임라인 정리</a></li><li class="l2"><a href="#5-해법-3-다른-접근들-42-4">5. 해법 3: 다른 접근들 (42.4)</a></li><li class="l2"><a href="#6-요약-42-5">6. 요약 (42.5)</a></li><li class="l2"><a href="#7-직접-해보기-작은-wal을-만들고-모든-지점에서-크래시시키기">7. 직접 해보기 — 작은 WAL을 만들고 모든 지점에서 크래시시키기</a></li><li class="l3"><a href="#7-1-설계">7.1 설계</a></li><li class="l3"><a href="#7-2-코드-code-c42_wal_journal-c">7.2 코드 (code/C42_wal_journal.c)</a></li><li class="l3"><a href="#7-3-실제-출력">7.3 실제 출력</a></li><li class="l3"><a href="#7-4-해석">7.4 해석</a></li><li class="l3"><a href="#7-5-fsck-py-시뮬레이터">7.5 fsck.py 시뮬레이터</a></li><li class="l2"><a href="#8-펌웨어-엔지니어의-눈으로">8. 펌웨어 엔지니어의 눈으로</a></li><li class="l2"><a href="#9-면접-질문">9. 면접 질문</a></li><li class="l3"><a href="#q1-파일-append-하나가-왜-크래시-일관성-문제를-일으키나-가능한-부분-쓰기-결과를-설명하라">Q1. 파일 append 하나가 왜 크래시 일관성 문제를 일으키나? 가능한 부분 쓰기 결과를 설명하라.</a></li><li class="l3"><a href="#q2-저널링-프로토콜을-단계별로-설명하고-각-단계-사이에-왜-대기-barrier-가-필요한가">Q2. 저널링 프로토콜을 단계별로 설명하고, 각 단계 사이에 왜 대기(barrier)가 필요한가?</a></li><li class="l3"><a href="#q3-ext3-4의-data-journal-data-ordered-data-writeback-차이는-기본값이-ordered인-이유는">Q3. ext3/4의 data=journal, data=ordered, data=writeback 차이는? 기본값이 ordered인 이유는?</a></li><li class="l3"><a href="#q4-저널링에서-블록-재사용이-왜-문제이고-revoke-레코드는-어떻게-동작하나">Q4. 저널링에서 블록 재사용이 왜 문제이고, revoke 레코드는 어떻게 동작하나?</a></li><li class="l3"><a href="#q5-트랜잭션-체크섬은-어떤-문제를-풀고-무엇을-가정하나">Q5. 트랜잭션 체크섬은 어떤 문제를 풀고, 무엇을 가정하나?</a></li><li class="l3"><a href="#q6-ssd-ftl의-전원-손실-복구를-os-저널링과-비교해-설명해-보라">Q6. SSD FTL의 전원 손실 복구를 OS 저널링과 비교해 설명해 보라.</a></li><li class="l2"><a href="#10-자가-점검-숙제">10. 자가 점검 &amp; 숙제</a></li><li class="l3"><a href="#퀴즈-1-data-journaling에서-txe-쓰기가-끝난-직후-checkpoint-전에-전원이-나갔다-재부팅-후-상태는">퀴즈 1. data journaling에서 TxE 쓰기가 끝난 직후, checkpoint 전에 전원이 나갔다. 재부팅 후 상태는?</a></li><li class="l3"><a href="#퀴즈-2-ordered-mode에서-데이터-쓰기-완료-를-txb-쓰기-전에-기다릴-필요가-있나">퀴즈 2. ordered mode에서 "데이터 쓰기 완료"를 TxB 쓰기 전에 기다릴 필요가 있나?</a></li><li class="l3"><a href="#퀴즈-3-저널이-128mb-트랜잭션이-평균-64kb-초당-200개-커밋된다-checkpoint-free-가-전혀-안-되면-몇-초-만에-로그가-차나-fsck-대비-복구-시간의-차원은">퀴즈 3. 저널이 128MB, 트랜잭션이 평균 64KB, 초당 200개 커밋된다. checkpoint/free 가 전혀 안 되면 몇 초 만에 로그가 차나? fsck 대비 복구 시간의 차원은?</a></li><li class="l3"><a href="#퀴즈-4-fsck가-고칠-수-없는-상황-두-가지를-이-장에서-찾아라">퀴즈 4. fsck가 "고칠 수 없는" 상황 두 가지를 이 장에서 찾아라.</a></li><li class="l3"><a href="#원문-homework-중-꼭-해볼-것">원문 Homework 중 꼭 해볼 것</a></li><li class="l2"><a href="#11-다음으로">11. 다음으로</a></li></ol></aside></div><script>
+const KEY='ostep_read_v1',TKEY='ostep_theme';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+try{const t=localStorage.getItem(TKEY);if(t)document.documentElement.dataset.theme=t}catch(e){}
+const tb=document.getElementById('theme');
+if(tb)tb.onclick=()=>{const d=document.documentElement;
+  const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+  const nx=cur==='dark'?'light':'dark';d.dataset.theme=nx;try{localStorage.setItem(TKEY,nx)}catch(e){}};
+
+const bar=document.getElementById('bar');
+const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%'};
+addEventListener('scroll',onScroll,{passive:true});onScroll();
+const id=document.body.dataset.note,rb=document.getElementById('readbtn');
+const sync=()=>{const on=readSet().has(id);rb.classList.toggle('on',on);rb.textContent=on?'✓ 읽음':'읽음 표시'};
+rb.onclick=()=>{const s=readSet();s.has(id)?s.delete(id):s.add(id);try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}sync()};sync();
+const links=[...document.querySelectorAll('aside a')];
+const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){links.forEach(a=>a.classList.remove('active'));
+  const a=map.get(e.target.id);if(a){a.classList.add('active');a.scrollIntoView({block:'nearest'})}}}),{rootMargin:'-70px 0px -70% 0px'});
+document.querySelectorAll('main h2[id],main h3[id]').forEach(h=>io.observe(h));
+addEventListener('keydown',e=>{if(e.target.matches('input,textarea'))return;
+  if(e.key==='j'){const n=document.querySelector('.nav a.next');if(n)location.href=n.href}
+  if(e.key==='k'){const p=document.querySelector('.nav a.prev');if(p)location.href=p.href}});
+</script></body></html>

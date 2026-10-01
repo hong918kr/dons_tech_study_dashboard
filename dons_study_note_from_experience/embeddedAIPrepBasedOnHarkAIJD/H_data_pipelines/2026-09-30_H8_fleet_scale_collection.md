@@ -1,0 +1,1206 @@
+# H8. Fleet 규모 데이터 수집 — 원격 설정, 샘플링 정책, FW 버전 태깅, dogfood 운영
+
+> **이 노트를 다 읽으면**: 데이터 수집을 "캠페인" 단위의 프로그램(요구 정의 → 원격 설정 → 수집 → 라벨 → 학습 → 배포 → 필드 피드백)으로 설계하고 NPI 단계(EVT·DVT·PVT·MP)에 맞춰 배치할 수 있다 · FW 업데이트 없이 기기가 무엇을 기록할지 바꾸는 config 시스템(스키마 검증·버전·hash·서명·capability 협상·staged rollout·kill switch)을 만들 수 있다 · uniform·stratified·event-triggered·budgeted 샘플링을 bytes 대비 희귀 이벤트 수와 층(stratum) 커버리지로 비교하고, hash 기반 cohort와 inverse probability weight로 편향 없이 분석할 수 있다 · dogfood fleet 운영(모집·provisioning·기기 상태 관리·20대 → 1,000대 확장)과 비용·기간(Poisson 추정)·거버넌스를 숫자로 말할 수 있다
+> **JD 연결**: "Build data collection and ingestion pipelines for … various sensors, **at scale**", "Experience building sensor data collection pipelines" · study_prep_list H8 — 원격 로깅 설정, 샘플링 정책, FW 버전별 태깅, dogfood 기기 관리 · J5 — 모델 버전 관리, OTA로 모델 교체 · O3 — 실기기 farm, 회귀 CI
+> **Don 기준 난이도**: 수많은 챔버에 시나리오를 스케줄하고 client 상태를 모으던 테스트 인프라, NPI → MP 단계 운영, factory test station 설정 관리, FW 버전별 이슈 추적은 이미 강함 / 샘플링 설계의 통계(층화, 선택 편향, inverse probability weight), 희귀 이벤트 수집 기간 추정, shadow mode, 사람(dogfood 사용자)이 끼는 운영은 새로 배움
+> **선행 노트**: H1(온디바이스 로깅), H2(전송·업로드 스케줄링), H3(백엔드 ingestion·메타데이터), H4(라벨링), H5(데이터셋 관리), H6(프라이버시·동의), H7(품질 모니터링), C8(최적화 후 검증), J5(모델 업데이트) — H1~H7의 "메커니즘"은 거기서 다루고, 이 노트는 그것들을 **fleet 운영 프로그램**으로 엮는다
+
+---
+
+## 0. 큰 그림 — 수집은 기능이 아니라 "프로그램"이다
+
+H1~H7은 부품이다. H1은 기기가 센서 데이터를 flash에 어떻게 쓰는지, H2는 언제 어떻게 올리는지, H3는 서버가 어떻게 받아 저장하는지, H4는 라벨을 어떻게 붙이는지, H5는 데이터셋을 어떻게 나누고 버전 관리하는지, H6은 무엇을 모아도 되는지, H7은 모은 데이터가 멀쩡한지를 다룬다.
+
+그런데 부품이 다 있어도 "다음 달까지 새 제스처 모델을 위한 데이터 300시간"이라는 요청은 해결되지 않는다. 누가, 몇 대의 기기로, 어떤 설정으로, 무엇을 우선 모으고, 예산은 얼마이고, 다 모였는지 어떻게 알고, 다음 FW가 나오면 섞인 데이터를 어떻게 하는지 — 이것이 H8이다. 한 문장으로 하면 **"fleet(기기 무리) 전체를 하나의 분산 측정 장비로 보고, 그 장비에 실험(캠페인)을 스케줄하는 일"**이다.
+
+Don에게 이건 낯선 일이 아니다. 대규모 챔버 시스템에 테스트 시나리오를 스케줄하고, 각 client(테스트 호스트)의 상태를 모아 대시보드로 보던 테스트 인프라와 구조가 거의 같다.
+
+| Don의 챔버 테스트 인프라 | Fleet 데이터 수집 (H8) |
+|---|---|
+| 테스트 시나리오 (온도·전압·워크로드 조합) | 수집 캠페인 (센서·rate·trigger·기간·예산) |
+| 시나리오 스케줄러가 챔버/슬롯에 할당 | cohort 할당: 어떤 기기가 어떤 캠페인에 참여하나 |
+| client가 주기적으로 상태 보고 (heartbeat) | 기기 check-in: FW·config 버전·배터리·업로드량 보고 |
+| 테스트 job 설정 파일 (버전 관리) | 원격 logging config (버전·hash·서명) |
+| 장비 고장·offline 슬롯 처리 | 분실·고장·연락 끊긴 dogfood 기기 처리 |
+| FW 빌드별 결과 집계, 회귀 비교 | FW 빌드별 데이터 층화, 버전 간 회귀 탐지 (H7) |
+| 커버리지 매트릭스 (조건 × DUT) 빈칸 채우기 | stratified sampling으로 조건 × 사용자 빈칸 채우기 |
+| 장비 시간 · 챔버 수 = 비용 | 기기 수 · MB · 라벨러 시간 = 비용 |
+
+가장 큰 차이는 두 가지다. 첫째, **DUT가 사람 손목 위에 있다.** 챔버는 시키면 시나리오를 돌리지만, dogfood 사용자는 충전을 잊고, 앱을 지우고, 기기를 잃어버린다. 둘째, **원하는 사건을 마음대로 만들 수 없다.** 챔버는 온도를 85 °C로 올리면 되지만, "달리면서 하는 double-tap" 같은 희귀 이벤트는 사용자가 일상에서 우연히 해 줄 때까지 기다려야 한다. 그래서 샘플링 정책과 기간 추정이 핵심 기술이 된다.
+
+```svg
+<svg viewBox="0 0 680 450" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="h8a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<rect x="276" y="29" width="128" height="38" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/><text x="340" y="45" font-size="12" text-anchor="middle">1 데이터 요구 정의</text><text x="340" y="60" font-size="12" text-anchor="middle">모델팀과 함께</text> <rect x="434" y="58" width="128" height="38" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/><text x="498" y="74" font-size="12" text-anchor="middle">2 캠페인 설계</text><text x="498" y="89" font-size="12" text-anchor="middle">정책·예산·동의</text> <rect x="531" y="134" width="128" height="38" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/><text x="595" y="150" font-size="12" text-anchor="middle">3 원격 설정</text><text x="595" y="165" font-size="12" text-anchor="middle">config push</text> <rect x="531" y="228" width="128" height="38" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/><text x="595" y="244" font-size="12" text-anchor="middle">4 수집</text><text x="595" y="259" font-size="12" text-anchor="middle">H1 로깅 · H2 전송</text> <rect x="434" y="304" width="128" height="38" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/><text x="498" y="320" font-size="12" text-anchor="middle">5 모니터링</text><text x="498" y="335" font-size="12" text-anchor="middle">H7 품질</text> <rect x="276" y="333" width="128" height="38" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/><text x="340" y="349" font-size="12" text-anchor="middle">6 라벨링</text><text x="340" y="364" font-size="12" text-anchor="middle">H4</text> <rect x="118" y="304" width="128" height="38" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/><text x="182" y="320" font-size="12" text-anchor="middle">7 큐레이션·버전</text><text x="182" y="335" font-size="12" text-anchor="middle">H5 · H3</text> <rect x="21" y="228" width="128" height="38" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/><text x="85" y="244" font-size="12" text-anchor="middle">8 학습·평가</text><text x="85" y="259" font-size="12" text-anchor="middle">C8 검증</text>
+<rect x="21" y="134" width="128" height="38" rx="6" fill="none" stroke="#d0564a" stroke-width="2"/><text x="85" y="150" font-size="12" text-anchor="middle">9 배포</text><text x="85" y="165" font-size="12" text-anchor="middle">J5 OTA</text> <rect x="118" y="58" width="128" height="38" rx="6" fill="none" stroke="#d0564a" stroke-width="2"/><text x="182" y="74" font-size="12" text-anchor="middle">10 필드 피드백</text><text x="182" y="89" font-size="12" text-anchor="middle">hard negative</text> <line x1="408" y1="61" x2="430" y2="64" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8a)"/> <line x1="527" y1="100" x2="565" y2="130" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8a)"/> <line x1="595" y1="176" x2="595" y2="224" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8a)"/> <line x1="565" y1="270" x2="527" y2="300" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8a)"/> <line x1="430" y1="336" x2="408" y2="339" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8a)"/> <line x1="272" y1="339" x2="250" y2="336" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8a)"/>
+<line x1="153" y1="300" x2="115" y2="270" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8a)"/> <line x1="85" y1="224" x2="85" y2="176" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8a)"/> <line x1="115" y1="130" x2="153" y2="100" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8a)"/> <line x1="250" y1="64" x2="272" y2="61" stroke="#d0564a" stroke-width="1.5" marker-end="url(#h8a)"/> <text x="340" y="192" font-size="14" text-anchor="middle">캠페인 1회 = 루프 1바퀴</text> <text x="340" y="212" font-size="12" text-anchor="middle">다음 캠페인은 이번 바퀴의 빈칸에서 시작</text> <line x1="20" y1="392" x2="660" y2="392" stroke="currentColor"/> <rect x="20" y="400" width="100" height="26" rx="4" fill="none" stroke="#888"/><text x="70" y="418" font-size="12" text-anchor="middle">Proto 수십 대</text>
+<rect x="128" y="400" width="120" height="26" rx="4" fill="none" stroke="#4a7bd0"/><text x="188" y="418" font-size="12" text-anchor="middle">EVT 내부 dogfood</text> <rect x="256" y="400" width="130" height="26" rx="4" fill="none" stroke="#4a7bd0"/><text x="321" y="418" font-size="12" text-anchor="middle">DVT 확장 dogfood</text> <rect x="394" y="400" width="120" height="26" rx="4" fill="none" stroke="#e08a3c"/><text x="454" y="418" font-size="12" text-anchor="middle">PVT 외부 beta</text> <rect x="522" y="400" width="138" height="26" rx="4" fill="none" stroke="#3f9a6b"/><text x="591" y="418" font-size="12" text-anchor="middle">MP · opt-in 사용자</text> <text x="20" y="444" font-size="12">아래 띠: 같은 루프가 NPI 단계마다 더 큰 fleet, 더 제품에 가까운 HW·FW로 반복된다.</text>
+</svg>
+```
+
+그림 1 — 수집 프로그램 라이프사이클. 파랑(정의·설계)은 사람이 정하는 단계, 주황(설정·수집·모니터링)은 fleet이 도는 단계, 초록(라벨·큐레이션·학습)은 데이터가 모델이 되는 단계, 빨강(배포·피드백)은 모델이 다시 데이터를 부르는 단계다. 10 → 1 화살표(빨강)가 이 노트의 핵심이다. 배포된 모델이 헷갈린 사례가 다음 캠페인의 요구가 된다.
+
+이 노트는 이 루프를 따라간다: 정의·NPI 매핑(1절) → 원격 설정(2절) → cohort(3절) → 샘플링(4절) → 버전 태깅(5절) → dogfood 운영(6절) → 필드 피드백(7절) → 비용·기간(8절) → 거버넌스(9절).
+
+---
+
+## 1. 수집 프로그램 라이프사이클 — "캠페인" 단위로 생각한다
+
+### 1.1 캠페인이란
+
+**캠페인(collection campaign)** 은 "특정 데이터 요구를 채우기 위해, 정해진 기기 집합에, 정해진 설정을, 정해진 기간·예산으로 적용하는 한 번의 수집"이다. 테스트 인프라의 "test plan 하나"와 같은 단위다. 캠페인 단위로 생각하면 좋은 점이 세 가지 있다.
+
+- **추적 가능성**: 모든 레코드에 `campaign_id`가 붙어 "이 데이터는 왜, 어떤 조건으로 모였나"를 나중에 답할 수 있다 (5절).
+- **승인 단위**: 프라이버시 리뷰(H6)와 예산 승인을 캠페인마다 받는다 (9절).
+- **종료 조건**: "목표 2,000개 확인된 희귀 이벤트 또는 6주, 먼저 오는 쪽"처럼 끝이 있다. 끝이 없는 수집은 비용만 쌓이고 아무도 안 보는 데이터 늪이 된다.
+
+### 1.2 단계별로 무엇을 하나
+
+1. **데이터 요구 정의 (모델팀과)**: "wrist-flick 제스처 recall이 달리는 중에 떨어진다" 같은 문제에서 출발해 "달리는 중 flick 양성 1,500개 + 달리는 중 일상 동작 음성 50시간, 사용자 200명 이상, 왼손 착용 20% 이상"처럼 **수와 다양성**으로 바꾼다. 이 숫자가 H5의 split 계획과 맞아야 한다.
+2. **캠페인 설계**: 샘플링 정책(4절), 기기당 하루 예산, 기간, 필요한 FW capability, 동의 범위(H6), 종료 조건, 비용(8절)을 한 문서로 정한다.
+3. **원격 설정**: config를 만들어 검증·서명하고, cohort에 staged rollout한다 (2·3절).
+4. **수집**: 기기는 H1 방식으로 기록하고 H2 정책대로 올린다. 서버는 H3로 받는다.
+5. **모니터링 (H7)**: 데이터 품질(드롭·clipping·drift)과 **운영 지표**(config 적용률, 기기별 업로드, 목표 대비 진척)를 매일 본다.
+6. **라벨링 (H4)**: 우선순위가 높은 clip부터 라벨러에게 보낸다. 라벨 결과가 "trigger가 맞았나"의 정답이 되어 trigger 품질도 잰다.
+7. **큐레이션·버전 (H5·H3)**: FW·HW 층으로 걸러 데이터셋 버전을 만든다.
+8. **학습·평가**: 모델팀이 학습하고, 최적화 후 검증(C8)을 거친다.
+9. **배포 (J5)**: 모델을 OTA로 내보낸다. 처음엔 shadow mode(7절).
+10. **필드 피드백**: 새 모델이 헷갈린 사례·사용자 정정·shadow 불일치가 다음 캠페인의 요구가 된다.
+
+### 1.3 캠페인 명세서 예시
+
+캠페인 하나를 문서로 쓰면 이 정도다. 이게 2절 config의 "사람용 원본"이다.
+
+```text
+campaign_id      : flick_running_v1
+owner            : edge-ml (Don) / model team (gesture)
+goal             : 확인된 "달리는 중 flick" 양성 1,500개, 서로 다른 사용자 200명 이상
+                   달리는 중 음성(일상 동작) 50시간 — 오탐 평가용 uniform 샘플
+fleet / cohort   : DVT dogfood 500대 중 hash(device_id, "flick_running_v1") < 40%
+fw requirement   : >= 1.3.1 (capability: imu_200hz, conf_trigger)
+sampling         : trigger(gesture conf 0.3~0.7 & activity=running) 80% + uniform 20%
+budget           : 기기당 20 MB/day, 배터리 > 30% 이고 충전 중일 때만 업로드
+privacy scope    : IMU raw + 모델 score만. 마이크 없음. 보관 365일. (H6 리뷰 #PR-0412)
+stop condition   : goal 달성 또는 6주 또는 kill switch
+success metric   : 다음 모델의 running-flick recall +10%p, FA/day 악화 없음
+```
+
+### 1.4 NPI 단계와 연결 — 어떤 HW에서 모은 데이터를 믿을 수 있나
+
+Don이 Apple에서 겪은 bring-up → EVT → DVT → PVT → MP 흐름에 수집 프로그램을 겹치면 이렇다. 핵심은 **"단계가 바뀌면 센서·기구·FW가 바뀌고, 그 전 단계 데이터의 유효성도 바뀐다"**는 것이다.
+
+| NPI 단계 | 전형적 기기 수 (예시) | 누가 착용 | 수집 목적 | 데이터 유효성 주의 |
+|---|---|---|---|---|
+| Proto · 개발 보드 | 수 대~수십 대 | 엔지니어 본인 | 파이프라인 bring-up, 포맷 검증 | 센서 위치·기구가 다름. 학습용으로는 거의 못 씀 |
+| EVT | 수십 대 | 내부 팀 (dogfood 1차) | 첫 실착용 데이터, trigger 설계, 운영 리허설 | 센서 part·필터·ODR이 아직 바뀜. hw_rev 태그 필수 |
+| DVT | 수백 대 | 내부 전사 dogfood | 본 학습 데이터, 사용자 다양성 확보 | 기구 거의 확정. EVT 데이터는 재검증 후 일부만 사용 |
+| PVT | 수백~수천 대 | 외부 beta (계약·동의) | 실제 사용자 분포, 오탐 측정 | 양산 공정 기기. 대표성이 가장 좋음 |
+| MP · 출시 후 | 수만 대 이상 | opt-in 사용자 | 필드 피드백, hard negative, drift | 동의 범위가 가장 좁음. 대부분 feature·통계만 |
+
+> 펌웨어 쪽 비유: EVT 보드에서 잡은 PCIe link margin을 PVT sign-off에 그대로 쓰지 않는 것과 같다. 데이터도 "어느 build의 어느 HW에서 나온 것인가"가 결과의 일부다.
+
+---
+
+## 2. 원격 로깅 설정 — FW 업데이트 없이 "무엇을 기록할지" 바꾼다
+
+### 2.1 직관
+
+FW를 다시 빌드·서명·QA·OTA하는 데는 며칠~몇 주가 걸린다. 반면 "오늘부터 이 cohort는 IMU를 200 Hz로, 낮은 confidence일 때만 4초 clip을 남겨라"는 요구는 매주 바뀐다. 그래서 **무엇을 기록할지(what)는 데이터(config)로, 어떻게 기록할지(how)는 코드(FW)로** 나눈다.
+
+Don에게 익숙한 예가 두 개 있다. NVMe의 Set Features / vendor-specific log page로 같은 FW에서 telemetry 수준을 바꾸는 것, 그리고 factory test station이 FW 재빌드 없이 test limit 파일만 바꿔 sequence를 조정하는 것. 원격 logging config도 같다. 단, **수만 대에 무선으로** 간다는 점 때문에 검증·서명·단계적 배포·긴급 정지가 필수가 된다.
+
+### 2.2 config 스키마 — 무엇을 담나
+
+| 필드 | 예시 | 의미 | 왜 필요 |
+|---|---|---|---|
+| `campaign_id` | `flick_running_v1` | 어느 캠페인의 설정인가 | 모든 레코드에 복사되어 추적 (5절) |
+| `config_ver` | `3` | 단조 증가 버전 | rollback·replay 방지, 적용 상태 집계 |
+| `sensors` | `{"imu": 200}` | 켤 센서와 rate (Hz) | 전력·용량 예산 (H1) |
+| `trigger` | `low_conf` | 언제 clip을 남기나 | 4절 샘플링 정책 |
+| `duration_s` | `4` | clip 길이 | 이벤트 전후 문맥 (pre-trigger buffer는 H1 ring buffer) |
+| `daily_mb_cap` | `20` | 기기당 하루 상한 | 저장·전송·배터리 예산 (H2) |
+| `privacy` | `features_only` | 어떤 수준까지 올려도 되나 | 동의 범위 (H6) |
+| `min_fw` · `needs` | `10301` · `["imu_200hz"]` | 이 설정이 요구하는 FW·기능 | capability 협상 |
+| `expires` | `2026-11-15` | 만료일 | 잊힌 캠페인이 영원히 도는 것 방지 |
+
+손으로 한 번 따져 보자. `imu: 200`, 6축, 축당 2 byte면 초당 200 × 6 × 2 = 2,400 B다. 4초 clip은 9,600 B ≈ 9.4 KiB. `daily_mb_cap = 20`이면 하루 최대 20,000,000 / 9,600 ≈ 2,083개 clip이다. 이 숫자를 보면 IMU만으로는 상한에 거의 안 닿고, 마이크 feature나 raw 오디오가 들어갈 때 상한이 의미를 가진다는 것을 알 수 있다.
+
+### 2.3 서버 쪽 검증 — 손으로 쓴 validator
+
+config는 사람이 쓰고 사람은 틀린다. 그래서 서버에 올리는 순간 **스키마 검증**을 한다. 실무에서는 JSON Schema 라이브러리를 쓰지만, 여기서는 원리를 보려고 손으로 쓴다. 타입·범위·허용값·모르는 필드·센서별 허용 rate·교차 규칙(마이크 raw는 별도 리뷰)을 검사한다.
+
+```python
+import json
+
+SCHEMA = {  # 필드 -> (타입, 검사 함수, 설명)
+    "campaign_id": (str,  lambda v: len(v) > 0, "비어 있지 않음"),
+    "config_ver":  (int,  lambda v: v >= 1, ">= 1"),
+    "sensors":     (dict, lambda v: set(v) <= {"imu", "mic", "ppg"}, "imu/mic/ppg만"),
+    "trigger":     (str,  lambda v: v in ("uniform", "low_conf", "rare_class"), "허용 trigger"),
+    "duration_s":  (int,  lambda v: 1 <= v <= 30, "1..30 s"),
+    "daily_mb_cap":(int,  lambda v: 1 <= v <= 50, "1..50 MB"),
+    "privacy":     (str,  lambda v: v in ("on_device_only", "features_only", "raw_with_consent"), "privacy scope"),
+}
+ODR_OK = {"imu": (25, 50, 100, 200), "mic": (16000,), "ppg": (25, 100)}
+
+def validate(cfg):
+    errs = [f"unknown field: {k}" for k in cfg if k not in SCHEMA]
+    for k, (typ, check, desc) in SCHEMA.items():
+        if k not in cfg:
+            errs.append(f"missing: {k}"); continue
+        v = cfg[k]
+        if type(v) is not typ:          # bool은 int의 subclass라 isinstance 대신 type 비교
+            errs.append(f"{k}: type {type(v).__name__} != {typ.__name__}"); continue
+        if not check(v):
+            errs.append(f"{k}: {v!r} violates {desc}")
+    for s, hz in cfg.get("sensors", {}).items():
+        if s in ODR_OK and hz not in ODR_OK[s]:
+            errs.append(f"sensors.{s}: {hz} Hz not in {ODR_OK[s]}")
+    if cfg.get("sensors", {}).get("mic") and cfg.get("privacy") == "raw_with_consent":
+        errs.append("mic raw 수집은 별도 privacy review 필요 (H6)")   # 교차 규칙
+    return errs
+
+good = {"campaign_id": "gest_v2", "config_ver": 3, "sensors": {"imu": 100},
+        "trigger": "low_conf", "duration_s": 4, "daily_mb_cap": 20, "privacy": "features_only"}
+bad = dict(good, sensors={"imu": 120, "mic": 16000}, duration_s=True,
+           privacy="raw_with_consent", gps=1)
+for name, c in (("good", good), ("bad", bad)):
+    e = validate(c)
+    print(name, "OK" if not e else f"REJECT ({len(e)})")
+    for x in e: print("   -", x)
+```
+
+```text
+good OK
+bad REJECT (4)
+   - unknown field: gps
+   - duration_s: type bool != int
+   - sensors.imu: 120 Hz not in (25, 50, 100, 200)
+   - mic raw 수집은 별도 privacy review 필요 (H6)
+```
+
+출력에서 볼 것: 잘못된 config는 **한 번에 모든 에러를** 보여 준다 (첫 에러에서 멈추면 사람이 다섯 번 왕복한다). `duration_s=True`가 잡힌 것에 주목하자. Python에서 `bool`은 `int`의 subclass라 `isinstance(True, int)`가 참이다 — 그래서 `type(v) is typ`로 비교했다. JSON의 `true`가 정수 필드로 새어 들어가는 버그는 실제로 흔하다.
+
+### 2.4 버전 · hash · 서명 — 기기는 무엇을 믿고 적용하나
+
+서버 검증을 통과한 config는 배포 전에 세 가지를 붙인다.
+
+- **canonical 직렬화**: 같은 내용이면 항상 같은 바이트가 되게 key 정렬·공백 제거. 그래야 hash가 안정적이다.
+- **hash (SHA-256)**: 전송 중 손상 감지, 그리고 "이 기기가 지금 적용한 config가 정확히 무엇인가"를 짧은 ID로 보고하는 용도.
+- **서명**: hash는 누구나 다시 계산할 수 있다. 서명은 **서버의 비밀키를 가진 쪽만** 만들 수 있다. 실제 제품은 Ed25519나 ECDSA 같은 비대칭 서명을 쓰고 기기에는 공개키만 둔다 (secure boot와 같은 구조). 아래 예제는 표준 라이브러리만 쓰려고 HMAC으로 흉내 낸다.
+
+기기 쪽 적용 규칙은 순서가 중요하다: hash → 서명 → 버전(단조 증가) → FW 최소 버전 → capability → **검증이 다 끝난 뒤 한 번에 교체**.
+
+```python
+import json, hashlib, hmac
+
+KEY = b"server-signing-key-demo"     # 실제로는 Ed25519 같은 비대칭 서명 (기기엔 공개키만)
+def canon(cfg):                      # 같은 내용 -> 항상 같은 바이트
+    return json.dumps(cfg, sort_keys=True, separators=(",", ":")).encode()
+def package(cfg):
+    body = canon(cfg)
+    return {"body": body, "sha256": hashlib.sha256(body).hexdigest(),
+            "sig": hmac.new(KEY, body, hashlib.sha256).hexdigest()}
+
+class Device:
+    def __init__(self, fw, caps):
+        self.fw, self.caps, self.active_ver, self.active = fw, caps, 0, None
+    def apply(self, pkg):
+        body = pkg["body"]
+        if hashlib.sha256(body).hexdigest() != pkg["sha256"]: return "REJECT hash"
+        exp = hmac.new(KEY, body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(exp, pkg["sig"]):          return "REJECT signature"
+        cfg = json.loads(body)
+        if cfg["config_ver"] <= self.active_ver:              return "REJECT rollback/replay"
+        if self.fw < cfg["min_fw"]:                           return f"REJECT fw {self.fw} < {cfg['min_fw']}"
+        missing = set(cfg["needs"]) - self.caps
+        if missing:                                           return f"REJECT caps missing {sorted(missing)}"
+        self.active_ver, self.active = cfg["config_ver"], cfg
+        return f"APPLIED v{self.active_ver}"
+
+cfg = {"campaign_id": "gest_v2", "config_ver": 3, "min_fw": 120,
+       "needs": ["imu_200hz", "conf_trigger"], "sensors": {"imu": 200}}
+p = package(cfg)
+print("sha256", p["sha256"][:16], "len", len(p["body"]))
+devs = {"A fw130": Device(130, {"imu_200hz", "conf_trigger"}),
+        "B fw118": Device(118, {"imu_200hz", "conf_trigger"}),
+        "C fw130": Device(130, {"conf_trigger"})}
+for n, d in devs.items(): print(n, "->", d.apply(p))
+tampered = dict(p, body=p["body"].replace(b'"imu":200', b'"imu":400'))
+print("A tampered ->", devs["A fw130"].apply(tampered))
+tampered["sha256"] = hashlib.sha256(tampered["body"]).hexdigest()   # 공격자가 hash까지 다시 계산
+print("A tamper+rehash ->", devs["A fw130"].apply(tampered))
+print("A replay   ->", devs["A fw130"].apply(p))
+```
+
+```text
+sha256 39d7084f279c118a len 112
+A fw130 -> APPLIED v3
+B fw118 -> REJECT fw 118 < 120
+C fw130 -> REJECT caps missing ['imu_200hz']
+A tampered -> REJECT hash
+A tamper+rehash -> REJECT signature
+A replay   -> REJECT rollback/replay
+```
+
+출력에서 볼 것: 같은 config 패키지가 기기 상태에 따라 세 가지로 갈린다. B는 FW가 낮아서, C는 200 Hz IMU 기능이 없어서 거절한다 — 이게 **capability 협상**이다. 기기가 check-in할 때 자기 capability를 보고하므로 서버는 애초에 C에 이 config를 보내지 않는 것이 맞지만, 기기도 한 번 더 막는다 (방어를 두 겹으로). "tamper + rehash"가 서명에서 걸리는 것이 hash와 서명의 차이를 보여 준다. 같은 버전 재적용(replay)도 거절된다.
+
+### 2.5 배포 — check-in, staged rollout, kill switch
+
+기기는 서버에 상시 연결되어 있지 않다 (웨어러블은 폰을 거쳐 가끔 연결된다). 그래서 **pull 모델**을 쓴다. 기기가 주기적으로 check-in하면서 자기 상태를 보고하고, 서버는 그 기기에 맞는 config를 돌려준다.
+
+```svg
+<svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="h8b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<rect x="90" y="16" width="120" height="30" rx="5" fill="none" stroke="#e08a3c" stroke-width="2"/><text x="150" y="36" font-size="13" text-anchor="middle">Device (FW)</text> <rect x="470" y="16" width="120" height="30" rx="5" fill="none" stroke="#4a7bd0" stroke-width="2"/><text x="530" y="36" font-size="13" text-anchor="middle">Config server</text> <line x1="150" y1="46" x2="150" y2="345" stroke="#888" stroke-dasharray="4 3"/> <line x1="530" y1="46" x2="530" y2="345" stroke="#888" stroke-dasharray="4 3"/> <line x1="150" y1="74" x2="528" y2="74" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8b)"/> <text x="340" y="68" font-size="12" text-anchor="middle">① check-in: id, fw, hw_rev, caps, cfg_ver, battery</text> <rect x="400" y="86" width="260" height="40" rx="4" fill="none" stroke="#4a7bd0"/> <text x="530" y="102" font-size="12" text-anchor="middle">② bucket = hash(id, salt) → stage?</text>
+<text x="530" y="118" font-size="12" text-anchor="middle">fw · caps 맞는 config 선택</text> <line x1="528" y1="146" x2="152" y2="146" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8b)"/> <text x="340" y="140" font-size="12" text-anchor="middle">③ config 패키지 (body, sha256, sig) 또는 "변경 없음"</text> <rect x="20" y="158" width="260" height="40" rx="4" fill="none" stroke="#e08a3c"/> <text x="150" y="174" font-size="12" text-anchor="middle">④ hash → sig → ver → fw → caps</text> <text x="150" y="190" font-size="12" text-anchor="middle">통과하면 원자적 교체, 실패하면 유지</text> <line x1="150" y1="218" x2="528" y2="218" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8b)"/> <text x="340" y="212" font-size="12" text-anchor="middle">⑤ ack: applied v3 또는 reject 사유</text>
+<rect x="400" y="230" width="260" height="40" rx="4" fill="none" stroke="#4a7bd0"/> <text x="530" y="246" font-size="12" text-anchor="middle">⑥ stage별 적용률 · 에러 · 배터리 지표</text> <text x="530" y="262" font-size="12" text-anchor="middle">이상하면 rollout 중단 · kill</text> <line x1="528" y1="300" x2="152" y2="300" stroke="#d0564a" stroke-width="2" marker-end="url(#h8b)"/> <text x="340" y="294" font-size="12" text-anchor="middle">⑦ 다음 check-in: kill = 1 (서명된 정지 명령)</text> <text x="150" y="330" font-size="12" text-anchor="middle">수집 즉시 중단, 기본 설정으로</text>
+</svg>
+```
+
+그림 2 — check-in 기반 config 배포. 기기가 먼저 자기 상태(FW·capability·현재 config 버전)를 말하고, 서버가 cohort와 호환성을 따져 config를 고른다. ⑥의 지표가 staged rollout의 "다음 단계로 가도 되나" 판정 근거이고, ⑦ kill switch도 같은 경로로 간다 — 그래서 kill이 기기에 닿는 시간은 check-in 주기에 묶인다.
+
+**staged rollout**: config를 한 번에 전체에 보내지 않는다. 1% → 5% → 20% → 100%처럼 넓히고, 각 단계에서 적용률·reject 사유·배터리 소모·업로드량·크래시를 본다. 3절의 hash bucket을 쓰면 "1%에 들었던 기기는 5%에도 반드시 들어 있다"가 보장된다 (예제 3에서 확인).
+
+**kill switch**: 캠페인이 배터리를 너무 쓰거나, 프라이버시 범위를 넘는 데이터가 올라오면 즉시 멈춰야 한다. 설계 규칙은 이렇다.
+
+- kill은 **가장 높은 우선순위**: kill > 캠페인 config > FW 기본값.
+- kill 메시지도 **서명**한다. 서명 없는 kill을 받아들이면 누구나 fleet 수집을 끌 수 있다.
+- kill은 **버전 검사보다 먼저** 처리한다 (아래 C 예제에서 확인). 단, 서명 검사보다 먼저 하면 안 된다.
+- check-in 주기가 6시간이면 최악 6시간 + 오프라인 기간 동안 kill이 안 닿는다. 그래서 기기 쪽에도 **로컬 안전장치**(배터리 < 20%면 수집 중지, 하루 상한, `expires` 지나면 기본값 복귀)를 둔다.
+
+**last-known-good**: 새 config가 적용 후 크래시를 유발하면 (예: 200 Hz에서 버퍼 overflow) 재부팅 후 이전 config로 돌아가야 한다. A/B 펌웨어 슬롯(J5)의 config 버전이다.
+
+### 2.6 기기 쪽 C — 검증 후 원자적 교체
+
+MCU에서는 JSON 대신 CBOR나 고정 struct를 쓰는 경우가 많다 (H1 로그 포맷과 같은 고민). 아래는 이미 파싱된 struct에 대해 CRC → kill → 버전 → FW → capability bitmask 순으로 검사하고, 통과했을 때만 활성 config를 교체하는 코드다. 서명 검증은 CRC 다음 단계에 들어가야 하지만 여기서는 생략했다. `cc -std=c11 -Wall -Wextra -O2`로 경고 없이 컴파일된다.
+
+```c
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+enum { CAP_IMU_200HZ = 1u << 0, CAP_CONF_TRIGGER = 1u << 1, CAP_MIC_FEATURES = 1u << 2 };
+
+typedef struct {            /* 서버가 내려준 config의 바이너리 형태 (CBOR 등을 파싱한 결과) */
+    uint32_t config_ver;
+    uint32_t min_fw;        /* 예: 1.3.0 -> 10300 */
+    uint32_t needs_caps;    /* bitmask */
+    uint16_t imu_odr_hz;
+    uint16_t daily_kb_cap;
+    uint8_t  kill;          /* 1이면 수집 즉시 중단 */
+    uint8_t  pad[3];
+    uint32_t crc;           /* 위 필드 전체의 CRC32 (서명 검증은 그 다음 단계) */
+} log_cfg_t;
+
+static uint32_t crc32(const void *p, size_t n) {
+    const uint8_t *b = p; uint32_t c = 0xFFFFFFFFu;
+    while (n--) { c ^= *b++; for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & -(c & 1u)); }
+    return ~c;
+}
+
+static const uint32_t FW = 10301, CAPS = CAP_IMU_200HZ | CAP_CONF_TRIGGER;
+static log_cfg_t active = { .config_ver = 2, .imu_odr_hz = 100, .daily_kb_cap = 5000 };
+
+static const char *apply(const log_cfg_t *c) {
+    if (crc32(c, offsetof(log_cfg_t, crc)) != c->crc) return "REJECT crc";
+    if (c->kill) { active.daily_kb_cap = 0; return "KILL: collection stopped"; }
+    if (c->config_ver <= active.config_ver) return "REJECT stale version";
+    if (FW < c->min_fw) return "REJECT fw too old";
+    if ((c->needs_caps & ~CAPS) != 0) return "REJECT missing capability";
+    active = *c;                    /* 검증이 끝난 뒤에만 한 번에 교체 */
+    return "APPLIED";
+}
+
+int main(void) {
+    log_cfg_t c = { .config_ver = 3, .min_fw = 10300, .needs_caps = CAP_IMU_200HZ | CAP_CONF_TRIGGER,
+                    .imu_odr_hz = 200, .daily_kb_cap = 20000 };
+    c.crc = crc32(&c, offsetof(log_cfg_t, crc));
+    printf("crc32(\"123456789\") = 0x%08X (check value)\n", (unsigned)crc32("123456789", 9));
+    printf("v3            : %s (odr=%u)\n", apply(&c), (unsigned)active.imu_odr_hz);
+    log_cfg_t m = c; m.config_ver = 4; m.needs_caps |= CAP_MIC_FEATURES; m.crc = crc32(&m, offsetof(log_cfg_t, crc));
+    printf("v4 needs mic  : %s\n", apply(&m));
+    log_cfg_t bad = c; bad.config_ver = 5; bad.imu_odr_hz = 400;   /* crc 갱신 안 함 = 손상 */
+    printf("v5 corrupted  : %s\n", apply(&bad));
+    log_cfg_t k; memset(&k, 0, sizeof k); k.kill = 1; k.crc = crc32(&k, offsetof(log_cfg_t, crc));
+    printf("kill switch   : %s (cap=%u)\n", apply(&k), (unsigned)active.daily_kb_cap);
+    return 0;
+}
+```
+
+```text
+crc32("123456789") = 0xCBF43926 (check value)
+v3            : APPLIED (odr=200)
+v4 needs mic  : REJECT missing capability
+v5 corrupted  : REJECT crc
+kill switch   : KILL: collection stopped (cap=0)
+```
+
+출력에서 볼 것: 첫 줄의 `0xCBF43926`은 CRC-32의 표준 check value다 — 직접 짠 CRC가 맞는지 먼저 확인하는 습관. capability는 bitmask 하나로 `(needs & ~have) != 0`이면 거절한다. `active = *c;`가 **검증이 다 끝난 뒤 한 번만** 실행된다는 점이 핵심이다. 실제 기기에서는 이 교체를 flash에 쓸 때도 두 슬롯 + 유효 플래그로 원자성을 보장한다 (SSD FW의 메타데이터 업데이트와 같은 패턴).
+
+---
+
+## 3. Deterministic cohorting — hash로 "누가 참여하나"를 정한다
+
+### 3.1 왜 `random()`이 아닌가
+
+캠페인에 fleet의 40%만 참여시키고 싶다. 서버가 check-in마다 `random() < 0.4`로 정하면 무슨 일이 생기나? 같은 기기가 오늘은 들어가고 내일은 빠진다. 데이터는 "어떤 날은 수집, 어떤 날은 미수집"으로 뒤죽박죽이 되고, 사용자당 데이터가 안 쌓인다. 결과를 재현할 수도 없다.
+
+해결은 **hash 기반 결정적 할당**이다.
+
+```
+bucket(device, salt) = H(salt ‖ ":" ‖ device_id) mod 10000      (0 … 9999)
+cohort 참여  ⇔  bucket < pct × 100
+```
+
+말로 하면: 기기 ID와 캠페인별 소금(salt)을 이어 붙여 hash하고, 0~9999 사이 번호표를 뽑는다. 번호표가 기준보다 작으면 참여. 같은 기기·같은 salt면 **언제 어디서 계산해도** 같은 번호표가 나온다. 서버를 재시작해도, 다른 서버가 계산해도 같다. 상태를 저장할 필요가 없다는 것이 큰 장점이다.
+
+### 3.2 손으로 따져 보기
+
+예제 3을 돌리면 `bucket("HK-00042", "gest_v2") = 5269`가 나온다.
+
+- 20% rollout: 기준 2000 → 5269 ≥ 2000 → 불참
+- 60% rollout: 기준 6000 → 5269 < 6000 → 참여
+- 20%에서 60%로 넓혀도, 20%일 때 참여하던 기기(bucket < 2000)는 당연히 bucket < 6000이다 → **단계가 중첩(nested)된다**
+
+salt를 `kws_shadow`로 바꾸면 같은 기기의 bucket은 3850이 된다. 다른 실험에서는 **다른 번호표**를 받는다. 이게 실험끼리 독립이 되는 이유다.
+
+### 3.3 코드로 확인
+
+```python
+import hashlib
+import numpy as np, pandas as pd
+
+def bucket(device_id, salt, n=10000):
+    h = hashlib.sha256(f"{salt}:{device_id}".encode()).digest()
+    return int.from_bytes(h[:8], "big") % n          # 0..9999 = 0.01% 단위
+
+def in_rollout(device_id, salt, pct):                 # pct% 안에 들면 True
+    return bucket(device_id, salt) < pct * 100
+
+ids = [f"HK-{i:05d}" for i in range(1000)]
+print("stable :", bucket("HK-00042", "gest_v2"), bucket("HK-00042", "gest_v2"))
+print("new salt:", bucket("HK-00042", "kws_shadow"))
+
+# 1) staged rollout: 1% -> 5% -> 20% -> 100%, 앞 단계 기기는 항상 뒤 단계에 포함
+stages = {p: {d for d in ids if in_rollout(d, "cfg_v3", p)} for p in (1, 5, 20, 100)}
+print("rollout sizes:", {p: len(s) for p, s in stages.items()},
+      "| nested:", stages[1] <= stages[5] <= stages[20] <= stages[100])
+
+# 2) 두 실험의 cohort가 서로 독립인가 (salt가 다르면 섞여야 한다)
+df = pd.DataFrame({"ab": ["B" if bucket(d, "kws_ab") < 5000 else "A" for d in ids],
+                   "col": ["collect" if bucket(d, "gest_v2") < 3000 else "-" for d in ids]})
+print(pd.crosstab(df.ab, df.col))
+
+# 3) 같은 salt를 재사용하면 cohort가 완전히 겹친다 (함정)
+same = [bucket(d, "gest_v2") < 5000 for d in ids]
+col = [bucket(d, "gest_v2") < 3000 for d in ids]
+print("salt 재사용: collect 기기 중 B 비율 =", np.mean([s for s, c in zip(same, col) if c]))
+```
+
+```text
+stable : 5269 5269
+new salt: 3850
+rollout sizes: {1: 12, 5: 47, 20: 186, 100: 1000} | nested: True
+col    -  collect
+ab               
+A    344      141
+B    361      154
+salt 재사용: collect 기기 중 B 비율 = 1.0
+```
+
+출력에서 볼 것: (1) 같은 입력은 같은 bucket. (2) rollout 크기가 대략 1%·5%·20%이고 `nested: True` — staged rollout에서 앞 단계 기기가 빠지지 않는다. (3) A/B 실험(`kws_ab`)과 수집 cohort(`gest_v2`)가 다른 salt면 collect 기기 안에서 A와 B가 반반 가까이 섞인다 (141 대 154). (4) salt를 재사용하면 "collect 기기는 전부 B"가 된다 — 수집 데이터가 실험군에만 몰려 두 실험 결과가 모두 오염된다.
+
+### 3.4 실험 flag와의 관계
+
+A/B 실험, staged rollout, 수집 cohort는 모두 같은 기계 장치(hash bucket + 범위)로 표현된다. 차이는 **무엇을 바꾸느냐**뿐이다.
+
+```
+salt = "kws_ab"         0 ─────────── 4999 │ 5000 ─────────── 9999
+                         A (기존 모델)       │  B (새 threshold)
+
+salt = "cfg_v3_rollout" 0 ─ 99 │ 100 ─ 499 │ 500 ─ 1999 │ 2000 ─── 9999
+                         1%    │   5%까지   │   20%까지   │   나머지
+
+salt = "holdout_2026"   0 ── 499 │ 500 ────────────────────────── 9999
+                         holdout   │  모든 실험·캠페인 대상
+                      (아무것도 안 바꿈: 장기 기준선)
+```
+
+- **holdout**: 일부 기기(예: 5%)는 모든 실험에서 제외해 "아무것도 안 했을 때"의 장기 기준선을 남긴다.
+- **수집 cohort와 A/B cohort를 독립으로**: 새 모델(B)을 쓰는 기기만 데이터를 올리면, 데이터 분포 자체가 모델에 따라 달라진다 (7.4절 피드백 편향).
+- **레코드에 bucket·salt를 남긴다**: 나중에 "이 데이터는 어느 실험군에서 왔나"를 다시 계산하지 않아도 되게.
+
+### 3.5 함정
+
+- **Python 내장 `hash()`를 쓴다**: 문자열 hash는 프로세스마다 랜덤화된다 (`PYTHONHASHSEED`). 서버를 재시작하면 cohort가 바뀐다. 반드시 SHA-256 같은 고정 hash.
+- **`mod 100`처럼 거친 bucket**: 0.5% rollout을 못 한다. 10,000 이상 권장.
+- **device_id가 바뀐다**: 공장 초기화나 보드 교체(RMA) 후 ID가 새로 발급되면 cohort가 바뀐다. 하드웨어 고유 ID(serial)에 묶고, 교체 이력을 레코드에 남긴다.
+- **사용자 단위가 필요한데 기기 단위로 나눈다**: 한 사람이 기기 두 대를 쓰면 두 cohort에 걸칠 수 있다. 실험 단위(unit)를 먼저 정한다 — H5의 "사용자 단위 split"과 같은 고민.
+
+---
+
+## 4. 샘플링 정책 — 같은 bytes로 무엇을 더 잡나
+
+### 4.1 네 가지 정책의 직관
+
+기기는 하루 종일 센서를 보고 있지만 전부 올릴 수는 없다 (배터리·전송·저장·프라이버시). 그러니 "어떤 순간을 남길지" 정해야 한다.
+
+| 정책 | 무엇을 남기나 | 장점 | 약점 |
+|---|---|---|---|
+| uniform random | 무작위 시각의 window | 편향 없음 → base rate·오탐률(FA/day)을 그대로 추정 | 희귀 이벤트는 거의 안 잡힘 |
+| stratified | 층(조건·기기·사용자 그룹)별로 정한 양 | 작은 그룹(HW rev B, 왼손, 고령)도 충분히 | 층을 미리 알아야 함, 층별 가중치 기록 필요 |
+| event-triggered | 모델 low confidence, near miss, 희귀 class 후보 | 희귀·어려운 사례를 bytes당 수백 배 효율로 | **선택 편향**: 모델이 못 보는 것은 영원히 안 잡힘, base rate 추정 불가 |
+| budgeted · battery-aware | 위 정책에 기기당 하루 상한·배터리 조건을 씌움 | 사용자 경험 보호, 비용 예측 가능 | 배터리 좋은 사용자(충전 습관)로 편향 가능 |
+
+Don의 언어로 말하면, uniform은 **랜덤 샘플링 검사(AQL)**, triggered는 **에러 발생 시 덤프(crash dump, NVMe telemetry trigger)**, stratified는 **테스트 커버리지 매트릭스의 빈칸 채우기**다. 실무 답은 거의 항상 **섞는 것(hybrid)** 이다.
+
+### 4.2 손계산 — uniform으로 희귀 이벤트를 몇 개 잡나
+
+가정: 깨어 있는 16시간 = 57,600초 = 4초 window 14,400개. 희귀 이벤트는 기기당 하루 평균 λ번 (생활 패턴별로 0.3·1.0·3.0, 비율 50%·35%·15% → 평균 0.5×0.3 + 0.35×1.0 + 0.15×3.0 = 0.95). 기기당 하루 30개 window를 무작위로 남기면, 하루에 잡히는 희귀 이벤트 기대값은
+
+```
+E[잡힌 수 / 기기·일] = 30 × λ / 14400 = 30 × 0.95 / 14400 ≈ 0.00198
+fleet 500대 × 14일  → 0.00198 × 500 × 14 ≈ 13.9 개
+```
+
+말로 하면: 2주 동안 500대 fleet이 31 GB를 올려도 희귀 이벤트는 열몇 개다. 아래 시뮬레이션의 uniform 결과(14개)와 정확히 맞는다.
+
+### 4.3 시뮬레이션 — fleet 500대, 14일, 정책 4개
+
+설정: 기기는 생활 패턴(sed·act·ath)과 HW rev(A·B)로 6개 층에 속한다. clip 하나 0.15 MB (예: IMU + 오디오 feature 4초). on-device 모델은 희귀 이벤트의 60%를 low-confidence로 표시하고, 평범한 window도 하루 평균 20개를 잘못 표시한다. 정책별 하루 예산:
+
+- `uniform`: 기기당 무작위 30개
+- `stratified`: 층마다 하루 2,500개(= 전체 15,000 / 6)를 기기 수로 나눠 배분, 기기당 최대 60개
+- `triggered`: trigger된 후보 중 최대 30개
+- `hybrid`: trigger 24개 + 무작위 6개, 배터리 낮은 날(15%)은 건너뜀
+
+```python
+import numpy as np, pandas as pd
+rng = np.random.default_rng(7)
+N, DAYS, W, CLIP_MB = 500, 14, 14400, 0.15          # 하루 14400개 4초 window, clip 0.15 MB
+life = rng.choice(["sed", "act", "ath"], N, p=[.5, .35, .15])
+hw = rng.choice(["A", "B"], N, p=[.8, .2])
+lam = pd.Series({"sed": .3, "act": 1.0, "ath": 3.0})[life].to_numpy()   # 희귀 이벤트/일
+strata = pd.Series(life) + "/" + hw
+n_str = strata.value_counts()
+k_strat = np.minimum(60, np.ceil(N * 30 / 6 / n_str[strata].to_numpy())).astype(int)
+
+def run(policy):
+    mb = rare = 0; uni = pd.Series(0, index=n_str.index); rs = uni.copy()
+    for d in range(DAYS):
+        ev = rng.poisson(lam)                         # 오늘 기기별 희귀 이벤트 수
+        flag = rng.binomial(ev, 0.6)                  # 모델이 low-conf로 잡은 것
+        false = rng.poisson(20, N)                    # 평범한 window인데 trigger된 것
+        low_batt = rng.random(N) < 0.15
+        for i in range(N):
+            if policy == "hybrid" and low_batt[i]: continue
+            k_uni = {"uniform": 30, "stratified": k_strat[i], "triggered": 0, "hybrid": 6}[policy]
+            k_trg = {"triggered": 30, "hybrid": 24}.get(policy, 0)
+            r_uni = rng.hypergeometric(ev[i], W - ev[i], k_uni) if k_uni else 0
+            cand = flag[i] + false[i]; take = min(cand, k_trg)
+            r_trg = rng.hypergeometric(flag[i], false[i], take) if take else 0
+            mb += (k_uni + take) * CLIP_MB; rare += r_uni + r_trg; uni[strata[i]] += k_uni; rs[strata[i]] += r_uni + r_trg
+    return dict(policy=policy, GB=mb / 1000, rare=rare, rare_per_GB=rare / (mb / 1000),
+                min_str_uniform=uni.min(), min_str_rare=rs.min())
+print("stratum sizes:", n_str.to_dict())
+print(pd.DataFrame([run(p) for p in ("uniform", "stratified", "triggered", "hybrid")])
+      .round(1).to_string(index=False))
+```
+
+```text
+stratum sizes: {'sed/A': 194, 'act/A': 154, 'ath/A': 59, 'sed/B': 41, 'act/B': 38, 'ath/B': 14}
+    policy   GB  rare  rare_per_GB  min_str_uniform  min_str_rare
+   uniform 31.5    14          0.4             5880             0
+stratified 27.8    15          0.5            11760             0
+ triggered 21.6  4004        185.5                0            92
+    hybrid 23.1  3351        144.9             1008            85
+```
+
+출력 열의 뜻: `GB` 총 업로드, `rare` 잡힌 희귀 이벤트 수, `rare_per_GB` 효율, `min_str_uniform` 가장 작은 층이 받은 **무작위(편향 없는)** clip 수, `min_str_rare` 가장 작은 층이 받은 희귀 이벤트 수.
+
+출력에서 볼 것:
+
+- **triggered는 bytes를 덜 쓰면서 희귀 이벤트를 약 290배 더 잡는다** (4004 대 14). trigger 후보가 하루 30개 미만인 기기가 많아 예산을 다 안 쓰기 때문에 GB도 더 작다.
+- 그러나 triggered의 `min_str_uniform`은 **0**이다. 무작위 샘플이 하나도 없으니 "평범한 하루에 오탐이 몇 번 나나", "희귀 이벤트가 실제로 얼마나 흔한가"를 추정할 수 없다.
+- stratified는 uniform보다 bytes를 적게 쓰면서 가장 작은 층(ath/B, 14대)의 무작위 clip을 두 배(11,760 대 5,880)로 늘린다. 희귀 이벤트에는 도움이 안 되지만 **평가 세트의 층별 신뢰구간**에는 결정적이다.
+- hybrid는 희귀 이벤트를 triggered의 84% 수준으로 잡으면서 모든 층에 1,000개 이상 무작위 clip을 남긴다. 배터리 낮은 날을 건너뛴 비용이 포함된 숫자다.
+
+```svg
+<svg viewBox="0 0 680 260" xmlns="http://www.w3.org/2000/svg">
+<text x="110" y="24" font-size="13">희귀 이벤트 / GB (클수록 효율적)</text> <text x="430" y="24" font-size="13">가장 작은 층의 무작위 clip 수</text> <text x="100" y="66" font-size="12" text-anchor="end">uniform</text> <text x="100" y="106" font-size="12" text-anchor="end">stratified</text> <text x="100" y="146" font-size="12" text-anchor="end">triggered</text> <text x="100" y="186" font-size="12" text-anchor="end">hybrid</text> <line x1="110" y1="40" x2="110" y2="205" stroke="currentColor"/> <rect x="110" y="50" width="1" height="24" fill="#888"/><text x="117" y="66" font-size="12">0.4</text>
+<rect x="110" y="90" width="1" height="24" fill="#888"/><text x="117" y="106" font-size="12">0.5</text> <rect x="110" y="130" width="185.5" height="24" fill="#e08a3c"/><text x="301" y="146" font-size="12">185.5</text> <rect x="110" y="170" width="144.9" height="24" fill="#3f9a6b"/><text x="261" y="186" font-size="12">144.9</text> <line x1="430" y1="40" x2="430" y2="205" stroke="currentColor"/> <rect x="430" y="50" width="98" height="24" fill="#4a7bd0"/><text x="534" y="66" font-size="12">5,880</text> <rect x="430" y="90" width="196" height="24" fill="#4a7bd0"/><text x="632" y="106" font-size="12">11,760</text> <text x="436" y="146" font-size="12">0 — base rate 추정 불가</text> <rect x="430" y="170" width="16.8" height="24" fill="#3f9a6b"/><text x="452" y="186" font-size="12">1,008</text>
+<line x1="110" y1="205" x2="310" y2="205" stroke="currentColor"/><text x="110" y="222" font-size="12" text-anchor="middle">0</text><text x="310" y="222" font-size="12" text-anchor="middle">200</text> <line x1="430" y1="205" x2="630" y2="205" stroke="currentColor"/><text x="430" y="222" font-size="12" text-anchor="middle">0</text><text x="630" y="222" font-size="12" text-anchor="middle">12,000</text> <text x="20" y="250" font-size="12">왼쪽은 triggered가 압도, 오른쪽은 triggered가 0. 두 축을 다 만족하는 것은 hybrid(초록)뿐이다.</text>
+</svg>
+```
+
+그림 3 — 예제 4의 결과. 정책 하나만 보면 한 축에서 반드시 진다. 희귀 이벤트 효율(왼쪽)과 편향 없는 층별 샘플(오른쪽)은 서로 다른 목적이고, 그래서 캠페인 config의 `trigger` 필드는 보통 "trigger 80% + uniform 20%" 같은 혼합으로 쓴다.
+
+### 4.4 "왜 잡혔나"를 기록한다 — inverse probability weight
+
+hybrid로 모은 데이터에서 "희귀 이벤트가 전체 window의 몇 %인가"를 그냥 세면 크게 틀린다. trigger가 희귀 이벤트를 골라 담았기 때문이다. 해결책은 **각 레코드에 "이 window가 데이터셋에 들어올 확률"을 메타데이터로 남기고, 분석할 때 그 역수로 가중하는 것**이다 (inverse probability weighting, IPW).
+
+```
+p_incl(window) = 1           (trigger가 표시한 window: 무조건 남김)
+               = P_UNI       (표시 안 된 window: uniform 경로로만 들어옴)
+가중치 w = 1 / p_incl
+추정 비율 = ∑ w·y / ∑ w        (y = 희귀 이벤트면 1)
+```
+
+말로 하면: uniform으로 2% 확률로 뽑힌 평범한 window 하나는 "뽑히지 않은 비슷한 window 50개"를 대표한다. 그래서 가중치 50을 준다. trigger로 무조건 들어온 window는 자기 자신만 대표하므로 가중치 1.
+
+손계산 미니 예: window 1,000개, 희귀 2개. trigger가 희귀 1개 + 평범 3개를 표시, uniform(P=0.1)이 표시 안 된 것 중 평범 10개를 뽑았다고 하자. 그냥 세면 1 / 14 ≈ 7.1%. IPW로는 분자 = 1×1 = 1, 분모 = 4×1 + 10×10 = 104 → 0.96%. 진짜 값 0.2%에 훨씬 가깝고, 숫자가 커지면 평균적으로 정확히 맞는다 (아래 코드). 
+
+```python
+import numpy as np
+rng = np.random.default_rng(2)
+n, TRUE, P_UNI = 500_000, 0.002, 0.02          # fleet window 수, 진짜 희귀 비율 0.2%, uniform 확률 2%
+def one_run():
+    rare = rng.random(n) < TRUE
+    flag = np.where(rare, rng.random(n) < 0.6, rng.random(n) < 0.002)   # on-device trigger
+    uni = rng.random(n) < P_UNI
+    kept = flag | uni
+    p_incl = np.where(flag, 1.0, P_UNI)        # 이 window가 데이터셋에 들어올 확률 (메타데이터로 기록)
+    w = 1.0 / p_incl[kept]                     # inverse probability weight
+    return (rare[kept].mean(),                 # naive: 모은 것 전부로 비율 계산
+            rare[uni].mean(),                  # uniform 경로로 들어온 것만
+            np.sum(w * rare[kept]) / np.sum(w),# IPW
+            kept.mean())
+r = np.array([one_run() for _ in range(100)])
+print(f"captured fraction of fleet windows: {r[:, 3].mean():.2%}")
+print(f"true rare rate : {TRUE:.3%}")
+for name, col in (("naive", 0), ("uniform-only", 1), ("IPW", 2)):
+    print(f"{name:13s}: mean {r[:, col].mean():.3%}  std {r[:, col].std():.3%}")
+```
+
+```text
+captured fraction of fleet windows: 2.31%
+true rare rate : 0.200%
+naive        : mean 5.269%  std 0.226%
+uniform-only : mean 0.199%  std 0.044%
+IPW          : mean 0.202%  std 0.027%
+```
+
+출력에서 볼 것: naive 추정은 진짜 값(0.2%)의 26배다. uniform 경로만 쓰면 편향은 없지만 데이터의 대부분(trigger 분)을 버린다. IPW는 편향이 없으면서 표준편차도 uniform-only보다 작다 (0.027% 대 0.044%). 단, **`p_incl`이 레코드에 없으면 나중에 복원할 수 없다.** 그래서 H3 메타데이터 스키마에 `sample_reason`, `sample_prob`가 들어가야 한다. 이건 H8이 H3에 요구하는 가장 중요한 필드다.
+
+### 4.5 예산과 배터리 — 기기 쪽 규칙
+
+budget은 기기에서 지켜야 한다 (서버는 늦게 안다).
+
+- **기기당 하루 MB 상한**: token bucket처럼 자정에 채우고 clip마다 차감. 상한에 가까워지면 무엇을 먼저 버릴지(보통 uniform 몫은 하루 할당량으로 따로 떼어 두고, trigger 몫이 넘치면 score가 덜 애매한 것부터 버린다)를 config에 명시한다. 정해 두지 않으면 하루 초반 몇 시간의 데이터만 남는다.
+- **배터리 조건**: "배터리 < 30%면 캡처 중지", "업로드는 충전 중 + Wi-Fi일 때만"(H2). 캡처(센서 + 저장)와 업로드(무선)의 전력 비용은 다르므로 따로 조건을 둔다.
+- **flash 상한**: 업로드 못 한 clip이 쌓이면 오래된 uniform부터 버린다 (H1 저장 예산). 버린 개수도 카운터로 보고한다 — 안 그러면 H7에서 "데이터가 왜 줄었나"를 못 찾는다.
+- **편향 주의**: "충전 중에만 업로드"는 충전을 자주 하는 사용자 데이터가 빨리 들어오게 만든다. 업로드 시점이 아닌 **캡처 시점**에 `sample_prob`를 기록하면 분석에서 바로잡을 수 있다.
+
+### 4.6 함정
+
+- **trigger 데이터만으로 오탐률을 잰다**: 분모가 틀렸다. FA/day는 uniform 또는 IPW로만 (11절 표 첫 행).
+- **층을 나중에 정한다**: stratified는 캡처 전에 층을 알아야 한다. 기기 메타데이터(HW rev, 착용 손목, 언어)는 provisioning 때 받아 둔다 (6.2절).
+- **상한을 서버에서만 관리**: 오프라인이던 기기가 일주일치를 한꺼번에 올린다. 상한은 기기 카운터로 지킨다.
+
+---
+
+## 5. FW/HW 버전 태깅과 층화 — 섞인 데이터가 데이터셋을 망치는 법
+
+### 5.1 모든 레코드가 들고 다녀야 하는 태그
+
+H1이 레코드 헤더를, H3가 서버 스키마를 다룬다. H8 관점에서 **"나중에 층으로 나눌 수 있어야 하는 것"**은 전부 레코드에 붙어야 한다.
+
+| 태그 | 예시 | 왜 |
+|---|---|---|
+| `fw_build_id` | `1.3.1+g7c2e9a1` | 센서 드라이버·필터·trigger 로직이 build마다 다름 |
+| `hw_rev` | `DVT2` | 기구·센서 위치·안테나 배치 |
+| `sensor_part` · `sensor_lot` | `IMU-X rev C` · `lot 2431` | part 교체, lot별 offset·noise 차이 |
+| `calib_ver` | `cal-4` | factory calibration 테이블 버전 (Don의 factory test 영역) |
+| `config_ver` · `campaign_id` | `3` · `flick_running_v1` | 어떤 설정으로 모였나 |
+| `model_ver` | `gesture-0.9.2-int8` | trigger를 결정한 on-device 모델 |
+| `sample_reason` · `sample_prob` | `low_conf` · `1.0` | 4.4절 IPW |
+| `cohort` · `salt` | `bucket 1234` · `flick_running_v1` | 실험군 재현 |
+
+### 5.2 FW 버전이 섞이면 무엇이 망가지나
+
+FW 변경 중 **데이터를 바꾸는 변경(data-affecting change)** 이 있다. 흔한 것들:
+
+- IMU full-scale range 변경 (±8 g → ±4 g): 강한 동작이 clipping된다.
+- ODR(출력 데이터 rate)나 anti-aliasing 필터 변경: 주파수 성분이 달라진다.
+- 마이크 gain·AGC 변경: 진폭 분포가 이동한다.
+- timestamp 버그 수정: 이전 데이터의 센서 간 정렬이 틀려 있었다.
+- trigger 로직이나 on-device 모델 변경: **어떤 window가 뽑히는지** 자체가 바뀐다 (선택 분포 변화).
+
+이런 변경이 섞인 데이터를 그냥 합치면 모델은 "FW 버전"이라는 숨은 변수를 배우거나, 평가 숫자가 평균에 묻힌다. 예를 보자.
+
+### 5.3 예제 — FW 1.3.0이 accel range를 바꿨다
+
+FW 1.2.0은 ±8 g, 1.3.0은 전력 최적화로 ±4 g로 바꿨다고 하자. 강한 flick은 peak가 6 g 근처라 1.3.0에서는 4 g에 붙어 버린다. threshold 분류기를 1.2.0 데이터로 정하고 전체를 평가한다.
+
+```python
+import numpy as np, pandas as pd
+rng = np.random.default_rng(3)
+rows = []
+for fw, n, rng_g in (("1.2.0", 4000, 8.0), ("1.3.0", 1000, 4.0)):   # 1.3.0: accel range ±8g -> ±4g
+    flick = rng.random(n) < 0.3
+    peak = np.where(flick, rng.normal(6.0, 0.8, n), rng.normal(3.0, 0.6, n))
+    peak = np.minimum(np.abs(peak), rng_g)                          # saturation(clipping)
+    rows.append(pd.DataFrame({"fw": fw, "flick": flick, "peak_g": peak}))
+df = pd.concat(rows, ignore_index=True)
+
+# 1.2.0 데이터로 threshold "학습": 두 class 평균의 중간
+d12 = df[df.fw == "1.2.0"]
+thr = (d12[d12.flick].peak_g.mean() + d12[~d12.flick].peak_g.mean()) / 2
+df["pred"] = df.peak_g > thr
+df["correct"] = df.pred == df.flick
+df["clipped"] = df.peak_g >= df.fw.map({"1.2.0": 8.0, "1.3.0": 4.0})
+print(f"threshold = {thr:.2f} g")
+print(f"pooled accuracy = {df.correct.mean():.3f}   (FW 섞인 전체)")
+print(df.groupby("fw").agg(n=("correct", "size"), acc=("correct", "mean"),
+                           clip_rate=("clipped", "mean"),
+                           flick_recall=("pred", lambda p: p[df.loc[p.index, "flick"]].mean()))
+        .round(3))
+```
+
+```text
+threshold = 4.50 g
+pooled accuracy = 0.929   (FW 섞인 전체)
+          n    acc  clip_rate  flick_recall
+fw                                         
+1.2.0  4000  0.985      0.002         0.973
+1.3.0  1000  0.704      0.323         0.000
+```
+
+출력에서 볼 것: 전체(pooled) 정확도 0.929는 "조금 떨어졌네" 정도로 보인다. 그런데 FW별로 나누면 1.3.0에서 **flick recall이 0**이다 — 그 FW를 쓰는 사용자에게는 기능이 완전히 죽었다. 정확도가 0.704로 그나마 남은 것은 flick이 아닌 70%를 맞혔기 때문이다. clip_rate 0.323이 원인을 바로 가리킨다. 태그가 없었다면 이 분해 자체가 불가능하다.
+
+```svg
+<svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+<line x1="70" y1="280" x2="630" y2="280" stroke="currentColor"/> <line x1="70" y1="280" x2="70" y2="40" stroke="currentColor"/> <line x1="70.0" y1="280" x2="70.0" y2="285" stroke="currentColor"/><text x="70.0" y="299" font-size="12" text-anchor="middle">0</text> <line x1="135.9" y1="280" x2="135.9" y2="285" stroke="currentColor"/><text x="135.9" y="299" font-size="12" text-anchor="middle">1</text> <line x1="201.8" y1="280" x2="201.8" y2="285" stroke="currentColor"/><text x="201.8" y="299" font-size="12" text-anchor="middle">2</text> <line x1="267.6" y1="280" x2="267.6" y2="285" stroke="currentColor"/><text x="267.6" y="299" font-size="12" text-anchor="middle">3</text> <line x1="333.5" y1="280" x2="333.5" y2="285" stroke="currentColor"/><text x="333.5" y="299" font-size="12" text-anchor="middle">4</text> <line x1="399.4" y1="280" x2="399.4" y2="285" stroke="currentColor"/><text x="399.4" y="299" font-size="12" text-anchor="middle">5</text>
+<line x1="465.3" y1="280" x2="465.3" y2="285" stroke="currentColor"/><text x="465.3" y="299" font-size="12" text-anchor="middle">6</text> <line x1="531.2" y1="280" x2="531.2" y2="285" stroke="currentColor"/><text x="531.2" y="299" font-size="12" text-anchor="middle">7</text> <line x1="597.1" y1="280" x2="597.1" y2="285" stroke="currentColor"/><text x="597.1" y="299" font-size="12" text-anchor="middle">8</text> <line x1="65" y1="280.0" x2="70" y2="280.0" stroke="currentColor"/><text x="61" y="284.0" font-size="12" text-anchor="end">0.0</text> <line x1="65" y1="211.4" x2="70" y2="211.4" stroke="currentColor"/><text x="61" y="215.4" font-size="12" text-anchor="end">0.1</text> <line x1="65" y1="142.9" x2="70" y2="142.9" stroke="currentColor"/><text x="61" y="146.9" font-size="12" text-anchor="end">0.2</text> <line x1="65" y1="74.3" x2="70" y2="74.3" stroke="currentColor"/><text x="61" y="78.3" font-size="12" text-anchor="end">0.3</text> <polyline points="70.0,280.0 86.5,280.0 86.5,280.0 102.9,280.0 102.9,280.0 119.4,280.0 119.4,280.0 135.9,280.0 135.9,279.5 152.4,279.5 152.4,278.8 168.8,278.8 168.8,274.9 185.3,274.9 185.3,267.8 201.8,267.8 201.8,253.4 218.2,253.4 218.2,229.9 234.7,229.9 234.7,214.2 251.2,214.2 251.2,207.8 267.6,207.8 267.6,206.6 284.1,206.6 284.1,213.3 300.6,213.3 300.6,232.3 317.1,232.3 317.1,253.3 333.5,253.3 333.5,260.5 350.0,260.5 350.0,273.7 366.5,273.7 366.5,269.0 382.9,269.0 382.9,269.5 399.4,269.5 399.4,265.6 415.9,265.6 415.9,257.9 432.4,257.9 432.4,256.5 448.8,256.5 448.8,252.7 465.3,252.7 465.3,255.1 481.8,255.1 481.8,258.9 498.2,258.9 498.2,258.6 514.7,258.6 514.7,266.8 531.2,266.8 531.2,270.1 547.6,270.1 547.6,273.5 564.1,273.5 564.1,276.6 580.6,276.6 580.6,278.5 597.1,278.5 597.1,279.0 613.5,279.0 613.5,280.0 630.0,280.0" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<polyline points="70.0,280.0 86.5,280.0 86.5,280.0 102.9,280.0 102.9,280.0 119.4,280.0 119.4,280.0 135.9,280.0 135.9,279.3 152.4,279.3 152.4,278.6 168.8,278.6 168.8,275.9 185.3,275.9 185.3,262.9 201.8,262.9 201.8,248.5 218.2,248.5 218.2,227.9 234.7,227.9 234.7,212.1 251.2,212.1 251.2,212.8 267.6,212.8 267.6,198.4 284.1,198.4 284.1,220.3 300.6,220.3 300.6,225.1 317.1,225.1 317.1,253.9 333.5,253.9 333.5,58.5 350.0,58.5 350.0,280.0 366.5,280.0 366.5,280.0 382.9,280.0 382.9,280.0 399.4,280.0 399.4,280.0 415.9,280.0 415.9,280.0 432.4,280.0 432.4,280.0 448.8,280.0 448.8,280.0 465.3,280.0 465.3,280.0 481.8,280.0 481.8,280.0 498.2,280.0 498.2,280.0 514.7,280.0 514.7,280.0 531.2,280.0 531.2,280.0 547.6,280.0 547.6,280.0 564.1,280.0 564.1,280.0 580.6,280.0 580.6,280.0 597.1,280.0 597.1,280.0 613.5,280.0 613.5,280.0 630.0,280.0" fill="none" stroke="#e08a3c" stroke-width="2"/> <line x1="366.5" y1="280" x2="366.5" y2="40" stroke="#d0564a" stroke-width="1.5" stroke-dasharray="5 3"/> <text x="372" y="56" font-size="12">threshold 4.5 g</text> <text x="300" y="34" font-size="12" text-anchor="end">1.3.0: 4 g에 쌓인 clipping 벽</text> <text x="470" y="200" font-size="12">1.2.0 flick 봉우리 (≈6 g)</text> <text x="350" y="324" font-size="12" text-anchor="middle">peak |accel| (g)</text> <text x="20" y="20" font-size="12">비율</text> <line x1="470" y1="110" x2="500" y2="110" stroke="#4a7bd0" stroke-width="2"/><text x="506" y="114" font-size="12">FW 1.2.0 (±8 g)</text>
+<line x1="470" y1="132" x2="500" y2="132" stroke="#e08a3c" stroke-width="2"/><text x="506" y="136" font-size="12">FW 1.3.0 (±4 g)</text>
+</svg>
+```
+
+그림 4 — 예제 5의 peak 분포(bin 0.25 g, 각 FW 안에서 비율). 파랑(1.2.0)은 3 g 근처 일상 동작과 6 g 근처 flick의 두 봉우리. 주황(1.3.0)은 6 g 봉우리가 사라지고 4.0~4.25 g bin에 32%가 몰린 벽이 생겼다. threshold(빨강 점선)가 벽 오른쪽에 있으니 1.3.0의 flick은 전부 놓친다.
+
+### 5.4 실무 규칙
+
+1. **FW release note에 "data-affecting" 표시**: 센서 설정·전처리·trigger·모델을 건드린 변경은 체크박스로 표시하고, 데이터 팀이 자동으로 알림을 받는다. Don이 SSD에서 "NAND 파라미터 테이블 변경"을 별도로 리뷰하던 것과 같다.
+2. **데이터셋은 FW 범위에 고정(pin)**: dataset card(H5)에 "fw ∈ [1.2.0, 1.2.x], hw_rev ∈ {DVT1, DVT2}"를 적는다. 범위 밖 데이터는 별도 버전.
+3. **호환성 매트릭스**: 어떤 FW의 데이터를 어떤 변환(리샘플, gain 보정)을 거쳐 합칠 수 있는지 표로 관리. 변환 불가(clipping은 되돌릴 수 없다)면 제외.
+4. **버전별 분석이 기본값**: 대시보드의 모든 지표를 FW·HW별로 쪼갠 뷰가 기본이어야 한다. H7의 회귀 탐지(버전 간 분포 비교)가 여기에 붙는다.
+5. **혼합 비율을 고정**: 학습 세트의 FW 비율이 평가 세트와 다르면 평가가 왜곡된다. 층별로 split한다 (H5).
+6. **태그 누락은 `unknown` 층으로**: 버리지도 섞지도 말고, 누락률 자체를 H7 지표로 본다.
+
+> Don 연결: SSD 양산에서 필드 RMA를 분석할 때 "FW 버전 × NAND lot × 고객 워크로드"로 쪼개지 않으면 원인이 평균에 묻히던 것, Apple에서 특정 build에서만 나는 버스 장애를 build ID로 bisect하던 것과 똑같다. ML 데이터에서는 그 "결과"가 모델의 학습 재료가 된다는 점만 다르다.
+
+---
+
+## 6. Dogfood 운영 — 사람과 기기를 같이 관리한다
+
+**dogfood**는 "자기 회사 제품을 직원이 먼저 써 보는 것"(eat your own dog food)이다. 데이터 수집 관점에서는 **동의한 내부 사용자 fleet**이다. 기기를 관리하는 일(provisioning, 상태 감시, 교체)과 사람을 관리하는 일(모집, 동의, 지원, 동기 부여)이 함께 간다.
+
+### 6.1 모집 — 다양성이 수보다 중요하다
+
+- **누구를**: 손목 둘레, 왼손/오른손 착용, 나이대, 활동 수준(운동 습관), 말투·억양(음성), 직군(앉아 있는 시간). 엔지니어만 모으면 "책상에 앉아 노트북 치는 30대" 데이터만 쌓인다.
+- **목표 표를 먼저 만든다**: 층별 목표 인원을 정하고 지원자 설문으로 채운다 — stratified sampling의 사람 버전.
+- **동의 (H6)**: 무엇을 모으고, 얼마나 보관하고, 누가 보고, 어떻게 철회하는지. 동의 버전을 기기·사용자에 기록하고, 동의 범위 밖 config는 기기에 적용되지 않게 한다 (2절의 `privacy` 필드와 연결).
+- **이탈 감안**: 4주 뒤 활성 비율은 대개 처음보다 크게 떨어진다. 몇 %가 될지는 조직마다 다르니 EVT 소규모 운영에서 직접 재고, 그 숫자로 DVT 모집 인원을 정한다.
+
+### 6.2 Provisioning과 기기 생애주기
+
+**provisioning**은 기기를 "fleet의 구성원"으로 등록하는 일이다: 고유 device ID(serial에 묶음), 기기 인증서(서버가 기기를 식별·인증, 업로드 서명), 사용자 계정 연결, 동의 버전, 층 메타데이터(손목 방향 등), 초기 FW·config. Don이 factory test에서 serial·calibration·key를 쓰던 공정이 여기에 해당한다.
+
+```svg
+<svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="h8c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<rect x="20" y="40" width="110" height="40" rx="6" fill="none" stroke="#888" stroke-width="2"/><text x="75" y="58" font-size="12" text-anchor="middle">재고</text><text x="75" y="73" font-size="12" text-anchor="middle">inventory</text> <rect x="175" y="40" width="120" height="40" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/><text x="235" y="58" font-size="12" text-anchor="middle">provisioned</text><text x="235" y="73" font-size="12" text-anchor="middle">ID · cert · FW</text> <rect x="340" y="40" width="120" height="40" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/><text x="400" y="58" font-size="12" text-anchor="middle">onboarded</text><text x="400" y="73" font-size="12" text-anchor="middle">사용자 · 동의 · 앱</text> <rect x="505" y="40" width="120" height="40" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/><text x="565" y="58" font-size="12" text-anchor="middle">active</text><text x="565" y="73" font-size="12" text-anchor="middle">check-in &lt; 24 h</text> <rect x="505" y="170" width="120" height="40" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/><text x="565" y="188" font-size="12" text-anchor="middle">stale</text><text x="565" y="203" font-size="12" text-anchor="middle">24~72 h</text> <rect x="340" y="170" width="120" height="40" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/><text x="400" y="188" font-size="12" text-anchor="middle">dark</text><text x="400" y="203" font-size="12" text-anchor="middle">3~14 일</text> <rect x="175" y="170" width="120" height="40" rx="6" fill="none" stroke="#d0564a" stroke-width="2"/><text x="235" y="188" font-size="12" text-anchor="middle">lost?</text><text x="235" y="203" font-size="12" text-anchor="middle">14 일 이상</text> <rect x="20" y="170" width="110" height="40" rx="6" fill="none" stroke="#888" stroke-width="2"/><text x="75" y="188" font-size="12" text-anchor="middle">retired</text><text x="75" y="203" font-size="12" text-anchor="middle">cert revoke</text>
+<rect x="340" y="275" width="120" height="40" rx="6" fill="none" stroke="#d0564a" stroke-width="2"/><text x="400" y="293" font-size="12" text-anchor="middle">RMA</text><text x="400" y="308" font-size="12" text-anchor="middle">고장 · 반납</text> <line x1="130" y1="60" x2="172" y2="60" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8c)"/> <line x1="295" y1="60" x2="337" y2="60" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8c)"/> <line x1="460" y1="60" x2="502" y2="60" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8c)"/> <line x1="555" y1="80" x2="555" y2="167" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8c)"/><text x="549" y="128" font-size="12" text-anchor="end">소식 없음</text> <line x1="585" y1="170" x2="585" y2="83" stroke="#3f9a6b" stroke-width="1.5" marker-end="url(#h8c)"/><text x="591" y="128" font-size="12">check-in</text> <line x1="505" y1="190" x2="463" y2="190" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8c)"/> <line x1="340" y1="190" x2="298" y2="190" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8c)"/>
+<line x1="175" y1="190" x2="133" y2="190" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8c)"/> <line x1="520" y1="80" x2="464" y2="288" stroke="#d0564a" stroke-width="1.5" marker-end="url(#h8c)"/> <line x1="340" y1="295" x2="130" y2="208" stroke="#d0564a" stroke-width="1.5" marker-end="url(#h8c)"/> <text x="400" y="230" font-size="12" text-anchor="middle">사람이 연락</text><text x="520" y="250" font-size="12">고장</text> <text x="20" y="333" font-size="12">RMA 기기는 데이터·키 삭제 후 retired. 사용자에겐 새로 provisioning한 기기 (ID 바뀜 → 3.5절)</text>
+</svg>
+```
+
+그림 5 — dogfood 기기의 상태 기계. 위 줄은 기기가 fleet에 들어오는 길, 아래 줄은 연락이 끊겨 빠져나가는 길이다. 자동화(리마인더 알림)는 stale에서, 사람의 개입(메신저·전화)은 dark에서 시작한다. lost?에서 retired로 갈 때 인증서를 revoke해야 그 기기가 남의 손에서 데이터를 올리지 못한다.
+
+### 6.3 사용자 경험 쪽 운영
+
+- **온보딩 앱**: 페어링, 동의, 프로필(층 정보), "지금 어떤 캠페인에 참여 중인지" 표시. 투명성은 신뢰와 참여율을 올린다.
+- **피드백·버그 신고**: 앱에서 "방금 이상했어" 버튼 → 기기 ring buffer의 직전 N분 로그 + 센서 clip + 상태 스냅샷을 첨부해 올린다 (H1의 pre-trigger buffer와 같은 장치). 이 신고 자체가 **사람이 라벨한 hard example**이다 (7.1절).
+- **간단한 라벨 요청**: "방금 손목 튕기기 했나요? 예/아니오" 같은 in-app 확인. 너무 자주 물으면 이탈하니 하루 횟수 상한.
+- **인센티브와 지원**: 착용 시간·피드백에 따른 보상, 신제품 우선 체험 — 단 보상이 데이터를 왜곡하지 않게 (신고 건수 보상 → 가짜 신고). 충전기 분실·밴드 파손·앱 로그인 문제는 작을 땐 엔지니어가, 커지면 전담 채널·FAQ가 받는다.
+
+### 6.4 Fleet 대시보드 — 매일 아침 보는 표
+
+챔버 인프라의 "client 상태 보드"와 같다. 아래는 check-in 테이블에서 상태 분류, FW 분포, config drift(목표 버전 미적용), 업로드량, 조치 목록을 뽑는 코드다.
+
+```python
+import numpy as np, pandas as pd
+rng = np.random.default_rng(11)
+N, NOW, TARGET_CFG = 40, pd.Timestamp("2026-09-30 09:00"), 3
+hours_ago = np.concatenate([rng.exponential(6, 30), rng.uniform(30, 90, 6), rng.uniform(400, 700, 4)])
+fleet = pd.DataFrame({
+    "device": [f"HK-{i:05d}" for i in range(N)],
+    "last_checkin": NOW - pd.to_timedelta(hours_ago, unit="h"),
+    "fw": rng.choice(["1.2.0", "1.3.0", "1.3.1"], N, p=[.15, .25, .6]),
+    "cfg_ver": rng.choice([2, 3], N, p=[.2, .8]),
+    "mb_24h": rng.gamma(2, 4, N).round(1)})
+
+def state(h):
+    if h < 24: return "active"
+    if h < 72: return "stale"        # 하루 넘게 소식 없음 -> 자동 리마인더
+    if h < 14 * 24: return "dark"    # 3일 이상 -> 사람이 연락
+    return "lost?"                   # 2주 이상 -> 분실/고장 처리, 인증서 revoke 검토
+fleet["state"] = [state(h) for h in (NOW - fleet.last_checkin).dt.total_seconds() / 3600]
+fleet.loc[fleet.state != "active", "mb_24h"] = 0.0
+
+print(fleet.state.value_counts().to_string(), "\n")
+act = fleet[fleet.state == "active"]
+print("FW mix (active):", act.fw.value_counts(normalize=True).round(2).to_dict())
+drift = act[act.cfg_ver != TARGET_CFG]
+print(f"config drift: {len(drift)} active devices still on cfg v2 ->", list(drift.device[:4]))
+print(f"upload today: {act.mb_24h.sum():.0f} MB, per active device p50={act.mb_24h.median():.1f} "
+      f"p95={act.mb_24h.quantile(.95):.1f} MB")
+print("action list:", fleet[fleet.state.isin(["dark", "lost?"])][["device", "state"]]
+      .to_dict("records")[:3])
+```
+
+```text
+state
+active    30
+stale      5
+lost?      4
+dark       1 
+
+FW mix (active): {'1.3.1': 0.47, '1.3.0': 0.27, '1.2.0': 0.27}
+config drift: 7 active devices still on cfg v2 -> ['HK-00006', 'HK-00007', 'HK-00017', 'HK-00019']
+upload today: 248 MB, per active device p50=7.8 p95=15.3 MB
+action list: [{'device': 'HK-00032', 'state': 'dark'}, {'device': 'HK-00036', 'state': 'lost?'}, {'device': 'HK-00037', 'state': 'lost?'}]
+```
+
+출력에서 볼 것: 40대 중 10대는 오늘 데이터를 안 올렸다. active 기기 중 7대가 아직 cfg v2다 — FW가 낮아서 capability 협상에서 걸렸는지(2.4절), check-in은 했는데 적용 실패했는지 ack 사유를 봐야 한다. FW 1.2.0이 아직 27%라는 것은 5절 관점에서 데이터셋을 FW로 나눠야 한다는 경고다. p95가 p50의 두 배쯤인 것은 일부 기기가 trigger를 자주 일으킨다는 뜻 — trigger 오작동인지, 그 사용자의 생활 패턴인지 확인할 후보다.
+
+### 6.5 분실 · 고장 기기
+
+- **분실**: 14일 이상 check-in 없음 → 사용자 확인 → 인증서 revoke(서버가 그 기기 업로드 거부), 다음 연결 시 원격 wipe, 재고 대장(serial ↔ 사용자 ↔ 상태 ↔ 위치) 업데이트. 수백 대가 되면 "지금 누가 몇 번 기기를 갖고 있나"가 의외로 큰 일이다.
+- **고장 (RMA)**: 반납받아 실패 분석 — 이것도 데이터다 (Don의 RMA 분석 경험 그대로). 센서 고장이 데이터에 남긴 흔적(H7의 saturation·stuck 값)을 역추적해 "고장 전 며칠치 데이터"를 격리한다.
+
+### 6.6 20대에서 1,000대 이상으로 — 무엇이 바뀌나
+
+| 항목 | 내부 20대 (EVT) | 내부 200대 (DVT) | 외부 beta 1,000대 이상 (PVT) |
+|---|---|---|---|
+| 모집 | 팀원에게 직접 부탁 | 사내 공지 + 설문, 층별 목표 | 외부 모집·계약, 지역·인구 분포 설계 |
+| 동의 | 간단한 내부 동의서 | 법무 검토된 사내 동의 | 정식 동의·약관, 철회·삭제 절차 자동화 (H6) |
+| provisioning | 엔지니어가 책상에서 수동 | 스크립트 + 배치 작업 | 공장·물류에서 자동, 배송 추적 |
+| config 배포 | 손으로 push, 전체 한 번에 | staged rollout 1단계·2단계 | 1% → 5% → 20% → 100%, 자동 halt 기준 |
+| 모니터링 | 엔지니어가 로그 직접 봄 | 대시보드 + 매일 리뷰 | 자동 알림·on-call, SLA |
+| 지원 | 옆자리에 가서 물어봄 | Slack 채널 | 지원 티켓 시스템, FAQ, 배송 교체 |
+| 분실·고장 | "책상 서랍에 있었네" | 재고 대장, 월 1회 정리 | RMA 절차, 인증서 revoke 자동화 |
+| 데이터량 | 하루 수백 MB | 하루 수 GB | 하루 수십 GB 이상, 라벨 대기열 관리 |
+| 실패 비용 | 다시 하면 됨 | 일주일 손실 | 외부 사용자 신뢰·법적 문제 |
+| 핵심 위험 | 파이프라인 버그 | FW 혼합, 층 편향 | 프라이버시 사고, 비용 폭증 |
+
+Don의 챔버 인프라가 몇 대에서 수백 대로 커졌을 때를 떠올리면 된다. 작을 때 사람이 하던 일(상태 확인, 재시도, 고장 장비 처리)이 하나씩 **자동화 + 알림 + 절차**로 바뀐다. 그리고 규모가 커질수록 "한 번 잘못 보낸 config"의 피해 범위가 커지므로 staged rollout과 kill switch가 선택이 아니라 필수가 된다.
+
+---
+
+## 7. 필드 피드백 루프 — 필드에서 hard negative를 찾는다
+
+### 7.1 무엇이 "어려운 사례"인가, 어떻게 기기가 알아보나
+
+**hard negative**는 "정답은 음성(제스처 아님)인데 모델이 양성처럼 보는 사례"다. 예: 손목 튕기기 모델에 대해 박수, 키보드 엔터 세게 치기, 개 목줄 당기기. 실험실에서는 상상하기 어렵고 **필드에서만** 나온다. 기기가 이런 순간을 알아보는 trigger:
+
+| trigger | 의미 | 예 |
+|---|---|---|
+| low confidence | score가 threshold 근처 (0.3~0.7) | 애매한 동작 |
+| near miss | wake word 1단계는 통과, 2단계에서 탈락 | "헤이 마크"를 "헤이 하크"로 착각할 뻔 |
+| disagreement | production 모델과 shadow 모델의 판정이 다름 | 7.2절 |
+| rare class 후보 | 드문 class의 score가 일정 이상 | 낙상 감지 후보 |
+| 사용자 신고 | 앱의 "이상했어" 버튼 | 6.3절 |
+
+user correction은 특히 값지다. 사람이 라벨을 (암묵적으로) 붙여 준 것이고, 모델이 **자신 있게 틀린** 사례도 잡힌다 — low-conf trigger가 못 잡는 영역이다.
+
+### 7.2 Shadow mode — 새 모델을 몰래 돌려 본다
+
+새 모델을 바로 사용자에게 내보내는 대신, production 모델 옆에서 **결과를 사용자에게 보여 주지 않고** 같이 돌린다. 두 모델의 판정이 다른 window만 올린다. C8에서 float 모델과 int8 모델을 비교한 것의 필드 버전이다 — 기준이 "정답"이 아니라 "현재 모델"이라는 점만 다르다.
+
+```svg
+<svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="h8d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<rect x="20" y="95" width="100" height="44" rx="6" fill="none" stroke="#888" stroke-width="2"/><text x="70" y="114" font-size="12" text-anchor="middle">센서 window</text><text x="70" y="130" font-size="12" text-anchor="middle">ring buffer</text> <rect x="170" y="40" width="130" height="44" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/><text x="235" y="59" font-size="12" text-anchor="middle">production M1</text><text x="235" y="75" font-size="12" text-anchor="middle">사용자에게 보임</text> <rect x="170" y="150" width="130" height="44" rx="6" fill="none" stroke="#e08a3c" stroke-width="2" stroke-dasharray="5 3"/><text x="235" y="169" font-size="12" text-anchor="middle">shadow M2</text><text x="235" y="185" font-size="12" text-anchor="middle">결과 숨김</text> <rect x="350" y="95" width="110" height="44" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/><text x="405" y="114" font-size="12" text-anchor="middle">p1 ≠ p2 ?</text><text x="405" y="130" font-size="12" text-anchor="middle">불일치만</text> <rect x="510" y="40" width="150" height="44" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/><text x="585" y="59" font-size="12" text-anchor="middle">clip + 두 score 업로드</text><text x="585" y="75" font-size="12" text-anchor="middle">H1 · H2</text> <rect x="510" y="150" width="150" height="44" rx="6" fill="none" stroke="#d0564a" stroke-width="2"/><text x="585" y="169" font-size="12" text-anchor="middle">라벨 (H4) → 재학습</text><text x="585" y="185" font-size="12" text-anchor="middle">→ 다음 shadow</text> <line x1="120" y1="110" x2="167" y2="70" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8d)"/> <line x1="120" y1="124" x2="167" y2="164" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8d)"/>
+<line x1="300" y1="70" x2="347" y2="108" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8d)"/> <line x1="300" y1="164" x2="347" y2="126" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8d)"/> <line x1="460" y1="108" x2="507" y2="70" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8d)"/> <line x1="585" y1="84" x2="585" y2="147" stroke="currentColor" stroke-width="1.5" marker-end="url(#h8d)"/> <line x1="510" y1="215" x2="235" y2="215" stroke="#d0564a" stroke-width="1.5"/><line x1="235" y1="215" x2="235" y2="197" stroke="#d0564a" stroke-width="1.5" marker-end="url(#h8d)"/> <text x="372" y="235" font-size="12" text-anchor="middle">재학습한 모델이 다음 shadow가 된다 (OTA, J5)</text> <text x="405" y="160" font-size="12" text-anchor="middle">일치 → 버림</text>
+</svg>
+```
+
+그림 6 — shadow mode. 두 모델이 같은 window를 보고, 판정이 같으면 아무것도 올리지 않는다. 판정이 다른 window만 clip과 두 score를 붙여 올리고, 라벨링 후 "누가 맞았나"를 센다. 비용은 기기 쪽 추론 2배(전력·latency — D·K 모듈)와 불일치 업로드뿐이다.
+
+왜 불일치만 라벨해도 되나? 두 모델이 같은 판정을 낸 window에서는 둘 다 맞거나 둘 다 틀린다. 그러니 **두 모델의 오류 수 차이는 불일치 window 안에서만 생긴다.** 수식으로:
+
+```
+errors(M1) − errors(M2) = #(불일치 중 M2가 맞음) − #(불일치 중 M1이 맞음)
+```
+
+말로 하면: 불일치 window만 라벨해서 "M2가 맞은 수 − M1이 맞은 수"를 세면, 전체를 라벨하지 않고도 M2가 줄인 오류 수를 정확히 안다.
+
+```python
+import numpy as np
+rng = np.random.default_rng(5)
+n = 200_000                                    # 하루치 fleet window 수 (예시)
+y = rng.random(n) < 0.01                       # 진짜 제스처 1%
+hard = (~y) & (rng.random(n) < 0.02)           # 제스처처럼 보이는 일상 동작 (hard negative)
+sig = np.where(y, 1.0, 0.0) + np.where(hard, 0.8, 0.0)
+m1 = sig + rng.normal(0, 0.18, n)              # production 모델: hard negative에 잘 속는다
+m2 = sig - 0.5 * hard + rng.normal(0, 0.17, n) # shadow 모델: hard negative로 재학습
+p1, p2 = m1 > 0.5, m2 > 0.5                    # 사용자에겐 p1만 보인다
+
+dis = p1 != p2
+print(f"disagreements: {dis.sum()} / {n} ({dis.mean():.2%}) -> 이것만 업로드")
+# 업로드된 disagreement만 라벨링 (H4). 일치한 window는 두 모델 성적이 같으므로 차이에 기여 안 함
+lab = y[dis]
+m1_right, m2_right = (p1[dis] == lab).sum(), (p2[dis] == lab).sum()
+print(f"labeled disagreements: M1 right {m1_right}, M2 right {m2_right}")
+fp = lambda p: (p & ~y).sum(); fn = lambda p: (~p & y).sum()
+print(f"(전수 정답으로 확인) M1 FP={fp(p1)} FN={fn(p1)} | M2 FP={fp(p2)} FN={fn(p2)}")
+print(f"net errors removed = {(fp(p1)+fn(p1)) - (fp(p2)+fn(p2))} == {m2_right - m1_right}")
+print(f"M1 FPs that are hard negatives: {(p1 & hard).sum() / fp(p1):.1%}")
+```
+
+```text
+disagreements: 4197 / 200000 (2.10%) -> 이것만 업로드
+labeled disagreements: M1 right 359, M2 right 3838
+(전수 정답으로 확인) M1 FP=4299 FN=8 | M2 FP=826 FN=2
+net errors removed = 3479 == 3479
+M1 FPs that are hard negatives: 87.8%
+```
+
+출력에서 볼 것: 200,000개 window 중 2.1%만 올리고 라벨해서, M2가 오류를 3,479개 줄였다는 것을 정확히 알아냈다 (전수 정답으로 계산한 값과 일치). M1 오탐의 88%가 hard negative라는 것은 "M1의 FP 문제는 대부분 이 특정 일상 동작 때문"이라는 진단이고, 그게 바로 M2를 hard negative로 재학습한 이유다. 주의: 이 차이 계산은 **오류 총합**만 알려 준다. FP와 FN을 따로 보려면 불일치를 (M1=양성, M2=음성)과 반대로 나눠 세면 된다.
+
+### 7.3 Release별 개선 측정
+
+"좋아졌다"는 네 가지로 말한다: 버전 고정·FW 층별 **고정 평가 세트**에서의 회귀 비교(H5, C8의 6절), uniform 또는 IPW로 추정한 **필드 지표**(FA/day, user correction rate, 신고율 — FW·모델 버전별), 배포 전 **shadow 불일치 분석**, 그리고 계절·사용자 변화를 빼기 위한 **holdout cohort** 대비 비교(3.4절).
+
+### 7.4 피드백 루프의 함정 — 모델이 자기 데이터를 고른다
+
+trigger가 현재 모델의 confidence에 의존하면, **다음 학습 데이터가 현재 모델의 약점 모양으로** 모인다. 좋은 점도 있지만(약점 보강), 위험도 있다.
+
+- 모델 v2는 v1이 헷갈린 데이터로 학습 → v2가 헷갈리는 영역이 다른 곳으로 이동 → v3 데이터는 또 다른 영역. 데이터셋의 분포가 실제 사용 분포에서 멀어진다. 해결: uniform 비율 유지 + IPW 가중 + 고정 평가 세트.
+- trigger 기준이 모델 버전마다 바뀌므로 `model_ver`와 `sample_reason`을 레코드에 꼭 남긴다 (5.1절).
+- 평가 세트에 trigger 데이터를 넣으면 "어려운 사례 비율"이 실제보다 높아져 정확도가 낮게 보인다. 평가 세트는 uniform 경로로 만든다.
+
+---
+
+## 8. 비용 · 용량 계획 — 얼마나 들고, 얼마나 걸리나
+
+### 8.1 손계산 — 1,000대 fleet
+
+가정 (전부 예시, 실제 단가는 계약·리전·tier마다 다름): 기기당 하루 8 MB, 활성 70%, 보관 365일, object storage 월 $0.023/GB, 업로드 clip 중 5%를 사람이 라벨, clip 하나 20초, 라벨러 시급 $25, 하루 실작업 6시간.
+
+```
+하루 업로드  = 1000 × 0.7 × 8 MB            = 5.6 GB/day
+정상 상태 저장 = 5.6 GB × 365                ≈ 2,044 GB ≈ 2.04 TB
+저장 비용    = 2,044 × $0.023              ≈ $47 / month
+clip 수     = 5,600 MB × 6.7 clip/MB       ≈ 37,520 / day
+라벨 수      = 37,520 × 5%                  ≈ 1,876 / day
+라벨 시간    = 1,876 × 20 s / 3600         ≈ 10.4 h/day  → 6 h/day 기준 1.7 FTE
+라벨 비용    = 10.4 h × 30 일 × $25         ≈ $7,800 / month
+```
+
+말로 하면: **저장은 싸고, 사람이 비싸다.** 1,000대 fleet에서 저장 비용은 한 달 $47, 라벨은 약 $7,800로 160배쯤 차이가 난다. 그래서 4절의 샘플링(무엇을 올리나)과 7절의 불일치 필터(무엇을 라벨하나)가 곧 비용 관리다.
+
+### 8.2 계산기
+
+```python
+# 모든 단가는 "가정"이다. 실제 계약가·리전·tier에 따라 다르니 숫자를 바꿔 넣어 쓴다.
+A = dict(mb_per_dev_day=8.0,      # 기기 1대 하루 업로드 (H1 압축 후)
+         active_ratio=0.7,        # 그날 실제로 업로드하는 기기 비율
+         retention_days=365,      # raw 보관 기간 (H6 정책)
+         storage_usd_gb_month=0.023,  # object storage 표준 tier 목록가 수준 (가정)
+         egress_usd_gb=0.09,      # 클라우드 밖으로 나가는 전송 단가 (가정)
+         egress_fraction=0.10,    # raw 중 외부 라벨링 업체로 내보내는 비율
+         clips_per_mb=6.7,        # 0.15 MB clip
+         label_fraction=0.05,     # 업로드 clip 중 사람이 라벨링하는 비율
+         sec_per_label=20, usd_per_label_hour=25, productive_h_per_day=6)
+
+def plan(fleet, a=A):
+    gb_day = fleet * a["active_ratio"] * a["mb_per_dev_day"] / 1000
+    stored_gb = gb_day * a["retention_days"]                # 정상 상태(steady state) 저장량
+    storage = stored_gb * a["storage_usd_gb_month"]
+    egress = gb_day * 30 * a["egress_fraction"] * a["egress_usd_gb"]
+    labels_day = gb_day * 1000 * a["clips_per_mb"] * a["label_fraction"]
+    label_h_day = labels_day * a["sec_per_label"] / 3600
+    return dict(fleet=fleet, GB_day=round(gb_day, 1), stored_TB=round(stored_gb / 1000, 2),
+                storage_usd_mo=round(storage), egress_usd_mo=round(egress),
+                labels_day=round(labels_day), labeler_FTE=round(label_h_day / a["productive_h_per_day"], 1),
+                label_usd_mo=round(label_h_day * 30 * a["usd_per_label_hour"]))
+import pandas as pd
+print(pd.DataFrame([plan(f) for f in (20, 200, 1000, 5000)]).to_string(index=False))
+```
+
+```text
+ fleet  GB_day  stored_TB  storage_usd_mo  egress_usd_mo  labels_day  labeler_FTE  label_usd_mo
+    20     0.1       0.04               1              0          38          0.0           156
+   200     1.1       0.41               9              0         375          0.3          1563
+  1000     5.6       2.04              47              2        1876          1.7          7817
+  5000    28.0      10.22             235              8        9380          8.7         39083
+```
+
+출력에서 볼 것: fleet이 250배(20 → 5,000)가 되면 모든 비용이 선형으로 250배가 된다 — 이 모델은 단순 비례이기 때문이다. 5,000대에서 라벨러 8.7명이 필요하다는 것은 "fleet을 늘리기 전에 라벨 파이프라인(H4의 weak labeling, active learning)부터 확장해야 한다"는 뜻이다. egress가 작은 것은 외부로 내보내는 비율을 10%로 가정했기 때문이고, 라벨링 업체에 raw를 다 보내면 달라진다. 실제 계획에서는 storage tier 이동(오래된 raw는 cold tier), 요청 수 과금, 처리(compute) 비용, 기기 쪽 전송 비용(셀룰러면 데이터 요금)도 넣는다.
+
+### 8.3 희귀 class를 X개 모으는 데 며칠? — Poisson 추정
+
+희귀 이벤트가 독립적으로, 일정한 평균 속도로 일어난다고 보면 t일 동안 모이는 수 N(t)는 Poisson 분포를 따른다.
+
+```
+N(t) ~ Poisson(r·t)         r = fleet 하루 평균 수확량
+평균 기간       = TARGET / r
+P90 기간       = P(N(t) ≥ TARGET) ≥ 0.9 를 만족하는 최소 t
+```
+
+r은 **퍼널**의 곱이다: 발생률 × trigger recall × 업로드 성공 × 동의 범위 × 라벨 확인율 × 활성 기기 수. 예제의 가정: 발생 0.5/기기·일, trigger recall 0.6, 업로드 0.9, 동의 0.85, 라벨 확인 0.7 → 0.5 × 0.6 × 0.9 × 0.85 × 0.7 = 0.1606 /기기·일.
+
+손계산 (500대, 활성 70%): r = 500 × 0.7 × 0.1606 ≈ 56.2 /일. 평균 기간 2000 / 56.2 ≈ 35.6일. 그 시점의 표준편차는 √2000 ≈ 44.7개 ≈ 0.8일치. P90은 평균보다 1.28σ 더 → 44.7 × 1.28 ≈ 57개 ≈ 1.0일 → 약 36.6일, 정수로 올려 37일.
+
+```python
+from scipy.stats import poisson
+import numpy as np
+# 퍼널: 희귀 이벤트 발생 -> trigger -> 업로드 성공 -> 동의 scope OK -> 라벨 후 진짜로 확인
+funnel = dict(occur_per_dev_day=0.5, trigger_recall=0.6, upload_ok=0.9,
+              consent_ok=0.85, label_confirm=0.7)
+yield_per_dev_day = np.prod(list(funnel.values()))
+TARGET = 2000                                   # 학습에 필요한 확인된 희귀 이벤트 수
+print(f"usable rare events / device-day = {yield_per_dev_day:.4f}")
+for fleet, active in ((20, 0.9), (500, 0.7), (1000, 0.7)):
+    rate = fleet * active * yield_per_dev_day   # fleet 전체 하루 기대 개수
+    mean_days = TARGET / rate
+    # P(N(t) >= TARGET) >= 0.9 가 되는 가장 작은 t (일 단위)
+    t = int(np.floor(mean_days))
+    while poisson.sf(TARGET - 1, rate * t) < 0.9:
+        t += 1
+    print(f"fleet {fleet:5d}: {rate:6.1f}/day  mean {mean_days:6.1f} d  P90 {t:4d} d")
+```
+
+```text
+usable rare events / device-day = 0.1606
+fleet    20:    2.9/day  mean  691.6 d  P90  712 d
+fleet   500:   56.2/day  mean   35.6 d  P90   37 d
+fleet  1000:  112.5/day  mean   17.8 d  P90   19 d
+```
+
+출력에서 볼 것: 20대 내부 fleet으로는 2년 가까이 걸린다 — 이게 "희귀 이벤트는 fleet 규모 없이는 못 모은다"의 숫자다. 500대면 5주, 1,000대면 2.5주. 그리고 목표가 큰 수(2,000)일 때는 P90이 평균보다 겨우 1일 길다. 즉 **Poisson 잡음은 작은 문제고, 진짜 불확실성은 퍼널 숫자(r) 자체**다. trigger recall이 0.6이 아니라 0.3이면 기간은 두 배다. 그래서 캠페인 첫 주에 퍼널 각 단계를 실측해서 r을 다시 계산한다.
+
+```svg
+<svg viewBox="0 0 680 310" xmlns="http://www.w3.org/2000/svg">
+<line x1="70" y1="260" x2="630" y2="260" stroke="currentColor"/> <line x1="70" y1="260" x2="70" y2="40" stroke="currentColor"/> <line x1="70.0" y1="260" x2="70.0" y2="265" stroke="currentColor"/><text x="70.0" y="279" font-size="12" text-anchor="middle">0</text> <line x1="163.3" y1="260" x2="163.3" y2="265" stroke="currentColor"/><text x="163.3" y="279" font-size="12" text-anchor="middle">10</text> <line x1="256.7" y1="260" x2="256.7" y2="265" stroke="currentColor"/><text x="256.7" y="279" font-size="12" text-anchor="middle">20</text> <line x1="350.0" y1="260" x2="350.0" y2="265" stroke="currentColor"/><text x="350.0" y="279" font-size="12" text-anchor="middle">30</text> <line x1="443.3" y1="260" x2="443.3" y2="265" stroke="currentColor"/><text x="443.3" y="279" font-size="12" text-anchor="middle">40</text> <line x1="536.7" y1="260" x2="536.7" y2="265" stroke="currentColor"/><text x="536.7" y="279" font-size="12" text-anchor="middle">50</text>
+<line x1="630.0" y1="260" x2="630.0" y2="265" stroke="currentColor"/><text x="630.0" y="279" font-size="12" text-anchor="middle">60</text> <line x1="65" y1="260" x2="70" y2="260" stroke="currentColor"/><text x="61" y="264" font-size="12" text-anchor="end">0</text> <line x1="65" y1="150" x2="70" y2="150" stroke="currentColor"/><text x="61" y="154" font-size="12" text-anchor="end">0.5</text> <line x1="65" y1="40" x2="70" y2="40" stroke="currentColor"/><text x="61" y="44" font-size="12" text-anchor="end">1.0</text> <line x1="70" y1="62" x2="630" y2="62" stroke="#888" stroke-dasharray="4 3"/><text x="626" y="56" font-size="12" text-anchor="end">P = 0.9</text> <polyline points="70.0,260.0 74.7,260.0 79.3,260.0 84.0,260.0 88.7,260.0 93.3,260.0 98.0,260.0 102.7,260.0 107.3,260.0 112.0,260.0 116.7,260.0 121.3,260.0 126.0,260.0 130.7,260.0 135.3,260.0 140.0,260.0 144.7,260.0 149.3,260.0 154.0,260.0 158.7,260.0 163.3,260.0 168.0,260.0 172.7,260.0 177.3,260.0 182.0,260.0 186.7,260.0 191.3,260.0 196.0,260.0 200.7,260.0 205.3,260.0 210.0,260.0 214.7,260.0 219.3,260.0 224.0,260.0 228.7,260.0 233.3,260.0 238.0,260.0 242.7,260.0 247.3,260.0 252.0,260.0 256.7,260.0 261.3,260.0 266.0,260.0 270.7,260.0 275.3,260.0 280.0,260.0 284.7,260.0 289.3,260.0 294.0,260.0 298.7,260.0 303.3,260.0 308.0,260.0 312.7,260.0 317.3,260.0 322.0,260.0 326.7,260.0 331.3,260.0 336.0,260.0 340.7,260.0 345.3,260.0 350.0,260.0 354.7,260.0 359.3,260.0 364.0,260.0 368.7,260.0 373.3,260.0 378.0,259.9 382.7,259.1 387.3,254.9 392.0,240.6 396.7,207.6 401.3,157.0 406.0,104.3 410.7,66.8 415.3,48.2 420.0,41.8 424.7,40.3 429.3,40.0 434.0,40.0 438.7,40.0 443.3,40.0 448.0,40.0 452.7,40.0 457.3,40.0 462.0,40.0 466.7,40.0 471.3,40.0 476.0,40.0 480.7,40.0 485.3,40.0 490.0,40.0 494.7,40.0 499.3,40.0 504.0,40.0 508.7,40.0 513.3,40.0 518.0,40.0 522.7,40.0 527.3,40.0 532.0,40.0 536.7,40.0 541.3,40.0 546.0,40.0 550.7,40.0 555.3,40.0 560.0,40.0 564.7,40.0 569.3,40.0 574.0,40.0 578.7,40.0 583.3,40.0 588.0,40.0 592.7,40.0 597.3,40.0 602.0,40.0 606.7,40.0 611.3,40.0 616.0,40.0 620.7,40.0 625.3,40.0 630.0,40.0" fill="none" stroke="#4a7bd0" stroke-width="2"/> <polyline points="70.0,260.0 74.7,260.0 79.3,260.0 84.0,260.0 88.7,260.0 93.3,260.0 98.0,260.0 102.7,260.0 107.3,260.0 112.0,260.0 116.7,260.0 121.3,260.0 126.0,260.0 130.7,260.0 135.3,260.0 140.0,260.0 144.7,260.0 149.3,260.0 154.0,260.0 158.7,260.0 163.3,260.0 168.0,260.0 172.7,260.0 177.3,260.0 182.0,260.0 186.7,260.0 191.3,260.0 196.0,260.0 200.7,260.0 205.3,260.0 210.0,260.0 214.7,260.0 219.3,260.0 224.0,259.9 228.7,254.9 233.3,207.6 238.0,104.3 242.7,48.2 247.3,40.3 252.0,40.0 256.7,40.0 261.3,40.0 266.0,40.0 270.7,40.0 275.3,40.0 280.0,40.0 284.7,40.0 289.3,40.0 294.0,40.0 298.7,40.0 303.3,40.0 308.0,40.0 312.7,40.0 317.3,40.0 322.0,40.0 326.7,40.0 331.3,40.0 336.0,40.0 340.7,40.0 345.3,40.0 350.0,40.0 354.7,40.0 359.3,40.0 364.0,40.0 368.7,40.0 373.3,40.0 378.0,40.0 382.7,40.0 387.3,40.0 392.0,40.0 396.7,40.0 401.3,40.0 406.0,40.0 410.7,40.0 415.3,40.0 420.0,40.0 424.7,40.0 429.3,40.0 434.0,40.0 438.7,40.0 443.3,40.0 448.0,40.0 452.7,40.0 457.3,40.0 462.0,40.0 466.7,40.0 471.3,40.0 476.0,40.0 480.7,40.0 485.3,40.0 490.0,40.0 494.7,40.0 499.3,40.0 504.0,40.0 508.7,40.0 513.3,40.0 518.0,40.0 522.7,40.0 527.3,40.0 532.0,40.0 536.7,40.0 541.3,40.0 546.0,40.0 550.7,40.0 555.3,40.0 560.0,40.0 564.7,40.0 569.3,40.0 574.0,40.0 578.7,40.0 583.3,40.0 588.0,40.0 592.7,40.0 597.3,40.0 602.0,40.0 606.7,40.0 611.3,40.0 616.0,40.0 620.7,40.0 625.3,40.0 630.0,40.0" fill="none" stroke="#3f9a6b" stroke-width="2"/> <text x="140" y="110" font-size="12">1,000대</text>
+<text x="460" y="110" font-size="12">500대</text> <text x="350" y="300" font-size="12" text-anchor="middle">수집 일수</text> <text x="20" y="28" font-size="12">P(확인된 희귀 이벤트 ≥ 2,000)</text>
+</svg>
+```
+
+그림 7 — 예제 9의 가정에서 "목표 2,000개를 다 모았을 확률"을 날짜별로 계산한 곡선 (초록 1,000대, 파랑 500대). 곡선이 거의 계단처럼 가파르다 — 목표 수가 크면 Poisson 잡음은 하루 정도의 폭밖에 안 된다. 일정의 불확실성은 곡선의 기울기가 아니라 곡선의 **위치**(퍼널 숫자)에서 온다.
+
+### 8.4 현실 보정 — 사람마다 발생률이 다르다
+
+Poisson 모델은 "모든 기기가 같은 속도"라고 가정한다. 실제로는 소수의 열성 사용자(매일 달리는 사람)가 희귀 이벤트 대부분을 만든다. 그러면 데이터가 몇 사람에게 쏠리고, 모델은 그 사람들의 동작 습관을 외운다 (H5의 사용자 단위 split이 막으려는 것). 그래서 **사용자당 기여 상한(cap)** 을 둔다. 대가는 기간이다.
+
+```python
+import numpy as np
+rng = np.random.default_rng(1)
+DEV, MEAN, TARGET = 350, 0.1606, 2000            # 활성 기기 350대 (500 × 0.7), ex9과 같은 평균
+rate = rng.gamma(shape=0.5, scale=MEAN / 0.5, size=DEV)   # 사람마다 발생률이 크게 다르다
+def days_needed(cap):
+    got, d = np.zeros(DEV), 0
+    while np.minimum(got, cap).sum() < TARGET:
+        got += rng.poisson(rate); d += 1
+        if d > 2000: return None
+    return d, got
+d, got = days_needed(cap=np.inf)
+top = np.sort(got)[::-1]
+print(f"no cap : {d} days, top 10% devices give {top[:DEV // 10].sum() / got.sum():.0%} of events, "
+      f"devices with 0 events: {(got == 0).sum()}")
+for cap in (20, 10):
+    r = days_needed(cap)
+    print(f"cap {cap:2d}: " + ("never" if r is None else f"{r[0]} days, contributing devices "
+          f"{(np.minimum(r[1], cap) > 0).sum()}"))
+```
+
+```text
+no cap : 39 days, top 10% devices give 48% of events, devices with 0 events: 105
+cap 20: 47 days, contributing devices 250
+cap 10: 108 days, contributing devices 289
+```
+
+출력에서 볼 것: 평균 발생률은 예제 9와 같은데(그래서 상한 없이는 39일로 비슷하다), 상위 10% 기기가 이벤트의 절반 가까이를 낸다. 105대는 한 번도 안 냈다. 사용자당 20개 상한을 두면 47일, 10개면 108일로 늘어난다 — 대신 기여 기기는 상한 없을 때 245대(350 − 105)에서 250대, 289대로 늘고, 무엇보다 한 사람이 차지하는 비중이 최대 20개·10개로 묶인다. 이게 "수 vs 다양성"의 실제 trade-off이고, 1.2절에서 목표를 "개수 + 서로 다른 사용자 수"로 쓰는 이유다.
+
+### 8.5 인력과 일정
+
+- **사람**: 라벨러는 8.2절 FTE에 라벨 가이드 작성·교육·이중 라벨 검수 시간을 더한다 (처음 2주는 생산성이 낮다). dogfood 200대 이상이면 기기 지원·물류 담당이 따로 필요하다 — 엔지니어가 하면 개발이 멈춘다.
+- **일정 표현**: "평균 5주, P90 5.3주, 단 trigger recall 0.6 가정 — 1주차 실측 후 재추정"처럼 **가정과 재추정 시점**을 같이 말한다. Don이 NPI에서 일정 리스크를 보고하던 방식 그대로.
+
+---
+
+## 9. 거버넌스 — 누가 무엇을 승인하고, 무엇이 기록되나
+
+fleet 수집은 사람의 일상을 기록하는 일이다. 기술보다 절차가 먼저 무너지는 곳이라, 역할과 승인을 명시한다. 세부 법·정책은 H6에서 다루고, 여기서는 **운영 절차**만 본다.
+
+| 역할 | 할 수 있는 것 | 할 수 없는 것 |
+|---|---|---|
+| 캠페인 owner (엔지니어) | 캠페인 명세 작성, config 초안, 진척 모니터링 | 혼자 배포 승인, raw 개인 데이터 열람 |
+| 프라이버시 리뷰어 | 동의 범위·보관 기간·센서 범위 승인 | config 작성 |
+| fleet 운영자 | 승인된 config의 staged rollout, kill switch | 승인 안 된 config 배포 |
+| 라벨러 | 할당된 clip 열람·라벨 (가명화된 상태) | 기기 ID ↔ 사용자 매핑 열람 |
+| 모델팀 | 버전 고정된 데이터셋 사용 | raw bucket 직접 접근 |
+| 감사(audit) | 모든 로그 열람 | 데이터 변경 |
+
+새 캠페인 승인 흐름:
+
+```
+캠페인 명세 작성 ──► 자동 검사 (스키마·예산·동의 범위 대조, 2.3절 validator)
+        │
+        ▼
+ 프라이버시 리뷰 (H6) ── 새 센서·raw 오디오·위치 포함이면 필수, 아니면 경량 리뷰
+        │
+        ▼
+ 예산 승인 (8절 계산기 첨부) ──► config 서명 (서명 키는 운영 시스템만 보유)
+        │
+        ▼
+ staged rollout 1% ─► 지표 OK? ─► 5% ─► 20% ─► 100%     어느 단계든 ─► kill
+        │
+        ▼
+ 종료: 만료일 or 목표 달성 ─► 기기 config 기본값 복귀 ─► 보관 정책에 따라 삭제 예약
+```
+
+**audit log**에 남길 것: 누가 어느 config를 언제 서명·배포했나, 어느 cohort에 몇 대가 적용했나, 누가 어느 데이터셋 버전을 열람·다운로드했나, 동의 철회 요청과 삭제 완료 시각. Don의 factory test에서 "어느 station이 어느 limit 파일 버전으로 어느 serial을 PASS 시켰나"를 추적하던 것과 같은 수준의 추적성을 목표로 한다.
+
+---
+
+## 10. 임베디드 관점에서 다시 보기
+
+H8은 프로그램 이야기지만, 그 프로그램이 돌아가려면 FW가 지켜야 할 것들이 있다.
+
+- **config 파서와 검증은 FW 코드다**: 고정 크기 struct 또는 CBOR, 범위 검사, CRC + 서명, 원자적 교체(2.6절). 메모리는 정적으로 잡는다 — config 크기 상한을 스키마에 둔다.
+- **capability 보고**: FW가 지원하는 기능을 bitmask로 check-in에 넣는다. 새 기능을 추가할 때마다 bit 하나 — 서버가 FW 버전 문자열을 파싱해 기능을 추측하지 않게.
+- **trigger는 추론 경로에 붙는다**: low-conf, disagreement trigger는 추론 직후 score를 보고 결정한다. trigger가 걸리면 ring buffer(H1)의 pre-trigger 구간 + post-trigger 구간을 flash로 내리는 작업을 **추론 태스크가 아닌 낮은 우선순위 태스크**로 넘긴다 (J1·J2의 실시간 설계).
+- **shadow 모델 비용**: 추론을 두 번 하면 전력·latency·arena 메모리가 늘어난다. 실무에서는 shadow를 매 window가 아니라 1/N로 돌리거나, 충전 중에만 돌리거나, DSP/NPU 여유 시간에만 돌린다 (D·K 모듈).
+- **로컬 예산 카운터**: 하루 MB, 하루 clip 수, 배터리 임계값, 버린 clip 수 — 모두 FW 카운터이고 check-in으로 보고한다. 카운터가 없으면 H7이 "데이터가 왜 줄었나"를 못 찾는다.
+- **메타데이터는 캡처 시점에**: `fw_build_id`, `config_ver`, `model_ver`, `sample_reason`, `sample_prob`는 clip을 만드는 순간 헤더에 넣는다. 업로드 시점에 붙이면 그 사이 FW·config가 바뀐 경우 틀린 태그가 붙는다.
+- **시계**: 기기 RTC가 틀리면 "하루 상한", "만료일", 데이터 정렬이 다 틀어진다. check-in 때 서버 시간과의 offset을 기록한다.
+
+---
+
+## 11. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| trigger 데이터로만 오탐률 계산 | 필드 FA/day가 평가보다 몇 배 높게 또는 낮게 나옴 | 선택 편향, 분모 오류 | uniform 경로 유지, `sample_prob` 기록 후 IPW |
+| FW 태그 없이 데이터 합침 | 특정 사용자군에서만 기능이 죽는데 전체 지표는 멀쩡 | data-affecting FW 변경이 평균에 묻힘 | 레코드 태그 필수, FW 층별 분석·데이터셋 FW 범위 고정 |
+| `random()`으로 cohort 할당 | 같은 기기가 날마다 참여·불참, 사용자당 데이터 부족 | 비결정적 할당 | `hash(salt, device_id)` bucket |
+| 실험끼리 salt 재사용 | A/B 결과와 수집 데이터가 서로 오염 | cohort가 완전히 겹침 | 캠페인·실험마다 고유 salt, 레코드에 저장 |
+| config 전체 동시 배포 | 하룻밤 사이 fleet 배터리 민원 폭주 | staged rollout·halt 기준 없음 | 1% → 5% → 20%, 자동 halt, 서명된 kill switch |
+| 만료 없는 캠페인 | 아무도 안 보는 데이터가 계속 쌓이고 비용 증가 | 종료 조건 부재 | `expires` 필드, 목표 달성 시 자동 종료 |
+| 목표를 시간으로만 정함 | 300시간 모았는데 희귀 class는 수십 개 | 일상 window가 대부분 | 이벤트 수 + 사용자 수로 목표 정의, 퍼널로 기간 추정 |
+| 열성 사용자 쏠림 | 검증 정확도는 높은데 신규 사용자에서 급락 | 소수 사용자가 데이터 다수 | 사용자당 기여 상한, 사용자 단위 split (H5) |
+| 분실 기기 인증서 방치 | 모르는 데이터가 계속 올라옴 | revoke 절차 없음 | lost? 상태에서 revoke, 재고 대장 |
+| 메타데이터를 업로드 시점에 붙임 | 일부 clip의 FW·config 태그가 실제와 다름 | 캡처와 업로드 사이 업데이트 | 캡처 시점 헤더에 기록 |
+
+---
+
+## 12. 면접에서 이렇게 말한다
+
+**Q.** "Design a data collection program for a new gesture across 500 dogfood devices."
+
+**A.** 목표를 숫자로 먼저 고정한다 — 확인된 양성 몇 개, 서로 다른 사용자 몇 명, 오탐 평가용 음성 몇 시간. 그다음 캠페인 명세(센서·rate·trigger·예산·동의 범위·종료 조건)를 쓰고, hash cohort로 기기를 고르고, 서명된 config를 1% → 100%로 배포한다. 샘플링은 trigger 80% + uniform 20%, 모든 레코드에 FW·HW·config·sample_prob를 태그. 퍼널로 기간을 추정하고 1주차 실측으로 재추정한다. 라벨 비용이 저장보다 훨씬 크니 라벨 우선순위를 같이 설계한다.
+
+> I'd start by pinning the goal in numbers: confirmed positives, distinct users, and hours of uniformly sampled negatives for false-alarm estimation. Then I'd write a campaign spec — sensors, rates, triggers, per-device budget, consent scope, stop condition — assign devices with a salted hash cohort, and roll out a signed config from 1% to 100% with halt criteria. Sampling would be roughly 80% event-triggered and 20% uniform, and every record carries FW build, HW rev, config version and its sampling probability. I'd estimate the timeline from the funnel with a Poisson model, re-estimate after week one, and plan labeling capacity up front because labeling, not storage, dominates cost.
+
+**Q.** "How do you remotely change what devices log without a FW update?"
+
+**A.** "무엇을 기록할지"는 config 데이터로, "어떻게 기록할지"는 FW 코드로 나눈다. 기기가 check-in할 때 FW 버전·capability·현재 config 버전을 보고하고, 서버가 호환되는 config를 돌려준다. config는 스키마 검증, 단조 증가 버전, hash, 비대칭 서명을 거치고, 기기는 서명·버전·capability를 확인한 뒤 원자적으로 교체한다. staged rollout과 서명된 kill switch, 만료일, last-known-good 복귀를 둔다.
+
+> Separate the "what" from the "how": the firmware implements logging primitives, and a server-driven config selects sensors, rates, triggers, durations and budgets. Devices pull configs at check-in, reporting FW version, a capability bitmask and their active config version. Configs are schema-validated on the server, versioned monotonically, hashed and signed; the device verifies signature, version and capabilities before swapping atomically. Rollout is staged, there's a signed kill switch with top priority, configs expire, and a crash after apply falls back to the last known good config.
+
+**Q.** "How do you make sure you collect enough rare events?"
+
+**A.** 무작위 샘플링으로는 안 된다 — 4초 window 14,400개 중 하나인 사건을 하루 30개 무작위 clip으로 잡을 확률은 거의 없다. on-device trigger(low confidence, near miss, rare class 후보, 사용자 정정)로 효율을 수백 배 올리고, 퍼널(발생률 × trigger recall × 업로드 × 동의 × 라벨 확인)로 fleet 하루 수확량을 계산해 Poisson으로 기간을 추정한다. 사용자당 상한을 둬서 다양성을 지키고, uniform 일부를 남겨 base rate를 편향 없이 잰다.
+
+> Uniform sampling won't do it — the math gives you a handful of events per fleet-week. I'd use on-device triggers such as low confidence, near misses, rare-class candidates and user corrections, which in simulation gave a few hundred times more rare events per gigabyte. Then I'd model the funnel — occurrence rate times trigger recall, upload success, consent scope and label confirmation — to get a daily fleet yield and a Poisson timeline, cap contributions per user for diversity, and keep a uniform slice with logged sampling probabilities so base rates stay unbiased.
+
+**Q.** "How do you prevent mixed FW versions from corrupting your dataset?"
+
+**A.** 세 겹으로 막는다. 첫째, 모든 레코드에 캡처 시점의 FW build ID·HW rev·센서 part/lot·calibration·config·model 버전을 붙인다. 둘째, FW release note에 data-affecting 변경을 표시하고, 데이터셋은 FW 범위에 고정하며 호환성 매트릭스로 합칠 수 있는 범위를 관리한다. 셋째, 모든 지표를 FW층별로 보는 것이 기본값이다 — 예를 들어 accel range가 ±8 g에서 ±4 g로 바뀌면 전체 정확도는 0.93인데 그 FW에서는 recall이 0이 될 수 있다.
+
+> Tag at capture time, gate at dataset build time, and analyze by version by default. Every record carries the FW build, HW rev, sensor part and lot, calibration, config and model versions. FW changes that affect data — sensor range, ODR, filters, gain, timestamps, trigger logic — are flagged in release notes, and datasets are pinned to FW ranges with a compatibility matrix saying what can be merged after resampling and what must be excluded. In a toy example, a range change from 8 g to 4 g left pooled accuracy at 0.93 but dropped recall to zero on the new FW — only per-version views catch that.
+
+**Q.** "How would you use the field to find hard negatives?"
+
+**A.** 기기에서 알아볼 수 있는 신호를 trigger로 쓴다: threshold 근처 score, 동작 직후 사용자의 취소·되돌림, wake word 2단계 탈락, 사용자 신고. 그리고 새 모델을 shadow mode로 돌려 production과 판정이 다른 window만 올린다. 두 모델의 오류 수 차이는 불일치 window 안에서만 생기므로, 불일치만 라벨해도 개선량을 정확히 안다. 단, 이 데이터는 모델이 고른 것이라 평가 세트는 uniform으로 따로 유지한다.
+
+> Use signals the device can see: scores near threshold, user corrections right after an action, second-stage rejections for wake words, and in-app reports. Then run the candidate model in shadow mode and upload only windows where it disagrees with production. Because agreements contribute equally to both models' error counts, labeling just the disagreements gives the exact difference in errors — in my simulation that was about 2% of windows. Those labeled disagreements become hard negatives for retraining, while the evaluation set stays uniformly sampled so the model doesn't pick its own exam.
+
+**Q.** "What changes when you scale dogfood from 20 to 1,000 devices?"
+
+**A.** 사람이 손으로 하던 모든 것이 자동화·절차·알림으로 바뀐다. provisioning은 스크립트·공장으로, config 배포는 staged rollout과 halt 기준으로, 상태 확인은 check-in 대시보드와 stale/dark/lost 상태 기계로, 분실은 인증서 revoke 절차로. 그리고 병목이 저장이 아니라 라벨러와 지원 인력으로 옮겨 간다. 챔버 테스트 인프라를 몇 대에서 수백 대로 키울 때와 같은 변화다.
+
+> Everything a person did by hand becomes automation plus alerting plus process: scripted or factory provisioning, staged config rollout with halt criteria, a check-in dashboard with a stale-dark-lost state machine, certificate revocation for lost units, and a real support channel. The bottleneck moves from storage to labelers and support staff. It's the same transition I went through scaling a chamber test infrastructure from a few hosts to hundreds — scheduling, status collection and failure handling all had to become systems.
+
+---
+
+## 13. 직접 해보기
+
+1. 2.2절 config에서 IMU 100 Hz, 6축, 축당 2 byte, clip 4초, `daily_mb_cap = 5`일 때 하루 최대 clip 수를 계산하라. 정답: 100 × 6 × 2 × 4 = 4,800 B, 5,000,000 / 4,800 ≈ 1,041개.
+2. `bucket(d, salt) < pct × 100` 방식에서 rollout을 20%에서 10%로 **줄이면** 어떤 기기가 빠지나? 넓힐 때와 비교해 무엇이 문제인가? 정답: bucket 1000~1999인 기기가 빠진다. 결정적이라 어떤 기기가 빠질지 정확히 안다. 문제는 이미 그 기기에 적용된 config를 되돌리는 "다음 config"를 보내야 한다는 것 (config 버전 증가 필요).
+3. 4.4절 미니 예제(window 1,000개, trigger 4개 중 희귀 1개, uniform P=0.1로 평범 10개)에서 uniform이 희귀 1개를 더 뽑았다면 IPW 추정은? 정답: 분자 1 + 10 = 11, 분모 4 + 11 × 10 = 114 → 약 9.6%. 작은 표본에서 IPW는 분산이 크다는 것을 보여 준다.
+4. 예제 9에서 trigger recall이 0.3으로 실측됐다. 500대 fleet의 평균 기간과 P90 기간을 다시 계산하라. 힌트: r이 절반(약 28.1/일)이 되므로 평균은 약 71일. 코드의 `trigger_recall`만 바꿔 실행해 P90을 확인한다.
+5. 코드 과제: 예제 5에 "FW 1.2.0 데이터만으로 학습한 threshold"와 "pooled 데이터로 학습한 threshold"를 둘 다 만들고 FW별 recall을 비교하라. 힌트: pooled threshold는 clipping 벽 쪽으로 끌려 내려가 1.2.0 성능까지 바꾼다 — 섞인 데이터가 양쪽 모두를 망치는지 확인한다.
+6. 코드 과제: 예제 7을 고쳐 불일치를 (M1 양성, M2 음성)과 (M1 음성, M2 양성)으로 나누고 FP 감소와 FN 변화를 각각 라벨된 불일치만으로 계산하라. 정답 확인: 전수 계산한 FP·FN 차이와 같아야 한다.
+
+---
+
+## 14. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| fleet | 기기 무리 | 수집·업데이트·모니터링 대상인 배포된 기기 전체 |
+| campaign | 수집 캠페인 | 목표·설정·cohort·기간·예산·종료 조건이 정해진 한 번의 수집 |
+| capability negotiation | 기능 협상 | 기기가 지원 기능을 보고하고 서버·기기가 호환되는 설정만 적용 |
+| staged rollout | 단계적 배포 | 1% → 5% → 20% → 100%처럼 넓히며 각 단계 지표로 진행 판단 |
+| kill switch | 긴급 정지 | 서명된 최우선 명령으로 수집을 즉시 중단 |
+| cohort | 실험·수집 집단 | 같은 처리를 받는 기기 집합 |
+| holdout | 기준 보존군 | 어떤 실험도 적용하지 않는 장기 비교용 기기 집합 |
+| stratified sampling | 층화 샘플링 | 그룹(층)별로 정한 양을 뽑아 작은 그룹도 충분히 확보 |
+| event-triggered capture | 이벤트 기반 캡처 | 모델 score·사용자 행동 등 신호가 있을 때만 clip 저장 |
+| selection bias | 선택 편향 | 뽑힌 데이터가 전체를 대표하지 않아 생기는 추정 오류 |
+| IPW | inverse probability weighting | 포함 확률의 역수로 가중해 선택 편향을 보정 |
+| data-affecting change | 데이터 영향 변경 | 센서 설정·전처리·trigger를 바꿔 데이터 분포를 바꾸는 FW 변경 |
+| hard negative | 어려운 음성 | 정답은 음성인데 모델이 양성으로 착각하기 쉬운 사례 |
+| shadow mode | 그림자 실행 | 새 모델을 사용자에게 안 보이게 함께 돌려 결과만 비교 |
+| funnel | 퍼널 | 발생 → trigger → 업로드 → 동의 → 라벨 확인으로 줄어드는 단계별 비율 |
+| Poisson process | 포아송 과정 | 독립적 사건이 일정 평균 속도로 일어나는 모델, 기간 추정에 사용 |
+| audit log | 감사 기록 | 누가 언제 무엇을 승인·배포·열람했는지의 변경 불가 기록 |
+
+---
+
+## 15. 요약 & 체크리스트
+
+Fleet 규모 수집은 H1~H7의 부품을 **캠페인 단위의 반복 루프**로 운영하는 일이다. 무엇을 기록할지는 서명된 원격 config로 바꾸고(스키마 검증 → 버전 → hash → 서명 → capability 확인 → 원자적 교체, staged rollout과 kill switch), 누가 참여할지는 salt를 넣은 hash bucket으로 결정적으로 정한다. 샘플링은 희귀 이벤트 효율(trigger)과 편향 없는 추정(uniform·stratified)을 섞고, 레코드마다 `sample_prob`를 남겨 IPW로 바로잡는다. FW·HW·config·모델 버전 태그를 캡처 시점에 붙여 섞인 데이터가 평균에 묻히지 않게 하고, dogfood fleet은 사람과 기기 양쪽의 상태 기계로 관리한다. 필드에서는 user correction·near miss·shadow 불일치로 hard negative를 찾고, 비용은 저장이 아니라 라벨이, 일정은 Poisson 잡음이 아니라 퍼널 숫자가 지배한다.
+
+- [ ] 캠페인 명세(목표·cohort·FW 요구·샘플링·예산·동의·종료 조건)를 한 페이지로 쓸 수 있다
+- [ ] NPI 단계별로 fleet 규모와 데이터 유효성 주의점을 말할 수 있다
+- [ ] config 검증 → hash → 서명 → 버전 → capability → 원자적 교체 순서와 각 단계가 막는 위험을 설명할 수 있다
+- [ ] `hash(salt, device_id) mod 10000`으로 staged rollout이 중첩되는 이유와 salt 재사용의 위험을 보여 줄 수 있다
+- [ ] uniform 샘플링으로 잡히는 희귀 이벤트 수를 손으로 계산하고 trigger와 비교할 수 있다
+- [ ] trigger 데이터의 선택 편향을 IPW로 보정하는 식을 쓰고 손으로 계산할 수 있다
+- [ ] data-affecting FW 변경이 pooled 지표에 묻히는 예를 들고, 태그·데이터셋 고정·층별 분석으로 막을 수 있다
+- [ ] dogfood 기기 상태 기계와 20대 → 1,000대 확장 시 바뀌는 것을 말할 수 있다
+- [ ] shadow mode에서 불일치만 라벨해도 오류 수 차이를 정확히 아는 이유를 설명할 수 있다
+- [ ] 퍼널 × fleet으로 하루 수확량을 구하고 Poisson으로 평균·P90 기간을 계산할 수 있다
+
+---
+
+## 참고 자료
+
+- Ron Kohavi, Diane Tang, Ya Xu, "Trustworthy Online Controlled Experiments: A Practical Guide to A/B Testing" (Cambridge University Press, 2020) — hash 기반 할당, holdout, 실험 간 간섭.
+- Chip Huyen, "Designing Machine Learning Systems" (O'Reilly, 2022) — 데이터 수집·샘플링(stratified, importance sampling), 피드백 루프, shadow deployment.
+- D. Sculley et al., "Hidden Technical Debt in Machine Learning Systems", NeurIPS 2015 — 피드백 루프, 데이터 의존성.
+- Timnit Gebru et al., "Datasheets for Datasets", Communications of the ACM, 2021 — 데이터셋 문서화 (H5 dataset card와 연결).
+- Python 표준 라이브러리 문서: [hashlib](https://docs.python.org/3/library/hashlib.html), [hmac](https://docs.python.org/3/library/hmac.html), [json](https://docs.python.org/3/library/json.html)
+- SciPy 문서: [scipy.stats.poisson](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.poisson.html)
+- [JSON Schema](https://json-schema.org/) — 실무 config 검증 표준 (이 노트는 원리를 보려고 손으로 구현)
+- RFC 8949 "Concise Binary Object Representation (CBOR)" — MCU용 config·로그 직렬화 (H1과 연결)
+- RFC 8032 "Edwards-Curve Digital Signature Algorithm (EdDSA)" — Ed25519 서명

@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>18. 인터럽트 잠금 RAII 가드</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="problems/18_raii_guard">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">코딩 문제 · 18. 인터럽트 잠금 RAII 가드</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">코딩 문제 · Problems</div>
+      <h1>18. 인터럽트 잠금 RAII 가드</h1>
+      <div class="meta"><span>7분 읽기</span><span>101줄</span><span>7개 절</span></div>
+    </div>
+    <blockquote><p><strong>주제</strong>: RAII · critical section · 복사·이동 삭제 · <code>-fno-exceptions</code> · <strong>난이도</strong>: 기초 · <strong>목표 시간</strong>: 20분 <strong>해설은 보지 말 것</strong>: 먼저 <code>starters/18_raii_guard.cpp</code>를 채워 <code>make run N=18</code>으로 통과시킨다.</p></blockquote>
+<h2 id="면접관의-문장">면접관의 문장<a class="anchor" href="#면접관의-문장" aria-label="link">#</a></h2>
+<p>"Here's a bug we actually shipped. Somebody added an early <code>return</code> in the middle of a critical section and forgot the matching <code>irq_unlock()</code>. The device ran for six hours and then stopped responding to the button, because interrupts were off the whole time.</p>
+<p>We build this firmware as C++ with <code>-fno-exceptions -fno-rtti</code>. Show me the RAII version. A guard object that disables interrupts in its constructor and restores the previous state in its destructor.</p>
+<p>I care about three things. One: it has to restore the previous PRIMASK, not blindly enable interrupts — nesting has to work. Two: nobody should be able to copy it, move it, or store it in a container. Three: it must not be bigger or slower than the C version. Then use it in a couple of functions that share state with an ISR."</p>
+<h2 id="요구사항">요구사항<a class="anchor" href="#요구사항" aria-label="link">#</a></h2>
+<ol><li><code>IrqLock</code> 클래스를 만든다. 생성자는 현재 PRIMASK를 저장하고 인터럽트를 끈다. 소멸자는 저장한 값을 그대로 복원한다.</li><li>코어 접근은 주어진 <code>core::get_primask()</code>, <code>core::disable_irq()</code>, <code>core::set_primask(v)</code> 세 함수만 쓴다. PRIMASK는 <code>0</code> = 인터럽트 허용, <code>1</code> = 마스킹이다.</li><li>중첩이 동작해야 한다. 이미 잠긴 구간에서 가드를 또 만들면, 안쪽 가드의 <code>saved()</code>는 <code>1</code>이고, 안쪽 가드가 파괴될 때 PRIMASK는 <code>1</code>로 남아야 한다. 가장 바깥 가드가 파괴될 때만 <code>0</code>이 된다.</li><li>복사 생성, 복사 대입, 이동 생성, 이동 대입을 <strong>모두</strong> <code>= delete</code> 한다. 네 가지가 전부 막혔다는 것을 <code>std::is_copy_constructible</code> 계열로 확인한다.</li><li><code>sizeof(IrqLock) == sizeof(uint32_t)</code>여야 한다. 플래그나 포인터를 추가하면 안 된다.</li><li><code>try_consume(n)</code>: <code>g_credits</code>가 <code>n</code> 이상이면 <code>n</code>만큼 빼고 <code>g_consumed</code>에 더한 뒤 <code>true</code>. <code>n == 0</code>이면 아무것도 하지 않고 <code>true</code>. 모자라면 <code>false</code>. 세 경로 모두에서 소멸자가 정확히 한 번만 돌아야 한다.</li><li><code>produce(n)</code>: <code>g_credits</code>에 <code>n</code>을 더한다.</li><li><code>snapshot(&amp;c, &amp;d)</code>: <code>g_credits</code>와 <code>g_consumed</code>를 <strong>같은 잠금 구간 안에서</strong> 함께 읽는다. 두 값의 합이 항상 생산 총량과 같아야 한다.</li><li><code>nested_producer(&amp;inner_saved)</code>: 가드를 중첩해서 잡고, 안쪽 가드의 <code>saved()</code>를 내보낸다. 안쪽 블록과 그 뒤 두 지점에서 각각 <code>g_credits</code>를 1씩 올린다.</li><li>생성자 호출 횟수(<code>core::g_disable_calls</code>)와 소멸자 호출 횟수(<code>core::g_restore_calls</code>)는 어떤 실행 경로에서도 정확히 같아야 한다.</li></ol>
+<h2 id="인터페이스">인터페이스<a class="anchor" href="#인터페이스" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">cpp</span><pre><code>class IrqLock {
+public:
+    IrqLock() noexcept;
+    ~IrqLock();
+    /* 복사 4종 삭제 */
+    std::uint32_t saved() const noexcept;
+private:
+    std::uint32_t saved_;
+};
+
+static bool try_consume(std::uint32_t n);
+static void produce(std::uint32_t n);
+static void snapshot(std::uint32_t *credits, std::uint32_t *consumed);
+static void nested_producer(std::uint32_t *inner_saved_out);</code></pre></figure>
+<h2 id="제약">제약<a class="anchor" href="#제약" aria-label="link">#</a></h2>
+<ul><li>C++17. 힙 금지(<code>new</code>, <code>malloc</code>, STL 컨테이너 금지). 예외와 RTTI가 꺼진 상태를 가정한다.</li><li>허용 헤더: <code>&lt;cstdint&gt; &lt;cstddef&gt; &lt;new&gt; &lt;type_traits&gt; &lt;cassert&gt; &lt;cstdio&gt; &lt;utility&gt;</code>.</li><li>소멸자에서 실패를 알릴 방법이 없다. 소멸자는 반드시 성공하는 연산만 해야 한다.</li><li>가드는 스코프 안에 이름 있는 지역 변수로만 만든다. 임시 객체(<code>IrqLock();</code>)로 만들면 그 자리에서 바로 파괴되므로 아무 구간도 보호하지 못한다.</li><li><code>c++ -std=c++17 -Wall -Wextra -O2 -g -fno-exceptions -fno-rtti</code>에서 경고 0개.</li></ul>
+<h2 id="예시-동작">예시 동작<a class="anchor" href="#예시-동작" aria-label="link">#</a></h2>
+<figure class="code"><pre><code>core::g_primask = 0
+{
+    IrqLock a;            // a.saved() == 0,  PRIMASK -&gt; 1
+    {
+        IrqLock b;        // b.saved() == 1,  PRIMASK -&gt; 1 (이미 1)
+        {
+            IrqLock c;    // c.saved() == 1
+        }                 // ~c: PRIMASK &lt;- 1   (여전히 잠김)
+    }                     // ~b: PRIMASK &lt;- 1   (여전히 잠김)
+}                         // ~a: PRIMASK &lt;- 0   (여기서만 열린다)
+
+disable_calls == 3, restore_calls == 3</code></pre></figure>
+<p><code>try_consume</code>의 세 경로:</p>
+<figure class="code"><pre><code>g_credits = 6, g_consumed = 4
+try_consume(0)  -&gt; true    (아무 변화 없음, PRIMASK 복원됨)
+try_consume(9)  -&gt; false   (부족, 아무 변화 없음, PRIMASK 복원됨)
+try_consume(4)  -&gt; true    (credits 2, consumed 8, PRIMASK 복원됨)</code></pre></figure>
+<h2 id="스스로-점검할-질문">스스로 점검할 질문<a class="anchor" href="#스스로-점검할-질문" aria-label="link">#</a></h2>
+<ol><li>소멸자가 <code>core::set_primask(0)</code>을 하드코딩하면 어떤 중첩 시나리오에서 깨지는가? 그 버그는 몇 시간 뒤에 어떤 증상으로 보이는가?</li><li>이동 생성자를 허용하려면 무엇이 추가로 필요하고, 가드의 크기와 소멸자는 어떻게 변하는가?</li><li>이 가드를 ISR 안에서 만들어도 되는가? ISR 진입 시점의 PRIMASK는 무엇인가?</li><li><code>IrqLock lock;</code> 대신 <code>IrqLock();</code>이라고 쓰면 생성된 기계어가 어떻게 달라지는가?</li><li>가드가 잠그는 구간이 200 사이클이라면, 시스템의 최악 인터럽트 지연(latency)에 얼마가 더해지는가?</li><li><code>-O2</code>에서 이 클래스가 C 버전과 같은 기계어가 된다고 말할 근거는 무엇인가? 어떻게 확인하는가?</li><li>PRIMASK 대신 BASEPRI를 쓰는 가드는 무엇이 달라지고, 왜 그 편이 나은 경우가 있는가?</li><li>예외가 켜져 있다면 이 가드의 의미가 어떻게 달라지는가? 소멸자에 <code>noexcept</code>가 붙는 이유는?</li></ol>
+<h2 id="follow-up-면접관이-이어서-물을-것">follow-up (면접관이 이어서 물을 것)<a class="anchor" href="#follow-up-면접관이-이어서-물을-것" aria-label="link">#</a></h2>
+<ol><li>"Now I want the same guard, but for a mutex in an RTOS. What changes?"</li><li>"How do you stop somebody from holding this lock for 10 milliseconds?"</li><li>"Can you write a guard that takes the lock only if it's free, and tells the caller whether it got it?"</li><li>"Our coding standard forbids C++ in ISRs. Does that rule make sense to you?"</li><li>"Show me the same critical section without disabling interrupts at all."</li></ol>
+<hr>
+<p><strong>해설</strong>: <a href="../drills/L3_embedded_cpp.html">notes/L3_embedded_cpp.md</a> §2, §3 · <strong>답안</strong>: <code>solutions/18_raii_guard.cpp</code></p>
+    <div class="nav"><a class="prev" href="17_timer_wheel.html"><span class="dir">← 이전</span><span class="nm">17. 소프트웨어 타이머와 wrap-safe 시간 비교</span></a><a class="next" href="19_static_vector.html"><span class="dir">다음 →</span><span class="nm">19. 힙 없는 고정 용량 컨테이너 static_vector&lt;T, N&gt;</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#면접관의-문장">면접관의 문장</a></li><li class="l2"><a href="#요구사항">요구사항</a></li><li class="l2"><a href="#인터페이스">인터페이스</a></li><li class="l2"><a href="#제약">제약</a></li><li class="l2"><a href="#예시-동작">예시 동작</a></li><li class="l2"><a href="#스스로-점검할-질문">스스로 점검할 질문</a></li><li class="l2"><a href="#follow-up-면접관이-이어서-물을-것">follow-up (면접관이 이어서 물을 것)</a></li></ol></aside>
+</div><script>
+const KEY='hark_notes_read_v1', TKEY='hark_notes_theme', CKEY='hark_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

@@ -1,0 +1,1408 @@
+# F4. Qualcomm 스택 — QNN(AI Engine Direct), HTP, SNPE, AI Hub, Genie — PyTorch 모델을 Hexagon NPU까지 데려가는 길
+
+> **이 노트를 다 읽으면**: Snapdragon의 하드웨어(CPU·GPU·Hexagon NPU·센서 허브)와 Qualcomm 소프트웨어 이름들(QAIRT, QNN, SNPE, ORT QNN EP, TFLite delegate, AI Hub, Genie)을 한 장의 지도로 설명할 수 있다 · QNN의 backend·converter·model library·**context binary**·양자화 encoding이 각각 무엇이고 왜 있는지 말할 수 있다 · QNN에 넘길 산출물(static shape ONNX, QNN용 QDQ 양자화 모델, 사전 점검 리포트, raw 입력·golden 출력)을 직접 만들고 float 대비 수치를 검증할 수 있다 · 하드웨어 없이 AI Hub로 실기기 프로파일을 받는 흐름과, QNN bring-up에서 버전 매트릭스·CPU fallback·init 시간을 다루는 법을 설명할 수 있다
+> **JD 연결**: JD가 런타임 이름으로 **"QNN"** 을 직접 언급한다 · "Work with platform vendors to bring up toolchains, SDKs and new accelerator" · "Deploying workloads on NPUs or specialized accelerators" · "Evaluate and select silicon platforms" — study_prep_list **F4** 행: QNN (AI Engine Direct): backend(CPU/GPU/HTP), context binary / SNPE(구세대), Hexagon SDK / Qualcomm AI Hub (클라우드 실기기 컴파일·프로파일) / Genie (온디바이스 LLM). 함께 닿는 행: **F5**(ONNX/ORT), **F8**(벤더 SDK bring-up), **M1**(평가 기준표), **C2·C8**(PTQ·검증), **E4·E5·E8**(Hexagon·NPU·FastRPC)
+> **Don 기준 난이도**: 벤더 SDK·툴체인 bring-up, 버전 매트릭스 관리, "도구가 만든 산출물을 열어서 확인하는 습관", golden 대비 검증은 이미 강함 / Qualcomm 고유의 이름과 파일 종류, QNN 툴 체인 순서, HTP가 원하는 모델 모양(static shape, QDQ, 8/16-bit), AI Hub 사용법은 새로 배운다
+> **선행 노트**: C2(ORT static QDQ 양자화, 5절), C6(graph 최적화·static shape 9절·CPU fallback 12절), C8(SQNR·레이어별 diff), E4(Hexagon HVX/HMX/VTCM, 6절), E5(NPU 컴파일러·bring-up, 6·8절), E8(FastRPC·IPC, 3절). 병행 노트: F1(TFLite/LiteRT), F3(llama.cpp), F5(ONNX/ORT), F8(벤더 SDK bring-up 절차)
+
+---
+
+## 0. 큰 그림 — 왜 이 스택을 알아야 하나
+
+### 0.1 Hark와 Qualcomm — 단서 정리
+
+먼저 분명히 해 둘 것: 아래는 **단서**이지 사실이 아니다.
+
+- JD가 런타임 이름으로 "QNN"을 직접 적었다. 이건 확실한 신호다 — Qualcomm 칩 위에서 모델을 돌리는 일이 업무에 들어 있다는 뜻이다.
+- Hark는 Qualcomm Ventures의 투자를 받은 것으로 알려져 있고, 채용 공고들에 Qualcomm 칩셋을 암시하는 문구가 있다. **단서일 뿐** 1세대 기기가 어떤 칩을 쓰는지는 공개되지 않았다.
+- 그래서 이 노트는 "예를 들어 Hark 같은 웨어러블이 Snapdragon 계열 SoC를 쓴다면"이라는 가정으로 예시를 든다.
+
+### 0.2 이 노트의 위치
+
+E4에서 Hexagon의 하드웨어(scalar VLIW, HVX, HMX, VTCM)를 봤고, E5에서 NPU 컴파일러가 하는 일(partition → 양자화 제약 → tiling → command stream)을 일반론으로 봤다. F4는 그 일반론에 **Qualcomm이 붙인 실제 이름**을 붙이는 노트다. 펌웨어 비유로 말하면:
+
+| 펌웨어 세계 | Qualcomm ML 세계 |
+|---|---|
+| 칩 벤더의 SDK + 툴체인 (컴파일러, 링커, 플래시 툴) | QAIRT SDK 안의 QNN 툴 (converter, model-lib-generator, context-binary-generator, net-run) |
+| HAL 드라이버를 IP 블록별로 고른다 | QNN **backend** 라이브러리를 엔진별로 고른다 (CPU / GPU / HTP) |
+| 소스 → 오브젝트 → 링크된 이미지 → 플래시 | 모델 → `model.cpp`·`model.bin` → `libmodel.so` → **context binary** |
+| 부팅 시 init 시퀀스를 줄이려고 캘리브레이션 값을 미리 구워 둔다 | 기기에서 그래프 준비(prepare)를 하지 않으려고 context binary를 미리 만든다 |
+| EVB 없이 벤더 원격 랩에서 측정 | Qualcomm AI Hub — 클라우드에 연결된 실기기에서 compile·profile |
+
+### 0.3 지도 한 장
+
+```svg
+<svg viewBox="0 0 680 410" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="f4a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs> <rect x="10" y="30" width="530" height="40" rx="6" fill="#888" fill-opacity="0.15" stroke="#888"/> <text x="275" y="55" font-size="13" text-anchor="middle">PyTorch / TensorFlow 모델 → ONNX 또는 TFLite 파일</text> <rect x="10" y="95" width="125" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="#4a7bd0"/> <text x="72" y="114" font-size="12" text-anchor="middle">ONNX Runtime</text><text x="72" y="130" font-size="12" text-anchor="middle">QNN EP</text> <rect x="145" y="95" width="125" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="#4a7bd0"/>
+<text x="207" y="114" font-size="12" text-anchor="middle">TFLite / LiteRT</text><text x="207" y="130" font-size="12" text-anchor="middle">QNN delegate</text> <rect x="280" y="95" width="125" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="#4a7bd0"/> <text x="342" y="114" font-size="12" text-anchor="middle">Genie</text><text x="342" y="130" font-size="12" text-anchor="middle">(LLM 런타임)</text> <rect x="415" y="95" width="125" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="#4a7bd0"/> <text x="477" y="114" font-size="12" text-anchor="middle">QNN C API 직접</text><text x="477" y="130" font-size="12" text-anchor="middle">(앱/서비스 C++)</text> <rect x="10" y="165" width="530" height="54" rx="6" fill="#e08a3c" fill-opacity="0.15" stroke="#e08a3c"/>
+<text x="275" y="187" font-size="13" text-anchor="middle">QAIRT SDK = QNN (AI Engine Direct) + SNPE (구세대) + 툴</text> <text x="275" y="207" font-size="12" text-anchor="middle">converter · model-lib-generator · context-binary-generator · net-run · profile-viewer</text> <rect x="10" y="245" width="125" height="44" rx="6" fill="#3f9a6b" fill-opacity="0.15" stroke="#3f9a6b"/> <text x="72" y="271" font-size="12" text-anchor="middle">libQnnCpu.so</text> <rect x="145" y="245" width="125" height="44" rx="6" fill="#3f9a6b" fill-opacity="0.15" stroke="#3f9a6b"/> <text x="207" y="271" font-size="12" text-anchor="middle">libQnnGpu.so</text>
+<rect x="280" y="245" width="125" height="44" rx="6" fill="#3f9a6b" fill-opacity="0.15" stroke="#3f9a6b"/> <text x="342" y="264" font-size="12" text-anchor="middle">libQnnHtp.so</text><text x="342" y="280" font-size="12" text-anchor="middle">+ Stub / Skel</text> <rect x="415" y="245" width="125" height="44" rx="6" fill="#888" fill-opacity="0.1" stroke="#888" stroke-dasharray="4 3"/> <text x="477" y="264" font-size="12" text-anchor="middle">센서 허브 쪽은</text><text x="477" y="280" font-size="12" text-anchor="middle">별도 SDK·펌웨어</text> <rect x="10" y="325" width="125" height="56" rx="6" fill="none" stroke="currentColor"/> <text x="72" y="348" font-size="12" text-anchor="middle">Kryo / Oryon</text><text x="72" y="366" font-size="12" text-anchor="middle">CPU</text>
+<rect x="145" y="325" width="125" height="56" rx="6" fill="none" stroke="currentColor"/> <text x="207" y="348" font-size="12" text-anchor="middle">Adreno</text><text x="207" y="366" font-size="12" text-anchor="middle">GPU</text> <rect x="280" y="325" width="125" height="56" rx="6" fill="none" stroke="currentColor" stroke-width="2"/> <text x="342" y="348" font-size="12" text-anchor="middle">Hexagon NPU</text><text x="342" y="366" font-size="12" text-anchor="middle">HVX · HMX · VTCM</text> <rect x="415" y="325" width="125" height="56" rx="6" fill="none" stroke="currentColor"/> <text x="477" y="348" font-size="12" text-anchor="middle">Sensing hub</text><text x="477" y="366" font-size="12" text-anchor="middle">(always-on)</text>
+<line x1="275" y1="70" x2="275" y2="93" stroke="currentColor" marker-end="url(#f4a)"/> <line x1="275" y1="139" x2="275" y2="163" stroke="currentColor" marker-end="url(#f4a)"/> <line x1="72" y1="219" x2="72" y2="243" stroke="currentColor" marker-end="url(#f4a)"/> <line x1="207" y1="219" x2="207" y2="243" stroke="currentColor" marker-end="url(#f4a)"/> <line x1="342" y1="219" x2="342" y2="243" stroke="currentColor" marker-end="url(#f4a)"/> <line x1="72" y1="289" x2="72" y2="323" stroke="currentColor" marker-end="url(#f4a)"/>
+<line x1="207" y1="289" x2="207" y2="323" stroke="currentColor" marker-end="url(#f4a)"/> <line x1="342" y1="289" x2="342" y2="323" stroke="#d0564a" stroke-width="2" marker-end="url(#f4a)"/> <text x="350" y="311" font-size="12">FastRPC</text> <rect x="560" y="30" width="110" height="351" rx="8" fill="#d0564a" fill-opacity="0.1" stroke="#d0564a"/> <text x="615" y="55" font-size="13" text-anchor="middle">Qualcomm</text><text x="615" y="72" font-size="13" text-anchor="middle">AI Hub</text> <text x="615" y="105" font-size="12" text-anchor="middle">클라우드</text>
+<text x="615" y="135" font-size="12" text-anchor="middle">compile</text><text x="615" y="155" font-size="12" text-anchor="middle">profile</text><text x="615" y="175" font-size="12" text-anchor="middle">inference</text> <text x="615" y="215" font-size="12" text-anchor="middle">실기기 팜</text><text x="615" y="232" font-size="12" text-anchor="middle">(폰 · IoT 보드)</text> <text x="615" y="275" font-size="12" text-anchor="middle">AI Hub Models</text><text x="615" y="292" font-size="12" text-anchor="middle">(최적화 레시피)</text> <line x1="540" y1="50" x2="558" y2="50" stroke="currentColor" marker-end="url(#f4a)"/> <line x1="558" y1="200" x2="542" y2="200" stroke="currentColor" marker-end="url(#f4a)"/> <text x="10" y="402" font-size="12">공개 문서 기준의 단순화. 이름·묶음 구성은 SDK 버전에 따라 다르다.</text>
+</svg>
+```
+
+그림 1 — Qualcomm AI 소프트웨어 지도. 위에서부터 모델 파일 → 통합 경로(ORT QNN EP, TFLite delegate, Genie, QNN API 직접) → QAIRT SDK(QNN 툴과 런타임) → backend 라이브러리 → 실제 엔진. NPU로 가는 길(빨간 화살표)은 CPU에서 Hexagon으로 넘어가는 FastRPC를 지난다. 오른쪽 AI Hub는 이 전체를 클라우드의 실기기에서 대신 돌려 준다.
+
+말로 하면: **앱이 어떤 프레임워크를 쓰든, Hexagon NPU에 닿는 마지막 길은 거의 QNN HTP backend다.** ORT QNN EP도, TFLite QNN delegate도, Genie도 결국 QNN을 부른다(공식 문서 기준, 버전에 따라 다름).
+
+### 0.4 이 노트에서 실제로 돌린 것과 돌리지 않은 것
+
+QNN SDK와 AI Hub는 Qualcomm 계정(AI Hub는 API token)이 필요하고, 이 노트를 쓴 환경(macOS, Apple Silicon)에는 둘 다 없다. 그래서 두 종류의 코드가 섞여 있다.
+
+| 종류 | 표시 | 내용 |
+|---|---|---|
+| 실제로 돌린 코드 | 출력이 붙어 있음 | PyTorch → static ONNX, ORT의 QNN용 QDQ 양자화, 사전 점검기, float 대비 수치, 레이어별 SQNR, 핸드오프 패키지, C로 dequant |
+| 돌리지 않은 코드 | "실행하지 않음 (계정/SDK 필요)" | `qnn-onnx-converter` 등 QNN 툴, `qai_hub` 클라이언트, ORT QNN EP 옵션. 공식 문서에 나오는 이름만 쓰고, 플래그는 버전마다 다르니 `--help`로 확인할 것 |
+
+---
+
+## 1. 이름 정리 — Qualcomm AI 소프트웨어 사전
+
+Qualcomm 문서를 처음 읽으면 이름이 너무 많아서 길을 잃는다. 이 절은 이름 하나에 한 줄씩 붙인다.
+
+### 1.1 하드웨어 이름
+
+| 이름 | 무엇 | 메모 |
+|---|---|---|
+| Snapdragon | Qualcomm의 SoC 브랜드 | 폰(8 Gen x, 8 Elite), XR(XR2), 웨어러블(W5), AR 안경(AR1/AR2) 등 |
+| QCS / QCM | IoT·산업용 SoC 계열 이름 | 예: QCS6490, QCS8550. 웨어러블보다는 카메라·로봇·게이트웨이 |
+| Kryo / Oryon | CPU 코어 이름 | Oryon은 최근 세대의 자체 설계 코어 |
+| Adreno | GPU | OpenCL·Vulkan. QNN GPU backend의 대상 |
+| Hexagon | DSP/NPU 아키텍처 | 버전 이름 v68, v69, v73, v75, v79 등. E4 6절 |
+| HTP | Hexagon Tensor Processor | QNN에서 NPU 쪽 Hexagon(HVX + HMX)을 가리키는 backend 이름 |
+| HVX / HMX / VTCM | 벡터 확장 / 행렬 확장 / 벡터용 TCM | E4 6.2~6.4절 |
+| Sensing hub | always-on 저전력 영역 | 센서 융합·저전력 오디오. ML은 별도 경로 (E8 1절) |
+
+Hexagon 버전과 폰 칩의 대응은 공개 자료에서 대략 v69 ≈ 8 Gen 1, v73 ≈ 8 Gen 2, v75 ≈ 8 Gen 3, v79 ≈ 8 Elite로 알려져 있다. **확인 필요** — 실제 작업에서는 대상 칩의 문서나 AI Hub 기기 속성으로 확인한다. 이 번호가 중요한 이유는 4.4절의 HTP Stub/Skel 라이브러리 이름과 context binary 호환성이 이 번호에 묶이기 때문이다.
+
+### 1.2 소프트웨어 이름
+
+| 이름 | 무엇 | 지금의 위치 (공식 문서 기준, 버전에 따라 다름) |
+|---|---|---|
+| QNN = Qualcomm AI Engine Direct | 저수준 NN 런타임 + 툴 | 새 개발의 중심. backend 라이브러리를 골라서 같은 API로 CPU/GPU/HTP 실행 |
+| SNPE = Snapdragon Neural Processing Engine | 이전 세대 런타임 | DLC 파일 포맷. 여전히 배포되지만 새 기능은 QNN 쪽으로 가는 흐름으로 알려짐 |
+| QAIRT = Qualcomm AI Runtime | QNN과 SNPE를 한 패키지로 묶은 SDK 이름 | 최근 배포 이름. 문서·다운로드에서 "QAIRT SDK"로 보인다 |
+| Hexagon SDK | DSP에 직접 C/C++ 코드를 올리는 SDK | 신경망이 아닌 신호처리 코드, FastRPC, HVX intrinsic (E4 6.5절) |
+| ONNX Runtime QNN EP | ORT의 execution provider | `QNNExecutionProvider`. QDQ ONNX를 받아 QNN으로 실행 |
+| TFLite(LiteRT) QNN delegate | TFLite delegate | TFLite 모델의 일부/전체를 QNN으로 위임 (F1). 배포 형태는 버전 확인 |
+| Qualcomm AI Hub | 클라우드 서비스 | 모델 업로드 → 대상 기기용 compile → 실기기 profile/inference |
+| AI Hub Models | 최적화된 모델 레시피 모음 | `qai-hub-models` Python 패키지, GitHub 저장소 |
+| Genie | QAIRT 안의 생성형 AI(LLM) 런타임 | 토크나이저·샘플링·KV-cache 관리가 붙은 LLM 실행기로 소개됨 (9절) |
+| AIMET | Qualcomm의 양자화·압축 라이브러리 | 오픈소스. 고급 PTQ/QAT, encoding 파일 생성 |
+
+### 1.3 언제 무엇을 쓰나
+
+| 상황 | 흔한 선택 | 이유 |
+|---|---|---|
+| Android 앱에서 ONNX 모델을 빨리 NPU로 | ORT + QNN EP | 그래프 분할·CPU fallback을 ORT가 처리. 코드가 가장 적다 |
+| 이미 TFLite 파이프라인이 있다 | TFLite + QNN delegate | 기존 앱 구조 유지 |
+| 지연·메모리를 끝까지 짜내야 한다, 서비스/데몬 형태 | QNN C API 직접 + context binary | 런타임 오버헤드 최소, 버퍼·스레드 직접 제어 |
+| 온디바이스 LLM | Genie (또는 QNN 직접) | KV-cache·토큰 루프를 런타임이 관리 |
+| 칩을 사기 전에 평가 | AI Hub | 실기기 수치를 클라우드로 받음 (8절) |
+| 오디오 front-end, 필터, FFT | Hexagon SDK (aDSP) | NN이 아니라 신호처리 코드 |
+
+말로 하면: **"모델은 QNN, 신호처리는 Hexagon SDK, 평가는 AI Hub."** 이 한 줄만 기억해도 면접에서 이름이 섞이지 않는다.
+
+---
+
+## 2. QNN 핵심 개념 — backend, graph, op package, context
+
+### 2.1 Backend — 엔진마다 라이브러리 하나
+
+QNN의 설계 핵심은 **하나의 API, 여러 backend**다. 앱은 같은 함수(그래프 만들기, 실행하기)를 부르고, 어떤 엔진에서 돌지는 어떤 backend `.so`를 로드했는지가 정한다.
+
+| Backend 라이브러리 (Android/Linux 이름) | 엔진 | 지원 정밀도 (대략, 버전 확인) | 용도 |
+|---|---|---|---|
+| `libQnnCpu.so` | CPU | float32 | 레퍼런스, 디버깅 |
+| `libQnnGpu.so` | Adreno GPU | float32/float16 | float 모델을 빠르게 |
+| `libQnnHtp.so` | Hexagon NPU (HTP) | int8/int16 양자화, 최근 세대는 fp16도 | **배포의 주력** |
+| `libQnnDsp.so` | HMX 없는 옛 Hexagon DSP | 양자화 | 구세대 칩 |
+| `libQnnSaver.so` | 실행 대신 기록 | — | API 호출을 저장해 재현·디버깅 |
+
+Windows on Snapdragon에서는 같은 이름의 `.dll`이다. HTP backend는 혼자 동작하지 않는다: CPU 쪽 `libQnnHtp.so`가 Hexagon 쪽에서 도는 코드(**Skel** 라이브러리, 예: `libQnnHtpV75Skel.so` 같은 Hexagon 버전별 이름)를 **Stub** 라이브러리와 FastRPC를 통해 부른다. 이 Stub/Skel 이름에 Hexagon 버전이 박혀 있어서, 칩과 맞지 않는 Skel을 올리면 로드가 실패한다 (정확한 파일 이름은 SDK의 lib 폴더에서 확인).
+
+Don 연결: SSD 펌웨어에서 같은 FTL 코드가 컨트롤러 세대마다 다른 HAL을 링크했던 것과 같은 구조다. 상위 로직은 그대로, 하위 라이브러리만 교체.
+
+### 2.2 Graph, tensor, op, op package
+
+- **Graph**: QNN 안의 모델 표현. 노드(op)와 tensor로 이루어진다 (C6 1절의 dataflow graph와 같은 개념).
+- **Op**: QNN이 정의한 연산 이름(예: Conv2d, FullyConnected, ElementWiseAdd 류). ONNX op와 1:1이 아닐 수 있어서 converter가 번역한다.
+- **Op package**: QNN이 기본 제공하지 않는 op를 사용자가 직접 구현해서 붙이는 플러그인. HTP용 op package는 Hexagon 코드(HVX)를 직접 써야 해서 비용이 크다 — "unsupported op를 만나면 먼저 그래프를 바꾸고, op package는 최후의 수단"이 보통의 순서다(C6 8절).
+- **Tensor 종류**: 그래프 입력(APP_WRITE), 출력(APP_READ), 상수(STATIC = 가중치), 중간값(NATIVE) 같은 구분이 있다. 이름은 QNN 헤더 기준, 버전 확인.
+
+### 2.3 Converter가 만드는 것 — 모델이 "C++ 소스"가 된다
+
+QNN converter의 출력이 처음엔 이상해 보인다. 모델을 바이너리 파일 하나로 만들지 않고, **C++ 소스 + 가중치 바이너리**로 만든다.
+
+```
+model.onnx ──qnn-onnx-converter──▶ model.cpp   (그래프를 만드는 QNN API 호출 코드: "op 추가, tensor 연결")
+                                    model.bin   (가중치 원본 바이트)
+                                    model_net.json (그래프 설명, 디버깅용 — 버전에 따라 다름)
+
+model.cpp + model.bin ──qnn-model-lib-generator──▶ libmodel.so  (대상 아키텍처별: aarch64-android, x86_64-linux 등)
+```
+
+말로 하면: `model.cpp`는 "그래프를 조립하는 프로그램"이고, `libmodel.so`는 그 프로그램을 컴파일한 것이다. 실행할 때 런타임이 이 `.so`를 로드해서 그래프를 조립하고, backend가 그 그래프를 자기 하드웨어에 맞게 **준비(prepare/finalize)** 한다.
+
+### 2.4 Context binary — "준비 결과"를 직렬화한 것
+
+HTP에서 그래프 준비는 가볍지 않다. 컴파일러가 op를 HMX/HVX 커널로 lowering하고, tiling을 정하고, VTCM 배치와 DMA 스케줄을 짜고, 메모리 계획을 세운다(E5 6절, C6 10절). 이것을 **기기에서 앱이 시작할 때마다** 하면 init 시간이 길어진다.
+
+**Context binary**는 이 준비가 끝난 상태를 파일로 직렬화한 것이다.
+
+- 만드는 법: `qnn-context-binary-generator`가 `libmodel.so`와 `libQnnHtp.so`를 받아서 `.bin` 파일을 만든다. 호스트(x86 Linux)에서 오프라인으로 할 수 있다(공식 문서 기준, 버전에 따라 다름).
+- 쓰는 법: 기기에서는 모델 라이브러리 대신 context binary를 로드(retrieve)해서 바로 실행한다.
+- 대가: **특정 SoC·Hexagon 버전·SDK 버전에 묶인다.** 다른 칩이나 크게 다른 SDK 버전에서는 로드가 실패할 수 있다. 그래서 context binary는 "칩별 빌드 산출물"로 관리해야 한다.
+
+```svg
+<svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="20" font-size="13">앱 시작부터 첫 결과까지 — 개념도 (길이는 비율 예시, 실측 아님)</text> <text x="10" y="62" font-size="12">모델 lib 경로</text> <rect x="130" y="45" width="60" height="28" fill="#888" fill-opacity="0.5"/> <rect x="190" y="45" width="300" height="28" fill="#d0564a" fill-opacity="0.6"/> <rect x="490" y="45" width="40" height="28" fill="#3f9a6b" fill-opacity="0.7"/> <text x="160" y="64" font-size="12" text-anchor="middle">로드</text>
+<text x="340" y="64" font-size="12" text-anchor="middle">기기에서 그래프 준비 (compile · tiling · VTCM 계획)</text> <text x="510" y="64" font-size="12" text-anchor="middle">실행</text> <text x="10" y="122" font-size="12">context binary</text> <rect x="130" y="105" width="60" height="28" fill="#888" fill-opacity="0.5"/> <rect x="190" y="105" width="50" height="28" fill="#4a7bd0" fill-opacity="0.6"/> <rect x="240" y="105" width="40" height="28" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="160" y="124" font-size="12" text-anchor="middle">로드</text> <text x="215" y="124" font-size="12" text-anchor="middle">복원</text> <text x="260" y="124" font-size="12" text-anchor="middle">실행</text> <line x1="130" y1="160" x2="660" y2="160" stroke="currentColor"/> <text x="130" y="178" font-size="12">t = 0</text><text x="660" y="178" font-size="12" text-anchor="end">시간 →</text> <rect x="190" y="195" width="300" height="10" fill="#d0564a" fill-opacity="0.6"/>
+<text x="500" y="205" font-size="12">← 호스트에서 미리 처리</text> <text x="10" y="235" font-size="12">대가: binary가 특정 칩(Hexagon 버전)·SDK 버전에 묶인다. 칩별로 빌드·버전 관리가 필요하다.</text>
+</svg>
+```
+
+그림 2 — 온라인 준비 vs context binary. 빨간 구간(그래프 준비)을 호스트에서 오프라인으로 해서 파일에 담아 두면, 기기는 로드·복원만 하고 바로 실행한다. 길이는 개념을 보여 주는 비율이지 실측이 아니다. 실제 차이는 모델 크기·칩·SDK에 따라 다르다.
+
+Don 연결: SSD 펌웨어에서 부팅마다 NAND 특성 테이블을 다시 계산하지 않고 공장에서 계산한 값을 구워 넣던 것, 또는 FPGA bitstream을 미리 합성해 두는 것과 같은 판단이다. "느린 준비를 빌드 타임으로 옮기고, 대신 대상 하드웨어에 묶인다."
+
+ORT QNN EP에도 같은 아이디어가 있다. ORT는 **EPContext** 모델이라는 형식으로 "QNN context binary를 품은 ONNX 파일"을 만들 수 있고, 세션 설정 키 `ep.context_enable`, `ep.context_file_path`, `ep.context_embed_mode`로 제어한다. 이 키들은 이 노트 환경의 ORT 1.19.2 바이너리 안에 문자열로 존재함을 확인했다(QNN EP 자체는 없지만 공통 세션 설정 키다). 7.3절에서 ORT CPU에서 같은 종류의 trade-off를 직접 잰다.
+
+### 2.5 양자화 encoding — QNN이 읽는 scale/offset
+
+HTP는 양자화된 정수 연산이 주력이다. QNN에서 tensor 하나의 양자화 정보를 **encoding**이라고 부르고, 핵심은 scale과 offset이다.
+
+```
+QNN 문서식 표기 :  real = scale × (q + offset)
+ONNX QDQ 표기   :  real = scale × (q − zero_point)
+따라서          :  offset = − zero_point
+```
+
+말로 하면: 둘은 같은 식인데 부호 관례만 다르다. ONNX의 zero_point 98은 QNN 표기로 offset −98이다. 이 부호 하나 때문에 bring-up에서 "출력이 정확히 2×zero_point만큼 밀려 있다" 같은 버그가 나온다(5.6절의 C 예제).
+
+QNN에 양자화 정보를 주는 길은 세 가지다(공식 문서 기준, 버전에 따라 다름).
+
+| 방법 | 어떻게 | 장단점 |
+|---|---|---|
+| QNN converter가 직접 양자화 | `--input_list`로 calibration 입력 목록을 주면 converter가 범위를 재서 encoding을 만든다 | 간단. 대신 양자화 알고리즘 선택지가 제한적 |
+| QDQ ONNX를 넘김 | ORT 양자화 도구나 AIMET으로 Q/DQ가 박힌 ONNX를 만들고, converter가 Q/DQ에서 encoding을 읽는다 | **양자화를 호스트에서 통제·검증 가능** (이 노트의 실습 경로). ORT QNN EP도 이 형식을 기대한다 |
+| Encoding override 파일 | AIMET 등이 만든 encoding JSON을 converter 옵션(`--quantization_overrides`)으로 준다 | 특정 tensor만 16-bit, 특정 범위 강제 등 세밀한 제어 |
+
+정밀도 선택지(HTP 기준, 칩 세대·SDK 버전 확인):
+
+- **A8W8**: activation 8-bit, weight 8-bit. 가장 빠르고 작다. CNN·KWS 같은 작은 모델의 기본값.
+- **A16W8**: activation 16-bit, weight 8-bit. 정확도가 민감한 모델(오디오, transformer의 일부)에서 흔히 쓴다. activation 메모리·대역폭이 2배라 느려진다.
+- **W4A16 류**: LLM에서 weight 4-bit + activation 16-bit (9절).
+- **Per-channel weight**: Conv 가중치를 출력 채널마다 다른 scale로. 대칭(offset 0)이어야 한다는 제약이 흔하다.
+- **FP16**: 최신 세대 HTP는 fp16 실행도 지원한다고 알려져 있다. 양자화가 어려운 모델의 탈출구지만 int8보다 느리고 전력이 크다.
+
+### 2.6 HTP 성능 모드와 전원
+
+HTP는 클럭·전압을 바꾸는 **performance mode(power profile)** 를 가진다. ORT QNN EP 문서에는 `htp_performance_mode` 옵션과 `burst`, `balanced`, `high_performance`, `sustained_high_performance`, `power_saver` 같은 값이 나온다(공식 문서 기준, 버전에 따라 다름 — 정확한 목록은 문서 확인). QNN API 쪽에도 같은 개념의 power config가 있다.
+
+| 모드 성격 | 언제 | 함정 |
+|---|---|---|
+| burst | 사용자가 기다리는 짧은 작업 (버튼 눌러 질문) | 오래 쓰면 열·배터리. 벤치마크에서 이 모드만 보면 과대평가 |
+| sustained high performance | 연속 처리 (실시간 오디오 스트림) | 열 평형에서의 숫자가 진짜 숫자 (M2 지속 조건) |
+| balanced / power saver | 백그라운드, 주기적 추론 | 지연이 늘고, 모드 전환 자체에도 비용 |
+
+Don 연결: RF 칩 통합에서 전력/성능 margin sign-off를 할 때 "어떤 전원 상태에서 잰 숫자인가"를 반드시 묻던 것과 같다. **모든 지연 숫자에는 power mode가 붙어 있어야 한다.**
+
+### 2.7 VTCM과 FastRPC — 보이지 않는 아래층
+
+- **VTCM** (E4 6.4절): HTP 컴파일러가 타일을 올리는 on-chip scratchpad. QNN HTP 설정에는 VTCM 크기를 지정하는 옵션이 있는 것으로 알려져 있다(버전 확인). 여러 모델이 동시에 HTP를 쓰면 VTCM을 나눠 가져야 해서, 단독 실행 벤치마크보다 느려질 수 있다.
+- **FastRPC** (E8 3절): CPU의 `libQnnHtp.so`가 Hexagon의 Skel 코드를 부르는 길. 호출 하나에 고정비가 있으므로 QNN은 "그래프 전체를 한 번에 올려 두고 execute만 반복"하는 구조다. CPU fallback이 섞이면 이 경계를 여러 번 넘게 되어 고정비가 누적된다(6.4절).
+
+### 2.8 QNN API 호출 순서 — 의사코드
+
+앱이 QNN을 직접 쓸 때의 큰 흐름이다. **의사코드 — 컴파일하지 않음.** 함수 이름은 QNN 헤더의 이름 체계(`QnnBackend_`, `QnnContext_`, `QnnGraph_` 접두사)를 따르지만, 실제로는 `QnnInterface_getProviders`로 얻은 함수 테이블을 통해 부르고 인자도 더 많다. 정확한 시그니처는 SDK 헤더 확인.
+
+```c
+/* 의사코드 — 컴파일하지 않음 (계정/SDK 필요). 흐름만 본다. */
+lib = dlopen("libQnnHtp.so");                        /* backend 고르기 = 엔진 고르기 */
+qnn = QnnInterface_getProviders(...)->table;          /* 함수 포인터 테이블 */
+qnn.backendCreate(log, cfg, &backend);                /* HTP 세션 열기 (FastRPC 연결) */
+qnn.deviceCreate(...);  /* 성능 모드 등 디바이스 설정 — 버전별 */
+
+/* 경로 A: context binary (권장 배포 경로) */
+buf = read_file("model.serialized.bin");
+qnn.contextCreateFromBinary(backend, dev, cfg, buf, len, &ctx, prof);
+qnn.graphRetrieve(ctx, "model", &graph);              /* 준비가 끝난 그래프를 꺼냄 */
+
+/* 경로 B: model library (개발 중) — libmodel.so의 compose 함수로 그래프 조립 후 finalize */
+
+for (;;) {                                            /* 실행 루프: 입력 버퍼만 바꿔서 반복 */
+    fill_input(in_tensors);                           /* 전처리 결과를 입력 tensor 버퍼에 */
+    qnn.graphExecute(graph, in_tensors, n_in, out_tensors, n_out, prof, NULL);
+    use_output(out_tensors);                          /* dequant: real = scale × (q + offset) */
+}
+qnn.contextFree(ctx, prof); qnn.backendFree(backend);
+```
+
+말로 하면: **"backend 열기 → context 만들기(가능하면 binary에서) → graph 꺼내기 → execute 반복 → 정리"**. 펌웨어로 치면 "드라이버 init → 펌웨어 이미지 로드 → 큐 생성 → 명령 반복 제출"이다.
+
+---
+
+## 3. 표준 흐름 — PyTorch에서 Hexagon까지
+
+### 3.1 전체 흐름
+
+```svg
+<svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="f4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs> <text x="10" y="22" font-size="13">① 호스트 (로컬 실습 범위: 파란 상자)</text> <rect x="10" y="32" width="150" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0"/> <text x="85" y="53" font-size="12" text-anchor="middle">PyTorch 모델</text><text x="85" y="70" font-size="12" text-anchor="middle">(학습 완료, eval)</text> <rect x="180" y="32" width="150" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0"/> <text x="255" y="53" font-size="12" text-anchor="middle">ONNX (static shape)</text><text x="255" y="70" font-size="12" text-anchor="middle">+ QDQ 양자화 · 점검</text>
+<rect x="350" y="32" width="150" height="50" rx="6" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c"/> <text x="425" y="53" font-size="12" text-anchor="middle">qnn-onnx-converter</text><text x="425" y="70" font-size="12" text-anchor="middle">(+ calib list / overrides)</text> <rect x="520" y="32" width="150" height="50" rx="6" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c"/> <text x="595" y="53" font-size="12" text-anchor="middle">model.cpp</text><text x="595" y="70" font-size="12" text-anchor="middle">model.bin</text> <text x="10" y="122" font-size="13">② 호스트: 컴파일 · 오프라인 준비</text> <rect x="10" y="132" width="150" height="50" rx="6" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c"/>
+<text x="85" y="153" font-size="12" text-anchor="middle">qnn-model-lib-</text><text x="85" y="170" font-size="12" text-anchor="middle">generator</text> <rect x="180" y="132" width="150" height="50" rx="6" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c"/> <text x="255" y="153" font-size="12" text-anchor="middle">libmodel.so</text><text x="255" y="170" font-size="12" text-anchor="middle">(aarch64 / x86_64)</text> <rect x="350" y="132" width="150" height="50" rx="6" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c"/> <text x="425" y="153" font-size="12" text-anchor="middle">qnn-context-binary-</text><text x="425" y="170" font-size="12" text-anchor="middle">generator + HTP</text> <rect x="520" y="132" width="150" height="50" rx="6" fill="#d0564a" fill-opacity="0.2" stroke="#d0564a"/>
+<text x="595" y="153" font-size="12" text-anchor="middle">context binary</text><text x="595" y="170" font-size="12" text-anchor="middle">(칩·SDK에 묶임)</text> <text x="10" y="222" font-size="13">③ 기기 (adb push 후 실행 · 측정 · 비교)</text> <rect x="10" y="232" width="150" height="50" rx="6" fill="#3f9a6b" fill-opacity="0.2" stroke="#3f9a6b"/> <text x="85" y="253" font-size="12" text-anchor="middle">qnn-net-run</text><text x="85" y="270" font-size="12" text-anchor="middle">(HTP backend)</text> <rect x="180" y="232" width="150" height="50" rx="6" fill="#3f9a6b" fill-opacity="0.2" stroke="#3f9a6b"/> <text x="255" y="253" font-size="12" text-anchor="middle">출력 .raw</text><text x="255" y="270" font-size="12" text-anchor="middle">+ profiling log</text>
+<rect x="350" y="232" width="150" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0"/> <text x="425" y="253" font-size="12" text-anchor="middle">golden 비교 (C8)</text><text x="425" y="270" font-size="12" text-anchor="middle">SQNR · top-1 일치</text> <rect x="520" y="232" width="150" height="50" rx="6" fill="#3f9a6b" fill-opacity="0.2" stroke="#3f9a6b"/> <text x="595" y="253" font-size="12" text-anchor="middle">앱 통합</text><text x="595" y="270" font-size="12" text-anchor="middle">QNN API / ORT QNN EP</text> <line x1="160" y1="57" x2="178" y2="57" stroke="currentColor" marker-end="url(#f4b)"/> <line x1="330" y1="57" x2="348" y2="57" stroke="currentColor" marker-end="url(#f4b)"/>
+<line x1="500" y1="57" x2="518" y2="57" stroke="currentColor" marker-end="url(#f4b)"/> <path d="M595,82 L595,104 L85,104 L85,130" fill="none" stroke="currentColor" marker-end="url(#f4b)"/> <line x1="160" y1="157" x2="178" y2="157" stroke="currentColor" marker-end="url(#f4b)"/> <line x1="330" y1="157" x2="348" y2="157" stroke="currentColor" marker-end="url(#f4b)"/> <line x1="500" y1="157" x2="518" y2="157" stroke="currentColor" marker-end="url(#f4b)"/> <path d="M595,182 L595,204 L85,204 L85,230" fill="none" stroke="currentColor" marker-end="url(#f4b)"/>
+<line x1="160" y1="257" x2="178" y2="257" stroke="currentColor" marker-end="url(#f4b)"/> <line x1="330" y1="257" x2="348" y2="257" stroke="currentColor" marker-end="url(#f4b)"/> <line x1="500" y1="257" x2="518" y2="257" stroke="currentColor" marker-end="url(#f4b)"/> <text x="10" y="310" font-size="12">파란 상자는 이 노트에서 실제로 실행, 주황·빨강·초록 상자는 QNN SDK와 기기가 필요 (실행하지 않음).</text> <text x="10" y="328" font-size="12">툴 이름은 공식 문서 기준. 플래그·출력 파일 이름은 SDK 버전에 따라 다르다.</text>
+</svg>
+```
+
+그림 3 — PyTorch에서 Hexagon까지의 QNN 표준 흐름. ① 호스트에서 ONNX를 만들고 converter로 C++ 소스·가중치로 바꾸고, ② 그것을 라이브러리로 컴파일한 뒤 HTP용 context binary로 미리 준비하고, ③ 기기에서 `qnn-net-run`으로 돌려 golden과 비교한 뒤 앱에 통합한다.
+
+### 3.2 명령으로 보면 — 실행하지 않음 (계정/SDK 필요)
+
+아래는 공식 문서·튜토리얼에 나오는 툴 이름으로 쓴 **흐름 스케치**다. 툴 이름은 확실하지만, 플래그 이름은 SDK 버전마다 바뀌어 왔으므로 각 툴의 `--help`로 반드시 확인한다. 파일 이름(`f4_static.onnx`, `input_list.txt`)은 4~7절에서 실제로 만든 산출물이다.
+
+```sh
+# 실행하지 않음 (계정/SDK 필요) — QAIRT/QNN SDK 설치 후, 환경 설정 스크립트를 source 했다고 가정
+# ① ONNX → QNN 그래프 소스. 양자화를 converter에 맡기면 calibration 입력 목록을 준다
+qnn-onnx-converter --input_network f4_static.onnx \
+                   --input_list input_list.txt \
+                   --output_path model/f4.cpp
+#   (QDQ ONNX를 넘기는 경우: Q/DQ에서 encoding을 읽는다. 특정 tensor 강제는 --quantization_overrides <json>)
+#   (비트폭 옵션: --act_bw 16 / --weight_bw 8 류 — 이름·존재 여부 버전 확인)
+
+# ② C++ 소스 + 가중치 → 대상별 모델 라이브러리
+qnn-model-lib-generator -c model/f4.cpp -b model/f4.bin -o model_libs
+
+# ③ HTP용 오프라인 준비 → context binary (HTP 세부 옵션은 별도 config JSON으로 — 버전 확인)
+qnn-context-binary-generator --backend libQnnHtp.so \
+                             --model model_libs/x86_64-linux-clang/libf4.so \
+                             --binary_file f4_htp
+```
+
+```sh
+# 실행하지 않음 (계정/SDK 필요) — 기기 쪽. 필요한 파일을 adb로 밀어 넣고 실행
+adb push f4_htp.bin input_list.txt inputs/ /data/local/tmp/f4/
+adb push libQnnHtp.so libQnnHtpV75Stub.so qnn-net-run /data/local/tmp/f4/   # Stub 이름은 칩의 Hexagon 버전에 맞게
+adb push libQnnHtpV75Skel.so /data/local/tmp/f4/                              # Hexagon 쪽에서 로드됨
+adb shell "cd /data/local/tmp/f4 && export LD_LIBRARY_PATH=. ADSP_LIBRARY_PATH=. && \
+           ./qnn-net-run --backend libQnnHtp.so --retrieve_context f4_htp.bin \
+                         --input_list input_list.txt --profiling_level basic"
+adb pull /data/local/tmp/f4/output ./device_out          # 출력 .raw + 프로파일 로그
+qnn-profile-viewer --input_log device_out/<profile log 파일>   # 이름·플래그는 버전 확인
+```
+
+명령을 읽을 때 볼 것:
+
+- `--input_list`는 converter에서는 **calibration 입력**, `qnn-net-run`에서는 **추론 입력** 목록이다. 형식은 같다(한 줄 = 한 번의 추론, raw 파일 경로). 7.2절에서 실제로 만든다.
+- 기기 쪽에서 CPU 라이브러리 경로(`LD_LIBRARY_PATH`)와 DSP 라이브러리 경로(`ADSP_LIBRARY_PATH`)가 **따로** 있다. Skel은 Hexagon이 로드하므로 DSP 경로에 있어야 한다. 이 부분이 bring-up 첫날 가장 흔한 실패다(10절).
+- `--retrieve_context`로 context binary를 로드하면 기기에서 준비 시간이 사라진다. 개발 중에는 대신 `--model libf4.so`를 줘서 기기에서 준비하게 할 수도 있다.
+
+### 3.3 ORT QNN EP로 통합하면 — 실행하지 않음 (QNN EP가 들어간 ORT 빌드 필요)
+
+ORT 경로는 위 단계를 런타임이 대신 해 준다. QDQ ONNX를 그대로 주면 QNN EP가 지원되는 부분을 QNN 그래프로 만들어 HTP에서 돌리고, 나머지는 CPU EP로 돌린다.
+
+```python
+# 실행하지 않음 (QNN EP가 포함된 ORT 빌드 + Snapdragon 기기 필요) — 옵션 이름은 ORT QNN EP 문서 기준, 버전 확인
+import onnxruntime as ort
+so = ort.SessionOptions()
+so.add_session_config_entry("session.disable_cpu_ep_fallback", "1")   # fallback이 생기면 세션 생성 실패 → 조용한 fallback 차단
+so.add_session_config_entry("ep.context_enable", "1")                 # 준비 결과를 EPContext 모델로 저장 (2.4절)
+so.add_session_config_entry("ep.context_file_path", "f4_a8w8pc_ctx.onnx")
+sess = ort.InferenceSession("f4_a8w8pc.onnx", so,
+        providers=[("QNNExecutionProvider", {"backend_path": "libQnnHtp.so",          # Windows는 QnnHtp.dll
+                                             "htp_performance_mode": "sustained_high_performance",
+                                             "profiling_level": "basic"})])
+print(sess.get_providers())     # 여기에 QNN EP가 있어도 "전부 HTP에서 돈다"는 뜻은 아니다 (6.4절)
+```
+
+`session.disable_cpu_ep_fallback`, `ep.context_enable`, `ep.context_file_path` 세 키는 이 환경의 ORT 1.19.2 라이브러리 안에 존재하는 것을 확인했다. QNN EP 고유 옵션(`backend_path`, `htp_performance_mode`, `profiling_level`)은 QNN EP 문서 기준이며 이 환경에서는 확인할 수 없다.
+
+---
+
+## 4. 로컬 실습 ① — HTP가 좋아하는 ONNX 만들기
+
+여기부터는 실제로 돌린 코드다. 환경: `.venv/bin/python` (Python 3.9, torch 2.8, onnx 1.19.1, onnxruntime 1.19.2, macOS arm64). 스크래치 폴더에서 실행했다.
+
+### 4.1 공통 모듈 — 합성 KWS 데이터와 작은 CNN
+
+예를 들어 Hark 같은 기기의 2단 wake word라면, 입력은 1초 오디오의 MFCC(49 프레임 × 10 계수)이고 모델은 작은 depthwise-separable CNN일 것이다(B5, B9). 실제 오디오 대신 "클래스마다 다른 시간·주파수 위치에 음절 같은 덩어리가 있는" 합성 데이터를 쓴다. 공통 모듈에는 calibration 데이터 리더(`Reader`)도 넣어 두고 5절 이후에서 재사용한다.
+
+```python
+# f4_common.py — 합성 KWS 데이터(49 프레임 × 10 MFCC)와 작은 CNN
+import numpy as np, torch, torch.nn as nn
+T, F, NCLS = 49, 10, 4
+
+def make_data(n, seed):
+    g = np.random.default_rng(seed)
+    y = g.integers(0, NCLS, n)
+    X = g.normal(0, 1.0, (n, 1, T, F)).astype(np.float32)
+    t = np.arange(T)[:, None]; f = np.arange(F)[None, :]
+    for c in range(NCLS):                       # 클래스마다 다른 (시간, 주파수) 위치의 "음절" 블롭
+        tc, fc = 10 + 9 * c, 2 + 2 * c
+        blob = 3.0 * np.exp(-((t - tc) ** 2) / 30 - ((f - fc) ** 2) / 3)
+        X[y == c, 0] += blob.astype(np.float32)
+    return torch.from_numpy(X), torch.from_numpy(y)
+
+class KwsNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.c1 = nn.Sequential(nn.Conv2d(1, 16, 3, padding=1), nn.BatchNorm2d(16), nn.ReLU())
+        self.dw = nn.Sequential(nn.Conv2d(16, 16, 3, padding=1, groups=16), nn.BatchNorm2d(16), nn.ReLU())
+        self.pw = nn.Sequential(nn.Conv2d(16, 32, 1), nn.BatchNorm2d(32), nn.ReLU())
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(32, NCLS)
+    def forward(self, x):
+        x = self.pw(self.dw(self.c1(x)))
+        return self.fc(torch.flatten(self.pool(x), 1))
+
+from onnxruntime.quantization import CalibrationDataReader
+class Reader(CalibrationDataReader):            # 대표 입력 200개 = calibration set (학습 데이터에서)
+    def __init__(self, n=200):
+        X, _ = make_data(n, seed=1); self.it = iter({"mfcc": X[i:i+1].numpy()} for i in range(n))
+    def get_next(self): return next(self.it, None)
+```
+
+학습은 짧게 한다(합성 데이터 2000개, 8 epoch). 목적은 정확도 경쟁이 아니라 "학습된 가중치 분포를 가진 모델"을 얻는 것이다.
+
+```python
+# f4_train.py
+import torch, torch.nn as nn
+from f4_common import make_data, KwsNet
+torch.manual_seed(0)
+X, y = make_data(2000, seed=1); m = KwsNet(); opt = torch.optim.Adam(m.parameters(), 3e-3)
+for ep in range(8):
+    for i in range(0, 2000, 64):
+        opt.zero_grad(); loss = nn.functional.cross_entropy(m(X[i:i+64]), y[i:i+64]); loss.backward(); opt.step()
+m.eval(); Xt, yt = make_data(500, seed=2)
+print("test acc", (m(Xt).argmax(1) == yt).float().mean().item()); torch.save(m.state_dict(), "f4_float.pt")
+```
+
+```text
+test acc 0.8339999914169312
+```
+
+출력에서 볼 것: 테스트 정확도 0.834. 노이즈가 큰 합성 데이터라 100%가 아닌 게 정상이다. 이 float 모델이 이후 모든 비교의 기준(golden)이다.
+
+### 4.2 예제 1 — static shape로 export하고 확인하기
+
+무엇을 확인하는 코드인지: `dynamic_axes` 없이 export하면 그래프의 모든 입력·출력 dim이 숫자로 고정되는지, 그리고 ONNX가 torch와 같은 답을 내는지 확인한다.
+
+```python
+# ex1_export.py — static shape ONNX export + 그래프 입력 shape 확인 + torch 대비 수치 확인
+import warnings; warnings.filterwarnings("ignore")
+import collections, numpy as np, onnx, onnxruntime as ort, torch
+from f4_common import make_data, KwsNet, T, F
+m = KwsNet(); m.load_state_dict(torch.load("f4_float.pt")); m.eval()
+dummy = torch.zeros(1, 1, T, F)
+torch.onnx.export(m, dummy, "f4_static.onnx", input_names=["mfcc"], output_names=["logits"],
+                  opset_version=17, dynamo=False)            # dynamic_axes 없음 = 모든 dim 고정
+mp = onnx.load("f4_static.onnx"); onnx.checker.check_model(mp)
+for v in list(mp.graph.input) + list(mp.graph.output):
+    dims = [d.dim_value if d.HasField("dim_value") else d.dim_param for d in v.type.tensor_type.shape.dim]
+    print(f"{v.name:7s} dims={dims}")
+print("opset:", mp.opset_import[0].version, "| ops:", dict(collections.Counter(n.op_type for n in mp.graph.node)))
+X, _ = make_data(8, seed=3)
+s = ort.InferenceSession("f4_static.onnx", providers=["CPUExecutionProvider"])
+o = np.concatenate([s.run(None, {"mfcc": X[i:i+1].numpy()})[0] for i in range(8)])
+print("max|ort - torch| =", float(np.abs(o - m(X).detach().numpy()).max()))
+```
+
+```text
+mfcc    dims=[1, 1, 49, 10]
+logits  dims=[1, 4]
+opset: 17 | ops: {'Conv': 3, 'Relu': 3, 'GlobalAveragePool': 1, 'Flatten': 1, 'Gemm': 1}
+max|ort - torch| = 1.430511474609375e-06
+```
+
+출력에서 볼 것:
+
+- 입력 `[1, 1, 49, 10]`, 출력 `[1, 4]` — 모든 dim이 숫자다. 문자열(`"N"`, `"T"`)이 하나라도 있으면 dynamic이다(6.3절에서 일부러 만든다).
+- BatchNorm이 사라지고 Conv 3개 + Relu 3개만 남았다. eval 모드 export가 BN을 Conv에 접었다(B1 7절, C6 4절). HTP 입장에서 좋은 일이다 — 처리할 op가 줄었다.
+- ORT와 torch의 차이는 1.4e-6. float 연산 순서 차이 수준이다(C8 3절). 여기까지는 "변환이 모델을 바꾸지 않았다"는 확인이다.
+
+왜 batch 1로 고정하나: 웨어러블에서 KWS는 한 번에 한 창(window)씩 들어온다. HTP는 shape가 고정된 그래프를 컴파일해서 tiling·VTCM 배치를 미리 정하므로(C6 9절, E5 5절), 실제로 쓸 shape 하나로 고정하는 것이 가장 효율적이다.
+
+### 4.3 예제 2 — 이 ORT에 QNN EP가 있는가
+
+무엇을 확인하는 코드인지: 현재 onnxruntime 빌드가 어떤 EP를 갖고 있는지, 그리고 없는 QNN EP를 요청하면 무슨 일이 일어나는지 확인한다.
+
+```python
+# ex2_providers.py — 이 ORT 빌드에 QNN EP가 있는가? 없으면 무슨 일이 생기나
+import platform, onnxruntime as ort
+print("platform :", platform.system(), platform.machine())
+print("ort      :", ort.__version__, "| device:", ort.get_device())
+avail = ort.get_available_providers()
+print("available:", avail)
+print("QNN EP?  :", "QNNExecutionProvider" in avail)
+try:   # QNN EP를 억지로 요청해 본다 (backend_path는 Android/Windows ARM64 기준 이름)
+    s = ort.InferenceSession("f4_static.onnx",
+            providers=[("QNNExecutionProvider", {"backend_path": "libQnnHtp.so"}), "CPUExecutionProvider"])
+    print("session providers:", s.get_providers())
+except Exception as e:
+    print("error:", type(e).__name__, str(e)[:120])
+```
+
+```text
+.../onnxruntime/capi/onnxruntime_inference_collection.py:69: UserWarning: Specified provider 'QNNExecutionProvider' is not in available provider names.Available providers: 'CoreMLExecutionProvider, AzureExecutionProvider, CPUExecutionProvider'
+  warnings.warn(
+platform : Darwin arm64
+ort      : 1.19.2 | device: CPU
+available: ['CoreMLExecutionProvider', 'AzureExecutionProvider', 'CPUExecutionProvider']
+QNN EP?  : False
+session providers: ['CPUExecutionProvider']
+```
+
+출력에서 볼 것:
+
+- 예상대로 macOS용 ORT에는 QNN EP가 **없다**. 대신 Apple용 CoreML EP가 있다. QNN EP는 Windows on Snapdragon(ARM64)용 패키지나 Android용 빌드에 들어간다(공식 문서 기준, 배포 형태는 버전에 따라 다름).
+- 더 중요한 것: 없는 EP를 요청해도 **에러가 아니라 경고 한 줄**이 나오고 세션은 CPU로 조용히 만들어진다. 기기에서 "NPU로 돌린다고 생각했는데 사실 CPU였다"가 이렇게 생긴다. 그래서 세션을 만든 뒤 `get_providers()`를 확인하고, 배포 빌드에서는 3.3절의 `session.disable_cpu_ep_fallback`처럼 실패를 시끄럽게 만드는 설정을 쓴다.
+
+---
+
+## 5. 로컬 실습 ② — QNN용 QDQ 양자화
+
+### 5.1 ORT 안에 QNN 전용 도우미가 있다
+
+C2 5절에서는 일반적인 `quantize_static`으로 QDQ 모델을 만들었다. ORT에는 QNN EP를 위한 전용 도우미가 들어 있다.
+
+- `onnxruntime.quantization.execution_providers.qnn.qnn_preprocess_model` — QNN에 맞게 그래프를 전처리(일부 패턴 fusion 등)
+- `onnxruntime.quantization.execution_providers.qnn.get_qnn_qdq_config` — QNN EP와 호환되는 양자화 설정(`StaticQuantConfig`)을 만들어 준다
+
+이 환경의 ORT 1.19.2 소스(`quant_config.py`)를 직접 읽어서 확인한 사실들:
+
+| 항목 | 소스에서 확인한 내용 |
+|---|---|
+| 기본값 | `activation_type=QUInt8`, `weight_type=QUInt8`, `per_channel=False` |
+| weight 대칭 | `weight_symmetric`을 안 주면 weight 타입이 signed(int8/int16)일 때 대칭으로 둔다 |
+| per-channel 대상 | `per_channel=True`면 Conv 가중치는 axis 0, ConvTranspose는 axis 1 |
+| MatMul | 소스 주석: "QNN does not support per-channel MatMul" → MatMul 가중치는 per-tensor로 강제 |
+| 16-bit Sigmoid/Tanh | 출력 scale·zero-point를 QNN 요구값으로 고정 (Sigmoid uint16: scale 1/65536, zp 0) |
+| opset < 21 + 16-bit | ONNX 표준 Q/DQ가 16-bit를 opset 21부터 지원하므로, 그 전에는 `com.microsoft` 도메인의 Q/DQ를 쓴다 |
+| 제외 op | `Cast`는 양자화 대상에서 뺀다 |
+
+이 표가 말해 주는 것: **"HTP가 원하는 양자화"는 일반 양자화와 미묘하게 다르다.** 대칭/비대칭, per-channel 가능 여부, 특정 op의 고정 scale 같은 규칙이 있다. 벤더 문서와 이런 도우미 코드가 그 규칙의 실제 출처다.
+
+### 5.2 8-bit vs 16-bit activation — 손으로 먼저
+
+activation 범위가 calibration에서 [−4.04, +6.47]이었다고 하자(5.4절에서 실제로 이 값이 나온다).
+
+```
+uint8  : scale = (6.47 − (−4.04)) / 255    = 10.51 / 255   ≈ 0.0412     → 한 칸 = 0.041
+uint16 : scale = (6.47 − (−4.04)) / 65535  = 10.51 / 65535 ≈ 0.000160   → 한 칸 = 0.00016
+반올림 오차 최대 = scale / 2  →  uint8: 0.0206,  uint16: 0.00008  (약 257배 작다)
+양자화 노이즈 SQNR 이론값 ≈ 6.02 × bits + 상수  →  16-bit가 8-bit보다 약 48 dB 높을 수 있다
+```
+
+말로 하면: 16-bit activation은 칸이 256배 촘촘하다. 그런데 실제 모델 출력의 SQNR이 48 dB씩 오르지는 않는다. 가중치가 여전히 8-bit이고 그 오차가 뒤쪽 레이어에서 상한을 정하며, calibration 범위 밖 값의 clipping은 비트 수와 무관하기 때문이다(5.4~5.6절과 7.1절에서 숫자로 본다). 비용은 activation 메모리·대역폭 2배, VTCM에 들어가는 타일 크기 절반이다.
+
+### 5.3 예제 3 — QNN용 설정으로 QDQ 모델 3종 만들기
+
+무엇을 확인하는 코드인지: `get_qnn_qdq_config`로 A8W8(per-tensor), A8W8(per-channel), A16W8(per-channel) 세 모델을 만들고 Q/DQ 노드의 개수·도메인·파일 크기를 비교한다.
+
+```python
+# ex3_quant.py — ORT의 QNN용 설정(get_qnn_qdq_config)으로 QDQ 모델 3종 만들기
+import collections, logging, os, warnings, onnx
+warnings.filterwarnings("ignore"); logging.disable(logging.WARNING)
+from onnxruntime.quantization import quantize, QuantType
+from onnxruntime.quantization.execution_providers.qnn import get_qnn_qdq_config, qnn_preprocess_model
+from f4_common import Reader      # calibration reader (f4_common 참고)
+
+changed = qnn_preprocess_model("f4_static.onnx", "f4_pre.onnx")   # QNN용 그래프 전처리(바뀐 게 없으면 False)
+src = "f4_pre.onnx" if changed else "f4_static.onnx"; print("preprocess changed:", changed)
+configs = {"a8w8":    dict(activation_type=QuantType.QUInt8,  weight_type=QuantType.QUInt8),
+           "a8w8pc":  dict(activation_type=QuantType.QUInt8,  weight_type=QuantType.QInt8, per_channel=True),
+           "a16w8pc": dict(activation_type=QuantType.QUInt16, weight_type=QuantType.QInt8, per_channel=True)}
+for name, kw in configs.items():
+    cfg = get_qnn_qdq_config(src, Reader(), **kw)
+    quantize(src, f"f4_{name}.onnx", cfg)
+    g = onnx.load(f"f4_{name}.onnx").graph
+    ops = collections.Counter(f"{n.domain or 'ai.onnx'}:{n.op_type}" for n in g.node if "Linear" in n.op_type)
+    print(f"{name:8s} {os.path.getsize(f'f4_{name}.onnx'):6d} B  {dict(ops)}")
+```
+
+```text
+preprocess changed: False
+a8w8       8098 B  {'ai.onnx:DequantizeLinear': 15, 'ai.onnx:QuantizeLinear': 7}
+a8w8pc     9074 B  {'ai.onnx:DequantizeLinear': 15, 'ai.onnx:QuantizeLinear': 7}
+a16w8pc    9428 B  {'com.microsoft:DequantizeLinear': 15, 'com.microsoft:QuantizeLinear': 7}
+```
+
+출력에서 볼 것:
+
+- `preprocess changed: False` — 이 단순한 CNN에는 전처리가 바꿀 패턴(예: LayerNorm 류 fusion)이 없다. transformer 모델이면 True가 나올 수 있다.
+- Q 7개 = activation 7곳(입력, conv 3개 출력, pool, flatten, logits). DQ 15개 = activation 7 + weight 4 + bias 4. C2 5.3절과 같은 셈이다.
+- **A16 모델의 Q/DQ는 `com.microsoft` 도메인이다.** opset 17로 export했기 때문이다(5.1절 표). QNN 툴체인이나 다른 런타임이 이 도메인을 받는지 확인해야 한다 — 받지 않으면 export를 opset 21 이상으로 올리는 선택지가 있다.
+- 크기: float ONNX는 5370 B였다. 이 작은 모델에서는 QDQ 파일이 **오히려 크다**(8~9 KB). 가중치가 몇 KB밖에 안 되니 scale·zero-point 배열과 Q/DQ 노드의 오버헤드가 더 크다. 실제 크기 이득은 converter가 만드는 최종 산출물(context binary)에서 봐야 한다.
+
+### 5.4 예제 4 — float 대비 수치: 정확도, top-1 일치율, SQNR
+
+무엇을 확인하는 코드인지: 세 QDQ 모델을 float ONNX와 같은 500개 테스트 입력으로 비교한다. 지표는 C8 2절의 것들이다.
+
+```python
+# ex4_numerics.py — float ONNX vs QDQ 3종: 정확도, top-1 일치율, logits SQNR (C8의 지표)
+import numpy as np, onnxruntime as ort
+from f4_common import make_data
+X, y = make_data(500, seed=2); X = X.numpy(); y = y.numpy()
+
+def run(path):
+    s = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    return np.concatenate([s.run(None, {"mfcc": X[i:i+1]})[0] for i in range(len(X))])
+
+def sqnr_db(ref, test):                    # 10·log10( Σref² / Σ(ref−test)² )
+    return 10 * np.log10((ref ** 2).sum() / ((ref - test) ** 2).sum())
+
+ref = run("f4_static.onnx")
+print(f"{'model':8s} {'acc':>6s} {'top1==fp':>9s} {'SQNR dB':>8s} {'max|d|':>7s}")
+print(f"{'float':8s} {(ref.argmax(1) == y).mean():6.3f} {'-':>9s} {'-':>8s} {'-':>7s}")
+for name in ["a8w8", "a8w8pc", "a16w8pc"]:
+    o = run(f"f4_{name}.onnx")
+    print(f"{name:8s} {(o.argmax(1) == y).mean():6.3f} {(o.argmax(1) == ref.argmax(1)).mean():9.3f} "
+          f"{sqnr_db(ref, o):8.1f} {np.abs(ref - o).max():7.3f}")
+```
+
+```text
+model       acc  top1==fp  SQNR dB  max|d|
+float     0.834         -        -       -
+a8w8      0.826     0.988     29.3   0.666
+a8w8pc    0.832     0.998     33.3   0.666
+a16w8pc   0.836     0.994     34.3   0.668
+```
+
+출력에서 볼 것:
+
+- **per-channel이 4 dB를 벌었다** (29.3 → 33.3 dB). depthwise conv는 채널마다 가중치 크기가 크게 달라서 per-tensor scale 하나로는 작은 채널이 뭉개진다(C2 6절). HTP 배포에서 Conv 가중치는 per-channel이 기본 선택인 이유다.
+- **16-bit activation은 겨우 1 dB**만 더 벌었다. 5.2절의 "이론상 48 dB"와 거리가 멀다. 다음 절에서 이유를 찾는다.
+- **max|d|가 세 모델 모두 0.666 근처로 똑같다.** 양자화 방식과 무관하게 같은 크기의 오차가 있다는 건 "양자화 해상도"가 아니라 다른 원인이라는 신호다. 이것도 다음 절에서 찾는다.
+- a16w8pc의 정확도 0.836이 float 0.834보다 높은 것은 500개 중 1개 차이로, 노이즈다. 정확도가 아니라 top-1 일치율·SQNR로 판단한다(C8 2절).
+
+### 5.5 예제 5 — converter가 읽을 encoding을 직접 뽑아 보기
+
+무엇을 확인하는 코드인지: QDQ 모델에서 tensor별 dtype·scale·zero_point와 그것이 의미하는 float 범위를 표로 뽑는다. QNN converter가 QDQ 모델에서 읽어 갈 정보가 정확히 이것이다.
+
+```python
+# ex5_encodings.py — QDQ 모델에서 "converter가 읽을 양자화 encoding"을 뽑는다
+import onnx, numpy as np
+from onnx import numpy_helper
+g = onnx.load("f4_a8w8pc.onnx").graph
+init = {t.name: numpy_helper.to_array(t) for t in g.initializer}
+print(f"{'tensor':34s} {'kind':6s} {'dtype':6s} {'scale':>10s} {'zp':>5s}  float range")
+for n in g.node:
+    if n.op_type != "QuantizeLinear" and not (n.op_type == "DequantizeLinear" and n.input[0] in init):
+        continue                                   # activation은 Q에서, weight/bias는 DQ(initializer)에서
+    x, s, z = n.input[0], init[n.input[1]], init[n.input[2]]
+    kind = "act" if n.op_type == "QuantizeLinear" else ("bias" if init[x].dtype == np.int32 else "weight")
+    if s.size > 1:                                 # per-channel: 채널 수와 scale 범위만
+        print(f"{x[-34:]:34s} {kind:6s} {str(z.dtype):6s} {'[' + str(s.size) + ' ch]':>10s} {int(z.max()):5d}  "
+              f"scale {s.min():.2e}..{s.max():.2e}")
+    else:
+        lo, hi = (np.iinfo(z.dtype).min - int(z)) * s, (np.iinfo(z.dtype).max - int(z)) * s
+        print(f"{x[-34:]:34s} {kind:6s} {str(z.dtype):6s} {float(s):10.3e} {int(z):5d}  [{lo:+.3f}, {hi:+.3f}]")
+```
+
+```text
+tensor                             kind   dtype       scale    zp  float range
+fc.bias_quantized                  bias   int32      [4 ch]     0  scale 1.31e-05..2.38e-05
+fc.weight_quantized                weight int8       [4 ch]     0  scale 3.25e-03..5.92e-03
+mfcc                               act    uint8   4.124e-02    98  [-4.041, +6.474]
+onnx::Conv_37_quantized            weight int8      [16 ch]     0  scale 7.74e-04..4.60e-03
+onnx::Conv_38_quantized            bias   int32     [16 ch]     0  scale 3.19e-05..1.90e-04
+onnx::Conv_40_quantized            weight int8      [16 ch]     0  scale 4.29e-03..1.77e-02
+onnx::Conv_41_quantized            bias   int32     [16 ch]     0  scale 1.07e-04..4.41e-04
+onnx::Conv_43_quantized            weight int8      [32 ch]     0  scale 9.77e-03..2.01e-02
+onnx::Conv_44_quantized            bias   int32     [32 ch]     0  scale 3.20e-04..6.58e-04
+/c1/c1.2/Relu_output_0             act    uint8   2.485e-02     0  [+0.000, +6.338]
+/dw/dw.2/Relu_output_0             act    uint8   3.271e-02     0  [+0.000, +8.341]
+/pw/pw.2/Relu_output_0             act    uint8   8.824e-02     0  [+0.000, +22.502]
+/pool/GlobalAveragePool_output_0   act    uint8   4.012e-03     0  [+0.000, +1.023]
+/Flatten_output_0                  act    uint8   4.012e-03     0  [+0.000, +1.023]
+logits_QuantizeLinear_Input        act    uint8   2.611e-02   104  [-2.716, +3.943]
+```
+
+출력에서 볼 것:
+
+- **weight는 int8 대칭(zp 0), per-channel**. 첫 Conv는 채널별 scale이 7.74e-04 ~ 4.60e-03으로 약 6배 차이다 — 이 차이가 per-channel이 4 dB를 번 이유다.
+- **bias는 int32**, scale은 (입력 scale × 채널별 weight scale)이다. HTP가 int32 누산기에 bias를 그대로 더하기 위한 형식이다(C1 requantization).
+- **activation은 uint8 비대칭**. 입력 `mfcc`는 zp 98, Relu 출력들은 zp 0(음수가 없으니 [0, max] 범위 전체를 씀 — Relu가 Q 범위로 흡수되어 그래프에서 사라졌다).
+- **범인: `logits`의 범위가 [−2.716, +3.943]이다.** 그런데 테스트셋의 float logits 최소값은 −3.382다(다음 예제에서 출력). calibration 200개에 그만큼 음수인 logit이 없었으니, 그보다 작은 값은 −2.716에서 **잘린다(clipping)**. 5.4절의 max|d| ≈ 0.666 ≈ 3.382 − 2.716이 정확히 이 잘림이다. 그래서 양자화 방식(8/16-bit, per-channel)과 무관하게 같은 오차가 나왔다.
+
+Don 연결: ADC full-scale을 calibration 신호로 잡았는데 실제 신호가 더 커서 saturation이 나는 상황과 똑같다. 해상도(bits)를 올려도 saturation은 안 고쳐진다 — 범위를 고쳐야 한다.
+
+### 5.6 예제 6 — tensor override로 범위를 고치기
+
+무엇을 확인하는 코드인지: `logits` tensor 하나만 범위를 [−6, +6]으로 직접 지정(override)해서 다시 양자화하고, SQNR·max|d|가 어떻게 바뀌는지 본다. QNN 쪽의 `--quantization_overrides`와 같은 발상이다.
+
+```python
+# ex6_override.py — 출력 텐서의 calibration 범위가 좁아 잘린다 → tensor override로 넓혀 다시 양자화
+import logging, warnings, numpy as np, onnxruntime as ort
+warnings.filterwarnings("ignore"); logging.disable(logging.WARNING)
+from onnxruntime.quantization import quantize, QuantType
+from onnxruntime.quantization.execution_providers.qnn import get_qnn_qdq_config
+from f4_common import make_data, Reader
+X, y = make_data(500, seed=2); X = X.numpy()
+def run(p):
+    s = ort.InferenceSession(p, providers=["CPUExecutionProvider"])
+    return np.concatenate([s.run(None, {"mfcc": X[i:i+1]})[0] for i in range(len(X))])
+ref = run("f4_static.onnx")
+print("float logits min/max on test:", round(float(ref.min()), 3), round(float(ref.max()), 3))
+ov = {"logits": [{"rmin": np.float32(-6.0), "rmax": np.float32(6.0)}]}   # 이 텐서만 범위를 직접 지정
+for name, at in [("a8w8pc", QuantType.QUInt8), ("a16w8pc", QuantType.QUInt16)]:
+    cfg = get_qnn_qdq_config("f4_static.onnx", Reader(), activation_type=at, weight_type=QuantType.QInt8,
+                             per_channel=True, init_overrides=ov)
+    quantize("f4_static.onnx", f"f4_{name}_ov.onnx", cfg)
+    for tag, p in [("before", f"f4_{name}.onnx"), ("after ", f"f4_{name}_ov.onnx")]:
+        o = run(p); d = ref - o
+        print(f"{name:8s} {tag} SQNR {10 * np.log10((ref**2).sum() / (d**2).sum()):5.1f} dB  max|d| {np.abs(d).max():.3f}"
+              f"  top1==fp {(o.argmax(1) == ref.argmax(1)).mean():.3f}")
+```
+
+```text
+float logits min/max on test: -3.382 4.158
+a8w8pc   before SQNR  33.3 dB  max|d| 0.666  top1==fp 0.998
+a8w8pc   after  SQNR  36.3 dB  max|d| 0.088  top1==fp 0.996
+a16w8pc  before SQNR  34.3 dB  max|d| 0.668  top1==fp 0.994
+a16w8pc  after  SQNR  42.4 dB  max|d| 0.078  top1==fp 0.994
+```
+
+출력에서 볼 것:
+
+- 테스트 logits 최소값 −3.382는 calibration 범위 하한 −2.716보다 작다 — 5.5절의 추리가 맞았다.
+- override 후 **max|d|가 0.666 → 0.088로 7.5배 줄었다.** clipping이 사라졌다.
+- **16-bit activation의 이득이 이제야 보인다**: 34.3 → 42.4 dB. clipping이 오차를 지배하는 동안에는 해상도를 올려도 소용없었다. 8-bit 쪽은 범위를 넓힌 만큼 칸이 굵어져서 3 dB만 올랐다(범위 ↔ 해상도 trade-off).
+- top-1 일치율은 오히려 0.998 → 0.996으로 미세하게 내렸다(500개 중 1개). 분류 결과가 경계에 걸린 샘플 하나의 문제로, SQNR 개선과 top-1이 항상 같은 방향은 아니다(C8 2절). 판단은 여러 지표를 함께 본다.
+
+교훈: **calibration set은 실제 분포의 꼬리까지 담아야 한다.** 출력 layer처럼 범위가 중요한 tensor는 override로 범위를 직접 주는 것도 정상적인 엔지니어링이다. QNN 쪽에서는 같은 일을 converter의 overrides JSON이나 AIMET encoding으로 한다(공식 문서 기준, 버전에 따라 다름).
+
+### 5.7 예제 7 — 펌웨어 쪽에서 양자화된 출력 읽기 (C)
+
+무엇을 확인하는 코드인지: 기기에서 HTP가 uint8 출력 버퍼를 돌려준다고 할 때, 앱/펌웨어가 QNN식 offset 표기로 dequant하는 코드를 쓰고, ORT가 낸 float 값과 같은지 확인한다. 입력은 ORT QDQ 모델(`f4_a8w8pc`)의 실제 uint8 logits 3개 샘플이다(QDQ 그래프의 마지막 Q 출력을 뽑아서 얻음: `[24 43 114 232]`, `[128 127 123 46]`, `[186 106 98 28]`, ORT float 출력은 각각 `[-2.089 -1.593 0.261 3.342]`, `[0.627 0.601 0.496 -1.515]`, `[2.141 0.052 -0.157 -1.985]`).
+
+```c
+/* ex10_dequant.c — 양자화된 출력 버퍼(uint8)를 펌웨어에서 해석: QNN식 offset 표기와 ONNX zero_point 표기 */
+#include <stdint.h>
+#include <stdio.h>
+#include <math.h>
+
+typedef struct { float scale; int32_t offset; } qnn_enc_t;   /* QNN 문서 표기: real = scale * (q + offset) */
+
+static float dequant(uint8_t q, qnn_enc_t e) { return e.scale * (float)((int32_t)q + e.offset); }
+static uint8_t quant(float x, qnn_enc_t e) {                  /* q = clamp(round(x/scale) - offset) */
+    long v = lroundf(x / e.scale) - e.offset;
+    return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+}
+int main(void) {
+    const qnn_enc_t in_enc  = { 0.0412387438f, -98 };          /* ONNX: scale, zero_point=98  → offset=-98  */
+    const qnn_enc_t out_enc = { 0.0261130761f, -104 };         /* ONNX: scale, zero_point=104 → offset=-104 */
+    const uint8_t out[3][4] = { {24, 43, 114, 232}, {128, 127, 123, 46}, {186, 106, 98, 28} };
+    for (int s = 0; s < 3; s++) {
+        int best_q = 0, best_f = 0;
+        printf("sample %d:", s);
+        for (int c = 0; c < 4; c++) {
+            float f = dequant(out[s][c], out_enc);
+            printf(" %+.4f", f);
+            if (out[s][c] > out[s][best_q]) best_q = c;            /* 정수 그대로 argmax */
+            if (f > dequant(out[s][best_f], out_enc)) best_f = c;  /* float로 바꿔서 argmax */
+        }
+        printf("  argmax(q)=%d argmax(f)=%d\n", best_q, best_f);
+    }
+    printf("quant(0.0)=%u quant(-4.1)=%u quant(+9.0)=%u\n",
+           quant(0.0f, in_enc), quant(-4.1f, in_enc), quant(9.0f, in_enc));
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 ex10_dequant.c -o ex10 -lm && ./ex10
+```
+
+```text
+sample 0: -2.0890 -1.5929 +0.2611 +3.3425  argmax(q)=3 argmax(f)=3
+sample 1: +0.6267 +0.6006 +0.4961 -1.5146  argmax(q)=0 argmax(f)=0
+sample 2: +2.1413 +0.0522 -0.1567 -1.9846  argmax(q)=0 argmax(f)=0
+quant(0.0)=98 quant(-4.1)=0 quant(+9.0)=255
+```
+
+출력에서 볼 것:
+
+- C의 dequant 결과가 ORT float 출력과 소수 넷째 자리까지 같다. offset = −zero_point 변환이 맞았다. 경고 0개로 컴파일됐다.
+- **argmax는 정수 그대로 해도 같다.** scale > 0인 affine 변환은 순서를 보존하므로, 분류 결과만 필요하면 펌웨어에서 dequant를 생략할 수 있다(softmax 확률이 필요할 때만 dequant).
+- `quant(0.0)=98`: float 0은 정확히 zero_point로 간다(zero-padding이 정확해야 하는 이유, C1). `−4.1`은 범위 하한 −4.04 밖이라 0으로, `+9.0`은 상한 6.47 밖이라 255로 **포화**된다. 5.5절의 clipping이 입력 쪽에서 일어나는 모습이다.
+
+---
+
+## 6. 로컬 실습 ③ — 사전 점검기와 "HTP에 나쁜 모델"
+
+### 6.1 왜 점검기를 직접 만드나
+
+SDK 없이도 ONNX 파일만 보면 "converter에서 막히거나 CPU로 떨어질 것 같은 것"의 대부분을 미리 찾을 수 있다. 펌웨어로 치면 빌드 전에 도는 lint, 혹은 테이프아웃 전 DRC다. 점검 항목:
+
+| 점검 | 왜 HTP에 문제인가 |
+|---|---|
+| 입력·출력 dim에 문자열(`N`, `T`)이나 0 | HTP는 고정 shape로 그래프를 준비한다. dynamic dim은 준비 자체가 안 되거나, 일부 버전에서는 제한적 지원이라 확인 필요 |
+| 출력 shape가 **값**에 따라 바뀌는 op (`NonZero`, `Unique`, `NonMaxSuppression` 등) | 컴파일 시점에 다음 op의 shape를 알 수 없다. 메모리 계획·tiling 불가 |
+| 제어 흐름 (`If`, `Loop`, `Scan`) | 그래프가 하나의 고정된 dataflow가 아니게 된다 |
+| 런타임 shape 계산 (`Shape`, `Range`, `Expand` 등) | dynamic export의 흔적. 보통 static export로 사라진다 |
+| 예시 지원 목록 밖의 op | op 지원표에서 확인할 대상. 없으면 CPU fallback 또는 converter 실패 |
+| QDQ 모델인데 Q/DQ로 감싸지지 않은 compute op | 그 op는 float로 남는다 → HTP에서 fp16으로 돌거나 CPU로 떨어질 후보 |
+
+중요한 단서: 점검기 안의 "SAFE" op 목록은 **이 노트가 만든 예시**다. Qualcomm의 공식 op 지원표가 아니다. 실제 작업에서는 SDK 문서의 backend별 op 지원표(그리고 op마다 붙은 정밀도·속성 제약)로 바꿔 끼운다.
+
+### 6.2 예제 8 — 점검기
+
+무엇을 확인하는 코드인지: ONNX 파일을 읽어 위 표의 항목을 검사하고, 4~5절에서 만든 "좋은" 모델들이 통과하는지 본다.
+
+```python
+# htp_check.py — QNN/HTP에 넘기기 전 ONNX "사전 점검" (op 목록은 예시 — 공식 op 지원표로 교체할 것)
+import collections, sys, onnx
+SAFE = {"Conv", "ConvTranspose", "Relu", "Clip", "Sigmoid", "Tanh", "Add", "Sub", "Mul", "Div",
+        "MatMul", "Gemm", "GlobalAveragePool", "AveragePool", "MaxPool", "Flatten", "Reshape",
+        "Transpose", "Concat", "Split", "Slice", "Softmax", "LayerNormalization", "Resize", "Pad",
+        "ReduceMean", "Gather", "Squeeze", "Unsqueeze", "HardSwish", "PRelu", "LeakyRelu"}
+QDQ = {"QuantizeLinear", "DequantizeLinear"}
+DATA_DEP = {"NonZero", "Unique", "NonMaxSuppression", "Compress", "Loop", "If", "Scan"}
+SHAPE_OPS = {"Shape", "Range", "ConstantOfShape", "Expand"}   # 런타임 shape 계산 = 동적 그래프 신호
+
+def check(path):
+    m = onnx.shape_inference.infer_shapes(onnx.load(path)); g = m.graph; issues = []
+    for v in list(g.input) + list(g.output):
+        dims = [d.dim_value if d.HasField("dim_value") else (d.dim_param or "?") for d in v.type.tensor_type.shape.dim]
+        if any(not isinstance(d, int) or d <= 0 for d in dims): issues.append(f"DYNAMIC io  {v.name} {dims}")
+    ops = collections.Counter(n.op_type for n in g.node)
+    for op in sorted(ops):
+        if op in DATA_DEP:   issues.append(f"DATA-DEP op {op} x{ops[op]} (출력 shape가 값에 따라 변함)")
+        elif op in SHAPE_OPS: issues.append(f"SHAPE op   {op} x{ops[op]} (런타임 shape 계산)")
+        elif op not in SAFE | QDQ | {"Constant", "Cast"}: issues.append(f"NOT-LISTED {op} x{ops[op]} (예시 목록에 없음 → op 지원표 확인)")
+    producer = {o: n for n in g.node for o in n.output}
+    inits = {t.name: t.data_type for t in g.initializer}
+    if ops["QuantizeLinear"]:                       # QDQ 모델이면: float로 남은 compute op 찾기
+        for n in g.node:
+            if n.op_type in QDQ or n.op_type not in SAFE: continue
+            ins = [i for i in n.input if i and i not in inits]
+            if any(producer.get(i) is None or producer[i].op_type != "DequantizeLinear" for i in ins):
+                issues.append(f"FLOAT-IN   {n.op_type} {n.name} (입력이 DQ에서 오지 않음 → float 실행/fallback 후보)")
+            if any(inits.get(i) == onnx.TensorProto.FLOAT for i in n.input):
+                issues.append(f"FLOAT-W    {n.op_type} {n.name} (가중치가 양자화되지 않은 float)")
+    print(f"[{path}] ops={dict(ops)}")
+    print("\n".join("  " + i for i in issues) if issues else
+          "  OK: static shape, 예시 op 목록 안" + (", 모든 compute op가 QDQ로 감싸짐" if ops["QuantizeLinear"] else " (float — 양자화 전)"))
+
+if __name__ == "__main__":
+    for p in sys.argv[1:]: check(p)
+```
+
+```sh
+.venv/bin/python htp_check.py f4_static.onnx f4_a8w8pc.onnx f4_a16w8pc.onnx
+```
+
+```text
+[f4_static.onnx] ops={'Conv': 3, 'Relu': 3, 'GlobalAveragePool': 1, 'Flatten': 1, 'Gemm': 1}
+  OK: static shape, 예시 op 목록 안 (float — 양자화 전)
+[f4_a8w8pc.onnx] ops={'DequantizeLinear': 15, 'QuantizeLinear': 7, 'Conv': 3, 'GlobalAveragePool': 1, 'Flatten': 1, 'Gemm': 1}
+  OK: static shape, 예시 op 목록 안, 모든 compute op가 QDQ로 감싸짐
+[f4_a16w8pc.onnx] ops={'DequantizeLinear': 15, 'QuantizeLinear': 7, 'Conv': 3, 'GlobalAveragePool': 1, 'Flatten': 1, 'Gemm': 1}
+  OK: static shape, 예시 op 목록 안, 모든 compute op가 QDQ로 감싸짐
+```
+
+출력에서 볼 것: 세 모델 모두 통과했다. float 모델은 "양자화 전"이라고 따로 표시된다 — HTP에 float 모델을 그대로 주면 converter 쪽 양자화(`--input_list`)가 필요하거나 fp16 실행이 된다. 한 가지 덧붙일 점: 5.5절에서 보듯 `Gemm`(fc) 가중치도 per-channel로 양자화됐다. ORT 도우미는 MatMul만 per-tensor로 강제한다. Gemm per-channel을 QNN이 그대로 받는지는 SDK 버전에서 확인할 항목이다 — 점검기에 규칙으로 추가할 만한 것이다(14절 연습문제).
+
+### 6.3 예제 9 — 나쁜 모델 두 가지를 잡기
+
+무엇을 확인하는 코드인지: (a) "에너지가 있는 프레임만 골라 넣는" 그럴듯한 전처리를 모델 안에 넣고 dynamic axes로 export한 모델, (b) "민감한 층이라 float로 두자"며 한 Conv를 양자화에서 제외한 모델을 만들고, 점검기가 각각을 잡는지 본다.
+
+```python
+# ex8_bad.py — HTP에 나쁜 모델 두 가지를 만들고 htp_check로 잡는다
+import logging, warnings, torch, onnx
+warnings.filterwarnings("ignore"); logging.disable(logging.WARNING)
+from onnxruntime.quantization import quantize, QuantType
+from onnxruntime.quantization.execution_providers.qnn import get_qnn_qdq_config
+from f4_common import KwsNet, Reader, T, F
+from htp_check import check
+
+class TrimNet(KwsNet):                  # "에너지 있는 프레임만 골라서" 넣는 모델 = 값에 따라 T가 변함
+    def forward(self, x):
+        keep = torch.nonzero(x.mean(dim=(1, 3))[0] > 0).squeeze(1)   # NonZero
+        return super().forward(x[:, :, keep, :])
+m = TrimNet(); m.load_state_dict(torch.load("f4_float.pt")); m.eval()
+torch.onnx.export(m, torch.randn(1, 1, T, F), "f4_bad_dynamic.onnx", input_names=["mfcc"],
+                  output_names=["logits"], opset_version=17, dynamo=False,
+                  dynamic_axes={"mfcc": {0: "N", 2: "T"}, "logits": {0: "N"}})
+check("f4_bad_dynamic.onnx")
+
+cfg = get_qnn_qdq_config("f4_static.onnx", Reader(), activation_type=QuantType.QUInt8,
+                         weight_type=QuantType.QInt8, per_channel=True)
+cfg.nodes_to_exclude = ["/pw/pw.0/Conv"]          # "민감한 층이라 float로 두자" → float island
+quantize("f4_static.onnx", "f4_bad_island.onnx", cfg)
+check("f4_bad_island.onnx")
+```
+
+```text
+[f4_bad_dynamic.onnx] ops={'ReduceMean': 1, 'Constant': 3, 'Gather': 2, 'Greater': 1, 'NonZero': 1, 'Transpose': 1, 'Squeeze': 1, 'Conv': 3, 'Relu': 3, 'GlobalAveragePool': 1, 'Flatten': 1, 'Gemm': 1}
+  DYNAMIC io  mfcc ['N', 1, 'T', 10]
+  DYNAMIC io  logits ['N', 4]
+  NOT-LISTED Greater x1 (예시 목록에 없음 → op 지원표 확인)
+  DATA-DEP op NonZero x1 (출력 shape가 값에 따라 변함)
+[f4_bad_island.onnx] ops={'DequantizeLinear': 13, 'QuantizeLinear': 7, 'Conv': 3, 'Relu': 1, 'GlobalAveragePool': 1, 'Flatten': 1, 'Gemm': 1}
+  FLOAT-W    Conv /pw/pw.0/Conv (가중치가 양자화되지 않은 float)
+  FLOAT-IN   Relu /pw/pw.2/Relu (입력이 DQ에서 오지 않음 → float 실행/fallback 후보)
+```
+
+출력에서 볼 것:
+
+- **(a) dynamic 모델**: 입력 dim에 `N`, `T`가 있고, `NonZero`가 있다. `NonZero`의 출력 길이는 입력 **값**에 따라 바뀌므로, 그 뒤의 Conv 3개는 몇 프레임을 처리할지 컴파일 시점에 모른다. `Greater`는 예시 목록에 없어서 "확인하라"고만 표시했다 — 실제로는 지원될 가능성이 크지만, 이 점검기는 모르면 모른다고 말한다.
+- 고치는 법: 프레임 고르기를 **모델 밖**(펌웨어 전처리)으로 빼고, 모델 입력은 항상 49 프레임으로 고정한다. 프레임이 모자라면 0으로 padding(zero_point로 정확히 표현됨, 5.7절). "가변 길이 처리를 모델 밖으로" — 이것이 HTP용 모델 설계의 첫 원칙이다.
+- **(b) float island 모델**: 제외한 Conv의 가중치가 float로 남았고(FLOAT-W), 그 뒤 Relu가 Q 범위로 흡수되지 못하고 float로 남았다(FLOAT-IN, Relu가 다시 나타남). DQ가 15 → 13개로 줄었다(그 Conv의 weight·bias DQ가 없어짐). 기기에서는 이 Conv가 fp16으로 돌거나 CPU로 떨어지고, 앞뒤로 dequant/quant 변환이 붙는다.
+
+### 6.4 CPU fallback의 비용 — 그림으로
+
+```svg
+<svg viewBox="0 0 680 260" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="f4c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs> <text x="10" y="20" font-size="13">그래프가 HTP와 CPU로 쪼개지면 — 경계마다 비용이 붙는다</text> <rect x="10" y="40" width="250" height="90" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/> <text x="135" y="58" font-size="12" text-anchor="middle">HTP 파티션 1</text> <rect x="25" y="70" width="65" height="40" rx="5" fill="none" stroke="currentColor"/><text x="57" y="95" font-size="12" text-anchor="middle">Conv</text> <rect x="105" y="70" width="65" height="40" rx="5" fill="none" stroke="currentColor"/><text x="137" y="95" font-size="12" text-anchor="middle">DWConv</text>
+<rect x="185" y="70" width="65" height="40" rx="5" fill="none" stroke="currentColor"/><text x="217" y="95" font-size="12" text-anchor="middle">Conv</text> <rect x="290" y="40" width="110" height="90" rx="8" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/> <text x="345" y="58" font-size="12" text-anchor="middle">CPU</text> <rect x="305" y="70" width="80" height="40" rx="5" fill="none" stroke="#d0564a"/><text x="345" y="95" font-size="12" text-anchor="middle">NonZero</text> <rect x="430" y="40" width="240" height="90" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/> <text x="550" y="58" font-size="12" text-anchor="middle">HTP 파티션 2</text>
+<rect x="445" y="70" width="65" height="40" rx="5" fill="none" stroke="currentColor"/><text x="477" y="95" font-size="12" text-anchor="middle">Conv</text> <rect x="525" y="70" width="65" height="40" rx="5" fill="none" stroke="currentColor"/><text x="557" y="95" font-size="12" text-anchor="middle">Pool</text> <rect x="605" y="70" width="55" height="40" rx="5" fill="none" stroke="currentColor"/><text x="632" y="95" font-size="12" text-anchor="middle">FC</text> <line x1="90" y1="90" x2="103" y2="90" stroke="currentColor" marker-end="url(#f4c)"/> <line x1="170" y1="90" x2="183" y2="90" stroke="currentColor" marker-end="url(#f4c)"/> <line x1="250" y1="90" x2="303" y2="90" stroke="#d0564a" stroke-width="2" marker-end="url(#f4c)"/>
+<line x1="385" y1="90" x2="443" y2="90" stroke="#d0564a" stroke-width="2" marker-end="url(#f4c)"/> <line x1="510" y1="90" x2="523" y2="90" stroke="currentColor" marker-end="url(#f4c)"/> <line x1="590" y1="90" x2="603" y2="90" stroke="currentColor" marker-end="url(#f4c)"/> <text x="10" y="160" font-size="12">빨간 경계 하나마다:</text> <text x="30" y="180" font-size="12">1) int8 → float dequant (HTP 쪽 또는 CPU 쪽) 와 다시 quant</text> <text x="30" y="198" font-size="12">2) 메모리 복사 / cache maintenance (공유 버퍼가 아니면)</text>
+<text x="30" y="216" font-size="12">3) FastRPC 왕복 + HTP 재진입, 그리고 CPU가 깨어 있어야 함 (전력)</text> <text x="10" y="244" font-size="12">작은 op 하나 때문에 경계가 두 개 생기면, 그 op 연산량보다 경계 비용이 훨씬 클 수 있다.</text>
+</svg>
+```
+
+그림 4 — CPU fallback의 구조. 지원되지 않는 op 하나(`NonZero`)가 그래프를 HTP 파티션 두 개와 CPU 조각 하나로 쪼갠다. 빨간 경계마다 형식 변환·복사·FastRPC 왕복이 붙어서, op 자체보다 경계 비용이 더 클 수 있다. 펌웨어로 치면 DMA로 쭉 흐르던 데이터 경로 중간에 CPU memcpy가 끼는 것이다.
+
+### 6.5 예제 10 — "providers 목록"이 숨기는 것: 파티션 커버리지 재기
+
+무엇을 확인하는 코드인지: QNN EP가 없으니, 같은 구조를 가진 macOS의 CoreML EP로 "가속기 EP가 그래프의 몇 개 노드를 가져갔나"를 ORT 로그에서 읽는다. QNN EP도 세션 생성 시 비슷한 형태의 커버리지 정보를 로그로 남긴다고 알려져 있다(정확한 문구는 버전 확인). 이 실험이 보여 주는 것은 CoreML이 아니라 **확인하는 방법**이다.
+
+```python
+# ex12_partition.py — 가속기 EP가 그래프의 몇 %를 가져갔나? (macOS라 CoreML EP로 "QNN EP 자리"를 대신 실험)
+import sys, onnxruntime as ort
+so = ort.SessionOptions(); so.log_severity_level = 1          # INFO: EP의 GetCapability 요약이 찍힌다
+s = ort.InferenceSession(sys.argv[1], so, providers=["CoreMLExecutionProvider", "CPUExecutionProvider"])
+print("providers:", s.get_providers())
+```
+
+```sh
+for f in f4_static.onnx f4_a8w8pc.onnx f4_bad_dynamic.onnx; do
+  echo "== $f"; .venv/bin/python ex12_partition.py $f 2>&1 | grep -o "number of partitions.*\|providers:.*"
+done
+```
+
+```text
+== f4_static.onnx
+number of partitions supported by CoreML: 1 number of nodes in the graph: 9 number of nodes supported by CoreML: 9
+providers: ['CoreMLExecutionProvider', 'CPUExecutionProvider']
+== f4_a8w8pc.onnx
+number of partitions supported by CoreML: 2 number of nodes in the graph: 28 number of nodes supported by CoreML: 2
+providers: ['CoreMLExecutionProvider', 'CPUExecutionProvider']
+== f4_bad_dynamic.onnx
+number of partitions supported by CoreML: 2 number of nodes in the graph: 16 number of nodes supported by CoreML: 11
+providers: ['CoreMLExecutionProvider', 'CPUExecutionProvider']
+```
+
+출력에서 볼 것:
+
+- 세 경우 모두 `get_providers()`는 똑같이 `['CoreMLExecutionProvider', 'CPUExecutionProvider']`다. **providers 목록만 보면 차이를 모른다.**
+- float 모델은 9/9 노드, 파티션 1개 — 전부 가속기.
+- QDQ 모델은 28개 중 **2개**만 가속기로 갔다. 이 CoreML EP 버전은 QDQ 형식을 거의 받지 않는다. 같은 QDQ 파일이 QNN EP에서는 주력 입력 형식이다 — **EP마다 "좋은 모델"의 정의가 다르다.** 그래서 대상 EP에서 직접 커버리지를 재야 한다.
+- dynamic 모델은 16개 중 11개, 파티션 2개 — 그림 4처럼 쪼개졌다.
+
+QNN 실기기에서 같은 일을 하는 법(실행하지 않음): 세션 로그 수준을 올려 QNN EP의 파티션 요약을 보고, `session.disable_cpu_ep_fallback=1`로 fallback이 있으면 세션 생성이 실패하게 만들고, `profiling_level`로 op별 실행 위치·시간을 본다.
+
+---
+
+## 7. 레이어별 비교, init 시간, 핸드오프 패키지
+
+### 7.1 예제 11 — 레이어별 SQNR (어디서 정밀도를 잃나)
+
+무엇을 확인하는 코드인지: QDQ 모델의 각 Q→DQ 지점 값을 float 모델의 같은 tensor와 비교해서 레이어별 SQNR을 잰다. 기기에서 `qnn-net-run`의 중간 출력 덤프(디버그 옵션, 버전 확인)와 비교할 때 쓰는 것과 같은 방법이다(C8 4절).
+
+```python
+# ex7_layerwise.py — 레이어별 SQNR: 각 Q→DQ 지점의 값을 float 모델의 같은 텐서와 비교 (C8 4절)
+import numpy as np, onnx, onnxruntime as ort
+from f4_common import make_data
+X = make_data(100, seed=2)[0].numpy()
+
+def run_with_taps(path, taps):                  # 지정 텐서들을 graph output으로 노출해서 실행
+    m = onnx.load(path); have = {o.name for o in m.graph.output}
+    m.graph.output.extend(onnx.helper.make_empty_tensor_value_info(t) for t in taps if t not in have)
+    s = ort.InferenceSession(m.SerializeToString(), providers=["CPUExecutionProvider"])
+    names = [o.name for o in s.get_outputs()]
+    outs = [dict(zip(names, s.run(None, {"mfcc": X[i:i+1]}))) for i in range(len(X))]
+    return {t: np.concatenate([o[t] for o in outs]) for t in taps}
+
+def dq_taps(path):                              # float 텐서 이름 → 그 텐서를 Q→DQ한 출력 이름
+    g = onnx.load(path).graph; q = {n.output[0]: n.input[0] for n in g.node if n.op_type == "QuantizeLinear"}
+    return {q[n.input[0]].replace("_QuantizeLinear_Input", ""): n.output[0] for n in g.node if n.op_type == "DequantizeLinear" and n.input[0] in q}
+
+for name in ["a8w8", "a8w8pc", "a16w8pc"]:
+    taps = dq_taps(f"f4_{name}.onnx")
+    ref = run_with_taps("f4_static.onnx", list(taps)); qv = run_with_taps(f"f4_{name}.onnx", list(taps.values()))
+    row = [10 * np.log10((ref[k]**2).sum() / ((ref[k] - qv[v])**2).sum()) for k, v in taps.items()]
+    print(f"{name:8s}", " ".join(f"{s:5.1f}" for s in row))
+print("tensors :", " | ".join(k.split("/")[1] if "/" in k else k for k in taps))
+```
+
+```text
+a8w8      39.5  38.3  32.9  29.9  36.4  36.4  29.9
+a8w8pc    39.5  38.8  34.4  31.1  42.7  42.7  36.6
+a16w8pc   59.3  51.2  43.7  41.2  45.3  45.3  39.9
+tensors : mfcc | c1 | dw | pw | pool | Flatten_output_0 | logits
+```
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<text x="60" y="22" font-size="13">레이어별 SQNR (dB, 높을수록 float에 가깝다) — ex7 실제 출력</text> <line x1="60" y1="260" x2="640" y2="260" stroke="currentColor"/><line x1="60" y1="260" x2="60" y2="50" stroke="currentColor"/> <line x1="56" y1="260.0" x2="640" y2="260.0" stroke="#888" stroke-opacity="0.3"/><text x="52" y="264.0" font-size="12" text-anchor="end">0</text> <line x1="56" y1="190.0" x2="640" y2="190.0" stroke="#888" stroke-opacity="0.3"/><text x="52" y="194.0" font-size="12" text-anchor="end">20</text> <line x1="56" y1="120.0" x2="640" y2="120.0" stroke="#888" stroke-opacity="0.3"/><text x="52" y="124.0" font-size="12" text-anchor="end">40</text> <line x1="56" y1="50.0" x2="640" y2="50.0" stroke="#888" stroke-opacity="0.3"/><text x="52" y="54.0" font-size="12" text-anchor="end">60</text>
+<rect x="72.0" y="121.8" width="20" height="138.2" fill="#888" fill-opacity="0.8"/> <rect x="94.0" y="121.8" width="20" height="138.2" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="116.0" y="52.5" width="20" height="207.5" fill="#e08a3c" fill-opacity="0.8"/> <text x="105.0" y="278" font-size="12" text-anchor="middle">mfcc</text> <rect x="168.7" y="126.0" width="20" height="134.0" fill="#888" fill-opacity="0.8"/> <rect x="190.7" y="124.2" width="20" height="135.8" fill="#4a7bd0" fill-opacity="0.8"/>
+<rect x="212.7" y="80.8" width="20" height="179.2" fill="#e08a3c" fill-opacity="0.8"/> <text x="201.7" y="278" font-size="12" text-anchor="middle">c1</text> <rect x="265.3" y="144.8" width="20" height="115.2" fill="#888" fill-opacity="0.8"/> <rect x="287.3" y="139.6" width="20" height="120.4" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="309.3" y="107.0" width="20" height="153.0" fill="#e08a3c" fill-opacity="0.8"/> <text x="298.3" y="278" font-size="12" text-anchor="middle">dw</text>
+<rect x="362.0" y="155.4" width="20" height="104.6" fill="#888" fill-opacity="0.8"/> <rect x="384.0" y="151.2" width="20" height="108.8" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="406.0" y="115.8" width="20" height="144.2" fill="#e08a3c" fill-opacity="0.8"/> <text x="395.0" y="278" font-size="12" text-anchor="middle">pw</text> <rect x="458.7" y="132.6" width="20" height="127.4" fill="#888" fill-opacity="0.8"/> <rect x="480.7" y="110.6" width="20" height="149.4" fill="#4a7bd0" fill-opacity="0.8"/>
+<rect x="502.7" y="101.4" width="20" height="158.6" fill="#e08a3c" fill-opacity="0.8"/> <text x="491.7" y="278" font-size="12" text-anchor="middle">pool</text> <rect x="555.3" y="155.4" width="20" height="104.6" fill="#888" fill-opacity="0.8"/> <rect x="577.3" y="131.9" width="20" height="128.1" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="599.3" y="120.4" width="20" height="139.6" fill="#e08a3c" fill-opacity="0.8"/> <text x="588.3" y="278" font-size="12" text-anchor="middle">logits</text>
+<rect x="420" y="290" width="12" height="12" fill="#888" fill-opacity="0.8"/><text x="436" y="300" font-size="12">a8w8</text> <rect x="505" y="290" width="12" height="12" fill="#4a7bd0" fill-opacity="0.8"/><text x="521" y="300" font-size="12">a8w8pc</text> <rect x="590" y="290" width="12" height="12" fill="#e08a3c" fill-opacity="0.8"/><text x="606" y="300" font-size="12">a16w8pc</text> <text x="60" y="300" font-size="12">입력 → 출력 순서. 100개 샘플.</text> <text x="60" y="320" font-size="12">16-bit activation은 앞단을 크게 올리지만 8-bit 가중치가 뒤쪽 상한을 정한다.</text>
+</svg>
+```
+
+그림 5 — 레이어별 SQNR(예제 11의 실제 숫자, Flatten은 pool과 같아서 생략). 회색 A8W8 per-tensor, 파랑 A8W8 per-channel, 주황 A16W8 per-channel. 16-bit는 입력에서 59 dB로 크게 앞서지만 Conv를 지날수록 8-bit 가중치 오차가 쌓여 41 dB 근처로 내려온다.
+
+출력에서 볼 것:
+
+- **입력(mfcc)**: 8-bit는 39.5 dB, 16-bit는 59.3 dB. 이론상 차이는 약 48 dB인데 20 dB밖에 안 난다. 손으로 따져 보면: 입력 신호 rms ≈ 1.13, 8-bit 반올림 노이즈 rms = scale/√12 = 0.0412/√12 ≈ 0.0119 → 20·log10(1.13/0.0119) ≈ 39.5 dB로 측정과 일치한다. 16-bit라면 같은 계산으로 약 88 dB여야 한다. 그런데 59.3 dB에서 멈춘 이유는 **입력 clipping**이다. 아래 확인 코드처럼 49,000개 값 중 3개가 calibration 범위 밖이고, 그 잘림만으로 SQNR이 59.26 dB가 된다. 16-bit에서는 반올림 노이즈가 너무 작아서 clipping이 오차를 지배한다 — 5.5절과 같은 교훈이 입력에서도 나온다.
+
+```python
+# 입력 SQNR 손검증: 8-bit 반올림 노이즈 이론값, 16-bit 이론값, clipping만의 SQNR (scale·zp는 예제 5와 16-bit 모델의 실제 값)
+import numpy as np
+from f4_common import make_data
+X = make_data(100, seed=2)[0].numpy(); rms = np.sqrt((X**2).mean())
+print("rms", rms, X.min(), X.max(), "clipped:", ((X < -4.041) | (X > 6.474)).sum(), "/", X.size)
+print("8bit th ", 20 * np.log10(rms / (0.04123874 / np.sqrt(12))))
+s16 = 0.00016046203; print("16bit th", 20 * np.log10(rms / (s16 / np.sqrt(12))))
+lo, hi = -25117 * s16, (65535 - 25117) * s16; Xc = np.clip(X, lo, hi)        # 16-bit 입력 범위 (zp 25117)
+print("clip-only SQNR", 10 * np.log10((X**2).sum() / ((X - Xc)**2).sum()), lo, hi)
+```
+
+```text
+rms 1.1263885 -4.253021 6.6123295 clipped: 3 / 49000
+8bit th  39.51946925190946
+16bit th 87.71813135836743
+clip-only SQNR 59.256634 -4.03032480751 6.48555432854
+```
+
+- **pw(마지막 Conv)가 바닥**: 세 설정 모두 pw에서 가장 낮다(29.9 / 31.1 / 41.2). 오차가 레이어를 거치며 쌓인 결과다. "처음 무너지는 레이어"를 찾을 때 이 표의 기울기를 본다(C8 4절).
+- **pool에서 다시 오른다**: global average pool이 49×10개 값을 평균내면서 독립적인 양자화 노이즈가 상쇄된다. 평균은 노이즈를 √N 비율로 줄인다(A2).
+- **logits**: per-tensor 29.9, per-channel 36.6, 16-bit 39.9. 이 값에 5.6절의 clipping이 섞여 있다.
+- 실무 결론(이 모델 한정): per-channel은 비용이 거의 없이 이득이 크니 기본으로 켠다. 16-bit activation은 이득이 있지만 activation 메모리 2배를 감수할 만큼인지는 정확도 요구와 지연 예산으로 정한다 — 그리고 그 지연은 **HTP 실기기에서** 재야 한다(8절).
+
+### 7.2 예제 12 — QNN 툴체인에 넘길 핸드오프 패키지
+
+무엇을 확인하는 코드인지: 3.2절의 명령이 기대하는 입력을 실제로 만든다. 모델 2개(float·QDQ), 헤더 없는 float32 raw 입력, `input_list.txt`, float 모델의 golden 출력, 그리고 shape·layout·해시를 적은 manifest.
+
+```python
+# ex11_handoff.py — QNN 툴체인에 넘길 "핸드오프 패키지"를 만든다: 모델 + raw 입력 + input_list + golden 출력
+import hashlib, json, os, shutil, numpy as np, onnxruntime as ort
+from f4_common import make_data
+out = "handoff"; shutil.rmtree(out, ignore_errors=True); os.makedirs(f"{out}/inputs"); os.makedirs(f"{out}/golden")
+for f in ["f4_static.onnx", "f4_a8w8pc.onnx"]: shutil.copy(f, out)
+X = make_data(5, seed=2)[0].numpy()                      # 검증용 5개 (calibration용이면 수백 개)
+s = ort.InferenceSession("f4_static.onnx", providers=["CPUExecutionProvider"])
+lines = []
+for i, x in enumerate(X):
+    p = f"inputs/mfcc_{i:03d}.raw"; x[None].astype(np.float32).tofile(f"{out}/{p}")   # 헤더 없는 float32
+    lines.append(p)
+    s.run(None, {"mfcc": x[None]})[0].astype(np.float32).tofile(f"{out}/golden/logits_{i:03d}.raw")
+open(f"{out}/input_list.txt", "w").write("\n".join(lines) + "\n")   # 한 줄 = 한 번의 추론 입력
+sha = lambda f: hashlib.sha256(open(f, "rb").read()).hexdigest()[:12]
+manifest = {"input": {"name": "mfcc", "shape": [1, 1, 49, 10], "dtype": "float32", "layout": "NCHW"},
+            "output": {"name": "logits", "shape": [1, 4]},
+            "models": {f: sha(f"{out}/{f}") for f in ["f4_static.onnx", "f4_a8w8pc.onnx"]}}
+json.dump(manifest, open(f"{out}/manifest.json", "w"), indent=1)
+for root, _, files in sorted(os.walk(out)):
+    for f in sorted(files)[: (9 if root == out else 2)]: print(f"{os.path.join(root, f):30s} {os.path.getsize(os.path.join(root, f)):6d} B")
+print(open(f"{out}/input_list.txt").read().strip().splitlines()[:2], "...")
+print(manifest["models"])
+```
+
+```text
+handoff/f4_a8w8pc.onnx           9074 B
+handoff/f4_static.onnx           5370 B
+handoff/input_list.txt            100 B
+handoff/manifest.json             273 B
+handoff/golden/logits_000.raw      16 B
+handoff/golden/logits_001.raw      16 B
+handoff/inputs/mfcc_000.raw      1960 B
+handoff/inputs/mfcc_001.raw      1960 B
+['inputs/mfcc_000.raw', 'inputs/mfcc_001.raw'] ...
+{'f4_static.onnx': 'e24d93a0d209', 'f4_a8w8pc.onnx': 'ef88344bd485'}
+```
+
+출력에서 볼 것:
+
+- raw 입력 하나가 1960 B = 1 × 1 × 49 × 10 × 4바이트. 헤더가 없으니 **shape·dtype·layout을 아는 사람만 읽을 수 있다** — 그래서 manifest가 필요하다. golden 하나는 4 × 4 = 16 B.
+- layout을 `NCHW`로 적었다. QNN converter는 HTP를 위해 내부적으로 NHWC 류로 바꾸는 경우가 있어서, 기기에서 raw 입력이 어떤 layout이어야 하는지는 converter 출력(입력 tensor 정의)으로 확인해야 한다(C6 7절, 공식 문서 기준, 버전에 따라 다름). 이 한 줄을 manifest에 적어 두는 습관이 bring-up 하루를 아낀다.
+- 모델 해시: "기기에서 돌린 binary가 정확히 어떤 ONNX에서 왔나"를 추적하기 위해서다. SSD 펌웨어 릴리스에서 이미지마다 빌드 해시를 남기던 것과 같다.
+
+### 7.3 예제 13 — init 비용 vs 실행 비용, 그리고 "미리 준비한 그래프"의 대가
+
+무엇을 확인하는 코드인지: ORT CPU에서 세션 생성(init) 시간과 1회 실행 시간을 따로 재고, 최적화된 그래프를 파일로 저장해 다시 로드하면 init이 줄어드는지 본다. QNN context binary와 같은 종류의 trade-off를 손에 잡히는 크기로 확인하는 실험이다.
+
+```python
+# ex9_init_vs_run.py — "준비(init) 비용"과 "실행 비용"을 따로 잰다 + 최적화된 그래프를 미리 저장해 재사용
+import time, numpy as np, onnxruntime as ort
+x = np.zeros((1, 1, 49, 10), np.float32)
+def create(path, level, save_to=None):
+    so = ort.SessionOptions(); so.graph_optimization_level = level
+    if save_to: so.optimized_model_filepath = save_to       # 최적화 결과 그래프를 파일로 남김
+    t = time.perf_counter(); s = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
+    return s, (time.perf_counter() - t) * 1e3
+def med_init(path, level): return np.median([create(path, level)[1] for _ in range(20)])
+s, _ = create("f4_a8w8pc.onnx", ort.GraphOptimizationLevel.ORT_ENABLE_ALL, save_to="f4_a8w8pc.opt.onnx")
+for _ in range(10): s.run(None, {"mfcc": x})                # warm-up
+t = time.perf_counter(); [s.run(None, {"mfcc": x}) for _ in range(1000)]
+run_us = (time.perf_counter() - t) * 1e3
+print(f"init  (QDQ 원본, 최적화 ON) : {med_init('f4_a8w8pc.onnx', ort.GraphOptimizationLevel.ORT_ENABLE_ALL):6.2f} ms")
+print(f"init  (미리 최적화본, OFF)  : {med_init('f4_a8w8pc.opt.onnx', ort.GraphOptimizationLevel.ORT_DISABLE_ALL):6.2f} ms")
+print(f"run   (1회 평균)            : {run_us:6.1f} us")
+print("ops after ORT optimization:", sorted({n.op_type for n in __import__('onnx').load('f4_a8w8pc.opt.onnx').graph.node}))
+```
+
+```text
+2026-09-30 18:41:58.102943 [W:onnxruntime:, inference_session.cc:2039 Initialize] Serializing optimized model with Graph Optimization level greater than ORT_ENABLE_EXTENDED and the NchwcTransformer enabled. The generated model may contain hardware specific optimizations, and should only be used in the same environment the model was optimized in.
+init  (QDQ 원본, 최적화 ON) :   2.25 ms
+init  (미리 최적화본, OFF)  :   0.68 ms
+run   (1회 평균)            :   60.7 us
+ops after ORT optimization: ['DequantizeLinear', 'Flatten', 'QGemm', 'QLinearConv', 'QLinearGlobalAveragePool', 'QuantizeLinear', 'Transpose']
+```
+
+출력에서 볼 것:
+
+- init이 2.25 ms → 0.68 ms로 약 3배 줄었다. 그래프 최적화(QDQ 패턴을 `QLinearConv`·`QGemm` 같은 정수 커널로 바꾸는 일)를 미리 해 뒀기 때문이다.
+- **ORT의 경고 문구가 context binary의 대가를 그대로 말한다**: "hardware specific optimizations … should only be used in the same environment the model was optimized in." 미리 준비한 결과물은 준비한 환경에 묶인다. QNN context binary가 SoC·SDK 버전에 묶이는 것과 같은 이야기다.
+- 실행 시간은 측정마다 크게 흔들렸다(같은 스크립트를 세 번 돌려 362 µs, 593 µs, 60.7 µs가 나왔다). 노트북 CPU의 클럭·스케줄링 노이즈다. init 숫자는 상대적으로 안정적이었다. 실기기 측정에서는 성능 모드 고정, warm-up, 반복 측정의 분포(중앙값·p99)를 보고해야 하는 이유다(D6, M2).
+- 이 tiny 모델에서는 init 2 ms가 문제가 안 되지만, HTP에서 큰 모델(수십~수백 MB)의 온라인 준비는 훨씬 오래 걸릴 수 있다고 알려져 있다. 웨어러블에서 "wake word가 감지된 뒤 ASR 모델을 로드"하는 구조라면 이 init이 사용자가 느끼는 지연에 그대로 들어간다 — context binary와 "모델을 미리 로드해 두는 상주 전략"이 설계 질문이 된다(E8 5절).
+
+---
+
+## 8. Qualcomm AI Hub — 하드웨어 없이 실기기에서 재기
+
+### 8.1 무엇인가
+
+Qualcomm AI Hub는 모델을 올리면 **Qualcomm이 운영하는 실기기**(Snapdragon 폰, Snapdragon PC, IoT 개발 보드 등)에서 compile·profile·inference를 해 주는 클라우드 서비스다. Python 클라이언트 `qai_hub`(`pip install qai-hub`)로 쓰고, 계정의 API token이 필요하다.
+
+```svg
+<svg viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="f4d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs> <rect x="10" y="40" width="150" height="150" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/> <text x="85" y="62" font-size="13" text-anchor="middle">내 노트북</text> <text x="85" y="90" font-size="12" text-anchor="middle">PyTorch / ONNX</text> <text x="85" y="110" font-size="12" text-anchor="middle">qai_hub 클라이언트</text> <text x="85" y="130" font-size="12" text-anchor="middle">API token</text>
+<text x="85" y="160" font-size="12" text-anchor="middle">결과 다운로드</text> <rect x="215" y="40" width="200" height="150" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/> <text x="315" y="62" font-size="13" text-anchor="middle">AI Hub (클라우드)</text> <rect x="230" y="75" width="170" height="30" rx="5" fill="none" stroke="currentColor"/><text x="315" y="95" font-size="12" text-anchor="middle">compile job</text> <rect x="230" y="113" width="170" height="30" rx="5" fill="none" stroke="currentColor"/><text x="315" y="133" font-size="12" text-anchor="middle">profile job</text> <rect x="230" y="151" width="170" height="30" rx="5" fill="none" stroke="currentColor"/><text x="315" y="171" font-size="12" text-anchor="middle">inference job</text>
+<rect x="470" y="40" width="200" height="150" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/> <text x="570" y="62" font-size="13" text-anchor="middle">실기기 팜</text> <text x="570" y="90" font-size="12" text-anchor="middle">Snapdragon 폰</text> <text x="570" y="110" font-size="12" text-anchor="middle">Snapdragon PC</text> <text x="570" y="130" font-size="12" text-anchor="middle">QCS 계열 IoT 보드</text> <text x="570" y="160" font-size="12" text-anchor="middle">(목록은 get_devices로)</text>
+<line x1="160" y1="80" x2="213" y2="80" stroke="currentColor" marker-end="url(#f4d)"/> <text x="187" y="74" font-size="12" text-anchor="middle">업로드</text> <line x1="415" y1="128" x2="468" y2="128" stroke="currentColor" marker-end="url(#f4d)"/> <line x1="468" y1="148" x2="417" y2="148" stroke="currentColor" marker-end="url(#f4d)"/> <line x1="213" y1="160" x2="162" y2="160" stroke="currentColor" marker-end="url(#f4d)"/> <text x="10" y="220" font-size="12">compile: 대상 기기·런타임(TFLite / QNN context binary / ONNX 등)용 산출물을 만든다</text>
+<text x="10" y="240" font-size="12">profile: 실기기에서 지연·메모리·op별 실행 위치(NPU / GPU / CPU)와 시간을 잰다</text> <text x="10" y="260" font-size="12">inference: 내가 준 입력으로 실기기 출력을 받아 golden과 비교한다 (C8)</text>
+</svg>
+```
+
+그림 6 — AI Hub 흐름. 노트북에서 모델을 올리면 클라우드가 대상 기기용으로 compile하고, 실기기 팜에서 profile·inference를 돌려 결과를 돌려준다. 칩이 책상에 없어도 "그 칩에서의 숫자"를 얻는다.
+
+### 8.2 코드로 보면 — 실행하지 않음 (계정/SDK 필요)
+
+아래는 AI Hub 공식 문서의 예제 구조를 따른 스케치다. 함수 이름(`upload_model`, `submit_compile_job`, `submit_profile_job`, `submit_inference_job`, `get_devices`, `Device`)은 `qai_hub` 클라이언트의 공개 API다. 기기 이름 문자열, `options` 문자열의 값, 결과 객체의 메서드 이름은 버전에 따라 다를 수 있으니 문서로 확인한다.
+
+```python
+# 실행하지 않음 (계정/SDK 필요) — 먼저 터미널에서: pip install qai-hub && qai-hub configure --api_token <TOKEN>
+import numpy as np, qai_hub as hub
+
+for d in hub.get_devices()[:5]: print(d)                  # 어떤 기기가 있는지 (이름·OS·속성)
+device = hub.Device("Samsung Galaxy S24 (Family)")        # 예시 이름 — get_devices 결과에서 고를 것
+# IoT 칩 평가라면 예: hub.Device("QCS6490 (Proxy)") 같은 이름 — 존재 여부는 get_devices로 확인
+
+compile_job = hub.submit_compile_job(
+    model="f4_a8w8pc.onnx",                               # 4~5절에서 만든 QDQ ONNX (PyTorch TorchScript도 가능)
+    device=device,
+    input_specs=dict(mfcc=(1, 1, 49, 10)),                # static shape를 여기서도 명시
+    options="--target_runtime qnn_context_binary",        # 대상 런타임 선택 (값 목록은 문서 확인)
+)
+target_model = compile_job.get_target_model()             # 기기용 산출물 (context binary 등)
+
+profile_job = hub.submit_profile_job(model=target_model, device=device)
+profile = profile_job.download_profile()                  # 지연, 메모리, op별 compute unit(NPU/GPU/CPU)
+
+x = np.fromfile("handoff/inputs/mfcc_000.raw", np.float32).reshape(1, 1, 49, 10)
+inference_job = hub.submit_inference_job(model=target_model, device=device, inputs=dict(mfcc=[x]))
+out = inference_job.download_output_data()                # dict: 출력 이름 → 배열 리스트
+# golden(handoff/golden/logits_000.raw)과 SQNR·top-1 비교 → 예제 4와 같은 표를 "실기기 열"로 확장
+```
+
+Qualcomm이 미리 최적화해 둔 모델은 `qai-hub-models` 패키지로 받는다(실행하지 않음 — 계정 필요):
+
+```sh
+# 실행하지 않음 (계정/SDK 필요)
+pip install qai-hub-models
+python -m qai_hub_models.models.mobilenet_v2.export   # 모델별 export 스크립트가 compile·profile까지 AI Hub로 돌린다 (모듈 경로는 저장소 확인)
+```
+
+### 8.3 왜 칩 평가(M1)에 가치가 있나
+
+Don의 기존 방식(EVB를 받아 bring-up하고 재기)은 정확하지만 느리고, 칩이 여러 개면 비싸다. AI Hub는 **"사기 전에 재 볼 수 있는"** 도구다.
+
+| 평가 질문 (M1) | AI Hub로 얻는 것 | 한계 |
+|---|---|---|
+| 우리 모델이 이 칩 NPU에서 몇 ms인가 | 실기기 profile 지연 | 기기 팜의 열·전원 조건은 우리 제품과 다르다 |
+| 전부 NPU에서 도나, fallback이 있나 | op별 compute unit 표 | op 단위 정보의 깊이는 버전마다 다름 |
+| 양자화 후 정확도가 유지되나 | inference job 출력 vs golden | 입력 전처리는 내가 맞춰야 한다 |
+| 칩 A vs 칩 B | 같은 모델을 여러 기기에 동시 제출 | 우리 칩(웨어러블 전용 SoC)이 목록에 없을 수 있다 |
+| 메모리가 맞나 | profile의 메모리 사용량 | 다른 앱·모델과 공존하는 상황은 안 보임 |
+
+말로 하면: AI Hub는 **"상대 비교와 첫 번째 필터"** 로 쓰고, 최종 결정은 제품 조건(열 평형, 동시 실행, 실제 전원 모드)에서 EVB로 확인한다. "칩 없이 평가하는 법" 면접 질문의 답이 이 표다.
+
+---
+
+## 9. Snapdragon 위의 LLM — Genie, w4a16, KV-cache, 분할 context binary
+
+이 절은 공개 자료 수준의 개념 정리다. 세부 수치와 구조는 SDK·모델 레시피 버전마다 다르므로 모두 hedge로 읽는다. LLM 추론 일반론은 D5, L1~L2, F3에서 다룬다.
+
+### 9.1 무엇이 다른가
+
+KWS CNN과 달리 LLM은 (1) 가중치가 수 GB, (2) 토큰을 하나씩 생성하는 루프, (3) 매 토큰마다 커지는 KV-cache가 있다. HTP의 "고정 shape, 오프라인 준비" 철학과 충돌하는 부분이 많아서, 공개된 레시피들은 이렇게 맞춘다고 알려져 있다.
+
+| 문제 | 공개 레시피의 대응 (개념, hedge) |
+|---|---|
+| 가중치가 너무 크다 | weight 4-bit(일부 8-bit), activation 16-bit — **w4a16** |
+| 토큰 루프는 shape가 변한다 | 그래프를 두 종류로: 프롬프트를 덩어리로 처리하는 그래프(예: 한 번에 128 토큰)와 토큰을 1개씩 생성하는 그래프. 둘 다 고정 shape |
+| KV-cache가 커진다 | 최대 context 길이를 고정하고, KV-cache를 그래프의 **입력·출력 tensor**로 두어 앱/런타임이 관리 |
+| 하나의 context binary가 너무 크다 | 레이어 묶음별로 **여러 개의 context binary(part)** 로 쪼개 순서대로 실행 |
+| 두 그래프가 가중치를 중복으로 가진다 | 같은 context 안에서 가중치를 공유하는 방식이 쓰인다고 알려짐 |
+| 토크나이저·샘플링·루프 관리 | **Genie**가 런타임으로 제공 (설정 파일 + 실행 도구) |
+
+### 9.2 그림으로
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="f4e" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs> <text x="10" y="20" font-size="13">HTP 위의 LLM — 개념도 (공개 레시피 수준, 세부는 버전마다 다름)</text> <rect x="10" y="40" width="90" height="70" rx="6" fill="#888" fill-opacity="0.15" stroke="#888"/> <text x="55" y="70" font-size="12" text-anchor="middle">토크나이저</text><text x="55" y="88" font-size="12" text-anchor="middle">임베딩 (CPU)</text> <rect x="120" y="40" width="120" height="70" rx="6" fill="#e08a3c" fill-opacity="0.15" stroke="#e08a3c"/> <text x="180" y="65" font-size="12" text-anchor="middle">part 1</text><text x="180" y="83" font-size="12" text-anchor="middle">layers 0..k</text><text x="180" y="100" font-size="12" text-anchor="middle">context binary</text>
+<rect x="260" y="40" width="120" height="70" rx="6" fill="#e08a3c" fill-opacity="0.15" stroke="#e08a3c"/> <text x="320" y="65" font-size="12" text-anchor="middle">part 2</text><text x="320" y="83" font-size="12" text-anchor="middle">layers ...</text><text x="320" y="100" font-size="12" text-anchor="middle">context binary</text> <rect x="400" y="40" width="120" height="70" rx="6" fill="#e08a3c" fill-opacity="0.15" stroke="#e08a3c"/> <text x="460" y="65" font-size="12" text-anchor="middle">part N</text><text x="460" y="83" font-size="12" text-anchor="middle">마지막 layers</text><text x="460" y="100" font-size="12" text-anchor="middle">+ LM head</text> <rect x="540" y="40" width="130" height="70" rx="6" fill="#888" fill-opacity="0.15" stroke="#888"/> <text x="605" y="70" font-size="12" text-anchor="middle">샘플링</text><text x="605" y="88" font-size="12" text-anchor="middle">→ 다음 토큰</text>
+<line x1="100" y1="75" x2="118" y2="75" stroke="currentColor" marker-end="url(#f4e)"/> <line x1="240" y1="75" x2="258" y2="75" stroke="currentColor" marker-end="url(#f4e)"/> <line x1="380" y1="75" x2="398" y2="75" stroke="currentColor" marker-end="url(#f4e)"/> <line x1="520" y1="75" x2="538" y2="75" stroke="currentColor" marker-end="url(#f4e)"/> <path d="M605,110 L605,130 L55,130 L55,112" fill="none" stroke="currentColor" stroke-dasharray="5 4" marker-end="url(#f4e)"/> <text x="330" y="146" font-size="12" text-anchor="middle">토큰 루프 (Genie 같은 런타임이 관리)</text>
+<rect x="120" y="165" width="400" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="#4a7bd0"/> <text x="320" y="184" font-size="12" text-anchor="middle">part마다 그래프 2종: 프롬프트 처리 (토큰 여러 개 한 번에)</text> <text x="320" y="201" font-size="12" text-anchor="middle">와 토큰 생성 (1개씩). 둘 다 고정 shape, 가중치 공유</text> <rect x="120" y="222" width="400" height="44" rx="6" fill="#3f9a6b" fill-opacity="0.15" stroke="#3f9a6b"/> <text x="320" y="241" font-size="12" text-anchor="middle">KV-cache = 그래프 입력·출력 tensor (최대 context 길이 고정)</text> <text x="320" y="258" font-size="12" text-anchor="middle">weight 4-bit · activation 16-bit (w4a16)</text>
+<text x="10" y="290" font-size="12">part 개수, 그래프 구성, 공유 방식은 모델 크기·SDK·레시피에 따라 다르다.</text>
+</svg>
+```
+
+그림 7 — HTP 위 LLM의 개념 구조. 큰 모델을 레이어 묶음별 context binary 여러 개로 쪼개 순서대로 실행하고, 각 part는 프롬프트 처리용·토큰 생성용 고정 shape 그래프를 가진다. KV-cache는 그래프 바깥에서 관리되는 입력·출력 tensor다. 토큰 루프·샘플링은 Genie 같은 런타임이 맡는다.
+
+### 9.3 숫자 감각 — 손으로
+
+3B 파라미터 모델을 w4a16으로 올린다면:
+
+```
+가중치      : 3 × 10⁹ × 4 bit = 1.5 × 10⁹ byte ≈ 1.5 GB  (+ scale 등 메타데이터)
+KV-cache    : 2 (K,V) × layers × context × kv_heads × head_dim × 2 byte(16-bit)
+  예: 28 layers, context 2048, kv_heads 8, head_dim 128
+      = 2 × 28 × 2048 × 8 × 128 × 2 ≈ 235 MB
+토큰 1개 생성 = 가중치 전체를 한 번 읽음 → DRAM 대역폭이 상한 (D5)
+  예: 대역폭 50 GB/s 가정 → 1.5 GB / 50 GB/s = 30 ms/token ≈ 33 token/s 상한
+```
+
+말로 하면: 웨어러블급 기기에서 LLM은 **메모리 용량과 대역폭**의 문제다. HTP의 TOPS가 아무리 높아도 token 생성 속도는 가중치를 읽는 속도로 정해진다(D3 roofline의 memory-bound 영역). 위 숫자의 layer·head 값은 손계산용 예시이지 특정 모델의 사양이 아니다.
+
+### 9.4 Genie와 AI Hub LLM 레시피 (hedge)
+
+- **Genie**: QAIRT에 포함된 생성형 AI 런타임으로 소개된다. LLM용 context binary들과 토크나이저, 설정 JSON(샘플링, context 길이, part 목록)을 받아 텍스트 생성을 수행하고, 명령줄 실행 도구와 C API를 제공한다고 알려져 있다. 정확한 도구 이름·설정 스키마는 SDK 문서 확인.
+- **AI Hub의 LLM 레시피**: AI Hub Models에 Llama 계열, Qwen 계열 같은 공개 LLM의 Snapdragon용 export 레시피가 올라와 있다. 큰 모델은 대개 계정 승인·라이선스 동의가 필요하고, export 결과가 여러 part의 context binary로 나온다고 알려져 있다.
+- 웨어러블 관점: Hark 같은 기기에서 온디바이스 LLM이 있다면 크기는 수억~수십억 파라미터의 SLM일 것이고(B8), 무거운 생성은 폰·클라우드로 넘기는 hybrid일 가능성이 크다(L3). 면접에서는 "on-device SLM은 w4a16 + 분할 context binary + 고정 context 길이 KV-cache로 HTP에 올리는 것이 공개 레시피의 모양이고, 병목은 대역폭"이라고 말할 수 있으면 충분하다.
+
+---
+
+## 10. QNN bring-up과 디버깅 (F8, C8 연결)
+
+Don의 강점이 가장 직접적으로 쓰이는 절이다. F8(벤더 SDK bring-up 절차 일반론)의 Qualcomm판이다.
+
+### 10.1 버전 매트릭스 — 첫날 만드는 표
+
+| 축 | 예시 값 (가상) | 안 맞으면 생기는 증상 |
+|---|---|---|
+| QAIRT/QNN SDK 버전 | 2.x.y | converter 출력과 런타임이 서로 다른 버전 → 로드 실패, 이상한 에러 코드 |
+| Hexagon 버전 (HTP arch) | v73 / v75 / v79 | 잘못된 Stub/Skel → backend 생성 실패 |
+| SoC 모델 | 제품 칩 | context binary 로드 실패 (다른 칩용으로 생성됨) |
+| 기기 OS / BSP | Android 버전, Linux BSP 버전 | FastRPC 드라이버·DSP 이미지와 SDK 불일치 |
+| DSP 펌웨어 이미지 | 벤더 BSP에 포함 | Skel 로드 거부, 서명 문제 |
+| 상위 런타임 | ORT 버전 + QNN EP 빌드 | EP가 기대하는 QNN 버전과 SDK 불일치 |
+| 모델 산출물 해시 | manifest 해시 | "어제 되던 모델"이 무엇이었는지 모름 |
+
+Don 연결: SSD에서 "FW 버전 × NAND 세대 × 호스트 드라이버 × 테스트 스크립트 버전" 매트릭스를 관리하던 것과 같다. **context binary는 이 매트릭스의 한 셀에만 유효한 산출물**이라는 점이 핵심이다.
+
+### 10.2 순서대로 하는 bring-up 체크리스트
+
+1. **CPU backend로 먼저 돌린다.** `libQnnCpu.so`로 converter 산출물을 돌려 float 결과가 ONNX golden과 맞는지 본다. 여기서 틀리면 converter·layout·전처리 문제다(HTP 문제가 아니다).
+2. **HTP backend 생성만 따로 확인한다.** Stub/Skel 경로(`ADSP_LIBRARY_PATH`), 권한, FastRPC가 살아 있는지. 모델 없이 "backend 열기"까지가 하나의 마일스톤이다.
+3. **작은 모델부터.** Conv 하나짜리 모델 → 우리 KWS 모델 → 큰 모델. 실패 공간을 줄인다(펌웨어 bring-up에서 레지스터 read/write → DMA 한 번 → 전체 경로 순서와 같다).
+4. **op 검증.** converter 로그에서 지원되지 않는 op, 변환 경고를 읽는다. 6절 점검기를 CI에 넣어 converter에 들어가기 전에 막는다.
+5. **수치 비교.** HTP 출력 vs golden: SQNR, top-1 일치율, max abs error(C8). 5.6절 같은 clipping은 max abs error로, 전반적 정밀도 부족은 SQNR로 보인다.
+6. **레이어별 덤프.** 전체가 틀리면 중간 출력을 덤프해서 처음 무너지는 레이어를 찾는다. `qnn-net-run`에는 중간 tensor를 저장하는 디버그 옵션이 있는 것으로 알려져 있다(이름 버전 확인). 비교 방법은 7.1절 그대로다. 단, converter가 레이어를 fusion하거나 이름을 바꾸므로 **이름 매핑 표**를 먼저 만든다(C8 4절의 함정).
+7. **CPU fallback 찾기.** ORT QNN EP라면 파티션 로그와 `session.disable_cpu_ep_fallback`, QNN 직접이라면 profiling 결과의 op별 실행 위치. 6.5절처럼 "providers 목록"을 믿지 않는다.
+8. **init vs inference 분리 측정.** 세션/컨텍스트 생성 시간, 첫 실행(warm-up), 정상 상태 실행을 따로 잰다. context binary로 init이 얼마나 줄었는지 기록한다.
+9. **성능 모드 고정 후 측정.** burst vs sustained의 숫자를 섞지 않는다. 열 평형 후 지속 측정(M2)과 전력 측정(E9, K3)을 함께.
+10. **벤더(FAE)와 이슈 주고받기.** 재현 패키지 = 7.2절의 핸드오프 패키지 + SDK·기기 버전 + 로그. Don이 SSD·RF에서 벤더에 보내던 "재현 키트"와 같은 형식.
+
+### 10.3 정확도가 안 맞을 때 — QNN에서 흔한 원인 순서
+
+| 순서 | 의심 | 확인 방법 |
+|---|---|---|
+| 1 | 전처리 불일치 (MFCC 파라미터, 정규화, 채널 순서) | 기기 입력 raw를 덤프해 호스트 입력과 비트 비교 |
+| 2 | layout (NCHW vs NHWC) | converter가 정의한 입력 tensor shape 확인, 7.2절 manifest |
+| 3 | 입력 양자화 (scale·offset 부호) | 5.7절의 C 코드처럼 quant/dequant를 손으로 검증 |
+| 4 | calibration 범위 clipping | 5.5절처럼 encoding의 float 범위 vs 실제 데이터 범위 |
+| 5 | 특정 레이어 정밀도 부족 | 레이어별 SQNR, 그 레이어만 16-bit override |
+| 6 | op 구현 차이 (반올림, 근사 activation) | 단일 op 모델로 HTP vs CPU backend 비교 |
+| 7 | SDK 버그 | 최소 재현 모델 + 버전 정보로 FAE에 보고 |
+
+---
+
+## 11. 임베디드 관점에서 다시 보기
+
+- **QNN은 "드라이버 + 컴파일러 + 이미지 포맷"의 묶음이다.** backend `.so` = 드라이버, converter·context-binary-generator = 컴파일러·링커, context binary = 펌웨어 이미지. Don이 매일 하던 "툴체인 → 이미지 → 타깃에서 로드 → 검증" 루프와 같은 모양이다.
+- **고정 shape는 고정 메모리 맵이다.** HTP 컴파일러가 tiling·VTCM·DMA를 미리 정하려면 모든 tensor 크기를 알아야 한다. 링커 스크립트가 섹션 크기를 알아야 메모리 맵을 짜는 것과 같다(F7). 가변 길이 처리는 모델 밖, 펌웨어 전처리에서 padding/windowing으로 고정 크기를 만든다.
+- **양자화 encoding은 인터페이스 계약이다.** 입력 scale/offset은 전처리 코드(DSP나 MCU)가 지켜야 할 계약이고, 출력 scale/offset은 후처리 코드가 지켜야 할 계약이다. 모델을 다시 양자화하면 이 계약이 바뀐다 → 펌웨어 쪽 상수도 같이 바뀌어야 한다. 모델 파일과 encoding 상수를 같은 버전으로 묶어 배포한다.
+- **init 시간은 부팅 시간이다.** 웨어러블에서 모델 로드는 wake 경로의 일부다. context binary, 모델 상주, 메모리 매핑 로드를 "부팅 시간 최적화"처럼 다룬다.
+- **경계 비용은 IPC 비용이다.** HTP ↔ CPU 경계(fallback)는 E8의 mailbox·FastRPC 왕복이다. 경계 수를 세는 것이 성능 분석의 첫 단계다.
+- **정수 출력은 정수로 소비할 수 있다.** argmax, 임계값 비교(wake word 점수 > 임계값)는 dequant 없이 정수 영역에서 한다(5.7절). 임계값을 미리 양자화해 두면 MCU 쪽 코드가 float를 전혀 안 써도 된다.
+
+---
+
+## 12. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| QNN EP를 요청하고 확인하지 않음 | "NPU라는데" 지연·전력이 CPU 수준 | EP가 없거나 실패해서 조용히 CPU로 감 (예제 2) | `get_providers()` 확인, `session.disable_cpu_ep_fallback=1`, 로그에서 파티션 커버리지 확인 |
+| `get_providers()`만 보고 "전부 NPU" | 일부 op만 NPU, 나머지 CPU. 경계 비용으로 느림 | providers 목록은 커버리지를 말하지 않음 (예제 10) | 파티션 로그·op별 profiling으로 노드 수 기준 커버리지 확인 |
+| dynamic axes로 export | converter 실패 또는 준비 실패, 혹은 일부 fallback | HTP는 고정 shape 그래프를 준비 | 실제 쓸 shape로 static export, 가변 처리는 모델 밖 |
+| calibration set이 좁음 | max abs error가 특정 값에서 고정, 큰 입력에서 결과 이상 | 범위 밖 값이 clipping (예제 5·6) | 꼬리까지 담은 calibration, 출력 등 핵심 tensor range override |
+| zero_point와 offset 부호 혼동 | 출력이 일정량(2×zp×scale) 밀림 | ONNX zp ↔ QNN offset = −zp | 5.7절처럼 C로 손검증, 단위 테스트 |
+| context binary를 다른 칩·SDK에서 재사용 | 로드 실패, 혹은 업데이트 후 갑자기 실패 | binary가 SoC·Hexagon 버전·SDK 버전에 묶임 | 칩별·SDK별 빌드 산출물로 관리, manifest에 버전 기록 |
+| Skel 라이브러리 경로 누락 | HTP backend 생성 실패, 모델과 무관한 에러 | DSP가 로드할 Skel이 DSP 경로에 없음 | `ADSP_LIBRARY_PATH` 설정, Hexagon 버전에 맞는 Skel |
+| burst 모드 숫자로 평가 | 제품에서 지연이 더 길고 발열 | 성능 모드·열 조건이 다름 | sustained 모드, 열 평형 후 측정, 모드를 숫자에 표기 |
+| 16-bit activation이면 다 해결될 거라 기대 | SQNR이 거의 안 오름 | 오차가 clipping이나 8-bit weight에 지배됨 (예제 4·11) | 레이어별 SQNR로 원인 먼저, 필요한 tensor만 16-bit |
+| float island를 남김 | 특정 레이어만 느리고 경계가 생김 | 양자화 제외·미지원 op (예제 9) | 점검기로 CI에서 차단, 그 레이어는 16-bit로 대체 검토 |
+
+---
+
+## 13. 면접에서 이렇게 말한다
+
+**Q.** "Walk through deploying a PyTorch model to the Hexagon NPU."
+
+**A.** eval 모드로 static shape ONNX export → torch와 수치 확인 → calibration set으로 QDQ 양자화(Conv는 per-channel int8, activation은 uint8 기본, 민감한 곳만 16-bit) → op·shape 점검 → QNN converter로 변환, 모델 라이브러리 컴파일, HTP용 context binary 생성 → 기기에서 qnn-net-run으로 golden 비교와 프로파일 → 앱에는 QNN API나 ORT QNN EP로 통합. 매 단계에 수치 확인 지점이 있다.
+
+> "I export the model in eval mode to ONNX with fully static shapes and check it against PyTorch. Then I quantize it with a representative calibration set, usually per-channel int8 weights and 8-bit activations, moving specific tensors to 16-bit only where layer-wise SQNR says I need it. Before touching the SDK I lint the graph for dynamic shapes, data-dependent ops and float islands. Then the QNN converter turns it into a model library, and I generate an HTP context binary offline for the target SoC. On the device I run it with qnn-net-run against golden outputs and profile it, and finally integrate through the QNN API or ONNX Runtime's QNN execution provider with CPU fallback disabled, so any unsupported op fails loudly instead of silently running on the CPU."
+
+**Q.** "What is a QNN context binary and why use it?"
+
+**A.** HTP가 그래프를 준비한 결과(커널 선택, tiling, VTCM·메모리 계획)를 직렬화한 파일이다. 호스트에서 미리 만들어 두면 기기에서 준비 시간이 사라져서 init이 짧아진다. 대가는 특정 SoC·Hexagon 버전·SDK 버전에 묶인다는 것이라 칩별 빌드 산출물로 관리한다.
+
+> "A context binary is the serialized result of the HTP backend preparing a graph: op lowering, tiling, VTCM and memory planning, all done ahead of time. Loading it on the device skips that preparation, so initialization time drops a lot, which matters when a model has to come up on a wake event. The trade-off is that it's tied to a specific SoC, Hexagon version and SDK version, so I treat it like a firmware image: built per target, versioned, and tracked with a manifest."
+
+**Q.** "How would you evaluate a Snapdragon part for our model without hardware?"
+
+**A.** Qualcomm AI Hub에 우리 모델을 올려서 후보 기기들에서 compile·profile·inference를 돌린다. 지연, 메모리, op별 실행 위치(NPU/CPU), 실기기 출력의 정확도를 같은 모델로 나란히 비교한다. 다만 열·전원 조건과 동시 실행은 제품과 다르니 첫 필터로 쓰고, 최종 후보는 EVB에서 sustained 조건으로 확인한다.
+
+> "I'd use Qualcomm AI Hub. I upload our actual model, compile it for each candidate device, and run profile jobs to get on-device latency, memory and which compute unit each op ran on, plus inference jobs to check accuracy against our golden outputs. That gives a fair side-by-side comparison in a day without buying boards. I'd treat it as the first filter, though: thermal conditions, power modes and concurrency with the rest of our pipeline are different from a device farm, so the finalists still get measured on an EVB under sustained load."
+
+**Q.** "Why do static shapes matter for HTP?"
+
+**A.** HTP 컴파일러는 tensor 크기를 알아야 tiling, VTCM 배치, DMA 스케줄, 메모리 계획을 미리 정할 수 있다. dynamic shape나 NonZero처럼 값에 따라 shape가 바뀌는 op가 있으면 준비가 안 되거나 그 부분이 CPU로 떨어져 경계 비용이 생긴다. 그래서 가변 길이 처리는 모델 밖에서 padding/windowing으로 고정한다.
+
+> "The HTP compiler plans everything ahead of time: tiling, what lives in VTCM, DMA scheduling, buffer reuse. All of that needs concrete tensor sizes. A dynamic dimension, or an op like NonZero whose output size depends on the data, breaks that, so either preparation fails or that part of the graph falls back to the CPU with conversion and RPC costs at each boundary. My rule is to keep variable-length logic outside the model, in the firmware pre-processing, and feed the model fixed-size, padded windows."
+
+**Q.** "8-bit vs 16-bit activations on HTP?"
+
+**A.** 8-bit가 빠르고 메모리·대역폭이 반이라 기본값이다. 16-bit는 해상도가 256배 촘촘해서 오디오나 transformer처럼 activation 범위가 넓은 모델에서 정확도를 살린다. 대신 activation 메모리 2배, VTCM 타일 절반이라 느려진다. 내 실험에서는 clipping이 있으면 16-bit도 1 dB밖에 못 벌었고, 범위를 고친 뒤에야 16-bit가 8-bit보다 약 6 dB 앞섰다. 그래서 레이어별 SQNR로 필요한 곳만 16-bit로 올린다.
+
+> "8-bit activations are the default: fastest, half the memory and bandwidth. 16-bit activations give you 256 times finer steps, which helps models with wide dynamic range like audio front-ends or transformer blocks, but they double activation traffic and halve the tile size that fits in on-chip memory, so they cost latency. In a small experiment I ran, switching to 16-bit gained only 1 dB at first because the real error was clipping from a narrow calibration range; after fixing the range, 16-bit ended up about 6 dB ahead of 8-bit. So I diagnose with layer-wise SQNR first, then promote only the tensors that need it, using mixed precision rather than flipping the whole model."
+
+**Q.** "How do you detect and eliminate CPU fallback?"
+
+**A.** providers 목록이 아니라 파티션 커버리지(노드 수, 파티션 수)를 로그로 보고, 배포 빌드에서는 CPU fallback을 비활성화해서 생기면 실패하게 한다. profiling으로 op별 실행 위치를 확인하고, 원인 op는 그래프 수정(대체 op, 모델 밖으로 이동), 양자화 누락 수정, 마지막으로 op package 순서로 없앤다.
+
+> "I don't trust the providers list; it only says which providers are registered. I look at the partitioning log for node coverage and number of partitions, and in release builds I disable CPU EP fallback so an unsupported op makes session creation fail instead of silently slowing us down. Profiling tells me where each op actually ran. Then I remove the causes in order of cost: rewrite or move the op out of the model, fix quantization gaps that leave float islands, and only as a last resort write a custom op package."
+
+**Q.** "How would you run a small LLM on a Snapdragon NPU?"
+
+**A.** 공개 레시피 수준에서 말하면: weight 4-bit·activation 16-bit, 프롬프트 처리용과 토큰 생성용 고정 shape 그래프 두 종류, 최대 context 길이를 고정한 KV-cache를 그래프 입·출력으로, 큰 모델은 여러 context binary로 분할. 토큰 루프·샘플링은 Genie 같은 런타임이 맡는다. 병목은 TOPS가 아니라 DRAM 대역폭이다.
+
+> "At the level of Qualcomm's public recipes: 4-bit weights with 16-bit activations, two fixed-shape graphs, one that processes the prompt in chunks and one that generates a token at a time, a KV cache with a fixed maximum context passed in and out as tensors, and the model split into several context binaries when it's too large for one. A runtime like Genie handles the token loop, tokenizer and sampling. The thing I'd watch is memory, because token generation reads all the weights every step, so bandwidth, not TOPS, sets the tokens per second."
+
+---
+
+## 14. 직접 해보기
+
+1. **손계산**: activation 범위가 [−2, +6]이고 uint8 비대칭이다. scale, zero_point, QNN 표기 offset을 구하고, float 0.0과 +7.0이 각각 어떤 q로 가는지 계산하라.
+   정답: scale = 8/255 ≈ 0.03137, zero_point = round(2/0.03137) = round(63.75) = 64, offset = −64. 0.0 → q = 64(정확), +7.0 → round(7/0.03137)+64 = 223+64 = 287 → 포화로 255.
+
+2. **손계산**: 7B 모델을 w4a16으로 올린다. 가중치 용량과, DRAM 대역폭 60 GB/s일 때 토큰 생성 속도 상한을 구하라.
+   정답: 7×10⁹ × 0.5 B = 3.5 GB, 3.5 / 60 ≈ 58 ms/token → 약 17 token/s 상한 (메타데이터·KV 읽기 제외).
+
+3. **코드**: `htp_check.py`에 규칙 두 개를 추가하라 — (a) Gemm/MatMul 가중치가 per-channel이면 "QNN 버전에서 per-channel 지원 확인" 경고, (b) Q/DQ 노드가 `com.microsoft` 도메인이면 "툴체인이 contrib Q/DQ를 받는지 확인" 경고. `f4_a8w8pc.onnx`와 `f4_a16w8pc.onnx`에 돌려 보라.
+   힌트: DQ 노드의 scale initializer 크기가 1보다 크고, 그 DQ 출력을 Gemm이 소비하면 (a). `n.domain == "com.microsoft"`이면 (b).
+
+4. **코드**: 예제 6에서 override 대신 calibration 샘플 수를 200 → 2000으로 늘려 보라. logits 범위와 max|d|가 어떻게 바뀌나? override와 비교해 장단점은?
+   힌트: `Reader(n=2000)`. 범위가 넓어지지만 테스트셋 최솟값을 다 덮는다는 보장은 없다. override는 확실하지만 "적절한 값"을 사람이 정해야 한다.
+
+5. **코드**: opset 21로 export한 뒤 A16W8 양자화를 하면 Q/DQ 도메인이 무엇이 되는지 확인하라 (`opset_version=21`). 이 환경의 ORT가 그 모델을 CPU에서 실행하는지도 확인하라.
+   힌트: 5.1절 표 — opset ≥ 21이면 표준 도메인으로 16-bit Q/DQ를 쓸 수 있다. 실행 여부는 ORT 버전의 opset 지원 범위에 달렸으니 직접 돌려서 확인할 것.
+
+6. **설계**: Hark 같은 이어버드형 기기에서 "wake word 감지 후 300 ms 안에 ASR 모델 첫 결과"가 요구사항이다. ASR 모델 init이 400 ms라면 어떤 선택지들이 있나? 세 가지 이상 쓰고 각각의 전력·메모리 대가를 적어라.
+   힌트: context binary로 init 단축, 모델을 상주(메모리·누설 전력), wake 1단계에서 미리 로드 시작(false wake 시 낭비, E8 5절), 첫 결과를 스트리밍 encoder 일부만으로.
+
+---
+
+## 15. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| QNN | Qualcomm AI Engine Direct | backend를 바꿔 끼워 CPU/GPU/HTP에서 같은 API로 NN을 돌리는 저수준 SDK·런타임 |
+| QAIRT | Qualcomm AI Runtime | QNN과 SNPE 등을 묶은 최근 SDK 배포 이름 |
+| SNPE | Snapdragon Neural Processing Engine | 이전 세대 런타임, DLC 포맷 |
+| HTP | Hexagon Tensor Processor | QNN에서 NPU 쪽 Hexagon(HVX+HMX)을 가리키는 backend |
+| Backend | 엔진별 런타임 라이브러리 | `libQnnCpu.so`, `libQnnGpu.so`, `libQnnHtp.so` 등 |
+| Stub / Skel | CPU 쪽 / Hexagon 쪽 라이브러리 쌍 | FastRPC로 연결. Skel 이름에 Hexagon 버전이 들어감 |
+| Op package | 사용자 정의 op 플러그인 | 미지원 op를 직접 구현해 붙임. HTP용은 Hexagon 코드 필요 |
+| Model library | `libmodel.so` | converter가 만든 `model.cpp`·`model.bin`을 컴파일한 그래프 조립 라이브러리 |
+| Context binary | 준비된 그래프의 직렬화 파일 | 기기에서 준비 시간을 없앰. SoC·SDK에 묶임 |
+| EPContext | ORT의 "EP 준비 결과를 품은 ONNX" | `ep.context_enable` 등으로 생성. QNN EP에서는 context binary를 담음 |
+| Encoding | tensor의 양자화 정보 | scale, offset(= −zero_point), bitwidth |
+| QDQ | Quantize-DeQuantize 형식 | float op 앞뒤에 Q/DQ를 끼워 양자화를 그래프에 명시 (C2) |
+| A8W8 / A16W8 / W4A16 | activation·weight 비트폭 표기 | HTP의 흔한 정밀도 조합 |
+| Per-channel | 출력 채널마다 다른 scale | Conv 가중치의 기본 선택, 대칭(offset 0) |
+| Calibration | 대표 입력으로 범위를 재는 단계 | 범위가 좁으면 clipping, 넓으면 해상도 손실 |
+| Override | 특정 tensor의 양자화를 수동 지정 | 비트폭·범위 강제. ORT `init_overrides`, QNN `--quantization_overrides` |
+| CPU fallback | 가속기가 못 받은 op를 CPU가 실행 | 경계마다 변환·복사·RPC 비용 |
+| Performance mode | HTP 클럭·전압 프로파일 | burst, sustained high performance, power saver 등 |
+| VTCM | 벡터용 tightly-coupled memory | HTP 컴파일러가 타일을 올리는 on-chip SRAM (E4) |
+| FastRPC | CPU → Hexagon 원격 호출 | QNN HTP backend의 바닥 (E8) |
+| AI Hub | Qualcomm 클라우드 실기기 서비스 | compile·profile·inference job |
+| AI Hub Models | 최적화 모델 레시피 | `qai-hub-models` 패키지 |
+| Genie | QAIRT의 LLM 런타임 | 토큰 루프·KV-cache·샘플링 관리 |
+| `qnn-net-run` | QNN 명령줄 실행 도구 | input_list의 raw 입력으로 모델 실행, 출력·프로파일 저장 |
+
+---
+
+## 16. 요약 & 체크리스트
+
+Qualcomm 칩에서 NN은 결국 **QNN의 HTP backend**를 지나 Hexagon NPU에서 돈다. ORT QNN EP, TFLite delegate, Genie는 그 위의 통합 경로이고, AI Hub는 그 전체를 클라우드의 실기기에서 대신 돌려 주는 평가 도구다. QNN의 흐름은 "ONNX → converter(C++ 소스+가중치) → 모델 라이브러리 → context binary(오프라인 준비, 칩·SDK에 묶임) → 기기 실행"이고, HTP가 원하는 모델은 **static shape, 데이터 의존 op 없음, 빈틈없이 QDQ로 감싼 그래프**다. 이 노트에서 SDK 없이도 그 산출물을 만들고 검증했다: per-channel이 4 dB를 벌었고, 16-bit activation은 calibration clipping을 고친 뒤에야 8-bit보다 약 6 dB 앞섰고, providers 목록은 파티션 커버리지를 숨긴다는 것을 직접 확인했다. bring-up은 Don에게 익숙한 일 — 버전 매트릭스, 작은 것부터, golden 비교, 재현 패키지 — 을 Qualcomm 이름으로 하는 것이다.
+
+- [ ] Snapdragon의 엔진(CPU·GPU·Hexagon NPU·센서 허브)과 QNN backend 라이브러리를 짝지어 그릴 수 있다
+- [ ] QNN, SNPE, QAIRT, ORT QNN EP, AI Hub, Genie가 각각 무엇인지 한 문장씩 말할 수 있다
+- [ ] converter → model library → context binary → qnn-net-run 순서와 각 산출물의 의미를 설명할 수 있다
+- [ ] context binary가 init 시간을 줄이는 이유와 그 대가(칩·SDK 종속)를 말할 수 있다
+- [ ] ONNX zero_point와 QNN offset의 관계를 손으로 변환하고 C로 dequant할 수 있다
+- [ ] `get_qnn_qdq_config`로 A8W8·A16W8 QDQ 모델을 만들고 float 대비 SQNR·top-1 일치율을 잴 수 있다
+- [ ] encoding 표에서 calibration clipping을 찾아 override로 고칠 수 있다
+- [ ] dynamic shape·데이터 의존 op·float island를 잡는 점검기를 만들고 결과를 해석할 수 있다
+- [ ] providers 목록과 파티션 커버리지의 차이, CPU fallback을 막는 설정을 설명할 수 있다
+- [ ] AI Hub의 compile·profile·inference job으로 하드웨어 없이 칩을 비교하는 계획과 그 한계를 말할 수 있다
+
+## 참고 자료
+
+- Qualcomm AI Engine Direct (QNN) SDK 문서 — Qualcomm 개발자 사이트(qualcomm.com의 developer 영역)에서 "Qualcomm AI Engine Direct SDK" 또는 "QAIRT"로 검색. 툴 사용법(qnn-onnx-converter, qnn-model-lib-generator, qnn-context-binary-generator, qnn-net-run), backend별 op 지원표, HTP 설정
+- ONNX Runtime QNN Execution Provider 문서: https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html — 옵션(`backend_path`, `htp_performance_mode`, `profiling_level`), QDQ 모델 요구사항, EPContext
+- ONNX Runtime 양자화 문서: https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html
+- ONNX Runtime 소스의 QNN 양자화 도우미: `onnxruntime/python/tools/quantization/execution_providers/qnn/quant_config.py` (github.com/microsoft/onnxruntime) — 이 노트 5.1절 표의 출처
+- Qualcomm AI Hub: https://aihub.qualcomm.com — 문서와 `qai_hub` 클라이언트 API 레퍼런스는 사이트의 Docs 메뉴
+- AI Hub Models: https://github.com/quic/ai-hub-models 및 PyPI `qai-hub-models`
+- AIMET (AI Model Efficiency Toolkit): https://github.com/quic/aimet — 고급 PTQ/QAT, encoding 파일
+- Hexagon SDK 문서 — Qualcomm 개발자 사이트에서 "Hexagon SDK"로 검색 (FastRPC, HVX)
+- 이 노트 세트: C2(PTQ·QDQ), C6(graph 최적화·static shape·fallback), C8(검증 지표·레이어별 diff), E4(Hexagon), E5(NPU 컴파일러·bring-up), E8(FastRPC·wake 경로), D5(LLM 추론 성능), M1(평가 기준표), F5(ONNX/ORT), F8(벤더 SDK bring-up)

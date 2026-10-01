@@ -1,0 +1,1367 @@
+# H1. 온디바이스 로깅 — DMA·링버퍼에서 flash까지, 로그 포맷, 압축, wear, 용량 예산
+
+> **이 노트를 다 읽으면**: 센서 → DMA → ring → logger task → flash → 업로드 큐로 이어지는 온디바이스 데이터 경로를 그리고 각 단계의 책임을 말할 수 있다 · 웨어러블 하루치 IMU·오디오·PPG 로그 크기를 손으로 계산하고 로깅 모드(연속 / trigger / duty-cycle / 특징만)로 줄일 수 있다 · segment·chunk·record 3단 로그 포맷을 CRC-32와 commit marker로 설계해 C writer와 Python reader(잘림·모르는 type·비트 플립 처리)를 직접 만들 수 있다 · raw/protobuf/CBOR/FlatBuffers/JSON의 크기·속도·스키마 진화를 실측으로 비교하고, delta+압축 비율, write amplification, flash 수명, 전원 차단 복구, 드롭 정책을 숫자로 설명할 수 있다
+> **JD 연결**: "Build **data collection and ingestion pipelines** for an embedded system including various sensors, **at scale**" (JD 1번 업무), "Experience building sensor data collection pipelines" — study_prep_list **H1**: DMA + ring buffer → flash / 로그 포맷 (헤더+바이너리, protobuf, FlatBuffers, CBOR) / 압축, flash wear, 저장 용량 예산 (P0). 이어지는 행: **H2**(전송), **H3**(백엔드 ingestion), **H6**(프라이버시), **H7**(데이터 품질 — 드롭 카운터)
+> **Don 기준 난이도**: DMA·링버퍼·NAND/NOR 특성·FTL·wear leveling·write amplification·PLP·CRC/ECC는 Don이 이 노트의 독자 중 가장 잘 아는 부분이다 (SSD 펌웨어 그 자체) / 새로 배울 것은 "ML 데이터로서의 로그" 관점 — 무엇을 남길지(라벨 가치 vs 용량 vs 프라이버시), 수년 뒤에도 읽히는 self-describing 포맷, 직렬화 포맷 비교, 센서 데이터의 압축 특성, 드롭을 데이터 품질 지표로 남기는 법
+> **선행 노트**: A6(C 바이너리 로그 → numpy structured dtype, packed struct, endianness), G2(IMU FIFO·DMA 데이터 경로), G6(센서별 데이터율 표), G7(timestamp, 22바이트 batch 헤더, time QA), E7(DMA·캐시), E8(MCU vs AP 배치), D2(메모리 예산)
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+### 0.1 Don은 이 노트의 "아래층"을 이미 만들어 봤다
+
+엔터프라이즈 SSD 펌웨어는 결국 "호스트가 보낸 바이트를 DMA로 받아 RAM 버퍼에 모으고, page 단위로 NAND에 program하고, 전원이 갑자기 나가도 이미 ack한 데이터는 잃지 않고, 블록이 닳지 않게 고르게 쓰는" 시스템이다. 온디바이스 센서 로거도 정확히 같은 모양이다. 다른 점은 딱 세 가지다.
+
+1. **호스트가 센서다.** 데이터는 명령으로 오지 않고 일정한 rate로 끊임없이 흘러온다. 멈추라고 할 수도 없다 (센서 FIFO는 기다려 주지 않는다 — G2).
+2. **바이트의 의미가 중요하다.** SSD는 LBA의 내용이 뭔지 모른다. 로거는 "이 바이트가 몇 시 몇 분의 어느 축 가속도인지"를 몇 년 뒤의 ML 엔지니어가 알 수 있게 남겨야 한다. 포맷이 곧 데이터셋의 계약이다.
+3. **전부 남길 수 없다.** 저장 용량·배터리·업로드 대역폭·프라이버시 때문에 "무엇을 남길지"를 고르는 것 자체가 설계다. 그리고 버린 것은 **버렸다고 기록**해야 데이터 품질(H7)을 판단할 수 있다.
+
+| SSD 펌웨어 (Don) | 온디바이스 센서 로거 (H1) |
+|---|---|
+| 호스트 write 명령 + DMA | 센서 FIFO watermark IRQ + DMA (G2) |
+| write cache (DRAM/SRAM 버퍼) | 센서별 ring buffer + logger staging buffer |
+| page 단위 program, 블록 단위 erase | 같다 — NOR sector 4 KB, NAND page 2~16 KB |
+| FTL, wear leveling, GC | circular log, LittleFS·FCB, eMMC 내부 FTL |
+| WAF (write amplification factor) | 패딩·헤더·메타데이터 갱신·FTL이 만드는 WA |
+| PLP: 커패시터로 in-flight 데이터 flush | 원자적 chunk commit + 부팅 시 복구 스캔 |
+| end-to-end data protection (CRC/ECC) | chunk CRC-32, segment 헤더 CRC |
+| telemetry 로그 포맷 버전 관리 | self-describing 헤더, record type + length, 스키마 진화 |
+| 큐 깊이·throttling | backpressure, 우선순위 클래스, 드롭 카운터 |
+
+이 표의 왼쪽 열은 Don이 이미 설명할 수 있다. 이 노트의 일은 오른쪽 열에 "ML 데이터로 쓰인다"는 조건이 붙으면 무엇이 달라지는지를 숫자로 보여 주는 것이다.
+
+### 0.2 데이터 경로 한 장
+
+```svg
+<svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="h1a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><text x="20" y="22" font-size="13">온디바이스 로깅 데이터 경로 (가상의 웨어러블 — 구성은 추정)</text><rect x="20" y="50" width="110" height="44" rx="6" fill="#e08a3c" fill-opacity="0.2" stroke="currentColor"/><text x="75" y="77" font-size="13" text-anchor="middle">IMU FIFO</text><rect x="20" y="110" width="110" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.2" stroke="currentColor"/><text x="75" y="130" font-size="13" text-anchor="middle">Mic PCM</text><text x="75" y="146" font-size="12" text-anchor="middle">I2S / PDM</text><rect x="20" y="170" width="110" height="44" rx="6" fill="#3f9a6b" fill-opacity="0.2" stroke="currentColor"/>
+<text x="75" y="197" font-size="13" text-anchor="middle">PPG AFE</text><rect x="146" y="34" width="340" height="236" rx="8" fill="none" stroke="currentColor" stroke-dasharray="6 4"/><text x="316" y="262" font-size="12" text-anchor="middle">Always-on MCU (RTOS) — 실시간 경로</text><rect x="160" y="80" width="70" height="104" rx="6" fill="#888" fill-opacity="0.15" stroke="currentColor"/><text x="195" y="128" font-size="13" text-anchor="middle">DMA</text><text x="195" y="146" font-size="12" text-anchor="middle">ping-pong</text><rect x="250" y="57" width="80" height="30" rx="4" fill="#e08a3c" fill-opacity="0.2" stroke="currentColor"/><text x="290" y="77" font-size="12" text-anchor="middle">IMU ring</text>
+<rect x="250" y="117" width="80" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.2" stroke="currentColor"/><text x="290" y="137" font-size="12" text-anchor="middle">audio ring</text><rect x="250" y="177" width="80" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.2" stroke="currentColor"/><text x="290" y="197" font-size="12" text-anchor="middle">PPG ring</text><rect x="350" y="60" width="124" height="160" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="currentColor"/><text x="412" y="84" font-size="13" text-anchor="middle">logger task</text><text x="412" y="108" font-size="12" text-anchor="middle">packetize</text><text x="412" y="128" font-size="12" text-anchor="middle">timestamp (G7)</text>
+<text x="412" y="148" font-size="12" text-anchor="middle">delta · compress</text><text x="412" y="168" font-size="12" text-anchor="middle">CRC + commit</text><text x="412" y="188" font-size="12" text-anchor="middle">drop counters</text><text x="412" y="208" font-size="12" text-anchor="middle">→ H7</text><rect x="526" y="60" width="140" height="160" rx="6" fill="#888" fill-opacity="0.15" stroke="currentColor"/><text x="596" y="84" font-size="13" text-anchor="middle">storage</text><text x="596" y="108" font-size="12" text-anchor="middle">MCU 내장 flash</text><text x="596" y="128" font-size="12" text-anchor="middle">외장 SPI NOR</text>
+<text x="596" y="148" font-size="12" text-anchor="middle">(raw NAND)</text><text x="596" y="168" font-size="12" text-anchor="middle">eMMC/UFS + FS</text><text x="596" y="188" font-size="12" text-anchor="middle">LittleFS · FCB</text><line x1="130" y1="72" x2="158" y2="94" stroke="currentColor" marker-end="url(#h1a)"/><line x1="130" y1="132" x2="158" y2="132" stroke="currentColor" marker-end="url(#h1a)"/><line x1="130" y1="192" x2="158" y2="170" stroke="currentColor" marker-end="url(#h1a)"/><line x1="230" y1="94" x2="248" y2="74" stroke="currentColor" marker-end="url(#h1a)"/><line x1="230" y1="132" x2="248" y2="132" stroke="currentColor" marker-end="url(#h1a)"/>
+<line x1="230" y1="170" x2="248" y2="190" stroke="currentColor" marker-end="url(#h1a)"/><line x1="330" y1="72" x2="348" y2="96" stroke="currentColor" marker-end="url(#h1a)"/><line x1="330" y1="132" x2="348" y2="138" stroke="currentColor" marker-end="url(#h1a)"/><line x1="330" y1="192" x2="348" y2="178" stroke="currentColor" marker-end="url(#h1a)"/><line x1="474" y1="140" x2="524" y2="140" stroke="currentColor" marker-end="url(#h1a)"/><text x="500" y="132" font-size="12" text-anchor="middle">page</text><rect x="526" y="292" width="140" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="currentColor"/><text x="596" y="316" font-size="13" text-anchor="middle">upload queue</text>
+<text x="596" y="336" font-size="12" text-anchor="middle">BLE / Wi-Fi (H2)</text><line x1="596" y1="220" x2="596" y2="290" stroke="currentColor" marker-end="url(#h1a)"/><rect x="300" y="292" width="186" height="56" rx="6" fill="none" stroke="currentColor" stroke-dasharray="6 4"/><text x="393" y="316" font-size="13" text-anchor="middle">AP / SoC (E8)</text><text x="393" y="336" font-size="12" text-anchor="middle">큰 버퍼 · eMMC · 네트워크</text><line x1="524" y1="320" x2="488" y2="320" stroke="currentColor" marker-start="url(#h1a)" marker-end="url(#h1a)"/><text x="20" y="376" font-size="12">실시간(놓치면 끝): 센서 → DMA → ring. 준실시간(수백 ms 지연 허용): logger → flash.</text><text x="20" y="394" font-size="12">비실시간(분·시간 단위): flash → 업로드. 단계마다 버퍼가 있고, 버퍼마다 "넘치면 무엇을 버리나"가 있다.</text>
+</svg>
+```
+
+그림 1 — 온디바이스 데이터 경로. 왼쪽부터 시간 제약이 느슨해진다. 센서 FIFO와 DMA는 µs~ms 단위로 맞춰야 하고, logger task는 수백 ms의 여유가 있고, 업로드는 몇 시간 뒤여도 된다. 각 경계의 버퍼 크기가 "얼마나 오래 멈춰도 데이터를 안 잃나"를 정한다.
+
+### 0.3 누가 어디서 도나 — MCU vs AP (E8 연결)
+
+예를 들어 Hark 같은 웨어러블이라면 always-on MCU(또는 SoC 안의 sensor island)와 큰 AP(Qualcomm SoC 등)가 같이 있을 것으로 추정된다. 로깅 책임을 나누는 전형적인 방법은 이렇다.
+
+| 단계 | MCU (always-on) | AP (필요할 때 깨어남) |
+|---|---|---|
+| 센서 읽기·DMA·ring | 항상 여기 — AP를 깨우면 전력이 수십 배 | 고대역 센서(카메라)만 |
+| 패킷화·timestamp | 여기 — 시계 기준이 MCU라서 (G7) | MCU 시각을 자기 시계로 변환 |
+| 압축 | 가벼운 것(delta, varint, LZ4급) | 무거운 것(zlib/zstd, 오디오 codec) |
+| 저장 | 내장 flash·SPI NOR (MB 단위) | eMMC/UFS (GB 단위) + 파일시스템 |
+| 업로드 | BLE로 폰에 직접 (작은 데이터) | Wi-Fi/셀룰러, 큰 파일 |
+
+핵심 판단 기준은 E8과 같다: **AP를 깨우는 비용**. MCU가 수 MB짜리 NOR에 모아 두었다가 AP가 다른 이유로 깨어 있을 때 한꺼번에 넘기는 "piggyback" 구조가 흔하다. 오디오처럼 rate가 큰 스트림은 MCU flash에 하루치를 담을 수 없으니(1절에서 계산) trigger 창만 남기거나 AP 쪽 저장소로 바로 보낸다.
+
+### 0.4 이 노트의 지도
+
+1절에서 "무엇을 얼마나 남길지"를 숫자로 정하고, 2절에서 포맷을 설계해 C writer와 Python reader를 만든다. 3절은 직렬화 포맷 비교, 4절은 압축, 5절은 flash·파일시스템·wear, 6절은 전원 차단, 7절은 backpressure와 드롭 정책, 8절은 이것을 RTOS logger task 하나로 묶는다. 예제는 모두 실제로 실행한 결과다 (Python은 `.venv/bin/python`, C는 `cc -std=c11 -Wall -Wextra -O2`, 경고 0개).
+
+---
+
+## 1. 무엇을 남길까 — 로깅 모드와 하루 용량
+
+### 1.1 직관 — 블랙박스와 CCTV
+
+자동차 블랙박스는 하루 종일 녹화하지 않는다. 링버퍼에 최근 몇십 초를 계속 덮어쓰다가 충격이 오면 **충격 전 10초 + 후 10초**만 따로 저장한다. CCTV는 하루 종일 녹화하지만 화질을 낮추고 일주일 지나면 지운다. 센서 로거도 이 두 극단 사이 어딘가를 고른다.
+
+ML 데이터 관점에서 질문은 하나다: **"나중에 모델을 만들 때 이 바이트가 쓸모 있을까?"** 연속 raw는 무엇이든 다시 계산할 수 있어서 가치가 가장 크지만 비싸다. 특징(feature)만 남기면 싸지만, 나중에 특징 정의를 바꾸고 싶어도 원본이 없다. 이 비대칭이 설계의 핵심이다.
+
+### 1.2 네 가지 모드
+
+- **연속 raw (continuous)**: 모든 샘플을 그대로. 데이터셋 초기 수집(dogfood, 실험실)에서 쓴다. 가장 비싸다.
+- **trigger 창 (event-triggered window)**: 링버퍼에 항상 최근 N초를 유지(**pre-roll**)하다가 trigger(wake word 후보, 탭 제스처, 낙상 의심, 사용자 버튼)가 오면 pre-roll + 이후 M초(**post-trigger**)를 저장한다. 블랙박스 방식. "trigger 전에 무슨 일이 있었나"가 라벨링에 결정적이라 pre-roll이 중요하다.
+- **샘플링 / duty-cycle**: 10분마다 10초씩, 또는 기기 100대 중 1대만, 또는 1시간에 한 번 무작위. 분포 통계(drift 감시, H7)에 쓸 편향 없는 표본이 필요할 때.
+- **온디바이스 요약 (features only)**: 1초마다 특징 벡터(평균, 분산, 스펙트럼 대역 에너지, 모델 출력 확률)만. 가장 싸고 프라이버시에도 유리하지만 원본 재처리가 불가능하다.
+
+```svg
+<svg viewBox="0 0 680 290" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="13">로깅 모드 — 10분 구간에서 무엇이 저장되나 (오디오 창 길이는 보이도록 과장)</text><text x="20" y="64" font-size="12">A 연속 raw (전부)</text><rect x="180" y="52" width="380" height="18" fill="#4a7bd0" fill-opacity="0.75"/><text x="572" y="66" font-size="12">2878 MB/day</text><text x="20" y="114" font-size="12">C IMU 상시 + 오디오 trigger</text><rect x="180" y="108" width="380" height="6" fill="#888" fill-opacity="0.7"/><rect x="244" y="98" width="12" height="18" fill="#e08a3c" fill-opacity="0.8"/><rect x="256" y="98" width="36" height="18" fill="#4a7bd0" fill-opacity="0.75"/>
+<line x1="256" y1="92" x2="256" y2="122" stroke="#d0564a" stroke-width="2"/><rect x="358" y="98" width="12" height="18" fill="#e08a3c" fill-opacity="0.8"/><rect x="370" y="98" width="36" height="18" fill="#4a7bd0" fill-opacity="0.75"/><line x1="370" y1="92" x2="370" y2="122" stroke="#d0564a" stroke-width="2"/><rect x="453" y="98" width="12" height="18" fill="#e08a3c" fill-opacity="0.8"/><rect x="465" y="98" width="36" height="18" fill="#4a7bd0" fill-opacity="0.75"/><line x1="465" y1="92" x2="465" y2="122" stroke="#d0564a" stroke-width="2"/><text x="572" y="114" font-size="12">177 MB/day</text>
+<text x="20" y="164" font-size="12">D IMU 상시 + 오디오 duty</text><rect x="180" y="158" width="380" height="6" fill="#888" fill-opacity="0.7"/><rect x="180" y="148" width="6.3" height="18" fill="#4a7bd0" fill-opacity="0.75"/><rect x="243.3" y="148" width="6.3" height="18" fill="#4a7bd0" fill-opacity="0.75"/><rect x="306.7" y="148" width="6.3" height="18" fill="#4a7bd0" fill-opacity="0.75"/><rect x="370" y="148" width="6.3" height="18" fill="#4a7bd0" fill-opacity="0.75"/><rect x="433.3" y="148" width="6.3" height="18" fill="#4a7bd0" fill-opacity="0.75"/><rect x="496.7" y="148" width="6.3" height="18" fill="#4a7bd0" fill-opacity="0.75"/>
+<text x="572" y="164" font-size="12">159 MB/day</text><text x="20" y="214" font-size="12">E 특징만 (32 float/s)</text><line x1="180" y1="207" x2="560" y2="207" stroke="#3f9a6b" stroke-width="3" stroke-dasharray="2 4"/><text x="572" y="214" font-size="12">11 MB/day</text><line x1="180" y1="240" x2="560" y2="240" stroke="currentColor"/><line x1="180" y1="240" x2="180" y2="245" stroke="currentColor"/><text x="180" y="258" font-size="12" text-anchor="middle">0</text><line x1="306.7" y1="240" x2="306.7" y2="245" stroke="currentColor"/><text x="306.7" y="258" font-size="12" text-anchor="middle">200 s</text><line x1="433.3" y1="240" x2="433.3" y2="245" stroke="currentColor"/><text x="433.3" y="258" font-size="12" text-anchor="middle">400 s</text>
+<line x1="560" y1="240" x2="560" y2="245" stroke="currentColor"/><text x="560" y="258" font-size="12" text-anchor="middle">600 s</text><rect x="180" y="270" width="12" height="10" fill="#e08a3c" fill-opacity="0.8"/><text x="198" y="279" font-size="12">pre-roll</text><rect x="262" y="270" width="12" height="10" fill="#4a7bd0" fill-opacity="0.75"/><text x="280" y="279" font-size="12">오디오 저장</text><rect x="362" y="273" width="12" height="4" fill="#888"/><text x="380" y="279" font-size="12">IMU 상시</text><line x1="456" y1="268" x2="456" y2="282" stroke="#d0564a" stroke-width="2"/><text x="464" y="279" font-size="12">trigger</text>
+</svg>
+```
+
+그림 2 — 네 가지 모드를 10분 창으로 본 것. 오른쪽 숫자는 예제 1에서 계산한 하루 용량이다. duty-cycle 막대(10분마다 10 s)는 실제 축척이고, trigger 창(2 s pre-roll + 8 s post)은 보이도록 넓게 그렸다.
+
+### 1.3 손으로 계산 — 하루 용량
+
+센서 사양을 정해 두자 (G6의 표와 같은 가정).
+
+```
+IMU   : 6축 × 2 B × 100 Hz          = 1,200 B/s  → × 86,400 s = 103.68 MB/day
+audio : 16,000 Hz × 2 B (16-bit 모노) = 32,000 B/s → × 86,400 s = 2,764.8 MB/day
+PPG   : 25 Hz × 3 B (24-bit ADC 1채널) = 75 B/s    → × 86,400 s = 6.48 MB/day
+```
+
+말로 하면: **오디오가 IMU의 약 27배다.** 마이크를 하루 종일 raw로 남기는 순간 나머지 센서는 반올림 오차가 된다. 그래서 로깅 설계의 첫 결정은 거의 항상 "오디오를 어떻게 할까"다.
+
+trigger 모드를 손으로 해 보자. 하루에 trigger 200번, 창 하나 = pre-roll 2 s + post 8 s = 10 s라면 오디오는 200 × 10 s × 32,000 B/s = 64 MB/day. 연속(2,765 MB)의 2.3%다.
+
+### 1.4 코드로 확인 — 예제 1
+
+**예제 1** — 무엇을 확인하나: 센서별 하루 raw 크기와, 로깅 모드 여섯 가지의 하루 용량 (IMU에는 batch마다 8 B 레코드 헤더 오버헤드를 넣었다).
+
+```python
+# 웨어러블 하루(24 h) 로그 크기: 센서별 raw + 로깅 모드별 (가정 숫자는 주석에)
+DAY = 86400
+raw = {"IMU 6x16bit@100Hz": 100 * 6 * 2, "audio 16kHz 16bit": 16000 * 2, "PPG 25Hz 3B": 25 * 3}
+for k, bps in raw.items():
+    print("%-18s %7d B/s %9.1f MB/day" % (k, bps, bps * DAY / 1e6))
+imu, aud, ppg = raw.values()
+hdr = 1 + 8 / 300                    # IMU batch 25샘플(300 B)마다 rec 헤더 8 B → +2.7%
+modes = {                            # 모드별 하루 바이트
+    "A continuous raw (all)":          (imu * hdr + aud + ppg) * DAY,
+    "B IMU+PPG raw, audio off":        (imu * hdr + ppg) * DAY,
+    "C + triggered audio 200x(2+8s)":  (imu * hdr + ppg) * DAY + 200 * 10 * aud,
+    "D duty-cycled audio 10s/10min":   (imu * hdr + ppg) * DAY + (DAY / 600) * 10 * aud,
+    "E features only (32 float/s)":    32 * 4 * DAY,
+    "F events only (200x 64 B)":       200 * 64,
+}
+for k, b in modes.items():
+    print("%-32s %10.2f MB/day" % (k, b / 1e6))
+```
+
+```text
+IMU 6x16bit@100Hz     1200 B/s     103.7 MB/day
+audio 16kHz 16bit    32000 B/s    2764.8 MB/day
+PPG 25Hz 3B             75 B/s       6.5 MB/day
+A continuous raw (all)              2877.72 MB/day
+B IMU+PPG raw, audio off             112.92 MB/day
+C + triggered audio 200x(2+8s)       176.92 MB/day
+D duty-cycled audio 10s/10min        159.00 MB/day
+E features only (32 float/s)          11.06 MB/day
+F events only (200x 64 B)              0.01 MB/day
+```
+
+출력에서 볼 것: 연속 raw(A)는 하루 2.9 GB — MCU에 붙는 SPI NOR(보통 수 MB~수십 MB)에는 1시간도 못 담는다. 오디오를 끄면(B) 113 MB로 25분의 1이 되고, trigger 창(C)이나 duty-cycle(D)로 오디오를 조금 섞어도 160~180 MB다. 특징만(E) 남기면 11 MB, 이벤트만(F)이면 13 KB. 모드 선택이 압축(4절, 많아야 2배)보다 **한 자릿수 이상** 큰 레버다.
+
+### 1.5 트레이드오프 표
+
+| 모드 | 저장·업로드 | 전력 | 프라이버시 (H6) | 라벨·재처리 가치 | 언제 쓰나 |
+|---|---|---|---|---|---|
+| 연속 raw | 최대 (오디오 포함 시 GB/day) | flash write·업로드 전력 최대 | 최악 — 대화 전체가 남는다 | 최고 — 무엇이든 다시 계산 | 사내 dogfood, 실험실 수집, 초기 데이터셋 |
+| trigger 창 | 작음 (trigger 수 × 창 길이) | 링버퍼 유지 비용 + 가끔 write | 중간 — trigger 주변만 | 높음 — 하지만 trigger가 놓친 사건은 영영 없다 (선택 편향) | wake word false accept/reject 수집, 제스처 hard example |
+| 샘플링 / duty | 조절 가능 | 조절 가능 | 중간 | 분포 통계에 좋음 — 편향 없는 표본 | drift 감시(H7), fleet 통계(H8) |
+| 특징만 | 최소 | 최소 | 좋음 — 원음 복원 불가 (단, 특징으로도 추론 가능한 정보 주의) | 낮음 — 특징 정의 바꾸면 무용 | 양산 기기 telemetry, 모델 출력 모니터링 |
+
+함정 하나를 강조한다. **trigger 모드는 데이터셋에 선택 편향을 넣는다.** 현재 모델의 trigger가 놓친 wake word(false reject)는 저장되지 않으므로, 그 데이터로 재학습한 모델은 놓치는 패턴을 영원히 못 배운다. 그래서 trigger 창에 **작은 비율의 무작위 창**(예: 1%)을 섞어 두는 것이 정석이다. 이것은 SSD에서 "에러가 난 블록만 로그를 남기면 정상 블록 분포를 모른다"와 같은 이야기다.
+
+---
+
+## 2. 레코드·청크 포맷 설계
+
+### 2.1 직관 — 택배 상자 세 겹
+
+- **segment (파일)**: 트럭 한 대. 겉에 "어느 기기, 어떤 FW, 언제 출발, 센서 설정이 뭐였나"가 적힌 송장이 한 장 붙는다.
+- **chunk**: 상자 하나. **전원 차단에 대한 원자 단위**다. 상자 하나는 통째로 도착하거나 통째로 버려진다. 상자마다 내용물 목록과 봉인(CRC + commit 표시)이 있다.
+- **record**: 상자 안의 물건 하나. "IMU 25샘플", "오디오 4000샘플", "설정 변경", "드롭 카운터". 물건마다 꼬리표(type, length, timestamp)가 붙어 있어서, 모르는 물건은 크기만 보고 건너뛸 수 있다.
+
+### 2.2 각 층이 담아야 할 것
+
+**segment 헤더** — 파일 하나에 한 번. 이 정보가 없으면 몇 달 뒤 데이터를 해석할 수 없다.
+
+- magic, 포맷 버전, **헤더 길이** (헤더가 커져도 옛 reader가 건너뛸 수 있게)
+- device ID (기기별 split·디버깅 — H5), FW 버전 (버전별 품질 비교 — H7·H8), boot count
+- segment 순번 (업로드·중복 제거 — H2·H3)
+- 시계 정보: segment 시작의 MCU monotonic 시각, 그때의 wall clock 추정, 시계 출처 (G7: "로그 포맷은 시간 정보의 계약이다")
+- 센서 설정 스냅샷 — ODR, full-scale range, 필터 설정. 여기서는 설정을 config record로 넣었다 (설정은 세션 중에도 바뀌므로 2.4절)
+
+**chunk 헤더** — commit 단위마다.
+
+- magic (resync용), chunk 순번 (빠진 chunk 검출), 기준 시각 `t_base_us` (64-bit)
+- payload 길이, 레코드 수, payload CRC-32, **헤더 자체의 CRC-32** (길이 필드가 깨졌는지 먼저 확인)
+- 맨 끝 commit marker — 마지막에 쓰는 4바이트
+
+**record 헤더** — 8바이트: type(1) · version(1) · length(2) · `t_off_us`(4, chunk 기준 시각에서의 offset). 32-bit µs offset은 71.6분까지 표현되므로 chunk 하나(수백 ms~수 초) 안에서는 충분하다.
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="13">HLG1 로그 레이아웃 — segment → chunk → record (바이트 폭은 개념적)</text><rect x="20" y="44" width="70" height="36" fill="#4a7bd0" fill-opacity="0.3" stroke="currentColor"/><text x="55" y="66" font-size="12" text-anchor="middle">seg hdr</text><rect x="90" y="44" width="60" height="36" fill="#e08a3c" fill-opacity="0.3" stroke="currentColor"/><text x="120" y="66" font-size="12" text-anchor="middle">chk hdr</text><rect x="150" y="44" width="24" height="36" fill="#3f9a6b" fill-opacity="0.3" stroke="currentColor"/><text x="162" y="66" font-size="12" text-anchor="middle">R</text><rect x="174" y="44" width="70" height="36" fill="#888" fill-opacity="0.15" stroke="currentColor"/>
+<text x="209" y="66" font-size="12" text-anchor="middle">IMU 304</text><rect x="244" y="44" width="24" height="36" fill="#3f9a6b" fill-opacity="0.3" stroke="currentColor"/><text x="256" y="66" font-size="12" text-anchor="middle">R</text><rect x="268" y="44" width="150" height="36" fill="#888" fill-opacity="0.15" stroke="currentColor"/><text x="343" y="66" font-size="12" text-anchor="middle">audio 8004</text><rect x="418" y="44" width="44" height="36" fill="#d0564a" fill-opacity="0.3" stroke="currentColor"/><text x="440" y="66" font-size="12" text-anchor="middle">CMIT</text><rect x="470" y="44" width="60" height="36" fill="#e08a3c" fill-opacity="0.3" stroke="currentColor"/>
+<text x="500" y="66" font-size="12" text-anchor="middle">chk hdr</text><rect x="530" y="44" width="110" height="36" fill="none" stroke="currentColor" stroke-dasharray="4 3"/><text x="585" y="66" font-size="12" text-anchor="middle">… 쓰는 중</text><line x1="90" y1="90" x2="462" y2="90" stroke="currentColor"/><line x1="90" y1="86" x2="90" y2="94" stroke="currentColor"/><line x1="462" y1="86" x2="462" y2="94" stroke="currentColor"/><text x="276" y="108" font-size="12" text-anchor="middle">chunk = 원자적 commit 단위 (예제 2: 8,360 B)</text><text x="20" y="140" font-size="13">chunk header 32 B (little-endian, packed)</text>
+<rect x="20" y="150" width="64" height="30" fill="#e08a3c" fill-opacity="0.25" stroke="currentColor"/><text x="52" y="170" font-size="12" text-anchor="middle">magic</text><rect x="84" y="150" width="64" height="30" fill="#e08a3c" fill-opacity="0.25" stroke="currentColor"/><text x="116" y="170" font-size="12" text-anchor="middle">seq</text><rect x="148" y="150" width="128" height="30" fill="#e08a3c" fill-opacity="0.25" stroke="currentColor"/><text x="212" y="170" font-size="12" text-anchor="middle">t_base_us (u64)</text><rect x="276" y="150" width="64" height="30" fill="#e08a3c" fill-opacity="0.25" stroke="currentColor"/><text x="308" y="170" font-size="12" text-anchor="middle">len</text>
+<rect x="340" y="150" width="32" height="30" fill="#e08a3c" fill-opacity="0.25" stroke="currentColor"/><text x="356" y="170" font-size="12" text-anchor="middle">n</text><rect x="372" y="150" width="32" height="30" fill="#e08a3c" fill-opacity="0.25" stroke="currentColor"/><text x="388" y="170" font-size="12" text-anchor="middle">flg</text><rect x="404" y="150" width="64" height="30" fill="#d0564a" fill-opacity="0.25" stroke="currentColor"/><text x="436" y="170" font-size="12" text-anchor="middle">p_crc</text><rect x="468" y="150" width="64" height="30" fill="#d0564a" fill-opacity="0.25" stroke="currentColor"/><text x="500" y="170" font-size="12" text-anchor="middle">h_crc</text>
+<text x="52" y="196" font-size="12" text-anchor="middle">4</text><text x="116" y="196" font-size="12" text-anchor="middle">4</text><text x="212" y="196" font-size="12" text-anchor="middle">8</text><text x="308" y="196" font-size="12" text-anchor="middle">4</text><text x="356" y="196" font-size="12" text-anchor="middle">2</text><text x="388" y="196" font-size="12" text-anchor="middle">2</text><text x="436" y="196" font-size="12" text-anchor="middle">4</text><text x="500" y="196" font-size="12" text-anchor="middle">4</text><text x="20" y="228" font-size="13">record header 8 B + payload</text><rect x="20" y="238" width="48" height="30" fill="#3f9a6b" fill-opacity="0.25" stroke="currentColor"/><text x="44" y="258" font-size="12" text-anchor="middle">type</text><rect x="68" y="238" width="48" height="30" fill="#3f9a6b" fill-opacity="0.25" stroke="currentColor"/><text x="92" y="258" font-size="12" text-anchor="middle">ver</text><rect x="116" y="238" width="64" height="30" fill="#3f9a6b" fill-opacity="0.25" stroke="currentColor"/><text x="148" y="258" font-size="12" text-anchor="middle">len</text>
+<rect x="180" y="238" width="128" height="30" fill="#3f9a6b" fill-opacity="0.25" stroke="currentColor"/><text x="244" y="258" font-size="12" text-anchor="middle">t_off_us (u32)</text><rect x="308" y="238" width="220" height="30" fill="#888" fill-opacity="0.15" stroke="currentColor"/><text x="418" y="258" font-size="12" text-anchor="middle">payload (len B) — type별 해석</text><text x="20" y="296" font-size="12">모르는 type → len만큼 건너뛴다 (forward compatibility).</text><text x="20" y="314" font-size="12">h_crc가 맞아야 len을 믿는다 → 깨진 길이로 엉뚱한 곳을 읽는 일이 없다.</text>
+</svg>
+```
+
+그림 3 — 이 노트의 포맷 HLG1. segment 헤더 52 B가 파일 앞에 한 번, 그 뒤로 chunk가 이어진다. chunk 안의 R은 8 B record 헤더다. 끝의 CMIT(commit marker)가 쓰여 있어야 chunk가 유효하다.
+
+### 2.3 설계 원칙 다섯 가지
+
+1. **self-describing vs schema-ID.** 레코드마다 필드 이름을 넣으면(JSON, 키가 있는 CBOR) 스키마 없이도 읽히지만 크다 (3절에서 1.5~3배). 반대로 "type 0x01 = IMU v1"처럼 **번호만** 넣고 스키마는 별도 문서(.proto, C 헤더, 스키마 레지스트리)에 두면 작다. 센서 로그는 거의 항상 후자다. 대신 schema-ID → 스키마 매핑을 **버전 관리**하고 (H3), segment 헤더에 포맷 버전을 넣는다.
+2. **TLV (type-length-value)로 forward compatibility.** reader는 모르는 type을 length만큼 건너뛴다. 새 FW가 새 레코드 type을 추가해도 옛 파서가 죽지 않는다. 같은 type 안에서 레이아웃을 바꿀 때는 `ver`를 올린다. **필드를 중간에 끼워 넣지 말고 끝에 붙인다** (예제 6에서 왜 그런지 본다).
+3. **길이는 CRC로 보호한다.** 깨진 length 필드는 파서를 엉뚱한 곳으로 보내 쓰레기를 "정상 레코드"로 읽게 만든다. 그래서 chunk 헤더에 자기 CRC를 둔다.
+4. **endianness와 alignment는 명시한다 (A6 연결).** 이 포맷은 전부 little-endian, `__attribute__((packed))`, `_Static_assert`로 크기를 고정한다. Cortex-M과 x86/ARM64 호스트는 모두 little-endian이라 실수해도 에러가 안 나지만, 그래서 더 위험하다 (A6 4.4절). packed 구조체의 정렬 안 된 필드 접근은 Cortex-M0 같은 코어에서 fault를 낼 수 있으니 `memcpy`로 읽고 쓴다.
+5. **timestamp는 시계 출처와 함께.** 레코드 시각은 MCU monotonic(µs)이고, segment 헤더에 그 시계와 wall clock의 관계를 남긴다. 샘플별 시각은 G7의 방법(IRQ 시각 역산 + ODR 회귀)으로 batch 헤더에서 복원한다. G7 예제 14의 22바이트 batch 헤더가 이 포맷의 IMU payload 앞부분 역할을 한다.
+
+### 2.4 메타데이터 스냅샷 — 설정이 바뀌는 순간 기록한다
+
+센서 설정(ODR, full-scale, 필터, 마이크 gain)은 세션 중에 바뀔 수 있다 (전력 모드 전환, 원격 설정 — H8). 그래서 설정은 segment 헤더에만 두지 않고 **config record**로도 남긴다. 규칙은 단순하다: (1) segment를 열 때 한 번, (2) 설정이 바뀔 때마다 그 즉시, (3) 바뀐 설정이 적용된 첫 샘플보다 **먼저** 같은 chunk에 넣는다. 이 순서가 틀리면 ±4 g로 바뀐 데이터가 ±2 g 스케일로 변환된다 — 에러 없이 값이 두 배가 된다 (A6 4.6절의 raw count → 물리 단위).
+
+### 2.5 코드로 확인 — 예제 2: C writer
+
+**예제 2** — 무엇을 확인하나: 펌웨어가 쓰듯 packed 구조체로 segment 헤더 + chunk 40개(250 ms마다 IMU 25샘플 + 오디오 4000샘플)를 쓰고, CRC-32가 표준 값(`"123456789"` → `0xCBF43926`)과 같은지. 일부 chunk에는 config·event·드롭 카운터와 "미래 버전에서 추가된" type 0x7F 레코드를 넣었다.
+
+```c
+/* hlog_writer.c — 청크 단위 센서 로그 writer (segment header + chunk + record + CRC-32 + commit) */
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include <stddef.h>
+
+#define SEG_MAGIC   0x31474C48u   /* "HLG1" (LE 메모리: 48 4C 47 31) */
+#define CHK_MAGIC   0x4B4E4843u   /* "CHNK" */
+#define COMMIT_MARK 0x54494D43u   /* "CMIT" */
+enum { R_IMU = 0x01, R_AUDIO = 0x02, R_EVENT = 0x03, R_CONFIG = 0x04, R_DROPS = 0x10, R_FUTURE = 0x7F };
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic; uint16_t fmt_ver, hdr_len;
+    uint64_t device_id; uint32_t fw_ver, boot_count, seg_seq;
+    uint64_t t0_mono_us, t0_utc_ms;
+    uint8_t clock_src, flags; uint16_t reserved; uint32_t hdr_crc;
+} seg_hdr_t;
+typedef struct __attribute__((packed)) {
+    uint32_t magic, chunk_seq; uint64_t t_base_us;
+    uint32_t payload_len; uint16_t n_rec, flags; uint32_t payload_crc, hdr_crc;
+} chunk_hdr_t;
+typedef struct __attribute__((packed)) { uint8_t type, ver; uint16_t len; uint32_t t_off_us; } rec_hdr_t;
+_Static_assert(sizeof(seg_hdr_t) == 52, "segment header contract");
+_Static_assert(sizeof(chunk_hdr_t) == 32, "chunk header contract");
+_Static_assert(sizeof(rec_hdr_t) == 8, "record header contract");
+
+static uint32_t crc_tab[256];
+static void crc_init(void) {
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; k++) c = (c & 1u) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+        crc_tab[i] = c;
+    }
+}
+static uint32_t crc32(const void *p, size_t n) {          /* IEEE 802.3, zlib.crc32와 같은 값 */
+    const uint8_t *b = p; uint32_t c = 0xFFFFFFFFu;
+    while (n--) c = crc_tab[(c ^ *b++) & 0xFFu] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+
+static uint8_t payload[16384]; static size_t plen; static uint16_t nrec;
+static void add_rec(uint8_t type, uint32_t t_off, const void *data, uint16_t len) {
+    rec_hdr_t r = { type, 1, len, t_off };
+    memcpy(payload + plen, &r, sizeof r); memcpy(payload + plen + sizeof r, data, len);
+    plen += sizeof r + len; nrec++;
+}
+static void commit_chunk(FILE *f, uint32_t seq, uint64_t t_base) {   /* 순서: hdr → payload → commit */
+    chunk_hdr_t h = { CHK_MAGIC, seq, t_base, (uint32_t)plen, nrec, 0, crc32(payload, plen), 0 };
+    h.hdr_crc = crc32(&h, offsetof(chunk_hdr_t, hdr_crc));
+    uint32_t cm = COMMIT_MARK;
+    fwrite(&h, sizeof h, 1, f); fwrite(payload, 1, plen, f); fwrite(&cm, 4, 1, f);
+    plen = 0; nrec = 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) return 1;
+    crc_init();
+    FILE *f = fopen(argv[1], "wb");
+    seg_hdr_t s = { SEG_MAGIC, 0x0100, sizeof(seg_hdr_t), 0xD0E5A1C0FFEE0001ull, (2u << 16) | (7u << 8) | 3u,
+                    42, 7, 5000000ull, 1790000000000ull, 1, 0, 0, 0 };
+    s.hdr_crc = crc32(&s, offsetof(seg_hdr_t, hdr_crc));
+    fwrite(&s, sizeof s, 1, f);
+    uint16_t imu_seq = 0; uint32_t aud_seq = 0;
+    for (uint32_t c = 0; c < 40; c++) {                     /* 40 chunk × 250 ms = 10 s */
+        uint64_t t_base = s.t0_mono_us + (uint64_t)c * 250000u;
+        if (c == 0) { const char cfg[] = "imu_odr=100;acc_fs=4;gyr_fs=500;mic_sr=16000"; add_rec(R_CONFIG, 0, cfg, sizeof cfg - 1); }
+        uint8_t imu[4 + 25 * 12]; memcpy(imu, &imu_seq, 2); imu[2] = 25; imu[3] = 0;
+        for (int i = 0; i < 25; i++) for (int a = 0; a < 6; a++) {
+            int16_t v = (int16_t)(a == 2 ? 8192 : 0) + (int16_t)(300 * sin(0.02 * (imu_seq + i) * (a + 1)));
+            memcpy(imu + 4 + (i * 6 + a) * 2, &v, 2);
+        }
+        add_rec(R_IMU, 0, imu, sizeof imu); imu_seq += 25;
+        uint8_t aud[4 + 4000 * 2]; memcpy(aud, &aud_seq, 4);
+        for (int i = 0; i < 4000; i++) { int16_t v = (int16_t)(2000 * sin(6.283185307179586 * 440.0 * (aud_seq + i) / 16000.0)); memcpy(aud + 4 + 2 * i, &v, 2); }
+        add_rec(R_AUDIO, 0, aud, sizeof aud); aud_seq += 4000;
+        if (c == 17) { uint8_t ev[6] = { 0x01, 0x00, 0x5A, 0, 0, 0 }; add_rec(R_EVENT, 123456, ev, 6); }
+        if (c == 23) { const char fut[] = "v2-only record"; add_rec(R_FUTURE, 1000, fut, sizeof fut - 1); }
+        if (c == 39) { uint32_t drops[2] = { 0, 4000 }; add_rec(R_DROPS, 249000, drops, 8); }
+        commit_chunk(f, c, t_base);
+    }
+    long size = ftell(f); fclose(f);
+    printf("seg_hdr=%zu B, chunk_hdr=%zu B, rec_hdr=%zu B\n", sizeof(seg_hdr_t), sizeof(chunk_hdr_t), sizeof(rec_hdr_t));
+    printf("wrote 40 chunks, %ld bytes, crc32(\"123456789\")=0x%08X\n", size, crc32("123456789", 9));
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 hlog_writer.c -o hlog_writer -lm && ./hlog_writer log.bin && xxd -l 96 log.bin
+```
+
+```text
+seg_hdr=52 B, chunk_hdr=32 B, rec_hdr=8 B
+wrote 40 chunks, 334556 bytes, crc32("123456789")=0xCBF43926
+00000000: 484c 4731 0001 3400 0100 eeff c0a1 e5d0  HLG1..4.........
+00000010: 0307 0200 2a00 0000 0700 0000 404b 4c00  ....*.......@KL.
+00000020: 0000 0000 006c 50c4 a001 0000 0100 0000  .....lP.........
+00000030: 7c42 f863 4348 4e4b 0000 0000 404b 4c00  |B.cCHNK....@KL.
+00000040: 0000 0000 b820 0000 0300 0000 d805 e85d  ..... .........]
+00000050: 441d c2eb 0401 2c00 0000 0000 696d 755f  D.....,.....imu_
+```
+
+출력에서 볼 것:
+
+- `0xCBF43926`은 CRC-32/IEEE의 표준 check 값이다. 펌웨어 CRC와 호스트 `zlib.crc32`가 같은 알고리즘인지 이 한 줄로 확인한다. 실무에서 가장 흔한 버그가 "다른 CRC-32 변형(초기값·반사·최종 XOR)"이다.
+- 파일 크기를 손으로 맞춰 보자. chunk 하나 = 헤더 32 + IMU 레코드(8 + 4 + 300) + 오디오 레코드(8 + 4 + 8000) + commit 4 = **8,360 B**. 40개면 334,400 B. 여기에 segment 헤더 52, config 레코드 8 + 44 = 52, event 8 + 6 = 14, 미래 레코드 8 + 14 = 22, 드롭 카운터 8 + 8 = 16을 더하면 **334,556 B** — 출력과 같다.
+- hexdump 0x34(=52) 위치에서 `CHNK`가 시작한다. 그 뒤 `0000 0000`(seq 0), `404b 4c00 0000 0000`(t_base = 0x4C4B40 = 5,000,000 µs), `b820 0000`(payload 0x20B8 = 8,376 B — config 레코드가 들어간 첫 chunk라 8,324 + 52). little-endian으로 읽는 연습이 된다.
+- 오버헤드는 chunk당 헤더 32 + commit 4 + 레코드 헤더 2 × 8 = 52 B, 8,360 B 중 0.6%다. 포맷의 안전장치는 거의 공짜다.
+
+### 2.6 코드로 확인 — 예제 3: 검증하는 reader
+
+reader는 writer보다 중요하다. 수년 동안 수천 대의 기기, 수십 개의 FW 버전이 만든 파일을 읽어야 하고, 그중 일부는 반드시 깨져 있다. 원칙: **검증 없이는 한 바이트도 믿지 않는다. 깨진 곳은 건너뛰고 계속 읽는다. 무엇을 건너뛰었는지 센다.**
+
+**예제 3** — 무엇을 확인하나: 같은 포맷의 Python reader(`h1log.py`, 6절의 전원 차단 실험에서도 쓴다)가 (1) 정상 파일, (2) 200,001 바이트에서 잘린 파일, (3) 중간에 1비트가 뒤집힌 파일을 어떻게 처리하는지, 그리고 모르는 type 0x7F를 건너뛰는지.
+
+```python
+# h1log.py — HLG1 포맷 reader(검증·복구) + 같은 포맷의 Python writer
+import struct, zlib
+SEG = struct.Struct("<IHHQIIIQQBBHI")     # 52 B segment header
+CHK = struct.Struct("<IIQIHHII")          # 32 B chunk header
+REC = struct.Struct("<BBHI")              # 8 B record header
+SEG_MAGIC, CHK_MAGIC, COMMIT = 0x31474C48, 0x4B4E4843, 0x54494D43
+KNOWN = {1: "imu", 2: "audio", 3: "event", 4: "config", 0x10: "drops"}
+
+def make_chunk(seq, t_base, records):                 # records = [(type, t_off, bytes)]
+    body = b"".join(REC.pack(t, 1, len(d), off) + d for t, off, d in records)
+    h = CHK.pack(CHK_MAGIC, seq, t_base, len(body), len(records), 0, zlib.crc32(body), 0)
+    h = h[:-4] + struct.pack("<I", zlib.crc32(h[:-4]))
+    return h + body + struct.pack("<I", COMMIT)
+
+def read_log(buf):
+    st = dict(chunks=0, records={}, unknown=0, bad=0, torn_tail=0, resync_skipped=0)
+    f = SEG.unpack_from(buf, 0)
+    assert f[0] == SEG_MAGIC and zlib.crc32(buf[:48]) == f[-1], "bad segment header"
+    pos, out = f[2], []                                # hdr_len 만큼 건너뜀 → 헤더가 커져도 OK
+    while pos + CHK.size <= len(buf):
+        m, seq, tb, plen, nrec, fl, pcrc, hcrc = CHK.unpack_from(buf, pos)
+        end = pos + CHK.size + plen + 4
+        hdr_ok = m == CHK_MAGIC and zlib.crc32(buf[pos:pos + 28]) == hcrc
+        if hdr_ok and end > len(buf):
+            st["torn_tail"] += 1; break                 # 헤더는 멀쩡, 몸통이 잘림 = 전원 차단 꼬리
+        if not (hdr_ok and zlib.crc32(buf[pos + 32:end - 4]) == pcrc and buf[end - 4:end] == b"CMIT"):
+            nxt = buf.find(b"CHNK", pos + 1)            # 손상 → 다음 magic으로 resync
+            if nxt < 0: st["torn_tail"] += 1; break     # 뒤에 더 없음 = 꼬리 쓰레기/erased
+            st["bad"] += 1; st["resync_skipped"] += nxt - pos; pos = nxt; continue
+        p = pos + CHK.size
+        for _ in range(nrec):
+            t, ver, ln, off = REC.unpack_from(buf, p)
+            name = KNOWN.get(t)
+            if name is None: st["unknown"] += 1        # 모르는 type은 len으로 건너뛴다
+            else:
+                st["records"][name] = st["records"].get(name, 0) + 1
+                out.append((seq, tb + off, name, buf[p + 8:p + 8 + ln]))
+            p += REC.size + ln
+        st["chunks"] += 1; pos = end
+    if 0 < len(buf) - pos < CHK.size: st["torn_tail"] += 1   # 헤더조차 다 못 씀
+    return f, out, st
+```
+
+```python
+# C writer가 만든 log.bin을 검증하며 읽기 + 잘린 파일 + 중간 손상 파일
+import numpy as np
+from h1log import read_log
+buf = open("log.bin", "rb").read()
+seg, recs, st = read_log(buf)
+print("device=%016X fw=%d.%d.%d boot=%d seg=%d" % (seg[3], seg[4] >> 16, seg[4] >> 8 & 255, seg[4] & 255, seg[5], seg[6]))
+print("full   :", st)
+imu = np.concatenate([np.frombuffer(d[4:], "<i2") for _, _, n, d in recs if n == "imu"]).reshape(-1, 6)
+print("imu shape", imu.shape, "first az =", imu[0, 2], " config:", [d.decode() for _, _, n, d in recs if n == "config"][0][:24])
+cut = buf[:200_001]                                   # 200001 바이트에서 전원 차단
+print("cut    :", read_log(cut)[2])
+bad = bytearray(buf); bad[100_000] ^= 0x01            # 중간 1비트 flip (retention error 흉내)
+print("bitflip:", read_log(bytes(bad))[2])
+```
+
+```text
+device=D0E5A1C0FFEE0001 fw=2.7.3 boot=42 seg=7
+full   : {'chunks': 40, 'records': {'config': 1, 'imu': 40, 'audio': 40, 'event': 1, 'drops': 1}, 'unknown': 1, 'bad': 0, 'torn_tail': 0, 'resync_skipped': 0}
+imu shape (1000, 6) first az = 8192  config: imu_odr=100;acc_fs=4;gyr
+cut    : {'chunks': 23, 'records': {'config': 1, 'imu': 23, 'audio': 23, 'event': 1}, 'unknown': 0, 'bad': 0, 'torn_tail': 1, 'resync_skipped': 0}
+bitflip: {'chunks': 39, 'records': {'config': 1, 'imu': 39, 'audio': 39, 'event': 1, 'drops': 1}, 'unknown': 1, 'bad': 1, 'torn_tail': 0, 'resync_skipped': 8360}
+```
+
+출력에서 볼 것:
+
+- **정상 파일**: C가 쓴 것을 Python이 그대로 읽는다. 40 chunk, IMU 1000샘플 × 6축, az = 8192 (±4 g에서 1 g). type 0x7F는 `unknown: 1`로 세고 건너뛰었다 — 옛 reader가 새 FW 파일을 읽어도 죽지 않는다.
+- **잘린 파일**: 손으로 맞춰 보자. chunk k의 끝 = 52 + 52(config) + 8,360 × (k + 1), chunk 17 이후 event 14 B 추가. chunk 22 끝 = 104 + 8,360 × 23 + 14 = 192,398, chunk 23 끝 = 200,758 + 22(미래 레코드) = 200,780 > 200,001. 그래서 완전한 chunk 23개를 살리고 24번째를 `torn_tail`로 버렸다. 버린 것은 마지막 250 ms뿐이다.
+- **비트 플립**: 1비트가 깨진 chunk 하나(정확히 8,360 B)만 버리고 다음 `CHNK` magic에서 resync해서 나머지 39개를 살렸다. CRC가 없었다면 이 1비트는 IMU 값 하나를 조용히 바꿨을 것이다. 깨진 chunk 수(`bad`)는 그 자체로 H7의 품질 지표다 — 특정 기기에서 늘어나면 flash 수명이나 전원 문제다.
+
+### 2.7 흔한 함정
+
+- **CRC 범위 실수**: 헤더 CRC를 자기 자신(CRC 필드)까지 포함해서 계산하면 영원히 안 맞는다. 위 코드는 `offsetof(chunk_hdr_t, hdr_crc)`까지만 계산한다.
+- **resync 성능**: magic을 바이트 단위로 찾는 것은 손상이 드물 때만 괜찮다. NAND/NOR라면 chunk를 page 경계에서 시작하도록 정렬하면 resync를 page 단위로 할 수 있다 (8절).
+- **magic이 데이터에 나타날 수 있다**: 오디오 샘플이 우연히 `CHNK`와 같은 바이트를 가질 수 있다. 그래서 magic만 보지 않고 헤더 CRC까지 확인한다. 위 reader는 magic을 찾은 뒤 다시 루프에서 헤더 CRC를 검사한다.
+- **reader가 예외로 죽는다**: 파일 하나가 깨졌다고 ingestion 배치 전체가 멈추면 안 된다 (H3). 통계를 남기고 계속 간다.
+
+---
+
+## 3. 직렬화 포맷 — raw, protobuf, CBOR, FlatBuffers, JSON
+
+### 3.1 직관 — 같은 숫자를 포장하는 다섯 가지 방법
+
+같은 IMU 샘플 150개(25샘플 × 6축)를 포장한다고 하자.
+
+- **raw packed binary**: C 구조체를 그대로 덤프. 크기 최소·속도 최대, 대신 스키마는 "C 헤더 파일"이라는 바깥 문서다.
+- **protobuf**: `.proto` 스키마 + 필드 번호 + varint. 작은 정수는 1바이트로 줄어든다. 새 필드 추가에 강하다. MCU용 구현으로 nanopb가 널리 쓰인다.
+- **CBOR** (RFC 8949): "바이너리 JSON". 스키마 없이 self-describing. 키 이름을 넣으면 커지지만, 큰 배열을 byte string 하나로 넣으면 raw에 가까워진다. MCU용 구현으로 TinyCBOR, QCBOR, Zephyr의 zcbor가 있다.
+- **FlatBuffers**: 직렬화된 버퍼를 **파싱 없이 그대로** 읽는다(zero-copy). offset table(vtable)과 정렬 패딩 때문에 약간 크다. TFLite 모델 파일(`.tflite`)이 FlatBuffers다 (F1).
+- **JSON**: 사람이 읽는다. 숫자를 10진 문자열로 쓰니 3배쯤 크다. 로그 본문으로는 거의 안 쓰고, 설정·매니페스트에 쓴다.
+
+### 3.2 varint와 zigzag — 손으로 인코딩해 보기
+
+protobuf의 정수 인코딩 **varint**는 7비트씩 끊어서 쓰고, 각 바이트의 최상위 비트(MSB)를 "다음 바이트가 더 있음" 표시로 쓴다. 0~127은 1바이트, 128~16,383은 2바이트, 16,384~2,097,151은 3바이트다.
+
+음수는 그냥 varint로 쓰면 64-bit 2의 보수라 10바이트가 된다. 그래서 `sint32`는 **zigzag** 변환을 먼저 한다: 0, −1, 1, −2, 2 … → 0, 1, 2, 3, 4 …
+
+```
+zigzag(v) = (v << 1) ^ (v >> 31)        (32-bit 산술 시프트)
+
+손계산: v = 300
+  zigzag = 600 = 0b100_1011000
+  하위 7비트 1011000 = 0x58, 뒤에 더 있음 → 0x58 | 0x80 = 0xD8
+  남은 600 >> 7 = 4 → 0x04 (마지막)
+  → d8 04  (2 B)
+```
+
+말로 하면: zigzag는 "절댓값이 작은 수는 부호와 상관없이 작은 양수로" 바꾸고, varint는 "작은 양수는 적은 바이트로" 쓴다. 둘을 합치면 **0 근처에 몰린 값**이 싸진다. 센서 raw 값(가속도 z축 8192)은 0 근처가 아니지만, **이웃 샘플과의 차이(delta)**는 0 근처다. 이것이 3.4절과 4절의 핵심이다.
+
+**예제 4** — 무엇을 확인하나: 손으로 짠 varint·zigzag 인코더가 protobuf 라이브러리와 바이트 단위로 같은지. `protoc` 컴파일러가 없어서(`which protoc` → not found) 메시지 타입을 `descriptor_pb2`로 코드에서 정의했다 (`pbdyn.py`, 예제 5·6에서도 쓴다).
+
+```python
+# pbdyn.py — protoc 없이 .proto를 코드로 정의: message ImuBatch { uint64 t0_us=1; uint32 seq=2; repeated sint32 s=3; }
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+F = descriptor_pb2.FieldDescriptorProto
+fdp = descriptor_pb2.FileDescriptorProto(name="imu.proto", package="h1", syntax="proto3")
+m = fdp.message_type.add(name="ImuBatch")
+m.field.add(name="t0_us", number=1, type=F.TYPE_UINT64, label=F.LABEL_OPTIONAL)
+m.field.add(name="seq", number=2, type=F.TYPE_UINT32, label=F.LABEL_OPTIONAL)
+m.field.add(name="s", number=3, type=F.TYPE_SINT32, label=F.LABEL_REPEATED)   # proto3: packed 기본
+pool = descriptor_pool.DescriptorPool(); pool.Add(fdp)
+ImuBatch = message_factory.GetMessageClass(pool.FindMessageTypeByName("h1.ImuBatch"))
+```
+
+```python
+# varint · zigzag를 손으로 인코딩하고, protobuf 라이브러리 출력과 바이트 단위로 비교
+from pbdyn import ImuBatch
+def varint(n):                                   # 7비트씩, 최상위 비트 = "더 있음"
+    out = bytearray()
+    while True:
+        b = n & 0x7F; n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n: return bytes(out)
+zz = lambda v: (v << 1) ^ (v >> 31)              # sint32 zigzag: 0,-1,1,-2 → 0,1,2,3
+for v in [0, 1, -1, 63, -64, 64, 300, -300, 8192, -32768]:
+    print("%7d  zigzag=%6d  varint=%-10s (%d B)  vs int16 2 B" % (v, zz(v), varint(zz(v)).hex(), len(varint(zz(v)))))
+vals = [8192, -3, 5, -300]
+packed = b"".join(varint(zz(v)) for v in vals)
+hand = varint(1 << 3 | 0) + varint(5000000) + varint(2 << 3 | 0) + varint(25) \
+     + varint(3 << 3 | 2) + varint(len(packed)) + packed   # tag = field<<3 | wiretype
+lib = ImuBatch(t0_us=5000000, seq=25, s=vals).SerializeToString()
+print("hand:", hand.hex()); print("lib :", lib.hex(), " same =", hand == lib)
+```
+
+```text
+      0  zigzag=     0  varint=00         (1 B)  vs int16 2 B
+      1  zigzag=     2  varint=02         (1 B)  vs int16 2 B
+     -1  zigzag=     1  varint=01         (1 B)  vs int16 2 B
+     63  zigzag=   126  varint=7e         (1 B)  vs int16 2 B
+    -64  zigzag=   127  varint=7f         (1 B)  vs int16 2 B
+     64  zigzag=   128  varint=8001       (2 B)  vs int16 2 B
+    300  zigzag=   600  varint=d804       (2 B)  vs int16 2 B
+   -300  zigzag=   599  varint=d704       (2 B)  vs int16 2 B
+   8192  zigzag= 16384  varint=808001     (3 B)  vs int16 2 B
+ -32768  zigzag= 65535  varint=ffff03     (3 B)  vs int16 2 B
+hand: 08c096b10210191a07808001050ad704
+lib :  08c096b10210191a07808001050ad704  same = True
+```
+
+출력에서 볼 것: −64~63은 1바이트로 int16의 절반, −8192~8191은 2바이트로 본전, 그 밖은 3바이트로 **오히려 손해**다. 가속도 z축(중력 1 g = 8192 LSB)은 3바이트가 된다. 메시지 전체도 손으로 만든 바이트와 라이브러리 출력이 완전히 같다: `08`(field 1, varint) `c096b102`(5,000,000) `10`(field 2) `19`(25) `1a`(field 3, length-delimited) `07`(7 B) 그리고 packed 값 4개. wire format은 이게 전부다 — nanopb가 MCU에서 하는 일도 이것이다.
+
+### 3.3 코드로 확인 — 예제 5: 같은 데이터, 일곱 가지 표현
+
+먼저 노트 전체에서 쓸 합성 데이터 생성기다. **실제 센서 로그가 아니라** 그럴듯한 특성(중력 오프셋, 느린 움직임, 주기적 흔들림, 센서 노이즈, 음절이 켜졌다 꺼지는 "목소리" + 실내 잡음 + 마이크 noise floor)을 흉내 낸 것이다. 압축률은 실제 데이터에서 달라질 수 있다.
+
+```python
+# h1data.py — 합성 센서 데이터 (seed 고정). 실제 센서 로그가 아니다.
+import numpy as np
+def synth_imu(seconds=100, fs=100, seed=0):
+    rng = np.random.default_rng(seed); n = seconds * fs; t = np.arange(n) / fs
+    motion = np.cumsum(rng.standard_normal((n, 6)), 0); motion -= motion.mean(0)   # 느린 움직임
+    motion = 0.3 * motion / np.abs(motion).max(0)                                  # ±0.3 g / ±0.3×full 근처
+    acc = 8192 * (np.array([0, 0, 1.0]) + motion[:, :3] + 0.4 * np.sin(2 * np.pi * 1.8 * t)[:, None] * (t % 20 < 8)[:, None])
+    gyr = 65.5 * 60 * motion[:, 3:] / 0.3                                          # 수십 dps
+    x = np.c_[acc + rng.normal(0, 15, (n, 3)), gyr + rng.normal(0, 4, (n, 3))]     # 센서 노이즈 (LSB)
+    return np.clip(np.round(x), -32768, 32767).astype("<i2")                       # [n, 6] int16 raw count
+def synth_audio(seconds=10, fs=16000, seed=0):
+    rng = np.random.default_rng(seed); t = np.arange(seconds * fs) / fs
+    f0 = 140 + 30 * np.sin(2 * np.pi * 0.7 * t)                                    # 음높이가 변하는 "목소리"
+    ph = 2 * np.pi * np.cumsum(f0) / fs
+    voice = sum(np.sin(k * ph) / k for k in range(1, 12)) * (np.sin(2 * np.pi * 2.5 * t) > 0)   # 음절 on/off
+    noise = np.convolve(rng.standard_normal(len(t)), np.ones(4) / 4, "same")       # 실내 잡음
+    x = 3000 * voice + 400 * noise + rng.normal(0, 30, len(t))                     # + 마이크 noise floor
+    return np.clip(np.round(x), -32768, 32767).astype("<i2")
+```
+
+**예제 5** — 무엇을 확인하나: 같은 IMU batch 400개(100 s)를 raw / FlatBuffers / protobuf / protobuf + delta / CBOR(키 + 정수 배열) / CBOR(byte string) / JSON으로 인코딩했을 때의 크기와 Python에서의 encode·decode 시간, 그리고 모두 원본으로 정확히 복원되는지(`ok`). FlatBuffers는 `flatc` 컴파일러 없이 Python 런타임의 `Builder` API로 테이블을 직접 만들었다.
+
+```python
+# 같은 IMU batch 400개(25샘플×6축, 100 s)를 7가지 표현으로: 크기와 Python encode/decode 시간
+import json, struct, time, cbor2, numpy as np, flatbuffers
+from h1data import synth_imu
+from pbdyn import ImuBatch
+x = synth_imu(100).reshape(400, 25, 6); T0 = [5_000_000 + 250_000 * i for i in range(400)]
+H = struct.Struct("<QHBB")
+def fb_enc(t0, seq, s):                                       # FlatBuffers: table {t0, seq, s:[short]}
+    b = flatbuffers.Builder(400); v = b.CreateNumpyVector(s)
+    b.StartObject(3); b.PrependUint64Slot(0, t0, 0); b.PrependUint32Slot(1, seq, 0)
+    b.PrependUOffsetTRelativeSlot(2, v, 0); b.Finish(b.EndObject()); return bytes(b.Output())
+def fb_dec(d):                                                # zero-copy: 버퍼 안을 그대로 가리키는 view
+    tab = flatbuffers.table.Table(d, flatbuffers.encode.Get(flatbuffers.packer.uoffset, d, 0))
+    return tab.GetVectorAsNumpy(flatbuffers.number_types.Int16Flags, tab.Offset(8))
+dz = lambda s: np.diff(s, axis=0, prepend=0).ravel().tolist()  # 시간축 delta (첫 행은 그대로)
+fmts = {
+ "raw packed": (lambda t, i, s: H.pack(t, i * 25, 25, 0) + s.tobytes(),
+                lambda d: np.frombuffer(d, "<i2", offset=12)),
+ "FlatBuffers": (lambda t, i, s: fb_enc(t, i * 25, s.ravel()), fb_dec),
+ "protobuf": (lambda t, i, s: ImuBatch(t0_us=t, seq=i * 25, s=s.ravel().tolist()).SerializeToString(),
+              lambda d: np.array(ImuBatch.FromString(d).s, np.int16)),
+ "protobuf Δ": (lambda t, i, s: ImuBatch(t0_us=t, seq=i * 25, s=dz(s)).SerializeToString(),
+              lambda d: np.cumsum(np.array(ImuBatch.FromString(d).s).reshape(25, 6), 0).astype(np.int16)),
+ "CBOR": (lambda t, i, s: cbor2.dumps({"t0": t, "seq": i * 25, "s": s.ravel().tolist()}),
+          lambda d: np.array(cbor2.loads(d)["s"], np.int16)),
+ "CBOR bstr": (lambda t, i, s: cbor2.dumps({"t0": t, "seq": i * 25, "s": s.tobytes()}),
+               lambda d: np.frombuffer(cbor2.loads(d)["s"], "<i2")),
+ "JSON": (lambda t, i, s: json.dumps({"t0": t, "seq": i * 25, "s": s.ravel().tolist()}).encode(),
+          lambda d: np.array(json.loads(d)["s"], np.int16)),
+}
+for name, (enc, dec) in fmts.items():
+    t = time.perf_counter(); blobs = [enc(T0[i], i, x[i]) for i in range(400)]; te = time.perf_counter() - t
+    t = time.perf_counter(); ok = all((dec(b).ravel() == x[i].ravel()).all() for i, b in enumerate(blobs)); td = time.perf_counter() - t
+    n = sum(map(len, blobs))
+    print("%-12s %7d B  %5.1f B/batch  x%.2f  enc %5.1f us  dec %5.1f us  ok=%s" % (name, n, n / 400, n / (400 * 312), te / 400 * 1e6, td / 400 * 1e6, ok))
+```
+
+```text
+raw packed    124800 B  312.0 B/batch  x1.00  enc   0.4 us  dec   1.5 us  ok=True
+FlatBuffers   137592 B  344.0 B/batch  x1.10  enc  18.1 us  dec   5.6 us  ok=True
+protobuf      128499 B  321.2 B/batch  x1.03  enc   4.9 us  dec  10.0 us  ok=True
+protobuf Δ     84409 B  211.0 B/batch  x0.68  enc  10.8 us  dec  13.8 us  ok=True
+CBOR          182514 B  456.3 B/batch  x1.46  enc  11.3 us  dec  16.1 us  ok=True
+CBOR bstr     128388 B  321.0 B/batch  x1.03  enc   2.5 us  dec   2.5 us  ok=True
+JSON          377342 B  943.4 B/batch  x3.02  enc  11.5 us  dec  14.8 us  ok=True
+```
+
+```svg
+<svg viewBox="0 0 640 320" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="13">IMU batch 1개(25샘플×6축 = 300 B 데이터)를 담는 데 드는 바이트 — 예제 5 실측</text><text x="122" y="60" font-size="13" text-anchor="end">raw packed</text><rect x="130" y="44" width="145.5" height="22" fill="#3f9a6b" fill-opacity="0.75"/><text x="281.5" y="60" font-size="12">312.0 B</text><text x="122" y="94" font-size="13" text-anchor="end">protobuf Δ</text><rect x="130" y="78" width="98.4" height="22" fill="#3f9a6b" fill-opacity="0.75"/><text x="234.4" y="94" font-size="12">211.0 B</text><text x="122" y="128" font-size="13" text-anchor="end">protobuf</text>
+<rect x="130" y="112" width="149.8" height="22" fill="#4a7bd0" fill-opacity="0.75"/><text x="285.8" y="128" font-size="12">321.2 B</text><text x="122" y="162" font-size="13" text-anchor="end">CBOR bstr</text><rect x="130" y="146" width="149.7" height="22" fill="#e08a3c" fill-opacity="0.75"/><text x="285.7" y="162" font-size="12">321.0 B</text><text x="122" y="196" font-size="13" text-anchor="end">FlatBuffers</text><rect x="130" y="180" width="160.4" height="22" fill="#4a7bd0" fill-opacity="0.75"/><text x="296.4" y="196" font-size="12">344.0 B</text>
+<text x="122" y="230" font-size="13" text-anchor="end">CBOR</text><rect x="130" y="214" width="212.8" height="22" fill="#e08a3c" fill-opacity="0.75"/><text x="348.8" y="230" font-size="12">456.3 B</text><text x="122" y="264" font-size="13" text-anchor="end">JSON</text><rect x="130" y="248" width="440.0" height="22" fill="#d0564a" fill-opacity="0.75"/><text x="576.0" y="264" font-size="12">943.4 B</text><line x1="269.9" y1="38" x2="269.9" y2="282" stroke="currentColor" stroke-dasharray="4 3"/><text x="273.9" y="298" font-size="12">payload 300 B</text>
+<line x1="130" y1="38" x2="130" y2="282" stroke="currentColor"/>
+</svg>
+```
+
+그림 4 — 같은 300 B의 IMU 데이터를 담는 비용. 점선이 순수 데이터 크기다. delta를 거친 protobuf만 데이터보다 작아진다.
+
+출력에서 볼 것:
+
+- **크기**: raw 312 B(데이터 300 + 헤더 12)가 기준이다. protobuf는 거의 같고(3% 큼 — 작은 축은 1~2바이트로 줄지만 중력 축이 3바이트로 늘어 상쇄), CBOR byte string도 같다(키 문자열 몇 바이트만 추가). FlatBuffers는 vtable·offset·정렬 패딩으로 10% 크다. 키 + 정수 배열 CBOR은 46%, JSON은 3배 크다.
+- **protobuf Δ**: 값 대신 이웃 샘플과의 차이를 넣으면 211 B로 raw보다 **32% 작다**. 직렬화 포맷이 아니라 **데이터 변환(delta)**이 크기를 줄였다. 4절로 이어진다.
+- **속도**: raw는 `struct.pack` + `tobytes`라서 압도적이다. FlatBuffers decode는 버퍼 안을 가리키는 view라서 protobuf보다 빠르고, MCU에서는 이 차이가 더 크다 (파싱용 RAM이 필요 없다). 숫자는 이 Mac의 Python 기준이고 비교 코드(`==`) 시간이 포함돼 있다 — MCU 성능의 근거로 쓰면 안 되고 **상대적인 감**만 본다.
+- `ok=True`: 일곱 가지 모두 비트 단위로 원본을 복원했다. 포맷을 바꿀 때는 항상 이 왕복(round-trip) 테스트를 먼저 만든다.
+
+### 3.4 스키마 진화 — 예제 6
+
+로그 포맷은 FW와 함께 진화한다. 6개월 뒤 IMU 레코드에 온도 필드를 추가한다고 하자. 옛 reader(수집 서버의 파서, 옛 버전 분석 스크립트)는 새 파일을 어떻게 읽을까?
+
+**예제 6** — 무엇을 확인하나: v2 writer가 필드를 하나 추가했을 때 (1) protobuf v1 reader, (2) 필드를 중간에 끼워 넣은 raw struct를 읽는 v1 reader, (3) 레코드 헤더에 version·length가 있는 TLV reader의 동작.
+
+```python
+# 스키마 진화: v2 writer가 필드를 하나 추가했을 때 v1 reader는? (protobuf vs raw struct vs TLV)
+import struct
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+from pbdyn import ImuBatch as ImuBatchV1, fdp
+v2 = descriptor_pb2.FileDescriptorProto(); v2.CopyFrom(fdp); v2.name = "imu_v2.proto"; v2.package = "h1v2"
+v2.message_type[0].field.add(name="temp_c_x100", number=4, type=descriptor_pb2.FieldDescriptorProto.TYPE_SINT32,
+                             label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL)
+pool = descriptor_pool.DescriptorPool(); pool.Add(v2)
+ImuBatchV2 = message_factory.GetMessageClass(pool.FindMessageTypeByName("h1v2.ImuBatch"))
+blob = ImuBatchV2(t0_us=5_000_000, seq=25, s=[8192, -3], temp_c_x100=3150).SerializeToString()
+old = ImuBatchV1.FromString(blob)                          # v1은 field 4를 모른다
+print("protobuf v1 reads v2:", old.t0_us, old.seq, list(old.s), "| re-serialize keeps unknown:", old.SerializeToString() == blob)
+V1, V2 = struct.Struct("<QI2h"), struct.Struct("<QIh2h")   # v2가 temp를 '중간에' 끼워 넣음
+raw = V2.pack(5_000_000, 25, 3150, 8192, -3)
+print("raw struct v1 reads v2:", V1.unpack_from(raw), "<- 조용히 틀림 (8192, -3이어야 함)")
+tlv = struct.pack("<BBH", 1, 2, V2.size) + raw             # [type][ver][len] 헤더가 있으면
+t, ver, ln = struct.unpack_from("<BBH", tlv)
+print("TLV v1 reader: ver=%d len=%d ->" % (ver, ln), "v1 layout 아님, 레코드 skip 후 계속" if ver != 1 else "parse")
+```
+
+```text
+protobuf v1 reads v2: 5000000 25 [8192, -3] | re-serialize keeps unknown: True
+raw struct v1 reads v2: (5000000, 25, 3150, 8192) <- 조용히 틀림 (8192, -3이어야 함)
+TLV v1 reader: ver=2 len=18 -> v1 layout 아님, 레코드 skip 후 계속
+```
+
+출력에서 볼 것: protobuf는 모르는 field 4를 무시하고(다시 직렬화해도 보존한다) 나머지를 정확히 읽는다. raw struct는 **에러 없이** 온도 3150을 가속도로 읽는다 — 데이터셋이 조용히 오염되는 최악의 경우다. TLV 헤더의 `ver`와 `len`이 있으면 raw binary도 안전해진다: 모르는 버전은 건너뛰거나(이 예제), 알려진 v1 필드 뒤에 새 필드를 **끝에만** 붙인다는 규칙을 지키면 v1 reader가 앞부분만 읽고 `len`으로 넘어갈 수도 있다. 이것이 Don이 SSD telemetry 로그 포맷에서 지켰을 규칙과 같다.
+
+### 3.5 정리 — 무엇을 고르나
+
+| 포맷 | 크기 (예제 5) | MCU encode 비용 | 스키마 진화 | 사람·도구 친화 | 센서 로그에서의 자리 |
+|---|---|---|---|---|---|
+| raw packed + TLV 헤더 | 1.00× | 최소 (memcpy) | `ver`·`len` 규칙을 직접 지켜야 함 | 낮음 — C 헤더·파서 필요 | 고rate 샘플 payload의 기본값 |
+| protobuf (nanopb) | 1.03× (Δ면 0.68×) | 중간 — varint 루프 | 강함 — 필드 번호, unknown 보존 | 좋음 — .proto가 문서 | 메타데이터·이벤트·설정, 업로드 envelope |
+| CBOR (bstr) | 1.03× | 낮음 | 키 기반이라 유연 | 좋음 — 스키마 없이 덤프 가능 | 이질적인 이벤트·진단 레코드 |
+| CBOR (키+배열) | 1.46× | 중간 | 유연 | 좋음 | 저rate 레코드만 |
+| FlatBuffers | 1.10× | builder가 무겁다 | 강함 — 끝에 필드 추가 | 중간 | 읽기가 많은 쪽(모델 파일, 설정)에 유리 |
+| JSON | 3.02× | 높음 — 문자열 포맷 | 유연 | 최고 | 매니페스트·설정. 샘플 본문엔 쓰지 않음 |
+
+실무에서 흔한 조합은 **"envelope은 protobuf/CBOR, 샘플 payload는 raw packed bytes"**다. 메타데이터는 진화가 잦고 작으니 스키마 진화가 강한 포맷으로, 샘플은 크고 단순하니 raw로 (`bytes` 필드나 CBOR byte string 안에 넣는다). 예제 5의 "CBOR bstr" 행이 바로 이 구조이고, raw와 같은 크기·속도를 내면서 self-describing 키를 갖는다.
+
+---
+
+## 4. 압축 — delta, varint, zlib/lzma, 그리고 블록 단위
+
+### 4.1 직관 — 센서 데이터는 "다음 값이 이전 값과 비슷하다"
+
+무손실 압축은 **예측 가능한 부분**을 없애는 일이다. 센서 신호는 100 Hz로 샘플링하면 이웃 샘플이 거의 같다 (손목의 움직임은 수 Hz 이하이므로). 그래서 값 자체(8192, 8201, 8187 …)보다 **차이**(+9, −14 …)가 훨씬 작은 수에 몰린다. 작은 수는 적은 비트로 쓸 수 있다.
+
+반대로 **노이즈는 압축되지 않는다.** IMU 노이즈가 ±15 LSB라면 그 부분은 log₂(노이즈 범위) 비트만큼의 진짜 정보(엔트로피)다. 무손실로는 이 아래로 못 내려간다. 그래서 센서 로그의 무손실 압축률은 대개 **1.5~2× 근처**에서 멈춘다. 4배, 10배를 원하면 손실 압축(오디오 codec, 양자화, 다운샘플링)이나 1절의 모드 선택으로 가야 한다.
+
+### 4.2 기법 네 가지
+
+- **delta encoding**: `d[n] = x[n] − x[n−1]`. 복원은 누적합. int16에서 차이가 int16 범위를 넘어도 **mod 2¹⁶ wrap을 그대로 두면 가역**이다 (`np.diff`를 int16으로 하면 wrap되고, `np.cumsum` 후 int16으로 자르면 정확히 돌아온다). 첫 샘플(또는 블록마다 첫 샘플)은 절댓값으로 둔다. timestamp에는 delta-of-delta가 특히 잘 듣는다 (일정 주기면 0이 계속 나온다).
+- **zigzag + varint**: 3.2절. 작은 delta를 1바이트로. 사전·창 없이 바이트 단위로 돌아서 MCU에서 가볍다.
+- **byte shuffle**: int16 배열을 "모든 하위 바이트 → 모든 상위 바이트" 순서로 재배열. delta의 상위 바이트는 거의 0x00이나 0xFF라서 길게 반복되고, 일반 압축기(LZ77 계열)가 잘 잡는다. Blosc 같은 과학 데이터 압축 라이브러리가 쓰는 기법이다.
+- **범용 압축기**: zlib(deflate), lzma, 그리고 MCU용인 LZ4·heatshrink. 반복 패턴을 사전으로 대체한다.
+
+### 4.3 코드로 확인 — 예제 7
+
+**예제 7** — 무엇을 확인하나: 합성 IMU 600 s와 합성 오디오 10 s에서 raw / delta / delta + shuffle에 zlib(레벨 6)과 lzma를 걸었을 때의 압축률, 그리고 delta + zigzag-varint만 쓴 경우.
+
+```python
+# IMU(600 s)와 audio(10 s) 압축률: raw vs delta vs delta+byte-shuffle, zlib/lzma, varint
+import zlib, lzma, time, numpy as np
+from h1data import synth_imu, synth_audio
+def zz_varint_len(d):                                  # zigzag+varint 바이트 수 (값마다 1~3 B)
+    z = (d.astype(np.int32) << 1) ^ (d.astype(np.int32) >> 31)
+    return int(np.sum(1 + (z >= 128) + (z >= 16384)))
+def variants(x):                                       # x: [n, ch] int16 → {이름: bytes}
+    d = np.diff(x, axis=0, prepend=np.zeros((1, x.shape[1]), x.dtype))   # int16 wrap 그대로 (가역)
+    shuf = lambda a: a.view(np.uint8).reshape(-1, 2).T.copy().tobytes()   # 하위 바이트들 | 상위 바이트들
+    return {"raw": x.tobytes(), "delta": d.tobytes(), "delta+shuffle": shuf(d)}
+for name, x in [("IMU 6ch", synth_imu(600)), ("audio", synth_audio(10)[:, None])]:
+    print("%s: %d B raw, delta zigzag-varint alone = %.2fx" % (name, x.nbytes, x.nbytes / zz_varint_len(np.diff(x, axis=0, prepend=0 * x[:1]))))
+    for vname, b in variants(x).items():
+        for cname, f in [("zlib-6", lambda b: zlib.compress(b, 6)), ("lzma", lzma.compress)]:
+            t = time.perf_counter(); c = f(b); dt = time.perf_counter() - t
+            print("  %-14s %-6s ratio %5.2fx  %6.1f MB/s (host)" % (vname, cname, len(b) / len(c), len(b) / dt / 1e6))
+```
+
+```text
+IMU 6ch: 720000 B raw, delta zigzag-varint alone = 1.69x
+  raw            zlib-6 ratio  1.18x    37.5 MB/s (host)
+  raw            lzma   ratio  1.51x     6.7 MB/s (host)
+  delta          zlib-6 ratio  1.59x    15.0 MB/s (host)
+  delta          lzma   ratio  1.88x     6.9 MB/s (host)
+  delta+shuffle  zlib-6 ratio  1.83x    14.8 MB/s (host)
+  delta+shuffle  lzma   ratio  1.93x     3.9 MB/s (host)
+audio: 320000 B raw, delta zigzag-varint alone = 1.16x
+  raw            zlib-6 ratio  1.17x    37.5 MB/s (host)
+  raw            lzma   ratio  1.33x     8.7 MB/s (host)
+  delta          zlib-6 ratio  1.33x    32.0 MB/s (host)
+  delta          lzma   ratio  1.48x     9.2 MB/s (host)
+  delta+shuffle  zlib-6 ratio  1.57x    14.3 MB/s (host)
+  delta+shuffle  lzma   ratio  1.62x     5.1 MB/s (host)
+```
+
+```svg
+<svg viewBox="0 0 660 330" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="13">무손실 압축률 (합성 데이터, 예제 7 실측) — 2× 근처가 천장이다</text><text x="142" y="72" font-size="12" text-anchor="end">raw+zlib</text><rect x="150" y="44" width="118.0" height="18" fill="#4a7bd0" fill-opacity="0.75"/><text x="274.0" y="58" font-size="12">1.18×</text><text x="142" y="122" font-size="12" text-anchor="end">Δ+zlib</text><rect x="150" y="94" width="159.0" height="18" fill="#4a7bd0" fill-opacity="0.75"/><text x="315.0" y="108" font-size="12">1.59×</text><text x="142" y="172" font-size="12" text-anchor="end">Δ varint</text>
+<rect x="150" y="144" width="169.0" height="18" fill="#4a7bd0" fill-opacity="0.75"/><text x="325.0" y="158" font-size="12">1.69×</text><text x="142" y="222" font-size="12" text-anchor="end">Δ+shuffle+zlib</text><rect x="150" y="194" width="183.0" height="18" fill="#4a7bd0" fill-opacity="0.75"/><text x="339.0" y="208" font-size="12">1.83×</text><text x="142" y="272" font-size="12" text-anchor="end">Δ+shuffle+lzma</text><rect x="150" y="244" width="193.0" height="18" fill="#4a7bd0" fill-opacity="0.75"/><text x="349.0" y="258" font-size="12">1.93×</text>
+<rect x="150" y="66" width="117.0" height="18" fill="#e08a3c" fill-opacity="0.75"/><text x="273.0" y="80" font-size="12">1.17×</text><rect x="150" y="116" width="133.0" height="18" fill="#e08a3c" fill-opacity="0.75"/><text x="289.0" y="130" font-size="12">1.33×</text><rect x="150" y="166" width="116.0" height="18" fill="#e08a3c" fill-opacity="0.75"/><text x="272.0" y="180" font-size="12">1.16×</text><rect x="150" y="216" width="157.0" height="18" fill="#e08a3c" fill-opacity="0.75"/><text x="313.0" y="230" font-size="12">1.57×</text>
+<rect x="150" y="266" width="162.0" height="18" fill="#e08a3c" fill-opacity="0.75"/><text x="318.0" y="280" font-size="12">1.62×</text><line x1="250.0" y1="40" x2="250.0" y2="300" stroke="#888" stroke-dasharray="4 3"/><text x="250.0" y="316" font-size="12" text-anchor="middle">1×</text><line x1="350.0" y1="40" x2="350.0" y2="300" stroke="#888" stroke-dasharray="4 3"/><text x="350.0" y="316" font-size="12" text-anchor="middle">2×</text><line x1="150" y1="40" x2="150" y2="300" stroke="currentColor"/><rect x="470" y="60" width="14" height="12" fill="#4a7bd0" fill-opacity="0.75"/><text x="490" y="71" font-size="12">IMU 6축 int16</text><rect x="470" y="82" width="14" height="12" fill="#e08a3c" fill-opacity="0.75"/><text x="490" y="93" font-size="12">audio 16 kHz int16</text><text x="470" y="130" font-size="12">참고: 손실 음성 codec은</text><text x="470" y="148" font-size="12">256 kbps → 16~32 kbps</text><text x="470" y="166" font-size="12">= 비트레이트로 8~16×</text>
+</svg>
+```
+
+그림 5 — 예제 7의 압축률. 파랑은 IMU, 주황은 오디오다. 어떤 조합도 2×를 넘지 못한다. 오른쪽 참고 숫자는 실측이 아니라 비트레이트 산수다 (16 kHz × 16 bit = 256 kbps를 16~32 kbps codec으로 보내면 8~16배).
+
+출력에서 볼 것:
+
+- **raw에 zlib만 걸면 1.18×** — 거의 소용없다. 범용 압축기는 "같은 바이트열이 반복되는" 패턴을 찾는데, 노이즈가 섞인 int16 샘플은 정확히 반복되지 않는다.
+- **delta가 대부분의 일을 한다.** delta만 해도 zlib이 1.59×, delta + shuffle이면 1.83×. 사전 없는 delta + zigzag-varint만으로도 1.69× — MCU에서 거의 공짜로 얻는 숫자다. lzma는 조금 더(1.93×) 짜내지만 이 Mac에서도 4~7 MB/s로 느리고 메모리를 많이 쓴다.
+- **오디오는 무손실로 잘 안 줄어든다.** raw + zlib 1.17×, 최선이 1.62×다. 이 합성 오디오는 음절 사이에 조용한 구간이 절반이라 오히려 실제 녹음보다 유리한 편일 수 있다. 하루 2.76 GB가 1.7 GB가 되어 봐야 MCU flash에는 여전히 안 들어간다. 오디오는 **모드 선택(1절)이나 손실 codec**으로 줄여야 한다. 단, 손실 codec은 모델 학습 데이터의 분포를 바꾼다 (codec artifact를 학습한 모델이 기기에서 raw PCM을 받으면 성능이 달라질 수 있다) — 수집 목적에 따라 판단한다.
+
+### 4.4 블록 단위 압축 — 랜덤 접근과 MCU RAM
+
+파일 전체를 한 덩어리로 압축하면 비율은 가장 좋지만 두 가지 문제가 생긴다. (1) 중간의 1초를 읽으려면 처음부터 풀어야 한다. (2) 어딘가 1비트가 깨지면 그 뒤가 전부 날아간다 (압축 스트림은 앞의 상태에 의존한다). 그래서 로그는 **chunk(또는 블록)마다 독립적으로** 압축한다. delta도 블록마다 다시 시작한다. 그러면 블록 하나가 "독립적으로 복원 가능한 최소 단위"가 되고, 2절의 chunk와 크기를 맞추면 전원 차단·손상의 피해도 블록 하나로 제한된다.
+
+대가는 압축률이다. 블록이 작을수록 압축기가 볼 수 있는 과거가 짧아진다. 또 MCU에서는 압축기의 **작업 메모리**가 문제다. zlib 문서(`zconf.h`)에 나온 deflate 메모리 공식은 `(1 << (windowBits + 2)) + (1 << (memLevel + 9))` 바이트다.
+
+```
+기본값 windowBits=15, memLevel=8 : 2¹⁷ + 2¹⁷ = 262,144 B = 256 KB   ← MCU SRAM 전체보다 크다
+windowBits=10, memLevel=1        : 2¹² + 2¹⁰ =   5,120 B =   5 KB
+```
+
+**예제 8** — 무엇을 확인하나: IMU delta + shuffle을 블록 크기 300 B~76.8 KB로 나눠 독립 압축했을 때(블록 index 8 B 포함) 압축률이 어떻게 변하는지, 그리고 deflate 창을 MCU 크기(5 KB)로 줄이면 얼마나 손해인지.
+
+```python
+# 블록 단위 압축: 블록 크기(랜덤 접근 단위)와 deflate 창 크기(MCU RAM)에 따른 압축률
+import zlib, numpy as np
+from h1data import synth_imu
+x = synth_imu(600)
+d = np.diff(x, axis=0, prepend=np.zeros((1, 6), x.dtype))
+def shuffled(a): return a.view(np.uint8).reshape(-1, 2).T.copy().tobytes()
+def ratio(block_bytes, wbits, mem):
+    rows = block_bytes // 12; total = 0
+    for i in range(0, len(x), rows):                   # 블록마다 delta를 다시 시작 (독립 복원 가능)
+        blk = x[i:i + rows]; db = np.diff(blk, axis=0, prepend=np.zeros((1, 6), x.dtype))
+        c = zlib.compressobj(6, zlib.DEFLATED, wbits, mem)
+        total += len(c.compress(shuffled(db)) + c.flush()) + 8   # + 블록 index 8 B (offset, len)
+    return x.nbytes / total
+print("deflate RAM (zlib 공식) wbits=15,mem=8: %d KB, wbits=10,mem=1: %d KB"
+      % (((1 << 17) + (1 << 17)) // 1024, ((1 << 12) + (1 << 10)) // 1024))
+print("block      wbits15/mem8   wbits10/mem1")
+for bb in [300, 1200, 4800, 19200, 76800]:
+    print("%6d B   %8.2fx      %8.2fx" % (bb, ratio(bb, 15, 8), ratio(bb, 10, 1)))
+print("whole file delta+shuffle zlib-6: %.2fx" % (x.nbytes / len(zlib.compress(shuffled(d), 6))))
+```
+
+```text
+deflate RAM (zlib 공식) wbits=15,mem=8: 256 KB, wbits=10,mem=1: 5 KB
+block      wbits15/mem8   wbits10/mem1
+   300 B       1.29x          1.30x
+  1200 B       1.55x          1.51x
+  4800 B       1.72x          1.60x
+ 19200 B       1.74x          1.62x
+ 76800 B       1.79x          1.63x
+whole file delta+shuffle zlib-6: 1.83x
+```
+
+출력에서 볼 것: 블록 300 B(IMU batch 하나 = 0.25 s)는 1.29×로 크게 손해지만, 4.8 KB(4 s)면 1.72×로 파일 전체 압축(1.83×)의 94%를 얻는다. 그 이상은 수확 체감이다. 창을 5 KB로 줄이면 큰 블록에서 0.1~0.2× 정도 잃는다. 결론: **chunk를 수 KB(= flash page·sector 크기 근처)로 잡고 chunk마다 압축하면, 랜덤 접근·손상 격리·MCU RAM을 다 지키면서 압축률은 거의 잃지 않는다.** 이 크기는 5절의 page 크기, 8절의 flush 정책과 같이 정한다.
+
+### 4.5 MCU에서의 CPU 비용 — 조심스럽게
+
+이 노트에서 잰 속도는 전부 Mac의 Python(C로 된 zlib 호출)이다. Cortex-M에서의 숫자는 재지 않았으니 단정하지 않는다. 대신 판단의 틀은 이렇다.
+
+- **delta + zigzag-varint**: 샘플당 뺄셈·시프트·비교 몇 번. 100 Hz × 6축이면 초당 600번 — 어떤 MCU에서도 무시할 수 있다. 1순위다.
+- **LZ4**: 압축이 빠르고 해제가 아주 단순한 LZ77 계열로 알려져 있다. MCU 이식 사례가 많다. 이 환경에는 설치되어 있지 않아 측정하지 않았다.
+- **heatshrink**: 임베디드용으로 만든 LZSS 구현으로, 창 크기를 2의 거듭제곱으로 정해 수백 바이트~수 KB RAM으로 돌게 설계됐다. 역시 측정하지 않았다.
+- **zlib/deflate 작은 창**: 예제 8처럼 5 KB 수준까지 줄일 수 있다. 압축 쪽은 해시 탐색 때문에 해제보다 훨씬 무겁다.
+- **lzma·zstd 고레벨**: MCU 쪽 압축으로는 부적합. AP나 서버에서 재압축할 때 쓴다.
+
+결정 순서: (1) 모드로 바이트를 줄이고, (2) delta + varint를 MCU에서, (3) 그래도 저장·전송이 모자라면 LZ4/heatshrink를 **실기기에서 cycle을 재서** 결정한다. 압축에 쓰는 CPU 에너지와 줄어든 flash write·무선 전송 에너지(D7·H2)를 비교해야 한다. 무선 전송 비트당 에너지가 대개 훨씬 비싸므로 압축이 전체 에너지를 줄이는 경우가 많지만, 이것도 측정으로 확인할 일이다.
+
+---
+
+## 5. 저장 계층 — flash, 파일시스템, wear
+
+### 5.1 flash 특성 다시 보기 (Don의 영역)
+
+Don에게는 복습이니 표로 짧게 정리한다. 숫자는 부품마다 크게 다르므로 자릿수만 본다.
+
+| 매체 | 쓰기 단위 | 지우기 단위 | 내구성 (P/E, 대략) | 특징 |
+|---|---|---|---|---|
+| MCU 내장 flash | word~수십 B | page/sector 수 KB | 흔히 1만 회 수준 | 펌웨어 이미지와 공유. erase 중 같은 bank에서 코드 실행이 멈출 수 있다 |
+| SPI NOR | page 256 B (부분 program 가능) | sector 4 KB, block 32/64 KB | 흔히 10만 회 | 바이트 단위 읽기, XIP. sector erase 수십~수백 ms |
+| raw SLC NAND | page 2~4 KB | block 64~128 page | 수만 회 | bad block, ECC 필요, page당 program 횟수(NOP) 제한 |
+| eMMC/UFS (TLC 등) | 호스트는 512 B~4 KB 섹터 | 내부 FTL이 관리 | 수천 회 (셀 기준) | FTL·GC·wear leveling 내장. 내부 WA는 호스트가 못 본다 |
+
+ML 로깅에서 새로 생기는 관점은 하나다: **로그는 순차·append-only이고, 오래된 것부터 버려도 된다.** 이건 flash가 가장 좋아하는 쓰기 패턴이다. 제자리 갱신(in-place update)만 피하면 된다.
+
+### 5.2 raw flash 위의 circular log
+
+파일시스템 없이 raw NOR 파티션을 sector의 고리(ring)로 쓰는 방법이다. Zephyr의 FCB(Flash Circular Buffer)가 이 구조이고, SSD의 log-structured FTL을 아주 단순하게 만든 것이라고 보면 된다.
+
+- 각 sector 앞에 작은 헤더(magic + **sector 순번**)를 둔다.
+- 현재 sector에 chunk를 이어서 program한다 (NOR는 1→0만 가능하므로 erased 영역에 append).
+- 가득 차면 다음 sector를 erase하고 순번 + 1을 쓴다. 고리의 끝이면 0번으로 돌아간다. **가장 오래된 데이터가 자동으로 희생**된다 (업로드 전이면 손실 — 7절의 정책 대상).
+- 부팅 시 모든 sector 헤더의 순번만 읽어 최대 = head(쓰는 곳), 최소 = tail(가장 오래된 곳)을 복원한다. 그다음 head sector 안에서 2절의 chunk 검증으로 마지막 유효 chunk 끝을 찾는다.
+
+wear는 자동으로 고르다: 모든 sector가 정확히 차례로 한 번씩 erase된다. 정적 데이터가 없으니 static wear leveling도 필요 없다.
+
+```svg
+<svg viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="h1b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><text x="20" y="22" font-size="13">raw NOR 위 circular log — sector 16개 (숫자 = sector 순번)</text><rect x="20" y="70" width="38" height="44" fill="#4a7bd0" fill-opacity="0.45" stroke="currentColor"/><text x="39" y="97" font-size="12" text-anchor="middle">108</text><rect x="60" y="70" width="38" height="44" fill="#4a7bd0" fill-opacity="0.45" stroke="currentColor"/><text x="79" y="97" font-size="12" text-anchor="middle">109</text><rect x="100" y="70" width="38" height="44" fill="#4a7bd0" fill-opacity="0.45" stroke="currentColor"/><text x="119" y="97" font-size="12" text-anchor="middle">110</text><rect x="140" y="70" width="38" height="44" fill="#4a7bd0" fill-opacity="0.45" stroke="currentColor"/><text x="159" y="97" font-size="12" text-anchor="middle">111</text><rect x="180" y="70" width="38" height="44" fill="#4a7bd0" fill-opacity="0.45" stroke="currentColor"/><text x="199" y="97" font-size="12" text-anchor="middle">112</text><rect x="220" y="70" width="38" height="44" fill="#4a7bd0" fill-opacity="0.45" stroke="currentColor"/><text x="239" y="97" font-size="12" text-anchor="middle">113</text>
+<rect x="260" y="70" width="38" height="44" fill="none" stroke="currentColor"/><rect x="260" y="70" width="16" height="44" fill="#e08a3c" fill-opacity="0.6"/><text x="279" y="97" font-size="12" text-anchor="middle">114</text><rect x="300" y="70" width="38" height="44" fill="none" stroke="currentColor" stroke-dasharray="4 3"/><text x="319" y="97" font-size="12" text-anchor="middle">FF</text><rect x="340" y="70" width="38" height="44" fill="#888" fill-opacity="0.3" stroke="currentColor"/><text x="359" y="97" font-size="12" text-anchor="middle">100</text><rect x="380" y="70" width="38" height="44" fill="#888" fill-opacity="0.3" stroke="currentColor"/><text x="399" y="97" font-size="12" text-anchor="middle">101</text><rect x="420" y="70" width="38" height="44" fill="#888" fill-opacity="0.3" stroke="currentColor"/><text x="439" y="97" font-size="12" text-anchor="middle">102</text><rect x="460" y="70" width="38" height="44" fill="#888" fill-opacity="0.3" stroke="currentColor"/><text x="479" y="97" font-size="12" text-anchor="middle">103</text><rect x="500" y="70" width="38" height="44" fill="#888" fill-opacity="0.3" stroke="currentColor"/><text x="519" y="97" font-size="12" text-anchor="middle">104</text><rect x="540" y="70" width="38" height="44" fill="#888" fill-opacity="0.3" stroke="currentColor"/><text x="559" y="97" font-size="12" text-anchor="middle">105</text>
+<rect x="580" y="70" width="38" height="44" fill="#888" fill-opacity="0.3" stroke="currentColor"/><text x="599" y="97" font-size="12" text-anchor="middle">106</text><rect x="620" y="70" width="38" height="44" fill="#888" fill-opacity="0.3" stroke="currentColor"/><text x="639" y="97" font-size="12" text-anchor="middle">107</text><line x1="279" y1="40" x2="279" y2="66" stroke="currentColor" marker-end="url(#h1b)"/><text x="279" y="36" font-size="12" text-anchor="middle">head (쓰는 중)</text><line x1="319" y1="140" x2="319" y2="118" stroke="currentColor" marker-end="url(#h1b)"/><text x="319" y="154" font-size="12" text-anchor="middle">미리 erase</text><line x1="359" y1="40" x2="359" y2="66" stroke="currentColor" marker-end="url(#h1b)"/><text x="400" y="36" font-size="12" text-anchor="middle">tail (가장 오래됨)</text><line x1="40" y1="128" x2="250" y2="128" stroke="currentColor" marker-end="url(#h1b)"/><text x="145" y="146" font-size="12" text-anchor="middle">쓰기 방향, 끝에서 0번으로 wrap</text><text x="20" y="190" font-size="13">제자리 갱신 메타데이터 (FAT식, FTL 없는 raw flash 위)</text><rect x="20" y="204" width="38" height="44" fill="#d0564a" fill-opacity="0.6" stroke="currentColor"/><text x="39" y="231" font-size="12" text-anchor="middle">FAT</text>
+<rect x="60" y="204" width="598" height="44" fill="#4a7bd0" fill-opacity="0.15" stroke="currentColor"/><text x="359" y="231" font-size="12" text-anchor="middle">데이터 sector들 — 고르게 쓰인다</text><text x="20" y="270" font-size="12">flush마다 FAT·디렉터리 sector를 erase + 재기록 → 하루 86,400번 (예제 9). 이 sector 하나가 기기 수명을 정한다.</text>
+</svg>
+```
+
+그림 6 — circular log에서는 head가 한 바퀴 돌 때마다 모든 sector가 한 번씩 erase된다. 아래는 같은 flash에 메타데이터를 제자리 갱신하는 경우: 한 sector에 erase가 몰린다 (hot spot).
+
+**예제 9** — 무엇을 확인하나: 1 MB NOR 파티션(4 KB sector 256개)에 IMU 1,200 B/s를 1초마다 하루 동안 append했을 때 sector별 erase 횟수, 부팅 스캔으로 head/tail을 복원하는지, 그리고 "flush마다 메타데이터 sector를 제자리 갱신"하는 설계와의 수명 비교.
+
+```python
+# raw NOR 위 circular log vs "제자리 갱신" 메타데이터(FAT식): 하루 IMU 로깅 후 sector별 erase 횟수
+import numpy as np
+SECT, N = 4096, 256                                   # 4 KB sector × 256 = 1 MB 로그 파티션
+class CircularLog:
+    def __init__(s):
+        s.seq = np.full(N, -1); s.used = np.zeros(N, int); s.erases = np.zeros(N, int); s.cur = 0
+        s.erase(0); s.seq[0] = 0
+    def erase(s, i): s.erases[i] += 1; s.used[i] = 16; s.seq[i] = -1   # 16 B sector 헤더(seq 포함)
+    def append(s, nbytes):                            # NOR: 같은 sector에 이어서 program (1→0만)
+        while nbytes:
+            k = min(nbytes, SECT - s.used[s.cur]); s.used[s.cur] += k; nbytes -= k
+            if s.used[s.cur] == SECT:                 # 가득 → 다음 sector를 erase (가장 오래된 데이터 희생)
+                nxt = (s.cur + 1) % N; new_seq = s.seq[s.cur] + 1
+                s.erase(nxt); s.seq[nxt] = new_seq; s.cur = nxt
+    def boot_scan(s):                                 # 전원 재투입: 헤더의 seq만 읽어 head/tail 복원
+        v = np.where(s.seq >= 0)[0]
+        return v[np.argmax(s.seq[v])], v[np.argmin(s.seq[v])]
+log = CircularLog()
+for sec in range(86400): log.append(1200)             # 1200 B/s, 1초마다 flush
+head, tail = log.boot_scan()
+print("circular: head=%d tail=%d (cur=%d)  erases/sector min=%d max=%d" % (head, tail, log.cur, log.erases.min(), log.erases.max()))
+fat_meta_erases = 86400 * 1                           # 매 flush마다 FAT/디렉터리 sector를 제자리 갱신하면
+print("in-place metadata sector: %d erases/day  -> 100k-cycle NOR dies in %.1f days" % (fat_meta_erases, 100_000 / fat_meta_erases))
+print("circular data sectors: %.0f erases/day -> 100k cycles last %.0f days (%.1f years)"
+      % (log.erases.max(), 100_000 / log.erases.max(), 100_000 / log.erases.max() / 365))
+```
+
+```text
+circular: head=67 tail=68 (cur=67)  erases/sector min=99 max=100
+in-place metadata sector: 86400 erases/day  -> 100k-cycle NOR dies in 1.2 days
+circular data sectors: 100 erases/day -> 100k cycles last 1000 days (2.7 years)
+```
+
+출력에서 볼 것:
+
+- sector 256개의 erase 횟수가 99~100으로 완벽하게 고르다. 손으로: 103.68 MB/day ÷ (4,096 − 16) B/sector ≈ 25,412 sector/day ÷ 256 ≈ 99.3회. 부팅 스캔은 순번만으로 head(67)와 바로 다음의 tail(68)을 찾았다.
+- 같은 NOR에서 flush마다 메타데이터 sector를 제자리 갱신하면 그 sector 하나가 하루 86,400번 erase되어 **1.2일 만에** 정격 수명을 넘는다. FTL 없는 raw flash에 FAT를 올리면 생기는 일이다.
+- circular log도 1 MB 파티션이면 2.7년이다. 웨어러블 수명으로는 빠듯하고, 무엇보다 1 MB는 IMU를 14분(1 MB ÷ 1,200 B/s)밖에 못 담는다. 예제 11에서 용량을 키운다.
+
+### 5.3 MCU 파일시스템 — LittleFS와 FAT
+
+raw circular log는 단순하고 강하지만 "파일"이 없다. 세션별로 파일을 나누고, 설정 파일을 같이 두고, 업로드 완료된 파일을 지우고 싶다면 파일시스템을 쓴다.
+
+- **LittleFS**: MCU용으로 설계된 파일시스템. 공식 설명의 세 가지 목표가 power-loss resilience(전원이 언제 나가도 일관된 상태로 복구), dynamic wear leveling, bounded RAM/ROM이다. 메타데이터를 copy-on-write로 갱신하고 블록 쌍(metadata pair)을 번갈아 쓴다. Zephyr, Mbed OS 등에서 쓴다. 주의할 점: 파일 끝에 append해도 내부적으로 메타데이터 커밋이 일어나므로, **작은 write + 잦은 sync는 WA와 지연을 키운다**. 큰 버퍼로 모아서 쓰고 sync 주기를 정책으로 정한다 (5.4절).
+- **FAT (FatFs 등)**: PC·SD 카드와 호환되는 것이 장점. 그러나 (1) FAT 테이블과 디렉터리 엔트리를 제자리 갱신하므로 FTL 없는 raw flash에서는 예제 9의 hot spot이 생기고, (2) 저널이 없어서 쓰는 도중 전원이 나가면 FAT와 디렉터리가 어긋날 수 있다 (lost cluster, 크기가 0인 파일). SD 카드나 eMMC는 내부 FTL이 wear를 흡수하지만 전원 차단 일관성 문제는 남는다. 쓴다면 "파일 하나를 미리 크게 할당해 두고 그 안에 2절의 chunk 포맷으로 append" 하는 식으로 메타데이터 갱신을 최소화한다.
+- **eMMC + Linux 파일시스템 (AP 쪽)**: ext4·f2fs 같은 저널링/로그 구조 파일시스템. 이때도 앱 레벨 포맷(2절)의 CRC·commit은 필요하다 — 파일시스템은 메타데이터 일관성을 지켜 주지만, `fsync` 안 한 데이터나 앱이 쓰다 만 레코드까지 지켜 주지는 않는다.
+
+### 5.4 write amplification — flush 정책이 만든다
+
+SSD에서 WAF는 주로 GC가 만든다. 센서 로거에서는 **flush 정책**이 만든다. chunk를 닫을 때마다 page 단위로 program해야 하는데, chunk가 page보다 작으면 나머지를 0xFF로 채운 채 page를 소비한다 (NAND는 같은 page를 다시 program할 수 없고, NOR는 가능하지만 파일시스템이 page 단위로 관리하는 경우가 많다).
+
+손계산: IMU 1,200 B/s, page 2,048 B, flush 1 s. chunk = 헤더 32 + 1,200 + commit 4 = 1,236 B → page 1개 소비 → WA = 2,048 ÷ 1,200 = **1.71**. page가 4,096 B면 3.41. flush를 5 s로 늘리면 chunk = 6,036 B → 3 page(6,144) → WA 1.02.
+
+**예제 10** — 무엇을 확인하나: DMA half/full 콜백(125 ms마다 150 B)을 받아 page 단위로 program하는 logger를 C로 흉내 내고, page 크기 × flush 주기별 하루 program page 수, WA, 전원 차단 시 잃을 수 있는 최대 시간(risk)을 잰다.
+
+```c
+/* logger task flush 정책: DMA half/full 콜백(125 ms마다 150 B) → page 단위 staging → flash program
+   flush 주기 T마다 chunk를 닫고(헤더 32 B + commit 4 B) 남은 page는 0xFF로 채워 program한다 */
+#include <stdio.h>
+#include <stdint.h>
+typedef struct { uint64_t payload, programmed, pages; uint32_t max_risk_ms; } stat_t;
+static stat_t run(uint32_t page, uint32_t flush_ms) {
+    stat_t s = {0}; uint32_t staged = 0, oldest_ms = 0; int have = 0;
+    for (uint32_t t = 125; t <= 3600u * 1000u; t += 125) {      /* 1시간, DMA 콜백마다 */
+        if (!have) { oldest_ms = t - 125; have = 1; staged += 32; }   /* 새 chunk 헤더 */
+        staged += 150; s.payload += 150;
+        while (staged >= page) { staged -= page; s.pages++; }               /* 꽉 찬 page는 바로 program */
+        if (t - oldest_ms >= flush_ms) {                                    /* chunk 닫기 = commit */
+            staged += 4; while (staged >= page) { staged -= page; s.pages++; }
+            if (staged) { s.pages++; staged = 0; }                          /* 패딩해서 마지막 page program */
+            if (t - oldest_ms > s.max_risk_ms) s.max_risk_ms = t - oldest_ms;
+            have = 0;
+        }
+    }
+    s.programmed = s.pages * page; return s;
+}
+int main(void) {
+    const uint32_t pages[] = {256, 2048, 4096}, flush[] = {250, 1000, 5000, 30000};
+    printf("page  flush_ms  pages/day   WA    MB/day   risk_ms\n");
+    for (int p = 0; p < 3; p++) for (int f = 0; f < 4; f++) {
+        stat_t s = run(pages[p], flush[f]);
+        printf("%5u %8u %10llu %5.2f %8.1f %8u\n", pages[p], flush[f], (unsigned long long)s.pages * 24,
+               (double)s.programmed / s.payload, s.programmed * 24 / 1e6, s.max_risk_ms);
+    }
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 ex10.c -o ex10 && ./ex10
+```
+
+```text
+page  flush_ms  pages/day   WA    MB/day   risk_ms
+  256      250     691200  1.71    176.9      250
+  256     1000     432000  1.07    110.6     1000
+  256     5000     414720  1.02    106.2     5000
+  256    30000     406080  1.00    104.0    30000
+ 2048      250     345600  6.83    707.8      250
+ 2048     1000      86400  1.71    176.9     1000
+ 2048     5000      51840  1.02    106.2     5000
+ 2048    30000      51840  1.02    106.2    30000
+ 4096      250     345600 13.65   1415.6      250
+ 4096     1000      86400  3.41    353.9     1000
+ 4096     5000      34560  1.37    141.6     5000
+ 4096    30000      25920  1.02    106.2    30000
+```
+
+```svg
+<svg viewBox="0 0 660 310" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="13">flush 주기 vs write amplification (IMU 1200 B/s, 예제 10 실측)</text><line x1="80" y1="250" x2="590" y2="250" stroke="currentColor"/><line x1="80" y1="40" x2="80" y2="250" stroke="currentColor"/><line x1="76" y1="250.0" x2="80" y2="250.0" stroke="currentColor"/><text x="70" y="254.0" font-size="12" text-anchor="end">0</text><line x1="76" y1="220.0" x2="80" y2="220.0" stroke="currentColor"/><text x="70" y="224.0" font-size="12" text-anchor="end">2</text><line x1="76" y1="190.0" x2="80" y2="190.0" stroke="currentColor"/><text x="70" y="194.0" font-size="12" text-anchor="end">4</text><line x1="76" y1="160.0" x2="80" y2="160.0" stroke="currentColor"/><text x="70" y="164.0" font-size="12" text-anchor="end">6</text><line x1="76" y1="130.0" x2="80" y2="130.0" stroke="currentColor"/><text x="70" y="134.0" font-size="12" text-anchor="end">8</text>
+<line x1="76" y1="100.0" x2="80" y2="100.0" stroke="currentColor"/><text x="70" y="104.0" font-size="12" text-anchor="end">10</text><line x1="76" y1="70.0" x2="80" y2="70.0" stroke="currentColor"/><text x="70" y="74.0" font-size="12" text-anchor="end">12</text><line x1="76" y1="40.0" x2="80" y2="40.0" stroke="currentColor"/><text x="70" y="44.0" font-size="12" text-anchor="end">14</text><line x1="80.0" y1="250" x2="80.0" y2="254" stroke="currentColor"/><text x="80.0" y="270" font-size="12" text-anchor="middle">0.25 s</text><line x1="224.8" y1="250" x2="224.8" y2="254" stroke="currentColor"/><text x="224.8" y="270" font-size="12" text-anchor="middle">1 s</text><line x1="392.9" y1="250" x2="392.9" y2="254" stroke="currentColor"/><text x="392.9" y="270" font-size="12" text-anchor="middle">5 s</text><line x1="580.0" y1="250" x2="580.0" y2="254" stroke="currentColor"/><text x="580.0" y="270" font-size="12" text-anchor="middle">30 s</text><text x="335" y="292" font-size="12" text-anchor="middle">flush 주기 (log 축) — 길수록 WA↓, 전원 차단 시 잃는 데이터↑</text>
+<text x="30" y="150" font-size="12" text-anchor="middle" transform="rotate(-90 30 150)">WA (program한 바이트 ÷ 데이터)</text><line x1="80" y1="235.0" x2="590" y2="235.0" stroke="#888" stroke-dasharray="4 3"/><polyline points="80.0,224.3 224.8,233.9 392.9,234.7 580.0,235.0" fill="none" stroke="#3f9a6b" stroke-width="2.5"/><circle cx="80.0" cy="224.3" r="3.5" fill="#3f9a6b"/><circle cx="224.8" cy="233.9" r="3.5" fill="#3f9a6b"/><circle cx="392.9" cy="234.7" r="3.5" fill="#3f9a6b"/><circle cx="580.0" cy="235.0" r="3.5" fill="#3f9a6b"/><polyline points="80.0,147.6 224.8,224.3 392.9,234.7 580.0,234.7" fill="none" stroke="#4a7bd0" stroke-width="2.5"/>
+<circle cx="80.0" cy="147.6" r="3.5" fill="#4a7bd0"/><circle cx="224.8" cy="224.3" r="3.5" fill="#4a7bd0"/><circle cx="392.9" cy="234.7" r="3.5" fill="#4a7bd0"/><circle cx="580.0" cy="234.7" r="3.5" fill="#4a7bd0"/><polyline points="80.0,45.2 224.8,198.8 392.9,229.4 580.0,234.7" fill="none" stroke="#d0564a" stroke-width="2.5"/><circle cx="80.0" cy="45.2" r="3.5" fill="#d0564a"/><circle cx="224.8" cy="198.8" r="3.5" fill="#d0564a"/><circle cx="392.9" cy="229.4" r="3.5" fill="#d0564a"/>
+<circle cx="580.0" cy="234.7" r="3.5" fill="#d0564a"/><line x1="440" y1="60" x2="465" y2="60" stroke="#3f9a6b" stroke-width="2.5"/><text x="472" y="64" font-size="12">page 256 B</text><line x1="440" y1="80" x2="465" y2="80" stroke="#4a7bd0" stroke-width="2.5"/><text x="472" y="84" font-size="12">page 2048 B</text><line x1="440" y1="100" x2="465" y2="100" stroke="#d0564a" stroke-width="2.5"/><text x="472" y="104" font-size="12">page 4096 B</text>
+</svg>
+```
+
+그림 7 — flush 주기와 WA. 회색 점선이 WA = 1이다. page가 클수록 짧은 flush의 대가가 크다. 반대 방향의 비용(전원 차단 시 잃는 시간 = flush 주기)은 축 아래 글로 적었다.
+
+출력에서 볼 것:
+
+- **page 4 KB에서 250 ms마다 flush하면 WA 13.65** — 하루 104 MB를 쓰려고 1.4 GB를 program한다. SSD에서 작은 random write + FUA(Force Unit Access)가 WAF를 터뜨리는 것과 같은 이야기다.
+- 같은 page에서 flush를 5~30 s로 늘리면 WA는 1.02~1.37로 내려간다. 대신 `risk_ms`(아직 RAM에만 있는 데이터의 최대 나이)가 5~30 s가 된다. 웨어러블에서 이 데이터가 날아가는 경우는 배터리 분리·크래시 같은 드문 사건이므로, **대부분 수 초의 risk는 받아들일 만하다**. 단, 이벤트(낙상, 크래시 직전 상황) 레코드는 즉시 flush하는 별도 경로를 둔다 (7절의 우선순위).
+- 256 B page(NOR)는 page가 작아서 flush 주기에 둔감하다. NOR가 MCU 로깅에 잘 맞는 이유 중 하나다.
+- 이 숫자는 "호스트 WA"만이다. eMMC라면 그 아래 FTL이 자기 WA를 또 곱한다 (예제 11).
+
+### 5.5 수명 계산 — 예제 11
+
+수명 공식은 Don이 SSD에서 쓰던 TBW·DWPD 계산과 같다.
+
+```
+수명(년) = 용량 × P/E cycles ÷ (하루 payload × WA_host × WA_device) ÷ 365
+보관 시간 = 용량 ÷ (하루 payload × WA_host)   ← 업로드 못 하면 이 시간 뒤 덮어쓴다
+DWPD     = 하루 셀 쓰기량 ÷ 용량
+```
+
+말로 하면: 셀이 견디는 총 쓰기량(용량 × P/E)을 하루에 실제로 셀에 쓰는 양으로 나눈다. 완벽한 wear leveling을 가정한 **최선의 경우**다.
+
+**예제 11** — 무엇을 확인하나: 저장 매체·용량·로깅 모드 조합별 수명, 업로드 없이 버틸 수 있는 시간, DWPD. P/E와 장치 내부 WA는 자릿수 감각용 가정이다.
+
+```python
+# 수명 = 용량 × P/E cycle ÷ (하루 쓰기 × WA) — 완벽한 wear leveling 가정 (최선의 경우)
+# P/E·WA 값은 자릿수 감각용 가정이다. 실제는 부품 datasheet와 FTL 측정으로 확인한다.
+cases = [  # 이름, 용량 MB, P/E cycles, 하루 payload MB, 호스트 WA(패딩·헤더), 장치 내부 WA(FTL)
+    ("MCU int flash 1MB, IMU",           1,   10_000,  103.7, 1.07, 1.0),
+    ("NOR 16MB, IMU+PPG+trig audio",    16,  100_000,  176.9, 1.07, 1.0),
+    ("NOR 16MB, continuous all",        16,  100_000, 2877.7, 1.07, 1.0),
+    ("NOR 64MB, continuous all",        64,  100_000, 2877.7, 1.07, 1.0),
+    ("eMMC 8GB TLC, continuous all",  8192,    3_000, 2877.7, 1.02, 3.0),
+    ("eMMC 8GB TLC, IMU+PPG+trig",    8192,    3_000,  176.9, 1.02, 3.0),
+]
+print("%-32s %9s %10s %10s" % ("case", "years", "keep(h)", "DWPD"))
+for name, cap, pe, daily, wa_h, wa_d in cases:
+    nand_writes = daily * wa_h * wa_d                     # 셀에 실제로 쓰이는 MB/day
+    years = cap * pe / nand_writes / 365
+    keep_h = cap / (daily * wa_h) * 24                    # 업로드 못 하면 덮어쓰기 전까지 보관 시간
+    print("%-32s %9.2f %10.1f %10.1f" % (name, years, keep_h, nand_writes / cap))
+```
+
+```text
+case                                 years    keep(h)       DWPD
+MCU int flash 1MB, IMU                0.25        0.2      111.0
+NOR 16MB, IMU+PPG+trig audio         23.16        2.0       11.8
+NOR 16MB, continuous all              1.42        0.1      192.4
+NOR 64MB, continuous all              5.69        0.5       48.1
+eMMC 8GB TLC, continuous all          7.65       67.0        1.1
+eMMC 8GB TLC, IMU+PPG+trig          124.39     1089.6        0.1
+```
+
+출력에서 볼 것:
+
+- **MCU 내장 flash에 IMU를 계속 쓰면 3개월**(0.25년)이다. 내장 flash는 로그 저장소로 쓰지 말라는 숫자다 — 게다가 펌웨어 이미지와 같은 칩이다.
+- 16 MB NOR에 IMU + PPG + trigger 오디오(1절의 C 모드)면 23년으로 수명은 충분하지만, **보관 시간이 2시간**이다. 2시간 안에 폰으로 BLE 업로드(H2)가 안 되면 오래된 데이터부터 덮어쓴다. 수명보다 보관 시간이 먼저 설계를 제약한다.
+- 연속 raw(오디오 포함)는 64 MB NOR로도 30분치(0.5 h)밖에 못 담고, DWPD 48이다. 이 모드는 AP 쪽 eMMC로 가야 하고, eMMC 8 GB면 67시간 보관에 7.7년 — 내부 WA 3을 가정해도 dogfood 기기로는 충분하다.
+- Don의 SSD 감각으로 DWPD를 보자. 엔터프라이즈 SSD의 read-intensive 등급이 1 DWPD 안팎인 것을 생각하면, NOR에 DWPD 192는 "NOR의 10만 회 내구성이라서 가능한 숫자"다.
+
+---
+
+## 6. 전원 차단 안전성 — 원자적 chunk commit
+
+### 6.1 직관 — 은행 송금의 두 단계
+
+송금은 "보내는 계좌에서 빼기"와 "받는 계좌에 넣기"가 둘 다 되거나 둘 다 안 되어야 한다. 그래서 기록을 먼저 남기고 마지막에 "완료" 도장을 찍는다. 도장이 없으면 없던 일로 한다. chunk commit도 같다: **데이터를 다 쓰고, CRC로 내용을 봉인하고, 마지막에 commit marker를 쓴다.** reader는 commit marker까지 온전한 chunk만 믿는다.
+
+Don에게 익숙한 말로: SSD의 PLP는 커패시터 에너지로 in-flight 데이터를 NAND에 내려 "ack한 데이터는 잃지 않는다"를 보장한다. 웨어러블에는 대개 그런 커패시터가 없다. 대신 **"commit되지 않은 마지막 chunk만 잃고, 그 외에는 절대 잘못된 데이터를 받아들이지 않는다"**를 보장한다. 잃는 양의 상한은 flush 주기(5.4절)로 정한다.
+
+### 6.2 쓰는 순서와 끊기는 지점
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="h1c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><text x="20" y="22" font-size="13">chunk 하나의 쓰기 순서와 전원이 끊기는 네 지점</text><rect x="40" y="60" width="90" height="40" fill="#e08a3c" fill-opacity="0.3" stroke="currentColor"/><text x="85" y="85" font-size="12" text-anchor="middle">chunk hdr</text><rect x="130" y="60" width="380" height="40" fill="#888" fill-opacity="0.15" stroke="currentColor"/><text x="320" y="85" font-size="12" text-anchor="middle">payload (records) — 여러 page에 걸침</text><rect x="510" y="60" width="60" height="40" fill="#d0564a" fill-opacity="0.3" stroke="currentColor"/><text x="540" y="85" font-size="12" text-anchor="middle">CMIT</text><line x1="40" y1="116" x2="600" y2="116" stroke="currentColor" marker-end="url(#h1c)"/><text x="610" y="120" font-size="12">시간</text><line x1="80" y1="44" x2="80" y2="104" stroke="#d0564a" stroke-width="2" stroke-dasharray="4 3"/><text x="80" y="40" font-size="13" text-anchor="middle">①</text><line x1="300" y1="44" x2="300" y2="104" stroke="#d0564a" stroke-width="2" stroke-dasharray="4 3"/><text x="300" y="40" font-size="13" text-anchor="middle">②</text>
+<line x1="530" y1="44" x2="530" y2="104" stroke="#d0564a" stroke-width="2" stroke-dasharray="4 3"/><text x="530" y="40" font-size="13" text-anchor="middle">③</text><line x1="590" y1="44" x2="590" y2="104" stroke="#3f9a6b" stroke-width="2" stroke-dasharray="4 3"/><text x="590" y="40" font-size="13" text-anchor="middle">④</text><text x="40" y="152" font-size="12">① 헤더 쓰는 중 → magic/h_crc 불일치 → 뒤에 CHNK 없음 → torn tail로 판정, 여기서 append 재개</text><text x="40" y="174" font-size="12">② payload 중간 → h_crc는 맞지만 len이 파일/기록 끝을 넘음 또는 p_crc 불일치 → chunk 버림</text><text x="40" y="196" font-size="12">③ CMIT 쓰는 중 → payload CRC는 맞아도 commit 없음 → 버림 (쓰다 만 것을 믿지 않는다)</text><text x="40" y="218" font-size="12">④ CMIT 이후 → 유효. 다음 chunk의 ①~③은 다음 chunk만 잃는다</text><rect x="40" y="244" width="120" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="currentColor"/><text x="100" y="270" font-size="12" text-anchor="middle">부팅: head 찾기</text><rect x="190" y="244" width="140" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="currentColor"/><text x="260" y="263" font-size="12" text-anchor="middle">chunk 순회</text><text x="260" y="280" font-size="12" text-anchor="middle">h_crc → p_crc → CMIT</text>
+<rect x="360" y="244" width="140" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="currentColor"/><text x="430" y="263" font-size="12" text-anchor="middle">첫 실패 위치 =</text><text x="430" y="280" font-size="12" text-anchor="middle">유효 데이터의 끝</text><rect x="530" y="244" width="130" height="44" rx="6" fill="#3f9a6b" fill-opacity="0.15" stroke="currentColor"/><text x="595" y="263" font-size="12" text-anchor="middle">다음 page부터</text><text x="595" y="280" font-size="12" text-anchor="middle">새 chunk append</text><line x1="160" y1="266" x2="188" y2="266" stroke="currentColor" marker-end="url(#h1c)"/><line x1="330" y1="266" x2="358" y2="266" stroke="currentColor" marker-end="url(#h1c)"/><line x1="500" y1="266" x2="528" y2="266" stroke="currentColor" marker-end="url(#h1c)"/><text x="40" y="314" font-size="12">torn page는 다시 program하지 않는다 (NAND NOP 제한, 반쯤 program된 셀) → 다음 page 경계로 건너뛴다.</text>
+</svg>
+```
+
+그림 8 — 쓰기 순서와 끊기는 지점. 어디서 끊겨도 결과는 "그 chunk 전체를 버린다" 하나로 수렴한다. 아래는 부팅 시 복구 스캔의 흐름이다.
+
+추가로 생각할 것 두 가지.
+
+- **torn write (반쯤 program된 page)**: 전원이 program 도중에 나가면 그 page는 0xFF도 아니고 원래 데이터도 아닌 **쓰레기**일 수 있다. NAND에서는 이웃 page(MLC/TLC의 paired page)까지 영향을 받을 수 있다는 점을 Don은 알 것이다. 그래서 복구 후에는 그 page를 재사용하지 않고 다음 page(필요하면 다음 sector)에서 새로 시작한다.
+- **commit marker를 따로 쓰는 이유**: CRC만으로도 "온전한가"는 판정되지만, NOR에서는 commit을 별도 word로 **나중에** program하면 "데이터가 다 내려간 뒤에만 commit이 존재한다"는 순서 보장이 생긴다 (flash 컨트롤러·캐시가 쓰기 순서를 바꾸지 않는다는 전제 — write 후 busy 대기·barrier 필요). 이 노트의 포맷은 commit을 chunk 끝에 같이 쓰지만, 같은 원리다.
+
+### 6.3 코드로 확인 — 예제 12: 전원 차단 1000번
+
+**예제 12** — 무엇을 확인하나: 크기가 제각각인 chunk 120개(약 500 KB)를 1 MB 파티션에 쓰다가 임의의 바이트 위치에서 전원을 끊는다 (cut 이후는 erased 0xFF). "torn page" 모드에서는 끊긴 page의 나머지를 무작위 쓰레기로 채운다. 각 1000회 동안 (1) 복구된 chunk 수가 정답(commit까지 다 쓴 chunk 수)과 정확히 같은지, (2) 원본과 다른 데이터를 받아들인 적이 있는지, (3) CRC·commit 없는 단순 `[type][len][payload]` 포맷이면 어떤지 비교한다.
+
+```python
+# 전원 차단 1000번 시뮬레이션: 임의 바이트 위치에서 끊고, 부팅 복구 스캔 결과를 정답과 비교
+import struct, zlib, numpy as np
+from h1log import SEG, SEG_MAGIC, make_chunk, read_log
+rng = np.random.default_rng(1); PAGE, PART = 256, 1 << 20          # NOR page 256 B, 파티션 1 MB
+seg = SEG.pack(SEG_MAGIC, 0x100, 52, 1, 0x020703, 42, 7, 0, 0, 1, 0, 0, 0)
+log, ends, chunks = bytearray(seg[:-4] + struct.pack("<I", zlib.crc32(seg[:-4]))), [], []
+for i in range(120):                                               # 크기가 제각각인 chunk 120개
+    recs = [(1, 0, rng.bytes(304)), (2, 0, rng.bytes(int(rng.integers(500, 8000))))]
+    log += make_chunk(i, i * 250_000, recs); ends.append(len(log)); chunks.append(recs)
+flat = [d for recs in chunks for _, _, d in recs]                  # 비교: CRC·commit 없는 [type][len][payload]
+naive = b"".join(struct.pack("<BH", 1, len(d)) + d for d in flat)
+def power_cut(img, cut, torn):                                      # cut 이후는 erased(0xFF)
+    out = bytearray(b"\xff" * PART); out[:cut] = img[:cut]
+    if torn:                                                        # 끊긴 page의 나머지 = 반쯤 program된 쓰레기
+        pe = min((cut // PAGE + 1) * PAGE, PART); out[cut:pe] = rng.bytes(pe - cut)
+    return bytes(out)
+def naive_bad(buf):                                                 # 원본과 다른 레코드를 받아들였나?
+    p, i = 0, 0
+    while p + 3 <= len(buf):
+        t, ln = struct.unpack_from("<BH", buf, p)
+        if t == 0xFF or p + 3 + ln > len(buf): return False
+        if i >= len(flat) or buf[p + 3:p + 3 + ln] != flat[i]: return True
+        p += 3 + ln; i += 1
+    return False
+for torn in (False, True):
+    res = dict(exact=0, lost_committed=0, accepted_garbage=0, naive_accepted_garbage=0)
+    for _ in range(1000):
+        cut = int(rng.integers(53, len(log)))
+        _, recs, st = read_log(power_cut(log, cut, torn))
+        want = sum(e <= cut for e in ends)                          # commit marker까지 다 쓴 chunk 수
+        res["exact"] += st["chunks"] == want
+        res["lost_committed"] += st["chunks"] < want
+        res["accepted_garbage"] += any(d != chunks[s][k % 2][2] for k, (s, _, _, d) in enumerate(recs))
+        res["naive_accepted_garbage"] += naive_bad(power_cut(naive, int(rng.integers(1, len(naive))), torn))
+    print("torn page" if torn else "clean cut", res)
+```
+
+```text
+clean cut {'exact': 1000, 'lost_committed': 0, 'accepted_garbage': 0, 'naive_accepted_garbage': 1000}
+torn page {'exact': 1000, 'lost_committed': 0, 'accepted_garbage': 0, 'naive_accepted_garbage': 1000}
+```
+
+출력에서 볼 것:
+
+- **HLG1 포맷: 2000번 모두 정확**하다. commit까지 쓴 chunk는 하나도 잃지 않았고(`lost_committed: 0`), 쓰다 만 chunk나 쓰레기를 하나도 받아들이지 않았다(`accepted_garbage: 0`). 파티션의 나머지가 0xFF여도, 끊긴 page가 쓰레기여도 같다.
+- **단순 포맷: 2000번 모두 오염**됐다. 이유는 단순하다. 마지막 레코드의 길이 필드는 이미 쓰였는데 payload가 중간에 끊기면, 나머지 자리는 0xFF(또는 쓰레기)인 채로 "길이만큼" 읽혀서 정상 레코드로 통과한다. 헤더가 끊긴 경우엔 길이 필드 자체가 0xFF 섞인 엉뚱한 값이 된다. 에러 없이 **0xFF로 가득한 가짜 IMU 샘플**(int16로 −1)이 데이터셋에 들어간다 — ML 파이프라인에서 가장 찾기 어려운 종류의 오염이다.
+- 무작위 쓰레기가 우연히 CRC-32를 통과할 확률은 시도당 약 2⁻³² 수준이므로, 1000번 실험으로는 0이 나오는 것이 정상이다. 수백만 대 × 수년이면 이 확률도 0이 아니므로, 중요한 데이터에는 CRC 외에 chunk 순번 연속성 같은 추가 검사를 같이 쓴다.
+
+### 6.4 웨어러블의 "전원 차단"은 실제로 무엇인가
+
+배터리 기기에서 순간적인 전원 상실은 SSD보다 드물다. 실제로 일어나는 것은 이런 것들이다.
+
+- **배터리 방전**: fuel gauge가 남은 용량을 알려 주므로 **예고된** 전원 상실이다. 저전압 임계값에서 열린 chunk를 commit하고 로거를 닫는 "graceful shutdown" 경로를 만든다. 이것이 웨어러블판 PLP다.
+- **brown-out (순간 전압 강하)**: 무선 송신·모터·LED가 동시에 전류를 당길 때. BOD(brown-out detector)가 리셋을 걸면 진행 중이던 flash program이 끊길 수 있다.
+- **크래시·watchdog 리셋**: 전원은 살아 있지만 RAM의 staging buffer가 사라진다. 기법 하나: 로그 링버퍼를 **리셋 때 초기화하지 않는 RAM 영역**(`.noinit` 섹션 같은)에 두고 부팅 시 CRC로 검증해 살린다. 크래시 직전의 센서 데이터는 디버깅에 가장 귀중하다. (리셋 종류에 따라 RAM 유지 여부가 MCU마다 다르니 확인 필요.)
+- **사용자가 배터리를 빼거나 기기가 떨어져 커넥터가 순간 끊김**: 진짜 예고 없는 전원 상실. 6.3절의 포맷이 이것을 처리한다.
+
+---
+
+## 7. Backpressure와 드롭 정책
+
+### 7.1 직관 — 물이 넘칠 때 무엇을 버리나
+
+생산자(센서)는 멈출 수 없고, 소비자(flash, 업로드)는 가끔 멈춘다. flash는 erase나 GC 동안 수백 ms~수 초 응답이 없을 수 있고, BLE 링크는 폰이 멀어지면 몇 시간 끊긴다. 그동안 들어오는 데이터는 RAM 버퍼에 쌓이고, 버퍼는 언젠가 넘친다. **넘칠 때 무엇을 버릴지를 미리 정하지 않으면, 우연이 정한다.**
+
+SSD 펌웨어에서 큐가 차면 호스트에 backpressure(명령 수락 지연)를 걸 수 있다. 센서는 그 신호를 받을 수 없다 — 센서 FIFO가 넘치면 데이터는 그냥 사라진다 (G2 4.4절). 그래서 로거의 backpressure는 "멈춰 달라"가 아니라 **"무엇을 포기할지 고르기"**다.
+
+### 7.2 정책의 재료
+
+- **우선순위 클래스**: 예) 0 = 이벤트·크래시·드롭 카운터(절대 잃으면 안 됨), 1 = IMU·PPG(작고 라벨 가치 높음), 2 = 오디오(크고 trigger 창이면 다시 기회가 옴).
+- **클래스별 quota**: 버퍼를 클래스별로 나눠 한 클래스가 다른 클래스를 굶기지 못하게 한다.
+- **drop-new vs overwrite-oldest**: 실시간 모니터링에는 최신이 중요하니 오래된 것을 덮어쓰고, 사건 기록(trigger 창)에는 사건의 시작이 중요하니 새로 들어오는 것을 버린다. 클래스마다 다르게 고를 수 있다.
+- **단위**: 바이트 단위로 자르지 말고 **레코드(블록) 단위**로 버린다. 반쪽짜리 IMU batch는 timestamp 역산(G7)을 망친다.
+- **드롭을 기록한다**: 버릴 때마다 클래스별 드롭 바이트·레코드 수·구간을 세고, 다음 chunk에 **드롭 카운터 레코드**(예제 2의 type 0x10)로 남긴다. 이것이 H7 데이터 품질 대시보드의 원천이다. 드롭이 기록되지 않으면 데이터셋의 구멍이 "센서 고장"인지 "로거 정책"인지 구분할 수 없다.
+
+### 7.3 코드로 확인 — 예제 13
+
+**예제 13** — 무엇을 확인하나: 저장소가 평소 64 B/ms(64 KB/s)로 비우다가 5 s마다 1 s 동안 멈출 때(GC·erase 흉내), 16,000 B RAM 버퍼에서 세 정책 — 공용 FIFO + drop-new, 공용 FIFO + overwrite-oldest, 클래스별 quota + 우선순위 drain — 의 클래스별 드롭률. 생산자: 이벤트 64 B(평균 5 s에 한 번), IMU 300 B(250 ms마다), 오디오 1,024 B(32 ms마다 = 32 KB/s).
+
+```python
+# 저장소가 주기적으로 멈출 때(GC·erase 1 s) 16000 B RAM 버퍼의 드롭 정책 비교 — 120 s, 1 ms tick
+from collections import deque
+import numpy as np
+CAP, NAMES = 16000, ("event", "imu", "audio")
+def sim(policy):
+    rng = np.random.default_rng(3); q = [deque(), deque(), deque()] if policy == "priority" else [deque()]
+    quota = {0: 1024, 1: 4096, 2: 10880}; made = np.zeros(3); drop = np.zeros(3)
+    used = lambda qs: sum(n for d in qs for _, n in d)
+    for ms in range(120_000):
+        blocks = ([(0, 64)] if rng.random() < 1 / 5000 else []) + ([(1, 300)] if ms % 250 == 0 else []) \
+               + ([(2, 1024)] if ms % 32 == 0 else [])
+        for c, n in blocks:
+            made[c] += n; d = q[c] if policy == "priority" else q[0]
+            if policy == "priority" and sum(x for _, x in d) + n > quota[c]: drop[c] += n; continue
+            if policy == "drop_new" and used(q) + n > CAP: drop[c] += n; continue
+            while policy == "overwrite_old" and used(q) + n > CAP:
+                oc, on = q[0].popleft(); drop[oc] += on            # 가장 오래된 블록을 희생
+            d.append([c, n])
+        budget = 0 if ms % 5000 >= 4000 else 64                    # 64 B/ms, 5 s마다 1 s 정지 (GC·erase)
+        for d in q:                                               # priority면 event→imu→audio 순으로 비움
+            while budget and d:
+                k = min(budget, d[0][1]); d[0][1] -= k; budget -= k
+                if d[0][1] == 0: d.popleft()
+    return made, drop
+for p in ("drop_new", "overwrite_old", "priority"):
+    made, drop = sim(p)
+    print("%-14s " % p + "  ".join("%s %5.1f%%" % (NAMES[c], 100 * drop[c] / made[c]) for c in range(3)))
+```
+
+```text
+drop_new       event   3.3%  imu  12.3%  audio  10.9%
+overwrite_old  event  10.0%  imu  14.8%  audio  10.7%
+priority       event   0.0%  imu   0.0%  audio  14.2%
+```
+
+```svg
+<svg viewBox="0 0 640 320" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="13">저장소가 5 s마다 1 s 멈출 때 클래스별 드롭률 — 예제 13 실측 (120 s)</text><line x1="70" y1="260" x2="610" y2="260" stroke="currentColor"/><line x1="70" y1="50" x2="70" y2="260" stroke="currentColor"/><line x1="66" y1="260" x2="70" y2="260" stroke="currentColor"/><text x="62" y="264" font-size="12" text-anchor="end">0%</text><line x1="66" y1="212" x2="70" y2="212" stroke="currentColor"/><text x="62" y="216" font-size="12" text-anchor="end">4%</text><line x1="66" y1="164" x2="70" y2="164" stroke="currentColor"/><text x="62" y="168" font-size="12" text-anchor="end">8%</text><line x1="66" y1="116" x2="70" y2="116" stroke="currentColor"/><text x="62" y="120" font-size="12" text-anchor="end">12%</text><line x1="66" y1="68" x2="70" y2="68" stroke="currentColor"/><text x="62" y="72" font-size="12" text-anchor="end">16%</text><rect x="110" y="220.4" width="36" height="39.6" fill="#d0564a" fill-opacity="0.8"/>
+<text x="128" y="214.4" font-size="12" text-anchor="middle">3.3</text><rect x="152" y="112.4" width="36" height="147.6" fill="#e08a3c" fill-opacity="0.8"/><text x="170" y="106.4" font-size="12" text-anchor="middle">12.3</text><rect x="194" y="129.2" width="36" height="130.8" fill="#4a7bd0" fill-opacity="0.8"/><text x="212" y="123.2" font-size="12" text-anchor="middle">10.9</text><text x="170" y="280" font-size="13" text-anchor="middle">drop_new</text><rect x="280" y="140.0" width="36" height="120.0" fill="#d0564a" fill-opacity="0.8"/><text x="298" y="134.0" font-size="12" text-anchor="middle">10.0</text>
+<rect x="322" y="82.4" width="36" height="177.6" fill="#e08a3c" fill-opacity="0.8"/><text x="340" y="76.4" font-size="12" text-anchor="middle">14.8</text><rect x="364" y="131.6" width="36" height="128.4" fill="#4a7bd0" fill-opacity="0.8"/><text x="382" y="125.6" font-size="12" text-anchor="middle">10.7</text><text x="340" y="280" font-size="13" text-anchor="middle">overwrite_old</text><rect x="450" y="260.0" width="36" height="0.0" fill="#d0564a" fill-opacity="0.8"/><text x="468" y="254.0" font-size="12" text-anchor="middle">0.0</text><rect x="492" y="260.0" width="36" height="0.0" fill="#e08a3c" fill-opacity="0.8"/>
+<text x="510" y="254.0" font-size="12" text-anchor="middle">0.0</text><rect x="534" y="89.6" width="36" height="170.4" fill="#4a7bd0" fill-opacity="0.8"/><text x="552" y="83.6" font-size="12" text-anchor="middle">14.2</text><text x="510" y="280" font-size="13" text-anchor="middle">priority</text><rect x="430" y="40" width="12" height="12" fill="#d0564a" fill-opacity="0.8"/><text x="446" y="51" font-size="12">event</text><rect x="492" y="40" width="12" height="12" fill="#e08a3c" fill-opacity="0.8"/><text x="508" y="51" font-size="12">imu</text><rect x="554" y="40" width="12" height="12" fill="#4a7bd0" fill-opacity="0.8"/><text x="570" y="51" font-size="12">audio</text><text x="20" y="306" font-size="12">priority: 클래스별 quota + event→imu→audio 순으로 비움. 버리는 것을 고른다 = 오디오만 잃는다.</text>
+</svg>
+```
+
+그림 9 — 같은 부하, 같은 RAM, 세 가지 정책. 앞의 두 정책은 "우연히" 이벤트와 IMU까지 잃는다. 우선순위 정책은 오디오를 조금 더 잃는 대신 이벤트와 IMU를 하나도 잃지 않는다.
+
+출력에서 볼 것:
+
+- **drop-new 공용 FIFO**: 1 s 정지 동안 오디오(32 KB/s)가 0.5 s 만에 버퍼를 채우고, 그 뒤 들어오는 IMU와 이벤트도 자리가 없어 버려진다 (IMU 12.3%). 버퍼가 크기 순서대로 "먼저 온 사람"에게 점령당한다.
+- **overwrite-oldest**: 더 나쁘다. 정지 중에 버퍼 앞쪽의 IMU·이벤트를 밀어내고 오디오가 그 자리를 차지한다 (이벤트 10%).
+- **우선순위 + quota**: 이벤트·IMU 드롭 0%. 오디오는 14.2%로 공용 FIFO보다 조금 더 잃는다 — 오디오가 쓸 수 있는 RAM이 10,880 B로 줄었기 때문이다. **같은 RAM으로 무엇을 잃을지를 우리가 골랐다**는 것이 핵심이다.
+- 평균 drain(64 × 0.8 = 51.2 B/ms)은 평균 생산(약 33 B/ms)보다 크다. 그런데도 드롭이 난다. **평균 대역폭이 충분해도 최악 정지 시간 × 생산 rate만큼의 버퍼가 없으면 잃는다** — D6의 jitter·버퍼 크기 이야기와 같다. 이 실험에서 오디오까지 지키려면 정지 1 s × 33.2 KB/s ≈ 33 KB 이상이 필요하다.
+
+### 7.4 업로드 쪽 backpressure (H2로 넘김)
+
+flash가 꽉 찼는데 업로드가 안 될 때(폰이 없다, 링크가 나쁘다)도 같은 문제다. 이때 버리는 단위는 chunk·파일이고, 정책은 "가장 오래된 저우선 파일부터 삭제", "이벤트 파일은 보호" 같은 식이다. 업로드 큐에는 각 파일의 우선순위·크기·생성 시각을 두고, 업로드 성공(서버 ack) 후에만 삭제한다. 자세한 것은 H2.
+
+---
+## 8. RTOS logger task 설계 — 지금까지를 한 task로
+
+### 8.1 구조
+
+```
+ ISR / DMA 영역 (µs)           logger task (ms, 낮은 우선순위)              storage task 또는 같은 task
+ ───────────────────           ─────────────────────────────────            ───────────────────────────
+ DMA half-complete IRQ ─┐
+ DMA full-complete  IRQ ─┼─► 센서별 SPSC ring  ──►  1) ring에서 batch 꺼냄
+ IMU FIFO watermark IRQ ─┘   (+ IRQ 시각 G7)       2) batch 헤더(seq, t_irq, period_q16)
+                                                    3) delta + varint (선택)
+   ISR는 복사·시각만.                               4) chunk staging에 record append
+   절대 flash를 만지지 않는다.                       5) chunk가 page 경계 근처 or flush 타이머
+                                                       → CRC → commit 요청  ──────────────►  page program
+                                                    6) 드롭 카운터·config 스냅샷 record           (erase는 미리)
+                                                    7) 우선순위 클래스별 quota 검사 (7절)
+```
+
+### 8.2 설계 규칙
+
+1. **DMA는 ping-pong(double buffer)으로 받는다.** DMA가 B 버퍼를 채우는 동안 A 버퍼를 처리한다. half/full 인터럽트가 그 경계다 (E7 5.4절). 캐시가 있는 코어라면 DMA 버퍼의 cache invalidate를 잊지 않는다 (E7 6절의 stale 버그).
+2. **ISR는 복사와 시각만.** IRQ 시각을 capture하고, ring에 넣고, task를 깨운다. 압축·CRC·flash는 task에서. flash program·erase는 수 ms~수백 ms 블로킹이라 ISR에서 하면 다른 센서 FIFO가 넘친다.
+3. **page 크기로 모아서 쓴다.** staging buffer를 page(또는 sector) 정렬로 두고, 꽉 찬 page는 즉시 program, 남은 부분은 flush 정책(5.4절)에 따라. chunk 시작을 page 경계에 맞추면 resync와 torn page 처리가 page 단위로 단순해진다 (그 대가로 약간의 패딩).
+4. **erase는 미리 한다.** 다음 sector를 쓸 때가 되어서야 erase하면 그 수십~수백 ms 동안 로거가 멈춘다 (예제 13의 정지). head 앞의 sector 한두 개를 idle 시간에 미리 erase해 둔다 (그림 6의 "미리 erase"). SSD에서 free block pool을 미리 확보하는 것과 같다.
+5. **flush 정책은 세 가지 조건의 OR**: (a) chunk가 목표 크기(예: 4 KB)에 도달, (b) 가장 오래된 미flush 데이터가 T초(예: 5 s)를 넘음, (c) 우선순위 0 이벤트 발생 또는 저전압 경고 → 즉시 commit.
+6. **timestamp는 G7 방식**: batch마다 IRQ 시각 + seq + 추정 주기를 넣고 샘플별 시각은 넣지 않는다. 시계 관계(MCU monotonic ↔ wall clock)는 segment 헤더와, 동기화가 갱신될 때마다 "clock sync" 레코드로 남긴다.
+7. **설정 변경은 레코드로**: 2.4절. 설정 적용 직전에 config 스냅샷 레코드를 넣고, 가능하면 그 시점에 chunk를 닫아서 "한 chunk 안에서는 설정이 하나"가 되게 한다. reader가 단순해진다.
+8. **모든 버림은 센다**: ring overflow, quota 초과, 센서 FIFO overflow 플래그(G2), CRC 실패 chunk 수까지. 카운터는 단조 증가로 두고 주기적으로 레코드로 남긴다 (차분은 서버에서).
+
+### 8.3 RAM 예산 손계산 (D2 연결)
+
+IMU + PPG 상시 + 오디오 trigger(2 s pre-roll) 구성을 MCU에 올린다고 하자.
+
+```
+오디오 pre-roll ring  : 2 s × 32,000 B/s           = 64,000 B   ← 가장 크다
+DMA ping-pong (오디오): 2 × 16 ms × 32 B/ms        =  1,024 B
+IMU ring              : 1 s × 1,200 B/s             =  1,200 B
+PPG ring              : 1 s × 75 B/s                =     75 B
+chunk staging         : 4 KB page × 2 (double)      =  8,192 B
+backpressure 버퍼     : flash 정지 1 s × 33 KB/s     ≈ 33,000 B   (예제 13 결론)
+──────────────────────────────────────────────────────────────
+합계                                                 ≈ 107 KB
+```
+
+말로 하면: 웨어러블 MCU SRAM이 수백 KB라면 로깅만으로 상당 부분을 쓴다. 가장 큰 두 항목(pre-roll, backpressure 버퍼)은 둘 다 오디오 때문이다. 줄이는 방법: pre-roll을 1 s로, 오디오를 8 kHz 또는 압축된 형태(예: codec 출력)로 링에 저장, flash 정지 시간이 짧은 저장소(NOR의 미리 erase) 선택, 정지 중에는 오디오 trigger를 받지 않기. 이 숫자는 D2의 메모리 예산 워크시트에 그대로 들어간다.
+
+---
+
+## 9. 임베디드 관점에서 다시 보기 — 한 장짜리 설계안
+
+예를 들어 Hark 같은 웨어러블의 **dogfood 수집 펌웨어**를 설계한다면 (모든 숫자는 이 노트의 가정이다):
+
+| 항목 | 결정 | 근거 |
+|---|---|---|
+| 모드 | IMU·PPG 연속 raw, 오디오는 trigger 창(2 s + 8 s) + 1% 무작위 창 | 예제 1: 177 MB/day. 무작위 창으로 선택 편향 완화 (1.5절) |
+| 포맷 | segment 헤더(기기·FW·시계·설정) + chunk(CRC-32·commit) + TLV record | 예제 2·3: 오버헤드 0.6%, 잘림·비트 플립·모르는 type 처리 |
+| 직렬화 | 샘플 payload = raw packed int16 (+ MCU delta-varint 선택), 메타데이터 = protobuf/CBOR | 예제 5·6: raw가 가장 빠르고, 진화가 필요한 곳만 스키마 포맷 |
+| 압축 | MCU: delta + zigzag-varint. AP/서버: zlib/zstd 재압축 | 예제 7·8: varint만으로 1.69×, chunk 4.8 KB면 전체 압축의 94% |
+| 저장 | IMU·PPG·이벤트 → 16 MB NOR circular log, 오디오 창 → AP eMMC | 예제 11: NOR 23년·보관 2 h, eMMC는 오디오 담당 |
+| flush | chunk 4 KB 또는 5 s, 이벤트·저전압은 즉시 | 예제 10: WA 1.02~1.37, risk ≤ 5 s |
+| 전원 차단 | commit 순서 + 부팅 스캔 + torn page 건너뛰기 + 저전압 graceful close | 예제 12: 2000/2000 정확 복구 |
+| backpressure | 3 클래스 quota, 레코드 단위 drop-new, 드롭 카운터 레코드 | 예제 13: 이벤트·IMU 0% 드롭 |
+| 업로드 | NOR → BLE(폰) 2시간 안에, eMMC → Wi-Fi 충전 중 | H2 |
+| 품질 | chunk seq gap, CRC fail, 드롭 카운터, FIFO overflow, time QA | H7, G7 7절 |
+
+이 표를 면접에서 화이트보드 한 장으로 그릴 수 있으면 "data collection pipeline at scale"의 온디바이스 절반은 답한 것이다. 나머지 절반(전송·서버·라벨·데이터셋)은 H2~H8이다.
+
+Don의 경험을 이 표에 대응시키면 거의 모든 행에 SSD 펌웨어의 짝이 있다: NAND 프로그래밍·WAF(저장·flush), PLP(전원 차단), end-to-end CRC(포맷), 큐 throttling(backpressure), telemetry 로그(포맷 버전·카운터). **면접에서 "데이터 파이프라인 경험이 없다"가 아니라 "그 파이프라인의 가장 어려운 하단부를 양산 수준으로 만들어 봤다"로 말할 수 있다.**
+
+---
+
+## 10. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| CRC·commit 없는 `[len][payload]` 포맷 | 전원 차단 후 0xFF(−1)로 가득한 샘플이 데이터셋에 섞임, 에러 없음 | 끊긴 레코드를 길이만 보고 받아들임 | chunk CRC + commit marker + 헤더 CRC (예제 12) |
+| 필드를 구조체 중간에 추가 | 옛 파서가 온도를 가속도로 읽음, 에러 없음 | raw struct에 버전·길이 없음 | TLV `ver`·`len`, 필드는 끝에만 추가, protobuf envelope (예제 6) |
+| 센서 설정을 파일 헤더에만 기록 | 세션 중간부터 가속도가 2배·½배 | full-scale 변경이 로그에 안 남음 | 변경 즉시 config 스냅샷 레코드, chunk 경계에서 적용 (2.4절) |
+| 작은 chunk를 큰 page에 자주 flush | flash 수명이 계산의 1/10, 쓰기 전력 증가 | 패딩으로 WA 13× (예제 10) | page 크기만큼 모으기, flush 주기 수 초, 이벤트만 즉시 |
+| raw flash에 FAT, 매초 sync | 몇 주 만에 특정 sector 불량, 파일시스템 깨짐 | FAT·디렉터리 제자리 갱신 hot spot, 저널 없음 (예제 9) | circular log 또는 LittleFS, 큰 파일 미리 할당 |
+| 공용 버퍼에 오디오·IMU·이벤트를 같이 | flash가 멈출 때 IMU·이벤트가 사라짐 | 큰 스트림이 버퍼를 점령 (예제 13) | 클래스별 quota + 우선순위 drain, 레코드 단위 드롭 |
+| 드롭을 세지 않음 | 데이터셋의 구멍이 센서 고장인지 정책인지 모름 | 버림이 조용함 | 드롭 카운터 레코드, chunk seq, FIFO overflow 플래그 (H7) |
+| 파일 전체를 한 스트림으로 압축 | 1비트 오류로 파일 뒷부분 전체 손실, 중간 읽기 느림 | 압축 상태가 앞에 의존 | chunk별 독립 압축 + delta 재시작 (예제 8) |
+| 오디오를 zlib로 줄이려 함 | 2.7 GB/day가 2.3 GB/day — 여전히 안 들어감 | 노이즈가 많은 PCM은 무손실로 안 줄어듦 (예제 7) | 모드(trigger·duty), 손실 codec (분포 변화 주의), AP 저장소 |
+| trigger 창만 수집 | 재학습해도 false reject가 안 줄어듦 | trigger가 놓친 사례는 저장 안 됨 (선택 편향) | 무작위 창 일부 섞기, trigger 임계값을 수집용으로 낮추기 |
+
+---
+
+## 11. 면접에서 이렇게 말한다
+
+**Q.** "Design an on-device logging format for multi-sensor data."
+
+**A.** 세 층으로 답한다. 파일(segment) 헤더에 magic·포맷 버전·헤더 길이·기기 ID·FW 버전·시계 정보·센서 설정. 그 아래 chunk가 전원 차단의 원자 단위 — 순번, 기준 시각, 길이, payload CRC, 헤더 CRC, 끝에 commit marker. chunk 안은 TLV record — type, version, length, 시각 offset — 모르는 type은 length로 건너뛴다. 샘플은 raw packed little-endian int16, 메타데이터는 protobuf나 CBOR. 설정이 바뀌면 config 레코드, 버린 데이터는 드롭 카운터 레코드.
+
+> I'd use three layers. A segment header per file carries a magic, format version, header length, device ID, firmware version, clock information and the sensor configuration, so the file is self-describing years later. Below that, a chunk is the atomic unit for power loss: it has a sequence number, a 64-bit base timestamp, the payload length, a CRC over the payload, a CRC over the header itself, and a commit marker written last. Inside a chunk, records are type-length-value with a version byte, so an old parser can skip record types it doesn't know. Sample payloads are packed little-endian integers for speed, and metadata goes in protobuf or CBOR where schema evolution matters. Configuration changes and drop counters are records too, because the dataset needs to know both how the data was produced and what was lost.
+
+**Q.** "How do you survive power loss while logging?"
+
+**A.** 쓰는 순서와 검증으로. 헤더 → payload → CRC → 마지막에 commit marker. 부팅하면 head를 찾고 chunk마다 헤더 CRC, 길이, payload CRC, commit을 확인해서 첫 실패 지점을 유효 데이터의 끝으로 본다. torn page는 다시 쓰지 않고 다음 page부터. 잃는 것은 commit 안 된 마지막 chunk뿐이고, 그 상한은 flush 주기다. 실제로 임의 위치 전원 차단 2000번 시뮬레이션에서 commit된 chunk는 하나도 잃지 않았고 쓰레기도 하나도 받아들이지 않았다. SSD의 PLP와 같은 목표를 커패시터 없이 포맷으로 푸는 것이다. 배터리 기기라면 저전압 경고에서 graceful close도 한다.
+
+> I make every chunk commit atomically by ordering the writes: header, payload, then a commit marker written last, with CRCs over both the header and the payload. On boot I find the head and walk the chunks, checking header CRC, length bounds, payload CRC and the commit marker; the first failure marks the end of valid data, and I resume on the next page rather than reprogramming a torn one. The worst case is losing the last uncommitted chunk, which is bounded by the flush interval. I've simulated thousands of random power cuts against this scheme with zero lost committed chunks and zero accepted garbage, while a naive length-prefixed format accepted corrupted records every time. It's the same goal as SSD power-loss protection, achieved with format discipline instead of hold-up capacitors, plus a graceful close on the low-battery warning.
+
+**Q.** "How much flash does a day of IMU plus audio take, and how do you reduce it?"
+
+**A.** IMU 6축 16-bit 100 Hz는 1.2 KB/s, 하루 104 MB. 오디오 16 kHz 16-bit은 32 KB/s, 하루 2.76 GB — 27배다. 그래서 먼저 모드로 줄인다: 오디오는 trigger 창(2 s pre-roll + 8 s)만 남기면 하루 200번 기준 64 MB, IMU와 합쳐 약 170~180 MB. 그다음 delta + varint로 IMU를 1.7배 정도, 범용 압축을 더해 2배 가까이. 오디오는 무손실로는 1.2~1.6배밖에 안 되니 더 줄이려면 손실 codec이나 특징만 남기기. 압축보다 모드 선택이 10배 이상 큰 레버다.
+
+> IMU at six axes, 16 bits, 100 hertz is 1.2 kilobytes per second, about 104 megabytes a day. Sixteen-kilohertz 16-bit audio is 32 kilobytes per second, about 2.8 gigabytes a day, so audio dominates by a factor of 27. The biggest lever is the logging mode: keeping only triggered audio windows, say two seconds of pre-roll plus eight seconds after, at 200 triggers a day is 64 megabytes, so the whole day is under 200 megabytes. Then delta plus zigzag varint gets IMU down by about 1.7x for almost no CPU, and a block compressor on top gets close to 2x. Lossless compression barely helps audio, around 1.2 to 1.6x, so beyond that you need a lossy codec or on-device features, and you have to think about whether the codec changes the training distribution.
+
+**Q.** "Protobuf vs raw binary vs CBOR for device logs?"
+
+**A.** 같은 IMU batch로 재 보면 raw 312 B, protobuf 321 B, 키 있는 CBOR 456 B, JSON 943 B. 크기는 protobuf와 raw가 비슷하고 raw가 encode가 가장 싸다. 차이는 스키마 진화다: raw는 필드를 중간에 넣으면 옛 파서가 조용히 틀린 값을 읽고, protobuf는 모르는 필드를 무시한다. 그래서 샘플 payload는 raw bytes로, 그 바깥 envelope과 메타데이터는 protobuf(MCU에선 nanopb)나 CBOR로. CBOR은 스키마 없이 이질적인 진단 레코드에 좋고, 배열을 byte string으로 넣으면 raw와 같은 크기다. protobuf에 delta를 넣으면 varint 덕분에 raw보다 30% 작아진다.
+
+> On the same IMU batch I measured 312 bytes raw, 321 for protobuf, 456 for CBOR with keys and integer arrays, and 943 for JSON. Raw and protobuf are about the same size, and raw is by far the cheapest to encode. The real difference is schema evolution: if you insert a field into a raw struct, an old parser silently misreads values, while protobuf skips unknown fields and even preserves them. So I put high-rate samples in a raw packed byte payload and wrap it in a protobuf or CBOR envelope for metadata, using nanopb or a small CBOR library on the MCU. CBOR is nice for heterogeneous diagnostic records without a schema, and with byte strings it's the same size as raw. And if you delta-encode samples first, protobuf's zigzag varints come out about 30 percent smaller than raw.
+
+**Q.** "How do you avoid wearing out flash?"
+
+**A.** 세 가지. 첫째, 제자리 갱신을 없앤다 — append-only circular log나 LittleFS. raw flash에 FAT를 올리면 FAT sector 하나가 하루 수만 번 erase돼 며칠 만에 죽는다. 둘째, write amplification을 줄인다 — page 크기만큼 모아 쓰고 flush를 수 초로. 4 KB page에 250 ms flush면 WA가 13이다. 셋째, 수명을 계산한다 — 용량 × P/E ÷ (하루 쓰기 × WA). 16 MB NOR에 하루 177 MB면 23년이지만 보관 시간은 2시간이라 업로드 설계가 먼저 제약이 된다. 내장 MCU flash에는 로그를 쓰지 않는다.
+
+> First, never update in place: use an append-only circular log or a log-structured filesystem like LittleFS, because a FAT table on raw flash gets erased tens of thousands of times a day and dies in days. Second, control write amplification: batch writes to the page size and flush every few seconds instead of every few hundred milliseconds; with four-kilobyte pages and a 250-millisecond flush I measured a write amplification of about 13. Third, do the lifetime math the same way we do TBW for SSDs: capacity times P/E cycles divided by daily writes times write amplification. A 16-megabyte NOR logging 177 megabytes a day lasts over 20 years, but it only holds two hours of data, so retention and upload cadence become the real constraint. And I keep logs off the MCU's internal flash, which typically has far lower endurance and holds the firmware.
+
+**Q.** "What happens when storage or the uplink can't keep up?"
+
+**A.** 센서는 멈출 수 없으니 무엇을 버릴지 정책으로 정한다. 우선순위 클래스(이벤트 > IMU > 오디오)와 클래스별 quota, 레코드 단위 드롭, 드롭 카운터 레코드. 시뮬레이션에서 1 s flash 정지를 주면 공용 버퍼는 IMU 12~15%, 이벤트까지 잃지만, quota + 우선순위면 이벤트·IMU 0%로 오디오만 잃는다. 평균 대역폭이 충분해도 최악 정지 시간 × 유입 rate만큼 버퍼가 필요하다. 드롭 카운터는 데이터 품질 모니터링의 입력이다.
+
+> Sensors can't be paused, so the logger has to choose what to lose. I use priority classes, for example events, then IMU, then audio, each with its own buffer quota, and I drop whole records, never partial ones, and log a drop-counter record so the data-quality pipeline can tell a policy drop from a sensor fault. In a simulation with one-second storage stalls, a shared buffer lost 12 to 15 percent of IMU and even some events, while per-class quotas with priority draining lost zero events and zero IMU and only shed audio. The sizing rule is that average bandwidth isn't enough; you need worst-case stall time times the inflow rate in buffer, or a policy for what to shed.
+
+---
+
+## 12. 직접 해보기
+
+1. 손계산: 6축 IMU를 200 Hz, 3축 가속도만 50 Hz 두 모드로 하루 로그 크기를 구하라 (int16, 헤더 무시). — 정답: 200 Hz 6축 = 2,400 B/s → 207.36 MB/day. 50 Hz 3축 = 300 B/s → 25.92 MB/day.
+2. 손계산: varint로 sint32 값 −1, 100, −1000, 20000을 인코딩한 바이트 수와 실제 바이트(hex)를 구하라. — 정답: zigzag 1, 200, 1999, 40000 → `01`(1 B), `c801`(2 B), `cf0f`(2 B), `c0b802`(3 B).
+3. 손계산: page 2 KB, IMU 1,200 B/s, chunk 오버헤드 36 B일 때 flush 2 s의 WA는? — 정답: chunk 2,436 B → page 2개(4,096 B) → 4,096 ÷ 2,400 ≈ 1.71.
+4. 코드 과제: 예제 3의 reader에 "chunk seq gap 검출"을 추가하고, 예제 2의 C writer가 chunk 10을 건너뛰게 바꿔서 gap 1개가 보고되는지 확인하라. — 힌트: 이전 `seq`를 기억하고 `seq != prev + 1`이면 gap. 비트 플립으로 버린 chunk도 gap으로 보여야 한다 (예제 3의 bitflip 케이스).
+5. 코드 과제: 예제 12에서 commit marker 검사를 빼고(CRC만) 다시 돌려 결과가 바뀌는지 보라. 그다음 payload CRC도 빼고 commit marker만 남겨 보라. — 정답: CRC만 남기면 `accepted_garbage`는 여전히 0이지만 `exact`가 998·999로 조금 줄어든다 (실행해 본 결과). payload는 다 썼고 commit 4바이트를 쓰기 전에 끊긴 chunk를 받아들이기 때문이다 — 데이터는 맞지만 "commit된 것만 믿는다"는 계약이 깨진다. commit만 남기면 끊긴 chunk는 잡지만 비트 플립(예제 3)은 못 잡는다.
+6. 코드 과제: 예제 13에 "오디오는 overwrite-oldest, IMU·이벤트는 drop-new" 혼합 정책을 추가하고, 정지 시간을 0.5 s·2 s로 바꿔 드롭률 표를 만들어라. — 힌트: 클래스별 deque에서 quota 초과 시 오디오만 `popleft`. 2 s 정지에서는 IMU quota 4,096 B(3.4 s 분량)도 충분한지 확인.
+
+---
+
+## 13. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| ring buffer | 원형 버퍼 | 고정 크기 배열을 head/tail 인덱스로 돌려 쓰는 FIFO. ISR → task 전달의 기본 |
+| ping-pong (double) buffer | 이중 버퍼 | DMA가 한쪽을 채우는 동안 CPU가 다른 쪽을 처리 |
+| pre-roll | 트리거 전 구간 | trigger 이전 N초를 링버퍼에서 꺼내 함께 저장 |
+| post-trigger | 트리거 후 구간 | trigger 이후 M초를 이어서 저장 |
+| segment | 로그 파일 단위 | 헤더에 기기·FW·시계·설정을 담는 최상위 단위 |
+| chunk | 커밋 단위 | 전원 차단에 대해 원자적인 레코드 묶음. CRC + commit marker |
+| record | 레코드 | type·version·length·시각 offset + payload. TLV 구조 |
+| TLV | type-length-value | 모르는 type을 length로 건너뛸 수 있는 인코딩 |
+| commit marker | 커밋 표시 | 마지막에 쓰는 고정 값. 있어야 chunk가 유효 |
+| self-describing | 자기 서술적 | 스키마 없이도 필드 이름·타입을 알 수 있는 포맷 (JSON, CBOR) |
+| schema evolution | 스키마 진화 | 포맷 변경 후에도 옛/새 reader·writer가 서로 읽히는 성질 |
+| forward / backward compatibility | 전방·후방 호환 | 옛 reader가 새 데이터를 / 새 reader가 옛 데이터를 읽음 |
+| varint | 가변 길이 정수 | 7비트씩, MSB = 계속 비트. 작은 수일수록 짧다 |
+| zigzag | 지그재그 변환 | 부호 있는 정수를 0, −1, 1, −2 … → 0, 1, 2, 3 …으로 |
+| delta encoding | 차분 인코딩 | 이전 값과의 차이를 저장. 센서 신호에서 값이 작아진다 |
+| byte shuffle | 바이트 재배열 | 다바이트 값의 같은 자리 바이트끼리 모아 압축률을 높임 |
+| protobuf / nanopb | Protocol Buffers / MCU 구현 | 필드 번호 + wire type 기반 스키마 직렬화 |
+| CBOR | Concise Binary Object Representation | RFC 8949, 바이너리 JSON 같은 self-describing 포맷 |
+| FlatBuffers | 제로카피 직렬화 | 파싱 없이 버퍼 안을 offset으로 직접 접근. .tflite 포맷 |
+| P/E cycle | program/erase 횟수 | flash 블록이 견디는 쓰기·지우기 반복 수 |
+| wear leveling | 마모 평준화 | erase를 모든 블록에 고르게 분산 |
+| write amplification (WA) | 쓰기 증폭 | 실제 program한 바이트 ÷ 쓰려던 데이터 바이트 |
+| DWPD | drive writes per day | 하루에 장치 용량의 몇 배를 쓰는지 |
+| circular log / FCB | 원형 로그 / Zephyr Flash Circular Buffer | sector를 고리로 append, 가장 오래된 것부터 erase |
+| LittleFS | MCU용 파일시스템 | 전원 차단 복원력, dynamic wear leveling, 제한된 RAM |
+| torn write / torn page | 찢어진 쓰기 | program 도중 전원 상실로 반쯤 쓰인 page |
+| PLP | power-loss protection | SSD에서 커패시터로 in-flight 데이터를 지키는 기능 |
+| backpressure | 역압 | 소비자가 느릴 때 생산자 쪽으로 전달되는 압력, 또는 그 대응 정책 |
+| drop counter | 드롭 카운터 | 정책·오버플로로 버린 바이트·레코드 수. 품질 지표 |
+
+---
+
+## 14. 요약 & 체크리스트
+
+온디바이스 로깅은 Don이 SSD 펌웨어에서 만든 시스템(DMA → 버퍼 → page program → wear·WA·PLP·CRC)에 "ML 데이터"라는 조건을 붙인 것이다. 가장 큰 레버는 **무엇을 남길지**(모드)다 — 오디오를 연속으로 남기면 하루 2.8 GB, trigger 창으로 바꾸면 전체가 200 MB 아래로 내려간다. 압축은 delta + varint로 IMU 1.7×, 범용 압축을 더해도 2× 근처가 천장이고 오디오는 무손실로 거의 안 줄어든다. 포맷은 segment(자기 서술 메타데이터) → chunk(CRC + commit, 전원 차단 원자 단위) → TLV record(모르는 type 건너뛰기)의 3층으로 설계하고, 샘플은 raw, 메타데이터는 protobuf/CBOR로. 저장은 append-only(circular log·LittleFS)로 hot spot을 없애고, page 크기로 모아 몇 초마다 flush해 WA를 1 근처로, 수명은 용량 × P/E ÷ (하루 쓰기 × WA)로 계산하되 보관 시간이 먼저 제약이 될 수 있다. 버퍼가 넘칠 때는 우선순위 클래스와 quota로 버릴 것을 고르고, 버린 것은 반드시 센다.
+
+- [ ] IMU·오디오·PPG의 하루 raw 크기와 네 가지 로깅 모드의 용량을 손으로 계산할 수 있다
+- [ ] trigger 모드의 선택 편향을 설명하고 완화책(무작위 창)을 말할 수 있다
+- [ ] segment·chunk·record 헤더에 들어갈 필드와 그 이유를 화이트보드에 그릴 수 있다
+- [ ] varint·zigzag를 손으로 인코딩하고 protobuf wire format 한 메시지를 바이트로 읽을 수 있다
+- [ ] raw / protobuf / CBOR / FlatBuffers / JSON의 크기·속도·스키마 진화 차이를 실측 숫자로 말할 수 있다
+- [ ] delta가 압축을 돕는 이유와 오디오가 무손실로 안 줄어드는 이유를 설명할 수 있다
+- [ ] flush 주기·page 크기에서 WA를 손으로 계산하고 수명·보관 시간·DWPD를 계산할 수 있다
+- [ ] raw flash 위 FAT의 위험과 circular log·LittleFS의 장점을 설명할 수 있다
+- [ ] 원자적 chunk commit과 부팅 복구 스캔을 설계하고, 단순 length-prefix 포맷이 왜 오염되는지 말할 수 있다
+- [ ] 우선순위 클래스·quota·드롭 카운터로 backpressure 정책을 설계하고 버퍼 크기를 최악 정지 시간으로 잡을 수 있다
+
+---
+
+## 참고 자료
+
+- Protocol Buffers 공식 문서 — "Encoding" (varint, zigzag, wire type, packed repeated): https://protobuf.dev/programming-guides/encoding/
+- nanopb — MCU용 protobuf 구현: https://jpa.kapsi.fi/nanopb/
+- RFC 8949 — Concise Binary Object Representation (CBOR): https://www.rfc-editor.org/rfc/rfc8949
+- FlatBuffers 공식 문서: https://flatbuffers.dev/
+- LittleFS — 설계 문서(DESIGN.md)와 README: https://github.com/littlefs-project/littlefs
+- Zephyr Project 문서 — Flash Circular Buffer (FCB), Settings/NVS 저장소: https://docs.zephyrproject.org/latest/services/storage/index.html
+- zlib 매뉴얼과 메모리 사용량(`zconf.h`의 공식): https://zlib.net/manual.html
+- LZ4: https://github.com/lz4/lz4 · heatshrink: https://github.com/atomicobject/heatshrink
+- FatFs (ChaN) — MCU용 FAT 구현과 전원 차단 주의 사항: http://elm-chan.org/fsw/ff/
+- Python `struct`, `zlib`, `lzma` 표준 라이브러리 문서: https://docs.python.org/3/library/
+- 이 노트와 이어지는 노트: A6(바이너리 로그 → numpy), G2(IMU FIFO·DMA), G6(센서 데이터율), G7(timestamp·time QA), E7(DMA·캐시), E8(MCU vs AP), D2(메모리 예산), H2(전송), H3(백엔드 ingestion), H6(프라이버시), H7(데이터 품질)

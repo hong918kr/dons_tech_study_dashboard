@@ -1,6 +1,6 @@
 # B01. BSP 해부 — reset이 풀리는 순간부터 앱의 첫 줄까지
 
-> **시리즈**: BSP 집중 1/4 · **선행**: C01(Cortex 부트·링커), C03(BSP·주변장치 드라이버), J02(JD 문장 해설) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling"
+> **시리즈**: BSP 집중 1/6 · **선행**: C01(Cortex 부트·링커), C03(BSP·주변장치 드라이버), J02(JD 문장 해설) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling"
 > **Don 상태**: 🟡 절반. 제품 보드의 BSP를 오너로 만들어 본 적은 없다. 그러나 BSP의 아래 절반(코어 부팅, 클럭·메모리·버스 bring-up, 새 실리콘이 처음 깨어날 때의 디버깅)은 FPGA pre-silicon과 Apple 실리콘 통합에서 직접 했다. 이 노트의 목적은 "해봤다"고 말하는 게 아니라 **지도를 전부 그린 뒤 내 좌표를 정확히 찍는 것**이다.
 > **이 노트를 다 읽으면**: ① BSP의 경계(무엇이 BSP이고 무엇이 아닌지)를 표로 말할 수 있다 ② reset → 클럭 → 핀 → 메모리 → 디바이스 init → 앱 순서를 화이트보드에 그리고 각 단계가 틀렸을 때의 증상을 말할 수 있다 ③ 보드 리비전이 셋으로 늘었을 때의 관리 설계안을 제시할 수 있다.
 

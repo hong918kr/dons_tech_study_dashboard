@@ -22,6 +22,8 @@ JD 원문의 해당 문장: "Own BSP development, peripheral driver integration 
 | `bsp/B01_bsp_anatomy.md` | BSP 해부: 부트 체인, 클럭·전원 초기화 순서, 핀 먹싱, 메모리 맵·링커, 디바이스 초기화 순서, HAL/드라이버 계층, 보드 리비전 관리 |
 | `bsp/B02_zephyr_board_port.md` | Zephyr에서 보드를 실제로 올리는 법: 디렉토리 구성, devicetree, Kconfig/defconfig, 드라이버 바인딩, west 빌드, 보드 리비전, twister. 실습 중심 |
 | `bsp/B03_linux_android_bsp.md` | Cortex-A/Linux·Android BSP: 부트 체인(BootROM→TF-A→U-Boot→kernel), device tree, 커널 드라이버·HAL, Yocto/AOSP 개요. Don이 약한 영역의 방어 범위 설정 |
+| `bsp/B05_vendor_fpga_integration.md` | (2026-09-29 추가) 벤더 코드 통합·벤더 검증 협업, 하드웨어 스펙 검증, FPGA 두 의미(pre-silicon vs 출하) |
+| `bsp/B06_embedded_os_landscape.md` | (2026-09-29 추가) eLinux·AOSP·VxWorks·QNX·RTOS 지형도, hands-on 5단계, bare-metal 번역표, 램프업 |
 | `bsp/B04_bsp_interview.md` | 면접 대비: 질문 30개 이상(기초/중급/심화), Don 경험 매핑, 정직 스크립트, 화이트보드용 그림, 체크리스트 |
 
 ## 노트 구조 (B01~B04 공통, 400~700줄)

@@ -1,12 +1,13 @@
 # Hark — Embedded Software Engineer · Context
 
-> **최종 갱신**: 2026-09-23 · **상태**: 📞 리크루터 콜 완료 (지원 전)
+> **최종 갱신**: 2026-09-29 · **상태**: 📨 지원완료 (9/21) · 리크루터 회신 대기 — "이번 주 안에 연락" 확약(9/29)
+> **📅 진행 중 계획**: [P06 7일 계획](2026-09-19_hark_study_notes/site/plan/P06_7day_plan.html) (9/30~10/6, Zephyr 실습 포함) · 급하면 [P04 4일 압축판](2026-09-19_hark_study_notes/site/plan/P04_4day_sprint.html)
 > **🗺 자리 지도**: [P03 임베디드 7자리](2026-09-19_hark_study_notes/site/plan/P03_embedded_role_map.html) — Embedded Software 팀 5공고(BSP·Systems·Platform·UX·DevOps) + On-Device Models 2공고 비교. BSP 1순위, Systems 2순위
 > **⚡ JD 개정 2026-09-23**: [P02 개정 분석](2026-09-19_hark_study_notes/site/plan/P02_jd_change_2026-09-23.html) — OTA·온디바이스AI·factory test 항목 삭제, FPGA·vendor 통합 신설, 3+ → 5+ yrs, RTOS → eLinux/AOSP 포함
-> **🧱 BSP 집중**: [B00~B04](2026-09-19_hark_study_notes/site/bsp/B00_bsp_overview.html) — 공고 제목이 BSP로 바뀐 뒤 추가. 기초·Zephyr 실전·Linux/Android·면접 41문항
-> **🧩 코딩 세션**: [Coding Session — 1st tech interview prep](2026-09-19_hark_study_notes/site/coding.html) — 문제 5 · 해설 5 · 답안/뼈대 HTML · `make` 채점
+> **🧱 BSP 집중**: [B00~B06](2026-09-19_hark_study_notes/site/bsp/B00_bsp_overview.html) — 공고 제목이 BSP로 바뀐 뒤 추가. 기초·Zephyr 실전·Linux/Android·면접 41문항
+> **🧩 코딩 세션**: [Coding Session](2026-09-19_hark_study_notes/site/coding.html) — **문제 21개**(드릴 5 + 레퍼런스 뱅크 16: L0 비트 → L1 메모리 → L2 관용구 → L3 임베디드 C++) · 답안/뼈대 HTML · `make` 채점
 > **🎯 마스터 플랜**: [1차 tech session D-7 역산 계획](2026-09-19_hark_study_notes/site/plan/P01_tech_session_master_plan.html) — 매일 여는 페이지
-> **📚 스터디 노트**: [2026-09-19_hark_study_notes/site/index.html](2026-09-19_hark_study_notes/site/index.html) — 마스터 플랜 1 + 코딩 연습 5문제(문제·답안·해설) + JD 리서치 15 + 개념 노트 11 + 스터디 노트 6 (총 44편). JD 문장별로 읽으려면 J01~J14, 확인 필요 항목은 J00
+> **📚 스터디 노트**: [2026-09-19_hark_study_notes/site/index.html](2026-09-19_hark_study_notes/site/index.html) — 마스터 플랜 1 + 코딩 연습 5문제(문제·답안·해설) + JD 리서치 15 + 개념 노트 11 + 스터디 노트 6 (총 56편). JD 문장별로 읽으려면 J01~J14, 확인 필요 항목은 J00
 > **JD**: https://job-boards.greenhouse.io/hark/jobs/4186968009 · **위치**: San Jose, CA / onsite (Adcock 캠퍼스, 근무형태 JD 미기재 → onsite 추정) · **연봉 밴드**: $120,000 – $300,000 base (+ equity 가능)
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
@@ -290,6 +291,12 @@
 |---|---|---|
 | 2026-09-18 | 컨텍스트 파일 생성 (JD·회사 조사) | Greenhouse API로 JD 원문 확보(JD 갱신일 2026-08-26). 57개 공고 스캔해 하드웨어 구조 단서 수집 |
 | 2026-09-19 | 스터디 노트 사이트 생성 | `2026-09-19_hark_study_notes/` — C00~C10 개념 + S01~S06 드릴, 약 14,600줄. 빌드: `python3 build_notes_site.py` |
+| 2026-09-29 | 리크루터 답장 | "apologies for the delay, should be hearing back this week. Im speaking to them later on this week due to them being OOO" → 침묵 원인은 팀 OOO. 이번 주 회신 예정. 재촉 대신 대기 |
+| 2026-09-30 | **코딩 레퍼런스 뱅크 + 스토리 예시** | `coding/` 문제 06~21 추가(L0~L3, 총 21문제 · 27,000줄 · 전부 경고 0 테스트 통과, L0·L1은 ASan/UBSan까지) · `study/S07` 스토리 A·B·C 예시(지어낸 견본, 6단 뼈대) · 빌더가 C++ 답안도 HTML 렌더 |
+| 2026-09-30 | 7일 계획 작성 | `plan/P06` — D1 기준 맞추기(J00 3건) → 스토리 A/C → BSP 해부 → **D5 Zephyr 실습 반나절** → OS 갭 방어 → 리허설 |
+| 2026-09-29 | **노트 감사 + BSP 시리즈 확장** | `plan/P05` 감사(현행 JD 24줄 ↔ 노트 커버리지, 낡은 인용 32건, 과잉 주장 6건) · 신규 `bsp/B05`(벤더·FPGA 통합 856줄) `bsp/B06`(임베디드 OS 지형도 702줄) · OTA/AI/factory 6개 노트에 하향 배너 · **S06의 가짜 JD 인용문 제거** · B03 §8.1 낡은 결론 재작성 |
+| 2026-09-29 | 4일 스프린트 작성 | `plan/P04` — 하루 2시간 × 4일. OTA·AI·factory 버리고 디버깅·BSP·벤더/FPGA·코딩 2문제로 압축 |
+| 2026-09-21 | **지원 제출** | 제목이 BSP로 바뀐 날 Greenhouse로 지원 |
 | 2026-09-23 | 임베디드 7자리 비교 분석 | `plan/P03` — Embedded Software 팀이 BSP/Systems/Platform/UX/DevOps 5축으로 확정. 밴드 3형제 동일($120–300K), 리크루터 제시 $250K는 상단 구간 |
 | 2026-09-23 | **JD 본문 전면 개정** (12:38 ET) | OTA·온디바이스AI·factory test 삭제 · vendor 통합·FPGA 통합·board bring-up 신설 · 3+→5+ yrs · RTOS→eLinux/AOSP 포함. 적합도 ⭐4 → ⭐4.5. 분석: `plan/P02` · 같은 날 On-Device AI Inference Engineer → Embedded AI Engineer로 개편 |
 | 2026-09-22 | 임베디드 팀 공고 재편 | ESE(시스템)·ESE Platform(구 OS Architect)·Frontier UX 본문 재작성. 네 공고가 모두 "The Embedded Software team owns..."로 시작 → **팀 구조 = BSP / Platform / Systems / UX** |

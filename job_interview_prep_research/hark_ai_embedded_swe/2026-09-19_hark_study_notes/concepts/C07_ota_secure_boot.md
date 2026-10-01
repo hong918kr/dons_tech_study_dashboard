@@ -4,6 +4,8 @@
 > **JD 연결**: "Build and maintain OTA update infrastructure for reliable field updates" / Bonus: "Familiarity with secure boot, firmware signing, or hardware root of trust"
 > **Don 기준 난이도**: SSD FW의 firmware download/commit(NVMe Firmware Image Download·Firmware Commit), flash 파티션, CRC는 이미 안다 / 공개키 서명·키 관리·MCUboot 스왑 알고리즘·Zephyr DFU API·anti-rollback은 새로 배운다
 
+> **⚠ 2026-09-23 JD 개정**: 이 항목은 현재 JD에서 삭제됨 — 우선순위 하향, 개념 수준으로만. OTA 절은 하향하고, Bonus에 남은 secure boot·firmware signing·hardware root of trust 절만 유지한다. [P02 분석](../plan/P02_jd_change_2026-09-23.html)
+
 ---
 
 ## 0. 큰 그림

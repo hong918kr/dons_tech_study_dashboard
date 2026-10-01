@@ -1,0 +1,791 @@
+# Ch.47 분산 시스템 — 고장 나는 부품으로 고장 안 나는 시스템 만들기
+
+> 📖 원문: [47. Distributed Systems](../book-md/C47_distributed_systems.md) · [PDF p.560](../Operating%20Systems%20-%20Three%20Easy%20Pieces.pdf#page=560) · ⏱️ 읽기 약 40분 · 🔗 선행: [Ch.44 데이터 무결성](2026-09-30_C44_data_integrity.md), [Ch.38 RAID](2026-09-30_C38_raid.md)
+
+## 0. 한눈에 보기
+
+> **THE CRUX: HOW TO BUILD SYSTEMS THAT WORK WHEN COMPONENTS FAIL** — "How can we build a working system out of parts that don't work correctly all the time?"
+> (항상 제대로 동작하지는 않는 부품들로, 어떻게 제대로 동작하는 시스템을 만들 것인가?)
+
+- 분산 시스템의 핵심 문제는 **실패(failure)** 다. 기계 수천 대가 있으면 "어딘가 고장"은 예외가 아니라 일상이다.
+- 네트워크는 본질적으로 **패킷을 잃어버린다**. 그래서 그 위에 **ack + timeout/retry + sequence number** 로 신뢰성을 쌓는다.
+- 분산 시스템을 짜는 추상화로 OS 쪽 아이디어(**DSM**, 분산 공유 메모리)는 실패했고, PL 쪽 아이디어(**RPC**, 원격 프로시저 호출)가 이겼다.
+- RPC = **stub generator**(인자 포장 자동화) + **run-time library**(타임아웃, 재전송, 중복 제거, 바이트 순서, 비동기 호출).
+- 이 챕터의 메시지 하나: "**재전송은 공짜가 아니다 — 중복을 어떻게 처리할지 정해야 한다**" (at-most-once, 멱등성 → Ch.48 NFS 로 이어짐).
+
+## 1. 5분 복습표
+
+| 용어 | 한 줄 뜻 | 예시 / 비유 |
+|---|---|---|
+| 패킷 손실(packet loss) | 보낸 메시지가 목적지에 안 닿음 | 라우터 버퍼가 꽉 차서 그냥 버림 |
+| UDP/IP | 손실을 감추지 않는 비신뢰 데이터그램 계층 | `sendto()` 하고 끝. 도착 보장 없음 |
+| 체크섬(checksum) | 데이터에서 계산한 짧은 요약값으로 손상 감지 | 덧셈 합, CRC, Fletcher |
+| ack (acknowledgment) | "받았다" 는 짧은 응답 메시지 | 등기우편 수령 확인 |
+| timeout/retry | ack 가 일정 시간 안 오면 다시 보냄 | 답장 없으면 다시 전화 |
+| sequence counter | 메시지마다 번호를 붙여 중복 감지 | 택배 송장 번호 |
+| exactly-once / at-most-once | 정확히 한 번 실행 / 많아야 한 번 실행 | 송금은 두 번 되면 안 됨 |
+| exponential back-off | 재시도할 때마다 대기 시간을 두 배로 | Ethernet, ALOHA |
+| DSM (distributed shared memory) | 여러 기계가 하나의 가상 주소 공간을 공유 | 원격 페이지를 page fault 로 가져옴 |
+| RPC (remote procedure call) | 원격 함수 호출을 로컬 함수 호출처럼 | gRPC, Sun RPC, Thrift |
+| stub generator | 인터페이스 정의로부터 포장 코드를 자동 생성 | `rpcgen`, `protoc` |
+| marshaling (serialization) | 인자들을 연속된 바이트 버퍼로 펼치기 | struct → 바이트 배열 |
+| XDR | Sun RPC 의 표준 데이터 표현(빅 엔디안) | 네트워크 바이트 순서 |
+| end-to-end argument | 진짜 신뢰성 검사는 맨 끝(응용)에서만 완결된다 | 파일 전송 후 전체 체크섬 비교 |
+
+## 2. 분산 시스템이 왜 어려운가 (도입부)
+
+웹 브라우저가 구글에 접속하면 겉보기엔 "클라이언트 1대 ↔ 서버 1대" 지만, 실제로는 서버 쪽에 수천 대가 협력한다. 이렇게 여러 기계로 서비스를 만들면 새로운 문제 세 가지가 생긴다.
+
+1. **실패(failure)** — 기계, 디스크, 네트워크, 소프트웨어 모두 가끔 고장 난다. 그런데 사용자에게는 "절대 안 죽는" 서비스처럼 보여야 한다.
+2. **성능(performance)** — 기계 사이에 네트워크가 끼므로 메시지 수를 줄이고, 지연(latency)을 낮추고 대역폭(bandwidth)을 높여야 한다.
+3. **보안(security)** — 상대가 진짜 그 상대인지(인증), 중간에서 엿보거나 바꾸지 않는지.
+
+흥미로운 점은 실패가 **기회**이기도 하다는 것. 부품 하나가 죽어도 시스템 전체가 죽을 필요는 없다. 여러 대를 모아 "거의 안 죽는" 시스템을 만드는 것이 분산 시스템의 진짜 가치다. 이건 Ch.38 RAID 가 디스크 여러 개로 "안 죽는 디스크" 를 만든 것과 같은 정신인데, 네트워크가 끼면서 문제와 해법이 더 복잡해진다.
+
+이 장은 그중 가장 기본인 **통신(communication)** — 기계들이 어떻게 메시지를 주고받고, 그 과정의 실패를 어떻게 다룰지 — 에 집중한다.
+
+## 3. 통신의 기본: 패킷은 사라진다 (47.1)
+
+현대 네트워킹의 중심 교리: **통신은 근본적으로 신뢰할 수 없다**. 인터넷이든 데이터센터 안의 InfiniBand 든 패킷은 잃어버리거나, 깨지거나, 도착하지 않는다.
+
+원인은 여러 가지다.
+
+- 전송 중 **비트 뒤집힘**(전기적 문제 등)
+- 링크, 라우터, 원격 호스트의 **고장** (케이블이 실제로 잘리기도 한다)
+- 그리고 가장 근본적인 원인: **버퍼 부족**
+
+마지막 것이 핵심이다. 모든 링크와 장비가 완벽하게 동작해도, 라우터에 패킷이 한꺼번에 몰리면 라우터 메모리에 다 담을 수 없다. 남은 선택지는 **일부를 버리는 것(drop)** 뿐이다. 받는 쪽 호스트도 마찬가지 — 한 기계에 메시지를 너무 많이 보내면 수신 버퍼가 넘친다.
+
+> **TIP — 통신은 본질적으로 비신뢰적이다 (Communication Is Inherently Unreliable)**: 비트 손상, 링크/기계 고장, 버퍼 부족은 모두 "패킷이 안 도착한다" 는 똑같은 결과로 나타난다. 신뢰할 수 있는 서비스를 만들려면 패킷 손실에 대처하는 기법이 필수다.
+
+### 새 예제: 버퍼가 넘치는 순간 계산
+
+라우터 출력 포트가 10 Gbps, 입력 포트 4개가 동시에 각 10 Gbps 로 같은 출력 포트를 향한다고 하자. 포트 버퍼는 1 MB.
+
+- 들어오는 속도 40 Gbps − 나가는 속도 10 Gbps = 초과 30 Gbps = 3.75 GB/s 로 버퍼가 찬다.
+- 1 MB / 3.75 GB/s ≈ 0.27 ms.
+
+즉 고장 하나 없이도 **0.27 ms** 만 이런 몰림(incast)이 지속되면 패킷을 버리기 시작한다. 데이터센터의 "TCP incast" 문제가 정확히 이것이다.
+
+## 4. 비신뢰 통신 계층: UDP (47.2)
+
+가장 간단한 대처는 **대처하지 않는 것**이다. 어떤 응용은 패킷 손실을 스스로 처리할 줄 알기 때문에, 바닥 계층은 그냥 비신뢰 메시징만 제공해도 된다(이것도 뒤에 나올 end-to-end argument 의 한 예).
+
+그 대표가 **UDP/IP** 다. 소켓 API 로 통신 끝점(endpoint)을 만들고, 다른 프로세스가 그 끝점으로 **데이터그램(datagram)** — 최대 크기가 정해진 메시지 — 을 보낸다. 원문 Figure 47.1/47.2 의 코드는 이렇게 생겼다(요약).
+
+```c
+// server
+int sd = UDP_Open(10000);                 // socket(AF_INET, SOCK_DGRAM) + bind(port)
+while (1) {
+    rc = UDP_Read(sd, &s, buffer, BUFFER_SIZE);    // recvfrom(): 누가 보냈는지(s)도 같이 받음
+    if (rc > 0) UDP_Write(sd, &s, reply, BUFFER_SIZE);  // sendto(): 그 주소로 답장
+}
+// client
+int sd = UDP_Open(20000);
+UDP_FillSockAddr(&addr, "machine.cs.wisc.edu", 10000);   // gethostbyname + htons(port)
+UDP_Write(sd, &addr, message, BUFFER_SIZE);
+UDP_Read(sd, &addr2, buffer, BUFFER_SIZE);    // 답이 안 오면? 여기서 영원히 블록된다!
+```
+
+주목할 점:
+
+- 서버는 연결(connection) 개념이 없다. 패킷 하나하나에 "보낸 사람 주소" 가 붙어 오고, 그 주소로 답한다.
+- 클라이언트의 마지막 `UDP_Read()` 는 응답이 유실되면 **영원히 기다린다**. 이 문제를 고치는 것이 47.3 절의 내용이고, 아래 "직접 해보기" 의 코드가 바로 이걸 고친 버전이다.
+- UDP 도 완전 무방비는 아니다. **체크섬**으로 일부 손상은 잡는다. 다만 손실은 보고하지 않는다 — 보낸 쪽은 아무것도 모른다.
+
+> **TIP — 무결성에는 체크섬을 (Use Checksums For Integrity)**: 보내기 전에 메시지의 체크섬을 계산해 같이 보내고, 받는 쪽이 다시 계산해 비교한다. 체크섬은 **효과(effectiveness, 변화를 얼마나 잘 잡나)** 와 **성능(performance, 계산 비용)** 이 서로 충돌한다.
+
+### 계산 예제: 덧셈 체크섬 vs Fletcher
+
+메시지 `"Hi!"` = 바이트 `0x48 0x69 0x21` (= 72, 105, 33).
+
+**8비트 덧셈 체크섬**: 72 + 105 + 33 = 210 = `0xD2`.
+바이트 순서가 뒤바뀐 `"iH!"` 도 105 + 72 + 33 = 210 = `0xD2`. → **순서 바뀜을 못 잡는다.**
+
+**Fletcher-16** (두 개의 합, mod 255): `s1 += byte; s2 += s1;`
+
+| 단계 | 바이트 | s1 | s2 |
+|---|---|---|---|
+| 1 | 72 | 72 | 72 |
+| 2 | 105 | 177 | 249 |
+| 3 | 33 | 210 | 459 mod 255 = 204 |
+
+결과 `(s2 << 8) or s1` = `0xCCD2`.
+
+`"iH!"` 로 하면: s1 = 105 → 177 → 210, s2 = 105 → 282 mod 255 = 27 → 237. 결과 `0xEDD2`. → **위치 정보가 s2 에 섞이므로 순서 바뀜을 잡는다.** 대신 덧셈이 두 배. "효과 vs 성능" 트레이드오프의 작은 예다. (Ch.44 에서 본 CRC 는 더 강하고 더 비싸다 — 그래서 NIC 하드웨어가 대신 계산한다.)
+
+## 5. 신뢰 통신 계층: ack, timeout, sequence number (47.3)
+
+비신뢰 네트워크 위에 신뢰 계층을 쌓아 보자. 첫 질문: **보낸 쪽은 받는 쪽이 받았는지 어떻게 아나?**
+
+### 5.1 1단계 — ack
+
+받는 쪽이 짧은 **ack(확인 응답)** 를 돌려준다. ack 를 받으면 보낸 쪽은 안심한다(Figure 47.3).
+
+문제: ack 가 **안 오면**?
+
+### 5.2 2단계 — timeout/retry
+
+보낼 때 **타이머**를 건다. 시간 안에 ack 가 없으면 메시지가 사라졌다고 결론 내리고 **다시 보낸다(retry)**. 다시 보내려면 보낸 메시지의 **사본을 보관(keep copy)** 해야 한다(Figure 47.4). 이 조합을 **timeout/retry** 라고 부른다.
+
+문제: 사라진 게 메시지가 아니라 **ack** 였다면(Figure 47.5)? 보낸 쪽 입장에선 똑같이 "ack 없음 → 재전송" 이지만, 받는 쪽은 **같은 메시지를 두 번** 받는다. 파일을 다운로드하는데 같은 패킷이 두 번 끼어 들어가면 파일이 망가진다. 우리가 원하는 건 **각 메시지를 정확히 한 번(exactly-once)** 받는 것이다.
+
+### 5.3 3단계 — 중복 감지: sequence counter
+
+받는 쪽이 중복을 알아보려면 메시지마다 고유한 표식이 있어야 한다.
+
+- **순진한 방법**: 메시지마다 고유 ID, 받는 쪽은 지금까지 본 모든 ID 를 기억. → 메모리가 **무한히** 필요.
+- **똑똑한 방법: sequence counter**. 양쪽이 시작값(예: 1)에 합의하고 각자 카운터를 유지한다.
+  - 보낸 쪽: 현재 카운터 값 N 을 메시지에 붙여 보내고, 보낸 뒤 N+1 로 올린다.
+  - 받는 쪽: 자기 카운터(기대값)와 비교.
+    - 들어온 ID == 기대값 N → 처음 보는 것. **ack 하고 응용에 올려 준다**. 기대값을 N+1 로.
+    - 들어온 ID < 기대값 → 이미 본 것(ack 가 유실돼 재전송된 것). **ack 만 다시 보내고 응용에는 올리지 않는다.**
+
+메모리는 카운터 하나면 된다. 이 핵심 아이디어는 TCP 의 sequence number, PCIe 데이터 링크 계층의 sequence number 모두에 그대로 있다.
+
+```svg
+<svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif" font-size="13">
+  <defs>
+    <marker id="C47-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="C47-arrow-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill:var(--accent)"/>
+    </marker>
+  </defs>
+  <text x="120" y="18" text-anchor="middle" font-weight="bold" fill="currentColor">(a) 정상</text>
+  <text x="360" y="18" text-anchor="middle" font-weight="bold" fill="currentColor">(b) 요청 유실 (Fig 47.4)</text>
+  <text x="600" y="18" text-anchor="middle" font-weight="bold" fill="currentColor">(c) ack 유실 (Fig 47.5)</text>
+  <g fill="currentColor" font-size="12">
+    <text x="40" y="40" text-anchor="middle">Sender</text><text x="200" y="40" text-anchor="middle">Receiver</text>
+    <text x="280" y="40" text-anchor="middle">Sender</text><text x="440" y="40" text-anchor="middle">Receiver</text>
+    <text x="520" y="40" text-anchor="middle">Sender</text><text x="680" y="40" text-anchor="middle">Receiver</text>
+  </g>
+  <g stroke="currentColor" stroke-width="2">
+    <line x1="40" y1="50" x2="40" y2="285"/><line x1="200" y1="50" x2="200" y2="285"/>
+    <line x1="280" y1="50" x2="280" y2="285"/><line x1="440" y1="50" x2="440" y2="285"/>
+    <line x1="520" y1="50" x2="520" y2="285"/><line x1="680" y1="50" x2="680" y2="285"/>
+  </g>
+  <line x1="40" y1="65" x2="200" y2="95" stroke="currentColor" stroke-width="1.5" marker-end="url(#C47-arrow)"/>
+  <text x="120" y="70" text-anchor="middle" fill="currentColor" font-size="12">msg seq=N</text>
+  <line x1="200" y1="105" x2="40" y2="135" style="stroke:var(--accent)" stroke-width="1.5" marker-end="url(#C47-arrow-acc)"/>
+  <text x="120" y="135" text-anchor="middle" style="fill:var(--accent)" font-size="12">ack N</text>
+  <text x="206" y="100" fill="currentColor" font-size="11">deliver</text>
+  <line x1="280" y1="65" x2="350" y2="78" stroke="currentColor" stroke-width="1.5"/>
+  <text x="358" y="84" fill="#d9534f" font-size="18" font-weight="bold">✕</text>
+  <text x="330" y="66" text-anchor="middle" fill="currentColor" font-size="12">seq=N</text>
+  <rect x="268" y="65" width="8" height="95" style="fill:var(--accent-soft)" stroke="currentColor"/>
+  <text x="300" y="120" fill="currentColor" font-size="11">timeout</text>
+  <line x1="280" y1="170" x2="440" y2="200" stroke="currentColor" stroke-width="1.5" marker-end="url(#C47-arrow)"/>
+  <text x="360" y="176" text-anchor="middle" fill="currentColor" font-size="12">retry seq=N</text>
+  <line x1="440" y1="210" x2="280" y2="240" style="stroke:var(--accent)" stroke-width="1.5" marker-end="url(#C47-arrow-acc)"/>
+  <text x="360" y="242" text-anchor="middle" style="fill:var(--accent)" font-size="12">ack N</text>
+  <line x1="520" y1="65" x2="680" y2="95" stroke="currentColor" stroke-width="1.5" marker-end="url(#C47-arrow)"/>
+  <text x="600" y="70" text-anchor="middle" fill="currentColor" font-size="12">seq=N</text>
+  <text x="640" y="88" fill="currentColor" font-size="11">deliver,</text>
+  <text x="640" y="101" fill="currentColor" font-size="11">기대값→N+1</text>
+  <line x1="680" y1="108" x2="610" y2="121" style="stroke:var(--accent)" stroke-width="1.5"/>
+  <text x="596" y="128" fill="#d9534f" font-size="18" font-weight="bold">✕</text>
+  <rect x="508" y="65" width="8" height="95" style="fill:var(--accent-soft)" stroke="currentColor"/>
+  <text x="530" y="150" fill="currentColor" font-size="11">timeout</text>
+  <line x1="520" y1="170" x2="680" y2="200" stroke="currentColor" stroke-width="1.5" marker-end="url(#C47-arrow)"/>
+  <text x="600" y="176" text-anchor="middle" fill="currentColor" font-size="12">retry seq=N</text>
+  <text x="676" y="222" text-anchor="end" fill="currentColor" font-size="11">N &lt; 기대값 → 중복!</text>
+  <text x="676" y="236" text-anchor="end" fill="currentColor" font-size="11">ack 만, deliver 안 함</text>
+  <line x1="680" y1="244" x2="520" y2="274" style="stroke:var(--accent)" stroke-width="1.5" marker-end="url(#C47-arrow-acc)"/>
+  <text x="600" y="282" text-anchor="middle" style="fill:var(--accent)" font-size="12">ack N</text>
+</svg>
+```
+
+세 경우를 트레이스로 정리하면(보낸 쪽 카운터 S, 받는 쪽 기대값 R, 둘 다 1에서 시작):
+
+```text
+event                         S   R   응용에 올라간 메시지
+send #1 → 도착, ack 도착        2   2   [1]
+send #2 → 유실                  3   2   [1]
+  timeout, resend #2 → 도착     3   3   [1,2]
+send #3 → 도착, ack 유실        4   4   [1,2,3]
+  timeout, resend #3 → 도착     4   4   [1,2,3]   ← #3 < R(4) 이므로 ack 만, deliver X
+```
+
+### 5.4 타임아웃 값 정하기
+
+> **TIP — 타임아웃 값을 조심해서 정하라 (Be Careful Setting The Timeout Value)**: 너무 짧으면 쓸데없이 재전송해서 CPU 와 네트워크를 낭비하고, 너무 길면 손실을 늦게 알아채 성능이 나빠진다. 서버 하나에 클라이언트 여럿이면, 손실은 **서버 과부하의 신호**일 수 있다. 그럴 땐 재시도할 때마다 타임아웃을 두 배로 늘리는 **exponential back-off** 가 과부하를 악화시키지 않는다 (ALOHA → 초기 Ethernet).
+
+**계산 1 — 백오프 총 대기 시간**: 첫 타임아웃 100 ms, 매번 2배, 최대 5번 시도 후 포기.
+100 + 200 + 400 + 800 + 1600 = **3100 ms**. 고정 100 ms 로 5번이면 500 ms 에 포기하지만, 그동안 서버에 5배의 재전송 폭탄을 퍼붓는다.
+
+**계산 2 — 손실률과 재전송 기대 횟수**: 편도 손실 확률 p = 1 % 라고 하자. 왕복(요청 + ack)이 성공하려면 둘 다 살아야 하므로
+- 왕복 실패 확률 q = 1 − 0.99² = 0.0199 (약 2 %)
+- 기대 전송 횟수 = 1 / (1 − q) = 1 / 0.9801 ≈ **1.02 회**
+- 5번 연속 실패 확률 = q⁵ ≈ 0.0199⁵ ≈ **3.1 × 10⁻⁹**
+
+즉 재시도 몇 번이면 "사실상 반드시" 전달된다. 남은 문제는 오직 **중복**이다.
+
+TCP 는 이 아이디어에 혼잡 제어(congestion control, Van Jacobson), 여러 개의 동시 미확인 메시지(sliding window), 수백 가지 최적화를 더한 것이다. 참고로 TCP 는 RTT 를 계속 측정해 `RTO = SRTT + 4·RTTVAR` 처럼 타임아웃을 적응적으로 정한다 — "딱 손실을 감지할 만큼만 기다려라" 라는 TIP 의 실전판이다.
+
+## 6. 통신 추상화 1: 분산 공유 메모리 DSM (47.4)
+
+메시징 계층이 생겼으니, 이제 분산 시스템을 **어떤 추상화로 프로그래밍할지** 정해야 한다.
+
+시스템 커뮤니티의 한 갈래는 OS 추상화를 분산 환경으로 확장했다. 대표가 **DSM(distributed shared memory)**: 서로 다른 기계의 프로세스들이 하나의 큰 가상 주소 공간을 공유한다. 분산 계산이 마치 "스레드가 다른 기계에서 도는 멀티스레드 프로그램" 처럼 보인다.
+
+동작 원리는 Ch.21 의 스와핑과 똑같은 **가상 메모리 트릭**이다.
+
+1. 페이지가 로컬에 있으면 → 그냥 빠르게 접근.
+2. 다른 기계에 있으면 → **page fault** → 핸들러가 그 기계에 메시지를 보내 페이지를 가져와 페이지 테이블에 설치 → 실행 재개.
+
+왜 안 쓰이게 됐나?
+
+- **실패 처리**: 기계 하나가 죽으면 그 기계의 페이지들이 주소 공간에서 **구멍**이 된다. 연결 리스트의 `next` 가 사라진 영역을 가리키면? 복구할 방법이 마땅치 않다.
+- **성능**: 프로그래머는 "메모리 접근은 싸다" 고 가정하고 코드를 짠다. DSM 에선 어떤 load 는 100 ns, 어떤 load 는 원격 페이지 fetch 로 수백 µs 다. 결국 통신이 거의 안 일어나도록 계산을 조직해야 했고, 그러면 DSM 을 쓰는 의미가 없다.
+
+결론: 연구는 많았지만 오늘날 DSM 으로 신뢰성 있는 분산 시스템을 만드는 사람은 없다. (다만 아이디어는 형태를 바꿔 살아 있다 — 아래 "펌웨어 엔지니어의 눈으로" 참고.)
+
+## 7. 통신 추상화 2: RPC (47.5)
+
+OS 추상화가 실패한 자리에서 **프로그래밍 언어(PL) 추상화**가 이겼다. 그것이 **RPC(remote procedure call)** 다 (Birrell & Nelson, 1984, Xerox PARC).
+
+목표는 단 하나: **원격 기계의 코드를 실행하는 것을 로컬 함수 호출만큼 쉽게**. 클라이언트는 함수를 부르고 잠시 후 결과를 받는다. 서버는 내보낼(export) 함수들만 정의한다. 나머지 마법은 RPC 시스템의 두 부품이 맡는다: **stub generator** 와 **run-time library**.
+
+```svg
+<svg viewBox="0 0 720 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif" font-size="13">
+  <defs>
+    <marker id="C47-arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <text x="170" y="20" text-anchor="middle" font-weight="bold" fill="currentColor">Client 기계</text>
+  <text x="550" y="20" text-anchor="middle" font-weight="bold" fill="currentColor">Server 기계</text>
+  <rect x="60" y="35" width="220" height="45" rx="6" fill="none" stroke="currentColor"/>
+  <text x="170" y="55" text-anchor="middle" fill="currentColor">client 코드</text>
+  <text x="170" y="72" text-anchor="middle" fill="currentColor" font-size="12">r = func1(x);</text>
+  <rect x="60" y="100" width="220" height="70" rx="6" style="fill:var(--accent-soft)" stroke="currentColor"/>
+  <text x="170" y="120" text-anchor="middle" fill="currentColor" font-weight="bold">client stub (자동 생성)</text>
+  <text x="170" y="138" text-anchor="middle" fill="currentColor" font-size="12">버퍼 생성 · func ID + 인자 marshal</text>
+  <text x="170" y="155" text-anchor="middle" fill="currentColor" font-size="12">응답 기다림 · unmarshal · return</text>
+  <rect x="60" y="190" width="220" height="70" rx="6" fill="none" stroke="currentColor"/>
+  <text x="170" y="210" text-anchor="middle" fill="currentColor" font-weight="bold">RPC run-time</text>
+  <text x="170" y="228" text-anchor="middle" fill="currentColor" font-size="12">이름 찾기 · seq 번호 · timeout/retry</text>
+  <text x="170" y="245" text-anchor="middle" fill="currentColor" font-size="12">조각내기 · 바이트 순서(XDR)</text>
+  <rect x="440" y="35" width="220" height="45" rx="6" fill="none" stroke="currentColor"/>
+  <text x="550" y="55" text-anchor="middle" fill="currentColor">server 함수</text>
+  <text x="550" y="72" text-anchor="middle" fill="currentColor" font-size="12">int func1(int arg1) { ... }</text>
+  <rect x="440" y="100" width="220" height="70" rx="6" style="fill:var(--accent-soft)" stroke="currentColor"/>
+  <text x="550" y="120" text-anchor="middle" fill="currentColor" font-weight="bold">server stub (skeleton)</text>
+  <text x="550" y="138" text-anchor="middle" fill="currentColor" font-size="12">unmarshal · ID 로 함수 dispatch</text>
+  <text x="550" y="155" text-anchor="middle" fill="currentColor" font-size="12">결과 marshal · 응답 전송</text>
+  <rect x="440" y="190" width="220" height="70" rx="6" fill="none" stroke="currentColor"/>
+  <text x="550" y="210" text-anchor="middle" fill="currentColor" font-weight="bold">RPC run-time</text>
+  <text x="550" y="228" text-anchor="middle" fill="currentColor" font-size="12">중복 요청 걸러내기(at-most-once)</text>
+  <text x="550" y="245" text-anchor="middle" fill="currentColor" font-size="12">thread pool 로 동시 처리</text>
+  <g stroke="currentColor" stroke-width="1.5" marker-end="url(#C47-arrow2)">
+    <line x1="140" y1="80" x2="140" y2="98"/>
+    <line x1="140" y1="170" x2="140" y2="188"/>
+    <line x1="580" y1="188" x2="580" y2="172"/>
+    <line x1="580" y1="98" x2="580" y2="82"/>
+  </g>
+  <g style="stroke:var(--accent)" stroke-width="1.5" marker-end="url(#C47-arrow2)">
+    <line x1="200" y1="98" x2="200" y2="82"/>
+    <line x1="200" y1="188" x2="200" y2="172"/>
+    <line x1="520" y1="82" x2="520" y2="98"/>
+    <line x1="520" y1="172" x2="520" y2="188"/>
+  </g>
+  <path d="M170 260 L170 295 L550 295 L550 262" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#C47-arrow2)"/>
+  <text x="360" y="288" text-anchor="middle" fill="currentColor" font-size="12">요청: [seq | func ID | 인자 bytes]  (UDP)</text>
+  <path d="M520 262 L520 280 L200 280 L200 262" fill="none" style="stroke:var(--accent)" stroke-width="1.5" stroke-dasharray="5 3"/>
+  <text x="360" y="318" text-anchor="middle" style="fill:var(--accent)" font-size="12">응답: [seq | 반환값 bytes] — 응답 자체가 요청의 ack 역할</text>
+</svg>
+```
+
+### 7.1 Stub generator (protocol compiler)
+
+일의 핵심: 함수 인자와 결과를 메시지에 넣고 빼는 지루한 코드를 **자동 생성**한다. 손으로 짤 때 생기는 실수를 원천 봉쇄하고, 최적화도 할 수 있다.
+
+입력은 인터페이스 정의다.
+
+```c
+interface {
+    int func1(int arg1);
+    int func2(int arg1, int arg2);
+};
+```
+
+**client stub** 의 `func1()` 안에서 일어나는 일:
+
+1. 메시지 버퍼 생성 (연속된 바이트 배열)
+2. 버퍼에 **함수 ID + 인자들을 포장** — 이걸 **marshaling** (또는 serialization) 이라 한다
+3. RPC 서버로 전송 (실제 전송 세부는 run-time 이 처리)
+4. 응답 대기 (함수 호출은 보통 동기적이므로)
+5. 반환 코드와 결과를 풀어냄 — **unmarshaling** (deserialization)
+6. 호출자에게 return
+
+**server stub** 쪽:
+
+1. 메시지 unmarshal → 함수 ID 와 인자 추출
+2. **실제 함수 호출** (드디어!)
+3. 결과를 응답 버퍼에 marshal
+4. 응답 전송
+
+stub 컴파일러가 고민해야 할 문제 두 가지:
+
+- **복잡한 인자**: `write(fd, buf, size)` 처럼 **포인터**가 오면? 포인터 값 자체는 원격 기계에서 의미가 없다. 그래서 `buffer_t` 처럼 "크기와 함께 넘기는 데이터 덩어리" 같은 잘 알려진 타입을 쓰거나, 데이터 구조에 주석(annotation)을 달아 어떤 바이트를 직렬화할지 컴파일러에 알려준다. (gRPC 의 protobuf `bytes`, `repeated` 가 바로 이것.)
+- **서버의 동시성**: 요청 하나씩 순서대로 처리하면, 하나가 I/O 로 블록될 때 서버 전체가 논다. 그래서 흔히 **thread pool**: 시작할 때 스레드 몇 개를 만들어 두고, 메인 스레드가 요청을 받아 worker 에게 나눠준다. 대가는 익숙한 것 — RPC 핸들러가 락 등 동기화를 써야 한다 (Ch.28~31).
+
+### 7.2 Run-time library
+
+성능과 신뢰성 문제 대부분이 여기서 처리된다.
+
+**이름 찾기(naming)**: 원격 서비스를 어떻게 찾나? 가장 단순하게는 기존 이름 체계 — 호스트 이름(IP 주소) + 포트 번호. 포트는 한 기계 안에서 여러 통신 채널을 구분하는 번호다. (DNS, 그리고 Saltzer & Kaashoek 책의 naming 장 추천.)
+
+**TCP 위에? UDP 위에?** 직관적으로는 신뢰성 있는 TCP 가 정답 같다. 하지만 메시지 수를 세 보자.
+
+```text
+RPC on TCP                        RPC on UDP (+ RPC 자체 신뢰성)
+client → server : request        client → server : request
+server → client : ack(TCP)       server → client : reply   (= request 의 ack 역할)
+server → client : reply          (client 의 다음 request 가 reply 의 ack 역할)
+client → server : ack(TCP)
+= 4 메시지                        = 2 메시지
+```
+
+요청/응답 프로토콜에서는 **응답 자체가 확인 응답**이 되므로 TCP 의 ack 두 개는 "여분" 이다. (연결 수립 3-way handshake 까지 치면 차이는 더 크다.) 그래서 많은 RPC 패키지가 **UDP 위에** 만들어지고, 신뢰성은 RPC 층이 직접 timeout/retry + ack + **sequence number** 로 제공한다. 그 결과 RPC 는
+
+- 실패가 없으면 **exactly-once** (정확히 한 번),
+- 실패가 있으면 **at-most-once** (많아야 한 번)
+
+실행을 보장할 수 있다. at-most-once 를 위해 서버 run-time 은 "이 클라이언트의 마지막 seq 와 그 응답" 을 기억했다가, 재전송된 요청에는 **함수를 다시 실행하지 않고 저장된 응답만** 돌려준다. 아래 "직접 해보기" 가 정확히 이 동작을 보여준다.
+
+| 실행 보장(semantics) | 어떻게 | 위험 |
+|---|---|---|
+| at-least-once | 응답 올 때까지 무작정 재전송 | 비멱등 연산이 여러 번 실행됨 |
+| at-most-once | seq 번호 + 서버 측 중복 제거 | 서버가 죽으면 실행됐는지 모를 수 있음 |
+| exactly-once | at-most-once + 영속 로그/트랜잭션 | 비싸다. 실패 없는 경우에만 쉽게 성립 |
+
+**그 밖의 문제들 (Other Issues)**:
+
+- **오래 걸리는 호출**: 원격 함수가 오래 걸리면 클라이언트 타이머가 "실패" 로 오해하고 재전송한다. 해법: 응답이 바로 안 나올 때 서버가 **명시적 ack** ("요청 받았어") 를 먼저 보내고, 클라이언트는 주기적으로 "아직 하는 중?" 을 묻는다. "응" 이면 계속 기다린다.
+- **큰 인자**: 패킷 하나에 안 들어가면 송신 측 **fragmentation**(쪼개기) + 수신 측 **reassembly**(재조립). 하위 프로토콜이 안 해주면 RPC run-time 이 직접 한다.
+- **바이트 순서(byte ordering)**: 빅 엔디안 vs 리틀 엔디안. Sun RPC 는 **XDR** 이라는 고정 표현을 쓴다. 기계 엔디안이 XDR 과 같으면 그대로, 다르면 필드마다 변환 — 약간의 성능 비용.
+- **비동기 RPC**: 동기 호출은 기다리는 동안 클라이언트가 논다. 비동기 RPC 는 요청을 보내고 즉시 반환, 클라이언트는 다른 일(다른 RPC 포함)을 하다가 나중에 "미처리 RPC 완료를 기다려" 라고 run-time 에 요청해 결과를 받는다.
+
+### 계산 예제: 엔디안 변환
+
+정수 `0x12345678` 을 보낸다.
+
+```text
+메모리 주소        +0   +1   +2   +3
+리틀 엔디안(x86/ARM) 78   56   34   12
+빅 엔디안(XDR/네트워크) 12   34   56   78
+```
+
+ARM(리틀) → XDR(빅) 이면 `htonl()` 이 바이트 4개를 뒤집는다. 양쪽 다 리틀 엔디안인데 XDR(빅)을 거치면 **보낼 때 한 번, 받을 때 한 번** 쓸데없이 뒤집는다 — 그래서 현대 포맷(protobuf varint, FlatBuffers)은 리틀 엔디안이나 엔디안 무관 인코딩을 택하기도 한다.
+
+## 8. ASIDE: End-to-End Argument
+
+> **ASIDE — 종단 간 논증 (The End-to-End Argument)**: 어떤 기능은 계층 구조의 **맨 끝(보통 응용)** 에서만 진짜로 완결될 수 있다. Saltzer, Reed, Clark 의 예: 기계 A 에서 B 로 파일을 신뢰성 있게 옮기기.
+
+신뢰 통신 프로토콜(timeout/retry, ack, seq)이 "보낸 바이트는 순서대로 다 도착한다" 를 보장해도,
+
+- 보내기 **전에** 송신 측 메모리에서 바이트가 깨졌다면?
+- 받은 **후에** 수신 측이 디스크에 쓰다가 문제가 생겼다면?
+
+네트워크는 완벽했지만 파일 전송은 실패했다. 그래서 진짜 신뢰성은 **끝에서 끝까지의 검사** — 전송 완료 후 수신 측 디스크에서 파일을 다시 읽어 체크섬을 내고, 송신 측 체크섬과 비교 — 로만 얻는다.
+
+따름정리(corollary): 그렇다고 하위 계층의 신뢰성 기능이 쓸모없는 건 아니다. 하위 계층의 재전송은 **성능 최적화**로서 가치가 있다(손실마다 파일 전체를 다시 보내지 않아도 되니까). 위치를 신중히 정하라는 것이지, 하위 계층 기능을 금지하라는 게 아니다.
+
+## 9. 요약 (47.6)
+
+- 분산 시스템의 핵심 이슈는 **실패** 다. 구글 말처럼 "데스크톱 한 대면 고장은 드물지만, 수천 대 데이터센터에선 고장이 항상 일어나고 있다."
+- 통신은 분산 시스템의 심장이고, 그 대표 추상화가 **RPC** 다. RPC 패키지는 timeout/retry, ack 같은 지저분한 세부를 다 처리해 로컬 호출과 비슷한 서비스를 제공한다.
+- 가장 좋은 공부법은 직접 써 보는 것 — 원문은 Sun RPC 의 `rpcgen` 을 권한다. 오늘날이라면 gRPC + protobuf 가 같은 구조(IDL → stub 생성 → run-time)다.
+
+## 10. 직접 해보기
+
+이 챕터용 OSTEP 시뮬레이터는 없다(`.tools/ostep-homework` 에 `dist-intro` 류 디렉터리 없음). 대신 원문 Figure 47.1/47.2 의 UDP 코드를 출발점으로, **timeout + 재전송 + 지수 백오프 + sequence number + 서버 측 중복 제거(at-most-once)** 를 넣은 진짜 localhost UDP 클라이언트/서버를 만들었다.
+
+설계:
+
+- `fork()` 로 서버/클라이언트 2 프로세스. 서버 소켓은 포트 0 에 bind 해서 커널이 빈 포트를 고르게 한 뒤 fork.
+- 서버가 제공하는 RPC 는 `add(x)` = `counter += x` — 일부러 **비멱등(non-idempotent)** 연산을 골랐다. 재전송이 재실행으로 이어지면 값이 틀어진다.
+- 와이어 포맷은 `htonl/ntohl` 로 빅 엔디안 (XDR 흉내). 클라이언트 쪽 `rpc_add()` 가 client stub 역할.
+- 손실은 서버가 결정적으로 흉내 낸다: seq 2 의 첫 **요청** 버림, seq 3 의 첫 **응답** 버림, seq 4 의 응답 두 번 버림.
+- 마지막에 같은 시나리오를 **중복 제거를 끈 서버**로 다시 돌린다.
+
+```c
+// C47_udp_rpc.c — UDP 위에 "신뢰성 + at-most-once RPC" 를 손으로 얹어 보기
+//
+//  - 서버/클라이언트 모두 localhost UDP 소켓 (fork 로 프로세스 2개)
+//  - 클라이언트: 요청마다 sequence number, 타임아웃(recv 대기) + 재전송, 지수 백오프
+//  - 서버: 비멱등 연산 add(x) (counter += x) 를 제공
+//          last_seq / last_reply 를 기억해 중복 요청은 "다시 실행하지 않고" 캐시된 답만 재전송
+//  - 손실은 서버가 일부러 흉내 낸다 (결정적으로):
+//          seq 2 : 첫 번째 "요청" 을 버림       (Figure 47.4: dropped request)
+//          seq 3 : 첫 번째 "응답" 을 안 보냄     (Figure 47.5: dropped reply → 중복 요청 도착)
+//          seq 4 : 응답을 두 번 연속 안 보냄     (백오프 2번)
+//  - 마지막에 dedup 을 끈 "순진한 서버" 로 같은 시나리오를 돌려 counter 가 틀어지는 것을 보여 줌
+//
+// build: cc -Wall -Wextra -O0 code/C47_udp_rpc.c -o .work/bin/C47_udp_rpc && .work/bin/C47_udp_rpc
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+enum { OP_ADD = 1, OP_QUIT = 2 };
+
+// 와이어 포맷: 전부 네트워크 바이트 순서(big endian) — XDR 이 하는 일의 축소판
+struct msg {
+    uint32_t seq;   // sequence number (요청 ID)
+    uint32_t op;    // 프로시저 ID (stub 이 넣는 "어떤 함수인가")
+    int32_t  arg;   // 인자
+    int32_t  ret;   // 응답일 때 반환값
+};
+
+static void marshal(struct msg *m) {
+    m->seq = htonl(m->seq); m->op = htonl(m->op);
+    m->arg = (int32_t)htonl((uint32_t)m->arg); m->ret = (int32_t)htonl((uint32_t)m->ret);
+}
+static void unmarshal(struct msg *m) {
+    m->seq = ntohl(m->seq); m->op = ntohl(m->op);
+    m->arg = (int32_t)ntohl((uint32_t)m->arg); m->ret = (int32_t)ntohl((uint32_t)m->ret);
+}
+
+static double now_ms(void) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
+}
+static double T0;
+
+// ---------------------------------------------------------------- server
+static void server(int sd, int dedup) {
+    int counter = 0;
+    uint32_t last_seq = 0;        // 마지막으로 "실행한" 요청 번호 (클라이언트 1개라 변수 하나)
+    struct msg last_reply = {0};
+    int seen[16] = {0};           // seq 별 도착 횟수 (손실 흉내용)
+
+    for (;;) {
+        struct msg m; struct sockaddr_in from; socklen_t fl = sizeof(from);
+        ssize_t n = recvfrom(sd, &m, sizeof(m), 0, (struct sockaddr *)&from, &fl);
+        if (n != (ssize_t)sizeof(m)) continue;
+        unmarshal(&m);
+        if (m.op == OP_QUIT) break;
+        int k = m.seq < 16 ? ++seen[m.seq] : 1;
+
+        if (m.seq == 2 && k == 1) {   // 요청 자체를 잃어버린 척
+            printf("  [server %6.1fms] seq=%u  (요청 DROP — 받은 적 없는 셈)\n", now_ms() - T0, m.seq);
+            fflush(stdout); continue;
+        }
+        int drop_reply = (m.seq == 3 && k == 1) || (m.seq == 4 && k <= 2);
+        if (dedup && m.seq <= last_seq) {  // 중복: 실행하지 않고 캐시된 응답만 다시 보냄
+            printf("  [server %6.1fms] seq=%u  중복 요청 → 재실행 안 함, 캐시된 응답 재전송 (counter=%d)%s\n",
+                   now_ms() - T0, m.seq, counter, drop_reply ? "  (응답 DROP)" : "");
+            fflush(stdout);
+            if (drop_reply) continue;
+            struct msg r = last_reply; marshal(&r);
+            sendto(sd, &r, sizeof(r), 0, (struct sockaddr *)&from, fl);
+            continue;
+        }
+        counter += m.arg;                 // 실제 프로시저 실행 (비멱등!)
+        last_seq = m.seq;
+        last_reply = (struct msg){.seq = m.seq, .op = m.op, .arg = m.arg, .ret = counter};
+        printf("  [server %6.1fms] seq=%u  add(%d) 실행 → counter=%d%s\n", now_ms() - T0, m.seq, m.arg,
+               counter, drop_reply ? "  (응답 DROP)" : "");
+        fflush(stdout);
+        if (drop_reply) continue;
+        struct msg r = last_reply; marshal(&r);
+        sendto(sd, &r, sizeof(r), 0, (struct sockaddr *)&from, fl);
+    }
+    printf("  [server] 종료. 최종 counter=%d\n", counter);
+    fflush(stdout);
+}
+
+// ---------------------------------------------------------------- client stub
+// rpc_add(): 호출자 눈에는 평범한 함수. 안에서 marshal → send → timeout/retry → unmarshal.
+static uint32_t next_seq = 1;
+static int stat_sends, stat_timeouts;
+
+static int rpc_add(int sd, struct sockaddr_in *srv, int x) {
+    struct msg req = {.seq = next_seq++, .op = OP_ADD, .arg = x};
+    struct msg wire = req; marshal(&wire);     // 재전송용 사본 보관 ("keep copy")
+    int timeout_ms = 100;                      // 처음 타임아웃
+    for (int attempt = 1; attempt <= 6; attempt++) {
+        sendto(sd, &wire, sizeof(wire), 0, (struct sockaddr *)srv, sizeof(*srv));
+        stat_sends++;
+        printf("[client %6.1fms] seq=%u  add(%d) 전송 (시도 %d, timeout=%dms)\n",
+               now_ms() - T0, req.seq, x, attempt, timeout_ms);
+        fflush(stdout);
+        double deadline = now_ms() + timeout_ms;
+        for (;;) {
+            double left = deadline - now_ms();
+            if (left <= 0) break;
+            fd_set rf; FD_ZERO(&rf); FD_SET(sd, &rf);
+            struct timeval tv = {.tv_sec = 0, .tv_usec = (int)(left * 1000)};
+            if (select(sd + 1, &rf, NULL, NULL, &tv) <= 0) break;   // 타이머 만료
+            struct msg rep;
+            if (recv(sd, &rep, sizeof(rep), 0) != (ssize_t)sizeof(rep)) continue;
+            unmarshal(&rep);
+            if (rep.seq != req.seq) {          // 예전 요청에 대한 늦은 응답 → 버림
+                printf("[client] 늦게 온 옛 응답 seq=%u 무시\n", rep.seq);
+                continue;
+            }
+            printf("[client %6.1fms] seq=%u  응답 수신 → 반환값 %d\n", now_ms() - T0, rep.seq, rep.ret);
+            fflush(stdout);
+            return rep.ret;
+        }
+        stat_timeouts++;
+        printf("[client %6.1fms] seq=%u  TIMEOUT → 재전송, 백오프 %dms→%dms\n",
+               now_ms() - T0, req.seq, timeout_ms, timeout_ms * 2);
+        fflush(stdout);
+        timeout_ms *= 2;                       // exponential back-off
+    }
+    fprintf(stderr, "rpc_add: 서버 응답 없음\n");
+    exit(1);
+}
+
+static int run(int dedup) {
+    // 서버 소켓을 먼저 bind (포트 0 → 커널이 빈 포트 배정) 한 뒤 fork
+    int ssd = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in sa = {.sin_family = AF_INET, .sin_port = 0};
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (ssd < 0 || bind(ssd, (struct sockaddr *)&sa, sizeof(sa)) < 0) { perror("bind"); exit(1); }
+    socklen_t sl = sizeof(sa);
+    getsockname(ssd, (struct sockaddr *)&sa, &sl);
+
+    pid_t pid = fork();
+    if (pid == 0) { server(ssd, dedup); _exit(0); }
+    close(ssd);
+
+    int csd = socket(AF_INET, SOCK_DGRAM, 0);
+    next_seq = 1; stat_sends = stat_timeouts = 0;
+    int expected = 0, got = 0;
+    for (int x = 10; x <= 50; x += 10) {       // add(10), add(20), ... add(50)
+        expected += x;
+        got = rpc_add(csd, &sa, x);
+    }
+    struct msg q = {.op = OP_QUIT}; marshal(&q);
+    sendto(csd, &q, sizeof(q), 0, (struct sockaddr *)&sa, sizeof(sa));
+    waitpid(pid, NULL, 0);
+    close(csd);
+    printf("=> 기대값 %d, 마지막 응답 %d, 전송 %d회, 타임아웃 %d회 %s\n\n", expected, got, stat_sends,
+           stat_timeouts, expected == got ? "(OK: at-most-once 유지)" : "(틀림! 재전송된 add 가 다시 실행됨)");
+    return 0;
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    T0 = now_ms();
+    printf("=== 1) seq 번호 + 중복 제거(dedup) 서버 ===\n");
+    run(1);
+    T0 = now_ms();
+    printf("=== 2) 중복 제거 없는 순진한 서버 (재전송 = 재실행) ===\n");
+    run(0);
+    return 0;
+}
+```
+
+실행:
+
+```text
+$ cc -Wall -Wextra -O0 code/C47_udp_rpc.c -o .work/bin/C47_udp_rpc && .work/bin/C47_udp_rpc
+=== 1) seq 번호 + 중복 제거(dedup) 서버 ===
+[client    1.5ms] seq=1  add(10) 전송 (시도 1, timeout=100ms)
+  [server    1.5ms] seq=1  add(10) 실행 → counter=10
+[client    1.6ms] seq=1  응답 수신 → 반환값 10
+[client    1.7ms] seq=2  add(20) 전송 (시도 1, timeout=100ms)
+  [server    1.7ms] seq=2  (요청 DROP — 받은 적 없는 셈)
+[client  104.8ms] seq=2  TIMEOUT → 재전송, 백오프 100ms→200ms
+[client  104.8ms] seq=2  add(20) 전송 (시도 2, timeout=200ms)
+  [server  104.9ms] seq=2  add(20) 실행 → counter=30
+[client  104.9ms] seq=2  응답 수신 → 반환값 30
+[client  104.9ms] seq=3  add(30) 전송 (시도 1, timeout=100ms)
+  [server  105.0ms] seq=3  add(30) 실행 → counter=60  (응답 DROP)
+[client  210.0ms] seq=3  TIMEOUT → 재전송, 백오프 100ms→200ms
+[client  210.0ms] seq=3  add(30) 전송 (시도 2, timeout=200ms)
+  [server  210.1ms] seq=3  중복 요청 → 재실행 안 함, 캐시된 응답 재전송 (counter=60)
+[client  210.1ms] seq=3  응답 수신 → 반환값 60
+[client  210.1ms] seq=4  add(40) 전송 (시도 1, timeout=100ms)
+  [server  210.2ms] seq=4  add(40) 실행 → counter=100  (응답 DROP)
+[client  315.2ms] seq=4  TIMEOUT → 재전송, 백오프 100ms→200ms
+[client  315.2ms] seq=4  add(40) 전송 (시도 2, timeout=200ms)
+  [server  315.2ms] seq=4  중복 요청 → 재실행 안 함, 캐시된 응답 재전송 (counter=100)  (응답 DROP)
+[client  524.2ms] seq=4  TIMEOUT → 재전송, 백오프 200ms→400ms
+[client  525.7ms] seq=4  add(40) 전송 (시도 3, timeout=400ms)
+  [server  525.8ms] seq=4  중복 요청 → 재실행 안 함, 캐시된 응답 재전송 (counter=100)
+[client  525.9ms] seq=4  응답 수신 → 반환값 100
+[client  525.9ms] seq=5  add(50) 전송 (시도 1, timeout=100ms)
+  [server  525.9ms] seq=5  add(50) 실행 → counter=150
+[client  526.0ms] seq=5  응답 수신 → 반환값 150
+  [server] 종료. 최종 counter=150
+=> 기대값 150, 마지막 응답 150, 전송 9회, 타임아웃 4회 (OK: at-most-once 유지)
+
+=== 2) 중복 제거 없는 순진한 서버 (재전송 = 재실행) ===
+[client    0.4ms] seq=1  add(10) 전송 (시도 1, timeout=100ms)
+  [server    1.1ms] seq=1  add(10) 실행 → counter=10
+[client    1.1ms] seq=1  응답 수신 → 반환값 10
+[client    1.1ms] seq=2  add(20) 전송 (시도 1, timeout=100ms)
+  [server    1.1ms] seq=2  (요청 DROP — 받은 적 없는 셈)
+[client  106.6ms] seq=2  TIMEOUT → 재전송, 백오프 100ms→200ms
+[client  106.7ms] seq=2  add(20) 전송 (시도 2, timeout=200ms)
+  [server  106.7ms] seq=2  add(20) 실행 → counter=30
+[client  106.8ms] seq=2  응답 수신 → 반환값 30
+[client  106.8ms] seq=3  add(30) 전송 (시도 1, timeout=100ms)
+  [server  106.8ms] seq=3  add(30) 실행 → counter=60  (응답 DROP)
+[client  210.2ms] seq=3  TIMEOUT → 재전송, 백오프 100ms→200ms
+[client  210.3ms] seq=3  add(30) 전송 (시도 2, timeout=200ms)
+  [server  210.3ms] seq=3  add(30) 실행 → counter=90
+[client  210.4ms] seq=3  응답 수신 → 반환값 90
+[client  210.4ms] seq=4  add(40) 전송 (시도 1, timeout=100ms)
+  [server  210.4ms] seq=4  add(40) 실행 → counter=130  (응답 DROP)
+[client  312.5ms] seq=4  TIMEOUT → 재전송, 백오프 100ms→200ms
+[client  312.9ms] seq=4  add(40) 전송 (시도 2, timeout=200ms)
+  [server  312.9ms] seq=4  add(40) 실행 → counter=170  (응답 DROP)
+[client  515.2ms] seq=4  TIMEOUT → 재전송, 백오프 200ms→400ms
+[client  515.3ms] seq=4  add(40) 전송 (시도 3, timeout=400ms)
+  [server  515.3ms] seq=4  add(40) 실행 → counter=210
+[client  515.4ms] seq=4  응답 수신 → 반환값 210
+[client  515.4ms] seq=5  add(50) 전송 (시도 1, timeout=100ms)
+  [server  515.4ms] seq=5  add(50) 실행 → counter=260
+[client  515.5ms] seq=5  응답 수신 → 반환값 260
+  [server] 종료. 최종 counter=260
+=> 기대값 150, 마지막 응답 260, 전송 9회, 타임아웃 4회 (틀림! 재전송된 add 가 다시 실행됨)
+```
+
+읽는 법:
+
+- **seq 2 (요청 유실)**: 클라이언트는 100 ms 기다리다 TIMEOUT, 200 ms 타임아웃으로 재전송. 서버는 처음 보는 요청이라 실행. Figure 47.4 그대로.
+- **seq 3 (응답 유실)**: 서버는 이미 실행했다(counter=60). 재전송이 오자 dedup 서버는 `seq <= last_seq` 를 보고 **재실행 없이 캐시된 응답(60)** 만 보낸다. Figure 47.5 + sequence counter.
+- **seq 4 (응답 두 번 유실)**: 타임아웃이 100 → 200 → 400 ms 로 늘어나는 **지수 백오프**가 타임스탬프에 그대로 보인다(약 100 ms, 약 200 ms 간격).
+- **순진한 서버**: 같은 손실 패턴인데 재전송마다 `add` 를 다시 실행해서 30 이 한 번, 40 이 두 번 더 더해졌다 → 150 + 30 + 80 = **260**. at-least-once 의 위험이 숫자로 보인다.
+- 타이밍(ms 값)은 실행마다 조금씩 다르지만, 메시지 순서와 counter 값은 결정적이다.
+
+더 해볼 것:
+
+```sh
+# 1) 서버 쪽 drop 조건을 rand() % 10 == 0 같은 무작위 손실로 바꾸고 1000번 RPC → 타임아웃 횟수 통계
+# 2) 응답이 늦게 도착하는 경우(서버에서 usleep(150000)) → 클라이언트의 "늦게 온 옛 응답 무시" 분기 확인
+# 3) macOS 에서 실제 패킷 확인:  sudo tcpdump -i lo0 -n udp
+```
+
+## 11. 펌웨어 엔지니어의 눈으로
+
+- **PCIe Data Link Layer = 이 장의 신뢰 계층 그 자체.** TLP 마다 12비트 **sequence number** 와 LCRC 를 붙이고, 수신 측은 ACK/NAK DLLP 를 보내며, 송신 측은 **replay buffer**(= "keep copy") 와 **REPLAY_TIMER**(= timeout) 로 재전송한다. 중복 TLP 는 seq 로 걸러 ACK 만 한다 — 원문 5.3절과 문자 그대로 같다. PCIe 링크 디버깅에서 보는 "replay timeout", "replay number rollover" AER 에러가 바로 이 메커니즘의 실패 카운터다.
+- **NVMe 큐 = 비동기 RPC.** SQ entry 는 marshal 된 요청(opcode = 함수 ID, CID = sequence/request ID, PRP/SGL = 포인터 인자를 "잘 알려진 타입" 으로 넘기는 방법), CQ entry 는 응답(CID 로 매칭, status). 호스트는 doorbell 을 울리고 다른 일을 하다 인터럽트/폴링으로 결과를 수거한다 — 7.2 의 비동기 RPC 와 같은 구조. 커맨드가 안 끝나면 호스트 드라이버의 **I/O timeout → Abort → controller reset** 이 "오래 걸리는 호출" 문제의 현실 버전이다. SSD FW 입장에선 같은 CID 재사용, 리셋 중 in-flight 커맨드 처리가 바로 중복/at-most-once 문제다.
+- **I2C/SPMI 의 ACK/NACK** 는 바이트 단위 ack 다. NACK 받으면 드라이버가 재시도하는데, PMIC 레지스터 쓰기처럼 "같은 값 쓰기" 는 멱등이라 안전하지만, **write-1-to-clear 인터럽트 상태 레지스터**나 FIFO push 처럼 비멱등 레지스터에 무작정 재시도하면 두 번 적용된다. RF 칩 통합 디버깅에서 "재시도 로직이 상태를 꼬았다" 류 버그가 여기서 나온다.
+- **코프로세서 메일박스 = RPC.** Apple 류 SoC 에서 AP ↔ 코프로세서(펌웨어) 간 메일박스 메시지는 endpoint(= 포트/서비스 이름), 메시지 타입(= 함수 ID), payload(= marshal 된 인자), 그리고 공유 메모리 버퍼 포인터(= 복잡한 인자는 DMA 가능 영역의 주소+길이로)로 구성된다. 엔디안과 구조체 패딩을 양쪽이 합의해야 하는 것도 XDR 문제와 같다.
+- **DSM 의 부활: GPU/가속기 unified memory.** CUDA Unified Memory 나 CXL 메모리 공유는 "원격(디바이스) 페이지를 page fault 로 가져온다" 는 DSM 의 메커니즘을 PCIe/NVLink 위에서 쓴다. DSM 이 겪은 성능 문제(접근 비용 불균일)는 그대로 있어서, 실전에선 `cudaMemPrefetchAsync` / access hint 로 "통신이 거의 안 일어나도록" 배치를 조정한다 — 원문이 지적한 바로 그 함정.
+
+## 12. 면접 질문
+
+### Q1. ack 와 timeout/retry 만으로는 왜 부족한가? sequence number 는 무엇을 해결하나?
+<details>
+<summary>답 보기</summary>
+
+ack + timeout/retry 는 **손실**은 해결하지만, 유실된 것이 **ack** 였을 때 받는 쪽이 **같은 메시지를 두 번** 받게 만든다. 보낸 쪽은 "요청 유실" 과 "ack 유실" 을 **구분할 수 없기** 때문이다.
+
+**sequence number** 는 메시지마다 단조 증가하는 ID 를 붙이고, 받는 쪽이 "다음 기대값" 하나만 기억하게 한다. 기대값보다 작은 ID 는 중복이므로 **ack 만 다시 보내고 응용에 전달하지 않는다**. 모든 ID 를 기억하는 방식과 달리 **O(1) 메모리**로 exactly-once 전달을 만든다. TCP 와 PCIe DLL 이 모두 이 구조다.
+
+</details>
+
+### Q2. RPC 를 TCP 가 아니라 UDP 위에 만드는 이유는?
+<details>
+<summary>답 보기</summary>
+
+요청/응답 패턴에서는 **응답 자체가 요청에 대한 ack** 역할을 하고, 다음 요청이 이전 응답의 ack 역할을 한다. TCP 위에 올리면 TCP 가 별도로 ack 를 두 번 더 보내 **메시지가 2개 → 4개**가 되고, 연결 수립 비용도 든다.
+
+UDP 위에 올리면 RPC run-time 이 **timeout/retry + seq 번호 + 서버 측 중복 제거**를 직접 구현해야 하지만, 그 덕에 요청/응답 구조에 딱 맞는 최소 메시지로 **at-most-once** 를 보장할 수 있다. (단, 오늘날 gRPC 는 HTTP/2-over-TCP 를 쓴다 — 스트리밍, 흐름 제어, 방화벽 친화성 등 다른 요구가 커졌기 때문. QUIC 은 다시 UDP 위로 돌아간 사례.)
+
+</details>
+
+### Q3. at-least-once, at-most-once, exactly-once 의 차이와 각각을 만드는 방법은?
+<details>
+<summary>답 보기</summary>
+
+- **at-least-once**: 응답이 올 때까지 재전송. 간단하지만 비멱등 연산은 **여러 번 실행**될 수 있다. 연산이 **멱등**이면 이걸로 충분하다(NFS 가 이 방식).
+- **at-most-once**: 요청에 (client ID, seq) 를 붙이고, 서버가 **최근 seq 와 응답을 캐시**해 중복이면 재실행 없이 캐시 응답만 돌려준다. 서버가 크래시하면 캐시가 사라지므로 "실행됐는지 모름" 상태가 남는다.
+- **exactly-once**: 실패까지 고려하면 서버의 중복 제거 테이블과 실행 결과를 **원자적으로 영속화**(로그/트랜잭션)해야 한다. 비싸며, 엄밀히는 클라이언트가 무한히 재시도할 수 있다는 가정도 필요하다.
+
+</details>
+
+### Q4. 타임아웃 값을 어떻게 정하나? 왜 exponential back-off 를 쓰나?
+<details>
+<summary>답 보기</summary>
+
+너무 짧으면 **불필요한 재전송**(CPU, 대역폭 낭비, 서버 과부하 악화), 너무 길면 **손실 감지가 늦어** 지연이 커진다. 이상적으로는 "손실을 감지할 만큼만" — 실전에선 RTT 를 측정해 평균과 분산으로 적응적으로 정한다(TCP 의 `RTO = SRTT + 4·RTTVAR`).
+
+여러 클라이언트가 한 서버에 몰릴 때 손실은 **과부하 신호**일 수 있다. 이때 모두가 같은 주기로 재전송하면 부하가 더 커지는 악순환이 생긴다. **exponential back-off**(재시도마다 2배, 보통 **jitter** 추가)는 재전송 부하를 기하급수적으로 줄여 시스템이 회복할 틈을 준다.
+
+</details>
+
+### Q5. DSM 이 실패하고 RPC 가 살아남은 이유는?
+<details>
+<summary>답 보기</summary>
+
+DSM 은 원격 접근을 **일반 메모리 load/store 뒤에 숨긴다**. 그 결과 (1) 기계 하나가 죽으면 주소 공간 일부가 사라지는데, 포인터로 엮인 자료구조에서 이를 **복구할 방법이 없다**. (2) 같은 load 가 ns 단위일 수도 수백 µs 일 수도 있어, 성능을 내려면 결국 통신을 의식해 짜야 하므로 **추상화의 의미가 사라진다**.
+
+RPC 는 원격 호출을 **명시적인 함수 경계**로 만든다. 실패는 "호출이 에러/타임아웃을 반환" 하는 형태로 **드러나고**, 비용도 호출 단위로 예측 가능하다. 실패를 숨기지 않고 다룰 수 있는 지점을 준 것이 핵심 차이다.
+
+</details>
+
+### Q6. End-to-end argument 를 설명하고, 하위 계층 신뢰성 기능은 그럼 왜 있나?
+<details>
+<summary>답 보기</summary>
+
+정확성 보장(예: 파일 전송의 무결성)은 **응용 끝단에서의 검사**로만 완결된다. 네트워크가 완벽해도 송신 측 메모리 손상이나 수신 측 디스크 쓰기 오류는 못 막기 때문이다. 그래서 전송 후 **전체 파일 체크섬 비교** 같은 end-to-end 검사가 필요하다.
+
+하위 계층의 재전송/체크섬은 **정확성**이 아니라 **성능 최적화**로 정당화된다. 링크 단에서 패킷 하나를 재전송하면, 끝단에서 손상을 발견하고 파일 전체를 다시 보내는 것보다 훨씬 싸다. 예: NVMe end-to-end data protection(PI) 은 호스트~NAND 끝까지 가는 검사, PCIe LCRC 는 링크 단 최적화.
+
+</details>
+
+## 13. 자가 점검 & 숙제
+
+### 퀴즈 1. 받는 쪽 기대값이 7 인데 seq=5 메시지가 도착했다. 어떻게 해야 하나?
+<details>
+<summary>답 보기</summary>
+
+5 < 7 이므로 **이미 받은 메시지의 재전송**이다. ack 는 다시 보내되(보낸 쪽이 아직 ack 를 못 받았을 수 있으므로) **응용에는 전달하지 않는다**. ack 를 안 보내면 보낸 쪽은 영원히 재전송한다.
+
+</details>
+
+### 퀴즈 2. 편도 손실률 5 % 일 때 요청-ack 왕복이 한 번에 성공할 확률과 기대 전송 횟수는?
+<details>
+<summary>답 보기</summary>
+
+성공 확률 = 0.95 × 0.95 = **0.9025**. 기대 전송 횟수 = 1 / 0.9025 ≈ **1.108 회**. 3번 연속 실패 확률 = (0.0975)³ ≈ 9.3 × 10⁻⁴.
+
+</details>
+
+### 퀴즈 3. 위 "직접 해보기" 의 순진한 서버 최종값이 260 인 이유를 계산으로 설명하라.
+<details>
+<summary>답 보기</summary>
+
+정상이면 10+20+30+40+50 = 150. seq 2 는 **요청**이 유실된 것이라 서버는 한 번만 실행(추가 없음). seq 3 은 응답 유실 1번 → add(30) **1번 추가 실행** (+30). seq 4 는 응답 유실 2번 → add(40) **2번 추가 실행** (+80). 150 + 30 + 80 = **260**.
+
+</details>
+
+### 퀴즈 4. RPC 서버를 thread pool 로 만들면 at-most-once 구현에서 무엇이 추가로 필요해지나?
+<details>
+<summary>답 보기</summary>
+
+같은 (client, seq) 의 재전송이 **다른 worker 에 동시에** 배정될 수 있다. 그래서 중복 제거 테이블 조회/갱신을 **락으로 보호**하고, "처리 중(in progress)" 상태를 두어 두 번째 요청은 실행하지 않고 기다리거나 "작업 중" ack 를 보내게 해야 한다. 원문의 "동시성의 표준 비용 — 락이 필요해진다" 가 이것이다.
+
+</details>
+
+### 숙제 (원문 v0.91 에는 이 장의 Homework 절이 없다 — 대신 스스로 해볼 과제)
+
+- **과제 1 — 무작위 손실로 바꾸기**: 위 코드의 drop 조건을 확률적 손실로 바꾸고 RPC 1000번. 손실률별 평균 전송 횟수가 `1/(1-q)` 공식과 맞는지 확인 → **재전송 기대값 계산**을 검증하는 문제.
+- **과제 2 — 큰 메시지 쪼개기**: 64 KB 인자를 1 KB 조각으로 나눠 보내고 조각마다 seq 를 붙여 재조립 → **fragmentation/reassembly 와 sliding window 필요성**을 체감하는 문제.
+- **과제 3 — 다중 클라이언트 at-most-once**: 서버가 `(client addr, last_seq, last_reply)` 테이블을 갖도록 확장 → **중복 제거 상태가 클라이언트 수에 비례**한다는 점(= 서버가 상태를 가진다)을 확인하는 문제. 이 "서버 상태" 가 크래시 복구를 어렵게 만든다는 것이 다음 장 NFS 의 출발점이다.
+
+## 14. 다음으로
+
+- 다음: [Ch.48 Sun 의 NFS](2026-09-30_C48_nfs.md) — RPC 위에 분산 파일 시스템을 올린다. 핵심 키워드는 **stateless 프로토콜**과 **멱등성**: "중복 제거 상태를 아예 안 두면 서버 크래시 복구가 공짜가 된다."
+- 그 다음: [Ch.49 AFS](2026-09-30_C49_afs.md) — 반대로 서버가 상태(callback)를 가져서 확장성을 얻는 설계.
+- 복습 연결: 체크섬의 강도와 비용은 [Ch.44](2026-09-30_C44_data_integrity.md), 원격 페이지를 가져오는 page fault 메커니즘은 [Ch.21](2026-09-30_C21_swapping_mechanisms.md), thread pool 의 동기화는 [Ch.30 조건 변수](2026-09-30_C30_condition_variables.md).

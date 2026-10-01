@@ -3,6 +3,7 @@
 > **목표**: HW-SW 디버깅 시나리오 12개를 같은 틀(clarify → 가설 순위 → 측정·도구 → root cause → fix → prevention)로 답하는 연습을 한다. 그다음 Don의 레쥬메 사실만으로 STAR 스토리를 만들어 행동 질문에 매핑하고, "Why Hark / Why leave Apple" 답변 초안과 펌웨어 면접용 영어 표현을 정리한다.
 > **선행**: C10(디버깅·bring-up·회로도), C03(I2C/SPI/I2S), C05(저전력), C06(무선 공존), C07(OTA), C09(factory)
 > **사용법**: 질문을 먼저 소리 내어 답해 보고, 그다음 모범 답안을 읽는다. 시나리오는 타이머 3분을 켜고 말한다.
+> **⚠ 2026-09-29 수정**: §5.1의 JD 인용문이 실제 JD에 없는 문장이었다(초기 추정이 인용으로 굳음). 현행 JD 문장으로 교체함. JD 인용은 [JD 스냅샷](../../JD_SNAPSHOT_2026-09-29.md) 기준. [P05 감사](../plan/P05_note_audit.html)
 
 ---
 
@@ -406,9 +407,9 @@ bool expired_ok(uint32_t now, uint32_t deadline) { return (int32_t)(now - deadli
 
 ### 5.1 Why Hark? (60초)
 
-**한국어 요점**: (1) AI가 채팅창을 벗어나 전용 기기로 들어가는 첫 세대를 만들고 싶다. (2) 모델·하드웨어·펌웨어를 한 회사가 같이 설계하는 곳은 드물고, 그래서 펌웨어가 모델 실행 제약(메모리·레이턴시)에 직접 영향을 준다(JD: "work with the agent team on model execution and memory constraints"). (3) 내 경력은 새 실리콘을 실제 제품으로 만드는 것이었다: bring-up, 인터페이스 장애 root cause, factory test, 양산. 1세대 기기에 그게 가장 필요하다. (4) 개인적 방향: on-device AI와 AI 하드웨어 쪽으로 커리어를 옮기고 싶다.
+**한국어 요점**: (1) AI가 채팅창을 벗어나 전용 기기로 들어가는 첫 세대를 만들고 싶다. (2) 모델·하드웨어·펌웨어를 한 회사가 같이 설계하는 곳은 드물다. JD 인용은 현행 문장만 쓴다 — BSP JD 인트로의 "board bring-up, vendor code integrations ... FPGA-based system integrations, and system power and performance improvements". (3) 내 경력은 새 실리콘을 실제 제품으로 만드는 것이었다: bring-up, 인터페이스 장애 root cause, factory test, 양산. 1세대 기기에 그게 가장 필요하다. (4) 개인적 방향: on-device AI와 AI 하드웨어 쪽으로 커리어를 옮기고 싶다.
 
-**English**: "Three reasons. First, I want to build the first generation of devices where AI leaves the chat box, and Hark is designing the model, the hardware and the firmware together, which is rare. It means the firmware isn't in a vacuum: memory and latency decisions on the device directly shape what the model can do. Second, my whole career has been taking new silicon to a shipping product: bring-up, root-causing interface failures, factory test and mass production. A first-generation device needs exactly that. And third, I want my next years to be in on-device AI, and this role sits right where the model meets the hardware."
+**English**: "Three reasons. First, I want to build the first generation of devices where AI leaves the chat box, and Hark is designing the model, the hardware and the firmware together, which is rare. It means the firmware work sits close to the product: the board, the vendor silicon and the power budget decide what the device can actually do. Second, my whole career has been taking new silicon to a shipping product: bring-up, root-causing interface failures, factory test and mass production. A first-generation device needs exactly that. And third, I want my next years to be in on-device AI, and this role sits right where the model meets the hardware."
 
 **주의**: Hark 제품 세부(하드웨어 구조, 일정)는 공개되지 않았다. "I understand the hardware isn't public yet, so I'm basing this on the job description and public announcements"라고 말하고, 추정은 질문으로 바꾼다("Is the always-on path on a separate MCU?").
 

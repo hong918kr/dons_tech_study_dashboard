@@ -1,6 +1,6 @@
 # B04. BSP 면접 대비 — 41문항, 정직 스크립트, 화이트보드 순서
 
-> **시리즈**: BSP 집중 4/4 · **선행**: B00(전략), B01(BSP 해부), B02(Zephyr 보드 포팅), B03(Linux·Android BSP) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling"
+> **시리즈**: BSP 집중 4/6 · **선행**: B00(전략), B01(BSP 해부), B02(Zephyr 보드 포팅), B03(Linux·Android BSP) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling"
 > **Don 상태**: 🟡 — 아래 층(버스 bring-up, pre-silicon, 디버깅, 양산)은 ✅ 강하고, "BSP를 처음부터 소유해 본 경험"은 ❌ 없다. 이 노트는 **그 두 사실을 한 호흡에 말하는 연습**이다.
 > **이 노트를 다 읽으면**: ① BSP 관련 41개 질문에 30초 안에 구조를 잡아 답할 수 있다 ② 레쥬메의 어느 줄이 어느 질문에 대응하는지 즉시 꺼낼 수 있다 ③ "BSP를 소유해 봤나"에 과장 없이, 그러나 약해 보이지 않게 답할 수 있다.
 

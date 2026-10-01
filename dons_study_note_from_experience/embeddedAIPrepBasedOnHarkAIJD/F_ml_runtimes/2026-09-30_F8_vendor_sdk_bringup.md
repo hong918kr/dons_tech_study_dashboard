@@ -1,0 +1,1539 @@
+# F8. 벤더 SDK·툴체인·새 가속기 bring-up — 버전 매트릭스부터 op 커버리지, fallback, 정확도·성능 이슈 추적까지
+
+> **이 노트를 다 읽으면**: 새 NPU·SDK bring-up을 "EVB → 버전 고정 → hello-world → op sweep → 정확도 → 성능 → 전력 → 제품 통합 → 회귀 CI → 양산"의 단계와 통과 기준으로 설명할 수 있다 · 버전 매트릭스를 manifest와 부팅 시 handshake로 고정하고, 단일 op 모델을 자동 생성해 기준(ONNX Runtime) 대비 지원/fallback/불일치 표를 만드는 도구를 직접 짤 수 있다 · CPU fallback의 비용을 경계 비용까지 계산하고 그래프 수술로 없앤 뒤 수치가 같음을 증명할 수 있다 · 레이어별 diff와 불일치 서명(반올림·scale·offset·layout·포화)으로 "누구 버그인가"를 증거 사슬로 보이고, 벤더용 최소 재현 리포트와 SDK 회귀 gate를 만들 수 있다
+> **JD 연결**: "Work with platform vendors to bring up toolchains, SDKs and new accelerator to ensure efficient model deployment and optimization" · study_prep_list **F8** 행 — 버전 매트릭스, op 지원표 읽기, CPU **fallback** 찾기·제거, 벤더 프로파일러 사용, FAE와 이슈 주고받기, 정확도 불일치 디버깅(전처리, 스케일, layout) · 연결: **M1**(평가 기준표), **M2**(벤치마크 방법론), **C6**(그래프 최적화·fallback), **C8**(레이어별 diff·golden vector), **E5** 8절(NPU bring-up 체크리스트), **D6**(벤치마크 하니스)
+> **Don 기준 난이도**: 새 실리콘·IP를 FPGA pre-silicon에서 살리고, 벤더와 errata·재현 케이스를 주고받고, 인터페이스 장애를 root cause까지 파고, bring-up → NPI → MP로 끌고 가는 일은 **이미 Don의 본업**이다 / 새로 배울 것은 ML 특유의 부분 — op 단위 지원표, 양자화 때문에 "정답이 하나가 아닌" 비교, converter·컴파일러·런타임으로 쪼개진 툴체인, 모델 zoo 단위의 회귀
+> **선행 노트**: C6(그래프 최적화·CPU fallback·그래프 수술), C8(검증 지표·레이어별 diff·golden vector), E5(NPU 구조·bring-up 체크리스트), D6(벤치마크 하니스). 병렬 작성 중인 F1(TFLite)·F2(TFLite Micro)·F4(Qualcomm QNN)·F5(ONNX Runtime)·F7(크로스 빌드)은 ID로만 가리킨다
+
+---
+
+## 0. 큰 그림 — Don이 이미 해 본 일을 ML 말로 다시 하기
+
+새 가속기 bring-up을 처음 들으면 낯설게 느껴지지만, 뼈대는 Don이 SSD 컨트롤러와 RF 칩셋에서 해 온 일과 같다. **새 하드웨어 + 벤더가 준 소프트웨어 + 우리 제품**이 처음 만나고, 그 셋이 "제품이 요구하는 수준으로 함께 동작한다"는 것을 증거로 보여 줄 때까지 단계를 밟는다. 다른 점은 단 하나, 이번에 돌리는 "워크로드"가 NVMe 명령이나 RF 패킷이 아니라 **신경망 모델**이라는 것이다.
+
+모델이라는 워크로드는 세 가지 성질 때문에 bring-up을 까다롭게 만든다.
+
+- **op 단위로 지원 여부가 갈린다.** 모델은 수십~수백 개의 op(Conv, Resize, Softmax …)로 된 그래프다. 가속기는 그중 일부만, 그것도 특정 파라미터 조합만 지원한다. 지원 안 되는 op는 CPU로 넘어가고(fallback), 그 순간 성능이 무너진다.
+- **정답이 bit 하나로 정해지지 않는다.** int8 양자화가 들어가면 기준(float)과 벤더 결과는 원래 조금 다르다. "얼마나 다르면 버그인가"를 따로 정해야 한다(C8).
+- **툴체인이 길다.** 모델(ONNX/TFLite) → converter → 양자화 → 컴파일러 → 바이너리 → 런타임 → 드라이버 → NPU firmware. 어느 단계든 버그가 있을 수 있고, 각각 버전이 따로 움직인다.
+
+그래서 이 노트의 도구는 전부 하나의 질문에 답하려고 존재한다: **"이 모델이, 이 버전 조합에서, 이 가속기 위에서, 기준과 같은 답을 제품이 요구하는 시간·전력 안에 내는가? 아니라면 누구의 무엇 때문인가?"**
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg"><defs><marker id="f8a" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<text x="10" y="18" font-size="13">새 가속기·SDK bring-up 생애주기 (아래 작은 글씨 = 단계 통과 기준)</text><rect x="14" y="40" width="112" height="46" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="70" y="60" font-size="12" text-anchor="middle">1. EVB 수령</text><text x="70" y="76" font-size="12" text-anchor="middle">보드 살리기</text><text x="70" y="104" font-size="12" text-anchor="middle">ID·데모 OK</text><line x1="126" y1="63" x2="144" y2="63" stroke="currentColor" marker-end="url(#f8a)"/><rect x="146" y="40" width="112" height="46" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="202" y="60" font-size="12" text-anchor="middle">2. SDK 설치</text><text x="202" y="76" font-size="12" text-anchor="middle">버전 고정</text><text x="202" y="104" font-size="12" text-anchor="middle">manifest 해시</text><line x1="258" y1="63" x2="276" y2="63" stroke="currentColor" marker-end="url(#f8a)"/><rect x="278" y="40" width="112" height="46" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="334" y="60" font-size="12" text-anchor="middle">3. hello-world</text><text x="334" y="76" font-size="12" text-anchor="middle">모델 1개</text><text x="334" y="104" font-size="12" text-anchor="middle">bit-exact</text><line x1="390" y1="63" x2="408" y2="63" stroke="currentColor" marker-end="url(#f8a)"/><rect x="410" y="40" width="112" height="46" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="466" y="60" font-size="12" text-anchor="middle">4. op coverage</text><text x="466" y="76" font-size="12" text-anchor="middle">sweep</text><text x="466" y="104" font-size="12" text-anchor="middle">지원표</text><line x1="522" y1="63" x2="540" y2="63" stroke="currentColor" marker-end="url(#f8a)"/><rect x="542" y="40" width="112" height="46" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="598" y="60" font-size="12" text-anchor="middle">5. 정확도</text><text x="598" y="76" font-size="12" text-anchor="middle">검증</text><text x="598" y="104" font-size="12" text-anchor="middle">SQNR·top-1</text><rect x="14" y="170" width="112" height="46" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="70" y="190" font-size="12" text-anchor="middle">6. 성능</text><text x="70" y="206" font-size="12" text-anchor="middle">프로파일링</text><text x="70" y="234" font-size="12" text-anchor="middle">p99·활용률</text><line x1="126" y1="193" x2="144" y2="193" stroke="currentColor" marker-end="url(#f8a)"/><rect x="146" y="170" width="112" height="46" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="202" y="190" font-size="12" text-anchor="middle">7. 전력·열</text><text x="202" y="206" font-size="12" text-anchor="middle">측정</text><text x="202" y="234" font-size="12" text-anchor="middle">mJ/추론</text><line x1="258" y1="193" x2="276" y2="193" stroke="currentColor" marker-end="url(#f8a)"/>
+<rect x="278" y="170" width="112" height="46" rx="5" fill="#3f9a6b" fill-opacity="0.2" stroke="#3f9a6b" stroke-width="2"/><text x="334" y="190" font-size="12" text-anchor="middle">8. 제품 FW</text><text x="334" y="206" font-size="12" text-anchor="middle">통합</text><text x="334" y="234" font-size="12" text-anchor="middle">메모리 맵</text><line x1="390" y1="193" x2="408" y2="193" stroke="currentColor" marker-end="url(#f8a)"/><rect x="410" y="170" width="112" height="46" rx="5" fill="#3f9a6b" fill-opacity="0.2" stroke="#3f9a6b" stroke-width="2"/><text x="466" y="190" font-size="12" text-anchor="middle">9. 회귀·CI</text><text x="466" y="206" font-size="12" text-anchor="middle">device farm</text><text x="466" y="234" font-size="12" text-anchor="middle">gate 통과</text><line x1="522" y1="193" x2="540" y2="193" stroke="currentColor" marker-end="url(#f8a)"/><rect x="542" y="170" width="112" height="46" rx="5" fill="#3f9a6b" fill-opacity="0.2" stroke="#3f9a6b" stroke-width="2"/><text x="598" y="190" font-size="12" text-anchor="middle">10. 양산 (MP)</text><text x="598" y="206" font-size="12" text-anchor="middle">현장 이슈</text><text x="598" y="234" font-size="12" text-anchor="middle">RMA 추적</text><path d="M 654 63 L 668 63 L 668 140 L 70 140 L 70 168" fill="none" stroke="currentColor" marker-end="url(#f8a)"/><line x1="14" y1="30" x2="390" y2="30" stroke="#4a7bd0" stroke-width="4"/><line x1="410" y1="30" x2="670" y2="30" stroke="#e08a3c" stroke-width="4"/><line x1="14" y1="160" x2="244" y2="160" stroke="#e08a3c" stroke-width="4"/><line x1="278" y1="160" x2="670" y2="160" stroke="#3f9a6b" stroke-width="4"/><text x="14" y="252" font-size="12">파랑 = bring-up (살리기) · 주황 = characterize (특성 파악) · 초록 = productize (제품화)</text><text x="14" y="272" font-size="12">각 단계는 앞 단계의 "통과 기준"을 전제로 한다. 순서를 건너뛰면 원인 후보가 곱으로 늘어난다.</text><text x="14" y="290" font-size="12">새 SDK 버전이 오면 2 → 9를 다시 돈다 (9가 자동화돼 있으면 하루, 아니면 몇 주).</text>
+</svg>
+```
+
+그림 1 — 새 가속기·SDK bring-up 생애주기. 각 단계 밑의 작은 글씨가 그 단계를 "통과했다"고 말할 수 있는 증거다. 새 SDK 버전이 나오면 2번부터 9번까지를 다시 돈다.
+
+### 0.1 각 단계 ↔ Don의 경험
+
+아래 표는 면접에서도 그대로 쓸 수 있는 매핑이다. 왼쪽 열은 이 노트에서 배우는 것이고, 오른쪽 두 열은 Don이 이미 한 일이다.
+
+| 단계 | ML 가속기에서 하는 일 | SSD FW (SK hynix/Solidigm)에서 같은 일 | RF 칩셋 통합 (Apple)에서 같은 일 |
+|---|---|---|---|
+| 1. EVB 수령 | 벤더 평가 보드 부팅, 샘플 앱·데모 모델 실행, NPU 장치 노드·ID 확인 | FPGA 이미지에 새 IP 올리고 레지스터 ID·버전 읽기 | 새 칩 샘플 보드 bring-up, 전원 시퀀스·버스 링크 확인 |
+| 2. SDK 설치·버전 고정 | SDK·converter·런타임·firmware 버전 조합을 manifest로 기록, 컨테이너로 고정 | 툴체인·RTL 릴리스·FPGA 비트스트림 버전 고정 | 칩 firmware·드라이버·OS 빌드 조합 관리 |
+| 3. hello-world | 단일 conv 하나를 기준과 bit-exact 비교 | DMA 한 번 보내고 golden 패턴과 비교 | 루프백·기본 패킷 송수신 |
+| 4. op coverage sweep | op × 파라미터 조합을 자동 생성해 지원/fallback/불일치 표 작성 | 명령 종류 × 파라미터 조합 테스트 매트릭스 | 모드·채널·레이트 조합 매트릭스 |
+| 5. 정확도 검증 | 레이어별 diff, SQNR·top-1 agreement, 실데이터 정확도 | 데이터 무결성·ECC 정정 결과 비교 | 성능 지표(throughput, 에러율) 기준 대비 검증 |
+| 6. 성능 프로파일링 | 레이어별 cycle, 활용률, DMA 바이트, init vs steady | QoS latency 분포, 병목 분석 | 처리량·지연 측정, 버스 병목 |
+| 7. 전력·열 | 추론당 에너지, sustained 성능, throttling | 전력 상태·thermal throttling 정책 | 전력/성능 margin sign-off |
+| 8. 제품 FW 통합 | 메모리 맵·arena 배치, 버전 handshake, 에러 경로 | 양산 펌웨어에 기능 통합 | 제품 OS·드라이버 통합 |
+| 9. 회귀·CI | 모델 zoo × SDK 버전 nightly, gate | nightly 회귀, 장시간 soak test | 빌드별 자동 테스트, factory test |
+| 10. 양산·현장 | 필드 텔레메트리, OTA로 모델·SDK 동시 갱신 | 고객 이슈·RMA 분석, 텔레메트리 | NPI → MP 전환, 현장 이슈 root cause |
+
+말로 하면: **Don은 1·2·3·6·7·9·10은 이미 몸으로 안다.** 이 노트는 4(op sweep)와 5(양자화 때문에 정답이 퍼진 정확도 비교), 그리고 이 둘을 자동화하는 도구에 가장 많은 지면을 쓴다.
+
+### 0.2 이 노트의 실습 환경 — 진짜 벤더 SDK 없이 워크플로를 끝까지
+
+노트 작성 환경에는 Qualcomm QNN이나 Arm Vela 같은 벤더 SDK가 없다. 대신 두 가지로 bring-up 워크플로 전체를 재현한다.
+
+- **기준(reference)**: ONNX Runtime의 CPU Execution Provider. 실무에서도 "float 기준"이나 "fake-quant 기준"을 ORT CPU로 만드는 일이 흔하다.
+- **가짜 벤더 런타임 `FakeNPU`**: Python으로 만든 작은 흉내. 지원표 규칙, int8 출력 양자화, 일부러 심은 버그(좌표 변환 모드 오구현, softmax axis 무시, padding 오류), 그리고 **SDK 버전에 따라 바뀌는 동작**을 가진다.
+- **진짜 가속기 EP 하나**: 이 Mac에 있는 ONNX Runtime **CoreML Execution Provider**. 벤더 SDK는 아니지만 "가속기 백엔드가 그래프를 받아 일부만 가져가고 나머지는 CPU로 돌려보내는" 실제 동작을 로그로 볼 수 있다(3.5절, 4.5절).
+
+`FakeNPU`의 버그는 실제로 자주 보고되는 유형을 본떴지만, **특정 벤더 제품의 실제 버그가 아니다.** 도구와 사고방식을 익히는 것이 목적이다.
+
+---
+
+## 1. 첫 주 — EVB, SDK 설치, hello-world
+
+### 1.1 EVB를 받으면 하는 일 (순서가 중요하다)
+
+E5 8.2절의 하드웨어 체크리스트(전원·클럭·리셋 → 메모리 맵 → firmware 로드 → 드라이버)는 이미 벤더가 EVB에서 끝내 놓은 경우가 많다. 우리 쪽 첫 주는 그 위의 소프트웨어 스택을 살리는 일이다.
+
+1. **벤더 샘플을 수정 없이 그대로 돌린다.** 벤더가 문서에 적은 명령 그대로. 여기서 안 되면 우리 환경(호스트 OS, 드라이버, 권한, 케이블)이 문서와 다르다는 뜻이다. 이 단계에서 **벤더 문서의 버전과 실제 설치된 버전이 같은지**부터 적는다.
+2. **샘플이 낸 숫자를 기록한다.** 샘플 모델의 latency, 정확도, 출력 일부. 이것이 "벤더가 보장한 동작"의 첫 기준점이다. 나중에 우리 모델이 이상할 때 "샘플은 여전히 같은 숫자를 내는가?"로 보드·드라이버 문제를 먼저 걸러 낸다.
+3. **가장 작은 내 모델 하나**: conv 하나짜리. 입력·weight를 고정하고, 기준(ORT CPU 또는 벤더의 bit-accurate 시뮬레이터)과 **bit-exact** 비교. E5 8.3절의 C 예제가 바로 이 단계다.
+4. **그다음에야 진짜 모델.** 첫날 제품 모델을 바로 넣으면, 안 될 때 원인 후보가 수십 개다(전처리, op 지원, 양자화, 메모리, 드라이버 …). 한 번에 하나씩 변수를 늘린다.
+
+> 펌웨어 비유: 새 SoC에서 바로 전체 제품 펌웨어를 부팅하지 않는다. LED 깜빡이기 → UART 출력 → 타이머 인터럽트 → DMA 한 번 → 그다음 기능. "hello-world"의 목적은 **원인 후보를 줄인 상태에서 첫 성공 경로를 확보하는 것**이다.
+
+### 1.2 벤더 SDK의 대략적인 구성 (일반론)
+
+벤더마다 이름은 다르지만 SDK는 거의 항상 아래 조각으로 나뉜다. 정확한 이름·옵션은 각 벤더 문서(F1·F2·F4)에서 확인한다.
+
+| 조각 | 하는 일 | 예 (이름만 — 세부는 버전 문서 확인) |
+|---|---|---|
+| converter | 프레임워크 모델(ONNX, TFLite, PyTorch)을 벤더 IR로 변환 | QNN converter, TFLite converter |
+| quantizer | calibration 데이터로 scale·zero-point 결정, int8/int16 모델 생성 | 벤더 양자화 도구, ORT·TFLite 양자화 |
+| compiler | 그래프 분할(partition), fusion, tiling, 메모리 배치, 명령 스트림 생성 | Arm Vela, QNN context binary 생성 단계 |
+| runtime | 기기에서 바이너리 로드·실행, 입출력 버퍼 관리 | QNN 런타임 라이브러리, TFLite delegate |
+| driver / firmware | OS 커널 드라이버, NPU 내부 제어 CPU의 firmware | 벤더 BSP에 포함되는 경우가 많음 |
+| 도구 | 프로파일러, 시뮬레이터, 모델 뷰어, 로그 | 벤더 profiler, bit-accurate 시뮬레이터 |
+
+여기서 중요한 사실: **이 조각들은 각자 버전이 있고, 같은 SDK 묶음 안에서도 따로 갱신된다.** 그래서 다음 절의 버전 매트릭스가 필요하다.
+
+---
+
+## 2. 버전 매트릭스 — "그 결과는 어떤 조합에서 나왔나"
+
+### 2.1 직관 — 8층짜리 탑
+
+SSD 펌웨어에서 "이 버그는 FW 1.2.3 + NAND lot X + 컨트롤러 B0 stepping에서만 난다"는 말을 Don은 수없이 했을 것이다. ML 가속기는 층이 더 많다.
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg"><defs><marker id="f8b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<text x="10" y="18" font-size="13">버전 매트릭스 = 이 8층이 한 세트다 (한 층만 바뀌어도 결과가 바뀔 수 있다)</text><rect x="130" y="32" width="300" height="28" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="280" y="50" font-size="12" text-anchor="middle">모델 (ONNX opset 17, 양자화 파라미터)</text><rect x="130" y="66" width="300" height="28" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="280" y="84" font-size="12" text-anchor="middle">converter / quantizer</text><rect x="130" y="100" width="300" height="28" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="280" y="118" font-size="12" text-anchor="middle">컴파일러 · SDK 2.1.0</text><rect x="130" y="134" width="300" height="28" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="280" y="152" font-size="12" text-anchor="middle">런타임 라이브러리 (libnpu.so / .a)</text><rect x="130" y="168" width="300" height="28" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="280" y="186" font-size="12" text-anchor="middle">커널 드라이버 · HAL</text><rect x="130" y="202" width="300" height="28" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="280" y="220" font-size="12" text-anchor="middle">NPU firmware 0x0201_0007</text><rect x="130" y="236" width="300" height="28" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="280" y="254" font-size="12" text-anchor="middle">OS · BSP (Android / Linux / Zephyr)</text><rect x="130" y="270" width="300" height="28" rx="5" fill="#888" fill-opacity="0.2" stroke="#888" stroke-width="2"/><text x="280" y="288" font-size="12" text-anchor="middle">실리콘 stepping (A0 / B0)</text><text x="120" y="70" font-size="12" text-anchor="end">호스트</text><text x="120" y="86" font-size="12" text-anchor="end">(빌드 머신)</text><text x="120" y="186" font-size="12" text-anchor="end">기기 이미지</text><text x="120" y="202" font-size="12" text-anchor="end">(OTA 단위)</text><text x="120" y="288" font-size="12" text-anchor="end">HW</text><path d="M 450 32 L 460 32 L 460 128 L 450 128" fill="none" stroke="currentColor"/><path d="M 450 134 L 460 134 L 460 264 L 450 264" fill="none" stroke="currentColor"/><path d="M 450 270 L 460 270 L 460 298 L 450 298" fill="none" stroke="currentColor"/><text x="470" y="76" font-size="12">Docker 이미지 digest</text><text x="470" y="92" font-size="12">requirements.lock (hash)</text><text x="470" y="196" font-size="12">BSP manifest · OTA 패키지</text><text x="470" y="212" font-size="12">부팅 시 버전 handshake (예제 11)</text><text x="470" y="288" font-size="12">errata 목록 · ECO 이력</text><path d="M 128 112 C 96 130, 96 140, 128 150" fill="none" stroke="#d0564a" stroke-width="2" marker-end="url(#f8b)"/><text x="14" y="324" font-size="12">빨간 화살표: 컴파일러가 만든 바이너리 포맷 ↔ 런타임이 읽는 포맷 — 가장 자주 깨지는 경계</text>
+</svg>
+```
+
+그림 2 — 버전 매트릭스는 8층이 한 세트다. 위 3층은 호스트(빌드 머신)에서, 가운데 4층은 기기 이미지에서, 맨 아래는 하드웨어에서 고정한다. 빨간 화살표(컴파일러가 만든 바이너리 ↔ 런타임)는 가장 자주 깨지는 경계다.
+
+깨지는 전형적인 경계는 이렇다.
+
+- **컴파일러 ↔ 런타임**: 새 SDK 컴파일러로 만든 바이너리를 옛 런타임이 못 읽는다(또는 더 나쁘게, 읽기는 하는데 다르게 해석한다).
+- **런타임 ↔ NPU firmware**: 드라이버·firmware의 mailbox 프로토콜이나 기능 비트가 바뀌었다.
+- **모델 opset ↔ converter**: PyTorch가 새 opset으로 export했는데 converter가 그 opset의 op 정의를 모른다(예: opset 20의 `Gelu` 단일 op를 모르는 converter는 실패하거나 CPU로 보낸다).
+- **OS·BSP ↔ 드라이버**: Android 버전이 바뀌며 메모리 할당자나 권한 정책이 바뀌었다.
+- **실리콘 stepping**: A0에서 errata로 막아 둔 기능이 B0에서 풀렸는데 SDK는 여전히 A0 우회 경로를 쓴다.
+
+### 2.2 버전 매트릭스 템플릿
+
+아래 표를 프로젝트 첫날 만들고, 모든 측정 결과·버그 리포트에 이 표의 해시를 붙인다.
+
+| 층 | 현재 값 (예) | 어디서 고정하나 | 기기에서 읽는 법 | 담당 | errata·릴리스 노트 |
+|---|---|---|---|---|---|
+| 모델 | `kws_dscnn` opset 17, int8, calib v3 | 모델 레지스트리 + 파일 해시 | 모델 헤더의 버전·해시 필드 | ML 팀 | 모델 changelog |
+| converter·quantizer | 2.1.0 | 컨테이너 이미지 digest | (호스트 전용) | 우리 | 벤더 릴리스 노트 §converter |
+| 컴파일러·SDK | 2.1.0 | 컨테이너 이미지 digest | 바이너리 헤더의 SDK 버전 | 우리 | 벤더 known issues |
+| 런타임 라이브러리 | 2.1.0 | BSP manifest | 런타임 API의 버전 함수 | 우리 + 벤더 | 벤더 릴리스 노트 §runtime |
+| 드라이버·HAL | BSP 빌드 번호 | BSP manifest | `/sys` 노드·드라이버 로그(OS 따라 다름) | BSP 팀 | BSP 릴리스 노트 |
+| NPU firmware | 0x0201_0007 | BSP manifest | firmware 버전 레지스터·mailbox 응답 | 벤더 | firmware errata |
+| OS·BSP | Android/Linux/Zephyr 빌드 | 빌드 시스템 | OS 빌드 문자열 | BSP 팀 | OS 릴리스 노트 |
+| 실리콘 | B0 | (하드웨어) | chip ID·revision 레지스터 | HW 팀 | 실리콘 errata 시트 |
+
+말로 하면: **"어디서 고정하나"와 "기기에서 읽는 법" 두 열이 핵심이다.** 고정만 하고 읽지 않으면 실제 기기에 다른 버전이 올라가 있어도 모른다. 읽기만 하고 고정하지 않으면 재현이 안 된다.
+
+### 2.3 재현 가능한 환경 — 컨테이너와 고정된 wheel
+
+호스트 쪽(converter·컴파일러·Python 도구)은 컨테이너로 고정하는 것이 표준이다. 아래는 **형태를 보여 주는 템플릿**이다(이 노트 환경에서 실행하지 않았다. 이미지 이름과 경로는 가상의 예).
+
+```sh
+# Dockerfile 의 핵심 — 베이스 이미지는 tag가 아니라 digest로 고정
+#   FROM ubuntu:22.04@sha256:<digest>
+#   COPY vendor-sdk-2.1.0.tar.gz /opt/      # 벤더 SDK 아카이브도 해시를 기록
+#   COPY requirements.lock /tmp/
+#   RUN pip install --require-hashes -r /tmp/requirements.lock
+# requirements.lock 한 줄의 형태:
+#   onnx==1.19.1 --hash=sha256:<hash>
+# 빌드한 이미지의 digest를 manifest에 기록한다
+docker build -t bringup:sdk2.1.0 .
+docker inspect --format '{{.Id}}' bringup:sdk2.1.0
+```
+
+`pip install --require-hashes`는 실제로 있는 pip 옵션이다. lock 파일의 모든 패키지에 해시가 있어야 설치되므로, 누군가 같은 버전 번호로 다른 파일을 올려도 막힌다. 펌웨어로 치면 **빌드 입력 전체의 체크섬을 고정하는 것**이다.
+
+### 2.4 예제 1 — 환경 manifest와 fingerprint (`manifest.py`)
+
+모든 측정 결과 옆에 "이 결과는 어떤 조합에서 나왔나"를 한 줄 해시로 붙이는 코드다. 벤더 SDK 항목은 예시 값이다.
+
+```python
+# 환경 manifest: "이 결과가 어떤 조합에서 나왔나"를 한 줄 해시로 고정한다
+import hashlib, json, platform, sys
+import numpy, onnx, onnxruntime as ort
+
+manifest = {
+    "host": f"{platform.system()}-{platform.machine()}",
+    "python": platform.python_version(),
+    "numpy": numpy.__version__,
+    "onnx": onnx.__version__,
+    "onnx_max_opset": onnx.defs.onnx_opset_version(),
+    "onnxruntime": ort.__version__,
+    "ort_providers": ort.get_available_providers(),
+    # 실제 벤더 SDK라면 여기에 들어갈 항목 (예시 값)
+    "vendor_sdk": "FakeNPU-SDK 2.1.0",
+    "npu_firmware": "fw 0x0201_0007",
+    "converter": "fakenpu-convert 2.1.0",
+    "model_opset": 17,
+}
+blob = json.dumps(manifest, sort_keys=True).encode()
+manifest["fingerprint"] = hashlib.sha256(blob).hexdigest()[:12]
+for k, v in manifest.items():
+    print(f"{k:15s} {v}")
+```
+
+```text
+host            Darwin-arm64
+python          3.9.6
+numpy           2.0.2
+onnx            1.19.1
+onnx_max_opset  24
+onnxruntime     1.19.2
+ort_providers   ['CoreMLExecutionProvider', 'AzureExecutionProvider', 'CPUExecutionProvider']
+vendor_sdk      FakeNPU-SDK 2.1.0
+npu_firmware    fw 0x0201_0007
+converter       fakenpu-convert 2.1.0
+model_opset     17
+fingerprint     8812827ca7ef
+```
+
+출력에서 볼 것: 마지막 줄의 `fingerprint`. 조합 중 하나라도 바뀌면 해시가 바뀐다. CSV·대시보드·Jira 티켓에 이 12글자만 붙여도 "같은 조합에서 나온 결과끼리" 비교할 수 있다. `sort_keys=True`로 직렬화하는 이유는 dict 순서가 달라도 같은 해시가 나오게 하기 위해서다.
+
+### 2.5 예제 2 — 기기 쪽: 부팅 때 버전 handshake (`compat.c`)
+
+호스트에서 고정해도 기기에는 다른 조합이 올라갈 수 있다(OTA가 반만 성공, 잘못된 이미지 플래시). 그래서 펌웨어는 모델을 로드하기 전에 **모델 바이너리 헤더 ↔ 런타임 ↔ NPU firmware** 호환성을 검사하고, 맞지 않으면 조용히 실행하지 말고 명확한 에러 코드로 거부해야 한다. 아래 헤더 형식은 설명용으로 만든 것이다.
+
+```c
+/* 모델 바이너리 헤더 ↔ 런타임/NPU firmware 호환성 검사: 부팅 때 버전 불일치를 조용히 넘기지 않는다 */
+#include <stdio.h>
+#include <stdint.h>
+typedef struct { uint32_t magic; uint16_t sdk_major, sdk_minor; uint32_t fw_min, crc; } model_hdr_t;
+typedef enum { OK = 0, E_MAGIC, E_SDK_MAJOR, E_SDK_NEWER, E_FW_OLD, E_CRC } compat_t;
+static const char *msg[] = {"OK", "bad magic", "SDK major mismatch", "model built by newer SDK",
+                            "NPU firmware too old", "CRC mismatch"};
+#define RT_SDK_MAJOR 2u
+#define RT_SDK_MINOR 1u
+static compat_t check(const model_hdr_t *m, uint32_t npu_fw, uint32_t crc_calc) {
+    if (m->magic != 0x4E505531u) return E_MAGIC;                 /* "NPU1" */
+    if (m->sdk_major != RT_SDK_MAJOR) return E_SDK_MAJOR;          /* 포맷이 바뀜 → 무조건 거부 */
+    if (m->sdk_minor > RT_SDK_MINOR) return E_SDK_NEWER;           /* 새 컴파일러가 만든 명령을 모름 */
+    if (npu_fw < m->fw_min) return E_FW_OLD;                       /* errata 수정 전 firmware */
+    if (crc_calc != m->crc) return E_CRC;                          /* flash 손상·잘못된 이미지 */
+    return OK;
+}
+int main(void) {
+    const uint32_t fw = 0x02010007u;                               /* 기기에서 읽은 NPU firmware 버전 */
+    model_hdr_t cases[] = {
+        {0x4E505531u, 2, 1, 0x02010005u, 0xABCD}, {0x4E505531u, 2, 2, 0x02010005u, 0xABCD},
+        {0x4E505531u, 3, 0, 0x02010005u, 0xABCD}, {0x4E505531u, 2, 0, 0x02010009u, 0xABCD},
+        {0x4E505531u, 2, 1, 0x02010005u, 0x1234}};
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        compat_t r = check(&cases[i], fw, 0xABCD);
+        printf("model sdk %u.%u fw_min 0x%08X -> %s\n", (unsigned)cases[i].sdk_major,
+               (unsigned)cases[i].sdk_minor, (unsigned)cases[i].fw_min, msg[r]);
+    }
+    return 0;
+}
+```
+
+```text
+model sdk 2.1 fw_min 0x02010005 -> OK
+model sdk 2.2 fw_min 0x02010005 -> model built by newer SDK
+model sdk 3.0 fw_min 0x02010005 -> SDK major mismatch
+model sdk 2.0 fw_min 0x02010009 -> NPU firmware too old
+model sdk 2.1 fw_min 0x02010005 -> CRC mismatch
+```
+
+`cc -std=c11 -Wall -Wextra -O2`로 경고 0개. 출력에서 볼 것: 규칙이 네 종류다. **major가 다르면 무조건 거부**(바이너리 포맷 자체가 바뀜), **모델이 런타임보다 새 minor면 거부**(모르는 명령이 있을 수 있음), **firmware가 모델이 요구하는 최소 버전보다 낮으면 거부**(errata 수정 전), **CRC 불일치면 거부**. 옛 minor로 만든 모델을 새 런타임이 읽는 방향은 허용하는 것이 보통이다(하위 호환). 실제 벤더가 이 규칙을 어떻게 보장하는지는 릴리스 노트의 호환성 절을 반드시 확인한다.
+
+### 2.6 릴리스 노트·errata 추적
+
+벤더 릴리스 노트는 읽고 버리는 문서가 아니라 **추적 대상**이다. 새 SDK가 올 때마다 아래 표에 한 줄씩 추가한다.
+
+| SDK 버전 | 릴리스 노트 항목 | 우리에게 영향 | 확인 방법 | 상태 |
+|---|---|---|---|---|
+| 2.2.0 | "Added dilated convolution support" | `conv3x3 dil2` fallback이 사라질 수 있음 | op sweep 재실행 | 확인: NPU로 이동 (3절 예제 4) |
+| 2.2.0 | "Improved depthwise performance" | depthwise 커널이 바뀜 → 수치 회귀 위험 | sweep + 회귀 gate | **회귀 발견**: `dwconv5x5 s2` 불일치 |
+| 2.2.0 | "Known issue: Resize linear half_pixel" | 우리 업샘플 레이어 | sweep | 2.1부터 있던 불일치, 우회 유지 |
+| 2.1.0 errata | "LayerNorm executes on CPU" | transformer 블록 latency | 프로파일 | 우회: 2.2에서 해제 예정 |
+
+(표의 릴리스 노트 문구는 FakeNPU를 위한 가상의 예다.) 펌웨어 시절 실리콘 errata 시트를 관리하던 방식 그대로다: **항목마다 "우리 제품에 영향이 있나 → 어떻게 확인하나 → 확인 결과"**까지 닫는다.
+
+---
+
+## 3. Op coverage sweep — 지원표를 믿지 말고 직접 만든다
+
+### 3.1 왜 벤더 op 지원표만으로는 부족한가
+
+벤더 문서에는 보통 "지원 op 목록"이 있다. 그런데 실무에서 문제가 되는 것은 거의 항상 목록에 **있는** op다.
+
+- **파라미터 조합**: "Conv 지원"이라고 써 있어도 kernel 7×7, dilation 2, stride 3, group 수, 비대칭 padding 중 일부는 안 될 수 있다.
+- **모드·속성**: Resize는 `mode`(nearest/linear/cubic)와 `coordinate_transformation_mode`(half_pixel/asymmetric/align_corners …)의 조합마다 다른 커널이다.
+- **축·shape**: Softmax가 마지막 축만 지원하거나, 특정 채널 수의 배수만 빠르거나.
+- **dtype**: int8은 되고 int16은 CPU로 가거나.
+- **버전**: 같은 op가 SDK 2.1에서는 CPU, 2.2에서는 NPU. 또는 반대로 2.2에서 새로 틀리기 시작.
+
+그래서 bring-up 엔지니어는 **op 하나짜리 모델을 파라미터 조합별로 자동 생성해서** 기준과 벤더 런타임에 같은 입력을 넣고, 결과를 FALLBACK / OK(≤ 1 LSB) / MISMATCH로 판정해 표로 만드는 sweep 도구를 만든다. E5 8.2절 6번 항목을 실제 코드로 옮기는 것이다.
+
+### 3.2 예제 3 — 가짜 벤더 런타임 `FakeNPU` (`fakenpu.py`)
+
+먼저 실험 대상이 될 "벤더 런타임"을 만든다. 이 모듈은 이후 예제들이 `import`해서 쓰는 도구이고, 자체 출력은 없다. 핵심은 세 가지다.
+
+- `single_op()`: op 하나짜리 ONNX 모델을 `onnx.helper`로 만들고 `onnx.checker`로 검사한다.
+- `FakeNPU.place()`: 노드 하나를 보고 NPU/CPU 배치와 이유, 그리고 (있다면) 버그를 돌려준다. **이것이 벤더의 "지원표 + 숨은 버그"를 흉내 낸 부분이다.**
+- `FakeNPU.run()`: CPU로 간 op는 fp32 그대로(기준과 같음), NPU로 간 op는 출력을 int8로 양자화한다. 버그가 있는 op는 모델을 살짝 바꿔(속성 변경) 틀린 답을 낸다.
+
+```python
+# fakenpu.py — 실제 벤더 SDK 대신 쓰는 "가짜 NPU 런타임". 기준은 ONNX Runtime CPU EP.
+import copy
+import numpy as np, onnx, onnxruntime as ort
+from onnx import helper as h, TensorProto as TP
+
+def single_op(op, attrs, x_shape, inits=(), opset=17):
+    """op 하나짜리 ONNX 모델. inits = [(이름, ndarray)] 는 weight 같은 상수 입력."""
+    names = ["x"] + [n for n, _ in inits]
+    node = h.make_node(op, names, ["y"], **attrs)
+    g = h.make_graph([node], op, [h.make_tensor_value_info("x", TP.FLOAT, x_shape)],
+                     [h.make_tensor_value_info("y", TP.FLOAT, [None] * len(x_shape))],
+                     [onnx.numpy_helper.from_array(a, n) for n, a in inits])
+    m = h.make_model(g, opset_imports=[h.make_opsetid("", opset)], ir_version=9)
+    onnx.checker.check_model(m)
+    return m
+
+def run_ref(m, x):
+    s = ort.InferenceSession(m.SerializeToString(), providers=["CPUExecutionProvider"])
+    return s.run(None, {"x": x})[0]
+
+def attr(node, name, default=None):
+    for a in node.attribute:
+        if a.name == name:
+            return h.get_attribute_value(a)
+    return default
+
+class FakeNPU:
+    """규칙 기반 지원표 + int8 출력 양자화 + 버전별 버그를 흉내 낸다."""
+    def __init__(self, sdk="2.1"):
+        self.sdk = sdk
+
+    def place(self, node, x_shape):
+        """(장소, 이유, 버그 변형 함수 or None)"""
+        op, v22 = node.op_type, self.sdk >= "2.2"      # 데모용 문자열 비교 (실전은 tuple로)
+        k = attr(node, "kernel_shape", [1])[0]
+        if op == "Conv":
+            dw = attr(node, "group", 1) == x_shape[1] > 1
+            if attr(node, "dilations", [1, 1])[0] > 1 and not v22:
+                return "CPU", "dilation>1 not supported", None
+            if k > 5:
+                return "CPU", f"kernel {k}x{k} > 5x5", None
+            if dw and k == 5 and attr(node, "strides", [1])[0] == 2 and v22:
+                return "NPU", "", _bug_dw_pad          # 2.2에서 생긴 회귀
+        if op == "LayerNormalization" and not v22:
+            return "CPU", "LayerNorm lowered to CPU in 2.1", None
+        if op in ("Gelu", "Erf", "HardSwish"):
+            return "CPU", f"{op} not in NPU op set", None
+        if op == "Resize" and attr(node, "mode", b"nearest") == b"linear":
+            ctm = attr(node, "coordinate_transformation_mode", b"half_pixel")
+            if ctm == b"align_corners":
+                return "CPU", "align_corners not supported", None
+            return "NPU", "", _bug_resize_ctm         # half_pixel을 asymmetric으로 구현
+        if op == "Softmax" and attr(node, "axis", -1) not in (-1, 3) and not v22:
+            return "NPU", "", _bug_softmax_axis       # axis 무시, 마지막 축으로 계산
+        return "NPU", "", None
+
+    def run(self, m, x):
+        node = m.graph.node[0]
+        where, why, bug = self.place(node, list(x.shape))
+        y_true = run_ref(m, x)
+        if where == "CPU":
+            return y_true, where, why                  # fp32 CPU 커널 = 기준과 같다
+        y = run_ref(bug(copy.deepcopy(m)), x) if bug else y_true
+        scale = max(float(np.abs(y_true).max()), 1e-8) / 127   # 벤더 calibration
+        q = np.clip(np.round(y / scale), -128, 127)
+        return (q * scale).astype(np.float32), where, f"scale={scale:.4g}"
+
+def _set(m, name, value):
+    n = m.graph.node[0]
+    keep = [a for a in n.attribute if a.name != name]
+    del n.attribute[:]
+    n.attribute.extend(keep + [h.make_attribute(name, value)])
+    return m
+
+def _bug_resize_ctm(m):   return _set(m, "coordinate_transformation_mode", "asymmetric")
+def _bug_softmax_axis(m): return _set(m, "axis", -1)
+def _bug_dw_pad(m):       return _set(m, "pads", [1, 1, 3, 3])
+```
+
+읽을 때 볼 것: `run()`의 양자화는 `scale = max|y| / 127`의 대칭 per-tensor 방식이라(C1), 정상 동작이면 오차가 **최대 0.5 LSB**다. 버그 세 개는 모두 속성 하나를 바꾸는 방식으로 넣었다. 실제 벤더 버그도 "속성 하나를 잘못 해석"하는 형태가 아주 많다.
+
+### 3.3 예제 4 — op coverage sweep (`sweep.py`)
+
+17개 변형을 만들어 SDK 2.1과 2.2에서 돌리고, 기준 대비 최대 오차를 **출력 LSB 단위**로 표시한다. 판정 기준은 1 LSB다.
+
+```python
+# op coverage sweep: 단일 op 모델을 변형별로 만들어 기준(ORT) vs FakeNPU(2.1, 2.2)를 비교
+import numpy as np
+from fakenpu import single_op, run_ref, FakeNPU
+rng = np.random.default_rng(0)
+W = lambda *s: (rng.standard_normal(s) * 0.3).astype(np.float32)
+X = (1, 8, 16, 16)
+def conv(k, s=1, d=1, g=1):
+    p = d * (k - 1) // 2
+    return ("Conv", dict(kernel_shape=[k, k], strides=[s, s], dilations=[d, d], group=g,
+            pads=[p] * 4), X, [("w", W(8, 8 // g, k, k))])
+def resize(mode, ctm):
+    return ("Resize", dict(mode=mode, coordinate_transformation_mode=ctm), X,
+            [("roi", np.zeros(0, np.float32)), ("scales", np.array([1, 1, 2, 2], np.float32))])
+CASES = {
+    "conv3x3 s1": conv(3), "conv3x3 s2": conv(3, s=2), "conv5x5 s1": conv(5),
+    "conv7x7 s1": conv(7), "conv3x3 dil2": conv(3, d=2),
+    "dwconv3x3 s1": conv(3, g=8), "dwconv5x5 s2": conv(5, s=2, g=8),
+    "maxpool2x2": ("MaxPool", dict(kernel_shape=[2, 2], strides=[2, 2]), X, []),
+    "resize nearest": resize("nearest", "asymmetric"),
+    "resize linear hp": resize("linear", "half_pixel"),
+    "resize linear ac": resize("linear", "align_corners"),
+    "softmax axis-1": ("Softmax", dict(axis=-1), X, []),
+    "softmax axis1": ("Softmax", dict(axis=1), X, []),
+    "layernorm": ("LayerNormalization", dict(axis=-1), (1, 10, 64), [("g", W(64) + 1), ("b", W(64))]),
+    "gelu(opset20)": ("Gelu", {}, (1, 10, 64), []),
+    "sigmoid": ("Sigmoid", {}, X, []), "hardswish": ("HardSwish", {}, X, []),
+}
+TOL_LSB, reasons, table = 1.0, {}, {}
+print(f"{'case':18s} {'SDK 2.1':18s} {'SDK 2.2':18s}")
+for name, (op, a, shp, inits) in CASES.items():
+    m = single_op(op, a, shp, inits, opset=20 if op == "Gelu" else 17)
+    x = rng.standard_normal(shp).astype(np.float32) * 2
+    ref, cells = run_ref(m, x), []
+    for sdk in ("2.1", "2.2"):
+        y, where, why = FakeNPU(sdk).run(m, x)
+        lsb = float(np.abs(ref).max()) / 127
+        err = float(np.abs(y - ref).max()) / lsb
+        tag = "FALLBACK" if where == "CPU" else ("OK" if err <= TOL_LSB else "MISMATCH")
+        cells.append(f"{tag:8s} {err:6.2f}" if where == "NPU" else tag)
+        if where == "CPU": reasons[name] = why
+    table[name] = [c.split()[0] for c in cells]
+    print(f"{name:18s} {cells[0]:18s} {cells[1]:18s}")
+for k, v in reasons.items(): print(f"  fallback reason  {k:18s} {v}")
+import json; json.dump(table, open("coverage.json", "w"))
+```
+
+```text
+case               SDK 2.1            SDK 2.2           
+conv3x3 s1         OK         0.50    OK         0.50   
+conv3x3 s2         OK         0.50    OK         0.50   
+conv5x5 s1         OK         0.50    OK         0.50   
+conv7x7 s1         FALLBACK           FALLBACK          
+conv3x3 dil2       FALLBACK           OK         0.50   
+dwconv3x3 s1       OK         0.50    OK         0.50   
+dwconv5x5 s2       OK         0.50    MISMATCH 203.85   
+maxpool2x2         OK         0.50    OK         0.50   
+resize nearest     OK         0.50    OK         0.50   
+resize linear hp   MISMATCH  93.72    MISMATCH  93.72   
+resize linear ac   FALLBACK           FALLBACK          
+softmax axis-1     OK         0.50    OK         0.50   
+softmax axis1      MISMATCH 103.26    OK         0.50   
+layernorm          FALLBACK           OK         0.50   
+gelu(opset20)      FALLBACK           FALLBACK          
+sigmoid            OK         0.50    OK         0.50   
+hardswish          FALLBACK           FALLBACK          
+  fallback reason  conv7x7 s1         kernel 7x7 > 5x5
+  fallback reason  conv3x3 dil2       dilation>1 not supported
+  fallback reason  resize linear ac   align_corners not supported
+  fallback reason  layernorm          LayerNorm lowered to CPU in 2.1
+  fallback reason  gelu(opset20)      Gelu not in NPU op set
+  fallback reason  hardswish          HardSwish not in NPU op set
+```
+
+출력에서 볼 것:
+
+- `OK 0.50`: NPU에서 돌았고 오차가 정확히 0.5 LSB다. 기준 출력을 int8로 반올림한 것이니 최대 오차가 반 LSB인 것은 수학적으로 당연하다. **이 숫자가 0.5보다 크면** 커널이 기준과 다른 계산을 한다는 뜻이다.
+- `FALLBACK`: 정확도는 기준과 같지만(fp32 CPU) 느려진다. 이유 문자열이 함께 나온다.
+- `MISMATCH`: NPU에서 돌았는데 값이 틀린다. 93 LSB, 103 LSB, 203 LSB는 "반올림 차이"가 아니라 **전혀 다른 계산**이다.
+- **버전에 따라 바뀐 4줄**: dilation conv와 LayerNorm은 2.2에서 NPU로 올라왔다(좋은 변화), softmax axis 버그는 고쳐졌다, 그리고 `dwconv5x5 s2`는 2.2에서 **새로 틀리기 시작했다**(회귀). 릴리스 노트에는 "depthwise 성능 개선"이라고만 써 있었을 것이다.
+
+```svg
+<svg viewBox="0 0 560 446" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="18" font-size="13">op coverage sweep 결과 (예제 2 실제 출력)</text><text x="210" y="38" font-size="12" text-anchor="middle">SDK 2.1</text><text x="336" y="38" font-size="12" text-anchor="middle">SDK 2.2</text><text x="142" y="60" font-size="12" text-anchor="end">conv3x3 s1</text><rect x="150" y="48" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="210" y="60" font-size="12" text-anchor="middle">OK</text><rect x="276" y="48" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="60" font-size="12" text-anchor="middle">OK</text><text x="142" y="80" font-size="12" text-anchor="end">conv3x3 s2</text><rect x="150" y="68" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="210" y="80" font-size="12" text-anchor="middle">OK</text><rect x="276" y="68" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="80" font-size="12" text-anchor="middle">OK</text><text x="142" y="100" font-size="12" text-anchor="end">conv5x5 s1</text><rect x="150" y="88" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="210" y="100" font-size="12" text-anchor="middle">OK</text><rect x="276" y="88" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="100" font-size="12" text-anchor="middle">OK</text><text x="142" y="120" font-size="12" text-anchor="end">conv7x7 s1</text><rect x="150" y="108" width="120" height="16" rx="3" fill="#e08a3c" fill-opacity="0.55"/><text x="210" y="120" font-size="12" text-anchor="middle">FALLBACK</text><rect x="276" y="108" width="120" height="16" rx="3" fill="#e08a3c" fill-opacity="0.55"/><text x="336" y="120" font-size="12" text-anchor="middle">FALLBACK</text><text x="142" y="140" font-size="12" text-anchor="end">conv3x3 dil2</text><rect x="150" y="128" width="120" height="16" rx="3" fill="#e08a3c" fill-opacity="0.55"/><text x="210" y="140" font-size="12" text-anchor="middle">FALLBACK</text><rect x="276" y="128" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="140" font-size="12" text-anchor="middle">OK</text><text x="408" y="140" font-size="12">← 버전에 따라 바뀜</text><text x="142" y="160" font-size="12" text-anchor="end">dwconv3x3 s1</text><rect x="150" y="148" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="210" y="160" font-size="12" text-anchor="middle">OK</text><rect x="276" y="148" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="160" font-size="12" text-anchor="middle">OK</text><text x="142" y="180" font-size="12" text-anchor="end">dwconv5x5 s2</text><rect x="150" y="168" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="210" y="180" font-size="12" text-anchor="middle">OK</text><rect x="276" y="168" width="120" height="16" rx="3" fill="#d0564a" fill-opacity="0.55"/><text x="336" y="180" font-size="12" text-anchor="middle">MISMATCH</text>
+<text x="408" y="180" font-size="12">← 버전에 따라 바뀜</text><text x="142" y="200" font-size="12" text-anchor="end">maxpool2x2</text><rect x="150" y="188" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="210" y="200" font-size="12" text-anchor="middle">OK</text><rect x="276" y="188" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="200" font-size="12" text-anchor="middle">OK</text><text x="142" y="220" font-size="12" text-anchor="end">resize nearest</text><rect x="150" y="208" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="210" y="220" font-size="12" text-anchor="middle">OK</text><rect x="276" y="208" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="220" font-size="12" text-anchor="middle">OK</text><text x="142" y="240" font-size="12" text-anchor="end">resize linear hp</text><rect x="150" y="228" width="120" height="16" rx="3" fill="#d0564a" fill-opacity="0.55"/><text x="210" y="240" font-size="12" text-anchor="middle">MISMATCH</text><rect x="276" y="228" width="120" height="16" rx="3" fill="#d0564a" fill-opacity="0.55"/><text x="336" y="240" font-size="12" text-anchor="middle">MISMATCH</text><text x="142" y="260" font-size="12" text-anchor="end">resize linear ac</text><rect x="150" y="248" width="120" height="16" rx="3" fill="#e08a3c" fill-opacity="0.55"/><text x="210" y="260" font-size="12" text-anchor="middle">FALLBACK</text><rect x="276" y="248" width="120" height="16" rx="3" fill="#e08a3c" fill-opacity="0.55"/><text x="336" y="260" font-size="12" text-anchor="middle">FALLBACK</text><text x="142" y="280" font-size="12" text-anchor="end">softmax axis-1</text><rect x="150" y="268" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="210" y="280" font-size="12" text-anchor="middle">OK</text><rect x="276" y="268" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="280" font-size="12" text-anchor="middle">OK</text><text x="142" y="300" font-size="12" text-anchor="end">softmax axis1</text><rect x="150" y="288" width="120" height="16" rx="3" fill="#d0564a" fill-opacity="0.55"/><text x="210" y="300" font-size="12" text-anchor="middle">MISMATCH</text><rect x="276" y="288" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="300" font-size="12" text-anchor="middle">OK</text><text x="408" y="300" font-size="12">← 버전에 따라 바뀜</text><text x="142" y="320" font-size="12" text-anchor="end">layernorm</text><rect x="150" y="308" width="120" height="16" rx="3" fill="#e08a3c" fill-opacity="0.55"/><text x="210" y="320" font-size="12" text-anchor="middle">FALLBACK</text><rect x="276" y="308" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="320" font-size="12" text-anchor="middle">OK</text><text x="408" y="320" font-size="12">← 버전에 따라 바뀜</text><text x="142" y="340" font-size="12" text-anchor="end">gelu(opset20)</text>
+<rect x="150" y="328" width="120" height="16" rx="3" fill="#e08a3c" fill-opacity="0.55"/><text x="210" y="340" font-size="12" text-anchor="middle">FALLBACK</text><rect x="276" y="328" width="120" height="16" rx="3" fill="#e08a3c" fill-opacity="0.55"/><text x="336" y="340" font-size="12" text-anchor="middle">FALLBACK</text><text x="142" y="360" font-size="12" text-anchor="end">sigmoid</text><rect x="150" y="348" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="210" y="360" font-size="12" text-anchor="middle">OK</text><rect x="276" y="348" width="120" height="16" rx="3" fill="#3f9a6b" fill-opacity="0.55"/><text x="336" y="360" font-size="12" text-anchor="middle">OK</text><text x="142" y="380" font-size="12" text-anchor="end">hardswish</text><rect x="150" y="368" width="120" height="16" rx="3" fill="#e08a3c" fill-opacity="0.55"/><text x="210" y="380" font-size="12" text-anchor="middle">FALLBACK</text><rect x="276" y="368" width="120" height="16" rx="3" fill="#e08a3c" fill-opacity="0.55"/><text x="336" y="380" font-size="12" text-anchor="middle">FALLBACK</text><rect x="20" y="397" width="14" height="14" fill="#3f9a6b" fill-opacity="0.55"/><text x="40" y="408" font-size="12">NPU, ≤1 LSB</text><rect x="190" y="397" width="14" height="14" fill="#e08a3c" fill-opacity="0.55"/><text x="210" y="408" font-size="12">CPU fallback</text><rect x="360" y="397" width="14" height="14" fill="#d0564a" fill-opacity="0.55"/><text x="380" y="408" font-size="12">NPU, 값 틀림</text><text x="20" y="432" font-size="12">초록=그대로 써도 됨 · 주황=느려짐(정확도는 같음) · 빨강=조용히 틀림 → 가장 위험</text>
+</svg>
+```
+
+그림 3 — 예제 4의 실제 출력을 그대로 그린 coverage heatmap. 주황(fallback)은 느려질 뿐이지만, 빨강(mismatch)은 **조용히 틀린다** — 에러도 경고도 없이 다른 숫자를 낸다. bring-up에서 가장 먼저 잡아야 하는 것은 빨강이다.
+
+### 3.4 예제 5 — 손으로 확인: Resize의 좌표 변환 모드 (`resize_ctm.py`)
+
+`resize linear hp`가 왜 93 LSB나 틀렸을까? `FakeNPU`는 `half_pixel`을 `asymmetric`으로 구현했다. 두 모드는 "출력 픽셀 i가 입력의 어느 좌표에서 오는가"를 다르게 계산한다.
+
+```
+입력 [0, 10] (폭 2) → 출력 폭 4 (scale 2), linear 보간
+
+half_pixel    : x_in = (i + 0.5) / 2 − 0.5   → −0.25, 0.25, 0.75, 1.25
+                (범위 밖은 가장자리로 clamp)   →  0.0,  0.25, 0.75, 1.0
+                값 = 10 · x_in                →  0,    2.5,  7.5,  10
+
+asymmetric    : x_in = i / 2                 →  0,    0.5,  1.0,  1.5 → clamp 1.0
+                값                            →  0,    5,    10,   10
+
+align_corners : x_in = i · (2 − 1) / (4 − 1) →  0,    1/3,  2/3,  1
+                값                            →  0,    3.33, 6.67, 10
+```
+
+말로 하면: 같은 "2배 linear 업샘플"인데 두 번째 픽셀이 2.5, 5, 3.33으로 다 다르다. ORT로 확인한다.
+
+```python
+# Resize linear ×2: coordinate_transformation_mode 세 가지가 같은 입력에 다른 답을 낸다
+import numpy as np
+from fakenpu import single_op, run_ref
+x = np.array([[[[0.0, 10.0]]]], np.float32)                 # 1×1×1×2
+for ctm in ("half_pixel", "asymmetric", "align_corners"):
+    m = single_op("Resize", dict(mode="linear", coordinate_transformation_mode=ctm), (1, 1, 1, 2),
+                  [("roi", np.zeros(0, np.float32)), ("scales", np.array([1, 1, 1, 2], np.float32))])
+    print(f"{ctm:14s} {run_ref(m, x).ravel()}")
+```
+
+```text
+half_pixel     [ 0.   2.5  7.5 10. ]
+asymmetric     [ 0.  5. 10. 10.]
+align_corners  [ 0.         3.3333335  6.666667  10.       ]
+```
+
+출력에서 볼 것: 손계산과 정확히 같다. 이런 차이는 실제로 프레임워크를 건널 때 흔하다(옛 TensorFlow의 `align_corners`/`half_pixel_centers` 플래그 조합과 PyTorch `interpolate`의 `align_corners`가 서로 다른 기본값을 가진 역사가 있다). converter나 벤더 커널이 이 속성 하나를 잘못 옮기면, 업샘플이 들어간 모델(세그멘테이션, 오디오 디코더)이 **조용히** 틀린다. sweep에 모든 모드를 넣어야 하는 이유다.
+
+### 3.5 예제 6 — 진짜 가속기 백엔드에게 물어보기: ORT CoreML EP (`coreml_probe.py`)
+
+`FakeNPU`의 지원표는 내가 지어낸 것이다. 진짜 백엔드는 어떻게 대답할까? ONNX Runtime은 Execution Provider(EP)가 그래프를 받으면 `GetCapability`라는 단계에서 "내가 가져갈 노드"를 고르고, 나머지는 CPU EP로 돌린다(F5). 로그 수준을 verbose로 올리면 노드별 판정이 찍힌다. 이 Mac의 CoreML EP로 op마다 물어본다.
+
+```python
+# 실제 가속기 EP(ORT CoreML EP)에게 op별 지원 여부를 묻는다 — verbose 로그의 GetSupportedNodes 줄을 파싱
+import os, re, tempfile, numpy as np, onnxruntime as ort
+from fakenpu import single_op
+
+def ask_coreml(model):
+    so = ort.SessionOptions(); so.log_severity_level = 0               # verbose
+    fd, path = tempfile.mkstemp(); saved = os.dup(2); os.dup2(fd, 2)    # C++ 로그(stderr) → 파일
+    try:
+        ort.InferenceSession(model.SerializeToString(), so,
+                             providers=["CoreMLExecutionProvider", "CPUExecutionProvider"])
+    finally:
+        os.dup2(saved, 2); os.close(fd)
+    log = open(path).read(); os.remove(path)
+    sup = re.findall(r"Operator type: \[(\w+)\] index: \[\d+\] name: \[[^\]]*\] supported: \[(\d)\]", log)
+    cpu = re.findall(r"placed on \[CPUExecutionProvider\]\. Number of nodes: (\d+)", log)
+    return sup, int(cpu[0]) if cpu else 0
+
+if __name__ == "__main__":
+    X, k = (1, 8, 16, 16), lambda v: np.full((1,), v, np.float32)
+    CASES = [("Conv", dict(pads=[1] * 4), [("w", np.zeros((8, 8, 3, 3), np.float32))]),
+             ("HardSwish", {}, []), ("HardSigmoid", {}, []), ("Clip", {}, [("lo", k(0)), ("hi", k(6))]),
+             ("Mul", {}, [("c", k(0.5))]), ("Add", {}, [("c", k(0.5))]), ("Tanh", {}, []),
+             ("Erf", {}, []), ("Softmax", dict(axis=1), [])]
+    for op, attrs, inits in CASES:
+        sup, n_cpu = ask_coreml(single_op(op, attrs, X, inits))
+        print(f"{op:12s} EP verdict {sup}   nodes left on CPU: {n_cpu}")
+```
+
+```text
+Conv         EP verdict [('Conv', '1')]   nodes left on CPU: 0
+HardSwish    EP verdict [('HardSwish', '0'), ('HardSigmoid', '0'), ('Mul', '1')]   nodes left on CPU: 1
+HardSigmoid  EP verdict [('HardSigmoid', '0')]   nodes left on CPU: 1
+Clip         EP verdict [('Clip', '1')]   nodes left on CPU: 0
+Mul          EP verdict [('Mul', '1')]   nodes left on CPU: 0
+Add          EP verdict [('Add', '1')]   nodes left on CPU: 0
+Tanh         EP verdict [('Tanh', '1')]   nodes left on CPU: 0
+Erf          EP verdict [('Erf', '0')]   nodes left on CPU: 1
+Softmax      EP verdict [('Softmax', '1')]   nodes left on CPU: 0
+```
+
+출력에서 볼 것 (ORT 1.19.2, CoreML EP 기본 설정 기준의 실제 결과):
+
+- `HardSwish`는 CoreML EP가 지원하지 않는다. 더 흥미로운 것은 판정 목록에 `HardSigmoid`와 `Mul`이 함께 나온다는 점이다. ORT가 그래프를 다시 분할하는 과정에서 `HardSwish`를 ONNX 함수 정의대로 `HardSigmoid` + `Mul`로 풀었고, EP가 그중 `Mul`만 가져갔다. 결국 `HardSigmoid` 1개가 CPU에 남는다.
+- `Erf`도 지원하지 않는다. `Gelu`를 `Erf`로 표현한 모델은 이 EP에서 CPU fallback이 생긴다.
+- `Clip`, `Mul`, `Add`, `Tanh`, `Softmax`, `Conv`는 지원한다.
+
+이 결과는 **ORT 버전과 CoreML EP 옵션(모델 포맷, compute unit)에 따라 달라질 수 있다** — 그 자체가 2절 버전 매트릭스의 교훈이다. 그리고 이 로그 파싱 방식 자체가 실무 도구다. 벤더 EP(예: ORT QNN EP)도 비슷하게 로그나 프로파일로 배치를 보여 주므로, **배치 결과를 텍스트로 뽑아 CI에서 diff**하는 것이 fallback 회귀를 잡는 가장 싼 방법이다.
+
+### 3.6 실제 sweep에서 넣어야 할 축
+
+예제 4는 17개만 돌렸다. 제품용 sweep은 수백~수천 개가 된다. 축은 이렇게 잡는다.
+
+| op 계열 | 변형 축 | 꼭 넣을 경계 조건 |
+|---|---|---|
+| Conv | kernel 1/3/5/7, stride 1/2, dilation 1/2, group 1/C(depthwise)/중간값, padding 대칭/비대칭 | 채널 1, 채널이 8·16·32의 배수가 아닌 값, 큰 feature map(SRAM 초과) |
+| Pool | max/avg, kernel·stride, `ceil_mode`, `count_include_pad` | 출력이 1×1이 되는 크기 |
+| Resize | nearest/linear, 모든 `coordinate_transformation_mode`, `nearest_mode` | 비정수 scale, 다운샘플 |
+| Softmax·LayerNorm | axis, 길이 | 길이 1, 매우 긴 축, 음수 axis |
+| 활성 함수 | ReLU, ReLU6(Clip), Sigmoid, Tanh, HardSwish, GELU(Erf/Tanh 근사) | 입력 범위 밖(포화 영역) |
+| Elementwise | Add/Mul/Sub/Div, broadcasting 모양 | 스칼라·채널별·전체 broadcasting |
+| 모양 바꾸기 | Reshape, Transpose(perm 전부), Concat(axis), Slice, Pad | NCHW↔NHWC를 건너는 transpose |
+| MatMul·Gemm | M·N·K 크기, transpose 플래그 | batch matmul, K가 작을 때 |
+| dtype | int8, int16 activation, fp16 | 양자화 파라미터 극단값(scale 매우 작음) |
+
+입력 데이터도 축이다: 정규분포만 쓰지 말고 **0만, 최댓값만, 극단값 섞기**를 넣는다. 포화·오버플로 버그는 평범한 입력에서 안 보인다. SSD 시절 데이터 패턴(all-0, all-1, walking-1, random)을 바꿔 가며 테스트하던 것과 같다.
+
+---
+
+## 4. CPU fallback — 찾고, 비용을 재고, 없앤다
+
+### 4.1 리포트에서 fallback 찾기
+
+C6 12절에서 본 것처럼 fallback은 그래프를 NPU 구간과 CPU 구간으로 쪼갠다. 도구마다 보여 주는 방식이 다르지만, 찾아야 할 정보는 같다: **어떤 op가, 왜, 그래프의 어디에서 CPU로 갔고, 구간(partition)이 몇 개로 쪼개졌나.**
+
+| 도구 | 어디서 보나 (일반론) | 볼 것 |
+|---|---|---|
+| ONNX Runtime + EP | 로그 수준을 verbose로: `GetCapability` 줄, "Node placements" 아래 EP별 노드 목록 | EP가 가져간 노드 수, partition 수, CPU에 남은 노드 이름 |
+| TFLite + delegate | delegate 적용 시 로그(교체된 노드 수와 partition 수), benchmark 도구의 op 프로파일 | delegate가 가져간 비율, partition 수 |
+| Arm Vela | 컴파일 요약(NPU/CPU op 개수), op별 상세 출력 | CPU로 남은 op와 이유 |
+| QNN 등 벤더 SDK | 컨버터 로그, 프로파일러 출력 | backend별 op 배치 |
+
+이 노트 환경에서 실제로 본 ORT 로그는 이런 모양이었다(4.5절에서 쓰는 모델, 로그 수준 verbose, 앞부분 타임스탬프 생략).
+
+```text
+CoreMLExecutionProvider::GetCapability, number of partitions supported by CoreML: 2 number of nodes in the graph: 4 number of nodes supported by CoreML: 2
+Node placements
+ Node(s) placed on [CoreMLExecutionProvider]. Number of nodes: 3
+ Node(s) placed on [CPUExecutionProvider]. Number of nodes: 2
+```
+
+또 하나 유용한 실제 옵션: ORT에는 세션 설정 `session.disable_cpu_ep_fallback`이 있다. 이것을 `"1"`로 주면 EP가 못 가져간 노드가 있을 때 세션 생성이 실패하게 만들 수 있다(이 노트 환경에서 providers 목록에 CPU EP를 함께 넣으면 "Conflicting session configuration" 에러가 나는 것까지 확인했다). CI에서 **"fallback이 하나라도 생기면 빌드 실패"** 규칙을 만들 때 쓸 수 있다.
+
+### 4.2 비용 모델 — fallback 하나가 왜 6배를 만드나
+
+경계 하나의 비용을 이렇게 모델링한다(C6 12.2절의 항목들을 숫자로).
+
+```
+경계 비용 = 동기화(제출·IRQ·대기) + 복사(bytes ÷ 대역폭) + layout 변환(bytes에 비례)
+
+예: 64,000 B 텐서가 NPU → CPU 로 건너감, 동기화 60 µs, 대역폭 2,000 B/µs (= 2 GB/s),
+    layout 변환 1.5 µs/KB
+
+    60 + 64000/2000 + (64000/1024)·1.5
+  = 60 + 32 + 62.5·1.5
+  = 60 + 32 + 93.75 = 185.75 µs
+```
+
+말로 하면: NPU에서 6 µs면 끝날 HardSwish 하나를 CPU로 보내면, CPU 실행(120 µs)에 더해 **왕복 경계 두 번 = 약 371 µs**가 붙는다. 숫자는 설명용 가상 값이지만 비율은 실무 감각과 맞는다: 경계 비용이 CPU op 자체보다 크다.
+
+### 4.3 예제 7 — partition 타임라인 시뮬레이션 (`partition.py`)
+
+```python
+# CPU fallback 비용 모델: 지원표로 그래프를 NPU/CPU 구간으로 자르고 경계 비용까지 더한다
+OPS = [  # (이름, op 종류, 출력 bytes, NPU µs, CPU µs) — 설명용 가상 값
+    ("conv1", "Conv", 64_000, 40, 900), ("hsw1", "HardSwish", 64_000, 6, 120),
+    ("dw2", "Conv", 64_000, 25, 600), ("conv3", "Conv", 32_000, 30, 700),
+    ("hsw3", "HardSwish", 32_000, 4, 60), ("dw4", "Conv", 32_000, 18, 400),
+    ("conv5", "Conv", 16_000, 22, 500), ("gap", "GlobalAveragePool", 512, 3, 20),
+    ("fc", "Gemm", 48, 5, 30), ("softmax", "Softmax", 48, 2, 4)]
+SYNC_US, BW_B_PER_US, LAYOUT_US_PER_KB = 60, 2_000, 1.5   # 제출/IRQ, 2 GB/s, NHWC 변환
+
+def schedule(unsupported):
+    t, timeline, prev, n_bound = 0.0, [], "NPU", 0
+    for i, (name, op, out_b, npu, cpu) in enumerate(OPS):
+        dev = "CPU" if op in unsupported else "NPU"
+        if dev != prev:  # 경계: 앞 op 출력이 장치를 건넌다
+            in_b = OPS[i - 1][2] if i else 0
+            cost = SYNC_US + in_b / BW_B_PER_US + in_b / 1024 * LAYOUT_US_PER_KB
+            timeline.append(("xfer", f"{prev}->{dev}", t, cost)); t += cost; n_bound += 1
+        dur = cpu if dev == "CPU" else npu
+        timeline.append((dev, name, t, dur)); t += dur; prev = dev
+    return t, n_bound, timeline
+
+for label, unsup in [("ideal (all NPU)", set()), ("HardSwish on CPU", {"HardSwish"}),
+                     ("Softmax on CPU", {"Softmax"}), ("both on CPU", {"HardSwish", "Softmax"})]:
+    total, nb, tl = schedule(unsup)
+    cpu = sum(d for k, _, _, d in tl if k == "CPU"); x = sum(d for k, _, _, d in tl if k == "xfer")
+    print(f"{label:18s} total {total:7.1f} us | CPU ops {cpu:6.1f} | boundaries {nb} cost {x:6.1f}")
+_, _, tl = schedule({"HardSwish"})
+for k, name, start, dur in tl:
+    print(f"   {k:4s} {name:9s} start {start:7.1f}  dur {dur:6.1f}")
+```
+
+```text
+ideal (all NPU)    total   155.0 us | CPU ops    0.0 | boundaries 0 cost    0.0
+HardSwish on CPU   total   942.2 us | CPU ops  180.0 | boundaries 4 cost  617.2
+Softmax on CPU     total   217.1 us | CPU ops    4.0 | boundaries 1 cost   60.1
+both on CPU        total  1004.3 us | CPU ops  184.0 | boundaries 5 cost  677.3
+   NPU  conv1     start     0.0  dur   40.0
+   xfer NPU->CPU  start    40.0  dur  185.8
+   CPU  hsw1      start   225.8  dur  120.0
+   xfer CPU->NPU  start   345.8  dur  185.8
+   NPU  dw2       start   531.5  dur   25.0
+   NPU  conv3     start   556.5  dur   30.0
+   xfer NPU->CPU  start   586.5  dur  122.9
+   CPU  hsw3      start   709.4  dur   60.0
+   xfer CPU->NPU  start   769.4  dur  122.9
+   NPU  dw4       start   892.2  dur   18.0
+   NPU  conv5     start   910.2  dur   22.0
+   NPU  gap       start   932.2  dur    3.0
+   NPU  fc        start   935.2  dur    5.0
+   NPU  softmax   start   940.2  dur    2.0
+```
+
+출력에서 볼 것:
+
+- 전부 NPU면 155 µs. HardSwish 두 개가 CPU로 가면 942 µs — **6배**. 그중 CPU 연산은 180 µs뿐이고 **경계 4번에 617 µs**가 든다.
+- Softmax(모델 끝)만 CPU로 가면 217 µs. 경계가 한 번이고 텐서가 48 B로 작아서 동기화 60 µs가 거의 전부다. **fallback은 개수보다 위치와 텐서 크기가 중요하다**(C6의 규칙을 숫자로 확인).
+- 타임라인의 첫 경계 185.8 µs는 4.2절 손계산(185.75)과 같다.
+
+```svg
+<svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="18" font-size="13">같은 모델, 두 가지 배치 (예제 3의 실제 계산값, µs)</text><text x="94" y="70" font-size="12" text-anchor="end">전부 NPU</text><rect x="100.0" y="40" width="21.9" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="121.9" y="40" width="3.3" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="125.2" y="40" width="13.7" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="138.9" y="40" width="16.4" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="155.3" y="40" width="2.2" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="157.5" y="40" width="9.9" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="167.3" y="40" width="12.0" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="179.4" y="40" width="1.6" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="181.0" y="40" width="2.7" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="183.7" y="40" width="1.1" height="22" fill="#4a7bd0" fill-opacity="0.6"/><text x="190.8" y="70" font-size="12">155 µs</text><text x="94" y="150" font-size="12" text-anchor="end">HardSwish</text><text x="94" y="166" font-size="12" text-anchor="end">→CPU</text><rect x="100.0" y="120" width="21.9" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="121.9" y="132" width="101.7" height="22" fill="#d0564a" fill-opacity="0.6"/><rect x="223.6" y="144" width="65.7" height="22" fill="#e08a3c" fill-opacity="0.6"/><rect x="289.3" y="132" width="101.7" height="22" fill="#d0564a" fill-opacity="0.6"/><rect x="390.9" y="120" width="13.7" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="404.6" y="120" width="16.4" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="421.0" y="132" width="67.3" height="22" fill="#d0564a" fill-opacity="0.6"/><rect x="488.3" y="144" width="32.8" height="22" fill="#e08a3c" fill-opacity="0.6"/><rect x="521.1" y="132" width="67.3" height="22" fill="#d0564a" fill-opacity="0.6"/><rect x="588.4" y="120" width="9.9" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="598.2" y="120" width="12.0" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="610.3" y="120" width="1.6" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="611.9" y="120" width="2.7" height="22" fill="#4a7bd0" fill-opacity="0.6"/><rect x="614.7" y="120" width="1.1" height="22" fill="#4a7bd0" fill-opacity="0.6"/><text x="621.8" y="150" font-size="12">942 µs</text><line x1="100" y1="205" x2="592.6" y2="205" stroke="currentColor"/><line x1="100.0" y1="205" x2="100.0" y2="210" stroke="currentColor"/><text x="100.0" y="223" font-size="12" text-anchor="middle">0</text><line x1="209.5" y1="205" x2="209.5" y2="210" stroke="currentColor"/><text x="209.5" y="223" font-size="12" text-anchor="middle">200</text><line x1="318.9" y1="205" x2="318.9" y2="210" stroke="currentColor"/><text x="318.9" y="223" font-size="12" text-anchor="middle">400</text><line x1="428.4" y1="205" x2="428.4" y2="210" stroke="currentColor"/><text x="428.4" y="223" font-size="12" text-anchor="middle">600</text>
+<line x1="537.9" y1="205" x2="537.9" y2="210" stroke="currentColor"/><text x="537.9" y="223" font-size="12" text-anchor="middle">800</text><rect x="100" y="232" width="12" height="12" fill="#4a7bd0" fill-opacity="0.6"/><text x="118" y="243" font-size="12">NPU op</text><rect x="250" y="232" width="12" height="12" fill="#e08a3c" fill-opacity="0.6"/><text x="268" y="243" font-size="12">CPU op</text><rect x="400" y="232" width="12" height="12" fill="#d0564a" fill-opacity="0.6"/><text x="418" y="243" font-size="12">경계: 동기화+복사+layout</text>
+</svg>
+```
+
+그림 4 — 예제 7의 실제 계산값으로 그린 타임라인. 위는 전부 NPU, 아래는 HardSwish가 CPU로 간 경우. 빨간 경계 막대가 전체 시간의 대부분을 차지한다.
+
+### 4.4 예제 8 — 그래프 수술: 미지원 op를 지원 op 조합으로 (`surgery.py`)
+
+해결책 사다리(C6 12.2절)의 첫 칸은 **등가 패턴으로 교체**하는 것이다. 두 가지를 바꾼다.
+
+```
+HardSwish(x) = x · HardSigmoid(x; α = 1/6, β = 0.5)
+             = x · max(0, min(1, x/6 + 0.5))                 ← 정의상 정확히 같다
+
+GELU(x)      = 0.5 · x · (1 + erf(x/√2))                      ← 원래 정의 (Gelu op, Erf)
+             ≈ 0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715 · x³)))   ← tanh 근사
+```
+
+말로 하면: HardSwish는 수학적으로 **완전히 같은** 식으로 바꾸고, GELU는 널리 쓰이는 **근사식**으로 바꾼다. 앞의 것은 오차 0이어야 하고, 뒤의 것은 작은 오차가 생기는데 그것이 int8 LSB보다 충분히 작은지 확인해야 한다.
+
+```python
+# 그래프 수술: 미지원 HardSwish·Gelu를 NPU가 아는 op 조합으로 바꾸고 수치가 같은지 확인
+import numpy as np, onnx
+from onnx import helper as h, TensorProto as TP, numpy_helper as nh
+from fakenpu import run_ref, FakeNPU
+rng = np.random.default_rng(1)
+c = lambda n, v: nh.from_array(np.array(v, np.float32), n)
+inits = [nh.from_array((rng.standard_normal((8, 8, 3, 3)) * 0.3).astype(np.float32), n) for n in ("w1", "w2")]
+nodes = [h.make_node("Conv", ["x", "w1"], ["a"], pads=[1] * 4), h.make_node("HardSwish", ["a"], ["b"]),
+         h.make_node("Conv", ["b", "w2"], ["d"], pads=[1] * 4), h.make_node("Gelu", ["d"], ["y"])]
+io = lambda n: h.make_tensor_value_info(n, TP.FLOAT, [1, 8, 16, 16])
+mk = lambda ns, ini: h.make_model(h.make_graph(ns, "g", [io("x")], [io("y")], ini),
+                                  opset_imports=[h.make_opsetid("", 20)], ir_version=9)
+
+def rewrite(nodes):
+    out, consts = [], [c("k_a", np.sqrt(2 / np.pi)), c("k_b", 0.044715), c("one", 1.0), c("half", 0.5)]
+    for n in nodes:
+        x, y = n.input[0], n.output[0]
+        if n.op_type == "HardSwish":     # x · HardSigmoid(x; 1/6, 0.5)  — 정확히 같은 식
+            out += [h.make_node("HardSigmoid", [x], [y + "_hs"], alpha=1 / 6, beta=0.5),
+                    h.make_node("Mul", [x, y + "_hs"], [y])]
+        elif n.op_type == "Gelu":        # tanh 근사: 0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))
+            t = lambda s: f"{y}_{s}"
+            out += [h.make_node("Mul", [x, x], [t("x2")]), h.make_node("Mul", [t("x2"), x], [t("x3")]),
+                    h.make_node("Mul", [t("x3"), "k_b"], [t("bx3")]), h.make_node("Add", [x, t("bx3")], [t("in")]),
+                    h.make_node("Mul", [t("in"), "k_a"], [t("arg")]), h.make_node("Tanh", [t("arg")], [t("th")]),
+                    h.make_node("Add", [t("th"), "one"], [t("p1")]), h.make_node("Mul", [x, t("p1")], [t("xp")]),
+                    h.make_node("Mul", [t("xp"), "half"], [y])]
+        else:
+            out.append(n)
+    return out, consts
+
+before = mk(nodes, inits)
+new_nodes, consts = rewrite(nodes)
+after = mk(new_nodes, inits + consts); onnx.checker.check_model(after)
+x = rng.standard_normal((1, 8, 16, 16)).astype(np.float32)
+if __name__ == "__main__":
+    npu = FakeNPU("2.2")
+    for tag, m in (("before", before), ("after", after)):
+        places = [npu.place(n, [1, 8, 16, 16])[0] for n in m.graph.node]
+        print(f"{tag:6s} {len(places):2d} nodes, on CPU: {[n.op_type for n, p in zip(m.graph.node, places) if p == 'CPU']}")
+    ya, yb = run_ref(before, x), run_ref(after, x)
+    lsb = np.abs(ya).max() / 127
+    print(f"max |after - before| = {np.abs(ya - yb).max():.2e}  (int8 LSB of output = {lsb:.3e})")
+    hs_only = mk(rewrite(nodes[:2])[0] + nodes[2:], inits)       # HardSwish만 바꾼 버전
+    print(f"HardSwish-only rewrite: max diff = {np.abs(run_ref(hs_only, x) - ya).max():.2e}")
+```
+
+```text
+before  4 nodes, on CPU: ['HardSwish', 'Gelu']
+after  13 nodes, on CPU: []
+max |after - before| = 4.73e-04  (int8 LSB of output = 1.043e-01)
+HardSwish-only rewrite: max diff = 0.00e+00
+```
+
+출력에서 볼 것: 수술 전에는 HardSwish와 Gelu가 CPU로 간다. 수술 후 13개 노드가 전부 NPU다. 전체 출력 차이 4.73e-04는 출력 int8 LSB(0.104)의 약 0.5%로 무시할 수 있고, HardSwish만 바꾼 버전은 차이가 **정확히 0**이다 — 오차는 전부 GELU 근사에서 왔다. "수술했다"가 아니라 **"수술했고, 이 숫자로 등가임을 보였다"**까지가 한 세트다.
+
+### 4.5 예제 9 — 진짜 백엔드 기준으로 다시 수술 (`coreml_fix.py`)
+
+예제 8의 수술은 FakeNPU 기준으로는 완벽했다. 그런데 예제 6에서 CoreML EP는 `HardSigmoid`를 지원하지 않았다. 즉 **FakeNPU용으로 고친 그래프가 다른 백엔드에서는 여전히 fallback**을 남긴다. 그래서 HardSigmoid를 한 번 더 풀어 `Mul → Add → Clip`으로 바꾸고, 이번에는 실제 CoreML EP로 배치와 수치를 둘 다 확인한다.
+
+```python
+# 진짜 백엔드 기준으로 다시 수술: HardSwish → x · Clip(x/6 + 0.5, 0, 1), 그리고 CoreML EP vs CPU EP 수치 비교
+import numpy as np, onnx, onnxruntime as ort
+from onnx import helper as h, numpy_helper as nh
+ort.set_default_logger_severity(3)                       # CoreML EP 경고 숨김
+import surgery as e                                      # before / after 모델과 rewrite 재사용
+from coreml_probe import ask_coreml
+
+def hardswish_to_clip(src):
+    m = onnx.ModelProto(); m.CopyFrom(src)
+    new = []
+    for n in m.graph.node:
+        if n.op_type == "HardSigmoid":                    # e.after 안의 HardSigmoid(alpha=1/6, beta=0.5)
+            x, y = n.input[0], n.output[0]
+            new += [h.make_node("Mul", [x, "sixth"], [y + "_m"]), h.make_node("Add", [y + "_m", "half"], [y + "_a"]),
+                    h.make_node("Clip", [y + "_a", "zero", "one"], [y])]
+        else:
+            new.append(n)
+    del m.graph.node[:]; m.graph.node.extend(new)
+    m.graph.initializer.extend([nh.from_array(np.array(v, np.float32), k) for k, v in (("sixth", 1 / 6), ("zero", 0.0))])
+    return m
+
+src = e.after
+fixed = hardswish_to_clip(src); onnx.checker.check_model(fixed)
+for tag, m in (("before", e.before), ("after (FakeNPU fix)", e.after), ("after (CoreML fix)", fixed)):
+    sup, n_cpu = ask_coreml(m)
+    print(f"{tag:20s} nodes {len(m.graph.node):2d}  EP-unsupported {sorted({o for o, s in sup if s == '0' and not o.startswith('CoreML_')})}  CPU nodes {n_cpu}")
+run = lambda m, p: ort.InferenceSession(m.SerializeToString(), providers=p).run(None, {"x": e.x})[0]
+y_cpu = run(e.before, ["CPUExecutionProvider"])
+y_cml = run(fixed, ["CoreMLExecutionProvider", "CPUExecutionProvider"])
+print(f"CoreML EP(fixed) vs CPU EP(before): max |diff| = {np.abs(y_cml - y_cpu).max():.2e}, "
+      f"cos = {float((y_cml * y_cpu).sum() / np.linalg.norm(y_cml) / np.linalg.norm(y_cpu)):.6f}")
+print(f"CPU EP(fixed)    vs CPU EP(before): max |diff| = {np.abs(run(fixed, ['CPUExecutionProvider']) - y_cpu).max():.2e}  (근사식 몫)")
+```
+
+```text
+before               nodes  4  EP-unsupported ['Gelu', 'HardSigmoid', 'HardSwish']  CPU nodes 2
+after (FakeNPU fix)  nodes 13  EP-unsupported ['HardSigmoid']  CPU nodes 1
+after (CoreML fix)   nodes 15  EP-unsupported []  CPU nodes 0
+CoreML EP(fixed) vs CPU EP(before): max |diff| = 7.66e-03, cos = 1.000000
+CPU EP(fixed)    vs CPU EP(before): max |diff| = 4.73e-04  (근사식 몫)
+```
+
+출력에서 볼 것:
+
+- 수술 전: CoreML EP가 Gelu·HardSwish(와 ORT가 풀어낸 HardSigmoid)를 못 가져가서 CPU 노드 2개.
+- FakeNPU용 수술: HardSigmoid 하나가 남아 CPU 노드 1개 — **한 백엔드의 지원표에 맞춘 수술은 다른 백엔드에서 통하지 않는다.**
+- CoreML용 수술: 15개 노드 전부 EP가 가져가고 CPU 노드 0개.
+- 수치: CPU EP에서 돌린 수술 모델과 원본의 차이는 4.73e-04(GELU 근사 몫, 예제 8과 같음). CoreML EP에서 돌리면 7.66e-03까지 커진다. 출력 크기(최대 약 13)에 비하면 상대 오차 약 6e-4로, fp16 계산에서 예상되는 크기와 비슷하다. CoreML EP가 이 연산을 실제로 어느 정밀도·어느 장치(CPU/GPU/Neural Engine)에서 돌렸는지는 이 로그만으로는 확정할 수 없다 — **추정**이다. 확정하려면 벤더(여기서는 CoreML) 쪽 프로파일 도구로 확인해야 한다. 이것이 바로 bring-up에서 "기준과 다른 이유를 설명할 수 있는가"를 묻는 순간이다.
+
+### 4.6 fallback 해결 사다리 — 싼 것부터
+
+| 순서 | 방법 | 비용 | 예 | 검증 |
+|---|---|---|---|---|
+| 1 | 컴파일러 옵션·설정 | 매우 쌈 | 특정 op를 NPU에 강제, 정밀도 옵션 | sweep 재실행 |
+| 2 | 등가 그래프 수술 | 쌈 | HardSwish → Mul·Add·Clip, Gelu → tanh 근사 | 예제 8·9처럼 수치 diff |
+| 3 | 파라미터를 지원 범위로 | 중간 (재학습 필요할 수 있음) | kernel 7 → 5, dilation → 일반 conv 조합, dynamic → static shape | 정확도 회귀 |
+| 4 | 모델 설계 변경 | 비쌈 (재학습) | LayerNorm → BatchNorm 계열, attention 변형 교체 | 전체 정확도 평가 (C7) |
+| 5 | CPU 구간을 끝으로 몰기 | 중간 | 후처리(softmax, argmax, NMS)를 그래프 끝에 모음 | 프로파일 |
+| 6 | 벤더에 op 지원 요청 | 시간 (몇 주~몇 달) | 최소 재현 모델 + 비즈니스 영향 첨부 | 새 SDK에서 sweep |
+
+---
+
+## 5. 정확도 이슈 triage — "누구 버그인가"를 증명하는 법
+
+### 5.1 직관 — 결론이 아니라 증거 사슬
+
+벤더 결과가 기준과 다르면 회의실에서 가장 먼저 나오는 말은 "벤더 버그 아니야?"다. 벤더 FAE는 반대로 "고객 모델·전처리 문제 아닌가요?"라고 묻는다. 둘 다 증거 없이 하는 말이다. Don이 RF 칩 통합에서 버스 장애를 root cause할 때 한 일 — 로직 분석기 캡처로 "이 트랜잭션에서 이 신호가 이 타이밍에 어긋났다"를 보이는 것 — 을 ML 텐서로 하는 것이 이 절이다.
+
+```svg
+<svg viewBox="0 0 680 460" xmlns="http://www.w3.org/2000/svg"><defs><marker id="f8c" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<text x="10" y="18" font-size="13">"누구 버그인가" 증명 순서 — 왼쪽 열을 위에서 아래로, 오른쪽은 결론</text><rect x="20" y="32" width="290" height="36" rx="5" fill="#d0564a" fill-opacity="0.2" stroke="#d0564a" stroke-width="2"/><text x="165" y="54" font-size="12" text-anchor="middle">벤더 출력 ≠ 기준 출력</text><line x1="165" y1="68" x2="165" y2="90" stroke="currentColor" marker-end="url(#f8c)"/><rect x="20" y="92" width="290" height="36" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="165" y="114" font-size="12" text-anchor="middle">입력 텐서가 bit 단위로 같은가?</text><line x1="165" y1="128" x2="165" y2="150" stroke="currentColor" marker-end="url(#f8c)"/><line x1="310" y1="110" x2="340" y2="110" stroke="currentColor" marker-end="url(#f8c)"/><rect x="342" y="92" width="320" height="36" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="502" y="114" font-size="12" text-anchor="middle">아니오 → 우리 쪽: 전처리·layout·dtype</text><text x="172" y="144" font-size="12">예</text><rect x="20" y="152" width="290" height="36" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="165" y="174" font-size="12" text-anchor="middle">fake-quant 기준(QDQ+ORT)과도 다른가?</text><line x1="165" y1="188" x2="165" y2="210" stroke="currentColor" marker-end="url(#f8c)"/><line x1="310" y1="170" x2="340" y2="170" stroke="currentColor" marker-end="url(#f8c)"/><rect x="342" y="152" width="320" height="36" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="502" y="174" font-size="12" text-anchor="middle">아니오 → 정상 양자화 오차: tolerance 재협의</text><text x="172" y="204" font-size="12">예</text><rect x="20" y="212" width="290" height="36" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="165" y="234" font-size="12" text-anchor="middle">레이어별 diff: 처음 무너지는 레이어 L</text><line x1="165" y1="248" x2="165" y2="270" stroke="currentColor" marker-end="url(#f8c)"/><rect x="20" y="272" width="290" height="36" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="165" y="294" font-size="12" text-anchor="middle">L에 기준 입력을 주입해도 L이 틀리나?</text><line x1="165" y1="308" x2="165" y2="330" stroke="currentColor" marker-end="url(#f8c)"/><line x1="310" y1="290" x2="340" y2="290" stroke="currentColor" marker-end="url(#f8c)"/><rect x="342" y="272" width="320" height="36" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="502" y="294" font-size="12" text-anchor="middle">아니오 → 오차 누적: 정밀도·mixed precision 검토</text><text x="172" y="324" font-size="12">예</text><rect x="20" y="332" width="290" height="36" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="165" y="354" font-size="12" text-anchor="middle">L을 단일 op 모델로 떼도 재현?</text><line x1="165" y1="368" x2="165" y2="390" stroke="currentColor" marker-end="url(#f8c)"/><line x1="310" y1="350" x2="340" y2="350" stroke="currentColor" marker-end="url(#f8c)"/>
+<rect x="342" y="332" width="320" height="36" rx="5" fill="#d0564a" fill-opacity="0.2" stroke="#d0564a" stroke-width="2"/><text x="502" y="354" font-size="12" text-anchor="middle">예 → 벤더 커널 버그: 최소 재현 + 리포트</text><text x="172" y="384" font-size="12">아니오</text><rect x="20" y="392" width="290" height="36" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="165" y="414" font-size="12" text-anchor="middle">하위 그래프(L ± 2층)로 재현</text><line x1="310" y1="410" x2="340" y2="410" stroke="currentColor" marker-end="url(#f8c)"/><rect x="342" y="392" width="320" height="36" rx="5" fill="#d0564a" fill-opacity="0.2" stroke="#d0564a" stroke-width="2"/><text x="502" y="414" font-size="12" text-anchor="middle">→ 컴파일러 버그: fusion·tiling·arena 겹침</text><text x="20" y="442" font-size="12">주황 = 우리 쪽 또는 정상 범위 · 빨강 = 벤더 쪽. 각 화살표가 리포트의 증거 한 줄이 된다.</text>
+</svg>
+```
+
+그림 5 — "누구 버그인가"를 증명하는 순서. 왼쪽 열을 위에서부터 하나씩 통과시키고, 오른쪽으로 빠지는 지점이 결론이다. 각 화살표가 리포트의 증거 한 줄이 된다.
+
+각 단계를 풀면 이렇다.
+
+1. **입력 텐서가 bit 단위로 같은가?** 가장 흔한 원인이 여기 있다. 전처리(정규화 상수, RGB/BGR, 오디오 프레임 정렬, 리샘플러), layout(NCHW/NHWC), dtype(uint8/int8, zero-point). 기준 쪽 입력 텐서와 기기에서 NPU에 들어가는 입력 버퍼를 **덤프해서 해시 비교**한다. 다르면 우리 쪽이다.
+2. **fake-quant 기준과도 다른가?** float 기준과 int8 결과가 다른 것은 정상이다. 비교 대상은 "int8이라면 나와야 할 값" — 양자화 노드(QuantizeLinear/DequantizeLinear, QDQ)를 넣은 모델을 ORT CPU로 돌린 결과다(C2, C8). 이것과 같다면 그건 버그가 아니라 양자화 오차이고, 문제는 tolerance나 양자화 방식(C2)이다.
+3. **레이어별 diff로 처음 무너지는 레이어 L을 찾는다** (C8 4절, 예제 11).
+4. **L에 기준 입력을 주입해도 L이 틀리나?** 앞 레이어들의 작은 오차가 쌓여서 L에서 드러난 것일 수 있다. L의 입력을 기준 값으로 바꿔 넣었을 때 L이 맞으면 "누적" 문제 — 정밀도(int16 activation, mixed precision) 쪽이다.
+5. **L을 단일 op 모델로 떼어도 재현되나?** 재현되면 벤더 커널 버그다. 이것이 벤더가 가장 좋아하는 형태의 리포트다(7절).
+6. **안 되면 하위 그래프(L 앞뒤 몇 층)로 재현.** 단독으로는 맞는데 그래프 안에서만 틀리면 fusion, tiling, arena 메모리 겹침, 동기화 같은 **컴파일러·런타임 문제**일 가능성이 높다.
+
+### 5.2 불일치 서명 — diff 모양으로 원인 후보를 좁힌다
+
+같은 "틀림"이라도 diff의 **모양**이 원인마다 다르다. 펌웨어로 치면, 데이터 오류가 "1비트 뒤집힘"인지 "바이트 순서 뒤바뀜"인지 "버퍼 전체 쓰레기"인지 패턴을 보고 원인을 추정하는 것과 같다.
+
+| 서명 | diff 모양 | 흔한 원인 | 다음 실험 |
+|---|---|---|---|
+| ROUNDING_1LSB | 최대 1 LSB, 평균이 0 또는 −0.5 | 반올림 방식(round-half-up/even/truncate), requant 곱셈 구현 | 평균 bias 확인. 이 정도면 tolerance로 처리할지 협의 |
+| SCALE_MISMATCH | dut ≈ a·ref (a ≠ 1)의 직선 | scale을 잘못 기록·적용, per-channel ↔ per-tensor 혼동 | 모델 파일의 scale과 런타임이 쓴 scale 비교 |
+| ZERO_POINT_OFFSET | dut ≈ ref + b | zero-point 누락·부호, uint8 ↔ int8 변환(±128) | zero-point 값 덤프 |
+| LAYOUT_PERMUTATION | 값의 집합은 같은데 위치만 다름 | NCHW ↔ NHWC, weight OIHW ↔ HWIO, stride 계산 오류 | 후보 permutation으로 되돌려 일치하는지 |
+| SATURATION | 큰 값에서만 틀리고 틀린 값이 한 경계값에 몰림 | 누산기 폭 부족, 중간 clamp, activation 범위 잘못 | 입력 크기를 키워 가며 재현 |
+| UNKNOWN (상관 0) | 무작위 | 버퍼 미초기화, 캐시 coherency, 잘못된 주소, 동기화 | 같은 입력 두 번 실행해 결정성 확인, 캐시 flush |
+
+### 5.3 예제 10 — 불일치 서명 분류기 (`classify.py`)
+
+위 표를 코드로 옮긴다. 기준과 벤더의 int8 텐서를 받아 diff 통계로 유형을 붙인다. 판정 순서가 중요하다 — 싼 검사부터, 그리고 더 구체적인 가설부터.
+
+```python
+# 불일치 서명 분류기: 기준(ref)과 벤더(dut) int8 텐서의 diff 통계로 버그 유형을 추정한다
+import numpy as np
+
+def classify(ref, dut):
+    r, t = ref.astype(np.int32).ravel(), dut.astype(np.int32).ravel()
+    d = t - r
+    if not d.any():
+        return "BIT_EXACT", ""
+    if np.abs(d).max() <= 1:
+        return "ROUNDING_1LSB", f"mismatch {np.mean(d != 0):.0%}, mean d {d.mean():+.2f}"
+    if np.array_equal(np.sort(r), np.sort(t)):
+        return "LAYOUT_PERMUTATION", "same values, different positions"
+    big = np.abs(d) > 1
+    lo, hi = t.min(), t.max()
+    if np.all((t[big] == lo) | (t[big] == hi)) and np.all(np.abs(r[big]) > np.minimum(-lo, hi)):
+        return "SATURATION", f"{big.mean():.1%} clipped at [{lo},{hi}]"
+    ok = (np.abs(r) < 127) & (np.abs(t) < 127)        # 포화된 점은 직선 맞추기에서 뺀다
+    A = np.stack([r[ok], np.ones(ok.sum())], 1).astype(float)
+    (a, b), *_ = np.linalg.lstsq(A, t[ok].astype(float), rcond=None)
+    rms = np.sqrt(np.mean((A @ [a, b] - t[ok]) ** 2))
+    if rms < 1.0:
+        kind = "ZERO_POINT_OFFSET" if abs(a - 1) < 0.01 else "SCALE_MISMATCH"
+        return kind, f"dut ≈ {a:.3f}·ref {b:+.2f} (fit rms {rms:.2f})"
+    return "UNKNOWN", f"corr {np.corrcoef(r, t)[0, 1]:+.2f}"
+
+if __name__ == "__main__":
+    rng = np.random.default_rng(7)
+    f = rng.standard_normal((1, 8, 16, 16)) * 40              # 레이어 출력 (float, LSB 단위)
+    ref = np.clip(np.round(f), -128, 127).astype(np.int8)
+    q = lambda v: np.clip(np.round(v), -128, 127).astype(np.int8)
+    bugs = {
+        "same kernel": ref.copy(),
+        "truncate vs round": np.clip(np.floor(f), -128, 127).astype(np.int8),
+        "scale 6% off": q(f / 1.06),
+        "zero-point +3": q(f + 3),
+        "NHWC read as NCHW": ref.transpose(0, 2, 3, 1).reshape(ref.shape),
+        "acc clamp at ±90": np.clip(ref, -90, 90),
+        "stale buffer": rng.integers(-128, 128, ref.shape).astype(np.int8),
+    }
+    for name, dut in bugs.items():
+        kind, info = classify(ref, dut)
+        print(f"{name:18s} -> {kind:19s} {info}")
+```
+
+```text
+same kernel        -> BIT_EXACT           
+truncate vs round  -> ROUNDING_1LSB       mismatch 50%, mean d -0.50
+scale 6% off       -> SCALE_MISMATCH      dut ≈ 0.944·ref +0.01 (fit rms 0.41)
+zero-point +3      -> ZERO_POINT_OFFSET   dut ≈ 1.000·ref +3.00 (fit rms 0.00)
+NHWC read as NCHW  -> LAYOUT_PERMUTATION  same values, different positions
+acc clamp at ±90   -> SATURATION          1.9% clipped at [-90,90]
+stale buffer       -> UNKNOWN             corr +0.01
+```
+
+출력에서 볼 것: 일부러 심은 일곱 가지 버그를 전부 맞게 분류했다. `truncate vs round`는 50%가 틀리고 평균이 정확히 −0.50 — 버림(floor)은 반올림보다 평균 반 LSB 작다. `scale 6% off`는 기울기 0.944 = 1/1.06을 되찾았다. `zero-point +3`은 절편 +3.00. `acc clamp at ±90`은 전체의 1.9%만 틀렸고 모두 ±90에 붙었다.
+
+이 분류기는 **진단 보조**다. 실제로는 두 가지 이상의 원인이 겹치기도 하고(scale + 반올림), 모양만으로 확정할 수 없는 경우도 많다. 그래서 출력은 "원인"이 아니라 "다음에 할 실험"으로 이어져야 한다(5.2절 표의 마지막 열).
+
+```svg
+<svg viewBox="0 0 660 440" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="18" font-size="13">불일치 서명: 가로축 = 기준 int8 값, 세로축 = (벤더 − 기준) 차이 [LSB]</text><text x="115.0" y="52" font-size="12" text-anchor="middle">1 LSB 반올림</text><rect x="20" y="60" width="190" height="150" fill="none" stroke="currentColor" stroke-opacity="0.4"/><line x1="20" y1="135.0" x2="210" y2="135.0" stroke="currentColor" stroke-opacity="0.3"/><circle cx="109.1" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="103.1" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="144.7" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="103.1" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="92.7" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="118.7" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="51.2" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="86.8" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="115.7" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="47.5" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="109.1" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="52.7" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="159.5" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="156.6" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="131.3" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="135.0" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="129.8" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="121.7" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="86.1" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="118.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="142.5" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="106.1" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="106.1" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="156.6" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="135.8" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="85.3" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="64.5" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="126.1" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="92.7" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="104.6" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="94.2" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="112.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="127.6" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="92.7" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="112.8" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="74.9" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="143.2" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="126.1" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="87.5" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="125.4" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="155.1" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="95.7" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="74.9" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="106.8" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="113.5" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="108.3" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="72.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="102.4" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="99.4" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="118.0" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="106.1" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="80.1" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="108.3" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="149.1" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="118.0" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="168.4" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="125.4" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="118.7" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="138.8" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="74.9" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="135.0" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="115.0" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="112.0" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="141.7" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="88.3" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="138.0" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="114.3" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="145.4" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="112.8" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="79.4" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="40.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="37.1" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="190.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="31.1" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="40.0" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="33.4" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="190.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="46.7" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="182.5" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="191.4" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><text x="24" y="74" font-size="12">±8</text><text x="330.0" y="52" font-size="12" text-anchor="middle">scale 6%</text><rect x="235" y="60" width="190" height="150" fill="none" stroke="currentColor" stroke-opacity="0.4"/><line x1="235" y1="135.0" x2="425" y2="135.0" stroke="currentColor" stroke-opacity="0.3"/><circle cx="324.1" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="318.1" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="359.7" cy="161.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="318.1" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="307.7" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="333.7" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="266.2" cy="90.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="301.8" cy="117.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="330.7" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="262.5" cy="81.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="324.1" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="267.7" cy="90.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="374.5" cy="170.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="371.6" cy="161.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="346.3" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="350.0" cy="152.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="344.8" cy="152.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="336.7" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="301.1" cy="117.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="333.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="357.5" cy="161.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="321.1" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="321.1" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="371.6" cy="161.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="350.8" cy="152.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="300.3" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="279.5" cy="99.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="341.1" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="307.7" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="319.6" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="309.2" cy="117.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="327.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="342.6" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="307.7" cy="117.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="327.8" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="289.9" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="358.2" cy="152.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="341.1" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="302.5" cy="117.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="340.4" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="370.1" cy="161.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="310.7" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="289.9" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="321.8" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="328.5" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="323.3" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="287.0" cy="99.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="317.4" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="314.4" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="333.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="321.1" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="295.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="323.3" cy="126.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="364.1" cy="161.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="333.0" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="383.4" cy="170.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="340.4" cy="143.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="333.7" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="353.8" cy="152.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="289.9" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="350.0" cy="152.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="330.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="327.0" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="356.7" cy="152.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="303.3" cy="117.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="353.0" cy="152.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="329.3" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="360.4" cy="161.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="327.8" cy="135.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="294.4" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="255.0" cy="81.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="252.1" cy="81.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="405.0" cy="179.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="246.1" cy="72.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="255.0" cy="90.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="248.4" cy="81.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="405.0" cy="179.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="261.7" cy="90.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="397.5" cy="179.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="406.4" cy="188.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><text x="239" y="74" font-size="12">±8</text><text x="545.0" y="52" font-size="12" text-anchor="middle">zero-point +3</text><rect x="450" y="60" width="190" height="150" fill="none" stroke="currentColor" stroke-opacity="0.4"/><line x1="450" y1="135.0" x2="640" y2="135.0" stroke="currentColor" stroke-opacity="0.3"/><circle cx="539.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="533.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="574.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="533.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="522.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="548.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="481.2" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="516.8" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="545.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="477.5" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="539.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="482.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="589.5" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="586.6" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="561.3" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="565.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="559.8" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="551.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="516.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="548.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="572.5" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="536.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="536.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="586.6" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="565.8" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="515.3" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="494.5" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="556.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="522.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="534.6" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="524.2" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="542.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="557.6" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="522.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="542.8" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="504.9" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="573.2" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="556.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="517.5" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="555.4" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="585.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="525.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="504.9" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="536.8" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="543.5" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="538.3" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="502.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="532.4" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="529.4" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="548.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="536.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="510.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="538.3" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="579.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="548.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="598.4" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="555.4" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="548.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="568.8" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="504.9" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="565.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="545.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="542.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="571.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="518.3" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="568.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="544.3" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="575.4" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="542.8" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="509.4" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="470.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="467.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="620.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="461.1" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="470.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="463.4" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="620.0" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="476.7" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="612.5" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="621.4" cy="108.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><text x="454" y="74" font-size="12">±8</text><text x="115.0" y="242" font-size="12" text-anchor="middle">layout 뒤바뀜</text><rect x="20" y="250" width="190" height="150" fill="none" stroke="currentColor" stroke-opacity="0.4"/><line x1="20" y1="325.0" x2="210" y2="325.0" stroke="currentColor" stroke-opacity="0.3"/><circle cx="109.1" cy="309.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="103.1" cy="324.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="144.7" cy="343.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="103.1" cy="314.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="92.7" cy="296.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="118.7" cy="312.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="51.2" cy="299.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="86.8" cy="282.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="115.7" cy="326.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="47.5" cy="285.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="109.1" cy="300.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="52.7" cy="305.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="159.5" cy="348.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="156.6" cy="341.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="131.3" cy="308.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="135.0" cy="331.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="129.8" cy="333.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="121.7" cy="328.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="86.1" cy="317.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="118.0" cy="335.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="142.5" cy="326.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="106.1" cy="309.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="106.1" cy="330.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="156.6" cy="349.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="135.8" cy="368.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="85.3" cy="319.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="64.5" cy="321.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="126.1" cy="334.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="92.7" cy="309.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="104.6" cy="332.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="94.2" cy="336.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="112.0" cy="334.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="127.6" cy="355.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="92.7" cy="306.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="112.8" cy="303.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="74.9" cy="309.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="143.2" cy="347.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="126.1" cy="340.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="87.5" cy="333.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="125.4" cy="349.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="155.1" cy="363.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="95.7" cy="328.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="74.9" cy="306.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="106.8" cy="330.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="113.5" cy="310.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="108.3" cy="326.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="72.0" cy="323.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="102.4" cy="308.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="99.4" cy="345.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="118.0" cy="319.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="106.1" cy="292.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="80.1" cy="318.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="108.3" cy="339.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="149.1" cy="331.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="118.0" cy="314.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="168.4" cy="362.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="125.4" cy="344.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="118.7" cy="316.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="138.8" cy="335.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="74.9" cy="289.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="135.0" cy="360.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="115.0" cy="335.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="112.0" cy="342.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="141.7" cy="332.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="88.3" cy="321.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="138.0" cy="327.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="114.3" cy="320.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="145.4" cy="339.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="112.8" cy="353.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="79.4" cy="290.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="40.0" cy="270.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="37.1" cy="296.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="190.0" cy="359.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="31.1" cy="267.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="40.0" cy="312.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="33.4" cy="290.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="190.0" cy="335.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="46.7" cy="293.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="182.5" cy="366.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="191.4" cy="368.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><text x="24" y="264" font-size="12">±200</text><text x="330.0" y="242" font-size="12" text-anchor="middle">포화 ±90</text><rect x="235" y="250" width="190" height="150" fill="none" stroke="currentColor" stroke-opacity="0.4"/><line x1="235" y1="325.0" x2="425" y2="325.0" stroke="currentColor" stroke-opacity="0.3"/><circle cx="324.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="318.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="359.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="318.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="307.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="333.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="266.2" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="301.8" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="330.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="262.5" cy="323.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="324.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="267.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="374.5" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="371.6" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="346.3" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="350.0" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="344.8" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="336.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="301.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="333.0" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="357.5" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="321.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="321.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="371.6" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="350.8" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="300.3" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="279.5" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="341.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="307.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="319.6" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="309.2" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="327.0" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="342.6" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="307.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="327.8" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="289.9" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="358.2" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="341.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="302.5" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="340.4" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="370.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="310.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="289.9" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="321.8" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="328.5" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="323.3" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="287.0" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="317.4" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="314.4" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="333.0" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="321.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="295.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="323.3" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="364.1" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="333.0" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="383.4" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="340.4" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="333.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="353.8" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="289.9" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="350.0" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="330.0" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="327.0" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="356.7" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="303.3" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="353.0" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="329.3" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="360.4" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="327.8" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="294.4" cy="325.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="255.0" cy="305.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="252.1" cy="298.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="405.0" cy="344.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="246.1" cy="284.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="255.0" cy="305.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="248.4" cy="289.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="405.0" cy="344.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="261.7" cy="321.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="397.5" cy="326.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="406.4" cy="348.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><text x="239" y="264" font-size="12">±40</text><text x="545.0" y="242" font-size="12" text-anchor="middle">쓰레기 값</text><rect x="450" y="250" width="190" height="150" fill="none" stroke="currentColor" stroke-opacity="0.4"/><line x1="450" y1="325.0" x2="640" y2="325.0" stroke="currentColor" stroke-opacity="0.3"/><circle cx="539.1" cy="287.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="533.1" cy="361.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="574.7" cy="300.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="533.1" cy="322.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="522.7" cy="345.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="548.7" cy="314.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="481.2" cy="279.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="516.8" cy="336.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="545.7" cy="304.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="477.5" cy="272.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="539.1" cy="333.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="482.7" cy="289.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="589.5" cy="374.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="586.6" cy="389.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="561.3" cy="323.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="565.0" cy="304.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="559.8" cy="336.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="551.7" cy="315.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="516.1" cy="344.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="548.0" cy="314.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="572.5" cy="354.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="536.1" cy="309.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="536.1" cy="350.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="586.6" cy="349.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="565.8" cy="303.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="515.3" cy="290.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="494.5" cy="310.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="556.1" cy="310.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="522.7" cy="332.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="534.6" cy="287.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="524.2" cy="326.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="542.0" cy="368.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="557.6" cy="303.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="522.7" cy="284.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="542.8" cy="303.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="504.9" cy="273.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="573.2" cy="349.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="556.1" cy="295.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="517.5" cy="277.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="555.4" cy="310.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="585.1" cy="368.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="525.7" cy="343.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="504.9" cy="304.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="536.8" cy="357.7" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="543.5" cy="368.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="538.3" cy="332.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="502.0" cy="278.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="532.4" cy="350.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="529.4" cy="280.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="548.0" cy="338.8" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="536.1" cy="297.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="510.1" cy="273.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="538.3" cy="363.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="579.1" cy="356.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="548.0" cy="360.9" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="598.4" cy="391.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="555.4" cy="353.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="548.7" cy="282.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="568.8" cy="355.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="504.9" cy="304.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="565.0" cy="310.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="545.0" cy="281.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="542.0" cy="292.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="571.7" cy="296.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="518.3" cy="348.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="568.0" cy="356.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="544.3" cy="361.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="575.4" cy="358.4" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="542.8" cy="279.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="509.4" cy="333.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="470.0" cy="254.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="467.1" cy="254.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="620.0" cy="396.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="461.1" cy="254.0" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="470.0" cy="300.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/>
+<circle cx="463.4" cy="289.1" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="620.0" cy="366.2" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="476.7" cy="302.6" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="612.5" cy="389.3" r="2" fill="#4a7bd0" fill-opacity="0.7"/><circle cx="621.4" cy="344.5" r="2" fill="#4a7bd0" fill-opacity="0.7"/><text x="454" y="264" font-size="12">±200</text><text x="10" y="412" font-size="12">평평한 띠 = 반올림 · 기울어진 계단 = scale · 위로 뜬 띠 = offset · 양 끝만 튐 = 포화</text><text x="10" y="430" font-size="12">layout과 쓰레기는 둘 다 d ≈ −ref 구름이다 → 값의 집합(정렬 후 비교)이 같은지로 가른다</text>
+</svg>
+```
+
+그림 6 — 예제 10과 같은 데이터로 그린 불일치 서명. 가로축은 기준 int8 값, 세로축은 차이. scale 오류는 기울어진 계단, offset은 위로 뜬 띠, 포화는 양 끝에서만 튄다. layout 오류와 쓰레기 값은 둘 다 d ≈ −ref 모양의 구름이라 그림만으로는 구분이 안 된다 — 그래서 분류기는 "값의 집합이 같은가"(정렬 후 비교)로 둘을 가른다.
+
+### 5.4 예제 11 — 레이어별 자동 비교로 처음 무너지는 레이어 찾기 (`layerwise.py`)
+
+이제 모델 전체에 적용한다. 9개 노드짜리 작은 CNN의 모든 중간 텐서를 그래프 출력으로 꺼내고(C8 4절과 같은 기법), "벤더" 쪽에는 converter가 `w2`의 scale을 6% 크게 기록한 버그를 심는다. 레이어마다 SQNR과 서명을 찍는다.
+
+```python
+# 레이어별 자동 비교: 모든 중간 텐서를 출력으로 꺼내 SQNR + 서명 분류로 "처음 무너지는 레이어"를 찾는다
+import copy, numpy as np, onnx
+from onnx import helper as h, TensorProto as TP, numpy_helper as nh
+from fakenpu import run_ref
+from classify import classify
+rng = np.random.default_rng(3)
+Wt = lambda n, *s: nh.from_array((rng.standard_normal(s) * 0.25).astype(np.float32), n)
+nodes = [h.make_node("Conv", ["x", "w1"], ["conv1"], pads=[1] * 4), h.make_node("Relu", ["conv1"], ["relu1"]),
+         h.make_node("Conv", ["relu1", "w2"], ["conv2"], pads=[1] * 4), h.make_node("Relu", ["conv2"], ["relu2"]),
+         h.make_node("Conv", ["relu2", "w3"], ["conv3"], pads=[1] * 4), h.make_node("Relu", ["conv3"], ["relu3"]),
+         h.make_node("GlobalAveragePool", ["relu3"], ["gap"]), h.make_node("Flatten", ["gap"], ["flat"]),
+         h.make_node("Gemm", ["flat", "wfc"], ["logits"])]
+names = [n.output[0] for n in nodes]
+vi = lambda n: h.make_tensor_value_info(n, TP.FLOAT, None if n != "x" else [1, 8, 16, 16])
+g = h.make_graph(nodes, "net", [vi("x")], [h.make_tensor_value_info(n, TP.FLOAT, None) for n in names],
+                 [Wt("w1", 8, 8, 3, 3), Wt("w2", 8, 8, 3, 3), Wt("w3", 8, 8, 3, 3), Wt("wfc", 8, 4)])
+model = h.make_model(g, opset_imports=[h.make_opsetid("", 17)], ir_version=9)
+vendor = copy.deepcopy(model)                       # 주입한 버그: converter가 w2 scale을 6% 크게 기록
+w2 = vendor.graph.initializer[1]; w2.CopyFrom(nh.from_array(nh.to_array(w2) * 1.06, "w2"))
+
+def run_all(m, x):
+    import onnxruntime as ort
+    s = ort.InferenceSession(m.SerializeToString(), providers=["CPUExecutionProvider"])
+    return dict(zip(names, s.run(names, {"x": x})))
+x = rng.standard_normal((1, 8, 16, 16)).astype(np.float32)
+R, V = run_all(model, x), run_all(vendor, x)
+print(f"{'layer':7s} {'SQNR dB':>8s}  verdict")
+for n in names:
+    s = np.abs(R[n]).max() / 127                    # 기준 calibration scale (레이어별)
+    qr, qv = [np.clip(np.round(a / s), -128, 127).astype(np.int8) for a in (R[n], V[n])]
+    err = qr.astype(float) - qv
+    sqnr = 10 * np.log10((qr.astype(float) ** 2).sum() / max((err ** 2).sum(), 1e-12))
+    kind, info = classify(qr, qv)
+    print(f"{n:7s} {sqnr:8.1f}  {kind:17s} {info}" if err.any() else f"{n:7s} {'inf':>8s}  {kind}")
+```
+
+```text
+layer    SQNR dB  verdict
+conv1        inf  BIT_EXACT
+relu1        inf  BIT_EXACT
+conv2       24.3  SCALE_MISMATCH    dut ≈ 1.060·ref +0.00 (fit rms 0.42)
+relu2       24.3  SCALE_MISMATCH    dut ≈ 1.060·ref -0.00 (fit rms 0.30)
+conv3       24.3  SCALE_MISMATCH    dut ≈ 1.060·ref +0.01 (fit rms 0.42)
+relu3       24.3  SCALE_MISMATCH    dut ≈ 1.060·ref +0.01 (fit rms 0.36)
+gap         26.5  SCALE_MISMATCH    dut ≈ 1.058·ref +0.12 (fit rms 0.25)
+flat        26.5  SCALE_MISMATCH    dut ≈ 1.058·ref +0.12 (fit rms 0.25)
+logits      27.8  SCALE_MISMATCH    dut ≈ 1.065·ref -0.09 (fit rms 0.00)
+```
+
+출력에서 볼 것:
+
+- `conv1`, `relu1`은 BIT_EXACT(SQNR 무한대). `conv2`부터 무너진다 — **처음 무너지는 레이어 = conv2**.
+- 이후 모든 레이어가 같은 서명(기울기 약 1.06)을 물려받는다. conv3 자체는 멀쩡해도 입력이 6% 커서 출력도 6% 크다. **두 번째 이후의 레이어는 원인이 아니라 피해자**다. 그래서 "가장 많이 틀린 레이어"가 아니라 "처음 틀린 레이어"를 찾는다.
+- SQNR 24.3 dB를 손으로 확인해 보자. 출력이 1.06배면 오차 = 0.06·ref이므로
+
+```
+SQNR = 10·log10( Σref² / Σ(0.06·ref)² ) = 10·log10(1 / 0.0036) = 10·log10(277.8) ≈ 24.4 dB
+```
+
+말로 하면: "6% scale 오류는 SQNR 약 24 dB"라는 감각을 외워 두면, 리포트에서 24 dB 근처의 평평한 SQNR을 보자마자 scale 계열을 의심할 수 있다(반올림 수준이면 보통 40 dB 이상이 나온다 — 정확한 값은 분포에 따라 다르다).
+
+5.1절의 4단계("기준 입력 주입")는 이 예제를 확장하면 된다: conv2의 입력 `relu1`을 기준 값으로 고정해 벤더 쪽 conv2만 돌린다. 연습문제로 남긴다(12절).
+
+---
+
+## 6. 성능 이슈 — 레이어별 프로파일, memory-bound, spill, init vs steady, thermal
+
+### 6.1 무엇을 보나
+
+벤더 프로파일러는 형식이 제각각이지만 레이어(또는 fused 구간)별로 대략 이런 숫자를 준다: cycle(또는 시간), MAC 수, DRAM 읽기·쓰기 바이트, SRAM 사용량. 이 넷만 있으면 D3의 roofline 사고로 각 레이어를 진단할 수 있다.
+
+```
+compute 하한   t_comp = MACs ÷ (MAC/cycle)
+memory 하한    t_mem  = DRAM bytes ÷ (bytes/cycle)
+실측           cycles
+활용률         util   = MACs ÷ (cycles · MAC/cycle)
+arithmetic intensity  AI = MACs ÷ DRAM bytes      (MAC/byte)
+
+t_mem > t_comp           → memory-bound  (MAC 배열이 데이터를 기다린다)
+SRAM working set > SRAM  → spill         (DRAM 왕복이 생긴다)
+cycles ≫ max(t_comp, t_mem) → 둘 다 아닌 낭비 (드라이버 오버헤드, 동기화, 잘못된 캐시 속성)
+```
+
+손계산 하나: 가상의 NPU가 512 MAC/cycle, DRAM 8 B/cycle일 때 `dw2_3x3`(MAC 294,912, DRAM 70,000 B)는 t_comp = 294912/512 = 576 cycle, t_mem = 70000/8 = 8,750 cycle. 메모리 하한이 15배 크다 — depthwise는 MAC당 데이터가 많아서 거의 항상 memory-bound다(D4, E5).
+
+### 6.2 예제 12 — 프로파일 CSV 자동 진단 (`profile_diag.py`)
+
+```python
+# 벤더 프로파일러 출력(가상 CSV)을 읽고 레이어별로 compute/memory-bound, SRAM spill을 판정한다
+import csv, io
+PROFILE = """layer,macs,dram_bytes,sram_working_set,cycles
+conv1_3x3,7077888,30000,180000,16000
+dw2_3x3,294912,70000,140000,9500
+pw3_1x1,4194304,40000,260000,8800
+dw4_3x3,147456,36000,72000,5200
+pw5_1x1,8388608,1350000,1600000,172000
+fc_head,262144,262000,262000,33500
+resize_up,0,64000,128000,26000"""
+MAC_PER_CYC, DRAM_B_PER_CYC, SRAM = 512, 8, 1_048_576      # 가상의 NPU: 512 MAC/cycle, 8 B/cycle, 1 MiB
+print(f"{'layer':10s} {'util':>5s} {'AI':>7s} {'t_comp':>7s} {'t_mem':>7s} {'actual':>7s}  diagnosis")
+for row in csv.DictReader(io.StringIO(PROFILE)):
+    macs, dram, ws, cyc = (int(row[k]) for k in ("macs", "dram_bytes", "sram_working_set", "cycles"))
+    t_comp, t_mem = macs / MAC_PER_CYC, dram / DRAM_B_PER_CYC     # 각각의 하한 (cycles)
+    util, ai = macs / (cyc * MAC_PER_CYC), macs / max(dram, 1)    # 활용률, MAC/byte
+    diag = "memory-bound" if t_mem > t_comp else "compute-bound"
+    if ws > SRAM:
+        diag += ", SRAM spill"
+    if cyc > 1.5 * max(t_comp, t_mem):
+        diag += f", {cyc / max(t_comp, t_mem):.1f}x over bound"
+    print(f"{row['layer']:10s} {util:5.0%} {ai:7.1f} {t_comp:7.0f} {t_mem:7.0f} {cyc:7d}  {diag}")
+```
+
+```text
+layer       util      AI  t_comp   t_mem  actual  diagnosis
+conv1_3x3    86%   235.9   13824    3750   16000  compute-bound
+dw2_3x3       6%     4.2     576    8750    9500  memory-bound
+pw3_1x1      93%   104.9    8192    5000    8800  compute-bound
+dw4_3x3       6%     4.1     288    4500    5200  memory-bound
+pw5_1x1      10%     6.2   16384  168750  172000  memory-bound, SRAM spill
+fc_head       2%     1.0     512   32750   33500  memory-bound
+resize_up     0%     0.0       0    8000   26000  memory-bound, 3.2x over bound
+```
+
+출력에서 볼 것:
+
+- `conv1`, `pw3`는 활용률 86~93%의 compute-bound — 건드릴 것이 별로 없다.
+- depthwise 두 개와 `fc_head`는 memory-bound, 활용률 2~6%. 레이어 fusion(앞뒤 conv와 묶어 DRAM 왕복 제거)이나 모델 구조 변경이 답이다.
+- `pw5_1x1`은 working set 1.6 MB가 SRAM 1 MiB를 넘어 **spill**이 났다. MAC이 가장 많은 레이어인데 활용률이 10%다. 벤더 컴파일러의 tiling 옵션, 채널 분할, 또는 모델 쪽에서 채널 수를 줄이는 것이 후보다.
+- `resize_up`은 memory 하한(8,000)보다 3.2배 오래 걸렸다. 연산도 메모리도 설명하지 못하는 시간 — **이런 레이어가 벤더에 물어볼 1순위**다. 비효율적인 커널, 드라이버 오버헤드, 숨은 CPU 경유일 수 있다.
+
+### 6.3 예제 13 — init 시간 vs 첫 추론 vs steady state (`timing.py`)
+
+기기에서 모델을 처음 로드할 때는 컴파일·그래프 최적화·메모리 할당·가중치 업로드가 일어난다. 그래서 **init, 첫 추론, steady state를 따로 재야** 한다. 웨어러블이라면 "앱을 켜고 첫 wake word가 인식되기까지"에는 init과 첫 추론이 다 들어간다. 아래는 실제 ORT CPU EP로 잰 것이다(D6의 하니스 원칙: warm-up 버림, 스레드 고정, 분위수).
+
+```python
+# init(컴파일) 시간 vs 첫 추론 vs steady state를 따로 잰다 — 실제 ORT CPU EP
+import time, numpy as np, onnxruntime as ort
+from onnx import helper as h, TensorProto as TP, numpy_helper as nh
+rng = np.random.default_rng(0)
+nodes, inits, cur = [], [], "x"
+for i in range(6):                                   # conv3x3 + relu 6층, 32ch, 64x64
+    inits.append(nh.from_array((rng.standard_normal((32, 32, 3, 3)) * 0.1).astype(np.float32), f"w{i}"))
+    nodes += [h.make_node("Conv", [cur, f"w{i}"], [f"c{i}"], pads=[1] * 4), h.make_node("Relu", [f"c{i}"], [f"r{i}"])]
+    cur = f"r{i}"
+vi = lambda n: h.make_tensor_value_info(n, TP.FLOAT, [1, 32, 64, 64])
+m = h.make_model(h.make_graph(nodes, "bench", [vi("x")], [vi(cur)], inits),
+                 opset_imports=[h.make_opsetid("", 17)], ir_version=9).SerializeToString()
+so = ort.SessionOptions(); so.intra_op_num_threads = 1      # 스레드 고정 = 재현성
+x = rng.standard_normal((1, 32, 64, 64)).astype(np.float32)
+t0 = time.perf_counter(); s = ort.InferenceSession(m, so, providers=["CPUExecutionProvider"])
+t1 = time.perf_counter(); s.run(None, {"x": x}); t2 = time.perf_counter()
+lat = []
+for _ in range(200):
+    a = time.perf_counter(); s.run(None, {"x": x}); lat.append((time.perf_counter() - a) * 1e3)
+lat = np.array(lat[20:])                                   # 앞 20회 warm-up 버림
+print(f"session init : {(t1 - t0) * 1e3:7.2f} ms")
+print(f"first run    : {(t2 - t1) * 1e3:7.2f} ms")
+print(f"steady p50   : {np.percentile(lat, 50):7.2f} ms   p99 {np.percentile(lat, 99):6.2f} ms   max {lat.max():6.2f} ms")
+print(f"MACs/run     : {6 * 32 * 32 * 9 * 64 * 64 / 1e6:7.1f} M")
+```
+
+같은 스크립트를 세 번 연속 실행한 실제 출력:
+
+```text
+--- run 1
+session init :    4.36 ms
+first run    :   52.57 ms
+steady p50   :   31.70 ms   p99  97.90 ms   max 128.58 ms
+MACs/run     :   226.5 M
+--- run 2
+session init :    3.86 ms
+first run    :   19.04 ms
+steady p50   :   22.21 ms   p99  55.03 ms   max  65.78 ms
+MACs/run     :   226.5 M
+--- run 3
+session init :    3.30 ms
+first run    :   18.02 ms
+steady p50   :   20.20 ms   p99  53.44 ms   max  66.90 ms
+MACs/run     :   226.5 M
+```
+
+출력에서 볼 것:
+
+- **run 1과 run 2·3의 p50이 약 1.4~1.6배 다르다.** 코드도 입력도 같다. 이 노트를 쓰는 동안 같은 Mac에서 다른 작업들이 함께 돌고 있었다 — 호스트가 공유되면 숫자가 흔들린다. 이것이 6.5절 벤치마크 규율과 device farm 격리가 필요한 이유이고, 측정 결과에 항상 **반복 횟수와 분산**을 붙여야 하는 이유다.
+- p99가 p50의 2.5~3배다. 평균만 보고하면 이 꼬리가 사라진다(D6).
+- 이 작은 모델에서 ORT CPU의 session init은 수 ms지만, 벤더 NPU 런타임은 init에서 그래프 컴파일까지 하면 수백 ms~수 초가 걸리는 경우도 있다. 그래서 많은 벤더 SDK가 **미리 컴파일한 바이너리(캐시)**를 저장해 두고 로드하는 경로를 제공한다(QNN의 context binary가 그런 역할이다 — F4). bring-up 때 "init 시간이 컴파일 때문인가, 로드 때문인가"를 분리해 재야 한다.
+
+### 6.4 예제 14 — 긴 실행에서 thermal throttling 찾기 (`thermal.py`)
+
+짧은 벤치마크는 기기가 차가울 때의 숫자다. 웨어러블은 열 여유가 작아서 몇 분만 연속 추론해도 클럭이 내려갈 수 있다. 1차 RC 열 모델로 15분짜리 latency 시계열을 시뮬레이션하고, 이동 중앙값으로 throttling 시작점을 찾는다.
+
+```python
+# 긴 실행에서 thermal throttling 찾기: 1차 열 모델로 latency 시계열을 만들고 변화점을 검출 (시뮬레이션)
+import numpy as np
+rng = np.random.default_rng(5)
+T, T_AMB, T_LIM, TAU, RISE = 35.0, 35.0, 85.0, 120.0, 70.0   # °C, 시정수 120 s, 지속 부하 시 +70 °C
+freq, lat = 1.0, []
+for t in range(900):                                    # 1초에 1번 측정, 15분
+    T += ((T_AMB + RISE * freq) - T) / TAU               # 1차 RC 열 모델 (전력 ∝ freq)
+    if T > T_LIM: freq = 0.7                             # throttle: 클럭 70%
+    elif T < T_LIM - 5: freq = 1.0                       # 5 °C hysteresis
+    lat.append(8.0 / freq + rng.normal(0, 0.15))         # 기본 8 ms
+lat = np.array(lat)
+med = np.array([np.median(lat[max(0, i - 15):i + 1]) for i in range(len(lat))])
+base = np.median(lat[:60])
+first = int(np.argmax(med > base * 1.15))
+print(f"first-minute median : {base:5.2f} ms")
+print(f"throttle detected at: t = {first} s")
+print(f"last-5-min median   : {np.median(lat[-300:]):5.2f} ms  (sustained / peak = {base / np.median(lat[-300:]):.2f})")
+print(f"time throttled      : {np.mean(lat > base * 1.15):.0%} of the run")
+```
+
+```text
+first-minute median :  7.96 ms
+throttle detected at: t = 156 s
+last-5-min median   : 11.44 ms  (sustained / peak = 0.70)
+time throttled      : 83% of the run
+```
+
+손계산으로 시점을 확인한다. 부하를 걸면 온도는 T(t) = 35 + 70·(1 − e^(−t/120))로 올라간다. 85 °C를 넘는 시점은
+
+```
+35 + 70·(1 − e^(−t/120)) = 85
+1 − e^(−t/120) = 50/70 = 5/7
+e^(−t/120) = 2/7
+t = 120 · ln(3.5) ≈ 120 · 1.2528 ≈ 150.3 s
+```
+
+출력에서 볼 것: 검출 시점 156 s는 손계산 150 s보다 몇 초 늦다 — 이동 중앙값 창(16개 표본)의 절반 정도가 지나야 중앙값이 바뀌기 때문이다. 클럭 70%에서는 정상 상태 온도가 35 + 49 = 84 °C로 hysteresis 하한(80 °C)보다 높아서 **다시 풀리지 않는다**. sustained 성능은 peak의 0.70배다.
+
+```svg
+<svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="18" font-size="13">15분 연속 추론의 latency (예제 9 시뮬레이션, 5초 간격 표본)</text><line x1="60" y1="200" x2="640" y2="200" stroke="currentColor"/><line x1="60" y1="200" x2="60" y2="40" stroke="currentColor"/><polyline points="60.0,162.4 63.2,159.7 66.4,159.2 69.7,165.2 72.9,162.1 76.1,157.5 79.3,163.9 82.6,161.2 85.8,156.5 89.0,159.9 92.2,157.1 95.4,162.5 98.7,157.5 101.9,161.2 105.1,160.5 108.3,163.9 111.6,162.9 114.8,158.2 118.0,160.2 121.2,160.6 124.4,162.2 127.7,154.3 130.9,162.8 134.1,163.0 137.3,154.4 140.6,163.1 143.8,157.8 147.0,154.5 150.2,161.0 153.4,164.4 156.7,91.3 159.9,93.8 163.1,90.8 166.3,91.1 169.6,88.7 172.8,93.1 176.0,91.6 179.2,83.4 182.4,88.3 185.7,85.8 188.9,93.0 192.1,94.5 195.3,86.1 198.6,91.9 201.8,83.1 205.0,87.9 208.2,94.9 211.4,93.1 214.7,91.6 217.9,95.3 221.1,96.3 224.3,90.6 227.6,89.0 230.8,89.8 234.0,91.4 237.2,91.8 240.4,94.8 243.7,98.5 246.9,94.3 250.1,91.0 253.3,94.6 256.6,90.0 259.8,92.1 263.0,93.6 266.2,85.4 269.4,89.8 272.7,93.5 275.9,95.4 279.1,88.0 282.3,92.6 285.6,90.8 288.8,92.6 292.0,89.9 295.2,92.0 298.4,90.4 301.7,95.7 304.9,90.6 308.1,92.6 311.3,89.2 314.6,93.5 317.8,86.6 321.0,89.9 324.2,88.7 327.4,88.1 330.7,89.3 333.9,90.8 337.1,95.0 340.3,89.3 343.6,89.8 346.8,95.0 350.0,89.1 353.2,92.9 356.4,93.2 359.7,91.2 362.9,90.7 366.1,89.9 369.3,90.3 372.6,89.5 375.8,96.2 379.0,88.9 382.2,94.1 385.4,90.7 388.7,90.2 391.9,95.8 395.1,91.6 398.3,90.6 401.6,90.7 404.8,94.9 408.0,97.4 411.2,92.7 414.4,91.3 417.7,93.3 420.9,92.5 424.1,87.6 427.3,91.7 430.6,86.8 433.8,98.5 437.0,94.7 440.2,94.1 443.4,89.1 446.7,85.4 449.9,94.8 453.1,86.9 456.3,84.1 459.6,89.1 462.8,85.3 466.0,89.1 469.2,86.5 472.4,91.1 475.7,89.2 478.9,90.1 482.1,91.3 485.3,90.9 488.6,97.6 491.8,93.2 495.0,89.5 498.2,95.8 501.4,94.1 504.7,89.2 507.9,92.0 511.1,87.7 514.3,90.1 517.6,90.9 520.8,87.9 524.0,90.6 527.2,94.3 530.4,94.3 533.7,92.2 536.9,90.5 540.1,91.1 543.3,94.1 546.6,90.9 549.8,88.9 553.0,91.2 556.2,87.6 559.4,94.9 562.7,94.8 565.9,86.2 569.1,96.1 572.3,88.4 575.6,90.4 578.8,88.6 582.0,89.1 585.2,88.4 588.4,88.6 591.7,90.2 594.9,90.9 598.1,93.2 601.3,90.3 604.6,90.1 607.8,92.7 611.0,92.4 614.2,92.9 617.4,94.3 620.7,90.5 623.9,92.6 627.1,95.9 630.3,90.3 633.6,89.6 636.8,89.2" fill="none" stroke="#4a7bd0" stroke-width="1.5"/><text x="54" y="204.0" font-size="12" text-anchor="end">6</text><text x="54" y="164.0" font-size="12" text-anchor="end">8</text><text x="54" y="124.0" font-size="12" text-anchor="end">10</text><text x="54" y="84.0" font-size="12" text-anchor="end">12</text><text x="54" y="44.0" font-size="12" text-anchor="end">14</text><text x="60.0" y="216" font-size="12" text-anchor="middle">0분</text><text x="176.0" y="216" font-size="12" text-anchor="middle">3분</text><text x="292.0" y="216" font-size="12" text-anchor="middle">6분</text><text x="408.0" y="216" font-size="12" text-anchor="middle">9분</text><text x="524.0" y="216" font-size="12" text-anchor="middle">12분</text>
+<text x="640.0" y="216" font-size="12" text-anchor="middle">15분</text><line x1="160.5" y1="200" x2="160.5" y2="40" stroke="#d0564a" stroke-dasharray="4 3"/><text x="166.5" y="54" font-size="12">156 s: throttle 검출</text><text x="70" y="80" font-size="12">peak ≈ 8 ms</text><text x="460" y="82.0" font-size="12">sustained ≈ 11.4 ms</text><text x="10" y="240" font-size="12">처음 1~2분만 재면 "8 ms"라고 보고하게 된다. 제품이 실제로 보는 숫자는 오른쪽이다.</text>
+</svg>
+```
+
+그림 7 — 예제 14의 latency 시계열(5초 간격 표본). 처음 2분 반만 재면 8 ms, 제품이 실제로 겪는 숫자는 11.4 ms다.
+
+### 6.5 벤치마크 규율 (D6·M2 요약)
+
+스레드·affinity·DVFS 설정을 고정하고 기록한다 · warm-up을 버리고 반복 횟수와 p50·p90·p99·max를 함께 보고한다 · init / 첫 추론 / steady / 15분 sustained를 따로 잰다 · 입력은 실제 분포로(0 입력은 zero-skip 하드웨어에서 비현실적으로 빠를 수 있다) · end-to-end와 모델 단독을 둘 다 잰다 · 측정마다 2.4절의 fingerprint를 붙인다.
+
+---
+
+## 7. 벤더와 일하기 — 최소 재현 리포트, FAE, NDA, 우회 vs 수정
+
+### 7.1 좋은 버그 리포트의 원칙
+
+Don이 SSD 시절 NAND·IP 벤더와, Apple에서 칩 벤더와 이슈를 주고받으며 배운 원칙은 ML에서도 그대로다.
+
+- **벤더가 자기 책상에서 5분 안에 재현할 수 있어야 한다.** 우리 제품 모델 전체가 아니라 단일 op 또는 작은 하위 그래프, 고정된 입력, 실행 명령 한 줄.
+- **기대값과 실제값을 숫자로.** "정확도가 떨어집니다"가 아니라 "이 텐서의 이 위치에서 기대 37, 실제 −91, SQNR 24.3 dB".
+- **우리가 배제한 것을 적는다.** 입력 bit-exact 확인, fake-quant 기준과 비교, 단일 op 재현 여부 — 그림 5의 사슬. 벤더 엔지니어가 같은 질문을 되묻는 왕복을 없앤다.
+- **비즈니스 영향을 한 줄로.** "이 op 때문에 latency가 6배, 출시 일정의 critical path" — 우선순위는 이것으로 정해진다.
+
+### 7.2 리포트 템플릿
+
+```text
+제목: [SDK 2.2.0][HTP/NPU] Depthwise Conv 5x5 stride 2 output mismatch (203 LSB) — regression from 2.1.0
+
+1. 환경 (fingerprint 8812827ca7ef)
+   SDK / converter / compiler : 2.2.0 / 2.2.0 / 2.2.0   (2.1.0에서는 정상)
+   runtime / NPU firmware     : 2.2.0 / 0x0201_0007
+   OS·BSP / 보드 / 실리콘      : <BSP 빌드> / <EVB rev> / B0
+   호스트 컨테이너 digest       : sha256:<...>
+
+2. 재현 모델 (첨부: dw5x5_s2.onnx, 1 node, weight 랜덤 seed 0)
+   Conv group=8, kernel 5x5, stride 2, pads [2,2,2,2], input 1x8x16x16, int8 per-tensor
+
+3. 입력 (첨부: input.npy, 생성 seed와 값 범위 <min, max>를 함께 적는다)
+
+4. 기대 vs 실제
+   기준: ONNX Runtime 1.19.2 CPU EP (fp32) → int8 per-tensor 양자화
+   2.1.0: max err 0.50 LSB (정상) / 2.2.0: max err 203.85 LSB
+   서명: 출력이 공간적으로 한쪽으로 밀린 패턴 — padding 해석 의심
+   (근거: pads를 [1,1,3,3]으로 바꾼 기준 출력과 일치)
+
+5. 우리가 배제한 것
+   - 입력 버퍼 bit-exact (해시 일치)
+   - 같은 모델, kernel 3x3 또는 stride 1이면 정상 (sweep 결과 첨부)
+   - 단일 op로 재현됨 → 그래프 맥락과 무관
+
+6. 영향
+   gesture 모델 top-1 agreement 0.986 → 0.644, SDK 2.2 rollout 차단 중
+
+7. 요청
+   원인 확인과 수정 버전 일정. 그 전까지 쓸 수 있는 컴파일러 옵션 우회가 있는지
+
+첨부: dw5x5_s2.onnx, input.npy, expected.npy, actual_2.1.npy, actual_2.2.npy,
+      sweep_2.1_vs_2.2.csv, manifest.json, 실행 명령·로그
+```
+
+(위의 수치는 이 노트의 FakeNPU 실험 결과를 넣은 예시다. 4번의 padding 근거는 우리가 버그를 직접 심었기 때문에 알 수 있는 것이고, 실무에서는 "후보 해석으로 기준을 다시 계산해 일치하는지"를 확인해서 얻는다.) 4번의 "padding 해석 의심"처럼 **가설은 적되 단정하지 않는다.** 벤더 내부 구조는 벤더가 더 잘 안다.
+
+### 7.3 FAE escalation과 이슈 생애주기
+
+| 단계 | 누구 | 무엇 | Don의 경험 |
+|---|---|---|---|
+| 1 | 벤더 지원 포털·티켓 | 재현 리포트 제출, 티켓 번호 확보 | 벤더 이슈 트래커 사용 |
+| 2 | FAE (field application engineer) | 재현 확인, 우회 제안, 내부 엔지니어링으로 전달 | FAE와 주간 sync |
+| 3 | 벤더 엔지니어링 | root cause, 수정, 내부 회귀 | 원인 공유 요청 |
+| 4 | escalation | 일정이 출시 critical path면 계정 담당·관리자 라인으로 | 프로그램 매니저와 우선순위 조율 |
+| 5 | 수정 배포 | 패치/새 SDK, 릴리스 노트 항목 | 2.6절 표에 기록 |
+| 6 | 검증·종료 | 우리 sweep·회귀 gate에서 확인 후 닫음 | "벤더가 고쳤다"가 아니라 "우리가 확인했다"로 닫음 |
+
+우리 쪽 추적은 Jira가 편하다. 티켓 하나에 이런 필드를 둔다: 벤더 티켓 번호, fingerprint, 영향 모델 목록, 서명 유형(5.2절), 우회 여부, 차단 중인 마일스톤, 재검증 결과. 회귀 gate(8절)가 FAIL을 내면 이 필드를 채운 티켓을 자동으로 여는 것까지 가면 좋다.
+
+### 7.4 NDA와 공유 제약
+
+- **제품 모델·데이터는 대개 벤더에 보낼 수 없다.** 그래서 단일 op 재현, 랜덤 weight(seed 기록), 합성 입력이 중요하다. 재현이 우리 모델의 특정 weight 분포에서만 나면, weight 통계(범위·분포)만 맞춘 합성 weight로 재현을 시도한다.
+- 레이어 이름이 제품 기능을 드러내면 이름을 일반화한다(`gesture_head_fc` → `fc_3`).
+- 반대로 벤더 문서·SDK·errata는 NDA 대상인 경우가 많다. 사내 위키에 옮길 때 접근 범위를 지키고, 공개 저장소·공개 이슈 트래커에 벤더 내부 정보를 올리지 않는다.
+- 여러 벤더를 동시에 평가할 때(M1) 한 벤더의 성능 숫자나 내부 정보를 다른 벤더에 넘기지 않는다.
+
+### 7.5 우회(workaround) vs 수정(fix) — 언제 기다리고 언제 돌아가나
+
+| 상황 | 판단 | 이유 |
+|---|---|---|
+| 우회가 등가 수술(예제 8)로 가능, 오차 0 | 우회하고 벤더 수정은 병행 | 일정 위험 없음. 수정되면 되돌릴지 결정 |
+| 우회가 근사(GELU tanh 등), 정확도 영향 측정됨 | 정확도 회귀가 tolerance 안이면 우회 | 측정값을 근거로 남긴다 |
+| 우회하려면 재학습 필요 | 벤더 수정 일정과 비교 | 재학습 비용 vs 대기 비용 |
+| 벤더가 "다음 분기"라고 함, 출시가 먼저 | 우회 + escalation | critical path |
+| 원인 불명(UNKNOWN 서명, 비결정적) | 우회 금지, 원인 규명 우선 | 메모리 손상류는 다른 곳에서 다시 터진다 |
+
+마지막 줄이 중요하다. SSD 펌웨어에서 원인 모를 데이터 손상을 "재시도로 우회"하면 안 되는 것과 같다. **비결정적 불일치는 우회 대상이 아니다.**
+
+---
+
+## 8. 회귀·CI — SDK 버전이 바뀌어도 제품을 지킨다
+
+### 8.1 설계 스케치
+
+```svg
+<svg viewBox="0 0 680 230" xmlns="http://www.w3.org/2000/svg"><defs><marker id="f8d" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<text x="10" y="18" font-size="13">모델 × SDK 회귀 CI — 트리거 두 개, 같은 파이프라인</text><rect x="14" y="40" width="140" height="46" rx="5" fill="#888" fill-opacity="0.2" stroke="#888" stroke-width="2"/><text x="84" y="60" font-size="12" text-anchor="middle">트리거</text><text x="84" y="76" font-size="12" text-anchor="middle">모델 커밋 / SDK drop</text><line x1="154" y1="63" x2="180" y2="63" stroke="currentColor" marker-end="url(#f8d)"/><rect x="182" y="40" width="140" height="46" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="252" y="60" font-size="12" text-anchor="middle">고정 컨테이너</text><text x="252" y="76" font-size="12" text-anchor="middle">convert+compile</text><line x1="322" y1="63" x2="348" y2="63" stroke="currentColor" marker-end="url(#f8d)"/><rect x="350" y="40" width="140" height="46" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0" stroke-width="2"/><text x="420" y="60" font-size="12" text-anchor="middle">device farm</text><text x="420" y="76" font-size="12" text-anchor="middle">N대 × 모델 zoo</text><line x1="490" y1="63" x2="516" y2="63" stroke="currentColor" marker-end="url(#f8d)"/><rect x="518" y="40" width="140" height="46" rx="5" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c" stroke-width="2"/><text x="588" y="60" font-size="12" text-anchor="middle">비교</text><text x="588" y="76" font-size="12" text-anchor="middle">golden·tolerance</text><line x1="588" y1="86" x2="588" y2="120" stroke="currentColor" marker-end="url(#f8d)"/><rect x="518" y="122" width="140" height="46" rx="5" fill="#3f9a6b" fill-opacity="0.2" stroke="#3f9a6b" stroke-width="2"/><text x="588" y="142" font-size="12" text-anchor="middle">gate</text><text x="588" y="158" font-size="12" text-anchor="middle">PASS → 승격</text><line x1="518" y1="145" x2="470" y2="145" stroke="currentColor" marker-end="url(#f8d)"/><rect x="330" y="122" width="140" height="46" rx="5" fill="#d0564a" fill-opacity="0.2" stroke="#d0564a" stroke-width="2"/><text x="400" y="142" font-size="12" text-anchor="middle">FAIL</text><text x="400" y="158" font-size="12" text-anchor="middle">Jira 자동 티켓</text><line x1="330" y1="145" x2="290" y2="145" stroke="currentColor" marker-end="url(#f8d)"/><rect x="150" y="122" width="140" height="46" rx="5" fill="#888" fill-opacity="0.2" stroke="#888" stroke-width="2"/><text x="220" y="142" font-size="12" text-anchor="middle">대시보드</text><text x="220" y="158" font-size="12" text-anchor="middle">모델×SDK 추세</text><text x="14" y="196" font-size="12">artifact 보관: 컴파일된 바이너리 · 레이어별 출력 · 프로파일 · manifest — 나중에 bisect할 재료</text><text x="14" y="216" font-size="12">SDK drop 트리거는 "모델은 그대로, 툴체인만 바뀜", 모델 커밋 트리거는 그 반대 — 원인 축이 분리된다</text>
+</svg>
+```
+
+그림 8 — 모델 × SDK 회귀 CI. 트리거가 둘(모델 커밋, 새 SDK drop)이지만 파이프라인은 같다. SDK drop 트리거는 "모델은 그대로, 툴체인만 바뀜"이라 원인 축이 깔끔하게 분리된다.
+
+구성 요소:
+
+- **golden 출력**: 모델마다 고정 입력 N개에 대한 기준 출력(ORT fp32와 fake-quant 둘 다). 입력·출력 파일의 해시를 저장한다(C8 5절의 golden vector).
+- **tolerance 파일**: 모델별 SQNR 하한, top-1 agreement 하한, latency 회귀 허용치. 기본값 + 모델별 override.
+- **device farm**: 실제 기기 여러 대. Qualcomm AI Hub처럼 클라우드에서 실기기 컴파일·프로파일·추론 작업을 돌려 주는 서비스도 있고(F4), 사내 랙에 기기를 꽂아 두고 USB/adb로 돌리는 방식도 있다. 기기 간 편차를 보려면 같은 모델을 최소 2~3대에서 돌린다.
+- **artifact 보관**: 컴파일된 바이너리, 레이어별 출력, 프로파일, manifest. 회귀가 발견되면 이것으로 SDK 버전 사이를 bisect한다.
+- **대시보드**: 모델 × SDK 버전 격자에 SQNR·latency 추세. 한 칸이 빨개지면 Jira 티켓 링크.
+
+### 8.2 예제 15 — 회귀 gate (`gate.py`)
+
+같은 model zoo를 SDK 2.1(기준선)과 2.2(후보)로 돌린 결과를 golden과 비교해 gate한다. 결과 데이터는 시뮬레이션이다(모델별 노이즈 크기로 SDK 품질을 흉내). 핵심 설계는 **기준선에서도 이미 실패하던 항목은 "기존 이슈(KNOWN)"로 분리하고, 새로 생긴 실패만 막는 것**이다.
+
+```python
+# 회귀 게이트: 같은 model zoo를 SDK 2.1(기준선)과 2.2(후보)로 돌린 결과를 golden과 비교해 PASS/FAIL
+import json, sys, numpy as np
+rng = np.random.default_rng(11)
+TOL = json.loads("""{"default": {"min_sqnr_db": 25, "min_top1_agree": 0.98, "max_lat_regress": 0.10},
+                     "kws_dscnn": {"min_sqnr_db": 30}}""")          # tolerance 파일 (모델별 override)
+ZOO = {  # 모델: (SDK 2.1 노이즈, SDK 2.2 노이즈, 2.1 p50 ms, 2.2 p50 ms) — 시뮬레이션 설정
+    "kws_dscnn":   (0.02, 0.02, 1.9, 1.7),
+    "gesture_cnn": (0.02, 0.45, 3.2, 2.9),   # dwconv5x5 s2 회귀가 걸린 모델
+    "wear_detect": (0.02, 0.02, 0.4, 0.5),   # 2.2에서 25% 느려짐
+    "vad_gru":     (0.05, 0.04, 2.5, 2.4)}
+
+def metrics(golden, out):
+    sqnr = 10 * np.log10((golden ** 2).sum() / ((golden - out) ** 2).sum())
+    return sqnr, np.mean(golden.argmax(1) == out.argmax(1))
+
+fail = False
+print(f"{'model':12s} {'SQNR 2.1/2.2':>13s} {'top1 agree':>11s} {'p50 ms':>10s}  verdict")
+for name, (n21, n22, l21, l22) in ZOO.items():
+    tol = {**TOL["default"], **TOL.get(name, {})}
+    golden = rng.standard_normal((500, 10)).astype(np.float32)      # ORT fp32 golden logits
+    s21, a21 = metrics(golden, golden + rng.normal(0, n21, golden.shape))
+    s22, a22 = metrics(golden, golden + rng.normal(0, n22, golden.shape))
+    checks = [(f"SQNR<{tol['min_sqnr_db']}", s21 < tol["min_sqnr_db"], s22 < tol["min_sqnr_db"]),
+              (f"agree<{tol['min_top1_agree']}", a21 < tol["min_top1_agree"], a22 < tol["min_top1_agree"]),
+              (f"latency +{l22 / l21 - 1:.0%}", False, l22 > l21 * (1 + tol["max_lat_regress"]))]
+    new = [w for w, old_bad, bad in checks if bad and not old_bad]      # 새로 생긴 실패만 막는다
+    known = [w for w, old_bad, bad in checks if bad and old_bad]        # 2.1부터 있던 실패 = 기존 이슈
+    fail |= bool(new)
+    verdict = "FAIL: " + ", ".join(new) if new else ("KNOWN: " + ", ".join(known) if known else "PASS")
+    print(f"{name:12s} {s21:5.1f}/{s22:5.1f} {a21:5.3f}/{a22:5.3f} {l21:4.1f}/{l22:4.1f}  {verdict}")
+print("GATE:", "BLOCK SDK 2.2 rollout" if fail else "promote SDK 2.2")
+sys.exit(1 if fail else 0)
+```
+
+```text
+model         SQNR 2.1/2.2  top1 agree     p50 ms  verdict
+kws_dscnn     33.9/ 34.0 0.984/0.988  1.9/ 1.7  PASS
+gesture_cnn   33.9/  6.9 0.986/0.644  3.2/ 2.9  FAIL: SQNR<25, agree<0.98
+wear_detect   34.0/ 34.0 0.990/0.988  0.4/ 0.5  FAIL: latency +25%
+vad_gru       26.1/ 28.0 0.956/0.954  2.5/ 2.4  KNOWN: agree<0.98
+GATE: BLOCK SDK 2.2 rollout
+exit=1
+```
+
+출력에서 볼 것:
+
+- `kws_dscnn`: 더 엄격한 override(SQNR 30 dB)도 통과.
+- `gesture_cnn`: SQNR 33.9 → 6.9 dB. 노이즈 σ = 0.45를 표준편차 1인 logit에 더했으니 SQNR = 10·log10(1/0.45²) = 10·log10(4.94) ≈ 6.9 dB로 손계산과 같다. 3절에서 발견한 `dwconv5x5 s2` 회귀가 모델 수준에서는 이렇게 보인다.
+- `wear_detect`: 정확도는 같지만 latency가 25% 나빠졌다. **성능 회귀도 회귀다.**
+- `vad_gru`: top-1 agreement가 2.1에서도 0.956으로 기준 미달 — KNOWN으로 분리해 gate를 막지 않는다. 대신 이 항목은 별도 티켓으로 추적한다. 이 구분이 없으면 gate가 늘 빨간색이 되고, 사람들은 빨간색을 무시하기 시작한다.
+- 종료 코드 1 — CI 시스템은 이 숫자 하나로 rollout을 막는다.
+
+### 8.3 운영 팁
+
+- **nightly**: 최신 SDK 후보 × 전체 zoo. **PR마다**: 바뀐 모델 × 고정 SDK, 작은 입력 세트.
+- tolerance는 처음부터 빡빡하게 정하지 말고, 기준선의 run-to-run 분포를 몇 주 모은 뒤 정한다(예제 13처럼 latency는 흔들린다). latency gate는 p50 하나보다 "여러 번 실행의 중앙값"으로 판정한다.
+- **op sweep도 CI에 넣는다.** 모델 zoo가 안 쓰는 op라도 다음 모델이 쓸 수 있다. sweep 결과 CSV의 버전 간 diff(그림 3의 "버전에 따라 바뀜" 열)가 SDK 릴리스 노트보다 정확한 변경 기록이다.
+- 결과에는 항상 fingerprint를 붙이고, 대시보드는 fingerprint로 묶는다.
+
+---
+
+## 9. 플랫폼을 고르기 전에 평가할 것 (M1 포인터)
+
+이 노트의 도구는 bring-up뿐 아니라 **칩·플랫폼 선정 평가**에도 그대로 쓰인다(M1 평가 기준표, M2 벤치마크 방법론). 2~4주의 평가 기간에 이렇게 쓴다.
+
+| 평가 항목 | 무엇을 재나 | 이 노트의 도구 | 나쁜 신호 |
+|---|---|---|---|
+| op 커버리지 | 우리 model zoo의 op·파라미터 조합 중 NPU 실행 비율, partition 수 | op sweep(예제 4), EP 로그 파싱(예제 6) | 백본 중간 fallback, 핵심 op(LayerNorm, attention) 미지원 |
+| 정확도 | fake-quant 기준 대비 SQNR, 실데이터 정확도 | 레이어별 비교(예제 11), 서명 분류(예제 10) | 설명 안 되는 MISMATCH, 비결정성 |
+| 성능 | p50/p99, init, sustained, 활용률 | 프로파일 진단(예제 12), 하니스(예제 13·14) | 데이터시트 대비 큰 격차, 프로파일러 부재 |
+| 전력 | 추론당 mJ, idle·sleep 전력, wake-up 시간 | (D7, K 모듈) | 저전력 상태 진입 불가, retention 미지원 |
+| 툴 성숙도 | 문서 품질, 프로파일러, 시뮬레이터, 에러 메시지, 컨테이너·CLI 지원 | 버전 매트릭스(2절) | GUI 전용 도구, 재현 불가능한 설치 |
+| 벤더 대응 | 첫 리포트 응답 시간, 수정 주기, FAE 기술 깊이 | 리포트 템플릿(7절) | 단일 op 재현에도 응답 없음 |
+| 로드맵·버전 정책 | 릴리스 주기, 하위 호환 정책, 지원 기간 | 릴리스 노트 추적(2.6절) | 매 릴리스 바이너리 호환 깨짐 |
+
+말로 하면: **평가 기간에 버그 리포트를 하나 일부러 보내 보라.** 벤더 응답의 속도와 질이 양산 2년 동안의 경험을 가장 잘 예측한다. 이것은 Don이 벤더와 일하며 이미 알고 있는 사실이고, 면접에서 말할 가치가 있다.
+
+---
+
+## 10. 임베디드 관점에서 다시 보기 — bring-up 결과를 제품 펌웨어에 심기
+
+bring-up에서 만든 지식은 결국 제품 펌웨어 코드와 설정으로 굳어야 한다. 웨어러블(예를 들어 Hark 같은 기기라면 — 추정)의 펌웨어에 들어가야 할 것들이다.
+
+- **부팅 시 버전 handshake** (예제 2): 모델 헤더의 SDK 버전·최소 firmware 버전·CRC를 검사하고, 불일치면 명확한 에러 코드와 함께 모델 기능을 끄고 텔레메트리로 보고한다. "조용히 이상한 결과를 내는 것"보다 "기능이 꺼졌다고 알리는 것"이 훨씬 낫다.
+- **모델과 런타임은 한 OTA 단위로**: 모델만 새 SDK로 컴파일해서 보내고 런타임은 옛것이면 예제 2의 `model built by newer SDK`가 필드에서 터진다. OTA 패키지 manifest에 둘을 묶고, 롤백도 묶어서 한다.
+- **양산 빌드에서는 fallback을 허용하지 않는다**: bring-up 때는 fallback이 편하지만, 제품에서는 예상 못 한 CPU 경로가 latency·전력 예산을 깬다. ORT라면 `session.disable_cpu_ep_fallback`, 다른 런타임이라면 컴파일 단계에서 "CPU op 0개"를 빌드 조건으로 둔다.
+- **NPU 에러 경로**: 타임아웃, hang 시 register dump, 재시도 정책, 실패 시 CPU 경량 모델로의 의도된 degrade. E5 8.2절의 "타임아웃과 에러 경로를 먼저" 원칙.
+- **필드 텔레메트리**: 추론 latency 분포(히스토그램 몇 칸), NPU 에러 카운터, thermal throttling 횟수, 모델·SDK fingerprint. SSD 펌웨어의 SMART·telemetry 로그와 같은 역할이다. 양산 후 "특정 SDK 조합에서만 p99가 나쁘다"를 찾아 주는 것은 이 데이터다.
+- **결정성 테스트**: 같은 입력을 1,000번 넣어 출력 해시가 항상 같은지(C8). 다르면 동기화·캐시·메모리 문제이고, 이것은 정확도 tolerance로 덮을 수 있는 문제가 아니다.
+
+```
+펌웨어 안의 bring-up 흔적 (개념도)
+
+ boot ─► read NPU fw version ─► load model header ─► compat check ──fail──► disable feature + telemetry
+                                                         │ OK
+                                                         ▼
+                                         self-test: golden input → output hash == 저장값?
+                                                         │ OK                 └─fail──► degrade to CPU model
+                                                         ▼
+                                       run loop: latency histogram, error counters, thermal events
+```
+
+---
+
+## 11. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| 첫날 제품 모델을 통째로 넣음 | "안 돌아요", 원인 후보 수십 개 | 변수를 한 번에 다 바꿈 | 벤더 샘플 → 단일 op → 작은 그래프 → 제품 모델 순서 |
+| 버전을 기록하지 않음 | 지난주 결과가 재현이 안 됨 | 누군가 SDK·firmware·컨테이너를 갱신 | manifest + fingerprint를 모든 결과에 첨부 (예제 1) |
+| 벤더 op 목록만 믿음 | 목록에 있는 op인데 CPU로 가거나 값이 틀림 | 파라미터 조합·모드별로 지원이 다름 | op sweep (예제 4) |
+| float 기준과 int8 결과를 직접 비교 | "전부 틀렸다"는 결론 | 양자화 오차를 버그로 오해 | fake-quant 기준과 비교, LSB 단위로 판정 |
+| 가장 많이 틀린 레이어를 원인으로 지목 | 엉뚱한 커널을 의심 | 오차는 뒤로 전파된다 | 처음 무너지는 레이어 + 기준 입력 주입 (예제 11) |
+| 한 백엔드 기준으로 그래프 수술 | 다른 SDK·EP에서 여전히 fallback | 지원표가 백엔드마다 다름 | 목표 백엔드의 배치 로그로 확인 (예제 9) |
+| fallback 개수만 셈 | 하나 고쳤는데 latency 그대로 | 위치·텐서 크기·경계 비용 무시 | partition 타임라인으로 비용 계산 (예제 7) |
+| 차가운 기기에서 30초만 측정 | 필드 latency가 보고값의 1.4배 | thermal throttling | 15분 sustained 측정 (예제 14) |
+| 비결정적 불일치를 tolerance로 덮음 | 필드에서 간헐적 오동작 | 캐시 coherency·메모리 겹침·동기화 | 같은 입력 반복 실행 해시 비교, 우회 금지 |
+| 회귀 gate가 기존 실패까지 막음 | 늘 빨간 대시보드, 아무도 안 봄 | 기준선 실패와 새 실패를 구분 안 함 | KNOWN 분리, 별도 티켓 (예제 15) |
+
+---
+
+## 12. 면접에서 이렇게 말한다
+
+이 주제는 Don의 경력이 가장 직접적으로 증거가 되는 질문들이다. 답의 뼈대는 "**구조화된 절차 + Don의 실제 사례 한 개 + 숫자로 닫기**"다. 아래 STAR 훅의 대괄호 부분은 Don이 실제 사례로 채워 말한다(사실을 지어내지 않는다).
+
+**Q.** "Tell me how you would bring up a new NPU SDK."
+
+**A.** 단계와 통과 기준으로 답한다. 벤더 샘플을 수정 없이 돌려 기준점 확보 → 버전 매트릭스 고정(컨테이너 + manifest) → 단일 conv bit-exact → op sweep으로 우리 model zoo 기준 지원표 작성 → 레이어별 정확도 → 프로파일(init/steady/sustained) → 전력 → 제품 통합 → 회귀 CI. 그리고 "이건 제가 SSD 컨트롤러 IP를 FPGA pre-silicon에서 살리던 순서와 같다"로 연결한다.
+
+> "I treat it like silicon bring-up, with an exit criterion for every stage. First I run the vendor's sample unmodified to get a baseline and pin every version — SDK, converter, runtime, NPU firmware, BSP — into a manifest and a container. Then a single conv layer, bit-exact against a reference. Then an automated op sweep: single-op models across the parameter combinations our model zoo actually uses, classified as on-NPU and matching, CPU fallback, or mismatch. Only then the real model, with layer-wise comparison, then profiling for init, steady-state and sustained thermal performance, then integration and a regression gate in CI. It's the same discipline I used bringing up new controller IP on FPGA before silicon at Solidigm: [one concrete example — what IP, what the first-light test was]."
+
+**Q.** "The vendor's runtime gives different results — how do you prove whose bug it is?"
+
+**A.** 증거 사슬로 답한다(그림 5). 입력 bit-exact 확인 → fake-quant 기준과 비교(양자화 오차인지) → 레이어별 diff로 처음 무너지는 레이어 → 기준 입력 주입 → 단일 op 재현. 단일 op로 재현되면 벤더 커널, 하위 그래프에서만 나면 컴파일러, 입력이 다르면 우리 쪽. diff 서명(scale은 직선, offset은 띠, layout은 값 집합 동일)으로 가설을 좁힌다.
+
+> "I don't argue about it, I bisect it. First I hash the input buffer the NPU actually sees against the reference input — preprocessing and layout are the most common culprits and those are on us. Then I compare against a fake-quantized reference, not the float model, so normal quantization error isn't mistaken for a bug. Then I dump every intermediate tensor and find the first layer that diverges, feed it the reference input to rule out accumulated error, and try to reproduce it as a single-op model. The shape of the diff narrows it down: a constant ratio means a scale problem, a constant offset means zero-point, same values in different positions means layout. If it reproduces as a single op, it goes to the vendor as a five-minute repro. That's how I root-caused interface failures on new RF silicon at Apple: [the bus failure example — what the evidence chain was]."
+
+**Q.** "How do you track op coverage?"
+
+**A.** 벤더 목록이 아니라 우리 도구로. 우리 model zoo에서 실제 쓰는 op·파라미터 조합을 추출하고, 단일 op 모델을 자동 생성해 SDK 버전마다 돌린다. 결과는 CSV + heatmap, 버전 간 diff가 진짜 변경 기록이다. 배치 결과(어떤 노드가 어느 백엔드로)를 로그에서 파싱해 CI에서 diff하고, 양산 빌드에서는 fallback 0을 조건으로 둔다.
+
+> "I build the coverage table myself rather than trusting the vendor's op list, because the failures are almost always in ops that are on the list — a specific kernel size, a resize coordinate mode, a softmax axis. I extract the op and attribute combinations from our model zoo, auto-generate single-op models, and run them against a reference on every SDK release. Each cell is on-accelerator-and-matching, CPU fallback with the reason, or mismatch. The diff between SDK versions is more reliable than the release notes — in my own practice sweep a 'performance improvement' release introduced a new depthwise mismatch. I also parse the runtime's placement logs in CI so a new fallback fails the build."
+
+**Q.** "How do you protect the product from SDK regressions?"
+
+**A.** 회귀 CI. golden 출력 + 모델별 tolerance 파일 + device farm nightly + gate. 정확도(SQNR, top-1 agreement)와 성능(latency) 둘 다 gate하고, 기준선에서 이미 실패하던 항목은 KNOWN으로 분리해 새 회귀만 막는다. artifact를 보관해 SDK 버전 사이를 bisect한다. 펌웨어 쪽에서는 부팅 시 버전 handshake와 모델·런타임 묶음 OTA.
+
+> "Three layers. In CI, every SDK drop runs our whole model zoo on real devices against golden outputs with per-model tolerances — SQNR, top-1 agreement against the reference, and latency — and the gate only blocks on new failures, so known issues are tracked separately and the dashboard stays meaningful. We keep the compiled binaries and per-layer outputs so we can bisect between versions. In the product, the model and runtime ship as one OTA unit, and the firmware checks version compatibility at boot and refuses to run a mismatched model rather than producing silently wrong results. It's the same thinking as nightly regression and field telemetry on enterprise SSD firmware: [an example of a regression your nightly caught before it shipped]."
+
+**Q.** "Describe working with a silicon vendor on a blocking issue."
+
+**A.** STAR. Situation(출시 critical path의 벤더 이슈) → Task(원인 규명과 일정 보호) → Action(최소 재현, 증거 사슬, FAE 주간 sync, 병행 우회, escalation) → Result(수정 버전·일정·배운 것). 핵심 메시지: 벤더를 적이 아니라 공동 디버깅 파트너로 대하고, 재현 가능성을 내 쪽 책임으로 둔다.
+
+> "Situation: [on the RF chipset program at Apple / SSD controller at Solidigm], we hit [the blocking issue] late in NPI, and it was on the critical path to [milestone]. My task was to get it root-caused without slipping the schedule. I reduced it to a minimal reproduction the vendor could run on their own bench, attached the evidence of what we had already ruled out, and set up a weekly sync with their FAE so questions didn't sit in email. In parallel I built a workaround so we weren't blocked waiting, and I escalated through the program manager when the fix date didn't match our milestone. Result: [the fix, the date, and what changed in the process afterwards]. The lesson I carry into ML accelerators is that the quality of the repro determines how fast the vendor moves."
+
+**Q.** "When do you work around a vendor bug instead of waiting for a fix?"
+
+**A.** 우회가 등가이고 측정으로 증명되면 우회하고 수정은 병행. 근사 우회는 정확도 영향을 재고 tolerance 안일 때만. 재학습이 필요한 우회는 벤더 일정과 비용 비교. 비결정적 문제는 절대 우회하지 않는다 — 메모리 손상류는 다른 곳에서 다시 터진다.
+
+> "If there's a provably equivalent workaround — say, rewriting an unsupported activation into supported elementwise ops with zero numerical difference — I take it immediately and keep the vendor ticket open. If the workaround is an approximation, I measure the accuracy impact and only ship it within tolerance. But I never work around a non-deterministic mismatch; that's usually memory corruption or a synchronization bug, and hiding it just moves the failure somewhere harder to debug."
+
+**Q.** "You have two weeks to evaluate a new NPU platform. What do you do?"
+
+**A.** M1 평가표를 이 노트의 도구로 채운다. 1주차: 버전 고정, op sweep을 우리 zoo로, 대표 모델 2~3개 end-to-end 정확도. 2주차: 성능(init/steady/sustained), 전력, 그리고 일부러 버그 리포트 하나를 보내 벤더 응답 품질을 본다.
+
+> "Week one: pin the environment, run our op sweep and two or three representative models end to end — coverage, partition count and accuracy against a fake-quant reference. Week two: init, steady-state and fifteen-minute sustained latency, energy per inference, and the tooling — is there a profiler, can it run headless in CI. And I deliberately file one well-formed bug report, because how the vendor responds during evaluation predicts the next two years of production support better than any datasheet."
+
+---
+
+## 13. 직접 해보기
+
+1. **손계산**: 경계 비용 모델(4.2절)에서 텐서가 32,000 B일 때 경계 한 번의 비용은? 정답: 60 + 16 + 31.25·1.5 = 60 + 16 + 46.875 ≈ 122.9 µs (예제 7 출력의 두 번째 경계와 같다).
+2. **손계산**: 출력이 기준의 0.97배가 되는 scale 오류의 SQNR은 대략 몇 dB인가? 정답: 10·log10(1/0.03²) = 10·log10(1111) ≈ 30.5 dB.
+3. **코드 — sweep 확장**: `sweep.py`의 `CASES`에 `conv3x3 s1` 채널 3개짜리(입력 1×3×16×16)와 `avgpool 3x3 count_include_pad`를 추가하고, `FakeNPU.place()`에 "채널 수가 8의 배수가 아니면 CPU" 규칙을 넣어 표가 어떻게 바뀌는지 확인하라. 힌트: `single_op`의 `x_shape`와 weight shape를 같이 바꿔야 한다.
+4. **코드 — 기준 입력 주입**: `layerwise.py`를 확장해, `conv2`만 들어 있는 모델에 기준 쪽 `relu1` 값을 넣었을 때 벤더 `conv2`가 여전히 틀리는지 확인하라. 정답: 여전히 SCALE_MISMATCH(기울기 약 1.06) — 버그가 conv2 자체(w2)에 있으므로 주입해도 틀린다. 반대로 conv3에 기준 `relu2`를 주입하면 BIT_EXACT가 나와 "conv3는 피해자"임이 증명된다.
+5. **코드 — 분류기 약점 찾기**: `classify.py`에 "scale 6% 오류 + truncation"을 동시에 넣은 텐서를 주면 무엇으로 분류되는가? 분류 결과와 fit rms를 보고, 이 경우를 구분하려면 어떤 통계를 추가해야 할지 적어 보라. 정답: `SCALE_MISMATCH`, `dut ≈ 0.943·ref -0.49` — 기울기는 scale 오류, 절편 −0.49는 truncation의 평균 −0.5 LSB bias다. 절편을 따로 보고(|b| ≈ 0.5)하는 규칙을 추가하면 두 원인을 함께 표시할 수 있다.
+6. **설계**: 여러분의 가상 제품(웨어러블 KWS + 제스처)에 대해 2.2절 버전 매트릭스 표와 8.2절 tolerance 파일을 직접 채우고, `gate.py`에 "fallback 노드 수가 늘면 FAIL" 규칙을 추가하라. 정답 예: 각 모델의 CPU 노드 수를 결과에 넣고 `cpu22 > cpu21`이면 새 실패로 처리.
+
+---
+
+## 14. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| bring-up | 새 하드웨어·소프트웨어를 처음 살려 동작을 확인하는 과정 | 이 노트에서는 EVB부터 회귀 CI까지의 단계 전체 |
+| EVB | evaluation board, 벤더 평가 보드 | 제품 보드 전에 칩과 SDK를 시험하는 보드 |
+| SDK | software development kit | converter·컴파일러·런타임·도구 묶음 |
+| 버전 매트릭스 | 결과에 영향을 주는 모든 구성 요소의 버전 조합 | 모델부터 실리콘 stepping까지 8층 |
+| manifest / fingerprint | 버전 조합 기록 / 그 기록의 해시 | 결과마다 붙여 같은 조합끼리 비교 |
+| op coverage | 가속기가 실행할 수 있는 op·파라미터 조합의 범위 | 벤더 목록이 아니라 sweep으로 측정 |
+| op sweep | 단일 op 모델을 조합별로 자동 생성해 비교하는 테스트 | 지원/fallback/불일치 표를 만든다 |
+| execution provider (EP) | ONNX Runtime의 백엔드 플러그인 | CPU EP, CoreML EP, QNN EP 등 |
+| GetCapability | EP가 자기가 실행할 노드를 고르는 ORT 단계 | 로그로 배치 결과를 볼 수 있다 |
+| CPU fallback | 가속기가 못 하는 op를 CPU가 실행 | 경계 비용 때문에 느려진다 |
+| partition | 같은 장치에서 연속 실행되는 그래프 구간 | fallback 하나가 구간을 쪼갠다 |
+| 경계 비용 | 장치 전환 시 동기화·복사·layout 변환 비용 | fallback 비용의 대부분 |
+| 그래프 수술 | 그래프의 노드 패턴을 등가 패턴으로 교체 | 미지원 op 제거, 수치 검증 필수 |
+| fake-quant 기준 | 양자화 노드를 넣고 float로 돌린 기준 | "int8이면 나와야 할 값" |
+| LSB | least significant bit, 양자화 한 칸 | 오차를 scale 단위로 재는 눈금 |
+| SQNR | signal-to-quantization-noise ratio | 10·log10(신호 에너지 / 오차 에너지), dB |
+| 불일치 서명 | diff 통계의 특징적 모양 | 반올림·scale·offset·layout·포화를 가른다 |
+| 처음 무너지는 레이어 | 레이어별 비교에서 처음 기준을 벗어나는 레이어 | 이후 레이어는 대개 피해자 |
+| memory-bound | 메모리 대역폭이 시간을 결정 | depthwise, FC가 흔함 |
+| SRAM spill | working set이 온칩 SRAM을 넘어 DRAM 왕복 | 활용률 급락의 원인 |
+| sustained 성능 | 열 평형 상태에서의 성능 | peak보다 낮다 |
+| FAE | field application engineer | 고객 지원을 맡는 벤더 엔지니어 |
+| errata | 알려진 하드웨어·소프트웨어 결함 목록 | 항목마다 영향 여부를 닫는다 |
+| golden 출력 | 고정 입력에 대한 기준 출력 | 회귀 비교의 기준 |
+| tolerance 파일 | 모델별 합격 기준 | SQNR·agreement·latency 하한 |
+| regression gate | 새 버전을 받아들일지 자동 판정 | 새 실패만 막는다 |
+| device farm | 실기기 여러 대를 자동으로 돌리는 설비 | 사내 랙 또는 클라우드 서비스 |
+
+---
+
+## 15. 요약 & 체크리스트
+
+새 가속기·SDK bring-up은 Don이 해 온 실리콘 bring-up과 같은 절차다 — 단계마다 통과 기준을 두고, 변수를 하나씩 늘리고, 모든 결과에 버전 조합을 붙인다. ML 특유의 부분은 세 가지였다. 첫째, op 단위로 지원이 갈리므로 벤더 목록 대신 **단일 op sweep**으로 지원/fallback/불일치 표를 직접 만든다. 둘째, fallback은 **경계 비용** 때문에 위치와 텐서 크기가 개수보다 중요하고, 그래프 수술로 없애되 **목표 백엔드의 배치 로그와 수치 diff로 증명**한다. 셋째, 양자화 때문에 정답이 퍼지므로 **fake-quant 기준, 레이어별 diff, 불일치 서명**으로 "누구 버그인가"를 증거 사슬로 보이고, 그 사슬을 그대로 벤더 리포트로 보낸다. 마지막으로 이 모든 것을 **회귀 gate**로 자동화해 SDK가 바뀌어도 제품을 지킨다.
+
+- [ ] bring-up 10단계를 순서대로 말하고, 각 단계의 통과 기준과 Don의 경험 사례를 하나씩 댈 수 있다
+- [ ] 버전 매트릭스 8층을 나열하고, 각 층을 어디서 고정하고 기기에서 어떻게 읽는지 말할 수 있다
+- [ ] 단일 op ONNX 모델을 `onnx.helper`로 만들어 기준과 비교하는 sweep을 직접 짤 수 있다
+- [ ] Resize의 half_pixel/asymmetric/align_corners 좌표를 손으로 계산할 수 있다
+- [ ] fallback 경계 비용을 손으로 계산하고, 위치에 따라 비용이 왜 다른지 설명할 수 있다
+- [ ] 미지원 op를 등가 패턴으로 바꾸고, 목표 백엔드의 배치와 수치 차이로 검증할 수 있다
+- [ ] 반올림·scale·offset·layout·포화 서명을 diff 모양으로 구분하고, scale 오류의 SQNR을 손으로 계산할 수 있다
+- [ ] 레이어별 비교에서 "처음 무너지는 레이어"와 "피해자 레이어"를 구분할 수 있다
+- [ ] 프로파일 숫자로 compute-bound·memory-bound·spill·설명 안 되는 시간을 판정할 수 있다
+- [ ] 최소 재현 버그 리포트와 KNOWN을 분리하는 회귀 gate를 설계할 수 있다
+
+---
+
+## 참고 자료
+
+- ONNX Runtime 문서 — Execution Providers, 세션 옵션, 로깅: [onnxruntime.ai/docs](https://onnxruntime.ai/docs/)
+- ONNX 연산자 명세 (Resize의 `coordinate_transformation_mode`, HardSwish, Gelu 정의): [onnx.ai/onnx/operators](https://onnx.ai/onnx/operators/)
+- ONNX Python API (`onnx.helper`, `onnx.checker`, `numpy_helper`): [onnx.ai/onnx/api](https://onnx.ai/onnx/api/)
+- Netron — 모델 그래프 뷰어: [netron.app](https://netron.app)
+- LiteRT (TensorFlow Lite) 문서 — delegate, 양자화: [ai.google.dev/edge/litert](https://ai.google.dev/edge/litert)
+- Arm Ethos-U Vela 컴파일러: [pypi.org/project/ethos-u-vela](https://pypi.org/project/ethos-u-vela/)
+- Qualcomm AI Hub — 실기기 컴파일·프로파일 서비스: [aihub.qualcomm.com](https://aihub.qualcomm.com/)
+- pip 해시 고정 설치 (`--require-hashes`): [pip.pypa.io — Secure installs](https://pip.pypa.io/en/stable/topics/secure-installs/)
+- MLPerf Tiny 벤치마크 (MLCommons): [github.com/mlcommons/tiny](https://github.com/mlcommons/tiny)
+- 이 노트와 직결되는 다른 노트: C6(그래프 최적화·fallback), C8(검증), E5(NPU bring-up), D6(벤치마크), M1(평가 기준표)

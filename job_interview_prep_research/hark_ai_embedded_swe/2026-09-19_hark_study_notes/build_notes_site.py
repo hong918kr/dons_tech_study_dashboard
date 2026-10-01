@@ -531,6 +531,7 @@ def hub_page(colls, totals):
     <div class="stat"><b>{totals["minutes"]}분</b><span>총 읽기 시간</span></div>
     <div class="stat"><b>{totals["sections"]}</b><span>절</span></div>
   </div>
+  <p class="lead"><a href="plan/P00_index.html"><b>→ 준비 인덱스 (여기서 시작)</b></a> — 오늘 할 것 · 급할 때 · 주제별 입구</p>
   <p class="lead"><a href="coding.html"><b>→ Coding Session (1st tech interview prep)</b></a> — 문제 5개 · 해설 · 답안 · <code>make</code> 채점</p>
   <div class="tools"><input id="q" placeholder="노트 검색 — 제목·요약·소제목 (예: NVIC, I2C, tickless, MCUboot, BLE)"></div>
   {"".join(tracks)}
@@ -600,18 +601,50 @@ def collect():
 
 # ------------------------------------------------------- 코딩 세션 (C 파일 + 인덱스)
 CODING = Path(__file__).resolve().parent / "coding"
-CODE_TITLES = {
-    "01_spsc_ring_isr": "ISR-safe SPSC 링버퍼",
-    "02_i2s_pingpong": "I2S DMA 핑퐁 버퍼",
-    "03_reg_bitfield": "레지스터 비트필드와 RMW",
-    "04_mem_pool": "고정 크기 memory pool",
-    "05_uart_parser": "UART 패킷 파서 FSM",
-}
+LEVELS = [
+    ("드릴 (tech session 우선순위)", range(1, 6)),
+    ("L0 비트·정수 기초", range(6, 10)),
+    ("L1 메모리·포인터", range(10, 14)),
+    ("L2 임베디드 관용구", range(14, 18)),
+    ("L3 임베디드 C++", range(18, 22)),
+]
+LEVEL_NOTE = {"L0": "L0_bit_basics", "L1": "L1_memory_pointers",
+              "L2": "L2_embedded_idioms", "L3": "L3_embedded_cpp"}
+
+
+def code_titles():
+    """coding/problems/NN_*.md 의 H1 에서 제목을 읽어온다."""
+    out = {}
+    d = Path(__file__).resolve().parent / "coding" / "problems"
+    for f in sorted(d.glob("[0-9][0-9]_*.md")):
+        title = f.stem
+        for line in f.read_text(encoding="utf-8").splitlines():
+            m = HEAD.match(line)
+            if m and len(m.group(1)) == 1:
+                title = re.sub(r"^\d+\.\s*", "", strip_md(m.group(2)))
+                title = title.split(" — ")[0].split(" - ")[0].strip()
+                break
+        out[f.stem] = title
+    return out
+
+
+CODE_TITLES = {}
 
 
 def code_page(src, stem, kind):
     """C 소스 하나 → 읽기용 HTML."""
     label = "모범답안" if kind == "solution" else "뼈대 (TODO)"
+    lang = "cpp" if src.suffix == ".cpp" else "c"
+    drill = stem
+    if not (OUT / "drills" / f"{stem}.html").exists():
+        try:
+            n = int(stem[:2])
+        except ValueError:
+            n = 0
+        for lvl, rng in LEVELS:
+            if n in rng and lvl[:2] in LEVEL_NOTE:
+                drill = LEVEL_NOTE[lvl[:2]]
+                break
     title = CODE_TITLES.get(stem, stem)
     text = src.read_text(encoding="utf-8")
     n = len(text.splitlines())
@@ -623,31 +656,44 @@ def code_page(src, stem, kind):
 </div></div>
 <div class="wrap"><main>
   <div class="hero">
-    <div class="kicker">coding/{esc(kind)}s/{esc(stem)}.c</div>
+    <div class="kicker">coding/{esc(kind)}s/{esc(stem)}{esc(src.suffix)}</div>
     <h1>{esc(title)} — {esc(label)}</h1>
     <div class="meta"><span>{n}줄</span><span>C11</span><span>make {'sol' if kind == 'solution' else 'run'} N={esc(stem[:2])}</span></div>
   </div>
-  <figure class="code"><span class="lang">c</span><pre><code>{esc(text)}</code></pre></figure>
+  <figure class="code"><span class="lang">{lang}</span><pre><code>{esc(text)}</code></pre></figure>
   <div class="nav">
     <a class="prev" href="../problems/{esc(stem)}.html"><span class="dir">← 문제</span><span class="nm">{esc(title)}</span></a>
-    <a class="next" href="../drills/{esc(stem)}.html"><span class="dir">해설 →</span><span class="nm">{esc(title)}</span></a>
+    <a class="next" href="../drills/{esc(drill)}.html"><span class="dir">해설 →</span><span class="nm">{esc(title)}</span></a>
   </div>
 </main></div>"""
     return shell(f"{title} — {label}", body, JS_PAGE)
 
 
 def coding_index():
-    rows = []
-    for stem, title in sorted(CODE_TITLES.items()):
-        cells = [f"<b>{esc(stem[:2])}</b>", esc(title),
-                 f'<a href="problems/{stem}.html">문제</a>',
-                 f'<a href="drills/{stem}.html">해설 노트</a>',
-                 f'<a href="code/{stem}_solution.html">모범답안</a>',
-                 f'<a href="code/{stem}_starter.html">뼈대</a>',
-                 f"<code>make run N={stem[:2]}</code>"]
-        rows.append("<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
-    head = "".join(f"<th>{h}</th>" for h in
-                   ["N", "주제", "문제", "해설", "답안", "뼈대", "채점"])
+    blocks = []
+    for lvl_name, rng in LEVELS:
+        rows = []
+        for n in rng:
+            stem = next((k for k in CODE_TITLES if k.startswith(f"{n:02d}_")), None)
+            if not stem:
+                continue
+            title = CODE_TITLES[stem]
+            sol = OUT / "code" / f"{stem}_solution.html"
+            sta = OUT / "code" / f"{stem}_starter.html"
+            cells = [f"<b>{n:02d}</b>", esc(title),
+                     f'<a href="problems/{stem}.html">문제</a>',
+                     (f'<a href="drills/{stem}.html">해설</a>' if (OUT / "drills" / f"{stem}.html").exists()
+                      else (f'<a href="drills/{LEVEL_NOTE[lvl_name[:2]]}.html">{lvl_name[:2]} 노트</a>'
+                            if lvl_name[:2] in LEVEL_NOTE else "—")),
+                     (f'<a href="code/{stem}_solution.html">답안</a>' if sol.exists() else "—"),
+                     (f'<a href="code/{stem}_starter.html">뼈대</a>' if sta.exists() else "—"),
+                     f"<code>make run N={n:02d}</code>"]
+            rows.append("<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
+        if rows:
+            head = "".join(f"<th>{h}</th>" for h in
+                           ["N", "주제", "문제", "해설", "답안", "뼈대", "채점"])
+            blocks.append(f'<h2>{esc(lvl_name)}</h2>'
+                          f'<table><thead><tr>{head}</tr></thead><tbody>{"".join(rows)}</tbody></table>')
     body = f"""
 <div class="top"><div class="top-in">
   <a class="home" href="index.html">← 노트 목록</a>
@@ -655,15 +701,13 @@ def coding_index():
   <button class="btn" id="theme">◐</button>
 </div></div>
 <div class="hub">
-  <h1>Coding Session — 1차 Tech Interview 대비</h1>
-  <p class="lead">문제를 먼저 손으로 푼다. 막히면 해설을 연다. 답안은 마지막에 본다.
-     터미널에서 <code>coding/</code> 폴더에 들어가 <code>make run N=01</code>로 채점한다.</p>
+  <h1>Coding Session — 문제 · 해설 · 답안</h1>
+  <p class="lead">01~05는 면접 직전 드릴, 06~21은 기초부터 쌓는 레퍼런스 뱅크(비트 → 메모리 → 임베디드 관용구 → 임베디드 C++).
+     문제를 먼저 손으로 풀고, 막히면 해설을 연다. 터미널에서 <code>coding/</code> 폴더에 들어가 <code>make run N=01</code>로 채점한다.</p>
   <p class="lead"><a href="problems/00_how_to_use.html"><b>→ 사용법 먼저 읽기</b></a> ·
-     <a href="plan/P01_tech_session_master_plan.html">마스터 플랜</a> ·
+     <a href="plan/P06_7day_plan.html">7일 계획</a> ·
      <a href="study/S01_c_coding_drills.html">추가 드릴 14문제 (S01)</a></p>
-  <table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>
-  <h2>순서</h2>
-  <div class="sub">시간이 없으면 01 → 03 → 02 세 개만. 하루 한 문제면 5일.</div>
+  {"".join(blocks)}
 </div>"""
     return shell("Coding Session — 1st Tech Interview Prep", body, JS_HUB)
 
@@ -671,11 +715,14 @@ def coding_index():
 def build_coding():
     if not CODING.exists():
         return 0
+    global CODE_TITLES
+    CODE_TITLES = code_titles()
     out = OUT / "code"
     out.mkdir(parents=True, exist_ok=True)
     n = 0
     for kind in ("solution", "starter"):
-        for src in sorted((CODING / f"{kind}s").glob("*.c")):
+        srcs = sorted(list((CODING / f"{kind}s").glob("*.c")) + list((CODING / f"{kind}s").glob("*.cpp")))
+        for src in srcs:
             (out / f"{src.stem}_{kind}.html").write_text(
                 code_page(src, src.stem, kind), encoding="utf-8")
             n += 1

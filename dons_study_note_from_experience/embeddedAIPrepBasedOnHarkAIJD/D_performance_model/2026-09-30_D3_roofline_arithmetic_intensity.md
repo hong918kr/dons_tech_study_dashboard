@@ -1,0 +1,1423 @@
+# D3. Roofline과 Arithmetic Intensity — compute-bound vs memory-bound를 한 장으로
+
+> **이 노트를 다 읽으면**: 어떤 커널이든 ops와 bytes를 손으로 세서 arithmetic intensity를 구하고 compute-bound인지 memory-bound인지 판정할 수 있다 · 칩 스펙(peak, 대역폭)만으로 roofline과 ridge point를 그리고 "이 레이어는 최대 몇 GOPS"를 말할 수 있다 · 이 Mac에서 대역폭·연산 천장을 직접 재서 실측 roofline에 커널을 찍고 벗어난 점을 해석할 수 있다 · batching, 양자화, fusion, tiling, SRAM 상주가 roofline 위의 점을 어디로 옮기는지 설명하고 실리콘 선정에 쓸 수 있다
+> **JD 연결**: "Understanding of performance characteristics of different model families … memory bandwidth" · "Evaluate and select silicon (CPU, DSP, NPU, GPU)" · study_prep_list **D3** 행: ops/byte, compute-bound vs memory-bound, roofline 그래프 그리기, ridge point ("HW 선정·병목 설명의 공용어") · 연결: D1(FLOPs·MACs), D2(메모리), D4(모델 계열별 특성), D5(LLM prefill/decode), D7(에너지), E7(메모리 시스템), K4(열), M1(평가 기준표), M4(데이터시트 해석)
+> **Don 기준 난이도**: 대역폭·캐시·DMA·PCIe 병목 감각은 이미 강하다 / 새로 배울 것은 그 감각을 "ops/byte 하나의 숫자와 로그-로그 그래프 한 장"으로 정리해 ML 커널에 적용하는 방법과, ML 쪽에서 쓰는 단위(FLOP, MAC, TOPS)의 관례
+> **선행 노트**: A1(행렬곱·루프 순서·BLAS), B2 6.5절(DS conv의 intensity), B3 11.2절(GEMV vs GEMM), C4 4절(CSR vs dense 실측), C6 4절(op fusion), C7 2.4절(같은 MAC, 5~515 GMAC/s). 병렬 작성 중인 D1(MAC 공식)·D2(메모리 계산)·D4·D5·D6·D7과 함께 읽으면 좋다
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+Don이 SSD 컨트롤러 펌웨어를 튜닝할 때 늘 묻던 질문이 있다. "지금 이 워크로드는 **NAND 채널 대역폭**에 막혀 있나, 아니면 **컨트롤러 코어(또는 ECC 엔진) 처리량**에 막혀 있나?" 앞쪽이면 코어를 더 빨리 돌려 봐야 소용이 없고, 뒤쪽이면 채널을 늘려 봐야 소용이 없다. 둘 중 **느린 쪽이 전체 속도**를 정한다.
+
+신경망 추론도 똑같다. 모든 레이어는 결국 두 가지 일을 한다.
+
+- **데이터를 옮긴다**: weight와 activation을 DRAM(또는 flash, SRAM)에서 연산기까지 가져오고, 결과를 다시 써 넣는다. 속도의 단위는 **bytes/s (대역폭)**.
+- **계산한다**: 가져온 데이터로 곱하고 더한다. 속도의 단위는 **ops/s (연산 처리량)**.
+
+**Roofline 모델**은 이 두 한계를 그래프 한 장에 겹쳐 그린 것이다. 가로축은 "바이트 하나를 옮길 때마다 연산을 몇 번 하나"(arithmetic intensity), 세로축은 "초당 몇 연산을 낼 수 있나"(attainable performance)다. 이 한 장으로 다음을 바로 말할 수 있다.
+
+- 이 레이어는 **compute-bound**(연산기가 병목)인가, **memory-bound**(대역폭이 병목)인가?
+- 이 칩에서 이 레이어가 낼 수 있는 **최대 속도**는? 지금 실측은 그 상한의 몇 %인가?
+- 양자화·batching·fusion 중 **무엇이 효과가 있고 무엇이 소용없는가**?
+- 새 칩을 고를 때 **TOPS를 더 살까, 대역폭을 더 살까**?
+
+그래서 study_prep_list에서 D3는 "HW 선정·병목 설명의 공용어"라고 적혀 있다. 모델 팀, 컴파일러 팀, 실리콘 팀이 서로 다른 말을 쓰다가도 roofline 그림 앞에서는 같은 말을 한다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 300">
+<text x="20" y="22" font-size="14">연산 엔진은 "파이프(대역폭)로 먹이를 받는 공장"이다</text> <rect x="20" y="60" width="150" height="120" rx="6" fill="none" stroke="currentColor" stroke-width="2"/> <text x="95" y="90" font-size="13" text-anchor="middle">DRAM / flash</text> <text x="95" y="112" font-size="12" text-anchor="middle">weight · activation</text> <text x="95" y="130" font-size="12" text-anchor="middle">용량 크다, 느리다</text>
+<rect x="190" y="100" width="170" height="40" rx="4" fill="none" stroke="#e08a3c" stroke-width="3"/> <text x="275" y="125" font-size="12" text-anchor="middle">버스 · DMA · PCIe: BW (B/s)</text> <line x1="170" y1="120" x2="190" y2="120" stroke="#e08a3c" stroke-width="3"/> <line x1="360" y1="120" x2="372" y2="120" stroke="#e08a3c" stroke-width="3"/> <polygon points="380,120 370,113 370,127" fill="#e08a3c"/> <rect x="380" y="60" width="130" height="120" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/> <text x="445" y="90" font-size="13" text-anchor="middle">on-chip SRAM</text>
+<text x="445" y="112" font-size="12" text-anchor="middle">cache · TCM</text> <text x="445" y="130" font-size="12" text-anchor="middle">작다, 빠르다</text> <rect x="530" y="60" width="115" height="120" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/> <text x="587" y="90" font-size="13" text-anchor="middle">MAC 배열</text> <text x="587" y="112" font-size="12" text-anchor="middle">SIMD · NPU</text>
+<text x="587" y="130" font-size="12" text-anchor="middle">peak P (ops/s)</text> <line x1="510" y1="120" x2="527" y2="120" stroke="currentColor" stroke-width="2"/> <polygon points="530,120 522,115 522,125" fill="currentColor"/> <text x="20" y="215" font-size="13">시간 ≈ max( 옮길 바이트 ÷ BW ,  할 연산 ÷ P )</text> <text x="20" y="240" font-size="12">바이트당 연산이 적으면(I가 작으면) 파이프가 병목 → memory-bound</text>
+<text x="20" y="262" font-size="12">바이트당 연산이 많으면(I가 크면) MAC 배열이 병목 → compute-bound</text> <text x="20" y="284" font-size="12">경계: I = P ÷ BW (ridge point). SSD로 치면 "NAND 채널 대역폭 vs 컨트롤러 처리량"의 경계</text>
+</svg>
+```
+
+그림 1 — roofline이 모델링하는 기계. 느린 큰 메모리에서 파이프(대역폭)를 거쳐 빠른 작은 메모리와 연산기로 데이터가 흐른다. 두 단계 중 느린 쪽이 전체 속도를 정한다. 파이프는 여러 단(DRAM→L2→L1)일 수 있고, 그게 6절의 hierarchical roofline이다.
+
+이 노트의 순서: 두 한계와 intensity 정의(1절) → roofline 유도와 ridge point(2절) → 가상 하드웨어 4종 비교(3절) → 커널별 intensity 손계산(4절) → 이 Mac에서 roofline 실측(5절) → 캐시 계층별 roofline(6절) → roofline으로 결정하기: batching·양자화·fusion·tiling·실리콘 선정(7절) → 모델의 한계(8절) → 임베디드 관점(9절) → 실수·면접·드릴·연습(10~13절).
+
+---
+
+## 1. 두 개의 한계와 arithmetic intensity
+
+### 1.1 직관 — 공장과 트럭
+
+공장(연산기)이 하루에 제품 1000개를 만들 수 있다고 하자. 원료는 트럭(메모리 버스)이 하루 50톤을 실어 온다. 제품 하나에 원료가 몇 톤 드는지에 따라 병목이 달라진다.
+
+- 제품 하나에 원료 1톤: 트럭이 하루 50개 분량밖에 못 가져온다. 공장은 950개 분량을 놀린다. → **트럭이 병목** (memory-bound).
+- 제품 하나에 원료 0.01톤: 트럭은 5000개 분량을 가져오는데 공장이 1000개밖에 못 만든다. → **공장이 병목** (compute-bound).
+
+여기서 "원료 1톤당 제품 몇 개"가 **arithmetic intensity**다. 공장 쪽 관점으로 뒤집어 말하면 "옮긴 바이트 하나로 연산을 몇 번 하나"다.
+
+### 1.2 정의
+
+```
+arithmetic intensity   I = (연산 수) ÷ (옮긴 바이트 수)          단위: ops/byte (또는 FLOP/byte)
+
+attainable performance = min( P ,  I × BW )                       단위: ops/s
+   P  = peak 연산 처리량 (ops/s)
+   BW = 메모리 대역폭 (bytes/s)
+```
+
+말로 하면: 커널이 낼 수 있는 속도는 "연산기가 최대로 낼 수 있는 속도"와 "메모리가 실어 오는 바이트 수 × 바이트당 연산 수" 중 **작은 쪽**이다.
+
+같은 식을 **시간**으로 쓰면 펌웨어 엔지니어에게 더 익숙하다.
+
+```
+t_compute = ops ÷ P
+t_memory  = bytes ÷ BW
+t ≈ max( t_compute, t_memory )        ← 연산과 전송이 완벽히 겹친다(overlap)고 가정
+
+attainable = ops ÷ t = min( P, ops ÷ bytes × BW ) = min( P, I × BW )
+```
+
+말로 하면: DMA로 다음 타일을 가져오는 동안 현재 타일을 계산하는 **double buffering**이 완벽하다면, 전체 시간은 두 시간 중 긴 쪽이다. roofline은 이 "완벽한 겹침"을 가정한 **상한**(best case)이다. 실제는 항상 그 아래다.
+
+### 1.3 단위 관례 — FLOP, op, MAC, TOPS
+
+ML 성능 문서는 단위가 섞여 있어서 처음에 가장 많이 헷갈린다.
+
+| 용어 | 뜻 | 관계 |
+|---|---|---|
+| MAC | multiply-accumulate 1회 (`acc += a × b`) | 곱 1 + 덧셈 1 |
+| FLOP | 부동소수점 연산 1회 | 1 MAC = 2 FLOP |
+| op | 정수 포함 연산 1회 (int8 TOPS의 단위) | 1 MAC = 2 ops |
+| GFLOP/s, TOPS | 초당 10⁹ FLOP, 초당 10¹² ops | 데이터시트의 "4 TOPS"는 보통 초당 2×10¹² MAC |
+| FLOPs (소문자 s) | 모델 연산량 (개수) | 논문마다 MAC을 FLOPs라고 부르기도 한다 — 반드시 확인 |
+
+이 노트는 **ops = 2 × MAC**으로 통일한다. B2 6.5절은 intensity를 "MAC/B"로 계산했는데(예: standard 3×3이 263.8 MAC/B), 이 노트 단위로는 두 배인 527.6 ops/B다. 숫자가 두 배 차이 나면 먼저 단위를 의심하자.
+
+### 1.4 손계산 — 벡터 덧셈 4개
+
+`z = x + y`, 원소 4개, fp32.
+
+```
+연산:   덧셈 4번                              → 4 FLOP
+바이트: x 읽기 4×4 = 16 B, y 읽기 16 B, z 쓰기 16 B → 48 B
+I = 4 ÷ 48 = 0.083 FLOP/B
+```
+
+말로 하면: 12바이트를 옮길 때마다 덧셈을 딱 한 번 한다. 원소 수를 백만 개로 늘려도 비율은 그대로다(둘 다 n에 비례). **elementwise 연산의 intensity는 크기와 무관하게 낮다.**
+
+이 커널을 대역폭 50 GB/s, peak 1000 GFLOP/s 칩에서 돌리면:
+
+```
+attainable = min(1000, 0.083 × 50) = min(1000, 4.2) = 4.2 GFLOP/s   → peak의 0.4 %
+```
+
+연산기가 99.6 % 놀고 있다. 이 커널을 빠르게 하는 유일한 방법은 **바이트를 줄이는 것**(더 작은 dtype, 다른 op와 fusion)이다. 연산기를 두 배로 늘려도 1 %도 빨라지지 않는다.
+
+### 1.5 Don 경험과 연결
+
+- **PCIe/NVMe**: 4K random read에서 호스트 인터페이스 대역폭을 다 쓰기 전에 컨트롤러 IOPS가 먼저 찬다면 "compute-bound", 128K sequential read에서 PCIe Gen4 x4 대역폭이 먼저 찬다면 "memory-bound"와 같은 구조다. 요청 크기(바이트)당 펌웨어가 하는 일(명령어 수)의 비율이 intensity에 해당한다.
+- **DMA-fed 가속기**: 하드웨어 ECC/암호화 엔진에 DMA로 데이터를 먹일 때, 엔진 처리량(GB/s)이 DMA 대역폭보다 크면 엔진은 굶는다. NPU도 똑같다. MAC 배열이 아무리 넓어도 DMA가 weight를 늦게 가져오면 놀게 된다.
+
+### 1.6 함정
+
+- **"바이트"는 코드가 요청한 바이트가 아니라 실제로 그 메모리 레벨을 오간 바이트**다. 캐시에 이미 있는 데이터를 다시 읽으면 DRAM 바이트는 0이다. 그래서 같은 커널도 "어느 레벨의 바이트를 세느냐"에 따라 I가 달라진다(4.8절, 6절).
+- 이 노트의 손계산은 대부분 **"각 텐서를 DRAM에서 딱 한 번 옮긴다"는 최소(compulsory) 트래픽**으로 센다. 실제 트래픽은 이것보다 크거나 같으므로, 이렇게 구한 I는 **상한**이다.
+
+---
+
+## 2. Roofline 그래프 유도와 그리기
+
+### 2.1 로그-로그 축에서 왜 "지붕 모양"이 되나
+
+`attainable = min(P, I × BW)`를 두 조각으로 나눠 보자.
+
+```
+I가 작을 때:  attainable = BW × I      → log(attainable) = log(BW) + 1·log(I)   (기울기 1인 직선)
+I가 클 때:    attainable = P           → 수평선
+두 직선이 만나는 곳:  BW × I = P   →   I_ridge = P ÷ BW
+```
+
+말로 하면: 로그-로그 그래프에서 메모리 한계는 **기울기 1(45°)의 사선**, 연산 한계는 **수평선**이다. 두 선이 만나는 꺾인 점이 **ridge point**(마룻점)이고, 그 x좌표가 P ÷ BW다. 사선과 수평선을 합친 모양이 지붕 같아서 roofline이라고 부른다.
+
+로그 축을 쓰는 이유: 커널의 intensity는 0.1(elementwise)부터 1000(큰 GEMM)까지 네 자릿수에 걸쳐 있고, 칩의 peak도 1 GOPS(MCU)부터 수십 TOPS(NPU)까지 다섯 자릿수에 걸쳐 있다. 선형 축으로는 한 그림에 담을 수 없다. 로그 축에서는 **"대역폭이 2배"가 사선 전체를 위로 평행이동**, **"peak가 2배"가 수평선을 위로 평행이동**하는 것으로 보여서 읽기 쉽다.
+
+### 2.2 손계산 — 예시 가속기 하나
+
+peak P = 1000 GFLOP/s, 대역폭 BW = 50 GB/s인 가상의 가속기.
+
+```
+ridge point:  I_ridge = 1000 ÷ 50 = 20 FLOP/B
+
+커널 A: I = 0.5  → min(1000, 0.5 × 50) =   25 GFLOP/s   memory-bound, peak의 2.5 %
+커널 B: I = 4.5  → min(1000, 4.5 × 50) =  225 GFLOP/s   memory-bound, peak의 22.5 %
+커널 C: I = 264  → min(1000, 264 × 50) = 1000 GFLOP/s   compute-bound, peak의 100 %
+```
+
+말로 하면: ridge point보다 왼쪽에 있는 커널은 모두 memory-bound이고, 얼마나 왼쪽이냐에 비례해서 peak를 못 쓴다. ridge의 오른쪽은 모두 같은 천장(P)에 붙는다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 380">
+<text x="20" y="22" font-size="14">roofline 개념도 — 예시 가속기: peak 1000 GFLOP/s, 대역폭 50 GB/s</text> <line x1="80" y1="330" x2="640" y2="330" stroke="currentColor"/> <line x1="80" y1="40" x2="80" y2="330" stroke="currentColor"/> <line x1="80.0" y1="330" x2="80.0" y2="335" stroke="currentColor"/><text x="80.0" y="349" font-size="12" text-anchor="middle">0.1</text> <line x1="80.0" y1="40" x2="80.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="220.0" y1="330" x2="220.0" y2="335" stroke="currentColor"/><text x="220.0" y="349" font-size="12" text-anchor="middle">1</text> <line x1="220.0" y1="40" x2="220.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="360.0" y1="330" x2="360.0" y2="335" stroke="currentColor"/><text x="360.0" y="349" font-size="12" text-anchor="middle">10</text> <line x1="360.0" y1="40" x2="360.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="500.0" y1="330" x2="500.0" y2="335" stroke="currentColor"/><text x="500.0" y="349" font-size="12" text-anchor="middle">100</text>
+<line x1="500.0" y1="40" x2="500.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="640.0" y1="330" x2="640.0" y2="335" stroke="currentColor"/><text x="640.0" y="349" font-size="12" text-anchor="middle">1000</text> <line x1="640.0" y1="40" x2="640.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="330.0" x2="80" y2="330.0" stroke="currentColor"/><text x="72" y="334.0" font-size="12" text-anchor="end">1</text> <line x1="80" y1="330.0" x2="640" y2="330.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="75" y1="257.5" x2="80" y2="257.5" stroke="currentColor"/><text x="72" y="261.5" font-size="12" text-anchor="end">10</text> <line x1="80" y1="257.5" x2="640" y2="257.5" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="185.0" x2="80" y2="185.0" stroke="currentColor"/><text x="72" y="189.0" font-size="12" text-anchor="end">100</text> <line x1="80" y1="185.0" x2="640" y2="185.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="112.5" x2="80" y2="112.5" stroke="currentColor"/><text x="72" y="116.5" font-size="12" text-anchor="end">1000</text>
+<line x1="80" y1="112.5" x2="640" y2="112.5" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="40.0" x2="80" y2="40.0" stroke="currentColor"/><text x="72" y="44.0" font-size="12" text-anchor="end">10000</text> <line x1="80" y1="40.0" x2="640" y2="40.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <text x="360.0" y="368" font-size="13" text-anchor="middle">arithmetic intensity I (FLOP/byte, log)</text> <text x="16" y="185.0" font-size="13" text-anchor="middle" transform="rotate(-90 16 185.0)">attainable GFLOP/s (log)</text>
+<line x1="402.1" y1="40" x2="402.1" y2="330" stroke="currentColor" stroke-dasharray="5 4"/> <polyline points="80.0,279.3 402.1,112.5 402.1,112.5 640.0,112.5" fill="none" stroke="#4a7bd0" stroke-width="3"/> <text x="408.1" y="308.2" font-size="12">ridge point I = 1000/50 = 20</text> <text x="156.2" y="201.1" font-size="12" transform="rotate(-27.5 156.2 201.1)">메모리 지붕: I × 50 GB/s</text> <text x="468.9" y="104.5" font-size="12">연산 지붕: 1000 GFLOP/s</text>
+<text x="104.7" y="77.9" font-size="13" fill="#d0564a">memory-bound 영역</text> <text x="444.3" y="68.9" font-size="13" fill="#3f9a6b">compute-bound 영역</text> <circle cx="177.9" cy="228.6" r="5" fill="#d0564a"/><text x="183.9" y="222.6" font-size="12" text-anchor="start">GEMV fp32 (I=0.5 → 25)</text> <circle cx="311.4" cy="159.5" r="5" fill="#e08a3c"/><text x="319.4" y="173.5" font-size="12" text-anchor="start">dwconv int8 (I=4.5 → 225)</text> <circle cx="559.0" cy="112.5" r="5" fill="#3f9a6b"/><text x="559.0" y="132.5" font-size="12" text-anchor="middle">conv3×3 (I=264 → 1000)</text>
+</svg>
+```
+
+그림 2 — roofline 개념도. 파란 선이 지붕이다. 빨간 점(GEMV)과 주황 점(depthwise conv)은 사선 위에 있어서 memory-bound, 초록 점(standard conv)은 수평선 위에 있어서 compute-bound다. 점선이 ridge point(I = 20). 커널의 실측 점은 **항상 이 지붕 아래**에 찍힌다. 지붕 위로 올라가면 측정이나 바이트 계산이 틀렸거나, 세는 메모리 레벨이 잘못된 것이다(5.6절).
+
+### 2.3 ridge point가 말해 주는 것
+
+ridge point는 **"이 칩을 제값 주고 쓰려면 커널이 바이트당 최소 몇 연산은 해야 하나"**라는 숫자다.
+
+- ridge가 **작다**(예: 1~5): 대역폭이 연산에 비해 넉넉한 칩. 웬만한 커널이 compute-bound. 캐시 없는 MCU, CPU 1코어가 여기에 가깝다.
+- ridge가 **크다**(예: 100~500): 연산이 대역폭에 비해 넘치는 칩. 큰 GEMM·standard conv 말고는 전부 memory-bound. 모바일 NPU가 전형적이다.
+
+그래서 **TOPS 숫자가 커질수록 ridge가 오른쪽으로 가고, 같은 모델이 memory-bound 쪽으로 밀린다.** 데이터시트에 TOPS만 크게 쓰고 대역폭을 작게 쓰는 칩(M4)을 경계해야 하는 이유다.
+
+### 2.4 코드로 확인 — 식 하나로 표 만들기
+
+3절의 예제 2가 이 식을 여러 칩과 커널에 적용한다. 여기서는 식이 단순하다는 점만 기억하자: `min(P, I × BW)` 한 줄이다. 어려운 부분은 식이 아니라 **I를 정확히 세는 것**(4절)과 **P와 BW를 정직하게 재는 것**(5절)이다.
+
+---
+
+## 3. 하드웨어마다 ridge point가 다르다 — 가상의 4종 비교
+
+### 3.1 예시 하드웨어 (숫자는 설명용으로 만든 반올림 값)
+
+아래 숫자는 **실제 제품의 스펙이 아니다.** 각 계열의 "자릿수 감각"을 잡기 위해 만든 둥근 숫자다. 실제 칩을 평가할 때는 데이터시트와 실측으로 채워 넣어야 한다(M1, M4).
+
+| 가상 하드웨어 | 가정 | peak (int8) | 대역폭 | ridge (ops/B) |
+|---|---|---|---|---|
+| MCU (캐시 없음) | Cortex-M급 200 MHz, int8 SIMD 2 MAC/cycle, SRAM 32-bit 버스 cycle당 1워드 | 0.8 GOPS | 0.8 GB/s | 1 |
+| MCU + micro-NPU | 소형 NPU(수백 MAC/cycle급), 공유 SRAM | 100 GOPS | 4 GB/s | 25 |
+| DSP (vector) | 넓은 SIMD(VLIW) DSP, 외부 DRAM | 1 TOPS | 15 GB/s | 67 |
+| 폰 SoC NPU | 수십 TOPS급 NPU, LPDDR5 공유 | 20 TOPS | 60 GB/s | 333 |
+
+MCU의 peak 손계산: `200 MHz × 2 MAC/cycle × 2 ops/MAC = 0.8 GOPS`. 대역폭: `200 MHz × 4 B/cycle = 0.8 GB/s`. ridge = 0.8 ÷ 0.8 = 1.
+
+말로 하면: MCU는 연산이 느린 만큼 메모리도 "상대적으로" 빠르다. 캐시 없는 zero-wait SRAM이라면 load 한 번이 1 cycle이라서, 연산 한 번과 load 한 번의 비용이 비슷하다. 반면 폰 NPU는 연산기가 메모리보다 수백 배 빠르다.
+
+### 3.2 코드로 확인 — 커널 3개를 4종 칩에 올리기
+
+무엇을 확인하나: 같은 커널(int8 GEMV, depthwise conv, standard conv)이 칩에 따라 memory-bound/compute-bound가 바뀌는 것.
+
+```python
+# 가상의(반올림한 예시) 하드웨어 4종: ridge point와 커널별 attainable 성능
+hw = {  # name: (peak ops/s, bandwidth B/s)  ← MCU~폰 NPU는 설명용으로 만든 숫자
+    "MCU (no cache, int8 SIMD)":  (0.8e9,  0.8e9),
+    "MCU + micro-NPU":            (100e9,  4e9),
+    "DSP (vector, int8)":         (1e12,   15e9),
+    "phone NPU (int8)":           (20e12,  60e9),
+}
+kern = {"GEMV int8 (I=2)": 2.0, "dwconv int8 (I=9)": 9.0, "conv3x3 int8 (I=528)": 527.6}
+print(f"{'hardware':27s} {'peak':>9s} {'BW':>8s} {'ridge':>7s} | " + " | ".join(f"{k:>20s}" for k in kern))
+for name, (P, BW) in hw.items():
+    cells = []
+    for I in kern.values():
+        att = min(P, I * BW)
+        cells.append(f"{att/1e9:8.1f}G {'M' if I * BW < P else 'C'} {100*att/P:5.1f}%")
+    print(f"{name:27s} {P/1e9:7.1f}G {BW/1e9:6.1f}G {P/BW:7.1f} | " + " | ".join(f"{c:>20s}" for c in cells))
+print("M = memory-bound, C = compute-bound, % = attainable / peak")
+```
+
+```text
+hardware                         peak       BW   ridge |      GEMV int8 (I=2) |    dwconv int8 (I=9) | conv3x3 int8 (I=528)
+MCU (no cache, int8 SIMD)       0.8G    0.8G     1.0 |        0.8G C 100.0% |        0.8G C 100.0% |        0.8G C 100.0%
+MCU + micro-NPU               100.0G    4.0G    25.0 |        8.0G M   8.0% |       36.0G M  36.0% |      100.0G C 100.0%
+DSP (vector, int8)           1000.0G   15.0G    66.7 |       30.0G M   3.0% |      135.0G M  13.5% |     1000.0G C 100.0%
+phone NPU (int8)            20000.0G   60.0G   333.3 |      120.0G M   0.6% |      540.0G M   2.7% |    20000.0G C 100.0%
+M = memory-bound, C = compute-bound, % = attainable / peak
+```
+
+출력에서 볼 것:
+
+- **같은 GEMV가 MCU에서는 compute-bound(100 %)**, 폰 NPU에서는 peak의 **0.6 %**다. B3 11.3절의 "RNN은 MCU에서는 오히려 좋다"가 이 한 줄이다.
+- depthwise(I = 9)는 ridge가 1인 MCU 말고는 전부 memory-bound다. NPU에서 2.7 %. B2 6.5절이 말한 "MAC을 64배 줄여도 시간은 64배 안 준다"의 정량 버전이다.
+- standard conv3×3(I = 528)은 모든 칩에서 compute-bound다. NPU가 좋아하는 모양이다.
+- 표의 intensity는 4.5절에서 손으로 유도한 값이다(int8, 최소 트래픽).
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 390">
+<text x="20" y="22" font-size="14">가상의 하드웨어 4종 (int8, 반올림한 예시 숫자) — 지붕과 ridge point</text> <line x1="80" y1="340" x2="640" y2="340" stroke="currentColor"/> <line x1="80" y1="40" x2="80" y2="340" stroke="currentColor"/> <line x1="80.0" y1="340" x2="80.0" y2="345" stroke="currentColor"/><text x="80.0" y="359" font-size="12" text-anchor="middle">0.1</text> <line x1="80.0" y1="40" x2="80.0" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="192.0" y1="340" x2="192.0" y2="345" stroke="currentColor"/><text x="192.0" y="359" font-size="12" text-anchor="middle">1</text> <line x1="192.0" y1="40" x2="192.0" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="304.0" y1="340" x2="304.0" y2="345" stroke="currentColor"/><text x="304.0" y="359" font-size="12" text-anchor="middle">10</text> <line x1="304.0" y1="40" x2="304.0" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="416.0" y1="340" x2="416.0" y2="345" stroke="currentColor"/><text x="416.0" y="359" font-size="12" text-anchor="middle">100</text>
+<line x1="416.0" y1="40" x2="416.0" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="528.0" y1="340" x2="528.0" y2="345" stroke="currentColor"/><text x="528.0" y="359" font-size="12" text-anchor="middle">1000</text> <line x1="528.0" y1="40" x2="528.0" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="640.0" y1="340" x2="640.0" y2="345" stroke="currentColor"/><text x="640.0" y="359" font-size="12" text-anchor="middle">10000</text> <line x1="640.0" y1="40" x2="640.0" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="75" y1="340.0" x2="80" y2="340.0" stroke="currentColor"/><text x="72" y="344.0" font-size="12" text-anchor="end">0.1</text> <line x1="80" y1="340.0" x2="640" y2="340.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="290.0" x2="80" y2="290.0" stroke="currentColor"/><text x="72" y="294.0" font-size="12" text-anchor="end">1</text> <line x1="80" y1="290.0" x2="640" y2="290.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="240.0" x2="80" y2="240.0" stroke="currentColor"/><text x="72" y="244.0" font-size="12" text-anchor="end">10</text>
+<line x1="80" y1="240.0" x2="640" y2="240.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="190.0" x2="80" y2="190.0" stroke="currentColor"/><text x="72" y="194.0" font-size="12" text-anchor="end">100</text> <line x1="80" y1="190.0" x2="640" y2="190.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="140.0" x2="80" y2="140.0" stroke="currentColor"/><text x="72" y="144.0" font-size="12" text-anchor="end">1000</text> <line x1="80" y1="140.0" x2="640" y2="140.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="75" y1="90.0" x2="80" y2="90.0" stroke="currentColor"/><text x="72" y="94.0" font-size="12" text-anchor="end">10000</text> <line x1="80" y1="90.0" x2="640" y2="90.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="40.0" x2="80" y2="40.0" stroke="currentColor"/><text x="72" y="44.0" font-size="12" text-anchor="end">100000</text> <line x1="80" y1="40.0" x2="640" y2="40.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <text x="360.0" y="378" font-size="13" text-anchor="middle">arithmetic intensity I (ops/byte, log)</text>
+<text x="16" y="190.0" font-size="13" text-anchor="middle" transform="rotate(-90 16 190.0)">attainable GOPS (log)</text> <polyline points="80.0,344.8 192.0,294.8 192.0,294.8 640.0,294.8" fill="none" stroke="#888" stroke-width="2.5"/> <circle cx="192.0" cy="294.8" r="4" fill="#888"/> <text x="196.0" y="287.8" font-size="12">ridge 1</text> <line x1="400" y1="252" x2="424" y2="252" stroke="#888" stroke-width="3"/><text x="430" y="256" font-size="12">MCU (0.8 GOPS, 0.8 GB/s)</text>
+<polyline points="80.0,309.9 348.6,190.0 348.6,190.0 640.0,190.0" fill="none" stroke="#3f9a6b" stroke-width="2.5"/> <circle cx="348.6" cy="190.0" r="4" fill="#3f9a6b"/> <text x="352.6" y="183.0" font-size="12">ridge 25</text> <line x1="400" y1="270" x2="424" y2="270" stroke="#3f9a6b" stroke-width="3"/><text x="430" y="274" font-size="12">MCU+microNPU (100 GOPS, 4 GB/s)</text> <polyline points="80.0,281.2 396.3,140.0 396.3,140.0 640.0,140.0" fill="none" stroke="#e08a3c" stroke-width="2.5"/>
+<circle cx="396.3" cy="140.0" r="4" fill="#e08a3c"/> <text x="400.3" y="133.0" font-size="12">ridge 66.7</text> <line x1="400" y1="288" x2="424" y2="288" stroke="#e08a3c" stroke-width="3"/><text x="430" y="292" font-size="12">DSP (1 TOPS, 15 GB/s)</text> <polyline points="80.0,251.1 474.6,74.9 474.6,74.9 640.0,74.9" fill="none" stroke="#4a7bd0" stroke-width="2.5"/> <circle cx="474.6" cy="74.9" r="4" fill="#4a7bd0"/>
+<text x="478.6" y="67.9" font-size="12">ridge 333</text> <line x1="400" y1="306" x2="424" y2="306" stroke="#4a7bd0" stroke-width="3"/><text x="430" y="310" font-size="12">phone NPU (20 TOPS, 60 GB/s)</text> <line x1="225.7" y1="40" x2="225.7" y2="340" stroke="#d0564a" stroke-dasharray="3 3"/> <text x="228.7" y="52" font-size="12" fill="#d0564a">GEMV int8</text> <line x1="298.9" y1="40" x2="298.9" y2="340" stroke="#d0564a" stroke-dasharray="3 3"/>
+<text x="301.9" y="52" font-size="12" fill="#d0564a">dwconv int8</text> <line x1="496.9" y1="40" x2="496.9" y2="340" stroke="#d0564a" stroke-dasharray="3 3"/> <text x="499.9" y="52" font-size="12" fill="#d0564a">conv3×3 int8</text>
+</svg>
+```
+
+그림 3 — 가상 하드웨어 4종의 roofline을 절대 단위로 겹친 것. 칩이 클수록 지붕이 위에 있지만 **꺾이는 점(ridge)도 오른쪽으로 간다.** 빨간 점선 세 개는 커널의 intensity다. GEMV 점선(I = 2)과 각 지붕이 만나는 높이가 그 칩에서 GEMV가 낼 수 있는 최대 속도다. 폰 NPU(파랑)는 GEMV에서 120 GOPS로, peak 20 TOPS의 0.6 %다.
+
+### 3.3 임베디드 연결 — "NPU를 달면 무조건 빠르다"가 틀리는 순간
+
+Hark 같은 웨어러블이라면(추정) always-on MCU + 큰 SoC(DSP/NPU) 구조일 가능성이 높다. roofline으로 보면 역할 분담이 자연스럽게 나온다.
+
+- **MCU**: ridge가 낮아서 어떤 커널이든 연산기를 잘 쓴다. 대신 절대 속도가 느리다. 작은 GRU, 작은 FC 위주 wake word·착용 감지에 적합.
+- **NPU**: ridge가 높아서 큰 conv·GEMM만 제 성능이 나온다. batch=1 GEMV, depthwise, 작은 RNN을 NPU로 보내면 peak의 몇 %만 쓰면서 전력은 NPU를 깨우는 비용까지 낸다.
+
+### 3.4 함정
+
+- **peak는 "이상적인 op"로 잰 값**이다. NPU의 TOPS는 대개 int8(또는 int4), dense, 최대 클럭, 모든 MAC이 매 cycle 일한다는 가정이다. sparsity를 포함한 TOPS(C4 9절), int4 TOPS를 int8 모델에 쓰면 ridge를 잘못 그린다.
+- **대역폭도 이론치와 실측이 다르다.** LPDDR 이론치 = 버스 폭 × 전송률이지만, 실제로 한 IP(예: NPU)가 받는 대역폭은 다른 마스터(CPU, GPU, ISP, 디스플레이)와 나눠 쓴다. 5절에서 이 Mac CPU가 이론 100 GB/s 중 약 65~75 GB/s만 받는 것을 직접 본다.
+
+---
+
+## 4. 커널별 arithmetic intensity 손계산
+
+기호: b = 원소당 바이트(fp32 = 4, fp16 = 2, int8 = 1). 모두 **최소 트래픽**(각 텐서를 한 번씩 읽고 쓴다)으로 센다.
+
+### 4.1 벡터 덧셈 (elementwise)
+
+```
+z = x + y,  길이 n
+ops   = n
+bytes = b·(n + n + n) = 3bn
+I     = 1 / (3b)        fp32: 0.083   fp16: 0.167   int8: 0.333
+```
+
+말로 하면: 원소 하나당 연산 1번, 바이트 3개 원소분. 크기와 무관하게 극도로 memory-bound. ReLU, bias add, residual add, layernorm의 대부분이 이 부류다.
+
+### 4.2 내적 (dot product)
+
+```
+s = x·y,  길이 n
+ops   = 2n          (MAC n번)
+bytes = b·2n        (스칼라 출력은 무시)
+I     = 1 / b       fp32: 0.25   fp16: 0.5   int8: 1
+```
+
+말로 하면: 곱과 덧셈 2 ops를 위해 원소 2개를 읽는다. 여전히 memory-bound. 두 벡터 모두 **재사용이 없기** 때문이다.
+
+### 4.3 GEMV — batch 1 dense layer
+
+```
+y = W·x,  W: [M, K]
+ops   = 2MK
+bytes = b·(MK + K + M)     ← weight MK가 압도적
+I     ≈ 2MK / (b·MK) = 2/b   fp32: 0.5   fp16: 1   int8: 2
+```
+
+손계산 (2×3 weight, fp32):
+
+```
+ops   = 2 × 2 × 3 = 12 FLOP
+bytes = 4 × (6 + 3 + 2) = 44 B
+I     = 12 / 44 = 0.27 FLOP/B      (크기가 커지면 0.5로 수렴)
+```
+
+말로 하면: weight 원소 하나를 읽어서 **딱 한 번 곱하고 버린다.** x는 M번 재사용되지만(캐시에 있으니 공짜) weight가 바이트의 대부분이라 의미가 없다. B3 11.2절의 결론 "작은 GEMV는 memory-bound"가 이 식이다. **LLM decode(D5)의 본질도 이것**이다: token 하나를 만들 때 모든 weight를 한 번씩 읽는다.
+
+### 4.4 GEMM — 재사용이 생긴다
+
+```
+C = A·B,  A: [M, K], B: [K, N], C: [M, N]
+ops   = 2MNK
+bytes = b·(MK + KN + MN)
+정사각 M = N = K = n:   I = 2n³ / (3bn²) = 2n / (3b)      fp32: n/6   fp16: n/3   int8: 2n/3
+```
+
+말로 하면: 원소 하나를 읽으면 **n번 재사용**된다(A의 원소 a[i][k]는 C의 한 행 전체 n개에 기여). 그래서 I가 **행렬 크기에 비례해서 커진다.** n = 6이면 fp32 I = 1, n = 1024면 I = 171.
+
+손계산 (2×2×2, fp32):
+
+```
+ops   = 2 × 8 = 16 FLOP
+bytes = 4 × (4 + 4 + 4) = 48 B
+I     = 0.33 FLOP/B        (n/6 = 2/6 = 0.33 ✓)
+```
+
+batch B인 dense layer(`[B, K] × [K, N]`)도 GEMM이다.
+
+```
+I = 2BKN / (b·(KN + BK + BN))
+B = 1   → ≈ 2/b         (GEMV)
+B ≫ 1   → weight KN을 B번 재사용 → I가 대략 B에 비례해서 커진다 (K, N보다 B가 커지면 포화)
+```
+
+말로 하면: **batch는 weight 재사용 횟수다.** 7.1절에서 이게 서버가 batch를 키우는 이유이자 웨어러블이 그럴 수 없는 이유가 된다.
+
+### 4.5 conv2d와 depthwise conv
+
+stride 1, same padding, H×H 입력, 커널 k×k.
+
+```
+standard:  ops   = 2 · H² · C_out · C_in · k²
+           bytes = b · (H²·C_in + H²·C_out + C_out·C_in·k²)
+
+depthwise: ops   = 2 · H² · C · k²                (채널끼리 섞지 않는다)
+           bytes = b · (H²·C + H²·C + C·k²)
+           I     ≈ 2·H²·C·k² / (b · 2·H²·C) = k² / b      k=3, int8 → I ≈ 9
+```
+
+말로 하면: standard conv는 입력 픽셀 하나가 C_out × k² 번 재사용되어 I가 크다. depthwise는 입력 픽셀 하나가 **k² = 9번**만 재사용된다. 그래서 depthwise의 I는 채널 수·해상도와 거의 무관하게 k²/b 근처에 붙는다. pointwise(1×1)는 그 중간이다(I ≈ 2·C_in·C_out / (b·(C_in + C_out)), C_in = C_out = 64, int8이면 약 64).
+
+### 4.6 attention decode (LLM에서 새 token 1개)
+
+head 하나, 차원 d, 캐시된 길이 L.
+
+```
+scores = q · Kᵀ     : L·d MAC     (K 캐시 L×d 읽기)
+out    = p · V      : L·d MAC     (V 캐시 L×d 읽기)
+ops   = 4·L·d
+bytes ≈ b · 2·L·d          (KV 캐시 읽기가 지배)
+I     ≈ 2/b                fp16: 1   int8: 2
+```
+
+말로 하면: 캐시된 key/value 원소 하나를 읽어서 한 번 곱하고 끝이다. GEMV와 똑같은 구조라서 I ≈ 1 (fp16). GQA(grouped-query attention)처럼 query head g개가 KV 한 벌을 공유하면 같은 KV 바이트로 g배 연산을 하므로 I ≈ 2g/b가 된다. 그리고 중요한 차이: **batch를 키워도 KV 캐시는 시퀀스마다 따로라서 재사용되지 않는다.** weight GEMV는 batch로 intensity를 올릴 수 있지만 attention decode는 그렇지 않다(D5에서 자세히).
+
+### 4.7 코드로 확인 — 한 표로 모으기
+
+무엇을 확인하나: 4.1~4.6의 공식을 dtype 세 가지로 계산해 표를 만든다.
+
+```python
+# 커널별 arithmetic intensity 손계산을 코드로: "각 텐서를 DRAM에서 딱 한 번 옮긴다"는 최소 트래픽 가정
+def vec_add(n, b):  return n,          b * 3 * n                 # z = x + y
+def dot(n, b):      return 2 * n,      b * 2 * n                 # s = x·y (스칼라 출력 무시)
+def gemv(m, k, b):  return 2 * m * k,  b * (m * k + k + m)       # y = W x
+def gemm(m, n, k, b): return 2 * m * n * k, b * (m * k + k * n + m * n)
+def conv(h, cin, cout, ks, b, groups=1):                          # stride 1, same padding
+    macs = h * h * cout * (cin // groups) * ks * ks
+    return 2 * macs, b * (h * h * cin + h * h * cout + cout * (cin // groups) * ks * ks)
+def attn_decode(L, d, b):                                         # 한 head, 새 token 1개: q·K^T, p·V
+    return 4 * L * d, b * (2 * L * d + 2 * d)                     # K,V 캐시 읽기가 지배
+cases = [("vector add n=1M",       lambda b: vec_add(1 << 20, b)),
+         ("dot n=1M",              lambda b: dot(1 << 20, b)),
+         ("GEMV 1024x1024",        lambda b: gemv(1024, 1024, b)),
+         ("GEMM 256^3",            lambda b: gemm(256, 256, 256, b)),
+         ("GEMM 1024^3",           lambda b: gemm(1024, 1024, 1024, b)),
+         ("conv3x3 64->64 @56",    lambda b: conv(56, 64, 64, 3, b)),
+         ("dwconv3x3 64 @56",      lambda b: conv(56, 64, 64, 3, b, groups=64)),
+         ("pwconv1x1 64->64 @56",  lambda b: conv(56, 64, 64, 1, b)),
+         ("attn decode L=2048 d=64", lambda b: attn_decode(2048, 64, b))]
+print(f"{'kernel':26s} {'fp32':>8s} {'fp16':>8s} {'int8':>8s}   (ops/byte)")
+for name, f in cases:
+    vals = [f(b)[0] / f(b)[1] for b in (4, 2, 1)]
+    print(f"{name:26s} " + " ".join(f"{v:8.2f}" for v in vals))
+```
+
+```text
+kernel                         fp32     fp16     int8   (ops/byte)
+vector add n=1M                0.08     0.17     0.33
+dot n=1M                       0.25     0.50     1.00
+GEMV 1024x1024                 0.50     1.00     2.00
+GEMM 256^3                    42.67    85.33   170.67
+GEMM 1024^3                  170.67   341.33   682.67
+conv3x3 64->64 @56           131.89   263.78   527.55
+dwconv3x3 64 @56               2.25     4.49     8.99
+pwconv1x1 64->64 @56          15.84    31.68    63.35
+attn decode L=2048 d=64        0.50     1.00     2.00
+```
+
+출력에서 볼 것:
+
+- 한 줄 안에서 **dtype이 작아질수록 I가 정확히 2배씩** 커진다. 바이트가 절반이 되니까. 이게 "양자화는 점을 오른쪽으로 옮긴다"(7.2절)의 수치다.
+- 줄 사이 차이는 훨씬 크다. vector add(0.08)와 GEMM 1024(171)는 **2000배** 차이. dtype보다 **연산의 모양(재사용 구조)**이 intensity를 훨씬 크게 좌우한다.
+- depthwise 2.25 vs standard 131.89(fp32): 같은 입력·출력 크기인데 58배 차이.
+- attention decode가 GEMV와 같은 값(fp16에서 1.00)이다. 구조가 같기 때문이다.
+
+### 4.8 어느 레벨의 바이트를 세나 — 답이 바뀌는 이유
+
+4.4의 GEMM `I = n/6`은 "A, B, C를 **DRAM에서 한 번씩만** 옮긴다"는 가정이다. 이게 성립하려면 계산하는 동안 필요한 데이터가 전부 on-chip(캐시/SRAM)에 머물러야 한다. n = 4096, fp32면 행렬 하나가 64 MiB라서 어떤 칩의 SRAM에도 안 들어간다. 그러면 실제로는:
+
+- 알고리즘이 **타일 단위**로 계산한다. SRAM에 T×T 타일 몇 개만 올려 두고 나머지는 DRAM에서 다시 읽는다.
+- A와 B의 각 원소는 한 번이 아니라 **n/T번** DRAM에서 읽힌다.
+
+```
+DRAM bytes ≈ b · (2n³/T + n²)          (A, B를 n/T번씩 다시 읽고, C는 한 번 쓴다)
+I_DRAM     ≈ 2n³ / (b · 2n³/T) = T / b       (n ≫ T일 때)
+```
+
+말로 하면: 큰 GEMM의 DRAM intensity는 행렬 크기가 아니라 **타일 크기(= on-chip 메모리 크기)**가 정한다. SRAM이 크면 타일이 커지고 intensity가 커진다. 이게 NPU가 수 MB의 on-chip SRAM을 두는 이유다.
+
+반대로 레벨을 내려가 **L1이나 레지스터에서 세면** 같은 GEMM도 intensity가 훨씬 작다. naive 삼중 루프는 MAC 하나마다 A, B 원소를 하나씩 load하므로 L1 기준 I = 2 FLOP / 8 B = 0.25다(6절에서 그림으로).
+
+### 4.9 코드로 확인 — SRAM 크기가 intensity 상한을 정한다
+
+무엇을 확인하나: int8 GEMM 4096³에서 SRAM 크기(→ 타일 크기)별 DRAM 트래픽과 I. 타일 3개(A, B, C)가 SRAM에 들어간다고 가정한 단순 모델이다.
+
+```python
+# on-chip SRAM 크기가 GEMM의 DRAM intensity 상한을 정한다: T×T 타일 3개가 SRAM에 들어간다고 가정
+import math
+def dram_bytes(n, T, b):
+    # C 타일(T×T)을 SRAM에 두고 K 방향으로 A 타일·B 타일을 흘려 넣음:
+    # A는 n/T번, B도 n/T번 다시 읽힌다. C는 한 번 쓴다.
+    return b * (2 * n**3 / T + n * n)
+n, b = 4096, 1                                   # int8 GEMM 4096^3
+flop = 2 * n**3
+print(f"ideal (everything fits): I = {flop / (b * 3 * n * n):8.1f} ops/B")
+for sram_kb in (32, 128, 512, 2048, 8192):
+    T = int(math.sqrt(sram_kb * 1024 / (3 * b)))     # 타일 3개 (A, B, C)가 SRAM에 들어가는 최대 T
+    T = min(n, 1 << int(math.log2(T)))               # 2의 거듭제곱으로 내림
+    I = flop / dram_bytes(n, T, b)
+    print(f"SRAM {sram_kb:5d} KiB -> tile T={T:4d}  DRAM traffic {dram_bytes(n,T,b)/2**20:8.1f} MiB  I = {I:7.1f} ops/B")
+```
+
+```text
+ideal (everything fits): I =   2730.7 ops/B
+SRAM    32 KiB -> tile T=  64  DRAM traffic   2064.0 MiB  I =    63.5 ops/B
+SRAM   128 KiB -> tile T= 128  DRAM traffic   1040.0 MiB  I =   126.0 ops/B
+SRAM   512 KiB -> tile T= 256  DRAM traffic    528.0 MiB  I =   248.2 ops/B
+SRAM  2048 KiB -> tile T= 512  DRAM traffic    272.0 MiB  I =   481.9 ops/B
+SRAM  8192 KiB -> tile T=1024  DRAM traffic    144.0 MiB  I =   910.2 ops/B
+```
+
+출력에서 볼 것: 이상적인 I는 2731인데 SRAM 32 KiB로는 64밖에 안 된다. **SRAM을 4배 늘릴 때마다 타일 변이 2배, I가 약 2배**가 된다. 폰 NPU의 ridge 333(3절)을 넘기려면 이 모델에서는 타일 T ≥ 512, 즉 SRAM 약 2 MiB가 필요하다. "NPU의 on-chip SRAM 크기"가 사실상 **어떤 모델까지 compute-bound로 돌릴 수 있나**를 정한다는 뜻이다(E5).
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 380">
+<text x="20" y="22" font-size="14">정사각 GEMM n×n×n의 intensity — 크기와 함께 커지고, SRAM 타일이 상한을 만든다</text> <line x1="80" y1="330" x2="640" y2="330" stroke="currentColor"/> <line x1="80" y1="40" x2="80" y2="330" stroke="currentColor"/> <line x1="80.0" y1="330" x2="80.0" y2="335" stroke="currentColor"/><text x="80.0" y="349" font-size="12" text-anchor="middle">16</text> <line x1="80.0" y1="40" x2="80.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="204.4" y1="330" x2="204.4" y2="335" stroke="currentColor"/><text x="204.4" y="349" font-size="12" text-anchor="middle">64</text> <line x1="204.4" y1="40" x2="204.4" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="328.9" y1="330" x2="328.9" y2="335" stroke="currentColor"/><text x="328.9" y="349" font-size="12" text-anchor="middle">256</text> <line x1="328.9" y1="40" x2="328.9" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="453.3" y1="330" x2="453.3" y2="335" stroke="currentColor"/><text x="453.3" y="349" font-size="12" text-anchor="middle">1024</text>
+<line x1="453.3" y1="40" x2="453.3" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="577.8" y1="330" x2="577.8" y2="335" stroke="currentColor"/><text x="577.8" y="349" font-size="12" text-anchor="middle">4096</text> <line x1="577.8" y1="40" x2="577.8" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="330.0" x2="80" y2="330.0" stroke="currentColor"/><text x="72" y="334.0" font-size="12" text-anchor="end">1</text> <line x1="80" y1="330.0" x2="640" y2="330.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="75" y1="257.5" x2="80" y2="257.5" stroke="currentColor"/><text x="72" y="261.5" font-size="12" text-anchor="end">10</text> <line x1="80" y1="257.5" x2="640" y2="257.5" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="185.0" x2="80" y2="185.0" stroke="currentColor"/><text x="72" y="189.0" font-size="12" text-anchor="end">100</text> <line x1="80" y1="185.0" x2="640" y2="185.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="112.5" x2="80" y2="112.5" stroke="currentColor"/><text x="72" y="116.5" font-size="12" text-anchor="end">1000</text>
+<line x1="80" y1="112.5" x2="640" y2="112.5" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="40.0" x2="80" y2="40.0" stroke="currentColor"/><text x="72" y="44.0" font-size="12" text-anchor="end">10000</text> <line x1="80" y1="40.0" x2="640" y2="40.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <text x="360.0" y="368" font-size="13" text-anchor="middle">행렬 크기 n (log)</text> <text x="16" y="185.0" font-size="13" text-anchor="middle" transform="rotate(-90 16 185.0)">I (ops/byte, log)</text>
+<polyline points="80.0,299.1 95.6,293.7 111.1,288.2 126.7,282.7 142.2,277.3 157.8,271.8 173.3,266.4 188.9,260.9 204.4,255.5 220.0,250.0 235.6,244.6 251.1,239.1 266.7,233.6 282.2,228.2 297.8,222.7 313.3,217.3 328.9,211.8 344.4,206.4 360.0,200.9 375.6,195.5 391.1,190.0 406.7,184.5 422.2,179.1 437.8,173.6 453.3,168.2 468.9,162.7 484.4,157.3 500.0,151.8 515.6,146.3 531.1,140.9 546.7,135.4 562.2,130.0 577.8,124.5 593.3,119.1 608.9,113.6 624.4,108.2 640.0,102.7" fill="none" stroke="#4a7bd0" stroke-width="2.5"/> <text x="636.0" y="118.7" font-size="12" text-anchor="end">fp32  I = n/6</text> <polyline points="80.0,277.3 95.6,271.8 111.1,266.4 126.7,260.9 142.2,255.5 157.8,250.0 173.3,244.6 188.9,239.1 204.4,233.6 220.0,228.2 235.6,222.7 251.1,217.3 266.7,211.8 282.2,206.4 297.8,200.9 313.3,195.5 328.9,190.0 344.4,184.5 360.0,179.1 375.6,173.6 391.1,168.2 406.7,162.7 422.2,157.3 437.8,151.8 453.3,146.3 468.9,140.9 484.4,135.4 500.0,130.0 515.6,124.5 531.1,119.1 546.7,113.6 562.2,108.2 577.8,102.7 593.3,97.2 608.9,91.8 624.4,86.3 640.0,80.9" fill="none" stroke="#e08a3c" stroke-width="2.5"/> <text x="636.0" y="96.9" font-size="12" text-anchor="end">fp16  I = n/3</text> <polyline points="80.0,255.5 95.6,250.0 111.1,244.6 126.7,239.1 142.2,233.6 157.8,228.2 173.3,222.7 188.9,217.3 204.4,211.8 220.0,206.4 235.6,200.9 251.1,195.5 266.7,190.0 282.2,184.5 297.8,179.1 313.3,173.6 328.9,168.2 344.4,162.7 360.0,157.3 375.6,151.8 391.1,146.3 406.7,140.9 422.2,135.4 437.8,130.0 453.3,124.5 468.9,119.1 484.4,113.6 500.0,108.2 515.6,102.7 531.1,97.2 546.7,91.8 562.2,86.3 577.8,80.9 593.3,75.4 608.9,70.0 624.4,64.5 640.0,59.0" fill="none" stroke="#3f9a6b" stroke-width="2.5"/>
+<text x="636.0" y="75.0" font-size="12" text-anchor="end">int8  I = 2n/3</text> <polyline points="80.0,255.5 95.6,250.0 111.1,244.6 126.7,239.1 142.2,233.6 157.8,228.2 173.3,222.7 188.9,217.3 204.4,211.8 220.0,206.4 235.6,200.9 251.1,195.5 266.7,190.0 282.2,184.5 297.8,179.1 313.3,173.6 328.9,168.2 344.4,166.5 360.0,164.9 375.6,163.6 391.1,162.4 406.7,161.4 422.2,160.5 437.8,159.8 453.3,159.1 468.9,158.5 484.4,158.1 500.0,157.7 515.6,157.3 531.1,157.0 546.7,156.8 562.2,156.6 577.8,156.4 593.3,156.2 608.9,156.1 624.4,156.0 640.0,155.9" fill="none" stroke="#d0564a" stroke-width="2" stroke-dasharray="6 4"/> <text x="636" y="176.4" font-size="12" text-anchor="end" fill="#d0564a">int8 + SRAM 512 KiB(타일 T=256): I ≈ 250에서 멈춤</text> <line x1="80" y1="239.7" x2="640" y2="239.7" stroke="#888" stroke-dasharray="4 3"/> <text x="86" y="235.7" font-size="12">M2 fp32 ridge 17.6</text>
+<line x1="80" y1="197.8" x2="640" y2="197.8" stroke="#888" stroke-dasharray="4 3"/> <text x="86" y="193.8" font-size="12">DSP ridge 67</text> <line x1="80" y1="147.1" x2="640" y2="147.1" stroke="#888" stroke-dasharray="4 3"/> <text x="86" y="143.1" font-size="12">phone NPU ridge 333</text>
+</svg>
+```
+
+그림 4 — 정사각 GEMM의 intensity. 세 실선은 "모두 on-chip에 들어간다"는 이상적인 경우(dtype별 기울기 같음, 높이만 2배씩 차이). 빨간 점선은 int8 + SRAM 512 KiB(타일 T = 256)일 때로, n이 타일보다 커지면 I가 약 250에서 멈춘다. 회색 수평선은 3절·5절의 ridge point들이다. 선이 ridge 위로 올라가는 n부터 그 칩에서 compute-bound가 된다. 예: M2 fp32(ridge 17.6)는 n ≈ 106부터, 폰 NPU(333)는 int8 n ≈ 500부터 — 단 SRAM 512 KiB짜리 NPU라면 점선이 333에 닿지 못하므로 **아무리 큰 GEMM도 memory-bound**다.
+
+### 4.10 함정
+
+- **FLOPs 공식과 bytes 공식의 단위를 맞춰라.** MAC으로 세고 ops/s peak에 나누면 2배 틀린다.
+- **출력 dtype을 잊지 말 것.** int8 GEMV의 accumulator는 int32다. 출력을 int32로 내보내면 출력 바이트가 4배다(대부분 requantize해서 int8로 내보낸다).
+- **padding, halo, im2col 버퍼**는 최소 트래픽 계산에 없다. im2col로 conv를 GEMM으로 바꾸면 입력이 k²배로 부풀어 DRAM 트래픽이 늘 수 있다(B2 10.2절).
+- **weight가 이미 SRAM에 상주한다면** weight 바이트를 DRAM 트래픽에서 빼야 한다. 같은 레이어가 "매 추론 weight 재로드"와 "상주"에서 완전히 다른 점에 찍힌다(7.4절).
+
+---
+
+## 5. 이 Mac에서 roofline을 직접 재 보기
+
+지금까지는 스펙 숫자로 그렸다. 이제 실제 기계에서 **P와 BW를 재고**, 커널을 돌려 **점을 찍는다.** 새 칩 bring-up에서 Don이 할 일 그대로다: 데이터시트 숫자를 믿기 전에 마이크로벤치마크로 천장을 잰다.
+
+### 5.1 기계와 측정 규칙
+
+| 항목 | 값 | 출처 |
+|---|---|---|
+| SoC | Apple M2 (P-core 4 + E-core 4) | `sysctl machdep.cpu.brand_string`, `hw.perflevel0/1.physicalcpu` |
+| 메모리 | 24 GB unified LPDDR5 | `sysctl hw.memsize` |
+| L1d (P-core) | 128 KiB | `sysctl hw.perflevel0.l1dcachesize` |
+| L2 (P 클러스터 공유) | 16 MiB | `sysctl hw.perflevel0.l2cachesize` |
+| 메모리 이론 대역폭 | 약 100 GB/s | Apple이 M2 발표 때 밝힌 수치(LPDDR5-6400 × 128-bit = 102.4 GB/s와 일치). CPU 혼자 이만큼 받는다는 뜻은 아니다 |
+
+측정 규칙 (중요):
+
+- 이 머신에서는 **다른 작업이 동시에 돌고 있었다**(load average 4~5). 그래서 모든 측정은 여러 번 반복하고 **best(최소 시간)와 median을 함께** 적는다. roofline은 "천장"을 재는 것이므로 주로 best를 쓰고, median과의 차이로 노이즈를 가늠한다.
+- 스레드: numpy·torch의 행렬곱은 Apple **Accelerate** 라이브러리로 간다(`numpy.show_config()`에서 `blas: accelerate`, `torch.__config__.show()`에서 `BLAS_INFO=accelerate`). Accelerate 스레드 수는 환경변수 `VECLIB_MAXIMUM_THREADS`로, torch의 자체 연산(elementwise, conv)은 `torch.set_num_threads`로 조절했다. 각 예제에 무엇을 썼는지 적는다.
+- 같은 스크립트를 다시 돌리면 숫자가 10~30 % 흔들린다. **자릿수와 비율**을 읽고 소수점은 믿지 말자.
+
+### 5.2 메모리 천장 (a) — numpy로 STREAM 흉내
+
+**STREAM**은 John McCalpin이 만든 메모리 대역폭 벤치마크의 표준이다. 캐시보다 훨씬 큰 배열에 네 가지 커널(copy, scale, add, triad)을 돌리고, "읽은 바이트 + 쓴 바이트"를 시간으로 나눈다.
+
+무엇을 확인하나: L2(16 MiB)보다 8배 큰 배열로 DRAM 대역폭을 잰다. numpy의 `out=` 인자로 임시 배열 생성을 막는다.
+
+```python
+# numpy STREAM 유사 측정: copy / scale / add / triad, 큰 배열(DRAM에 안 들어가는 크기)
+import numpy as np, time
+N = 32 * 1024 * 1024                      # 32M float32 = 128 MiB per array (L2 16 MiB의 8배)
+a = np.zeros(N, np.float32); b = np.ones(N, np.float32); c = np.full(N, 2.0, np.float32)
+s = np.float32(3.0)
+def run(name, f, nbytes, reps=15):
+    f(); ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); f(); ts.append(time.perf_counter() - t0)
+    ts.sort()
+    print(f"{name:6s} bytes/iter={nbytes/2**20:5.0f} MiB  best={nbytes/ts[0]/1e9:6.1f} GB/s  median={nbytes/ts[len(ts)//2]/1e9:6.1f} GB/s")
+B = 4 * N
+run("copy",  lambda: np.copyto(a, b),                          2 * B)   # read b, write a
+run("scale", lambda: np.multiply(b, s, out=a),                 2 * B)
+run("add",   lambda: np.add(b, c, out=a),                      3 * B)
+run("triad", lambda: (np.multiply(c, s, out=a), np.add(a, b, out=a)), 5 * B)  # numpy는 2 pass: 3B + 2B 대신 실제 트래픽 5B
+```
+
+```text
+copy   bytes/iter=  256 MiB  best=  77.5 GB/s  median=  76.1 GB/s
+scale  bytes/iter=  256 MiB  best=  74.3 GB/s  median=  72.5 GB/s
+add    bytes/iter=  384 MiB  best=  67.7 GB/s  median=  64.2 GB/s
+triad  bytes/iter=  640 MiB  best=  68.5 GB/s  median=  67.0 GB/s
+```
+
+출력에서 볼 것:
+
+- DRAM 대역폭은 **약 65~77 GB/s**다. 이론치 100 GB/s의 2/3~3/4. CPU 한쪽에서 잰 값으로는 흔한 비율이다(메모리 컨트롤러 효율, refresh, CPU 클러스터가 낼 수 있는 outstanding 요청 수 한계 등. 정확한 원인은 여기서 확인하지 않았다).
+- triad를 numpy로 쓰면 **두 번의 pass**(곱해서 a에 쓰고, 다시 a를 읽어 더함)가 된다. 그래서 바이트를 STREAM 공식(3 배열)이 아니라 실제로 오간 5 배열분으로 셌다. 이게 바로 **fusion이 없을 때 생기는 추가 트래픽**이다(7.3절).
+- 쓰기가 섞인 커널은 **write-allocate**(쓰기 전에 캐시 라인을 먼저 읽어 오는 동작)가 일어나면 실제 DRAM 트래픽이 공식보다 크다. STREAM 관례는 이를 세지 않는다. 그래서 STREAM 숫자는 "실제 버스 트래픽"보다 작게 나올 수 있다.
+
+### 5.3 메모리 천장 (b) — C triad로 크기별 대역폭 (캐시 계층이 보인다)
+
+무엇을 확인하나: 같은 triad를 C로 쓰고 **작업 집합 크기를 12 KiB부터 384 MiB까지** 늘려 가며 대역폭을 잰다. 작은 크기는 L1, 중간은 L2, 큰 크기는 DRAM에서 데이터가 온다. `cc -std=c11 -Wall -Wextra -O2`로 컴파일, 경고 0개.
+
+```c
+/* STREAM 유사 triad a[i] = b[i] + s*c[i]: 작업 집합 크기별 대역폭 (1 thread) */
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+int main(void) {
+    const size_t maxn = (size_t)1 << 25;              /* 32M float = 128 MiB per array */
+    float *a = malloc(maxn * 4), *b = malloc(maxn * 4), *c = malloc(maxn * 4);
+    if (!a || !b || !c) return 1;
+    for (size_t i = 0; i < maxn; i++) { a[i] = 0; b[i] = 1; c[i] = 2; }
+    const float s = 3.0f;
+    for (size_t n = (size_t)1 << 10; n <= maxn; n <<= 1) {
+        size_t reps = ((size_t)1 << 28) / n; if (reps < 5) reps = 5;
+        double best = 1e30;
+        for (int trial = 0; trial < 7; trial++) {
+            double t0 = now();
+            for (size_t r = 0; r < reps; r++) {
+                for (size_t i = 0; i < n; i++) a[i] = b[i] + s * c[i];
+                __asm__ volatile("" ::: "memory");     /* 반복 제거 방지 */
+            }
+            double dt = (now() - t0) / reps;
+            if (dt < best) best = dt;
+        }
+        double bytes = 3.0 * 4 * n;                    /* STREAM 관례: read b,c + write a */
+        printf("working set %9.1f KiB  triad %6.1f GB/s\n", bytes / 1024, bytes / best / 1e9);
+    }
+    printf("check a[7]=%.1f\n", a[7]);
+    free(a); free(b); free(c);
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 triad.c -o triad && ./triad
+```
+
+```text
+working set      12.0 KiB  triad  209.2 GB/s
+working set      24.0 KiB  triad  203.4 GB/s
+working set      48.0 KiB  triad  184.2 GB/s
+working set      96.0 KiB  triad  196.1 GB/s
+working set     192.0 KiB  triad  194.4 GB/s
+working set     384.0 KiB  triad  128.7 GB/s
+working set     768.0 KiB  triad  130.1 GB/s
+working set    1536.0 KiB  triad  115.1 GB/s
+working set    3072.0 KiB  triad  107.1 GB/s
+working set    6144.0 KiB  triad  102.3 GB/s
+working set   12288.0 KiB  triad  125.7 GB/s
+working set   24576.0 KiB  triad   82.8 GB/s
+working set   49152.0 KiB  triad   59.4 GB/s
+working set   98304.0 KiB  triad   59.4 GB/s
+working set  196608.0 KiB  triad   56.1 GB/s
+working set  393216.0 KiB  triad   63.2 GB/s
+check a[7]=7.0
+```
+
+출력에서 볼 것: 계단이 세 개 보인다.
+
+- **~192 KiB까지 약 185~210 GB/s**: L1(128 KiB)과 그 근처. 192 KiB가 L1보다 큰데도 빠른 것은 L1을 약간 넘는 정도는 prefetcher와 L2가 가려 주기 때문으로 보인다.
+- **384 KiB ~ 12 MiB: 약 100~130 GB/s**: L2(16 MiB) 안.
+- **24 MiB부터: 약 56~83 GB/s → 대형 배열에서 약 60 GB/s**: DRAM. numpy(5.2절)와 같은 자릿수다. numpy가 이미 메모리 한계에 붙어 있다는 뜻이다.
+
+이 세 계단이 6절의 **hierarchical roofline**에서 세 개의 사선이 된다.
+
+### 5.4 스레드를 늘리면 DRAM 대역폭이 늘까
+
+무엇을 확인하나: 큰 배열 triad를 pthread 1/2/4/8개로 나눠 돌린다.
+
+```c
+/* triad를 T개 pthread로 나눠 돌려 DRAM 대역폭 상한에 다가가기 (배열 128 MiB x 3) */
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#define N ((size_t)1 << 25)
+static float *a, *b, *c;
+typedef struct { size_t lo, hi; } Range;
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+static void *work(void *p) {
+    Range *r = p;
+    for (size_t i = r->lo; i < r->hi; i++) a[i] = b[i] + 3.0f * c[i];
+    return NULL;
+}
+int main(void) {
+    a = malloc(N * 4); b = malloc(N * 4); c = malloc(N * 4);
+    if (!a || !b || !c) return 1;
+    for (size_t i = 0; i < N; i++) { a[i] = 0; b[i] = 1; c[i] = 2; }
+    int threads[] = {1, 2, 4, 8};
+    for (int k = 0; k < 4; k++) {
+        int T = threads[k]; pthread_t th[8]; Range rg[8]; double best = 1e30;
+        for (int trial = 0; trial < 15; trial++) {
+            double t0 = now();
+            for (int t = 0; t < T; t++) {
+                rg[t].lo = N * t / T; rg[t].hi = N * (t + 1) / T;
+                pthread_create(&th[t], NULL, work, &rg[t]);
+            }
+            for (int t = 0; t < T; t++) pthread_join(th[t], NULL);
+            double dt = now() - t0; if (dt < best) best = dt;
+        }
+        printf("threads=%d  triad %6.1f GB/s (best of 15)\n", T, 12.0 * N / best / 1e9);
+    }
+    printf("check a[7]=%.1f\n", a[7]);
+    return 0;
+}
+```
+
+```text
+threads=1  triad   67.5 GB/s (best of 15)
+threads=2  triad   68.3 GB/s (best of 15)
+threads=4  triad   62.8 GB/s (best of 15)
+threads=8  triad   58.0 GB/s (best of 15)
+check a[7]=7.0
+```
+
+출력에서 볼 것: **스레드를 늘려도 거의 그대로**(58~68 GB/s)다. 이 칩에서는 P-core **하나가 이미 CPU 쪽 DRAM 대역폭 대부분을 쓸 수 있다**는 뜻이다. 많은 x86 서버에서는 1코어가 전체 대역폭의 일부밖에 못 써서 코어를 늘려야 대역폭이 오르는 것과 다르다. 교훈: **대역폭 천장을 잴 때 코어 수를 바꿔 가며 확인해야 한다.** 칩마다 다르다.
+
+(참고: 스레드 생성 시간이 측정에 포함되지만 384 MiB를 옮기는 수 ms에 비하면 무시할 만하다.)
+
+### 5.5 연산 천장 (a) — 큰 float32 행렬곱
+
+무엇을 확인하나: 2048×2048 fp32 행렬곱(I = 2048/6 ≈ 341, 확실히 compute-bound)으로 "이 머신이 실제로 내는 최대 FLOP/s"를 잰다. numpy는 `VECLIB_MAXIMUM_THREADS` 없이/`=1`로, torch는 `set_num_threads(1, 4, 8)`로 바꿔 본다.
+
+```python
+# 큰 float32 행렬곱으로 "이 머신이 실제로 내는 최대 연산 속도" 측정
+import os, sys, time, numpy as np, torch
+def best_time(f, reps=10):
+    f(); ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); f(); ts.append(time.perf_counter() - t0)
+    return min(ts), sorted(ts)[len(ts) // 2]
+n = 2048
+rng = np.random.default_rng(0)
+A = rng.standard_normal((n, n), dtype=np.float32); B = rng.standard_normal((n, n), dtype=np.float32)
+flop = 2 * n**3
+tb, tm = best_time(lambda: A @ B)
+print(f"numpy  VECLIB_MAXIMUM_THREADS={os.environ.get('VECLIB_MAXIMUM_THREADS','(unset)'):7s} n={n}: "
+      f"best {flop/tb/1e9:6.0f} GFLOP/s  median {flop/tm/1e9:6.0f}")
+tA, tB = torch.from_numpy(A), torch.from_numpy(B)
+for th in (1, 4, 8):
+    torch.set_num_threads(th)
+    tb, tm = best_time(lambda: tA @ tB)
+    print(f"torch  set_num_threads({th})              n={n}: best {flop/tb/1e9:6.0f} GFLOP/s  median {flop/tm/1e9:6.0f}")
+```
+
+```sh
+.venv/bin/python peak.py; VECLIB_MAXIMUM_THREADS=1 .venv/bin/python peak.py
+```
+
+```text
+numpy  VECLIB_MAXIMUM_THREADS=(unset) n=2048: best   1170 GFLOP/s  median   1125
+torch  set_num_threads(1)              n=2048: best   1169 GFLOP/s  median   1157
+torch  set_num_threads(4)              n=2048: best   1165 GFLOP/s  median   1156
+torch  set_num_threads(8)              n=2048: best   1140 GFLOP/s  median   1092
+numpy  VECLIB_MAXIMUM_THREADS=1       n=2048: best   1185 GFLOP/s  median   1170
+torch  set_num_threads(1)              n=2048: best   1188 GFLOP/s  median   1108
+torch  set_num_threads(4)              n=2048: best   1041 GFLOP/s  median   1017
+torch  set_num_threads(8)              n=2048: best   1056 GFLOP/s  median   1015
+```
+
+출력에서 볼 것:
+
+- 어떤 설정이든 **약 1.0~1.2 TFLOP/s**다. A1 8절에서 numpy n=512가 약 690 GMAC/s(= 1.37 TFLOP/s)였던 것과 같은 자릿수다.
+- **`torch.set_num_threads`는 이 숫자를 거의 바꾸지 않는다.** torch의 fp32 행렬곱이 torch 자체 스레드 풀이 아니라 Accelerate로 넘어가기 때문이다. `VECLIB_MAXIMUM_THREADS=1`로 Accelerate 스레드를 1개로 묶어도 느려지지 않았다. 여러 번 돌려 본 결과 스레드 설정 사이의 차이는 노이즈(10~30 %)와 구별되지 않았다.
+- 이 값은 5.6절에서 잴 **NEON 1코어 천장(약 93 GFLOP/s)의 12배 이상**이고, P-core 4개 NEON 이론치(아래 계산으로 약 450 GFLOP/s)보다도 크다. 즉 이 행렬곱은 일반 NEON 경로가 아니다. Apple 칩의 Accelerate는 CPU 옆의 **전용 행렬 연산 유닛**(흔히 AMX라고 불리며, Apple이 공식 문서로 공개하지 않았다)을 쓰는 것으로 알려져 있다. 이 노트에서는 확인된 사실만 쓴다: "**Accelerate 행렬곱 경로의 실측 천장 ≈ 1.2 TFLOP/s**, 스레드 설정과 무관".
+
+이게 roofline에서 중요한 교훈 하나를 준다. **"이 칩의 peak"는 하나가 아니다.** 행렬곱 전용 경로, NEON SIMD 경로, 스칼라 경로가 각각 다른 천장을 가진다. 커널이 어떤 경로로 실행되느냐에 따라 **어느 지붕 아래에 있는지**가 달라진다. NPU가 있는 SoC도 마찬가지다: NPU 천장, DSP 천장, CPU 천장이 따로 있다.
+
+### 5.6 연산 천장 (b) — NEON FMA 마이크로벤치마크 (C)
+
+무엇을 확인하나: 메모리 접근 없이 NEON `vfmaq_f32`(4-lane fp32 fused multiply-add)만 반복해서 CPU **코어 1개의 SIMD 천장**을 잰다. 독립 accumulator 개수(NACC)를 바꿔 가며.
+
+```c
+/* NEON FMA만 반복하는 루프로 CPU 코어 1개의 fp32 연산 천장을 잰다 (메모리 접근 없음) */
+#include <arm_neon.h>
+#include <stdio.h>
+#include <time.h>
+#ifndef NACC
+#define NACC 16
+#endif
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+int main(void) {
+    float32x4_t acc[NACC], x = vdupq_n_f32(1.0000001f), y = vdupq_n_f32(0.9999999f);
+    for (int k = 0; k < NACC; k++) acc[k] = vdupq_n_f32((float)k);
+    const long iters = 200000000L;
+    double best = 1e30;
+    for (int trial = 0; trial < 5; trial++) {
+        double t0 = now();
+        for (long i = 0; i < iters; i++)
+            for (int k = 0; k < NACC; k++) acc[k] = vfmaq_f32(acc[k], x, y);  /* NACC개 독립 체인: latency 숨기기 */
+        double dt = now() - t0; if (dt < best) best = dt;
+    }
+    double flop = (double)iters * NACC * 4 * 2;                /* NACC acc x 4 lane x (mul+add) */
+    float sum = 0; for (int k = 0; k < NACC; k++) sum += vaddvq_f32(acc[k]);
+    printf("NEON fp32 FMA peak (1 thread): %.1f GFLOP/s  (%.2f s, checksum %.3g)\n", flop / best / 1e9, best, sum);
+    return 0;
+}
+```
+
+```sh
+for n in 4 8 16 24; do cc -std=c11 -Wall -Wextra -O2 -DNACC=$n fma.c -o fma$n && echo "NACC=$n" && ./fma$n; done
+```
+
+```text
+NACC=4
+NEON fp32 FMA peak (1 thread): 25.9 GFLOP/s  (0.25 s, checksum 2.68e+08)
+NACC=8
+NEON fp32 FMA peak (1 thread): 51.1 GFLOP/s  (0.25 s, checksum 5.37e+08)
+NACC=16
+NEON fp32 FMA peak (1 thread): 92.7 GFLOP/s  (0.28 s, checksum 1.07e+09)
+NACC=24
+NEON fp32 FMA peak (1 thread): 89.8 GFLOP/s  (0.43 s, checksum 1.61e+09)
+```
+
+출력에서 볼 것:
+
+- **NACC = 4 → 26, 8 → 51, 16 → 93 GFLOP/s.** accumulator를 두 배로 늘리면 속도도 거의 두 배다. FMA 하나의 결과가 나오기까지 몇 cycle이 걸리는데(latency), 체인이 4개뿐이면 파이프라인이 대부분 비어 있다. 체인을 늘려야 매 cycle 여러 FMA 유닛을 채운다(throughput).
+- 16에서 포화(24도 같은 수준). 역산하면: NACC = 4에서 `26 GFLOP/s ÷ 8 FLOP/FMA명령 ≈ 3.2 G명령/s`. FMA latency가 4 cycle이라면 체인 4개가 cycle당 1개를 내므로 클럭 ≈ 3.2 GHz로 맞아떨어진다. 16에서 93 GFLOP/s는 cycle당 약 3.6개 FMA 명령 — **FMA 파이프 4개**라는 널리 알려진 분석과 맞는다(Apple 공식 자료가 아니므로 "추정"으로 둔다).
+- 이론 천장 추정: `4 pipe × 4 lane × 2 FLOP × 약 3.5 GHz ≈ 112 GFLOP/s/코어`, P-core 4개면 약 450 GFLOP/s.
+
+Don에게 익숙한 말로: 이것은 **latency vs throughput**의 전형이다. 파이프라인된 DMA 엔진에 outstanding 요청을 1개만 넣으면 대역폭이 안 나오는 것과 같다. roofline의 수평선은 "throughput이 꽉 찼을 때"의 값이라서, 의존성 체인이 긴 커널은 **지붕까지 못 올라간다**(8절).
+
+### 5.7 커널을 재서 점 찍기
+
+무엇을 확인하나: elementwise, GEMV, GEMM(여러 크기), standard/depthwise conv를 torch(fp32)로 재서 (I, GFLOP/s) 점을 만든다. I는 4절의 최소 DRAM 트래픽 공식으로 계산했다. `torch.set_num_threads(4)`(P-core 수).
+
+```python
+# 여러 커널의 (arithmetic intensity, 실측 GFLOP/s)를 재서 roofline 위에 찍을 점을 만든다
+import time, torch, torch.nn.functional as F
+torch.manual_seed(0); torch.set_num_threads(4)          # P-core 4개에 맞춤
+def bench(f, reps=50):
+    for _ in range(3): f()
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); f(); ts.append(time.perf_counter() - t0)
+    ts.sort(); return ts[0], ts[len(ts) // 2]
+rows = []
+def point(name, f, flop, nbytes):
+    tb, tm = bench(f)
+    rows.append((name, flop / nbytes, flop / tb / 1e9, flop / tm / 1e9))
+with torch.inference_mode():
+    N = 1 << 24; x, y = torch.randn(N), torch.randn(N); o = torch.empty(N)
+    point("add  x+y  16M", lambda: torch.add(x, y, out=o), N, 12 * N)
+    point("axpy x+2y 16M", lambda: torch.add(x, y, alpha=2.0, out=o), 2 * N, 12 * N)
+    for n in (1024, 4096):
+        W, v = torch.randn(n, n), torch.randn(n)
+        point(f"GEMV {n}x{n}", lambda: W @ v, 2 * n * n, 4 * (n * n + 2 * n))
+    for n in (64, 256, 1024, 2048):
+        A, B = torch.randn(n, n), torch.randn(n, n)
+        point(f"GEMM n={n}", lambda: A @ B, 2 * n**3, 4 * 3 * n * n)
+    C, H = 64, 56
+    xi = torch.randn(1, C, H, H); ws = torch.randn(C, C, 3, 3); wd = torch.randn(C, 1, 3, 3)
+    act = 4 * 2 * C * H * H
+    point("conv3x3 64->64 @56", lambda: F.conv2d(xi, ws, padding=1), 2 * H * H * C * C * 9, act + 4 * C * C * 9)
+    point("dwconv3x3 64 @56", lambda: F.conv2d(xi, wd, padding=1, groups=C), 2 * H * H * C * 9, act + 4 * C * 9)
+for name, I, gb, gm in rows:
+    print(f"{name:20s} I={I:7.3f} FLOP/B  best {gb:7.1f} GFLOP/s  median {gm:7.1f}  (best x I^-1 = {gb/I:6.1f} GB/s)")
+```
+
+```text
+add  x+y  16M        I=  0.083 FLOP/B  best     5.8 GFLOP/s  median     5.1  (best x I^-1 =   69.1 GB/s)
+axpy x+2y 16M        I=  0.167 FLOP/B  best    11.5 GFLOP/s  median    10.2  (best x I^-1 =   69.0 GB/s)
+GEMV 1024x1024       I=  0.499 FLOP/B  best   109.2 GFLOP/s  median    91.8  (best x I^-1 =  218.8 GB/s)
+GEMV 4096x4096       I=  0.500 FLOP/B  best    29.2 GFLOP/s  median    24.8  (best x I^-1 =   58.4 GB/s)
+GEMM n=64            I= 10.667 FLOP/B  best   292.7 GFLOP/s  median   237.4  (best x I^-1 =   27.4 GB/s)
+GEMM n=256           I= 42.667 FLOP/B  best  1211.0 GFLOP/s  median  1024.6  (best x I^-1 =   28.4 GB/s)
+GEMM n=1024          I=170.667 FLOP/B  best  1383.8 GFLOP/s  median  1315.3  (best x I^-1 =    8.1 GB/s)
+GEMM n=2048          I=341.333 FLOP/B  best  1205.2 GFLOP/s  median  1080.1  (best x I^-1 =    3.5 GB/s)
+conv3x3 64->64 @56   I=131.888 FLOP/B  best   726.7 GFLOP/s  median   616.4  (best x I^-1 =    5.5 GB/s)
+dwconv3x3 64 @56     I=  2.247 FLOP/B  best    24.0 GFLOP/s  median    23.2  (best x I^-1 =   10.7 GB/s)
+```
+
+맨 오른쪽 열 `best × I⁻¹`은 "이 속도를 내려면 필요한 DRAM 대역폭"이다. memory-bound 커널이라면 이 값이 실측 대역폭(약 60~70 GB/s)에 가까워야 한다.
+
+측정 roofline: **P ≈ 1.2 TFLOP/s**(5.5절 행렬곱), **BW ≈ 68 GB/s**(5.2절 triad·add). ridge = 1200 ÷ 68 ≈ **17.6 FLOP/B**.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 390">
+<text x="20" y="22" font-size="14">이 Mac(M2)에서 측정한 roofline과 커널 점 (fp32, best-of 50)</text> <line x1="80" y1="340" x2="640" y2="340" stroke="currentColor"/> <line x1="80" y1="40" x2="80" y2="340" stroke="currentColor"/> <line x1="119.2" y1="340" x2="119.2" y2="345" stroke="currentColor"/><text x="119.2" y="359" font-size="12" text-anchor="middle">0.1</text> <line x1="119.2" y1="40" x2="119.2" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="249.4" y1="340" x2="249.4" y2="345" stroke="currentColor"/><text x="249.4" y="359" font-size="12" text-anchor="middle">1</text> <line x1="249.4" y1="40" x2="249.4" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="379.6" y1="340" x2="379.6" y2="345" stroke="currentColor"/><text x="379.6" y="359" font-size="12" text-anchor="middle">10</text> <line x1="379.6" y1="40" x2="379.6" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="509.8" y1="340" x2="509.8" y2="345" stroke="currentColor"/><text x="509.8" y="359" font-size="12" text-anchor="middle">100</text>
+<line x1="509.8" y1="40" x2="509.8" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="640.0" y1="340" x2="640.0" y2="345" stroke="currentColor"/><text x="640.0" y="359" font-size="12" text-anchor="middle">1000</text> <line x1="640.0" y1="40" x2="640.0" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="340.0" x2="80" y2="340.0" stroke="currentColor"/><text x="72" y="344.0" font-size="12" text-anchor="end">1</text> <line x1="80" y1="340.0" x2="640" y2="340.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="75" y1="258.9" x2="80" y2="258.9" stroke="currentColor"/><text x="72" y="262.9" font-size="12" text-anchor="end">10</text> <line x1="80" y1="258.9" x2="640" y2="258.9" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="177.8" x2="80" y2="177.8" stroke="currentColor"/><text x="72" y="181.8" font-size="12" text-anchor="end">100</text> <line x1="80" y1="177.8" x2="640" y2="177.8" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="96.7" x2="80" y2="96.7" stroke="currentColor"/><text x="72" y="100.7" font-size="12" text-anchor="end">1000</text>
+<line x1="80" y1="96.7" x2="640" y2="96.7" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <text x="360.0" y="378" font-size="13" text-anchor="middle">arithmetic intensity I (FLOP/byte, DRAM 기준 최소 트래픽)</text> <text x="16" y="190.0" font-size="13" text-anchor="middle" transform="rotate(-90 16 190.0)">GFLOP/s (log)</text> <polyline points="80.0,296.9 411.7,90.3 411.7,90.3 640.0,90.3" fill="none" stroke="#4a7bd0" stroke-width="2.5"/> <polyline points="80.0,296.9 266.9,180.5 266.9,180.5 640.0,180.5" fill="none" stroke="#888" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="412.8" y="55.7" font-size="12" text-anchor="middle">측정 천장(행렬 경로) ≈ 1.2 TFLOP/s</text> <text x="571.9" y="174.5" font-size="12" text-anchor="middle">NEON 1코어 93</text> <text x="99.0" y="255.0" font-size="12" transform="rotate(-23 99.0 255.0)">DRAM 68 GB/s</text> <circle cx="108.7" cy="278.1" r="4.5" fill="#d0564a"/><text x="114.7" y="292.1" font-size="12" text-anchor="start">add</text> <circle cx="148.2" cy="254.0" r="4.5" fill="#d0564a"/><text x="154.2" y="268.0" font-size="12" text-anchor="start">axpy</text>
+<circle cx="210.1" cy="174.7" r="4.5" fill="#e08a3c"/><text x="218.1" y="168.7" font-size="12" text-anchor="start">GEMV 1024 (L2 안)</text> <circle cx="210.2" cy="221.2" r="4.5" fill="#d0564a"/><text x="218.2" y="235.2" font-size="12" text-anchor="start">GEMV 4096</text> <circle cx="383.2" cy="140.0" r="4.5" fill="#4a7bd0"/><text x="391.2" y="154.0" font-size="12" text-anchor="start">GEMM 64</text> <circle cx="461.6" cy="89.9" r="4.5" fill="#4a7bd0"/><text x="453.6" y="79.9" font-size="12" text-anchor="end">GEMM 256</text> <circle cx="540.0" cy="85.2" r="4.5" fill="#4a7bd0"/><text x="540.0" y="73.2" font-size="12" text-anchor="middle">GEMM 1024</text>
+<circle cx="579.2" cy="90.1" r="4.5" fill="#4a7bd0"/><text x="587.2" y="106.1" font-size="12" text-anchor="start">GEMM 2048</text> <circle cx="525.4" cy="107.9" r="4.5" fill="#3f9a6b"/><text x="533.4" y="121.9" font-size="12" text-anchor="start">conv3×3</text> <circle cx="295.2" cy="228.1" r="4.5" fill="#3f9a6b"/><text x="303.2" y="242.1" font-size="12" text-anchor="start">dwconv3×3</text>
+</svg>
+```
+
+그림 5 — 이 Mac에서 측정한 roofline(파란 실선)과 커널 점(best 값). 회색 점선은 NEON 1코어 천장(93 GFLOP/s)이다. 빨간 점(elementwise, 큰 GEMV)은 사선에 거의 붙어 있고, 파란 점(큰 GEMM)은 수평선에 붙어 있다. 주황 점(GEMV 1024)은 **지붕 위**에 있고, 초록 점(depthwise)은 지붕보다 한참 아래다.
+
+### 5.8 점이 지붕에서 벗어난 이유 읽기
+
+| 커널 | 관찰 | 해석 |
+|---|---|---|
+| add, axpy (16M) | best × I⁻¹ = 69 GB/s | **메모리 지붕에 정확히 붙음.** elementwise는 torch도 대역폭 한계까지 잘 짠다. 개선 여지는 "바이트 줄이기"뿐 |
+| GEMV 4096 (64 MiB) | 58 GB/s 상당 | 지붕의 약 85 %. weight가 L2(16 MiB)보다 커서 매번 DRAM에서 온다. 정상적인 memory-bound |
+| GEMV 1024 (4 MiB) | 219 GB/s 상당 — **DRAM 지붕 위** | weight 4 MiB가 **L2 안에 들어가서** 반복 실행 때 DRAM에 안 간다. DRAM 바이트로 센 I가 틀린 것. L2 기준으로 세면 L2 지붕(약 110~130 GB/s, 여러 코어면 더) 아래로 들어온다. "지붕 위의 점 = 세는 레벨이 틀렸다"의 교과서 예 |
+| GEMM 64 | 293 GFLOP/s, 지붕(725)의 약 40 % | I = 10.7로 ridge(17.6) 왼쪽이지만 사실 64×64×3 = 48 KiB는 L1에 들어간다. 병목은 대역폭이 아니라 **호출 오버헤드**다. 0.5 MFLOP짜리 일이라 1 µs대에 끝나고, Python→torch→Accelerate 호출 비용이 같은 자릿수다 |
+| GEMM 256~2048 | 1.2~1.4 TFLOP/s | 연산 지붕에 붙음. n = 1024 best가 5.5절 천장보다 약간 높은 것은 천장 자체도 노이즈가 있는 측정이기 때문 |
+| conv3×3 64→64 @56 | 727 GFLOP/s (지붕의 약 60 %) | compute-bound 영역이지만 GEMM보다 낮다. conv → GEMM 변환(im2col 또는 직접 conv 알고리즘) 비용, 행렬 모양이 정사각이 아닌 것(K = 576, N = 3136, M = 64) 등. 행렬 경로 효율은 모양에 민감하다 |
+| dwconv3×3 64 @56 | 24 GFLOP/s, 필요 대역폭 11 GB/s | I = 2.25에서 메모리 지붕은 153 GFLOP/s인데 그 16 %. **메모리도 연산기도 다 못 쓰는** 상태 = 구현 한계. depthwise는 행렬 경로를 탈 수 없고(재사용 구조가 없음), 채널별 작은 3×3 루프라 SIMD 효율과 오버헤드에 묶인다. C7 2.4절에서 depthwise 단독이 5 GMAC/s였던 것과 같은 이야기 |
+
+roofline 해석의 세 가지 규칙으로 정리하면:
+
+1. **지붕에 붙은 점**: 하드웨어를 다 쓰고 있다. 더 빠르게 하려면 점을 **옮겨야**(I를 바꾸거나 다른 지붕으로) 한다. 코드 튜닝은 소용없다.
+2. **지붕 아래 멀리 있는 점**: 구현이 하드웨어를 못 쓰고 있다. SIMD, 루프 구조, 오버헤드, 메모리 접근 패턴을 봐야 한다. 이 경우는 코드 튜닝이 효과가 있다.
+3. **지붕 위의 점**: 모델이 틀렸다. 대개 바이트를 잘못 셌다(캐시 재사용, 상주 weight).
+
+### 5.9 함정
+
+- **Python 오버헤드**: torch 연산 하나를 호출하는 데 수 µs가 든다. 1 µs 안에 끝나는 커널은 roofline이 아니라 오버헤드를 재게 된다. 작은 커널은 반복 루프를 C 안에 넣어 재자(5.3절처럼).
+- **첫 실행 제외(warm-up)**: 첫 호출은 메모리 할당, 페이지 폴트, 라이브러리 초기화를 포함한다. 모든 예제가 먼저 한 번 돌리고 잰다.
+- **캐시가 데워진 상태**: 같은 입력으로 반복하면 작은 텐서는 캐시에 남는다. 실제 추론에서는 레이어마다 다른 weight를 쓰므로 캐시가 차갑다. 벤치마크 조건이 실제와 다르면 roofline 점이 실제보다 좋게 나온다.
+- **열(thermal)과 DVFS**: 오래 돌리면 클럭이 내려간다. 이 노트의 측정은 짧아서 burst 성능에 가깝다(K4).
+
+---
+
+## 6. Hierarchical roofline — 캐시 레벨마다 지붕이 하나씩
+
+### 6.1 직관
+
+5.3절에서 L1 약 200, L2 약 110, DRAM 약 60 GB/s(1코어)를 쟀다. 데이터가 레지스터까지 오려면 DRAM → L2 → L1 → 레지스터의 **파이프를 여러 단** 지나야 한다. 각 단마다 "그 레벨을 오간 바이트"가 다르고, 대역폭도 다르다. 그래서 **레벨마다 roofline을 하나씩** 그리고, 커널의 intensity도 **레벨마다 따로** 센다. 이를 hierarchical(또는 cache-aware) roofline이라고 부른다.
+
+```
+attainable = min( P,  I_L1 × BW_L1,  I_L2 × BW_L2,  I_DRAM × BW_DRAM )
+```
+
+말로 하면: 모든 단의 파이프가 제 몫을 해야 하고, **가장 좁은 단**이 전체를 정한다. 재사용을 잘하는 커널은 아래 레벨로 갈수록 바이트가 줄어서(I가 커져서) 병목이 위쪽 레벨로 올라간다.
+
+### 6.2 손계산 — 같은 GEMM, 레벨별 intensity
+
+fp32 GEMM n = 1024, 1코어를 예로 든다.
+
+```
+naive 삼중 루프 (A1 8절의 ijk):
+   L1 기준: MAC 하나마다 A 원소 1개, B 원소 1개 load → 2 FLOP / 8 B     → I_L1 = 0.25
+   → 1코어 L1 지붕: 0.25 × 200 GB/s = 50 GFLOP/s  (실제는 B를 열 방향으로 읽어서 캐시 미스로 훨씬 더 느리다)
+
+4×4 레지스터 블로킹 microkernel:
+   k 한 칸마다 A 4개 + B 4개 load (32 B), 16 MAC (32 FLOP)          → I_L1 = 1.0
+   → L1 지붕: 1.0 × 200 = 200 > NEON 천장 93  → 이제 L1은 병목이 아니다 (간신히)
+
+BLAS 수준 (레지스터 8×12 microkernel):
+   k 한 칸마다 8 + 12 = 20개 load (80 B), 96 MAC (192 FLOP)         → I_L1 = 2.4
+   + L2 타일링, L3/DRAM 타일링으로 I_L2, I_DRAM도 수십~수백
+```
+
+말로 하면: **tiling(블로킹)은 레벨마다 intensity를 끌어올리는 기술**이다. 레지스터 블로킹은 L1 intensity를, 캐시 블로킹은 L2/DRAM intensity를 올린다. A1 8절에서 naive ijk(약 1.1 GMAC/s)와 BLAS(약 600 GMAC/s)가 500배 차이 났던 것의 상당 부분이 이것이다.
+
+(8×12는 BLAS 계열 라이브러리에서 흔히 쓰이는 microkernel 크기의 한 예다. 정확한 크기는 라이브러리와 CPU마다 다르다.)
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 390">
+<text x="20" y="22" font-size="14">hierarchical roofline — 1코어, 이 Mac에서 잰 L1·L2·DRAM 대역폭 (C triad)</text> <line x1="80" y1="340" x2="640" y2="340" stroke="currentColor"/> <line x1="80" y1="40" x2="80" y2="340" stroke="currentColor"/> <line x1="131.1" y1="340" x2="131.1" y2="345" stroke="currentColor"/><text x="131.1" y="359" font-size="12" text-anchor="middle">0.1</text> <line x1="131.1" y1="40" x2="131.1" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="300.7" y1="340" x2="300.7" y2="345" stroke="currentColor"/><text x="300.7" y="359" font-size="12" text-anchor="middle">1</text> <line x1="300.7" y1="40" x2="300.7" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="470.4" y1="340" x2="470.4" y2="345" stroke="currentColor"/><text x="470.4" y="359" font-size="12" text-anchor="middle">10</text> <line x1="470.4" y1="40" x2="470.4" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="640.0" y1="340" x2="640.0" y2="345" stroke="currentColor"/><text x="640.0" y="359" font-size="12" text-anchor="middle">100</text>
+<line x1="640.0" y1="40" x2="640.0" y2="340" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="340.0" x2="80" y2="340.0" stroke="currentColor"/><text x="72" y="344.0" font-size="12" text-anchor="end">1</text> <line x1="80" y1="340.0" x2="640" y2="340.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="240.0" x2="80" y2="240.0" stroke="currentColor"/><text x="72" y="244.0" font-size="12" text-anchor="end">10</text> <line x1="80" y1="240.0" x2="640" y2="240.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="75" y1="140.0" x2="80" y2="140.0" stroke="currentColor"/><text x="72" y="144.0" font-size="12" text-anchor="end">100</text> <line x1="80" y1="140.0" x2="640" y2="140.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="40.0" x2="80" y2="40.0" stroke="currentColor"/><text x="72" y="44.0" font-size="12" text-anchor="end">1000</text> <line x1="80" y1="40.0" x2="640" y2="40.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <text x="360.0" y="378" font-size="13" text-anchor="middle">I (FLOP/byte) — 레벨마다 따로 센다</text>
+<text x="16" y="190.0" font-size="13" text-anchor="middle" transform="rotate(-90 16 190.0)">GFLOP/s (log)</text> <polyline points="80.0,240.0 244.1,143.3 244.1,143.3 640.0,143.3" fill="none" stroke="#3f9a6b" stroke-width="2.2"/> <line x1="470" y1="250" x2="494" y2="250" stroke="#3f9a6b" stroke-width="3"/><text x="500" y="254" font-size="12">L1 ≈ 200 GB/s</text> <polyline points="80.0,266.0 288.1,143.3 288.1,143.3 640.0,143.3" fill="none" stroke="#e08a3c" stroke-width="2.2"/> <line x1="470" y1="268" x2="494" y2="268" stroke="#e08a3c" stroke-width="3"/><text x="500" y="272" font-size="12">L2 ≈ 110 GB/s</text>
+<polyline points="80.0,292.3 332.8,143.3 332.8,143.3 640.0,143.3" fill="none" stroke="#d0564a" stroke-width="2.2"/> <line x1="470" y1="286" x2="494" y2="286" stroke="#d0564a" stroke-width="3"/><text x="500" y="290" font-size="12">DRAM ≈ 60 GB/s</text> <text x="640" y="135.3" font-size="12" text-anchor="end">NEON fp32 1코어 ≈ 93 GFLOP/s</text> <circle cx="198.6" cy="170.1" r="5" fill="#3f9a6b"/><text x="206.6" y="184.1" font-size="12" text-anchor="start">naive GEMM: I_L1 = 0.25 → 50</text> <circle cx="300.7" cy="143.3" r="5" fill="#4a7bd0"/><text x="308.7" y="159.3" font-size="12" text-anchor="start">blocked GEMM: I_L1 = 1 → 93 (L1이 아슬아슬)</text>
+<line x1="300.7" y1="143.3" x2="300.7" y2="340" stroke="#4a7bd0" stroke-dasharray="2 3"/> <text x="470" y="316" font-size="12">레벨마다 I를 따로 구하고</text><text x="470" y="332" font-size="12">가장 낮은 지붕이 속도를 정한다</text>
+</svg>
+```
+
+그림 6 — 이 Mac 1코어의 hierarchical roofline. 세 사선은 5.3절에서 잰 L1·L2·DRAM 대역폭이고 수평선은 5.6절의 NEON 1코어 천장이다. naive GEMM(초록 점)은 L1 기준 I = 0.25라서 L1 사선에 걸린다. 4×4 블로킹(파란 점)은 I_L1 = 1로 L1 지붕(200)이 NEON 천장(93)보다 높아져서 연산 천장에 닿는다. 같은 그래프에서 이 커널의 I_L2, I_DRAM은 훨씬 오른쪽에 찍힌다.
+
+### 6.3 NPU에서의 계층: DRAM → on-chip SRAM → MAC 배열
+
+NPU는 CPU 캐시 대신 **소프트웨어가 관리하는 SRAM**(scratchpad)을 쓰는 경우가 많다. 컴파일러가 "어떤 타일을 언제 DMA로 SRAM에 올릴지"를 정한다(E5). 계층은:
+
+```
+DRAM ──(수~수십 GB/s)──▶ on-chip SRAM ──(수백 GB/s~수 TB/s)──▶ MAC 배열 내부 레지스터/버퍼
+      I_DRAM: 타일 크기가 결정          I_SRAM: dataflow(weight/output-stationary)가 결정
+```
+
+- DRAM 단의 intensity는 **SRAM 크기와 타일링**이 정한다(4.9절).
+- SRAM → MAC 단의 intensity는 **dataflow**(한 번 가져온 weight를 MAC 배열 안에서 몇 번 쓰나)가 정한다. systolic array는 이 재사용을 하드웨어 배선으로 구현한 것이다.
+
+펌웨어 엔지니어라면 이 구조가 익숙하다. SSD 컨트롤러의 **DRAM 버퍼 ↔ SRAM ↔ 하드웨어 엔진**과 같다. 엔진이 SRAM만 보고 일하고, 펌웨어(여기서는 NPU 컴파일러)가 DMA descriptor로 데이터를 미리 올려 둔다.
+
+### 6.4 함정
+
+- **"DRAM 기준 I만 보고 compute-bound라고 결론"**: I_DRAM이 커도 I_L1이 작으면 L1에서 막힌다. naive 삼중 루프가 대표적이다.
+- **레벨별 대역폭은 코어 수에 따라 다르다.** L1은 코어마다 따로 있어서 코어 수에 비례해 늘고, DRAM은 공유라서 안 늘 수 있다(5.4절). 멀티코어 roofline을 그릴 때는 레벨별로 "몇 코어 기준"인지 명시한다.
+
+---
+
+## 7. Roofline으로 결정하기
+
+roofline의 진짜 쓸모는 "무엇을 바꾸면 얼마나 빨라지나"를 **실험 전에** 말하는 것이다. 모든 최적화는 점을 **오른쪽으로**(I 증가) 옮기거나, **지붕 자체를** 올리거나, **지붕 아래 점을 지붕 쪽으로** 올리는 것 중 하나다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 380">
+<text x="20" y="22" font-size="14">roofline 위에서 최적화는 "점을 어디로 옮기나"로 읽는다 (예시 가속기 1000 GOPS / 50 GB/s)</text> <line x1="80" y1="330" x2="640" y2="330" stroke="currentColor"/> <line x1="80" y1="40" x2="80" y2="330" stroke="currentColor"/> <line x1="80.0" y1="330" x2="80.0" y2="335" stroke="currentColor"/><text x="80.0" y="349" font-size="12" text-anchor="middle">0.1</text> <line x1="80.0" y1="40" x2="80.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="220.0" y1="330" x2="220.0" y2="335" stroke="currentColor"/><text x="220.0" y="349" font-size="12" text-anchor="middle">1</text> <line x1="220.0" y1="40" x2="220.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="360.0" y1="330" x2="360.0" y2="335" stroke="currentColor"/><text x="360.0" y="349" font-size="12" text-anchor="middle">10</text> <line x1="360.0" y1="40" x2="360.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="500.0" y1="330" x2="500.0" y2="335" stroke="currentColor"/><text x="500.0" y="349" font-size="12" text-anchor="middle">100</text>
+<line x1="500.0" y1="40" x2="500.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="640.0" y1="330" x2="640.0" y2="335" stroke="currentColor"/><text x="640.0" y="349" font-size="12" text-anchor="middle">1000</text> <line x1="640.0" y1="40" x2="640.0" y2="330" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="330.0" x2="80" y2="330.0" stroke="currentColor"/><text x="72" y="334.0" font-size="12" text-anchor="end">1</text> <line x1="80" y1="330.0" x2="640" y2="330.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/>
+<line x1="75" y1="257.5" x2="80" y2="257.5" stroke="currentColor"/><text x="72" y="261.5" font-size="12" text-anchor="end">10</text> <line x1="80" y1="257.5" x2="640" y2="257.5" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="185.0" x2="80" y2="185.0" stroke="currentColor"/><text x="72" y="189.0" font-size="12" text-anchor="end">100</text> <line x1="80" y1="185.0" x2="640" y2="185.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="112.5" x2="80" y2="112.5" stroke="currentColor"/><text x="72" y="116.5" font-size="12" text-anchor="end">1000</text>
+<line x1="80" y1="112.5" x2="640" y2="112.5" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <line x1="75" y1="40.0" x2="80" y2="40.0" stroke="currentColor"/><text x="72" y="44.0" font-size="12" text-anchor="end">10000</text> <line x1="80" y1="40.0" x2="640" y2="40.0" stroke="#888" stroke-width="0.5" stroke-dasharray="2 4"/> <text x="360.0" y="368" font-size="13" text-anchor="middle">I (ops/byte, log)</text> <text x="16" y="185.0" font-size="13" text-anchor="middle" transform="rotate(-90 16 185.0)">attainable (log)</text>
+<polyline points="80.0,279.3 402.1,112.5 402.1,112.5 640.0,112.5" fill="none" stroke="#888" stroke-width="2.5"/> <circle cx="177.9" cy="228.6" r="4" fill="#d0564a"/><line x1="177.9" y1="228.6" x2="262.1" y2="185.0" stroke="#d0564a" stroke-width="2"/><polygon points="262.1,185.0 256.4,191.9 253.2,185.7" fill="#d0564a"/><text x="70.0" y="200.8" font-size="12" fill="#d0564a">① fp32→int8: 바이트 ÷4</text> <circle cx="262.1" cy="185.0" r="4" fill="#4a7bd0"/><line x1="262.1" y1="185.0" x2="388.6" y2="119.5" stroke="#4a7bd0" stroke-width="2"/><polygon points="388.6,119.5 382.8,126.5 379.6,120.2" fill="#4a7bd0"/><text x="113.4" y="148.3" font-size="12" fill="#4a7bd0">② batch 1→8 · tiling: 재사용 ×8</text> <circle cx="93.6" cy="272.3" r="4" fill="#e08a3c"/><line x1="93.6" y1="272.3" x2="160.4" y2="237.7" stroke="#e08a3c" stroke-width="2"/><polygon points="160.4,237.7 154.6,244.6 151.4,238.4" fill="#e08a3c"/><text x="133.0" y="281.0" font-size="12" fill="#e08a3c">③ fusion: 중간 텐서 왕복 제거</text> <circle cx="500.0" cy="172.2" r="4" fill="#3f9a6b"/><line x1="500.0" y1="172.2" x2="500.0" y2="116.5" stroke="#3f9a6b" stroke-width="2"/><polygon points="500.0,116.5 503.5,124.8 496.5,124.8" fill="#3f9a6b"/><text x="250.0" y="214.4" font-size="12" fill="#3f9a6b">④ 구현 개선(SIMD·DMA overlap): 지붕 아래 → 지붕</text>
+</svg>
+```
+
+그림 7 — 최적화가 점을 움직이는 방향. ① 양자화는 같은 연산을 더 적은 바이트로 하게 해서 오른쪽으로(memory-bound에서는 그만큼 위로도), ② batching·tiling은 재사용을 늘려 오른쪽으로, ③ fusion은 중간 텐서 왕복을 없애 오른쪽으로 옮긴다. ④ 구현 개선은 I는 그대로 두고 지붕 아래 점을 지붕 쪽으로 올린다. compute-bound 영역(수평선)에서 오른쪽으로 옮기는 것은 **속도를 바꾸지 않는다** — 이미 연산 천장에 있으니까.
+
+### 7.1 Batching — 서버는 batch를 키우고, 웨어러블은 batch 1로 산다
+
+4.4절: dense layer의 I는 batch B에 거의 비례한다. weight를 한 번 가져와서 B개 샘플에 쓰기 때문이다.
+
+무엇을 확인하나: 4096×4096 fp32 dense layer(weight 64 MiB, L2보다 큼)를 batch 1~256으로 돌려 처리율과 샘플당 시간을 본다. median 시간.
+
+```python
+# dense layer 4096x4096 (fp32): batch를 키우면 intensity와 처리율이 어떻게 변하나
+import time, torch
+torch.manual_seed(0); torch.set_num_threads(4)
+K = N = 4096
+W = torch.randn(N, K)                                   # 64 MiB: L2(16 MiB)보다 큼 → 매번 DRAM에서
+def bench(f, reps=20):
+    f(); ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); f(); ts.append(time.perf_counter() - t0)
+    return sorted(ts)[len(ts) // 2]                      # median
+with torch.inference_mode():
+    for Bt in (1, 4, 16, 64, 256):
+        X = torch.randn(Bt, K)
+        t = bench(lambda: X @ W.T)
+        flop = 2 * Bt * K * N
+        I = flop / (4 * (K * N + Bt * K + Bt * N))
+        print(f"batch={Bt:4d}  I={I:6.1f} FLOP/B  {t*1e3:7.3f} ms  "
+              f"{flop/t/1e9:7.1f} GFLOP/s  per-sample {t/Bt*1e6:8.1f} us")
+```
+
+```text
+batch=   1  I=   0.5 FLOP/B    1.207 ms     27.8 GFLOP/s  per-sample   1207.2 us
+batch=   4  I=   2.0 FLOP/B    5.009 ms     26.8 GFLOP/s  per-sample   1252.2 us
+batch=  16  I=   7.9 FLOP/B    4.905 ms    109.5 GFLOP/s  per-sample    306.6 us
+batch=  64  I=  31.0 FLOP/B    5.754 ms    373.2 GFLOP/s  per-sample     89.9 us
+batch= 256  I= 113.8 FLOP/B   10.664 ms    805.5 GFLOP/s  per-sample     41.7 us
+```
+
+출력에서 볼 것:
+
+- batch 1: 64 MiB ÷ 1.21 ms ≈ 55 GB/s. **DRAM 지붕에 붙은 GEMV**다. 28 GFLOP/s.
+- batch 256: 806 GFLOP/s로 **약 29배**. 샘플당 시간은 1207 µs → 42 µs. I = 114로 ridge(17.6)를 넘어 compute-bound 영역이다.
+- batch 4는 오히려 batch 1보다 **총 시간이 4배** 걸렸다(샘플당 시간이 거의 같음). roofline이 예측하는 것(I = 2 → 약 4배 빠른 처리율)과 정반대다. 따로 확인해 보니 batch 2~16 구간에서 Accelerate가 느린 경로를 탄다(별도로 재 보니 numpy도 같은 현상이었고, batch 2에서는 GEMV를 두 번 부르는 쪽이 오히려 빨랐다). 원인은 확인하지 않았다. **roofline은 상한일 뿐이고, 라이브러리가 그 모양(skinny GEMM)을 잘 처리하는지는 별개**다. 실제 배포에서 흔히 부딪히는 일이다.
+
+**왜 서버는 batch를 키우나**: 여러 사용자의 요청을 모아 한 번에 돌리면 weight 재사용이 늘어 같은 칩으로 처리량이 수십 배가 된다. 대가는 latency(모이기를 기다리는 시간)다.
+
+**왜 웨어러블은 batch 1인가**: 한 사람, 한 마이크, 한 IMU 스트림이다. 20 ms 오디오 프레임이 들어오면 다음 프레임을 기다릴 수 없다(D6 deadline). 그래서 edge 추론은 거의 항상 **batch 1 = GEMV/작은 GEMM = memory-bound 쪽**에서 산다. 다른 방법으로 intensity를 올려야 한다:
+
+- 시간 축으로 묶을 수 있는 계산은 묶는다: B3 11.2절의 GRU 입력 투영(`W_ih·X`)처럼 여러 프레임을 한 GEMM으로.
+- 여러 모델·여러 head가 같은 입력을 쓰면 weight를 이어 붙여 한 GEMM으로.
+- 그래도 안 되면 바이트 자체를 줄인다(양자화, 7.2절) 또는 weight를 SRAM에 상주시킨다(7.4절).
+
+### 7.2 양자화 — 바이트를 줄여 점을 오른쪽으로
+
+memory-bound 커널에서 fp32 → int8은 같은 ops에 바이트를 1/4로 만든다. I가 4배, attainable도 (사선 위에 있는 한) 4배다. **단, 연산 쪽도 4배 빨리 먹을 수 있어야** 한다.
+
+무엇을 확인하나: 8192×8192 GEMV(fp32 weight 256 MiB, int8 weight 64 MiB)를 C로 세 가지 방식으로 돌린다: fp32 단순 루프, fp32 16-lane 루프, int8 루프. 모두 1스레드.
+
+```c
+/* 8192x8192 GEMV: fp32 naive / fp32 16-lane / int8. 바이트가 1/4이면 시간도 1/4인가? */
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#define R 8192
+#define C 8192
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+static void f32_naive(const float *W, const float *x, float *y) {
+    for (int r = 0; r < R; r++) { float acc = 0; const float *w = W + (size_t)r * C;
+        for (int c = 0; c < C; c++) acc += w[c] * x[c];          /* 한 줄짜리 덧셈 체인 */
+        y[r] = acc; }
+}
+static void f32_lanes(const float *W, const float *x, float *y) {
+    for (int r = 0; r < R; r++) { float acc[16] = {0}; const float *w = W + (size_t)r * C;
+        for (int c = 0; c < C; c += 16)
+            for (int l = 0; l < 16; l++) acc[l] += w[c + l] * x[c + l];   /* 독립 체인 16개 → SIMD */
+        float s = 0; for (int l = 0; l < 16; l++) s += acc[l];
+        y[r] = s; }
+}
+static void i8_gemv(const int8_t *W, const int8_t *x, int32_t *y) {
+    for (int r = 0; r < R; r++) { int32_t acc = 0; const int8_t *w = W + (size_t)r * C;
+        for (int c = 0; c < C; c++) acc += (int32_t)w[c] * x[c];  /* 정수 합은 순서 바꿔도 같음 → 자동 SIMD */
+        y[r] = acc; }
+}
+int main(void) {
+    float *Wf = malloc((size_t)R * C * 4), *xf = malloc(C * 4), *yf = malloc(R * 4), *yl = malloc(R * 4);
+    int8_t *Wq = malloc((size_t)R * C), *xq = malloc(C); int32_t *yq = malloc(R * 4);
+    if (!Wf || !xf || !yf || !yl || !Wq || !xq || !yq) return 1;
+    for (size_t i = 0; i < (size_t)R * C; i++) { Wq[i] = (int8_t)(i * 7 % 255 - 127); Wf[i] = Wq[i]; }
+    for (int c = 0; c < C; c++) { xq[c] = (int8_t)(c % 5 - 2); xf[c] = xq[c]; }
+    double b[3] = {1e30, 1e30, 1e30};
+    for (int t = 0; t < 7; t++) {
+        double t0 = now(); f32_naive(Wf, xf, yf); double t1 = now(); f32_lanes(Wf, xf, yl);
+        double t2 = now(); i8_gemv(Wq, xq, yq); double t3 = now();
+        if (t1 - t0 < b[0]) b[0] = t1 - t0; if (t2 - t1 < b[1]) b[1] = t2 - t1; if (t3 - t2 < b[2]) b[2] = t3 - t2;
+    }
+    const char *nm[3] = {"fp32 naive  ", "fp32 16-lane", "int8        "}; double wb[3] = {4, 4, 1};
+    for (int k = 0; k < 3; k++)
+        printf("%s %6.2f ms  weight stream %5.1f GB/s  %5.1f G(FL)OP/s\n", nm[k], b[k] * 1e3,
+               wb[k] * R * C / b[k] / 1e9, 2.0 * R * C / b[k] / 1e9);
+    printf("check y[3]: %.0f %.0f %d\n", yf[3], yl[3], yq[3]);
+    return 0;
+}
+```
+
+```text
+fp32 naive    64.43 ms  weight stream   4.2 GB/s    2.1 G(FL)OP/s
+fp32 16-lane   7.21 ms  weight stream  37.2 GB/s   18.6 G(FL)OP/s
+int8           1.72 ms  weight stream  39.1 GB/s   78.3 G(FL)OP/s
+check y[3]: -8227 -8227 -8227
+```
+
+출력에서 볼 것:
+
+- **fp32 16-lane과 int8은 둘 다 weight를 약 37~39 GB/s로 흘린다.** 둘 다 같은 메모리 지붕 위에 있고, int8은 바이트가 1/4이라 **약 4.2배 빠르다**(7.21 → 1.72 ms). 양자화가 memory-bound 커널에 주는 이득이 정확히 바이트 비율이라는 것을 확인했다.
+- **fp32 단순 루프는 64 ms로 9배 느리다.** 이건 메모리 문제가 아니다. `acc += w[c] × x[c]` 한 줄은 모든 덧셈이 이전 덧셈을 기다리는 의존성 체인이다. 컴파일러는 부동소수점 덧셈 순서를 바꾸면 결과가 달라질 수 있어서(`-ffast-math` 없이는) SIMD로 바꾸지 못한다. 5.6절의 NACC = 1인 상황이다. 2.1 GFLOP/s ≈ FMA 1개 / 3~4 cycle. **memory-bound라고 생각했던 커널이 사실은 latency-bound**였던 것이다. roofline을 그려 보면 이 점은 지붕보다 한참 아래에 찍혀서 "구현 문제"라고 바로 알려 준다.
+- int8은 정수 덧셈이라 순서를 바꿔도 결과가 같다. 그래서 컴파일러가 자동으로 SIMD화했다.
+- 1스레드 read-only 스트림이 약 38 GB/s로 triad(약 60 GB/s)보다 낮다. 행마다 reduction이 끊기는 패턴과 1코어가 동시에 낼 수 있는 miss 수의 한계로 추정한다(확인하지 않음). 이런 "커널별 실효 대역폭 차이"도 roofline의 사선이 하나가 아닌 이유다.
+
+양자화가 **효과 없는** 경우: compute-bound 커널에서 연산기가 int8을 더 빨리 처리하지 못한다면 바이트를 줄여도 수평선에 머문다. 반대로 NPU처럼 int8 MAC이 fp16보다 2배 많은 칩이라면 int8은 **지붕도 올린다**. 결국 "양자화가 몇 배 빨라지나"는 roofline 위치에 따라 1배~4배(이상)로 달라진다.
+
+### 7.3 Operator fusion — DRAM 왕복을 없애 점을 오른쪽으로
+
+C6 4절: conv → BN → ReLU를 따로 돌리면 중간 텐서가 DRAM을 왕복한다. fusion은 **연산 수는 그대로, 바이트만 줄인다.**
+
+무엇을 확인하나: `y = relu(x × s + b)`를 op 3개(중간 텐서 2번 저장)와 루프 1개로 비교한다. 배열 128 MiB.
+
+```c
+/* y = relu(x*s + b): op 3개를 따로(중간 텐서 DRAM 왕복) vs 루프 하나로 fusion */
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#define N ((size_t)1 << 25)                        /* 32M float = 128 MiB */
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+static void unfused(const float *x, float *t, float *y, float s, float b) {
+    for (size_t i = 0; i < N; i++) t[i] = x[i] * s;                 /* read x, write t */
+    for (size_t i = 0; i < N; i++) t[i] = t[i] + b;                 /* read t, write t */
+    for (size_t i = 0; i < N; i++) y[i] = t[i] > 0 ? t[i] : 0;      /* read t, write y */
+}
+static void fused(const float *x, float *y, float s, float b) {
+    for (size_t i = 0; i < N; i++) { float v = x[i] * s + b; y[i] = v > 0 ? v : 0; }  /* read x, write y */
+}
+int main(void) {
+    float *x = malloc(N * 4), *t = malloc(N * 4), *y = malloc(N * 4);
+    if (!x || !t || !y) return 1;
+    for (size_t i = 0; i < N; i++) { x[i] = (float)(i % 17) - 8; t[i] = 0; y[i] = 0; }
+    double bu = 1e30, bf = 1e30;
+    for (int k = 0; k < 9; k++) {
+        double t0 = now(); unfused(x, t, y, 0.5f, 1.0f); double t1 = now(); fused(x, y, 0.5f, 1.0f); double t2 = now();
+        if (t1 - t0 < bu) bu = t1 - t0; if (t2 - t1 < bf) bf = t2 - t1;
+    }
+    double flop = 3.0 * N;                                           /* mul, add, max per element */
+    printf("unfused: %6.2f ms  bytes %4.0f MiB  I=%.3f FLOP/B  %5.1f GB/s\n", bu * 1e3, 24.0 * N / 1048576, flop / (24.0 * N), 24.0 * N / bu / 1e9);
+    printf("fused  : %6.2f ms  bytes %4.0f MiB  I=%.3f FLOP/B  %5.1f GB/s\n", bf * 1e3,  8.0 * N / 1048576, flop / ( 8.0 * N),  8.0 * N / bf / 1e9);
+    printf("speedup %.2fx (byte ratio 3x), y[1]=%.1f y[16]=%.1f\n", bu / bf, y[1], y[16]);
+    return 0;
+}
+```
+
+```text
+unfused:  12.32 ms  bytes  768 MiB  I=0.125 FLOP/B   65.4 GB/s
+fused  :   4.20 ms  bytes  256 MiB  I=0.375 FLOP/B   63.9 GB/s
+speedup 2.93x (byte ratio 3x), y[1]=0.0 y[16]=5.0
+```
+
+출력에서 볼 것: 두 버전 모두 **같은 대역폭(64~65 GB/s)**으로 돈다. 즉 둘 다 메모리 지붕에 붙어 있다. 바이트가 3배 차이 나니 시간도 **2.9배** 차이. fusion은 intensity를 0.125 → 0.375로 3배 오른쪽으로 옮겼고, 사선 위이므로 속도도 3배다. elementwise 체인에서 fusion은 **거의 공짜 점심**이다. C6이 fusion을 그래프 최적화의 핵심으로 꼽은 이유가 이 숫자다.
+
+### 7.4 Tiling과 SRAM 상주 — weight를 "한 번만" 가져오기
+
+NPU·DSP가 on-chip SRAM을 크게 두는 이유는 두 가지다.
+
+- **tiling**(4.9절): 큰 레이어를 SRAM 크기 타일로 잘라 재사용을 늘린다. SRAM이 클수록 I_DRAM의 상한이 커진다.
+- **weight 상주**: 모델 전체 weight가 SRAM에 들어가면, 처음 한 번만 DRAM(또는 flash)에서 가져오고 **이후 추론에서는 weight DRAM 트래픽이 0**이 된다. 그러면 GEMV의 I_DRAM은 "activation만 오가는" 값으로 치솟는다.
+
+손계산: wake word용 작은 모델, int8 weight 200 KB, 추론당 MAC 5 M(ops 10 M), 입력·출력 activation DRAM 트래픽 20 KB라고 하자(가상의 숫자).
+
+```
+weight를 매번 DRAM에서 읽을 때:  I = 10 M ops ÷ (200 KB + 20 KB) ≈ 45 ops/B
+weight SRAM 상주:               I = 10 M ops ÷ 20 KB             = 500 ops/B
+→ MCU + micro-NPU(ridge 25)에서는 둘 다 compute-bound지만,
+  DSP(ridge 67)에서는 상주 여부가 memory-bound ↔ compute-bound를 가른다.
+```
+
+말로 하면: **SRAM 크기는 "무료 대역폭"이다.** 모델이 SRAM에 들어가느냐가 roofline 위치를 바꾼다. 그래서 edge 모델 설계(C7)가 "SRAM에 들어가는 크기"를 강한 제약으로 쓴다. 에너지 면에서도 DRAM 접근은 SRAM보다 훨씬 비싸서(D7) 상주는 전력까지 줄인다.
+
+### 7.5 실리콘 선정 — 연산을 살까, 대역폭을 살까 (M1)
+
+roofline은 칩 비교표(M1)를 "우리 모델 기준"으로 읽게 해 준다. 절차:
+
+1. 대표 모델(예: wake word CNN, 음성 인코더, 작은 LLM)의 레이어별 ops와 bytes를 센다(D1, D2).
+2. 레이어별 I의 **분포**를 본다. ops 가중 히스토그램이 좋다.
+3. 후보 칩의 ridge와 비교한다.
+
+- **대부분의 연산이 ridge 오른쪽**(큰 conv 위주 비전 모델): TOPS가 효과가 있다. 연산을 산다.
+- **대부분이 ridge 왼쪽**(batch-1 LLM decode, RNN, depthwise 많은 모델, 음성 streaming): TOPS를 두 배로 해도 안 빨라진다. **대역폭과 SRAM 크기**를 산다. LLM decode는 tokens/s 상한이 거의 "대역폭 ÷ 모델 바이트"로 정해진다(D5).
+
+예: 칩 X = 40 TOPS / 50 GB/s(ridge 800), 칩 Y = 15 TOPS / 100 GB/s(ridge 150). 1B 파라미터 int4 LLM decode(I ≈ 4 ops/B, 0.5 GB/token)라면 X는 약 100 token/s, Y는 약 200 token/s 상한이다. TOPS가 절반인 Y가 **두 배 빠르다.** 반대로 해상도 큰 비전 CNN(I ≫ 800)이면 X가 2.7배 빠르다.
+
+### 7.6 함정
+
+- **"양자화했는데 안 빨라졌다"**: compute-bound 레이어였거나, int8 커널이 없어 dequantize 후 fp32로 돌았거나(연산 천장이 오히려 낮아짐), 연산이 latency-bound였다.
+- **"batch를 키웠는데 latency가 늘었다"**: 당연하다. throughput과 latency는 다른 축이다. 웨어러블에서는 latency 예산(D6)이 먼저다.
+- **fusion으로 중간 텐서를 없앴는데 안 빨라졌다**: 그 op는 이미 compute-bound였거나, 중간 텐서가 원래 캐시 안에 있어서 DRAM 왕복이 없었다.
+
+---
+
+## 8. Roofline 모델의 한계 — 무엇을 빼먹고 있나
+
+roofline은 **상한을 주는 1차 모델**이다. "이것보다 빠를 수 없다"는 확실하게 말하지만, "이만큼 빠를 것이다"는 보장하지 않는다. 빼먹는 것들:
+
+| 빠진 것 | 무슨 일이 생기나 | 대응 |
+|---|---|---|
+| 고정 오버헤드 (latency) | 커널 launch, 드라이버 호출, DMA 설정, 동기화. 작은 op에서는 이게 전부다(5.8절 GEMM 64, C7의 작은 1×1 16개) | `t ≈ t0 + max(ops/P, bytes/BW)`로 확장. t0를 따로 측정 |
+| 연산 종류 차이 | peak는 "가장 좋은 op"(int8 dot-product, FMA) 기준. exp, divide, gather, softmax는 훨씬 느리다. SIMD 폭을 못 채우는 모양(채널 수 7, depthwise)도 | op 종류별 천장을 따로 그린다(5.5절: 행렬 경로 1.2 TFLOP/s vs NEON 93) |
+| 특수 명령 | int8 dot-product 명령(Arm SDOT/UDOT 등)이 있으면 int8 천장이 fp32의 몇 배. 없으면 int8이 오히려 느릴 수도 | 칩·명령어별 천장 (E2) |
+| 의존성 체인 | 5.6절 NACC, 7.2절 fp32 단순 루프. throughput 천장이 아니라 latency 천장에 걸림 | ILP 늘리기(accumulator 여러 개, 루프 풀기) |
+| 메모리 latency vs 대역폭 | roofline의 BW는 "스트리밍"(prefetch가 잘 되는 연속 접근) 기준. 포인터 추적, gather, 작은 랜덤 접근은 latency에 묶인다 | Little's law: 대역폭 ≈ outstanding 요청 수 × 요청 크기 ÷ latency |
+| 여러 개의 지붕 | L1/L2/DRAM(6절), CPU/DSP/NPU별 천장 | hierarchical roofline, 엔진별 roofline |
+| 전력·열 한계 | 웨어러블은 peak로 오래 못 돈다. DVFS로 클럭이 내려가면 P가 내려가고, 전력 예산이 먼저 막히면 "연산 지붕"이 사실상 더 낮다 | sustained 조건에서 재측정(K4), 에너지 roofline(D7) |
+| 공유 자원 경합 | 폰 SoC에서 NPU가 도는 동안 CPU·GPU·카메라가 DRAM을 같이 쓴다. BW가 측정할 때마다 다르다 | 실제 시나리오 부하를 걸고 측정 |
+| overlap 가정 | double buffering이 불완전하면 `t = t_compute + t_memory`에 가까워진다 | DMA와 연산 겹치기(9.2절) |
+
+Don에게 익숙한 비유: roofline은 **링크 budget 계산**과 같다. 이론 최대치를 알려 주지만 실제 링크는 overhead(프로토콜 헤더, 재전송, 전력 모드 전환)만큼 낮다. 그래도 budget 계산 없이 튜닝을 시작하는 사람은 없다.
+
+---
+
+## 9. 임베디드 관점에서 다시 보기
+
+### 9.1 캐시 없는 MCU — 대부분 compute-bound
+
+Cortex-M4/M33급 MCU에서 SRAM은 대개 zero-wait이고 load 한 번이 1~2 cycle이다. 3절의 가상 MCU처럼 ridge가 1 근처라서 GEMV조차 compute-bound다. 그래서 MCU 최적화는 **연산 명령 수를 줄이는 쪽**(SIMD, int8 packed MAC, 루프 풀기)이 효과가 크다. B3 11.3절의 "RNN은 MCU에서 오히려 좋다"가 이것이다.
+
+예외: **weight가 flash에 있을 때**. XIP(execute-in-place) flash는 wait state가 붙거나 캐시/prefetch 버퍼가 작아서 대역폭이 SRAM보다 한참 낮을 수 있다. 그러면 weight를 읽는 레이어가 flash 대역폭에 묶인다. "weight를 SRAM으로 복사해 두고 돌린다" vs "flash에서 바로 읽는다"는 roofline 위치를 바꾸는 선택이다(D2의 메모리 예산과 trade-off).
+
+### 9.2 DSP + TCM + DMA — double buffering이 roofline을 현실로 만든다
+
+DSP(예: Xtensa HiFi, Hexagon)는 보통 작은 TCM(tightly coupled memory)과 DMA를 쓴다. 1.2절의 `t = max(t_compute, t_memory)`는 **DMA와 연산이 겹칠 때만** 성립한다.
+
+```
+double buffering 없음 (직렬):
+DMA   [tile0]         [tile1]         [tile2]
+MAC           [tile0]         [tile1]         [tile2]
+→ t = Σ(t_dma + t_mac)
+
+double buffering (ping-pong 버퍼 2개):
+DMA   [tile0][tile1][tile2][tile3]
+MAC          [tile0][tile1][tile2][tile3]
+→ t ≈ N × max(t_dma, t_mac)  ← roofline 가정
+```
+
+말로 하면: 버퍼 두 개를 번갈아 쓰면서 DMA가 다음 타일을 가져오는 동안 MAC이 현재 타일을 계산한다. Don이 SSD에서 NAND read와 호스트 전송을 겹치던 것과 똑같다. 이게 안 되어 있으면 실측이 roofline보다 최대 2배 느리다.
+
+### 9.3 NPU — 컴파일러가 roofline을 푼다
+
+NPU 컴파일러(벤더 툴체인)는 레이어마다 "어떤 타일 크기로 자르고, 무엇을 SRAM에 두고, DMA를 어떻게 겹칠지"를 정한다. 사실상 **레이어마다 roofline 최적화 문제를 푸는 것**이다. 엔지니어가 할 일은:
+
+- 프로파일러에서 레이어별 시간과 DRAM 트래픽을 받아 **레이어별 roofline 점**을 찍는다.
+- 지붕 아래 멀리 있는 레이어 → 지원 안 되는 op, 비효율적인 모양(채널 수 정렬, C6 7.5절), CPU fallback 여부 확인.
+- memory-bound 레이어가 전체 시간의 대부분이면 → 양자화, fusion, SRAM 상주를 먼저 검토.
+
+### 9.4 폰 SoC — 대역폭은 공유 자원이다
+
+Qualcomm 같은 모바일 SoC(Hark 기기에 쓰일 수 있다고 추정되는 계열)에서 LPDDR 대역폭은 CPU, GPU, DSP/NPU, ISP, 디스플레이가 나눠 쓴다. 데이터시트 대역폭을 NPU 혼자 쓴다고 가정하면 memory-bound 레이어를 과대평가한다. 실제 유즈케이스(마이크 스트리밍 + BLE + 화면 켜짐 등)를 걸고 재야 한다.
+
+---
+
+## 10. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| MAC과 ops(FLOP)를 섞음 | 계산한 attainable이 실측의 정확히 2배 또는 1/2 | TOPS는 보통 2 ops/MAC 기준 | 단위를 하나로 통일, 식마다 단위 표기 |
+| DRAM 바이트를 셌는데 데이터가 캐시에 있음 | 실측 점이 지붕 **위**에 찍힘 (5.8절 GEMV 1024) | 반복 실행 중 L2 재사용 | 작업 집합이 캐시보다 큰지 확인, 레벨별로 센다 |
+| peak를 데이터시트 TOPS로 잡음 | 모든 레이어가 "지붕의 20 %" | int4/sparsity/부스트 클럭 기준 TOPS | 마이크로벤치마크로 실측 천장을 잰다 |
+| 대역폭을 이론치로 잡음 | memory-bound 예측이 1.3~1.5배 낙관적 | 실효 대역폭은 이론의 60~80 % | STREAM류로 재서 쓴다 |
+| 작은 커널을 Python에서 잼 | 모든 작은 op가 비슷하게 느림 | 호출 오버헤드가 지배 | 반복을 네이티브 루프 안에 넣거나 t0를 분리 |
+| fp32 reduction 루프를 memory-bound로 오판 | 대역폭을 다 못 쓰는데 원인을 모름 (7.2절) | 의존성 체인으로 SIMD 불가 | accumulator 여러 개, 벡터화 리포트 확인 |
+| batch 1 배포인데 batch 32 벤치마크 | 실제 기기에서 몇 배 느림 | batch가 I를 올려 줬던 것 | 배포 조건(batch 1, 콜드 캐시)으로 측정 |
+| weight 상주 여부를 무시 | 모델 A는 예측이 맞고 모델 B는 크게 빗나감 | B는 SRAM에 안 들어가 매번 DRAM 재로드 | 레이어별로 weight 위치(SRAM/DRAM/flash)를 표시 |
+| 스레드 설정이 먹었다고 가정 | 스레드를 바꿔도 결과가 안 변함 (5.5절) | 행렬곱이 별도 라이브러리(Accelerate)로 감 | 실제 백엔드와 그 설정 방법 확인 |
+
+---
+
+## 11. 면접에서 이렇게 말한다
+
+**Q.** "What is the roofline model, and how do you use it in practice?"
+
+**A.** 커널 성능 상한을 min(peak 연산, intensity × 대역폭)으로 보는 모델이다. 레이어마다 ops와 bytes를 세서 intensity를 구하고 칩의 ridge point와 비교해 compute-bound인지 memory-bound인지 먼저 판정한다. 그다음 실측 점을 찍어 지붕까지 얼마나 남았는지 보고, 지붕에 붙었으면 intensity를 바꾸는 최적화(양자화·fusion·batching), 멀리 있으면 구현 최적화를 한다.
+
+> "Roofline says attainable throughput is the minimum of peak compute and arithmetic intensity times memory bandwidth. I count ops and bytes per layer, compare the intensity against the chip's ridge point to classify it as compute- or memory-bound, then plot the measured point. If it's on the roof, I need to move the point — quantize, fuse, batch, or keep weights on-chip. If it's far below the roof, it's an implementation problem, and I look at SIMD utilization, overheads, and DMA overlap."
+
+**Q.** "Is LLM decode compute-bound or memory-bound? Why?"
+
+**A.** batch 1 decode는 memory-bound다. token 하나를 만들 때 모든 weight를 한 번씩 읽고 각 weight로 MAC을 한 번만 한다. GEMV라서 intensity가 fp16 기준 약 1, int8 약 2 ops/B다. 그래서 tokens/s 상한은 대략 "대역폭 ÷ (모델 바이트 + KV-cache 바이트)"다. prefill은 여러 token을 한꺼번에 처리하는 GEMM이라 compute-bound 쪽이다.
+
+> "Decode at batch one is memory-bound: every generated token streams all the weights once and uses each weight in a single multiply-accumulate, so intensity is about one op per byte in fp16. The upper bound on tokens per second is roughly memory bandwidth divided by the bytes of weights plus KV cache read per token. Prefill processes the whole prompt as a GEMM, so it sits on the compute side."
+
+**Q.** "Depthwise convolution has far fewer MACs. Why doesn't it speed up proportionally on an NPU?"
+
+**A.** depthwise는 입력 픽셀 하나를 k² = 9번만 재사용한다. intensity가 int8에서 약 9 ops/B로, ridge가 수백인 NPU에서는 메모리 지붕에 걸린다. 게다가 채널 간 reduction이 없어 MAC 배열의 lane을 채우지 못한다. MAC을 64배 줄여도 옮기는 바이트는 거의 그대로라서 시간은 그만큼 줄지 않는다.
+
+> "Depthwise reuses each input pixel only k-squared times, so its intensity is around nine ops per byte in int8 — far left of an NPU ridge point that's typically in the hundreds. It moves almost the same bytes as a standard conv while doing a fraction of the math, and it can't fill a MAC array designed for long reductions across channels. So it's bandwidth- and utilization-limited, not MAC-limited."
+
+**Q.** "How would you choose between a chip with more TOPS and one with more memory bandwidth?"
+
+**A.** 우리 대표 모델의 레이어별 intensity 분포를 두 칩의 ridge와 비교한다. 시간의 대부분을 차지하는 레이어가 ridge 왼쪽이면(batch-1 LLM decode, RNN, streaming 음성) 대역폭과 on-chip SRAM이 성능을 정하니까 대역폭 쪽을 고른다. 큰 conv가 지배하는 비전 모델이면 TOPS가 효과가 있다. 그리고 sustained 열 조건에서 실측으로 확인한다.
+
+> "I'd profile our representative models into a per-layer intensity distribution, weighted by time, and overlay it on each chip's roofline. If most of the time sits left of the ridge — batch-one LLM decode, RNNs, streaming audio — bandwidth and on-chip SRAM decide performance, so extra TOPS is wasted. If large convolutions dominate, compute matters. Then I'd confirm with sustained, thermally-limited measurements, not datasheet peaks."
+
+**Q.** "Your kernel runs at 20% of peak. How do you find out why?"
+
+**A.** 먼저 intensity를 계산해 roofline에서 그 I의 지붕 높이를 구한다. 지붕 자체가 peak의 20 % 근처라면 memory-bound라서 정상이고, 바이트를 줄여야 한다. 지붕이 훨씬 높은데 20 %라면 구현 문제다. 실효 대역폭을 재서 대역폭도 못 쓰고 있으면 접근 패턴·prefetch·DMA overlap을, 대역폭은 여유 있는데 연산도 못 쓰면 SIMD화·의존성 체인·호출 오버헤드를 본다.
+
+> "First I compute the kernel's arithmetic intensity and read the roof at that point. If the roof itself is around twenty percent of peak, the kernel is memory-bound and working as expected; the fix is fewer bytes. If the roof is much higher, it's an implementation gap: I measure achieved bandwidth — if that's low too, I look at access patterns, prefetching, and DMA overlap; if bandwidth has headroom, I check vectorization, dependency chains, and per-call overhead."
+
+**Q.** "Why does int8 quantization sometimes give 4x and sometimes almost nothing?"
+
+**A.** memory-bound 커널에서는 바이트가 1/4이 되니 사선 위에서 최대 4배 빨라진다(fp32 대비). compute-bound 커널에서는 연산 천장이 바뀌어야 빨라지는데, int8 MAC 처리량이 fp32와 같다면 그대로다. 또 int8 커널이 없어 dequantize해서 돌면 오히려 느려질 수 있다.
+
+> "It depends where the layer sits on the roofline. A memory-bound layer moves four times fewer bytes versus fp32, so it can get close to 4x. A compute-bound layer only speeds up if the hardware actually has higher int8 throughput, like dot-product instructions or a larger int8 MAC array. And if the runtime lacks an int8 kernel and dequantizes, it can even get slower."
+
+---
+
+## 12. Roofline 스피드 드릴 — 6문제
+
+면접에서 화이트보드로 30초 안에 답해야 하는 유형이다. 먼저 손으로 풀고 아래 코드로 확인하자.
+
+**드릴 1.** NPU 4 TOPS(int8), DRAM 8 GB/s. 1024×1024 int8 GEMV(입력·출력 int8)는 compute-bound인가 memory-bound인가? attainable과 시간은?
+
+정답: ops = 2 × 1024² ≈ 2.1 M, bytes ≈ 1 MiB + 2 KiB → I ≈ 2. ridge = 4000 ÷ 8 = 500. **memory-bound.** attainable = 2 × 8 = 16 GOPS (peak의 0.4 %). 시간 ≈ 1.05 MB ÷ 8 GB/s ≈ 131 µs.
+
+**드릴 2.** 같은 NPU, 같은 weight로 batch 16이면?
+
+정답: I ≈ 31(weight 한 번에 16배 연산). 아직 ridge 500 왼쪽이라 memory-bound, attainable ≈ 248 GOPS. 총 시간은 거의 같고(약 135 µs) 샘플당 약 8.4 µs로 16배 좋아진다.
+
+**드릴 3.** DSP 1 TOPS / 15 GB/s(ridge 67). int8, 64채널, 56×56에서 standard 3×3, depthwise 3×3, pointwise 1×1 각각은?
+
+정답: 4.7절 표 int8 열에서 I = 528, 9, 63. standard는 compute-bound(1 TOPS), depthwise는 memory-bound(9 × 15 = 135 GOPS), pointwise는 ridge 바로 아래라 거의 경계(약 950 GOPS).
+
+**드릴 4.** 1B 파라미터 LLM, weight int4(파라미터당 0.5 B), LPDDR 50 GB/s. decode tokens/s 상한은? fp16이면?
+
+정답: token당 weight 0.5 GB 읽기 → 50 ÷ 0.5 = **100 token/s**(KV-cache 읽기 무시한 상한). fp16이면 2 GB → 25 token/s.
+
+**드릴 5.** 웨어러블 DSP의 실효 대역폭이 6 GB/s. weight 3.2 MB인 모델을 100 fps로 돌리면서 weight를 매 프레임 DRAM에서 다시 읽는다. 대역폭의 몇 %를 weight 재로드에 쓰나?
+
+정답: 3.2 MB × 100 = 0.32 GB/s → **약 5.3 %**. 혼자라면 괜찮아 보이지만, 다른 IP와 공유하고 에너지(D7)까지 생각하면 SRAM 상주를 검토할 이유가 된다.
+
+**드릴 6.** 칩 1 TOPS / 20 GB/s. 어떤 커널이 I = 10, 실측 50 GOPS. 무엇이 문제인가?
+
+정답: 지붕 = min(1000, 10 × 20) = 200 GOPS. 실측은 지붕의 25 %이고, 쓰는 대역폭은 50 ÷ 10 = 5 GB/s로 20 GB/s의 1/4. memory-bound 영역인데 **대역폭도 못 쓰고 있다** → 접근 패턴(stride, 작은 DMA burst), DMA-연산 overlap 부재, 호출 오버헤드를 의심한다. 코드 튜닝으로 최대 4배 여지가 있다.
+
+무엇을 확인하나: 드릴 1, 2, 4, 5를 식 그대로 계산.
+
+```python
+# 면접 드릴 1·2·4를 숫자로 확인: roofline = min(peak, I × BW)
+def roof(ops, nbytes, peak, bw):
+    I = ops / nbytes; att = min(peak, I * bw)
+    return I, att, ops / att, "memory" if I * bw < peak else "compute"
+# Q1: NPU 4 TOPS int8, DRAM 8 GB/s, 1024x1024 int8 GEMV (int8 입력, int8 출력)
+I, att, t, kind = roof(2 * 1024 * 1024, 1024 * 1024 + 1024 + 1024, 4e12, 8e9)
+print(f"Q1 I={I:.2f} ops/B  ridge={4e12/8e9:.0f}  {kind}-bound  attainable={att/1e9:.1f} GOPS ({100*att/4e12:.2f}% of peak)  t={t*1e6:.0f} us")
+# Q2: 같은 NPU에서 batch 16 GEMM (weight는 한 번만 읽음)
+B = 16
+I, att, t, kind = roof(2 * B * 1024 * 1024, 1024 * 1024 + 2 * B * 1024, 4e12, 8e9)
+print(f"Q2 batch={B}: I={I:.1f}  {kind}-bound  attainable={att/1e9:.0f} GOPS  t={t*1e6:.0f} us  per-sample {t/B*1e6:.1f} us")
+# Q4: 1B 파라미터 LLM decode, 가중치 int4(0.5 B/param), LPDDR 50 GB/s, 매 token 전체 가중치 1회 읽기
+w_bytes = 1e9 * 0.5
+print(f"Q4 decode upper bound = {50e9 / w_bytes:.0f} tokens/s (KV-cache 읽기 무시)")
+# Q5: 6 GB/s로 3.2 MB conv 모델 weight를 매 프레임(100 fps) 다시 읽으면 대역폭의 몇 %?
+print(f"Q5 weight re-read traffic = {3.2e6 * 100 / 1e9:.2f} GB/s = {100 * 3.2e6 * 100 / 6e9:.1f}% of 6 GB/s")
+```
+
+```text
+Q1 I=2.00 ops/B  ridge=500  memory-bound  attainable=16.0 GOPS (0.40% of peak)  t=131 us
+Q2 batch=16: I=31.0  memory-bound  attainable=248 GOPS  t=135 us  per-sample 8.4 us
+Q4 decode upper bound = 100 tokens/s (KV-cache 읽기 무시)
+Q5 weight re-read traffic = 0.32 GB/s = 5.3% of 6 GB/s
+```
+
+출력에서 볼 것: 손계산과 같다. 드릴 2의 batch 16은 시간이 거의 같다(131 → 135 µs). memory-bound에서는 **연산을 16배 더 해도 시간이 안 늘어난다** — batch의 이득을 한 줄로 보여 준다.
+
+---
+
+## 13. 직접 해보기
+
+**연습 1 — 손계산.** fp16 GEMM M = 1, N = 4096, K = 4096과 M = 64일 때 I를 구하라. 대역폭 60 GB/s, peak 20 TFLOP/s(fp16) 칩에서 각각 attainable은?
+
+정답: M = 1: I = 2·4096² ÷ (2·(4096² + 4096 + 4096)) ≈ 1.0 → 60 GFLOP/s. M = 64: I = 2·64·4096² ÷ (2·(4096² + 2·64·4096)) ≈ 62 → 약 3.7 TFLOP/s (여전히 memory-bound, ridge 333).
+
+**연습 2 — 손계산.** attention decode에서 GQA로 query head 8개가 KV head 1개를 공유한다. fp16에서 I는? batch를 4로 올리면 I는 어떻게 되나?
+
+정답: I ≈ 2g/b = 2·8/2 = 8. batch 4는 시퀀스마다 KV 캐시가 달라서 KV 바이트도 4배 → I는 그대로 8.
+
+**연습 3 — 코드.** 5.3절 `triad.c`를 copy(`a[i] = b[i]`)로 바꿔 크기별 대역폭을 재고 triad와 비교하라. L1 구간에서 차이가 나는가?
+
+힌트: copy는 원소당 바이트가 8 B(STREAM 관례), triad는 12 B. L1에서는 load/store 포트 수가, DRAM에서는 버스가 한계를 정한다.
+
+**연습 4 — 코드.** 5.7절 `kernels.py`에 `torch.nn.functional.linear`로 batch 1, 8, 64를 추가하고 roofline 위에 찍어라. batch 8이 예측(I 약 8배)만큼 빨라지는가? 안 된다면 7.1절의 관찰과 연결해 설명하라.
+
+힌트: 7.1절처럼 Accelerate의 작은 batch 경로가 느릴 수 있다. roofline은 상한이다.
+
+**연습 5 — 설계.** 웨어러블 DSP(가상의 1 TOPS, 15 GB/s, TCM 512 KB)에서 wake word 모델(int8 weight 300 KB, activation 최대 60 KB)을 돌린다. weight를 TCM에 상주시킬 수 있는가? 상주할 때와 안 할 때 대표 레이어(int8 GEMV 256×1024)의 attainable을 비교하라.
+
+정답: 300 + 60 = 360 KB < 512 KB라서 상주 가능. 상주 안 함: I ≈ 2 → 30 GOPS. 상주: DRAM 기준으로는 weight 바이트가 0이 되어 TCM 대역폭이나 연산이 병목이 된다(TCM 대역폭이 주어지지 않았으므로 "DRAM 지붕에서 벗어난다"까지가 답).
+
+**연습 6 — 측정.** `fma.c`를 NACC = 1, 2로도 돌려 보고 FMA latency(cycle)를 추정하라. 클럭은 약 3.2 GHz로 가정.
+
+힌트: NACC = 1에서 GFLOP/s ÷ 8 ÷ 3.2 GHz = cycle당 FMA 명령 수 → 그 역수가 latency.
+
+---
+
+## 14. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| arithmetic intensity (I) | 연산 밀도 | 옮긴 바이트 하나당 연산 수 (ops/byte, FLOP/byte) |
+| roofline | 지붕선 모델 | attainable = min(peak, I × BW)를 로그-로그로 그린 것 |
+| ridge point | 마룻점 | 사선과 수평선이 만나는 I = peak ÷ BW. 이보다 왼쪽은 memory-bound |
+| compute-bound | 연산 한계 | 연산기가 병목. 바이트를 줄여도 안 빨라진다 |
+| memory-bound | 대역폭 한계 | 메모리 대역폭이 병목. 연산기를 늘려도 안 빨라진다 |
+| attainable performance | 도달 가능 성능 | 주어진 I에서 roofline이 허락하는 최대 ops/s |
+| compulsory traffic | 최소 트래픽 | 각 텐서를 딱 한 번씩 옮긴다고 가정한 바이트 수 |
+| hierarchical roofline | 계층 roofline | L1/L2/DRAM 등 레벨마다 대역폭 지붕과 I를 따로 두는 확장 |
+| STREAM | 대역폭 벤치마크 | copy/scale/add/triad로 지속 메모리 대역폭을 재는 표준 |
+| triad | STREAM 커널 | `a[i] = b[i] + s × c[i]`. 원소당 12 B(fp32) |
+| write-allocate | 쓰기 할당 | 쓰기 전에 캐시 라인을 먼저 읽어 오는 동작. 실제 트래픽 증가 |
+| tiling / blocking | 타일링 | 큰 연산을 on-chip 메모리에 맞는 조각으로 잘라 재사용을 늘림 |
+| data reuse | 재사용 | 한 번 가져온 원소로 연산을 여러 번 하는 것. I를 올리는 근본 |
+| GEMV | 행렬-벡터 곱 | batch 1 dense layer. I ≈ 2/b |
+| GEMM | 행렬-행렬 곱 | 재사용 있음. 정사각이면 I = 2n/(3b) |
+| double buffering | 핑퐁 버퍼 | DMA와 연산을 겹쳐 t ≈ max(t_dma, t_compute)로 만드는 기법 |
+| weight residency | weight 상주 | weight를 on-chip SRAM에 계속 두어 DRAM 재로드를 없앰 |
+| ILP | 명령어 수준 병렬성 | 독립 명령 여러 개로 파이프라인 latency를 숨기는 것 |
+| TOPS | 초당 10¹² ops | 보통 int8, 1 MAC = 2 ops 기준. 조건(int4, sparsity)을 확인 |
+
+---
+
+## 15. 요약 & 체크리스트
+
+커널의 속도는 연산 처리량(P)과 메모리 대역폭(BW) 중 느린 쪽이 정하고, 둘의 경계는 arithmetic intensity I = ops ÷ bytes가 ridge point P ÷ BW보다 큰지 작은지로 갈린다. elementwise·GEMV·depthwise·attention decode는 재사용이 없어 I가 0.1~10 수준이고, 큰 GEMM·standard conv는 재사용으로 I가 수백이다. 칩의 TOPS가 커질수록 ridge가 오른쪽으로 가서 batch 1 edge 추론은 대부분 memory-bound가 된다. 그래서 edge에서는 바이트를 줄이는 최적화(양자화, fusion, SRAM 상주, tiling)가 연산을 줄이는 최적화만큼, 또는 그보다 중요하다. 이 Mac에서는 DRAM 약 60~77 GB/s, Accelerate 행렬곱 약 1.2 TFLOP/s, NEON 1코어 약 93 GFLOP/s를 쟀고, elementwise는 메모리 지붕에, 큰 GEMM은 연산 지붕에 붙었으며, depthwise와 작은 GEMM은 구현·오버헤드 때문에 지붕 아래에 있었다. roofline은 상한이지 예측이 아니다: 오버헤드, 의존성 체인, 라이브러리 경로, 열 한계는 따로 봐야 한다.
+
+- [ ] vector add, dot, GEMV, GEMM, conv, depthwise, attention decode의 I를 fp32/fp16/int8로 손으로 계산할 수 있다
+- [ ] peak와 대역폭으로 ridge point를 구하고 roofline을 로그-로그로 그릴 수 있다
+- [ ] 주어진 칩에서 레이어의 attainable 성능과 시간을 30초 안에 계산할 수 있다
+- [ ] MAC, FLOP, op, TOPS 단위 관례를 설명하고 2배 실수를 피할 수 있다
+- [ ] STREAM류 벤치마크와 FMA 마이크로벤치마크로 실측 천장을 잴 수 있다
+- [ ] 실측 점이 지붕 위/지붕 근처/지붕 아래일 때 각각 무엇을 의심할지 말할 수 있다
+- [ ] hierarchical roofline에서 레벨별 I가 왜 다른지, tiling이 무엇을 바꾸는지 설명할 수 있다
+- [ ] batching, 양자화, fusion, SRAM 상주가 점을 어디로 옮기는지 그림으로 설명할 수 있다
+- [ ] LLM decode tokens/s 상한을 대역폭과 모델 크기로 계산할 수 있다
+- [ ] 칩 선정에서 "TOPS를 살지 대역폭을 살지"를 모델의 intensity 분포로 논증할 수 있다
+
+---
+
+## 참고 자료
+
+- Samuel Williams, Andrew Waterman, David Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures," Communications of the ACM 52(4), 2009 — roofline의 원 논문
+- John D. McCalpin, STREAM benchmark — [https://www.cs.virginia.edu/stream/](https://www.cs.virginia.edu/stream/)
+- Aleksandar Ilic, Frederico Pratas, Leonel Sousa, "Cache-aware Roofline model: Upgrading the loft," IEEE Computer Architecture Letters, 2014 — 캐시 계층 roofline
+- Vivienne Sze, Yu-Hsin Chen, Tien-Ju Yang, Joel Emer, "Efficient Processing of Deep Neural Networks," Morgan & Claypool, 2020 — dataflow, 재사용, 에너지(E5, D7)
+- John L. Hennessy, David A. Patterson, "Computer Architecture: A Quantitative Approach" (6th ed.) — roofline과 메모리 계층 설명 포함
+- Mark Horowitz, "Computing's Energy Problem (and what we can do about it)," ISSCC 2014 — 연산 vs 메모리 접근 에너지(D7)
+- MIT 6.5940 TinyML and Efficient Deep Learning Computing — [https://efficientml.ai](https://efficientml.ai)
+- PyTorch `torch.set_num_threads` — [https://pytorch.org/docs/stable/generated/torch.set_num_threads.html](https://pytorch.org/docs/stable/generated/torch.set_num_threads.html)
+- 이 노트 세트: A1 8절(루프 순서와 BLAS), B2 6.5절(DS conv intensity), B3 11.2절(GEMV vs GEMM), C4 4절(CSR vs dense), C6 4절(fusion), C7 2.4절(FLOPs ≠ latency)

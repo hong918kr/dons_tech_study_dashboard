@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>21. 객체 풀 (acquire / release + placement new)</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="problems/21_object_pool">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">코딩 문제 · 21. 객체 풀 (acquire / release + placement new)</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">코딩 문제 · Problems</div>
+      <h1>21. 객체 풀 (<code>acquire</code> / <code>release</code> + placement new)</h1>
+      <div class="meta"><span>10분 읽기</span><span>124줄</span><span>7개 절</span></div>
+    </div>
+    <blockquote><p><strong>주제</strong>: 타입이 있는 고정 풀 · 생성자·소멸자 보장 · 04와의 차이 · <strong>난이도</strong>: 심화 · <strong>목표 시간</strong>: 30분 <strong>해설은 보지 말 것</strong>: 먼저 <code>starters/21_object_pool.cpp</code>를 채워 <code>make run N=21</code>으로 통과시킨다.</p></blockquote>
+<h2 id="면접관의-문장">면접관의 문장<a class="anchor" href="#면접관의-문장" aria-label="link">#</a></h2>
+<p>"You already wrote me a fixed-block memory pool in C. Now the things we hand out aren't byte buffers — they're objects. An audio session that grabs a mixer channel in its constructor and gives it back in its destructor. Four of them, maximum, and no heap.</p>
+<p>Write <code>object_pool&lt;T, N&gt;</code>. <code>acquire</code> takes constructor arguments and hands back a fully constructed <code>T*</code>, or <code>nullptr</code> when the pool is empty. <code>release</code> runs the destructor and takes the slot back.</p>
+<p>Then answer the question I care about: what happens when somebody forgets to release? With <code>malloc</code> you leak memory. Here the memory is static, so what exactly leaks? And tell me how this differs from the C pool you wrote earlier — I want to hear the words constructor and destructor."</p>
+<h2 id="요구사항">요구사항<a class="anchor" href="#요구사항" aria-label="link">#</a></h2>
+<ol><li>슬롯은 <code>union { Slot *next; alignas(T) unsigned char storage[sizeof(T)]; }</code>다. 자유 상태에서는 링크, 사용 중에는 <code>T</code>의 저장소다. 사용 중인 슬롯의 메타데이터 오버헤드는 0바이트다.</li><li>생성자는 슬롯 <code>N</code>개를 <code>slots_[0] -&gt; slots_[1] -&gt; ... -&gt; nullptr</code> 순서로 엮고 <code>free_head_</code>를 첫 슬롯에 맞춘다. 이 시점에 <code>T</code>의 생성자는 호출되지 않는다.</li><li><code>acquire(args...)</code>는 자유 슬롯 하나를 떼어 내고 그 저장소 위에 placement new로 <code>T</code>를 생성해서 돌려준다. 인자는 완벽 전달한다. 비었으면 <code>nullptr</code>이고 <strong>생성자는 호출되지 않는다</strong>. 반복문 없이 O(1)이어야 한다.</li><li><code>acquire</code>에서 순서를 지킨다. <code>storage</code>를 덮어쓰기 전에 <code>next</code> 링크를 먼저 읽어 둬야 한다. union이므로 둘은 같은 메모리다.</li><li><code>release(p)</code>의 반환값은 정확히 셋이다. <code>Release::Ok</code>(정상 반납 또는 <code>p == nullptr</code>인 no-op), <code>Release::Foreign</code>(이 풀의 슬롯 시작 주소가 아님), <code>Release::DoubleFree</code>(이미 자유 상태인 슬롯).</li><li><code>Release::Ok</code>일 때만 소멸자를 호출한다. 거부된 호출은 <code>used</code>, <code>high_water</code>, free list, <code>live</code> 표 중 <strong>무엇도</strong> 바꾸지 않는다. 특히 double release가 free list에 같은 슬롯을 두 번 넣으면 안 된다.</li><li><code>Foreign</code>으로 거부해야 하는 것: 풀 범위 밖 주소(스택 객체 등), 슬롯 중간을 가리키는 주소, one-past-end 주소.</li><li>풀의 소멸자는 <strong>아직 살아 있는 객체 전부의 소멸자를 호출</strong>한다. 반납을 잊은 코드가 있어도 <code>T</code>의 소멸자가 획득한 자원은 해제된다. 04의 raw 블록 풀에는 없는 책임이다.</li><li><code>destroy_all()</code>은 인덱스 역순으로 파괴하고 슬롯을 free list에 되돌린다. 호출 뒤 <code>used() == 0</code>이다.</li><li><code>capacity()</code>, <code>used()</code>, <code>available()</code>, <code>high_water()</code>를 제공한다. <code>high_water</code>는 release를 해도 내려가지 않는다.</li><li><code>owns(p)</code>는 부수효과 없이 소유 여부만 판정한다. <code>live_at(i)</code>는 살아 있는 객체 포인터 또는 <code>nullptr</code>을 돌려준다(진단용).</li><li>복사 생성·복사 대입·이동 생성·이동 대입을 모두 <code>= delete</code>한다. 풀이 이동하면 이미 배급된 포인터가 엉뚱한 주소를 가리킨다.</li><li>release는 LIFO다. 방금 반납한 슬롯이 다음 <code>acquire</code>에서 그대로 나온다.</li><li>전부 acquire하고 전부 release하는 사이클을 100번 돌려도 용량이 줄지 않고(단편화 0), 생성 횟수와 소멸 횟수가 정확히 같아야 한다.</li></ol>
+<h2 id="인터페이스">인터페이스<a class="anchor" href="#인터페이스" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">cpp</span><pre><code>enum class Release : int { Ok = 0, Foreign = -1, DoubleFree = -2 };
+
+template &lt;typename T, std::size_t N&gt;
+class object_pool {
+public:
+    using value_type = T;
+    object_pool() noexcept;
+    ~object_pool();
+    object_pool(const object_pool &amp;) = delete;
+    object_pool &amp;operator=(const object_pool &amp;) = delete;
+    object_pool(object_pool &amp;&amp;) = delete;
+    object_pool &amp;operator=(object_pool &amp;&amp;) = delete;
+
+    template &lt;typename... Args&gt; T *acquire(Args &amp;&amp;...args);
+    Release release(T *p);
+    void destroy_all() noexcept;
+
+    static constexpr std::size_t capacity() noexcept;
+    std::size_t used() const noexcept;
+    std::size_t available() const noexcept;
+    std::size_t high_water() const noexcept;
+    bool owns(const T *p) const noexcept;
+    T *live_at(std::size_t i) noexcept;
+};</code></pre></figure>
+<h2 id="제약">제약<a class="anchor" href="#제약" aria-label="link">#</a></h2>
+<ul><li>C++17. <code>new</code>(placement new 제외), <code>delete</code>, <code>malloc</code>, <code>free</code>, STL 컨테이너 전부 금지.</li><li>허용 헤더: <code>&lt;cstdint&gt; &lt;cstddef&gt; &lt;new&gt; &lt;type_traits&gt; &lt;cassert&gt; &lt;cstdio&gt; &lt;utility&gt;</code>.</li><li><code>acquire</code>와 <code>release</code>는 반복문 없이 상수 시간. 생성자와 <code>destroy_all</code>만 <code>N</code>에 비례하는 반복문을 갖는다.</li><li>예외가 없다. 고갈은 <code>nullptr</code>, 오류는 열거형 반환값으로만 알린다.</li><li>반환 주소는 항상 <code>alignof(T)</code>의 배수여야 한다.</li><li><code>c++ -std=c++17 -Wall -Wextra -O2 -g -fno-exceptions -fno-rtti</code>에서 경고 0개.</li></ul>
+<h2 id="예시-동작">예시 동작<a class="anchor" href="#예시-동작" aria-label="link">#</a></h2>
+<p>용량 4, <code>Session</code>은 생성자에서 채널을 열고 소멸자에서 닫는다.</p>
+<figure class="code"><pre><code>object_pool&lt;Session,4&gt; pool;        ctor=0 dtor=0 open=0  used=0 hw=0
+a = pool.acquire(11, 44100)         ctor=1        open=1  used=1 hw=1  -&gt; &amp;slot[0]
+b = pool.acquire(12, 48000)         ctor=2        open=2  used=2 hw=2  -&gt; &amp;slot[1]
+c = pool.acquire(13)                ctor=3        open=3  used=3 hw=3
+d = pool.acquire(14)                ctor=4        open=4  used=4 hw=4
+e = pool.acquire(15)                ctor=4        open=4  used=4 hw=4  -&gt; nullptr (생성자 미호출)
+pool.release(c)          -&gt; Ok      dtor=1        open=3  used=3 hw=4
+f = pool.acquire(99)                ctor=5        open=4  used=4 hw=4  -&gt; &amp;slot[2] (LIFO)
+pool.release(&amp;stack_obj) -&gt; Foreign             상태 불변, 소멸자 미호출
+pool.release((T*)((char*)a + 1)) -&gt; Foreign      슬롯 중간 주소
+pool.release(a)          -&gt; Ok
+pool.release(a)          -&gt; DoubleFree          상태 불변
+pool.release(nullptr)    -&gt; Ok                  no-op
+pool.release(e2)         -&gt; Foreign             one-past-end 주소</code></pre></figure>
+<p>주의: <code>c</code>를 반납한 뒤 그 슬롯이 <code>f</code>에게 다시 나갔다. 이때 낡은 포인터 <code>c</code>로 <code>release</code>를 부르면 주소가 유효하고 live 상태이므로 <code>Ok</code>가 되고, 실제로는 <code>f</code>가 파괴된다. 풀이 잡아 줄 수 없는 종류의 버그다 — 반납한 포인터는 즉시 버려야 한다.</p>
+<p>스코프를 벗어날 때:</p>
+<figure class="code"><pre><code>{
+    object_pool&lt;Session,4&gt; pool;
+    pool.acquire(10); pool.acquire(20); pool.acquire(30);   // 반납을 잊었다
+}   // 풀 소멸자가 30, 20, 10 순서로 소멸자를 호출한다. open == 0</code></pre></figure>
+<h2 id="스스로-점검할-질문">스스로 점검할 질문<a class="anchor" href="#스스로-점검할-질문" aria-label="link">#</a></h2>
+<ol><li>04의 <code>pool_alloc</code>이 돌려준 블록과 이 <code>acquire</code>가 돌려준 포인터는 무엇이 다른가? 호출자가 해야 하는 일이 어떻게 줄었는가?</li><li><code>release</code>를 잊으면 정확히 무엇이 누수되는가? 메모리가 아니라면 무엇인가?</li><li><code>acquire</code>에서 <code>next</code>를 읽기 전에 placement new를 하면 어떤 일이 일어나는가? 그 버그의 증상은?</li><li><code>live_</code> 표를 비트맵으로 바꾸면 무엇을 얻고 무엇을 잃는가?</li><li>풀 소멸자가 남은 객체를 파괴하는 것이 항상 옳은가? 그 객체를 가리키는 포인터를 누가 아직 들고 있다면?</li><li><code>destroy_all()</code>을 인덱스 역순으로 도는 것과 생성 역순으로 도는 것은 같은가? 다르다면 왜 인덱스 역순으로 했는가?</li><li>같은 저장소에 <code>T</code>를 파괴하고 다시 생성했을 때, 이전 포인터를 계속 써도 되는가? <code>std::launder</code>는 여기서 무엇을 해 주는가?</li><li>ISR에서 <code>acquire</code>를 호출하려면 무엇을 추가해야 하는가? <code>T</code>의 생성자가 오래 걸리면?</li></ol>
+<h2 id="follow-up-면접관이-이어서-물을-것">follow-up (면접관이 이어서 물을 것)<a class="anchor" href="#follow-up-면접관이-이어서-물을-것" aria-label="link">#</a></h2>
+<ol><li>"Make <code>acquire</code> return something that releases itself when it goes out of scope."</li><li>"Two different types, one pool. Possible? Desirable?"</li><li>"How do you find the code path that forgot to release, in the field?"</li><li>"What's the alignment story if <code>T</code> contains a <code>double</code> and you're on a Cortex-M0+?"</li><li>"Compare this with an RTOS memory pool API. What does the RTOS give you that this doesn't?"</li></ol>
+<hr>
+<p><strong>해설</strong>: <a href="../drills/L3_embedded_cpp.html">notes/L3_embedded_cpp.md</a> §5, §7 · <strong>답안</strong>: <code>solutions/21_object_pool.cpp</code></p>
+    <div class="nav"><a class="prev" href="20_register_wrapper.html"><span class="dir">← 이전</span><span class="nm">20. 타입 안전 레지스터 필드 접근</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#면접관의-문장">면접관의 문장</a></li><li class="l2"><a href="#요구사항">요구사항</a></li><li class="l2"><a href="#인터페이스">인터페이스</a></li><li class="l2"><a href="#제약">제약</a></li><li class="l2"><a href="#예시-동작">예시 동작</a></li><li class="l2"><a href="#스스로-점검할-질문">스스로 점검할 질문</a></li><li class="l2"><a href="#follow-up-면접관이-이어서-물을-것">follow-up (면접관이 이어서 물을 것)</a></li></ol></aside>
+</div><script>
+const KEY='hark_notes_read_v1', TKEY='hark_notes_theme', CKEY='hark_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

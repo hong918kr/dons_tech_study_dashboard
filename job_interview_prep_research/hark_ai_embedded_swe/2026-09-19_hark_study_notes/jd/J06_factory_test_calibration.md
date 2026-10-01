@@ -4,6 +4,8 @@
 > **Don 현재 상태**: ✅ 강함 — context 3.1의 "designing and leading **factory test-node architecture**", "Silicon/system bring up → NPI → MP", "SSD/MFG Firmware". **JD 7개 Responsibility 중 Don이 가장 확실하게 이기는 항목**이다.
 > **이 노트를 다 읽으면**: ① factory test 펌웨어를 "디버그 코드"가 아니라 자체 요구사항을 가진 제품으로 설명할 수 있다 · ② 캘리브레이션 데이터의 수명주기(측정→저장→검증→필드→RMA)를 처음부터 끝까지 설계할 수 있다 · ③ Apple 경험을 기밀 없이 일반화해 스타트업 면접관이 듣고 싶은 언어로 옮길 수 있다
 
+> **⚠ 2026-09-23 JD 개정**: 이 항목은 현재 JD에서 삭제됨 — 우선순위 하향, 개념 수준으로만. Bonus의 EVT/DVT/PVT와 "양산까지 끌고 간 경험" 스토리 각도로만 쓴다. [P02 분석](../plan/P02_jd_change_2026-09-23.html)
+
 ---
 
 ## 0. 문장 뜯어보기

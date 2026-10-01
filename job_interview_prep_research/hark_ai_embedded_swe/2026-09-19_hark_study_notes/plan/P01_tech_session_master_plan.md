@@ -1,6 +1,7 @@
 # P01. 1차 Tech Session 마스터 플랜 — 이 한 판에 집중한다
 
 > **목표**: Hark Embedded Software Engineer **tech session 통과** · **프로세스**: HM 검토 → intro → **tech** → 온사이트 (3단계뿐이라 이 라운드가 관문)
+> **⏱ 시간이 없을 때**: [P04 4일 스프린트](P04_4day_sprint.html) — 하루 2시간 압축 코스 (일하면서 준비)
 > **🗺 자리 지도**: [P03 임베디드 7자리 분석](P03_embedded_role_map.html) — BSP 1순위 · Systems 2순위 · 나머지 5개 제외
 > **⚡ 2026-09-23 JD 개정**: 본문 전면 재작성 → [P02 개정 분석](P02_jd_change_2026-09-23.html) **먼저 읽기**. OTA·AI·factory 항목 삭제, FPGA·vendor 통합 신설, 적합도 ⭐4→⭐4.5
 > **⚡ 2026-09-21 변경**: 공고 제목이 **`Embedded Software Engineer, BSP`** 로 바뀜(본문 동일) → BSP 비중 상향. [BSP 집중 시리즈 B00~B04](../bsp/B00_bsp_overview.html)

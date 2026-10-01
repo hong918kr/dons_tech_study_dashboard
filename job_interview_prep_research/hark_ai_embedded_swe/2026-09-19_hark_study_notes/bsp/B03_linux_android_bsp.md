@@ -1,6 +1,6 @@
 # B03. Linux·Android BSP — Cortex-A 쪽에서 "BSP"라는 단어가 뜻하는 것
 
-> **시리즈**: BSP 집중 3/4 · **선행**: B00(BSP 정의·전략), B01(BSP 해부), B02(Zephyr 보드 포팅) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling" / "Experience with ARM Cortex-M or Cortex-A processors and associated toolchains"
+> **시리즈**: BSP 집중 3/6 · **선행**: B00(BSP 정의·전략), B01(BSP 해부), B02(Zephyr 보드 포팅) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling" / "Experience with ARM Cortex-M or Cortex-A processors and associated toolchains"
 > **Don 상태**: ❌ 약함 — Cortex-R/M bare-metal과 FPGA pre-silicon bring-up은 강하지만, Cortex-A + Linux + Android 스택은 레쥬메에 근거가 없다. 이 노트의 목적은 "해봤다"고 말하게 만드는 게 아니라 **지도를 정확히 알고 경계를 정직하게 긋게** 하는 것이다.
 > **이 노트를 다 읽으면**: ① BootROM에서 Android init까지 부트 체인을 단계 이름과 실행 EL까지 붙여 화이트보드에 그릴 수 있다 ② Linux devicetree와 Zephyr devicetree가 왜 문법은 같은데 완전히 다른 물건인지 설명할 수 있다 ③ "Linux BSP는 안 해봤습니다"를 손해 없이, 오히려 신뢰를 얻는 방식으로 말할 수 있다.
 
@@ -503,9 +503,11 @@ context의 단서(Embedded Application 공고가 Android 기반 앱, System Test
 
 ### 8.1 현실적인 비중 추정
 
-이 포지션은 JD 문장상 **"ARM-based SoCs and microcontrollers"** 둘 다 적혀 있다. 하지만 같은 회사의 다른 공고(Embedded Application = Android 앱, System Test = Qualcomm/Android)가 따로 있다는 사실(context 2.2)은, **이 자리의 무게중심이 MCU/RTOS 쪽**이라는 신호다 [추정].
+> **⚠ 2026-09-29 재작성**: 아래 판단의 전제 두 개가 깨졌다. ① "Embedded Application = Android 앱" 공고는 2026-09-22에 **시스템 소프트웨어 역할로 전면 재작성**되어 더 이상 앱 자리가 아니다. ② BSP JD 자신이 2026-09-23 개정에서 필수 요건에 **eLinux와 AOSP를 이름으로** 넣었다("Hands-on experience with embedded operating systems, such as eLinux, AOSP, VxWorks and RTOSes"). 따라서 "Linux는 안 해도 된다"는 옛 결론은 폐기한다. 아래 §8.2의 깊이 3단계와 §8.3 정직 스크립트는 그대로 유효하되, **A 목록을 한 단계 올려서** 준비한다.
 
-따라서 Linux/Android BSP는 **"대화가 통해야 하는 영역"이지 "소유해야 하는 영역"이 아닐 가능성이 크다**. 이 가정 위에서 준비 깊이를 정한다.
+이 포지션은 JD 문장상 **"ARM-based SoCs and microcontrollers"** 둘 다 적혀 있고, 요건에 eLinux·AOSP가 명시돼 있다. 다만 **Responsibilities 여섯 줄에는 커널·유저스페이스 작업이 한 줄도 없다** — board bring-up, 드라이버, 벤더 통합, 하드웨어 스펙 검증, 전력·발열, 디버깅뿐이다. 반면 같은 팀의 `Embedded Software Engineer`(시스템) 공고는 "kernel, user space, and MCU domains"와 "embedded Linux"를 업무로 못박는다.
+
+**결론**: 이 자리에서 Linux/Android는 **요건 문장으로 검증받는 영역**이지, 매일 소유하는 영역은 아닐 가능성이 크다 [추정]. 그러므로 목표는 "커널 BSP를 소유할 수 있다"가 아니라 **"면접에서 Linux·AOSP 질문에 막히지 않고, 내가 어디까지 해봤는지 정확히 말할 수 있다"** 이다. 깊이는 §8.2의 A 목록까지 확실히, B는 개념까지, C는 이름만.
 
 ### 8.2 깊이 3단계
 

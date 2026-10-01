@@ -1,0 +1,1519 @@
+# G2. IMU 인터페이스와 드라이버 — SPI/I2C, 레지스터, FIFO + watermark, 내장 기능, ML core
+
+> **이 노트를 다 읽으면**: IMU용 버스(SPI·I2C·I3C)를 처리량 숫자로 고르고 bring-up 순서(대기 → WHO_AM_I → soft reset → 설정 → readback → self-test → INT)를 그대로 짤 수 있다 · polling / DRDY 인터럽트 / FIFO + watermark 세 가지 데이터 경로를 wake 횟수·지연·평균 전류로 비교하고 watermark를 식으로 고를 수 있다 · tag 붙은 FIFO frame을 파싱하고 overflow·부분 frame·손상에서 복구하며, 배치로 받은 샘플에 시각을 붙일 수 있다 · wake-on-motion 같은 내장 기능과 센서 안 ML core(ST MLC류)가 왜 µW 예산의 핵심인지, RTOS 드라이버를 ISR → 스레드 → 링으로 어떻게 나누는지 말할 수 있다
+> **JD 연결**: "Experience working with sensors such as **IMUs, accelerometers, gyroscopes**", "Design and implement **data collection pipelines**", "Profile and optimize memory usage, **power consumption**, real-time performance" — study_prep_list **G2**: SPI/I2C 레지스터 설정, **FIFO + watermark 인터럽트**, wake-on-motion·step counter 등 내장 기능, 센서 내장 ML core (ST MLC). 함께 닿는 행: **G1**(IMU 물리), **G3**(퓨전), **G7**(시간 동기화), **E8**(센서 허브·batching), **E9**(저전력 모드), **B7**(IMU 모델, 센서 안 decision tree), **H1**(로깅)
+> **Don 기준 난이도**: SPI/I2C bring-up, 레지스터 단위 드라이버, 인터럽트, DMA, 링버퍼는 이미 몸에 있다 / 새로 배울 것은 **IMU에만 있는 것들** — FIFO 모드와 tag frame, watermark를 전력·지연·RAM으로 고르는 법, 배치 샘플 시각 복원, 센서 내장 기능과 ML core, 그리고 "MCU를 언제 깨울지"로 설계하는 저전력 데이터 경로
+> **선행 노트**: B7(IMU 모델, 11.3절 사다리), E8(1.2절 sensor hub batching, 3.3절 SPSC 링), E9(6.5절 IMU µA 예산). 병행 노트: G1(IMU 원리), G3(퓨전), G7(시간 동기화)
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+### 0.1 Don은 이미 이 구조를 안다 — NVMe completion queue와 interrupt coalescing
+
+SSD 펌웨어에서 NVMe completion을 host에 알리는 방식을 떠올려 보자. 명령 하나 끝날 때마다 MSI-X 인터럽트를 쏘면 host CPU가 인터럽트 폭풍에 묻힌다. 그래서 **interrupt coalescing**을 쓴다 — completion을 큐에 쌓아 두고 "N개가 모였거나 T µs가 지나면" 한 번만 인터럽트를 올린다. host는 한 번 깨어나서 큐를 몽땅 비운다.
+
+IMU의 **FIFO + watermark 인터럽트**는 정확히 같은 발상이다.
+
+- completion queue ↔ 센서 칩 안의 **FIFO** (샘플을 쌓는 하드웨어 큐)
+- "N개 모이면 인터럽트" ↔ **watermark** (FIFO 채움 수준이 문턱을 넘으면 INT 핀을 올림)
+- host가 큐를 비움 ↔ MCU가 SPI 버스트(+DMA)로 FIFO를 한 번에 읽음
+- 큐가 넘침 ↔ **FIFO overflow** (가장 오래된 샘플을 덮어쓰거나 새 샘플을 버림)
+
+다른 점은 목적이다. NVMe에서는 CPU 사이클을 아끼려고 coalescing을 하지만, 웨어러블에서는 **MCU를 deep sleep에 오래 두어 µA를 아끼려고** 한다. MCU가 한 번 깨어나는 데 드는 전하(sleep 탈출 + 클럭 안정화 + 드라이버 오버헤드)는 샘플 하나를 옮기는 데 드는 전하보다 훨씬 크다. 그래서 "몇 개씩 모아서 한 번에"가 저전력 수집의 핵심이다(E9 6.5절, E8 1.2절).
+
+### 0.2 데이터 경로 한 장
+
+```svg
+<svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="g2a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="22" font-size="13">IMU 데이터 경로 한 장 — 센서 칩 안에서 모델 입력까지</text>
+<rect x="10" y="36" width="250" height="272" rx="8" fill="none" stroke="#4a7bd0" stroke-width="1.5" stroke-dasharray="6 3"/><text x="20" y="52" font-size="12">IMU 칩 (가상 FIMU-6)</text>
+<rect x="25" y="62" width="100" height="44" rx="5" fill="#888" fill-opacity="0.2" stroke="currentColor"/><text x="75" y="80" font-size="12" text-anchor="middle">MEMS 소자</text><text x="75" y="97" font-size="12" text-anchor="middle">acc · gyro</text>
+<rect x="145" y="62" width="100" height="44" rx="5" fill="#888" fill-opacity="0.2" stroke="currentColor"/><text x="195" y="80" font-size="12" text-anchor="middle">ADC + 필터</text><text x="195" y="97" font-size="12" text-anchor="middle">ODR · FS · LPF</text>
+<rect x="25" y="126" width="100" height="44" rx="5" fill="none" stroke="currentColor"/><text x="75" y="144" font-size="12" text-anchor="middle">데이터 레지스터</text><text x="75" y="161" font-size="12" text-anchor="middle">최신 1 샘플</text>
+<rect x="145" y="126" width="100" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.25" stroke="currentColor"/><text x="195" y="144" font-size="12" text-anchor="middle">FIFO</text><text x="195" y="161" font-size="12" text-anchor="middle">tag 붙은 frame</text>
+<rect x="25" y="190" width="220" height="50" rx="5" fill="#3f9a6b" fill-opacity="0.25" stroke="currentColor"/><text x="135" y="210" font-size="12" text-anchor="middle">내장 엔진: any/no-motion · tap</text><text x="135" y="228" font-size="12" text-anchor="middle">step · tilt · ML core (MLC류)</text>
+<rect x="25" y="256" width="220" height="40" rx="5" fill="none" stroke="currentColor"/><text x="135" y="281" font-size="12" text-anchor="middle">INT1 · INT2 핀 (PP/OD, 극성, latch)</text>
+<line x1="125" y1="84" x2="143" y2="84" stroke="currentColor" marker-end="url(#g2a)"/><polyline points="195,106 195,116 75,116 75,124" fill="none" stroke="currentColor" marker-end="url(#g2a)"/><line x1="195" y1="116" x2="195" y2="124" stroke="currentColor" marker-end="url(#g2a)"/>
+<polyline points="245,84 252,84 252,215 247,215" fill="none" stroke="currentColor" marker-end="url(#g2a)"/><line x1="135" y1="240" x2="135" y2="254" stroke="currentColor" marker-end="url(#g2a)"/><line x1="230" y1="170" x2="230" y2="188" stroke="currentColor" stroke-dasharray="3 2"/>
+<text x="325" y="138" font-size="12" text-anchor="middle">SPI (4선)</text><line x1="262" y1="148" x2="388" y2="148" stroke="currentColor" stroke-width="2.5" marker-end="url(#g2a)"/><text x="325" y="166" font-size="12" text-anchor="middle">버스트 + DMA</text>
+<text x="325" y="266" font-size="12" text-anchor="middle">INT (wm · motion)</text><line x1="247" y1="276" x2="388" y2="276" stroke="#e08a3c" stroke-width="2" marker-end="url(#g2a)"/>
+<rect x="390" y="36" width="280" height="272" rx="8" fill="none" stroke="#3f9a6b" stroke-width="1.5" stroke-dasharray="6 3"/><text x="400" y="52" font-size="12">MCU (always-on, RTOS)</text>
+<rect x="405" y="62" width="120" height="44" rx="5" fill="#3f9a6b" fill-opacity="0.2" stroke="currentColor"/><text x="465" y="80" font-size="12" text-anchor="middle">링 버퍼</text><text x="465" y="97" font-size="12" text-anchor="middle">샘플 + gap 표시</text>
+<rect x="540" y="62" width="118" height="44" rx="5" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/><text x="599" y="80" font-size="12" text-anchor="middle">window builder</text><text x="599" y="97" font-size="12" text-anchor="middle">→ 모델 (B7)</text>
+<rect x="405" y="124" width="253" height="48" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="currentColor"/><text x="531" y="143" font-size="12" text-anchor="middle">드라이버 스레드</text><text x="531" y="161" font-size="12" text-anchor="middle">STATUS → 개수 → drain → 파싱 · OVR 복구</text>
+<rect x="405" y="254" width="253" height="44" rx="5" fill="#e08a3c" fill-opacity="0.25" stroke="currentColor"/><text x="531" y="273" font-size="12" text-anchor="middle">ISR: 시각 기록 + 신호만</text><text x="531" y="290" font-size="12" text-anchor="middle">(수 µs, 버스 접근 없음)</text>
+<line x1="531" y1="254" x2="531" y2="174" stroke="currentColor" marker-end="url(#g2a)"/><text x="537" y="218" font-size="12">semaphore</text>
+<line x1="465" y1="124" x2="465" y2="108" stroke="currentColor" marker-end="url(#g2a)"/><line x1="525" y1="84" x2="538" y2="84" stroke="currentColor" marker-end="url(#g2a)"/>
+<text x="530" y="328" font-size="12" text-anchor="middle">결과 · 이벤트만 AP로 (E8)</text><text x="135" y="328" font-size="12" text-anchor="middle">센서는 MCU가 자는 동안에도 일한다</text>
+</svg>
+```
+
+그림 1 — 이 노트 전체의 지도. 왼쪽 IMU 칩 안에서 MEMS 소자 → ADC·필터를 거친 샘플은 (a) 데이터 레지스터(최신 1개만), (b) FIFO(쌓임), (c) 내장 엔진(움직임·걸음·제스처·ML core)으로 간다. 칩은 조건이 맞으면 INT 핀을 올린다. 오른쪽 MCU에서는 ISR이 시각만 찍고 스레드를 깨우며, 드라이버 스레드가 SPI 버스트로 FIFO를 비우고 파싱해 링 버퍼에 넣고, window builder가 모델 입력 창을 만든다.
+
+그림을 말로 하면: **센서는 MCU가 자는 동안에도 일하고, MCU는 "모였다" 또는 "무슨 일이 생겼다"는 신호에만 깨어난다.** 1절은 버스, 2절은 bring-up, 3·4절은 데이터 경로와 FIFO, 5절은 시각, 6·7절은 내장 기능과 ML core, 8절은 RTOS 드라이버 구조, 9절은 디버그다.
+
+### 0.3 이 노트의 실험 장치 — 가상 IMU "FIMU-6"
+
+실제 IMU(Bosch BMI270, ST LSM6DSx, TDK ICM-4xxxx 등)는 레지스터 주소·비트 배치·FIFO 포맷이 부품마다 다르고, 정확한 값은 각 데이터시트에서 확인해야 한다. 이 노트는 특정 부품의 레지스터를 외우는 대신, **흔한 설계 패턴을 모은 가상의 6축 IMU "FIMU-6"** 를 정의해 놓고 그 위에서 드라이버를 짠다. **아래 레지스터 맵은 지어낸 것이다. 실제 부품과 주소·값이 같지 않다.**
+
+| 주소 | 이름 | R/W | 내용 (가상) |
+|---|---|---|---|
+| 0x00 | WHO_AM_I | R | 0xA7 고정 — 칩 ID |
+| 0x01 | STATUS | R | bit0 DRDY(새 샘플), bit1 FWM(watermark 도달), bit2 OVR(FIFO 넘침, sticky) |
+| 0x02 | FIFO_LVL | R | FIFO에 저장된 frame 수 (0–128) |
+| 0x04 | FIFO_DATA | R | 읽을 때마다 FIFO의 다음 바이트. 버스트 중에도 **주소가 증가하지 않는다** |
+| 0x08–0x0D | ACC_X_L … ACC_Z_H | R | 가속도 int16 × 3, little-endian. 이 영역을 읽기 시작하면 DRDY 해제 |
+| 0x0E–0x13 | GYR_X_L … GYR_Z_H | R | 자이로 int16 × 3 (±500 dps 고정 = 65.536 LSB/dps) |
+| 0x20 | CTRL_ACC | RW | [7:4] ODR 코드 (0 off, 1 = 12.5 Hz, 2 = 25, 3 = 50, 4 = 100, 5 = 200, 6 = 400, 7 = 800, 8 = 1600 Hz)<br>[3:2] FS 코드 (±2/4/8/16 g) |
+| 0x21 | CTRL_GYR | RW | [7:4] ODR 코드 (모델에서는 gyro가 acc ODR을 따른다) |
+| 0x22 | CTRL_MISC | RW | bit0 SOFT_RESET (모든 레지스터 기본값), bit1 IF_INC (버스트 주소 자동 증가, 기본 1), bit7 SELF_TEST |
+| 0x23 | FIFO_CTRL | RW | [1:0] 모드 0 bypass, 1 stop-on-full, 2 stream<br>bit2 gyro도 FIFO에, bit3 timestamp frame도 FIFO에 |
+| 0x24 | FIFO_WM | RW | watermark (frame 단위, 0이면 끔) |
+| 0x25 | INT_CFG | RW | bit0 open-drain, bit1 active-low, bit2 latched (모델은 값만 저장) |
+| 0x26 | INT1_MAP | RW | STATUS와 같은 비트 배치 — 어떤 조건을 INT1 핀에 낼지 |
+
+이 장치 모델은 실제 칩이 보이는 행동 몇 가지를 흉내 낸다: 전원 인가 후 10 ms 동안은 버스에 응답하지 않는다(모든 읽기가 0x00), MCU의 SPI mode가 틀리면 읽은 바이트가 1비트 밀린다, stream 모드에서 FIFO가 차면 가장 오래된 frame을 덮어쓰고 OVR을 세운다, bypass로 바꾸면 FIFO를 비우고 OVR을 지운다, 빈 FIFO를 읽으면 0x00이 나온다. 파일 하나(`fimu_model.h`)에 장치 모델과 MCU 쪽 버스 함수(`reg_read`, `reg_write`, `burst_read`)를 같이 넣었고, 뒤의 C 예제들은 모두 이 헤더를 include 한다. 한 번 훑어보고, 예제를 읽다가 궁금할 때 돌아오면 된다.
+
+```c
+/* fimu_model.h — 가상(FICTIONAL) IMU "FIMU-6" 장치 모델 + MCU 쪽 버스 함수.
+ * 레지스터 주소·비트·값은 이 노트를 위해 지어낸 것이다. 실제 부품(BMI270, LSM6DSx, ICM-4xxxx 등)과 무관하다. */
+#ifndef FIMU_MODEL_H
+#define FIMU_MODEL_H
+#include <math.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+enum { R_WHO_AM_I = 0x00, R_STATUS = 0x01, R_FIFO_LVL = 0x02, R_FIFO_DATA = 0x04,
+       R_ACC_X_L = 0x08, R_GYR_X_L = 0x0E,                   /* 각 6바이트, little-endian int16 x3 */
+       R_CTRL_ACC = 0x20, R_CTRL_GYR = 0x21, R_CTRL_MISC = 0x22, R_FIFO_CTRL = 0x23,
+       R_FIFO_WM = 0x24, R_INT_CFG = 0x25, R_INT1_MAP = 0x26 };
+#define WHO_AM_I_VAL 0xA7
+#define S_DRDY 0x01            /* STATUS 와 INT1_MAP 이 같은 비트 배치를 쓴다 */
+#define S_FWM  0x02
+#define S_OVR  0x04
+#define M_SOFT_RESET 0x01      /* CTRL_MISC */
+#define M_IF_INC     0x02
+#define M_SELF_TEST  0x80
+enum { FIFO_BYPASS = 0, FIFO_STOP_ON_FULL = 1, FIFO_STREAM = 2 };   /* FIFO_CTRL[1:0] */
+#define F_GYR 0x04             /* FIFO_CTRL: gyro도 FIFO에 넣기 */
+#define F_TS  0x08             /* FIFO_CTRL: timestamp frame 넣기 */
+#define FIFO_FRAMES 128
+#define FRAME_B 7              /* header 1 + payload 6 */
+enum { TAG_ACC = 0x1, TAG_GYR = 0x2, TAG_TS = 0x3 };
+#define TS_EVERY 16            /* sample set 16개마다 timestamp frame 1개 */
+#define TS_TICK_US 25.0
+static const double ODR_HZ[16] = { 0, 12.5, 25, 50, 100, 200, 400, 800, 1600 };
+
+typedef struct {
+    uint8_t reg[0x30], fifo[FIFO_FRAMES][FRAME_B], seq, status;
+    unsigned rd, n, rd_byte;          /* frame 링: 읽기 위치, 저장 frame 수, 현재 frame 안 바이트 */
+    double now_us, t_next_us, ready_us, odr_err;
+    uint32_t n_gen, n_lost;
+    int master_mode;                  /* MCU가 쓰는 SPI mode. 이 장치는 mode 0/3만 맞다 */
+} fimu_t;
+
+static inline uint8_t fimu_hdr(uint8_t tag, uint8_t seq) {   /* [7:4]tag [3:1]seq [0]odd parity */
+    uint8_t h = (uint8_t)(tag << 4 | (seq & 7) << 1);
+    return (uint8_t)(h | !(__builtin_popcount(h) & 1));
+}
+static inline void fimu_defaults(fimu_t *d) {
+    memset(d->reg, 0, sizeof d->reg);
+    d->reg[R_WHO_AM_I] = WHO_AM_I_VAL; d->reg[R_CTRL_MISC] = M_IF_INC;
+    d->rd = d->n = d->rd_byte = 0; d->status = 0;
+}
+static inline void fimu_init(fimu_t *d, double ready_us) {
+    memset(d, 0, sizeof *d); fimu_defaults(d); d->ready_us = ready_us;
+}
+static inline void put16(uint8_t *p, double v) {             /* 포화 후 little-endian 저장 */
+    long r = lround(v); if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+    p[0] = (uint8_t)(r & 0xFF); p[1] = (uint8_t)((r >> 8) & 0xFF);
+}
+static inline void fifo_push(fimu_t *d, uint8_t tag, const uint8_t p[6]) {
+    if (d->n == FIFO_FRAMES) {
+        d->status |= S_OVR; d->n_lost++;
+        if ((d->reg[R_FIFO_CTRL] & 3) != FIFO_STREAM) return;          /* stop-on-full: 새 것을 버림 */
+        d->rd = (d->rd + 1) % FIFO_FRAMES; d->n--; d->rd_byte = 0;     /* stream: 가장 오래된 것을 덮음 */
+    }
+    uint8_t *f = d->fifo[(d->rd + d->n) % FIFO_FRAMES];
+    f[0] = fimu_hdr(tag, d->seq++); memcpy(f + 1, p, 6); d->n++;
+}
+static inline void fimu_step(fimu_t *d, double t_us) {      /* 장치 시간을 t_us까지 진행 */
+    d->now_us = t_us;
+    double odr = ODR_HZ[d->reg[R_CTRL_ACC] >> 4];
+    if (odr == 0 || t_us < d->ready_us) { d->t_next_us = t_us; return; }
+    double per = 1e6 / (odr * (1 + d->odr_err));
+    while (d->t_next_us <= t_us) {
+        double t = d->t_next_us / 1e6, st = (d->reg[R_CTRL_MISC] & M_SELF_TEST) ? 0.1 : 0.0;
+        double lsb = 32768.0 / (2 << ((d->reg[R_CTRL_ACC] >> 2) & 3));     /* ±2/4/8/16 g */
+        uint8_t a[6], g[6], ts[6] = { 0 };
+        put16(a, lsb * (0.25 * sin(2 * 3.14159265358979 * 1.5 * t) + st)); put16(a + 2, lsb * (-0.04 + st));
+        put16(a + 4, lsb * (1.0 + st));
+        put16(g, 65.536 * 30 * cos(2 * 3.14159265358979 * 1.5 * t)); put16(g + 2, 65.536 * 2); put16(g + 4, 0);
+        memcpy(&d->reg[R_ACC_X_L], a, 6); memcpy(&d->reg[R_GYR_X_L], g, 6); d->status |= S_DRDY;
+        uint8_t fc = d->reg[R_FIFO_CTRL];
+        if ((fc & 3) != FIFO_BYPASS) {
+            if ((fc & F_TS) && d->n_gen % TS_EVERY == 0) {
+                uint32_t tick = (uint32_t)(d->t_next_us / TS_TICK_US);
+                for (int i = 0; i < 4; i++) ts[i] = (uint8_t)(tick >> (8 * i));
+                fifo_push(d, TAG_TS, ts);
+            }
+            fifo_push(d, TAG_ACC, a);
+            if (fc & F_GYR) fifo_push(d, TAG_GYR, g);
+        }
+        d->n_gen++; d->t_next_us += per;
+    }
+}
+static inline uint8_t fimu_status(const fimu_t *d) {
+    uint8_t wm = d->reg[R_FIFO_WM];
+    return (uint8_t)(d->status | ((wm && d->n >= wm) ? S_FWM : 0));
+}
+static inline int fimu_int1(const fimu_t *d) { return (fimu_status(d) & d->reg[R_INT1_MAP]) != 0; }
+static inline uint8_t rd_reg(fimu_t *d, uint8_t a) {
+    if (a == R_STATUS) return fimu_status(d);
+    if (a == R_FIFO_LVL) return (uint8_t)d->n;
+    if (a == R_FIFO_DATA) {
+        if (d->n == 0) return 0x00;                                     /* 빈 FIFO는 0x00 (parity 불량) */
+        uint8_t b = d->fifo[d->rd][d->rd_byte++];
+        if (d->rd_byte == FRAME_B) { d->rd_byte = 0; d->rd = (d->rd + 1) % FIFO_FRAMES; d->n--; }
+        return b;
+    }
+    if (a == R_ACC_X_L) d->status &= (uint8_t)~S_DRDY;
+    return d->reg[a];
+}
+static inline void wr_reg(fimu_t *d, uint8_t a, uint8_t v) {
+    if (a == R_CTRL_MISC && (v & M_SOFT_RESET)) { fimu_defaults(d); return; }
+    if (a < 0x20) return;                                               /* read-only 영역 */
+    if (a == R_FIFO_CTRL && (v & 3) == FIFO_BYPASS) { d->n = d->rd = d->rd_byte = 0; d->status &= (uint8_t)~S_OVR; }
+    d->reg[a] = v;
+}
+/* 한 번의 CS-low 구간 = 한 트랜잭션. tx[0] = R/W(bit7, 1=read) | addr[6:0] */
+static inline void fimu_spi(fimu_t *d, const uint8_t *tx, uint8_t *rx, size_t n) {
+    uint8_t a = tx[0] & 0x7F; int is_rd = tx[0] & 0x80;
+    rx[0] = 0x00;                                                       /* 주소 바이트 동안의 MISO는 쓰레기 */
+    for (size_t i = 1; i < n; i++) {
+        if (d->now_us < d->ready_us) { rx[i] = 0x00; continue; }         /* 아직 부팅 중: 응답 없음 */
+        if (is_rd) {
+            uint8_t v = rd_reg(d, a);
+            rx[i] = (d->master_mode == 0 || d->master_mode == 3) ? v : (uint8_t)(v >> 1);  /* mode 불일치 흉내 */
+        } else {
+            wr_reg(d, a, tx[i]);
+        }
+        if ((d->reg[R_CTRL_MISC] & M_IF_INC) && a != R_FIFO_DATA) a++;  /* FIFO 포트는 증가하지 않음 */
+    }
+}
+/* ---- MCU 쪽 버스 함수 (실제 보드라면 SPI 컨트롤러 + CS GPIO + DMA) ---- */
+static fimu_t *g_dev;
+static inline uint8_t reg_read(uint8_t a) {
+    uint8_t tx[2] = { (uint8_t)(0x80 | a), 0 }, rx[2]; fimu_spi(g_dev, tx, rx, 2); return rx[1];
+}
+static inline void reg_write(uint8_t a, uint8_t v) {
+    uint8_t tx[2] = { (uint8_t)(a & 0x7F), v }, rx[2]; fimu_spi(g_dev, tx, rx, 2);
+}
+static inline void burst_read(uint8_t a, uint8_t *dst, size_t n) {          /* n <= 1024 */
+    uint8_t tx[1 + 1024] = { (uint8_t)(0x80 | a) }, rx[1 + 1024];
+    fimu_spi(g_dev, tx, rx, n + 1); memcpy(dst, rx + 1, n);
+}
+#endif
+```
+
+읽는 요령: `fimu_spi()`가 **CS가 내려가 있는 한 트랜잭션**이다. `tx[0]`의 bit7이 1이면 읽기, 나머지 7비트가 시작 주소다. `rx[0]`은 주소를 보내는 동안 MISO에 나온 바이트라 의미가 없다 — 실제 SPI도 그렇다(full-duplex라 보내는 만큼 받는다). `fimu_step()`은 "장치 시간"을 앞으로 돌려 ODR에 맞춰 샘플을 만든다. MCU 쪽 코드는 장치의 내부(`d->fifo` 등)를 직접 보지 않고 **버스 함수로만** 대화한다는 규칙을 지킨다(예외: 시뮬레이션 통계, INT 핀 레벨 `fimu_int1()`, 예제 5에서 시험용 바이트열을 만드는 부분).
+
+---
+
+## 1. 버스 고르기 — SPI vs I2C vs I3C
+
+### 1.1 SPI — 4선, mode, 읽기 비트, 자동 증가
+
+**SPI(Serial Peripheral Interface)** 는 SCLK(클럭), MOSI(master → slave 데이터), MISO(slave → master), CS(chip select, 보통 active-low) 4선 동기 버스다. Don에게는 익숙하니 IMU에서 특히 중요한 점만 정리한다.
+
+**mode (CPOL, CPHA)**: CPOL은 클럭의 idle 레벨, CPHA는 "어느 edge에서 샘플링하나"다.
+
+| mode | CPOL (idle) | CPHA | 샘플링 edge | 데이터 바뀌는 edge |
+|---|---|---|---|---|
+| 0 | 0 (low) | 0 | 상승 (첫 edge) | 하강 |
+| 1 | 0 (low) | 1 | 하강 (둘째 edge) | 상승 |
+| 2 | 1 (high) | 0 | 하강 (첫 edge) | 상승 |
+| 3 | 1 (high) | 1 | 상승 (둘째 edge) | 하강 |
+
+말로 하면: mode 0과 3은 둘 다 "상승 edge에서 샘플링"이라 같은 장치와 대화할 수 있다. 그래서 많은 IMU 데이터시트가 **mode 0과 3을 지원**한다고 적는다(부품마다 확인). mode를 1이나 2로 잘못 두면 반 클럭 어긋난 곳에서 샘플링해서 **값이 1비트 밀려 보이는** 전형적 증상이 나온다 — 2.4절 예제에서 재현한다.
+
+**읽기 비트 관례**: IMU류 센서는 첫 바이트를 `R/W | address[6:0]`로 쓰는 경우가 흔하다. bit7 = 1이면 읽기, 0이면 쓰기. 그래서 주소 0x04를 읽으려면 `0x84`를 보낸다. 이 관례는 흔하지만 보편 규칙은 아니다(일부 부품은 bit6에 "multi-byte" 비트를 두거나 반대 극성을 쓴다 — 데이터시트의 SPI 프로토콜 그림이 정답).
+
+**자동 증가(auto-increment)**: CS를 내린 채 클럭을 계속 주면 주소가 1씩 증가하며 다음 레지스터가 나온다. ACC_X_L부터 12바이트를 한 번에 읽으면 acc + gyro 6축이 한 트랜잭션에 온다. 단 **FIFO 데이터 포트는 예외** — 같은 주소에서 계속 FIFO의 다음 바이트가 나오도록 설계된 부품이 많다(FIMU-6도 그렇다). 이게 "FIFO 전체를 버스트 하나로 읽는다"를 가능하게 한다.
+
+**dummy byte**: 일부 부품(예: Bosch 일부 IMU)은 SPI 읽기에서 주소 바이트 뒤 첫 바이트가 dummy라 버려야 한다고 데이터시트에 적혀 있다. 드라이버에 "읽기 오프셋"을 파라미터로 두면 부품을 바꿀 때 편하다.
+
+**3-wire SPI**: MOSI/MISO를 한 선(SDIO)으로 합친 모드를 지원하는 IMU도 있다. 핀이 귀한 웨어러블에서 쓰지만 MCU SPI 컨트롤러의 half-duplex 지원과 방향 전환 타이밍을 확인해야 한다.
+
+### 1.2 I2C — 2선, 주소, repeated start
+
+**I2C** 는 SCL·SDA 2선 open-drain 버스다. 장치마다 7비트 주소가 있고, IMU는 흔히 핀 하나(SA0/SDO)로 주소 LSB를 골라 같은 부품 두 개를 한 버스에 달 수 있다(예: 0x6A/0x6B 또는 0x68/0x69 같은 쌍 — 부품 데이터시트 확인).
+
+레지스터 읽기는 "쓰기로 레지스터 주소를 알려 주고, **repeated start**(STOP 없이 다시 START)로 방향을 바꿔 읽는" 두 단계다.
+
+```
+S | addr+W | A | reg | A | Sr | addr+R | A | data0 | A | data1 | A | ... | dataN-1 | NA | P
+  S=START  A=ACK  Sr=repeated START  NA=NACK(마지막 바이트)  P=STOP   바이트마다 8비트 + ACK 1비트 = 9비트
+```
+
+속도 등급: Standard-mode 100 kHz, Fast-mode 400 kHz, Fast-mode Plus 1 MHz. 실제 상승 시간은 **pull-up 저항 × 버스 용량(RC)** 으로 정해지므로, 1 MHz를 쓰려면 더 센 pull-up(더 작은 저항)이 필요하고 그만큼 low일 때 전류가 더 흐른다 — 저전력 기기에서 I2C 속도를 올리는 것은 공짜가 아니다. clock stretching(slave가 SCL을 붙잡는 것)을 하는 장치가 있으면 MCU 컨트롤러가 지원하는지도 확인한다.
+
+### 1.3 I3C — I2C의 후속 (개념만)
+
+**I3C** 는 MIPI가 만든 2선 버스로, 기존 I2C 장치와 같은 버스에 공존할 수 있으면서 SDR 모드 12.5 MHz로 더 빠르고, **in-band interrupt(IBI)** — 별도 INT 선 없이 slave가 버스 위로 인터럽트를 올리는 기능 — 와 동적 주소 할당을 지원한다(E8 1.2절). 핀 수가 중요한 웨어러블에 매력적이고 일부 최신 IMU가 I3C를 지원한다. 다만 MCU 쪽 I3C 컨트롤러 지원, IBI 지연, 드라이버 성숙도는 플랫폼마다 차이가 크니 "I3C면 INT 핀이 필요 없다"는 말은 **설계 검토 후에** 해야 한다. 아래 계산에서 I3C 줄은 "바이트당 9비트, 12.5 MHz"로 근사한 값이다(실제 프레이밍은 ACK 대신 T-bit 등 세부가 다르다).
+
+### 1.4 처리량 손계산 — FIFO 한 번 비우는 데 얼마나 걸리나
+
+설정: acc + gyro를 FIFO에 넣으면 샘플마다 frame 2개 = 14 B (FIMU-6 frame은 7 B). watermark 32 frame = 224 B.
+
+- I2C 400 kHz: 비트 수 = START 1 + 주소 9 + 레지스터 9 + Sr 1 + 주소 9 + 데이터 9 × 224 + STOP 1 = 2046비트. 시간 = 2046 / 400 000 = **5.1 ms**.
+- SPI 10 MHz: (주소 1 + 데이터 224) × 8 = 1800비트 → 180 µs, CS 여유 0.5 µs를 더해 **약 180 µs**.
+
+말로 하면: 같은 FIFO를 비우는 데 I2C 400 kHz는 SPI 10 MHz보다 약 28배 오래 걸린다. 버스가 오래 잡혀 있으면 MCU도 그만큼 오래 깨어 있거나(폴링 방식 드라이버) 최소한 버스 컨트롤러와 클럭 트리가 켜져 있어야 한다.
+
+**예제 1** — 무엇을 확인하나: 버스별로 1 frame, 데이터 레지스터 12 B, watermark 224 B, FIFO 전체 896 B를 읽는 시간과, 6축 1.6 kHz 스트림을 옮길 때의 버스 점유율.
+
+```python
+# ex1_bus.py — FIFO 버스트 읽기 시간: I2C 100k/400k/1M, I3C SDR(근사), SPI 10 MHz
+def i2c_us(n, hz):    # START + addr(W) + reg + Sr + addr(R) + n data, 바이트마다 9비트(ACK 포함), STOP
+    bits = 1 + 9 + 9 + 1 + 9 + 9 * n + 1
+    return bits / hz * 1e6
+def spi_us(n, hz, cs_us=0.5):   # 주소 1바이트 + n바이트, 8비트/바이트, CS 앞뒤 여유 cs_us (가정)
+    return (1 + n) * 8 / hz * 1e6 + cs_us
+buses = [("I2C 100k", lambda n: i2c_us(n, 100e3)), ("I2C 400k", lambda n: i2c_us(n, 400e3)),
+         ("I2C 1M (Fm+)", lambda n: i2c_us(n, 1e6)), ("I3C SDR~12.5M", lambda n: i2c_us(n, 12.5e6)),
+         ("SPI 10M", lambda n: spi_us(n, 10e6))]
+sizes = [("1 frame 7B", 7), ("data regs 12B", 12), ("wm 32fr 224B", 224), ("full 896B", 896)]
+print(f"{'bus':14s}" + "".join(f"{s:>15s}" for s, _ in sizes) + "   max B/s")
+for name, f in buses:
+    row = "".join(f"{f(n):>13.1f}us" for _, n in sizes)
+    print(f"{name:14s}{row}   {896 / f(896) * 1e6:>8.0f}")
+need = 1600 * 14                       # acc+gyro 1.6 kHz, frame 2개(14 B)/샘플
+print(f"\n6축 1600 Hz 스트림 = {need} B/s 를 옮길 때 버스 점유율:")
+for name, f in buses:
+    print(f"  {name:14s} {need / (896 / f(896) * 1e6):6.1%}")
+```
+
+```text
+bus                1 frame 7B  data regs 12B   wm 32fr 224B      full 896B   max B/s
+I2C 100k              930.0us       1380.0us      20460.0us      80940.0us      11070
+I2C 400k              232.5us        345.0us       5115.0us      20235.0us      44280
+I2C 1M (Fm+)           93.0us        138.0us       2046.0us       8094.0us     110699
+I3C SDR~12.5M           7.4us         11.0us        163.7us        647.5us    1383741
+SPI 10M                 6.9us         10.9us        180.5us        718.1us    1247737
+
+6축 1600 Hz 스트림 = 22400 B/s 를 옮길 때 버스 점유율:
+  I2C 100k       202.3%
+  I2C 400k        50.6%
+  I2C 1M (Fm+)    20.2%
+  I3C SDR~12.5M    1.6%
+  SPI 10M          1.8%
+```
+
+출력에서 볼 것: I2C 100 kHz로는 6축 1.6 kHz 스트림을 **아예 옮길 수 없다**(필요 대역의 202 %). I2C 400 kHz도 버스의 절반을 쓴다 — 같은 버스에 다른 센서(기압계, 연료 게이지)가 있으면 충돌한다. SPI 10 MHz와 I3C SDR은 2 % 미만이다. 반대로 50 Hz 가속도만 쓴다면 I2C 400 kHz도 충분하다. **버스는 "ODR × 축 수 × 바이트"로 고른다.**
+
+```svg
+<svg viewBox="0 0 640 270" xmlns="http://www.w3.org/2000/svg"><text x="10" y="22" font-size="13" text-anchor="start">224 B(watermark 32 frame) 버스트 읽기 시간 — 로그 축</text><text x="162" y="62" font-size="12" text-anchor="end">I2C 100 kHz</text><rect x="170" y="45" width="355.9" height="24" fill="#d0564a" fill-opacity="0.75"/><text x="520" y="62" font-size="12" text-anchor="end">20,460 µs</text>
+<text x="162" y="100" font-size="12" text-anchor="end">I2C 400 kHz</text><rect x="170" y="83" width="291.2" height="24" fill="#d0564a" fill-opacity="0.75"/><text x="467" y="100" font-size="12" text-anchor="start">5,115 µs</text><text x="162" y="138" font-size="12" text-anchor="end">I2C 1 MHz (Fm+)</text><rect x="170" y="121" width="248.4" height="24" fill="#d0564a" fill-opacity="0.75"/>
+<text x="424" y="138" font-size="12" text-anchor="start">2,046 µs</text><text x="162" y="176" font-size="12" text-anchor="end">I3C SDR (근사)</text><rect x="170" y="159" width="130.5" height="24" fill="#e08a3c" fill-opacity="0.75"/><text x="307" y="176" font-size="12" text-anchor="start">164 µs</text><text x="162" y="214" font-size="12" text-anchor="end">SPI 10 MHz</text>
+<rect x="170" y="197" width="135.1" height="24" fill="#3f9a6b" fill-opacity="0.75"/><text x="311" y="214" font-size="12" text-anchor="start">180 µs</text><line x1="170" y1="241" x2="600" y2="241" stroke="currentColor"/><line x1="170.0" y1="241" x2="170.0" y2="246" stroke="currentColor"/><text x="170" y="260" font-size="12" text-anchor="middle">10 µs</text>
+<line x1="277.5" y1="241" x2="277.5" y2="246" stroke="currentColor"/><text x="278" y="260" font-size="12" text-anchor="middle">100 µs</text><line x1="385.0" y1="241" x2="385.0" y2="246" stroke="currentColor"/><text x="385" y="260" font-size="12" text-anchor="middle">1 ms</text><line x1="492.5" y1="241" x2="492.5" y2="246" stroke="currentColor"/><text x="492" y="260" font-size="12" text-anchor="middle">10 ms</text>
+<line x1="600.0" y1="241" x2="600.0" y2="246" stroke="currentColor"/><text x="600" y="260" font-size="12" text-anchor="middle">100 ms</text><line x1="557.2" y1="40" x2="557.2" y2="241" stroke="#888" stroke-dasharray="4 3"/><text x="553" y="38" font-size="12" text-anchor="end">wm 32 frame이 차는 시간 @400 Hz = 40 ms</text></svg>
+```
+
+그림 2 — 224 B(watermark 32 frame) 버스트 하나를 읽는 시간, 로그 축. 점선은 400 Hz acc+gyro에서 watermark 32 frame이 차는 데 걸리는 40 ms. I2C 100 kHz 막대는 이 간격의 절반을 차지한다 — 버스가 거의 쉬지 못한다는 뜻이다.
+
+### 1.5 고르는 기준
+
+| 기준 | SPI | I2C | I3C |
+|---|---|---|---|
+| 핀 | 4 (+ INT) | 2 (+ INT), 버스 공유 | 2, IBI로 INT 생략 가능 |
+| 처리량 | 수~10 MHz급, 고 ODR·자이로·FIFO 대량 읽기에 적합 | 100 k–1 MHz, 저 ODR 가속도면 충분 | SDR 12.5 MHz (HDR 모드는 더 빠름) |
+| 전력 | pull-up 없음, 짧은 버스트 | pull-up 전류, 긴 트랜잭션 | push-pull 구간이 많아 I2C보다 유리 |
+| 견고성 | CS 덕에 장치 선택이 명확, 신호선 많음 | ACK로 장치 존재 확인, 버스 hang(SDA stuck) 위험 | 컨트롤러·드라이버 성숙도 확인 필요 |
+| 디버그 | 로직 분석기로 바로 읽힘 | 주소 NACK, stretching 등 상태가 많음 | 분석기 디코더 지원 확인 |
+
+웨어러블에서 흔한 선택: **IMU는 SPI**(자이로·고 ODR·FIFO), 느린 센서(기압·온도·연료 게이지)는 I2C에 모은다. 핀이 정말 부족하면 I3C를 검토한다.
+
+---
+
+## 2. Bring-up 순서 — 처음 전원을 넣고 첫 샘플까지
+
+### 2.1 순서
+
+Don이 새 실리콘 bring-up에서 하던 것과 같다: **살아 있나 → 내가 아는 상태로 되돌린다 → 설정한다 → 설정이 들어갔는지 읽어 본다 → 스스로 시험하게 한다 → 인터럽트를 연다.**
+
+1. **전원 레일과 대기**: VDD·VDDIO가 올라오고 데이터시트의 power-up 시간(보통 수 ms)을 기다린다. 그 전에 버스를 건드리면 응답이 없거나 이상한 값이 나온다. VDDIO가 MCU I/O 전압과 맞는지(레벨 시프터 필요 여부)도 여기서 확인한다.
+2. **버스 인터페이스 선택**: SPI/I2C 겸용 부품은 CS 핀 레벨이나 특정 레지스터로 인터페이스가 정해진다. 일부 부품은 "SPI로 쓰려면 처음에 CS를 한 번 토글하라"는 식의 규칙이 있다(데이터시트 확인).
+3. **WHO_AM_I 읽기**: 고정된 칩 ID를 읽어 버스·배선·mode·주소가 맞는지 본다. 틀리면 여기서 멈추고 디버그한다(9절).
+4. **soft reset**: 이전 부팅·이전 펌웨어가 남긴 설정을 지우고 기본 상태로. reset 후에는 데이터시트의 대기 시간을 지키고, reset 완료 비트가 있으면 폴링한다.
+5. **설정**: ODR, full-scale range(FS), 디지털 필터(LPF 대역, 일부 부품은 HPF), 전력 모드(저전력/일반/고성능), FIFO 모드·watermark·batch 대상, 인터럽트 라우팅. 순서가 중요한 부품도 있다(예: "센서를 끈 상태에서 FIFO를 설정하라").
+6. **readback**: 쓴 레지스터를 다시 읽어 비교한다. 쓰기가 무시되는 경우(잠긴 레지스터, 전력 모드 제약, 잘못된 bank)를 여기서 잡는다.
+7. **self-test**: 칩 안의 구동 장치가 MEMS 구조에 정전기력을 걸어 **알려진 만큼 일부러 움직이고**, 켜기 전후 출력 차이가 데이터시트의 최소·최대 범위 안인지 본다. 공장 테스트(factory test)와 현장 진단에 쓴다. 조건(FS, ODR, 정착 시간, 평균 개수)은 데이터시트가 정한 대로 맞춰야 한계값이 의미가 있다.
+8. **인터럽트 핀 설정, 그리고 MCU 쪽 IRQ는 마지막에 켠다**: 설정 도중 발생한 가짜 edge가 핸들러를 부르지 않게 한다. MCU IRQ를 켜기 전에 STATUS를 한 번 읽어 남은 플래그를 지운다.
+
+### 2.2 INT 핀 옵션
+
+| 옵션 | 선택지 | 고르는 기준 |
+|---|---|---|
+| 출력 구동 | push-pull / open-drain | 핀을 혼자 쓰면 push-pull(외부 저항 불필요). 여러 장치가 한 선을 공유(wired-OR)하면 open-drain + pull-up |
+| 극성 | active-high / active-low | MCU wake 입력이 지원하는 쪽. open-drain 공유선은 보통 active-low |
+| 펄스 vs 래치 | pulsed / latched | pulsed: 짧은 펄스 — MCU가 edge를 놓치면 끝. latched: 원인 레지스터를 읽을 때까지 유지 — 레벨 트리거와 함께 쓰면 놓치지 않는다 |
+| MCU 쪽 트리거 | edge / level | edge는 "레벨이 계속 높으면 다시 오지 않는다"는 함정이 있다 (8절에서 drain 루프로 막는다) |
+
+deep sleep에서 깨워야 하는 핀이면 MCU의 **wake-capable GPIO**에 연결해야 한다. 모든 GPIO가 가장 깊은 sleep에서 깨울 수 있는 건 아니다(E9 6.3절). 보드 설계 리뷰 때 확인할 항목이다.
+
+### 2.3 코드로 확인 — bring-up과 두 가지 실패
+
+**예제 2** — 무엇을 확인하나: power-up 대기를 안 했을 때와 SPI mode를 틀렸을 때 WHO_AM_I가 어떻게 보이는지, 그리고 정상 시퀀스(soft reset → 설정 → readback → self-test)가 통과하는지.
+
+```c
+/* ex2_bringup.c — 가상 FIMU-6 bring-up: power-up 대기, WHO_AM_I, soft reset, 설정+readback, self-test, INT 설정 */
+#include <stdio.h>
+#include "fimu_model.h"
+
+static double t_us;                                  /* MCU가 보는 시간 (가짜 delay) */
+static void delay_us(double us) { t_us += us; fimu_step(g_dev, t_us); }
+static int16_t le16(const uint8_t *p) { return (int16_t)(uint16_t)(p[0] | p[1] << 8); }
+static double mean_az(int n) {                       /* 데이터 레지스터에서 az n개 평균 [LSB] */
+    double s = 0; uint8_t b[6];
+    for (int i = 0; i < n; i++) { delay_us(10000); burst_read(R_ACC_X_L, b, 6); s += le16(b + 4); }
+    return s / n;
+}
+static int check(const char *what, uint8_t got, uint8_t want) {
+    printf("  %-26s got 0x%02X want 0x%02X  %s\n", what, got, want, got == want ? "OK" : "FAIL");
+    return got == want;
+}
+int main(void) {
+    static fimu_t dev; g_dev = &dev; fimu_init(&dev, 10000);   /* 부팅에 10 ms 걸리는 장치 */
+    printf("[1] 전원 직후 바로 읽기 (t=%.0f us)\n", t_us);
+    check("WHO_AM_I", reg_read(R_WHO_AM_I), WHO_AM_I_VAL);
+    delay_us(15000);
+    printf("[2] SPI mode 1로 잘못 설정하고 읽기\n"); dev.master_mode = 1;
+    check("WHO_AM_I", reg_read(R_WHO_AM_I), WHO_AM_I_VAL);
+    printf("[3] mode 0으로 고친 뒤 정상 시퀀스\n"); dev.master_mode = 0;
+    if (!check("WHO_AM_I", reg_read(R_WHO_AM_I), WHO_AM_I_VAL)) return 1;
+    reg_write(R_CTRL_ACC, 0x55);                     /* 이전 부팅의 설정이 남아 있다고 가정 */
+    reg_write(R_CTRL_MISC, M_SOFT_RESET); delay_us(1000);
+    check("CTRL_ACC after reset", reg_read(R_CTRL_ACC), 0x00);
+    const uint8_t cfg[][2] = {
+        { R_CTRL_ACC, 3 << 4 | 1 << 2 },             /* ODR code 3 = 50 Hz, FS code 1 = ±4 g */
+        { R_INT_CFG, 0x00 },                          /* push-pull, active-high, pulsed (가상 비트 정의) */
+        { R_INT1_MAP, S_DRDY },
+    };
+    for (unsigned i = 0; i < sizeof cfg / sizeof cfg[0]; i++) {
+        reg_write(cfg[i][0], cfg[i][1]);
+        char name[32]; snprintf(name, sizeof name, "readback reg 0x%02X", cfg[i][0]);
+        check(name, reg_read(cfg[i][0]), cfg[i][1]);
+    }
+    double off = mean_az(8);
+    reg_write(R_CTRL_MISC, M_IF_INC | M_SELF_TEST); delay_us(20000);  /* 정착 시간 */
+    double on = mean_az(8);
+    reg_write(R_CTRL_MISC, M_IF_INC); delay_us(20000);
+    double delta = on - off, lo = 400, hi = 1600;   /* 가상 한계 [LSB @ ±4 g] */
+    printf("  self-test: off %.1f on %.1f delta %.1f LSB (%.3f g) -> %s\n",
+           off, on, delta, delta / 8192.0, (delta >= lo && delta <= hi) ? "PASS" : "FAIL");
+    printf("  az = %.4f g (1 g이면 정상), INT1 level = %d\n", mean_az(4) / 8192.0, fimu_int1(&dev));
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 -pthread ex2_bringup.c -o ex2 -lm && ./ex2
+```
+
+```text
+[1] 전원 직후 바로 읽기 (t=0 us)
+  WHO_AM_I                   got 0x00 want 0xA7  FAIL
+[2] SPI mode 1로 잘못 설정하고 읽기
+  WHO_AM_I                   got 0x53 want 0xA7  FAIL
+[3] mode 0으로 고친 뒤 정상 시퀀스
+  WHO_AM_I                   got 0xA7 want 0xA7  OK
+  CTRL_ACC after reset       got 0x00 want 0x00  OK
+  readback reg 0x20          got 0x34 want 0x34  OK
+  readback reg 0x25          got 0x00 want 0x00  OK
+  readback reg 0x26          got 0x01 want 0x01  OK
+  self-test: off 8192.0 on 9011.0 delta 819.0 LSB (0.100 g) -> PASS
+  az = 1.0000 g (1 g이면 정상), INT1 level = 0
+```
+
+출력에서 볼 것:
+
+- [1] 전원 직후 0x00: 장치가 아직 부팅 중이다. 실제 보드에서는 0x00 또는 0xFF가 흔한데, **MISO가 떠 있으면(pull 없음) 0xFF, 장치가 MISO를 low로 잡고 있으면 0x00**처럼 보인다. 둘 다 "응답 없음"의 신호다.
+- [2] 0x53 = 0xA7 >> 1: 값이 정확히 1비트 밀렸다 — **mode 불일치(또는 샘플링 타이밍 문제)의 지문**이다. 비트 패턴이 원래 값과 "비슷하게" 틀리면 배선보다 타이밍을 의심한다.
+- self-test delta 819 LSB = 0.100 g: 가상 한계 400–1600 LSB 안이라 PASS. 실제 데이터시트 한계는 축별·FS별로 다르다.
+- 마지막 줄의 az = 1.0000 g: 책상에 놓인 IMU의 z축이 중력 1 g를 본다는 sanity check. **단위 변환(LSB → g)이 맞는지 확인하는 가장 싼 방법**이다(G1).
+
+### 2.4 bring-up 함정
+
+- reset 직후 바로 쓰기: reset 완료 전에 쓴 설정이 날아간다. 대기 시간 또는 완료 비트를 지킨다.
+- readback을 안 함: "설정했는데 ODR이 기본값"인 버그가 몇 주 뒤 데이터 분석에서야 드러난다. bring-up 로그에 readback 결과를 남긴다.
+- self-test 후 원래 설정으로 안 돌려놓음: 0.1 g 오프셋이 붙은 데이터를 계속 수집한다.
+- MCU IRQ를 먼저 켬: 설정 도중 생긴 edge로 핸들러가 빈 FIFO를 읽고, 이후 edge를 놓치는 상태로 시작한다.
+
+---
+
+## 3. 데이터 경로 세 가지 — polling, DRDY 인터럽트, FIFO + watermark
+
+### 3.1 직관 — 우편함 확인하기
+
+- **polling**: 5분마다 현관에 나가 우편함을 열어 본다. 편지가 없어도 나간다. 편지가 두 통 왔다 가면, 우편함이 1칸이라 하나는 사라진다.
+- **DRDY 인터럽트(샘플마다)**: 편지 한 통 올 때마다 초인종이 울리고 나간다. 놓치지는 않지만 하루에 수백 번 일어나야 한다.
+- **FIFO + watermark**: 우편함이 큰 상자이고, 20통이 차면 초인종이 울린다. 한 번 나가서 다 가져온다. 대신 가장 오래된 편지는 최대 "20통이 차는 시간"만큼 늦게 받는다.
+
+정의:
+
+- **DRDY(data-ready)**: 새 샘플이 데이터 레지스터에 들어왔다는 플래그. INT 핀에 연결할 수 있다.
+- **FIFO**: 센서 칩 안의 샘플 큐. 수백 B~수 KB.
+- **watermark(WM)**: FIFO 채움 수준의 문턱. 넘으면 FWM 플래그와 INT.
+
+```svg
+<svg viewBox="0 0 660 230" xmlns="http://www.w3.org/2000/svg"><text x="10" y="22" font-size="13" text-anchor="start">같은 400 Hz 센서, MCU가 깨어나는 시각 (0–100 ms)</text><text x="112" y="59" font-size="12" text-anchor="end">poll 1 kHz</text><line x1="120" y1="55" x2="640" y2="55" stroke="currentColor" stroke-opacity="0.4"/><path d="M121.2,41V69 M126.4,41V69 M131.6,41V69 M136.8,41V69 M142.0,41V69 M147.2,41V69 M152.4,41V69 M157.6,41V69 M162.8,41V69 M168.0,41V69 M173.2,41V69 M178.4,41V69 M183.6,41V69 M188.8,41V69 M194.0,41V69 M199.2,41V69 M204.4,41V69 M209.6,41V69 M214.8,41V69 M220.0,41V69 M225.2,41V69 M230.4,41V69 M235.6,41V69 M240.8,41V69 M246.0,41V69 M251.2,41V69 M256.4,41V69 M261.6,41V69 M266.8,41V69 M272.0,41V69 M277.2,41V69 M282.4,41V69 M287.6,41V69 M292.8,41V69 M298.0,41V69 M303.2,41V69 M308.4,41V69 M313.6,41V69 M318.8,41V69 M324.0,41V69 M329.2,41V69 M334.4,41V69 M339.6,41V69 M344.8,41V69 M350.0,41V69 M355.2,41V69 M360.4,41V69 M365.6,41V69 M370.8,41V69 M376.0,41V69 M381.2,41V69 M386.4,41V69 M391.6,41V69 M396.8,41V69 M402.0,41V69 M407.2,41V69 M412.4,41V69 M417.6,41V69 M422.8,41V69 M428.0,41V69 M433.2,41V69 M438.4,41V69 M443.6,41V69 M448.8,41V69 M454.0,41V69 M459.2,41V69 M464.4,41V69 M469.6,41V69 M474.8,41V69 M480.0,41V69 M485.2,41V69 M490.4,41V69 M495.6,41V69 M500.8,41V69 M506.0,41V69 M511.2,41V69 M516.4,41V69 M521.6,41V69 M526.8,41V69 M532.0,41V69 M537.2,41V69 M542.4,41V69 M547.6,41V69 M552.8,41V69 M558.0,41V69 M563.2,41V69 M568.4,41V69 M573.6,41V69 M578.8,41V69 M584.0,41V69 M589.2,41V69 M594.4,41V69 M599.6,41V69 M604.8,41V69 M610.0,41V69 M615.2,41V69 M620.4,41V69 M625.6,41V69 M630.8,41V69 M636.0,41V69" stroke="#888" stroke-width="1" fill="none"/>
+<text x="640" y="37" font-size="12" text-anchor="end">1000 wakes/s</text><text x="112" y="109" font-size="12" text-anchor="end">DRDY @400 Hz</text><line x1="120" y1="105" x2="640" y2="105" stroke="currentColor" stroke-opacity="0.4"/><path d="M120.0,91V119 M133.0,91V119 M146.0,91V119 M159.0,91V119 M172.0,91V119 M185.0,91V119 M198.0,91V119 M211.0,91V119 M224.0,91V119 M237.0,91V119 M250.0,91V119 M263.0,91V119 M276.0,91V119 M289.0,91V119 M302.0,91V119 M315.0,91V119 M328.0,91V119 M341.0,91V119 M354.0,91V119 M367.0,91V119 M380.0,91V119 M393.0,91V119 M406.0,91V119 M419.0,91V119 M432.0,91V119 M445.0,91V119 M458.0,91V119 M471.0,91V119 M484.0,91V119 M497.0,91V119 M510.0,91V119 M523.0,91V119 M536.0,91V119 M549.0,91V119 M562.0,91V119 M575.0,91V119 M588.0,91V119 M601.0,91V119 M614.0,91V119 M627.0,91V119" stroke="#e08a3c" stroke-width="2.5" fill="none"/>
+<text x="640" y="87" font-size="12" text-anchor="end">400 wakes/s</text><text x="112" y="159" font-size="12" text-anchor="end">FIFO wm=16 샘플</text><line x1="120" y1="155" x2="640" y2="155" stroke="currentColor" stroke-opacity="0.4"/><path d="M315.0,141V169 M523.0,141V169" stroke="#3f9a6b" stroke-width="2.5" fill="none"/><text x="640" y="137" font-size="12" text-anchor="end">25 wakes/s</text>
+<line x1="120" y1="190" x2="640" y2="190" stroke="currentColor"/><line x1="120.0" y1="190" x2="120.0" y2="195" stroke="currentColor"/><text x="120" y="209" font-size="12" text-anchor="middle">0 ms</text><line x1="224.0" y1="190" x2="224.0" y2="195" stroke="currentColor"/><text x="224" y="209" font-size="12" text-anchor="middle">20 ms</text><line x1="328.0" y1="190" x2="328.0" y2="195" stroke="currentColor"/>
+<text x="328" y="209" font-size="12" text-anchor="middle">40 ms</text><line x1="432.0" y1="190" x2="432.0" y2="195" stroke="currentColor"/><text x="432" y="209" font-size="12" text-anchor="middle">60 ms</text><line x1="536.0" y1="190" x2="536.0" y2="195" stroke="currentColor"/><text x="536" y="209" font-size="12" text-anchor="middle">80 ms</text><line x1="640.0" y1="190" x2="640.0" y2="195" stroke="currentColor"/>
+<text x="640" y="209" font-size="12" text-anchor="middle">100 ms</text></svg>
+```
+
+그림 3 — 같은 400 Hz 센서를 세 방식으로 읽을 때 MCU가 깨어나는 시각(0–100 ms). 위: 1 kHz polling은 샘플이 없어도 깨어난다. 가운데: DRDY는 샘플마다(2.5 ms 간격). 아래: FIFO watermark 16샘플(32 frame)이면 40 ms마다 한 번 — 첫 wake는 16번째 샘플이 도착하는 37.5 ms다.
+
+### 3.2 코드로 확인 — 같은 장치, 세 가지 드라이버
+
+**예제 3** — 무엇을 확인하나: 가상 IMU(acc + gyro 400 Hz)를 2초 동안 polling(1 kHz, 200 Hz), DRDY 인터럽트, FIFO + watermark(32, 96 frame)로 읽을 때 초당 wake 수, 받은 샘플, 놓친 샘플, 지연, MCU가 깨어 있는 시간. 시간을 5 µs씩 진행하는 시뮬레이션이라 출력이 매번 같다.
+
+```c
+/* ex3_datapath.c — 같은 가상 IMU(acc+gyro 400 Hz)를 polling / DRDY 인터럽트 / FIFO+watermark로 2초간 읽기 */
+#include <stdio.h>
+#include "fimu_model.h"
+#define T_END   2e6        /* us */
+#define DT      5.0        /* 시뮬레이션 시간 해상도 us */
+#define T_WAKE  20.0       /* MCU가 sleep에서 깨어 코드를 돌리기까지 us (가정) */
+#define SPI_HZ  8e6
+#define T_CS    2.0        /* 트랜잭션당 CS·드라이버 오버헤드 us (가정) */
+typedef struct { const char *name; int mode; double poll_us; uint8_t wm; } cfg_t;   /* mode 0 poll, 1 DRDY, 2 FIFO */
+
+int main(void) {
+    const cfg_t C[] = { { "poll 1 kHz", 0, 1000, 0 }, { "poll 200 Hz", 0, 5000, 0 }, { "DRDY IRQ", 1, 0, 0 },
+                        { "FIFO wm=32", 2, 0, 32 }, { "FIFO wm=96", 2, 0, 96 } };
+    printf("%-12s %8s %8s %9s %9s %9s %10s\n", "mode", "wakes/s", "got/s", "missed", "lat_avg", "lat_max", "awake ms/s");
+    for (unsigned c = 0; c < sizeof C / sizeof C[0]; c++) {
+        static fimu_t dev; g_dev = &dev; fimu_init(&dev, 0);
+        reg_write(R_CTRL_ACC, 6 << 4 | 1 << 2); reg_write(R_CTRL_GYR, 6 << 4);   /* 400 Hz */
+        if (C[c].mode == 2) { reg_write(R_FIFO_WM, C[c].wm); reg_write(R_FIFO_CTRL, FIFO_STREAM | F_GYR); }
+        reg_write(R_INT1_MAP, C[c].mode == 1 ? S_DRDY : C[c].mode == 2 ? S_FWM : 0);
+        const double per = 1e6 / 400;
+        long wakes = 0, got = 0; int prev = 0;
+        double lat_sum = 0, lat_max = 0, awake = 0, next_poll = 1230;   /* poll 위상은 샘플과 무관 */
+        for (double t = 0; t < T_END; t += DT) {
+            fimu_step(&dev, t);
+            int lvl = fimu_int1(&dev), wake = (C[c].mode == 0) ? (t >= next_poll) : (lvl && !prev);
+            prev = lvl;
+            if (!wake) continue;
+            if (C[c].mode == 0) next_poll += C[c].poll_us;
+            wakes++;
+            double bus = 0; uint8_t buf[FIFO_FRAMES * FRAME_B];
+            if (C[c].mode < 2) {
+                uint8_t st = reg_read(R_STATUS); bus += T_CS + 2 * 8 / SPI_HZ * 1e6;
+                if (st & S_DRDY) {
+                    burst_read(R_ACC_X_L, buf, 12); bus += T_CS + 13 * 8 / SPI_HZ * 1e6;
+                    double lat = T_WAKE + bus + t - (dev.n_gen - 1) * per;
+                    got++; lat_sum += lat; if (lat > lat_max) lat_max = lat;
+                }
+            } else {
+                unsigned n = reg_read(R_FIFO_LVL); bus += T_CS + 2 * 8 / SPI_HZ * 1e6;
+                burst_read(R_FIFO_DATA, buf, n * FRAME_B); bus += T_CS + (1 + n * FRAME_B) * 8 / SPI_HZ * 1e6;
+                for (unsigned f = 0; f < n; f++) {
+                    if ((buf[f * FRAME_B] >> 4) != TAG_ACC) continue;
+                    double lat = T_WAKE + bus + t - got * per;   /* 손실이 없으면 got번째 샘플의 시각 */
+                    got++; lat_sum += lat; if (lat > lat_max) lat_max = lat;
+                }
+            }
+            awake += T_WAKE + bus;
+        }
+        long pending = C[c].mode < 2 ? (dev.status & S_DRDY ? 1 : 0) : dev.n / 2;
+        printf("%-12s %8.1f %8.1f %9ld %7.2fms %7.2fms %10.2f\n", C[c].name, wakes / 2.0, got / 2.0,
+               (long)dev.n_gen - got - pending, lat_sum / got / 1e3, lat_max / 1e3, awake / 2.0 / 1e3);
+    }
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 -pthread ex3_datapath.c -o ex3 -lm && ./ex3
+```
+
+```text
+mode          wakes/s    got/s    missed   lat_avg   lat_max awake ms/s
+poll 1 kHz      999.5    400.0         0    0.52ms    1.27ms      29.99
+poll 200 Hz     200.0    200.0       399    1.27ms    1.27ms       7.80
+DRDY IRQ        400.0    400.0         0    0.04ms    0.04ms      15.60
+FIFO wm=32       25.0    400.0         0   19.00ms   37.75ms       6.28
+FIFO wm=96        8.0    384.0         0   59.45ms  118.20ms       5.59
+```
+
+출력에서 볼 것:
+
+- **poll 1 kHz**: 샘플은 다 받지만 초당 1000번 깬다. 데이터가 없는 wake가 60 %다. 지연은 polling 간격만큼 들쭉날쭉(평균 0.52 ms, 최대 1.27 ms).
+- **poll 200 Hz**: ODR보다 느리게 polling하면 **샘플의 절반(399개)을 조용히 잃는다**. 데이터 레지스터는 1칸짜리 우편함이기 때문이다. 에러가 나지 않으니 데이터를 분석하기 전까지 모른다 — 실무에서 실제로 나는 버그다.
+- **DRDY IRQ**: 지연은 최소(40 µs = wake 20 µs + SPI 2번)지만 샘플마다 깬다(400/s).
+- **FIFO wm=32**: wake가 25/s로 16배 줄고, 대가로 평균 지연 19 ms, 최대 37.75 ms(가장 오래된 샘플이 watermark가 찰 때까지 기다린 시간). wm=96이면 8/s, 최대 118 ms. 마지막 줄의 got/s 384는 끝날 때 FIFO에 남은 32샘플 때문이다(손실 아님, missed 0).
+- **awake ms/s**: FIFO 쪽이 6.28 ms/s로 가장 작지만, 대부분이 **SPI 전송 시간**(400샘플 × 14 B × 8 / 8 MHz = 5.6 ms)이다. 이 시간을 **DMA에 맡기고 CPU를 sleep(WFI)에 두면** 깨어 있는 CPU 시간은 더 줄어든다 — 3.3절 전력 모델이 이것을 반영한다.
+
+### 3.3 전력 모델 — wake 한 번의 전하 × 초당 횟수
+
+식:
+
+```
+I_avg = I_sleep + (ODR / W) × [ Q_wake + Q_bus(W) + Q_proc(W) ]
+
+Q_wake    = (I_run − I_sleep) × (T_wake + T_isr)        wake 한 번의 고정 비용
+Q_bus(W)  = (I_dma − I_sleep) × (W × B + 3) × 8 / f_SPI  CPU는 자고 DMA만 일한다
+Q_proc(W) = (I_run − I_sleep) × W × T_proc               샘플마다 파싱·변환
+```
+
+말로 하면: 샘플당 비용(전송·처리)은 W를 바꿔도 거의 그대로다(W개를 W배 드물게 하니까). **W로 줄일 수 있는 건 Q_wake 항 하나뿐**이고, 그 항은 1/W로 줄어든다. 그래서 W를 키우면 처음엔 크게 줄다가 곧 바닥(sleep 전류 + 샘플당 비용)에 붙는다.
+
+손계산: E9 6.5절과 같은 MCU (run 288 µA, sleep 2 µA, sleep 탈출 150 µs) + ISR·스레드 전환 40 µs를 가정하면 Q_wake = 286 µA × 190 µs = 0.0543 µA·s. ODR 100 Hz에서 W = 1이면 초당 100번 → **5.43 µA**가 wake 비용. W = 20이면 5번 → 0.27 µA.
+
+**예제 4** — 무엇을 확인하나: W(샘플 수)를 바꿀 때 평균 전류, 그중 wake 비용, 최악 지연(W/ODR + 최악 서비스 지연 50 ms), MCU RAM(이중 버퍼), FIFO 여유.
+
+```python
+# ex4_power.py — watermark W(샘플 수)에 따른 MCU 평균 전류·지연·RAM·overflow 여유 (숫자는 설명용 가정, E9 6.5와 같은 MCU)
+import math
+ODR = 100.0                 # Hz, acc+gyro → FIFO frame 2개(14 B)/샘플
+I_SLEEP, I_RUN, I_DMA = 2.0, 288.0, 60.0     # µA: deep sleep, CPU run, CPU는 자고 SPI+DMA만 동작
+T_WAKE, T_ISR = 150e-6, 40e-6                # s: sleep 탈출 + 클럭 안정, ISR+스레드 전환+드라이버 오버헤드
+SPI_HZ, B = 8e6, 14
+T_PROC = 30e-6                               # s/샘플: 파싱·변환·링 push (CPU)
+FIFO_SETS = 64                               # FIFO 128 frame = 64 샘플
+T_SERVICE_WORST = 0.050                      # s: 인터럽트 후 drain 시작까지 최악 (다른 작업에 막힘, 가정)
+def avg_uA(W):
+    rate = ODR / W
+    q_wake = (I_RUN - I_SLEEP) * (T_WAKE + T_ISR)            # µA·s per wake (= µC)
+    q_bus  = (I_DMA - I_SLEEP) * (W * B + 3) * 8 / SPI_HZ     # DMA 동안 CPU sleep
+    q_proc = (I_RUN - I_SLEEP) * W * T_PROC
+    return I_SLEEP + rate * (q_wake + q_bus + q_proc), rate * q_wake
+print("   W  wakes/s  avg_uA  of_which_wake  lat_max_ms  RAM_B(x2)  margin_sets")
+for W in [1, 2, 5, 10, 20, 32, 45, 58, 64]:
+    tot, wk = avg_uA(W)
+    lat = (W / ODR + T_SERVICE_WORST) * 1e3
+    margin = FIFO_SETS - W - math.ceil(ODR * T_SERVICE_WORST)   # 최악 서비스 지연 동안 들어올 샘플까지 담고 남는 칸
+    print(f"{W:4d} {ODR/W:8.1f} {tot:7.2f} {wk:14.2f} {lat:11.1f} {2*W*B:10d} {margin:12d}")
+```
+
+```text
+   W  wakes/s  avg_uA  of_which_wake  lat_max_ms  RAM_B(x2)  margin_sets
+   1    100.0    8.39           5.43        60.0         28           58
+   2     50.0    5.66           2.72        70.0         56           57
+   5     20.0    4.03           1.09       100.0        140           54
+  10     10.0    3.48           0.54       150.0        280           49
+  20      5.0    3.21           0.27       250.0        560           39
+  32      3.1    3.11           0.17       370.0        896           27
+  45      2.2    3.06           0.12       500.0       1260           14
+  58      1.7    3.03           0.09       630.0       1624            1
+  64      1.6    3.02           0.08       690.0       1792           -5
+```
+
+출력에서 볼 것:
+
+- W = 1 → 10: 8.39 → 3.48 µA. **전류의 대부분을 첫 10배에서 얻는다.** W = 20 → 64는 3.21 → 3.02 µA로 거의 그대로다.
+- 반면 지연은 W에 정비례해 늘어난다(60 → 690 ms). RAM도 W에 비례.
+- margin_sets가 음수(W = 64)면, 인터럽트 후 드라이버가 최악 50 ms 늦게 오는 동안 들어올 5샘플을 담을 칸이 없다 → **overflow**. W를 FIFO 용량 끝까지 올리면 안 되는 이유다.
+- 결론: 이 가정에서는 **W = 10~20 근처가 무릎(knee)** 이다. 이 이상은 전류를 거의 못 줄이면서 지연·RAM·overflow 위험만 키운다.
+
+```svg
+<svg viewBox="0 0 640 310" xmlns="http://www.w3.org/2000/svg"><text x="10" y="18" font-size="13" text-anchor="start">watermark W에 따른 평균 전류(파랑, 왼쪽 축)와 최악 지연(주황, 오른쪽 축)</text><line x1="70" y1="260" x2="570" y2="260" stroke="currentColor"/><line x1="70" y1="260" x2="70" y2="40" stroke="currentColor"/><line x1="570" y1="260" x2="570" y2="40" stroke="currentColor"/>
+<line x1="66" y1="260.0" x2="70" y2="260.0" stroke="currentColor"/><text x="63" y="264" font-size="12" text-anchor="end">0</text><line x1="66" y1="211.1" x2="70" y2="211.1" stroke="currentColor"/><text x="63" y="215" font-size="12" text-anchor="end">2</text><line x1="66" y1="162.2" x2="70" y2="162.2" stroke="currentColor"/><text x="63" y="166" font-size="12" text-anchor="end">4</text>
+<line x1="66" y1="113.3" x2="70" y2="113.3" stroke="currentColor"/><text x="63" y="117" font-size="12" text-anchor="end">6</text><line x1="66" y1="64.4" x2="70" y2="64.4" stroke="currentColor"/><text x="63" y="68" font-size="12" text-anchor="end">8</text><line x1="570" y1="260.0" x2="574" y2="260.0" stroke="currentColor"/><text x="577" y="264" font-size="12" text-anchor="start">0</text>
+<line x1="570" y1="205.0" x2="574" y2="205.0" stroke="currentColor"/><text x="577" y="209" font-size="12" text-anchor="start">180</text><line x1="570" y1="150.0" x2="574" y2="150.0" stroke="currentColor"/><text x="577" y="154" font-size="12" text-anchor="start">360</text><line x1="570" y1="95.0" x2="574" y2="95.0" stroke="currentColor"/><text x="577" y="99" font-size="12" text-anchor="start">540</text>
+<line x1="570" y1="40.0" x2="574" y2="40.0" stroke="currentColor"/><text x="577" y="44" font-size="12" text-anchor="start">720</text><line x1="77.8" y1="260" x2="77.8" y2="264" stroke="currentColor"/><text x="78" y="278" font-size="12" text-anchor="middle">1</text><line x1="132.5" y1="260" x2="132.5" y2="264" stroke="currentColor"/><text x="132" y="278" font-size="12" text-anchor="middle">8</text>
+<line x1="195.0" y1="260" x2="195.0" y2="264" stroke="currentColor"/><text x="195" y="278" font-size="12" text-anchor="middle">16</text><line x1="320.0" y1="260" x2="320.0" y2="264" stroke="currentColor"/><text x="320" y="278" font-size="12" text-anchor="middle">32</text><line x1="445.0" y1="260" x2="445.0" y2="264" stroke="currentColor"/><text x="445" y="278" font-size="12" text-anchor="middle">48</text>
+<line x1="570.0" y1="260" x2="570.0" y2="264" stroke="currentColor"/><text x="570" y="278" font-size="12" text-anchor="middle">64</text><text x="320" y="296" font-size="12" text-anchor="middle">W (watermark, 샘플 수) — FIFO 64 샘플</text><text x="40" y="44" font-size="12" text-anchor="start">µA</text><text x="604" y="44" font-size="12" text-anchor="start">ms</text>
+<polyline fill="none" stroke="#4a7bd0" stroke-width="2.5" points="77.8,54.9 85.6,121.5 93.4,143.7 101.2,154.8 109.1,161.5 116.9,165.9 124.7,169.1 132.5,171.5 140.3,173.3 148.1,174.8 155.9,176.0 163.8,177.0 171.6,177.9 179.4,178.6 187.2,179.3 195.0,179.8 202.8,180.3 210.6,180.7 218.4,181.1 226.2,181.5 234.1,181.8 241.9,182.1 249.7,182.4 257.5,182.6 265.3,182.8 273.1,183.0 280.9,183.2 288.8,183.4 296.6,183.6 304.4,183.7 312.2,183.9 320.0,184.0 327.8,184.1 335.6,184.2 343.4,184.3 351.2,184.5 359.1,184.6 366.9,184.6 374.7,184.7 382.5,184.8 390.3,184.9 398.1,185.0 405.9,185.1 413.8,185.1 421.6,185.2 429.4,185.3 437.2,185.3 445.0,185.4 452.8,185.4 460.6,185.5 468.4,185.5 476.2,185.6 484.1,185.6 491.9,185.7 499.7,185.7 507.5,185.8 515.3,185.8 523.1,185.9 530.9,185.9 538.8,185.9 546.6,186.0 554.4,186.0 562.2,186.0 570.0,186.1"/>
+<polyline fill="none" stroke="#e08a3c" stroke-width="2.5" points="77.8,241.7 85.6,238.6 93.4,235.6 101.2,232.5 109.1,229.4 116.9,226.4 124.7,223.3 132.5,220.3 140.3,217.2 148.1,214.2 155.9,211.1 163.8,208.1 171.6,205.0 179.4,201.9 187.2,198.9 195.0,195.8 202.8,192.8 210.6,189.7 218.4,186.7 226.2,183.6 234.1,180.6 241.9,177.5 249.7,174.4 257.5,171.4 265.3,168.3 273.1,165.3 280.9,162.2 288.8,159.2 296.6,156.1 304.4,153.1 312.2,150.0 320.0,146.9 327.8,143.9 335.6,140.8 343.4,137.8 351.2,134.7 359.1,131.7 366.9,128.6 374.7,125.6 382.5,122.5 390.3,119.4 398.1,116.4 405.9,113.3 413.8,110.3 421.6,107.2 429.4,104.2 437.2,101.1 445.0,98.1 452.8,95.0 460.6,91.9 468.4,88.9 476.2,85.8 484.1,82.8 491.9,79.7 499.7,76.7 507.5,73.6 515.3,70.6 523.1,67.5 530.9,64.4 538.8,61.4 546.6,58.3 554.4,55.3 562.2,52.2 570.0,49.2"/>
+<line x1="85.6" y1="211.1" x2="570" y2="211.1" stroke="#888" stroke-dasharray="4 3"/><text x="382" y="227" font-size="12" text-anchor="start">sleep 바닥 2 µA</text><rect x="530.9" y="40" width="39.1" height="220" fill="#d0564a" fill-opacity="0.15"/><text x="527" y="54" font-size="12" text-anchor="end">overflow 위험 →</text><text x="101" y="59" font-size="12" text-anchor="start">W=1: 8.4 µA</text>
+<text x="216" y="172" font-size="12" text-anchor="start">W=20: 3.2 µA</text></svg>
+```
+
+그림 4 — 예제 4의 모델을 W = 1…64로 그린 것. 파랑(왼쪽 축)은 평균 전류, 주황(오른쪽 축)은 최악 지연, 회색 점선은 sleep 바닥 2 µA, 빨간 영역은 최악 서비스 지연을 감당 못 해 overflow 위험이 있는 구간. 파랑은 W ≈ 10 이후 평평하고 주황은 계속 오른다.
+
+함정: 이 모델의 "깨우는 대상"은 µA급 MCU다. 깨우는 대상이 SoC의 AP라면 wake 한 번이 mJ급이라(E8 1.2절, 1.5절) 같은 곡선의 무릎이 수천 샘플 쪽으로 이동한다 — 그래서 sensor hub가 있다. 반대로 **IMU 자체 전류**(수~수백 µA, 모드·ODR에 따라)는 W와 무관하므로, 전체 예산에서는 센서 전력 모드와 ODR 선택이 W보다 클 수 있다(E9 6.5절 표의 IMU 25 µA).
+
+### 3.4 언제 무엇을 쓰나
+
+| 방식 | 좋을 때 | 나쁠 때 |
+|---|---|---|
+| polling | bring-up, 디버그, MCU가 어차피 깨어 있는 고속 제어 루프 | 저전력, ODR보다 느린 polling (샘플 손실) |
+| DRDY 인터럽트 | 샘플 하나하나의 지연이 중요 (제어 루프, 저지연 제스처), ODR이 낮음 | 높은 ODR에서 wake 폭풍 |
+| FIFO + watermark | always-on 수집, 로깅, 창 단위 ML (대부분의 웨어러블 경로) | 지연 수 ms 이하가 필요한 경우 (작은 W로 타협) |
+| FIFO + 내장 이벤트 | 평소엔 아무도 안 깨고, 움직임·제스처 때만 깨움 (6절) | 이벤트 정의가 바뀌는 연구 단계 (센서 기능이 고정) |
+
+---
+
+## 4. FIFO 깊이 보기 — 모드, frame 포맷, watermark, overflow, DMA
+
+### 4.1 FIFO 모드
+
+이름은 벤더마다 다르지만 개념은 대체로 아래 네 가지로 정리된다(정확한 이름·동작은 데이터시트 확인).
+
+| 모드 (일반 이름) | FIFO가 찼을 때 | 쓰는 곳 |
+|---|---|---|
+| bypass | FIFO를 안 씀 (모드 전환 시 FIFO를 비우는 용도로도 씀) | 데이터 레지스터만 읽을 때, FIFO 리셋 |
+| FIFO (stop-on-full) | **새 샘플을 버리고** 멈춤 | "이 순간부터 N개" 한 번 캡처 (진단, 이벤트 스냅샷) |
+| stream (continuous) | **가장 오래된 샘플을 덮어씀**, 계속 돈다 | 상시 수집 — 가장 흔함 |
+| 트리거 조합 (stream-to-FIFO, bypass-to-stream 등) | 이벤트 전에는 stream, 이벤트가 오면 멈춤(또는 반대) | 이벤트 앞뒤를 남기는 pre-trigger 캡처 (낙상 직전 2초 같은) |
+
+말로 하면: stream은 **최신 데이터를 지키고**, stop-on-full은 **오래된 데이터를 지킨다**. 상시 ML 입력에는 최신이 중요하니 stream을, "트리거 순간의 앞뒤"가 중요한 진단 캡처에는 트리거 모드를 쓴다. 이것은 Don이 SSD에서 다루던 trace buffer의 "wrap vs stop" 선택과 같다.
+
+### 4.2 frame 포맷 — 왜 tag가 필요한가
+
+가장 단순한 FIFO는 **headerless**: acc XYZ, gyro XYZ가 정해진 순서로 반복된다. 파서는 "12바이트마다 한 샘플"로 자르면 된다. 문제는 세 가지다.
+
+1. acc와 gyro의 ODR이 다르면(예: acc 100 Hz, gyro 400 Hz) 순서가 규칙적이지 않다.
+2. 한 바이트라도 밀리면(부분 읽기, 버스 오류) **이후 전부가 엉뚱한 축으로 해석**된다. 복구할 단서가 없다.
+3. 시각 정보(timestamp)나 설정 변경 표시를 끼울 자리가 없다.
+
+그래서 많은 최신 IMU는 frame마다 **header(tag)** 를 붙인다. 예를 들어 일부 ST 부품은 "tag 1 B + 데이터 6 B" 구조를, 일부 Bosch 부품은 header 모드에서 frame 종류를 나타내는 header 바이트와 sensortime frame을 둔다(세부는 각 데이터시트). FIMU-6의 가상 포맷은 이렇다.
+
+```
+ header 바이트                     frame = 7 B
+ bit:  7   6   5   4   3   2   1   0          +--------+----+----+----+----+----+----+
+     +---------------+-----------+---+        | header | d0 | d1 | d2 | d3 | d4 | d5 |
+     |    TAG (4)    |  SEQ (3)  | P |        +--------+----+----+----+----+----+----+
+     +---------------+-----------+---+
+ TAG 1 = ACC  : d0..d5 = X_L X_H Y_L Y_H Z_L Z_H   (int16 LE)
+ TAG 2 = GYR  : 같은 배치
+ TAG 3 = TS   : d0..d3 = 32-bit sensor tick (1 tick = 25 µs), d4 d5 = 0
+ SEQ  = frame마다 1씩 증가하는 3-bit 카운터 (0..7 반복)
+ P    = odd parity: header 8비트의 1의 개수가 홀수가 되도록
+```
+
+손계산 — header 만들기:
+
+- ACC, seq 0: TAG 1 → `0001 000?`. 앞 7비트의 1의 개수 = 1(홀수) → P = 0 → **0x10**.
+- GYR, seq 1: `0010 001?` → 1의 개수 2(짝수) → P = 1 → **0x23**.
+- ACC, seq 5: `0001 101?` → 1의 개수 3(홀수) → P = 0 → **0x1A**.
+- 빈 FIFO에서 읽은 0x00: 1의 개수 0(짝수) → parity 불량 → "유효한 frame 아님"으로 걸러진다. 일부러 이렇게 설계한 것이다.
+
+이 header 하나로 파서는 세 가지 검사를 할 수 있다: **tag가 알려진 값인가**(1~3), **parity가 맞나**, **seq가 직전 + 1인가**(아니면 frame이 빠졌다). Don이 SSD에서 쓰던 "sequence number + CRC가 붙은 로그 레코드"와 같은 아이디어다. 3비트 seq는 8개 이상 연속으로 잃으면 몇 개를 잃었는지 모른다는 한계가 있다 — 그래서 timestamp frame이 필요하다.
+
+**timestamp frame**: 센서 내부 카운터 값을 주기적으로(FIMU-6은 16샘플마다) FIFO에 끼운다. 그러면 (a) 샘플 시각을 센서 시계 기준으로 알 수 있고, (b) 두 TS frame 사이의 샘플 수와 tick 차이로 **실제 ODR**을 잴 수 있다 — 센서 내부 발진기는 수 % 틀릴 수 있다(G1, G7).
+
+### 4.3 watermark 고르기 — 세 가지 제약
+
+watermark W(frame 단위)는 아래 셋을 동시에 만족해야 한다.
+
+```
+(1) 지연:      W / R_frame + T_service ≤ L_max          R_frame = ODR × (frame/샘플)
+(2) overflow:  W + R_frame × T_service_worst + margin ≤ C_fifo
+(3) RAM:       MCU 쪽 버퍼 ≥ W × B_frame (이중 버퍼면 × 2)
+그 안에서:     전력은 W가 클수록 작다 (3.3절) → 제약을 만족하는 가장 큰 W, 단 무릎 너머는 이득 없음
+```
+
+말로 하면: **지연 한계와 FIFO 용량이 W의 상한을 정하고, 전력이 W를 위로 민다.**
+
+손계산 — FIMU-6, acc + gyro 400 Hz (R_frame = 800 frame/s), FIFO 128 frame, 제스처 인식 지연 예산 L_max = 100 ms, 드라이버 최악 서비스 지연 T_service_worst = 30 ms:
+
+- (1) W ≤ (100 − 30) ms × 800/s = 56 frame
+- (2) W ≤ 128 − 800 × 0.030 − 8(여유) = 96 frame
+- (3) W = 56이면 56 × 7 = 392 B, 이중 버퍼 784 B — 문제없음
+- 전력: 56 frame = 28샘플이면 3.3절의 무릎(10~20샘플)을 이미 넘었다. **W = 32~56 frame 사이 어디든 전력 차이는 작으니, 지연이 작은 32 쪽**을 고르는 것도 합리적이다.
+
+ML 쪽과 연결: 모델 창이 2초(800샘플), hop이 0.5초라면 "hop마다 한 번 깨워 FIFO를 비우고 바로 추론"이 자연스럽다. 이때 W를 hop에 맞추고 싶어지지만 hop 0.5초 = 400 frame은 FIFO 128을 넘는다. 해결: W를 작게 두고 MCU 쪽 링에 모았다가 hop마다 추론하거나, FIFO가 큰 부품을 고르거나, 센서 허브에 맡긴다(E8). **FIFO 용량은 부품 선택 기준**이다.
+
+### 4.4 overflow — 무슨 일이 생기고 어떻게 복구하나
+
+```svg
+<svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg"><text x="10" y="22" font-size="13" text-anchor="start">FIFO 채움 수준 (frame) — 400 Hz acc+gyro, wm 32, 용량 128, 100 ms부터 드라이버가 190 ms 막힘</text><rect x="253.3" y="40" width="367.3" height="210" fill="#888" fill-opacity="0.15"/><text x="259" y="54" font-size="12" text-anchor="start">드라이버 스레드가 막힌 구간</text>
+<line x1="60" y1="250" x2="640" y2="250" stroke="currentColor"/><line x1="60" y1="250" x2="60" y2="40" stroke="currentColor"/><line x1="56" y1="250.0" x2="60" y2="250.0" stroke="currentColor"/><text x="53" y="254" font-size="12" text-anchor="end">0</text><line x1="56" y1="202.0" x2="60" y2="202.0" stroke="currentColor"/><text x="53" y="206" font-size="12" text-anchor="end">32</text>
+<line x1="56" y1="154.0" x2="60" y2="154.0" stroke="currentColor"/><text x="53" y="158" font-size="12" text-anchor="end">64</text><line x1="56" y1="106.0" x2="60" y2="106.0" stroke="currentColor"/><text x="53" y="110" font-size="12" text-anchor="end">96</text><line x1="56" y1="58.0" x2="60" y2="58.0" stroke="currentColor"/><text x="53" y="62" font-size="12" text-anchor="end">128</text>
+<line x1="60.0" y1="250" x2="60.0" y2="254" stroke="currentColor"/><text x="60" y="268" font-size="12" text-anchor="middle">0 ms</text><line x1="156.7" y1="250" x2="156.7" y2="254" stroke="currentColor"/><text x="157" y="268" font-size="12" text-anchor="middle">50 ms</text><line x1="253.3" y1="250" x2="253.3" y2="254" stroke="currentColor"/><text x="253" y="268" font-size="12" text-anchor="middle">100 ms</text>
+<line x1="350.0" y1="250" x2="350.0" y2="254" stroke="currentColor"/><text x="350" y="268" font-size="12" text-anchor="middle">150 ms</text><line x1="446.7" y1="250" x2="446.7" y2="254" stroke="currentColor"/><text x="447" y="268" font-size="12" text-anchor="middle">200 ms</text><line x1="543.3" y1="250" x2="543.3" y2="254" stroke="currentColor"/><text x="543" y="268" font-size="12" text-anchor="middle">250 ms</text>
+<line x1="640.0" y1="250" x2="640.0" y2="254" stroke="currentColor"/><text x="640" y="268" font-size="12" text-anchor="middle">300 ms</text><line x1="60" y1="202.0" x2="640" y2="202.0" stroke="#3f9a6b" stroke-dasharray="5 3"/><text x="437" y="197" font-size="12" text-anchor="middle">watermark → INT</text><line x1="60" y1="58.0" x2="640" y2="58.0" stroke="#d0564a" stroke-dasharray="5 3"/>
+<text x="70" y="53" font-size="12" text-anchor="start">용량 128 = 꽉 참</text>
+<polyline fill="none" stroke="#4a7bd0" stroke-width="2" points="60.0,249.7 61.0,249.1 61.9,248.5 62.9,247.9 63.9,247.3 64.8,246.7 65.8,246.1 66.8,245.5 67.7,244.9 68.7,244.3 69.7,243.7 70.6,243.1 71.6,242.5 72.6,241.9 73.5,241.3 74.5,240.7 75.5,240.1 76.4,239.5 77.4,238.9 78.4,238.3 79.3,237.7 80.3,237.1 81.3,236.5 82.2,235.9 83.2,235.3 84.2,234.7 85.1,234.1 86.1,233.5 87.1,232.9 88.0,232.3 89.0,231.7 90.0,231.1 90.9,230.5 91.9,229.9 92.9,229.3 93.8,228.7 94.8,228.1 95.8,227.5 96.7,226.9 97.7,226.3 98.7,225.7 99.6,225.1 100.6,224.5 101.6,223.9 102.5,223.3 103.5,222.7 104.5,222.1 105.4,221.5 106.4,220.9 107.4,220.3 108.3,219.7 109.3,219.1 110.3,218.5 111.2,217.9 112.2,217.3 113.2,216.7 114.1,216.1 115.1,215.5 116.1,214.9 117.0,214.3 118.0,213.7 119.0,213.1 119.9,212.5 120.9,211.9 121.9,211.3 122.8,210.7 123.8,210.1 124.8,209.5 125.7,208.9 126.7,208.3 127.7,207.7 128.6,207.1 129.6,206.5 130.6,205.9 131.5,205.3 132.5,204.7 133.5,204.1 134.4,203.5 135.4,202.9 136.4,202.3 137.3,201.7 138.3,201.1 139.3,200.5 139.8,249.7 140.7,249.1 141.7,248.5 142.6,247.9 143.6,247.3 144.6,246.7 145.6,246.1 146.5,245.5 147.5,244.9 148.4,244.3 149.4,243.7 150.4,243.1 151.3,242.5 152.3,241.9 153.3,241.3 154.2,240.7 155.2,240.1 156.2,239.5 157.2,238.9 158.1,238.3 159.1,237.7 160.1,237.1 161.0,236.5 162.0,235.9 162.9,235.3 163.9,234.7 164.9,234.1 165.8,233.5 166.8,232.9 167.8,232.3 168.8,231.7 169.7,231.1 170.7,230.5 171.7,229.9 172.6,229.3 173.6,228.7 174.6,228.1 175.5,227.5 176.5,226.9 177.4,226.3 178.4,225.7 179.4,225.1 180.3,224.5 181.3,223.9 182.3,223.3 183.2,222.7 184.2,222.1 185.2,221.5 186.2,220.9 187.1,220.3 188.1,219.7 189.1,219.1 190.0,218.5 191.0,217.9 192.0,217.3 192.9,216.7 193.9,216.1 194.8,215.5 195.8,214.9 196.8,214.3 197.8,213.7 198.7,213.1 199.7,212.5 200.7,211.9 201.6,211.3 202.6,210.7 203.6,210.1 204.5,209.5 205.5,208.9 206.4,208.3 207.4,207.7 208.4,207.1 209.3,206.5 210.3,205.9 211.3,205.3 212.2,204.7 213.2,204.1 214.2,203.5 215.2,202.9 216.1,202.3 217.1,201.7 218.1,201.1 219.0,200.5 219.5,249.7 220.5,249.1 221.4,248.5 222.4,247.9 223.4,247.3 224.3,246.7 225.3,246.1 226.3,245.5 227.2,244.9 228.2,244.3 229.2,243.7 230.1,243.1 231.1,242.5 232.1,241.9 233.0,241.3 234.0,240.7 235.0,240.1 235.9,239.5 236.9,238.9 237.9,238.3 238.8,237.7 239.8,237.1 240.8,236.5 241.7,235.9 242.7,235.3 243.7,234.7 244.6,234.1 245.6,233.5 246.6,232.9 247.5,232.3 248.5,231.7 249.5,231.1 250.4,230.5 251.4,229.9 252.4,229.3 253.3,228.7 254.3,228.1 255.3,227.5 256.2,226.9 257.2,226.3 258.2,225.7 259.1,225.1 260.1,224.5 261.1,223.9 262.0,223.3 263.0,222.7 264.0,222.1 264.9,221.5 265.9,220.9 266.9,220.3 267.8,219.7 268.8,219.1 269.8,218.5 270.7,217.9 271.7,217.3 272.7,216.7 273.6,216.1 274.6,215.5 275.6,214.9 276.5,214.3 277.5,213.7 278.5,213.1 279.4,212.5 280.4,211.9 281.4,211.3 282.3,210.7 283.3,210.1 284.3,209.5 285.2,208.9 286.2,208.3 287.2,207.7 288.1,207.1 289.1,206.5 290.1,205.9 291.0,205.3 292.0,204.7 293.0,204.1 293.9,203.5 294.9,202.9 295.9,202.3 296.8,201.7 297.8,201.1 298.8,200.5 299.7,199.9 300.7,199.3 301.7,198.7 302.6,198.1 303.6,197.5 304.6,196.9 305.5,196.3 306.5,195.7 307.5,195.1 308.4,194.5 309.4,193.9 310.4,193.3 311.3,192.7 312.3,192.1 313.3,191.5 314.2,190.9 315.2,190.3 316.2,189.7 317.1,189.1 318.1,188.5 319.1,187.9 320.0,187.3 321.0,186.7 322.0,186.1 322.9,185.5 323.9,184.9 324.9,184.3 325.8,183.7 326.8,183.1 327.8,182.5 328.7,181.9 329.7,181.3 330.7,180.7 331.6,180.1 332.6,179.5 333.6,178.9 334.5,178.3 335.5,177.7 336.5,177.1 337.4,176.5 338.4,175.9 339.4,175.3 340.3,174.7 341.3,174.1 342.3,173.5 343.2,172.9 344.2,172.3 345.2,171.7 346.1,171.1 347.1,170.5 348.1,169.9 349.0,169.3 350.0,168.7 351.0,168.1 351.9,167.5 352.9,166.9 353.9,166.3 354.8,165.7 355.8,165.1 356.8,164.5 357.7,163.9 358.7,163.3 359.7,162.7 360.6,162.1 361.6,161.5 362.6,160.9 363.5,160.3 364.5,159.7 365.5,159.1 366.4,158.5 367.4,157.9 368.4,157.3 369.3,156.7 370.3,156.1 371.3,155.5 372.2,154.9 373.2,154.3 374.2,153.7 375.1,153.1 376.1,152.5 377.1,151.9 378.0,151.3 379.0,150.7 380.0,150.1 380.9,149.5 381.9,148.9 382.9,148.3 383.8,147.7 384.8,147.1 385.8,146.5 386.7,145.9 387.7,145.3 388.7,144.7 389.6,144.1 390.6,143.5 391.6,142.9 392.5,142.3 393.5,141.7 394.5,141.1 395.4,140.5 396.4,139.9 397.4,139.3 398.3,138.7 399.3,138.1 400.3,137.5 401.2,136.9 402.2,136.3 403.2,135.7 404.1,135.1 405.1,134.5 406.1,133.9 407.0,133.3 408.0,132.7 409.0,132.1 409.9,131.5 410.9,130.9 411.9,130.3 412.8,129.7 413.8,129.1 414.8,128.5 415.7,127.9 416.7,127.3 417.7,126.7 418.6,126.1 419.6,125.5 420.6,124.9 421.5,124.3 422.5,123.7 423.5,123.1 424.4,122.5 425.4,121.9 426.4,121.3 427.3,120.7 428.3,120.1 429.3,119.5 430.2,118.9 431.2,118.3 432.2,117.7 433.1,117.1 434.1,116.5 435.1,115.9 436.0,115.3 437.0,114.7 438.0,114.1 438.9,113.5 439.9,112.9 440.9,112.3 441.8,111.7 442.8,111.1 443.8,110.5 444.7,109.9 445.7,109.3 446.7,108.7 447.6,108.1 448.6,107.5 449.6,106.9 450.5,106.3 451.5,105.7 452.5,105.1 453.4,104.5 454.4,103.9 455.4,103.3 456.3,102.7 457.3,102.1 458.3,101.5 459.2,100.9 460.2,100.3 461.2,99.7 462.1,99.1 463.1,98.5 464.1,97.9 465.0,97.3 466.0,96.7 467.0,96.1 467.9,95.5 468.9,94.9 469.9,94.3 470.8,93.7 471.8,93.1 472.8,92.5 473.7,91.9 474.7,91.3 475.7,90.7 476.6,90.1 477.6,89.5 478.6,88.9 479.5,88.3 480.5,87.7 481.5,87.1 482.4,86.5 483.4,85.9 484.4,85.3 485.3,84.7 486.3,84.1 487.3,83.5 488.2,82.9 489.2,82.3 490.2,81.7 491.1,81.1 492.1,80.5 493.1,79.9 494.0,79.3 495.0,78.7 496.0,78.1 496.9,77.5 497.9,76.9 498.9,76.3 499.8,75.7 500.8,75.1 501.8,74.5 502.7,73.9 503.7,73.3 504.7,72.7 505.6,72.1 506.6,71.5 507.6,70.9 508.5,70.3 509.5,69.7 510.5,69.1 511.4,68.5 512.4,67.9 513.4,67.3 514.3,66.7 515.3,66.1 516.3,65.5 517.2,64.9 518.2,64.3 519.2,63.7 520.1,63.1 521.1,62.5 522.1,61.9 523.0,61.3 524.0,60.7 525.0,60.1 525.9,59.5 526.9,58.9 527.9,58.3 528.8,58.0 529.8,58.0 530.8,58.0 531.7,58.0 532.7,58.0 533.7,58.0 534.6,58.0 535.6,58.0 536.6,58.0 537.5,58.0 538.5,58.0 539.5,58.0 540.4,58.0 541.4,58.0 542.4,58.0 543.3,58.0 544.3,58.0 545.3,58.0 546.2,58.0 547.2,58.0 548.2,58.0 549.1,58.0 550.1,58.0 551.1,58.0 552.0,58.0 553.0,58.0 554.0,58.0 554.9,58.0 555.9,58.0 556.9,58.0 557.8,58.0 558.8,58.0 559.8,58.0 560.7,58.0 561.7,58.0 562.7,58.0 563.6,58.0 564.6,58.0 565.6,58.0 566.5,58.0 567.5,58.0 568.5,58.0 569.4,58.0 570.4,58.0 571.4,58.0 572.3,58.0 573.3,58.0 574.3,58.0 575.2,58.0 576.2,58.0 577.2,58.0 578.1,58.0 579.1,58.0 580.1,58.0 581.0,58.0 582.0,58.0 583.0,58.0 583.9,58.0 584.9,58.0 585.9,58.0 586.8,58.0 587.8,58.0 588.8,58.0 589.7,58.0 590.7,58.0 591.7,58.0 592.6,58.0 593.6,58.0 594.6,58.0 595.5,58.0 596.5,58.0 597.5,58.0 598.4,58.0 599.4,58.0 600.4,58.0 601.3,58.0 602.3,58.0 603.3,58.0 604.2,58.0 605.2,58.0 606.2,58.0 607.1,58.0 608.1,58.0 609.1,58.0 610.0,58.0 611.0,58.0 612.0,58.0 612.9,58.0 613.9,58.0 614.9,58.0 615.8,58.0 616.8,58.0 617.8,58.0 618.7,58.0 619.7,58.0 620.7,58.0 621.1,249.7 622.1,249.1 623.1,248.5 624.1,247.9 625.0,247.3 626.0,246.7 627.0,246.1 627.9,245.5 628.9,244.9 629.9,244.3 630.8,243.7 631.8,243.1 632.8,242.5 633.7,241.9 634.7,241.3 635.6,240.7 636.6,240.1 637.6,239.5 638.6,238.9 639.5,238.3"/>
+<line x1="528.4" y1="58.0" x2="620.7" y2="58.0" stroke="#d0564a" stroke-width="4"/><text x="615" y="76" font-size="12" text-anchor="end">overflow: 38 frame 덮어씀</text></svg>
+```
+
+그림 5 — 400 Hz acc+gyro, watermark 32, 용량 128 frame. 처음 두 번은 watermark에서 바로 비워진다(톱니). 100 ms부터 드라이버 스레드가 다른 일에 190 ms 붙잡히면 FIFO가 160 ms 만에 꽉 차고(0.8 frame/ms × 160 ms = 128), 그 뒤 약 48 ms 동안 들어온 38 frame만큼 가장 오래된 데이터를 덮어쓴다(stream 모드). 드라이버가 돌아오면 남아 있는 128 frame을 읽지만 그 앞의 38 frame은 이미 없다.
+
+**왜 생기나**: 인터럽트가 늦게 처리됨(더 높은 우선순위 작업, 긴 critical section, flash 쓰기 중 버스 공유), edge 인터럽트를 놓침(8절), watermark를 용량에 너무 가깝게 둠, ODR을 올렸는데 W를 안 바꿈.
+
+**어떻게 알아채나** — 세 겹으로 확인한다.
+
+1. 센서의 overflow 플래그(FIMU-6의 OVR, sticky).
+2. frame seq 불연속(파서에서).
+3. timestamp 점프: 두 TS frame 사이 tick 차이가 "샘플 수 × 주기"보다 크다.
+
+**복구 절차**:
+
+1. 남아 있는 데이터는 **유효하다** — 버리지 말고 읽는다(stream 모드에서는 최신 데이터다).
+2. 소비자에게 **gap 표시**를 보낸다. 링 버퍼에 "여기서 끊겼다" 마커를 넣고, window builder는 끊긴 데이터를 이어 붙이지 않는다(이어 붙이면 모델이 존재하지 않는 급격한 움직임을 본다).
+3. 플래그를 지우고 FIFO를 깨끗한 상태로(부품에 따라 모드를 bypass로 바꿨다 되돌리기, 또는 flush 비트).
+4. 카운터를 올린다: `imu_overflow_count`, 잃은 시간 추정치. **telemetry로 올려 fleet에서 보이게** 한다(H7) — Don이 SSD에서 하던 health counter와 같다.
+5. 원인을 줄인다: W를 낮추거나 드라이버 스레드 우선순위를 올리거나, 긴 작업을 쪼갠다.
+
+### 4.5 부분 frame과 손상 — 파서 만들기
+
+현실의 읽기는 항상 frame 경계에서 끝나지 않는다. DMA 최대 길이로 잘리거나, 드라이버가 "바이트 수"로 읽거나, 버스 오류로 몇 바이트가 사라진다. 부품에 따라 frame 중간에서 읽기를 멈추면 그 frame이 버려지기도 한다 — 그래서 원칙은 **"FIFO 레벨을 frame 단위로 읽고, frame 단위로만 읽는다"** 이다. 그래도 파서는 방어적으로 짠다.
+
+- **carry**: frame 조각이 남으면 다음 호출로 넘긴다.
+- **검사**: tag·parity·seq.
+- **재동기화**: header가 틀리면 1바이트씩 밀며 찾되, **다음 header까지 맞고 seq가 이어질 때만** 믿는다. 데이터 바이트가 우연히 header처럼 보일 확률(FIMU-6에서 유효 header는 256개 중 24개, 약 9 %)을 두 개 연속 + seq 일치로 크게 낮춘다.
+
+**예제 5** — 무엇을 확인하나: 가상 IMU(100 Hz, acc + gyro + timestamp, ODR 0.8 % 빠름)의 FIFO를 45 B씩(7의 배수 아님) 끊어 읽은 바이트열에 손상 두 개(header 비트 반전, 3바이트 유실)를 넣고, 파서가 쓰레기를 통과시키지 않고 복구하는지, timestamp frame으로 실제 ODR을 재는지.
+
+```c
+/* ex5_parser.c — 가상 FIMU-6 FIFO 바이트열 파서: 부분 frame carry, parity/tag/seq 검사, 손상 후 재동기화, timestamp 복원 */
+#include <stdio.h>
+#include "fimu_model.h"
+
+typedef struct {
+    uint8_t carry[FRAME_B * 2]; unsigned nc;      /* 지난번에 남은 바이트 (frame 조각) */
+    int synced; uint8_t exp_seq;
+    uint32_t ts0, ts_last, n_since_ts;            /* timestamp 상태 */
+    long acc, gyr, ts, skipped, gaps, lost, resyncs, bad_az;
+} parser_t;
+
+static int hdr_ok(uint8_t h) { int tag = h >> 4; return tag >= TAG_ACC && tag <= TAG_TS && (__builtin_popcount(h) & 1); }
+static int16_t le16(const uint8_t *p) { return (int16_t)(uint16_t)(p[0] | p[1] << 8); }
+
+static void frame(parser_t *p, const uint8_t *f) {
+    uint8_t seq = (f[0] >> 1) & 7;
+    if (seq != p->exp_seq) { p->gaps++; p->lost += (seq - p->exp_seq) & 7; }   /* 8개 이상 잃으면 모듈로라 못 셈 */
+    p->exp_seq = (seq + 1) & 7;
+    switch (f[0] >> 4) {
+    case TAG_TS: { uint32_t tk = (uint32_t)f[1] | f[2] << 8 | f[3] << 16 | (uint32_t)f[4] << 24;
+                   if (p->ts++ == 0) p->ts0 = tk;
+                   p->ts_last = tk; p->n_since_ts = 0; break; }
+    case TAG_ACC: { p->acc++; p->n_since_ts++; int16_t az = le16(f + 5);
+                    if (az < 7000 || az > 9400) p->bad_az++; break; }   /* ±4 g에서 1 g = 8192 LSB */
+    case TAG_GYR: p->gyr++; break;
+    }
+}
+static void parse(parser_t *p, const uint8_t *in, unsigned n) {
+    uint8_t b[FRAME_B * 2 + 64]; unsigned len = 0, i = 0;
+    memcpy(b, p->carry, p->nc); len = p->nc; memcpy(b + len, in, n); len += n;
+    while (len - i >= FRAME_B) {
+        if (!hdr_ok(b[i])) { p->skipped++; if (p->synced) { p->synced = 0; p->resyncs++; } i++; continue; }
+        if (!p->synced) {                                   /* 재동기화: 다음 header도 맞아야 믿는다 */
+            if (len - i < 2 * FRAME_B) break;               /* 판단할 바이트가 부족 → 다음 호출에서 */
+            uint8_t h2 = b[i + FRAME_B];
+            if (!hdr_ok(h2) || ((h2 >> 1) & 7) != (((b[i] >> 1) + 1) & 7)) { p->skipped++; i++; continue; }
+            p->synced = 1;                                  /* exp_seq는 유지 → frame()이 gap을 센다 */
+        }
+        frame(p, b + i); i += FRAME_B;
+    }
+    p->nc = len - i; memcpy(p->carry, b + i, p->nc);
+}
+int main(void) {
+    static fimu_t dev; g_dev = &dev; fimu_init(&dev, 0); dev.odr_err = +0.008;   /* 센서 ODR이 0.8 % 빠르다 */
+    reg_write(R_CTRL_ACC, 4 << 4 | 1 << 2); reg_write(R_CTRL_GYR, 4 << 4);        /* 100 Hz, ±4 g */
+    reg_write(R_FIFO_CTRL, FIFO_STREAM | F_GYR | F_TS);
+    static uint8_t s[8192]; unsigned ns = 0;
+    for (double t = 0; t <= 3e6; t += 100e3) {              /* 100 ms마다, 45바이트씩(7의 배수 아님) 끊어 읽기 */
+        fimu_step(&dev, t);
+        for (unsigned left = dev.n * FRAME_B - dev.rd_byte; left; ) {
+            unsigned k = left < 45 ? left : 45; burst_read(R_FIFO_DATA, s + ns, k); ns += k; left -= k;
+        }
+    }
+    s[700] ^= 0x40;                                         /* 손상 1: frame 100의 header 비트 하나 뒤집힘 */
+    memmove(s + 1403, s + 1406, ns - 1406); ns -= 3;        /* 손상 2: frame 200 중간 3바이트 유실 */
+    parser_t p = { 0 };
+    for (unsigned i = 0; i < ns; i += 45) parse(&p, s + i, ns - i < 45 ? ns - i : 45);
+    printf("stream %u B (%.2f frames) | ACC %ld GYR %ld TS %ld\n", ns, ns / 7.0, p.acc, p.gyr, p.ts);
+    printf("skipped bytes %ld, resyncs %ld, seq gaps %ld (lost frames %ld), garbage az %ld, carry %u B\n",
+           p.skipped, p.resyncs, p.gaps, p.lost, p.bad_az, p.nc);
+    double odr = (p.ts - 1) * TS_EVERY / ((p.ts_last - p.ts0) * TS_TICK_US * 1e-6);   /* TS frame은 16샘플 간격 */
+    printf("ODR from TS frames: %.2f Hz (nominal 100, true %.2f)\n", odr, 100 * 1.008);
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 -pthread ex5_parser.c -o ex5 -lm && ./ex5
+```
+
+```text
+stream 4372 B (624.57 frames) | ACC 301 GYR 303 TS 19
+skipped bytes 11, resyncs 2, seq gaps 2 (lost frames 2), garbage az 0, carry 0 B
+ODR from TS frames: 100.80 Hz (nominal 100, true 100.80)
+```
+
+출력에서 볼 것:
+
+- 원래 625 frame(4375 B)에서 3 B를 지워 4372 B. 파서는 ACC 301 + GYR 303 + TS 19 = 623 frame을 받고, **잃은 frame 2개를 seq로 정확히 셌다**(손상 1: header가 깨진 frame, 손상 2: 3 B가 빠져 찢어진 frame).
+- **garbage az 0**: 재동기화 중에 데이터 바이트를 header로 착각해 이상한 az 값을 내보낸 경우가 없다. 이 숫자가 0이 아니면 파서가 "쓰레기를 샘플로" 내보내고 있다는 뜻 — 모델 입력에 스파이크로 나타난다.
+- carry 0 B: 마지막 조각까지 다 처리했다. 45 B로 끊어도 결과가 같다는 것이 carry 로직의 검증이다.
+- ODR 100.80 Hz: TS frame 두 개 사이 tick 차이와 샘플 수(16)로 잰 실제 ODR. 공칭 100 Hz를 믿고 시각을 붙이면 10분에 약 4.8초 어긋난다(5절).
+
+함정: 이 파서는 seq가 3비트라 **8 frame 이상** 연속으로 잃으면 잃은 수를 모듈로 8로만 안다. overflow처럼 큰 손실은 OVR 플래그와 timestamp 점프로 잡아야 한다.
+
+### 4.6 DMA로 읽기 — Don의 영역에서 IMU만의 주의점
+
+FIFO 비우기는 "주소 1바이트 + N바이트 읽기"라 DMA에 딱 맞다. Don이 이미 아는 것은 빼고, IMU 드라이버에서 실제로 걸리는 점만 적는다.
+
+- **full-duplex라 TX도 돌아야 한다**: 받으려면 보내야 한다. TX DMA는 `[0x80 | FIFO_DATA, 0x00, 0x00, …]`를 보낸다. 컨트롤러가 지원하면 "TX 주소 고정(non-increment)으로 0x00 한 바이트를 반복"해서 TX 버퍼 메모리를 아낀다.
+- **RX의 첫 바이트(와 dummy byte가 있는 부품은 둘째 바이트)는 버린다**: 버퍼를 `rx[N + 1]`로 잡고 `rx + 1`부터 파싱하거나, 파서에 오프셋을 넘긴다.
+- **CS는 버스트 내내 low**: 일부 SPI 컨트롤러의 하드웨어 CS는 워드(바이트) 사이에 CS를 올린다 → 장치가 매 바이트를 새 트랜잭션으로 해석. GPIO CS를 쓰거나 컨트롤러의 "CS 유지" 설정을 확인한다.
+- **캐시**: D-cache가 있는 코어(Cortex-M7 등)에서는 DMA가 쓴 RX 버퍼를 읽기 전에 해당 영역을 invalidate 하고, 버퍼를 캐시 라인(예: 32 B) 정렬·크기로 잡는다. 아니면 non-cacheable 영역에 둔다(E7).
+- **길이 상한**: DMA 전송 카운터 폭(예: 16비트)과 FIFO 용량을 비교한다. FIFO 레벨 레지스터가 frame 단위인지 바이트 단위인지, 몇 비트인지도.
+- **완료 대기 중 sleep**: 전송 중 CPU는 WFI로 잔다. DMA 완료 인터럽트가 스레드를 깨운다. 3.3절 모델의 `I_DMA`가 이 상태다.
+- **버스 공유**: 같은 SPI에 flash가 있으면 flash 쓰기(수 ms) 동안 IMU 읽기가 밀린다 → T_service_worst가 늘어 W 상한이 줄어든다(4.3절 식 2).
+
+```c
+/* SPI+DMA로 FIFO 비우기 — 스케치 (컴파일하지 않았다). spi_dma_txrx(), cs_low/high(), sem_*()는 가상의 HAL 이름 */
+static uint8_t tx_buf[1 + FIFO_MAX_B];                         /* tx_buf[0]만 주소, 나머지 0 */
+static uint8_t rx_buf[1 + FIFO_MAX_B] __attribute__((aligned(32)));
+
+int imu_fifo_drain(unsigned n_frames, void (*parse)(const uint8_t *, unsigned)) {
+    unsigned n = n_frames * FRAME_B;                           /* frame 단위로만 읽는다 */
+    tx_buf[0] = 0x80 | R_FIFO_DATA;
+    cs_low();
+    spi_dma_txrx(tx_buf, rx_buf, n + 1);                       /* 완료 인터럽트가 sem을 준다 */
+    if (sem_take(&dma_done, MS(5)) != 0) { cs_high(); return -1; }   /* 타임아웃 = 버스 장애 */
+    cs_high();
+    dcache_invalidate(rx_buf, sizeof rx_buf);                  /* D-cache 코어라면 */
+    parse(rx_buf + 1, n);                                      /* 첫 바이트(주소 구간)는 버림 */
+    return 0;
+}
+```
+
+---
+
+## 5. 배치된 샘플에 시각 붙이기 — G7 예고
+
+FIFO로 25개를 한 번에 받으면 샘플마다 "언제 측정됐는지"를 다시 계산해야 한다. 센서 퓨전(G3)과 멀티센서 정렬(G7), 그리고 라벨과 데이터 맞추기(H4)가 모두 이 시각에 기댄다.
+
+세 가지 방법:
+
+- **A. 시작 시각 + i / ODR_공칭**: 가장 쉽고 가장 나쁘다. 센서 발진기 오차가 그대로 누적된다.
+- **B. 배치마다 인터럽트 시각에 고정(anchor)**: ISR이 watermark 인터럽트 순간의 MCU 시각을 찍는다. 그 순간 FIFO의 W번째 샘플이 막 도착했으니, 배치의 j번째 샘플은 `t_irq − (W − 1 − j) / ODR`. 오차가 배치 안에서만 생기고 누적되지 않는다.
+- **C. B + 실제 ODR 추정**: 여러 인터럽트 시각을 "누적 샘플 번호"에 대해 직선 맞춤(least squares)하면 기울기가 실제 주기다. 또는 4.2절의 TS frame으로 잰다.
+
+손계산 — 방법 A의 누적 오차: 센서가 1.2 % 빠르면 10분(600 s) 뒤 샘플 번호로 계산한 시각이 600 × 0.012 = 7.2 s 어긋난다. 방법 B의 배치 내 최대 오차: (W − 1) × 주기 × 0.012 = 24 × 9.88 ms × 0.012 ≈ 2.8 ms.
+
+**예제 6** — 무엇을 확인하나: 공칭 100 Hz, 실제 101.2 Hz인 센서를 watermark 25로 10분 받을 때 세 방법의 시각 오차. 인터럽트 지연 지터는 20–300 µs로 가정.
+
+```python
+# ex7_ts.py — 배치(FIFO)로 받은 샘플에 시각 붙이기: 세 방법 비교. 센서 ODR은 공칭 100 Hz보다 1.2 % 빠르다
+import numpy as np
+rng = np.random.default_rng(3)
+ODR_NOM, ODR_TRUE, W, T = 100.0, 100.0 * 1.012, 25, 600.0     # watermark 25 샘플, 10분
+n = int(T * ODR_TRUE) // W * W
+t_true = 0.0123 + np.arange(n) / ODR_TRUE                     # 실제 샘플 시각 (MCU 시계 기준)
+k = np.arange(W - 1, n, W)                                    # 각 watermark를 채운 샘플 번호
+t_irq = t_true[k] + rng.uniform(20e-6, 300e-6, len(k))        # ISR이 찍은 시각 = 실제 + 인터럽트 지연 지터
+i = np.arange(n); b = i // W                                  # 샘플 i가 속한 배치
+est = {
+    "A: t0 + i/ODR_nominal": t_irq[0] - (W - 1) / ODR_NOM + i / ODR_NOM,
+    "B: per-batch anchor, nominal": t_irq[b] - (W - 1 - i % W) / ODR_NOM,
+    "C: per-batch anchor, fitted ODR": None,
+}
+slope, icpt = np.polyfit(k, t_irq, 1)                         # t_irq ≈ icpt + slope·k → 실제 주기 추정
+est["C: per-batch anchor, fitted ODR"] = t_irq[b] - (W - 1 - i % W) * slope
+print(f"fitted ODR = {1/slope:.3f} Hz (true {ODR_TRUE:.3f})")
+for name, e in est.items():
+    err = (e - t_true) * 1e3
+    print(f"{name:32s} max |err| {np.max(np.abs(err)):9.3f} ms   rms {np.sqrt(np.mean(err**2)):8.3f} ms")
+```
+
+```text
+fitted ODR = 101.200 Hz (true 101.200)
+A: t0 + i/ODR_nominal            max |err|  7194.708 ms   rms 4153.075 ms
+B: per-batch anchor, nominal     max |err|     2.826 ms   rms    1.529 ms
+C: per-batch anchor, fitted ODR  max |err|     0.300 ms   rms    0.178 ms
+```
+
+출력에서 볼 것: A는 최대 7.2초 어긋난다 — 10분짜리 로그의 끝에서 IMU와 오디오가 7초 엇갈린다는 뜻이다. B는 2.8 ms로 손계산과 같고, C는 0.3 ms로 **인터럽트 지터 수준**까지 내려간다. 실무 규칙: **ISR 첫 줄에서 free-running 타이머를 읽어 시각을 찍는다**(그 뒤의 처리 지연이 시각에 섞이지 않게). 더 자세한 clock drift·재샘플링은 G7에서 다룬다.
+
+함정: 인터럽트 시각에 FIFO에 정확히 W개가 있다고 가정했지만, 드라이버가 늦게 와서 n > W개를 읽으면 "W번째 샘플 = t_irq" 관계로 W번째를 찾아 앞뒤로 계산해야 한다. 그리고 overflow 뒤에는 이 관계가 깨지므로 다시 고정한다.
+
+---
+
+## 6. 내장 기능 — 센서가 MCU 대신 깨어 있는다
+
+### 6.1 무엇이 있나
+
+요즘 IMU는 작은 고정 기능 회로(또는 작은 상태 기계)를 품고 있어서, MCU가 자는 동안 센서 혼자 판단하고 **조건이 맞을 때만 INT를 올린다**. 이름과 세부는 벤더마다 다르다 — 예를 들어 Bosch는 BMI270 같은 부품의 "features", TDK는 일부 부품의 "APEX" motion functions, ST는 embedded functions·FSM(finite state machine)·MLC 같은 이름을 쓴다(정확한 목록은 각 데이터시트).
+
+| 기능 | 무엇을 알려 주나 | 웨어러블에서 쓰는 곳 |
+|---|---|---|
+| wake-on-motion / any-motion | 가속도 변화가 문턱을 일정 시간 넘음 | 정지 → 움직임 시작 시 MCU·고 ODR 경로 깨우기 |
+| no-motion / stationary | 일정 시간 동안 변화가 문턱 아래 | 책상에 벗어 둠 → 수집 중단, 저전력 모드로 |
+| tap / double-tap | 짧은 충격 펄스 (간격·정적 구간 조건) | 이어버드·손목 탭 UI |
+| step detector / counter | 걸음 이벤트, 누적 걸음 수 | 걸음 수를 MCU 없이 센다 |
+| significant motion | "위치가 바뀔 정도로" 움직임 (걷기 시작 등) | 위치 기반 기능 깨우기 |
+| tilt / orientation | 기울기 변화, 6방향(위·아래·옆) 자세 | 화면 깨우기(raise-to-wake), 착용 자세 |
+| free-fall | 모든 축이 0 g 근처 | 낙상 후보의 1단계 (B7 8절) |
+
+이 기능들이 사 주는 것은 하나다: **MCU가 데이터를 보지 않고도 잘 수 있는 시간**. E9 6.5절의 예에서 wake-on-motion으로 평균 33.6 µA → 15 µA가 됐다(하루의 95 %가 정지라고 가정).
+
+### 6.2 설정 파라미터
+
+대부분 같은 몇 가지 손잡이다.
+
+- **문턱(threshold)**: mg 단위. 너무 낮으면 잡음·진동에 깨고(오검출), 너무 높으면 느린 움직임을 놓친다.
+- **지속 시간(duration)**: "N샘플 연속으로 넘어야" 인정. 순간 충격을 거른다.
+- **축 선택·고역통과**: 중력(정적 1 g)을 빼고 변화만 보도록 HPF 또는 "직전 샘플과의 차이(slope)"를 쓰는 부품이 많다.
+- **센서 ODR·전력 모드**: 기능이 도는 ODR이 낮을수록 센서 전류가 작고 반응이 느리다.
+- **latch / 디바운스**: 이벤트 후 일정 시간 재발생 금지.
+
+### 6.3 코드로 확인 — any-motion 문턱 고르기
+
+**예제 7** — 무엇을 확인하나: 2시간짜리 합성 손목 데이터(50 Hz: 정지 잡음 2.5 mg, 책상 두드림 같은 짧은 진동 100회, 실제 손목 움직임 60회)에 "EMA로 만든 고역통과 가속도의 축별 최댓값 > 문턱이 N샘플 연속" 검출기를 돌려, 문턱에 따른 오검출/시간(움직임이 아닌데 trigger)과 검출률을 본다.
+
+```python
+# ex6_anymotion.py — any-motion 검출기: |고역통과 가속도| > 문턱이 N샘플 연속이면 trigger. 문턱별 오검출 vs 검출률
+import numpy as np
+rng = np.random.default_rng(7)
+FS, HOURS = 50, 2
+n = FS * 3600 * HOURS
+acc = np.tile([0.0, 0.0, 1.0], (n, 1)) + rng.normal(0, 0.0025, (n, 3))      # 정지: 1 g + 2.5 mg 잡음
+def add_burst(s, dur, amp, f):                       # 책상 두드림·차량 진동 같은 짧은 방해 (진짜 움직임 아님)
+    t = np.arange(int(dur * FS)) / FS
+    acc[s:s + len(t)] += np.outer(amp * np.exp(-t / (dur / 3)) * np.sin(2 * np.pi * f * t), rng.normal(0, 1, 3))
+for s in rng.integers(0, n - 100, 50 * HOURS):
+    add_burst(s, 0.3, rng.uniform(0.005, 0.04), rng.uniform(5, 15))
+starts = np.sort(rng.choice(np.arange(500, n - 500, 400), 30 * HOURS, replace=False))  # 진짜 손목 움직임
+theta, events, cur = np.zeros(n), [], 0.0
+for k, s in enumerate(starts):                       # 손목 기울기가 cur → new로 부드럽게 바뀌고 다음 움직임까지 유지
+    d, new = int(rng.uniform(0.4, 1.0) * FS), np.radians(rng.uniform(0, 70))
+    theta[s:s + d] = cur + (new - cur) * 0.5 * (1 - np.cos(np.pi * np.arange(d) / d))
+    end = starts[k + 1] if k + 1 < len(starts) else n
+    theta[s + d:end] = new; cur = new; events.append((s, s + d))
+    acc[s:s + d] += rng.uniform(0.03, 0.2) * np.sin(np.pi * np.arange(d) / d)[:, None] * rng.normal(0, 1, 3)
+acc += np.stack([np.sin(theta), np.zeros(n), np.cos(theta) - 1], 1)          # 중력 방향 변화
+lp = np.empty_like(acc); lp[0] = acc[0]
+for i in range(1, n): lp[i] = lp[i - 1] + 0.1 * (acc[i] - lp[i - 1])        # EMA 저역통과 (센서 안 HPF 흉내)
+hp = np.abs(acc - lp).max(axis=1)                                            # 축별 |고역통과|의 최댓값
+in_ev = np.zeros(n, bool)
+for s, e in events: in_ev[s:e + FS // 2] = True
+def run(thr, N):
+    above = hp > thr
+    run_len = np.convolve(above, np.ones(N, int), "full")[:n] == N            # N샘플 연속
+    trig = np.flatnonzero(run_len & ~np.r_[False, run_len[:-1]])             # 시작점만
+    fa = int(np.sum(~in_ev[trig])) / HOURS
+    det = np.mean([np.any((trig >= s) & (trig < e + FS // 2)) for s, e in events])
+    return fa, det
+print(" thr_mg   N=1 FA/h  det     N=3 FA/h  det")
+for thr in [0.010, 0.015, 0.020, 0.030, 0.040, 0.060, 0.080, 0.120]:
+    (f1, d1), (f3, d3) = run(thr, 1), run(thr, 3)
+    print(f"{thr*1e3:6.0f} {f1:10.1f} {d1:5.0%} {f3:10.1f} {d3:5.0%}")
+```
+
+```text
+ thr_mg   N=1 FA/h  det     N=3 FA/h  det
+    10       98.5  100%       12.0  100%
+    15       54.0  100%        4.5   98%
+    20       34.5   98%        2.0   98%
+    30       13.5   98%        0.0   98%
+    40        7.0   98%        0.0   98%
+    60        1.0   95%        0.0   93%
+    80        0.0   88%        0.0   88%
+   120        0.0   60%        0.0   60%
+```
+
+출력에서 볼 것:
+
+- **N = 1**(한 샘플만 넘어도)은 문턱 10 mg에서 시간당 98.5번 헛되이 깬다. 잡음 2.5 mg의 4σ 근처라 순수 잡음만으로도 넘는 샘플이 생긴다.
+- **N = 3**(3샘플 연속)은 같은 10 mg에서 12회/h, 30 mg부터 0회/h. 잡음이 3샘플 연속으로 문턱을 넘을 확률은 한 샘플 확률의 대략 세제곱이라 급격히 준다. **지속 시간은 공짜에 가까운 필터**다.
+- 검출률은 문턱을 올리면 천천히 떨어진다(80 mg에서 88 %, 120 mg에서 60 %). 98 %에서 더 안 오르는 건 기울기가 거의 안 바뀐 "움직임"이 합성 데이터에 섞여 있어서다 — 실제 라벨에도 이런 애매한 사건이 있다.
+- 이 데이터에서는 **N = 3, 문턱 25~40 mg**이 오검출 거의 0, 검출률 98 %의 좋은 구간이다. 실제 기기에서는 착용자·활동·진동 환경(차량, 운동)이 다르므로 **필드 로그로 다시 고른다**.
+
+```svg
+<svg viewBox="0 0 640 310" xmlns="http://www.w3.org/2000/svg"><text x="10" y="22" font-size="13" text-anchor="start">any-motion 문턱 — 오검출/시간(실선, 왼쪽) vs 검출률(점선, 오른쪽)</text><line x1="70" y1="255" x2="570" y2="255" stroke="currentColor"/><line x1="70" y1="255" x2="70" y2="40" stroke="currentColor"/><line x1="570" y1="255" x2="570" y2="40" stroke="currentColor"/>
+<line x1="66" y1="255.0" x2="70" y2="255.0" stroke="currentColor"/><text x="63" y="259" font-size="12" text-anchor="end">0</text><line x1="66" y1="201.2" x2="70" y2="201.2" stroke="currentColor"/><text x="63" y="205" font-size="12" text-anchor="end">50</text><line x1="66" y1="147.5" x2="70" y2="147.5" stroke="currentColor"/><text x="63" y="152" font-size="12" text-anchor="end">100</text>
+<line x1="66" y1="93.8" x2="70" y2="93.8" stroke="currentColor"/><text x="63" y="98" font-size="12" text-anchor="end">150</text><line x1="66" y1="40.0" x2="70" y2="40.0" stroke="currentColor"/><text x="63" y="44" font-size="12" text-anchor="end">200</text><line x1="570" y1="255.0" x2="574" y2="255.0" stroke="currentColor"/><text x="577" y="259" font-size="12" text-anchor="start">0%</text>
+<line x1="570" y1="201.2" x2="574" y2="201.2" stroke="currentColor"/><text x="577" y="205" font-size="12" text-anchor="start">25%</text><line x1="570" y1="147.5" x2="574" y2="147.5" stroke="currentColor"/><text x="577" y="152" font-size="12" text-anchor="start">50%</text><line x1="570" y1="93.8" x2="574" y2="93.8" stroke="currentColor"/><text x="577" y="98" font-size="12" text-anchor="start">75%</text>
+<line x1="570" y1="40.0" x2="574" y2="40.0" stroke="currentColor"/><text x="577" y="44" font-size="12" text-anchor="start">100%</text><line x1="70.0" y1="255" x2="70.0" y2="259" stroke="currentColor"/><text x="70" y="273" font-size="12" text-anchor="middle">0</text><line x1="153.3" y1="255" x2="153.3" y2="259" stroke="currentColor"/><text x="153" y="273" font-size="12" text-anchor="middle">25</text>
+<line x1="236.7" y1="255" x2="236.7" y2="259" stroke="currentColor"/><text x="237" y="273" font-size="12" text-anchor="middle">50</text><line x1="320.0" y1="255" x2="320.0" y2="259" stroke="currentColor"/><text x="320" y="273" font-size="12" text-anchor="middle">75</text><line x1="403.3" y1="255" x2="403.3" y2="259" stroke="currentColor"/><text x="403" y="273" font-size="12" text-anchor="middle">100</text>
+<line x1="486.7" y1="255" x2="486.7" y2="259" stroke="currentColor"/><text x="487" y="273" font-size="12" text-anchor="middle">125</text><line x1="570.0" y1="255" x2="570.0" y2="259" stroke="currentColor"/><text x="570" y="273" font-size="12" text-anchor="middle">150</text><text x="320" y="291" font-size="12" text-anchor="middle">문턱 [mg] (고역통과 가속도 크기)</text>
+<polyline fill="none" stroke="#d0564a" stroke-width="2.5" points="86.7,40.0 103.3,149.1 120.0,196.9 136.7,217.9 153.3,231.9 170.0,240.5 186.7,245.3 203.3,247.5 220.0,249.1 236.7,252.3 253.3,253.4 270.0,253.9 286.7,254.5 303.3,254.5 320.0,254.5 336.7,255.0 353.3,255.0 370.0,255.0 386.7,255.0 403.3,255.0 420.0,255.0 436.7,255.0 453.3,255.0 470.0,255.0 486.7,255.0 503.3,255.0 520.0,255.0 536.7,255.0 553.3,255.0 570.0,255.0"/>
+<polyline fill="none" stroke="#d0564a" stroke-width="2" stroke-dasharray="6 4" points="86.7,40.0 103.3,40.0 120.0,40.0 136.7,43.6 153.3,43.6 170.0,43.6 186.7,43.6 203.3,43.6 220.0,43.6 236.7,47.2 253.3,50.8 270.0,50.8 286.7,54.3 303.3,61.5 320.0,61.5 336.7,65.1 353.3,65.1 370.0,65.1 386.7,72.2 403.3,79.4 420.0,86.6 436.7,100.9 453.3,104.5 470.0,126.0 486.7,126.0 503.3,136.8 520.0,147.5 536.7,147.5 553.3,147.5 570.0,158.2"/>
+<polyline fill="none" stroke="#4a7bd0" stroke-width="2.5" points="86.7,69.0 103.3,242.1 120.0,250.2 136.7,252.8 153.3,254.5 170.0,255.0 186.7,255.0 203.3,255.0 220.0,255.0 236.7,255.0 253.3,255.0 270.0,255.0 286.7,255.0 303.3,255.0 320.0,255.0 336.7,255.0 353.3,255.0 370.0,255.0 386.7,255.0 403.3,255.0 420.0,255.0 436.7,255.0 453.3,255.0 470.0,255.0 486.7,255.0 503.3,255.0 520.0,255.0 536.7,255.0 553.3,255.0 570.0,255.0"/>
+<polyline fill="none" stroke="#4a7bd0" stroke-width="2" stroke-dasharray="6 4" points="86.7,40.0 103.3,40.0 120.0,43.6 136.7,43.6 153.3,43.6 170.0,43.6 186.7,43.6 203.3,43.6 220.0,47.2 236.7,50.8 253.3,50.8 270.0,54.3 286.7,57.9 303.3,61.5 320.0,61.5 336.7,65.1 353.3,65.1 370.0,68.7 386.7,83.0 403.3,83.0 420.0,90.2 436.7,111.7 453.3,115.2 470.0,126.0 486.7,133.2 503.3,140.3 520.0,147.5 536.7,147.5 553.3,151.1 570.0,161.8"/>
+<line x1="330" y1="180" x2="355" y2="180" stroke="#d0564a" stroke-width="2.5"/><text x="360" y="184" font-size="12" text-anchor="start">N=1 (1샘플만 넘어도)</text><line x1="330" y1="202" x2="355" y2="202" stroke="#4a7bd0" stroke-width="2.5"/><text x="360" y="206" font-size="12" text-anchor="start">N=3 (3샘플 연속)</text><text x="330" y="228" font-size="12" text-anchor="start">실선 = 오검출/h, 점선 = 검출률</text></svg>
+```
+
+그림 6 — 예제 7을 문턱 5~150 mg로 촘촘히 돌린 결과. 실선은 시간당 오검출(왼쪽 축, 200 이상은 잘라서 표시), 점선은 검출률(오른쪽 축). 빨강 N = 1, 파랑 N = 3. 파랑 실선이 훨씬 일찍 0으로 떨어지는 반면 두 점선은 거의 겹친다 — 지속 시간 조건은 검출률을 거의 잃지 않고 오검출을 크게 줄인다.
+
+오검출의 비용을 숫자로: 한 번 잘못 깨면 MCU가 깨어나 고 ODR로 바꾸고 1~2초 데이터를 보고 "아니네" 하고 다시 잔다. 그 비용이 1초 × 300 µA라면, 시간당 100번이면 평균 8.3 µA — **내장 기능을 켜서 아끼려던 전류를 오검출이 다 먹는다**. 문턱 선택은 "검출률"만이 아니라 "오검출 × 한 번의 비용"으로 해야 한다(B7 7절의 hysteresis·debounce와 같은 논리).
+
+---
+
+## 7. 센서 안의 ML — ST MLC와 그 친구들
+
+### 7.1 무엇인가
+
+내장 기능이 "고정된 규칙"이라면, 다음 단계는 **사용자가 학습시킨 작은 모델을 센서 안에서 돌리는 것**이다. 가장 잘 문서화된 예가 ST의 **MLC(Machine Learning Core)** 다(B7 4.6절에서 한 번 봤다). ST 앱노트(AN5259, LSM6DSOX용 등)에 따르면 개념은 이렇다.
+
+1. 센서 안에서 가속도·자이로(부품에 따라 외부 센서 입력도)를 필터링하고, 정해진 **창(window)** 마다 **특징(feature)** 을 계산한다 — mean, variance, energy, peak-to-peak, zero-crossing, min/max, peak 검출 등.
+2. 그 특징으로 **decision tree**를 센서 안에서 실행한다. 트리는 여러 개를 동시에 둘 수 있다(개수·노드 한도는 부품마다 다르다).
+3. 결과(클래스 번호)를 레지스터에 쓰고, 바뀌면 INT를 올린다.
+4. 트리는 PC에서 로그 데이터로 학습하고(ST 도구나 일반 ML 도구), ST 도구가 그 트리를 **센서 레지스터 설정 파일**로 바꿔 준다. 펌웨어는 부팅 때 이 설정을 버스로 써 넣기만 한다.
+
+ST는 이 밖에 FSM(작은 상태 기계 프로그램)을, 일부 최신 부품에서는 사용자가 C로 프로그래밍하는 센서 안 처리 코어(ISPU라는 이름)를 내놓았다. Bosch에도 초기화 때 기능용 설정 블롭을 장치에 써 넣는 부품(BMI270 등)과, 프로그래머블 코어를 품은 "smart sensor" 계열(BHI2xx 등)이 있다. **구체적인 기능·한도·도구 이름은 세대마다 바뀌므로 해당 부품 데이터시트와 앱노트로 확인한다.**
+
+### 7.2 왜 중요한가 — µW 예산
+
+E9 6.5절과 B7 11.3절의 사다리를 다시 보자.
+
+```
+stage 0: 센서 안 (내장 기능 · MLC)   ~µW 추가     "걷기 / 뛰기 / 정지 / 손목 들기"
+stage 1: always-on MCU              ~수십–수백 µA  "어떤 제스처인지 (작은 CNN)"
+stage 2: DSP · AP                   ~mW 이상      "의미 이해, 음성 대화"
+```
+
+- MLC류는 특징 계산과 트리 비교가 **센서가 어차피 깨어 있는 동안** 고정 회로에서 돈다. 추가 전류가 작다(데이터시트상 수 µA급으로 소개되는 경우가 많다 — 설정·ODR에 따라 다름).
+- 그 결과로 MCU는 "클래스가 바뀌었을 때만" 깬다. 하루에 몇십~몇백 번.
+- 대가: 특징 종류·창 길이·트리 깊이가 하드웨어로 제한되고, 디버깅이 어렵고(센서 안을 들여다볼 수 없다), 벤더 도구에 묶인다. 정확도가 MCU 위의 CNN만 못하면 **1단계 필터**로만 쓴다 — "움직임 있음 + 손목 들기 후보"면 MCU를 깨워 진짜 모델을 돌린다.
+
+### 7.3 드라이버 관점에서 할 일
+
+- 설정 블롭(수백 B~수 KB)을 부팅 때 버스로 써 넣는 경로 — I2C 400 kHz로 8 KB면 약 0.2초다(1.4절 식). bring-up 시간 예산에 넣는다.
+- 블롭 버전과 펌웨어 버전을 같이 관리한다. OTA로 모델(트리)만 바꿀 수 있게 하면 ML 팀이 펌웨어 릴리스 없이 반복할 수 있다(J5).
+- golden 비교: PC에서 같은 로그를 트리에 넣은 결과와 센서가 낸 결과를 비교하는 테스트(B7 5절의 "C로 내보낸 트리 golden 비교"와 같은 습관). 센서 안 특징 계산의 필터·스케일이 PC 구현과 미묘하게 다른 것이 가장 흔한 불일치 원인이다.
+
+---
+
+## 8. RTOS 드라이버 구조
+
+### 8.1 원칙
+
+1. **ISR은 최소한만**: 시각 찍기(free-running 타이머), 스레드 깨우기(semaphore/event), 끝. ISR 안에서 SPI 트랜잭션을 하지 않는다 — 버스 대기 시간 동안 다른 인터럽트가 막히고, 버스 mutex를 ISR에서 잡을 수 없다.
+2. **드라이버 스레드가 버스를 소유**: STATUS 읽기 → FIFO 레벨 → SPI+DMA drain → 파싱 → overflow 처리 → 링에 push.
+3. **edge 인터럽트 함정 방지**: 다 읽은 뒤 STATUS를 다시 보고, 아직 watermark 이상이면 한 번 더 drain한다. 읽는 동안 새 샘플이 들어와 레벨이 높은 채로 남으면 **새 rising edge가 오지 않아 영원히 멈출 수 있다**.
+4. **링 버퍼로 소비자와 분리**: 드라이버는 샘플을 넣기만, window builder(ML 입력)·로거(H1)는 꺼내기만. SPSC 링이면 lock이 필요 없다(E8 3.3절).
+5. **gap을 데이터로 전달**: overflow·버스 오류는 링 안의 마커로 소비자에게 알린다.
+6. **시각은 ISR에서, 단위 변환은 소비자 근처에서**: raw int16을 링에 넣고 변환은 한 곳에서 한다(스케일 버그를 한 군데로 모은다).
+
+### 8.2 코드로 확인 — pthread로 흉내 낸 ISR → 스레드 → 링
+
+**예제 8** — 무엇을 확인하나: 실제 시간으로 도는 가상 IMU(acc + gyro 1600 Hz, watermark 64 frame)를 하드웨어 스레드가 돌리고, rising edge에서 "ISR"이 시각만 찍어 드라이버 스레드를 깨우고, 드라이버가 FIFO를 drain해 SPSC 링에 넣고, window builder가 64샘플 창을 만든다. 300 ms 지점에서 드라이버를 70 ms 붙잡아 overflow를 일부러 일으키고 복구를 본다.
+
+```c
+/* ex8_rtos.c — RTOS식 드라이버 구조를 pthread로 흉내 낸다 (가상 FIMU-6, acc+gyro 1600 Hz, wm 64 frame).
+ * "ISR"(시각 기록 + 신호만) → 드라이버 스레드(FIFO drain, OVR 복구) → SPSC 링 → window builder 스레드.
+ * 300 ms 지점에서 드라이버 스레드를 70 ms 붙잡아(더 높은 우선순위 작업 흉내) FIFO overflow를 일부러 만든다. */
+#define _DARWIN_C_SOURCE
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <time.h>
+#include <unistd.h>
+#include "fimu_model.h"
+
+static double now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; }
+static pthread_mutex_t bus = PTHREAD_MUTEX_INITIALIZER;             /* 장치 모델 보호 = SPI 버스 소유권 */
+static pthread_mutex_t mq = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;                 /* RTOS의 semaphore 역할 */
+static int irq_pending; static double irq_ts, T0; static atomic_int done;
+
+typedef struct { int16_t az; uint8_t gap; } smp_t;                  /* gap=1: 이 지점에서 데이터가 끊겼다 */
+#define RN 1024u
+static smp_t ring[RN]; static atomic_uint wr, rd;                    /* SPSC 링 (E8 3.3) */
+static void ring_push(smp_t s) {
+    unsigned w = atomic_load(&wr);
+    if (w - atomic_load(&rd) < RN) { ring[w % RN] = s; atomic_store(&wr, w + 1); }
+}
+static void *hw_thread(void *arg) {                                   /* 센서 + INT 핀 + ISR */
+    (void)arg; int prev = 0;
+    while (!atomic_load(&done)) {
+        pthread_mutex_lock(&bus); fimu_step(g_dev, now_us() - T0); int lvl = fimu_int1(g_dev); pthread_mutex_unlock(&bus);
+        if (lvl && !prev) {                                            /* rising edge → ISR: 시각 찍고 신호만 */
+            pthread_mutex_lock(&mq); irq_ts = now_us(); irq_pending = 1; pthread_cond_signal(&cv); pthread_mutex_unlock(&mq);
+        }
+        prev = lvl; usleep(100);
+    }
+    return NULL;
+}
+static long irqs, ovr, lat_n; static double lat_sum, lat_max;
+static void *drv_thread(void *arg) {
+    (void)arg; static uint8_t buf[FIFO_FRAMES * FRAME_B]; int stalled = 0;
+    while (!atomic_load(&done)) {
+        pthread_mutex_lock(&mq);
+        while (!irq_pending && !atomic_load(&done)) pthread_cond_wait(&cv, &mq);
+        irq_pending = 0; double t_irq = irq_ts; pthread_mutex_unlock(&mq);
+        if (atomic_load(&done)) break;
+        irqs++;
+        if (!stalled && t_irq - T0 > 300e3) { stalled = 1; usleep(70000); }
+        uint8_t st;
+        do {                                                           /* FIFO가 wm 아래로 내려갈 때까지 drain */
+            pthread_mutex_lock(&bus);
+            st = reg_read(R_STATUS); unsigned n = reg_read(R_FIFO_LVL);
+            burst_read(R_FIFO_DATA, buf, n * FRAME_B);                 /* 실보드: SPI + DMA, 완료 대기 */
+            if (st & S_OVR) { reg_write(R_FIFO_CTRL, FIFO_BYPASS); reg_write(R_FIFO_CTRL, FIFO_STREAM | F_GYR); }
+            uint8_t st2 = reg_read(R_STATUS); pthread_mutex_unlock(&bus);
+            if (st & S_OVR) { ovr++; ring_push((smp_t){ 0, 1 }); }     /* 끊긴 자리를 소비자에게 알린다 */
+            for (unsigned f = 0; f < n; f++) {
+                const uint8_t *p = &buf[f * FRAME_B];
+                if ((p[0] >> 4) == TAG_ACC) ring_push((smp_t){ (int16_t)(uint16_t)(p[5] | p[6] << 8), 0 });
+            }
+            st = st2;
+        } while (st & S_FWM);
+        double lat = now_us() - t_irq; lat_sum += lat; lat_n++; if (lat > lat_max) lat_max = lat;
+    }
+    return NULL;
+}
+static long wins, dropped_partial, total;
+static void *win_thread(void *arg) {                                   /* 64샘플 창을 만드는 소비자 */
+    (void)arg; int fill = 0;
+    while (!atomic_load(&done) || atomic_load(&rd) != atomic_load(&wr)) {
+        unsigned r = atomic_load(&rd);
+        if (r == atomic_load(&wr)) { usleep(200); continue; }
+        smp_t s = ring[r % RN]; atomic_store(&rd, r + 1);
+        if (s.gap) { if (fill) dropped_partial++; fill = 0; continue; } /* 끊긴 데이터를 이어 붙이지 않는다 */
+        total++; if (++fill == 64) { wins++; fill = 0; }
+    }
+    return NULL;
+}
+int main(void) {
+    static fimu_t dev; g_dev = &dev; fimu_init(&dev, 0);
+    reg_write(R_CTRL_ACC, 8 << 4 | 1 << 2); reg_write(R_CTRL_GYR, 8 << 4);   /* 1600 Hz */
+    reg_write(R_FIFO_WM, 64); reg_write(R_FIFO_CTRL, FIFO_STREAM | F_GYR); reg_write(R_INT1_MAP, S_FWM);
+    T0 = now_us(); pthread_t th[3];
+    pthread_create(&th[0], NULL, hw_thread, NULL); pthread_create(&th[1], NULL, drv_thread, NULL);
+    pthread_create(&th[2], NULL, win_thread, NULL);
+    usleep(1000000); atomic_store(&done, 1);
+    pthread_mutex_lock(&mq); pthread_cond_signal(&cv); pthread_mutex_unlock(&mq);
+    for (int i = 0; i < 3; i++) pthread_join(th[i], NULL);
+    printf("generated %u acc samples, delivered %ld, lost in sensor FIFO %u frames\n", dev.n_gen, total, dev.n_lost);
+    printf("irqs in 1 s %ld, overflow events %ld, windows %ld, partial windows dropped %ld\n",
+           irqs, ovr, wins, dropped_partial);
+    printf("irq->drain done: avg w/o worst %.0f us, worst %.0f us\n", (lat_sum - lat_max) / (lat_n - 1), lat_max);
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 -pthread ex8_rtos.c -o ex8 -lm && ./ex8
+```
+
+```text
+generated 1603 acc samples, delivered 1504, lost in sensor FIFO 162 frames
+irqs in 1 s 46, overflow events 1, windows 23, partial windows dropped 1
+irq->drain done: avg w/o worst 6 us, worst 71131 us
+```
+
+출력에서 볼 것 (실제 시간을 쓰므로 숫자는 실행마다 조금씩 다르다 — 세 번 돌려 irqs 46~47, 덮어쓴 frame 160~184 범위였다):
+
+- 1600 Hz × 2 frame = 3200 frame/s, watermark 64면 초당 50번이 기대값인데, 70 ms 정체 동안 인터럽트가 안 생겨 46번이다.
+- **overflow events 1**: 정체 동안 FIFO(128 frame = 40 ms 분량)가 넘쳐 약 160 frame(80샘플)을 덮어썼다. 드라이버는 OVR을 보고 gap 마커를 링에 넣고, FIFO를 bypass → stream으로 되돌려 플래그를 지웠다.
+- **partial windows dropped 1**: window builder가 gap에서 채우던 창을 버렸다. 끊긴 데이터로 만든 창이 모델에 들어가지 않았다는 뜻이다.
+- irq → drain 지연: 평소 수 µs(호스트가 빠르다), 최악 71 ms가 바로 주입한 정체다. 실제 MCU에서는 이 히스토그램을 GPIO 토글 + 로직 분석기나 사이클 카운터로 재서 4.3절 식의 T_service_worst로 쓴다.
+
+### 8.3 Zephyr라면 — sensor API 개념
+
+Zephyr RTOS에는 센서 드라이버 공통 API가 있다. 아래는 개념 스케치이고 **컴파일하지 않았다**. 함수·enum 이름은 Zephyr sensor 문서 기준이지만, 드라이버마다 지원하는 trigger·attribute가 다르고 버전에 따라 API가 바뀌므로 사용하는 Zephyr 버전의 문서와 해당 드라이버 소스를 확인해야 한다.
+
+```c
+/* Zephyr 스케치 — 컴파일하지 않음. DRDY trigger로 샘플을 받는 가장 기본 형태 */
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/sensor.h>
+
+static const struct device *const imu = DEVICE_DT_GET_ONE(st_lsm6dso);   /* devicetree 노드 */
+K_SEM_DEFINE(imu_sem, 0, 1);
+
+static void imu_handler(const struct device *dev, const struct sensor_trigger *trig)
+{
+    ARG_UNUSED(dev); ARG_UNUSED(trig);
+    k_sem_give(&imu_sem);                       /* 짧게: 신호만 */
+}
+
+static void imu_thread(void *p1, void *p2, void *p3)
+{
+    struct sensor_value odr = { .val1 = 104, .val2 = 0 };
+    struct sensor_trigger trig = { .type = SENSOR_TRIG_DATA_READY, .chan = SENSOR_CHAN_ACCEL_XYZ };
+    struct sensor_value acc[3];
+
+    if (!device_is_ready(imu)) return;
+    sensor_attr_set(imu, SENSOR_CHAN_ACCEL_XYZ, SENSOR_ATTR_SAMPLING_FREQUENCY, &odr);
+    sensor_trigger_set(imu, &trig, imu_handler);
+    for (;;) {
+        k_sem_take(&imu_sem, K_FOREVER);
+        sensor_sample_fetch(imu);                                  /* 버스에서 읽어 드라이버에 저장 */
+        sensor_channel_get(imu, SENSOR_CHAN_ACCEL_XYZ, acc);       /* 저장된 값을 SI 단위로 */
+        window_push(sensor_value_to_double(&acc[0]), sensor_value_to_double(&acc[1]),
+                    sensor_value_to_double(&acc[2]));
+    }
+}
+K_THREAD_DEFINE(imu_tid, 2048, imu_thread, NULL, NULL, NULL, 5, 0, 0);
+```
+
+개념 정리:
+
+- `sensor_sample_fetch()` = "버스에서 읽어 드라이버 안에 저장", `sensor_channel_get()` = "저장된 값을 `struct sensor_value`(정수부 `val1` + 백만분의 일 단위 `val2`)로 꺼내기". 가속도는 m/s² 같은 SI 단위로 나온다.
+- `sensor_trigger_set()` + `SENSOR_TRIG_DATA_READY`는 3절의 "DRDY 인터럽트" 방식이다. trigger 종류에는 이 밖에 `SENSOR_TRIG_MOTION`, `SENSOR_TRIG_STATIONARY`, `SENSOR_TRIG_TAP`, `SENSOR_TRIG_DOUBLE_TAP`, `SENSOR_TRIG_FIFO_WATERMARK`, `SENSOR_TRIG_FIFO_FULL` 등이 정의돼 있지만, **어떤 것을 지원하는지는 드라이버마다 다르다**.
+- 핸들러가 어느 컨텍스트에서 불리는지(드라이버 전용 스레드인지 system workqueue인지)는 드라이버의 Kconfig 선택에 따라 다르다. 핸들러 안에서 오래 걸리는 일을 하지 않는 것이 안전하다.
+- 샘플 단위 fetch/get은 FIFO 배치에 비효율적이다. 최근 Zephyr에는 RTIO 기반 비동기 읽기·디코더 API(`sensor_read()`, `sensor_get_decoder()` 등)와 FIFO 스트리밍 경로가 들어와 있다 — 버전과 드라이버 지원 여부를 확인하고, 지원이 없으면 드라이버를 확장하거나 8.2절 구조로 직접 짠다.
+- `104` Hz는 일부 ST 부품의 ODR 단계 예시다. 드라이버는 요청 ODR을 지원하는 가장 가까운 단계로 바꾸거나 에러를 낸다.
+
+---
+
+## 9. 디버그 — 로직 분석기로 보기
+
+### 9.1 SPI 버스트 한 번의 모습
+
+FIMU-6에서 FIFO 첫 frame(가속도, 책상 위 정지)을 SPI mode 0, 10 MHz로 읽는 트랜잭션을 로직 분석기로 보면 이렇다. 먼저 비트 수준(첫 두 바이트):
+
+```
+        |<------ byte 0: MOSI 0x84 ------>|<------ byte 1: MISO 0x10 ------>|
+CS   ‾‾‾\_______________________________________________________________________ ... __/‾‾
+SCLK ____/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\__/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_ ...
+MOSI ===X 1 X 0 X 0 X 0 X 0 X 1 X 0 X 0 X 0 X 0 X 0 X 0 X 0 X 0 X 0 X 0 X ...
+MISO ---(don't care)---------------------X 0 X 0 X 0 X 1 X 0 X 0 X 0 X 0 X ...
+         R  a6  a5  a4  a3  a2  a1  a0
+```
+
+읽는 법: mode 0이라 SCLK idle은 low, **상승 edge에서 양쪽이 샘플링**하고 하강 edge에서 다음 비트로 바뀐다. byte 0의 첫 비트 R = 1(읽기), 나머지 7비트 = 0x04(FIFO_DATA). byte 0 동안 MISO는 의미가 없다. byte 1부터 장치가 FIFO 내용을 MSB부터 내보낸다.
+
+분석기의 SPI 디코더 화면(바이트 수준):
+
+```
+t (µs)   0.0   0.8   1.6   2.4   3.2   4.0   4.8   5.6        10 MHz → 바이트당 0.8 µs
+MOSI     84    00    00    00    00    00    00    00
+MISO     xx    10    00    00    B8    FE    00    20
+               hdr   X_L   X_H   Y_L   Y_H   Z_L   Z_H
+```
+
+손으로 디코드:
+
+- header 0x10 = `0001 000 0` → TAG 1(ACC), SEQ 0, parity 0 (1의 개수 1개, 홀수 → OK)
+- X = 0x0000 = 0 → 0 g
+- Y = 0xFEB8 = 65208 − 65536 = −328 → −328 / 8192 = **−0.040 g**
+- Z = 0x2000 = 8192 → **1.000 g** (±4 g에서 1 g = 8192 LSB)
+
+Don에게 익숙한 습관 그대로: **증상이 생기면 펌웨어 로그보다 먼저 분석기로 버스를 본다.** CS가 바이트 사이에 올라가는지, 첫 바이트의 R 비트가 서는지, MISO가 어느 edge에서 바뀌는지가 화면에 다 나온다. 디버그 빌드에서는 ISR 진입·drain 시작·drain 끝에 GPIO를 토글해 같은 화면에 띄우면 8.2절의 지연 히스토그램을 바로 얻는다.
+
+### 9.2 코드로 확인 — 2바이트에서 g까지, 네 가지 변환 버그
+
+**예제 9** — 무엇을 확인하나: 같은 레지스터 바이트를 부호 확장 누락, 바이트 순서 반대, FS 착각, 찢어진 읽기(torn read)로 변환하면 어떤 값이 나오는지.
+
+```c
+/* ex9_sign.c — 레지스터 2바이트 → int16 → 물리 단위: 흔한 변환 버그 4가지를 같은 바이트로 재현 */
+#include <stdint.h>
+#include <stdio.h>
+int main(void) {
+    const uint8_t b[2] = { 0x00, 0xE0 };       /* L=0x00, H=0xE0 → int16 0xE000 = -8192 (±4 g에서 -1 g) */
+    const double lsb_per_g = 32768.0 / 4;       /* ±4 g, 16-bit */
+    int16_t ok      = (int16_t)(uint16_t)(b[0] | b[1] << 8);
+    int     no_sign = b[0] | b[1] << 8;         /* 버그 1: int에 담고 부호 확장 안 함 */
+    int16_t swapped = (int16_t)(uint16_t)(b[1] | b[0] << 8);   /* 버그 2: 바이트 순서(endianness) 반대 */
+    double  wrong_fs = ok / (32768.0 / 2);      /* 버그 3: 설정은 ±4 g인데 ±2 g 감도로 변환 */
+    const uint16_t old_s = 0x01FF, new_s = 0x0200;   /* 버그 4: L은 이전 샘플, H는 새 샘플에서 (BDU 없음) */
+    int16_t torn = (int16_t)((old_s & 0xFF) | (new_s & 0xFF00));
+    printf("correct        raw %6d -> %+.3f g\n", ok, ok / lsb_per_g);
+    printf("no sign ext.   raw %6d -> %+.3f g\n", no_sign, no_sign / lsb_per_g);
+    printf("byte swapped   raw %6d -> %+.3f g\n", swapped, swapped / lsb_per_g);
+    printf("wrong FS       raw %6d -> %+.3f g\n", ok, wrong_fs);
+    printf("torn read      raw %6d (old 511, new 512) -> error %+.3f g\n", torn, (torn - 512) / lsb_per_g);
+    printf("m/s^2 = g x 9.80665 -> %+.3f m/s^2\n", ok / lsb_per_g * 9.80665);
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 ex9_sign.c -o ex9 && ./ex9
+```
+
+```text
+correct        raw  -8192 -> -1.000 g
+no sign ext.   raw  57344 -> +7.000 g
+byte swapped   raw    224 -> +0.027 g
+wrong FS       raw  -8192 -> -0.500 g
+torn read      raw    767 (old 511, new 512) -> error +0.031 g
+m/s^2 = g x 9.80665 -> -9.807 m/s^2
+```
+
+출력에서 볼 것:
+
+- **부호 확장 누락**: −1 g가 +7 g로 보인다. 음수 쪽 값이 전부 큰 양수로 튀니 그래프에서 "위쪽으로 잘린 사각파"처럼 보인다. `(int16_t)(uint16_t)(L | H << 8)`가 정석이다.
+- **바이트 순서 반대**: −1 g가 +0.027 g. 값이 작고 잡음처럼 보여서 오히려 알아채기 어렵다. 정지 상태에서 z가 1 g가 아니면 의심한다.
+- **FS 착각**: 정확히 2배(또는 1/2) 틀린다. 정지 상태 가속도 크기 ‖a‖ = 1 g sanity check로 바로 잡힌다.
+- **찢어진 읽기**: L은 이전 샘플(511), H는 새 샘플(512)에서 와서 767 — 0.031 g짜리 가짜 스파이크. 값이 바이트 경계(256의 배수)를 넘을 때만 생겨서 드물고 재현이 어렵다. 해결은 **한 번의 버스트로 L·H를 같이 읽기** + 부품의 BDU(block data update, "상·하위 바이트를 같은 샘플로 묶어 두는" 옵션) 같은 기능 켜기. FIFO로 읽으면 이 문제는 원천적으로 없다.
+
+### 9.3 버스·데이터 수준 버그 표
+
+| 버그 | 증상 | 확인 방법 | 고치는 법 |
+|---|---|---|---|
+| SPI mode 틀림 | WHO_AM_I가 1비트 밀린 값 (0xA7 → 0x53), 가끔 맞음 | 분석기로 MISO 전환 edge 확인 | mode 0 또는 3 (데이터시트) |
+| CS 타이밍 | 버스트의 첫 바이트만 맞고 나머지 이상, 또는 쓰기가 무시됨 | CS가 바이트마다 올라가는지, CS↔SCLK setup/hold 시간 | GPIO CS 또는 컨트롤러 CS 유지 설정, CS 지연 추가 |
+| I2C 주소 표기 | 모든 트랜잭션 NACK | 7비트 주소를 이미 1비트 shift해서 넘겼는지 | HAL이 7비트를 받는지 8비트를 받는지 확인 |
+| endianness | 정지 상태 z가 1 g가 아님, 작은 잡음 같은 값 | 알려진 값(1 g)을 hex로 찍어 보기 | 데이터시트의 L/H 순서대로 조립 |
+| int16 부호 확장 | 음수가 큰 양수로 (−1 g → +7 g) | 기울여서 음수 쪽 값 보기 | `(int16_t)(uint16_t)` 캐스트 |
+| 단위·FS 착각 | 정확히 2배·4배 틀림, dps ↔ rad/s 혼동 | 정지 시 가속도 크기 = 1 g, 정지 시 자이로 ≈ 0 | FS 설정을 readback해서 변환 계수와 같이 기록 |
+| torn read | 바이트 경계에서 드문 스파이크 | 256의 배수 근처 값의 분포 | 한 버스트로 읽기, BDU 켜기, FIFO 사용 |
+| auto-increment 꺼짐 / FIFO 포트 증가 | 버스트에서 같은 값 반복, 또는 FIFO 대신 옆 레지스터가 읽힘 | 분석기 디코더로 바이트 패턴 확인 | IF_INC류 비트, FIFO 포트 동작 확인 |
+| FIFO overrun 무시 | 창 안에 순간 점프, 시각이 맞지 않음 | OVR 플래그·seq·timestamp 점프 카운터 | 4.4절 복구 절차, W·우선순위 조정 |
+| DMA 캐시 | 가끔 이전 배치 데이터가 다시 보임 | 버퍼를 패턴으로 채우고 DMA 후 확인 | invalidate, 정렬, non-cacheable 영역 |
+
+---
+
+## 10. 임베디드 관점에서 다시 보기 — 최소 전력 IMU 경로 설계
+
+지금까지를 하나의 설계로 묶으면, 웨어러블 손목 제스처 인식의 IMU 경로는 대략 이런 **상태 기계**가 된다(숫자는 E9 6.5절 같은 설명용 가정).
+
+```
+            no-motion 10 s (센서 내장)                          motion (센서 내장 INT)
+   +-----------------------------------------+      +-----------------------------------------+
+   |                                         v      |                                         v
+ [ACTIVE]                                   [IDLE]--+                                      [ACTIVE]
+  IMU: acc+gyro 100 Hz, FIFO W=20샘플        IMU: acc만 저전력 25–50 Hz, any-motion 켬
+  MCU: 0.2 s마다 깨어 FIFO drain(DMA)         MCU: deep sleep, motion INT만 기다림
+       1 s 창마다 작은 CNN (B7)              FIFO: 꺼짐 (또는 pre-trigger용 stream만)
+  평균 ≈ 수십 µA                             평균 ≈ 센서 µA + MCU sleep µA
+```
+
+설계 결정과 근거:
+
+| 결정 | 근거 (이 노트의 절) |
+|---|---|
+| IMU는 SPI, 느린 센서는 I2C | 6축 고 ODR FIFO는 I2C 400 kHz에서 버스 절반 (1.4) |
+| FIFO stream + watermark, W는 무릎 근처 | wake 비용만 1/W로 줄고, 넘으면 지연·RAM·overflow 위험만 (3.3, 4.3) |
+| ISR은 시각 + 신호, drain은 스레드 + DMA | 버스 대기 동안 CPU sleep, edge 함정 방지 (4.6, 8.1) |
+| tag + seq + timestamp frame 사용 | 손상·overflow 탐지와 실제 ODR 추정 (4.2, 4.5, 5) |
+| 정지 시 센서 내장 no/any-motion에 맡김 | 하루 대부분 MCU가 데이터를 안 봐도 됨 (6.1, E9 6.5) |
+| any-motion은 N샘플 지속 + 필드 로그로 문턱 | 오검출 × 한 번 비용이 절약분을 먹을 수 있음 (6.3) |
+| gap을 링 마커로 전달, 창 폐기 | 끊긴 데이터를 이어 붙이면 모델이 가짜 움직임을 봄 (4.4, 8.2) |
+| 카운터: overflow, resync, 오검출, drain 지연 최대 | fleet에서 보이게 (H7) |
+
+메모리 감각: FIFO drain 버퍼(128 frame × 7 B ≈ 0.9 KB, 이중이면 1.8 KB) + 샘플 링(1 s × 100 Hz × 12 B = 1.2 KB) + 모델 창(B7, int8 6축 × 100 = 600 B)이면 IMU 경로 RAM은 수 KB다. 오디오 pre-roll(수십 KB, E8 1.3절)에 비하면 작다. 그래서 IMU 쪽의 진짜 예산은 RAM보다 **전류와 wake 횟수**다.
+
+---
+
+## 11. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| ODR보다 느린 polling | 데이터가 "부드럽게" 보이는데 샘플 수가 절반 | 1칸짜리 데이터 레지스터가 덮어써짐 (예제 3) | FIFO 사용, 또는 DRDY 인터럽트 |
+| watermark를 FIFO 용량 근처로 | 가끔 overflow, 부하 걸릴 때만 | 서비스 지연 동안 들어올 샘플 칸이 없음 | 4.3절 식 (2), 여유 확보 |
+| edge 인터럽트 + 한 번만 읽기 | 수집이 어느 순간 영원히 멈춤 | 읽는 동안 레벨이 다시 wm 이상 → 새 edge 없음 | 읽은 뒤 STATUS 재확인 루프, latched + level 트리거 |
+| ISR에서 SPI 트랜잭션 | 다른 인터럽트 지연, 가끔 버스 충돌 | ISR이 버스·mutex를 잡음 | ISR은 시각 + 신호만 (8.1) |
+| overflow 뒤 데이터를 이어 붙임 | 모델이 가끔 이상한 이벤트를 냄 | gap을 모르는 window builder | gap 마커 + 창 폐기 (예제 8) |
+| 공칭 ODR로 시각 계산 | 긴 로그에서 IMU와 오디오·영상이 수 초 어긋남 | 센서 발진기 오차 누적 | 배치 anchor + ODR 추정, TS frame (5) |
+| readback·self-test 생략 | 몇 주 뒤 데이터 분석에서 설정 오류 발견 | 쓰기가 무시된 레지스터 | bring-up 로그에 readback·self-test 결과 기록 |
+| any-motion 문턱을 책상에서만 정함 | 착용 시 배터리가 예상보다 빨리 닳음 | 실생활 진동으로 오검출 폭증 | 필드 로그로 오검출/h 측정, 지속 시간 조건 (6.3) |
+| 센서 설정 블롭 버전 미관리 | 같은 펌웨어인데 기기마다 내장 ML 결과가 다름 | MLC·기능 설정이 펌웨어와 따로 놂 | 블롭 버전을 펌웨어·로그 메타데이터에 포함 (7.3) |
+
+---
+
+## 12. 면접에서 이렇게 말한다
+
+**Q.** "Design the IMU data path for a wearable with minimal power."
+
+**A.** 정지 시간이 대부분이라는 전제에서 시작한다. 정지 중에는 IMU를 가속도 저전력 모드 + 내장 any-motion으로 두고 MCU는 deep sleep. 움직임 인터럽트가 오면 6축 FIFO stream + watermark로 바꾸고, MCU는 watermark마다 깨어 SPI+DMA로 FIFO를 비운 뒤 창이 차면 작은 모델을 돌린다. no-motion이 일정 시간 지속되면 다시 내린다. 숫자로는 wake 비용이 1/W로 줄어 무릎(10~20샘플) 근처에서 고르고, 남은 예산은 센서 전류가 지배한다.
+
+> "I'd build it as a two-state machine. When the device is still — which is most of the day — the IMU runs accel-only in low-power mode with its built-in any-motion detector, and the MCU stays in deep sleep. On a motion interrupt, I switch to 6-axis FIFO streaming with a watermark; the MCU wakes once per watermark, drains the FIFO over SPI with DMA, and runs the model when a window is ready. A no-motion timeout drops it back. Batching cuts the per-wake overhead by one over the watermark, so I pick a watermark near the knee of that curve; beyond that the sensor's own current dominates the budget."
+
+**Q.** "How do you choose the FIFO watermark?"
+
+**A.** 세 제약이다. 지연 예산(W/ODR + 서비스 지연 ≤ 한계), overflow 여유(W + 최악 서비스 지연 동안 들어올 frame ≤ 용량), MCU RAM. 그 안에서 전력은 W가 클수록 좋지만 wake 비용 항만 줄기 때문에 금방 평평해진다. 그래서 "제약을 만족하는 범위에서 무릎 근처"를 고르고, 최악 서비스 지연은 측정해서 넣는다.
+
+> "Three constraints bound it: latency — watermark over ODR plus service time must fit the budget; overflow margin — the watermark plus whatever arrives during the worst-case service delay must fit in the FIFO; and RAM for the drain buffer. Within that, a bigger watermark saves power, but only the per-wake term shrinks, so the curve flattens quickly. I pick a value near the knee and I measure the worst-case service latency rather than guessing it."
+
+**Q.** "What happens on FIFO overflow and how do you recover?"
+
+**A.** stream 모드면 가장 오래된 데이터가 덮어써지고 sticky 플래그가 선다. 남은 데이터는 최신이라 유효하니 읽는다. 소비자에게 gap 마커를 보내 창을 이어 붙이지 않게 하고, 플래그를 지우고 FIFO를 깨끗한 상태로 돌린 뒤, 카운터를 올려 telemetry로 보낸다. 탐지는 플래그, frame seq, timestamp 점프 세 겹으로 한다. 그다음 원인(서비스 지연, W)을 고친다.
+
+> "In stream mode the sensor overwrites the oldest frames and sets a sticky overflow flag. The data still in the FIFO is the newest, so I drain it, but I push a gap marker into the ring so the window builder never stitches across the discontinuity. Then I clear the flag, reset the FIFO to a known state, and bump an overflow counter that goes into telemetry. I detect it three ways — the flag, frame sequence counters, and timestamp jumps — and then fix the root cause, usually service latency or a watermark too close to capacity."
+
+**Q.** "Why use the sensor's wake-on-motion instead of detecting motion on the MCU?"
+
+**A.** MCU에서 하면 MCU가 계속 샘플을 봐야 하니 깨어 있거나 자주 깬다. 센서 안 회로는 센서가 어차피 켜져 있는 동안 µA 이하 추가로 판단하고, 조건이 맞을 때만 깨운다. 대가는 유연성 — 문턱·지속 시간 정도만 바꿀 수 있고 오검출이 절약분을 먹을 수 있으니 필드 로그로 튜닝해야 한다.
+
+> "Because detecting motion on the MCU means the MCU has to look at every sample, so it's awake or waking constantly. The sensor's motion engine runs while the sensor is on anyway, at negligible extra current, and only raises an interrupt when the condition is met — so the MCU can sleep through most of the day. The trade-off is flexibility: you get a threshold and a duration, and false wakes can eat the savings, so I'd tune it on field logs and track false wakes per hour."
+
+**Q.** "How do you timestamp samples that arrive in a batch from the FIFO?"
+
+**A.** ISR 첫 줄에서 free-running 타이머로 인터럽트 시각을 찍는다. 그 순간 W번째 샘플이 막 도착했으니 배치 안 샘플은 거꾸로 주기를 빼서 계산한다. 주기는 공칭값이 아니라 인터럽트 시각들의 직선 맞춤이나 센서 timestamp frame으로 추정한다 — 센서 발진기는 % 단위로 틀려서 공칭값으로 누적하면 10분에 수 초 어긋난다.
+
+> "I capture a free-running timer in the first line of the ISR. At that instant the watermark-th sample has just landed, so I assign times backwards within the batch using the sample period. The period itself I estimate — either by fitting interrupt times against cumulative sample count, or from the sensor's timestamp frames — because the sensor's oscillator can be off by a percent or more, and integrating the nominal ODR drifts by seconds over a ten-minute log."
+
+**Q.** "WHO_AM_I reads 0x53 but the datasheet says 0xA7. What do you check?"
+
+**A.** 0x53은 0xA7을 정확히 1비트 오른쪽으로 민 값이다. 배선 단선보다 **샘플링 타이밍** — SPI mode(CPHA)가 틀렸거나, 클럭이 너무 빨라 MISO setup이 안 맞는다. 분석기로 MISO가 어느 edge에서 바뀌는지 보고, mode 0/3으로 바꾸고 클럭을 낮춰 본다. 0x00이나 0xFF면 그건 응답이 없는 것 — 전원, power-up 대기, CS, 인터페이스 선택을 본다.
+
+> "0x53 is 0xA7 shifted right by one bit, which points to a sampling-edge problem rather than wiring — wrong SPI mode, or a clock too fast for the MISO setup time. I'd scope MISO against SCLK, switch to mode 0 or 3, and drop the clock. If it read 0x00 or 0xFF instead, that's no response at all, so I'd check power, the power-up delay, chip select, and interface selection."
+
+**Q.** "SPI or I2C for the IMU?"
+
+**A.** ODR × 축 × 바이트로 계산한다. 6축 1.6 kHz는 22 KB/s라 I2C 400 kHz 버스의 절반을 먹지만 SPI 10 MHz에서는 2 % 미만이다. 핀이 부족하고 가속도 50 Hz 정도면 I2C로 충분하다. 핀과 속도 둘 다 필요하면 I3C를 검토하되 컨트롤러·드라이버 지원을 확인한다.
+
+> "I do the arithmetic: ODR times axes times bytes. Six axes at 1.6 kHz is about 22 KB/s with FIFO headers — half of a 400 kHz I2C bus, under two percent of a 10 MHz SPI. If it's a 50 Hz accelerometer and pins are tight, I2C is fine. If I need both pins and bandwidth, I3C is worth evaluating, but I'd confirm controller and driver support first."
+
+---
+
+## 13. 직접 해보기
+
+1. 손계산: I2C 1 MHz로 448 B(64 frame)를 레지스터 버스트로 읽는 시간은? 예제 1의 프레이밍(START·주소·레지스터·Sr·주소·데이터·STOP, 바이트당 9비트)을 쓴다. 정답: 비트 = 1 + 9 + 9 + 1 + 9 + 9 × 448 + 1 = 4062 → 4.06 ms.
+2. 손계산: FIMU-6 header `0x35`는 유효한가? 유효하면 tag와 seq는? 정답: `0011 0101` → 1의 개수 4(짝수) → parity 불량, 유효하지 않다. (`0x34`라면 1의 개수 3 → 유효, tag 3 = TS, seq 2.)
+3. 손계산: acc + gyro 200 Hz, FIFO 128 frame, 지연 한계 300 ms, 최악 서비스 지연 80 ms, 여유 8 frame일 때 W의 상한은? 정답: R = 400 frame/s. 지연: (300 − 80) ms × 400 = 88. overflow: 128 − 32 − 8 = 88. 상한 88 frame(44샘플).
+4. 코드: 예제 3에 FIFO 모드를 stop-on-full로 바꾼 줄과 wm = 120을 추가하고 MCU wake 지연을 30 ms로 늘려 보라. stream과 비교해 잃는 샘플이 "오래된 것"인지 "새것"인지 seq나 latency로 확인하라. 힌트: stop-on-full은 새 frame을, stream은 가장 오래된 frame을 버린다. 예제 3의 latency 계산은 '손실 없음'을 가정하므로, 손실이 생기면 header의 seq로 어느 frame이 빠졌는지 직접 확인해야 한다.
+5. 코드: 예제 7에 no-motion 검출(고역통과 크기 < 문턱이 T초 지속)을 추가하고, T = 2, 5, 10 s에서 "실제로는 움직이는 중인데 no-motion을 낸 횟수"를 세라. 힌트: 합성 데이터의 움직임 시작 간격이 최소 8 s(400샘플)라 정지 구간이 7 s 이상이므로 T가 짧으면 움직임 사이마다 no-motion이 난다 — 그 자체는 오검출이 아니다. 정의를 먼저 정한다.
+6. 코드: 예제 5 파서에서 TS frame을 이용해 각 ACC 샘플의 시각(µs)을 계산해 출력하고, 실제 시각(장치 모델의 `n × 주기`)과의 최대 오차를 구하라. 손상 2 직후의 샘플은 오차가 어떻게 되나? 힌트: 시각 = TS tick × 25 µs + (그 TS 뒤 몇 번째 ACC인지) × 추정 주기. 잃은 frame이 ACC였다면 그 TS 구간의 뒤쪽 샘플이 한 주기씩 앞당겨져 틀리고, 다음 TS frame에서 바로 회복된다(GYR를 잃었다면 영향 없음). 이 예제의 손상 1은 ACC frame, 손상 2는 GYR frame에 걸린다.
+
+---
+
+## 14. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| ODR | Output Data Rate | 센서가 초당 내는 샘플 수 (Hz) |
+| FS | Full-Scale range | 측정 범위 (±2/4/8/16 g). LSB당 크기를 정한다 |
+| WHO_AM_I | 칩 ID 레지스터 | bring-up 첫 읽기 대상, 버스·mode·주소 확인용 |
+| soft reset | 소프트웨어 리셋 | 레지스터를 기본값으로, 이후 대기 필요 |
+| self-test | 자가 시험 | 정전기력으로 일부러 움직여 출력 차이를 한계와 비교 |
+| DRDY | Data Ready | 새 샘플이 데이터 레지스터에 들어왔다는 플래그 |
+| FIFO | 센서 안 샘플 큐 | 샘플을 쌓아 MCU가 한 번에 읽게 함 |
+| watermark | FIFO 문턱 | 채움이 넘으면 INT. 배치 크기를 정한다 |
+| bypass / stream / stop-on-full | FIFO 모드 | 안 씀 / 오래된 것 덮어씀 / 새것 버림 |
+| frame · tag | FIFO 단위 · 머리표 | 데이터 종류·순번·parity를 담은 header + payload |
+| overflow (overrun) | FIFO 넘침 | 서비스가 늦어 데이터 손실, sticky 플래그 |
+| BDU | Block Data Update | 상·하위 바이트를 같은 샘플로 묶어 torn read 방지 (부품마다 이름 다름) |
+| auto-increment | 주소 자동 증가 | 버스트 중 다음 레지스터로 넘어감 (FIFO 포트는 예외) |
+| CPOL · CPHA | SPI 클럭 극성 · 위상 | 합쳐서 mode 0–3 |
+| repeated start | I2C Sr | STOP 없이 방향을 바꿔 레지스터 읽기 |
+| I3C · IBI | MIPI 2선 버스 · in-band interrupt | INT 선 없이 버스로 인터럽트 |
+| push-pull · open-drain | 출력 구동 방식 | 단독 사용 / 선 공유(wired-OR) + pull-up |
+| latched · pulsed | INT 유지 방식 | 원인을 읽을 때까지 유지 / 짧은 펄스 |
+| any-motion · no-motion | 움직임 시작 · 정지 검출 | 문턱 + 지속 시간, 센서 안에서 |
+| MLC | Machine Learning Core (ST) | 센서 안 특징 계산 + decision tree |
+| FSM | Finite State Machine | 일부 센서 안의 작은 프로그래머블 상태 기계 |
+| interrupt coalescing | 인터럽트 묶기 | N개 모이면 한 번 알림 — watermark와 같은 발상 |
+| gap 마커 | 불연속 표시 | 링 안에서 "여기서 끊겼다"를 소비자에게 알림 |
+
+---
+
+## 15. 요약 & 체크리스트
+
+IMU 드라이버의 핵심은 레지스터를 쓰는 기술이 아니라 **"MCU를 언제 깨울지"를 설계하는 기술**이다. 버스는 ODR × 축 × 바이트로 고르고(6축 고 ODR이면 SPI), bring-up은 대기 → WHO_AM_I → reset → 설정 → readback → self-test → INT 순서로 한다. 데이터 경로는 polling < DRDY < FIFO + watermark 순으로 wake가 줄고, 전력은 wake 비용 항만 1/W로 줄기 때문에 무릎 근처의 W를 지연·overflow·RAM 제약 안에서 고른다. FIFO는 tag·seq·timestamp frame으로 손상과 overflow를 탐지하고, gap을 소비자에게 알리며, 배치 샘플 시각은 ISR 시각 + 추정 주기로 붙인다. 정지 시간은 센서 내장 기능과 MLC 같은 센서 안 ML에 맡겨 MCU를 재운다. RTOS 구조는 ISR(시각 + 신호) → 스레드(SPI+DMA drain, 파싱, 복구) → SPSC 링 → window builder다.
+
+- [ ] I2C 400 kHz와 SPI 10 MHz에서 N바이트 FIFO 버스트 시간을 손으로 계산할 수 있다
+- [ ] SPI mode 0–3의 차이와 "1비트 밀린 WHO_AM_I"의 뜻을 설명할 수 있다
+- [ ] bring-up 8단계를 순서와 이유까지 말할 수 있다
+- [ ] polling / DRDY / FIFO의 wake 수·지연·샘플 손실을 비교할 수 있다
+- [ ] 평균 전류 식에서 W가 줄이는 항이 무엇인지 말하고 무릎을 찾을 수 있다
+- [ ] watermark 상한을 지연·overflow·RAM 세 식으로 계산할 수 있다
+- [ ] tag frame header의 parity·seq를 손으로 검사하고 재동기화 규칙을 설명할 수 있다
+- [ ] overflow 탐지 세 가지와 복구 5단계를 말할 수 있다
+- [ ] 배치 샘플 시각을 인터럽트 시각과 추정 주기로 계산할 수 있다
+- [ ] any-motion 문턱을 오검출/h × 한 번 비용으로 고를 수 있고, MLC류가 µW 예산에서 왜 중요한지 말할 수 있다
+
+---
+
+## 참고 자료
+
+- STMicroelectronics, AN5259 "LSM6DSOX: Machine Learning Core" — 센서 안 특징·decision tree 개념. 같은 계열 데이터시트의 FIFO·embedded functions 장
+- Bosch Sensortec, BMI270 데이터시트와 공개 드라이버 [BMI270_SensorAPI](https://github.com/boschsensortec/BMI270_SensorAPI) — FIFO header 모드, 기능 설정 파일 로딩
+- TDK InvenSense ICM-426xx 계열 데이터시트 — FIFO와 APEX motion functions (부품별 지원 확인)
+- NXP, UM10204 "I2C-bus specification and user manual" — 속도 등급, repeated start, pull-up 계산
+- MIPI Alliance, I3C Basic 규격 소개 — [mipi.org](https://www.mipi.org/) (SDR, IBI, 동적 주소)
+- Zephyr Project 문서 — [docs.zephyrproject.org](https://docs.zephyrproject.org/) 의 Sensors 장 (fetch/get, trigger, RTIO 기반 read/decode)
+- Android 센서 batching 문서 — [source.android.com](https://source.android.com/docs/core/interaction/sensors/batching) (센서 허브 FIFO batching의 OS 쪽 모델)
+- 이 노트와 연결: B7(센서 안 decision tree, 11.3 사다리), E8(1.2 batching, 3.3 SPSC 링), E9(6.5 IMU µA 예산), G1(IMU 원리), G3(퓨전), G7(시간 동기화), H1(로깅), H7(품질 모니터링)

@@ -1,6 +1,6 @@
 # B02. Zephyr 보드 포팅 실전 — board.yml에서 "안 켜지는 보드"까지
 
-> **시리즈**: BSP 집중 2/4 · **선행**: B01(BSP 해부), C03 10절(Zephyr device model), C04 14절(west·Kconfig·devicetree) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling"
+> **시리즈**: BSP 집중 2/6 · **선행**: B01(BSP 해부), C03 10절(Zephyr device model), C04 14절(west·Kconfig·devicetree) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling"
 > **Don 상태**: ❌ → 🟡. Zephyr 보드를 포팅해 본 적이 없다. 이 노트는 "읽고 아는 척"이 아니라 **nRF52840 DK 하나로 실제로 따라 할 수 있는 절차**를 만드는 게 목적이다. 여기 있는 명령은 전부 실행 가능한 것만 적었다.
 > **이 노트를 다 읽으면**: ① 새 보드를 Zephyr에 올릴 때 만들어야 하는 파일과 각 파일의 역할을 말할 수 있다 ② devicetree / Kconfig / C 코드 중 무엇을 어디에 써야 하는지 판단할 수 있다 ③ 보드가 안 켜질 때 빌드 산출물(`zephyr.dts`, `.config`, `devicetree_generated.h`)로 원인을 좁힐 수 있다.
 

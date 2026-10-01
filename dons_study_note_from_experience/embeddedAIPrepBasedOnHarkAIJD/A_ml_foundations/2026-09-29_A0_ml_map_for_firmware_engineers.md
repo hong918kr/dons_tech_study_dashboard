@@ -1,0 +1,917 @@
+# A0. 머신러닝 한 장 지도 — 펌웨어 엔지니어를 위한 입문
+
+> **이 노트를 다 읽으면**: ML을 "데이터로 계수를 정하는 함수"로 설명할 수 있다 · training과 inference가 무엇을 계산하고 어디서 도는지 구분한다 · numpy로 작은 분류기를 학습하고 같은 추론을 C로 옮겨 결과를 맞춰 볼 수 있다 · edge ML 한 사이클에서 Embedded AI Engineer의 자리를 짚을 수 있다
+> **JD 연결**: "responsible for the full AI stack on the device, including data ingestion, model development, optimization, and deployment on embedded devices" — study_prep_list 전체(A~O)의 입구. A1~A6을 읽기 전 오리엔테이션
+> **Don 기준 난이도**: C·고정소수점·측정 기반 디버깅은 이미 강함 / "학습(training)이 무엇을 하는지", ML 용어, 확률적 출력에 대한 사고방식은 새로 배움
+> **선행 노트**: 없음
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+펌웨어 엔지니어가 ML을 처음 볼 때 가장 헷갈리는 점은 **"무엇이 코드이고 무엇이 데이터인가"**다.
+펌웨어에서는 동작이 전부 코드에 적혀 있다. `if (accel > THRESHOLD)`처럼 엔지니어가 규칙과 숫자를 직접 정한다.
+ML에서는 **계산의 모양(구조)**만 사람이 정하고, 그 안에 들어가는 **숫자(파라미터)**는 데이터가 정한다.
+
+이 노트는 A1(선형대수)~A6(데이터 도구)로 들어가기 전에 전체 지도를 한 장으로 그린다. 한 줄로 요약하면 이렇다.
+
+```
+  서버(GPU)                                         기기(MCU / DSP / NPU)
+ ┌──────────────────────────────┐   가중치 파일   ┌──────────────────────────┐
+ │ 데이터 + 정답 → 학습(training) │ ─────────────► │ 센서 → 전처리 → 추론     │
+ │ "숫자를 찾는 과정" (비쌈, 1번)  │   (export)     │ "숫자를 쓰는 과정" (싸게,  │
+ └──────────────────────────────┘                │  하루 수만 번)             │
+                                                   └──────────────────────────┘
+```
+
+말로 하면: **서버는 좋은 계수를 찾고, 기기는 그 계수로 계산만 한다.** Embedded AI Engineer의 일은 오른쪽 상자를 제한된 메모리·전력·지연 안에서 정확하게 돌리는 것, 그리고 왼쪽 상자에 들어갈 데이터를 기기에서 모아 오는 것이다.
+
+```svg
+<svg viewBox="0 0 680 290" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="a0ar1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="26" font-size="14">Training — 서버 GPU (가끔, 크게)</text> <rect x="20" y="40" width="120" height="50" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/> <text x="80" y="62" font-size="12" text-anchor="middle">데이터셋</text>
+<text x="80" y="78" font-size="12" text-anchor="middle">x와 정답 y</text> <rect x="170" y="40" width="100" height="50" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<text x="220" y="70" font-size="12" text-anchor="middle">forward</text> <rect x="300" y="40" width="90" height="50" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/> <text x="345" y="70" font-size="12" text-anchor="middle">loss</text>
+<rect x="420" y="40" width="120" height="50" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/> <text x="480" y="62" font-size="12" text-anchor="middle">backward</text>
+<text x="480" y="78" font-size="12" text-anchor="middle">(gradient)</text> <rect x="570" y="40" width="90" height="50" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<text x="615" y="70" font-size="12" text-anchor="middle">update w</text> <line x1="140" y1="65" x2="168" y2="65" stroke="currentColor" marker-end="url(#a0ar1)"/>
+<line x1="270" y1="65" x2="298" y2="65" stroke="currentColor" marker-end="url(#a0ar1)"/> <line x1="390" y1="65" x2="418" y2="65" stroke="currentColor" marker-end="url(#a0ar1)"/>
+<line x1="540" y1="65" x2="568" y2="65" stroke="currentColor" marker-end="url(#a0ar1)"/> <path d="M600,90 L600,114 L220,114 L220,92" fill="none" stroke="currentColor" stroke-dasharray="5 4" marker-end="url(#a0ar1)"/>
+<text x="410" y="130" font-size="12" text-anchor="middle">수백~수백만 번 반복</text> <line x1="645" y1="90" x2="645" y2="193" stroke="#3f9a6b" stroke-width="2.5" marker-end="url(#a0ar1)"/>
+<text x="636" y="150" font-size="12" text-anchor="end">export: 가중치 파일</text> <text x="20" y="180" font-size="14">Inference — 기기 MCU/DSP/NPU (항상, 작게)</text>
+<rect x="20" y="195" width="100" height="50" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/> <text x="70" y="225" font-size="12" text-anchor="middle">센서 (IMU)</text>
+<rect x="140" y="195" width="110" height="50" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/> <text x="195" y="225" font-size="12" text-anchor="middle">전처리 · 특징</text>
+<rect x="270" y="195" width="120" height="50" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/> <text x="330" y="225" font-size="12" text-anchor="middle">forward만</text>
+<rect x="410" y="195" width="120" height="50" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/> <text x="470" y="217" font-size="12" text-anchor="middle">p(shake)</text>
+<text x="470" y="233" font-size="12" text-anchor="middle">→ threshold</text> <rect x="560" y="195" width="110" height="50" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/>
+<text x="615" y="217" font-size="12" text-anchor="middle">가중치</text> <text x="615" y="233" font-size="12" text-anchor="middle">(flash 상수)</text> <line x1="120" y1="220" x2="138" y2="220" stroke="currentColor" marker-end="url(#a0ar1)"/>
+<line x1="250" y1="220" x2="268" y2="220" stroke="currentColor" marker-end="url(#a0ar1)"/> <line x1="390" y1="220" x2="408" y2="220" stroke="currentColor" marker-end="url(#a0ar1)"/>
+<path d="M615,245 L615,265 L330,265 L330,247" fill="none" stroke="#3f9a6b" marker-end="url(#a0ar1)"/> <text x="472" y="282" font-size="12" text-anchor="middle">읽기만 한다 (read-only)</text>
+</svg>
+```
+
+그림 1 — 위 줄(training)은 서버에서 forward → loss → backward → update를 반복해 가중치를 찾는다. 아래 줄(inference)은 기기에서 센서 데이터로 forward만 계산한다. 두 세계를 잇는 것은 "가중치 파일" 하나다.
+
+펌웨어 비유로 먼저 잡아 두자.
+
+| ML 개념 | 펌웨어에서 비슷한 것 | 차이점 |
+|---|---|---|
+| 모델 구조 (layer 종류·연결) | 필터 구조 (FIR 탭 수, IIR 차수) | 구조는 사람이 정한다는 점은 같다 |
+| 파라미터 (weight, bias) | FIR 계수, 캘리브레이션 테이블, PID gain | 사람이 튜닝하지 않고 **데이터로 자동 튜닝** |
+| 학습 (training) | 캘리브레이션 스테이션에서 계수를 뽑는 과정 | 수천~수조 샘플, GPU 수 시간~수 주 |
+| 추론 (inference) | 양산 펌웨어가 계수 테이블로 계산 | 기기에서 매 프레임 실행 |
+| 가중치 파일 | NV 영역에 굽는 캘리브레이션 데이터 | 크기가 수 KB ~ 수 GB |
+
+---
+
+## 1. ML이란 — 규칙을 쓰는 대신 데이터로 함수를 배운다
+
+### 1.1 직관: 손목 흔들기 감지기를 두 가지 방법으로 만들기
+
+예를 들어 Hark 같은 웨어러블(제품 구성은 추정이다)에 "손목을 흔들면 어시스턴트를 깨운다"는 기능을 넣는다고 하자. IMU 가속도계에서 2초 창(window)마다 판단한다.
+
+**방법 1 — 규칙 기반 (전통적 펌웨어)**
+
+```c
+/* 엔지니어가 로그를 보고 정한 규칙 */
+if (accel_std_g > 0.15f) {
+    trigger_wake();
+}
+```
+
+엔지니어가 로그를 몇 개 보고 "흔들면 가속도 변동이 크다 → 0.15 g 넘으면 흔든 것"이라고 정한다. 간단하고 설명하기 쉽다. 문제는 **걷기**도 가속도 변동이 크다는 것이다. 규칙이 하나 늘고, 예외가 늘고, 결국 `if` 문 20개와 매직 넘버 30개가 된다.
+
+**방법 2 — 학습 기반 (ML)**
+
+"흔든 창"과 "흔들지 않은 창"을 수백 개 모으고, 각 창에 정답(label)을 붙인다. 그리고 다음 모양의 함수를 정해 둔다.
+
+```
+p(shake) = σ(w1·f1 + w2·f2 + b)
+```
+
+말로 하면: 특징 두 개(`f1`, `f2`)에 각각 가중치를 곱해 더하고, bias를 더한 뒤, sigmoid σ로 0~1 사이 확률로 누른다. `w1, w2, b` 세 숫자는 **데이터에서 자동으로 찾는다.** 이것이 로지스틱 회귀(logistic regression)이고, 가장 작은 "신경망"이기도 하다(뉴런 1개).
+
+- **sigmoid** σ(z) = 1 / (1 + e^(−z)): 어떤 실수든 0~1 사이로 눌러 주는 S자 함수. z = 0이면 0.5, z가 크면 1에 가깝다.
+- **feature(특징)**: 모델에 들어가는 입력 숫자. 여기서는 원시 IMU 샘플 100개를 요약한 숫자 2개다.
+
+### 1.2 정의: 모델 = 파라미터를 가진 함수
+
+ML에서 **모델**은 `ŷ = f(x; θ)` 모양의 함수다.
+
+- `x`: 입력 (특징 벡터, 오디오 프레임, 이미지 …)
+- `θ` (theta): 파라미터 묶음 (weight와 bias 전부)
+- `ŷ` (y-hat): 모델의 예측
+
+말로 하면: 모델은 "입력 x를 받아 예측 ŷ를 내는 계산 절차"이고, 그 절차 안의 계수들이 θ다. 계산 절차(코드)는 고정이고, θ(데이터)만 바뀐다.
+
+이 관점은 Don에게 이미 익숙하다. **FIR 필터**가 정확히 이 모양이다.
+
+```
+FIR:     y[n]  = h0·x[n] + h1·x[n−1] + h2·x[n−2]          ← 계수 h는 설계로 정함
+선형모델: z     = w1·f1 + w2·f2 + b                        ← 계수 w는 데이터로 정함
+```
+
+말로 하면: 둘 다 "입력과 계수의 내적(dot product)"이다. C로 쓰면 둘 다 MAC 루프 하나다. 차이는 계수를 누가 정하느냐뿐이다. FIR 계수는 필터 설계 툴(원하는 주파수 응답)이 정하고, 모델 계수는 학습(원하는 정답과의 차이 최소화)이 정한다.
+
+**손계산.** FIR 계수 h = [0.25, 0.5, 0.25], 입력 x = [1, 2, 3]이면 y = 0.25·1 + 0.5·2 + 0.25·3 = 0.25 + 1.0 + 0.75 = **2.0**.
+모델 w = [0.8, −0.3], b = 0.1, 특징 f = [0.5, 2.0]이면 z = 0.8·0.5 + (−0.3)·2.0 + 0.1 = 0.4 − 0.6 + 0.1 = **−0.1**, σ(−0.1) = 1/(1 + e^0.1) = 1/2.1052 ≈ **0.475**.
+
+예제 1 — FIR 필터와 선형 모델이 같은 계산(내적)임을 확인하는 코드.
+
+```python
+import numpy as np
+
+# (1) 손으로 설계한 FIR 필터: 계수 h는 엔지니어가 정한다
+h = np.array([0.25, 0.5, 0.25])
+x = np.array([1.0, 2.0, 3.0])          # 최근 입력 3개
+print("FIR  y =", np.dot(h, x))
+
+# (2) 선형 모델: 계산 모양은 똑같고, w와 b는 데이터가 정한다
+w = np.array([0.8, -0.3])
+b = 0.1
+feat = np.array([0.5, 2.0])            # 특징 2개
+z = np.dot(w, feat) + b
+print("model z =", round(z, 4))
+print("sigmoid(z) =", round(1 / (1 + np.exp(-z)), 4))
+```
+
+```text
+FIR  y = 2.0
+model z = -0.1
+sigmoid(z) = 0.475
+```
+
+출력에서 볼 것: 손계산과 똑같다. `np.dot`은 C의 `for (i) acc += h[i] * x[i];`와 같은 계산이다. sigmoid 0.475는 "shake일 확률 47.5%" — 0.5보다 작으니 "흔들지 않음" 쪽이다.
+
+### 1.3 파라미터는 "숫자 표"다
+
+파라미터는 결국 **숫자 배열**이다. 이 노트의 모델은 float 3개(12바이트)다. MobileNet 같은 작은 CNN은 수백만 개(수 MB), 1B LLM은 10억 개(FP16이면 2 GB)다. 기기 입장에서는 크기만 다를 뿐 **flash나 DRAM에 올려 두고 읽기만 하는 const 테이블**이다.
+
+그래서 edge ML의 많은 질문은 펌웨어 질문으로 바뀐다. "이 테이블이 flash에 들어가나?", "추론 한 번에 이 테이블을 몇 번 읽나(대역폭)?", "float 대신 int8로 저장하면(양자화) 정확도가 얼마나 떨어지나?" — 각각 D2, D5, C1에서 다룬다.
+
+### 1.4 흔한 함정
+
+- "ML = 신경망"이 아니다. 로지스틱 회귀, decision tree, random forest도 ML이고, MCU에서는 이런 **고전 ML**이 아주 흔하다 (B7).
+- "학습된 모델은 규칙보다 항상 낫다"도 아니다. 특징이 2개뿐이고 물리를 잘 알면 사람 규칙이 충분할 때가 많다. ML은 특징이 많고, 경계가 복잡하고, 데이터가 충분할 때 이긴다.
+
+---
+
+## 2. 예제 데이터 — still / walk / shake
+
+이 노트 전체에서 쓸 가짜(synthetic) IMU 데이터를 만든다. 실제 IMU를 흉내 낸 **장난감**이다: 가속도 크기 |a| = 1 g(중력) + 사인파 흔들림 + 잡음.
+
+| 동작 | 흔들림 진폭 | 흔들림 주파수 | label |
+|---|---|---|---|
+| still (가만히) | 0.02 g | 1 Hz | 0 |
+| walk (걷기) | 0.25~0.5 g | 1.5~2.5 Hz | 0 |
+| shake (손목 흔들기) | 0.35~0.8 g | 4~7 Hz | 1 |
+
+창(window) 하나에서 특징 2개를 뽑는다.
+
+- `f1 = std(|a|)`: 흔들림의 **크기** (g). 사인파라면 진폭 A에 대해 A/√2.
+- `f2 = mean(|Δ|a||) × fs`: 이웃 샘플 차이의 평균, 즉 평균 **jerk**(가속도 변화율, g/s). 사인파라면 약 4·A·f라서 **주파수**에 민감하다.
+
+말로 하면: f1은 "얼마나 세게", f2는 "얼마나 빠르게" 흔드는지를 요약한 숫자다. 걷기와 흔들기는 세기는 비슷하지만 빠르기가 다르다.
+
+손계산으로 감을 잡자. walk A = 0.4 g, f = 2 Hz면 f1 ≈ 0.4/1.414 = 0.28 g, f2 ≈ 4·0.4·2 = 3.2 g/s. shake A = 0.6 g, f = 5.5 Hz면 f1 ≈ 0.42 g, f2 ≈ 4·0.6·5.5 = 13.2 g/s. f1로는 둘을 가르기 어렵고 f2로는 쉽게 갈린다.
+
+예제 2 — 300개 창을 만들고 특징 행렬 X(300×2)와 label 벡터 y를 만드는 코드. 이후 예제는 (독립 실행이라고 적힌 것 말고는) 이 코드 **뒤에 이어 붙여** 실행한다.
+
+```python
+import numpy as np
+
+FS = 50                                # IMU 샘플링 50 Hz
+N_WIN = 100                            # 2초 창
+rng = np.random.default_rng(0)
+
+def make_window(kind, fs=FS):
+    t = np.arange(N_WIN) / fs
+    amp, freq = {"still": (0.02, 1.0),
+                 "walk":  (rng.uniform(0.25, 0.5), rng.uniform(1.5, 2.5)),
+                 "shake": (rng.uniform(0.35, 0.8), rng.uniform(4.0, 7.0))}[kind]
+    mag = 1.0 + amp * np.sin(2 * np.pi * freq * t + rng.uniform(0, 6.28))
+    return mag + rng.normal(0, 0.02, N_WIN)      # |a| in g
+
+def features(mag, fs=FS):
+    f1 = np.std(mag)                             # 흔들림 크기 (g)
+    f2 = np.mean(np.abs(np.diff(mag))) * fs      # 평균 jerk (g/s)
+    return np.array([f1, f2])
+
+kinds = ["still"] * 100 + ["walk"] * 100 + ["shake"] * 100
+X = np.array([features(make_window(k)) for k in kinds])
+y = np.array([1.0 if k == "shake" else 0.0 for k in kinds])   # label
+perm = rng.permutation(len(y))
+X, y = X[perm], y[perm]
+X_tr, y_tr, X_te, y_te = X[:240], y[:240], X[240:], y[240:]
+k_arr = np.array(kinds)[perm]
+print("X shape:", X.shape, " y shape:", y.shape, " shake 비율:", round(y.mean(), 3))
+for k in ["still", "walk", "shake"]:
+    m = X[k_arr == k].mean(axis=0)
+    print(f"{k:5s}: std 평균 {m[0]:.3f} g   jerk 평균 {m[1]:5.2f} g/s")
+```
+
+```text
+X shape: (300, 2)  y shape: (300,)  shake 비율: 0.333
+still: std 평균 0.024 g   jerk 평균  1.13 g/s
+walk : std 평균 0.266 g   jerk 평균  3.13 g/s
+shake: std 평균 0.397 g   jerk 평균 12.23 g/s
+```
+
+출력에서 볼 것: X는 "샘플 300개 × 특징 2개" 행렬이다. 이 **행 = 샘플, 열 = 특징** 배치는 ML 전체의 표준 관례다(A1에서 shape를 자세히). jerk 평균이 손계산(walk ≈ 3.2, shake ≈ 13)과 비슷하게 나온다. 데이터는 섞은(permutation) 뒤 앞 240개를 학습용(train), 뒤 60개를 시험용(test)으로 나눴다.
+
+예제 3 — 1.1절의 규칙 `f1 > 0.15`를 test 데이터에 적용해 보는 코드 (예제 2 뒤에 이어서).
+
+```python
+# 사람이 짠 규칙: "흔들림(std)이 0.15 g를 넘으면 shake"
+rule_pred = (X_te[:, 0] > 0.15).astype(float)
+print("rule accuracy (test):", round((rule_pred == y_te).mean(), 3))
+k_te = k_arr[240:]
+for k in ["still", "walk", "shake"]:
+    print(f"  {k:5s}: SHAKE로 판정된 비율 {rule_pred[k_te == k].mean():.2f}")
+```
+
+```text
+rule accuracy (test): 0.667
+  still: SHAKE로 판정된 비율 0.00
+  walk : SHAKE로 판정된 비율 1.00
+  shake: SHAKE로 판정된 비율 1.00
+```
+
+출력에서 볼 것: 규칙은 걷기를 **전부** 흔들기로 오판한다. 걸을 때마다 어시스턴트가 깨어나는 제품이다. 사람이 jerk 규칙을 하나 더 추가하면 고칠 수 있지만, 그 "추가할 규칙과 숫자"를 데이터에서 자동으로 찾는 것이 학습이다.
+
+```svg
+<svg viewBox="0 0 640 340" xmlns="http://www.w3.org/2000/svg">
+<line x1="60" y1="280" x2="580" y2="280" stroke="currentColor"/> <line x1="60" y1="20" x2="60" y2="280" stroke="currentColor"/> <text x="60" y="296" font-size="12" text-anchor="middle">0.0</text>
+<text x="147" y="296" font-size="12" text-anchor="middle">0.1</text> <text x="233" y="296" font-size="12" text-anchor="middle">0.2</text> <text x="320" y="296" font-size="12" text-anchor="middle">0.3</text>
+<text x="407" y="296" font-size="12" text-anchor="middle">0.4</text> <text x="493" y="296" font-size="12" text-anchor="middle">0.5</text> <text x="580" y="296" font-size="12" text-anchor="middle">0.6</text>
+<text x="52" y="284" font-size="12" text-anchor="end">0</text> <text x="52" y="219" font-size="12" text-anchor="end">6</text> <text x="52" y="154" font-size="12" text-anchor="end">12</text>
+<text x="52" y="89" font-size="12" text-anchor="end">18</text> <text x="52" y="24" font-size="12" text-anchor="end">24</text> <text x="320" y="314" font-size="13" text-anchor="middle">f1 = std(|a|) [g]</text>
+<text x="16" y="150" font-size="13" text-anchor="middle" transform="rotate(-90 16 150)">f2 = 평균 jerk [g/s]</text> <circle cx="78.6" cy="268.3" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="80.8" cy="267.9" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="321.6" cy="196.2" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="313.2" cy="166.8" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="82.1" cy="268.1" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="80.4" cy="268.0" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="443.8" cy="147.9" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="543.9" cy="84.9" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="233.8" cy="249.8" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="539.7" cy="139.5" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="82.5" cy="266.3" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="78.5" cy="268.3" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="81.6" cy="268.4" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="298.7" cy="166.0" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="359.7" cy="184.8" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="360.4" cy="243.6" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="278.9" cy="203.4" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="281.8" cy="251.9" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="356.5" cy="244.3" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="277.9" cy="213.8" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="80.6" cy="268.3" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="307.1" cy="247.7" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="219.2" cy="251.5" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="517.5" cy="133.8" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="283.7" cy="246.3" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="252.8" cy="251.3" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="214.4" cy="251.7" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="284.1" cy="241.9" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="239.8" cy="249.4" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="82.5" cy="267.7" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="320.7" cy="237.4" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="335.7" cy="248.1" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="82.0" cy="265.5" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="480.3" cy="84.1" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="344.0" cy="234.4" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="457.6" cy="98.7" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="401.5" cy="183.7" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="81.1" cy="266.8" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="544.3" cy="62.3" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="79.2" cy="269.3" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="321.1" cy="181.9" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="81.7" cy="268.0" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="82.6" cy="267.1" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="82.6" cy="265.4" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="388.3" cy="187.8" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="282.6" cy="248.6" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="79.9" cy="270.4" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="317.5" cy="248.6" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="82.9" cy="268.0" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="381.9" cy="134.9" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="312.4" cy="237.0" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="80.4" cy="268.9" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="404.8" cy="124.7" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="511.6" cy="91.3" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="343.6" cy="160.1" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="427.1" cy="139.7" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="311.5" cy="174.7" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="82.0" cy="266.2" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="227.6" cy="258.0" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="351.4" cy="234.8" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="322.1" cy="238.2" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="282.4" cy="183.5" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="460.6" cy="85.8" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="80.2" cy="267.8" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="342.8" cy="244.3" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="82.6" cy="266.8" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="365.5" cy="168.0" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="252.7" cy="250.9" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="253.1" cy="250.4" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="437.6" cy="100.3" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="543.1" cy="95.7" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="238.3" cy="250.2" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="241.7" cy="252.2" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="344.1" cy="246.1" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="81.4" cy="269.1" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="242.1" cy="249.7" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="290.6" cy="248.4" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="82.8" cy="267.2" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="79.1" cy="266.9" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="290.7" cy="250.4" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="220.6" cy="259.4" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="354.5" cy="242.8" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="81.5" cy="267.8" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="80.7" cy="267.4" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="444.9" cy="105.0" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="84.2" cy="267.3" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="402.3" cy="154.4" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="82.7" cy="266.2" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="265.8" cy="251.3" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="81.7" cy="268.6" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="286.8" cy="253.7" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="80.9" cy="267.7" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="301.1" cy="191.6" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="82.5" cy="266.7" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="305.4" cy="241.6" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="81.2" cy="267.7" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="80.7" cy="269.3" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="422.3" cy="154.2" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="521.6" cy="126.0" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="81.1" cy="266.5" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="78.1" cy="268.7" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="339.5" cy="197.2" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="333.0" cy="198.1" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="334.2" cy="200.4" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="228.2" cy="253.4" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="80.1" cy="268.5" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="282.4" cy="206.1" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="80.8" cy="267.7" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="400.8" cy="130.3" r="3.5" fill="#e08a3c" fill-opacity="0.8"/>
+<circle cx="315.4" cy="237.3" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="460.8" cy="116.0" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="258.3" cy="251.2" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="377.1" cy="141.4" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="334.0" cy="182.1" r="3.5" fill="#e08a3c" fill-opacity="0.8"/> <circle cx="80.4" cy="268.5" r="3.5" fill="#888" fill-opacity="0.8"/>
+<circle cx="284.8" cy="240.0" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="344.1" cy="231.6" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/> <circle cx="367.1" cy="226.8" r="3.5" fill="#4a7bd0" fill-opacity="0.8"/>
+<circle cx="81.5" cy="268.1" r="3.5" fill="#888" fill-opacity="0.8"/> <circle cx="84.3" cy="266.1" r="3.5" fill="#888" fill-opacity="0.8"/>
+<line x1="190.0" y1="20" x2="190.0" y2="280" stroke="#d0564a" stroke-width="2" stroke-dasharray="6 4"/> <text x="196" y="34" font-size="12">규칙: f1 &gt; 0.15</text>
+<line x1="60.0" y1="188.7" x2="580.0" y2="234.6" stroke="#3f9a6b" stroke-width="2.5"/> <text x="450" y="215" font-size="12">학습된 경계 p=0.5</text> <circle cx="455" cy="246" r="4" fill="#888"/>
+<text x="465" y="250" font-size="12">still (label 0)</text> <circle cx="455" cy="260" r="4" fill="#4a7bd0"/> <text x="465" y="264" font-size="12">walk (label 0)</text> <circle cx="455" cy="274" r="4" fill="#e08a3c"/>
+<text x="465" y="278" font-size="12">shake (label 1)</text>
+</svg>
+```
+
+그림 2 — 실제 계산한 특징 120개(동작별 40개)의 산점도. 빨간 점선은 사람 규칙 `f1 > 0.15`로, 파란 walk 점을 전부 shake 쪽에 넣는다. 초록 실선은 5절에서 학습한 로지스틱 회귀의 경계(p = 0.5)로, jerk(f2) 축을 주로 써서 walk와 shake를 가른다.
+
+---
+
+## 3. Training vs Inference — 무엇을 계산하고 어디서 도는가
+
+### 3.1 정의
+
+| | Training (학습) | Inference (추론) |
+|---|---|---|
+| 목적 | 좋은 파라미터 θ를 **찾는다** | 주어진 θ로 예측을 **계산한다** |
+| 입력 | 데이터 x **와 정답 y** 수천~수조 개 | 새 입력 x 하나 (정답 없음) |
+| 계산 | forward + loss + **backward** + update, 반복 | **forward만** 1번 |
+| 메모리 | 파라미터 + gradient + optimizer 상태 + 중간값(activation) 전부 저장 | 파라미터 + 현재 레이어 activation만 |
+| 정밀도 | 보통 FP32/BF16 (작은 gradient를 표현해야 함) | FP16, INT8, INT4까지 낮춰도 됨 (C1) |
+| 어디서 | 데이터센터 GPU/TPU | 기기의 CPU/DSP/NPU/MCU, 또는 서버 |
+| 얼마나 자주 | 모델 버전마다 한 번 (수 시간~수 주) | 매 프레임, 하루 수만~수백만 번 |
+| 무엇이 중요 | 처리량(throughput), 최종 정확도 | **latency, 전력, 메모리**, 결정성 |
+
+- **forward**: 입력에서 출력까지 계산하는 방향. 추론 = forward.
+- **backward (backpropagation)**: loss에서 거꾸로 거슬러 가며 "각 파라미터를 조금 바꾸면 loss가 얼마나 변하나(gradient)"를 계산하는 방향. A3에서 chain rule로 자세히.
+
+### 3.2 비용 감 잡기
+
+예제 4 — training과 inference의 연산량 차이를 숫자로 보는 코드 (독립 실행).
+
+```python
+# 예제 5 모델: 파라미터 P=3 (w 2개 + b), 샘플 240개, epoch 201회
+P, N, E = 3, 240, 201
+infer_mac = 2                      # 샘플 1개 추론: w·x (MAC 2번)
+train_mac = E * N * (2 + 2)        # forward 2 + gradient 2 (대략)
+print(f"inference 1회 : {infer_mac} MAC")
+print(f"training 전체 : {train_mac:,} MAC  (= inference {train_mac // infer_mac:,}회분)")
+
+# 큰 모델 경험칙: inference ≈ 2·P FLOP/token, training ≈ 6·P·D FLOP
+P_llm, D = 1e9, 1e12               # 1B 파라미터, 1조 토큰
+print(f"1B LLM inference: {2 * P_llm:.1e} FLOP/token")
+print(f"1B LLM training : {6 * P_llm * D:.1e} FLOP  (= 토큰 {6 * P_llm * D / (2 * P_llm):.0e}개 생성분)")
+```
+
+```text
+inference 1회 : 2 MAC
+training 전체 : 192,960 MAC  (= inference 96,480회분)
+1B LLM inference: 2.0e+09 FLOP/token
+1B LLM training : 6.0e+21 FLOP  (= 토큰 3e+12개 생성분)
+```
+
+출력에서 볼 것: 장난감 모델도 학습은 추론 약 10만 번 분량이다. 큰 모델에서 널리 쓰는 경험칙은 "추론은 토큰당 약 2·P FLOP(MAC 1개 = 곱셈+덧셈 2 FLOP), 학습은 forward 1배 + backward 약 2배라서 토큰당 약 6·P FLOP"이다. 1B 모델을 1조 토큰으로 학습하는 비용은 6×10²¹ FLOP로, 기기에서는 상상할 수 없는 양이다.
+
+### 3.3 왜 기기는 (거의) 추론만 하나
+
+1. **연산량**: 위 숫자대로 학습은 추론보다 수만~수조 배 비싸다. 배터리 기기에 맞지 않는다.
+2. **메모리**: backward를 하려면 forward의 중간값(activation)을 전부 저장해야 하고, gradient와 optimizer 상태(Adam이면 파라미터의 2배)도 필요하다. 추론은 레이어가 끝나면 중간값을 버려도 된다(D2의 arena 재사용).
+3. **정답이 없다**: 기기가 보는 데이터에는 label이 없다. 사용자가 "지금 흔든 거 맞아"라고 알려 주지 않는다.
+4. **검증 불가**: 기기마다 모델이 제멋대로 바뀌면 QA·재현이 불가능하다. 펌웨어로 치면 필드에서 코드가 스스로 바뀌는 것이다.
+
+예외도 있다. 사용자별 소량 fine-tuning(on-device personalization), 키워드 등록처럼 마지막 레이어만 조금 바꾸는 경우, federated learning 등이다. 하지만 Hark JD의 역할에서 기기 쪽 일은 거의 전부 **추론을 효율적으로 돌리는 것**이라고 보면 된다.
+
+펌웨어 비유: 학습은 **캘리브레이션 스테이션**(비싼 장비, 공장에서 한 번), 추론은 **양산 펌웨어**(캘리브레이션 결과를 NV에서 읽어 매번 계산)다.
+
+---
+
+## 4. 학습의 종류 — label이 어디서 오는가
+
+**label(정답)**은 "이 입력에 대해 모델이 내야 하는 올바른 출력"이다. 예제 2에서 각 창에 붙인 0/1이 label이다. 학습의 종류는 label을 **어디서 얻느냐**로 나눈다.
+
+| 종류 | label | 예시 (웨어러블 맥락) | 출력 |
+|---|---|---|---|
+| Supervised — classification | 사람이 붙인 **범주** | 흔들기/아님, wake word 있음/없음, 걷기/뛰기/계단 | 클래스별 확률 |
+| Supervised — regression | 사람이나 기준 장비가 준 **연속값** | IMU로 걸음 속도(m/s) 추정, PPG로 심박수(bpm) 추정 | 실수 하나 |
+| Unsupervised | **없음** | IMU 로그를 비슷한 패턴끼리 묶기(clustering), 평소와 다른 패턴 찾기(anomaly detection) | 그룹 번호, 이상 점수 |
+| Self-supervised | 데이터 **자체**에서 자동 생성 | 문장의 다음 단어 맞히기(LLM), 가린 오디오 구간 맞히기 | 다음 토큰 확률 등 |
+
+- **classification**: 출력이 "몇 개 중 하나". 이 노트의 예제가 여기다 (클래스 2개 = binary classification).
+- **regression**: 출력이 숫자 하나. 기준 장비(예: 흉부 스트랩 심박계)가 label을 준다.
+- **self-supervised**: LLM이 대표적이다. 인터넷 텍스트 "오늘 날씨가 좋다"에서 입력 "오늘 날씨가" → 정답 "좋다"를 **자동으로** 만든다. 사람이 label을 붙이지 않아도 되니 수조 토큰 규모로 학습할 수 있다. 이렇게 사전학습(pre-training)한 뒤, 사람이 만든 소량의 예시로 supervised fine-tuning을 하는 것이 요즘 LLM의 기본 흐름이다 (B8).
+
+**Don 연결.** 센서 제품에서 가장 비싼 것은 보통 모델이 아니라 **label**이다. "이 IMU 로그 구간이 정확히 몇 초부터 몇 초까지 흔든 것인가"를 알려면 영상 동기화나 버튼 로깅 같은 장치가 필요하다 (H4 라벨링, G7 시간 동기화). JD 1번 업무 "data collection and ingestion pipelines"의 상당 부분이 이 label을 싸고 정확하게 얻는 일이다.
+
+---
+
+## 5. 학습 루프 한 장
+
+### 5.1 그림으로
+
+```svg
+<svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="a0ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="20" y="50" width="120" height="50" rx="6" fill="none" stroke="#888" stroke-width="2"/> <text x="80" y="72" font-size="13" text-anchor="middle">데이터</text> <text x="80" y="89" font-size="12" text-anchor="middle">특징 x</text>
+<rect x="180" y="50" width="130" height="50" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/> <text x="245" y="72" font-size="13" text-anchor="middle">모델</text> <text x="245" y="89" font-size="12" text-anchor="middle">f(x; w, b)</text>
+<rect x="350" y="50" width="110" height="50" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/> <text x="405" y="72" font-size="13" text-anchor="middle">예측</text> <text x="405" y="89" font-size="12" text-anchor="middle">ŷ = p</text>
+<rect x="500" y="50" width="130" height="50" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/> <text x="565" y="72" font-size="13" text-anchor="middle">loss</text> <text x="565" y="89" font-size="12" text-anchor="middle">L(ŷ, y)</text>
+<line x1="140" y1="75" x2="178" y2="75" stroke="currentColor" marker-end="url(#a0ar2)"/> <line x1="310" y1="75" x2="348" y2="75" stroke="currentColor" marker-end="url(#a0ar2)"/>
+<line x1="460" y1="75" x2="498" y2="75" stroke="currentColor" marker-end="url(#a0ar2)"/> <text x="330" y="44" font-size="12" text-anchor="middle">① forward</text>
+<path d="M80,50 L80,24 L565,24 L565,48" fill="none" stroke="#888" stroke-dasharray="5 4" marker-end="url(#a0ar2)"/> <text x="480" y="18" font-size="12" text-anchor="middle">정답 label y</text>
+<text x="565" y="118" font-size="12" text-anchor="middle">② 얼마나 틀렸나 (A2)</text> <rect x="500" y="170" width="130" height="50" rx="6" fill="none" stroke="#d0564a" stroke-width="2"/>
+<text x="565" y="192" font-size="13" text-anchor="middle">gradient</text> <text x="565" y="209" font-size="12" text-anchor="middle">∂L/∂w, ∂L/∂b</text>
+<line x1="565" y1="124" x2="565" y2="168" stroke="currentColor" marker-end="url(#a0ar2)"/> <text x="557" y="150" font-size="12" text-anchor="end">③ backward (A3)</text>
+<rect x="180" y="170" width="220" height="50" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/> <text x="290" y="192" font-size="13" text-anchor="middle">update</text>
+<text x="290" y="209" font-size="12" text-anchor="middle">w ← w − η·∂L/∂w</text> <line x1="500" y1="195" x2="402" y2="195" stroke="currentColor" marker-end="url(#a0ar2)"/> <text x="450" y="187" font-size="12" text-anchor="middle">④</text>
+<line x1="245" y1="170" x2="245" y2="102" stroke="#3f9a6b" stroke-width="2" marker-end="url(#a0ar2)"/> <text x="253" y="140" font-size="12">새 w, b로 다시 ①</text>
+<rect x="20" y="170" width="130" height="50" rx="6" fill="none" stroke="#888" stroke-dasharray="5 4"/> <text x="85" y="192" font-size="12" text-anchor="middle">test 데이터로</text>
+<text x="85" y="209" font-size="12" text-anchor="middle">따로 평가 (A4)</text> <line x1="200" y1="100" x2="110" y2="168" stroke="#888" stroke-dasharray="5 4" marker-end="url(#a0ar2)"/>
+<text x="330" y="258" font-size="13" text-anchor="middle">①~④를 epoch마다 반복 = 학습. 이 루프 전체를 PyTorch로 쓰는 법은 A5.</text> <text x="330" y="280" font-size="12" text-anchor="middle">행렬곱·shape는 A1 · loss와 확률은 A2 · gradient와 학습률 η는 A3 · 평가는 A4</text>
+</svg>
+```
+
+그림 3 — 학습 루프. ① 모델이 예측하고, ② 정답과 비교해 loss(틀린 정도)를 숫자 하나로 만들고, ③ 각 파라미터가 loss에 주는 영향(gradient)을 계산하고, ④ loss가 줄어드는 방향으로 파라미터를 조금 옮긴다. 학습에 쓰지 않은 test 데이터로는 따로 평가만 한다.
+
+### 5.2 각 단계의 정의 (자세한 건 뒤 노트에서)
+
+- **loss**: 예측이 정답에서 얼마나 먼지를 나타내는 숫자 하나. 작을수록 좋다. 이 예제는 binary cross-entropy를 쓴다.
+
+```
+L = −(1/N) ∑ [ y·log(p) + (1 − y)·log(1 − p) ]
+```
+
+말로 하면: 정답이 1인데 p가 작거나, 정답이 0인데 p가 크면 큰 벌점을 준다. 정답 쪽에 확신할수록 벌점이 0에 가깝다. 모든 파라미터가 0이면 p = 0.5이고 L = −log(0.5) = ln 2 ≈ 0.6931이다. (A2)
+
+- **gradient**: loss를 각 파라미터로 편미분한 값. 로지스틱 회귀 + cross-entropy에서는 결과가 아주 간단해진다.
+
+```
+∂L/∂w = (1/N) ∑ (p − y)·x        ∂L/∂b = (1/N) ∑ (p − y)
+```
+
+말로 하면: "예측 오차(p − y)에 입력을 곱해 평균 낸 것". 오차가 크고 입력이 큰 특징일수록 그 가중치를 많이 고친다. 유도는 A3에서 chain rule로 한다.
+
+- **update (gradient descent)**: `w ← w − η·∂L/∂w`. η(eta)는 **learning rate(학습률)**, 한 번에 얼마나 크게 움직일지다. 제어 루프의 **gain**과 같다 — 너무 크면 발산(oscillation), 너무 작으면 수렴이 느리다.
+- **epoch**: 학습 데이터 전체를 한 번 훑는 것. 이 예제는 240개를 한 번에 넣는 full-batch라서 epoch 1회 = update 1회다. 큰 데이터에서는 32~256개씩 **batch**로 나눠 batch마다 update한다.
+
+### 5.3 코드로 — 20줄짜리 학습
+
+예제 5 — 로지스틱 회귀를 gradient descent로 학습하고 test 정확도를 보는 코드 (예제 2 뒤에 이어서).
+
+```python
+mu, sd = X_tr.mean(axis=0), X_tr.std(axis=0)     # 정규화 상수 (이것도 '모델'의 일부)
+Xn = (X_tr - mu) / sd
+
+def sigmoid(z):
+    return 1 / (1 + np.exp(-z))
+
+w, b, lr = np.zeros(2), 0.0, 0.5                  # 파라미터 3개 + 학습률
+for epoch in range(201):
+    p = sigmoid(Xn @ w + b)                       # 1) 예측 (forward)
+    loss = -np.mean(y_tr * np.log(p + 1e-12) + (1 - y_tr) * np.log(1 - p + 1e-12))
+    gw = Xn.T @ (p - y_tr) / len(y_tr)            # 2) gradient
+    gb = np.mean(p - y_tr)
+    w, b = w - lr * gw, b - lr * gb               # 3) update
+    if epoch % 50 == 0:
+        print(f"epoch {epoch:3d}  loss {loss:.4f}")
+
+p_te = sigmoid(((X_te - mu) / sd) @ w + b)
+print("test accuracy:", ((p_te > 0.5) == y_te).mean())
+print("w =", w.round(4), " b =", round(b, 4))
+print("mu =", mu.round(4), " sd =", sd.round(4))
+```
+
+```text
+epoch   0  loss 0.6931
+epoch  50  loss 0.1095
+epoch 100  loss 0.0780
+epoch 150  loss 0.0635
+epoch 200  loss 0.0547
+test accuracy: 0.9833333333333333
+w = [1.0153 4.4282]  b = -1.3565
+mu = [0.2238 5.2874]  sd = [0.1654 5.0932]
+```
+
+출력에서 볼 것:
+
+- epoch 0의 loss 0.6931 = ln 2. 파라미터가 0이라 모든 예측이 0.5였다는 뜻이고, 위 손계산과 정확히 맞는다.
+- test accuracy 0.983 = 60개 중 59개 정답. 규칙(0.667)보다 훨씬 낫다.
+- 학습된 w2(jerk 가중치, 4.43)가 w1(std 가중치, 1.02)보다 4배 크다. 모델이 **스스로** "빠르기가 더 중요하다"를 찾아냈다. 그림 2의 초록 경계가 거의 수평(jerk 축으로 가름)인 이유다.
+- `mu`, `sd`(정규화 상수)도 학습 데이터에서 계산한 값이다. 기기로 **w, b와 함께 반드시 가져가야 한다.** 빠뜨리면 조용히 틀린다(8절).
+
+**정규화(standardization)**가 왜 필요한가: f1은 0~0.6, f2는 0~22 범위라 크기가 30배 다르다. 그대로 gradient descent를 하면 큰 특징 쪽만 크게 움직여 수렴이 느리거나 발산한다. 평균 0, 표준편차 1로 맞추면 같은 학습률로 두 가중치가 고르게 움직인다. ADC 값을 물리 단위로 스케일링하는 것과 비슷한 전처리다.
+
+```svg
+<svg viewBox="0 0 620 270" xmlns="http://www.w3.org/2000/svg">
+<line x1="60" y1="220" x2="560" y2="220" stroke="currentColor"/> <line x1="60" y1="20" x2="60" y2="220" stroke="currentColor"/> <line x1="60" y1="120" x2="560" y2="120" stroke="#888" stroke-dasharray="2 4"/>
+<line x1="60" y1="20" x2="560" y2="20" stroke="#888" stroke-dasharray="2 4"/> <text x="52" y="224" font-size="12" text-anchor="end">0</text> <text x="52" y="124" font-size="12" text-anchor="end">0.5</text>
+<text x="52" y="24" font-size="12" text-anchor="end">1.0</text> <text x="60" y="238" font-size="12" text-anchor="middle">0</text> <text x="185" y="238" font-size="12" text-anchor="middle">50</text>
+<text x="310" y="238" font-size="12" text-anchor="middle">100</text> <text x="435" y="238" font-size="12" text-anchor="middle">150</text> <text x="560" y="238" font-size="12" text-anchor="middle">200</text>
+<text x="310" y="258" font-size="13" text-anchor="middle">epoch</text>
+<polyline fill="none" stroke="#4a7bd0" stroke-width="2.5" points="60.0,81.4 72.5,155.1 85.0,172.6 97.5,180.9 110.0,185.9 122.5,189.4 135.0,192.0 147.5,194.0 160.0,195.6 172.5,196.9 185.0,198.1 197.5,199.1 210.0,199.9 222.5,200.7 235.0,201.4 247.5,202.0 260.0,202.6 272.5,203.1 285.0,203.6 297.5,204.0 310.0,204.4 322.5,204.8 335.0,205.1 347.5,205.5 360.0,205.8 372.5,206.1 385.0,206.3 397.5,206.6 410.0,206.8 422.5,207.1 435.0,207.3 447.5,207.5 460.0,207.7 472.5,207.9 485.0,208.1 497.5,208.3 510.0,208.4 522.5,208.6 535.0,208.8 547.5,208.9 560.0,209.1"/>
+<polyline fill="none" stroke="#e08a3c" stroke-width="2.5" points="60.0,96.7 72.5,23.3 85.0,23.3 97.5,23.3 110.0,23.3 122.5,23.3 135.0,23.3 147.5,23.3 160.0,23.3 172.5,23.3 185.0,23.3 197.5,23.3 210.0,23.3 222.5,23.3 235.0,23.3 247.5,23.3 260.0,23.3 272.5,23.3 285.0,23.3 297.5,23.3 310.0,23.3 322.5,23.3 335.0,23.3 347.5,23.3 360.0,23.3 372.5,23.3 385.0,23.3 397.5,23.3 410.0,23.3 422.5,23.3 435.0,23.3 447.5,23.3 460.0,23.3 472.5,23.3 485.0,23.3 497.5,23.3 510.0,23.3 522.5,23.3 535.0,23.3 547.5,23.3 560.0,23.3"/>
+<line x1="400" y1="60" x2="425" y2="60" stroke="#e08a3c" stroke-width="2.5"/> <text x="432" y="64" font-size="12">test accuracy</text> <line x1="400" y1="80" x2="425" y2="80" stroke="#4a7bd0" stroke-width="2.5"/>
+<text x="432" y="84" font-size="12">train loss</text>
+</svg>
+```
+
+그림 4 — 예제 5를 epoch마다 기록한 실제 곡선(5 epoch 간격 점). 주황 test accuracy는 epoch 5에 이미 0.983(60개 중 59개)에 도달하고 이후 그대로다. 파란 loss는 0.693에서 시작해 계속 줄어든다. 판정(0.5 기준)은 이미 맞지만, 학습은 정답 쪽 확률을 계속 더 확신하게 만든다 — accuracy와 loss는 다른 것을 잰다.
+
+### 5.4 임베디드 연결과 함정
+
+- 학습 루프는 **폐루프 제어**와 닮았다: 오차(loss) 측정 → 오차의 기울기로 보정량 계산 → 파라미터 갱신. 학습률은 gain, 발산은 불안정한 루프다.
+- 흔한 함정: 정규화 상수를 **test 데이터 포함 전체**로 계산하는 것. test 정보가 학습에 새어 들어가(data leakage) 성능이 부풀려진다. 위 코드는 `X_tr`로만 계산했다 (A4).
+- 흔한 함정: `log(0)`. p가 정확히 0이나 1이 되면 `-inf`가 나온다. 그래서 `1e-12`를 더했다. 실제 프레임워크는 logit에서 바로 계산하는 안정한 함수를 쓴다 (A2).
+
+---
+
+## 6. 서버에서 기기로 — 같은 추론을 C로
+
+학습이 끝나면 기기로 가져갈 것은 **숫자 7개**다: w 2개, b 1개, mu 2개, sd 2개. 이것을 C 헤더로 내보내고(export), 기기에서는 forward만 C로 구현한다. 실제 TFLite Micro 워크플로(F2)도 모델 파일을 C 배열로 flash에 넣는다 — 원리는 같다.
+
+### 6.1 가중치를 C 헤더로 내보내기
+
+예제 6 — 학습된 파라미터와 test 샘플 5개를 C 헤더로 쓰고, Python 추론 결과를 기록하는 코드 (예제 2, 5 뒤에 이어서. 아래 출력은 예제 5 출력 다음에 이어 나오는 부분).
+
+```python
+with open("model_params.h", "w") as f:
+    f.write("/* auto-generated: shake detector (logistic regression) */\n")
+    f.write(f"static const float MU[2] = {{{mu[0]:.9g}f, {mu[1]:.9g}f}};\n")
+    f.write(f"static const float SD[2] = {{{sd[0]:.9g}f, {sd[1]:.9g}f}};\n")
+    f.write(f"static const float W[2]  = {{{w[0]:.9g}f, {w[1]:.9g}f}};\n")
+    f.write(f"static const float B     = {b:.9g}f;\n")
+    f.write("static const float TEST_X[5][2] = {\n")
+    for x in X_te[:5]:
+        f.write(f"  {{{x[0]:.9g}f, {x[1]:.9g}f}},\n")
+    f.write("};\n")
+print(open("model_params.h").read())
+p5 = sigmoid(((X_te[:5] - mu) / sd) @ w + b)
+for i, p in enumerate(p5):
+    print(f"py  sample {i}: p(shake) = {p:.6f}  label = {int(y_te[i])}")
+```
+
+```text
+/* auto-generated: shake detector (logistic regression) */
+static const float MU[2] = {0.223831696f, 5.28744769f};
+static const float SD[2] = {0.165385558f, 5.09315275f};
+static const float W[2]  = {1.01525154f, 4.42818133f};
+static const float B     = -1.35654101f;
+static const float TEST_X[5][2] = {
+  {0.506343913f, 18.9138037f},
+  {0.325201201f, 3.22521836f},
+  {0.189638297f, 2.39290953f},
+  {0.21678082f, 2.2057351f},
+  {0.0233152953f, 1.0075868f},
+};
+
+py  sample 0: p(shake) = 0.999995  label = 1
+py  sample 1: p(shake) = 0.073970  label = 0
+py  sample 2: p(shake) = 0.016576  label = 0
+py  sample 3: p(shake) = 0.016640  label = 0
+py  sample 4: p(shake) = 0.001817  label = 0
+```
+
+출력에서 볼 것: 모델 전체가 헤더 몇 줄이다. `%.9g`로 쓴 이유는 float32를 10진수로 왕복해도 비트가 보존되려면 유효숫자 9자리가 필요하기 때문이다. 이 test 샘플 5개가 **golden vector**다 — 펌웨어 검증에서 쓰는 그 개념 그대로다 (C8, J6).
+
+**손계산으로 sample 1을 확인하자.** x = (0.3252, 3.2252).
+정규화: (0.3252 − 0.2238)/0.1654 = 0.613, (3.2252 − 5.2874)/5.0932 = −0.405.
+z = −1.3565 + 1.0153·0.613 + 4.4282·(−0.405) = −1.3565 + 0.622 − 1.793 = −2.527.
+p = 1/(1 + e^2.527) = 1/(1 + 12.52) ≈ 0.0740. 출력 0.073970과 맞는다.
+
+### 6.2 C로 추론
+
+예제 7 — 같은 헤더로 C에서 추론해 Python과 같은 값이 나오는지 확인하는 코드 (`cc -std=c11 -Wall -Wextra -O2 infer.c -o infer -lm`, 경고 0개).
+
+```c
+#include <math.h>
+#include <stdio.h>
+#include "model_params.h"
+
+/* 기기에서 도는 부분: 정규화 → 내적 → sigmoid. 학습 코드는 없다. */
+static float predict_shake(const float x[2])
+{
+    float z = B;
+    for (int i = 0; i < 2; i++) {
+        float xn = (x[i] - MU[i]) / SD[i];   /* 학습 때와 똑같은 전처리 */
+        z += W[i] * xn;                      /* MAC */
+    }
+    return 1.0f / (1.0f + expf(-z));
+}
+
+int main(void)
+{
+    for (int i = 0; i < 5; i++) {
+        float p = predict_shake(TEST_X[i]);
+        printf("C   sample %d: p(shake) = %.6f  -> %s\n",
+               i, (double)p, p > 0.5f ? "SHAKE" : "no");
+    }
+    return 0;
+}
+```
+
+```text
+C   sample 0: p(shake) = 0.999995  -> SHAKE
+C   sample 1: p(shake) = 0.073970  -> no
+C   sample 2: p(shake) = 0.016576  -> no
+C   sample 3: p(shake) = 0.016640  -> no
+C   sample 4: p(shake) = 0.001817  -> no
+```
+
+출력에서 볼 것: 소수점 6자리까지 Python(float64)과 C(float32)가 일치한다. 이것이 배포 검증의 기본 형태다 — **서버 reference 출력 vs 기기 출력 비교**. 실제로는 float64 vs float32, 다른 `expf` 구현, 연산 순서 차이 때문에 마지막 자리가 다를 수 있으므로 bit-exact 대신 **허용 오차(tolerance)** 비교를 쓴다 (C8).
+
+기기에 들어간 것은 결국 `predict_shake()` 한 함수와 const 배열 몇 개다. 학습 루프, loss, gradient는 기기에 없다. 이것이 3절의 "기기는 추론만 한다"의 실체다.
+
+### 6.3 맛보기: int8 버전
+
+MCU(특히 FPU 없는 코어)나 NPU는 float 대신 **int8 정수 연산**을 선호한다. 메모리 4배 절약, MAC 속도·전력 이득이 크다. 여기서는 두 가지 기법만 맛본다.
+
+1. **정규화 접기(folding)**: z = ∑ wᵢ·(xᵢ − μᵢ)/σᵢ + b를 전개하면 z = ∑ (wᵢ/σᵢ)·xᵢ + (b − ∑ wᵢμᵢ/σᵢ). 전처리 뺄셈·나눗셈이 가중치 안으로 사라진다. B1의 **BatchNorm folding**과 같은 아이디어다.
+2. **대칭 양자화**: 실수 ≈ scale × 정수(−127~127). 곱셈 누산은 int32로 하고, 마지막에 scale을 한 번 곱한다.
+
+예제 8 — 정규화를 접고 int8로 양자화한 추론이 float 결과와 얼마나 가까운지 보는 코드 (예제 2, 5 뒤에 이어서. 출력은 이어 나오는 부분).
+
+```python
+# (1) 정규화를 가중치에 접어 넣기: z = w'·x + b'
+w_f = w / sd
+b_f = b - np.sum(w * mu / sd)
+# (2) 대칭 int8 양자화: 실수 ≈ scale × 정수
+def q8(v, scale):
+    return np.clip(np.round(v / scale), -127, 127).astype(np.int32)
+s_x = np.abs(X_tr).max(axis=0) / 127              # 특징별 scale
+v = w_f * s_x                                     # 특징 scale을 가중치에 흡수
+s_w = np.abs(v).max() / 127
+wq = q8(v, s_w)
+print("folded w' =", w_f.round(4), " b' =", round(b_f, 4))
+print("int8 w    =", wq, " s_w =", round(s_w, 6))
+for i in range(5):
+    xq = q8(X_te[i], s_x)                         # 센서 특징 → int8
+    acc = int(np.dot(wq, xq))                     # int32 누산 (MAC)
+    z_q = acc * s_w + b_f
+    z_f = X_te[i] @ w_f + b_f
+    print(f"sample {i}: xq={xq}  acc={acc:6d}  z_float={z_f:8.4f}  z_int8={z_q:8.4f}")
+```
+
+```text
+folded w' = [6.1387 0.8694]  b' = -7.3277
+int8 w    = [ 25 127]  s_w = 0.001083
+sample 0: xq=[115 120]  acc= 18115  z_float= 12.2250  z_int8= 12.2961
+sample 1: xq=[74 20]  acc=  4390  z_float= -2.5272  z_int8= -2.5720
+sample 2: xq=[43 15]  acc=  2980  z_float= -4.0831  z_int8= -4.0995
+sample 3: xq=[49 14]  acc=  3003  z_float= -4.0792  z_int8= -4.0746
+sample 4: xq=[5 6]  acc=   887  z_float= -6.3085  z_int8= -6.3668
+```
+
+출력에서 볼 것: 가중치가 정수 `[25, 127]`, 입력도 정수, 누산 `acc`도 정수다. z가 float와 소수 첫째 자리 안에서 맞고 판정(z > 0 ⇔ p > 0.5)은 5개 모두 같다. 예제 7의 sample 1에서 손계산한 z ≈ −2.527이 `z_float`에 그대로 보인다. 오차의 원인은 반올림(가중치 25는 원래 약 24.7 같은 값이 잘린 것)이다. 이 오차를 어떻게 줄이는지(per-channel scale, zero-point, requantization을 고정소수점 multiplier + shift로 바꾸기, 그리고 C 커널)는 **C1 Quantization**과 **J3 고정소수점 커널**에서 다룬다. 마지막의 `acc × s_w`도 기기에서는 float 없이 정수 곱 + 시프트로 바꾼다 — Don이 이미 잘 아는 Q-format 세계다.
+
+---
+
+## 7. Edge ML 라이프사이클 — 그리고 이 직군의 자리
+
+### 7.1 한 사이클
+
+```svg
+<svg viewBox="0 0 680 260" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="a0ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<line x1="10" y1="40" x2="658" y2="40" stroke="#3f9a6b" stroke-width="2"/> <line x1="10" y1="34" x2="10" y2="46" stroke="#3f9a6b" stroke-width="2"/> <line x1="658" y1="34" x2="658" y2="46" stroke="#3f9a6b" stroke-width="2"/>
+<text x="334" y="28" font-size="13" text-anchor="middle">Embedded AI Engineer (Hark JD) — "full AI stack on the device"</text> <rect x="10" y="60" width="112" height="70" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<text x="66" y="82" font-size="13" text-anchor="middle">① 데이터 수집</text> <text x="66" y="100" font-size="12" text-anchor="middle">sensor logging</text> <text x="66" y="118" font-size="12" text-anchor="middle">G · H</text>
+<rect x="144" y="60" width="112" height="70" rx="6" fill="none" stroke="#888" stroke-width="2"/> <text x="200" y="82" font-size="13" text-anchor="middle">② 학습</text> <text x="200" y="100" font-size="12" text-anchor="middle">training</text>
+<text x="200" y="118" font-size="12" text-anchor="middle">A · B · I</text> <rect x="278" y="60" width="112" height="70" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<text x="334" y="82" font-size="13" text-anchor="middle">③ 최적화</text> <text x="334" y="100" font-size="12" text-anchor="middle">quantize · prune</text> <text x="334" y="118" font-size="12" text-anchor="middle">C · D</text>
+<rect x="412" y="60" width="112" height="70" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/> <text x="468" y="82" font-size="13" text-anchor="middle">④ 배포</text>
+<text x="468" y="100" font-size="12" text-anchor="middle">runtime · NPU</text> <text x="468" y="118" font-size="12" text-anchor="middle">E · F · J · M</text>
+<rect x="546" y="60" width="112" height="70" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/> <text x="602" y="82" font-size="13" text-anchor="middle">⑤ 측정·감시</text>
+<text x="602" y="100" font-size="12" text-anchor="middle">profile · monitor</text> <text x="602" y="118" font-size="12" text-anchor="middle">K · H7 · J5</text>
+<line x1="122" y1="95" x2="142" y2="95" stroke="currentColor" marker-end="url(#a0ar3)"/> <line x1="256" y1="95" x2="276" y2="95" stroke="currentColor" marker-end="url(#a0ar3)"/>
+<line x1="390" y1="95" x2="410" y2="95" stroke="currentColor" marker-end="url(#a0ar3)"/> <line x1="524" y1="95" x2="544" y2="95" stroke="currentColor" marker-end="url(#a0ar3)"/>
+<text x="200" y="150" font-size="12" text-anchor="middle">(모델팀과 co-design)</text> <path d="M602,130 L602,172 L66,172 L66,132" fill="none" stroke="#e08a3c" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#a0ar3)"/>
+<text x="334" y="190" font-size="12" text-anchor="middle">오탐·미탐 로그, 분포 drift → 새 데이터 수집 → 재학습</text> <text x="334" y="225" font-size="12" text-anchor="middle">가로지르는 것: I Co-design · L 온디바이스 LLM · N 도메인 · O 툴 · P 인터뷰</text>
+<text x="334" y="245" font-size="12" text-anchor="middle">파랑 = 이 직군이 직접 손대는 단계 · 회색 = 모델팀이 주도하고 함께 설계</text>
+</svg>
+```
+
+그림 5 — Edge ML 라이프사이클. 데이터 수집 → 학습 → 최적화 → 배포 → 측정·감시를 돌고, 필드에서 본 문제가 다시 데이터 수집으로 돌아온다. 각 상자 아래 글자는 study_prep_list의 모듈이다.
+
+이 노트의 예제가 이 사이클을 아주 작게 한 바퀴 돈 것이다: 예제 2(①, 가짜 데이터) → 예제 5(②) → 예제 8(③, int8 맛보기) → 예제 6·7(④, C로 배포와 golden vector 검증) → 8절 예제 10(⑤, 필드에서 생긴 조용한 버그).
+
+### 7.2 단계 ↔ 모듈 ↔ JD 매핑
+
+| 단계 | 하는 일 | study_prep_list 모듈 | Hark JD 문장 | Don 경험 연결 |
+|---|---|---|---|---|
+| ① 데이터 수집 | 센서 드라이버, FIFO·DMA 로깅, 시간 동기화, 기기→서버 전송, 라벨링 | G1–G7, H1–H8 | Build data collection and ingestion pipelines … various sensors, at scale | SPI/I2C bring-up, 링버퍼·flash 로깅, telemetry |
+| ② 학습 | 모델 구조 선택, 학습, 평가 | A1–A6, B1–B9 | (모델팀과) co-design model architectures | 새로 배움 — A 모듈이 목표 |
+| ② ↔ ③ 설계 조율 | 예산(지연·메모리·전력·대역폭)을 숫자로 정하고 모델 구조에 반영 | I1–I6, D1–D7 | … meets the required latency, memory, power, and bandwidth | margin sign-off, 성능 예산 |
+| ③ 최적화 | 양자화, pruning, distillation, 그래프 최적화, 정확도 회귀 검증 | C1–C8 | … efficient model deployment and optimization | 고정소수점, 검증·root cause |
+| ④ 배포 | 런타임(TFLite Micro, QNN, llama.cpp), 벤더 SDK bring-up, 펌웨어 통합, 실리콘 선정 | E1–E9, F1–F8, J1–J6, M1–M4 | bring up toolchains, SDKs and new accelerator · Integrate ML inference into embedded firmware in C, C++, or Rust · Evaluate and select silicon platforms | 새 IP bring-up, bare-metal C, 벤더 협업 |
+| ⑤ 측정·감시 | 지연·메모리·전력 프로파일, 필드 품질 모니터링, 모델 OTA | K1–K5, H7, J5, O3 | Profile and optimize memory usage, power consumption, and real-time performance | Trace32, Power Analyzer, telemetry |
+| 전 구간 | 온디바이스 LLM·hybrid, 웨어러블 제약, 툴 | L1–L6, N1–N4, O1–O3 | (우대) lightweight LLM, hybrid edge-LLM, wearables | Apple 컨슈머 플랫폼 |
+
+### 7.3 이 직군이 서 있는 곳
+
+JD 첫 문단은 "responsible for the full AI stack on the device, including data ingestion, model development, optimization, and deployment"라고 쓴다. 즉 **①③④⑤를 소유하고 ②는 모델팀과 함께** 하는 자리다. 모델 연구자처럼 새 아키텍처를 발명할 필요는 없지만, 모델팀과 **같은 언어**(loss, overfitting, accuracy, quantization 손실)로 말할 수 있어야 한다. A 모듈의 목적이 그것이다.
+
+반대로 이 직군의 강점은 모델팀이 모르는 것 — "이 op는 NPU에서 CPU fallback이 난다", "이 activation 텐서는 SRAM에 안 들어간다", "샘플링 레이트가 바뀌면 특징 분포가 바뀐다" — 을 아는 것이다. Don의 펌웨어 경험이 정확히 이 쪽이다.
+
+---
+
+## 8. 펌웨어 엔지니어의 사고방식 바꾸기
+
+### 8.1 출력은 확률이고, 판정은 제품 결정이다
+
+펌웨어 함수는 보통 결정적이다: 같은 입력이면 같은 출력, 그리고 스펙이 "정답"을 정의한다. 모델도 같은 입력이면 같은 출력을 내지만(결정적), 출력이 **확률**이고 그 확률이 **틀릴 수 있다**. 어디서 끊을지(threshold)는 모델이 아니라 제품이 정한다.
+
+예제 9 — threshold에 따라 오탐(false positive)과 미탐(false negative)이 어떻게 바뀌는지 보는 코드 (예제 2, 5 뒤에 이어서).
+
+```python
+# 모델은 '확률'을 준다. SHAKE로 볼지 말지는 threshold라는 제품 결정이다.
+for th in (0.1, 0.5, 0.9, 0.99):
+    pred = p_te > th
+    fp = int(np.sum(pred & (y_te == 0)))      # 오탐: 안 흔들었는데 SHAKE
+    fn = int(np.sum(~pred & (y_te == 1)))     # 미탐: 흔들었는데 놓침
+    print(f"threshold {th:4.2f}: 오탐(FP)={fp}  미탐(FN)={fn}")
+```
+
+```text
+threshold 0.10: 오탐(FP)=2  미탐(FN)=0
+threshold 0.50: 오탐(FP)=0  미탐(FN)=1
+threshold 0.90: 오탐(FP)=0  미탐(FN)=2
+threshold 0.99: 오탐(FP)=0  미탐(FN)=8
+```
+
+출력에서 볼 것: threshold를 올리면 오탐이 줄고 미탐이 늘어난다. 공짜로 둘 다 줄일 방법은 없다. wake word라면 오탐 = 사용자 몰래 깨어나 전력과 프라이버시를 소모, 미탐 = 사용자가 짜증 — 어느 쪽 비용이 큰지는 제품이 정한다. 이 트레이드오프를 재는 지표(precision/recall, FAR/FRR, ROC)는 A4에서 다룬다.
+
+### 8.2 "정답 스펙"이 없고, 정확도는 통계다
+
+- 펌웨어: "레지스터 X에 0x5를 쓰면 모드 B" — 스펙이 정답이다. 테스트 하나가 실패하면 버그다.
+- ML: "이 모델은 test 60개 중 59개 맞힘(98.3%)" — 틀린 1개는 버그가 아니라 **분포의 꼬리**일 수 있다. 개별 실패보다 **어떤 데이터 조건에서 실패율이 올라가는지**가 중요하다.
+- 그래서 정확도는 항상 "**어떤 데이터에서**"와 함께 말한다. 50 Hz 데이터로 98%인 모델이 100 Hz 데이터에서도 98%라는 보장은 없다. test 60개에서 측정한 98.3%는 표본이 작아 오차 폭도 크다 — 60개 중 1개 차이가 1.7%p다.
+
+### 8.3 버그가 조용하다 — 데이터 버그
+
+펌웨어 버그는 보통 크래시, hang, assert, CRC 에러로 **소리를 낸다**. ML 파이프라인의 가장 흔한 버그는 **숫자가 조금 다른 입력**이다. 모델은 아무 입력에나 그럴듯한 확률을 내므로, 아무 에러 없이 정확도만 조용히 떨어진다.
+
+예제 10 — 펌웨어 팀이 IMU ODR(출력 데이터 속도)을 50 Hz → 100 Hz로 바꿨는데 특징 코드의 `fs` 상수는 50 그대로인 상황을 재현하는 코드 (예제 2, 5 뒤에 이어서).
+
+```python
+# 펌웨어 팀이 IMU ODR을 50 Hz → 100 Hz로 올렸다. 특징 코드는 그대로 fs=50.
+kinds2 = ["still"] * 50 + ["walk"] * 50 + ["shake"] * 50
+y2 = np.array([1.0 if k == "shake" else 0.0 for k in kinds2])
+wins = [make_window(k, fs=100) for k in kinds2]          # 실제 100 Hz 데이터
+
+def evaluate(fs_used):
+    F = np.array([features(m, fs=fs_used) for m in wins])
+    p = sigmoid(((F - mu) / sd) @ w + b)
+    pred = p > 0.5
+    return (pred == y2).mean(), pred[y2 == 1].mean(), F[y2 == 1, 1].mean()
+
+for fs_used in (100, 50):
+    acc, recall, jerk = evaluate(fs_used)
+    print(f"feature fs={fs_used:3d}: accuracy={acc:.3f}  shake 검출률={recall:.2f}  shake jerk 평균={jerk:.2f}")
+```
+
+```text
+feature fs=100: accuracy=1.000  shake 검출률=1.00  shake jerk 평균=12.00
+feature fs= 50: accuracy=0.833  shake 검출률=0.50  shake jerk 평균=6.00
+```
+
+출력에서 볼 것: `fs`를 틀리게 쓰면 jerk가 정확히 절반(12.00 → 6.00)이 되고, 흔들기의 **절반을 놓친다.** 크래시도 경고도 없다. 코드 리뷰에서도 `* fs` 한 줄은 멀쩡해 보인다. 이런 버그를 잡는 방법은 **입력 분포를 감시하는 것**이다 — "필드 기기의 jerk 평균이 학습 데이터 평균(5.29)과 크게 다르다"는 telemetry 알람이 있으면 바로 보인다 (H7).
+
+### 8.4 디버깅 사고방식 대응표
+
+| 펌웨어 디버깅 | ML 디버깅에서 같은 역할 |
+|---|---|
+| 로직 애널라이저로 버스 파형 보기 | 입력 텐서 값 찍기: 범위, 평균, 단위, 채널 순서, 샘플링 레이트 |
+| golden 레지스터 덤프와 diff | 서버 reference 출력과 기기 출력을 레이어별로 diff (C8) |
+| 스펙 위반 찾기 | 학습 데이터 분포와 필드 데이터 분포의 차이(drift) 찾기 |
+| 특정 테스트 벡터에서만 fail | 특정 사용자·기기·환경에서만 정확도 하락 → 데이터 slice별 평가 |
+| 테스트 벡터에만 맞춘 튜닝 | **overfitting** — 학습 데이터만 외우고 새 데이터에서 틀림 (A4) |
+| 양산 전 margin 확인 | 배포 전 정확도 회귀 테스트, 지연·전력 margin |
+
+핵심: **ML 버그의 80%는 모델이 아니라 데이터와 전처리에 있다고 가정하고 시작한다.** 모델 가중치보다 먼저 "기기가 모델에 준 입력이 학습 때 입력과 같은가"를 확인한다. 이건 bring-up 때 "칩보다 먼저 보드 전원·클럭을 의심한다"는 습관과 같다.
+
+---
+
+## 9. 임베디드 관점에서 다시 보기
+
+이 노트의 예제 모델을 MCU 관점으로 다시 계산해 보자.
+
+| 항목 | 이 노트의 모델 | 전형적인 IMU CNN (B7, 추정 규모) | 1B SLM (B8) |
+|---|---|---|---|
+| 파라미터 수 | 3 (+ 정규화 4) | 수만 | 10억 |
+| 가중치 크기 | 28 B (float) / 수 B (int8) | 수십 KB (int8) | 약 0.5 GB (INT4) |
+| 추론당 MAC | 2 | 수십만~수백만 | 토큰당 약 10억 |
+| 실행 위치 | 어떤 MCU든 | Cortex-M4F/M55, DSP | App SoC NPU/CPU |
+| 병목 | 특징 추출(원시 100샘플 처리)이 모델보다 비쌈 | 연산 또는 SRAM | 메모리 대역폭 (D5) |
+
+관찰:
+
+1. **이 모델에서는 모델보다 전처리가 비싸다.** std와 jerk 계산은 샘플 100개를 훑지만 모델은 MAC 2번이다. 작은 센서 모델에서는 흔한 일이고, 그래서 특징 추출을 DSP나 센서 허브로 보내는 설계(I4)가 의미가 있다.
+2. **전처리 상수도 모델이다.** `MU`, `SD`, `FS`, 창 길이, 단위(g vs m/s²)가 학습 때와 한 비트라도 다르면 8.3절처럼 조용히 틀린다. 배포 패키지 = 가중치 + 전처리 스펙 + 버전 정보로 관리해야 한다 (J5).
+3. **golden vector 검증은 첫날부터.** 예제 6·7처럼 서버에서 입력-출력 쌍을 뽑아 기기에서 비교하는 테스트를 CI에 넣는다 (J6).
+4. **float → int8은 공짜가 아니다.** 예제 8처럼 z가 조금씩 움직인다. 경계 근처 샘플은 판정이 뒤집힐 수 있으므로, 양자화 후 **정확도**를 다시 측정한다 (C2, C8).
+
+---
+
+## 10. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| 정규화 상수(mu, sd)를 기기에 안 가져감 | 기기에서 거의 항상 같은 클래스만 나옴 | 학습은 정규화된 입력, 기기는 원시 입력 | 전처리를 모델의 일부로 export, 또는 가중치에 folding |
+| 샘플링 레이트·단위 불일치 | 에러 없이 정확도 하락 (예제 10) | 특징 계산 상수가 학습 때와 다름 | 전처리 스펙 버전 관리, 입력 분포 telemetry |
+| test 데이터로 정규화·튜닝 | 개발 중 정확도는 높은데 필드에서 낮음 | data leakage | 통계는 train으로만 계산, test는 마지막에 한 번 |
+| 같은 사용자의 데이터가 train과 test에 섞임 | 신규 사용자에서 정확도 급락 | 사용자별 습관을 외움 | 사용자·기기 단위로 split (A4) |
+| accuracy 하나만 봄 | 희귀 이벤트(흔들기 1%)를 전혀 못 잡는데 99% | class imbalance | precision/recall, 오탐률을 따로 봄 |
+| threshold를 0.5로 고정 | 오탐이 너무 많거나 반응이 둔함 | 제품 비용을 반영 안 함 | 오탐·미탐 비용으로 threshold 결정 (예제 9) |
+| 학습률을 너무 크게 | loss가 줄지 않고 튀거나 NaN | 발산 | 학습률 줄이기, 정규화 확인 (A3) |
+| 기기 출력을 reference와 비교 안 함 | 배포 후 원인 모를 정확도 차이 | 전처리·레이아웃·양자화 차이 | golden vector, 레이어별 diff (C8) |
+
+---
+
+## 11. 면접에서 이렇게 말한다
+
+**Q.** "Explain the difference between training and inference."
+
+**A.** 학습은 정답이 있는 데이터로 파라미터를 찾는 반복 최적화다(forward + backward + update, 수백만 번, GPU). 추론은 고정된 파라미터로 forward 한 번을 계산하는 것이다. 학습은 처리량과 최종 정확도, 추론은 지연·전력·메모리가 핵심 지표다. 기기는 거의 추론만 한다.
+
+> Training is an optimization loop: we run forward passes on labeled data, compute a loss, backpropagate gradients and update the weights, millions of times, usually on GPUs in FP32 or BF16. Inference is just the forward pass with frozen weights. On the device we almost only do inference, so what matters there is latency, energy per inference, and memory footprint, and that is also why we can quantize to INT8 or lower for inference but not easily for training.
+
+**Q.** "How would you explain machine learning to a firmware team?"
+
+**A.** FIR 필터에 비유한다. 구조(탭 수)는 우리가 정하고, 계수는 필터 설계 툴 대신 데이터가 정한다. 모델 = MAC 루프 + const 계수 테이블이고, 학습 = 자동 캘리브레이션이다. 그래서 펌웨어 쪽 책임은 "학습 때와 비트 단위로 같은 전처리"와 "reference 출력과 비교 가능한 테스트"다.
+
+> I'd say a model is like an FIR filter whose coefficients were fitted from data instead of designed by hand. At runtime it's just MAC loops over a constant weight table in flash. Training is basically an automated calibration step done offline. The part that firmware owns is making the input pipeline identical to what the model saw in training — sample rate, units, scaling — and testing against golden input-output vectors from the reference implementation.
+
+**Q.** "What changes when you move a model from a server to an MCU?"
+
+**A.** 네 가지다. 정밀도(FP32 → INT8, 정확도 재측정), 메모리(동적 할당 없이 정적 arena, flash의 가중치, SRAM 안의 peak activation), 연산(지원 op 제한, CMSIS-NN 같은 커널, NPU fallback 여부), 그리고 입력 파이프라인(센서 드라이버·전처리를 C로 다시 구현하므로 학습 때와 일치 검증).
+
+> Four things change. Precision: we quantize, usually to INT8, and re-validate accuracy. Memory: no dynamic allocation, weights live in flash, and peak activation memory has to fit in a static SRAM arena. Compute: only a subset of ops is supported or accelerated, so I check for unsupported ops and CPU fallbacks. And the input pipeline: preprocessing gets re-implemented in C on the device, so I verify it against the Python reference with golden vectors, because a sample-rate or scaling mismatch fails silently.
+
+**Q.** "Your model is 98% accurate offline but users say it misses gestures. How do you debug it?"
+
+**A.** 모델보다 입력부터 의심한다. 기기에서 모델 입력 텐서를 로깅해 학습 데이터 분포와 비교한다(샘플링 레이트, 단위, 축 순서, 정규화). 그다음 필드 데이터 일부에 label을 붙여 slice별(사용자, 착용 위치, FW 버전)로 정확도를 보고, offline test set이 필드를 대표하는지 확인한다.
+
+> I'd start from the input, not the model. I'd log the actual input tensors on the device and compare their distribution against the training data — sample rate, units, axis order, normalization. A 2x sample-rate mismatch, for example, silently halves a jerk feature and can drop recall by half. Then I'd label a slice of field data and break accuracy down by user, wear position and firmware version, to see whether the offline test set was representative.
+
+**Q.** "Why do we quantize models for edge devices, and what's the cost?"
+
+**A.** 가중치 크기 4배 감소(FP32 → INT8), 정수 MAC이 빠르고 전력이 적고, 많은 NPU가 INT8만 가속한다. 대가는 반올림 오차로 인한 정확도 손실이고, 경계 근처 샘플의 판정이 뒤집힐 수 있다. 그래서 양자화 후 정확도를 다시 재고, 손실이 크면 per-channel scale이나 QAT를 쓴다.
+
+> Quantizing FP32 weights to INT8 cuts model size by 4x, integer MACs are faster and cheaper in energy, and many NPUs only accelerate INT8. The cost is rounding error, which shifts the logits slightly and can flip decisions near the boundary. So I always re-measure accuracy after quantization, and if the drop is too large I look at per-channel scales, better calibration, or quantization-aware training.
+
+**Q.** "What's the role of an embedded AI engineer versus the ML research team?"
+
+**A.** 모델팀은 구조와 학습(②)을 주도하고, 이 직군은 데이터 수집(①), 최적화(③), 배포(④), 측정(⑤)을 소유한다. 그리고 지연·메모리·전력 예산을 숫자로 정해 모델팀에 되먹여 함께 설계한다.
+
+> The research team owns model architecture and training. The embedded AI engineer owns everything that touches the device: collecting and labeling sensor data, optimizing and quantizing the model, bringing up the runtime and accelerator, integrating inference into firmware, and profiling latency, memory and power. The key collaboration point is the budget: I turn latency, memory, power and bandwidth limits into concrete constraints the model team can design against.
+
+---
+
+## 12. 직접 해보기
+
+1. (손계산) w = [2, −1], b = 0.5, 특징 x = [1, 3]일 때 z와 σ(z)를 구하라. e^0.5 ≈ 1.649를 써라.
+정답: z = 2 − 3 + 0.5 = −0.5, σ(−0.5) = 1/(1 + e^0.5) = 1/(1 + 1.649) ≈ 0.378.
+
+2. (손계산) 모든 파라미터가 0인 로지스틱 회귀의 binary cross-entropy loss는 label과 상관없이 얼마인가? 왜 그런가?
+정답: p = 0.5이므로 −log 0.5 = ln 2 ≈ 0.693. 예제 5의 epoch 0 loss와 같다.
+
+3. (손계산) 사인파 흔들림 A = 0.5 g, f = 2 Hz일 때 f1 = std ≈ ?, f2 = 평균 jerk ≈ ? (잡음 무시)
+정답: f1 = A/√2 ≈ 0.354 g, f2 ≈ 4·A·f = 4.0 g/s — walk와 shake 중 어느 쪽 경계에 가까운지 그림 2에서 찾아보라.
+
+4. (코드) 예제 5에서 학습률 `lr`을 0.05와 20으로 바꿔 epoch 200의 loss와 w를 비교하라. 결과가 예상과 같은가?
+정답: 실제로 돌려 보면 lr=0.05는 loss 0.1735(느린 수렴, w = [0.848, 1.5965]), lr=20은 발산하지 않고 loss 0.0039, w = [−1.4966, 15.2764]가 된다. 이 문제는 loss 곡면이 볼록(convex)하고 데이터가 거의 선형 분리 가능해서 큰 lr도 버틴다. 대신 w가 계속 커져 확률이 0/1로 극단화된다(과신). 깊은 신경망에서는 큰 lr이 쉽게 발산한다 — 이유는 A3에서.
+
+5. (코드) 예제 10의 버그를 C 쪽에서 막는 방법을 설계하라: `predict_shake()` 앞에 입력 분포를 감시하는 코드를 한 줄 넣는다면?
+힌트: 최근 N개 창의 jerk 이동 평균을 유지하고, 학습 데이터 평균(`MU[1]` ≈ 5.29)에서 크게 벗어나면 telemetry 카운터를 올린다.
+
+6. (코드) 예제 8의 int8 추론을 C로 옮겨라: `int8_t wq[2]`, `int8_t xq[2]`, `int32_t acc`로 누산하고 마지막에만 float `s_w`를 곱해 z를 출력해 예제 8의 `z_int8`과 비교하라.
+힌트: 누산은 반드시 int32로 한다. int8 × int8 곱 하나가 최대 16129라서 곱 두 개만 더해도 int16 한계(32767) 근처이고, 입력이 수백 개인 레이어에서는 반드시 넘친다. 마지막 float 곱을 multiplier + shift로 바꾸는 것은 C1에서.
+
+---
+
+## 13. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| model | 모델 | 파라미터를 가진 함수 `ŷ = f(x; θ)`. 코드(구조) + 숫자(파라미터) |
+| parameter / weight | 파라미터 / 가중치 | 학습으로 정해지는 숫자. 기기에서는 const 테이블 |
+| bias | 편향 | 입력과 무관하게 더해지는 파라미터 (IMU의 bias = 센서 오프셋과 다른 뜻이니 주의) |
+| feature | 특징 | 모델에 들어가는 입력 숫자. 원시 데이터를 요약한 것일 수도, 원시 데이터 자체일 수도 있다 |
+| label | 정답 | 입력에 대해 모델이 내야 하는 올바른 출력. supervised learning의 재료 |
+| sample | 샘플 | 입력-정답 한 쌍 (여기서는 2초 창 하나). 신호처리의 "샘플 1개"와 다르니 주의 |
+| dataset split | train/val/test 분할 | 학습용, 튜닝용, 최종 평가용으로 데이터를 나눔 (A4) |
+| batch | 배치 | 한 번의 update에 쓰는 샘플 묶음 |
+| epoch | 에폭 | 학습 데이터 전체를 한 번 훑는 단위 |
+| activation | 활성값 / 활성화 함수 | 레이어의 중간 출력 텐서, 또는 ReLU·sigmoid 같은 비선형 함수. 문맥으로 구분 |
+| logit | 로짓 | sigmoid/softmax에 들어가기 전의 원시 점수 z. z > 0 ⇔ p > 0.5 |
+| sigmoid | 시그모이드 | σ(z) = 1/(1 + e^(−z)). 실수를 0~1 확률로 누름 |
+| loss | 손실 | 예측이 정답에서 얼마나 먼지를 나타내는 숫자 하나 (A2) |
+| gradient | 기울기 | loss를 각 파라미터로 미분한 값. 어느 방향으로 고칠지 알려 줌 (A3) |
+| learning rate | 학습률 η | 한 번에 파라미터를 움직이는 크기. 제어 루프 gain과 비슷 |
+| training | 학습 | 데이터로 파라미터를 찾는 반복 최적화 |
+| inference | 추론 | 고정된 파라미터로 forward만 계산해 예측을 내는 것 |
+| overfitting | 과적합 | 학습 데이터는 외웠지만 새 데이터에서 틀림 (A4) |
+| threshold | 임계값 | 확률을 예/아니오 판정으로 바꾸는 기준. 제품 결정 |
+| false positive / negative | 오탐 / 미탐 | 없는데 있다고 함 / 있는데 놓침 |
+| latency | 지연 | 입력이 들어와서 결과가 나올 때까지 걸리는 시간 (D6) |
+| quantization | 양자화 | float 파라미터·activation을 int8 등 정수로 표현 (C1) |
+| golden vector | 기준 벡터 | reference 구현에서 뽑은 입력-출력 쌍. 기기 구현 검증용 |
+| data drift | 분포 이동 | 필드 입력 분포가 학습 때와 달라지는 것 (H7) |
+
+---
+
+## 14. 요약 & 체크리스트
+
+ML은 "계산 구조는 사람이, 계수는 데이터가 정하는" 프로그래밍 방식이다. 모델은 파라미터를 가진 함수이고, 기기 입장에서 파라미터는 flash의 const 테이블이다. 학습(training)은 서버 GPU에서 forward → loss → backward → update를 반복하며 계수를 찾는 비싼 과정이고, 추론(inference)은 기기에서 forward만 계산하는 싼 과정이다. 로지스틱 회귀 하나로도 데이터 → 학습 → export → C 추론 → golden vector 검증 → int8 맛보기까지 edge ML 사이클 전체를 돌아 볼 수 있다. Embedded AI Engineer는 이 사이클에서 데이터 수집·최적화·배포·측정을 소유하고 모델 설계를 함께 한다. 그리고 가장 무서운 버그는 크래시가 아니라 **전처리 불일치로 인한 조용한 정확도 하락**이다.
+
+- [ ] FIR 필터와 선형 모델이 같은 계산(내적)임을 손계산으로 보일 수 있다
+- [ ] training과 inference가 각각 무엇을 계산하고 어디서 도는지 표로 설명할 수 있다
+- [ ] "inference ≈ 2·P FLOP/token, training ≈ 6·P·D FLOP" 경험칙을 쓸 수 있다
+- [ ] supervised(classification/regression), unsupervised, self-supervised를 label 출처로 구분할 수 있다
+- [ ] 학습 루프 네 단계(forward, loss, gradient, update)를 그림으로 그릴 수 있다
+- [ ] 모든 파라미터가 0일 때 BCE loss가 ln 2인 이유를 말할 수 있다
+- [ ] 학습된 가중치와 정규화 상수를 C 헤더로 export하고 C 추론 결과를 Python과 비교할 수 있다
+- [ ] 정규화를 가중치에 folding하는 식을 유도할 수 있다
+- [ ] threshold가 오탐·미탐 트레이드오프를 정한다는 것을 예로 설명할 수 있다
+- [ ] 샘플링 레이트 불일치 같은 "조용한 데이터 버그"를 찾는 방법을 말할 수 있다
+
+## 참고 자료
+
+- Ian Goodfellow, Yoshua Bengio, Aaron Courville, "Deep Learning" (MIT Press, 2016) — 5장 Machine Learning Basics. [deeplearningbook.org](https://www.deeplearningbook.org/)
+- Aston Zhang 외, "Dive into Deep Learning" — 2~4장(선형 회귀, 분류). [d2l.ai](https://d2l.ai/)
+- Pete Warden, Daniel Situnayake, "TinyML" (O'Reilly, 2019) — MCU 배포 흐름 전체
+- 3Blue1Brown, "Neural networks" 시리즈 — gradient descent 직관. [youtube.com/@3blue1brown](https://www.youtube.com/@3blue1brown)
+- Andrej Karpathy, "Neural Networks: Zero to Hero" — 학습 루프를 바닥부터. [karpathy.ai/zero-to-hero.html](https://karpathy.ai/zero-to-hero.html)
+- MIT 6.5940 TinyML and Efficient Deep Learning (Song Han). [efficientml.ai](https://efficientml.ai/)
+- Jared Kaplan 외, "Scaling Laws for Neural Language Models" (2020) — 학습 연산량 ≈ 6·N·D 근사의 출처. [arXiv:2001.08361](https://arxiv.org/abs/2001.08361)
+- NumPy 공식 문서 [numpy.org/doc](https://numpy.org/doc/stable/)

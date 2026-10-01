@@ -4,6 +4,8 @@
 > **JD 연결**: "Develop factory test and calibration firmware for manufacturing" / Bonus: "Experience shipping consumer electronics through EVT/DVT/PVT milestones"
 > **Don 기준 난이도**: bring-up → NPI → MP 흐름, factory test-node 설계, 스트레스 시나리오, yield 논의는 이미 강점 / 센서·마이크·배터리 캘리브레이션의 수학, cal 데이터 포맷, 키·인증서 provisioning, 스타트업에서 처음부터 라인을 세팅하는 관점은 새로 정리한다
 
+> **⚠ 2026-09-23 JD 개정**: 이 항목은 현재 JD에서 삭제됨 — 우선순위 하향, 개념 수준으로만. Bonus의 EVT/DVT/PVT 마일스톤 경험으로만 유지한다. [P02 분석](../plan/P02_jd_change_2026-09-23.html)
+
 ---
 
 ## 0. 큰 그림

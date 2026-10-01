@@ -1,0 +1,1712 @@
+# J1. 추론 통합 패턴 — 센서에서 결과까지 펌웨어 구조, 버퍼 소유권, 생명주기
+
+> **이 노트를 다 읽으면**: 마이크·IMU에서 이벤트까지의 펌웨어 구조(ISR/DMA → raw 링 → 전처리 → feature 링 → 추론 → 판정 → 이벤트 버스 + 제어 평면)를 블록도로 그리고 단계마다 실행 문맥·주기·버퍼 소유자를 말할 수 있다 · 모든 버퍼를 정적으로 두고 arena 배치·정렬·"init 뒤 malloc 0"을 코드로 강제하며, 인덱스 넘기기(zero-copy)와 memcpy의 비용을 숫자로 비교할 수 있다 · superloop / RTOS 태스크 / work queue / NPU 비동기 네 가지 추론 패턴과 우선순위 배치의 이유를 시뮬레이션 결과로 설명할 수 있다 · `ml_init / ml_process_frame / ml_get_result / ml_reset / ml_stats` API를 소유권 규칙과 함께 설계하고, 느린 추론·멈춘 소비자 같은 결함을 주입해 drop 정책·역압·streaming 상태 reset이 어떻게 동작하는지 실측으로 보여 줄 수 있다
+> **JD 연결**: "Integrate ML inference into embedded firmware written in C, C++, or Rust" — study_prep_list **J1**: 정적 메모리, arena 배치 / 입력 double buffering, ISR → task 전달 / RTOS 추론 태스크와 우선순위. 함께 닿는 행: **J2**(실시간), **J5**(모델 업데이트), **J6**(테스트), **H7**(품질 모니터링)
+> **Don 기준 난이도**: ISR·DMA·링버퍼·RTOS 우선순위·에러 처리·telemetry는 SSD 펌웨어에서 매일 하던 일이다 / 새로 배울 것은 "모델"이라는 부품이 가진 특수한 성질 — streaming 상태, arena의 persistent/scratch 구분, warm-up, 출력 sanity 검사, 모델·런타임 호환성 — 을 그 구조 안에 제대로 끼워 넣는 법
+> **선행 노트**: B5 9.1절(DMA ping-pong 오디오), B7 7절(smoothing·hysteresis), D2(arena 크기), D6(deadline·꼬리 지연), E7(캐시 일관성), E8 3절(SPSC 링 + doorbell), F2 4절(TFLM 앱 골격), F7(링커 배치), G2 8절(IMU ISR → 스레드 → 링), I3 7.2절(superloop이 프레임을 놓친다). 이 노트는 그 내용을 **다시 유도하지 않고** 가져다 쓴다.
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+### 0.1 이미 본 조각들, 그리고 J1이 하는 일
+
+지금까지의 노트는 부품을 하나씩 만들었다.
+
+| 노트 | 이미 만든 부품 | J1에서의 자리 |
+|---|---|---|
+| B5 9.1절 | I2S + DMA ping-pong, 반쪽 완료 인터럽트 | 그림 1의 맨 왼쪽 (센서·DMA) |
+| G2 8절 | IMU FIFO watermark ISR → 스레드 → 링 | 같은 자리, IMU 버전 |
+| E8 3.4절 | SPSC 링 + doorbell, false sharing | 단계 사이의 모든 링 |
+| D2 | arena 크기 = peak 활성값 + scratch + persistent | 추론 태스크가 독점하는 메모리 |
+| F7 | 가중치는 flash/XIP, arena는 DTCM — 링커 스크립트 | 메모리 지도 (2절) |
+| F2 4절 | TFLM: op resolver → interpreter → AllocateTensors → Invoke | 추론 태스크의 내부 |
+| D6, I3 7.2절 | deadline, 꼬리 지연, superloop의 프레임 손실 | 우선순위 배치 (3.6절) |
+| B7 7절 | 투표, 확률 평균, hysteresis, debounce | 후처리·판정 |
+
+부품은 있다. 그런데 면접관이 "마이크에서 wake word 이벤트까지 펌웨어 구조를 설명해 보라"고 하면, 부품 목록이 아니라 **조립도**를 원한다. 조립도에서 진짜로 어려운 질문은 부품 안이 아니라 **경계**에 있다.
+
+- 이 버퍼는 지금 누구 것인가? 언제 돌려주나?
+- 추론이 프레임 주기보다 오래 걸리면 어디서 무엇이 버려지나?
+- 프레임이 빠졌을 때 모델의 streaming 상태는 어떻게 되나?
+- 모델 파일이 깨졌거나 런타임과 버전이 안 맞으면?
+- 모델 둘이 arena 하나를 나눠 쓰면 언제 안전한가?
+
+Don에게 익숙한 말로 하면: NVMe 컨트롤러 펌웨어에서 "host 명령 → SQ → 명령 파서 → FTL → NAND 스케줄러 → CQ → 인터럽트"를 그릴 때, 각 단계 내부 알고리즘보다 **큐 깊이, 버퍼 소유권, 에러 경로, 전원 상태 전환**이 양산 품질을 결정했던 것과 같다. J1은 ML 추론을 그 틀에 넣는다.
+
+### 0.2 레퍼런스 아키텍처 한 장
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 400">
+<text x="340" y="18" font-size="14" text-anchor="middle">추론 통합 레퍼런스 아키텍처 — 데이터 평면(위)과 제어 평면(아래)</text> <text x="55" y="48" font-size="12" text-anchor="middle">ISR 문맥</text> <text x="252" y="48" font-size="12" text-anchor="middle">태스크: 높음</text> <text x="459" y="48" font-size="12" text-anchor="middle">태스크: 낮음</text> <text x="601" y="48" font-size="12" text-anchor="middle">태스크: 낮음</text>
+<rect x="10" y="60" width="90" height="62" rx="6" fill="none" stroke="#888" stroke-width="2"/> <text x="55" y="86" font-size="13" text-anchor="middle">센서 + DMA</text> <text x="55" y="104" font-size="12" text-anchor="middle">완료 ISR</text> <rect x="118" y="72" width="70" height="38" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<line x1="135" y1="72" x2="135" y2="110" stroke="#4a7bd0"/><line x1="153" y1="72" x2="153" y2="110" stroke="#4a7bd0"/><line x1="171" y1="72" x2="171" y2="110" stroke="#4a7bd0"/> <text x="153" y="130" font-size="12" text-anchor="middle">raw 링</text> <rect x="206" y="60" width="92" height="62" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/> <text x="252" y="86" font-size="13" text-anchor="middle">전처리</text>
+<text x="252" y="104" font-size="12" text-anchor="middle">특징 추출</text> <rect x="316" y="72" width="70" height="38" fill="none" stroke="#4a7bd0" stroke-width="2"/> <line x1="333" y1="72" x2="333" y2="110" stroke="#4a7bd0"/><line x1="351" y1="72" x2="351" y2="110" stroke="#4a7bd0"/><line x1="369" y1="72" x2="369" y2="110" stroke="#4a7bd0"/> <text x="351" y="130" font-size="12" text-anchor="middle">feature 링</text>
+<rect x="404" y="60" width="110" height="62" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/> <text x="459" y="80" font-size="13" text-anchor="middle">추론</text> <text x="459" y="97" font-size="12" text-anchor="middle">runtime</text> <text x="459" y="113" font-size="12" text-anchor="middle">+ tensor arena</text> <rect x="532" y="60" width="138" height="62" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/>
+<text x="601" y="86" font-size="13" text-anchor="middle">후처리 · 판정</text> <text x="601" y="104" font-size="12" text-anchor="middle">smoothing, hysteresis</text> <line x1="100" y1="91" x2="118" y2="91" stroke="currentColor"/><polygon points="118,91 111,87 111,95" fill="currentColor"/> <line x1="188" y1="91" x2="206" y2="91" stroke="currentColor"/><polygon points="206,91 199,87 199,95" fill="currentColor"/>
+<line x1="298" y1="91" x2="316" y2="91" stroke="currentColor"/><polygon points="316,91 309,87 309,95" fill="currentColor"/> <line x1="386" y1="91" x2="404" y2="91" stroke="currentColor"/><polygon points="404,91 397,87 397,95" fill="currentColor"/> <line x1="514" y1="91" x2="532" y2="91" stroke="currentColor"/><polygon points="532,91 525,87 525,95" fill="currentColor"/>
+<rect x="532" y="150" width="138" height="32" rx="6" fill="none" stroke="#d0564a" stroke-width="2"/> <text x="601" y="171" font-size="13" text-anchor="middle">이벤트 버스 (큐)</text> <line x1="601" y1="122" x2="601" y2="150" stroke="currentColor"/><polygon points="601,150 597,143 605,143" fill="currentColor"/> <text x="545" y="202" font-size="12">→ UI · 햅틱</text> <text x="545" y="218" font-size="12">→ AP 깨우기</text>
+<text x="545" y="234" font-size="12">→ 로그 · BLE</text> <text x="10" y="160" font-size="12">버퍼 소유: 슬롯은 정적,</text> <text x="10" y="176" font-size="12">링은 인덱스만 넘긴다</text> <text x="10" y="192" font-size="12">arena는 추론 태스크 독점</text> <line x1="85" y1="252" x2="597" y2="252" stroke="#888" stroke-dasharray="5 4"/> <line x1="252" y1="122" x2="252" y2="252" stroke="#888" stroke-dasharray="4 3"/>
+<line x1="459" y1="122" x2="459" y2="252" stroke="#888" stroke-dasharray="4 3"/> <text x="262" y="238" font-size="12">설정 반영</text> <text x="452" y="214" font-size="12" text-anchor="end">모델 load · 카운터</text> <line x1="85" y1="252" x2="85" y2="275" stroke="#888" stroke-dasharray="4 3"/> <line x1="258" y1="252" x2="258" y2="275" stroke="#888" stroke-dasharray="4 3"/>
+<line x1="431" y1="252" x2="431" y2="275" stroke="#888" stroke-dasharray="4 3"/> <line x1="597" y1="252" x2="597" y2="275" stroke="#888" stroke-dasharray="4 3"/> <rect x="10" y="275" width="150" height="54" rx="6" fill="none" stroke="#888" stroke-width="2"/> <text x="85" y="298" font-size="13" text-anchor="middle">설정 (config)</text> <text x="85" y="316" font-size="12" text-anchor="middle">임계값, stride, 모드</text>
+<rect x="178" y="275" width="160" height="54" rx="6" fill="none" stroke="#888" stroke-width="2"/> <text x="258" y="298" font-size="13" text-anchor="middle">모델 저장소</text> <text x="258" y="316" font-size="12" text-anchor="middle">flash A/B 슬롯 (J5)</text> <rect x="356" y="275" width="150" height="54" rx="6" fill="none" stroke="#888" stroke-width="2"/>
+<text x="431" y="298" font-size="13" text-anchor="middle">telemetry</text> <text x="431" y="316" font-size="12" text-anchor="middle">카운터, 히스토그램</text> <rect x="524" y="275" width="146" height="54" rx="6" fill="none" stroke="#888" stroke-width="2"/> <text x="597" y="298" font-size="13" text-anchor="middle">전원 관리</text> <text x="597" y="316" font-size="12" text-anchor="middle">sleep 진입 · 깨움</text>
+<text x="340" y="352" font-size="12" text-anchor="middle">점선 = 제어 평면: 느리고 드물다. init, 설정 변경, 모델 교체, 카운터 수집, 전원 전환</text> <text x="340" y="372" font-size="12" text-anchor="middle">실선 = 데이터 평면: 프레임마다. 여기에는 malloc, 블로킹 로그, 긴 lock이 없어야 한다</text> <text x="340" y="392" font-size="12" text-anchor="middle">우선순위: 캡처 &gt; 전처리 &gt; 추론 ≥ 후처리 (3.6절)</text>
+</svg>
+```
+
+그림 1 — 이 노트 전체의 조립도. 위쪽 실선이 프레임마다 흐르는 데이터 평면, 아래쪽 점선이 드물게 일어나는 제어 평면이다. 단계 사이에는 항상 링(큐)이 있고, 링은 슬롯 데이터가 아니라 **인덱스**를 넘긴다. 추론 태스크의 arena는 그 태스크만 만진다.
+
+### 0.3 J1이 답하는 다섯 가지 질문
+
+1. **구조** (1절): 단계를 어떻게 나누고, 단계마다 실행 문맥·주기·시간 예산은 얼마인가?
+2. **메모리와 소유권** (2절): 무엇을 어디에 정적으로 두고, 각 버퍼는 언제 누구 것인가?
+3. **태스크 패턴과 우선순위** (3절): 추론을 superloop/RTOS/work queue/NPU 중 어떻게 돌리나? 왜 추론이 캡처보다 낮은가?
+4. **ML 컴포넌트와 생명주기** (4–5절): 모델 부품의 API, init 검증, warm-up, streaming 상태 reset, 재초기화, 저전력.
+5. **동작 확인과 결함** (6–9절): 호스트에서 전체를 돌려 카운터를 보고, 느린 추론·멈춘 소비자를 주입하고, 에러·관측성·동시성 위험을 다룬다.
+
+---
+
+## 1. 레퍼런스 아키텍처 — 단계별 책임
+
+### 1.1 단계 표
+
+예를 들어 Hark 같은 웨어러블에서 always-on MCU가 wake word를 듣는다고 하자(숫자는 설명용 가정). 16 kHz mono, 10 ms hop(160 샘플), 모델은 1 s 창(log-mel 49 프레임 × 40), 40 ms마다 추론.
+
+| 단계 | 실행 문맥 | 주기 | 입력 → 출력 | 시간 예산 (가정) | 실패하면 |
+|---|---|---|---|---|---|
+| 캡처 | DMA + 반쪽 완료 ISR | 10 ms | I2S → PCM 슬롯 | ISR 수 µs | 프레임 손실 (복구 불가) |
+| 전처리 | 태스크 (높음) | 10 ms | PCM 160 → mel 40 | 0.5–1.5 ms | raw 링이 차서 결국 캡처 손실 |
+| 추론 | 태스크 (낮음) | 40 ms | mel 창 49×40 → logits | 5–25 ms | 결과가 늦거나 건너뜀 |
+| 후처리·판정 | 추론 태스크 안 또는 별도 | 40 ms | logits → 이벤트 | 수십 µs | 오검출·미검출 |
+| 이벤트 소비 | 앱 태스크 | 이벤트 때 | 이벤트 → 동작 | 앱마다 다름 | 사용자 체감 지연 |
+
+말로 하면: **왼쪽일수록 빠르고 짧고 복구 불가능**하고, 오른쪽일수록 느리고 길고 건너뛰어도 되는 일이다. 이 비대칭이 3.6절 우선순위의 근거다.
+
+### 1.2 주기 손계산 — 단계마다 일의 양이 다르다
+
+- 캡처: 1 s에 100 프레임. 프레임당 320 B(int16 × 160).
+- 전처리: 1 s에 100번. 프레임당 FFT 512 하나 + mel 40 (B5).
+- 추론: stride 40 ms면 1 s에 25번. 한 번에 창 전체(49 프레임)를 본다.
+- 판정: 25번/s. 이벤트는 하루 수십 번.
+
+그래서 단계 사이의 링은 **속도를 맞추는 완충기**다. 전처리는 10 ms마다 한 칸을 채우고, 추론은 40 ms마다 4칸을 가져간다. 추론이 15 ms 걸리는 동안 전처리는 1–2칸을 더 채운다. 링 깊이는 "소비자가 최악으로 늦을 수 있는 시간 ÷ 생산 주기 + 여유"로 정한다. 예: 추론 최악 25 ms + 스케줄링 지터 10 ms → 35 ms ÷ 10 ms = 4칸, 여유 2배 → 8칸.
+
+### 1.3 왜 단계 사이에 꼭 큐를 두나
+
+- **속도 분리**: 생산 주기(10 ms)와 소비 주기(40 ms)가 다르다.
+- **지터 흡수**: 추론 시간은 캐시·버스 경쟁·선점 때문에 흔들린다(D6).
+- **실패 격리**: 소비자가 늦으면 "어디서 버릴지"를 링이 가득일 때의 정책 한 곳에서 정한다. 큐가 없으면 늦음이 호출 체인을 타고 ISR까지 번진다.
+- **관측 지점**: 링마다 high-water mark(HWM, 최대 점유)를 재면 병목 단계가 바로 보인다.
+
+### 1.4 제어 평면 — 데이터 평면과 섞지 않는다
+
+제어 평면은 init, 설정 변경, 모델 교체, telemetry 수집, 전원 전환이다. 이것들은 **데이터 평면 태스크에게 메시지로 요청**하고, 데이터 평면은 프레임 경계에서만 반영한다. 예: 임계값 변경은 판정 단계가 다음 결과부터 쓴다. 모델 교체는 추론 태스크가 현재 invoke를 끝낸 뒤 `ml_deinit → ml_init`을 한다. 다른 태스크가 arena나 interpreter를 직접 만지면 안 된다(9절).
+
+SSD에 비유하면 admin queue와 I/O queue를 나눈 것과 같다. admin 명령(펌웨어 교체, 설정)은 I/O 경로와 다른 큐로 들어오고, I/O 경로는 안전한 지점에서만 그것을 반영한다.
+
+### 1.5 함정
+
+- 전처리를 ISR 안에서 한다: FFT 1 ms를 ISR에서 돌리면 다른 인터럽트 지연이 1 ms 늘어난다. ISR은 슬롯을 넘기고 깨우기만 한다.
+- 추론과 후처리를 한 함수에 섞어서 후처리 상태(smoothing 창, hysteresis)를 모델 reset 때 같이 지우는 것을 잊는다(5.4절).
+- 이벤트 소비자가 이벤트 버스 콜백 안에서 블로킹 I/O(BLE 전송)를 한다 → 추론 태스크가 멈춘다. 버스는 큐여야 한다.
+
+---
+
+## 2. 정적 메모리 설계 — 모든 버퍼는 이름과 주인이 있다
+
+### 2.1 원칙 다섯 개
+
+1. **모든 데이터 평면 버퍼는 정적**이다: `static` 배열로 선언해 링커가 주소를 정한다. 크기는 빌드 때 확정되고 맵 파일에 보인다(F7 8절).
+2. **init 이후 malloc 0**: heap을 쓰더라도 init 단계에서만. 그 뒤의 할당은 버그로 취급하고 카운트한다. 이유: 단편화, 비결정적 시간, 실패 경로 테스트 불가.
+3. **arena는 추론 태스크 독점**이고 크기는 D2 방식으로 잰 peak + 여유. 배치는 가장 빠른 RAM(DTCM 등, F7 4절). 정렬은 최소 16 B(TFLM 내부가 16 B 정렬을 맞춘다), DMA·NPU가 읽으면 캐시 라인(32/64 B) 정렬.
+4. **가중치는 flash/XIP에 const**로 두고 RAM에 복사하지 않는다(필요하면 성능 때문에 일부만, D2 1.3절).
+5. **예산은 컴파일 때 검사**한다: `static_assert`로 합계가 배정된 SRAM을 넘으면 빌드가 실패하게.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 260">
+<text x="340" y="18" font-size="14" text-anchor="middle">예제 1의 SRAM 예산 192 KB — 비율대로 그린 막대</text> <rect x="30" y="50" width="2" height="40" fill="#d0564a"/> <rect x="32" y="50" width="17" height="40" fill="#4a7bd0"/> <rect x="49" y="50" width="11" height="40" fill="#3f9a6b"/> <rect x="60" y="50" width="300" height="40" fill="#e08a3c"/> <rect x="360" y="50" width="12" height="40" fill="#888"/>
+<rect x="30" y="50" width="600" height="40" fill="none" stroke="currentColor"/> <text x="210" y="75" font-size="13" text-anchor="middle">tensor arena 96 KB</text> <text x="501" y="75" font-size="13" text-anchor="middle">여유 82.6 KB (43%)</text> <line x1="31" y1="90" x2="31" y2="120" stroke="currentColor"/><text x="20" y="135" font-size="12">DMA ping-pong 640 B</text>
+<line x1="40" y1="90" x2="60" y2="150" stroke="currentColor"/><text x="20" y="165" font-size="12">raw 링 16 × 336 B = 5.25 KB</text> <line x1="55" y1="90" x2="100" y2="180" stroke="currentColor"/><text x="20" y="195" font-size="12">feature 링 64 × 56 B = 3.5 KB</text> <line x1="366" y1="90" x2="366" y2="120" stroke="currentColor"/><text x="300" y="135" font-size="12">로그 링 4 KB</text>
+<text x="300" y="165" font-size="12">flash (따로): 모델 blob = 헤더 + 가중치, const</text> <text x="300" y="185" font-size="12">링커가 arena를 DTCM, 링을 SRAM에 배치 (F7)</text> <text x="30" y="230" font-size="12">arena가 막대의 절반을 차지한다 — 메모리 다이어트는 arena(모델 구조, D2)에서 시작하고,</text> <text x="30" y="248" font-size="12">링 깊이는 "견딜 최악 지연"으로 정한 뒤 남는 만큼만 늘린다</text>
+</svg>
+```
+
+그림 2 — 예제 1의 정적 버퍼를 192 KB SRAM 예산에 비율대로 그렸다. arena 하나가 다른 모든 버퍼의 7배다. 링 깊이를 두 배로 늘려도 수 KB지만, arena는 모델 하나만 바뀌어도 수십 KB가 움직인다.
+
+### 2.2 코드로 확인 — 정적 메모리 지도와 할당 봉인
+
+**예제 1** — 무엇을 확인하나: 가상의 KWS 펌웨어 버퍼를 전부 정적으로 선언하고, (1) 크기와 정렬을 출력하고, (2) SRAM 예산을 `static_assert`로 검사하고, (3) init 동안만 쓰는 bump allocator를 init 끝에 **봉인**해서 이후 할당을 잡아낸다.
+
+```c
+/* memmap.c — 가상의 KWS 펌웨어: 모든 버퍼를 정적으로 두고 SRAM 예산을 컴파일 때 검사 + init 뒤 할당 봉인 */
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#define SRAM_BUDGET (192u * 1024u)                    /* ML에 배정된 SRAM (가정) */
+typedef struct { uint32_t seq; uint64_t t_cap; int16_t pcm[160]; } raw_slot_t;   /* 10 ms 16 kHz */
+typedef struct { uint32_t seq; uint64_t t_cap; int8_t mel[40]; } feat_slot_t;    /* 프레임당 40 mel */
+
+static _Alignas(32) int16_t   dma_pingpong[2][160];   /* DMA가 직접 쓰는 곳: cache line 32 B 정렬 */
+static raw_slot_t             raw_ring[16];
+static feat_slot_t            feat_ring[64];
+#ifndef ARENA_KB
+#define ARENA_KB 96                                   /* D2 방식으로 잰 peak + 여유 */
+#endif
+static _Alignas(16) uint8_t   tensor_arena[ARENA_KB * 1024];
+static uint8_t                log_ring[4096];
+#define ML_SRAM (sizeof dma_pingpong + sizeof raw_ring + sizeof feat_ring + sizeof tensor_arena + sizeof log_ring)
+static_assert(ML_SRAM <= SRAM_BUDGET, "ML SRAM budget exceeded");   /* 예산 초과면 빌드 실패 */
+
+static _Alignas(16) uint8_t pool[2048]; static uint32_t pool_used, sealed, late_allocs;
+static void *fw_alloc(uint32_t n) {                   /* init 동안만 쓰는 bump allocator */
+    if (sealed) { late_allocs++; return NULL; }       /* 봉인 뒤 할당 = 설계 버그 → 카운트 */
+    n = (n + 15u) & ~15u; if (pool_used + n > sizeof pool) return NULL;
+    void *p = &pool[pool_used]; pool_used += n; return p;
+}
+#define ROW(x) printf("%-14s %7zu B  addr%%16=%2u addr%%32=%2u\n", #x, sizeof x, \
+                       (unsigned)((uintptr_t)&x % 16), (unsigned)((uintptr_t)&x % 32))
+int main(void) {
+    ROW(dma_pingpong); ROW(raw_ring); ROW(feat_ring); ROW(tensor_arena); ROW(log_ring);
+    printf("ML SRAM total  %7zu B of %u B (%.1f%%)\n", ML_SRAM, SRAM_BUDGET, 100.0 * ML_SRAM / SRAM_BUDGET);
+    void *a = fw_alloc(100), *b = fw_alloc(300); sealed = 1;          /* init 끝 = 봉인 */
+    void *c = fw_alloc(64);
+    printf("init: a@%td b@%td used %u B; after seal -> %s, late_allocs %u\n",
+           (uint8_t *)a - pool, (uint8_t *)b - pool, pool_used, c ? "ptr" : "NULL", late_allocs);
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 memmap.c -o memmap && ./memmap
+```
+
+```text
+dma_pingpong       640 B  addr%16= 0 addr%32= 0
+raw_ring          5376 B  addr%16= 0 addr%32= 0
+feat_ring         3584 B  addr%16= 0 addr%32= 0
+tensor_arena     98304 B  addr%16= 0 addr%32= 0
+log_ring          4096 B  addr%16= 0 addr%32= 0
+ML SRAM total   112000 B of 196608 B (57.0%)
+init: a@0 b@112 used 416 B; after seal -> NULL, late_allocs 1
+```
+
+arena를 180 KB로 늘려서 빌드하면(`-DARENA_KB=180`) 실행 전에 빌드가 실패한다.
+
+```text
+memmap.c:18:15: error: static assertion failed due to requirement '(sizeof dma_pingpong + sizeof raw_ring + sizeof feat_ring + sizeof tensor_arena + sizeof log_ring) <= (192U * 1024U)': ML SRAM budget exceeded
+```
+
+출력에서 볼 것: 예산 초과가 **런타임이 아니라 컴파일 때** 잡힌다. 봉인 뒤 `fw_alloc`은 NULL과 `late_allocs` 카운터를 남긴다 — 양산 펌웨어에서는 이 카운터를 telemetry로 올리거나 디버그 빌드에서 assert로 바꾼다. 호스트 링커가 큰 배열을 우연히 32 B에 맞춰 놓았지만(`addr%32=0`), 이것에 기대면 안 된다. DMA 버퍼처럼 정렬이 **필요한** 곳은 `_Alignas`로 명시한다.
+
+### 2.3 버퍼 소유권 규칙
+
+소유권(ownership)이란 "지금 이 메모리를 써도 되는 주체가 누구인가"다. 동시에 두 주체가 쓰거나, 한 주체가 쓰는 중에 다른 주체가 읽으면 데이터가 깨진다. 펌웨어에서는 이것을 lock이 아니라 **규칙과 인덱스**로 보장한다.
+
+| 버퍼 | 누가 쓰나 | 누가 읽나 | 언제 돌려주나 | 수명 |
+|---|---|---|---|---|
+| DMA ping-pong 반쪽 | DMA 하드웨어 | ISR → 전처리 | 다음 반쪽 완료 전 (10 ms) | 프레임 1개 |
+| raw 링 슬롯 | ISR(=DMA 완료 처리) | 전처리 태스크 | 특징 계산 직후 `release` | 수 ms |
+| feature 링 슬롯 | 전처리 태스크 | 추론 태스크 | 창에 복사한 직후 | 수 ms |
+| 모델 입력 창 (streaming 상태) | 추론 태스크 | 추론 태스크 | 없음 — gap 때 reset | 세션 내내 |
+| arena scratch (head) | 런타임 | 런타임 | invoke가 끝나면 무의미 | invoke 1회 |
+| arena persistent (tail) | 런타임 | 런타임 | `ml_deinit` | init ~ deinit |
+| 가중치 (flash) | 아무도 (const) | 런타임 | 없음 | 펌웨어 이미지 |
+| 결과 (`ml_result_t`) | 추론 태스크 | 판정·앱 | 복사해서 넘김 | 값 |
+
+세 가지 규칙으로 요약된다.
+
+- **링의 head는 producer만, tail은 consumer만 쓴다** (E8 3.3절). 그래서 SPSC 링은 lock이 필요 없다.
+- **`release`(tail 증가) 이후에는 그 슬롯 포인터를 만지지 않는다.** release하는 순간 슬롯은 producer 것이다.
+- **결과는 값으로 넘긴다.** 작은 구조체(수십 B)는 복사가 포인터 공유보다 안전하고 싸다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300">
+<text x="320" y="18" font-size="14" text-anchor="middle">링 슬롯 하나의 소유권 순환 — 화살표마다 누가 무엇을 하나</text> <rect x="250" y="40" width="140" height="44" rx="8" fill="none" stroke="#888" stroke-width="2"/> <text x="320" y="67" font-size="13" text-anchor="middle">FREE</text> <rect x="470" y="128" width="150" height="44" rx="8" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<text x="545" y="155" font-size="13" text-anchor="middle">PRODUCER 소유</text> <rect x="250" y="216" width="140" height="44" rx="8" fill="none" stroke="#e08a3c" stroke-width="2"/> <text x="320" y="243" font-size="13" text-anchor="middle">READY (공개됨)</text> <rect x="20" y="128" width="150" height="44" rx="8" fill="none" stroke="#3f9a6b" stroke-width="2"/>
+<text x="95" y="155" font-size="13" text-anchor="middle">CONSUMER 소유</text> <line x1="390" y1="70" x2="500" y2="128" stroke="currentColor"/><polygon points="500,128 490,127 495,119" fill="currentColor"/> <text x="452" y="88" font-size="12">wr_slot: head-tail &lt; N</text> <line x1="530" y1="172" x2="390" y2="232" stroke="currentColor"/><polygon points="390,232 397,225 400,234" fill="currentColor"/>
+<text x="452" y="215" font-size="12">commit: head++ (release)</text> <line x1="250" y1="232" x2="120" y2="172" stroke="currentColor"/><polygon points="120,172 130,173 126,181" fill="currentColor"/> <text x="20" y="215" font-size="12">rd_slot: head != tail (acquire)</text> <line x1="140" y1="128" x2="250" y2="70" stroke="currentColor"/><polygon points="250,70 240,71 245,79" fill="currentColor"/>
+<text x="38" y="88" font-size="12">release: tail++ (release)</text> <text x="320" y="140" font-size="12" text-anchor="middle">DMA·ISR가 슬롯에 직접 쓴다</text> <text x="320" y="158" font-size="12" text-anchor="middle">전처리가 제자리에서 읽는다</text> <text x="320" y="176" font-size="12" text-anchor="middle">→ 데이터는 움직이지 않고 인덱스만 돈다</text>
+<text x="320" y="290" font-size="12" text-anchor="middle">가득일 때 producer(ISR)는 기다릴 수 없다 → drop-newest + 카운터</text>
+</svg>
+```
+
+그림 3 — 슬롯 하나가 도는 네 상태. head 증가가 "producer → 모두에게 공개", tail 증가가 "consumer → producer에게 반납"이다. 메모리 순서는 E8 3.4절과 같다: payload를 다 쓴 뒤 release store로 head를 올리고, consumer는 acquire load로 head를 본 뒤 payload를 읽는다.
+
+### 2.4 코드로 확인 — 디버그 빌드의 소유권 추적기
+
+**예제 2** — 무엇을 확인하나: 슬롯마다 "현재 주인"을 기록하고, 허용된 전이(그림 3) 이외의 전이나 주인이 아닌 접근을 위반으로 잡는다. 양산 빌드에서는 끄고, 통합 초기와 HIL 테스트(J6)에서 켜 두는 종류의 도구다.
+
+```c
+/* owner.c — 디버그 빌드용 슬롯 소유권 추적: FREE → PRODUCER → READY → CONSUMER → FREE 외 전이는 위반 */
+#include <stdio.h>
+typedef enum { FREE, PRODUCER, READY, CONSUMER } owner_t;
+static const char *NM[] = {"FREE", "PRODUCER", "READY", "CONSUMER"};
+#define N 4
+static owner_t own[N]; static unsigned violations;
+static void move(int s, owner_t from, owner_t to, const char *who) {
+    if (own[s] != from) {
+        violations++;
+        printf("  VIOLATION %-14s slot %d: expected %s, was %s\n", who, s, NM[from], NM[own[s]]);
+    }
+    own[s] = to;
+}
+static void check_access(int s, owner_t me, const char *who) {   /* 버퍼를 만지기 직전에 부른다 */
+    if (own[s] != me) { violations++; printf("  VIOLATION %-14s slot %d: owned by %s\n", who, s, NM[own[s]]); }
+}
+int main(void) {
+    puts("correct flow:");
+    move(0, FREE, PRODUCER, "acquire"); check_access(0, PRODUCER, "dma write");
+    move(0, PRODUCER, READY, "commit");  move(0, READY, CONSUMER, "pop");
+    check_access(0, CONSUMER, "feature read"); move(0, CONSUMER, FREE, "release");
+    printf("  violations %u\n", violations);
+    puts("bug 1: read after release (keep pointer, release early):");
+    move(1, FREE, PRODUCER, "acquire"); move(1, PRODUCER, READY, "commit"); move(1, READY, CONSUMER, "pop");
+    move(1, CONSUMER, FREE, "release"); check_access(1, CONSUMER, "feature read");
+    puts("bug 2: double release:");
+    move(1, CONSUMER, FREE, "release");
+    puts("bug 3: consumer touches slot not yet committed:");
+    move(2, FREE, PRODUCER, "acquire"); check_access(2, CONSUMER, "feature read");
+    printf("total violations %u\n", violations);
+    return 0;
+}
+```
+
+```text
+correct flow:
+  violations 0
+bug 1: read after release (keep pointer, release early):
+  VIOLATION feature read   slot 1: owned by FREE
+bug 2: double release:
+  VIOLATION release        slot 1: expected CONSUMER, was FREE
+bug 3: consumer touches slot not yet committed:
+  VIOLATION feature read   slot 2: owned by PRODUCER
+total violations 3
+```
+
+출력에서 볼 것: 세 가지 전형적인 소유권 버그 — release 후 읽기, 이중 release, commit 전 읽기 — 가 각각 한 줄로 잡힌다. 실제 시스템에서 이 버그들은 "가끔 모델 출력이 이상하다"로만 보인다. 슬롯 내용이 다음 프레임으로 덮여도 크기와 형식은 멀쩡하기 때문이다. Don이 SSD에서 버퍼 descriptor에 owner 필드를 두고 FW/HW 소유권 전이를 assert로 감시하던 것과 같은 방법이다.
+
+### 2.5 zero-copy vs memcpy — 얼마나 차이 나나
+
+zero-copy는 "데이터를 옮기지 않고 슬롯 번호(인덱스)만 넘긴다"는 뜻이다. 비용은 인덱스 store 하나다. memcpy는 바이트 수에 비례한다.
+
+**예제 3** — 무엇을 확인하나: 전형적인 프레임 크기마다 memcpy 한 번의 시간을 호스트(Apple M2)에서 잰다. MCU의 절대값이 아니라 **크기에 따른 비율**을 보는 대리 지표다.
+
+```c
+/* memcpy_cost.c — 프레임 크기별 memcpy 비용 (호스트 M2; MCU 값의 대리 지표일 뿐) vs 인덱스 넘기기 */
+#define _DARWIN_C_SOURCE
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+static _Alignas(64) uint8_t src[4][65536], dst[65536];
+static volatile uint32_t sink;
+int main(void) {
+    struct { const char *name; size_t n; } f[] = {
+        {"audio hop 10 ms int16", 320}, {"40 mel x 49 int8", 1960}, {"IMU 2 s 6-axis int16", 2400},
+        {"96x96 gray int8", 9216}, {"audio 1 s int16", 32000}};
+    for (size_t k = 0; k < 4; k++) memset(src[k], (int)k + 1, sizeof src[k]);
+    printf("%-24s %7s %9s %9s\n", "frame", "bytes", "ns/copy", "GB/s");
+    for (size_t i = 0; i < sizeof f / sizeof f[0]; i++) {
+        const int reps = 200000; uint64_t best = UINT64_MAX;
+        for (int trial = 0; trial < 5; trial++) {
+            uint64_t t0 = now_ns();
+            for (int r = 0; r < reps; r++) { memcpy(dst, src[r & 3], f[i].n); sink += dst[r % f[i].n]; }
+            uint64_t dt = now_ns() - t0; if (dt < best) best = dt;
+        }
+        double ns = (double)best / reps;
+        printf("%-24s %7zu %9.1f %9.1f\n", f[i].name, f[i].n, ns, f[i].n / ns);
+    }
+    uint32_t head = 0; uint64_t t0 = now_ns();               /* 인덱스 넘기기: 4 B store 하나 */
+    for (int r = 0; r < 200000; r++) { head++; sink += head; }
+    printf("%-24s %7d %9.1f\n", "index publish (head++)", 4, (double)(now_ns() - t0) / 200000);
+    return 0;
+}
+```
+
+```text
+frame                      bytes   ns/copy      GB/s
+audio hop 10 ms int16        320      13.9      23.1
+40 mel x 49 int8            1960      32.6      60.1
+IMU 2 s 6-axis int16        2400      31.1      77.1
+96x96 gray int8             9216     114.5      80.5
+audio 1 s int16            32000     332.3      96.3
+index publish (head++)         4       0.3
+```
+
+출력에서 볼 것: 호스트에서는 32 KB 복사도 0.3 µs 수준이다(데이터가 캐시에 있고 대역폭이 크다). 실행할 때마다 작은 크기의 값은 2배 정도 흔들린다(한 번은 320 B가 5.5 ns로 나왔다) — 이 정도 크기는 측정 오버헤드와 비슷하다.
+
+MCU로 옮겨 손으로 어림해 보자. **가정**: Cortex-M4급, 80 MHz, SRAM → SRAM memcpy가 사이클당 1–2 B 정도(실제 값은 코어, 버스, 정렬, 라이브러리 구현에 따라 다르므로 반드시 DWT로 잴 것, D6 4.2절).
+
+```
+1 s 오디오 창 32,000 B 복사 : 32,000 / (1~2 B/cycle) = 16,000~32,000 cycle = 0.2~0.4 ms
+  → 40 ms마다 창 전체를 복사하면 CPU의 0.5~1%. 10 ms마다 하면 2~4%
+10 ms hop 320 B 복사       : 160~320 cycle = 2~4 µs → 무시해도 된다
+```
+
+말로 하면: **hop 하나 복사는 공짜에 가깝고, 창 전체를 매번 복사하는 것은 낭비**다. 그래서 실무 패턴은 이렇다.
+
+- ISR → 전처리: 슬롯 인덱스만 넘긴다 (DMA가 슬롯에 직접 쓴다).
+- 전처리 → 추론: 특징은 작으니(프레임당 40 B) **복사**해서 추론 태스크의 창에 넣는다. 창 자체는 추론 태스크의 streaming 상태다.
+- 모델 입력 텐서: 창을 매번 텐서로 옮기는 대신, 가능하면 **입력 텐서 자체를 원형 버퍼로** 쓰거나(런타임이 허용하면 입력 포인터를 바꾼다), streaming 모델(B5 3.4절)로 바꿔서 새 프레임만 넣는다.
+
+### 2.6 입력 double buffering — 짧게
+
+B5 9.1절의 DMA ping-pong이 가장 작은 double buffer다. 추론 입력에도 같은 생각을 쓴다: NPU가 입력 텐서 A로 invoke하는 동안 CPU가 다음 창을 B에 준비하고 맞바꾼다(3.5절). 대가는 입력 텐서 하나만큼의 메모리다. CPU가 추론을 직접 돌리는 단일 코어 MCU에서는 겹칠 상대가 없으므로 이득은 DMA 캡처 쪽에만 있다.
+
+### 2.7 함정
+
+- arena를 함수 안의 지역 배열로 선언한다(스택). F2 예제처럼 데모에서는 동작하지만 펌웨어에서는 스택 오버플로다. arena는 파일 범위 `static`이다.
+- `const` 없이 선언한 가중치 배열이 `.data`로 가서 부팅 때 RAM으로 복사된다(F7 2절). flash도 RAM도 두 배로 먹는다.
+- DMA 버퍼가 캐시 라인 경계를 다른 변수와 공유한다 → invalidate가 이웃 변수를 날린다(9.2절).
+- 링 깊이를 "넉넉히"로 정한다. 깊이는 **견딜 최악의 소비자 지연**이라는 요구사항에서 나와야 하고, 그 이상은 지연만 늘린다(7.2절).
+
+---
+
+## 3. 추론 태스크 패턴 네 가지와 우선순위
+
+### 3.1 비교 표
+
+| 패턴 | 구조 | 잘 맞는 곳 | 약점 |
+|---|---|---|---|
+| (a) superloop polling | `while(1)`에서 플래그 확인, run-to-completion | 아주 작은 MCU, 일 하나, RTOS 없음 | 긴 추론이 다른 일을 막는다 (I3 7.2절) |
+| (b) RTOS 태스크 + 큐/세마포어 | ISR이 notify → 태스크가 깨어 처리 | 대부분의 Cortex-M 제품 | 태스크마다 스택, 우선순위 설계 필요 |
+| (c) work queue (이벤트 구동) | ISR이 work item을 제출, 공용 스레드가 실행 | Zephyr, 일이 많고 짧을 때 | 긴 추론이 공용 큐를 막는다 → 전용 큐 필요 |
+| (d) NPU 오프로드 + 완료 IRQ | 태스크가 submit, NPU가 끝나면 IRQ | NPU/DSP가 있는 SoC (E5, E8) | 상태기계, timeout, 캐시 일관성, 늦은 IRQ |
+
+### 3.2 (a) superloop — 가장 단순하고, 가장 빨리 한계에 닿는다
+
+아래 두 조각((a), (b))은 구조를 보여 주는 예시 코드다. 펌웨어 SDK API(FreeRTOS, Zephyr)를 쓰므로 이 환경에서 컴파일하지 않았다. 함수 이름은 실제 API다.
+
+```c
+/* (a) superloop — 예시 코드 (컴파일 안 함). ISR은 플래그와 인덱스만 남긴다 */
+static volatile uint32_t frames_ready;          /* ISR이 증가 */
+void I2S_DMA_HalfCplt_IRQHandler(void) { frames_ready++; }
+int main(void) {
+    board_init(); ml_init(&cfg);
+    for (;;) {
+        while (frames_ready) { frames_ready--; features_from_next_slot(); }   /* 짧은 일 */
+        if (window_due()) run_inference_and_decide();                        /* 긴 일: 15 ms */
+        __WFI();                                                              /* 할 일 없으면 sleep */
+    }
+}
+```
+
+문제는 `run_inference_and_decide()`가 15 ms 도는 동안 특징 추출이 밀린다는 것이다. ISR이 데이터를 링에 넣어 두면 데이터는 살아남지만, 링 깊이 × 10 ms보다 추론이 길어지면 손실이 시작된다. I3 7.2절의 시뮬레이션이 정확히 이 결과(제스처 분류 30 ms가 KWS 프레임을 놓침)였다. 해결책은 추론을 조각내 양보하거나(cooperative chunking), 선점형 RTOS로 가는 것이다.
+
+### 3.3 (b) RTOS 태스크 — ISR은 깨우기만 한다
+
+```c
+/* (b) FreeRTOS — 예시 코드 (컴파일 안 함). ISR은 task notification으로 깨운다 */
+static TaskHandle_t feat_task;
+void I2S_DMA_HalfCplt_IRQHandler(void) {
+    BaseType_t woken = pdFALSE;
+    raw_commit_from_isr();                                /* head++ (2.3절 규칙) */
+    vTaskNotifyGiveFromISR(feat_task, &woken);            /* 카운팅 세마포어처럼 동작 */
+    portYIELD_FROM_ISR(woken);                            /* 더 높은 태스크가 깼으면 바로 전환 */
+}
+static void feat_task_fn(void *arg) {
+    for (;;) {
+        ulTaskNotifyTake(pdFALSE, portMAX_DELAY);         /* 한 번에 하나씩 소비 */
+        int i; while ((i = raw_rd_slot()) >= 0) { mel_from_slot(i); raw_release(); feat_push(); }
+        xTaskNotifyGive(inf_task);                        /* 추론 태스크 깨우기 */
+    }
+}
+```
+
+ISR에서 쓸 수 있는 것은 `...FromISR` 계열뿐이다. mutex를 잡거나, `printf`를 하거나, 블로킹 큐 송신을 하면 안 된다. 깨어난 태스크는 **링이 빌 때까지** 처리한다 — 알림 여러 번이 하나로 합쳐져도(coalescing) 프레임을 잃지 않는 표준 패턴이다(E8 3.4절의 doorbell과 같다).
+
+### 3.4 (c) work queue — 공용 스레드에 긴 일을 넣지 말 것
+
+Zephyr라면 전용 `struct k_work_q`를 `k_work_queue_start()`로 만들고(스택·우선순위 지정), 전처리가 끝날 때 `k_work_submit_to_queue()`로 추론 work item을 제출한다. work queue 패턴의 좋은 성질 하나: **같은 work item이 이미 대기 중이면 다시 제출해도 한 번만 실행된다.** 이것이 자연스럽게 "latest-wins" 정책이 된다(7.1절). 나쁜 성질: 시스템 공용 work queue에 15 ms 추론을 넣으면 같은 큐의 모든 짧은 일(버튼, BLE 콜백)이 15 ms씩 밀린다. 그래서 추론은 **전용 큐(전용 스레드)** 에 넣는다.
+
+### 3.5 (d) NPU 오프로드 — 비동기 완료와 상태기계
+
+NPU나 DSP로 추론을 넘기면(E5, E8, F4) CPU는 submit 후 다른 일을 하고, NPU가 끝나면 완료 인터럽트가 온다. 이때 드라이버는 상태기계가 된다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 280">
+<text x="330" y="18" font-size="14" text-anchor="middle">NPU job 상태기계 — 한 번에 하나, 세대 태그로 늦은 IRQ를 거른다</text> <rect x="20" y="110" width="110" height="46" rx="8" fill="none" stroke="#888" stroke-width="2"/> <text x="75" y="138" font-size="13" text-anchor="middle">IDLE</text> <rect x="230" y="110" width="130" height="46" rx="8" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<text x="295" y="138" font-size="13" text-anchor="middle">SUBMITTED</text> <rect x="490" y="40" width="140" height="40" rx="8" fill="none" stroke="#3f9a6b" stroke-width="2"/> <text x="560" y="65" font-size="13" text-anchor="middle">DONE</text> <rect x="490" y="113" width="140" height="40" rx="8" fill="none" stroke="#e08a3c" stroke-width="2"/> <text x="560" y="138" font-size="13" text-anchor="middle">ERROR</text>
+<rect x="490" y="186" width="140" height="40" rx="8" fill="none" stroke="#d0564a" stroke-width="2"/> <text x="560" y="211" font-size="13" text-anchor="middle">TIMEOUT</text> <line x1="130" y1="133" x2="230" y2="133" stroke="currentColor"/><polygon points="230,133 222,129 222,137" fill="currentColor"/> <text x="180" y="124" font-size="12" text-anchor="middle">submit, gen++</text>
+<line x1="360" y1="122" x2="490" y2="60" stroke="currentColor"/><polygon points="490,60 480,60 484,68" fill="currentColor"/> <text x="400" y="78" font-size="12">IRQ ok, tag==gen</text> <line x1="360" y1="133" x2="490" y2="133" stroke="currentColor"/><polygon points="490,133 482,129 482,137" fill="currentColor"/> <text x="425" y="126" font-size="12" text-anchor="middle">IRQ err</text>
+<line x1="360" y1="145" x2="490" y2="206" stroke="currentColor"/><polygon points="490,206 480,206 484,198" fill="currentColor"/> <text x="372" y="220" font-size="12">now-t_sub &gt; 20 ms</text> <path d="M 560 226 Q 560 262 300 262 Q 75 262 75 156" fill="none" stroke="currentColor"/> <polygon points="75,156 71,164 79,164" fill="currentColor"/>
+<text x="330" y="254" font-size="12" text-anchor="middle">태스크가 결과 소비 (DONE: cache invalidate 후 읽기, TIMEOUT: NPU reset) → IDLE</text> <text x="295" y="182" font-size="12" text-anchor="middle">tag != gen 인 IRQ</text> <text x="295" y="198" font-size="12" text-anchor="middle">= stale, 무시</text>
+</svg>
+```
+
+그림 4 — job은 한 번에 하나다. submit 때 세대 번호(gen)를 올리고 NPU에 tag로 넘긴다. 완료 IRQ는 `SUBMITTED`이고 tag가 현재 gen과 같을 때만 상태를 바꾼다. timeout이 난 job의 완료가 늦게 와서 **다음 job의 완료로 오인되는 것**을 막는 장치다.
+
+**예제 4** — 무엇을 확인하나: 정상 2개, 에러 1개, 응답 없음 1개, 늦은 완료 1개(다음 job 진행 중에 도착), 정상 1개를 차례로 넣고 상태기계가 각각을 올바르게 분류하는지 본다. 시간은 1 ms tick 이산 시뮬레이션이다.
+
+```c
+/* npu_sm.c — NPU 비동기 오프로드 상태기계: IDLE → SUBMITTED → DONE / ERROR / TIMEOUT, 세대 태그로 늦은 IRQ 거르기 */
+#include <stdint.h>
+#include <stdio.h>
+typedef enum { IDLE, SUBMITTED, DONE, ERROR, TIMEOUT } st_t;
+static const char *NM[] = {"IDLE", "SUBMITTED", "DONE", "ERROR", "TIMEOUT"};
+#define TIMEOUT_MS 20
+static struct { st_t st; uint32_t gen, t_sub; } job;               /* 드라이버 쪽 상태 */
+typedef struct { int live; uint32_t t_done, tag; int status; } cpl_t;
+static cpl_t hw[8];                                                /* NPU 흉내: 대기 중인 완료들 */
+static uint32_t n_ok, n_err, n_timeout, n_stale;
+
+static void npu_submit(uint32_t now, uint32_t lat, int status) {   /* 태스크 문맥 */
+    if (job.st != IDLE) return;                                    /* 한 번에 한 job */
+    job.gen++; job.st = SUBMITTED; job.t_sub = now;
+    /* 실제: 입력 버퍼 cache clean (E7) → 레지스터에 주소·tag 쓰기 → doorbell */
+    if (lat) hw[job.gen & 7] = (cpl_t){ 1, now + lat, job.gen, status };
+}
+static void npu_irq(uint32_t tag, int status) {                    /* ISR 문맥: 상태만 바꾸고 나간다 */
+    if (job.st != SUBMITTED || tag != job.gen) { n_stale++; return; }   /* 늦게 온 완료 */
+    job.st = status ? ERROR : DONE;
+}
+static void inference_task(uint32_t now) {                         /* 태스크 문맥: 결과 소비 */
+    if (job.st == SUBMITTED && now - job.t_sub > TIMEOUT_MS) { job.st = TIMEOUT; /* 실제: NPU reset */ }
+    if (job.st == DONE)    { n_ok++;      /* 실제: 출력 버퍼 cache invalidate 후 읽기 */ }
+    if (job.st == ERROR)   { n_err++; }
+    if (job.st == TIMEOUT) { n_timeout++; }
+    if (job.st >= DONE) { printf("  t=%3u ms job %u -> %s\n", now, job.gen, NM[job.st]); job.st = IDLE; }
+}
+int main(void) {
+    /* job별 (지연 ms, status): 정상, 정상, 에러, 멈춤(완료 없음), 늦음(45 ms → 다음 job 진행 중에 도착), 정상 */
+    const uint32_t lat[] = {8, 9, 5, 0, 45, 8}; const int sts[] = {0, 0, 1, 0, 0, 0};
+    for (uint32_t t = 0; t < 260; t++) {
+        if (t % 40 == 0 && t / 40 < 6) npu_submit(t, lat[t / 40], sts[t / 40]);
+        for (int k = 0; k < 8; k++)
+            if (hw[k].live && t == hw[k].t_done) { hw[k].live = 0; npu_irq(hw[k].tag, hw[k].status); }
+        inference_task(t);
+    }
+    printf("ok %u  error %u  timeout %u  stale IRQ ignored %u\n", n_ok, n_err, n_timeout, n_stale);
+    return 0;
+}
+```
+
+```text
+  t=  8 ms job 1 -> DONE
+  t= 49 ms job 2 -> DONE
+  t= 85 ms job 3 -> ERROR
+  t=141 ms job 4 -> TIMEOUT
+  t=181 ms job 5 -> TIMEOUT
+  t=208 ms job 6 -> DONE
+ok 3  error 1  timeout 2  stale IRQ ignored 1
+```
+
+출력에서 볼 것: job 5는 20 ms 안에 안 끝나서 181 ms에 TIMEOUT 처리됐다. 그 완료 IRQ는 205 ms에 도착하는데, 그때 NPU는 job 6(200 ms 제출)을 돌리는 중이다. tag 검사가 없으면 job 6이 5 ms 만에 "DONE"이 되고 **job 5의 출력 버퍼를 job 6의 결과로 읽는다**. 이것이 `stale IRQ ignored 1`이 막은 사고다. Don에게는 NVMe의 command ID(CID)로 늦은 completion을 걸러내는 것과 같은 구조다. 실제 드라이버에서는 timeout 뒤 NPU를 reset해서 늦은 완료 자체가 안 오게 하는 것이 1차 방어이고, tag는 reset과 IRQ가 경쟁하는 틈을 막는 2차 방어다.
+
+### 3.6 우선순위 — 왜 추론은 캡처보다 낮은가
+
+1.1절 표의 비대칭을 다시 보자. 캡처를 놓치면 데이터가 **영원히** 사라진다. 전처리가 늦으면 링이 버텨 주는 동안은 괜찮다. 추론이 늦으면 결과가 늦을 뿐이고, 한 번 건너뛰어도 다음 창이 거의 같은 정보를 담고 있다(창 1 s, stride 40 ms면 겹침 96%). 그래서 우선순위는 **"놓치면 복구 불가능한 일일수록 높게"** 둔다. Rate-monotonic(주기가 짧을수록 높게) 규칙과도 같은 결론이다(D6).
+
+**예제 5** — 무엇을 확인하나: 코어 하나, 고정 우선순위 선점 스케줄러를 0.1 ms tick으로 직접 시뮬레이션한다(macOS에서는 사용자 프로세스가 실시간 우선순위를 제대로 쓸 수 없어서, 실제 스레드 대신 계산으로 본다). 캡처 10 ms마다 0.2 ms(DMA 반쪽 하나만큼만 버팀), 전처리 10 ms마다 1.5 ms(raw 링 4칸), 추론 40 ms마다 25 ms. 우선순위 배치를 바꿔 10 s 동안의 손실과 최악 응답 시간을 센다.
+
+```c
+/* prio_sim.c — 코어 1개 고정 우선순위 스케줄링 이산 시뮬레이션 (0.1 ms tick, 10 s). macOS에서 RT 우선순위를 못 쓰니 직접 계산 */
+#include <stdio.h>
+#include <string.h>
+#define NT 3
+typedef struct { const char *name; int period, cost, depth, prio, grp; } task_t;  /* 단위: 0.1 ms */
+typedef struct { int q[8], n, left, drops, done, max_rt; } run_t;   /* q: 대기 job의 release 시각 */
+
+static void sim(const char *title, const task_t *t) {
+    run_t r[NT]; memset(r, 0, sizeof r); int cur;
+    for (int now = 0; now < 100000; now++) {
+        for (int i = 0; i < NT; i++) if (now % t[i].period == 0) {
+            if (r[i].n == t[i].depth) r[i].drops++;                 /* 버퍼 가득 → 프레임 잃음 */
+            else r[i].q[r[i].n++] = now;
+        }
+        int best = -1;
+        for (int i = 0; i < NT; i++) if (r[i].n && (best < 0 || t[i].prio > t[best].prio)) best = i;
+        for (int i = 0; best >= 0 && i < NT; i++)                  /* 같은 그룹 안에서는 시작한 job이 끝까지 */
+            if (i != best && r[i].left && t[i].grp == t[best].grp) best = i;
+        if (best < 0) continue;
+        if (!r[best].left) r[best].left = t[best].cost;
+        cur = best;
+        if (--r[cur].left == 0) {                                   /* job 완료 */
+            int rt = now + 1 - r[cur].q[0];
+            if (rt > r[cur].max_rt) r[cur].max_rt = rt;
+            memmove(r[cur].q, r[cur].q + 1, sizeof(int) * 7); r[cur].n--; r[cur].done++;
+        }
+    }
+    printf("%s\n", title);
+    for (int i = 0; i < NT; i++)
+        printf("  %-9s done %5d  dropped %4d  worst response %5.1f ms\n", t[i].name, r[i].done, r[i].drops, r[i].max_rt / 10.0);
+}
+int main(void) {   /* capture: 10 ms마다 0.2 ms, DMA 반쪽 1개 여유 / feature: 1.5 ms, raw 링 4칸 / inference: 40 ms마다 25 ms */
+    task_t a[NT] = {{"capture", 100, 2, 1, 3, 0}, {"feature", 100, 15, 4, 2, 1}, {"inference", 400, 250, 1, 1, 2}};
+    task_t b[NT] = {{"capture", 100, 2, 1, 1, 0}, {"feature", 100, 15, 4, 2, 1}, {"inference", 400, 250, 1, 3, 2}};
+    task_t c[NT] = {{"capture", 100, 2, 1, 3, 0}, {"feature", 100, 15, 2, 1, 1}, {"inference", 400, 250, 1, 1, 1}};
+    sim("A) preemptive: capture > feature > inference", a);
+    sim("B) preemptive: inference > feature > capture", b);
+    sim("C) capture=ISR, feature+inference in one superloop (raw ring 2)", c);
+    c[1].depth = 1;
+    sim("D) same superloop, raw ring 1", c);
+    return 0;
+}
+```
+
+```text
+A) preemptive: capture > feature > inference
+  capture   done  1000  dropped    0  worst response   0.2 ms
+  feature   done  1000  dropped    0  worst response   1.7 ms
+  inference done   250  dropped    0  worst response  31.8 ms
+B) preemptive: inference > feature > capture
+  capture   done   500  dropped  500  worst response  29.7 ms
+  feature   done  1000  dropped    0  worst response  26.5 ms
+  inference done   250  dropped    0  worst response  25.0 ms
+C) capture=ISR, feature+inference in one superloop (raw ring 2)
+  capture   done  1000  dropped    0  worst response   0.2 ms
+  feature   done  1000  dropped    0  worst response  18.6 ms
+  inference done   250  dropped    0  worst response  27.1 ms
+D) same superloop, raw ring 1
+  capture   done  1000  dropped    0  worst response   0.2 ms
+  feature   done   750  dropped  250  worst response  18.6 ms
+  inference done   250  dropped    0  worst response  27.1 ms
+```
+
+출력에서 볼 것:
+
+- **A (캡처 > 전처리 > 추론)**: 손실 0. 추론의 최악 응답은 25 ms가 아니라 31.8 ms다 — 선점당한 시간(캡처·전처리 몫)이 더해진다. 이것이 추론이 치르는 값이고, 추론은 그 값을 치를 수 있다(stride 40 ms 안).
+- **B (추론이 최상위)**: 캡처의 절반(500개)이 사라진다. 이용률(0.02 + 0.15 + 0.625 = 80%)은 100% 미만인데도 실패한다. **평균 이용률이 아니라 높은 우선순위 일의 길이(blocking time)** 가 낮은 우선순위의 deadline을 깬다.
+- **C (캡처만 ISR, 전처리와 추론은 한 superloop)**: raw 링이 2칸이면 버틴다. 전처리 최악 응답이 18.6 ms로 늘었다(추론이 끝날 때까지 기다림).
+- **D (같은 superloop, 링 1칸)**: 전처리 프레임의 25%가 사라진다. superloop에서 **링 깊이가 곧 실시간 여유**다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 270">
+<text x="340" y="18" font-size="14" text-anchor="middle">처음 50 ms 타임라인 (예제 5와 같은 규칙으로 계산) — 1 ms = 11 px</text> <text x="10" y="44" font-size="13">A) 캡처 &gt; 전처리 &gt; 추론</text> <text x="10" y="68" font-size="12">캡처</text><text x="10" y="88" font-size="12">전처리</text><text x="10" y="108" font-size="12">추론</text>
+<rect x="90" y="58" width="3" height="14" fill="#4a7bd0"/><rect x="200" y="58" width="3" height="14" fill="#4a7bd0"/><rect x="310" y="58" width="3" height="14" fill="#4a7bd0"/><rect x="420" y="58" width="3" height="14" fill="#4a7bd0"/><rect x="530" y="58" width="3" height="14" fill="#4a7bd0"/>
+<rect x="92" y="78" width="17" height="14" fill="#3f9a6b"/><rect x="202" y="78" width="17" height="14" fill="#3f9a6b"/><rect x="312" y="78" width="17" height="14" fill="#3f9a6b"/><rect x="422" y="78" width="17" height="14" fill="#3f9a6b"/><rect x="532" y="78" width="17" height="14" fill="#3f9a6b"/>
+<rect x="109" y="98" width="91" height="14" fill="#e08a3c"/><rect x="219" y="98" width="91" height="14" fill="#e08a3c"/><rect x="329" y="98" width="91" height="14" fill="#e08a3c"/><rect x="439" y="98" width="1" height="14" fill="#e08a3c"/><rect x="549" y="98" width="91" height="14" fill="#e08a3c"/> <text x="445" y="110" font-size="12">31.8 ms에 끝</text> <text x="10" y="148" font-size="13">B) 추론 &gt; 전처리 &gt; 캡처</text>
+<text x="10" y="172" font-size="12">캡처</text><text x="10" y="192" font-size="12">전처리</text><text x="10" y="212" font-size="12">추론</text> <rect x="414" y="162" width="3" height="14" fill="#4a7bd0"/><rect x="436" y="162" width="3" height="14" fill="#4a7bd0"/> <rect x="365" y="182" width="50" height="14" fill="#3f9a6b"/><rect x="420" y="182" width="16" height="14" fill="#3f9a6b"/>
+<rect x="90" y="202" width="275" height="14" fill="#e08a3c"/><rect x="530" y="202" width="110" height="14" fill="#e08a3c"/> <text x="200" y="176" font-size="13" fill="#d0564a" text-anchor="middle">✕</text><text x="310" y="176" font-size="13" fill="#d0564a" text-anchor="middle">✕</text>
+<text x="200" y="160" font-size="12" text-anchor="middle">손실</text><text x="310" y="160" font-size="12" text-anchor="middle">손실</text> <line x1="90" y1="228" x2="640" y2="228" stroke="currentColor"/>
+<line x1="90" y1="224" x2="90" y2="232" stroke="currentColor"/><line x1="200" y1="224" x2="200" y2="232" stroke="currentColor"/><line x1="310" y1="224" x2="310" y2="232" stroke="currentColor"/><line x1="420" y1="224" x2="420" y2="232" stroke="currentColor"/><line x1="530" y1="224" x2="530" y2="232" stroke="currentColor"/><line x1="640" y1="224" x2="640" y2="232" stroke="currentColor"/>
+<text x="90" y="246" font-size="12" text-anchor="middle">0</text><text x="200" y="246" font-size="12" text-anchor="middle">10</text><text x="310" y="246" font-size="12" text-anchor="middle">20</text><text x="420" y="246" font-size="12" text-anchor="middle">30</text><text x="530" y="246" font-size="12" text-anchor="middle">40</text><text x="640" y="246" font-size="12" text-anchor="middle">50 ms</text>
+<text x="340" y="264" font-size="12" text-anchor="middle">B에서는 10, 20 ms의 캡처가 추론 25 ms에 막혀 DMA 반쪽이 덮인다</text>
+</svg>
+```
+
+그림 5 — 예제 5의 A와 B 배치에서 처음 50 ms. A에서 추론(주황)은 10 ms마다 잘게 선점당하지만 31.8 ms에 끝난다. B에서 추론이 0–25 ms를 독점하는 동안 10 ms와 20 ms의 캡처가 실행되지 못하고 사라진다(✕).
+
+실제 RTOS에서 하나 더 챙길 것: **전처리를 추론보다 높게** 두는 것이 기본이지만, 전처리 자체가 무거우면(예: 카메라 리사이즈 5 ms) 그 아래 추론의 응답이 늘어난다. 각 태스크의 최악 응답 시간은 "자기 실행 시간 + 자기보다 높은 모든 태스크의 간섭"으로 계산한다(응답 시간 분석, J2). 그리고 후처리·판정은 짧으므로 추론 태스크 안에서 끝내는 경우가 많다.
+
+---
+
+## 4. ML 컴포넌트 API — `ml.h`
+
+### 4.1 왜 API부터 정하나
+
+TFLM이든 QNN이든 자체 커널이든, 런타임 API를 앱 코드 여기저기서 직접 부르면 세 가지가 무너진다. (1) 모델을 바꿀 때 앱 전체를 고친다. (2) 소유권 규칙(누가 arena를 만지나)이 코드에 흩어진다. (3) 호스트에서 테스트할 수 없다. 그래서 펌웨어에서는 ML을 **하나의 부품**으로 감싸고, 앱은 그 부품의 작은 API만 본다. HAL로 주변장치를 감싸는 것과 같은 이유다.
+
+좋은 ML 부품 API의 조건: (1) **메모리를 받고 할당하지 않는다** — arena와 모델 포인터를 호출자가 넘기므로 링커 맵에서 주인이 분명하다. (2) **소유권을 함수마다 문서화한다** — 빌림(borrow, 호출 동안만), 복사(copy), 독점(exclusive, init~deinit). (3) **상태를 드러낸다** — UNINIT / WARMUP / RUNNING / FAULTED로 "아직 결과 없음"과 "에러"를 구분. (4) **streaming 상태 reset을 따로 둔다**. (5) **카운터를 준다**. (6) **스레드 안전성을 약속하지 않는다** — "한 태스크에서만 부른다"가 계약이고 lock은 부품 밖의 일이다(9.4절).
+
+### 4.2 헤더
+
+**예제 6 (1/3)** — 헤더. 각 함수 주석의 [빌림]/[복사]/[독점]이 소유권 계약이다.
+
+```c
+/* ml.h — ML 컴포넌트 공개 API. 소유권은 함수마다 [빌림]/[복사]/[독점]으로 적는다. */
+#ifndef ML_H
+#define ML_H
+#include <stddef.h>
+#include <stdint.h>
+
+#define ML_FEAT_DIM 4u          /* 프레임(10 ms)당 특징 수 */
+#define ML_WIN      16u         /* 모델 입력 창 = 16 프레임 = 160 ms */
+
+typedef enum {
+    ML_OK = 0, ML_E_ARG, ML_E_MAGIC, ML_E_VERSION, ML_E_CRC, ML_E_OPS,
+    ML_E_ARENA, ML_E_STATE, ML_E_INVOKE, ML_E_RANGE, ML_E_DISABLED
+} ml_status_t;
+typedef enum { ML_ST_UNINIT, ML_ST_WARMUP, ML_ST_RUNNING, ML_ST_FAULTED } ml_state_t;
+typedef enum { ML_PUSH_ONLY, ML_RUN_IF_DUE } ml_mode_t;
+
+typedef struct {
+    const uint8_t *model;   size_t model_len;  /* [빌림·영구] flash의 모델 blob. ml_deinit까지 유효해야 */
+    uint8_t       *arena;   size_t arena_len;  /* [독점] 호출자가 정적 할당, init~deinit 동안 ml만 만진다 */
+    uint32_t       stride;                     /* 몇 프레임마다 추론할지 (예: 4 = 40 ms) */
+} ml_config_t;
+
+typedef struct {
+    uint32_t seq;           /* 이 결과를 만든 창의 마지막 프레임 번호 */
+    int8_t   score;         /* event 점수 (int8, 양수일수록 event) */
+    uint8_t  valid;         /* 1 = 이번 호출에서 새 결과가 나왔다 */
+} ml_result_t;
+
+typedef struct {
+    uint32_t frames, gaps, resets, invokes, skipped, invoke_err, range_err;
+    uint32_t state;
+} ml_stats_t;
+
+ml_status_t ml_init(const ml_config_t *cfg);                 /* 모델 검증 + arena 배치 + warm-up */
+/* feat: [빌림·호출 동안만] 내부 창에 복사된다. out: [호출자 소유] 새 결과면 valid=1 */
+ml_status_t ml_process_frame(uint32_t seq, const int8_t feat[ML_FEAT_DIM],
+                             ml_mode_t mode, ml_result_t *out);
+ml_status_t ml_get_result(ml_result_t *out);                 /* [복사] 마지막 결과 */
+void        ml_reset(void);                                  /* streaming 상태만 지운다 (gap, 설정 변경) */
+void        ml_stats(ml_stats_t *out);                       /* [복사] 카운터 스냅샷 */
+void        ml_deinit(void);                                 /* 이후 arena·model 반납 */
+void        ml_test_inject_invoke_errors(uint32_t n);        /* 테스트 훅: 다음 n번 invoke 실패 */
+#endif
+```
+
+`ml_process_frame`의 `mode`가 이 API의 핵심 설계다. `ML_RUN_IF_DUE`는 "stride가 찼으면 추론하라", `ML_PUSH_ONLY`는 "창에 넣기만 하고 추론은 건너뛰어라"다. 추론이 밀렸을 때 앱이 **밀린 프레임은 창에만 넣고 마지막 프레임에서만 추론**하게 할 수 있다(7.1절의 latest 정책). 이 결정을 부품이 아니라 앱(스케줄링을 아는 쪽)이 내린다.
+
+### 4.3 모델 blob 형식 — 헤더 + CRC + 요구 사항
+
+모델은 런타임이 해석하는 바이트 덩어리(blob)다. TFLite flatbuffer라면 앞 8바이트에 root offset과 `"TFL3"` 식별자가 있고(F2 3.3절), 버전·op 목록은 flatbuffer 안에 있다. 제품에서는 그 앞에 **자체 컨테이너 헤더**를 하나 더 붙이는 경우가 많다: magic, 형식 버전, payload 길이, CRC, 필요한 arena 크기, 필요한 op 목록. 이유는 부팅 때 flatbuffer를 해석하기 **전에** 싸게 거르기 위해서다(J5에서 A/B 슬롯 선택에 같은 헤더를 쓴다).
+
+**예제 6 (2/3)** — 이 노트의 모델 형식과 "변환기". 모델은 학습된 것이 아니라 "창의 평균 에너지가 높으면 event"를 int8 MLP(64 → 8 → 2) 모양으로 손으로 쓴 것이다. 통합 구조를 보는 것이 목적이라 모델을 일부러 단순하게 했다. 실제 TFLM 모델로 같은 구조를 만들고 싶으면 `invoke()` 자리에 F2 4.2절의 `interpreter.Invoke()`를 넣으면 된다.
+
+```c
+/* model_fmt.h — 모델 blob 형식 + "변환기"(오프라인 도구 흉내). 실제 제품이면 build 때 만든 const 배열 */
+#ifndef MODEL_FMT_H
+#define MODEL_FMT_H
+#include <assert.h>
+#include <stdint.h>
+#include <string.h>
+
+#define MODEL_MAGIC 0x4C4D314Au              /* "J1ML" little-endian */
+#define OP_FC   0x1u
+#define OP_RELU 0x2u
+#define OP_LSTM 0x4u                         /* 이 런타임은 지원 안 함 (호환성 검사용) */
+#define N_IN  64                             /* 16 프레임 × 4 특징 */
+#define N_H   8
+#define N_OUT 2                              /* [0]=background, [1]=event */
+
+typedef struct {
+    uint32_t magic; uint16_t ver_major, ver_minor;
+    uint32_t op_mask, arena_need, payload_len, crc32;
+} model_hdr_t;
+static_assert(sizeof(model_hdr_t) == 24, "header must be 24 B, no padding");
+
+typedef struct {                              /* payload: 정렬된 순서 그대로 직렬화 */
+    int32_t b1[N_H]; int32_t b2[N_OUT];
+    int8_t  w1[N_H][N_IN]; int8_t w2[N_OUT][N_H];
+} model_payload_t;
+
+static inline uint32_t crc32_calc(const uint8_t *p, uint32_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    while (n--) { c ^= *p++; for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u))); }
+    return ~c;
+}
+
+/* 손으로 쓴 int8 MLP: hidden h는 프레임 2h, 2h+1의 에너지가 높으면 켜진다. 학습된 모델이 아니다. */
+static inline uint32_t model_build(uint8_t *buf, uint16_t major, uint16_t minor, uint32_t ops) {
+    model_payload_t p; memset(&p, 0, sizeof p);
+    for (int h = 0; h < N_H; h++) {
+        p.b1[h] = -2 * 8 * 70;                            /* 특징 평균 70 이상이면 양수 */
+        for (int t = 2 * h; t < 2 * h + 2; t++)
+            for (int f = 0; f < 4; f++) p.w1[h][t * 4 + f] = 2;
+        p.w2[1][h] = 2;                                   /* event 로짓 = 2·Σh */
+    }
+    p.b2[0] = 400;                                        /* background 로짓 = 상수 400 */
+    model_hdr_t h = { MODEL_MAGIC, major, minor, ops, 256u, (uint32_t)sizeof p, 0 };
+    h.crc32 = crc32_calc((const uint8_t *)&p, sizeof p);
+    memcpy(buf, &h, sizeof h); memcpy(buf + sizeof h, &p, sizeof p);
+    return (uint32_t)(sizeof h + sizeof p);
+}
+#endif
+```
+
+### 4.4 구현
+
+**예제 6 (3/3)** — `ml.c`. init의 검증 순서, arena를 head(scratch)와 tail(persistent)로 나누는 것, streaming 창, gap 검출, 출력 범위 검사, 연속 에러 시 FAULTED를 눈여겨본다.
+
+```c
+/* ml.c — ML 컴포넌트 구현: 검증 → arena 배치 → warm-up → streaming 창 → invoke → 출력 검사 */
+#include "ml.h"
+#include "model_fmt.h"
+
+#define RT_MAJOR 1u
+#define RT_MAX_MINOR 2u
+#define RT_OPS (OP_FC | OP_RELU)               /* 이 런타임이 가진 커널 */
+
+typedef struct {                               /* arena tail = persistent (호출 사이에 살아남음) */
+    int8_t win[ML_WIN][ML_FEAT_DIM];
+    uint32_t last_seq, filled, since, consec_err;
+} ml_persist_t;
+typedef struct { int32_t acc1[N_H], acc2[N_OUT]; } ml_scratch_t;   /* arena head = invoke 동안만 */
+
+static struct {
+    const model_payload_t *p; ml_persist_t *ps; ml_scratch_t *sc;
+    uint32_t stride, inject; ml_state_t st; ml_result_t last; ml_stats_t s;
+} g;
+
+static int32_t clamp32(int32_t v, int32_t lo, int32_t hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+static ml_status_t invoke(const int8_t *x, int8_t *score) {
+    if (g.inject) { g.inject--; return ML_E_INVOKE; }        /* 테스트 훅: 런타임 에러 흉내 */
+    const model_payload_t *p = g.p; ml_scratch_t *sc = g.sc;
+    for (int h = 0; h < N_H; h++) {
+        int32_t a = p->b1[h];
+        for (int i = 0; i < N_IN; i++) a += p->w1[h][i] * x[i];
+        sc->acc1[h] = clamp32(a >> 2, 0, 127);                /* ReLU + requant */
+    }
+    for (int o = 0; o < N_OUT; o++) {
+        int32_t a = p->b2[o];
+        for (int h = 0; h < N_H; h++) a += p->w2[o][h] * sc->acc1[h];
+        sc->acc2[o] = a;
+    }
+    int32_t d = sc->acc2[1] - sc->acc2[0];
+    if (d > (1 << 14) || d < -(1 << 14)) return ML_E_RANGE;  /* 이 모델로는 나올 수 없는 값 */
+    *score = (int8_t)clamp32(d >> 3, -128, 127);
+    return ML_OK;
+}
+
+ml_status_t ml_init(const ml_config_t *c) {
+    model_hdr_t h;
+    g.st = ML_ST_UNINIT;
+    if (!c || !c->model || c->model_len < sizeof h || !c->arena || !c->stride) return ML_E_ARG;
+    if (((uintptr_t)c->model | (uintptr_t)c->arena) & 15u) return ML_E_ARG; /* 16 B 정렬 요구 */
+    memcpy(&h, c->model, sizeof h);
+    if (h.magic != MODEL_MAGIC) return ML_E_MAGIC;
+    if (h.ver_major != RT_MAJOR || h.ver_minor > RT_MAX_MINOR) return ML_E_VERSION;
+    if (h.payload_len != sizeof(model_payload_t) || c->model_len < sizeof h + h.payload_len ||
+        crc32_calc(c->model + sizeof h, h.payload_len) != h.crc32) return ML_E_CRC;
+    if (h.op_mask & ~RT_OPS) return ML_E_OPS;
+    size_t need = sizeof(ml_scratch_t) + sizeof(ml_persist_t);
+    if (h.arena_need < need) h.arena_need = (uint32_t)need;
+    if (c->arena_len < h.arena_need) return ML_E_ARENA;
+    memset(&g, 0, sizeof g);
+    g.p = (const model_payload_t *)(const void *)(c->model + sizeof h);   /* flash에서 바로 읽음 */
+    g.sc = (ml_scratch_t *)(void *)c->arena;                              /* head */
+    g.ps = (ml_persist_t *)(void *)(c->arena + c->arena_len - sizeof(ml_persist_t)); /* tail */
+    g.stride = c->stride;
+    int8_t zero[N_IN] = {0}, s;                                 /* warm-up: 한 번 돌려 본다 */
+    if (invoke(zero, &s) != ML_OK) return ML_E_INVOKE;
+    memset(g.ps, 0, sizeof *g.ps);
+    g.st = ML_ST_WARMUP;
+    return ML_OK;
+}
+
+void ml_reset(void) {
+    if (g.st == ML_ST_UNINIT || g.st == ML_ST_FAULTED) return;
+    uint32_t ce = g.ps->consec_err;
+    memset(g.ps, 0, sizeof *g.ps); g.ps->consec_err = ce;
+    g.st = ML_ST_WARMUP; g.s.resets++;
+}
+
+ml_status_t ml_process_frame(uint32_t seq, const int8_t feat[ML_FEAT_DIM],
+                             ml_mode_t mode, ml_result_t *out) {
+    if (out) out->valid = 0;
+    if (g.st == ML_ST_UNINIT) return ML_E_STATE;
+    if (g.st == ML_ST_FAULTED) return ML_E_DISABLED;
+    ml_persist_t *ps = g.ps;
+    if (ps->filled && seq != ps->last_seq + 1) { g.s.gaps++; ml_reset(); }  /* 끊김 → 창 무효 */
+    memmove(ps->win[0], ps->win[1], (ML_WIN - 1) * ML_FEAT_DIM);
+    memcpy(ps->win[ML_WIN - 1], feat, ML_FEAT_DIM);                          /* [복사] */
+    ps->last_seq = seq; ps->since++; g.s.frames++;
+    if (ps->filled < ML_WIN) {                                              /* 아직 warm-up */
+        if (++ps->filled < ML_WIN) return ML_OK;
+        ps->since = g.stride;                                               /* 창이 막 찼다 → 바로 추론 */
+    }
+    g.st = ML_ST_RUNNING;
+    if (ps->since < g.stride || mode == ML_PUSH_ONLY) return ML_OK;
+    g.s.skipped += ps->since / g.stride - 1; ps->since %= g.stride;
+    int8_t score; g.s.invokes++;
+    ml_status_t r = invoke(&ps->win[0][0], &score);
+    if (r != ML_OK) {
+        if (r == ML_E_RANGE) g.s.range_err++; else g.s.invoke_err++;
+        if (++ps->consec_err >= 3) g.st = ML_ST_FAULTED;                    /* 연속 3회 → 끈다 */
+        return r;
+    }
+    ps->consec_err = 0;
+    g.last = (ml_result_t){ seq, score, 1 };
+    if (out) *out = g.last;
+    return ML_OK;
+}
+
+ml_status_t ml_get_result(ml_result_t *out) {
+    if (g.st == ML_ST_UNINIT) return ML_E_STATE;
+    *out = g.last; out->valid = g.last.valid; return ML_OK;
+}
+void ml_stats(ml_stats_t *out) { *out = g.s; out->state = (uint32_t)g.st; }
+void ml_deinit(void) { memset(&g, 0, sizeof g); }
+void ml_test_inject_invoke_errors(uint32_t n) { g.inject = n; }
+```
+
+설계 포인트를 짚어 두자.
+
+- **검증 순서가 비용 순서다**: 인자·정렬(공짜) → magic → 버전 → 길이·CRC(수백 B~수백 KB 읽기) → op 호환성 → arena 크기. 싼 검사로 먼저 거른다. 큰 모델의 CRC는 부팅 시간에 보인다(F7 9.4절: 비트 단위 CRC면 수백 KB 모델에 수 ms~수십 ms, 하드웨어 CRC 가속기로 줄인다). 부팅마다가 부담이면 "업데이트 직후 한 번 + 주기적 scrub"으로 바꾼다.
+- **가중치는 복사하지 않는다**: `g.p`는 flash의 blob을 직접 가리킨다. 그래서 blob 정렬(16 B)을 init에서 검사한다.
+- **arena 분할**: scratch(`acc1`, `acc2`)는 head, streaming 창은 tail에 둔다. 9.1절에서 이 구분이 "모델 둘이 arena 하나"를 가능하게 하는 열쇠임을 본다. TFLM의 arena도 같은 구조다: 앞쪽(head)은 invoke 중에만 쓰는 비영속 영역, 뒤쪽(tail)은 interpreter가 살아 있는 동안 유지되는 영속 영역이다(D2 4.3절).
+- **warm-up**: init 끝에 0 입력으로 한 번 돌린다. 실제 기기에서 첫 invoke는 캐시·TLB·flash prefetch가 비어 있어 느리고(D6 2.3절의 cold 호출), 커널 내부의 지연 초기화가 숨어 있을 수도 있다. 첫 사용자 프레임에서 이것을 치르지 않게 init에서 치른다. 덤으로 "invoke 경로가 실제로 동작한다"는 self-test가 된다.
+- **연속 에러 3회 → FAULTED**: 한 번의 에러는 무시하고 다음 프레임에서 회복할 수 있다. 연속이면 부품을 끄고 앱이 fallback으로 간다(8절).
+
+---
+
+## 5. 모델 생명주기 — init에서 shutdown까지
+
+### 5.1 상태 그림
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 340">
+<text x="340" y="18" font-size="14" text-anchor="middle">ML 부품의 생명주기 — 상태와 전이</text> <rect x="20" y="60" width="110" height="44" rx="8" fill="none" stroke="#888" stroke-width="2"/> <text x="75" y="87" font-size="13" text-anchor="middle">UNINIT</text> <rect x="250" y="60" width="120" height="44" rx="8" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<text x="310" y="87" font-size="13" text-anchor="middle">WARMUP</text> <rect x="500" y="60" width="140" height="44" rx="8" fill="none" stroke="#3f9a6b" stroke-width="2"/> <text x="570" y="87" font-size="13" text-anchor="middle">RUNNING</text> <rect x="500" y="200" width="140" height="44" rx="8" fill="none" stroke="#d0564a" stroke-width="2"/> <text x="570" y="227" font-size="13" text-anchor="middle">FAULTED</text>
+<rect x="250" y="200" width="120" height="44" rx="8" fill="none" stroke="#888" stroke-width="2" stroke-dasharray="5 3"/> <text x="310" y="220" font-size="13" text-anchor="middle">SLEEP</text> <text x="310" y="236" font-size="12" text-anchor="middle">(앱 수준)</text> <line x1="130" y1="82" x2="250" y2="82" stroke="currentColor"/><polygon points="250,82 242,78 242,86" fill="currentColor"/>
+<text x="190" y="54" font-size="12" text-anchor="middle">ml_init:</text> <text x="190" y="72" font-size="12" text-anchor="middle">검증 + warm-up</text> <line x1="370" y1="74" x2="500" y2="74" stroke="currentColor"/><polygon points="500,74 492,70 492,78" fill="currentColor"/> <text x="435" y="66" font-size="12" text-anchor="middle">창이 가득 참</text>
+<line x1="500" y1="94" x2="370" y2="94" stroke="currentColor"/><polygon points="370,94 378,90 378,98" fill="currentColor"/> <text x="435" y="114" font-size="12" text-anchor="middle">gap · ml_reset</text> <line x1="570" y1="104" x2="570" y2="200" stroke="currentColor"/><polygon points="570,200 566,192 574,192" fill="currentColor"/> <text x="580" y="150" font-size="12">연속 에러 3회</text>
+<line x1="500" y1="104" x2="370" y2="210" stroke="currentColor"/><polygon points="370,210 376,202 380,209" fill="currentColor"/> <text x="400" y="176" font-size="12">sleep 진입</text> <line x1="290" y1="200" x2="290" y2="104" stroke="currentColor"/><polygon points="290,104 286,112 294,112" fill="currentColor"/> <text x="282" y="160" font-size="12" text-anchor="end">깨어남: reset</text>
+<path d="M 570 244 Q 570 285 300 285 Q 75 285 75 104" fill="none" stroke="currentColor"/> <polygon points="75,104 71,112 79,112" fill="currentColor"/> <text x="340" y="305" font-size="12" text-anchor="middle">아래 곡선: ml_deinit → backoff → ml_init (재시도), 또는 설정 변경 · 모델 교체</text> <text x="340" y="325" font-size="12" text-anchor="middle">init 실패(E_CRC, E_VERSION, E_OPS, E_ARENA)는 UNINIT에 머문다 → 이전 모델 슬롯으로 (J5)</text>
+</svg>
+```
+
+그림 6 — ML 부품의 상태. WARMUP은 "모델은 준비됐지만 streaming 창이 아직 안 찼다"는 뜻이다. gap이나 깨어남은 RUNNING을 WARMUP으로 되돌린다. FAULTED에서 나오는 길은 deinit → init뿐이다. SLEEP은 부품 상태가 아니라 앱이 부품을 쓰지 않는 구간이다.
+
+### 5.2 init — 무엇을 검증하나
+
+| 검사 | 막는 사고 | 실패 시 |
+|---|---|---|
+| 정렬 (blob, arena) | 비정렬 접근 fault, SIMD 커널 오동작 | 빌드·링커 설정 버그 → E_ARG |
+| magic | 빈 슬롯, 다른 종류의 파일 | 이전 슬롯 시도 |
+| 형식 버전 (major/minor) | 런타임이 모르는 형식 해석 | major 다르면 거부, minor가 더 새것이면 거부 |
+| 길이 + CRC | 전송·flash 쓰기 중 손상, 비트 반전 | 이전 슬롯 + telemetry |
+| op 호환성 | 런타임에 없는 커널 → invoke 중 실패 | 거부 (J5: 업데이트 전에 서버가 검사해야 함) |
+| arena 크기 | AllocateTensors 실패, 또는 더 나쁘게 넘침 | 거부 |
+| warm-up invoke | 커널 경로 자체의 문제 | 거부 |
+
+TFLM에서는 op 호환성 검사가 `AllocateTensors()`에서 일어난다: op resolver에 없는 op가 모델에 있으면 여기서 실패한다(F2 4.3절). arena 부족도 같은 곳에서 실패한다. 즉 TFLM을 쓰면 위 표의 아래 두 줄은 런타임이 해 주고, 위 네 줄(컨테이너 헤더)은 직접 한다. 버전 규칙에서 "minor가 더 새것이면 거부"는 보수적인 선택이다 — 새 minor가 "옛 런타임도 읽을 수 있는 추가"만 하도록 형식을 설계했다면 허용해도 된다. 이 결정은 J5의 호환성 매트릭스에 적어 둔다.
+
+### 5.3 코드로 확인 — 생명주기 테스트
+
+**예제 7** — 무엇을 확인하나: 잘못된 모델 6종이 각각 맞는 에러로 거부되는지, 정상 모델이 WARMUP → RUNNING으로 가는지, 프레임 2개 유실이 gap → reset → WARMUP을 일으키는지, invoke 에러 3번이 FAULTED → DISABLED로 가는지.
+
+```c
+/* ml_test.c — 생명주기: 잘못된 모델 거부 → init → warm-up → gap reset → 연속 에러 → FAULTED */
+#include <stdio.h>
+#include "ml.h"
+#include "model_fmt.h"
+
+static _Alignas(16) uint8_t blob[1024], bad[1024];
+static _Alignas(16) uint8_t arena[256];
+static const char *ST[] = {"UNINIT", "WARMUP", "RUNNING", "FAULTED"};
+static const char *ER[] = {"OK", "E_ARG", "E_MAGIC", "E_VERSION", "E_CRC", "E_OPS",
+                           "E_ARENA", "E_STATE", "E_INVOKE", "E_RANGE", "E_DISABLED"};
+
+static void try_init(const char *what, const uint8_t *m, size_t ml, size_t al) {
+    ml_config_t c = { m, ml, arena, al, 4 };
+    printf("%-24s -> %s\n", what, ER[ml_init(&c)]);
+}
+int main(void) {
+    uint32_t n = model_build(blob, 1, 2, OP_FC | OP_RELU);
+    printf("model blob %u B (header 24 + payload %u)\n", n, n - 24);
+    model_build(bad, 2, 0, OP_FC);            try_init("major 2.0", bad, n, sizeof arena);
+    model_build(bad, 1, 3, OP_FC);            try_init("minor 1.3 (newer)", bad, n, sizeof arena);
+    model_build(bad, 1, 0, OP_FC | OP_LSTM);  try_init("needs LSTM op", bad, n, sizeof arena);
+    model_build(bad, 1, 0, OP_FC); bad[100] ^= 0x10; try_init("1 bit flip in payload", bad, n, sizeof arena);
+    try_init("arena 64 B", blob, n, 64);
+    try_init("misaligned model", blob + 1, n, sizeof arena);
+    try_init("good model", blob, n, sizeof arena);
+
+    ml_result_t r = {0}; ml_stats_t s; int8_t loud[4] = {95, 95, 95, 95};
+    for (uint32_t seq = 0; seq < 24; seq++) {
+        if (seq == 18) seq = 20;                                   /* 프레임 2개 유실 */
+        ml_process_frame(seq, loud, ML_RUN_IF_DUE, &r);
+        ml_stats(&s);
+        if (r.valid || seq == 0 || seq == 15 || seq == 20)
+            printf("seq %2u  state %-7s valid %u score %4d\n", seq, ST[s.state], r.valid, r.valid ? r.score : 0);
+    }
+    ml_test_inject_invoke_errors(3);
+    for (uint32_t seq = 24; seq < 60; seq++) {
+        ml_status_t st = ml_process_frame(seq, loud, ML_RUN_IF_DUE, &r);
+        if (st != ML_OK) { ml_stats(&s); printf("seq %2u  -> %-10s state %s\n", seq, ER[st], ST[s.state]); }
+        if (st == ML_E_DISABLED) break;
+    }
+    ml_stats(&s);
+    printf("frames %u gaps %u resets %u invokes %u invoke_err %u\n",
+           s.frames, s.gaps, s.resets, s.invokes, s.invoke_err);
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 ml_test.c ml.c -o ml_test && ./ml_test
+```
+
+```text
+model blob 592 B (header 24 + payload 568)
+major 2.0                -> E_VERSION
+minor 1.3 (newer)        -> E_VERSION
+needs LSTM op            -> E_OPS
+1 bit flip in payload    -> E_CRC
+arena 64 B               -> E_ARENA
+misaligned model         -> E_ARG
+good model               -> OK
+seq  0  state WARMUP  valid 0 score    0
+seq 15  state RUNNING valid 1 score  127
+seq 20  state WARMUP  valid 0 score    0
+seq 35  -> E_INVOKE   state RUNNING
+seq 39  -> E_INVOKE   state RUNNING
+seq 43  -> E_INVOKE   state FAULTED
+seq 44  -> E_DISABLED state FAULTED
+frames 42 gaps 1 resets 1 invokes 4 invoke_err 3
+```
+
+출력에서 볼 것:
+
+- payload의 **비트 하나**(`bad[100] ^= 0x10`)가 CRC로 잡힌다. 이 비트가 가중치 하나를 바꿨다면 모델은 에러 없이 조금 틀린 답을 냈을 것이다 — 가장 찾기 어려운 종류의 버그다.
+- seq 15에서 창(16 프레임)이 처음 차고 바로 결과가 나온다. seq 18–19가 빠지자 seq 20에서 WARMUP으로 돌아갔고, 다시 16 프레임(20–35)을 모은 뒤 seq 35에서야 추론했다(그 추론은 주입한 에러). **프레임 2개(20 ms) 유실이 결과 공백 160 ms + 다음 추론까지를 만든다.** 7.2절에서 실제 파이프라인으로 다시 본다.
+- 에러 3번(seq 35, 39, 43)에 FAULTED가 되고, 그 뒤 호출은 `E_DISABLED`를 받는다. 앱은 이것을 보고 fallback으로 간다.
+
+### 5.4 streaming 상태 reset — 언제, 무엇을
+
+streaming 모델은 지난 입력을 기억한다. 이 노트의 모델은 16 프레임 창, B5 3.4절의 streaming KWS는 conv 층마다 지난 프레임 몇 개, B3의 RNN/GRU는 hidden state를 기억한다. 이 기억은 **연속된 입력**을 가정한다. 그래서 다음 경우에는 반드시 지운다.
+
+- **gap**: 프레임 번호가 건너뛰었다(드롭, DMA overrun, 센서 FIFO overflow). 지우지 않으면 모델은 시간상 떨어진 두 조각을 이어 붙인 가짜 신호를 본다. RNN이면 hidden state가 그 가짜 신호로 오염되어 몇 초 동안 이상한 출력이 이어질 수 있다.
+- **센서 설정 변경**: 샘플레이트, 게인, IMU range가 바뀌면 이전 특징과 새 특징의 척도가 다르다.
+- **sleep에서 깨어남**: 그 사이의 시간은 존재하지 않는 입력이다.
+- **모델 교체**: 새 모델의 상태 형식은 다를 수 있다 → reset이 아니라 deinit → init.
+
+그리고 **후처리 상태도 같이** 지운다. smoothing 창, hysteresis 상태, debounce 카운터(B7 7절)가 reset 전의 점수를 들고 있으면 reset 직후 판정이 옛 점수에 끌려간다. 예제 9의 파이프라인은 `ml_stats`의 `resets` 카운터가 바뀌면 판정 상태를 지운다.
+
+gap 검출은 프레임에 붙은 **sequence 번호**로 한다. 타임스탬프로도 할 수 있지만(G7), 번호가 정확하고 싸다. DMA 완료 ISR에서 번호를 붙이는 것이 가장 정확하다 — ISR이 드롭을 했으면 그 번호는 아무 슬롯에도 안 들어가므로 소비자가 자동으로 gap을 본다.
+
+### 5.5 재초기화와 저전력·종료
+
+- **설정 변경**: 임계값만이면 판정 단계가 다음 결과부터 쓴다. stride·입력 형식이 바뀌면 추론 태스크에 메시지 → 현재 invoke가 끝난 뒤 `ml_deinit → ml_init`. 다른 태스크에서 직접 부르지 않는다.
+- **모델 교체 (J5)**: 새 슬롯 검증(5.2절) → deinit → 새 모델로 init → warm-up → telemetry로 확인 → 확정. 실패하면 이전 슬롯.
+- **저전력 진입 (E9)**: 현재 invoke를 끝내고 → 캡처를 멈추고 → 링을 비운다. arena가 전원이 꺼지는 SRAM bank에 있으면 깨어날 때 init을 다시 하거나(가중치가 flash에 있으면 수 ms), persistent 영역만 retention bank에 둔다(E9 3.3절). 깨어나면 streaming 상태는 어차피 reset이다.
+- **안전 종료**: NPU 오프로드라면 진행 중인 job이 끝나거나 timeout될 때까지 기다린 뒤 arena를 반납한다. 그 전에 arena를 다른 용도로 쓰면 NPU가 그 위에 결과를 쓴다.
+
+---
+
+## 6. 호스트 레퍼런스 구현 — 전체 파이프라인을 pthread로
+
+### 6.1 무엇을 흉내 내나
+
+| 펌웨어 | 호스트 흉내 |
+|---|---|
+| I2S DMA + 반쪽 완료 ISR | `isr_thread`: 10 ms 절대 시각마다 깨어 슬롯에 160 샘플을 쓰고 commit |
+| 전처리 태스크 | `feat_thread`: raw 슬롯을 제자리에서 읽어 특징 4개 → feature 링 |
+| 추론 태스크 + 판정 | `inf_thread`: feature를 받아 `ml_process_frame` → 판정 → 이벤트 출력 |
+| 세마포어 / task notification | `bell_t` (mutex + condvar + pending 플래그) |
+| 무거운 모델 | invoke 뒤 `infer_ms`만큼 바쁜 대기 (기본 4 ms) |
+| 마이크 입력 | 잡음 ±256 + 1.5 s마다 300 ms 동안 ±6000 사각파 "event" |
+
+macOS의 pthread는 실시간 우선순위가 없고 코어가 8개라서, 스레드끼리 CPU를 다투지 않는다. 그래서 이 구현이 보여 주는 것은 **버퍼링·drop 정책·역압·상태 reset의 논리**이고, 우선순위 효과는 예제 5의 시뮬레이션이 맡는다.
+
+### 6.2 코드 — `pipe.c`
+
+**예제 8** — 네 조각을 이어 붙이면 하나의 파일이다. 조각 1: 링. 슬롯 배열은 정적이고, `wr_slot`/`rd_slot`은 슬롯 **번호**를 돌려준다. 호출자는 그 슬롯에 직접 쓰고 읽은 뒤 `commit`/`release`한다. HWM은 producer가 잰다.
+
+```c
+/* pipe.c — "ISR"(10 ms 프레임) → raw 링 → 특징 스레드 → feature 링 → 추론 스레드(ml.h) → 판정 → 이벤트 */
+#define _DARWIN_C_SOURCE
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include "ml.h"
+#include "model_fmt.h"
+
+#define HOP 160u                    /* 10 ms @ 16 kHz */
+#ifndef RAW_N
+#define RAW_N 16u                   /* raw 링 16슬롯 = 160 ms 여유 (-DRAW_N=64로 바꿔 본다) */
+#endif
+#define FEAT_N 32u                  /* feature 링 32슬롯 = 320 ms 여유 */
+#define STRIDE 4u                   /* 4 프레임(40 ms)마다 추론 */
+#define MS 1000000ull
+
+/* ---- 1. 슬롯은 정적 배열, 링은 "인덱스"만 주고받는다 (zero-copy) ---- */
+typedef struct { uint32_t seq; uint64_t t_cap; int16_t pcm[HOP]; } raw_slot_t;
+typedef struct { uint32_t seq; uint64_t t_cap; int8_t f[ML_FEAT_DIM]; } feat_slot_t;
+typedef struct { _Alignas(64) _Atomic uint32_t head; _Alignas(64) _Atomic uint32_t tail; uint32_t hwm; } ring_t;
+
+static raw_slot_t raw_slot[RAW_N];  static ring_t raw;
+static feat_slot_t feat_slot[FEAT_N]; static ring_t feat;
+static _Alignas(16) uint8_t model_flash[1024];    /* 실제 기기: const, flash/XIP (F7) */
+static _Alignas(16) uint8_t tensor_arena[256];    /* 실제 기기: .bss, DTCM/SRAM (D2) */
+
+static int wr_slot(ring_t *r, uint32_t n) {        /* producer: 빈 슬롯 번호 or -1(가득) */
+    uint32_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
+    uint32_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
+    if (h - t == n) return -1;
+    if (h - t + 1 > r->hwm) r->hwm = h - t + 1;
+    return (int)(h & (n - 1));
+}
+static void commit(ring_t *r) { atomic_fetch_add_explicit(&r->head, 1, memory_order_release); }
+static int rd_slot(ring_t *r, uint32_t n) {        /* consumer: 읽을 슬롯 번호 or -1(빔) */
+    uint32_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+    uint32_t h = atomic_load_explicit(&r->head, memory_order_acquire);
+    return h == t ? -1 : (int)(t & (n - 1));
+}
+static void release(ring_t *r) { atomic_fetch_add_explicit(&r->tail, 1, memory_order_release); }
+static uint32_t count(ring_t *r) { return atomic_load(&r->head) - atomic_load(&r->tail); }
+```
+
+조각 2: doorbell과 카운터. 지연 히스토그램 구간은 1, 2, 5, 10, 20, 50, 100 ms다.
+
+```c
+/* ---- 2. doorbell = 인터럽트/세마포어 흉내 (E8 3.4절과 같은 패턴) ---- */
+typedef struct { pthread_mutex_t mu; pthread_cond_t cv; int pending; } bell_t;
+#define BELL_INIT { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0 }
+static bell_t bell_feat = BELL_INIT, bell_inf = BELL_INIT, bell_space = BELL_INIT;
+static void bell_ring(bell_t *b) { pthread_mutex_lock(&b->mu); b->pending = 1; pthread_cond_signal(&b->cv); pthread_mutex_unlock(&b->mu); }
+static void bell_wait(bell_t *b) {
+    pthread_mutex_lock(&b->mu); while (!b->pending) pthread_cond_wait(&b->cv, &b->mu);
+    b->pending = 0; pthread_mutex_unlock(&b->mu);
+}
+static uint64_t now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
+
+/* ---- 3. 설정과 카운터 ---- */
+static double run_s = 6; static int infer_ms = 4, latest = 0, stall_ms = 0;
+static uint64_t t0;
+static _Atomic int prod_done, feat_done;
+static _Atomic uint64_t ev_start; static _Atomic uint32_t ev_true;
+static uint32_t raw_drops, bp_waits, events, e2e_hist[8], inv_hist[8], ev_lat_max;
+static const unsigned EDGE[7] = {1, 2, 5, 10, 20, 50, 100};
+static void hist(uint32_t *hh, uint64_t ns) { int b = 0; while (b < 7 && ns >= EDGE[b] * MS) b++; hh[b]++; }
+```
+
+조각 3: "ISR"과 전처리. ISR은 링이 가득이면 **기다리지 않고** 프레임을 버리고 센다. 전처리는 슬롯을 제자리에서 읽고, 특징을 다 만든 즉시 release한 뒤, feature 링이 가득이면 **기다린다**(역압). 두 단계의 정책이 다른 이유는 7.3절에서 정리한다.
+
+```c
+/* ---- 4. "ISR + DMA": 10 ms마다 프레임 하나. 링이 가득이면 기다리지 않고 버린다 ---- */
+static void *isr_thread(void *a) {
+    (void)a; uint32_t lcg = 1, n = (uint32_t)(run_s * 100);
+    for (uint32_t seq = 0; seq < n; seq++) {
+        uint64_t due = t0 + seq * 10 * MS, now = now_ns();
+        if (due > now) { struct timespec d = { 0, (long)(due - now) }; nanosleep(&d, NULL); }
+        uint32_t ms = seq * 10 % 1500; int ev = ms >= 500 && ms < 800;   /* 1.5 s마다 300 ms event */
+        if (ms == 500) { atomic_store(&ev_start, now_ns()); atomic_fetch_add(&ev_true, 1); }
+        int i = wr_slot(&raw, RAW_N);
+        if (i < 0) { raw_drops++; continue; }                 /* drop-newest: ISR은 block 금지 */
+        raw_slot_t *s = &raw_slot[i];                         /* DMA가 이 슬롯에 바로 쓴다고 본다 */
+        for (uint32_t k = 0; k < HOP; k++) {
+            lcg = lcg * 1664525u + 1013904223u;
+            s->pcm[k] = (int16_t)((int32_t)(lcg >> 23) - 256 + (ev ? ((k & 16) ? 6000 : -6000) : 0));
+        }
+        s->seq = seq; s->t_cap = now_ns();
+        commit(&raw); bell_ring(&bell_feat);                  /* = xTaskNotifyFromISR / k_sem_give */
+    }
+    atomic_store(&prod_done, 1); bell_ring(&bell_feat); return NULL;
+}
+
+/* ---- 5. 특징: 40샘플 4블록의 평균 |x| → 8·log2 (0..127) ---- */
+static int8_t log2q(uint32_t v) {                             /* 8·log2(v), 소수 3비트 근사 */
+    if (!v) return 0;
+    int e = 31 - __builtin_clz(v);
+    uint32_t frac = e >= 3 ? (v >> (e - 3)) & 7u : (v << (3 - e)) & 7u;
+    int r = 8 * e + (int)frac; return (int8_t)(r > 127 ? 127 : r);
+}
+static void *feat_thread(void *a) {
+    (void)a; int stalled = 0;
+    for (;;) {
+        int i = rd_slot(&raw, RAW_N);
+        if (i < 0) { if (atomic_load(&prod_done)) break; bell_wait(&bell_feat); continue; }
+        if (stall_ms && !stalled && now_ns() - t0 > 3400 * MS) {   /* 결함 주입: 소비자 정지 */
+            stalled = 1; struct timespec d = { stall_ms / 1000, (long)(stall_ms % 1000) * 1000000L }; nanosleep(&d, NULL);
+        }
+        const raw_slot_t *s = &raw_slot[i];                   /* 제자리에서 읽는다 (복사 없음) */
+        feat_slot_t fs = { s->seq, s->t_cap, {0} };
+        for (uint32_t b = 0; b < ML_FEAT_DIM; b++) {
+            uint32_t acc = 0;
+            for (uint32_t k = 0; k < 40; k++) { int v = s->pcm[b * 40 + k]; acc += (uint32_t)(v < 0 ? -v : v); }
+            fs.f[b] = log2q(acc / 40);
+        }
+        release(&raw);                                        /* 이 순간 슬롯 소유권이 ISR로 돌아간다 */
+        int j;
+        while ((j = wr_slot(&feat, FEAT_N)) < 0) { bp_waits++; bell_wait(&bell_space); } /* 역압 */
+        feat_slot[j] = fs; commit(&feat); bell_ring(&bell_inf);
+    }
+    atomic_store(&feat_done, 1); bell_ring(&bell_inf); return NULL;
+}
+```
+
+조각 4: 추론 + 판정 + main. `latest` 정책이면 링에 더 읽을 것이 남아 있는 동안 `ML_PUSH_ONLY`로 창만 채우고, 마지막 프레임에서만 추론한다. `ml_stats`의 `resets`가 바뀌면 판정 상태도 지운다(5.4절).
+
+```c
+/* ---- 6. 추론 + 판정(B7: 3회 이동평균 + hysteresis) → 이벤트 버스 ---- */
+static int dec_on, dec_n; static int dec_hist[3];
+static void decide(int8_t score) {
+    dec_hist[dec_n++ % 3] = score;
+    int avg = dec_n < 3 ? -128 : (dec_hist[0] + dec_hist[1] + dec_hist[2]) / 3;
+    if (!dec_on && avg >= 40) {
+        dec_on = 1; events++;
+        uint32_t lat = (uint32_t)((now_ns() - atomic_load(&ev_start)) / MS);
+        if (lat > ev_lat_max) ev_lat_max = lat;
+        printf("  EVENT #%u at %.2f s, %u ms after onset\n", events, (double)(now_ns() - t0) / 1e9, lat);
+    } else if (dec_on && avg <= -20) dec_on = 0;
+}
+static void *inf_thread(void *a) {
+    (void)a; ml_result_t r; ml_stats_t s; uint32_t resets = 0;
+    for (;;) {
+        int j = rd_slot(&feat, FEAT_N);
+        if (j < 0) { if (atomic_load(&feat_done)) break; bell_wait(&bell_inf); continue; }
+        feat_slot_t fs = feat_slot[j];                     /* 8+8+4 B뿐이라 복사하고 바로 반납 */
+        release(&feat); bell_ring(&bell_space);
+        ml_mode_t mode = (latest && count(&feat) > 0) ? ML_PUSH_ONLY : ML_RUN_IF_DUE;
+        uint64_t t1 = now_ns();
+        ml_process_frame(fs.seq, fs.f, mode, &r);
+        ml_stats(&s);
+        if (s.resets != resets) { resets = s.resets; dec_n = 0; dec_on = 0; }  /* 후처리 상태도 같이 */
+        if (!r.valid) continue;
+        while (now_ns() - t1 < (uint64_t)infer_ms * MS) { }  /* 더 큰 모델이라고 가정: 바쁜 대기 */
+        uint64_t t2 = now_ns();
+        hist(inv_hist, t2 - t1); hist(e2e_hist, t2 - fs.t_cap);
+        decide(r.score);
+    }
+    return NULL;
+}
+
+static void print_hist(const char *name, const uint32_t *h) {
+    static const char *L[8] = {"<1", "<2", "<5", "<10", "<20", "<50", "<100", ">=100"};
+    printf("%-10s", name);
+    for (int b = 0; b < 8; b++) if (h[b]) printf(" %s ms:%u", L[b], h[b]);
+    printf("\n");
+}
+int main(int argc, char **argv) {
+    if (argc > 1) run_s = atof(argv[1]);
+    if (argc > 2) infer_ms = atoi(argv[2]);
+    if (argc > 3) latest = !strcmp(argv[3], "latest");
+    if (argc > 4) stall_ms = atoi(argv[4]);
+    uint32_t n = model_build(model_flash, 1, 0, OP_FC | OP_RELU);
+    ml_config_t cfg = { model_flash, n, tensor_arena, sizeof tensor_arena, STRIDE };
+    if (ml_init(&cfg) != ML_OK) { printf("ml_init failed\n"); return 1; }  /* 이후 malloc 없음 */
+    printf("run %.0f s, infer %d ms, policy %s, stall %d ms\n", run_s, infer_ms, latest ? "latest" : "fifo", stall_ms);
+    pthread_t th[3]; t0 = now_ns();
+    pthread_create(&th[2], NULL, inf_thread, NULL);
+    pthread_create(&th[1], NULL, feat_thread, NULL);
+    pthread_create(&th[0], NULL, isr_thread, NULL);
+    for (int k = 0; k < 3; k++) pthread_join(th[k], NULL);
+    ml_stats_t s; ml_stats(&s);
+    printf("frames in %u  raw drops %u  raw hwm %u/%u  feat hwm %u/%u  backpressure waits %u\n",
+           (uint32_t)(run_s * 100), raw_drops, raw.hwm, RAW_N, feat.hwm, FEAT_N, bp_waits);
+    printf("ml: frames %u gaps %u resets %u invokes %u skipped %u\n", s.frames, s.gaps, s.resets, s.invokes, s.skipped);
+    print_hist("invoke", inv_hist); print_hist("end2end", e2e_hist);
+    printf("events true %u detected %u  worst onset->event %u ms\n", atomic_load(&ev_true), events, ev_lat_max);
+    return 0;
+}
+```
+
+### 6.3 정상 실행
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 -pthread pipe.c ml.c -o pipe
+./pipe 6 4 fifo 0          # 6초, 추론 4 ms, fifo 정책, 결함 없음
+```
+
+```text
+run 6 s, infer 4 ms, policy fifo, stall 0 ms
+  EVENT #1 at 0.63 s, 131 ms after onset
+  EVENT #2 at 2.12 s, 113 ms after onset
+  EVENT #3 at 3.64 s, 134 ms after onset
+  EVENT #4 at 5.12 s, 113 ms after onset
+frames in 600  raw drops 0  raw hwm 1/16  feat hwm 1/32  backpressure waits 0
+ml: frames 600 gaps 0 resets 0 invokes 147 skipped 0
+invoke     <5 ms:146 <10 ms:1
+end2end    <5 ms:146 <10 ms:1
+events true 4 detected 4  worst onset->event 134 ms
+```
+
+출력 읽는 법:
+
+- `frames in 600`, `raw drops 0`, `ml: frames 600` — 6 s × 100 프레임이 하나도 빠지지 않고 추론 부품까지 갔다.
+- `raw hwm 1/16`, `feat hwm 1/32` — 링이 거의 비어 있다. 소비자가 생산자를 충분히 따라간다. **HWM은 링 깊이를 정하는 근거 데이터**다: 필드에서 HWM이 깊이의 70%를 넘으면 경보를 올린다.
+- `invokes 147` — 첫 결과는 창이 찬 seq 15, 그 뒤 4 프레임마다: `1 + (599 − 15) / 4 = 147`. 계산과 정확히 맞는다.
+- `end2end` — 창의 마지막 프레임이 캡처된 순간부터 결과가 나올 때까지. 거의 전부 5 ms 미만(바쁜 대기 4 ms + 스레드 깨움).
+- 이벤트 4개 모두 검출, onset에서 이벤트까지 113–134 ms. 이 지연의 대부분은 **알고리즘 지연**이다: hidden unit이 event 프레임을 충분히 봐야 하고(창 160 ms의 일부), 판정이 점수 3개의 평균을 쓰므로(40 ms × 2 더). 처리 지연(5 ms)은 작은 몫이다. "지연 예산"을 말할 때 둘을 나눠서 말해야 한다(L4, D6 1.5절).
+
+---
+
+## 7. 결함 주입 — 늦은 추론, 멈춘 소비자, 그리고 우선순위
+
+### 7.1 추론이 프레임 주기보다 길다 — fifo vs latest
+
+추론을 60 ms로 늘린다. stride 40 ms보다 길다. 즉 **처리량이 부족**하다: 추론은 1 s에 최대 16.7번인데 25번 요청이 들어온다.
+
+```sh
+./pipe 6 60 fifo 0
+./pipe 6 60 latest 0
+```
+
+```text
+run 6 s, infer 60 ms, policy fifo, stall 0 ms
+  EVENT #1 at 0.93 s, 430 ms after onset
+  EVENT #2 at 4.26 s, 759 ms after onset
+  EVENT #3 at 5.38 s, 378 ms after onset
+frames in 600  raw drops 49  raw hwm 16/16  feat hwm 32/32  backpressure waits 57
+ml: frames 551 gaps 26 resets 26 invokes 104 skipped 0
+invoke     <100 ms:104
+end2end    <100 ms:8 >=100 ms:96
+events true 4 detected 3  worst onset->event 759 ms
+```
+
+```text
+run 6 s, infer 60 ms, policy latest, stall 0 ms
+  EVENT #1 at 0.69 s, 190 ms after onset
+  EVENT #2 at 2.19 s, 192 ms after onset
+  EVENT #3 at 3.71 s, 206 ms after onset
+  EVENT #4 at 5.21 s, 209 ms after onset
+frames in 600  raw drops 0  raw hwm 3/16  feat hwm 8/32  backpressure waits 0
+ml: frames 600 gaps 0 resets 0 invokes 99 skipped 48
+invoke     <100 ms:99
+end2end    <100 ms:98 >=100 ms:1
+events true 4 detected 4  worst onset->event 209 ms
+```
+
+fifo(모든 stride를 차례로 처리)에서 일어난 일을 순서대로 따라가면:
+
+1. 추론이 밀리면서 feature 링이 찬다(`feat hwm 32/32`).
+2. 전처리가 feature 링에서 기다린다(`backpressure waits 57`) → raw 링을 못 비운다.
+3. raw 링이 찬다(`raw hwm 16/16`) → ISR이 버린다(`raw drops 49`).
+4. 버려진 프레임마다 seq가 건너뛴다 → `gaps 26`, `resets 26` → 매번 16 프레임 warm-up.
+5. 결과: end-to-end 지연이 거의 전부 100 ms 이상(큐에서 기다린 시간), 이벤트 1개 놓침, 늦게 잡힌 것은 760 ms 지연.
+
+**과부하가 역압을 타고 가장 앞단(ISR)까지 번져서, 가장 비싼 곳(캡처)에서 버려졌다.** 게다가 드롭이 흩어져 일어나니 reset이 반복되어(reset storm) 모델이 결과를 낼 기회 자체가 줄었다.
+
+latest(밀린 것은 창에만 넣고 최신 창에서만 추론)에서는:
+
+- `raw drops 0`, `gaps 0`. 데이터는 하나도 잃지 않았다. **잃은 것은 추론 기회(`skipped 48`)뿐**이다. `99 + 48 = 147` — 정상 실행의 invoke 수와 정확히 같다.
+- end-to-end 지연이 100 ms 미만으로 유지된다. 모든 결과가 "가장 최근 창"에 대한 것이다.
+- 이벤트 4개 모두 검출, 지연 190–209 ms(정상보다 약 70 ms 늘었다: invoke 60 ms + 결과 간격이 넓어져 3점 평균이 느려짐).
+
+말로 하면: **스트리밍 추론에서 처리량이 모자라면, 오래된 추론 기회를 버리고 최신 데이터를 지킨다.** 창이 96% 겹치므로 건너뛴 추론의 정보는 다음 추론이 거의 다 본다. 반대로 데이터(프레임)를 버리면 창에 구멍이 나고 streaming 상태가 무효가 된다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 300">
+<text x="340" y="18" font-size="14" text-anchor="middle">결함 주입 결과 — 최악 onset→이벤트 지연 (막대)과 검출 수</text> <line x1="70" y1="240" x2="660" y2="240" stroke="currentColor"/> <line x1="70" y1="40" x2="70" y2="240" stroke="currentColor"/> <line x1="66" y1="240" x2="70" y2="240" stroke="currentColor"/><text x="62" y="244" font-size="12" text-anchor="end">0</text>
+<line x1="66" y1="190" x2="70" y2="190" stroke="currentColor"/><text x="62" y="194" font-size="12" text-anchor="end">200</text> <line x1="66" y1="140" x2="70" y2="140" stroke="currentColor"/><text x="62" y="144" font-size="12" text-anchor="end">400</text> <line x1="66" y1="90" x2="70" y2="90" stroke="currentColor"/><text x="62" y="94" font-size="12" text-anchor="end">600</text>
+<line x1="66" y1="40" x2="70" y2="40" stroke="currentColor"/><text x="62" y="44" font-size="12" text-anchor="end">800 ms</text> <rect x="95" y="206" width="70" height="34" fill="#3f9a6b"/> <rect x="210" y="50" width="70" height="190" fill="#d0564a"/> <rect x="325" y="188" width="70" height="52" fill="#4a7bd0"/> <rect x="440" y="206" width="70" height="34" fill="#d0564a"/>
+<rect x="555" y="157" width="70" height="83" fill="#e08a3c"/> <text x="130" y="200" font-size="12" text-anchor="middle">134</text> <text x="245" y="44" font-size="12" text-anchor="middle">759</text> <text x="360" y="182" font-size="12" text-anchor="middle">209</text> <text x="475" y="200" font-size="12" text-anchor="middle">136</text> <text x="590" y="151" font-size="12" text-anchor="middle">331</text>
+<text x="130" y="258" font-size="12" text-anchor="middle">정상</text> <text x="245" y="258" font-size="12" text-anchor="middle">60 ms fifo</text> <text x="360" y="258" font-size="12" text-anchor="middle">60 ms latest</text> <text x="475" y="258" font-size="12" text-anchor="middle">정지, 링 16</text> <text x="590" y="258" font-size="12" text-anchor="middle">정지, 링 64</text>
+<text x="130" y="276" font-size="12" text-anchor="middle">4/4, drop 0</text> <text x="245" y="276" font-size="12" text-anchor="middle">3/4, drop 49</text> <text x="360" y="276" font-size="12" text-anchor="middle">4/4, drop 0</text> <text x="475" y="276" font-size="12" text-anchor="middle">3/4, drop 26</text> <text x="590" y="276" font-size="12" text-anchor="middle">4/4, drop 0</text>
+<text x="340" y="296" font-size="12" text-anchor="middle">빨강 = 이벤트를 놓친 구성. "정지, 링 16"은 지연이 짧아 보이지만 이벤트 하나가 통째로 사라졌다</text>
+</svg>
+```
+
+그림 7 — 예제 8의 다섯 실행. 막대는 검출된 이벤트 중 최악의 onset→이벤트 지연, 아래 숫자는 검출 수와 raw 드롭 수. 같은 "느린 추론"이라도 정책(fifo/latest)에 따라 결과가 완전히 다르고, 같은 "정지"라도 버퍼 깊이에 따라 "놓침"과 "늦음"이 갈린다.
+
+### 7.2 소비자가 멈췄다 — 버퍼 깊이는 "견딜 정지 시간"이다
+
+전처리 스레드가 t = 3.4 s에 400 ms 멈춘다고 하자(예: flash 지우기가 버스를 잡았다, 더 높은 우선순위 태스크가 폭주했다). 3.5 s에 시작하는 event가 그 구간에 걸린다.
+
+```sh
+./pipe 6 4 fifo 400                                  # raw 링 16칸 = 160 ms
+cc -std=c11 -Wall -Wextra -O2 -pthread -DRAW_N=64u pipe.c ml.c -o pipe64 && ./pipe64 6 4 fifo 400   # 64칸 = 640 ms
+```
+
+```text
+run 6 s, infer 4 ms, policy fifo, stall 400 ms
+  EVENT #1 at 0.64 s, 133 ms after onset
+  EVENT #2 at 2.12 s, 113 ms after onset
+  EVENT #3 at 5.14 s, 136 ms after onset
+frames in 600  raw drops 26  raw hwm 16/16  feat hwm 16/32  backpressure waits 0
+ml: frames 574 gaps 1 resets 1 invokes 137 skipped 0
+invoke     <5 ms:137
+end2end    <5 ms:132 <10 ms:1 >=100 ms:4
+events true 4 detected 3  worst onset->event 136 ms
+```
+
+```text
+run 6 s, infer 4 ms, policy fifo, stall 400 ms
+  EVENT #1 at 0.64 s, 134 ms after onset
+  EVENT #2 at 2.12 s, 113 ms after onset
+  EVENT #3 at 3.83 s, 331 ms after onset
+  EVENT #4 at 5.12 s, 114 ms after onset
+frames in 600  raw drops 0  raw hwm 41/64  feat hwm 32/32  backpressure waits 4
+ml: frames 600 gaps 0 resets 0 invokes 147 skipped 0
+invoke     <5 ms:146 <10 ms:1
+end2end    <5 ms:135 <10 ms:1 <50 ms:1 <100 ms:2 >=100 ms:8
+events true 4 detected 4  worst onset->event 331 ms
+```
+
+- **링 16칸**: 160 ms를 버티고 그 뒤 26 프레임을 버렸다. gap 1번 → reset 1번. 3.5–3.8 s의 event는 대부분 버려진 프레임 안에 있었으므로 **통째로 사라졌다**(3/4). 지연 숫자는 정상처럼 보인다 — 놓친 것은 지연 통계에 안 잡힌다. 그래서 검출률과 드롭 카운터를 지연과 **같이** 봐야 한다.
+- **링 64칸**: 400 ms 정지를 다 버텼다(`raw hwm 41/64`). 드롭 0, 이벤트 4/4. 대신 그 event는 331 ms 늦게 나왔고, 밀린 프레임을 처리하는 동안 end-to-end 지연이 100 ms를 넘은 결과가 8개 생겼다. 밀린 프레임이 몰려 들어오자 feature 링이 잠깐 가득 찼다(`feat hwm 32/32`, 역압 4번).
+
+링 깊이의 비용: 64칸 × 336 B = 21.5 KB(16칸이면 5.4 KB). 즉 **"400 ms 정지를 견딘다"는 요구사항의 값이 16 KB SRAM**이다. 이 숫자로 설계 회의를 한다: 400 ms 정지를 일으키는 원인(flash erase)을 고칠 것인가, 16 KB를 낼 것인가, 그 구간의 이벤트 손실을 받아들일 것인가.
+
+### 7.3 단계별 drop 정책 정리
+
+| 경계 | 가득일 때 | 이유 |
+|---|---|---|
+| DMA → raw 링 (ISR) | drop-newest + 카운터 | ISR은 기다릴 수 없다. drop-oldest는 consumer가 가진 tail을 producer가 건드려야 해서 SPSC 규칙을 깬다 |
+| raw 링 → 전처리 → feature 링 | block (역압) 또는 drop + gap 표시 | 전처리는 기다려도 된다. 단, 역압이 ISR까지 번지면 결국 캡처에서 버린다 (7.1 fifo) |
+| feature → 추론 | latest-wins: 창에는 다 넣고 추론만 건너뜀 | 데이터는 지키고 연산을 버린다 |
+| 결과 → 이벤트 버스 | 이벤트는 drop 금지 (작은 큐 + 카운터), 연속 점수는 최신 값 덮어쓰기 | 이벤트는 드물고 중요, 점수는 최신만 의미 |
+
+ISR에서 "가장 오래된 것을 덮어쓰는(drop-oldest)" 링이 필요하면 SPSC가 아닌 설계가 필요하다: 예를 들어 consumer가 슬롯을 읽은 뒤 seq를 다시 확인해 덮였는지 판단하는 seqlock 방식. 대부분의 경우 drop-newest + gap 표시가 더 단순하고 충분하다.
+
+### 7.4 우선순위 효과 — 정직하게
+
+이 호스트 구현에서 스레드 우선순위를 바꿔도 결과는 거의 같다. macOS는 사용자 스레드에 고정 우선순위 선점(SCHED_FIFO 같은)을 실질적으로 보장하지 않고, 코어 8개에 스레드 3개라 서로 CPU를 빼앗지도 않는다. 그래서 우선순위의 효과는 **예제 5(단일 코어 시뮬레이션)** 로 봤다. 실제 기기에서 확인하는 방법:
+
+- Cortex-M + FreeRTOS/Zephyr 보드에서 같은 구조를 돌리고, 태스크마다 GPIO를 토글해 로직 분석기로 타임라인을 본다(그림 5의 실물).
+- 또는 RTOS 트레이스(SEGGER SystemView, Percepio Tracealyzer, Zephyr의 tracing)로 태스크 전환을 기록한다.
+- Linux라면 `SCHED_FIFO` + `taskset`으로 스레드들을 코어 하나에 묶으면 호스트에서도 우선순위 효과를 볼 수 있다(root 권한 필요).
+
+---
+
+## 8. 에러 처리와 관측성
+
+### 8.1 ML 부품이 실패하는 방식
+
+일반 드라이버의 실패는 대개 "에러 코드"로 온다. ML 부품의 실패는 절반이 **에러 코드 없이** 온다 — 모델은 언제나 숫자를 낸다. 그래서 출력 자체를 검사해야 한다.
+
+| 실패 | 어떻게 보이나 | 검출 | 대응 |
+|---|---|---|---|
+| invoke 에러 (런타임 status) | 에러 코드 | 반환값 | 1회는 건너뜀, 연속이면 FAULTED |
+| NaN / Inf 출력 | float 출력에 NaN | `isfinite` | 그 결과 버림, 원인은 입력·가중치·fp16 overflow |
+| 범위 밖 출력 | 확률 < 0 또는 > 1, 합 ≠ 1, 불가능한 logit | 범위·합 검사 | 버림 + 카운터 |
+| 고착 (stuck) | 완전히 같은 출력이 계속 | 연속 동일 카운터 | 입력 경로(센서·DMA 멈춤) 의심 |
+| 조용한 정확도 저하 | 정상처럼 보이는 틀린 답 | 기기에서는 거의 불가 → fleet 통계 (H7) | 모델·센서 재보정, 롤백 (J5) |
+| deadline 초과 | 결과가 늦음 | invoke 시간 측정, 히스토그램 | 건너뜀(latest) + 카운터 |
+| NPU 무응답 | 완료 IRQ가 안 옴 | timeout (3.5절) | NPU reset, 재시도, CPU fallback |
+
+int8 모델은 NaN이 나올 수 없지만, **모든 출력이 -128 또는 127로 포화**되는 것이 비슷한 신호다(입력 스케일이 틀렸거나 가중치가 깨졌다). DSP·NPU에서 fp16으로 돌리는 모델은 큰 활성값에서 overflow → Inf → NaN이 실제로 생긴다(C1).
+
+### 8.2 코드로 확인 — 출력 검사와 fallback
+
+**예제 9** — 무엇을 확인하나: 확률 출력에 NaN, 범위 밖, 합 ≠ 1, 고착을 검사하고, 2연속 실패하면 기능을 끄고 기본값("unknown")을 낸 뒤, backoff가 지나면 다시 켜는 정책.
+
+```c
+/* guard.c — 출력 검사(NaN·범위·확률 합·고착) + 실패 누적 시 fallback과 재시도 backoff */
+#include <math.h>
+#include <stdio.h>
+typedef enum { G_OK, G_NAN, G_RANGE, G_SUM, G_STUCK } gst_t;
+static const char *GN[] = {"OK", "NAN/INF", "RANGE", "SUM!=1", "STUCK"};
+
+static gst_t check_probs(const float *p, int n, float *prev, int *same) {
+    float s = 0; int eq = 1;
+    for (int i = 0; i < n; i++) {
+        if (!isfinite(p[i])) return G_NAN;                  /* fp16/fp32 출력 DSP·NPU에서 실제로 생긴다 */
+        if (p[i] < 0.f || p[i] > 1.f) return G_RANGE;
+        s += p[i]; eq &= (p[i] == prev[i]); prev[i] = p[i];
+    }
+    if (fabsf(s - 1.f) > 1e-3f) return G_SUM;
+    *same = eq ? *same + 1 : 0;
+    return *same >= 3 ? G_STUCK : G_OK;                      /* 같은 출력 4번 연속 = 입력이 멈췄거나 고착 */
+}
+int main(void) {
+    float out[][3] = {{.7f, .2f, .1f}, {NAN, .5f, .5f}, {.6f, .6f, -.2f}, {0}, {0}, {.5f, .3f, .1f},
+                      {.1f, .1f, .8f}, {.1f, .1f, .8f}, {.1f, .1f, .8f}, {.1f, .1f, .8f}, {.2f, .7f, .1f}};
+    float prev[3] = {0}; int same = 0, fails = 0, mode = 0, backoff = 0;   /* mode 0=normal 1=fallback */
+    for (int k = 0; k < 11; k++) {
+        if (mode) {                                           /* 모델 끔: 기본값을 내보내고 기다린다 */
+            printf("frame %d: model off   -> FALLBACK ('unknown'), retry in %d\n", k, backoff);
+            if (--backoff == 0) { mode = 0; fails = 0; }      /* 실제: ml_deinit → ml_init → warm-up */
+            continue;
+        }
+        gst_t g = check_probs(out[k], 3, prev, &same);
+        fails = g == G_OK ? 0 : fails + 1;
+        if (fails >= 2) { mode = 1; backoff = 2; }            /* 2연속 실패 → 기능 끄기 */
+        printf("frame %d: %-11s -> %s (fails %d)\n", k, GN[g], mode ? "enter FALLBACK" : "use model", fails);
+    }
+    return 0;
+}
+```
+
+```text
+frame 0: OK          -> use model (fails 0)
+frame 1: NAN/INF     -> use model (fails 1)
+frame 2: RANGE       -> enter FALLBACK (fails 2)
+frame 3: model off   -> FALLBACK ('unknown'), retry in 2
+frame 4: model off   -> FALLBACK ('unknown'), retry in 1
+frame 5: SUM!=1      -> use model (fails 1)
+frame 6: OK          -> use model (fails 0)
+frame 7: OK          -> use model (fails 0)
+frame 8: OK          -> use model (fails 0)
+frame 9: STUCK       -> use model (fails 1)
+frame 10: OK          -> use model (fails 0)
+```
+
+출력에서 볼 것: 한 번의 실패(frame 5, 9)는 그 결과만 버리고 계속 간다. 2연속 실패(frame 1 NaN, frame 2 범위 밖)에 fallback으로 들어가 두 프레임 동안 모델을 끄고 "unknown"을 낸 뒤 재시도한다. frame 6–9는 같은 출력 4번 연속이라 STUCK이 됐다.
+
+**fallback은 기능마다 다르게** 정한다. 이것이 제품 결정이다.
+
+| 기능 (예시) | 모델이 꺼지면 | 이유 |
+|---|---|---|
+| wake word | 기능 끔 + 버튼으로 깨우기 안내 | 오검출(가짜 wake)이 미검출보다 나쁘다 |
+| 착용 감지 | "착용 중"으로 가정 | 미착용 오판 → 알림이 끊기는 게 더 나쁘다 |
+| 제스처 | 제스처 끔 | 오동작이 사용자 신뢰를 깬다 |
+| 낙상 감지 | 단순 임계값 규칙으로 대체 | 안전 기능은 품질이 낮아도 꺼지면 안 된다 |
+
+### 8.3 watchdog과 추론
+
+추론은 가장 긴 단일 작업이라 watchdog 설계에 영향을 준다.
+
+- **하드웨어 watchdog**은 시스템 전체가 멈췄을 때의 마지막 방어다. 주기는 가장 긴 정상 작업(추론 최악 + 여유)보다 길어야 한다. 추론 하나가 watchdog 주기를 넘으면 "정상 동작 중 리셋"이 된다.
+- 그래서 보통 **태스크 수준 watchdog**을 둔다: 각 태스크가 매 주기 "살아 있음"을 체크인하고, 감시 태스크가 모든 체크인을 확인했을 때만 하드웨어 watchdog을 찬다. 추론 태스크는 invoke마다 체크인한다. 추론 태스크만 멈추면(무한 루프 커널, NPU 대기 데드락) 감시 태스크가 그것을 보고 → 먼저 ML 부품만 재시작(deinit/init)하고 → 그래도 안 되면 시스템 리셋.
+- **invoke 자체에 시간 상한**: CPU에서 도는 동기 invoke는 중간에 멈출 수 없다. 대신 invoke 시간을 매번 재서 상한(예: 정상 최악의 2배)을 넘으면 카운터 + 다음부터 그 모델 비활성. NPU라면 3.5절의 timeout이 이 역할이다.
+- 리셋 원인 레지스터와 "리셋 직전 마지막 상태(ML 상태, 마지막 invoke 시간)"를 retention RAM에 남겨 두면 필드 리셋의 원인 분석이 된다. Don이 SSD에서 assert 덤프를 남기던 것과 같다.
+
+### 8.4 telemetry 카운터와 로그 훅
+
+예제 8의 출력 그대로가 telemetry의 뼈대다. 필드에서는 이것을 고정 크기 레코드로 만들어 주기적으로(예: 1시간마다) 로그나 BLE로 올린다(H1, H7).
+
+레코드는 고정 크기(예: 64 B)로 정하고 `static_assert`로 크기를 고정한다: 레코드 형식 버전, 모델 버전, uptime, `frames_in / raw_drops / gaps / resets / invokes / skipped / invoke_err / range_err`, 링 HWM 두 개, end-to-end 지연 히스토그램 8칸, 최대 지연, 이벤트 수. 로그 훅은 문자열이 아니라 (레벨, 코드, 인자)만 받는 함수 포인터 하나로 두어, 데이터 평면에서 불러도 싸고 블로킹이 없게 한다. 문자열 포맷은 기기 밖(호스트 디코더)에서 한다. 이 레코드를 fleet에서 모으면 H7 3절의 "릴리스별 drop률·reset률" 대시보드가 된다: 새 모델 릴리스 뒤 `skipped`나 지연 꼬리가 늘었다면 그 모델이 기기에서 더 느리다는 뜻이다.
+
+설계 원칙:
+
+- 카운터는 **단조 증가**로만 둔다(리셋하지 않음). 수집 쪽이 차이를 계산한다. 오버플로는 32비트면 프레임 100/s 기준 497일.
+- 지연은 평균이 아니라 **히스토그램**으로 보낸다(D6 4.3절: 샘플을 저장하지 않고 분위수 추정).
+- 레코드에 **모델 버전과 레코드 형식 버전**을 넣는다. 둘 다 없으면 fleet 데이터를 해석할 수 없다.
+- 로그 훅은 함수 포인터 하나로 둔다. 호스트 테스트에서는 printf로, 기기에서는 RAM 링으로, 양산에서는 WARN 이상만.
+
+---
+
+## 9. 동시성 위험
+
+### 9.1 모델 둘, arena 하나 — 언제 안전한가
+
+예를 들어 Hark 같은 기기가 같은 MCU에서 KWS(오디오)와 제스처(IMU) 두 모델을 돌린다고 하자. arena를 따로 두면 메모리가 합이 되고, 하나를 나눠 쓰면 큰 쪽만큼만 든다. 나눠 쓰기의 조건은 하나다: **두 모델의 invoke가 시간상 겹치지 않고, 호출 사이에 살아남아야 하는 것(persistent)은 공유 영역에 두지 않는다.**
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 230">
+<text x="340" y="18" font-size="14" text-anchor="middle">arena 1 KB를 두 모델이 시분할 — head는 공유, tail은 모델별</text> <rect x="40" y="70" width="600" height="40" fill="none" stroke="currentColor"/> <rect x="40" y="70" width="150" height="40" fill="#4a7bd0" fill-opacity="0.5"/> <rect x="40" y="110" width="300" height="20" fill="#e08a3c" fill-opacity="0.6"/> <rect x="633" y="70" width="7" height="40" fill="#3f9a6b"/>
+<text x="115" y="95" font-size="12" text-anchor="middle">A scratch 256 B</text> <text x="190" y="125" font-size="12" text-anchor="middle">B scratch 512 B (invoke 중에만)</text> <text x="190" y="60" font-size="12" text-anchor="middle">head (non-persistent): max(A, B) = 512 B</text> <line x1="340" y1="64" x2="340" y2="135" stroke="#888" stroke-dasharray="4 3"/>
+<text x="560" y="60" font-size="12" text-anchor="middle">tail (persistent)</text> <line x1="636" y1="110" x2="610" y2="160" stroke="currentColor"/> <text x="610" y="176" font-size="12" text-anchor="end">A streaming 상태 12 B — 맞는 자리</text> <rect x="265" y="70" width="7" height="40" fill="#d0564a"/> <line x1="268" y1="110" x2="268" y2="160" stroke="#d0564a"/>
+<text x="40" y="176" font-size="12">버그: A 상태를 offset 384에 →</text> <text x="40" y="194" font-size="12">B의 scratch가 덮는다</text> <text x="340" y="222" font-size="12" text-anchor="middle">A만 테스트하면 통과한다 (A의 scratch는 256 B까지만 쓴다) — B와 합쳐야 드러난다</text>
+</svg>
+```
+
+그림 8 — 시분할 arena의 배치. head는 invoke 동안만 의미 있는 scratch라 두 모델이 번갈아 같은 자리를 쓴다. tail에는 모델마다 호출 사이에 살아남아야 하는 streaming 상태가 따로 쌓인다. 빨간 칸은 상태를 head에 잘못 둔 경우다.
+
+**예제 10** — 무엇을 확인하나: streaming 모델 A(최근 4개 입력의 합)와 stateless 모델 B를 한 arena에서 번갈아 돌린다. A의 상태를 tail에 둔 경우와 head(B scratch 범위)에 둔 경우를, A 단독과 A+B 교대로 각각 비교한다.
+
+```c
+/* arena2.c — 모델 둘이 arena 하나를 시분할: head(scratch)는 공유, tail(persistent 상태)은 모델별 */
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#define ARENA 1024
+#define A_SCRATCH 256   /* 모델 A(streaming KWS 흉내): invoke 동안만 */
+#define B_SCRATCH 512   /* 모델 B(stateless 제스처 흉내): invoke 동안만 */
+#define A_STATE 12      /* A의 streaming 상태: 지난 입력 3개 (int32) — 호출 사이에 살아야 함 */
+static _Alignas(16) uint8_t arena[ARENA];
+
+static int32_t model_a(int32_t x, int32_t *st) {              /* y = 최근 4개 입력의 합 */
+    memset(arena, 0xA5, A_SCRATCH);                           /* scratch를 쓴다 (head) */
+    int32_t y = x + st[0] + st[1] + st[2];
+    st[2] = st[1]; st[1] = st[0]; st[0] = x;
+    return y;
+}
+static void model_b(void) { memset(arena, 0x5B, B_SCRATCH); }  /* head를 512 B 덮어쓴다 */
+
+static int run(int32_t *a_state, int with_b) {
+    int32_t g[3] = {0}, golden, y; int bad = 0;
+    memset(a_state, 0, A_STATE);
+    for (int32_t x = 1; x <= 20; x++) {
+        golden = x + g[0] + g[1] + g[2]; g[2] = g[1]; g[1] = g[0]; g[0] = x;
+        y = model_a(x, a_state);
+        if (with_b) model_b();                                /* 같은 태스크에서 순서대로 → 겹치지 않음 */
+        bad += (y != golden);
+    }
+    return bad;
+}
+int main(void) {
+    int32_t *tail_state = (int32_t *)(void *)(arena + ARENA - A_STATE);   /* 맞는 배치: tail */
+    int32_t *head_state = (int32_t *)(void *)(arena + 384);               /* 버그: head 안 (B scratch 범위) */
+    printf("arena: shared head %d B (= max(%d, %d)) + tail %d B; separate arenas would need %d B\n",
+           B_SCRATCH, A_SCRATCH, B_SCRATCH, A_STATE, A_SCRATCH + B_SCRATCH + A_STATE);
+    printf("A alone, state in tail : mismatches %2d / 20\n", run(tail_state, 0));
+    printf("A + B,  state in tail : mismatches %2d / 20\n", run(tail_state, 1));
+    printf("A alone, state in head : mismatches %2d / 20\n", run(head_state, 0));
+    printf("A + B,  state in head : mismatches %2d / 20\n", run(head_state, 1));
+    return 0;
+}
+```
+
+```text
+arena: shared head 512 B (= max(256, 512)) + tail 12 B; separate arenas would need 780 B
+A alone, state in tail : mismatches  0 / 20
+A + B,  state in tail : mismatches  0 / 20
+A alone, state in head : mismatches  0 / 20
+A + B,  state in head : mismatches 19 / 20
+```
+
+출력에서 볼 것: 상태를 head에 둔 버그는 **A 단독 테스트에서 0개, A+B에서 19/20개** 틀린다. 단위 테스트가 통과한 부품이 통합에서 깨지는 전형이다. 메모리 절약은 780 B → 524 B(head 512 + tail 12)이고, 실제 모델에서는 수십 KB 단위다.
+
+TFLM은 이것을 공식적으로 지원한다. 여러 `MicroInterpreter`가 **같은 `MicroAllocator`** (같은 arena)를 공유하면, 비영속(head) 영역은 모델 사이에 재사용되고 영속(tail) 영역만 모델마다 쌓인다. 저장소의 `micro_interpreter_test.cc`에 있는 `TestMultiTenantInterpreter` 테스트가 "두 모델의 head 사용량 합보다 공유 head가 작거나 같다", "세 번째 모델을 추가해도 head가 늘지 않는다"를 확인한다(실제 clone한 `.tools/tflite-micro`에서 확인). 조건은 이 노트와 같다: **invoke는 한 번에 하나**. 두 interpreter를 서로 다른 태스크에서 동시에 invoke하면 head가 겹쳐 쓰인다. 그래서 두 모델은 같은 추론 태스크에서 순서대로 돌리거나, arena 사용권을 mutex로 직렬화한다.
+
+### 9.2 DMA·NPU와 캐시 일관성
+
+Cortex-M7, Cortex-A, DSP처럼 data cache가 있는 코어에서 DMA나 non-coherent NPU와 버퍼를 주고받으면, CPU 캐시와 메모리가 서로 다른 값을 들고 있을 수 있다(E7 6절, 7.3절).
+
+```c
+/* 예시 코드 (컴파일 안 함) — CMSIS-Core, Cortex-M7. 버퍼는 32 B(캐시 라인) 정렬, 크기도 32의 배수 */
+static int8_t npu_in[INPUT_BYTES]   __attribute__((aligned(32)));
+static int8_t npu_out[OUTPUT_BYTES] __attribute__((aligned(32)));
+
+prepare_input(npu_in);                                   /* CPU가 씀 → 캐시에만 있을 수 있다 */
+SCB_CleanDCache_by_Addr(npu_in, sizeof npu_in);          /* 1) 메모리로 내려보낸 뒤 */
+npu_submit(npu_in, npu_out);                             /* 2) NPU가 메모리에서 읽게 한다 */
+/* ... 완료 IRQ ... */
+SCB_InvalidateDCache_by_Addr(npu_out, sizeof npu_out);   /* 3) 캐시의 옛 값을 버리고 */
+read_logits(npu_out);                                    /* 4) 메모리의 새 값을 읽는다 */
+```
+
+- **clean before device reads, invalidate after device writes.** 순서가 바뀌거나 하나가 빠지면 NPU가 옛 입력을 보거나, CPU가 옛 출력을 본다. 증상은 "가끔 한 프레임 전 결과가 나온다"다.
+- 버퍼가 캐시 라인을 다른 변수와 공유하면 invalidate가 그 변수의 최신 값(아직 메모리에 안 내려간 것)을 날린다. 그래서 **정렬과 크기를 캐시 라인 배수로** 맞춘다(2.1절 원칙 3).
+- DMA가 쓰는 동안 CPU가 같은 라인을 읽으면 그 라인이 캐시에 다시 올라온다 → invalidate는 DMA 완료 **후**에 한다.
+- 대안: 그 버퍼들을 MPU로 non-cacheable 영역에 두거나, DTCM(캐시를 거치지 않는 밀착 메모리)에 둔다. DTCM은 DMA 접근 가능 여부를 칩 매뉴얼로 확인해야 한다.
+
+### 9.3 ISR 안전성 — ISR에서 하지 말 것
+
+| ISR에서 금지 | 이유 | 대신 |
+|---|---|---|
+| 특징 추출·추론 | 다른 인터럽트 지연 증가 | 슬롯 commit + 태스크 깨우기 |
+| mutex 잡기, 블로킹 큐 송신 | ISR은 잘 수 없다 → 데드락·assert | `...FromISR` API, lock-free 링 |
+| printf / 블로킹 로그 | UART 대기로 수 ms | 코드+인자를 RAM 링에 (8.4절) |
+| malloc | 비결정적, 재진입 불가 | 정적 슬롯 |
+| ML 부품 API 호출 | 부품은 "한 태스크에서만" 계약 | 메시지로 요청 |
+| 공유 카운터의 비원자적 증가 | 태스크와 경쟁 | ISR만 쓰는 카운터로 분리하거나 원자 연산 |
+
+### 9.4 priority inversion — 공유 자원 하나가 우선순위를 뒤집는다
+
+시나리오: 추론 태스크(낮음)가 외부 QSPI flash에서 가중치 일부를 읽으려고 **SPI 버스 mutex**를 잡았다. 그 사이 IMU 전처리 태스크(높음)가 같은 버스로 IMU FIFO를 읽으려 한다 → mutex를 기다린다. 그때 BLE 태스크(중간)가 깨어나 추론 태스크를 선점한다. 결과: 높은 태스크가 **중간 태스크가 끝날 때까지** 기다린다. 우선순위가 뒤집혔다(D6).
+
+해결:
+
+- **priority inheritance mutex**: mutex를 가진 낮은 태스크가 기다리는 높은 태스크의 우선순위를 잠시 물려받는다. FreeRTOS의 mutex(`xSemaphoreCreateMutex`)와 Zephyr의 `k_mutex`는 priority inheritance를 한다. **binary semaphore는 하지 않는다** — mutex 자리에 semaphore를 쓰는 것이 흔한 실수다. POSIX는 `pthread_mutexattr_setprotocol(..., PTHREAD_PRIO_INHERIT)`.
+- **critical section을 짧게**: 가중치 전체를 읽는 동안 버스를 잡지 말고 DMA 전송 단위로 잡았다 놓는다.
+- **공유 자원을 없앤다**: IMU와 외부 flash를 다른 버스에 둔다(HW 결정 — I 모듈의 co-design 주제), 또는 버스를 소유하는 전용 서버 태스크를 두고 요청을 큐로 받는다.
+- **arena를 mutex로 지키지 않는다**: arena는 추론 태스크 하나가 독점하는 설계(9.1절)가 가장 안전하다. 두 태스크가 arena를 나눠 쓰는 순간 이 절의 문제가 arena에도 생긴다.
+
+---
+
+## 10. 임베디드 관점에서 다시 보기
+
+지금까지의 구조를 실제 플랫폼에 놓으면 이렇게 달라진다.
+
+| 항목 | Cortex-M MCU (always-on) | DSP (Hexagon 등) | 앱 SoC + NPU |
+|---|---|---|---|
+| 캡처 경로 | I2S/PDM DMA → 반쪽 완료 ISR | 오디오 front-end가 DSP에 직접 | 센서 허브 / DSP가 넘겨줌 (E8) |
+| 추론 실행 | CPU 동기 invoke (TFLM + CMSIS-NN) | DSP 스레드, 벡터 확장 | NPU 비동기 + 완료 IRQ (3.5절) |
+| arena 위치 | DTCM / SRAM, `.bss` 정적 | DSP TCM 또는 L2 | 드라이버가 할당한 DMA-able 메모리 |
+| 가중치 | 내부 flash XIP 또는 QSPI | DSP 이미지와 함께 로드 | 파일 시스템 → 공유 메모리 |
+| 캐시 일관성 | M7이면 필요, M4/M33은 대개 D-cache 없음 | 필요 | IO-coherent인지 확인 (E7 7.3절) |
+| 주된 실패 | 링 넘침, 스택 부족, 비정렬 | 메시지 큐 지연, 전원 상태 전환 | timeout, 드라이버 버전 불일치 (F8) |
+| 우선순위 도구 | RTOS 태스크 우선순위 | DSP 스레드 우선순위, 하드웨어 스레드 | OS 스케줄러, NPU job 우선순위 |
+
+플랫폼이 달라도 변하지 않는 것: 버퍼는 정적이고 주인이 있다 · ISR은 넘기고 깨우기만 한다 · 단계 사이는 링이고 가득일 때의 정책이 명시돼 있다 · 모델 부품은 검증 → warm-up → streaming 창 → 출력 검사 → 카운터의 생명주기를 가진다 · 실패는 카운터로 남고 fleet으로 간다.
+
+---
+
+## 11. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| ISR에서 특징 추출이나 추론 | 다른 인터럽트(UART, BLE) 지연, 가끔 DMA overrun | ISR 안의 수 ms 작업 | ISR은 commit + notify만 (3.3절) |
+| 추론 태스크가 캡처보다 높은 우선순위 | 오디오가 주기적으로 끊김, 드롭 카운터 증가 | 긴 invoke가 캡처를 막음 | 캡처 > 전처리 > 추론 (예제 5) |
+| 과부하에서 fifo 처리 | 지연이 계속 커지다 드롭, reset 폭주 | 역압이 ISR까지 번짐 | latest-wins, 추론 기회만 버림 (7.1절) |
+| gap 뒤 streaming 상태 유지 | 프레임 손실 직후 몇 초간 오검출 | 끊긴 두 조각을 이어 붙인 입력 | seq로 gap 검출 → 모델·후처리 reset (5.4절) |
+| release 후 슬롯 포인터 사용 | 가끔 이상한 출력, 재현 어려움 | 슬롯이 다음 프레임으로 덮임 | 소유권 규칙, 디버그 추적기 (예제 2) |
+| arena를 지역 변수로 | 랜덤 HardFault | 스택 오버플로 | 파일 범위 `static`, 정렬 명시 |
+| persistent 상태를 공유 head에 | 단독 테스트 통과, 두 모델 같이 돌리면 오동작 | 다른 모델의 scratch가 덮음 | 상태는 tail (예제 10) |
+| NPU 출력 invalidate 누락 | 가끔 한 프레임 전 결과 | 캐시의 옛 값 | clean before, invalidate after (9.2절) |
+| timeout 뒤 늦은 IRQ 처리 | 다음 job이 너무 빨리 끝나고 결과가 틀림 | job 구분 없음 | 세대 태그 (예제 4) |
+| 모델 검증 없이 로드 | OTA 뒤 일부 기기만 오동작 | 손상·버전 불일치 | 헤더 + CRC + op 검사 (예제 7) |
+
+---
+
+## 12. 면접에서 이렇게 말한다
+
+**Q.** Walk me through the firmware architecture from mic to wake-word event.
+
+**A.** 다섯 단계와 두 개의 링으로 설명한다. PDM/I2S DMA가 10 ms 블록을 채우면 반쪽 완료 ISR이 슬롯을 commit하고 전처리 태스크를 깨운다. 전처리는 log-mel 한 프레임을 만들어 feature 링에 넣는다. 추론 태스크는 40 ms마다 창으로 invoke하고, 후처리가 smoothing·hysteresis로 이벤트를 만들어 이벤트 버스에 낸다. 우선순위는 캡처 > 전처리 > 추론. 설정·모델 교체·telemetry는 별도 제어 평면이 프레임 경계에서 반영한다.
+
+> The DMA fills 10 ms blocks; the half-complete ISR only commits the slot and notifies the feature task. Features go into a second SPSC ring, the inference task runs the model every 40 ms on the sliding window, and post-processing applies smoothing and hysteresis before publishing an event. Priorities are capture above features above inference, and config, model updates and telemetry go through a separate control path that applies changes at frame boundaries.
+
+**Q.** Where do you allocate the tensor arena and why?
+
+**A.** 파일 범위의 정적 배열로, 링커 스크립트로 가장 빠른 RAM(DTCM 등)에 둔다. 크기는 peak 활성값 + scratch + persistent를 재서(또는 RecordingMicroAllocator로) 여유를 더해 정하고, 총 SRAM 예산은 static_assert로 빌드 때 검사한다. 정렬은 16 B 이상, NPU·DMA가 만지면 캐시 라인 배수. init 이후에는 할당이 없다. 가중치는 flash에 const로 두고 복사하지 않는다.
+
+> As a statically allocated, aligned array in .bss, placed by the linker script into the fastest RAM — usually DTCM. I size it from the measured peak plus margin, check the total SRAM budget with a static_assert, and never allocate after init. Weights stay const in flash; the arena only holds activations, scratch and the persistent state.
+
+**Q.** How does the ISR hand data to the inference task?
+
+**A.** 데이터를 복사하지 않고 슬롯 인덱스를 넘긴다. DMA가 정적 슬롯에 직접 쓰고, ISR은 release 순서로 head를 올린 뒤 task notification이나 세마포어로 다음 태스크를 깨운다. 소비자는 링이 빌 때까지 처리하니 알림이 합쳐져도 잃지 않는다. 링이 가득이면 ISR은 기다리지 않고 버리고 카운트하며, seq 번호로 소비자가 gap을 안다.
+
+> Zero-copy: the DMA writes directly into a static slot, the ISR publishes it by bumping the head with release semantics and gives a task notification. The consumer drains until empty, so coalesced notifications don't lose frames. If the ring is full the ISR drops the newest frame and counts it; sequence numbers let downstream detect the gap.
+
+**Q.** Inference sometimes takes longer than the frame period — what happens?
+
+**A.** 단발성이면 링이 흡수한다 — 링 깊이를 그 최악 지연으로 정해 두기 때문이다. 지속적으로 처리량이 부족하면 fifo로 모든 stride를 처리하려 할 때 역압이 ISR까지 번져 캡처에서 프레임을 잃고, gap 때문에 streaming 상태가 계속 reset된다. 그래서 latest-wins로 간다: 밀린 프레임은 창에만 넣고 최신 창에서만 추론해서, 데이터가 아니라 추론 기회를 버린다. 실험에서 60 ms 추론으로 fifo는 49 프레임 드롭·이벤트 1개 놓침, latest는 드롭 0·4/4 검출이었다.
+
+> Short overruns are absorbed by the ring, which is sized for the worst-case consumer delay. Sustained overload is the dangerous case: processing every stride in FIFO order pushes backpressure up to the ISR, frames get dropped at capture and the streaming state keeps resetting. So I use latest-wins — push the backlog into the window but only invoke on the newest one — which drops inference opportunities instead of data. In my host simulation that turned 49 dropped frames and a missed event into zero drops and four of four detections.
+
+**Q.** How do you run two models in one arena?
+
+**A.** invoke가 시간상 겹치지 않게 같은 태스크에서 순서대로 돌리고, 호출 사이에 살아남아야 하는 streaming 상태는 모델별 persistent 영역에 둔다. 그러면 scratch 영역은 큰 모델만큼만 필요하다. TFLM은 여러 interpreter가 같은 MicroAllocator를 공유하는 방식으로 이것을 지원한다. 위험은 상태를 공유 영역에 두는 것인데, 단독 테스트에선 통과하고 같이 돌릴 때만 깨진다.
+
+> Time-multiplex them: both invokes happen serially in the same task, the non-persistent head of the arena is shared, and each model's persistent state lives in its own tail region. TFLM supports this by sharing one MicroAllocator across interpreters. The classic bug is persistent state placed in the shared region — it passes the single-model test and only breaks when the second model runs.
+
+**Q.** A frame got dropped. What does your inference component do?
+
+**A.** seq 번호로 gap을 보고 streaming 상태(창, conv 버퍼, RNN hidden state)를 reset하고, 후처리 상태도 같이 지운다. 창이 다시 찰 때까지 WARMUP으로 결과를 내지 않는다. 이어 붙인 입력으로 추론하면 오검출이 나기 때문이다. 드롭과 reset은 카운터로 남긴다.
+
+> It detects the gap from the sequence number, resets the streaming state — window, conv buffers, RNN hidden state — and the post-processing state too, then stays in warm-up until the window refills. Splicing two discontiguous pieces would create false detections. Drops and resets are both counted for telemetry.
+
+**Q.** How do you protect against a bad model or bad outputs in the field?
+
+**A.** 로드 때 컨테이너 헤더의 magic·버전·CRC·필요 op·arena 크기를 검사하고 warm-up invoke로 경로를 확인한다. 실패하면 이전 슬롯으로. 실행 중에는 출력 범위·NaN·고착을 검사하고, 연속 실패면 기능별 fallback으로 가고 backoff 후 재초기화한다. 조용한 정확도 저하는 기기 혼자 못 잡으니 telemetry 카운터를 fleet에서 릴리스별로 본다.
+
+> At load time: magic, format version, CRC, required ops and arena size from a container header, then a warm-up invoke; on failure fall back to the previous slot. At run time: output sanity checks — range, NaN, stuck outputs — with a per-feature fallback after consecutive failures and a backoff before re-init. Silent accuracy regressions can't be caught on one device, so the counters go to fleet telemetry broken down by model version.
+
+---
+
+## 13. 직접 해보기
+
+1. 1.1절 가정(16 kHz, hop 10 ms, stride 40 ms, 추론 최악 25 ms, 스케줄링 지터 10 ms)에서 raw 링 최소 깊이를 손으로 계산하라. 정답: (25 + 10) / 10 = 3.5 → 4칸, 여유를 두면 8칸.
+2. 예제 8에서 `STRIDE`를 2로 바꾸고 `./pipe 6 4 fifo 0`의 invokes를 미리 계산한 뒤 실행해 확인하라. 정답: 첫 결과 seq 15, 그 뒤 2 프레임마다 → 1 + (599 − 15) / 2 = 293.
+3. 예제 4에서 `npu_irq`의 `tag != job.gen` 검사를 지우고 실행하라. job 6은 어떻게 되나? 정답: 205 ms에 job 5의 늦은 완료로 DONE이 되어 5 ms 만에 "끝난" 것으로 처리된다(잘못된 출력을 읽는다). job 6의 진짜 완료(208 ms)는 오히려 stale로 버려진다 — 실행하면 `t=205 ms job 6 -> DONE`이 찍힌다.
+4. 예제 5에 네 번째 태스크(BLE, 20 ms마다 3 ms, 우선순위 2.5에 해당하도록 전처리와 추론 사이)를 넣고, 추론의 최악 응답 시간이 어떻게 변하는지 예측한 뒤 확인하라. 힌트: 추론 응답 = 25 + 그동안 끼어드는 높은 일(캡처 0.8, 전처리 6, BLE 6) ≈ 38 ms. 실제로 돌리면 37.8 ms — 40 ms stride 안에 겨우 들어온다. BLE가 조금만 길어져도 추론이 다음 stride를 넘긴다.
+5. 예제 8에 "drop-oldest" 옵션을 직접 설계해 보라. SPSC 규칙을 깨지 않으려면 어떻게 해야 하나? 정답(한 가지): ISR은 가득이면 drop-newest를 하되 "overrun" 플래그를 세우고, 소비자가 플래그를 보면 자기 tail을 앞으로 건너뛰어(오래된 것을 스스로 버리고) gap 처리를 한다 — tail은 계속 소비자만 쓴다.
+
+
+---
+
+## 14. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| data plane / control plane | 데이터 평면 / 제어 평면 | 프레임마다 흐르는 경로 / 드물게 일어나는 설정·교체·수집 경로 |
+| SPSC ring | 단일 생산자·단일 소비자 링 | head는 생산자만, tail은 소비자만 써서 lock이 필요 없는 큐 |
+| zero-copy | 복사 없는 전달 | 데이터는 슬롯에 두고 인덱스만 넘긴다 |
+| ownership | 소유권 | 지금 그 메모리를 써도 되는 주체. 전이는 commit/release로 |
+| high-water mark (HWM) | 최대 점유 | 링이 가장 찼을 때의 칸 수. 깊이 설계의 근거 |
+| backpressure | 역압 | 하류가 가득 차서 상류가 기다리는 것. 결국 ISR까지 번질 수 있다 |
+| drop-newest / latest-wins | 정책 이름 | 가득이면 새 것을 버림 / 밀리면 최신 것만 처리 |
+| tensor arena | 텐서 메모리 풀 | 활성값·scratch·persistent 상태가 사는 정적 버퍼 |
+| head / tail (arena) | 비영속 / 영속 영역 | invoke 동안만 쓰는 scratch / 호출 사이에 살아남는 상태 |
+| streaming state | 스트리밍 상태 | 창, conv 버퍼, RNN hidden state 등 연속 입력을 가정한 기억 |
+| gap | 끊김 | seq 번호가 건너뜀. streaming 상태 reset의 신호 |
+| warm-up | 예열 | 첫 invoke의 cold 비용을 init에서 치르는 것 / 창이 찰 때까지 결과 보류 |
+| multi-tenant arena | 다중 모델 arena | 여러 모델이 head를 공유하고 tail만 따로 쓰는 배치 (TFLM 지원) |
+| generation tag | 세대 태그 | job마다 올리는 번호. 늦은 완료를 걸러낸다 |
+| priority inversion | 우선순위 역전 | 낮은 태스크가 가진 자원 때문에 높은 태스크가 중간 태스크를 기다림 |
+| priority inheritance | 우선순위 상속 | mutex를 가진 태스크가 기다리는 태스크의 우선순위를 잠시 물려받음 |
+| clean / invalidate | 캐시 유지 연산 | 캐시 → 메모리로 내림 / 캐시의 옛 값을 버림 |
+| fallback | 대체 동작 | 모델이 꺼졌을 때 기능별로 정한 기본 동작 |
+
+---
+
+## 15. 요약 & 체크리스트
+
+ML 추론을 펌웨어에 통합한다는 것은 모델을 돌리는 일이 아니라 **모델을 하나의 부품으로 데이터 경로에 끼워 넣는 일**이다. 데이터 경로는 ISR/DMA → raw 링 → 전처리 → feature 링 → 추론 → 판정 → 이벤트 버스이고, 제어 평면이 설정·모델 교체·telemetry·전원을 프레임 경계에서 반영한다. 모든 버퍼는 정적이고 주인이 있으며, 링은 인덱스를 넘기고, ISR은 기다리지 않는다. 우선순위는 놓치면 복구 불가능한 일(캡처)일수록 높다. ML 부품은 검증 → warm-up → streaming 창 → 출력 검사 → 카운터의 생명주기를 가지며, gap이 나면 모델과 후처리 상태를 함께 reset한다. 처리량이 모자라면 데이터가 아니라 추론 기회를 버린다(latest-wins). 모델 둘은 invoke를 직렬화하고 persistent 상태를 분리하면 arena 하나로 돌릴 수 있다. NPU 오프로드는 상태기계·timeout·세대 태그·캐시 유지가 함께 와야 한다.
+
+- [ ] 마이크에서 이벤트까지의 블록도를 그리고 단계마다 실행 문맥·주기·실패 시 결과를 말할 수 있다
+- [ ] 링 깊이를 "견딜 최악 소비자 지연 ÷ 생산 주기"로 계산하고, 그 SRAM 값을 말할 수 있다
+- [ ] 버퍼 소유권 표(누가 쓰고, 누가 읽고, 언제 돌려주나)를 작성할 수 있다
+- [ ] arena 위치·정렬·크기 결정과 init 뒤 malloc 0을 코드로 강제할 수 있다
+- [ ] superloop / RTOS / work queue / NPU 비동기 패턴의 장단점과 우선순위 배치의 이유를 설명할 수 있다
+- [ ] NPU job 상태기계와 세대 태그가 막는 사고를 설명할 수 있다
+- [ ] `ml_init / ml_process_frame / ml_get_result / ml_reset / ml_stats`의 소유권 계약을 말할 수 있다
+- [ ] 과부하에서 fifo와 latest-wins의 차이를 예제 8의 숫자로 설명할 수 있다
+- [ ] gap → streaming 상태 + 후처리 reset의 이유를 말할 수 있다
+- [ ] 두 모델이 arena 하나를 쓸 때의 조건과 전형적인 버그를 말할 수 있다
+
+## 참고 자료
+
+- TensorFlow Lite Micro 저장소: [github.com/tensorflow/tflite-micro](https://github.com/tensorflow/tflite-micro) — `tensorflow/lite/micro/micro_interpreter_test.cc`의 `TestMultiTenantInterpreter`, `micro_allocator.h`
+- Pete Warden, Daniel Situnayake, "TinyML" (O'Reilly, 2019) — 마이크 → 특징 → 모델 → 명령 인식 파이프라인 예제
+- FreeRTOS 문서 — Task Notifications, `vTaskNotifyGiveFromISR`, Mutexes(priority inheritance): [freertos.org](https://www.freertos.org)
+- Zephyr 문서 — Workqueue Threads, Mutexes: [docs.zephyrproject.org](https://docs.zephyrproject.org)
+- Arm CMSIS-Core — Cache functions (`SCB_CleanDCache_by_Addr`, `SCB_InvalidateDCache_by_Addr`): [arm-software.github.io/CMSIS_5](https://arm-software.github.io/CMSIS_5/Core/html/index.html)
+- Jane W. S. Liu, "Real-Time Systems" (Prentice Hall, 2000) — 고정 우선순위 스케줄링, 응답 시간 분석, priority inheritance
+- 이 노트 세트: B5 9.1절, B7 7절, D2, D6, E7 6–7절, E8 3절, E9 3.3절, F2 4절, F7, G2 8절, H7, I3 7.2절

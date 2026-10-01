@@ -4,6 +4,8 @@
 > **Don 현재 상태**: 🟡 부분 — 레쥬메에 OTA 명시는 없다. 다만 양산 SSD 펌웨어, telemetry·error reporting 설계, factory test-node 아키텍처가 있어 "필드에서 돌아가는 펌웨어를 운영하는 감각"은 증거가 있다. NVMe firmware download/commit 경험 여부는 확인이 필요하다.
 > **이 노트를 다 읽으면**: ① 빌드에서 롤백까지 OTA 파이프라인 전 구간을 단계별 산출물·실패 모드와 함께 그릴 수 있다 ② SoC + MCU + 라디오칩이 섞인 기기의 멀티 이미지 업데이트를 설계할 수 있다 ③ "maintain"이 실제로 무슨 일인지(호환성 매트릭스, 키 수명, 인증서 만료, N-2 업그레이드 테스트) 말할 수 있다.
 
+> **⚠ 2026-09-23 JD 개정**: 이 항목은 현재 JD에서 삭제됨 — 우선순위 하향, 개념 수준으로만. Bonus의 secure boot·firmware signing 대비용으로만 읽는다. [P02 분석](../plan/P02_jd_change_2026-09-23.html)
+
 ---
 
 ## 0. 문장 뜯어보기

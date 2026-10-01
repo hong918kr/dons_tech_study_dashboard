@@ -1,6 +1,6 @@
 # B00. BSP 집중 — 왜 지금 이걸 파야 하는가
 
-> **시리즈**: BSP 집중 0/4 (지도) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling"
+> **시리즈**: BSP 집중 0/6 (지도) · **JD 근거**: "Own BSP development, peripheral driver integration (SPI, I2C, UART, I2S), and RTOS task scheduling"
 > **⚡ 2026-09-23 갱신**: JD 본문이 개정되어 BSP·bring-up·vendor·FPGA 중심으로 재편됨 → [P02 분석](../plan/P02_jd_change_2026-09-23.html)
 > **계기**: 2026-09-21, Hark가 이 공고의 제목을 `Embedded Software Engineer` → **`Embedded Software Engineer, BSP`** 로 변경 (본문은 동일)
 > **Don 상태**: 🟡 BSP를 처음부터 소유해 본 적은 없다. 그 아래층(실리콘·주변장치 bring-up)은 강하다
@@ -116,7 +116,9 @@ BSP(Board Support Package)는 **"이 보드에서 소프트웨어가 돌게 만�
 | [B01 BSP 해부](B01_bsp_anatomy.html) | 부트 체인, 클럭·전원, 핀 먹싱, 메모리 맵, 초기화 순서, 보드 리비전 | ① 먼저 |
 | [B02 Zephyr 보드 포팅](B02_zephyr_board_port.html) | 실제로 보드를 올리는 법. devicetree, Kconfig, 드라이버 바인딩, west | ② 손으로 따라 하기 |
 | [B03 Linux·Android BSP](B03_linux_android_bsp.html) | Cortex-A 쪽. 부트 체인, device tree, HAL, AOSP/Yocto. 약한 영역의 방어선 | ③ 개념만 |
-| [B04 BSP 면접](B04_bsp_interview.html) | 질문 30개+, Don 매핑, 정직 스크립트 | ④ 마지막에 |
+| [B04 BSP 면접](B04_bsp_interview.html) | 질문 41개, Don 매핑, 정직 스크립트 | ④ |
+| [B05 벤더·FPGA 통합](B05_vendor_fpga_integration.html) | **9/23 JD 신설 항목** — 벤더 코드 통합·검증, 하드웨어 스펙 검증, FPGA 두 의미 | ②½ 스토리 재료 |
+| [B06 임베디드 OS 지형도](B06_embedded_os_landscape.html) | **9/23 요건 확대** — eLinux·AOSP·VxWorks·QNX·RTOS, hands-on 등급, 램프업 | ③½ 갭 방어 |
 
 기존 노트 중 겹치는 것은 [C01 Cortex·부트](../concepts/C01_arm_cortex_boot_toolchain.html), [C03 드라이버](../concepts/C03_bsp_peripheral_drivers.html), [C04 RTOS](../concepts/C04_rtos_freertos_zephyr.html), [J02 BSP 업무](../jd/J02_bsp_drivers_rtos_scheduling.html)다. 이 시리즈는 **BSP 관점으로 다시 묶은 것**이라 중복 설명 대신 링크로 연결한다.
 

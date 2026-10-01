@@ -1,0 +1,1641 @@
+# K2. 성능 프로파일링 — sampling vs instrumentation, flame graph, trace, PMU, ML 전용 프로파일러
+
+> **이 노트를 다 읽으면**: sampling · instrumentation · tracing · PMU 카운터 · 시뮬레이션의 원리와 비용을 구분하고 질문에 맞는 도구를 고를 수 있다 · `sample`(또는 `perf`/`simpleperf`) 출력을 folded stack으로 바꿔 flame graph를 직접 그리고 읽을 수 있다 · `-finstrument-functions` 프로파일러와 펌웨어용 trace ring buffer를 직접 만들고 그 overhead를 숫자로 말할 수 있다 · torch.profiler·ORT·QNN·Streamline·Trace32 같은 ML/벤더 프로파일러가 무엇을 보여 주는지 알고 "기기에서 2배 느리다"를 체계적으로 추적할 수 있다
+> **JD 연결**: "Profile and optimize memory usage, power consumption, and **real-time performance**" — study_prep_list **K2** 행: DWT CYCCNT, PMU 카운터 / Linux `perf`, Android `simpleperf` / Snapdragon Profiler, QNN profiler, Arm Streamline, Trace32. 함께 닿는 행: D6(측정 하니스), E1(PMU 지표 해석), I5(벤치마크), I6(프로파일 → 병목 분류), J2(WCET 측정), F8(성능 triage)
+> **Don 기준 난이도**: Trace32·로직 분석기·내부 타임스탬프로 SSD 펌웨어 성능을 잡던 경험이 그대로 쓰인다 / 새로 배울 것은 통계적 sampling의 오차와 함정, flame graph 읽기, Python·ML 런타임 안쪽 프로파일러, 모바일 SoC(Snapdragon) 쪽 도구 지도
+> **선행 노트**: D6(벤치 하니스·백분위·`clock_gettime`), E1(마이크로아키텍처·10절 PMU 지표표), I6(torch.profiler·ORT 프로파일로 병목 분류), J2(DWT로 WCET 재기). **이 노트는 그 내용을 반복하지 않고 "도구가 어떻게 동작하고, 어떻게 만들고, 어떻게 속는가"에 집중한다**
+
+---
+
+## 0. 큰 그림 — 프로파일링은 "시간이 어디로 갔나"에 답하는 측정이다
+
+D6에서 우리는 **얼마나** 걸리는지(latency 분포)를 쟀다. I6에서는 프로파일 결과를 보고 **무엇을 고칠지** 골랐다. K2는 그 사이에 있는 질문, **"그 시간이 어디로, 왜 갔나"**를 알아내는 도구를 다룬다.
+
+Don이 SSD 펌웨어에서 하던 일을 떠올려 보자. 4K random read의 tail latency가 스펙을 넘으면, Trace32로 ETM trace를 떠서 함수별 실행 시간을 보거나, GPIO를 토글해 로직 분석기로 구간을 재거나, 펌웨어 안에 타임스탬프 로그를 박아 넣었다. 각 방법은 **보이는 것과 비용이 다르다**. ETM은 모든 명령을 보지만 trace 포트와 장비가 필요하고, GPIO 토글은 싸지만 내가 고른 지점만 보이고, 타임스탬프 로그는 코드를 바꾸니 타이밍을 흔든다. ML 추론을 프로파일링할 때도 같은 선택을 한다. 다만 도구 이름이 바뀌고(`perf`, `simpleperf`, torch.profiler, QNN profiler…) 측정 대상이 "함수"에서 "레이어(op)"로 올라간다.
+
+```
+   질문 ──▶ 수집(collect) ──▶ 기호화(symbolize) ──▶ 집계(aggregate) ──▶ 시각화 ──▶ 해석
+   "왜 느려?"  타이머 샘플 / 훅 /     주소 → 함수 이름     스택별 합계 /       flame graph /   "conv가 52%,
+              trace 레코드 / PMU    (심볼, DWARF)        op별 합계           타임라인        IPC 4.9 → 연산형"
+```
+
+한 장으로 보면 프로파일러는 이 다섯 단계의 조합이다. 이 노트에서는 각 단계를 **직접 만들어 본다** — 그래야 도구가 거짓말할 때 알아챈다.
+
+### 0.1 다른 노트와의 경계
+
+| 주제 | 어디서 다뤘나 | K2에서는 |
+|---|---|---|
+| latency 분포, p50/p99, warm-up, 하니스 | D6 2절·4절 | 반복하지 않음. 프로파일 숫자의 통계 오차만 추가 |
+| PMU 지표표(IPC, MPKI…)와 해석 흐름 | E1 10절 | 카운터를 **어떻게 읽나**(macOS, Cortex-M DWT, Cortex-A perf) |
+| torch.profiler·ORT op별 비중으로 병목 분류 | I6 3절·9절 | chrome trace를 **타임라인으로** 그리고, 프레임워크 overhead를 분리 |
+| 백엔드별 벤치마크 스위트 | I5 5절 | 없음 |
+| DWT CYCCNT로 WCET 재기 | J2 5.7절 | CYCCNT 외 카운터(CPICNT, LSUCNT…)와 trace 기반 측정 |
+| `llama-bench` pp/tg | F3 7절 | `llama-bench`를 sampling 프로파일러로 들여다봄 |
+| 프로파일 CSV 자동 진단, thermal | F8 6절 | 없음 |
+
+### 0.2 이 노트의 측정 환경 (그리고 한계)
+
+- 기계: Apple M2 (8코어: P 4 + E 4), macOS 26.4.1, Apple clang 21.0.0. Xcode는 없고 Command Line Tools만 있다.
+- Python: `.venv/bin/python` (torch 2.8.0, onnxruntime 1.19.2, numpy 2.0).
+- 같은 기계에서 다른 작업이 함께 돌고 있었다. **모든 시간 숫자는 잡음이 크다** — 같은 명령을 다시 돌리면 10~30% 다르게 나오는 일이 흔했다. 그래서 이 노트는 절대 시간보다 **비율과 순서**를 본다. 숫자를 그대로 외우지 말 것.
+- macOS에서 실제로 된 것과 안 된 것:
+
+| 도구 | 결과 |
+|---|---|
+| `/usr/bin/sample` (sampling, 내 프로세스) | **동작함** — sudo 불필요 |
+| `/usr/bin/xctrace` (Instruments CLI) | **실패** — `xcode-select: error: tool 'xctrace' requires Xcode, but active developer directory '/Library/Developer/CommandLineTools' is a command line tools instance` |
+| `cc -pg` (gprof 방식) | 컴파일 에러는 없지만 **아무 일도 안 함** — `mcount` 심볼 0개, `gmon.out` 안 생김, `gprof` 없음 |
+| `-finstrument-functions` | **동작함** (4절) |
+| `powermetrics` | `powermetrics must be invoked as the superuser` — 실행 안 함 |
+| `/usr/bin/time -l`, `proc_pid_rusage` | **동작함** — 프로세스 단위 instructions·cycles (5절) |
+| `perf`, `simpleperf`, Streamline, QNN, Trace32 | 이 Mac에 없음 — 명령은 문서 기준으로만 적고 "실행하지 않음"이라고 표시 |
+
+---
+
+## 1. 프로파일러의 다섯 갈래 — 무엇을 희생해서 무엇을 보나
+
+### 1.1 직관 — 교통 조사 비유
+
+시내 도로가 왜 막히는지 조사한다고 하자.
+
+- **Sampling**: 헬기에서 1분마다 사진을 찍는다. 사진 1000장에서 차가 어느 도로에 몇 대 있었는지 센다. 차에 아무것도 달 필요가 없다(오버헤드 작음). 대신 1분 사이에 잠깐 지나간 차는 운이 좋아야 찍히고(통계 오차), 번호판이 안 보이면 누구 차인지 모른다(심볼 없음).
+- **Instrumentation**: 모든 차에 GPS 기록기를 단다. 누가 어디를 몇 번 지나갔는지 **정확히** 안다. 하지만 기록기가 무거워서 차가 느려진다(교란). 특히 짧은 구간을 자주 오가는 차(작은 함수)일수록 기록기 무게가 상대적으로 커진다.
+- **Tracing**: 교차로마다 블랙박스를 달고 "몇 시 몇 분에 누가 지나갔다"를 시간순으로 남긴다. 합계가 아니라 **언제, 어떤 순서로**가 보인다. 기록 용량이 문제다.
+- **PMU 카운터**: 엔진 ECU가 세는 숫자 — 총 회전수, 연료 분사 횟수, 급제동 횟수. 어디서 일어났는지는 모르지만 **왜** 느린지(엔진이 놀았나, 브레이크를 자주 밟았나)를 말해 준다.
+- **Cycle-accurate 시뮬레이션**: 도로 전체를 컴퓨터 안에 재현해서 차 한 대 한 대를 시뮬레이션한다. 모든 것을 볼 수 있지만 실제보다 수천 배 느리고, 모델이 현실과 다르면 틀린다.
+
+### 1.2 한 장으로
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 340">
+<defs><marker id="k2ax" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs> <line x1="60" y1="300" x2="660" y2="300" stroke="currentColor" marker-end="url(#k2ax)"/> <line x1="60" y1="300" x2="60" y2="20" stroke="currentColor" marker-end="url(#k2ax)"/> <text x="420" y="325" font-size="13">실행 교란 (overhead · 관측자 효과) →</text>
+<text x="70" y="22" font-size="13">시간 정보: 집계 → 타임라인 ↑</text> <rect x="80" y="222" width="160" height="56" rx="6" fill="#3f9a6b" fill-opacity="0.15" stroke="#3f9a6b"/> <text x="90" y="244" font-size="13">PMU 카운터</text> <text x="90" y="264" font-size="12">perf stat, DWT CPICNT</text> <rect x="170" y="140" width="170" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="#4a7bd0"/>
+<text x="180" y="162" font-size="13">Sampling</text> <text x="180" y="182" font-size="12">sample, perf record</text> <rect x="380" y="170" width="200" height="56" rx="6" fill="#d0564a" fill-opacity="0.15" stroke="#d0564a"/> <text x="390" y="192" font-size="13">Instrumentation</text> <text x="390" y="212" font-size="12">-finstrument-functions, cProfile</text>
+<rect x="300" y="60" width="200" height="56" rx="6" fill="#e08a3c" fill-opacity="0.15" stroke="#e08a3c"/> <text x="310" y="82" font-size="13">Tracing</text> <text x="310" y="102" font-size="12">ETM, SystemView, Perfetto</text> <rect x="510" y="36" width="140" height="56" rx="6" fill="#888" fill-opacity="0.15" stroke="#888"/> <text x="520" y="58" font-size="13">Cycle-accurate</text>
+<text x="520" y="78" font-size="12">RTL sim (×1000↑ 느림)</text> <text x="80" y="210" font-size="12">"왜"(IPC, miss)</text> <text x="170" y="132" font-size="12">"어디서"(통계적)</text> <text x="380" y="242" font-size="12">"몇 번·정확히 얼마"</text> <text x="300" y="52" font-size="12">"언제·어떤 순서로"</text>
+</svg>
+```
+
+그림 1 — 프로파일러의 다섯 갈래. 가로축은 프로그램을 얼마나 흔드는지, 세로축은 시간 정보가 얼마나 자세한지(합계만 → 시간순 전체). ETM 같은 하드웨어 trace는 CPU를 거의 흔들지 않지만 장비와 trace 포트가 필요해서, 그림에서는 소프트웨어 tracing 기준으로 놓았다.
+
+### 1.3 비교표
+
+| 방식 | 수집 원리 | 보이는 것 | 비용·위험 | 대표 도구 |
+|---|---|---|---|---|
+| Sampling | 타이머(또는 PMU overflow) 인터럽트마다 PC와 call stack을 기록 | 함수·줄별 시간 비율(통계), 호출 경로 | 오버헤드 작음(수 %). 짧은 함수는 오차 큼. 심볼·unwind 정보 필요 | `perf record`, `simpleperf`, Instruments Time Profiler, macOS `sample`, py-spy |
+| Instrumentation | 함수 입구·출구(또는 지정 구간)에 코드를 삽입 | 정확한 호출 횟수, 구간별 inclusive/exclusive 시간 | 호출마다 고정 비용 → 작은 함수가 많으면 결과가 왜곡 | gprof(`-pg`), `-finstrument-functions`, cProfile, `record_function`, Tracy 같은 수동 구간 |
+| Tracing | 이벤트(시간, 종류, 인자)를 시간순 레코드로 남김 | 타임라인: 선점, 대기, 병렬성, 지연의 원인 | 저장·전송 대역폭. 버퍼가 차면 유실 | ETM/MTB + Trace32, SEGGER SystemView, Tracealyzer, ftrace, Perfetto, chrome trace |
+| PMU 카운터 | CPU 안의 하드웨어 카운터를 구간 앞뒤로 읽음 | cycles, instructions, cache·branch miss, stall → IPC 등 파생 지표 | 거의 0. 대신 "어디서"는 모름(sampling과 합치면 앎). 카운터 수 제한(동시에 몇 개) | `perf stat`, `simpleperf stat`, DWT, Streamline |
+| Cycle-accurate sim | 하드웨어 모델 안에서 실행 | 모든 신호·파이프라인 상태 | 매우 느림, 모델 정확도에 의존 | RTL 시뮬레이션, 벤더 cycle model, gem5(근사) |
+
+### 1.4 언제 무엇을 쓰나 — 결정 규칙
+
+```
+처음 보는 프로그램, "어디가 느린지" 모름 ──▶ Sampling (가장 싸고 전체가 보인다)
+hotspot을 찾았는데 "왜" 느린지 모름      ──▶ PMU (IPC, miss) — E1 10절 표로 해석
+가끔만 느림, 선점·대기·순서 문제 의심      ──▶ Tracing (타임라인)
+호출 횟수가 궁금하거나 MCU에 sampling 없음 ──▶ Instrumentation (구간 단위로 굵게)
+아직 칩이 없음 (pre-silicon)              ──▶ 시뮬레이션 / 분석 모델(D1~D3) / 벤더 추정치
+```
+
+Don의 FPGA pre-silicon bring-up 경험이 마지막 줄이다. 칩이 나오기 전에는 시뮬레이션이 유일한 "프로파일러"고, 칩이 나오면 trace와 카운터로 넘어간다.
+
+### 1.5 관측자 효과 — 실제 숫자 미리 보기
+
+아래 3·4절에서 같은 프로그램(`hot.c`, 프레임 하나에 약 0.27 ms)을 여러 방법으로 측정했다. 프레임당 시간(5회 실행의 범위):
+
+| 측정 방식 | ms/frame | 비고 |
+|---|---|---|
+| 아무것도 안 붙임 | 0.259 ~ 0.272 | 기준 |
+| tail call 최적화 끔(`-fno-optimize-sibling-calls`) | 0.260 ~ 0.285 | 스택을 정직하게 만들기 위한 빌드 (2.5절) |
+| `sample` 1 ms 간격으로 붙임 (3회) | 0.284 ~ 0.313 | 번갈아 잰 기준 0.262 ~ 0.286 대비 0~19% 느림 (2.7절) |
+| instrumentation, inline **후** 훅 | 0.262 ~ 0.282 | 함수 8개 × 프레임 — 거의 무료 |
+| instrumentation, inline **전** 훅(기본) | 2.755 ~ 2.871 | **10배 이상** 느림 — 작은 helper가 9만 8천 번 불림 |
+
+말로 하면: **같은 계열의 도구라도 설정 하나로 오버헤드가 0%에서 1000%까지 간다.** 오버헤드가 크면 느려지는 것보다 더 나쁜 일이 생긴다 — **비율이 틀어진다**. 4절에서 보겠지만 inline 전 훅을 쓰면 8%짜리 후처리가 90%로 보인다.
+
+---
+
+## 2. Sampling 프로파일러 — 원리와 macOS `sample`
+
+### 2.1 원리
+
+Sampling 프로파일러는 이렇게 동작한다.
+
+1. 주기적 인터럽트를 건다. 리눅스 `perf`는 보통 PMU의 cycles 카운터 overflow(예: 4000 Hz 상당)나 타이머를 쓴다. macOS `sample`은 대상 태스크를 잠깐 멈추고 각 스레드의 스택을 읽는 방식으로, 간격(기본 1 ms)마다 반복한다.
+2. 그 순간의 **PC(program counter)** 를 기록한다. 이것만 있으면 "flat profile"(함수별 self 비율)이 나온다.
+3. **스택을 거슬러 올라간다(unwind)**. frame pointer 체인(`x29` on AArch64)을 따라가거나, DWARF CFI(`.eh_frame`) 정보를 해석하거나, 스택 복사본을 나중에 해석한다(`perf --call-graph dwarf`). 이것으로 "누가 불렀나"가 붙는다.
+4. 주소를 함수 이름으로 바꾼다(**symbolize**). 심볼 테이블이나 디버그 정보가 필요하다. strip된 바이너리는 `0x100e345b4` 같은 주소만 남는다.
+5. 같은 스택끼리 합친다.
+
+펌웨어 비유: 1 ms SysTick ISR에서 스택에 push된 리턴 주소(stacked PC)를 링버퍼에 적어 두고, 나중에 `.map` 파일로 함수 이름을 찾는 것과 같다. Cortex-M3/M4/M7은 이것을 **하드웨어로** 해 준다 — DWT의 PC sampling이 주기적으로 PC를 ITM 패킷으로 SWO 핀에 내보낸다(6.2절).
+
+### 2.2 sampling은 통계다 — 손계산
+
+샘플 N개 중 함수 f에 n개가 떨어졌다면 f의 시간 비율 추정치는 p̂ = n/N이다. 각 샘플이 "f 안이냐 아니냐"인 독립 시행이라고 보면 이항분포이고, 표준오차는
+
+```
+SE(p̂) = √( p̂ · (1 − p̂) / N )
+95% 구간 ≈ p̂ ± 1.96 · SE
+```
+
+말로 하면: **샘플 수를 4배로 늘려야 오차가 절반이 된다.** 손으로 해 보자. 아래 3절 실험에서 postprocess가 N = 1698 샘플 중 137개였다.
+
+```
+p̂ = 137 / 1698 = 0.0807
+SE = √(0.0807 × 0.9193 / 1698) = √(4.37e-5) = 0.00661
+95% 구간 = 8.07% ± 1.30%p  →  약 6.8% ~ 9.4%
+```
+
+같은 계산을 시뮬레이션으로 확인한다.
+
+무엇을 확인하는 코드인지: 샘플 수 N에 따른 비율 추정의 95% 구간을 공식과 이항 시뮬레이션 두 가지로 비교한다.
+
+```python
+# 샘플 수 N에서 "함수 비율 p"의 통계 오차 — 이항분포 근사와 시뮬레이션으로 확인
+import numpy as np
+p_true = 137 / 1698                                       # postprocess 비율 (위 sample 결과)
+rng = np.random.default_rng(0)
+for N in (100, 1698, 20000):
+    se = np.sqrt(p_true * (1 - p_true) / N)
+    sims = rng.binomial(N, p_true, size=10000) / N         # 같은 프로그램을 10000번 샘플링했다고 치면
+    lo, hi = np.percentile(sims, [2.5, 97.5])
+    print(f"N={N:6d}  p={100 * p_true:.1f}%  ±1.96·SE = ±{196 * se:.2f}%p   sim 95% [{100 * lo:.1f}, {100 * hi:.1f}]%")
+```
+
+```text
+N=   100  p=8.1%  ±1.96·SE = ±5.34%p   sim 95% [3.0, 14.0]%
+N=  1698  p=8.1%  ±1.96·SE = ±1.30%p   sim 95% [6.8, 9.4]%
+N= 20000  p=8.1%  ±1.96·SE = ±0.38%p   sim 95% [7.7, 8.5]%
+```
+
+출력에서 볼 것: 샘플 100개로는 8%짜리 함수가 3%로도 14%로도 보일 수 있다. 1 ms 간격으로 2초(약 1700개)를 모으면 ±1.3%p, 20초면 ±0.4%p. **짧게 돌린 프로파일에서 5% 미만의 차이로 결론 내지 않는다.** 또 하나: 이 공식은 샘플이 독립이라는 가정이다. 프로그램이 정확히 1 ms 주기로 같은 일을 반복하면 샘플이 늘 같은 위상에 떨어져 편향된다(aliasing). 그래서 `perf`는 소수 같은 어중간한 주파수(예: `-F 999`)를 권한다.
+
+### 2.3 실험 대상 — 세 종류의 hotspot을 섞은 가짜 추론 파이프라인
+
+무엇을 확인하는 코드인지: 프레임 하나를 처리하는 `run_frame()`이 전처리(1 MB 프레임 복사 6번 — 메모리형), 추론(int8 3×3 conv 두 번 — 연산형), 후처리(분기가 많은 필터 — 소스 기준 분기형)를 부른다. 함수에 `noinline`을 붙여 스택에 이름이 남게 했다.
+
+```c
+/* hot.c — 의도적으로 세 종류의 hotspot을 섞은 "가짜 추론 파이프라인" */
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#define NOINL __attribute__((noinline))
+enum { H = 48, W = 48, CI = 8, CO = 16, NB = 4096, FRAMEB = 1 << 20 };
+static int8_t act[H][W][CI], wgt[CO][3][3][CI]; static int32_t out[H][W][CO];
+static uint8_t src[FRAMEB], dst[FRAMEB]; static int16_t score[NB];
+NOINL void conv_int8(void) {                 /* compute-bound: int8 MAC 루프 */
+  for (int y = 1; y < H - 1; y++) for (int x = 1; x < W - 1; x++)
+    for (int o = 0; o < CO; o++) { int32_t acc = 0;
+      for (int ky = 0; ky < 3; ky++) for (int kx = 0; kx < 3; kx++)
+        for (int c = 0; c < CI; c++) acc += act[y+ky-1][x+kx-1][c] * wgt[o][ky][kx][c];
+      out[y][x][o] = acc; }
+}
+NOINL void copy_stage(void) {                /* memory-bound: 1 MB 프레임 복사 ×6 */
+  for (int r = 0; r < 6; r++) { memcpy(dst, src, FRAMEB); src[r] ^= dst[FRAMEB - 1 - r]; }
+}
+static inline int classify(int s) {          /* 작은 helper — -O2에서는 inline된다 */
+  if (s & 1) return s > 0 ? 1 : 2;
+  return (s & 6) == 2 ? -1 : 0;
+}
+NOINL int branchy_post(void) {               /* 분기가 많은 후처리 (소스 기준) */
+  int kept = 0;
+  for (int r = 0; r < 24; r++)
+    for (int i = 0; i < NB; i++) kept += classify(score[i] ^ (r * 7919));
+  return kept;
+}
+NOINL void preprocess(void) { copy_stage(); }
+NOINL void infer(void) { conv_int8(); conv_int8(); }
+NOINL int postprocess(void) { return branchy_post(); }
+NOINL int run_frame(void) { preprocess(); infer(); return postprocess(); }
+int main(int argc, char **argv) {
+  int frames = argc > 1 ? atoi(argv[1]) : 2000; srand(1);
+  for (size_t i = 0; i < sizeof act; i++) ((int8_t *)act)[i] = (int8_t)(rand() % 21 - 10);
+  for (size_t i = 0; i < sizeof wgt; i++) ((int8_t *)wgt)[i] = (int8_t)(rand() % 5 - 2);
+  for (int i = 0; i < NB; i++) score[i] = (int16_t)rand();
+  struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0); long chk = 0;
+  for (int f = 0; f < frames; f++) chk += run_frame();
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+  printf("frames=%d total=%.1f ms per_frame=%.3f ms chk=%ld out=%d\n", frames, ms, ms / frames, chk, out[5][5][3]);
+  return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 -g hot.c -o hot                                   # 일반 빌드
+cc -std=c11 -Wall -Wextra -O2 -g -fno-optimize-sibling-calls hot.c -o hot_nt    # tail call 끔
+./hot 2000
+```
+
+```text
+frames=2000 total=518.3 ms per_frame=0.259 ms chk=122328000 out=-21
+```
+
+출력에서 볼 것: 경고 0개, 프레임당 약 0.26 ms. `chk`는 컴파일러가 계산을 지우지 못하게 결과를 쓰는 값이다(빌드가 달라도 같아야 한다 — 같았다).
+
+### 2.4 `sample`로 잡기 — 첫 번째 출력은 거짓말을 한다
+
+macOS `sample`은 `sample <pid 또는 이름> <초> <간격ms> -file <출력>`으로 쓴다. 내 사용자 권한으로 띄운 프로세스라면 sudo 없이 붙는다.
+
+```sh
+./hot 15000 > run_hot.txt &          # 약 4초 동안 도는 프로세스
+sleep 0.5                            # dyld 시작 구간을 피한다
+sample hot 2 1 -file s_hot.txt       # 2초, 1 ms 간격
+```
+
+일반 빌드(`hot`)의 Call graph 부분(실제 출력 그대로):
+
+```text
+Call graph:
+    1701 Thread_3983473   DispatchQueue_1: com.apple.main-thread  (serial)
+      1701 start  (in dyld) + 6992  [0x18c3dbda4]
+        1701 main  (in hot) + 244  [0x104cc4a58]  hot.c:41
+          862 run_frame  (in hot) + 16  [0x104cc495c]  hot.c:34
+          + 435 infer  (in hot) + 12  [0x104cc4940]  hot.c:32
+          + ! 244 conv_int8  (in hot) + 200,188,...  [0x104cc45c0,0x104cc45b4,...]  hot.c:15
+          + ! 151 conv_int8  (in hot) + 236  [0x104cc45e4]  hot.c:16
+          + ! 34 conv_int8  (in hot) + 240,248  [0x104cc45e8,0x104cc45f0]  hot.c:13
+          + ! 6 conv_int8  (in hot) + 256,264,...  [0x104cc45f8,0x104cc4600,...]  hot.c:12
+          + 247 conv_int8  (in hot) + 200,188,...  [0x104cc45c0,0x104cc45b4,...]  hot.c:15
+          + 147 conv_int8  (in hot) + 236  [0x104cc45e4]  hot.c:16
+          + 31 conv_int8  (in hot) + 240,248  [0x104cc45e8,0x104cc45f0]  hot.c:13
+          + 2 conv_int8  (in hot) + 256,268  [0x104cc45f8,0x104cc4604]  hot.c:12
+          692 run_frame  (in hot) + 12  [0x104cc4958]  hot.c:34
+          + 137 copy_stage  (in hot) + 116  [0x104cc468c]  hot.c:19
+          + ! 137 _platform_memmove  (in libsystem_platform.dylib) + 88,108,...  [0x18c7a1418,0x18c7a142c,...]
+          + 119 copy_stage  (in hot) + 44  [0x104cc4644]  hot.c:19
+          + ! 119 _platform_memmove  (in libsystem_platform.dylib) + 88,108,...  [0x18c7a1418,0x18c7a142c,...]
+          + 119 copy_stage  (in hot) + 152  [0x104cc46b0]  hot.c:19
+          + ! 119 _platform_memmove  (in libsystem_platform.dylib) + 88,108  [0x18c7a1418,0x18c7a142c]
+          + 118 copy_stage  (in hot) + 224  [0x104cc46f8]  hot.c:19
+          + ! 118 _platform_memmove  (in libsystem_platform.dylib) + 88,96  [0x18c7a1418,0x18c7a1420]
+          + 102 copy_stage  (in hot) + 188  [0x104cc46d4]  hot.c:19
+          + ! 102 _platform_memmove  (in libsystem_platform.dylib) + 88,108  [0x18c7a1418,0x18c7a142c]
+          + 97 copy_stage  (in hot) + 80  [0x104cc4668]  hot.c:19
+          +   97 _platform_memmove  (in libsystem_platform.dylib) + 88,108  [0x18c7a1418,0x18c7a142c]
+          147 branchy_post  (in hot) + 472,476,...  [0x104cc48f0,0x104cc48f4,...]  hot.c:28
+```
+
+읽는 법: 각 줄 맨 앞 숫자는 **그 스택 위치를 지난 샘플 수**(inclusive)다. 들여쓰기가 호출 깊이, `+ ! :` 기호는 트리 선이다. `conv_int8 (in hot) + 200,188,...  hot.c:15`는 함수 시작에서 200바이트 떨어진 명령에서 샘플이 잡혔고 그게 소스 15번째 줄이라는 뜻이다 — `-g`를 줬기 때문에 줄 번호까지 나온다. 맨 아래 "Sort by top of stack"은 스택 꼭대기(self) 기준 flat profile이다.
+
+그런데 이상한 점이 세 군데 있다.
+
+- `preprocess`가 **없다**. `copy_stage`가 `run_frame` 바로 밑에 붙었다.
+- `conv_int8`이 `infer` 밑에 435개, **`run_frame` 바로 밑에 427개**로 갈라졌다.
+- `postprocess`도, `run_frame`도 없이 `branchy_post`가 **`main` 바로 밑에** 있다.
+
+원인은 **tail call 최적화**다. `void preprocess(void) { copy_stage(); }`처럼 마지막에 다른 함수를 부르고 끝나는 함수는, 컴파일러가 `bl`(call) 대신 `b`(jump)로 바꾸고 자기 스택 프레임을 미리 치운다. 실행은 빨라지지만 unwind할 때 그 함수는 스택에 없다. `infer()`의 두 번째 `conv_int8()`도 tail call이라 `infer`가 사라지고, `run_frame`의 마지막 `postprocess()`, 그리고 `postprocess`의 `branchy_post()`가 연달아 tail call이라 둘 다 사라졌다.
+
+`-fno-optimize-sibling-calls`로 빌드한 `hot_nt`는 정직한 트리를 준다.
+
+```text
+          882 run_frame  (in hot_nt) + 16  [0x1047d0980]  hot.c:34
+          + 463 infer  (in hot_nt) + 12  [0x1047d0950]  hot.c:32
+          + ! 253 conv_int8  (in hot_nt) + 200,188,...  [0x1047d05c0,0x1047d05b4,...]  hot.c:15
+          ...
+          679 run_frame  (in hot_nt) + 12  [0x1047d097c]  hot.c:34
+          + 679 preprocess  (in hot_nt) + 12  [0x1047d093c]  hot.c:31
+          +   129 copy_stage  (in hot_nt) + 224  [0x1047d06f8]  hot.c:19
+          +   ! 129 _platform_memmove  (in libsystem_platform.dylib) + 88,108,...  [0x18c7a1418,0x18c7a142c,...]
+          ...
+          137 run_frame  (in hot_nt) + 20  [0x1047d0984]  hot.c:34
+            137 postprocess  (in hot_nt) + 12  [0x1047d0968]  hot.c:33
+              137 branchy_post  (in hot_nt) + 136,432,...  [0x1047d07a0,0x1047d08c8,...]  hot.c:28
+```
+
+(전체 1698 샘플 중 발췌. `...`은 생략 표시)
+
+출력에서 볼 것: 이제 `run_frame → infer → conv_int8`, `run_frame → preprocess → copy_stage → memmove`, `run_frame → postprocess → branchy_post`가 소스 구조와 같다. 또 `copy_stage` 아래 `_platform_memmove`가 **6개의 서로 다른 호출 지점**(+44, +80, +116…)으로 나뉜다 — 컴파일러가 `for r < 6` 루프를 펼쳐(unroll) memcpy 호출이 6군데 생겼기 때문이다. 줄 번호는 모두 19번 줄로 같다.
+
+### 2.5 sampling이 속는 다섯 가지 방법
+
+| 원인 | 증상 | 대처 |
+|---|---|---|
+| tail call 최적화 | 중간 함수가 스택에서 사라짐, 자식이 엉뚱한 부모 밑에 붙음 | 프로파일용 빌드에 `-fno-optimize-sibling-calls`. 최종 판단은 원래 빌드로 |
+| inline | 작은 함수가 부모 안에 녹아 이름 자체가 없음 | 줄 번호(`-g`)로 본다. `perf annotate`처럼 명령 단위로 본다 |
+| frame pointer 없음 | 스택이 1~2단에서 끊김 | `-fno-omit-frame-pointer`, 또는 DWARF unwind(`perf record --call-graph dwarf`) |
+| 심볼 없음(strip) | `0x7a3f…` 주소만 나옴 | 배포 빌드와 같은 빌드 ID의 심볼 파일을 따로 보관(펌웨어의 `.elf`/`.map`과 같은 원리) |
+| 샘플이 없는 곳 | 인터럽트가 막힌 구간(커널, critical section)은 샘플이 밀려서 다른 곳에 쌓임 | PMU overflow 기반 sampling(NMI에 가까움) 쓰기, 결과에서 "skid" 감안 |
+
+Don의 펌웨어 경험과 연결하면: **ETM trace에서 함수가 사라지는 것과 같은 이유**다. 디버거가 함수 단위 통계를 낼 때도 tail call과 inline 때문에 같은 착시가 생긴다. 해결도 같다 — 프로파일용 빌드 옵션을 정하고, 그 옵션이 성능을 얼마나 바꾸는지 먼저 잰다(1.5절 표: tail call을 꺼도 시간 차이는 잡음 수준).
+
+### 2.6 다른 플랫폼에서의 같은 일 (실행하지 않음)
+
+```sh
+# Linux (Cortex-A 보드, x86 서버) — perf
+perf record -F 999 -g ./kws_bench            # frame pointer 기반 call graph
+perf record -F 999 --call-graph dwarf ./kws_bench   # frame pointer 없는 바이너리
+perf report --stdio --no-children | head -40
+# Android — simpleperf (NDK에 포함)
+adb shell simpleperf record -g -p <pid> --duration 10 -o /data/local/tmp/perf.data
+adb shell simpleperf report -i /data/local/tmp/perf.data
+# macOS + Xcode 설치 시 — Instruments Time Profiler (이 Mac에서는 Xcode가 없어 실패)
+xctrace record --template 'Time Profiler' --launch -- ./hot 15000
+```
+
+옵션 이름은 도구 버전마다 조금씩 다르니 `--help`로 확인한다. NDK의 simpleperf 디렉터리에는 `app_profiler.py`, `report_html.py` 같은 도우미 스크립트도 있다(위치는 NDK 버전마다 다르다).
+
+### 2.7 sampling의 오버헤드
+
+`sample`을 붙인 실행과 안 붙인 실행을 번갈아 세 번 쟀다 (8000 프레임, 그중 1.8초 동안 sampling).
+
+```text
+plain   0.264
+sampled 0.313
+plain   0.262
+sampled 0.297
+plain   0.286
+sampled 0.284
+```
+
+출력에서 볼 것: 붙였을 때 0~19% 느렸다. 실행마다 잡음(0.262~0.286)이 같은 크기라서 정확한 값은 말할 수 없다. 이 도구는 샘플마다 태스크를 잠깐 멈추고 스택을 읽기 때문에 `perf`의 PMU 기반 sampling보다 무거울 수 있다. **결론: "수 % 이상일 수 있으니 시간 숫자는 프로파일러를 뗀 실행에서 잰다. 프로파일러는 비율과 위치를 보는 도구다."**
+
+---
+
+## 3. Flame graph — 직접 만들고 읽기
+
+### 3.1 folded stack — flame graph의 입력 형식
+
+Brendan Gregg의 flame graph는 단순한 텍스트 형식에서 시작한다. 한 줄이 "스택 하나와 그 스택이 관측된 횟수"다.
+
+```text
+start;main;run_frame;infer;conv_int8 882
+start;main;run_frame;preprocess;copy_stage;_platform_memmove 679
+start;main;run_frame;postprocess;branchy_post 137
+```
+
+이것을 **folded(접힌) stack**이라고 부른다. 원래 FlameGraph 저장소에는 `perf script` 출력을 이 형식으로 바꾸는 `stackcollapse-perf.pl`, 이것을 SVG로 그리는 `flamegraph.pl`이 있다. 여기서는 둘 다 Python으로 직접 만든다.
+
+`sample`의 트리 출력에서 folded로 가려면 한 가지만 계산하면 된다. 트리의 각 줄은 inclusive 샘플 수이므로 **self = 자기 수 − 자식들의 합**이다. 손으로 해 보자. `hot_nt`에서 `run_frame`은 882 + 679 + 137 = 1698, 자식 `infer` 463 + 419 = 882의 자식 `conv_int8`이 882(253+179+29+2 + 230+158+30+1). 따라서 `infer`의 self는 882 − 882 = 0, `conv_int8`의 self는 882 − 0 = 882. 접힌 줄은 `...;infer;conv_int8 882` 하나가 된다.
+
+### 3.2 `sample` 출력 → folded stack
+
+무엇을 확인하는 코드인지: `sample` 출력의 Call graph에서 main thread만 골라, 들여쓰기 깊이로 트리를 복원하고 self 샘플을 경로별로 합친다.
+
+```python
+# fold_sample.py — macOS `sample` 출력의 Call graph(들여쓰기 트리)를 folded stack으로 바꾼다
+import re, sys
+from collections import Counter
+lines = open(sys.argv[1]).read().split("Call graph:")[1].split("Total number in stack")[0].splitlines()
+pat = re.compile(r"^([\s+!:|]*)(\d+) (\S+)")          # 들여쓰기 기호 + 샘플 수 + 함수 이름
+nodes, stack, in_main = [], [], False                  # stack: (깊이, 이름, 샘플 수, 자식 합)
+folded = Counter()
+def pop_until(depth):
+    while stack and stack[-1][0] >= depth:
+        d, name, n, kids = stack.pop()
+        path = ";".join(s[1] for s in stack) + (";" if stack else "") + name
+        if n - kids > 0: folded[path] += n - kids       # self 샘플 = 자기 수 − 자식 합
+for ln in lines:
+    m = pat.match(ln)
+    if not m: continue
+    depth, n, name = len(m.group(1)), int(m.group(2)), m.group(3)
+    if name.startswith("Thread_"):                     # 스레드 경계: main-thread만 쓴다
+        pop_until(0); in_main = "main-thread" in ln; continue
+    if not in_main: continue
+    pop_until(depth)
+    if stack: stack[-1][3] += n
+    stack.append([depth, name, n, 0])
+pop_until(0)
+for path, n in sorted(folded.items(), key=lambda kv: -kv[1]):
+    print(f"{path} {n}")
+```
+
+```sh
+.venv/bin/python fold_sample.py s_hot.txt     # tail call 빌드
+.venv/bin/python fold_sample.py s_hot_nt.txt  # 정직한 빌드
+```
+
+```text
+start;main;run_frame;copy_stage;_platform_memmove 692
+start;main;run_frame;infer;conv_int8 435
+start;main;run_frame;conv_int8 427
+start;main;branchy_post 147
+start;main;run_frame;infer;conv_int8 882
+start;main;run_frame;preprocess;copy_stage;_platform_memmove 679
+start;main;run_frame;postprocess;branchy_post 137
+```
+
+출력에서 볼 것: 위 네 줄이 일반 빌드, 아래 세 줄이 `-fno-optimize-sibling-calls` 빌드다. 일반 빌드에서는 `conv_int8`이 두 경로로 갈라져 있다 — flame graph로 그리면 같은 함수가 두 군데에 따로 나타나서 "conv가 두 종류인가?" 하는 오해를 만든다. 정직한 빌드로는 `conv_int8 882 / 1698 = 51.9%`, `memmove 679 = 40.0%`, `branchy_post 137 = 8.1%`.
+
+### 3.3 folded stack → flame graph SVG
+
+무엇을 확인하는 코드인지: 모든 경로 접두사에 샘플 수를 누적하고, 아래(root)부터 위로 쌓으며 폭 = 비율로 사각형을 그린다. 같은 깊이의 형제는 이름 순으로 놓는다(시간 순서가 아님).
+
+```python
+# flame.py — folded stack → flame graph SVG (Brendan Gregg 형식을 최소한으로 흉내)
+import sys
+from collections import defaultdict
+total = defaultdict(int)                               # 경로 접두사별 누적 샘플 수
+for ln in open(sys.argv[1]):
+    path, n = ln.rsplit(" ", 1); parts = path.split(";")
+    for d in range(1, len(parts) + 1): total[tuple(parts[:d])] += int(n)
+roots = sum(v for k, v in total.items() if len(k) == 1)
+W, X0, H, maxd = 660, 10, 20, max(len(k) for k in total)
+def color(name):
+    if "conv" in name: return "#4a7bd0"                # compute
+    if "mem" in name or "copy" in name: return "#e08a3c"  # memory
+    if "branchy" in name or "post" in name: return "#3f9a6b"
+    return "#888"
+out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 {maxd * H + 30}">']
+def draw(prefix, x, depth):
+    kids = sorted(k for k in total if len(k) == depth + 1 and k[:depth] == prefix)
+    for k in kids:
+        w = W * total[k] / roots; y = (maxd - depth - 1) * H + 4
+        out.append(f'<rect x="{x:.1f}" y="{y}" width="{max(w - 1, 0.5):.1f}" height="{H - 2}" '
+                   f'fill="{color(k[-1])}" fill-opacity="0.75"/>')
+        label = f"{k[-1]} {100 * total[k] / roots:.1f}%"
+        if w > 30:
+            label = label if len(label) * 6.6 < w - 6 else label[: int((w - 6) / 6.6) - 2] + ".."
+            out.append(f'<text x="{x + 4:.1f}" y="{y + 13}" font-size="12">{label}</text>')
+        draw(k, x, depth + 1); x += w
+draw((), X0, 0)
+out.append(f'<text x="10" y="{maxd * H + 22}" font-size="12">samples = {roots} (1 ms 간격), 폭 = 그 함수가 스택에 있었던 샘플 비율</text></svg>')
+print("\n".join(out))
+```
+
+```sh
+.venv/bin/python flame.py hot_nt.folded > flame.svg
+.venv/bin/python -c "import xml.dom.minidom as m; m.parse('flame.svg'); print('ok')"
+```
+
+```text
+ok
+```
+
+아래가 그 결과 SVG를 그대로 붙인 것이다(색은 이 노트의 규칙에 맞춰 범주별로: 파랑 = 연산, 주황 = 메모리 복사, 초록 = 후처리, 회색 = 그 밖).
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 150">
+<rect x="10.0" y="104" width="659.0" height="18" fill="#888" fill-opacity="0.75"/> <text x="14.0" y="117" font-size="12">start 100.0%</text> <rect x="10.0" y="84" width="659.0" height="18" fill="#888" fill-opacity="0.75"/> <text x="14.0" y="97" font-size="12">main 100.0%</text> <rect x="10.0" y="64" width="659.0" height="18" fill="#888" fill-opacity="0.75"/> <text x="14.0" y="77" font-size="12">run_frame 100.0%</text>
+<rect x="10.0" y="44" width="341.8" height="18" fill="#888" fill-opacity="0.75"/> <text x="14.0" y="57" font-size="12">infer 51.9%</text> <rect x="10.0" y="24" width="341.8" height="18" fill="#4a7bd0" fill-opacity="0.75"/> <text x="14.0" y="37" font-size="12">conv_int8 51.9%</text> <rect x="352.8" y="44" width="52.3" height="18" fill="#3f9a6b" fill-opacity="0.75"/> <text x="356.8" y="57" font-size="12">postp..</text>
+<rect x="352.8" y="24" width="52.3" height="18" fill="#3f9a6b" fill-opacity="0.75"/> <text x="356.8" y="37" font-size="12">branc..</text> <rect x="406.1" y="44" width="262.9" height="18" fill="#888" fill-opacity="0.75"/> <text x="410.1" y="57" font-size="12">preprocess 40.0%</text> <rect x="406.1" y="24" width="262.9" height="18" fill="#e08a3c" fill-opacity="0.75"/>
+<text x="410.1" y="37" font-size="12">copy_stage 40.0%</text> <rect x="406.1" y="4" width="262.9" height="18" fill="#e08a3c" fill-opacity="0.75"/> <text x="410.1" y="17" font-size="12">_platform_memmove 40.0%</text> <text x="10" y="142" font-size="12">samples = 1698 (1 ms 간격), 폭 = 그 함수가 스택에 있었던 샘플 비율</text>
+</svg>
+```
+
+그림 2 — `hot_nt`를 `sample`로 2초 동안 1 ms 간격으로 잡은 1698 샘플로 만든 flame graph(실제 데이터). conv_int8 51.9%, memmove 40.0%, postprocess(그 위 branchy_post) 8.1%. 초록 칸은 좁아서 이름이 잘렸다.
+
+### 3.4 flame graph 읽는 법
+
+1. **폭 = 그 함수가 스택 어딘가에 있었던 시간 비율(inclusive)**. 가장 넓은 칸부터 본다.
+2. **꼭대기(위가 비어 있는 부분)의 폭 = self 시간**. `conv_int8` 위는 비어 있다 → 자기 루프에서 시간을 쓴다. `copy_stage` 위에는 `_platform_memmove`가 꽉 차 있다 → `copy_stage` 자신은 거의 일을 안 하고 libc에 맡긴다.
+3. **가로 순서는 시간이 아니다.** 알파벳 순서다(`infer` < `postprocess` < `preprocess`). 시간 순서를 보려면 trace 타임라인(6·7절)이 필요하다. 시간 순서로 그리는 변형을 flame chart라고 부르며 Chrome DevTools·Perfetto가 이 방식이다.
+4. **색은 의미가 없거나, 도구가 정한 의미가 있다.** 원래 `flamegraph.pl`은 따뜻한 색을 무작위로 쓴다. 우리는 범주로 칠했다.
+5. **넓은 평원(plateau)을 찾는다.** 위에 아무것도 없는 넓은 칸이 최적화 1순위다. 여기서는 conv(52%)와 memmove(40%).
+6. 뒤집어 그린 것(root가 위)을 **icicle graph**라고 한다. 두 프로파일을 빼서 늘어난 곳은 빨강·줄어든 곳은 파랑으로 칠한 것을 **differential flame graph**라고 하며, 최적화 전후 비교나 회귀 분석에 쓴다.
+
+이 그림에서 내리는 결론: "후처리를 아무리 고쳐도 최대 8%밖에 못 줄인다(Amdahl). conv와 복사가 92%다." 복사 40%는 놀라운 숫자다 — 실제 펌웨어라면 "DMA로 바로 넣으면 이 복사 자체가 없어진다"는 설계 질문으로 이어진다(I4 전처리 배치).
+
+### 3.5 진짜 워크로드 — `llama-bench`를 sampling으로 들여다보기
+
+장난감 말고 진짜 추론 엔진을 보자. F3에서 쓴 llama.cpp의 `llama-bench`로 Qwen2.5-0.5B Q4_0을 CPU에서 token generation(`-ngl 0 -t 4 -p 0 -n 256`)시키고, 도는 중에 3초 동안 `sample`을 붙였다.
+
+```sh
+T=.tools; $T/llama.cpp/build/bin/llama-bench -m $T/models/qwen2.5-0.5b-Q4_0.gguf -ngl 0 -t 4 -p 0 -n 256 -r 3 &
+sleep 2; sample llama-bench 3 1 -file s_llama.txt
+```
+
+`sample`의 "Sort by top of stack"(self 기준) 상위 일부 (실제 출력, 긴 C++ 이름은 줄였다):
+
+```text
+        __workq_kernreturn  (in libsystem_kernel.dylib)        38775
+        ggml_graph_compute_thread  (in libggml-cpu.0.25.3.dylib)        3539
+        ggml_gemv_q4_0_4x8_q8_0  (in libggml-cpu.0.25.3.dylib)        2277
+        __semwait_signal  (in libsystem_kernel.dylib)        2119
+        ggml_gemv_q8_0_4x8_q8_0  (in libggml-cpu.0.25.3.dylib)        1306
+        ggml_barrier  (in libggml-cpu.0.25.3.dylib)        709
+        ggml_compute_forward_flash_attn_ext_f16_one_chunk(...)  (in libggml-cpu.0.25.3.dylib)        361
+```
+
+여기서 처음 배우는 것: **스레드가 많은 프로세스에서는 "자고 있는" 샘플이 대부분이다.** 이 프로세스에는 스레드가 38개 있었고(Metal·BLAS·디스패치 스레드 포함), 각 스레드가 샘플마다 기록된다. `__workq_kernreturn`, `__semwait_signal`은 커널에서 기다리는 중이다. 그래서 먼저 범주로 묶어서 "일하는 샘플"만 본다.
+
+무엇을 확인하는 코드인지: self 기준 표를 대기·동기화/spin·행렬곱 커널·attention·기타로 묶고, 대기를 뺀 나머지 중 비율을 낸다.
+
+```python
+# sample 출력의 "Sort by top of stack" 표를 범주별로 묶는다 — 스레드가 많은 런타임을 읽는 첫걸음
+import re, sys
+from collections import Counter
+txt = open(sys.argv[1]).read().split("Sort by top of stack")[1].split("Binary Images")[0]
+rows = [(m.group(1).strip(), int(m.group(2))) for m in re.finditer(r"^\s+(.+?)\s+\(in .+?\)\s+(\d+)$", txt, re.M)]
+def bucket(fn):
+    if fn.startswith(("__workq_kernreturn", "__semwait", "__psynch", "mach_msg")): return "idle (kernel wait)"
+    if fn.startswith(("ggml_graph_compute_thread", "ggml_barrier", "ggml_threadpool")): return "sync / spin"
+    if "gemv" in fn or "gemm" in fn or "mul_mat" in fn or "vec_dot" in fn: return "matmul kernels"
+    if "flash_attn" in fn: return "attention"
+    return "other"
+b = Counter()
+for fn, n in rows: b[bucket(fn)] += n
+busy = sum(n for k, n in b.items() if k != "idle (kernel wait)")
+for k, n in b.most_common():
+    extra = f"  ({100 * n / busy:4.1f}% of non-idle)" if k != "idle (kernel wait)" else ""
+    print(f"{k:20s} {n:6d}{extra}")
+```
+
+```text
+idle (kernel wait)    40894
+sync / spin            4255  (50.5% of non-idle)
+matmul kernels         3656  (43.4% of non-idle)
+attention               361  ( 4.3% of non-idle)
+other                   157  ( 1.9% of non-idle)
+```
+
+출력에서 볼 것: 일하는 샘플의 **절반(50.5%)이 동기화·spin**(`ggml_graph_compute_thread` 자신, `ggml_barrier`)이고 행렬곱 커널은 43%다. token generation은 한 토큰에 행렬-벡터 곱(gemv)을 수백 번 하는데, 0.5B 모델이라 op 하나가 작다. 그래서 스레드 4개가 op마다 barrier에서 서로를 기다리는 비용이 계산과 비슷해진다. (주의: `ggml_graph_compute_thread`의 self 샘플에는 inline된 일부 계산이 섞였을 수 있다. "절반"은 상한에 가까운 해석이다.)
+
+프로파일이 가설을 줬으니 실험으로 확인한다 — 스레드 수를 바꾸고 다시 잰다.
+
+```sh
+llama-bench -m qwen2.5-0.5b-Q4_0.gguf -ngl 0 -t 1,2,4 -p 0 -n 128 -r 3
+```
+
+```text
+| qwen2 1B Q4_0                  | 330.17 MiB |   494.03 M | MTL,BLAS   |       1 |           tg128 |         67.85 ± 5.73 |
+| qwen2 1B Q4_0                  | 330.17 MiB |   494.03 M | MTL,BLAS   |       2 |           tg128 |         96.40 ± 0.99 |
+| qwen2 1B Q4_0                  | 330.17 MiB |   494.03 M | MTL,BLAS   |       4 |           tg128 |         79.63 ± 8.06 |
+```
+
+그리고 1 스레드로 돌린 것을 같은 방법으로 묶으면:
+
+```text
+idle (kernel wait)    58197
+matmul kernels         1968  (91.6% of non-idle)
+attention               138  ( 6.4% of non-idle)
+other                    42  ( 2.0% of non-idle)
+```
+
+출력에서 볼 것: 1 스레드에서는 sync/spin 범주가 **사라지고** 행렬곱이 92%가 된다. 처리량은 2 스레드가 가장 좋았고(96 t/s) 4 스레드는 오히려 떨어졌다(80 t/s, 편차도 큼). 다른 작업이 함께 돌던 기계라 정확한 값은 믿지 말고, **"작은 모델의 tg는 스레드를 늘려도 동기화 비용 때문에 안 빨라진다"**는 방향만 가져간다. (표의 backend 열이 `MTL,BLAS`인 것은 빌드에 포함된 backend 목록이고, `-ngl 0`이라 레이어는 CPU에서 돈다 — sample에 `libggml-cpu`의 커널이 잡힌 것이 그 증거다.) 이 흐름 — **프로파일 → 가설 → 한 변수만 바꾼 실험 → 재측정** — 이 9절 방법론의 축소판이다.
+
+또 하나: 3초 동안 1 ms 간격이면 스레드당 3000 샘플이어야 하는데 실제로는 2120이었다. 스레드가 38개라 `sample`이 간격을 못 지켰다. **요청한 샘플링 주기는 약속이 아니다.** 비율을 볼 때는 문제가 없지만 "샘플 수 × 1 ms = 시간"으로 환산하면 틀린다.
+
+---
+
+## 4. Instrumentation 프로파일러 — `-finstrument-functions`로 직접 만들기
+
+### 4.1 원리, 그리고 gprof가 macOS에서 안 되는 것
+
+Instrumentation은 코드에 측정 코드를 **삽입**한다. 두 가지 방식이 있다.
+
+- **컴파일러가 모든 함수에 자동 삽입**: gcc/clang의 `-pg`(함수 입구에서 `mcount` 호출 → gprof), `-finstrument-functions`(입구에서 `__cyg_profile_func_enter`, 출구에서 `__cyg_profile_func_exit` 호출).
+- **사람이 구간에 수동 삽입**: `PROFILE_SCOPE("conv1")` 같은 매크로, torch의 `record_function`, Android의 `ATrace_beginSection`. 펌웨어에서 GPIO를 토글하는 것도 수동 instrumentation이다.
+
+먼저 고전적인 gprof부터 확인했다.
+
+```sh
+cc -pg -O2 hot.c -o hot_pg; echo "exit=$?"; ./hot_pg 200
+ls gmon.out; nm hot_pg | grep -ci mcount; which gprof || echo "gprof: not found"
+```
+
+```text
+exit=0
+frames=200 total=72.1 ms per_frame=0.361 ms chk=12232800 out=-21
+ls: gmon.out: No such file or directory
+0
+gprof: not found
+```
+
+출력에서 볼 것: Apple clang은 `-pg`를 **에러 없이 받아들이지만 아무것도 삽입하지 않는다**(`mcount` 0개, `gmon.out` 없음). "빌드가 됐으니 프로파일이 될 것"이라고 믿으면 안 된다는 작은 교훈이다. 그래서 `-finstrument-functions`로 직접 만든다.
+
+### 4.2 직접 만든 함수 프로파일러
+
+설계는 펌웨어 사람에게 익숙한 **shadow stack**이다.
+
+- 입구 훅: `{함수 주소, 진입 시각, 자식 시간 합 = 0}`을 스택에 push.
+- 출구 훅: pop해서 `dt = 지금 − 진입 시각`을 그 함수의 inclusive에 더하고, 부모 프레임의 "자식 시간 합"에 dt를 더한다.
+- exclusive(self) = inclusive − 자식 시간 합.
+- 훅 자신에는 `no_instrument_function`을 붙여 무한 재귀를 막는다. 프로그램이 끝날 때(`destructor`) 주소를 `dladdr`로 이름으로 바꿔 출력한다.
+
+손으로 먼저: `run_frame`이 0~100 µs, 그 안에서 `infer`가 10~60 µs, `infer` 안의 `conv_int8` 두 번이 각각 10~35, 35~60 µs라면, `conv_int8` incl = 25 + 25 = 50, excl = 50. `infer` incl = 50, child = 50 → excl = 0. `run_frame` incl = 100, child = 50(+ 다른 자식) → excl = 나머지.
+
+무엇을 확인하는 코드인지: 함수 입구·출구 훅으로 함수별 호출 횟수, inclusive, exclusive 시간을 모은다 (단일 스레드 가정, 재귀·`longjmp` 미지원).
+
+```c
+/* iprof.c — -finstrument-functions 훅으로 만드는 함수 단위 프로파일러 (단일 스레드 가정) */
+#define _DARWIN_C_SOURCE
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <time.h>
+#define NI __attribute__((no_instrument_function))
+typedef struct { void *fn; uint64_t calls, incl, child; } Stat;   /* child = 자식들의 incl 합 */
+typedef struct { void *fn; uint64_t t0, child; } Frame;
+static Stat tab[64]; static Frame stk[64]; static int depth;
+NI static uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+NI static Stat *slot(void *fn) {                 /* 작은 선형 탐색 테이블 */
+  for (int i = 0; i < 64; i++) { if (tab[i].fn == fn) return &tab[i]; if (!tab[i].fn) { tab[i].fn = fn; return &tab[i]; } }
+  return &tab[63];
+}
+NI void __cyg_profile_func_enter(void *fn, void *site) {
+  (void)site; stk[depth++] = (Frame){fn, now_ns(), 0};
+}
+NI void __cyg_profile_func_exit(void *fn, void *site) {
+  (void)site; uint64_t t = now_ns(); Frame f = stk[--depth]; uint64_t dt = t - f.t0;
+  Stat *s = slot(fn); s->calls++; s->incl += dt; s->child += f.child;
+  if (depth > 0) stk[depth - 1].child += dt;     /* 부모에게 "자식이 쓴 시간"을 알려 준다 */
+}
+NI __attribute__((destructor)) static void report(void) {
+  fprintf(stderr, "%-14s %10s %10s %10s\n", "function", "calls", "incl_ms", "excl_ms");
+  for (int i = 0; i < 64 && tab[i].fn; i++) {
+    Dl_info di; const char *name = dladdr(tab[i].fn, &di) && di.dli_sname ? di.dli_sname : "?";
+    fprintf(stderr, "%-14s %10llu %10.1f %10.1f\n", name, (unsigned long long)tab[i].calls,
+            tab[i].incl / 1e6, (tab[i].incl - tab[i].child) / 1e6);
+  }
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 -g -c iprof.c -o iprof.o
+cc -std=c11 -Wall -Wextra -O2 -g -finstrument-functions hot.c iprof.o -o hot_inst
+cc -std=c11 -Wall -Wextra -O2 -g -finstrument-functions-after-inlining hot.c iprof.o -o hot_inst_ai
+./hot_inst 2000; ./hot_inst_ai 2000
+```
+
+`-finstrument-functions` (기본 — inline **전에** 훅을 넣는다):
+
+```text
+function            calls    incl_ms    excl_ms
+copy_stage           2000      247.6      247.6
+preprocess           2000      247.7        0.1
+conv_int8            4000      313.8      313.8
+infer                2000      313.9        0.1
+classify        196608000     2216.8     2216.8
+branchy_post         2000     5287.0     3070.2
+postprocess          2000     5287.1        0.1
+run_frame            2000     5848.8        0.1
+main                    1     5849.1        0.3
+frames=2000 total=5848.8 ms per_frame=2.924 ms chk=122328000 out=-21
+```
+
+`-finstrument-functions-after-inlining` (inline된 함수에는 훅을 넣지 않는다):
+
+```text
+function            calls    incl_ms    excl_ms
+copy_stage           2000      205.1      205.1
+preprocess           2000      205.2        0.1
+conv_int8            4000      281.0      281.0
+infer                2000      281.0        0.1
+branchy_post         2000       45.1       45.1
+postprocess          2000       45.1        0.0
+run_frame            2000      531.4        0.1
+main                    1      531.8        0.3
+frames=2000 total=531.5 ms per_frame=0.266 ms chk=122328000 out=-21
+```
+
+출력에서 볼 것:
+
+- **호출 횟수는 정확하다.** sampling은 절대 말해 주지 않는 정보다. `conv_int8` 4000 = 2000 프레임 × 2, `classify` 196,608,000 = 2000 × 24 × 4096.
+- 기본 모드에서는 `-O2`에서 원래 inline되어 사라졌을 `classify`에도 훅이 들어갔다. 그래서 1억 9천만 번 × (시계 읽기 2번 + 테이블 갱신)이 더해져 **프레임당 0.27 ms → 2.92 ms**가 되고, 후처리가 전체의 90%처럼 보인다. 측정이 측정 대상을 바꾼 전형적인 예다.
+- inline 후 모드는 훅이 함수 8개에만 들어가 시간이 거의 그대로(0.266 ms)이고, 비율도 sampling과 1~2%p 안에서 맞는다.
+
+### 4.3 sampling vs instrumentation — 한 그림으로
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 210">
+<text x="8" y="46" font-size="12">sampling (sample)</text> <rect x="200.0" y="30" width="171.4" height="22" fill="#4a7bd0" fill-opacity="0.8"/> <text x="204.0" y="45" font-size="12">51.9%</text> <rect x="371.4" y="30" width="132.0" height="22" fill="#e08a3c" fill-opacity="0.8"/> <text x="375.4" y="45" font-size="12">40.0%</text> <rect x="503.4" y="30" width="26.6" height="22" fill="#3f9a6b" fill-opacity="0.8"/>
+<text x="538" y="46" font-size="12">0.26–0.29 ms/frame</text> <text x="8" y="96" font-size="12">instr. after-inlining</text> <rect x="200.0" y="80" width="174.6" height="22" fill="#4a7bd0" fill-opacity="0.8"/> <text x="204.0" y="95" font-size="12">52.9%</text> <rect x="374.6" y="80" width="127.4" height="22" fill="#e08a3c" fill-opacity="0.8"/> <text x="378.6" y="95" font-size="12">38.6%</text>
+<rect x="502.0" y="80" width="28.0" height="22" fill="#3f9a6b" fill-opacity="0.8"/> <text x="538" y="96" font-size="12">0.26–0.28 ms/frame</text> <text x="8" y="146" font-size="12">instr. 기본 (inline 전)</text> <rect x="200.0" y="130" width="17.7" height="22" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="217.7" y="130" width="14.0" height="22" fill="#e08a3c" fill-opacity="0.8"/>
+<rect x="231.7" y="130" width="298.3" height="22" fill="#3f9a6b" fill-opacity="0.8"/> <text x="235.7" y="145" font-size="12">90.4%</text> <text x="538" y="146" font-size="12">2.76–2.87 ms/frame</text> <rect x="200" y="182" width="12" height="12" fill="#4a7bd0" fill-opacity="0.8"/><text x="216" y="193" font-size="12">conv_int8</text>
+<rect x="310" y="182" width="12" height="12" fill="#e08a3c" fill-opacity="0.8"/><text x="326" y="193" font-size="12">copy_stage</text> <rect x="420" y="182" width="12" height="12" fill="#3f9a6b" fill-opacity="0.8"/><text x="436" y="193" font-size="12">postprocess</text> <text x="200" y="18" font-size="12">프레임 시간 중 비율 (100% 막대)</text>
+</svg>
+```
+
+그림 3 — 같은 프로그램을 세 방법으로 잰 함수별 비율(실제 데이터). sampling(1698 샘플)과 inline 후 instrumentation은 52/39~40/8~8.5%로 일치한다. inline 전 instrumentation은 postprocess를 90.4%로 부풀리고, 프레임 시간도 10배가 된다.
+
+### 4.4 오버헤드를 손으로 계산하기
+
+```
+늘어난 시간 / 프레임   = 2.80 − 0.27 ≈ 2.53 ms
+추가 훅 호출 / 프레임  = classify 24 × 4096 = 98,304 번 (enter + exit 한 쌍씩)
+훅 한 쌍의 비용        ≈ 2.53 ms ÷ 98,304 ≈ 25.7 ns
+classify 한 번의 원래 비용 ≈ 45.1 ms ÷ 196,608,000 ≈ 0.23 ns (SIMD로 여러 개를 한 번에 처리)
+```
+
+말로 하면: **훅 한 쌍(약 26 ns)이 원래 일(0.2 ns)의 100배다.** instrumentation의 상대 오버헤드는 "함수 하나가 하는 일의 크기"에 반비례한다. 그래서 규칙이 나온다.
+
+- 함수 단위 자동 instrumentation은 **굵은 함수**(수 µs 이상)에만 의미가 있다.
+- ML에서는 **op(레이어) 단위**가 자연스러운 굵기다. torch.profiler, ORT, TFLM MicroProfiler 모두 op 단위로 훅을 건다(7절). conv 한 번이 수십~수백 µs라 훅 비용 1 µs도 1% 미만이다.
+- MCU에서는 시계 읽기가 DWT CYCCNT 한 번(로드 1개)이라 훨씬 싸지만, 대신 기록을 어디에 쌓느냐가 문제다 → 6절 trace buffer.
+
+### 4.5 언제 instrumentation이 sampling을 이기나
+
+| 상황 | 이유 |
+|---|---|
+| 호출 횟수가 궁금할 때 ("이 콜백이 프레임당 몇 번 불리나") | sampling은 횟수를 모른다 |
+| 드물게 일어나는 긴 이벤트 (p99를 만드는 원인) | 1 ms 샘플은 1000번에 1번 생기는 5 ms 구간을 놓치기 쉽다. 구간을 직접 재서 최대값을 남긴다 |
+| OS도 타이머 인터럽트도 마음대로 못 쓰는 bare-metal | 구간 매크로 + CYCCNT가 가장 쉽다 |
+| 비동기 가속기(NPU, DSP)의 작업 | 호스트 CPU를 sampling하면 "기다림"만 보인다. 제출·완료 시점을 instrument해야 가속기 시간이 보인다 |
+
+---
+
+## 5. PMU 카운터 — "왜"를 말해 주는 숫자
+
+### 5.1 무엇을 세나
+
+PMU(Performance Monitoring Unit)는 CPU 안에 있는 하드웨어 카운터 묶음이다. 보통 cycle 카운터 하나와, 이벤트를 골라 세는 범용 카운터 몇 개(코어마다 다름, Cortex-A는 흔히 6개 안팎)로 이루어진다.
+
+| 이벤트 | 뜻 | 여기서 나오는 파생 지표 |
+|---|---|---|
+| cycles | 코어 클럭 수 | 시간 ≈ cycles ÷ 주파수 |
+| instructions (retired) | 끝까지 실행된 명령 수 | **IPC = instructions ÷ cycles** |
+| L1D/L2/LLC refill(miss) | 캐시에서 못 찾은 접근 | MPKI = miss × 1000 ÷ instructions |
+| branch mispredict | 분기 예측 실패 | miss rate = mispredict ÷ branches |
+| stall (frontend/backend) | 명령을 못 내보낸 cycle | stall 비율 |
+| bus/memory access | 외부 메모리 트랜잭션 | DDR 대역폭 추정 |
+
+지표의 해석과 "IPC가 낮고 miss가 많으면 지역성 문제" 같은 판단 흐름은 E1 10절에 표로 정리했다. 여기서는 **어떻게 읽나**에 집중한다.
+
+**IPC가 말해 주는 것**: 같은 명령 수를 몇 cycle에 끝냈나. 넓은 OoO 코어(Apple M, Cortex-X)는 이론상 cycle당 8개 안팎까지 낼 수 있고, in-order Cortex-M4는 1 미만이다. IPC 자체가 목표는 아니다 — SIMD로 명령 수를 줄이면 IPC가 떨어져도 더 빠를 수 있다. 그래서 **IPC는 instructions 수와 함께 본다.**
+
+### 5.2 이 Mac에서 PMU 읽기 — 할 수 있는 것과 없는 것
+
+macOS는 사용자 프로그램에 PMU를 직접 열어 주지 않는다. Instruments의 CPU Counters 템플릿은 Xcode가 필요하고(이 Mac에서는 `xctrace` 자체가 실패), `powermetrics`는 root가 필요하다. 하지만 커널이 **프로세스 단위로 누적한 instructions·cycles**는 sudo 없이 읽힌다.
+
+```sh
+/usr/bin/time -l ./hot 2000 2>&1 | grep -iE "per_frame|instructions|cycles|real"
+```
+
+```text
+frames=2000 total=729.6 ms per_frame=0.365 ms chk=122328000 out=-21
+        0.73 real         0.71 user         0.00 sys
+          8260423465  instructions retired
+          1897847706  cycles elapsed
+```
+
+말로 하면: 프로세스 전체로 IPC = 8.26e9 ÷ 1.90e9 = 4.35. 같은 숫자를 프로그램 안에서 구간 앞뒤로 읽을 수 있다 — `proc_pid_rusage(..., RUSAGE_INFO_V4, ...)`의 `ri_instructions`, `ri_cycles` 필드. 이것으로 **단계별 IPC**를 잰다.
+
+무엇을 확인하는 코드인지: `hot.c`의 단계 함수를 따로따로 2000번씩 돌리며 앞뒤로 instructions·cycles를 읽어 호출당 값과 IPC를 낸다. 마지막 줄은 같은 후처리를 "정렬된(예측 가능한)" 점수로 돌린 대조군이다.
+
+```c
+/* pmu_stages.c — macOS의 per-process 카운터(proc_pid_rusage v4)로 단계별 cycles·instructions·IPC */
+#define _DARWIN_C_SOURCE
+#include <libproc.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#define main hot_main                                   /* hot.c의 함수들을 재사용 */
+#include "hot.c"
+#undef main
+static void counters(uint64_t *ins, uint64_t *cyc) {
+  struct rusage_info_v4 ri; proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&ri);
+  *ins = ri.ri_instructions; *cyc = ri.ri_cycles;
+}
+static void run(const char *name, void (*fn)(void), int n) {
+  uint64_t i0, c0, i1, c1; struct timespec t0, t1;
+  for (int k = 0; k < 20; k++) fn();                    /* warm-up */
+  clock_gettime(CLOCK_MONOTONIC, &t0); counters(&i0, &c0);
+  for (int k = 0; k < n; k++) fn();
+  counters(&i1, &c1); clock_gettime(CLOCK_MONOTONIC, &t1);
+  double us = ((t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec)) / 1e3 / n;
+  printf("%-12s %8.1f us/call %12.0f inst/call %11.0f cyc/call  IPC %.2f  GHz(eff) %.2f\n", name, us,
+         (double)(i1 - i0) / n, (double)(c1 - c0) / n, (double)(i1 - i0) / (c1 - c0), (double)(c1 - c0) / n / us / 1e3);
+}
+static volatile int sink;
+#define BARRIER() __asm__ volatile("" ::: "memory")  /* 컴파일러가 호출을 루프 밖으로 빼지 못하게 */
+static void post(void) { BARRIER(); sink = branchy_post(); }
+static void sorted_post(void) {                         /* 같은 일, 점수를 정렬해서 분기를 예측 가능하게 */
+  static int done; if (!done) { for (int i = 0; i < NB; i++) score[i] = (int16_t)(i * 8 - 16384); done = 1; }
+  BARRIER(); sink = branchy_post();
+}
+int main(void) {
+  srand(1); for (size_t i = 0; i < sizeof act; i++) ((int8_t *)act)[i] = (int8_t)(rand() % 21 - 10);
+  for (int i = 0; i < NB; i++) score[i] = (int16_t)rand();
+  run("conv_int8", conv_int8, 2000); run("copy_stage", copy_stage, 2000);
+  run("branchy", post, 2000); run("predictable", sorted_post, 2000);
+  return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 pmu_stages.c -o pmu_stages && ./pmu_stages && ./pmu_stages && ./pmu_stages
+```
+
+```text
+conv_int8       102.6 us/call      1317859 inst/call      266405 cyc/call  IPC 4.95  GHz(eff) 2.60
+copy_stage      178.3 us/call      1182959 inst/call      430452 cyc/call  IPC 2.75  GHz(eff) 2.41
+branchy          39.8 us/call       308601 inst/call       94107 cyc/call  IPC 3.28  GHz(eff) 2.36
+predictable      31.1 us/call       308072 inst/call       81683 cyc/call  IPC 3.77  GHz(eff) 2.62
+conv_int8       131.2 us/call      1318808 inst/call      301456 cyc/call  IPC 4.37  GHz(eff) 2.30
+copy_stage      189.5 us/call      1183351 inst/call      437735 cyc/call  IPC 2.70  GHz(eff) 2.31
+branchy          36.3 us/call       308110 inst/call       88382 cyc/call  IPC 3.49  GHz(eff) 2.43
+predictable      42.9 us/call       308530 inst/call       95043 cyc/call  IPC 3.25  GHz(eff) 2.22
+conv_int8       111.7 us/call      1317995 inst/call      268815 cyc/call  IPC 4.90  GHz(eff) 2.41
+copy_stage      187.7 us/call      1183430 inst/call      394075 cyc/call  IPC 3.00  GHz(eff) 2.10
+branchy          39.5 us/call       308155 inst/call       93061 cyc/call  IPC 3.31  GHz(eff) 2.35
+predictable      43.4 us/call       308727 inst/call       87944 cyc/call  IPC 3.51  GHz(eff) 2.03
+```
+
+출력에서 볼 것:
+
+- **instructions는 실행마다 거의 같고(0.1% 이내), 시간과 cycles는 10~30% 흔들린다.** instructions 수는 "무엇을 했나"이고 시간은 "환경이 어땠나"까지 섞인다. 회귀 테스트에 instructions를 쓰는 이유다(CI에서 시간보다 훨씬 안정적인 신호).
+- `GHz(eff)` = cycles ÷ 시간이 2.0~2.6 GHz로 나온다. M2 P-core의 최대 클럭보다 낮다. 이 cycle 카운터가 어떤 클럭 기준인지, 스레드가 E-core로 옮겨 다녔는지는 이 데이터만으로 알 수 없다 — **해석에 확신이 없는 숫자는 그렇게 적는다**.
+- conv: MAC 수는 46 × 46 × 16 × 72 = 2,437,632인데 명령은 132만 개 → MAC당 0.54 명령. 스칼라라면 MAC당 몇 개의 명령이 필요하니, **컴파일러가 SIMD로 벡터화했다**는 뜻이다. IPC 4.4~4.9로 높다 → 연산형이고 코어를 잘 쓰고 있다.
+- copy: IPC 2.7~3.0으로 가장 낮다. 6 MiB를 약 180 µs에 복사 = 약 35 GB/s. src와 dst를 합쳐 2 MiB라 L2(M2 P-cluster의 공유 L2는 공개 자료 기준 16 MB) 안에 있다 — DRAM이 아니라 L2 대역폭을 재고 있다. 같은 코드를 32 MiB 프레임으로 바꾸면 다른 숫자가 나올 것이다.
+- **branchy와 predictable의 차이가 작다**(잡음 안). 소스는 분기투성이인데 왜? 명령 수가 원소당 308,000 ÷ 98,304 = 3.1개뿐이다. `objdump -d hot`으로 `branchy_post`를 보면 `cmeq.4s`, `and.16b`, `bif.16b` 같은 **SIMD 마스크 명령만 있고 조건 분기가 없다**. 컴파일러가 분기를 없앴다(branchless + 벡터화). 진짜 분기 예측 실패 효과는 E1 7절의 실험을 볼 것.
+
+### 5.3 함정 — 컴파일러가 벤치마크를 지웠다
+
+이 예제의 첫 버전에는 `BARRIER()`가 없었다. 그 결과(실제 출력):
+
+```text
+branchy           0.0 us/call          160 inst/call          77 cyc/call  IPC 2.08  GHz(eff) 2.40
+```
+
+`branchy_post()`는 전역 배열을 읽기만 하고 아무것도 쓰지 않는다. 컴파일러는 이 함수가 루프 안에서 매번 같은 값을 낸다고 증명하고 **호출을 루프 밖으로 빼서 한 번만 불렀다**. 프로파일러는 정직하게 "0 µs"라고 말했다 — 측정 코드가 틀린 것이다. 빈 inline asm `__asm__ volatile("" ::: "memory")`는 "메모리가 바뀌었을 수 있다"고 컴파일러에게 알려 이 최적화를 막는다. 펌웨어에서 `volatile` 레지스터 접근을 쓰는 것과 같은 이유다. **숫자가 너무 좋으면 먼저 측정을 의심한다.**
+
+### 5.4 Cortex-M — DWT 카운터 (예시 코드, 이 노트에서는 컴파일하지 않음)
+
+J2 5.7절에서 `DWT->CYCCNT`로 구간 cycle을 재는 법을 봤다. Cortex-M3/M4/M7의 DWT에는 CYCCNT 말고도 **8-bit 이벤트 카운터** 다섯 개가 있다(ARMv7-M 아키텍처 매뉴얼 기준 — 구현 여부와 주소는 코어 TRM으로 확인).
+
+| 레지스터 | 주소(ARMv7-M) | 세는 것 |
+|---|---|---|
+| DWT_CTRL | 0xE0001000 | 활성화 비트: CYCCNTENA(bit 0), CPIEVTENA(17), EXCEVTENA(18), SLEEPEVTENA(19), LSUEVTENA(20), FOLDEVTENA(21) |
+| DWT_CYCCNT | 0xE0001004 | 32-bit cycle 카운터 |
+| DWT_CPICNT | 0xE0001008 | 명령 실행에 첫 cycle 외에 추가로 든 cycle (멀티사이클 명령, 버스 대기 일부) |
+| DWT_EXCCNT | 0xE000100C | 예외 진입·복귀 처리에 든 cycle |
+| DWT_SLEEPCNT | 0xE0001010 | sleep 상태 cycle |
+| DWT_LSUCNT | 0xE0001014 | load/store 추가 cycle (메모리 대기) |
+| DWT_FOLDCNT | 0xE0001018 | folded 명령(0 cycle에 끝난 명령, 예: IT) 수 |
+
+아키텍처 매뉴얼에는 이 카운터들로 실행된 명령 수를 얻는 관계가 나온다.
+
+```
+instructions ≈ CYCCNT − CPICNT − EXCCNT − SLEEPCNT − LSUCNT + FOLDCNT
+```
+
+말로 하면: 전체 cycle에서 "명령 하나에 1 cycle"을 넘는 몫(추가 cycle, 예외, sleep, 메모리 대기)을 빼고, 0 cycle에 끝난 명령을 더하면 명령 수다. 그러면 Cortex-M에서도 IPC(정확히는 CPI)를 낼 수 있다. 8-bit 카운터는 256마다 넘치므로, 짧은 구간은 앞뒤 차이를 mod 256으로 읽고, 긴 구간은 overflow 이벤트를 ITM으로 흘려 디버거가 세게 한다.
+
+```c
+/* Cortex-M4 예시 — 레지스터 주소는 ARMv7-M 기준. CMSIS의 DWT->CTRL 등을 쓰는 것이 보통이다 */
+#define DEMCR      (*(volatile uint32_t *)0xE000EDFCu)   /* bit 24 TRCENA: DWT/ITM 전원 */
+#define DWT_CTRL   (*(volatile uint32_t *)0xE0001000u)
+#define DWT_CYCCNT (*(volatile uint32_t *)0xE0001004u)
+#define DWT_LSUCNT (*(volatile uint32_t *)0xE0001014u)
+static inline void pmu_start(void) {
+  DEMCR |= 1u << 24;
+  DWT_CYCCNT = 0;
+  DWT_CTRL |= (1u << 0) | (1u << 20);                  /* CYCCNT + LSU 이벤트 카운터 */
+}
+/* 사용: uint32_t c0 = DWT_CYCCNT, l0 = DWT_LSUCNT; conv(); 
+         cyc = DWT_CYCCNT - c0; lsu = (uint8_t)(DWT_LSUCNT - l0);   ← 짧은 구간만 유효 */
+```
+
+주의: Cortex-M7 일부 구현은 DWT에 lock access 레지스터가 있어 먼저 unlock해야 하고, Cortex-M0/M0+에는 CYCCNT가 없다(Don이 다뤘던 M0+라면 SysTick이나 외부 타이머를 쓴다). ARMv8.1-M(Cortex-M55/M85)은 Cortex-A와 비슷한 **PMU 확장**(이벤트 번호로 고르는 카운터)을 가진다 — 이벤트 목록은 각 TRM 확인.
+
+해석 예: conv 커널이 CYCCNT 1,000,000, LSUCNT 누적이 300,000 cycle이라면 30%가 load/store 대기다 → 가중치를 flash가 아니라 TCM/SRAM에 두거나(E7), 캐시 정책을 바꿔 볼 이유가 된다.
+
+### 5.5 Cortex-A — `perf stat`, `simpleperf stat` (실행하지 않음)
+
+```sh
+perf stat -e cycles,instructions,cache-misses,branch-misses -r 5 ./kws_bench
+perf stat -e r11,r08,r03,r10 ./kws_bench        # ARMv8 공통 이벤트 번호: CPU_CYCLES, INST_RETIRED, L1D_CACHE_REFILL, BR_MIS_PRED
+adb shell simpleperf stat -e cpu-cycles,instructions,cache-misses -p <pid> --duration 5
+adb shell simpleperf list hw                     # 이 기기에서 쓸 수 있는 하드웨어 이벤트
+```
+
+출력은 이벤트별 총합과 IPC(`insn per cycle`)를 보여 준다. 카운터보다 이벤트를 많이 요청하면 시간을 나눠 번갈아 세고(multiplexing) 비율로 보정한다 — 출력에 백분율로 표시된다. 짧은 구간에서는 이 보정이 부정확하니 이벤트를 몇 개씩 나눠 따로 잰다. `perf record -e cache-misses`처럼 **PMU 이벤트로 sampling**하면 "cache miss가 어디서 나는지"의 flame graph도 만들 수 있다 — sampling(어디서)과 PMU(왜)를 합친 것이다.
+
+---
+
+## 6. Tracing — 시간축으로 보기
+
+### 6.1 profile과 trace는 다르다
+
+Profile은 **합계**다 — "conv가 52%". Trace는 **사건의 시간순 기록**이다 — "8.025 ms에 FEAT가 BLE를 선점했고, 8.625 ms에 끝났고, BLE가 9.125 ms까지 돌았고, 그 다음에야 추론이 시작됐다." 실시간 시스템에서 deadline miss는 대부분 합계로는 안 보인다. **평균 CPU 점유율 80%에서도 특정 순서로 이벤트가 겹치면 deadline을 놓친다**(J2의 RTA가 다루는 문제). 그 순서를 보는 도구가 trace다.
+
+### 6.2 기기 위 trace 수단 — 싼 것부터
+
+| 수단 | 어떻게 | 해상도·비용 | 메모 |
+|---|---|---|---|
+| GPIO 토글 + 로직 분석기/오실로스코프 | 구간 시작에 핀 set, 끝에 clear | ns 단위, 핀 수만큼 | 가장 싸고 확실. 전력 프로브와 같은 화면에 놓으면 "어느 구간이 전류를 먹나"까지 (K3) |
+| ITM 소프트웨어 이벤트 + SWO | 코드에서 ITM stimulus 포트에 한 워드 쓰기 → SWO 핀으로 직렬 출력 | 쓰기 몇 cycle, SWO 대역폭(보통 수 Mbps)이 한계 | Cortex-M3/M4/M7. DWT PC sampling·예외 trace 패킷도 같은 길로 나온다 |
+| SEGGER RTT 기반 기록 (SystemView) | RAM 링버퍼에 쓰고 J-Link가 백그라운드로 읽음 | 이벤트당 짧은 기록 비용, 디버그 프로브 필요 | RTOS 태스크 전환·ISR·사용자 마커를 타임라인으로 |
+| Percepio Tracealyzer | RTOS 커널에 trace recorder 라이브러리를 넣어 snapshot 또는 streaming | 비슷한 계열 | FreeRTOS, Zephyr 등 지원. 태스크 상태·CPU 부하 그래프 |
+| ETM / MTB 명령 trace | CPU가 실행한 분기 흐름을 하드웨어가 압축해서 trace 포트(TPIU) 또는 온칩 버퍼(ETB/MTB)로 | **CPU 교란 없음**, 모든 명령. 장비(Trace32, J-Trace)와 핀 필요 | 함수별 시간, 코드 커버리지, "그 순간 무엇을 실행했나" 재구성. M0+는 MTB(온칩 소용량) |
+| Linux ftrace / trace-cmd | 커널 tracepoint와 함수 trace | 커널 스케줄링·IRQ·드라이버 | 사용자 공간 마커는 `/sys/kernel/tracing/trace_marker`에 쓰기 |
+| Perfetto (Android, Linux) | 시스템 trace 수집기 + 웹 UI(ui.perfetto.dev) | 스케줄러, 주파수, 사용자 구간 | Android 앱은 NDK의 `ATrace_beginSection()`/`ATrace_endSection()`으로 구간 표시. 예전 이름 systrace/atrace |
+
+정확한 API 이름과 설정은 각 제품 문서를 따른다. 공통 구조는 같다: **(1) 아주 싼 기록 함수 → (2) 버퍼 → (3) 기기 밖으로 내보내는 통로 → (4) 호스트 디코더와 타임라인 UI**. 이 네 개를 작게 직접 만들어 본다.
+
+### 6.3 초소형 trace buffer — 기록 쪽
+
+설계 결정:
+
+- 레코드 하나 = `{uint32 timestamp, uint16 event id, uint16 arg}` = 8바이트. timestamp는 MCU라면 CYCCNT 또는 free-running 타이머.
+- 링버퍼 크기는 2의 거듭제곱 → 인덱스를 `& (N−1)`로 wrap.
+- **쓰기 인덱스는 `atomic_fetch_add`로 예약**한다. 태스크가 기록하는 도중에 ISR이 들어와 또 기록해도 같은 슬롯을 두 번 쓰지 않는다. Cortex-M3 이상에서는 `LDREX/STREX` 루프로 컴파일된다(M0+처럼 exclusive 명령이 없는 코어는 인터럽트를 잠깐 막는다).
+- 넘치면 **덮어쓴다**(flight recorder 모드): 사고 직전의 마지막 N개가 남는다. 반대로 "처음 N개만 남기고 멈춤" 모드는 부팅 분석에 좋다.
+- 기록 함수는 `static inline` — 함수 호출 비용도 아낀다.
+
+```c
+/* trace_ring.h — 펌웨어용 초소형 trace buffer: {timestamp, event id, arg} 8바이트 레코드의 ring */
+#include <stdatomic.h>
+#include <stdint.h>
+typedef struct { uint32_t ts; uint16_t id; uint16_t arg; } TraceRec;   /* 8 B */
+enum { EV_TASK_IN = 1, EV_ISR_ENTER, EV_ISR_EXIT, EV_MARK_BEGIN, EV_MARK_END };
+#define TRACE_N 1024u                                  /* 2의 거듭제곱 → 마스크로 wrap */
+static TraceRec trace_buf[TRACE_N];
+static atomic_uint trace_wr;                           /* 누적 쓰기 횟수 (wrap 안 함) */
+extern uint32_t trace_now(void);                       /* MCU: DWT->CYCCNT 또는 free-running timer */
+static inline void trace(uint16_t id, uint16_t arg) {
+  /* fetch_add로 슬롯을 "예약" → ISR이 task를 선점해도 같은 슬롯을 두 번 쓰지 않는다 */
+  unsigned i = atomic_fetch_add_explicit(&trace_wr, 1u, memory_order_relaxed);
+  trace_buf[i & (TRACE_N - 1)] = (TraceRec){trace_now(), id, arg};
+}
+```
+
+이제 이 trace를 쓰는 "펌웨어"를 흉내 낸다. 가상 시간(1 tick = 1 µs)으로 고정 우선순위 선점 스케줄러를 돌린다. 예를 들어 Hark 같은 웨어러블의 음성 경로를 단순화한 가상 시나리오다(실제 제품 구조가 아니라 연습용 가정).
+
+- 마이크 DMA half-complete ISR: 2 ms마다, 25 µs.
+- FEAT(feature 추출, 우선순위 3): 10 ms hop마다 600 µs. 끝나면 추론을 요청.
+- BLE(패킷 처리, 우선순위 2): 15 ms마다 1500 µs.
+- INFER(추론, 우선순위 1): 요청마다 7000 µs.
+
+무엇을 확인하는 코드인지: 스케줄러가 태스크를 바꿀 때, ISR 입출구, 추론 시작·끝에 trace 레코드를 남기고, 끝에 링버퍼를 파일로 덤프한다.
+
+```c
+/* fw_sim.c — 가상 시간(1 tick = 1 us)으로 고정 우선순위 선점 스케줄을 흉내 내며 trace를 남긴다 */
+#include <stdio.h>
+#include "trace_ring.h"
+enum { IDLE, INFER, BLE, FEAT, NT };                   /* 숫자가 클수록 우선순위 높음 */
+static uint32_t now_us; uint32_t trace_now(void) { return now_us; }
+static int left[NT];                                   /* 남은 실행 시간 (us) */
+static const int COST[NT] = {0, 7000, 1500, 600};
+int main(void) {
+  int isr_left = 0, cur = -1, frame = 0, mics = 0;
+  for (now_us = 0; now_us < 60000; now_us++) {
+    if (now_us % 2000 == 0) {                          /* 마이크 DMA half-complete ISR, 2 ms마다 */
+      trace(EV_ISR_ENTER, 0); isr_left = 25;
+      if (++mics % 5 == 0) left[FEAT] += COST[FEAT];   /* 10 ms hop마다 feature 태스크 깨움 */
+    }
+    if (now_us % 15000 == 7000) left[BLE] += COST[BLE];/* BLE 패킷 처리, 15 ms마다 */
+    if (isr_left > 0) { if (--isr_left == 0) trace(EV_ISR_EXIT, 0); continue; }
+    int run = IDLE;
+    for (int t = NT - 1; t > IDLE; t--) if (left[t] > 0) { run = t; break; }
+    if (run != cur) { trace(EV_TASK_IN, (uint16_t)run); cur = run; }
+    if (run == IDLE) continue;
+    if (run == INFER && left[INFER] == COST[INFER]) trace(EV_MARK_BEGIN, (uint16_t)frame);
+    if (--left[run] == 0) {
+      if (run == FEAT) { left[INFER] += COST[INFER]; }  /* feature 끝 → 추론 요청 */
+      if (run == INFER) trace(EV_MARK_END, (uint16_t)frame++);
+    }
+  }
+  unsigned n = atomic_load(&trace_wr);
+  printf("records written=%u  kept=%u  overwritten=%u  ring=%zu bytes\n",
+         n, n < TRACE_N ? n : TRACE_N, n > TRACE_N ? n - TRACE_N : 0, sizeof trace_buf);
+  FILE *f = fopen("trace.bin", "wb");                  /* MCU라면: J-Link/UART/RTT로 덤프 */
+  for (unsigned k = (n > TRACE_N ? n - TRACE_N : 0); k < n; k++) fwrite(&trace_buf[k & (TRACE_N - 1)], sizeof(TraceRec), 1, f);
+  fclose(f); return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 fw_sim.c -o fw_sim && ./fw_sim && xxd trace.bin | head -3
+```
+
+```text
+records written=97  kept=97  overwritten=0  ring=8192 bytes
+00000000: 0000 0000 0200 0000 1800 0000 0300 0000  ................
+00000010: 1900 0000 0100 0000 d007 0000 0200 0000  ................
+00000020: e807 0000 0300 0000 a00f 0000 0200 0000  ................
+```
+
+출력에서 볼 것: 60 ms 동안 레코드 97개(776바이트). 첫 레코드 `0000 0000 0200 0000` = ts 0, id 2(ISR_ENTER), arg 0. 둘째 `1800 0000 0300 0000` = ts 0x18 = 24, id 3(ISR_EXIT). little-endian이다. Don이 SSD에서 덤프하던 이벤트 로그와 같은 모양이다.
+
+### 6.4 호스트 디코더와 타임라인
+
+무엇을 확인하는 코드인지: 8바이트 레코드를 풀어서 레인(ISR, FEAT, BLE, INFER, IDLE)별 구간을 복원하고, CPU 점유율과 추론 한 번의 wall 시간 vs 실제 CPU 시간을 계산한 뒤, 처음 40 ms를 SVG로 그린다.
+
+```python
+# trace_decode.py — trace.bin(8 B 레코드) → 태스크별 구간, CPU 점유율, 추론 wall/CPU 시간, 타임라인 SVG
+import struct
+NAMES = {0: "IDLE", 1: "INFER", 2: "BLE", 3: "FEAT"}
+recs = list(struct.iter_unpack("<IHH", open("trace.bin", "rb").read()))
+iv = {k: [] for k in ["ISR", "FEAT", "BLE", "INFER", "IDLE"]}   # 레인별 (start, end)
+cur, since, isr_t, marks = None, 0, None, {}
+for ts, ev, arg in recs:
+    if ev == 2: isr_t = ts                                    # ISR_ENTER: 현재 태스크 구간을 끊는다
+    if ev == 3: iv["ISR"].append((isr_t, ts + 1))
+    if ev in (1, 2) and cur is not None and ts > since: iv[cur].append((since, ts))
+    if ev == 1: cur, since = NAMES[arg], ts
+    if ev == 3: since = ts + 1                                # ISR이 끝나면 같은 태스크가 이어서 돈다
+    if ev in (4, 5): marks.setdefault(arg, {})[ev] = ts + (ev == 5)   # END는 그 tick이 끝난 시각
+iv[cur].append((since, 60000))
+busy = lambda l, a=0, b=60000: sum(max(0, min(e, b) - max(s, a)) for s, e in l)
+print("CPU share over 60 ms: " + "  ".join(f"{k} {100 * busy(v) / 60000:.1f}%" for k, v in iv.items()))
+for f, m in sorted(marks.items()):
+    if 5 in m:
+        w = m[5] - m[4]; c = busy(iv["INFER"], m[4], m[5])
+        print(f"frame {f}: infer begin {m[4] / 1e3:6.3f} ms  wall {w / 1e3:.3f} ms  cpu {c / 1e3:.3f} ms  preempted {(w - c) / 1e3:.3f} ms")
+X0, PW, T = 70, 590, 40000; sx = lambda t: X0 + PW * t / T
+col = {"ISR": "#d0564a", "FEAT": "#e08a3c", "BLE": "#3f9a6b", "INFER": "#4a7bd0", "IDLE": "#888"}
+s = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 200">']
+for row, (k, l) in enumerate(iv.items()):
+    y = 10 + 28 * row; s.append(f'<text x="8" y="{y + 14}" font-size="12">{k}</text>')
+    for a, b in l:
+        if a < T: s.append(f'<rect x="{sx(a):.1f}" y="{y}" width="{max(sx(min(b, T)) - sx(a), 1.5):.1f}" height="18" fill="{col[k]}" fill-opacity="0.8"/>')
+for t in range(0, T + 1, 5000):
+    s.append(f'<line x1="{sx(t):.1f}" y1="150" x2="{sx(t):.1f}" y2="155" stroke="currentColor"/><text x="{sx(t) - 6:.1f}" y="170" font-size="12">{t // 1000}</text>')
+s.append(f'<line x1="{X0}" y1="150" x2="{X0 + PW}" y2="150" stroke="currentColor"/><text x="8" y="190" font-size="12">시간 (ms) — 가상 시간 시뮬레이션, 처음 40 ms</text></svg>')
+open("fw_timeline.svg", "w").write("\n".join(s))
+```
+
+```text
+CPU share over 60 ms: ISR 1.2%  FEAT 6.0%  BLE 10.0%  INFER 60.6%  IDLE 22.1%
+frame 0: infer begin  9.125 ms  wall 7.100 ms  cpu 7.000 ms  preempted 0.100 ms
+frame 1: infer begin 18.625 ms  wall 8.600 ms  cpu 7.000 ms  preempted 1.600 ms
+frame 2: infer begin 28.625 ms  wall 7.075 ms  cpu 7.000 ms  preempted 0.075 ms
+frame 3: infer begin 39.125 ms  wall 7.100 ms  cpu 7.000 ms  preempted 0.100 ms
+frame 4: infer begin 48.625 ms  wall 8.600 ms  cpu 7.000 ms  preempted 1.600 ms
+```
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 200">
+<text x="8" y="24" font-size="12">ISR</text> <rect x="70.0" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="99.5" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="129.0" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="158.5" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/>
+<rect x="188.0" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="217.5" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="247.0" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="276.5" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="306.0" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/>
+<rect x="335.5" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="365.0" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="394.5" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="424.0" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="453.5" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/>
+<rect x="483.0" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="512.5" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="542.0" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="571.5" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <rect x="601.0" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/>
+<rect x="630.5" y="10" width="1.5" height="18" fill="#d0564a" fill-opacity="0.8"/> <text x="8" y="52" font-size="12">FEAT</text> <rect x="188.4" y="38" width="8.8" height="18" fill="#e08a3c" fill-opacity="0.8"/> <rect x="335.9" y="38" width="8.9" height="18" fill="#e08a3c" fill-opacity="0.8"/> <rect x="483.4" y="38" width="8.9" height="18" fill="#e08a3c" fill-opacity="0.8"/>
+<rect x="630.9" y="38" width="8.9" height="18" fill="#e08a3c" fill-opacity="0.8"/> <text x="8" y="80" font-size="12">BLE</text> <rect x="173.2" y="66" width="14.8" height="18" fill="#3f9a6b" fill-opacity="0.8"/> <rect x="197.2" y="66" width="7.4" height="18" fill="#3f9a6b" fill-opacity="0.8"/> <rect x="394.9" y="66" width="22.1" height="18" fill="#3f9a6b" fill-opacity="0.8"/>
+<rect x="615.8" y="66" width="14.8" height="18" fill="#3f9a6b" fill-opacity="0.8"/> <rect x="639.7" y="66" width="7.4" height="18" fill="#3f9a6b" fill-opacity="0.8"/> <text x="8" y="108" font-size="12">INFER</text> <rect x="204.6" y="94" width="12.9" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="217.9" y="94" width="29.1" height="18" fill="#4a7bd0" fill-opacity="0.8"/>
+<rect x="247.4" y="94" width="29.1" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="276.9" y="94" width="29.1" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="306.4" y="94" width="3.0" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="344.7" y="94" width="20.3" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="365.4" y="94" width="29.1" height="18" fill="#4a7bd0" fill-opacity="0.8"/>
+<rect x="417.0" y="94" width="7.0" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="424.4" y="94" width="29.1" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="453.9" y="94" width="17.7" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="492.2" y="94" width="20.3" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="512.9" y="94" width="29.1" height="18" fill="#4a7bd0" fill-opacity="0.8"/>
+<rect x="542.4" y="94" width="29.1" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="571.9" y="94" width="24.7" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <rect x="647.1" y="94" width="12.9" height="18" fill="#4a7bd0" fill-opacity="0.8"/> <text x="8" y="136" font-size="12">IDLE</text> <rect x="70.4" y="122" width="29.1" height="18" fill="#888" fill-opacity="0.8"/>
+<rect x="99.9" y="122" width="29.1" height="18" fill="#888" fill-opacity="0.8"/> <rect x="129.4" y="122" width="29.1" height="18" fill="#888" fill-opacity="0.8"/> <rect x="158.9" y="122" width="14.4" height="18" fill="#888" fill-opacity="0.8"/> <rect x="309.3" y="122" width="26.2" height="18" fill="#888" fill-opacity="0.8"/> <rect x="471.6" y="122" width="11.4" height="18" fill="#888" fill-opacity="0.8"/>
+<rect x="596.6" y="122" width="4.4" height="18" fill="#888" fill-opacity="0.8"/> <rect x="601.4" y="122" width="14.4" height="18" fill="#888" fill-opacity="0.8"/> <line x1="70.0" y1="150" x2="70.0" y2="155" stroke="currentColor"/><text x="64.0" y="170" font-size="12">0</text> <line x1="143.8" y1="150" x2="143.8" y2="155" stroke="currentColor"/><text x="137.8" y="170" font-size="12">5</text>
+<line x1="217.5" y1="150" x2="217.5" y2="155" stroke="currentColor"/><text x="211.5" y="170" font-size="12">10</text> <line x1="291.2" y1="150" x2="291.2" y2="155" stroke="currentColor"/><text x="285.2" y="170" font-size="12">15</text> <line x1="365.0" y1="150" x2="365.0" y2="155" stroke="currentColor"/><text x="359.0" y="170" font-size="12">20</text>
+<line x1="438.8" y1="150" x2="438.8" y2="155" stroke="currentColor"/><text x="432.8" y="170" font-size="12">25</text> <line x1="512.5" y1="150" x2="512.5" y2="155" stroke="currentColor"/><text x="506.5" y="170" font-size="12">30</text> <line x1="586.2" y1="150" x2="586.2" y2="155" stroke="currentColor"/><text x="580.2" y="170" font-size="12">35</text>
+<line x1="660.0" y1="150" x2="660.0" y2="155" stroke="currentColor"/><text x="654.0" y="170" font-size="12">40</text> <line x1="70" y1="150" x2="660" y2="150" stroke="currentColor"/><text x="8" y="190" font-size="12">시간 (ms) — 가상 시간 시뮬레이션, 처음 40 ms</text>
+</svg>
+```
+
+그림 4 — 시뮬레이션 trace를 디코더로 복원한 타임라인(실제 출력). 빨간 눈금이 2 ms마다 오는 마이크 ISR, 주황이 FEAT, 초록이 BLE, 파랑이 INFER. 18.6 ms에 시작한 두 번째 추론이 22 ms에 BLE에게 1.5 ms 선점당하는 것이 보인다.
+
+출력에서 볼 것:
+
+- **추론의 CPU 시간은 늘 7.000 ms인데 wall 시간은 7.075 ~ 8.600 ms**다. 차이는 선점 시간이다. 프로파일(합계)로는 "INFER 60.6%"만 보이지만 trace는 "frame 1, 4에서 BLE가 1.5 ms를 끼어들었다"를 보여 준다.
+- frame 0의 추론은 hop(8 ms) 직후가 아니라 9.125 ms에 시작한다. 7 ms에 깨어난 BLE가 아직 남아 있었고(FEAT에 잠깐 선점당한 뒤 9.125 ms까지 실행), BLE가 INFER보다 우선순위가 높기 때문이다. **latency의 원인이 내 코드가 아니라 다른 태스크와의 순서**인 경우, trace 없이는 찾기 어렵다.
+- 이 숫자들은 J2의 RTA(응답 시간 분석)로 계산하는 최악 응답 시간을 **측정으로 확인**하는 재료다.
+
+### 6.5 trace 설계를 숫자로 점검하기
+
+```
+레코드 발생률 = 97개 ÷ 60 ms ≈ 1,617 개/s
+대역폭        = 1,617 × 8 B ≈ 12.9 KB/s
+SWO 2 MHz, UART식 8N1(바이트당 10 bit) ≈ 200 KB/s → 점유율 약 6.5%
+1024개 링(8 KB)을 채우는 시간 ≈ 1024 ÷ 1,617 ≈ 0.63 s
+```
+
+말로 하면: 이 정도 이벤트율이면 SWO로 실시간 streaming이 충분하고, 온칩 버퍼만 쓴다면 마지막 0.6초가 남는다. 만약 op마다(레이어 30개 × 100 Hz) begin/end를 추가하면 6,000 개/s가 더해져 약 61 KB/s — 아직 SWO로 가능하지만 링은 0.13초밖에 못 담는다. **무엇을 기록할지 고르는 것이 trace 설계의 핵심이다.**
+
+trace 설계 체크리스트:
+
+- timestamp 출처와 해상도(CYCCNT는 32-bit라 수백 MHz에서 수 초마다 wrap — 디코더가 wrap을 풀어야 한다).
+- 멀티코어라면 코어별 버퍼 + 공통 시간축(코어 간 timestamp 동기화, G7).
+- 기록 비용을 실측(기록 함수만 100만 번 돌려 cycle 측정)하고, 측정 대상 구간 길이에 비해 1% 미만인지 확인.
+- 유실 카운터(overwritten)를 반드시 같이 덤프 — "trace에 없다"와 "안 일어났다"를 구분하기 위해.
+
+---
+
+## 7. ML 프레임워크 안쪽 — cProfile, torch.profiler, ORT
+
+### 7.1 cProfile — 파이썬 전처리의 함수별 시간
+
+cProfile은 Python 인터프리터의 **함수 호출 훅**을 쓰는 instrumentation 프로파일러다(4절과 같은 계열). Python 함수 호출마다 비용이 붙으므로, numpy 내부(C)에서 오래 도는 코드는 오버헤드가 작고, 작은 Python 함수를 수백만 번 부르면 크다.
+
+실험 대상 — 1초 16 kHz 오디오를 log-mel로 바꾸는 전처리. 일부러 두 가지 실수를 넣었다: mel filterbank를 **매 호출마다 다시 만든다**, 정규화를 **Python 이중 루프**로 한다.
+
+```python
+# pre_pipeline.py — 1초 16 kHz 오디오 → log-mel (일부러 느린 Python 루프 하나를 섞었다)
+import numpy as np
+SR, NFFT, HOP, NMEL = 16000, 512, 160, 40
+def pre_emphasis(x): return np.append(x[0], x[1:] - 0.97 * x[:-1])
+def frame(x):
+    n = 1 + (len(x) - NFFT) // HOP
+    return np.stack([x[i * HOP: i * HOP + NFFT] for i in range(n)])
+def mel_fb():
+    m = np.linspace(0, 2595 * np.log10(1 + SR / 2 / 700), NMEL + 2)
+    hz = 700 * (10 ** (m / 2595) - 1); b = np.floor((NFFT + 1) * hz / SR).astype(int)
+    fb = np.zeros((NMEL, NFFT // 2 + 1))
+    for k in range(1, NMEL + 1):
+        fb[k - 1, b[k - 1]:b[k]] = np.linspace(0, 1, b[k] - b[k - 1], endpoint=False)
+        fb[k - 1, b[k]:b[k + 1]] = np.linspace(1, 0, b[k + 1] - b[k], endpoint=False)
+    return fb
+def normalize_slow(f):                     # 프레임마다, 원소마다 Python 루프 — 의도적 병목
+    out = np.empty_like(f)
+    for i in range(f.shape[0]):
+        mu = sum(f[i]) / f.shape[1]
+        for j in range(f.shape[1]): out[i, j] = f[i, j] - mu
+    return out
+def logmel(x):
+    f = frame(pre_emphasis(x)) * np.hanning(NFFT)
+    p = np.abs(np.fft.rfft(f, axis=1)) ** 2 / NFFT
+    return normalize_slow(np.log(p @ mel_fb().T + 1e-6))
+```
+
+무엇을 확인하는 코드인지: cProfile 없이 잰 시간과 cProfile 아래 시간을 비교하고, self 시간(tottime) 순으로 상위 함수를 본다.
+
+```python
+# cProfile로 전처리 파이프라인 50회 실행을 프로파일하고, 프로파일러 자체의 비용도 잰다
+import cProfile, pstats, io, time, numpy as np
+from pre_pipeline import logmel
+x = np.random.default_rng(0).standard_normal(16000).astype(np.float32)
+for _ in range(5): logmel(x)                                   # warm-up
+t0 = time.perf_counter(); [logmel(x) for _ in range(50)]; plain = time.perf_counter() - t0
+pr = cProfile.Profile(); t0 = time.perf_counter(); pr.enable()
+for _ in range(50): y = logmel(x)
+pr.disable(); prof = time.perf_counter() - t0
+print(f"out {y.shape}  plain {plain / 50 * 1e3:.2f} ms/call  under cProfile {prof / 50 * 1e3:.2f} ms/call")
+s = io.StringIO(); pstats.Stats(pr, stream=s).strip_dirs().sort_stats("tottime").print_stats(7)
+print("\n".join(l for l in s.getvalue().splitlines()[3:] if l.strip()))
+```
+
+```text
+out (97, 40)  plain 1.83 ms/call  under cProfile 2.07 ms/call
+   List reduced from 46 to 7 due to restriction <7>
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       50    0.041    0.001    0.054    0.001 pre_pipeline.py:16(normalize_slow)
+     4050    0.018    0.000    0.023    0.000 function_base.py:25(linspace)
+     4850    0.012    0.000    0.012    0.000 {built-in method builtins.sum}
+       50    0.010    0.000    0.104    0.002 pre_pipeline.py:22(logmel)
+       50    0.005    0.000    0.029    0.001 pre_pipeline.py:8(mel_fb)
+       50    0.005    0.000    0.005    0.000 _pocketfft.py:51(_raw_fft)
+     4100    0.001    0.000    0.001    0.000 {built-in method numpy.arange}
+```
+
+읽는 법: `tottime` = 그 함수 자신(self), `cumtime` = 자식 포함(inclusive), `ncalls` = 호출 횟수(정확).
+
+출력에서 볼 것:
+
+- `logmel` cumtime 0.104 s(50회) 중 `normalize_slow`가 0.054 s = **52%**. 그런데 그 안의 이중 루프 `out[i, j] = f[i, j] − mu`는 함수 호출이 아니라서 따로 안 보이고 `normalize_slow`의 tottime(0.041)으로 뭉쳐 나온다. cProfile은 **함수 단위까지만** 본다. 줄 단위가 필요하면 line_profiler 같은 다른 도구가 필요하다.
+- `mel_fb`가 cumtime 0.029 s = 28%, 그 아래 `linspace`가 **4050번** = 50회 × 81번. 매 호출 상수를 다시 만드는 실수가 호출 횟수로 드러난다. 고치는 법: 한 번 만들어 재사용(펌웨어로 치면 `const` 테이블을 flash에 두기).
+- cProfile 오버헤드는 1.83 → 2.07 ms(약 13%)다. 이번 실행은 잡음이 컸다 — 같은 코드를 앞서 돌렸을 때는 1.41 → 1.47 ms(4%)였다. 어느 쪽이든 크지 않은 것은 대부분의 시간이 numpy C 코드 안에 있고 Python 함수 호출 수가 적기 때문이다. 호출이 수백만 번인 코드라면 2배 이상 느려지기도 한다 — 4.4절과 같은 이유.
+
+샘플링 계열의 Python 프로파일러(py-spy)는 이 환경에 설치돼 있지 않다. py-spy는 실행 중인 Python 프로세스의 스택을 바깥에서 읽어 오는 방식이라 코드 수정·재시작이 필요 없고, flame graph SVG를 바로 만든다.
+
+### 7.2 torch.profiler + `record_function` + chrome trace → 타임라인
+
+I6 3.1절에서는 torch.profiler의 `key_averages()`로 op별 비율 **표**를 봤다. 여기서는 같은 도구를 **trace**로 쓴다. `record_function("이름")`으로 사용자 구간을 표시하고, `export_chrome_trace()`로 Chrome trace event 형식의 JSON을 내보낸다. 이 JSON은 Perfetto UI(ui.perfetto.dev)나 Chrome의 `chrome://tracing`에 그대로 열린다. 여기서는 JSON을 직접 파싱해서 그림을 그린다.
+
+공용 모델 — 작은 KWS CNN:
+
+```python
+# kws_net.py — 예제들이 공유하는 작은 KWS CNN (입력: 1×1×97×40 log-mel)
+import torch, torch.nn as nn
+torch.manual_seed(0)
+net = nn.Sequential(nn.Conv2d(1, 16, 3, padding=1), nn.BatchNorm2d(16), nn.ReLU(), nn.MaxPool2d(2),
+                    nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool2d(1),
+                    nn.Flatten(), nn.Linear(32, 12)).eval()
+```
+
+무엇을 확인하는 코드인지: 전처리(numpy) → 모델 → 후처리를 `record_function`으로 나누고, warm-up 20회 후 3회를 프로파일해서 표와 chrome trace를 낸다.
+
+```python
+# torch.profiler: record_function으로 구간을 나누고 chrome trace(JSON)로 내보낸다
+import torch, numpy as np
+from torch.profiler import profile, record_function, ProfilerActivity
+from pre_pipeline import frame, pre_emphasis, mel_fb, NFFT
+from kws_net import net
+torch.set_num_threads(1)
+FB = mel_fb().T.astype(np.float32); x = np.random.default_rng(0).standard_normal(16000).astype(np.float32)
+def step():
+    with record_function("preprocess"):
+        f = frame(pre_emphasis(x)) * np.hanning(NFFT)
+        m = np.log((np.abs(np.fft.rfft(f, axis=1)) ** 2 / NFFT) @ FB + 1e-6)
+        t = torch.from_numpy(m.astype(np.float32))[None, None]
+    with record_function("model"):
+        logits = net(t)
+    with record_function("postprocess"):
+        return int(torch.softmax(logits, 1).argmax())
+with torch.no_grad():
+    for _ in range(20): step()                                  # warm-up
+    with profile(activities=[ProfilerActivity.CPU]) as prof:
+        for _ in range(3): step()
+prof.export_chrome_trace("trace.json")
+print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=8))
+```
+
+```text
+---------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                             Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg    # of Calls  
+---------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                       preprocess        43.62%       1.291ms        44.17%       1.307ms     435.720us             3  
+    aten::max_pool2d_with_indices        15.34%     453.928us        15.34%     453.928us     151.309us             3  
+               aten::_convolution        12.62%     373.344us        21.01%     621.850us     103.642us             6  
+                            model         8.59%     254.259us        53.19%       1.574ms     524.597us             3  
+       aten::_slow_conv2d_forward         7.22%     213.548us         8.10%     239.673us      79.891us             3  
+          aten::native_batch_norm         2.10%      62.127us         2.29%      67.628us      22.543us             3  
+                      postprocess         1.72%      51.000us         2.64%      78.126us      26.042us             3  
+                  aten::clamp_min         1.45%      42.917us         1.45%      42.917us       7.153us             6  
+---------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 2.959ms
+```
+
+이 표에는 `preprocess`(43.6%)와 `model`(8.6%)이 **self 시간**으로 들어 있다. 사용자 구간의 self = 그 안에서 torch op가 아닌 것에 쓴 시간이다. 전처리는 numpy라서 torch op가 없으니 거의 전부 self고, `model`의 self 254 µs(3회)는 **nn.Module의 Python 호출 overhead와 프로파일러 자체 비용**이다.
+
+무엇을 확인하는 코드인지: chrome trace JSON에서 마지막 step 하나의 사용자 구간과, 다른 op 안에 들어 있지 않은 top-level op만 골라 시작 시각과 길이를 출력하고 타임라인 SVG를 그린다.
+
+```python
+# chrome trace JSON → 마지막 한 번의 step을 구간/op 두 줄 타임라인 SVG로 그린다
+import json
+ev = [e for e in json.load(open("trace.json"))["traceEvents"] if e.get("ph") == "X"]
+ann = sorted((e for e in ev if e["cat"] == "user_annotation"), key=lambda e: e["ts"])[-3:]
+t0, t1 = ann[0]["ts"], ann[-1]["ts"] + ann[-1]["dur"]
+ops = sorted((e for e in ev if e["cat"] == "cpu_op" and t0 <= e["ts"] <= t1), key=lambda e: e["ts"])
+top, end = [], -1.0                                       # 다른 op 안에 들어 있지 않은 op만
+for e in ops:
+    if e["ts"] >= end: top.append(e); end = e["ts"] + e["dur"]
+print(f"step span {t1 - t0:.0f} us")
+for a in ann: print(f"  [{a['name']:11s}] start {a['ts'] - t0:7.1f}  dur {a['dur']:7.1f} us")
+for e in top: print(f"  {e['name']:30s} start {e['ts'] - t0:7.1f}  dur {e['dur']:6.1f} us")
+X0, PW = 100, 560; sx = lambda t: X0 + PW * (t - t0) / (t1 - t0)
+col = {"preprocess": "#e08a3c", "model": "#4a7bd0", "postprocess": "#3f9a6b"}
+s = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 230">',
+     '<text x="10" y="42" font-size="13">구간</text><text x="10" y="92" font-size="13">top-level op</text>']
+for a in ann:
+    x, w = sx(a["ts"]), PW * a["dur"] / (t1 - t0)
+    s.append(f'<rect x="{x:.1f}" y="26" width="{w:.1f}" height="24" fill="{col[a["name"]]}" fill-opacity="0.8"/>')
+    anc = 'text-anchor="end" ' if x > 500 else ""          # 오른쪽 끝 라벨은 끝 정렬
+    s.append(f'<text x="{x + 3 if not anc else x + w:.1f}" y="20" {anc}font-size="12">{a["name"]} {a["dur"]:.0f}us</text>')
+for i, e in enumerate(top):
+    x, w = sx(e["ts"]), max(PW * e["dur"] / (t1 - t0), 1)
+    s.append(f'<rect x="{x:.1f}" y="{76 + 14 * (i % 2)}" width="{w:.1f}" height="12" fill="{["#4a7bd0", "#888"][i % 2]}"/>')
+lab = [e for e in top if e["dur"] > 40]
+for j, e in enumerate(lab):                               # 긴 op만 이름표 (아래로 계단식)
+    x = sx(e["ts"] + e["dur"] / 2); y = 125 + 15 * j
+    s.append(f'<line x1="{x:.1f}" y1="104" x2="{x:.1f}" y2="{y - 10}" stroke="currentColor" stroke-width="0.5"/>')
+    s.append(f'<text x="{x:.1f}" y="{y}" font-size="12">{e["name"].replace("aten::", "")} {e["dur"]:.0f}us</text>')
+for k in range(0, int(t1 - t0) + 1, 200):
+    s.append(f'<line x1="{sx(t0 + k):.1f}" y1="210" x2="{sx(t0 + k):.1f}" y2="215" stroke="currentColor"/>'
+             f'<text x="{sx(t0 + k) - 8:.1f}" y="227" font-size="12">{k}</text>')
+s.append(f'<text x="{X0 + 10}" y="92" font-size="12">(numpy 구간 — torch op가 안 보인다)</text>')
+s.append(f'<line x1="{X0}" y1="210" x2="{X0 + PW}" y2="210" stroke="currentColor"/><text x="10" y="227" font-size="12">시간 (us)</text></svg>')
+open("timeline.svg", "w").write("\n".join(s))
+```
+
+```text
+step span 858 us
+  [preprocess ] start     0.0  dur   378.7 us
+  [model      ] start   382.0  dur   454.8 us
+  [postprocess] start   840.1  dur    17.8 us
+  aten::lift_fresh               start   364.5  dur    0.2 us
+  aten::unsqueeze                start   366.3  dur    1.8 us
+  aten::unsqueeze                start   368.3  dur    0.9 us
+  aten::conv2d                   start   390.1  dur  118.5 us
+  aten::batch_norm               start   517.3  dur   22.3 us
+  aten::relu                     start   543.3  dur    7.8 us
+  aten::max_pool2d               start   555.9  dur  150.6 us
+  aten::conv2d                   start   711.7  dur   74.0 us
+  aten::relu                     start   789.9  dur    5.7 us
+  aten::adaptive_avg_pool2d      start   801.2  dur   11.2 us
+  aten::flatten                  start   815.5  dur    1.4 us
+  aten::linear                   start   820.3  dur    6.4 us
+  aten::softmax                  start   842.7  dur    1.4 us
+  aten::argmax                   start   844.9  dur    3.2 us
+  aten::item                     start   849.3  dur    0.6 us
+```
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 230">
+<text x="10" y="42" font-size="13">구간</text><text x="10" y="92" font-size="13">top-level op</text> <rect x="100.0" y="26" width="247.2" height="24" fill="#e08a3c" fill-opacity="0.8"/> <text x="103.0" y="20" font-size="12">preprocess 379us</text> <rect x="349.4" y="26" width="296.9" height="24" fill="#4a7bd0" fill-opacity="0.8"/> <text x="352.4" y="20" font-size="12">model 455us</text>
+<rect x="648.4" y="26" width="11.6" height="24" fill="#3f9a6b" fill-opacity="0.8"/> <text x="660.0" y="20" text-anchor="end" font-size="12">postprocess 18us</text> <rect x="337.9" y="76" width="1.0" height="12" fill="#4a7bd0"/> <rect x="339.1" y="90" width="1.2" height="12" fill="#888"/> <rect x="340.5" y="76" width="1.0" height="12" fill="#4a7bd0"/> <rect x="354.7" y="90" width="77.3" height="12" fill="#888"/>
+<rect x="437.7" y="76" width="14.5" height="12" fill="#4a7bd0"/> <rect x="454.6" y="90" width="5.1" height="12" fill="#888"/> <rect x="462.9" y="76" width="98.3" height="12" fill="#4a7bd0"/> <rect x="564.6" y="90" width="48.3" height="12" fill="#888"/> <rect x="615.6" y="76" width="3.7" height="12" fill="#4a7bd0"/> <rect x="623.0" y="90" width="7.3" height="12" fill="#888"/>
+<rect x="632.4" y="76" width="1.0" height="12" fill="#4a7bd0"/> <rect x="635.5" y="90" width="4.2" height="12" fill="#888"/> <rect x="650.1" y="76" width="1.0" height="12" fill="#4a7bd0"/> <rect x="651.6" y="90" width="2.1" height="12" fill="#888"/> <rect x="654.4" y="76" width="1.0" height="12" fill="#4a7bd0"/> <line x1="393.3" y1="104" x2="393.3" y2="115" stroke="currentColor" stroke-width="0.5"/>
+<text x="393.3" y="125" font-size="12">conv2d 118us</text> <line x1="512.1" y1="104" x2="512.1" y2="130" stroke="currentColor" stroke-width="0.5"/> <text x="512.1" y="140" font-size="12">max_pool2d 151us</text> <line x1="588.7" y1="104" x2="588.7" y2="145" stroke="currentColor" stroke-width="0.5"/> <text x="588.7" y="155" font-size="12">conv2d 74us</text>
+<line x1="100.0" y1="210" x2="100.0" y2="215" stroke="currentColor"/><text x="92.0" y="227" font-size="12">0</text> <line x1="230.6" y1="210" x2="230.6" y2="215" stroke="currentColor"/><text x="222.6" y="227" font-size="12">200</text> <line x1="361.1" y1="210" x2="361.1" y2="215" stroke="currentColor"/><text x="353.1" y="227" font-size="12">400</text>
+<line x1="491.7" y1="210" x2="491.7" y2="215" stroke="currentColor"/><text x="483.7" y="227" font-size="12">600</text> <line x1="622.2" y1="210" x2="622.2" y2="215" stroke="currentColor"/><text x="614.2" y="227" font-size="12">800</text> <text x="110" y="92" font-size="12">(numpy 구간 — torch op가 안 보인다)</text>
+<line x1="100" y1="210" x2="660" y2="210" stroke="currentColor"/><text x="10" y="227" font-size="12">시간 (us)</text>
+</svg>
+```
+
+그림 5 — torch.profiler chrome trace에서 뽑은 추론 한 번의 타임라인(실제 데이터, Mac CPU 1 thread). 위 줄은 `record_function` 구간, 아래 줄은 top-level aten op(교대로 파랑·회색). 전처리 구간에는 torch op가 거의 없다 — numpy가 일하는 동안 torch 프로파일러는 아무것도 못 본다.
+
+출력에서 볼 것 — 시간을 세 덩어리로 나눈다(I4의 "모델만 재면 절반만 잰 것"):
+
+```
+step 전체                   858 µs
+  preprocess (numpy)        379 µs   44%   ← 모델이 아님
+  model 구간                455 µs
+    top-level op 합         398 µs   = 118.5 + 22.3 + 7.8 + 150.6 + 74.0 + 5.7 + 11.2 + 1.4 + 6.4
+    op 사이 빈틈             57 µs   ← 프레임워크(Python dispatch) + 프로파일러 overhead
+  postprocess               18 µs
+```
+
+- 두 번째로 큰 op가 **`max_pool2d` 151 µs**로, 연산량이 훨씬 큰 conv보다 길다. 이 PyTorch CPU 경로에서 `max_pool2d_with_indices`가 느린 것이다(표에도 15.3%). 연산량(D1)으로 예측한 순서와 측정이 다를 때가 프로파일러가 값을 하는 순간이다.
+- 그런데 이것이 **타깃에서도 그럴까?** 아니다 — 아래 7.3절에서 같은 모델을 ORT로 돌리면 MaxPool은 12 µs다. 프로파일은 "이 런타임, 이 기계"의 성질이다(I6 3.4절의 교훈과 같다).
+
+### 7.3 ORT 프로파일 — op별 표 (짧게, 자세한 것은 I6 3.2절)
+
+무엇을 확인하는 코드인지: 같은 모델을 ONNX로 내보내 ORT 세션 프로파일링을 켜고, 30회 실행 중 뒤 20회의 node별 커널 시간 중앙값을 낸다.
+
+```python
+# ORT 세션 프로파일링: 같은 CNN을 ONNX로 내보내고 profile JSON에서 node별 시간을 합산한다
+import json, collections, numpy as np, torch, onnxruntime as ort
+from kws_net import net
+torch.onnx.export(net, torch.zeros(1, 1, 97, 40), "kws.onnx", dynamo=False, opset_version=17)
+so = ort.SessionOptions(); so.enable_profiling = True; so.intra_op_num_threads = 1
+sess = ort.InferenceSession("kws.onnx", so, providers=["CPUExecutionProvider"])
+x = np.random.default_rng(0).standard_normal((1, 1, 97, 40)).astype(np.float32)
+for _ in range(30): sess.run(None, {sess.get_inputs()[0].name: x})
+ev = json.load(open(sess.end_profiling()))
+node = collections.defaultdict(list)
+for e in ev:
+    if e.get("cat") == "Node" and e["name"].endswith("_kernel_time"):
+        node[(e["args"]["op_name"], e["name"][:-12])].append(e["dur"])
+runs = [e["dur"] for e in ev if e.get("name") == "model_run"][10:]
+print(f"model_run median {np.median(runs):.0f} us (runs 10..29)")
+for (op, name), d in sorted(node.items(), key=lambda kv: -np.median(kv[1][10:])):
+    print(f"  {op:18s} {name:28s} {np.median(d[10:]):6.0f} us")
+```
+
+```sh
+.venv/bin/python -W ignore ort_prof.py      # torch.onnx의 deprecation 경고를 숨김
+```
+
+```text
+model_run median 232 us (runs 10..29)
+  FusedConv          /4/Conv                         160 us
+  FusedConv          /0/Conv                          36 us
+  MaxPool            /3/MaxPool                       12 us
+  GlobalAveragePool  /6/GlobalAveragePool              7 us
+  Gemm               /8/Gemm                           1 us
+  Flatten            /7/Flatten                        0 us
+```
+
+출력에서 볼 것: ORT는 Conv + BatchNorm + ReLU를 `FusedConv` 하나로 합쳤다(C6 graph optimization). node 합 216 µs, `model_run` 232 µs → 세션 overhead 약 16 µs. torch eager의 op 사이 빈틈(57 µs)보다 훨씬 작다. 같은 모델인데 두 번째 conv는 torch 74 µs, ORT 160 µs로 **오히려 ORT가 느리다** — 런타임마다 커널 선택이 다르다. (다른 실행에서는 `model_run`이 230~500 µs로 흔들렸다. 잡음 큰 기계라는 점을 기억할 것.)
+
+### 7.4 런타임이 스스로 내는 숫자
+
+- **llama.cpp**: 실행이 끝나면 `llama_perf_context_print`가 load / prompt eval / eval 시간과 token당 ms를 찍는다(F3 9절에 실제 출력). 단계별 합계라서 "pp가 느린가 tg가 느린가"를 먼저 가른다.
+- **TFLite `benchmark_model`**: `--enable_op_profiling=true`로 op별 표와 delegate된 노드 수를 낸다(F1).
+- **TFLM `MicroProfiler`**: `MicroInterpreter`에 profiler를 넘기면 op마다 tick을 기록한다. tick 출처는 플랫폼 포트가 정한다(MCU라면 CYCCNT). 사용법과 실제 출력은 F2 4절.
+- 공통점: 모두 **op 단위 instrumentation**이다. 4.4절의 계산대로 op 하나가 충분히 굵어서 오버헤드가 작다. 대신 op **안**(커널 내부의 메모리 대기 등)은 안 보인다 → PMU나 하드웨어 trace가 필요하다.
+
+---
+
+## 8. 벤더·모바일 ML 프로파일러 지도 (실행하지 않음 — 개념과 무엇을 얻는지만)
+
+아래 도구는 이 Mac에서 돌릴 수 없다. 화면이나 출력을 지어내지 않고, 각 도구가 **어떤 질문에 답하는지**만 정리한다. 이름·옵션은 SDK 버전마다 바뀌니 실제 사용 시 문서로 확인한다.
+
+| 도구 | 대상 | 주로 얻는 것 | 수집 방식 |
+|---|---|---|---|
+| Snapdragon Profiler (Qualcomm) | Snapdragon SoC 전체 | CPU 코어별 부하·주파수, GPU·DSP 지표, 메모리 대역폭 같은 시스템 지표를 시간축으로. trace 캡처 | 기기의 수집 서비스 + 호스트 GUI (ADB) |
+| QNN profiling (`qnn-net-run --profiling_level basic/detailed` → `qnn-profile-viewer`) | QNN backend (HTP 등) | 그래프 실행 시간, op별 시간/cycle, 초기화·finalize 시간. detailed일수록 자세하고 오버헤드 큼 | runtime instrumentation, 로그 파일 → viewer로 표 변환 (F4 3.2절) |
+| ORT QNN EP `profiling_level` | ORT에서 QNN 쓸 때 | 위와 같은 정보를 ORT 세션에서 | EP 옵션 (F4 3.3절) |
+| Qualcomm AI Hub profile job | 클라우드 실기기 | 지연, 메모리, op별 실행 위치(NPU/GPU/CPU)와 시간 | 업로드 → 원격 측정 (F4 10절) |
+| Arm Streamline (Arm Performance Studio 등) | Cortex-A/Mali, 일부 Cortex-M | 타임라인 위에 PMU 카운터(cycles, cache, 대역폭), 함수 sampling, 사용자 annotation | 기기의 수집 데몬(gator) + 호스트 GUI |
+| Arm NN / ExecuTorch / TFLite 내장 프로파일링 | Arm CPU·GPU·NPU 백엔드 | op별 시간, 어느 backend에서 돌았나 | 런타임 instrumentation (옵션으로 켬) |
+| Ethos-U PMU (driver) + Vela 성능 추정 | Ethos-U55/U65 micro-NPU | NPU 활성 cycle, AXI(메모리) 트랜잭션 수 같은 카운터 / Vela는 컴파일 시 레이어별 cycle·대역폭 **추정** | NPU 내부 카운터를 driver가 읽음 / 정적 분석 |
+| TFLM MicroProfiler | MCU | op별 tick | instrumentation (F2) |
+| Lauterbach Trace32 | MCU·DSP·SoC 코어 | ETM/PTM trace 기반 함수 실행 시간 통계, 호출 트리, 코드 커버리지, 디버거 기반 PC sampling | 하드웨어 trace + 디버거 |
+| Perfetto / systrace | Android 시스템 | 스레드 스케줄링, CPU 주파수, `ATrace` 구간 | 커널 tracepoint + 사용자 마커 |
+
+### 8.1 각 도구가 답하는 세 가지 질문
+
+ML 추론을 기기에서 프로파일링할 때 결국 원하는 숫자는 세 종류다.
+
+1. **레이어별 시간** — 어느 레이어(op)가 비싼가, 어느 op가 NPU가 아니라 CPU로 떨어졌나(fallback). → QNN profiling, AI Hub, ORT/TFLite op 프로파일, MicroProfiler.
+2. **하드웨어 활용도** — NPU가 실제로 얼마나 바빴나(활성 cycle ÷ 전체), MAC 배열이 놀았나. → 벤더 PMU(Ethos-U PMU, HTP 쪽 상세 프로파일), Vela 추정과 비교.
+3. **메모리(DDR) 대역폭** — 가중치·activation이 DDR을 얼마나 오갔나. memory-bound인가(D3 roofline). → Snapdragon Profiler·Streamline의 대역폭 카운터, Ethos-U의 AXI 카운터.
+
+여기에 **시스템 맥락**(다른 태스크와 겹쳤나, 주파수가 떨어졌나, 큐에서 기다렸나)을 보는 trace(Perfetto, Snapdragon Profiler, SystemView)가 더해진다.
+
+### 8.2 Trace32 — Don의 도구를 ML 쪽으로
+
+Don은 Trace32를 이미 쓴다. ML 추론 프로파일링에서 쓰는 방법:
+
+- ETM trace로 추론 한 번을 통째로 떠서 **함수별 실행 시간 통계**를 낸다. TFLM이나 CMSIS-NN 커널 이름(`arm_convolve_s8` 같은)이 그대로 나오므로 "레이어별 시간"을 런타임 수정 없이 얻는다. instrumentation이 아니므로 **교란이 없다** — J2의 WCET 측정에도 좋다.
+- trace 길이가 모자라면 추론의 일부만 잡히니, 트리거(추론 시작 함수 진입)와 필터(커널 함수만)를 건다.
+- 명령 이름(예: 함수 통계 계열 `Trace.STATistic.Func`)과 라이선스별 기능은 Lauterbach 매뉴얼로 확인한다.
+- Hexagon DSP처럼 Qualcomm 쪽 코어도 Trace32가 지원하는 경우가 있으나, 실제 제품 보드에서 trace 포트가 열려 있는지는 별개 문제다.
+
+### 8.3 "Snapdragon NPU에서 모델을 프로파일링하라"를 받으면
+
+1. 모델 단독: QNN(또는 ORT QNN EP)으로 `profiling_level=basic` → 그래프 시간과 op별 시간, 초기화 시간. 같은 조건으로 AI Hub profile job과 비교해 "내 보드 설정이 정상인가"를 본다.
+2. op 실행 위치 확인: 모든 op가 HTP에서 도는가, CPU fallback이나 그래프 분할이 있는가(F4 6.5절, F8 4절).
+3. 상위 op에 대해 detailed 프로파일로 cycle을 보고, 연산량(D1)으로 계산한 기대 cycle과 비교 → compute-bound인지 memory-bound인지(D3).
+4. 시스템 안에서: 앱 전체를 돌리며 Snapdragon Profiler 또는 Perfetto로 타임라인을 떠서, 전처리·IPC(FastRPC)·후처리·다른 앱과의 경쟁·주파수 변화를 본다.
+5. 장시간: sustained 상태에서 반복(K4 throttling).
+
+---
+
+## 9. 방법론 — 질문에서 결론까지
+
+### 9.1 흐름
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 250">
+<defs><marker id="k2m" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs> <rect x="20" y="30" width="140" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="#4a7bd0"/> <text x="30" y="52" font-size="13">① 질문 정의</text><text x="30" y="72" font-size="12">무엇이, 얼마나 느린가</text>
+<rect x="186" y="30" width="140" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.15" stroke="#4a7bd0"/> <text x="196" y="52" font-size="13">② 환경 고정</text><text x="196" y="72" font-size="12">release, 심볼, 클럭</text> <rect x="352" y="30" width="140" height="56" rx="6" fill="#e08a3c" fill-opacity="0.15" stroke="#e08a3c"/>
+<text x="362" y="52" font-size="13">③ 구간 분해</text><text x="362" y="72" font-size="12">pre / model / post</text> <rect x="518" y="30" width="140" height="56" rx="6" fill="#e08a3c" fill-opacity="0.15" stroke="#e08a3c"/> <text x="528" y="52" font-size="13">④ hotspot 찾기</text><text x="528" y="72" font-size="12">sampling, op 프로파일</text>
+<rect x="518" y="150" width="140" height="56" rx="6" fill="#3f9a6b" fill-opacity="0.15" stroke="#3f9a6b"/> <text x="528" y="172" font-size="13">⑤ 원인 찾기</text><text x="528" y="192" font-size="12">PMU(왜), trace(언제)</text> <rect x="352" y="150" width="140" height="56" rx="6" fill="#3f9a6b" fill-opacity="0.15" stroke="#3f9a6b"/>
+<text x="362" y="172" font-size="13">⑥ 수정 하나</text><text x="362" y="192" font-size="12">가설 1개 = 변경 1개</text> <rect x="186" y="150" width="140" height="56" rx="6" fill="#d0564a" fill-opacity="0.15" stroke="#d0564a"/> <text x="196" y="172" font-size="13">⑦ 재측정</text><text x="196" y="192" font-size="12">같은 조건, 반복, 분포</text> <line x1="160" y1="58" x2="184" y2="58" stroke="currentColor" marker-end="url(#k2m)"/>
+<line x1="326" y1="58" x2="350" y2="58" stroke="currentColor" marker-end="url(#k2m)"/> <line x1="492" y1="58" x2="516" y2="58" stroke="currentColor" marker-end="url(#k2m)"/> <line x1="588" y1="86" x2="588" y2="148" stroke="currentColor" marker-end="url(#k2m)"/> <line x1="518" y1="178" x2="494" y2="178" stroke="currentColor" marker-end="url(#k2m)"/>
+<line x1="352" y1="178" x2="328" y2="178" stroke="currentColor" marker-end="url(#k2m)"/> <path d="M256,150 L256,118 L422,118 L422,88" fill="none" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#k2m)"/> <text x="268" y="112" font-size="12">예산 초과 → 다시</text> <line x1="186" y1="178" x2="120" y2="178" stroke="currentColor" marker-end="url(#k2m)"/> <text x="20" y="182" font-size="13">sign-off</text>
+<text x="20" y="232" font-size="12">각 단계에서 "프로파일러가 결과를 바꾸지 않았나"를 확인한다 (1.5절, 4.4절)</text>
+</svg>
+```
+
+그림 6 — 프로파일링 방법론. ①~④는 "어디", ⑤는 "왜·언제", ⑥~⑦은 "고쳐졌나". 점선은 예산을 아직 못 맞췄을 때 구간 분해로 돌아가는 루프(I6의 co-design 루프와 같은 구조).
+
+### 9.2 단계별로
+
+**① 질문 정의.** "느리다"가 아니라 숫자로: "wake word 후 응답 p99가 300 ms 예산을 40 ms 넘는다", "추론이 EVB 데이터시트 기대치의 2배다". 질문이 도구를 정한다 — 평균 문제면 profile, 가끔 튀면 trace.
+
+**② 환경 고정.** 측정하는 빌드가 배포 빌드와 같은 최적화인가(debug 빌드 프로파일은 쓸모없다), 심볼이 있는가(심볼만 따로 두고 바이너리는 같게), 클럭·전원 모드(DVFS governor, HTP performance mode)가 고정됐나, 온도는? warm-up 후 steady state인가(D6 2절). 이 단계의 체크리스트는 I5 4.5절에 있다.
+
+**③ 구간 분해.** 비싼 도구 전에 싼 타임스탬프로 큰 덩어리를 나눈다. 7.2절의 실측이 좋은 예다: step 858 µs 중 모델 op는 398 µs뿐이고, 전처리 379 µs, 프레임워크 빈틈 57 µs. **모델을 최적화하기 전에 "모델이 범인인가"부터 확인한다**(I4).
+
+**④ hotspot.** sampling으로 flame graph, 또는 런타임의 op 프로파일. 넓은 평원을 찾는다.
+
+**⑤ 원인.** hotspot이 왜 느린가 — PMU로 IPC·miss를 보고(E1 10절 흐름), 가끔만 느리면 trace로 선점·대기 순서를 본다(6절).
+
+**⑥ 수정 하나.** 한 번에 하나만 바꾼다. 둘을 바꾸면 무엇이 효과였는지 모른다(3.5절의 스레드 수 실험).
+
+**⑦ 재측정과 유의성.** 같은 조건으로, 여러 번 반복해서 분포로 비교한다. 2.2절의 sampling 오차, D6의 분포 비교. 개선이 잡음보다 작으면 "개선 없음"으로 기록한다.
+
+### 9.3 손계산 — "기기에서 2배 느리다"를 쪼개기
+
+상황(가정): 모델 단독 벤치(벤더 도구)로는 8 ms인데 앱에서 재면 16 ms다.
+
+```
+앱에서 잰 16 ms를 타임스탬프로 쪼갰더니:
+  입력 복사 + 정규화 (CPU)        3.0 ms
+  NPU 제출 → 완료                 9.5 ms
+  출력 복사 + softmax + 후처리     1.5 ms
+  나머지(큐 대기, 스레드 깨우기)    2.0 ms
+합 16.0 ms
+```
+
+말로 하면: 모델 자체는 9.5 ms로 벤치(8 ms)보다 1.5 ms만 느리다. 나머지 6.5 ms는 모델 밖이다. 따라서 첫 수정 후보는 NPU가 아니라 **입력 경로(3 ms)** — 정규화를 모델 안으로 넣거나(I4), 양자화된 입력을 바로 만들거나, 복사를 없애는 것. 9.5 vs 8 ms의 차이는 따로: 첫 실행인가(초기화·캐시), 성능 모드가 다른가, 그래프가 분할돼 CPU fallback이 끼었나(QNN 프로파일로 op 위치 확인).
+
+### 9.4 피해야 할 함정 모음
+
+- debug 빌드(`-O0`)를 프로파일 — hotspot이 다른 곳에 생긴다.
+- 심볼 없는 바이너리 — 주소만 남는다. 심볼 파일은 빌드마다 보관.
+- 주파수 변화(DVFS, thermal) — 같은 코드가 다른 시간. 클럭을 고정하거나, cycles·instructions로 본다(5.2절: instructions는 0.1% 안으로 안정).
+- **프로파일러를 프로파일** — 오버헤드가 결과를 바꿈(4절: 8% → 90%). 프로파일러를 뗀 실행 시간과 비교.
+- 컴파일러가 측정 대상을 지움(5.3절) — 결과를 사용하고, 필요하면 barrier.
+- tail call·inline으로 스택이 거짓말(2.4절).
+- 샘플 부족 — 5% 차이를 1000 샘플로 결론(2.2절).
+- 대기 샘플을 일로 착각 — 스레드 많은 런타임에서 idle 스택을 먼저 걸러낸다(3.5절).
+- 호스트 프로파일을 타깃 결론으로 — 런타임·커널이 다르면 hotspot도 다르다(7.2~7.3절: MaxPool 151 µs vs 12 µs).
+
+---
+
+## 10. 임베디드 관점에서 다시 보기
+
+웨어러블 MCU + NPU 시스템에서 프로파일링 도구를 계층별로 배치하면:
+
+```
+계층              도구                                     언제
+───────────────────────────────────────────────────────────────────────────────
+보드 (전기)       GPIO 토글 + 로직 분석기, 전력 프로브(K3)    구간 길이·전류를 같은 시간축에서
+MCU 코어          DWT CYCCNT/CPICNT/LSUCNT, PC sampling      커널 하나의 cycle, 메모리 대기 비율
+                  ETM/MTB + Trace32                          교란 없는 함수 시간, WCET 근거
+RTOS              trace ring(6절), SystemView, Tracealyzer   선점·ISR·deadline miss
+ML 런타임         TFLM MicroProfiler, op 단위 begin/end       레이어별 시간
+NPU               벤더 PMU(활성 cycle, AXI), 컴파일러 추정     활용도, 대역폭
+앱 프로세서       perf/simpleperf, Perfetto, QNN profiling,    Snapdragon 쪽 파이프라인
+                  Snapdragon Profiler, Streamline
+```
+
+실무 원칙:
+
+- **양산 펌웨어에 trace ring을 남겨 둔다.** 기록 비용이 작고(이벤트 몇 개/프레임), 필드에서 deadline miss가 났을 때 마지막 N개 이벤트를 crash dump와 함께 올리면(H1 on-device logging) 재현 없이 원인을 본다. Don이 SSD에서 telemetry 로그로 하던 일이다.
+- **op 단위 계측은 컴파일 타임 스위치**로. 개발 빌드에서는 op마다 CYCCNT를 기록하고, 양산에서는 추론 전체 하나만.
+- **NPU는 sampling이 안 된다.** CPU를 sampling하면 "완료 대기"만 보인다. 제출·완료 시각(instrumentation) + NPU 자체 카운터가 필요하다.
+- **trace의 timestamp는 한 시간축으로.** MCU의 CYCCNT, 앱 프로세서의 monotonic clock, NPU의 cycle 카운터를 합쳐 보려면 기준점 동기화가 필요하다(G7 시간 동기화).
+
+---
+
+## 11. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| debug 빌드를 프로파일 | hotspot이 배포 빌드와 다름 | `-O0`은 inline·벡터화가 없음 | 배포와 같은 최적화 + `-g` (디버그 정보는 코드를 바꾸지 않음) |
+| 함수 단위 자동 계측을 작은 함수에 | 실행이 10배 느려지고 특정 함수 비율이 폭증 | 훅 비용(약 26 ns) ≫ 함수 비용 | `-finstrument-functions-after-inlining`, 또는 굵은 구간만 수동 계측 |
+| tail call 빌드의 스택을 믿음 | 함수가 엉뚱한 부모 밑에, 같은 함수가 두 군데 | 중간 프레임이 jump로 사라짐 | `-fno-optimize-sibling-calls`로 프로파일용 빌드, 성능 차이 먼저 확인 |
+| 짧게 잡은 sampling으로 결론 | 다시 돌리면 순위가 바뀜 | N이 작아 SE가 큼 | N과 SE를 계산(±1.96·√(p(1−p)/N)), 더 길게 |
+| 대기 스레드 샘플을 포함해 비율 계산 | 커널 wait 함수가 1위 | 스레드 풀의 idle 스레드 | 대기 스택을 먼저 걸러내고 "일하는 샘플"만 비율로 |
+| 벤치 루프 안의 순수 함수 | 0 µs, 명령 수 몇백 개 | 컴파일러가 호출을 루프 밖으로 이동 | 결과 사용, `volatile` sink, 메모리 barrier |
+| 시간만 보고 회귀 판단 | 같은 코드인데 ±20% | DVFS, 다른 작업, 코어 이동 | instructions 같은 안정 지표를 함께 기록, 클럭 고정 |
+| trace에 유실 카운터가 없음 | "그 이벤트는 안 일어났다"고 잘못 결론 | 링이 덮어써서 사라짐 | written/overwritten을 함께 덤프 |
+| 호스트 프로파일을 타깃에 일반화 | 타깃에서 고친 효과 없음 | 커널 구현·메모리 계층이 다름 | 타깃(또는 AI Hub 같은 실기기)에서 op 프로파일 |
+| 모델만 프로파일 | 모델을 2배 빠르게 했는데 end-to-end는 15%만 개선 | 전처리·프레임워크·대기가 절반 | ③ 구간 분해부터 (9.3절) |
+
+---
+
+## 12. 면접에서 이렇게 말한다
+
+**Q.** "Sampling vs instrumentation profiling — what are the trade-offs?"
+
+**A.** sampling은 주기적으로 PC와 스택을 찍어 통계로 비율을 낸다. 오버헤드가 작고 코드 수정이 없지만, 통계 오차가 있고 호출 횟수를 모르며 심볼·unwind 정보에 의존한다. instrumentation은 함수나 구간에 훅을 넣어 정확한 횟수와 시간을 주지만 훅마다 고정 비용이 있어 작은 함수가 많으면 결과가 왜곡된다. 실제로 inline될 helper에 훅이 들어가자 8% 함수가 90%로 보이고 실행이 10배 느려지는 것을 쟀다. 그래서 먼저 sampling으로 어디인지 보고, 굵은 단위(op, 프레임)만 계측한다.
+
+> "Sampling interrupts the program periodically and records the PC and call stack, so it's cheap and needs no code changes, but it's statistical — the error shrinks with the square root of the sample count — it can't count calls, and it depends on symbols and stack unwinding. Instrumentation inserts hooks, so it gives exact call counts and durations, but every hook has a fixed cost, which distorts the picture when functions are small. I measured a case where instrumenting a helper the compiler would normally inline made the program ten times slower and made an 8% stage look like 90%. So I start with sampling to find where the time goes, and only instrument at a coarse granularity like per-op or per-frame."
+
+**Q.** "How do you read a flame graph?"
+
+**A.** 세로는 call stack 깊이, 각 칸의 폭은 그 함수가 스택에 있던 샘플 비율(inclusive)이다. 칸 위가 비어 있는 부분의 폭이 self 시간이고, 넓은 평원이 최적화 대상이다. 가로 순서는 시간이 아니라 알파벳 순이고 색은 보통 의미가 없다. tail call이나 inline 때문에 중간 함수가 사라질 수 있다는 것도 염두에 둔다.
+
+> "The y-axis is stack depth and the width of each box is the fraction of samples in which that function was on the stack, so width is inclusive time. The exposed top edge of a box is its self time, and wide plateaus are what I optimize first. The x-axis is sorted alphabetically, not by time, and colors usually carry no meaning. I also keep in mind that tail calls and inlining can hide frames, so if a function shows up under an unexpected parent I check the build flags before drawing conclusions."
+
+**Q.** "Inference is 2× slower on the device than the vendor benchmark. How do you profile it?"
+
+**A.** 먼저 같은 조건인지 확인한다: 첫 실행인지 steady state인지, 성능 모드·클럭, 같은 모델 파일인지. 그다음 end-to-end를 타임스탬프로 전처리·제출·NPU 실행·후처리·대기로 쪼갠다. 대부분 차이는 모델 밖에 있다. 모델 구간이 느리면 런타임 프로파일러로 op별 시간과 실행 위치를 봐서 CPU fallback이나 그래프 분할을 찾고, 남은 차이는 PMU나 대역폭 카운터로 memory-bound인지 본다. 마지막으로 시스템 trace로 다른 태스크와의 경쟁이나 throttling을 확인한다.
+
+> "First I make sure we're comparing like with like: steady state rather than first run, the same performance mode and clocks, the same model artifact. Then I break the end-to-end time into stages with timestamps — preprocessing, submission, accelerator execution, postprocessing and queueing — because very often half the gap is outside the model. If the model stage itself is slow, I use the runtime's profiler to get per-op times and where each op ran, looking for CPU fallback or graph partitioning. Whatever is left I check with hardware counters for memory-bandwidth limits, and finally a system trace for contention with other tasks or thermal throttling."
+
+**Q.** "What does IPC tell you?"
+
+**A.** cycle당 끝낸 명령 수다. 넓은 OoO 코어에서 IPC가 낮으면 메모리 대기나 의존 체인으로 코어가 놀고 있다는 신호고, 높으면 연산형이다. 다만 SIMD로 명령 수 자체를 줄이면 IPC가 낮아도 더 빠를 수 있어서 명령 수와 함께 본다. 이 Mac에서 conv 커널은 IPC 약 4.9, 큰 memcpy 단계는 약 2.7이었다. 명령 수는 실행 간 0.1% 안으로 안정적이라 회귀 감시에 좋다.
+
+> "IPC is instructions retired per cycle. On a wide out-of-order core, a low IPC usually means the core is stalled on memory or a dependency chain, and a high IPC means you're compute-bound and using the core well. But it's not a goal by itself — vectorizing reduces the instruction count and can lower IPC while making the code faster — so I always read it together with the instruction count and cache-miss rates. Instruction counts are also very stable run to run, which makes them a good regression signal in CI compared with wall-clock time."
+
+**Q.** "How would you profile a model on a Snapdragon NPU?"
+
+**A.** QNN 또는 ORT QNN EP에서 profiling level을 켜고 qnn-net-run으로 돌려 그래프 시간·op별 시간·초기화 시간을 본다. 모든 op가 HTP에서 도는지, fallback이나 분할이 있는지 확인하고, AI Hub profile job과 숫자를 비교해 보드 설정을 검증한다. 상위 op는 detailed 프로파일로 cycle을 보고 연산량과 비교해 memory-bound인지 판단한다. 그다음 앱 전체를 Snapdragon Profiler나 Perfetto로 trace해서 전처리, FastRPC 오버헤드, 주파수 변화를 본다.
+
+> "I'd start at the model level: run it with QNN's profiling enabled — or the profiling level option in ONNX Runtime's QNN execution provider — to get total graph time, per-op times and init time, and compare against an AI Hub profile job to validate my board setup. I check that every op actually runs on the HTP, with no CPU fallback or graph splits. For the top ops I use the detailed profile and compare cycles with what the op's MAC count predicts, to tell compute-bound from memory-bound. Then I profile the whole app with a system trace — Snapdragon Profiler or Perfetto — to see preprocessing, the RPC overhead to the DSP, clock changes and contention."
+
+**Q.** "How would you add tracing to firmware without disturbing timing?"
+
+**A.** 이벤트당 8바이트 정도의 고정 레코드를 lock-free 링버퍼에 쓰고, timestamp는 cycle 카운터에서 읽는다. ISR이 태스크를 선점해도 안전하게 atomic으로 슬롯을 예약한다. 기록 비용을 실측해 측정 구간의 1% 미만인지 확인하고, 대역폭을 계산해 SWO나 RTT로 streaming할지 링만 둘지 정한다. 유실 카운터를 함께 남긴다. 교란이 전혀 없어야 하면 ETM 같은 하드웨어 trace를 쓴다.
+
+> "I'd log fixed-size records — a timestamp from the cycle counter, an event ID and a small argument, eight bytes — into a lock-free ring buffer, reserving the slot with an atomic increment so an ISR preempting a task can't corrupt it. I measure the cost of the logging call and keep it well under one percent of the intervals I care about, compute the event rate to decide between streaming over SWO or RTT and keeping a flight-recorder ring, and always dump the overwrite counter so missing events aren't mistaken for events that never happened. If I need zero perturbation, I use hardware instruction trace like ETM with a Trace32 probe."
+
+---
+
+## 13. 직접 해보기
+
+1. 손계산: 1 ms 간격 sampling으로 5초를 모았다. 함수 A가 4.0%였다. 95% 구간은? 이 구간이 ±0.5%p 이하가 되려면 몇 초를 모아야 하나?
+   정답: N = 5000, SE = √(0.04 × 0.96 / 5000) ≈ 0.00277 → ±0.54%p (3.46 ~ 4.54%). ±0.5%p 이하가 되려면 N ≥ 0.04 × 0.96 × (1.96 ÷ 0.005)² ≈ 5,901 → 약 6초.
+2. 손계산: 훅 한 쌍이 30 ns인 instrumentation으로, 한 번에 200 ns 걸리는 함수를 프레임당 10,000번 부르는 코드를 잰다. 그 함수의 시간은 몇 % 부풀려 보이나? 프레임 전체가 5 ms라면 프레임은 몇 % 느려지나?
+   정답: 30/200 = 15% 부풀림(훅의 일부만 함수 안에 잡히면 조금 덜). 추가 시간 10,000 × 30 ns = 0.3 ms → 5 ms 대비 6% 느려짐.
+3. 코드: `flame.py`를 고쳐 두 folded 파일(`hot.folded`, `hot_nt.folded`)을 받아, 함수 이름(경로의 마지막)별 self 비율 차이를 출력하라. tail call 빌드에서 어떤 함수의 비율이 같고 어떤 경로가 달라지는지 확인한다.
+   힌트: 경로가 아니라 마지막 이름으로 묶으면 두 빌드의 self 비율은 거의 같다 — 달라지는 것은 부모 경로뿐이다.
+4. 코드: `trace_ring.h`의 `trace()`를 100만 번 부르는 루프를 만들어 호출당 ns를 재라. `memory_order_relaxed` 대신 `memory_order_seq_cst`로 바꾸면 달라지나? 이 값으로 6.5절의 "op마다 begin/end" 설계의 CPU 오버헤드를 계산하라.
+   힌트: 호스트에서 수 ns 수준일 것이다. 6,000 이벤트/s × (호출당 비용)이 1초 중 몇 %인지가 답.
+5. 코드: `fw_sim.c`에서 BLE의 우선순위를 INFER보다 낮게(enum 순서 변경) 바꾸고 디코더를 다시 돌려라. 추론 wall 시간과 BLE 응답 시간은 각각 어떻게 바뀌나? 어느 쪽이 제품에 맞는 선택인지 J2의 deadline 관점으로 말해 보라.
+   힌트: INFER wall은 7.0~7.1 ms로 줄지만 BLE는 최대 7 ms를 기다린다 — BLE 연결 이벤트의 deadline이 그보다 짧다면 안 된다.
+6. 조사: 이 노트의 `torch_trace.py`가 만든 `trace.json`을 ui.perfetto.dev에 열어(파일 업로드), 그림 5와 같은 구간이 보이는지 확인하라. Perfetto의 SQL 쿼리 기능으로 op별 합계를 내 보라.
+   힌트: chrome JSON trace는 Perfetto UI가 바로 읽는다. slice 테이블에서 name별 sum(dur)을 구한다.
+
+---
+
+## 14. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| sampling profiler | 표본 추출 프로파일러 | 주기적으로 PC·스택을 찍어 통계로 시간 비율을 추정 |
+| instrumentation | 계측 코드 삽입 | 함수·구간 입출구에 훅을 넣어 정확한 횟수와 시간을 잰다 |
+| tracing | 이벤트 기록 | 사건을 시간순으로 남겨 타임라인을 복원 |
+| PMU | Performance Monitoring Unit | cycles, instructions, miss 등을 세는 CPU 내장 하드웨어 카운터 |
+| IPC / CPI | instructions per cycle / 그 역수 | 코어가 cycle당 얼마나 일했나 |
+| inclusive / exclusive(self) | 자식 포함 / 자기만 | flame graph의 폭 / 꼭대기 폭 |
+| call stack unwind | 스택 거슬러 오르기 | frame pointer 또는 DWARF CFI로 호출자들을 복원 |
+| symbolization | 기호화 | 주소를 함수 이름·줄 번호로 바꾸기 |
+| folded stack | 접힌 스택 | `a;b;c 123` 한 줄 형식, flame graph의 입력 |
+| flame graph | 불꽃 그래프 | 스택을 쌓고 폭을 비율로 그린 그림, x축은 시간이 아님 |
+| flame chart | 불꽃 차트 | x축이 시간인 변형 (DevTools, Perfetto) |
+| tail call | 꼬리 호출 | 마지막 호출을 jump로 바꿔 프레임을 없애는 최적화 — 스택에서 함수가 사라짐 |
+| observer effect | 관측자 효과 | 측정이 측정 대상을 바꾸는 현상 |
+| chrome trace | Chrome trace event JSON | `ph`, `ts`, `dur`, `name` 레코드의 배열, Perfetto가 읽음 |
+| ITM / SWO | Instrumentation Trace Macrocell / Serial Wire Output | Cortex-M의 소프트웨어 이벤트·PC 샘플을 핀 하나로 내보내는 길 |
+| ETM / MTB | Embedded Trace Macrocell / Micro Trace Buffer | 명령 흐름 하드웨어 trace / M0+용 온칩 소용량 trace |
+| DWT | Data Watchpoint and Trace | CYCCNT, CPICNT, LSUCNT 등 카운터와 watchpoint를 가진 Cortex-M 블록 |
+| multiplexing | 카운터 시분할 | 이벤트가 카운터보다 많을 때 번갈아 세고 비율로 보정 |
+| flight recorder | 비행 기록기 모드 | 링을 덮어써서 마지막 N개 이벤트를 남기는 trace 방식 |
+
+---
+
+## 15. 요약 & 체크리스트
+
+프로파일러는 "수집 → 기호화 → 집계 → 시각화 → 해석"의 조합이고, 수집 방식에 따라 sampling(싸고 통계적, "어디서"), instrumentation(정확한 횟수, 대신 교란), tracing(시간 순서, "언제"), PMU(하드웨어 이유, "왜"), 시뮬레이션(칩 전)으로 갈린다. 직접 만든 도구로 확인한 것: sampling 1698개로 conv 52% / 복사 40% / 후처리 8%(±1.3%p)를 얻었고, inline 후 instrumentation이 같은 비율을 재현했지만 inline 전 instrumentation은 실행을 10배 느리게 하고 후처리를 90%로 부풀렸다. tail call은 스택을 거짓말하게 하고, 컴파일러는 벤치마크를 지울 수 있으며, 스레드가 많은 런타임(llama.cpp)에서는 대기 샘플을 걸러야 동기화 비용(일하는 샘플의 절반)이 보인다. ML에서는 op 단위 instrumentation(torch.profiler, ORT, QNN, MicroProfiler)이 기본 굵기이고, 모델 밖(전처리 44%, 프레임워크 빈틈 7%)을 먼저 분리한다. 기기에서는 GPIO·DWT·trace ring·ETM(Trace32)과 벤더 도구(QNN profiling, Snapdragon Profiler, Streamline, Ethos-U PMU)가 같은 질문의 다른 층을 맡는다.
+
+- [ ] 다섯 가지 프로파일링 방식을 "보이는 것 / 비용"으로 설명하고 상황별로 고를 수 있다
+- [ ] sampling 비율의 95% 구간을 √(p(1−p)/N)로 손으로 계산할 수 있다
+- [ ] `sample`(또는 `perf`) 출력을 folded stack으로 바꾸고 flame graph를 직접 그릴 수 있다
+- [ ] flame graph에서 inclusive·self·평원을 읽고, x축이 시간이 아님을 설명할 수 있다
+- [ ] tail call·inline·심볼 누락이 스택을 어떻게 왜곡하는지와 대처 빌드 옵션을 말할 수 있다
+- [ ] `-finstrument-functions` 프로파일러의 shadow stack으로 inclusive/exclusive를 계산할 수 있다
+- [ ] 훅 비용 ÷ 함수 비용으로 instrumentation 오버헤드를 추정할 수 있다
+- [ ] IPC·instructions를 읽어 연산형/메모리형을 가르고, Cortex-M DWT 카운터로 CPI를 구하는 식을 쓸 수 있다
+- [ ] lock-free trace ring과 디코더를 만들고, 이벤트율로 대역폭·링 지속 시간을 계산할 수 있다
+- [ ] torch.profiler chrome trace에서 전처리·op·프레임워크 overhead를 분리하고, Snapdragon NPU 프로파일링 절차를 말할 수 있다
+
+## 참고 자료
+
+- Brendan Gregg, "Flame Graphs" — https://www.brendangregg.com/flamegraphs.html (FlameGraph 저장소: https://github.com/brendangregg/FlameGraph)
+- Brendan Gregg, "Systems Performance", 2nd ed. (Addison-Wesley, 2020) — 프로파일링 방법론, perf, PMU
+- Linux `perf` wiki — https://perf.wiki.kernel.org/
+- Android simpleperf 문서 — https://developer.android.com/ndk/guides/simpleperf
+- Perfetto 문서 — https://perfetto.dev/docs/
+- PyTorch Profiler 문서 — https://pytorch.org/docs/stable/profiler.html
+- ONNX Runtime 프로파일링 — https://onnxruntime.ai/docs/performance/tune-performance/profiling-tools.html
+- Python `cProfile`/`profile` 문서 — https://docs.python.org/3/library/profile.html
+- GCC `-finstrument-functions` (Instrumentation Options) — https://gcc.gnu.org/onlinedocs/gcc/Instrumentation-Options.html
+- Arm, "ARMv7-M Architecture Reference Manual" — DWT·ITM·ETM 레지스터와 카운터 정의 (developer.arm.com)
+- SEGGER SystemView — https://www.segger.com/products/development-tools/systemview/
+- Lauterbach TRACE32 문서 — https://www.lauterbach.com/ (trace·profiling 매뉴얼)
+- Qualcomm AI Engine Direct(QNN) / AI Hub 문서 — https://aihub.qualcomm.com/ 및 Qualcomm 개발자 문서 (F4 참고 자료)
+- 이 저장소의 관련 노트: D6, E1 10절, I4, I5, I6 3절, J2 5절, F1·F2·F3·F4·F8

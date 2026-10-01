@@ -4,6 +4,8 @@
 > **JD 연결**: "Collaborate with the on-device AI team to support model inference within memory and latency budgets" · "the runtime environment that hosts on-device intelligence" · 우대 "Exposure to ML inference runtimes on embedded platforms"
 > **Don 기준 난이도**: SRAM 배치·DMA·링버퍼·cycle 측정은 이미 안다 / 양산 추론 런타임(TFLM), 양자화 수학, 오디오 특징 추출, NPU 오프로드는 새로 배운다
 
+> **⚠ 2026-09-23 JD 개정**: 이 항목은 현재 JD에서 삭제됨 — 우선순위 하향, 개념 수준으로만. Bonus의 "Exposure to ML inference runtimes on embedded platforms" 수준으로만 유지한다. [P02 분석](../plan/P02_jd_change_2026-09-23.html)
+
 ---
 
 ## 0. 큰 그림

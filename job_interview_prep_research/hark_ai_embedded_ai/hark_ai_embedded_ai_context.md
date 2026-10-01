@@ -1,10 +1,11 @@
 # Hark — Embedded AI Engineer · Context
 
-> **최종 갱신**: 2026-09-27 · **상태**: 🔍 조사중
+> **최종 갱신**: 2026-10-01 · **상태**: 🔍 조사중
 > **JD**: https://job-boards.greenhouse.io/hark/jobs/4392090009 · **위치**: San Jose, CA / onsite 추정 · **연봉 밴드**: $200,000 – $450,000 base (+ equity 가능)
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > **관련 포지션**: 같은 회사 [Embedded SWE, BSP](../hark_ai_embedded_swe/hark_ai_embedded_swe_context.md) (📞 리크루터 진행 중, 1순위) · 자리 비교는 [P03 임베디드 7자리 지도](../hark_ai_embedded_swe/2026-09-19_hark_study_notes/site/plan/P03_embedded_role_map.html)
-> **🧭 스터디 나침반**: [study_prep_list — 이 직군 공부 목록 (15모듈, 약 100개념)](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/study_prep_list.html) — 2026-09-28 `dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/`로 이동
+> **🧭 스터디 나침반**: [study_prep_list — 이 직군 공부 목록 (15모듈, 약 100개념)](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/site/compass/study_prep_list.html) — 2026-09-28 `dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/`로 이동
+> **📚 스터디 노트 사이트**: [노트 목록](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/site/index.html) — 진행: 모듈 A(A0–A6) · B(B1–B9) · C(C1–C8) · D(D1–D7) · E(E1–E9) · F(F1–F8) · G(G1–G7) · H(H1–H8) · I(I1–I6) · J(J1–J6) · K(K1–K5) 작성 완료, 다음 L
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
 
 <!-- 상태 값: 🔍 조사중 → 📨 지원완료 → 📞 리크루터 → 💻 폰스크린 → 🏢 온사이트 → 🎉 오퍼 | ❌ 불합격 | ⏸ 보류 -->
@@ -246,6 +247,17 @@
 | 2026-09-27 | 컨텍스트 파일 생성 (JD·회사 조사) | Greenhouse API로 JD 원문 확보(updated_at 2026-09-25 17:15 ET). 보드 공고 55개, TL On-Device AI Inference 공고 사라짐 확인 |
 | 2026-09-28 | 스터디 나침반 작성 | `study_notes/study_prep_list.md` — 모듈 A~O, JD→모듈 매핑, 프로젝트 PJ1~PJ8, 인터뷰 드릴. 빌드: `python3 study_notes/build_study_notes.py` |
 | 2026-09-28 | 스터디 노트 위치 이동 | `hark_ai_embedded_ai/study_notes/` → **`dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/`** (Don이 직접 이동). 상호 링크·빌드 스크립트 경로 수정. 빌드: `python3 dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/build_study_notes.py`. 모듈별 노트 작성(리서치)은 아직 시작 전 |
+| 2026-09-29 | **스터디 노트 모듈 A 완료** | A0 ML 입문 · A1 선형대수 · A2 확률·통계 · A3 최적화·역전파 · A4 학습 워크플로·평가 · A5 PyTorch · A6 numpy/pandas 센서 로그 — 7편 약 8,600줄, SVG 34개, 예제 약 100개(모두 `.venv`에서 실행·C는 경고 0 컴파일). 사이트 빌더 `build_site.py`(Hark BSP 빌더 기반 + SVG 차트) · 작성 규칙 `NOTES_SPEC.md` · `.venv`(numpy/pandas/matplotlib/torch/onnx). **다음: 모듈 B (모델 아키텍처)** |
+| 2026-09-30 | **스터디 노트 모듈 B 완료** | B1 MLP·활성화·정규화 · B2 CNN · B3 RNN/LSTM/GRU · B4 Transformer · B5 오디오·음성 · B6 비전 · B7 IMU·센서 모델 · B8 소형 LLM · B9 효율 아키텍처 — 9편 약 12,100줄, SVG 55개, 예제 약 120개(모두 실행 검증). venv에 torchvision/torchaudio/transformers/scikit-learn 추가, HF 캐시(~/.cache/huggingface) 약 865 MB — SmolLM2-135M-Instruct 실모델 + 여러 모델 config/tokenizer. **다음: 모듈 C (모델 경량화 — 양자화)** |
+| 2026-09-30 | **스터디 노트 모듈 C 완료** | C1 양자화 이론 · C2 PTQ/QAT · C3 LLM 양자화(실제 SmolLM2로 RTN/SmoothQuant/GPTQ/AWQ/KV 측정) · C4 pruning · C5 distillation · C6 그래프 최적화(ORT) · C7 HW-aware 설계(latency LUT·NAS) · C8 최적화 후 검증 — 8편 약 11,200줄, SVG 53개, 예제 약 130개. venv에 onnxruntime 추가. 누적 24편 약 32,000줄. **다음: 모듈 D (성능 모델)** |
+| 2026-09-30 | **스터디 노트 모듈 D 완료** | D1 FLOPs/MAC 공식·드릴 · D2 메모리(arena·flash/SRAM·스택) · D3 roofline(이 Mac 실측) · D4 모델 계열별 성능 · D5 LLM 추론 성능(해석 모델 vs SmolLM2 실측, prefix caching) · D6 latency/tail/real-time · D7 에너지 모델 — 7편 약 9,400줄, SVG 51개, 예제 약 100개. 누적 31편 약 41,400줄. **다음: 모듈 E (HW 아키텍처)** |
+| 2026-09-30 | **스터디 노트 모듈 E 완료** | E1 CPU 마이크로아키텍처 · E2 ARM Cortex-M/A + NEON/SDOT/i8mm/Helium · E3 RISC-V · E4 DSP(Xtensa HiFi·Hexagon) · E5 NPU(systolic 시뮬·tiling·bring-up) · E6 GPU(MPS 실측) · E7 메모리 시스템 · E8 이기종 SoC · E9 전력·열 HW — 9편 약 12,500줄, SVG 74개, 예제 약 100개. 누적 40편 약 53,900줄. **다음: 모듈 F (런타임·툴체인)** |
+| 2026-09-30 | **스터디 노트 모듈 F 완료** | F1 TFLite/LiteRT · F2 TFLite Micro(Mac 호스트 빌드, bit-exact) · F3 llama.cpp(3모델×6양자화 실측) · F4 Qualcomm QNN/AI Hub(QDQ 산출물, SDK 명령 미실행) · F5 ONNX/ORT · F6 Core ML(ANE 실측)·ExecuTorch·컴파일러 · F7 크로스 빌드·링커 스크립트 · F8 벤더 SDK bring-up — 8편 약 11,700줄, SVG 56개, 예제 약 120개. 로컬 도구: `.tools/llama.cpp`, `.tools/tflite-micro`, `.tools/models`(GGUF 5.2 GB), `.venv-tf`(TF 2.20). 누적 48편 약 65,500줄. **다음: 모듈 G (센서·신호처리)** |
+| 2026-09-30 | **스터디 노트 모듈 G 완료** | G1 IMU 원리(Allan deviation) · G2 IMU 드라이버(가상 FIMU-6, FIFO+watermark) · G3 보정·퓨전(quaternion, Mahony/Madgwick/ESKF) · G4 마이크(PDM, CIC, beamforming, AEC) · G5 DSP 기초(FIR/IIR/FFT/mel C 구현) · G6 기타 센서(ISP, PPG, 착용 감지) · G7 시간 동기화 — 7편 약 10,600줄, SVG 59개, 예제 약 105개. 누적 55편 약 76,100줄. **다음: 모듈 H (데이터 파이프라인)** |
+| 2026-09-30 | **스터디 노트 모듈 H 완료** | H1 온디바이스 로깅(포맷·전원 차단 복구·WA) · H2 전송(BLE 계산·재개형 업로드) · H3 백엔드 ingestion(로컬 큐→Parquet→SQLite) · H4 라벨링 · H5 데이터셋 관리 · H6 프라이버시·동의 · H7 품질 모니터링(PSI/KS/CUSUM) · H8 fleet 수집 — 8편 약 10,600줄, SVG 62개, 예제 약 100개. JD 1번 업무("data collection and ingestion pipelines ... at scale")를 직접 커버. venv에 pyarrow·cbor2 추가. 누적 63편 약 86,700줄. **다음: 모듈 I (HW/SW Co-design)** |
+| 2026-10-01 | **스터디 노트 모듈 I 완료** | 공통 사례(음성+제스처 웨어러블, 가정)로 I1 예산 설정 · I2 HW 친화 설계 규칙 + ONNX linter · I3 cascade 공동 최적화·분할점·클라우드 라우팅 · I4 전/후처리 배치 · I5 벤치마크(MLPerf, 자체 하네스) · I6 co-design 루프(v0→v4 실측) — 6편 약 8,500줄, SVG 51개, 예제 약 80개. JD 2번 업무("co-design model architectures that meet latency, memory, power, bandwidth")를 직접 커버. 누적 69편 약 95,200줄. **다음: 모듈 J (펌웨어 통합)** |
+| 2026-10-01 | **스터디 노트 모듈 J 완료** | J1 추론 통합 패턴(pthread 참조 파이프라인) · J2 실시간(RTA·WCET·chunking) · J3 int8 커널(TFLite 참조와 bit-exact) · J4 C++/Rust(Cortex-M4 no_std 빌드) · J5 모델 OTA(A/B·전원 차단 시뮬) · J6 테스트(단위·sanitizer·재생·HIL·공장) — 6편 약 10,500줄, SVG 51개, 예제 약 80개. JD 4번 업무("Integrate ML inference into embedded firmware written in C, C++, or Rust")를 직접 커버. Rust를 `.tools/`에 로컬 설치. 누적 75편 약 105,700줄. **다음: 모듈 K (프로파일링)** |
+| 2026-10-01 | **스터디 노트 모듈 K 완료** | K1 메모리 프로파일링(실제 링크·map/size-diff·스택 분석·CI 게이트) · K2 성능 프로파일링(sample·flame graph·계측·trace) · K3 전력 측정(계측기 효과 시뮬·회귀 리그) · K4 열·지속 성능(이 Mac 35분 실측) · K5 커널 최적화(루프 변환·레이아웃·Winograd·DMA) — 5편 약 7,400줄, SVG 38개, 예제 약 70개. JD 5번 업무("Profile and optimize memory usage, power consumption, and real-time performance")를 직접 커버. 이전 노트 SVG 3개(D7·H4·K4)의 잘린 viewBox도 수정. 누적 80편 약 113,100줄. **다음: 모듈 L (온디바이스 LLM)** |
 
 ---
 

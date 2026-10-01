@@ -1,0 +1,1303 @@
+# B4. Attention과 Transformer — Q·K·V부터 GQA·RoPE·KV-cache 맛보기까지
+
+> **이 노트를 다 읽으면**: 3토큰 self-attention을 손으로 계산하고 `F.scaled_dot_product_attention`과 맞출 수 있다 · multi-head attention의 shape를 단계마다 말하고 파라미터 수(4·d²)를 셀 수 있다 · MHA/MQA/GQA와 KV-cache 크기 공식(2 × layers × kv_heads × head_dim × seq × bytes)으로 실제 모델의 메모리를 계산할 수 있다 · RoPE·causal mask·pre-norm 블록·KV-cache가 왜 필요한지와 attention이 NPU에서 어려운 이유를 설명할 수 있다
+> **JD 연결**: "(Preferred) Experience with CNN, RNN, transformers, KV-cache behavior, memory bandwidth", "Lightweight LLM models", "Audio/Voice/Vision models" · study_prep_list **B4** 행 — Q·K·V, scaled dot-product, softmax, multi-head, **MHA vs MQA vs GQA**, positional encoding, **RoPE**, FFN, SwiGLU, residual, pre-norm, encoder vs decoder-only, causal mask (그리고 **D5** KV-cache 미리보기)
+> **Don 기준 난이도**: 행렬곱·내적·softmax(A1, A2)와 캐시·메모리 대역폭·링버퍼 감각은 이미 있다 / 새로 배울 것은 "토큰끼리 정보를 섞는 연산"이라는 관점, head 쪼개기의 shape 계산, 위치 정보를 넣는 방법, 그리고 LLM 추론이 왜 메모리 대역폭 문제로 바뀌는지
+> **선행 노트**: A1, A2, A3, B1
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+오늘날 edge에서 도는 "큰" 모델은 거의 다 transformer다. 소형 LLM(Llama 3.2 1B, Qwen 0.5B), 음성 인식(Whisper, Conformer), 이미지 인코더(ViT, CLIP)가 모두 같은 블록을 쌓아 만든다. 그 블록의 심장이 **attention**이다. 예를 들어 Hark 같은 웨어러블이 "기기에서 음성 → 텍스트 → 짧은 답변"을 한다면, 그 경로의 대부분이 이 노트의 연산이다(추정 예시).
+
+### 지금까지의 모델은 "어디를 볼지"가 고정되어 있었다
+
+- **Dense/MLP (B1)**: 입력 벡터 하나를 통째로 변환한다. 시퀀스라는 개념이 없다.
+- **CNN (B2)**: 출력 하나는 **고정된 크기의 창**(kernel 3, 5, …) 안의 입력만 본다. 멀리 있는 정보는 층을 많이 쌓아야 닿는다. 창 안에서 각 위치의 가중치도 입력과 상관없이 **학습 후 고정**이다.
+- **RNN (B3)**: 과거 전체를 **고정 크기 hidden state 하나**에 압축해서 들고 간다. 100 프레임 전 정보는 그 압축을 100번 통과해야 한다.
+
+**attention은 다르다**: 모든 출력 위치가 **모든 입력 위치를 직접** 볼 수 있고, 각 입력을 얼마나 볼지(가중치)가 **입력 내용에 따라 매번 새로 계산**된다. "timer"라는 단어를 처리할 때 문장 앞쪽의 "set"을 크게 보고 "hey"는 작게 보는 식이다.
+
+```
+                   입력 위치 j →
+                   x1   x2   x3   x4   x5
+  conv (k=3)  y3:  ·    w    w    w    ·        ← 고정 창, 고정 가중치
+  RNN         y5:  h1 → h2 → h3 → h4 → h5       ← 과거는 h 하나에 압축
+  attention   y3:  p31  p32  p33  p34  p35      ← 모든 j, 가중치 p는 입력에 따라 매번 계산
+```
+
+### 비유: 부드러운(soft) CAM
+
+Don은 하드웨어 **CAM(content-addressable memory)**을 안다. 주소가 아니라 **내용(tag)**으로 찾는 메모리다. key를 넣으면 모든 엔트리의 tag와 병렬 비교해서 **일치하는 한 줄**의 data를 돌려준다.
+
+attention은 이 CAM을 **연속적·미분 가능**하게 만든 것이다.
+
+- 질의(**query**, q)를 모든 엔트리의 **key**(k)와 비교한다. 비교 방법은 "일치/불일치" 대신 **내적 q·k**(얼마나 비슷한가, A1 2절).
+- 비교 점수를 softmax(A2 6절)로 **합이 1인 가중치**로 바꾼다. CAM의 hit = 1, miss = 0이 0.40, 0.20, 0.40 같은 연속값이 된 것이다.
+- 출력은 모든 엔트리의 **value**(v)를 그 가중치로 섞은 **가중 평균**이다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 270">
+<text x="170.0" y="24.0" font-size="13" text-anchor="middle">하드웨어 CAM: 정확히 일치하는 한 줄만</text> <text x="500.0" y="24.0" font-size="13" text-anchor="middle">attention: 모든 줄을 유사도만큼 섞는다</text> <rect x="20.0" y="60.0" width="80.0" height="34.0" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/> <text x="60.0" y="82.0" font-size="12" text-anchor="middle">key 0x2B</text> <rect x="140.0" y="50.0" width="90.0" height="34.0" fill="none" stroke="currentColor"/> <text x="185.0" y="72.0" font-size="12" text-anchor="middle">tag 0x1A</text> <rect x="240.0" y="50.0" width="70.0" height="34.0" fill="none" stroke="currentColor"/> <text x="275.0" y="72.0" font-size="12" text-anchor="middle">data0</text> <line x1="100.0" y1="77.0" x2="140.0" y2="67.0" stroke="#888" stroke-dasharray="4 3"/> <text x="125.0" y="62.0" font-size="12" text-anchor="middle">miss</text>
+<rect x="140.0" y="100.0" width="90.0" height="34.0" fill="none" stroke="currentColor"/> <text x="185.0" y="122.0" font-size="12" text-anchor="middle">tag 0x2B</text> <rect x="240.0" y="100.0" width="70.0" height="34.0" fill="none" stroke="currentColor"/> <text x="275.0" y="122.0" font-size="12" text-anchor="middle">data1</text> <line x1="100.0" y1="77.0" x2="140.0" y2="117.0" stroke="#3f9a6b" stroke-width="2"/> <text x="120.0" y="114.0" font-size="12" text-anchor="middle">hit</text> <rect x="140.0" y="150.0" width="90.0" height="34.0" fill="none" stroke="currentColor"/> <text x="185.0" y="172.0" font-size="12" text-anchor="middle">tag 0x3C</text> <rect x="240.0" y="150.0" width="70.0" height="34.0" fill="none" stroke="currentColor"/> <text x="275.0" y="172.0" font-size="12" text-anchor="middle">data2</text>
+<line x1="100.0" y1="77.0" x2="140.0" y2="167.0" stroke="#888" stroke-dasharray="4 3"/> <text x="125.0" y="195.0" font-size="12" text-anchor="middle">miss</text> <line x1="310.0" y1="117.0" x2="330.0" y2="117.0" stroke="currentColor"/> <text x="275.0" y="225.0" font-size="12" text-anchor="middle">출력 = data1 (0 또는 1의 가중치)</text> <rect x="390.0" y="60.0" width="64.0" height="34.0" fill="#e08a3c" fill-opacity="0.25" stroke="#e08a3c"/> <text x="422.0" y="82.0" font-size="12" text-anchor="middle">q=[1,0]</text> <line x1="454.0" y1="77.0" x2="500.0" y2="67.0" stroke="#e08a3c" stroke-width="3.4"/> <rect x="500.0" y="50.0" width="72.0" height="34.0" fill="none" stroke="currentColor"/> <text x="536.0" y="72.0" font-size="12" text-anchor="middle">k1=[1,0]</text> <text x="596.0" y="65.0" font-size="12" text-anchor="middle">w=0.40</text>
+<rect x="578.0" y="68.0" width="40.0" height="8.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/> <rect x="626.0" y="50.0" width="72.0" height="34.0" fill="none" stroke="currentColor"/> <text x="662.0" y="72.0" font-size="12" text-anchor="middle">v1=[1,0]</text> <line x1="454.0" y1="77.0" x2="500.0" y2="117.0" stroke="#e08a3c" stroke-width="2.2"/> <rect x="500.0" y="100.0" width="72.0" height="34.0" fill="none" stroke="currentColor"/> <text x="536.0" y="122.0" font-size="12" text-anchor="middle">k2=[0,1]</text> <text x="596.0" y="115.0" font-size="12" text-anchor="middle">w=0.20</text> <rect x="578.0" y="118.0" width="19.8" height="8.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/> <rect x="626.0" y="100.0" width="72.0" height="34.0" fill="none" stroke="currentColor"/> <text x="662.0" y="122.0" font-size="12" text-anchor="middle">v2=[0,2]</text>
+<line x1="454.0" y1="77.0" x2="500.0" y2="167.0" stroke="#e08a3c" stroke-width="3.4"/> <rect x="500.0" y="150.0" width="72.0" height="34.0" fill="none" stroke="currentColor"/> <text x="536.0" y="172.0" font-size="12" text-anchor="middle">k3=[1,1]</text> <text x="596.0" y="165.0" font-size="12" text-anchor="middle">w=0.40</text> <rect x="578.0" y="168.0" width="40.0" height="8.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/> <rect x="626.0" y="150.0" width="72.0" height="34.0" fill="none" stroke="currentColor"/> <text x="662.0" y="172.0" font-size="12" text-anchor="middle">v3=[3,3]</text> <text x="560.0" y="225.0" font-size="12" text-anchor="middle">출력 = 0.40·v1 + 0.20·v2 + 0.40·v3 = [1.60, 1.60]</text> <text x="360.0" y="255.0" font-size="12" text-anchor="middle">CAM은 비교 결과가 hit/miss(0/1), attention은 softmax(q·k/√d) 연속 가중치 → 미분 가능</text>
+</svg>
+```
+
+그림 1 — 왼쪽: 하드웨어 CAM은 tag가 정확히 같은 한 줄만 읽는다. 오른쪽: attention은 query와 모든 key의 유사도로 가중치를 만들고 value를 섞는다. 숫자는 1.3절 손계산 예제의 실제 값이다. 가중치가 연속값이라 gradient가 흐르고, 그래서 "무엇을 찾을지(query)"와 "무엇으로 찾힐지(key)"를 **학습**할 수 있다.
+
+---
+
+## 1. Scaled dot-product attention — 한 head를 끝까지
+
+### 1.1 직관: 도서관 검색
+
+도서관에서 책을 찾는다고 하자. 내 **질문**(query)을 각 책의 **색인 카드**(key)와 비교해서 얼마나 관련 있는지 점수를 매긴다. 그리고 관련도에 비례해서 각 책의 **내용**(value)을 조금씩 읽어 섞은 것이 내 답이다. key와 value를 나눈 이유는 "찾히는 기준"과 "꺼내 오는 내용"이 달라도 되기 때문이다.
+
+self-attention에서는 query, key, value가 **모두 같은 입력 시퀀스에서** 나온다. 각 토큰이 "나는 무엇을 찾나(q)", "나는 무엇으로 찾히나(k)", "찾히면 무엇을 건네나(v)" 세 가지 얼굴을 갖는 셈이다.
+
+### 1.2 정의
+
+입력 `X`는 토큰 T개, 각 토큰이 d_model차원 벡터인 `[T, d_model]` 행렬이다. 학습되는 가중치 세 개로 투영한다(각각 dense layer 하나, B1).
+
+```
+Q = X · W_Q     [T, d_model] × [d_model, d_k] → [T, d_k]
+K = X · W_K     [T, d_model] × [d_model, d_k] → [T, d_k]
+V = X · W_V     [T, d_model] × [d_model, d_v] → [T, d_v]
+
+S = Q · Kᵀ / √d_k            [T, d_k] × [d_k, T] → [T, T]   (점수)
+P = softmax(S, 행 방향)        [T, T]                          (가중치, 각 행 합 = 1)
+O = P · V                     [T, T] × [T, d_v] → [T, d_v]   (출력)
+
+Attention(Q, K, V) = softmax(Q·Kᵀ / √d_k) · V
+```
+
+말로 하면: 모든 query와 모든 key의 내적을 한 번에 계산해서 T×T 점수표를 만들고, 행마다 softmax를 해서 "query i가 key j를 얼마나 볼지"의 확률표 P로 바꾼 다음, 그 확률로 value 행들을 섞는다. 출력 i번째 행은 `O_i = ∑_j P_ij · V_j`다.
+
+A1에서 본 것처럼 이 식은 **GEMM 두 개**(`Q·Kᵀ`, `P·V`)와 그 사이의 **softmax 하나**다. 파라미터는 W_Q, W_K, W_V뿐이고, P는 파라미터가 아니라 **입력마다 계산되는 값**이다. 이것이 conv 가중치와의 결정적 차이다.
+
+### 1.3 손으로 계산: 토큰 3개, d = 2
+
+계산을 쉽게 하려고 투영은 이미 끝났다고 치고 Q, K, V를 바로 준다.
+
+```
+      Q          K          V
+t1  [1, 0]    [1, 0]    [1, 0]
+t2  [0, 1]    [0, 1]    [0, 2]
+t3  [1, 1]    [1, 1]    [3, 3]
+```
+
+**1단계 — 점수 Q·Kᵀ**. (i, j) 칸은 q_i · k_j다.
+
+```
+          k1  k2  k3
+q1  [  1,  0,  1 ]      q1·k3 = 1·1 + 0·1 = 1
+q2  [  0,  1,  1 ]
+q3  [  1,  1,  2 ]      q3·k3 = 1·1 + 1·1 = 2
+```
+
+**2단계 — √d_k = √2 ≈ 1.4142로 나눈다**.
+
+```
+q1  [0.7071, 0,      0.7071]
+q2  [0,      0.7071, 0.7071]
+q3  [0.7071, 0.7071, 1.4142]
+```
+
+**3단계 — 행마다 softmax** (A2 6.3절처럼 max를 빼도 결과는 같다).
+
+```
+q1: e^0.7071 = 2.0281, e^0 = 1
+    합 = 2.0281 + 1 + 2.0281 = 5.0562
+    P1 = [2.0281, 1, 2.0281] / 5.0562 = [0.4011, 0.1978, 0.4011]
+
+q3: max 1.4142를 빼면 [−0.7071, −0.7071, 0] → e^ = [0.4931, 0.4931, 1]
+    합 = 1.9862 → P3 = [0.2483, 0.2483, 0.5035]
+```
+
+q2는 q1과 대칭이라 `[0.1978, 0.4011, 0.4011]`이다.
+
+**4단계 — 가중합 P·V**.
+
+```
+O1 = 0.4011·[1,0] + 0.1978·[0,2] + 0.4011·[3,3]
+   = [0.4011 + 0 + 1.2033,  0 + 0.3956 + 1.2033]
+   = [1.6044, 1.5989]
+```
+
+말로 하면: q1 = [1, 0]은 x축 방향을 "찾는" query다. k1 = [1, 0]과 k3 = [1, 1]은 x성분이 있어 점수가 같고(0.7071), k2 = [0, 1]은 0점이다. 그래서 t1과 t3의 value를 40%씩, t2는 20%만 섞었다. 점수가 0인 k2도 **0이 아닌 20%**를 받는다는 점에 주의하자. softmax는 절대 정확히 0을 만들지 않는다(mask가 필요한 이유, 3절).
+
+### 1.4 코드로 확인 — numpy와 `F.scaled_dot_product_attention`
+
+손계산을 numpy로 그대로 옮기고, PyTorch의 fused 함수와 비교한다. PyTorch 함수는 `[batch, heads, T, d]` 4차원 텐서를 받으므로 앞에 차원 두 개를 붙인다.
+
+```python
+import numpy as np, torch, torch.nn.functional as F
+np.set_printoptions(precision=4, suppress=True)
+Q = np.array([[1., 0.], [0., 1.], [1., 1.]])   # 3 tokens, d_k = 2
+K = np.array([[1., 0.], [0., 1.], [1., 1.]])
+V = np.array([[1., 0.], [0., 2.], [3., 3.]])
+
+S = Q @ K.T / np.sqrt(2)                       # [3,3] scores
+S = S - S.max(axis=1, keepdims=True)           # stable softmax (A2)
+P = np.exp(S) / np.exp(S).sum(axis=1, keepdims=True)
+O = P @ V                                      # [3,2] outputs
+print("P (attention weights):\n", P)
+print("row sums:", P.sum(axis=1))
+print("O = P @ V:\n", O)
+
+t = lambda a: torch.tensor(a, dtype=torch.float32)[None, None]  # [B=1,h=1,T,d]
+O_t = F.scaled_dot_product_attention(t(Q), t(K), t(V))
+print("SDPA:\n", O_t[0, 0].numpy())
+print("max |numpy - SDPA| =", np.abs(O - O_t[0, 0].numpy()).max())
+```
+
+```text
+P (attention weights):
+ [[0.4011 0.1978 0.4011]
+ [0.1978 0.4011 0.4011]
+ [0.2483 0.2483 0.5035]]
+row sums: [1. 1. 1.]
+O = P @ V:
+ [[1.6044 1.5989]
+ [1.4011 2.0056]
+ [1.7587 2.007 ]]
+SDPA:
+ [[1.6044 1.5989]
+ [1.4011 2.0056]
+ [1.7587 2.007 ]]
+max |numpy - SDPA| = 1.06149865120031e-07
+```
+
+출력에서 볼 것: P의 각 행 합이 정확히 1이고, 손계산 값(0.4011, 0.1978, 0.2483, 0.5035)과 O의 첫 행 [1.6044, 1.5989]가 그대로 나온다. `F.scaled_dot_product_attention`(줄여서 **SDPA**)은 같은 식을 한 번에 계산하는 PyTorch 2.x 함수이고, 차이는 float32 반올림 수준(1e-7)이다. SDPA는 기본으로 `1/√d`를 곱해 준다(`scale=` 인자로 바꿀 수 있다).
+
+### 1.5 attention 가중치를 그림으로
+
+attention 가중치 P를 히트맵으로 그리면 "누가 누구를 보는지"가 한눈에 보인다. 모델 디버깅과 논문에서 가장 흔한 시각화다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 400">
+<text x="163.0" y="44.0" font-size="13" text-anchor="middle">손계산 예제 (3 토큰, 양방향)</text> <text x="101.0" y="62.0" font-size="12" text-anchor="middle">k1</text> <text x="163.0" y="62.0" font-size="12" text-anchor="middle">k2</text> <text x="225.0" y="62.0" font-size="12" text-anchor="middle">k3</text> <text x="62.0" y="105.0" font-size="12" text-anchor="end">q1</text> <rect x="70.0" y="70.0" width="62.0" height="62.0" fill="#4a7bd0" fill-opacity="0.401" stroke="currentColor"/> <text x="101.0" y="105.0" font-size="12" text-anchor="middle">0.40</text> <rect x="132.0" y="70.0" width="62.0" height="62.0" fill="#4a7bd0" fill-opacity="0.238" stroke="currentColor"/> <text x="163.0" y="105.0" font-size="12" text-anchor="middle">0.20</text> <rect x="194.0" y="70.0" width="62.0" height="62.0" fill="#4a7bd0" fill-opacity="0.401" stroke="currentColor"/>
+<text x="225.0" y="105.0" font-size="12" text-anchor="middle">0.40</text> <text x="62.0" y="167.0" font-size="12" text-anchor="end">q2</text> <rect x="70.0" y="132.0" width="62.0" height="62.0" fill="#4a7bd0" fill-opacity="0.238" stroke="currentColor"/> <text x="101.0" y="167.0" font-size="12" text-anchor="middle">0.20</text> <rect x="132.0" y="132.0" width="62.0" height="62.0" fill="#4a7bd0" fill-opacity="0.401" stroke="currentColor"/> <text x="163.0" y="167.0" font-size="12" text-anchor="middle">0.40</text> <rect x="194.0" y="132.0" width="62.0" height="62.0" fill="#4a7bd0" fill-opacity="0.401" stroke="currentColor"/> <text x="225.0" y="167.0" font-size="12" text-anchor="middle">0.40</text> <text x="62.0" y="229.0" font-size="12" text-anchor="end">q3</text> <rect x="70.0" y="194.0" width="62.0" height="62.0" fill="#4a7bd0" fill-opacity="0.279" stroke="currentColor"/>
+<text x="101.0" y="229.0" font-size="12" text-anchor="middle">0.25</text> <rect x="132.0" y="194.0" width="62.0" height="62.0" fill="#4a7bd0" fill-opacity="0.279" stroke="currentColor"/> <text x="163.0" y="229.0" font-size="12" text-anchor="middle">0.25</text> <rect x="194.0" y="194.0" width="62.0" height="62.0" fill="#4a7bd0" fill-opacity="0.483" stroke="currentColor"/> <text x="225.0" y="229.0" font-size="12" text-anchor="middle">0.50</text> <text x="500.0" y="44.0" font-size="13" text-anchor="middle">causal (5 토큰, 난수 Q·K)</text> <text x="388.0" y="62.0" font-size="12" text-anchor="middle">k1</text> <text x="444.0" y="62.0" font-size="12" text-anchor="middle">k2</text> <text x="500.0" y="62.0" font-size="12" text-anchor="middle">k3</text> <text x="556.0" y="62.0" font-size="12" text-anchor="middle">k4</text> <text x="612.0" y="62.0" font-size="12" text-anchor="middle">k5</text>
+<text x="352.0" y="102.0" font-size="12" text-anchor="end">q1</text> <rect x="360.0" y="70.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.88" stroke="currentColor"/> <text x="388.0" y="102.0" font-size="12" text-anchor="middle">1.00</text> <rect x="416.0" y="70.0" width="56.0" height="56.0" fill="none" stroke="#888" stroke-dasharray="3 3"/> <text x="444.0" y="102.0" font-size="12" text-anchor="middle">0</text> <rect x="472.0" y="70.0" width="56.0" height="56.0" fill="none" stroke="#888" stroke-dasharray="3 3"/> <text x="500.0" y="102.0" font-size="12" text-anchor="middle">0</text> <rect x="528.0" y="70.0" width="56.0" height="56.0" fill="none" stroke="#888" stroke-dasharray="3 3"/> <text x="556.0" y="102.0" font-size="12" text-anchor="middle">0</text> <rect x="584.0" y="70.0" width="56.0" height="56.0" fill="none" stroke="#888" stroke-dasharray="3 3"/>
+<text x="612.0" y="102.0" font-size="12" text-anchor="middle">0</text> <text x="352.0" y="158.0" font-size="12" text-anchor="end">q2</text> <rect x="360.0" y="126.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.549" stroke="currentColor"/> <text x="388.0" y="158.0" font-size="12" text-anchor="middle">0.59</text> <rect x="416.0" y="126.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.411" stroke="currentColor"/> <text x="444.0" y="158.0" font-size="12" text-anchor="middle">0.41</text> <rect x="472.0" y="126.0" width="56.0" height="56.0" fill="none" stroke="#888" stroke-dasharray="3 3"/> <text x="500.0" y="158.0" font-size="12" text-anchor="middle">0</text> <rect x="528.0" y="126.0" width="56.0" height="56.0" fill="none" stroke="#888" stroke-dasharray="3 3"/> <text x="556.0" y="158.0" font-size="12" text-anchor="middle">0</text>
+<rect x="584.0" y="126.0" width="56.0" height="56.0" fill="none" stroke="#888" stroke-dasharray="3 3"/> <text x="612.0" y="158.0" font-size="12" text-anchor="middle">0</text> <text x="352.0" y="214.0" font-size="12" text-anchor="end">q3</text> <rect x="360.0" y="182.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.462" stroke="currentColor"/> <text x="388.0" y="214.0" font-size="12" text-anchor="middle">0.48</text> <rect x="416.0" y="182.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.218" stroke="currentColor"/> <text x="444.0" y="214.0" font-size="12" text-anchor="middle">0.17</text> <rect x="472.0" y="182.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.36" stroke="currentColor"/> <text x="500.0" y="214.0" font-size="12" text-anchor="middle">0.35</text>
+<rect x="528.0" y="182.0" width="56.0" height="56.0" fill="none" stroke="#888" stroke-dasharray="3 3"/> <text x="556.0" y="214.0" font-size="12" text-anchor="middle">0</text> <rect x="584.0" y="182.0" width="56.0" height="56.0" fill="none" stroke="#888" stroke-dasharray="3 3"/> <text x="612.0" y="214.0" font-size="12" text-anchor="middle">0</text> <text x="352.0" y="270.0" font-size="12" text-anchor="end">q4</text> <rect x="360.0" y="238.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.198" stroke="currentColor"/> <text x="388.0" y="270.0" font-size="12" text-anchor="middle">0.15</text> <rect x="416.0" y="238.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.134" stroke="currentColor"/> <text x="444.0" y="270.0" font-size="12" text-anchor="middle">0.07</text>
+<rect x="472.0" y="238.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.669" stroke="currentColor"/> <text x="500.0" y="270.0" font-size="12" text-anchor="middle">0.74</text> <rect x="528.0" y="238.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.118" stroke="currentColor"/> <text x="556.0" y="270.0" font-size="12" text-anchor="middle">0.05</text> <rect x="584.0" y="238.0" width="56.0" height="56.0" fill="none" stroke="#888" stroke-dasharray="3 3"/> <text x="612.0" y="270.0" font-size="12" text-anchor="middle">0</text> <text x="352.0" y="326.0" font-size="12" text-anchor="end">q5</text> <rect x="360.0" y="294.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.283" stroke="currentColor"/> <text x="388.0" y="326.0" font-size="12" text-anchor="middle">0.25</text>
+<rect x="416.0" y="294.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.117" stroke="currentColor"/> <text x="444.0" y="326.0" font-size="12" text-anchor="middle">0.05</text> <rect x="472.0" y="294.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.538" stroke="currentColor"/> <text x="500.0" y="326.0" font-size="12" text-anchor="middle">0.57</text> <rect x="528.0" y="294.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.125" stroke="currentColor"/> <text x="556.0" y="326.0" font-size="12" text-anchor="middle">0.06</text> <rect x="584.0" y="294.0" width="56.0" height="56.0" fill="#4a7bd0" fill-opacity="0.138" stroke="currentColor"/> <text x="612.0" y="326.0" font-size="12" text-anchor="middle">0.07</text> <text x="360.0" y="390.0" font-size="12" text-anchor="middle">행 = query(출력 위치), 열 = key(참조 위치). 색이 진할수록 가중치가 크다. 각 행의 합 = 1</text>
+</svg>
+```
+
+그림 2 — 왼쪽: 1.3절 손계산 예제의 실제 P. 오른쪽: 3절 예제(난수 Q, K, T = 5)의 causal P를 실제로 계산한 값. 대각선 위쪽이 0인 이유는 3절에서 설명한다. 첫 번째 토큰(q1)은 볼 수 있는 key가 자기 자신뿐이라 가중치가 1.00이다.
+
+### 1.6 C로 한 head 계산하기 — 그리고 "online softmax"
+
+펌웨어 관점에서 한 query 행의 attention은 **루프 세 개**다: 점수 계산(내적) → softmax → value 가중합. 아래 C 코드는 같은 예제를 두 방식으로 계산한다.
+
+- `attn_row_3pass`: 점수를 버퍼 `s[T]`에 저장하고 max → exp·sum → 가중합 세 번 훑는다. A2의 안정 softmax 그대로다.
+- `attn_row_online`: key를 **한 번만** 훑으면서 "지금까지의 max `m`, 분모 `l`, 누적 출력 `acc`"를 들고 간다. 새 점수가 max를 갱신하면 이전 누적값에 `e^(m_old − m_new)`를 곱해 기준을 맞춘다. 점수 버퍼가 필요 없다. 이것이 10절 FlashAttention의 핵심 트릭이다.
+
+```c
+#include <math.h>
+#include <stdio.h>
+#define T 3
+#define D 2
+static const float Q[T][D] = {{1, 0}, {0, 1}, {1, 1}};
+static const float K[T][D] = {{1, 0}, {0, 1}, {1, 1}};
+static const float V[T][D] = {{1, 0}, {0, 2}, {3, 3}};
+
+/* 기준: scores 버퍼 s[T]를 쓰는 3-pass (max → exp·sum → 가중합) */
+static void attn_row_3pass(int i, float out[D]) {
+    float s[T], m = -INFINITY, sum = 0.0f, scale = 1.0f / sqrtf((float)D);
+    for (int j = 0; j < T; j++) {
+        s[j] = 0.0f;
+        for (int c = 0; c < D; c++) s[j] += Q[i][c] * K[j][c];
+        s[j] *= scale;
+        if (s[j] > m) m = s[j];
+    }
+    for (int j = 0; j < T; j++) { s[j] = expf(s[j] - m); sum += s[j]; }
+    for (int c = 0; c < D; c++) {
+        out[c] = 0.0f;
+        for (int j = 0; j < T; j++) out[c] += s[j] * V[j][c];
+        out[c] /= sum;
+    }
+}
+
+/* online softmax: key를 한 번만 훑고 score 버퍼 없음 (FlashAttention의 핵심 아이디어) */
+static void attn_row_online(int i, float out[D]) {
+    float m = -INFINITY, l = 0.0f, acc[D] = {0}, scale = 1.0f / sqrtf((float)D);
+    for (int j = 0; j < T; j++) {
+        float s = 0.0f;
+        for (int c = 0; c < D; c++) s += Q[i][c] * K[j][c];
+        s *= scale;
+        float m_new = s > m ? s : m;
+        float corr = expf(m - m_new);        /* 이전 누적값을 새 max 기준으로 보정 */
+        float p = expf(s - m_new);
+        l = l * corr + p;
+        for (int c = 0; c < D; c++) acc[c] = acc[c] * corr + p * V[j][c];
+        m = m_new;
+    }
+    for (int c = 0; c < D; c++) out[c] = acc[c] / l;
+}
+
+int main(void) {
+    for (int i = 0; i < T; i++) {
+        float a[D], b[D];
+        attn_row_3pass(i, a);
+        attn_row_online(i, b);
+        printf("row %d  3-pass: %.4f %.4f   online: %.4f %.4f\n", i, a[0], a[1], b[0], b[1]);
+    }
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 attn_head.c -o attn_head -lm && ./attn_head
+```
+
+```text
+row 0  3-pass: 1.6044 1.5989   online: 1.6044 1.5989
+row 1  3-pass: 1.4011 2.0056   online: 1.4011 2.0056
+row 2  3-pass: 1.7587 2.0070   online: 1.7587 2.0070
+```
+
+출력에서 볼 것: 경고 0개로 컴파일되고, 두 방식 모두 numpy·PyTorch와 같은 [1.6044, 1.5989]를 낸다. online 버전은 **T×T 점수 행렬도, 길이 T 버퍼도 없이** 같은 답을 낸다. T가 4096이면 점수 행 하나만 16 KB(float32)인데, 이 버퍼를 없애는 것이 SRAM이 작은 기기에서 중요하다.
+
+Don 경험과 연결: 3-pass 방식은 "DMA로 전체를 받아 놓고 처리", online 방식은 "링버퍼로 들어오는 대로 처리하면서 running 통계를 갱신"하는 스트리밍 처리와 같다. 펌웨어의 running max·running average 갱신과 같은 발상이다.
+
+### 1.7 함정
+
+- **Q·Kᵀ의 transpose 방향**: `Q @ K`가 아니라 `Q @ K.T`다. d_k = T인 장난감 예제에서는 shape가 우연히 맞아 틀린 값이 조용히 나온다. 테스트는 T ≠ d로 한다.
+- **softmax 축**: key 축(마지막 축, 행 방향)이다. 열 방향으로 하면 "각 key가 query들에 나눠 주는 양"이 되어 의미가 다르다. 검증법: `P.sum(-1)`이 전부 1인지 본다.
+- **P는 파라미터가 아니다**: 가중치 파일에는 W_Q, W_K, W_V, W_O만 있다. P는 매 추론마다 새로 계산되는 **activation**이다. 그래서 메모리 계획에서 P는 activation 버퍼로 잡아야 한다.
+
+---
+
+## 2. 왜 √d_k로 나누나
+
+### 2.1 분산 논증
+
+q와 k의 각 성분이 서로 독립이고 평균 0, 분산 1이라고 하자(초기화와 정규화 덕분에 대략 이렇다, A3·B1). 그러면
+
+```
+q·k = q_1·k_1 + q_2·k_2 + … + q_d·k_d
+
+각 항 q_i·k_i : 평균 0, 분산 E[q_i²]·E[k_i²] = 1·1 = 1
+독립 항 d개의 합 : 평균 0, 분산 d      (A2: 독립 변수 합의 분산 = 분산의 합)
+→ q·k 의 표준편차 = √d
+→ q·k / √d 의 분산 = d / d = 1
+```
+
+말로 하면: 내적은 d개 항의 합이라 차원이 커질수록 값의 폭이 √d배로 커진다. √d로 나누면 d와 상관없이 점수의 표준편차가 1 근처로 고정된다.
+
+### 2.2 왜 점수 폭이 크면 안 되나 — softmax 포화
+
+softmax에 폭이 큰 점수가 들어가면 가장 큰 값 하나가 거의 1을 가져가고 나머지는 0이 된다(A2 10절의 temperature가 아주 낮은 상태). 그 상태에서는
+
+- 사실상 **argmax 하나만 보는 hard lookup**이 되어 "섞는" 능력을 잃는다.
+- softmax의 gradient `∂p_i/∂s_j = p_i(δ_ij − p_j)`가 p가 0 또는 1 근처에서 거의 0이 된다. 학습이 멈춘다(A3의 vanishing gradient와 같은 증상).
+
+### 2.3 코드로 확인
+
+d = 4, 64, 512에서 난수 q, k 내적 1만 개의 분산을 재고, d = 512일 때 key 8개에 대한 softmax를 나누기 전후로 비교한다.
+
+```python
+import numpy as np
+rng = np.random.default_rng(0)
+np.set_printoptions(precision=3, suppress=True)
+T = 8                                            # 8 keys
+for d in [4, 64, 512]:
+    q = rng.standard_normal((10000, d))          # 성분 ~ N(0,1)
+    k = rng.standard_normal((10000, d))
+    dots = (q * k).sum(axis=1)                   # q·k 10000개
+    print(f"d={d:3d}  var(q·k)={dots.var():7.1f}  var(q·k/√d)={(dots/np.sqrt(d)).var():.3f}")
+
+def softmax(s):
+    e = np.exp(s - s.max()); return e / e.sum()
+d = 512
+q = rng.standard_normal(d); K = rng.standard_normal((T, d))
+raw = K @ q
+print("raw scores   :", raw)
+print("softmax(raw) :", softmax(raw))
+print("softmax(/√d) :", softmax(raw / np.sqrt(d)))
+```
+
+```text
+d=  4  var(q·k)=    4.0  var(q·k/√d)=0.999
+d= 64  var(q·k)=   65.3  var(q·k/√d)=1.020
+d=512  var(q·k)=  509.7  var(q·k/√d)=0.995
+raw scores   : [-21.503   5.514 -13.963 -24.575 -43.737  43.86   17.613  43.922]
+softmax(raw) : [0.    0.    0.    0.    0.    0.485 0.    0.515]
+softmax(/√d) : [0.021 0.068 0.029 0.018 0.008 0.37  0.116 0.371]
+```
+
+출력에서 볼 것: var(q·k)는 d와 거의 같고(4.0, 65.3, 509.7), √d로 나누면 모두 1 근처다. d = 512에서 나누지 않은 점수는 −43 ~ +44로 퍼져 softmax가 두 개(0.485, 0.515)에 몰리고 나머지는 전부 0이다. 나누면 0.37, 0.37, 0.116 … 으로 부드러운 분포가 된다.
+
+### 2.4 임베디드 연결
+
+이 스케일은 추론 때 **상수 곱 하나**다. 실무에서는 대개 W_Q(또는 Q)에 `1/√d_k`를 미리 접어 넣어(folding) 런타임 곱셈을 없앤다. head_dim = 64면 1/8 = 0.125라 fixed-point에서는 **shift 3**으로 끝난다. 단, 양자화할 때 점수 폭이 줄어드는 것을 감안해서 scale을 정해야 한다(C1, C2).
+
+---
+
+## 3. Mask — 보면 안 되는 것을 가리기
+
+### 3.1 causal mask (decoder)
+
+언어 모델은 "다음 토큰 예측"을 학습한다. 위치 i의 출력이 위치 i+1 이후의 입력을 보면 **답을 보고 시험 치는** 것이다. 그래서 decoder는 query i가 key j ≤ i만 보도록 막는다. 이것이 **causal mask**(또는 look-ahead mask)다.
+
+구현은 간단하다. softmax **전에** 금지된 칸의 점수를 −∞로 만든다. e^(−∞) = 0이라 그 칸의 가중치가 정확히 0이 되고, 남은 칸끼리 합이 1이 된다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 350">
+<text x="162.0" y="46.0" font-size="13" text-anchor="middle">causal mask (decoder)</text> <text x="77.0" y="63.0" font-size="12" text-anchor="middle">0</text> <text x="111.0" y="63.0" font-size="12" text-anchor="middle">1</text> <text x="145.0" y="63.0" font-size="12" text-anchor="middle">2</text> <text x="179.0" y="63.0" font-size="12" text-anchor="middle">3</text> <text x="213.0" y="63.0" font-size="12" text-anchor="middle">4</text> <text x="247.0" y="63.0" font-size="12" text-anchor="middle">5</text> <text x="53.0" y="91.0" font-size="12" text-anchor="end">0</text> <rect x="60.0" y="70.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="77.0" y="91.0" font-size="12" text-anchor="middle">0</text> <rect x="94.0" y="70.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/>
+<text x="111.0" y="91.0" font-size="12" text-anchor="middle">−∞</text> <rect x="128.0" y="70.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="145.0" y="91.0" font-size="12" text-anchor="middle">−∞</text> <rect x="162.0" y="70.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="179.0" y="91.0" font-size="12" text-anchor="middle">−∞</text> <rect x="196.0" y="70.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="213.0" y="91.0" font-size="12" text-anchor="middle">−∞</text> <rect x="230.0" y="70.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="247.0" y="91.0" font-size="12" text-anchor="middle">−∞</text> <text x="53.0" y="125.0" font-size="12" text-anchor="end">1</text>
+<rect x="60.0" y="104.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="77.0" y="125.0" font-size="12" text-anchor="middle">0</text> <rect x="94.0" y="104.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="111.0" y="125.0" font-size="12" text-anchor="middle">0</text> <rect x="128.0" y="104.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="145.0" y="125.0" font-size="12" text-anchor="middle">−∞</text> <rect x="162.0" y="104.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="179.0" y="125.0" font-size="12" text-anchor="middle">−∞</text> <rect x="196.0" y="104.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/>
+<text x="213.0" y="125.0" font-size="12" text-anchor="middle">−∞</text> <rect x="230.0" y="104.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="247.0" y="125.0" font-size="12" text-anchor="middle">−∞</text> <text x="53.0" y="159.0" font-size="12" text-anchor="end">2</text> <rect x="60.0" y="138.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="77.0" y="159.0" font-size="12" text-anchor="middle">0</text> <rect x="94.0" y="138.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="111.0" y="159.0" font-size="12" text-anchor="middle">0</text> <rect x="128.0" y="138.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="145.0" y="159.0" font-size="12" text-anchor="middle">0</text>
+<rect x="162.0" y="138.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="179.0" y="159.0" font-size="12" text-anchor="middle">−∞</text> <rect x="196.0" y="138.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="213.0" y="159.0" font-size="12" text-anchor="middle">−∞</text> <rect x="230.0" y="138.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="247.0" y="159.0" font-size="12" text-anchor="middle">−∞</text> <text x="53.0" y="193.0" font-size="12" text-anchor="end">3</text> <rect x="60.0" y="172.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="77.0" y="193.0" font-size="12" text-anchor="middle">0</text>
+<rect x="94.0" y="172.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="111.0" y="193.0" font-size="12" text-anchor="middle">0</text> <rect x="128.0" y="172.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="145.0" y="193.0" font-size="12" text-anchor="middle">0</text> <rect x="162.0" y="172.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="179.0" y="193.0" font-size="12" text-anchor="middle">0</text> <rect x="196.0" y="172.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="213.0" y="193.0" font-size="12" text-anchor="middle">−∞</text> <rect x="230.0" y="172.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/>
+<text x="247.0" y="193.0" font-size="12" text-anchor="middle">−∞</text> <text x="53.0" y="227.0" font-size="12" text-anchor="end">4</text> <rect x="60.0" y="206.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="77.0" y="227.0" font-size="12" text-anchor="middle">0</text> <rect x="94.0" y="206.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="111.0" y="227.0" font-size="12" text-anchor="middle">0</text> <rect x="128.0" y="206.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="145.0" y="227.0" font-size="12" text-anchor="middle">0</text> <rect x="162.0" y="206.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="179.0" y="227.0" font-size="12" text-anchor="middle">0</text>
+<rect x="196.0" y="206.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="213.0" y="227.0" font-size="12" text-anchor="middle">0</text> <rect x="230.0" y="206.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="247.0" y="227.0" font-size="12" text-anchor="middle">−∞</text> <text x="53.0" y="261.0" font-size="12" text-anchor="end">5</text> <rect x="60.0" y="240.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="77.0" y="261.0" font-size="12" text-anchor="middle">0</text> <rect x="94.0" y="240.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="111.0" y="261.0" font-size="12" text-anchor="middle">0</text>
+<rect x="128.0" y="240.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="145.0" y="261.0" font-size="12" text-anchor="middle">0</text> <rect x="162.0" y="240.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="179.0" y="261.0" font-size="12" text-anchor="middle">0</text> <rect x="196.0" y="240.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="213.0" y="261.0" font-size="12" text-anchor="middle">0</text> <rect x="230.0" y="240.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="247.0" y="261.0" font-size="12" text-anchor="middle">0</text> <text x="442.0" y="46.0" font-size="13" text-anchor="middle">padding mask (실제 길이 4)</text> <text x="357.0" y="63.0" font-size="12" text-anchor="middle">0</text>
+<text x="391.0" y="63.0" font-size="12" text-anchor="middle">1</text> <text x="425.0" y="63.0" font-size="12" text-anchor="middle">2</text> <text x="459.0" y="63.0" font-size="12" text-anchor="middle">3</text> <text x="493.0" y="63.0" font-size="12" text-anchor="middle">4</text> <text x="527.0" y="63.0" font-size="12" text-anchor="middle">5</text> <text x="333.0" y="91.0" font-size="12" text-anchor="end">0</text> <rect x="340.0" y="70.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="357.0" y="91.0" font-size="12" text-anchor="middle">0</text> <rect x="374.0" y="70.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="391.0" y="91.0" font-size="12" text-anchor="middle">0</text> <rect x="408.0" y="70.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/>
+<text x="425.0" y="91.0" font-size="12" text-anchor="middle">0</text> <rect x="442.0" y="70.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="459.0" y="91.0" font-size="12" text-anchor="middle">0</text> <rect x="476.0" y="70.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="493.0" y="91.0" font-size="12" text-anchor="middle">−∞</text> <rect x="510.0" y="70.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="527.0" y="91.0" font-size="12" text-anchor="middle">−∞</text> <text x="333.0" y="125.0" font-size="12" text-anchor="end">1</text> <rect x="340.0" y="104.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="357.0" y="125.0" font-size="12" text-anchor="middle">0</text>
+<rect x="374.0" y="104.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="391.0" y="125.0" font-size="12" text-anchor="middle">0</text> <rect x="408.0" y="104.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="425.0" y="125.0" font-size="12" text-anchor="middle">0</text> <rect x="442.0" y="104.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="459.0" y="125.0" font-size="12" text-anchor="middle">0</text> <rect x="476.0" y="104.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="493.0" y="125.0" font-size="12" text-anchor="middle">−∞</text> <rect x="510.0" y="104.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/>
+<text x="527.0" y="125.0" font-size="12" text-anchor="middle">−∞</text> <text x="333.0" y="159.0" font-size="12" text-anchor="end">2</text> <rect x="340.0" y="138.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="357.0" y="159.0" font-size="12" text-anchor="middle">0</text> <rect x="374.0" y="138.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="391.0" y="159.0" font-size="12" text-anchor="middle">0</text> <rect x="408.0" y="138.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="425.0" y="159.0" font-size="12" text-anchor="middle">0</text> <rect x="442.0" y="138.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="459.0" y="159.0" font-size="12" text-anchor="middle">0</text>
+<rect x="476.0" y="138.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="493.0" y="159.0" font-size="12" text-anchor="middle">−∞</text> <rect x="510.0" y="138.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="527.0" y="159.0" font-size="12" text-anchor="middle">−∞</text> <text x="333.0" y="193.0" font-size="12" text-anchor="end">3</text> <rect x="340.0" y="172.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="357.0" y="193.0" font-size="12" text-anchor="middle">0</text> <rect x="374.0" y="172.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="391.0" y="193.0" font-size="12" text-anchor="middle">0</text>
+<rect x="408.0" y="172.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="425.0" y="193.0" font-size="12" text-anchor="middle">0</text> <rect x="442.0" y="172.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="459.0" y="193.0" font-size="12" text-anchor="middle">0</text> <rect x="476.0" y="172.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="493.0" y="193.0" font-size="12" text-anchor="middle">−∞</text> <rect x="510.0" y="172.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="527.0" y="193.0" font-size="12" text-anchor="middle">−∞</text> <text x="333.0" y="227.0" font-size="12" text-anchor="end">4</text>
+<rect x="340.0" y="206.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="357.0" y="227.0" font-size="12" text-anchor="middle">0</text> <rect x="374.0" y="206.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="391.0" y="227.0" font-size="12" text-anchor="middle">0</text> <rect x="408.0" y="206.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="425.0" y="227.0" font-size="12" text-anchor="middle">0</text> <rect x="442.0" y="206.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="459.0" y="227.0" font-size="12" text-anchor="middle">0</text> <rect x="476.0" y="206.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/>
+<text x="493.0" y="227.0" font-size="12" text-anchor="middle">−∞</text> <rect x="510.0" y="206.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="527.0" y="227.0" font-size="12" text-anchor="middle">−∞</text> <text x="333.0" y="261.0" font-size="12" text-anchor="end">5</text> <rect x="340.0" y="240.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="357.0" y="261.0" font-size="12" text-anchor="middle">0</text> <rect x="374.0" y="240.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="391.0" y="261.0" font-size="12" text-anchor="middle">0</text> <rect x="408.0" y="240.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="425.0" y="261.0" font-size="12" text-anchor="middle">0</text>
+<rect x="442.0" y="240.0" width="34.0" height="34.0" fill="#3f9a6b" fill-opacity="0.45" stroke="currentColor"/> <text x="459.0" y="261.0" font-size="12" text-anchor="middle">0</text> <rect x="476.0" y="240.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="493.0" y="261.0" font-size="12" text-anchor="middle">−∞</text> <rect x="510.0" y="240.0" width="34.0" height="34.0" fill="#d0564a" fill-opacity="0.2" stroke="currentColor"/> <text x="527.0" y="261.0" font-size="12" text-anchor="middle">−∞</text> <text x="162.0" y="305.0" font-size="12" text-anchor="middle">j ≤ i 만 허용 = 하삼각(tril)</text> <text x="442.0" y="305.0" font-size="12" text-anchor="middle">key 4, 5는 [PAD] → 모든 행에서 차단</text> <text x="320.0" y="335.0" font-size="12" text-anchor="middle">mask 값은 softmax 전에 score에 더한다: 0 = 통과, −∞ → e^(−∞) = 0 가중치</text>
+</svg>
+```
+
+그림 3 — 왼쪽: causal mask. 대각선 포함 아래쪽(j ≤ i)만 0(통과), 위쪽은 −∞(차단). 모양이 하삼각 행렬이라 `torch.tril`로 만든다. 오른쪽: padding mask. 실제 길이 4인 입력을 길이 6으로 맞추려고 붙인 [PAD] 토큰 두 개를 key 쪽에서 모든 행이 못 보게 막는다.
+
+### 3.2 padding mask
+
+배치 안의 문장 길이가 다르면 짧은 문장 뒤에 [PAD]를 채워 같은 길이로 맞춘다. [PAD]는 의미 없는 토큰이라 attention이 그 key를 보면 출력이 오염된다. 그래서 **key 축의 [PAD] 열**을 −∞로 막는다. (query 쪽 [PAD] 행의 출력은 어차피 loss에서 버린다.)
+
+### 3.3 코드로 확인
+
+```python
+import torch, torch.nn.functional as F
+torch.manual_seed(0); torch.set_printoptions(precision=3, sci_mode=False)
+T, d = 5, 4
+q, k, v = (torch.randn(1, 1, T, d) for _ in range(3))
+
+# (1) causal: 위치 i는 j <= i만 본다
+causal = torch.tril(torch.ones(T, T, dtype=torch.bool))
+S = (q @ k.transpose(-2, -1)) / d**0.5
+S = S.masked_fill(~causal, float("-inf"))        # 미래 = -inf
+P = S.softmax(-1)
+print("causal P:\n", P[0, 0])
+out_manual = P @ v
+out_sdpa = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+print("max diff vs is_causal=True:", (out_manual - out_sdpa).abs().max().item())
+
+# (2) padding: 길이 3인 문장을 T=5로 패딩 → key 3,4는 가짜
+pad = torch.tensor([True, True, True, False, False])   # True = 진짜 토큰
+P2 = (q @ k.transpose(-2, -1) / d**0.5).masked_fill(~pad, float("-inf")).softmax(-1)
+print("padding P (row 0):", P2[0, 0, 0])
+out2 = F.scaled_dot_product_attention(q, k, v, attn_mask=pad.view(1, T))  # True = 참여
+print("max diff vs attn_mask:", (P2 @ v - out2).abs().max().item())
+```
+
+```text
+causal P:
+ tensor([[1.000, 0.000, 0.000, 0.000, 0.000],
+        [0.586, 0.414, 0.000, 0.000, 0.000],
+        [0.478, 0.172, 0.350, 0.000, 0.000],
+        [0.147, 0.068, 0.736, 0.048, 0.000],
+        [0.254, 0.046, 0.572, 0.056, 0.072]])
+max diff vs is_causal=True: 2.384185791015625e-07
+padding P (row 0): tensor([0.264, 0.601, 0.135, 0.000, 0.000])
+max diff vs attn_mask: 2.384185791015625e-07
+```
+
+출력에서 볼 것: causal P는 대각선 위가 전부 0.000이고 각 행 합은 1이다. 첫 행은 [1, 0, 0, 0, 0] — 첫 토큰은 자기 자신만 본다. 직접 만든 −∞ mask와 `is_causal=True`, 그리고 bool `attn_mask`(True = 참여)의 결과가 float 오차 수준으로 같다. padding 행 0은 key 3, 4에 정확히 0을 주고 나머지 세 개로 합 1을 만든다.
+
+### 3.4 함정
+
+- **bool mask의 의미가 라이브러리마다 반대**: SDPA의 bool `attn_mask`는 True = "참여"다. 반면 `nn.MultiheadAttention`의 `key_padding_mask`는 True = "무시"다. 헷갈리면 출력이 NaN이거나 조용히 틀린다. 반드시 작은 예제로 확인한다.
+- **한 행 전체가 −∞**: 모든 key가 막힌 행은 softmax가 0/0 = NaN이 된다(예: 전부 [PAD]인 샘플). 막힌 값으로 −∞ 대신 dtype의 큰 음수(예: `torch.finfo(dtype).min`)를 쓰거나, 그 행을 따로 처리한다.
+- **fp16에서 −1e9**: fp16 최대값은 65504라 −1e9는 −inf가 된다. 임베디드 int8 경로에서는 −∞ 자체를 표현 못 하므로 "mask 칸은 exp LUT에서 0을 돌려준다" 같은 규칙으로 구현한다.
+
+---
+
+## 4. Multi-head attention — 여러 관점으로 동시에 보기
+
+### 4.1 직관
+
+한 head는 query마다 가중치 분포 **하나**만 만든다. 그런데 "timer"라는 토큰은 동시에 여러 가지를 보고 싶다: 문법적으로 연결된 동사("set"), 숫자("5 minutes"), 바로 앞 토큰. 하나의 softmax로는 이 여러 관계를 동시에 표현하기 어렵다.
+
+그래서 d_model을 h개의 작은 조각(head)으로 나누고, **head마다 독립적인 attention**을 돌린 뒤 결과를 이어 붙인다. 이것이 **multi-head attention(MHA)**이다. 비용은 거의 그대로다. 큰 head 하나 대신 작은 head 여러 개로 같은 차원을 나눠 쓸 뿐이기 때문이다.
+
+### 4.2 shape를 단계별로
+
+d_model = d, head 수 = h, head 차원 d_h = d / h. batch B, 길이 T.
+
+```
+x                         [B, T, d]
+Q = x·W_Q (K, V도 같음)    [B, T, d]          W_Q: [d, d]  (h개 head의 W_Q를 옆으로 붙인 것)
+view                      [B, T, h, d_h]     d를 h × d_h로 쪼갠다 (메모리 이동 없음)
+transpose(1, 2)           [B, h, T, d_h]     head를 batch처럼 앞으로
+S = Q·Kᵀ/√d_h             [B, h, T, T]       head마다 T×T 점수표
+O = softmax(S)·V          [B, h, T, d_h]
+transpose + reshape       [B, T, h·d_h] = [B, T, d]   (concat)
+y = O·W_O                 [B, T, d]          W_O: [d, d]  head들의 결과를 섞는다
+```
+
+말로 하면: 큰 투영 한 번으로 모든 head의 q, k, v를 만들고, 마지막 차원을 h 조각으로 잘라 head 축을 batch처럼 앞에 세운다. 그러면 SDPA가 (B × h)개의 독립 attention을 한 번에 처리한다. 끝나면 다시 이어 붙이고 W_O로 섞는다.
+
+Don 경험과 연결: `view`는 C에서 같은 1차원 버퍼를 `[T][h][d_h]` 3차원 배열로 다시 해석(캐스팅)하는 것과 같다(A1 7절 stride). `transpose`는 stride만 바꾸는 논리적 연산이고, 뒤의 `reshape`가 메모리를 실제로 복사할 수 있다. NPU 컴파일러가 이 transpose들을 layout 변환으로 없애 주느냐가 성능에 크다.
+
+### 4.3 파라미터 수: 4·d²
+
+W_Q, W_K, W_V, W_O가 각각 `[d, d]`라 **4·d²**(bias가 있으면 + 4·d). head 수 h와 **무관**하다. head를 늘려도 각 head가 작아질 뿐이다.
+
+손계산: d = 16 → 4 × 256 = 1024 + bias 64 = 1088. d = 2048(Llama-3.2-1B 크기)이면 4 × 2048² ≈ 16.8M — 단, 이 모델은 GQA라 실제로는 더 작다(5절).
+
+### 4.4 코드로 확인 — 직접 짠 MHA vs `nn.MultiheadAttention`
+
+`nn.MultiheadAttention`의 가중치를 꺼내서 위 shape 흐름대로 직접 계산하고 결과를 비교한다.
+
+```python
+import torch, torch.nn as nn, torch.nn.functional as F
+torch.manual_seed(0)
+B, T, d, h = 2, 6, 16, 4; dh = d // h
+mha = nn.MultiheadAttention(d, h, batch_first=True)   # 레퍼런스
+x = torch.randn(B, T, d)
+
+Wq, Wk, Wv = mha.in_proj_weight.chunk(3)              # 각 [d, d]
+bq, bk, bv = mha.in_proj_bias.chunk(3)
+def split(t):                                         # [B,T,d] -> [B,h,T,dh]
+    return t.view(B, T, h, dh).transpose(1, 2)
+q, k, v = split(x @ Wq.T + bq), split(x @ Wk.T + bk), split(x @ Wv.T + bv)
+print("x", tuple(x.shape), "-> q", tuple(q.shape))
+S = q @ k.transpose(-2, -1) / dh**0.5                 # [B,h,T,T]
+o = S.softmax(-1) @ v                                 # [B,h,T,dh]
+print("scores", tuple(S.shape), "-> per-head out", tuple(o.shape))
+o = o.transpose(1, 2).reshape(B, T, d)                # concat heads -> [B,T,d]
+y = o @ mha.out_proj.weight.T + mha.out_proj.bias     # W_O
+print("concat", tuple(o.shape), "-> y", tuple(y.shape))
+
+y_ref, _ = mha(x, x, x, need_weights=False)
+print("max |mine - nn.MHA| =", (y - y_ref).abs().max().item())
+n = sum(p.numel() for p in mha.parameters())
+print("params:", n, " 4·d² =", 4 * d * d, " 4·d (bias) =", 4 * d)
+```
+
+```text
+x (2, 6, 16) -> q (2, 4, 6, 4)
+scores (2, 4, 6, 6) -> per-head out (2, 4, 6, 4)
+concat (2, 6, 16) -> y (2, 6, 16)
+max |mine - nn.MHA| = 1.1920928955078125e-07
+params: 1088  4·d² = 1024  4·d (bias) = 64
+```
+
+출력에서 볼 것: `[2, 6, 16]` → head 4개로 쪼개면 `[2, 4, 6, 4]`, 점수는 head마다 `[6, 6]`, 이어 붙이면 다시 `[2, 6, 16]`. PyTorch 레퍼런스와 1e-7 수준으로 같다. 파라미터 1088 = 4·d²(1024) + 4·d(64). `in_proj_weight`가 Q, K, V 가중치를 `[3d, d]` 하나로 묶어 저장한다는 것도 알아 두자. 모델 변환 도구에서 이 묶음을 풀어야 하는 경우가 있다.
+
+### 4.5 함정
+
+- **`batch_first`**: `nn.MultiheadAttention`의 기본은 `[T, B, d]`다. `batch_first=True`를 빼먹으면 batch와 시간 축이 바뀐 채로 돈다(에러 없이).
+- **`view` 전에 `transpose`하지 않기**: `[B, T, d]`를 곧바로 `view(B, h, T, d_h)`하면 shape는 맞지만 토큰과 head가 뒤섞인다. 순서는 반드시 `view(B, T, h, d_h)` → `transpose(1, 2)`.
+- **d가 h로 나누어떨어져야 한다**: d_h = d / h. 대부분 d_h = 64 또는 128로 맞춘다. NPU도 64·128 단위 tile을 좋아한다.
+
+---
+
+## 5. MHA vs MQA vs GQA — K/V head를 몇 개 둘까
+
+### 5.1 왜 K/V head 수가 중요한가
+
+9절에서 자세히 보겠지만, LLM이 토큰을 하나씩 생성할 때는 과거 모든 토큰의 **K와 V를 메모리에 저장**해 두고 매 step 다시 읽는다(KV-cache). 그 크기는 **K/V head 수에 정비례**한다. 반면 query는 매 step 새 토큰 하나 것만 필요해 저장하지 않는다. 그래서 "query head는 많이, K/V head는 적게"라는 아이디어가 나왔다.
+
+| 방식 | query head | K/V head | 설명 | 대표 모델 |
+|---|---|---|---|---|
+| MHA (multi-head) | h | h | head마다 자기 K, V | GPT-2, BERT, Whisper |
+| MQA (multi-query) | h | 1 | 모든 head가 K, V 한 벌 공유 | PaLM, Falcon-7B |
+| GQA (grouped-query) | h | g (1 < g < h) | h/g개 head가 한 그룹으로 K, V 공유 | Llama 3.x, Qwen2.5, SmolLM2 |
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 340">
+<text x="130.0" y="26.0" font-size="13" text-anchor="middle">MHA (kv 8)</text> <rect x="46.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="55.0" y="68.0" font-size="12" text-anchor="middle">0</text> <rect x="68.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="77.0" y="68.0" font-size="12" text-anchor="middle">1</text> <rect x="90.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="99.0" y="68.0" font-size="12" text-anchor="middle">2</text> <rect x="112.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="121.0" y="68.0" font-size="12" text-anchor="middle">3</text> <rect x="134.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/>
+<text x="143.0" y="68.0" font-size="12" text-anchor="middle">4</text> <rect x="156.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="165.0" y="68.0" font-size="12" text-anchor="middle">5</text> <rect x="178.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="187.0" y="68.0" font-size="12" text-anchor="middle">6</text> <rect x="200.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="209.0" y="68.0" font-size="12" text-anchor="middle">7</text> <rect x="46.0" y="140.0" width="18.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/> <text x="55.0" y="158.0" font-size="12" text-anchor="middle">KV</text> <rect x="68.0" y="140.0" width="18.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/>
+<text x="77.0" y="158.0" font-size="12" text-anchor="middle">KV</text> <rect x="90.0" y="140.0" width="18.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/> <text x="99.0" y="158.0" font-size="12" text-anchor="middle">KV</text> <rect x="112.0" y="140.0" width="18.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/> <text x="121.0" y="158.0" font-size="12" text-anchor="middle">KV</text> <rect x="134.0" y="140.0" width="18.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/> <text x="143.0" y="158.0" font-size="12" text-anchor="middle">KV</text> <rect x="156.0" y="140.0" width="18.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/> <text x="165.0" y="158.0" font-size="12" text-anchor="middle">KV</text> <rect x="178.0" y="140.0" width="18.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/>
+<text x="187.0" y="158.0" font-size="12" text-anchor="middle">KV</text> <rect x="200.0" y="140.0" width="18.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/> <text x="209.0" y="158.0" font-size="12" text-anchor="middle">KV</text> <line x1="55.0" y1="76.0" x2="55.0" y2="140.0" stroke="#888"/> <line x1="77.0" y1="76.0" x2="77.0" y2="140.0" stroke="#888"/> <line x1="99.0" y1="76.0" x2="99.0" y2="140.0" stroke="#888"/> <line x1="121.0" y1="76.0" x2="121.0" y2="140.0" stroke="#888"/> <line x1="143.0" y1="76.0" x2="143.0" y2="140.0" stroke="#888"/> <line x1="165.0" y1="76.0" x2="165.0" y2="140.0" stroke="#888"/> <line x1="187.0" y1="76.0" x2="187.0" y2="140.0" stroke="#888"/> <line x1="209.0" y1="76.0" x2="209.0" y2="140.0" stroke="#888"/> <text x="350.0" y="26.0" font-size="13" text-anchor="middle">GQA (kv 2)</text>
+<rect x="266.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="275.0" y="68.0" font-size="12" text-anchor="middle">0</text> <rect x="288.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="297.0" y="68.0" font-size="12" text-anchor="middle">1</text> <rect x="310.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="319.0" y="68.0" font-size="12" text-anchor="middle">2</text> <rect x="332.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="341.0" y="68.0" font-size="12" text-anchor="middle">3</text> <rect x="354.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="363.0" y="68.0" font-size="12" text-anchor="middle">4</text>
+<rect x="376.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="385.0" y="68.0" font-size="12" text-anchor="middle">5</text> <rect x="398.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="407.0" y="68.0" font-size="12" text-anchor="middle">6</text> <rect x="420.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="429.0" y="68.0" font-size="12" text-anchor="middle">7</text> <rect x="266.0" y="140.0" width="84.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/> <text x="308.0" y="158.0" font-size="12" text-anchor="middle">KV head 0</text> <rect x="354.0" y="140.0" width="84.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/> <text x="396.0" y="158.0" font-size="12" text-anchor="middle">KV head 1</text>
+<line x1="275.0" y1="76.0" x2="308.0" y2="140.0" stroke="#888"/> <line x1="297.0" y1="76.0" x2="308.0" y2="140.0" stroke="#888"/> <line x1="319.0" y1="76.0" x2="308.0" y2="140.0" stroke="#888"/> <line x1="341.0" y1="76.0" x2="308.0" y2="140.0" stroke="#888"/> <line x1="363.0" y1="76.0" x2="396.0" y2="140.0" stroke="#888"/> <line x1="385.0" y1="76.0" x2="396.0" y2="140.0" stroke="#888"/> <line x1="407.0" y1="76.0" x2="396.0" y2="140.0" stroke="#888"/> <line x1="429.0" y1="76.0" x2="396.0" y2="140.0" stroke="#888"/> <text x="570.0" y="26.0" font-size="13" text-anchor="middle">MQA (kv 1)</text> <rect x="486.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="495.0" y="68.0" font-size="12" text-anchor="middle">0</text> <rect x="508.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/>
+<text x="517.0" y="68.0" font-size="12" text-anchor="middle">1</text> <rect x="530.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="539.0" y="68.0" font-size="12" text-anchor="middle">2</text> <rect x="552.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="561.0" y="68.0" font-size="12" text-anchor="middle">3</text> <rect x="574.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="583.0" y="68.0" font-size="12" text-anchor="middle">4</text> <rect x="596.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="605.0" y="68.0" font-size="12" text-anchor="middle">5</text> <rect x="618.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/>
+<text x="627.0" y="68.0" font-size="12" text-anchor="middle">6</text> <rect x="640.0" y="50.0" width="18.0" height="26.0" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/> <text x="649.0" y="68.0" font-size="12" text-anchor="middle">7</text> <rect x="486.0" y="140.0" width="172.0" height="26.0" fill="#4a7bd0" fill-opacity="0.45" stroke="#4a7bd0"/> <text x="572.0" y="158.0" font-size="12" text-anchor="middle">KV head 0</text> <line x1="495.0" y1="76.0" x2="572.0" y2="140.0" stroke="#888"/> <line x1="517.0" y1="76.0" x2="572.0" y2="140.0" stroke="#888"/> <line x1="539.0" y1="76.0" x2="572.0" y2="140.0" stroke="#888"/> <line x1="561.0" y1="76.0" x2="572.0" y2="140.0" stroke="#888"/> <line x1="583.0" y1="76.0" x2="572.0" y2="140.0" stroke="#888"/> <line x1="605.0" y1="76.0" x2="572.0" y2="140.0" stroke="#888"/> <line x1="627.0" y1="76.0" x2="572.0" y2="140.0" stroke="#888"/>
+<line x1="649.0" y1="76.0" x2="572.0" y2="140.0" stroke="#888"/> <text x="20.0" y="68.0" font-size="12" text-anchor="end">Q</text> <text x="20.0" y="158.0" font-size="12" text-anchor="end">K,V</text> <text x="340.0" y="208.0" font-size="13" text-anchor="middle">Llama-3.2-1B 모양(16층, head_dim 64), fp16, seq 4096의 KV-cache</text> <text x="100.0" y="240.0" font-size="12" text-anchor="end">MHA</text> <rect x="110.0" y="225.0" width="460.0" height="20.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/> <text x="576.0" y="240.0" font-size="12" text-anchor="start">512 MiB</text> <text x="100.0" y="270.0" font-size="12" text-anchor="end">GQA</text> <rect x="110.0" y="255.0" width="115.0" height="20.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/> <text x="231.0" y="270.0" font-size="12" text-anchor="start">128 MiB</text>
+<text x="100.0" y="300.0" font-size="12" text-anchor="end">MQA</text> <rect x="110.0" y="285.0" width="14.4" height="20.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/> <text x="130.4" y="300.0" font-size="12" text-anchor="start">16 MiB</text> <text x="340.0" y="330.0" font-size="12" text-anchor="middle">실제 모델은 GQA(kv 8). MHA였다면 4배, MQA였다면 1/8</text>
+</svg>
+```
+
+그림 4 — 위: query head 8개가 K/V head를 어떻게 공유하는지. MHA는 1:1, GQA(kv 2)는 4개씩 한 그룹, MQA는 전부 하나를 공유한다. 아래: Llama-3.2-1B 모양(16층, head_dim 64, fp16, 길이 4096)에서 K/V head 수만 바꿨을 때의 KV-cache 크기(아래 5.4절 코드 출력값).
+
+MQA는 KV를 가장 많이 줄이지만 품질이 떨어지는 경우가 있어, 그 중간인 GQA가 현재 소형 LLM의 표준이 되었다. 파라미터도 줄어든다. W_K, W_V가 `[d, d]`에서 `[d, g·d_h]`가 되기 때문이다(Llama-3.2-1B: `k_proj`가 2048 → 512).
+
+### 5.2 GQA 계산 = K/V를 복제한 MHA
+
+GQA의 수학은 간단하다. K/V head를 그룹 크기만큼 **복제**해서 query head 수에 맞추면 평범한 MHA와 같다. 실제 커널은 복제하지 않고 **같은 메모리를 여러 head가 읽게** 해서 대역폭을 아낀다.
+
+```python
+import torch, torch.nn.functional as F
+torch.manual_seed(0)
+B, T, dh = 1, 6, 8
+n_q, n_kv = 8, 2                          # GQA: query head 8개, K/V head 2개
+g = n_q // n_kv                           # 그룹 크기 = 4
+q = torch.randn(B, n_q, T, dh)
+k = torch.randn(B, n_kv, T, dh)           # K/V는 head가 2개뿐
+v = torch.randn(B, n_kv, T, dh)
+
+# 방법 1: K/V head를 그룹 크기만큼 복제해서 평범한 MHA로 계산
+k_rep = k.repeat_interleave(g, dim=1)     # [1,8,T,dh]: head 0,0,0,0,1,1,1,1
+v_rep = v.repeat_interleave(g, dim=1)
+o1 = F.scaled_dot_product_attention(q, k_rep, v_rep, is_causal=True)
+# 방법 2: PyTorch 2.5+의 enable_gqa (복제 없이 커널이 공유)
+o2 = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
+print("out", tuple(o1.shape), " max diff:", (o1 - o2).abs().max().item())
+print("K/V 저장 원소 수  MHA:", 2 * n_q * T * dh, " GQA:", 2 * n_kv * T * dh,
+      " MQA:", 2 * 1 * T * dh)
+```
+
+```text
+out (1, 8, 6, 8)  max diff: 2.384185791015625e-07
+K/V 저장 원소 수  MHA: 768  GQA: 192  MQA: 96
+```
+
+출력에서 볼 것: 복제 방식과 `enable_gqa=True`(PyTorch 2.5부터)의 결과가 같다. 저장해야 하는 K/V 원소 수는 MHA 768 → GQA 192(1/4) → MQA 96(1/8). **연산량(MAC)은 거의 같다**. query head 8개가 각자 T×T 점수를 계산하는 것은 변하지 않기 때문이다. GQA가 줄이는 것은 **메모리와 대역폭**이다.
+
+### 5.3 KV-cache 크기 공식
+
+```
+KV bytes = 2 × layers × kv_heads × head_dim × seq_len × bytes_per_elem × batch
+           ↑ K와 V 두 개
+```
+
+말로 하면: 층마다, K/V head마다, 토큰마다 head_dim개 숫자를 K용·V용으로 하나씩 저장한다. **seq_len에 선형으로** 커진다. 토큰 하나당 바이트(= seq_len 1)를 먼저 외워 두면 편하다.
+
+### 5.4 실제 모델로 계산 — Llama-3.2-1B
+
+아래 숫자는 `transformers.AutoConfig`로 실제 config를 읽어서 쓴다. Meta 원본 저장소는 접근 승인이 필요해서 같은 config를 올려 둔 `unsloth/Llama-3.2-1B` 미러에서 읽었다.
+
+```python
+import warnings; warnings.filterwarnings("ignore")
+from transformers import AutoConfig
+c = AutoConfig.from_pretrained("unsloth/Llama-3.2-1B")   # Meta 원본과 같은 config 미러
+L, nq, nkv = c.num_hidden_layers, c.num_attention_heads, c.num_key_value_heads
+hd = c.head_dim
+print(f"layers={L} q_heads={nq} kv_heads={nkv} head_dim={hd} hidden={c.hidden_size}")
+
+def kv_bytes(layers, kv_heads, head_dim, seq, nbytes):
+    return 2 * layers * kv_heads * head_dim * seq * nbytes   # 2 = K와 V
+
+per_tok = kv_bytes(L, nkv, hd, 1, 2)
+print(f"fp16 KV per token: GQA {per_tok} B = {per_tok/1024:.0f} KiB,"
+      f" if MHA {kv_bytes(L, nq, hd, 1, 2)//1024} KiB, if MQA {kv_bytes(L, 1, hd, 1, 2)//1024} KiB")
+for seq in [1024, 4096, 8192, 131072]:
+    row = [kv_bytes(L, n, hd, seq, 2) / 2**20 for n in (nq, nkv, 1)]
+    print(f"seq={seq:6d}  MHA {row[0]:8.0f} MiB  GQA {row[1]:7.0f} MiB  MQA {row[2]:6.0f} MiB")
+print(f"int8 KV, seq=4096: {kv_bytes(L, nkv, hd, 4096, 1)/2**20:.0f} MiB")
+```
+
+```text
+layers=16 q_heads=32 kv_heads=8 head_dim=64 hidden=2048
+fp16 KV per token: GQA 32768 B = 32 KiB, if MHA 128 KiB, if MQA 4 KiB
+seq=  1024  MHA      128 MiB  GQA      32 MiB  MQA      4 MiB
+seq=  4096  MHA      512 MiB  GQA     128 MiB  MQA     16 MiB
+seq=  8192  MHA     1024 MiB  GQA     256 MiB  MQA     32 MiB
+seq=131072  MHA    16384 MiB  GQA    4096 MiB  MQA    512 MiB
+int8 KV, seq=4096: 64 MiB
+```
+
+출력에서 볼 것: Llama-3.2-1B는 16층, query head 32, KV head 8, head_dim 64다. fp16 KV는 **토큰당 32 KiB**, 4096 토큰이면 128 MiB다. 같은 모델이 MHA였다면 512 MiB, MQA였다면 16 MiB. config상 최대 문맥 131072 토큰을 다 채우면 GQA로도 4 GiB라, 기기에서는 문맥 길이를 짧게 제한하는 것이 현실적이다. KV를 int8로 저장하면 절반(64 MiB)이 된다.
+
+손계산으로 검증: 2 × 16 × 8 × 64 × 2 B = 32,768 B = 32 KiB/token. × 4096 = 134,217,728 B = 128 MiB. 맞다.
+
+다른 소형 모델도 같은 방식으로 config를 읽어 계산하면 다음과 같다(config 값은 모두 Hugging Face에서 `AutoConfig`로 확인, head_dim이 config에 없는 모델은 hidden ÷ heads로 계산, 토큰당 KV는 공식으로 계산).
+
+| 모델 | layers | q heads | kv heads | head_dim | 방식 | fp16 KV / token |
+|---|---|---|---|---|---|---|
+| GPT-2 (124M) | 12 | 12 | 12 | 64 | MHA | 36 KiB |
+| SmolLM2-135M | 30 | 9 | 3 | 64 | GQA (3:1) | 22.5 KiB |
+| Qwen2.5-0.5B | 24 | 14 | 2 | 64 | GQA (7:1) | 12 KiB |
+| Llama-3.2-1B | 16 | 32 | 8 | 64 | GQA (4:1) | 32 KiB |
+
+말로 하면: 파라미터가 8배 큰 Llama-3.2-1B가 GPT-2보다 토큰당 KV가 오히려 작다. GQA 덕분이다. Qwen2.5-0.5B는 KV head를 2개까지 줄여서 토큰당 12 KiB다. **모델 선정 때 파라미터 수만 보지 말고 kv_heads × layers를 봐야 하는 이유**다.
+
+### 5.5 Don 경험과 연결
+
+KV-cache는 **쓰기 한 번, 읽기 여러 번** 하는 거대한 링버퍼 같은 구조다. 토큰마다 append하고, 매 step 전체를 스트리밍으로 읽는다. SSD 펌웨어에서 FTL 매핑 테이블을 DRAM에 얼마나 들고 있을 수 있는지 계산하던 것과 같은 산수다. "엔트리 크기 × 엔트리 수 ≤ 가용 DRAM"이고, 엔트리 크기를 줄이는 방법(GQA, int8 KV)이 곧 용량 설계다.
+
+---
+
+## 6. 위치 정보 — attention은 순서를 모른다
+
+### 6.1 permutation 실험
+
+attention 식을 다시 보자. `softmax(Q·Kᵀ)·V`에는 "i번째"라는 개념이 없다. 입력 토큰 순서를 섞으면 출력도 **똑같이 섞일 뿐** 각 토큰의 출력 값은 그대로다(수학 용어로 permutation-**equivariant**). "dog bites man"과 "man bites dog"가 토큰 단위로 같은 출력을 낸다는 뜻이다.
+
+```python
+import torch, torch.nn.functional as F
+torch.manual_seed(0)
+T, d = 4, 8
+x = torch.randn(1, 1, T, d)
+Wq, Wk, Wv = (torch.randn(d, d) for _ in range(3))
+def attn(x):
+    return F.scaled_dot_product_attention(x @ Wq, x @ Wk, x @ Wv)
+
+perm = torch.tensor([2, 0, 3, 1])            # 토큰 순서 뒤섞기
+y, y_p = attn(x), attn(x[:, :, perm])
+print("attn(permuted x) == permuted attn(x)?",
+      torch.allclose(y_p, y[:, :, perm], atol=1e-5))
+print("token 0 output, original order :", y[0, 0, 0, :3])
+print("token 0 output, shuffled order :", y_p[0, 0, 1, :3])  # perm[1] == 0
+
+pos = torch.randn(T, d)                       # 학습된 위치 벡터라고 치자
+y2, y2_p = attn(x + pos), attn(x[:, :, perm] + pos)
+print("with position added, still equal?",
+      torch.allclose(y2_p, y2[:, :, perm], atol=1e-5))
+```
+
+```text
+attn(permuted x) == permuted attn(x)? True
+token 0 output, original order : tensor([-1.4448,  4.0935, -1.5946])
+token 0 output, shuffled order : tensor([-1.4448,  4.0935, -1.5946])
+with position added, still equal? False
+```
+
+출력에서 볼 것: 입력을 섞어도 토큰 0의 출력 벡터는 완전히 같다(자리만 옮겨감). 위치 벡터 `pos`를 더하면 섞은 입력의 결과가 달라진다 — 이제 모델이 순서를 구별한다. conv나 RNN은 구조 자체에 순서가 박혀 있지만, attention은 **위치 정보를 따로 넣어 줘야** 한다.
+
+### 6.2 방법 1: 절대 위치 벡터를 더한다
+
+- **sinusoidal** (원조 Transformer, 2017): 위치 pos의 2i, 2i+1번째 차원에 `sin(pos / 10000^(2i/d))`, `cos(pos / 10000^(2i/d))`를 넣는다. 학습 파라미터가 없다. 차원마다 주파수가 다른 sin/cos라서 Don에게는 **주파수가 기하급수로 내려가는 NCO 뱅크**의 위상값을 feature로 쓰는 것과 같다.
+- **learned** (BERT, GPT-2, ViT, Whisper decoder): 위치마다 학습되는 벡터 `[max_len, d]` 표를 두고 입력 embedding에 더한다. 단순하지만 학습 때 본 최대 길이(GPT-2 1024, Whisper decoder 448)를 넘을 수 없다.
+
+두 방법 모두 입력 x에 위치 벡터를 **더한다**. 그러면 q·k에 "절대 위치"가 섞여 들어가지만, 언어에서 중요한 것은 대개 "몇 칸 떨어져 있나"라는 **상대 위치**다.
+
+### 6.3 방법 2: RoPE — q, k를 위치만큼 회전한다
+
+**RoPE(Rotary Position Embedding)**는 현재 거의 모든 소형 LLM(Llama, Qwen, Gemma, SmolLM, Phi 계열)이 쓰는 방식이다. 아이디어:
+
+1. q, k 벡터의 차원을 두 개씩 짝 짓는다: (x₀, x₁), (x₂, x₃), …  각 짝을 **2D 평면의 점**으로 본다.
+2. 위치 m의 토큰이면 i번째 짝을 각도 `m · θ_i`만큼 **회전**한다. `θ_i = base^(−2i/d)` (base는 보통 10000, Llama 3는 500000).
+3. value에는 적용하지 않는다. q와 k에만, **attention 점수 계산 직전에** 적용한다.
+
+```
+짝 (a, b)를 각도 φ = m·θ_i 만큼 회전:
+a' = a·cos φ − b·sin φ
+b' = a·sin φ + b·cos φ
+```
+
+왜 상대 위치가 되나: 회전된 q(위치 m)와 k(위치 n)의 내적에서, 두 벡터가 각각 mθ, nθ만큼 돌았으므로 **둘 사이 각도는 (m − n)θ만큼만** 변한다. 내적은 두 벡터의 길이와 사이 각도로만 정해지므로(A1 2절), 점수는 **m − n에만 의존**한다.
+
+```
+rope(q, m) · rope(k, n) = f(q, k, m − n)      ← 절대 위치 m, n이 아니라 차이만
+```
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 375">
+<line x1="30.0" y1="170.0" x2="310.0" y2="170.0" stroke="currentColor"/> <line x1="170.0" y1="310.0" x2="170.0" y2="30.0" stroke="currentColor"/> <line x1="170.0" y1="170.0" x2="286.4" y2="140.9" stroke="#e08a3c" stroke-width="2" stroke-opacity="0.35"/> <text x="301.9" y="141.0" font-size="12" text-anchor="middle">m=0</text> <line x1="170.0" y1="170.0" x2="269.4" y2="102.7" stroke="#e08a3c" stroke-width="2" stroke-opacity="0.51"/> <text x="282.6" y="97.8" font-size="12" text-anchor="middle">m=1</text> <line x1="170.0" y1="170.0" x2="240.3" y2="72.7" stroke="#e08a3c" stroke-width="2" stroke-opacity="0.67"/> <text x="249.7" y="63.8" font-size="12" text-anchor="middle">m=2</text> <line x1="170.0" y1="170.0" x2="202.7" y2="54.5" stroke="#e08a3c" stroke-width="2" stroke-opacity="0.83"/> <text x="207.0" y="43.1" font-size="12" text-anchor="middle">m=3</text>
+<line x1="170.0" y1="170.0" x2="161.1" y2="50.3" stroke="#e08a3c" stroke-width="2" stroke-opacity="0.99"/> <text x="159.9" y="38.4" font-size="12" text-anchor="middle">m=4</text> <text x="170.0" y="24.0" font-size="13" text-anchor="middle">pair (x0,x1)를 위치 m마다 m·θ 만큼 회전</text> <text x="170.0" y="345.0" font-size="12" text-anchor="middle">길이는 그대로, 각도만 m·θ 증가</text> <line x1="360.0" y1="170.0" x2="640.0" y2="170.0" stroke="currentColor"/> <line x1="500.0" y1="310.0" x2="500.0" y2="30.0" stroke="currentColor"/> <text x="500.0" y="24.0" font-size="13" text-anchor="middle">q는 위치 m, k는 위치 n</text> <line x1="500.0" y1="170.0" x2="455.6" y2="58.5" stroke="#e08a3c" stroke-width="2"/> <line x1="500.0" y1="170.0" x2="570.2" y2="104.6" stroke="#e08a3c" stroke-width="2"/> <text x="450.4" y="49.5" font-size="12" text-anchor="middle">q@5</text>
+<text x="583.4" y="96.3" font-size="12" text-anchor="middle">k@3</text> <line x1="500.0" y1="170.0" x2="463.1" y2="284.2" stroke="#4a7bd0" stroke-width="2" stroke-dasharray="6 4"/> <line x1="500.0" y1="170.0" x2="404.2" y2="175.6" stroke="#4a7bd0" stroke-width="2" stroke-dasharray="6 4"/> <text x="458.8" y="301.5" font-size="12" text-anchor="middle">q@12</text> <text x="386.2" y="180.7" font-size="12" text-anchor="middle">k@10</text> <text x="500.0" y="345.0" font-size="12" text-anchor="middle">(5,3)과 (12,10): 쌍 전체가 같이 회전할 뿐</text> <text x="500.0" y="362.0" font-size="12" text-anchor="middle">q·k 사이 각도 = (aq−ak) + (m−n)·θ → 내적은 m−n에만 의존</text>
+</svg>
+```
+
+그림 5 — 왼쪽: 한 짝 (x₀, x₁)이 위치 m = 0…4에서 m·θ씩 회전한다. 길이는 변하지 않는다. 오른쪽: (m, n) = (5, 3)과 (12, 10)은 둘 다 전체가 다른 각도로 돌아가 있지만, q와 k 사이의 각도는 같다. 그래서 내적(= attention 점수)이 같다.
+
+### 6.4 코드로 확인 — 내적은 위치 차이에만 의존
+
+```python
+import numpy as np
+rng = np.random.default_rng(0)
+d, base = 8, 10000.0
+theta = base ** (-np.arange(0, d, 2) / d)       # 쌍마다 각속도 [d/2]
+print("theta per pair:", np.round(theta, 4))
+
+def rope(x, m):                                 # x: [d], m: 위치
+    x2 = x.reshape(-1, 2)                       # (x0,x1),(x2,x3),...
+    c, s = np.cos(m * theta), np.sin(m * theta)
+    out = np.stack([x2[:, 0] * c - x2[:, 1] * s,  # 2D 회전
+                    x2[:, 0] * s + x2[:, 1] * c], axis=1)
+    return out.reshape(-1)
+
+q, k = rng.standard_normal(d), rng.standard_normal(d)
+print("norm 보존:", np.linalg.norm(q).round(4), np.linalg.norm(rope(q, 37)).round(4))
+for m, n in [(5, 3), (12, 10), (102, 100), (3, 5), (7, 7), (0, 0)]:
+    print(f"m={m:3d} n={n:3d}  m-n={m-n:3d}  rope(q,m)·rope(k,n) = {rope(q, m) @ rope(k, n):8.4f}")
+```
+
+```text
+theta per pair: [1.    0.1   0.01  0.001]
+norm 보존: 1.8627 1.8627
+m=  5 n=  3  m-n=  2  rope(q,m)·rope(k,n) =  -1.7631
+m= 12 n= 10  m-n=  2  rope(q,m)·rope(k,n) =  -1.7631
+m=102 n=100  m-n=  2  rope(q,m)·rope(k,n) =  -1.7631
+m=  3 n=  5  m-n= -2  rope(q,m)·rope(k,n) =  -1.3804
+m=  7 n=  7  m-n=  0  rope(q,m)·rope(k,n) =  -1.4680
+m=  0 n=  0  m-n=  0  rope(q,m)·rope(k,n) =  -1.4680
+```
+
+출력에서 볼 것: 짝마다 각속도가 1, 0.1, 0.01, 0.001로 기하급수로 줄어든다(빠른 짝은 가까운 거리를, 느린 짝은 먼 거리를 구별). 회전이라 벡터 길이(norm)는 보존된다. (5, 3), (12, 10), (102, 100)은 절대 위치가 전혀 다른데 점수가 모두 −1.7631로 같고, 거리 −2(k가 q보다 뒤)는 다른 값이다. m = n이면 회전이 상쇄되어 그냥 q·k(−1.4680)다.
+
+### 6.5 임베디드 연결과 함정
+
+- **비용**: RoPE는 파라미터가 없고, 위치별 cos/sin 표 `[max_len, d/2]`만 있으면 된다. 곱셈 4개·덧셈 2개 per 짝이라 attention 자체보다 훨씬 싸다. 하지만 **elementwise 연산이라 NPU에서 MAC 배열을 못 쓰고** vector unit이나 DSP로 떨어지는 경우가 많다. 표는 미리 계산해 ROM/flash에 둔다.
+- **짝 짓는 방식이 구현마다 다르다**: 위 코드는 (0,1), (2,3) 인접 짝(interleaved)이다. Hugging Face Llama 구현은 앞 절반과 뒤 절반을 짝 짓는(`rotate_half`) 방식이다. 수학적으로 동치이지만 **가중치 행 순서가 달라서**, 한쪽 형식의 가중치를 다른 쪽 커널로 돌리면 출력이 망가진다. 모델 변환·포팅 때 가장 흔한 버그 중 하나다.
+- **KV-cache에는 회전된 K를 저장**한다. 위치 n은 토큰이 들어온 순간 정해지므로 한 번 회전해서 넣고 다시 건드리지 않는다.
+- **긴 문맥 확장**: Llama 3.2 config에는 `rope_scaling`(`rope_type: llama3`, factor 32)이 있다. 학습 길이보다 긴 문맥을 위해 θ를 조정하는 장치다. 런타임이 이 설정을 지원하지 않으면 짧은 입력은 멀쩡하고 긴 입력에서만 품질이 무너진다.
+
+---
+
+## 7. Transformer 블록 — attention + FFN + residual + norm
+
+### 7.1 블록의 구조
+
+transformer는 같은 모양의 블록을 N번 쌓는다(Llama-3.2-1B는 16개). 블록 하나는 두 개의 "가지(branch)"로 되어 있다.
+
+1. **attention 가지**: 토큰 **사이에서** 정보를 교환한다(유일하게 토큰끼리 섞이는 곳).
+2. **FFN 가지**: 토큰 **각각을 독립적으로** 변환한다(위치마다 같은 MLP, B1).
+
+각 가지는 **residual connection**으로 본선에 더해진다: `x = x + branch(x)`. 이 본선을 **residual stream**이라고 부른다. 입력부터 출력까지 `[B, T, d]` shape 그대로 흐르는 "버스"이고, 각 가지는 버스에서 읽어서 계산한 결과를 버스에 **더해 넣는** 모듈이다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 420">
+<line x1="120.0" y1="380.0" x2="120.0" y2="20.0" stroke="currentColor" stroke-width="3"/> <text x="120.0" y="392.0" font-size="12" text-anchor="middle">x (residual stream) [B,T,d]</text> <text x="120.0" y="14.0" font-size="12" text-anchor="middle">다음 블록으로</text> <line x1="120.0" y1="330.0" x2="190.0" y2="330.0" stroke="#4a7bd0"/> <rect x="190.0" y="315.0" width="100.0" height="30.0" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/> <text x="240.0" y="335.0" font-size="12" text-anchor="middle">RMSNorm</text> <line x1="290.0" y1="330.0" x2="315.0" y2="330.0" stroke="#4a7bd0"/> <rect x="315.0" y="315.0" width="190.0" height="30.0" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/> <text x="410.0" y="335.0" font-size="12" text-anchor="middle">Attention (+RoPE, mask)</text> <line x1="505.0" y1="330.0" x2="525.0" y2="330.0" stroke="#4a7bd0"/>
+<line x1="525.0" y1="330.0" x2="525.0" y2="250.0" stroke="#4a7bd0"/> <line x1="525.0" y1="250.0" x2="132.0" y2="250.0" stroke="#4a7bd0"/> <circle cx="120" cy="250" r="12" fill="none" stroke="currentColor"/> <text x="120.0" y="255.0" font-size="14" text-anchor="middle">+</text> <line x1="120.0" y1="170.0" x2="190.0" y2="170.0" stroke="#e08a3c"/> <rect x="190.0" y="155.0" width="100.0" height="30.0" fill="#e08a3c" fill-opacity="0.25" stroke="#e08a3c"/> <text x="240.0" y="175.0" font-size="12" text-anchor="middle">RMSNorm</text> <line x1="290.0" y1="170.0" x2="315.0" y2="170.0" stroke="#e08a3c"/> <rect x="315.0" y="155.0" width="190.0" height="30.0" fill="#e08a3c" fill-opacity="0.25" stroke="#e08a3c"/> <text x="410.0" y="175.0" font-size="12" text-anchor="middle">FFN (SwiGLU / GELU)</text> <line x1="505.0" y1="170.0" x2="525.0" y2="170.0" stroke="#e08a3c"/>
+<line x1="525.0" y1="170.0" x2="525.0" y2="90.0" stroke="#e08a3c"/> <line x1="525.0" y1="90.0" x2="132.0" y2="90.0" stroke="#e08a3c"/> <circle cx="120" cy="90" r="12" fill="none" stroke="currentColor"/> <text x="120.0" y="95.0" font-size="14" text-anchor="middle">+</text> <text x="540.0" y="295.0" font-size="12" text-anchor="start">① x = x + Attn(Norm(x))</text> <text x="540.0" y="313.0" font-size="12" text-anchor="start">토큰끼리 정보 교환</text> <text x="540.0" y="135.0" font-size="12" text-anchor="start">② x = x + FFN(Norm(x))</text> <text x="540.0" y="153.0" font-size="12" text-anchor="start">토큰별 독립 변환</text> <text x="360.0" y="410.0" font-size="12" text-anchor="middle">pre-norm: 정규화는 가지(branch) 안에서만, 본선(굵은 선)은 덧셈만 한다</text>
+</svg>
+```
+
+그림 6 — pre-norm decoder 블록. 굵은 세로선이 residual stream이다. 각 가지는 RMSNorm으로 정규화한 뒤 계산하고, 결과를 본선에 더한다. 본선 자체에는 정규화가 없다.
+
+### 7.2 pre-norm vs post-norm
+
+- **post-norm** (원조 2017): `x = Norm(x + Attn(x))`. 본선에 정규화가 끼어 있어 깊어지면 학습이 불안정해서 learning rate warmup이 필수였다.
+- **pre-norm** (GPT-2 이후 대부분): `x = x + Attn(Norm(x))`. 본선이 순수한 덧셈이라 gradient가 층을 건너 곧장 흐른다(A3 8절 vanishing gradient 대책과 같은 원리). 대신 맨 마지막에 최종 Norm을 한 번 더 둔다.
+
+정규화는 LayerNorm 또는 **RMSNorm**이다(B1). RMSNorm은 평균을 빼지 않고 RMS로만 나누고 bias가 없어 조금 더 싸다. Llama·Qwen 계열은 RMSNorm, BERT·GPT-2·Whisper는 LayerNorm이다.
+
+### 7.3 FFN: d → 4d → d, 그리고 SwiGLU
+
+FFN은 토큰마다 적용되는 2층 MLP다.
+
+```
+GELU FFN   : FFN(x) = W_down · GELU(W_up · x)              W_up [4d, d], W_down [d, 4d]
+             파라미터 = 2 · d · 4d = 8·d²
+
+SwiGLU FFN : FFN(x) = W_down · ( SiLU(W_gate · x) ⊙ (W_up · x) )    ⊙ = 원소별 곱
+             hidden = d_ff 이면 파라미터 = 3 · d · d_ff
+             d_ff = 4d   → 12·d²
+             d_ff = 8d/3 → 8·d²  (GELU와 같은 예산으로 맞춘 선택)
+```
+
+말로 하면: SwiGLU는 up 투영을 두 개 만들어 하나를 SiLU에 통과시켜 **게이트(0 근처 ~ 통과)**로 쓰고, 다른 하나와 원소별로 곱한다. 행렬이 3개라 같은 hidden이면 파라미터가 1.5배이므로, 원 논문과 Llama는 hidden을 약 8d/3로 줄여 예산을 맞춘다. Llama-3.2-1B는 d = 2048, d_ff = 8192(= 4d)로 넉넉하게 잡았다.
+
+Don 경험과 연결: 게이트는 "신호 × enable 비트"를 연속값으로 만든 것이다. 하드웨어 입장에서 SwiGLU는 GEMM 3개 + SiLU(sigmoid 계열, LUT) + 원소별 곱 하나다.
+
+### 7.4 블록 전체를 40줄로
+
+아래는 pre-norm, RMSNorm, (GQA 지원) attention, GELU/SwiGLU FFN을 가진 decoder 블록이다. `block.py`로 저장해서 다음 예제와 9절에서 쓴다.
+
+```python
+import torch, torch.nn as nn, torch.nn.functional as F
+
+class Attention(nn.Module):
+    def __init__(s, d, n_q, n_kv):
+        super().__init__()
+        s.n_q, s.n_kv, s.dh = n_q, n_kv, d // n_q
+        s.wq = nn.Linear(d, n_q * s.dh, bias=False)
+        s.wk = nn.Linear(d, n_kv * s.dh, bias=False)   # GQA: K/V는 n_kv head
+        s.wv = nn.Linear(d, n_kv * s.dh, bias=False)
+        s.wo = nn.Linear(n_q * s.dh, d, bias=False)
+    def forward(s, x):                                  # x: [B,T,d]
+        B, T, _ = x.shape
+        q = s.wq(x).view(B, T, s.n_q, s.dh).transpose(1, 2)
+        k = s.wk(x).view(B, T, s.n_kv, s.dh).transpose(1, 2)
+        v = s.wv(x).view(B, T, s.n_kv, s.dh).transpose(1, 2)
+        o = F.scaled_dot_product_attention(q, k, v, is_causal=True,
+                                           enable_gqa=s.n_q != s.n_kv)
+        return s.wo(o.transpose(1, 2).reshape(B, T, -1))
+
+class FFN(nn.Module):
+    def __init__(s, d, hidden, kind):
+        super().__init__()
+        s.kind = kind
+        s.up = nn.Linear(d, hidden, bias=False)
+        s.gate = nn.Linear(d, hidden, bias=False) if kind == "swiglu" else None
+        s.down = nn.Linear(hidden, d, bias=False)
+    def forward(s, x):
+        if s.kind == "swiglu":
+            return s.down(F.silu(s.gate(x)) * s.up(x))
+        return s.down(F.gelu(s.up(x)))
+
+class Block(nn.Module):                                 # pre-norm decoder block
+    def __init__(s, d, n_q, n_kv, hidden, kind="swiglu"):
+        super().__init__()
+        s.norm1, s.norm2 = nn.RMSNorm(d), nn.RMSNorm(d)
+        s.attn, s.ffn = Attention(d, n_q, n_kv), FFN(d, hidden, kind)
+    def forward(s, x):
+        x = x + s.attn(s.norm1(x))                      # residual 1
+        x = x + s.ffn(s.norm2(x))                       # residual 2
+        return x
+```
+
+### 7.5 파라미터 수 분해
+
+위 블록을 설정만 바꿔 가며 attention과 FFN의 파라미터를 센다. 마지막 줄은 Llama-3.2-1B와 같은 크기의 층 하나를 `meta` device(메모리 할당 없이 shape만)에서 만들어 센다.
+
+```python
+import torch
+from block import Block
+torch.manual_seed(0)
+blk = Block(d=64, n_q=4, n_kv=4, hidden=256, kind="gelu")
+x = torch.randn(2, 10, 64)
+print("in", tuple(x.shape), "-> out", tuple(blk(x).shape))
+
+def count(m): return sum(p.numel() for p in m.parameters())
+d = 512
+for name, kw in [("MHA + GELU 4d   ", dict(n_q=8, n_kv=8, hidden=4 * d, kind="gelu")),
+                 ("MHA + SwiGLU 4d ", dict(n_q=8, n_kv=8, hidden=4 * d, kind="swiglu")),
+                 ("MHA + SwiGLU 8/3", dict(n_q=8, n_kv=8, hidden=8 * d // 3, kind="swiglu")),
+                 ("GQA(8/2)+GELU 4d", dict(n_q=8, n_kv=2, hidden=4 * d, kind="gelu"))]:
+    b = Block(d, **kw)
+    a, f, n = count(b.attn), count(b.ffn), count(b.norm1) + count(b.norm2)
+    print(f"{name}: attn {a:8,d} ({a/d/d:4.1f}·d²)  ffn {f:9,d} ({f/d/d:4.1f}·d²)"
+          f"  norm {n}  ffn share {f/(a+f+n):.0%}")
+
+with torch.device("meta"):                              # 메모리 할당 없이 개수만
+    b = Block(2048, n_q=32, n_kv=8, hidden=8192, kind="swiglu")  # Llama-3.2-1B 층 하나
+a, f = count(b.attn), count(b.ffn)
+print(f"Llama-3.2-1B-like layer: attn {a:,}  ffn {f:,}  ffn share {f/(a+f):.0%}")
+```
+
+```text
+in (2, 10, 64) -> out (2, 10, 64)
+MHA + GELU 4d   : attn 1,048,576 ( 4.0·d²)  ffn 2,097,152 ( 8.0·d²)  norm 1024  ffn share 67%
+MHA + SwiGLU 4d : attn 1,048,576 ( 4.0·d²)  ffn 3,145,728 (12.0·d²)  norm 1024  ffn share 75%
+MHA + SwiGLU 8/3: attn 1,048,576 ( 4.0·d²)  ffn 2,096,640 ( 8.0·d²)  norm 1024  ffn share 67%
+GQA(8/2)+GELU 4d: attn  655,360 ( 2.5·d²)  ffn 2,097,152 ( 8.0·d²)  norm 1024  ffn share 76%
+Llama-3.2-1B-like layer: attn 10,485,760  ffn 50,331,648  ffn share 83%
+```
+
+출력에서 볼 것:
+
+| 설정 (d = 512) | attention | FFN | FFN 비중 |
+|---|---|---|---|
+| MHA + GELU 4d | 4.0·d² | 8.0·d² | 67% |
+| MHA + SwiGLU 4d | 4.0·d² | 12.0·d² | 75% |
+| MHA + SwiGLU 8d/3 | 4.0·d² | 8.0·d² | 67% |
+| GQA (8q/2kv) + GELU 4d | 2.5·d² | 8.0·d² | 76% |
+| Llama-3.2-1B 층 (GQA 32/8, SwiGLU 4d) | 10.5M | 50.3M | 83% |
+
+말로 하면: 블록 파라미터의 **2/3 이상이 FFN**이다. "transformer = attention"이라는 인상과 달리, 가중치 메모리와 (짧은 문맥에서의) 연산량은 FFN이 주도한다. GQA는 attention 쪽을 4·d²에서 2.5·d²로 더 줄인다(W_K, W_V가 각 d²/4). 양자화(C1–C3)로 줄일 대상도 대부분 FFN 가중치다.
+
+전체 모델로 넓히면: Llama-3.2-1B의 총 파라미터를 같은 방식으로 세면 1,235,814,400개(약 1.24B)이고, 그중 embedding 표(128256 × 2048 ≈ 263M, 출력층과 공유)가 약 21%, 16개 층이 16 × 60.8M ≈ 973M이다. vocab이 큰 소형 LLM에서는 embedding도 무시 못 할 몫이다(B8).
+
+### 7.6 함정
+
+- **residual 앞뒤 dtype**: residual stream은 층을 지날수록 값이 커질 수 있다. int8로 양자화할 때 residual 덧셈의 scale이 맞지 않으면 오차가 층마다 누적된다. 보통 residual과 norm은 높은 정밀도(int16/fp16)로 남긴다.
+- **최종 norm 누락**: pre-norm 모델을 직접 구현할 때 마지막 RMSNorm을 빼먹으면 출력 logit 크기가 틀어진다. 에러 없이 품질만 나쁘다.
+- **LayerNorm vs RMSNorm 혼동**: 가중치를 옮길 때 RMSNorm 모델에 LayerNorm 커널을 쓰면 평균을 빼 버려서 값이 달라진다.
+
+---
+
+## 8. Encoder-only, decoder-only, encoder-decoder
+
+같은 블록을 어떻게 배치하느냐로 세 가족이 나뉜다. 차이는 **mask**와 **cross-attention** 유무다.
+
+- **encoder**: mask 없는 양방향 self-attention. 입력 전체를 한 번에 보고 표현(embedding)을 만든다.
+- **decoder**: causal self-attention. 다음 토큰을 하나씩 생성한다.
+- **cross-attention**: query는 decoder에서, key·value는 encoder 출력에서 온다. "텍스트를 만들면서 오디오를 참조"하는 통로다.
+
+| 구조 | attention 종류 | 대표 모델 | 입력 → 출력 | 추론 방식 |
+|---|---|---|---|---|
+| encoder-only | 양방향 self | BERT, ViT, Conformer encoder, CLIP 이미지 인코더 | 시퀀스 → 표현/분류 | 한 번의 forward |
+| decoder-only | causal self | GPT-2, Llama 3.2, Qwen2.5, SmolLM2 | 토큰 → 다음 토큰 | prefill 1번 + 토큰마다 decode |
+| encoder-decoder | 양방향 self (enc)<br>causal self + cross (dec) | Whisper, T5 | 오디오/텍스트 → 텍스트 | encoder 1번 + decoder 토큰마다 |
+
+몇 가지 구체적인 숫자(Hugging Face config로 확인): **Whisper-tiny**는 d_model 384, encoder 4층 + decoder 4층, head 6개, FFN 1536(= 4d, GELU)이다. encoder 입력은 30초 오디오의 log-mel 80채널이고, 2개의 conv를 지나 **1500 프레임**이 된다(`max_source_positions` 1500). decoder 최대 길이는 448 토큰이다.
+
+**ViT**는 이미지를 16×16 패치로 잘라 각 패치를 토큰으로 본다(224×224 이미지 → 196 토큰). **Conformer**는 attention 블록 사이에 depthwise conv 모듈을 넣은 음성용 encoder다(B5). decoder-only LLM의 입력에 음성·이미지 encoder 출력을 토큰처럼 이어 붙이면 speech-LLM, VLM이 된다(B8).
+
+임베디드 관점의 차이: encoder는 **입력 길이가 정해지면 한 번에 끝나는** 정적 그래프라 NPU에 올리기 쉽다(ViT, KWS용 소형 transformer). decoder는 **토큰마다 길이가 1씩 늘어나는** 루프라서 KV-cache 관리와 동적 shape 문제가 생긴다. Whisper는 encoder(무겁고 정적)와 decoder(가볍고 반복)를 **다른 가속기나 다른 정밀도**로 나눠 돌리는 설계가 흔하다.
+
+---
+
+## 9. Autoregressive decoding과 KV-cache
+
+### 9.1 decoder는 토큰을 하나씩 만든다
+
+decoder-only 모델의 생성은 루프다.
+
+```
+prompt = [t1 … tP]
+repeat:
+    logits = model(지금까지의 토큰 전부)     ← 마지막 위치의 출력만 쓴다
+    t_next = sample(logits[-1])             (B8: greedy, top-k, temperature)
+    토큰 목록에 t_next 추가
+```
+
+순진하게 구현하면 step마다 **전체 시퀀스를 다시 계산**한다. 그런데 causal mask 때문에 과거 토큰의 K, V는 **미래 토큰이 추가되어도 절대 변하지 않는다**(위치 j의 계산은 j 이전만 보므로). 매번 같은 값을 다시 계산하는 것은 낭비다.
+
+### 9.2 KV-cache: 과거의 K, V를 저장해 두기
+
+그래서 층마다 과거 토큰의 K, V를 저장해 두고, 새 토큰 하나에 대해서만 q, k, v를 계산한다.
+
+```
+step t (새 토큰 1개):
+  q_t, k_t, v_t = x_t · W_Q, W_K, W_V          ← 토큰 1개 분량의 투영만
+  K_cache ← append(K_cache, k_t)               [kv_heads, t, d_h]
+  V_cache ← append(V_cache, v_t)
+  o_t = softmax(q_t · K_cacheᵀ / √d_h) · V_cache   ← 1 × t 점수 (mask 불필요: 과거만 있다)
+```
+
+말로 하면: 새 토큰의 query 하나가 캐시에 쌓인 모든 key와 비교하고 value를 섞는다. 저장 대상은 **K와 V뿐**이다. Q는 그 step에서만 쓰고 버린다. 그래서 이름이 KV-cache다.
+
+- **prefill**: prompt 전체(P개 토큰)를 한 번에 넣어 캐시를 채운다. 행렬 × 행렬(GEMM) 연산이다.
+- **decode**: 이후 토큰을 하나씩. 행렬 × 벡터(GEMV) 연산이다.
+
+### 9.3 코드로 확인 — 캐시 유무의 출력이 같은가, 얼마나 빨라지나
+
+attention 층 하나를 캐시 없이(매 step 전체 재계산)와 캐시 있게(prefill 후 한 토큰씩) 돌려, **매 step 마지막 토큰의 출력**을 비교한다.
+
+```python
+import time, torch, torch.nn as nn, torch.nn.functional as F
+torch.manual_seed(0)
+class CachedAttn(nn.Module):
+    def __init__(s, d, h):
+        super().__init__(); s.h, s.dh = h, d // h
+        s.wqkv, s.wo = nn.Linear(d, 3 * d, bias=False), nn.Linear(d, d, bias=False)
+    def forward(s, x, cache=None):                     # x: [B, t_new, d]
+        B, t, d = x.shape
+        q, k, v = (z.view(B, t, s.h, s.dh).transpose(1, 2) for z in s.wqkv(x).chunk(3, -1))
+        if cache is not None:                          # 과거 K,V 뒤에 새 것만 붙인다
+            k, v = torch.cat([cache[0], k], 2), torch.cat([cache[1], v], 2)
+        o = F.scaled_dot_product_attention(q, k, v, is_causal=(cache is None))
+        return s.wo(o.transpose(1, 2).reshape(B, t, d)), (k, v)
+
+def run(d, h, T, n_prefill):
+    m, x = CachedAttn(d, h).eval(), torch.randn(1, T, d)
+    with torch.inference_mode():
+        t0 = time.perf_counter(); ref = []
+        for t in range(n_prefill, T + 1):              # 캐시 없음: 매 step 전체 재계산
+            ref.append(m(x[:, :t])[0][:, -1])
+        t1 = time.perf_counter()
+        y, cache = m(x[:, :n_prefill]); got = [y[:, -1]]   # prefill
+        for t in range(n_prefill, T):                  # decode: 토큰 1개씩
+            y, cache = m(x[:, t:t + 1], cache); got.append(y[:, -1])
+        t2 = time.perf_counter()
+    diff = (torch.stack(ref) - torch.stack(got)).abs().max().item()
+    return diff, t1 - t0, t2 - t1, tuple(cache[0].shape)
+
+diff, *_ , shp = run(d=64, h=4, T=16, n_prefill=4)
+print(f"small: max diff = {diff:.2e}, cache K shape = {shp}")
+diff, t_nc, t_c, shp = run(d=512, h=8, T=512, n_prefill=16)
+print(f"d=512,T=512: diff={diff:.2e}  no-cache {t_nc:.2f}s  cache {t_c:.2f}s  x{t_nc/t_c:.0f}")
+```
+
+```text
+small: max diff = 1.19e-07, cache K shape = (1, 4, 16, 16)
+d=512,T=512: diff=2.38e-07  no-cache 1.32s  cache 0.18s  x7
+```
+
+출력에서 볼 것: 두 경로의 출력 차이가 1e-7 수준 — 캐시는 **근사가 아니라 완전히 같은 계산**이다. 16 토큰 후 캐시 K의 shape는 `[1, 4, 16, 16]`(batch, head, 토큰, d_h)로 토큰마다 한 칸씩 늘었다. d = 512, 512 토큰에서 캐시 쪽이 약 7배 빨랐다(같은 코드를 두 번 돌렸을 때 7배, 12배로 달랐다 — CPU 상태에 따라 변한다). 이론적인 MAC 비율(아래)보다 훨씬 작은데, 캐시 경로는 step마다 **아주 작은 행렬곱을 수백 번** 부르는 것이라 Python·커널 호출 오버헤드와 메모리 접근이 시간을 지배하기 때문이다. 이것이 바로 "decode는 연산이 아니라 다른 것에 묶인다"의 첫 번째 맛보기다.
+
+### 9.4 MAC 수로 보면
+
+Llama-3.2-1B 모양 층 하나에서 투영(W_Q, W_K, W_V, W_O)만 세어도 차이가 크다. 1024 토큰을 생성할 때(아래 10절 코드 출력의 마지막 줄):
+
+```
+캐시 없음: ∑_{t=1..1024} t × 10.49M ≈ 5.50 T MAC     (step마다 t개 토큰 전부 재투영)
+캐시 있음: 1024 × 10.49M            ≈ 10.74 G MAC    (step마다 1개)
+비율 ≈ 512배 ( = (N+1)/2 )
+```
+
+말로 하면: 캐시가 없으면 총 연산이 생성 길이의 **제곱**으로, 캐시가 있으면 **선형**으로 는다. 대가는 메모리다. 5.4절처럼 토큰당 32 KiB씩 캐시가 자란다.
+
+### 9.5 prefill vs decode — compute-bound vs memory-bound (D5 미리보기)
+
+decode step 하나에서 batch 1이면 **모든 가중치를 한 번씩 읽어서 곱셈 한 번씩**만 한다. fp16 가중치 2바이트당 MAC 1회(= 2 FLOP)이니 연산 밀도(arithmetic intensity)가 약 **1 FLOP/byte**다. NPU는 보통 이보다 수백 배 높은 연산 밀도에서야 MAC 배열을 다 쓸 수 있다(E7 roofline). 그래서
+
+- **prefill**: 가중치 한 번 읽고 P개 토큰에 재사용 → **compute-bound**. 시간 ≈ MAC ÷ TOPS. 첫 토큰까지 시간(TTFT)을 정한다.
+- **decode**: 토큰마다 가중치 전부 + KV-cache 전부를 읽음 → **memory-bound**. 시간 ≈ (가중치 바이트 + KV 바이트) ÷ 메모리 대역폭.
+
+back-of-envelope(가정 수치로만): Llama-3.2-1B의 가중치는 1.24B개다. int4로 저장하면 약 0.62 GB(scale 오버헤드 무시)다. 기기 메모리 대역폭을 **50 GB/s로 가정**하면 decode 상한은 대략 50 ÷ 0.62 ≈ 80 tokens/s이고, 문맥이 길어지면 KV 바이트가 분모에 더해져 더 느려진다. 이 계산은 D5에서 제대로 한다. 기억할 것은 **"decode 속도 ≈ 대역폭 ÷ 매 토큰 읽는 바이트"**라는 한 줄이다.
+
+### 9.6 Don 경험과 연결
+
+KV-cache는 **미리 할당된 ring/linear 버퍼 + write pointer**로 구현한다. 최대 문맥 길이만큼 `[layers][2][kv_heads][max_seq][d_h]`를 정적으로 잡고, 토큰마다 write pointer를 하나 올린다. 문맥이 가득 차면 오래된 토큰을 버리는 sliding window(ring buffer 그대로)나 앞부분 요약 같은 정책이 필요하다. SSD 펌웨어의 write buffer·journal 관리와 같은 종류의 설계 문제다. llama.cpp 같은 런타임도 캐시를 미리 할당한다(F3).
+
+---
+
+## 10. 비용 — 언제 T²가 문제가 되나
+
+### 10.1 두 종류의 항
+
+층 하나의 forward(길이 T, batch 1)를 MAC으로 세면 두 종류가 있다.
+
+```
+선형 항 (토큰마다 같은 가중치):  T × (투영 + FFN)       ∝ T · d²     W_Q,K,V,O + FFN
+T² 항 (토큰 쌍마다):             Q·Kᵀ + P·V = 2 · T² · d   ∝ T² · d
+점수 메모리:                     heads × T × T 개 원소       ∝ T²
+```
+
+말로 하면: 선형 항은 "토큰 수 × 가중치 크기", T² 항은 "토큰 쌍의 수 × 차원"이다. 짧은 문맥에서는 d²가 크니 선형 항이 지배하고, 문맥이 길어지면 T²가 따라잡는다.
+
+손계산(MHA + GELU 4d 블록): 선형 항 = T·(4d² + 8d²) = 12·T·d², T² 항 = 2·T²·d. 같아지는 지점은 2T²d = 12Td² → **T = 6d**. FFN만과 비교하면 T = 4d다.
+
+**Whisper-tiny encoder로 검산**: d = 384, T = 1500. 선형 항 12 × 384² = 1,769,472 MAC/토큰, T² 항 2 × 1500 × 384 = 1,152,000 MAC/토큰. T² 항 비율 = 1,152,000 ÷ 2,921,472 ≈ **39%**. d가 작은 음성 encoder에서는 1500 프레임만으로도 attention 코어가 벌써 큰 몫이다. 반면 d = 2048인 LLM에서는 훨씬 긴 문맥이 필요하다(아래).
+
+### 10.2 코드로 표 만들기 — Llama-3.2-1B 모양
+
+```python
+# Llama-3.2-1B-like layer 하나의 forward MAC 수 (batch 1, causal 절약 없이 full T×T)
+d, n_q, n_kv, dh, dff = 2048, 32, 8, 64, 8192
+proj = d * (n_q * dh) * 2 + d * (n_kv * dh) * 2        # Wq, Wo + Wk, Wv (per token)
+ffn = 3 * d * dff                                      # SwiGLU gate/up/down (per token)
+print(f"per-token linear MACs: proj {proj/1e6:.2f}M, ffn {ffn/1e6:.2f}M")
+print(" T     | proj+FFN (T·const) | QKᵀ+PV (2·T²·d) | attn-core share | fp16 score mem (32 heads)")
+for T in [128, 1024, 4096, 16384]:
+    lin = T * (proj + ffn)
+    core = 2 * T * T * n_q * dh
+    mem = T * T * n_q * 2                              # [h,T,T] fp16 bytes
+    print(f"{T:6d} | {lin/1e9:14.1f} G   | {core/1e9:12.1f} G   | {core/(lin+core):14.0%}  | {mem/2**20:10.0f} MiB")
+print("crossover T where QKᵀ+PV == FFN:", ffn // (2 * n_q * dh))
+print("crossover T where QKᵀ+PV == proj+FFN:", (proj + ffn) // (2 * n_q * dh))
+
+# 캐시 유무에 따른 decode MAC 합계 (proj만 비교, prompt 0에서 N 토큰 생성)
+N = 1024
+no_cache = sum(t * proj for t in range(1, N + 1))      # 매 step t개 토큰 전부 재투영
+cache = N * proj                                       # 매 step 새 토큰 1개만
+print(f"projection MACs for {N} tokens: no-cache {no_cache/1e12:.2f} T, cache {cache/1e9:.2f} G, x{no_cache/cache:.0f}")
+```
+
+```text
+per-token linear MACs: proj 10.49M, ffn 50.33M
+ T     | proj+FFN (T·const) | QKᵀ+PV (2·T²·d) | attn-core share | fp16 score mem (32 heads)
+   128 |            7.8 G   |          0.1 G   |             1%  |          1 MiB
+  1024 |           62.3 G   |          4.3 G   |             6%  |         64 MiB
+  4096 |          249.1 G   |         68.7 G   |            22%  |       1024 MiB
+ 16384 |          996.4 G   |       1099.5 G   |            52%  |      16384 MiB
+crossover T where QKᵀ+PV == FFN: 12288
+crossover T where QKᵀ+PV == proj+FFN: 14848
+projection MACs for 1024 tokens: no-cache 5.50 T, cache 10.74 G, x512
+```
+
+출력에서 볼 것: T = 128에서 T² 항은 1%, T = 1024에서 6%, T = 4096에서 22%다. FFN과 같아지는 지점은 T = 12288(2·T²·d = 3·d·d_ff·T에서 T = 1.5·d_ff = 6d, SwiGLU 4d라서), 선형 항 전체와 같아지는 지점은 약 14.8k 토큰이다. 이 계산은 causal이라 절반만 계산해도 되는 부분을 무시한 **full T×T 기준**이다. 그리고 **점수 메모리**가 T = 4096에서 층당 1 GiB(fp16, 32 head)다 — 연산보다 이쪽이 먼저 문제다.
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 305">
+<line x1="70.0" y1="260.0" x2="630.0" y2="260.0" stroke="currentColor"/> <line x1="70.0" y1="260.0" x2="70.0" y2="40.0" stroke="currentColor"/> <line x1="70.0" y1="260.0" x2="70.0" y2="265.0" stroke="currentColor"/> <text x="70.0" y="280.0" font-size="12" text-anchor="middle">64</text> <line x1="182.0" y1="260.0" x2="182.0" y2="265.0" stroke="currentColor"/> <text x="182.0" y="280.0" font-size="12" text-anchor="middle">256</text> <line x1="294.0" y1="260.0" x2="294.0" y2="265.0" stroke="currentColor"/> <text x="294.0" y="280.0" font-size="12" text-anchor="middle">1024</text> <line x1="406.0" y1="260.0" x2="406.0" y2="265.0" stroke="currentColor"/> <text x="406.0" y="280.0" font-size="12" text-anchor="middle">4096</text> <line x1="518.0" y1="260.0" x2="518.0" y2="265.0" stroke="currentColor"/> <text x="518.0" y="280.0" font-size="12" text-anchor="middle">16384</text>
+<line x1="630.0" y1="260.0" x2="630.0" y2="265.0" stroke="currentColor"/> <text x="630.0" y="280.0" font-size="12" text-anchor="middle">65536</text> <line x1="65.0" y1="260.0" x2="70.0" y2="260.0" stroke="currentColor"/> <text x="61.0" y="264.0" font-size="12" text-anchor="end">0%</text> <line x1="65.0" y1="205.0" x2="70.0" y2="205.0" stroke="currentColor"/> <text x="61.0" y="209.0" font-size="12" text-anchor="end">25%</text> <line x1="65.0" y1="150.0" x2="70.0" y2="150.0" stroke="currentColor"/> <text x="61.0" y="154.0" font-size="12" text-anchor="end">50%</text> <line x1="65.0" y1="95.0" x2="70.0" y2="95.0" stroke="currentColor"/> <text x="61.0" y="99.0" font-size="12" text-anchor="end">75%</text> <line x1="65.0" y1="40.0" x2="70.0" y2="40.0" stroke="currentColor"/> <text x="61.0" y="44.0" font-size="12" text-anchor="end">100%</text>
+<line x1="70.0" y1="150.0" x2="630.0" y2="150.0" stroke="#888" stroke-dasharray="4 4"/> <polyline points="70.0,259.1 84.4,258.9 98.7,258.7 113.1,258.4 127.4,258.1 141.8,257.7 156.2,257.3 170.5,256.8 184.9,256.1 199.2,255.4 213.6,254.5 227.9,253.5 242.3,252.3 256.7,250.8 271.0,249.1 285.4,247.2 299.7,244.8 314.1,242.1 328.5,239.0 342.8,235.3 357.2,231.2 371.5,226.4 385.9,221.1 400.3,215.0 414.6,208.3 429.0,201.0 443.3,193.0 457.7,184.4 472.1,175.4 486.4,166.0 500.8,156.3 515.1,146.5 529.5,136.8 543.8,127.3 558.2,118.2 572.6,109.4 586.9,101.3 601.3,93.7 615.6,86.9 630.0,80.6" fill="none" stroke="#d0564a" stroke-width="2.5"/> <circle cx="126.0" cy="258.1" r="4" fill="#4a7bd0"/> <text x="122.0" y="249.1" font-size="12" text-anchor="end">1%</text> <circle cx="294.0" cy="245.8" r="4" fill="#4a7bd0"/> <text x="290.0" y="236.8" font-size="12" text-anchor="end">6%</text>
+<circle cx="406.0" cy="212.4" r="4" fill="#4a7bd0"/> <text x="402.0" y="203.4" font-size="12" text-anchor="end">22%</text> <circle cx="518.0" cy="144.6" r="4" fill="#4a7bd0"/> <text x="514.0" y="135.6" font-size="12" text-anchor="end">52%</text> <line x1="510.0" y1="260.0" x2="510.0" y2="40.0" stroke="#888" stroke-dasharray="2 3"/> <text x="514.0" y="52.0" font-size="12" text-anchor="start">T ≈ 14.8k</text> <text x="350.0" y="24.0" font-size="13" text-anchor="middle">Llama-3.2-1B 모양 층 하나: 전체 MAC 중 QKᵀ+PV(T² 항)의 비율</text> <text x="350.0" y="295.0" font-size="12" text-anchor="middle">시퀀스 길이 T (log scale)</text>
+</svg>
+```
+
+그림 7 — Llama-3.2-1B 모양 층 하나에서 전체 MAC 중 T² 항(Q·Kᵀ + P·V)의 비율(40개 점을 실제 계산, log 축). 파란 점은 위 표의 T = 128, 1024, 4096, 16384. 기기에서 흔한 수백~수천 토큰 구간에서는 선형 항(가중치 GEMM)이 여전히 대부분이다.
+
+### 10.3 FlashAttention — T×T를 메모리에 만들지 않는다
+
+순진한 구현은 `S = Q·Kᵀ`(T×T)를 통째로 DRAM에 쓰고, 다시 읽어 softmax하고, 또 쓰고 읽어 P·V를 한다. T = 4096이면 층당 1 GiB가 DRAM을 왕복한다. **FlashAttention**(Dao et al., 2022)은 개념적으로 이렇게 한다.
+
+1. Q를 행 블록(tile)으로, K·V를 열 블록으로 나눠 **on-chip SRAM에 들어가는 크기**만큼만 가져온다.
+2. tile 단위로 점수를 계산하고 곧장 softmax·V 가중합까지 한다.
+3. softmax 분모는 1.6절의 **online softmax**(running max `m`, running sum `l`, 보정 계수 `e^(m_old − m_new)`)로 tile을 넘어가며 갱신한다.
+4. 결과적으로 T×T 행렬은 **어디에도 저장되지 않는다**. DRAM 트래픽은 Q, K, V, O 읽기·쓰기 수준(∝ T·d)으로 줄어든다.
+
+MAC 수는 그대로다(오히려 보정 때문에 약간 늘어난다). 줄어드는 것은 **메모리 트래픽**이고, attention이 memory-bound인 구간에서는 그게 곧 속도다. Don 경험과 연결: GEMM tiling(A1 8절)과 같은 원리에, softmax라는 "행 전체를 봐야 하는 연산"을 스트리밍으로 바꾼 트릭을 더한 것이다. 모바일·NPU 벤더의 "fused attention kernel"도 대개 같은 발상이다.
+
+### 10.4 decode 때의 attention 비용
+
+decode step 하나의 attention 코어는 `1 × t` 점수라 MAC은 2·t·d로 작다. 하지만 KV-cache 전체(t × 토큰당 32 KiB)를 **매 step 읽어야** 한다. 4096 토큰이면 step마다 128 MiB를 읽는다. 가중치(int4 약 0.62 GB)에 비하면 작지만 문맥이 길수록 무시할 수 없다. GQA·int8 KV·sliding window가 이 항을 줄이는 도구다(D5).
+
+---
+
+## 11. 임베디드 관점에서 다시 보기
+
+### 11.1 transformer가 NPU를 힘들게 하는 이유
+
+CNN(B2)은 NPU가 가장 잘하는 일이다: 고정 shape, conv/GEMM 위주, 작은 가중치를 많이 재사용한다. transformer는 여러 면에서 반대다.
+
+| 부담 요인 | 어디서 | 왜 NPU에 불리한가 | 흔한 대응 |
+|---|---|---|---|
+| softmax | 모든 attention | exp·max·나눗셈, 행 전체 reduction. MAC 배열이 아닌 vector/DSP 유닛에서 돈다 | exp LUT, int16 softmax, fused attention 커널 |
+| LayerNorm / RMSNorm | 블록마다 2번 | 평균·분산 reduction + 역제곱근 | RMSNorm(평균 없음), 높은 정밀도 유지, 커널 융합 |
+| 동적 shape | decode 루프, KV 길이 | 컴파일러는 고정 shape 그래프를 원한다. T가 매 step 1씩 변한다 | 최대 길이로 고정 + mask, 길이 bucket 몇 개 |
+| 큰 가중치 | FFN, embedding | 수백 MB가 SRAM에 안 들어가 매 토큰 DRAM에서 스트리밍 | int8/int4 weight-only 양자화 |
+| 메모리 대역폭 | decode 전체 | 연산 밀도 ≈ 1 FLOP/byte → MAC이 놀고 대역폭이 상한 | 양자화, GQA, 배치/투기적 디코딩(L 모듈) |
+| T×T 중간값 | 긴 입력 attention | 점수 행렬이 SRAM 초과 → DRAM 왕복 | tiling / FlashAttention식 커널 |
+| elementwise 다수 | RoPE, SiLU·곱, residual | 연산은 작은데 텐서 전체를 한 번씩 읽고 씀 | 연산자 융합(fusion) |
+
+### 11.2 기기에서 쓰는 요령
+
+- **static shape로 만든다**: encoder는 입력 길이를 고정한다(예: 오디오 1초 = 프레임 N개, 모자라면 padding + mask). decoder는 KV-cache를 최대 길이로 미리 잡고 "현재 길이"를 mask로 표현하면 그래프 하나(decode 1토큰용)와 prefill용 그래프 하나로 끝난다.
+- **fused attention 연산자를 쓰는지 확인한다**: 런타임(QNN, TFLite, ExecuTorch, llama.cpp …)이 Q·Kᵀ → softmax → ·V를 하나의 커널로 처리하는지, 아니면 연산자 5~6개로 쪼개서 중간값을 DRAM에 쓰는지에 따라 속도가 크게 다르다. 연산자 지원 표를 먼저 본다(F 모듈).
+- **가중치는 int8/int4, activation은 int8/int16/fp16**: decode가 memory-bound라 **가중치 바이트를 줄이는 것 = 속도**다. 반면 softmax 입력, norm, residual은 정밀도에 민감해서 높은 비트로 두는 mixed precision이 흔하다(C1–C3).
+- **KV-cache를 예산에 넣는다**: "모델 가중치 + KV(최대 문맥) + activation + 런타임"이 기기 RAM 예산이다. 예: Llama-3.2-1B int4 약 0.62 GB + KV fp16 2048 토큰 64 MiB + α. 문맥 길이를 반으로 줄이면 KV도 반이다.
+- **softmax를 C로 볼 줄 안다**: 1.6절처럼 행마다 max → exp → sum → 나누기. int8 경로에서는 score scale × 정수 차이로 exp LUT를 인덱싱한다(A2 14절 과제와 같다).
+
+### 11.3 Hark 같은 기기라면 (추정 예시)
+
+- always-on 저전력 MCU: transformer보다 DS-CNN 같은 작은 CNN으로 wake word (B5).
+- SoC의 NPU/DSP: 음성 encoder(Conformer/Whisper encoder 계열)는 정적 shape로 NPU에, decoder·소형 LLM은 KV-cache와 함께 CPU/NPU 혼합으로.
+- 선택 기준: 모델의 `kv_heads × layers × head_dim`(KV 크기), 가중치 바이트, 기기 대역폭 — 이 세 숫자로 tokens/s와 메모리를 먼저 추정하고 실측으로 확인한다(D5, K 모듈).
+
+---
+
+## 12. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| `Q @ K`로 계산 (`.T` 누락) | T = d일 때만 돌고 값이 이상함, 아니면 shape 에러 | 점수는 q_i·k_j = Q·Kᵀ | T ≠ d인 테스트로 확인 |
+| softmax 축을 잘못 잡음 | 행 합이 1이 아님, 품질 저하 | key 축(마지막)이 아님 | `P.sum(-1)`이 1인지 assert |
+| √d_k 스케일 누락 | 학습 초반 loss 정체, attention이 한 토큰에 쏠림 | 점수 분산이 d배 → softmax 포화 | `1/√d_k` 곱하기 (또는 W_Q에 folding) |
+| mask 의미 반대 (True = 무시/참여 혼동) | 출력이 전부 NaN이거나 미래를 봐서 학습 loss가 비정상적으로 낮음 | 라이브러리마다 bool mask 규약이 다름 | 3×3 장난감으로 P를 찍어 확인 |
+| 모든 key가 막힌 행 | NaN 전파 | softmax 0/0 | finfo.min 사용, 빈 행 처리 |
+| `view(B, h, T, d_h)`로 바로 쪼갬 | 에러 없이 품질 붕괴 | 토큰과 head 축이 섞임 | `view(B, T, h, d_h).transpose(1, 2)` |
+| RoPE 짝 방식 불일치 (interleaved vs rotate_half) | 변환한 모델이 횡설수설 | 가중치 행 순서가 커널과 다름 | 레퍼런스 구현과 한 층 출력 비교 |
+| KV-cache에 회전 전 K 저장, 또는 위치 인덱스 오프셋 오류 | 짧은 prompt는 되는데 decode가 점점 망가짐 | 새 토큰의 position이 캐시 길이와 어긋남 | position = 현재 캐시 길이, 캐시 on/off 출력 비교 테스트 |
+| KV-cache 크기를 MHA 공식(q heads)으로 계산 | 메모리 추정이 4~8배 과대 | GQA는 kv_heads로 계산 | config의 `num_key_value_heads` 사용 |
+| 동적 길이 그래프를 NPU에 그대로 export | 컴파일 실패 또는 CPU fallback으로 느림 | NPU 컴파일러는 고정 shape 선호 | 최대 길이 고정 + mask, prefill/decode 그래프 분리 |
+
+---
+
+## 13. 면접에서 이렇게 말한다
+
+**Q.** "Explain self-attention in one minute."
+
+**A.** 각 토큰을 세 개의 선형 투영으로 query, key, value로 만든다. query를 모든 key와 내적해서 점수를 만들고, √d_k로 나눠 softmax하면 합이 1인 가중치가 된다. 출력은 그 가중치로 value들을 섞은 가중 평균이다. 모든 위치가 모든 위치를 직접 보고, 어디를 볼지가 입력 내용에 따라 달라진다는 점이 conv·RNN과 다르다. 부드러운 CAM이라고 생각하면 된다. 연산은 GEMM 두 개와 softmax 하나다.
+
+> Each token is projected into a query, a key and a value. The query is dot-producted with every key, scaled by one over root d_k, and softmaxed into weights that sum to one; the output is the weighted average of the values. So every position can look at every other position, and where it looks depends on the content, unlike a fixed conv window or an RNN's compressed state. I think of it as a soft, differentiable content-addressable memory. Computationally it's two GEMMs, QK-transpose and PV, with a softmax in between.
+
+**Q.** "Why do we divide by the square root of d_k?"
+
+**A.** q, k 성분이 평균 0, 분산 1이면 d_k개 곱의 합인 내적의 분산은 d_k다. 그대로 두면 d_k가 클수록 점수 폭이 커져 softmax가 포화되고(거의 one-hot), gradient가 사라진다. √d_k로 나누면 분산이 1로 고정된다. 추론에서는 상수라 W_Q에 접어 넣으면 비용이 0이다.
+
+> If the components of q and k have zero mean and unit variance, their dot product has variance d_k, so the scores grow with head dimension. Large scores saturate the softmax into nearly one-hot and its gradient vanishes. Dividing by root d_k keeps the score variance around one regardless of head size. At inference it's just a constant, so you can fold it into the query projection for free.
+
+**Q.** "MHA vs MQA vs GQA — and why does it matter on device?"
+
+**A.** 셋 다 query head 수는 같고 K/V head 수만 다르다. MHA는 head마다, MQA는 전부 한 벌, GQA는 그룹마다 한 벌. 연산량은 거의 같지만 KV-cache 크기와 decode 때 읽는 바이트가 K/V head 수에 비례한다. 기기에서는 decode가 memory-bound라서 GQA가 메모리와 tokens/s를 직접 개선한다. Llama-3.2-1B는 32 query head, 8 KV head라 MHA 대비 KV가 1/4, 토큰당 fp16 32 KiB다.
+
+> They differ only in how many key/value heads there are: one per query head in MHA, a single shared one in MQA, and one per group in GQA. The FLOPs barely change, but the KV-cache size and the bytes read per decode step scale with the number of KV heads. On device, decode is memory-bandwidth-bound, so GQA directly buys memory and tokens per second. Llama 3.2 1B, for example, has 32 query heads and 8 KV heads, so its cache is a quarter of the MHA size, about 32 KB per token in fp16.
+
+**Q.** "What does the KV-cache store, and how big is it?"
+
+**A.** decoder의 각 층에서 과거 토큰들의 K, V 벡터를 저장한다. causal이라 과거 K, V는 변하지 않으므로 다시 계산할 필요가 없다. 크기는 2 × layers × kv_heads × head_dim × seq × bytes. Llama-3.2-1B는 2 × 16 × 8 × 64 × 2 B = 토큰당 32 KiB, 4096 토큰이면 128 MiB다. 문맥 길이에 선형이라 기기에서는 최대 문맥, KV 정밀도(int8), GQA로 관리한다.
+
+> It stores the key and value vectors of all previous tokens for every layer. Because attention is causal, those never change, so we compute them once and only project the new token each step. The size is two times layers times KV heads times head dim times sequence length times bytes per element. For Llama 3.2 1B in fp16 that's 32 KB per token, so 128 MB at a 4K context. It grows linearly with context, so on device I'd budget it explicitly, cap the context, and consider an int8 cache.
+
+**Q.** "What is RoPE?"
+
+**A.** Rotary position embedding. q와 k의 차원을 두 개씩 짝 지어 2D 평면에서 위치 m에 비례하는 각도(m·θ_i, 짝마다 다른 주파수)만큼 회전한다. 두 벡터가 각각 m, n만큼 돌면 사이 각도는 (m − n)θ만 변하므로 내적이 상대 위치에만 의존한다. 파라미터가 없고, value에는 적용하지 않으며, KV-cache에는 회전된 K를 저장한다. 포팅할 때 짝 짓는 방식(interleaved vs half-split)이 맞는지 확인해야 한다.
+
+> RoPE rotates pairs of dimensions in the query and key by an angle proportional to the token position, with a different frequency for each pair. Since both vectors are rotated, the angle between a query at m and a key at n only changes by m minus n, so the attention score depends on relative position. It has no parameters, isn't applied to values, and the cached keys are stored already rotated. When porting a model I check the pairing convention, interleaved versus rotate-half, because a mismatch silently breaks the output.
+
+**Q.** "What's the complexity of attention?"
+
+**A.** 길이 T, 차원 d에서 Q·Kᵀ와 P·V가 O(T²·d) 연산, 점수 행렬이 O(T²) 메모리다. 투영과 FFN은 O(T·d²)다. 그래서 T가 약 4d~6d보다 짧으면 FFN·투영이 지배하고 길면 T² 항이 지배한다. Llama-3.2-1B 모양이면 4096 토큰에서 T² 항이 약 22%, 교차점은 1만 토큰 이상이다. 실제로는 연산보다 T×T 메모리 트래픽이 먼저 문제라 FlashAttention처럼 tile 단위로 online softmax를 해서 T×T를 저장하지 않는다. decode에서는 토큰당 O(T·d) 연산이지만 KV-cache 전체를 읽는 것이 비용이다.
+
+> For sequence length T and model width d, the QK-transpose and PV products are order T squared times d compute and the score matrix is order T squared memory, while the projections and the FFN are order T times d squared. So below roughly four to six times d tokens the FFN dominates; beyond that the quadratic term does. For a Llama-3.2-1B-sized layer it's about 22 percent at 4K tokens. In practice the T-by-T memory traffic hurts first, which is why FlashAttention tiles the computation with an online softmax and never materializes the full matrix. During decode it's linear per token, but you pay for reading the whole KV-cache.
+
+**Q.** "Why are transformers harder to deploy on an NPU than CNNs?"
+
+**A.** CNN은 고정 shape에 conv/GEMM 위주라 MAC 배열에 딱 맞는다. transformer는 softmax·LayerNorm 같은 reduction·비선형 연산이 많아 vector 유닛으로 떨어지고, decode는 길이가 매 step 변하는 동적 shape이며, 가중치가 커서 DRAM 대역폭이 상한이 된다. 대응은 최대 길이 고정 + mask로 static shape, fused attention 커널, weight-only int8/int4 양자화, GQA 모델 선택, KV-cache 예산 관리다.
+
+> CNNs are static-shape conv and GEMM workloads that map cleanly onto a MAC array. Transformers add softmax and normalization, which are reductions and nonlinearities that fall back to vector units; decode has a shape that grows every step; and the weights are big enough that DRAM bandwidth sets the ceiling. The usual fixes are static shapes with a max length and masking, fused attention kernels, weight-only int8 or int4 quantization, choosing GQA models, and budgeting the KV-cache explicitly.
+
+---
+
+## 14. 직접 해보기
+
+1. 손계산: Q = K = `[[2, 0], [0, 2]]`, V = `[[1, 0], [0, 1]]`, d_k = 2일 때 attention 출력 첫 행을 구하라.
+정답: 점수 행 1 = [4, 0] / √2 = [2.828, 0] → softmax = [e^2.828, 1] / (e^2.828 + 1) = [16.92, 1] / 17.92 ≈ [0.944, 0.056] → 출력 ≈ [0.944, 0.056].
+
+2. 손계산: d_model = 768, head 12개인 MHA 층의 head_dim과 파라미터 수(bias 포함)는? GQA로 KV head를 4개로 줄이면 파라미터는 얼마로 줄어드나?
+정답: d_h = 64. MHA = 4·768² + 4·768 = 2,362,368. GQA(bias 없이 비교): W_Q, W_O = 2·768², W_K, W_V = 2·768·256 → 1,179,648 + 393,216 = 1,572,864 (MHA의 bias 없는 2,359,296 대비 약 2/3).
+
+3. 계산: Qwen2.5-0.5B(24층, KV head 2, head_dim 64)로 문맥 8192 토큰을 fp16 KV-cache로 돌리면 KV는 몇 MiB? int8이면?
+정답: 2 × 24 × 2 × 64 × 2 B = 12 KiB/token → × 8192 = 96 MiB. int8이면 48 MiB.
+
+4. 계산: d = 256인 음성 encoder(MHA + GELU 4d)에서 T² 항이 선형 항과 같아지는 입력 길이는? 10 ms 프레임이면 몇 초 분량인가?
+정답: T = 6d = 1536 프레임 → 15.36초. 몇 초짜리 명령어 인식에서는 선형 항이 지배한다.
+
+5. 코드 과제: 9.3절 `CachedAttn`에 RoPE(6.4절 함수를 torch로)를 넣어라. 캐시 경로에서 새 토큰의 위치를 "현재 캐시 길이"로 주고, 캐시 없는 경로와 출력이 같은지 확인하라. 일부러 위치를 1 어긋나게 하면 차이가 얼마나 나는지도 재라.
+힌트: position 인덱스는 prefill에서 `0..P−1`, decode step에서 `cache[0].shape[2]`다. K는 회전한 뒤 캐시에 넣는다.
+
+6. 코드 과제: 1.6절 C 코드의 online softmax를 K, V를 2개씩 묶은 tile 단위로 처리하도록 바꿔라(tile 안에서는 3-pass, tile 사이에서는 running max 보정). 결과가 같은지 확인하고, 필요한 버퍼 크기가 T가 아니라 tile 크기에 비례함을 설명하라.
+힌트: tile마다 local max를 구해 `m_new = max(m, m_tile)`로 갱신하고, `acc`와 `l`에 `e^(m − m_new)`, tile 합에 `e^(m_tile − m_new)`를 곱해 합친다.
+
+---
+
+## 15. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| attention | 주의 메커니즘 | query와 key의 유사도로 value를 가중 평균하는 연산 |
+| self-attention | 자기 attention | Q, K, V가 모두 같은 시퀀스에서 나오는 attention |
+| cross-attention | 교차 attention | Q는 decoder, K·V는 encoder 출력에서 오는 attention |
+| query / key / value | 질의 / 색인 / 내용 | 찾는 것, 찾히는 기준, 꺼내 오는 내용. 각각 입력의 선형 투영 |
+| scaled dot-product | 스케일 내적 | Q·Kᵀ를 √d_k로 나눈 점수 |
+| SDPA | `scaled_dot_product_attention` | PyTorch 2.x의 fused attention 함수 |
+| causal mask | 인과 마스크 | 미래 위치(j > i)를 −∞로 막는 하삼각 mask |
+| padding mask | 패딩 마스크 | [PAD] key를 막는 mask |
+| head / head_dim | 헤드 / 헤드 차원 | d_model을 나눈 독립 attention 하나와 그 차원(d_h = d / h) |
+| MHA / MQA / GQA | multi-head / multi-query / grouped-query | K/V head 수가 h / 1 / g개인 방식 |
+| KV-cache | 키·값 캐시 | decode 중 과거 토큰의 K, V를 층마다 저장한 버퍼 |
+| prefill / decode | 프리필 / 디코드 | prompt를 한 번에 처리(GEMM) / 토큰 하나씩 생성(GEMV) |
+| positional encoding | 위치 인코딩 | 순서를 모르는 attention에 위치 정보를 넣는 방법 |
+| RoPE | rotary position embedding | q, k의 차원 짝을 위치 비례 각도로 회전해 상대 위치를 넣는 방식 |
+| residual stream | 잔차 스트림 | 블록들을 관통하는 `[B, T, d]` 본선. 각 가지가 여기에 더한다 |
+| pre-norm | 선정규화 | 가지 입력에서만 정규화하는 블록 배치 |
+| RMSNorm | RMS 정규화 | 평균 빼기 없이 RMS로만 나누는 정규화 (B1) |
+| FFN | feed-forward network | 토큰별 2층 MLP, d → d_ff → d |
+| SwiGLU | Swish-gated linear unit | SiLU 게이트 × up 투영을 쓰는 FFN 변형, 행렬 3개 |
+| encoder / decoder | 인코더 / 디코더 | 양방향으로 입력을 표현 / causal로 출력을 생성 |
+| FlashAttention | 플래시 어텐션 | tiling + online softmax로 T×T 행렬을 저장하지 않는 attention 커널 |
+| online softmax | 온라인 소프트맥스 | running max·sum을 보정하며 한 번에 훑는 softmax |
+| arithmetic intensity | 연산 밀도 | 읽은 바이트당 연산 수. 낮으면 memory-bound (E7) |
+
+---
+
+## 16. 요약 & 체크리스트
+
+attention은 "모든 출력이 모든 입력을, 내용에 따라 정해지는 가중치로 섞는" 연산이고, 부드러운 CAM이다. 식은 `softmax(Q·Kᵀ/√d_k)·V` — GEMM 두 개와 softmax 하나 — 이며, √d_k는 점수 분산을 1로 유지해 softmax 포화를 막는다. decoder는 causal mask로 미래를 막고, 배치에서는 padding mask로 [PAD]를 막는다. multi-head는 d를 h개 head로 나눠 여러 관계를 동시에 보고, 파라미터는 h와 무관하게 4·d²다. MHA/MQA/GQA는 K/V head 수만 다르며, KV-cache 크기 = 2 × layers × kv_heads × head_dim × seq × bytes에 직접 영향을 준다(Llama-3.2-1B fp16 토큰당 32 KiB). attention은 순서를 모르므로 위치 정보가 필요하고, 소형 LLM의 표준인 RoPE는 q, k를 위치만큼 회전해 점수가 상대 위치에만 의존하게 한다. 블록은 pre-norm + attention + residual + FFN(GELU 또는 SwiGLU) + residual이며 파라미터의 2/3 이상이 FFN이다. decode는 KV-cache로 재계산을 없애지만 매 토큰 가중치와 KV를 다 읽어야 해서 memory-bound가 된다. 비용은 O(T·d²) 선형 항과 O(T²·d) 항의 경쟁이고, 기기에서는 T×T 메모리 트래픽을 없애는 fused/Flash식 커널, static shape, 저비트 가중치가 핵심 요령이다.
+
+- [ ] 3토큰, d = 2 attention을 손으로 계산하고 SDPA 출력과 맞출 수 있다
+- [ ] √d_k로 나누는 이유를 분산 논증과 softmax 포화로 설명할 수 있다
+- [ ] causal mask와 padding mask를 −∞ 덧셈으로 구현하고 bool mask 규약 차이를 말할 수 있다
+- [ ] MHA의 shape 흐름 `[B,T,d] → [B,h,T,d_h] → [B,h,T,T] → [B,T,d]`를 그리고 4·d² 파라미터를 셀 수 있다
+- [ ] MHA/MQA/GQA의 차이와 KV-cache 크기 공식을 쓰고, 실제 config로 토큰당 KV를 계산할 수 있다
+- [ ] attention이 permutation-equivariant임을 보이고, RoPE의 내적이 m − n에만 의존함을 설명할 수 있다
+- [ ] pre-norm 블록을 40줄 PyTorch로 짜고 attention/FFN 파라미터 비중을 말할 수 있다
+- [ ] GELU FFN(8·d²)과 SwiGLU(3·d·d_ff)의 파라미터 차이를 계산할 수 있다
+- [ ] encoder-only / decoder-only / encoder-decoder 대표 모델과 추론 방식 차이를 말할 수 있다
+- [ ] KV-cache 유무의 출력이 같음을 코드로 보이고, prefill은 compute-bound, decode는 memory-bound인 이유를 설명할 수 있다
+- [ ] T² 항과 선형 항의 교차점(T ≈ 4d~6d)을 계산하고 FlashAttention의 아이디어(tiling + online softmax)를 설명할 수 있다
+
+## 참고 자료
+
+- Vaswani et al., "Attention Is All You Need", NeurIPS 2017 — [arXiv:1706.03762](https://arxiv.org/abs/1706.03762)
+- Shazeer, "Fast Transformer Decoding: One Write-Head is All You Need", 2019 (MQA) — [arXiv:1911.02150](https://arxiv.org/abs/1911.02150)
+- Ainslie et al., "GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints", EMNLP 2023 — [arXiv:2305.13245](https://arxiv.org/abs/2305.13245)
+- Su et al., "RoFormer: Enhanced Transformer with Rotary Position Embedding", 2021 — [arXiv:2104.09864](https://arxiv.org/abs/2104.09864)
+- Shazeer, "GLU Variants Improve Transformer", 2020 (SwiGLU) — [arXiv:2002.05202](https://arxiv.org/abs/2002.05202)
+- Zhang & Sennrich, "Root Mean Square Layer Normalization", NeurIPS 2019 — [arXiv:1910.07467](https://arxiv.org/abs/1910.07467)
+- Xiong et al., "On Layer Normalization in the Transformer Architecture", ICML 2020 (pre-norm vs post-norm) — [arXiv:2002.04745](https://arxiv.org/abs/2002.04745)
+- Dao et al., "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness", NeurIPS 2022 — [arXiv:2205.14135](https://arxiv.org/abs/2205.14135)
+- Milakov & Gimelshein, "Online normalizer calculation for softmax", 2018 — [arXiv:1805.02867](https://arxiv.org/abs/1805.02867)
+- Radford et al., "Robust Speech Recognition via Large-Scale Weak Supervision", 2022 (Whisper) — [arXiv:2212.04356](https://arxiv.org/abs/2212.04356)
+- PyTorch 문서: [torch.nn.functional.scaled_dot_product_attention](https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html), [torch.nn.MultiheadAttention](https://pytorch.org/docs/stable/generated/torch.nn.MultiheadAttention.html)
+- Dive into Deep Learning, 11장 Attention Mechanisms and Transformers — [d2l.ai](https://d2l.ai/)
+- Jay Alammar, "The Illustrated Transformer" — [jalammar.github.io/illustrated-transformer](https://jalammar.github.io/illustrated-transformer/)
+- Andrej Karpathy, "Let's build GPT: from scratch, in code, spelled out" (Neural Networks: Zero to Hero), `nanoGPT`, `llama2.c` — [github.com/karpathy/nanoGPT](https://github.com/karpathy/nanoGPT)
+- Hugging Face `transformers` Llama 구현(`modeling_llama.py`의 `rotate_half`, `repeat_kv`) — [github.com/huggingface/transformers](https://github.com/huggingface/transformers)
+- MIT 6.5940 TinyML and Efficient Deep Learning (Song Han) — LLM 배포, KV-cache 강의 — [efficientml.ai](https://efficientml.ai/)

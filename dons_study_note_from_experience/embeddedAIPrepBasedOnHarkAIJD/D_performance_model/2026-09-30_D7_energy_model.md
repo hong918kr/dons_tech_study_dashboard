@@ -1,0 +1,1297 @@
+# D7. 에너지 모델 — 데이터 이동이 전력을 먹는다, 추론 1회의 에너지와 배터리 수명
+
+> **이 노트를 다 읽으면**: mW와 mJ, mAh와 Wh를 섞지 않고 배터리 수명을 손으로 계산할 수 있다 · C·V²·f와 누설 전력으로 race-to-idle이 언제 이기는지 숫자로 판단할 수 있다 · "MAC + SRAM + DRAM + static × 시간" 모델로 추론 1회의 에너지를 추정하고 어느 항이 지배하는지 말할 수 있다 · "X TOPS/W" 스펙을 실제 모델의 추론당 에너지로 바꾸고, 기기 계산과 클라우드 전송 중 어느 쪽이 배터리에 싼지, 열 때문에 얼마나 지속할 수 있는지, 그리고 이것을 실측으로 어떻게 확인하는지 설명할 수 있다
+> **JD 연결**: "Profile and optimize memory usage, **power consumption**, real-time performance", "Co-design model architectures that meet latency, memory, **power**, bandwidth", "Evaluate and select silicon platforms" — study_prep_list **D7**: 연산당 에너지 vs DRAM 접근 에너지 (DRAM이 수백 배) / "data movement dominates" / energy per inference, TOPS/W 해석. 함께 다루는 행: **E9**(C·V²·f, leakage, DVFS, race-to-idle, throttling, 피부 온도), **K3**(PPK2·Joulescope·Monsoon, energy per inference, duty-cycle 평균 전류), **N1**(mAh와 always-on 예산, 피부 온도), **M4**(TOPS에 숨은 조건)
+> **Don 기준 난이도**: 전류 프로파일 측정, 평균 전류·duty cycle 계산, 전력 margin sign-off, 시퀀스 중 GPIO 트리거로 구간 자르기는 이미 손에 익었다 / 그 숫자를 "MAC 몇 개 × pJ + 바이트 몇 개 × pJ"로 **분해해서 예측**하는 것, TOPS/W 같은 ML 가속기 스펙을 의심하는 법, 기기 vs 클라우드의 에너지 경계를 새로 배운다
+> **선행 노트**: C1 (Horowitz 표 첫 소개, 양자화가 에너지를 줄이는 이유), D1 (MAC 세기), D2 (파라미터·activation 바이트), D3 (roofline, arithmetic intensity), D5 (LLM decode = 대역폭 한계). 전력 cascade 예제는 B5 8절·B6 9.2절·B7·B9 5.2절에서 이미 봤다 — 이 노트는 그 숫자들이 어디서 나오는지를 아래에서부터 쌓는다.
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+펌웨어 엔지니어가 전력을 보는 방식은 보통 **위에서 아래로**다. Power Analyzer를 물리고, 전류 파형을 보고, "이 구간이 18 mA, 이 구간이 150 µA"를 읽는다. Don이 RF 칩셋 margin sign-off에서 한 일이 정확히 이것이다.
+
+edge ML 엔지니어는 여기에 **아래에서 위로** 가는 모델이 하나 더 필요하다. 아직 실리콘이 없을 때(칩 선정 단계), 모델이 아직 학습 중일 때(co-design 단계), "이 모델을 이 NPU에 올리면 추론 1회에 몇 µJ, 하루 배터리의 몇 %?"를 **먼저 계산**해야 하기 때문이다. 그 모델의 뼈대는 딱 한 줄이다.
+
+```
+E_inference ≈ Σ MAC × e_mac  +  Σ 바이트(SRAM) × e_sram  +  Σ 바이트(DRAM) × e_dram  +  P_static × t
+```
+
+말로 하면: 곱셈·덧셈에 드는 에너지, 데이터를 칩 안에서 옮기는 에너지, 칩 밖(DRAM)에서 가져오는 에너지, 그리고 켜져 있는 동안 새는 에너지를 더한다. 이 노트의 핵심 메시지는 **두 번째·세 번째 항이 첫 번째 항보다 거의 항상 크다**는 것이다. "data movement dominates"라는 말이 이것이다.
+
+```svg
+<svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="d7a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10" y="40" width="100" height="60" rx="6" fill="#888" fill-opacity="0.15" stroke="currentColor"/><text x="60" y="66" font-size="13" text-anchor="middle">센서</text>
+<text x="60" y="84" font-size="12" text-anchor="middle">mic · IMU</text><rect x="140" y="40" width="130" height="60" rx="6" fill="#3f9a6b" fill-opacity="0.2" stroke="currentColor"/>
+<text x="205" y="64" font-size="13" text-anchor="middle">always-on MCU</text><text x="205" y="82" font-size="12" text-anchor="middle">VAD · KWS, ≤ 1 mW</text>
+<rect x="300" y="20" width="220" height="190" rx="8" fill="none" stroke="#4a7bd0" stroke-width="1.5" stroke-dasharray="6 4"/><text x="310" y="14" font-size="12">SoC (깨어 있을 때만, 수백 mW)</text>
+<rect x="315" y="34" width="90" height="46" rx="6" fill="#3f9a6b" fill-opacity="0.25" stroke="currentColor"/><text x="360" y="54" font-size="12" text-anchor="middle">MAC array</text>
+<text x="360" y="71" font-size="12" text-anchor="middle">~0.3 pJ/MAC</text><rect x="415" y="34" width="95" height="46" rx="6" fill="#4a7bd0" fill-opacity="0.2" stroke="currentColor"/>
+<text x="462" y="54" font-size="12" text-anchor="middle">local buffer</text><text x="462" y="71" font-size="12" text-anchor="middle">~1 pJ/B</text>
+<rect x="315" y="96" width="195" height="46" rx="6" fill="#4a7bd0" fill-opacity="0.35" stroke="currentColor"/><text x="412" y="116" font-size="12" text-anchor="middle">큰 on-chip SRAM (MB급)</text>
+<text x="412" y="133" font-size="12" text-anchor="middle">~10 pJ/B</text><rect x="315" y="154" width="165" height="44" rx="6" fill="#888" fill-opacity="0.15" stroke="currentColor"/>
+<text x="397" y="172" font-size="12" text-anchor="middle">static: 누설 · 클럭 · PLL</text><text x="397" y="189" font-size="12" text-anchor="middle">켜져 있는 시간 × mW</text>
+<rect x="315" y="240" width="195" height="50" rx="6" fill="#d0564a" fill-opacity="0.25" stroke="currentColor"/><text x="412" y="261" font-size="13" text-anchor="middle">LPDDR DRAM</text>
+<text x="412" y="279" font-size="12" text-anchor="middle">~40–300 pJ/B</text><rect x="550" y="96" width="120" height="60" rx="6" fill="#e08a3c" fill-opacity="0.25" stroke="currentColor"/>
+<text x="610" y="120" font-size="13" text-anchor="middle">Radio</text><text x="610" y="138" font-size="12" text-anchor="middle">~0.1–1 µJ/B + 고정비</text>
+<rect x="550" y="240" width="120" height="50" rx="6" fill="#888" fill-opacity="0.15" stroke="currentColor"/><text x="610" y="262" font-size="13" text-anchor="middle">폰 · 클라우드</text>
+<text x="610" y="279" font-size="12" text-anchor="middle">(기기 배터리 밖)</text><line x1="110" y1="70" x2="138" y2="70" stroke="currentColor" marker-end="url(#d7a)"/>
+<line x1="270" y1="70" x2="313" y2="60" stroke="currentColor" marker-end="url(#d7a)"/><line x1="405" y1="57" x2="413" y2="57" stroke="currentColor"/>
+<line x1="497" y1="142" x2="497" y2="238" stroke="#d0564a" stroke-width="2" marker-end="url(#d7a)"/><line x1="510" y1="120" x2="548" y2="124" stroke="currentColor" marker-end="url(#d7a)"/>
+<line x1="610" y1="156" x2="610" y2="238" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#d7a)"/><text x="20" y="160" font-size="12">바이트 하나를 옮기는 비용 (자릿수)</text>
+<text x="20" y="182" font-size="12">MAC 0.3 pJ ≪ SRAM 1–10 pJ</text><text x="20" y="202" font-size="12">≪ DRAM 40–300 pJ ≪ Radio 100 000+ pJ</text><text x="20" y="232" font-size="12">→ 에너지 설계 = 데이터를</text>
+<text x="20" y="250" font-size="12">   가까운 곳에 두고 덜 옮기기</text>
+</svg>
+```
+
+그림 1 — 웨어러블(가정)에서 에너지가 쓰이는 곳. 같은 1바이트라도 어디서 가져오느냐에 따라 비용이 자릿수로 달라진다. MAC 자체는 가장 싼 항목이다. 숫자는 Horowitz(45 nm)와 흔히 인용되는 자릿수를 섞은 **설명용 값**이다.
+
+펌웨어 비유로 말하면: SSD 펌웨어에서 성능을 결정한 것은 CPU의 add 명령이 아니라 **NAND와 DRAM을 몇 번 건드리느냐**였다. 에너지도 똑같다. ML 연산의 에너지 설계는 결국 "데이터를 가장 가까운 메모리에 두고, 한 번 가져온 것을 최대한 재사용하고, 덜 옮기는 것"이다. 양자화(C1), pruning(C4), fusion(C6), tiling(K5)은 모두 이 한 문장의 변주다.
+
+이 노트의 순서:
+
+1. 전력과 에너지의 기초 — 단위, C·V²·f, 누설, DVFS, race-to-idle
+2. 연산당 에너지 — Horowitz 표와 "DRAM은 MAC의 수백 배"
+3. 추론 1회 에너지 계산기 — KWS on MCU, MobileNetV2 on NPU, 1B LLM decode
+4. 최적화가 에너지를 바꾸는 방식 — 양자화·pruning·fusion·tiling
+5. TOPS/W 해석 — 스펙을 추론당 에너지로 바꾸기
+6. 시스템 배터리 수학 — always-on 예산, duty cycle, 기기 vs 클라우드
+7. 열 — 지속 가능한 전력과 throttling
+8. 측정 — ∫(P − P_idle)dt를 제대로 하는 법
+
+---
+
+## 1. 전력과 에너지 — 단위부터 정확히
+
+### 1.1 P = dE/dt — 전력은 "속도", 에너지는 "양"
+
+**에너지(energy)** 는 한 일의 총량이다. 단위는 J(줄). **전력(power)** 은 에너지를 쓰는 속도다. 단위는 W = J/s.
+
+```
+P = dE/dt            E = ∫ P dt        (P가 일정하면 E = P × t)
+```
+
+말로 하면: 전력은 수도꼭지를 얼마나 틀었는지, 에너지는 물이 얼마나 나갔는지다. 배터리는 물탱크(에너지)이고, 기기가 오래 가는지는 **평균 전력**이 결정한다.
+
+자주 헷갈리는 단위 환산을 표로 정리한다.
+
+| 양 | 단위 | 환산 |
+|---|---|---|
+| 에너지 | J, mJ, µJ | 1 mW × 1 s = 1 mJ, 1 mW × 1 ms = 1 µJ |
+| 에너지 | Wh, mWh | 1 Wh = 3600 J, 1 mWh = 3.6 J |
+| 전하 | mAh | 1 mAh = 3.6 C (쿨롱). 에너지가 아니다 |
+| 배터리 에너지 | mAh × V → mWh | 300 mAh × 3.7 V = 1110 mWh = 1.11 Wh |
+| 전력 | mW = mA × V | 3.8 V 레일에서 10 mA = 38 mW |
+
+**mAh는 에너지가 아니라 전하다.** 전압을 곱해야 에너지가 된다. 그래서 "평균 전류 1 mA"는 3.7 V 배터리 기준이냐, 1.8 V 코어 레일 기준이냐에 따라 전력이 두 배 이상 다르다. DC-DC 변환 효율까지 생각하면 **배터리 쪽에서 본 전력**으로 통일하는 것이 안전하다(8절 측정에서 다시 나온다).
+
+손으로 계산해 보자. 300 mAh, 3.7 V 셀이면 1.11 Wh = 1110 mWh다. 평균 1 mW면 1110시간 ≈ 46일, 평균 10 mW면 111시간 ≈ 4.6일, 평균 100 mW면 11시간이다. **평균 전력이 10배 늘면 수명이 10배 준다.** 너무 당연하지만, 뒤에서 "추론 1회 0.36 mJ"같은 숫자를 이 표로 바꾸는 습관이 중요하다.
+
+단위 환산과 "추론 1회 에너지 → 하루 배터리 %"를 코드로 확인한다.
+
+```python
+# 단위 변환: mAh·V → Wh → J, 평균 전력 → 배터리 수명
+cap_mAh, V = 300, 3.7                 # 가정: 웨어러블 셀
+E_Wh = cap_mAh / 1000 * V             # Ah × V = Wh
+E_J = E_Wh * 3600                     # 1 Wh = 3600 J
+print(f"battery   : {cap_mAh} mAh x {V} V = {E_Wh:.3f} Wh = {E_J:.0f} J")
+
+for P_mW in [1, 10, 100, 1000]:
+    hours = E_Wh * 1000 / P_mW        # mWh / mW = h
+    print(f"avg {P_mW:5d} mW -> {hours:8.1f} h ({hours/24:6.2f} days)")
+
+# 한 번의 이벤트: 전력 × 시간 = 에너지
+P_active_mW, t_ms = 30.0, 12.0
+E_mJ = P_active_mW * t_ms / 1000      # mW × s = mJ
+print(f"inference : {P_active_mW} mW x {t_ms} ms = {E_mJ:.3f} mJ")
+print(f"per day at 1 inference/s: {E_mJ*86400/3600:.2f} mWh "
+      f"= {E_mJ*86400/3600/(E_Wh*1000)*100:.2f} % of battery")
+```
+
+```text
+battery   : 300 mAh x 3.7 V = 1.110 Wh = 3996 J
+avg     1 mW ->   1110.0 h ( 46.25 days)
+avg    10 mW ->    111.0 h (  4.62 days)
+avg   100 mW ->     11.1 h (  0.46 days)
+avg  1000 mW ->      1.1 h (  0.05 days)
+inference : 30.0 mW x 12.0 ms = 0.360 mJ
+per day at 1 inference/s: 8.64 mWh = 0.78 % of battery
+```
+
+출력에서 볼 것: 30 mW로 12 ms 도는 추론은 0.36 mJ인데, 이걸 **매초** 하면 하루 8.64 mWh, 배터리의 0.78 %다. 추론 1회의 에너지는 작아 보여도 "몇 번 하느냐"를 곱하면 예산 항목이 된다.
+
+### 1.2 동적 전력 — P_dyn = α · C · V² · f
+
+CMOS 게이트는 출력이 0↔1로 바뀔 때마다 부하 커패시턴스를 충전·방전한다. 한 번 충전에 드는 에너지는 C·V²(그 절반은 충전 때 트랜지스터에서, 절반은 방전 때 열로)다. 초당 f번 클럭이 돌고, 그중 α 비율의 노드가 실제로 토글하면:
+
+```
+P_dyn = α · C · V² · f          (α: activity factor, C: 스위칭 커패시턴스, V: 공급 전압, f: 클럭)
+E_dyn per cycle = α · C · V²    ← f가 사라진다
+```
+
+말로 하면: 동적 **전력**은 주파수에 비례하지만, 한 사이클당 **에너지**는 주파수와 무관하고 전압의 제곱에만 비례한다. 그래서 "클럭을 내리면 에너지가 준다"는 틀린 말이고, "전압을 내리면 에너지가 준다"가 맞다. 클럭만 내리면 같은 일을 더 오래 할 뿐, 일 하나당 동적 에너지는 같다.
+
+손계산: 유효 커패시턴스 α·C = 0.2 nF인 코어가 1.0 V에서 2천만 사이클을 돌면 E = 0.2 nF × 1.0² × 2×10⁷ = 4 mJ. 같은 일을 0.6 V에서 하면 0.2 nF × 0.36 × 2×10⁷ = 1.44 mJ — 동적 에너지만 보면 64 % 절약이다.
+
+### 1.3 정적 전력 — 누설(leakage)
+
+트랜지스터는 꺼져 있어도 전류가 샌다(subthreshold leakage, gate leakage 등). 이 **누설 전력**은 클럭이 멈춰도 전압이 걸려 있는 한 계속 나간다.
+
+```
+P_static ≈ V · I_leak(V, T)       (I_leak은 전압과 온도에 따라 커진다 — 온도에 대해 대략 지수적)
+E_static = P_static × (전원이 켜져 있는 시간)
+```
+
+말로 하면: 정적 에너지는 **시간에 비례**한다. 일을 느리게 하면 동적 에너지는 줄지만(낮은 V), 정적 에너지는 늘어난다(긴 t). 이 줄다리기가 1.5절의 race-to-idle 문제다.
+
+펌웨어 쪽에서 "정적"에 들어가는 것은 트랜지스터 누설만이 아니다. **켜져 있는 동안 일정하게 나가는 모든 전력** — PLL, 클럭 트리, 전압 레귤레이터의 quiescent 전류, 켜진 SRAM의 retention, DRAM refresh와 background 전력, 켜 둔 주변장치 — 을 한데 묶어 "platform power" 또는 "uncore power"라고 부르자. 실제 SoC에서는 이 부분이 코어 누설보다 큰 경우가 흔하다.
+
+### 1.4 DVFS와 전원 상태
+
+**DVFS(dynamic voltage and frequency scaling)** 는 부하에 따라 (V, f) 쌍, 즉 **OPP(operating performance point)** 를 바꾸는 것이다. 주파수를 올리려면 게이트 지연을 줄여야 하므로 전압도 올려야 한다. 그래서 OPP 표는 보통 "100 MHz @ 0.6 V … 500 MHz @ 1.0 V"처럼 짝으로 나온다.
+
+전원 상태는 대략 이런 계단이다 (이름은 벤더마다 다르다).
+
+| 상태 | 클럭 | 전압 | 상태 유지 | 깨어나는 비용 |
+|---|---|---|---|---|
+| active | 돈다 | OPP 전압 | 예 | 없음 |
+| clock-gated idle (WFI) | 멈춤 | 유지 | 예 | 수 사이클 |
+| retention | 멈춤 | 낮춤 | SRAM·레지스터 일부만 | µs급 |
+| power-gated / deep sleep | 멈춤 | 끔 | 아니오 (재초기화) | 수십 µs~ms + 재초기화 에너지 |
+
+Don에게 익숙한 WFI는 동적 전력만 없앤다. 누설과 platform power는 그대로다. 진짜로 에너지를 아끼려면 **power gating**까지 가야 하는데, 그러면 깨어나는 비용(PLL lock, 상태 복구, 캐시 warm-up)이 붙는다. 8절 측정 예제에서 이 "wake 비용"이 GPIO 창 밖에 숨어 있는 모습을 볼 것이다.
+
+### 1.5 race-to-idle vs slow-and-steady
+
+두 전략이 있다.
+
+- **race-to-idle**: 가장 빠른 OPP로 일을 빨리 끝내고, 남은 시간은 깊은 sleep으로 들어간다.
+- **slow-and-steady**: deadline을 겨우 맞추는 가장 낮은 OPP로 천천히 한다. 전압이 낮으니 사이클당 에너지가 작다.
+
+어느 쪽이 이기는지는 **세 가지 숫자**에 달렸다: (1) V를 낮춰서 얻는 동적 에너지 절약, (2) 오래 켜져 있어서 더 나가는 정적·platform 에너지, (3) 일을 끝낸 뒤 들어가는 idle 상태의 전력.
+
+손계산으로 극단 두 개를 보자. 일은 2천만 사이클, 창은 200 ms, α·C = 0.2 nF, 누설 전류 20 mA(가정).
+
+```
+경우 A: platform 30 mW, 끝나면 0.1 mW deep sleep
+  0.6 V·100 MHz: t = 200 ms. P = 0.2n·0.36·100M + 0.6·20m + 30m = 7.2 + 12 + 30 = 49.2 mW → 9.84 mJ
+  1.0 V·500 MHz: t =  40 ms. P = 100 + 20 + 30 = 150 mW → 6.0 mJ + 0.1 mW × 160 ms ≈ 6.02 mJ
+  → 빨리 끝내고 자는 쪽이 이긴다 (platform 30 mW × 160 ms = 4.8 mJ를 아낀다)
+
+경우 B: platform 0, 끝나도 전압을 유지한 채 clock-gate만 (누설 계속)
+  0.6 V·100 MHz: 19.2 mW × 200 ms = 3.84 mJ
+  1.0 V·500 MHz: 120 mW × 40 ms + 20 mW × 160 ms = 4.8 + 3.2 = 8.0 mJ
+  → 천천히 하는 쪽이 두 배 이상 이긴다
+```
+
+말로 하면: **켜져 있기만 해도 나가는 전력(platform, 누설)이 크고, 끝난 뒤 정말로 꺼질 수 있으면 race-to-idle**. 반대로 idle에서도 전력이 새고 platform 전력이 작으면 **낮은 전압으로 천천히**가 이긴다. 대부분의 실제 시스템은 그 사이 어딘가에 최적점이 있다.
+
+OPP 다섯 개와 세 가지 시나리오를 모두 계산한다.
+
+```python
+# race-to-idle vs slow-and-steady: 같은 일을 다른 V/f로 할 때 창(window) 전체 에너지
+import numpy as np
+N_cyc  = 20e6              # 할 일: 2천만 cycle (가정)
+T_win  = 0.200             # 200 ms 안에 끝내면 됨 (deadline = 다음 작업 시작)
+C_eff  = 0.2e-9            # F, 1.0 V·500 MHz에서 동적 100 mW가 되도록 잡은 값
+opp = [(0.60, 100e6), (0.70, 200e6), (0.80, 300e6), (0.90, 400e6), (1.00, 500e6)]
+
+def window_energy(V, f, P_plat, I_leak, P_off):
+    t_act  = N_cyc / f
+    P_dyn  = C_eff * V**2 * f
+    P_leak = I_leak * V                       # 누설 전류 × 전압 (단순화)
+    E_act  = (P_dyn + P_leak + P_plat) * t_act
+    E_rest = P_off * (T_win - t_act)          # 남은 시간의 전력
+    return t_act, P_dyn + P_leak + P_plat, E_act + E_rest
+
+cases = {"A: power-gate idle, platform 30 mW": dict(P_plat=30e-3, I_leak=20e-3, P_off=0.1e-3),
+         "B: no deep sleep, platform  0 mW": dict(P_plat=0.0,   I_leak=20e-3, P_off=None),
+         "C: power-gate idle, platform 100 mW": dict(P_plat=100e-3, I_leak=20e-3, P_off=0.1e-3)}
+for name, k in cases.items():
+    print(name)
+    for V, f in opp:
+        P_off = k["P_off"] if k["P_off"] is not None else k["I_leak"] * V  # 전압 유지한 채 clock-gate
+        t, P, E = window_energy(V, f, k["P_plat"], k["I_leak"], P_off)
+        print(f"  {V:.2f} V {f/1e6:4.0f} MHz  t_act={t*1e3:6.1f} ms  P_act={P*1e3:6.1f} mW  E_win={E*1e3:6.2f} mJ")
+```
+
+```text
+A: power-gate idle, platform 30 mW
+  0.60 V  100 MHz  t_act= 200.0 ms  P_act=  49.2 mW  E_win=  9.84 mJ
+  0.70 V  200 MHz  t_act= 100.0 ms  P_act=  63.6 mW  E_win=  6.37 mJ
+  0.80 V  300 MHz  t_act=  66.7 ms  P_act=  84.4 mW  E_win=  5.64 mJ
+  0.90 V  400 MHz  t_act=  50.0 ms  P_act= 112.8 mW  E_win=  5.66 mJ
+  1.00 V  500 MHz  t_act=  40.0 ms  P_act= 150.0 mW  E_win=  6.02 mJ
+B: no deep sleep, platform  0 mW
+  0.60 V  100 MHz  t_act= 200.0 ms  P_act=  19.2 mW  E_win=  3.84 mJ
+  0.70 V  200 MHz  t_act= 100.0 ms  P_act=  33.6 mW  E_win=  4.76 mJ
+  0.80 V  300 MHz  t_act=  66.7 ms  P_act=  54.4 mW  E_win=  5.76 mJ
+  0.90 V  400 MHz  t_act=  50.0 ms  P_act=  82.8 mW  E_win=  6.84 mJ
+  1.00 V  500 MHz  t_act=  40.0 ms  P_act= 120.0 mW  E_win=  8.00 mJ
+C: power-gate idle, platform 100 mW
+  0.60 V  100 MHz  t_act= 200.0 ms  P_act= 119.2 mW  E_win= 23.84 mJ
+  0.70 V  200 MHz  t_act= 100.0 ms  P_act= 133.6 mW  E_win= 13.37 mJ
+  0.80 V  300 MHz  t_act=  66.7 ms  P_act= 154.4 mW  E_win= 10.31 mJ
+  0.90 V  400 MHz  t_act=  50.0 ms  P_act= 182.8 mW  E_win=  9.15 mJ
+  1.00 V  500 MHz  t_act=  40.0 ms  P_act= 220.0 mW  E_win=  8.82 mJ
+```
+
+출력에서 볼 것: A는 0.8~0.9 V 근처에서 최소(5.6 mJ)이고 최고 속도(6.0 mJ)도 최저 속도(9.8 mJ)보다 훨씬 낫다. B는 최저 속도가 최적이다. platform 전력이 100 mW인 C는 최고 속도가 최적 — 전형적인 race-to-idle이다.
+
+```svg
+<svg viewBox="0 0 680 350" xmlns="http://www.w3.org/2000/svg">
+<line x1="70" y1="290" x2="620" y2="290" stroke="currentColor"/><line x1="70" y1="290" x2="70" y2="40" stroke="currentColor"/>
+<line x1="66" y1="290.0" x2="70" y2="290.0" stroke="currentColor"/><text x="62" y="294.0" font-size="12" text-anchor="end">0</text>
+<line x1="66" y1="240.0" x2="70" y2="240.0" stroke="currentColor"/><text x="62" y="244.0" font-size="12" text-anchor="end">5</text>
+<line x1="66" y1="190.0" x2="70" y2="190.0" stroke="currentColor"/><text x="62" y="194.0" font-size="12" text-anchor="end">10</text>
+<line x1="66" y1="140.0" x2="70" y2="140.0" stroke="currentColor"/><text x="62" y="144.0" font-size="12" text-anchor="end">15</text>
+<line x1="66" y1="90.0" x2="70" y2="90.0" stroke="currentColor"/><text x="62" y="94.0" font-size="12" text-anchor="end">20</text>
+<line x1="66" y1="40.0" x2="70" y2="40.0" stroke="currentColor"/><text x="62" y="44.0" font-size="12" text-anchor="end">25</text>
+<line x1="70.0" y1="290" x2="70.0" y2="294" stroke="currentColor"/><text x="70.0" y="308" font-size="12" text-anchor="middle">100 MHz / 0.6 V</text>
+<line x1="207.5" y1="290" x2="207.5" y2="294" stroke="currentColor"/><text x="207.5" y="308" font-size="12" text-anchor="middle">200 MHz / 0.7 V</text>
+<line x1="345.0" y1="290" x2="345.0" y2="294" stroke="currentColor"/><text x="345.0" y="308" font-size="12" text-anchor="middle">300 MHz / 0.8 V</text>
+<line x1="482.5" y1="290" x2="482.5" y2="294" stroke="currentColor"/><text x="482.5" y="308" font-size="12" text-anchor="middle">400 MHz / 0.9 V</text>
+<line x1="620.0" y1="290" x2="620.0" y2="294" stroke="currentColor"/><text x="620.0" y="308" font-size="12" text-anchor="middle">500 MHz / 1.0 V</text>
+<text x="345.0" y="330" font-size="13" text-anchor="middle">동작점 (주파수 / 전압) — 빠를수록 일찍 끝나고 남은 시간은 idle</text><text x="20" y="165.0" font-size="13" text-anchor="middle" transform="rotate(-90 20 165.0)">200 ms 창의 에너지 (mJ)</text>
+<polyline points="70.0,191.6 104.4,206.3 138.8,215.7 173.1,222.0 207.5,226.3 241.9,229.3 276.2,231.4 310.6,232.8 345.0,233.6 379.4,234.0 413.8,234.1 448.1,233.9 482.5,233.4 516.9,232.8 551.2,232.0 585.6,231.0 620.0,229.8" fill="none" stroke="#4a7bd0" stroke-width="2.2"/>
+<circle cx="413.8" cy="234.1" r="5" fill="#4a7bd0"/><line x1="400" y1="48" x2="425" y2="48" stroke="#4a7bd0" stroke-width="3"/><text x="432" y="52" font-size="12">A: platform 30 mW, idle은 power-gate</text>
+<polyline points="70.0,251.6 104.4,249.4 138.8,247.1 173.1,244.8 207.5,242.4 241.9,240.0 276.2,237.5 310.6,235.0 345.0,232.4 379.4,229.8 413.8,227.1 448.1,224.4 482.5,221.6 516.9,218.8 551.2,215.9 585.6,213.0 620.0,210.0" fill="none" stroke="#e08a3c" stroke-width="2.2"/>
+<circle cx="70.0" cy="251.6" r="5" fill="#e08a3c"/><line x1="400" y1="66" x2="425" y2="66" stroke="#e08a3c" stroke-width="3"/><text x="432" y="70" font-size="12">B: platform 0, idle에도 누설</text>
+<polyline points="70.0,51.6 104.4,94.3 138.8,122.4 173.1,142.0 207.5,156.3 241.9,167.1 276.2,175.4 310.6,181.8 345.0,186.9 379.4,190.9 413.8,194.1 448.1,196.6 482.5,198.4 516.9,199.9 551.2,200.9 585.6,201.5 620.0,201.8" fill="none" stroke="#3f9a6b" stroke-width="2.2"/>
+<circle cx="620.0" cy="201.8" r="5" fill="#3f9a6b"/><line x1="400" y1="84" x2="425" y2="84" stroke="#3f9a6b" stroke-width="3"/><text x="432" y="88" font-size="12">C: platform 100 mW, idle은 power-gate</text>
+<text x="400" y="110" font-size="12">● = 그 경우의 최소 에너지 동작점</text>
+</svg>
+```
+
+그림 2 — 200 ms 창의 총 에너지를 동작점별로 그렸다(전압은 주파수에 선형으로 보간한 가정 OPP). platform 전력이 클수록 최적점이 오른쪽(빠르게)으로 간다. 동그라미가 각 경우의 최적점이다.
+
+### 1.6 Don의 경험과 연결
+
+Don이 Power Analyzer로 본 전류 파형에서 "active 구간의 높이 × 폭 + 꼬리"가 바로 이 식이다. 스마트폰·웨어러블 SoC에서 race-to-idle이 자주 이기는 이유는 **DRAM, PLL, 레귤레이터, 인터커넥트 같은 platform 전력**이 코어 누설보다 크기 때문이다. 반대로 always-on MCU처럼 platform이 거의 없고 sleep 전류가 µA급인 곳에서는 "가장 낮은 전압 + 적당한 클럭"이 흔히 이긴다.
+
+함정:
+
+- **ML 추론에서 f를 올려도 시간이 안 준다.** 메모리 대역폭 한계(D3, D5)인 워크로드는 코어 클럭을 올려도 DRAM이 병목이라 t가 거의 그대로다. 그러면 전압만 올라가고 에너지가 늘어난다. race-to-idle은 **compute-bound 구간**에서만 성립한다.
+- **깨어나는 비용을 잊지 말 것.** 1초에 50번 깨는 작업이라면 wake 비용 × 50이 절약분을 먹을 수 있다.
+- **온도가 오르면 누설이 늘어난다.** 최고 OPP로 오래 돌면 칩이 뜨거워지고, 누설이 커지고, 7절의 throttling이 시작된다.
+
+---
+
+## 2. 연산당 에너지 — 산술은 싸고, 옮기는 것은 비싸다
+
+### 2.1 Horowitz 표
+
+Mark Horowitz의 ISSCC 2014 기조 발표 "Computing's Energy Problem (and what we can do about it)"은 45 nm 공정(0.9 V)에서 연산 하나, 메모리 접근 하나에 드는 에너지를 정리했다. C1에서 일부를 봤다. 여기서는 메모리 쪽까지 전부 본다. 아래 값은 발표에서 널리 인용되는 수치다.
+
+| 연산 (45 nm, 0.9 V) | 에너지 | 비고 |
+|---|---|---|
+| 8-bit int add | 0.03 pJ | |
+| 32-bit int add | 0.1 pJ | int8 MAC의 누산기 |
+| 8-bit int mult | 0.2 pJ | |
+| 32-bit int mult | 3.1 pJ | |
+| 16-bit float add | 0.4 pJ | |
+| 16-bit float mult | 1.1 pJ | |
+| 32-bit float add | 0.9 pJ | |
+| 32-bit float mult | 3.7 pJ | |
+| SRAM 8 KB 읽기 (64-bit) | 10 pJ | 작은 로컬 버퍼 |
+| SRAM 32 KB 읽기 (64-bit) | 20 pJ | L1급 |
+| SRAM 1 MB 읽기 (64-bit) | 100 pJ | 큰 on-chip 메모리 |
+| DRAM 읽기 (64-bit) | 1.3–2.6 nJ | 칩 밖 |
+
+C1의 표에 있던 "32-bit SRAM 5 pJ, 32-bit DRAM 640 pJ"는 같은 발표를 Han et al.(EIE, Deep Compression)이 32-bit 단위로 다시 적은 것이다. 64-bit 10 pJ, 1.3 nJ의 절반이므로 서로 맞는다.
+
+```svg
+<svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<text x="182" y="45" font-size="12" text-anchor="end">int8 add</text><rect x="190" y="30" width="35.8" height="22" fill="#3f9a6b" fill-opacity="0.75"/><text x="231.8" y="45" font-size="12">0.03 pJ</text>
+<text x="182" y="71" font-size="12" text-anchor="end">int32 add</text><rect x="190" y="56" width="75.0" height="22" fill="#3f9a6b" fill-opacity="0.75"/><text x="271.0" y="71" font-size="12">0.1 pJ</text>
+<text x="182" y="97" font-size="12" text-anchor="end">int8 mult</text><rect x="190" y="82" width="97.6" height="22" fill="#3f9a6b" fill-opacity="0.75"/><text x="293.6" y="97" font-size="12">0.2 pJ</text>
+<text x="182" y="123" font-size="12" text-anchor="end">fp16 add</text><rect x="190" y="108" width="120.2" height="22" fill="#4a7bd0" fill-opacity="0.75"/><text x="316.2" y="123" font-size="12">0.4 pJ</text>
+<text x="182" y="149" font-size="12" text-anchor="end">fp32 add</text><rect x="190" y="134" width="146.6" height="22" fill="#4a7bd0" fill-opacity="0.75"/><text x="342.6" y="149" font-size="12">0.9 pJ</text>
+<text x="182" y="175" font-size="12" text-anchor="end">fp16 mult</text><rect x="190" y="160" width="153.1" height="22" fill="#4a7bd0" fill-opacity="0.75"/><text x="349.1" y="175" font-size="12">1.1 pJ</text>
+<text x="182" y="201" font-size="12" text-anchor="end">int32 mult</text><rect x="190" y="186" width="186.9" height="22" fill="#e08a3c" fill-opacity="0.75"/><text x="382.9" y="201" font-size="12">3.1 pJ</text>
+<text x="182" y="227" font-size="12" text-anchor="end">fp32 mult</text><rect x="190" y="212" width="192.6" height="22" fill="#e08a3c" fill-opacity="0.75"/><text x="388.6" y="227" font-size="12">3.7 pJ</text>
+<text x="182" y="253" font-size="12" text-anchor="end">SRAM 8 KB (64b)</text><rect x="190" y="238" width="225.0" height="22" fill="#888" fill-opacity="0.75"/><text x="421.0" y="253" font-size="12">10 pJ</text>
+<text x="182" y="279" font-size="12" text-anchor="end">SRAM 32 KB (64b)</text><rect x="190" y="264" width="247.6" height="22" fill="#888" fill-opacity="0.75"/><text x="443.6" y="279" font-size="12">20 pJ</text>
+<text x="182" y="305" font-size="12" text-anchor="end">SRAM 1 MB (64b)</text><rect x="190" y="290" width="300.0" height="22" fill="#888" fill-opacity="0.75"/><text x="496.0" y="305" font-size="12">100 pJ</text>
+<text x="182" y="331" font-size="12" text-anchor="end">DRAM (64b), 1.3–2.6 nJ</text><rect x="190" y="316" width="383.5" height="22" fill="#d0564a" fill-opacity="0.75"/>
+<rect x="573.5" y="316" width="22.6" height="22" fill="#d0564a" fill-opacity="0.35"/><text x="602.1" y="331" font-size="12">1300–2600 pJ</text><line x1="190" y1="346" x2="640" y2="346" stroke="currentColor"/>
+<line x1="190.0" y1="346" x2="190.0" y2="350" stroke="currentColor"/><text x="190.0" y="364" font-size="12" text-anchor="middle">0.01</text>
+<line x1="265.0" y1="346" x2="265.0" y2="350" stroke="currentColor"/><text x="265.0" y="364" font-size="12" text-anchor="middle">0.1</text>
+<line x1="340.0" y1="346" x2="340.0" y2="350" stroke="currentColor"/><text x="340.0" y="364" font-size="12" text-anchor="middle">1</text>
+<line x1="415.0" y1="346" x2="415.0" y2="350" stroke="currentColor"/><text x="415.0" y="364" font-size="12" text-anchor="middle">10</text>
+<line x1="490.0" y1="346" x2="490.0" y2="350" stroke="currentColor"/><text x="490.0" y="364" font-size="12" text-anchor="middle">100</text>
+<line x1="565.0" y1="346" x2="565.0" y2="350" stroke="currentColor"/><text x="565.0" y="364" font-size="12" text-anchor="middle">1000</text>
+<line x1="640.0" y1="346" x2="640.0" y2="350" stroke="currentColor"/><text x="640.0" y="364" font-size="12" text-anchor="middle">10000</text>
+<text x="415.0" y="382" font-size="13" text-anchor="middle">에너지 (pJ, 로그 눈금) — Horowitz ISSCC 2014, 45 nm</text>
+</svg>
+```
+
+그림 3 — Horowitz 표를 로그 눈금으로. 산술(초록·파랑·주황)은 0.03~4 pJ, SRAM은 크기에 따라 10~100 pJ, DRAM은 1000 pJ를 넘는다. 막대 하나가 10배씩이다.
+
+### 2.2 MAC과 바이트 단위로 환산
+
+ML에서 쓰기 편하게 두 가지로 바꾼다. int8 MAC은 8-bit 곱 + 32-bit 누산이므로 0.2 + 0.1 = 0.3 pJ이다. 메모리는 64-bit(8바이트) 접근 에너지를 8로 나눠 바이트당으로 만든다.
+
+```python
+# Horowitz ISSCC 2014 (45 nm, 0.9 V) 표를 MAC·바이트 단위로 환산
+op = {"int8 add": 0.03, "int32 add": 0.1, "fp16 add": 0.4, "fp32 add": 0.9,
+      "int8 mul": 0.2,  "int32 mul": 3.1, "fp16 mul": 1.1, "fp32 mul": 3.7}   # pJ
+mac = {"int8 MAC (8b mul + 32b add)": op["int8 mul"] + op["int32 add"],
+       "fp16 MAC": op["fp16 mul"] + op["fp16 add"],
+       "fp32 MAC": op["fp32 mul"] + op["fp32 add"]}
+mem64 = {"SRAM 8 KB": 10, "SRAM 32 KB": 20, "SRAM 1 MB": 100,
+         "DRAM (low)": 1300, "DRAM (high)": 2600}                              # pJ / 64-bit access
+e_int8 = mac["int8 MAC (8b mul + 32b add)"]
+for k, v in mac.items():
+    print(f"{k:28s} {v:5.2f} pJ  ({v/e_int8:5.1f}x int8 MAC)")
+print()
+for k, v in mem64.items():
+    per_B = v / 8
+    print(f"{k:12s} {v:6.0f} pJ/64b = {per_B:6.1f} pJ/B  = {per_B/e_int8:7.0f}x int8 MAC per byte")
+```
+
+```text
+int8 MAC (8b mul + 32b add)   0.30 pJ  (  1.0x int8 MAC)
+fp16 MAC                      1.50 pJ  (  5.0x int8 MAC)
+fp32 MAC                      4.60 pJ  ( 15.3x int8 MAC)
+
+SRAM 8 KB        10 pJ/64b =    1.2 pJ/B  =       4x int8 MAC per byte
+SRAM 32 KB       20 pJ/64b =    2.5 pJ/B  =       8x int8 MAC per byte
+SRAM 1 MB       100 pJ/64b =   12.5 pJ/B  =      42x int8 MAC per byte
+DRAM (low)     1300 pJ/64b =  162.5 pJ/B  =     542x int8 MAC per byte
+DRAM (high)    2600 pJ/64b =  325.0 pJ/B  =    1083x int8 MAC per byte
+```
+
+출력에서 볼 것: DRAM에서 **1바이트** 가져오는 에너지는 int8 MAC 500~1000번이다. 32-bit 워드 하나로 치면 수천 번이다. 1 MB SRAM도 바이트당 MAC 40번 이상이다. 반면 8 KB 로컬 버퍼는 MAC 4번 수준이다. **"메모리 계층의 어디에서 가져오느냐"가 MAC 정밀도보다 훨씬 큰 손잡이**다.
+
+### 2.3 두 번째 데이터 포인트 — Eyeriss의 상대 비용
+
+MIT Eyeriss(Chen, Emer, Sze, ISCA 2016)는 65 nm 가속기에서 데이터 한 번 접근하는 상대 비용을 MAC 한 번 = 1로 두고 이렇게 정리했다: 레지스터 파일 약 1×, PE 간 전달(NoC) 약 2×, 글로벌 버퍼(on-chip SRAM) 약 6×, DRAM 약 200×. 공정과 기준은 다르지만 결론은 같다. **계층이 한 칸 멀어질 때마다 비용이 몇 배씩 뛰고, DRAM은 두 자릿수 이상 비싸다.** NPU의 dataflow(weight-stationary, output-stationary, row-stationary — E5)는 전부 "비싼 계층 접근을 싼 계층 재사용으로 바꾸는" 방법이다.
+
+### 2.4 공정이 바뀌면?
+
+45 nm는 오래된 공정이다. 최신 공정에서는 절대값이 달라진다. 정성적으로만 기억하자.
+
+- **산술(로직)** 은 공정이 줄면서 에너지가 줄었다. 다만 Dennard scaling(전압이 공정과 함께 줄던 시대)이 2000년대 중반에 끝나서, 전압이 거의 안 내려가 개선 속도는 느려졌다.
+- **SRAM과 배선**은 로직보다 덜 줄어든다. 배선의 커패시턴스는 길이에 비례하고, 칩 안에서 데이터를 멀리 보내는 비용은 잘 안 줄어든다.
+- **DRAM 인터페이스**는 칩 밖으로 나가는 I/O(패드, PCB 배선, 종단)의 비용이라 더 느리게 준다. LPDDR 세대가 바뀌면서 I/O 전압을 낮춰(예: LPDDR4X는 I/O 전압을 LPDDR4보다 낮췄다) 비트당 에너지를 줄여 왔지만, 로직만큼 빠르지는 않다.
+
+그래서 **공정이 발전할수록 "데이터 이동이 지배한다"는 결론은 더 강해진다.** 이 노트의 계산기는 on-chip 값에 45 nm 숫자를, DRAM에 "LPDDR4X/5급 약 5 pJ/bit = 40 pJ/B"라는 가정값을 쓴다. on-chip이 실제보다 비싸게 잡혀 있으니 DRAM의 비중은 오히려 **보수적으로(작게)** 계산된 셈이다. 흔히 보이는 DRAM 자릿수는 "LPDDR 계열 수 pJ/bit, DDR DIMM 계열 10~20 pJ/bit"인데, 접근 패턴·활동률·인터페이스에 따라 크게 달라지므로 **실제 칩은 벤더 데이터나 실측으로 교체해야 하는 가정값**이다.
+
+### 2.5 명령어 오버헤드 — CPU에서는 MAC이 더 작아진다
+
+Horowitz 발표의 또 다른 포인트는 범용 프로세서에서 명령어 하나를 처리하는 에너지(명령 fetch, decode, 레지스터 파일 읽기·쓰기, 파이프라인 제어)가 **수십 pJ 자릿수**이고, 그중 실제 산술은 작은 조각이라는 것이다. 말로 하면: CPU로 int8 MAC 하나를 하면 0.3 pJ짜리 일을 하려고 명령 한두 개 분량의 수십 pJ를 쓴다. 이게 MCU에서 ML을 돌릴 때의 현실이고(3.3절), SIMD(Helium, NEON)가 명령 하나에 MAC 여러 개를 묶고 NPU가 명령어 자체를 없애는(고정 dataflow) 이유다. **명령어 fetch도 데이터 이동이다.**
+
+---
+
+## 3. 추론 1회의 에너지 모델
+
+### 3.1 모델 식
+
+```
+E ≈ N_MAC · e_mac                     ← 산술 (datapath)
+  + N_instr · e_instr                 ← CPU라면 명령 오버헤드 (NPU는 0에 가깝다)
+  + B_SRAM · e_sram                   ← on-chip 이동 (바이트 × 계층별 단가)
+  + B_ext · e_ext                     ← 칩 밖: DRAM, 외부 flash
+  + P_static · t                      ← 켜져 있는 동안의 누설·platform
+```
+
+말로 하면: 연산을 세고(D1), 바이트를 세고(D2), 시간(D3·D6의 latency)을 알면 에너지가 나온다. D 모듈의 앞 노트들이 사실 이 식의 입력을 만드는 법이었다.
+
+주의할 점은 **B_SRAM, B_ext는 "텐서 크기"가 아니라 "traffic(실제로 옮긴 바이트)"** 라는 것이다. 같은 weight를 타일마다 다시 읽으면 여러 번 센다. activation은 한 레이어가 쓰고(write) 다음 레이어가 읽는다(read).
+
+### 3.2 준비물 — MobileNetV2의 MAC·파라미터·activation traffic
+
+(b) 사례에 쓸 숫자를 직접 센다. 레이어 구성은 MobileNetV2 논문(Sandler et al., 2018)의 inverted residual 설정 표 그대로다. 각 레이어가 입력을 한 번 읽고 출력을 한 번 쓴다고 가정하고 activation traffic을 합한다.
+
+```python
+# MobileNetV2-1.0 (224x224) 레이어별 MAC · 파라미터 · activation 바이트를 직접 센다 (int8 가정, BN은 folding)
+def mbv2_layers(res=224):
+    L, H, c = [], res // 2, 32
+    L.append(("conv3x3", res * res // 4 * 27 * 32, 27 * 32 + 32, 3 * res * res, H * H * 32))
+    cfg = [(1, 16, 1, 1), (6, 24, 2, 2), (6, 32, 3, 2), (6, 64, 4, 2), (6, 96, 3, 1), (6, 160, 3, 2), (6, 320, 1, 1)]
+    for t, co, n, s in cfg:
+        for i in range(n):
+            st, e = (s if i == 0 else 1), c * t
+            Ho = H // st
+            if t != 1:   # expand 1x1
+                L.append(("pw-expand", H * H * c * e, c * e + e, H * H * c, H * H * e))
+            L.append(("dw3x3", Ho * Ho * e * 9, e * 9 + e, H * H * e, Ho * Ho * e))
+            L.append(("pw-project", Ho * Ho * e * co, e * co + co, Ho * Ho * e, Ho * Ho * co))
+            H, c = Ho, co
+    L.append(("conv1x1", H * H * c * 1280, c * 1280 + 1280, H * H * c, H * H * 1280))
+    L.append(("fc", 1280 * 1000, 1280 * 1000 + 1000, 1280, 1000))   # avgpool 생략(무시할 만큼 작음)
+    return L
+
+L = mbv2_layers()
+macs = sum(l[1] for l in L); params = sum(l[2] for l in L)
+act_rw = sum(l[3] + l[4] for l in L)
+print(f"layers={len(L)}  MACs={macs/1e6:.1f} M  params={params/1e6:.2f} M")
+print(f"activation traffic (every layer reads input + writes output, int8) = {act_rw/1e6:.2f} MB")
+print(f"largest single in+out = {max(l[3]+l[4] for l in L)/1e3:.0f} KB")
+```
+
+```text
+layers=53  MACs=300.8 M  params=3.49 M
+activation traffic (every layer reads input + writes output, int8) = 13.45 MB
+largest single in+out = 1505 KB
+```
+
+출력에서 볼 것: MAC 300.8 M, 파라미터 3.49 M — 논문 값(약 300 M MAC, 3.4 M 파라미터)과 맞는다(residual add와 avgpool은 무시했다). activation traffic은 13.45 MB로 **weight(3.49 MB)의 4배**다. 이 중 큰 부분이 블록 안의 6배로 확장된 텐서라는 게 4절의 fusion 이야기로 이어진다.
+
+### 3.3 계산기와 세 가지 사례
+
+사례의 가정을 먼저 적는다. **모든 에너지 상수는 설명용 가정**이다 (on-chip은 Horowitz 45 nm, DRAM은 40 pJ/B).
+
+| 사례 | 연산 | 메모리 traffic | 시간·static |
+|---|---|---|---|
+| (a) KWS DS-CNN on Cortex-M급 CPU | 2.7 M MAC (Hello Edge의 DS-CNN small 자릿수로 가정), 0.5 MAC/cycle, 명령 1개/cycle, 명령당 25 pJ | activation SRAM 2.7 MB (MAC당 1 B), weight flash 40 KB × 20 pJ/B | 96 MHz → 56 ms, static 0.5 mW |
+| (b1) MobileNetV2 int8 on NPU, weight in DRAM | 300.8 M MAC × 0.3 pJ | activation 13.45 MB + weight 2회(DRAM→SRAM 쓰기, 읽기) × 12.5 pJ/B, DRAM 3.49 MB | 1.5 ms, 20 mW |
+| (b2) 같은 NPU, weight가 SRAM에 상주 | 동일 | activation + weight 1회 읽기, DRAM 0 | 동일 |
+| (c) 1B LLM int4 decode 1 token | 1 G MAC × 0.3 pJ | weight 0.5625 GB(4.5 bit/weight, C1 5.3절) + KV 16 MB를 DRAM에서, 같은 양이 작은 버퍼를 거침(2.5 pJ/B) | 유효 25 GB/s → 23 ms, static 300 mW |
+
+(c)의 KV 16 MB는 예를 들어 layer 16개, KV head 8개, head_dim 64, fp16, context 512 토큰일 때 `2 × 16 × 8 × 64 × 2 B × 512 = 16.8 MB`에서 온 자릿수다(D5의 KV-cache 식).
+
+아래 코드는 4항 계산기 `energy()`를 정의하고, 표의 네 경우에 적용해 항목별 µJ와 비율을 출력한다.
+
+```python
+# 추론 1회 에너지 계산기: E = MAC·e_mac + 명령 오버헤드 + SRAM·e_sram + DRAM/flash·e_ext + P_static·t
+PJ = 1e-12
+def energy(macs, e_mac, instr=0, e_instr=0, sram_B=0, e_sram=0, ext_B=0, e_ext=0, P_static=0, t=0):
+    parts = {"compute (MAC datapath)": macs * e_mac * PJ,
+             "instr/operand overhead": instr * e_instr * PJ,
+             "on-chip SRAM":           sram_B * e_sram * PJ,
+             "off-chip flash/DRAM":    ext_B * e_ext * PJ,
+             "static x time":          P_static * t}
+    return parts, sum(parts.values())
+
+def show(name, parts, tot):
+    print(f"{name}: total = {tot*1e3:.3f} mJ")
+    for k, v in parts.items():
+        print(f"   {k:24s} {v*1e6:10.1f} uJ  {100*v/tot:5.1f} %")
+
+# (a) KWS DS-CNN, Cortex-M급 CPU (가정: 2.7M MAC, 0.5 MAC/cycle, 1 instr/cycle, 96 MHz)
+cyc = 2.7e6 / 0.5
+show("(a) KWS on MCU CPU", *energy(2.7e6, 0.3, instr=cyc, e_instr=25, sram_B=2.7e6, e_sram=2.0,
+                                   ext_B=40e3, e_ext=20, P_static=0.5e-3, t=cyc / 96e6))
+# (b) MobileNetV2 int8 on NPU (300.8M MAC, 3.49 MB weights, 13.45 MB activation traffic, 1.5 ms)
+w, act, t_b = 3.49e6, 13.45e6, 1.5e-3
+show("(b1) MBv2 NPU, weights in DRAM", *energy(300.8e6, 0.3, sram_B=act + 2 * w, e_sram=12.5,
+                                               ext_B=w, e_ext=40, P_static=20e-3, t=t_b))
+show("(b2) MBv2 NPU, weights cached in SRAM", *energy(300.8e6, 0.3, sram_B=act + w, e_sram=12.5,
+                                                      P_static=20e-3, t=t_b))
+# (c) 1B LLM int4(4.5 bit) decode 1 token: weights 0.5625 GB + KV 16 MB from DRAM, 25 GB/s effective
+ext = 0.5625e9 + 16e6
+show("(c) 1B int4 LLM decode token", *energy(1e9, 0.3, sram_B=ext, e_sram=2.5,
+                                             ext_B=ext, e_ext=40, P_static=300e-3, t=ext / 25e9))
+```
+
+```text
+(a) KWS on MCU CPU: total = 0.170 mJ
+   compute (MAC datapath)          0.8 uJ    0.5 %
+   instr/operand overhead        135.0 uJ   79.3 %
+   on-chip SRAM                    5.4 uJ    3.2 %
+   off-chip flash/DRAM             0.8 uJ    0.5 %
+   static x time                  28.1 uJ   16.5 %
+(b1) MBv2 NPU, weights in DRAM: total = 0.515 mJ
+   compute (MAC datapath)         90.2 uJ   17.5 %
+   instr/operand overhead          0.0 uJ    0.0 %
+   on-chip SRAM                  255.4 uJ   49.6 %
+   off-chip flash/DRAM           139.6 uJ   27.1 %
+   static x time                  30.0 uJ    5.8 %
+(b2) MBv2 NPU, weights cached in SRAM: total = 0.332 mJ
+   compute (MAC datapath)         90.2 uJ   27.2 %
+   instr/operand overhead          0.0 uJ    0.0 %
+   on-chip SRAM                  211.8 uJ   63.8 %
+   off-chip flash/DRAM             0.0 uJ    0.0 %
+   static x time                  30.0 uJ    9.0 %
+(c) 1B int4 LLM decode token: total = 31.828 mJ
+   compute (MAC datapath)        300.0 uJ    0.9 %
+   instr/operand overhead          0.0 uJ    0.0 %
+   on-chip SRAM                 1446.2 uJ    4.5 %
+   off-chip flash/DRAM         23140.0 uJ   72.7 %
+   static x time                6942.0 uJ   21.8 %
+```
+
+출력에서 볼 것:
+
+- **(a) MCU**: 순수 MAC은 0.5 %뿐이다. 79 %가 명령·operand 오버헤드, 17 %가 static × 시간이다. 합계 0.17 mJ. 데이터시트 방식으로 교차 검증하면, 30 µA/MHz(가정) × 96 MHz × 1.8 V ≈ 5.2 mW × 56 ms ≈ 0.29 mJ — **같은 자릿수**다. 두 방법이 자릿수에서 맞으면 모델을 믿을 만하다.
+- **(b1) NPU, weight in DRAM**: MAC 18 %, on-chip SRAM 50 %, DRAM 27 %. 데이터 이동이 77 %다. Horowitz의 DDR3 시절 값(160 pJ/B)을 쓰면 DRAM 항은 558 µJ로 커져 혼자서 절반을 넘는다.
+- **(b2) weight 상주**: DRAM 항이 사라져 0.515 → 0.332 mJ (36 % 절약). 그래도 SRAM이 64 %다. 큰 SRAM(바이트당 12.5 pJ)을 activation이 13 MB나 오가기 때문이다 → 4절의 fusion.
+- **(c) LLM decode**: MAC은 **0.9 %**, DRAM이 73 %, static × 시간이 22 %다. 토큰 하나에 31.8 mJ. 50토큰 답변이면 1.6 J이다. static 항이 큰 이유는 대역폭 한계로 토큰당 23 ms가 걸리는 동안 SoC와 DRAM이 켜져 있어야 하기 때문이다. D5의 "decode는 memory-bound"가 에너지에서도 똑같이 나타난다.
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<text x="192" y="43" font-size="12" text-anchor="end">(a) KWS, MCU CPU</text><text x="192" y="58" font-size="12" text-anchor="end">합계 0.170 mJ</text><rect x="200.0" y="30" width="1.9" height="32" fill="#3f9a6b" fill-opacity="0.8"/>
+<rect x="201.9" y="30" width="330.2" height="32" fill="#4a7bd0" fill-opacity="0.8"/><text x="367.0" y="51" font-size="12" text-anchor="middle">83%</text><rect x="532.0" y="30" width="1.9" height="32" fill="#d0564a" fill-opacity="0.8"/>
+<rect x="533.9" y="30" width="66.1" height="32" fill="#888" fill-opacity="0.8"/><text x="567.0" y="51" font-size="12" text-anchor="middle">17%</text><text x="192" y="93" font-size="12" text-anchor="end">(b1) MBv2 NPU, W in DRAM</text>
+<text x="192" y="108" font-size="12" text-anchor="end">합계 0.515 mJ</text><rect x="200.0" y="80" width="70.0" height="32" fill="#3f9a6b" fill-opacity="0.8"/><text x="235.0" y="101" font-size="12" text-anchor="middle">18%</text>
+<rect x="270.0" y="80" width="198.3" height="32" fill="#4a7bd0" fill-opacity="0.8"/><text x="369.2" y="101" font-size="12" text-anchor="middle">50%</text><rect x="468.3" y="80" width="108.4" height="32" fill="#d0564a" fill-opacity="0.8"/>
+<text x="522.5" y="101" font-size="12" text-anchor="middle">27%</text><rect x="576.7" y="80" width="23.3" height="32" fill="#888" fill-opacity="0.8"/><text x="192" y="143" font-size="12" text-anchor="end">(b2) MBv2 NPU, W in SRAM</text>
+<text x="192" y="158" font-size="12" text-anchor="end">합계 0.332 mJ</text><rect x="200.0" y="130" width="108.7" height="32" fill="#3f9a6b" fill-opacity="0.8"/><text x="254.3" y="151" font-size="12" text-anchor="middle">27%</text>
+<rect x="308.7" y="130" width="255.2" height="32" fill="#4a7bd0" fill-opacity="0.8"/><text x="436.3" y="151" font-size="12" text-anchor="middle">64%</text><rect x="563.9" y="130" width="36.1" height="32" fill="#888" fill-opacity="0.8"/>
+<text x="581.9" y="151" font-size="12" text-anchor="middle">9%</text><text x="192" y="193" font-size="12" text-anchor="end">(c) 1B int4 LLM, 1 token</text><text x="192" y="208" font-size="12" text-anchor="end">합계 31.8 mJ</text>
+<rect x="200.0" y="180" width="3.8" height="32" fill="#3f9a6b" fill-opacity="0.8"/><rect x="203.8" y="180" width="18.2" height="32" fill="#4a7bd0" fill-opacity="0.8"/>
+<rect x="221.9" y="180" width="290.8" height="32" fill="#d0564a" fill-opacity="0.8"/><text x="367.4" y="201" font-size="12" text-anchor="middle">73%</text><rect x="512.8" y="180" width="87.2" height="32" fill="#888" fill-opacity="0.8"/>
+<text x="556.4" y="201" font-size="12" text-anchor="middle">22%</text><line x1="200" y1="232" x2="600" y2="232" stroke="currentColor"/><text x="200.0" y="246" font-size="12" text-anchor="middle">0%</text>
+<text x="300.0" y="246" font-size="12" text-anchor="middle">25%</text><text x="400.0" y="246" font-size="12" text-anchor="middle">50%</text><text x="500.0" y="246" font-size="12" text-anchor="middle">75%</text>
+<text x="600.0" y="246" font-size="12" text-anchor="middle">100%</text><rect x="20" y="262" width="14" height="14" fill="#3f9a6b" fill-opacity="0.8"/><text x="40" y="274" font-size="12">MAC datapath</text>
+<rect x="150" y="262" width="14" height="14" fill="#4a7bd0" fill-opacity="0.8"/><text x="170" y="274" font-size="12">on-chip 이동 (명령·SRAM)</text>
+<rect x="345" y="262" width="14" height="14" fill="#d0564a" fill-opacity="0.8"/><text x="365" y="274" font-size="12">off-chip (flash/DRAM)</text>
+<rect x="525" y="262" width="14" height="14" fill="#888" fill-opacity="0.8"/><text x="545" y="274" font-size="12">static × 시간</text>
+</svg>
+```
+
+그림 4 — 세 사례의 에너지 구성을 100 % 막대로. 초록(MAC)이 의미 있게 보이는 것은 weight를 SRAM에 둔 NPU뿐이다. 나머지는 파랑(on-chip 이동)과 빨강(off-chip)이 지배한다. 절대값은 0.17 mJ에서 31.8 mJ까지 200배 차이가 난다.
+
+### 3.4 손으로 다시 — LLM 토큰 하나
+
+코드 없이 머릿속으로 할 수 있어야 면접에서 쓴다.
+
+```
+weight 바이트     : 1e9 × 4.5 bit / 8 ≈ 0.56 GB
+DRAM 에너지       : 0.56e9 B × 40 pJ/B ≈ 22.5 mJ
+MAC 에너지        : 1e9 × 0.3 pJ       = 0.3 mJ          → DRAM이 약 75배
+시간 (25 GB/s)    : 0.56 GB / 25 GB/s  ≈ 22 ms
+static (300 mW)   : 300 mW × 22 ms     ≈ 6.7 mJ
+토큰당 합계       : 약 30 mJ,  tokens/s 약 44
+```
+
+말로 하면: 토큰당 에너지 ≈ (모델 바이트 × DRAM 단가) + (static 전력 × 모델 바이트 / 대역폭). **둘 다 모델 바이트에 비례한다.** 그래서 int8 → int4 양자화는 토큰당 에너지를 거의 절반으로 만든다. MAC을 줄이는 기법(예: 더 싼 곱셈기)은 여기서 거의 효과가 없다.
+
+### 3.5 KWS를 "얼마나 자주" 돌리나
+
+(a)의 0.17 mJ를 1.1절처럼 전력으로 바꾸자. 스트리밍 KWS가 1초 창을 200 ms마다 한 번(초당 5회) 판정한다면 0.17 × 5 = 0.85 mW다. B5에서 잡은 always-on 예산 1 mW를 KWS 혼자 거의 다 쓴다. 그래서 실제 설계는 (1) VAD로 KWS를 gating하고(B5 8.2절), (2) 스트리밍 모델로 새 프레임만 계산하고(B3), (3) 명령 오버헤드가 없는 저전력 DSP·micro-NPU(Ethos-U55급)로 옮긴다. 세 번째가 MAC 에너지를 줄이는 게 아니라 **명령 오버헤드(=명령어 이동)** 를 없애는 것이라는 점이 3.3절 (a)의 교훈이다.
+
+---
+
+## 4. 최적화 기법이 에너지를 바꾸는 방식
+
+C 모듈의 기법들을 에너지 모델의 각 항에 대응시키면 이렇다.
+
+| 기법 | 줄이는 항 | 주의 |
+|---|---|---|
+| 양자화 fp16 → int8 → int4 (C1–C3) | e_mac, B_SRAM, B_ext 모두 | int4 weight는 연산 전 unpack이 필요할 수 있다 |
+| unstructured pruning (C4) | B_ext (압축 저장 시) | sparse HW가 없으면 MAC은 그대로, index 오버헤드 추가 |
+| structured pruning (C4) | N_MAC, 바이트 모두 | 정확도 손실이 더 크다 |
+| operator fusion (C6) | 중간 텐서의 B_SRAM·B_ext | 로컬 버퍼에 들어가야 한다 |
+| tiling (K5) | B_ext (spill 방지, 재사용) | 타일 경계의 halo, weight 재로딩 |
+| weight 상주 (weight in SRAM) | B_ext | SRAM 면적·누설 증가 |
+
+MobileNetV2 NPU 사례(b1)를 기준으로 하나씩 적용해 본다. block fusion은 inverted residual 블록 안의 확장된 텐서(expand 출력 → depthwise → project 입력)를 큰 SRAM 대신 작은 로컬 버퍼(1.25 pJ/B)에서 흘려보내는 것으로 모델링했다. 3.2절 코드로 세면 이 텐서들이 activation traffic의 78 %(10.48 MB)다. int4 weight는 바이트가 절반, 50 % unstructured pruning은 bitmap index(weight당 1 bit)를 붙여 0.5 + 0.125 = 0.625배로 저장된다고 가정했다.
+
+```python
+# MobileNetV2 on NPU: 정밀도·pruning·fusion·tiling이 에너지 항목을 어떻게 바꾸나 (모든 상수는 가정)
+PJ = 1e-12
+MACS, W8, ACT, INNER = 300.8e6, 3.49e6, 13.45e6, 10.48e6   # ex4 값, INNER = 블록 내부 expand 텐서 traffic
+E_SRAM_BIG, E_SRAM_LOC, E_DRAM, P_ST, T = 12.5, 1.25, 40, 20e-3, 1.5e-3
+
+def run(name, e_mac=0.3, macs=MACS, w=W8, act_big=ACT, act_loc=0.0, act_dram=0.0, base=None):
+    comp = macs * e_mac * PJ
+    sram = ((act_big + 2 * w) * E_SRAM_BIG + act_loc * E_SRAM_LOC) * PJ
+    dram = (w + act_dram) * E_DRAM * PJ
+    tot = comp + sram + dram + P_ST * T
+    rel = "" if base is None else f"  ({tot/base:4.2f}x)"
+    print(f"{name:34s} comp {comp*1e6:5.0f}  sram {sram*1e6:5.0f}  dram {dram*1e6:5.0f}  total {tot*1e6:5.0f} uJ{rel}")
+    return tot
+
+b = run("int8, weights in DRAM (b1)")
+run("fp16 everything", e_mac=1.5, w=2 * W8, act_big=2 * ACT, base=b)
+run("int8 + no tiling: act spill DRAM", act_big=ACT, act_dram=ACT, base=b)
+run("int8 + block fusion", act_big=ACT - INNER, act_loc=INNER, base=b)
+run("int8 fused + int4 weights", w=W8 / 2, act_big=ACT - INNER, act_loc=INNER, base=b)
+run("int8 fused + 50% prune, dense HW", w=W8 * 0.625, act_big=ACT - INNER, act_loc=INNER, base=b)
+run("int8 fused + 50% prune, sparse HW", macs=MACS / 2, w=W8 * 0.625, act_big=ACT - INNER, act_loc=INNER, base=b)
+```
+
+```text
+int8, weights in DRAM (b1)         comp    90  sram   255  dram   140  total   515 uJ
+fp16 everything                    comp   451  sram   511  dram   279  total  1271 uJ  (2.47x)
+int8 + no tiling: act spill DRAM   comp    90  sram   255  dram   678  total  1053 uJ  (2.04x)
+int8 + block fusion                comp    90  sram   137  dram   140  total   397 uJ  (0.77x)
+int8 fused + int4 weights          comp    90  sram    94  dram    70  total   284 uJ  (0.55x)
+int8 fused + 50% prune, dense HW   comp    90  sram   105  dram    87  total   312 uJ  (0.61x)
+int8 fused + 50% prune, sparse HW  comp    45  sram   105  dram    87  total   267 uJ  (0.52x)
+```
+
+출력에서 볼 것:
+
+- **fp16은 int8보다 2.5배** 비싸다. MAC만 5배 비싸서가 아니라, 모든 바이트 traffic이 2배가 되어서다.
+- **tiling이 없어서 activation이 DRAM으로 넘치면 2배**가 된다. 최적화의 첫 번째 목표는 "DRAM spill을 없애는 것"이다. D2의 peak memory 계산이 에너지와 직결되는 지점이다.
+- **block fusion만으로 23 %** 줄었다. MAC 수는 하나도 안 바뀌었다.
+- int4 weight를 더하면 기준 대비 0.55배. pruning은 **sparse HW가 없으면(dense HW) MAC 에너지가 그대로**라서 int4보다 효과가 작다. sparse HW가 있어도 MAC 항은 원래 작았기 때문에 추가 이득은 45 µJ뿐이다.
+
+일반화하면: **바이트를 줄이는 최적화가 MAC을 줄이는 최적화보다 에너지에 더 잘 듣는다.** 단, (b2)처럼 weight가 SRAM에 상주하고 fusion이 잘 된 compute-heavy 경우에는 MAC 항이 커지므로 그때부터 MAC 절감(structured pruning, 더 작은 모델)이 의미를 갖는다. "지금 어느 항이 지배하는지"를 먼저 계산하는 것이 순서다 — 펌웨어 최적화에서 프로파일 없이 손대지 않는 것과 같다.
+
+함정:
+
+- **latency 이득 ≠ 에너지 이득.** 병렬성을 늘려 latency를 줄였는데 DRAM traffic이 늘면 에너지는 오히려 늘 수 있다.
+- **"int4 모델은 4배 효율"** 같은 계산은 MAC 항만 본 것이다. int4 unpack, scale 적용, 누산기는 여전히 32-bit다.
+- **압축된 weight의 decompress 비용**을 잊기 쉽다. 코드북·Huffman 방식은 CPU에서 풀면 명령 오버헤드가 붙는다.
+
+---
+
+## 5. TOPS/W 해석 — 스펙을 추론당 에너지로
+
+### 5.1 정의와 환산
+
+```
+TOPS    = 초당 10¹² 연산 (보통 1 MAC = 곱 1 + 덧셈 1 = 2 ops로 센다)
+TOPS/W  = 10¹² ops/s ÷ W = 10¹² ops/J
+1 TOPS/W = 1 op/pJ    →   pJ/op = 1 / (TOPS/W),   pJ/MAC = 2 / (TOPS/W)
+```
+
+말로 하면: "5 TOPS/W"는 연산 하나에 0.2 pJ, MAC 하나에 0.4 pJ라는 뜻이다. 모델의 MAC 수를 곱하면 **이상적인** 추론당 에너지가 나온다. MobileNetV2(300.8 M MAC)라면 0.4 pJ × 3×10⁸ ≈ 120 µJ다.
+
+### 5.2 스펙에 숨은 조건 (M4)
+
+데이터시트의 TOPS/W 숫자 옆에는 거의 항상 조건이 붙어 있다(작은 글씨로). 확인할 목록:
+
+1. **정밀도**: int4 기준인가 int8 기준인가? int4 MAC은 보통 int8의 2배 처리량으로 적힌다. 모델이 int8이면 반으로 나눠야 한다.
+2. **sparsity**: "2:4 structured sparsity 적용 시" 같은 조건이면 0을 건너뛴 연산까지 센 것이다. dense 모델이면 반으로.
+3. **peak vs effective**: 최대 활용률(모든 MAC이 매 사이클 바쁨) 기준이다. 실제 모델은 depthwise conv, 작은 채널, 비지원 op fallback 때문에 활용률이 20~60 %인 경우가 흔하다. 활용률이 낮아도 클럭 트리·누설·제어 로직 전력은 거의 그대로 나가므로 **효율은 활용률보다 더 나빠진다**.
+4. **무엇이 포함되었나**: NPU 코어만인가(MAC array + 로컬 버퍼), 큰 SRAM 포함인가, SoC 전체인가, DRAM까지인가? 코어만의 숫자는 3.3절에서 본 on-chip·off-chip 이동을 대부분 빼고 잰 것이다.
+5. **동작점과 온도**: 가장 효율 좋은 낮은 전압 OPP에서 잰 TOPS/W와 가장 빠른 OPP에서 잰 TOPS는 **서로 다른 동작점**일 수 있다. 둘을 곱해 "이 성능을 이 효율로"라고 읽으면 안 된다.
+
+### 5.3 코드 — 조건을 하나씩 벗겨 내기
+
+가상의 스펙 "10 TOPS/W, 4 TOPS (int4, 2:4 sparsity, NPU core, peak)"를 MobileNetV2 int8 추론 1회로 바꾼다. 활용률 30 %, peak 전력의 20 %는 활용률과 무관하게 나간다고 가정한다. 메모리 traffic은 4절의 fused int8 결과(SRAM 137 µJ + DRAM 140 µJ)를 쓴다.
+
+```python
+# "10 TOPS/W" 스펙을 MobileNetV2 int8 추론 1회 에너지로 바꾸기 — 조건을 하나씩 벗겨 낸다 (가정 스펙)
+MACS = 300.8e6
+spec_tops_w, peak_tops = 10.0, 4.0            # 광고: int4, 2:4 sparsity, NPU core only, peak
+pj_op = 1 / spec_tops_w                        # 1 TOPS/W = 1 op/pJ  → 0.1 pJ/op
+steps = [("spec as printed (1 MAC = 2 ops)", 2 * pj_op)]
+steps.append(("remove 2x sparsity credit", steps[-1][1] * 2))
+steps.append(("int8 instead of int4 (half rate)", steps[-1][1] * 2))
+u, static_frac = 0.30, 0.20                    # 활용률 30 %, peak 전력 중 20 %는 활용률과 무관
+steps.append((f"utilization {u:.0%}", steps[-1][1] * (static_frac + (1 - static_frac) * u) / u))
+for name, e in steps:
+    print(f"{name:34s} {e:5.2f} pJ/MAC -> {MACS * e * 1e-6:6.1f} uJ/inference")
+
+core = MACS * steps[-1][1] * 1e-6              # uJ
+mem = 137 + 140                                # uJ, ex6 fused int8: SRAM + DRAM
+t = MACS / (peak_tops / 8 * 1e12 * u)          # int8 dense MAC/s = peak_ops/2(sparse)/2(int4)/2(ops per MAC)
+soc = 20e-3 * t * 1e6                          # uJ, SoC 나머지 20 mW 가정
+total = core + mem + soc
+print(f"+ SRAM/DRAM traffic {mem:.0f} uJ, + SoC static {soc:.0f} uJ (t = {t*1e3:.2f} ms)")
+print(f"system energy/inference = {total:.0f} uJ  -> {total / (MACS * 2 * pj_op * 1e-6):.1f}x the naive number")
+print(f"effective system TOPS/W (int8 dense) = {2 * MACS / (total * 1e-6) / 1e12:.2f}")
+```
+
+```text
+spec as printed (1 MAC = 2 ops)     0.20 pJ/MAC ->   60.2 uJ/inference
+remove 2x sparsity credit           0.40 pJ/MAC ->  120.3 uJ/inference
+int8 instead of int4 (half rate)    0.80 pJ/MAC ->  240.6 uJ/inference
+utilization 30%                     1.17 pJ/MAC ->  352.9 uJ/inference
++ SRAM/DRAM traffic 277 uJ, + SoC static 40 uJ (t = 2.01 ms)
+system energy/inference = 670 uJ  -> 11.1x the naive number
+effective system TOPS/W (int8 dense) = 0.90
+```
+
+출력에서 볼 것: 스펙을 곧이곧대로 곱하면 60 µJ인데, 조건을 하나씩 벗기면 670 µJ — **11배**다. 시스템 전체로 본 유효 효율은 0.9 TOPS/W로, 광고 숫자의 1/11이다. 이 계산은 가정값이지만, "스펙 TOPS/W로 배터리 수명을 계산하면 한 자릿수 이상 낙관적일 수 있다"는 결론은 방향이 확실하다.
+
+```svg
+<svg viewBox="0 0 680 272" xmlns="http://www.w3.org/2000/svg">
+<text x="222" y="36" font-size="12" text-anchor="end">스펙 그대로 (int4, sparse, peak)</text><rect x="230" y="20" width="31.8" height="24" fill="#3f9a6b" fill-opacity="0.75"/><text x="267.8" y="36" font-size="12">60 µJ</text>
+<text x="222" y="70" font-size="12" text-anchor="end">sparsity 크레딧 제거</text><rect x="230" y="54" width="63.6" height="24" fill="#3f9a6b" fill-opacity="0.75"/><text x="299.6" y="70" font-size="12">120 µJ</text>
+<text x="222" y="104" font-size="12" text-anchor="end">int8로 환산</text><rect x="230" y="88" width="127.2" height="24" fill="#4a7bd0" fill-opacity="0.75"/><text x="363.2" y="104" font-size="12">241 µJ</text>
+<text x="222" y="138" font-size="12" text-anchor="end">활용률 30 %</text><rect x="230" y="122" width="186.5" height="24" fill="#4a7bd0" fill-opacity="0.75"/><text x="422.5" y="138" font-size="12">353 µJ</text>
+<text x="222" y="172" font-size="12" text-anchor="end">+ SRAM·DRAM traffic</text><rect x="230" y="156" width="332.9" height="24" fill="#e08a3c" fill-opacity="0.75"/><text x="568.9" y="172" font-size="12">630 µJ</text>
+<text x="222" y="206" font-size="12" text-anchor="end">+ SoC static</text><rect x="230" y="190" width="354.2" height="24" fill="#d0564a" fill-opacity="0.75"/><text x="590.2" y="206" font-size="12">670 µJ</text>
+<line x1="230" y1="224" x2="600" y2="224" stroke="currentColor"/><text x="230.0" y="240" font-size="12" text-anchor="middle">0</text><text x="282.9" y="240" font-size="12" text-anchor="middle">100</text>
+<text x="335.7" y="240" font-size="12" text-anchor="middle">200</text><text x="388.6" y="240" font-size="12" text-anchor="middle">300</text><text x="441.4" y="240" font-size="12" text-anchor="middle">400</text>
+<text x="494.3" y="240" font-size="12" text-anchor="middle">500</text><text x="547.1" y="240" font-size="12" text-anchor="middle">600</text><text x="600.0" y="240" font-size="12" text-anchor="middle">700</text>
+<text x="415.0" y="258" font-size="13" text-anchor="middle">MobileNetV2 int8 추론 1회 에너지 (µJ)</text>
+</svg>
+```
+
+그림 5 — "10 TOPS/W" 한 줄이 시스템 에너지로 바뀌는 과정. 초록은 스펙 표기의 조건, 파랑은 모델과 활용률, 주황·빨강은 스펙이 보통 포함하지 않는 부분이다.
+
+### 5.4 그럼 칩은 어떻게 비교하나
+
+- 벤더 TOPS/W는 **같은 조건으로 정규화**한 뒤에만 비교한다(정밀도, sparsity, 포함 범위).
+- 가능하면 **"대표 모델의 추론당 mJ"** 를 달라고 한다. 이게 사용자가 느끼는 숫자다. Qualcomm AI Hub처럼 실기기 프로파일을 주는 서비스나 벤더 EVB로 직접 잰다(M2, 8절).
+- 우리 모델의 MAC과 바이트를 알고 있으면, **바이트 쪽이 지배하는지**부터 본다. DRAM이 지배하면 TOPS/W보다 **메모리 대역폭당 전력(pJ/bit)과 on-chip SRAM 크기**가 더 중요한 스펙이다.
+
+---
+
+## 6. 시스템 수준 배터리 수학
+
+### 6.1 평균 전력 = Σ (상태 전력 × 상태 비율)
+
+```
+P_avg = Σ_i P_i × (t_i / T)                  (상태 i의 전력과 시간 비율)
+      = P_floor + Σ_events (rate × E_event)   (항상 나가는 바닥 + 이벤트 빈도 × 이벤트당 에너지)
+배터리 수명 = E_battery × (사용 가능 비율) / P_avg
+```
+
+말로 하면: 상시 전력(sleep floor, always-on 센서·VAD)과 이벤트 전력(wake, 추론, 전송)을 따로 센다. 이벤트는 "초당 몇 번 × 한 번에 몇 mJ"로 바꾸면 mW가 된다 (1 mJ/s = 1 mW). Don이 해 온 "duty-cycle 평균 전류 계산"과 같은 식이다.
+
+B5·B9에서 본 wake cascade를 다시 떠올리자. 1단 always-on이 싸고, 2단 검증기가 escalate를 걸러 3단의 비싼 SoC 호출 횟수를 줄인다. 기대 비용 `E[cost] = c1 + p1·c2 + p1·p2·c3`(B9 5.1절)의 c 자리에 이 노트의 "이벤트당 에너지"가 들어간다.
+
+### 6.2 하루 예산 — always-on 1 mW의 의미
+
+가정한 웨어러블(300 mAh, 3.7 V, 사용 가능 90 %)의 하루 예산을 짠다. 항목은 B5·B9의 cascade 숫자와 비슷한 자릿수로 잡았다.
+
+```python
+# always-on 웨어러블 하루 에너지 예산: 상태별 평균 전력 → 배터리 수명 (숫자는 모두 설명용 가정)
+bat_mWh = 300 * 3.7 * 0.9                     # 300 mAh, 3.7 V, 사용 가능 90 %
+day_s = 86400
+items = {  # 이름: (전력 mW, 하루 동안 켜진 총 시간 s)
+    "sleep floor (PMIC, RTC, retention)": (0.02, day_s),
+    "mic + VAD always-on":                (0.30, day_s),
+    "KWS (VAD-gated, 30 % duty)":         (0.60, 0.30 * day_s),
+    "BLE link keep-alive":                (0.10, day_s),
+    "false wakes: 2/h x 2 s @ 300 mW":    (300, 2 * 24 * 2),
+    "sessions: 30/day x 8 s @ 800 mW":    (800, 30 * 8),
+    "radio upload per session: 30 x 1 s @ 40 mW": (40, 30 * 1),
+}
+tot = 0
+for k, (p, t) in items.items():
+    e = p * t / 3600                          # mWh/day
+    tot += e
+    print(f"{k:44s} {e:7.2f} mWh/day  (avg {e/24*1000:7.1f} uW)")
+print(f"{'total':44s} {tot:7.2f} mWh/day  (avg {tot/24:.3f} mW)")
+print(f"battery {bat_mWh:.0f} mWh -> {bat_mWh/tot:.1f} days")
+```
+
+```text
+sleep floor (PMIC, RTC, retention)              0.48 mWh/day  (avg    20.0 uW)
+mic + VAD always-on                             7.20 mWh/day  (avg   300.0 uW)
+KWS (VAD-gated, 30 % duty)                      4.32 mWh/day  (avg   180.0 uW)
+BLE link keep-alive                             2.40 mWh/day  (avg   100.0 uW)
+false wakes: 2/h x 2 s @ 300 mW                 8.00 mWh/day  (avg   333.3 uW)
+sessions: 30/day x 8 s @ 800 mW                53.33 mWh/day  (avg  2222.2 uW)
+radio upload per session: 30 x 1 s @ 40 mW      0.33 mWh/day  (avg    13.9 uW)
+total                                          76.07 mWh/day  (avg 3.169 mW)
+battery 999 mWh -> 13.1 days
+```
+
+출력에서 볼 것:
+
+- always-on 항목들(sleep floor + mic/VAD + gated KWS + BLE keep-alive)은 합쳐서 **0.6 mW**로 "always-on 1 mW 예산" 안에 있다. 이것만이면 배터리가 두 달 넘게(약 69일) 간다.
+- 그런데 **하루 30번, 8초짜리 대화 세션(800 mW)** 이 53 mWh로 전체의 70 %를 먹는다. 평균 2.2 mW다. 대화 세션의 SoC 에너지를 줄이는 것(예: 3.4절의 int4, 짧은 응답, 클라우드 오프로드)이 가장 큰 손잡이다.
+- false wake는 시간당 2번만으로 8 mWh, 전체의 10 %다. 시간당 20번이면 이게 80 mWh가 되어 전체보다 커진다 — B5·B6에서 "FP율이 배터리를 결정한다"고 한 이유다.
+
+이 표는 Don이 실무에서 만들 "power budget 스프레드시트"와 같은 모양이다. 차이는 각 행의 mJ가 3절의 모델에서 나온다는 것 — 즉 **모델 구조를 바꾸면 이 표의 어느 행이 얼마나 움직이는지** 미리 말할 수 있다는 것이다.
+
+### 6.3 기기 vs 클라우드 — 어느 쪽이 배터리에 싼가
+
+오프로드의 에너지는 "보내는 바이트 × 비트당 무선 에너지"만이 아니다. 무선은 **고정비**가 크다.
+
+```
+E_offload ≈ E_fixed (wake, 연결, 프로토콜 오버헤드, tail) + bytes × e_radio + P_wait × t_RTT
+E_local   ≈ E_inference (3절 모델)
+오프로드가 이기는 조건:  E_offload < E_local
+```
+
+무선의 typical 자릿수(가정, 칩·환경·프로토콜 설정에 따라 크게 다름):
+
+| 무선 | 바이트당 에너지 | 고정비 | 비고 |
+|---|---|---|---|
+| BLE (폰으로) | 약 0.3–1 µJ/B (수십 nJ/bit) | 연결이 유지되어 있으면 작다 (mJ 이하~수 mJ) | 처리량이 낮다 (수백 kbps급) |
+| Wi-Fi | 약 0.1 µJ/B (10~수십 nJ/bit) | power-save에서 깨어나기 + 응답 후 tail이 수십~수백 mJ | 처리량이 높다 |
+| LTE/cellular | Wi-Fi와 비슷하거나 더 큼 | 전송 후 수 초간 고전력 상태에 머무는 tail이 J급일 수 있다 (Huang et al., MobiSys 2012) | 웨어러블 단독 연결 시 |
+
+B7·B5에서처럼 3초 음성 질의를 생각하자. 16 kHz·16-bit raw면 96 KB, Opus 16 kbps로 압축하면 6 KB다. 계산기로 비교한다(BLE 고정 2 mJ + 0.6 µJ/B, Wi-Fi 고정 135 mJ + 0.12 µJ/B — 모두 가정).
+
+```python
+# 기기에서 돌릴까, 보낼까 — 기기 배터리 관점의 에너지 비교 (무선 수치는 typical 자릿수 가정)
+import numpy as np
+radio = {  # 이름: (고정 비용 mJ = wake/연결/tail + 응답 대기, 바이트당 uJ)
+    "BLE (to phone)": (1.0 + 1.0, 0.6),     # 연결 이벤트 ~1 mJ + 대기 1 s @ 1 mW, 약 75 nJ/bit
+    "Wi-Fi":          (60 + 75, 0.12),      # tail ~200 ms @ 300 mW + RTT 0.5 s @ 150 mW, 약 15 nJ/bit
+}
+local = {"KWS (MCU)": 0.17, "MBv2 (NPU)": 0.67, "small ASR 3 s (assumed)": 60.0,
+         "1B LLM, 50 tokens": 50 * 31.8}    # mJ, 앞 예제 값 + 가정
+payloads = {"3 s audio raw 16k/16b": 96_000, "3 s audio Opus 16 kbps": 6_000,
+            "1 image JPEG": 50_000, "text query": 200}
+
+def e_radio(name, nbytes):
+    fixed, per_B = radio[name]
+    return fixed + nbytes * per_B / 1000      # mJ
+
+for p, nb in payloads.items():
+    row = "  ".join(f"{r.split()[0]}={e_radio(r, nb):8.2f}" for r in radio)
+    print(f"{p:24s} {nb:7d} B  offload mJ: {row}")
+print()
+for name, el in local.items():
+    cross = {r: max(0.0, (el - radio[r][0]) * 1000 / radio[r][1]) for r in radio}
+    txt = "  ".join(f"{r.split()[0]} wins if payload < {cross[r]/1e3:9.1f} KB" if cross[r] > 0
+                    else f"{r.split()[0]} never wins" for r in radio)
+    print(f"{name:24s} local {el:8.2f} mJ | {txt}")
+```
+
+```text
+3 s audio raw 16k/16b      96000 B  offload mJ: BLE=   59.60  Wi-Fi=  146.52
+3 s audio Opus 16 kbps      6000 B  offload mJ: BLE=    5.60  Wi-Fi=  135.72
+1 image JPEG               50000 B  offload mJ: BLE=   32.00  Wi-Fi=  141.00
+text query                   200 B  offload mJ: BLE=    2.12  Wi-Fi=  135.02
+
+KWS (MCU)                local     0.17 mJ | BLE never wins  Wi-Fi never wins
+MBv2 (NPU)               local     0.67 mJ | BLE never wins  Wi-Fi never wins
+small ASR 3 s (assumed)  local    60.00 mJ | BLE wins if payload <      96.7 KB  Wi-Fi never wins
+1B LLM, 50 tokens        local  1590.00 mJ | BLE wins if payload <    2646.7 KB  Wi-Fi wins if payload <   12125.0 KB
+```
+
+출력에서 볼 것:
+
+- **KWS·MobileNetV2 같은 작은 모델은 항상 기기가 이긴다.** 추론이 1 mJ 이하인데 무선 고정비만 2 mJ 이상이다. 센서 데이터를 "일단 다 보내서 클라우드에서 처리"하는 설계가 배터리 기기에서 안 되는 이유다.
+- **작은 ASR(60 mJ, 가정)** 은 BLE로 압축 오디오(6 KB → 5.6 mJ)를 보내는 게 10배 싸다. raw 오디오(96 KB → 59.6 mJ)면 거의 같아진다. **압축(Opus) 하나가 결정을 바꾼다.**
+- **1B LLM 50토큰(1.6 J)** 은 Wi-Fi로 보내도(135 mJ) 12배 싸다. 기기 배터리만 보면 LLM은 오프로드가 압도적으로 싸다.
+- Wi-Fi는 고정비 때문에 작은 전송에서 BLE보다 훨씬 비싸다. 큰 전송(수백 KB 이상)에서만 비트당 효율이 이긴다.
+
+```svg
+<svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<line x1="80" y1="300" x2="620" y2="300" stroke="currentColor"/><line x1="80" y1="300" x2="80" y2="30" stroke="currentColor"/>
+<line x1="80.0" y1="300" x2="80.0" y2="304" stroke="currentColor"/><text x="80.0" y="318" font-size="12" text-anchor="middle">100 B</text>
+<line x1="170.0" y1="300" x2="170.0" y2="304" stroke="currentColor"/><text x="170.0" y="318" font-size="12" text-anchor="middle">1 KB</text>
+<line x1="260.0" y1="300" x2="260.0" y2="304" stroke="currentColor"/><text x="260.0" y="318" font-size="12" text-anchor="middle">10 KB</text>
+<line x1="350.0" y1="300" x2="350.0" y2="304" stroke="currentColor"/><text x="350.0" y="318" font-size="12" text-anchor="middle">100 KB</text>
+<line x1="440.0" y1="300" x2="440.0" y2="304" stroke="currentColor"/><text x="440.0" y="318" font-size="12" text-anchor="middle">1 MB</text>
+<line x1="530.0" y1="300" x2="530.0" y2="304" stroke="currentColor"/><text x="530.0" y="318" font-size="12" text-anchor="middle">10 MB</text>
+<line x1="620.0" y1="300" x2="620.0" y2="304" stroke="currentColor"/><text x="620.0" y="318" font-size="12" text-anchor="middle">100 MB</text>
+<line x1="76" y1="300.0" x2="80" y2="300.0" stroke="currentColor"/><text x="72" y="304.0" font-size="12" text-anchor="end">0.1</text>
+<line x1="76" y1="246.0" x2="80" y2="246.0" stroke="currentColor"/><text x="72" y="250.0" font-size="12" text-anchor="end">1</text>
+<line x1="76" y1="192.0" x2="80" y2="192.0" stroke="currentColor"/><text x="72" y="196.0" font-size="12" text-anchor="end">10</text>
+<line x1="76" y1="138.0" x2="80" y2="138.0" stroke="currentColor"/><text x="72" y="142.0" font-size="12" text-anchor="end">100</text>
+<line x1="76" y1="84.0" x2="80" y2="84.0" stroke="currentColor"/><text x="72" y="88.0" font-size="12" text-anchor="end">1000</text>
+<line x1="76" y1="30.0" x2="80" y2="30.0" stroke="currentColor"/><text x="72" y="34.0" font-size="12" text-anchor="end">10000</text>
+<polyline points="80.0,229.1 98.0,228.7 116.0,228.0 134.0,227.1 152.0,225.7 170.0,223.6 188.0,220.6 206.0,216.6 224.0,211.3 242.0,204.8 260.0,197.2 278.0,188.7 296.0,179.5 314.0,169.7 332.0,159.6 350.0,149.2 368.0,138.7 386.0,128.1 404.0,117.4 422.0,106.7 440.0,95.9 458.0,85.1 476.0,74.3 494.0,63.6 512.0,52.8 530.0,42.0 548.0,31.2" fill="none" stroke="#4a7bd0" stroke-width="2.5"/>
+<polyline points="80.0,131.0 98.0,131.0 116.0,131.0 134.0,131.0 152.0,130.9 170.0,130.9 188.0,130.9 206.0,130.9 224.0,130.9 242.0,130.8 260.0,130.8 278.0,130.6 296.0,130.4 314.0,130.1 332.0,129.7 350.0,129.0 368.0,127.9 386.0,126.2 404.0,123.9 422.0,120.5 440.0,116.0 458.0,110.3 476.0,103.4 494.0,95.5 512.0,86.7 530.0,77.2 548.0,67.3 566.0,57.1 584.0,46.7 602.0,36.1" fill="none" stroke="#e08a3c" stroke-width="2.5"/>
+<line x1="80" y1="287.6" x2="620" y2="287.6" stroke="#3f9a6b" stroke-width="1.5" stroke-dasharray="6 4"/><text x="86" y="282.6" font-size="12">KWS 0.17 mJ</text>
+<line x1="80" y1="255.4" x2="620" y2="255.4" stroke="#3f9a6b" stroke-width="1.5" stroke-dasharray="6 4"/><text x="86" y="250.4" font-size="12">MBv2 0.67 mJ</text>
+<line x1="80" y1="150.0" x2="620" y2="150.0" stroke="#3f9a6b" stroke-width="1.5" stroke-dasharray="6 4"/><text x="86" y="145.0" font-size="12">ASR 3 s 60 mJ (가정)</text>
+<line x1="80" y1="73.1" x2="620" y2="73.1" stroke="#3f9a6b" stroke-width="1.5" stroke-dasharray="6 4"/><text x="86" y="68.1" font-size="12">1B LLM 50 tok 1.6 J</text><circle cx="348.7" cy="150.0" r="5" fill="#4a7bd0"/>
+<circle cx="478.0" cy="73.1" r="5" fill="#4a7bd0"/><circle cx="537.5" cy="73.1" r="5" fill="#e08a3c"/>
+<line x1="90" y1="376" x2="115" y2="376" stroke="#4a7bd0" stroke-width="3"/><text x="122" y="380" font-size="12">BLE 전송 (고정 2 mJ + 0.6 µJ/B)</text>
+<line x1="330" y1="376" x2="355" y2="376" stroke="#e08a3c" stroke-width="3"/><text x="362" y="380" font-size="12">Wi-Fi 전송 (135 mJ + 0.12 µJ/B)</text>
+<line x1="90" y1="394" x2="115" y2="394" stroke="#3f9a6b" stroke-width="1.5" stroke-dasharray="6 4"/><text x="122" y="398" font-size="12">기기에서 계산할 때 (● = 교차점)</text>
+<text x="350.0" y="338" font-size="13" text-anchor="middle">보내야 하는 데이터 (바이트, 로그)</text><text x="22" y="165.0" font-size="13" text-anchor="middle" transform="rotate(-90 22 165.0)">기기 배터리 에너지 (mJ, 로그)</text>
+</svg>
+```
+
+그림 6 — 전송 바이트에 따른 무선 에너지(실선)와 기기 계산 에너지(점선). 선이 점선 아래면 오프로드가 싸다. 동그라미가 교차점이다. BLE는 고정비가 작아 작은 payload에서 싸지만 기울기가 크고, Wi-Fi는 고정비가 커서 수백 KB 이상에서 유리해진다.
+
+### 6.4 경계를 어디에 긋느냐가 답을 바꾼다
+
+위 계산은 **기기 배터리**만 본 것이다. BLE로 보낸 데이터는 폰이 받아서 셀룰러나 Wi-Fi로 다시 보내고, 클라우드 GPU가 LLM을 돌린다. 지구 전체 에너지로 보면 오프로드가 더 쓸 수도 있다. 면접에서는 "어떤 에너지를 최소화하나 — 웨어러블 배터리, 폰 배터리, 전체?"를 먼저 묻고 답하는 게 좋다. 그리고 에너지 말고도 L3의 기준 — 지연(RTT, 연결 불안정), 프라이버시, 오프라인 동작, 클라우드 비용 — 이 같이 들어간다. 흔한 결론은 **"작은 always-on 모델은 기기, 큰 생성 모델은 오프로드, 중간(ASR)은 압축·연결 상태·지연 요구에 따라 동적으로"** 다.
+
+---
+
+## 7. 열 — 지속 가능한 전력의 상한
+
+### 7.1 전력 → 온도 → throttling 루프
+
+전력은 결국 열이 된다. 작은 웨어러블은 열을 버릴 표면적이 작고, 그 표면이 **피부에 닿아 있다**. 그래서 배터리보다 먼저 **열이 지속 전력의 상한**을 정하는 경우가 많다.
+
+```
+전력 P ─► 칩·케이스 온도 상승 ─► 피부 접촉면 온도 한계 접근 ─► thermal governor가 OPP를 낮춤
+   ▲                                                            │
+   └──────────── 낮은 OPP = 낮은 P, 하지만 성능도 낮아짐 ◄───────┘
+   (+ 온도가 오르면 누설 전력도 늘어난다 → 양의 피드백)
+```
+
+피부 접촉 온도 한계는 규격(예: IEC 62368-1의 접촉 온도 표)과 접촉 시간·재질에 따라 다르다. 장시간 피부 접촉 기기에 대해서는 **43 °C 안팎**이 자주 인용되는 자릿수이고(저온 화상 위험), 제품은 여유를 두고 그보다 낮게 목표를 잡는다. 이 노트의 숫자(한계 40 °C)는 설명용이며, 실제 제품 적용 전에는 해당 규격 원문과 사내 기준을 확인해야 한다.
+
+지속 가능한 전력의 자릿수(typical, 가정): 스마트폰은 수 W, 손목시계형 기기는 1 W 아래, 이어버드는 그보다 훨씬 작다. **짧은 burst는 이보다 훨씬 높게 쓸 수 있다** — 열에는 관성(커패시턴스)이 있기 때문이다.
+
+### 7.2 1차 열 RC 모델
+
+전기 회로와 똑같이 모델링한다. 열저항 R_th(K/W)는 "1 W를 버리려면 몇 도 올라가야 하나", 열용량 C_th(J/K)는 "1도 올리는 데 몇 J".
+
+```
+C_th · dT/dt = P − (T − T_0) / R_th
+정상 상태:     ΔT_ss = P · R_th
+시정수:        τ = R_th · C_th
+계단 입력:     T(t) = T_0 + P·R_th · (1 − e^(−t/τ))
+한계까지 걸리는 시간:  t_hit = −τ · ln(1 − ΔT_limit / (P · R_th))
+```
+
+말로 하면: RC 저역통과 필터에 전력을 계단 입력으로 넣은 것이다. Don에게는 전원 레일의 RC 응답과 똑같다. 지속 가능한 전력은 `ΔT_limit / R_th`, burst가 얼마나 버티는지는 τ가 정한다.
+
+손계산(가정: R_th = 30 K/W, C_th = 6 J/K → τ = 180 s, 기준 32 °C, 한계 40 °C):
+
+```
+지속 가능 전력 = 8 K / 30 K/W = 0.267 W
+1.5 W를 계속 쓰면 ΔT_ss = 45 K → 77 °C (당연히 불가)
+40 °C 도달 시간 = −180 × ln(1 − 8/45) = 180 × 0.196 ≈ 35 s
+```
+
+말로 하면: 이 기기는 1.5 W를 35초 동안만 쓸 수 있고, 그 뒤엔 평균 0.27 W로 내려가야 한다. 온디바이스 LLM이 30초 넘게 답을 생성하면 중간에 느려진다는 뜻이다.
+
+### 7.3 코드 — throttling 시뮬레이션
+
+hysteresis(40 °C에서 throttle, 39 °C에서 복귀)를 가진 단순 governor로 300초를 시뮬레이션한다.
+
+```python
+# 1차 열 RC 모델 + 단순 throttling governor (파라미터는 작은 웨어러블을 가정한 설명용 값)
+import numpy as np
+R, C = 30.0, 6.0                  # K/W, J/K  → tau = 180 s
+T0, T_hi, T_lo = 32.0, 40.0, 39.0 # 피부 위 기준 온도, throttle 진입/복귀 온도 (°C)
+P_hi, P_lo = 1.5, 0.15            # W: 원하는 부하, throttle 시 부하
+dt, n = 0.1, 3000                 # 300 s
+T, P = np.empty(n), np.empty(n)
+t_now, throttled = T0, False
+for i in range(n):
+    if t_now > T_hi: throttled = True
+    elif t_now < T_lo: throttled = False
+    p = P_lo if throttled else P_hi
+    t_now += dt * (p - (t_now - T0) / R) / C      # C·dT/dt = P − (T − T0)/R
+    T[i], P[i] = t_now, p
+tau = R * C
+t_hit = -tau * np.log(1 - (T_hi - T0) / (P_hi * R))
+print(f"tau = {tau:.0f} s, steady-state rise at {P_hi} W = {P_hi*R:.0f} K (would reach {T0+P_hi*R:.0f} C)")
+print(f"sustainable power for {T_hi-T0:.0f} K headroom = {(T_hi-T0)/R*1000:.0f} mW")
+print(f"analytic time to {T_hi} C at {P_hi} W = {t_hit:.1f} s; sim first throttle at {np.argmax(P < P_hi)*dt:.1f} s")
+print(f"max T = {T.max():.2f} C, avg power over 300 s = {P.mean()*1000:.0f} mW "
+      f"({P.mean()/P_hi:.0%} of requested)")
+print(f"avg power over last 100 s = {P[-1000:].mean()*1000:.0f} mW")
+```
+
+```text
+tau = 180 s, steady-state rise at 1.5 W = 45 K (would reach 77 C)
+sustainable power for 8 K headroom = 267 mW
+analytic time to 40.0 C at 1.5 W = 35.2 s; sim first throttle at 35.3 s
+max T = 40.02 C, avg power over 300 s = 397 mW (26% of requested)
+avg power over last 100 s = 281 mW
+```
+
+출력에서 볼 것: 해석해(35.2 s)와 시뮬레이션(35.3 s)이 맞는다. 300초 평균 전력은 요청의 26 %인 397 mW, 마지막 100초는 281 mW로 **지속 가능 전력(267 mW)에 수렴**한다. 처음 35초의 burst 덕분에 전체 평균이 조금 높을 뿐, 오래 돌리면 열이 허락하는 만큼만 쓸 수 있다.
+
+```svg
+<svg viewBox="0 0 680 370" xmlns="http://www.w3.org/2000/svg">
+<line x1="70" y1="200" x2="620" y2="200" stroke="currentColor"/><line x1="70" y1="200" x2="70" y2="30" stroke="currentColor"/><line x1="70" y1="320" x2="620" y2="320" stroke="currentColor"/>
+<line x1="70" y1="320" x2="70" y2="240" stroke="currentColor"/><text x="64" y="204.0" font-size="12" text-anchor="end">30</text><text x="64" y="147.3" font-size="12" text-anchor="end">34</text>
+<text x="64" y="90.7" font-size="12" text-anchor="end">38</text><text x="64" y="34.0" font-size="12" text-anchor="end">42</text>
+<line x1="70" y1="58.3" x2="620" y2="58.3" stroke="#d0564a" stroke-dasharray="6 4"/><text x="616" y="143.3" font-size="12" text-anchor="end">빨간 점선: throttle 진입 40 °C</text>
+<line x1="70" y1="72.5" x2="620" y2="72.5" stroke="#888" stroke-dasharray="3 3"/><text x="616" y="161.3" font-size="12" text-anchor="end">회색 점선: 복귀 39 °C</text>
+<polyline points="70.0,171.3 71.8,167.8 73.7,164.3 75.5,160.8 77.3,157.3 79.2,153.9 81.0,150.4 82.8,147.0 84.7,143.6 86.5,140.2 88.3,136.9 90.2,133.5 92.0,130.2 93.8,126.9 95.7,123.6 97.5,120.4 99.3,117.1 101.2,113.9 103.0,110.7 104.8,107.5 106.7,104.3 108.5,101.1 110.3,98.0 112.2,94.9 114.0,91.8 115.8,88.7 117.7,85.6 119.5,82.5 121.3,79.5 123.2,76.5 125.0,73.5 126.8,70.5 128.7,67.5 130.5,64.6 132.3,61.6 134.2,58.7 136.0,58.3 137.8,58.6 139.7,58.9 141.5,59.2 143.3,59.4 145.2,59.7 147.0,60.0 148.8,60.2 150.7,60.5 152.5,60.8 154.3,61.0 156.2,61.3 158.0,61.5 159.8,61.8 161.7,62.0 163.5,62.3 165.3,62.6 167.2,62.8 169.0,63.1 170.8,63.3 172.7,63.5 174.5,63.8 176.3,64.0 178.2,64.3 180.0,64.5 181.8,64.8 183.7,65.0 185.5,65.2 187.3,65.5 189.2,65.7 191.0,65.9 192.8,66.2 194.7,66.4 196.5,66.6 198.3,66.9 200.2,67.1 202.0,67.3 203.8,67.5 205.7,67.8 207.5,68.0 209.3,68.2 211.2,68.4 213.0,68.7 214.8,68.9 216.7,69.1 218.5,69.3 220.3,69.5 222.2,69.7 224.0,69.9 225.8,70.2 227.7,70.4 229.5,70.6 231.3,70.8 233.2,71.0 235.0,71.2 236.8,71.4 238.7,71.6 240.5,71.8 242.3,72.0 244.2,72.2 246.0,72.4 247.8,71.3 249.7,68.3 251.5,65.4 253.3,62.4 255.2,59.5 257.0,58.2 258.8,58.5 260.7,58.7 262.5,59.0 264.3,59.3 266.2,59.6 268.0,59.8 269.8,60.1 271.7,60.3 273.5,60.6 275.3,60.9 277.2,61.1 279.0,61.4 280.8,61.7 282.7,61.9 284.5,62.2 286.3,62.4 288.2,62.7 290.0,62.9 291.8,63.2 293.7,63.4 295.5,63.7 297.3,63.9 299.2,64.2 301.0,64.4 302.8,64.6 304.7,64.9 306.5,65.1 308.3,65.4 310.2,65.6 312.0,65.8 313.8,66.1 315.7,66.3 317.5,66.5 319.3,66.7 321.2,67.0 323.0,67.2 324.8,67.4 326.7,67.7 328.5,67.9 330.3,68.1 332.2,68.3 334.0,68.5 335.8,68.8 337.7,69.0 339.5,69.2 341.3,69.4 343.2,69.6 345.0,69.8 346.8,70.0 348.7,70.3 350.5,70.5 352.3,70.7 354.2,70.9 356.0,71.1 357.8,71.3 359.7,71.5 361.5,71.7 363.3,71.9 365.2,72.1 367.0,72.3 368.8,72.5 370.7,69.8 372.5,66.9 374.3,63.9 376.2,61.0 378.0,58.0 379.8,58.3 381.7,58.6 383.5,58.9 385.3,59.1 387.2,59.4 389.0,59.7 390.8,59.9 392.7,60.2 394.5,60.5 396.3,60.7 398.2,61.0 400.0,61.3 401.8,61.5 403.7,61.8 405.5,62.0 407.3,62.3 409.2,62.5 411.0,62.8 412.8,63.0 414.7,63.3 416.5,63.5 418.3,63.8 420.2,64.0 422.0,64.3 423.8,64.5 425.7,64.8 427.5,65.0 429.3,65.2 431.2,65.5 433.0,65.7 434.8,65.9 436.7,66.2 438.5,66.4 440.3,66.6 442.2,66.9 444.0,67.1 445.8,67.3 447.7,67.5 449.5,67.8 451.3,68.0 453.2,68.2 455.0,68.4 456.8,68.6 458.7,68.9 460.5,69.1 462.3,69.3 464.2,69.5 466.0,69.7 467.8,69.9 469.7,70.1 471.5,70.4 473.3,70.6 475.2,70.8 477.0,71.0 478.8,71.2 480.7,71.4 482.5,71.6 484.3,71.8 486.2,72.0 488.0,72.2 489.8,72.4 491.7,71.3 493.5,68.3 495.3,65.4 497.2,62.4 499.0,59.5 500.8,58.5 502.7,58.8 504.5,59.0 506.3,59.3 508.2,59.6 510.0,59.9 511.8,60.1 513.7,60.4 515.5,60.6 517.3,60.9 519.2,61.2 521.0,61.4 522.8,61.7 524.7,61.9 526.5,62.2 528.3,62.4 530.2,62.7 532.0,63.0 533.8,63.2 535.7,63.4 537.5,63.7 539.3,63.9 541.2,64.2 543.0,64.4 544.8,64.7 546.7,64.9 548.5,65.1 550.3,65.4 552.2,65.6 554.0,65.9 555.8,66.1 557.7,66.3 559.5,66.5 561.3,66.8 563.2,67.0 565.0,67.2 566.8,67.5 568.7,67.7 570.5,67.9 572.3,68.1 574.2,68.3 576.0,68.6 577.8,68.8 579.7,69.0 581.5,69.2 583.3,69.4 585.2,69.6 587.0,69.9 588.8,70.1 590.7,70.3 592.5,70.5 594.3,70.7 596.2,70.9 598.0,71.1 599.8,71.3 601.7,71.5 603.5,71.7 605.3,71.9 607.2,72.1 609.0,72.3 610.8,72.5 612.7,69.5 614.5,66.6 616.3,63.6 618.2,60.7" fill="none" stroke="#e08a3c" stroke-width="2"/>
+<polyline points="70.0,171.7 79.2,154.2 88.3,137.2 97.5,120.7 106.7,104.6 115.8,89.0 125.0,73.8 134.2,59.0 143.3,44.6 152.5,30.7" fill="none" stroke="#888" stroke-width="1.5" stroke-dasharray="5 4"/>
+<text x="158.5" y="42.7" font-size="12">throttle 없으면 (→ 77 °C)</text><text x="78" y="34" font-size="12">표면 온도 (°C)</text>
+<polyline points="70.0,245.0 134.5,245.0 134.7,312.5 247.1,312.5 247.3,245.0 256.1,245.0 256.3,312.5 369.0,312.5 369.2,245.0 378.0,245.0 378.2,312.5 490.9,312.5 491.1,245.0 499.7,245.0 499.9,312.5 610.8,312.5 611.0,245.0 619.8,245.0" fill="none" stroke="#4a7bd0" stroke-width="1.5"/>
+<text x="64" y="324.0" font-size="12" text-anchor="end">0</text><text x="64" y="299.0" font-size="12" text-anchor="end">0.5</text><text x="64" y="249.0" font-size="12" text-anchor="end">1.5</text>
+<line x1="70" y1="306.6" x2="620" y2="306.6" stroke="#3f9a6b" stroke-dasharray="6 4"/><text x="616" y="301.6" font-size="12" text-anchor="end">지속 가능 267 mW</text><text x="78" y="234" font-size="12">허용된 전력 (W)</text>
+<text x="70.0" y="336" font-size="12" text-anchor="middle">0</text><text x="180.0" y="336" font-size="12" text-anchor="middle">60</text><text x="290.0" y="336" font-size="12" text-anchor="middle">120</text>
+<text x="400.0" y="336" font-size="12" text-anchor="middle">180</text><text x="510.0" y="336" font-size="12" text-anchor="middle">240</text><text x="620.0" y="336" font-size="12" text-anchor="middle">300</text>
+<text x="345.0" y="356" font-size="13" text-anchor="middle">시간 (s)</text>
+</svg>
+```
+
+그림 7 — 위: 표면 온도, 아래: governor가 허용한 전력. 처음 35초는 1.5 W를 다 쓰고, 그 뒤로는 40 °C와 39 °C 사이를 오가며 평균이 267 mW 근처로 붙는다. 회색 점선은 throttle이 없을 때의 온도 궤적이다.
+
+함정: throttle 상태의 전력(P_lo)이 너무 높아 그 정상 상태 온도가 복귀 온도보다 높으면(`T_0 + P_lo·R_th > T_lo`), 한 번 throttle되면 영원히 안 풀린다. 처음 이 예제를 P_lo = 0.25 W로 짰을 때 정확히 그렇게 됐다(32 + 7.5 = 39.5 °C > 39 °C). governor 파라미터도 이 식으로 검증해야 한다.
+
+### 7.4 에너지 관점의 교훈
+
+- **벤치마크는 sustained 조건에서** 한다(K4, M2). 첫 10초 숫자는 burst다.
+- 에너지를 줄이면 열도 준다. 3~4절의 최적화는 배터리뿐 아니라 **지속 성능**을 올린다.
+- race-to-idle(1.5절)은 짧은 작업에는 좋지만, 긴 작업에서 최고 OPP를 고집하면 곧 throttle에 걸려 결국 낮은 OPP로 끝난다 — 게다가 뜨거워진 칩의 누설까지 떠안는다.
+
+---
+
+## 8. 측정 — 모델을 실측으로 검증하기
+
+### 8.1 장비와 원리
+
+모델은 가설이다. 실측으로 검증해야 한다. Don의 영역이므로 체크리스트 중심으로 정리한다.
+
+| 장비 | 특징 (대략) | 쓰임 |
+|---|---|---|
+| Nordic PPK2 | 저가, 100 kS/s급, 소스 모드(전원 공급)와 앰미터 모드 | MCU·BLE 기기 개발용 |
+| Joulescope | 더 넓은 대역폭(MS/s급 샘플링), nA~A 범위를 빠르게 전환 | 짧은 spike가 중요한 저전력 기기 |
+| Monsoon Power Monitor | 배터리 대체 전원 겸 측정, 폰급 수 A | 스마트폰·SoC 기기 |
+| shunt 저항 + 차동 앰프 + DAQ/오실로스코프 | 레일별 측정 가능, 설계 필요 | 보드 내부 레일 분해 |
+
+원리는 같다: 전류 경로에 작은 shunt 저항을 넣고 양단 전압(V = I·R)을 증폭해 샘플링한다. shunt가 크면 해상도는 좋지만 **burden voltage**(shunt에서 떨어지는 전압) 때문에 기기 전압이 흔들린다. 좋은 장비는 전류 범위에 따라 shunt를 자동 전환한다.
+
+### 8.2 energy per inference = ∫ (P − P_idle) dt
+
+```
+E_inf = ∫_{t_start}^{t_end} ( V(t)·I(t) − P_idle ) dt
+      ≈ Σ_k ( V·I_k − P_idle ) · Δt          (Δt = 1/f_s, 사다리꼴 적분이면 더 정확)
+```
+
+말로 하면: 추론 구간의 전력에서 **추론이 없을 때도 나갔을 전력(baseline)** 을 빼고 적분한다. 이렇게 해야 "추론을 추가하면 배터리가 얼마나 더 닳나"라는 marginal 비용이 나온다. 단, 6.2절 예산에서는 baseline을 따로 한 행으로 센다 — 두 번 세지도, 빼먹지도 않게 한다.
+
+### 8.3 시뮬레이션으로 보는 흔한 실수 세 가지
+
+현실적인 전류 파형을 만든다: baseline 150 µA, 추론 전 2 ms의 wake(클럭·PLL 기동, 3 mA), 12 ms 추론(8 mA + 50샘플마다 짧은 DMA 버스트 +2 mA), 20 µA rms 잡음. 펌웨어는 추론 함수 앞뒤로 GPIO를 올리고 내린다.
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<rect x="136.0" y="40" width="440.0" height="210" fill="#3f9a6b" fill-opacity="0.10"/><rect x="224.0" y="40" width="264.0" height="210" fill="#4a7bd0" fill-opacity="0.12"/><line x1="70" y1="250" x2="620" y2="250" stroke="currentColor"/>
+<line x1="70" y1="250" x2="70" y2="40" stroke="currentColor"/>
+<polyline points="70.0,247.1 179.8,247.1 180.0,192.7 223.8,192.7 224.0,59.1 224.9,59.1 225.1,97.3 234.8,97.3 235.0,59.1 235.9,59.1 236.1,97.3 245.8,97.3 246.0,59.1 246.9,59.1 247.1,97.3 256.8,97.3 257.0,59.1 257.9,59.1 258.1,97.3 267.8,97.3 268.0,59.1 268.9,59.1 269.1,97.3 278.8,97.3 279.0,59.1 279.9,59.1 280.1,97.3 289.8,97.3 290.0,59.1 290.9,59.1 291.1,97.3 300.8,97.3 301.0,59.1 301.9,59.1 302.1,97.3 311.8,97.3 312.0,59.1 312.9,59.1 313.1,97.3 322.8,97.3 323.0,59.1 323.9,59.1 324.1,97.3 333.8,97.3 334.0,59.1 334.9,59.1 335.1,97.3 344.8,97.3 345.0,59.1 345.9,59.1 346.1,97.3 355.8,97.3 356.0,59.1 356.9,59.1 357.1,97.3 366.8,97.3 367.0,59.1 367.9,59.1 368.1,97.3 377.8,97.3 378.0,59.1 378.9,59.1 379.1,97.3 388.8,97.3 389.0,59.1 389.9,59.1 390.1,97.3 399.8,97.3 400.0,59.1 400.9,59.1 401.1,97.3 410.8,97.3 411.0,59.1 411.9,59.1 412.1,97.3 421.8,97.3 422.0,59.1 422.9,59.1 423.1,97.3 432.8,97.3 433.0,59.1 433.9,59.1 434.1,97.3 443.8,97.3 444.0,59.1 444.9,59.1 445.1,97.3 454.8,97.3 455.0,59.1 455.9,59.1 456.1,97.3 465.8,97.3 466.0,59.1 466.9,59.1 467.1,97.3 476.8,97.3 477.0,59.1 477.9,59.1 478.1,97.3 487.8,97.3 488.0,247.1 619.8,247.1" fill="none" stroke="#e08a3c" stroke-width="1.5"/>
+<line x1="70" y1="247.1" x2="620" y2="247.1" stroke="#888" stroke-dasharray="4 3"/><text x="616" y="242.1" font-size="12" text-anchor="end">I_idle 0.15 mA</text>
+<polyline points="70,280 224.0,280 224.0,266 488.0,266 488.0,280 620,280" fill="none" stroke="#4a7bd0" stroke-width="2"/><text x="64" y="278" font-size="12" text-anchor="end">GPIO</text>
+<text x="64" y="254.0" font-size="12" text-anchor="end">0</text><text x="64" y="196.7" font-size="12" text-anchor="end">3</text><text x="64" y="101.3" font-size="12" text-anchor="end">8</text>
+<text x="64" y="63.1" font-size="12" text-anchor="end">10</text><text x="202.0" y="186.7" font-size="12" text-anchor="middle">wake</text><text x="356.0" y="51.1" font-size="12" text-anchor="middle">추론 12 ms (DMA 버스트)</text>
+<text x="543.0" y="54" font-size="12" text-anchor="middle">여유 창</text><text x="76" y="32" font-size="12">전류 (mA)</text><text x="70.0" y="298" font-size="12" text-anchor="middle">25 ms</text>
+<text x="180.0" y="298" font-size="12" text-anchor="middle">30 ms</text><text x="290.0" y="298" font-size="12" text-anchor="middle">35 ms</text><text x="400.0" y="298" font-size="12" text-anchor="middle">40 ms</text>
+<text x="510.0" y="298" font-size="12" text-anchor="middle">45 ms</text><text x="620.0" y="298" font-size="12" text-anchor="middle">50 ms</text>
+</svg>
+```
+
+그림 8 — 시뮬레이션한 전류 파형. 파란 음영은 GPIO가 high인 구간, 연한 초록 음영은 앞뒤로 여유를 둔 적분 창이다. wake 구간(30~32 ms)이 GPIO 밖에 있다는 점에 주목.
+
+```python
+# 측정 시뮬레이션: GPIO 창 기준 ∫(P − P_idle)dt, 그리고 흔한 실수 3가지의 오차
+import numpy as np
+rng = np.random.default_rng(0)
+fs, V = 100_000, 3.8                       # PPK2급 100 kS/s, 배터리 레일 3.8 V
+t = np.arange(0, 0.100, 1 / fs)            # 100 ms 창
+I_idle = 0.150e-3                          # 150 uA baseline
+I = np.full_like(t, I_idle)
+wake = (t >= 0.030) & (t < 0.032)          # 2 ms: 클럭·PLL 기동 (GPIO 올리기 전)
+inf = (t >= 0.032) & (t < 0.044)           # 12 ms: 추론 (GPIO high)
+I[wake] = 3e-3
+I[inf] = 8e-3 + 2e-3 * (np.arange(inf.sum()) % 50 < 5)   # 연산 중 짧은 DMA 버스트
+I_meas = I + rng.normal(0, 20e-6, t.size)  # 측정 잡음 20 uA rms
+gpio = inf
+
+def E_uJ(mask, cur, fs, sub=True):
+    P = V * (cur[mask] - (I_idle if sub else 0))
+    return np.trapezoid(P, dx=1 / fs) * 1e6       # 사다리꼴 적분, J → uJ
+
+truth = V * ((I - I_idle)[wake | inf]).sum() / fs * 1e6
+pad = (t >= 0.028) & (t < 0.048)           # GPIO 앞뒤로 여유를 둔 창
+print(f"truth (wake + inference)       : {truth:7.2f} uJ")
+print(f"GPIO window, baseline removed  : {E_uJ(gpio, I_meas, fs):7.2f} uJ  <- wake 비용 누락")
+print(f"padded window, baseline removed: {E_uJ(pad, I_meas, fs):7.2f} uJ")
+print(f"padded window, NO baseline sub : {E_uJ(pad, I_meas, fs, sub=False):7.2f} uJ")
+d = 100                                    # 1 kS/s로 '점 샘플링'(평균 없이 솎아내기)
+print(f"1 kS/s decimated (no averaging): {E_uJ(pad[::d], I_meas[::d], fs / d):7.2f} uJ")
+```
+
+```text
+truth (wake + inference)       :  388.74 uJ
+GPIO window, baseline removed  :  366.78 uJ  <- wake 비용 누락
+padded window, baseline removed:  388.79 uJ
+padded window, NO baseline sub :  400.18 uJ
+1 kS/s decimated (no averaging):  471.11 uJ
+```
+
+출력에서 볼 것:
+
+- **GPIO 창만 적분하면 wake 비용(약 22 µJ, 6 %)을 놓친다.** GPIO는 "추론 함수"를 감쌌지 "추론 때문에 생긴 모든 전류"를 감싼 게 아니다. 여유 창을 두고 baseline을 빼면 정답(388.7 µJ)과 맞는다.
+- **baseline을 빼지 않으면** 20 ms × 150 µA × 3.8 V ≈ 11.4 µJ가 더해진다. 여기선 3 %지만, 추론이 짧고 baseline이 큰 SoC에서는 몇 배 오차가 된다.
+- **1 kS/s로 점 샘플링**(평균 없이 솎아냄)하면 21 % 과대평가된다. 샘플 시점이 DMA 버스트와 동기되어 aliasing이 생긴 것이다. 장비가 느리면 적어도 샘플 사이를 **평균**해야 한다(연습문제 6).
+
+### 8.4 펌웨어 쪽 누산기 — C로
+
+기기 안의 전류 센서(fuel gauge, 보드 내 current-sense ADC)로 자체 측정하는 경우를 흉내 낸다. 부동소수점 없이 정수로 적분한다: µA × mV = nW, nW ÷ Hz = nJ.
+
+```c
+/* 펌웨어 쪽 에너지 누산기: ADC 전류 샘플(uA 정수)을 받아 baseline을 빼고 정수로 적분 */
+#include <stdint.h>
+#include <stdio.h>
+
+#define FS_HZ     100000u   /* 샘플링 100 kS/s */
+#define VBAT_MV   3800u     /* 레일 전압 3.8 V */
+#define IDLE_UA   150
+
+static int32_t sample_ua(uint32_t n)          /* ex11과 같은 파형(잡음 제외) */
+{
+    if (n >= 3000 && n < 3200) return 3000;                       /* wake 2 ms   */
+    if (n >= 3200 && n < 4400) return 8000 + (((n - 3200) % 50) < 5 ? 2000 : 0);
+    return IDLE_UA;
+}
+
+int main(void)
+{
+    int64_t acc = 0;                           /* sum of (I - I_idle) [uA·sample] */
+    for (uint32_t n = 2800; n < 4800; n++)     /* padded window 28..48 ms */
+        acc += sample_ua(n) - IDLE_UA;
+    /* uA × mV = nW,  nW / Hz = nJ */
+    int64_t e_nj = acc * VBAT_MV / FS_HZ;
+    printf("acc = %lld uA*samples\n", (long long)acc);
+    printf("E   = %lld nJ = %.2f uJ\n", (long long)e_nj, e_nj / 1000.0);
+    return 0;
+}
+```
+
+```sh
+cc -std=c11 -Wall -Wextra -O2 ex12.c -o ex12 -lm && ./ex12
+```
+
+```text
+acc = 10230000 uA*samples
+E   = 388740 nJ = 388.74 uJ
+```
+
+출력에서 볼 것: Python의 정답과 같은 388.74 µJ가 정수 연산만으로 나온다. `acc`는 int64라서 `acc × 3800`이 넘칠 걱정이 없다(10⁷ × 4×10³ = 4×10¹⁰ ≪ 9.2×10¹⁸). 32-bit로 짰다면 넘쳤을 것이다.
+
+### 8.5 측정 체크리스트
+
+- [ ] 측정 지점: 배터리 단자(시스템 전체) vs 특정 레일(코어·DRAM·NPU)을 목적에 맞게 고른다. 레일 전력의 합은 배터리 전력보다 작다(DC-DC 효율).
+- [ ] 샘플링: 가장 짧은 이벤트(DMA 버스트, 무선 TX)보다 충분히 빠르게. 느리면 평균(anti-alias) 모드로.
+- [ ] 트리거: 추론 앞뒤 GPIO, 그리고 **여유 창**으로 wake·tail 포함. GPIO 토글 자체의 전류도 확인.
+- [ ] baseline: 같은 상태에서 추론만 뺀 구간을 따로 재서 뺀다. 온도가 바뀌면 baseline도 바뀐다.
+- [ ] 반복: 수백 번 반복해 평균과 분산. 첫 실행(캐시 cold, 가중치 로딩)은 따로 보고한다.
+- [ ] 조건 기록: OPP, 온도, 펌웨어 빌드, 모델 버전, 입력 데이터. 재현이 안 되면 측정이 아니다.
+- [ ] 모델과 비교: 3절 모델의 예측과 자릿수가 맞는지. 두 배 이상 틀리면 어느 항의 가정이 틀렸는지 찾는다 — 보통 static × 시간이나 DRAM traffic이다.
+- [ ] 한 번은 **모델을 끈 상태**로 전체 하루 시나리오를 돌려 6.2절 예산표와 대조한다.
+
+---
+
+## 9. 임베디드 관점에서 다시 보기
+
+에너지 모델을 기기 계층별로 정리한다 (Hark 같은 웨어러블을 가정한 구조).
+
+| 계층 | 지배 항 | 가장 큰 손잡이 |
+|---|---|---|
+| always-on MCU (KWS, IMU) | 명령 오버헤드, static × 시간 | 모델 크기·실행 빈도, VAD gating, micro-NPU/DSP로 이동, 저전압 OPP |
+| SoC NPU (비전, ASR 인코더) | on-chip SRAM, DRAM | 양자화, fusion, tiling, weight 상주, DRAM spill 제거 |
+| SoC LLM decode | DRAM, static × 시간 | weight 바이트(int4), 모델 크기, 토큰 수, 오프로드 |
+| 무선 | 고정비(wake·tail), 바이트 | 배치 전송, 압축, 연결 유지 전략 |
+| 전체 | 이벤트 빈도 × 이벤트 에너지 | false wake율, cascade 설계, duty cycle |
+
+펌웨어로 구현할 때의 체크포인트:
+
+- **링커 스크립트로 weight 위치를 정한다**(F7). 자주 쓰는 작은 weight는 TCM/SRAM, 큰 weight는 flash/DRAM. 이 결정이 3.3절 (b1) vs (b2)의 차이, 36 %다.
+- **tensor arena를 SRAM 안에** 들어가게 하는 것(D2의 peak memory)이 곧 DRAM spill 방지다.
+- **추론 사이 전원 상태**를 설계한다: 다음 추론까지 20 ms면 retention, 1 s면 power-gate. wake 비용과 sleep 전력의 손익분기를 계산한다(연습문제 5와 같은 식).
+- **DVFS 정책을 워크로드 유형에 맞춘다**: compute-bound 레이어는 높은 OPP로 race, memory-bound 구간(LLM decode)은 코어 OPP를 낮추고 DRAM 쪽을 본다.
+- **측정 hook을 펌웨어에 넣는다**: 추론 시작·끝 GPIO, 레이어 경계 GPIO(선택), 온도 로그. 이게 없으면 8절의 측정이 불가능하다.
+
+---
+
+## 10. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| mAh를 에너지로 계산 | 레일마다 수명 계산이 다르게 나옴 | 전압을 안 곱함 | 배터리 전압 기준 mWh로 통일 |
+| MAC만 세서 에너지 추정 | 실측이 예측보다 5~10배 큼 | SRAM·DRAM traffic, static 누락 | 4항 모델로 분해, 바이트 traffic 계산 |
+| TOPS/W를 그대로 곱함 | 배터리 수명이 한 자릿수 낙관적 | 정밀도·sparsity·peak·포함 범위 조건 무시 | 5.2절 조건 목록으로 정규화 |
+| memory-bound인데 클럭만 올림 | latency 거의 그대로, 전력만 증가 | DRAM 병목(D3) | 바이트를 줄이거나 코어 OPP를 낮춤 |
+| race-to-idle 무조건 적용 | 오히려 에너지 증가 | idle에서 전력이 새거나 platform 전력이 작음 | 1.5절 식으로 동작점별 에너지 비교 |
+| GPIO 창만 적분 | 추론 에너지 과소평가 | wake·tail 누락 | 여유 창 + baseline 차감 |
+| 느린 샘플링으로 점 샘플 | 측정값이 들쭉날쭉, 과대/과소 | 버스트와 aliasing | 빠른 샘플링 또는 구간 평균 |
+| 첫 10초 벤치마크로 결정 | 제품에서 성능이 절반 | thermal throttling | sustained 조건에서 측정, RC 모델로 예측 |
+| 오프로드는 항상 싸다고 가정 | 작은 모델까지 전송해 배터리 악화 | 무선 고정비(wake·tail) 무시 | 6.3절 계산기로 교차점 확인 |
+| 기기 배터리만 보고 결론 | 폰 배터리·클라우드 비용 문제 발생 | 에너지 경계 설정 누락 | 최소화할 대상을 먼저 정의 |
+
+---
+
+## 11. 면접에서 이렇게 말한다
+
+**Q.** "Why does data movement dominate energy in ML inference?"
+
+**A.** 산술 연산은 짧은 배선 안에서 끝나지만 메모리 접근은 긴 배선과 큰 배열을 구동해야 한다. Horowitz의 45 nm 표로 int8 MAC이 약 0.3 pJ인데, 1 MB SRAM에서 1바이트 읽기가 약 12 pJ, DRAM에서 1바이트가 160 pJ 이상이다. 즉 DRAM 1바이트가 MAC 수백 번이다. 그래서 LLM decode처럼 weight를 매 토큰 DRAM에서 읽는 워크로드는 MAC 에너지가 1 % 미만이고, 최적화는 바이트를 줄이는 쪽(양자화, fusion, tiling, 재사용)이 먼저다. 공정이 발전할수록 로직이 더 빨리 싸지므로 이 비율은 더 벌어진다.
+
+> "Because moving a byte costs far more than computing on it. In Horowitz's 45-nanometer numbers an int8 multiply-accumulate is about 0.3 picojoules, reading a byte from a megabyte-scale SRAM is around 12, and from DRAM well over a hundred. So one DRAM byte costs hundreds of MACs. For something like LLM decode, where all weights stream from DRAM every token, the arithmetic is under one percent of the energy. That is why the first optimizations I look at are the ones that cut bytes — quantization, fusion, tiling, keeping weights on-chip — and why the gap grows with newer process nodes."
+
+**Q.** "Estimate the battery life impact of an always-on wake word model."
+
+**A.** 추론 1회 에너지 × 실행 빈도로 평균 전력을 만들고 배터리 에너지와 비교한다. 예: MCU에서 DS-CNN급 KWS가 추론당 약 0.17 mJ, 초당 5회면 0.85 mW. 300 mAh·3.7 V(1.11 Wh) 배터리면 하루 20 mWh, 약 1.8 %다. VAD로 30 %만 돌리면 0.26 mW, 하루 0.55 %. 그런데 실제로 배터리를 결정하는 건 보통 false wake다 — false wake 하나가 SoC를 수백 mW로 몇 초 깨우면, 시간당 수십 번만 되어도 KWS 자체보다 훨씬 크다. 그래서 FA/hour를 전력 예산 항목으로 같이 관리한다.
+
+> "I'd turn it into average power: energy per inference times invocation rate. Say a DS-CNN-class model on a Cortex-M costs about 0.17 millijoules and runs five times a second — that's 0.85 milliwatts, around 20 milliwatt-hours a day, or about 2 percent of a 1.1 watt-hour battery. Gating it with a VAD at 30 percent duty brings that near half a percent. But the bigger lever is usually false accepts: each one wakes the SoC at hundreds of milliwatts for seconds, so false accepts per hour belong in the power budget alongside the model itself."
+
+**Q.** "Race-to-idle — when does it help and when doesn't it?"
+
+**A.** 일 하나당 동적 에너지는 C·V²로 주파수와 무관하고 전압에만 의존한다. 그래서 빨리 하면 동적 에너지는 늘지만(높은 V), 켜져 있는 시간이 줄어 정적·platform 에너지가 준다. platform 전력(DRAM, PLL, 레귤레이터)이 크고 끝난 뒤 깊은 sleep으로 갈 수 있으면 race-to-idle이 이긴다. idle에서도 누설이 계속되거나 platform이 작으면 낮은 전압으로 천천히가 이긴다. 그리고 memory-bound 워크로드는 클럭을 올려도 빨리 안 끝나므로 race가 성립하지 않는다. 나는 OPP별로 "active 에너지 + 남은 시간의 idle 에너지"를 계산해서 고른다.
+
+> "Dynamic energy per operation scales with C V squared, independent of frequency, while static and platform energy scale with time. Racing at a high voltage costs more dynamic energy but lets you shut down sooner. So race-to-idle wins when always-on platform power — DRAM, PLLs, regulators — is large and you can actually power-gate afterward. It loses when idle still leaks or platform power is small; then the lowest voltage that meets the deadline wins. It also doesn't apply to memory-bound phases, because a faster clock doesn't finish them sooner. In practice I compute active-plus-idle energy for each operating point over the period and pick the minimum."
+
+**Q.** "A vendor says their NPU does 5 TOPS/W. How do you interpret that?"
+
+**A.** 먼저 pJ로 바꾼다: 5 TOPS/W는 op당 0.2 pJ, MAC당 0.4 pJ다. 그 다음 조건을 묻는다 — int4인가 int8인가, sparsity 크레딧이 들어갔나, peak 활용률 기준인가, NPU 코어만인가 SRAM·DRAM·SoC까지인가, 어느 전압에서 잰 건가. 내 모델에 맞게 정규화해서 활용률과 메모리 traffic을 더하면 시스템 수준 효율은 쉽게 몇 배에서 열 배 낮아진다. 그래서 대표 모델의 추론당 mJ를 실측으로 요구하고, 모델이 memory-bound면 TOPS/W보다 DRAM pJ/bit와 on-chip SRAM 크기를 더 본다.
+
+> "First I convert it: 5 TOPS per watt is 0.2 picojoules per op, about 0.4 per MAC. Then I ask for the conditions — int4 or int8, whether sparsity is counted, peak or typical utilization, whether it's NPU core only or includes SRAM, DRAM and the rest of the SoC, and at which voltage point. After normalizing to my model's precision, realistic utilization and memory traffic, the system-level number is often several times to ten times worse. So I ask for measured millijoules per inference on a representative model, and if the model is memory-bound I care more about DRAM energy per bit and on-chip SRAM size than the TOPS per watt headline."
+
+**Q.** "On-device vs cloud — which uses less energy?"
+
+**A.** 경계부터 정한다 — 웨어러블 배터리만인지, 전체인지. 기기 배터리 기준으로는 "무선 고정비 + 바이트 × 비트당 에너지 + 응답 대기"와 "로컬 추론 에너지"를 비교한다. 작은 always-on 모델(추론 1 mJ 미만)은 무선 고정비만으로도 비싸서 항상 기기가 이긴다. 1B LLM 답변처럼 J급 워크로드는 압축된 음성 몇 KB를 보내는 게 한 자릿수 이상 싸다. 중간(ASR)은 압축 여부와 연결 상태에 따라 바뀐다. 에너지 외에 지연, 프라이버시, 오프라인 동작도 같이 본다.
+
+> "It depends on the boundary and the workload. For the wearable's battery, I compare the local inference energy against the radio cost: a fixed wake-and-tail cost plus bytes times energy per bit plus waiting for the response. Small always-on models under a millijoule always win locally — the radio's fixed cost alone is bigger. A one-billion-parameter LLM answer costs on the order of a joule on-device, while sending a few kilobytes of compressed audio over BLE costs a few millijoules, so offload wins by more than ten times. Mid-size models like ASR flip depending on compression and link state. Then latency, privacy and offline behavior go into the same decision."
+
+**Q.** "How would you measure energy per inference on a device?"
+
+**A.** 배터리 단자에 PPK2나 Joulescope를 물리고, 펌웨어에서 추론 앞뒤로 GPIO를 토글한다. 이벤트보다 충분히 빠르게 샘플링하고, GPIO 창보다 넓은 여유 창으로 wake와 tail을 포함한다. 추론이 없는 같은 상태의 baseline 전력을 따로 재서 빼고 적분한다: ∫(P − P_idle)dt. 수백 번 반복해 평균·분산을 보고, OPP·온도·빌드를 기록하고, 분석 모델의 예측과 자릿수를 대조한다.
+
+> "I'd power the device through a Joulescope or PPK2 at the battery terminals and toggle a GPIO around the inference call. I sample fast enough to catch the shortest bursts, integrate over a window padded beyond the GPIO edges so wake-up and tail current are included, and subtract a baseline measured in the same state without inference — so energy is the integral of P minus P-idle. I repeat it hundreds of times, report mean and spread, log operating point, temperature and build, and check it against my analytical estimate; if they disagree by more than about 2x, one of the assumptions is wrong and I go find it."
+
+**Q.** "What limits sustained ML performance in a small wearable?"
+
+**A.** 대개 배터리보다 열이다. 1차 RC 모델로 보면 지속 가능 전력은 허용 온도 상승 ÷ 열저항이다. 예를 들어 R_th 30 K/W, 여유 8 K면 약 270 mW다. 열용량 덕분에 짧은 burst(예: 1.5 W로 약 35초)는 가능하지만 긴 작업은 throttle된다. 그래서 벤치마크는 sustained 조건에서 하고, 에너지 최적화가 곧 지속 성능 최적화라고 본다.
+
+> "Usually heat, before battery. With a first-order thermal model, sustainable power is the allowed temperature rise divided by thermal resistance — for example 8 kelvin of headroom at 30 kelvin per watt is under 300 milliwatts. Thermal capacitance lets you burst much higher for tens of seconds, but a long on-device generation will hit the skin-temperature limit and throttle. So I benchmark under sustained conditions and treat energy reduction as the way to raise sustained performance."
+
+---
+
+## 12. 직접 해보기
+
+1. 손계산: 200 mAh, 3.85 V 배터리에서 평균 2 mW면 며칠 가는가? 정답: 200 × 3.85 = 770 mWh, 770 / 2 = 385 h ≈ 16일.
+2. 손계산: α·C = 0.2 nF인 코어가 0.8 V에서 1천만 사이클을 돌 때 동적 에너지는? 같은 일을 1.0 V에서 하면? 정답: 0.2 nF × 0.64 × 10⁷ = 1.28 mJ, 1.0 V면 2.0 mJ (주파수는 답에 영향 없음).
+3. 손계산: "8 TOPS/W (int8, dense, peak)" NPU로 MobileNetV2(300.8 M MAC)를 돌릴 때 이상적 에너지는? 활용률 40 %, peak 전력의 25 %가 고정이라면? 정답: 2/8 = 0.25 pJ/MAC → 75 µJ. 활용률 반영 시 배수 = (0.25 + 0.75 × 0.4)/0.4 = 1.375 → 약 103 µJ (메모리 traffic 제외).
+4. 손계산: 1B 파라미터 int4(4.5 bit/weight) LLM이 100토큰을 생성한다. DRAM 40 pJ/B, 대역폭 25 GB/s, static 300 mW라면 총 에너지와 1.11 Wh 배터리 대비 비율은? 정답: 토큰당 0.5625 GB × 40 pJ = 22.5 mJ + 300 mW × 22.5 ms = 6.75 mJ → 약 29 mJ, 100토큰 약 2.9 J ≈ 0.07 % (3996 J 기준).
+5. 설계: 추론 사이 간격이 T일 때 retention(0.5 mW 유지, wake 비용 0)과 power-gate(0.02 mW 유지, wake 1회 0.3 mJ) 중 무엇이 나은가? 손익분기 T는? 정답: 0.5T = 0.02T + 0.3 mJ → T = 0.3/0.48 ≈ 0.625 s. 그보다 길면 power-gate.
+6. 코드: ex11에서 1 kS/s 점 샘플링 대신 100샘플씩 **평균**을 내서(`I_meas[pad].reshape(-1, 100).mean(axis=1)`) 적분하면 오차가 어떻게 되는가? 힌트: 창 길이가 100의 배수라 reshape가 된다. 정답: 평균은 적분을 보존하므로 정답(약 389 µJ)과 거의 같다 — anti-alias 평균의 효과.
+7. 코드: ex9에 LTE를 추가하라(고정비 1000 mJ, 0.1 µJ/B 가정). 1B LLM 50토큰의 교차점은? 힌트: `(1590 − 1000) × 1000 / 0.1` 바이트. 정답: 약 5.9 MB — payload가 몇 KB인 음성 질의라면 LTE로도 오프로드가 싸지만, 차이는 Wi-Fi보다 훨씬 작다.
+
+---
+
+## 13. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| power | 전력 (W) | 에너지를 쓰는 속도, P = dE/dt |
+| energy | 에너지 (J, Wh) | 전력의 시간 적분. 배터리가 담는 양 |
+| mAh | 전하 | 전압을 곱해야 에너지(mWh)가 된다 |
+| dynamic power | 동적 전력 | 스위칭 전력 α·C·V²·f. 사이클당 에너지는 C·V² |
+| leakage / static power | 누설 / 정적 전력 | 클럭이 멈춰도 전압이 있으면 나가는 전력 |
+| platform power | 플랫폼 전력 | PLL, 레귤레이터, DRAM background 등 켜져 있으면 나가는 전력 |
+| DVFS | 동적 전압·주파수 조정 | 부하에 따라 OPP(V, f 쌍)를 바꾸는 것 |
+| OPP | operating performance point | 검증된 (전압, 주파수) 조합 |
+| race-to-idle | 빨리 끝내고 자기 | platform 전력이 크고 깊은 sleep이 가능할 때 유리 |
+| power gating | 전원 차단 | 블록의 전원을 끊어 누설까지 없앰. 상태는 잃음 |
+| retention | 상태 유지 저전력 | 낮은 전압으로 SRAM·레지스터 상태만 유지 |
+| energy per inference | 추론당 에너지 | ∫(P − P_idle)dt, 보통 µJ~mJ |
+| data movement | 데이터 이동 | 메모리 계층 사이의 바이트 이동. 에너지의 주범 |
+| Horowitz table | 연산당 에너지 표 | ISSCC 2014, 45 nm의 연산·메모리 접근 에너지 |
+| TOPS/W | 전력 효율 스펙 | 1 TOPS/W = 1 op/pJ = MAC당 2 pJ |
+| utilization | 활용률 | 실제 처리량 ÷ peak 처리량 |
+| duty cycle | 동작 비율 | 켜져 있는 시간 ÷ 전체 시간 |
+| tail energy | 꼬리 에너지 | 무선이 전송 후 바로 저전력으로 안 내려가서 쓰는 에너지 |
+| thermal resistance R_th | 열저항 (K/W) | 1 W를 버릴 때의 온도 상승 |
+| thermal capacitance C_th | 열용량 (J/K) | 1 K 올리는 데 드는 에너지. τ = R_th·C_th |
+| throttling | 성능 제한 | 온도 한계에서 OPP를 낮추는 것 |
+| shunt resistor | 전류 감지 저항 | 양단 전압으로 전류를 잰다 |
+| burden voltage | 부담 전압 | shunt에서 떨어지는 전압. 기기 동작에 영향 |
+| baseline | 기준 전력 | 추론이 없을 때의 같은 상태 전력 |
+
+---
+
+## 14. 요약 & 체크리스트
+
+전력은 속도, 에너지는 양이다. 배터리 수명은 평균 전력이 정하고, mAh는 전압을 곱해야 에너지가 된다. 동적 에너지는 사이클당 C·V²로 전압에만 의존하고, 정적·platform 에너지는 켜져 있는 시간에 비례한다 — 이 둘의 줄다리기가 race-to-idle이냐 slow-and-steady냐를 정한다. 연산 하나의 에너지는 메모리 접근보다 자릿수로 작아서(int8 MAC 0.3 pJ vs DRAM 바이트 160 pJ 이상, 45 nm), 추론 에너지는 `MAC × e_mac + 바이트 × 계층별 단가 + static × 시간`으로 모델링하면 대부분 데이터 이동이 지배한다. MCU에서는 명령 오버헤드, NPU에서는 SRAM·DRAM traffic, LLM decode에서는 DRAM과 static이 주범이다. 그래서 양자화·fusion·tiling·weight 상주처럼 바이트를 줄이는 기법이 MAC을 줄이는 기법보다 잘 듣는다. TOPS/W 스펙은 정밀도·sparsity·활용률·포함 범위를 정규화하면 시스템 수준에서 몇 배~열 배 나빠질 수 있다. 시스템 수준에서는 always-on 바닥 전력 + 이벤트 빈도 × 이벤트 에너지로 예산을 짜고, false wake와 긴 SoC 세션이 보통 가장 큰 항목이다. 오프로드는 무선 고정비 때문에 작은 모델에선 손해, J급 LLM에선 큰 이득이다. 작은 웨어러블의 지속 전력은 열(ΔT/R_th)이 제한하며, 모든 모델은 GPIO 트리거·여유 창·baseline 차감으로 실측해 검증한다.
+
+- [ ] mAh·V → Wh 환산과 평균 전력 → 배터리 수명을 손으로 계산할 수 있다
+- [ ] C·V²·f에서 사이클당 에너지가 f와 무관함을 설명하고, OPP별 창 에너지를 계산해 race-to-idle 여부를 판단할 수 있다
+- [ ] Horowitz 표의 핵심 숫자(int8 MAC 약 0.3 pJ, SRAM 10~100 pJ/64b, DRAM 1.3~2.6 nJ/64b)와 그 비율을 말할 수 있다
+- [ ] 4항 에너지 모델로 KWS·CNN·LLM decode의 추론당 에너지를 추정하고 지배 항을 짚을 수 있다
+- [ ] LLM 토큰당 에너지를 "모델 바이트 × DRAM 단가 + static × 모델 바이트/대역폭"으로 암산할 수 있다
+- [ ] 양자화·pruning·fusion·tiling이 각각 어느 항을 줄이는지 설명할 수 있다
+- [ ] "X TOPS/W"를 pJ/MAC으로 바꾸고, 스펙에 숨은 조건 다섯 가지를 물을 수 있다
+- [ ] 하루 에너지 예산표를 만들고 false wake·세션·always-on의 비중을 비교할 수 있다
+- [ ] 기기 vs 클라우드 에너지를 고정비 + 바이트 모델로 비교하고 교차점을 구할 수 있다
+- [ ] 1차 열 RC 모델로 지속 가능 전력과 burst 지속 시간을 계산하고, 측정에서 wake·baseline·aliasing 실수를 피할 수 있다
+
+## 참고 자료
+
+- M. Horowitz, "1.1 Computing's Energy Problem (and what we can do about it)", IEEE ISSCC 2014 — 2절의 연산·메모리 에너지 표
+- V. Sze, Y.-H. Chen, T.-J. Yang, J. Emer, "Efficient Processing of Deep Neural Networks: A Tutorial and Survey", Proceedings of the IEEE, 2017 — 에너지 관점의 DNN 가속기 개관 (같은 저자들의 책 "Efficient Processing of Deep Neural Networks", 2020)
+- Y.-H. Chen, J. Emer, V. Sze, "Eyeriss: A Spatial Architecture for Energy-Efficient Dataflow for Convolutional Neural Networks", ISCA 2016 — 2.3절의 계층별 상대 비용
+- S. Han et al., "EIE: Efficient Inference Engine on Compressed Deep Neural Network", ISCA 2016 / "Deep Compression", ICLR 2016 — 32-bit 단위 SRAM·DRAM 에너지 인용
+- Y. Zhang, N. Suda, L. Lai, V. Chandra, "Hello Edge: Keyword Spotting on Microcontrollers", arXiv:1711.07128, 2017 — DS-CNN KWS의 크기 자릿수
+- M. Sandler et al., "MobileNetV2: Inverted Residuals and Linear Bottlenecks", CVPR 2018 — 3.2절 레이어 구성
+- J. Huang et al., "A Close Examination of Performance and Power Characteristics of 4G LTE Networks", MobiSys 2012 — 무선 tail energy
+- J. Rabaey, A. Chandrakasan, B. Nikolić, "Digital Integrated Circuits: A Design Perspective" — 동적·누설 전력
+- J. Hennessy, D. Patterson, "Computer Architecture: A Quantitative Approach" (6th ed.) — 에너지·Dennard scaling의 끝, 도메인 특화 가속기
+- MIT 6.5940 "TinyML and Efficient Deep Learning Computing" (Song Han) — [efficientml.ai](https://efficientml.ai)
+- Nordic Power Profiler Kit II 문서 — [nordicsemi.com](https://www.nordicsemi.com) · Joulescope — [joulescope.com](https://www.joulescope.com)
+- IEC 62368-1 — 접촉 가능한 표면의 온도 한계 (7.1절, 원문 확인 필요)
