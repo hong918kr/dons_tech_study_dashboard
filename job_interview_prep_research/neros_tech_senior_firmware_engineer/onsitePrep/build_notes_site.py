@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Neros Firmware Test Engineer 준비 노트 마크다운 → 읽기 좋은 HTML 사이트.
+"""Neros 온사이트 준비 노트 마크다운 → 읽기 좋은 HTML 사이트.
 
   python3 build_notes_site.py            # site/ 전체 재생성
 
@@ -27,17 +27,17 @@ ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "site"
 COLLECTIONS = [
     {"key": "plan", "dir": ROOT / "plan",
-     "title_ko": "게임 플랜", "title_en": "Game Plan",
-     "blurb": "목요일 HM 45분 인터뷰까지 이틀 일정. 여기서 시작해서 링크를 따라간다.",
+     "title_ko": "게임 플랜", "title_en": "Onsite Game Plan",
+     "blurb": "온사이트 구성(Tour · 발표 1시간 · 1:1 여러 개)과 준비 순서. 여기서 시작한다.",
      "src_hint": "plan"},
+    {"key": "company", "dir": ROOT / "company",
+     "title_ko": "회사 파악", "title_en": "Company Q&A",
+     "blurb": "Don이 물어본 회사 관련 질문을 하나씩 조사해 답한 페이지. 공고 원문과 면접에서 들은 것을 근거로.",
+     "src_hint": "company"},
     {"key": "notes", "dir": ROOT / "notes",
-     "title_ko": "스터디 노트", "title_en": "Study Notes",
-     "blurb": "JD 한 줄씩 → HIL · Python · pytest · CI · 프로토콜 · 드론 스택 · 스토리와 영어 답변.",
+     "title_ko": "준비 노트", "title_en": "Onsite Notes",
+     "blurb": "회사 스택 지도 → STM32 → 발표 → C/C++ → ring buffer → system design → 임베디드 퀴즈 → factory test FW → 면접관별 대응.",
      "src_hint": "notes"},
-    {"key": "problems", "dir": ROOT / "python" / "problems",
-     "title_ko": "Python 코딩 문제", "title_en": "Python Problems",
-     "blurb": "테스트 자동화 면접에서 나오는 Python 라이브 코딩. 먼저 starter로 풀고, 막히면 힌트, 마지막에 답안.",
-     "src_hint": "python/problems"},
 ]
 META_DIR = ROOT / "meta"          # 선택: <stem>.json 에 icon/range 지정
 
@@ -107,9 +107,14 @@ def md2html(href):
     m = re.match(r"^(?:.*/)?(\w+_context)\.md(#.*)?$", href)      # 상위 폴더의 컨텍스트 파일
     if m:
         return f"../../../{m.group(1)}.html{m.group(2) or ''}"
-    m = re.match(r"^(?:.*/)?(plan|notes|problems)/([\w-]+)\.md(#.*)?$", href)   # 소스 위치와 무관하게
+    m = re.match(r"^(?:.*/)?(plan|notes|problems|company)/([\w-]+)\.md(#.*)?$", href)   # 소스 위치와 무관하게
     if m:                                                          # site/<coll>/X.html 로
         return f"../{m.group(1)}/{m.group(2)}.html{m.group(3) or ''}"
+    m = re.match(r"^(?:.*/)?code/([\w.-]+\.(?:c|h|cpp)|Makefile)(#.*)?$", href)   # C 코드 → 읽기용 페이지
+    if m:
+        return f"../code/{m.group(1)}.html{m.group(2) or ''}"
+    if href.startswith("../../"):            # onsitePrep 바깥(../../research 등): site/<coll>/ 은 한 단계 더 깊다
+        href = "../" + href
     return re.sub(r"\.md(#|$)", r".html\1", href)
 
 
@@ -367,7 +372,7 @@ h2:hover .anchor,h3:hover .anchor{opacity:1}
 """
 
 JS_PAGE = """
-const KEY='neros_fte_notes_read_v1', TKEY='neros_fte_notes_theme', CKEY='neros_fte_notes_check_v1';
+const KEY='neros_onsite_notes_read_v1', TKEY='neros_onsite_notes_theme', CKEY='neros_onsite_notes_check_v1';
 const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
 const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
 (function(){
@@ -415,7 +420,7 @@ const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){
 """
 
 JS_HUB = """
-const KEY='neros_fte_notes_read_v1', TKEY='neros_fte_notes_theme';
+const KEY='neros_onsite_notes_read_v1', TKEY='neros_onsite_notes_theme';
 (function(){
   try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
   const tb=document.getElementById('theme');
@@ -516,16 +521,16 @@ def hub_page(colls, totals):
   <div class="sub">{esc(c["blurb"])} — <code>{esc(c["src_hint"])}/</code></div>
   <div class="grid">{"".join(cards)}</div>
 </section>""")
-    return shell("Neros FW Test Engineer 준비", f"""
+    return shell("Neros 온사이트 준비", f"""
 <div class="top"><div class="top-in">
-  <span class="t"><b>Neros</b> · Firmware Test Engineer — HM 45분 인터뷰 준비</span>
+  <span class="t"><b>Neros</b> · 온사이트 준비 — Tour · 발표 1h · 1:1 기술</span>
   <button class="btn" id="resetread">읽음 초기화</button>
   <button class="btn" id="theme">◐</button>
 </div></div>
 <div class="hub">
   <h1>준비 노트</h1>
-  <p class="lead"><b>Firmware Test Engineer</b> (Greenhouse 4941340007) HM 인터뷰 대비 — <b>목요일 2026-10-01</b>. 리크루터가 <b>Python</b>을 물어본다고 했다.
-     <b>게임 플랜</b>부터 읽고, 노트 N01 → N02 → N03 순서로, 코딩 문제는 starter로 직접 푼다. 읽은 노트는 체크로 남는다.</p>
+  <p class="lead"><b>Neros 온사이트</b> (Torrance) 대비. 구성: <b>Tour 30분 → 내 경력 발표 1시간 → 1:1 기술 여러 개</b>(C/C++ · ring buffer · generic system design).
+     FW Test HM Michael Honor 인터뷰(10-01) 이후 결과 대기 중. Senior FW Platform HM이 들어올 수도 있다.</p>
   <div class="stats">
     <div class="stat"><b>{totals["notes"]}</b><span>노트</span></div>
     <div class="stat"><b id="readcount">0</b><span>읽음</span></div>
@@ -533,8 +538,10 @@ def hub_page(colls, totals):
     <div class="stat"><b>{totals["sections"]}</b><span>절</span></div>
   </div>
   <p class="lead"><a href="start.html"><b>🧭 START HERE — 어디서부터 볼까 (남은 시간별 코스)</b></a></p>
-  <p class="lead"><a href="coding.html"><b>→ Python Coding Session (HM interview prep)</b></a> — 문제 · starter · 모범답안 · <code>python3 python/run.py NN</code> 채점</p>
-  <div class="tools"><input id="q" placeholder="노트 검색 — 제목·요약·소제목 (예: pytest, fixture, CRSF, GitLab, HIL, flaky)"></div>
+  <p class="lead">C 연습: <a href="../../research/ringbuffer_research/html/index.html"><b>링버퍼 완전정복 (7레벨 42문제)</b></a> ·
+     <a href="../../practice/html/index.html"><b>Neros C 연습 세트 (7토픽 42문제)</b></a> ·
+     <a href="code/index.html"><b>온사이트용 C 코드 (화이트보드 버전)</b></a></p>
+  <div class="tools"><input id="q" placeholder="노트 검색 — 제목·요약·소제목 (예: volatile, ring buffer, PCIe, 8b/10b, STM32, OTA)"></div>
   {"".join(tracks)}
 </div>""", JS_HUB)
 
@@ -591,7 +598,7 @@ def collect():
                 "id": f"{c['key']}/{f.stem}", "stem": f.stem, "file": f.stem + ".html",
                 "h1": h1, "title": title, "summary": summary or m.get("summary_ko", "")[:190],
                 "lines": lines, "lines_n": len(lines), "minutes": read_time(text),
-                "headings": heads, "icon": m.get("icon", {"plan": "🎯", "notes": "📘", "problems": "🐍"}.get(c["key"], "📗")),
+                "headings": heads, "icon": m.get("icon", {"plan": "🎯", "notes": "📘", "company": "🏢"}.get(c["key"], "📗")),
                 "badge": m.get("range", ""), "priority": PRIORITY.get(f.stem, ""),
                 "sections": sum(1 for l in lines if HEAD.match(l) and len(HEAD.match(l).group(1)) == 2),
             })
@@ -600,93 +607,55 @@ def collect():
     return colls
 
 
-# ------------------------------------------------------- 코딩 세션 (Python 파일 + 인덱스)
-CODING = ROOT / "python"
+# ------------------------------------------------------- C 코드 (화이트보드 버전) 읽기용 페이지
+CODE = ROOT / "code"
 
 
-def code_title(stem):
-    """problems/<stem>.md 의 h1 을 제목으로 쓴다."""
-    md = CODING / "problems" / f"{stem}.md"
-    if md.exists():
-        for l in md.read_text(encoding="utf-8").splitlines():
-            m = HEAD.match(l)
-            if m and len(m.group(1)) == 1:
-                return title_text(m.group(2))
-    return stem
-
-
-def code_page(src, stem, kind):
-    """Python 소스 하나 → 읽기용 HTML."""
-    label = "모범답안" if kind == "solution" else "starter (TODO)"
-    title = code_title(stem)
+def code_page(src):
     text = src.read_text(encoding="utf-8")
-    n = len(text.splitlines())
-    cmd = f"python3 python/{kind}s/{stem}.py" if kind == "solution" else f"python3 python/run.py {stem[:2]}"
+    lang = "c" if src.suffix in (".c", ".h") else src.suffix.lstrip(".") or "text"
     body = f"""
 <div class="top"><div class="top-in">
-  <a class="home" href="../coding.html">← 코딩 세션</a>
-  <span class="t">{esc(title)} · {esc(label)}</span>
+  <a class="home" href="index.html">← 코드 목록</a>
+  <span class="t">{esc(src.name)}</span>
   <button class="btn" id="theme">◐</button>
 </div></div>
 <div class="wrap"><main>
-  <div class="hero">
-    <div class="kicker">python/{esc(kind)}s/{esc(stem)}.py</div>
-    <h1>{esc(title)} — {esc(label)}</h1>
-    <div class="meta"><span>{n}줄</span><span>Python 3.9+</span><span>{esc(cmd)}</span></div>
-  </div>
-  <figure class="code"><span class="lang">python</span><pre><code>{esc(text)}</code></pre></figure>
-  <div class="nav">
-    <a class="prev" href="../problems/{esc(stem)}.html"><span class="dir">← 문제</span><span class="nm">{esc(title)}</span></a>
-    <a class="next" href="{esc(stem)}_{'starter' if kind == 'solution' else 'solution'}.html"><span class="dir">{'starter' if kind == 'solution' else '모범답안'} →</span><span class="nm">{esc(title)}</span></a>
-  </div>
+  <div class="hero"><div class="kicker">onsitePrep/code/{esc(src.name)}</div>
+    <h1>{esc(src.name)}</h1>
+    <div class="meta"><span>{len(text.splitlines())}줄</span><span>make -C code test</span></div></div>
+  <figure class="code"><span class="lang">{esc(lang)}</span><pre><code>{esc(text)}</code></pre></figure>
 </main></div>"""
-    return shell(f"{title} — {label}", body, JS_PAGE)
-
-
-def coding_index():
-    rows = []
-    for md in sorted((CODING / "problems").glob("[0-9]*.md")):
-        stem = md.stem
-        cells = [f"<b>{esc(stem[:2])}</b>", esc(code_title(stem)),
-                 f'<a href="problems/{stem}.html">문제</a>',
-                 f'<a href="code/{stem}_starter.html">starter</a>',
-                 f'<a href="code/{stem}_solution.html">모범답안</a>',
-                 f"<code>python3 python/run.py {stem[:2]}</code>"]
-        rows.append("<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
-    head = "".join(f"<th>{h}</th>" for h in ["N", "주제", "문제", "starter", "답안", "채점"])
-    body = f"""
-<div class="top"><div class="top-in">
-  <a class="home" href="index.html">← 노트 목록</a>
-  <span class="t">Python Coding Session · Neros FW Test Engineer</span>
-  <button class="btn" id="theme">◐</button>
-</div></div>
-<div class="hub">
-  <h1>Python Coding Session — HM 인터뷰 대비</h1>
-  <p class="lead">문제를 읽고 <code>python/starters/NN_*.py</code>의 TODO를 채운다. 채점은
-     <code>firmwareTestEngineerPrep/</code>에서 <code>python3 python/run.py 01</code> (starter) ·
-     <code>python3 python/run.py 01 --sol</code> (답안) · <code>python3 python/run.py all --sol</code>.
-     표준 라이브러리만 쓴다 (pytest 설치 불필요).</p>
-  <table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table>
-  <h2>순서</h2>
-  <div class="sub">시간이 없으면 게임 플랜의 ★ 표시 문제만. 20분 타이머를 걸고 말하면서 푼다.</div>
-</div>"""
-    return shell("Python Coding Session — Neros FW Test Engineer", body, JS_HUB)
+    return shell(src.name, body, JS_PAGE)
 
 
 def build_coding():
-    if not CODING.exists():
+    if not CODE.exists():
+        return 0
+    files = sorted(p for p in CODE.iterdir() if p.suffix in (".c", ".h", ".cpp") or p.name == "Makefile")
+    if not files:
         return 0
     out = OUT / "code"
     out.mkdir(parents=True, exist_ok=True)
-    n = 0
-    for kind in ("solution", "starter"):
-        for src in sorted((CODING / f"{kind}s").glob("[0-9]*.py")):
-            (out / f"{src.stem}_{kind}.html").write_text(
-                code_page(src, src.stem, kind), encoding="utf-8")
-            n += 1
-    (OUT / "coding.html").write_text(coding_index(), encoding="utf-8")
-    print(f"  code     {n}개 → site/code/  · site/coding.html")
-    return n
+    rows = []
+    for f in files:
+        (out / f"{f.name}.html").write_text(code_page(f), encoding="utf-8")
+        first = next((l.strip(" /*") for l in f.read_text(encoding="utf-8").splitlines() if l.strip()), "")
+        rows.append(f'<tr><td><a href="{esc(f.name)}.html"><code>{esc(f.name)}</code></a></td><td>{esc(first[:120])}</td></tr>')
+    body = f"""
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">온사이트용 C 코드</span>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="hub"><h1>온사이트용 C 코드 — 화이트보드 버전</h1>
+  <p class="lead">전부 <code>cc -std=c11 -Wall -Wextra -Werror</code>로 컴파일되고 테스트를 통과한다.
+     터미널: <code>make -C onsitePrep/code test</code></p>
+  <table><thead><tr><th>파일</th><th>내용</th></tr></thead><tbody>{''.join(rows)}</tbody></table>
+</div>"""
+    (out / "index.html").write_text(shell("온사이트용 C 코드", body, JS_HUB), encoding="utf-8")
+    print(f"  code     {len(files)}개 → site/code/")
+    return len(files)
 
 
 def build_start():
@@ -706,13 +675,13 @@ def build_start():
 <div class="top"><div class="top-in">
   <a class="home" href="index.html">← 전체 노트 목록</a>
   <span class="t">START HERE · 읽는 순서</span>
-  <a class="btn" href="coding.html">코딩 세션</a>
+  <a class="btn" href="code/index.html">C 코드</a>
   <button class="btn" id="theme">◐</button>
 </div></div>
 <div class="wrap">
   <main>
     <div class="hero">
-      <div class="kicker">Neros · Firmware Test Engineer · HM 45분</div>
+      <div class="kicker">Neros · Onsite · Torrance</div>
       <h1>{inline(h1)}</h1>
     </div>
     {body}

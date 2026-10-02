@@ -1,7 +1,9 @@
 # Neros Technologies — Senior Firmware Engineer, Platform · Context
 
-> **최종 갱신**: 2026-09-29 · **상태**: 💻 Firmware Test Engineer HM **45분** — 2026-10-01(목)
-> 📚 준비 자료: `firmwareTestEngineerPrep/site/index.html` (게임 플랜 → 노트 → Python 문제 11개). 리크루터: Python 질문 나옴
+> **최종 갱신**: 2026-10-01 · **상태**: 💻 Firmware Test Engineer HM 인터뷰 완료 · 결과 대기 (온사이트 가능성 높음)
+> ✅ **2026-10-01(목) HM Michael Honor (Firmware Test 리드) 인터뷰 완료** — 15분 늦게 시작해 실제 약 30분. 임베디드 퀴즈 위주(UART/I2C/SPI 차이, PCIe를 SW에서 어떻게 쓰나, 8b/10b, Git/PR/rebase) + 테스트 철학 2문항. **Python은 안 물어봄.** "결과 곧 알려 주겠다". 분위기 좋음 → §6
+> 🏢 **온사이트 대비**: `onsitePrep/site/start.html` (Tour 30분 · 경력 발표 1시간 · 1:1 C/C++ · ring buffer · generic system design)
+> 📚 HM 콜 준비 자료(완료): `firmwareTestEngineerPrep/site/index.html`
 > 🔀 **2026-09-27: Talent Coordinator Jazmin Vu 메일 — "Firmware Test Engineer" 포지션으로 다음 단계(HM 30분 Microsoft Teams) 진행.** 가능 날짜 4개 이상 + 시간대를 링크로 제출 요청. 원래 트랙(Principal/Senior Embedded SWE)이 아니라 **테스트 포지션($145.5–204K)** 이라는 점이 핵심 → §8 참고
 > ~~⏳ 2026-09-18(금) Adam Kibit 45분 기술 인터뷰 완료 → 09-25 현재 1주째 연락 없음 → Devin에게 follow-up~~ (09-27 결과 도착: 위 전환). 준비 자료: `2026-09-18_adam_interview_D-6h_prep.md`, `neros_hm_adam_technical_prep_2026-09-18.md`
 > **JD**: https://job-boards.greenhouse.io/nerostechnologies/jobs/5195308007 · **위치**: Torrance, CA / onsite [추정] · **연봉 밴드**: $195,000 – $273,000 base + equity
@@ -21,6 +23,7 @@
 - **핵심 어필**: ① NVMe **telemetry** 기반 디버그 기능을 설계해 출시함 (JD의 logging/telemetry 라이브러리와 직결) ② 다른 엔지니어가 쓰는 **test platform SDK/API**를 배포한 경험 ③ Apple에서 칩과 시스템의 경계(PCIe/I2C/SPMI/RFFE)에서 터지는 버그를 루트코즈해 온 경험 = "platform meets consumer" 문제 ④ RF-adjacent firmware (Nice-to-have 항목)
 - **최대 갭/리스크**: (1) Bazel·빌드 시스템 오너십 ❌ (2) Embedded Linux·Yocto ❌ (3) 플랫폼 코드를 여러 팀이 쓰게 유지해 온 **명시적 증거가 약함** (4) **Torrance(LA) 이주** (5) ITAR·US Person 요건 가능성 (6) Apple 재직 ~9개월에 이직하는 걸 어떻게 설명할지
 - **인터뷰 포맷** [확인됨 2026-09-16]: ✅ 리크루터 콜 → **HM Adam Kibit 45분 기술** → 온사이트 (Tour 30분 · **경력 발표 1시간** · 1:1 기술 여러 개: C/C++, **ring buffer**, generic system design)
+- **✅ 2026-10-01 Michael Honor 인터뷰 결과 요약**: 퀴즈형 임베디드 질문 + "정의 안 된 것의 테스트 케이스", "done의 의미". FW 조직 **15명**(LinkedIn 12 → Adam 13 → Michael 15), Michael 밑 FW Test 2명, **테스트 펌웨어가 가장 급함 → 연내 최대 5명 추가 채용**, **factory test firmware가 아직 없음(나중에 필요)**, **STM(STM32) 사용 = 자체 실리콘 없음**. 개발 인력 약 70명 / 전체 약 260명(나머지 테크니션). 다음: 결과 대기 → 온사이트 대비 (`onsitePrep/`)
 - **🔀 포지션 전환 (2026-09-27)**: Adam 인터뷰 뒤 **Firmware Test Engineer** (JD [17], base **$145.5–204K**) 로 HM 30분 인터뷰 제안. **적합도는 오히려 ⭐⭐⭐⭐** (HIL·테스트 자동화·Python·I2C/SPI/UART·RF 테스트 — 레쥬메와 직결). 대신 ① 밴드 상단 $204K ≈ Don이 말한 최저선 $200K ② 개발→테스트 트랙 = **레벨·커리어 방향 하향** ③ 5+년 "software testing" 요구. 자세한 분석은 **§8**
 - **다음 액션 (2026-09-27)**: ① 일정 링크에 날짜 4개+ 제출 (서두르되, 준비 시간 2~3일 확보되게) ② **제출 전에 Jazmin/Devin에게 확인 질문** — 원래 Senior/Principal 트랙은 closed인지, 레벨·밴드는 어떻게 되는지, 이 HM이 누구인지 ③ 수락 여부 결정 기준 정하기 (§8.4) ④ §8.5 준비 항목
 - ~~다음 액션 (2026-09-22)~~: ① 2026-09-24(목)까지 연락 없으면 리크루터 Devin에게 짧은 follow-up 메일 ② Adam 인터뷰 기억나는 질문을 §6에 기록 ③ 기다리는 동안 온사이트 대비: 경력 발표 1시간 초안, ring buffer 맨손 구현
@@ -91,7 +94,7 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 ### 2.3 단계 · 펀딩 · 규모
 | 설립 | 펀딩 총액 / 최근 라운드 | 밸류에이션 | 주요 투자자 | 인원 | HQ |
 |---|---|---|---|---|---|
-| 2023 | 누적 ~$370M [추정][4] / **Series C $250M (2026-08-11)** [1][2] · Series B $75M (2025-11, Sequoia 리드) [14] | **$2.5B** post (Series B 대비 약 3배) [2] | Sequoia, American Strategic Technology Fund (C 공동 리드), Valor, Thiel Capital, Spark, Allen & Co, Interlagos, Dylan Field [1] | ~~250+~~ → **약 300명, 절반 이상이 공장 operator/technician. FW 엔지니어 12명 + Director** [확인됨 2026-09-16 리크루터] | Torrance, CA. 250,000 sqft 공장 [3] |
+| 2023 | 누적 ~$370M [추정][4] / **Series C $250M (2026-08-11)** [1][2] · Series B $75M (2025-11, Sequoia 리드) [14] | **$2.5B** post (Series B 대비 약 3배) [2] | Sequoia, American Strategic Technology Fund (C 공동 리드), Valor, Thiel Capital, Spark, Allen & Co, Interlagos, Dylan Field [1] | ~~250+~~ → ~~약 300명 (2026-09-16 리크루터)~~ → **약 260명, 개발 인력 약 70명, 나머지는 테크니션** [확인됨 2026-10-01 Michael Honor]. FW 인원 추이: LinkedIn 검색 12명 → Adam 13명(09-18) → **Michael 15명(10-01)**, FW Test는 Michael 밑 2명 | Torrance, CA. 250,000 sqft 공장 [3] |
 
 - 기타 오피스: Ukraine Office, Washington DC, Tennessee, Swindon(UK) [6]
 - 비상장. IPO 관련 공식 언급은 없음. 목표는 **2028년까지 연 100만 대 생산** [1][3]
@@ -322,6 +325,9 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 | 2026-09-27 | **🔀 Firmware Test Engineer로 전환 제안 — HM 30분 Teams 인터뷰** | Talent Coordinator **Jazmin Vu** 메일. "move you forward … for the Firmware Test Engineer position", HM과 30분 Microsoft Teams, 날짜 4개 이상 + 시간대 제출 요청. Greenhouse JD 4941340007 (updated 2026-09-24), base $145.5–204K. 원래 트랙 결과(불합격/보류)는 메일에 언급 없음 → 확인 필요 |
 | 2026-09-28 | **HM 인터뷰 2026-10-01(목) 확정 · 준비 사이트 생성** | 리크루터: **Python 질문 나옴**. `firmwareTestEngineerPrep/` — 게임 플랜 1 · 노트 7 (JD 해설, HIL, Python, pytest, CI/Git, 프로토콜·드론 스택, 스토리·영어) · Python 문제 11 (starter/답안, 70테스트 PASS). 보기: `firmwareTestEngineerPrep/site/index.html` |
 | 2026-09-29 | **HM 인터뷰 길이 45분으로 확인** | 초대 메일의 30분 → 실제 45분. Python 라이브 코딩(15~20분)이 들어갈 여유가 생김 → 준비 배분에서 코딩 비중 상향 |
+| 2026-10-01 | **✅ FW Test HM Michael Honor 인터뷰 완료 (실제 약 30분)** | HM이 15분 늦어 30분으로 단축. 퀴즈형: UART/I2C/SPI 차이, PCIe를 SW에서 어떻게 쓰나(Don: 핀 수 적게 고속 — TX/RX 차동쌍, REFCLK, CLKREQ#, SerDes 설명), 8b/10b, Git 사용법·PR·rebase. 테스트 철학: "정의 안 된 것의 테스트 케이스"(Don: 격리된 unit부터 쌓아 올림), "done의 의미"(Don: 80%에서 내보내고 고객·타 팀 피드백으로 보완 → HM 반응 좋음). Python 미출제. 정보: FW 15명, FW Test 2명, 테스트 FW가 가장 급함·연내 최대 5명 채용, factory test FW 없음, STM 사용. 결과 곧 통보 |
+| 2026-10-01 | 채용 공고 diff (09-27 94개 → 10-01 105개) | 삭제 0, 추가 11 (FW 직군 신규는 없음. Principal Connectivity, Senior Platform Engineer(autonomy), Senior GNC, Senior Perception, Senior EW T&E 등). **Firmware Test Engineer 공고 유지** → 아직 채워지지 않았거나 복수 채용(최대 5명) 중. Flight Software Manager 밴드 상향 $198–277.5K → **$225.5–316.5K**. 스냅샷: `research/job_board_snapshots/` |
+| 2026-10-01 | **온사이트 준비 사이트 생성** | `onsitePrep/` — 회사 스택 지도(FW·임베디드 공고 13개 분석), STM32 의미, 1시간 발표 가이드, C/C++, ring buffer, generic system design, 임베디드 퀴즈, factory test FW, 면접관별 대응 |
 
 ---
 
@@ -340,6 +346,37 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 - 내 답 / 결과: ~~2026-09-22 현재 결과 대기, 연락 없음~~ → 2026-09-27 **Firmware Test Engineer로 방향 전환된 다음 단계** 통보. Senior/Principal 개발 트랙으로는 안 간다는 신호일 가능성이 큼 [추정]. Adam이 Don의 강점을 **테스트·통합·factory test 쪽**으로 읽었을 가능성 [추정]
 - 잘한 점 / 아쉬운 점: (미기록)
 - 다음 라운드에 반영할 것: (미기록)
+
+### 2026-10-01 · FW Test Engineer HM 인터뷰 (예정 45분 → 실제 약 30분) · 면접관 Michael Honor (Firmware Test 리드, HM)
+- **형식**: Microsoft Teams. HM이 15분 늦게 들어와서 짧게 진행. 대화보다는 **퀴즈형 질문을 연달아** 던지는 스타일
+- **받은 질문**
+  - UART, I2C, SPI 각각의 차이점
+  - PCIe 관련: "SW에서는 PCIe를 어떻게 이용하나?"
+  - 8b/10b encoding/decoding
+  - Git 사용법, pull request, rebase
+  - "정의(define)되어 있지 않은 것에 대해 테스트 케이스를 어떻게 만들 건가?"
+  - "done의 의미는?"
+- **내 답**
+  - PCIe: 왜 필요한지 → 적은 핀으로 고속 통신. TX/RX 차동쌍, REFCLK, CLKREQ# 등 핵심 핀, SerDes 설명. ⚠️ 질문은 "SW 관점"이었으므로 다음엔 **enumeration → config space → BAR → MMIO 레지스터 → DMA → MSI/MSI-X 인터럽트 → 드라이버** 흐름으로 답할 것 (`onsitePrep` N07)
+  - 정의 안 된 것의 테스트: 격리된 unit test부터 시작해서 그 위로 쌓아 올린다
+  - done의 의미: 80% 정도 완성해서 일단 내보내고, 고객이나 다른 팀의 피드백을 받으며 가이드를 받는 방식 → **HM 반응이 좋았음**
+- **들은 정보** [확인됨 2026-10-01 Michael]
+  - FW 엔지니어 15명, FW Test Engineer는 Michael 밑에 2명 정도
+  - 개발 인력 약 70명, 전체 약 260명, 나머지는 테크니션
+  - **테스트 펌웨어가 가장 급하다 → 올해 안에 최대 5명 추가 채용**
+  - **factory test firmware가 아직 없고, 나중에 필요하다** → Don의 Apple factory test-node · SK hynix MFG FW 경험과 정확히 맞는 지점. 온사이트 발표에서 활용
+  - **STM(STM32) 사용** → 자체 실리콘 없이 상용 MCU 기반 [추정: 패밀리 미확인]. Tennessee FW 공고에 "STM32 family" 필수, Ukraine 공고에 "ARM Cortex-M e.g. STM32" 명시 [확인됨 공고]
+  - Python은 묻지 않음
+- **잘한 점**: "done" 답변으로 스타트업 속도 감각을 보여 줌. 퀴즈에 막힘없이 답함
+- **아쉬운 점**: PCIe를 HW(핀) 관점으로 답함 — 질문 의도는 SW 관점이었을 가능성. 8b/10b는 목적(DC balance, run length 제한, 클럭 복원, 제어 심볼) 위주로 다시 정리
+- **다음 라운드에 반영**: 온사이트는 임베디드 지식 비중이 클 것. 퀴즈형 질문에 **"한 문장 정의 → 왜 → 예시"** 30초 답 틀로 대비. factory test FW를 발표의 연결고리로
+
+### 리크루터 안내 온사이트 구성 (2026-09-16 Devin) [확인됨]
+1. **Tour 30분**
+2. **내 경력 발표 1시간**: 가장 큰 challenge, issue resolving/debugging, bring-up 경험
+3. **1:1 기술 인터뷰 여러 개**: 기본 C/C++, **ring buffer 구현**, **system design** — 드론 개발자가 많지 않아서 드론 설계가 아니라 **generic한 문제**
+- 추가 [확인됨 Don]: **Senior FW Platform 직군 HM도 들어올 수 있다**고 함
+- 준비: `onsitePrep/site/start.html`
 
 ---
 
