@@ -315,7 +315,7 @@ JD 1번 요건(ML 5년)은 공부만으로 증명이 안 된다. **수치가 남
 
 ## 6. 진행 체크 (모듈 노트 작성 현황)
 
-**현재 위치 (2026-10-01)**: 모듈 **A–K 작성 완료** (80편 · 약 113,100줄 · SVG 584개 · 실행 검증된 예제 약 1,110개) → **다음은 모듈 L (온디바이스 LLM · Hybrid — SLM 선택, 온디바이스 스택, hybrid 라우팅, 음성 파이프라인, 메모리·RAG, 디코딩 가속)**. 읽기는 A0부터 순서대로.
+**현재 위치 (2026-10-03)**: 모듈 **A–L 작성 완료** (86편 · 약 122,100줄 · SVG 633개 · 실행 검증된 예제 약 1,200개) → **다음은 모듈 M (실리콘 선정 — 평가 기준, 벤치마크 방법, 벤더 지형, 데이터시트 해석)**. 남은 것: M(4) · N(4) · O(3) = 11편. 읽기는 A0부터 순서대로.
 
 **로컬 도구 추가 (모듈 J)**: `.tools/rustup` + `.tools/cargo` (Rust 1.99, Cortex-M4 target `thumbv7em-none-eabihf`) — 쓰려면 `export RUSTUP_HOME=$PWD/.tools/rustup CARGO_HOME=$PWD/.tools/cargo PATH=$PWD/.tools/cargo/bin:$PATH`
 
@@ -466,8 +466,19 @@ JD 1번 요건(ML 5년)은 공부만으로 증명이 안 된다. **수치가 남
 | K5 | [커널 최적화 기법 — 루프 변환, 데이터 레이아웃, Winograd·FFT, DMA 겹치기](../K/2026-10-01_K5_kernel_optimization_techniques.html) | 1,709줄 · SVG 7 | interchange 33× · tap 상수화 10.3× · AoS→SoA ~7× · Winograd 1.6–2.1× · `restrict` M4 명령 54.5 → 29.75 · DMA 3중 버퍼 시뮬(손계산 일치) | ✅ 10-01 | ⬜ |
 
 - [x] J. 펌웨어 통합 (J1–J6) — 2026-10-01 작성 완료
+**모듈 L — 온디바이스 LLM · Hybrid** (2026-10-03, 6편 · 약 8,900줄 · SVG 49개) — 모두 이 Mac에서 실제 모델(SmolLM2 135M/360M, Qwen2.5-0.5B, Whisper-tiny, MiniLM)로 측정
+
+| ID | 노트 | 분량 | 핵심 실습 결과 | 작성 | 읽음 |
+|---|---|---|---|---|---|
+| L1 | [SLM 선택 — 요구사항에서 후보, 평가, 결정까지](../L/2026-10-03_L1_slm_selection.html) | 1,436줄 · SVG 8 | 50문항 제품 평가: zero-shot intent 135M 0 / Qwen 0.5B 0.50 → 라벨 설명+GBNF 0.73–0.77 · JSON schema로 유효 17 → 100% (하지만 빈 필드 지어냄) · 22.7M 인코더가 intent에서 Qwen 이김 · 권고: Qwen 0.5B Q4_K_M + intent 분리 | ✅ 10-03 | ⬜ |
+| L2 | [온디바이스 LLM 스택 — 서비스, 세션·KV, 컨텍스트, 스트리밍, 취소](../L/2026-10-03_L2_on_device_llm_stack.html) | 1,624줄 · SVG 7 | 8턴 prefill 2,558 → 260 토큰(TTFT 7.8 → 1.9 s) · KV 저장 12,305 B/token(공식 12,288) 복원 시 2.5 s → 25 ms · 취소 후 슬롯 29–45 ms · host-RAM prompt cache 프라이버시 이슈 발견 | ✅ 10-03 | ⬜ |
+| L3 | [Hybrid 라우팅 — 실제 신호로 기기 vs 클라우드](../L/2026-10-03_L3_hybrid_routing.html) | 1,494줄 · SVG 7 | 실측 신호 AUROC: sum log-prob 0.83, self-consistency 0.81, 결합 0.87 · 보정 후 ECE 0.058 · ~44% 라우팅으로 클라우드 단독 정확도 도달 · circuit breaker p95 3.5 → 0.83 s | ✅ 10-03 | ⬜ |
+| L4 | [음성 파이프라인 end-to-end — VAD → ASR → LLM → TTS](../L/2026-10-03_L4_voice_pipeline_e2e.html) | 1,624줄 · SVG 10 | TTFA 중앙값: 순차+say 2,748 → 엔진 상주 1,151 → 스트리밍 1,015 ms · endpoint 대기가 60% · Whisper-tiny WER 13% → 83%(0 dB) · barge-in 48 ms vs 924 ms | ✅ 10-03 | ⬜ |
+| L5 | [온디바이스 메모리와 RAG — 개인 기억 저장·검색](../L/2026-10-03_L5_on_device_memory_rag.html) | 1,665줄 · SVG 8 | MiniLM recall@1 0.967 · int8 거의 무손실, binary 0.287 → 재순위 0.933 · IVF recall 0.873 → 0.974 · RAG 0/10 → 9/10 → 필터 10/10 · SQLite DELETE 후에도 바이트 잔존 | ✅ 10-03 | ⬜ |
+| L6 | [디코딩 가속 — speculative, prompt lookup, 배칭 실측](../L/2026-10-03_L6_decoding_acceleration.html) | 1,098줄 · SVG 9 | 135M → 360M draft는 대부분 오히려 느림(×0.21–1.05) · prompt lookup 요약 ×1.6–1.8 · Metal은 ne11>8에서 GEMM 전환(소스 확인) · 배칭 16 동시 ×5 | ✅ 10-03 | ⬜ |
+
 - [x] K. 프로파일링 (K1–K5) — 2026-10-01 작성 완료
-- [ ] L. 온디바이스 LLM · Hybrid (L1–L6)
+- [x] L. 온디바이스 LLM · Hybrid (L1–L6) — 2026-10-03 작성 완료
 - [ ] M. 실리콘 선정 (M1–M4)
 - [ ] N. 도메인 (N1–N4)
 - [ ] O. 툴 (O1–O3)

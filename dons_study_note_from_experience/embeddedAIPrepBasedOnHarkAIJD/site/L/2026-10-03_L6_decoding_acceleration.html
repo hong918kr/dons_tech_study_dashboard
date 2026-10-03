@@ -1,0 +1,791 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>L6. 디코딩 가속 — speculative decoding, prompt lookup, 배칭을 실제로 재 보기</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="L/2026-10-03_L6_decoding_acceleration">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">L. 온디바이스 LLM · L6. 디코딩 가속 — speculative decoding, prompt lookup, 배칭을 실제로 재 보기</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">L. 온디바이스 LLM · On-device LLM &amp; Hybrid</div>
+      <h1>L6. 디코딩 가속 — speculative decoding, prompt lookup, 배칭을 실제로 재 보기</h1>
+      <div class="meta"><span>158분 읽기</span><span>1098줄</span><span>41개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: speculative decoding이 "언제 빨라지고 언제 느려지는지"를 측정한 draft·target 비용과 수락률로 설명할 수 있다 · llama.cpp로 draft 모델 방식과 prompt lookup(n-gram) 방식을 직접 켜고 tokens/s·수락률을 A/B로 잴 수 있다 · k개 token 검증이 GEMV를 작은 GEMM으로 바꿔 arithmetic intensity를 올린다는 것을 숫자로 말할 수 있다 · 폰(batch 1)과 서버(continuous batching)의 처리량 차이, 그리고 웨어러블 NPU에서 현실적인 가속 수단을 판단할 수 있다 <strong>JD 연결</strong>: "(우대) Experience with hybrid edge-LLM pipelines, <strong>integrating small language models on device</strong>" — study_prep_list <strong>L6</strong>: speculative decoding (draft 모델), prompt caching, 온디바이스 draft + 클라우드 verify · 지연 단축 <strong>Don 기준 난이도</strong>: 측정 설계(A/B, 반복, median, 부하 기록), 캐시·대역폭 직관, 링버퍼식 상태 되감기는 이미 강한 부분 / 수락률이라는 확률적 지표, "모델 두 개를 번갈아 돌리는" 런타임 비용, 커널 경로가 batch 크기에 따라 바뀌는 현상은 새로 배울 부분 <strong>선행 노트</strong>: D5 (decode = memory-bound, speculative 기대 속도 공식 — 이 노트는 공식을 다시 유도하지 않는다), D3 (roofline), C3 (가중치·KV 양자화), B9 (MoE, early exit), F3 (llama.cpp, llama-bench), E5 (NPU), D7 (에너지 모델)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>D5에서 확인한 한 줄부터 다시 쓴다: <strong>decode에서 token 하나를 만들 때마다 가중치 전체를 메모리에서 한 번 읽는다.</strong> 연산기는 놀고 메모리 버스가 병목이다(memory-bound). 그래서 decode를 빠르게 하는 방법은 결국 네 갈래 중 하나다.</p>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 330">
+<rect x="230" y="125" width="200" height="80" rx="8" fill="#888" fill-opacity="0.15" stroke="currentColor"/><text x="330" y="150" font-size="13" text-anchor="middle">decode 1 token =</text><text x="330" y="170" font-size="13" text-anchor="middle">가중치 전부 1번 읽기</text><text x="330" y="190" font-size="12" text-anchor="middle">(memory-bound, D5)</text><rect x="20" y="20" width="250" height="80" rx="8" fill="#4a7bd0" fill-opacity="0.18" stroke="#4a7bd0"/><text x="145" y="44" font-size="13" text-anchor="middle">① token당 바이트 줄이기</text><text x="145" y="64" font-size="12" text-anchor="middle">가중치·KV 양자화 (C3), GQA</text><text x="145" y="82" font-size="12" text-anchor="middle">작은 모델 (L1)</text><rect x="390" y="20" width="250" height="80" rx="8" fill="#e08a3c" fill-opacity="0.18" stroke="#e08a3c"/><text x="515" y="44" font-size="13" text-anchor="middle">② 가중치 1번 읽고 token 여러 개</text><text x="515" y="64" font-size="12" text-anchor="middle">speculative · prompt lookup · MTP</text><text x="515" y="82" font-size="12" text-anchor="middle">batching (서버)  ← 이 노트</text><rect x="20" y="230" width="250" height="80" rx="8" fill="#3f9a6b" fill-opacity="0.18" stroke="#3f9a6b"/><text x="145" y="254" font-size="13" text-anchor="middle">③ token당 일 줄이기</text><text x="145" y="274" font-size="12" text-anchor="middle">early exit, MoE (B9)</text><text x="145" y="292" font-size="12" text-anchor="middle">층·expert 일부만 읽기</text><rect x="390" y="230" width="250" height="80" rx="8" fill="#d0564a" fill-opacity="0.15" stroke="#d0564a"/><text x="515" y="254" font-size="13" text-anchor="middle">④ 이미 한 일 재사용</text><text x="515" y="274" font-size="12" text-anchor="middle">prefix / KV 캐시 (D5, L2)</text><text x="515" y="292" font-size="12" text-anchor="middle">TTFT를 줄인다 (decode 아님)</text><line x1="230" y1="135" x2="200" y2="100" stroke="currentColor"/><line x1="430" y1="135" x2="460" y2="100" stroke="currentColor"/><line x1="230" y1="195" x2="200" y2="230" stroke="currentColor"/><line x1="430" y1="195" x2="460" y2="230" stroke="currentColor"/>
+</svg></figure>
+<p>그림 1 — decode 가속의 네 갈래. ①은 C3(양자화)·L1(작은 모델), ③은 B9(early exit, MoE), ④는 D5 5.6절·L2(prefix/KV 재사용)에서 다뤘다. 이 노트는 ②, 즉 <strong>가중치를 한 번 읽어서 token을 여러 개 얻는 방법</strong>을 이 Mac에서 실제로 잰다.</p>
+<p>펌웨어 비유로 말하면 ②는 <strong>"버스 트랜잭션 한 번에 여러 워드를 실어 보내기"</strong>다. NAND에서 page 하나를 읽는 비용은 고정이고, 그 page에서 몇 바이트를 쓰느냐에 따라 효율이 달라진다. decode는 매번 page 전체(가중치 전체)를 읽고 1바이트(token 1개)만 쓰는 낭비 상태다. ②의 방법들은 같은 읽기로 token을 여러 개 뽑으려 한다.</p>
+<ul><li><strong>speculative decoding</strong>: 작은 draft 모델이 다음 γ개 token을 추측하고, target 모델이 γ+1개 위치를 <strong>한 번의 forward</strong>로 검증한다.</li><li><strong>prompt lookup (n-gram drafting)</strong>: draft 모델 없이, 프롬프트·지금까지의 출력에서 같은 n-gram을 찾아 그 뒤 token들을 추측으로 쓴다. 요약·편집·RAG처럼 <strong>입력을 베끼는 과제</strong>에서 강하다.</li><li><strong>Medusa, EAGLE, lookahead, MTP, LayerSkip</strong>: draft를 다른 곳(추가 head, target의 hidden state, Jacobi 반복, 학습 때 넣은 다중 token head, target의 얕은 층)에서 얻는 변형들이다.</li><li><strong>batching</strong>: 서로 다른 사용자의 요청 여러 개를 한 forward에 묶는다. 서버에서는 핵심이지만 개인 기기는 사용자가 한 명이라 거의 못 쓴다.</li></ul>
+<p>이 노트에서 실제로 재는 것 (Apple M2, 8코어, 24 GB, Metal GPU와 CPU 4 threads 둘 다):</p>
+<div class="tw"><table><thead><tr><th>실험</th><th>도구</th><th>결과 한 줄</th></tr></thead><tbody><tr><td>draft 135M → target 360M</td><td>llama-server <code>--spec-type draft-simple</code></td><td>수락률 80~93%인데도 <strong>대부분 느려졌다</strong> (Metal ×0.21~0.88, CPU ×0.24~1.11)</td></tr><tr><td>prompt lookup</td><td>llama-server <code>--spec-type ngram-simple</code></td><td>요약 과제 <strong>×1.55~1.77</strong>, 자유 대화는 ×0.93~1.00</td></tr><tr><td>검증 비용 T(k)</td><td>llama-bench <code>-p 1,2,3,5,9,17,33</code></td><td>CPU는 k = 5까지 ×1.3, Metal은 k = 5에서 ×3.1 (커널 경로 때문)</td></tr><tr><td>batching</td><td>llama-server <code>--parallel N</code></td><td>CPU N = 4에서 총 처리량 ×3.1, 요청 하나는 ×0.82</td></tr></tbody></table></div>
+<p>결론을 미리 말하면: <strong>이 짝(135M → 360M)은 draft가 너무 비싸다.</strong> 수락률이 높아도 draft 한 step이 target의 50~63% 시간을 먹으면 이득이 안 난다. 왜 그런지를 D5의 공식에 <strong>측정한 비용</strong>을 넣어 설명하는 것이 이 노트의 핵심이다. 반대로 draft 비용이 0인 prompt lookup은 맞는 과제에서 확실히 이긴다.</p>
+<hr>
+<h2 id="1-speculative-decoding-5줄-복습과-정확성">1. speculative decoding — 5줄 복습과 정확성<a class="anchor" href="#1-speculative-decoding-5줄-복습과-정확성" aria-label="link">#</a></h2>
+<h3 id="1-1-다섯-줄-요약-유도는-d5-6-2절">1.1 다섯 줄 요약 (유도는 D5 6.2절)<a class="anchor" href="#1-1-다섯-줄-요약-유도는-d5-6-2절" aria-label="link">#</a></h3>
+<ol><li>draft 모델이 γ개 token d₁…d_γ를 하나씩(자기회귀로) 뽑는다. draft가 작으니 한 step이 싸다.</li><li>target 모델에 "마지막 확정 token + d₁…d_γ"를 넣고 <strong>한 번</strong> forward 한다. 출력은 γ+1개 위치의 다음-token 분포다. prefill과 같은 모양이다.</li><li>앞에서부터 비교해서 처음 틀린 위치까지 받아들인다. 틀린 자리에는 target의 token을 쓴다. 다 맞으면 target이 하나 더 준다(보너스).</li><li>그래서 한 사이클에 1 ~ γ+1개 token이 나오고, target 가중치는 <strong>한 번만</strong> 읽힌다.</li><li>기대 이득 = (사이클당 얻은 token 수) ÷ (draft γ step 시간 + 검증 1회 시간, target 1 step 단위). D5의 <code>E = (1 − α^(γ+1)) / (1 − α)</code>와 <code>속도 ≈ E ÷ (γ·c + 1)</code>가 이것이다.</li></ol>
+<p>이 노트에서 쓸 기호:</p>
+<div class="tw"><table><thead><tr><th>기호</th><th>뜻</th><th>이 노트에서 어떻게 얻나</th></tr></thead><tbody><tr><td>γ</td><td>한 사이클에 draft가 추측하는 token 수</td><td>llama.cpp <code>--spec-draft-n-max</code></td></tr><tr><td>α</td><td>draft token 하나가 수락될 확률 (단순화)</td><td>서버가 주는 <code>draft_n_accepted ÷ draft_n</code></td></tr><tr><td>τ</td><td>target forward 1회당 실제로 얻은 token 수</td><td><code>n_out ÷ (n_out − accepted)</code></td></tr><tr><td>T_t(k)</td><td>target이 k개 위치를 한 번에 처리하는 시간</td><td>llama-bench <code>-p k</code></td></tr><tr><td>T_d</td><td>draft 1 token 시간</td><td>llama-bench <code>-n</code></td></tr><tr><td>c</td><td>T_d ÷ T_t(1) — draft의 상대 비용</td><td>위 둘의 비</td></tr></tbody></table></div>
+<p>말로 하면: τ는 "검증 한 번에 평균 몇 token을 건졌나"이고, 이득은 τ가 클수록, c와 T_t(γ+1)이 작을수록 커진다. D5는 T_t(γ+1) = T_t(1)이라고 가정했는데, <strong>이 가정이 실제 하드웨어에서 얼마나 깨지는지</strong>를 3절에서 잰다.</p>
+<h3 id="1-2-왜-품질-손해가-없나-rejection-sampling">1.2 왜 품질 손해가 없나 — rejection sampling<a class="anchor" href="#1-2-왜-품질-손해가-없나-rejection-sampling" aria-label="link">#</a></h3>
+<p>greedy(temperature 0)라면 간단하다. target의 argmax와 draft token이 같으면 받아들이고, 다르면 target의 argmax를 쓴다. 출력은 target 혼자 greedy로 돌린 것과 <strong>token 단위로 똑같다.</strong></p>
+<p>sampling(temperature &gt; 0)이면 Leviathan et al.(2023)의 규칙을 쓴다. draft가 확률 q(x)로 뽑은 token x를</p>
+<figure class="code"><pre><code>확률 min(1, p(x) / q(x)) 로 수락
+거절되면 정규화한 max(0, p − q) 분포에서 다시 뽑는다</code></pre></figure>
+<p>말로 하면: target이 draft보다 그 token을 더 좋아하면 무조건 받고, 덜 좋아하면 그 비율만큼만 받는다. 거절됐을 때는 "target이 원했는데 draft가 덜 준 몫"에서 뽑는다. 이렇게 하면 최종 출력 분포가 <strong>정확히 p</strong>(target 분포)가 된다. D5의 Monte Carlo가 이 부분은 다루지 않았으니, 핵심만 기억하자: <strong>speculative decoding은 근사가 아니라 정확한 샘플러다.</strong></p>
+<p>llama.cpp는 어떻게 하나? 이 빌드의 <code>common/sampling.cpp</code>의 <code>common_sampler_sample_and_accept_n()</code>을 보면, target이 각 위치에서 <strong>자기 sampler로 직접 token을 뽑고</strong>, 그것이 draft token과 같을 때만 다음으로 넘어간다. draft는 top-k 10에서 가장 높은 token을 내는 greedy draft다(<code>common/speculative.cpp</code>, <code>top_k = 10</code>). 이것도 출력 분포는 target 단독과 같다(매 위치의 token을 target이 자기 분포로 뽑으니까). 대신 sampling일 때 수락률은 rejection sampling보다 낮다: 같은 분포에서 뽑아도 "우연히 같은 token"이어야 수락되기 때문이다. 4.4절에서 temperature 0.8의 수락률이 실제로 떨어지는 것을 본다.</p>
+<blockquote><p>정리: greedy는 "같으면 수락", sampled는 "rejection sampling(논문)" 또는 "target이 뽑고 같으면 수락(llama.cpp server)". 둘 다 출력 분포는 target과 같다. 수락률만 다르다.</p></blockquote>
+<h3 id="1-3-c로-보는-greedy-검증-루프">1.3 C로 보는 greedy 검증 루프<a class="anchor" href="#1-3-c로-보는-greedy-검증-루프" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: target이 한 번의 forward로 낸 argmax 배열 하나로 "몇 개를 받고 무엇을 내보내는지"가 결정되는 과정. 펌웨어의 "CRC 맞는 데까지 받고, 틀린 프레임부터 재전송"과 같은 구조다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#include &lt;stdio.h&gt;
+
+/* greedy speculative verify: draft[k]개와 target이 한 번의 forward로 낸 argmax[k+1]개를 비교한다.
+   target_argmax[i] = "draft[0..i-1]까지 받아들였을 때 target이 고르는 다음 token". */
+static int verify_greedy(const int *draft, int k, const int *target_argmax, int *out)
+{
+    int n = 0;
+    for (int i = 0; i &lt; k; i++) {
+        out[n++] = target_argmax[i];          /* target의 token은 항상 맞다 */
+        if (target_argmax[i] != draft[i])     /* 처음 틀린 곳에서 멈춘다: 그 뒤 draft는 버림 */
+            return n;
+    }
+    out[n++] = target_argmax[k];              /* 전부 맞으면 보너스 1개 */
+    return n;
+}
+
+int main(void)
+{
+    const int draft[4] = {101, 7, 42, 9};
+    const int cases[3][5] = {
+        {101, 7, 42, 9, 55},    /* 4개 모두 수락 + 보너스 */
+        {101, 7, 13, 9, 55},    /* 2개 수락 후 3번째에서 거절 */
+        {88, 7, 42, 9, 55},     /* 첫 token부터 거절 */
+    };
+    for (int c = 0; c &lt; 3; c++) {
+        int out[5];
+        int n = verify_greedy(draft, 4, cases[c], out);
+        printf("case %d: emitted %d token(s):", c, n);
+        for (int i = 0; i &lt; n; i++) printf(" %d", out[i]);
+        printf("  (accepted drafts = %d)\n", n - 1);
+    }
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>case 0: emitted 5 token(s): 101 7 42 9 55  (accepted drafts = 4)
+case 1: emitted 3 token(s): 101 7 13  (accepted drafts = 2)
+case 2: emitted 1 token(s): 88  (accepted drafts = 0)</code></pre></figure>
+<p>출력에서 볼 것: 최악(case 2)에도 1 token은 나온다. 즉 speculative decoding은 <strong>품질은 절대 안 잃고, 속도만 잃을 수 있다.</strong> case 1에서 3번째 draft 이후(42, 9)는 맞든 틀리든 버려진다. 뒤쪽 draft의 가치가 기하급수로 줄어드는 이유다.</p>
+<hr>
+<h2 id="2-실험-준비-모델-짝-도구-측정-방법">2. 실험 준비 — 모델 짝, 도구, 측정 방법<a class="anchor" href="#2-실험-준비-모델-짝-도구-측정-방법" aria-label="link">#</a></h2>
+<h3 id="2-1-draft-target-짝-tokenizer가-같아야-한다">2.1 draft–target 짝: tokenizer가 같아야 한다<a class="anchor" href="#2-1-draft-target-짝-tokenizer가-같아야-한다" aria-label="link">#</a></h3>
+<p>draft token ID를 target에 그대로 넣으니, <strong>두 모델의 vocab이 ID 단위로 같아야</strong> 한다. llama.cpp는 <code>common/speculative.cpp</code>의 <code>common_speculative_are_compatible()</code>에서 vocab 종류, BOS/EOS, vocab 크기 차이, 그리고 일정 ID 이후의 token 문자열을 하나씩 비교한다. 다르면 "the target and draft vocabs are not compatible"로 거부한다.</p>
+<p>무엇을 확인하나: 이 Mac에 있는 GGUF들의 vocab이 실제로 같은지, llama.cpp에 들어 있는 <code>gguf-py</code> 파서로 직접 읽어서 비교한다 (pip 설치 없이 경로만 추가).</p>
+<figure class="code"><span class="lang">python</span><pre><code>import hashlib, sys
+sys.path.insert(0, ".tools/llama.cpp/gguf-py")           # llama.cpp에 들어 있는 gguf 파서 (pip 설치 없이)
+import gguf
+def info(name):
+    r = gguf.GGUFReader(f".tools/models/{name}.gguf")
+    get = lambda k: r.fields[k].contents() if k in r.fields else None
+    toks = get("tokenizer.ggml.tokens")
+    arch = get("general.architecture")
+    return dict(n_vocab=len(toks), bos=get("tokenizer.ggml.bos_token_id"), eos=get("tokenizer.ggml.eos_token_id"),
+                layers=get(f"{arch}.block_count"), d=get(f"{arch}.embedding_length"),
+                vocab_md5=hashlib.md5("\n".join(toks).encode()).hexdigest()[:8])
+for m in ("smollm2-135m-Q8_0", "smollm2-360m-instruct-Q8_0", "qwen2.5-0.5b-Q8_0"):
+    print(f"{m:28s}", info(m))</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>smollm2-135m-Q8_0            {'n_vocab': 49152, 'bos': 1, 'eos': 2, 'layers': 30, 'd': 576, 'vocab_md5': '020bbde8'}
+smollm2-360m-instruct-Q8_0   {'n_vocab': 49152, 'bos': 1, 'eos': 2, 'layers': 32, 'd': 960, 'vocab_md5': '020bbde8'}
+qwen2.5-0.5b-Q8_0            {'n_vocab': 151936, 'bos': 151643, 'eos': 151645, 'layers': 24, 'd': 896, 'vocab_md5': 'b1671b30'}</code></pre></figure>
+<p>출력에서 볼 것: SmolLM2 135M과 360M은 token 49,152개의 문자열 목록 전체의 해시(<code>020bbde8</code>)까지 같다. 같은 tokenizer로 학습된 한 가족이라 짝이 된다. Qwen2.5-0.5B는 vocab이 151,936개로 완전히 다르고, 이 Mac에는 <strong>Qwen2.5보다 작은 Qwen 모델이 없어서</strong> Qwen 쪽 짝은 만들 수 없다(새 다운로드 금지 조건). 실무에서는 같은 가족의 작은 모델(예: Llama-3.2-1B → 3B, Qwen2.5-0.5B → 1.5B/3B)을 쓴다.</p>
+<p>짝의 크기를 보자. 파라미터 비는 135M ÷ 362M ≈ 0.37, Q8_0 파일 크기 비는 145 MB ÷ 386 MB ≈ 0.38이다. <strong>memory-bound 이론대로라면 draft 1 step은 target의 약 38% 시간</strong>이어야 한다. D5 예제의 1B → 3B 짝(c = 0.38)과 거의 같은 비율이고, D5는 이 정도 c면 α가 아주 높아야 겨우 이득이라고 계산했다. 실제는 그보다 더 나쁘다는 것을 3절에서 본다.</p>
+<h3 id="2-2-llama-cpp의-도구와-플래그">2.2 llama.cpp의 도구와 플래그<a class="anchor" href="#2-2-llama-cpp의-도구와-플래그" aria-label="link">#</a></h3>
+<p>이 빌드(<code>f7b384c</code>)에는 다음이 있다.</p>
+<div class="tw"><table><thead><tr><th>도구</th><th>하는 일</th><th>이 노트에서</th></tr></thead><tbody><tr><td><code>llama-speculative-simple</code></td><td>target + draft로 한 프롬프트 생성, 수락률 출력</td><td>첫 확인</td></tr><tr><td><code>llama-speculative</code></td><td>트리형 draft, <code>--draft-p-split</code> 등 실험 기능</td><td>쓰지 않음</td></tr><tr><td><code>llama-server</code></td><td><code>--spec-type</code>으로 draft·n-gram 방식 선택, 응답 <code>timings</code>에 <code>draft_n</code>, <code>draft_n_accepted</code></td><td>주 측정</td></tr><tr><td><code>llama-bench</code></td><td><code>-p k</code>로 k-token forward 시간, <code>-n</code>으로 decode 시간</td><td>재료 측정</td></tr></tbody></table></div>
+<p>주의할 플래그 (이 빌드 기준, 버전마다 이름이 바뀐다):</p>
+<ul><li><code>-md</code>(= <code>--spec-draft-model</code>)로 draft를 주고 <strong><code>--spec-type draft-simple</code>도 함께</strong> 줘야 한다. 빠뜨리면 <code>llama-speculative-simple</code>이 "failed to initialize speculative decoding"으로 끝났다.</li><li><code>--spec-draft-n-max N</code>이 γ다(기본 3). 예전 이름 <code>--draft-max</code>는 "the argument has been removed"라고 거부된다.</li><li><code>--spec-draft-p-min P</code>: draft의 top 확률이 P보다 낮으면 그 자리에서 추측을 멈춘다(기본 0 = 항상 γ개).</li><li><code>--spec-type</code> 목록: <code>none, draft-simple, draft-eagle3, draft-mtp, draft-dflash, draft-dspark, ngram-simple, ngram-map-k, ngram-map-k4v, ngram-mod, ngram-cache</code>. EAGLE-3와 MTP까지 런타임이 지원한다는 뜻이다(전용 draft 가중치가 필요해서 이 노트에서는 못 잰다).</li><li>서버의 요청별 speculative 파라미터(<code>speculative.n_max</code> 등)는 이 빌드의 <code>tools/server/server-schema.cpp</code>에서 <code>#if 0</code>으로 꺼져 있다. 그래서 γ마다 <strong>서버를 따로 띄워야</strong> 한다.</li></ul>
+<p>무엇을 확인하나: CPU에서 코드 생성 프롬프트(ChatML 형식) 하나를 γ = 4로 돌렸을 때 llama.cpp가 직접 보고하는 수락 통계.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>llama-speculative-simple -m smollm2-360m-instruct-Q8_0.gguf -md smollm2-135m-Q8_0.gguf \
+  --spec-type draft-simple --spec-draft-n-max 4 -f p_code.txt -n 128 --temp 0 -ngl 0 -ngld 0 -t 4</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>I decoded  132 tokens in    1.045 seconds, speed:  126.364 t/s
+I n_accept  = 101
+I accept    = 82.114%</code></pre></figure>
+<p>출력에서 볼 것: 128개를 요청했는데 132개가 나왔다. 마지막 사이클이 γ+1개를 한꺼번에 받았기 때문이다(속도를 잴 때 token 수를 실제 출력 수로 나눠야 하는 이유). 수락률은 82%로 높다. 그런데 같은 조건의 target 단독은 약 135 tok/s다(4.1절). <strong>수락률 82%로도 느리다.</strong> 이 노트 전체가 이 한 줄을 설명한다.</p>
+<h3 id="2-3-측정-방법-부하가-있는-기계에서-공정하게-재기">2.3 측정 방법 — 부하가 있는 기계에서 공정하게 재기<a class="anchor" href="#2-3-측정-방법-부하가-있는-기계에서-공정하게-재기" aria-label="link">#</a></h3>
+<p>이 Mac은 측정 중에 다른 작업(다른 llama-server 여러 개)이 같이 돌았다. 1분 load average가 처음엔 70을 넘었고, 그때 360M 모델이 0.6 tok/s까지 떨어졌다. 그래서 다음 규칙으로 쟀다.</p>
+<ol><li><strong>게이트</strong>: 1분 load average가 6 아래로 내려갈 때까지 기다렸다가 시작했다(최대 30분).</li><li><strong>동시 기동 + 교차(interleave)</strong>: 비교할 설정의 서버를 전부 미리 띄워 두고, 같은 프롬프트를 설정 A, B, C… 순서로 번갈아 보냈다. 부하가 시간에 따라 변해도 모든 설정에 비슷하게 걸린다. 펌웨어 A/B 테스트에서 "같은 보드, 같은 온도, 교대로 측정"하는 것과 같다.</li><li>과제 5종 × 3회 반복, <strong>median</strong>. 요청마다 load average를 같이 기록했다.</li><li>greedy(temperature 0), <code>cache_prompt: false</code>, 출력 최대 128 token. 프롬프트는 SmolLM2의 ChatML 형식으로 직접 감쌌다.</li><li><strong>정답 확인</strong>: greedy에서 speculative 출력이 target 단독 출력과 글자 단위로 같은지 비교했다.</li></ol>
+<p>과제 5종 (모두 영어 지시, 마지막만 한국어):</p>
+<div class="tw"><table><thead><tr><th>과제</th><th>프롬프트 요지</th><th>기대</th></tr></thead><tbody><tr><td>code</td><td>is_palindrome 함수 + docstring + assert 3개</td><td>정형적, draft가 잘 맞힘</td></tr><tr><td>summary</td><td>웨어러블 배터리 문단(약 110단어)을 "원문 표현을 살려" 3문장 요약</td><td>입력 복사가 많음</td></tr><tr><td>extract</td><td>센서 로그 5줄을 JSON 리스트로</td><td>구조적 + 입력 복사</td></tr><tr><td>chat</td><td>그림 그리는 로봇 이야기</td><td>자유 생성, 예측 어려움</td></tr><tr><td>korean</td><td>"웨어러블 배터리 오래 쓰는 법 세 가지를 한국어로"</td><td>SmolLM2는 한국어가 약함</td></tr></tbody></table></div>
+<hr>
+<h2 id="3-재료-측정-draft-비용-c와-검증-비용-t-k">3. 재료 측정 — draft 비용 c와 검증 비용 T(k)<a class="anchor" href="#3-재료-측정-draft-비용-c와-검증-비용-t-k" aria-label="link">#</a></h2>
+<p>speculative decoding의 이득은 세 숫자로 정해진다: τ(얻은 token), c(draft 상대 비용), T_t(γ+1)/T_t(1)(검증 비용). τ는 과제가 정하고, 나머지 둘은 <strong>하드웨어와 런타임이 정한다.</strong> 먼저 하드웨어 쪽 두 숫자를 잰다.</p>
+<h3 id="3-1-llama-bench로-k-token-forward-시간-재기">3.1 llama-bench로 k-token forward 시간 재기<a class="anchor" href="#3-1-llama-bench로-k-token-forward-시간-재기" aria-label="link">#</a></h3>
+<p><code>llama-bench -p k</code>는 빈 context에서 k개 token을 한 번에 넣는 forward(prefill)의 시간을 잰다. 이게 곧 "γ = k − 1개 draft를 검증하는 데 드는 시간"이다. <code>-r 10</code>으로 10번 재고 jsonl의 <code>samples_ns</code>에서 median을 뽑았다(측정 시 1분 load average 약 5).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>llama-bench -m smollm2-360m-instruct-Q8_0.gguf -m smollm2-360m-instruct-f16.gguf \
+            -m smollm2-135m-Q8_0.gguf -m smollm2-135m-Q4_K_M.gguf \
+            -ngl 99 -t 4 -p 1,2,3,5,9,17,33 -n 32 -r 10 -o jsonl      # Metal; CPU는 -ngl 0</code></pre></figure>
+<p>무엇을 확인하나: 모델·백엔드별로 k개 위치 forward 1회의 시간(ms)과 decode 1 token 시간.</p>
+<figure class="code"><span class="lang">python</span><pre><code>import json, statistics as st
+rows = [json.loads(l) for l in open("/private/tmp/claude-501/l6/bench2.jsonl")]
+name = {"smollm2-360m-instruct-Q8_0.gguf": "360M Q8_0", "smollm2-360m-instruct-f16.gguf": "360M f16",
+        "smollm2-135m-Q8_0.gguf": "135M Q8_0", "smollm2-135m-Q4_K_M.gguf": "135M Q4_K_M"}
+for ngl, dev in ((99, "Metal"), (0, "CPU")):
+    print(f"[{dev}] forward 1회 ms (median of 10)   k=1     2     3     5     9    17    33 | tg ms/token")
+    for fn, nm in name.items():
+        r = [x for x in rows if x["n_gpu_layers"] == ngl and x["model_filename"].endswith(fn)]
+        pp = {x["n_prompt"]: st.median(x["samples_ns"]) / 1e6 for x in r if x["n_prompt"]}
+        tg = [st.median(x["samples_ns"]) / 1e6 / x["n_gen"] for x in r if x["n_gen"]][0]
+        print(f"  {nm:12s}" + " " * 20 + "".join(f"{pp[k]:6.1f}" for k in sorted(pp)) + f" | {tg:5.2f}")</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[Metal] forward 1회 ms (median of 10)   k=1     2     3     5     9    17    33 | tg ms/token
+  360M Q8_0                          6.2   9.7  13.2  20.0  16.1  18.0  21.1 |  6.43
+  360M f16                           9.4  10.8  14.0  21.1  23.6  28.5  30.9 |  9.75
+  135M Q8_0                          4.1   5.7   7.5  11.3   8.5   9.4  10.4 |  4.02
+  135M Q4_K_M                        3.6   4.8   6.2   8.7   8.4   9.3  11.2 |  3.97
+[CPU] forward 1회 ms (median of 10)   k=1     2     3     5     9    17    33 | tg ms/token
+  360M Q8_0                          6.4   7.4   8.7   8.3  11.8  20.1  36.9 |  6.57
+  360M f16                          11.8  12.9  16.9  23.4  42.7  75.3 198.5 | 14.88
+  135M Q8_0                          3.3   3.3   3.8   6.5   6.0   7.8  13.8 |  3.28
+  135M Q4_K_M                        4.7   5.6   8.7  10.3  15.6  33.1  77.7 |  4.08</code></pre></figure>
+<p>출력에서 볼 것은 세 가지다.</p>
+<p><strong>(1) c는 0.38이 아니라 0.50~0.63이다.</strong></p>
+<figure class="code"><pre><code>CPU  : c = T_d / T_t(1) = 3.28 / 6.57 = 0.50
+Metal: c = 4.02 / 6.43 = 0.63
+바이트 비율 (이론)       = 145 MB / 386 MB = 0.38</code></pre></figure>
+<p>말로 하면: 작은 모델은 바이트에 비례해서 빨라지지 않는다. 360M Q8_0은 386 MB ÷ 6.57 ms ≈ 59 GB/s로 대역폭을 잘 쓰지만, 135M Q8_0은 145 MB ÷ 3.28 ms ≈ 44 GB/s다. 층 수가 30개로 360M(32개)과 거의 같아서 <strong>층마다 붙는 고정 비용(커널 실행, 스레드 동기화, norm·attention 같은 작은 연산)</strong>이 줄지 않는다. Metal은 커널 launch 오버헤드가 더 커서 c가 0.63까지 간다. 펌웨어로 치면 "전송 크기가 줄어도 DMA descriptor 설정·인터럽트 비용은 그대로"인 상황이다.</p>
+<p><strong>(2) Q4_K_M draft가 Q8_0 draft보다 빠르지 않다.</strong> Metal에서 3.97 vs 4.02 ms로 같고, CPU에서는 4.08 vs 3.28 ms로 오히려 느리다. 이 크기에서는 바이트가 아니라 고정 비용·역양자화 비용이 지배하기 때문이다. "draft를 더 세게 양자화하면 c가 준다"는 직관은 큰 모델에서만 맞다.</p>
+<p><strong>(3) 검증 비용이 k에 따라 늘어난다.</strong> 이건 다음 절에서 그림으로 본다.</p>
+<h3 id="3-2-검증-비용-t-k-검증은-공짜-라는-가정이-깨지는-곳">3.2 검증 비용 T(k) — "검증은 공짜"라는 가정이 깨지는 곳<a class="anchor" href="#3-2-검증-비용-t-k-검증은-공짜-라는-가정이-깨지는-곳" aria-label="link">#</a></h3>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 305">
+<line x1="70.0" y1="250.0" x2="590.0" y2="250.0" stroke="currentColor" stroke-width="1"/><line x1="70.0" y1="30.0" x2="70.0" y2="250.0" stroke="currentColor" stroke-width="1"/><line x1="70.0" y1="250.0" x2="70.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="70.0" y="268.0" font-size="12" text-anchor="middle">1</text><line x1="173.1" y1="250.0" x2="173.1" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="173.1" y="268.0" font-size="12" text-anchor="middle">2</text><line x1="233.4" y1="250.0" x2="233.4" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="233.4" y="268.0" font-size="12" text-anchor="middle">3</text><line x1="309.4" y1="250.0" x2="309.4" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="309.4" y="268.0" font-size="12" text-anchor="middle">5</text><line x1="396.8" y1="250.0" x2="396.8" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="396.8" y="268.0" font-size="12" text-anchor="middle">9</text><line x1="491.4" y1="250.0" x2="491.4" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="491.4" y="268.0" font-size="12" text-anchor="middle">17</text><line x1="590.0" y1="250.0" x2="590.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="590.0" y="268.0" font-size="12" text-anchor="middle">33</text><line x1="65.0" y1="250.0" x2="70.0" y2="250.0" stroke="currentColor" stroke-width="1"/><text x="62.0" y="254.0" font-size="12" text-anchor="end">0</text><line x1="65.0" y1="195.0" x2="70.0" y2="195.0" stroke="currentColor" stroke-width="1"/><text x="62.0" y="199.0" font-size="12" text-anchor="end">10</text><line x1="65.0" y1="140.0" x2="70.0" y2="140.0" stroke="currentColor" stroke-width="1"/><text x="62.0" y="144.0" font-size="12" text-anchor="end">20</text><line x1="65.0" y1="85.0" x2="70.0" y2="85.0" stroke="currentColor" stroke-width="1"/><text x="62.0" y="89.0" font-size="12" text-anchor="end">30</text><line x1="65.0" y1="30.0" x2="70.0" y2="30.0" stroke="currentColor" stroke-width="1"/><text x="62.0" y="34.0" font-size="12" text-anchor="end">40</text><line x1="70.0" y1="215.3" x2="590.0" y2="215.3" stroke="#888" stroke-width="1" stroke-dasharray="4 4"/><text x="586.0" y="231.3" font-size="11" text-anchor="end">이상적 memory-bound: k와 무관</text><line x1="388.3" y1="30.0" x2="388.3" y2="250.0" stroke="#d0564a" stroke-width="1" stroke-dasharray="2 3"/><text x="392.3" y="42.0" font-size="11" text-anchor="start">Metal: k>8부터 GEMM 커널</text><polyline points="70.0,215.7 173.1,196.5 233.4,177.1 309.4,139.9 396.8,161.4 491.4,150.8 590.0,133.9" fill="none" stroke="#e08a3c" stroke-width="2"/><circle cx="70.0" cy="215.7" r="4" fill="#e08a3c"/><circle cx="173.1" cy="196.5" r="4" fill="#e08a3c"/><circle cx="233.4" cy="177.1" r="4" fill="#e08a3c"/><circle cx="309.4" cy="139.9" r="4" fill="#e08a3c"/><circle cx="396.8" cy="161.4" r="4" fill="#e08a3c"/><circle cx="491.4" cy="150.8" r="4" fill="#e08a3c"/><circle cx="590.0" cy="133.9" r="4" fill="#e08a3c"/><polyline points="70.0,214.6 173.1,209.3 233.4,201.9 309.4,204.6 396.8,185.2 491.4,139.3 590.0,46.8" fill="none" stroke="#4a7bd0" stroke-width="2"/><circle cx="70.0" cy="214.6" r="4" fill="#4a7bd0"/><circle cx="173.1" cy="209.3" r="4" fill="#4a7bd0"/><circle cx="233.4" cy="201.9" r="4" fill="#4a7bd0"/><circle cx="309.4" cy="204.6" r="4" fill="#4a7bd0"/><circle cx="396.8" cy="185.2" r="4" fill="#4a7bd0"/><circle cx="491.4" cy="139.3" r="4" fill="#4a7bd0"/><circle cx="590.0" cy="46.8" r="4" fill="#4a7bd0"/><line x1="100.0" y1="290.0" x2="125.0" y2="290.0" stroke="#e08a3c" stroke-width="2"/><text x="130.0" y="294.0" font-size="12" text-anchor="start">Metal</text><line x1="200.0" y1="290.0" x2="225.0" y2="290.0" stroke="#4a7bd0" stroke-width="2"/><text x="230.0" y="294.0" font-size="12" text-anchor="start">CPU 4 threads</text><text x="330.0" y="284.0" font-size="12" text-anchor="middle"></text><text x="24.0" y="140.0" font-size="12" text-anchor="middle" transform="rotate(-90 24 140.0)">forward 1회 ms</text><text x="560.0" y="294.0" font-size="11" text-anchor="end">x: 한 번에 넣는 token 수 k (log)</text>
+</svg></figure>
+<p>그림 2 — 360M Q8_0 target의 forward 1회 시간 vs 한 번에 넣는 token 수 k (실측, median of 10). 회색 점선은 "memory-bound라 k와 무관"이라는 이상적 가정. CPU(파랑)는 k = 5까지 거의 평평(×1.3)하다가 k = 9부터 연산이 보이기 시작한다. Metal(주황)은 k = 2~5에서 오히려 가파르게 오르다가, k = 9에서 <strong>떨어진다</strong>.</p>
+<p>Metal의 이상한 모양은 커널 선택 때문이다. 이 빌드의 <code>ggml/src/ggml-metal/ggml-metal-common.cpp</code>에 행렬곱을 GEMM 커널(<code>mul_mm</code>, simdgroup 행렬 연산)로 보낼지 정하는 조건이 있다:</p>
+<figure class="code"><span class="lang">c</span><pre><code>return !ggml_is_transposed(op-&gt;src[0]) &amp;&amp;
+       !ggml_is_transposed(op-&gt;src[1]) &amp;&amp;
+       has_simdgroup_mm &amp;&amp; ne00 &gt;= 64 &amp;&amp; ne11 &gt; 8;</code></pre></figure>
+<p><code>ne11</code>이 한 번에 곱하는 token(행) 수다. <strong>8개 이하면 GEMM이 아니라 행렬-벡터 계열 커널</strong>을 쓰고, 9개부터 GEMM을 쓴다. <code>ggml-metal-ops.cpp</code>에는 "small-batch mat-mv kernels, should be efficient for BS [2, ~8]"라는 주석과 함께 소배치 전용 경로가 있는데, 조건에 <code>ne00 % 128 == 0</code>(입력 차원이 128의 배수)이 들어 있다. SmolLM2-360M의 hidden 크기는 960이라 128의 배수가 아니다. 그래서 이 모델의 상당수 행렬곱은 소배치 경로도 못 타고 일반 mat-vec 경로로 가는 것으로 보인다(추정 — 층별 커널 선택을 trace하지는 않았다). 측정에서 T(5) = 20.0 ms &gt; T(9) = 16.1 ms인 것이 정확히 8/9 경계와 맞는다.</p>
+<p>D5 6.1절의 PyTorch 실측(M = 1은 53 GB/s, M ≥ 2는 22 GB/s)과 같은 교훈이다: <strong>"검증 k개 = 1 token 비용"은 커널이 작은 M을 잘 처리할 때만 성립한다.</strong> 그리고 speculative decoding은 정확히 그 작은 M(2~17)에서 산다.</p>
+<h3 id="3-3-k개-검증은-arithmetic-intensity를-얼마나-올리나-d3-e5-연결">3.3 k개 검증은 arithmetic intensity를 얼마나 올리나 (D3, E5 연결)<a class="anchor" href="#3-3-k개-검증은-arithmetic-intensity를-얼마나-올리나-d3-e5-연결" aria-label="link">#</a></h3>
+<p>decode 1 token은 GEMV다: 가중치 행렬 W(d_out × d_in)에 벡터 하나를 곱한다. 가중치 1바이트로 곱셈-덧셈을 한 번(Q8_0이면 약 1 MAC/B) 한다. k개 위치를 한 번에 검증하면 <strong>같은 가중치로 k번 곱하는 작은 GEMM</strong>이 된다.</p>
+<figure class="code"><pre><code>FLOP   = 2 × P × k            (P = 파라미터 수)
+bytes  ≈ W = P × bits / 8     (k와 무관, KV는 짧은 context라 무시)
+intensity = 2k × 8 / bits     → Q8_0(8.5 bit)이면 약 1.9k, int4(4.5 bit)이면 약 3.6k FLOP/B</code></pre></figure>
+<p>손계산: 1B int4, k = 8이면 <code>3.6 × 8 ≈ 28 FLOP/B</code>. 웨어러블 NPU 가정(2 TFLOP/s, 17 GB/s)의 ridge는 <code>2e12 / 17e9 ≈ 118 FLOP/B</code>라서 여전히 memory-bound다. 즉 <strong>이론상</strong> k = 8까지는 검증 시간이 1 token과 같다.</p>
+<p>무엇을 확인하나: 모델 두 개 × k에 대해 intensity와 웨어러블 가정의 메모리 시간 vs 연산 시간.</p>
+<figure class="code"><span class="lang">python</span><pre><code># k개 token을 한 번에 검증할 때의 arithmetic intensity (가중치만 센 단순 모델, KV는 작다고 가정)
+models = {"SmolLM2-360M Q8_0": (362e6, 8.5), "1B int4 (4.5 bit)": (1.0e9, 4.5)}
+hw = {"웨어러블 NPU (가정 2 TFLOP/s, 17 GB/s)": (2e12, 17e9), "폰 NPU (가정 10 TFLOP/s, 60 GB/s)": (10e12, 60e9)}
+for hn, (peak, bw) in hw.items():
+    print(f"{hn}: ridge = {peak/bw:.0f} FLOP/B")
+for mn, (P, bits) in models.items():
+    W = P * bits / 8
+    print(f"\n{mn}: weight {W/1e6:.0f} MB")
+    for k in (1, 4, 8, 16, 64):
+        flop = 2 * P * k                          # k개 위치에 같은 가중치를 재사용
+        ai = flop / W
+        t_mem, t_cmp = W / 17e9, flop / 2e12      # 웨어러블 가정
+        print(f"  k={k:2d}: {flop/1e9:6.1f} GFLOP, intensity {ai:6.1f} FLOP/B, "
+              f"wearable t_mem {t_mem*1e3:5.1f} ms vs t_cmp {t_cmp*1e3:5.1f} ms -&gt; {'memory' if t_mem &gt; t_cmp else 'COMPUTE'}-bound")</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>웨어러블 NPU (가정 2 TFLOP/s, 17 GB/s): ridge = 118 FLOP/B
+폰 NPU (가정 10 TFLOP/s, 60 GB/s): ridge = 167 FLOP/B
+
+SmolLM2-360M Q8_0: weight 385 MB
+  k= 1:    0.7 GFLOP, intensity    1.9 FLOP/B, wearable t_mem  22.6 ms vs t_cmp   0.4 ms -&gt; memory-bound
+  k= 4:    2.9 GFLOP, intensity    7.5 FLOP/B, wearable t_mem  22.6 ms vs t_cmp   1.4 ms -&gt; memory-bound
+  k= 8:    5.8 GFLOP, intensity   15.1 FLOP/B, wearable t_mem  22.6 ms vs t_cmp   2.9 ms -&gt; memory-bound
+  k=16:   11.6 GFLOP, intensity   30.1 FLOP/B, wearable t_mem  22.6 ms vs t_cmp   5.8 ms -&gt; memory-bound
+  k=64:   46.3 GFLOP, intensity  120.5 FLOP/B, wearable t_mem  22.6 ms vs t_cmp  23.2 ms -&gt; COMPUTE-bound
+
+1B int4 (4.5 bit): weight 562 MB
+  k= 1:    2.0 GFLOP, intensity    3.6 FLOP/B, wearable t_mem  33.1 ms vs t_cmp   1.0 ms -&gt; memory-bound
+  k= 4:    8.0 GFLOP, intensity   14.2 FLOP/B, wearable t_mem  33.1 ms vs t_cmp   4.0 ms -&gt; memory-bound
+  k= 8:   16.0 GFLOP, intensity   28.4 FLOP/B, wearable t_mem  33.1 ms vs t_cmp   8.0 ms -&gt; memory-bound
+  k=16:   32.0 GFLOP, intensity   56.9 FLOP/B, wearable t_mem  33.1 ms vs t_cmp  16.0 ms -&gt; memory-bound
+  k=64:  128.0 GFLOP, intensity  227.6 FLOP/B, wearable t_mem  33.1 ms vs t_cmp  64.0 ms -&gt; COMPUTE-bound</code></pre></figure>
+<p>출력에서 볼 것: intensity는 k에 정확히 비례한다(1.9 → 7.5 → 15.1, 즉 1.9k). k = 1, 4, 8에서 1B int4는 3.6, 14.2, 28.4 FLOP/B로 ridge 118의 3~24%다. 연산은 메모리 시간의 3~24%를 차지할 뿐이니 <strong>이상적인 NPU에서는 검증이 거의 공짜</strong>다. 그런데 3.2절의 Metal처럼 커널이 작은 M을 못 다루면 이 이론적 여유가 사라진다. NPU를 평가할 때(M1) "batch 1 GEMV"와 "M = 2~16 작은 GEMM" 둘 다 측정해야 하는 이유다.</p>
+<p>E5의 systolic array로 보면 더 분명하다. 128×128 배열에 벡터 하나(M = 1)를 넣으면 한 열만 일하고 나머지는 논다. M = 8이면 8배의 일을 같은 가중치 로드로 한다. 하지만 배열이 M = 128을 전제로 tiling을 짜 놨다면, M = 8도 padding으로 128짜리 타일을 돌릴 수 있다 — 이 경우 <strong>검증 시간이 k와 무관하게 비싸다</strong>(타일 하나 비용). 어느 쪽인지는 NPU 툴체인이 작은 M을 어떻게 lowering하는지에 달렸고, 문서보다 측정이 확실하다.</p>
+<hr>
+<h2 id="4-실측-draft-모델-speculative-decoding">4. 실측 — draft 모델 speculative decoding<a class="anchor" href="#4-실측-draft-모델-speculative-decoding" aria-label="link">#</a></h2>
+<h3 id="4-1-먼저-작은-a-b-하나">4.1 먼저 작은 A/B 하나<a class="anchor" href="#4-1-먼저-작은-a-b-하나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 서버 두 개(target 단독, γ = 4 speculative)를 CPU에 띄우고 code·chat 두 과제를 교차로 3번씩 보내, median tok/s와 수락률을 얻는다. 이 노트의 큰 측정은 이 스크립트를 설정 12개 × 과제 5개로 넓힌 것이다.</p>
+<figure class="code"><span class="lang">python</span><pre><code>import json, statistics, subprocess, sys, time, urllib.request
+sys.path.insert(0, "/private/tmp/claude-501/l6"); from prompts import PROMPTS, chatml
+BIN, M = ".tools/llama.cpp/build/bin/llama-server", ".tools/models/"
+CFG = {"base":   ["-m", M + "smollm2-360m-instruct-Q8_0.gguf"],
+       "spec_k4": ["-m", M + "smollm2-360m-instruct-Q8_0.gguf", "-md", M + "smollm2-135m-Q8_0.gguf",
+                   "--spec-type", "draft-simple", "--spec-draft-n-max", "4"]}
+srv = {n: subprocess.Popen([BIN, "--port", str(18300 + i), "-c", "2048", "-t", "4", "-ngl", "0", "-ngld", "0"] + a,
+                           stderr=subprocess.DEVNULL) for i, (n, a) in enumerate(CFG.items())}
+def post(i, body):
+    req = urllib.request.Request(f"http://127.0.0.1:{18300 + i}/completion", json.dumps(body).encode())
+    return json.loads(urllib.request.urlopen(req).read())["timings"]
+time.sleep(8)                                              # 모델 로드 대기 (간단히)
+res = {}
+for rep in range(3):                                       # A/B를 번갈아: 부하 변화가 양쪽에 똑같이 걸리게
+    for task in ("code", "chat"):
+        for i, n in enumerate(CFG):
+            t = post(i, {"prompt": chatml(PROMPTS[task]), "n_predict": 128, "temperature": 0, "cache_prompt": False})
+            res.setdefault((n, task), []).append((t["predicted_per_second"], t.get("draft_n", 0), t.get("draft_n_accepted", 0)))
+for (n, task), v in res.items():
+    tps = statistics.median(x[0] for x in v); dn = sum(x[1] for x in v); ac = sum(x[2] for x in v)
+    print(f"{n:8s} {task:5s} median {tps:6.1f} tok/s  " + (f"draft {dn} accepted {ac} ({100*ac/dn:.0f}%)" if dn else ""))
+for p in srv.values(): p.terminate()</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>base     code  median  135.2 tok/s  
+spec_k4  code  median  144.2 tok/s  draft 348 accepted 294 (84%)
+base     chat  median  134.6 tok/s  
+spec_k4  chat  median   84.3 tok/s  draft 597 accepted 231 (39%)</code></pre></figure>
+<p>출력에서 볼 것: code는 수락률 84%로 <strong>×1.07</strong>(144.2 ÷ 135.2), chat은 39%로 <strong>×0.63</strong>이다. 같은 모델 짝인데 과제에 따라 이득과 손해가 갈린다. <code>prompts.py</code>는 2.3절 표의 다섯 프롬프트와 ChatML 래퍼(<code>&lt;|im_start|&gt;system … &lt;|im_start|&gt;assistant\n</code>)를 담은 작은 파일이다. (측정 시 load average 약 3)</p>
+<h3 id="4-2-전체-결과-γ-sweep-과제-5종-백엔드-2종">4.2 전체 결과 — γ sweep × 과제 5종 × 백엔드 2종<a class="anchor" href="#4-2-전체-결과-γ-sweep-과제-5종-백엔드-2종" aria-label="link">#</a></h3>
+<p>설정마다 llama-server를 하나씩 띄우고(Metal은 <code>-ngl 99 -ngld 99</code>, CPU는 <code>-ngl 0 -ngld 0</code>, 둘 다 <code>-t 4 -c 2048</code>) 2.3절 방법으로 쟀다. 숫자는 <strong>target 단독(Q8_0, 같은 백엔드) 대비 tok/s 배수</strong>이고 괄호는 수락률이다. Metal 측정 중 load average median 3.9(최대 6.1), CPU는 median 7.8(최대 10.8).</p>
+<p>Metal (M2 GPU):</p>
+<div class="tw"><table><thead><tr><th>설정</th><th>code</th><th>summary</th><th>extract</th><th>chat</th><th>korean</th></tr></thead><tbody><tr><td>target Q8_0 단독 (tok/s)</td><td>127.6</td><td>152.1</td><td>154.5</td><td>155.4</td><td>156.3</td></tr><tr><td>γ = 2</td><td>×0.65 (91%)</td><td>×0.55 (87%)</td><td>×0.54 (85%)</td><td>×0.46 (64%)</td><td>×0.55 (95%)</td></tr><tr><td>γ = 4</td><td>×0.63 (84%)</td><td>×0.52 (84%)</td><td>×0.49 (79%)</td><td>×0.33 (46%)</td><td>×0.52 (93%)</td></tr><tr><td>γ = 8</td><td>×0.88 (79%)</td><td>×0.62 (68%)</td><td>×0.76 (81%)</td><td>×0.34 (28%)</td><td>×0.72 (85%)</td></tr><tr><td>γ = 16</td><td>×0.72 (61%)</td><td>×0.46 (50%)</td><td>×0.61 (65%)</td><td>×0.21 (15%)</td><td>×0.69 (80%)</td></tr><tr><td>γ = 4, draft Q4_K_M</td><td>×0.69 (88%)</td><td>×0.49 (73%)</td><td>×0.51 (79%)</td><td>×0.37 (50%)</td><td>×0.56 (92%)</td></tr></tbody></table></div>
+<p>CPU (4 threads):</p>
+<div class="tw"><table><thead><tr><th>설정</th><th>code</th><th>summary</th><th>extract</th><th>chat</th><th>korean</th></tr></thead><tbody><tr><td>target Q8_0 단독 (tok/s)</td><td>139.4</td><td>118.0</td><td>133.3</td><td>133.4</td><td>134.3</td></tr><tr><td>γ = 2</td><td>×0.75 (91%)</td><td>×0.81 (87%)</td><td>×0.82 (100%)</td><td>×0.60 (57%)</td><td>×0.80 (95%)</td></tr><tr><td>γ = 4</td><td>×0.96 (84%)</td><td>×0.94 (77%)</td><td>×0.95 (81%)</td><td>×0.58 (39%)</td><td>×1.04 (93%)</td></tr><tr><td>γ = 8</td><td>×0.99 (79%)</td><td>×0.86 (60%)</td><td>×1.05 (82%)</td><td>×0.39 (22%)</td><td>×1.05 (85%)</td></tr><tr><td>γ = 16</td><td>×0.76 (61%)</td><td>×0.66 (43%)</td><td>×0.74 (53%)</td><td>×0.24 (12%)</td><td>×0.95 (72%)</td></tr><tr><td>γ = 4, <code>--poll 0</code></td><td>×1.02 (84%)</td><td>×1.04 (77%)</td><td>×1.02 (81%)</td><td>×0.67 (39%)</td><td>×1.10 (93%)</td></tr><tr><td>γ = 8, <code>--poll 0</code></td><td>×1.08 (79%)</td><td>×0.92 (60%)</td><td>×1.07 (82%)</td><td>×0.42 (22%)</td><td>×1.11 (85%)</td></tr></tbody></table></div>
+<p>표 읽는 법과 주의:</p>
+<ul><li><strong>노이즈 크기</strong>: Metal의 code 기준값(127.6)이 다른 과제(152~156)보다 낮다. 출력 길이·내용 차이도 있지만, 다른 측정(prompt lookup에서 draft가 하나도 안 나온 경우)에서도 code가 ×1.17로 나와서 <strong>이 셀은 약 ±15%의 노이즈</strong>가 있다고 본다. 다른 셀은 3회 사이 차이가 대체로 10% 이내였다.</li><li>수락률은 타이밍과 무관하다. greedy라서 같은 설정이면 3회 모두 같은 값이 나왔다.</li><li>korean의 높은 수락률(93%)은 좋은 소식이 아니다. 5.4절에서 보듯 SmolLM2가 한국어 지시를 이해 못 하고 <strong>프롬프트를 되풀이</strong>하는 퇴화 출력이라 예측이 쉬웠을 뿐이다.</li><li>CPU extract는 출력이 39 token에서 끝나서(EOS) 다른 과제보다 표본이 작다.</li></ul>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 305">
+<line x1="60.0" y1="240.0" x2="310.0" y2="240.0" stroke="currentColor" stroke-width="1"/><line x1="60.0" y1="40.0" x2="60.0" y2="240.0" stroke="currentColor" stroke-width="1"/><text x="185.0" y="28.0" font-size="13" text-anchor="middle">Metal (M2 GPU)</text><line x1="60.0" y1="240.0" x2="60.0" y2="245.0" stroke="currentColor" stroke-width="1"/><text x="60.0" y="258.0" font-size="12" text-anchor="middle">γ=2</text><line x1="143.3" y1="240.0" x2="143.3" y2="245.0" stroke="currentColor" stroke-width="1"/><text x="143.3" y="258.0" font-size="12" text-anchor="middle">γ=4</text><line x1="226.7" y1="240.0" x2="226.7" y2="245.0" stroke="currentColor" stroke-width="1"/><text x="226.7" y="258.0" font-size="12" text-anchor="middle">γ=8</text><line x1="310.0" y1="240.0" x2="310.0" y2="245.0" stroke="currentColor" stroke-width="1"/><text x="310.0" y="258.0" font-size="12" text-anchor="middle">γ=16</text><line x1="55.0" y1="240.0" x2="60.0" y2="240.0" stroke="currentColor" stroke-width="1"/><text x="52.0" y="244.0" font-size="12" text-anchor="end">0.00</text><line x1="55.0" y1="198.3" x2="60.0" y2="198.3" stroke="currentColor" stroke-width="1"/><text x="52.0" y="202.3" font-size="12" text-anchor="end">0.25</text><line x1="55.0" y1="156.7" x2="60.0" y2="156.7" stroke="currentColor" stroke-width="1"/><text x="52.0" y="160.7" font-size="12" text-anchor="end">0.50</text><line x1="55.0" y1="115.0" x2="60.0" y2="115.0" stroke="currentColor" stroke-width="1"/><text x="52.0" y="119.0" font-size="12" text-anchor="end">0.75</text><line x1="55.0" y1="73.3" x2="60.0" y2="73.3" stroke="currentColor" stroke-width="1"/><text x="52.0" y="77.3" font-size="12" text-anchor="end">1.00</text><line x1="60.0" y1="73.3" x2="310.0" y2="73.3" stroke="#888" stroke-width="1" stroke-dasharray="4 4"/><polyline points="60.0,131.7 143.3,135.0 226.7,93.3 310.0,120.0" fill="none" stroke="#4a7bd0" stroke-width="2"/><circle cx="60.0" cy="131.7" r="4" fill="#4a7bd0"/><circle cx="143.3" cy="135.0" r="4" fill="#4a7bd0"/><circle cx="226.7" cy="93.3" r="4" fill="#4a7bd0"/><circle cx="310.0" cy="120.0" r="4" fill="#4a7bd0"/><polyline points="60.0,148.3 143.3,153.3 226.7,136.7 310.0,163.3" fill="none" stroke="#e08a3c" stroke-width="2"/><circle cx="60.0" cy="148.3" r="4" fill="#e08a3c"/><circle cx="143.3" cy="153.3" r="4" fill="#e08a3c"/><circle cx="226.7" cy="136.7" r="4" fill="#e08a3c"/><circle cx="310.0" cy="163.3" r="4" fill="#e08a3c"/><polyline points="60.0,163.3 143.3,185.0 226.7,183.3 310.0,205.0" fill="none" stroke="#d0564a" stroke-width="2"/><circle cx="60.0" cy="163.3" r="4" fill="#d0564a"/><circle cx="143.3" cy="185.0" r="4" fill="#d0564a"/><circle cx="226.7" cy="183.3" r="4" fill="#d0564a"/><circle cx="310.0" cy="205.0" r="4" fill="#d0564a"/><line x1="380.0" y1="240.0" x2="630.0" y2="240.0" stroke="currentColor" stroke-width="1"/><line x1="380.0" y1="40.0" x2="380.0" y2="240.0" stroke="currentColor" stroke-width="1"/><text x="505.0" y="28.0" font-size="13" text-anchor="middle">CPU 4 threads</text><line x1="380.0" y1="240.0" x2="380.0" y2="245.0" stroke="currentColor" stroke-width="1"/><text x="380.0" y="258.0" font-size="12" text-anchor="middle">γ=2</text><line x1="463.3" y1="240.0" x2="463.3" y2="245.0" stroke="currentColor" stroke-width="1"/><text x="463.3" y="258.0" font-size="12" text-anchor="middle">γ=4</text><line x1="546.7" y1="240.0" x2="546.7" y2="245.0" stroke="currentColor" stroke-width="1"/><text x="546.7" y="258.0" font-size="12" text-anchor="middle">γ=8</text><line x1="630.0" y1="240.0" x2="630.0" y2="245.0" stroke="currentColor" stroke-width="1"/><text x="630.0" y="258.0" font-size="12" text-anchor="middle">γ=16</text><line x1="375.0" y1="240.0" x2="380.0" y2="240.0" stroke="currentColor" stroke-width="1"/><text x="372.0" y="244.0" font-size="12" text-anchor="end">0.00</text><line x1="375.0" y1="198.3" x2="380.0" y2="198.3" stroke="currentColor" stroke-width="1"/><text x="372.0" y="202.3" font-size="12" text-anchor="end">0.25</text><line x1="375.0" y1="156.7" x2="380.0" y2="156.7" stroke="currentColor" stroke-width="1"/><text x="372.0" y="160.7" font-size="12" text-anchor="end">0.50</text><line x1="375.0" y1="115.0" x2="380.0" y2="115.0" stroke="currentColor" stroke-width="1"/><text x="372.0" y="119.0" font-size="12" text-anchor="end">0.75</text><line x1="375.0" y1="73.3" x2="380.0" y2="73.3" stroke="currentColor" stroke-width="1"/><text x="372.0" y="77.3" font-size="12" text-anchor="end">1.00</text><line x1="380.0" y1="73.3" x2="630.0" y2="73.3" stroke="#888" stroke-width="1" stroke-dasharray="4 4"/><polyline points="380.0,115.0 463.3,80.0 546.7,75.0 630.0,113.3" fill="none" stroke="#4a7bd0" stroke-width="2"/><circle cx="380.0" cy="115.0" r="4" fill="#4a7bd0"/><circle cx="463.3" cy="80.0" r="4" fill="#4a7bd0"/><circle cx="546.7" cy="75.0" r="4" fill="#4a7bd0"/><circle cx="630.0" cy="113.3" r="4" fill="#4a7bd0"/><polyline points="380.0,105.0 463.3,83.3 546.7,96.7 630.0,130.0" fill="none" stroke="#e08a3c" stroke-width="2"/><circle cx="380.0" cy="105.0" r="4" fill="#e08a3c"/><circle cx="463.3" cy="83.3" r="4" fill="#e08a3c"/><circle cx="546.7" cy="96.7" r="4" fill="#e08a3c"/><circle cx="630.0" cy="130.0" r="4" fill="#e08a3c"/><polyline points="380.0,140.0 463.3,143.3 546.7,175.0 630.0,200.0" fill="none" stroke="#d0564a" stroke-width="2"/><circle cx="380.0" cy="140.0" r="4" fill="#d0564a"/><circle cx="463.3" cy="143.3" r="4" fill="#d0564a"/><circle cx="546.7" cy="175.0" r="4" fill="#d0564a"/><circle cx="630.0" cy="200.0" r="4" fill="#d0564a"/><text x="20.0" y="140.0" font-size="12" text-anchor="middle" transform="rotate(-90 20 140)">target 단독 대비 배수</text><line x1="150.0" y1="290.0" x2="175.0" y2="290.0" stroke="#4a7bd0" stroke-width="2"/><text x="180.0" y="294.0" font-size="12" text-anchor="start">code</text><line x1="280.0" y1="290.0" x2="305.0" y2="290.0" stroke="#e08a3c" stroke-width="2"/><text x="310.0" y="294.0" font-size="12" text-anchor="start">summary</text><line x1="410.0" y1="290.0" x2="435.0" y2="290.0" stroke="#d0564a" stroke-width="2"/><text x="440.0" y="294.0" font-size="12" text-anchor="start">chat</text><text x="560.0" y="294.0" font-size="11" text-anchor="start">점선 = ×1.0</text>
+</svg></figure>
+<p>그림 3 — γ에 따른 속도 배수 (target 단독 = 1.0, 위 표의 실측). 왼쪽 Metal, 오른쪽 CPU. Metal은 γ = 8이 γ = 4보다 좋다 — 검증이 9 token이 되어 GEMM 커널로 넘어가기 때문이다(3.2절). CPU는 γ = 4~8이 최선이고 그래도 ×1.0 언저리다. chat(빨강)은 γ가 클수록 나빠진다.</p>
+<h3 id="4-3-왜-안-빨라지나-d5-식에-측정값-넣기">4.3 왜 안 빨라지나 — D5 식에 측정값 넣기<a class="anchor" href="#4-3-왜-안-빨라지나-d5-식에-측정값-넣기" aria-label="link">#</a></h3>
+<p>D5의 식을 수락률 α 대신 <strong>측정한 τ</strong>로 쓰면 가정이 하나 줄어든다.</p>
+<figure class="code"><pre><code>사이클 시간      = γ × T_d + T_t(γ+1)
+같은 token 수를 target 혼자 만들 때 = τ × T_t(1)
+예측 배수        = τ × T_t(1) ÷ (γ × T_d + T_t(γ+1))</code></pre></figure>
+<p>말로 하면: "draft γ번 + 검증 1번"으로 τ개를 얻는 시간과, target이 τ번 decode하는 시간을 비교한다. τ는 서버 응답에서 <code>n_out ÷ (n_out − accepted)</code>로 계산했다(사이클마다 수락 수 + 1개가 나오므로 사이클 수 = n_out − accepted).</p>
+<p>무엇을 확인하나: code 과제의 τ와 3.1절의 T 값으로 예측한 배수가 4.2절의 실측과 맞는지.</p>
+<figure class="code"><span class="lang">python</span><pre><code># D5 식을 "측정한 비용"으로 채워서 speedup을 예측하고 실측과 비교한다 (숫자는 3.1, 4.2절 측정값)
+Tt = {"Metal": {1: 6.43, 3: 13.25, 5: 20.01, 9: 16.10, 17: 18.04},   # target 360M Q8_0: k개 위치 forward 1회 ms
+      "CPU":   {1: 6.57, 3: 8.75,  5: 8.26,  9: 11.78, 17: 20.13}}
+Td = {"Metal": 4.02, "CPU": 3.28}                                     # draft 135M Q8_0: token당 ms
+tau = {("Metal", 2): 2.78, ("Metal", 4): 4.27, ("Metal", 8): 6.74, ("Metal", 16): 9.85,   # code 과제: target forward 1회당 얻은 token
+       ("CPU", 2): 2.78, ("CPU", 4): 4.27, ("CPU", 8): 6.74}
+meas = {("Metal", 2): 0.65, ("Metal", 4): 0.63, ("Metal", 8): 0.88, ("Metal", 16): 0.72,
+        ("CPU", 2): 0.70, ("CPU", 4): 0.89, ("CPU", 8): 0.84}
+for (dev, g), t in tau.items():
+    cycle = g * Td[dev] + Tt[dev][g + 1]            # draft g step + target 검증 1회 (g+1개 위치)
+    pred = t * Tt[dev][1] / cycle                   # 같은 token 수를 target 혼자 만들 때 시간 ÷ cycle 시간
+    print(f"{dev:5s} γ={g:2d}: cycle {cycle:5.1f} ms = draft {g*Td[dev]:5.1f} + verify {Tt[dev][g+1]:5.1f} → "
+          f"token {t:4.2f}개 → 예측 ×{pred:4.2f}  실측 ×{meas[(dev, g)]:4.2f}")
+for dev in Td:
+    print(f"{dev}: c = Td/Tt(1) = {Td[dev]/Tt[dev][1]:.2f},  검증 비용 Tt(5)/Tt(1) = {Tt[dev][5]/Tt[dev][1]:.2f}")</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Metal γ= 2: cycle  21.3 ms = draft   8.0 + verify  13.2 → token 2.78개 → 예측 ×0.84  실측 ×0.65
+Metal γ= 4: cycle  36.1 ms = draft  16.1 + verify  20.0 → token 4.27개 → 예측 ×0.76  실측 ×0.63
+Metal γ= 8: cycle  48.3 ms = draft  32.2 + verify  16.1 → token 6.74개 → 예측 ×0.90  실측 ×0.88
+Metal γ=16: cycle  82.4 ms = draft  64.3 + verify  18.0 → token 9.85개 → 예측 ×0.77  실측 ×0.72
+CPU   γ= 2: cycle  15.3 ms = draft   6.6 + verify   8.8 → token 2.78개 → 예측 ×1.19  실측 ×0.70
+CPU   γ= 4: cycle  21.4 ms = draft  13.1 + verify   8.3 → token 4.27개 → 예측 ×1.31  실측 ×0.89
+CPU   γ= 8: cycle  38.0 ms = draft  26.2 + verify  11.8 → token 6.74개 → 예측 ×1.16  실측 ×0.84
+Metal: c = Td/Tt(1) = 0.63,  검증 비용 Tt(5)/Tt(1) = 3.11
+CPU: c = Td/Tt(1) = 0.50,  검증 비용 Tt(5)/Tt(1) = 1.26</code></pre></figure>
+<p>(실측 열의 CPU 값은 첫 CPU 측정 세트, load median 6.2에서 나온 값이다. 4.2절 표의 CPU 세트는 그 뒤 다시 잰 것이라 약간 다르다: γ = 2/4/8에서 0.75/0.96/0.99.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>Metal은 식이 맞는다.</strong> γ = 8, 16에서 예측 0.90/0.77 vs 실측 0.88/0.72. 실패 원인이 그대로 보인다: γ = 16이면 사이클 82 ms 중 64 ms가 draft다. τ = 9.85로 검증 한 번에 거의 10 token을 건져도, draft에 쓴 시간이 target이 직접 10번 decode하는 시간(64 ms)과 같다. <strong>c = 0.63이면 draft 하나가 target 하나의 2/3 값이다. 이 상태에서는 수락률 100%라도 최대 1 ÷ 0.63 ≈ ×1.6 미만이다.</strong></li><li><strong>CPU는 예측(×1.16~1.31)이 실측(×0.70~0.99)보다 높다.</strong> 식에 없는 사이클당 고정 비용이 있다는 뜻이다. 후보: 모델 두 개의 context가 번갈아 실행되며 생기는 스레드풀 전환, draft의 logits 복사와 top-k 샘플링(49,152개 vocab), 서버의 사이클당 처리. 이 중 하나는 확인했다: <strong><code>--poll 0</code></strong>(스레드가 일을 기다리며 spin하지 않게)을 주면 같은 γ = 4가 ×0.96 → ×1.02, γ = 8이 ×0.99 → ×1.08로 올라갔다(4.2절 표). draft와 target이 각자 4개 스레드로 spin-wait하면서 8코어(성능 코어 4 + 효율 코어 4)를 서로 뺏는 것으로 보인다(추정 — 스레드 스케줄을 직접 trace하지는 않았다).</li><li><strong>D5의 손계산이 경고했던 것</strong>: c = 0.38에서도 α가 0.65는 넘어야 이득이었다. 실제 c는 0.50~0.63이고, 검증도 공짜가 아니다. 그래서 "수락률 80%대 + 이득 없음"이라는 결과가 나온다. <strong>수락률만 보고 speculative decoding을 판단하면 안 된다.</strong></li></ul>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300">
+<text x="20.0" y="44.0" font-size="12" text-anchor="start">Metal: target 단독</text><text x="20.0" y="84.0" font-size="12" text-anchor="start">Metal: γ=4 spec</text><rect x="150.0" y="30.0" width="57.9" height="20" fill="#4a7bd0" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="207.9" y="30.0" width="57.9" height="20" fill="#4a7bd0" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="265.7" y="30.0" width="57.9" height="20" fill="#4a7bd0" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="323.6" y="30.0" width="57.9" height="20" fill="#4a7bd0" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="381.5" y="30.0" width="15.6" height="20" fill="#4a7bd0" fill-opacity="0.3"/><text x="403.1" y="44.0" font-size="12" text-anchor="start">27.5 ms → 4.27 token</text><rect x="150.0" y="70.0" width="36.2" height="20" fill="#e08a3c" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="186.2" y="70.0" width="36.2" height="20" fill="#e08a3c" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="222.4" y="70.0" width="36.2" height="20" fill="#e08a3c" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="258.5" y="70.0" width="36.2" height="20" fill="#e08a3c" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="294.7" y="70.0" width="180.1" height="20" fill="#3f9a6b" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><text x="384.8" y="84.0" font-size="11" text-anchor="middle">verify 5</text><text x="480.8" y="84.0" font-size="12" text-anchor="start">36.1 ms → 4.27 token</text><text x="20.0" y="154.0" font-size="12" text-anchor="start">CPU: target 단독</text><text x="20.0" y="194.0" font-size="12" text-anchor="start">CPU: γ=4 spec</text><rect x="150.0" y="140.0" width="59.1" height="20" fill="#4a7bd0" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="209.1" y="140.0" width="59.1" height="20" fill="#4a7bd0" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="268.3" y="140.0" width="59.1" height="20" fill="#4a7bd0" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="327.4" y="140.0" width="59.1" height="20" fill="#4a7bd0" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="386.5" y="140.0" width="16.0" height="20" fill="#4a7bd0" fill-opacity="0.3"/><text x="408.5" y="154.0" font-size="12" text-anchor="start">28.1 ms → 4.27 token</text><rect x="150.0" y="180.0" width="29.5" height="20" fill="#e08a3c" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="179.5" y="180.0" width="29.5" height="20" fill="#e08a3c" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="209.0" y="180.0" width="29.5" height="20" fill="#e08a3c" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="238.6" y="180.0" width="29.5" height="20" fill="#e08a3c" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><rect x="268.1" y="180.0" width="74.3" height="20" fill="#3f9a6b" fill-opacity="0.6" stroke="currentColor" stroke-width="0.5"/><text x="305.3" y="194.0" font-size="11" text-anchor="middle">verify 5</text><text x="348.4" y="194.0" font-size="12" text-anchor="start">21.4 ms → 4.27 token</text><line x1="150.0" y1="250.0" x2="420.0" y2="250.0" stroke="currentColor" stroke-width="1"/><line x1="150.0" y1="250.0" x2="150.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="150.0" y="268.0" font-size="12" text-anchor="middle">0 ms</text><line x1="240.0" y1="250.0" x2="240.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="240.0" y="268.0" font-size="12" text-anchor="middle">10 ms</text><line x1="330.0" y1="250.0" x2="330.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="330.0" y="268.0" font-size="12" text-anchor="middle">20 ms</text><line x1="420.0" y1="250.0" x2="420.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="420.0" y="268.0" font-size="12" text-anchor="middle">30 ms</text><rect x="150.0" y="282.0" width="14.0" height="10.0" fill="#4a7bd0" fill-opacity="0.6"/><text x="170.0" y="291.0" font-size="12" text-anchor="start">target decode 1 token</text><rect x="330.0" y="282.0" width="14.0" height="10.0" fill="#e08a3c" fill-opacity="0.6"/><text x="350.0" y="291.0" font-size="12" text-anchor="start">draft 1 token</text><rect x="450.0" y="282.0" width="14.0" height="10.0" fill="#3f9a6b" fill-opacity="0.6"/><text x="470.0" y="291.0" font-size="12" text-anchor="start">target 검증 (5 위치)</text>
+</svg></figure>
+<p>그림 4 — γ = 4, code 과제(τ = 4.27)의 한 사이클을 실측 비용으로 그린 시간축. 파랑은 target decode 1 token, 주황은 draft 1 token, 초록은 target 검증(5 위치). Metal은 검증 하나가 20 ms(1 token의 3.1배)라 사이클이 target 단독보다 길다. CPU는 이론상 21.4 ms &lt; 28.1 ms로 이겨야 하지만, 사이클당 고정 비용 때문에 실측은 거의 비긴다.</p>
+<h3 id="4-4-greedy-vs-sampling-수락률은-temperature에-민감하다">4.4 greedy vs sampling — 수락률은 temperature에 민감하다<a class="anchor" href="#4-4-greedy-vs-sampling-수락률은-temperature에-민감하다" aria-label="link">#</a></h3>
+<p>같은 γ = 4 서버에 temperature 0.8(seed 고정)로도 보냈다. 출력은 서로 다른 문장이 되니 tok/s 비교는 거칠지만, 수락률 차이는 분명하다.</p>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 300">
+<line x1="60.0" y1="250.0" x2="620.0" y2="250.0" stroke="currentColor" stroke-width="1"/><line x1="60.0" y1="30.0" x2="60.0" y2="250.0" stroke="currentColor" stroke-width="1"/><line x1="55.0" y1="250.0" x2="60.0" y2="250.0" stroke="currentColor" stroke-width="1"/><text x="52.0" y="254.0" font-size="12" text-anchor="end">0%</text><line x1="55.0" y1="195.0" x2="60.0" y2="195.0" stroke="currentColor" stroke-width="1"/><text x="52.0" y="199.0" font-size="12" text-anchor="end">25%</text><line x1="55.0" y1="140.0" x2="60.0" y2="140.0" stroke="currentColor" stroke-width="1"/><text x="52.0" y="144.0" font-size="12" text-anchor="end">50%</text><line x1="55.0" y1="85.0" x2="60.0" y2="85.0" stroke="currentColor" stroke-width="1"/><text x="52.0" y="89.0" font-size="12" text-anchor="end">75%</text><line x1="55.0" y1="30.0" x2="60.0" y2="30.0" stroke="currentColor" stroke-width="1"/><text x="52.0" y="34.0" font-size="12" text-anchor="end">100%</text><text x="116.0" y="268.0" font-size="12" text-anchor="middle">code</text><rect x="77.0" y="65.2" width="23.0" height="184.8" fill="#4a7bd0" fill-opacity="0.75"/><text x="88.5" y="61.2" font-size="11" text-anchor="middle">84</text><rect x="103.0" y="80.6" width="23.0" height="169.4" fill="#e08a3c" fill-opacity="0.75"/><text x="114.5" y="76.6" font-size="11" text-anchor="middle">77</text><rect x="129.0" y="206.0" width="23.0" height="44.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="140.5" y="202.0" font-size="11" text-anchor="middle">20</text><text x="228.0" y="268.0" font-size="12" text-anchor="middle">summary</text><rect x="189.0" y="65.2" width="23.0" height="184.8" fill="#4a7bd0" fill-opacity="0.75"/><text x="200.5" y="61.2" font-size="11" text-anchor="middle">84</text><rect x="215.0" y="129.0" width="23.0" height="121.0" fill="#e08a3c" fill-opacity="0.75"/><text x="226.5" y="125.0" font-size="11" text-anchor="middle">55</text><rect x="241.0" y="137.8" width="23.0" height="112.2" fill="#3f9a6b" fill-opacity="0.75"/><text x="252.5" y="133.8" font-size="11" text-anchor="middle">51</text><text x="340.0" y="268.0" font-size="12" text-anchor="middle">extract</text><rect x="301.0" y="76.2" width="23.0" height="173.8" fill="#4a7bd0" fill-opacity="0.75"/><text x="312.5" y="72.2" font-size="11" text-anchor="middle">79</text><rect x="327.0" y="76.2" width="23.0" height="173.8" fill="#e08a3c" fill-opacity="0.75"/><text x="338.5" y="72.2" font-size="11" text-anchor="middle">79</text><rect x="353.0" y="177.4" width="23.0" height="72.6" fill="#3f9a6b" fill-opacity="0.75"/><text x="364.5" y="173.4" font-size="11" text-anchor="middle">33</text><text x="452.0" y="268.0" font-size="12" text-anchor="middle">chat</text><rect x="413.0" y="148.8" width="23.0" height="101.2" fill="#4a7bd0" fill-opacity="0.75"/><text x="424.5" y="144.8" font-size="11" text-anchor="middle">46</text><rect x="439.0" y="184.0" width="23.0" height="66.0" fill="#e08a3c" fill-opacity="0.75"/><text x="450.5" y="180.0" font-size="11" text-anchor="middle">30</text><rect x="465.0" y="221.4" width="23.0" height="28.6" fill="#3f9a6b" fill-opacity="0.75"/><text x="476.5" y="217.4" font-size="11" text-anchor="middle">13</text><text x="564.0" y="268.0" font-size="12" text-anchor="middle">korean</text><rect x="525.0" y="45.4" width="23.0" height="204.6" fill="#4a7bd0" fill-opacity="0.75"/><text x="536.5" y="41.4" font-size="11" text-anchor="middle">93</text><rect x="551.0" y="135.6" width="23.0" height="114.4" fill="#e08a3c" fill-opacity="0.75"/><text x="562.5" y="131.6" font-size="11" text-anchor="middle">52</text><rect x="577.0" y="41.0" width="23.0" height="209.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="588.5" y="37.0" font-size="11" text-anchor="middle">95</text><rect x="80.0" y="282.0" width="12.0" height="12.0" fill="#4a7bd0" fill-opacity="0.75"/><text x="97.0" y="292.0" font-size="12" text-anchor="start">draft 135M, greedy</text><rect x="270.0" y="282.0" width="12.0" height="12.0" fill="#e08a3c" fill-opacity="0.75"/><text x="287.0" y="292.0" font-size="12" text-anchor="start">draft 135M, T=0.8</text><rect x="460.0" y="282.0" width="12.0" height="12.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="477.0" y="292.0" font-size="12" text-anchor="start">prompt lookup n=3</text><text x="20.0" y="140.0" font-size="12" text-anchor="middle" transform="rotate(-90 20 140.0)">draft 수락률</text>
+</svg></figure>
+<p>그림 5 — 과제별 draft 수락률 (Metal 측정 세트). 파랑: draft 135M, greedy. 주황: 같은 draft, temperature 0.8. 초록: prompt lookup (n = 3, 5절). korean의 높은 값은 퇴화 출력 때문이다(5.4절).</p>
+<div class="tw"><table><thead><tr><th>과제</th><th>greedy 수락률</th><th>T = 0.8 수락률 (Metal / CPU)</th><th>T = 0.8 배수 (Metal / CPU)</th></tr></thead><tbody><tr><td>code</td><td>84%</td><td>77% / 79%</td><td>×0.58 / ×0.99</td></tr><tr><td>summary</td><td>84% / 77%</td><td>55% / 65%</td><td>×0.34 / ×0.84</td></tr><tr><td>extract</td><td>79% / 81%</td><td>79% / 74%</td><td>×0.42 / ×0.91</td></tr><tr><td>chat</td><td>46% / 39%</td><td>30% / 33%</td><td>×0.27 / ×0.57</td></tr></tbody></table></div>
+<p>출력에서 볼 것: temperature를 올리면 수락률이 최대 30%p 떨어진다(summary 84% → 55%). 1.2절에서 말한 이유다: llama.cpp는 target이 자기 분포에서 <strong>뽑은</strong> token이 draft의 greedy token과 같아야 수락한다. 분포가 넓어질수록 "우연히 같을" 확률이 준다. 음성 비서는 보통 낮은 temperature를 쓰니 greedy 쪽 숫자가 더 현실적이지만, 창작형 응답은 sampled 쪽에 가깝다.</p>
+<h3 id="4-5-출력이-똑같다-를-확인하기-그리고-부동소수점의-함정">4.5 "출력이 똑같다"를 확인하기 — 그리고 부동소수점의 함정<a class="anchor" href="#4-5-출력이-똑같다-를-확인하기-그리고-부동소수점의-함정" aria-label="link">#</a></h3>
+<p>greedy에서는 speculative 출력이 target 단독 출력과 <strong>글자 단위로 같아야</strong> 한다. 모든 측정의 rep 0 출력을 비교했다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>sd_q8_k2 identical to base_q8: [True, True, True, True, True]
+sd_q8_k4 identical to base_q8: [True, True, True, True, True]
+sd_q8_k8 identical to base_q8: [True, True, True, True, True]
+sd_q8_k16 identical to base_q8: [True, True, True, True, True]
+sd_q8_d4_k4 identical to base_q8: [True, True, True, True, True]
+ng3 identical to base_q8: [True, True, True, False, True]
+ngdef identical to base_q8: [True, True, True, True, True]</code></pre></figure>
+<p>(Metal, 순서는 code, summary, extract, chat, korean.) draft 방식은 전부 같았다. 그런데 prompt lookup(<code>ng3</code>)의 chat 하나가 달랐다. 출력의 앞 39단어는 같고, "He was a robot who" 다음에 기준 출력은 "had been designed to paint", prompt lookup 쪽은 "loved to paint"로 갈라졌다. draft가 틀려서가 아니다 — draft는 수락 여부만 정하지 token을 정하지 않는다. 원인은 <strong>target 쪽 계산 경로</strong>다: 검증 forward는 k개 위치를 한꺼번에 계산하는데, k에 따라 다른 커널(3.2절)과 다른 누산 순서를 쓴다. 부동소수점 덧셈은 결합법칙이 성립하지 않으니 logit이 아주 조금 달라지고, 1등과 2등이 거의 동점인 위치에서 argmax가 뒤집힌다. CPU 측정에서는 모두 같았다.</p>
+<p>펌웨어 경험으로 말하면 "DMA burst 크기를 바꿨더니 결과 CRC가 달라졌다"와 같은 종류의 문제다. 수학적으로는 lossless지만 <strong>수치적으로는 batch 모양에 따라 결과가 흔들린다.</strong> 회귀 테스트에서 "spec on/off 출력 비교"를 할 때는 완전 일치가 아니라 "divergence 위치에서 top-2 logit 차이가 아주 작은지"로 판정해야 한다.</p>
+<h3 id="4-6-언제-이길까-target을-무겁게-draft를-가볍게">4.6 언제 이길까 — target을 무겁게, draft를 가볍게<a class="anchor" href="#4-6-언제-이길까-target을-무겁게-draft를-가볍게" aria-label="link">#</a></h3>
+<p>c를 줄이는 가장 직접적인 방법은 <strong>target을 더 크게(무겁게)</strong> 만드는 것이다. 같은 135M draft에 target을 f16 360M(725 MB)으로 바꾸면 target 단독은 Metal 95~106 tok/s로 느려지지만, γ = 4 speculative는 chat을 빼면 76~81 tok/s로 Q8_0 target 때와 거의 같아서, 배수가 ×0.49~0.63에서 <strong>×0.76~0.85</strong>로 오른다(Metal, 같은 f16 단독 대비, chat 제외. chat은 ×0.33 → ×0.52). 방향은 맞지만 이 짝으로는 여전히 이득이 안 난다.</p>
+<p>실제 기기에서 의미 있는 짝을 숫자로 보자 (가정, 웨어러블 17 GB/s, memory-bound 이상 모델):</p>
+<div class="tw"><table><thead><tr><th>짝</th><th>가중치 (int4)</th><th>c (바이트 비)</th><th>비고</th></tr></thead><tbody><tr><td>135M → 360M</td><td>76 MB → 204 MB</td><td>0.37</td><td>이 노트의 짝 (실측 c 0.50~0.63)</td></tr><tr><td>135M → 1.7B</td><td>76 MB → 962 MB</td><td>0.08</td><td>같은 SmolLM2 가족 (1.7B는 이 Mac에 없음)</td></tr><tr><td>1B → 3B</td><td>약 0.7 GB → 1.8 GB</td><td>0.38</td><td>D5의 예 (Llama-3.2, 실제 파라미터 1.24B·3.21B)</td></tr></tbody></table></div>
+<p>말로 하면: draft가 target의 1/10 이하일 때 speculative decoding이 큰 이득(×2 이상)을 낼 여지가 생긴다. 그런데 웨어러블에는 <strong>1.7B target이 안 들어간다</strong>(L1, D5 7절). 기기에 들어가는 작은 target일수록 draft와 크기 차이를 벌리기 어렵다. 이것이 "speculative decoding은 큰 모델의 기법"이라는 말의 정량적 의미다.</p>
+<hr>
+<h2 id="5-prompt-lookup-draft-모델-없이-프롬프트에서-베끼기">5. prompt lookup — draft 모델 없이 프롬프트에서 베끼기<a class="anchor" href="#5-prompt-lookup-draft-모델-없이-프롬프트에서-베끼기" aria-label="link">#</a></h2>
+<h3 id="5-1-아이디어">5.1 아이디어<a class="anchor" href="#5-1-아이디어" aria-label="link">#</a></h3>
+<p>요약, 문서 편집, RAG 답변, 코드 수정 같은 과제에서는 <strong>출력의 상당 부분이 입력에 이미 있다.</strong> "The Aria wrist-worn device has a 120 mAh battery"를 쓰는 중이라면, 다음 token들은 원문 "… a wrist-worn device with a 120 mAh battery. In always-on mode …"에서 그대로 올 가능성이 높다. 그러니 draft 모델 대신 <strong>지금까지의 마지막 n개 token과 같은 n-gram을 프롬프트(+지금까지 출력)에서 찾아, 그 뒤 m개를 draft로 쓴다.</strong> Saxena(2023)가 "prompt lookup decoding"으로 공개한 방법이고, llama.cpp의 <code>ngram-simple</code>이 같은 방식이다.</p>
+<figure class="code"><pre><code>context: ... a wrist-worn device with a 120 mAh battery . In always-on mode ...
+output : The Aria wrist-worn device has a 120 mAh battery
+                                            └ 마지막 3-gram "120 mAh battery"
+lookup : context에서 "120 mAh battery" 를 찾음 → 뒤 m개 ". In always-on mode ..." 를 draft로
+verify : target이 한 번의 forward로 검증 → 맞는 만큼 수락</code></pre></figure>
+<p>장점은 펌웨어 엔지니어가 좋아할 만한 것들이다: <strong>추가 가중치 0바이트, 추가 KV 0바이트, draft 연산 0 FLOP</strong>(문자열 검색 비용만), 학습 불필요. 단점은 과제 의존성이 크다는 것 — 입력을 베끼지 않는 자유 대화에서는 draft가 거의 안 나오거나 틀린다.</p>
+<h3 id="5-2-오프라인-시뮬레이션-실제-출력에-n-gram-매칭을-돌려-보기">5.2 오프라인 시뮬레이션 — 실제 출력에 n-gram 매칭을 돌려 보기<a class="anchor" href="#5-2-오프라인-시뮬레이션-실제-출력에-n-gram-매칭을-돌려-보기" aria-label="link">#</a></h3>
+<p>먼저 llama.cpp 없이 원리를 확인한다. target의 실제 greedy 출력 token열을 서버에서 받아 두고(<code>return_tokens: true</code>), 그 위에서 "prompt lookup이 있었다면 검증 한 번에 몇 token을 얻었을지"를 계산한다. greedy에서는 수락 여부가 "draft token == 실제 출력 token"으로 결정되니, 출력만 있으면 정확히 시뮬레이션할 수 있다.</p>
+<p>무엇을 확인하나: 360M Q8_0 서버에서 과제 5종의 프롬프트 token과 greedy 출력 token(최대 256개)을 받아 저장한다.</p>
+<figure class="code"><span class="lang">python</span><pre><code>import json, subprocess, sys, time, urllib.request
+sys.path.insert(0, "/private/tmp/claude-501/l6")
+from prompts import PROMPTS, chatml
+R = ".tools"; port = 18190
+srv = subprocess.Popen([R + "/llama.cpp/build/bin/llama-server", "--port", str(port), "-c", "2048", "-np", "1", "-t", "4",
+                        "--no-webui", "-m", R + "/models/smollm2-360m-instruct-Q8_0.gguf"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def post(path, body):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    return json.loads(urllib.request.urlopen(req, timeout=900).read())
+for _ in range(200):
+    try:
+        if json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2).read()).get("status") == "ok": break
+    except Exception: time.sleep(1)
+out = {}
+for task, p in PROMPTS.items():
+    pt = post("/tokenize", {"content": chatml(p), "add_special": False, "parse_special": True})["tokens"]
+    d = post("/completion", {"prompt": chatml(p), "n_predict": 256, "temperature": 0, "cache_prompt": False, "return_tokens": True})
+    out[task] = dict(prompt=pt, out=d["tokens"], text=d["content"])
+    print(task, len(pt), len(d["tokens"]), repr(d["content"][-60:]))
+json.dump(out, open("/private/tmp/claude-501/l6/tokens.json", "w"), ensure_ascii=False)
+srv.terminate()</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>code 47 256 'True\nassert is_palindrome("Not a palindrome") == False\n```\n\n'
+summary 188 145 'cing wake word false accepts from 20 per hour to 4 per hour.'
+extract 147 160 " {'t': 18.0, 'sensor': 'imu', 'event': 'tap', 'conf': 0.67}]"
+chat 35 256 'textures.\n\nAs Zephyr painted, he began to see the world in a'
+korean 106 256 '는 방법 세 가지를 한국어로 설명해 줘: 웨어러블 기기의 배터리를 오래 쓰는 방법 세 가지를 한국어로 설명�'</code></pre></figure>
+<p>출력에서 볼 것: summary 출력의 끝("… wake word false accepts from 20 per hour to 4 per hour.")이 원문 문장 거의 그대로다. 한국어 프롬프트는 약 40글자인데 106 token이다 — SmolLM2 tokenizer에서 한글 한 글자가 2~3 token으로 쪼개진다(B8의 tokenizer 효율 이야기). korean 출력은 프롬프트를 되풀이하고 있다.</p>
+<p>무엇을 확인하나: 저장한 token열 위에서 prompt lookup(n-gram n = 3, draft 최대 k = 8)을 흉내 내고, 검증 1회당 얻는 token 수(tok/step)와 수락률을 센다. 그다음 n과 k를 바꿔 본다.</p>
+<figure class="code"><span class="lang">python</span><pre><code>import json
+D = json.load(open("/private/tmp/claude-501/l6/tokens.json"))
+def pld_draft(ctx, n, k):                 # prompt lookup: 마지막 n-gram을 앞에서 찾아 그 뒤 k개를 draft로
+    key = ctx[-n:]
+    for j in range(len(ctx) - n - 1, -1, -1):  # 가장 최근 매치부터
+        if ctx[j:j + n] == key:
+            return ctx[j + n:j + n + k]
+    return []
+def simulate(prompt, out, n=3, k=8):
+    i = steps = drafted = accepted = 0
+    while i &lt; len(out):
+        d = pld_draft(prompt + out[:i], n, k)
+        a = 0
+        while a &lt; len(d) and i + a &lt; len(out) and d[a] == out[i + a]:
+            a += 1
+        drafted += len(d); accepted += a; steps += 1
+        i += a + 1                        # 수락된 a개 + target이 주는 1개
+    return steps, drafted, accepted
+print(f"{'task':8s} {'n_out':&gt;5s} {'steps':&gt;5s} {'tok/step':&gt;8s} {'drafted':&gt;7s} {'accept%':&gt;7s}")
+for task, v in D.items():
+    s, dr, ac = simulate(v["prompt"], v["out"])
+    print(f"{task:8s} {len(v['out']):5d} {s:5d} {len(v['out'])/s:8.2f} {dr:7d} {100*ac/max(dr,1):6.1f}%")
+print("\nn-gram 길이 n 과 draft 길이 k 에 따른 tok/step (summary / chat)")
+for n in (1, 2, 3, 4):
+    row = []
+    for k in (4, 8, 16):
+        r = [len(D[t]["out"]) / simulate(D[t]["prompt"], D[t]["out"], n, k)[0] for t in ("summary", "chat")]
+        row.append(f"k={k:2d}: {r[0]:4.2f} / {r[1]:4.2f}")
+    print(f"n={n}: " + " | ".join(row))</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>task     n_out steps tok/step drafted accept%
+code       256   208     1.23     120   40.0%
+summary    145    51     2.84     184   51.6%
+extract    160    86     1.86     224   33.0%
+chat       256   240     1.07     117   13.7%
+korean     256    40     6.40     232   93.5%
+
+n-gram 길이 n 과 draft 길이 k 에 따른 tok/step (summary / chat)
+n=1: k= 4: 2.30 / 1.18 | k= 8: 2.59 / 1.19 | k=16: 3.09 / 1.19
+n=2: k= 4: 2.64 / 1.12 | k= 8: 3.30 / 1.13 | k=16: 3.92 / 1.13
+n=3: k= 4: 2.34 / 1.06 | k= 8: 2.84 / 1.07 | k=16: 3.22 / 1.07
+n=4: k= 4: 2.16 / 1.04 | k= 8: 2.42 / 1.04 | k=16: 2.69 / 1.04</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>summary는 검증 한 번에 평균 <strong>2.84 token</strong>을 얻는다. 145 token을 51번의 target forward로 만든다. chat은 1.07로 거의 이득이 없다(240번 중 대부분 draft가 없거나 첫 token에서 틀림).</li><li>code(1.23)는 draft 모델 방식(τ = 4.27)보다 훨씬 낮다. 코드의 반복 구조("assert is_palindrome(")는 잡지만, 새 내용은 못 맞힌다. <strong>draft 모델은 "언어를 아는" 추측, prompt lookup은 "베끼기"</strong> 추측이다.</li><li>n이 작을수록 매치는 자주 되지만 틀린 매치도 늘어난다. summary에서는 n = 2가 가장 좋고(k = 16에서 3.92), n = 4는 너무 엄격하다. k를 늘리면 tok/step은 계속 오르지만, 실제로는 검증 비용 T(k+1)도 오른다(3.2절).</li><li>korean의 6.40은 프롬프트를 그대로 되풀이하는 퇴화 출력이라 생긴 숫자다. 5.4절.</li></ul>
+<h3 id="5-3-llama-cpp-ngram-simple로-실측">5.3 llama.cpp <code>ngram-simple</code>로 실측<a class="anchor" href="#5-3-llama-cpp-ngram-simple로-실측" aria-label="link">#</a></h3>
+<p>같은 아이디어를 llama.cpp 서버로 켰다. 두 설정을 쟀다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># ng3: 3-gram으로 찾고 최대 8개를 draft
+llama-server -m smollm2-360m-instruct-Q8_0.gguf --spec-type ngram-simple \
+  --spec-ngram-simple-size-n 3 --spec-ngram-simple-size-m 8 --spec-draft-n-max 8
+# ngdef: 기본값 (n = 12, m = 48), draft 최대 16
+llama-server -m smollm2-360m-instruct-Q8_0.gguf --spec-type ngram-simple --spec-draft-n-max 16</code></pre></figure>
+<p>결과 (target Q8_0 단독 대비 배수, 괄호는 수락률, "-"는 draft가 하나도 안 나옴):</p>
+<div class="tw"><table><thead><tr><th>설정</th><th>code</th><th>summary</th><th>extract</th><th>chat</th><th>korean</th></tr></thead><tbody><tr><td>ng3, Metal</td><td>×1.18 (20%)</td><td><strong>×1.55</strong> (51%)</td><td>×1.10 (33%)</td><td>×0.93 (13%)</td><td>×2.25 (95%)</td></tr><tr><td>ngdef, Metal</td><td>×1.17 (-)</td><td><strong>×1.68</strong> (100%)</td><td>×0.87 (7%)</td><td>×1.01 (-)</td><td>×2.96 (81%)</td></tr><tr><td>ng3, CPU</td><td>×0.94 (20%)</td><td><strong>×1.77</strong> (51%)</td><td>×0.89 (6%)</td><td>×1.00 (6%)</td><td>×3.01 (95%)</td></tr><tr><td>ngdef, CPU</td><td>×0.93 (-)</td><td><strong>×1.69</strong> (100%)</td><td>×0.96 (-)</td><td>×1.01 (-)</td><td>×2.39 (81%)</td></tr></tbody></table></div>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 300">
+<line x1="60.0" y1="250.0" x2="620.0" y2="250.0" stroke="currentColor" stroke-width="1"/><line x1="60.0" y1="30.0" x2="60.0" y2="250.0" stroke="currentColor" stroke-width="1"/><line x1="60.0" y1="181.2" x2="620.0" y2="181.2" stroke="#888" stroke-width="1" stroke-dasharray="4 4"/><line x1="55.0" y1="250.0" x2="60.0" y2="250.0" stroke="currentColor" stroke-width="1"/><text x="52.0" y="254.0" font-size="12" text-anchor="end">×0</text><line x1="55.0" y1="181.2" x2="60.0" y2="181.2" stroke="currentColor" stroke-width="1"/><text x="52.0" y="185.2" font-size="12" text-anchor="end">×1</text><line x1="55.0" y1="112.5" x2="60.0" y2="112.5" stroke="currentColor" stroke-width="1"/><text x="52.0" y="116.5" font-size="12" text-anchor="end">×2</text><line x1="55.0" y1="43.8" x2="60.0" y2="43.8" stroke="currentColor" stroke-width="1"/><text x="52.0" y="47.8" font-size="12" text-anchor="end">×3</text><text x="116.0" y="268.0" font-size="12" text-anchor="middle">code</text><rect x="82.0" y="175.8" width="30.0" height="74.2" fill="#4a7bd0" fill-opacity="0.75"/><text x="97.0" y="171.8" font-size="11" text-anchor="middle">1.08</text><rect x="116.0" y="185.4" width="30.0" height="64.6" fill="#3f9a6b" fill-opacity="0.75"/><text x="131.0" y="181.4" font-size="11" text-anchor="middle">0.94</text><text x="228.0" y="268.0" font-size="12" text-anchor="middle">summary</text><rect x="194.0" y="186.8" width="30.0" height="63.2" fill="#4a7bd0" fill-opacity="0.75"/><text x="209.0" y="182.8" font-size="11" text-anchor="middle">0.92</text><rect x="228.0" y="128.3" width="30.0" height="121.7" fill="#3f9a6b" fill-opacity="0.75"/><text x="243.0" y="124.3" font-size="11" text-anchor="middle">1.77</text><text x="340.0" y="268.0" font-size="12" text-anchor="middle">extract</text><rect x="306.0" y="176.4" width="30.0" height="73.6" fill="#4a7bd0" fill-opacity="0.75"/><text x="321.0" y="172.4" font-size="11" text-anchor="middle">1.07</text><rect x="340.0" y="188.8" width="30.0" height="61.2" fill="#3f9a6b" fill-opacity="0.75"/><text x="355.0" y="184.8" font-size="11" text-anchor="middle">0.89</text><text x="452.0" y="268.0" font-size="12" text-anchor="middle">chat</text><rect x="418.0" y="221.1" width="30.0" height="28.9" fill="#4a7bd0" fill-opacity="0.75"/><text x="433.0" y="217.1" font-size="11" text-anchor="middle">0.42</text><rect x="452.0" y="181.2" width="30.0" height="68.8" fill="#3f9a6b" fill-opacity="0.75"/><text x="467.0" y="177.2" font-size="11" text-anchor="middle">1.00</text><text x="564.0" y="268.0" font-size="12" text-anchor="middle">korean</text><rect x="530.0" y="173.7" width="30.0" height="76.3" fill="#4a7bd0" fill-opacity="0.75"/><text x="545.0" y="169.7" font-size="11" text-anchor="middle">1.11</text><rect x="564.0" y="43.1" width="30.0" height="206.9" fill="#3f9a6b" fill-opacity="0.75"/><text x="579.0" y="39.1" font-size="11" text-anchor="middle">3.01</text><rect x="90.0" y="282.0" width="12.0" height="12.0" fill="#4a7bd0" fill-opacity="0.75"/><text x="107.0" y="292.0" font-size="12" text-anchor="start">draft 135M γ=8 (CPU, poll 0)</text><rect x="350.0" y="282.0" width="12.0" height="12.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="367.0" y="292.0" font-size="12" text-anchor="start">prompt lookup n=3 (CPU)</text><text x="20.0" y="140.0" font-size="12" text-anchor="middle" transform="rotate(-90 20 140.0)">target 단독 대비</text>
+</svg></figure>
+<p>그림 6 — CPU에서 과제별 속도 배수: draft 모델(파랑, γ = 8, <code>--poll 0</code>) vs prompt lookup(초록, n = 3). 점선 = ×1.0. draft 모델은 정형 과제에서 ×1.07~1.11, 자유 대화에서 ×0.42로 크게 진다. prompt lookup은 베끼는 과제(summary)에서 ×1.77, 나머지는 ×0.89~1.00으로 <strong>져도 조금만 진다.</strong></p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>시뮬레이션과 실측 수락률이 맞는다.</strong> summary 51.6%(시뮬) vs 51%(실측), chat 13.7% vs 13%(Metal), extract 33.0% vs 33%(Metal). 5.2절의 단순한 Python 흉내가 llama.cpp 구현과 같은 일을 한다는 확인이다. code만 40% vs 20%로 다른데, 시뮬레이션은 출력 256 token, 서버는 128 token이라 뒤쪽 assert 반복 구간이 시뮬레이션에만 들어간 탓으로 보인다.</li><li>summary의 tok/step 2.84에 비해 실측 배수(×1.55~1.77)가 낮은 것은 검증 비용 때문이다. CPU에서 draft가 붙은 step은 평균 약 3.6개 draft를 검증하는데, T(4~5)/T(1) ≈ 1.3이라 이론 상한이 <code>2.84 ÷ 1.3 ≈ 2.2배</code> 정도다. 나머지 차이는 4.3절의 사이클당 고정 비용이다.</li><li>ngdef(n = 12)는 매치 조건이 엄격해서 summary에서만 draft가 나왔고(수락 100%), 다른 과제에서는 draft가 거의 없어 <strong>손해도 없다(×0.87~1.17, 노이즈 범위)</strong>. 안전한 기본값이다.</li><li>draft가 안 나올 때 비용이 거의 0이라는 점이 draft 모델과의 가장 큰 차이다. draft 모델은 틀려도 γ step을 이미 돌렸지만, prompt lookup은 매치가 없으면 그냥 일반 decode다.</li></ul>
+<h3 id="5-4-어떤-과제가-이득을-보나-그리고-퇴화-출력의-함정">5.4 어떤 과제가 이득을 보나 — 그리고 퇴화 출력의 함정<a class="anchor" href="#5-4-어떤-과제가-이득을-보나-그리고-퇴화-출력의-함정" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>과제 유형</th><th>입력 복사 비율</th><th>prompt lookup</th><th>예 (웨어러블 음성 비서라면, 추정)</th></tr></thead><tbody><tr><td>요약·발췌</td><td>높음</td><td>큰 이득</td><td>"오늘 회의 내용 요약해 줘" (ASR transcript를 입력으로)</td></tr><tr><td>편집·교정</td><td>매우 높음</td><td>큰 이득</td><td>"방금 메모에서 시간을 3시로 바꿔 줘"</td></tr><tr><td>RAG 답변</td><td>중간~높음</td><td>이득</td><td>개인 메모(L5)에서 찾은 문장을 인용하는 답변</td></tr><tr><td>구조화 출력</td><td>중간</td><td>작은 이득</td><td>센서 로그 → JSON, 일정 → 정해진 형식</td></tr><tr><td>자유 대화·창작</td><td>낮음</td><td>거의 0 (손해도 거의 0)</td><td>잡담, 이야기</td></tr></tbody></table></div>
+<p>korean 열의 ×2.25~3.01은 <strong>좋은 결과가 아니다.</strong> SmolLM2-360M은 한국어 지시를 이해하지 못하고 "웨어러블 기기의 배터리를 오래 쓰는 방법 세 가지를 한국어로 설명해 줘:"를 계속 되풀이했다(5.2절 출력). 반복 루프는 n-gram 매칭이 100% 맞히는 최고의 먹잇감이다. 벤치마크에서 prompt lookup이 엄청나게 빠르게 나오면 <strong>출력 품질(반복·퇴화)을 먼저 확인해야 한다.</strong> 측정하는 사람이 속기 쉬운 함정이다.</p>
+<p>음성 비서에 연결하면: ASR 결과를 다듬어 다시 말하기, 메시지 받아쓰기 교정, 캘린더 항목 읽어 주기처럼 <strong>입력을 재구성하는 응답이 많다면</strong> prompt lookup은 메모리 0바이트로 얻는 공짜 가속이다. 제품 로그로 "출력 token 중 입력 n-gram에서 예측 가능한 비율"을 먼저 재 보면(5.2절 시뮬레이션 그대로) 도입 효과를 출시 전에 예측할 수 있다.</p>
+<hr>
+<h2 id="6-다른-방법들-draft를-어디서-얻나">6. 다른 방법들 — draft를 어디서 얻나<a class="anchor" href="#6-다른-방법들-draft를-어디서-얻나" aria-label="link">#</a></h2>
+<p>draft 모델과 prompt lookup 사이에는 여러 변형이 있다. 모두 "검증은 target이 한 번에"라는 뼈대는 같고, <strong>draft를 얻는 곳</strong>이 다르다.</p>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 300">
+<text x="20" y="24" font-size="13">draft를 어디서 얻나 — 정성적 배치 (측정값 아님)</text><line x1="60" y1="260" x2="640" y2="260" stroke="currentColor"/><line x1="60" y1="260" x2="60" y2="40" stroke="currentColor"/><text x="350" y="290" font-size="12" text-anchor="middle">추가 메모리·학습 비용 →</text><text x="22" y="150" font-size="12" text-anchor="middle" transform="rotate(-90 22 150)">기대 수락 길이 →</text><circle cx="100" cy="200" r="7" fill="#3f9a6b"/><text x="112" y="196" font-size="12">prompt lookup / n-gram</text><text x="112" y="212" font-size="12">0 바이트, 학습 없음, 과제 의존 큼</text><circle cx="130" cy="235" r="7" fill="#888"/><text x="142" y="240" font-size="12">lookahead (Jacobi), 학습 없음</text><circle cx="250" cy="150" r="7" fill="#4a7bd0"/><text x="262" y="146" font-size="12">Medusa head (target에 head 몇 개)</text><circle cx="300" cy="105" r="7" fill="#e08a3c"/><text x="312" y="101" font-size="12">EAGLE (hidden state로 1-layer draft)</text><circle cx="230" cy="70" r="7" fill="#d0564a"/><text x="242" y="66" font-size="12">MTP / self-spec (LayerSkip): 학습 때 넣음</text><circle cx="580" cy="140" r="7" fill="#888"/><text x="592" y="136" font-size="12">독립</text><text x="640" y="166" font-size="12" text-anchor="end">독립 draft 모델 (가중치+KV 추가 상주)</text>
+</svg></figure>
+<p>그림 7 — draft를 얻는 방법들의 정성적 배치. 가로는 추가 메모리·학습 비용, 세로는 일반적으로 보고된 수락 길이의 대략적 순서다. 측정값이 아니라 논문들의 주장을 요약한 그림이니 순서만 참고한다.</p>
+<div class="tw"><table><thead><tr><th>방법</th><th>draft를 얻는 곳</th><th>추가 메모리</th><th>학습</th><th>NPU 친화성 (추정)</th></tr></thead><tbody><tr><td>독립 draft 모델</td><td>작은 별도 LM</td><td>가중치 + KV 전체</td><td>없음 (같은 가족이면)</td><td>그래프 2개, KV 2벌, 전환 비용</td></tr><tr><td>prompt lookup / n-gram</td><td>프롬프트·출력의 n-gram</td><td>0</td><td>없음</td><td>매우 좋음 (CPU에서 검색, NPU는 검증만)</td></tr><tr><td>Medusa</td><td>target 마지막 hidden state에 붙인 head 여러 개가 t+1, t+2, … 를 동시에 예측</td><td>head 몇 개 (작음)</td><td>head 학습 필요</td><td>좋음, 단 tree 검증용 attention mask 필요</td></tr><tr><td>EAGLE (1/2/3)</td><td>target의 feature(hidden state)를 입력으로 받는 1-layer draft</td><td>1개 층 수준</td><td>draft 층 학습</td><td>보통 (target feature를 draft로 넘기는 데이터 흐름)</td></tr><tr><td>lookahead (Jacobi)</td><td>여러 위치를 동시에 반복 갱신하며 n-gram 풀을 만듦</td><td>n-gram 풀</td><td>없음</td><td>낮음 (한 step 연산이 커서 compute 여유가 필요)</td></tr><tr><td>MTP (multi-token prediction)</td><td>학습 때부터 다음 여러 token을 예측하는 head·모듈</td><td>작음</td><td>사전학습 단계에서</td><td>좋음 (모델 일부라 그래프 하나)</td></tr><tr><td>self-speculative (LayerSkip 등)</td><td>target의 앞쪽 층만 써서 early exit로 draft</td><td>0 (가중치 공유)</td><td>early-exit 학습 권장</td><td>좋음 (같은 가중치, KV 일부 공유)</td></tr></tbody></table></div>
+<p>한 줄씩 풀면:</p>
+<ul><li><strong>Medusa</strong> (Cai et al., 2024): target의 마지막 hidden state 위에 작은 head(대개 1층 MLP) 여러 개를 붙여, head i가 i칸 뒤 token을 예측한다. 후보들의 조합을 <strong>tree</strong>로 만들어 한 번에 검증한다(tree attention: 각 후보 경로가 자기 조상만 보도록 attention mask를 준다). 추가 메모리가 작고 target forward 한 번으로 draft까지 나온다.</li><li><strong>EAGLE</strong> (Li et al., 2024): "token을 맞히는 것보다 다음 feature(hidden state)를 맞히는 게 쉽다"는 관찰로, target의 feature와 한 칸 앞 token을 입력으로 받는 1-layer draft를 학습한다. EAGLE-2는 draft tree를 신뢰도에 따라 동적으로 키우고, EAGLE-3는 여러 층의 feature를 섞는다. 이 llama.cpp 빌드는 <code>--spec-type draft-eagle3</code>를 지원한다(전용 draft GGUF 필요).</li><li><strong>lookahead decoding</strong> (Fu et al., 2024): Jacobi 반복으로 미래 여러 위치를 병렬로 추측·갱신하며 n-gram 후보 풀을 만들고 검증한다. draft 모델이 필요 없지만 <strong>한 step의 연산이 크다</strong>(창 크기 × n-gram 길이만큼의 위치를 매 step 계산). GPU처럼 연산이 남는 곳에 맞고, 연산 예산이 빠듯한 웨어러블 NPU에는 불리하다(추정). llama.cpp에는 <code>examples/lookahead</code>가 있지만 이 빌드에서는 빌드하지 않았다.</li><li><strong>MTP</strong> (Gloeckle et al., 2024; DeepSeek-V3에서 대규모로 사용): 사전학습 때 "다음 1개"뿐 아니라 "다음 n개"를 예측하는 head를 같이 학습한다. 추론 때 이 head가 draft가 된다. 모델을 처음부터 이렇게 만들어야 해서 우리가 고를 수 있는 선택지는 "MTP head가 있는 모델을 고르기"다. 이 빌드의 <code>draft-mtp</code>가 그것이다.</li><li><strong>self-speculative / LayerSkip</strong> (Elhoushi et al., 2024): 학습 때 layer dropout과 early-exit loss를 넣어 얕은 층의 출력도 쓸 만하게 만들고, 추론 때 앞쪽 L층만으로 draft를 만든 뒤 나머지 층으로 검증한다. 가중치를 공유하니 추가 메모리가 거의 없고, 앞 L층의 KV도 재사용한다. B9 4절의 early exit와 같은 뿌리다. (학습 없이 층을 건너뛰는 Draft &amp; Verify, Zhang et al. 2023도 있다.)</li></ul>
+<p><strong>NPU에서 따질 것</strong> (E5, F4와 연결):</p>
+<ol><li><strong>정적 shape</strong>: NPU 컴파일러는 대개 고정 shape 그래프를 좋아한다. 검증 그래프를 k = 4 또는 8 같은 <strong>고정 크기로 컴파일하고, draft가 적으면 padding</strong>하는 것이 현실적이다. prompt lookup처럼 draft 길이가 들쭉날쭉한 방법도 고정 k 그래프 하나 + mask로 처리한다.</li><li><strong>KV 되감기</strong>: 거절된 위치의 KV를 무효화해야 한다. 런타임이 KV를 그래프 내부 상태로 숨기면 어렵고, 입력·출력 버퍼로 노출하면 "길이 포인터만 되돌리기"로 끝난다(9.2절 C 코드).</li><li><strong>작은 M 커널</strong>: 3.2절의 Metal처럼 M = 2~8 경로가 느리면 검증이 비싸진다. 벤더 툴체인에서 이 구간을 반드시 측정한다.</li><li><strong>draft를 어디서 돌리나</strong>: 독립 draft 모델을 NPU에서 target과 번갈아 돌리면 그래프 전환 비용이 사이클마다 든다. draft를 CPU에, target 검증을 NPU에 두는 분업도 가능하지만, 두 장치 사이 동기화 지연이 사이클당 들어간다(E8의 이종 SoC 문제). Medusa·MTP·self-speculative는 <strong>그래프 하나</strong>라 이 문제가 없다는 점이 웨어러블에서 큰 장점이다(추정 — 실제 NPU 지원 여부는 툴체인마다 다르다).</li></ol>
+<hr>
+<h2 id="7-batching-폰과-서버는-왜-다른가">7. batching — 폰과 서버는 왜 다른가<a class="anchor" href="#7-batching-폰과-서버는-왜-다른가" aria-label="link">#</a></h2>
+<h3 id="7-1-continuous-batching이란">7.1 continuous batching이란<a class="anchor" href="#7-1-continuous-batching이란" aria-label="link">#</a></h3>
+<p>D5 6.1절에서 본 대로, 서로 다른 sequence N개를 한 forward에 묶으면 가중치를 한 번 읽어 N개 token을 만든다. speculative decoding이 "한 사용자의 미래 token"을 묶는다면, batching은 "여러 사용자의 현재 token"을 묶는다. 서버는 요청이 제각각 들어오고 끝나니, <strong>step마다</strong> 끝난 sequence를 빼고 새 요청을 넣는다. 이것이 continuous batching(iteration-level scheduling, Orca, Yu et al. OSDI 2022)이고, vLLM의 PagedAttention(Kwon et al. SOSP 2023)이 그 KV 관리를 맡는다. llama-server에서는 <code>--parallel N</code>(slot N개)이 동시에 처리하는 sequence 수, <code>--cont-batching</code>(기본 켜짐)이 그 스케줄링이다.</p>
+<h3 id="7-2-실측-n개-동시-요청">7.2 실측 — N개 동시 요청<a class="anchor" href="#7-2-실측-n개-동시-요청" aria-label="link">#</a></h3>
+<p>같은 chat 프롬프트를 temperature 0.8, seed만 다르게, <code>ignore_eos</code>로 정확히 128 token씩 N개 동시에 보냈다. 서버는 <code>-np N -c 512×N</code>, target 360M Q8_0. N마다 3회, median. (측정 시 load average 4.3~5.5)</p>
+<p>무엇을 확인하나: N에 따른 총 처리량(모든 요청 token ÷ 벽시계 시간)과 요청 하나가 체감하는 속도.</p>
+<figure class="code"><span class="lang">python</span><pre><code>import json, statistics as st
+rs = [json.loads(l) for l in open("/private/tmp/claude-501/l6/res_batch.jsonl")]
+for dev in ("gpu", "cpu"):
+    print(f"[{'Metal' if dev == 'gpu' else 'CPU 4 threads'}]  N  총 tok/s  요청당 tok/s  총/N=1   요청당/N=1")
+    b = None
+    for N in (1, 2, 4, 8, 16):
+        x = [r for r in rs if r["dev"] == dev and r["N"] == N]
+        agg, per = st.median(r["agg"] for r in x), st.median(r["per_med"] for r in x)
+        b = b or (agg, per)
+        print(f"{N:20d} {agg:9.0f} {per:12.0f} {agg/b[0]:8.2f} {per/b[1]:10.2f}")</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[Metal]  N  총 tok/s  요청당 tok/s  총/N=1   요청당/N=1
+                   1       154          157     1.00       1.00
+                   2       168           85     1.09       0.54
+                   4       183           46     1.19       0.30
+                   8       203           26     1.32       0.16
+                  16       775           52     5.05       0.33
+[CPU 4 threads]  N  총 tok/s  요청당 tok/s  총/N=1   요청당/N=1
+                   1       127          131     1.00       1.00
+                   2       202          107     1.59       0.82
+                   4       392          107     3.09       0.82
+                   8       446           64     3.51       0.49
+                  16       473           35     3.72       0.27</code></pre></figure>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 300">
+<line x1="70.0" y1="250.0" x2="570.0" y2="250.0" stroke="currentColor" stroke-width="1"/><line x1="70.0" y1="30.0" x2="70.0" y2="250.0" stroke="currentColor" stroke-width="1"/><line x1="70.0" y1="250.0" x2="70.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="70.0" y="268.0" font-size="12" text-anchor="middle">N=1</text><line x1="195.0" y1="250.0" x2="195.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="195.0" y="268.0" font-size="12" text-anchor="middle">N=2</text><line x1="320.0" y1="250.0" x2="320.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="320.0" y="268.0" font-size="12" text-anchor="middle">N=4</text><line x1="445.0" y1="250.0" x2="445.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="445.0" y="268.0" font-size="12" text-anchor="middle">N=8</text><line x1="570.0" y1="250.0" x2="570.0" y2="255.0" stroke="currentColor" stroke-width="1"/><text x="570.0" y="268.0" font-size="12" text-anchor="middle">N=16</text><line x1="65.0" y1="250.0" x2="70.0" y2="250.0" stroke="currentColor" stroke-width="1"/><text x="62.0" y="254.0" font-size="12" text-anchor="end">0</text><line x1="65.0" y1="195.0" x2="70.0" y2="195.0" stroke="currentColor" stroke-width="1"/><text x="62.0" y="199.0" font-size="12" text-anchor="end">200</text><line x1="65.0" y1="140.0" x2="70.0" y2="140.0" stroke="currentColor" stroke-width="1"/><text x="62.0" y="144.0" font-size="12" text-anchor="end">400</text><line x1="65.0" y1="85.0" x2="70.0" y2="85.0" stroke="currentColor" stroke-width="1"/><text x="62.0" y="89.0" font-size="12" text-anchor="end">600</text><line x1="65.0" y1="30.0" x2="70.0" y2="30.0" stroke="currentColor" stroke-width="1"/><text x="62.0" y="34.0" font-size="12" text-anchor="end">800</text><polyline points="70.0,207.7 195.0,203.8 320.0,199.7 445.0,194.2 570.0,36.9" fill="none" stroke="#e08a3c" stroke-width="2"/><circle cx="70.0" cy="207.7" r="3" fill="#e08a3c"/><circle cx="195.0" cy="203.8" r="3" fill="#e08a3c"/><circle cx="320.0" cy="199.7" r="3" fill="#e08a3c"/><circle cx="445.0" cy="194.2" r="3" fill="#e08a3c"/><circle cx="570.0" cy="36.9" r="3" fill="#e08a3c"/><text x="576.0" y="40.9" font-size="11" text-anchor="start">Metal 총</text><polyline points="70.0,215.1 195.0,194.4 320.0,142.2 445.0,127.3 570.0,119.9" fill="none" stroke="#4a7bd0" stroke-width="2"/><circle cx="70.0" cy="215.1" r="3" fill="#4a7bd0"/><circle cx="195.0" cy="194.4" r="3" fill="#4a7bd0"/><circle cx="320.0" cy="142.2" r="3" fill="#4a7bd0"/><circle cx="445.0" cy="127.3" r="3" fill="#4a7bd0"/><circle cx="570.0" cy="119.9" r="3" fill="#4a7bd0"/><text x="576.0" y="123.9" font-size="11" text-anchor="start">CPU 총</text><polyline points="70.0,206.8 195.0,226.6 320.0,237.3 445.0,242.8 570.0,235.7" fill="none" stroke="#e08a3c" stroke-width="2" stroke-dasharray="5 4"/><circle cx="70.0" cy="206.8" r="3" fill="#e08a3c"/><circle cx="195.0" cy="226.6" r="3" fill="#e08a3c"/><circle cx="320.0" cy="237.3" r="3" fill="#e08a3c"/><circle cx="445.0" cy="242.8" r="3" fill="#e08a3c"/><circle cx="570.0" cy="235.7" r="3" fill="#e08a3c"/><text x="576.0" y="229.7" font-size="11" text-anchor="start">Metal 요청당</text><polyline points="70.0,214.0 195.0,220.6 320.0,220.6 445.0,232.4 570.0,240.4" fill="none" stroke="#4a7bd0" stroke-width="2" stroke-dasharray="5 4"/><circle cx="70.0" cy="214.0" r="3" fill="#4a7bd0"/><circle cx="195.0" cy="220.6" r="3" fill="#4a7bd0"/><circle cx="320.0" cy="220.6" r="3" fill="#4a7bd0"/><circle cx="445.0" cy="232.4" r="3" fill="#4a7bd0"/><circle cx="570.0" cy="240.4" r="3" fill="#4a7bd0"/><text x="576.0" y="252.4" font-size="11" text-anchor="start">CPU 요청당</text><text x="24.0" y="140.0" font-size="12" text-anchor="middle" transform="rotate(-90 24 140.0)">tok/s</text><text x="320.0" y="288.0" font-size="11" text-anchor="middle">동시 요청 수 N (= server slot 수), 실선 = 총 처리량, 점선 = 요청 하나가 보는 속도</text>
+</svg></figure>
+<p>그림 8 — 동시 요청 수 N에 따른 총 처리량(실선)과 요청당 속도(점선). CPU(파랑)는 N = 4까지 총 처리량이 거의 N배로 오르다가(×3.1) 연산 한계에 닿아 평평해진다. Metal(주황)은 N = 8까지 거의 안 오르다가 N = 16에서 ×5로 뛴다 — 3.2절과 같은 커널 경계(<code>ne11 &gt; 8</code>)다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>CPU N = 4</strong>: 총 처리량 392 tok/s(×3.1)인데 요청 하나는 107 tok/s(×0.82). 서버 운영자에게는 "같은 하드웨어로 3배 손님", 사용자 한 명에게는 "18% 느려짐"이다. memory-bound decode에 batch가 공짜에 가깝다는 D5의 이론이 그대로 보인다.</li><li><strong>CPU N = 8~16</strong>: 총 처리량이 446 → 473으로 포화. 4 threads의 연산 한계에 닿았다(compute-bound로 넘어감). 요청당 속도는 35 tok/s까지 떨어진다.</li><li><strong>Metal N = 2~8</strong>: 총 처리량이 154 → 203으로 거의 그대로이고 요청당 속도만 1/N로 준다. 3.2절의 mat-vec 경로가 행마다 비용을 다시 내기 때문으로 보인다. N = 16에서 GEMM 경로로 넘어가자 775 tok/s. <strong>같은 하드웨어에서 batch 8과 16의 효율이 4배 차이</strong> 나는 것은 커널 경계 하나 때문이다.</li></ul>
+<h3 id="7-3-폰-웨어러블이-서버-같은-처리량을-못-얻는-이유">7.3 폰·웨어러블이 서버 같은 처리량을 못 얻는 이유<a class="anchor" href="#7-3-폰-웨어러블이-서버-같은-처리량을-못-얻는-이유" aria-label="link">#</a></h3>
+<ul><li><strong>사용자가 한 명이다.</strong> 묶을 다른 요청이 없다. 위 표의 N = 1 줄이 기기의 현실이다.</li><li>묶을 수 있는 것은 "한 사용자의 미래 token"(speculative, prompt lookup)이나 "한 사용자의 여러 후보"(parallel sampling, beam search) 정도다. 후자는 처리량이 아니라 품질을 위한 것이라 지연은 오히려 늘어난다.</li><li>그래서 서버 업계의 "tokens/s per GPU" 숫자(batch 수십~수백)를 기기 성능과 비교하면 안 된다. 기기에서 볼 숫자는 <strong>batch 1 TPOT</strong>다(D5).</li><li>거꾸로 hybrid 설계(L3)에서는 이 비대칭이 경제성을 만든다: 클라우드는 수많은 사용자를 batch로 묶어 token당 비용이 싸고, 기기는 batch 1이라 token당 에너지·시간이 비싸다. "어떤 요청을 기기에서, 어떤 요청을 클라우드에서"의 판단 근거 중 하나다.</li></ul>
+<hr>
+<h2 id="8-에너지-더-계산하고-덜-읽기">8. 에너지 — 더 계산하고 덜 읽기<a class="anchor" href="#8-에너지-더-계산하고-덜-읽기" aria-label="link">#</a></h2>
+<p>speculative decoding은 <strong>연산을 더 하고(draft 연산, 거절된 token의 검증 연산), 가중치 읽기를 줄인다</strong>(target 가중치를 τ token마다 한 번만 읽음). memory-bound 기기에서 에너지는 대부분 DRAM 읽기와 static 전력이니(D7 3.4절: token당 DRAM 22.5 mJ vs MAC 0.3 mJ), 이 교환이 에너지에도 이득일 가능성이 높다. 바이트만 세면 조건이 간단하다.</p>
+<figure class="code"><pre><code>token당 DRAM 바이트 (target 단독)   = W_t
+token당 DRAM 바이트 (speculative)  = (γ × W_d + W_t) / τ
+이득 조건                          τ &gt; 1 + γ × W_d / W_t</code></pre></figure>
+<p>말로 하면: 한 사이클에 읽는 바이트(draft γ번 + target 1번)를 얻은 token 수로 나눈 값이 W_t보다 작으면 이득이다. 손계산 — γ = 4, W_d / W_t = 0.135(135M int4 / 1B int4)면 τ &gt; 1.54. 4.2절의 code(τ = 4.27)는 넉넉히 넘고, 자유 대화도 τ = 2.5 정도면 넘는다. prompt lookup은 W_d = 0이라 τ &gt; 1이면 무조건 이득이다.</p>
+<p>무엇을 확인하나: D7의 가정 숫자(DRAM 40 pJ/B, int8 MAC 0.3 pJ, static 300 mW)와 웨어러블 가정(17 GB/s, 2 TMAC/s)으로 token당 시간과 에너지를 계산한다. τ는 이 노트에서 측정한 값을 빌려 쓴다(모델 짝이 다르니 예시일 뿐이다).</p>
+<figure class="code"><span class="lang">python</span><pre><code># 웨어러블 가정(D7 숫자)에서 token당 에너지: target 단독 vs speculative. 모든 HW 숫자는 가정이다.
+e_B, e_MAC, P_st, BW, PEAK = 40e-12, 0.3e-12, 0.3, 17e9, 2e12   # DRAM J/B, J/MAC, static W, B/s, MAC/s
+def step(W, P, k=1):                       # 가중치 W 바이트, 파라미터 P개 모델의 forward 1회 (k개 위치)
+    t = max(W / BW, P * k / PEAK)          # 시간 = 메모리와 연산 중 느린 쪽
+    return t, W * e_B + P * k * e_MAC + P_st * t
+Pt, Wt = 1.0e9, 1.0e9 * 4.5 / 8            # target 1B int4
+Pd, Wd = 135e6, 135e6 * 4.5 / 8            # draft 135M int4
+t1, E1 = step(Wt, Pt)
+print(f"target 단독: {t1*1e3:5.1f} ms/token, {E1*1e3:5.1f} mJ/token")
+cases = [("draft 모델, code (τ=4.27)", 4, 4.27, True), ("draft 모델, chat (τ=2.51)", 4, 2.51, True),
+         ("draft 모델, 최악 (τ=1.2)", 4, 1.2, True),
+         ("prompt lookup, summary (τ=2.84)", 8, 2.84, False), ("prompt lookup, chat (τ=1.07)", 8, 1.07, False)]
+for name, g, tau, use_draft in cases:
+    td, Ed = step(Wd, Pd) if use_draft else (0.0, 0.0)
+    tv, Ev = step(Wt, Pt, g + 1)
+    t_tok, E_tok = (g * td + tv) / tau, (g * Ed + Ev) / tau
+    print(f"{name:32s}: {t_tok*1e3:5.1f} ms/token (×{t1/t_tok:4.2f}), {E_tok*1e3:5.1f} mJ/token (×{E_tok/E1:4.2f} 에너지)")</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>target 단독:  33.1 ms/token,  32.7 mJ/token
+draft 모델, code (τ=4.27)         :  11.9 ms/token (×2.77),  12.1 mJ/token (×0.37 에너지)
+draft 모델, chat (τ=2.51)         :  20.3 ms/token (×1.63),  20.6 mJ/token (×0.63 에너지)
+draft 모델, 최악 (τ=1.2)            :  42.5 ms/token (×0.78),  43.0 mJ/token (×1.31 에너지)
+prompt lookup, summary (τ=2.84) :  11.7 ms/token (×2.84),  12.4 mJ/token (×0.38 에너지)
+prompt lookup, chat (τ=1.07)    :  30.9 ms/token (×1.07),  32.8 mJ/token (×1.00 에너지)</code></pre></figure>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 260">
+<text x="190.0" y="20.0" font-size="12" text-anchor="start">token당 에너지 (target 단독 = 1.0, 낮을수록 좋음) — 가정 모델</text><text x="182.0" y="46.0" font-size="12" text-anchor="end">target 단독</text><rect x="190.0" y="34.0" width="140.0" height="18.0" fill="#888" fill-opacity="0.75"/><text x="336.0" y="48.0" font-size="12" text-anchor="start">×1.00 에너지, 속도 ×1.00</text><text x="182.0" y="82.0" font-size="12" text-anchor="end">draft, code τ=4.27</text><rect x="190.0" y="70.0" width="51.8" height="18.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="336.0" y="84.0" font-size="12" text-anchor="start">×0.37 에너지, 속도 ×2.77</text><text x="182.0" y="118.0" font-size="12" text-anchor="end">draft, chat τ=2.51</text><rect x="190.0" y="106.0" width="88.2" height="18.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="336.0" y="120.0" font-size="12" text-anchor="start">×0.63 에너지, 속도 ×1.63</text><text x="182.0" y="154.0" font-size="12" text-anchor="end">draft, 최악 τ=1.2</text><rect x="190.0" y="142.0" width="183.4" height="18.0" fill="#d0564a" fill-opacity="0.75"/><text x="379.4" y="156.0" font-size="12" text-anchor="start">×1.31 에너지, 속도 ×0.78</text><text x="182.0" y="190.0" font-size="12" text-anchor="end">lookup, summary τ=2.84</text><rect x="190.0" y="178.0" width="53.2" height="18.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="336.0" y="192.0" font-size="12" text-anchor="start">×0.38 에너지, 속도 ×2.84</text><text x="182.0" y="226.0" font-size="12" text-anchor="end">lookup, chat τ=1.07</text><rect x="190.0" y="214.0" width="140.0" height="18.0" fill="#888" fill-opacity="0.75"/><text x="336.0" y="228.0" font-size="12" text-anchor="start">×1.00 에너지, 속도 ×1.07</text><line x1="330.0" y1="30.0" x2="330.0" y2="246.0" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"/>
+</svg></figure>
+<p>그림 9 — 웨어러블 가정 모델의 token당 에너지 (target 1B int4 단독 = 1.0). 초록은 절약, 빨강은 손해, 회색은 비김. 가정 모델이므로 절대값이 아니라 방향만 본다.</p>
+<p>출력에서 볼 것과 해석:</p>
+<ul><li>이 이상적 모델에서는 c = 76 MB ÷ 562 MB = 0.135이고 검증도 공짜(memory-bound)라서, 같은 τ로 <strong>속도 ×2.8, 에너지 ×0.37</strong>이 나온다. 이 Mac의 실측(×1.0 언저리)과의 차이는 전부 3절의 두 가지 — 실측 c가 0.5~0.63이고, 검증이 공짜가 아님 — 에서 온다. 기기 NPU가 작은 모델에서도 대역폭에 비례하는 속도를 내는지(고정 오버헤드가 작은지)가 판단의 열쇠다.</li><li>에너지와 속도가 거의 같은 비율로 움직인다. 이 모델에서 token당 에너지 = DRAM 바이트 비용 + static × 시간이고, 둘 다 "읽은 바이트"에 비례하기 때문이다(D7 3.4절과 같은 결론). race-to-idle 관점으로 말하면 <strong>빨리 끝내는 것이 곧 아끼는 것</strong>이다.</li><li>τ가 낮으면(최악 τ = 1.2) 에너지가 ×1.31로 <strong>손해</strong>다. draft 연산과 draft 가중치 읽기가 버려지기 때문이다. 과제에 따라 speculative를 켜고 끄는 정책(예: 최근 수락률이 낮으면 끄기 — llama.cpp <code>ngram-map-k</code>가 n-gram별 수락 기록을 쓰는 것과 같은 발상)이 에너지에도 필요하다.</li><li>빠진 것: KV 읽기(짧은 context라 무시), draft를 SRAM에 상주시키는 경우(가중치가 작으면 DRAM 40 pJ/B가 아니라 SRAM 수 pJ/B — draft가 2~4 MB 수준인 Medusa head나 n-gram 테이블이라면 가능), DVFS. 실제 판단은 K3의 전력 측정으로 한다.</li></ul>
+<hr>
+<h2 id="9-임베디드-관점에서-다시-보기">9. 임베디드 관점에서 다시 보기<a class="anchor" href="#9-임베디드-관점에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="9-1-웨어러블-npu에서-현실적인-것과-아닌-것-추정-포함">9.1 웨어러블 NPU에서 현실적인 것과 아닌 것 (추정 포함)<a class="anchor" href="#9-1-웨어러블-npu에서-현실적인-것과-아닌-것-추정-포함" aria-label="link">#</a></h3>
+<p>Hark 같은 웨어러블이라면(추정: Qualcomm 계열 SoC, LPDDR 대역폭 수십 GB/s 이하, 0.5~1B급 int4 SLM) 다음 순서로 검토하겠다.</p>
+<div class="tw"><table><thead><tr><th>순위</th><th>기법</th><th>이유</th><th>위험</th></tr></thead><tbody><tr><td>1</td><td>가중치·KV 양자화, 작은 모델 (①)</td><td>바이트를 직접 줄임, 확실한 이득</td><td>품질 (C3, C8로 검증)</td></tr><tr><td>2</td><td>prompt lookup</td><td>메모리 0, 학습 0, 맞는 과제에서 ×1.5 이상, 틀려도 손해 작음</td><td>과제 의존, 퇴화 출력에 속기 쉬움</td></tr><tr><td>3</td><td>prefix/KV 재사용 (④)</td><td>system prompt·대화 이력의 prefill 제거, TTFT 단축</td><td>KV 메모리 상주 (D5 5.6, L2)</td></tr><tr><td>4</td><td>MTP·Medusa·self-speculative</td><td>그래프 하나, 추가 메모리 작음</td><td>해당 head가 있는 모델·학습 필요, 툴체인 지원</td></tr><tr><td>5</td><td>독립 draft 모델</td><td>기존 모델 짝으로 바로 가능</td><td>draft 가중치+KV 상주, c가 크면 손해 (이 노트의 실측)</td></tr><tr><td>6</td><td>batching</td><td>사용자 1명</td><td>해당 없음 (서버 쪽 기법)</td></tr></tbody></table></div>
+<p><strong>온디바이스 draft + 클라우드 verify</strong> (study_prep_list L6의 키워드)는 따로 생각해야 한다. 사이클마다 "기기 draft → 네트워크 → 클라우드 검증 → 네트워크 → 기기"가 돈다. 셀룰러·BLE 경유 왕복 시간이 수십~수백 ms라면, γ = 8에서 τ = 5라고 해도 <strong>5 token마다 왕복 한 번</strong>이 붙는다. 클라우드 모델이 처음부터 스트리밍으로 생성하면 첫 token에만 왕복이 붙는다. 그래서 지연 단축 수단으로는 불리하고, 의미가 있다면 (a) 클라우드 연산 비용 절감(검증은 batch로 묶기 쉬움), (b) 연결이 끊겨도 기기 draft로 계속 말할 수 있는 graceful degradation 정도다(추정 — 공개된 제품 사례로 확인하지 않았다). 지연이 목적이라면 L3의 라우팅(처음부터 어느 쪽이 답할지 정하기)이나 "기기가 짧은 첫 문장을 먼저 말하고 클라우드가 이어받기"가 더 현실적이다.</p>
+<h3 id="9-2-c로-보는-kv-되감기-지우지-말고-포인터만-되돌린다">9.2 C로 보는 KV 되감기 — "지우지 말고 포인터만 되돌린다"<a class="anchor" href="#9-2-c로-보는-kv-되감기-지우지-말고-포인터만-되돌린다" aria-label="link">#</a></h3>
+<p>검증 forward는 draft token들의 KV까지 일단 캐시에 쓴다. 일부가 거절되면 그 위치들을 무효화해야 한다. 링버퍼의 write pointer를 되돌리는 것과 같다. 데이터를 지울 필요가 없다 — 다음 쓰기가 덮어쓴다.</p>
+<p>무엇을 확인하나: prompt 3개, draft 4개 검증, 2개만 수락, 교정 token 1개를 넣은 뒤 KV 길이와 내용.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+
+#define MAX_CTX 16
+#define KV_DIM  2                         /* 실제로는 layers × kv_heads × head_dim. 여기선 2개 숫자 */
+
+typedef struct { float k[MAX_CTX][KV_DIM]; int n_past; } kv_cache_t;
+
+/* 검증 forward: 위치 n_past .. n_past+n-1 에 KV를 "일단" 다 쓴다 (draft token 포함) */
+static void kv_append(kv_cache_t *kv, const int *tok, int n)
+{
+    for (int i = 0; i &lt; n; i++) {
+        kv-&gt;k[kv-&gt;n_past + i][0] = (float)tok[i];
+        kv-&gt;k[kv-&gt;n_past + i][1] = (float)tok[i] * 0.5f;
+    }
+    kv-&gt;n_past += n;
+}
+
+/* 거절되면: 버릴 위치를 지우지 않고 길이만 되돌린다 (다음 쓰기가 덮어씀) */
+static void kv_rollback(kv_cache_t *kv, int new_len) { kv-&gt;n_past = new_len; }
+
+int main(void)
+{
+    kv_cache_t kv; memset(&amp;kv, 0, sizeof kv);
+    int prompt[3] = {11, 12, 13};
+    kv_append(&amp;kv, prompt, 3);
+    int base = kv.n_past;
+
+    int verify[5] = {13, 101, 7, 42, 9};  /* 마지막 확정 token + draft 4개 → 5 위치를 한 번에 */
+    kv_append(&amp;kv, verify + 1, 4);        /* draft 4개의 KV를 써 둔다 */
+    int accepted = 2;                      /* target이 앞 2개만 인정 (3번째에서 다름) */
+    kv_rollback(&amp;kv, base + accepted);     /* 거절된 2개 위치를 무효화 */
+    int fix = 77;                          /* target이 낸 교정 token */
+    kv_append(&amp;kv, &amp;fix, 1);
+
+    printf("n_past = %d (prompt 3 + accepted 2 + correction 1)\n", kv.n_past);
+    for (int i = 0; i &lt; kv.n_past; i++) printf("%g ", kv.k[i][0]);
+    printf("\n");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>n_past = 6 (prompt 3 + accepted 2 + correction 1)
+11 12 13 101 7 77</code></pre></figure>
+<p>출력에서 볼 것: 위치 5에는 원래 draft 42의 KV가 있었지만, 되감은 뒤 교정 token 77이 덮어썼다. 위치 6(draft 9)의 KV는 메모리에 남아 있지만 <code>n_past</code> 밖이라 attention이 보지 않는다. 실제 런타임에서는 (1) attention이 <code>n_past</code>까지만 보도록 mask나 길이 인자를 주고, (2) 교정 token의 KV는 다음 사이클의 검증 forward 첫 위치에서 계산된다(여기서는 단순화해서 바로 넣었다). llama.cpp에서는 sequence의 KV 범위를 지우는 메모리 API로 같은 일을 한다. paged KV(D5 5.3)라면 블록 단위 할당이라, 거절이 블록 경계를 넘을 때만 블록을 반납하면 된다.</p>
+<p>펌웨어 경험과 연결하면: NVMe의 completion queue에서 "head pointer만 옮기고 엔트리는 안 지운다"와 같은 패턴이다. 실수하기 쉬운 곳도 같다 — <strong>포인터를 되돌리는 것을 잊으면 거절된 token의 KV가 context에 남아 이후 출력이 미묘하게 틀어진다.</strong> 증상은 crash가 아니라 "가끔 문맥이 이상한 답"이라 찾기 어렵다. 4.5절처럼 spec on/off greedy 출력 비교 테스트를 회귀 스위트에 넣어 두는 것이 가장 싼 보험이다.</p>
+<h3 id="9-3-bring-up-체크리스트-speculative-켰더니-빨라졌다-느려졌다-를-받았을-때">9.3 bring-up 체크리스트 — "speculative 켰더니 빨라졌다/느려졌다"를 받았을 때<a class="anchor" href="#9-3-bring-up-체크리스트-speculative-켰더니-빨라졌다-느려졌다-를-받았을-때" aria-label="link">#</a></h3>
+<ol><li><strong>c를 먼저 잰다.</strong> draft 1 token 시간 ÷ target 1 token 시간. 0.3을 넘으면 기대를 낮춘다. 바이트 비가 아니라 <strong>실측</strong>으로.</li><li><strong>T(k)를 k = 1~17로 잰다.</strong> 그래프가 평평하지 않은 구간(Metal의 2~8 같은)을 찾고, γ를 그 구간 밖으로 잡는다.</li><li><strong>τ와 수락률을 과제별로</strong> 잰다. 벤치마크 프롬프트가 아니라 제품 프롬프트로. temperature도 제품 설정으로.</li><li><strong>출력 동일성</strong>(greedy)을 확인한다. 다르면 KV 되감기 버그 또는 수치 경로 차이(4.5절) 중 무엇인지 가른다.</li><li><strong>퇴화 출력</strong>을 확인한다. 수락률·속도가 비정상적으로 높으면 반복 루프를 의심한다(5.4절).</li><li><strong>스레드·전원 설정</strong>을 확인한다. 이 노트에서 <code>--poll 0</code> 하나로 CPU 결과가 2~10%p 바뀌었다. 기기에서는 DVFS governor, 코어 배치(big/little)도 같은 종류의 변수다.</li><li><strong>메모리</strong>: draft 가중치 + draft KV가 상주 예산 안인지(D2). 웨어러블에서는 이것만으로 탈락할 수 있다.</li></ol>
+<hr>
+<h2 id="10-흔한-실수와-증상">10. 흔한 실수와 증상<a class="anchor" href="#10-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>수락률만 보고 판단</td><td>"수락률 85%인데 느려요"</td><td>draft 비용 c와 검증 비용 T(γ+1)를 안 봄</td><td>τ × T_t(1) ÷ (γ·T_d + T_t(γ+1))로 예측 (4.3절)</td></tr><tr><td>바이트 비로 c 추정</td><td>예측 ×1.3, 실측 ×0.9</td><td>작은 모델은 층별 고정 비용 때문에 바이트만큼 안 빨라짐</td><td>draft·target을 llama-bench로 직접 측정</td></tr><tr><td>γ를 크게</td><td>γ = 16에서 오히려 느려짐</td><td>뒤쪽 draft는 앞이 다 맞아야 가치, draft 비용은 선형 증가</td><td>γ sweep 후 최적점 선택, <code>--spec-draft-p-min</code>으로 조기 중단</td></tr><tr><td>커널 경계 무시</td><td>γ = 4가 γ = 8보다 느림 (Metal)</td><td>검증 token 수 ≤ 8이면 mat-vec 계열 경로, 모델 차원(960)이 소배치 커널 조건과 안 맞음</td><td>T(k) 측정 후 γ+1을 경계 밖으로</td></tr><tr><td>vocab이 다른 짝</td><td>"vocabs are not compatible" 오류</td><td>다른 tokenizer</td><td>같은 가족 모델로 짝, gguf 메타데이터 비교 (2.1절)</td></tr><tr><td>퇴화 출력으로 벤치마크</td><td>prompt lookup ×3, 수락률 95%</td><td>모델이 프롬프트를 되풀이</td><td>출력 품질 먼저 확인, 품질 지표와 함께 보고</td></tr><tr><td>부하 있는 기계에서 순차 측정</td><td>설정 간 차이가 측정마다 뒤집힘</td><td>시간에 따른 부하 변화</td><td>교차(interleave) 측정, 반복, median, load 기록</td></tr><tr><td>KV 되감기 누락</td><td>가끔 문맥이 어긋난 답, crash는 없음</td><td>거절된 draft의 KV가 context에 남음</td><td>spec on/off greedy 출력 비교 회귀 테스트</td></tr><tr><td>greedy 출력 완전 일치를 기대</td><td>테스트가 가끔 실패</td><td>batch 모양별 누산 순서 차이로 근소한 logit 차</td><td>갈라진 위치의 top-2 logit 차를 함께 기록해 판정</td></tr><tr><td>서버 batch 처리량을 기기 성능으로 인용</td><td>기기에서 수치 재현 불가</td><td>기기는 batch 1</td><td>batch 1 TPOT로 비교 (7.3절)</td></tr></tbody></table></div>
+<hr>
+<h2 id="11-면접에서-이렇게-말한다">11. 면접에서 이렇게 말한다<a class="anchor" href="#11-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> "Explain speculative decoding and when it helps."</p>
+<p><strong>A.</strong> decode는 token마다 가중치 전체를 읽는 memory-bound 작업이다. 작은 draft 모델이 γ개를 추측하고 target이 γ+1개 위치를 한 번의 forward로 검증하면, target 가중치를 한 번 읽고 여러 token을 얻는다. 수락 규칙(greedy 일치 또는 rejection sampling) 덕분에 출력 분포는 target과 정확히 같다. 이득은 τ × T_t(1) ÷ (γ·T_d + T_t(γ+1))이라서, draft가 target보다 10배 이상 싸고, 과제가 예측 가능하고, 검증 batch가 거의 공짜일 때 이긴다.</p>
+<blockquote><p>Decode is memory-bound: every token re-reads all the weights. A cheap draft model proposes γ tokens and the target verifies γ+1 positions in one forward pass, so one weight read yields several tokens, and the acceptance rule keeps the output distribution identical to the target's. It pays off when the draft is roughly ten times cheaper than the target, the text is predictable, and the hardware can verify a small batch at close to single-token cost.</p></blockquote>
+<p><strong>Q.</strong> "Why might speculative decoding not help on our device?"</p>
+<p><strong>A.</strong> 세 가지다. 첫째, 기기에 들어가는 target이 작아서 draft와의 크기 차이가 작다 — 내가 135M → 360M으로 재 보니 draft가 target 시간의 50~63%를 먹었고(바이트 비는 38%), 수락률 80%대에서도 ×0.5~1.1이었다. 둘째, 검증 비용이 공짜가 아니다 — Metal에서 5-token forward가 1-token의 3.1배였다(커널 경로 때문). 셋째, draft 가중치와 KV가 메모리를 더 먹고, 두 모델을 번갈아 돌리는 전환 비용이 있다. 그래서 먼저 c와 T(k)를 재고, 안 되면 prompt lookup이나 MTP/Medusa 같은 단일 그래프 방식을 본다.</p>
+<blockquote><p>On a wearable the target itself is small, so the draft is not much cheaper: when I measured SmolLM2 135M drafting for 360M, the draft cost 50 to 63 percent of a target step and, even with 80-plus percent acceptance, I got 0.5 to 1.1x. Verification also isn't free if the NPU or GPU kernels handle batch sizes of 2 to 8 poorly, and the draft adds weights, KV and switching overhead. So I measure the draft cost ratio and the k-token forward cost first, and then I look at zero-memory options like prompt lookup or single-graph ones like MTP heads.</p></blockquote>
+<p><strong>Q.</strong> "What is prompt lookup decoding and which tasks benefit?"</p>
+<p><strong>A.</strong> draft 모델 대신 마지막 n개 token과 같은 n-gram을 프롬프트·출력에서 찾아 그 뒤 token들을 draft로 쓰는 방법이다. 추가 메모리와 학습이 0이고, 매치가 없으면 일반 decode라 손해도 작다. 요약·편집·RAG·코드 수정처럼 입력을 베끼는 과제에서 이득이 크다. 내가 잰 것으로는 요약에서 ×1.55~1.77, 자유 대화에서 ×0.93~1.00이었다. 단, 반복·퇴화 출력도 엄청 빨라 보이니 품질과 같이 봐야 한다.</p>
+<blockquote><p>Prompt lookup drafts by matching the last few tokens against an n-gram in the prompt or earlier output and proposing whatever followed it. It needs no extra weights or training, and when nothing matches it falls back to normal decode, so the downside is small. It shines on copy-heavy tasks like summarization, editing, RAG and code edits: I measured 1.55 to 1.77x on summarization and roughly 1.0x on open chat. One caveat is that degenerate repetitive output also looks very fast, so I always report quality next to speed.</p></blockquote>
+<p><strong>Q.</strong> "How does verifying k tokens change arithmetic intensity?"</p>
+<p><strong>A.</strong> 1 token decode는 GEMV라서 가중치 1바이트당 MAC 1번 정도다(int8 기준 약 2 FLOP/B, int4면 약 3.6). k개를 한 번에 검증하면 같은 가중치로 k번 곱하는 작은 GEMM이 되어 intensity가 k배가 된다. 1B int4에서 k = 1, 4, 8이면 3.6, 14, 28 FLOP/B로, 웨어러블 ridge(가정 약 118)보다 한참 아래라 이론상 시간은 거의 그대로다. 실제로는 커널이 작은 M을 잘 처리하는지가 관건이라 k = 1~17을 직접 잰다.</p>
+<blockquote><p>Single-token decode is a GEMV, about 2 FLOP per byte for int8 weights and about 3.6 for int4. Verifying k positions reuses each weight k times, so it becomes a skinny GEMM with k times the intensity: 3.6, 14 and 28 FLOP per byte for k = 1, 4 and 8 on a 1B int4 model. All of those are still far below a wearable ridge point of around 118, so in theory verification costs about the same as one token. In practice it depends on whether the kernels handle small M efficiently, so I measure k from 1 to 17 directly.</p></blockquote>
+<p><strong>Q.</strong> "Batching on a phone versus a server?"</p>
+<p><strong>A.</strong> 서버는 여러 사용자의 요청을 continuous batching으로 한 forward에 묶어 가중치 재사용을 N배로 만든다. 내가 CPU에서 재 보니 동시 4개에서 총 처리량 ×3.1, 요청 하나는 ×0.82였다. 폰·웨어러블은 사용자가 한 명이라 batch가 1이고, 남는 수단은 한 사용자의 미래 token을 묶는 speculative·prompt lookup이다. 그래서 서버의 "tokens/s per GPU"와 기기의 batch-1 TPOT는 비교하면 안 된다.</p>
+<blockquote><p>A server packs many users' sequences into each forward pass with continuous batching, so it reuses each weight read N times. On this CPU, four concurrent requests gave 3.1x aggregate throughput while each request ran at 0.82x. A phone serves one user at batch size 1, so the only way to get the same reuse is to batch one user's future tokens through speculative decoding or prompt lookup. That's why server tokens-per-second numbers can't be compared with on-device batch-1 TPOT.</p></blockquote>
+<p><strong>Q.</strong> "Does speculative decoding save energy?"</p>
+<p><strong>A.</strong> memory-bound 기기에서는 대체로 그렇다. token당 읽는 바이트가 (γ·W_d + W_t)/τ로 줄고, 빨리 끝나니 static 에너지도 준다. 조건은 τ &gt; 1 + γ·W_d/W_t다. 하지만 τ가 낮으면 draft 연산과 읽기가 버려져서 손해(가정 모델에서 τ = 1.2일 때 ×1.3)라, 수락률이 낮을 때 자동으로 끄는 정책이 필요하다.</p>
+<blockquote><p>Usually yes on a memory-bound device: bytes read per output token drop to (γ·W_draft + W_target)/τ, and finishing sooner also cuts static energy. The break-even condition is τ &gt; 1 + γ·W_draft/W_target. When acceptance is poor the draft work is wasted and energy goes up, about 1.3x in my model at τ = 1.2, so I'd add a policy that turns drafting off when recent acceptance drops.</p></blockquote>
+<hr>
+<h2 id="12-직접-해보기">12. 직접 해보기<a class="anchor" href="#12-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>손계산</strong>: c = 0.1, 검증 공짜, γ = 4, 측정 τ = 3.0일 때 배수는? c = 0.5면? 정답: <code>3.0 ÷ (4 × 0.1 + 1) = 2.14배</code>, <code>3.0 ÷ (4 × 0.5 + 1) = 1.0배</code>.</li><li><strong>손계산</strong>: 3.1절의 CPU 숫자(T_d = 3.28, T_t(1) = 6.57, T_t(9) = 11.78)로, γ = 8이 이득이려면 τ가 최소 얼마여야 하나? 정답: <code>τ &gt; (8 × 3.28 + 11.78) ÷ 6.57 = 38.0 ÷ 6.57 ≈ 5.8</code>. 측정 τ는 code 6.74, chat 2.67이었다.</li><li><strong>손계산</strong>: 1B int4 target, 135M int4 draft, γ = 4. 에너지(바이트) 관점의 손익분기 τ는? 정답: <code>1 + 4 × 0.135 = 1.54</code>.</li><li><strong>코드</strong>: 5.2절 시뮬레이션에 "최근 매치" 대신 "가장 많이 나온 continuation"을 고르는 규칙을 넣어 summary·chat의 tok/step을 비교하라. 힌트: n-gram → {다음 m-gram: 횟수} 딕셔너리. llama.cpp <code>ngram-map-k</code>가 비슷한 일을 한다.</li><li><strong>측정</strong>: 4.1절 스크립트에 <code>--spec-draft-p-min 0.6</code>을 준 서버를 추가해 chat의 배수가 바뀌는지 재라. 힌트: draft가 자신 없을 때 일찍 멈추면 틀린 draft 비용이 준다. 수락률은 오르고 τ는 줄 수 있다.</li><li><strong>측정</strong>: llama-bench로 Qwen2.5-0.5B Q8_0의 T(k)를 k = 1, 2, 3, 5, 9, 17로 재고, 같은 Metal 경계(8/9)가 보이는지 확인하라. 힌트: <code>-p 1,2,3,5,9,17 -n 0 -r 10 -o jsonl</code>, 그리고 3.1절 파서 재사용.</li></ol>
+<hr>
+<h2 id="13-용어-사전">13. 용어 사전<a class="anchor" href="#13-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>speculative decoding</td><td>추측 디코딩</td><td>draft가 추측하고 target이 한 번에 검증, 출력 분포는 target과 같음</td></tr><tr><td>draft model</td><td>초안 모델</td><td>싸게 다음 token들을 추측하는 작은 모델</td></tr><tr><td>target model</td><td>목표 모델</td><td>최종 출력 분포를 정하는 큰 모델</td></tr><tr><td>γ (draft length)</td><td>추측 길이</td><td>한 사이클에 추측하는 token 수, llama.cpp <code>--spec-draft-n-max</code></td></tr><tr><td>acceptance rate (α)</td><td>수락률</td><td>추측한 token 중 수락된 비율</td></tr><tr><td>τ (tokens per step)</td><td>사이클당 token</td><td>target forward 1회당 얻는 평균 token 수</td></tr><tr><td>c</td><td>draft 상대 비용</td><td>draft 1 step 시간 ÷ target 1 step 시간</td></tr><tr><td>rejection sampling</td><td>기각 샘플링</td><td>min(1, p/q)로 수락, 거절 시 (p − q)⁺에서 재샘플 — 분포 보존</td></tr><tr><td>prompt lookup</td><td>프롬프트 참조 디코딩</td><td>프롬프트·출력의 n-gram 매치로 draft를 만듦</td></tr><tr><td>n-gram</td><td>n-그램</td><td>연속한 n개 token</td></tr><tr><td>Medusa</td><td>메두사</td><td>target에 여러 개의 미래 예측 head를 붙이는 방식</td></tr><tr><td>EAGLE</td><td>이글</td><td>target의 hidden feature로 1-layer draft를 돌리는 방식</td></tr><tr><td>lookahead decoding</td><td>미리보기 디코딩</td><td>Jacobi 반복으로 n-gram 후보를 만들어 검증</td></tr><tr><td>MTP</td><td>다중 token 예측</td><td>학습 때부터 다음 여러 token을 예측하는 head</td></tr><tr><td>self-speculative</td><td>자기 추측</td><td>target의 얕은 층(early exit)을 draft로 사용 (LayerSkip)</td></tr><tr><td>tree attention</td><td>트리 attention</td><td>여러 후보 경로를 mask로 한 번에 검증</td></tr><tr><td>continuous batching</td><td>연속 배칭</td><td>step마다 끝난 요청을 빼고 새 요청을 넣는 서버 스케줄링</td></tr><tr><td>KV rollback</td><td>KV 되감기</td><td>거절된 위치의 KV를 길이 포인터로 무효화</td></tr><tr><td>mat-vec / GEMM 경로</td><td>커널 경로</td><td>행 수(M)에 따라 바뀌는 행렬곱 구현, 소배치 성능을 좌우</td></tr></tbody></table></div>
+<hr>
+<h2 id="14-요약-체크리스트">14. 요약 &amp; 체크리스트<a class="anchor" href="#14-요약-체크리스트" aria-label="link">#</a></h2>
+<p>speculative decoding은 "가중치 한 번 읽고 token 여러 개"를 노리는 정확한(lossless) 가속이다. 이득은 τ × T_t(1) ÷ (γ·T_d + T_t(γ+1))로 정해지고, 이 Mac의 SmolLM2 135M → 360M 실측에서는 draft 비용 c가 0.50~0.63(바이트 비 0.38보다 큼), 검증 비용이 Metal에서 5 token에 ×3.1이라 수락률 80~93%에도 대부분 ×1 미만이었다(최선은 CPU ×1.08 — 퇴화한 korean 출력 제외 — , Metal ×0.88). draft 비용이 0인 prompt lookup은 요약 과제에서 ×1.55~1.77, 맞지 않는 과제에서도 ×0.9~1.0으로 손해가 작았다. batching은 서버에서 총 처리량을 ×3~5로 올리지만 기기는 batch 1이다. 웨어러블에서는 양자화·작은 모델·prompt lookup·prefix 재사용이 먼저이고, 독립 draft 모델은 c와 T(k)를 측정한 뒤에만 고려한다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" > decode가 왜 memory-bound인지와 가속의 네 갈래를 그림 없이 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > τ, c, T(k)를 정의하고 τ × T_t(1) ÷ (γ·T_d + T_t(γ+1))로 배수를 손으로 계산할 수 있다</label></li><li class="task"><label><input type="checkbox" > greedy 수락과 rejection sampling이 왜 출력 분포를 바꾸지 않는지 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > llama-server로 draft 방식과 ngram 방식을 켜고 <code>draft_n</code>, <code>draft_n_accepted</code>로 수락률을 잴 수 있다</label></li><li class="task"><label><input type="checkbox" > 바이트 비로 계산한 c와 실측 c가 다른 이유(층별 고정 비용)를 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > k-token 검증의 arithmetic intensity를 k = 1, 4, 8에 대해 손으로 계산할 수 있다</label></li><li class="task"><label><input type="checkbox" > Metal의 γ = 4가 γ = 8보다 느린 이유를 커널 경계로 설명할 수 있다</label></li><li class="task"><label><input type="checkbox" > prompt lookup이 이득인 과제와 퇴화 출력의 함정을 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > 서버 continuous batching과 기기 batch 1의 처리량·지연 차이를 실측 숫자로 말할 수 있다</label></li><li class="task"><label><input type="checkbox" > 에너지 손익분기 τ &gt; 1 + γ·W_d/W_t를 유도하고 적용할 수 있다</label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>Leviathan, Kalman, Matias, "Fast Inference from Transformers via Speculative Decoding", ICML 2023 — https://arxiv.org/abs/2211.17192</li><li>Chen et al., "Accelerating Large Language Model Decoding with Speculative Sampling", 2023 — https://arxiv.org/abs/2302.01318</li><li>Cai et al., "Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads", ICML 2024 — https://arxiv.org/abs/2401.10774</li><li>Li et al., "EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty", ICML 2024 — https://arxiv.org/abs/2401.15077</li><li>Fu et al., "Break the Sequential Dependency of LLM Inference Using Lookahead Decoding", ICML 2024 — https://arxiv.org/abs/2402.02057</li><li>Gloeckle et al., "Better &amp; Faster Large Language Models via Multi-token Prediction", ICML 2024 — https://arxiv.org/abs/2404.19737</li><li>Elhoushi et al., "LayerSkip: Enabling Early Exit Inference and Self-Speculative Decoding", ACL 2024 — https://arxiv.org/abs/2404.16710</li><li>Zhang et al., "Draft &amp; Verify: Lossless Large Language Model Acceleration via Self-Speculative Decoding", 2023 — https://arxiv.org/abs/2309.08168</li><li>Saxena, "Prompt Lookup Decoding", 2023 — https://github.com/apoorvumang/prompt-lookup-decoding</li><li>Yu et al., "Orca: A Distributed Serving System for Transformer-Based Generative Models", OSDI 2022</li><li>Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention", SOSP 2023 — https://arxiv.org/abs/2309.06180</li><li>llama.cpp 저장소의 <code>docs/speculative.md</code>, <code>tools/server/README.md</code>, <code>common/speculative.cpp</code>, <code>common/sampling.cpp</code>, <code>ggml/src/ggml-metal/ggml-metal-common.cpp</code> (이 노트의 빌드 <code>f7b384c</code> 기준) — https://github.com/ggml-org/llama.cpp</li><li>이 노트 세트: D5 (공식, batching·speculative roofline), D3 (roofline), D7 (에너지 숫자), C3 (양자화), B9 (early exit, MoE), E5 (NPU), F3 (llama.cpp)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-03_L5_on_device_memory_rag.html"><span class="dir">← 이전</span><span class="nm">L5. 온디바이스 메모리와 RAG — 개인 기억을 기기 안에 저장하고 찾아 쓰기</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l2"><a href="#1-speculative-decoding-5줄-복습과-정확성">1. speculative decoding — 5줄 복습과 정확성</a></li><li class="l3"><a href="#1-1-다섯-줄-요약-유도는-d5-6-2절">1.1 다섯 줄 요약 (유도는 D5 6.2절)</a></li><li class="l3"><a href="#1-2-왜-품질-손해가-없나-rejection-sampling">1.2 왜 품질 손해가 없나 — rejection sampling</a></li><li class="l3"><a href="#1-3-c로-보는-greedy-검증-루프">1.3 C로 보는 greedy 검증 루프</a></li><li class="l2"><a href="#2-실험-준비-모델-짝-도구-측정-방법">2. 실험 준비 — 모델 짝, 도구, 측정 방법</a></li><li class="l3"><a href="#2-1-draft-target-짝-tokenizer가-같아야-한다">2.1 draft–target 짝: tokenizer가 같아야 한다</a></li><li class="l3"><a href="#2-2-llama-cpp의-도구와-플래그">2.2 llama.cpp의 도구와 플래그</a></li><li class="l3"><a href="#2-3-측정-방법-부하가-있는-기계에서-공정하게-재기">2.3 측정 방법 — 부하가 있는 기계에서 공정하게 재기</a></li><li class="l2"><a href="#3-재료-측정-draft-비용-c와-검증-비용-t-k">3. 재료 측정 — draft 비용 c와 검증 비용 T(k)</a></li><li class="l3"><a href="#3-1-llama-bench로-k-token-forward-시간-재기">3.1 llama-bench로 k-token forward 시간 재기</a></li><li class="l3"><a href="#3-2-검증-비용-t-k-검증은-공짜-라는-가정이-깨지는-곳">3.2 검증 비용 T(k) — "검증은 공짜"라는 가정이 깨지는 곳</a></li><li class="l3"><a href="#3-3-k개-검증은-arithmetic-intensity를-얼마나-올리나-d3-e5-연결">3.3 k개 검증은 arithmetic intensity를 얼마나 올리나 (D3, E5 연결)</a></li><li class="l2"><a href="#4-실측-draft-모델-speculative-decoding">4. 실측 — draft 모델 speculative decoding</a></li><li class="l3"><a href="#4-1-먼저-작은-a-b-하나">4.1 먼저 작은 A/B 하나</a></li><li class="l3"><a href="#4-2-전체-결과-γ-sweep-과제-5종-백엔드-2종">4.2 전체 결과 — γ sweep × 과제 5종 × 백엔드 2종</a></li><li class="l3"><a href="#4-3-왜-안-빨라지나-d5-식에-측정값-넣기">4.3 왜 안 빨라지나 — D5 식에 측정값 넣기</a></li><li class="l3"><a href="#4-4-greedy-vs-sampling-수락률은-temperature에-민감하다">4.4 greedy vs sampling — 수락률은 temperature에 민감하다</a></li><li class="l3"><a href="#4-5-출력이-똑같다-를-확인하기-그리고-부동소수점의-함정">4.5 "출력이 똑같다"를 확인하기 — 그리고 부동소수점의 함정</a></li><li class="l3"><a href="#4-6-언제-이길까-target을-무겁게-draft를-가볍게">4.6 언제 이길까 — target을 무겁게, draft를 가볍게</a></li><li class="l2"><a href="#5-prompt-lookup-draft-모델-없이-프롬프트에서-베끼기">5. prompt lookup — draft 모델 없이 프롬프트에서 베끼기</a></li><li class="l3"><a href="#5-1-아이디어">5.1 아이디어</a></li><li class="l3"><a href="#5-2-오프라인-시뮬레이션-실제-출력에-n-gram-매칭을-돌려-보기">5.2 오프라인 시뮬레이션 — 실제 출력에 n-gram 매칭을 돌려 보기</a></li><li class="l3"><a href="#5-3-llama-cpp-ngram-simple로-실측">5.3 llama.cpp ngram-simple로 실측</a></li><li class="l3"><a href="#5-4-어떤-과제가-이득을-보나-그리고-퇴화-출력의-함정">5.4 어떤 과제가 이득을 보나 — 그리고 퇴화 출력의 함정</a></li><li class="l2"><a href="#6-다른-방법들-draft를-어디서-얻나">6. 다른 방법들 — draft를 어디서 얻나</a></li><li class="l2"><a href="#7-batching-폰과-서버는-왜-다른가">7. batching — 폰과 서버는 왜 다른가</a></li><li class="l3"><a href="#7-1-continuous-batching이란">7.1 continuous batching이란</a></li><li class="l3"><a href="#7-2-실측-n개-동시-요청">7.2 실측 — N개 동시 요청</a></li><li class="l3"><a href="#7-3-폰-웨어러블이-서버-같은-처리량을-못-얻는-이유">7.3 폰·웨어러블이 서버 같은 처리량을 못 얻는 이유</a></li><li class="l2"><a href="#8-에너지-더-계산하고-덜-읽기">8. 에너지 — 더 계산하고 덜 읽기</a></li><li class="l2"><a href="#9-임베디드-관점에서-다시-보기">9. 임베디드 관점에서 다시 보기</a></li><li class="l3"><a href="#9-1-웨어러블-npu에서-현실적인-것과-아닌-것-추정-포함">9.1 웨어러블 NPU에서 현실적인 것과 아닌 것 (추정 포함)</a></li><li class="l3"><a href="#9-2-c로-보는-kv-되감기-지우지-말고-포인터만-되돌린다">9.2 C로 보는 KV 되감기 — "지우지 말고 포인터만 되돌린다"</a></li><li class="l3"><a href="#9-3-bring-up-체크리스트-speculative-켰더니-빨라졌다-느려졌다-를-받았을-때">9.3 bring-up 체크리스트 — "speculative 켰더니 빨라졌다/느려졌다"를 받았을 때</a></li><li class="l2"><a href="#10-흔한-실수와-증상">10. 흔한 실수와 증상</a></li><li class="l2"><a href="#11-면접에서-이렇게-말한다">11. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#12-직접-해보기">12. 직접 해보기</a></li><li class="l2"><a href="#13-용어-사전">13. 용어 사전</a></li><li class="l2"><a href="#14-요약-체크리스트">14. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

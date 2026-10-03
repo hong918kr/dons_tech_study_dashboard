@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D4 · 10-06 (화) 드릴 — ring buffer · 스레드 · 상태 머신 · retry / C ring · atomics · 타이머</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="drills/2026-10-03_D4_ring_threads">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">매일 타이핑 드릴 · D4 · 10-06 (화) 드릴 — ring buffer · 스레드 · 상태 머신 · retry / C ring · atomics · 타이머</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">매일 타이핑 드릴 · Daily Drills</div>
+      <h1>⌨️ D4 · 10-06 (화) 드릴 — ring buffer · 스레드 · 상태 머신 · retry / C ring · atomics · 타이머</h1>
+      <div class="meta"><span>19분 읽기</span><span>530줄</span><span>23개 절</span></div>
+    </div>
+    <blockquote><p>매일 아침 20분 + 저녁 20분. <strong>정답을 보지 않고</strong> 빈 파일에 친다. 브라우저: <a href="../drills.html">드릴 트레이너</a> (Day 4 탭) · 에디터: <code>python3 drills/drill.py new 4</code> → <code>python3 drills/drill.py check 4</code>. 틀린 항목은 다음 날 다시.</p></blockquote>
+<h2 id="python-10개">Python 10개<a class="anchor" href="#python-10개" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>ID</th><th>주제</th><th>칠 것</th></tr></thead><tbody><tr><td>P4-01</td><td>RingBuffer 핵심 (drop-new)</td><td>RingBuffer(capacity): push(x) → bool (가득 차면 False), pop() (비면 IndexError), len(). head + count 방식.</td></tr><tr><td>P4-02</td><td>deque(maxlen)</td><td>스트림의 마지막 n개만 리스트로 돌려주는 last_n(stream, n). deque 사용.</td></tr><tr><td>P4-03</td><td>Lock</td><td>여러 스레드에서 안전한 SafeCounter: increment(), value 속성. with self._lock.</td></tr><tr><td>P4-04</td><td>queue.Queue producer/consumer</td><td>producer 스레드가 items를 넣고 끝에 None(sentinel), consumer가 모아서 돌려주는 run_pipeline(items).</td></tr><tr><td>P4-05</td><td>Condition + while wait</td><td>한 칸짜리 Mailbox: put(x), get(timeout) — 비어 있으면 기다리고, 시간 초과면 TimeoutError.</td></tr><tr><td>P4-06</td><td>dict 상태 머신</td><td>TRANSITIONS {("IDLE","arm"):"ARMED", ("ARMED","takeoff"):"FLYING", ("ARMED","disarm"):"IDLE", ("FLYING","land"):"ARMED"}. step(state, event), 없는 전이는 ValueError.</td></tr><tr><td>P4-07</td><td>Enum</td><td>State(Enum) IDLE=0, ARMED=1, FLYING=2. 이름 문자열로 찾는 from_name(s) (대소문자 무시).</td></tr><tr><td>P4-08</td><td>deadline polling (monotonic)</td><td>pred()가 True가 될 때까지 interval마다 확인, timeout 넘으면 False. wait_until(pred, timeout, interval=0.01).</td></tr><tr><td>P4-09</td><td>retry 데코레이터</td><td>예외가 나면 최대 times번까지 다시 부르는 데코레이터 retry(times). functools.wraps 사용.</td></tr><tr><td>P4-10</td><td>generator로 구분자 프레이밍</td><td>바이트 chunk 이터러블에서 0x00 구분자로 끝나는 프레임을 yield 하는 frames(chunks). 마지막 미완성은 버린다.</td></tr></tbody></table></div>
+<h3 id="p4-01-ringbuffer-핵심-drop-new">P4-01 · RingBuffer 핵심 (drop-new)<a class="anchor" href="#p4-01-ringbuffer-핵심-drop-new" aria-label="link">#</a></h3>
+<p>RingBuffer(capacity): push(x) → bool (가득 차면 False), pop() (비면 IndexError), len(). head + count 방식.</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">python</span><pre><code>class RingBuffer:
+    def __init__(self, capacity):
+        self._buf = [None] * capacity
+        self._cap = capacity
+        self._head = 0
+        self._count = 0
+
+    def __len__(self):
+        return self._count
+
+    def push(self, item):
+        if self._count == self._cap:
+            return False
+        self._buf[self._head] = item
+        self._head = (self._head + 1) % self._cap
+        self._count += 1
+        return True
+
+    def pop(self):
+        if self._count == 0:
+            raise IndexError("empty")
+        tail = (self._head - self._count) % self._cap
+        item, self._buf[tail] = self._buf[tail], None
+        self._count -= 1
+        return item</code></pre></figure>
+<h3 id="p4-02-deque-maxlen">P4-02 · deque(maxlen)<a class="anchor" href="#p4-02-deque-maxlen" aria-label="link">#</a></h3>
+<p>스트림의 마지막 n개만 리스트로 돌려주는 last_n(stream, n). deque 사용.</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">python</span><pre><code>from collections import deque
+
+
+def last_n(stream, n):
+    return list(deque(stream, maxlen=n))</code></pre></figure>
+<h3 id="p4-03-lock">P4-03 · Lock<a class="anchor" href="#p4-03-lock" aria-label="link">#</a></h3>
+<p>여러 스레드에서 안전한 SafeCounter: increment(), value 속성. with self._lock.</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">python</span><pre><code>import threading
+
+
+class SafeCounter:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.value = 0
+
+    def increment(self):
+        with self._lock:
+            self.value += 1</code></pre></figure>
+<h3 id="p4-04-queue-queue-producer-consumer">P4-04 · queue.Queue producer/consumer<a class="anchor" href="#p4-04-queue-queue-producer-consumer" aria-label="link">#</a></h3>
+<p>producer 스레드가 items를 넣고 끝에 None(sentinel), consumer가 모아서 돌려주는 run_pipeline(items).</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">python</span><pre><code>import queue
+import threading
+
+
+def run_pipeline(items):
+    q = queue.Queue(maxsize=4)
+    out = []
+
+    def producer():
+        for x in items:
+            q.put(x)
+        q.put(None)
+
+    t = threading.Thread(target=producer)
+    t.start()
+    while True:
+        x = q.get(timeout=2)
+        if x is None:
+            break
+        out.append(x)
+    t.join()
+    return out</code></pre></figure>
+<h3 id="p4-05-condition-while-wait">P4-05 · Condition + while wait<a class="anchor" href="#p4-05-condition-while-wait" aria-label="link">#</a></h3>
+<p>한 칸짜리 Mailbox: put(x), get(timeout) — 비어 있으면 기다리고, 시간 초과면 TimeoutError.</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">python</span><pre><code>import threading
+
+
+class Mailbox:
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._item = None
+        self._full = False
+
+    def put(self, x):
+        with self._cond:
+            self._item, self._full = x, True
+            self._cond.notify()
+
+    def get(self, timeout):
+        with self._cond:
+            if not self._cond.wait_for(lambda: self._full, timeout):
+                raise TimeoutError("mailbox empty")
+            self._full = False
+            return self._item</code></pre></figure>
+<h3 id="p4-06-dict-상태-머신">P4-06 · dict 상태 머신<a class="anchor" href="#p4-06-dict-상태-머신" aria-label="link">#</a></h3>
+<p>TRANSITIONS {("IDLE","arm"):"ARMED", ("ARMED","takeoff"):"FLYING", ("ARMED","disarm"):"IDLE", ("FLYING","land"):"ARMED"}. step(state, event), 없는 전이는 ValueError.</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">python</span><pre><code>TRANSITIONS = {
+    ("IDLE", "arm"): "ARMED",
+    ("ARMED", "takeoff"): "FLYING",
+    ("ARMED", "disarm"): "IDLE",
+    ("FLYING", "land"): "ARMED",
+}
+
+
+def step(state, event):
+    try:
+        return TRANSITIONS[(state, event)]
+    except KeyError:
+        raise ValueError(f"{event} not allowed in {state}") from None</code></pre></figure>
+<h3 id="p4-07-enum">P4-07 · Enum<a class="anchor" href="#p4-07-enum" aria-label="link">#</a></h3>
+<p>State(Enum) IDLE=0, ARMED=1, FLYING=2. 이름 문자열로 찾는 from_name(s) (대소문자 무시).</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">python</span><pre><code>from enum import Enum
+
+
+class State(Enum):
+    IDLE = 0
+    ARMED = 1
+    FLYING = 2
+
+
+def from_name(s):
+    return State[s.upper()]</code></pre></figure>
+<h3 id="p4-08-deadline-polling-monotonic">P4-08 · deadline polling (monotonic)<a class="anchor" href="#p4-08-deadline-polling-monotonic" aria-label="link">#</a></h3>
+<p>pred()가 True가 될 때까지 interval마다 확인, timeout 넘으면 False. wait_until(pred, timeout, interval=0.01).</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">python</span><pre><code>import time
+
+
+def wait_until(pred, timeout, interval=0.01):
+    deadline = time.monotonic() + timeout
+    while True:
+        if pred():
+            return True
+        if time.monotonic() &gt;= deadline:
+            return False
+        time.sleep(interval)</code></pre></figure>
+<h3 id="p4-09-retry-데코레이터">P4-09 · retry 데코레이터<a class="anchor" href="#p4-09-retry-데코레이터" aria-label="link">#</a></h3>
+<p>예외가 나면 최대 times번까지 다시 부르는 데코레이터 retry(times). functools.wraps 사용.</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">python</span><pre><code>import functools
+
+
+def retry(times):
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            last = None
+            for _ in range(times):
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e:
+                    last = e
+            raise last
+        return wrapper
+    return deco</code></pre></figure>
+<h3 id="p4-10-generator로-구분자-프레이밍">P4-10 · generator로 구분자 프레이밍<a class="anchor" href="#p4-10-generator로-구분자-프레이밍" aria-label="link">#</a></h3>
+<p>바이트 chunk 이터러블에서 0x00 구분자로 끝나는 프레임을 yield 하는 frames(chunks). 마지막 미완성은 버린다.</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">python</span><pre><code>def frames(chunks):
+    buf = bytearray()
+    for chunk in chunks:
+        buf += chunk
+        while True:
+            i = buf.find(0)
+            if i &lt; 0:
+                break
+            yield bytes(buf[:i])
+            del buf[:i + 1]</code></pre></figure>
+<h2 id="c-10개">C 10개<a class="anchor" href="#c-10개" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>ID</th><th>주제</th><th>칠 것</th></tr></thead><tbody><tr><td>C4-01</td><td>ring buffer push / pop</td><td>RB_SIZE 16(2의 거듭제곱), free-running head/tail, rb_push / rb_pop (drop-new).</td></tr><tr><td>C4-02</td><td>ring count / space / empty / full</td><td>rb_t(위와 같은 모양, given)에 대해 rb_count, rb_space, rb_empty, rb_full.</td></tr><tr><td>C4-03</td><td>SPSC push (C11 atomics)</td><td>ISR producer용 spsc_push: tail은 acquire로 읽고, 데이터를 쓴 뒤 head를 release로 publish.</td></tr><tr><td>C4-04</td><td>ISR 플래그 패턴</td><td>ISR이 세우는 volatile 플래그 g_rx_ready와 main loop에서 읽고 내리는 take_rx_ready(void). (단일 코어, 플래그 하나)</td></tr><tr><td>C4-05</td><td>switch 상태 머신</td><td>state_t {IDLE, ARMED, FLYING}, event_t {EV_ARM, EV_DISARM, EV_TAKEOFF, EV_LAND}. 허용 안 되는 이벤트는 상태 유지. sm_step(s, e).</td></tr><tr><td>C4-06</td><td>테이블 기반 상태 머신</td><td>transition_t {from, ev, to} 배열을 순회하는 sm_lookup(s, e). 없으면 s 그대로. (state_t/event_t는 given)</td></tr><tr><td>C4-07</td><td>디바운스</td><td>debounce_t {stable, count}. raw가 stable과 다른 값으로 N(=3)번 연속이면 stable을 바꾼다. debounce(d, raw) → stable.</td></tr><tr><td>C4-08</td><td>이동 평균 (링 + 합)</td><td>avg_t {buf[8], idx, n, sum}. 새 값을 넣고 지금까지(최대 8개)의 평균을 돌려주는 avg_push(a, v). 합은 O(1)로 갱신.</td></tr><tr><td>C4-09</td><td>tick wrap 안전한 timeout</td><td>32비트 tick이 wrap 해도 맞는 timed_out(now, start, timeout).</td></tr><tr><td>C4-10</td><td>bulk write (memcpy 두 번)</td><td>rb_t(given, RB_SIZE 16)에 최대 len바이트를 wrap 지점에서 두 번 memcpy로 쓰고 쓴 개수를 돌려주는 rb_write(rb, src, len).</td></tr></tbody></table></div>
+<h3 id="c4-01-ring-buffer-push-pop">C4-01 · ring buffer push / pop<a class="anchor" href="#c4-01-ring-buffer-push-pop" aria-label="link">#</a></h3>
+<p>RB_SIZE 16(2의 거듭제곱), free-running head/tail, rb_push / rb_pop (drop-new).</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define RB_SIZE 16u
+#define RB_MASK (RB_SIZE - 1u)
+
+typedef struct {
+    uint8_t  buf[RB_SIZE];
+    uint32_t head, tail;
+} rb_t;
+
+bool rb_push(rb_t *rb, uint8_t b)
+{
+    if (rb-&gt;head - rb-&gt;tail == RB_SIZE)
+        return false;
+    rb-&gt;buf[rb-&gt;head &amp; RB_MASK] = b;
+    rb-&gt;head++;
+    return true;
+}
+
+bool rb_pop(rb_t *rb, uint8_t *out)
+{
+    if (rb-&gt;head == rb-&gt;tail)
+        return false;
+    *out = rb-&gt;buf[rb-&gt;tail &amp; RB_MASK];
+    rb-&gt;tail++;
+    return true;
+}</code></pre></figure>
+<h3 id="c4-02-ring-count-space-empty-full">C4-02 · ring count / space / empty / full<a class="anchor" href="#c4-02-ring-count-space-empty-full" aria-label="link">#</a></h3>
+<p>rb_t(위와 같은 모양, given)에 대해 rb_count, rb_space, rb_empty, rb_full.</p>
+<p>주어진 코드 (치지 않음):</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define RB_SIZE 16u
+typedef struct { uint8_t buf[RB_SIZE]; uint32_t head, tail; } rb_t;</code></pre></figure>
+<p>정답:</p>
+<figure class="code"><span class="lang">c</span><pre><code>static inline uint32_t rb_count(const rb_t *rb) { return rb-&gt;head - rb-&gt;tail; }
+static inline uint32_t rb_space(const rb_t *rb) { return RB_SIZE - rb_count(rb); }
+static inline bool rb_empty(const rb_t *rb)     { return rb_count(rb) == 0; }
+static inline bool rb_full(const rb_t *rb)      { return rb_count(rb) == RB_SIZE; }</code></pre></figure>
+<h3 id="c4-03-spsc-push-c11-atomics">C4-03 · SPSC push (C11 atomics)<a class="anchor" href="#c4-03-spsc-push-c11-atomics" aria-label="link">#</a></h3>
+<p>ISR producer용 spsc_push: tail은 acquire로 읽고, 데이터를 쓴 뒤 head를 release로 publish.</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define Q_SIZE 8u
+
+typedef struct {
+    uint8_t buf[Q_SIZE];
+    _Atomic uint32_t head, tail;
+} spsc_t;
+
+bool spsc_push(spsc_t *q, uint8_t b)
+{
+    uint32_t head = atomic_load_explicit(&amp;q-&gt;head, memory_order_relaxed);
+    uint32_t tail = atomic_load_explicit(&amp;q-&gt;tail, memory_order_acquire);
+    if (head - tail == Q_SIZE)
+        return false;
+    q-&gt;buf[head &amp; (Q_SIZE - 1u)] = b;
+    atomic_store_explicit(&amp;q-&gt;head, head + 1, memory_order_release);
+    return true;
+}</code></pre></figure>
+<h3 id="c4-04-isr-플래그-패턴">C4-04 · ISR 플래그 패턴<a class="anchor" href="#c4-04-isr-플래그-패턴" aria-label="link">#</a></h3>
+<p>ISR이 세우는 volatile 플래그 g_rx_ready와 main loop에서 읽고 내리는 take_rx_ready(void). (단일 코어, 플래그 하나)</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">c</span><pre><code>static volatile bool g_rx_ready;
+
+void uart_rx_isr(void)
+{
+    g_rx_ready = true;
+}
+
+bool take_rx_ready(void)
+{
+    if (!g_rx_ready)
+        return false;
+    g_rx_ready = false;
+    return true;
+}</code></pre></figure>
+<h3 id="c4-05-switch-상태-머신">C4-05 · switch 상태 머신<a class="anchor" href="#c4-05-switch-상태-머신" aria-label="link">#</a></h3>
+<p>state_t {IDLE, ARMED, FLYING}, event_t {EV_ARM, EV_DISARM, EV_TAKEOFF, EV_LAND}. 허용 안 되는 이벤트는 상태 유지. sm_step(s, e).</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">c</span><pre><code>typedef enum { IDLE, ARMED, FLYING } state_t;
+typedef enum { EV_ARM, EV_DISARM, EV_TAKEOFF, EV_LAND } event_t;
+
+state_t sm_step(state_t s, event_t e)
+{
+    switch (s) {
+    case IDLE:   return e == EV_ARM ? ARMED : s;
+    case ARMED:  return e == EV_TAKEOFF ? FLYING : e == EV_DISARM ? IDLE : s;
+    case FLYING: return e == EV_LAND ? ARMED : s;
+    }
+    return s;
+}</code></pre></figure>
+<h3 id="c4-06-테이블-기반-상태-머신">C4-06 · 테이블 기반 상태 머신<a class="anchor" href="#c4-06-테이블-기반-상태-머신" aria-label="link">#</a></h3>
+<p>transition_t {from, ev, to} 배열을 순회하는 sm_lookup(s, e). 없으면 s 그대로. (state_t/event_t는 given)</p>
+<p>주어진 코드 (치지 않음):</p>
+<figure class="code"><span class="lang">c</span><pre><code>typedef enum { IDLE, ARMED, FLYING } state_t;
+typedef enum { EV_ARM, EV_DISARM, EV_TAKEOFF, EV_LAND } event_t;</code></pre></figure>
+<p>정답:</p>
+<figure class="code"><span class="lang">c</span><pre><code>typedef struct {
+    state_t from;
+    event_t ev;
+    state_t to;
+} transition_t;
+
+static const transition_t TABLE[] = {
+    {IDLE, EV_ARM, ARMED},
+    {ARMED, EV_TAKEOFF, FLYING},
+    {ARMED, EV_DISARM, IDLE},
+    {FLYING, EV_LAND, ARMED},
+};
+
+state_t sm_lookup(state_t s, event_t e)
+{
+    for (size_t i = 0; i &lt; sizeof TABLE / sizeof TABLE[0]; i++)
+        if (TABLE[i].from == s &amp;&amp; TABLE[i].ev == e)
+            return TABLE[i].to;
+    return s;
+}</code></pre></figure>
+<h3 id="c4-07-디바운스">C4-07 · 디바운스<a class="anchor" href="#c4-07-디바운스" aria-label="link">#</a></h3>
+<p>debounce_t {stable, count}. raw가 stable과 다른 값으로 N(=3)번 연속이면 stable을 바꾼다. debounce(d, raw) → stable.</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define DEBOUNCE_N 3
+
+typedef struct {
+    bool    stable;
+    uint8_t count;
+} debounce_t;
+
+bool debounce(debounce_t *d, bool raw)
+{
+    if (raw == d-&gt;stable) {
+        d-&gt;count = 0;
+    } else if (++d-&gt;count &gt;= DEBOUNCE_N) {
+        d-&gt;stable = raw;
+        d-&gt;count = 0;
+    }
+    return d-&gt;stable;
+}</code></pre></figure>
+<h3 id="c4-08-이동-평균-링-합">C4-08 · 이동 평균 (링 + 합)<a class="anchor" href="#c4-08-이동-평균-링-합" aria-label="link">#</a></h3>
+<p>avg_t {buf[8], idx, n, sum}. 새 값을 넣고 지금까지(최대 8개)의 평균을 돌려주는 avg_push(a, v). 합은 O(1)로 갱신.</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define AVG_N 8
+
+typedef struct {
+    int32_t buf[AVG_N];
+    uint8_t idx, n;
+    int32_t sum;
+} avg_t;
+
+int32_t avg_push(avg_t *a, int32_t v)
+{
+    if (a-&gt;n == AVG_N)
+        a-&gt;sum -= a-&gt;buf[a-&gt;idx];
+    else
+        a-&gt;n++;
+    a-&gt;buf[a-&gt;idx] = v;
+    a-&gt;sum += v;
+    a-&gt;idx = (uint8_t)((a-&gt;idx + 1) % AVG_N);
+    return a-&gt;sum / a-&gt;n;
+}</code></pre></figure>
+<h3 id="c4-09-tick-wrap-안전한-timeout">C4-09 · tick wrap 안전한 timeout<a class="anchor" href="#c4-09-tick-wrap-안전한-timeout" aria-label="link">#</a></h3>
+<p>32비트 tick이 wrap 해도 맞는 timed_out(now, start, timeout).</p>
+<p>정답:</p>
+<figure class="code"><span class="lang">c</span><pre><code>bool timed_out(uint32_t now, uint32_t start, uint32_t timeout)
+{
+    return (uint32_t)(now - start) &gt;= timeout;
+}</code></pre></figure>
+<h3 id="c4-10-bulk-write-memcpy-두-번">C4-10 · bulk write (memcpy 두 번)<a class="anchor" href="#c4-10-bulk-write-memcpy-두-번" aria-label="link">#</a></h3>
+<p>rb_t(given, RB_SIZE 16)에 최대 len바이트를 wrap 지점에서 두 번 memcpy로 쓰고 쓴 개수를 돌려주는 rb_write(rb, src, len).</p>
+<p>주어진 코드 (치지 않음):</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define RB_SIZE 16u
+#define RB_MASK (RB_SIZE - 1u)
+typedef struct { uint8_t buf[RB_SIZE]; uint32_t head, tail; } rb_t;</code></pre></figure>
+<p>정답:</p>
+<figure class="code"><span class="lang">c</span><pre><code>size_t rb_write(rb_t *rb, const uint8_t *src, size_t len)
+{
+    uint32_t space = RB_SIZE - (rb-&gt;head - rb-&gt;tail);
+    uint32_t n = len &lt; space ? (uint32_t)len : space;
+    uint32_t idx = rb-&gt;head &amp; RB_MASK;
+    uint32_t first = RB_SIZE - idx;
+    if (first &gt; n)
+        first = n;
+    memcpy(&amp;rb-&gt;buf[idx], src, first);
+    memcpy(&amp;rb-&gt;buf[0], src + first, n - first);
+    rb-&gt;head += n;
+    return n;
+}</code></pre></figure>
+<h2 id="체크">체크<a class="anchor" href="#체크" aria-label="link">#</a></h2>
+<ul class="tasks"><li class="task"><label><input type="checkbox" > Python 10개를 정답 안 보고 → <code>python3 drills/drill.py check 4</code> 에서 ✓ 10</label></li><li class="task"><label><input type="checkbox" > C 10개를 정답 안 보고 → ✓ 10</label></li><li class="task"><label><input type="checkbox" > 틀린 것 ID를 적어 두고 다음 날 아침 첫 5분에 다시</label></li></ul>
+    <div class="nav"><a class="prev" href="2026-10-03_D3_bytes_bits.html"><span class="dir">← 이전</span><span class="nm">D3 · 10-05 (월) 드릴 — bytes · struct · 비트 필드 · CRC / C 엔디언 · 레지스터 · 파싱</span></a><a class="next" href="2026-10-03_D5_pytest_ctests.html"><span class="dir">다음 →</span><span class="nm">D5 · 10-07 (수) 드릴 — pytest · fixture · mock / C 단위 테스트 · fake · DI</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#python-10개">Python 10개</a></li><li class="l3"><a href="#p4-01-ringbuffer-핵심-drop-new">P4-01 · RingBuffer 핵심 (drop-new)</a></li><li class="l3"><a href="#p4-02-deque-maxlen">P4-02 · deque(maxlen)</a></li><li class="l3"><a href="#p4-03-lock">P4-03 · Lock</a></li><li class="l3"><a href="#p4-04-queue-queue-producer-consumer">P4-04 · queue.Queue producer/consumer</a></li><li class="l3"><a href="#p4-05-condition-while-wait">P4-05 · Condition + while wait</a></li><li class="l3"><a href="#p4-06-dict-상태-머신">P4-06 · dict 상태 머신</a></li><li class="l3"><a href="#p4-07-enum">P4-07 · Enum</a></li><li class="l3"><a href="#p4-08-deadline-polling-monotonic">P4-08 · deadline polling (monotonic)</a></li><li class="l3"><a href="#p4-09-retry-데코레이터">P4-09 · retry 데코레이터</a></li><li class="l3"><a href="#p4-10-generator로-구분자-프레이밍">P4-10 · generator로 구분자 프레이밍</a></li><li class="l2"><a href="#c-10개">C 10개</a></li><li class="l3"><a href="#c4-01-ring-buffer-push-pop">C4-01 · ring buffer push / pop</a></li><li class="l3"><a href="#c4-02-ring-count-space-empty-full">C4-02 · ring count / space / empty / full</a></li><li class="l3"><a href="#c4-03-spsc-push-c11-atomics">C4-03 · SPSC push (C11 atomics)</a></li><li class="l3"><a href="#c4-04-isr-플래그-패턴">C4-04 · ISR 플래그 패턴</a></li><li class="l3"><a href="#c4-05-switch-상태-머신">C4-05 · switch 상태 머신</a></li><li class="l3"><a href="#c4-06-테이블-기반-상태-머신">C4-06 · 테이블 기반 상태 머신</a></li><li class="l3"><a href="#c4-07-디바운스">C4-07 · 디바운스</a></li><li class="l3"><a href="#c4-08-이동-평균-링-합">C4-08 · 이동 평균 (링 + 합)</a></li><li class="l3"><a href="#c4-09-tick-wrap-안전한-timeout">C4-09 · tick wrap 안전한 timeout</a></li><li class="l3"><a href="#c4-10-bulk-write-memcpy-두-번">C4-10 · bulk write (memcpy 두 번)</a></li><li class="l2"><a href="#체크">체크</a></li></ol></aside>
+</div><script>
+const KEY='neros_tsp_notes_read_v1', TKEY='neros_tsp_notes_theme', CKEY='neros_tsp_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

@@ -1,7 +1,8 @@
 # Neros Technologies — Senior Firmware Engineer, Platform · Context
 
-> **최종 갱신**: 2026-10-01 · **상태**: 💻 Firmware Test Engineer HM 인터뷰 완료 · 결과 대기 (온사이트 가능성 높음)
-> ✅ **2026-10-01(목) HM Michael Honor (Firmware Test 리드) 인터뷰 완료** — 15분 늦게 시작해 실제 약 30분. 임베디드 퀴즈 위주(UART/I2C/SPI 차이, PCIe를 SW에서 어떻게 쓰나, 8b/10b, Git/PR/rebase) + 테스트 철학 2문항. **Python은 안 물어봄.** "결과 곧 알려 주겠다". 분위기 좋음 → §6
+> **최종 갱신**: 2026-10-03 · **상태**: 🧪 Technical screen 추가 확정 (2026-10-08 목 11am · 1시간 · 코딩) → 통과 시 온사이트
+> 🧪 **2026-10-02 리크루터 연락: Michael Honor 인터뷰 잘 봤음 → 온사이트 전에 technical screen 1세션 추가.** 2026-10-08(목) 11:00, 1시간, **코딩 위주** 예상. 주제: **pytest · ring buffer · Python/C 둘 다 가능 · system design**. 면접관 **Jon Kotowski** — 공개 검색상 Neros Full Stack Engineer [추정, Datanyze 단일 출처 + ZoomInfo 스니펫]. 준비: `technicalScreenPrep/index.html` → §6
+> ✅ **2026-10-01(목) HM Michael Honor (Firmware Test 리드) 인터뷰 완료 → 10-02 통과(다음 단계 진행)** — 15분 늦게 시작해 실제 약 30분. 임베디드 퀴즈 위주(UART/I2C/SPI 차이, PCIe를 SW에서 어떻게 쓰나, 8b/10b, Git/PR/rebase) + 테스트 철학 2문항. **Python은 안 물어봄.** ~~"결과 곧 알려 주겠다"~~ → 10-02 리크루터: 잘 봤음, technical screen 추가 → §6
 > 🏢 **온사이트 대비**: `onsitePrep/site/start.html` (Tour 30분 · 경력 발표 1시간 · 1:1 C/C++ · ring buffer · generic system design)
 > 📚 HM 콜 준비 자료(완료): `firmwareTestEngineerPrep/site/index.html`
 > 🔀 **2026-09-27: Talent Coordinator Jazmin Vu 메일 — "Firmware Test Engineer" 포지션으로 다음 단계(HM 30분 Microsoft Teams) 진행.** 가능 날짜 4개 이상 + 시간대를 링크로 제출 요청. 원래 트랙(Principal/Senior Embedded SWE)이 아니라 **테스트 포지션($145.5–204K)** 이라는 점이 핵심 → §8 참고
@@ -25,7 +26,8 @@
 - **인터뷰 포맷** [확인됨 2026-09-16]: ✅ 리크루터 콜 → **HM Adam Kibit 45분 기술** → 온사이트 (Tour 30분 · **경력 발표 1시간** · 1:1 기술 여러 개: C/C++, **ring buffer**, generic system design)
 - **✅ 2026-10-01 Michael Honor 인터뷰 결과 요약**: 퀴즈형 임베디드 질문 + "정의 안 된 것의 테스트 케이스", "done의 의미". FW 조직 **15명**(LinkedIn 12 → Adam 13 → Michael 15), Michael 밑 FW Test 2명, **테스트 펌웨어가 가장 급함 → 연내 최대 5명 추가 채용**, **factory test firmware가 아직 없음(나중에 필요)**, **STM(STM32) 사용 = 자체 실리콘 없음**. 개발 인력 약 70명 / 전체 약 260명(나머지 테크니션). 다음: 결과 대기 → 온사이트 대비 (`onsitePrep/`)
 - **🔀 포지션 전환 (2026-09-27)**: Adam 인터뷰 뒤 **Firmware Test Engineer** (JD [17], base **$145.5–204K**) 로 HM 30분 인터뷰 제안. **적합도는 오히려 ⭐⭐⭐⭐** (HIL·테스트 자동화·Python·I2C/SPI/UART·RF 테스트 — 레쥬메와 직결). 대신 ① 밴드 상단 $204K ≈ Don이 말한 최저선 $200K ② 개발→테스트 트랙 = **레벨·커리어 방향 하향** ③ 5+년 "software testing" 요구. 자세한 분석은 **§8**
-- **다음 액션 (2026-09-27)**: ① 일정 링크에 날짜 4개+ 제출 (서두르되, 준비 시간 2~3일 확보되게) ② **제출 전에 Jazmin/Devin에게 확인 질문** — 원래 Senior/Principal 트랙은 closed인지, 레벨·밴드는 어떻게 되는지, 이 HM이 누구인지 ③ 수락 여부 결정 기준 정하기 (§8.4) ④ §8.5 준비 항목
+- **🧪 다음 액션 (2026-10-02)**: ① **10-08(목) 11am technical screen** 준비 — `technicalScreenPrep/` D-6 플랜(ring buffer Python 12분 · C 5분, pytest로 남의 코드 테스트 25분, test·tooling system design 10분 요약) ② 면접관 Jon Kotowski는 Full Stack [추정] → 임베디드 퀴즈보다 코드 품질 · 테스트 · 설계 소통 중심으로 대비 ③ LinkedIn 로그인 조회 · 친구 신청 하지 않음 ④ 온사이트 준비(`onsitePrep/`)는 스크린 이후로
+- ~~다음 액션 (2026-09-27)~~: ① 일정 링크에 날짜 4개+ 제출 (서두르되, 준비 시간 2~3일 확보되게) ② **제출 전에 Jazmin/Devin에게 확인 질문** — 원래 Senior/Principal 트랙은 closed인지, 레벨·밴드는 어떻게 되는지, 이 HM이 누구인지 ③ 수락 여부 결정 기준 정하기 (§8.4) ④ §8.5 준비 항목
 - ~~다음 액션 (2026-09-22)~~: ① 2026-09-24(목)까지 연락 없으면 리크루터 Devin에게 짧은 follow-up 메일 ② Adam 인터뷰 기억나는 질문을 §6에 기록 ③ 기다리는 동안 온사이트 대비: 경력 발표 1시간 초안, ring buffer 맨손 구현
 - ~~이전 다음 액션 (2026-09-16)~~: ① ~~**Adam(HM) 45분 기술 인터뷰 준비** — HM 준비 노트의 스토리 A·B·C 실제 디테일 채우기 + Board B 변종 구조·MCU↔컴패니언 프로토콜 화이트보드 연습 ② 온사이트 대비: 1시간 발표 초안, ring buffer 맨손 구현, generic system design ③ ~~Bazel 미니 프로젝트~~ → 특정 JD 없는 req로 확인돼 우선순위 하향~~ (인터뷰 완료)
 
@@ -203,6 +205,7 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
        ② 본인 경력 발표 1시간 (가장 큰 challenge, issue resolving/debugging, bring-up 경험)
        ③ 1:1 기술 인터뷰 여러 개: 기본 C/C++, ring buffer 구현, generic system design (드론 설계 아님)
 ```
+- **2026-10-02 갱신 [확인됨 리크루터]** — FW Test 트랙 실제 경로: ✅ Adam 45m (09-18) → 🔀 FW Test 전환 (09-27) → ✅ **Michael Honor HM** (10-01, 통과) → 🧪 **Technical screen 1h** (10-08 목 11am, Jon Kotowski, 코딩 위주: pytest · ring buffer · Python/C · system design) → 온사이트 (위 구성)
 - ~~이전 추정 (2026-09-14): 팀원 45분 기술 폰스크린 → Torrance 온사이트(C 코딩 / Bazel·빌드 딥다이브 / 플랫폼 설계 / 미션)~~ → 2026-09-16 리크루터 안내로 교체. **빌드 시스템 딥다이브는 확인된 온사이트 항목에 없음.**
 - Glassdoor 후기: "transparent and well communicated", 포커스 영역을 미리 알려줌 [7]. 표본이 적음.
 
@@ -328,6 +331,9 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 | 2026-10-01 | **✅ FW Test HM Michael Honor 인터뷰 완료 (실제 약 30분)** | HM이 15분 늦어 30분으로 단축. 퀴즈형: UART/I2C/SPI 차이, PCIe를 SW에서 어떻게 쓰나(Don: 핀 수 적게 고속 — TX/RX 차동쌍, REFCLK, CLKREQ#, SerDes 설명), 8b/10b, Git 사용법·PR·rebase. 테스트 철학: "정의 안 된 것의 테스트 케이스"(Don: 격리된 unit부터 쌓아 올림), "done의 의미"(Don: 80%에서 내보내고 고객·타 팀 피드백으로 보완 → HM 반응 좋음). Python 미출제. 정보: FW 15명, FW Test 2명, 테스트 FW가 가장 급함·연내 최대 5명 채용, factory test FW 없음, STM 사용. 결과 곧 통보 |
 | 2026-10-01 | 채용 공고 diff (09-27 94개 → 10-01 105개) | 삭제 0, 추가 11 (FW 직군 신규는 없음. Principal Connectivity, Senior Platform Engineer(autonomy), Senior GNC, Senior Perception, Senior EW T&E 등). **Firmware Test Engineer 공고 유지** → 아직 채워지지 않았거나 복수 채용(최대 5명) 중. Flight Software Manager 밴드 상향 $198–277.5K → **$225.5–316.5K**. 스냅샷: `research/job_board_snapshots/` |
 | 2026-10-01 | **온사이트 준비 사이트 생성** | `onsitePrep/` — 회사 스택 지도(FW·임베디드 공고 13개 분석), STM32 의미, 1시간 발표 가이드, C/C++, ring buffer, generic system design, 임베디드 퀴즈, factory test FW, 면접관별 대응 |
+| 2026-10-02 | **리크루터 연락 — Michael 인터뷰 통과, 온사이트 전 technical screen 1세션 추가** | 2026-10-08(목) 11:00, 1시간, 코딩 위주 예상. 주제: pytest · ring buffer · Python/C 둘 다 가능 · system design. 면접관 **Jon Kotowski** — Neros Full Stack Engineer [추정, Datanyze 단일 출처; ZoomInfo 스니펫도 같은 직함, 과거 Hoonigan SWE·모바일 앱 개발 이력은 동명이인 가능성]. LinkedIn은 로그인 조회·친구 신청 하지 않음 (Don 지시) |
+| 2026-10-02 | **technical screen 준비 사이트 생성** | `technicalScreenPrep/` — D-6 게임 플랜, 노트 5 (면접관·형식 분석 / pytest 실전 / ring buffer Python·C·꼬리 질문 / test·tooling system design: 프레임워크·HIL 팜·CI 결과 대시보드 / 말하면서 코딩·역질문), Python 문제 7 (ring buffer, pytest 테스트 작성 2문제는 **mutant 9개 채점**, HIL conftest는 pytester 채점, thread-safe ring, stream framer, onsitePrep C 링버퍼를 ctypes로 테스트). `.venv`에 pytest 8.4.2. 전 모범답안 PASS. 보기: `technicalScreenPrep/index.html` |
+| 2026-10-03 | **매일 타이핑 드릴 + 직군별 테스트 설계 추가 · 트랙 교정 전략 정리** | Don: Python을 거의 안 써서 문법을 다시 손에 붙여야 함 → `technicalScreenPrep/drills/` Python 10 + C 10 × 5일(100개, 정답 전부 실행 검증), 브라우저 트레이너 `site/drills.html` + `drill.py new/check`. system design 대비 `technicalScreenPrep/design/` S00~S09 (Flight · Radio · Ground/Peripherals · Video/FPGA · Platform · Linux/Autonomy · Factory · Integration, 시나리오 카드 16장). **전략**: 테스트 트랙 → 개발 트랙 교정은 스크린·온사이트에서 꺼내지 않고, 온사이트 발표로 개발 깊이를 보여 준 뒤 **오퍼 단계에서 리크루터 채널로** (직함 Senior · 밴드 · factory test FW = FW 개발 범위 · 6개월 후 platform 이동 검토). 10-06 저녁 기준 Python ring buffer 15분 미달이면 스크린에서 ring buffer는 C로 제안 |
 
 ---
 
@@ -369,7 +375,20 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
   - Python은 묻지 않음
 - **잘한 점**: "done" 답변으로 스타트업 속도 감각을 보여 줌. 퀴즈에 막힘없이 답함
 - **아쉬운 점**: PCIe를 HW(핀) 관점으로 답함 — 질문 의도는 SW 관점이었을 가능성. 8b/10b는 목적(DC balance, run length 제한, 클럭 복원, 제어 심볼) 위주로 다시 정리
+- **결과** [확인됨 2026-10-02 리크루터]: 잘 봤음 → 온사이트 전에 technical screen 1세션 추가 (아래)
 - **다음 라운드에 반영**: 온사이트는 임베디드 지식 비중이 클 것. 퀴즈형 질문에 **"한 문장 정의 → 왜 → 예시"** 30초 답 틀로 대비. factory test FW를 발표의 연결고리로
+
+### 2026-10-08 · Technical screen (1시간, 예정) · 면접관 Jon Kotowski (Full Stack Engineer [추정])
+- **일정** [확인됨 2026-10-02 리크루터]: 2026-10-08(목) 11:00, 1시간. 온사이트 **전에** 추가된 1세션
+- **형식** [확인됨 리크루터]: 코딩 위주 예상. 주제 — **pytest**, **ring buffer**, **Python/C 둘 다 가능**, **system design**
+- **면접관** [추정]: Jon Kotowski — Datanyze 기준 Neros Full Stack Engineer (단일 출처), ZoomInfo 검색 스니펫도 같은 직함 [18]. Neros "Full-Stack Software Engineer III" 공고 [19]: React/Node/TS, Electron, Python(Django/Flask), SQL/NoSQL·Redis·time-series, event-driven, CI, nice-to-have InfluxDB·Grafana·telemetry → **코드 품질 · 테스트 · 데이터/설계 소통**을 볼 가능성 [추정]
+- **해석** [추정]: Michael 라운드(퀴즈형)에서 비어 있던 코딩·Python·pytest를 온사이트 전에 확인하려는 단계. 긍정 신호지만 통과해야 온사이트
+- **준비**: `technicalScreenPrep/index.html` (START HERE) — 1시간 예상: 자기소개 5 → ring buffer 25 → pytest 15 → system design 10 → 역질문 5
+- **주의**: LinkedIn 로그인 조회 · 친구 신청 하지 않음 (Don 지시)
+- 받은 질문: (인터뷰 후 기록)
+- 내 답 / 결과: (인터뷰 후 기록)
+- 잘한 점 / 아쉬운 점: (인터뷰 후 기록)
+- 다음 라운드에 반영할 것: (인터뷰 후 기록)
 
 ### 리크루터 안내 온사이트 구성 (2026-09-16 Devin) [확인됨]
 1. **Tour 30분**
@@ -464,6 +483,8 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 15. https://www.therobotreport.com/red-cat-wins-u-s-army-next-gen-drone-contract-over-skydio/ · https://www.modalai.com/pages/2026-u-s-drone-manufacturers-comprehensive-list — 경쟁 구도 (2026-09-14)
 16. https://www.glassdoor.com/Reviews/Neros-Reviews-E10732288.htm — 리뷰 4.9/5, WLB 4.4 (2026-09-14)
 17. https://job-boards.greenhouse.io/nerostechnologies/jobs/4941340007 — Firmware Test Engineer JD, Greenhouse API updated 2026-09-24 (확인일 2026-09-27)
+18. Datanyze (Don 검색, URL 미기록) · https://www.zoominfo.com/p/Jon-Kotowski/2366174729 — Jon Kotowski 직함 "Full Stack Engineer at Neros" (데이터 브로커, 검색 스니펫 기준, 확인일 2026-10-02). LinkedIn은 조회하지 않음
+19. https://job-boards.greenhouse.io/nerostechnologies/jobs/5174689007 — Full-Stack Software Engineer III, Greenhouse updated 2026-09-30, base $152.5–213.5K (스냅샷 `research/job_board_snapshots/2026-10-02_neros_jobs.json`, 확인일 2026-10-02)
 
 ---
 

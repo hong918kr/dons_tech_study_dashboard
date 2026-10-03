@@ -1,11 +1,11 @@
 # Hark — Embedded AI Engineer · Context
 
-> **최종 갱신**: 2026-10-01 · **상태**: 🔍 조사중
+> **최종 갱신**: 2026-10-03 · **상태**: 🔍 조사중
 > **JD**: https://job-boards.greenhouse.io/hark/jobs/4392090009 · **위치**: San Jose, CA / onsite 추정 · **연봉 밴드**: $200,000 – $450,000 base (+ equity 가능)
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > **관련 포지션**: 같은 회사 [Embedded SWE, BSP](../hark_ai_embedded_swe/hark_ai_embedded_swe_context.md) (📞 리크루터 진행 중, 1순위) · 자리 비교는 [P03 임베디드 7자리 지도](../hark_ai_embedded_swe/2026-09-19_hark_study_notes/site/plan/P03_embedded_role_map.html)
 > **🧭 스터디 나침반**: [study_prep_list — 이 직군 공부 목록 (15모듈, 약 100개념)](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/site/compass/study_prep_list.html) — 2026-09-28 `dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/`로 이동
-> **📚 스터디 노트 사이트**: [노트 목록](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/site/index.html) — 진행: 모듈 A(A0–A6) · B(B1–B9) · C(C1–C8) · D(D1–D7) · E(E1–E9) · F(F1–F8) · G(G1–G7) · H(H1–H8) · I(I1–I6) · J(J1–J6) · K(K1–K5) 작성 완료, 다음 L
+> **📚 스터디 노트 사이트**: [노트 목록](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/site/index.html) — 진행: 모듈 A(A0–A6) · B(B1–B9) · C(C1–C8) · D(D1–D7) · E(E1–E9) · F(F1–F8) · G(G1–G7) · H(H1–H8) · I(I1–I6) · J(J1–J6) · K(K1–K5) · L(L1–L6) 작성 완료, 다음 M
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
 
 <!-- 상태 값: 🔍 조사중 → 📨 지원완료 → 📞 리크루터 → 💻 폰스크린 → 🏢 온사이트 → 🎉 오퍼 | ❌ 불합격 | ⏸ 보류 -->
@@ -258,6 +258,7 @@
 | 2026-10-01 | **스터디 노트 모듈 I 완료** | 공통 사례(음성+제스처 웨어러블, 가정)로 I1 예산 설정 · I2 HW 친화 설계 규칙 + ONNX linter · I3 cascade 공동 최적화·분할점·클라우드 라우팅 · I4 전/후처리 배치 · I5 벤치마크(MLPerf, 자체 하네스) · I6 co-design 루프(v0→v4 실측) — 6편 약 8,500줄, SVG 51개, 예제 약 80개. JD 2번 업무("co-design model architectures that meet latency, memory, power, bandwidth")를 직접 커버. 누적 69편 약 95,200줄. **다음: 모듈 J (펌웨어 통합)** |
 | 2026-10-01 | **스터디 노트 모듈 J 완료** | J1 추론 통합 패턴(pthread 참조 파이프라인) · J2 실시간(RTA·WCET·chunking) · J3 int8 커널(TFLite 참조와 bit-exact) · J4 C++/Rust(Cortex-M4 no_std 빌드) · J5 모델 OTA(A/B·전원 차단 시뮬) · J6 테스트(단위·sanitizer·재생·HIL·공장) — 6편 약 10,500줄, SVG 51개, 예제 약 80개. JD 4번 업무("Integrate ML inference into embedded firmware written in C, C++, or Rust")를 직접 커버. Rust를 `.tools/`에 로컬 설치. 누적 75편 약 105,700줄. **다음: 모듈 K (프로파일링)** |
 | 2026-10-01 | **스터디 노트 모듈 K 완료** | K1 메모리 프로파일링(실제 링크·map/size-diff·스택 분석·CI 게이트) · K2 성능 프로파일링(sample·flame graph·계측·trace) · K3 전력 측정(계측기 효과 시뮬·회귀 리그) · K4 열·지속 성능(이 Mac 35분 실측) · K5 커널 최적화(루프 변환·레이아웃·Winograd·DMA) — 5편 약 7,400줄, SVG 38개, 예제 약 70개. JD 5번 업무("Profile and optimize memory usage, power consumption, and real-time performance")를 직접 커버. 이전 노트 SVG 3개(D7·H4·K4)의 잘린 viewBox도 수정. 누적 80편 약 113,100줄. **다음: 모듈 L (온디바이스 LLM)** |
+| 2026-10-03 | **스터디 노트 모듈 L 완료** | L1 SLM 선택(50문항 제품 평가) · L2 온디바이스 LLM 스택(llama-server 세션·KV·취소) · L3 hybrid 라우팅(실측 신호 보정) · L4 음성 파이프라인(VAD→Whisper→LLM→TTS 실연결, TTFA 1.0 s) · L5 메모리·RAG · L6 디코딩 가속(speculative 실측) — 6편 약 8,900줄, SVG 49개, 예제 약 90개. JD 우대 "lightweight LLM", "hybrid edge-LLM pipelines", "Audio/Voice"를 직접 커버. 모델 추가 다운로드(Whisper-tiny, MiniLM, SmolLM2-360M). 누적 86편 약 122,100줄. **다음: 모듈 M (실리콘 선정)** |
 
 ---
 
