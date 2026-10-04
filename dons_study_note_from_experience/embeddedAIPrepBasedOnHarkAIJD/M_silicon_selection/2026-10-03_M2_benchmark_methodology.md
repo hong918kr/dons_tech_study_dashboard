@@ -1,0 +1,969 @@
+# M2. 벤치마크 방법론 — 칩 후보를 공정하게 비교하는 법 (iso-accuracy, 측정 층위, 신뢰구간, 노력 정규화)
+
+> **이 노트를 다 읽으면**: 칩 후보 비교의 "공정성 계약"(같은 모델·같은 정확도 floor·같은 경계)을 표로 쓸 수 있다 · 우리 제품 op를 덮는 모델 세트를 ONNX op 히스토그램으로 설계하고 빈칸을 찾을 수 있다 · 각 벤더 quantizer를 통과한 결과를 iso-accuracy로 정규화하고, 커널·모델·e2e 층에서 순위가 뒤집히는 이유를 설명할 수 있다 · 칩 간 속도 비율을 run·unit 단위 신뢰구간과 out-of-box/tuned 두 열로 보고하는 평가 보고서를 쓸 수 있다
+> **JD 연결**: "**Evaluate and select silicon platforms** (GPUs, NPUs etc.)", "Work with platform vendors to bring up toolchains, SDKs and new accelerator" — study_prep_list **M2** 행: 대표 모델 세트, end-to-end vs 커널 단위, sustained 열 조건, 재현성 → "공정한 비교"
+> **Don 기준 난이도**: 측정 설계·A/B 비교·양산 sign-off 통계는 이미 강하다 / 새로 배울 것은 "정확도도 같이 맞춰야 하는 비교", 벤더 툴체인마다 다른 quantizer, 층위에 따라 뒤집히는 순위
+> **선행 노트**: I5(벤치마크·MLPerf·하니스·점수화), D6(tail latency 하니스), K2(프로파일링), K3(전력 측정), K4(sustained·열), C8(최적화 후 검증), F8(벤더 SDK bring-up·op 커버리지), M1(평가 기준표)
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+SSD 시절 새 NAND 벤더 두 곳의 샘플을 비교한다고 해 보자. A사는 자기 컨트롤러 튜닝으로 잰 tR(read latency)을 주고, B사는 우리 펌웨어로 잰 숫자를 준다. 둘을 나란히 놓으면 비교가 아니다. 같은 펌웨어, 같은 온도, 같은 ECC 강도(= 같은 "정답률")에서 다시 재야 한다. 칩 선정 벤치마크가 정확히 이 문제다. 다만 edge ML에서는 **벤더마다 자기 컴파일러·자기 quantizer**가 있어서, "같은 모델"을 넣어도 나오는 실행 파일은 서로 다르고 **정확도까지 달라진다**.
+
+I5는 벤치마크 일반(MLPerf 규칙, 벤더 숫자 해부, 우리 스위트 설계, 하니스, 점수화, A/A 재현성)을 다뤘다. 이 노트는 그중 한 장면만 좁게 판다: **선정 단계에서 칩 후보 2~4개를 서로 비교하는 방법론**.
+
+```svg
+<svg viewBox="0 0 680 270" xmlns="http://www.w3.org/2000/svg">
+<rect x="10" y="95" width="100" height="60" rx="6" fill="none" stroke="#4a7bd0" stroke-width="2"/><text x="60" y="122" font-size="13" text-anchor="middle">모델 세트</text><text x="60" y="138" font-size="12" text-anchor="middle">ONNX + eval 세트</text><rect x="140" y="20" width="110" height="50" rx="6" fill="none" stroke="#888" stroke-width="2"/><text x="195" y="42" font-size="13" text-anchor="middle">벤더 A 툴체인</text>
+<text x="195" y="58" font-size="12" text-anchor="middle">자기 quantizer</text><line x1="110" y1="125" x2="140" y2="45" stroke="currentColor"/><line x1="250" y1="45" x2="280" y2="125" stroke="currentColor"/><rect x="140" y="105" width="110" height="50" rx="6" fill="none" stroke="#888" stroke-width="2"/><text x="195" y="127" font-size="13" text-anchor="middle">벤더 B 툴체인</text>
+<text x="195" y="143" font-size="12" text-anchor="middle">자기 quantizer</text><line x1="110" y1="125" x2="140" y2="130" stroke="currentColor"/><line x1="250" y1="130" x2="280" y2="125" stroke="currentColor"/><rect x="140" y="190" width="110" height="50" rx="6" fill="none" stroke="#888" stroke-width="2"/><text x="195" y="212" font-size="13" text-anchor="middle">벤더 C 툴체인</text>
+<text x="195" y="228" font-size="12" text-anchor="middle">자기 quantizer</text><line x1="110" y1="125" x2="140" y2="215" stroke="currentColor"/><line x1="250" y1="215" x2="280" y2="125" stroke="currentColor"/><rect x="280" y="90" width="100" height="70" rx="6" fill="none" stroke="#d0564a" stroke-width="2"/><text x="330" y="114" font-size="13" text-anchor="middle">정확도 게이트</text>
+<text x="330" y="130" font-size="12" text-anchor="middle">floor 통과?</text><text x="330" y="146" font-size="12" text-anchor="middle">실패 → 무효</text><line x1="380" y1="125" x2="402" y2="125" stroke="currentColor"/><polygon points="402,121 410,125 402,129" fill="currentColor"/><rect x="410" y="70" width="120" height="110" rx="6" fill="none" stroke="#e08a3c" stroke-width="2"/><text x="470" y="106" font-size="13" text-anchor="middle">성능 측정</text>
+<text x="470" y="122" font-size="12" text-anchor="middle">커널 · 모델 · e2e</text><text x="470" y="138" font-size="12" text-anchor="middle">warm · sustained</text><text x="470" y="154" font-size="12" text-anchor="middle">같은 전력 경계</text><line x1="530" y1="125" x2="552" y2="125" stroke="currentColor"/><polygon points="552,121 560,125 552,129" fill="currentColor"/><rect x="560" y="40" width="110" height="60" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/>
+<text x="615" y="67" font-size="13" text-anchor="middle">통계</text><text x="615" y="83" font-size="12" text-anchor="middle">run·unit CI</text><rect x="560" y="150" width="110" height="60" rx="6" fill="none" stroke="#3f9a6b" stroke-width="2"/><text x="615" y="177" font-size="13" text-anchor="middle">보고서</text><text x="615" y="193" font-size="12" text-anchor="middle">OOB / tuned · 노력</text>
+<line x1="615" y1="100" x2="615" y2="150" stroke="currentColor"/>
+<text x="340" y="262" font-size="12" text-anchor="middle">순서가 중요하다: 정확도를 먼저 통과해야 속도 숫자가 의미를 갖는다</text></svg>
+```
+
+그림 1 — 선정 벤치마크의 흐름. 같은 모델 세트가 각 벤더 툴체인(각자 quantizer)을 지나고, 정확도 게이트를 통과한 산출물만 성능 측정으로 간다. 결과는 신뢰구간과 out-of-box/tuned 두 열로 보고된다.
+
+| 이미 다룬 것 | 노트 | 이 노트에서는 |
+|---|---|---|
+| MLPerf 시나리오·division·정확도 목표 | I5 §2 | "정확도 목표" 아이디어를 칩 비교 규칙(iso-accuracy)으로 가져온다 |
+| 우리 스위트 설계, 6-backend 하니스, Pareto·가중치 | I5 §4–6 | 같은 하니스를 **후보 칩 사이 공정성** 관점으로 쓴다 |
+| A/A 테스트, run 내부 bootstrap | I5 §7 | run·세션·unit 계층을 나눈 **비율 CI**와 필요한 unit 수 |
+| tail latency 하니스 | D6 | 그대로 사용 |
+| 전력 측정 통계, paired 설계 | K3 | 칩 비교용 측정 경계·순서 규칙만 |
+| sustained·thermal 방법 | K4 | 평가 킷에서의 프로토콜만 |
+| 최적화 후 정확도 검증 | C8 | 정확도 게이트로 사용 |
+| op 커버리지 sweep, 환경 고정 | F8 | 버전 매트릭스로 연결 |
+
+> 측정 환경 주의: 실측은 Apple M2 MacBook(8코어) 한 대에서 했다. 진짜 후보 칩이 없으므로 **같은 Mac의 backend를 "칩 후보 stand-in"으로 쓴다**: X = ONNX Runtime CPU(fp32 또는 int8), Y = Core ML `CPU_AND_NE`(fp16, ANE 배치 여부는 Core ML이 결정). 절대 숫자보다 **방법론이 결론을 어떻게 바꾸는지**를 본다. 다른 작업이 함께 돌던 상태라 숫자는 흔들린다(그것도 교재다).
+
+---
+
+## 1. 공정 비교의 원칙 — "공정성 계약"을 먼저 쓴다
+
+### 1.1 직관
+
+공정한 비교란 "바꾼 변수는 칩 하나뿐"인 상태다. 실험 설계로 말하면 칩이 독립변수고 나머지는 통제변수다. 문제는 edge ML에서 칩을 바꾸면 **툴체인, 정밀도, 지원 op, 전처리 위치**가 줄줄이 따라 바뀐다는 것이다. 그래서 "무엇을 고정하고 무엇을 각자에게 맡길지"를 측정 전에 문서로 합의한다. 이것을 이 노트에서는 **공정성 계약(fairness contract)** 이라고 부른다.
+
+### 1.2 원칙 표
+
+| 원칙 | 규칙 | 왜 | 확인 방법 |
+|---|---|---|---|
+| 같은 모델 그래프 | 모든 후보에 같은 ONNX(또는 같은 PyTorch 체크포인트)를 준다. 구조 변경은 "변형 모델"로 따로 기록 | 벤더가 몰래 작은 모델로 바꾸면 비교가 끝난다 | 파일 해시, 파라미터 수, MAC 수 대조 |
+| iso-accuracy | 각 후보는 **자기 quantizer**를 써도 되지만 같은 eval 세트에서 정확도 floor를 넘어야 한다 | int8이 빠른 건 당연하다. 정확도를 잃고 빨라진 건 비교 대상이 아니다 | 우리 eval 세트·우리 채점 스크립트로 직접 잰다 (3절) |
+| 전·후처리 경계 | 전처리(MFCC 등)·후처리를 **모두 포함** 또는 **모두 제외**. 섞지 않는다 | 한쪽만 DSP 전처리를 빼면 그쪽이 유리해진다 | 측정 시작·끝 지점을 그림으로 합의 (4절) |
+| 같은 시나리오 | batch, stream 여부, 입력 길이, 동시 실행(예: KWS와 ASR 동시) 같게 | batch 8 숫자와 batch 1 숫자는 다른 질문이다 | 하니스 설정 파일을 공유 |
+| warm vs cold | warm p50/p99와 cold(첫 추론·로드 시간)를 **따로** 보고 | NPU는 첫 호출에 컴파일·DMA 설정이 들어가 cold가 수십 배일 수 있다 | 프로세스 재시작 후 첫 호출을 별도 기록 |
+| sustained 상태 | 같은 온도 조건·같은 지속 시간(예: 10분 후 마지막 1분) | 짧은 burst는 peak 클럭 숫자다 | K4 프로토콜 (7절) |
+| 같은 전력 경계 | 같은 레일 묶음(SoC 전체 vs NPU 레일만)에서 잰다 | NPU 레일만 잰 칩이 항상 이긴다 | 측정 회로도에 경계 표시 (K3) |
+| 노력 동일 또는 기록 | 튜닝 시간을 맞추거나, 못 맞추면 시간·변경 내역을 기록하고 out-of-box/tuned 두 열로 보고 | 한 칩만 2주 튜닝하면 "칩"이 아니라 "엔지니어"를 비교한 것 | 노력 장부 (6절) |
+
+### 1.3 손으로 보는 예 — 계약이 없으면 생기는 일
+
+벤더 P는 "KWS 0.05 ms (int8, 모델만)"을, 벤더 Q는 "KWS 0.20 ms (fp16, 전처리 포함)"을 보냈다고 하자. 표면상 P가 4배 빠르다. 그런데 전처리가 양쪽 모두 0.12 ms라면(4절 실측과 비슷한 크기):
+
+```
+P를 Q와 같은 경계로 맞춤:  0.05 + 0.12 = 0.17 ms
+Q는 그대로:                 0.20 ms
+비율: 0.20 / 0.17 ≈ 1.18   (4배 → 1.18배)
+```
+
+말로 하면, 경계 하나만 맞췄는데 "4배"가 "18 %"가 됐다. 여기에 P의 int8이 floor를 못 넘으면 P는 fp16으로 다시 재야 하고, 순위가 뒤집힐 수도 있다. 숫자를 받기 **전에** 계약서를 보내는 이유다.
+
+### 1.4 함정
+
+- 벤더에게 ONNX만 주고 "최적화해서 숫자 달라"고 하면 벤더-tuned 숫자가 온다. 받는 건 좋지만 반드시 **벤더-tuned로 표시**한다(6절).
+- "같은 모델"인데 opset이나 export 방식이 달라 그래프가 다르게 쪼개질 수 있다. 같은 파일을 주는 것까지가 계약이다.
+
+---
+
+## 2. 모델 세트 설계 — 커버리지 행렬
+
+### 2.1 직관
+
+칩 비교에 모델 하나만 쓰면 그 모델의 op 구성이 운 좋게 맞는 칩이 이긴다. SSD QoS 시험에서 4K random read만 재고 sequential write를 빼먹으면 안 되는 것과 같다. 모델 세트는 **우리 제품이 쓸 op 종류·shape를 빠짐없이 덮는** 최소 집합이어야 한다.
+
+### 2.2 커버리지 축
+
+| 축 | 예 | 왜 칩마다 다르게 나오나 |
+|---|---|---|
+| 표준 conv | 3×3, 10×4 stem | NPU의 주력. 대부분 빠르다 |
+| depthwise conv | MobileNet, DS-CNN | 채널당 연산이 적어 MAC 배열 활용률이 낮다 (E5) |
+| pointwise 1×1 | MobileNet 확장·투영 | 사실상 matmul. 대역폭 민감 |
+| 작은 FC / 큰 FC | 분류 head / LLM FFN | 큰 FC는 weight 대역폭이 지배 (D3) |
+| activation×activation matmul | attention QKᵀ, AV | weight가 아니라 activation끼리 곱함. 일부 NPU는 미지원·CPU fallback |
+| softmax, layernorm | transformer | 비선형·reduce. NPU에서 정밀도 문제 잦음 |
+| LSTM/GRU | VAD, denoise | 순차 의존성. 많은 NPU가 unroll 또는 미지원 |
+| upsample | ConvTranspose, Resize | denoise U-Net 등 |
+| 작은 텐서 op | 출력 256개 이하 | dispatch 오버헤드가 연산보다 큼 |
+| shape 연산 | Reshape, Transpose, Gather | 데이터 이동만. NPU 그래프를 쪼개는 주범 |
+| dynamic shape | 가변 길이 입력 | 정적 컴파일 NPU는 재컴파일·padding 필요 |
+
+### 2.3 코드 — 모델 세트 만들기 (stand-in 6개)
+
+무엇을 확인하나: 웨어러블 후보 워크로드(KWS, IMU 제스처, VAD, ASR encoder, LLM FFN 블록, presence 감지)를 대표하는 작은 모델 6개를 ONNX로 내보낸다. 가중치는 랜덤이다(op 구성만 본다).
+
+```python
+# zoo.py — 후보 실리콘 비교용 '모델 세트' 5개 (stand-in, 가중치 랜덤)
+import torch, torch.nn as nn, torchvision
+torch.manual_seed(0)
+def dw(c): return nn.Sequential(nn.Conv2d(c, c, 3, padding=1, groups=c), nn.ReLU(), nn.Conv2d(c, c, 1), nn.ReLU())
+kws = nn.Sequential(nn.Conv2d(1, 64, (10, 4), stride=2, padding=(5, 1)), nn.ReLU(),
+                    *[dw(64) for _ in range(4)], nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(64, 12))
+imu = nn.Sequential(nn.Conv1d(6, 32, 5, padding=2), nn.ReLU(), nn.Conv1d(32, 64, 5, stride=2, padding=2), nn.ReLU(),
+                    nn.AdaptiveAvgPool1d(1), nn.Flatten(), nn.Linear(64, 8))
+class Lstm(nn.Module):           # 스트리밍 VAD/denoise 류
+    def __init__(s): super().__init__(); s.l = nn.LSTM(40, 96, 2, batch_first=True); s.o = nn.Linear(96, 2)
+    def forward(s, x): return s.o(s.l(x)[0])
+class Enc(nn.Module):            # 작은 transformer encoder (ASR 류)
+    def __init__(s, d=144):
+        super().__init__(); s.i = nn.Linear(80, d)
+        s.e = nn.TransformerEncoder(nn.TransformerEncoderLayer(d, 4, 4 * d, 0.0, batch_first=True), 4, enable_nested_tensor=False)
+        s.o = nn.Linear(d, 40)
+    def forward(s, x): return s.o(s.e(s.i(x)))
+class Mlp(nn.Module):            # 큰 matmul 위주 (LLM FFN 블록 proxy)
+    def __init__(s): super().__init__(); s.a = nn.Linear(576, 1536); s.b = nn.Linear(1536, 576)
+    def forward(s, x): return s.b(torch.nn.functional.silu(s.a(x)))
+SET = {"kws_dscnn": (kws, (1, 1, 49, 10)), "imu_cnn1d": (imu, (1, 6, 128)), "vad_lstm": (Lstm(), (1, 50, 40)),
+       "asr_enc": (Enc(), (1, 100, 80)), "llm_ffn": (Mlp(), (1, 64, 576)),
+       "vww_mnv2": (torchvision.models.mobilenet_v2(width_mult=0.35, num_classes=2), (1, 3, 96, 96))}
+if __name__ == "__main__":
+    for n, (m, shp) in SET.items():
+        dyn = {"x": {1: "T"}} if n == "asr_enc" else None    # ASR만 길이 가변(dynamic shape)
+        torch.onnx.export(m.eval(), torch.randn(shp), f"{n}.onnx", input_names=["x"], dynamo=False,
+                          dynamic_axes=dyn, opset_version=17)
+    print("exported", len(SET))
+```
+
+```text
+exported 6
+```
+
+출력에서 볼 것: ASR encoder만 길이 축 `T`를 dynamic으로 내보냈다. 이것이 행렬에서 어떻게 드러나는지 다음 코드에서 본다.
+
+### 2.4 코드 — op 히스토그램으로 커버리지 행렬 만들기
+
+무엇을 확인하나: 각 ONNX 그래프의 노드를 2.2절 카테고리로 분류해 "카테고리 × 모델" 행렬을 만든다. 공유 가중치(Identity 별칭)를 가중치로 인식하지 않으면 FC가 attention matmul로 잘못 세어지는 함정이 있어서 그 처리도 넣었다.
+
+```python
+# ONNX 모델 세트 -> op 카테고리 커버리지 행렬 (행=카테고리, 열=모델, 값=노드 수)
+import onnx, numpy as np
+from onnx import shape_inference, numpy_helper
+CATS = ["conv_std", "conv_dw", "conv_1x1", "fc_small", "fc_large", "matmul_act", "softmax",
+        "lstm", "upsample", "norm", "act_eltwise", "shape_ops", "small_out", "dyn_shape"]
+SHAPE_OPS = {"Reshape", "Transpose", "Concat", "Slice", "Gather", "Shape", "Unsqueeze", "Squeeze",
+             "Split", "Expand", "Flatten", "Constant", "ConstantOfShape", "Range", "Where", "Equal", "Cast"}  # 데이터 이동·shape 계산만 하는 op
+def cats_of(m):
+    g = m.graph; init = {i.name: numpy_helper.to_array(i).shape for i in g.initializer}
+    vi = {v.name: [d.dim_value if d.HasField("dim_value") else -1 for d in v.type.tensor_type.shape.dim]
+          for v in list(g.value_info) + list(g.output)}
+    for n in g.node:                                # Identity(초기값) = 공유 가중치 별칭 -> 가중치로 취급
+        if n.op_type == "Identity" and n.input[0] in init: init[n.output[0]] = init[n.input[0]]
+    c = dict.fromkeys(CATS, 0)
+    for n in g.node:
+        if n.op_type == "Identity": continue
+        a = {x.name: onnx.helper.get_attribute_value(x) for x in n.attribute}
+        if n.op_type == "Conv":
+            w = init[n.input[1]]; k = int(np.prod(w[2:]))
+            c["conv_dw" if a.get("group", 1) > 1 else "conv_1x1" if k == 1 else "conv_std"] += 1
+        elif n.op_type in ("MatMul", "Gemm"):
+            ws = [init[i] for i in n.input[:2] if i in init]
+            if not ws: c["matmul_act"] += 1            # activation x activation (attention QK^T, AV)
+            else: c["fc_large" if np.prod(ws[0]) >= 512 * 1024 else "fc_small"] += 1
+        elif n.op_type == "Softmax": c["softmax"] += 1
+        elif n.op_type in ("LSTM", "GRU"): c["lstm"] += 1
+        elif n.op_type in ("ConvTranspose", "Resize"): c["upsample"] += 1   # denoise U-Net 등에 필요
+        elif n.op_type in ("LayerNormalization", "BatchNormalization", "ReduceMean"): c["norm"] += 1
+        elif n.op_type in SHAPE_OPS: c["shape_ops"] += 1
+        else: c["act_eltwise"] += 1
+        shp = vi.get(n.output[0])
+        if shp and min(shp) > 0 and np.prod(shp) <= 256 and n.op_type not in SHAPE_OPS: c["small_out"] += 1
+    c["dyn_shape"] = int(any(d.dim_param for i in g.input for d in i.type.tensor_type.shape.dim))
+    return c
+names = ["kws_dscnn", "imu_cnn1d", "vad_lstm", "asr_enc", "llm_ffn", "vww_mnv2"]
+M = np.array([[cats_of(shape_inference.infer_shapes(onnx.load(f"{n}.onnx")))[k] for n in names] for k in CATS])
+np.save("cov.npy", M)
+print(f"{'category':<12}" + "".join(f"{n[:9]:>10}" for n in names))
+for k, row in zip(CATS, M): print(f"{k:<12}" + "".join(f"{v:>10}" for v in row) + ("   <- 빈 행" if row.sum() == 0 else ""))
+```
+
+```text
+category     kws_dscnn imu_cnn1d  vad_lstm   asr_enc   llm_ffn  vww_mnv2
+conv_std             1         2         0         0         0         1
+conv_dw              4         0         0         0         0        17
+conv_1x1             4         0         0         0         0        34
+fc_small             1         1         1        18         0         1
+fc_large             0         0         0         0         2         0
+matmul_act           0         0         0         8         0         0
+softmax              0         0         0         4         0         0
+lstm                 0         0         2         0         0         0
+upsample             0         0         0         0         0         0   <- 빈 행
+norm                 0         0         0         8         0         0
+act_eltwise         10         3         1        70         4        46
+shape_ops            1         1        46       519         0        71
+small_out            2         2         2        24         0         1
+dyn_shape            0         0         0         1         0         0
+```
+
+```svg
+<svg viewBox="0 0 640 395" xmlns="http://www.w3.org/2000/svg">
+<text x="160" y="30" font-size="12" text-anchor="middle">kws_dscnn</text><text x="240" y="30" font-size="12" text-anchor="middle">imu_cnn1d</text><text x="320" y="30" font-size="12" text-anchor="middle">vad_lstm</text><text x="400" y="30" font-size="12" text-anchor="middle">asr_enc</text><text x="480" y="30" font-size="12" text-anchor="middle">llm_ffn</text>
+<text x="560" y="30" font-size="12" text-anchor="middle">vww_mnv2</text><text x="112" y="55" font-size="12" text-anchor="end">conv_std</text><rect x="121" y="41" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/><text x="160" y="55" font-size="12" text-anchor="middle">1</text><rect x="201" y="41" width="78" height="20" fill="#4a7bd0" fill-opacity="0.28" stroke="#888" stroke-width="0.5"/>
+<text x="240" y="55" font-size="12" text-anchor="middle">2</text><rect x="281" y="41" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="361" y="41" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="441" y="41" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="41" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/>
+<text x="560" y="55" font-size="12" text-anchor="middle">1</text><text x="112" y="77" font-size="12" text-anchor="end">conv_dw</text><rect x="121" y="63" width="78" height="20" fill="#4a7bd0" fill-opacity="0.34" stroke="#888" stroke-width="0.5"/><text x="160" y="77" font-size="12" text-anchor="middle">4</text><rect x="201" y="63" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/>
+<rect x="281" y="63" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="361" y="63" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="441" y="63" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="63" width="78" height="20" fill="#4a7bd0" fill-opacity="0.50" stroke="#888" stroke-width="0.5"/><text x="560" y="77" font-size="12" text-anchor="middle">17</text>
+<text x="112" y="99" font-size="12" text-anchor="end">conv_1x1</text><rect x="121" y="85" width="78" height="20" fill="#4a7bd0" fill-opacity="0.34" stroke="#888" stroke-width="0.5"/><text x="160" y="99" font-size="12" text-anchor="middle">4</text><rect x="201" y="85" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="281" y="85" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/>
+<rect x="361" y="85" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="441" y="85" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="85" width="78" height="20" fill="#4a7bd0" fill-opacity="0.58" stroke="#888" stroke-width="0.5"/><text x="560" y="99" font-size="12" text-anchor="middle">34</text><text x="112" y="121" font-size="12" text-anchor="end">fc_small</text>
+<rect x="121" y="107" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/><text x="160" y="121" font-size="12" text-anchor="middle">1</text><rect x="201" y="107" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/><text x="240" y="121" font-size="12" text-anchor="middle">1</text><rect x="281" y="107" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/>
+<text x="320" y="121" font-size="12" text-anchor="middle">1</text><rect x="361" y="107" width="78" height="20" fill="#4a7bd0" fill-opacity="0.50" stroke="#888" stroke-width="0.5"/><text x="400" y="121" font-size="12" text-anchor="middle">18</text><rect x="441" y="107" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="107" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/>
+<text x="560" y="121" font-size="12" text-anchor="middle">1</text><text x="112" y="143" font-size="12" text-anchor="end">fc_large</text><rect x="121" y="129" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="201" y="129" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="281" y="129" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/>
+<rect x="361" y="129" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="441" y="129" width="78" height="20" fill="#4a7bd0" fill-opacity="0.28" stroke="#888" stroke-width="0.5"/><text x="480" y="143" font-size="12" text-anchor="middle">2</text><rect x="521" y="129" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><text x="112" y="165" font-size="12" text-anchor="end">matmul_act</text>
+<rect x="121" y="151" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="201" y="151" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="281" y="151" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="361" y="151" width="78" height="20" fill="#4a7bd0" fill-opacity="0.41" stroke="#888" stroke-width="0.5"/><text x="400" y="165" font-size="12" text-anchor="middle">8</text>
+<rect x="441" y="151" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="151" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><text x="112" y="187" font-size="12" text-anchor="end">softmax</text><rect x="121" y="173" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="201" y="173" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/>
+<rect x="281" y="173" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="361" y="173" width="78" height="20" fill="#4a7bd0" fill-opacity="0.34" stroke="#888" stroke-width="0.5"/><text x="400" y="187" font-size="12" text-anchor="middle">4</text><rect x="441" y="173" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="173" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/>
+<text x="112" y="209" font-size="12" text-anchor="end">lstm</text><rect x="121" y="195" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="201" y="195" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="281" y="195" width="78" height="20" fill="#4a7bd0" fill-opacity="0.28" stroke="#888" stroke-width="0.5"/><text x="320" y="209" font-size="12" text-anchor="middle">2</text>
+<rect x="361" y="195" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="441" y="195" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="195" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><text x="112" y="231" font-size="12" text-anchor="end">upsample</text><rect x="121" y="217" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/>
+<rect x="201" y="217" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="281" y="217" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="361" y="217" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="441" y="217" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="217" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/>
+<rect x="120" y="216" width="480" height="22" fill="none" stroke="#d0564a" stroke-width="2"/><text x="360" y="231" font-size="12" text-anchor="middle">빈 행 — 모델 세트에 없음</text><text x="112" y="253" font-size="12" text-anchor="end">norm</text><rect x="121" y="239" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="201" y="239" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="281" y="239" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/>
+<rect x="361" y="239" width="78" height="20" fill="#4a7bd0" fill-opacity="0.41" stroke="#888" stroke-width="0.5"/><text x="400" y="253" font-size="12" text-anchor="middle">8</text><rect x="441" y="239" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="239" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><text x="112" y="275" font-size="12" text-anchor="end">act_eltwise</text>
+<rect x="121" y="261" width="78" height="20" fill="#4a7bd0" fill-opacity="0.44" stroke="#888" stroke-width="0.5"/><text x="160" y="275" font-size="12" text-anchor="middle">10</text><rect x="201" y="261" width="78" height="20" fill="#4a7bd0" fill-opacity="0.32" stroke="#888" stroke-width="0.5"/><text x="240" y="275" font-size="12" text-anchor="middle">3</text><rect x="281" y="261" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/>
+<text x="320" y="275" font-size="12" text-anchor="middle">1</text><rect x="361" y="261" width="78" height="20" fill="#4a7bd0" fill-opacity="0.66" stroke="#888" stroke-width="0.5"/><text x="400" y="275" font-size="12" text-anchor="middle">70</text><rect x="441" y="261" width="78" height="20" fill="#4a7bd0" fill-opacity="0.34" stroke="#888" stroke-width="0.5"/><text x="480" y="275" font-size="12" text-anchor="middle">4</text>
+<rect x="521" y="261" width="78" height="20" fill="#4a7bd0" fill-opacity="0.61" stroke="#888" stroke-width="0.5"/><text x="560" y="275" font-size="12" text-anchor="middle">46</text><text x="112" y="297" font-size="12" text-anchor="end">shape_ops</text><rect x="121" y="283" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/><text x="160" y="297" font-size="12" text-anchor="middle">1</text>
+<rect x="201" y="283" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/><text x="240" y="297" font-size="12" text-anchor="middle">1</text><rect x="281" y="283" width="78" height="20" fill="#4a7bd0" fill-opacity="0.61" stroke="#888" stroke-width="0.5"/><text x="320" y="297" font-size="12" text-anchor="middle">46</text><rect x="361" y="283" width="78" height="20" fill="#4a7bd0" fill-opacity="0.90" stroke="#888" stroke-width="0.5"/>
+<text x="400" y="297" font-size="12" text-anchor="middle">519</text><rect x="441" y="283" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="283" width="78" height="20" fill="#4a7bd0" fill-opacity="0.66" stroke="#888" stroke-width="0.5"/><text x="560" y="297" font-size="12" text-anchor="middle">71</text><text x="112" y="319" font-size="12" text-anchor="end">small_out</text>
+<rect x="121" y="305" width="78" height="20" fill="#4a7bd0" fill-opacity="0.28" stroke="#888" stroke-width="0.5"/><text x="160" y="319" font-size="12" text-anchor="middle">2</text><rect x="201" y="305" width="78" height="20" fill="#4a7bd0" fill-opacity="0.28" stroke="#888" stroke-width="0.5"/><text x="240" y="319" font-size="12" text-anchor="middle">2</text><rect x="281" y="305" width="78" height="20" fill="#4a7bd0" fill-opacity="0.28" stroke="#888" stroke-width="0.5"/>
+<text x="320" y="319" font-size="12" text-anchor="middle">2</text><rect x="361" y="305" width="78" height="20" fill="#4a7bd0" fill-opacity="0.54" stroke="#888" stroke-width="0.5"/><text x="400" y="319" font-size="12" text-anchor="middle">24</text><rect x="441" y="305" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="305" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/>
+<text x="560" y="319" font-size="12" text-anchor="middle">1</text><text x="112" y="341" font-size="12" text-anchor="end">dyn_shape</text><rect x="121" y="327" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="201" y="327" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="281" y="327" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/>
+<rect x="361" y="327" width="78" height="20" fill="#4a7bd0" fill-opacity="0.23" stroke="#888" stroke-width="0.5"/><text x="400" y="341" font-size="12" text-anchor="middle">1</text><rect x="441" y="327" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><rect x="521" y="327" width="78" height="20" fill="#4a7bd0" fill-opacity="0.00" stroke="#888" stroke-width="0.5"/><text x="320" y="370" font-size="12" text-anchor="middle">셀 값 = 해당 카테고리 노드 수 (색 진하기 ∝ log(1+n)), 0은 빈 칸</text>
+</svg>
+```
+
+그림 2 — 실제 ONNX 6개에서 뽑은 커버리지 행렬. 색이 진할수록 노드가 많다. `upsample` 행이 비어 있다 — 제품에 denoise U-Net이 있다면 모델 세트에 구멍이 있다는 뜻이다.
+
+출력에서 볼 것:
+
+- `matmul_act` 8 = 4층 × 2(QKᵀ, AV). attention의 activation끼리 곱은 ASR encoder만 덮는다. 이 열을 빼면 attention 미지원 칩을 못 걸러낸다.
+- `shape_ops`가 ASR 519, LSTM 46이다. 연산은 거의 없지만 **NPU 그래프를 여러 조각으로 쪼개는** 주범이다(I5 §5.6에서 본 partition 문제). dynamic shape로 export한 ASR에서 특히 많다 — shape를 런타임에 계산하는 노드가 생기기 때문이다.
+- 처음 버전은 Identity 별칭을 처리하지 않아 `matmul_act`가 20으로 나왔다. 분류기 자체도 검증해야 한다(같은 4층 encoder의 attention matmul은 8개여야 맞다).
+
+### 2.5 제품 가중치와 proxy 모델
+
+행렬의 열(모델)에 **제품 가중치**를 붙인다. 예를 들어 Hark 같은 웨어러블이라면(추정) always-on KWS·VAD는 하루 수만 번 돌고, ASR encoder는 발화 때만, LLM FFN은 가끔이다. 그래서 "빈도 × 지연 예산 위반 시 비용"으로 가중치를 매기고, 가중치가 큰 열의 op 카테고리는 최소 두 모델이 덮도록 한다(한 모델에서만 나오면 그 모델 특유의 shape가 결과를 좌우한다).
+
+실제 모델이 기밀이라 벤더에게 줄 수 없을 때는 **proxy 모델**을 만든다.
+
+| proxy 규칙 | 내용 |
+|---|---|
+| 구조 보존 | 같은 op 종류, 같은 층 수, 같은 텐서 shape (채널 수·시퀀스 길이 그대로) |
+| 가중치 교체 | 랜덤 또는 공개 데이터로 짧게 학습한 가중치. 성능 측정에는 충분 |
+| 정확도용은 별도 | 랜덤 가중치로는 iso-accuracy를 못 잰다 → 정확도 게이트는 공개 데이터로 학습한 proxy 또는 우리 쪽에서 실제 모델로 수행 |
+| 분포 주의 | 랜덤 가중치는 activation 범위가 실제와 달라 quantizer 결과·sparsity 이득이 왜곡될 수 있음 |
+| 검증 | proxy와 실제 모델의 op 히스토그램·MAC·파라미터 수가 일치하는지 위 스크립트로 대조 |
+
+---
+
+## 3. 정확도 정규화 — iso-accuracy
+
+### 3.1 직관과 정의
+
+칩 A는 fp16, 칩 B는 int8, 칩 C는 int8 + 자체 quantizer. 속도만 비교하면 int8이 이긴다. 하지만 int8이 정확도를 5 %p 잃었다면 그건 다른 제품이다. **iso-accuracy 비교**란 "모든 후보가 같은 정확도 floor를 넘는 설정 중에서 가장 빠른(또는 가장 에너지가 적은) 설정끼리 비교"하는 것이다. MLPerf가 "fp32 기준 정확도의 99 %" 같은 목표를 두는 것과 같은 생각이다(I5 §2.6).
+
+```
+floor = acc_ref − δ          (예: δ = 1.0 %p, acc_ref = fp32 우리 eval)
+후보 k의 대표값 = min { latency(k, 설정 s) : acc(k, s) ≥ floor }
+```
+
+말로 하면, 각 칩은 자기 툴체인으로 원하는 만큼 양자화해도 되지만, floor 아래로 떨어진 설정의 속도는 "없는 숫자"로 친다. floor를 못 넘는 설정밖에 없으면 그 칩은 더 높은 정밀도(fp16, mixed precision)로 물러나서 다시 잰다.
+
+### 3.2 코드 — 각 "플랫폼"이 자기 경로로 변환
+
+무엇을 확인하나: 합성 KWS 데이터(I5와 같은 격자 무늬 방식)로 DS-CNN을 학습하고, 세 stand-in의 자기 변환 경로를 만든다 — A: ONNX fp32, B: Core ML fp16(ANE 대상), C: ORT static int8. C는 두 번 만든다: 대표 데이터 200개로 calibration(우리 방식)과, "기본 설정"처럼 작은 잡음 8개로 calibration한 것.
+
+```python
+# 합성 KWS(DS-CNN) 학습 -> 각 '플랫폼'의 자기 변환 경로로 산출물 만들기
+import torch, torch.nn as nn, numpy as np, coremltools as ct
+from onnxruntime.quantization import quantize_static, CalibrationDataReader, QuantFormat, QuantType
+torch.manual_seed(0); torch.set_num_threads(1)
+t, f = torch.arange(49.0)[:, None], torch.arange(10.0)[None, :]
+def data(n, seed, A=0.35):     # 클래스 = (시간 주파수 1~4) x (계수 방향 0~2) 격자 무늬 + N(0,1) 잡음
+    g = torch.Generator().manual_seed(seed); y = torch.randint(0, 12, (n,), generator=g)
+    ph = 2 * torch.pi * torch.rand(n, 1, 1, generator=g); a, b = (1 + y % 4)[:, None, None], (y // 4)[:, None, None]
+    return (A * torch.cos(2 * torch.pi * (a * t / 12 + b * f / 10) + ph) + torch.randn(n, 49, 10, generator=g)).unsqueeze(1), y
+def dw(c): return nn.Sequential(nn.Conv2d(c, c, 3, padding=1, groups=c), nn.BatchNorm2d(c), nn.ReLU(),
+                                nn.Conv2d(c, c, 1), nn.BatchNorm2d(c), nn.ReLU())
+net = nn.Sequential(nn.Conv2d(1, 64, (10, 4), stride=2, padding=(5, 1)), nn.BatchNorm2d(64), nn.ReLU(),
+                    *[dw(64) for _ in range(4)], nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(64, 12))
+Xtr, ytr = data(3000, 1); opt = torch.optim.Adam(net.parameters(), 2e-3)
+for ep in range(3):
+    for i in range(0, 3000, 100):
+        opt.zero_grad(); nn.functional.cross_entropy(net(Xtr[i:i+100]), ytr[i:i+100]).backward(); opt.step()
+net.eval(); x1 = torch.randn(1, 1, 49, 10)
+torch.onnx.export(net, x1, "kws_fp32.onnx", input_names=["x"], output_names=["y"], dynamo=False)
+class Calib(CalibrationDataReader):
+    def __init__(s, X): s.it = iter([{"x": X[i:i+1].numpy()} for i in range(len(X))])
+    def get_next(s): return next(s.it, None)
+quantize_static("kws_fp32.onnx", "kws_int8.onnx", Calib(data(200, 7)[0]),          # 대표 데이터 200개, per-channel
+                quant_format=QuantFormat.QDQ, per_channel=True, activation_type=QuantType.QInt8)
+quantize_static("kws_fp32.onnx", "kws_int8_naive.onnx", Calib(0.3 * torch.randn(8, 1, 49, 10)),  # 작은 잡음 8개, per-tensor
+                quant_format=QuantFormat.QDQ, per_channel=False, activation_type=QuantType.QUInt8)
+ct.convert(torch.jit.trace(net, x1), inputs=[ct.TensorType(name="x", shape=(1, 1, 49, 10))], convert_to="mlprogram",
+           compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS13).save("kws_fp16.mlpackage")
+Xte, yte = data(2000, 99); np.savez("eval.npz", X=Xte.numpy(), y=yte.numpy())
+with torch.no_grad(): print("torch fp32 eval acc:", (net(Xte).argmax(1) == yte).float().mean().item())
+```
+
+```text
+torch fp32 eval acc: 0.7804999947547913
+```
+
+### 3.3 코드 — 같은 eval 세트, 같은 하니스로 정확도와 latency
+
+무엇을 확인하나: 2000개 eval 샘플로 정확도를 재고, 같은 방식(warm-up 50, 500회, p50·p90)으로 latency를 잰다.
+
+```python
+# 각 '플랫폼'(stand-in)에서 같은 eval 세트로 정확도 + 같은 하니스로 latency p50
+import numpy as np, onnxruntime as ort, coremltools as ct, time, json
+d = np.load("eval.npz"); X, y = d["X"].astype(np.float32), d["y"]
+def ort_fn(path):
+    s = ort.InferenceSession(path, providers=["CPUExecutionProvider"]); return lambda x: s.run(None, {"x": x})[0]
+def cml_fn(cu):
+    m = ct.models.MLModel("kws_fp16.mlpackage", compute_units=cu)
+    return lambda x: list(m.predict({"x": x}).values())[0]
+PLAT = {"A_cpu_fp32":       ort_fn("kws_fp32.onnx"),
+        "B_ane_fp16":       cml_fn(ct.ComputeUnit.CPU_AND_NE),
+        "C_cpu_int8":       ort_fn("kws_int8.onnx"),
+        "C_cpu_int8_naive": ort_fn("kws_int8_naive.onnx")}
+res = {}
+for name, f in PLAT.items():
+    acc = np.mean([f(X[i:i+1]).argmax() == y[i] for i in range(len(X))])
+    for _ in range(50): f(X[:1])                                   # warm-up
+    t = []
+    for i in range(500):
+        t0 = time.perf_counter(); f(X[i:i+1]); t.append((time.perf_counter() - t0) * 1e3)
+    res[name] = (float(acc), float(np.median(t)), float(np.percentile(t, 90)))
+    print(f"{name:<17} acc {acc*100:5.1f} %   p50 {np.median(t):6.3f} ms   p90 {np.percentile(t, 90):6.3f} ms")
+json.dump(res, open("iso.json", "w"))
+```
+
+```text
+A_cpu_fp32        acc  78.0 %   p50  0.178 ms   p90  0.183 ms
+B_ane_fp16        acc  78.0 %   p50  0.123 ms   p90  0.127 ms
+C_cpu_int8        acc  78.2 %   p50  0.037 ms   p90  0.040 ms
+C_cpu_int8_naive  acc  63.6 %   p50  0.038 ms   p90  0.038 ms
+```
+
+출력에서 볼 것: 두 int8 산출물은 **속도가 같다**(0.037 vs 0.038 ms). 다른 건 정확도뿐이다 — 14 %p. 속도 숫자만 받았다면 둘을 구별할 방법이 없다. "벤더가 정확도를 우리 eval로 같이 보고하지 않으면 그 속도 숫자는 받지 않는다"는 규칙의 근거다.
+
+### 3.4 코드 — floor를 먼저 적용하고 비교
+
+```python
+# 정확도 바닥(floor)을 먼저 적용하고, 통과한 것끼리만 속도를 비교한다
+import json
+res = json.load(open("iso.json"))                 # name -> (acc, p50_ms, p90_ms)
+ref_acc, ref_ms = res["A_cpu_fp32"][0], res["A_cpu_fp32"][1]
+floor = ref_acc - 0.01                            # 규칙: fp32 기준 -1.0 %p 이내
+print(f"floor = {floor*100:.1f} %  (fp32 {ref_acc*100:.1f} % - 1.0 %p)")
+for n, (acc, p50, p90) in sorted(res.items(), key=lambda kv: kv[1][1]):
+    ok = acc >= floor
+    print(f"{n:<17} acc {acc*100:5.1f} %  p50 {p50:.3f} ms  vs A x{ref_ms/p50:4.1f}  "
+          + ("PASS" if ok else f"FAIL ({(acc-ref_acc)*100:+.1f} %p) -> 속도 숫자 무효"))
+best = {}                                         # 플랫폼(첫 글자)별: floor를 통과한 가장 빠른 설정
+for n, (acc, p50, _) in res.items():
+    if acc >= floor and p50 < best.get(n[0], ("", 1e9))[1]: best[n[0]] = (n, p50)
+print("iso-accuracy 대표값:", {k: f"{v[0]} {v[1]:.3f} ms" for k, v in sorted(best.items())})
+```
+
+```text
+floor = 77.0 %  (fp32 78.0 % - 1.0 %p)
+C_cpu_int8        acc  78.2 %  p50 0.037 ms  vs A x 4.8  PASS
+C_cpu_int8_naive  acc  63.6 %  p50 0.038 ms  vs A x 4.7  FAIL (-14.4 %p) -> 속도 숫자 무효
+B_ane_fp16        acc  78.0 %  p50 0.123 ms  vs A x 1.4  PASS
+A_cpu_fp32        acc  78.0 %  p50 0.178 ms  vs A x 1.0  PASS
+iso-accuracy 대표값: {'A': 'A_cpu_fp32 0.178 ms', 'B': 'B_ane_fp16 0.123 ms', 'C': 'C_cpu_int8 0.037 ms'}
+```
+
+```svg
+<svg viewBox="0 0 640 300" xmlns="http://www.w3.org/2000/svg">
+<line x1="90" y1="250" x2="590" y2="250" stroke="currentColor"/><line x1="90" y1="40" x2="90" y2="250" stroke="currentColor"/><line x1="90" y1="250" x2="90" y2="255" stroke="currentColor"/><text x="90" y="270" font-size="12" text-anchor="middle">0.02</text><line x1="259" y1="250" x2="259" y2="255" stroke="currentColor"/><text x="259" y="270" font-size="12" text-anchor="middle">0.05</text><line x1="387" y1="250" x2="387" y2="255" stroke="currentColor"/><text x="387" y="270" font-size="12" text-anchor="middle">0.1</text><line x1="515" y1="250" x2="515" y2="255" stroke="currentColor"/><text x="515" y="270" font-size="12" text-anchor="middle">0.2</text>
+<line x1="590" y1="250" x2="590" y2="255" stroke="currentColor"/><text x="590" y="270" font-size="12" text-anchor="middle">0.3</text><line x1="85" y1="250" x2="90" y2="250" stroke="currentColor"/><text x="80" y="254" font-size="12" text-anchor="end">60</text><line x1="85" y1="202" x2="90" y2="202" stroke="currentColor"/><text x="80" y="206" font-size="12" text-anchor="end">65</text><line x1="85" y1="155" x2="90" y2="155" stroke="currentColor"/><text x="80" y="159" font-size="12" text-anchor="end">70</text><line x1="85" y1="107" x2="90" y2="107" stroke="currentColor"/><text x="80" y="111" font-size="12" text-anchor="end">75</text>
+<line x1="85" y1="59" x2="90" y2="59" stroke="currentColor"/><text x="80" y="63" font-size="12" text-anchor="end">80</text><line x1="90" y1="87.7" x2="590" y2="87.7" stroke="#d0564a" stroke-dasharray="6 4"/><text x="95" y="104" font-size="12">정확도 floor 77.0 % (fp32 −1 %p)</text><rect x="90" y="87.7" width="500" height="162.3" fill="#d0564a" fill-opacity="0.06"/><circle cx="493.6" cy="78.2" r="6" fill="#888"/><text x="494" y="50" font-size="12" text-anchor="middle">A cpu fp32 · 0.178 ms · 78.0 %</text><circle cx="425.4" cy="78.2" r="6" fill="#4a7bd0"/><text x="425" y="106" font-size="12" text-anchor="middle">B ane fp16 · 0.123 ms · 78.0 %</text>
+<circle cx="203.6" cy="76.3" r="6" fill="#3f9a6b"/><text x="214" y="64" font-size="12" text-anchor="start">C int8 (우리 calib) · 0.037 ms · 78.2 %</text><circle cx="208.5" cy="215.6" r="6" fill="#d0564a"/><text x="219" y="204" font-size="12" text-anchor="start">C int8 (기본 calib) · 0.038 ms · 63.6 %</text>
+<text x="340" y="292" font-size="12" text-anchor="middle">p50 latency (ms, log 축) — 왼쪽일수록 빠름</text><text x="20" y="145" font-size="12" text-anchor="middle" transform="rotate(-90 20 145)">정확도 (%)</text></svg>
+```
+
+그림 3 — 실측 정확도 vs latency. 빨간 점선이 floor, 그 아래 음영은 "속도 숫자 무효" 영역이다. C의 기본 calibration 결과(빨간 점)는 가장 빠른 축에 있지만 비교에서 빠진다.
+
+### 3.5 정확도 차이에도 오차막대가 있다
+
+floor를 1 %p로 잡았는데 eval 세트가 작으면 1 %p 차이는 잡음일 수 있다. 무엇을 확인하나: 같은 2000개 샘플에 대한 **짝지은(paired) bootstrap**으로 Δacc의 95 % CI를 구한다. 짝지은 비교는 "같은 샘플에서 A는 맞고 후보는 틀린 경우"만 차이를 만들기 때문에, 두 정확도를 따로 잰 CI보다 훨씬 좁다.
+
+```python
+# 정확도 차이도 불확실하다: 같은 2000개 샘플에 대한 '짝지은(paired)' bootstrap으로 Δacc의 95 % CI
+import numpy as np, onnxruntime as ort, coremltools as ct
+d = np.load("eval.npz"); X, y = d["X"].astype(np.float32), d["y"]; rng = np.random.default_rng(2)
+def pred_ort(p):
+    s = ort.InferenceSession(p, providers=["CPUExecutionProvider"])
+    return np.array([s.run(None, {"x": X[i:i+1]})[0].argmax() for i in range(len(X))])
+m = ct.models.MLModel("kws_fp16.mlpackage", compute_units=ct.ComputeUnit.CPU_AND_NE)
+P = {"A": pred_ort("kws_fp32.onnx"), "B": np.array([list(m.predict({"x": X[i:i+1]}).values())[0].argmax() for i in range(len(X))]),
+     "C": pred_ort("kws_int8.onnx"), "C_naive": pred_ort("kws_int8_naive.onnx")}
+ca = P["A"] == y
+idx = rng.integers(0, len(y), (5000, len(y)))                 # 같은 인덱스로 A와 후보를 함께 재표본
+for k in ("B", "C", "C_naive"):
+    ck = P[k] == y; diff = (ck[idx].mean(1) - ca[idx].mean(1)) * 100
+    lo, hi = np.percentile(diff, [2.5, 97.5])
+    print(f"{k:<8} Δacc {(ck.mean() - ca.mean()) * 100:+5.2f} %p  CI [{lo:+5.2f}, {hi:+5.2f}]  "
+          f"top-1 일치율 {np.mean(P[k] == P['A']) * 100:5.1f} %  A만 맞음 {np.sum(ca & ~ck):3d}  후보만 맞음 {np.sum(~ca & ck):3d}")
+half = 1.96 * np.sqrt(ca.mean() * (1 - ca.mean()) / len(y)) * 100
+print(f"참고: A 정확도 자체의 95 % CI 반폭(비짝지음) ≈ ±{half:.1f} %p")
+```
+
+```text
+B        Δacc -0.05 %p  CI [-0.15, +0.00]  top-1 일치율 100.0 %  A만 맞음   1  후보만 맞음   0
+C        Δacc +0.15 %p  CI [-0.25, +0.55]  top-1 일치율  99.0 %  A만 맞음   6  후보만 맞음   9
+C_naive  Δacc -14.40 %p  CI [-16.45, -12.35]  top-1 일치율  70.0 %  A만 맞음 378  후보만 맞음  90
+참고: A 정확도 자체의 95 % CI 반폭(비짝지음) ≈ ±1.8 %p
+```
+
+출력에서 볼 것:
+
+- 정확도 하나의 CI 반폭은 ±1.8 %p라서, 따로 재서 비교하면 "1 %p floor"는 판정이 불가능하다. 짝지어 비교하면 C의 Δacc CI는 [−0.25, +0.55] %p로 좁아서 "floor 안"이라고 말할 수 있다.
+- **top-1 일치율**(fp32 기준 예측과 같은 비율)은 정확도보다 민감한 지표다. C는 정확도가 오히려 0.15 %p 높지만 1 %의 샘플에서 답이 바뀌었다. 칩 비교 보고서에는 Δacc CI와 일치율을 함께 쓴다(C8의 검증 지표와 같다).
+- 결정 규칙은 "Δacc 점추정 ≥ −δ"보다 "Δacc CI 하한 ≥ −δ"가 보수적이다. 어느 쪽을 쓸지도 계약서에 적는다.
+
+### 3.6 정확도로 정규화한 지표들
+
+| 지표 | 정의 | 언제 |
+|---|---|---|
+| latency @ floor | floor 통과 설정 중 최소 p50/p99 | 기본 |
+| energy @ floor | floor 통과 설정 중 최소 mJ/inference (같은 전력 경계) | 배터리 기기 |
+| 정확도 @ 예산 | latency 예산(예: 10 ms) 안에서 가장 높은 정확도 | 예산이 고정일 때 |
+| Pareto 위치 | 정확도-지연 평면의 Pareto 전선 위 여부 | 설정이 많을 때 (I5 §6) |
+
+함정: 칩마다 floor를 다른 eval 세트로 재면 무의미하다. **eval 세트·채점 스크립트·전처리는 우리가 소유하고 고정**한다. 벤더 quantizer의 calibration 데이터도 우리가 제공한다(위 C_naive처럼 "기본 calibration"이 무엇을 쓰는지 모르면 결과가 우연에 좌우된다).
+
+---
+
+## 4. 측정 층위 — 커널, 모델, end-to-end
+
+### 4.1 층위별 질문
+
+| 층 | 무엇을 재나 | 누가 주로 보여 주나 | 칩 선정에서의 쓰임 |
+|---|---|---|---|
+| 커널(microbench) | GEMM 하나, conv 하나 | 벤더 (peak에 가까운 숫자) | 원인 분석, roofline 확인 |
+| 모델 | 추론 1회 (입력 텐서 → 출력 텐서) | MLPerf, 벤더 데모 | 1차 비교 |
+| end-to-end | 센서 데이터 → 전처리 → 모델 → 후처리 → 결과 | 우리만 잴 수 있음 | 최종 판단 |
+| 시스템 | 하루 시나리오 배터리, 동시 실행 | 우리 | 제품 결정 (I1) |
+
+벤더가 커널·peak 숫자를 보여 주는 이유는 단순하다: 그게 가장 크고, 그들의 툴체인에서 가장 잘 튜닝된 경로이며, 고객 모델 없이도 낼 수 있다. 큰 GEMM은 MAC 배열을 꽉 채우고 dispatch 오버헤드가 묻힌다. 우리 모델은 작은 텐서·shape 연산·전처리가 섞여 있어서 그렇지 않다.
+
+### 4.2 코드 — 같은 두 플랫폼을 세 층에서
+
+무엇을 확인하나: 커널 층(큰 matmul 하나), 모델 층(ASR transformer, KWS, 아주 작은 IMU CNN), e2e 층(1 s 오디오 → 전처리 → KWS → softmax)에서 X(ORT CPU fp32)와 Y(Core ML NE fp16)의 순위를 본다. 먼저 커널·모델 산출물을 만든다.
+
+```python
+# 커널 층 벤치용 모델: 큰 Linear 하나 (1x512x1024 @ 1024x1024 = 537 M MAC)
+import torch, torch.nn as nn, coremltools as ct
+torch.manual_seed(0)
+mm = nn.Linear(1024, 1024, bias=False).eval(); x = torch.randn(1, 512, 1024)
+torch.onnx.export(mm, x, "mm.onnx", input_names=["x"], output_names=["y"], dynamo=False)
+ct.convert(torch.jit.trace(mm, x), inputs=[ct.TensorType(name="x", shape=x.shape)], convert_to="mlprogram",
+           compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS13).save("mm_fp16.mlpackage")
+print("ok")
+```
+
+```python
+import torch, coremltools as ct
+from zoo import SET
+for n in ["asr_enc", "imu_cnn1d"]:
+    m, shp = SET[n]; x = torch.randn(shp); m.eval()
+    torch.onnx.export(m, x, f"{n}_fixed.onnx", input_names=["x"], dynamo=False)
+    ct.convert(torch.jit.trace(m, x, check_trace=False), inputs=[ct.TensorType(name="x", shape=shp)], convert_to="mlprogram",
+               compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS13).save(f"{n}_fp16.mlpackage")
+```
+
+```python
+# 같은 두 stand-in 플랫폼(X=ORT CPU fp32, Y=Core ML CPU_AND_NE fp16)을 세 층에서 비교
+import numpy as np, onnxruntime as ort, coremltools as ct, time
+rng = np.random.default_rng(0)
+def p50(f, n=300):
+    for _ in range(30): f()
+    t = []
+    for _ in range(n): t0 = time.perf_counter(); f(); t.append(time.perf_counter() - t0)
+    return np.median(t) * 1e3
+def X(p): s = ort.InferenceSession(p, providers=["CPUExecutionProvider"]); return lambda v: s.run(None, {"x": v})[0]
+def Y(p): m = ct.models.MLModel(p, compute_units=ct.ComputeUnit.CPU_AND_NE); return lambda v: list(m.predict({"x": v}).values())[0]
+win = np.hanning(400).astype(np.float32); B = rng.random((257, 10)).astype(np.float32)   # 10-band 필터뱅크(형태만)
+def frontend(audio):                       # 1 s @16 kHz -> 49 frame x 10 log-band (양쪽 동일, CPU)
+    fr = np.lib.stride_tricks.sliding_window_view(audio, 400)[::320][:49] * win
+    return np.log(np.abs(np.fft.rfft(fr, 512)) ** 2 @ B + 1e-6).astype(np.float32)[None, None]
+audio = rng.standard_normal(16000).astype(np.float32)
+rows = [("kernel  matmul 512x1024x1024", "mm.onnx", "mm_fp16.mlpackage", (1, 512, 1024)),
+        ("model   asr transformer", "asr_enc_fixed.onnx", "asr_enc_fp16.mlpackage", (1, 100, 80)),
+        ("model   kws ds-cnn", "kws_fp32.onnx", "kws_fp16.mlpackage", (1, 1, 49, 10)),
+        ("model   imu cnn1d", "imu_cnn1d_fixed.onnx", "imu_cnn1d_fp16.mlpackage", (1, 6, 128))]
+print(f"{'level / workload':<30}{'X ms':>8}{'Y ms':>8}{'X/Y':>7}  winner")
+for name, a, b, shp in rows:
+    v = rng.standard_normal(shp).astype(np.float32); fx, fy = X(a), Y(b)
+    tx, ty = p50(lambda: fx(v)), p50(lambda: fy(v))
+    print(f"{name:<30}{tx:8.3f}{ty:8.3f}{tx/ty:7.2f}  {'Y' if ty < tx else 'X'}")
+fx, fy = X("kws_fp32.onnx"), Y("kws_fp16.mlpackage")
+post = lambda z: np.exp(z - z.max()) / np.exp(z - z.max()).sum()            # softmax 후처리
+tx = p50(lambda: post(fx(frontend(audio)))); ty = p50(lambda: post(fy(frontend(audio))))
+tf = p50(lambda: frontend(audio))
+print(f"{'e2e     audio->fe->kws->post':<30}{tx:8.3f}{ty:8.3f}{tx/ty:7.2f}  {'Y' if ty < tx else 'X'}   (front-end만 {tf:.3f} ms)")
+```
+
+```text
+level / workload                  X ms    Y ms    X/Y  winner
+kernel  matmul 512x1024x1024     2.757   0.668   4.13  Y
+model   asr transformer          1.013   0.296   3.42  Y
+model   kws ds-cnn               0.178   0.128   1.39  Y
+model   imu cnn1d                0.014   0.053   0.27  X
+e2e     audio->fe->kws->post     0.329   0.259   1.27  Y   (front-end만 0.120 ms)
+```
+
+```svg
+<svg viewBox="0 0 640 270" xmlns="http://www.w3.org/2000/svg">
+<text x="190" y="56" font-size="12" text-anchor="end">커널: matmul 512×1024×1024</text><rect x="400.0" y="40" width="176.2" height="22" fill="#4a7bd0"/><text x="582" y="56" font-size="12" text-anchor="start">×4.13</text><text x="190" y="94" font-size="12" text-anchor="end">모델: asr transformer</text><rect x="400.0" y="78" width="152.8" height="22" fill="#4a7bd0"/><text x="559" y="94" font-size="12" text-anchor="start">×3.42</text><text x="190" y="132" font-size="12" text-anchor="end">모델: kws ds-cnn</text><rect x="400.0" y="116" width="40.9" height="22" fill="#4a7bd0"/>
+<text x="447" y="132" font-size="12" text-anchor="start">×1.39</text><text x="190" y="170" font-size="12" text-anchor="end">모델: imu cnn1d</text><rect x="237.3" y="154" width="162.7" height="22" fill="#e08a3c"/><text x="406" y="170" font-size="12" text-anchor="start">×0.27</text><text x="190" y="208" font-size="12" text-anchor="end">e2e: 오디오→fe→kws→후처리</text><rect x="400.0" y="192" width="29.7" height="22" fill="#4a7bd0"/><text x="436" y="208" font-size="12" text-anchor="start">×1.27</text>
+<line x1="400" y1="30" x2="400" y2="235" stroke="currentColor"/><line x1="200.0" y1="232" x2="200.0" y2="238" stroke="currentColor"/><text x="200.0" y="252" font-size="12" text-anchor="middle">0.2</text><line x1="313.9" y1="232" x2="313.9" y2="238" stroke="currentColor"/><text x="313.9" y="252" font-size="12" text-anchor="middle">0.5</text><line x1="400.0" y1="232" x2="400.0" y2="238" stroke="currentColor"/><text x="400.0" y="252" font-size="12" text-anchor="middle">1</text><line x1="486.1" y1="232" x2="486.1" y2="238" stroke="currentColor"/><text x="486.1" y="252" font-size="12" text-anchor="middle">2</text>
+<line x1="600.0" y1="232" x2="600.0" y2="238" stroke="currentColor"/><text x="600.0" y="252" font-size="12" text-anchor="middle">5</text><text x="301" y="22" font-size="12" text-anchor="middle">← X(ORT CPU) 승</text><text x="519" y="22" font-size="12" text-anchor="middle">Y(Core ML NE) 승 →</text>
+<text x="400" y="267" font-size="12" text-anchor="middle">X/Y latency 비율 (log 축, 1보다 크면 Y가 빠름)</text></svg>
+```
+
+그림 4 — 실측 X/Y 비율(log 축). 커널에서 Y가 4.1배 빠르지만, 작은 IMU 모델에서는 X가 3.7배(1/0.27) 빠르다 — 순위가 뒤집혔다. e2e에서는 KWS 모델 층의 1.39배가 1.27배로 줄었다.
+
+출력에서 볼 것:
+
+- **커널 4.13배 → 모델 1.39배 → e2e 1.27배**. 층이 내려갈수록 가속기가 없는 부분(dispatch, 전처리, 후처리)이 커지면서 비율이 1로 수렴한다. 이것이 Amdahl의 법칙이다.
+- **IMU 모델에서 순위 역전**: 0.014 ms짜리 모델은 연산보다 "Core ML 호출 1회"의 고정 비용이 크다. NPU의 고정 오버헤드(드라이버 호출, 입력 복사, 동기화)는 작은 always-on 모델에서 치명적이다. 웨어러블의 always-on 모델 대부분이 이 크기다.
+- 커널 숫자로 칩을 고르면 "transformer 계열은 Y"까지는 맞지만 "IMU·VAD도 Y"는 틀린다.
+
+### 4.3 손계산 — e2e 비율 예측
+
+```
+e2e_X ≈ fe + model_X + post = 0.120 + 0.178 + p
+e2e_Y ≈ fe + model_Y + post = 0.120 + 0.128 + p
+p ≈ 0 이면  0.298 / 0.248 ≈ 1.20
+실측        0.329 / 0.259 ≈ 1.27
+```
+
+말로 하면, 공통 부분(fe)이 클수록 비율은 1에 가까워진다. 예측 1.20과 실측 1.27의 차이는 Python 호출·배열 변환 같은 측정 안 된 오버헤드다 — e2e는 **재야** 하는 이유다. 실제 칩에서는 전처리가 DSP에, 모델이 NPU에 있어 둘 사이의 DMA·동기화 비용까지 들어간다(I4).
+
+### 4.4 어떤 층을 믿나
+
+- **결정은 e2e(그리고 시스템) 층으로**, **원인 분석은 커널 층으로**. 커널 숫자는 "이 칩이 이론상 얼마나 빠를 수 있나"(상한), e2e 숫자는 "우리 제품에서 얼마나 빠른가"(실제)다.
+- 커널 층과 모델 층의 비율이 크게 다르면 그 차이 자체가 정보다: fallback, partition, dispatch, 레이아웃 변환(I5 §5.6, F8).
+- 커널 벤치를 쓸 때는 **우리 모델에 실제로 나오는 shape**로 잰다(2.4절 행렬에서 뽑는다). 1024×1024 정사각 GEMM은 우리 모델에 없다.
+
+---
+
+## 5. 통계 — 칩 간 비율의 신뢰구간
+
+### 5.1 변동의 계층
+
+칩 비교 숫자 하나에는 네 겹의 흔들림이 들어 있다.
+
+```
+샘플 (같은 run 안의 반복)        ← 캐시, 인터럽트, 스케줄링
+  └ run (세션 생성·로드 후 측정)   ← 메모리 배치, 클럭 상태, 코어 배정
+     └ 세션/날짜 (다른 시각·다른 날) ← 배경 부하, 온도, 펌웨어 상태
+        └ unit (같은 모델의 다른 칩)  ← 공정 산포(leakage, DVFS bin), 보드 차이
+```
+
+I5 §7.2는 샘플 층 bootstrap이 run 사이 흔들림을 못 본다는 것을 보였다. 칩 비교에서는 한 단계 더 나가서 **비율**의 CI를, **위 계층을 존중하며** 구해야 한다. SSD 양산 시험에서 "드라이브 1대로 QoS를 판정하지 않는다"와 같은 이유다.
+
+### 5.2 코드 — run을 교대로 측정
+
+무엇을 확인하나: X와 Y를 12 run씩, 순서를 XY/YX로 번갈아(시간에 따른 변화가 양쪽에 고르게 들어가도록), run마다 세션을 새로 만들어 200회씩 잰다.
+
+```python
+# X(ORT CPU fp32) vs Y(Core ML NE fp16), KWS 모델: 12 run, 순서를 XY / YX로 번갈아, run마다 세션을 새로 만든다
+import numpy as np, onnxruntime as ort, coremltools as ct, time
+v = np.random.default_rng(0).standard_normal((1, 1, 49, 10)).astype(np.float32)
+def make(p):
+    if p == "X":
+        s = ort.InferenceSession("kws_fp32.onnx", providers=["CPUExecutionProvider"]); return lambda: s.run(None, {"x": v})
+    m = ct.models.MLModel("kws_fp16.mlpackage", compute_units=ct.ComputeUnit.CPU_AND_NE); return lambda: m.predict({"x": v})
+R = {"X": [], "Y": []}
+for r in range(12):
+    for p in ("X", "Y") if r % 2 == 0 else ("Y", "X"):          # 순서도 번갈아 (ABBA)
+        f = make(p)
+        for _ in range(30): f()                                  # warm-up
+        t = []
+        for _ in range(200): t0 = time.perf_counter(); f(); t.append((time.perf_counter() - t0) * 1e3)
+        R[p].append(t); time.sleep(0.5)
+X, Y = np.array(R["X"]), np.array(R["Y"]); np.savez("runs.npz", X=X, Y=Y)
+for n, A in (("X", X), ("Y", Y)):
+    med = np.median(A, axis=1)
+    print(f"{n}: run별 p50 {np.round(med, 3)}  run 간 CoV {med.std(ddof=1) / med.mean() * 100:.1f} %")
+```
+
+```text
+X: run별 p50 [0.189 0.237 0.262 0.259 0.258 0.257 0.264 0.252 0.262 0.29  0.245 0.263]  run 간 CoV 9.4 %
+Y: run별 p50 [0.13  0.127 0.129 0.127 0.127 0.128 0.125 0.126 0.127 0.126 0.129 0.128]  run 간 CoV 1.1 %
+```
+
+출력에서 볼 것: Y는 run 간 CoV 1.1 %로 안정적인데, X는 첫 run 0.189 ms 이후 0.24~0.29 ms로 올라갔다. 3.3절과 4.2절에서 같은 X-KWS가 0.178 ms였던 것과도 다르다. 원인은 이 Mac에서 확정하지 못했다(코어 배정, 배경 부하, run 사이 0.5 s sleep 후의 클럭 상태 등이 후보). **확정 못 한 변동이 있다는 사실 자체를 보고서에 쓴다.**
+
+### 5.3 코드 — 비율의 CI: 샘플만 vs 계층 bootstrap
+
+무엇을 확인하나: X/Y 비율(run별 p50의 평균끼리)의 95 % CI를 두 방법으로 구한다. (a) 2400개 샘플을 한 통에 붓고 재표본, (b) run을 먼저 복원추출하고 그 안에서 샘플을 복원추출(계층 bootstrap). run 수를 3, 6, 12로 바꿔 본다.
+
+```python
+# X/Y latency 비율(p50 기준)의 95 % CI: (a) 샘플만 재표본 vs (b) run을 먼저 재표본(계층 bootstrap)
+import numpy as np
+d = np.load("runs.npz"); X, Y = d["X"], d["Y"]; rng = np.random.default_rng(1); B = 4000
+def naive():                                    # 2400개 샘플을 한 통에 붓고 재표본
+    x, y = X.ravel(), Y.ravel()
+    return np.median(x[rng.integers(0, x.size, (B, x.size))], 1) / np.median(y[rng.integers(0, y.size, (B, y.size))], 1)
+def hier(A):                                    # run을 복원추출 -> 각 run 안에서 샘플 복원추출 -> run p50의 평균
+    R, N = A.shape; ri = rng.integers(0, R, (B, R)); si = rng.integers(0, N, (B, R, N))
+    return np.median(A[ri[..., None], si], axis=2).mean(axis=1)
+def ci(r): return np.percentile(r, [2.5, 97.5])
+pt = np.median(X, 1).mean() / np.median(Y, 1).mean()
+for name, r in (("naive (샘플만)", naive()), ("계층 (run→샘플)", hier(X) / hier(Y))):
+    lo, hi = ci(r); print(f"{name:<16} X/Y = {pt:.2f}  95% CI [{lo:.2f}, {hi:.2f}]  폭 {hi - lo:.3f}")
+for k in (3, 6, 12):                            # run 수를 줄이면 CI가 얼마나 넓어지나 (앞 k개 run만 사용)
+    Xs, Ys = X[:k], Y[:k]; r = hier(Xs) / hier(Ys); lo, hi = ci(r)
+    print(f"  run {k:>2}개: X/Y = {np.median(Xs, 1).mean() / np.median(Ys, 1).mean():.2f}  CI [{lo:.2f}, {hi:.2f}]")
+```
+
+```text
+naive (샘플만)      X/Y = 1.99  95% CI [1.92, 2.03]  폭 0.110
+계층 (run→샘플)      X/Y = 1.99  95% CI [1.88, 2.12]  폭 0.236
+  run  3개: X/Y = 1.79  CI [1.48, 2.04]
+  run  6개: X/Y = 1.90  CI [1.72, 2.05]
+  run 12개: X/Y = 1.99  CI [1.88, 2.11]
+```
+
+```svg
+<svg viewBox="0 0 640 260" xmlns="http://www.w3.org/2000/svg">
+<text x="240" y="45" font-size="12" text-anchor="end">A: 샘플만 bootstrap, 12 run</text><line x1="492.2" y1="40" x2="529.2" y2="40" stroke="#888" stroke-width="3"/><line x1="492.2" y1="34" x2="492.2" y2="46" stroke="#888" stroke-width="2"/><line x1="529.2" y1="34" x2="529.2" y2="46" stroke="#888" stroke-width="2"/><circle cx="515.7" cy="40" r="5" fill="#888"/><text x="240" y="81" font-size="12" text-anchor="end">B: 계층 bootstrap, run 3개</text><line x1="344.2" y1="76" x2="532.5" y2="76" stroke="#4a7bd0" stroke-width="3"/><line x1="344.2" y1="70" x2="344.2" y2="82" stroke="#4a7bd0" stroke-width="2"/><line x1="532.5" y1="70" x2="532.5" y2="82" stroke="#4a7bd0" stroke-width="2"/>
+<circle cx="448.5" cy="76" r="5" fill="#4a7bd0"/><text x="240" y="117" font-size="12" text-anchor="end">C: 계층 bootstrap, run 6개</text><line x1="424.9" y1="112" x2="535.9" y2="112" stroke="#4a7bd0" stroke-width="3"/><line x1="424.9" y1="106" x2="424.9" y2="118" stroke="#4a7bd0" stroke-width="2"/><line x1="535.9" y1="106" x2="535.9" y2="118" stroke="#4a7bd0" stroke-width="2"/><circle cx="485.5" cy="112" r="5" fill="#4a7bd0"/><text x="240" y="153" font-size="12" text-anchor="end">D: 계층 bootstrap, run 12개</text>
+<line x1="478.7" y1="148" x2="559.5" y2="148" stroke="#4a7bd0" stroke-width="3"/><line x1="478.7" y1="142" x2="478.7" y2="154" stroke="#4a7bd0" stroke-width="2"/><line x1="559.5" y1="142" x2="559.5" y2="154" stroke="#4a7bd0" stroke-width="2"/><circle cx="515.7" cy="148" r="5" fill="#4a7bd0"/><text x="240" y="189" font-size="12" text-anchor="end">E: 다른 시각의 한 세션 (4절)</text><circle cx="313.9" cy="184" r="5" fill="#e08a3c"/><line x1="250.0" y1="215" x2="250.0" y2="221" stroke="currentColor"/><text x="250.0" y="236" font-size="12" text-anchor="middle">1.2</text>
+<line x1="317.3" y1="215" x2="317.3" y2="221" stroke="currentColor"/><text x="317.3" y="236" font-size="12" text-anchor="middle">1.4</text><line x1="384.5" y1="215" x2="384.5" y2="221" stroke="currentColor"/><text x="384.5" y="236" font-size="12" text-anchor="middle">1.6</text><line x1="451.8" y1="215" x2="451.8" y2="221" stroke="currentColor"/><text x="451.8" y="236" font-size="12" text-anchor="middle">1.8</text><line x1="519.1" y1="215" x2="519.1" y2="221" stroke="currentColor"/><text x="519.1" y="236" font-size="12" text-anchor="middle">2.0</text><line x1="586.4" y1="215" x2="586.4" y2="221" stroke="currentColor"/><text x="586.4" y="236" font-size="12" text-anchor="middle">2.2</text>
+<line x1="250" y1="215" x2="620" y2="215" stroke="currentColor"/><text x="435" y="254" font-size="12" text-anchor="middle">X/Y latency 비율 (점 = 추정치, 막대 = 95 % CI)</text></svg>
+```
+
+그림 5 — 같은 데이터, 다른 CI. 샘플만 재표본한 CI(회색)는 계층 CI의 절반 폭이다. run이 적으면 CI가 넓다. 그리고 다른 시각에 잰 한 세션의 추정치(주황, 4.2절의 1.39)는 어떤 CI에도 들어가지 않는다.
+
+출력에서 볼 것:
+
+- 샘플만 재표본하면 CI 폭이 0.110으로 **두 배 과신**한다. run 간 변동이 큰 X 때문이다.
+- run 3개로는 [1.48, 2.04] — "Y가 1.5배에서 2배 빠르다" 정도밖에 말 못 한다.
+- 가장 중요한 것: 4.2절 같은 비교에서 X/Y는 1.39, 3.3절 숫자로는 0.178/0.123 = 1.45였다. 12 run 계층 CI [1.88, 2.12]도 **세션 간 변동**은 덮지 못한다. 칩 선정 보고서의 CI는 "몇 run, 몇 세션, 몇 unit"을 반드시 함께 쓴다: 예) `X/Y = 1.99 [1.88, 2.12] (12 run · 1 세션 · 1 unit)`.
+
+### 5.4 unit 간 산포 — 여기서는 잴 수 없지만 계획은 세운다
+
+같은 칩 모델이라도 개체마다 leakage, DVFS bin, 메모리 타이밍, 보드 부품이 다르다. 평가 킷 한 대로 고른 칩이 양산품 평균과 다를 수 있다. 이 Mac은 한 대뿐이라 unit 간 산포는 **잴 수 없다** — 가정값으로 필요한 unit 수를 계획한다.
+
+```
+log(X/Y)의 분산 ≈ (σu,X² + σr,X²/R)/n  +  (σu,Y² + σr,Y²/R)/n
+CI 반폭(비율, %) ≈ exp(1.96·√분산) − 1
+σu = unit 간 CoV(가정), σr = run 간 CoV(실측), R = unit당 run 수, n = 칩당 unit 수
+```
+
+말로 하면, unit을 늘리면 두 항이 모두 줄고, run을 늘리면 run 항만 준다. unit 산포가 크면 run을 아무리 늘려도 소용없다.
+
+```python
+# 칩 비교에 기기(unit)가 몇 대 필요한가: log(X/Y)의 95 % CI 반폭 ≈ 1.96·√(Vx/n + Vy/n)
+import numpy as np
+run_cov = {"X": 0.094, "Y": 0.011}                # 위 실측: run 간 CoV (한 기기 안)
+R = 5                                             # 기기당 run 수
+print("unit CoV  " + "".join(f"  n={n:<3}" for n in (1, 2, 3, 5, 10)) + "   (값 = 비율 CI 반폭, %)")
+for su in (0.00, 0.02, 0.05, 0.08):               # 기기 간 산포 가정 (여기서는 잴 수 없음)
+    row = []
+    for n in (1, 2, 3, 5, 10):
+        v = sum(su**2 + c**2 / R for c in run_cov.values()) / n
+        row.append((np.exp(1.96 * np.sqrt(v)) - 1) * 100)
+    print(f"  {su*100:4.0f} %  " + "".join(f"{h:7.1f}" for h in row))
+```
+
+```text
+unit CoV    n=1    n=2    n=3    n=5    n=10    (값 = 비율 CI 반폭, %)
+     0 %      8.6    6.0    4.9    3.8    2.7
+     2 %     10.5    7.3    5.9    4.6    3.2
+     5 %     17.5   12.1    9.8    7.5    5.2
+     8 %     26.7   18.2   14.6   11.2    7.8
+```
+
+출력에서 볼 것: unit 산포를 5 %로 가정하면, 칩당 3대로 ±10 %, 5대로 ±7.5 % 정도다. "두 칩 차이가 20 % 이상이면 결정에 충분"이라는 기준을 미리 정했다면 칩당 3대로 충분하고, "10 % 차이도 구분해야 한다"면 5~10대가 필요하다. 평가 킷이 비싸면 **차이가 작은 후보끼리의 결정은 측정이 아니라 다른 기준(가격, 툴체인)으로 하겠다**고 미리 정하는 것도 방법이다.
+
+### 5.5 실무 규칙 요약
+
+- 칩당 최소: unit 2~3대 × 세션 2회(다른 날) × run 5회 × 샘플 200회 이상. p99를 보고하려면 run당 샘플을 늘린다(I5 §1.4).
+- 측정 순서는 칩·조건을 **교대**로(XYYX…), 온도 조건은 같게.
+- 보고는 비율 + 계층 CI + 측정 구조(run·세션·unit 수). 단일 숫자 금지.
+- unit 간 산포를 직접 못 재면 "가정값 σu = 5 %"처럼 **가정을 표에 적는다**.
+
+---
+
+## 6. 툴체인 노력 정규화
+
+### 6.1 직관
+
+칩 비교는 사실 "칩 + 툴체인 + 엔지니어 시간"의 비교다. 성숙한 툴체인은 out-of-box로 좋은 결과를 내고, 미성숙한 툴체인은 2주 튜닝 후에야 같은 결과를 낸다. 양산 일정에는 그 2주가 들어간다. 그래서 숫자 두 개를 쓴다: **out-of-box(OOB)** 와 **tuned**, 그리고 그 사이에 들어간 **노력**.
+
+### 6.2 stand-in 실측으로 보는 역전
+
+3절의 숫자를 "플랫폼" 단위로 다시 묶는다: X = ORT CPU 경로(A: fp32, C: int8), Y = Core ML 경로(B: fp16).
+
+| 플랫폼 | OOB 설정 | OOB p50 | tuned 설정 | tuned p50 | 들어간 노력 |
+|---|---|---|---|---|---|
+| X | int8 기본 calib → floor 실패 → fp32로 후퇴 | 0.178 ms | int8, 대표 데이터 calib, per-channel | 0.037 ms | calibration 세트 구성 + quantizer 옵션 탐색 |
+| Y | fp16 기본 변환 | 0.123 ms | (튜닝 안 함) | 0.123 ms | 0 |
+
+```svg
+<svg viewBox="0 0 640 210" xmlns="http://www.w3.org/2000/svg">
+<text x="150" y="55" font-size="12" text-anchor="end">플랫폼 X (CPU 계열)</text><line x1="203.5" y1="50" x2="529.5" y2="50" stroke="#888" stroke-width="3"/><circle cx="529.5" cy="50" r="7" fill="none" stroke="#4a7bd0" stroke-width="2.5"/><circle cx="203.5" cy="50" r="6" fill="#3f9a6b"/><text x="204" y="74" font-size="12">OOB fp32 → tuned int8 (+calib 수정)</text><text x="150" y="115" font-size="12" text-anchor="end">플랫폼 Y (NPU 계열)</text>
+<line x1="452.8" y1="110" x2="452.8" y2="110" stroke="#888" stroke-width="3"/><circle cx="452.8" cy="110" r="7" fill="none" stroke="#4a7bd0" stroke-width="2.5"/><circle cx="452.8" cy="110" r="6" fill="#3f9a6b"/><text x="453" y="134" font-size="12">OOB fp16 = tuned (튜닝 안 함)</text><line x1="160.0" y1="160" x2="160.0" y2="166" stroke="currentColor"/><text x="160.0" y="180" font-size="12" text-anchor="middle">0.03</text><line x1="266.0" y1="160" x2="266.0" y2="166" stroke="currentColor"/><text x="266.0" y="180" font-size="12" text-anchor="middle">0.05</text>
+<line x1="409.9" y1="160" x2="409.9" y2="166" stroke="currentColor"/><text x="409.9" y="180" font-size="12" text-anchor="middle">0.1</text><line x1="553.7" y1="160" x2="553.7" y2="166" stroke="currentColor"/><text x="553.7" y="180" font-size="12" text-anchor="middle">0.2</text><line x1="160" y1="160" x2="600" y2="160" stroke="currentColor"/><circle cx="190" cy="16" r="6" fill="none" stroke="#4a7bd0" stroke-width="2.5"/><text x="202" y="20" font-size="12">out-of-box</text><circle cx="300" cy="16" r="6" fill="#3f9a6b"/><text x="312" y="20" font-size="12">tuned (floor 통과)</text>
+<text x="380" y="202" font-size="12" text-anchor="middle">KWS p50 latency (ms, log 축) — OOB로는 Y가 1.4배 빠르고, tuned로는 X가 3.3배 빠르다</text></svg>
+```
+
+그림 6 — 실측 KWS p50. OOB로는 Y가 1.4배(0.178/0.123) 빠르고, X를 튜닝한 뒤에는 X가 3.3배(0.123/0.037) 빠르다. Y에는 같은 노력을 들이지 않았으므로 이 비교는 아직 공정하지 않다.
+
+말로 하면, "어느 칩이 빠른가"의 답이 **누가 얼마나 튜닝했나**에 따라 뒤집혔다. 공정하게 하려면 Y에도 같은 시간(예: 같은 일수)을 주거나, 최소한 "Y는 미튜닝"을 표에 박아 둔다.
+
+### 6.3 노력 장부(effort ledger)
+
+| 항목 | 기록할 것 | 예 |
+|---|---|---|
+| 시간 | 플랫폼별 엔지니어 시간 (시간 단위) | X: 6 h, Y: 0 h |
+| 변경 | 모델 그래프 변경, quantizer 옵션, 컴파일 플래그, op 교체 | "LayerNorm → 분해", "per-channel on" |
+| 벤더 개입 | 벤더 엔지니어가 한 일, 비공개 툴 사용 여부 | "벤더 FAE가 custom kernel 제공" |
+| 재현성 | 우리 팀이 그 결과를 혼자 재현할 수 있나 | 예/아니오 |
+| 지원 의존 | 공개 SDK로 가능한가, NDA·베타 툴이 필요한가 | "베타 컴파일러 2.3b 필요" |
+
+규칙:
+
+- **벤더-tuned 숫자는 별도 열로, 깃발을 단다.** 벤더가 우리 모델을 손으로 튜닝한 결과는 "이 칩의 가능성"이지 "우리 팀이 낼 수 있는 숫자"가 아니다. 우리가 재현하면 깃발을 뗀다.
+- 시간 상자(time-box)를 정한다: 예) 칩당 OOB 1일 + 튜닝 3일. 상자 안에서 얻은 최선이 tuned 열이다.
+- 노력 자체가 M1 평가 기준표의 "툴체인 성숙도" 점수 근거가 된다.
+
+---
+
+## 7. sustained·열·전력 — 평가 킷에서의 프로토콜
+
+K3(전력 측정 통계, paired 설계)와 K4(sustained·열 방법론)의 방법을 그대로 쓴다. 칩 **비교**에서 추가로 맞춰야 할 것만 정리한다.
+
+| 항목 | 규칙 | 평가 킷 함정 |
+|---|---|---|
+| 전력 경계 | 모든 후보를 같은 경계에서: (a) SoC 코어 레일 합, (b) 보드 입력 전력 둘 다 가능하면 둘 다 | 킷마다 측정 가능한 레일이 다르다. 한 킷은 NPU 레일만, 다른 킷은 보드 전체만 노출되면 비교 불가 → 공통 분모(보드 입력)로 내려간다 |
+| 기준선 | idle 전력을 같은 상태(같은 주변장치 on/off)에서 재고 뺀다 | 디버거, LED, USB-UART 브리지가 수십 mW. 끄거나 양쪽 같게 |
+| 지표 | energy/inference = (활성 전력 − idle) × 시간, 그리고 duty-cycle 반영한 평균 전력 | always-on 모델은 추론 에너지보다 **idle·wake 비용**이 지배할 수 있다 (D7) |
+| iso-accuracy | 에너지도 floor 통과 설정에서 잰다 | int8 에너지를 fp16 정확도와 짝짓지 않는다 |
+| sustained | 같은 시작 온도(예: 25 °C ±1), 같은 지속 시간, 마지막 구간의 p50/p99와 클럭 기록 | 킷의 방열판·팬이 제품 외장보다 훨씬 좋다. 열 결과는 "킷 조건"으로 표시하고, 가능하면 방열판 제거·밀폐 박스 조건을 추가 |
+| 순서 | 칩·조건 교대, 각 측정 전 냉각 대기 | 직전 측정의 열이 다음 측정에 남는다 |
+| 클럭·전원 모드 | 각 칩의 "제품에서 쓸" 전원 모드로. performance 모드 숫자는 별도 표시 | 벤더 데모는 보통 최고 성능 모드 |
+
+손계산 예: 칩 P가 KWS를 0.4 ms에 120 mW(활성 − idle), 칩 Q가 0.9 ms에 45 mW로 처리한다면(가상 숫자)
+
+```
+E_P = 120 mW × 0.4 ms = 48 µJ
+E_Q =  45 mW × 0.9 ms = 40.5 µJ
+```
+
+말로 하면, P가 2배 이상 빠르지만 추론당 에너지는 Q가 적다. 지연 예산(예: 10 ms) 안에 둘 다 들어가면 웨어러블에서는 Q가 낫다 — 단, 두 숫자가 같은 전력 경계·같은 floor에서 잰 것일 때만.
+
+---
+
+## 8. 평가 보고서 템플릿 — 가상의 비교로 채운 예
+
+아래는 **가상의** 칩 세 개(P: NPU 있는 Cortex-A SoC, Q: Cortex-M55 + Ethos-U 급 MCU, R: DSP 중심 SoC)를 웨어러블 음성 워크로드로 비교한 보고서 예다. 숫자는 모두 지어낸 예시이며 실제 제품과 무관하다. 구조를 보는 용도다.
+
+### 8.1 요약 (첫 단락)
+
+> 권고: always-on 층(KWS·VAD)은 Q, 발화 층(ASR encoder)은 P. R은 LSTM 미지원과 툴체인 미성숙으로 제외. 근거: iso-accuracy(δ = 1 %p) 기준 e2e p50과 energy/inference, 칩당 3 unit · 2 세션의 계층 CI. 주요 불확실성: Q의 결과 일부는 벤더-tuned(재현 진행 중), 열 시험은 킷 방열 조건.
+
+### 8.2 시나리오
+
+| 워크로드 | 모델 (세트 v1.2) | 시나리오 | 경계 | 지연 예산 |
+|---|---|---|---|---|
+| KWS | DS-CNN, 49×10 | stream, 20 ms hop, batch 1 | 오디오 버퍼 → posterior | p99 ≤ 10 ms |
+| VAD | LSTM 2층 | stream, 10 ms hop | 프레임 → 판정 | p99 ≤ 5 ms |
+| ASR encoder | transformer 4층 | 발화 1 s 단위, batch 1 | log-mel → logits | p90 ≤ 150 ms |
+| IMU | 1D CNN | 2.5 s 창, 50 Hz | 샘플 버퍼 → 클래스 | p99 ≤ 20 ms |
+
+### 8.3 환경·버전 매트릭스 (F8 연결)
+
+| 항목 | P | Q | R |
+|---|---|---|---|
+| 보드 | 평가 킷 rev B ×3 | 평가 킷 rev A ×3 | 평가 킷 ×2 |
+| SDK / 컴파일러 | SDK 2.x (공개) | 컴파일러 x.y (공개) + 벤더 패치 | SDK 1.x (베타, NDA) |
+| 런타임 | 벤더 런타임 | TFLM + NPU delegate | 벤더 런타임 |
+| 전원 모드 | 제품 모드(균형) | 제품 모드 | 기본 |
+| 측정 경계 | 보드 입력 + 코어 레일 | 보드 입력 | 보드 입력 |
+| 모델 세트 해시 | 동일 | 동일 | 동일 |
+
+### 8.4 정확도 게이트 (iso-accuracy)
+
+| 워크로드 | 기준(fp32) | P | Q | R |
+|---|---|---|---|---|
+| KWS | 94.1 % | int8 −0.3 %p [−0.6, 0.0] PASS | int8 −0.5 %p [−0.9, −0.1] PASS | int8 −2.4 %p FAIL → int16 −0.2 %p PASS |
+| VAD | F1 0.91 | int8 PASS | int8 PASS | 미지원 (LSTM) |
+| ASR enc | CER 8.2 % | int8 +0.3 %p PASS | 메모리 초과 | fp16 PASS |
+
+### 8.5 성능 결과 (floor 통과 설정, e2e, 계층 CI)
+
+| 워크로드 | P p50 / p99 | Q p50 / p99 | R p50 / p99 | 비율 (Q/P, p50) |
+|---|---|---|---|---|
+| KWS | 1.9 / 2.6 ms | 2.4 / 2.9 ms | 3.8 / 5.1 ms | 1.26 [1.15, 1.39] |
+| VAD | 0.9 / 1.4 ms | 0.7 / 0.9 ms | — | 0.78 [0.70, 0.88] |
+| ASR enc | 41 / 47 ms | — | 96 / 120 ms | — |
+
+### 8.6 전력·열
+
+| 항목 | P | Q | R |
+|---|---|---|---|
+| KWS energy/inference (보드 입력, idle 차감) | 310 µJ [280, 345] | 95 µJ [85, 108] | 420 µJ |
+| always-on 평균 전력 (KWS+VAD, duty 반영) | 14 mW | 3.1 mW | 19 mW |
+| ASR 10분 sustained 마지막 1분 p50 / 처음 1분 | 1.18× (킷 방열) | — | 1.05× |
+
+### 8.7 노력
+
+| 칩 | OOB 결과 | tuned 결과 | 시간 | 벤더 개입 | 재현 |
+|---|---|---|---|---|---|
+| P | KWS 2.3 ms | 1.9 ms | 1.5일 | 없음 | 예 |
+| Q | KWS 4.1 ms | 2.4 ms | 3일 | custom kernel 1개 (벤더-tuned) | 진행 중 |
+| R | KWS FAIL(int8) | 3.8 ms(int16) | 4일 | 베타 컴파일러 | 예 |
+
+### 8.8 caveat와 권고
+
+- Q의 tuned 숫자는 벤더 custom kernel에 의존한다. 우리 재현 전까지 OOB 4.1 ms를 보수 값으로 쓴다(그래도 예산 안).
+- 열 결과는 킷 방열판 조건이다. 제품 외장 조건 재시험을 EVT 전에 계획한다.
+- unit 간 산포는 칩당 3대로 측정했다. 칩 간 차이가 20 % 미만인 항목(KWS P vs Q)은 결정에 쓰지 않는다.
+- 권고 문단은 맨 위(8.1)에 쓰고, 본문은 그 근거 순서대로 배치한다.
+
+---
+
+## 9. 임베디드 관점에서 다시 보기
+
+- **측정 지점을 기기 안에 둔다.** 평가 킷에서는 호스트 Python의 `perf_counter`가 아니라 기기의 cycle counter(Cortex-M의 DWT `CYCCNT`, Hexagon의 pcycle 등)나 GPIO 토글 + 로직 분석기로 잰다. 그래야 호스트 통신이 측정에 섞이지 않는다. 이 노트의 Core ML 숫자에는 Python 호출 오버헤드가 들어 있다 — 실제 칩 비교라면 이건 "측정 경계 위반"이다.
+- **경계를 그림으로 합의**한다: "마이크 DMA half-buffer 인터럽트 → 결과 GPIO high"처럼 하드웨어 이벤트로 정의하면 칩마다 같은 경계를 쓸 수 있다.
+- **always-on 모델은 dispatch·wake 비용이 지배**한다(4.2절 IMU 역전). NPU를 깨우는 비용, 전원 도메인 on/off, 가중치를 SRAM에 다시 올리는 비용을 e2e에 포함한다.
+- **메모리 상주 조건을 같게**: 한 칩은 가중치가 SRAM에 다 들어가고 다른 칩은 외부 PSRAM/DRAM에서 읽으면, 같은 "모델 층" 숫자라도 의미가 다르다. 보고서에 상주 위치를 적는다(K1, D2).
+- **같은 펌웨어 하니스**: 각 칩에서 하니스(입력 주입, 타이밍, 결과 덤프)를 같은 소스로 빌드한다. J6의 HIL 하니스를 재사용하면 선정 단계 측정이 그대로 양산 회귀 시험의 기준선이 된다.
+
+---
+
+## 10. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| 속도만 받고 정확도는 안 봄 | 선정 후 int8 정확도가 floor 미달, 일정 지연 | 벤더 quantizer·calibration 차이 | 우리 eval 세트로 iso-accuracy 게이트 먼저 |
+| 벤더 숫자와 우리 숫자를 한 표에 섞음 | 칩 간 차이가 이상하게 큼 | 경계·시나리오·노력이 다름 | 공정성 계약, 벤더-tuned 깃발 |
+| 커널 벤치로 결정 | 실제 모델에서 이점이 사라지거나 역전 | dispatch·전처리·fallback | e2e로 결정, 커널은 원인 분석용 |
+| 모델 하나로 비교 | 다른 워크로드 추가 후 칩이 안 맞음 | op 커버리지 구멍 | 커버리지 행렬로 빈 행 확인 |
+| 샘플만 재표본한 CI | CI가 너무 좁고 다른 날 재면 벗어남 | run·세션·unit 변동 무시 | 계층 bootstrap, 측정 구조 명시 |
+| 킷 한 대로 결론 | 양산 칩이 예상보다 느리거나 뜨거움 | unit 산포 | 칩당 2~3대, 가정값 명시 |
+| 다른 전력 경계 | 한 칩이 비현실적으로 효율적 | NPU 레일만 측정 | 공통 경계(보드 입력)로 |
+| 킷 방열 조건을 제품 조건으로 착각 | 제품에서 throttling | 방열판·팬 | 열 결과에 조건 표시, 외장 조건 재시험 |
+| 한 칩만 오래 튜닝 | 그 칩이 이김 | 노력 불균형 | time-box, OOB/tuned 두 열 |
+
+---
+
+## 11. 면접에서 이렇게 말한다
+
+**Q.** "How do you benchmark two NPUs fairly when each has its own quantizer?"
+
+**A.** 같은 ONNX 모델과 우리 calibration 데이터를 양쪽에 주고, 각자 자기 quantizer를 쓰게 한다. 대신 결과는 우리 eval 세트와 우리 채점 스크립트로 정확도를 먼저 재고, fp32 대비 floor(예: 1 %p) 안에 들어온 설정만 속도 비교에 넣는다. floor를 못 넘는 칩은 더 높은 정밀도로 물러나서 다시 잰다. 측정 경계(전처리 포함 여부), 시나리오, 전원 모드, 전력 경계도 계약서로 고정하고, 튜닝 노력은 out-of-box와 tuned 두 열로 분리한다. 실제로 int8 산출물 두 개가 속도는 같고 정확도만 14 %p 다른 경우를 봤다 — 속도만 받았으면 구별할 수 없었다.
+
+> "I give both vendors the same ONNX model and our calibration data, and let each use its own quantizer — but then I measure accuracy myself, on our eval set with our scoring script, before I look at any latency. Only configurations within an accuracy floor, say one point below FP32, enter the speed comparison; if a chip can't meet it in INT8, it falls back to higher precision and we measure that. I also fix the measurement boundary, the scenario, the power mode and the power rail, and I report out-of-box and tuned results separately with the effort spent. I've seen two INT8 builds with identical latency that differed by fourteen points of accuracy — a speed-only number can't tell them apart."
+
+**Q.** "What's iso-accuracy comparison?"
+
+**A.** 같은 정확도 수준에서 성능을 비교하는 것이다. 각 후보의 여러 설정(fp16, int8, mixed) 중 정확도 floor를 넘는 것들만 남기고, 그중 가장 빠르거나 에너지가 적은 설정을 그 후보의 대표값으로 쓴다. MLPerf의 "기준 정확도의 99 %" 목표와 같은 생각이다. 정확도 차이 자체도 짝지은 bootstrap으로 CI를 내야 한다 — 2000개 eval이면 정확도 하나의 CI가 ±1.8 %p라서 따로 재면 1 %p floor를 판정할 수 없다.
+
+> "It means comparing performance at the same accuracy. For each candidate I keep only the configurations that meet the accuracy floor, and take the fastest — or the lowest-energy — one as that chip's number. It's the same idea as MLPerf's accuracy targets. The accuracy delta itself needs a confidence interval, ideally paired on the same samples, because with a two-thousand-sample eval set a single accuracy has about plus or minus two points of noise."
+
+**Q.** "Kernel vs end-to-end benchmarks — which do you trust?"
+
+**A.** 결정은 e2e, 원인 분석은 커널이다. 커널 벤치는 칩의 상한을 보여 주지만 dispatch, 작은 텐서, shape 연산, 전처리, 메모리 이동을 빼먹는다. 같은 두 backend로 재 보니 큰 matmul에서는 4.1배 차이가 KWS 모델에서 1.4배, e2e에서 1.27배로 줄었고, 아주 작은 IMU 모델에서는 순위가 뒤집혔다. 커널 숫자와 모델 숫자의 차이가 크면 그건 fallback이나 partition 같은 문제를 가리키는 신호로 쓴다.
+
+> "I decide on end-to-end numbers and use kernel numbers for diagnosis. A kernel benchmark shows the ceiling but leaves out dispatch, small tensors, shape ops, pre-processing and data movement. When I measured the same two backends, a four-times advantage on a large matmul shrank to one point four on a keyword-spotting model and one point three end to end, and on a tiny IMU model the ranking flipped. A big gap between kernel and model-level ratios is itself a clue — usually a fallback or a graph partition."
+
+**Q.** "How do you report uncertainty in a chip comparison?"
+
+**A.** 비율(예: X/Y latency)과 계층 bootstrap 95 % CI를 쓰고, 측정 구조를 같이 적는다: unit 몇 대, 세션 몇 번, run 몇 번. 샘플만 재표본하면 CI가 실제의 절반 폭으로 과신한다. run·세션·unit 변동이 있어서다. unit 간 산포를 직접 못 재면 가정값을 쓰고, 필요한 unit 수를 미리 계산한다. 예를 들어 unit CoV 5 % 가정이면 칩당 3대로 비율 CI가 약 ±10 %라서, 그보다 작은 차이로는 결정하지 않는다고 미리 정한다.
+
+> "I report a ratio with a hierarchical bootstrap confidence interval, and I state the structure behind it — how many units, sessions and runs. Resampling only individual samples gave me an interval half as wide as the run-level one, which is overconfident. Unit-to-unit variation I either measure with two or three boards per chip, or I state an assumption and size the experiment: with five percent unit variation, three units per chip gives roughly plus or minus ten percent on the ratio, so I decide up front not to choose between chips on smaller differences."
+
+**Q.** "How do you choose the model set for a silicon evaluation?"
+
+**A.** 제품 워크로드에서 출발해 op 카테고리 × 모델 커버리지 행렬을 만든다: 표준·depthwise·pointwise conv, 작은·큰 FC, attention matmul, softmax·layernorm, LSTM, upsample, 작은 텐서, shape 연산, dynamic shape. ONNX op 히스토그램으로 자동으로 만들고 빈 행이 있으면 모델을 추가한다. 실제 모델이 기밀이면 같은 구조·shape의 proxy를 주되 정확도 게이트는 우리 쪽에서 실제 모델로 한다.
+
+> "I start from the product workloads and build a coverage matrix of op categories against models — regular, depthwise and pointwise conv, small and large fully-connected layers, attention matmuls, softmax and layer norm, LSTMs, upsampling, small tensors, shape ops and dynamic shapes. I generate it from the ONNX op histograms and add a model wherever a row is empty. If the real models are confidential, I send structure- and shape-preserving proxies, and run the accuracy gate on the real models in-house."
+
+**Q.** "A vendor's numbers were measured by their own engineers. How do you use them?"
+
+**A.** 버리지 않는다. 그 칩의 가능성을 보여 주니까. 다만 벤더-tuned 깃발을 달아 별도 열에 두고, 우리 팀의 out-of-box와 time-box 안의 tuned 결과를 옆에 둔다. 어떤 변경(custom kernel, 비공개 컴파일러)이 들어갔는지 기록하고, 우리가 재현하면 깃발을 뗀다. 그 차이 자체가 툴체인 성숙도 점수의 근거다.
+
+> "I keep them, but flagged as vendor-tuned in a separate column, next to our own out-of-box and time-boxed tuned results. I record what changed — custom kernels, a beta compiler — and remove the flag once we reproduce it ourselves. The gap between vendor-tuned and our out-of-box is a direct measure of toolchain maturity."
+
+---
+
+## 12. 직접 해보기
+
+1. 손계산: 벤더 P가 모델만 0.30 ms, Q가 전처리 포함 0.50 ms를 보냈다. 전처리는 양쪽 0.15 ms다. 같은 경계로 맞춘 비율(Q/P)은? 정답: P = 0.45 ms, 비율 0.50/0.45 ≈ 1.11 (표면상 1.67배가 1.11배).
+2. 손계산: 칩 P 80 mW × 0.5 ms, 칩 Q 30 mW × 1.2 ms. 추론당 에너지가 적은 쪽은? 정답: P 40 µJ, Q 36 µJ → Q.
+3. 코드: 2.4절 `coverage.py`에 `GRU`·`ConvTranspose`가 들어간 작은 모델을 추가해 빈 행이 채워지는지 확인하라. 힌트: `nn.ConvTranspose1d`를 쓰는 1D U-Net 한 단이면 충분하다.
+4. 코드: 3.5절 `acc_ci.py`에서 eval 샘플을 500개로 줄이면 C의 Δacc CI가 얼마나 넓어지는지 재 보라. 정답 방향: 폭이 대략 √4 = 2배 넓어진다.
+5. 코드: 5.3절 계층 bootstrap을 세션 층까지 확장하라: 서로 다른 시각에 `stats_run.py`를 세 번 돌리고, 세션 → run → 샘플 순으로 재표본한다. 힌트: 세션 간 변동이 크면 run 12개 CI보다 훨씬 넓어진다 — 그게 정직한 폭이다.
+6. 문서: 8절 템플릿을 실제 후보 두 개(예: Cortex-M55+Ethos-U55 킷과 Cortex-A 계열 SoC 킷)로 빈칸만 채운 계약서로 만들어 보라. 정답: 숫자 없이도 경계·floor·시나리오·노력 time-box가 모두 정의되면 완성이다.
+
+---
+
+## 13. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| fairness contract | 공정성 계약 | 측정 전에 고정할 것(모델·floor·경계·시나리오·노력)을 적은 문서 |
+| iso-accuracy | 동일 정확도 비교 | 정확도 floor를 넘은 설정끼리만 성능 비교 |
+| accuracy floor | 정확도 하한 | 기준(fp32) 대비 허용 손실 δ를 뺀 값 |
+| top-1 agreement | 예측 일치율 | 기준 모델과 같은 클래스를 낸 샘플 비율 |
+| paired bootstrap | 짝지은 재표본 | 같은 샘플 인덱스로 두 결과를 함께 재표본해 차이의 CI를 구함 |
+| hierarchical bootstrap | 계층 재표본 | 상위 단위(run, unit)를 먼저, 그 안의 샘플을 나중에 재표본 |
+| coverage matrix | 커버리지 행렬 | op 카테고리 × 모델 노드 수 표 |
+| proxy model | 대리 모델 | 구조·shape는 같고 가중치만 다른 공개용 모델 |
+| out-of-box (OOB) | 기본 설정 결과 | 문서대로 기본 옵션으로 변환·실행한 결과 |
+| vendor-tuned | 벤더 튜닝 결과 | 벤더 엔지니어가 손댄 결과, 깃발 표시 |
+| effort ledger | 노력 장부 | 플랫폼별 튜닝 시간·변경·벤더 개입 기록 |
+| unit-to-unit variation | 개체 간 산포 | 같은 칩 모델의 개체별 성능·전력 차이 |
+| measurement boundary | 측정 경계 | 시간·전력을 어디서 어디까지 재는지 |
+
+---
+
+## 14. 요약 & 체크리스트
+
+칩 후보 비교는 칩 하나만 바뀌도록 나머지를 고정하는 실험이다. 측정 전에 공정성 계약을 쓴다: 같은 모델, 같은 경계, 같은 시나리오, 같은 전력 경계, 그리고 각 벤더 quantizer를 허용하되 우리 eval 세트로 잰 정확도 floor를 먼저 통과해야 한다(iso-accuracy). 모델 세트는 ONNX op 히스토그램으로 만든 커버리지 행렬로 빈칸 없이 설계한다. 결정은 e2e 층에서, 원인 분석은 커널 층에서 한다 — stand-in 실측에서 커널 4.1배 차이가 e2e 1.27배로 줄었고 작은 모델에서는 순위가 뒤집혔다. 결과는 run·세션·unit 계층을 존중한 비율 CI로 보고하고, out-of-box/tuned 두 열과 노력 장부로 툴체인 효과를 분리한다.
+
+- [ ] 공정성 계약 8개 항목을 표로 쓸 수 있다
+- [ ] 경계가 다른 두 벤더 숫자를 같은 경계로 손으로 환산할 수 있다
+- [ ] ONNX op 히스토그램으로 커버리지 행렬을 만들고 빈 행을 찾을 수 있다
+- [ ] floor를 먼저 적용하는 iso-accuracy 비교표를 만들 수 있다
+- [ ] 짝지은 bootstrap으로 Δacc CI와 top-1 일치율을 구할 수 있다
+- [ ] 커널·모델·e2e 층에서 비율이 왜 1로 수렴하고 왜 뒤집히는지 설명할 수 있다
+- [ ] 계층 bootstrap으로 칩 간 비율 CI를 구하고 측정 구조를 함께 적을 수 있다
+- [ ] unit 산포 가정으로 필요한 unit 수를 계산할 수 있다
+- [ ] OOB/tuned/vendor-tuned 열과 노력 장부를 포함한 보고서를 쓸 수 있다
+
+---
+
+## 참고 자료
+
+- V. J. Reddi et al., "MLPerf Inference Benchmark", ISCA 2020 (arXiv:1911.02549) — 정확도 목표, 시나리오, closed/open division
+- C. Banbury et al., "MLPerf Tiny Benchmark", NeurIPS 2021 Datasets and Benchmarks Track (arXiv:2106.07597)
+- MLCommons: [mlcommons.org](https://mlcommons.org/)
+- B. Efron, R. Tibshirani, "An Introduction to the Bootstrap" (Chapman & Hall, 1993)
+- T. Hoefler, R. Belli, "Scientific Benchmarking of Parallel Computing Systems", SC 2015 — 벤치마크 보고 규칙(분산·CI·측정 구조)
+- ONNX Runtime 양자화 문서: [onnxruntime.ai](https://onnxruntime.ai/)
+- ONNX operator 목록: [onnx.ai](https://onnx.ai/)
+- coremltools 문서: [apple.github.io/coremltools](https://apple.github.io/coremltools/)
+- 이 스터디 노트 세트: I5, D3, D6, D7, C8, E5, F8, I1, I4, J6, K1–K4, M1, M3

@@ -315,7 +315,7 @@ JD 1번 요건(ML 5년)은 공부만으로 증명이 안 된다. **수치가 남
 
 ## 6. 진행 체크 (모듈 노트 작성 현황)
 
-**현재 위치 (2026-10-03)**: 모듈 **A–L 작성 완료** (86편 · 약 122,100줄 · SVG 633개 · 실행 검증된 예제 약 1,200개) → **다음은 모듈 M (실리콘 선정 — 평가 기준, 벤치마크 방법, 벤더 지형, 데이터시트 해석)**. 남은 것: M(4) · N(4) · O(3) = 11편. 읽기는 A0부터 순서대로.
+**현재 위치 (2026-10-03)**: 모듈 **A–M 작성 완료** (90편 · 약 126,700줄 · SVG 660개 · 실행 검증된 예제 약 1,240개) → **다음은 모듈 N (도메인 — 웨어러블 제약, 기존 제품 사례, 로보틱스 센싱, always-listening UX)**. 남은 것: N(4) · O(3) = 7편. 읽기는 A0부터 순서대로.
 
 **로컬 도구 추가 (모듈 J)**: `.tools/rustup` + `.tools/cargo` (Rust 1.99, Cortex-M4 target `thumbv7em-none-eabihf`) — 쓰려면 `export RUSTUP_HOME=$PWD/.tools/rustup CARGO_HOME=$PWD/.tools/cargo PATH=$PWD/.tools/cargo/bin:$PATH`
 
@@ -478,8 +478,17 @@ JD 1번 요건(ML 5년)은 공부만으로 증명이 안 된다. **수치가 남
 | L6 | [디코딩 가속 — speculative, prompt lookup, 배칭 실측](../L/2026-10-03_L6_decoding_acceleration.html) | 1,098줄 · SVG 9 | 135M → 360M draft는 대부분 오히려 느림(×0.21–1.05) · prompt lookup 요약 ×1.6–1.8 · Metal은 ne11>8에서 GEMM 전환(소스 확인) · 배칭 16 동시 ×5 | ✅ 10-03 | ⬜ |
 
 - [x] K. 프로파일링 (K1–K5) — 2026-10-01 작성 완료
+**모듈 M — 실리콘 선정** (2026-10-03, 4편 · 약 4,600줄 · SVG 27개) — M3·M4는 웹 리서치 출처 인용(확인일 2026-10-03)
+
+| ID | 노트 | 분량 | 핵심 실습 결과 | 작성 | 읽음 |
+|---|---|---|---|---|---|
+| M1 | [실리콘 평가 기준 — 기준표와 의사결정 과정](../M/2026-10-03_M1_evaluation_criteria.html) | 1,341줄 · SVG 8 | 기준 32개(gate 16) · 가상 칩 4종으로 하드웨어 없이 성능 추정(LLM은 TOPS가 아니라 대역폭 순) · Monte Carlo 승리 확률 97.5% / 가중치 불확실 시 88.9% · 공수·TCO·break-even · 16주 RFI→PoC 프로세스 | ✅ 10-03 | ⬜ |
+| M2 | [벤치마크 방법론 — 칩 간 공정한 비교](../M/2026-10-03_M2_benchmark_methodology.html) | 969줄 · SVG 6 | 공정성 규칙 8개 · op 커버리지 heatmap · iso-accuracy: 같은 int8인데 정확도 14%p 차 · 커널 4.13× → end-to-end 1.27×, 작은 모델에선 순위 역전 · out-of-box vs tuned로 승자 뒤집힘 · 평가 보고서 템플릿 | ✅ 10-03 | ⬜ |
+| M3 | [엣지 AI 실리콘 벤더 지형](../M/2026-10-03_M3_vendor_landscape.html) | 1,042줄 · SVG 6 | 출처 53개 · always-on MCU 16종 · 웨어러블/AR SoC 12종 · 가속기 · 라이선스 IP 12종 · 최신 이벤트(ADI의 Alif 인수 발표 2026-09, Ambiq 상장, Qualcomm Wear Elite eNPU) · 확인 못 한 수치는 "확인 필요" | ✅ 10-03 | ⬜ |
+| M4 | [데이터시트 해석 — 숫자에 숨은 조건](../M/2026-10-03_M4_datasheet_interpretation.html) | 1,221줄 · SVG 7 | 실제 브리프 7종 인용·주석 · dense INT8 정규화(Orin Nano 67 → 33) · Coral 실측 ≈ 피크의 12% · µW 헤드라인 2.1 → 752 µW(마이크가 600) · FAE 질문 24개 · 레드 플래그 13개 | ✅ 10-03 | ⬜ |
+
 - [x] L. 온디바이스 LLM · Hybrid (L1–L6) — 2026-10-03 작성 완료
-- [ ] M. 실리콘 선정 (M1–M4)
+- [x] M. 실리콘 선정 (M1–M4) — 2026-10-03 작성 완료
 - [ ] N. 도메인 (N1–N4)
 - [ ] O. 툴 (O1–O3)
 
