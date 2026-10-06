@@ -1,11 +1,11 @@
 # Hark — Embedded AI Engineer · Context
 
-> **최종 갱신**: 2026-10-03 · **상태**: 🔍 조사중
+> **최종 갱신**: 2026-10-04 · **상태**: 🔍 조사중
 > **JD**: https://job-boards.greenhouse.io/hark/jobs/4392090009 · **위치**: San Jose, CA / onsite 추정 · **연봉 밴드**: $200,000 – $450,000 base (+ equity 가능)
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > **관련 포지션**: 같은 회사 [Embedded SWE, BSP](../hark_ai_embedded_swe/hark_ai_embedded_swe_context.md) (📞 리크루터 진행 중, 1순위) · 자리 비교는 [P03 임베디드 7자리 지도](../hark_ai_embedded_swe/2026-09-19_hark_study_notes/site/plan/P03_embedded_role_map.html)
 > **🧭 스터디 나침반**: [study_prep_list — 이 직군 공부 목록 (15모듈, 약 100개념)](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/site/compass/study_prep_list.html) — 2026-09-28 `dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/`로 이동
-> **📚 스터디 노트 사이트**: [노트 목록](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/site/index.html) — 진행: 모듈 A(A0–A6) · B(B1–B9) · C(C1–C8) · D(D1–D7) · E(E1–E9) · F(F1–F8) · G(G1–G7) · H(H1–H8) · I(I1–I6) · J(J1–J6) · K(K1–K5) · L(L1–L6) · M(M1–M4) 작성 완료, 다음 N
+> **📚 스터디 노트 사이트**: [노트 목록](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/site/index.html) — 진행: 모듈 A(A0–A6) · B(B1–B9) · C(C1–C8) · D(D1–D7) · E(E1–E9) · F(F1–F8) · G(G1–G7) · H(H1–H8) · I(I1–I6) · J(J1–J6) · K(K1–K5) · L(L1–L6) · M(M1–M4) · N(N1–N4) · O(O1–O3) — **A–O 전체 작성 완료** (97편), 이제 읽기 단계
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
 
 <!-- 상태 값: 🔍 조사중 → 📨 지원완료 → 📞 리크루터 → 💻 폰스크린 → 🏢 온사이트 → 🎉 오퍼 | ❌ 불합격 | ⏸ 보류 -->
@@ -260,6 +260,8 @@
 | 2026-10-01 | **스터디 노트 모듈 K 완료** | K1 메모리 프로파일링(실제 링크·map/size-diff·스택 분석·CI 게이트) · K2 성능 프로파일링(sample·flame graph·계측·trace) · K3 전력 측정(계측기 효과 시뮬·회귀 리그) · K4 열·지속 성능(이 Mac 35분 실측) · K5 커널 최적화(루프 변환·레이아웃·Winograd·DMA) — 5편 약 7,400줄, SVG 38개, 예제 약 70개. JD 5번 업무("Profile and optimize memory usage, power consumption, and real-time performance")를 직접 커버. 이전 노트 SVG 3개(D7·H4·K4)의 잘린 viewBox도 수정. 누적 80편 약 113,100줄. **다음: 모듈 L (온디바이스 LLM)** |
 | 2026-10-03 | **스터디 노트 모듈 L 완료** | L1 SLM 선택(50문항 제품 평가) · L2 온디바이스 LLM 스택(llama-server 세션·KV·취소) · L3 hybrid 라우팅(실측 신호 보정) · L4 음성 파이프라인(VAD→Whisper→LLM→TTS 실연결, TTFA 1.0 s) · L5 메모리·RAG · L6 디코딩 가속(speculative 실측) — 6편 약 8,900줄, SVG 49개, 예제 약 90개. JD 우대 "lightweight LLM", "hybrid edge-LLM pipelines", "Audio/Voice"를 직접 커버. 모델 추가 다운로드(Whisper-tiny, MiniLM, SmolLM2-360M). 누적 86편 약 122,100줄. **다음: 모듈 M (실리콘 선정)** |
 | 2026-10-03 | **스터디 노트 모듈 M 완료** | M1 평가 기준·의사결정 · M2 칩 간 벤치마크 방법론 · M3 벤더 지형(출처 53개) · M4 데이터시트 해석(실제 브리프 7종) — 4편 약 4,600줄, SVG 27개. JD 6번 업무("Evaluate and select silicon platforms")를 직접 커버. 리서치에서 나온 최신 업계 소식: ADI의 Alif 인수 발표(2026-09-09, 8-K), Qualcomm Wear Elite(2026-03, always-on eNPU). 누적 90편 약 126,700줄. **다음: 모듈 N (도메인)** |
+| 2026-10-04 | **스터디 노트 모듈 N 완료** | N1 웨어러블 제약(폼팩터별 전력·열·노화) · N2 기존 제품 사례(출처 46개, Humane/Rabbit 실패 분석) · N3 로보틱스 센싱(제어 루프 시뮬, BC→DAgger, Figure Helix) · N4 always-listening UX — 4편 약 4,500줄, SVG 27개. JD 우대 "wearables, robotics" 커버. 2026-10-04 기준 Hark 하드웨어 공개 발표는 찾지 못함(N2). 누적 94편 약 131,200줄. **다음(마지막): 모듈 O (툴)** |
+| 2026-10-04 | **스터디 노트 모듈 O 완료 → 전체 A–O 완료** | O1 Python 파이프라인(export→quantize→bench→report, 캐시·로그 파싱) · O2 Linux/Android 온디바이스(NNAPI deprecated, 16 KB 페이지, fake NPU 드라이버) · O3 ML CI(통계적 정확도·지연 게이트, device farm) — 3편 약 3,900줄, SVG 15개. **최종: 97편 · 약 135,100줄 · SVG 702개 · 예제 약 1,310개**. 다음: A0부터 읽기 + 포트폴리오 실습 |
 
 ---
 

@@ -315,7 +315,7 @@ JD 1번 요건(ML 5년)은 공부만으로 증명이 안 된다. **수치가 남
 
 ## 6. 진행 체크 (모듈 노트 작성 현황)
 
-**현재 위치 (2026-10-03)**: 모듈 **A–M 작성 완료** (90편 · 약 126,700줄 · SVG 660개 · 실행 검증된 예제 약 1,240개) → **다음은 모듈 N (도메인 — 웨어러블 제약, 기존 제품 사례, 로보틱스 센싱, always-listening UX)**. 남은 것: N(4) · O(3) = 7편. 읽기는 A0부터 순서대로.
+**현재 위치 (2026-10-04)**: 🎉 **모듈 A–O 전체 작성 완료** (97편 · 약 135,100줄 · SVG 702개 · 실행 검증된 예제 약 1,310개). 이제 할 일은 **읽기** — A0부터 순서대로 읽고 각 표의 '읽음' 칸을 ✅로 바꾼다.
 
 **로컬 도구 추가 (모듈 J)**: `.tools/rustup` + `.tools/cargo` (Rust 1.99, Cortex-M4 target `thumbv7em-none-eabihf`) — 쓰려면 `export RUSTUP_HOME=$PWD/.tools/rustup CARGO_HOME=$PWD/.tools/cargo PATH=$PWD/.tools/cargo/bin:$PATH`
 
@@ -488,8 +488,25 @@ JD 1번 요건(ML 5년)은 공부만으로 증명이 안 된다. **수치가 남
 | M4 | [데이터시트 해석 — 숫자에 숨은 조건](../M/2026-10-03_M4_datasheet_interpretation.html) | 1,221줄 · SVG 7 | 실제 브리프 7종 인용·주석 · dense INT8 정규화(Orin Nano 67 → 33) · Coral 실측 ≈ 피크의 12% · µW 헤드라인 2.1 → 752 µW(마이크가 600) · FAE 질문 24개 · 레드 플래그 13개 | ✅ 10-03 | ⬜ |
 
 - [x] L. 온디바이스 LLM · Hybrid (L1–L6) — 2026-10-03 작성 완료
+**모듈 N — 도메인** (2026-10-04, 4편 · 약 4,500줄 · SVG 27개) — N1·N2·N3·N4 모두 웹 출처 인용(확인일 2026-10-04)
+
+| ID | 노트 | 분량 | 핵심 실습 결과 | 작성 | 읽음 |
+|---|---|---|---|---|---|
+| N1 | [웨어러블 제약 — 폼팩터별 배터리·열·노화·추위](../N/2026-10-04_N1_wearable_constraints.html) | 995줄 · SVG 6 | 반지 평균 0.47 mW vs 시계 38 mW · 손목 지속 방열 ≈0.44 W (35 °C에선 1/3.4) · IEC 62368-1 43 °C · 2년 노화로 24 h → 19.3 h · 반지 always-on KWS는 5일 불가, 제스처 트리거면 155 h | ✅ 10-04 | ⬜ |
+| N2 | [기존 제품 사례 — AI 웨어러블의 성공과 실패](../N/2026-10-04_N2_product_case_studies.html) | 1,289줄 · SVG 6 | 출처 46개 · Apple/Pixel/Galaxy/Oura/Meta Ray-Ban/Humane/Rabbit/펜던트/OpenAI–io · 기기·폰·클라우드 배치 matrix · Humane 열 RC 모델 + C 열 governor · Hark 시사점(분석 표시) | ✅ 10-04 | ⬜ |
+| N3 | [로보틱스 센싱 — 제어 루프와 ML, 웨어러블에서 로봇으로](../N/2026-10-04_N3_robotics_sensing.html) | 1,360줄 · SVG 9 | 1 kHz PID: 지연 6.1 ms에서 위상 여유 0 · Q24 C = float · 역진자 LQR + IMU 퓨전 · behavior cloning이 미본 외란에 실패 → DAgger로 회복 · int8 좁은 calibration은 넘어짐 · Simplex 안전 모니터 · Figure Helix(S2 7B 7–9 Hz / S1 80M 200 Hz) | ✅ 10-04 | ⬜ |
+| N4 | [Always-listening UX — 오인식 비용, 표시등, 화자 인증, 지연 체감](../N/2026-10-04_N4_always_listening_ux.html) | 868줄 · SVG 6 | 사용자 비용 반영 시 임계값 이동 · 12주 후 잔류 72% vs 10% · 화자 인증으로 false wake −87% · "LED 먼저" C 상태기계가 버그 주입 위반 검출 · earcon으로 100% 턴 700 ms 이내 | ✅ 10-04 | ⬜ |
+
 - [x] M. 실리콘 선정 (M1–M4) — 2026-10-03 작성 완료
-- [ ] N. 도메인 (N1–N4)
-- [ ] O. 툴 (O1–O3)
+**모듈 O — 툴** (2026-10-04, 3편 · 약 3,900줄 · SVG 15개)
+
+| ID | 노트 | 분량 | 핵심 실습 결과 | 작성 | 읽음 |
+|---|---|---|---|---|---|
+| O1 | [Python 파이프라인 — export→quantize→bench→report 자동화](../O/2026-10-04_O1_python_pipelines.html) | 1,464줄 · SVG 5 | ONNX fp32 59 KB → int8 19 KB, 정확도 0.9551 유지 · 작은 모델에선 int8이 더 빠르지 않음(p50 5.0 vs 5.7 µs) · calibration 2개 vs 200개: 정확도 같아도 max logit 오차 3.35 vs 0.68 · 해시 캐시로 바뀐 단계만 재실행 · 로그 파싱 bootstrap CI로 회귀 판정 · C 바이너리 텔레메트리 CRC로 손상 레코드 검출 | ✅ 10-04 | ⬜ |
+| O2 | [Linux · Android 온디바이스 — adb, 빌드, NNAPI 이후, NPU 드라이버](../O/2026-10-04_O2_linux_android_on_device.html) | 1,206줄 · SVG 5 | NNAPI는 Android 15에서 deprecated → LiteRT/QNN · 이 Mac도 16 KB 페이지(4 KB 오프셋 mmap EINVAL) + ELF 정렬 검사기 · core pinning 없으면 p99/p50 2.7× · fake NPU 드라이버로 cache clean/invalidate 누락 버그 재현 · ioctl 번호 손계산(FASTRPC 0xC0105203) | ✅ 10-04 | ⬜ |
+| O3 | [ML CI — 정확도·지연 회귀 게이트와 실기기 farm](../O/2026-10-04_O3_ml_ci.html) | 1,247줄 · SVG 5 | golden·op parity·property pytest(배치 불변성이 20/20 seed 버그 검출) · 단순 정확도 게이트 오경보 8.8% vs non-inferiority 0% · 지연: 세션 내 반복 검정은 오경보 15.8%, 교차 5세션은 1.5% · +3%/PR 게이트는 15 PR 누적 +21.7% creep 놓침 · Qualcomm AI Hub / Firebase / AWS Device Farm | ✅ 10-04 | ⬜ |
+
+- [x] N. 도메인 (N1–N4) — 2026-10-04 작성 완료
+- [x] O. 툴 (O1–O3) — 2026-10-04 작성 완료 · **전체 A–O 완료**
 
 **P0만 먼저 하면** (tech session 대비 최소 세트): A1 A3 A4 A5 · B1 B2 B4 B5 B7 B8 · C1 C2 C3 C6 C8 · D1–D7 · E2 E4 E5 E7 E8 E9 · F1–F4 F7 F8 · G1 G2 G4 G5 G7 · H1 · I1 I2 I3 · J1 J2 J3 · K1 K2 K3 · L1–L4 · M1 · 프로젝트 PJ1–PJ4

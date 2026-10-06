@@ -2,6 +2,20 @@
 
 > 2026-10-08(목) 11:00, 1시간, **코딩 위주**. 주제는 pytest · ring buffer · Python/C · system design, 면접관은 Full Stack 엔지니어로 추정되는 Jon Kotowski. 자료는 노트 5개 + Python 문제 7개(starter · 모범답안 · `run.py` 채점) + **매일 타이핑 드릴 100개** + **직군별 테스트 설계 10편**이다. **남은 시간에 맞는 코스 하나만** 골라 위에서부터 내려간다.
 
+## 🎓 먼저 — 특별강의 L00 · L01 · L02
+
+| # | 강의 | 내용 |
+|---|---|---|
+| L00 | [특별강의: ring buffer · pytest · Python LeetCode 15](lecture/2026-10-04_L00_special_lecture.md) | 가장 나올 것부터: 개념 → 코드 → Tier S/A/B 문제 |
+| L01 | [문제 풀기 전 필수 Python 문법](lecture/2026-10-04_L01_python_syntax.md) | enqueue/dequeue(deque) · 스택 · heapq · dict/Counter · 슬라이스 · 정렬 · C와 다른 함정 |
+| L02 | [pytest 말고 — 임베디드 테스트 프레임워크 10종](lecture/2026-10-04_L02_embedded_test_frameworks.md) | Unity · CMock · Ceedling · CppUTest · GoogleTest · unittest · Robot · behave · OpenHTF · py-micro-hil, 전부 실행 검증 |
+| L03 | [임베디드 C 기본기 — 테스트 엔지니어용 가벼운 복습](lecture/2026-10-04_L03_embedded_c_basics.md) | 고정 폭 타입 · 비트 · 포인터 · 문자열 · memmove · 엔디언 · volatile/static · 패딩 · 매크로 · ring · CRC · tick wrap · ISR · 퀴즈 20 |
+| L04 | [임베디드 C++ 기본기 — 테스트 엔지니어용](lecture/2026-10-04_L04_embedded_cpp_basics.md) | 쓰는 것/끄는 것 · 참조 · enum class/constexpr · RAII · 템플릿 RingBuffer · 인터페이스 DI · 테스트 seam · extern "C" · 함정 · 퀴즈 15 |
+| L05 | [🔥 매일 몸풀기 — Python 8 + C 6](lecture/2026-10-04_L05_warmup.md) | 한 문제 = 구현 + 테스트 + main. Two Sum(dict) 2 · 투 포인터 2 · 이진 탐색 · BST · ring buffer · 괄호 / reverse str · linked list · strcpy · atoi · ring buffer 2종(count · free-running). `new.py` → playground 빈 파일 (계속 추가) |
+| L06 | [🎯 스크린 예상 시나리오 6개](lecture/2026-10-05_L06_screen_scenarios.md) | A ring buffer→pytest→확장(~40%) · B 텔레메트리 로그 처리 · C 버그 있는 코드에 테스트 · D C로 · E 드라이버+mock · F LeetCode — 1시간 진행표 · 꼬리 질문 사다리 · 모의 문제 2개(실행 검증) |
+
+> **[특별강의: ring buffer · pytest · Python LeetCode 15](lecture/2026-10-04_L00_special_lecture.md)** — Part 1 ring buffer 개념 → Part 2 pytest 개념 → Part 3 LeetCode Tier S(622 · 346 · 359 · 146) → A → B. 코드는 전부 pytest 37개 통과본 (`python3 lecture/build_lecture.py --test`).
+
 ## ⌨️ 매일 — 타이핑 드릴 (10-03 ~ 10-07, 아침 20분 + 저녁 20분)
 
 | Day | 날짜 | 주제 | 정답 목록 |

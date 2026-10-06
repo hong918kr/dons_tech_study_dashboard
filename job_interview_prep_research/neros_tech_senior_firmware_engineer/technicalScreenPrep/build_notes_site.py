@@ -27,6 +27,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "site"
 COLLECTIONS = [
+    {"key": "lecture", "dir": ROOT / "lecture",
+     "title_ko": "특별강의", "title_en": "Special Lecture",
+     "blurb": "L00 ring buffer · pytest · LeetCode 15 / L01 필수 Python 문법 / L02 임베디드 테스트 프레임워크 10종 / L03 임베디드 C 기본기 / L04 임베디드 C++ 기본기 / L05 매일 몸풀기 / L06 스크린 예상 시나리오. 코드는 전부 실행 검증본.",
+     "src_hint": "lecture"},
     {"key": "plan", "dir": ROOT / "plan",
      "title_ko": "게임 플랜", "title_en": "Game Plan",
      "blurb": "10-08(목) 11am technical screen까지 D-6 일정과 1시간 배분. 여기서 시작한다.",
@@ -105,7 +109,8 @@ def inline(s):
                lambda m: ph(f'<a href="{html.escape(md2html(m.group(2)), quote=True)}">{m.group(1)}</a>'), s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"<em>\1</em>", s)
-    s = re.sub(r"\x00(\d+)\x00", lambda m: keep[int(m.group(1))], s)
+    while "\x00" in s:                       # 링크 텍스트 안의 `code` 처럼 중첩된 자리표시자도 풀기
+        s = re.sub(r"\x00(\d+)\x00", lambda m: keep[int(m.group(1))], s)
     return s
 
 
@@ -123,7 +128,7 @@ def map_target(t):
     parts = rel.parts
     if rel.as_posix() == "START_HERE.md":
         return OUT / "start.html"
-    if len(parts) == 2 and parts[0] in ("plan", "notes", "drills", "design", "playground") and t.suffix == ".md":
+    if len(parts) == 2 and parts[0] in ("lecture", "plan", "notes", "drills", "design", "playground") and t.suffix == ".md":
         return OUT / parts[0] / (t.stem + ".html")
     if parts[:2] == ("python", "problems") and t.suffix == ".md":
         return OUT / "problems" / (t.stem + ".html")
@@ -155,7 +160,24 @@ def split_row(line):
         line = line[1:]
     if line.endswith("|"):
         line = line[:-1]
-    return [c.strip() for c in line.split("|")]
+    cells, cur, in_code = [], "", False          # `a | b` 처럼 백틱 안의 | 와 \| 는 칸을 나누지 않는다
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line) and line[i + 1] == "|":
+            cur += "|"
+            i += 2
+            continue
+        if ch == "`":
+            in_code = not in_code
+        if ch == "|" and not in_code:
+            cells.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+        i += 1
+    cells.append(cur.strip())
+    return cells
 
 
 def render(md_lines, toc, used_ids):
@@ -569,6 +591,7 @@ def hub_page(colls, totals):
     <div class="stat"><b>{totals["sections"]}</b><span>절</span></div>
   </div>
   <p class="lead"><a href="start.html"><b>🧭 START HERE — 어디서부터 볼까 (남은 시간별 코스)</b></a></p>
+  <p class="lead"><a href="lecture/2026-10-04_L00_special_lecture.html"><b>🎓 L00 특별강의 — ring buffer · pytest · Python LeetCode 15</b></a> · <a href="lecture/2026-10-04_L01_python_syntax.html"><b>📗 L01 필수 Python 문법</b></a> · <a href="lecture/2026-10-04_L02_embedded_test_frameworks.html"><b>🧰 L02 임베디드 테스트 프레임워크 10종</b></a> · <a href="lecture/2026-10-04_L03_embedded_c_basics.html"><b>🔧 L03 임베디드 C 기본기</b></a> · <a href="lecture/2026-10-04_L04_embedded_cpp_basics.html"><b>⚙️ L04 임베디드 C++ 기본기</b></a> · <a href="lecture/2026-10-04_L05_warmup.html"><b>🔥 L05 매일 몸풀기</b></a> · <a href="lecture/2026-10-05_L06_screen_scenarios.html"><b>🎯 L06 스크린 예상 시나리오</b></a></p>
   <p class="lead"><a href="drills.html"><b>⌨️ 드릴 트레이너 — 매일 Python 10 + C 10 타이핑</b></a> · <a href="design/2026-10-03_S00_overview.html"><b>🏗️ 직군별 테스트 설계 지도</b></a></p>
   <p class="lead"><a href="coding.html"><b>→ Python 문제 7개</b></a> — 문제 · starter · 모범답안 · <code>python3 python/run.py NN</code> 채점 (pytest · mutant)</p>
   <div class="tools"><input id="q" placeholder="노트 검색 — 제목·요약·소제목 (예: fixture, mock, deque, SPSC, flaky, conftest)"></div>
@@ -628,7 +651,7 @@ def collect():
                 "id": f"{c['key']}/{f.stem}", "stem": f.stem, "file": f.stem + ".html",
                 "h1": h1, "title": title, "summary": summary or m.get("summary_ko", "")[:190],
                 "lines": lines, "lines_n": len(lines), "minutes": read_time(text),
-                "headings": heads, "icon": m.get("icon", {"plan": "🎯", "notes": "📘", "problems": "🐍", "drills": "⌨️", "design": "🏗️", "playground": "🧪"}.get(c["key"], "📗")), "src": f,
+                "headings": heads, "icon": m.get("icon", {"plan": "🎯", "notes": "📘", "problems": "🐍", "drills": "⌨️", "design": "🏗️", "playground": "🧪", "lecture": "🎓"}.get(c["key"], "📗")), "src": f,
                 "badge": m.get("range", ""), "priority": PRIORITY.get(f.stem, ""),
                 "sections": sum(1 for l in lines if HEAD.match(l) and len(HEAD.match(l).group(1)) == 2),
             })
@@ -920,8 +943,19 @@ render();
 def build_drills_page(D):
     data = {"days": {str(k): v for k, v in D.DAYS.items()},
             "items": [{k: it[k] for k in ("id", "day", "lang", "title", "prompt", "given", "answer")} for it in D.ITEMS]}
+    try:                                     # L05 몸풀기 (lecture/warmup/) 를 'W' 탭으로
+        import build_lecture
+        warm = build_lecture.warmup_items()
+    except Exception:                        # noqa: BLE001
+        warm = []
+    if warm:
+        data["days"]["W"] = ["L05", "몸풀기 — Python 5 + C 5 (lecture/warmup, 파일 추가 시 자동 반영)"]
+        data["items"] += [{"id": w["id"], "day": "W", "lang": w["lang"], "title": w["title"],
+                           "prompt": w["prompt"], "given": "", "answer": w["answer"]} for w in warm]
     blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     day_btns = "".join(f'<button class="btn" data-day="{k}">Day {k} · {esc(v[0])}</button>' for k, v in D.DAYS.items())
+    if "W" in data["days"]:
+        day_btns = '<button class="btn" data-day="W">🔥 L05 몸풀기</button>' + day_btns
     md_links = " · ".join(f'<a href="drills/{f.stem}.html">D{f.stem.split("_D")[1][0]}</a>'
                           for f in sorted(DRILL_DIR.glob("*_D[0-9]_*.md")))
     body = f"""
@@ -947,7 +981,7 @@ def build_drills_page(D):
 <script type="application/json" id="drill-data">{blob}</script>"""
     page = shell("드릴 트레이너 — Python · C", body, JS_HUB + DRILL_JS, extra_head=f"<style>{DRILL_CSS}</style>")
     (OUT / "drills.html").write_text(page, encoding="utf-8")
-    print(f"  drills   {len(D.ITEMS)}개 → site/drills.html")
+    print(f"  drills   {len(data['items'])}개 (L05 몸풀기 포함) → site/drills.html")
 
 
 
@@ -990,7 +1024,16 @@ def build_start():
     print("  start    START_HERE.md → site/start.html · index.html")
 
 
+def build_lecture_md():
+    gen = ROOT / "lecture" / "build_lecture.py"
+    if gen.exists():
+        sys.path.insert(0, str(gen.parent))
+        import build_lecture      # noqa: E402
+        build_lecture.build()
+
+
 def main():
+    build_lecture_md()
     D = load_drills()
     colls = collect()
     if not any(c["notes"] for c in colls):

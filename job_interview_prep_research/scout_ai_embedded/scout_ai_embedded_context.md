@@ -1,6 +1,6 @@
 # Scout AI — Senior Embedded Software Engineer · Context
 
-> **최종 갱신**: 2026-10-03 · **상태**: 🔍 조사중
+> **최종 갱신**: 2026-10-04 · **상태**: 🔍 조사중
 > **JD**: https://job-boards.greenhouse.io/scoutai/jobs/5387985008 · **위치**: Sunnyvale, CA / onsite [추정] · **연봉 밴드**: $210,000 – $265,000 base + bonus + equity
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
@@ -111,6 +111,37 @@ Fury가 **camera-only**이므로 센서 스택의 중심은 카메라다. 여기
 - **클리어런스**: TS 취득 요구 가능성이 있다. 해외 체류 이력이나 가족 관계에 따라 수개월~1년 이상 걸린다
 - **스타트업 리스크**: 인원 34명 → 빠른 확장 중이다. 매출은 대부분 정부 계약이라 예산 사이클에 좌우된다
 - **Embedded Linux 필수 조건**: 레쥬메만으로는 스크리닝에서 걸릴 수 있다 → 레쥬메 키워드와 스토리를 미리 보강해야 한다
+
+### 2.9 가설 검증 — 이 자리가 Hark Embedded AI 역량을 원하나? (2026-10-04)
+**Don의 가설**: Scout가 임베디드 공고를 하나만 냈고, Fury·Orchestrator 제품군이 edge AI 작업을 반드시 필요로 하므로, 이 자리는 Hark Embedded AI Engineer와 같은 역량을 원한다.
+
+**결론: 절반만 맞다.** 회사 전체로 보면 edge AI 역량이 필요하다는 건 맞다. 하지만 Scout는 그 일을 **AI 팀 공고에 명시적으로 배정**했고, 이 임베디드 자리는 그 아래층(센서·드라이버·펌웨어)을 맡는다 [확인됨][8][14].
+
+| 근거 | 내용 |
+|---|---|
+| JD 문구 | 임베디드 JD에는 inference·model·GPU·NPU·quantization·latency budget 같은 ML 단어가 **하나도 없다**. 반복되는 단어는 sensor·driver·protocol·bring-up이다. Hark AI JD는 TFLite·llama.cpp·QNN과 ML 경력 5년을 요구했다 [JD] |
+| edge 추론 담당 | AI Engineer / Senior AI Engineer(**Fury Orchestration Team**) 공고의 업무 범위에 **"edge inference optimization"**이 들어 있다. 자격은 Python·PyTorch·SFT/DPO/RLVR이다 [확인됨][14] |
+| 센서 통합 담당 | Robotics Software Engineer가 "cameras, LiDAR, IMUs를 로봇 시스템에 통합"하고 perception·localization을 맡는다. 즉 autonomy·ROS 레벨이다 [확인됨][14] |
+| Orchestrator 구조 | 각 기체 API에 JSON 명령을 보내고, **flight controller나 autonomy SW는 수정하지 않는다**. Orchestrator는 LLM/SW 층이지 임베디드 층이 아니다 [확인됨][5] |
+| 공고가 하나뿐인 이유 | 역할이 층별로 나뉘어 있다: AI 팀(모델 + edge 최적화) / Robotics SWE(autonomy) / **Embedded(센서·FW)** / Vehicle Integration Tech(배선·장착). 임베디드는 맨 아래층의 1인 또는 소수 자리로 보인다. AI까지 흡수하는 만능 자리라는 신호는 없다 [추정] |
+
+**가설에서 맞는 부분 — 실제 연결고리**
+- Fury는 운전병 시연 데이터로 학습한다(ATV 8시간 교대 주행) [3]. 그래서 **"센서 데이터가 정확하고 안정적"이어야 한다는 것 = VLA 학습 데이터 품질**이다. Hark AI JD의 1번 업무("센서 데이터 수집·ingestion 파이프라인")와 IMU 요건이 바로 이 절반에 해당한다
+- 엣지 GPU 보드 위에서 카메라 → GPU 경로(zero-copy·dmabuf·동기화)는 임베디드와 AI 팀의 경계다. 작은 회사라 이 경계를 넘을 기회는 있다 [추정]
+
+**Hark Embedded AI 노트(A–O, 97편) 재사용도**
+| 재사용도 | 모듈 | 이유 |
+|---|---|---|
+| 높음 | G1·G2·G3·G6·G7(센서·시간 동기), H1·H7(로깅·데이터 품질), J6(테스트), K2(프로파일링), N3(로보틱스 센싱), O2(Linux 온디바이스) | JD 업무와 직접 일치 |
+| 중간 (대화 소재·성장 경로) | D(성능 모델), E6·E7(GPU·메모리 시스템), H3–H5(학습 데이터), I1(예산 설정), M4(데이터시트 해석) | 엣지 GPU에 대한 이해와 "왜 데이터 품질이 모델에 중요한가"를 설명할 때 |
+| 낮음 | A–C(ML 기초·모델·경량화), F(TFLite Micro·llama.cpp·QNN — Qualcomm 중심, Scout는 NVIDIA 계열 추정), L(온디바이스 LLM·음성), N1·N2·N4(웨어러블) | AI 팀 담당이거나 도메인이 다름 |
+| **Hark 노트에 없음 (Scout 필수)** | Embedded Linux kernel driver(device tree·IIO·V4L2), CAN, MIPI CSI-2/GMSL, PTP | 4.8 A–E가 메워야 할 부분 |
+
+**전략적 시사점**
+- 준비 비중: **Linux 드라이버·센서 bring-up 70% / edge AI 연결 30%**. edge AI를 앞세워 준비하면 필수 조건(embedded Linux) 준비가 부족해진다
+- 인터뷰 프레이밍: "ML 하고 싶다"고 하면 "AI 팀으로 옮겨 갈 사람"으로 보일 수 있다. 대신 **"센서 데이터는 Fury의 입력이고, 나는 그걸 믿을 수 있게 만드는 사람"**이라는 메시지로 가고, edge 추론은 성장 관심사로 덧붙인다
+- 가설 확인 질문(역질문에 추가): "Fury를 차량 컴퓨트에 배포·최적화하는 건 누가 맡나요? 임베디드가 카메라 → GPU 경로(캡처·zero-copy·동기화)까지 담당하나요?"
+- 커리어: Hark Embedded AI로 가는 **징검다리로는 유효하다**. AI 팀 옆에서 엣지 GPU·센서 데이터를 다루는 경험이 쌓이기 때문이다. 다만 "이 자리 = embedded AI"는 아니다
 
 ---
 
@@ -245,6 +276,7 @@ Fury가 **camera-only**이므로 센서 스택의 중심은 카메라다. 여기
   - 재사용: `anduril_firmware_engineer/` 111문제 은행, `don-c-prac-master/`, Verkada `concurrency_practice/`
 - [ ] **H. 실습 프로젝트 (갭 메우기 핵심)**: Raspberry Pi 또는 Jetson Orin Nano + SPI/I2C IMU → IIO kernel driver + DT overlay → 샘플레이트·jitter 측정 툴(Python) → GitHub 공개
 - [ ] **I. 시스템 설계**: 차량용 센서 키트(카메라 N + IMU + GNSS + CAN → 엣지 GPU), 로깅·health monitoring·degrade 모드
+- [ ] **Hark Embedded AI 노트 재사용** (2.9 표): G1·G2·G3·G6·G7, H1·H7, J6, K2, N3, O2 — `dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/`
 - [ ] **J. 회사·제품 이해**: Fury VLA 개념, Ox 오케스트레이터, Army UxS·ISV, ROS 2 기초(센서 메시지·타임스탬프) [추정]
 
 ---
@@ -254,6 +286,7 @@ Fury가 **camera-only**이므로 센서 스택의 중심은 카메라다. 여기
 | 날짜 | 이벤트 | 메모 |
 |---|---|---|
 | 2026-10-03 | 컨텍스트 파일 생성 (JD 조사) | Greenhouse 공고 5387985008 (최초 08-12, 갱신 10-01). 적합도 ⭐3.5 / 방향 ⭐4. 미지원. Embedded Linux 필수 → 스터디 목록 확정 예정 |
+| 2026-10-04 | 가설 검증: "이 자리 = Hark Embedded AI 역량?" | 결론 절반만 맞음 — edge inference는 AI Engineer 공고에 배정, 임베디드는 센서·FW 층. Hark 노트 재사용도 표 추가(2.9). 준비 비중 Linux/센서 70 : edge AI 30 |
 
 ---
 
@@ -284,6 +317,7 @@ Fury가 **camera-only**이므로 센서 스택의 중심은 카메라다. 여기
 11. https://www.prnewswire.com/news-releases/scout-ai-selected-as-a-winner-of-xtechoverwatch-competition-302630034.html — xTechOverwatch 우승, NOMAD 데모 (2026-10-03)
 12. https://www.prnewswire.com/news/scout-ai-inc./ — 보도자료 목록(최신 2026-04-29) (2026-10-03)
 13. https://job-boards.greenhouse.io/scoutai/jobs/5387985008 — JD 원문 (2026-10-03)
+14. https://boards-api.greenhouse.io/v1/boards/scoutai/jobs/5309913008 — Senior AI Engineer JD("edge inference optimization", Fury Orchestration Team). AI Engineer 4643324008, Robotics SWE 5137118008도 함께 확인 (2026-10-04)
 
 ---
 
