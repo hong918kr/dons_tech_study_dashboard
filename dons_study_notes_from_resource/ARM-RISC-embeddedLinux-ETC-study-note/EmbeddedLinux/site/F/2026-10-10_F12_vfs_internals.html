@@ -1,0 +1,1819 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>F12. VFS 내부 — super_block · inode · dentry · file, file_operations가 불리는 경로</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="F/2026-10-10_F12_vfs_internals">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">F. 커널 핵심 메커니즘 · F12. VFS 내부 — super_block · inode · dentry · file, file_operations가 불리는 경로</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">F. 커널 핵심 메커니즘 · Kernel Mechanisms</div>
+      <h1>F12. VFS 내부 — super_block · inode · dentry · file, file_operations가 불리는 경로</h1>
+      <div class="meta"><span>188분 읽기</span><span>2183줄</span><span>45개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: VFS의 네 객체(<code>super_block</code>·<code>inode</code>·<code>dentry</code>·<code>file</code>)와 각각의 ops 테이블이 무엇을 담당하는지 그림으로 그릴 수 있다 · <code>open("/dev/foo")</code>가 <code>do_sys_openat2</code> → <code>path_openat</code> → <code>vfs_open</code> → <code>chrdev_open</code> → 드라이버 <code>.open</code>까지 가는 경로를 실제 ftrace 출력으로 설명할 수 있다 · dcache와 RCU-walk/ref-walk가 경로 탐색을 어떻게 빠르게 하는지 말할 수 있다 · libfs로 50줄짜리 pseudo filesystem을 만들어 mount 할 수 있다 <strong>왜 필요한가</strong>: 드라이버 면접의 단골 "What happens when you open /dev/foo?"는 이 노트 한 장이고, 실무에서 "release가 안 불려요", "두 번째 open에서 상태가 섞여요", "sysfs 파일 하나 읽는 데 왜 이렇게 느려요" 같은 질문의 답이 전부 VFS 객체의 수명과 공유 관계에 있다 <strong>Don 기준 난이도</strong>: 함수 포인터 테이블로 HW 차이를 숨기는 HAL은 펌웨어에서 늘 했다 / 새로 배울 부분은 "이름(dentry) · 실체(inode) · 열린 세션(file)이 분리된 객체이고 각각 캐시와 참조 카운트로 따로 산다"는 것, 그리고 char device에서 <code>f_op</code>가 open 도중 <strong>바뀐다</strong>는 것 <strong>선행 노트</strong>: A3(fd → OFD → inode, 유저 시점), E3(커널 모듈), E6(<code>ksys_read</code> → <code>vfs_read</code> → <code>f_op-&gt;read</code>) — G4(char device), G7(misc device), G8(sysfs·debugfs), J2·J3(블록·메모리 파일시스템)으로 이어진다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>A3에서는 유저 시점에서 "fd → open file description → inode" 3단 구조를 봤다. 이 노트는 그 3단이 <strong>커널 안에서 실제로 어떤 구조체이고, 누가 만들고, 어떤 함수 포인터를 거쳐 드라이버까지 가는지</strong>를 본다.</p>
+<p>VFS(Virtual File System)는 한 문장으로 <strong>"파일처럼 보이는 모든 것에 대한 공통 인터페이스 + 함수 포인터 테이블"</strong>이다. ext4 파일, <code>/proc/cpuinfo</code>, <code>/sys/class/gpio/export</code>, <code>/dev/ttyAMA0</code>, pipe, socket이 모두 같은 <code>read()</code>로 읽히는 이유는 VFS가 공통 객체를 만들고, 실제 동작은 각 구현이 채운 ops 테이블로 넘기기 때문이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="190" y="16" width="300" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="41" text-anchor="middle" font-size="13">유저: open / read / write / ioctl / mmap</text>
+  <line x1="340" y1="56" x2="340" y2="88" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="40" y="90" width="600" height="80" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="340" y="114" text-anchor="middle" font-size="14" font-weight="bold">VFS — 공통 객체 + 함수 포인터 테이블</text>
+  <text x="340" y="138" text-anchor="middle" font-size="13">super_block · inode · dentry · file</text>
+  <text x="340" y="160" text-anchor="middle" font-size="13">s_op · i_op / i_fop · d_op · f_op</text>
+  <rect x="20" y="200" width="116" height="52" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="78" y="222" text-anchor="middle" font-size="13">ext4</text>
+  <text x="78" y="242" text-anchor="middle" font-size="12">블록 FS</text>
+  <rect x="144" y="200" width="116" height="52" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="202" y="222" text-anchor="middle" font-size="13">procfs</text>
+  <text x="202" y="242" text-anchor="middle" font-size="12">seq_file</text>
+  <rect x="268" y="200" width="116" height="52" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="326" y="222" text-anchor="middle" font-size="13">sysfs</text>
+  <text x="326" y="242" text-anchor="middle" font-size="12">kernfs</text>
+  <rect x="392" y="200" width="116" height="52" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="450" y="222" text-anchor="middle" font-size="13">f12fs</text>
+  <text x="450" y="242" text-anchor="middle" font-size="12">libfs (§7)</text>
+  <rect x="516" y="200" width="116" height="52" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="574" y="222" text-anchor="middle" font-size="13">char 드라이버</text>
+  <text x="574" y="242" text-anchor="middle" font-size="12">f12_vfs (§5)</text>
+  <line x1="78" y1="170" x2="78" y2="198" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="202" y1="170" x2="202" y2="198" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="326" y1="170" x2="326" y2="198" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="450" y1="170" x2="450" y2="198" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="574" y1="170" x2="574" y2="198" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="40" y="272" width="600" height="44" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="291" text-anchor="middle" font-size="12">펌웨어 HAL 비유: struct nand_ops { read_page, program, erase }</text>
+  <text x="340" y="308" text-anchor="middle" font-size="12">상위 FTL 코드는 그대로, 칩(벤더)마다 테이블만 다르게 채운다</text>
+</svg></figure>
+<p>그림 1 — VFS는 다형성(polymorphism) 계층이다. 위쪽 syscall 코드는 하나이고, 아래쪽 구현은 자기 ops 테이블만 채운다.</p>
+<p>Don의 SSD 펌웨어 경험으로 옮기면 정확히 이렇다. FTL은 <code>nand-&gt;ops-&gt;read_page(die, page, buf)</code>만 부르고, 벤더 A·B의 NAND 차이는 ops 테이블 구현 안에 숨는다. 커널도 <code>vfs_read()</code>는 <code>file-&gt;f_op-&gt;read(...)</code>만 부르고, 그게 ext4인지 <code>/dev/null</code>인지 Don이 쓴 드라이버인지 모른다. 차이는 두 가지다.</p>
+<ol><li>테이블이 <strong>네 종류</strong>다 — 마운트 단위(<code>super_operations</code>), 파일 실체 단위(<code>inode_operations</code>), 이름 단위(<code>dentry_operations</code>), 열린 세션 단위(<code>file_operations</code>).</li><li>객체마다 <strong>수명이 다르고 캐시된다</strong>. inode와 dentry는 파일을 닫아도 메모리에 남아(캐시) 다음 open을 빠르게 하고, <code>struct file</code>은 open마다 새로 생겼다가 마지막 참조가 사라지면 없어진다.</li></ol>
+<p>이 노트의 실습은 전부 랩의 <strong>debug 커널</strong>(<code>/var/lab/out/Image-dbg</code>, 6.18.55-dbg: ftrace function_graph, kprobe_events, lockdep 포함)을 QEMU <code>virt</code>(cortex-a57, <code>-smp 2</code>, 512 MB, TCG)로 부팅해서 돌렸다.</p>
+<div class="tw"><table><thead><tr><th>절</th><th>내용</th><th>실습</th></tr></thead><tbody><tr><td>§1</td><td>네 객체와 ops 테이블, 필드 확인</td><td>예제 1 (소스·심볼), 예제 2 (pahole)</td></tr><tr><td>§2</td><td><code>open()</code> 경로 — <code>do_sys_openat2</code>부터 <code>fd_install</code>까지</td><td>예제 3 (function_graph)</td></tr><tr><td>§3</td><td>경로 탐색 — dcache, RCU-walk, ref-walk</td><td>예제 4 (lookup 함수 추적)</td></tr><tr><td>§4</td><td>char device — <code>chrdev_open</code>이 <code>f_op</code>를 바꾼다</td><td>예제 5 (function_graph, 3가지 장치)</td></tr><tr><td>§5</td><td><code>f12_vfs</code> 모듈 — file 두 개, inode 하나, dup</td><td>예제 6</td></tr><tr><td>§6</td><td>read 경로와 kprobe로 파일 이름 찍기</td><td>예제 7 (kprobe_events)</td></tr><tr><td>§7</td><td>파일시스템 타입, mount, pseudo FS</td><td>예제 8 (statfs), 예제 9 (f12fs), 예제 10 (misc → sysfs·devtmpfs)</td></tr><tr><td>§8</td><td>dcache 크기 측정</td><td>예제 11 + 차트</td></tr></tbody></table></div>
+<blockquote><p>실행 환경: 소스는 Lima VM <code>elinux</code>(aarch64, 호스트 커널 <code>uname -r</code> = <code>7.0.0-38-generic</code>) 안의 <code>/var/lab/src/linux-6.18.55</code>, 구조체 레이아웃·심볼은 debug 빌드 트리 <code>/var/lab/out/linux-build-dbg</code>(vmlinux, System.map)에서 봤다. 모듈과 테스트 프로그램 출력은 전부 <strong>게스트 커널 6.18.55-dbg</strong>(BusyBox initramfs)에서 실제로 돌린 결과다. 테스트 프로그램은 VM에서 <code>gcc -std=gnu11 -Wall -Wextra -O2 -static</code>으로 빌드했고 경고 0개다. TCG 에뮬레이션 + lockdep 때문에 <strong>시간 값은 실제 보드보다 수십 배 느리다</strong> — 시간은 상대 비교로만 읽는다. 주소·PID·jiffies는 실행마다 다르다.</p></blockquote>
+<h3 id="0-1-실습-준비-모듈-빌드와-게스트-부팅-스크립트">0.1 실습 준비 — 모듈 빌드와 게스트 부팅 스크립트<a class="anchor" href="#0-1-실습-준비-모듈-빌드와-게스트-부팅-스크립트" aria-label="link">#</a></h3>
+<p>모듈 두 개(<code>f12_vfs</code>, <code>f12fs</code>)는 debug 커널 빌드 트리로 빌드한다 (vermagic <code>6.18.55-dbg</code>, 일반 <code>out/Image</code>에 넣으면 안 된다).</p>
+<figure class="code"><span class="lang">make</span><pre><code>obj-m += f12_vfs.o f12fs.o</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'mkdir -p /var/tmp/F12/mod &amp;&amp; cp ~/.elinux_scratch/F12/{f12_vfs.c,f12fs.c,Kbuild} /var/tmp/F12/mod/ \
+  &amp;&amp; cd /var/tmp/F12/mod &amp;&amp; make -j2 -C /var/lab/out/linux-build-dbg M=$PWD modules'</code></pre></figure>
+<p>게스트 안에서 돌릴 셸 스크립트를 하나 받아 initramfs에 넣고 부팅하는 스크립트(<code>boot.sh</code>, VM에서 실행). initramfs의 <code>/init</code>이 <code>LAB_CMD</code>를 실행한 뒤 전원을 끈다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# usage: boot.sh &lt;guest-script.sh&gt;  -&gt; boots dbg kernel with /f12/* and runs the script
+set -e
+G=$1; N=$(basename $G .sh); W=/var/tmp/F12/run_$N
+rm -rf $W &amp;&amp; mkdir -p $W/r
+cp -a /var/lab/build/rootfs/. $W/r/
+mkdir -p $W/r/f12
+cp /var/tmp/F12/mod/*.ko /var/tmp/F12/bin/* $W/r/f12/
+cp /Users/donh/.elinux_scratch/F12/$G $W/r/f12/t.sh
+(cd $W/r &amp;&amp; find . | cpio -o -H newc --quiet | gzip) &gt; $W/i.gz
+timeout ${TMO:-180} qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp ${SMP:-2} -m 512M -nographic -no-reboot \
+  -kernel /var/lab/out/Image-dbg -initrd $W/i.gz \
+  -append "console=ttyAMA0 quiet LAB_CMD=sh~/f12/t.sh" &gt; $W/out.txt 2&gt;&amp;1 || echo "qemu rc=$?"
+tr -d '\r' &lt; $W/out.txt &gt; /var/tmp/F12/out_$N.txt</code></pre></figure>
+<p>랩 initramfs의 <code>/init</code>은 proc, sysfs, devtmpfs(<code>/dev</code>), debugfs를 mount 한다. tracefs는 직접 mount 해야 한다(<code>mount -t tracefs none /sys/kernel/tracing</code>).</p>
+<hr>
+<h2 id="1-네-객체와-ops-테이블">1. 네 객체와 ops 테이블<a class="anchor" href="#1-네-객체와-ops-테이블" aria-label="link">#</a></h2>
+<h3 id="1-1-직관-도서관을-다시-보자">1.1 직관 — 도서관을 다시 보자<a class="anchor" href="#1-1-직관-도서관을-다시-보자" aria-label="link">#</a></h3>
+<p>A3의 도서관 비유를 커널 쪽으로 한 단계 넓힌다.</p>
+<ul><li><strong>super_block</strong> = 도서관 <strong>분관</strong> 하나. "이 분관은 ext4 방식으로 책을 꽂는다, 블록 크기는 4 KiB, 루트 서가는 여기". mount 한 번에 하나 생긴다.</li><li><strong>inode</strong> = <strong>책 그 자체</strong>(메타데이터 카드 포함). 크기, 권한, 소유자, 장치 번호, 데이터 위치. 파일 하나에 하나.</li><li><strong>dentry</strong> = <strong>서가 안내판의 한 줄</strong> "<code>/dev</code> 아래 <code>f12_vfs</code> → 이 책". 이름과 부모 디렉터리, 그리고 inode를 잇는다. 하드 링크가 있으면 책 하나에 안내판 줄이 여러 개다.</li><li><strong>file</strong> = <strong>대출 기록 카드</strong>. 누가 어떤 모드로 빌렸고 몇 쪽까지 읽었나. <code>open()</code>마다 하나.</li></ul>
+<p>핵심은 <strong>이름(dentry)과 실체(inode)가 다른 객체</strong>라는 점이다. FAT 같은 단순한 파일시스템은 디렉터리 엔트리에 파일 정보를 같이 담지만, VFS는 둘을 분리했다. 그래서 하드 링크(이름 둘, 실체 하나), rename(이름만 바꿈), "열어 둔 채로 unlink"(이름은 사라졌지만 실체와 열린 세션은 살아 있음)가 자연스럽게 된다.</p>
+<figure class="chart"><svg viewBox="0 0 680 430" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="20" width="160" height="36" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="100" y="43" text-anchor="middle" font-size="13">task_struct</text>
+  <rect x="20" y="84" width="160" height="36" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="100" y="107" text-anchor="middle" font-size="13">files_struct</text>
+  <rect x="20" y="148" width="160" height="80" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="100" y="168" text-anchor="middle" font-size="13">fdtable fd[]</text>
+  <text x="100" y="190" text-anchor="middle" font-size="12">fd 4 (open #1)</text>
+  <text x="100" y="208" text-anchor="middle" font-size="12">fd 6 = dup(4)</text>
+  <line x1="100" y1="56" x2="100" y2="82" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="100" y1="120" x2="100" y2="146" stroke="currentColor" marker-end="url(#ah2)"/>
+  <rect x="215" y="130" width="200" height="130" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="315" y="151" text-anchor="middle" font-size="13" font-weight="bold">struct file</text>
+  <text x="315" y="173" text-anchor="middle" font-size="12">f_pos · f_flags · f_mode</text>
+  <text x="315" y="193" text-anchor="middle" font-size="12">f_path = {mnt, dentry}</text>
+  <text x="315" y="213" text-anchor="middle" font-size="12">f_inode · private_data</text>
+  <text x="315" y="233" text-anchor="middle" font-size="12">f_ref (참조 카운트)</text>
+  <text x="315" y="252" text-anchor="middle" font-size="12">f_op</text>
+  <line x1="180" y1="188" x2="213" y2="188" stroke="currentColor" marker-end="url(#ah2)"/>
+  <rect x="215" y="300" width="200" height="66" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="315" y="321" text-anchor="middle" font-size="13">file_operations</text>
+  <text x="315" y="341" text-anchor="middle" font-size="12">.open .read .write .poll</text>
+  <text x="315" y="358" text-anchor="middle" font-size="12">.unlocked_ioctl .mmap</text>
+  <line x1="315" y1="260" x2="315" y2="298" stroke="currentColor" marker-end="url(#ah2)"/>
+  <rect x="460" y="20" width="200" height="96" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="560" y="41" text-anchor="middle" font-size="13" font-weight="bold">struct dentry</text>
+  <text x="560" y="62" text-anchor="middle" font-size="12">d_name = "f12_vfs"</text>
+  <text x="560" y="81" text-anchor="middle" font-size="12">d_parent · d_inode · d_sb</text>
+  <text x="560" y="100" text-anchor="middle" font-size="12">d_op (dentry_operations)</text>
+  <rect x="460" y="150" width="200" height="110" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="560" y="171" text-anchor="middle" font-size="13" font-weight="bold">struct inode</text>
+  <text x="560" y="192" text-anchor="middle" font-size="12">i_ino · i_mode · i_size</text>
+  <text x="560" y="211" text-anchor="middle" font-size="12">i_rdev = 10:258</text>
+  <text x="560" y="230" text-anchor="middle" font-size="12">i_op · i_fop · i_cdev</text>
+  <text x="560" y="249" text-anchor="middle" font-size="12">i_sb · i_mapping</text>
+  <rect x="460" y="300" width="200" height="96" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="560" y="321" text-anchor="middle" font-size="13" font-weight="bold">struct super_block</text>
+  <text x="560" y="342" text-anchor="middle" font-size="12">s_type = devtmpfs</text>
+  <text x="560" y="361" text-anchor="middle" font-size="12">s_root · s_magic · s_dev</text>
+  <text x="560" y="380" text-anchor="middle" font-size="12">s_op (super_operations)</text>
+  <line x1="415" y1="160" x2="458" y2="80" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="430" y="112" text-anchor="middle" font-size="12">dentry</text>
+  <line x1="415" y1="210" x2="458" y2="210" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="560" y1="116" x2="560" y2="148" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="566" y="137" font-size="12">d_inode</text>
+  <line x1="560" y1="260" x2="560" y2="298" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="566" y="284" font-size="12">i_sb</text>
+  <text x="20" y="270" font-size="12">프로세스마다</text>
+  <text x="20" y="288" font-size="12">(스레드는 공유)</text>
+  <text x="215" y="410" font-size="12">open()마다 1개, 수명은 f_ref</text>
+  <text x="460" y="420" font-size="12">mount마다 1개</text>
+</svg></figure>
+<p>그림 2 — 실습 §5의 실제 상태. fd 4와 fd 6(dup)은 같은 <code>struct file</code>을 가리키고, file은 <code>f_path.dentry</code>와 <code>f_inode</code>로 이름과 실체를 붙잡고, inode는 <code>i_sb</code>로 자기가 속한 마운트의 <code>super_block</code>을 안다. <code>/dev</code>는 devtmpfs이므로 <code>s_type</code>이 devtmpfs다.</p>
+<h3 id="1-2-정의-네-객체-한-장-정리">1.2 정의 — 네 객체 한 장 정리<a class="anchor" href="#1-2-정의-네-객체-한-장-정리" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>객체</th><th>언제 생기나</th><th>언제 없어지나</th><th>핵심 필드</th><th>ops 테이블</th><th>캐시</th></tr></thead><tbody><tr><td><code>struct super_block</code></td><td>mount 때 (<code>fill_super</code>)</td><td>마지막 umount</td><td><code>s_type</code>, <code>s_op</code>, <code>s_root</code>, <code>s_magic</code>, <code>s_fs_info</code></td><td><code>super_operations</code></td><td>마운트당 1개</td></tr><tr><td><code>struct inode</code></td><td>처음 lookup 될 때 (디스크에서 읽거나 pseudo FS가 생성)</td><td>참조 0 + 메모리 압박 또는 삭제</td><td><code>i_ino</code>, <code>i_mode</code>, <code>i_rdev</code>, <code>i_size</code>, <code>i_op</code>, <code>i_fop</code>, <code>i_sb</code>, <code>i_mapping</code>, <code>i_private</code></td><td><code>inode_operations</code> + 기본 <code>file_operations</code>(<code>i_fop</code>)</td><td>inode cache (해시)</td></tr><tr><td><code>struct dentry</code></td><td>경로 성분을 처음 lookup 할 때</td><td>참조 0이면 LRU에 남고, 메모리 압박 때 회수</td><td><code>d_name</code>, <code>d_parent</code>, <code>d_inode</code>(NULL이면 negative), <code>d_op</code>, <code>d_sb</code></td><td><code>dentry_operations</code></td><td>dcache (해시 + LRU)</td></tr><tr><td><code>struct file</code></td><td><code>open()</code>마다</td><td>마지막 <code>fput()</code> (모든 fd·mmap·참조가 사라질 때)</td><td><code>f_op</code>, <code>f_pos</code>, <code>f_flags</code>, <code>f_mode</code>, <code>f_path</code>, <code>f_inode</code>, <code>private_data</code>, <code>f_ref</code></td><td><code>file_operations</code></td><td>캐시 없음 (slab <code>filp</code>)</td></tr></tbody></table></div>
+<p>ops 테이블별로 "누가 부르나"를 보면 역할이 갈린다.</p>
+<div class="tw"><table><thead><tr><th>ops 테이블</th><th>대표 멤버</th><th>VFS가 부르는 장면</th><th>드라이버 작성자가 채우나</th></tr></thead><tbody><tr><td><code>super_operations</code></td><td><code>alloc_inode</code>, <code>evict_inode</code>, <code>statfs</code>, <code>sync_fs</code>, <code>put_super</code>, <code>show_options</code></td><td>inode 할당·회수, <code>statfs()</code>, <code>sync</code>, umount, <code>/proc/mounts</code> 출력</td><td>파일시스템을 만들 때만 (libfs가 <code>simple_super_operations</code> 제공)</td></tr><tr><td><code>inode_operations</code></td><td><code>lookup</code>, <code>create</code>, <code>mkdir</code>, <code>unlink</code>, <code>rename</code>, <code>permission</code>, <code>getattr</code>, <code>setattr</code>, <code>get_link</code></td><td>경로 탐색, 파일 생성·삭제, <code>stat()</code>, <code>chmod</code></td><td>파일시스템을 만들 때만</td></tr><tr><td><code>dentry_operations</code></td><td><code>d_revalidate</code>, <code>d_hash</code>, <code>d_compare</code>, <code>d_delete</code>, <code>d_release</code>, <code>d_dname</code></td><td>dcache hit를 믿어도 되는지 확인(NFS 등), 대소문자 무시 비교(vfat)</td><td>거의 안 씀</td></tr><tr><td><code>file_operations</code></td><td><code>open</code>, <code>release</code>, <code>read</code>, <code>write</code>, <code>read_iter</code>, <code>write_iter</code>, <code>llseek</code>, <code>poll</code>, <code>unlocked_ioctl</code>, <code>mmap</code>, <code>fsync</code></td><td>fd에 대한 거의 모든 syscall</td><td><strong>char 드라이버의 본업</strong> (G4)</td></tr></tbody></table></div>
+<p>드라이버 작성자 입장에서 정리하면: <strong>char 드라이버는 <code>file_operations</code> 하나만 채운다.</strong> 나머지 세 객체는 devtmpfs·sysfs 같은 기존 파일시스템이 대신 만들어 준다. 파일시스템이나 pseudo FS를 직접 만들 때(§7)만 <code>super_operations</code>·<code>inode_operations</code>까지 내려간다.</p>
+<p><code>i_fop</code>가 왜 inode에 있는지가 중요하다. inode는 "이 파일을 열면 어떤 <code>file_operations</code>로 시작할지"를 들고 있다. open 때 <code>do_dentry_open()</code>이 <code>file-&gt;f_op = inode-&gt;i_fop</code>로 복사한다. 정규 파일이면 ext4의 <code>ext4_file_operations</code>, 장치 파일이면 <code>init_special_inode()</code>가 넣어 둔 <code>def_chr_fops</code> — 그리고 이 <code>def_chr_fops</code>는 <strong>진짜 드라이버를 찾아서 <code>f_op</code>를 바꿔 끼우는 일</strong>만 한다(§4).</p>
+<h3 id="1-3-예제-1-함수-이름은-소스와-심볼에서-확인한다">1.3 예제 1 — 함수 이름은 소스와 심볼에서 확인한다<a class="anchor" href="#1-3-예제-1-함수-이름은-소스와-심볼에서-확인한다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 이 노트가 쓰는 open 경로 함수들이 랩 커널 6.18.55에 실제로 있는지, 그리고 VM 호스트 커널 7.0과 이름이 다른지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/lab/src/linux-6.18.55 &amp;&amp; grep -n "^static int do_sys_openat2\|^struct file \*do_filp_open\|^static struct file \*path_openat\|^static int do_open(\|^int vfs_open\|^static int do_dentry_open\|^static int link_path_walk\|^static int chrdev_open\|^const struct file_operations def_chr_fops\|^static int misc_open" fs/*.c drivers/char/misc.c'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>drivers/char/misc.c:118:static int misc_open(struct inode *inode, struct file *file)
+fs/char_dev.c:373:static int chrdev_open(struct inode *inode, struct file *filp)
+fs/char_dev.c:452:const struct file_operations def_chr_fops = {
+fs/namei.c:2441:static int link_path_walk(const char *name, struct nameidata *nd)
+fs/namei.c:3931:static int do_open(struct nameidata *nd,
+fs/namei.c:4118:static struct file *path_openat(struct nameidata *nd,
+fs/namei.c:4157:struct file *do_filp_open(int dfd, struct filename *pathname,
+fs/open.c:903:static int do_dentry_open(struct file *f,
+fs/open.c:1092:int vfs_open(const struct path *path, struct file *file)
+fs/open.c:1420:static int do_sys_openat2(int dfd, const char __user *filename,</code></pre></figure>
+<p>같은 이름을 VM 호스트 커널 7.0의 <code>/proc/kallsyms</code>와 랩 6.18의 <code>System.map</code>에서 찾아본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'grep -wE "do_file_open|do_filp_open|do_sys_openat2|path_openat|do_open|vfs_open|do_dentry_open|chrdev_open|misc_open|link_path_walk|lookup_fast" /proc/kallsyms | awk "{print \$2, \$3}"; echo ---; grep -wE "do_file_open|do_filp_open|do_sys_openat2|path_openat|do_open|vfs_open|do_dentry_open|chrdev_open|misc_open|link_path_walk|lookup_fast|open_last_lookups" /var/lab/out/linux-build-dbg/System.map | awk "{print \$2, \$3}"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>t do_dentry_open
+T vfs_open
+t do_sys_openat2
+t chrdev_open
+t lookup_fast
+t do_open
+t link_path_walk
+t path_openat
+T do_file_open
+t misc_open
+---
+t do_dentry_open
+T vfs_open
+t do_sys_openat2
+t chrdev_open
+t lookup_fast
+t link_path_walk
+t path_openat
+T do_filp_open
+t do_open
+t misc_open</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>6.18에서는 <code>do_filp_open</code>, 7.0에서는 <code>do_file_open</code></strong>이다. A1·C1 노트에서 7.0 호스트로 본 이름이 <code>do_file_open</code>이었던 이유가 이것이다 — 같은 역할의 함수가 이름만 바뀌었다. 면접에서는 "do_filp_open (renamed do_file_open in recent kernels)"처럼 말하면 안전하다.</li><li><code>open_last_lookups</code>는 System.map에 없다. 그리고 6.18의 <code>do_open</code> 심볼은 <strong>namei.c의 <code>do_open</code>이 아니다</strong>. 아래처럼 gdb로 보면 namei.c의 <code>do_open</code> 본문은 <code>path_openat</code> 안에 inline 되었고, 심볼 <code>do_open</code>은 NFS(<code>fs/nfs/dir.c</code>)의 다른 static 함수다.</li></ul>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/lab/out/linux-build-dbg &amp;&amp; gdb -batch -ex "info line do_open" vmlinux 2&gt;&amp;1 | tail -2'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Line 3935 of "/var/lab/src/linux-6.18.55/fs/namei.c" starts at address 0xffff800080507458 &lt;path_openat+448&gt; and ends at 0xffff80008050745c &lt;path_openat+452&gt;.
+Line 2042 of "/var/lab/src/linux-6.18.55/fs/nfs/dir.c" starts at address 0xffff80008069cbd0 &lt;do_open&gt; and ends at 0xffff80008069cbd8 &lt;do_open+8&gt;.</code></pre></figure>
+<p>함정: 소스의 함수 이름이 그대로 ftrace·kprobe 대상이 되는 것은 아니다. <strong>static 함수는 inline 되면 심볼이 사라진다.</strong> 추적할 함수는 <code>System.map</code>이나 <code>/sys/kernel/tracing/available_filter_functions</code>에서 먼저 확인한다.</p>
+<h3 id="1-4-예제-2-struct-file의-실제-레이아웃-pahole">1.4 예제 2 — <code>struct file</code>의 실제 레이아웃 (pahole)<a class="anchor" href="#1-4-예제-2-struct-file의-실제-레이아웃-pahole" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>struct file</code>에 A3에서 말로만 했던 필드(<code>f_pos</code>, <code>f_flags</code>, <code>f_op</code>, <code>private_data</code>, <code>f_ref</code>)가 실제로 어디 있는지. 이 오프셋은 §6 kprobe에서 그대로 쓴다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/lab/out/linux-build-dbg &amp;&amp; pahole -C file vmlinux | head -60'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>struct file {
+	spinlock_t                 f_lock;               /*     0     0 */
+
+	/* XXX 72 bytes hole, try to pack */
+
+	/* --- cacheline 1 boundary (64 bytes) was 8 bytes ago --- */
+	fmode_t                    f_mode;               /*    72     4 */
+
+	/* XXX 4 bytes hole, try to pack */
+
+	const struct file_operations  * f_op;            /*    80     8 */
+	struct address_space *     f_mapping;            /*    88     8 */
+	void *                     private_data;         /*    96     8 */
+	struct inode *             f_inode;              /*   104     8 */
+	unsigned int               f_flags;              /*   112     4 */
+	unsigned int               f_iocb_flags;         /*   116     4 */
+	const struct cred  *       f_cred;               /*   120     8 */
+	/* --- cacheline 2 boundary (128 bytes) --- */
+	struct fown_struct *       f_owner;              /*   128     8 */
+	union {
+		const struct path  f_path;               /*   136     0 */
+		struct path        __f_path;             /*   136     0 */
+	};                                               /*   136    16 */
+	union {
+		struct mutex       f_pos_lock;           /*   152     0 */
+		u64                f_pipe;               /*   152     8 */
+	};                                               /*   152   160 */
+	/* --- cacheline 4 boundary (256 bytes) was 56 bytes ago --- */
+	loff_t                     f_pos;                /*   312     8 */
+	/* --- cacheline 5 boundary (320 bytes) --- */
+	void *                     f_security;           /*   320     8 */
+	errseq_t                   f_wb_err;             /*   328     4 */
+	errseq_t                   f_sb_err;             /*   332     4 */
+	struct hlist_head *        f_ep;                 /*   336     8 */
+	union {
+		struct callback_head f_task_work __attribute__((__aligned__(8))); /*   344     0 */
+		struct llist_node  f_llist;              /*   344     0 */
+		struct file_ra_state f_ra;               /*   344    32 */
+		freeptr_t          f_freeptr;            /*   344     0 */
+	} __attribute__((__aligned__(8)));               /*   344    32 */
+	file_ref_t                 f_ref;                /*   376     0 */
+
+	/* size: 384, cachelines: 6, members: 19 */
+	/* sum members: 300, holes: 2, sum holes: 76 */
+	/* padding: 8 */
+	/* forced alignments: 1 */
+} __attribute__((__aligned__(8)));</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>f_lock</code>(spinlock)이 72바이트, <code>f_pos_lock</code>(mutex)이 160바이트를 차지한다. <strong>lockdep(PROVE_LOCKING) 때문에 락 구조체가 커진 debug 커널</strong>이라서다. 일반 커널에서 <code>struct file</code>은 이보다 훨씬 작고 오프셋도 다르다(소스 주석에는 <code>f_path</code>가 cacheline 1 = 64바이트 근처로 적혀 있다). pahole이 일부 타입 크기를 0으로 찍는 것은 DWARF 표현 문제이고, 오프셋은 맞다(§6에서 실제로 읽어서 검증한다).</li><li>참조 카운트가 <code>atomic_long_t f_count</code>가 아니라 <strong><code>file_ref_t f_ref</code></strong>다. A3 §11.4에서 말한 대로 6.13부터 바뀌었다. 드라이버는 이 필드를 직접 만지지 않고 <code>get_file()</code>/<code>fput()</code>/<code>file_count()</code>를 쓴다.</li><li>소스 정의는 <code>} __randomize_layout</code>이다. <code>CONFIG_RANDSTRUCT</code>를 켜면 필드 순서가 빌드마다 섞인다(랩은 <code>CONFIG_RANDSTRUCT_NONE=y</code>). <strong>드라이버가 오프셋을 하드코딩하면 안 되는 이유</strong>다.</li></ul>
+<p>같은 방식으로 dentry와 inode의 필요한 필드만 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/lab/out/linux-build-dbg &amp;&amp; pahole -C qstr vmlinux; pahole -C dentry vmlinux | grep -E "d_name|d_inode|d_parent|d_op|d_sb|size:|d_hash|d_flags|d_seq"; pahole -C inode vmlinux | grep -E "i_rdev|i_ino|i_fop|size:"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>struct qstr {
+	union {
+		struct {
+			u32        hash;                 /*     0     4 */
+			u32        len;                  /*     4     4 */
+		};                                       /*     0     8 */
+		u64                hash_len;             /*     0     8 */
+	};                                               /*     0     8 */
+	const unsigned char  *     name;                 /*     8     8 */
+
+	/* size: 16, cachelines: 1, members: 2 */
+	/* last cacheline: 16 bytes */
+};
+
+	unsigned int               d_flags;              /*     0     4 */
+	seqcount_spinlock_t        d_seq;                /*     8     0 */
+	struct hlist_bl_node       d_hash;               /*    72     0 */
+	struct dentry *            d_parent;             /*    88     8 */
+		struct qstr        __d_name;             /*    96    16 */
+		const struct qstr  d_name;               /*    96    16 */
+	struct inode *             d_inode;              /*   112     8 */
+	const struct dentry_operations  * d_op;          /*   160     8 */
+	struct super_block *       d_sb;                 /*   168     8 */
+	/* size: 328, cachelines: 6, members: 16 */
+	long unsigned int          i_ino;                /*    64     8 */
+	dev_t                      i_rdev;               /*    76     4 */
+		const struct file_operations  * i_fop;   /*   552     8 */
+	/* size: 1208, cachelines: 19, members: 55 */</code></pre></figure>
+<p>출력에서 볼 것: dentry의 이름은 <code>struct qstr</code>(hash + len + name 포인터)다. 해시를 미리 계산해 들고 있어서 dcache 비교가 빠르다(§3). dentry 앞부분(<code>d_flags</code>, <code>d_seq</code>, <code>d_hash</code>, <code>d_parent</code>, <code>d_name</code>, <code>d_inode</code>)은 소스 주석대로 "RCU lookup touched fields"로 묶여 있다 — 경로 탐색이 가장 자주 읽는 필드를 같은 캐시라인에 모은 것이다. Don이 SSD 펌웨어에서 hot 필드를 TCM이나 같은 캐시라인에 모으던 것과 같은 설계다.</p>
+<hr>
+<h2 id="2-open-의-경로-do_sys_openat2부터-fd_install까지">2. <code>open()</code>의 경로 — <code>do_sys_openat2</code>부터 <code>fd_install</code>까지<a class="anchor" href="#2-open-의-경로-do_sys_openat2부터-fd_install까지" aria-label="link">#</a></h2>
+<h3 id="2-1-직관-번호-예약-이름-따라가기-세션-만들기-번호에-꽂기">2.1 직관 — "번호 예약 → 이름 따라가기 → 세션 만들기 → 번호에 꽂기"<a class="anchor" href="#2-1-직관-번호-예약-이름-따라가기-세션-만들기-번호에-꽂기" aria-label="link">#</a></h3>
+<p><code>open()</code>이 하는 일을 펌웨어식으로 쓰면 네 단계다.</p>
+<ol><li><strong>빈 fd 번호를 예약</strong>한다 (아직 아무것도 안 꽂음).</li><li><strong>경로 문자열을 따라가</strong> 마지막 이름의 dentry와 inode를 찾는다 (§3).</li><li><strong><code>struct file</code>을 만들고</strong> inode의 <code>i_fop</code>를 복사한 뒤 <code>f_op-&gt;open</code>을 부른다 (드라이버가 처음 불리는 지점).</li><li>성공하면 <strong>예약한 번호에 file을 꽂는다</strong>(<code>fd_install</code>). 실패하면 예약을 취소한다.</li></ol>
+<p>번호를 먼저 예약하고 맨 마지막에 꽂는 이유: 다른 스레드가 아직 반쯤 만들어진 file을 그 fd로 보면 안 되기 때문이다. <code>fd_install()</code> 전까지 이 file은 이 스레드만 안다.</p>
+<figure class="chart"><svg viewBox="0 0 680 470" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="14" width="260" height="30" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="150" y="34" text-anchor="middle" font-size="13">openat(AT_FDCWD, path, flags)</text>
+  <text x="300" y="34" font-size="12">유저 → svc #0 → __arm64_sys_openat (E6)</text>
+  <rect x="20" y="58" width="260" height="30" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="150" y="78" text-anchor="middle" font-size="13">do_sys_openat2()</text>
+  <text x="300" y="78" font-size="12">getname: 경로 복사 · get_unused_fd_flags: 번호 예약</text>
+  <rect x="20" y="102" width="260" height="30" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="150" y="122" text-anchor="middle" font-size="13">do_filp_open()</text>
+  <text x="300" y="122" font-size="12">LOOKUP_RCU로 1차 → -ECHILD면 ref-walk로 재시도</text>
+  <rect x="20" y="146" width="260" height="30" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="150" y="166" text-anchor="middle" font-size="13">path_openat()</text>
+  <text x="300" y="166" font-size="12">alloc_empty_file: struct file 할당</text>
+  <rect x="20" y="190" width="260" height="30" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="150" y="210" text-anchor="middle" font-size="13">path_init + link_path_walk()</text>
+  <text x="300" y="210" font-size="12">마지막 성분 직전까지 디렉터리 따라가기 (§3)</text>
+  <rect x="20" y="234" width="260" height="30" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="150" y="254" text-anchor="middle" font-size="13">open_last_lookups() [inline]</text>
+  <text x="300" y="254" font-size="12">마지막 이름: lookup_fast, 없으면 lookup_open</text>
+  <rect x="20" y="278" width="260" height="30" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="150" y="298" text-anchor="middle" font-size="13">do_open() [inline]</text>
+  <text x="300" y="298" font-size="12">complete_walk · may_open (권한 검사)</text>
+  <rect x="20" y="322" width="260" height="30" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="150" y="342" text-anchor="middle" font-size="13">vfs_open() → do_dentry_open()</text>
+  <text x="300" y="342" font-size="12">f_op = fops_get(inode->i_fop)</text>
+  <rect x="20" y="366" width="260" height="30" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="150" y="386" text-anchor="middle" font-size="13">f_op->open(inode, file)</text>
+  <text x="300" y="386" font-size="12">장치 파일이면 chrdev_open (§4) → 드라이버 .open</text>
+  <rect x="20" y="410" width="260" height="30" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="150" y="430" text-anchor="middle" font-size="13">fd_install(fd, file)</text>
+  <text x="300" y="430" font-size="12">fdtable[fd] = file → 유저에게 fd 반환</text>
+  <line x1="150" y1="44" x2="150" y2="56" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="150" y1="88" x2="150" y2="100" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="150" y1="132" x2="150" y2="144" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="150" y1="176" x2="150" y2="188" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="150" y1="220" x2="150" y2="232" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="150" y1="264" x2="150" y2="276" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="150" y1="308" x2="150" y2="320" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="150" y1="352" x2="150" y2="364" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="150" y1="396" x2="150" y2="408" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="20" y="460" font-size="12">[inline] = 6.18-dbg 빌드에서 별도 심볼 없이 path_openat 안에 펼쳐짐 (예제 1)</text>
+</svg></figure>
+<p>그림 3 — <code>open()</code>의 커널 경로 (6.18.55 기준 이름). 초록은 준비, 주황은 경로 탐색, 빨강은 file 생성과 드라이버 호출, 파랑은 fd 테이블.</p>
+<h3 id="2-2-소스로-보기-랩-커널-그대로">2.2 소스로 보기 — 랩 커널 그대로<a class="anchor" href="#2-2-소스로-보기-랩-커널-그대로" aria-label="link">#</a></h3>
+<p><code>do_sys_openat2()</code>는 위 1·4단계를 그대로 보여 준다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>static int do_sys_openat2(int dfd, const char __user *filename,
+			  struct open_how *how)
+{
+	struct open_flags op;
+	struct filename *tmp;
+	int err, fd;
+
+	err = build_open_flags(how, &amp;op);
+	if (unlikely(err))
+		return err;
+
+	tmp = getname(filename);
+	if (IS_ERR(tmp))
+		return PTR_ERR(tmp);
+
+	fd = get_unused_fd_flags(how-&gt;flags);
+	if (likely(fd &gt;= 0)) {
+		struct file *f = do_filp_open(dfd, tmp, &amp;op);
+		if (IS_ERR(f)) {
+			put_unused_fd(fd);
+			fd = PTR_ERR(f);
+		} else {
+			fd_install(fd, f);
+		}
+	}
+	putname(tmp);
+	return fd;
+}</code></pre></figure>
+<p><code>do_filp_open()</code>은 <strong>같은 탐색을 최대 세 번</strong> 시도한다. 먼저 락 없이(RCU-walk), 안 되면 참조 카운트를 잡으면서(ref-walk), NFS 같은 곳에서 캐시가 낡았으면(<code>-ESTALE</code>) 재검증하면서.</p>
+<figure class="code"><span class="lang">c</span><pre><code>struct file *do_filp_open(int dfd, struct filename *pathname,
+		const struct open_flags *op)
+{
+	struct nameidata nd;
+	int flags = op-&gt;lookup_flags;
+	struct file *filp;
+
+	set_nameidata(&amp;nd, dfd, pathname, NULL);
+	filp = path_openat(&amp;nd, op, flags | LOOKUP_RCU);
+	if (unlikely(filp == ERR_PTR(-ECHILD)))
+		filp = path_openat(&amp;nd, op, flags);
+	if (unlikely(filp == ERR_PTR(-ESTALE)))
+		filp = path_openat(&amp;nd, op, flags | LOOKUP_REVAL);
+	restore_nameidata();
+	return filp;
+}</code></pre></figure>
+<p><code>path_openat()</code>의 핵심 부분 — <code>struct file</code>은 경로 탐색 <strong>전에</strong> 할당된다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>	file = alloc_empty_file(op-&gt;open_flag, current_cred());
+	...
+		const char *s = path_init(nd, flags);
+		while (!(error = link_path_walk(s, nd)) &amp;&amp;
+		       (s = open_last_lookups(nd, file, op)) != NULL)
+			;
+		if (!error)
+			error = do_open(nd, file, op);
+		terminate_walk(nd);</code></pre></figure>
+<p><code>while</code> 루프는 심볼릭 링크 때문이다. 마지막 성분이 symlink면 <code>open_last_lookups()</code>가 링크 내용을 새 경로로 돌려주고, 다시 <code>link_path_walk()</code>가 그것을 따라간다.</p>
+<p>마지막으로 <code>do_dentry_open()</code>(fs/open.c)이 file을 채우고 드라이버를 부른다. 드라이버 작성자에게 중요한 줄만 남겼다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>	path_get(&amp;f-&gt;f_path);
+	f-&gt;f_inode = inode;
+	f-&gt;f_mapping = inode-&gt;i_mapping;
+	...
+	f-&gt;f_op = fops_get(inode-&gt;i_fop);
+	...
+	/* normally all 3 are set; -&gt;open() can clear them if needed */
+	f-&gt;f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
+	if (!open)
+		open = f-&gt;f_op-&gt;open;
+	if (open) {
+		error = open(inode, f);
+		if (error)
+			goto cleanup_all;
+	}
+	f-&gt;f_mode |= FMODE_OPENED;
+	if ((f-&gt;f_mode &amp; FMODE_READ) &amp;&amp;
+	     likely(f-&gt;f_op-&gt;read || f-&gt;f_op-&gt;read_iter))
+		f-&gt;f_mode |= FMODE_CAN_READ;
+	if ((f-&gt;f_mode &amp; FMODE_WRITE) &amp;&amp;
+	     likely(f-&gt;f_op-&gt;write || f-&gt;f_op-&gt;write_iter))
+		f-&gt;f_mode |= FMODE_CAN_WRITE;
+	...
+	f-&gt;f_flags &amp;= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);</code></pre></figure>
+<p>여기서 드라이버 작성자가 알아야 할 것 세 가지:</p>
+<ul><li><code>fops_get()</code>은 <code>try_module_get(fops-&gt;owner)</code>다. <strong><code>.owner = THIS_MODULE</code>을 빼먹으면</strong> 열린 fd가 있는데 <code>rmmod</code>가 성공하고, 다음 read에서 사라진 코드로 점프한다.</li><li><code>FMODE_CAN_READ</code>/<code>FMODE_CAN_WRITE</code>는 <strong>open이 끝난 뒤의 <code>f_op</code></strong> 를 보고 정한다. 그래서 char device처럼 open 도중 <code>f_op</code>를 바꿔도 결과가 맞다. 그리고 <code>.write</code>가 없는 파일에 write 하면 <code>vfs_write()</code>가 <code>-EINVAL</code>을 돌려준다 (§7 f12fs에서 실제로 본다).</li><li><code>.open</code>이 실패하면(음수 반환) file은 버려지고 <code>.release</code>는 <strong>불리지 않는다</strong>. open에서 할당한 것은 open의 에러 경로에서 직접 풀어야 한다.</li></ul>
+<h3 id="2-3-예제-3-function_graph로-본-dev-null-open">2.3 예제 3 — function_graph로 본 <code>/dev/null</code> open<a class="anchor" href="#2-3-예제-3-function_graph로-본-dev-null-open" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 그림 3의 경로가 실제 커널에서 그대로 실행되는지. <code>do_sys_openat2</code>를 루트로, 깊이 5까지만 기록한다.</p>
+<p>추적 대상 프로세스만 기록하기 위해 작은 도우미 <code>t_trace</code>를 썼다. 자기 PID를 <code>set_ftrace_pid</code>에 쓰고, 경로 하나를 open(필요하면 read) 하는 동안만 <code>tracing_on</code>을 켠다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* t_trace: 자기 pid만 ftrace 하도록 걸고, open/read/close 한 번만 기록 */
+#include &lt;fcntl.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+
+#define T "/sys/kernel/tracing/"
+static void wr(const char *f, const char *v)
+{
+	int fd = open(f, O_WRONLY | O_TRUNC);
+	if (fd &lt; 0 || write(fd, v, strlen(v)) &lt; 0) { perror(f); exit(1); }
+	close(fd);
+}
+int main(int argc, char **argv)
+{
+	char pid[16], b[64];
+	if (argc &lt; 2) { fprintf(stderr, "usage: %s path [read]\n", argv[0]); return 1; }
+	snprintf(pid, sizeof(pid), "%d", getpid());
+	wr(T "set_ftrace_pid", pid);
+	int on = open(T "tracing_on", O_WRONLY);	/* 미리 열어 두고 1/0만 쓴다 */
+	if (on &lt; 0) { perror("tracing_on"); return 1; }
+	if (write(on, "1", 1) != 1) { perror("on"); return 1; }
+	int fd = open(argv[1], O_RDONLY | O_NONBLOCK);
+	if (fd &gt;= 0 &amp;&amp; argc &gt; 2 &amp;&amp; read(fd, b, sizeof(b)) &lt; 0) perror("read");
+	if (write(on, "0", 1) != 1) { perror("off"); return 1; }
+	printf("t_trace: open(%s) = %d\n", argv[1], fd);
+	if (fd &gt;= 0) close(fd);
+	return 0;
+}</code></pre></figure>
+<p>게스트 스크립트(<code>g2_trace.sh</code>)의 핵심. lockdep·preempt 카운터 같은 잡음 함수는 <code>set_ftrace_notrace</code>로 뺐다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /f12
+insmod f12_vfs.ko
+mount -t tracefs none /sys/kernel/tracing
+T=/sys/kernel/tracing
+echo 0 &gt; $T/tracing_on
+for f in lock_acquire lock_release lock_is_held_type lock_acquired lock_contended 'rcu_read_lock_*held' debug_lockdep_rcu_enabled rcu_lockdep_current_cpu_online __rcu_read_lock __rcu_read_unlock preempt_count_add preempt_count_sub __might_sleep __might_resched __might_fault; do echo "$f" &gt;&gt; $T/set_ftrace_notrace || echo "notrace fail $f"; done
+echo nofuncgraph-irqs &gt; $T/trace_options
+echo 'unwind_find_stack*' &gt;&gt; $T/set_ftrace_notrace
+for g in "vfs_open:5" "do_sys_openat2:5"; do
+  fn=${g%%:*}; d=${g##*:}
+  for p in /dev/null /dev/f12_vfs /dev/ttyAMA0; do
+    echo nop &gt; $T/current_tracer
+    echo $fn &gt; $T/set_graph_function
+    echo $d &gt; $T/max_graph_depth
+    echo function_graph &gt; $T/current_tracer
+    echo &gt; $T/trace
+    ./t_trace $p
+    echo "### graph=$fn depth=$d path=$p"
+    grep -v "^#" $T/trace | sed -e 's/^ *[0-9])//'
+  done
+done</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'TMO=300 ~/.elinux_scratch/F12/boot.sh g2_trace.sh; cat /var/tmp/F12/out_g2_trace.txt'</code></pre></figure>
+<p><code>/dev/null</code>, 루트 <code>do_sys_openat2</code>, 깊이 5 (출력 그대로, 앞의 <code>mutex_unlock</code>은 <code>tracing_on</code>에 "1"을 쓴 write의 끝부분이라 뺐다):</p>
+<figure class="code"><span class="lang">text</span><pre><code>### graph=do_sys_openat2 depth=5 path=/dev/null
+               |  do_sys_openat2() {
+               |    getname_flags() {
+               |      getname_flags.part.0() {
+               |        kmem_cache_alloc_noprof() {
+ + 14.208 us   |          fs_reclaim_acquire();
+   3.584 us    |          fs_reclaim_release();
+ + 35.904 us   |        }
+ + 50.912 us   |      }
+ + 56.864 us   |    }
+               |    get_unused_fd_flags() {
+               |      alloc_fd() {
+               |        _raw_spin_lock() {
+   2.448 us    |          do_raw_spin_trylock();
+ + 17.744 us   |        }
+               |        _raw_spin_unlock() {
+   2.112 us    |          do_raw_spin_unlock();
+ + 10.880 us   |        }
+ + 39.584 us   |      }
+ + 45.536 us   |    }
+               |    do_filp_open() {
+               |      path_openat() {
+               |        alloc_empty_file() {
+ + 11.040 us   |          kmem_cache_alloc_noprof();
+ + 16.544 us   |          init_file();
+ + 38.512 us   |        }
+               |        path_init() {
+ + 15.760 us   |          nd_jump_root();
+ + 25.664 us   |        }
+               |        link_path_walk() {
+   5.872 us    |          inode_permission();
+ + 40.800 us   |          walk_component();
+   5.120 us    |          inode_permission();
+   2.880 us    |          make_vfsuid();
+ + 79.168 us   |        }
+               |        lookup_fast() {
+ + 16.752 us   |          __d_lookup_rcu();
+ + 22.416 us   |        }
+   2.288 us    |        step_into();
+               |        complete_walk() {
+ + 35.712 us   |          try_to_unlazy();
+ + 42.368 us   |        }
+               |        may_open() {
+ + 52.912 us   |          inode_permission();
+ + 60.544 us   |        }
+               |        vfs_open() {
+ # 1226.096 us |          do_dentry_open();
+ # 1238.880 us |        }
+   3.296 us    |        security_file_post_open();
+               |        terminate_walk() {
+ + 22.864 us   |          dput();
+   9.488 us    |          mntput();
+ + 42.368 us   |        }
+ # 1592.928 us |      }
+ # 1599.552 us |    }
+   9.328 us    |    fd_install();
+               |    putname() {
+   5.552 us    |      kmem_cache_free();
+ + 11.248 us   |    }
+ # 1753.040 us |  }</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>그림 3의 순서 그대로다: <code>getname_flags</code>(경로 복사) → <code>get_unused_fd_flags</code>(번호 예약) → <code>do_filp_open</code> → <code>path_openat</code> → <code>alloc_empty_file</code> → <code>path_init</code> → <code>link_path_walk</code> → … → <code>vfs_open</code> → <code>fd_install</code>.</li><li><code>path_openat</code> 바로 아래에 <code>lookup_fast</code>, <code>step_into</code>, <code>complete_walk</code>, <code>may_open</code>, <code>vfs_open</code>이 보이고 <code>open_last_lookups</code>·<code>do_open</code>은 없다. 예제 1에서 본 <strong>inline</strong> 때문이다. 앞의 둘은 <code>open_last_lookups</code>의 몸통, 뒤의 셋은 <code>do_open</code>의 몸통이다.</li><li><code>link_path_walk</code>는 <code>/dev/null</code>의 <code>dev</code>까지만 처리하고(<code>walk_component</code> 한 번), 마지막 성분 <code>null</code>은 <code>lookup_fast</code> → <code>__d_lookup_rcu</code>로 dcache에서 찾았다. 파일시스템(devtmpfs)의 <code>-&gt;lookup</code>은 한 번도 불리지 않았다 — <strong>dcache hit</strong>.</li><li><code>complete_walk</code> → <code>try_to_unlazy</code>: RCU-walk로 찾은 결과를 <strong>참조 카운트를 잡은 정상 경로로 확정</strong>하는 단계다(§3).</li><li>시간: 전체 1.75 ms 중 1.2 ms가 <code>do_dentry_open</code>이다. TCG + lockdep 환경이라 절대값은 의미 없지만, 비율로는 "탐색보다 open 콜백 쪽이 무겁다"는 것을 보여 준다.</li></ul>
+<p>함정: function_graph는 <strong>함수 진입/복귀마다</strong> 기록하므로 오버헤드가 크다. 이 출력의 µs 값은 추적 비용이 섞인 값이다. 실제 지연 측정에는 함수 몇 개만 고른 <code>function</code> 트레이서나 kprobe 타임스탬프 차이를 쓴다(M5 ftrace, M7 eBPF).</p>
+<hr>
+<h2 id="3-경로-탐색-dcache-rcu-walk-ref-walk">3. 경로 탐색 — dcache, RCU-walk, ref-walk<a class="anchor" href="#3-경로-탐색-dcache-rcu-walk-ref-walk" aria-label="link">#</a></h2>
+<h3 id="3-1-직관-경로는-디렉터리-하나씩-해시-테이블-조회">3.1 직관 — 경로는 "디렉터리 하나씩 해시 테이블 조회"<a class="anchor" href="#3-1-직관-경로는-디렉터리-하나씩-해시-테이블-조회" aria-label="link">#</a></h3>
+<p><code>/sys/class/tty/ttyAMA0/dev</code>를 여는 것은 펌웨어로 치면 이렇다:</p>
+<figure class="code"><span class="lang">c</span><pre><code>node = root;
+for (name in "sys", "class", "tty", "ttyAMA0", "dev")
+	node = hash_lookup(node, name);   /* (부모 포인터, 이름) → 자식 */</code></pre></figure>
+<p>키는 <strong>(부모 dentry, 이름)</strong>이고, 테이블은 전역 해시 테이블 하나(<code>dentry_hashtable</code>)다. 부팅 로그에 크기가 찍힌다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.000000] Dentry cache hash table entries: 65536 (order: 7, 524288 bytes, linear)
+[    0.000000] Inode-cache hash table entries: 32768 (order: 6, 262144 bytes, linear)
+[    0.101535] Mount-cache hash table entries: 1024 (order: 1, 8192 bytes, linear)
+[    0.101629] Mountpoint-cache hash table entries: 1024 (order: 1, 8192 bytes, linear)</code></pre></figure>
+<p>(게스트 <code>dmesg | grep -E "cache hash table entries"</code> 출력에서 앞 4줄. 512 MB 게스트라 작다 — 해시 크기는 메모리 크기에 비례해 정해진다.)</p>
+<p>이름이 해시에 없으면(<strong>dcache miss</strong>) 그때 파일시스템의 <code>dir-&gt;i_op-&gt;lookup()</code>을 불러 디스크(또는 kernfs 트리)에서 찾고, 새 dentry를 만들어 해시에 넣는다. 다음부터는 hit다. "없다"는 결과도 <strong>negative dentry</strong>(<code>d_inode == NULL</code>)로 캐시한다 — 존재하지 않는 파일을 반복해서 찾는 프로그램(라이브러리 검색 경로, <code>$PATH</code> 탐색)이 매번 디스크를 읽지 않게 하기 위해서다.</p>
+<h3 id="3-2-rcu-walk와-ref-walk">3.2 RCU-walk와 ref-walk<a class="anchor" href="#3-2-rcu-walk와-ref-walk" aria-label="link">#</a></h3>
+<p>경로 탐색은 커널에서 가장 자주 도는 코드 중 하나라서, <strong>락도 참조 카운트도 안 잡고</strong> 걷는 모드가 있다.</p>
+<div class="tw"><table><thead><tr><th></th><th>RCU-walk (<code>LOOKUP_RCU</code>)</th><th>ref-walk</th></tr></thead><tbody><tr><td>해시 조회</td><td><code>__d_lookup_rcu()</code></td><td><code>__d_lookup()</code></td></tr><tr><td>동기화</td><td><code>rcu_read_lock</code> + dentry의 <code>d_seq</code> seqcount로 "그 사이 바뀌지 않았나" 검증</td><td><code>d_lock</code> spinlock + 참조 카운트(<code>dget</code>)</td></tr><tr><td>공유 캐시라인 쓰기</td><td>없음 (읽기만)</td><td>성분마다 refcount 증감</td></tr><tr><td>잠들 수 있나</td><td>없다</td><td>있다</td></tr><tr><td>언제 그만두나</td><td>잠들어야 하는 콜백(권한 검사, <code>d_revalidate</code>, 디스크 lookup)을 만나면 <code>-ECHILD</code></td><td>—</td></tr><tr><td>전환</td><td><code>try_to_unlazy()</code>로 지금까지 걸은 경로에 참조를 잡고 ref-walk로 계속, 실패하면 <code>do_filp_open</code>이 처음부터 ref-walk로 재시도</td><td>—</td></tr></tbody></table></div>
+<p>seqcount는 Don이 아는 "버전 번호를 읽고, 데이터를 읽고, 버전이 그대로면 유효" 패턴이다(F4에서 seqlock으로 다시 나온다). 멀티코어에서 같은 <code>/usr/lib</code>를 수천 번 걸어도 dentry의 refcount 캐시라인이 코어 사이를 튕기지 않는다는 것이 RCU-walk의 이점이다.</p>
+<p><code>lookup_fast()</code>의 실제 코드(fs/namei.c, 6.18) — RCU 분기와 ref 분기가 그대로 보인다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>static struct dentry *lookup_fast(struct nameidata *nd)
+{
+	struct dentry *dentry, *parent = nd-&gt;path.dentry;
+	int status = 1;
+
+	if (nd-&gt;flags &amp; LOOKUP_RCU) {
+		dentry = __d_lookup_rcu(parent, &amp;nd-&gt;last, &amp;nd-&gt;next_seq);
+		if (unlikely(!dentry)) {
+			if (!try_to_unlazy(nd))
+				return ERR_PTR(-ECHILD);
+			return NULL;
+		}
+		if (read_seqcount_retry(&amp;parent-&gt;d_seq, nd-&gt;seq))
+			return ERR_PTR(-ECHILD);
+
+		status = d_revalidate(nd-&gt;inode, &amp;nd-&gt;last, dentry, nd-&gt;flags);
+		if (likely(status &gt; 0))
+			return dentry;
+		...
+	} else {
+		dentry = __d_lookup(parent, &amp;nd-&gt;last);
+		if (unlikely(!dentry))
+			return NULL;
+		status = d_revalidate(nd-&gt;inode, &amp;nd-&gt;last, dentry, nd-&gt;flags);
+	}
+	...</code></pre></figure>
+<p><code>lookup_fast()</code>가 NULL(miss)을 돌려주면 <code>walk_component()</code>가 <code>lookup_slow()</code> → <code>__lookup_slow()</code> → <code>d_alloc_parallel()</code>(새 dentry 할당, 같은 이름을 동시에 찾는 다른 스레드와 조율) → <code>dir-&gt;i_op-&gt;lookup()</code>으로 간다.</p>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="14" width="40" height="28" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="40" y="33" text-anchor="middle" font-size="13">/</text>
+  <rect x="68" y="14" width="50" height="28" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="93" y="33" text-anchor="middle" font-size="13">sys</text>
+  <rect x="126" y="14" width="64" height="28" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="158" y="33" text-anchor="middle" font-size="13">class</text>
+  <rect x="198" y="14" width="50" height="28" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="223" y="33" text-anchor="middle" font-size="13">tty</text>
+  <rect x="256" y="14" width="86" height="28" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="299" y="33" text-anchor="middle" font-size="13">ttyAMA0</text>
+  <rect x="350" y="14" width="50" height="28" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="375" y="33" text-anchor="middle" font-size="13">dev</text>
+  <text x="410" y="33" font-size="12">성분마다 아래 과정을 반복</text>
+  <rect x="20" y="70" width="440" height="76" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="240" y="92" text-anchor="middle" font-size="13" font-weight="bold">① RCU-walk (LOOKUP_RCU)</text>
+  <text x="240" y="114" text-anchor="middle" font-size="12">__d_lookup_rcu: 락·refcount 없이 해시 버킷 탐색</text>
+  <text x="240" y="134" text-anchor="middle" font-size="12">d_seq seqcount로 결과가 유효한지 검증</text>
+  <rect x="20" y="180" width="440" height="76" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="240" y="202" text-anchor="middle" font-size="13" font-weight="bold">② ref-walk</text>
+  <text x="240" y="224" text-anchor="middle" font-size="12">__d_lookup: d_lock + 참조 카운트(dget)</text>
+  <text x="240" y="244" text-anchor="middle" font-size="12">잠들어도 되는 모드 — permission, d_revalidate 가능</text>
+  <rect x="20" y="290" width="440" height="76" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="240" y="312" text-anchor="middle" font-size="13" font-weight="bold">③ slow path — dcache miss</text>
+  <text x="240" y="334" text-anchor="middle" font-size="12">__lookup_slow → d_alloc_parallel (새 dentry)</text>
+  <text x="240" y="354" text-anchor="middle" font-size="12">→ dir->i_op->lookup (kernfs_iop_lookup, ext4_lookup …)</text>
+  <line x1="240" y1="146" x2="240" y2="178" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="250" y="167" font-size="12">miss 또는 -ECHILD → try_to_unlazy</text>
+  <line x1="240" y1="256" x2="240" y2="288" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="250" y="277" font-size="12">miss</text>
+  <rect x="500" y="70" width="160" height="186" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="580" y="92" text-anchor="middle" font-size="13">dentry_hashtable</text>
+  <text x="580" y="112" text-anchor="middle" font-size="12">65536 버킷</text>
+  <text x="580" y="130" text-anchor="middle" font-size="12">key = (parent, name)</text>
+  <rect x="520" y="144" width="120" height="20" rx="3" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="520" y="170" width="120" height="20" rx="3" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="520" y="196" width="120" height="20" rx="3" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="580" y="240" text-anchor="middle" font-size="12">hit면 ①에서 끝</text>
+  <line x1="460" y1="108" x2="498" y2="150" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="460" y1="328" x2="580" y2="258" stroke="currentColor" stroke-dasharray="5 4" marker-end="url(#ah4)"/>
+  <text x="560" y="300" text-anchor="middle" font-size="12">d_add: 해시에 등록</text>
+  <text x="20" y="390" font-size="12">사용 중이 아닌 dentry는 LRU에 남아 있다가 메모리 압박 때 shrinker가 회수한다 (§8).</text>
+</svg></figure>
+<p>그림 4 — 경로 성분 하나를 찾는 세 단계. 대부분은 ①에서 끝나고, 처음 보는 이름만 ③까지 간다.</p>
+<h3 id="3-3-예제-4-sysfs-경로를-두-번-열어-cold-warm-비교">3.3 예제 4 — sysfs 경로를 두 번 열어 cold/warm 비교<a class="anchor" href="#3-3-예제-4-sysfs-경로를-두-번-열어-cold-warm-비교" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 경로를 처음 열 때는 <code>i_op-&gt;lookup</code>(sysfs는 <code>kernfs_iop_lookup</code>)이 불려 dentry를 만들고, 두 번째에는 dcache hit로 끝나는지. 그리고 sysfs가 RCU-walk를 유지하는지.</p>
+<p><code>function</code> 트레이서에 lookup 관련 함수만 걸고, 호출 위치(<code>&lt;-부모</code>)별로 센다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /f12
+mount -t tracefs none /sys/kernel/tracing
+T=/sys/kernel/tracing
+echo 0 &gt; $T/tracing_on
+echo 'lookup_fast __lookup_slow kernfs_iop_lookup d_alloc_parallel try_to_unlazy __d_lookup_rcu __d_lookup' &gt; $T/set_ftrace_filter
+echo function &gt; $T/current_tracer
+P=/sys/class/tty/ttyAMA0/dev
+echo "path=$P"
+for i in 1 2; do
+  echo &gt; $T/trace
+  ./t_trace $P read
+  echo "### pass $i"
+  grep -v "^#" $T/trace | awk '{print $NF, $(NF-1)}' | sort | uniq -c
+done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>path=/sys/class/tty/ttyAMA0/dev
+t_trace: open(/sys/class/tty/ttyAMA0/dev) = 4
+### pass 1
+     10 &lt;-__lookup_slow d_alloc_parallel
+     10 &lt;-__lookup_slow kernfs_iop_lookup
+     11 &lt;-d_alloc_parallel __d_lookup_rcu
+      1 &lt;-d_lookup __d_lookup
+      1 &lt;-link_path_walk try_to_unlazy
+     11 &lt;-lookup_fast __d_lookup
+      1 &lt;-lookup_fast __d_lookup_rcu
+      1 &lt;-lookup_open.isra.0 d_alloc_parallel
+      1 &lt;-lookup_open.isra.0 kernfs_iop_lookup
+      1 &lt;-path_openat lookup_fast
+     10 &lt;-walk_component __lookup_slow
+     11 &lt;-walk_component lookup_fast
+t_trace: open(/sys/class/tty/ttyAMA0/dev) = 4
+### pass 2
+      1 &lt;-link_path_walk try_to_unlazy
+     11 &lt;-lookup_fast __d_lookup
+      1 &lt;-lookup_fast __d_lookup_rcu
+      1 &lt;-path_openat lookup_fast
+     11 &lt;-walk_component lookup_fast</code></pre></figure>
+<p>이 경로는 symlink를 지난다. 같은 게스트에서 <code>readlink /sys/class/tty/ttyAMA0</code>의 결과:</p>
+<figure class="code"><span class="lang">text</span><pre><code>../../devices/platform/9000000.pl011/9000000.pl011:0/9000000.pl011:0.0/tty/ttyAMA0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>pass 1</strong>: <code>walk_component</code> → <code>__lookup_slow</code> → <code>kernfs_iop_lookup</code>이 10번, 마지막 성분 <code>dev</code>는 <code>lookup_open</code> → <code>kernfs_iop_lookup</code>으로 1번. 10개는 <code>class</code>, <code>tty</code>, <code>ttyAMA0</code>(class 쪽 symlink), 그리고 symlink를 따라간 뒤의 <code>devices</code>, <code>platform</code>, <code>9000000.pl011</code>, <code>9000000.pl011:0</code>, <code>9000000.pl011:0.0</code>, <code>tty</code>, <code>ttyAMA0</code>이다. sysfs의 dentry·inode는 <strong>누가 처음 볼 때 만들어진다</strong>(kernfs 노드는 원래 있고, VFS 객체만 지연 생성).</li><li><strong>pass 2</strong>: <code>kernfs_iop_lookup</code>이 0번. 전부 <code>lookup_fast</code> 안에서 해시로 찾았다 — dcache hit.</li><li>두 pass 모두 <code>__d_lookup_rcu</code>는 1번(<code>sys</code>, rootfs 안), 나머지 11번은 <code>__d_lookup</code>(ref-walk)이다. 그리고 <code>link_path_walk</code>에서 <code>try_to_unlazy</code>가 1번 불렸다. 이유는 sysfs(kernfs)의 권한 콜백이 RCU 모드를 거부하기 때문이다:</li></ul>
+<figure class="code"><span class="lang">c</span><pre><code>int kernfs_iop_permission(struct mnt_idmap *idmap,
+			  struct inode *inode, int mask)
+{
+	...
+	if (mask &amp; MAY_NOT_BLOCK)
+		return -ECHILD;</code></pre></figure>
+<p>RCU-walk 중에는 권한 검사를 <code>MAY_NOT_BLOCK</code>으로 부르는데, kernfs는 rwsem을 잡아야 해서 <code>-ECHILD</code>로 "잠들어야 하니 ref-walk로 와라"라고 답한다. 그래서 <strong><code>/sys</code> 아래는 항상 ref-walk</strong>로 걷는다. 이것은 함수 추적으로 처음 알게 된 사실이고, sysfs 파일을 초당 수천 번 여는 데몬(예: 센서 값을 sysfs로 폴링)이 생각보다 CPU를 먹는 이유 중 하나다. 그런 경우 fd를 열어 두고 <code>pread(fd, buf, n, 0)</code>으로 다시 읽는 것이 맞다 — 경로 탐색과 open을 매번 하지 않는다.</p>
+<p>함정: <code>/proc/sys/vm/drop_caches</code>에 2를 쓰면 dentry·inode 캐시가 비워져서 pass 1 상태로 돌아간다. 벤치마크 전에 캐시 상태를 맞추지 않으면 첫 측정만 느린 이유를 엉뚱한 데서 찾게 된다(§8).</p>
+<hr>
+<h2 id="4-char-device-chrdev_open이-f_op를-바꿔-끼운다">4. char device — <code>chrdev_open</code>이 <code>f_op</code>를 바꿔 끼운다<a class="anchor" href="#4-char-device-chrdev_open이-f_op를-바꿔-끼운다" aria-label="link">#</a></h2>
+<h3 id="4-1-직관-장치-파일의-inode는-전화번호부-한-줄-이다">4.1 직관 — 장치 파일의 inode는 "전화번호부 한 줄"이다<a class="anchor" href="#4-1-직관-장치-파일의-inode는-전화번호부-한-줄-이다" aria-label="link">#</a></h3>
+<p><code>/dev/ttyAMA0</code>의 inode는 데이터를 갖고 있지 않다. 들고 있는 것은 <strong>장치 번호 <code>i_rdev</code> = (major 204, minor 64)</strong> 하나뿐이다. 파일시스템(devtmpfs, ext4 어느 쪽이든)이 이 inode를 만들 때 <code>init_special_inode()</code>가 <code>i_fop = &amp;def_chr_fops</code>를 넣는다. <code>def_chr_fops</code>의 정의는 이게 전부다:</p>
+<figure class="code"><span class="lang">c</span><pre><code>const struct file_operations def_chr_fops = {
+	.open = chrdev_open,
+	.llseek = noop_llseek,
+};</code></pre></figure>
+<p>즉 장치 파일의 첫 <code>f_op</code>는 <strong>"진짜 드라이버를 찾아 주는 open"</strong> 하나만 가진 껍데기다. 펌웨어로 치면 부트로더의 "디바이스 ID로 드라이버 테이블을 찾아서 함수 포인터 테이블을 갈아 끼우는" 디스패처다.</p>
+<h3 id="4-2-chrdev_open-랩-소스-그대로">4.2 <code>chrdev_open()</code> — 랩 소스 그대로<a class="anchor" href="#4-2-chrdev_open-랩-소스-그대로" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static int chrdev_open(struct inode *inode, struct file *filp)
+{
+	const struct file_operations *fops;
+	struct cdev *p;
+	struct cdev *new = NULL;
+	int ret = 0;
+
+	spin_lock(&amp;cdev_lock);
+	p = inode-&gt;i_cdev;
+	if (!p) {
+		struct kobject *kobj;
+		int idx;
+		spin_unlock(&amp;cdev_lock);
+		kobj = kobj_lookup(cdev_map, inode-&gt;i_rdev, &amp;idx);
+		if (!kobj)
+			return -ENXIO;
+		new = container_of(kobj, struct cdev, kobj);
+		spin_lock(&amp;cdev_lock);
+		/* Check i_cdev again in case somebody beat us to it while
+		   we dropped the lock. */
+		p = inode-&gt;i_cdev;
+		if (!p) {
+			inode-&gt;i_cdev = p = new;
+			list_add(&amp;inode-&gt;i_devices, &amp;p-&gt;list);
+			new = NULL;
+		} else if (!cdev_get(p))
+			ret = -ENXIO;
+	} else if (!cdev_get(p))
+		ret = -ENXIO;
+	spin_unlock(&amp;cdev_lock);
+	cdev_put(new);
+	if (ret)
+		return ret;
+
+	ret = -ENXIO;
+	fops = fops_get(p-&gt;ops);
+	if (!fops)
+		goto out_cdev_put;
+
+	replace_fops(filp, fops);
+	if (filp-&gt;f_op-&gt;open) {
+		ret = filp-&gt;f_op-&gt;open(inode, filp);
+		if (ret)
+			goto out_cdev_put;
+	}
+
+	return 0;
+
+ out_cdev_put:
+	cdev_put(p);
+	return ret;
+}</code></pre></figure>
+<p>읽는 법:</p>
+<ol><li><code>inode-&gt;i_cdev</code>가 비어 있으면(이 inode로 처음 open) <code>kobj_lookup(cdev_map, i_rdev)</code> — major:minor로 <strong><code>cdev_add()</code>가 등록해 둔 <code>struct cdev</code></strong> 를 찾는다. 없으면 <code>-ENXIO</code>("No such device or address"). 찾으면 inode에 캐시한다(다음 open은 이 조회를 건너뛴다).</li><li><code>replace_fops(filp, cdev-&gt;ops)</code> — <strong><code>file-&gt;f_op</code>를 드라이버의 <code>file_operations</code>로 교체</strong>.</li><li>바뀐 <code>f_op-&gt;open</code>을 부른다.</li></ol>
+<p>misc device는 이 과정을 한 번 더 한다. misc 서브시스템이 major 10 전체를 하나의 cdev(<code>misc_fops</code>, <code>.open = misc_open</code>)로 등록해 두고, <code>misc_open()</code>이 minor로 <code>misc_list</code>를 뒤져 실제 드라이버의 fops로 <strong>두 번째 교체</strong>를 한다. 그 전에 <code>file-&gt;private_data = miscdevice</code>를 넣어 준다(§5에서 그 값을 쓴다).</p>
+<figure class="code"><span class="lang">c</span><pre><code>	/*
+	 * Place the miscdevice in the file's
+	 * private_data so it can be used by the
+	 * file operations, including f_op-&gt;open below
+	 */
+	file-&gt;private_data = c;
+
+	err = 0;
+	replace_fops(file, new_fops);
+	if (file-&gt;f_op-&gt;open)
+		err = file-&gt;f_op-&gt;open(inode, file);</code></pre></figure>
+<p><code>/dev/null</code> 같은 메모리 장치(major 1)도 같은 2단 구조다. <code>memory_open()</code>이 minor로 <code>devlist[]</code>를 찾아 <code>filp-&gt;f_op = dev-&gt;fops</code>로 바꾼다.</p>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="235" y="18" text-anchor="middle" font-size="13" font-weight="bold">누가 무엇을 하나</text>
+  <text x="580" y="18" text-anchor="middle" font-size="13" font-weight="bold">그때 file->f_op</text>
+  <rect x="20" y="30" width="430" height="60" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="235" y="54" text-anchor="middle" font-size="13">do_dentry_open()</text>
+  <text x="235" y="76" text-anchor="middle" font-size="12">f_op = inode->i_fop (init_special_inode가 넣어 둠)</text>
+  <rect x="20" y="120" width="430" height="60" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="235" y="144" text-anchor="middle" font-size="13">chrdev_open(): i_rdev = 10:258</text>
+  <text x="235" y="166" text-anchor="middle" font-size="12">kobj_lookup(cdev_map) → misc의 cdev → replace_fops</text>
+  <rect x="20" y="210" width="430" height="60" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="235" y="234" text-anchor="middle" font-size="13">misc_open(): minor 258 → misc_list 검색</text>
+  <text x="235" y="256" text-anchor="middle" font-size="12">private_data = miscdevice, replace_fops</text>
+  <rect x="20" y="300" width="430" height="60" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="235" y="324" text-anchor="middle" font-size="13">f12_open(): 드라이버 코드</text>
+  <text x="235" y="346" text-anchor="middle" font-size="12">private_data = 우리 컨텍스트로 덮어씀</text>
+  <line x1="235" y1="90" x2="235" y2="118" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="235" y1="180" x2="235" y2="208" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="235" y1="270" x2="235" y2="298" stroke="currentColor" marker-end="url(#ah5)"/>
+  <rect x="495" y="42" width="170" height="36" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="580" y="65" text-anchor="middle" font-size="13">&amp;def_chr_fops</text>
+  <rect x="495" y="132" width="170" height="36" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="580" y="155" text-anchor="middle" font-size="13">&amp;misc_fops</text>
+  <rect x="495" y="222" width="170" height="36" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="580" y="245" text-anchor="middle" font-size="13">&amp;f12_fops</text>
+  <rect x="495" y="312" width="170" height="36" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="580" y="335" text-anchor="middle" font-size="13">&amp;f12_fops (최종)</text>
+  <line x1="450" y1="60" x2="493" y2="60" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah5)"/>
+  <line x1="450" y1="150" x2="493" y2="150" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah5)"/>
+  <line x1="450" y1="240" x2="493" y2="240" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah5)"/>
+  <line x1="450" y1="330" x2="493" y2="330" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah5)"/>
+  <text x="20" y="388" font-size="12">일반 cdev 드라이버(cdev_add)는 misc 단계 없이 chrdev_open에서 바로 드라이버 fops로 바뀐다 (G4).</text>
+</svg></figure>
+<p>그림 5 — misc device를 open 할 때 <code>file-&gt;f_op</code>가 두 번 바뀐다. 이후 read/ioctl은 마지막 <code>f_op</code>만 따라가므로 이 교체는 open 한 번에만 비용이 든다.</p>
+<h3 id="4-3-예제-5-function_graph로-본-세-장치의-vfs_open">4.3 예제 5 — function_graph로 본 세 장치의 <code>vfs_open</code><a class="anchor" href="#4-3-예제-5-function_graph로-본-세-장치의-vfs_open" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 그림 5의 교체가 실제로 일어나는지. 같은 <code>g2_trace.sh</code> 실행에서 루트를 <code>vfs_open</code>, 깊이 5로 잡은 결과다. 실습 모듈 <code>f12_vfs</code>(§5)는 이 부팅에서 막 insmod 했으므로 <strong>처음 open</strong>이다.</p>
+<p><code>/dev/f12_vfs</code> (출력 그대로, 중간에 끼어든 타이머 인터럽트 처리 4줄만 <code>...</code>로 생략):</p>
+<figure class="code"><span class="lang">text</span><pre><code>### graph=vfs_open depth=5 path=/dev/f12_vfs
+               |  vfs_open() {
+               |    do_dentry_open() {
+               |      path_get() {
+   3.904 us    |        mntget();
+               |        _raw_spin_lock() {
+   2.416 us    |          do_raw_spin_trylock();
+ + 14.448 us   |        }
+               |        _raw_spin_unlock() {
+ + 34.752 us   |          do_raw_spin_unlock();
+ + 65.200 us   |        }
+ ! 106.992 us  |      }
+   5.632 us    |      try_module_get();
+   3.664 us    |      security_file_open();
+   4.336 us    |      fsnotify_open_perm_and_set_mode();
+               |      chrdev_open() {
+               |        _raw_spin_lock() {
+ ...
+   4.048 us    |          do_raw_spin_trylock();
+ # 3992.496 us |        }
+               |        _raw_spin_unlock() {
+   3.456 us    |          do_raw_spin_unlock();
+ + 20.416 us   |        }
+               |        kobj_lookup() {
+ + 32.416 us   |          mutex_lock_nested();
+   4.160 us    |          try_module_get();
+ + 25.792 us   |          exact_lock();
+ + 11.664 us   |          mutex_unlock();
+   9.456 us    |          exact_match();
+   4.000 us    |          module_put();
+ ! 220.832 us  |        }
+               |        _raw_spin_lock() {
+   3.504 us    |          do_raw_spin_trylock();
+ + 20.592 us   |        }
+               |        _raw_spin_unlock() {
+   3.216 us    |          do_raw_spin_unlock();
+ + 15.424 us   |        }
+   3.792 us    |        try_module_get();
+   3.248 us    |        module_put();
+               |        misc_open() {
+ + 20.912 us   |          mutex_lock_nested();
+ # 1002.960 us |          try_module_get();
+   5.376 us    |          module_put();
+ * 13439.20 us |          f12_open [f12_vfs]();
+ + 17.040 us   |          mutex_unlock();
+ * 14778.30 us |        }
+ * 19148.19 us |      }
+               |      file_ra_state_init() {
+   5.760 us    |        inode_to_bdi();
+ + 16.960 us   |      }
+ * 19378.03 us |    }
+ * 19398.36 us |  }</code></pre></figure>
+<p><code>/dev/null</code> (같은 실행, 출력 앞부분의 인터럽트 처리 줄들을 생략하고 <code>vfs_open</code>부터):</p>
+<figure class="code"><span class="lang">text</span><pre><code>               |  vfs_open() {
+               |    do_dentry_open() {
+               |      path_get() {
+   3.792 us    |        mntget();
+               |        _raw_spin_lock() {
+   3.792 us    |          do_raw_spin_trylock();
+ ! 123.168 us  |        }
+               |        _raw_spin_unlock() {
+   1.952 us    |          do_raw_spin_unlock();
+   9.872 us    |        }
+ ! 152.752 us  |      }
+   3.504 us    |      try_module_get();
+   2.128 us    |      security_file_open();
+   2.752 us    |      fsnotify_open_perm_and_set_mode();
+               |      chrdev_open() {
+               |        _raw_spin_lock() {
+   2.176 us    |          do_raw_spin_trylock();
+ + 13.504 us   |        }
+   2.672 us    |        try_module_get();
+               |        _raw_spin_unlock() {
+   2.080 us    |          do_raw_spin_unlock();
+ + 12.048 us   |        }
+   2.208 us    |        try_module_get();
+   2.336 us    |        module_put();
+   2.752 us    |        memory_open();
+ ! 154.304 us  |      }
+               |      file_ra_state_init() {
+   2.704 us    |        inode_to_bdi();
+   9.248 us    |      }
+ ! 372.128 us  |    }
+ ! 390.000 us  |  }</code></pre></figure>
+<p><code>/dev/ttyAMA0</code>의 <code>chrdev_open</code> 부분 (같은 실행, 깊이 5에서 잘린 줄 그대로):</p>
+<figure class="code"><span class="lang">text</span><pre><code>               |      chrdev_open() {
+               |        _raw_spin_lock() {
+   3.664 us    |          do_raw_spin_trylock();
+ + 27.680 us   |        }
+               |        _raw_spin_unlock() {
+   3.248 us    |          do_raw_spin_unlock();
+ + 15.200 us   |        }
+               |        kobj_lookup() {
+ + 30.240 us   |          mutex_lock_nested();
+   3.424 us    |          try_module_get();
+ + 37.456 us   |          exact_lock();
+ + 11.376 us   |          mutex_unlock();
+   3.968 us    |          exact_match();
+   4.048 us    |          module_put();
+ ! 152.464 us  |        }
+               |        _raw_spin_lock() {
+   3.632 us    |          do_raw_spin_trylock();
+ + 20.592 us   |        }
+               |        _raw_spin_unlock() {
+   3.200 us    |          do_raw_spin_unlock();
+ + 14.784 us   |        }
+   3.200 us    |        try_module_get();
+   3.168 us    |        module_put();
+               |        tty_open() {
+ + 15.376 us   |          nonseekable_open();
+ + 34.304 us   |          __kmalloc_cache_noprof();
+ + 33.424 us   |          mutex_lock_nested();
+ ! 243.760 us  |          tty_lookup_driver();
+ + 19.632 us   |          mutex_unlock();
+ ! 100.384 us  |          tty_lock_interruptible();
+ ! 411.632 us  |          tty_reopen();
+ + 25.488 us   |          _raw_spin_lock();
+ + 13.616 us   |          _raw_spin_unlock();
+ + 50.912 us   |          check_tty_count();
+ * 13098.36 us |          uart_open();
+ # 4150.528 us |          tty_open_proc_set_tty();
+ + 46.800 us   |          tty_unlock();
+ * 18749.36 us |        }
+ * 19064.52 us |      }</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>세 장치 모두 <code>do_dentry_open</code> → <code>chrdev_open</code></strong>으로 들어간다 — <code>i_fop = &amp;def_chr_fops</code>가 공통이라는 증거다.</li><li><code>f12_vfs</code>: <code>kobj_lookup</code>(cdev_map에서 major:minor 검색) → <code>misc_open</code> → <code>f12_open [f12_vfs]</code>. 그림 5의 두 번 교체가 그대로 보인다. <code>[f12_vfs]</code>는 이 함수가 모듈에 있다는 표시다.</li><li><code>/dev/null</code>: <code>kobj_lookup</code>이 없다. 이 inode는 부팅 때 <code>/init</code>의 <code>mount -t debugfs ... 2&gt;/dev/null</code> 리다이렉션이 이미 열었으므로 <code>inode-&gt;i_cdev</code>에 캐시돼 있었다. 바로 <code>memory_open</code>으로 간다.</li><li><code>/dev/ttyAMA0</code>: 셸의 입출력은 <code>/dev/console</code>(5:1)이라는 다른 inode를 쓰므로 devtmpfs의 <code>/dev/ttyAMA0</code> inode는 이번이 첫 open이고, 그래서 <code>kobj_lookup</code>이 보인다. 그다음 <code>tty_open</code> → <code>uart_open</code>(serial core) — tty 계층이 드라이버 앞에 한 층 더 있다(H8 UART · TTY · serial에서 다룬다).</li><li><code>try_module_get</code>/<code>module_put</code> 쌍이 여러 번: <code>fops_get</code>이 fops의 <code>.owner</code> 모듈 참조를 잡고, 교체되는 옛 fops의 참조는 놓는다(<code>replace_fops</code>가 <code>fops_put</code>을 한다).</li></ul>
+<hr>
+<h2 id="5-실습-드라이버-f12_vfs-file-두-개-inode-하나-dup은-file-공유">5. 실습 드라이버 <code>f12_vfs</code> — file 두 개, inode 하나, dup은 file 공유<a class="anchor" href="#5-실습-드라이버-f12_vfs-file-두-개-inode-하나-dup은-file-공유" aria-label="link">#</a></h2>
+<h3 id="5-1-예제-6-모듈-open-read-release에서-vfs-객체-찍기">5.1 예제 6 — 모듈: open/read/release에서 VFS 객체 찍기<a class="anchor" href="#5-1-예제-6-모듈-open-read-release에서-vfs-객체-찍기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 드라이버 콜백이 받는 <code>struct inode *</code>와 <code>struct file *</code>가 무엇인지 — open마다 file은 새로 생기고 inode는 같은지, <code>private_data</code>를 누가 먼저 쓰는지, <code>f_pos</code>와 <code>*ppos</code>의 관계, dup된 fd는 같은 file인지, <code>.release</code>는 언제 불리는지.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f12_vfs: misc char device — open/read/release에서 VFS 객체를 찍어 본다 */
+#include &lt;linux/module.h&gt;
+#include &lt;linux/miscdevice.h&gt;
+#include &lt;linux/fs.h&gt;
+#include &lt;linux/slab.h&gt;
+
+struct f12_ctx { int id; char msg[32]; };	/* open 한 번당 하나 */
+static atomic_t f12_nopen = ATOMIC_INIT(0);
+
+static int f12_open(struct inode *inode, struct file *f)
+{
+	struct miscdevice *m = f-&gt;private_data;	/* misc_open()이 넣어 둔 값 */
+	struct f12_ctx *c = kzalloc(sizeof(*c), GFP_KERNEL);
+
+	if (!c)
+		return -ENOMEM;
+	c-&gt;id = atomic_inc_return(&amp;f12_nopen);
+	snprintf(c-&gt;msg, sizeof(c-&gt;msg), "hello from open #%d\n", c-&gt;id);
+	pr_info("f12: open#%d file=%px inode=%px ino=%lu rdev=%u:%u name=%pd misc=%s\n",
+		c-&gt;id, f, inode, inode-&gt;i_ino, imajor(inode), iminor(inode),
+		file_dentry(f), m-&gt;name);
+	pr_info("f12:   f_flags=0%o f_pos=%lld f_ref=%ld i_fop-&gt;open=%ps f_op-&gt;open=%ps\n",
+		f-&gt;f_flags, f-&gt;f_pos, file_count(f), inode-&gt;i_fop-&gt;open, f-&gt;f_op-&gt;open);
+	f-&gt;private_data = c;			/* 이제부터는 우리 것 */
+	return 0;
+}
+
+static ssize_t f12_read(struct file *f, char __user *buf, size_t n, loff_t *ppos)
+{
+	struct f12_ctx *c = f-&gt;private_data;
+
+	pr_info("f12: read  open#%d file=%px *ppos=%lld f_pos=%lld n=%zu nonblock=%d\n",
+		c-&gt;id, f, *ppos, f-&gt;f_pos, n, !!(f-&gt;f_flags &amp; O_NONBLOCK));
+	return simple_read_from_buffer(buf, n, ppos, c-&gt;msg, strlen(c-&gt;msg));
+}
+
+static int f12_release(struct inode *inode, struct file *f)
+{
+	struct f12_ctx *c = f-&gt;private_data;
+
+	pr_info("f12: release open#%d file=%px f_pos=%lld\n", c-&gt;id, f, f-&gt;f_pos);
+	kfree(c);
+	return 0;
+}
+
+static const struct file_operations f12_fops = {
+	.owner = THIS_MODULE, .open = f12_open, .read = f12_read,
+	.release = f12_release, .llseek = default_llseek,
+};
+static struct miscdevice f12_misc = {
+	.minor = MISC_DYNAMIC_MINOR, .name = "f12_vfs", .fops = &amp;f12_fops, .mode = 0666,
+};
+module_misc_device(f12_misc);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("F12: VFS objects seen from a misc char device");</code></pre></figure>
+<p>포인트:</p>
+<ul><li><code>%px</code>는 커널 주소를 <strong>가리지 않고</strong> 찍는다(<code>%p</code>는 해시된 값). 학습용으로만 쓰고 제품 코드에서는 쓰지 않는다 — 주소 유출은 KASLR을 무력화한다.</li><li><code>%pd</code>는 dentry 이름을 찍는 printk 확장이다. <code>file_dentry(f)</code>는 <code>f-&gt;f_path.dentry</code>(overlayfs 같은 경우를 처리한 버전).</li><li>open 첫 줄에서 <code>f-&gt;private_data</code>를 읽으면 <strong>misc_open이 넣어 둔 <code>struct miscdevice *</code></strong> 다(§4.2). 그 값을 쓴 뒤 우리 컨텍스트로 덮어쓴다. G4의 일반 cdev 드라이버는 대신 <code>container_of(inode-&gt;i_cdev, struct my_dev, cdev)</code>로 장치 구조체를 찾는다.</li><li><strong>컨텍스트를 open마다 따로 할당</strong>했다. 같은 장치를 두 프로세스가 열어도 상태가 섞이지 않는다. 장치 전역 상태(레지스터, FIFO)는 별도 구조체에 두고 락으로 보호한다(F4).</li></ul>
+<h3 id="5-2-테스트-프로그램-open-두-번-dup">5.2 테스트 프로그램 — open 두 번 + dup<a class="anchor" href="#5-2-테스트-프로그램-open-두-번-dup" aria-label="link">#</a></h3>
+<p>유저 동작을 <code>/dev/kmsg</code>에 써서 커널 로그와 같은 타임라인에 끼워 넣는다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* t_open: open 두 번 + dup — struct file 두 개, inode 한 개, dup은 file 공유 */
+#include &lt;fcntl.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sys/stat.h&gt;
+#include &lt;sys/sysmacros.h&gt;
+#include &lt;unistd.h&gt;
+
+static int kmsg = -1;
+static void mark(const char *s)		/* 유저 동작을 dmesg 타임라인에 끼워 넣기 */
+{
+	dprintf(kmsg, "f12: user: %s\n", s);
+	printf("user: %s\n", s);
+}
+static void rd(int fd, const char *tag)
+{
+	char b[8] = {0};
+	ssize_t n = read(fd, b, 6);
+	if (n &lt; 0) { perror("read"); exit(1); }
+	printf("  %s read %zd bytes \"%.*s\"  lseek(fd,0,SEEK_CUR)=%lld\n",
+	       tag, n, (int)n, b, (long long)lseek(fd, 0, SEEK_CUR));
+}
+int main(void)
+{
+	struct stat s1, s2;
+	if ((kmsg = open("/dev/kmsg", O_WRONLY)) &lt; 0) { perror("kmsg"); return 1; }
+	mark("fd1 = open(O_RDONLY)");
+	int fd1 = open("/dev/f12_vfs", O_RDONLY);
+	mark("fd2 = open(O_RDONLY|O_NONBLOCK)");
+	int fd2 = open("/dev/f12_vfs", O_RDONLY | O_NONBLOCK);
+	if (fd1 &lt; 0 || fd2 &lt; 0) { perror("open"); return 1; }
+	mark("fd3 = dup(fd1)");
+	int fd3 = dup(fd1);
+	if (fd3 &lt; 0 || fstat(fd1, &amp;s1) || fstat(fd2, &amp;s2)) { perror("dup/fstat"); return 1; }
+	printf("  fd1=%d fd2=%d fd3=%d  st_ino %lu/%lu  st_rdev %u:%u\n", fd1, fd2, fd3,
+	       (unsigned long)s1.st_ino, (unsigned long)s2.st_ino,
+	       major(s1.st_rdev), minor(s1.st_rdev));
+	mark("read fd1, fd3, fd2");
+	rd(fd1, "fd1"); rd(fd3, "fd3"); rd(fd2, "fd2");
+	mark("close(fd1)  -- fd3 still holds the file");
+	close(fd1);
+	mark("close(fd3)");
+	close(fd3);
+	mark("close(fd2)");
+	close(fd2);
+	return 0;
+}</code></pre></figure>
+<p>게스트 스크립트:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /f12
+echo "### uname"; uname -r
+echo "### insmod"; insmod f12_vfs.ko &amp;&amp; insmod f12fs.ko
+ls -l /dev/f12_vfs /dev/null /dev/ttyAMA0
+grep -E "misc|f12" /proc/devices; grep f12 /proc/misc
+echo "### filesystems"; cat /proc/filesystems
+echo "### t_open"; ./t_open
+echo "### dmesg"; dmesg | grep "f12:"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 17.61s
+### uname
+6.18.55-dbg
+### insmod
+crw-rw-rw-    1 0        0          10, 258 Oct 10 22:14 /dev/f12_vfs
+crw-rw-rw-    1 0        0           1,   3 Jan  1  1970 /dev/null
+crw-------    1 0        0         204,  64 Jan  1  1970 /dev/ttyAMA0
+ 10 misc
+258 f12_vfs
+...
+### t_open
+user: fd1 = open(O_RDONLY)
+user: fd2 = open(O_RDONLY|O_NONBLOCK)
+user: fd3 = dup(fd1)
+  fd1=4 fd2=5 fd3=6  st_ino 145/145  st_rdev 10:258
+user: read fd1, fd3, fd2
+  fd1 read 6 bytes "hello "  lseek(fd,0,SEEK_CUR)=6
+  fd3 read 6 bytes "from o"  lseek(fd,0,SEEK_CUR)=12
+  fd2 read 6 bytes "hello "  lseek(fd,0,SEEK_CUR)=6
+user: close(fd1)  -- fd3 still holds the file
+user: close(fd3)
+user: close(fd2)
+### dmesg
+[   20.025361] f12: user: fd1 = open(O_RDONLY)
+[   20.031687] f12: open#1 file=ffff000005323200 inode=ffff000005eca738 ino=145 rdev=10:258 name=f12_vfs misc=f12_vfs
+[   20.031937] f12:   f_flags=0400000 f_pos=0 f_ref=1 i_fop-&gt;open=chrdev_open f_op-&gt;open=f12_open [f12_vfs]
+[   20.037351] f12: user: fd2 = open(O_RDONLY|O_NONBLOCK)
+[   20.062807] f12: open#2 file=ffff000005323380 inode=ffff000005eca738 ino=145 rdev=10:258 name=f12_vfs misc=f12_vfs
+[   20.062875] f12:   f_flags=0404000 f_pos=0 f_ref=1 i_fop-&gt;open=chrdev_open f_op-&gt;open=f12_open [f12_vfs]
+[   20.063114] f12: user: fd3 = dup(fd1)
+[   20.075481] f12: user: read fd1, fd3, fd2
+[   20.075929] f12: read  open#1 file=ffff000005323200 *ppos=0 f_pos=0 n=6 nonblock=0
+[   20.076844] f12: read  open#1 file=ffff000005323200 *ppos=6 f_pos=6 n=6 nonblock=0
+[   20.077302] f12: read  open#2 file=ffff000005323380 *ppos=0 f_pos=0 n=6 nonblock=1
+[   20.081509] f12: user: close(fd1)  -- fd3 still holds the file
+[   20.082272] f12: user: close(fd3)
+[   20.082676] f12: release open#1 file=ffff000005323200 f_pos=12
+[   20.082841] f12: user: close(fd2)
+[   20.083407] f12: release open#2 file=ffff000005323380 f_pos=6
+[   20.441597] reboot: Power down</code></pre></figure>
+<p>(<code>ls -l</code> 출력의 색 제어 문자만 지웠고, <code>...</code>은 <code>/proc/filesystems</code> 목록 생략 — §7에서 따로 본다. 주소는 실행마다 다르다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>file은 둘, inode는 하나</strong>: open#1의 <code>file=...3200</code>, open#2의 <code>file=...3380</code>은 다르고, <code>inode=...a738</code>과 <code>ino=145</code>는 같다. 유저 쪽 <code>fstat</code>의 <code>st_ino 145/145</code>도 일치한다.</li><li><strong>dup은 새 file을 만들지 않는다</strong>: <code>fd3 = dup(fd1)</code> 줄 뒤에 커널 로그가 없다(open 콜백 없음). fd3로 읽은 read가 <code>open#1 file=...3200</code>, <code>*ppos=6</code>으로 찍혔다 — fd1과 같은 file, 같은 오프셋. 그래서 "hello " 다음 "from o"가 나왔다. fd2는 자기 file이라 처음부터 "hello ".</li><li><strong><code>f_flags</code></strong>: open#1은 <code>0400000</code>, open#2는 <code>0404000</code>. <code>04000</code>이 <code>O_NONBLOCK</code>, <code>0400000</code>은 arm64의 <code>O_LARGEFILE</code> — 64비트 커널은 <code>build_open_flags()</code>에서 항상 붙인다. 드라이버는 blocking 여부를 <code>f-&gt;f_flags &amp; O_NONBLOCK</code>으로 본다(F3, G6).</li><li><strong><code>i_fop-&gt;open=chrdev_open</code>, <code>f_op-&gt;open=f12_open</code></strong>: inode의 기본 fops는 여전히 <code>def_chr_fops</code>이고, file의 <code>f_op</code>만 우리 것으로 바뀌었다. 그림 5의 결과를 드라이버 안에서 직접 확인한 것이다.</li><li><strong><code>*ppos</code>와 <code>f_pos</code></strong>: read 콜백 안에서 둘이 같은 값이다. E6에서 본 대로 <code>ppos</code>는 <code>ksys_read</code>의 지역 변수 주소이고, 드라이버가 <code>simple_read_from_buffer</code>로 <code>*ppos</code>를 올리면 read가 끝난 뒤 <code>f_pos</code>에 반영된다. release 때 <code>f_pos=12</code>(open#1)와 <code>6</code>(open#2)이 그 결과다.</li><li><strong>release는 마지막 참조에서만</strong>: <code>close(fd1)</code> 뒤에는 release가 없고, <code>close(fd3)</code> 뒤에 <code>release open#1</code>이 나온다. fork로 fd를 물려받은 자식, <code>mmap</code>, 다른 커널 코드의 <code>get_file()</code>도 같은 참조다.</li></ul>
+<p>함정: <code>.release</code>를 "close 할 때 불리는 함수"로 이해하면 버그가 난다. 장치를 "열려 있는 동안만 전원 ON" 하는 드라이버가 dup된 fd 때문에 전원을 끄지 못하거나, 반대로 <code>.flush</code>(close마다 불림)에서 전원을 끄면 아직 쓰는 fd가 있는데 꺼진다. 자원 해제는 <code>.release</code>, close마다 할 일(예: 쓰기 버퍼 flush)은 <code>.flush</code>다.</p>
+<hr>
+<h2 id="6-read-경로와-kprobe-커널-안의-이름-찍기">6. read 경로와 kprobe — 커널 안의 이름 찍기<a class="anchor" href="#6-read-경로와-kprobe-커널-안의-이름-찍기" aria-label="link">#</a></h2>
+<h3 id="6-1-read-경로-복습">6.1 read 경로 복습<a class="anchor" href="#6-1-read-경로-복습" aria-label="link">#</a></h3>
+<p>E6 §2에서 <code>read()</code> → <code>ksys_read()</code> → <code>vfs_read()</code> → <code>file-&gt;f_op-&gt;read</code> 또는 <code>-&gt;read_iter</code>를 소스로 봤다. VFS 관점에서 다시 정리하면:</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>하는 일</th><th>사용하는 VFS 객체</th></tr></thead><tbody><tr><td><code>ksys_read(fd, ...)</code></td><td><code>fdget_pos(fd)</code>: fd 번호 → <code>struct file</code>, 정규 파일·디렉터리(<code>FMODE_ATOMIC_POS</code>)면 <code>f_pos_lock</code></td><td>fdtable, file</td></tr><tr><td><code>vfs_read(file, buf, n, &amp;pos)</code></td><td><code>FMODE_READ</code>/<code>FMODE_CAN_READ</code> 검사, <code>access_ok</code>, <code>rw_verify_area</code></td><td>file의 <code>f_mode</code></td></tr><tr><td><code>f_op-&gt;read</code></td><td>드라이버·procfs·sysfs 구현</td><td>file의 <code>f_op</code>, <code>private_data</code></td></tr><tr><td><code>f_op-&gt;read_iter</code> → <code>filemap_read()</code></td><td>정규 파일은 page cache(<code>f_mapping</code> = inode의 <code>i_mapping</code>)에서 복사</td><td>file, inode, address_space</td></tr></tbody></table></div>
+<p><code>f_pos_lock</code>이 정규 파일에만 걸리는 이유: 같은 file을 공유하는 두 스레드가 동시에 read 하면 POSIX는 오프셋이 깨지지 않기를 요구한다. 장치 파일은 <code>FMODE_ATOMIC_POS</code>가 없으므로 이 보장을 <strong>드라이버가 알아서</strong> 해야 한다(보통 장치 락으로).</p>
+<h3 id="6-2-예제-7-kprobe_events로-vfs_read의-파일-이름-찍기">6.2 예제 7 — kprobe_events로 <code>vfs_read</code>의 파일 이름 찍기<a class="anchor" href="#6-2-예제-7-kprobe_events로-vfs_read의-파일-이름-찍기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 커널을 다시 빌드하지 않고 임의의 커널 함수에 탐침을 걸어, 인자(<code>struct file *</code>)를 따라가 파일 이름·오프셋을 찍을 수 있는지. 예제 2의 pahole 오프셋을 그대로 쓴다.</p>
+<p>fetch-arg 문법: <code>$arg1</code>은 첫 인자(arm64에서 x0), <code>+OFF(X)</code>는 "X + OFF 주소의 8바이트 값"이다. 이름 문자열은 <code>file → f_path.dentry → d_name.name → 문자열</code> 순서로 세 번 따라간다.</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>식</th><th>근거 (예제 2 pahole)</th></tr></thead><tbody><tr><td>dentry 포인터</td><td><code>+144($arg1)</code></td><td><code>f_path</code> 136 + <code>struct path</code>의 <code>dentry</code> 8</td></tr><tr><td>이름 포인터</td><td><code>+104(+144($arg1))</code></td><td><code>d_name</code> 96 + <code>qstr.name</code> 8</td></tr><tr><td>문자열</td><td><code>+0(+104(+144($arg1))):string</code></td><td><code>:string</code>은 계산된 주소에서 문자열을 읽는다</td></tr><tr><td>파일 오프셋</td><td><code>+312($arg1):s64</code></td><td><code>f_pos</code> 312</td></tr><tr><td>장치 번호</td><td><code>chrdev_open</code>의 <code>+76($arg1):x32</code></td><td><code>inode-&gt;i_rdev</code> 76</td></tr></tbody></table></div>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /f12
+insmod f12_vfs.ko; insmod f12fs.ko; mkdir -p /mnt/f12; mount -t f12fs none /mnt/f12
+mount -t tracefs none /sys/kernel/tracing
+T=/sys/kernel/tracing
+echo 0 &gt; $T/tracing_on
+echo 'p:f12/vread vfs_read name=+0(+104(+144($arg1))):string count=$arg3:u64 f_pos=+312($arg1):s64' &gt;&gt; $T/kprobe_events
+echo 'p:f12/chropen chrdev_open rdev=+76($arg1):x32 ino=+64($arg1):u64' &gt;&gt; $T/kprobe_events
+echo 'r:f12/vread_ret vfs_read ret=$retval:s64' &gt;&gt; $T/kprobe_events
+echo "### kprobe_events"; cat $T/kprobe_events
+echo "### format"; cat $T/events/f12/vread/format | tail -4
+echo 1 &gt; $T/events/f12/enable
+echo &gt; $T/trace
+echo 1 &gt; $T/tracing_on
+cat /mnt/f12/hello &gt; /dev/null
+head -c 10 /dev/f12_vfs &gt; /dev/null
+dd if=/dev/zero of=/dev/null bs=4096 count=2 2&gt;/dev/null
+echo 0 &gt; $T/tracing_on
+echo "### trace"; grep -v "^#" $T/trace
+echo 0 &gt; $T/events/f12/enable; echo &gt; $T/kprobe_events</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 13.46s
+### kprobe_events
+p:f12/vread vfs_read name=+0(+104(+144($arg1))):string count=$arg3:u64 f_pos=+312($arg1):s64
+p:f12/chropen chrdev_open rdev=+76($arg1):x32 ino=+64($arg1):u64
+r10:f12/vread_ret vfs_read ret=$retval:s64
+### format
+	field:u64 count;	offset:20;	size:8;	signed:0;
+	field:s64 f_pos;	offset:28;	size:8;	signed:1;
+
+print fmt: "(%lx) name=\"%s\" count=%Lu f_pos=%Ld", REC-&gt;__probe_ip, __get_str(name), REC-&gt;count, REC-&gt;f_pos
+### trace
+              sh-72      [001] d....    16.452952: chropen: (chrdev_open+0x0/0x218) rdev=0x100003 ino=5
+             cat-81      [001] d....    16.521537: vread: (vfs_read+0x0/0x358) name="hello" count=4096 f_pos=0
+             cat-81      [001] d..1.    16.523179: vread_ret: (ksys_read+0x6c/0x110 &lt;- vfs_read) ret=17
+             cat-81      [001] d....    16.523666: vread: (vfs_read+0x0/0x358) name="hello" count=4096 f_pos=17
+             cat-81      [001] d..1.    16.523723: vread_ret: (ksys_read+0x6c/0x110 &lt;- vfs_read) ret=0
+              sh-72      [000] d....    16.540255: chropen: (chrdev_open+0x0/0x218) rdev=0x100003 ino=5
+            head-82      [001] d....    16.618569: chropen: (chrdev_open+0x0/0x218) rdev=0xa00102 ino=145
+            head-82      [001] d....    16.622306: vread: (vfs_read+0x0/0x358) name="f12_vfs" count=4096 f_pos=0
+            head-82      [001] d..1.    16.622520: vread_ret: (ksys_read+0x6c/0x110 &lt;- vfs_read) ret=19
+              sh-72      [000] d....    16.649729: chropen: (chrdev_open+0x0/0x218) rdev=0x100003 ino=5
+              dd-83      [001] d....    16.713952: chropen: (chrdev_open+0x0/0x218) rdev=0x100005 ino=7
+              dd-83      [001] d....    16.714516: chropen: (chrdev_open+0x0/0x218) rdev=0x100003 ino=5
+              dd-83      [001] d....    16.715263: vread: (vfs_read+0x0/0x358) name="zero" count=4096 f_pos=0
+              dd-83      [001] d..1.    16.715860: vread_ret: (ksys_read+0x6c/0x110 &lt;- vfs_read) ret=4096
+              dd-83      [001] d....    16.716151: vread: (vfs_read+0x0/0x358) name="zero" count=4096 f_pos=0
+              dd-83      [001] d..1.    16.716197: vread_ret: (ksys_read+0x6c/0x110 &lt;- vfs_read) ret=4096</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>name="hello"</code>, <code>"f12_vfs"</code>, <code>"zero"</code> — 커널 메모리를 세 번 따라가 dentry 이름을 꺼냈다. 첫 시도에서 <code>+104(+144($arg1)):string</code>(한 단계 부족)으로 썼을 때는 <code>name="H��"</code> 같은 쓰레기가 나왔다 — <code>:string</code>은 마지막 주소에서 바로 문자열을 읽으므로 이름 <strong>포인터</strong>가 든 칸을 한 번 더 따라가야 한다.</li><li><code>cat /mnt/f12/hello</code>: 첫 read가 17바이트(<code>ret=17</code>), 두 번째 read는 <code>f_pos=17</code>에서 0바이트 = EOF. 유저의 "read를 0이 나올 때까지 반복" 루프가 커널에서 이렇게 보인다.</li><li><code>/dev/zero</code>는 read마다 <code>f_pos=0</code>이다 — <code>/dev/zero</code>의 read는 위치를 올리지 않는다. 반면 <code>f12_vfs</code>·f12fs는 <code>simple_read_from_buffer</code>가 <code>*ppos</code>를 올린다.</li><li><code>chropen</code> 줄의 <code>rdev</code>는 커널 내부 <code>dev_t</code> 인코딩(major &lt;&lt; 20 + minor)이다: <code>0x100003</code> = 1:3(<code>/dev/null</code>), <code>0x100005</code> = 1:5(<code>/dev/zero</code>), <code>0xa00102</code> = 10:258(<code>f12_vfs</code>). 유저 쪽 <code>st_rdev</code>의 인코딩과 다르다 — 커널 안에서는 <code>MAJOR()</code>/<code>MINOR()</code>, 유저는 <code>major()</code>/<code>minor()</code>를 쓴다.</li><li><code>sh-72</code>가 <code>/dev/null</code>을 여는 줄은 스크립트의 <code>&gt; /dev/null</code> 리다이렉션이다.</li><li><code>r10:</code> — 리턴 프로브(kretprobe)는 동시에 추적할 수 있는 인스턴스 수(maxactive)가 자동으로 10으로 정해졌다는 표시다.</li></ul>
+<p>함정: 오프셋은 <strong>이 빌드(debug, lockdep)에만 맞다.</strong> 일반 커널, 다른 config, <code>CONFIG_RANDSTRUCT</code>에서는 전부 다르다. 실무에서는 BTF가 있는 커널에서 <code>$arg1-&gt;f_path.dentry-&gt;d_name.name</code> 같은 타입 기반 문법(kprobe의 BTF 인자, 또는 bpftrace)을 쓰는 것이 안전하다. 이 랩 커널은 <code>CONFIG_DEBUG_INFO_BTF</code>가 꺼져 있어서 오프셋 방식을 썼다.</p>
+<hr>
+<h2 id="7-파일시스템-타입-mount-그리고-pseudo-filesystem">7. 파일시스템 타입, mount, 그리고 pseudo filesystem<a class="anchor" href="#7-파일시스템-타입-mount-그리고-pseudo-filesystem" aria-label="link">#</a></h2>
+<h3 id="7-1-file_system_type-super_block-root-dentry">7.1 <code>file_system_type</code> → <code>super_block</code> → root dentry<a class="anchor" href="#7-1-file_system_type-super_block-root-dentry" aria-label="link">#</a></h3>
+<p>파일시스템 "종류"는 <code>struct file_system_type</code> 하나로 커널에 등록된다. 핵심 필드(6.18 include/linux/fs.h):</p>
+<figure class="code"><span class="lang">c</span><pre><code>struct file_system_type {
+	const char *name;
+	int fs_flags;
+	...
+	int (*init_fs_context)(struct fs_context *);
+	const struct fs_parameter_spec *parameters;
+	struct dentry *(*mount) (struct file_system_type *, int,
+		       const char *, void *);
+	void (*kill_sb) (struct super_block *);
+	struct module *owner;
+	struct file_system_type * next;
+	struct hlist_head fs_supers;
+	...</code></pre></figure>
+<ul><li><code>register_filesystem()</code>은 이것을 전역 단일 연결 리스트(<code>file_systems</code>, <code>next</code> 필드)에 넣는다. 같은 이름이 있으면 <code>-EBUSY</code>. <code>/proc/filesystems</code>는 이 리스트를 그대로 출력하고, <code>FS_REQUIRES_DEV</code>가 없는 것(블록 장치가 필요 없는 것) 앞에 <code>nodev</code>를 붙인다.</li><li><code>mount -t X</code>는 이름으로 타입을 찾고 <code>init_fs_context()</code>로 <code>struct fs_context</code>를 만든 뒤 <code>fc-&gt;ops-&gt;get_tree()</code>를 부른다. 새 mount API(fs_context)는 5.x부터의 방식이고, 옛 <code>.mount</code> 콜백은 남아 있지만 새 코드에서는 쓰지 않는다.</li><li><code>get_tree</code>는 보통 헬퍼 하나로 끝난다: <code>get_tree_nodev()</code>(mount마다 새 super_block, tmpfs·f12fs), <code>get_tree_single()</code>(시스템에 super_block 하나, 예: 일부 pseudo FS), <code>get_tree_bdev()</code>(블록 장치 기반, ext4). 헬퍼가 super_block을 할당하고 파일시스템의 <code>fill_super</code>를 불러 <code>s_op</code>, <code>s_magic</code>, <code>s_root</code>를 채우게 한다.</li><li><code>kill_sb</code>는 umount 때 super_block을 정리한다. 메모리에만 있는 FS는 <code>kill_litter_super()</code>(남은 dentry를 정리)를 쓴다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="20" y="22" font-size="13" font-weight="bold">insmod: register_filesystem()</text>
+  <rect x="20" y="34" width="80" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="60" y="54" text-anchor="middle" font-size="12">sysfs</text>
+  <rect x="120" y="34" width="80" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="160" y="54" text-anchor="middle" font-size="12">tmpfs</text>
+  <rect x="220" y="34" width="80" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="260" y="54" text-anchor="middle" font-size="12">proc</text>
+  <text x="330" y="54" text-anchor="middle" font-size="13">…</text>
+  <rect x="360" y="34" width="90" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="405" y="54" text-anchor="middle" font-size="12">f12fs</text>
+  <line x1="100" y1="49" x2="118" y2="49" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="200" y1="49" x2="218" y2="49" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="300" y1="49" x2="318" y2="49" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="340" y1="49" x2="358" y2="49" stroke="currentColor" marker-end="url(#ah6)"/>
+  <text x="470" y="54" font-size="12">= /proc/filesystems</text>
+  <rect x="20" y="96" width="300" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="118" text-anchor="middle" font-size="13">mount -t f12fs none /mnt/f12</text>
+  <text x="170" y="140" text-anchor="middle" font-size="12">init_fs_context → fc->ops->get_tree</text>
+  <rect x="20" y="184" width="300" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="206" text-anchor="middle" font-size="13">get_tree_nodev(fc, fill_super)</text>
+  <text x="170" y="228" text-anchor="middle" font-size="12">super_block 할당 + 익명 dev 0:25</text>
+  <rect x="20" y="272" width="300" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="294" text-anchor="middle" font-size="13">simple_fill_super(sb, magic, files)</text>
+  <text x="170" y="316" text-anchor="middle" font-size="12">s_op · s_magic · root inode · 파일들</text>
+  <line x1="170" y1="152" x2="170" y2="182" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="170" y1="240" x2="170" y2="270" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="405" y1="64" x2="300" y2="94" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah6)"/>
+  <rect x="370" y="100" width="290" height="80" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="515" y="122" text-anchor="middle" font-size="13" font-weight="bold">super_block</text>
+  <text x="515" y="144" text-anchor="middle" font-size="12">s_magic = 0x66313266</text>
+  <text x="515" y="164" text-anchor="middle" font-size="12">s_op = simple_super_operations</text>
+  <rect x="370" y="210" width="290" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="515" y="237" text-anchor="middle" font-size="12">root ino 1: simple_dir_inode_operations</text>
+  <rect x="370" y="284" width="90" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="415" y="304" text-anchor="middle" font-size="12">hello</text>
+  <text x="415" y="320" text-anchor="middle" font-size="12">ino 2</text>
+  <rect x="470" y="284" width="90" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="515" y="304" text-anchor="middle" font-size="12">jiffies</text>
+  <text x="515" y="320" text-anchor="middle" font-size="12">ino 3</text>
+  <rect x="570" y="284" width="90" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="615" y="304" text-anchor="middle" font-size="12">whoami</text>
+  <text x="615" y="320" text-anchor="middle" font-size="12">ino 4</text>
+  <line x1="320" y1="300" x2="368" y2="150" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="515" y1="180" x2="515" y2="208" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="515" y1="254" x2="515" y2="282" stroke="currentColor" marker-end="url(#ah6)"/>
+  <text x="20" y="362" font-size="12">세 파일 모두 i_fop = f12fs_fops — read 콜백이 i_ino로 구분해서 내용을 그때그때 만든다</text>
+</svg></figure>
+<p>그림 6 — f12fs가 등록되고 mount 되는 과정. 타입은 리스트에 한 번, super_block은 mount마다 하나.</p>
+<h3 id="7-2-예제-8-mount마다-super_block-하나-statfs의-f_type">7.2 예제 8 — mount마다 super_block 하나: <code>statfs</code>의 <code>f_type</code><a class="anchor" href="#7-2-예제-8-mount마다-super_block-하나-statfs의-f_type" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>statfs(2)</code>가 돌려주는 <code>f_type</code>이 그 mount의 <code>super_block-&gt;s_magic</code>이고, <code>st_dev</code>가 super_block의 <code>s_dev</code>라는 것.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* t_statfs: 마운트마다 super_block 하나 — statfs의 f_type = sb-&gt;s_magic */
+#include &lt;stdio.h&gt;
+#include &lt;sys/stat.h&gt;
+#include &lt;sys/sysmacros.h&gt;
+#include &lt;sys/statfs.h&gt;
+
+int main(int argc, char **argv)
+{
+	for (int i = 1; i &lt; argc; i++) {
+		struct statfs f;
+		struct stat st;
+		if (statfs(argv[i], &amp;f) || stat(argv[i], &amp;st)) { perror(argv[i]); continue; }
+		printf("%-22s f_type=0x%-10lx st_dev=%u:%-3u ino=%-6lu bsize=%ld\n",
+		       argv[i], (unsigned long)f.f_type, major(st.st_dev), minor(st.st_dev),
+		       (unsigned long)st.st_ino, (long)f.f_bsize);
+	}
+	return 0;
+}</code></pre></figure>
+<p>예제 9의 게스트 스크립트 안에서 실행했다(아래 §7.3의 스크립트 <code>### statfs</code> 부분):</p>
+<figure class="code"><span class="lang">text</span><pre><code>### statfs
+/                      f_type=0x1021994    st_dev=0:2   ino=1      bsize=4096
+/proc                  f_type=0x9fa0       st_dev=0:23  ino=1      bsize=4096
+/sys                   f_type=0x62656572   st_dev=0:24  ino=1      bsize=4096
+/dev                   f_type=0x1021994    st_dev=0:6   ino=1      bsize=4096
+/sys/kernel/debug      f_type=0x64626720   st_dev=0:8   ino=1      bsize=4096
+/mnt/f12               f_type=0x66313266   st_dev=0:25  ino=1      bsize=4096
+/mnt/f12               f_type=0x66313266   st_dev=0:25  ino=1      bsize=4096
+/mnt/f12b              f_type=0x66313266   st_dev=0:26  ino=1      bsize=4096</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>0x9fa0</code> = <code>PROC_SUPER_MAGIC</code>, <code>0x62656572</code> = <code>SYSFS_MAGIC</code>("beer"), <code>0x64626720</code> = <code>DEBUGFS_MAGIC</code>("dbg "), <code>0x1021994</code> = <code>TMPFS_MAGIC</code>. 우리 <code>0x66313266</code>은 ASCII "f12f"다.</li><li><code>/</code>(initramfs의 rootfs)와 <code>/dev</code>(devtmpfs)가 둘 다 <code>TMPFS_MAGIC</code>이다. 이 커널에서 rootfs와 devtmpfs는 내부적으로 tmpfs(shmem)를 쓴다. 그래도 <code>st_dev</code>가 0:2, 0:6으로 다르다 — <strong>다른 super_block</strong>이다.</li><li>모든 pseudo FS의 major가 0이다. 블록 장치가 없는 FS는 <code>get_tree_nodev()</code>가 익명 장치 번호(0:N)를 하나 할당한다. f12fs를 두 번 mount 하면 0:25, 0:26 — <code>get_tree_nodev</code>라서 mount마다 새 super_block이다.</li><li>모든 mount의 루트 inode 번호가 1이다. inode 번호는 <strong>super_block 안에서만</strong> 유일하다. 시스템 전체에서 파일을 식별하는 키는 <code>(st_dev, st_ino)</code> 쌍이다.</li></ul>
+<h3 id="7-3-예제-9-f12fs-libfs로-만든-50줄짜리-pseudo-filesystem">7.3 예제 9 — <code>f12fs</code>: libfs로 만든 50줄짜리 pseudo filesystem<a class="anchor" href="#7-3-예제-9-f12fs-libfs로-만든-50줄짜리-pseudo-filesystem" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 파일시스템을 하나 등록하고, mount 하면 모듈이 정한 파일들이 보이며, 파일 내용은 디스크가 아니라 <strong>read 시점에 커널 코드가 만든다</strong>는 것. procfs·sysfs·debugfs가 전부 이 원리다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f12fs: libfs로 만든 초소형 pseudo filesystem — 파일 내용은 read 때 생성 */
+#include &lt;linux/module.h&gt;
+#include &lt;linux/fs.h&gt;
+#include &lt;linux/fs_context.h&gt;
+#include &lt;linux/jiffies.h&gt;
+#include &lt;linux/sched.h&gt;
+
+#define F12FS_MAGIC 0x66313266			/* "f12f" */
+
+static ssize_t f12fs_read(struct file *f, char __user *u, size_t n, loff_t *pos)
+{
+	char buf[64];
+	int len;
+
+	switch (file_inode(f)-&gt;i_ino) {		/* inode 번호로 파일 구분 */
+	case 2:  len = scnprintf(buf, sizeof(buf), "hello from f12fs\n"); break;
+	case 3:  len = scnprintf(buf, sizeof(buf), "jiffies=%lu\n", jiffies); break;
+	default: len = scnprintf(buf, sizeof(buf), "pid=%d comm=%s\n",
+				 current-&gt;pid, current-&gt;comm);
+	}
+	return simple_read_from_buffer(u, n, pos, buf, len);
+}
+static const struct file_operations f12fs_fops = {
+	.owner = THIS_MODULE, .read = f12fs_read, .llseek = default_llseek,
+};
+
+static int f12fs_fill_super(struct super_block *sb, struct fs_context *fc)
+{
+	static const struct tree_descr files[] = {	/* 인덱스 = i_ino, 1은 root */
+		[2] = { "hello",   &amp;f12fs_fops, 0444 },
+		[3] = { "jiffies", &amp;f12fs_fops, 0444 },
+		[4] = { "whoami",  &amp;f12fs_fops, 0444 },
+		{ "" }
+	};
+	return simple_fill_super(sb, F12FS_MAGIC, files);
+}
+static int f12fs_get_tree(struct fs_context *fc)
+{
+	return get_tree_nodev(fc, f12fs_fill_super);	/* mount마다 새 super_block */
+}
+static const struct fs_context_operations f12fs_ctx_ops = { .get_tree = f12fs_get_tree };
+static int f12fs_init_fs_context(struct fs_context *fc)
+{
+	fc-&gt;ops = &amp;f12fs_ctx_ops;
+	return 0;
+}
+static struct file_system_type f12fs_type = {
+	.owner = THIS_MODULE, .name = "f12fs",
+	.init_fs_context = f12fs_init_fs_context, .kill_sb = kill_litter_super,
+};
+static int __init f12fs_init(void) { return register_filesystem(&amp;f12fs_type); }
+static void __exit f12fs_exit(void) { unregister_filesystem(&amp;f12fs_type); }
+module_init(f12fs_init);
+module_exit(f12fs_exit);
+MODULE_LICENSE("GPL");
+MODULE_ALIAS_FS("f12fs");
+MODULE_DESCRIPTION("F12: tiny libfs pseudo filesystem");</code></pre></figure>
+<p><code>simple_fill_super()</code>(fs/libfs.c)가 하는 일 — 이 한 함수가 §1의 네 객체 중 셋을 만든다:</p>
+<figure class="code"><span class="lang">c</span><pre><code>	s-&gt;s_magic = magic;
+	s-&gt;s_op = &amp;simple_super_operations;
+	...
+	inode = new_inode(s);
+	...
+	inode-&gt;i_ino = 1;
+	inode-&gt;i_mode = S_IFDIR | 0755;
+	inode-&gt;i_op = &amp;simple_dir_inode_operations;
+	inode-&gt;i_fop = &amp;simple_dir_operations;
+	...
+	s-&gt;s_root = d_make_root(inode);
+	...
+	for (i = 0; !files-&gt;name || files-&gt;name[0]; i++, files++) {
+		...
+		dentry = d_alloc_name(s-&gt;s_root, files-&gt;name);
+		...
+		inode = new_inode(s);
+		...
+		inode-&gt;i_mode = S_IFREG | files-&gt;mode;
+		inode-&gt;i_fop = files-&gt;ops;
+		inode-&gt;i_ino = i;
+		d_add(dentry, inode);
+	}</code></pre></figure>
+<p>즉 super_block을 채우고, 루트 inode + root dentry를 만들고, 파일마다 dentry(<code>d_alloc_name</code>) + inode(<code>new_inode</code>)를 만들어 <code>d_add</code>로 잇는다. 그리고 <code>i_fop = files-&gt;ops</code> — <strong>open 때 <code>do_dentry_open</code>이 복사할 바로 그 값</strong>이다.</p>
+<p>게스트 스크립트(<code>g3_fs.sh</code>):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /f12
+insmod f12fs.ko
+echo "### filesystems"; grep -E "f12fs|tmpfs|proc|sysfs|debugfs|devtmpfs" /proc/filesystems
+mkdir -p /mnt/f12 &amp;&amp; mount -t f12fs none /mnt/f12
+echo "### mount"; grep -E "f12fs|proc|sysfs|devtmpfs|debugfs" /proc/self/mountinfo
+echo "### ls"; ls -li --color=never /mnt/f12
+echo "### cat"; cat /mnt/f12/hello; cat /mnt/f12/jiffies; sleep 1; cat /mnt/f12/jiffies; cat /mnt/f12/whoami; sh -c 'cat /mnt/f12/whoami'
+echo "### write"; echo x &gt; /mnt/f12/hello; echo "rc=$?"
+echo "### create"; touch /mnt/f12/new; echo "rc=$?"
+echo "### statfs"; ./t_statfs / /proc /sys /dev /sys/kernel/debug /mnt/f12 2&gt;&amp;1
+mkdir -p /mnt/f12b &amp;&amp; mount -t f12fs none /mnt/f12b &amp;&amp; ./t_statfs /mnt/f12 /mnt/f12b
+echo "### lsmod"; lsmod | grep f12
+echo "### umount"; rmmod f12fs; lsmod | grep f12; umount /mnt/f12 /mnt/f12b; lsmod | grep f12; rmmod f12fs; grep f12 /proc/filesystems || echo "f12fs unregistered"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 56.14s
+### filesystems
+nodev	sysfs
+nodev	tmpfs
+nodev	proc
+nodev	devtmpfs
+nodev	debugfs
+nodev	f12fs
+### mount
+24 1 0:23 / /proc rw,relatime - proc proc rw
+25 1 0:24 / /sys rw,relatime - sysfs sysfs rw
+26 1 0:6 / /dev rw,relatime - devtmpfs devtmpfs rw,size=204732k,nr_inodes=51183,mode=755
+27 25 0:8 / /sys/kernel/debug rw,relatime - debugfs debugfs rw
+28 1 0:25 / /mnt/f12 rw,relatime - f12fs none rw
+### ls
+total 0
+      2 -r--r--r--    1 0        0                0 Oct 10 22:20 hello
+      3 -r--r--r--    1 0        0                0 Oct 10 22:20 jiffies
+      4 -r--r--r--    1 0        0                0 Oct 10 22:20 whoami
+### cat
+hello from f12fs
+jiffies=4294907738
+jiffies=4294908124
+pid=83 comm=cat
+pid=84 comm=cat
+### write
+sh: write error: Invalid argument
+rc=1
+### create
+touch: /mnt/f12/new: Permission denied
+rc=1
+### statfs
+...  (예제 8에 실은 8줄)
+### lsmod
+f12fs 12288 2 - Live 0xffffab30d1225000 (O)
+### umount
+rmmod: remove 'f12fs': Resource temporarily unavailable
+f12fs 12288 2 - Live 0xffffab30d1225000 (O)
+f12fs 12288 0 - Live 0xffffab30d1225000 (O)
+f12fs unregistered
+[   84.403025] reboot: Power down</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong><code>/proc/filesystems</code>에 <code>nodev f12fs</code></strong> — <code>register_filesystem</code> 한 줄의 결과. <code>/proc/self/mountinfo</code>의 <code>0:25</code>가 예제 8의 <code>st_dev</code>와 같다.</li><li><strong>크기 0인데 내용이 나온다</strong>: <code>ls</code>는 <code>i_size</code>(0)를 보여 주지만 <code>cat</code>은 17바이트를 읽는다. procfs·sysfs 파일이 모두 크기 0(또는 4096)으로 보이는 이유다. 그래서 이런 파일을 <code>stat</code>의 크기만큼 읽는 코드는 틀린다 — EOF(0)까지 read 해야 한다.</li><li><strong>내용은 read 시점에 생성</strong>: <code>jiffies</code>가 <code>sleep 1</code>을 사이에 두고 386 증가했다(이 커널은 <code>CONFIG_HZ=250</code>이므로 386 tick ≈ 1.5초 — <code>cat</code> 프로세스 생성까지 포함한 TCG 게스트의 시간이다. 숫자 자체보다 "매번 다르다"를 본다). <code>whoami</code>는 읽는 프로세스마다 <code>pid</code>가 다르다(83, 84). sysfs의 <code>show()</code> 콜백, procfs의 <code>seq_file</code>이 정확히 이 방식이다.</li><li><strong>write → <code>EINVAL</code></strong>: 모드는 0444지만 root라서 권한 검사는 통과했고, open에 성공했다. 그런데 <code>f12fs_fops</code>에 <code>.write</code>가 없으니 <code>do_dentry_open</code>이 <code>FMODE_CAN_WRITE</code>를 세우지 않았고, <code>vfs_write()</code>가 <code>-EINVAL</code>을 돌려줬다(§2.2).</li><li><strong>touch → <code>EACCES</code></strong>: 루트 디렉터리의 <code>i_op</code>(<code>simple_dir_inode_operations</code>)에는 <code>.lookup</code>만 있고 <code>.create</code>가 없다. <code>open(O_CREAT)</code> 경로의 <code>lookup_open()</code>은 <code>if (!dir_inode-&gt;i_op-&gt;create) error = -EACCES;</code>다. 소스 주석도 "shouldn't it be ENOSYS?"라고 투덜댄다.</li><li><strong>mount가 모듈 참조를 잡는다</strong>: mount 두 개 → <code>lsmod</code> 사용 카운트 2, 그 상태의 <code>rmmod</code>는 <code>EAGAIN</code>("Resource temporarily unavailable"). <code>.owner = THIS_MODULE</code>이 <code>file_system_type</code>에도 있는 이유다. umount 후 0이 되고 rmmod가 성공, <code>/proc/filesystems</code>에서도 사라졌다.</li></ul>
+<h3 id="7-4-드라이버는-pseudo-fs를-직접-만들지-않는다-어디에-붙이나">7.4 드라이버는 pseudo FS를 직접 만들지 않는다 — 어디에 붙이나<a class="anchor" href="#7-4-드라이버는-pseudo-fs를-직접-만들지-않는다-어디에-붙이나" aria-label="link">#</a></h3>
+<p>f12fs는 원리를 보려고 만든 것이고, 드라이버가 파일을 노출할 때는 이미 있는 pseudo FS의 API를 쓴다. 각자 VFS 위에서 위의 <code>simple_fill_super</code> 같은 일을 대신 해 준다.</p>
+<div class="tw"><table><thead><tr><th>pseudo FS</th><th>mount 위치</th><th>드라이버 API</th><th>용도</th><th>규칙</th></tr></thead><tbody><tr><td>devtmpfs</td><td><code>/dev</code></td><td><code>misc_register</code>, <code>device_create</code>(+<code>cdev_add</code>)</td><td>char/block 장치 노드</td><td>노드는 커널이 자동 생성, 권한·이름은 udev가 조정 (G9)</td></tr><tr><td>sysfs</td><td><code>/sys</code></td><td><code>DEVICE_ATTR_RW</code> + <code>show</code>/<code>store</code>, attribute group</td><td>장치 속성 한 파일에 값 하나</td><td>ABI다 — 한 번 내보내면 바꾸기 어렵다 (G8)</td></tr><tr><td>debugfs</td><td><code>/sys/kernel/debug</code></td><td><code>debugfs_create_file</code>, <code>debugfs_create_u32</code> 등</td><td>디버그 전용, 아무 형식</td><td>ABI 아님, 제품에서 꺼질 수 있음 (G8)</td></tr><tr><td>procfs</td><td><code>/proc</code></td><td><code>proc_create</code> + <code>seq_file</code></td><td>프로세스·커널 전역 정보</td><td>새 드라이버 정보는 넣지 않는 것이 관례</td></tr><tr><td>configfs</td><td><code>/sys/kernel/config</code></td><td><code>configfs_register_subsystem</code></td><td>유저가 객체를 <strong>만드는</strong> 설정 (USB gadget)</td><td>G8</td></tr><tr><td>tmpfs</td><td>어디든</td><td>(드라이버용 아님)</td><td>RAM 파일시스템</td><td>J3</td></tr></tbody></table></div>
+<h3 id="7-5-예제-10-misc_register-한-번이-sysfs-devtmpfs-procfs에-남기는-것">7.5 예제 10 — misc_register 한 번이 sysfs·devtmpfs·procfs에 남기는 것<a class="anchor" href="#7-5-예제-10-misc_register-한-번이-sysfs-devtmpfs-procfs에-남기는-것" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 6의 <code>module_misc_device()</code> 한 줄이 <code>/dev</code> 노드, <code>/sys/class/misc/...</code> 디렉터리, <code>/proc/misc</code> 항목을 모두 만들고, rmmod 하면 모두 사라지는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /f12
+echo "### link"; readlink /sys/class/tty/ttyAMA0
+echo "### insmod"; ls /dev | grep f12; insmod f12_vfs.ko; ls -l --color=never /dev/f12_vfs
+echo "### sysfs"; ls --color=never /sys/class/misc/f12_vfs/; cat /sys/class/misc/f12_vfs/dev /sys/class/misc/f12_vfs/uevent
+echo "### proc"; grep f12 /proc/misc; grep -w f12_open /proc/kallsyms
+echo "### rmmod"; rmmod f12_vfs; ls /dev/f12_vfs 2&gt;&amp;1</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>### insmod
+crw-rw-rw-    1 0        0          10, 258 Oct 10 22:24 /dev/f12_vfs
+### sysfs
+dev        power      subsystem  uevent
+10:258
+MAJOR=10
+MINOR=258
+DEVNAME=f12_vfs
+DEVMODE=0666
+### proc
+258 f12_vfs
+ffffdc95e557f088 t f12_open	[f12_vfs]
+### rmmod
+ls: /dev/f12_vfs: No such file or directory</code></pre></figure>
+<p>(<code>g8_misc2.sh</code> 출력에서 이 부분만. 앞의 <code>### link</code> 결과는 §3.3에 실었다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>insmod 전 <code>ls /dev | grep f12</code>는 아무것도 출력하지 않았고, insmod 직후 <code>/dev/f12_vfs</code>가 생겼다. udev가 없는 BusyBox initramfs에서도 <strong>devtmpfs는 커널이 직접 노드를 만든다.</strong> 권한 0666은 <code>miscdevice.mode</code>에서 왔다(<code>uevent</code>의 <code>DEVMODE=0666</code>).</li><li><code>/sys/class/misc/f12_vfs/uevent</code>의 <code>MAJOR</code>/<code>MINOR</code>/<code>DEVNAME</code>이 udev(또는 mdev)가 노드를 만들 때 쓰는 정보다(G9).</li><li>rmmod 하면 노드도 사라진다. 이 노드들은 전부 <strong>VFS 객체를 커널이 대신 만들어 준 것</strong>이다 — devtmpfs의 dentry/inode(<code>i_rdev</code> = 10:258, <code>i_fop = def_chr_fops</code>), sysfs의 kernfs 노드.</li></ul>
+<hr>
+<h2 id="8-dcache와-inode-cache의-크기-측정">8. dcache와 inode cache의 크기 — 측정<a class="anchor" href="#8-dcache와-inode-cache의-크기-측정" aria-label="link">#</a></h2>
+<h3 id="8-1-예제-11-sys-전체를-세-번-걷기">8.1 예제 11 — <code>/sys</code> 전체를 세 번 걷기<a class="anchor" href="#8-1-예제-11-sys-전체를-세-번-걷기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 경로를 처음 걸을 때 dentry·inode가 얼마나 생기는지, 두 번째부터 얼마나 빨라지는지, <code>drop_caches</code>로 회수되는지. <code>/proc/sys/fs/dentry-state</code>의 앞 두 숫자는 <code>nr_dentry</code>(전체 dentry 수)와 <code>nr_unused</code>(참조 0으로 LRU에 있는 수), <code>/proc/sys/fs/inode-nr</code>은 <code>nr_inodes</code>와 <code>nr_free_inodes</code>다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* t_walk: /sys 전체를 두 번 걷기 — dcache가 차기 전(cold)과 후(warm) 비교 */
+#define _GNU_SOURCE
+#include &lt;ftw.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;time.h&gt;
+
+static long nent;
+static int cb(const char *p, const struct stat *s, int t, struct FTW *f)
+{
+	(void)p; (void)s; (void)t; (void)f;
+	nent++;
+	return 0;
+}
+static void show(const char *file)
+{
+	char line[128];
+	FILE *fp = fopen(file, "r");
+	if (!fp || !fgets(line, sizeof(line), fp)) { perror(file); exit(1); }
+	printf("    %-28s %s", file, line);
+	fclose(fp);
+}
+static double now(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &amp;ts);
+	return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+int main(void)
+{
+	for (int pass = 1; pass &lt;= 3; pass++) {
+		printf("pass %d before:\n", pass);
+		show("/proc/sys/fs/dentry-state");
+		show("/proc/sys/fs/inode-nr");
+		nent = 0;
+		double t0 = now();
+		if (nftw("/sys", cb, 64, FTW_PHYS) &lt; 0) { perror("nftw"); return 1; }
+		printf("  pass %d: %ld entries in %.1f ms\n", pass, nent, (now() - t0) * 1e3);
+	}
+	printf("after:\n");
+	show("/proc/sys/fs/dentry-state");
+	show("/proc/sys/fs/inode-nr");
+	return 0;
+}</code></pre></figure>
+<p>(주석의 "두 번"은 실제로는 세 번이다 — 두 번째와 세 번째가 같은지도 보려고 늘렸다.)</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /f12
+echo "### slabinfo before"; grep -E "^(dentry|inode_cache|kernfs_node_cache|filp|proc_inode_cache|sysfs) " /proc/slabinfo | awk '{print $1, $2, $3, $4}'
+./t_walk
+echo "### slabinfo after"; grep -E "^(dentry|inode_cache|kernfs_node_cache|filp|proc_inode_cache) " /proc/slabinfo | awk '{print $1, $2, $3, $4}'
+echo "### drop_caches"; echo 2 &gt; /proc/sys/vm/drop_caches; cat /proc/sys/fs/dentry-state; cat /proc/sys/fs/inode-nr</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 14.09s
+### slabinfo before
+proc_inode_cache 24 24 1288
+kernfs_node_cache 17138 17138 184
+filp 42 42 384
+inode_cache 26 26 1216
+dentry 1212 1212 328
+pass 1 before:
+    /proc/sys/fs/dentry-state    1195	5	45	0	0	0
+    /proc/sys/fs/inode-nr        1219	0
+  pass 1: 27266 entries in 22822.6 ms
+pass 2 before:
+    /proc/sys/fs/dentry-state    27879	26690	45	0	0	0
+    /proc/sys/fs/inode-nr        27902	0
+  pass 2: 27266 entries in 16200.4 ms
+pass 3 before:
+    /proc/sys/fs/dentry-state    27879	26690	45	0	0	0
+    /proc/sys/fs/inode-nr        27902	0
+  pass 3: 27266 entries in 16573.1 ms
+after:
+    /proc/sys/fs/dentry-state    27879	26690	45	0	0	0
+    /proc/sys/fs/inode-nr        27902	0
+### slabinfo after
+proc_inode_cache 24 24 1288
+kernfs_node_cache 17138 17138 184
+filp 42 42 384
+inode_cache 17134 17134 1216
+dentry 27936 27936 328
+### drop_caches
+2288	708	45	0	0	0
+2312	0</code></pre></figure>
+<p>(slabinfo 열: 이름, active 객체 수, 전체 객체 수, 객체 크기(바이트).)</p>
+<figure class="chart"><svg viewBox="0 0 680 320" xmlns="http://www.w3.org/2000/svg">
+  <text x="195" y="22" text-anchor="middle" font-size="13" font-weight="bold">dentry / inode 개수</text>
+  <text x="535" y="22" text-anchor="middle" font-size="13" font-weight="bold">/sys 전체 nftw 시간</text>
+  <line x1="60" y1="250" x2="330" y2="250" stroke="currentColor"/>
+  <line x1="60" y1="183.3" x2="330" y2="183.3" stroke="#888" stroke-opacity="0.4"/>
+  <line x1="60" y1="116.7" x2="330" y2="116.7" stroke="#888" stroke-opacity="0.4"/>
+  <line x1="60" y1="50" x2="330" y2="50" stroke="#888" stroke-opacity="0.4"/>
+  <text x="54" y="254" text-anchor="end" font-size="12">0</text>
+  <text x="54" y="187" text-anchor="end" font-size="12">10k</text>
+  <text x="54" y="121" text-anchor="end" font-size="12">20k</text>
+  <text x="54" y="54" text-anchor="end" font-size="12">30k</text>
+  <rect x="70" y="242.0" width="28" height="8.0" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+  <rect x="102" y="241.9" width="28" height="8.1" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+  <text x="100" y="234" text-anchor="middle" font-size="12">1195</text>
+  <rect x="155" y="64.1" width="28" height="185.9" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+  <rect x="187" y="64.0" width="28" height="186.0" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+  <text x="185" y="58" text-anchor="middle" font-size="12">27879</text>
+  <rect x="240" y="234.7" width="28" height="15.3" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+  <rect x="272" y="234.6" width="28" height="15.4" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+  <text x="270" y="227" text-anchor="middle" font-size="12">2288</text>
+  <text x="100" y="268" text-anchor="middle" font-size="12">부팅 직후</text>
+  <text x="185" y="268" text-anchor="middle" font-size="12">walk 후</text>
+  <text x="270" y="268" text-anchor="middle" font-size="12">drop 후</text>
+  <rect x="80" y="288" width="12" height="12" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+  <text x="98" y="299" font-size="12">nr_dentry</text>
+  <rect x="190" y="288" width="12" height="12" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+  <text x="208" y="299" font-size="12">nr_inodes</text>
+  <line x1="420" y1="250" x2="650" y2="250" stroke="currentColor"/>
+  <line x1="420" y1="170" x2="650" y2="170" stroke="#888" stroke-opacity="0.4"/>
+  <line x1="420" y1="90" x2="650" y2="90" stroke="#888" stroke-opacity="0.4"/>
+  <text x="414" y="254" text-anchor="end" font-size="12">0 s</text>
+  <text x="414" y="174" text-anchor="end" font-size="12">10 s</text>
+  <text x="414" y="94" text-anchor="end" font-size="12">20 s</text>
+  <rect x="430" y="67.6" width="44" height="182.4" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+  <text x="452" y="61" text-anchor="middle" font-size="12">22.8 s</text>
+  <rect x="505" y="120.4" width="44" height="129.6" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+  <text x="527" y="114" text-anchor="middle" font-size="12">16.2 s</text>
+  <rect x="580" y="117.2" width="44" height="132.8" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+  <text x="602" y="111" text-anchor="middle" font-size="12">16.6 s</text>
+  <text x="452" y="268" text-anchor="middle" font-size="12">1차 (cold)</text>
+  <text x="527" y="268" text-anchor="middle" font-size="12">2차</text>
+  <text x="602" y="268" text-anchor="middle" font-size="12">3차</text>
+  <text x="535" y="299" text-anchor="middle" font-size="12">27266 항목, TCG + lockdep</text>
+</svg></figure>
+<p>그림 7 — 예제 11의 측정값. 왼쪽: <code>/sys</code>를 한 번 걸으면 dentry·inode가 약 2만 7천 개로 늘고, <code>drop_caches</code>(2)로 2288개까지 회수된다(막대 위 숫자는 nr_dentry). 오른쪽: 같은 걷기가 두 번째부터 약 29% 빨라진다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>dentry +26684, inode +26683</strong>: 걸은 항목 27266개마다 거의 하나씩 생겼다. 단, 이 숫자는 sysfs만이 아니다. <code>nftw</code>에 <code>FTW_MOUNT</code>를 주지 않았으므로 <code>/sys/kernel/debug</code>(debugfs, 그 아래 tracefs 자동 mount 포함)까지 넘어가서 걸었다.</li><li><strong><code>inode_cache</code> 26 → 17134, <code>kernfs_node_cache</code>는 17138 그대로</strong>: sysfs(kernfs) inode는 일반 <code>inode_cache</code> slab에서 나오고, 늘어난 수(약 1만 7천)가 kernfs 노드 수와 거의 같다 — kernfs 노드 하나당 VFS inode 하나가 생겼다. 나머지 약 1만 개는 debugfs·tracefs inode로, 이 FS들은 자기 전용 slab(<code>debugfs_inode_cache</code> 등, 위 grep에는 넣지 않았다)을 쓴다. kernfs 노드(원본 데이터)는 장치가 등록될 때 이미 있고, VFS의 dentry/inode는 <strong>누가 볼 때 만들어지는 캐시</strong>일 뿐이다(§3.3의 <code>kernfs_iop_lookup</code>). 메모리로 보면 dentry 328바이트 + inode 1216바이트(debug 빌드 크기) × 약 2만 7천 ≈ 40 MB. 512 MB 보드에서 무시할 수 없는 양이고, 그래서 이 캐시들은 shrinker로 회수 가능하게 만들어져 있다.</li><li><strong><code>nr_unused</code> 26690</strong>: 걷기가 끝나면 대부분 참조 0(누구도 열고 있지 않음)이 되어 LRU에 남는다. 이것이 "캐시"이고, <code>drop_caches</code>나 메모리 압박 때 회수 대상이다. 회수 후 2288개는 열려 있거나 mount 점처럼 고정된 것 + 이후 다시 만들어진 것이다.</li><li><strong>시간 22.8 s → 16.2 s</strong>: 2차부터 <code>kernfs_iop_lookup</code>과 dentry·inode 할당이 빠진 만큼 빨라졌다. 그래도 2차가 여전히 오래 걸리는 것은 매 항목마다 <code>newfstatat</code>/<code>getdents64</code> syscall, sysfs의 ref-walk(§3.3), 그리고 TCG + lockdep 비용이 남기 때문이다. 실제 보드에서는 절대값이 수십 배 작다.</li></ul>
+<p>함정: <code>/proc/sys/vm/drop_caches</code>는 <strong>전역 상태를 바꾸는 운영 도구</strong>이지 튜닝 손잡이가 아니다. 공유 장비에서 쓰면 다른 프로세스의 성능이 출렁인다. 이 측정도 랩 VM 호스트가 아니라 내 QEMU 게스트 안에서만 했다.</p>
+<hr>
+<h2 id="9-커널-안에서는-무슨-일이-일어나나-한-장-요약">9. 커널 안에서는 무슨 일이 일어나나 — 한 장 요약<a class="anchor" href="#9-커널-안에서는-무슨-일이-일어나나-한-장-요약" aria-label="link">#</a></h2>
+<p>이 노트 자체가 "커널 안" 이야기였으므로, 유저 API 하나하나가 어떤 VFS 객체와 ops를 건드리는지 표 하나로 묶는다.</p>
+<div class="tw"><table><thead><tr><th>유저 호출</th><th>VFS 경로 (6.18 이름)</th><th>만들거나 쓰는 객체</th><th>불리는 ops</th><th>다시 볼 노트</th></tr></thead><tbody><tr><td><code>open</code></td><td><code>do_sys_openat2</code> → <code>do_filp_open</code> → <code>path_openat</code> → <code>vfs_open</code> → <code>do_dentry_open</code></td><td>file 생성, dentry·inode는 dcache에서 (없으면 생성)</td><td><code>i_op-&gt;lookup</code>(miss 때), <code>f_op-&gt;open</code></td><td>§2, G4</td></tr><tr><td><code>open("/dev/x")</code></td><td>위 + <code>chrdev_open</code> → (<code>misc_open</code>)</td><td><code>inode-&gt;i_cdev</code> 캐시</td><td><code>def_chr_fops.open</code> → 드라이버 <code>.open</code></td><td>§4, G4, G7</td></tr><tr><td><code>read</code> / <code>write</code></td><td><code>ksys_read</code> → <code>vfs_read</code></td><td>file의 <code>f_pos</code></td><td><code>f_op-&gt;read</code>/<code>read_iter</code></td><td>E6, G4</td></tr><tr><td><code>close</code></td><td><code>file_close_fd</code> → <code>filp_flush</code> → <code>fput_close_sync</code> → (마지막이면) <code>__fput</code></td><td>file 해제, dentry·inode 참조 감소</td><td><code>f_op-&gt;flush</code>(매번), <code>f_op-&gt;release</code>(마지막)</td><td>§5</td></tr><tr><td><code>dup</code> / <code>fork</code></td><td><code>fdtable</code>에 포인터 복사, <code>f_ref</code> 증가</td><td>새 객체 없음</td><td>없음</td><td>§5, A3</td></tr><tr><td><code>stat</code></td><td>경로 탐색 → <code>vfs_getattr</code></td><td>dentry·inode</td><td><code>i_op-&gt;getattr</code> (없으면 generic)</td><td>§3</td></tr><tr><td><code>statfs</code></td><td><code>vfs_statfs</code></td><td>super_block</td><td><code>s_op-&gt;statfs</code></td><td>§7.2</td></tr><tr><td><code>mount</code></td><td><code>fs_context</code> → <code>get_tree</code> → <code>fill_super</code></td><td>super_block, root dentry/inode</td><td><code>init_fs_context</code>, <code>get_tree</code></td><td>§7</td></tr><tr><td><code>umount</code></td><td><code>kill_sb</code></td><td>super_block 해제</td><td><code>s_op-&gt;put_super</code> 등</td><td>§7</td></tr><tr><td><code>unlink</code></td><td><code>vfs_unlink</code></td><td>dentry 제거(negative), inode <code>i_nlink</code> 감소</td><td><code>i_op-&gt;unlink</code>, 마지막에 <code>s_op-&gt;evict_inode</code></td><td>J2</td></tr><tr><td>메모리 압박</td><td>shrinker (<code>prune_dcache_sb</code>, <code>prune_icache_sb</code>)</td><td>참조 0인 dentry·inode 회수</td><td><code>d_op-&gt;d_release</code>, <code>s_op-&gt;evict_inode</code></td><td>F9, §8</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="20" width="140" height="50" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="90" y="42" text-anchor="middle" font-size="13">struct file</text>
+  <text x="90" y="60" text-anchor="middle" font-size="12">open ~ 마지막 fput</text>
+  <rect x="190" y="20" width="140" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="260" y="42" text-anchor="middle" font-size="13">dentry</text>
+  <text x="260" y="60" text-anchor="middle" font-size="12">lookup ~ LRU 회수</text>
+  <rect x="360" y="20" width="140" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="430" y="42" text-anchor="middle" font-size="13">inode</text>
+  <text x="430" y="60" text-anchor="middle" font-size="12">lookup ~ evict</text>
+  <rect x="530" y="20" width="130" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="595" y="42" text-anchor="middle" font-size="13">super_block</text>
+  <text x="595" y="60" text-anchor="middle" font-size="12">mount ~ umount</text>
+  <line x1="160" y1="45" x2="188" y2="45" stroke="currentColor" marker-end="url(#ah7)"/>
+  <line x1="330" y1="45" x2="358" y2="45" stroke="currentColor" marker-end="url(#ah7)"/>
+  <line x1="500" y1="45" x2="528" y2="45" stroke="currentColor" marker-end="url(#ah7)"/>
+  <rect x="20" y="110" width="640" height="120" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="340" y="134" text-anchor="middle" font-size="13" font-weight="bold">char 드라이버가 실제로 만지는 것</text>
+  <text x="340" y="158" text-anchor="middle" font-size="12">file_operations 하나 (open · release · read · write · poll · unlocked_ioctl · mmap)</text>
+  <text x="340" y="180" text-anchor="middle" font-size="12">file->private_data (open마다 컨텍스트), file->f_flags (O_NONBLOCK), *ppos</text>
+  <text x="340" y="202" text-anchor="middle" font-size="12">inode->i_cdev 또는 misc가 준 private_data로 장치 구조체 찾기</text>
+  <text x="340" y="222" text-anchor="middle" font-size="12">나머지 객체는 devtmpfs · sysfs가 만들어 준다</text>
+  <line x1="90" y1="70" x2="90" y2="108" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah7)"/>
+</svg></figure>
+<p>그림 8 — 객체마다 수명이 다르다(왼쪽에서 오른쪽으로 갈수록 오래 산다). 드라이버가 직접 다루는 것은 맨 왼쪽 <code>struct file</code>과 <code>file_operations</code>뿐이다.</p>
+<hr>
+<h2 id="10-embedded-실무에서-다시-보기">10. Embedded 실무에서 다시 보기<a class="anchor" href="#10-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="10-1-센서-키트의-imu-char-device-open마다-컨텍스트">10.1 센서 키트의 IMU char device — open마다 컨텍스트<a class="anchor" href="#10-1-센서-키트의-imu-char-device-open마다-컨텍스트" aria-label="link">#</a></h3>
+<p>IMU 드라이버를 char device로 만들면 보통 두 프로세스가 동시에 연다: 센서 퓨전 데몬(고속 FIFO read)과 진단 툴(가끔 상태 ioctl). §5처럼 <strong>open마다 <code>private_data</code>에 컨텍스트</strong>(읽기 위치, 구독 설정)를 두고, 장치 전역 상태(FIFO, 레지스터 캐시)는 <code>container_of(inode-&gt;i_cdev, ...)</code>로 찾은 장치 구조체에 두고 mutex로 보호한다. 둘을 섞으면 "진단 툴을 켜면 퓨전 데몬의 데이터가 튄다" 같은 버그가 된다. 그리고 "하나만 열 수 있는 장치"(예: 펌웨어 업데이트 채널)는 <code>.open</code>에서 <code>atomic</code> 플래그로 두 번째 open에 <code>-EBUSY</code>를 돌려준다 — 이것도 file이 open마다 따로 생긴다는 사실 위에서 설계하는 것이다.</p>
+<h3 id="10-2-sysfs-폴링-데몬이-cpu를-먹는다">10.2 sysfs 폴링 데몬이 CPU를 먹는다<a class="anchor" href="#10-2-sysfs-폴링-데몬이-cpu를-먹는다" aria-label="link">#</a></h3>
+<p>GPIO 값, 온도, 배터리 잔량을 sysfs에서 100 Hz로 읽는 데몬이 흔하다. 매번 <code>open</code> + <code>read</code> + <code>close</code>를 하면 §3.3에서 본 것처럼 경로 성분마다 ref-walk(kernfs가 RCU-walk를 거부)와 kernfs 콜백, file 할당·해제가 반복된다. 해법은 <strong>fd를 한 번 열어 두고 <code>pread(fd, buf, n, 0)</code></strong> 으로 다시 읽기다. sysfs 속성은 오프셋 0에서 다시 읽으면 <code>show()</code>가 새로 불린다. 값 변화를 기다려야 하면 <code>poll()</code>(<code>sysfs_notify</code>, G6·G8) 또는 GPIO character device(<code>/dev/gpiochipN</code>)의 이벤트를 쓴다.</p>
+<h3 id="10-3-release가-안-불려서-장치-전원이-안-꺼져요">10.3 "release가 안 불려서 장치 전원이 안 꺼져요"<a class="anchor" href="#10-3-release가-안-불려서-장치-전원이-안-꺼져요" aria-label="link">#</a></h3>
+<p>카메라나 LiDAR처럼 "열려 있는 동안만 전원 ON" 하는 드라이버에서 자주 나온다. 원인은 거의 항상 <strong>file의 참조가 남아 있는 것</strong>이다: 데몬이 <code>fork()</code>/<code>system()</code>으로 자식을 띄웠는데 fd에 <code>O_CLOEXEC</code>가 없었다, <code>mmap</code>한 영역이 남아 있다(VMA가 file 참조를 잡는다), 다른 스레드가 dup 해 갔다. 확인은 <code>ls -l /proc/*/fd | grep 장치명</code>과 <code>/proc/&lt;pid&gt;/maps</code>. 드라이버 쪽에서는 §6.2의 kprobe처럼 <code>f12_release</code>(여기서는 드라이버의 release)에 탐침을 걸어 언제 불리는지 본다.</p>
+<h3 id="10-4-디버그-인터페이스는-debugfs에-제품-인터페이스는-sysfs-char에">10.4 디버그 인터페이스는 debugfs에, 제품 인터페이스는 sysfs/char에<a class="anchor" href="#10-4-디버그-인터페이스는-debugfs에-제품-인터페이스는-sysfs-char에" aria-label="link">#</a></h3>
+<p>bring-up 중에는 레지스터 덤프, 내부 카운터, 강제 상태 전이를 노출하고 싶다. 이것을 sysfs에 넣으면 유저스페이스 ABI가 되어 나중에 지울 수 없다. <strong>debugfs에 넣는다</strong>(<code>debugfs_create_regset32</code>, <code>debugfs_create_file</code>). 제품 빌드에서는 debugfs mount 자체를 막을 수 있고(<code>debugfs=off</code> 커널 인자, 또는 <code>CONFIG_DEBUG_FS</code> 끄기), 그때 드라이버가 깨지지 않도록 debugfs 함수의 실패를 무시하는 것이 관례다 — debugfs API는 에러를 확인하지 않아도 되게 설계됐다.</p>
+<hr>
+<h2 id="11-흔한-실수와-증상">11. 흔한 실수와 증상<a class="anchor" href="#11-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td><code>file_operations</code>에 <code>.owner = THIS_MODULE</code> 누락</td><td>fd가 열린 채 <code>rmmod</code> 성공, 다음 read에서 Oops</td><td><code>fops_get</code>이 모듈 참조를 못 잡음</td><td>모든 fops·<code>file_system_type</code>에 <code>.owner</code></td></tr><tr><td>장치 전역 구조체 하나에 읽기 위치까지 저장</td><td>두 프로세스가 열면 데이터가 섞임</td><td>file이 open마다 따로 생긴다는 점 무시</td><td>open마다 <code>private_data</code>에 컨텍스트</td></tr><tr><td><code>.release</code>를 "close마다"로 가정</td><td>dup·fork 뒤 release가 안 불림, 자원 누수</td><td>release는 마지막 <code>fput</code> 때만</td><td>자원 해제는 release, close마다 할 일은 <code>.flush</code></td></tr><tr><td><code>.open</code> 실패 경로에서 할당 해제 안 함</td><td>open 실패 때마다 메모리 누수</td><td>open이 실패하면 release가 안 불림</td><td>open 안에서 goto 에러 경로로 정리</td></tr><tr><td>misc 드라이버 open에서 <code>private_data</code>를 덮어쓰기 전에 사용 안 함</td><td>장치 구조체를 못 찾아 전역 변수에 의존</td><td>misc_open이 넣어 준 <code>miscdevice *</code>를 모름</td><td><code>container_of(f-&gt;private_data, struct my_dev, misc)</code> 후 덮어쓰기</td></tr><tr><td><code>.write</code> 없이 쓰기 가능한 노드 생성</td><td>유저 write가 <code>EINVAL</code></td><td><code>FMODE_CAN_WRITE</code> 미설정</td><td>노드 모드를 0444로, 또는 <code>.write</code> 구현</td></tr><tr><td>procfs·sysfs 파일을 <code>st_size</code>만큼 읽기</td><td>0바이트 또는 4096바이트에서 잘림</td><td>pseudo 파일의 크기는 의미 없음</td><td>EOF(0)까지 read 반복</td></tr><tr><td>sysfs 값을 루프에서 open/read/close</td><td>CPU 사용률 높음, 지연</td><td>매번 경로 탐색(ref-walk) + file 할당</td><td>fd 유지 + <code>pread(…, 0)</code>, 또는 poll</td></tr><tr><td>커널 구조체 오프셋 하드코딩 (kprobe·eBPF)</td><td>다른 빌드에서 쓰레기 값</td><td>config·lockdep·RANDSTRUCT로 레이아웃 변경</td><td>BTF 기반 접근, 또는 빌드마다 pahole로 재계산</td></tr><tr><td>pseudo FS mount 중 <code>rmmod</code> 시도 후 강제</td><td><code>EAGAIN</code>, 강제하면 위험</td><td>mount가 모듈 참조를 잡음</td><td>먼저 umount</td></tr></tbody></table></div>
+<hr>
+<h2 id="12-면접에서-이렇게-말한다">12. 면접에서 이렇게 말한다<a class="anchor" href="#12-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> What happens when you call <code>open("/dev/foo", O_RDWR)</code>?</p>
+<p><strong>A.</strong> 커널이 빈 fd 번호를 예약하고, 경로를 dcache로 따라가 <code>foo</code>의 dentry와 inode를 찾는다. <code>struct file</code>을 할당하고 <code>f_op = inode-&gt;i_fop</code>로 시작하는데, 장치 inode의 <code>i_fop</code>는 <code>def_chr_fops</code>라서 <code>chrdev_open</code>이 불린다. <code>chrdev_open</code>이 <code>i_rdev</code>(major:minor)로 <code>cdev_add</code> 때 등록된 cdev를 찾아 <code>f_op</code>를 드라이버의 <code>file_operations</code>로 바꾸고 드라이버 <code>.open</code>을 부른다. 성공하면 <code>fd_install</code>로 fd 번호에 file을 꽂고 번호를 돌려준다.</p>
+<blockquote><p>The kernel reserves an unused fd, then walks the path through the dentry cache to find the dentry and inode for "foo". It allocates a struct file and initializes f_op from inode-&gt;i_fop. For a character device that's def_chr_fops, whose open is chrdev_open: it looks up the cdev registered for the inode's major:minor, swaps file-&gt;f_op to the driver's file_operations, and calls the driver's open. If that succeeds, fd_install publishes the file in the process's fd table and the fd is returned. After that, read, ioctl and friends go straight through file-&gt;f_op.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "misc device면 뭐가 달라요?" → major 10 전체가 misc의 cdev 하나라서 <code>misc_open</code>이 minor로 한 번 더 찾아 fops를 두 번째로 바꾸고, <code>private_data</code>에 <code>struct miscdevice *</code>를 넣어 준다.</p>
+<p><strong>Q.</strong> What's the difference between an inode, a dentry, and a file?</p>
+<p><strong>A.</strong> inode는 파일 실체(메타데이터, 장치 번호, 데이터 위치)로 파일당 하나, dentry는 "부모 디렉터리 안의 이름 → inode" 연결로 이름당 하나, file은 열린 세션(오프셋, 플래그, f_op, private_data)으로 open마다 하나다. 하드 링크는 dentry 둘·inode 하나, 같은 파일을 두 번 open 하면 file 둘·inode 하나다.</p>
+<blockquote><p>An inode is the object itself — metadata, size, device number, where the data lives — one per file. A dentry is a name: it links a name in a parent directory to an inode, and it's what the dcache caches for path lookup. A struct file is an open instance — position, flags, f_op, private_data — created on every open. Two opens of the same device give two struct files and one inode; dup or fork shares the same struct file.</p></blockquote>
+<p><strong>Q.</strong> When is a driver's <code>release</code> called?</p>
+<p><strong>A.</strong> close 할 때가 아니라 그 struct file의 <strong>마지막 참조</strong>가 사라질 때다. dup, fork로 물려받은 fd, mmap이 참조를 잡고 있으면 close 해도 안 불린다. close마다 불리는 것은 <code>.flush</code>다.</p>
+<blockquote><p>Release is called when the last reference to the struct file goes away, not on every close. Dup'ed fds, children that inherited the fd across fork, and mmaps all hold references. If you need a hook on every close, that's flush.</p></blockquote>
+<p><strong>Q.</strong> How does path lookup stay fast?</p>
+<p><strong>A.</strong> 성분마다 (부모 dentry, 이름) 해시로 dcache를 찾는다. 대부분은 RCU-walk로 락도 refcount도 안 잡고 seqcount로만 검증하며 걷는다. 잠들어야 하는 콜백을 만나면 ref-walk로 내려가고, 캐시에 없을 때만 파일시스템의 <code>-&gt;lookup</code>을 부른다. 없는 이름도 negative dentry로 캐시한다.</p>
+<blockquote><p>Each component is a hash lookup in the dcache keyed by parent dentry and name. The common case is RCU-walk: no locks, no refcount changes, validated with per-dentry sequence counts. If something needs to sleep — a permission check, revalidation, or a cache miss — it drops to ref-walk, and only a miss calls the filesystem's lookup. Negative dentries cache "doesn't exist" too.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "sysfs도 RCU-walk 되나요?" → 6.18 기준 kernfs의 permission 콜백이 <code>MAY_NOT_BLOCK</code>에서 <code>-ECHILD</code>를 돌려주므로 <code>/sys</code> 아래는 ref-walk로 걷는다(함수 추적으로 확인).</p>
+<p><strong>Q.</strong> Where would you expose a driver's tuning knobs vs debug info vs data stream?</p>
+<p><strong>A.</strong> 데이터 스트림과 명령은 char device(또는 서브시스템 프레임워크), 장치 속성 하나하나는 sysfs 속성(ABI, 한 파일 한 값), 개발용 덤프는 debugfs(ABI 아님). procfs에는 새 드라이버 정보를 넣지 않는다.</p>
+<blockquote><p>Streaming data and commands go through a character device — or better, the right subsystem like IIO or input. Per-device attributes go in sysfs, one value per file, and that's ABI. Debug dumps and knobs go in debugfs, which isn't ABI and may be disabled in production. New driver info doesn't go in procfs.</p></blockquote>
+<p><strong>Q.</strong> What does <code>f_pos</code> vs <code>*ppos</code> mean in a driver's read?</p>
+<p><strong>A.</strong> <code>ppos</code>는 VFS가 넘기는 위치 포인터다. 일반 read에서는 <code>ksys_read</code>가 <code>f_pos</code>를 지역 변수로 복사해 그 주소를 넘기고 성공하면 다시 반영한다. <code>pread</code>면 유저가 준 오프셋이다. 그래서 드라이버는 <code>file-&gt;f_pos</code>가 아니라 <code>*ppos</code>만 읽고 갱신해야 한다.</p>
+<blockquote><p>ppos is the position the VFS hands you. For plain read, ksys_read copies f_pos into a local, passes its address, and writes it back on success; for pread it's the caller's offset. A driver should only use and update <code>*ppos</code>, never touch <code>file-&gt;f_pos</code> directly.</p></blockquote>
+<p><strong>Q.</strong> How do you add a new filesystem type to the kernel?</p>
+<p><strong>A.</strong> <code>struct file_system_type</code>에 이름, <code>init_fs_context</code>, <code>kill_sb</code>를 채워 <code>register_filesystem</code>한다. mount 때 <code>get_tree</code>가 <code>get_tree_nodev</code>/<code>get_tree_bdev</code> 같은 헬퍼로 super_block을 만들고 <code>fill_super</code>에서 <code>s_op</code>, 루트 inode, root dentry를 채운다. 메모리 기반이면 libfs(<code>simple_fill_super</code> 등)로 수십 줄이면 된다.</p>
+<blockquote><p>Fill in a file_system_type with a name, init_fs_context and kill_sb, and call register_filesystem. At mount time get_tree uses a helper like get_tree_nodev or get_tree_bdev to create the super_block and calls your fill_super, which sets s_op and creates the root inode and dentry. For an in-memory filesystem, libfs helpers like simple_fill_super get you there in a few dozen lines.</p></blockquote>
+<hr>
+<h2 id="13-직접-해보기">13. 직접 해보기<a class="anchor" href="#13-직접-해보기" aria-label="link">#</a></h2>
+<ol><li>(개념) 같은 파일에 하드 링크 <code>a</code>, <code>b</code>가 있다. <code>open("a")</code>, <code>open("b")</code>, <code>dup()</code>을 하면 file·dentry·inode는 각각 몇 개인가? 정답/힌트: file 2개, dentry 2개, inode 1개. dup은 새 객체를 만들지 않는다.</li></ol>
+<ol><li>(코드) <code>f12_vfs</code>에 "동시에 한 번만 열 수 있음" 정책을 넣어라. 두 번째 open은 <code>-EBUSY</code>, release에서 해제. <code>t_open</code>의 두 번째 open이 실패하는지 확인하라. 정답/힌트: <code>static atomic_t busy</code>; open에서 <code>if (atomic_cmpxchg(&amp;busy, 0, 1)) return -EBUSY;</code> release에서 <code>atomic_set(&amp;busy, 0)</code>. 실패한 open에서는 release가 안 불리므로 kzalloc 전에 검사한다.</li></ol>
+<ol><li>(관찰) function_graph를 <code>vfs_open</code> 대신 <code>__fput</code>에 걸고 <code>t_open</code>을 돌려라. <code>close(fd1)</code> 때는 <code>__fput</code>이 없고 <code>close(fd3)</code> 때 <code>__fput</code> → <code>f12_release</code>가 보이는지 확인하라. 정답/힌트: 6.18의 <code>close()</code>는 <code>file_close_fd</code> → <code>filp_flush</code>(<code>.flush</code>) → <code>fput_close_sync</code>이고, 마지막 참조일 때만 <code>__fput</code> → <code>.release</code>까지 간다. 같은 스레드 안에서 실행되므로 pid 필터에 잡힌다.</li></ol>
+<ol><li>(코드) <code>f12fs</code>에 쓰기 가능한 파일 <code>note</code>를 추가하라. write는 64바이트 버퍼에 저장, read는 그 내용을 돌려준다. 모드는 0644. 정답/힌트: <code>tree_descr</code>에 <code>[5] = {"note", &amp;note_fops, 0644}</code>, <code>.write</code>에서 <code>simple_write_to_buffer</code>. 여러 프로세스가 쓰면 mutex가 필요하다.</li></ol>
+<ol><li>(관찰) kprobe로 <code>do_dentry_open</code>의 첫 인자에서 <code>f_flags</code>(오프셋 112)를 찍고, <code>cat</code>, <code>echo x &gt;</code>, <code>dd oflag=...</code> 각각의 플래그를 비교하라. 정답/힌트: <code>p:f12/dopen do_dentry_open flags=+112($arg1):x32</code>. <code>O_LARGEFILE</code>(0400000)이 항상 붙는 것을 확인한다. <code>O_CREAT</code>·<code>O_TRUNC</code>는 <code>do_dentry_open</code> 끝에서 지워지므로 진입 시점 값으로 봐야 한다.</li></ol>
+<ol><li>(관찰) <code>/proc/sys/fs/dentry-state</code>를 보면서 존재하지 않는 경로 1만 개를 <code>stat</code> 하는 프로그램을 돌려라. 다섯 번째 숫자(<code>nr_negative</code>)가 어떻게 변하나? 정답/힌트: negative dentry가 그만큼 늘어난다. 이 게스트처럼 <code>/</code> 가 tmpfs(rootfs)이면 tmpfs가 negative dentry를 남기는지 먼저 확인하라 — 파일시스템마다 <code>d_delete</code> 정책이 다르다. 결과는 직접 실행해서 확인할 것(이 노트에서는 돌리지 않았다).</li></ol>
+<ol><li>(설계) IMU 드라이버의 "샘플링 주파수 설정", "FIFO 데이터", "레지스터 덤프"를 각각 어디로 노출할지 정하고 이유를 한 줄씩 써라. 정답/힌트: sysfs 속성(또는 IIO의 <code>sampling_frequency</code>), char device read(또는 IIO buffer), debugfs.</li></ol>
+<hr>
+<h2 id="14-용어-사전">14. 용어 사전<a class="anchor" href="#14-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>VFS</td><td>Virtual File System</td><td>모든 파일 같은 것에 공통 객체와 ops 테이블을 주는 계층</td></tr><tr><td>super_block</td><td>마운트된 파일시스템 인스턴스</td><td>mount마다 하나, <code>s_op</code>·<code>s_root</code>·<code>s_magic</code></td></tr><tr><td>inode</td><td>파일 실체</td><td>메타데이터·장치 번호·<code>i_op</code>·<code>i_fop</code>, 파일당 하나</td></tr><tr><td>dentry</td><td>directory entry</td><td>이름 → inode 연결, dcache의 단위</td></tr><tr><td>negative dentry</td><td><code>d_inode == NULL</code>인 dentry</td><td>"그 이름은 없다"를 캐시</td></tr><tr><td>struct file</td><td>열린 파일 (POSIX의 open file description)</td><td>open마다 하나, <code>f_pos</code>·<code>f_flags</code>·<code>f_op</code>·<code>private_data</code></td></tr><tr><td>file_ref_t <code>f_ref</code></td><td>file 참조 카운트 (6.13+)</td><td>0이 되면 <code>__fput</code> → <code>.release</code></td></tr><tr><td>dcache</td><td>dentry cache</td><td>(부모, 이름) 해시 테이블 + LRU</td></tr><tr><td>RCU-walk</td><td>락 없는 경로 탐색 모드</td><td>seqcount로 검증, 잠들어야 하면 <code>-ECHILD</code></td></tr><tr><td>ref-walk</td><td>참조 카운트를 잡는 탐색 모드</td><td>잠들 수 있음, RCU-walk 실패 시 사용</td></tr><tr><td><code>nameidata</code></td><td>경로 탐색 상태 구조체</td><td>현재 위치, 플래그(LOOKUP_RCU 등), 마지막 성분</td></tr><tr><td><code>def_chr_fops</code></td><td>장치 inode의 기본 fops</td><td><code>.open = chrdev_open</code>만 있는 디스패처</td></tr><tr><td>cdev</td><td>char device 등록 단위</td><td>major:minor 범위 → <code>file_operations</code></td></tr><tr><td><code>cdev_map</code></td><td>cdev 검색 테이블</td><td><code>kobj_lookup</code>으로 <code>i_rdev</code> → cdev</td></tr><tr><td><code>replace_fops</code></td><td><code>file-&gt;f_op</code> 교체 매크로</td><td>옛 fops 참조를 놓고 새 것으로</td></tr><tr><td>misc device</td><td>major 10 공유 char device</td><td><code>misc_register</code> 한 번으로 cdev·노드·sysfs</td></tr><tr><td><code>file_system_type</code></td><td>파일시스템 종류</td><td><code>register_filesystem</code>으로 등록, <code>/proc/filesystems</code></td></tr><tr><td>fs_context</td><td>새 mount API의 문맥</td><td><code>init_fs_context</code> → <code>get_tree</code></td></tr><tr><td>libfs</td><td>pseudo FS 헬퍼 모음</td><td><code>simple_fill_super</code>, <code>simple_read_from_buffer</code> …</td></tr><tr><td>pseudo filesystem</td><td>디스크 없는 FS</td><td>procfs, sysfs, debugfs, devtmpfs, tmpfs</td></tr><tr><td>kernfs</td><td>sysfs의 백엔드</td><td>노드는 미리 있고 VFS 객체는 lookup 때 생성</td></tr><tr><td><code>s_magic</code></td><td>FS 식별 번호</td><td><code>statfs()</code>의 <code>f_type</code></td></tr><tr><td>function_graph</td><td>ftrace 트레이서</td><td>함수 진입·복귀를 호출 트리로 기록</td></tr><tr><td>kprobe_events</td><td>동적 탐침 인터페이스</td><td>임의 커널 함수에 인자 fetch 포함 이벤트 생성</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-요약-체크리스트">15. 요약 &amp; 체크리스트<a class="anchor" href="#15-요약-체크리스트" aria-label="link">#</a></h2>
+<p>VFS는 super_block(마운트) · inode(실체) · dentry(이름) · file(열린 세션)이라는 네 객체와 각각의 ops 테이블로 이루어진 다형성 계층이다. <code>open()</code>은 빈 fd를 예약하고, dcache를 RCU-walk로 걸어 dentry/inode를 찾고(없으면 <code>-&gt;lookup</code>), <code>struct file</code>을 만들어 <code>f_op = i_fop</code>로 시작한 뒤 <code>f_op-&gt;open</code>을 부르고, 성공하면 <code>fd_install</code>한다. 장치 파일은 <code>i_fop = def_chr_fops</code>라서 <code>chrdev_open</code>이 <code>i_rdev</code>로 cdev를 찾아 <code>f_op</code>를 드라이버 것으로 바꾸고(misc는 한 번 더), 이후 read/ioctl은 그 <code>f_op</code>만 따른다. 같은 장치를 두 번 열면 file 둘·inode 하나, dup·fork는 file을 공유하고, 드라이버의 <code>.release</code>는 마지막 참조에서만 불린다. 파일시스템은 <code>register_filesystem</code>으로 등록되고 mount마다 super_block을 만들며, procfs·sysfs·debugfs·devtmpfs는 디스크 없이 read 시점에 내용을 만드는 pseudo FS다 — 드라이버는 그 API로 파일을 노출한다. 이 모든 것을 6.18.55-dbg 게스트에서 function_graph, function 트레이서, kprobe_events, <code>/proc/sys/fs/dentry-state</code>로 직접 확인했다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>super_block · inode · dentry · file의 역할, 생성 시점, 수명, ops 테이블을 표로 그릴 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>open()</code>의 커널 경로를 <code>do_sys_openat2</code> → <code>do_filp_open</code> → <code>path_openat</code> → <code>vfs_open</code> → <code>do_dentry_open</code> → <code>f_op-&gt;open</code> → <code>fd_install</code> 순서로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>6.18의 <code>do_filp_open</code>이 7.0에서 <code>do_file_open</code>이 된 것, inline 된 static 함수는 추적할 수 없다는 것을 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>dcache 해시, RCU-walk와 ref-walk의 차이, <code>-ECHILD</code>와 <code>try_to_unlazy</code>의 의미를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>def_chr_fops</code> → <code>chrdev_open</code> → <code>replace_fops</code> → 드라이버 <code>.open</code>, misc의 두 번째 교체를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>두 번 open과 dup의 차이를 file·inode 개수와 <code>f_pos</code> 공유로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>.release</code>와 <code>.flush</code>가 각각 언제 불리는지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>드라이버 read에서 <code>*ppos</code>를 쓰고 <code>f_pos</code>를 직접 쓰지 않는 이유를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>function_graph로 open 경로를, kprobe_events로 커널 함수 인자(파일 이름)를 찍을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>libfs(<code>simple_fill_super</code>, <code>get_tree_nodev</code>)로 pseudo filesystem을 만들고 mount 할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>드라이버 정보를 sysfs · debugfs · char device · procfs 중 어디에 노출할지 이유와 함께 고를 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>/proc/sys/fs/dentry-state</code>와 <code>/proc/slabinfo</code>로 dcache·inode cache 크기를 관찰하고 해석할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — Overview of the Linux Virtual File System: https://docs.kernel.org/filesystems/vfs.html</li><li>docs.kernel.org — Pathname lookup (RCU-walk, ref-walk): https://docs.kernel.org/filesystems/path-lookup.html</li><li>docs.kernel.org — ftrace: https://docs.kernel.org/trace/ftrace.html</li><li>docs.kernel.org — Kprobe-based Event Tracing: https://docs.kernel.org/trace/kprobetrace.html</li><li>docs.kernel.org — Filesystem Mount API (fs_context): https://docs.kernel.org/filesystems/mount_api.html</li><li>man7.org — open(2): https://man7.org/linux/man-pages/man2/open.2.html , statfs(2): https://man7.org/linux/man-pages/man2/statfs.2.html , proc(5): https://man7.org/linux/man-pages/man5/proc.5.html</li><li>Michael Kerrisk, "The Linux Programming Interface" — 4장(File I/O), 5장(File I/O: Further Details), 14장(File Systems), 18장(Directories and Links)</li><li>Jonathan Corbet, Alessandro Rubini, Greg Kroah-Hartman, "Linux Device Drivers, 3rd ed." — 3장(Char Drivers): <code>struct file</code>, <code>struct inode</code>, <code>file_operations</code></li><li>Neil Brown의 LWN 연재 "Pathname lookup in Linux" (2015) — RCU-walk의 설계 배경 (docs.kernel.org의 path-lookup 문서가 이 연재를 바탕으로 한다)</li><li>랩 소스 (elixir.bootlin.com의 v6.18에서도 같은 경로): <code>fs/open.c</code>(<code>do_sys_openat2</code>, <code>vfs_open</code>, <code>do_dentry_open</code>), <code>fs/namei.c</code>(<code>do_filp_open</code>, <code>path_openat</code>, <code>link_path_walk</code>, <code>lookup_fast</code>), <code>fs/dcache.c</code>, <code>fs/char_dev.c</code>(<code>chrdev_open</code>, <code>def_chr_fops</code>), <code>drivers/char/misc.c</code>(<code>misc_open</code>), <code>drivers/char/mem.c</code>(<code>memory_open</code>), <code>fs/libfs.c</code>(<code>simple_fill_super</code>), <code>fs/super.c</code>(<code>get_tree_nodev</code>), <code>fs/filesystems.c</code>(<code>register_filesystem</code>), <code>fs/kernfs/inode.c</code>(<code>kernfs_iop_permission</code>), <code>include/linux/fs.h</code>, <code>include/linux/dcache.h</code></li></ul>
+    <div class="nav"><a class="prev" href="2026-10-10_F11_virtual_memory_deep.html"><span class="dir">← 이전</span><span class="nm">F11. 가상 메모리 심화 — 페이지 테이블, TLB, page fault 처리, reclaim, OOM killer, swap 없는 임베디드</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l3"><a href="#0-1-실습-준비-모듈-빌드와-게스트-부팅-스크립트">0.1 실습 준비 — 모듈 빌드와 게스트 부팅 스크립트</a></li><li class="l2"><a href="#1-네-객체와-ops-테이블">1. 네 객체와 ops 테이블</a></li><li class="l3"><a href="#1-1-직관-도서관을-다시-보자">1.1 직관 — 도서관을 다시 보자</a></li><li class="l3"><a href="#1-2-정의-네-객체-한-장-정리">1.2 정의 — 네 객체 한 장 정리</a></li><li class="l3"><a href="#1-3-예제-1-함수-이름은-소스와-심볼에서-확인한다">1.3 예제 1 — 함수 이름은 소스와 심볼에서 확인한다</a></li><li class="l3"><a href="#1-4-예제-2-struct-file의-실제-레이아웃-pahole">1.4 예제 2 — struct file의 실제 레이아웃 (pahole)</a></li><li class="l2"><a href="#2-open-의-경로-do_sys_openat2부터-fd_install까지">2. open()의 경로 — do_sys_openat2부터 fd_install까지</a></li><li class="l3"><a href="#2-1-직관-번호-예약-이름-따라가기-세션-만들기-번호에-꽂기">2.1 직관 — "번호 예약 → 이름 따라가기 → 세션 만들기 → 번호에 꽂기"</a></li><li class="l3"><a href="#2-2-소스로-보기-랩-커널-그대로">2.2 소스로 보기 — 랩 커널 그대로</a></li><li class="l3"><a href="#2-3-예제-3-function_graph로-본-dev-null-open">2.3 예제 3 — function_graph로 본 /dev/null open</a></li><li class="l2"><a href="#3-경로-탐색-dcache-rcu-walk-ref-walk">3. 경로 탐색 — dcache, RCU-walk, ref-walk</a></li><li class="l3"><a href="#3-1-직관-경로는-디렉터리-하나씩-해시-테이블-조회">3.1 직관 — 경로는 "디렉터리 하나씩 해시 테이블 조회"</a></li><li class="l3"><a href="#3-2-rcu-walk와-ref-walk">3.2 RCU-walk와 ref-walk</a></li><li class="l3"><a href="#3-3-예제-4-sysfs-경로를-두-번-열어-cold-warm-비교">3.3 예제 4 — sysfs 경로를 두 번 열어 cold/warm 비교</a></li><li class="l2"><a href="#4-char-device-chrdev_open이-f_op를-바꿔-끼운다">4. char device — chrdev_open이 f_op를 바꿔 끼운다</a></li><li class="l3"><a href="#4-1-직관-장치-파일의-inode는-전화번호부-한-줄-이다">4.1 직관 — 장치 파일의 inode는 "전화번호부 한 줄"이다</a></li><li class="l3"><a href="#4-2-chrdev_open-랩-소스-그대로">4.2 chrdev_open() — 랩 소스 그대로</a></li><li class="l3"><a href="#4-3-예제-5-function_graph로-본-세-장치의-vfs_open">4.3 예제 5 — function_graph로 본 세 장치의 vfs_open</a></li><li class="l2"><a href="#5-실습-드라이버-f12_vfs-file-두-개-inode-하나-dup은-file-공유">5. 실습 드라이버 f12_vfs — file 두 개, inode 하나, dup은 file 공유</a></li><li class="l3"><a href="#5-1-예제-6-모듈-open-read-release에서-vfs-객체-찍기">5.1 예제 6 — 모듈: open/read/release에서 VFS 객체 찍기</a></li><li class="l3"><a href="#5-2-테스트-프로그램-open-두-번-dup">5.2 테스트 프로그램 — open 두 번 + dup</a></li><li class="l2"><a href="#6-read-경로와-kprobe-커널-안의-이름-찍기">6. read 경로와 kprobe — 커널 안의 이름 찍기</a></li><li class="l3"><a href="#6-1-read-경로-복습">6.1 read 경로 복습</a></li><li class="l3"><a href="#6-2-예제-7-kprobe_events로-vfs_read의-파일-이름-찍기">6.2 예제 7 — kprobe_events로 vfs_read의 파일 이름 찍기</a></li><li class="l2"><a href="#7-파일시스템-타입-mount-그리고-pseudo-filesystem">7. 파일시스템 타입, mount, 그리고 pseudo filesystem</a></li><li class="l3"><a href="#7-1-file_system_type-super_block-root-dentry">7.1 file_system_type → super_block → root dentry</a></li><li class="l3"><a href="#7-2-예제-8-mount마다-super_block-하나-statfs의-f_type">7.2 예제 8 — mount마다 super_block 하나: statfs의 f_type</a></li><li class="l3"><a href="#7-3-예제-9-f12fs-libfs로-만든-50줄짜리-pseudo-filesystem">7.3 예제 9 — f12fs: libfs로 만든 50줄짜리 pseudo filesystem</a></li><li class="l3"><a href="#7-4-드라이버는-pseudo-fs를-직접-만들지-않는다-어디에-붙이나">7.4 드라이버는 pseudo FS를 직접 만들지 않는다 — 어디에 붙이나</a></li><li class="l3"><a href="#7-5-예제-10-misc_register-한-번이-sysfs-devtmpfs-procfs에-남기는-것">7.5 예제 10 — misc_register 한 번이 sysfs·devtmpfs·procfs에 남기는 것</a></li><li class="l2"><a href="#8-dcache와-inode-cache의-크기-측정">8. dcache와 inode cache의 크기 — 측정</a></li><li class="l3"><a href="#8-1-예제-11-sys-전체를-세-번-걷기">8.1 예제 11 — /sys 전체를 세 번 걷기</a></li><li class="l2"><a href="#9-커널-안에서는-무슨-일이-일어나나-한-장-요약">9. 커널 안에서는 무슨 일이 일어나나 — 한 장 요약</a></li><li class="l2"><a href="#10-embedded-실무에서-다시-보기">10. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#10-1-센서-키트의-imu-char-device-open마다-컨텍스트">10.1 센서 키트의 IMU char device — open마다 컨텍스트</a></li><li class="l3"><a href="#10-2-sysfs-폴링-데몬이-cpu를-먹는다">10.2 sysfs 폴링 데몬이 CPU를 먹는다</a></li><li class="l3"><a href="#10-3-release가-안-불려서-장치-전원이-안-꺼져요">10.3 "release가 안 불려서 장치 전원이 안 꺼져요"</a></li><li class="l3"><a href="#10-4-디버그-인터페이스는-debugfs에-제품-인터페이스는-sysfs-char에">10.4 디버그 인터페이스는 debugfs에, 제품 인터페이스는 sysfs/char에</a></li><li class="l2"><a href="#11-흔한-실수와-증상">11. 흔한 실수와 증상</a></li><li class="l2"><a href="#12-면접에서-이렇게-말한다">12. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#13-직접-해보기">13. 직접 해보기</a></li><li class="l2"><a href="#14-용어-사전">14. 용어 사전</a></li><li class="l2"><a href="#15-요약-체크리스트">15. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

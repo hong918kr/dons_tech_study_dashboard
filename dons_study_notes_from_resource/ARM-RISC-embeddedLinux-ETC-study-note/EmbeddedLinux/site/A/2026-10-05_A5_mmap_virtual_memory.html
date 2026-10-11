@@ -1,0 +1,1643 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A5. 메모리 맵핑과 가상 메모리 (유저 관점) — 주소는 "약속"이고, 페이지는 만질 때 생긴다</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="A/2026-10-05_A5_mmap_virtual_memory">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">A. 유저스페이스 · 시스템 프로그래밍 · A5. 메모리 맵핑과 가상 메모리 (유저 관점) — 주소는 "약속"이고, 페이지는 만질 때 생긴다</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">A. 유저스페이스 · 시스템 프로그래밍 · Userspace &amp; Syscalls</div>
+      <h1>A5. 메모리 맵핑과 가상 메모리 (유저 관점) — 주소는 "약속"이고, 페이지는 만질 때 생긴다</h1>
+      <div class="meta"><span>170분 읽기</span><span>2078줄</span><span>66개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: <code>/proc/self/maps</code>로 프로세스 주소 공간을 읽을 수 있다 · minor/major page fault를 측정하고 RT 루프에서 없앨 수 있다 · <code>mmap</code>의 SHARED/PRIVATE·파일/익명 조합을 골라 쓸 수 있다 · 카메라 버퍼와 MMIO가 어떻게 유저 공간에 zero-copy로 보이는지 드라이버 쪽까지 설명할 수 있다 <strong>왜 필요한가</strong>: "malloc은 언제 실제 메모리를 쓰나?", "mmap vs read?", "카메라 프레임을 복사 없이 넘기려면?", "RT 스레드에서 page fault를 어떻게 막나?"는 Embedded Linux 면접 단골이고, 실무에선 메모리 누수·OOM·지터 디버깅의 출발점이다 <strong>Don 기준 난이도</strong>: MMU·캐시 속성·DMA는 이미 안다 / 새로 배울 것은 "Linux가 페이지를 <strong>언제</strong> 붙이는가"(demand paging, COW, overcommit)와 그걸 보는 도구(<code>/proc/&lt;pid&gt;/maps</code>, <code>smaps</code>, <code>/proc/meminfo</code>) <strong>선행 노트</strong>: A1, A2, A3</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>Don이 SSD 펌웨어에서 쓰던 Cortex-R/M에는 MMU가 없거나 꺼져 있었다. 코드가 <code>0x2000_0000</code>에 쓰면 그게 곧 SRAM의 <code>0x2000_0000</code>이었다. MPU는 "이 영역은 읽기 전용", "여기선 실행 금지" 같은 <strong>권한 검사만</strong> 했지 주소를 바꾸지 않았다.</p>
+<p>Linux가 도는 Cortex-A에서는 MMU가 켜져 있고, 프로세스가 보는 모든 주소는 <strong>가상 주소(virtual address, VA)</strong> 다. MMU가 page table을 따라가 <strong>물리 주소(physical address, PA)</strong> 로 바꾼다. 그래서 두 프로세스가 똑같이 <code>0xaaaa_aaaa_0000</code>을 써도 서로 다른 RAM을 만진다. 반대로 커널이 마음먹으면 두 프로세스의 서로 다른 VA를 <strong>같은 물리 페이지</strong>에 연결할 수도 있다. 공유 메모리, 카메라 버퍼 zero-copy, <code>/dev/mem</code>이 전부 이 "연결"을 이용한 것이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="170" y="24" font-size="14" text-anchor="middle">bare-metal: 주소 = 물리 주소</text>
+<text x="510" y="24" font-size="14" text-anchor="middle">Linux: 주소 = 가상 주소</text>
+<line x1="340" y1="10" x2="340" y2="290" stroke="#888" stroke-dasharray="4 4"/>
+<rect x="20" y="60" width="120" height="40" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="80" y="85" font-size="13" text-anchor="middle">CPU 코어</text>
+<rect x="20" y="140" width="120" height="40" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="80" y="165" font-size="13" text-anchor="middle">MPU (권한만)</text>
+<line x1="80" y1="100" x2="80" y2="138" stroke="currentColor" marker-end="url(#ah1)"/>
+<rect x="180" y="50" width="145" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="252" y="72" font-size="13" text-anchor="middle">SRAM 0x2000_0000</text>
+<rect x="180" y="110" width="145" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="252" y="132" font-size="13" text-anchor="middle">Flash 0x0800_0000</text>
+<rect x="180" y="170" width="145" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="252" y="192" font-size="13" text-anchor="middle">Periph 0x4000_0000</text>
+<line x1="140" y1="155" x2="178" y2="70" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="140" y1="160" x2="178" y2="127" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="140" y1="165" x2="178" y2="187" stroke="currentColor" marker-end="url(#ah1)"/><text x="170" y="245" font-size="13" text-anchor="middle">주소를 그대로 버스에 낸다</text><text x="170" y="265" font-size="13" text-anchor="middle">모든 태스크가 같은 주소 공간</text>
+<rect x="355" y="50" width="130" height="36" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="420" y="73" font-size="13" text-anchor="middle">프로세스 A의 VA</text>
+<rect x="355" y="100" width="130" height="36" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="420" y="123" font-size="13" text-anchor="middle">프로세스 B의 VA</text>
+<rect x="355" y="160" width="130" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="420" y="181" font-size="13" text-anchor="middle">MMU + TLB</text><text x="420" y="200" font-size="12" text-anchor="middle">page table walk</text>
+<line x1="420" y1="136" x2="420" y2="158" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="490" y1="68" x2="505" y2="68" stroke="currentColor"/>
+<line x1="505" y1="68" x2="505" y2="150" stroke="currentColor"/>
+<line x1="505" y1="150" x2="440" y2="158" stroke="currentColor" marker-end="url(#ah1)"/>
+<rect x="530" y="140" width="135" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="597" y="162" font-size="13" text-anchor="middle">RAM 페이지</text>
+<rect x="530" y="186" width="135" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="597" y="208" font-size="13" text-anchor="middle">DMA 버퍼</text>
+<rect x="530" y="232" width="135" height="34" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="597" y="254" font-size="13" text-anchor="middle">MMIO 레지스터</text>
+<line x1="485" y1="180" x2="528" y2="158" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="485" y1="190" x2="528" y2="203" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="485" y1="200" x2="528" y2="248" stroke="currentColor" marker-end="url(#ah1)"/><text x="420" y="245" font-size="13" text-anchor="middle">같은 VA라도</text><text x="420" y="265" font-size="13" text-anchor="middle">프로세스마다 다른 PA</text>
+</svg></figure>
+<p>그림 1 — bare-metal(왼쪽)은 주소가 곧 물리 주소이고 MPU는 권한만 본다. Linux(오른쪽)는 프로세스마다 page table이 따로 있고, MMU가 VA를 RAM·DMA 버퍼·MMIO 어디로든 연결한다.</p>
+<p>Embedded Linux 엔지니어의 일에서 이 주제가 나오는 장면은 이렇다.</p>
+<ul><li><strong>카메라 파이프라인</strong>: 1080p 프레임 하나가 약 3 MB다. 30 fps를 <code>read()</code>로 복사하면 초당 90 MB를 CPU가 memcpy한다. V4L2는 드라이버가 할당한 DMA 버퍼를 <code>mmap</code>으로 유저에게 보여 줘서 복사를 없앤다.</li><li><strong>RT 제어 루프</strong>: 1 kHz 모터 제어 스레드가 처음 만지는 스택 페이지에서 page fault가 나면 수 µs가 튄다. <code>mlockall()</code>로 미리 다 붙여 둔다.</li><li><strong>센서 데몬 간 공유</strong>: IMU 데몬이 최신 샘플을 공유 메모리에 게시하고 여러 프로세스가 읽는다.</li><li><strong>장비가 갑자기 죽음</strong>: 로그에 <code>Out of memory: Killed process ...</code>. overcommit과 OOM killer를 모르면 원인을 못 찾는다.</li><li><strong>FPGA/레지스터 직접 접근</strong>: 드라이버 없이 UIO나 <code>/dev/mem</code>으로 레지스터를 <code>mmap</code>해서 bring-up 테스트를 한다.</li></ul>
+<p>이 노트의 실행 환경은 Lima VM <code>elinux</code>(aarch64, Ubuntu 26.04)다. 커널 버전과 페이지 크기부터 확인한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>uname -r
+getconf PAGESIZE
+free -m</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>7.0.0-34-generic
+4096
+               total        used        free      shared  buff/cache   available
+Mem:            3895         533        1454           1        2079        3362
+Swap:              0           0           0</code></pre></figure>
+<p>출력에서 볼 것: 페이지 크기는 4096 바이트(4 KiB)다. arm64 커널은 4K/16K/64K 페이지 중 하나로 빌드할 수 있는데 Ubuntu 기본은 4K다. 이 VM은 RAM 약 4 GB에 <strong>swap이 없다</strong> — 뒤의 overcommit·OOM 이야기에서 중요하다.</p>
+<hr>
+<h2 id="1-가상-주소와-물리-주소-don이-아는-mmu로-다시-보기">1. 가상 주소와 물리 주소 — Don이 아는 MMU로 다시 보기<a class="anchor" href="#1-가상-주소와-물리-주소-don이-아는-mmu로-다시-보기" aria-label="link">#</a></h2>
+<h3 id="1-1-직관-주소-번역표-권한표-를-합친-것">1.1 직관: "주소 번역표 + 권한표"를 합친 것<a class="anchor" href="#1-1-직관-주소-번역표-권한표-를-합친-것" aria-label="link">#</a></h3>
+<p>MPU를 설정할 때 Don은 "영역 시작·크기·권한·캐시 속성"을 레지스터에 썼다. MMU의 page table 엔트리도 똑같은 정보를 담는다. 다른 점은 두 가지다.</p>
+<ol><li>단위가 <strong>고정 크기 페이지</strong>(4 KiB)이고 엔트리가 수십만 개다. 그래서 레지스터가 아니라 <strong>메모리에 있는 표</strong>(page table)로 둔다.</li><li>엔트리에 <strong>출력 주소(PA)</strong> 가 들어 있다. 즉 "권한 검사"에 더해 "주소 바꾸기"를 한다.</li></ol>
+<p><strong>page(페이지)</strong> 는 가상 주소 공간을 자르는 단위, <strong>page frame(페이지 프레임)</strong> 은 물리 RAM을 같은 크기로 자른 칸이다. page table은 "가상 페이지 번호 → 물리 프레임 번호 + 속성"의 표다.</p>
+<h3 id="1-2-arm64의-4단계-page-table-walk">1.2 arm64의 4단계 page table walk<a class="anchor" href="#1-2-arm64의-4단계-page-table-walk" aria-label="link">#</a></h3>
+<p>4 KiB granule, 48비트 VA 기준으로 VA는 이렇게 잘린다. 각 단계 표는 512개 엔트리 × 8바이트 = 정확히 4 KiB(한 페이지)다.</p>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340" y="20" font-size="14" text-anchor="middle">가상 주소 (48-bit VA, 4 KiB granule)</text>
+<rect x="30" y="32" width="80" height="34" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="70" y="54" font-size="12" text-anchor="middle">63..48</text>
+<rect x="110" y="32" width="100" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="160" y="54" font-size="12" text-anchor="middle">47..39 L0</text>
+<rect x="210" y="32" width="100" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="260" y="54" font-size="12" text-anchor="middle">38..30 L1</text>
+<rect x="310" y="32" width="100" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="360" y="54" font-size="12" text-anchor="middle">29..21 L2</text>
+<rect x="410" y="32" width="100" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="460" y="54" font-size="12" text-anchor="middle">20..12 L3</text>
+<rect x="510" y="32" width="120" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="570" y="54" font-size="12" text-anchor="middle">11..0 offset</text>
+<rect x="20" y="140" width="90" height="70" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="65" y="170" font-size="12" text-anchor="middle">TTBR0_EL1</text><text x="65" y="188" font-size="12" text-anchor="middle">(프로세스별)</text>
+<rect x="130" y="130" width="80" height="90" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="170" y="170" font-size="13" text-anchor="middle">L0 표</text><text x="170" y="188" font-size="12" text-anchor="middle">512 x 8B</text>
+<rect x="230" y="130" width="80" height="90" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="270" y="170" font-size="13" text-anchor="middle">L1 표</text><text x="270" y="188" font-size="12" text-anchor="middle">512 x 8B</text>
+<rect x="330" y="130" width="80" height="90" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="370" y="170" font-size="13" text-anchor="middle">L2 표</text><text x="370" y="188" font-size="12" text-anchor="middle">512 x 8B</text>
+<rect x="430" y="130" width="80" height="90" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="470" y="170" font-size="13" text-anchor="middle">L3 표</text><text x="470" y="188" font-size="12" text-anchor="middle">PTE</text>
+<rect x="530" y="130" width="145" height="90" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="602" y="165" font-size="13" text-anchor="middle">물리 프레임</text><text x="602" y="185" font-size="12" text-anchor="middle">4 KiB</text><text x="602" y="205" font-size="12" text-anchor="middle">PA = 프레임+offset</text>
+<line x1="110" y1="175" x2="128" y2="175" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="210" y1="175" x2="228" y2="175" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="310" y1="175" x2="328" y2="175" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="410" y1="175" x2="428" y2="175" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="510" y1="175" x2="528" y2="175" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="160" y1="66" x2="165" y2="128" stroke="#888" stroke-dasharray="3 3" marker-end="url(#ah2)"/>
+<line x1="260" y1="66" x2="265" y2="128" stroke="#888" stroke-dasharray="3 3" marker-end="url(#ah2)"/>
+<line x1="360" y1="66" x2="365" y2="128" stroke="#888" stroke-dasharray="3 3" marker-end="url(#ah2)"/>
+<line x1="460" y1="66" x2="465" y2="128" stroke="#888" stroke-dasharray="3 3" marker-end="url(#ah2)"/>
+<line x1="570" y1="66" x2="595" y2="128" stroke="#888" stroke-dasharray="3 3" marker-end="url(#ah2)"/><text x="340" y="250" font-size="13" text-anchor="middle">각 엔트리 = 다음 표(또는 프레임)의 PA + 권한(AP, UXN/PXN) + 메모리 속성(AttrIndx)</text><text x="340" y="272" font-size="13" text-anchor="middle">L2에서 멈추는 block 엔트리 = 2 MiB huge page (walk 1단계 절약)</text>
+<rect x="120" y="295" width="440" height="44" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="340" y="315" font-size="13" text-anchor="middle">TLB: 최근 변환 결과 캐시 — 맞으면 walk 생략</text><text x="340" y="332" font-size="12" text-anchor="middle">ASID 태그 덕분에 context switch 때 전부 비우지 않아도 된다</text>
+</svg></figure>
+<p>그림 2 — VA의 비트 필드가 각 단계 표의 인덱스가 된다. 최악의 경우 메모리를 4번 읽어야 PA가 나오므로 TLB가 핵심이다.</p>
+<p>정리하면:</p>
+<ul><li><strong>TTBR0_EL1</strong>은 유저 주소(아래쪽 절반)용 표의 시작 PA다. 프로세스를 바꿀 때 커널이 이 레지스터를 바꾼다. <strong>TTBR1_EL1</strong>은 커널 주소(위쪽 절반, <code>0xffff...</code>)용이고 모든 프로세스가 공유한다.</li><li>엔트리의 메모리 속성은 <strong>MAIR_EL1</strong>의 8개 슬롯 중 하나를 가리키는 인덱스(AttrIndx)다. Normal(캐시 됨), Normal-NC(캐시 안 됨, write-combine), Device-nGnRE, Device-nGnRnE 등이다. 12장에서 MMIO를 <code>mmap</code>할 때 다시 나온다.</li><li>엔트리가 "없음(invalid)"이면 MMU는 <strong>translation fault</strong>를 낸다. bare-metal에선 abort 핸들러로 가서 보통 리셋했다. Linux에선 이게 <strong>정상 경로</strong>다. 커널이 "아, 아직 안 붙인 페이지구나" 하고 페이지를 붙인 다음 그 명령을 다시 실행한다. 이게 3장의 page fault다.</li></ul>
+<h3 id="1-3-흔한-함정">1.3 흔한 함정<a class="anchor" href="#1-3-흔한-함정" aria-label="link">#</a></h3>
+<ul><li>"4 KiB 페이지인데 바이너리의 세그먼트는 64 KiB 간격"이 보일 수 있다(2장 출력의 <code>ex1</code> 매핑 주소 참고). arm64 링커는 16K/64K 페이지 커널에서도 돌도록 세그먼트를 64 KiB(max-page-size)로 정렬한다. 페이지 크기는 반드시 <code>sysconf(_SC_PAGESIZE)</code>로 물어본다. 하드코딩한 <code>4096</code>은 Apple Silicon(16K)이나 일부 서버(64K)에서 깨진다.</li><li>커널 공간 주소(<code>0xffff...</code>)를 유저가 읽으면 page table 엔트리가 있어도 권한(EL0 접근 불가) 때문에 SIGSEGV다.</li></ul>
+<hr>
+<h2 id="2-프로세스-주소-공간-레이아웃">2. 프로세스 주소 공간 레이아웃<a class="anchor" href="#2-프로세스-주소-공간-레이아웃" aria-label="link">#</a></h2>
+<h3 id="2-1-직관">2.1 직관<a class="anchor" href="#2-1-직관" aria-label="link">#</a></h3>
+<p>프로세스 하나의 가상 주소 공간은 "구역이 정해진 큰 빈 땅"이다. 아래쪽엔 프로그램 코드와 전역 변수, 그 위로 자라는 heap, 위쪽엔 아래로 자라는 stack, 그 사이 넓은 곳에 공유 라이브러리와 <code>mmap</code> 매핑이 놓인다. 각 구역 하나하나가 커널에서는 <strong>VMA(virtual memory area, <code>struct vm_area_struct</code>)</strong> 하나다. <code>/proc/&lt;pid&gt;/maps</code>의 한 줄이 VMA 하나다.</p>
+<figure class="chart"><svg viewBox="0 0 660 430" xmlns="http://www.w3.org/2000/svg">
+<rect x="40" y="20" width="230" height="36" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="155" y="43" font-size="13" text-anchor="middle">커널 공간 (EL0 접근 불가)</text>
+<rect x="40" y="66" width="230" height="40" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="155" y="91" font-size="13" text-anchor="middle">[stack] 아래로 자람</text>
+<rect x="40" y="106" width="230" height="30" fill="none" stroke="#888" stroke-dasharray="4 4"/><text x="155" y="126" font-size="12" text-anchor="middle">빈 공간 (매핑 없음)</text>
+<rect x="40" y="136" width="230" height="64" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="155" y="160" font-size="13" text-anchor="middle">mmap 영역 아래로 자람</text><text x="155" y="182" font-size="12" text-anchor="middle">libc · 큰 malloc · 익명 매핑</text>
+<rect x="40" y="200" width="230" height="40" fill="none" stroke="#888" stroke-dasharray="4 4"/><text x="155" y="225" font-size="12" text-anchor="middle">빈 공간 (매우 넓음)</text>
+<rect x="40" y="240" width="230" height="40" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="155" y="265" font-size="13" text-anchor="middle">[heap] 위로 자람 (brk)</text>
+<rect x="40" y="290" width="230" height="30" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="155" y="310" font-size="13" text-anchor="middle">.bss (0으로 초기화된 전역)</text>
+<rect x="40" y="320" width="230" height="30" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="155" y="340" font-size="13" text-anchor="middle">.data (초기값 있는 전역)</text>
+<rect x="40" y="350" width="230" height="40" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="155" y="375" font-size="13" text-anchor="middle">.text + .rodata (코드·상수)</text><text x="290" y="43" font-size="12">0xffff_0000_0000_0000 이상 (TTBR1)</text><text x="290" y="91" font-size="12">&amp;local = 0xffffce6f0764</text><text x="290" y="160" font-size="12">libc r-xp = 0xe686786a0000</text>
+<text x="290" y="182" font-size="12">malloc(1M) = 0xe6867859f010</text>
+<text x="290" y="265" font-size="12">malloc(64) = 0xb72fa659e010</text>
+<text x="290" y="310" font-size="12">&amp;g_zero = 0xb72fa1670018</text>
+<text x="290" y="340" font-size="12">&amp;g_init = 0xb72fa1670010</text>
+<text x="290" y="375" font-size="12">main = 0xb72fa1650a40</text>
+<text x="40" y="415" font-size="12">위 = 높은 주소, 아래 = 낮은 주소. 오른쪽 값은 ex1 실행 1회 (ASLR로 매번 바뀜)</text>
+</svg></figure>
+<p>그림 3 — 64비트 arm64 프로세스의 주소 공간. 각 상자가 VMA이고 <code>/proc/self/maps</code>의 한 줄이다.</p>
+<h3 id="2-2-예제-1-각-영역의-주소-찍고-maps와-맞춰-보기">2.2 예제 1: 각 영역의 주소 찍고 maps와 맞춰 보기<a class="anchor" href="#2-2-예제-1-각-영역의-주소-찍고-maps와-맞춰-보기" aria-label="link">#</a></h3>
+<p>전역·지역·heap·mmap 변수 주소를 찍은 뒤 자기 자신의 <code>/proc/self/maps</code>를 출력한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex1: 프로세스 주소 공간 — 각 영역의 주소를 찍고 /proc/self/maps와 맞춰 본다
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sys/mman.h&gt;
+
+int g_init = 42;          // .data
+int g_zero;               // .bss
+const char g_ro[] = "ro"; // .rodata
+
+static void show_maps(void)
+{
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) { perror("fopen"); exit(1); }
+    char line[512];
+    while (fgets(line, sizeof line, f))
+        fputs(line, stdout);
+    fclose(f);
+}
+
+int main(void)
+{
+    int local = 0;                                   // stack
+    void *small = malloc(64);                        // heap (brk)
+    void *big = malloc(1 &lt;&lt; 20);                     // 1 MiB -&gt; mmap 영역
+    void *anon = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (!small || !big || anon == MAP_FAILED) { perror("alloc"); exit(1); }
+
+    printf("text   main      = %p\n", (void *)main);
+    printf("rodata g_ro      = %p\n", (void *)g_ro);
+    printf("data   g_init    = %p\n", (void *)&amp;g_init);
+    printf("bss    g_zero    = %p\n", (void *)&amp;g_zero);
+    printf("heap   malloc(64)= %p\n", small);
+    printf("mmap   malloc(1M)= %p\n", big);
+    printf("mmap   anon 4K   = %p\n", anon);
+    printf("libc   printf    = %p\n", (void *)printf);
+    printf("stack  &amp;local    = %p\n", (void *)&amp;local);
+    printf("---- /proc/self/maps ----\n");
+    show_maps();
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>gcc -std=gnu11 -Wall -Wextra -O2 ex1_layout.c -o /tmp/A5/ex1 &amp;&amp; /tmp/A5/ex1</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>text   main      = 0xb72fa1650a40
+rodata g_ro      = 0xb72fa1650f40
+data   g_init    = 0xb72fa1670010
+bss    g_zero    = 0xb72fa1670018
+heap   malloc(64)= 0xb72fa659e010
+mmap   malloc(1M)= 0xe6867859f010
+mmap   anon 4K   = 0xe686788a7000
+libc   printf    = 0xe686786ef8a0
+stack  &amp;local    = 0xffffce6f0764
+---- /proc/self/maps ----
+b72fa1650000-b72fa1652000 r-xp 00000000 00:25 310                        /tmp/A5/ex1
+b72fa166f000-b72fa1670000 r--p 0000f000 00:25 310                        /tmp/A5/ex1
+b72fa1670000-b72fa1671000 rw-p 00010000 00:25 310                        /tmp/A5/ex1
+b72fa659e000-b72fa6600000 rw-p 00000000 00:00 0                          [heap]
+e6867859f000-e686786a0000 rw-p 00000000 00:00 0 
+e686786a0000-e68678849000 r-xp 00000000 fd:01 5341                       /usr/lib/aarch64-linux-gnu/libc.so.6
+e68678849000-e6867885d000 ---p 001a9000 fd:01 5341                       /usr/lib/aarch64-linux-gnu/libc.so.6
+e6867885d000-e68678860000 r--p 001ad000 fd:01 5341                       /usr/lib/aarch64-linux-gnu/libc.so.6
+e68678860000-e68678862000 rw-p 001b0000 fd:01 5341                       /usr/lib/aarch64-linux-gnu/libc.so.6
+e68678862000-e6867886e000 rw-p 00000000 00:00 0 
+e68678872000-e6867889c000 r-xp 00000000 fd:01 5338                       /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
+e686788a0000-e686788a2000 rw-p 00000000 00:00 0 
+e686788a7000-e686788aa000 rw-p 00000000 00:00 0 
+e686788aa000-e686788ae000 r--p 00000000 00:00 0                          [vvar]
+e686788ae000-e686788b0000 r-xp 00000000 00:00 0                          [vdso]
+e686788b0000-e686788b2000 r--p 0002e000 fd:01 5338                       /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
+e686788b2000-e686788b3000 rw-p 00030000 fd:01 5338                       /usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
+e686788b3000-e686788b4000 rw-p 00000000 00:00 0 
+ffffce6d0000-ffffce6f1000 rw-p 00000000 00:00 0                          [stack]</code></pre></figure>
+<p>출력에서 볼 것 (주소는 실행마다 다르다):</p>
+<ul><li><code>main</code>(text)과 <code>g_ro</code>(rodata)는 <code>r-xp</code> 줄 안에, <code>g_init</code>(data)과 <code>g_zero</code>(bss)는 <code>rw-p</code> 줄 안에 있다. 가운데 <code>r--p</code> 줄은 RELRO(재배치 후 읽기 전용으로 바뀌는 GOT 등)다.</li><li><code>.bss</code>는 파일에 내용이 없지만 <code>.data</code>와 같은 페이지에 들어갔다. <code>.bss</code>가 크면 그 뒤에 이름 없는 익명 <code>rw-p</code> 매핑이 붙는다.</li><li><code>malloc(64)</code>는 <code>[heap]</code>에, <code>malloc(1M)</code>는 이름 없는 <code>rw-p</code> 매핑(<code>e6867859f000-e686786a0000</code>, 정확히 1 MiB + 4 KiB)에 있다. 5장에서 이유를 본다.</li><li>libc는 한 파일이 권한별로 4개 VMA로 쪼개져 있다. <code>---p</code>는 정렬용 구멍(guard)이다.</li><li><code>[vdso]</code>는 커널이 매핑해 준 작은 코드 페이지다. <code>clock_gettime()</code>이 syscall 없이 도는 이유다(A1 참고).</li></ul>
+<h3 id="2-3-maps-한-줄-읽는-법">2.3 maps 한 줄 읽는 법<a class="anchor" href="#2-3-maps-한-줄-읽는-법" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>필드</th><th>예</th><th>뜻</th></tr></thead><tbody><tr><td>주소 범위</td><td><code>b72fa1670000-b72fa1671000</code></td><td>VMA의 시작(포함)과 끝(미포함). 항상 페이지 정렬</td></tr><tr><td>권한</td><td><code>rw-p</code></td><td>r/w/x + <code>p</code>(private, COW) 또는 <code>s</code>(shared)</td></tr><tr><td>offset</td><td><code>00010000</code></td><td>파일 매핑일 때 파일 안 시작 위치</td></tr><tr><td>dev</td><td><code>fd:01</code></td><td>파일이 있는 장치 major:minor (<code>00:00</code> = 익명)</td></tr><tr><td>inode</td><td><code>5341</code></td><td>파일 inode 번호 (<code>0</code> = 익명)</td></tr><tr><td>경로</td><td><code>/usr/lib/.../libc.so.6</code></td><td>파일 경로 또는 <code>[heap]</code> <code>[stack]</code> <code>[vdso]</code> 같은 특수 이름</td></tr></tbody></table></div>
+<h3 id="2-4-aslr-실행마다-주소가-바뀐다">2.4 ASLR — 실행마다 주소가 바뀐다<a class="anchor" href="#2-4-aslr-실행마다-주소가-바뀐다" aria-label="link">#</a></h3>
+<p><strong>ASLR(Address Space Layout Randomization)</strong> 은 공격자가 코드·스택 주소를 미리 알 수 없게 매 실행마다 시작 주소를 무작위로 바꾸는 기능이다. <code>setarch -R</code>로 끌 수 있다(디버깅 재현용).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /proc/sys/kernel/randomize_va_space
+./ex1 | head -3
+setarch -R ./ex1 | head -3
+setarch -R ./ex1 | head -3</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>2
+text   main      = 0xae8fd9960a40
+rodata g_ro      = 0xae8fd9960f40
+data   g_init    = 0xae8fd9980010
+text   main      = 0xaaaaaaaa0a40
+rodata g_ro      = 0xaaaaaaaa0f40
+data   g_init    = 0xaaaaaaac0010
+text   main      = 0xaaaaaaaa0a40
+rodata g_ro      = 0xaaaaaaaa0f40
+data   g_init    = 0xaaaaaaac0010</code></pre></figure>
+<p>출력에서 볼 것: <code>randomize_va_space=2</code>(stack·mmap·heap 전부 무작위)라서 첫 실행은 <code>0xae8f...</code>였지만, <code>setarch -R</code>로는 두 번 다 <code>0xaaaaaaaa0a40</code>으로 같다. gdb도 기본으로 ASLR을 끄고 실행한다. "gdb 안에선 재현되는데 밖에선 안 된다"의 흔한 원인이다.</p>
+<hr>
+<h2 id="3-demand-paging과-page-fault">3. Demand paging과 page fault<a class="anchor" href="#3-demand-paging과-page-fault" aria-label="link">#</a></h2>
+<h3 id="3-1-직관-땅-문서만-먼저-주고-집은-들어갈-때-짓는다">3.1 직관: 땅 문서만 먼저 주고, 집은 들어갈 때 짓는다<a class="anchor" href="#3-1-직관-땅-문서만-먼저-주고-집은-들어갈-때-짓는다" aria-label="link">#</a></h3>
+<p><code>mmap()</code>이나 <code>malloc()</code>이 돌려주는 것은 <strong>주소 범위에 대한 약속</strong>(VMA)이다. 이 시점엔 page table 엔트리도, 물리 페이지도 없다. 프로그램이 그 주소를 처음 만지는 순간 MMU가 translation fault를 내고, 커널의 page fault handler가</p>
+<ol><li>그 주소가 어느 VMA에 속하는지 찾고 (없으면 SIGSEGV),</li><li>권한이 맞는지 보고 (안 맞으면 SIGSEGV),</li><li>물리 페이지를 하나 할당해 0으로 채우거나(익명) 파일 내용을 가져와서(파일),</li><li>PTE를 쓰고 돌아가서 그 명령을 다시 실행한다.</li></ol>
+<p>이걸 <strong>demand paging</strong>이라 한다. 두 종류의 fault가 있다.</p>
+<div class="tw"><table><thead><tr><th>종류</th><th>언제</th><th>비용 (대략)</th><th>예</th></tr></thead><tbody><tr><td><strong>minor fault</strong></td><td>필요한 데이터가 이미 RAM에 있음. PTE만 채우면 됨</td><td>수백 ns ~ 수 µs</td><td>처음 쓰는 익명 페이지(0 페이지 할당), page cache에 있는 파일 페이지</td></tr><tr><td><strong>major fault</strong></td><td>데이터를 디스크(또는 swap)에서 읽어 와야 함</td><td>수십 µs ~ ms (저장장치에 따라)</td><td>캐시에 없는 파일을 mmap해서 처음 읽음</td></tr></tbody></table></div>
+<p>Don의 SSD 펌웨어 경험으로 말하면, major fault 하나 = 호스트가 NVMe read 커맨드 하나를 기다리는 것이다.</p>
+<h3 id="3-2-예제-2-만진-페이지-수-vs-fault-수-vs-시간">3.2 예제 2: 만진 페이지 수 vs fault 수 vs 시간<a class="anchor" href="#3-2-예제-2-만진-페이지-수-vs-fault-수-vs-시간" aria-label="link">#</a></h3>
+<p>익명 매핑을 만들고 페이지마다 1바이트씩 쓴다. <code>getrusage()</code>의 <code>ru_minflt</code>로 fault 수를, <code>clock_gettime()</code>으로 시간을 잰다. 인자로 세 모드를 비교한다: <code>plain</code>(그냥), <code>populate</code>(<code>MAP_POPULATE</code>로 mmap 안에서 미리 다 붙이기), <code>thp</code>(<code>madvise(MADV_HUGEPAGE)</code>로 2 MiB 페이지 요청).</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex2: demand paging — 페이지를 처음 만질 때마다 minor fault가 1번씩 난다
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/resource.h&gt;
+
+static long minflt(void)
+{
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &amp;ru) &lt; 0) { perror("getrusage"); exit(1); }
+    return ru.ru_minflt;
+}
+
+static double now_us(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &amp;t);
+    return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
+}
+
+int main(int argc, char **argv)
+{
+    const char *mode = argc &gt; 1 ? argv[1] : "plain";   // plain / populate / thp
+    long psz = sysconf(_SC_PAGESIZE);
+    printf("mode=%s page=%ld\n%8s %10s %10s %10s\n", mode, psz,
+           "pages", "minflt", "total_us", "ns/page");
+    for (long n = 1; n &lt;= 65536; n *= 4) {
+        size_t len = n * psz;
+        int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+        if (strcmp(mode, "populate") == 0) flags |= MAP_POPULATE;
+        long f0 = minflt();
+        double t0 = now_us();                 // mmap 호출 비용까지 포함해서 잰다
+        char *p = mmap(NULL, len, PROT_READ | PROT_WRITE, flags, -1, 0);
+        if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+        if (strcmp(mode, "thp") == 0 &amp;&amp; madvise(p, len, MADV_HUGEPAGE) &lt; 0) {
+            perror("madvise"); exit(1);
+        }
+        for (size_t off = 0; off &lt; len; off += psz)
+            p[off] = 1;                       // 페이지당 1바이트만 쓴다
+        double t1 = now_us();
+        long f1 = minflt();
+        printf("%8ld %10ld %10.1f %10.1f\n", n, f1 - f0, t1 - t0,
+               (t1 - t0) * 1000 / n);
+        munmap(p, len);
+    }
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>./ex2 &amp;&amp; ./ex2 populate &amp;&amp; ./ex2 thp</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>mode=plain page=4096
+   pages     minflt   total_us    ns/page
+       1          3        1.8     1792.0
+       4          4        2.4      604.2
+      16         16        8.4      523.4
+      64         64       39.1      610.7
+     256        256      146.2      571.1
+    1024       1024      538.7      526.1
+    4096       4096     2014.2      491.8
+   16384      16384     8703.1      531.2
+   65536      65536    52545.8      801.8
+mode=populate page=4096
+   pages     minflt   total_us    ns/page
+       1          3        3.3     3333.0
+       4          4        2.1      531.2
+      16         16        6.8      424.5
+      64         64       22.5      351.6
+     256        256       96.2      376.0
+    1024       1024      325.2      317.5
+    4096       4096     1300.8      317.6
+   16384      16384     4812.7      293.7
+   65536      65536    23262.0      355.0
+mode=thp page=4096
+   pages     minflt   total_us    ns/page
+       1          3        4.1     4084.0
+       4          4        3.0      760.5
+      16         16        9.7      606.8
+      64         64       30.8      480.5
+     256        256      117.4      458.5
+    1024          2       55.5       54.2
+    4096          8      185.6       45.3
+   16384         32      894.5       54.6
+   65536        128    11464.1      174.9</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>plain</code>: <strong>만진 페이지 수 = minor fault 수</strong>가 정확히 1:1이다. 페이지당 약 0.5 µs. 256 MiB(65536 페이지)를 처음 만지는 데 52 ms가 들었다. 1 kHz 제어 루프의 주기가 1 ms라는 걸 생각하면 엄청난 시간이다.</li><li><code>populate</code>: fault 수는 같지만(커널이 mmap 안에서 대신 fault를 일으킨다) 페이지당 약 0.3 µs로 싸다. 예외 진입/복귀 비용이 없어서다. 대신 <strong>mmap 호출 자체가 그만큼 오래 걸린다</strong> — 비용을 "시작 시점"으로 옮긴 것이다.</li><li><code>thp</code>: 1024 페이지(4 MiB)부터 fault가 512분의 1로 줄었다(1024 → 2). 2 MiB짜리 huge page 하나가 fault 한 번에 붙는다. 페이지당 약 50 ns. 64K 페이지 행에서 다시 오른 건 2 MiB 연속 물리 메모리를 구하느라(compaction 등) 시간이 든 것으로 보인다.</li><li>1페이지 행은 mmap syscall 비용이 지배해서 ns/page가 의미 없다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 640 330" xmlns="http://www.w3.org/2000/svg">
+<line x1="70" y1="270" x2="490" y2="270" stroke="currentColor"/>
+<line x1="70" y1="30" x2="70" y2="270" stroke="currentColor"/>
+<line x1="66" y1="270.0" x2="70" y2="270.0" stroke="currentColor"/>
+<line x1="70" y1="270.0" x2="490" y2="270.0" stroke="#888" stroke-opacity="0.3"/><text x="62" y="274.0" font-size="12" text-anchor="end">0</text>
+<line x1="66" y1="230.0" x2="70" y2="230.0" stroke="currentColor"/>
+<line x1="70" y1="230.0" x2="490" y2="230.0" stroke="#888" stroke-opacity="0.3"/><text x="62" y="234.0" font-size="12" text-anchor="end">150</text>
+<line x1="66" y1="190.0" x2="70" y2="190.0" stroke="currentColor"/>
+<line x1="70" y1="190.0" x2="490" y2="190.0" stroke="#888" stroke-opacity="0.3"/><text x="62" y="194.0" font-size="12" text-anchor="end">300</text>
+<line x1="66" y1="150.0" x2="70" y2="150.0" stroke="currentColor"/>
+<line x1="70" y1="150.0" x2="490" y2="150.0" stroke="#888" stroke-opacity="0.3"/><text x="62" y="154.0" font-size="12" text-anchor="end">450</text>
+<line x1="66" y1="110.0" x2="70" y2="110.0" stroke="currentColor"/>
+<line x1="70" y1="110.0" x2="490" y2="110.0" stroke="#888" stroke-opacity="0.3"/><text x="62" y="114.0" font-size="12" text-anchor="end">600</text>
+<line x1="66" y1="70.0" x2="70" y2="70.0" stroke="currentColor"/>
+<line x1="70" y1="70.0" x2="490" y2="70.0" stroke="#888" stroke-opacity="0.3"/><text x="62" y="74.0" font-size="12" text-anchor="end">750</text>
+<line x1="66" y1="30.0" x2="70" y2="30.0" stroke="currentColor"/>
+<line x1="70" y1="30.0" x2="490" y2="30.0" stroke="#888" stroke-opacity="0.3"/><text x="62" y="34.0" font-size="12" text-anchor="end">900</text>
+<line x1="70.0" y1="270" x2="70.0" y2="274" stroke="currentColor"/><text x="70.0" y="288" font-size="12" text-anchor="middle">4</text>
+<line x1="130.0" y1="270" x2="130.0" y2="274" stroke="currentColor"/><text x="130.0" y="288" font-size="12" text-anchor="middle">16</text>
+<line x1="190.0" y1="270" x2="190.0" y2="274" stroke="currentColor"/><text x="190.0" y="288" font-size="12" text-anchor="middle">64</text>
+<line x1="250.0" y1="270" x2="250.0" y2="274" stroke="currentColor"/><text x="250.0" y="288" font-size="12" text-anchor="middle">256</text>
+<line x1="310.0" y1="270" x2="310.0" y2="274" stroke="currentColor"/><text x="310.0" y="288" font-size="12" text-anchor="middle">1K</text>
+<line x1="370.0" y1="270" x2="370.0" y2="274" stroke="currentColor"/><text x="370.0" y="288" font-size="12" text-anchor="middle">4K</text>
+<line x1="430.0" y1="270" x2="430.0" y2="274" stroke="currentColor"/><text x="430.0" y="288" font-size="12" text-anchor="middle">16K</text>
+<line x1="490.0" y1="270" x2="490.0" y2="274" stroke="currentColor"/><text x="490.0" y="288" font-size="12" text-anchor="middle">64K</text><text x="280" y="318" font-size="13" text-anchor="middle">만진 페이지 수 (4 KiB 단위, 로그 축)</text><text x="18" y="150" font-size="13" text-anchor="middle" transform="rotate(-90 18 150)">ns / page</text>
+<polyline points="70.0,108.9 130.0,130.4 190.0,107.1 250.0,117.7 310.0,129.7 370.0,138.9 430.0,128.3 490.0,56.2" fill="none" stroke="#4a7bd0" stroke-width="2"/><circle cx="70.0" cy="108.9" r="3" fill="#4a7bd0"/><circle cx="130.0" cy="130.4" r="3" fill="#4a7bd0"/><circle cx="190.0" cy="107.1" r="3" fill="#4a7bd0"/><circle cx="250.0" cy="117.7" r="3" fill="#4a7bd0"/><circle cx="310.0" cy="129.7" r="3" fill="#4a7bd0"/>
+<circle cx="370.0" cy="138.9" r="3" fill="#4a7bd0"/><circle cx="430.0" cy="128.3" r="3" fill="#4a7bd0"/><circle cx="490.0" cy="56.2" r="3" fill="#4a7bd0"/>
+<polyline points="70.0,128.3 130.0,156.8 190.0,176.2 250.0,169.7 310.0,185.3 370.0,185.3 430.0,191.7 490.0,175.3" fill="none" stroke="#e08a3c" stroke-width="2"/><circle cx="70.0" cy="128.3" r="3" fill="#e08a3c"/><circle cx="130.0" cy="156.8" r="3" fill="#e08a3c"/><circle cx="190.0" cy="176.2" r="3" fill="#e08a3c"/><circle cx="250.0" cy="169.7" r="3" fill="#e08a3c"/><circle cx="310.0" cy="185.3" r="3" fill="#e08a3c"/>
+<circle cx="370.0" cy="185.3" r="3" fill="#e08a3c"/><circle cx="430.0" cy="191.7" r="3" fill="#e08a3c"/><circle cx="490.0" cy="175.3" r="3" fill="#e08a3c"/>
+<polyline points="70.0,67.2 130.0,108.2 190.0,141.9 250.0,147.7 310.0,255.5 370.0,257.9 430.0,255.4 490.0,223.4" fill="none" stroke="#3f9a6b" stroke-width="2"/><circle cx="70.0" cy="67.2" r="3" fill="#3f9a6b"/><circle cx="130.0" cy="108.2" r="3" fill="#3f9a6b"/><circle cx="190.0" cy="141.9" r="3" fill="#3f9a6b"/><circle cx="250.0" cy="147.7" r="3" fill="#3f9a6b"/><circle cx="310.0" cy="255.5" r="3" fill="#3f9a6b"/>
+<circle cx="370.0" cy="257.9" r="3" fill="#3f9a6b"/><circle cx="430.0" cy="255.4" r="3" fill="#3f9a6b"/><circle cx="490.0" cy="223.4" r="3" fill="#3f9a6b"/>
+<line x1="502" y1="40" x2="520" y2="40" stroke="#4a7bd0" stroke-width="3"/><text x="524" y="44" font-size="12">plain (4K fault)</text>
+<line x1="502" y1="62" x2="520" y2="62" stroke="#e08a3c" stroke-width="3"/><text x="524" y="66" font-size="12">MAP_POPULATE</text>
+<line x1="502" y1="84" x2="520" y2="84" stroke="#3f9a6b" stroke-width="3"/><text x="524" y="88" font-size="12">MADV_HUGEPAGE</text>
+</svg></figure>
+<p>그림 4 — 예제 2의 측정값(페이지 수 4 이상). 4 KiB fault는 페이지당 약 0.5 µs로 일정하다. huge page가 적용되는 4 MiB 이상에서 THP가 한 자릿수 빠르다.</p>
+<h3 id="3-3-예제-3-major-fault-page-cache에-없을-때">3.3 예제 3: major fault — page cache에 없을 때<a class="anchor" href="#3-3-예제-3-major-fault-page-cache에-없을-때" aria-label="link">#</a></h3>
+<p>디스크에 있는 64 MiB 파일을 <code>mmap</code>해서 페이지마다 1바이트씩 읽는다. 이번엔 <code>/proc/self/stat</code>의 10번째(minflt)·12번째(majflt) 필드로 센다. 캐시를 비운 상태(cold)와 채운 상태(warm), 그리고 <code>MADV_RANDOM</code>으로 readahead를 끈 경우를 비교한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex3: file-backed mmap — page cache에 없으면 major fault, 있으면 minor fault
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/stat.h&gt;
+
+// /proc/self/stat 의 10번째(minflt), 12번째(majflt) 필드
+static void faults(long *mn, long *mj)
+{
+    FILE *f = fopen("/proc/self/stat", "r");
+    if (!f) { perror("fopen"); exit(1); }
+    if (fscanf(f, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %ld %*u %ld",
+               mn, mj) != 2) { fprintf(stderr, "parse\n"); exit(1); }
+    fclose(f);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc &lt; 2) { fprintf(stderr, "usage: %s file [random]\n", argv[0]); exit(1); }
+    int fd = open(argv[1], O_RDONLY);
+    if (fd &lt; 0) { perror("open"); exit(1); }
+    struct stat st;
+    if (fstat(fd, &amp;st) &lt; 0) { perror("fstat"); exit(1); }
+    const volatile char *p = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+    close(fd);                         // 매핑은 fd를 닫아도 살아 있다
+    if (argc &gt; 2 &amp;&amp; madvise((void *)p, st.st_size, MADV_RANDOM) &lt; 0) {
+        perror("madvise"); exit(1);    // readahead 끄기
+    }
+
+    long mn0, mj0, mn1, mj1;
+    unsigned long sum = 0;
+    faults(&amp;mn0, &amp;mj0);
+    for (off_t off = 0; off &lt; st.st_size; off += 4096)
+        sum += p[off];
+    faults(&amp;mn1, &amp;mj1);
+    printf("size=%lld MiB  minflt=%ld  majflt=%ld  (sum=%lu)\n",
+           (long long)st.st_size &gt;&gt; 20, mn1 - mn0, mj1 - mj0, sum);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>dd if=/dev/urandom of=/var/tmp/A5/data.bin bs=1M count=64 status=none &amp;&amp; sync
+for m in "" random; do
+  echo "== cold $m"; sudo sh -c "echo 3 &gt; /proc/sys/vm/drop_caches"
+  /usr/bin/time -f "%e s elapsed" ./ex3 /var/tmp/A5/data.bin $m
+  echo "== warm $m"; /usr/bin/time -f "%e s elapsed" ./ex3 /var/tmp/A5/data.bin $m
+done
+sudo cat /sys/kernel/debug/fault_around_bytes</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== cold 
+size=64 MiB  minflt=436  majflt=1  (sum=2088852)
+0.01 s elapsed
+== warm 
+size=64 MiB  minflt=437  majflt=0  (sum=2088852)
+0.00 s elapsed
+== cold random
+size=64 MiB  minflt=1  majflt=16384  (sum=2088852)
+0.64 s elapsed
+== warm random
+size=64 MiB  minflt=1025  majflt=0  (sum=2088852)
+0.00 s elapsed
+65536</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>64 MiB = 16384 페이지인데 기본 모드에선 fault가 437번뿐이다. 두 가지 최적화 때문이다. <strong>readahead</strong>: 순차 접근을 감지하면 커널이 앞으로 읽을 부분을 미리 디스크에서 page cache로 올린다. 그래서 cold인데도 major fault는 첫 1번뿐이다. <strong>fault-around</strong>: 파일 페이지 fault 한 번에 주변 64 KiB(<code>fault_around_bytes=65536</code>)의, 이미 캐시에 있는 페이지들의 PTE를 한꺼번에 채운다. 최근 커널은 page cache가 큰 folio(여러 페이지 묶음)를 쓰기 때문에 한 번에 더 많이 매핑되기도 한다.</li><li><code>MADV_RANDOM</code>은 readahead와 fault-around를 끈다. cold에서 <strong>16384번 전부 major fault</strong>, 0.64초. 페이지당 약 39 µs — 디스크(여기선 Mac SSD 위 virtio 디스크) 왕복 비용이다. warm에서는 major 0, minor 1025다.</li><li><code>close(fd)</code> 후에도 매핑은 살아 있다. VMA가 <code>struct file</code>의 참조를 따로 잡고 있기 때문이다(A3의 fd → open file 구조 참고).</li></ul>
+<h3 id="3-4-함정">3.4 함정<a class="anchor" href="#3-4-함정" aria-label="link">#</a></h3>
+<ul class="tasks"><li>"메모리를 할당했으니 빠르겠지"는 틀렸다. 첫 접근이 진짜 비용이다. 벤치마크 첫 회차가 느린 흔한 이유다.</li><li>임베디드 eMMC/SD 카드에서 major fault는 ms 단위다. 실행 파일 자체도 파일 매핑이라 <strong>코드 페이지도 major fault로 읽힌다</strong>. 부팅 직후 첫 동작이 느린 이유 중 하나다.</li><li><code>ru_minflt</code>는 스레드 전체(프로세스)의 합이다. 스레드별은 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/stat</code>.</li></ul>
+<hr>
+<h2 id="4-overcommit과-oom-killer">4. Overcommit과 OOM killer<a class="anchor" href="#4-overcommit과-oom-killer" aria-label="link">#</a></h2>
+<h3 id="4-1-직관-은행-대출">4.1 직관: 은행 대출<a class="anchor" href="#4-1-직관-은행-대출" aria-label="link">#</a></h3>
+<p>demand paging 때문에 커널은 "약속(가상 메모리)"과 "실제 지급(물리 페이지)"을 분리할 수 있다. 은행이 예금보다 많이 대출해 주는 것처럼, 커널도 RAM보다 많은 가상 메모리를 약속한다. 이걸 <strong>overcommit</strong>이라 한다. 대부분의 프로그램은 약속받은 걸 다 쓰지 않으니 보통은 잘 굴러간다. 모두가 한꺼번에 인출하면? 물리 페이지를 줄 수 없는 순간 커널은 <strong>OOM(Out Of Memory) killer</strong>를 불러 프로세스 하나를 골라 SIGKILL로 죽인다.</p>
+<p><code>/proc/sys/vm/overcommit_memory</code> 값에 따라 정책이 다르다.</p>
+<div class="tw"><table><thead><tr><th>값</th><th>이름</th><th>동작</th></tr></thead><tbody><tr><td>0</td><td>heuristic (기본)</td><td>한 번의 요청이 "RAM + swap 전체보다 명백히 큰" 경우만 거절. 나머지는 허용</td></tr><tr><td>1</td><td>always</td><td>무조건 허용 (거대한 sparse 배열 쓰는 과학 계산용)</td></tr><tr><td>2</td><td>never (strict)</td><td>총 약속량(<code>Committed_AS</code>)이 <code>CommitLimit</code> = swap + RAM × <code>overcommit_ratio</code>% 를 넘으면 거절</td></tr></tbody></table></div>
+<h3 id="4-2-예제-4-4-gb-vm에서-8-gib-약속받기-안전한-데모">4.2 예제 4: 4 GB VM에서 8 GiB 약속받기 (안전한 데모)<a class="anchor" href="#4-2-예제-4-4-gb-vm에서-8-gib-약속받기-안전한-데모" aria-label="link">#</a></h3>
+<p>실제로 메모리를 다 쓰지는 않는다. 약속만 받고, 64 MiB만 만진다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex4: overcommit — 만지지 않은 메모리는 "약속"일 뿐, 물리 RAM을 쓰지 않는다
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+
+static void status(const char *tag)
+{
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) { perror("fopen"); exit(1); }
+    char line[256];
+    printf("[%s]", tag);
+    while (fgets(line, sizeof line, f))
+        if (!strncmp(line, "VmSize", 6) || !strncmp(line, "VmRSS", 5)) {
+            line[strcspn(line, "\n")] = 0;
+            printf("  %s", line);
+        }
+    printf("\n");
+    fclose(f);
+}
+
+int main(void)
+{
+    const size_t GiB = 1UL &lt;&lt; 30;
+    status("start");
+
+    // 1) 16 GiB 한 방: 모드 0 휴리스틱은 "RAM+swap보다 명백히 큰" 요청을 거절
+    void *huge = malloc(16 * GiB);
+    printf("malloc(16 GiB) at once -&gt; %p %s\n", huge, huge ? "OK" : "(refused)");
+    free(huge);
+
+    // 2) 1 GiB씩 8번 = 8 GiB (VM RAM 4 GiB의 2배) — 각각은 통과
+    void *blk[8];
+    for (int i = 0; i &lt; 8; i++) {
+        blk[i] = malloc(GiB);
+        if (!blk[i]) { printf("block %d failed\n", i); exit(1); }
+    }
+    printf("8 x malloc(1 GiB) -&gt; all OK\n");
+    status("8 GiB reserved");
+
+    // 3) 그중 64 MiB만 실제로 만진다 -&gt; RSS가 그만큼만 는다
+    memset(blk[0], 0xA5, 64UL &lt;&lt; 20);
+    printf("blk[0]=%p last byte=0x%02x\n", blk[0],
+           ((volatile unsigned char *)blk[0])[(64UL &lt;&lt; 20) - 1]);
+    status("touched 64 MiB");
+
+    for (int i = 0; i &lt; 8; i++) free(blk[i]);
+    status("freed");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>./ex4 &amp;&amp; grep -E "^(MemTotal|CommitLimit|Committed_AS)" /proc/meminfo</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[start]  VmSize:	    4048 kB  VmRSS:	    1220 kB
+malloc(16 GiB) at once -&gt; (nil) (refused)
+8 x malloc(1 GiB) -&gt; all OK
+[8 GiB reserved]  VmSize:	 8392688 kB  VmRSS:	    1252 kB
+blk[0]=0xe5165d26f010 last byte=0xa5
+[touched 64 MiB]  VmSize:	 8392688 kB  VmRSS:	   68452 kB
+[freed]  VmSize:	    4048 kB  VmRSS:	    1284 kB
+MemTotal:        3988828 kB
+CommitLimit:     1994412 kB
+Committed_AS:     945912 kB</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>malloc(16 GiB)</code> 한 방은 거절됐다(RAM 4 GB + swap 0보다 명백히 크다). 하지만 1 GiB씩 8번은 <strong>전부 성공</strong>했다. 휴리스틱은 요청 하나씩만 본다.</li><li><code>VmSize</code>(가상 크기)는 8 GiB인데 <code>VmRSS</code>(실제 물리 메모리)는 1.2 MB 그대로다. 64 MiB를 만진 뒤에야 RSS가 약 67 MB로 늘었다.</li><li><code>CommitLimit</code>(1.9 GB)은 모드 2일 때만 강제되는 한도라 모드 0에선 숫자만 보여 준다.</li></ul>
+<p><strong>함정 하나</strong>: 처음 이 코드를 짰을 때는 <code>malloc(16 GiB)</code>가 "OK"로 나왔다. gcc <code>-O2</code>가 "결과를 안 쓰는 malloc+free 쌍"을 통째로 지워 버렸기 때문이다. 그래서 포인터를 <code>printf</code>로 출력하고 <code>volatile</code>로 읽게 고쳤다. 메모리 실험 코드는 컴파일러 최적화를 꼭 의심한다.</p>
+<p>모드 2(strict)로 잠깐 바꿔서 같은 프로그램을 돌리고 바로 되돌려 보았다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>sudo sysctl -q vm.overcommit_memory=2; ./ex4; sudo sysctl -q vm.overcommit_memory=0</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[start]  VmSize:	    3408 kB  VmRSS:	    1212 kB
+malloc(16 GiB) at once -&gt; (nil) (refused)
+block 0 failed</code></pre></figure>
+<p>출력에서 볼 것: strict 모드에선 1 GiB 하나도 거절된다. 이미 약 0.95 GB가 약속돼 있고 한도가 1.99 GB이기 때문이다. swap 없는 임베디드 장비에서 모드 2는 "fork가 실패한다" 같은 부작용이 크다. 실제 장비에선 모드 0을 두고 cgroup 메모리 한도(L8)로 서비스별 상한을 거는 게 일반적이다.</p>
+<h3 id="4-3-oom-killer가-누구를-고르나">4.3 OOM killer가 누구를 고르나<a class="anchor" href="#4-3-oom-killer가-누구를-고르나" aria-label="link">#</a></h3>
+<p>커널은 프로세스마다 <strong>badness 점수</strong>(대략 "RSS + swap + page table 크기"를 RAM 대비 비율로)를 매기고 가장 큰 것을 죽인다. 유저가 조절하는 손잡이가 <code>/proc/&lt;pid&gt;/oom_score_adj</code>(-1000 ~ 1000)다. -1000이면 절대 안 죽고, 1000이면 1순위다. 읽기 전용 <code>/proc/&lt;pid&gt;/oom_score</code>는 그걸 반영한 결과값이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>echo "self(bash): score=$(cat /proc/self/oom_score) adj=$(cat /proc/self/oom_score_adj)"
+for n in systemd-journal sshd; do P=$(pgrep -o $n); echo "$n($P): score=$(cat /proc/$P/oom_score) adj=$(cat /proc/$P/oom_score_adj)"; done
+sh -c "echo 500 &gt; /proc/self/oom_score_adj; echo after adj=500: score=\$(cat /proc/self/oom_score)"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>self(bash): score=668 adj=0
+systemd-journal(618): score=502 adj=-250
+sshd(1255): score=0 adj=-1000
+after adj=500: score=1000</code></pre></figure>
+<p>출력에서 볼 것: 작은 프로세스인데 점수가 668이다. 최근 커널은 표시값을 <code>(1000 + 정규화된 badness) × 2/3</code> 꼴로 보여 주기 때문에 adj=0이면 기본이 약 667이다. sshd는 -1000이라 0(면제), journald는 systemd 유닛 설정 <code>OOMScoreAdjust=-250</code>이 적용돼 있다. 장비에서 <strong>제어 데몬은 낮추고</strong>(예: -900), 로그 업로더·웹 UI 같은 부가 서비스는 높여서 OOM 시 무엇이 먼저 죽을지 설계한다.</p>
+<p>OOM이 나면 커널 로그에 <code>Out of memory: Killed process &lt;pid&gt; (&lt;name&gt;) total-vm:...kB, anon-rss:...kB</code> 형태의 줄과 당시 메모리 상태 덤프가 남는다. <code>dmesg</code>나 <code>journalctl -k</code>로 찾는다. 이 노트에서는 VM을 일부러 OOM시키지 않았다.</p>
+<hr>
+<h2 id="5-malloc의-속사정-brk와-mmap">5. malloc의 속사정 — brk와 mmap<a class="anchor" href="#5-malloc의-속사정-brk와-mmap" aria-label="link">#</a></h2>
+<h3 id="5-1-정의">5.1 정의<a class="anchor" href="#5-1-정의" aria-label="link">#</a></h3>
+<p>glibc <code>malloc</code>은 커널에서 메모리를 두 가지 방법으로 받아 온다.</p>
+<ul><li><strong><code>brk</code>/<code>sbrk</code></strong>: <code>[heap]</code> VMA의 끝(program break)을 위로 밀어 늘린다. 작은 할당들을 그 안에서 잘라 쓴다(arena).</li><li><strong><code>mmap</code>(익명)</strong>: 큰 할당은 독립 매핑으로 받는다. <code>free()</code>하면 바로 <code>munmap</code>되어 OS에 반납된다.</li></ul>
+<p>기준이 <code>M_MMAP_THRESHOLD</code>(기본 128 KiB)다. 단, 정확히는 "heap 꼭대기(top chunk)에 남은 공간으로 못 줄 때, 요청이 threshold 이상이면 mmap"이다. 그리고 <strong>동적 threshold</strong>: mmap으로 받은 블록을 <code>free</code>하면 threshold가 그 크기로 올라간다(최대 32 MiB, 64비트 기준). 같은 크기 할당/해제를 반복할 때 매번 mmap/munmap하지 않으려는 장치다.</p>
+<h3 id="5-2-예제-5-strace로-brk-mmap-보기">5.2 예제 5: strace로 brk/mmap 보기<a class="anchor" href="#5-2-예제-5-strace로-brk-mmap-보기" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex5: malloc은 언제 brk(heap)를, 언제 mmap을 쓰나 — strace로 함께 본다
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+
+static void *heap_start;
+
+static void *alloc(size_t n)
+{
+    void *p = malloc(n);
+    if (!p) { perror("malloc"); exit(1); }
+    char *brk_now = sbrk(0);
+    const char *where = ((char *)p &gt;= (char *)heap_start &amp;&amp; (char *)p &lt; brk_now)
+                        ? "heap(brk)" : "mmap";
+    fprintf(stderr, "&gt;&gt; malloc(%7zu) = %p  %s\n", n, p, where);
+    return p;
+}
+
+int main(void)
+{
+    heap_start = sbrk(0);
+    void *a = alloc(100);
+    void *b = alloc(64 * 1024);
+    void *c = alloc(127 * 1024);
+    void *d = alloc(129 * 1024);        // 기본 M_MMAP_THRESHOLD(128 KiB)보다 크다
+    void *e = alloc(1024 * 1024);
+    fprintf(stderr, "&gt;&gt; free(1 MiB)  -&gt; 동적 threshold가 1 MiB로 올라간다\n");
+    free(e);
+    void *f = alloc(1024 * 1024);       // 이번엔 heap에서
+    free(a); free(b); free(c); free(d); free(f);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>setarch -R strace -e trace=brk,mmap,munmap ./ex5 2&gt;&amp;1 | tail -13</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>brk(NULL)                               = 0xaaaaaaac1000
+brk(0xaaaaaac00000)                     = 0xaaaaaac00000
+&gt;&gt; malloc(    100) = 0xaaaaaaac1010  heap(brk)
+&gt;&gt; malloc(  65536) = 0xaaaaaaac1080  heap(brk)
+&gt;&gt; malloc( 130048) = 0xaaaaaaad1090  heap(brk)
+&gt;&gt; malloc( 132096) = 0xaaaaaaaf0ca0  heap(brk)
+mmap(NULL, 1052672, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0xfffff7cdf000
+&gt;&gt; malloc(1048576) = 0xfffff7cdf010  mmap
+&gt;&gt; free(1 MiB)  -&gt; 동적 threshold가 1 MiB로 올라간다
+munmap(0xfffff7cdf000, 1052672)         = 0
+brk(0xaaaaaae00000)                     = 0xaaaaaae00000
+&gt;&gt; malloc(1048576) = 0xaaaaaab110b0  heap(brk)
++++ exited with 0 +++</code></pre></figure>
+<p>(앞부분의 동적 링커 mmap 줄들은 생략했다. ASLR을 끄고 돌린 결과다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>첫 <code>brk</code>가 heap을 <code>0xaaaaaac00000</code>, 즉 <strong>2 MiB 경계까지</strong> 한 번에 늘렸다(약 1.25 MB). 이 VM의 glibc 2.43은 THP를 고려해 heap 끝을 2 MiB에 맞추는 것으로 보인다(10장 참고).</li><li>그래서 129 KiB 할당은 threshold(128 KiB)보다 큰데도 <strong>heap에서</strong> 나왔다. top chunk에 공간이 남아 있었기 때문이다. "128 KiB 넘으면 무조건 mmap"은 틀린 상식이다. ASLR을 켜고 여러 번 돌리면 heap 시작 위치에 따라 결과가 바뀌기도 한다.</li><li>1 MiB는 top에 공간이 없어서 <code>mmap(1052672)</code>(1 MiB + 헤더, 페이지 올림)으로 받았다.</li><li><code>free(1 MiB)</code> → 즉시 <code>munmap</code>. 그리고 다음 <code>malloc(1 MiB)</code>는 threshold가 올라가서 <code>brk</code>를 늘려 heap에서 나왔다.</li></ul>
+<h3 id="5-3-함정">5.3 함정<a class="anchor" href="#5-3-함정" aria-label="link">#</a></h3>
+<ul><li><strong>"free 했는데 RSS가 안 줄어요"</strong>: heap 중간이 비어도 꼭대기가 아니면 <code>brk</code>를 줄일 수 없다(fragmentation). glibc는 <code>malloc_trim(0)</code>으로 빈 페이지에 <code>MADV_DONTNEED</code>를 걸어 돌려줄 수 있다.</li><li>멀티스레드 프로그램은 스레드마다 arena를 만들고, 그 arena는 <code>mmap</code>으로 받은 64 MiB 단위 영역이다. <code>/proc/&lt;pid&gt;/maps</code>에 64 MiB짜리 <code>---p</code> 예약 영역이 여러 개 보이는 이유다. 임베디드에선 <code>MALLOC_ARENA_MAX=2</code> 같은 환경 변수로 줄이기도 한다.</li><li>RT 코드에서 <code>malloc</code>은 언제 syscall + page fault를 일으킬지 모른다. RT 루프 전에 미리 할당·touch하고 루프 안에선 할당하지 않는다(8장).</li></ul>
+<hr>
+<h2 id="6-mmap-완전-정리">6. mmap 완전 정리<a class="anchor" href="#6-mmap-완전-정리" aria-label="link">#</a></h2>
+<h3 id="6-1-시그니처와-조합">6.1 시그니처와 조합<a class="anchor" href="#6-1-시그니처와-조합" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+int   munmap(void *addr, size_t length);
+int   mprotect(void *addr, size_t len, int prot);
+int   msync(void *addr, size_t length, int flags);</code></pre></figure>
+<ul><li><code>addr</code>: 보통 <code>NULL</code>(커널이 고름). <code>MAP_FIXED</code>와 같이 주면 그 주소에 강제(기존 매핑을 덮어쓰므로 위험; <code>MAP_FIXED_NOREPLACE</code>가 안전한 버전).</li><li><code>prot</code>: <code>PROT_READ</code>, <code>PROT_WRITE</code>, <code>PROT_EXEC</code>, <code>PROT_NONE</code>의 OR. PTE 권한 비트가 된다.</li><li><code>offset</code>: 페이지 크기의 배수여야 한다.</li><li>실패하면 <code>NULL</code>이 아니라 <strong><code>MAP_FAILED</code></strong>(<code>(void *)-1</code>)를 돌려준다.</li></ul>
+<p>매핑은 두 축의 조합 네 가지다.</p>
+<div class="tw"><table><thead><tr><th></th><th>MAP_SHARED</th><th>MAP_PRIVATE</th></tr></thead><tbody><tr><td><strong>파일</strong> (<code>fd</code> 있음)</td><td>쓰면 page cache가 바뀌고 결국 파일에 반영. 다른 프로세스도 봄. 예: 파일 공유 편집, 장치 버퍼</td><td>쓰면 COW로 내 사본만 바뀜. 파일 불변. 예: 실행 파일·라이브러리 로딩</td></tr><tr><td><strong>익명</strong> (<code>MAP_ANONYMOUS</code>, <code>fd=-1</code>)</td><td>fork한 자식과 공유. 예: 부모-자식 공유 메모리</td><td>0으로 채운 나만의 메모리. 예: 큰 malloc, 스레드 스택</td></tr></tbody></table></div>
+<p><strong>COW(copy-on-write)</strong> 는 "쓰기 전까지는 원본 페이지를 같이 쓰다가, 쓰는 순간 그 페이지만 복사해서 내 것으로 만드는" 방식이다. 커널은 PTE를 읽기 전용으로 만들어 두고, 쓰기 시 나는 permission fault에서 복사를 한다.</p>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="170" y="22" font-size="14" text-anchor="middle">MAP_SHARED</text>
+<text x="510" y="22" font-size="14" text-anchor="middle">MAP_PRIVATE (B가 쓴 뒤)</text>
+<line x1="340" y1="8" x2="340" y2="292" stroke="#888" stroke-dasharray="4 4"/>
+<rect x="30" y="45" width="120" height="36" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="90" y="68" font-size="13" text-anchor="middle">프로세스 A</text>
+<rect x="190" y="45" width="120" height="36" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="250" y="68" font-size="13" text-anchor="middle">프로세스 B</text>
+<rect x="85" y="140" width="170" height="40" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="170" y="165" font-size="13" text-anchor="middle">page cache 페이지</text>
+<rect x="85" y="240" width="170" height="36" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="170" y="263" font-size="13" text-anchor="middle">디스크의 파일</text>
+<line x1="90" y1="81" x2="150" y2="138" stroke="currentColor" marker-end="url(#ah3)"/>
+<line x1="250" y1="81" x2="190" y2="138" stroke="currentColor" marker-end="url(#ah3)"/>
+<line x1="170" y1="180" x2="170" y2="238" stroke="currentColor" stroke-dasharray="5 3" marker-end="url(#ah3)"/><text x="180" y="214" font-size="12">writeback / msync</text><text x="170" y="118" font-size="12" text-anchor="middle">둘 다 같은 물리 페이지</text>
+<rect x="365" y="45" width="120" height="36" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="425" y="68" font-size="13" text-anchor="middle">프로세스 A</text>
+<rect x="530" y="45" width="120" height="36" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="590" y="68" font-size="13" text-anchor="middle">프로세스 B</text>
+<rect x="365" y="140" width="150" height="40" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="440" y="165" font-size="13" text-anchor="middle">page cache 페이지</text>
+<rect x="535" y="140" width="125" height="40" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="597" y="158" font-size="13" text-anchor="middle">B 전용 사본</text><text x="597" y="174" font-size="12" text-anchor="middle">(익명 페이지)</text>
+<rect x="365" y="240" width="150" height="36" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="440" y="263" font-size="13" text-anchor="middle">파일 (불변)</text>
+<line x1="425" y1="81" x2="435" y2="138" stroke="currentColor" marker-end="url(#ah3)"/>
+<line x1="590" y1="81" x2="595" y2="138" stroke="#d0564a" stroke-width="2" marker-end="url(#ah3)"/>
+<line x1="570" y1="81" x2="480" y2="138" stroke="#888" stroke-dasharray="3 3"/><text x="560" y="115" font-size="12" text-anchor="middle">쓰기 전엔 여기</text>
+<line x1="440" y1="180" x2="440" y2="238" stroke="currentColor" stroke-dasharray="5 3" marker-end="url(#ah3)"/><text x="545" y="220" font-size="12">B의 쓰기는 파일로</text><text x="545" y="236" font-size="12">절대 안 간다</text>
+</svg></figure>
+<p>그림 5 — SHARED는 모든 매핑이 같은 page cache 페이지를 가리킨다. PRIVATE는 쓰기 전까지 공유하다가 쓰는 순간 그 페이지만 복사(COW)된다.</p>
+<h3 id="6-2-예제-6-같은-파일을-shared와-private로-동시에-매핑">6.2 예제 6: 같은 파일을 SHARED와 PRIVATE로 동시에 매핑<a class="anchor" href="#6-2-예제-6-같은-파일을-shared와-private로-동시에-매핑" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex6: 같은 파일을 MAP_SHARED / MAP_PRIVATE로 매핑하고 써 본다
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+
+#define DIE(m) do { perror(m); exit(1); } while (0)
+
+static void show_file(int fd, const char *tag)
+{
+    char buf[17] = {0};
+    if (pread(fd, buf, 16, 0) != 16) DIE("pread");
+    printf("%-28s file = \"%s\"\n", tag, buf);
+}
+
+int main(void)
+{
+    int fd = open("/tmp/A5/ex6.dat", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd &lt; 0) DIE("open");
+    if (write(fd, "AAAAAAAAAAAAAAAA", 16) != 16) DIE("write");
+    if (ftruncate(fd, 4096) &lt; 0) DIE("ftruncate");   // 매핑은 페이지 단위
+
+    char *sh = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    char *pv = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    if (sh == MAP_FAILED || pv == MAP_FAILED) DIE("mmap");
+    show_file(fd, "initial");
+
+    memcpy(sh, "SHARED", 6);              // page cache 페이지를 직접 수정
+    show_file(fd, "after write via SHARED");
+    printf("%-28s pv   = \"%.16s\"  (아직 COW 전이라 같이 보임)\n", "", pv);
+
+    memcpy(pv, "PRIV", 4);                // 여기서 COW: 내 전용 사본 생성
+    show_file(fd, "after write via PRIVATE");
+    printf("%-28s pv   = \"%.16s\"  sh = \"%.16s\"\n", "", pv, sh);
+
+    memcpy(sh + 8, "XY", 2);              // shared 쪽을 다시 바꿔도
+    printf("%-28s pv   = \"%.16s\"  (COW 이후엔 안 보임)\n", "after SHARED write #2", pv);
+
+    if (msync(sh, 4096, MS_SYNC) &lt; 0) DIE("msync");   // dirty 페이지를 디스크로
+    if (munmap(sh, 4096) &lt; 0 || munmap(pv, 4096) &lt; 0) DIE("munmap");
+    close(fd);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>./ex6 &amp;&amp; head -c 16 /tmp/A5/ex6.dat; echo</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>initial                      file = "AAAAAAAAAAAAAAAA"
+after write via SHARED       file = "SHAREDAAAAAAAAAA"
+                             pv   = "SHAREDAAAAAAAAAA"  (아직 COW 전이라 같이 보임)
+after write via PRIVATE      file = "SHAREDAAAAAAAAAA"
+                             pv   = "PRIVEDAAAAAAAAAA"  sh = "SHAREDAAAAAAAAAA"
+after SHARED write #2        pv   = "PRIVEDAAAAAAAAAA"  (COW 이후엔 안 보임)
+SHAREDAAXYAAAAAA</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>SHARED로 쓰자마자 <code>pread()</code>로 읽은 파일 내용이 바뀌었다. <code>write()</code>를 안 했는데도. SHARED 매핑은 page cache 페이지 그 자체이고, <code>read()</code>도 같은 page cache에서 읽기 때문이다.</li><li>PRIVATE 매핑은 <strong>쓰기 전까지는</strong> SHARED의 변경이 보였다(<code>pv = "SHARED..."</code>). 같은 page cache 페이지를 읽기 전용으로 가리키고 있었기 때문이다. POSIX는 이 부분을 "정의되지 않음"으로 두지만 Linux는 이렇게 동작한다.</li><li>PRIVATE로 쓰는 순간 COW가 일어나 이후 SHARED 쪽 변경(<code>XY</code>)이 안 보인다. 파일엔 <code>XY</code>가 들어갔다.</li></ul>
+<h3 id="6-3-msync-shared-매핑의-dirty-페이지를-언제-디스크에-쓰나">6.3 msync — SHARED 매핑의 dirty 페이지를 언제 디스크에 쓰나<a class="anchor" href="#6-3-msync-shared-매핑의-dirty-페이지를-언제-디스크에-쓰나" aria-label="link">#</a></h3>
+<p>SHARED 매핑에 쓰면 page cache 페이지가 <strong>dirty</strong>(디스크와 내용이 다름)가 된다. 커널의 writeback 스레드가 나중에(기본 약 30초 이내) 디스크에 쓴다. 지금 당장 쓰고 싶으면 <code>msync(MS_SYNC)</code>를 부른다. <code>write()</code> 경로의 <code>fsync()</code>에 해당한다.</p>
+<h3 id="6-4-예제-12-dirty가-쌓였다가-msync로-빠지는-것-보기">6.4 예제 12: Dirty가 쌓였다가 msync로 빠지는 것 보기<a class="anchor" href="#6-4-예제-12-dirty가-쌓였다가-msync로-빠지는-것-보기" aria-label="link">#</a></h3>
+<p>64 MiB 파일을 SHARED로 매핑해 채운 뒤 <code>/proc/meminfo</code>의 <code>Dirty</code>를 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex12: MAP_SHARED에 쓰면 page cache가 Dirty가 되고, msync가 디스크로 내린다
+#include &lt;fcntl.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+
+#define LEN (64UL &lt;&lt; 20)
+
+static long meminfo(const char *key)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    char k[64]; long v = -1, x;
+    if (!f) { perror("fopen"); exit(1); }
+    while (fscanf(f, "%63s %ld kB", k, &amp;x) == 2)
+        if (!strncmp(k, key, strlen(key)) &amp;&amp; k[strlen(key)] == ':') { v = x; break; }
+    fclose(f);
+    return v;
+}
+
+static double now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &amp;t);
+    return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
+
+int main(void)
+{
+    int fd = open("/var/tmp/A5/dirty.bin", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd &lt; 0) { perror("open"); exit(1); }
+    if (ftruncate(fd, LEN) &lt; 0) { perror("ftruncate"); exit(1); }
+    char *p = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+    close(fd);
+
+    printf("before write : Dirty=%6ld kB\n", meminfo("Dirty"));
+    memset(p, 0x5A, LEN);
+    printf("after memset : Dirty=%6ld kB  Writeback=%ld kB\n",
+           meminfo("Dirty"), meminfo("Writeback"));
+    double t0 = now_ms();
+    if (msync(p, LEN, MS_SYNC) &lt; 0) { perror("msync"); exit(1); }
+    printf("after msync  : Dirty=%6ld kB  (msync took %.1f ms)\n",
+           meminfo("Dirty"), now_ms() - t0);
+    munmap(p, LEN);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>sync &amp;&amp; ./ex12</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>before write : Dirty=    36 kB
+after memset : Dirty= 65536 kB  Writeback=0 kB
+after msync  : Dirty=     0 kB  (msync took 38.2 ms)</code></pre></figure>
+<p>출력에서 볼 것: memset 직후 시스템 전체 Dirty가 정확히 64 MiB(65536 kB) 늘었다. <code>msync(MS_SYNC)</code>가 38 ms 동안 디스크에 쓰고 나서 0으로 돌아왔다. 전원이 갑자기 꺼질 수 있는 장비(드론, 차량)에서 <strong>msync 없이 SHARED 매핑에 설정·로그를 쓰면 최대 수십 초치 데이터가 날아간다</strong>. <code>munmap</code>이나 <code>close</code>도 디스크 쓰기를 보장하지 않는다.</p>
+<h3 id="6-5-예제-7-mprotect와-sigsegv">6.5 예제 7: mprotect와 SIGSEGV<a class="anchor" href="#6-5-예제-7-mprotect와-sigsegv" aria-label="link">#</a></h3>
+<p><code>mprotect</code>로 페이지를 읽기 전용으로 바꾸고 쓰기를 시도한다. SIGSEGV 핸들러에서 <code>si_code</code>와 <code>si_addr</code>를 꺼내고 <code>siglongjmp</code>로 탈출한다(데모용; 시그널은 A6에서 자세히).</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex7: mprotect로 페이지 권한을 바꾸고, 위반하면 SIGSEGV가 어떻게 오는지 본다
+#include &lt;setjmp.h&gt;
+#include &lt;signal.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+
+static sigjmp_buf env;
+static volatile sig_atomic_t code;
+static void *volatile addr;
+
+static void on_segv(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig; (void)uc;
+    code = si-&gt;si_code;          // SEGV_MAPERR: 매핑 없음 / SEGV_ACCERR: 권한 위반
+    addr = si-&gt;si_addr;          // fault 난 가상 주소 (ARM의 FAR_EL1 값)
+    siglongjmp(env, 1);
+}
+
+static void try_write(volatile char *p, const char *what)
+{
+    if (sigsetjmp(env, 1) == 0) {
+        p[0] = 'x';
+        printf("%-24s write OK\n", what);
+    } else {
+        printf("%-24s SIGSEGV si_code=%s si_addr=%p\n", what,
+               code == SEGV_ACCERR ? "SEGV_ACCERR" :
+               code == SEGV_MAPERR ? "SEGV_MAPERR" : "other", addr);
+    }
+}
+
+int main(void)
+{
+    struct sigaction sa = {0};
+    sa.sa_sigaction = on_segv;
+    sa.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGSEGV, &amp;sa, NULL) &lt; 0) { perror("sigaction"); exit(1); }
+
+    long ps = sysconf(_SC_PAGESIZE);
+    char *p = mmap(NULL, 3 * ps, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+    printf("region %p .. %p (3 pages)\n", (void *)p, (void *)(p + 3 * ps));
+
+    try_write(p, "page0 RW");
+    if (mprotect(p, ps, PROT_READ) &lt; 0) { perror("mprotect"); exit(1); }
+    try_write(p, "page0 after PROT_READ");
+    if (munmap(p + 2 * ps, ps) &lt; 0) { perror("munmap"); exit(1); }
+    try_write(p + 2 * ps, "page2 after munmap");
+    try_write(p + ps + 100, "page1 still RW");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>region 0xe4f1c3412000 .. 0xe4f1c3415000 (3 pages)
+page0 RW                 write OK
+page0 after PROT_READ    SIGSEGV si_code=SEGV_ACCERR si_addr=0xe4f1c3412000
+page2 after munmap       SIGSEGV si_code=SEGV_MAPERR si_addr=0xe4f1c3414000
+page1 still RW           write OK</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong><code>SEGV_ACCERR</code></strong>: VMA는 있는데 권한 위반. <strong><code>SEGV_MAPERR</code></strong>: 그 주소에 VMA 자체가 없음. 크래시 덤프에서 이 둘을 구분하면 "읽기 전용 영역에 씀(예: 문자열 리터럴 수정)"과 "해제된/쓰레기 포인터"를 구분할 수 있다.</li><li><code>si_addr</code>는 ARM의 <strong>FAR_EL1</strong>(Fault Address Register)에 들어 있던 값이다. 커널이 abort 처리 중 읽어서 시그널에 넣어 준다. bare-metal에서 HardFault 핸들러가 MMFAR/BFAR를 읽던 것과 같다.</li><li><code>mprotect</code>는 페이지 단위다. 3페이지 VMA 중 1페이지만 바꾸면 VMA가 둘로 쪼개진다(maps에서 확인 가능).</li><li>이 기법의 실제 쓰임: 스택 끝 <strong>guard page</strong>(<code>PROT_NONE</code>), 스레드 스택 오버플로 감지, JIT, 그리고 디버깅용 "이 버퍼에 누가 쓰나" 함정 놓기.</li></ul>
+<h3 id="6-6-munmap의-규칙">6.6 munmap의 규칙<a class="anchor" href="#6-6-munmap의-규칙" aria-label="link">#</a></h3>
+<ul><li>범위 일부만 해제해도 된다(VMA가 쪼개진다). 매핑 안 된 범위를 해제해도 에러가 아니다.</li><li>해제 후 그 주소를 쓰면 <code>SEGV_MAPERR</code>(위 page2). 단, 그 사이 다른 <code>mmap</code>이 같은 주소를 받았다면 <strong>조용히 남의 메모리를 망가뜨린다</strong>. use-after-munmap은 use-after-free보다 찾기 어렵다.</li></ul>
+<hr>
+<h2 id="7-프로세스-간-메모리-공유">7. 프로세스 간 메모리 공유<a class="anchor" href="#7-프로세스-간-메모리-공유" aria-label="link">#</a></h2>
+<h3 id="7-1-예제-8-fork-전에-만든-익명-매핑">7.1 예제 8: fork 전에 만든 익명 매핑<a class="anchor" href="#7-1-예제-8-fork-전에-만든-익명-매핑" aria-label="link">#</a></h3>
+<p><code>MAP_SHARED | MAP_ANONYMOUS</code>를 fork 전에 만들면 부모와 자식이 같은 물리 페이지를 본다. 비교용으로 <code>MAP_PRIVATE</code> 매핑도 하나 만든다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex8: fork 전에 만든 익명 매핑 — SHARED는 부모·자식이 같은 물리 페이지, PRIVATE는 COW
+#include &lt;stdatomic.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/wait.h&gt;
+
+static long *map_counter(int flags)
+{
+    long *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                   flags | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+    return p;
+}
+
+int main(void)
+{
+    long *shared = map_counter(MAP_SHARED);
+    long *priv = map_counter(MAP_PRIVATE);
+    *shared = 0;
+    *priv = 0;
+
+    pid_t pid = fork();
+    if (pid &lt; 0) { perror("fork"); exit(1); }
+    if (pid == 0) {                                // child
+        for (int i = 0; i &lt; 1000000; i++)
+            atomic_fetch_add((_Atomic long *)shared, 1);
+        *priv = 777;                               // COW: 자식 전용 사본에 씀
+        printf("child : shared=%ld priv=%ld (vaddr shared=%p)\n",
+               *shared, *priv, (void *)shared);
+        fflush(stdout);                            // _exit은 stdio 버퍼를 안 비운다
+        _exit(0);
+    }
+    for (int i = 0; i &lt; 1000000; i++)              // 부모도 동시에 증가
+        atomic_fetch_add((_Atomic long *)shared, 1);
+    if (waitpid(pid, NULL, 0) &lt; 0) { perror("waitpid"); exit(1); }
+    printf("parent: shared=%ld priv=%ld (vaddr shared=%p)\n",
+           *shared, *priv, (void *)shared);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>child : shared=1861167 priv=777 (vaddr shared=0xf2a63e382000)
+parent: shared=2000000 priv=0 (vaddr shared=0xf2a63e382000)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>부모와 자식이 각각 100만 번 원자적으로 더한 결과가 정확히 200만이다. 같은 물리 페이지에서 <code>atomic_fetch_add</code>(arm64에선 LSE <code>ldadd</code> 계열 명령)가 경쟁했다. 자식의 값(1861167)은 자식이 끝난 시점의 중간값이다.</li><li>PRIVATE 매핑은 자식이 777을 써도 부모는 0이다. fork는 모든 PRIVATE 페이지를 COW로 공유하다가 쓰는 쪽만 복사한다. <strong>fork가 빠른 이유</strong>이기도 하다(A2).</li><li>가상 주소가 두 프로세스에서 같지만, 같은 이유는 "fork가 주소 공간을 복제했기 때문"이다. 관계없는 프로세스끼리는 주소가 다를 수 있으니 공유 메모리 안에 <strong>포인터를 저장하면 안 된다</strong>. 오프셋을 저장한다.</li><li>첫 시도에서는 자식 줄이 안 나왔다. 출력이 파이프일 때 stdout은 full buffering이고 <code>_exit()</code>는 stdio 버퍼를 비우지 않는다. 그래서 <code>fflush(stdout)</code>을 넣었다.</li></ul>
+<h3 id="7-2-예제-9-shm_open-이름으로-만나는-공유-메모리">7.2 예제 9: shm_open — 이름으로 만나는 공유 메모리<a class="anchor" href="#7-2-예제-9-shm_open-이름으로-만나는-공유-메모리" aria-label="link">#</a></h3>
+<p>관계없는 프로세스는 이름이 필요하다. <code>shm_open("/name")</code>은 <code>/dev/shm</code>(tmpfs)에 파일을 만들고 fd를 준다. 나머지는 파일 mmap과 같다. 예를 들어 센서 키트라면 IMU 데몬이 최신 샘플을 게시하고, 제어·로깅 프로세스가 읽는 구조다. 찢어진 읽기(쓰는 도중 읽기)를 막으려고 간단한 <strong>seqlock</strong>(F4)을 썼다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex9: shm_open — 관계없는 두 프로세스가 이름으로 같은 메모리를 공유한다
+#include &lt;fcntl.h&gt;
+#include &lt;stdatomic.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+
+struct imu_shm {                 // 예: IMU 데몬이 최신 샘플을 게시
+    _Atomic unsigned seq;        // 홀수 = 쓰는 중 (seqlock)
+    float ax, ay, az;
+    long  t_ns;
+};
+
+int main(int argc, char **argv)
+{
+    int writer = argc &gt; 1 &amp;&amp; strcmp(argv[1], "w") == 0;
+    int fd = shm_open("/a5_imu", writer ? O_CREAT | O_RDWR : O_RDONLY, 0644);
+    if (fd &lt; 0) { perror("shm_open"); exit(1); }
+    if (writer &amp;&amp; ftruncate(fd, sizeof(struct imu_shm)) &lt; 0) { perror("ftruncate"); exit(1); }
+    struct imu_shm *s = mmap(NULL, sizeof *s, writer ? PROT_READ | PROT_WRITE : PROT_READ,
+                             MAP_SHARED, fd, 0);
+    if (s == MAP_FAILED) { perror("mmap"); exit(1); }
+    close(fd);
+
+    for (int i = 0; i &lt; 5; i++) {
+        if (writer) {
+            atomic_fetch_add(&amp;s-&gt;seq, 1);              // odd: writing
+            s-&gt;ax = 0.01f * i; s-&gt;ay = 0.0f; s-&gt;az = 9.81f; s-&gt;t_ns = i * 1000000L;
+            atomic_fetch_add(&amp;s-&gt;seq, 1);              // even: done
+            usleep(100000);
+        } else {
+            unsigned a, b;
+            float ax, az; long t;
+            do {
+                a = atomic_load(&amp;s-&gt;seq);
+                ax = s-&gt;ax; az = s-&gt;az; t = s-&gt;t_ns;
+                b = atomic_load(&amp;s-&gt;seq);
+            } while ((a &amp; 1) || a != b);              // 쓰는 중이면 다시 읽기
+            printf("reader: seq=%u ax=%.2f az=%.2f t=%ld\n", a, ax, az, t);
+            usleep(100000);
+        }
+    }
+    if (writer) shm_unlink("/a5_imu");                 // 이름 제거 (매핑은 유지)
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>(./ex9 w &amp;) ; sleep 0.05; ls -l /dev/shm/a5_imu; ./ex9 r; sleep 0.2; ls /dev/shm/</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>-rw-r--r-- 1 donh donh 24 Oct  5 22:44 /dev/shm/a5_imu
+reader: seq=2 ax=0.00 az=9.81 t=0
+reader: seq=4 ax=0.01 az=9.81 t=1000000
+reader: seq=6 ax=0.02 az=9.81 t=2000000
+reader: seq=8 ax=0.03 az=9.81 t=3000000
+reader: seq=10 ax=0.04 az=9.81 t=4000000</code></pre></figure>
+<p>출력에서 볼 것: <code>/dev/shm/a5_imu</code>가 24바이트 파일로 보인다(구조체 크기). reader는 항상 짝수 seq만 받았다. 마지막 <code>ls /dev/shm/</code>가 빈 줄인 것은 writer가 <code>shm_unlink</code>로 이름을 지웠기 때문이다. 이 seqlock은 개념 데모라서 데이터 필드를 일반 변수로 읽는다. 엄밀한 C11에선 data race이고, 제대로 하려면 필드도 relaxed atomic으로 읽거나 배리어를 둔다(F5).</p>
+<div class="tw"><table><thead><tr><th>방법</th><th>이름</th><th>수명</th><th>쓰는 곳</th></tr></thead><tbody><tr><td><code>MAP_SHARED</code>+<code>MAP_ANONYMOUS</code> 후 fork</td><td>없음</td><td>마지막 매핑이 사라질 때</td><td>부모-자식 워커</td></tr><tr><td><code>shm_open</code> + <code>mmap</code></td><td><code>/dev/shm/name</code></td><td><code>shm_unlink</code>까지 (재부팅 시 소멸)</td><td>관계없는 데몬 간</td></tr><tr><td>일반 파일 + <code>MAP_SHARED</code></td><td>파일 경로</td><td>파일이 지워질 때까지</td><td>영속 데이터 공유</td></tr><tr><td><code>memfd_create</code> + fd 전달</td><td>없음 (fd만)</td><td>fd·매핑이 없어질 때</td><td>UNIX socket으로 fd 넘기기 (A7)</td></tr><tr><td>SysV <code>shmget</code></td><td>정수 key</td><td><code>IPC_RMID</code>까지</td><td>레거시 코드</td></tr></tbody></table></div>
+<hr>
+<h2 id="8-mlock-mlockall-rt-루프에서-page-fault-없애기">8. mlock / mlockall — RT 루프에서 page fault 없애기<a class="anchor" href="#8-mlock-mlockall-rt-루프에서-page-fault-없애기" aria-label="link">#</a></h2>
+<h3 id="8-1-직관">8.1 직관<a class="anchor" href="#8-1-직관" aria-label="link">#</a></h3>
+<p>RT 스레드의 적은 "예측 못 하는 지연"이다. page fault는 그 대표다. major fault는 ms 단위이고, minor fault도 수 µs에 메모리 할당(최악엔 reclaim)까지 끌어들인다. 해결책은 "루프 시작 전에 필요한 페이지를 전부 붙이고, 커널이 빼앗아 가지 못하게 잠그는 것"이다.</p>
+<ul><li><code>mlock(addr, len)</code>: 그 범위를 RAM에 붙이고(fault를 미리 일으키고) 잠근다. swap·reclaim 대상에서 빠진다.</li><li><code>mlockall(MCL_CURRENT)</code>: 지금 있는 모든 매핑을 잠근다.</li><li><code>mlockall(MCL_FUTURE)</code>: <strong>앞으로 생길 매핑도</strong> 만들어질 때 바로 붙이고 잠근다. mmap이 곧 MAP_POPULATE처럼 동작한다.</li><li>한도: 일반 유저는 <code>RLIMIT_MEMLOCK</code>(<code>ulimit -l</code>)까지만. root(정확히는 <code>CAP_IPC_LOCK</code>)는 제한 없음.</li></ul>
+<h3 id="8-2-예제-10-mlockall-전후-비교-그리고-rlimit-함정">8.2 예제 10: mlockall 전후 비교, 그리고 RLIMIT 함정<a class="anchor" href="#8-2-예제-10-mlockall-전후-비교-그리고-rlimit-함정" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex10: mlockall(MCL_CURRENT|MCL_FUTURE) — RT 루프에서 page fault를 없앤다
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/resource.h&gt;
+
+static long minflt(void)
+{
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &amp;ru);
+    return ru.ru_minflt;
+}
+
+static void vmlck(void)
+{
+    FILE *f = fopen("/proc/self/status", "r");
+    char line[256];
+    if (!f) { perror("fopen"); exit(1); }
+    while (fgets(line, sizeof line, f))
+        if (!strncmp(line, "VmLck", 5) || !strncmp(line, "VmRSS", 5))
+            printf("   %s", line);
+    fclose(f);
+}
+
+static void touch_buf(const char *tag, size_t len)
+{
+    long f0 = minflt();
+    char *b = malloc(len);                  // 큰 버퍼 → mmap
+    if (!b) { printf("%s: malloc(%zu MiB) failed\n", tag, len &gt;&gt; 20); return; }
+    long f1 = minflt();
+    memset(b, 1, len);
+    long f2 = minflt();
+    printf("%s: faults in malloc=%ld, in first touch=%ld (b[last]=%d)\n",
+           tag, f1 - f0, f2 - f1, ((volatile char *)b)[len - 1]);
+    free(b);
+}
+
+int main(void)
+{
+    struct rlimit rl;
+    getrlimit(RLIMIT_MEMLOCK, &amp;rl);
+    printf("RLIMIT_MEMLOCK soft=%llu KiB\n", (unsigned long long)rl.rlim_cur &gt;&gt; 10);
+
+    touch_buf("before mlockall", 16 &lt;&lt; 20);
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) &lt; 0) { perror("mlockall"); exit(1); }
+    printf("mlockall OK\n");
+    vmlck();
+    touch_buf("after  mlockall", 16 &lt;&lt; 20);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>echo "== as user" &amp;&amp; ./ex10; echo "== as root (CAP_IPC_LOCK)" &amp;&amp; sudo ./ex10</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== as user
+RLIMIT_MEMLOCK soft=8192 KiB
+before mlockall: faults in malloc=1, in first touch=519 (b[last]=1)
+mlockall OK
+   VmLck:	    4260 kB
+   VmRSS:	    4188 kB
+after  mlockall: malloc(16 MiB) failed
+== as root (CAP_IPC_LOCK)
+RLIMIT_MEMLOCK soft=8192 KiB
+before mlockall: faults in malloc=1, in first touch=519 (b[last]=1)
+mlockall OK
+   VmLck:	    3244 kB
+   VmRSS:	    3172 kB
+after  mlockall: faults in malloc=4096, in first touch=0 (b[last]=1)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>root에서 mlockall 이후에는 fault가 <strong>malloc 안에서 4096번</strong> 일어나고 첫 touch에선 0번이다. 지연을 "할당 시점"으로 옮겼다. RT 루프 안에서 접근할 때는 fault가 없다.</li><li>일반 유저로는 <code>mlockall</code> 자체는 성공했지만(현재 사용량 4 MB &lt; 8 MB), 그 뒤 16 MiB <code>malloc</code>이 <strong>NULL</strong>을 돌려줬다. MCL_FUTURE 상태에선 새 매핑이 한도를 넘으면 mmap이 <code>EAGAIN</code>으로 실패한다. strace로 확인했다:</li></ul>
+<figure class="code"><span class="lang">text</span><pre><code>mlockall(MCL_CURRENT|MCL_FUTURE)        = 0
+mmap(NULL, 16912384, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = -1 EAGAIN (Resource temporarily unavailable)</code></pre></figure>
+<ul><li>mlockall 전 16 MiB(4096 페이지) 첫 touch의 fault가 4096이 아니라 519다. 같은 strace에서 <code>madvise(..., MADV_HUGEPAGE)</code>가 보였다. 이 glibc는 큰 mmap 청크에 THP를 요청하고, 2 MiB 정렬된 안쪽 7개는 huge page로 7번, 양 끝 정렬 안 된 부분 512개는 4K로 fault가 났다(7 + 512 = 519).</li><li>그래서 실무 RT 앱은 systemd 유닛에 <code>LimitMEMLOCK=infinity</code>를 주거나 <code>CAP_IPC_LOCK</code>을 준다. 이걸 빼먹고 "장비에서만 malloc이 NULL"을 겪는 경우가 많다.</li></ul>
+<h3 id="8-3-rt-앱의-메모리-초기화-관례-n2에서-다시">8.3 RT 앱의 메모리 초기화 관례 (N2에서 다시)<a class="anchor" href="#8-3-rt-앱의-메모리-초기화-관례-n2에서-다시" aria-label="link">#</a></h3>
+<ol><li><code>mlockall(MCL_CURRENT | MCL_FUTURE)</code>.</li><li>스택 prefault: 예상 최대 스택 크기만큼 지역 배열을 잡고 memset하는 함수를 한 번 호출한다. 스택 페이지는 처음 닿을 때 붙기 때문이다.</li><li>모든 버퍼·풀을 미리 할당하고 touch. glibc가 free한 메모리를 OS에 돌려주지 않게 <code>mallopt(M_TRIM_THRESHOLD, -1)</code>과 <code>mallopt(M_MMAP_MAX, 0)</code>을 쓰기도 한다(rt-wiki의 전통적인 권고).</li><li>그 다음에 <code>SCHED_FIFO</code>로 올리고 루프 시작. 루프 안에선 malloc·파일 열기·printf 금지.</li></ol>
+<hr>
+<h2 id="9-메모리-사용량-제대로-읽기-rss-pss-proc-meminfo">9. 메모리 사용량 제대로 읽기 — RSS, PSS, /proc/meminfo<a class="anchor" href="#9-메모리-사용량-제대로-읽기-rss-pss-proc-meminfo" aria-label="link">#</a></h2>
+<h3 id="9-1-rss의-함정">9.1 RSS의 함정<a class="anchor" href="#9-1-rss의-함정" aria-label="link">#</a></h3>
+<p><strong>RSS(Resident Set Size)</strong> 는 "이 프로세스의 page table에 붙어 있는 물리 페이지 합"이다. libc처럼 여러 프로세스가 공유하는 페이지를 <strong>각자 전부 셈</strong>하므로, 모든 프로세스의 RSS를 더하면 실제 RAM보다 커진다. <strong>PSS(Proportional Set Size)</strong> 는 공유 페이지를 공유하는 프로세스 수로 나눠서 센다. 시스템 전체 합이 맞는 값이다. <strong>USS</strong>는 나 혼자만 쓰는 페이지(Private_Clean + Private_Dirty)다.</p>
+<h3 id="9-2-예제-11-32-mib를-4개-프로세스가-공유하면">9.2 예제 11: 32 MiB를 4개 프로세스가 공유하면<a class="anchor" href="#9-2-예제-11-32-mib를-4개-프로세스가-공유하면" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex11: RSS vs PSS — 4개 프로세스가 32 MiB를 공유하면 각자 PSS는 1/4
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/wait.h&gt;
+
+#define LEN (32UL &lt;&lt; 20)
+
+static void smaps_entry(const char *who, void *addr)
+{
+    char key[32], line[256];
+    snprintf(key, sizeof key, "%lx-", (unsigned long)addr);
+    FILE *f = fopen("/proc/self/smaps", "r");
+    if (!f) { perror("fopen"); exit(1); }
+    int in = 0;
+    printf("[%s pid=%d]", who, getpid());
+    while (fgets(line, sizeof line, f)) {
+        if (!strncmp(line, key, strlen(key))) { in = 1; continue; }
+        if (in &amp;&amp; (!strncmp(line, "Rss", 3) || !strncmp(line, "Pss:", 4) ||
+                   !strncmp(line, "Shared_Dirty", 12))) {
+            line[strcspn(line, "\n")] = 0;
+            printf("  %s", line);
+        }
+        if (in &amp;&amp; !strncmp(line, "VmFlags", 7)) break;
+    }
+    printf("\n");
+    fclose(f);
+}
+
+int main(void)
+{
+    char *p = mmap(NULL, LEN, PROT_READ | PROT_WRITE,
+                   MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+    memset(p, 7, LEN);                       // 부모가 전부 채움
+    smaps_entry("parent alone", p);
+    fflush(stdout);
+
+    for (int i = 0; i &lt; 3; i++) {
+        if (fork() == 0) {
+            volatile long sum = 0;
+            for (size_t o = 0; o &lt; LEN; o += 4096) sum += p[o];  // 매핑 연결
+            usleep(700000);                  // 4개가 동시에 살아 있는 동안 측정
+            if (i == 0) smaps_entry("child", p);
+            fflush(stdout);
+            usleep(500000);
+            fflush(stdout);
+            _exit(0);
+        }
+    }
+    usleep(500000);
+    smaps_entry("parent + 3 kids", p);
+    fflush(stdout);
+    while (wait(NULL) &gt; 0) ;
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[parent alone pid=187021]  Rss:               32768 kB  Pss:               32768 kB  Shared_Dirty:          0 kB
+[parent + 3 kids pid=187021]  Rss:               32768 kB  Pss:                8192 kB  Shared_Dirty:      32768 kB
+[child pid=187022]  Rss:               32768 kB  Pss:                8192 kB  Shared_Dirty:      32768 kB</code></pre></figure>
+<p>출력에서 볼 것: 4개 프로세스 모두 RSS는 32 MiB로 보이지만 PSS는 정확히 1/4인 8 MiB다. 혼자일 땐 같은 페이지가 <code>Private_Dirty</code>로 분류되다가(그래서 <code>Shared_Dirty</code>가 0), 공유가 시작되자 <code>Shared_Dirty</code>로 바뀌었다. 장비의 "메모리 예산표"를 만들 때는 PSS를 쓴다. 첫 시도에서는 측정 시점에 형제 프로세스 일부가 이미 끝나 자식의 PSS가 8901 kB로 나왔다. 동시에 살아 있게 sleep 순서를 조정했다.</p>
+<h3 id="9-3-smaps_rollup과-pmap">9.3 smaps_rollup과 pmap<a class="anchor" href="#9-3-smaps_rollup과-pmap" aria-label="link">#</a></h3>
+<p>프로세스 전체 합계는 <code>/proc/&lt;pid&gt;/smaps_rollup</code> 한 파일로 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /proc/self/smaps_rollup | head -12</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>b2d418b10000-ffffc2d02000 ---p 00000000 00:00 0                          [rollup]
+Rss:                6132 kB
+Pss:                2277 kB
+Pss_Dirty:          1284 kB
+Pss_Anon:           1284 kB
+Pss_File:            993 kB
+Pss_Shmem:             0 kB
+Shared_Clean:       4720 kB
+Shared_Dirty:          0 kB
+Private_Clean:       128 kB
+Private_Dirty:      1284 kB
+Referenced:         6132 kB</code></pre></figure>
+<p>출력에서 볼 것: <code>cat</code> 하나의 RSS는 6.1 MB지만 PSS는 2.3 MB다. 차이는 대부분 <code>Shared_Clean</code>(libc 코드 같은 공유 파일 페이지)이다. <code>pmap -x &lt;pid&gt;</code>는 VMA별 RSS/Dirty를 표로 보여 준다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>sudo pmap -x $(pgrep -o systemd-journal) | tail -4</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0000f9fbd68c7000       4       4       4 rw---   [ anon ]
+0000ffffd0abc000     132      20      20 rw---   [ stack ]
+---------------- ------- ------- ------- 
+total kB           35196   12296    3624</code></pre></figure>
+<p>출력에서 볼 것: 열은 가상 크기(Kbytes), RSS, Dirty다. 스택은 132 KiB 가상 공간 중 20 KiB만 실제로 붙어 있다 — demand paging이 스택에도 그대로 적용된다.</p>
+<h3 id="9-4-proc-meminfo-주요-필드">9.4 /proc/meminfo 주요 필드<a class="anchor" href="#9-4-proc-meminfo-주요-필드" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>grep -E "^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Dirty|Writeback|AnonPages|Mapped|Shmem|Mlocked|Committed_AS|CommitLimit|AnonHugePages|PageTables):" /proc/meminfo</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>MemTotal:        3988828 kB
+MemFree:         3176140 kB
+MemAvailable:    3429056 kB
+Buffers:            8792 kB
+Cached:           379340 kB
+Mlocked:           16752 kB
+Dirty:               464 kB
+Writeback:             0 kB
+AnonPages:        216152 kB
+Mapped:           108588 kB
+Shmem:             11040 kB
+PageTables:         5232 kB
+CommitLimit:     1994412 kB
+Committed_AS:     962364 kB
+AnonHugePages:     90112 kB</code></pre></figure>
+<div class="tw"><table><thead><tr><th>필드</th><th>뜻</th><th>볼 때 주의</th></tr></thead><tbody><tr><td>MemFree</td><td>아무도 안 쓰는 페이지</td><td>작아도 정상. Linux는 남는 RAM을 캐시로 쓴다</td></tr><tr><td><strong>MemAvailable</strong></td><td>스왑 없이 새 앱에 줄 수 있는 추정치 (Free + 회수 가능한 캐시)</td><td><strong>"메모리 남았나?"는 이 값으로 판단</strong></td></tr><tr><td>Cached</td><td>page cache (파일 내용) + Shmem</td><td>대부분 회수 가능. 단 Shmem(tmpfs, <code>/dev/shm</code>)은 회수 불가</td></tr><tr><td>Dirty / Writeback</td><td>디스크에 아직 안 쓴 / 지금 쓰는 중인 페이지</td><td>갑작스런 전원 차단 시 잃을 수 있는 양</td></tr><tr><td>AnonPages</td><td>익명 페이지 (heap, stack, 익명 mmap)</td><td>누수 감시 대상</td></tr><tr><td>Mapped</td><td>프로세스가 mmap한 파일 페이지</td><td>실행 파일·라이브러리 포함</td></tr><tr><td>Mlocked</td><td>mlock된 페이지</td><td>회수 불가</td></tr><tr><td>Committed_AS</td><td>지금까지 약속한 총량</td><td>RAM을 크게 넘으면 OOM 위험 신호</td></tr><tr><td>AnonHugePages</td><td>THP로 붙은 익명 메모리</td><td>10장</td></tr></tbody></table></div>
+<p><code>free</code>의 <code>available</code> 열이 MemAvailable이다. 0장 <code>free -m</code> 출력에서 <code>free</code>는 1454 MB인데 <code>available</code>은 3362 MB였던 이유가 Cached다.</p>
+<hr>
+<h2 id="10-huge-page-간단히">10. Huge page 간단히<a class="anchor" href="#10-huge-page-간단히" aria-label="link">#</a></h2>
+<p>TLB 엔트리 수는 정해져 있다. 4 KiB 페이지로 1 GiB를 덮으려면 26만 개 엔트리가 필요하지만 2 MiB 페이지면 512개다. 큰 버퍼를 다루는 프로그램(카메라 프레임 풀, NPU 텐서 버퍼)은 huge page로 TLB miss와 fault 수를 줄인다. 두 방식이 있다.</p>
+<div class="tw"><table><thead><tr><th></th><th>THP (Transparent Huge Pages)</th><th>hugetlbfs (<code>MAP_HUGETLB</code>)</th></tr></thead><tbody><tr><td>준비</td><td>자동. <code>/sys/kernel/mm/transparent_hugepage/enabled</code></td><td>미리 풀 예약: <code>vm.nr_hugepages</code></td></tr><tr><td>요청</td><td><code>madvise(MADV_HUGEPAGE)</code> (모드가 madvise일 때)</td><td><code>mmap(..., MAP_HUGETLB)</code> 또는 hugetlbfs 파일</td></tr><tr><td>보장</td><td>없음. 연속 물리 메모리가 없으면 4K로 대체</td><td>예약분 안에서 보장. 없으면 mmap 실패</td></tr><tr><td>단점</td><td>compaction 지연, 메모리 낭비 가능</td><td>미리 잡아 둔 만큼 다른 용도로 못 씀</td></tr></tbody></table></div>
+<p>이 VM은 <code>[madvise]</code> 모드다(0장 확인). 3장 예제 2의 <code>thp</code> 행이 THP 효과다.</p>
+<h3 id="예제-15-map_hugetlb">예제 15: MAP_HUGETLB<a class="anchor" href="#예제-15-map_hugetlb" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex15: MAP_HUGETLB — 미리 예약한 2 MiB hugetlb 풀에서 페이지를 받는다
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/resource.h&gt;
+
+int main(void)
+{
+    size_t len = 4UL &lt;&lt; 20;                              // 2 MiB x 2
+    char *p = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap(MAP_HUGETLB)"); return 1; }
+    struct rusage a, b;
+    getrusage(RUSAGE_SELF, &amp;a);
+    memset(p, 1, len);
+    getrusage(RUSAGE_SELF, &amp;b);
+    printf("hugetlb %p: 4 MiB touched with %ld faults (2 MiB align: %s)\n",
+           (void *)p, b.ru_minflt - a.ru_minflt,
+           ((unsigned long)p &amp; ((2UL &lt;&lt; 20) - 1)) ? "no" : "yes");
+    munmap(p, len);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>./ex15; sudo sysctl -w vm.nr_hugepages=4 &amp;&amp; ./ex15; grep -E "^HugePages_(Total|Free)" /proc/meminfo; sudo sysctl -w vm.nr_hugepages=0</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>mmap(MAP_HUGETLB): Cannot allocate memory
+vm.nr_hugepages = 4
+hugetlb 0xfa95e6000000: 4 MiB touched with 2 faults (2 MiB align: yes)
+HugePages_Total:       4
+HugePages_Free:        4
+vm.nr_hugepages = 0</code></pre></figure>
+<p>출력에서 볼 것: 풀이 0이면 <code>ENOMEM</code>으로 바로 실패한다(THP처럼 조용히 4K로 대체하지 않는다). 풀을 4개 예약하자 4 MiB를 fault 2번으로 붙였고 주소가 2 MiB 정렬이다. 실행이 끝난 뒤라 Free가 다시 4다. 실험 후 풀은 0으로 되돌렸다.</p>
+<hr>
+<h2 id="11-read-vs-mmap-언제-무엇이-빠른가">11. read() vs mmap — 언제 무엇이 빠른가<a class="anchor" href="#11-read-vs-mmap-언제-무엇이-빠른가" aria-label="link">#</a></h2>
+<h3 id="11-1-직관">11.1 직관<a class="anchor" href="#11-1-직관" aria-label="link">#</a></h3>
+<p><code>read()</code>는 page cache → 유저 버퍼로 <strong>CPU가 복사</strong>한다(커널의 <code>copy_to_user</code>). <code>mmap</code>은 page cache 페이지를 내 주소 공간에 <strong>직접 매핑</strong>하므로 복사가 없다. 대신 page fault와 page table 관리 비용, 그리고 <code>munmap</code> 때 TLB flush 비용이 있다. "mmap이 무조건 빠르다"는 틀렸고, 측정해야 한다.</p>
+<h3 id="11-2-예제-13-256-mib-파일을-읽어-합계-내기">11.2 예제 13: 256 MiB 파일을 읽어 합계 내기<a class="anchor" href="#11-2-예제-13-256-mib-파일을-읽어-합계-내기" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex13: page cache에 있는 파일을 read()로 복사해 읽기 vs mmap으로 직접 읽기
+#include &lt;fcntl.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/resource.h&gt;
+#include &lt;sys/stat.h&gt;
+
+static double now_s(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &amp;t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static uint64_t sum(const uint64_t *w, size_t n)
+{
+    uint64_t s = 0;
+    for (size_t i = 0; i &lt; n; i++) s += w[i];
+    return s;
+}
+
+static long minflt(void)
+{
+    struct rusage ru; getrusage(RUSAGE_SELF, &amp;ru); return ru.ru_minflt;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc &lt; 3) { fprintf(stderr, "usage: %s file read&lt;bufKiB&gt;/mmap/populate\n", argv[0]); exit(1); }
+    int fd = open(argv[1], O_RDONLY);
+    struct stat st;
+    if (fd &lt; 0 || fstat(fd, &amp;st) &lt; 0) { perror("open"); exit(1); }
+    uint64_t s = 0;
+    long f0 = minflt();
+    double t0 = now_s();
+    if (argv[2][0] == 'r') {                         // "read64" -&gt; 64 KiB 버퍼
+        size_t bs = (size_t)atol(argv[2] + 4) &lt;&lt; 10;
+        uint64_t *buf = aligned_alloc(4096, bs);
+        ssize_t n;
+        if (!buf) { perror("alloc"); exit(1); }
+        while ((n = read(fd, buf, bs)) &gt; 0) s += sum(buf, n / 8);
+        if (n &lt; 0) { perror("read"); exit(1); }
+    } else {
+        int fl = MAP_PRIVATE | (argv[2][0] == 'p' ? MAP_POPULATE : 0);
+        const uint64_t *m = mmap(NULL, st.st_size, PROT_READ, fl, fd, 0);
+        if (m == MAP_FAILED) { perror("mmap"); exit(1); }
+        s = sum(m, st.st_size / 8);
+        munmap((void *)m, st.st_size);
+    }
+    double dt = now_s() - t0;
+    printf("%-9s %7.2f GB/s  %6.1f ms  minflt=%ld  (sum=%llx)\n", argv[2],
+           st.st_size / dt / 1e9, dt * 1e3, minflt() - f0, (unsigned long long)s);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>dd if=/dev/urandom of=/var/tmp/A5/big.bin bs=1M count=256 status=none
+cat /var/tmp/A5/big.bin &gt; /dev/null    # page cache에 올려 둠
+for r in 1 2 3; do for m in read4 read64 read1024 mmap populate; do ./ex13 /var/tmp/A5/big.bin $m; done; echo; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>read4        8.21 GB/s    32.7 ms  minflt=7  (sum=7e4a295426aeddeb)
+read64      13.68 GB/s    19.6 ms  minflt=22  (sum=7e4a295426aeddeb)
+read1024    13.61 GB/s    19.7 ms  minflt=261  (sum=7e4a295426aeddeb)
+mmap        19.40 GB/s    13.8 ms  minflt=273  (sum=7e4a295426aeddeb)
+populate    16.82 GB/s    16.0 ms  minflt=273  (sum=7e4a295426aeddeb)
+
+read4        8.18 GB/s    32.8 ms  minflt=7  (sum=7e4a295426aeddeb)
+read64      13.91 GB/s    19.3 ms  minflt=22  (sum=7e4a295426aeddeb)
+read1024    13.71 GB/s    19.6 ms  minflt=261  (sum=7e4a295426aeddeb)
+mmap        19.68 GB/s    13.6 ms  minflt=273  (sum=7e4a295426aeddeb)
+populate    17.22 GB/s    15.6 ms  minflt=273  (sum=7e4a295426aeddeb)
+
+read4        8.20 GB/s    32.7 ms  minflt=7  (sum=7e4a295426aeddeb)
+read64      13.88 GB/s    19.3 ms  minflt=22  (sum=7e4a295426aeddeb)
+read1024     4.56 GB/s    58.9 ms  minflt=261  (sum=7e4a295426aeddeb)
+mmap        18.80 GB/s    14.3 ms  minflt=273  (sum=7e4a295426aeddeb)
+populate    17.10 GB/s    15.6 ms  minflt=273  (sum=7e4a295426aeddeb)</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 640 320" xmlns="http://www.w3.org/2000/svg">
+<text x="140" y="42" font-size="13" text-anchor="end">read 4K buf</text>
+<rect x="150" y="20" width="164.0" height="34" fill="#888" fill-opacity="0.7" stroke="#888"/><text x="322.0" y="42" font-size="13">8.20 GB/s</text><text x="140" y="92" font-size="13" text-anchor="end">read 64K buf</text>
+<rect x="150" y="70" width="277.6" height="34" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/><text x="435.6" y="92" font-size="13">13.88 GB/s</text><text x="140" y="142" font-size="13" text-anchor="end">read 1M buf</text>
+<rect x="150" y="120" width="272.2" height="34" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/><text x="430.2" y="142" font-size="13">13.61 GB/s</text><text x="140" y="192" font-size="13" text-anchor="end">mmap</text>
+<rect x="150" y="170" width="388.0" height="34" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/><text x="546.0" y="192" font-size="13">19.40 GB/s</text><text x="140" y="242" font-size="13" text-anchor="end">mmap+POPULATE</text>
+<rect x="150" y="220" width="342.0" height="34" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/><text x="500.0" y="242" font-size="13">17.10 GB/s</text>
+<line x1="150" y1="15" x2="150" y2="270" stroke="currentColor"/>
+<line x1="150" y1="270" x2="550" y2="270" stroke="currentColor"/>
+<line x1="150" y1="270" x2="150" y2="274" stroke="currentColor"/><text x="150" y="288" font-size="12" text-anchor="middle">0</text>
+<line x1="250" y1="270" x2="250" y2="274" stroke="currentColor"/><text x="250" y="288" font-size="12" text-anchor="middle">5</text>
+<line x1="350" y1="270" x2="350" y2="274" stroke="currentColor"/><text x="350" y="288" font-size="12" text-anchor="middle">10</text>
+<line x1="450" y1="270" x2="450" y2="274" stroke="currentColor"/><text x="450" y="288" font-size="12" text-anchor="middle">15</text>
+<line x1="550" y1="270" x2="550" y2="274" stroke="currentColor"/><text x="550" y="288" font-size="12" text-anchor="middle">20</text><text x="350" y="308" font-size="13" text-anchor="middle">처리량 GB/s (256 MiB, page cache warm, 3회 중앙값)</text>
+</svg></figure>
+<p>그림 6 — 예제 13의 3회 중앙값. warm cache에서 순차로 한 번 훑는 경우 mmap이 가장 빠르다. read는 버퍼가 작으면 syscall 횟수(4K 버퍼면 65536번)가 비용을 지배한다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>read4</code>(4 KiB 버퍼)는 syscall이 65536번이라 가장 느리다. 64 KiB부터는 syscall 비용이 묻혀 13.9 GB/s에서 평평해진다. 남은 차이는 <strong>복사 비용</strong>이다.</li><li><code>mmap</code>은 65536 페이지를 fault <strong>273번</strong>으로 매핑했다. fault-around와 page cache의 큰 folio 덕분이다. 복사가 없어 약 40% 빠르다.</li><li><code>populate</code>가 오히려 조금 느린 건, 미리 전부 매핑하는 동안 캐시가 식고 그 뒤 다시 데이터를 읽기 때문으로 보인다(측정 결과만 확실하다).</li><li><code>read1024</code>의 세 번째 4.56 GB/s는 이상치다(1 MiB 버퍼를 새로 받는 fault 261번 + 그 순간 VM 호스트 간섭으로 추정). 그래서 3회 이상 돌려 중앙값을 쓴다.</li></ul>
+<p>언제 무엇을:</p>
+<div class="tw"><table><thead><tr><th>상황</th><th>추천</th><th>이유</th></tr></thead><tbody><tr><td>큰 파일을 여러 번, 무작위로 접근 (DB, 지도 타일, 모델 가중치)</td><td>mmap</td><td>복사 없음, 필요한 페이지만 로드, 여러 프로세스가 page cache 공유</td></tr><tr><td>스트리밍으로 한 번 읽고 버림 (로그, 녹화 파일)</td><td>read (64 KiB 이상 버퍼)</td><td>단순, 에러가 리턴값으로 옴</td></tr><tr><td>파이프·소켓·문자 장치</td><td>read</td><td>mmap 불가 (드라이버가 <code>.mmap</code>을 안 주면 <code>ENODEV</code>)</td></tr><tr><td>장치 DMA 버퍼 (카메라, FPGA)</td><td>mmap</td><td>zero-copy (다음 장)</td></tr><tr><td>파일이 잘릴 수 있음</td><td>read</td><td>mmap 영역 중 파일 끝 넘어 페이지 접근 시 <strong>SIGBUS</strong></td></tr></tbody></table></div>
+<p>mmap의 I/O 에러는 리턴값이 아니라 <strong>SIGBUS</strong>로 온다. SD 카드가 빠진 상태에서 mmap한 파일을 읽으면 프로세스가 시그널로 죽는다. 이게 임베디드에서 mmap을 조심하는 이유 중 하나다.</p>
+<hr>
+<h2 id="12-장치-메모리-mmap과-zero-copy-카메라-dev-mem-uio">12. 장치 메모리 mmap과 zero-copy — 카메라, /dev/mem, UIO<a class="anchor" href="#12-장치-메모리-mmap과-zero-copy-카메라-dev-mem-uio" aria-label="link">#</a></h2>
+<h3 id="12-1-직관-dma-버퍼에-창문-내기">12.1 직관: DMA 버퍼에 창문 내기<a class="anchor" href="#12-1-직관-dma-버퍼에-창문-내기" aria-label="link">#</a></h3>
+<p>Don이 SSD 펌웨어에서 호스트 메모리로 DMA할 때, 데이터는 컨트롤러가 직접 쓰고 CPU는 손대지 않았다. Linux 카메라도 같다. ISP의 DMA가 프레임을 RAM의 버퍼에 쓴다. 문제는 그 버퍼가 <strong>커널이 할당한 물리 메모리</strong>라는 점이다. 유저 앱이 프레임을 받는 방법은 두 가지다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="24" font-size="14">read() 방식: 프레임마다 CPU가 복사</text>
+<rect x="20" y="40" width="140" height="44" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="90" y="67" font-size="13" text-anchor="middle">카메라 ISP DMA</text>
+<rect x="230" y="40" width="150" height="44" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="305" y="67" font-size="13" text-anchor="middle">커널 DMA 버퍼</text>
+<rect x="500" y="40" width="150" height="44" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="575" y="67" font-size="13" text-anchor="middle">유저 버퍼</text>
+<line x1="160" y1="62" x2="228" y2="62" stroke="currentColor" marker-end="url(#ah4)"/><text x="194" y="54" font-size="12" text-anchor="middle">DMA</text>
+<line x1="380" y1="62" x2="498" y2="62" stroke="#d0564a" stroke-width="2" marker-end="url(#ah4)"/><text x="440" y="100" font-size="12" text-anchor="middle">copy_to_user</text><text x="440" y="116" font-size="12" text-anchor="middle">(1080p 약 3 MB/프레임)</text>
+<line x1="20" y1="140" x2="660" y2="140" stroke="#888" stroke-dasharray="4 4"/><text x="20" y="166" font-size="14">mmap 방식 (V4L2 MMAP): 같은 물리 페이지를 유저도 매핑</text>
+<rect x="20" y="185" width="140" height="44" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="90" y="212" font-size="13" text-anchor="middle">카메라 ISP DMA</text>
+<rect x="230" y="185" width="170" height="44" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="315" y="212" font-size="13" text-anchor="middle">DMA 버퍼 (물리 RAM)</text>
+<rect x="500" y="185" width="150" height="44" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="575" y="212" font-size="13" text-anchor="middle">유저 VA 매핑</text>
+<line x1="160" y1="207" x2="228" y2="207" stroke="currentColor" marker-end="url(#ah4)"/><text x="194" y="199" font-size="12" text-anchor="middle">DMA</text>
+<line x1="498" y1="207" x2="402" y2="207" stroke="#3f9a6b" stroke-width="2" stroke-dasharray="6 3" marker-end="url(#ah4)"/><text x="450" y="248" font-size="12" text-anchor="middle">page table만 연결</text><text x="450" y="264" font-size="12" text-anchor="middle">(복사 0번)</text>
+<rect x="20" y="282" width="640" height="36" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="340" y="305" font-size="13" text-anchor="middle">유저와 드라이버는 ioctl(VIDIOC_QBUF / VIDIOC_DQBUF)로 "버퍼 번호"만 주고받는다</text>
+</svg></figure>
+<p>그림 7 — 위: read() 방식은 프레임마다 CPU가 복사한다. 아래: mmap 방식은 드라이버가 DMA 버퍼의 물리 페이지를 유저 page table에 연결해서 복사가 없다.</p>
+<h3 id="12-2-v4l2-mmap-흐름-코드-스케치">12.2 V4L2 MMAP 흐름 (코드 스케치)<a class="anchor" href="#12-2-v4l2-mmap-흐름-코드-스케치" aria-label="link">#</a></h3>
+<p>이 VM에는 카메라(<code>/dev/video*</code>)가 없어서 아래 코드는 <strong>실행하지 않은 스케치</strong>다. 흐름만 본다(자세한 건 I5, Q2).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 실행하지 않은 스케치: V4L2 MMAP 스트리밍의 뼈대 */
+struct v4l2_requestbuffers req = { .count = 4,
+    .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP };
+ioctl(fd, VIDIOC_REQBUFS, &amp;req);              /* 드라이버가 DMA 버퍼 4개 할당 */
+
+for (unsigned i = 0; i &lt; req.count; i++) {
+    struct v4l2_buffer b = { .type = req.type, .memory = V4L2_MEMORY_MMAP, .index = i };
+    ioctl(fd, VIDIOC_QUERYBUF, &amp;b);           /* 버퍼 i의 mmap offset·길이 */
+    buf[i] = mmap(NULL, b.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, b.m.offset);
+    ioctl(fd, VIDIOC_QBUF, &amp;b);               /* "여기에 채워 줘" */
+}
+ioctl(fd, VIDIOC_STREAMON, &amp;req.type);
+for (;;) {
+    poll(&amp;pfd, 1, -1);                        /* A4: 프레임 준비되면 깨어남 */
+    struct v4l2_buffer b = { .type = req.type, .memory = V4L2_MEMORY_MMAP };
+    ioctl(fd, VIDIOC_DQBUF, &amp;b);              /* 다 찬 버퍼 번호 b.index */
+    process(buf[b.index], b.bytesused);       /* 복사 없이 바로 처리 */
+    ioctl(fd, VIDIOC_QBUF, &amp;b);               /* 다시 드라이버에 돌려줌 */
+}</code></pre></figure>
+<p>여기서 <code>b.m.offset</code>은 파일 offset이 아니라 <strong>"몇 번 버퍼인지"를 알려 주는 쿠키</strong>다. 드라이버(videobuf2)의 <code>.mmap</code>이 이 값을 보고 어느 버퍼를 매핑할지 고른다. 같은 프레임을 GPU·NPU·인코더로 넘길 때는 <code>VIDIOC_EXPBUF</code>로 <strong>dma-buf fd</strong>를 받아 넘긴다(H9). 이것이 Jetson·i.MX8 카메라 파이프라인의 zero-copy 표준 경로다.</p>
+<h3 id="12-3-예제-14-dev-mem으로-mmio-레지스터-읽기">12.3 예제 14: /dev/mem으로 MMIO 레지스터 읽기<a class="anchor" href="#12-3-예제-14-dev-mem으로-mmio-레지스터-읽기" aria-label="link">#</a></h3>
+<p><code>/dev/mem</code>은 "파일 offset = 물리 주소"인 특수 장치다. <code>mmap</code>하면 그 물리 주소가 내 VA에 매핑된다. bring-up 때 드라이버 없이 레지스터를 보는 도구(<code>devmem2</code>, <code>busybox devmem</code>)가 이걸 쓴다. VM의 <code>/proc/iomem</code>에서 ARM PL061 GPIO 컨트롤러(<code>ARMH0061</code>)를 찾아 <strong>읽기 전용</strong>으로 ID 레지스터만 읽었다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>sudo cat /proc/iomem | head -4
+grep -E "STRICT_DEVMEM" /boot/config-$(uname -r)</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>10000000-1000ffff : GICD
+10010000-1008ffff : GICR
+20060000-20060fff : ARMH0061:00
+  20060000-20060fff : ARMH0061:00 ARMH0061:00
+CONFIG_STRICT_DEVMEM=y
+# CONFIG_IO_STRICT_DEVMEM is not set</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>// ex14: /dev/mem mmap으로 MMIO 레지스터 읽기 (PL061 GPIO의 ID 레지스터, 읽기 전용)
+#include &lt;fcntl.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+
+static void *map_phys(int fd, off_t phys, size_t len)
+{
+    void *v = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, phys);  // offset = 물리 주소
+    if (v == MAP_FAILED) {
+        printf("mmap phys 0x%llx -&gt; ", (unsigned long long)phys);
+        fflush(stdout);
+        perror("");
+        return NULL;
+    }
+    return v;
+}
+
+int main(void)
+{
+    int fd = open("/dev/mem", O_RDONLY | O_SYNC);   // O_SYNC: uncached 매핑 요청
+    if (fd &lt; 0) { perror("open /dev/mem"); exit(1); }
+
+    // /proc/iomem: 20060000-20060fff : ARMH0061:00  (ARM PL061 GPIO)
+    volatile const uint32_t *r = map_phys(fd, 0x20060000, 4096);
+    if (r) {
+        printf("PL061 @ phys 0x20060000 -&gt; user VA %p\n", (const void *)r);
+        printf("PeriphID0..3 :");
+        for (int off = 0xFE0; off &lt;= 0xFEC; off += 4)
+            printf(" 0x%02x", r[off / 4] &amp; 0xFF);
+        printf("\nPCellID0..3  :");
+        for (int off = 0xFF0; off &lt;= 0xFFC; off += 4)
+            printf(" 0x%02x", r[off / 4] &amp; 0xFF);
+        printf("\n");
+        munmap((void *)r, 4096);
+    }
+    // System RAM 영역은 CONFIG_STRICT_DEVMEM이 막는다
+    map_phys(fd, 0x80000000, 4096);
+    close(fd);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>./ex14; sudo ./ex14</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>open /dev/mem: Permission denied
+PL061 @ phys 0x20060000 -&gt; user VA 0xfc6edda3e000
+PeriphID0..3 : 0x61 0x10 0x04 0x00
+PCellID0..3  : 0x0d 0xf0 0x05 0xb1
+mmap phys 0x80000000 -&gt; Operation not permitted</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>일반 유저는 open부터 거절된다(<code>CAP_SYS_RAWIO</code> 필요).</li><li>PeriphID <code>0x61 0x10 0x04 0x00</code> = 부품 번호 0x061(PL061), 설계자 코드 0x41(ARM; PeriphID1 상위 4비트와 PeriphID2 하위 4비트를 합친 값), revision 0. PrimeCell ID <code>0x0d 0xf0 0x05 0xb1</code>은 모든 ARM PrimeCell 주변장치의 고정 서명이다. TRM에서 보던 값을 유저 프로그램이 MMU를 거쳐 읽은 것이다.</li><li>물리 <code>0x80000000</code>은 <code>/proc/iomem</code>상 System RAM이라 <code>CONFIG_STRICT_DEVMEM</code>이 <code>EPERM</code>으로 막았다. 커널이 쓰는 RAM을 유저가 망치지 못하게 하는 장치다. <code>CONFIG_IO_STRICT_DEVMEM</code>까지 켜면 <strong>드라이버가 이미 잡은 MMIO 영역</strong>도 막힌다. 이 VM은 꺼져 있어서 PL061(드라이버가 잡고 있음)을 읽을 수 있었다.</li><li>읽기만 한 이유: 드라이버가 쓰고 있는 장치의 레지스터에 유저가 쓰면 드라이버 상태와 HW가 어긋난다. <code>/dev/mem</code>이 "bring-up 도구로는 OK, 제품 코드로는 금지"인 이유다(H1).</li></ul>
+<h3 id="12-4-uio-dev-mem의-정식-버전">12.4 UIO — /dev/mem의 정식 버전<a class="anchor" href="#12-4-uio-dev-mem의-정식-버전" aria-label="link">#</a></h3>
+<p><strong>UIO(Userspace I/O)</strong> 는 작은 커널 드라이버(예: <code>uio_pdrv_genirq</code>, Device Tree로 붙임)가 레지스터 영역과 IRQ만 유저에게 넘겨주는 프레임워크다. 이 VM 커널에도 모듈로 있다(<code>CONFIG_UIO=m</code>, <code>CONFIG_UIO_PDRV_GENIRQ=m</code>). 다만 이 VM엔 붙일 장치 노드가 없어 아래는 실행하지 않은 스케치다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 실행하지 않은 스케치: UIO로 FPGA 레지스터 + 인터럽트 다루기 */
+int fd = open("/dev/uio0", O_RDWR | O_SYNC);
+/* map N은 offset = N * pagesize 로 고른다. 크기는 /sys/class/uio/uio0/maps/map0/size */
+volatile uint32_t *regs = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 * getpagesize());
+uint32_t on = 1, count;
+for (;;) {
+    write(fd, &amp;on, 4);              /* IRQ 다시 켜기 (irqcontrol) */
+    read(fd, &amp;count, 4);            /* 인터럽트가 올 때까지 block, 누적 횟수 반환 */
+    uint32_t st = regs[0x10 / 4];   /* 상태 레지스터 읽고 처리 */
+    regs[0x14 / 4] = st;            /* W1C 클리어 */
+}</code></pre></figure>
+<p>Don에게 익숙한 구조다: "레지스터 포인터 + IRQ 대기 루프". 장점은 커널 드라이버 없이 빠르게 bring-up할 수 있다는 것, 단점은 DMA·전원 관리·여러 프로세스 공유가 어렵고 IRQ 지연이 커널 드라이버보다 크다는 것이다.</p>
+<h3 id="12-5-캐시-속성-mmio를-캐시된-메모리로-매핑하면-안-되는-이유">12.5 캐시 속성 — MMIO를 캐시된 메모리로 매핑하면 안 되는 이유<a class="anchor" href="#12-5-캐시-속성-mmio를-캐시된-메모리로-매핑하면-안-되는-이유" aria-label="link">#</a></h3>
+<p>Don이 bare-metal에서 MPU 영역 속성으로 "Device / Strongly-ordered / Normal-NC / Normal WB"를 고르던 것과 같은 문제가 Linux <code>mmap</code>에도 있다. 드라이버(또는 <code>/dev/mem</code>)가 매핑할 때 <code>vma-&gt;vm_page_prot</code>에 속성을 정하고, 그게 PTE의 AttrIndx로 들어간다.</p>
+<div class="tw"><table><thead><tr><th>커널 헬퍼</th><th>arm64 메모리 타입</th><th>쓰는 곳</th></tr></thead><tbody><tr><td>(기본)</td><td>Normal, Write-Back cacheable</td><td>일반 RAM, page cache</td></tr><tr><td><code>pgprot_writecombine()</code></td><td>Normal Non-Cacheable</td><td>프레임버퍼, 큰 DMA 버퍼에 순차 쓰기 (쓰기를 모아서 버스로)</td></tr><tr><td><code>pgprot_device()</code></td><td>Device-nGnRE</td><td>MMIO 레지스터</td></tr><tr><td><code>pgprot_noncached()</code></td><td>Device-nGnRnE</td><td>MMIO (가장 엄격, 순서·완료 보장)</td></tr></tbody></table></div>
+<ul><li>MMIO를 Normal-cacheable로 매핑하면 읽기가 캐시에서 나와 상태 레지스터 변화를 못 보고, 쓰기가 캐시에 머물러 장치에 안 간다. speculative 읽기로 read-to-clear 레지스터가 지워질 수도 있다.</li><li>arm64의 <code>/dev/mem</code>은 RAM이 아닌 주소를 매핑하면 항상 <code>pgprot_noncached</code>(Device-nGnRnE)를 쓴다. <code>O_SYNC</code>는 RAM 영역일 때 의미가 있다(이 경우 write-combine). 다른 아키텍처는 다르게 동작하므로 습관적으로 <code>O_SYNC</code>를 붙인다.</li><li>카메라 DMA 버퍼를 유저가 CPU로 읽을 때, 버퍼가 cacheable이면 DMA가 쓴 뒤 <strong>캐시 invalidate</strong>가 필요하다(하드웨어 coherency가 없다면). <code>dma_alloc_coherent</code> 버퍼는 보통 non-cacheable(또는 HW coherent)로 매핑돼서 이 문제가 없지만, CPU가 읽기에 느리다. 그래서 V4L2/dma-buf에는 <code>DMA_BUF_IOCTL_SYNC</code> 같은 캐시 동기화 ioctl이 있다(H9). SSD 펌웨어에서 DMA 전후로 D-cache clean/invalidate하던 그것이다.</li></ul>
+<h3 id="12-6-드라이버-쪽-mmap-미리보기-g5-h9">12.6 드라이버 쪽 <code>.mmap</code> 미리보기 (G5, H9)<a class="anchor" href="#12-6-드라이버-쪽-mmap-미리보기-g5-h9" aria-label="link">#</a></h3>
+<p>유저의 <code>mmap(fd)</code>는 드라이버의 <code>file_operations.mmap</code>을 부른다. 드라이버가 하는 일은 "이 VMA의 PTE를 내 메모리로 채우는 것"이다. 아래는 커널 코드라 이 노트에선 실행하지 않았다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 실행하지 않은 커널 코드 스케치 (G5에서 직접 빌드) */
+static int mydev_mmap(struct file *f, struct vm_area_struct *vma)
+{
+    struct mydev *d = f-&gt;private_data;
+    unsigned long len = vma-&gt;vm_end - vma-&gt;vm_start;
+
+    if (len &gt; d-&gt;reg_size)
+        return -EINVAL;
+    /* (1) MMIO 레지스터: 물리 주소의 PFN을 PTE로 바로 채운다 */
+    vma-&gt;vm_page_prot = pgprot_noncached(vma-&gt;vm_page_prot);
+    return remap_pfn_range(vma, vma-&gt;vm_start, d-&gt;reg_phys &gt;&gt; PAGE_SHIFT,
+                           len, vma-&gt;vm_page_prot);
+}
+
+static int mybuf_mmap(struct file *f, struct vm_area_struct *vma)
+{
+    struct mydev *d = f-&gt;private_data;
+    /* (2) dma_alloc_coherent()로 받은 버퍼: 아키텍처에 맞는 속성으로 매핑 */
+    return dma_mmap_coherent(d-&gt;dev, vma, d-&gt;buf_cpu, d-&gt;buf_dma,
+                             vma-&gt;vm_end - vma-&gt;vm_start);
+}</code></pre></figure>
+<ul><li><code>remap_pfn_range</code>는 <code>VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP</code> 플래그를 VMA에 세운다. "struct page가 없는(또는 관리하지 않는) 물리 메모리이니 fork/core dump/swap 때 건드리지 말라"는 뜻이다. MMIO에는 <code>io_remap_pfn_range</code>, 간단한 경우 <code>vm_iomap_memory</code>도 있다.</li><li><code>dma_mmap_coherent</code>는 <code>dma_alloc_coherent</code>가 고른 캐시 속성과 같은 속성으로 매핑해 준다. 직접 <code>remap_pfn_range</code>로 DMA 버퍼를 매핑하면 커널 쪽 매핑과 유저 쪽 매핑의 캐시 속성이 달라지는(aliasing) 버그가 생길 수 있다.</li><li>다른 방식은 <code>.mmap</code>에서 PTE를 안 채우고 <code>vma-&gt;vm_ops-&gt;fault</code>를 등록해 두는 것이다. 유저가 접근할 때 page fault 경로에서 페이지를 하나씩 넘긴다(lazy). videobuf2와 dma-buf exporter 상당수가 내부적으로 이런 헬퍼들을 쓴다.</li></ul>
+<hr>
+<h2 id="13-커널-안에서는-무슨-일이-일어나나">13. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#13-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="170" y="22" font-size="14" text-anchor="middle">mmap() 호출 시</text>
+<text x="510" y="22" font-size="14" text-anchor="middle">처음 접근할 때 (page fault)</text>
+<rect x="20" y="40" width="300" height="38" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="170" y="64" font-size="12" text-anchor="middle">유저: mmap(addr, len, prot, flags, fd)</text>
+<rect x="20" y="100" width="300" height="38" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="170" y="124" font-size="13" text-anchor="middle">ksys_mmap_pgoff → do_mmap</text>
+<rect x="20" y="160" width="300" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="170" y="182" font-size="13" text-anchor="middle">vm_area_struct 생성 · mm 트리에 삽입</text><text x="170" y="200" font-size="12" text-anchor="middle">vm_start · vm_end · vm_flags · vm_ops</text>
+<rect x="20" y="232" width="300" height="38" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="170" y="256" font-size="13" text-anchor="middle">파일이면 file-&gt;f_op-&gt;mmap(file, vma)</text>
+<rect x="20" y="292" width="140" height="56" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="90" y="315" font-size="12" text-anchor="middle">remap_pfn_range</text><text x="90" y="333" font-size="12" text-anchor="middle">PTE 즉시 채움</text>
+<rect x="180" y="292" width="140" height="56" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="250" y="315" font-size="12" text-anchor="middle">vm_ops-&gt;fault 등록</text><text x="250" y="333" font-size="12" text-anchor="middle">나중에 채움</text>
+<line x1="170" y1="78" x2="170" y2="98" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="170" y1="138" x2="170" y2="158" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="170" y1="210" x2="170" y2="230" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="120" y1="270" x2="95" y2="290" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="220" y1="270" x2="245" y2="290" stroke="currentColor" marker-end="url(#ah5)"/><text x="170" y="378" font-size="12" text-anchor="middle">익명 매핑은 VMA만 만들고 끝 (PTE 없음)</text>
+<line x1="340" y1="35" x2="340" y2="390" stroke="#888" stroke-dasharray="4 4"/>
+<rect x="360" y="40" width="300" height="38" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="510" y="64" font-size="13" text-anchor="middle">load/store → MMU translation fault</text>
+<rect x="360" y="100" width="300" height="38" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="510" y="124" font-size="13" text-anchor="middle">do_mem_abort → do_page_fault (arm64)</text>
+<rect x="360" y="160" width="300" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="510" y="182" font-size="13" text-anchor="middle">VMA 찾기 → 권한 검사 → handle_mm_fault</text><text x="510" y="200" font-size="12" text-anchor="middle">VMA 없음/권한 위반 → SIGSEGV</text>
+<rect x="360" y="232" width="300" height="74" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="510" y="254" font-size="12" text-anchor="middle">익명 첫 접근: do_anonymous_page</text><text x="510" y="272" font-size="12" text-anchor="middle">파일: vm_ops-&gt;fault (filemap_fault 등)</text><text x="510" y="290" font-size="12" text-anchor="middle">COW 쓰기: do_wp_page</text>
+<rect x="360" y="326" width="300" height="38" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="510" y="350" font-size="13" text-anchor="middle">PTE 설치 → 예외 복귀 → 명령 재실행</text>
+<line x1="510" y1="78" x2="510" y2="98" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="510" y1="138" x2="510" y2="158" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="510" y1="210" x2="510" y2="230" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="510" y1="306" x2="510" y2="324" stroke="currentColor" marker-end="url(#ah5)"/>
+</svg></figure>
+<p>그림 8 — 왼쪽: <code>mmap()</code>은 VMA(약속)만 만들고, 장치 파일이면 드라이버의 <code>.mmap</code>이 PTE를 채울지 결정한다. 오른쪽: 처음 접근하면 arm64 abort 핸들러에서 page fault 경로로 들어가 PTE를 채운다.</p>
+<p>API와 커널 객체의 대응을 정리한다.</p>
+<div class="tw"><table><thead><tr><th>유저가 보는 것</th><th>커널 객체·함수</th><th>드라이버에서 다시 만나는 곳</th></tr></thead><tbody><tr><td>프로세스의 주소 공간 전체</td><td><code>struct mm_struct</code> (<code>task_struct-&gt;mm</code>), page table 루트(pgd)</td><td>커널 스레드는 <code>mm</code>이 없다 (F2)</td></tr><tr><td><code>/proc/&lt;pid&gt;/maps</code>의 한 줄</td><td><code>struct vm_area_struct</code> (VMA). 6.1부터 maple tree로 관리</td><td><code>.mmap(file, vma)</code>의 인자 (G5)</td></tr><tr><td><code>mmap()</code></td><td><code>ksys_mmap_pgoff()</code> → <code>vm_mmap_pgoff()</code> → <code>do_mmap()</code> → <code>mmap_region()</code></td><td><code>file_operations.mmap</code> 호출 지점</td></tr><tr><td>page fault</td><td>arm64 <code>do_mem_abort()</code> → <code>do_page_fault()</code> → <code>handle_mm_fault()</code></td><td><code>vm_operations_struct.fault</code></td></tr><tr><td>파일 페이지</td><td>page cache (<code>address_space</code>, folio)</td><td>파일시스템·블록 드라이버 (J)</td></tr><tr><td>MMIO/DMA 매핑</td><td><code>remap_pfn_range()</code>, <code>io_remap_pfn_range()</code>, <code>dma_mmap_coherent()</code></td><td>H1, H9</td></tr><tr><td><code>mlock</code></td><td>VMA의 <code>VM_LOCKED</code>, <code>Mlocked</code> 카운터</td><td>커널 쪽 대응 없음 (커널 메모리는 원래 swap 안 됨, F9)</td></tr><tr><td>커널 → 유저 복사</td><td><code>copy_to_user()</code> (page fault를 낼 수 있음)</td><td><code>.read</code> 구현 (G4 계열). 그래서 spinlock 잡고 호출 금지 (F2, F4)</td></tr></tbody></table></div>
+<p>드라이버를 쓸 때 핵심 두 가지:</p>
+<ol><li><strong><code>copy_to_user</code>/<code>copy_from_user</code>는 잠들 수 있다.</strong> 유저 버퍼가 아직 안 붙은 페이지면 page fault가 나고, major fault면 디스크 I/O를 기다린다. 그래서 atomic context(spinlock, IRQ 핸들러)에서 부르면 안 된다. 3장의 demand paging이 이 규칙의 이유다.</li><li><strong>커널 메모리는 demand paging이 없다.</strong> <code>kmalloc</code>은 즉시 물리 메모리를 주고(F9), 커널 코드가 잘못된 주소를 만지면 "page fault 처리"가 아니라 <strong>Oops</strong>다. 유저의 SIGSEGV에 해당하는 것이 커널에선 Oops/panic이다(M 모듈).</li></ol>
+<hr>
+<h2 id="14-embedded-실무에서-다시-보기">14. Embedded 실무에서 다시 보기<a class="anchor" href="#14-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="14-1-카메라-4대를-돌리는-로봇-메모리-예산">14.1 카메라 4대를 돌리는 로봇: 메모리 예산<a class="anchor" href="#14-1-카메라-4대를-돌리는-로봇-메모리-예산" aria-label="link">#</a></h3>
+<p>예를 들어 센서 키트에 1080p NV12 카메라 4대, 각각 버퍼 4개라면 3.1 MB × 4 × 4 ≈ 50 MB가 DMA 버퍼로 묶인다. 이건 <code>MemAvailable</code>에서 빠지고 OOM 계산에도 들어간다. 이 버퍼가 CMA(연속 물리 메모리 예약 영역)에서 나오는지, IOMMU로 흩어진 페이지를 모아 쓰는지는 SoC마다 다르다(H9, P 모듈). 프레임을 NPU로 넘길 때 <code>memcpy</code>가 하나라도 끼면 30 fps × 4대 × 3 MB = 초당 360 MB 복사다. "zero-copy 경로가 끊긴 곳 찾기"가 실무 성능 튜닝의 단골 과제다.</p>
+<h3 id="14-2-1-khz-모터-제어-루프의-지터">14.2 1 kHz 모터 제어 루프의 지터<a class="anchor" href="#14-2-1-khz-모터-제어-루프의-지터" aria-label="link">#</a></h3>
+<p><code>cyclictest</code>(N 모듈)로 측정한 최대 지연이 가끔 수백 µs로 튀면 첫 용의자는 page fault다. 확인 방법:</p>
+<figure class="code"><span class="lang">sh</span><pre><code># 제어 프로세스의 fault 카운터가 루프 동안 증가하는지 본다 (10, 12번째 필드)
+watch -n1 "awk '{print \"minflt=\"\$10, \"majflt=\"\$12}' /proc/$(pidof motor_ctl)/stat"</code></pre></figure>
+<p>루프가 도는 동안 숫자가 늘면 8장의 관례(mlockall + prefault + 루프 안 할당 금지)를 적용한다. <code>perf record -e page-faults -g -p &lt;pid&gt;</code>로 어느 코드에서 fault가 나는지도 볼 수 있다(M6).</p>
+<h3 id="14-3-메모리-누수-같아요">14.3 "메모리 누수 같아요"<a class="anchor" href="#14-3-메모리-누수-같아요" aria-label="link">#</a></h3>
+<p>장비가 며칠 돌면 죽는다는 보고. 순서:</p>
+<ol><li><code>journalctl -k</code>에서 <code>Out of memory</code> 줄과 죽은 프로세스 확인.</li><li>의심 프로세스의 <code>/proc/&lt;pid&gt;/smaps_rollup</code>의 <code>Pss_Anon</code>을 1시간 간격으로 기록. 계속 늘면 누수.</li><li><code>/proc/&lt;pid&gt;/maps</code>에서 어느 VMA가 커지는지 비교(<code>[heap]</code>인지, 이름 없는 익명 매핑 개수가 느는지 — 후자는 스레드 arena나 mmap 누수).</li><li>시스템 전체라면 <code>/proc/meminfo</code>의 <code>AnonPages</code>, <code>Shmem</code>(tmpfs에 로그가 쌓이는 경우가 많다!), <code>Slab</code>(커널 쪽 누수, 드라이버 의심).</li></ol>
+<h3 id="14-4-설정-파일을-mmap으로-쓰다-전원-차단">14.4 설정 파일을 mmap으로 쓰다 전원 차단<a class="anchor" href="#14-4-설정-파일을-mmap으로-쓰다-전원-차단" aria-label="link">#</a></h3>
+<p>드론 비행 로그를 SHARED mmap 링버퍼로 쓰는 설계를 봤다면 질문할 것: "msync는 언제 하나? 전원 차단 시 최대 몇 초 손실을 허용하나?" 예제 12에서 본 대로 Dirty 페이지는 msync 전까지 RAM에만 있다. 파일시스템의 저널링(J 모듈)은 메타데이터를 지켜 줄 뿐, 내 데이터가 디스크에 갔다는 보장이 아니다.</p>
+<hr>
+<h2 id="15-흔한-실수와-증상">15. 흔한 실수와 증상<a class="anchor" href="#15-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td><code>mmap</code> 실패를 <code>NULL</code>과 비교</td><td>실패해도 계속 진행하다 SIGSEGV</td><td>실패값은 <code>MAP_FAILED</code>(-1)</td><td><code>if (p == MAP_FAILED)</code></td></tr><tr><td>offset을 페이지 배수가 아니게 줌</td><td><code>EINVAL</code></td><td>mmap은 페이지 단위</td><td>offset을 내림 정렬하고 포인터에 나머지를 더함</td></tr><tr><td>파일 크기보다 큰 범위를 매핑하고 접근</td><td><strong>SIGBUS</strong></td><td>파일 끝 넘어 페이지엔 데이터가 없음</td><td><code>ftruncate</code>로 먼저 늘리기</td></tr><tr><td>SHARED 매핑에 쓰고 msync 안 함</td><td>전원 차단 후 데이터 손실</td><td>Dirty 페이지가 RAM에만 있음</td><td>중요 지점에서 <code>msync(MS_SYNC)</code></td></tr><tr><td>공유 메모리에 포인터 저장</td><td>다른 프로세스에서 쓰레기 값</td><td>프로세스마다 매핑 주소가 다름</td><td>베이스 기준 오프셋 저장</td></tr><tr><td>RT 앱에서 mlockall 안 함</td><td>가끔 수백 µs 지터</td><td>첫 접근 page fault, reclaim</td><td><code>mlockall</code> + 스택·버퍼 prefault</td></tr><tr><td>MCL_FUTURE 후 큰 malloc (일반 유저)</td><td>장비에서만 malloc이 NULL</td><td><code>RLIMIT_MEMLOCK</code> 초과 → mmap <code>EAGAIN</code></td><td><code>LimitMEMLOCK=infinity</code> 또는 <code>CAP_IPC_LOCK</code></td></tr><tr><td>RSS 합으로 메모리 예산 계산</td><td>합이 RAM보다 큼, 판단 틀림</td><td>공유 페이지 중복 계산</td><td>PSS(<code>smaps_rollup</code>) 사용</td></tr><tr><td>MMIO를 일반 캐시 속성으로 매핑</td><td>레지스터 값이 안 바뀌어 보임, 쓰기 유실</td><td>캐시가 끼어듦</td><td><code>pgprot_noncached</code>/<code>pgprot_device</code>, <code>/dev/mem</code>은 <code>O_SYNC</code></td></tr><tr><td><code>MemFree</code>가 작다고 메모리 부족 판단</td><td>멀쩡한데 경보</td><td>캐시가 RAM을 채운 정상 상태</td><td><code>MemAvailable</code>로 판단</td></tr></tbody></table></div>
+<hr>
+<h2 id="16-면접에서-이렇게-말한다">16. 면접에서 이렇게 말한다<a class="anchor" href="#16-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> What happens when you call malloc(1 GB) on a system with 512 MB of RAM?</p>
+<p><strong>A.</strong> 기본 overcommit 모드(0)에선 "RAM+swap보다 명백히 큰" 요청만 거절하므로 512 MB 장비에서 1 GB 한 번은 보통 거절된다. 하지만 더 작은 덩어리 여러 개로 나누면 전부 성공한다. 성공해도 받은 건 가상 주소 범위(VMA)뿐이고 물리 메모리는 처음 접근하는 페이지마다 page fault로 붙는다. 실제로 다 쓰면 OOM killer가 badness 점수가 가장 큰 프로세스를 죽인다.</p>
+<blockquote><p>Under the default heuristic overcommit, a single request obviously larger than RAM plus swap is refused, but the same amount split into smaller chunks succeeds. Either way malloc only reserves virtual address space — for big sizes glibc uses an anonymous mmap — and physical pages are attached lazily on first touch through page faults. If the process actually touches more than the system can supply, the OOM killer picks the task with the highest badness score and kills it. With overcommit_memory=2 the allocation would fail up front instead.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "그럼 OOM에서 내 제어 데몬은 어떻게 보호하나?" → <code>oom_score_adj</code>를 낮추고, 부가 서비스는 cgroup 메모리 한도로 묶는다.</p>
+<p><strong>Q.</strong> What is the difference between a minor and a major page fault?</p>
+<p><strong>A.</strong> 둘 다 PTE가 없어서 MMU가 예외를 낸 것이다. minor는 데이터가 이미 RAM에 있어(0 페이지 할당, page cache 히트) PTE만 채우면 되는 경우로 수백 ns~수 µs. major는 디스크나 swap에서 읽어야 해서 수십 µs~ms다. VM에서 측정해 보니 4K 익명 페이지 minor fault가 약 0.5 µs, readahead를 끈 cold 파일 major fault가 약 39 µs였다.</p>
+<blockquote><p>Both are MMU translation faults handled by the kernel. A minor fault is satisfied from memory — a freshly zeroed anonymous page or a page already in the page cache — so the kernel only installs a PTE, costing hundreds of nanoseconds. A major fault requires I/O from storage or swap, so it costs tens of microseconds to milliseconds. On my arm64 VM I measured about 0.5 µs per minor fault and about 39 µs per major fault with readahead disabled.</p></blockquote>
+<p><strong>Q.</strong> MAP_SHARED vs MAP_PRIVATE?</p>
+<p><strong>A.</strong> SHARED는 모든 매핑이 같은 물리 페이지(파일이면 page cache)를 가리켜서, 쓰기가 다른 프로세스와 파일에 보인다. PRIVATE는 COW다. 쓰기 전엔 공유하다가 쓰는 순간 그 페이지만 복사되어 내 것이 되고 파일엔 절대 반영되지 않는다. 실행 파일 로딩이 PRIVATE, 공유 메모리와 장치 버퍼가 SHARED다.</p>
+<blockquote><p>With MAP_SHARED every mapping points at the same physical pages — the page cache for files — so stores are visible to other processes and eventually written back to the file. MAP_PRIVATE is copy-on-write: pages are shared read-only until the first store, then the kernel copies that one page for the writer, and changes never reach the file. Shared libraries are mapped private; shared memory and device buffers are mapped shared.</p></blockquote>
+<p><strong>Q.</strong> How would you get camera frames to user space without copying?</p>
+<p><strong>A.</strong> V4L2 MMAP 스트리밍을 쓴다. REQBUFS로 드라이버가 DMA 버퍼를 할당하고, QUERYBUF로 각 버퍼의 offset을 받아 mmap하면 유저 page table이 그 물리 페이지를 직접 가리킨다. 그 뒤에는 QBUF/DQBUF로 버퍼 번호만 주고받는다. 다른 장치(GPU, NPU, 인코더)로 넘길 땐 EXPBUF로 dma-buf fd를 내보낸다. 버퍼가 cacheable이면 CPU 접근 전후 캐시 동기화가 필요하다.</p>
+<blockquote><p>I would use V4L2 streaming I/O with V4L2_MEMORY_MMAP. REQBUFS makes the driver allocate DMA-capable buffers, QUERYBUF gives each buffer's offset cookie, and mmap maps those physical pages straight into my address space. After STREAMON the loop is just poll, DQBUF, process in place, QBUF — only buffer indices cross the boundary. To hand frames to an encoder or NPU I would export them as dma-buf file descriptors, and I would watch cache maintenance if the buffers are cacheable.</p></blockquote>
+<p><strong>Q.</strong> How do you prevent page faults in a real-time thread?</p>
+<p><strong>A.</strong> 초기화 단계에서 <code>mlockall(MCL_CURRENT | MCL_FUTURE)</code>로 지금과 앞으로의 모든 매핑을 RAM에 붙이고 잠근다. 스택은 처음 닿을 때 붙으므로 예상 최대 크기만큼 미리 touch하고, 버퍼는 전부 미리 할당한다. 루프 안에서는 malloc·파일 I/O를 안 한다. 일반 유저면 <code>RLIMIT_MEMLOCK</code> 때문에 MCL_FUTURE 이후 mmap이 EAGAIN으로 실패할 수 있으니 <code>CAP_IPC_LOCK</code>이나 <code>LimitMEMLOCK</code>을 설정한다. 확인은 <code>/proc/&lt;pid&gt;/stat</code>의 fault 카운터가 루프 중 안 느는지로 한다.</p>
+<blockquote><p>At startup I call mlockall with MCL_CURRENT and MCL_FUTURE so every existing and future mapping is faulted in and pinned. I pre-fault the stack by touching its expected maximum depth, preallocate all buffers, and keep malloc and file I/O out of the loop. As a non-root service I make sure RLIMIT_MEMLOCK is raised or the process has CAP_IPC_LOCK, otherwise later mmaps fail with EAGAIN. Then I verify the minflt and majflt counters in /proc/pid/stat stay flat while the loop runs.</p></blockquote>
+<p><strong>Q.</strong> How does a driver implement mmap?</p>
+<p><strong>A.</strong> <code>file_operations.mmap(file, vma)</code>에서 VMA 범위를 검사하고, MMIO나 예약 메모리면 <code>vm_page_prot</code>를 noncached 등으로 정한 뒤 <code>remap_pfn_range</code>로 PTE를 바로 채운다. <code>dma_alloc_coherent</code> 버퍼면 캐시 속성을 맞춰 주는 <code>dma_mmap_coherent</code>를 쓴다. 아니면 <code>vm_ops-&gt;fault</code>를 등록해서 접근할 때 페이지를 넘긴다. <code>remap_pfn_range</code>는 VMA에 <code>VM_IO</code>, <code>VM_PFNMAP</code>을 세운다.</p>
+<blockquote><p>The driver's mmap file operation receives the VMA. It validates the requested size and offset, sets vm_page_prot — noncached or device for registers, writecombine for framebuffers — and for MMIO or reserved memory calls remap_pfn_range to populate the page tables immediately, which marks the VMA VM_IO and VM_PFNMAP. For coherent DMA buffers it uses dma_mmap_coherent so the user mapping has the same attributes as the kernel mapping. Alternatively it installs a vm_ops fault handler and supplies pages lazily.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "왜 <code>/dev/mem</code>을 제품에서 쓰면 안 되나?" → 권한(root, CAP_SYS_RAWIO) 필요, 드라이버와 HW 상태 충돌, 인터럽트·전원 관리·DMA 불가, STRICT_DEVMEM 설정에 따라 막힘. UIO나 정식 드라이버로 간다.</p>
+<p><strong>Q.</strong> RSS vs PSS — which would you use to budget memory on a device?</p>
+<p><strong>A.</strong> PSS. RSS는 공유 페이지를 각 프로세스에 전부 세서 합이 RAM보다 커질 수 있다. PSS는 공유 페이지를 공유하는 프로세스 수로 나눠 센다. 4개 프로세스가 32 MiB를 공유하는 실험에서 RSS는 각 32 MiB, PSS는 각 8 MiB였다. <code>/proc/&lt;pid&gt;/smaps_rollup</code>에서 읽는다.</p>
+<blockquote><p>PSS. RSS counts every shared page fully in each process, so summing RSS overcounts libraries and shared buffers. PSS divides each shared page by the number of processes mapping it, so the sum matches real usage. In a test with four processes sharing 32 MiB, each showed 32 MiB RSS but 8 MiB PSS. I read it from /proc/pid/smaps_rollup, and use Pss_Anon over time to spot leaks.</p></blockquote>
+<hr>
+<h2 id="17-직접-해보기">17. 직접 해보기<a class="anchor" href="#17-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong>: 4 KiB 페이지, 48비트 VA에서 page table은 왜 4단계인가? 64 KiB 페이지라면 offset은 몇 비트이고 몇 단계가 되나? 정답/힌트: 48 − 12 = 36비트를 9비트씩(512 엔트리) 나누면 4단계. 64K 페이지는 offset 16비트, 한 표에 8192 엔트리(13비트) → 32비트를 13+13+6으로 3단계.</li><li><strong>관찰</strong>: <code>sleep 100 &amp;</code>을 띄우고 <code>/proc/$!/maps</code>, <code>/proc/$!/smaps_rollup</code>을 본 뒤, 같은 <code>sleep</code>을 하나 더 띄워 두 프로세스의 Pss가 어떻게 변하는지 보라. 정답/힌트: libc·sleep 바이너리 페이지가 공유되므로 두 번째를 띄우면 각자 Pss_File이 줄어든다.</li><li><strong>코드</strong>: 예제 2를 고쳐서 같은 영역을 두 번째로 touch할 때 fault가 0인지 확인하라. 그 다음 <code>madvise(MADV_DONTNEED)</code> 후 다시 touch하면? 정답/힌트: 두 번째는 0. <code>MADV_DONTNEED</code>는 익명 private 페이지를 버리므로 다시 페이지 수만큼 fault가 나고 내용은 0이 된다.</li><li><strong>코드</strong>: 1 KiB 파일을 4 KiB 매핑하고 오프셋 2000을 읽어 보라. 그 다음 8 KiB를 매핑해 오프셋 5000을 읽어 보라. 각각 무엇이 나오나? 정답/힌트: 첫 페이지 안의 파일 끝 너머는 0으로 읽힌다. 파일이 전혀 없는 두 번째 페이지 접근은 SIGBUS.</li><li><strong>strace 관찰</strong>: <code>strace -e trace=mmap,mprotect,munmap /bin/true</code>의 출력에서 동적 링커가 libc를 매핑하는 순서를 해석하라. 정답/힌트: 전체 크기만큼 한 번 예약 → <code>MAP_FIXED</code>로 세그먼트별 덮어쓰기 → bss용 익명 매핑 → RELRO 영역 <code>mprotect(PROT_READ)</code>.</li><li><strong>설계</strong>: IMU 데몬(1 kHz)과 로거·제어 두 소비자가 있다. 예제 9의 seqlock 구조 대신 링버퍼를 shm에 두려면 무엇을 저장해야 하나? 소비자가 늦을 때 어떻게 알 수 있나? 정답/힌트: head 인덱스(단조 증가 64비트)와 고정 크기 슬롯 배열, 각 슬롯의 seq. 소비자는 자기 tail과 head 차이가 슬롯 수를 넘으면 overrun.</li><li><strong>측정</strong>: 예제 13을 <code>drop_caches</code> 직후(cold)에도 돌려 보라. 이번엔 read와 mmap 중 무엇이 빠른가? 왜? 정답/힌트: 디스크 I/O가 지배해 차이가 줄어든다. mmap은 readahead 패턴에 따라 major fault가 섞이고, read는 큰 버퍼로 readahead를 잘 탄다.</li></ol>
+<hr>
+<h2 id="18-용어-사전">18. 용어 사전<a class="anchor" href="#18-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>VA / PA</td><td>virtual / physical address</td><td>프로그램이 쓰는 주소 / 버스에 나가는 실제 주소</td></tr><tr><td>MMU</td><td>Memory Management Unit</td><td>page table로 VA→PA 변환과 권한 검사를 하는 HW</td></tr><tr><td>page / page frame</td><td>가상 / 물리 메모리의 고정 크기 단위</td><td>이 VM에선 4 KiB</td></tr><tr><td>page table, PTE</td><td>변환 표와 그 엔트리</td><td>다음 단계 PA + 권한 + 메모리 속성</td></tr><tr><td>TLB</td><td>Translation Lookaside Buffer</td><td>변환 결과 캐시. miss면 table walk</td></tr><tr><td>VMA</td><td><code>vm_area_struct</code></td><td>주소 공간의 연속 구간 하나. maps의 한 줄</td></tr><tr><td>demand paging</td><td>요구 페이징</td><td>처음 접근할 때 물리 페이지를 붙이는 방식</td></tr><tr><td>minor / major fault</td><td></td><td>RAM에서 해결 / 디스크 I/O 필요</td></tr><tr><td>COW</td><td>copy-on-write</td><td>쓰는 순간 그 페이지만 복사</td></tr><tr><td>page cache</td><td>파일 내용의 RAM 캐시</td><td>read/write/mmap이 모두 공유</td></tr><tr><td>dirty page</td><td>디스크와 내용이 다른 캐시 페이지</td><td>writeback 또는 msync로 내려감</td></tr><tr><td>overcommit</td><td>과다 약속</td><td>RAM보다 많은 가상 메모리를 허용</td></tr><tr><td>OOM killer</td><td>Out-Of-Memory killer</td><td>메모리가 바닥나면 프로세스를 골라 죽임</td></tr><tr><td>RSS / PSS / USS</td><td>resident / proportional / unique set size</td><td>붙은 전부 / 공유분 나눠서 / 나만의 것</td></tr><tr><td>THP</td><td>Transparent Huge Pages</td><td>커널이 자동으로 2 MiB 페이지 사용</td></tr><tr><td>hugetlbfs</td><td>예약형 huge page</td><td><code>MAP_HUGETLB</code>, <code>vm.nr_hugepages</code></td></tr><tr><td>mlock</td><td>memory lock</td><td>페이지를 RAM에 고정, fault·reclaim 방지</td></tr><tr><td>ASLR</td><td>주소 공간 무작위화</td><td>실행마다 시작 주소가 바뀜</td></tr><tr><td>zero-copy</td><td>복사 없는 전달</td><td>같은 물리 페이지를 여러 쪽이 매핑</td></tr><tr><td>UIO</td><td>Userspace I/O</td><td>레지스터와 IRQ를 유저에 넘기는 작은 프레임워크</td></tr><tr><td><code>remap_pfn_range</code></td><td>커널 함수</td><td>물리 프레임 번호로 유저 PTE를 채움</td></tr><tr><td>dma-buf</td><td>커널 버퍼 공유 프레임워크</td><td>DMA 버퍼를 fd로 장치 간 전달</td></tr></tbody></table></div>
+<hr>
+<h2 id="19-요약-체크리스트">19. 요약 &amp; 체크리스트<a class="anchor" href="#19-요약-체크리스트" aria-label="link">#</a></h2>
+<p>Linux에서 프로세스가 보는 주소는 전부 가상 주소이고, <code>mmap</code>과 <code>malloc</code>이 주는 것은 VMA라는 "약속"이다. 물리 페이지는 처음 만질 때 page fault로 붙는다(minor는 약 0.5 µs, major는 디스크 왕복). 그래서 커널은 RAM보다 많이 약속할 수 있고(overcommit), 정말 모자라면 OOM killer가 정리한다. <code>mmap</code>은 파일/익명 × SHARED/PRIVATE의 네 조합이고, SHARED는 같은 물리 페이지 공유, PRIVATE는 COW다. 이 "같은 물리 페이지를 여러 page table이 가리키게 한다"는 원리가 프로세스 간 공유 메모리, V4L2 카메라 버퍼 zero-copy, <code>/dev/mem</code>·UIO 레지스터 접근의 공통 기반이고, 드라이버 쪽에선 <code>.mmap</code> + <code>remap_pfn_range</code>/<code>dma_mmap_coherent</code>와 캐시 속성 선택으로 구현된다. RT 코드는 <code>mlockall</code>과 prefault로 fault를 루프 밖으로 몰아내고, 메모리 예산은 RSS가 아니라 PSS와 <code>MemAvailable</code>로 판단한다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>arm64 4단계 page table walk와 TLB의 역할을 MPU와 비교해 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>/proc/&lt;pid&gt;/maps</code> 한 줄의 각 필드를 읽고 text/data/bss/heap/mmap/stack을 찾을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>demand paging과 minor/major fault를 설명하고 <code>getrusage</code>나 <code>/proc/&lt;pid&gt;/stat</code>으로 셀 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>overcommit 모드 0/1/2와 OOM killer, <code>oom_score_adj</code>를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>glibc malloc이 brk와 mmap을 언제 쓰는지, "128 KiB 규칙"의 예외까지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>MAP_SHARED/PRIVATE, 파일/익명 조합을 상황에 맞게 고르고 COW를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>msync</code>, <code>munmap</code>, <code>mprotect</code>의 동작과 SIGSEGV(<code>SEGV_ACCERR</code>/<code>SEGV_MAPERR</code>)·SIGBUS를 구분할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>fork 전 공유 매핑과 <code>shm_open</code>으로 프로세스 간 공유 메모리를 짤 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>RT 루프를 위해 <code>mlockall(MCL_CURRENT | MCL_FUTURE)</code>와 prefault를 적용하고 <code>RLIMIT_MEMLOCK</code> 함정을 피할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>RSS/PSS와 <code>/proc/meminfo</code>의 MemAvailable·Cached·Dirty를 해석할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>V4L2 MMAP zero-copy 흐름과 드라이버 <code>.mmap</code>(<code>remap_pfn_range</code>, <code>dma_mmap_coherent</code>)을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>MMIO를 매핑할 때 필요한 캐시 속성(Device, Normal-NC)과 그 이유를 말할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>man7.org: <a href="https://man7.org/linux/man-pages/man2/mmap.2.html">mmap(2)</a>, <a href="https://man7.org/linux/man-pages/man2/mprotect.2.html">mprotect(2)</a>, <a href="https://man7.org/linux/man-pages/man2/msync.2.html">msync(2)</a>, <a href="https://man7.org/linux/man-pages/man2/mlock.2.html">mlock(2)</a>, <a href="https://man7.org/linux/man-pages/man2/madvise.2.html">madvise(2)</a>, <a href="https://man7.org/linux/man-pages/man3/shm_open.3.html">shm_open(3)</a>, <a href="https://man7.org/linux/man-pages/man3/mallopt.3.html">mallopt(3)</a>, <a href="https://man7.org/linux/man-pages/man2/getrusage.2.html">getrusage(2)</a>, <a href="https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html">proc_pid_maps(5)</a>, <a href="https://man7.org/linux/man-pages/man5/proc_pid_smaps.5.html">proc_pid_smaps(5)</a>, <a href="https://man7.org/linux/man-pages/man5/proc_meminfo.5.html">proc_meminfo(5)</a></li><li>Michael Kerrisk, "The Linux Programming Interface" — 6장(프로세스 메모리 레이아웃), 49장(Memory Mappings), 50장(Virtual Memory Operations), 54장(POSIX Shared Memory)</li><li>OSTEP — 13~23장 (Address Spaces, Paging, TLBs, Multi-level Page Tables, Swapping)</li><li>docs.kernel.org: <a href="https://docs.kernel.org/mm/overcommit-accounting.html">Overcommit Accounting</a>, <a href="https://docs.kernel.org/admin-guide/mm/transhuge.html">Transparent Hugepage Support</a>, <a href="https://docs.kernel.org/admin-guide/mm/hugetlbpage.html">HugeTLB Pages</a>, <a href="https://docs.kernel.org/driver-api/uio-howto.html">The Userspace I/O HOWTO</a>, <a href="https://docs.kernel.org/userspace-api/media/v4l/mmap.html">V4L2 Streaming I/O (Memory Mapping)</a>, <a href="https://docs.kernel.org/core-api/dma-api.html">Dynamic DMA mapping using the generic device</a></li><li>elixir.bootlin.com: <code>mm/mmap.c</code>(<code>do_mmap</code>), <code>mm/memory.c</code>(<code>handle_mm_fault</code>, <code>do_anonymous_page</code>, <code>do_wp_page</code>, <code>remap_pfn_range</code>), <code>arch/arm64/mm/fault.c</code>(<code>do_mem_abort</code>, <code>do_page_fault</code>), <code>drivers/char/mem.c</code>(<code>/dev/mem</code>), <code>drivers/uio/uio.c</code></li><li>Bootlin, "Linux kernel and driver development training" 슬라이드 — "Memory management", "DMA" 부분</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-05_A4_io_multiplexing.html"><span class="dir">← 이전</span><span class="nm">A4. I/O 다중화 — select / poll / epoll / eventfd / timerfd</span></a><a class="next" href="2026-10-05_A6_signals.html"><span class="dir">다음 →</span><span class="nm">A6. 시그널 — 프로세스에게 거는 소프트웨어 인터럽트</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l2"><a href="#1-가상-주소와-물리-주소-don이-아는-mmu로-다시-보기">1. 가상 주소와 물리 주소 — Don이 아는 MMU로 다시 보기</a></li><li class="l3"><a href="#1-1-직관-주소-번역표-권한표-를-합친-것">1.1 직관: "주소 번역표 + 권한표"를 합친 것</a></li><li class="l3"><a href="#1-2-arm64의-4단계-page-table-walk">1.2 arm64의 4단계 page table walk</a></li><li class="l3"><a href="#1-3-흔한-함정">1.3 흔한 함정</a></li><li class="l2"><a href="#2-프로세스-주소-공간-레이아웃">2. 프로세스 주소 공간 레이아웃</a></li><li class="l3"><a href="#2-1-직관">2.1 직관</a></li><li class="l3"><a href="#2-2-예제-1-각-영역의-주소-찍고-maps와-맞춰-보기">2.2 예제 1: 각 영역의 주소 찍고 maps와 맞춰 보기</a></li><li class="l3"><a href="#2-3-maps-한-줄-읽는-법">2.3 maps 한 줄 읽는 법</a></li><li class="l3"><a href="#2-4-aslr-실행마다-주소가-바뀐다">2.4 ASLR — 실행마다 주소가 바뀐다</a></li><li class="l2"><a href="#3-demand-paging과-page-fault">3. Demand paging과 page fault</a></li><li class="l3"><a href="#3-1-직관-땅-문서만-먼저-주고-집은-들어갈-때-짓는다">3.1 직관: 땅 문서만 먼저 주고, 집은 들어갈 때 짓는다</a></li><li class="l3"><a href="#3-2-예제-2-만진-페이지-수-vs-fault-수-vs-시간">3.2 예제 2: 만진 페이지 수 vs fault 수 vs 시간</a></li><li class="l3"><a href="#3-3-예제-3-major-fault-page-cache에-없을-때">3.3 예제 3: major fault — page cache에 없을 때</a></li><li class="l3"><a href="#3-4-함정">3.4 함정</a></li><li class="l2"><a href="#4-overcommit과-oom-killer">4. Overcommit과 OOM killer</a></li><li class="l3"><a href="#4-1-직관-은행-대출">4.1 직관: 은행 대출</a></li><li class="l3"><a href="#4-2-예제-4-4-gb-vm에서-8-gib-약속받기-안전한-데모">4.2 예제 4: 4 GB VM에서 8 GiB 약속받기 (안전한 데모)</a></li><li class="l3"><a href="#4-3-oom-killer가-누구를-고르나">4.3 OOM killer가 누구를 고르나</a></li><li class="l2"><a href="#5-malloc의-속사정-brk와-mmap">5. malloc의 속사정 — brk와 mmap</a></li><li class="l3"><a href="#5-1-정의">5.1 정의</a></li><li class="l3"><a href="#5-2-예제-5-strace로-brk-mmap-보기">5.2 예제 5: strace로 brk/mmap 보기</a></li><li class="l3"><a href="#5-3-함정">5.3 함정</a></li><li class="l2"><a href="#6-mmap-완전-정리">6. mmap 완전 정리</a></li><li class="l3"><a href="#6-1-시그니처와-조합">6.1 시그니처와 조합</a></li><li class="l3"><a href="#6-2-예제-6-같은-파일을-shared와-private로-동시에-매핑">6.2 예제 6: 같은 파일을 SHARED와 PRIVATE로 동시에 매핑</a></li><li class="l3"><a href="#6-3-msync-shared-매핑의-dirty-페이지를-언제-디스크에-쓰나">6.3 msync — SHARED 매핑의 dirty 페이지를 언제 디스크에 쓰나</a></li><li class="l3"><a href="#6-4-예제-12-dirty가-쌓였다가-msync로-빠지는-것-보기">6.4 예제 12: Dirty가 쌓였다가 msync로 빠지는 것 보기</a></li><li class="l3"><a href="#6-5-예제-7-mprotect와-sigsegv">6.5 예제 7: mprotect와 SIGSEGV</a></li><li class="l3"><a href="#6-6-munmap의-규칙">6.6 munmap의 규칙</a></li><li class="l2"><a href="#7-프로세스-간-메모리-공유">7. 프로세스 간 메모리 공유</a></li><li class="l3"><a href="#7-1-예제-8-fork-전에-만든-익명-매핑">7.1 예제 8: fork 전에 만든 익명 매핑</a></li><li class="l3"><a href="#7-2-예제-9-shm_open-이름으로-만나는-공유-메모리">7.2 예제 9: shm_open — 이름으로 만나는 공유 메모리</a></li><li class="l2"><a href="#8-mlock-mlockall-rt-루프에서-page-fault-없애기">8. mlock / mlockall — RT 루프에서 page fault 없애기</a></li><li class="l3"><a href="#8-1-직관">8.1 직관</a></li><li class="l3"><a href="#8-2-예제-10-mlockall-전후-비교-그리고-rlimit-함정">8.2 예제 10: mlockall 전후 비교, 그리고 RLIMIT 함정</a></li><li class="l3"><a href="#8-3-rt-앱의-메모리-초기화-관례-n2에서-다시">8.3 RT 앱의 메모리 초기화 관례 (N2에서 다시)</a></li><li class="l2"><a href="#9-메모리-사용량-제대로-읽기-rss-pss-proc-meminfo">9. 메모리 사용량 제대로 읽기 — RSS, PSS, /proc/meminfo</a></li><li class="l3"><a href="#9-1-rss의-함정">9.1 RSS의 함정</a></li><li class="l3"><a href="#9-2-예제-11-32-mib를-4개-프로세스가-공유하면">9.2 예제 11: 32 MiB를 4개 프로세스가 공유하면</a></li><li class="l3"><a href="#9-3-smaps_rollup과-pmap">9.3 smaps_rollup과 pmap</a></li><li class="l3"><a href="#9-4-proc-meminfo-주요-필드">9.4 /proc/meminfo 주요 필드</a></li><li class="l2"><a href="#10-huge-page-간단히">10. Huge page 간단히</a></li><li class="l3"><a href="#예제-15-map_hugetlb">예제 15: MAP_HUGETLB</a></li><li class="l2"><a href="#11-read-vs-mmap-언제-무엇이-빠른가">11. read() vs mmap — 언제 무엇이 빠른가</a></li><li class="l3"><a href="#11-1-직관">11.1 직관</a></li><li class="l3"><a href="#11-2-예제-13-256-mib-파일을-읽어-합계-내기">11.2 예제 13: 256 MiB 파일을 읽어 합계 내기</a></li><li class="l2"><a href="#12-장치-메모리-mmap과-zero-copy-카메라-dev-mem-uio">12. 장치 메모리 mmap과 zero-copy — 카메라, /dev/mem, UIO</a></li><li class="l3"><a href="#12-1-직관-dma-버퍼에-창문-내기">12.1 직관: DMA 버퍼에 창문 내기</a></li><li class="l3"><a href="#12-2-v4l2-mmap-흐름-코드-스케치">12.2 V4L2 MMAP 흐름 (코드 스케치)</a></li><li class="l3"><a href="#12-3-예제-14-dev-mem으로-mmio-레지스터-읽기">12.3 예제 14: /dev/mem으로 MMIO 레지스터 읽기</a></li><li class="l3"><a href="#12-4-uio-dev-mem의-정식-버전">12.4 UIO — /dev/mem의 정식 버전</a></li><li class="l3"><a href="#12-5-캐시-속성-mmio를-캐시된-메모리로-매핑하면-안-되는-이유">12.5 캐시 속성 — MMIO를 캐시된 메모리로 매핑하면 안 되는 이유</a></li><li class="l3"><a href="#12-6-드라이버-쪽-mmap-미리보기-g5-h9">12.6 드라이버 쪽 .mmap 미리보기 (G5, H9)</a></li><li class="l2"><a href="#13-커널-안에서는-무슨-일이-일어나나">13. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#14-embedded-실무에서-다시-보기">14. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#14-1-카메라-4대를-돌리는-로봇-메모리-예산">14.1 카메라 4대를 돌리는 로봇: 메모리 예산</a></li><li class="l3"><a href="#14-2-1-khz-모터-제어-루프의-지터">14.2 1 kHz 모터 제어 루프의 지터</a></li><li class="l3"><a href="#14-3-메모리-누수-같아요">14.3 "메모리 누수 같아요"</a></li><li class="l3"><a href="#14-4-설정-파일을-mmap으로-쓰다-전원-차단">14.4 설정 파일을 mmap으로 쓰다 전원 차단</a></li><li class="l2"><a href="#15-흔한-실수와-증상">15. 흔한 실수와 증상</a></li><li class="l2"><a href="#16-면접에서-이렇게-말한다">16. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#17-직접-해보기">17. 직접 해보기</a></li><li class="l2"><a href="#18-용어-사전">18. 용어 사전</a></li><li class="l2"><a href="#19-요약-체크리스트">19. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

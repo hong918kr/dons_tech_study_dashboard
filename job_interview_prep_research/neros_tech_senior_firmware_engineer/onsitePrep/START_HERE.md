@@ -2,6 +2,10 @@
 
 > 온사이트 구성은 **Tour 30분 → 내 경력 발표 1시간 → 1:1 기술 여러 개**(C/C++ · ring buffer · generic system design)다. 날짜는 아직 미정. **발표와 ring buffer가 가장 오래 걸리니 그 둘부터** 시작한다. 남은 시간에 맞는 코스 하나만 골라 위에서부터 내려간다.
 
+## 🧾 10-08 technical screen 반영 (먼저 읽기)
+
+> 스크린은 **C 코딩만**: ring buffer(외부 버퍼 · bulk all-or-nothing · peek offset) → 보너스 extract_packet(CRC). Don 자평 잘 풀었음. 들은 정보: **FW 17명 · Test 3명 · + full stack**. 재구성 · 참고 풀이 · **온사이트 우선순위(발표 → C 심화 → 테스트 인프라 system design → factory test FW 비전)**: [L09](../../technicalScreenPrep/site/lecture/2026-10-09_L09_screen_recap.html)
+
 ## ⏱️ 지금 바로 (결과 통보 전, 2~3시간)
 
 | 순서 | 시간 | 볼 것 | 왜 |

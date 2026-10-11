@@ -1,0 +1,1646 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>E3. 커널 모듈 (LKM) — 만들고, 넣고, 빼고, 서로 부르기</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="E/2026-10-10_E3_kernel_modules">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">E. 커널 구조 · 개발 기본 · E3. 커널 모듈 (LKM) — 만들고, 넣고, 빼고, 서로 부르기</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">E. 커널 구조 · 개발 기본 · Kernel Basics</div>
+      <h1>E3. 커널 모듈 (LKM) — 만들고, 넣고, 빼고, 서로 부르기</h1>
+      <div class="meta"><span>183분 읽기</span><span>2113줄</span><span>61개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: hello 모듈을 화이트보드에 쓰고 out-of-tree Makefile로 빌드해 QEMU 게스트에서 <code>insmod</code>/<code>rmmod</code>할 수 있다 · <code>modinfo</code>의 vermagic·depends·parm·alias가 어디서 오는지, <code>insmod</code>와 <code>modprobe</code>(depmod 색인)가 어떻게 다른지 설명할 수 있다 · 두 모듈 사이에 <code>EXPORT_SYMBOL_GPL</code>/네임스페이스로 함수를 내보내고, 로드 순서·refcount·"in use"·"Unknown symbol"을 재현하고 고칠 수 있다 · <code>finit_module</code> → <code>load_module</code> → <code>do_init_module</code> 경로와 taint 플래그(O, P, E)를 소스 이름 그대로 말할 수 있다 <strong>왜 필요한가</strong>: 드라이버 면접의 첫 실습 질문은 거의 항상 "hello world 모듈을 써 보라"이고, 입사 첫 주에 벤더 BSP의 <code>.ko</code>가 "Unknown symbol"·"version magic"·"Module is in use"로 안 올라가는 장면을 반드시 만난다 <strong>Don 기준 난이도</strong>: 링커·심볼·재배치·init 순서는 펌웨어에서 이미 안다 / 새로 배울 부분은 "실행 중인 커널에 링크를 런타임에 한다"는 점, 그 링크를 검사하는 장치들(vermagic, Module.symvers, GPL 심볼, 네임스페이스), 그리고 refcount로 언로드를 막는 규칙 <strong>선행 노트</strong>: B3(ELF와 링킹), C6(커널 시작·initcall), E1(커널 구조), E2(설정과 빌드 — Kbuild <code>obj-m</code>) — E4(커널 프로그래밍 제약)·E5(커널 C 관용구)·G3(platform driver)로 이어진다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>Don의 SSD 펌웨어를 떠올려 보자. <code>main.c</code>, <code>nand_drv.c</code>, <code>nvme.c</code>를 전부 컴파일해서 링커 스크립트로 <strong>한 번에</strong> 링크하면 <code>firmware.elf</code>가 나온다. 모든 함수 주소가 빌드 때 확정된다. 기능 하나를 고치려면 다시 빌드하고 다시 플래시한다.</p>
+<p>Linux 커널도 기본은 똑같다. <code>vmlinux</code>(= <code>Image</code>)는 수천 개의 <code>.o</code>를 한 번에 링크한 거대한 펌웨어다. 그런데 Linux에는 <strong>실행 중인 커널에 새 코드를 끼워 넣는 장치</strong>가 하나 더 있다. 그게 <strong>로더블 커널 모듈(LKM, Loadable Kernel Module)</strong> 이고 파일 확장자는 <code>.ko</code>(kernel object)다.</p>
+<ul><li><code>.ko</code>는 <strong>아직 링크가 덜 끝난 ELF 오브젝트</strong>다. 커널 함수(<code>printk</code>, <code>kmalloc</code> …)를 부르는 자리가 "미해결 심볼 + 재배치 항목"으로 남아 있다.</li><li><code>insmod</code>가 이 파일을 커널에 넘기면, 커널 안의 <strong>모듈 로더</strong>(<code>kernel/module/main.c</code>)가 메모리를 잡고, 심볼을 커널 심볼 표에서 찾아 주소를 채우고(재배치), <code>init</code> 함수를 부른다. <strong>링커가 하던 일을 커널이 런타임에 한다.</strong></li><li>올라간 모듈은 커널과 <strong>같은 주소 공간, 같은 특권(EL1)</strong> 에서 돈다. 유저 프로세스처럼 격리된 게 아니다. 모듈의 NULL 역참조는 곧 커널 Oops다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="165" y="24" text-anchor="middle" font-size="13" font-weight="bold">펌웨어 — 빌드 때 한 번 링크</text>
+  <text x="510" y="24" text-anchor="middle" font-size="13" font-weight="bold">Linux — 실행 중에 기능을 링크</text>
+  <line x1="335" y1="10" x2="335" y2="255" stroke="#888" stroke-dasharray="4 4"/>
+  <rect x="30" y="44" width="120" height="34" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="90" y="66" text-anchor="middle" font-size="12">main.c</text>
+  <rect x="170" y="44" width="120" height="34" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="230" y="66" text-anchor="middle" font-size="12">nand_drv.c</text>
+  <line x1="90" y1="78" x2="140" y2="108" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="230" y1="78" x2="180" y2="108" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="30" y="110" width="260" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="160" y="132" text-anchor="middle" font-size="12">ld + linker script</text>
+  <line x1="160" y1="144" x2="160" y2="174" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="30" y="176" width="260" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="160" y="198" text-anchor="middle" font-size="12">firmware.elf — 모든 주소 확정</text>
+  <text x="160" y="240" text-anchor="middle" font-size="12">기능 추가 = 다시 빌드 · 다시 플래시</text>
+  <rect x="360" y="44" width="140" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="430" y="66" text-anchor="middle" font-size="12">vmlinux (실행 중)</text>
+  <rect x="520" y="44" width="140" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="590" y="66" text-anchor="middle" font-size="12">e3_user.ko</text>
+  <line x1="430" y1="78" x2="470" y2="108" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="590" y1="78" x2="550" y2="108" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="395" y="98" text-anchor="middle" font-size="12">심볼 표</text>
+  <text x="630" y="98" text-anchor="middle" font-size="12">insmod</text>
+  <rect x="360" y="110" width="300" height="50" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="510" y="130" text-anchor="middle" font-size="12">module loader (kernel/module/main.c)</text>
+  <text x="510" y="150" text-anchor="middle" font-size="12">심볼 해석 + 재배치 + init 호출</text>
+  <line x1="510" y1="160" x2="510" y2="184" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="360" y="186" width="300" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="510" y="208" text-anchor="middle" font-size="12">커널 일부가 된 모듈 (같은 주소 공간·특권)</text>
+  <text x="510" y="246" text-anchor="middle" font-size="12">rmmod로 다시 뺀다 — 재부팅 없음</text>
+  <text x="340" y="284" text-anchor="middle" font-size="12">둘 다 "같은 주소 공간, 같은 특권"이다. 차이는 링크 시점뿐이다.</text>
+</svg></figure>
+<p>그림 1 — 왼쪽은 Don이 아는 펌웨어 빌드, 오른쪽은 Linux 모듈. 모듈 로더는 "커널 안에 들어 있는 링커 + 로더"다.</p>
+<p>모듈을 쓰는 이유는 실무적이다.</p>
+<div class="tw"><table><thead><tr><th>이유</th><th>장면</th></tr></thead><tbody><tr><td>개발 속도</td><td>드라이버 하나 고칠 때마다 커널 전체를 다시 굽고 재부팅하지 않는다. <code>rmmod</code> → 빌드 → <code>insmod</code>로 몇 초 만에 반복한다</td></tr><tr><td>이미지 크기·부팅 시간</td><td>배포판 커널은 수천 개 드라이버를 <code>=m</code>으로 두고 장치가 있을 때만 올린다 (D3 §9의 modalias 자동 로딩)</td></tr><tr><td>하드웨어 변형</td><td>같은 rootfs를 IMU 칩이 다른 보드 리비전 두 개에 쓴다. 맞는 모듈만 로드된다</td></tr><tr><td>벤더 코드</td><td>GPU·Wi-Fi·NPU 벤더는 드라이버를 out-of-tree <code>.ko</code>로 준다. 이걸 우리 커널에 맞춰 빌드하는 게 BSP 엔지니어의 일상이다</td></tr></tbody></table></div>
+<p>이 노트에서는 실제로 모듈 9개(<code>e3_hello</code>, <code>e3_multi</code>, <code>e3_param</code>, <code>e3_fail</code>, <code>e3_hold</code>, <code>e3_lib</code>, <code>e3_user</code>, <code>e3_prop</code>, 실패용 <code>e3_nolic</code>)를 만들어 <strong>QEMU 게스트 커널에 넣고 빼면서</strong> 모든 규칙을 눈으로 확인한다.</p>
+<blockquote><p>실행 환경: 빌드는 Lima VM <code>elinux</code>(aarch64, 호스트 커널 <code>uname -r</code> = <code>7.0.0-38-generic</code>)에서 랩의 커널 빌드 트리 <code>/var/lab/out/linux-build</code>(Linux <strong>6.18.55</strong>, <code>Module.symvers</code> 있음)를 대상으로 했다. 실행은 전부 QEMU <code>virt</code>(cortex-a57, 512 MB, TCG)로 부팅한 <strong>게스트 커널 6.18.55</strong> + BusyBox 1.37 initramfs 안이다. VM 호스트 커널(7.0)에는 모듈을 하나도 넣지 않았다. 커널 소스 인용은 <code>/var/lab/src/linux-6.18.55</code>에서 grep으로 확인했다. 모듈 주소·타임스탬프·<code>umod=</code> 포인터는 실행마다 다르다.</p></blockquote>
+<h3 id="0-1-실습-도구-빌드하고-qemu에-넣는-두-스크립트">0.1 실습 도구 — 빌드하고 QEMU에 넣는 두 스크립트<a class="anchor" href="#0-1-실습-도구-빌드하고-qemu에-넣는-두-스크립트" aria-label="link">#</a></h3>
+<p>모든 예제는 같은 방식으로 돈다. VM의 <code>/var/tmp/E3/</code> 아래에서 모듈을 빌드하고, 랩 rootfs를 복사해 <code>.ko</code>와 게스트용 스크립트를 넣고, <code>LAB_CMD=sh~/e3/tN.sh</code>로 부팅하면 스크립트 하나를 실행하고 자동으로 꺼진다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># mkinitrd.sh — 랩 rootfs 복사 → .ko·스크립트 추가 → cpio로 다시 묶기
+W=/var/tmp/E3; R=$W/rootfs
+rm -rf $R &amp;&amp; mkdir -p $R &amp;&amp; cp -a /var/lab/build/rootfs/. $R/
+mkdir -p $R/e3 $R/lib/modules/6.18.55/extra
+cp $W/base/*.ko $W/lib/e3_lib.ko $W/user/e3_user.ko $W/prop/e3_prop.ko \
+   $W/patched/*.ko /var/lab/build/linux/lib/crc/crc-ccitt.ko $R/e3/
+cp $W/lib/e3_lib.ko $W/user/e3_user.ko $W/base/e3_param.ko $W/base/e3_hello.ko \
+   $R/lib/modules/6.18.55/extra/
+cp /Users/donh/.elinux_scratch/E3/guest/*.sh $R/e3/
+(cd $R &amp;&amp; find . | cpio -o -H newc --quiet | gzip) &gt; $W/i.gz</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code># boot.sh &lt;게스트 스크립트&gt; [추가 커널 인자]
+S=$1; shift
+timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic \
+  -kernel /var/lab/out/Image -initrd /var/tmp/E3/i.gz \
+  -append "console=ttyAMA0 quiet $* LAB_CMD=sh~/e3/$S" 2&gt;&amp;1 | tr -d '\r' \
+  | sed -n '/lab initramfs/,$p' | grep -v "reboot: Power down"</code></pre></figure>
+<p><code>quiet</code>라서 콘솔에는 <code>pr_warn</code>/<code>pr_err</code>급 메시지만 섞여 나오고, <code>pr_info</code>는 스크립트 안에서 <code>dmesg</code>로 꺼내 본다. 게스트에는 <code>/lib/modules</code>가 비어 있고(랩 README: 랩 커널의 <code>.ko</code>는 initramfs에 설치되지 않음), 우리가 넣은 것만 있다.</p>
+<hr>
+<h2 id="1-모듈의-해부-hello-모듈-한-개">1. 모듈의 해부 — hello 모듈 한 개<a class="anchor" href="#1-모듈의-해부-hello-모듈-한-개" aria-label="link">#</a></h2>
+<h3 id="1-1-직관">1.1 직관<a class="anchor" href="#1-1-직관" aria-label="link">#</a></h3>
+<p>펌웨어의 드라이버 모듈은 보통 <code>xxx_init()</code>과 (가끔) <code>xxx_deinit()</code>을 가진다. <code>main()</code>이 순서대로 init을 부른다. 커널 모듈도 같다. 차이는 <strong>누가 init을 부르느냐</strong>다. 모듈은 <code>main()</code>이 없고, <strong>"로드될 때 이걸 불러 줘", "빠질 때 이걸 불러 줘"</strong> 라고 두 함수를 커널에 등록만 한다.</p>
+<h3 id="1-2-예제-1-e3_hello-c와-out-of-tree-makefile">1.2 예제 1 — <code>e3_hello.c</code>와 out-of-tree Makefile<a class="anchor" href="#1-2-예제-1-e3_hello-c와-out-of-tree-makefile" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 모듈이 가져야 할 최소 구성 — init/exit 함수, <code>module_init</code>/<code>module_exit</code> 등록, <code>__init</code>/<code>__exit</code> 섹션 표시, 메타데이터 매크로 — 와 커널 트리 밖에서 빌드하는 Makefile.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* e3_hello: 가장 작은 모듈 — init/exit, __init/__exit, 메타데이터 */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/init.h&gt;
+#include &lt;linux/module.h&gt;
+#include &lt;linux/printk.h&gt;
+
+static int __init e3_hello_init(void)
+{
+	/* init 실행 중에는 MODULE_STATE_COMING(1) 상태다 */
+	pr_info("hello from init, state=%d, fn=%ps\n",
+		THIS_MODULE-&gt;state, e3_hello_init);
+	return 0;		/* 0 = 성공. 음수 errno = 로드 실패 */
+}
+
+static void __exit e3_hello_exit(void)
+{
+	pr_info("bye from exit, state=%d\n", THIS_MODULE-&gt;state);
+}
+
+module_init(e3_hello_init);
+module_exit(e3_hello_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Don &lt;don@example.com&gt;");
+MODULE_DESCRIPTION("E3 minimal hello module");
+MODULE_VERSION("1.0");</code></pre></figure>
+<figure class="code"><span class="lang">make</span><pre><code>obj-m := e3_hello.o
+KDIR ?= /var/lab/out/linux-build
+
+all:
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
+clean:
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>mkdir -p /var/tmp/E3/hello &amp;&amp; cp ~/.elinux_scratch/E3/hello/* /var/tmp/E3/hello/
+cd /var/tmp/E3/hello &amp;&amp; make
+ls</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>make -C /var/lab/out/linux-build M=/var/tmp/E3/hello modules
+make[1]: Entering directory '/var/lab/build/linux'
+make[2]: Entering directory '/var/tmp/E3/hello'
+  CC [M]  e3_hello.o
+  MODPOST Module.symvers
+  CC [M]  e3_hello.mod.o
+  CC [M]  .module-common.o
+  LD [M]  e3_hello.ko
+make[2]: Leaving directory '/var/tmp/E3/hello'
+make[1]: Leaving directory '/var/lab/build/linux'
+Makefile
+Module.symvers
+e3_hello.c
+e3_hello.ko
+e3_hello.mod
+e3_hello.mod.c
+e3_hello.mod.o
+e3_hello.o
+modules.order</code></pre></figure>
+<p>출력에서 볼 것: 경고 0개. <code>CROSS_COMPILE</code>을 안 줬는데도 되는 것은 VM이 arm64이고 대상 커널도 arm64이기 때문이다(x86 PC에서 보드용으로 빌드하면 <code>ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-</code>가 필요하다, B1). 빌드는 4단계다: 내 <code>.c</code> → <code>.o</code>, <strong>modpost</strong>(심볼·라이선스 검사, <code>.mod.c</code> 생성), <code>.mod.c</code> → <code>.mod.o</code>, 그리고 셋을 묶어 <code>.ko</code>.</p>
+<p>코드 한 줄씩:</p>
+<div class="tw"><table><thead><tr><th>요소</th><th>뜻</th><th>빠뜨리면</th></tr></thead><tbody><tr><td><code>module_init(fn)</code></td><td>"로드되면 <code>fn</code>을 불러라". 모듈로 빌드되면 <code>fn</code>의 별칭 <code>init_module</code>을 만든다</td><td>init이 안 불린다(로드는 됨)</td></tr><tr><td><code>module_exit(fn)</code></td><td>"언로드할 때 <code>fn</code>을 불러라". 별칭 <code>cleanup_module</code></td><td><strong>rmmod 불가</strong> — <code>[permanent]</code> (§4)</td></tr><tr><td><code>__init</code></td><td>함수를 <code>.init.text</code> 섹션에 넣는다 → init이 끝나면 메모리를 버린다</td><td>동작은 같고 메모리만 낭비</td></tr><tr><td><code>__exit</code></td><td><code>.exit.text</code>에 넣는다. built-in이면 아예 버린다(쓸 일이 없으니까)</td><td>동작은 같다</td></tr><tr><td><code>MODULE_LICENSE</code></td><td>라이선스 문자열. GPL 호환이면 GPL 전용 심볼을 쓸 수 있다</td><td><strong>빌드 에러</strong> (6.18 modpost, §9)</td></tr><tr><td><code>MODULE_DESCRIPTION</code></td><td>설명</td><td>modpost <strong>경고</strong> (아래)</td></tr><tr><td><code>MODULE_AUTHOR</code>, <code>MODULE_VERSION</code></td><td>메타데이터. <code>VERSION</code>이 있으면 <code>srcversion</code>도 붙는다</td><td>상관없음</td></tr><tr><td><code>pr_fmt</code></td><td>모든 <code>pr_*()</code> 앞에 <code>"e3_hello: "</code>를 붙인다</td><td>로그에서 모듈을 구분하기 어렵다</td></tr></tbody></table></div>
+<blockquote><p>함정: 처음 base 디렉터리를 빌드할 때 <code>e3_fail.c</code>에 설명을 안 넣었더니 modpost가 <code>WARNING: modpost: missing MODULE_DESCRIPTION() in e3_fail.o</code>를 냈다. 6.x 최근 커널은 설명 없는 모듈을 경고한다. "경고 0개" 규칙을 지키려면 <code>MODULE_DESCRIPTION</code>도 필수로 생각하자.</p></blockquote>
+<h3 id="1-3-out-of-tree-빌드는-어떻게-굴러가나">1.3 out-of-tree 빌드는 어떻게 굴러가나<a class="anchor" href="#1-3-out-of-tree-빌드는-어떻게-굴러가나" aria-label="link">#</a></h3>
+<p><code>make -C $(KDIR) M=$(CURDIR) modules</code>는 "커널 빌드 트리로 가서(<code>-C</code>), 외부 디렉터리(<code>M=</code>)의 모듈을 빌드해라"다. 커널의 최상위 Makefile이 우리 디렉터리의 <code>Makefile</code>(또는 <code>Kbuild</code> 파일)을 <strong>Kbuild 문법으로 다시 읽어서</strong> <code>obj-m</code> 목록을 얻는다. 그래서 같은 파일 안에 "사람이 치는 <code>make</code> 규칙(<code>all:</code>)"과 "Kbuild가 읽는 <code>obj-m</code>"이 같이 있다. 큰 프로젝트는 둘을 나눠 <code>Kbuild</code> 파일에 <code>obj-m</code>만 두기도 한다.</p>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="340" y="28" text-anchor="middle" font-size="13" font-weight="bold">make -C /var/lab/out/linux-build M=$PWD modules</text>
+  <rect x="10" y="50" width="118" height="54" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="69" y="72" text-anchor="middle" font-size="12">e3_hello.c</text>
+  <text x="69" y="92" text-anchor="middle" font-size="12">obj-m := x.o</text>
+  <rect x="146" y="50" width="118" height="54" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="205" y="72" text-anchor="middle" font-size="12">CC [M]</text>
+  <text x="205" y="92" text-anchor="middle" font-size="12">e3_hello.o</text>
+  <rect x="282" y="50" width="118" height="54" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="341" y="72" text-anchor="middle" font-size="12">MODPOST</text>
+  <text x="341" y="92" text-anchor="middle" font-size="12">심볼·라이선스 검사</text>
+  <rect x="418" y="50" width="118" height="54" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="477" y="72" text-anchor="middle" font-size="12">e3_hello.mod.o</text>
+  <text x="477" y="92" text-anchor="middle" font-size="12">+ module-common</text>
+  <rect x="554" y="50" width="118" height="54" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="613" y="72" text-anchor="middle" font-size="12">LD [M]</text>
+  <text x="613" y="92" text-anchor="middle" font-size="12">e3_hello.ko</text>
+  <line x1="128" y1="77" x2="144" y2="77" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="264" y1="77" x2="280" y2="77" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="400" y1="77" x2="416" y2="77" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="536" y1="77" x2="552" y2="77" stroke="currentColor" marker-end="url(#ah2)"/>
+  <rect x="146" y="150" width="390" height="48" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="341" y="170" text-anchor="middle" font-size="12">커널 빌드 트리 (/var/lab/out/linux-build)</text>
+  <text x="341" y="189" text-anchor="middle" font-size="12">헤더 · .config · Kbuild 규칙 · Module.symvers · vermagic</text>
+  <line x1="205" y1="150" x2="205" y2="106" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah2)"/>
+  <line x1="341" y1="150" x2="341" y2="106" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah2)"/>
+  <line x1="477" y1="150" x2="477" y2="106" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah2)"/>
+  <text x="340" y="230" text-anchor="middle" font-size="12">커널 쪽 Kbuild가 내 Makefile을 다시 읽어 obj-m 목록을 빌드한다</text>
+</svg></figure>
+<p>그림 2 — out-of-tree 빌드. 모듈은 <strong>반드시 대상 커널의 빌드 트리</strong>(같은 <code>.config</code>, 같은 헤더, 같은 <code>Module.symvers</code>)로 빌드해야 한다. 다른 트리로 빌드한 <code>.ko</code>는 §10의 vermagic 검사에서 튕긴다.</p>
+<p>빌드 트리에 무엇이 있어야 하나: 전체 커널 빌드 결과까지는 필요 없고 <code>make modules_prepare</code>(설정 헤더·<code>scripts/mod/modpost</code> 같은 도구 생성)면 빌드는 된다. 다만 <code>Module.symvers</code>가 없으면 modpost가 커널 심볼의 존재·GPL 여부를 검사하지 못해 경고가 쏟아진다. 랩은 <code>make modules</code>까지 돌려서 <code>Module.symvers</code>(20,778줄)가 있다. 데스크톱 배포판에서는 이 역할을 <code>/lib/modules/$(uname -r)/build</code> 심볼릭 링크(→ <code>linux-headers</code> 패키지)가 한다.</p>
+<hr>
+<h2 id="2-ko-안에는-무엇이-들어-있나">2. <code>.ko</code> 안에는 무엇이 들어 있나<a class="anchor" href="#2-ko-안에는-무엇이-들어-있나" aria-label="link">#</a></h2>
+<h3 id="2-1-예제-2-modinfo와-mod-c">2.1 예제 2 — <code>modinfo</code>와 <code>.mod.c</code><a class="anchor" href="#2-1-예제-2-modinfo와-mod-c" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>modinfo</code>가 보여 주는 키들이 소스의 어느 매크로에서, 또는 빌드 시스템의 어느 단계에서 왔는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/E3/base &amp;&amp; modinfo e3_hello.ko
+strings -a e3_hello.ko | grep -E "^(license|author|description|version|srcversion|depends|name|vermagic)="
+head -30 e3_hello.mod.c</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>filename:       /var/tmp/E3/base/e3_hello.ko
+version:        1.0
+description:    E3 minimal hello module
+author:         Don &lt;don@example.com&gt;
+license:        GPL
+srcversion:     FF3FE46F7386678160F9951
+depends:        
+name:           e3_hello
+vermagic:       6.18.55 SMP preempt mod_unload aarch64
+version=1.0
+description=E3 minimal hello module
+author=Don &lt;don@example.com&gt;
+license=GPL
+srcversion=FF3FE46F7386678160F9951
+depends=
+name=e3_hello
+vermagic=6.18.55 SMP preempt mod_unload aarch64</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>#include &lt;linux/module.h&gt;
+#include &lt;linux/export-internal.h&gt;
+#include &lt;linux/compiler.h&gt;
+
+MODULE_INFO(name, KBUILD_MODNAME);
+
+__visible struct module __this_module
+__section(".gnu.linkonce.this_module") = {
+	.name = KBUILD_MODNAME,
+	.init = init_module,
+#ifdef CONFIG_MODULE_UNLOAD
+	.exit = cleanup_module,
+#endif
+	.arch = MODULE_ARCH_INIT,
+};
+
+
+MODULE_INFO(depends, "");
+
+
+MODULE_INFO(srcversion, "FF3FE46F7386678160F9951");</code></pre></figure>
+<p>출력에서 볼 것: <code>modinfo</code>는 마법이 아니라 <code>.modinfo</code> 섹션의 <code>key=value\0</code> 문자열들을 읽어서 보여 줄 뿐이다(<code>strings</code>로도 그대로 보인다). 각 키의 출처:</p>
+<div class="tw"><table><thead><tr><th>키</th><th>누가 넣나</th><th>쓰임</th></tr></thead><tbody><tr><td><code>license</code>, <code>author</code>, <code>description</code>, <code>version</code></td><td>내 소스의 <code>MODULE_*</code> 매크로</td><td>license는 커널이 GPL 심볼 허용·taint 판단에 쓴다</td></tr><tr><td><code>parm</code></td><td><code>MODULE_PARM_DESC</code> + <code>module_param</code>의 타입</td><td>사람용 문서 (§5)</td></tr><tr><td><code>alias</code></td><td><code>MODULE_DEVICE_TABLE</code></td><td>modprobe 자동 로딩 (D3 §9)</td></tr><tr><td><code>name</code></td><td><code>.mod.c</code>의 <code>MODULE_INFO(name, KBUILD_MODNAME)</code></td><td>모듈 이름 = 파일 이름에서 <code>-</code>를 <code>_</code>로</td></tr><tr><td><code>depends</code></td><td>modpost가 "다른 <strong>모듈</strong>에서 가져다 쓰는 심볼"을 보고 계산</td><td>depmod가 의존성 색인에 씀 (§11)</td></tr><tr><td><code>srcversion</code></td><td>modpost가 소스 파일들의 해시로 계산 (<code>MODULE_VERSION</code>이 있거나 <code>CONFIG_MODULE_SRCVERSION_ALL</code>일 때)</td><td>"같은 버전 문자열인데 소스가 다른" 빌드를 구분</td></tr><tr><td><code>vermagic</code></td><td><code>scripts/module-common.c</code>의 <code>MODULE_INFO(vermagic, VERMAGIC_STRING)</code> → <code>.module-common.o</code></td><td><strong>로드 때 커널과 비교</strong> (§10)</td></tr><tr><td><code>intree</code></td><td>커널 트리 안에서 빌드될 때만 <code>Y</code></td><td>없으면 taint <code>O</code> (§9)</td></tr></tbody></table></div>
+<p><code>.mod.c</code>가 핵심이다. modpost가 만들어 주는 이 C 파일이 <code>struct module __this_module</code>을 <code>.gnu.linkonce.this_module</code> 섹션에 정의하고, 그 <code>.init</code>/<code>.exit</code> 필드에 <code>init_module</code>/<code>cleanup_module</code>(= <code>module_init</code>/<code>module_exit</code>가 만든 별칭)을 꽂는다. 커널 로더는 이 섹션을 찾아 <code>struct module</code>로 쓴다. 즉 <strong><code>THIS_MODULE</code>은 이 <code>__this_module</code>의 주소</strong>다.</p>
+<p>vermagic의 <code>6.18.55 SMP preempt mod_unload aarch64</code>는 커널 버전 + 핵심 설정(SMP, 선점 모델, 언로드 지원, 아키텍처)이다. 이 값들이 다르면 <code>struct module</code> 배치나 락 구현이 달라져서 모듈이 커널 자료구조를 잘못 읽게 된다.</p>
+<h3 id="2-2-예제-3-__init이-정말-다른-섹션에-들어가나">2.2 예제 3 — <code>__init</code>이 정말 다른 섹션에 들어가나<a class="anchor" href="#2-2-예제-3-__init이-정말-다른-섹션에-들어가나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>__init</code>/<code>__exit</code>가 붙은 함수가 어느 섹션에 있고, <code>init_module</code>이 정말 같은 함수의 별칭인지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>readelf -sW e3_hello.ko | grep -E "e3_hello|__this_module|init_module|cleanup_module"
+readelf -SW e3_hello.ko | grep -E "init.text|exit.text|modinfo|this_module|\.text "</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>    29: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS e3_hello.c
+    32: 0000000000000000    56 FUNC    LOCAL  DEFAULT   10 e3_hello_init
+    34: 0000000000000000    44 FUNC    LOCAL  DEFAULT   12 e3_hello_exit
+    36: 0000000000000000     8 OBJECT  LOCAL  DEFAULT   14 __UNIQUE_ID___addressable_cleanup_module414
+    38: 0000000000000000     8 OBJECT  LOCAL  DEFAULT   16 __UNIQUE_ID___addressable_init_module413
+    44: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS e3_hello.mod.c
+    54: 0000000000000000  1152 OBJECT  GLOBAL DEFAULT   35 __this_module
+    55: 0000000000000000    44 FUNC    GLOBAL DEFAULT   12 cleanup_module
+    56: 0000000000000000    56 FUNC    GLOBAL DEFAULT   10 init_module
+  [ 4] .init.text.ftrace_trampoline PROGBITS        0000000000000000 000043 000001 00   A  0   0  1
+  [ 6] .text             PROGBITS        0000000000000000 000044 000000 00  AX  0   0  1
+  [10] .init.text        PROGBITS        0000000000000000 0000a0 000038 00  AX  0   0  4
+  [11] .rela.init.text   RELA            0000000000000000 005800 0000a8 18   I 39  10  8
+  [12] .exit.text        PROGBITS        0000000000000000 0000d8 00002c 00  AX  0   0  4
+  [13] .rela.exit.text   RELA            0000000000000000 0058a8 000078 18   I 39  12  8
+  [18] .modinfo          PROGBITS        0000000000000000 000118 0000c3 00   A  0   0  1
+  [35] .gnu.linkonce.this_module PROGBITS        0000000000000000 004c48 000480 00  WA  0   0 64
+  [36] .rela.gnu.linkonce.this_module RELA            0000000000000000 008a28 000030 18   I 39  35  8</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>e3_hello_init</code>(56바이트)은 섹션 10 = <code>.init.text</code>, <code>e3_hello_exit</code>(44바이트)은 섹션 12 = <code>.exit.text</code>. 일반 <code>.text</code>는 크기 0이다(이 모듈엔 다른 함수가 없다).</li><li><code>init_module</code>과 <code>e3_hello_init</code>이 <strong>같은 섹션·같은 크기</strong>다 — <code>module_init()</code> 매크로가 만든 별칭이다. 6.18 <code>include/linux/module.h</code>(모듈 빌드 쪽 정의)는 이렇다:</li></ul>
+<figure class="code"><span class="lang">c</span><pre><code>#define module_init(initfn)					\
+	static inline initcall_t __maybe_unused __inittest(void)		\
+	{ return initfn; }					\
+	int init_module(void) __copy(initfn)			\
+		__attribute__((alias(#initfn)));		\
+	___ADDRESSABLE(init_module, __initdata);</code></pre></figure>
+<p><code>__inittest</code>는 "initfn이 <code>int (*)(void)</code> 타입인가"를 컴파일 때 검사하는 장치이고, <code>___ADDRESSABLE</code>이 위 심볼 표의 <code>__UNIQUE_ID___addressable_init_module413</code>을 만든다. 모듈 빌드에서는 <code>late_initcall(fn)</code>·<code>subsys_initcall(fn)</code>도 전부 <code>module_init(fn)</code>으로 바뀐다(같은 헤더) — 모듈에는 initcall 레벨이 없다.</p>
+<ul><li>모든 주소가 0이다. 아직 링크(재배치)가 안 끝난 relocatable ELF라서다. <code>.rela.init.text</code>가 "이 위치에 <code>_printk</code> 주소를 채워 넣어라" 같은 재배치 목록이다. 이 빈칸을 채우는 게 커널 로더의 일이다(§13).</li><li><code>.gnu.linkonce.this_module</code>이 0x480 = 1152바이트 = <code>sizeof(struct module)</code>이다.</li></ul>
+<h3 id="2-3-ko-크기-파일-38-kb-중-실제-메모리에-올라가는-것은">2.3 <code>.ko</code> 크기 — 파일 38 KB 중 실제 메모리에 올라가는 것은?<a class="anchor" href="#2-3-ko-크기-파일-38-kb-중-실제-메모리에-올라가는-것은" aria-label="link">#</a></h3>
+<p><code>readelf -SW</code> 섹션 크기를 Python으로 분류하고(<code>.debug_*</code>와 그 <code>.rela</code>를 묶음), <code>strip --strip-debug</code> 결과와 게스트의 <code>/sys/module/e3_hello/coresize</code>를 같이 놓았다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>ls -l e3_hello.ko                                       # 38520
+cp e3_hello.ko /var/tmp/E3/e3_hello_s.ko &amp;&amp; strip --strip-debug /var/tmp/E3/e3_hello_s.ko
+ls -l /var/tmp/E3/e3_hello_s.ko                         # 5432
+readelf -SW e3_hello.ko | python3 -I -c "$CLASSIFY"     # 섹션 이름으로 범주를 나눠 합산 (.debug_* 와 .rela.debug_* → debug, 나머지 .rela.* → rela, .text/.init.text/.exit.text/.plt → code …)</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>-rw-rw-r-- 1 donh donh 38520 Oct 10 13:39 e3_hello.ko
+-rw-rw-r-- 1 donh donh 5432 Oct 10 13:41 /var/tmp/E3/e3_hello_s.ko
+{'other': 370, 'code': 104, 'rela': 384, 'modinfo': 195, 'debug(+rela)': 31364, 'this_module': 1152, 'symtab/strtab': 2174} 35743</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 640 380" xmlns="http://www.w3.org/2000/svg">
+  <text x="20" y="22" font-size="13" font-weight="bold">e3_hello.ko 파일 구성 (바이트, 합계 38,520)</text>
+  <line x1="225" y1="34" x2="225" y2="232" stroke="currentColor"/>
+  <text x="215" y="54" text-anchor="end" font-size="12">디버그 정보 .debug_*</text>
+  <rect x="225" y="42" width="360" height="16" fill="#4a7bd0"/>
+  <text x="580" y="54" text-anchor="end" font-size="12" fill="#fff">31,364</text>
+  <text x="215" y="78" text-anchor="end" font-size="12">ELF·섹션 헤더, 정렬</text>
+  <rect x="225" y="66" width="31.9" height="16" fill="#888"/>
+  <text x="262" y="78" font-size="12">2,777</text>
+  <text x="215" y="102" text-anchor="end" font-size="12">.symtab · .strtab</text>
+  <rect x="225" y="90" width="25" height="16" fill="#888"/>
+  <text x="256" y="102" font-size="12">2,174</text>
+  <text x="215" y="126" text-anchor="end" font-size="12">.gnu.linkonce.this_module</text>
+  <rect x="225" y="114" width="13.2" height="16" fill="#e08a3c"/>
+  <text x="244" y="126" font-size="12">1,152</text>
+  <text x="215" y="150" text-anchor="end" font-size="12">재배치 .rela.*</text>
+  <rect x="225" y="138" width="4.4" height="16" fill="#888"/>
+  <text x="236" y="150" font-size="12">384</text>
+  <text x="215" y="174" text-anchor="end" font-size="12">기타 (.rodata, .note)</text>
+  <rect x="225" y="162" width="4.3" height="16" fill="#888"/>
+  <text x="236" y="174" font-size="12">370</text>
+  <text x="215" y="198" text-anchor="end" font-size="12">.modinfo</text>
+  <rect x="225" y="186" width="2.2" height="16" fill="#e08a3c"/>
+  <text x="234" y="198" font-size="12">195</text>
+  <text x="215" y="222" text-anchor="end" font-size="12">코드 (.init/.exit.text)</text>
+  <rect x="225" y="210" width="1.2" height="16" fill="#3f9a6b"/>
+  <text x="232" y="222" font-size="12">104</text>
+  <text x="20" y="268" font-size="13" font-weight="bold">같은 모듈의 세 가지 크기</text>
+  <line x1="225" y1="278" x2="225" y2="362" stroke="currentColor"/>
+  <text x="215" y="296" text-anchor="end" font-size="12">.ko 파일</text>
+  <rect x="225" y="284" width="360" height="16" fill="#4a7bd0"/>
+  <text x="580" y="296" text-anchor="end" font-size="12" fill="#fff">38,520</text>
+  <text x="215" y="322" text-anchor="end" font-size="12">strip --strip-debug 후</text>
+  <rect x="225" y="310" width="50.8" height="16" fill="#3f9a6b"/>
+  <text x="282" y="322" font-size="12">5,432</text>
+  <text x="215" y="348" text-anchor="end" font-size="12">메모리 coresize (게스트)</text>
+  <rect x="225" y="336" width="114.8" height="16" fill="#e08a3c"/>
+  <text x="346" y="348" font-size="12">12,288 = 4 KB 페이지 3장</text>
+</svg></figure>
+<p>그림 3 — <code>e3_hello.ko</code>의 81%는 디버그 정보다. 실제 코드는 104바이트. 메모리에는 디버그 정보가 안 올라가지만, <code>CONFIG_STRICT_MODULE_RWX=y</code>라서 코드(RX)·읽기 전용(RO)·데이터(RW)를 <strong>페이지 단위로 따로</strong> 잡아 최소 3페이지 = 12,288바이트가 된다(<code>coresize</code>는 §3 예제 4의 실제 값).</p>
+<p>실무 연결: 제품 rootfs에 모듈을 넣을 때는 <code>make INSTALL_MOD_STRIP=1 modules_install</code>로 디버그 정보를 빼서 넣는다(Yocto·Buildroot가 기본으로 한다). 크래시 분석용으로는 strip 안 한 <code>.ko</code>를 따로 보관한다 — 펌웨어에서 <code>.elf</code>는 보관하고 <code>.bin</code>만 굽는 것과 같다.</p>
+<hr>
+<h2 id="3-넣고-보고-빼기-insmod-lsmod-rmmod">3. 넣고, 보고, 빼기 — <code>insmod</code> · <code>lsmod</code> · <code>rmmod</code><a class="anchor" href="#3-넣고-보고-빼기-insmod-lsmod-rmmod" aria-label="link">#</a></h2>
+<h3 id="3-1-예제-4-qemu-게스트에서-hello-모듈의-한-생애">3.1 예제 4 — QEMU 게스트에서 hello 모듈의 한 생애<a class="anchor" href="#3-1-예제-4-qemu-게스트에서-hello-모듈의-한-생애" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 로드 후 <code>/sys/module/&lt;이름&gt;/</code>에 생기는 것들, <code>/proc/kallsyms</code>에서 <code>__init</code> 함수가 사라지는 것, <code>lsmod</code> = <code>/proc/modules</code>, 언로드 후 흔적.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># guest t1.sh
+cd /e3
+echo "== insmod"; insmod e3_hello.ko; echo "insmod rc=$?"
+echo "== /sys/module/e3_hello"; ls /sys/module/e3_hello
+for f in initstate refcnt taint version srcversion coresize initsize; do echo "$f: $(cat /sys/module/e3_hello/$f)"; done
+echo "== sections"; ls -a /sys/module/e3_hello/sections
+echo "== kallsyms"; grep e3_hello /proc/kallsyms
+echo "== lsmod"; lsmod
+echo "== /proc/modules"; cat /proc/modules
+echo "== tainted: $(cat /proc/sys/kernel/tainted)"
+echo "== rmmod"; rmmod e3_hello; echo "rmmod rc=$?"; ls /sys/module/e3_hello 2&gt;&amp;1
+dmesg | grep e3_hello</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55 up 3.94s
+== insmod
+insmod rc=0
+== /sys/module/e3_hello
+coresize    initsize    notes       sections    taint       version
+holders     initstate   refcnt      srcversion  uevent
+initstate: live
+refcnt: 0
+taint: O
+version: 1.0
+srcversion: FF3FE46F7386678160F9951
+coresize: 12288
+initsize: 0
+== sections
+.                             .note.Linux
+..                            .note.gnu.build-id
+.exit.data                    .note.gnu.property
+.exit.text                    .plt
+.gnu.linkonce.this_module     .rodata.str1.8
+.init.data                    .strtab
+.init.plt                     .symtab
+.init.text                    .text.ftrace_trampoline
+.init.text.ftrace_trampoline
+== kallsyms
+ffffbd1160755000 r $d	[e3_hello]
+ffffbd1160751024 t $x	[e3_hello]
+ffffbd1160751024 t e3_hello_exit	[e3_hello]
+ffffbd1160753000 d $d	[e3_hello]
+ffffbd1160753000 d __UNIQUE_ID___addressable_cleanup_module414	[e3_hello]
+ffffbd1160755058 r $d	[e3_hello]
+ffffbd1160753040 d $d	[e3_hello]
+ffffbd116075509c r $d	[e3_hello]
+ffffbd116075509c r _note_19	[e3_hello]
+ffffbd11607550b4 r _note_18	[e3_hello]
+ffffbd1160753040 d __this_module	[e3_hello]
+ffffbd1160751024 t cleanup_module	[e3_hello]
+== lsmod
+e3_hello 12288 0 - Live 0xffffbd1160751000 (O)
+== /proc/modules
+e3_hello 12288 0 - Live 0xffffbd1160751000 (O)
+== tainted: 4096
+== rmmod
+rmmod rc=0
+ls: /sys/module/e3_hello: No such file or directory
+[    4.322404] e3_hello: loading out-of-tree module taints kernel.
+[    4.345492] e3_hello: hello from init, state=1, fn=e3_hello_init [e3_hello]
+[   13.106091] e3_hello: bye from exit, state=2</code></pre></figure>
+<p>(<code>ls</code>의 색 코드는 지웠다. 이후 스크립트는 <code>ls --color=never</code>를 쓴다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>init 중 state=1, exit 중 state=2</strong>. <code>enum module_state</code>는 <code>LIVE=0, COMING=1, GOING=2, UNFORMED=3</code>이다(<code>include/linux/module.h</code>). init이 도는 동안은 아직 LIVE가 아니다.</li><li><strong><code>initsize: 0</code>, kallsyms에 <code>e3_hello_init</code>이 없다</strong>. <code>do_init_module()</code>이 init 성공 직후 <code>.init.*</code> 영역을 해제하고 kallsyms를 "core 심볼만" 쓰도록 바꾼다. <code>sections/</code> 디렉터리에는 <code>.init.text</code> 항목이 남아 있지만 그 메모리는 이미 반납됐다. 그래서 <strong><code>__init</code> 함수를 init 이후에 부르면(예: 콜백으로 등록해 두면) 해제된 메모리로 점프</strong>한다. 커널은 빌드 때 modpost의 section mismatch 검사로 이것을 잡아 준다.</li><li><code>taint: O</code>, <code>tainted: 4096</code> = 비트 12 = <code>O</code>(out-of-tree). 첫 out-of-tree 모듈이 올라오는 순간 <code>loading out-of-tree module taints kernel.</code>이 한 번 찍힌다. §9에서 해독한다.</li><li><code>lsmod</code>의 BusyBox 출력은 <code>/proc/modules</code>를 그대로 보여 준다. 칸의 뜻: 이름, 크기(coresize), <strong>refcount</strong>, 사용하는 모듈 목록(<code>-</code> = 없음), 상태(<code>Live</code>/<code>Loading</code>/<code>Unloading</code>), 기준 주소, taint 플래그. 데스크톱 kmod <code>lsmod</code>는 같은 파일을 <code>Module Size Used by</code> 3칸으로 예쁘게 보여 줄 뿐이다.</li><li><code>rmmod</code> 후 <code>/sys/module/e3_hello</code>가 사라졌다. 그런데 <strong>taint는 남는다</strong>. 한 번 오염된 커널은 재부팅 전까지 계속 <code>O</code>다.</li></ul>
+<h3 id="3-2-모듈의-생애-상태-전이">3.2 모듈의 생애 — 상태 전이<a class="anchor" href="#3-2-모듈의-생애-상태-전이" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="40" width="130" height="50" rx="8" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="85" y="61" text-anchor="middle" font-size="13" font-weight="bold">.ko 파일</text>
+  <text x="85" y="80" text-anchor="middle" font-size="12">디스크의 ELF</text>
+  <rect x="270" y="40" width="130" height="50" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="335" y="61" text-anchor="middle" font-size="13" font-weight="bold">UNFORMED</text>
+  <text x="335" y="80" text-anchor="middle" font-size="12">복사·배치·재배치</text>
+  <rect x="530" y="40" width="130" height="50" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="595" y="61" text-anchor="middle" font-size="13" font-weight="bold">COMING</text>
+  <text x="595" y="80" text-anchor="middle" font-size="12">init() 실행 중</text>
+  <rect x="530" y="170" width="130" height="50" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="595" y="191" text-anchor="middle" font-size="13" font-weight="bold">LIVE</text>
+  <text x="595" y="210" text-anchor="middle" font-size="12">정상 동작</text>
+  <rect x="270" y="170" width="130" height="50" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="335" y="191" text-anchor="middle" font-size="13" font-weight="bold">GOING</text>
+  <text x="335" y="210" text-anchor="middle" font-size="12">exit() 실행 중</text>
+  <rect x="20" y="170" width="130" height="50" rx="8" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="85" y="191" text-anchor="middle" font-size="13" font-weight="bold">해제</text>
+  <text x="85" y="210" text-anchor="middle" font-size="12">free_module()</text>
+  <line x1="150" y1="65" x2="268" y2="65" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="209" y="57" text-anchor="middle" font-size="12">load_module</text>
+  <line x1="400" y1="65" x2="528" y2="65" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="465" y="57" text-anchor="middle" font-size="12">complete_formation</text>
+  <line x1="595" y1="90" x2="595" y2="168" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="588" y="134" text-anchor="end" font-size="12">init() == 0</text>
+  <line x1="530" y1="195" x2="402" y2="195" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="465" y="187" text-anchor="middle" font-size="12">rmmod</text>
+  <text x="465" y="212" text-anchor="middle" font-size="12">refcnt 0</text>
+  <line x1="530" y1="90" x2="402" y2="170" stroke="#d0564a" marker-end="url(#ah3)"/>
+  <text x="420" y="122" text-anchor="end" font-size="12" font-weight="bold">init() 실패</text>
+  <line x1="270" y1="90" x2="152" y2="170" stroke="#d0564a" marker-end="url(#ah3)"/>
+  <text x="200" y="122" text-anchor="end" font-size="12" font-weight="bold">심볼·재배치 실패</text>
+  <line x1="270" y1="195" x2="152" y2="195" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="211" y="187" text-anchor="middle" font-size="12">exit 후</text>
+  <text x="20" y="250" font-size="12">vermagic·서명 검사는 UNFORMED 전에 끝난다 (실패하면 그냥 거부).</text>
+  <text x="20" y="272" font-size="12">/proc/modules 상태 칸: Loading = COMING, Live = LIVE, Unloading = GOING</text>
+</svg></figure>
+<p>그림 4 — <code>struct module.state</code>의 전이. 빨간 화살표는 실패 경로다. init이 실패하면 <code>do_init_module()</code>의 <code>fail:</code> 라벨이 상태를 GOING으로 바꾸고 바로 <code>free_module()</code>한다 — <strong>exit 함수는 불리지 않는다.</strong> 그래서 init 안에서 스스로 정리해야 한다(§6).</p>
+<h3 id="3-3-insmod가-실제로-부르는-syscall">3.3 <code>insmod</code>가 실제로 부르는 syscall<a class="anchor" href="#3-3-insmod가-실제로-부르는-syscall" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>도구</th><th>syscall</th><th>특징</th></tr></thead><tbody><tr><td>BusyBox(이 랩, <code>MODPROBE_SMALL=y</code>)</td><td><code>init_module(buf, len, args)</code></td><td>파일을 유저 메모리로 읽어 통째로 넘긴다. §7 예제 9의 dyndbg 로그에 <code>init_module: umod=..., len=...</code>이 찍힌다</td></tr><tr><td>kmod(데스크톱·Yocto의 <code>insmod</code>/<code>modprobe</code>)</td><td><code>finit_module(fd, args, flags)</code> 먼저</td><td>커널이 fd에서 직접 읽는다. 어느 파일에서 왔는지 알 수 있어 LoadPin·IMA 같은 보안 정책이 파일 출처를 검사할 수 있다</td></tr><tr><td>언로드 (둘 다)</td><td><code>delete_module(name, O_NONBLOCK)</code></td><td>사용 중이면 기다리지 않고 바로 실패</td></tr></tbody></table></div>
+<p>두 syscall 모두 <code>CAP_SYS_MODULE</code> 권한이 필요하고(<code>may_init_module()</code>), <code>/proc/sys/kernel/modules_disabled</code>를 1로 쓰면 그 뒤로는 아무도 모듈을 못 넣는다(보안 강화 장비에서 부팅 끝에 쓰는 기법).</p>
+<hr>
+<h2 id="4-여러-파일로-된-모듈-그리고-뺄-수-없는-모듈">4. 여러 파일로 된 모듈, 그리고 뺄 수 없는 모듈<a class="anchor" href="#4-여러-파일로-된-모듈-그리고-뺄-수-없는-모듈" aria-label="link">#</a></h2>
+<h3 id="4-1-예제-5-e3_multi-e3_main-c-e3_util-c-exit-없음">4.1 예제 5 — <code>e3_multi</code> = <code>e3_main.c</code> + <code>e3_util.c</code>, exit 없음<a class="anchor" href="#4-1-예제-5-e3_multi-e3_main-c-e3_util-c-exit-없음" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 소스 두 개를 한 <code>.ko</code>로 묶는 Kbuild 문법(<code>&lt;모듈&gt;-y</code>), 그리고 <code>module_exit</code>이 없는 모듈은 영영 못 뺀다는 것.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* e3_util.c — 같은 모듈 안의 두 번째 .c: static이 아니면 같은 .ko 안에서는 그냥 링크된다.
+ * e3_util.h에는 선언 한 줄: int e3_util_sum(const int *v, int n); */
+#include "e3_util.h"
+
+int e3_util_sum(const int *v, int n)
+{
+	int i, s = 0;
+
+	for (i = 0; i &lt; n; i++)
+		s += v[i];
+	return s;
+}</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* e3_main.c — e3_multi = e3_main.o + e3_util.o. 일부러 module_exit이 없다 → rmmod 불가 */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include "e3_util.h"
+
+static int __init e3_multi_init(void)
+{
+	static const int v[] = { 1, 2, 3, 4 };
+
+	pr_info("sum=%d (e3_util_sum from another .c)\n",
+		e3_util_sum(v, ARRAY_SIZE(v)));
+	return 0;
+}
+module_init(e3_multi_init);
+/* module_exit 없음! */
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("E3 multi-file module without exit");</code></pre></figure>
+<p><code>base/</code> 디렉터리의 Makefile은 모듈 다섯 개를 한 번에 빌드한다:</p>
+<figure class="code"><span class="lang">make</span><pre><code># out-of-tree 모듈: 커널 빌드 트리의 Kbuild가 이 파일을 다시 읽는다
+obj-m += e3_hello.o e3_param.o e3_fail.o e3_hold.o
+obj-m += e3_multi.o
+e3_multi-y := e3_main.o e3_util.o
+
+KDIR ?= /var/lab/out/linux-build
+
+all:
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
+clean:
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/E3/base &amp;&amp; make
+cat e3_multi.mod; nm e3_multi.ko | grep -E "e3_|init_module|cleanup"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>...
+  CC [M]  e3_main.o
+  CC [M]  e3_util.o
+  LD [M]  e3_multi.o
+  MODPOST Module.symvers
+...
+  LD [M]  e3_multi.ko
+./e3_main.o
+./e3_util.o
+0000000000000000 d __UNIQUE_ID___addressable_init_module413
+0000000000000000 t e3_multi_init
+0000000000000000 T e3_util_sum
+0000000000000000 T init_module</code></pre></figure>
+<p>(빌드 로그는 <code>e3_multi</code> 관련 줄만 남겼다(<code>...</code>). 다섯 모듈 모두 경고 0개.)</p>
+<p>게스트에서(t3.sh 앞부분):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>insmod e3_multi.ko; lsmod; rmmod e3_multi; echo "rc=$?"
+dmesg | grep e3_multi</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>e3_multi 12288 0 [permanent], Live 0xffffc1924c8a3000 (O)
+rmmod: remove 'e3_multi': Device or resource busy
+rc=0
+[    6.271831] e3_multi: loading out-of-tree module taints kernel.
+[    6.302522] e3_multi: sum=10 (e3_util_sum from another .c)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>모듈 이름과 소스 이름이 같으면 안 된다.</strong> <code>e3_multi-y := e3_main.o e3_util.o</code>에서 <code>e3_multi.c</code>라는 파일이 있으면 Kbuild가 헷갈린다. 그래서 <code>e3_main.c</code>로 이름을 달리했다. <code>cleanup_module</code>이 <code>nm</code>에 없다 — exit을 안 만들었으니까.</li><li><code>e3_util_sum</code>은 <code>T</code>(전역)지만 <strong>다른 모듈은 이걸 못 쓴다.</strong> <code>EXPORT_SYMBOL</code>을 안 했기 때문이다. 같은 <code>.ko</code> 안의 링크는 일반 링커(<code>LD [M] e3_multi.o</code>)가 끝낸다. 모듈 경계를 넘는 링크만 커널 심볼 표를 거친다(§7).</li><li><code>[permanent]</code>: init은 있는데 exit이 없는 모듈. <code>delete_module()</code>의 <code>if (mod-&gt;init &amp;&amp; !mod-&gt;exit)</code> 검사가 <code>-EBUSY</code>를 돌려준다. 실무에서는 "한 번 올리면 끝"인 모듈이 아니라면 실수다. 개발 중에 이걸 만들면 재부팅해야 새 버전을 올릴 수 있다.</li><li><strong>BusyBox <code>rmmod</code>는 실패해도 종료 코드가 0이었다</strong>(이 빌드의 modprobe-small 구현). 스크립트에서 <code>rmmod x &amp;&amp; echo ok</code>로 성공을 판정하면 속는다. <code>grep -q '^x ' /proc/modules</code>로 다시 확인하자. kmod <code>rmmod</code>는 실패하면 1을 돌려준다.</li></ul>
+<hr>
+<h2 id="5-모듈-파라미터-로드할-때-값을-넘기기">5. 모듈 파라미터 — 로드할 때 값을 넘기기<a class="anchor" href="#5-모듈-파라미터-로드할-때-값을-넘기기" aria-label="link">#</a></h2>
+<h3 id="5-1-직관">5.1 직관<a class="anchor" href="#5-1-직관" aria-label="link">#</a></h3>
+<p>펌웨어에서 "보드마다 다른 값"은 <code>#define</code>이나 EEPROM 설정 블록으로 넘긴다. 모듈은 <strong>로드할 때 <code>이름=값</code></strong> 으로 넘긴다. <code>insmod e3_param.ko count=5</code>. 그리고 권한을 주면 <strong>실행 중에 <code>/sys/module/&lt;m&gt;/parameters/&lt;p&gt;</code> 파일로 읽고 쓸 수 있다.</strong> 디버그 레벨, 폴링 주기, 기능 on/off 같은 값에 쓴다.</p>
+<h3 id="5-2-예제-6-타입-권한-배열-콜백-파라미터">5.2 예제 6 — 타입·권한·배열·콜백 파라미터<a class="anchor" href="#5-2-예제-6-타입-권한-배열-콜백-파라미터" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>module_param</code>의 타입(int, bool, charp, uint), 배열 파라미터, 권한 비트(0644/0444/0), 범위 검사를 하는 콜백 파라미터(<code>module_param_cb</code>), <code>MODULE_PARM_DESC</code>가 <code>modinfo</code>에 보이는 모습.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* e3_param: module_param 종류·권한·콜백 */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/moduleparam.h&gt;
+#include &lt;linux/kernel.h&gt;
+
+static int count = 1;
+module_param(count, int, 0644);			/* root rw */
+MODULE_PARM_DESC(count, "samples per read (int, rw)");
+static bool verbose;
+module_param(verbose, bool, 0444);		/* 읽기 전용 */
+MODULE_PARM_DESC(verbose, "extra logs (bool, ro)");
+static char *name = "imu0";
+module_param(name, charp, 0444);
+MODULE_PARM_DESC(name, "sensor name (charp)");
+static int addrs[4];
+static int n_addrs;
+module_param_array(addrs, int, &amp;n_addrs, 0444);
+MODULE_PARM_DESC(addrs, "up to 4 I2C addresses");
+static unsigned int secret = 42;
+module_param(secret, uint, 0);			/* sysfs에 안 보임 */
+
+static int rate_hz = 100;
+static int rate_set(const char *val, const struct kernel_param *kp)
+{
+	int v, ret = kstrtoint(val, 0, &amp;v);
+
+	if (ret)
+		return ret;
+	if (v &lt; 1 || v &gt; 1000)
+		return -EINVAL;			/* 범위 검사 */
+	pr_info("rate_hz %d -&gt; %d\n", *(int *)kp-&gt;arg, v);
+	*(int *)kp-&gt;arg = v;
+	return 0;
+}
+static const struct kernel_param_ops rate_ops = {
+	.set = rate_set,
+	.get = param_get_int,
+};
+module_param_cb(rate_hz, &amp;rate_ops, &amp;rate_hz, 0644);
+MODULE_PARM_DESC(rate_hz, "ODR in Hz, 1..1000 (validated)");
+
+static int __init e3_param_init(void)
+{
+	pr_info("count=%d verbose=%d name=%s n_addrs=%d addrs[0]=0x%x secret=%u rate_hz=%d\n",
+		count, verbose, name, n_addrs, addrs[0], secret, rate_hz);
+	return 0;
+}
+static void __exit e3_param_exit(void)
+{
+	pr_info("exit: count=%d rate_hz=%d\n", count, rate_hz);
+}
+module_init(e3_param_init);
+module_exit(e3_param_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("E3 module parameters");</code></pre></figure>
+<p>먼저 VM에서 <code>modinfo</code>:</p>
+<figure class="code"><span class="lang">text</span><pre><code>filename:       /var/tmp/E3/base/e3_param.ko
+description:    E3 module parameters
+license:        GPL
+depends:        
+name:           e3_param
+vermagic:       6.18.55 SMP preempt mod_unload aarch64
+parm:           count:samples per read (int, rw) (int)
+parm:           verbose:extra logs (bool, ro) (bool)
+parm:           name:sensor name (charp) (charp)
+parm:           addrs:up to 4 I2C addresses (array of int)
+parm:           secret:uint
+parm:           rate_hz:ODR in Hz, 1..1000 (validated)</code></pre></figure>
+<p>게스트 스크립트(t3.sh 뒷부분):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>insmod e3_param.ko count=5 name=bmi088 addrs=0x68,0x69 verbose=1 secret=7
+P=/sys/module/e3_param/parameters; ls -l --color=never $P
+for f in $P/*; do echo "${f##*/} = $(cat $f)"; done
+echo 10 &gt; $P/count; echo "count -&gt; $(cat $P/count)"
+echo 200 &gt; $P/rate_hz; echo "rate_hz -&gt; $(cat $P/rate_hz)"
+echo 5000 &gt; $P/rate_hz; echo "write 5000 rc=$?, rate_hz=$(cat $P/rate_hz)"
+echo N &gt; $P/verbose; echo "write verbose rc=$?"
+rmmod e3_param
+for a in bogus=1 rate_hz=5000 count=abc; do echo "-- insmod e3_param.ko $a"; insmod e3_param.ko $a; echo "rc=$?"; grep -q e3_param /proc/modules &amp;&amp; rmmod e3_param; done
+dmesg | grep -E "e3_param"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>total 0
+-r--r--r--    1 0        0             4096 Oct 10 20:44 addrs
+-rw-r--r--    1 0        0             4096 Oct 10 20:44 count
+-r--r--r--    1 0        0             4096 Oct 10 20:44 name
+-rw-r--r--    1 0        0             4096 Oct 10 20:44 rate_hz
+-r--r--r--    1 0        0             4096 Oct 10 20:44 verbose
+addrs = 104,105
+count = 5
+name = bmi088
+rate_hz = 100
+verbose = Y
+count -&gt; 10
+rate_hz -&gt; 200
+sh: write error: Invalid argument
+write 5000 rc=1, rate_hz=200
+/e3/t3.sh: line 9: can't create /sys/module/e3_param/parameters/verbose: Permission denied
+write verbose rc=1
+-- insmod e3_param.ko bogus=1
+rc=0
+-- insmod e3_param.ko rate_hz=5000
+[    7.645653] e3_param: `5000' invalid for parameter `rate_hz'
+insmod: can't insert 'e3_param.ko': invalid parameter
+rc=1
+-- insmod e3_param.ko count=abc
+[    7.742125] e3_param: `abc' invalid for parameter `count'
+insmod: can't insert 'e3_param.ko': invalid parameter
+rc=1
+[    6.602616] e3_param: count=5 verbose=1 name=bmi088 n_addrs=2 addrs[0]=0x68 secret=7 rate_hz=100
+[    7.198082] e3_param: rate_hz 100 -&gt; 200
+[    7.358366] e3_param: exit: count=10 rate_hz=200
+[    7.428741] e3_param: unknown parameter 'bogus' ignored
+[    7.433074] e3_param: count=1 verbose=0 name=imu0 n_addrs=0 addrs[0]=0x0 secret=42 rate_hz=100
+[    7.566557] e3_param: exit: count=1 rate_hz=100
+[    7.645653] e3_param: `5000' invalid for parameter `rate_hz'
+[    7.742125] e3_param: `abc' invalid for parameter `count'</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>권한 비트가 그대로 sysfs 파일 권한</strong>이 된다. <code>0644</code> → <code>-rw-r--r--</code>, <code>0444</code> → 읽기 전용, <code>0</code>인 <code>secret</code>은 <strong>파일이 아예 없다</strong>(로드 때만 줄 수 있는 값). <code>0444</code> 파일에는 root도 못 쓴다(<code>Permission denied</code>) — sysfs는 쓰기 비트가 없는 속성의 쓰기 open을 root에게도 거절한다.</li><li><code>count</code>를 10으로 바꾸자 exit에서 <code>count=10</code>이 찍혔다. sysfs 쓰기는 <strong>모듈의 전역 변수를 직접 바꾼다.</strong> 드라이버 코드는 이 값이 언제든 바뀔 수 있다고 가정해야 한다(읽을 때 <code>READ_ONCE</code>, 여러 필드를 같이 바꿔야 하면 콜백에서 락).</li><li><code>rate_hz</code>는 콜백이라 <strong>범위 밖 값(5000)을 <code>-EINVAL</code>로 거절</strong>했고 값은 200 그대로다. 같은 콜백이 로드 때도 불려서 <code>insmod rate_hz=5000</code>이 로드 자체를 실패시켰다. 타입이 안 맞는 <code>count=abc</code>도 같다.</li><li><strong>모르는 파라미터(<code>bogus=1</code>)는 경고만 하고 로드는 된다</strong>(<code>unknown parameter 'bogus' ignored</code>). 오타 낸 파라미터가 조용히 무시되는 셈이다. dmesg를 꼭 본다.</li><li>배열 <code>addrs</code>는 <code>0x68,0x69</code>를 받아 <code>n_addrs=2</code>가 됐고 sysfs에는 <strong>10진수 <code>104,105</code></strong> 로 보인다. 16진수로 넣었다고 16진수로 나오지 않는다.</li><li><code>modinfo</code>의 <code>parm:</code> 줄: <code>module_param</code>은 타입을 <code>(int)</code>처럼 붙여 주지만 <code>module_param_cb</code>는 타입 정보가 없어 설명만 나온다. <code>secret</code>처럼 <code>MODULE_PARM_DESC</code>가 없으면 타입만 나온다.</li></ul>
+<div class="tw"><table><thead><tr><th>매크로</th><th>쓰임</th></tr></thead><tbody><tr><td><code>module_param(var, type, perm)</code></td><td>기본. type: <code>bool</code> <code>invbool</code> <code>int</code> <code>uint</code> <code>long</code> <code>ulong</code> <code>short</code> <code>ushort</code> <code>byte</code> <code>charp</code> <code>hexint</code></td></tr><tr><td><code>module_param_named(name, var, type, perm)</code></td><td>외부 이름과 C 변수 이름을 다르게</td></tr><tr><td><code>module_param_array(arr, type, &amp;n, perm)</code></td><td>콤마로 구분된 배열, 받은 개수가 <code>n</code>에</td></tr><tr><td><code>module_param_string(name, buf, len, perm)</code></td><td>고정 크기 버퍼로 문자열 복사 (<code>charp</code>는 포인터만 저장)</td></tr><tr><td><code>module_param_cb(name, &amp;ops, &amp;var, perm)</code></td><td><code>.set</code>/<code>.get</code> 콜백으로 검증·부수효과</td></tr><tr><td><code>MODULE_PARM_DESC(name, "설명")</code></td><td><code>modinfo</code>용 문서</td></tr></tbody></table></div>
+<blockquote><p>함정: 권한에 <code>0666</code>이나 <code>0777</code>처럼 <strong>others 쓰기 비트</strong>를 주면 컴파일이 안 된다(<code>include/linux/moduleparam.h</code>의 <code>VERIFY_OCTAL_PERMISSIONS</code>가 빌드 타임에 막는다). 일반 사용자가 커널 변수를 바꾸게 둘 수는 없다.</p></blockquote>
+<h3 id="5-3-커널-명령줄로-넘기기-built-in일-때">5.3 커널 명령줄로 넘기기 — built-in일 때<a class="anchor" href="#5-3-커널-명령줄로-넘기기-built-in일-때" aria-label="link">#</a></h3>
+<p>같은 드라이버를 <code>=y</code>(built-in)로 빌드하면 <code>insmod</code>할 일이 없다. 그때는 <strong>커널 명령줄에 <code>&lt;모듈이름&gt;.&lt;파라미터&gt;=값</code></strong> 을 쓴다. 예: <code>printk.time=0</code>, <code>usbcore.autosuspend=-1</code>. <code>.ko</code>로 빌드된 모듈의 명령줄 파라미터는 커널이 무시하고, <strong>modprobe가</strong> <code>/proc/cmdline</code>을 읽어 적용한다(kmod 기준). §12에서 랩으로 확인한다.</p>
+<hr>
+<h2 id="6-init이-실패하면-goto-사다리로-거꾸로-정리">6. init이 실패하면 — <code>goto</code> 사다리로 거꾸로 정리<a class="anchor" href="#6-init이-실패하면-goto-사다리로-거꾸로-정리" aria-label="link">#</a></h2>
+<h3 id="6-1-직관">6.1 직관<a class="anchor" href="#6-1-직관" aria-label="link">#</a></h3>
+<p>펌웨어 초기화에서 "클럭 켜고 → DMA 채널 잡고 → 인터럽트 등록"하다가 3단계에서 실패하면, 1·2단계에서 잡은 것을 <strong>역순으로</strong> 놓는다. 커널도 같다. 그리고 그림 4에서 봤듯 <strong>init이 실패하면 exit은 불리지 않는다.</strong> 정리는 init이 직접 해야 한다. 커널은 이걸 <code>goto</code> 라벨 사다리로 쓴다(E5에서 다시 나온다).</p>
+<h3 id="6-2-예제-7-e3_fail-어느-단계에서-실패해도-새는-것이-없다">6.2 예제 7 — <code>e3_fail</code>: 어느 단계에서 실패해도 새는 것이 없다<a class="anchor" href="#6-2-예제-7-e3_fail-어느-단계에서-실패해도-새는-것이-없다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 1단계(메모리), 2단계(misc 장치 등록), 3단계(가짜 HW probe)에서 각각 실패시켰을 때 정리 순서, 그리고 init이 돌려준 음수 errno가 <code>insmod</code>의 에러 메시지가 되는 것.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* e3_fail: init 실패 경로 — goto로 거꾸로 정리 */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/slab.h&gt;
+#include &lt;linux/miscdevice.h&gt;
+#include &lt;linux/fs.h&gt;
+
+static int fail_at;			/* 0=성공, 1/2/3=그 단계에서 실패 */
+module_param(fail_at, int, 0444);
+static void *buf;
+static const struct file_operations e3_fail_fops = { .owner = THIS_MODULE };
+static struct miscdevice e3_fail_misc = {
+	.minor = MISC_DYNAMIC_MINOR, .name = "e3_fail", .fops = &amp;e3_fail_fops,
+};
+
+static int e3_fake_hw_probe(void) { return fail_at == 3 ? -ENODEV : 0; }
+
+static int __init e3_fail_init(void)
+{
+	int ret;
+
+	buf = fail_at == 1 ? NULL : kzalloc(4096, GFP_KERNEL);	/* 1단계 */
+	if (!buf) {
+		ret = -ENOMEM;
+		goto err_buf;
+	}
+	ret = fail_at == 2 ? -EBUSY : misc_register(&amp;e3_fail_misc);	/* 2단계 */
+	if (ret)
+		goto err_free;
+	ret = e3_fake_hw_probe();				/* 3단계 */
+	if (ret)
+		goto err_misc;
+	pr_info("init ok\n");
+	return 0;
+
+err_misc:
+	misc_deregister(&amp;e3_fail_misc);
+	pr_info("undo: misc_deregister\n");
+err_free:
+	kfree(buf);
+	pr_info("undo: kfree\n");
+err_buf:
+	pr_err("init failed at step %d: %d\n", fail_at, ret);
+	return ret;
+}
+static void __exit e3_fail_exit(void)
+{
+	misc_deregister(&amp;e3_fail_misc);
+	kfree(buf);
+	pr_info("exit\n");
+}
+module_init(e3_fail_init);
+module_exit(e3_fail_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("E3 init failure path");</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code># guest t4.sh 일부
+for n in 3 2 1; do insmod e3_fail.ko fail_at=$n; done
+ls /dev/e3_fail 2&gt;&amp;1; lsmod
+insmod e3_fail.ko; ls --color=never /dev/e3_fail; rmmod e3_fail
+dmesg | grep -E "e3_fail"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[    7.000844] e3_fail: init failed at step 3: -19
+insmod: can't insert 'e3_fail.ko': No such device
+[    7.088558] e3_fail: init failed at step 2: -16
+insmod: can't insert 'e3_fail.ko': Device or resource busy
+[    7.237352] e3_fail: init failed at step 1: -12
+insmod: can't insert 'e3_fail.ko': Cannot allocate memory
+ls: /dev/e3_fail: No such file or directory
+/dev/e3_fail
+[    7.000629] e3_fail: undo: misc_deregister
+[    7.000781] e3_fail: undo: kfree
+[    7.000844] e3_fail: init failed at step 3: -19
+[    7.088405] e3_fail: undo: kfree
+[    7.088558] e3_fail: init failed at step 2: -16
+[    7.237352] e3_fail: init failed at step 1: -12
+[    7.642824] e3_fail: init ok
+[    7.753579] e3_fail: exit</code></pre></figure>
+<p>(<code>pr_err</code>는 <code>quiet</code>에서도 콘솔에 나오므로 위쪽에 섞여 보인다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>init의 반환값 <code>-ENODEV(-19)</code>, <code>-EBUSY(-16)</code>, <code>-ENOMEM(-12)</code>이 그대로 <code>insmod</code>의 <code>strerror</code> 메시지("No such device" 등)가 됐다. <strong>음수 errno를 돌려주는 게 커널 규약</strong>이다(E6). <code>-1</code>을 돌려주면 유저는 "Operation not permitted"(EPERM)를 보게 된다 — 엉뚱한 메시지다.</li><li>단계 3 실패: 등록했던 misc 장치를 먼저 해제하고 버퍼를 해제했다. 단계 2 실패: 버퍼만. 단계 1: 아무것도. <strong>라벨은 획득의 역순으로 놓이고, 실패 지점은 "자기 바로 전 단계까지 되돌리는" 라벨로 점프한다.</strong> 실패 후 <code>lsmod</code>가 비어 있고 <code>/dev/e3_fail</code>이 없다 — 새는 것이 없다.</li><li>실패한 로드도 이미 taint <code>O</code>를 남긴다. taint는 <code>load_module()</code> 초반(<code>module_augment_kernel_taints()</code>)에 찍히기 때문이다(§13).</li></ul>
+<blockquote><p>함정: init이 <strong>양수</strong>를 돌려주면? 커널은 <code>do_init_module()</code>에서 <code>'%s'-&gt;init suspiciously returned %d, it should follow 0/-E convention</code>이라고 경고하고 성공으로 취급한다(6.18 <code>kernel/module/main.c</code>). 펌웨어 습관대로 <code>return 1;</code>(성공)을 쓰면 안 된다.</p></blockquote>
+<h3 id="6-3-devm이라는-출구">6.3 devm이라는 출구<a class="anchor" href="#6-3-devm이라는-출구" aria-label="link">#</a></h3>
+<p>드라이버(G3)에서는 <code>probe()</code> 안에서 <code>devm_kzalloc</code>, <code>devm_request_irq</code>처럼 <strong>장치에 수명이 묶인 자원</strong>을 쓰면 실패·제거 때 커널이 역순으로 자동 해제한다. <code>goto</code> 사다리가 짧아진다. 하지만 모듈 init 자체(드라이버 등록 전)에는 장치가 없으니 여전히 손으로 정리한다. 그리고 면접관은 <code>goto</code> 패턴을 직접 써 보라고 한다.</p>
+<hr>
+<h2 id="7-모듈끼리-함수-부르기-export_symbol">7. 모듈끼리 함수 부르기 — <code>EXPORT_SYMBOL</code><a class="anchor" href="#7-모듈끼리-함수-부르기-export_symbol" aria-label="link">#</a></h2>
+<h3 id="7-1-직관">7.1 직관<a class="anchor" href="#7-1-직관" aria-label="link">#</a></h3>
+<p>펌웨어에서는 <code>nand_drv.c</code>가 <code>nand_read()</code>를 정의하면 다른 <code>.c</code>가 그냥 부른다. 링커가 같은 이미지 안에서 이름을 찾아 준다. 커널 모듈은 <strong>각자 따로 로드되는 별개의 링크 단위</strong>다. 그래서 "남이 불러도 되는 함수"를 <strong>명시적으로 공개</strong>해야 한다. 이게 <code>EXPORT_SYMBOL</code>이다. 공개된 심볼은 커널의 <strong>심볼 표</strong>(<code>__ksymtab</code> 섹션)에 이름과 주소가 등록되고, 나중에 로드되는 모듈의 미해결 심볼을 로더가 이 표에서 찾는다.</p>
+<div class="tw"><table><thead><tr><th>매크로</th><th>누가 쓸 수 있나</th></tr></thead><tbody><tr><td><code>EXPORT_SYMBOL(f)</code></td><td>모든 모듈 (라이선스 무관)</td></tr><tr><td><code>EXPORT_SYMBOL_GPL(f)</code></td><td>GPL 호환 라이선스 모듈만. 커널 내부 API 대부분이 이쪽이다</td></tr><tr><td><code>EXPORT_SYMBOL_NS(f, "NS")</code> / <code>EXPORT_SYMBOL_NS_GPL(f, "NS")</code></td><td><code>MODULE_IMPORT_NS("NS")</code>를 선언한 모듈만 (+ GPL 조건)</td></tr></tbody></table></div>
+<p><strong>네임스페이스</strong>는 심볼 이름 공간을 서브시스템별로 나눠 "아무 드라이버나 내부 헬퍼를 가져다 쓰는 것"을 막는 장치다(예: <code>USB_STORAGE</code>, <code>CRYPTO_INTERNAL</code>). 6.13부터 매크로 인자가 <strong>문자열 리터럴</strong>로 바뀌었다. 6.18 랩 소스(<code>grep -n</code> 결과, 경로 앞의 <code>/var/lab/src/linux-6.18.55/</code>는 생략):</p>
+<figure class="code"><span class="lang">text</span><pre><code>include/linux/export.h:91:#define EXPORT_SYMBOL_NS(sym, ns)	__EXPORT_SYMBOL(sym, "", ns)
+include/linux/export.h:92:#define EXPORT_SYMBOL_NS_GPL(sym, ns)	__EXPORT_SYMBOL(sym, "GPL", ns)
+include/linux/module.h:307:#define MODULE_IMPORT_NS(ns)	MODULE_INFO(import_ns, ns)</code></pre></figure>
+<p><code>MODULE_INFO(import_ns, ns)</code>이니 <code>ns</code>는 문자열이어야 한다. 예전 문법 <code>MODULE_IMPORT_NS(E3_LIB)</code>(따옴표 없음)로 빌드하면 6.18에서는 이렇게 깨진다:</p>
+<figure class="code"><span class="lang">text</span><pre><code>e3_user.c:23:18: error: expected ‘,’ or ‘;’ before ‘E3_LIB’</code></pre></figure>
+<p>오래된 BSP 드라이버를 6.13+로 옮길 때 자주 만나는 컴파일 에러다.</p>
+<h3 id="7-2-예제-8-e3_lib-내보내기-와-e3_user-가져다-쓰기-빌드">7.2 예제 8 — <code>e3_lib</code>(내보내기)와 <code>e3_user</code>(가져다 쓰기) 빌드<a class="anchor" href="#7-2-예제-8-e3_lib-내보내기-와-e3_user-가져다-쓰기-빌드" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 심볼 세 개를 서로 다른 방식으로 내보내고, 다른 디렉터리의 모듈이 그걸 쓰려면 빌드 때 무엇이 필요한지.</p>
+<p>공개 API는 <code>lib/e3_lib.h</code>에 선언한다(<code>int e3_lib_add(int a, int b);</code>, <code>int e3_lib_plain(void);</code>, <code>int e3_lib_secret(void);</code> 세 줄과 include guard).</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* e3_lib: 다른 모듈에게 함수를 내보내는 "라이브러리 모듈" */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/export.h&gt;
+#include "e3_lib.h"
+
+int e3_lib_add(int a, int b)
+{
+	return a + b;
+}
+EXPORT_SYMBOL_GPL(e3_lib_add);		/* GPL 호환 모듈만 */
+
+int e3_lib_plain(void)
+{
+	return 7;
+}
+EXPORT_SYMBOL(e3_lib_plain);		/* 라이선스 무관 */
+
+int e3_lib_secret(void)
+{
+	return 0x5eed;
+}
+EXPORT_SYMBOL_NS_GPL(e3_lib_secret, "E3_LIB");	/* 네임스페이스 */
+
+static int __init e3_lib_init(void)
+{
+	pr_info("loaded, exporting 3 symbols\n");
+	return 0;
+}
+static void __exit e3_lib_exit(void)
+{
+	pr_info("unloaded\n");
+}
+module_init(e3_lib_init);
+module_exit(e3_lib_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("E3 symbol provider");</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* e3_user: e3_lib의 심볼을 부르는 모듈 */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include "e3_lib.h"
+
+static int __init e3_user_init(void)
+{
+	pr_info("add(2,3)=%d plain=%d secret=0x%x\n",
+		e3_lib_add(2, 3), e3_lib_plain(), e3_lib_secret());
+	return 0;
+}
+static void __exit e3_user_exit(void)
+{
+	pr_info("bye\n");
+}
+module_init(e3_user_init);
+module_exit(e3_user_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("E3 symbol consumer");
+#ifndef E3_NO_IMPORT
+MODULE_IMPORT_NS("E3_LIB");		/* 6.13+: 문자열 리터럴 */
+#endif</code></pre></figure>
+<figure class="code"><span class="lang">make</span><pre><code># user/Makefile
+obj-m := e3_user.o
+ccflags-y += -I/var/tmp/E3/lib $(E3_FLAGS)
+# e3_lib의 Module.symvers를 알려 줘야 modpost가 심볼을 찾는다
+KBUILD_EXTRA_SYMBOLS := /var/tmp/E3/lib/Module.symvers
+KDIR ?= /var/lab/out/linux-build
+all:
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules</code></pre></figure>
+<p><code>e3_lib</code>를 먼저 빌드하면 그 디렉터리에 <code>Module.symvers</code>가 생긴다:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/E3/lib &amp;&amp; make &amp;&amp; cat Module.symvers</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>  CC [M]  e3_lib.o
+  MODPOST Module.symvers
+  LD [M]  e3_lib.ko
+0x00000000	e3_lib_add	e3_lib	EXPORT_SYMBOL_GPL	
+0x00000000	e3_lib_plain	e3_lib	EXPORT_SYMBOL	
+0x00000000	e3_lib_secret	e3_lib	EXPORT_SYMBOL_GPL	E3_LIB</code></pre></figure>
+<p>칸: CRC(아래), 심볼, 소속 모듈, 내보내기 종류, 네임스페이스. 첫 칸이 0인 건 이 커널이 <code>CONFIG_MODVERSIONS</code>가 꺼져 있어서다(§10).</p>
+<blockquote><p>함정: 처음엔 <code>e3_lib.h</code> 없이 빌드했더니 <code>warning: no previous prototype for ‘e3_lib_add’ [-Wmissing-prototypes]</code>가 세 번 나왔다. 커널 빌드는 <code>-Wmissing-prototypes</code>를 켠다. <strong>내보내는 함수는 반드시 헤더에 선언</strong>하고 정의하는 쪽도 그 헤더를 include한다. 사용자 모듈 안에 <code>int e3_lib_add(int, int);</code>를 직접 적는 것은 시그니처가 바뀌어도 아무도 모르는 지름길이다.</p></blockquote>
+<p>이제 <code>e3_user</code>를 세 가지로 빌드해 본다:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/E3/user; K=/var/lab/out/linux-build
+echo "=== (a) KBUILD_EXTRA_SYMBOLS 없이";  make -C $K M=$PWD KBUILD_EXTRA_SYMBOLS= modules
+echo "=== (b) MODULE_IMPORT_NS 빼고";      make E3_FLAGS=-DE3_NO_IMPORT
+echo "=== (c) 정상";                       make; modinfo e3_user.ko</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>=== (a) KBUILD_EXTRA_SYMBOLS 없이
+  CC [M]  e3_user.o
+  MODPOST Module.symvers
+ERROR: modpost: "e3_lib_add" [e3_user.ko] undefined!
+ERROR: modpost: "e3_lib_plain" [e3_user.ko] undefined!
+ERROR: modpost: "e3_lib_secret" [e3_user.ko] undefined!
+make[1]: *** [/var/lab/src/linux-6.18.55/Makefile:248: __sub-make] Error 2
+=== (b) MODULE_IMPORT_NS 빼고
+  CC [M]  e3_user.o
+  MODPOST Module.symvers
+ERROR: modpost: module e3_user uses symbol e3_lib_secret from namespace E3_LIB, but does not import it.
+=== (c) 정상
+  CC [M]  e3_user.o
+  MODPOST Module.symvers
+  CC [M]  e3_user.mod.o
+  CC [M]  .module-common.o
+  LD [M]  e3_user.ko
+filename:       /var/tmp/E3/user/e3_user.ko
+import_ns:      E3_LIB
+description:    E3 symbol consumer
+license:        GPL
+depends:        e3_lib
+name:           e3_user
+vermagic:       6.18.55 SMP preempt mod_unload aarch64</code></pre></figure>
+<p>(각 빌드 사이에 <code>make clean</code>을 했고, (a)의 make 에러 줄은 마지막 한 줄만 남겼다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>(a) modpost는 <code>vmlinux</code>의 <code>Module.symvers</code>(빌드 트리)와 <strong><code>KBUILD_EXTRA_SYMBOLS</code>로 알려 준 파일</strong>만 본다. 다른 out-of-tree 모듈의 심볼은 알려 주지 않으면 "undefined"다. 이건 런타임 에러를 <strong>빌드 타임에 미리 잡는</strong> 장치다. 예전 커널은 이걸 경고로만 냈지만 6.x는 에러다(급하면 <code>KBUILD_MODPOST_WARN=1</code>로 경고로 낮출 수 있지만, 그러면 로드 때 터진다).</li><li>(b) 네임스페이스 검사도 modpost가 빌드 때 한다. 런타임에도 <code>verify_namespace_is_imported()</code>가 한 번 더 본다.</li><li>(c) <code>depends: e3_lib</code> — modpost가 "e3_user가 e3_lib 소유 심볼을 쓴다"를 <code>Module.symvers</code>의 소속 칸에서 알아내 <code>.mod.c</code>에 <code>MODULE_INFO(depends, "e3_lib");</code>를 써 넣었다. depmod·modprobe는 이 한 줄로 로드 순서를 정한다(§11).</li><li>대안: 두 모듈을 <strong>같은 디렉터리의 같은 Makefile</strong>(<code>obj-m := e3_lib.o e3_user.o</code>)로 빌드하면 modpost가 한 번에 둘을 보므로 <code>KBUILD_EXTRA_SYMBOLS</code>가 필요 없다. 벤더 드라이버 묶음이 보통 이렇게 한다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="20" y="22" font-size="13" font-weight="bold">빌드 때 — modpost가 검사</text>
+  <rect x="20" y="34" width="200" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="120" y="53" text-anchor="middle" font-size="12">e3_lib.c</text>
+  <text x="120" y="70" text-anchor="middle" font-size="12">EXPORT_SYMBOL_GPL(...)</text>
+  <rect x="250" y="34" width="190" height="44" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="345" y="53" text-anchor="middle" font-size="12">lib/Module.symvers</text>
+  <text x="345" y="70" text-anchor="middle" font-size="12">e3_lib_add → e3_lib, GPL</text>
+  <rect x="250" y="96" width="190" height="44" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="345" y="115" text-anchor="middle" font-size="12">vmlinux Module.symvers</text>
+  <text x="345" y="132" text-anchor="middle" font-size="12">커널 심볼 20,778개</text>
+  <rect x="470" y="34" width="190" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="565" y="53" text-anchor="middle" font-size="12">modpost (e3_user)</text>
+  <text x="565" y="70" text-anchor="middle" font-size="12">undefined·NS·GPL 검사</text>
+  <rect x="430" y="140" width="230" height="44" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="545" y="159" text-anchor="middle" font-size="12">e3_user.ko (depends=e3_lib)</text>
+  <text x="545" y="176" text-anchor="middle" font-size="12">import_ns=E3_LIB</text>
+  <line x1="220" y1="56" x2="248" y2="56" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="440" y1="56" x2="468" y2="56" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="440" y1="118" x2="500" y2="80" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="565" y1="78" x2="565" y2="138" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="458" y="98" font-size="12">EXTRA_SYMBOLS</text>
+  <line x1="20" y1="205" x2="660" y2="205" stroke="#888" stroke-dasharray="5 4"/>
+  <text x="20" y="230" font-size="13" font-weight="bold">로드 때 — 커널 모듈 로더가 연결</text>
+  <rect x="20" y="244" width="200" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="120" y="263" text-anchor="middle" font-size="12">insmod e3_lib.ko</text>
+  <text x="120" y="280" text-anchor="middle" font-size="12">__ksymtab · _gpl 등록</text>
+  <rect x="250" y="244" width="190" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="345" y="263" text-anchor="middle" font-size="12">insmod e3_user.ko</text>
+  <text x="345" y="280" text-anchor="middle" font-size="12">resolve_symbol()</text>
+  <rect x="460" y="244" width="200" height="44" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="560" y="263" text-anchor="middle" font-size="12">ref_module(user, lib)</text>
+  <text x="560" y="280" text-anchor="middle" font-size="12">e3_lib refcnt 1, holders</text>
+  <line x1="250" y1="266" x2="222" y2="266" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="236" y="306" text-anchor="middle" font-size="12">찾기</text>
+  <line x1="440" y1="266" x2="458" y2="266" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="340" y="340" text-anchor="middle" font-size="12">순서가 바뀌면 resolve 실패 → "Unknown symbol e3_lib_add (err -2)"</text>
+</svg></figure>
+<p>그림 5 — 심볼 내보내기·가져오기. 위 칸은 <strong>빌드 때</strong> 정적 검사(modpost + <code>Module.symvers</code>), 아래 칸은 <strong>로드 때</strong> 실제 연결(커널 심볼 표 + <code>resolve_symbol()</code> + 의존 관계 기록). 둘은 따로 일한다 — 빌드가 통과해도 로드 순서가 틀리면 실패한다.</p>
+<h3 id="7-3-예제-9-로드-순서를-틀리면-unknown-symbol-그리고-로더-내부-로그">7.3 예제 9 — 로드 순서를 틀리면 "Unknown symbol", 그리고 로더 내부 로그<a class="anchor" href="#7-3-예제-9-로드-순서를-틀리면-unknown-symbol-그리고-로더-내부-로그" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>e3_lib</code> 없이 <code>e3_user</code>를 넣었을 때의 실패, 순서대로 넣었을 때의 성공, 그리고 dynamic debug로 <code>kernel/module/main.c</code>의 <code>pr_debug</code>를 켜서 로더가 하는 일을 직접 보기.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># guest t2.sh 앞부분
+echo 'file kernel/module/main.c +p' &gt; /sys/kernel/debug/dynamic_debug/control
+dmesg -c &gt;/dev/null
+echo "== 1) e3_user 먼저"; insmod e3_user.ko; echo "rc=$?"; dmesg -c
+echo "== 2) e3_lib 다음 e3_user"; insmod e3_lib.ko; insmod e3_user.ko; echo "rc=$?"; dmesg -c
+echo "== kallsyms"; grep -E " e3_lib_| __ksymtab_e3" /proc/kallsyms
+echo "== lsmod"; lsmod
+echo "lib refcnt=$(cat /sys/module/e3_lib/refcnt)"; ls /sys/module/e3_lib/holders</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== 1) e3_user 먼저
+insmod: can't insert 'e3_user.ko': unknown symbol in module or invalid parameter
+rc=1
+[    5.569740] init_module: umod=0000000023383683, len=38328, uargs=0000000012c72290
+[    5.586505] Core section allocation order for e3_user:
+[    5.586814] 	.plt
+[    5.586887] 	.text.ftrace_trampoline
+...
+[    5.590490] Init section allocation order for e3_user:
+...
+[    5.594966] Final section addresses for e3_user:
+[    5.596279] 	0xffffd8861ff82000 0x00000018 .plt
+...
+[    5.596558] 	0xffffd8861ff88048 0x0000004c .init.text
+[    5.596571] 	0xffffd8861ff82024 0x00000024 .exit.text
+...
+[    5.600218] e3_user: loading out-of-tree module taints kernel.
+[    5.610584] Absolute symbol: 0x00000000 e3_user.c
+[    5.610661] Absolute symbol: 0x00000000 e3_user.mod.c
+[    5.610674] Absolute symbol: 0x00000000 module-common.c
+[    5.611048] Failed to find symbol e3_lib_secret
+[    5.613858] e3_user: Unknown symbol e3_lib_secret (err -2)
+[    5.613914] Failed to find symbol e3_lib_add
+[    5.613928] e3_user: Unknown symbol e3_lib_add (err -2)
+[    5.614085] Failed to find symbol e3_lib_plain
+[    5.614099] e3_user: Unknown symbol e3_lib_plain (err -2)
+== 2) e3_lib 다음 e3_user
+rc=0
+[    6.119010] init_module: umod=0000000088d9636f, len=39976, uargs=0000000012c72290
+[    6.122651] Core section allocation order for e3_lib:
+...
+[    6.122710] 	__ksymtab
+[    6.122715] 	__ksymtab_gpl
+...
+[    6.135681] Failed to find symbol e3_lib_plain
+[    6.135764] Failed to find symbol e3_lib_add
+[    6.135777] Failed to find symbol e3_lib_secret
+[    6.151688] e3_lib: loaded, exporting 3 symbols
+[    6.224780] init_module: umod=00000000a1eabaf6, len=38328, uargs=0000000012c72290
+...
+[    6.234560] e3_user does not use e3_lib!
+[    6.234777] Allocating new usage for e3_user.
+[    6.245325] e3_user: add(2,3)=5 plain=7 secret=0x5eed
+== kallsyms
+ffffd8861ff86010 r __ksymtab_e3_lib_add	[e3_lib]
+ffffd8861ff86000 r __ksymtab_e3_lib_plain	[e3_lib]
+ffffd8861ff8601c r __ksymtab_e3_lib_secret	[e3_lib]
+ffffd8861ff82058 t e3_lib_exit	[e3_lib]
+ffffd8861ff82050 t e3_lib_secret	[e3_lib]
+ffffd8861ff82040 t e3_lib_add	[e3_lib]
+ffffd8861ff82048 T e3_lib_plain	[e3_lib]
+== lsmod
+e3_user 12288 0 - Live 0xffffd8861ff88000 (O)
+e3_lib 12288 1 e3_user, Live 0xffffd8861ff82000 (O)
+lib refcnt=1
+e3_user</code></pre></figure>
+<p>(<code>...</code>는 섹션 목록 줄을 생략한 곳이다. 원래 로그는 섹션마다 한 줄씩 수십 줄이다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>로더의 순서가 로그에 그대로 보인다</strong>: <code>init_module</code>(BusyBox는 파일을 메모리로 읽어 넘긴다) → 섹션 배치(Core 영역과 Init 영역을 따로) → 최종 주소 → taint → 심볼 해석(<code>Absolute symbol</code>, <code>Failed to find symbol</code>) → 실패면 <code>Unknown symbol ... (err -2)</code>. -2 = <code>-ENOENT</code>.</li><li>실패한 <code>e3_user</code>가 받은 주소(<code>0xffffd8861ff82000</code>)를 성공한 <code>e3_lib</code>가 그대로 다시 받았다. 실패한 로드의 메모리는 깨끗이 반납됐다.</li><li><code>e3_lib</code>를 로드할 때도 <code>Failed to find symbol e3_lib_*</code>가 찍혔다. 에러가 아니다. <code>complete_formation()</code> → <code>verify_exported_symbols()</code>가 "내가 내보낼 이름이 이미 다른 모듈에 있나?"를 확인한 것이다 — <strong>없어야</strong> 정상이다. 같은 이름을 두 모듈이 내보내면 두 번째 로드는 <code>exports duplicate symbol</code>로 실패한다.</li><li><code>e3_user does not use e3_lib!</code> → <code>Allocating new usage for e3_user.</code>: <code>ref_module()</code>이 "아직 의존 기록이 없으니 새로 만든다"는 뜻이다. 이 순간 <code>e3_lib</code>의 refcount가 1이 되고 <code>holders/e3_user</code>가 생긴다.</li><li>kallsyms에서 <code>e3_lib_plain</code>만 <code>T</code>(전역)이고 나머지는 <code>t</code>다. 내보내기 여부는 <code>T</code>/<code>t</code>가 아니라 <strong><code>__ksymtab_&lt;이름&gt;</code> 항목의 존재</strong>로 판단한다. <code>/proc/kallsyms</code>는 디버깅용 전체 심볼 목록이고, 다른 모듈이 링크할 수 있는 것은 <code>__ksymtab</code>에 있는 것뿐이다.</li></ul>
+<blockquote><p>실무 팁: <code>/proc/kallsyms</code>의 주소는 root가 아니면 0으로 보인다(<code>kernel.kptr_restrict</code>). 그리고 <code>kallsyms_lookup_name()</code>은 5.7부터 모듈에 export되지 않는다 — "kallsyms로 주소 찾아서 비공개 함수 부르기"는 막혔다.</p></blockquote>
+<hr>
+<h2 id="8-언로드를-막는-장치-refcount">8. 언로드를 막는 장치 — refcount<a class="anchor" href="#8-언로드를-막는-장치-refcount" aria-label="link">#</a></h2>
+<h3 id="8-1-직관">8.1 직관<a class="anchor" href="#8-1-직관" aria-label="link">#</a></h3>
+<p><code>e3_lib</code>를 <code>e3_user</code>가 쓰는 중에 빼면? <code>e3_user</code>가 다음에 <code>e3_lib_add</code>를 부르는 순간 <strong>해제된 메모리로 점프</strong>한다. 열린 <code>/dev/e3_hold</code>가 있는데 모듈을 빼면? 다음 <code>read()</code>가 사라진 <code>.read</code> 함수로 간다. 커널은 이걸 <strong>모듈 refcount</strong>로 막는다. 펌웨어 RTOS에서 "태스크가 쓰는 중인 드라이버 객체는 삭제 금지" 카운터를 두는 것과 같다.</p>
+<p>refcount를 올리는 길은 세 가지다:</p>
+<div class="tw"><table><thead><tr><th>누가</th><th>어떻게</th><th>보이는 곳</th></tr></thead><tbody><tr><td>다른 모듈이 내 심볼을 씀</td><td>로드 때 <code>resolve_symbol()</code> → <code>ref_module()</code> → <code>strong_try_module_get()</code></td><td><code>lsmod</code>의 Used by 칸에 모듈 이름, <code>/sys/module/&lt;m&gt;/holders/</code></td></tr><tr><td>유저가 내 장치 파일을 open</td><td>VFS가 <code>fops_get()</code> = <code>try_module_get(fops-&gt;owner)</code></td><td>Used by 숫자만 오른다</td></tr><tr><td>내 코드가 명시적으로</td><td><code>try_module_get(owner)</code> / <code>module_put(owner)</code></td><td>숫자</td></tr></tbody></table></div>
+<p><code>fops_get</code>의 6.18 정의(<code>include/linux/fs.h</code>):</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define fops_get(fops) ({						\
+	const struct file_operations *_fops = (fops);			\
+	(((_fops) &amp;&amp; try_module_get((_fops)-&gt;owner) ? (_fops) : NULL));	\
+})</code></pre></figure>
+<p>그래서 드라이버의 <code>file_operations</code>에 <code>.owner = THIS_MODULE</code> <strong>한 줄</strong>이 있어야 한다. 이게 없으면(owner가 NULL) <code>try_module_get(NULL)</code>은 그냥 성공하고 아무것도 잡지 않는다 — 파일이 열려 있어도 모듈이 빠진다.</p>
+<h3 id="8-2-예제-10-사용-중인-모듈-빼-보기">8.2 예제 10 — 사용 중인 모듈 빼 보기<a class="anchor" href="#8-2-예제-10-사용-중인-모듈-빼-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 심볼 의존(<code>e3_user</code> → <code>e3_lib</code>)과 열린 파일(<code>/dev/e3_hold</code>) 두 경우 모두 <code>rmmod</code>가 거절되고, 원인을 없애면 빠지는 것.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* e3_hold: fd가 열려 있는 동안 모듈 refcount가 올라가는 것을 본다 */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/miscdevice.h&gt;
+#include &lt;linux/fs.h&gt;
+
+static int e3_hold_open(struct inode *inode, struct file *f)
+{
+	/* 여기 들어왔을 때는 이미 VFS가 try_module_get(fops-&gt;owner)를 했다 */
+	pr_info("open: refcnt=%d\n", module_refcount(THIS_MODULE));
+	return 0;
+}
+static int e3_hold_release(struct inode *inode, struct file *f)
+{
+	pr_info("release: refcnt=%d (put comes after)\n",
+		module_refcount(THIS_MODULE));
+	return 0;
+}
+static const struct file_operations e3_hold_fops = {
+	.owner   = THIS_MODULE,		/* 이 한 줄이 rmmod를 막는다 */
+	.open    = e3_hold_open,
+	.release = e3_hold_release,
+};
+static struct miscdevice e3_hold_misc = {
+	.minor = MISC_DYNAMIC_MINOR, .name = "e3_hold", .fops = &amp;e3_hold_fops,
+};
+module_misc_device(e3_hold_misc);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("E3 refcount demo");</code></pre></figure>
+<p><code>module_misc_device(x)</code>는 init에서 <code>misc_register(&amp;x)</code>, exit에서 <code>misc_deregister(&amp;x)</code>를 만들어 주는 매크로다(<code>module_platform_driver</code>와 같은 계열, D3).</p>
+<figure class="code"><span class="lang">sh</span><pre><code># t2.sh 중간 — 심볼 의존
+rmmod e3_lib; echo "rc=$?"
+rmmod e3_user; rmmod e3_lib; echo "rc=$?"; dmesg -c
+# t4.sh 앞부분 — 열린 파일
+insmod e3_hold.ko; ls -l --color=never /dev/e3_hold
+exec 3&lt;/dev/e3_hold
+lsmod; echo "refcnt=$(cat /sys/module/e3_hold/refcnt)"
+rmmod e3_hold; echo "rc=$?"; lsmod
+exec 3&lt;&amp;-
+echo "after close: refcnt=$(cat /sys/module/e3_hold/refcnt)"; rmmod e3_hold; lsmod; echo "(lsmod empty)"
+dmesg | grep e3_hold</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>rmmod: remove 'e3_lib': Resource temporarily unavailable
+rc=0
+rc=0
+[   10.500888] hrtimer: interrupt took 8808928 ns
+[   18.377879] e3_user: bye
+[   18.402702] e3_user unusing e3_lib
+[   18.500049] e3_lib: unloaded
+crw-------    1 0        0          10, 258 Oct 10 20:45 /dev/e3_hold
+e3_hold 12288 1 - Live 0xffffcd72db41f000 (O)
+refcnt=1
+rmmod: remove 'e3_hold': Resource temporarily unavailable
+rc=0
+e3_hold 12288 1 - Live 0xffffcd72db41f000 (O)
+after close: refcnt=0
+(lsmod empty)
+[    6.246443] e3_hold: loading out-of-tree module taints kernel.
+[    6.400269] e3_hold: open: refcnt=1
+[    6.652518] e3_hold: release: refcnt=1 (put comes after)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>hrtimer: interrupt took ...</code> 줄은 TCG 에뮬레이션이 느려서 생긴 무관한 경고다.</li><li>두 경우 모두 <code>Resource temporarily unavailable</code> = <code>EAGAIN</code>(= <code>EWOULDBLOCK</code>). <code>rmmod</code>가 <code>O_NONBLOCK</code>으로 <code>delete_module()</code>을 부르므로 "기다리지 않고 바로 거절"한다. 데스크톱 kmod <code>rmmod</code>는 syscall 전에 refcount를 직접 읽어 보고 <code>ERROR: Module e3_lib is in use by: e3_user</code> 같은 친절한 메시지를 낸다. 인터뷰에서 말하는 <strong>"Module is in use"</strong> 가 이것이다.</li><li><code>open:</code> 시점에 이미 refcnt=1이다. <code>misc_open()</code>이 <code>fops_get()</code>으로 우리 모듈을 잡은 <strong>뒤에</strong> 우리 <code>.open</code>을 부르기 때문이다. <code>release:</code>에서도 1이다 — <code>module_put()</code>은 <code>.release</code>가 끝난 <strong>뒤</strong> VFS가 <code>__fput()</code>에서 한다. 우리 코드가 실행되는 동안 모듈이 사라질 수 없게 하는 순서다.</li><li><code>e3_user unusing e3_lib</code>: <code>e3_user</code>가 빠질 때 <code>module_unload_free()</code>가 의존 기록을 지우며 <code>module_put(e3_lib)</code>을 한다. 그래서 그다음 <code>rmmod e3_lib</code>는 성공한다.</li><li>여기서도 BusyBox <code>rmmod</code>의 rc는 실패인데 0이었다(§4 함정).</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="30" width="170" height="44" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="105" y="49" text-anchor="middle" font-size="12">셸 프로세스</text>
+  <text x="105" y="66" text-anchor="middle" font-size="12">fd 3 → /dev/e3_hold</text>
+  <rect x="260" y="30" width="150" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="335" y="49" text-anchor="middle" font-size="12">e3_hold</text>
+  <text x="335" y="66" text-anchor="middle" font-size="12">refcnt 1</text>
+  <line x1="190" y1="52" x2="258" y2="52" stroke="currentColor" marker-end="url(#ah5)"/>
+  <text x="224" y="94" text-anchor="middle" font-size="12">fops_get()</text>
+  <rect x="20" y="120" width="170" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="105" y="139" text-anchor="middle" font-size="12">e3_user</text>
+  <text x="105" y="156" text-anchor="middle" font-size="12">e3_lib_add() 호출</text>
+  <rect x="260" y="120" width="150" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="335" y="139" text-anchor="middle" font-size="12">e3_lib refcnt 1</text>
+  <text x="335" y="156" text-anchor="middle" font-size="12">holders/e3_user</text>
+  <line x1="190" y1="142" x2="258" y2="142" stroke="currentColor" marker-end="url(#ah5)"/>
+  <text x="224" y="184" text-anchor="middle" font-size="12">ref_module()</text>
+  <rect x="20" y="210" width="170" height="44" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="105" y="229" text-anchor="middle" font-size="12">e3_multi</text>
+  <text x="105" y="246" text-anchor="middle" font-size="12">module_exit 없음</text>
+  <rect x="260" y="210" width="150" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="335" y="237" text-anchor="middle" font-size="12">[permanent]</text>
+  <line x1="190" y1="232" x2="258" y2="232" stroke="currentColor" marker-end="url(#ah5)"/>
+  <rect x="450" y="20" width="215" height="250" rx="8" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="557" y="42" text-anchor="middle" font-size="13" font-weight="bold">delete_module() 검사</text>
+  <text x="462" y="70" font-size="12">1. holders 있음 → EAGAIN</text>
+  <text x="462" y="96" font-size="12">2. 상태 LIVE 아님 → EBUSY</text>
+  <text x="462" y="122" font-size="12">3. init만 있고 exit 없음</text>
+  <text x="482" y="140" font-size="12">→ EBUSY</text>
+  <text x="462" y="166" font-size="12">4. refcnt > 0 → EAGAIN</text>
+  <text x="462" y="192" font-size="12">5. 통과 → GOING</text>
+  <text x="482" y="210" font-size="12">exit() 호출</text>
+  <text x="462" y="236" font-size="12">6. free_module()</text>
+  <line x1="410" y1="52" x2="448" y2="160" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah5)"/>
+  <line x1="410" y1="142" x2="448" y2="70" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah5)"/>
+  <line x1="410" y1="232" x2="448" y2="130" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah5)"/>
+  <text x="20" y="288" font-size="12">세 모듈 모두 rmmod가 거절된다. 왼쪽 원인을 없애야(fd 닫기, e3_user 먼저 빼기) 빠진다.</text>
+</svg></figure>
+<p>그림 6 — 모듈을 붙잡는 세 가지와 <code>delete_module()</code>(6.18 <code>kernel/module/main.c</code>)의 검사 순서. 1번은 <code>list_empty(&amp;mod-&gt;source_list)</code>, 4번은 <code>try_stop_module()</code> → <code>try_release_module_ref()</code>다.</p>
+<h3 id="8-3-명시적-try_module_get-언제-직접-쓰나">8.3 명시적 <code>try_module_get</code> — 언제 직접 쓰나<a class="anchor" href="#8-3-명시적-try_module_get-언제-직접-쓰나" aria-label="link">#</a></h3>
+<p>대부분의 드라이버는 <code>.owner = THIS_MODULE</code>로 충분하다. 직접 쓰는 경우는 <strong>"남의 모듈이 준 함수 포인터를 나중에 부를" 때</strong>다. 예를 들어 센서 허브 코어 모듈이 하위 드라이버 모듈이 등록한 <code>ops</code>를 보관했다가 부른다면:</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 코어 모듈 쪽 — 하위 드라이버의 ops를 쓰는 동안 그 모듈을 잡는다 (개념 코드) */
+if (!try_module_get(ops-&gt;owner))
+	return -ENODEV;		/* 그 모듈이 빠지는 중(GOING)이면 실패 */
+ret = ops-&gt;read_sample(dev, buf);
+module_put(ops-&gt;owner);</code></pre></figure>
+<p><code>try_module_get()</code>은 모듈이 GOING이면 <strong>실패</strong>한다(그래서 이름에 try가 있다). <code>__module_get()</code>은 무조건 올린다. 그리고 <strong>자기 자신(<code>THIS_MODULE</code>)을 잡는 것은 대개 잘못</strong>이다. 자기 코드가 실행 중이라는 사실이 이미 "누군가 나를 불렀다"는 뜻이고, 그 호출자가 잡아야 한다. 특히 자기 workqueue 끝에서 <code>module_put(THIS_MODULE)</code>을 하면 put 직후 모듈이 해제되어 함수의 나머지 몇 명령이 해제된 메모리에서 돈다. 이런 경우를 위해 <code>module_put_and_kthread_exit()</code> 같은 전용 헬퍼가 있다.</p>
+<hr>
+<h2 id="9-라이선스-taint-서명">9. 라이선스, taint, 서명<a class="anchor" href="#9-라이선스-taint-서명" aria-label="link">#</a></h2>
+<h3 id="9-1-예제-11-module_license가-없거나-gpl이-아니면">9.1 예제 11 — <code>MODULE_LICENSE</code>가 없거나 GPL이 아니면<a class="anchor" href="#9-1-예제-11-module_license가-없거나-gpl이-아니면" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 라이선스가 없을 때(빌드), GPL이 아닌데 GPL 전용 심볼을 쓸 때(빌드와 로드), GPL이 아니지만 일반 심볼만 쓸 때(로드 + taint P).</p>
+<p>먼저 빌드 단계:</p>
+<p><code>e3_nolic.c</code>는 빈 init 하나와 <code>module_init</code>만 있고 <code>MODULE_LICENSE</code>가 없는 4줄짜리다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* e3_prop: GPL이 아닌 라이선스를 선언한 모듈 (taint P 실험용) */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include "e3_lib.h"
+
+static int __init e3_prop_init(void)
+{
+#ifdef E3_USE_GPL
+	pr_info("add=%d\n", e3_lib_add(1, 1));	/* GPL-only 심볼 */
+#else
+	pr_info("plain=%d\n", e3_lib_plain());	/* EXPORT_SYMBOL */
+#endif
+	return 0;
+}
+static void __exit e3_prop_exit(void) { }
+module_init(e3_prop_init);
+module_exit(e3_prop_exit);
+MODULE_LICENSE("Proprietary");
+MODULE_DESCRIPTION("E3 non-GPL module");</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/E3/nolic &amp;&amp; make
+cd /var/tmp/E3/prop
+echo "=== prop GPL-only"; make E3_FLAGS=-DE3_USE_GPL
+echo "=== prop GPL-only + KBUILD_MODPOST_WARN=1"; make E3_FLAGS=-DE3_USE_GPL KBUILD_MODPOST_WARN=1
+echo "=== prop plain"; make            # 일반 심볼만</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>  CC [M]  e3_nolic.o
+  MODPOST Module.symvers
+ERROR: modpost: missing MODULE_LICENSE() in e3_nolic.o
+WARNING: modpost: missing MODULE_DESCRIPTION() in e3_nolic.o
+make[4]: *** [/var/lab/src/linux-6.18.55/scripts/Makefile.modpost:147: Module.symvers] Error 1
+=== prop GPL-only
+  CC [M]  e3_prop.o
+  MODPOST Module.symvers
+ERROR: modpost: GPL-incompatible module e3_prop.ko uses GPL-only symbol 'e3_lib_add'
+=== prop GPL-only + KBUILD_MODPOST_WARN=1
+  CC [M]  e3_prop.o
+  MODPOST Module.symvers
+ERROR: modpost: GPL-incompatible module e3_prop.ko uses GPL-only symbol 'e3_lib_add'
+=== prop plain
+  CC [M]  e3_prop.o
+  MODPOST Module.symvers
+  CC [M]  e3_prop.mod.o
+  CC [M]  .module-common.o
+  LD [M]  e3_prop.ko</code></pre></figure>
+<p>(<code>make[N]: Entering/Leaving</code> 줄과 nolic의 재귀 make 에러 줄은 첫 줄만 남기고 뺐다. prop 빌드 사이에는 <code>make clean</code>을 했다.)</p>
+<p>출력에서 볼 것: 6.18에서는 <strong>라이선스 누락이 빌드 에러</strong>다. 그리고 GPL 전용 심볼 사용은 <code>KBUILD_MODPOST_WARN=1</code>로도 경고로 낮아지지 않는 <strong>진짜 에러</strong>다. 자주 듣는 "라이선스가 없으면 로드는 되는데 taint된다"는 옛 커널(또는 빌드 검사를 건너뛴 <code>.ko</code>) 이야기다. 런타임 동작을 보려면 빌드 검사를 우회한 <code>.ko</code>가 필요하다. 그래서 정상 빌드한 <code>e3_user.ko</code>의 <code>.modinfo</code>에서 <code>license=GPL</code>을 같은 길이의 <code>license=BSD</code>로 바이트 단위로 바꿨다(BSD 단독은 GPL 호환 목록에 없다). 실무에서 이런 <code>.ko</code>는 "다른 빌드 시스템으로 만든 벤더 바이너리"의 모습이다.</p>
+<figure class="code"><span class="lang">python</span><pre><code>#!/usr/bin/env python3
+"""patch_ko.py — 같은 길이의 문자열을 .ko 안에서 바꿔치기 (빌드 검사를 우회한 모듈 재현용)"""
+import sys
+src, dst, old, new = sys.argv[1:5]
+data = open(src, 'rb').read()
+assert len(old) == len(new) and data.count(old.encode()) == 1, "need exactly one same-length match"
+open(dst, 'wb').write(data.replace(old.encode(), new.encode()))
+print(f"{dst}: '{old}' -&gt; '{new}'")</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/E3 &amp;&amp; mkdir -p patched
+python3 -I patch_ko.py user/e3_user.ko patched/e3_user_bsd.ko "license=GPL" "license=BSD"
+modinfo patched/e3_user_bsd.ko | grep -E "license|vermagic"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>patched/e3_user_bsd.ko: 'license=GPL' -&gt; 'license=BSD'
+license:        BSD
+vermagic:       6.18.55 SMP preempt mod_unload aarch64</code></pre></figure>
+<p>게스트(t2.sh 뒷부분):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>insmod e3_lib.ko; insmod e3_prop.ko; echo "rc=$?"
+insmod e3_user_bsd.ko; echo "rc=$?"; dmesg -c
+lsmod
+t=$(cat /proc/sys/kernel/tainted); echo "tainted=$t"
+for b in 0:P 1:F 2:S 3:R 4:M 5:B 6:U 7:D 8:A 9:W 10:C 11:I 12:O 13:E 14:L 15:K 16:X 17:T 18:N 19:J; do
+  n=${b%%:*}; [ $(( (t &gt;&gt; n) &amp; 1 )) -eq 1 ] &amp;&amp; echo "  bit $n = ${b#*:}"; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>rc=0
+insmod: can't insert 'e3_user_bsd.ko': unknown symbol in module or invalid parameter
+rc=1
+[   18.838047] e3_lib: loaded, exporting 3 symbols
+[   18.929622] e3_prop: module license 'Proprietary' taints kernel.
+[   18.929840] Disabling lock debugging due to kernel taint
+[   18.929930] e3_prop: module license taints kernel.
+[   18.931073] e3_prop: plain=7
+[   18.999850] e3_user: Unknown symbol e3_lib_secret (err -2)
+[   18.999911] e3_user: Unknown symbol e3_lib_add (err -2)
+e3_prop 12288 0 - Live 0xffffd8861ff88000 (PO)
+e3_lib 12288 1 e3_prop, Live 0xffffd8861ff82000 (O)
+tainted=4097
+  bit 0 = P
+  bit 12 = O</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>e3_prop</code>("Proprietary")은 <strong>로드된다</strong>. <code>EXPORT_SYMBOL</code>인 <code>e3_lib_plain</code>만 쓰니까. 대신 커널이 <code>P</code> taint를 받고 <strong>lock debugging(lockdep)이 꺼진다</strong> — 소스를 볼 수 없는 코드가 섞였으니 커널 개발자들은 이 커널의 버그 리포트를 받지 않는다는 뜻이다. <code>lsmod</code>에 <code>(PO)</code>.</li><li>라이선스만 바꾼 <code>e3_user_bsd</code>(내부 이름은 <code>e3_user</code>)는 <strong>GPL 전용인 <code>e3_lib_add</code>와 <code>e3_lib_secret</code>만</strong> <code>Unknown symbol</code>로 실패했고, <code>EXPORT_SYMBOL</code>인 <code>e3_lib_plain</code>은 문제없이 찾았다. 런타임에는 "GPL 위반" 같은 메시지가 따로 없고 그냥 <strong>그 심볼이 안 보이는 것처럼</strong> 처리된다(<code>resolve_symbol()</code>이 <code>gplok = false</code>로 찾는다). 벤더 바이너리 <code>.ko</code>가 "Unknown symbol"로 실패하면 라이선스도 의심하라.</li><li><code>tainted=4097</code> = 0x1001 = 비트 0(P) + 비트 12(O). 위의 해독 루프는 6.18 <code>kernel/panic.c</code>의 <code>taint_flags[]</code> 순서를 그대로 옮긴 것이다.</li></ul>
+<h3 id="9-2-taint-플래그-읽는-법">9.2 taint 플래그 읽는 법<a class="anchor" href="#9-2-taint-플래그-읽는-법" aria-label="link">#</a></h3>
+<p><code>/proc/sys/kernel/tainted</code>는 비트마스크이고, Oops 메시지의 <code>Tainted: P   O</code> 줄과 <code>lsmod</code>의 괄호도 같은 정보다. 모듈과 관련된 것만 추리면:</p>
+<div class="tw"><table><thead><tr><th>비트</th><th>문자</th><th>뜻</th><th>언제</th></tr></thead><tbody><tr><td>0</td><td>P</td><td>proprietary module</td><td>GPL 호환이 아닌 라이선스(없음 포함)</td></tr><tr><td>1</td><td>F</td><td>forced load</td><td><code>modprobe --force</code>로 vermagic·버전 검사를 무시</td></tr><tr><td>7</td><td>D</td><td>died</td><td>Oops/BUG가 났다</td></tr><tr><td>9</td><td>W</td><td>warning</td><td><code>WARN_ON</code>이 터졌다</td></tr><tr><td>10</td><td>C</td><td>staging</td><td><code>drivers/staging</code>의 모듈</td></tr><tr><td>12</td><td>O</td><td>out-of-tree</td><td><code>.modinfo</code>에 <code>intree=Y</code>가 없음</td></tr><tr><td>13</td><td>E</td><td>unsigned</td><td><code>CONFIG_MODULE_SIG=y</code>인데 서명이 없거나 검증 실패</td></tr><tr><td>18</td><td>N</td><td>test</td><td>KUnit 등 테스트 모듈</td></tr></tbody></table></div>
+<p>비교를 위해 랩 커널 트리 안에서 빌드된 모듈(<code>crc-ccitt.ko</code>, <code>intree: Y</code>)을 넣어 봤다(t7.sh):</p>
+<figure class="code"><span class="lang">text</span><pre><code>tainted(start)=0
+crc_ccitt 12288 0 - Live 0xffffd456cc97e000
+taint file: ''  tainted=0
+ffffd456cc97e020 T crc_ccitt	[crc_ccitt]
+e3_hello 12288 0 - Live 0xffffd456cc984000 (O)
+crc_ccitt 12288 0 - Live 0xffffd456cc97e000
+tainted=4096</code></pre></figure>
+<p>in-tree 모듈은 taint를 남기지 않는다. 우리 <code>e3_hello</code>가 들어오는 순간 4096(O)이 된다. <strong>taint는 "고장"이 아니라 "디버깅할 때 알아야 할 이력"</strong> 이다. 커널 메일링 리스트에 Oops를 올리면 맨 먼저 이 줄을 본다.</p>
+<h3 id="9-3-모듈-서명-이-랩에서는-꺼져-있다">9.3 모듈 서명 — 이 랩에서는 꺼져 있다<a class="anchor" href="#9-3-모듈-서명-이-랩에서는-꺼져-있다" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>grep -E "CONFIG_MODULE_SIG|CONFIG_MODVERSIONS|CONFIG_MODULE_FORCE" /var/lab/out/linux-build/.config</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code># CONFIG_MODULE_FORCE_LOAD is not set
+# CONFIG_MODULE_FORCE_UNLOAD is not set
+# CONFIG_MODVERSIONS is not set
+# CONFIG_MODULE_SIG is not set</code></pre></figure>
+<p><code>CONFIG_MODULE_SIG=y</code>이면 빌드가 <code>.ko</code> 끝에 서명(PKCS#7)과 <code>~Module signature appended~</code> 꼬리표를 붙이고, 커널은 로드 때 <code>module_sig_check()</code>에서 내장 키링(<code>certs/</code>)으로 검증한다.</p>
+<div class="tw"><table><thead><tr><th>설정</th><th>서명이 없거나 틀리면</th></tr></thead><tbody><tr><td><code>MODULE_SIG=y</code>, <code>MODULE_SIG_FORCE=n</code></td><td>로드는 되고 taint <code>E</code> + <code>module verification failed: signature and/or required key missing - tainting kernel</code></td></tr><tr><td><code>MODULE_SIG_FORCE=y</code> (또는 부팅 인자 <code>module.sig_enforce=1</code>)</td><td><strong>로드 거부</strong> (<code>-EKEYREJECTED</code> 등)</td></tr><tr><td>Secure Boot + lockdown</td><td>강제와 같은 효과</td></tr></tbody></table></div>
+<p>이 랩은 서명이 꺼져 있어서 E taint가 생기지 않는다(그래서 위 출력에 E가 없다). 실무 장비(보안 부팅을 하는 드론·차량)에서는 <strong>서명 키를 빌드 서버에 두고 모든 <code>.ko</code>를 서명</strong>한다. out-of-tree 벤더 모듈도 우리 키로 다시 서명해야 하며(<code>scripts/sign-file</code>), 이걸 빠뜨리면 현장 장비에서 드라이버가 안 올라온다. 보안 부팅 체인은 C5와 L5에서 다룬다.</p>
+<hr>
+<h2 id="10-vermagic-다른-커널용으로-빌드했다">10. vermagic — "다른 커널용으로 빌드했다"<a class="anchor" href="#10-vermagic-다른-커널용으로-빌드했다" aria-label="link">#</a></h2>
+<h3 id="10-1-예제-12-vermagic만-바꾼-ko-넣어-보기">10.1 예제 12 — vermagic만 바꾼 <code>.ko</code> 넣어 보기<a class="anchor" href="#10-1-예제-12-vermagic만-바꾼-ko-넣어-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 커널 버전 문자열이 다른 모듈이 로드 때 어떻게 거절되는지. 다른 커널 트리로 빌드하는 대신, §9와 같은 바꿔치기로 vermagic의 <code>6.18.55</code>를 <code>6.18.99</code>로 고쳤다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>python3 -I patch_ko.py base/e3_hello.ko patched/e3_hello_badmagic.ko "vermagic=6.18.55" "vermagic=6.18.99"
+# guest
+insmod e3_hello_badmagic.ko; dmesg | tail -1</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>patched/e3_hello_badmagic.ko: 'vermagic=6.18.55' -&gt; 'vermagic=6.18.99'
+[    8.000621] e3_hello: version magic '6.18.99 SMP preempt mod_unload aarch64' should be '6.18.55 SMP preempt mod_unload aarch64'
+insmod: can't insert 'e3_hello_badmagic.ko': invalid module format
+[    8.000621] e3_hello: version magic '6.18.99 SMP preempt mod_unload aarch64' should be '6.18.55 SMP preempt mod_unload aarch64'</code></pre></figure>
+<p>(첫 줄 dmesg는 <code>pr_err</code>급이라 콘솔에도 찍혀 두 번 보인다.)</p>
+<p>출력에서 볼 것: <code>invalid module format</code> = <code>-ENOEXEC</code>. <strong>유저에게 보이는 메시지는 애매하고, 진짜 이유는 dmesg에만 있다.</strong> "invalid module format"을 보면 무조건 <code>dmesg | tail</code>부터 본다. 이 검사는 <code>early_mod_check()</code> → <code>check_modinfo()</code> → <code>same_magic()</code>이 하고, 메모리를 할당하기 <strong>전</strong>이다(그림 4의 "UNFORMED 전 거부").</p>
+<h3 id="10-2-vermagic과-modversions-crc-의-차이">10.2 vermagic과 modversions(CRC)의 차이<a class="anchor" href="#10-2-vermagic과-modversions-crc-의-차이" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>장치</th><th>무엇을 비교하나</th><th>이 랩</th></tr></thead><tbody><tr><td>vermagic</td><td>커널 릴리스 문자열 + SMP/preempt/mod_unload/arch</td><td>켜짐(항상)</td></tr><tr><td>modversions (<code>CONFIG_MODVERSIONS</code>)</td><td><strong>심볼마다</strong> 함수 시그니처·구조체 배치의 CRC (<code>Module.symvers</code> 첫 칸, <code>.ko</code>의 <code>__versions</code> 섹션)</td><td>꺼짐 → CRC 칸이 <code>0x00000000</code></td></tr></tbody></table></div>
+<p>modversions가 켜진 커널(배포판 대부분)은 릴리스 문자열이 같아도 구조체 하나가 바뀌면 <code>disagrees about version of symbol xxx</code>로 거절한다. 반대로 vermagic만 있는 이 랩 같은 커널은 <strong>같은 <code>6.18.55</code>인데 <code>.config</code>가 다른 트리로 빌드한 모듈이 vermagic을 통과해 버릴 수 있다.</strong> 그러면 구조체 오프셋이 달라 엉뚱한 메모리를 건드린다. 결론은 하나다: <strong>모듈은 장비에 올라간 그 커널의 빌드 트리로 빌드한다.</strong></p>
+<p><code>CONFIG_LOCALVERSION</code>(예: <code>-imx</code>)과 <code>CONFIG_LOCALVERSION_AUTO</code>(git 해시 <code>-g1a2b3c</code>)도 릴리스 문자열에 붙는다. 벤더 커널에 패치 한 줄 넣고 다시 빌드했더니 <code>uname -r</code>이 <code>6.6.23-g4f1e…-dirty</code>로 바뀌어 기존 모듈이 전부 안 올라가는 사고가 흔하다.</p>
+<hr>
+<h2 id="11-modprobe와-depmod-의존성을-알아서">11. <code>modprobe</code>와 <code>depmod</code> — 의존성을 알아서<a class="anchor" href="#11-modprobe와-depmod-의존성을-알아서" aria-label="link">#</a></h2>
+<h3 id="11-1-직관">11.1 직관<a class="anchor" href="#11-1-직관" aria-label="link">#</a></h3>
+<p><code>insmod</code>는 <strong>경로를 받아 그 파일 하나</strong>를 넣는다. 의존 모듈은 신경 쓰지 않는다(그래서 §7에서 순서를 틀리자 실패했다). <code>modprobe</code>는 <strong>이름을 받아</strong> <code>/lib/modules/$(uname -r)/</code>에서 파일을 찾고, 의존 모듈을 <strong>먼저</strong> 넣는다. 그러려면 "누가 누구에게 의존하는가" 색인이 필요하다. 그 색인을 만드는 도구가 <code>depmod</code>다. 펌웨어로 치면 링커 맵에서 init 순서를 미리 계산해 표로 만들어 두는 것이다.</p>
+<h3 id="11-2-예제-13-busybox-depmod-modprobe로-의존-모듈-자동-로드">11.2 예제 13 — BusyBox <code>depmod</code>/<code>modprobe</code>로 의존 모듈 자동 로드<a class="anchor" href="#11-2-예제-13-busybox-depmod-modprobe로-의존-모듈-자동-로드" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>/lib/modules/6.18.55/extra/</code>에 <code>.ko</code>를 두고 <code>depmod</code> → <code>modprobe e3_user</code> 한 번에 <code>e3_lib</code>까지 올라오는지, <code>modprobe -r</code>이 의존 모듈까지 내리는지, 그리고 커널 명령줄의 모듈 옵션을 BusyBox modprobe가 읽는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># t5.sh — 커널 인자에 e3_param.count=7 printk.time=0 추가
+K=/lib/modules/$(uname -r)
+echo "== before depmod"; ls --color=never -R $K
+depmod; echo "depmod rc=$?"; ls --color=never $K; echo "-- modules.dep.bb"; cat $K/modules.dep.bb
+echo "== modprobe e3_user"; modprobe e3_user; lsmod
+echo "== modprobe -r e3_user"; modprobe -r e3_user; lsmod; echo "(end lsmod)"
+echo "== modprobe e3_param (cmdline e3_param.count=7)"; modprobe e3_param; cat /sys/module/e3_param/parameters/count; rmmod e3_param
+echo "== insmod e3_param (cmdline is ignored)"; insmod /e3/e3_param.ko; cat /sys/module/e3_param/parameters/count; rmmod e3_param</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55 up 3.66s
+== cmdline: console=ttyAMA0 quiet e3_param.count=7 printk.time=0 LAB_CMD=sh~/e3/t5.sh
+== before depmod
+/lib/modules/6.18.55:
+extra           modules.dep.bb
+
+/lib/modules/6.18.55/extra:
+e3_hello.ko  e3_lib.ko    e3_param.ko  e3_user.ko
+depmod rc=0
+extra           modules.dep.bb
+-- modules.dep.bb
+extra/e3_param.ko
+
+extra/e3_user.ko
+e3_lib
+
+extra/e3_hello.ko
+
+extra/e3_lib.ko symbol:e3_lib_add symbol:e3_lib_plain symbol:e3_lib_secret
+
+== modprobe e3_user
+e3_user 12288 0 - Live 0xffffa814037eb000 (O)
+e3_lib 12288 1 e3_user, Live 0xffffa814037e5000 (O)
+== modprobe -r e3_user
+(end lsmod)
+== modprobe e3_param (cmdline e3_param.count=7)
+1
+== insmod e3_param (cmdline is ignored)
+1</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>modprobe e3_user</code> 한 줄에 <code>e3_lib</code>가 먼저 올라왔다. <code>modprobe -r e3_user</code>는 쓰는 모듈이 없어진 <code>e3_lib</code>까지 내렸다(lsmod가 비었다).</li><li>BusyBox의 색인은 <code>modules.dep.bb</code> 한 파일이다(이 BusyBox는 <code>CONFIG_MODPROBE_SMALL=y</code>). 모듈마다 "파일 경로 [alias/symbol 목록]" 줄 + "의존 모듈 이름" 줄 + 빈 줄. <code>e3_lib</code> 줄의 <code>symbol:e3_lib_add</code>는 "이 심볼이 필요하면 이 모듈을 넣어라"는 색인이다.</li><li><code>depmod</code> 전에 이미 <code>modules.dep.bb</code>가 있었다. 이 rootfs에는 우리가 만든 적이 없으니, 부팅 중 커널이 <code>request_module()</code>로 <code>/sbin/modprobe</code>(= <code>/proc/sys/kernel/modprobe</code>)를 부른 적이 있고, modprobe-small이 색인이 없을 때 전체를 스캔하며 만들어 둔 것으로 보인다(BusyBox <code>modprobe-small.c</code> 주석: "This will generate modules.dep.bb as a side effect").</li><li><strong>커널 명령줄의 <code>e3_param.count=7</code>은 BusyBox modprobe가 적용하지 않았다</strong>(count=1). kmod <code>modprobe</code>는 <code>/proc/cmdline</code>에서 <code>&lt;모듈&gt;.&lt;파라미터&gt;=</code> 항목을 찾아 옵션으로 붙여 준다. 그리고 <code>insmod</code>는 어느 쪽이든 명령줄을 보지 않는다. 장비에서 "명령줄에 넣었는데 안 먹어요"의 흔한 원인이다. 확실한 방법은 <code>/etc/modprobe.d/*.conf</code>의 <code>options e3_param count=7</code>(kmod)이다.</li></ul>
+<h3 id="11-3-데스크톱-yocto의-kmod-depmod는-무엇을-만드나">11.3 데스크톱·Yocto의 kmod <code>depmod</code>는 무엇을 만드나<a class="anchor" href="#11-3-데스크톱-yocto의-kmod-depmod는-무엇을-만드나" aria-label="link">#</a></h3>
+<p>비교를 위해 같은 <code>.ko</code>들을 VM 호스트의 kmod <code>depmod</code>(kmod 34.2)로 별도 디렉터리에 색인했다. 이건 파일만 읽고 쓰는 작업이라 호스트 커널에 아무것도 넣지 않는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>T=/var/tmp/E3/kmodtree; mkdir -p $T/lib/modules/6.18.55/extra
+cp /var/tmp/E3/lib/e3_lib.ko /var/tmp/E3/user/e3_user.ko /var/tmp/E3/base/e3_param.ko $T/lib/modules/6.18.55/extra/
+cp /var/lab/out/linux-build/modules.order /var/lab/out/linux-build/modules.builtin \
+   /var/lab/out/linux-build/modules.builtin.modinfo $T/lib/modules/6.18.55/
+depmod --version | head -1; depmod -b $T 6.18.55; echo rc=$?
+cd $T/lib/modules/6.18.55; ls; cat modules.dep; cat modules.symbols
+modprobe -d $T -S 6.18.55 --show-depends e3_user
+modprobe -d $T -S 6.18.55 -n -v virtio_blk</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>kmod version 34.2
+rc=0
+extra
+modules.alias
+modules.alias.bin
+modules.builtin
+...
+modules.dep
+modules.dep.bin
+modules.devname
+modules.order
+modules.softdep
+modules.symbols
+modules.symbols.bin
+modules.weakdep
+extra/e3_user.ko: extra/e3_lib.ko
+extra/e3_param.ko:
+extra/e3_lib.ko:
+# Aliases for symbols, used by symbol_request().
+alias symbol:e3_lib_plain e3_lib
+alias symbol:e3_lib_add e3_lib
+alias symbol:E3_LIB e3_lib
+alias symbol:e3_lib_secret e3_lib
+insmod /var/tmp/E3/kmodtree/lib/modules/6.18.55/extra/e3_lib.ko 
+insmod /var/tmp/E3/kmodtree/lib/modules/6.18.55/extra/e3_user.ko 
+builtin virtio_blk</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>modules.dep</code>의 형식은 <code>모듈: 의존1 의존2</code>. <code>--show-depends</code>가 실제로 할 <code>insmod</code> 순서를 보여 준다 — <strong>의존 모듈이 먼저</strong>. (<code>ls</code> 목록의 <code>...</code>는 <code>modules.builtin.*</code> 세 줄을 생략한 곳이다.)</li><li><code>modules.alias</code>(D3 §9의 modalias 자동 로딩), <code>modules.symbols</code>(<code>symbol_request()</code>용), <code>modules.builtin</code>(built-in 목록) 등 파일이 여러 개고 <code>.bin</code>은 빠른 조회용 트라이 색인이다. <code>alias symbol:E3_LIB</code> 줄은 네임스페이스 이름이 심볼처럼 잡힌 것으로, 이 조합(kmod 34.2 + 6.18)에서 관찰된 그대로 옮겼다(무해).</li><li><code>virtio_blk</code>는 <code>modules.builtin</code>에 있어서 <code>builtin virtio_blk</code>로 답하고 아무것도 하지 않는다. <strong>built-in 드라이버를 <code>modprobe</code>해도 에러가 아니다</strong> — udev가 modalias로 modprobe를 불러도 조용히 넘어가게 하려는 장치다.</li><li>실무에서는 <code>make modules_install INSTALL_MOD_PATH=&lt;rootfs&gt;</code>가 <code>.ko</code>를 <code>lib/modules/&lt;버전&gt;/kernel/...</code>(out-of-tree 모듈은 <code>M=</code>로 설치할 때 기본 <code>updates/</code>, 6.18 <code>scripts/Makefile.modinst</code>의 <code>INSTALL_MOD_DIR ?= updates</code>)에 복사하고 마지막에 <code>depmod</code>를 돌린다. Yocto·Buildroot는 타깃 rootfs를 만들 때 호스트 쪽 <code>depmod -b</code>를 돌린다(위 명령과 같은 방식).</li></ul>
+<div class="tw"><table><thead><tr><th></th><th>BusyBox (이 랩, modprobe-small)</th><th>kmod (데스크톱·Yocto)</th></tr></thead><tbody><tr><td>색인</td><td><code>modules.dep.bb</code> 하나</td><td><code>modules.dep</code>, <code>.alias</code>, <code>.symbols</code>, <code>.builtin</code>, <code>.bin</code></td></tr><tr><td>insmod syscall</td><td><code>init_module</code> (메모리 버퍼)</td><td><code>finit_module</code> (fd)</td></tr><tr><td>명령줄 <code>mod.param=</code></td><td>적용 안 함(관찰)</td><td><code>/proc/cmdline</code>에서 읽어 적용</td></tr><tr><td><code>/etc/modprobe.d</code> (options, blacklist, softdep)</td><td>이 빌드에서 블랙리스트 기능 꺼짐</td><td>지원</td></tr><tr><td>rmmod 실패 종료 코드</td><td>0 (관찰)</td><td>1</td></tr><tr><td>사용 중 메시지</td><td><code>Resource temporarily unavailable</code></td><td><code>Module X is in use by: Y</code></td></tr></tbody></table></div>
+<hr>
+<h2 id="12-built-in-y-vs-모듈-m">12. built-in(<code>=y</code>) vs 모듈(<code>=m</code>)<a class="anchor" href="#12-built-in-y-vs-모듈-m" aria-label="link">#</a></h2>
+<h3 id="12-1-같은-소스-두-가지-운명">12.1 같은 소스, 두 가지 운명<a class="anchor" href="#12-1-같은-소스-두-가지-운명" aria-label="link">#</a></h3>
+<p>Kconfig에서 <code>tristate</code> 항목은 <code>y</code>(커널 이미지에 포함), <code>m</code>(<code>.ko</code>), <code>n</code>(빌드 안 함) 중 하나다(E2). <strong>같은 드라이버 소스가 설정에 따라 둘 중 하나가 된다.</strong> 그래서 매크로들이 두 가지로 정의돼 있다:</p>
+<div class="tw"><table><thead><tr><th></th><th><code>=m</code> (모듈)</th><th><code>=y</code> (built-in)</th></tr></thead><tbody><tr><td><code>module_init(fn)</code></td><td><code>init_module</code> 별칭 → insmod 때 불림</td><td><code>__initcall(fn)</code> = <code>device_initcall(fn)</code> → 부팅 중 레벨 6에서 불림 (C6)</td></tr><tr><td><code>module_exit(fn)</code></td><td><code>cleanup_module</code> 별칭 → rmmod 때</td><td>불릴 일이 없다. arm64는 <code>.exit.text</code>를 init 영역(<code>__init_begin</code>~<code>__init_end</code>)에 두었다가 부팅 후 버린다</td></tr><tr><td><code>__init</code> 코드</td><td>모듈 init 후 해제 (<code>initsize: 0</code>)</td><td>부팅 끝에 <code>Freeing unused kernel memory</code>로 해제</td></tr><tr><td>파라미터 넘기기</td><td><code>insmod m.ko p=v</code>, <code>/etc/modprobe.d</code></td><td>커널 명령줄 <code>m.p=v</code></td></tr><tr><td><code>/sys/module/m/</code></td><td><code>initstate</code>, <code>refcnt</code>, <code>holders</code> … 전부</td><td>파라미터가 있을 때만 <code>parameters/</code>와 <code>uevent</code></td></tr><tr><td><code>THIS_MODULE</code></td><td><code>&amp;__this_module</code></td><td><code>NULL</code></td></tr><tr><td><code>lsmod</code></td><td>보인다</td><td>안 보인다 (<code>modules.builtin</code>에만)</td></tr><tr><td>장점</td><td>필요할 때만, 교체·디버깅 쉬움</td><td>부팅 초기에 필요(루트 FS·콘솔·인터럽트 컨트롤러), rootfs 전에 동작</td></tr></tbody></table></div>
+<p>C6 노트의 표 그대로, <code>include/linux/module.h</code>의 built-in 쪽 정의는 <code>#define module_init(x) __initcall(x);</code>이고 <code>include/linux/init.h</code>의 <code>#define __initcall(fn) device_initcall(fn)</code>이다. 그래서 built-in 드라이버의 init 순서는 링크 순서(Makefile 순서)와 initcall 레벨로 정해진다.</p>
+<h3 id="12-2-예제-14-built-in-모듈의-흔적과-명령줄-파라미터">12.2 예제 14 — built-in 모듈의 흔적과 명령줄 파라미터<a class="anchor" href="#12-2-예제-14-built-in-모듈의-흔적과-명령줄-파라미터" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: built-in인 <code>virtio_blk</code>·<code>printk</code>도 <code>/sys/module/</code>에 나타나지만 <code>initstate</code>가 없다는 것, 명령줄 <code>printk.time=0</code>이 built-in 파라미터를 바꾸는 것.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># t5.sh 끝 (커널 인자 printk.time=0)
+for d in /sys/module/*/parameters; do m=${d%/parameters}; [ -e $m/initstate ] || echo -n "${m##*/} "; done; echo
+cat /sys/module/printk/parameters/time
+# t6.sh / t7.sh
+ls --color=never /sys/module/printk/parameters /sys/module/module/parameters
+ls /sys/module/printk/initstate
+ls --color=never /sys/module/virtio_blk /sys/module/virtio_blk/parameters</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== built-in modules with parameters
+8250 8250_core acpi acpiphp ahci ahci_ceva amd_xgbe arm_smmu arm_smmu_v3 armmmci auth_rpcgss battery blk_cgroup block bq27xxx_battery button clk_imx8mm clk_imx8mn clk_imx8mp clk_imx8mq clk_imx93 cpufreq cpuidle cros_charge_control cros_ec_debugfs cryptomgr dns_resolver dynamic_debug e1000 e1000e edac_core efi_pstore ehci_hcd fb firmware_class fsl_dpa gpiolib_acpi grant_table hdma hdma_mgmt hibernate hid hid_apple hisi_rng hisi_sas_main hisi_sas_v3_hw hns3 i2c_algo_bit i2c_qup igb kernel keyboard kvm libahci libata lockd loop megaraid_sas memory_hotplug mmcblk module musb_hdrc mvneta mvpp2 netfs nfs nfs_layout_flexfiles nfs_layout_nfsv41_files nfsv4 nmi_backtrace nvmem_qfprom overlay page_reporting pci_hotplug pcie_aspm phy_xgene pinctrl_bcm2835 pnp printk processor psmouse pstore qcom_scm random rcupdate rcutree rng_core sata_sil24 sbsa_gwdt scsi_mod sdhci secretmem slab_common smc91x snps_udc_core snps_udc_plat spurious srcutree sunrpc sysrq tcp_cubic thermal tpm ufshcd_core usb_storage usbcore usbhid vfio_iommu_type1 vfio_pci virtio_blk virtio_net virtio_pci vt watchdog workqueue xen xen_blkfront xen_gntalloc xen_gntdev xen_kbdfront xen_netfront xen_privcmd xhci_hcd xilinx_uartps zynqmp_ipi_mailbox 
+== printk.time
+N
+/sys/module/module/parameters:
+async_probe
+
+/sys/module/printk/parameters:
+always_kmsg_dump         console_suspend          time
+console_no_auto_verbose  ignore_loglevel
+ls: /sys/module/printk/initstate: No such file or directory
+/sys/module/virtio_blk:
+parameters  uevent
+
+/sys/module/virtio_blk/parameters:
+num_request_queues  poll_queues         queue_depth</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>arm64 defconfig라 i.MX8·Xen·Qualcomm까지 built-in이 아주 많다. 이들은 <code>lsmod</code>에는 없지만 파라미터 때문에 <code>/sys/module/&lt;이름&gt;/parameters/</code>가 있다. 장비에서 "이 드라이버 모듈이야, built-in이야?"는 <code>/sys/module/&lt;이름&gt;/initstate</code> 존재 여부로 바로 안다(또는 <code>modules.builtin</code>에서 grep).</li><li><code>printk.time=0</code>을 명령줄에 넣었더니 <code>time</code>이 <code>N</code>이 됐다(이 부팅의 dmesg에는 타임스탬프가 없었다). <code>printk</code>는 진짜 "모듈"이 아니지만 <code>module_param</code>을 쓰는 built-in 코드는 모두 <code>KBUILD_MODNAME</code>(여기서는 <code>printk</code>)을 접두어로 쓴다.</li><li><code>/sys/module/module/parameters/async_probe</code>: 모듈 로더 자신도 파라미터를 가진다(<code>module.async_probe=1</code>이면 모든 모듈 드라이버의 probe를 비동기로).</li></ul>
+<hr>
+<h2 id="13-커널-안에서는-무슨-일이-일어나나">13. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#13-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<h3 id="13-1-insmod부터-live까지-6-18의-함수-이름-그대로">13.1 <code>insmod</code>부터 <code>LIVE</code>까지 — 6.18의 함수 이름 그대로<a class="anchor" href="#13-1-insmod부터-live까지-6-18의-함수-이름-그대로" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 470" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="16" width="300" height="44" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="170" y="35" text-anchor="middle" font-size="12">insmod (BusyBox, 이 랩)</text>
+  <text x="170" y="52" text-anchor="middle" font-size="12">init_module(buf, len, args)</text>
+  <rect x="360" y="16" width="300" height="44" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="35" text-anchor="middle" font-size="12">insmod / modprobe (kmod)</text>
+  <text x="510" y="52" text-anchor="middle" font-size="12">finit_module(fd, args, flags)</text>
+  <rect x="20" y="80" width="300" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="99" text-anchor="middle" font-size="12">copy_module_from_user()</text>
+  <text x="170" y="116" text-anchor="middle" font-size="12">유저 버퍼를 커널로 복사</text>
+  <rect x="360" y="80" width="300" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="510" y="99" text-anchor="middle" font-size="12">idempotent_init_module()</text>
+  <text x="510" y="116" text-anchor="middle" font-size="12">init_module_from_file()</text>
+  <line x1="170" y1="60" x2="170" y2="78" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="510" y1="60" x2="510" y2="78" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="170" y1="124" x2="280" y2="148" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="510" y1="124" x2="400" y2="148" stroke="currentColor" marker-end="url(#ah6)"/>
+  <rect x="170" y="150" width="340" height="30" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="170" text-anchor="middle" font-size="13" font-weight="bold">load_module(info, uargs, flags)</text>
+  <line x1="340" y1="180" x2="175" y2="196" stroke="currentColor" marker-end="url(#ah6)"/>
+  <rect x="20" y="198" width="310" height="26" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="216" font-size="12">1. module_sig_check — 서명 (랩: 꺼짐)</text>
+  <rect x="20" y="234" width="310" height="26" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="252" font-size="12">2. elf_validity_cache_copy — ELF 검증</text>
+  <rect x="20" y="270" width="310" height="26" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="30" y="288" font-size="12">3. early_mod_check — vermagic 비교</text>
+  <rect x="20" y="306" width="310" height="26" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="324" font-size="12">4. layout_and_allocate — 영역 할당·복사</text>
+  <rect x="20" y="342" width="310" height="26" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="360" font-size="12">5. add_unformed_module — UNFORMED 등록</text>
+  <rect x="20" y="378" width="310" height="26" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="30" y="396" font-size="12">6. module_augment_kernel_taints — O·P</text>
+  <rect x="350" y="198" width="310" height="26" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="360" y="216" font-size="12">7. simplify_symbols — 심볼 해석</text>
+  <rect x="350" y="234" width="310" height="26" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="360" y="252" font-size="12">8. apply_relocations — 주소 패치</text>
+  <rect x="350" y="270" width="310" height="26" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="360" y="288" font-size="12">9. complete_formation — RO/NX, COMING</text>
+  <rect x="350" y="306" width="310" height="26" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="360" y="324" font-size="12">10. parse_args — 모듈 파라미터</text>
+  <rect x="350" y="342" width="310" height="26" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="360" y="360" font-size="12">11. mod_sysfs_setup — /sys/module/&lt;m&gt;</text>
+  <rect x="350" y="378" width="310" height="26" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="360" y="396" font-size="12">12. do_init_module — init() → LIVE</text>
+  <line x1="330" y1="391" x2="348" y2="211" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah6)"/>
+  <text x="20" y="430" font-size="12">빨간 칸 = 이 노트에서 실패를 재현한 지점 (vermagic §10, Unknown symbol §7·§9, 파라미터 §5).</text>
+  <text x="20" y="452" font-size="12">각 단계 실패 시 load_module 끝의 goto 라벨들이 역순으로 정리한다 — 커널도 §6의 패턴을 쓴다.</text>
+</svg></figure>
+<p>그림 7 — 6.18 <code>kernel/module/main.c</code>의 로드 경로(왼쪽 열 다음 오른쪽 열). 함수 이름은 랩 소스에서 grep으로 확인했다. 예제 9의 dyndbg 로그(섹션 배치 → taint → <code>Absolute symbol</code>/<code>Failed to find symbol</code>)가 이 순서와 일치한다.</p>
+<p>단계별 설명(펌웨어 링커·로더와 대응시켜):</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>하는 일</th><th>펌웨어로 치면</th></tr></thead><tbody><tr><td>syscall 입구</td><td><code>may_init_module()</code>: <code>CAP_SYS_MODULE</code>·<code>modules_disabled</code> 검사. <code>finit_module</code>은 <code>idempotent_init_module()</code>로 <strong>같은 파일(inode)의 동시 로드를 한 번으로 합친다</strong>(udev가 같은 모듈을 여러 번 요청하는 부팅 폭주 대책)</td><td>부트로더가 이미지 헤더 확인</td></tr><tr><td><code>module_sig_check</code></td><td>서명 검증 (<code>CONFIG_MODULE_SIG</code>)</td><td>secure boot 서명 검증</td></tr><tr><td><code>elf_validity_cache_copy</code></td><td>ELF 헤더·섹션 표·<code>.modinfo</code>·<code>.gnu.linkonce.this_module</code> 존재 확인, 이름 확정</td><td>ELF 파서</td></tr><tr><td><code>early_mod_check</code></td><td>블랙리스트, <code>check_modstruct_version</code>, <code>check_modinfo</code>(vermagic, livepatch), 같은 이름 모듈이 이미 있나</td><td>버전 호환 확인</td></tr><tr><td><code>layout_and_allocate</code></td><td>core(text·rodata·data)와 init 영역을 <strong>따로</strong> 배치하고 메모리 할당(<code>execmem</code>), 섹션 복사</td><td>링커 스크립트의 섹션 배치</td></tr><tr><td><code>add_unformed_module</code></td><td>전역 <code>modules</code> 리스트에 UNFORMED로 등록 (중복 로드 방지)</td><td>—</td></tr><tr><td><code>module_augment_kernel_taints</code></td><td><code>intree</code> 없으면 O, license가 GPL 호환이 아니면 P, staging이면 C</td><td>—</td></tr><tr><td><code>find_module_sections</code> / <code>setup_modinfo</code></td><td><code>__ksymtab</code>, <code>__param</code>, <code>__ex_table</code> 등 특수 섹션 위치 기록, modinfo 속성</td><td>링커 맵 읽기</td></tr><tr><td><code>simplify_symbols</code></td><td>미해결 심볼마다 <code>resolve_symbol()</code> → 커널+모듈 심볼 표 검색, GPL·네임스페이스 검사, <code>ref_module()</code>로 의존 기록</td><td>링커의 심볼 해석</td></tr><tr><td><code>apply_relocations</code></td><td><code>.rela.*</code> 항목대로 명령어·데이터에 주소를 써 넣는다(arm64: <code>apply_relocate_add()</code>, ADRP/BL 범위 밖이면 PLT 경유 — 그래서 <code>.plt</code> 섹션이 있다)</td><td>링커의 재배치</td></tr><tr><td><code>post_relocation</code> / <code>complete_formation</code></td><td>퍼센트(per-cpu) 데이터 복사, <strong>중복 export 검사</strong>, text를 RO+X, rodata를 RO, data를 NX로(<code>STRICT_MODULE_RWX</code>), 상태 COMING</td><td>MPU 영역 권한 설정</td></tr><tr><td><code>prepare_coming_module</code> / <code>parse_args</code></td><td>모듈 notifier(<code>MODULE_STATE_COMING</code>), 파라미터 파싱(타입·콜백 검사 실패면 로드 실패)</td><td>—</td></tr><tr><td><code>mod_sysfs_setup</code></td><td><code>/sys/module/&lt;m&gt;/</code> 생성</td><td>—</td></tr><tr><td><code>do_init_module</code></td><td><code>do_one_initcall(mod-&gt;init)</code> → 성공이면 LIVE, 초기 참조 해제, init 영역 해제(워크큐로 지연), kallsyms를 core 심볼로 교체</td><td><code>main()</code>이 <code>xxx_init()</code> 호출</td></tr></tbody></table></div>
+<p>언로드는 <code>delete_module</code> syscall → 그림 6의 검사 → <code>try_stop_module()</code>(GOING) → <code>mod-&gt;exit()</code> → <code>free_module()</code>(sysfs 제거, 의존 기록 해제, 메모리 반납)이다.</p>
+<h3 id="13-2-핵심-구조체">13.2 핵심 구조체<a class="anchor" href="#13-2-핵심-구조체" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>구조체 / 변수</th><th>위치</th><th>이 노트에서 본 모습</th></tr></thead><tbody><tr><td><code>struct module</code></td><td><code>include/linux/module.h</code></td><td><code>.gnu.linkonce.this_module</code> 1152바이트, <code>THIS_MODULE</code></td></tr><tr><td><code>mod-&gt;state</code></td><td><code>enum module_state</code></td><td>init 중 1(COMING), exit 중 2(GOING)</td></tr><tr><td><code>mod-&gt;refcnt</code></td><td><code>atomic_t</code>, <code>module_refcount()</code> = 값 − <code>MODULE_REF_BASE</code></td><td><code>/sys/module/&lt;m&gt;/refcnt</code>, lsmod 3번째 칸</td></tr><tr><td><code>mod-&gt;source_list</code> / <code>target_list</code></td><td><code>struct module_use</code> 리스트</td><td><code>holders/</code>, lsmod "Used by" 이름</td></tr><tr><td><code>mod-&gt;mem[MOD_TEXT … MOD_INIT_TEXT …]</code></td><td>영역별 메모리</td><td><code>coresize</code>, <code>initsize</code></td></tr><tr><td><code>mod-&gt;kp</code>, <code>num_kp</code></td><td><code>struct kernel_param</code> 배열 (<code>__param</code> 섹션)</td><td><code>/sys/module/&lt;m&gt;/parameters/</code></td></tr><tr><td><code>struct kernel_symbol</code></td><td><code>__ksymtab*</code> 섹션</td><td><code>/proc/kallsyms</code>의 <code>__ksymtab_e3_lib_add</code></td></tr><tr><td><code>mod-&gt;taints</code></td><td>비트마스크</td><td>lsmod의 <code>(PO)</code></td></tr></tbody></table></div>
+<h3 id="13-3-드라이버를-쓸-때-다시-만나는-지점">13.3 드라이버를 쓸 때 다시 만나는 지점<a class="anchor" href="#13-3-드라이버를-쓸-때-다시-만나는-지점" aria-label="link">#</a></h3>
+<ul><li><strong><code>.owner = THIS_MODULE</code></strong> — <code>file_operations</code>(G4 문자 디바이스, G7 misc device), <code>struct platform_driver</code>의 <code>driver.owner</code>(<code>platform_driver_register</code> 매크로가 자동으로 채운다, G3), <code>struct i2c_driver</code>(H5) 등. 이 필드가 refcount 보호의 시작점이다.</li><li><strong><code>module_platform_driver()</code> / <code>module_i2c_driver()</code> / <code>module_misc_device()</code></strong> — init/exit 보일러플레이트를 만드는 매크로. 속은 이 노트의 <code>module_init</code>/<code>module_exit</code>다(D3, G3).</li><li><strong><code>MODULE_DEVICE_TABLE</code></strong> — <code>alias:</code>를 만들어 depmod·modprobe 자동 로딩으로 이어진다(D3 §9, G9).</li><li><strong><code>EXPORT_SYMBOL_GPL</code></strong> — 드라이버가 쓰는 커널 API(<code>devm_*</code>, <code>regmap_*</code>, <code>iio_*</code>) 대부분이 GPL 전용이다. 그래서 제품 드라이버는 사실상 GPL이어야 한다(E7).</li><li><strong>에러 경로</strong> — <code>probe()</code>의 <code>goto</code>/<code>devm</code> 정리(E5, G3), <code>-EPROBE_DEFER</code>(D3 §10).</li><li><strong><code>__init</code>/<code>__initdata</code></strong> — probe에서 쓰는 함수에 <code>__init</code>을 붙이면 안 된다. 핫플러그나 deferred probe로 init 이후에 probe가 불릴 수 있다. modpost의 section mismatch 경고가 이걸 잡는다.</li></ul>
+<hr>
+<h2 id="14-embedded-실무에서-다시-보기">14. Embedded 실무에서 다시 보기<a class="anchor" href="#14-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="14-1-장면-1-벤더-imu-드라이버를-bsp-커널에-맞춰-빌드">14.1 장면 1 — 벤더 IMU 드라이버를 BSP 커널에 맞춰 빌드<a class="anchor" href="#14-1-장면-1-벤더-imu-드라이버를-bsp-커널에-맞춰-빌드" aria-label="link">#</a></h3>
+<p>센서 키트 보드(i.MX8)에 벤더가 IMU 드라이버를 <code>bmi_vendor/</code> 소스로 줬다. 순서는 이 노트 그대로다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># Yocto SDK 또는 BSP 커널 빌드 트리를 대상으로
+make -C ~/bsp/build/tmp/work-shared/imx8mp/kernel-build-artifacts \
+     M=$PWD ARCH=arm64 CROSS_COMPILE=aarch64-poky-linux- modules
+modinfo bmi_vendor.ko | grep -E "vermagic|depends|license|alias"</code></pre></figure>
+<p><code>vermagic</code>이 보드의 <code>uname -r</code>과 같은지, <code>depends</code>에 보드에 없는 모듈이 있는지(<code>industrialio</code>, <code>regmap-i2c</code> 등은 보드 커널에 <code>=m</code>인지 <code>=y</code>인지), <code>license</code>가 GPL인지(아니면 GPL 전용 API를 쓸 수 없다), <code>alias</code>에 우리 DT의 <code>compatible</code>이 있는지를 확인한다. Yocto라면 이걸 <code>inherit module</code> 레시피로 만들어 <code>modules_install</code>·<code>depmod</code>·서명까지 빌드 시스템이 하게 한다(K 모듈).</p>
+<h3 id="14-2-장면-2-현장-장비에서-드라이버가-안-올라와요">14.2 장면 2 — "현장 장비에서 드라이버가 안 올라와요"<a class="anchor" href="#14-2-장면-2-현장-장비에서-드라이버가-안-올라와요" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>증상 (dmesg)</th><th>원인</th><th>대응</th></tr></thead><tbody><tr><td><code>version magic '6.6.23-g1a2b' should be '6.6.23-g9f8e'</code></td><td>커널을 다시 빌드했는데 모듈은 옛 것</td><td>커널과 모듈을 한 빌드에서 함께 배포 (OTA 패키지에 묶기)</td></tr><tr><td><code>Unknown symbol regmap_init_i2c (err -2)</code></td><td>의존 모듈을 안 넣었거나 <code>insmod</code>로 순서를 틀림</td><td><code>modprobe</code> 사용, <code>depmod</code> 재실행</td></tr><tr><td><code>Unknown symbol</code> + 라이선스가 GPL 아님</td><td>벤더 바이너리 <code>.ko</code>가 GPL 전용 API를 씀</td><td>벤더에 GPL 빌드 요청</td></tr><tr><td><code>module verification failed</code> 또는 로드 거부</td><td>서명 키 불일치</td><td>빌드 서버 키로 재서명</td></tr><tr><td><code>disagrees about version of symbol</code></td><td>modversions CRC 불일치 = 커널 구조체가 바뀜</td><td>같은 빌드 트리로 재빌드</td></tr></tbody></table></div>
+<h3 id="14-3-장면-3-파라미터로-현장-튜닝">14.3 장면 3 — 파라미터로 현장 튜닝<a class="anchor" href="#14-3-장면-3-파라미터로-현장-튜닝" aria-label="link">#</a></h3>
+<p>드론의 IMU 드라이버에 <code>module_param_cb(odr_hz, …, 0644)</code>를 두면, 비행 로그를 보면서 <code>echo 400 &gt; /sys/module/bmi_vendor/parameters/odr_hz</code>로 재부팅 없이 샘플링 주기를 바꿔 볼 수 있다. 단 콜백에서 범위를 검사하고(§5의 <code>rate_hz</code>), 값이 바뀌면 하드웨어 레지스터에 실제로 반영하는 코드까지 있어야 한다 — 전역 변수만 바꾸고 레지스터는 그대로인 "가짜 튜닝"이 흔한 버그다. 오래 쓸 설정이면 파라미터보다 sysfs 장치 속성(G8)이나 IIO 속성(I 모듈)이 맞는 자리다.</p>
+<h3 id="14-4-장면-4-부팅-시간과-built-in-선택">14.4 장면 4 — 부팅 시간과 built-in 선택<a class="anchor" href="#14-4-장면-4-부팅-시간과-built-in-선택" aria-label="link">#</a></h3>
+<p>카메라(V4L2) 드라이버를 <code>=m</code>으로 두면 부팅 후 udev가 modalias로 올리는 데 수백 ms가 더 걸린다. 차량용 후방 카메라처럼 "전원 켜고 2초 안에 영상"이 요구되면 그 드라이버만 <code>=y</code>로 바꾸고, 나머지는 모듈로 둔다. 반대로 루트 파일시스템이 있는 eMMC 드라이버를 <code>=m</code>으로 두면 rootfs를 못 읽어 initramfs가 필요해진다(C7). 결정 기준: <strong>rootfs 마운트 전에 필요하거나 부팅 시간 예산 안에 꼭 동작해야 하면 <code>=y</code>, 나머지는 <code>=m</code>.</strong></p>
+<hr>
+<h2 id="15-흔한-실수와-증상">15. 흔한 실수와 증상<a class="anchor" href="#15-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td><code>module_exit</code> 빠뜨림</td><td>lsmod에 <code>[permanent]</code>, rmmod <code>Device or resource busy</code></td><td>init만 있고 exit 없으면 <code>-EBUSY</code></td><td>exit 함수 추가 (재부팅 필요)</td></tr><tr><td>init에서 실패 시 정리 안 함</td><td>두 번째 insmod에서 <code>misc_register</code> <code>-EBUSY</code>, 메모리 누수</td><td>init 실패 시 exit은 안 불린다</td><td><code>goto</code> 사다리로 역순 정리</td></tr><tr><td>init이 <code>1</code> 반환</td><td><code>suspiciously returned 1</code> 경고 후 성공 처리</td><td>0/-errno 규약 위반</td><td>성공 0, 실패 <code>-ENODEV</code> 등</td></tr><tr><td>의존 모듈 먼저 안 넣음</td><td><code>Unknown symbol xxx (err -2)</code></td><td>심볼 표에 아직 없음</td><td><code>modprobe</code> + <code>depmod</code></td></tr><tr><td><code>KBUILD_EXTRA_SYMBOLS</code> 누락</td><td>빌드 때 <code>ERROR: modpost: "xxx" undefined!</code></td><td>modpost가 다른 out-of-tree 모듈의 Module.symvers를 모름</td><td>경로 지정 또는 같은 Makefile로 빌드</td></tr><tr><td>6.13+에서 <code>MODULE_IMPORT_NS(NS)</code></td><td><code>expected ‘,’ or ‘;’ before ‘NS’</code></td><td>인자가 문자열 리터럴로 바뀜</td><td><code>MODULE_IMPORT_NS("NS")</code></td></tr><tr><td>다른 트리로 빌드</td><td><code>invalid module format</code> + dmesg <code>version magic</code></td><td>vermagic 불일치</td><td>대상 커널 빌드 트리로 재빌드</td></tr><tr><td><code>fops.owner</code> 빠뜨림</td><td>파일이 열려 있어도 rmmod 성공 → 다음 read에서 Oops</td><td>refcount가 안 오름</td><td><code>.owner = THIS_MODULE</code></td></tr><tr><td>파라미터 오타</td><td>조용히 기본값으로 동작</td><td><code>unknown parameter ignored</code> 경고만</td><td>dmesg 확인, 중요한 값은 콜백에서 검증</td></tr><tr><td><code>__init</code> 함수를 콜백으로 등록</td><td>init 이후 호출 시 Oops (해제된 메모리)</td><td>init 영역은 로드 직후 해제</td><td><code>__init</code> 제거, section mismatch 경고 확인</td></tr></tbody></table></div>
+<hr>
+<h2 id="16-면접에서-이렇게-말한다">16. 면접에서 이렇게 말한다<a class="anchor" href="#16-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> Write a minimal "hello world" kernel module on the whiteboard and explain each line.</p>
+<p><strong>A.</strong> 헤더 두 개(<code>linux/module.h</code>, <code>linux/init.h</code>), <code>__init</code>이 붙은 <code>static int</code> init 함수가 <code>pr_info</code> 후 0을 반환, <code>__exit</code>이 붙은 <code>static void</code> exit 함수, <code>module_init</code>/<code>module_exit</code>로 등록, <code>MODULE_LICENSE("GPL")</code>과 <code>MODULE_DESCRIPTION</code>. 그리고 <code>obj-m := hello.o</code>와 <code>make -C &lt;커널 빌드 트리&gt; M=$PWD modules</code> Makefile까지 쓴다. 각 줄의 의미: <code>__init</code>은 로드 후 메모리 해제, 반환값은 0 또는 음수 errno, 라이선스는 GPL 전용 심볼 접근과 taint를 결정한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#include &lt;linux/module.h&gt;
+#include &lt;linux/init.h&gt;
+
+static int __init hello_init(void)
+{
+	pr_info("hello\n");
+	return 0;
+}
+
+static void __exit hello_exit(void)
+{
+	pr_info("bye\n");
+}
+
+module_init(hello_init);
+module_exit(hello_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("hello");</code></pre></figure>
+<blockquote><p>Two headers, an init function marked __init that returns 0 on success or a negative errno, an exit function marked __exit, module_init and module_exit to register them, and MODULE_LICENSE. The Makefile is just obj-m := hello.o, and I build it with make -C pointing at the target kernel's build tree and M equal to the current directory. __init puts the function in .init.text, which the kernel frees right after init succeeds. The license matters: without a GPL-compatible one, modpost refuses GPL-only symbols and the kernel is tainted. On a 6.18 kernel a missing MODULE_LICENSE is actually a build error.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "exit을 안 쓰면?" → 로드는 되지만 <code>[permanent]</code>가 되어 rmmod가 <code>-EBUSY</code>로 거절된다.</p>
+<p><strong>Q.</strong> What is the difference between insmod and modprobe?</p>
+<p><strong>A.</strong> <code>insmod</code>는 파일 경로 하나를 받아 그 모듈만 넣는다. 의존성을 모른다. <code>modprobe</code>는 이름(또는 alias)을 받아 <code>/lib/modules/$(uname -r)</code>에서 찾고, depmod가 만든 <code>modules.dep</code>을 보고 의존 모듈을 먼저 넣는다. <code>/etc/modprobe.d</code>의 options·blacklist도 적용하고, kmod 버전은 커널 명령줄의 <code>mod.param=</code>도 읽는다. udev 자동 로딩도 modalias로 modprobe를 부른다.</p>
+<blockquote><p>insmod takes a path and loads exactly that file; it knows nothing about dependencies, so if a symbol provider isn't loaded you get "Unknown symbol". modprobe takes a module name or an alias, looks it up under /lib/modules for the running kernel, and uses the modules.dep index built by depmod to load dependencies first. It also applies options and blacklists from /etc/modprobe.d. udev uses modprobe with the device's modalias for automatic loading.</p></blockquote>
+<p><strong>Q.</strong> What happens inside the kernel when you insmod a module?</p>
+<p><strong>A.</strong> <code>finit_module</code>(또는 <code>init_module</code>) → <code>load_module()</code>. 서명 검사, ELF 검증, vermagic 비교, core·init 영역을 따로 할당해 섹션 복사, UNFORMED로 목록 등록, taint 판정, 미해결 심볼을 커널·모듈 심볼 표에서 해석(GPL·네임스페이스 검사, 의존 기록), 재배치 적용, 메모리 권한 설정(text RO+X, data NX), 파라미터 파싱, sysfs 생성, 마지막으로 <code>do_init_module()</code>이 init을 부르고 성공하면 LIVE로 바꾸고 init 영역을 해제한다. 요컨대 커널 안에 있는 런타임 링커 + 로더다.</p>
+<blockquote><p>The syscall goes into load_module. It checks the signature if enabled, validates the ELF, compares vermagic, lays out and allocates separate core and init regions, adds the module to the list as UNFORMED, applies taints, resolves undefined symbols against the kernel and other modules' export tables — checking GPL-only and namespaces and recording the dependency — applies relocations, sets memory permissions, parses parameters, creates the sysfs directory, and finally do_init_module calls the init function. On success the state becomes LIVE and the init sections are freed. It's basically a runtime linker and loader inside the kernel.</p></blockquote>
+<p><strong>Q.</strong> EXPORT_SYMBOL vs EXPORT_SYMBOL_GPL — and what are symbol namespaces?</p>
+<p><strong>A.</strong> 둘 다 심볼을 커널 심볼 표에 올려 다른 모듈이 링크하게 한다. <code>_GPL</code>은 GPL 호환 라이선스 모듈만 쓸 수 있다. 빌드 때 modpost가 에러로 막고, 런타임에도 비GPL 모듈에는 그 심볼이 안 보여 <code>Unknown symbol</code>이 된다 — 직접 확인했다. 네임스페이스는 <code>EXPORT_SYMBOL_NS_GPL(f, "NS")</code>로 내보내고 쓰는 쪽이 <code>MODULE_IMPORT_NS("NS")</code>를 선언해야 하는 장치로, 서브시스템 내부 API가 아무 드라이버에서나 쓰이는 걸 막는다. 6.13부터 인자가 문자열 리터럴이다.</p>
+<blockquote><p>Both put the symbol into the kernel's export table so other modules can link against it. The GPL variant is only usable by modules with a GPL-compatible license — modpost rejects it at build time, and at load time the symbol is simply invisible to a non-GPL module, so you get Unknown symbol. Namespaces add another gate: the exporter uses EXPORT_SYMBOL_NS_GPL with a namespace string, and the user must declare MODULE_IMPORT_NS with the same string, otherwise modpost fails. Since 6.13 the namespace argument is a string literal.</p></blockquote>
+<p><strong>Q.</strong> How does the kernel prevent a module from being unloaded while it's in use?</p>
+<p><strong>A.</strong> 모듈 refcount다. 다른 모듈이 내 심볼을 쓰면 로드 때 <code>ref_module()</code>이 refcount를 올리고 holders에 기록한다. 장치 파일을 열면 VFS가 <code>fops_get()</code>으로 <code>try_module_get(fops-&gt;owner)</code>를 한다 — 그래서 <code>.owner = THIS_MODULE</code>이 중요하다. <code>delete_module()</code>은 holders가 있거나 refcount가 0이 아니면 <code>EAGAIN</code>, exit 함수가 없으면 <code>EBUSY</code>로 거절한다. kmod rmmod는 이걸 "Module is in use"로 보여 준다.</p>
+<blockquote><p>With the module reference count. When another module links against my symbols, ref_module takes a reference and records it in holders. When user space opens my device file, the VFS calls try_module_get on fops-&gt;owner — which is why .owner = THIS_MODULE matters. delete_module refuses with EAGAIN if there are holders or a non-zero refcount, and with EBUSY if the module has an init but no exit. If I hold a function pointer from another module for later use, I wrap the call in try_module_get and module_put on that module's owner.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "<code>try_module_get</code>이 실패하는 경우는?" → 그 모듈이 GOING(언로드 중)일 때. 그래서 try다.</p>
+<p><strong>Q.</strong> Your module's init fails halfway through. What happens, and how do you write it?</p>
+<p><strong>A.</strong> init이 음수 errno를 돌려주면 커널은 상태를 GOING으로 바꾸고 바로 free한다. <strong>exit은 불리지 않는다.</strong> 그래서 init 안에서 이미 획득한 자원을 역순으로 풀어야 하고, 커널 관용구는 <code>goto</code> 라벨 사다리다. 반환한 errno는 insmod 메시지가 된다(<code>-ENODEV</code> → "No such device"). 드라이버 probe에서는 devm 자원으로 사다리를 줄일 수 있다.</p>
+<blockquote><p>The kernel marks it GOING and frees it immediately, and the exit function is not called. So init must undo whatever it already acquired, in reverse order. The idiom is a goto ladder: each failure jumps to the label that releases everything acquired before it. The negative errno propagates to user space, so -ENODEV shows up as "No such device" in insmod. In probe functions I prefer devm-managed resources, which the driver core releases automatically.</p></blockquote>
+<p><strong>Q.</strong> What does "tainted kernel" mean? What are O, P and E?</p>
+<p><strong>A.</strong> 커널이 "지원 범위 밖의 일이 있었다"고 기록하는 비트마스크로, <code>/proc/sys/kernel/tainted</code>와 Oops의 <code>Tainted:</code> 줄에 나온다. O는 트리 밖에서 빌드된 모듈(<code>intree</code> 없음), P는 GPL 호환이 아닌 라이선스(P가 붙으면 lockdep도 꺼진다), E는 서명 검증이 켜진 커널에서 서명 없는 모듈. 고장이라는 뜻이 아니라, 버그 리포트를 볼 때 "재현 가능한 소스만으로 이뤄진 커널인가"를 알려 주는 이력이다.</p>
+<blockquote><p>It's a bitmask recording that something outside the supported envelope happened, shown in /proc/sys/kernel/tainted and in the Tainted line of an oops. O means an out-of-tree module was loaded, P a module with a non-GPL-compatible license — which also disables lock debugging — and E an unsigned module on a kernel with signature checking. It doesn't mean the kernel is broken; it tells whoever reads the bug report that code without available source or outside mainline was involved.</p></blockquote>
+<p><strong>Q.</strong> Built-in versus loadable module — how do you decide, and what changes in the code?</p>
+<p><strong>A.</strong> 코드는 같다. <code>=y</code>면 <code>module_init</code>이 <code>device_initcall</code>이 되어 부팅 중에 불리고, exit 코드는 버려지며, 파라미터는 커널 명령줄 <code>name.param=</code>으로 준다. <code>=m</code>이면 insmod 때 불리고 rmmod로 뺄 수 있다. rootfs 마운트 전에 필요하거나(스토리지, 콘솔, 인터럽트 컨트롤러) 부팅 시간 예산 안에 꼭 떠야 하는 건 built-in, 나머지는 모듈로 둬서 이미지를 작게 하고 개발 중 교체를 쉽게 한다.</p>
+<blockquote><p>The source is the same. Built in, module_init becomes a device_initcall that runs during boot, the exit path is discarded, and parameters come from the kernel command line as module.param. As a module, init runs at insmod and the code can be unloaded and replaced. Anything needed before the root filesystem is mounted — storage, console, the interrupt controller — or anything with a hard boot-time deadline goes built in; the rest stays modular for a smaller image and faster iteration.</p></blockquote>
+<hr>
+<h2 id="17-직접-해보기">17. 직접 해보기<a class="anchor" href="#17-직접-해보기" aria-label="link">#</a></h2>
+<ol><li>(개념) <code>e3_hello</code>를 로드한 뒤 <code>/sys/module/e3_hello/initsize</code>가 0인 이유와 kallsyms에 <code>e3_hello_init</code>이 없는 이유를 한 문단으로 설명하라. 정답/힌트: <code>do_init_module()</code>이 init 성공 후 init 영역을 해제하고 kallsyms를 core 심볼로 바꾼다.</li><li>(코드) <code>e3_param</code>에 <code>module_param_named(debug, e3_dbg, int, 0644)</code>를 추가하고, <code>echo 2 &gt; /sys/module/e3_param/parameters/debug</code>로 바꾼 값이 exit 로그에 보이게 하라. 이름과 변수 이름이 다른 것을 <code>modinfo</code>로 확인하라. 정답/힌트: <code>parm: debug:...</code>로 보이고 C 변수는 <code>e3_dbg</code>다.</li><li>(코드) <code>e3_lib</code>와 <code>e3_user</code>를 한 디렉터리·한 Makefile(<code>obj-m := e3_lib.o e3_user.o</code>)로 옮겨 <code>KBUILD_EXTRA_SYMBOLS</code> 없이 빌드되는지 확인하라. 정답/힌트: modpost가 한 번에 두 모듈을 보므로 된다. <code>modinfo e3_user.ko</code>의 <code>depends</code>는 그대로 <code>e3_lib</code>다.</li><li>(관찰) <code>e3_hold</code>의 <code>.owner = THIS_MODULE</code> 줄을 지우고 다시 빌드해, fd 3을 연 상태에서 <code>rmmod e3_hold</code>가 성공하는지 보라. 그다음 <code>exec 3&lt;&amp;-</code>를 하면 무슨 일이 생기나? 정답/힌트: rmmod는 성공하고, 닫을 때 해제된 모듈의 <code>.release</code>를 부르며 Oops가 날 수 있다. 이게 owner 필드가 있는 이유다.</li><li>(관찰) 같은 이름의 심볼(<code>e3_lib_add</code>)을 내보내는 두 번째 모듈 <code>e3_lib2</code>를 만들어 <code>e3_lib</code> 다음에 넣어 보라. dmesg 메시지와 errno는? 정답/힌트: <code>complete_formation()</code> → <code>verify_exported_symbols()</code>가 <code>e3_lib2: exports duplicate symbol e3_lib_add (owned by e3_lib)</code>를 찍고 <code>-ENOEXEC</code>(insmod: invalid module format)로 실패시킨다.</li><li>(dyndbg) 예제 9처럼 <code>file kernel/module/main.c +p</code>를 켜고 <code>rmmod e3_user</code>를 해서 <code>unusing</code> 줄을 찾아라. 그 줄을 찍는 함수는? 정답/힌트: <code>module_unload_free()</code>가 의존 기록마다 <code>pr_debug("%s unusing %s\n")</code> 후 <code>module_put()</code>한다.</li><li>(설계) 센서 허브 코어 모듈이 하위 IMU 드라이버 모듈의 <code>ops</code>를 보관하는 구조를 그려 보고, 어디서 <code>try_module_get</code>/<code>module_put</code>을 해야 하는지 표시하라. 정답/힌트: ops를 <strong>호출하는 구간</strong>에서 <code>ops-&gt;owner</code>를 잡는다. 하위 드라이버가 자신을 잡는 것은 틀린 설계다.</li></ol>
+<hr>
+<h2 id="18-용어-사전">18. 용어 사전<a class="anchor" href="#18-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>LKM</td><td>Loadable Kernel Module</td><td>실행 중인 커널에 런타임 링크되는 <code>.ko</code></td></tr><tr><td><code>.ko</code></td><td>kernel object</td><td>재배치 가능한 ELF + <code>.modinfo</code> + <code>__this_module</code></td></tr><tr><td>out-of-tree</td><td>커널 소스 밖</td><td><code>M=</code>로 빌드한 모듈. taint O</td></tr><tr><td>Kbuild</td><td>커널 빌드 시스템</td><td><code>obj-m</code>, <code>&lt;m&gt;-y</code> 문법을 읽는다</td></tr><tr><td>modpost</td><td>모듈 후처리 도구</td><td>심볼·라이선스·네임스페이스 검사, <code>.mod.c</code>와 <code>Module.symvers</code> 생성</td></tr><tr><td><code>Module.symvers</code></td><td>내보낸 심볼 목록</td><td>CRC, 심볼, 모듈, 종류, 네임스페이스</td></tr><tr><td><code>KBUILD_EXTRA_SYMBOLS</code></td><td>추가 symvers 경로</td><td>다른 out-of-tree 모듈 심볼을 modpost에 알림</td></tr><tr><td>vermagic</td><td>버전 매직 문자열</td><td>커널 릴리스 + 핵심 설정. 다르면 로드 거부</td></tr><tr><td>modversions</td><td>심볼별 CRC</td><td><code>CONFIG_MODVERSIONS</code>. 구조체 변경을 잡는다</td></tr><tr><td><code>EXPORT_SYMBOL(_GPL)</code></td><td>심볼 공개</td><td><code>__ksymtab(_gpl)</code>에 등록</td></tr><tr><td>symbol namespace</td><td>심볼 이름 공간</td><td><code>EXPORT_SYMBOL_NS</code> + <code>MODULE_IMPORT_NS("NS")</code></td></tr><tr><td><code>__init</code> / <code>__exit</code></td><td>섹션 표시</td><td>init 후 해제 / built-in이면 버림</td></tr><tr><td>refcount</td><td>모듈 참조 수</td><td>0이 아니면 언로드 불가</td></tr><tr><td>holders</td><td>나를 쓰는 모듈</td><td><code>/sys/module/&lt;m&gt;/holders/</code>, lsmod Used by</td></tr><tr><td><code>try_module_get</code></td><td>참조 획득 시도</td><td>GOING이면 실패</td></tr><tr><td>taint</td><td>오염 플래그</td><td>O(트리 밖), P(비GPL), E(무서명) 등</td></tr><tr><td>depmod</td><td>의존성 색인 생성기</td><td><code>modules.dep</code>(kmod), <code>modules.dep.bb</code>(BusyBox)</td></tr><tr><td>modprobe</td><td>이름으로 로드</td><td>의존 모듈 먼저, options/blacklist 적용</td></tr><tr><td><code>finit_module</code></td><td>fd로 모듈 로드 syscall</td><td>kmod가 쓴다. <code>init_module</code>은 버퍼로</td></tr><tr><td>built-in</td><td><code>=y</code></td><td><code>module_init</code> → <code>device_initcall</code>, <code>lsmod</code>에 없음</td></tr></tbody></table></div>
+<hr>
+<h2 id="19-요약-체크리스트">19. 요약 &amp; 체크리스트<a class="anchor" href="#19-요약-체크리스트" aria-label="link">#</a></h2>
+<p>모듈은 "실행 중인 커널에 런타임 링크되는 재배치 가능한 ELF"다. 소스는 init/exit 두 함수와 메타데이터 매크로로 이뤄지고, 대상 커널의 빌드 트리로 <code>make -C &lt;KDIR&gt; M=$PWD</code>해서 만든다. 빌드 때 modpost가 심볼 존재·GPL·네임스페이스·라이선스를 미리 검사하고, 로드 때 <code>load_module()</code>이 vermagic·서명을 확인한 뒤 메모리를 잡고 심볼을 해석·재배치하고 <code>init</code>을 부른다. 모듈 사이 함수 호출은 <code>EXPORT_SYMBOL(_GPL/_NS)</code>로만 되며, 의존 관계와 열린 파일은 refcount로 언로드를 막는다. init이 실패하면 exit은 불리지 않으니 <code>goto</code> 사다리로 스스로 정리한다. <code>modprobe</code>는 depmod 색인으로 의존 모듈을 먼저 넣는다. 같은 소스를 <code>=y</code>로 빌드하면 <code>module_init</code>은 initcall이 되고 파라미터는 커널 명령줄로 간다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>hello 모듈과 Makefile을 보지 않고 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>modinfo</code>의 vermagic, depends, srcversion, parm, alias가 어디서 오는지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>__init</code>/<code>__exit</code>이 어느 섹션에 들어가고 언제 해제되는지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>모듈 파라미터를 타입·권한·콜백으로 정의하고 sysfs로 바꿀 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>init 실패 경로를 <code>goto</code> 사다리로 짜고, 실패 시 exit이 안 불린다는 것을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>두 모듈 사이에 <code>EXPORT_SYMBOL_GPL</code>/<code>EXPORT_SYMBOL_NS_GPL</code>로 함수를 공유하고 <code>KBUILD_EXTRA_SYMBOLS</code>로 빌드할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"Unknown symbol", "invalid module format", "Module is in use"를 각각 원인별로 진단할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>.owner = THIS_MODULE</code>과 <code>try_module_get</code>/<code>module_put</code>이 왜 필요한지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>/proc/sys/kernel/tainted</code>를 비트로 해독하고 O, P, E의 의미를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>insmod</code>와 <code>modprobe</code>, BusyBox와 kmod의 차이를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>finit_module</code> → <code>load_module</code> → <code>do_init_module</code>의 주요 단계를 순서대로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>드라이버를 <code>=y</code>로 할지 <code>=m</code>으로 할지 근거를 들어 정할 수 있다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — Building External Modules: https://docs.kernel.org/kbuild/modules.html</li><li>docs.kernel.org — Symbol Namespaces: https://docs.kernel.org/core-api/symbol-namespaces.html</li><li>docs.kernel.org — Tainted kernels: https://docs.kernel.org/admin-guide/tainted-kernels.html</li><li>docs.kernel.org — Kernel module signing facility: https://docs.kernel.org/admin-guide/module-signing.html</li><li>man7.org — init_module(2) / finit_module(2): https://man7.org/linux/man-pages/man2/init_module.2.html</li><li>man7.org — delete_module(2): https://man7.org/linux/man-pages/man2/delete_module.2.html</li><li>랩 소스 <code>/var/lab/src/linux-6.18.55</code>: <code>kernel/module/main.c</code>(load_module, do_init_module, delete_module), <code>kernel/module/signing.c</code>, <code>include/linux/module.h</code>, <code>include/linux/moduleparam.h</code>, <code>include/linux/export.h</code>, <code>kernel/panic.c</code>(taint_flags), <code>scripts/mod/modpost.c</code>, <code>scripts/module-common.c</code> — 같은 파일을 https://elixir.bootlin.com/linux/v6.18/source 에서 볼 수 있다</li><li>BusyBox 1.37 <code>modutils/modprobe-small.c</code> (랩 <code>/var/lab/src/busybox-1.37.0</code>)</li><li>Bootlin, "Linux kernel and driver development" 교육 슬라이드 — 모듈 장: https://bootlin.com/doc/training/linux-kernel/</li><li>The Linux Kernel Module Programming Guide (sysprog21): https://sysprog21.github.io/lkmpg/</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-10_E2_kernel_config_build.html"><span class="dir">← 이전</span><span class="nm">E2. 커널 설정과 빌드 — Kconfig · defconfig · Kbuild · 산출물</span></a><a class="next" href="2026-10-10_E4_kernel_constraints.html"><span class="dir">다음 →</span><span class="nm">E4. 커널 프로그래밍 제약 — 커널 코드가 앱 코드와 다른 점</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l3"><a href="#0-1-실습-도구-빌드하고-qemu에-넣는-두-스크립트">0.1 실습 도구 — 빌드하고 QEMU에 넣는 두 스크립트</a></li><li class="l2"><a href="#1-모듈의-해부-hello-모듈-한-개">1. 모듈의 해부 — hello 모듈 한 개</a></li><li class="l3"><a href="#1-1-직관">1.1 직관</a></li><li class="l3"><a href="#1-2-예제-1-e3_hello-c와-out-of-tree-makefile">1.2 예제 1 — e3_hello.c와 out-of-tree Makefile</a></li><li class="l3"><a href="#1-3-out-of-tree-빌드는-어떻게-굴러가나">1.3 out-of-tree 빌드는 어떻게 굴러가나</a></li><li class="l2"><a href="#2-ko-안에는-무엇이-들어-있나">2. .ko 안에는 무엇이 들어 있나</a></li><li class="l3"><a href="#2-1-예제-2-modinfo와-mod-c">2.1 예제 2 — modinfo와 .mod.c</a></li><li class="l3"><a href="#2-2-예제-3-__init이-정말-다른-섹션에-들어가나">2.2 예제 3 — __init이 정말 다른 섹션에 들어가나</a></li><li class="l3"><a href="#2-3-ko-크기-파일-38-kb-중-실제-메모리에-올라가는-것은">2.3 .ko 크기 — 파일 38 KB 중 실제 메모리에 올라가는 것은?</a></li><li class="l2"><a href="#3-넣고-보고-빼기-insmod-lsmod-rmmod">3. 넣고, 보고, 빼기 — insmod · lsmod · rmmod</a></li><li class="l3"><a href="#3-1-예제-4-qemu-게스트에서-hello-모듈의-한-생애">3.1 예제 4 — QEMU 게스트에서 hello 모듈의 한 생애</a></li><li class="l3"><a href="#3-2-모듈의-생애-상태-전이">3.2 모듈의 생애 — 상태 전이</a></li><li class="l3"><a href="#3-3-insmod가-실제로-부르는-syscall">3.3 insmod가 실제로 부르는 syscall</a></li><li class="l2"><a href="#4-여러-파일로-된-모듈-그리고-뺄-수-없는-모듈">4. 여러 파일로 된 모듈, 그리고 뺄 수 없는 모듈</a></li><li class="l3"><a href="#4-1-예제-5-e3_multi-e3_main-c-e3_util-c-exit-없음">4.1 예제 5 — e3_multi = e3_main.c + e3_util.c, exit 없음</a></li><li class="l2"><a href="#5-모듈-파라미터-로드할-때-값을-넘기기">5. 모듈 파라미터 — 로드할 때 값을 넘기기</a></li><li class="l3"><a href="#5-1-직관">5.1 직관</a></li><li class="l3"><a href="#5-2-예제-6-타입-권한-배열-콜백-파라미터">5.2 예제 6 — 타입·권한·배열·콜백 파라미터</a></li><li class="l3"><a href="#5-3-커널-명령줄로-넘기기-built-in일-때">5.3 커널 명령줄로 넘기기 — built-in일 때</a></li><li class="l2"><a href="#6-init이-실패하면-goto-사다리로-거꾸로-정리">6. init이 실패하면 — goto 사다리로 거꾸로 정리</a></li><li class="l3"><a href="#6-1-직관">6.1 직관</a></li><li class="l3"><a href="#6-2-예제-7-e3_fail-어느-단계에서-실패해도-새는-것이-없다">6.2 예제 7 — e3_fail: 어느 단계에서 실패해도 새는 것이 없다</a></li><li class="l3"><a href="#6-3-devm이라는-출구">6.3 devm이라는 출구</a></li><li class="l2"><a href="#7-모듈끼리-함수-부르기-export_symbol">7. 모듈끼리 함수 부르기 — EXPORT_SYMBOL</a></li><li class="l3"><a href="#7-1-직관">7.1 직관</a></li><li class="l3"><a href="#7-2-예제-8-e3_lib-내보내기-와-e3_user-가져다-쓰기-빌드">7.2 예제 8 — e3_lib(내보내기)와 e3_user(가져다 쓰기) 빌드</a></li><li class="l3"><a href="#7-3-예제-9-로드-순서를-틀리면-unknown-symbol-그리고-로더-내부-로그">7.3 예제 9 — 로드 순서를 틀리면 "Unknown symbol", 그리고 로더 내부 로그</a></li><li class="l2"><a href="#8-언로드를-막는-장치-refcount">8. 언로드를 막는 장치 — refcount</a></li><li class="l3"><a href="#8-1-직관">8.1 직관</a></li><li class="l3"><a href="#8-2-예제-10-사용-중인-모듈-빼-보기">8.2 예제 10 — 사용 중인 모듈 빼 보기</a></li><li class="l3"><a href="#8-3-명시적-try_module_get-언제-직접-쓰나">8.3 명시적 try_module_get — 언제 직접 쓰나</a></li><li class="l2"><a href="#9-라이선스-taint-서명">9. 라이선스, taint, 서명</a></li><li class="l3"><a href="#9-1-예제-11-module_license가-없거나-gpl이-아니면">9.1 예제 11 — MODULE_LICENSE가 없거나 GPL이 아니면</a></li><li class="l3"><a href="#9-2-taint-플래그-읽는-법">9.2 taint 플래그 읽는 법</a></li><li class="l3"><a href="#9-3-모듈-서명-이-랩에서는-꺼져-있다">9.3 모듈 서명 — 이 랩에서는 꺼져 있다</a></li><li class="l2"><a href="#10-vermagic-다른-커널용으로-빌드했다">10. vermagic — "다른 커널용으로 빌드했다"</a></li><li class="l3"><a href="#10-1-예제-12-vermagic만-바꾼-ko-넣어-보기">10.1 예제 12 — vermagic만 바꾼 .ko 넣어 보기</a></li><li class="l3"><a href="#10-2-vermagic과-modversions-crc-의-차이">10.2 vermagic과 modversions(CRC)의 차이</a></li><li class="l2"><a href="#11-modprobe와-depmod-의존성을-알아서">11. modprobe와 depmod — 의존성을 알아서</a></li><li class="l3"><a href="#11-1-직관">11.1 직관</a></li><li class="l3"><a href="#11-2-예제-13-busybox-depmod-modprobe로-의존-모듈-자동-로드">11.2 예제 13 — BusyBox depmod/modprobe로 의존 모듈 자동 로드</a></li><li class="l3"><a href="#11-3-데스크톱-yocto의-kmod-depmod는-무엇을-만드나">11.3 데스크톱·Yocto의 kmod depmod는 무엇을 만드나</a></li><li class="l2"><a href="#12-built-in-y-vs-모듈-m">12. built-in(=y) vs 모듈(=m)</a></li><li class="l3"><a href="#12-1-같은-소스-두-가지-운명">12.1 같은 소스, 두 가지 운명</a></li><li class="l3"><a href="#12-2-예제-14-built-in-모듈의-흔적과-명령줄-파라미터">12.2 예제 14 — built-in 모듈의 흔적과 명령줄 파라미터</a></li><li class="l2"><a href="#13-커널-안에서는-무슨-일이-일어나나">13. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l3"><a href="#13-1-insmod부터-live까지-6-18의-함수-이름-그대로">13.1 insmod부터 LIVE까지 — 6.18의 함수 이름 그대로</a></li><li class="l3"><a href="#13-2-핵심-구조체">13.2 핵심 구조체</a></li><li class="l3"><a href="#13-3-드라이버를-쓸-때-다시-만나는-지점">13.3 드라이버를 쓸 때 다시 만나는 지점</a></li><li class="l2"><a href="#14-embedded-실무에서-다시-보기">14. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#14-1-장면-1-벤더-imu-드라이버를-bsp-커널에-맞춰-빌드">14.1 장면 1 — 벤더 IMU 드라이버를 BSP 커널에 맞춰 빌드</a></li><li class="l3"><a href="#14-2-장면-2-현장-장비에서-드라이버가-안-올라와요">14.2 장면 2 — "현장 장비에서 드라이버가 안 올라와요"</a></li><li class="l3"><a href="#14-3-장면-3-파라미터로-현장-튜닝">14.3 장면 3 — 파라미터로 현장 튜닝</a></li><li class="l3"><a href="#14-4-장면-4-부팅-시간과-built-in-선택">14.4 장면 4 — 부팅 시간과 built-in 선택</a></li><li class="l2"><a href="#15-흔한-실수와-증상">15. 흔한 실수와 증상</a></li><li class="l2"><a href="#16-면접에서-이렇게-말한다">16. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#17-직접-해보기">17. 직접 해보기</a></li><li class="l2"><a href="#18-용어-사전">18. 용어 사전</a></li><li class="l2"><a href="#19-요약-체크리스트">19. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

@@ -1,0 +1,1392 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>F6. 인터럽트 처리 — GIC → irqchip → handler, top/bottom half, threaded IRQ, affinity</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="F/2026-10-10_F6_interrupt_handling">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">F. 커널 핵심 메커니즘 · F6. 인터럽트 처리 — GIC → irqchip → handler, top/bottom half, threaded IRQ, affinity</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">F. 커널 핵심 메커니즘 · Kernel Mechanisms</div>
+      <h1>F6. 인터럽트 처리 — GIC → irqchip → handler, top/bottom half, threaded IRQ, affinity</h1>
+      <div class="meta"><span>148분 읽기</span><span>1702줄</span><span>55개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: 핀 하나가 올라간 순간부터 드라이버 handler까지 arm64 커널 함수 이름으로 따라갈 수 있다 · Linux IRQ 번호와 hwirq를 구분하고 <code>/proc/interrupts</code>·<code>/sys/kernel/irq</code>·<code>/sys/kernel/debug/irq</code>를 읽는다 · <code>request_irq</code>/<code>request_threaded_irq</code>/<code>IRQF_ONESHOT</code>/<code>IRQF_SHARED</code>/반환값을 상황에 맞게 고른다 · ftrace로 IRQ 경로와 지연을 직접 잰다 <strong>왜 필요한가</strong>: 드라이버 면접의 단골 질문("인터럽트가 들어오면 무슨 일이 일어나나요?", "top half/bottom half?", "threaded IRQ는 왜 쓰나요?")이고, 실무에서는 "센서 샘플이 가끔 늦다", "irq N: nobody cared", "부팅하자마자 CPU 하나가 100%"로 나타난다 <strong>Don 기준 난이도</strong>: NVIC·ISR·우선순위·ISR 최소화·레이스는 이미 안다 / irq_domain(번호 두 개), flow handler, threaded IRQ 스케줄링, affinity, 커널의 spurious 감지는 새로 배운다 <strong>선행 노트</strong>: D4(DT <code>interrupts</code> 속성과 GIC 3셀), F1(스케줄러·SCHED_FIFO), F2(실행 컨텍스트), F4(spinlock <code>_irqsave</code>)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>Cortex-M에서 인터럽트는 단순했다. 핀이 올라가면 NVIC가 벡터 테이블에서 <code>EXTI9_5_IRQHandler</code> 주소를 꺼내 바로 점프한다. ISR이 플래그를 지우고, 링버퍼에 넣고, RTOS 세마포어를 give 하면 끝이다. 번호 하나(IRQn), 함수 하나, 우선순위 하나.</p>
+<p>Linux SoC에서는 같은 일이 <strong>세 층</strong>으로 나뉜다.</p>
+<ul><li><strong>하드웨어 층</strong>: GIC(Generic Interrupt Controller)가 수백 개의 입력선을 받아 우선순위·대상 CPU를 정하고 CPU에 IRQ 예외를 건다. NVIC + 외부 인터럽트 라우터를 합친 물건이다.</li><li><strong>커널 공통 층 (genirq)</strong>: 예외 벡터는 <strong>딱 하나</strong>(<code>el1h_64_irq</code>)다. 거기서 GIC 드라이버가 "몇 번이냐"를 읽고, 그 번호를 <strong>irq_domain</strong>으로 Linux IRQ 번호로 바꾸고, <code>irq_desc</code>라는 디스크립터의 <strong>flow handler</strong>를 부른다. 벡터 테이블에 드라이버 함수가 직접 들어가는 일은 없다.</li><li><strong>드라이버 층</strong>: 드라이버는 <code>request_irq()</code>로 "이 번호가 오면 이 함수를 불러 달라"고 <strong>등록만</strong> 한다. 무거운 일은 <strong>threaded handler</strong>(커널 스레드)로 보낸다 — RTOS에서 "ISR은 세마포어만 give하고 실제 일은 태스크에서"와 같은 구조를 커널이 표준으로 제공하는 것이다.</li></ul>
+<p>이 노트는 QEMU <code>virt</code>(GICv2, CPU 4개) 위에서 <strong>가짜 장치 하나</strong>(<code>f6-irq</code>, GIC SPI 80)를 DT에 붙이고, 드라이버가 GIC의 pending 비트를 직접 세워 인터럽트를 만든다 (D4에서 쓴 <code>irq_set_irqchip_state(..., IRQCHIP_STATE_PENDING, true)</code> 기법). 그 위에서 hard/threaded handler, ftrace, 지연 측정, affinity, 인터럽트 폭풍과 "nobody cared", <code>disable_irq</code> deadlock, irqsoff tracer를 전부 실제로 돌려 본다.</p>
+<blockquote><p><strong>주의 (H6에서 발견)</strong>: QEMU <code>virt</code>의 GICv2m(MSI 프레임)은 <strong>SPI 80–143을 MSI용으로 예약</strong>한다. 이 노트의 SPI 80은 그 범위 안이라, PCI 장치가 MSI를 많이 쓰는 구성에서는 MSI 벡터와 겹칠 수 있다. 이 노트의 실습은 MSI를 거의 쓰지 않아 충돌이 없었을 뿐이다. 직접 따라 할 때는 <strong>SPI 120처럼 v2m 범위 밖</strong> 또는 <code>/sys/kernel/debug/irq/domains</code>에서 v2m 범위를 확인한 뒤 번호를 고르자 (H6 노트 참고).</p></blockquote>
+<figure class="chart"><svg viewBox="0 0 680 470" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <text x="20" y="22" font-size="13">하드웨어</text>
+  <text x="290" y="22" font-size="13">커널 (arm64, Linux 6.18) — 실제 함수 이름</text>
+  <rect x="10" y="40" width="250" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="20" y="60" font-size="12">센서 → IRQ 선 올라감 (edge/level)</text>
+  <text x="20" y="78" font-size="12">GIC SPI 80 = INTID 112</text>
+  <rect x="10" y="120" width="250" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="20" y="140" font-size="12">GIC Distributor (GICD)</text>
+  <text x="20" y="158" font-size="12">pending · 우선순위 · 대상 CPU 선택</text>
+  <rect x="10" y="200" width="250" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="20" y="220" font-size="12">GIC CPU interface (GICC)</text>
+  <text x="20" y="238" font-size="12">v3: Redistributor + ICC sysreg</text>
+  <rect x="10" y="280" width="250" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="20" y="300" font-size="12">CPU0: PSTATE.I = 0 이면 예외</text>
+  <text x="20" y="318" font-size="12">VBAR_EL1 + 0x280 (EL1h IRQ)</text>
+  <line x1="135" y1="90" x2="135" y2="117" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="135" y1="170" x2="135" y2="197" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="135" y1="250" x2="135" y2="277" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="260" y1="300" x2="278" y2="60" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="280" y="40" width="390" height="36" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="290" y="63" font-size="12">el1h_64_irq (entry.S 벡터): 레지스터 → pt_regs</text>
+  <rect x="280" y="88" width="390" height="36" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="290" y="111" font-size="12">el1h_64_irq_handler → el1_interrupt → __el1_irq</text>
+  <rect x="280" y="136" width="390" height="36" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="290" y="159" font-size="12">irq_enter_rcu → do_interrupt_handler (IRQ 스택)</text>
+  <rect x="280" y="184" width="390" height="36" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="290" y="207" font-size="12">handle_arch_irq = gic_handle_irq: IAR 읽기 → 112</text>
+  <rect x="280" y="232" width="390" height="36" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="290" y="255" font-size="12">generic_handle_domain_irq(domain, 112) → irq_desc 22</text>
+  <rect x="280" y="280" width="390" height="36" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="290" y="303" font-size="12">handle_fasteoi_irq (flow handler, ONESHOT면 mask)</text>
+  <rect x="280" y="328" width="390" height="36" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="290" y="351" font-size="12">handle_irq_event → __handle_irq_event_percpu</text>
+  <rect x="280" y="376" width="390" height="36" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="290" y="399" font-size="12">action->handler: f6_hard() → 반환값 해석</text>
+  <rect x="280" y="424" width="390" height="36" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="290" y="447" font-size="12">EOI (gic_eoi_irq) → irq_exit_rcu → softirq·선점</text>
+  <line x1="475" y1="76" x2="475" y2="86" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="475" y1="124" x2="475" y2="134" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="475" y1="172" x2="475" y2="182" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="475" y1="220" x2="475" y2="230" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="475" y1="268" x2="475" y2="278" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="475" y1="316" x2="475" y2="326" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="475" y1="364" x2="475" y2="374" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="475" y1="412" x2="475" y2="422" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="10" y="360" width="250" height="100" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="20" y="382" font-size="12">색 구분</text>
+  <text x="20" y="402" font-size="12">파랑: arch 진입/퇴장 (arm64)</text>
+  <text x="20" y="422" font-size="12">초록: irqchip + genirq 공통</text>
+  <text x="20" y="442" font-size="12">빨강: 드라이버가 등록한 함수</text>
+</svg></figure>
+<p>그림 1 — 인터럽트 한 번의 전체 경로. 오른쪽 함수 이름은 랩 커널(6.18.55) 소스와 §8의 실제 call trace에서 확인한 것이다. 예전 커널(5.10 무렵 이전) 자료에는 벡터 이름이 <code>el1_irq</code>/<code>el0_irq</code>로 나온다.</p>
+<p>bare-metal과 1:1로 맞춰 보면 이렇다.</p>
+<div class="tw"><table><thead><tr><th>Cortex-M (Don이 아는 것)</th><th>arm64 Linux</th><th>차이</th></tr></thead><tbody><tr><td>NVIC</td><td>GIC (GICv2: Distributor + CPU interface, GICv3: + Redistributor, ICC 시스템 레지스터)</td><td>대상 CPU 라우팅이 추가됨</td></tr><tr><td>벡터 테이블의 IRQn별 엔트리</td><td>IRQ 벡터 <strong>하나</strong> → <code>handle_arch_irq</code>(= <code>gic_handle_irq</code>)</td><td>번호 해석을 소프트웨어가 한다</td></tr><tr><td>IRQn</td><td><strong>hwirq</strong>(컨트롤러 안 번호) + <strong>Linux IRQ 번호(virq)</strong></td><td>irq_domain이 둘을 잇는다 (§3)</td></tr><tr><td>ISR 함수</td><td><code>irqaction-&gt;handler</code> (hard handler, top half)</td><td>여러 개가 한 줄에 매달릴 수 있다(공유)</td></tr><tr><td>"ISR은 짧게, 일은 태스크로"</td><td><code>thread_fn</code> (threaded handler, <code>irq/N-name</code> 커널 스레드, SCHED_FIFO 50)</td><td>커널이 스레드를 만들고 깨워 준다</td></tr><tr><td><code>NVIC_SetPriority</code></td><td>GIC 우선순위는 Linux가 거의 다 같은 값으로 둔다. 실질적 우선순위는 <strong>스레드 RT 우선순위</strong></td><td>선점 단위가 다르다</td></tr><tr><td><code>__disable_irq()</code> / PRIMASK</td><td><code>local_irq_disable()</code> (DAIF.I)</td><td>이 CPU만. 다른 CPU는 계속 받는다</td></tr><tr><td><code>NVIC_DisableIRQ(n)</code></td><td><code>disable_irq(n)</code></td><td>실행 중 handler가 끝나길 <strong>기다린다</strong> (§9)</td></tr></tbody></table></div>
+<hr>
+<h2 id="1-하드웨어-경로-gic와-arm64-예외">1. 하드웨어 경로 — GIC와 arm64 예외<a class="anchor" href="#1-하드웨어-경로-gic와-arm64-예외" aria-label="link">#</a></h2>
+<h3 id="1-1-gic-인터럽트-종류와-intid">1.1 GIC 인터럽트 종류와 INTID<a class="anchor" href="#1-1-gic-인터럽트-종류와-intid" aria-label="link">#</a></h3>
+<p>GIC는 인터럽트를 번호 대역으로 나눈다. 이 번호(INTID)가 GIC 드라이버 irq_domain의 <strong>hwirq</strong>가 된다.</p>
+<div class="tw"><table><thead><tr><th>종류</th><th>INTID 범위</th><th>뜻</th><th>예 (QEMU virt)</th></tr></thead><tbody><tr><td>SGI (Software Generated Interrupt)</td><td>0–15</td><td>CPU가 CPU에게 보내는 IPI</td><td>리스케줄 IPI, 함수 호출 IPI</td></tr><tr><td>PPI (Private Peripheral Interrupt)</td><td>16–31</td><td>CPU마다 따로 있는 장치</td><td>arch timer = PPI 11 = INTID 27</td></tr><tr><td>SPI (Shared Peripheral Interrupt)</td><td>32–1019</td><td>일반 주변장치, 아무 CPU로 보낼 수 있음</td><td>UART = SPI 1 = INTID 33, 우리 장치 = SPI 80 = INTID 112</td></tr><tr><td>LPI (GICv3+)</td><td>8192–</td><td>메시지 기반(MSI), ITS 경유</td><td>PCIe MSI-X</td></tr></tbody></table></div>
+<p>DT의 <code>interrupts = &lt;GIC_SPI 80 ...&gt;</code>에 적는 80은 <strong>SPI 안에서의 번호</strong>이고, GIC 안의 실제 번호는 80 + 32 = 112다 (D4 §4.2의 "+32 함정").</p>
+<h3 id="1-2-gic-한-번의-처리-iar-읽기와-eoi-쓰기">1.2 GIC 한 번의 처리 — IAR 읽기와 EOI 쓰기<a class="anchor" href="#1-2-gic-한-번의-처리-iar-읽기와-eoi-쓰기" aria-label="link">#</a></h3>
+<ul><li><strong>Distributor (GICD)</strong>: 모든 SPI의 enable/pending/우선순위/트리거 타입/대상 CPU(<code>GICD_ITARGETSR</code>, v3는 <code>GICD_IROUTER</code>)를 가진다. "pending 비트 세우기"(<code>GICD_ISPENDR</code>)를 소프트웨어가 할 수도 있다 — 이 노트의 인터럽트 생성 방법이다.</li><li><strong>CPU interface (GICC, v2) / ICC 시스템 레지스터 (v3)</strong>: CPU별 창구. 가장 높은 우선순위의 pending을 CPU에 IRQ 신호로 올린다. CPU는 <strong>IAR(Interrupt Acknowledge Register)을 읽어</strong> INTID를 얻고(이때 pending → active), 처리가 끝나면 <strong>EOI 레지스터에 그 값을 써서</strong> active를 해제한다.</li></ul>
+<p>NVIC는 이 "ack/EOI"를 하드웨어가 예외 진입/복귀 때 자동으로 해 줬다. GIC에서는 <strong>소프트웨어(GIC 드라이버)가 명시적으로</strong> 한다. 그래서 커널의 <code>irq_chip</code>에 <code>.irq_eoi</code>, <code>.irq_mask</code> 같은 콜백이 있다.</p>
+<p>GICv2 드라이버의 진입 함수는 실제로 이렇게 생겼다 (<code>drivers/irqchip/irq-gic.c</code>, 일부 발췌):</p>
+<figure class="code"><span class="lang">c</span><pre><code>static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
+{
+	...
+	do {
+		irqstat = readl_relaxed(cpu_base + GIC_CPU_INTACK);	/* IAR 읽기 */
+		irqnr = irqstat &amp; GICC_IAR_INT_ID_MASK;
+		if (unlikely(irqnr &gt;= 1020))				/* 1023 = spurious, 더 없음 */
+			break;
+		...
+		generic_handle_domain_irq(gic-&gt;domain, irqnr);		/* hwirq → irq_desc */
+	} while (1);
+}</code></pre></figure>
+<p><code>do { } while (1)</code> 루프라는 점이 중요하다. 한 번 예외로 들어오면 <strong>pending이 없을 때까지(IAR이 1023을 줄 때까지)</strong> 계속 처리한다. §6의 function_graph에서 실제로 IPI와 우리 SPI가 <strong>한 번의 <code>gic_handle_irq</code> 호출 안에서 연달아</strong> 처리되는 장면을 본다. GICv3는 같은 일을 <code>read_sysreg_s(SYS_ICC_IAR1_EL1)</code>(시스템 레지스터)로 한다 (<code>irq-gic-v3.c</code>의 <code>gic_handle_irq</code> → <code>__gic_handle_irq_from_irqson</code> → <code>__gic_handle_irq</code>).</p>
+<h3 id="1-3-cpu-쪽-벡터-하나-그리고-irq-스택">1.3 CPU 쪽 — 벡터 하나, 그리고 IRQ 스택<a class="anchor" href="#1-3-cpu-쪽-벡터-하나-그리고-irq-스택" aria-label="link">#</a></h3>
+<p>arm64의 예외 벡터 테이블(<code>VBAR_EL1</code>)에는 IRQ 엔트리가 상황별로 4개뿐이다(EL1t, EL1h, EL0 64-bit, EL0 32-bit). 커널 코드 실행 중이면 <code>VBAR_EL1 + 0x280</code>(EL1h IRQ), 유저 코드 실행 중이면 <code>+ 0x480</code>(EL0 64-bit IRQ)으로 들어온다. 랩 커널 <code>arch/arm64/kernel/entry.S</code>에서 <code>kernel_ventry 1, h, 64, irq</code>가 만드는 <code>el1h_64_irq</code>가 그것이다.</p>
+<p><code>arch/arm64/kernel/entry-common.c</code>(일부 발췌, 랩 소스 그대로):</p>
+<figure class="code"><span class="lang">c</span><pre><code>static __always_inline void __el1_irq(struct pt_regs *regs,
+				      void (*handler)(struct pt_regs *))
+{
+	irqentry_state_t state;
+
+	state = enter_from_kernel_mode(regs);
+
+	irq_enter_rcu();			/* preempt_count에 HARDIRQ 표시 */
+	do_interrupt_handler(regs, handler);	/* 필요하면 IRQ 전용 스택으로 갈아탄다 */
+	irq_exit_rcu();				/* 여기서 softirq 처리 (F7) */
+
+	exit_to_kernel_mode(regs, state);	/* 여기서 선점(reschedule) 검사 */
+}
+
+asmlinkage void noinstr el1h_64_irq_handler(struct pt_regs *regs)
+{
+	el1_interrupt(regs, handle_arch_irq);
+}</code></pre></figure>
+<p>볼 것 세 가지.</p>
+<ul><li><code>handle_arch_irq</code>는 <strong>함수 포인터</strong>다. GIC 드라이버가 초기화 때 <code>set_handle_irq(gic_handle_irq)</code>로 꽂는다. 아키텍처 코드는 GIC를 모른다.</li><li><code>do_interrupt_handler</code>는 태스크 스택 위에 있으면 <code>call_on_irq_stack()</code>으로 <strong>CPU별 IRQ 스택</strong>으로 바꾼다. Cortex-M의 MSP/PSP 분리와 같은 발상이다.</li><li><code>irq_exit_rcu()</code>에서 softirq가 돌고, <code>exit_to_kernel_mode()</code>에서 "handler가 더 높은 우선순위 태스크(예: irq 스레드)를 깨웠으면 지금 바꾸자"가 일어난다. <strong>threaded handler가 실행되는 시점이 여기서 결정된다</strong> (§5).</li></ul>
+<hr>
+<h2 id="2-실습-준비-f6-irq-노드와-f6_irq-드라이버">2. 실습 준비 — <code>f6-irq</code> 노드와 <code>f6_irq</code> 드라이버<a class="anchor" href="#2-실습-준비-f6-irq-노드와-f6_irq-드라이버" aria-label="link">#</a></h2>
+<h3 id="2-1-무엇을-하나">2.1 무엇을 하나<a class="anchor" href="#2-1-무엇을-하나" aria-label="link">#</a></h3>
+<ul class="tasks"><li>QEMU <code>virt</code>를 <strong><code>-smp 4</code></strong>로 띄운다. README 경고대로 <code>-dtb</code>를 줄 때는 DT를 같은 <code>-smp</code>로 다시 덤프해야 한다 (<code>out/virt.dts</code>는 CPU 1개짜리).</li><li>커널은 디버그 커널 <code>out/Image-dbg</code>(6.18.55-dbg: ftrace function_graph·irqsoff, lockdep, hung task 감지, <code>GENERIC_IRQ_DEBUGFS</code>, <code>IRQ_TIME_ACCOUNTING</code>)를 쓴다.</li><li>장치는 virt에서 아무도 안 쓰는 <strong>SPI 80, edge-rising</strong>. 하드웨어 선은 없으니 드라이버가 <code>irq_set_irqchip_state(irq, IRQCHIP_STATE_PENDING, true)</code>로 <strong>GICD_ISPENDR 비트를 세워</strong> 인터럽트를 만든다. D4는 probe 안에서 3번 쐈고, 여기서는 debugfs 파일 <code>fire</code>에 N을 쓰면 N번 쏜다.</li></ul>
+<p>랩 디버그 커널의 IRQ 관련 설정(빌드 트리 <code>.config</code>에서 발췌):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>grep -E "GENERIC_IRQ_DEBUGFS|IRQ_TIME_ACCOUNTING=|IRQSOFF_TRACER|IRQ_FORCED_THREADING|GENERIC_IRQ_INJECTION|^CONFIG_PREEMPT=|CONFIG_HZ=" /var/lab/out/linux-build-dbg/.config</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>CONFIG_GENERIC_IRQ_INJECTION=y
+CONFIG_IRQ_FORCED_THREADING=y
+CONFIG_GENERIC_IRQ_DEBUGFS=y
+CONFIG_PREEMPT=y
+CONFIG_IRQ_TIME_ACCOUNTING=y
+CONFIG_HZ=250
+CONFIG_HAVE_IRQ_TIME_ACCOUNTING=y
+CONFIG_IRQSOFF_TRACER=y</code></pre></figure>
+<h3 id="2-2-예제-1-dt-조각과-dtb-만들기">2.2 예제 1 — DT 조각과 dtb 만들기<a class="anchor" href="#2-2-예제-1-dt-조각과-dtb-만들기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>-smp 4</code> 머신의 DT를 QEMU에서 덤프하고, 노드 하나를 붙여 <code>f6.dtb</code>를 만든다.</p>
+<figure class="code"><span class="lang">dts</span><pre><code>/* f6_node.dtsi — virt(-smp 4) DT 사본 끝에 #include 되는 F6 데모 노드 */
+#include &lt;dt-bindings/interrupt-controller/arm-gic.h&gt;
+
+/ {
+	f6-irq {
+		compatible = "dons,f6-irq";
+		interrupts = &lt;GIC_SPI 80 IRQ_TYPE_EDGE_RISING&gt;;	/* virt에서 안 쓰는 SPI */
+	};
+};</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# mkdtb.sh — -smp 4 virt DT를 덤프하고 f6 노드를 붙여 /var/tmp/F6/f6.dtb 생성
+set -e
+W=/var/tmp/F6; K=/var/lab/src/linux-6.18.55/include
+qemu-system-aarch64 -machine virt,dumpdtb=$W/virt4.dtb -cpu cortex-a57 -smp 4 -m 512M -nographic
+dtc -q -I dtb -O dts -o $W/virt4.dts $W/virt4.dtb
+echo '#include "/Users/donh/.elinux_scratch/F6/f6_node.dtsi"' &gt;&gt; $W/virt4.dts
+cpp -nostdinc -I $K -undef -x assembler-with-cpp $W/virt4.dts &gt; $W/f6.pp.dts
+dtc -q -I dts -O dtb -o $W/f6.dtb $W/f6.pp.dts
+fdtget -t x $W/f6.dtb /f6-irq interrupts</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0 50 1</code></pre></figure>
+<p>출력에서 볼 것: 매크로가 풀려 <code>&lt;0 0x50 1&gt;</code> — GIC_SPI(0), 80(0x50), IRQ_TYPE_EDGE_RISING(1)이 되었다. 루트 노드의 <code>interrupt-parent</code>가 GIC(이 덤프에서는 phandle 0x8005 — CPU 수가 바뀌면 phandle 번호도 바뀐다)라서 노드에 <code>interrupt-parent</code>를 쓰지 않았다.</p>
+<h3 id="2-3-예제-2-드라이버-f6_irq-네-조각을-합쳐-한-파일">2.3 예제 2 — 드라이버 <code>f6_irq</code> (네 조각을 합쳐 한 파일)<a class="anchor" href="#2-3-예제-2-드라이버-f6_irq-네-조각을-합쳐-한-파일" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 한 모듈이 <code>mode</code> 파라미터로 다섯 가지 등록 방식을 시험하고, handler 안에서 <code>ktime_get_ns()</code>로 시각을 찍어 둔다. 첫 조각은 공통 정의와 hard handler다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f6_irq (1/3): hard handler + thread handler, 타임스탬프 기록 */
+#include &lt;linux/module.h&gt;
+#include &lt;linux/platform_device.h&gt;
+#include &lt;linux/of.h&gt;
+#include &lt;linux/interrupt.h&gt;
+#include &lt;linux/irq.h&gt;
+#include &lt;linux/debugfs.h&gt;
+#include &lt;linux/completion.h&gt;
+#include &lt;linux/delay.h&gt;
+#include &lt;linux/ktime.h&gt;
+
+enum { M_HARD, M_THREAD, M_NONE, M_SHARED, M_NOONESHOT };
+static int mode;	module_param(mode, int, 0444);
+static int hard_us;	module_param(hard_us, int, 0644);	/* hard handler 안 udelay */
+static int dis;		module_param(dis, int, 0644);	/* 1=disable_irq 2=_nosync (thread 안) */
+static int storm_max = 200000; module_param(storm_max, int, 0644);
+
+#define NS 4096
+static struct f6 {
+	int irq;
+	u64 t_pend, t_hard[NS];
+	u32 p2h[NS], hdur[NS], h2t[NS];		/* ns: pend→hard, hard 길이, hard→thread */
+	u8 hcpu[NS], tcpu[NS];
+	unsigned int n_hard, n_thr, n_b;
+	struct completion done;
+} f6;
+
+static irqreturn_t f6_hard(int irq, void *dev)
+{
+	u64 t = ktime_get_ns();
+	unsigned int i = f6.n_hard++;
+
+	if (i &lt; NS) {
+		f6.p2h[i] = t - f6.t_pend;
+		f6.t_hard[i] = t;
+		f6.hcpu[i] = smp_processor_id();
+	}
+	if (hard_us)
+		udelay(hard_us);
+	if (mode == M_NONE || mode == M_SHARED) {	/* "내 장치 아님" + 다시 pending → 폭풍 */
+		if (f6.n_hard &lt; storm_max)
+			irq_set_irqchip_state(irq, IRQCHIP_STATE_PENDING, true);
+		else
+			complete(&amp;f6.done);
+		return IRQ_NONE;
+	}
+	if (i &lt; NS)
+		f6.hdur[i] = ktime_get_ns() - t;
+	if (mode == M_THREAD)
+		return IRQ_WAKE_THREAD;		/* irq/N-f6_irq 스레드를 깨운다 */
+	complete(&amp;f6.done);
+	return IRQ_HANDLED;
+}</code></pre></figure>
+<p>두 번째 조각: thread handler, 그리고 공유 IRQ 실험용 두 번째 handler.</p>
+<figure class="code"><span class="lang">c</span><pre><code>static irqreturn_t f6_thread(int irq, void *dev)
+{
+	u64 t = ktime_get_ns();
+	unsigned int i = f6.n_thr++;
+
+	if (i &lt; NS) {
+		f6.h2t[i] = t - f6.t_hard[i];
+		f6.tcpu[i] = smp_processor_id();
+	}
+	if (dis == 1) { dis = 0; pr_info("f6: thread calls disable_irq(%d)\n", irq); disable_irq(irq); }
+	if (dis == 2) { dis = 0; pr_info("f6: thread calls disable_irq_nosync(%d)\n", irq); disable_irq_nosync(irq); }
+	complete(&amp;f6.done);
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t f6_b_handler(int irq, void *dev)	/* 공유 IRQ의 두 번째 장치 */
+{
+	f6.n_b++;
+	return IRQ_HANDLED;
+}</code></pre></figure>
+<p>세 번째 조각: debugfs 파일. <code>fire</code>는 pending을 세우고 handler가 <code>complete()</code>할 때까지 기다리기를 N번 반복한다. <code>irqsoff</code>는 이 CPU의 인터럽트를 ms 동안 막는다(§10). <code>stats</code>는 기록한 샘플을 덤프한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* f6_irq (2/3): debugfs — fire(N회 발생), stats, irqsoff(ms) */
+static int fire_set(void *data, u64 n)
+{
+	u64 k;
+
+	for (k = 0; k &lt; n; k++) {
+		reinit_completion(&amp;f6.done);
+		f6.t_pend = ktime_get_ns();
+		irq_set_irqchip_state(f6.irq, IRQCHIP_STATE_PENDING, true);	/* GICD_ISPENDR */
+		if (!wait_for_completion_timeout(&amp;f6.done, msecs_to_jiffies(3000))) {
+			pr_info("f6: fire #%llu timed out (n_hard=%u)\n", k, f6.n_hard);
+			return -ETIMEDOUT;
+		}
+		usleep_range(500, 1000);
+	}
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(fire_fops, NULL, fire_set, "%llu\n");
+
+static int irqsoff_set(void *data, u64 ms)
+{
+	unsigned long flags;
+
+	pr_info("f6: irqs off for %llu ms on CPU%d\n", ms, raw_smp_processor_id());
+	local_irq_save(flags);		/* 이 CPU의 IRQ 차단 (DAIF.I = 1) */
+	mdelay(ms);			/* busy-wait — 절대 실무에서 하지 말 것 */
+	local_irq_restore(flags);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(irqsoff_fops, NULL, irqsoff_set, "%llu\n");
+
+static int stats_show(struct seq_file *m, void *v)
+{
+	unsigned int i, n = min(f6.n_hard, (unsigned int)NS);
+
+	seq_printf(m, "n_hard=%u n_thr=%u n_b=%u\n", f6.n_hard, f6.n_thr, f6.n_b);
+	for (i = 0; i &lt; n; i++)		/* idx hcpu tcpu p2h hdur h2t (ns) */
+		seq_printf(m, "S %u %u %u %u %u %u\n", i, f6.hcpu[i],
+			   i &lt; f6.n_thr ? f6.tcpu[i] : 255, f6.p2h[i], f6.hdur[i],
+			   i &lt; f6.n_thr ? f6.h2t[i] : 0);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(stats);</code></pre></figure>
+<p>네 번째 조각: probe. <strong>여기가 이 노트의 핵심 API 다섯 가지</strong>다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* f6_irq (3/3): probe — mode에 따라 request_*_irq 선택 */
+static struct dentry *f6_dir;
+static int f6_b_cookie;
+
+static int f6_probe(struct platform_device *pdev)
+{
+	struct device *dev = &amp;pdev-&gt;dev;
+	int ret = 0;
+
+	init_completion(&amp;f6.done);
+	f6.irq = platform_get_irq(pdev, 0);
+	if (f6.irq &lt; 0)
+		return f6.irq;
+	switch (mode) {
+	case M_HARD:
+		ret = devm_request_irq(dev, f6.irq, f6_hard, 0, "f6_irq", &amp;f6);
+		break;
+	case M_THREAD:
+		ret = devm_request_threaded_irq(dev, f6.irq, f6_hard, f6_thread,
+						IRQF_ONESHOT, "f6_irq", &amp;f6);
+		break;
+	case M_NONE:
+		ret = devm_request_irq(dev, f6.irq, f6_hard, 0, "f6_irq", &amp;f6);
+		break;
+	case M_SHARED:
+		ret = devm_request_irq(dev, f6.irq, f6_hard, IRQF_SHARED, "f6_a", &amp;f6);
+		if (!ret)
+			ret = devm_request_irq(dev, f6.irq, f6_b_handler, IRQF_SHARED,
+					       "f6_b", &amp;f6_b_cookie);
+		break;
+	case M_NOONESHOT:	/* handler=NULL인데 IRQF_ONESHOT 없음 → 거부 */
+		ret = devm_request_threaded_irq(dev, f6.irq, NULL, f6_thread, 0, "f6_irq", &amp;f6);
+		break;
+	}
+	dev_info(dev, "mode=%d virq=%d hwirq=%lu request ret=%d\n", mode, f6.irq,
+		 irqd_to_hwirq(irq_get_irq_data(f6.irq)), ret);
+	if (ret)
+		return ret;
+	f6_dir = debugfs_create_dir("f6_irq", NULL);
+	debugfs_create_file_unsafe("fire", 0200, f6_dir, NULL, &amp;fire_fops);
+	debugfs_create_file_unsafe("irqsoff", 0200, f6_dir, NULL, &amp;irqsoff_fops);
+	debugfs_create_file("stats", 0400, f6_dir, NULL, &amp;stats_fops);
+	return 0;
+}
+
+static void f6_remove(struct platform_device *pdev)
+{
+	debugfs_remove_recursive(f6_dir);
+}
+
+static const struct of_device_id f6_of_match[] = {
+	{ .compatible = "dons,f6-irq" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, f6_of_match);
+
+static struct platform_driver f6_driver = {
+	.probe = f6_probe,
+	.remove = f6_remove,
+	.driver = { .name = "f6_irq", .of_match_table = f6_of_match },
+};
+module_platform_driver(f6_driver);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("F6 interrupt handling demo");</code></pre></figure>
+<p>코드 읽는 법:</p>
+<ul><li>handler 시그니처는 <code>irqreturn_t fn(int irq, void *dev_id)</code>. 두 번째 인자는 등록 때 넘긴 쿠키(<code>&amp;f6</code>)가 그대로 돌아온다. 공유 IRQ에서는 이 쿠키가 <strong>"어느 등록을 지울지" 식별자</strong>라서 장치마다 달라야 한다.</li><li><code>devm_</code> 버전이라 언바인드(rmmod) 때 <code>free_irq()</code>가 자동으로 불린다. <code>free_irq()</code>는 실행 중인 handler와 스레드가 끝날 때까지 기다린 뒤 돌아온다.</li><li>측정 배열에 락이 없다. 같은 IRQ의 hard handler는 <strong>동시에 두 CPU에서 돌지 않고</strong>(genirq가 <code>IRQD_IRQ_INPROGRESS</code>로 보장), <code>fire</code>가 매번 완료를 기다리므로 hard와 thread도 번갈아 돈다. 실제 드라이버라면 F4의 spinlock이 필요하다.</li></ul>
+<h3 id="2-4-예제-3-빌드와-부팅-스크립트">2.4 예제 3 — 빌드와 부팅 스크립트<a class="anchor" href="#2-4-예제-3-빌드와-부팅-스크립트" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# build.sh — 세 조각을 합쳐 dbg 커널용 f6_irq.ko 빌드
+set -e
+S=/Users/donh/.elinux_scratch/F6
+mkdir -p /var/tmp/F6/mod &amp;&amp; cd /var/tmp/F6/mod
+cat $S/f6_a.c $S/f6_b.c $S/f6_c.c &gt; f6_irq.c
+echo "obj-m := f6_irq.o" &gt; Kbuild
+make -j2 -C /var/lab/out/linux-build-dbg M=$PWD modules</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>make: Entering directory '/var/lab/build/linux-dbg'
+make[1]: Entering directory '/var/tmp/F6/mod'
+  CC [M]  f6_irq.o
+  MODPOST Module.symvers
+  CC [M]  f6_irq.mod.o
+  CC [M]  .module-common.o
+  LD [M]  f6_irq.ko
+make[1]: Leaving directory '/var/tmp/F6/mod'
+make: Leaving directory '/var/lab/build/linux-dbg'</code></pre></figure>
+<p>경고 0개다. (처음엔 <code>&lt;linux/of.h&gt;</code>를 빠뜨려 <code>array type has incomplete element type 'struct of_device_id'</code> 에러가 났다 — <code>platform_device.h</code>가 더 이상 <code>of.h</code>를 끌어오지 않는다.) 디버그 커널용 모듈은 반드시 <code>linux-build-dbg</code>로 빌드한다. <code>linux-build</code>로 빌드한 <code>.ko</code>는 vermagic이 달라 <code>Image-dbg</code>에서 안 올라간다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# boot.sh &lt;게스트 스크립트 이름&gt;  — dbg 커널 + -smp 4 + f6.dtb로 부팅, 스크립트 실행 후 종료
+set -e
+W=/var/tmp/F6; S=/Users/donh/.elinux_scratch/F6
+rm -rf $W/r &amp;&amp; mkdir $W/r &amp;&amp; cp -a /var/lab/build/rootfs/. $W/r/
+cp $W/mod/f6_irq.ko $S/g_*.sh $W/r/
+(cd $W/r &amp;&amp; find . | cpio -o -H newc --quiet | gzip) &gt; $W/i.gz
+timeout 300 qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 4 -m 512M -nographic \
+  -kernel /var/lab/out/Image-dbg -initrd $W/i.gz -dtb $W/f6.dtb \
+  -append "console=ttyAMA0 quiet LAB_CMD=sh~/$1"</code></pre></figure>
+<p>이후 예제는 전부 <code>sh boot.sh g_xxx.sh</code> 형태로 돌린다. 게스트 스크립트 <code>g_xxx.sh</code>는 각 예제에 붙인다.</p>
+<blockquote><p><strong>측정 환경 주의</strong>: QEMU는 KVM 없이 TCG(명령어 번역 에뮬레이션)로 돌고, 같은 VM에서 다른 작업 10여 개가 동시에 돌았다. 이 노트의 µs·ms 숫자는 <strong>실제 SoC보다 수십 배 느리고 꼬리(tail)가 길다</strong>. 숫자의 절대값보다 <strong>상대 크기</strong>(hard handler 몇 µs vs 스레드 깨우기 수백 µs)와 <strong>모양</strong>(분포의 긴 꼬리)을 보라.</p></blockquote>
+<hr>
+<h2 id="3-번호가-두-개-linux-irq-번호-vs-hwirq-irq_domain">3. 번호가 두 개 — Linux IRQ 번호 vs hwirq (irq_domain)<a class="anchor" href="#3-번호가-두-개-linux-irq-번호-vs-hwirq-irq_domain" aria-label="link">#</a></h2>
+<h3 id="3-1-직관">3.1 직관<a class="anchor" href="#3-1-직관" aria-label="link">#</a></h3>
+<p>Cortex-M에서 <code>EXTI15_10_IRQn = 40</code>은 하드웨어 번호이자 소프트웨어 번호였다. SoC에는 인터럽트 컨트롤러가 <strong>여러 개 계층으로</strong> 있다: GIC 아래에 GPIO 컨트롤러(핀 32개가 GIC SPI 하나로 묶임), 그 아래 I2C GPIO expander, PCIe MSI 컨트롤러… 각자 자기 0번부터 번호를 매긴다. "GPIO3의 21번"과 "GIC의 21번"은 다른 인터럽트다.</p>
+<p>그래서 커널은 두 번호를 구분한다.</p>
+<ul><li><strong>hwirq</strong>: 그 컨트롤러 안에서의 번호. GIC라면 INTID(112), GPIO 컨트롤러라면 핀 번호(21).</li><li><strong>Linux IRQ 번호 (virq)</strong>: 커널 전체에서 유일한 번호. 실행 중에 <strong>동적으로 할당</strong>된다(<code>CONFIG_SPARSE_IRQ</code>). <code>request_irq()</code>·<code>/proc/interrupts</code> 첫 칸·<code>/proc/irq/N</code>이 쓰는 번호다.</li><li><strong>irq_domain</strong>: 컨트롤러마다 하나씩 있는 "hwirq ↔ virq 변환표". DT를 파싱할 때(<code>irq_of_parse_and_map</code> → <code>irq_create_fwspec_mapping</code>) GIC 드라이버의 <code>translate</code> 콜백이 3셀을 hwirq + 트리거 타입으로 풀고, 빈 virq를 하나 잡아 매핑을 만든다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 660 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect x="10" y="20" width="300" height="56" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="20" y="42" font-size="12">DT 노드 f6-irq (부팅 때 파싱)</text>
+  <text x="20" y="62" font-size="12">interrupts = &lt;0 80 1&gt;  (SPI, 80, rising)</text>
+  <rect x="10" y="106" width="300" height="86" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="20" y="128" font-size="12">GIC irq_domain ":intc@8000000"</text>
+  <text x="20" y="148" font-size="12">translate: SPI 80 → hwirq 112, Edge</text>
+  <text x="20" y="168" font-size="12">alloc: 빈 virq 22를 잡아 매핑 등록</text>
+  <text x="20" y="184" font-size="12">flow handler = handle_fasteoi_irq</text>
+  <rect x="350" y="20" width="300" height="172" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="360" y="42" font-size="13">매핑 표 (이 부팅에서 실제 값)</text>
+  <text x="360" y="68" font-size="12">hwirq 27  (PPI 11) → virq 11 arch_timer</text>
+  <text x="360" y="92" font-size="12">hwirq 33  (SPI 1)  → virq 13 uart-pl011</text>
+  <text x="360" y="116" font-size="12">hwirq 112 (SPI 80) → virq 22 f6_irq</text>
+  <text x="360" y="148" font-size="12">virq는 부팅·드라이버 순서에 따라</text>
+  <text x="360" y="168" font-size="12">바뀐다. 하드코딩 금지</text>
+  <rect x="10" y="226" width="300" height="56" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="20" y="248" font-size="12">드라이버: platform_get_irq() → 22</text>
+  <text x="20" y="268" font-size="12">devm_request_irq(dev, 22, ...)</text>
+  <rect x="350" y="226" width="300" height="56" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="360" y="248" font-size="12">인터럽트 때 역방향: IAR = 112</text>
+  <text x="360" y="268" font-size="12">→ irq_resolve_mapping → desc 22</text>
+  <line x1="160" y1="76" x2="160" y2="103" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="310" y1="148" x2="347" y2="116" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="160" y1="192" x2="160" y2="223" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="500" y1="226" x2="500" y2="195" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="20" y="312" font-size="12">그림의 숫자 11·13·22·27·33·112는 예제 4의 /proc/interrupts 출력에서 그대로 옮겼다</text>
+</svg></figure>
+<p>그림 2 — irq_domain은 "컨트롤러 안 번호(hwirq)"와 "커널 전역 번호(virq)"를 잇는 표다. 등록할 때는 DT → hwirq → virq 방향, 인터럽트가 올 때는 IAR의 hwirq → virq → <code>irq_desc</code> 방향으로 쓴다.</p>
+<h3 id="3-2-예제-4-등록하고-20번-쏜-뒤-관찰-지점-다섯-곳">3.2 예제 4 — 등록하고 20번 쏜 뒤 관찰 지점 다섯 곳<a class="anchor" href="#3-2-예제-4-등록하고-20번-쏜-뒤-관찰-지점-다섯-곳" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: hard handler만 등록하고(mode=0) 인터럽트 20번 + debugfs 주입 1번을 일으킨 뒤 <code>/proc/interrupts</code>, <code>/sys/kernel/irq/N</code>, <code>/proc/irq/N</code>, <code>/sys/kernel/debug/irq/irqs/N</code>을 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# g_basic.sh — hard 모드: 등록 → 발생 → /proc/interrupts · sysfs · debugfs
+uname -r; nproc
+insmod /f6_irq.ko mode=0
+N=$(grep f6_irq /proc/interrupts | cut -d: -f1 | tr -d ' ')
+echo "=== /proc/interrupts (before) ==="; grep -E "CPU0|f6_irq|uart|arch_timer" /proc/interrupts
+echo 20 &gt; /sys/kernel/debug/f6_irq/fire
+echo "=== /proc/interrupts (after 20) ==="; grep -E "CPU0|f6_irq" /proc/interrupts
+echo "=== /sys/kernel/irq/$N ==="; for f in /sys/kernel/irq/$N/*; do printf "%-14s %s\n" ${f##*/} "$(cat $f)"; done
+echo "=== /proc/irq/$N ==="; ls /proc/irq/$N; for f in smp_affinity smp_affinity_list effective_affinity_list; do printf "%-24s %s\n" $f "$(cat /proc/irq/$N/$f)"; done
+echo "=== debugfs irq/irqs/$N ==="; cat /sys/kernel/debug/irq/irqs/$N
+echo "=== debugfs trigger (GENERIC_IRQ_INJECTION) ==="; echo trigger &gt; /sys/kernel/debug/irq/irqs/$N; grep f6_irq /proc/interrupts
+echo "=== domains ==="; ls /sys/kernel/debug/irq/domains/</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 13.33s
+6.18.55-dbg
+4
+=== /proc/interrupts (before) ===
+           CPU0       CPU1       CPU2       CPU3       
+ 11:       1665       1781       1825       1957 GIC-0  27 Level     arch_timer
+ 13:          0          0          0          0 GIC-0  33 Level     uart-pl011
+ 22:          0          0          0          0 GIC-0 112 Edge      f6_irq
+=== /proc/interrupts (after 20) ===
+           CPU0       CPU1       CPU2       CPU3       
+ 22:         20          0          0          0 GIC-0 112 Edge      f6_irq
+=== /sys/kernel/irq/22 ===
+actions        f6_irq
+chip_name      
+hwirq          112
+name           
+per_cpu_count  20,0,0,0
+type           edge
+wakeup         disabled
+=== /proc/irq/22 ===
+affinity_hint            f6_irq                   smp_affinity_list
+effective_affinity       node                     spurious
+effective_affinity_list  smp_affinity
+smp_affinity             f
+smp_affinity_list        0-3
+effective_affinity_list  0
+=== debugfs irq/irqs/22 ===
+handler:  handle_fasteoi_irq
+device:   (null)
+status:   0x00000001
+istate:   0x00004000
+ddepth:   0
+wdepth:   0
+dstate:   0x0b400201
+            IRQ_TYPE_EDGE_RISING
+            IRQD_ACTIVATED
+            IRQD_IRQ_STARTED
+            IRQD_SINGLE_TARGET
+            IRQD_DEFAULT_TRIGGER_SET
+            IRQD_HANDLE_ENFORCE_IRQCTX
+node:     -1
+affinity: 0-3
+effectiv: 0
+domain:  :intc@8000000
+ hwirq:   0x70
+ chip:    GIC-0
+  flags:   0x15
+             IRQCHIP_SET_TYPE_MASKED
+             IRQCHIP_MASK_ON_SUSPEND
+             IRQCHIP_SKIP_SET_WAKE
+=== debugfs trigger (GENERIC_IRQ_INJECTION) ===
+ 22:         21          0          0          0 GIC-0 112 Edge      f6_irq
+=== domains ===
+:intc@8000000                    GICv2m-PCI-MSIX-0000:00:01.0-12
+:intc@8000000:v2m@8020000-5      default
+:pl061@9030000</code></pre></figure>
+<p>(<code>ls</code>의 색상 escape 코드만 지웠다. 이 노트에서 이후 쓰는 커널은 모두 <code>6.18.55-dbg</code>다. Lima VM 호스트 커널은 7.0이지만 랩 모듈은 QEMU 게스트에서만 돌린다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>/proc/interrupts</code> 한 줄의 칸은 <strong>virq <code>22:</code> → CPU별 횟수 4칸 → 칩 이름 <code>GIC-0</code> → hwirq <code>112</code> → 트리거 <code>Edge</code> → 등록 이름 <code>f6_irq</code></strong>(공유면 쉼표로 여러 개)다. hwirq 칸이 112로 나와서 "SPI 80 + 32"가 바로 확인된다.</li><li>20번 모두 <strong>CPU0</strong>에서 처리됐다. <code>smp_affinity</code>는 <code>f</code>(0–3 전부 허용)인데 <code>effective_affinity_list</code>는 <code>0</code>이다. GICv2의 SPI는 한 번에 <strong>한 CPU에만</strong> 보낼 수 있고(<code>IRQD_SINGLE_TARGET</code>), 드라이버(<code>gic_set_affinity</code>)가 마스크에서 CPU 하나를 고른다. §7에서 옮겨 본다.</li><li><code>/sys/kernel/irq/22/chip_name</code>이 빈 줄이다. GICv2 드라이버의 <code>gic_chip</code>에 <code>.name</code>이 없고, <code>/proc/interrupts</code>의 <code>GIC-0</code>은 <code>.irq_print_chip</code> 콜백이 찍은 것이기 때문이다 (소스에서 확인).</li><li>debugfs의 <code>handler: handle_fasteoi_irq</code>가 <strong>flow handler</strong>다(§4.1). <code>istate</code>, <code>ddepth</code>(disable 깊이)는 §8·§9에서 다시 본다.</li><li><code>echo trigger &gt; /sys/kernel/debug/irq/irqs/22</code>로 셸에서 인터럽트를 주입했다(<code>CONFIG_GENERIC_IRQ_INJECTION</code>). 횟수가 20 → 21. 내부적으로 <code>irq_inject_interrupt()</code>가 우리 드라이버와 같은 <code>irq_set_irqchip_state(PENDING)</code>을 부른다. 하드웨어 없이 handler 경로를 시험하는 공식 방법이다.</li><li><code>domains/</code>에 GIC, GICv2m(MSI), PCI MSI-X, PL061 GPIO 도메인이 보인다. 컨트롤러마다 번호표가 따로 있다는 증거다.</li></ul>
+<hr>
+<h2 id="4-등록-api-request_irq부터-request_threaded_irq까지">4. 등록 API — <code>request_irq</code>부터 <code>request_threaded_irq</code>까지<a class="anchor" href="#4-등록-api-request_irq부터-request_threaded_irq까지" aria-label="link">#</a></h2>
+<h3 id="4-1-flow-handler-드라이버-handler를-부르기-전의-트리거별-절차">4.1 flow handler — 드라이버 handler를 부르기 전의 "트리거별 절차"<a class="anchor" href="#4-1-flow-handler-드라이버-handler를-부르기-전의-트리거별-절차" aria-label="link">#</a></h3>
+<p><code>irq_desc-&gt;handle_irq</code>에는 드라이버 함수가 아니라 <strong>트리거 방식에 맞는 공통 절차</strong>가 들어간다. 컨트롤러 드라이버가 매핑 때 고른다(<code>irq-gic.c</code>에서 SPI는 <code>handle_fasteoi_irq</code>, PPI는 <code>handle_percpu_devid_irq</code>).</p>
+<div class="tw"><table><thead><tr><th>flow handler</th><th>쓰는 곳</th><th>하는 일</th></tr></thead><tbody><tr><td><code>handle_fasteoi_irq</code></td><td>GIC 같은 "EOI 한 번이면 되는" 컨트롤러</td><td>(ONESHOT이면 mask) → handler들 → EOI</td></tr><tr><td><code>handle_edge_irq</code></td><td>많은 GPIO 컨트롤러의 edge</td><td>먼저 ack → handler 도는 중 새 edge 오면 루프</td></tr><tr><td><code>handle_level_irq</code></td><td>GPIO level</td><td>mask+ack → handler → unmask</td></tr><tr><td><code>handle_percpu_devid_irq</code></td><td>PPI(타이머 등 CPU별)</td><td>CPU별 dev_id로 handler 호출</td></tr><tr><td><code>handle_nested_irq</code></td><td>I2C GPIO expander 같은 sleep 필요한 자식</td><td>부모의 <strong>스레드 안에서</strong> 자식 thread_fn 직접 호출</td></tr></tbody></table></div>
+<p><code>handle_fasteoi_irq</code>의 핵심 줄(<code>kernel/irq/chip.c</code>, 발췌):</p>
+<figure class="code"><span class="lang">c</span><pre><code>	if (desc-&gt;istate &amp; IRQS_ONESHOT)
+		mask_irq(desc);
+
+	handle_irq_event(desc);
+
+	cond_unmask_eoi_irq(desc, chip);</code></pre></figure>
+<h3 id="4-2-api-표">4.2 API 표<a class="anchor" href="#4-2-api-표" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>API</th><th>무엇</th><th>언제</th></tr></thead><tbody><tr><td><code>request_irq(irq, handler, flags, name, dev)</code></td><td>hard handler만. 내부적으로 <code>request_threaded_irq(irq, handler, NULL, flags 또는 IRQF_COND_ONESHOT, ...)</code></td><td>MMIO 레지스터만 만지고 끝나는 짧은 처리</td></tr><tr><td><code>devm_request_irq(dev, ...)</code></td><td>위 + 장치가 떨어질 때 자동 <code>free_irq</code></td><td>probe에서 쓰는 기본형</td></tr><tr><td><code>request_threaded_irq(irq, handler, thread_fn, flags, name, dev)</code></td><td>hard + thread 두 단계</td><td>처리에 sleep이 필요하거나 오래 걸릴 때</td></tr><tr><td><code>devm_request_threaded_irq(...)</code></td><td>위 + 자동 해제</td><td>I2C/SPI 센서 드라이버의 표준</td></tr><tr><td><code>request_any_context_irq(...)</code></td><td>부모가 nested면 스레드로, 아니면 hard로</td><td>드물게</td></tr><tr><td><code>free_irq(irq, dev)</code></td><td>등록 해제, 실행 중인 handler·thread 끝날 때까지 대기</td><td>devm이면 직접 안 부름</td></tr></tbody></table></div>
+<p><code>IRQF_COND_ONESHOT</code>은 최근(6.x) 추가된 플래그다("같은 줄을 공유하는 다른 등록이 ONESHOT이면 나도 따른다"). 랩 소스 <code>include/linux/interrupt.h</code>의 <code>request_irq</code>가 이 플래그를 자동으로 붙인다.</p>
+<h3 id="4-3-handler-반환값">4.3 handler 반환값<a class="anchor" href="#4-3-handler-반환값" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>반환값</th><th>뜻</th><th>genirq가 하는 일</th></tr></thead><tbody><tr><td><code>IRQ_HANDLED</code></td><td>내 장치가 낸 인터럽트였고 처리했다</td><td>끝</td></tr><tr><td><code>IRQ_NONE</code></td><td>내 장치가 낸 게 아니다 (상태 레지스터 확인 결과)</td><td>공유 라인이면 다음 handler, 아무도 HANDLED 안 하면 "unhandled" 카운트 (§8)</td></tr><tr><td><code>IRQ_WAKE_THREAD</code></td><td>hard 단계 끝, thread_fn을 깨워 달라</td><td><code>__irq_wake_thread()</code> → <code>irq/N-name</code> 스레드 wakeup</td></tr></tbody></table></div>
+<h3 id="4-4-주요-플래그">4.4 주요 플래그<a class="anchor" href="#4-4-주요-플래그" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>플래그</th><th>뜻</th><th>주의</th></tr></thead><tbody><tr><td><code>IRQF_SHARED</code></td><td>한 줄을 여러 장치가 공유</td><td>모든 등록자가 붙여야 함, <code>dev_id</code>가 고유해야 함, 내 것 아니면 <code>IRQ_NONE</code></td></tr><tr><td><code>IRQF_ONESHOT</code></td><td>thread_fn이 끝날 때까지 라인을 mask</td><td>handler=NULL이면 <strong>필수</strong> (예제 11)</td></tr><tr><td><code>IRQF_TRIGGER_RISING</code> 등</td><td>트리거 타입 지정</td><td>DT에 이미 있으면 보통 0을 준다. 다르면 DT를 덮어쓴다</td></tr><tr><td><code>IRQF_NO_THREAD</code></td><td><code>threadirqs</code> 강제 스레딩 대상에서 제외</td><td>타이머·IPI처럼 hard에서 돌아야 하는 것</td></tr><tr><td><code>IRQF_NO_AUTOEN</code></td><td>등록만 하고 enable 안 함</td><td>장치 초기화 끝나고 <code>enable_irq()</code></td></tr><tr><td><code>IRQF_NOBALANCING</code></td><td>affinity 변경 금지</td><td>per-CPU 성격의 장치</td></tr><tr><td><code>IRQF_PERCPU</code></td><td>CPU별 인터럽트</td><td>보통 <code>request_percpu_irq()</code>가 처리</td></tr></tbody></table></div>
+<h3 id="4-5-어떤-걸-쓸까-결정-흐름">4.5 어떤 걸 쓸까 — 결정 흐름<a class="anchor" href="#4-5-어떤-걸-쓸까-결정-흐름" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 660 430" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect x="150" y="14" width="360" height="52" rx="10" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="330" y="36" font-size="13" text-anchor="middle">처리 중에 잠들어야 하나?</text>
+  <text x="330" y="55" font-size="12" text-anchor="middle">(I2C/SPI 전송, mutex, msleep, 큰 계산)</text>
+  <rect x="10" y="110" width="270" height="70" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="20" y="132" font-size="12">devm_request_irq(handler, 0)</text>
+  <text x="20" y="152" font-size="12">MMIO 읽고 ack, 큐에 넣고 끝</text>
+  <text x="20" y="171" font-size="12">더 필요하면 workqueue (F7)</text>
+  <rect x="330" y="110" width="320" height="52" rx="10" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="490" y="132" font-size="13" text-anchor="middle">hard 단계에서 장치를 ack 할 수 있나?</text>
+  <text x="490" y="151" font-size="12" text-anchor="middle">(MMIO 레지스터 = 예, I2C 장치 = 아니오)</text>
+  <rect x="300" y="210" width="350" height="70" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="310" y="232" font-size="12">request_threaded_irq(hard, thread, 0)</text>
+  <text x="310" y="252" font-size="12">hard: ack + 타임스탬프 → IRQ_WAKE_THREAD</text>
+  <text x="310" y="271" font-size="12">thread: 나머지 (sleep 가능)</text>
+  <rect x="300" y="310" width="350" height="70" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="310" y="332" font-size="12">request_threaded_irq(NULL, thread, IRQF_ONESHOT)</text>
+  <text x="310" y="352" font-size="12">level 라인이 계속 올라가 있으므로</text>
+  <text x="310" y="371" font-size="12">thread가 장치를 ack 할 때까지 mask</text>
+  <rect x="10" y="240" width="270" height="110" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="20" y="262" font-size="12">공통 규칙: 라인을 공유하면</text>
+  <text x="20" y="282" font-size="12">IRQF_SHARED + 장치별 dev_id</text>
+  <text x="20" y="302" font-size="12">상태 레지스터 보고 내 것 아니면</text>
+  <text x="20" y="322" font-size="12">IRQ_NONE 반환</text>
+  <text x="20" y="342" font-size="12">ONESHOT 여부도 맞춰야 함</text>
+  <line x1="230" y1="66" x2="150" y2="107" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="140" y="88" font-size="12">아니오</text>
+  <line x1="430" y1="66" x2="480" y2="107" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="470" y="88" font-size="12">예</text>
+  <line x1="420" y1="162" x2="420" y2="207" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="380" y="190" font-size="12">예</text>
+  <line x1="620" y1="162" x2="620" y2="307" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="575" y="190" font-size="12">아니오</text>
+  <text x="10" y="410" font-size="12">센서 키트의 I2C IMU(INT 핀 → GPIO): 거의 항상 맨 아래 칸 (H6에서 실제 드라이버로)</text>
+</svg></figure>
+<p>그림 3 — 등록 API 결정 흐름. "잠들어야 하나"가 첫 질문이고, "hard에서 장치를 조용히 시킬 수 있나"가 두 번째 질문이다.</p>
+<h3 id="4-6-예제-11-handler-null인데-irqf_oneshot을-빼면">4.6 예제 11 — handler=NULL인데 <code>IRQF_ONESHOT</code>을 빼면<a class="anchor" href="#4-6-예제-11-handler-null인데-irqf_oneshot을-빼면" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: hard handler 없이 thread만 등록하면서 ONESHOT을 빼면 커널이 거부한다 (mode=4).</p>
+<figure class="code"><span class="lang">sh</span><pre><code># g_misc.sh 앞부분
+echo "=== (a) handler=NULL, flags=0 ==="
+insmod /f6_irq.ko mode=4; dmesg | grep -E "f6|Threaded irq" | tail -3; rmmod f6_irq</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>=== (a) handler=NULL, flags=0 ===
+[   22.503231] genirq: Threaded irq requested with handler=NULL and !ONESHOT for f6_irq (irq 22)
+[   22.505136] f6_irq f6-irq: error -EINVAL: request_irq(22) 0x0 f6_thread [f6_irq] f6_irq
+[   22.510615] f6_irq f6-irq: probe with driver f6_irq failed with error -22
+[   22.505136] f6_irq f6-irq: error -EINVAL: request_irq(22) 0x0 f6_thread [f6_irq] f6_irq
+[   22.510541] f6_irq f6-irq: mode=4 virq=22 hwirq=112 request ret=-22
+[   22.510615] f6_irq f6-irq: probe with driver f6_irq failed with error -22</code></pre></figure>
+<p>(앞 세 줄은 에러 레벨이라 <code>quiet</code>에서도 콘솔에 바로 찍힌 것이고, 뒤 세 줄이 <code>dmesg | tail -3</code>의 출력이다. <code>insmod</code> 자체는 성공한다 — 드라이버 등록은 되고 probe만 실패한다.)</p>
+<p>출력에서 볼 것: 이유는 이렇다. handler가 NULL이면 커널이 기본 hard handler <code>irq_default_primary_handler</code>(그냥 <code>IRQ_WAKE_THREAD</code> 반환)를 넣는다. 이 함수는 <strong>장치를 ack 하지 못한다</strong>. 그런데 라인을 mask하지 않은 채 hard 단계를 끝내면, level 인터럽트는 여전히 올라가 있으므로 EOI 직후 <strong>다시 들어오고 또 들어오고</strong> — 스레드는 한 번도 못 돈다(인터럽트 폭풍). 그래서 커널이 <code>kernel/irq/manage.c</code>에서 이 조합을 아예 막는다. 에러 메시지 문자열을 외워 두면 현장에서 바로 알아본다.</p>
+<hr>
+<h2 id="5-top-half-bottom-half-와-threaded-irq">5. top half / bottom half 와 threaded IRQ<a class="anchor" href="#5-top-half-bottom-half-와-threaded-irq" aria-label="link">#</a></h2>
+<h3 id="5-1-용어-정리">5.1 용어 정리<a class="anchor" href="#5-1-용어-정리" aria-label="link">#</a></h3>
+<ul class="tasks"><li><strong>top half (hard handler, hardirq)</strong>: 인터럽트 컨텍스트에서 그 CPU의 IRQ가 꺼진 채로 돈다(arm64 Linux는 hardirq 중첩을 허용하지 않는다). sleep 금지, mutex 금지, <code>GFP_KERNEL</code> 금지 (F2).</li><li><strong>bottom half</strong>: "나중에, 덜 급한 컨텍스트에서" 할 일. 커널에 여러 종류가 있다 — softirq, tasklet(폐지 진행 중), workqueue, 그리고 <strong>threaded IRQ</strong>. 앞의 셋은 F7에서 다룬다.</li><li><strong>threaded IRQ</strong>: genirq가 등록마다 커널 스레드 <code>irq/&lt;virq&gt;-&lt;name&gt;</code>을 하나 만들고(<code>kthread_create(irq_thread, ...)</code>), hard handler가 <code>IRQ_WAKE_THREAD</code>를 반환하면 그 스레드를 깨운다. 스레드는 <strong>SCHED_FIFO 우선순위 50</strong>(<code>sched_set_fifo()</code> = <code>MAX_RT_PRIO / 2</code>)으로 돈다. 일반 태스크(SCHED_NORMAL)보다 항상 먼저, 그러나 다른 RT 태스크와는 우선순위로 경쟁한다.</li></ul>
+<p>RTOS 비유: hard handler = ISR, threaded handler = "ISR이 세마포어를 give하면 깨어나는 최고 우선순위급 태스크". 차이는 <strong>커널이 그 태스크·세마포어·ONESHOT mask/unmask까지 다 만들어 준다</strong>는 점이다.</p>
+<h3 id="5-2-예제-5-스레드-확인-우선순위-1000번-측정-affinity">5.2 예제 5 — 스레드 확인, 우선순위, 1000번 측정, affinity<a class="anchor" href="#5-2-예제-5-스레드-확인-우선순위-1000번-측정-affinity" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: mode=1(threaded, ONESHOT)로 등록하고 스레드와 우선순위를 본 뒤, 1000번 쏘아 시간을 기록한다. 이어서 affinity를 바꿔 처리 CPU가 옮겨 가는지 본다(§7에서 해석).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# g_thread.sh — threaded 모드: 스레드 확인 → 1000회 측정 → affinity 이동
+insmod /f6_irq.ko mode=1
+N=$(grep f6_irq /proc/interrupts | cut -d: -f1 | tr -d ' ')
+P=$(pgrep "irq/$N-f6_irq")
+echo "=== irq threads ==="; ps -o pid,comm,args | grep -E "PID|irq/"
+echo "=== chrt / sched of irq/$N-f6_irq (pid $P) ==="; chrt -p $P; grep -E "^policy|^prio" /proc/$P/sched
+echo 1000 &gt; /sys/kernel/debug/f6_irq/fire
+echo "=== /proc/interrupts after 1000 ==="; grep -E "CPU0|f6_irq" /proc/interrupts
+echo "=== move to CPU2 ==="; echo 4 &gt; /proc/irq/$N/smp_affinity
+cat /proc/irq/$N/smp_affinity_list /proc/irq/$N/effective_affinity_list
+echo 200 &gt; /sys/kernel/debug/f6_irq/fire
+grep -E "CPU0|f6_irq" /proc/interrupts; taskset -p $P
+echo "=== CPU0-1 list ==="; echo 0-1 &gt; /proc/irq/$N/smp_affinity_list
+cat /proc/irq/$N/smp_affinity_list /proc/irq/$N/effective_affinity_list
+echo 100 &gt; /sys/kernel/debug/f6_irq/fire; grep -E "f6_irq" /proc/interrupts
+echo "=== write offline-free invalid mask ==="; echo 10 &gt; /proc/irq/$N/smp_affinity; echo "ret=$?"
+cat /sys/kernel/debug/f6_irq/stats &gt; /stats.txt; head -1 /stats.txt
+echo "=== STATS BEGIN ==="; grep "^S" /stats.txt; echo "=== STATS END ==="</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 12.98s
+=== irq threads ===
+PID   COMMAND          COMMAND
+   86 irq/22-f6_irq    [irq/22-f6_irq]
+   93 grep             grep -E PID|irq/
+=== chrt / sched of irq/22-f6_irq (pid 86) ===
+pid 86's current scheduling policy: SCHED_FIFO
+pid 86's current scheduling priority: 50
+policy                                       :                    1
+prio                                         :                   49
+=== /proc/interrupts after 1000 ===
+           CPU0       CPU1       CPU2       CPU3       
+ 22:       1000          0          0          0 GIC-0 112 Edge      f6_irq
+=== move to CPU2 ===
+2
+2
+           CPU0       CPU1       CPU2       CPU3       
+ 22:       1000          0        200          0 GIC-0 112 Edge      f6_irq
+pid 86's current affinity mask: 4
+=== CPU0-1 list ===
+0-1
+0
+ 22:       1100          0        200          0 GIC-0 112 Edge      f6_irq
+=== write offline-free invalid mask ===
+sh: write error: Value too large for defined data type
+ret=1
+n_hard=1300 n_thr=1300 n_b=0
+=== STATS BEGIN ===
+S 0 0 0 2869568 81376 6277072
+S 1 0 0 238960 2656 144496
+S 2 0 0 1175888 4368 260128
+...
+=== STATS END ===</code></pre></figure>
+<p>(<code>S</code> 줄 1300개 중 처음 3개만 남겼다. 칸은 <code>번호 hardCPU threadCPU pend→hard hard길이 hard→thread</code>, 단위 ns.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>등록과 동시에 커널 스레드 <code>irq/22-f6_irq</code>가 생겼다. 이름의 22는 virq, 뒤는 <code>request_threaded_irq</code>에 준 이름이다. <code>ps</code>에서 대괄호로 보이면 커널 스레드다.</li><li><code>chrt</code>는 SCHED_FIFO 50. <code>/proc/PID/sched</code>의 <code>prio 49</code>는 커널 내부 표현(99 − 50)이다. <code>policy 1</code> = SCHED_FIFO. ftrace에서도 <code>prio=49</code>로 보인다(예제 6).</li><li>1300번 모두 hard와 thread 개수가 같다(<code>n_hard=1300 n_thr=1300</code>).</li></ul>
+<h3 id="5-3-측정-결과-top-half는-짧고-스레드-깨우기는-비싸다">5.3 측정 결과 — top half는 짧고, 스레드 깨우기는 비싸다<a class="anchor" href="#5-3-측정-결과-top-half는-짧고-스레드-깨우기는-비싸다" aria-label="link">#</a></h3>
+<p><code>stats</code> 샘플(CPU0에서 처리된 처음 1000개)을 Mac 쪽 Python으로 집계했다 (<code>statistics</code> 없이 정렬 후 백분위 인덱스).</p>
+<div class="tw"><table><thead><tr><th>구간</th><th>min</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr></thead><tbody><tr><td>hard handler 길이 (<code>hdur</code>)</td><td>1.7 µs</td><td>2.2 µs</td><td>4.6 µs</td><td>11.4 µs</td><td>663 µs</td></tr><tr><td>hard → thread 시작 (<code>h2t</code>)</td><td>53 µs</td><td>116 µs</td><td>350 µs</td><td>2.98 ms</td><td>11.7 ms</td></tr><tr><td>pending 세움 → hard 시작 (<code>p2h</code>)</td><td>74 µs</td><td>233 µs</td><td>1.68 ms</td><td>7.59 ms</td><td>16.5 ms</td></tr></tbody></table></div>
+<p>hard→thread 분포(1000개):</p>
+<figure class="chart"><svg viewBox="0 0 640 300" xmlns="http://www.w3.org/2000/svg">
+  <line x1="60" y1="240" x2="620" y2="240" stroke="currentColor"/>
+  <line x1="60" y1="30" x2="60" y2="240" stroke="currentColor"/>
+  <text x="54" y="244" font-size="12" text-anchor="end">0</text>
+  <text x="54" y="155" font-size="12" text-anchor="end">200</text>
+  <text x="54" y="66" font-size="12" text-anchor="end">400</text>
+  <line x1="60" y1="151" x2="620" y2="151" stroke="#888" stroke-dasharray="3,4"/>
+  <line x1="60" y1="62" x2="620" y2="62" stroke="#888" stroke-dasharray="3,4"/>
+  <rect x="75" y="56.4" width="60" height="183.6" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+  <rect x="155" y="97.8" width="60" height="142.2" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+  <rect x="235" y="149.8" width="60" height="90.2" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+  <rect x="315" y="226.7" width="60" height="13.3" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+  <rect x="395" y="233.8" width="60" height="6.2" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+  <rect x="475" y="233.3" width="60" height="6.7" fill="#d0564a" fill-opacity="0.75" stroke="#d0564a"/>
+  <rect x="555" y="237.8" width="60" height="2.2" fill="#d0564a" fill-opacity="0.75" stroke="#d0564a"/>
+  <text x="105" y="50" font-size="12" text-anchor="middle">413</text>
+  <text x="185" y="91" font-size="12" text-anchor="middle">320</text>
+  <text x="265" y="143" font-size="12" text-anchor="middle">203</text>
+  <text x="345" y="220" font-size="12" text-anchor="middle">30</text>
+  <text x="425" y="227" font-size="12" text-anchor="middle">14</text>
+  <text x="505" y="227" font-size="12" text-anchor="middle">15</text>
+  <text x="585" y="231" font-size="12" text-anchor="middle">5</text>
+  <text x="105" y="258" font-size="12" text-anchor="middle">50–100µs</text>
+  <text x="185" y="258" font-size="12" text-anchor="middle">100–200</text>
+  <text x="265" y="258" font-size="12" text-anchor="middle">200–500</text>
+  <text x="345" y="258" font-size="12" text-anchor="middle">0.5–1ms</text>
+  <text x="425" y="258" font-size="12" text-anchor="middle">1–2ms</text>
+  <text x="505" y="258" font-size="12" text-anchor="middle">2–5ms</text>
+  <text x="585" y="258" font-size="12" text-anchor="middle">≥5ms</text>
+  <text x="340" y="285" font-size="12" text-anchor="middle">hard handler 시작 → thread_fn 시작 (QEMU TCG, CPU0, 1000개)</text>
+  <text x="70" y="22" font-size="12">샘플 수 (50µs 미만 0개)</text>
+</svg></figure>
+<p>그림 4 — threaded handler의 깨어나기 지연 분포. 93.6%가 500 µs 안에 오지만 3.4%는 1 ms를 넘는다. 측정 환경(TCG + 호스트 부하) 탓에 꼬리가 실제보다 훨씬 길다.</p>
+<figure class="chart"><svg viewBox="0 0 680 290" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <text x="10" y="58" font-size="12">GIC 라인</text>
+  <text x="10" y="118" font-size="12">CPU0 hardirq</text>
+  <text x="10" y="178" font-size="12">irq/22-f6_irq</text>
+  <text x="10" y="194" font-size="12">(FIFO 50)</text>
+  <line x1="120" y1="114" x2="660" y2="114" stroke="#888" stroke-dasharray="2,4"/>
+  <rect x="128" y="44" width="16" height="20" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="124" y="36" font-size="12">pending</text>
+  <rect x="250" y="44" width="330" height="20" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="300" y="59" font-size="12">ONESHOT: masked (hard 시작 ~ thread 끝)</text>
+  <rect x="250" y="102" width="26" height="24" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="236" y="146" font-size="12">f6_hard</text>
+  <text x="236" y="162" font-size="12">p50 2.2µs</text>
+  <rect x="500" y="162" width="80" height="24" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="510" y="179" font-size="12">f6_thread</text>
+  <line x1="276" y1="118" x2="497" y2="170" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="300" y="196" font-size="12">IRQ_WAKE_THREAD</text>
+  <text x="300" y="212" font-size="12">→ 스케줄러 → switch</text>
+  <line x1="144" y1="80" x2="248" y2="80" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="140" y="96" font-size="12">p50 233µs</text>
+  <line x1="263" y1="232" x2="497" y2="232" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="280" y="250" font-size="12">hard → thread: p50 116µs · p90 350µs · p99 2.98ms</text>
+  <line x1="580" y1="40" x2="580" y2="186" stroke="#3f9a6b" stroke-dasharray="4,3"/>
+  <text x="420" y="278" font-size="12">unmask (irq_finalize_oneshot)</text>
+  <line x1="560" y1="266" x2="578" y2="190" stroke="#3f9a6b" marker-end="url(#ah4)"/>
+</svg></figure>
+<p>그림 5 — top half / threaded half 타임라인 (예제 5의 실측 p50·p90·p99, 가로축은 비례 아님). hard handler는 수 µs로 끝나지만 thread가 실제로 도는 시점은 스케줄러가 정한다. ONESHOT이면 그동안 라인이 mask되어 있어 <strong>다음 인터럽트도 그만큼 늦어진다</strong>.</p>
+<p>해석:</p>
+<ul><li><strong>top half 길이(2.2 µs)는 깨우기 지연(116 µs)의 1/50</strong>이다. TCG라 둘 다 실제보다 크지만 비율은 같은 방향이다. 실제 Cortex-A53/A72급 SoC에서는 IRQ→thread 깨우기가 보통 수 µs~수십 µs대라고 알려져 있다 (기억 기반 일반론, 이 노트에서 측정하지 않음 — M5/N 모듈에서 <code>cyclictest</code>로 직접 잴 것).</li><li>그래서 <strong>타임스탬프는 반드시 hard handler에서 찍는다</strong>. IMU 샘플 시각을 thread_fn에서 <code>ktime_get()</code>으로 찍으면 116 µs~수 ms의 지터가 그대로 데이터에 들어간다. IIO 드라이버가 <code>iio_pollfunc_store_time</code>(hard 단계)에서 시각을 저장하는 이유다.</li><li><code>p2h</code>(pending을 세운 뒤 hard가 시작하기까지)가 233 µs나 되는 것은 GIC 에뮬레이션과 TCG의 "번역 블록 경계에서만 인터럽트를 확인하는" 구조 때문이다. 실제 하드웨어에서는 이 구간이 훨씬 짧다(측정하지 않음).</li></ul>
+<h3 id="5-4-예제-6-ftrace-이벤트로-본-한-번의-왕복">5.4 예제 6 — ftrace 이벤트로 본 한 번의 왕복<a class="anchor" href="#5-4-예제-6-ftrace-이벤트로-본-한-번의-왕복" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>irq_handler_entry/exit</code> 이벤트와 스케줄러 이벤트(<code>sched_wakeup</code>, <code>sched_switch</code>)를 같이 켜서 IRQ → 스레드 깨우기 → 문맥 교환을 시간순으로 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# g_trace.sh (앞부분) — ftrace: irq 이벤트 + sched 이벤트
+mount -t tracefs none /sys/kernel/tracing; T=/sys/kernel/tracing
+insmod /f6_irq.ko mode=1
+N=$(grep f6_irq /proc/interrupts | cut -d: -f1 | tr -d ' ')
+echo "irq == $N" &gt; $T/events/irq/irq_handler_entry/filter
+echo "irq == $N" &gt; $T/events/irq/irq_handler_exit/filter
+echo 'comm ~ "irq/*"' &gt; $T/events/sched/sched_wakeup/filter
+echo 'next_comm ~ "irq/*" || prev_comm ~ "irq/*"' &gt; $T/events/sched/sched_switch/filter
+for e in irq/irq_handler_entry irq/irq_handler_exit sched/sched_wakeup sched/sched_switch; do echo 1 &gt; $T/events/$e/enable; done
+echo 2 &gt; /sys/kernel/debug/f6_irq/fire
+echo "=== EVENTS ==="; grep -v "^#" $T/trace</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>=== EVENTS ===
+          &lt;idle&gt;-0       [000] d.h1.    34.878901: irq_handler_entry: irq=22 name=f6_irq
+          &lt;idle&gt;-0       [000] d.h1.    34.879995: irq_handler_exit: irq=22 ret=handled
+          &lt;idle&gt;-0       [000] dNh4.    34.880376: sched_wakeup: comm=irq/22-f6_irq pid=88 prio=49 target_cpu=000
+          &lt;idle&gt;-0       [000] d..2.    34.889011: sched_switch: prev_comm=swapper/0 prev_pid=0 prev_prio=120 prev_state=R ==&gt; next_comm=irq/22-f6_irq next_pid=88 next_prio=49
+   irq/22-f6_irq-88      [000] d..2.    34.892416: sched_switch: prev_comm=irq/22-f6_irq prev_pid=88 prev_prio=49 prev_state=S ==&gt; next_comm=swapper/0 next_pid=0 next_prio=120
+          &lt;idle&gt;-0       [000] d.h1.    34.909347: irq_handler_entry: irq=22 name=f6_irq
+          &lt;idle&gt;-0       [000] d.h1.    34.909368: irq_handler_exit: irq=22 ret=handled
+          &lt;idle&gt;-0       [000] dNh4.    34.909409: sched_wakeup: comm=irq/22-f6_irq pid=88 prio=49 target_cpu=000
+          &lt;idle&gt;-0       [000] d..2.    34.913355: sched_switch: prev_comm=swapper/0 prev_pid=0 prev_prio=120 prev_state=R ==&gt; next_comm=irq/22-f6_irq next_pid=88 next_prio=49
+   irq/22-f6_irq-88      [000] d..2.    34.913543: sched_switch: prev_comm=irq/22-f6_irq prev_pid=88 prev_prio=49 prev_state=S ==&gt; next_comm=swapper/0 next_pid=0 next_prio=120</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>irq_handler_exit</code>의 <code>ret=handled</code>는 <strong><code>IRQ_WAKE_THREAD</code>도 handled로 찍힌다</strong>는 뜻이다(이벤트는 "처리됨/안 됨"만 구분).</li><li>플래그 칸 <code>d.h1.</code>: <code>d</code> = IRQ 꺼짐, <code>h</code> = hardirq 컨텍스트. <code>sched_wakeup</code> 줄의 <code>dNh4.</code>의 <code>N</code>은 need-resched — "IRQ에서 나갈 때 스케줄러를 불러라"가 이 순간 세워졌다.</li><li>두 번째 인터럽트: entry → exit 21 µs, wakeup까지 +41 µs, 실제 <code>sched_switch</code>까지 3.9 ms, 스레드 실행 188 µs. 이 실행에서는 idle CPU가 깨어나 스위치하기까지가 가장 길었다 — 트레이스 오버헤드 + TCG에서 idle(WFI) 상태 vCPU를 다시 돌리는 비용으로 보인다(추정). 이벤트 트레이싱 자체가 비용이라 예제 5의 수치보다 크다.</li><li>스레드가 끝나면 <code>prev_state=S</code>(잠듦)로 돌아간다. 다음 <code>IRQ_WAKE_THREAD</code>까지 <code>irq_thread()</code> 안에서 잔다.</li></ul>
+<hr>
+<h2 id="6-예제-7-function_graph로-gic_handle_irq-내부-보기">6. 예제 7 — function_graph로 <code>gic_handle_irq</code> 내부 보기<a class="anchor" href="#6-예제-7-function_graph로-gic_handle_irq-내부-보기" aria-label="link">#</a></h2>
+<p>무엇을 확인하나: CPU0만, <code>gic_handle_irq</code> 아래 7단계까지 함수 호출 트리와 시간을 기록한다. §1의 그림이 실제 함수 호출과 같은지 확인한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># g_trace.sh (뒷부분)
+echo 0 &gt; $T/events/enable; echo &gt; $T/trace
+echo 1 &gt; $T/tracing_cpumask            # CPU0만
+echo gic_handle_irq &gt; $T/set_graph_function
+echo 7 &gt; $T/max_graph_depth
+echo function_graph &gt; $T/current_tracer
+echo funcgraph-proc &gt; $T/trace_options
+echo 1 &gt; /sys/kernel/debug/f6_irq/fire
+echo 0 &gt; $T/tracing_on
+cat $T/trace</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code> 0)    &lt;idle&gt;-0    |               |  gic_handle_irq() {
+ 0)    &lt;idle&gt;-0    |               |    generic_handle_domain_irq() {
+ 0)    &lt;idle&gt;-0    |               |      __irq_resolve_mapping() {
+ 0)    &lt;idle&gt;-0    |   4.576 us    |        __rcu_read_lock();
+ ...
+ 0)    &lt;idle&gt;-0    | + 37.248 us   |      }
+ 0)    &lt;idle&gt;-0    |               |      handle_irq_desc() {
+ 0)    &lt;idle&gt;-0    |               |        handle_percpu_devid_irq() {
+ 0)    &lt;idle&gt;-0    |               |          ipi_handler() {
+ 0)    &lt;idle&gt;-0    |               |            generic_smp_call_function_single_interrupt() {
+ 0)    &lt;idle&gt;-0    | + 13.296 us   |              __flush_smp_call_function_queue();
+ 0)    &lt;idle&gt;-0    | + 18.624 us   |            }
+ 0)    &lt;idle&gt;-0    | + 25.920 us   |          }
+ 0)    &lt;idle&gt;-0    |   6.384 us    |          gic_eoi_irq();
+ 0)    &lt;idle&gt;-0    | + 41.424 us   |        }
+ 0)    &lt;idle&gt;-0    | + 46.384 us   |      }
+ 0)    &lt;idle&gt;-0    | + 92.320 us   |    }
+ 0)    &lt;idle&gt;-0    |               |    generic_handle_domain_irq() {
+ 0)    &lt;idle&gt;-0    |               |      __irq_resolve_mapping() {
+ ...
+ 0)    &lt;idle&gt;-0    | ! 124.576 us  |      }
+ 0)    &lt;idle&gt;-0    |               |      handle_irq_desc() {
+ 0)    &lt;idle&gt;-0    |               |        handle_fasteoi_irq() {
+ 0)    &lt;idle&gt;-0    |               |          _raw_spin_lock() {
+ 0)    &lt;idle&gt;-0    |   3.840 us    |            preempt_count_add();
+ 0)    &lt;idle&gt;-0    |   4.592 us    |            do_raw_spin_trylock();
+ 0)    &lt;idle&gt;-0    | + 34.160 us   |          }
+ 0)    &lt;idle&gt;-0    | + 16.960 us   |          irq_can_handle_pm();
+ 0)    &lt;idle&gt;-0    | + 37.824 us   |          gic_mask_irq();
+ 0)    &lt;idle&gt;-0    |               |          handle_irq_event() {
+ 0)    &lt;idle&gt;-0    |               |            _raw_spin_unlock() {
+ 0)    &lt;idle&gt;-0    |   4.528 us    |              do_raw_spin_unlock();
+ 0)    &lt;idle&gt;-0    |   3.952 us    |              preempt_count_sub();
+ 0)    &lt;idle&gt;-0    | + 27.616 us   |            }
+ 0)    &lt;idle&gt;-0    |               |            __handle_irq_event_percpu() {
+ 0)    &lt;idle&gt;-0    | + 60.128 us   |              f6_hard [f6_irq]();
+ 0)    &lt;idle&gt;-0    | ! 318.848 us  |              __irq_wake_thread();
+ 0)    &lt;idle&gt;-0    | ! 512.752 us  |            }
+ 0)    &lt;idle&gt;-0    |               |            add_interrupt_randomness() {
+ 0)    &lt;idle&gt;-0    | # 4489.280 us |              fast_mix();
+ 0)    &lt;idle&gt;-0    | + 70.784 us   |              add_timer_on();
+ 0)    &lt;idle&gt;-0    | # 4622.240 us |            }
+ 0)    &lt;idle&gt;-0    | + 12.176 us   |            note_interrupt();
+ ...
+ 0)    &lt;idle&gt;-0    | # 5301.248 us |          }
+ 0)    &lt;idle&gt;-0    |               |          cond_unmask_eoi_irq() {
+ 0)    &lt;idle&gt;-0    |   7.920 us    |            gic_eoi_irq();
+ 0)    &lt;idle&gt;-0    | + 22.800 us   |          }
+ ...
+ 0)    &lt;idle&gt;-0    | # 5570.192 us |        }
+ 0)    &lt;idle&gt;-0    | # 5598.368 us |      }
+ 0)    &lt;idle&gt;-0    | # 5732.816 us |    }
+ 0)    &lt;idle&gt;-0    | # 5858.992 us |  }</code></pre></figure>
+<p>(전체 698줄 중 우리 IRQ가 든 <code>gic_handle_irq</code> 한 블록만 남기고, <code>...</code>로 RCU lockdep 검사 줄과 spin unlock 줄을 생략했다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>한 번의 <code>gic_handle_irq</code> 호출 안에서 <code>generic_handle_domain_irq</code>가 두 번</strong> 불렸다. 처음 것은 IPI(<code>handle_percpu_devid_irq</code> → <code>ipi_handler</code>), 두 번째가 우리 SPI다. §1.2의 <code>do { IAR 읽기 } while (1)</code> 루프가 실제로 돈 것이다.</li><li><code>handle_fasteoi_irq</code> 안의 순서: 락 → <code>gic_mask_irq()</code>(<strong>ONESHOT이라 mask</strong>) → <code>handle_irq_event</code> → <code>f6_hard</code> → <code>__irq_wake_thread</code> → <code>note_interrupt</code>(§8의 spurious 감지기) → <code>cond_unmask_eoi_irq</code> 안에서 <code>gic_eoi_irq</code>(EOI). unmask는 여기서 하지 않고 스레드가 끝날 때 한다.</li><li><code>add_interrupt_randomness()</code> — 모든 인터럽트의 타이밍이 커널 난수 풀(entropy)에 섞인다.</li><li>시간 칸의 <code>+</code>, <code>!</code>, <code>#</code>은 10 µs, 100 µs, 1 ms 초과 표시다. 여기 숫자는 <strong>function_graph가 함수마다 진입/복귀를 기록하는 오버헤드 + lockdep + TCG</strong>가 겹친 값이라 실제 비용이 아니다(<code>fast_mix</code> 4.5 ms는 그 사이 호스트가 vCPU를 멈춘 것으로 보인다 — 추정). 구조를 보는 용도로 쓴다.</li><li><code>gic_handle_irq</code>보다 바깥(<code>el1h_64_irq_handler</code>, <code>el1_interrupt</code>)은 <code>noinstr</code>라 ftrace로 못 본다. 바깥은 §8의 call trace에서 본다.</li></ul>
+<hr>
+<h2 id="7-irq-affinity-어느-cpu가-받나">7. IRQ affinity — 어느 CPU가 받나<a class="anchor" href="#7-irq-affinity-어느-cpu가-받나" aria-label="link">#</a></h2>
+<h3 id="7-1-정의">7.1 정의<a class="anchor" href="#7-1-정의" aria-label="link">#</a></h3>
+<ul><li><code>/proc/irq/N/smp_affinity</code> (16진 비트마스크), <code>smp_affinity_list</code> (CPU 목록 <code>0-1,3</code>): "이 IRQ를 받아도 되는 CPU" — 사용자가 쓰는 값.</li><li><code>/proc/irq/N/effective_affinity(_list)</code>: 컨트롤러가 <strong>실제로</strong> 설정한 대상. GICv2 SPI는 한 CPU만 가능하므로(<code>IRQD_SINGLE_TARGET</code>) 드라이버가 마스크에서 하나를 고른다.</li><li>threaded handler의 스레드도 <strong>effective affinity를 따라간다</strong>(affinity가 바뀌면 플래그 <code>IRQTF_AFFINITY</code>가 서고, 스레드가 다음에 깨어날 때 <code>irq_thread_check_affinity()</code>가 스레드의 CPU 마스크를 맞춘다). 그래서 hard와 thread가 같은 CPU에서 돌아 캐시가 따뜻하다.</li></ul>
+<h3 id="7-2-예제-5-결과-다시-읽기">7.2 예제 5 결과 다시 읽기<a class="anchor" href="#7-2-예제-5-결과-다시-읽기" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>=== move to CPU2 ===
+2
+2
+ 22:       1000          0        200          0 GIC-0 112 Edge      f6_irq
+pid 86's current affinity mask: 4
+=== CPU0-1 list ===
+0-1
+0
+ 22:       1100          0        200          0 GIC-0 112 Edge      f6_irq
+=== write offline-free invalid mask ===
+sh: write error: Value too large for defined data type</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><code>echo 4 &gt; smp_affinity</code>(비트 2 = CPU2) 직후 200번이 <strong>전부 CPU2 칸</strong>으로 갔다. 스레드 <code>irq/22-f6_irq</code>의 <code>taskset</code> 마스크도 <code>4</code>로 따라왔다. 샘플 기록의 <code>hcpu</code>/<code>tcpu</code>도 1100개는 (0,0), 200개는 (2,2)로 hard·thread가 항상 같은 CPU였다.</li><li><code>0-1</code>을 주자 effective는 <code>0</code> — 이 실험에서는 마스크의 첫 CPU가 골라졌다 (<code>gic_set_affinity</code>의 <code>cpumask_any_and()</code> 결과).</li><li>존재하지 않는 CPU4(<code>10</code>)만 담은 마스크는 <code>EOVERFLOW</code>로 거절된다.</li></ul>
+<h3 id="7-3-왜-바꾸나-실무-기준">7.3 왜 바꾸나 — 실무 기준<a class="anchor" href="#7-3-왜-바꾸나-실무-기준" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>목적</th><th>방법</th></tr></thead><tbody><tr><td>실시간 제어 루프 CPU를 조용하게</td><td>그 CPU를 <code>isolcpus</code>/<code>nohz_full</code>로 빼고, 모든 IRQ의 affinity를 나머지 CPU로 (N 모듈)</td></tr><tr><td>반대로 센서 IRQ와 처리 스레드를 같은 CPU에</td><td>IRQ affinity = 처리 태스크의 CPU (캐시 지역성)</td></tr><tr><td>네트워크 고부하 분산</td><td>NIC 큐별 MSI-X를 CPU별로 (RSS)</td></tr><tr><td>부팅 기본값</td><td>커널 인자 <code>irqaffinity=0-1</code></td></tr></tbody></table></div>
+<p><strong>irqbalance</strong>는 유저스페이스 데몬으로, 주기적으로 IRQ 부하를 보고 <code>/proc/irq/*/smp_affinity</code>를 다시 쓴다. 서버 배포판에는 기본으로 깔리지만, 임베디드에서는 보통 <strong>끄고 정적으로</strong> 지정한다 — 실시간 장비에서 IRQ가 몰래 옮겨 다니면 지터의 원인이 되기 때문이다. 랩 BusyBox에는 irqbalance가 없어 실행하지 않았다.</p>
+<hr>
+<h2 id="8-irq_none-spurious-감지-인터럽트-폭풍">8. <code>IRQ_NONE</code>, spurious 감지, 인터럽트 폭풍<a class="anchor" href="#8-irq_none-spurious-감지-인터럽트-폭풍" aria-label="link">#</a></h2>
+<h3 id="8-1-커널의-감시-규칙-kernel-irq-spurious-c의-note_interrupt">8.1 커널의 감시 규칙 (<code>kernel/irq/spurious.c</code>의 <code>note_interrupt</code>)<a class="anchor" href="#8-1-커널의-감시-규칙-kernel-irq-spurious-c의-note_interrupt" aria-label="link">#</a></h3>
+<p>handler가 <code>IRQ_NONE</code>을 반환할 때마다(공유 라인이면 <strong>모든</strong> handler가 NONE일 때) <code>irqs_unhandled</code>를 센다. 랩 소스 기준 규칙:</p>
+<ul><li>직전 unhandled로부터 <code>HZ/10</code>(100 ms)보다 오래 지났으면 카운터를 1로 리셋한다 — 가끔 오는 가짜 인터럽트는 봐준다.</li><li>unhandled가 생긴 뒤부터 인터럽트를 10만 개 단위 창(<code>irq_count</code>)으로 센다. 창이 끝났을 때 unhandled가 <strong>99,900개 초과</strong>면 "고장"으로 판정한다.</li><li>판정되면 <code>irq N: nobody cared (try booting with the "irqpoll" option)</code> + 스택 + 등록된 handler 목록을 찍고, <code>Disabling IRQ #N</code> 후 그 라인을 <strong>꺼 버린다</strong>(<code>IRQS_SPURIOUS_DISABLED</code>). 이후 그 장치는 인터럽트를 못 받는다.</li></ul>
+<p>Cortex-M에서 플래그를 안 지운 level 인터럽트는 ISR에 무한 재진입하며 시스템을 멈춘다. Linux는 이걸 감지해서 <strong>한 장치를 희생하고 시스템을 살린다</strong>.</p>
+<h3 id="8-2-예제-8-폭풍-만들기와-nobody-cared">8.2 예제 8 — 폭풍 만들기와 "nobody cared"<a class="anchor" href="#8-2-예제-8-폭풍-만들기와-nobody-cared" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: mode=2에서 hard handler가 <code>IRQ_NONE</code>을 반환하면서 <strong>자기 자신을 다시 pending</strong> 시킨다. 플래그를 안 지운 level 인터럽트가 계속 다시 들어오는 상황을 흉내 낸 것이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# g_none.sh — IRQ_NONE + 자기 재-pending → 폭풍 → "nobody cared"
+insmod /f6_irq.ko mode=2
+N=$(grep f6_irq /proc/interrupts | cut -d: -f1 | tr -d ' ')
+T0=$(cut -d' ' -f1 /proc/uptime)
+echo 1 &gt; /sys/kernel/debug/f6_irq/fire; echo "fire ret=$?"
+sleep 3; T1=$(cut -d' ' -f1 /proc/uptime); echo "uptime $T0 -&gt; $T1"
+head -1 /sys/kernel/debug/f6_irq/stats
+echo "=== dmesg ==="; dmesg | tail -40
+echo "=== /proc/interrupts ==="; grep -E "CPU0|f6_irq" /proc/interrupts
+echo "=== /proc/irq/$N/spurious ==="; cat /proc/irq/$N/spurious
+echo "=== debugfs ==="; grep -E "istate|ddepth|IRQS_|IRQD_IRQ_DISABLED|IRQD_IRQ_MASKED" -A0 /sys/kernel/debug/irq/irqs/$N</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 13.36s
+[   28.584914] irq 22: nobody cared (try booting with the "irqpoll" option)
+[   28.592139] handlers:
+[   28.592212] [&lt;00000000e849e165&gt;] f6_hard [f6_irq]
+[   28.593357] Disabling IRQ #22
+fire ret=0
+uptime 15.25 -&gt; 31.29
+n_hard=200000 n_thr=0 n_b=0
+=== dmesg ===
+[   15.157720] f6_irq f6-irq: mode=2 virq=22 hwirq=112 request ret=0
+[   28.584914] irq 22: nobody cared (try booting with the "irqpoll" option)
+[   28.586548] CPU: 0 UID: 0 PID: 85 Comm: sh Tainted: G           O        6.18.55-dbg #1 PREEMPT 
+[   28.586863] Tainted: [O]=OOT_MODULE
+[   28.587184] Hardware name: linux,dummy-virt (DT)
+[   28.587432] Call trace:
+[   28.587755]  show_stack+0x30/0x90 (C)
+[   28.588821]  dump_stack_lvl+0x70/0x98
+[   28.588893]  dump_stack+0x18/0x24
+[   28.588930]  __report_bad_irq+0x54/0x100
+[   28.588973]  note_interrupt+0x344/0x3a0
+[   28.589017]  handle_irq_event+0x9c/0xc0
+[   28.589055]  handle_fasteoi_irq+0xfc/0x1a8
+[   28.589098]  handle_irq_desc+0x3c/0x68
+[   28.589134]  generic_handle_domain_irq+0x24/0x40
+[   28.589171]  gic_handle_irq+0x40/0xe0
+[   28.589202]  call_on_irq_stack+0x30/0x48
+[   28.589237]  do_interrupt_handler+0x88/0x98
+[   28.589274]  el1_interrupt+0x38/0x58
+[   28.589358]  el1h_64_irq_handler+0x18/0x30
+[   28.589393]  el1h_64_irq+0x6c/0x70
+[   28.589527]  _raw_spin_unlock_irqrestore+0x6c/0xa0 (P)
+[   28.589579]  __irq_put_desc_unlock+0x28/0x60
+[   28.589618]  irq_set_irqchip_state+0xa4/0x128
+[   28.589650]  fire_set+0x64/0xd8 [f6_irq]
+[   28.590524]  simple_attr_write_xsigned.isra.0+0xf4/0x1c0
+[   28.590607]  simple_attr_write+0x20/0x40
+[   28.590671]  debugfs_attr_write+0x4c/0x98
+[   28.590805]  vfs_write+0xd8/0x390
+[   28.590923]  ksys_write+0x6c/0x118
+[   28.590979]  __arm64_sys_write+0x20/0x40
+[   28.591015]  invoke_syscall.constprop.0+0x48/0xf0
+[   28.591051]  el0_svc_common.constprop.0+0x40/0xf0
+[   28.591085]  do_el0_svc+0x24/0x40
+[   28.591118]  el0_svc+0x50/0x2f8
+[   28.591544]  el0t_64_sync_handler+0xa0/0xe8
+[   28.591631]  el0t_64_sync+0x198/0x1a0
+[   28.592139] handlers:
+[   28.592212] [&lt;00000000e849e165&gt;] f6_hard [f6_irq]
+[   28.593357] Disabling IRQ #22
+=== /proc/interrupts ===
+           CPU0       CPU1       CPU2       CPU3       
+ 22:     200000          0          0          0 GIC-0 112 Edge      f6_irq
+=== /proc/irq/22/spurious ===
+count 0
+unhandled 0
+last_unhandled 4294695272 ms
+=== debugfs ===
+istate:   0x00004002
+            IRQS_SPURIOUS_DISABLED
+ddepth:   1
+            IRQD_IRQ_DISABLED</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>이 call trace가 그림 1의 실물 증명이다.</strong> 아래에서 위로: 유저 <code>sh</code>의 <code>write()</code> syscall(<code>el0t_64_sync</code> → ... → <code>fire_set</code>) → <code>irq_set_irqchip_state</code>가 락을 풀며 IRQ를 다시 켜는 순간(<code>_raw_spin_unlock_irqrestore</code>, <code>(P)</code>) 인터럽트가 걸려 → <code>el1h_64_irq</code> → <code>el1h_64_irq_handler</code> → <code>el1_interrupt</code> → <code>do_interrupt_handler</code> → <code>call_on_irq_stack</code> → <code>gic_handle_irq</code> → <code>generic_handle_domain_irq</code> → <code>handle_irq_desc</code> → <code>handle_fasteoi_irq</code> → <code>handle_irq_event</code> → <code>note_interrupt</code> → 보고. 커널 모드(EL1)에서 인터럽트를 받았으니 <code>el1h</code> 벡터다.</li><li>폭풍 동안 CPU0은 거의 인터럽트만 처리했다. 판정 후 <code>istate</code>에 <code>IRQS_SPURIOUS_DISABLED</code>, <code>ddepth: 1</code>, <code>IRQD_IRQ_DISABLED</code> — 커널이 <code>disable_irq</code>와 같은 상태로 만들었다.</li><li>이 실행에서는 판정이 <strong>20만 번째</strong>(두 번째 10만 창 끝)에서 났다. 같은 스크립트의 앞선 실행(대기 3초 없이, 출력은 생략)에서는 정확히 <code>100000</code>에서 판정됐다. 첫 창 도중 어딘가에서 unhandled 사이 간격이 100 ms를 넘어 카운터가 1로 리셋된 것으로 보인다(TCG에서 vCPU가 잠깐 멈춤 — 추정). 공교롭게 <code>storm_max</code>도 200000이라 폭풍은 판정과 같은 시점에 멈췄다.</li><li>실제 원인 후보: level 인터럽트인데 장치의 상태 비트를 안 지움, DT 트리거 타입 오류(level을 edge로, 극성 반대), 공유 라인에서 다른 장치가 올림, 장치가 리셋 중 IRQ 핀을 플로팅으로 둠. 커널 메시지에 나온 <code>irqpoll</code>은 PC 시절 잘못 배선된 IRQ용 우회책이고 임베디드 해결책이 아니다.</li></ul>
+<h3 id="8-3-예제-9-공유-라인이면-한-명만-irq_handled여도-산다">8.3 예제 9 — 공유 라인이면 한 명만 <code>IRQ_HANDLED</code>여도 산다<a class="anchor" href="#8-3-예제-9-공유-라인이면-한-명만-irq_handled여도-산다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: mode=3에서 같은 줄에 <code>f6_a</code>(항상 NONE + 재-pending)와 <code>f6_b</code>(항상 HANDLED)를 <code>IRQF_SHARED</code>로 등록하고 12만 번 폭풍을 일으킨다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# g_shared.sh — IRQF_SHARED: A는 IRQ_NONE, B는 IRQ_HANDLED → 폭풍이 와도 안 죽는다
+insmod /f6_irq.ko mode=3 storm_max=120000
+N=$(grep f6_ /proc/interrupts | cut -d: -f1 | tr -d ' ')
+grep -E "CPU0|f6_" /proc/interrupts
+echo 1 &gt; /sys/kernel/debug/f6_irq/fire; echo "fire ret=$?"; sleep 8
+head -1 /sys/kernel/debug/f6_irq/stats
+grep -E "CPU0|f6_" /proc/interrupts; cat /proc/irq/$N/spurious; ls -1 /proc/irq/$N | grep f6
+dmesg | grep -c "nobody cared"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 13.46s
+           CPU0       CPU1       CPU2       CPU3       
+ 22:          0          0          0          0 GIC-0 112 Edge      f6_a, f6_b
+sh: write error: Connection timed out
+fire ret=1
+n_hard=120000 n_thr=0 n_b=120000
+           CPU0       CPU1       CPU2       CPU3       
+ 22:     120000          0          0          0 GIC-0 112 Edge      f6_a, f6_b
+count 0
+unhandled 0
+last_unhandled 0 ms
+f6_a
+f6_b
+0</code></pre></figure>
+<p>출력에서 볼 것: <code>/proc/interrupts</code>의 이름 칸이 <code>f6_a, f6_b</code>, <code>/proc/irq/22/</code> 아래에 이름별 디렉터리 두 개. 12만 번 동안 <strong>두 handler가 매번 둘 다 불렸고</strong>(<code>n_hard = n_b = 120000</code>), 반환값을 OR한 결과가 HANDLED라 <code>unhandled 0</code>, "nobody cared" 0건이다. (<code>fire</code>가 3초 타임아웃 에러를 낸 것은 폭풍이 12만 번을 채우는 데 3초 넘게 걸렸기 때문이고, 결과에는 영향이 없다.)</p>
+<p>교훈 두 가지. 공유 라인에서는 <strong>"내 장치가 낸 게 맞는지" 상태 레지스터를 먼저 확인</strong>하고 아니면 <code>IRQ_NONE</code>을 반환해야 한다(아니면 고장 난 이웃을 커널이 못 찾는다). 그리고 반대로, 고장 난 장치가 정상 장치와 라인을 공유하면 커널의 폭풍 감지가 <strong>작동하지 않고</strong> CPU만 계속 태운다.</p>
+<hr>
+<h2 id="9-disable_irq-vs-disable_irq_nosync-자기-자신을-기다리는-deadlock">9. <code>disable_irq</code> vs <code>disable_irq_nosync</code> — 자기 자신을 기다리는 deadlock<a class="anchor" href="#9-disable_irq-vs-disable_irq_nosync-자기-자신을-기다리는-deadlock" aria-label="link">#</a></h2>
+<h3 id="9-1-정의">9.1 정의<a class="anchor" href="#9-1-정의" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>함수</th><th>하는 일</th><th>기다리나</th><th>어디서 불러도 되나</th></tr></thead><tbody><tr><td><code>disable_irq(irq)</code></td><td>depth++ 후 mask, <strong>실행 중인 hard handler와 thread_fn이 끝날 때까지 대기</strong>(<code>synchronize_irq</code>)</td><td>예 (sleep 가능)</td><td>process context, <strong>자기 handler 밖에서만</strong></td></tr><tr><td><code>disable_irq_nosync(irq)</code></td><td>depth++ 후 mask, 바로 반환</td><td>아니오</td><td>handler 안을 포함해 어디서나</td></tr><tr><td><code>disable_hardirq(irq)</code></td><td>mask + hard handler만 기다림</td><td>hard만</td><td>특수 용도</td></tr><tr><td><code>enable_irq(irq)</code></td><td>depth--, 0이 되면 unmask</td><td>아니오</td><td>호출 횟수를 disable과 맞춰야 함</td></tr><tr><td><code>synchronize_irq(irq)</code></td><td>mask 없이 "지금 도는 handler 끝나길" 대기</td><td>예</td><td>process context</td></tr></tbody></table></div>
+<p><code>disable_irq</code>는 <strong>중첩 카운트</strong>다(debugfs의 <code>ddepth</code>). 두 번 disable 했으면 두 번 enable 해야 켜진다. NVIC의 <code>NVIC_DisableIRQ</code>는 카운트가 없다 — Don이 bare-metal 습관대로 쓰면 틀리는 곳이다.</p>
+<h3 id="9-2-예제-10-thread_fn-안에서-disable_irq-를-부르면">9.2 예제 10 — thread_fn 안에서 <code>disable_irq()</code>를 부르면<a class="anchor" href="#9-2-예제-10-thread_fn-안에서-disable_irq-를-부르면" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 먼저 thread_fn 안에서 <code>disable_irq_nosync()</code>(정상), 그다음 <code>disable_irq()</code>(deadlock)를 부른다. hung task 감지 시간을 5초로 줄여 둔다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# g_dis.sh — thread_fn 안에서 disable_irq_nosync(OK) vs disable_irq(자기 자신을 기다리는 deadlock)
+echo 5 &gt; /proc/sys/kernel/hung_task_timeout_secs
+insmod /f6_irq.ko mode=1
+N=$(grep f6_irq /proc/interrupts | cut -d: -f1 | tr -d ' ')
+echo 2 &gt; /sys/module/f6_irq/parameters/dis
+echo 1 &gt; /sys/kernel/debug/f6_irq/fire; echo "nosync fire ret=$?"
+grep ddepth /sys/kernel/debug/irq/irqs/$N
+echo "--- enable_irq via re-insmod is not possible; just observe ---"
+rmmod f6_irq; insmod /f6_irq.ko mode=1
+echo 1 &gt; /sys/module/f6_irq/parameters/dis
+echo 1 &gt; /sys/kernel/debug/f6_irq/fire; echo "disable_irq fire ret=$?"
+P=$(pgrep "irq/$N-f6_irq"); echo "thread pid $P state: $(grep State /proc/$P/status)"
+cat /proc/$P/stack 2&gt;/dev/null
+sleep 12
+echo "=== dmesg ==="; dmesg | grep -E "f6|blocked|hung|irq/" | head -20
+dmesg | sed -n '/blocked for more/,/^.*&lt;\/TASK&gt;\|---\[ end/p' | head -30</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 9.21s
+nosync fire ret=0
+ddepth:   1
+--- enable_irq via re-insmod is not possible; just observe ---
+sh: write error: Connection timed out
+disable_irq fire ret=1
+thread pid 95 state: State:	D (disk sleep)
+[&lt;0&gt;] __synchronize_irq+0x9c/0xd8
+[&lt;0&gt;] disable_irq+0x58/0x70
+[&lt;0&gt;] f6_thread+0xc8/0x100 [f6_irq]
+[&lt;0&gt;] irq_thread_fn+0x30/0xc0
+[&lt;0&gt;] irq_thread+0x1c4/0x400
+[&lt;0&gt;] kthread+0x140/0x230
+[&lt;0&gt;] ret_from_fork+0x10/0x20
+[   20.212034] INFO: task irq/22-f6_irq:95 blocked for more than 5 seconds.
+[   20.212564]       Tainted: G           O        6.18.55-dbg #1
+[   20.212708] "echo 0 &gt; /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[   25.333190] INFO: task irq/22-f6_irq:95 blocked for more than 10 seconds.
+...
+=== dmesg ===
+[   10.039162] f6_irq: loading out-of-tree module taints kernel.
+[   10.069432] f6_irq f6-irq: mode=1 virq=22 hwirq=112 request ret=0
+[   10.228915] f6: thread calls disable_irq_nosync(22)
+[   10.522568] f6_irq f6-irq: mode=1 virq=22 hwirq=112 request ret=0
+[   10.551024] f6: thread calls disable_irq(22)
+[   13.563324] f6: fire #0 timed out (n_hard=1)
+[   20.212034] INFO: task irq/22-f6_irq:95 blocked for more than 5 seconds.
+...
+[   20.213604] Call trace:
+[   20.213763]  __switch_to+0xf4/0x1c8 (T)
+[   20.215224]  __schedule+0x480/0x1088
+[   20.215281]  schedule+0x48/0x140
+[   20.215309]  __synchronize_irq+0x9c/0xd8
+[   20.215344]  disable_irq+0x58/0x70
+[   20.215367]  f6_thread+0xc8/0x100 [f6_irq]
+[   20.215620]  irq_thread_fn+0x30/0xc0
+[   20.215665]  irq_thread+0x1c4/0x400
+[   20.215694]  kthread+0x140/0x230
+[   20.215724]  ret_from_fork+0x10/0x20</code></pre></figure>
+<p>(hung task 보고가 5초·10초에 두 번 찍혀 중복 줄과 "Showing all locks held" 블록을 <code>...</code>로 줄였다.)</p>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li>nosync는 즉시 돌아왔고 <code>ddepth: 1</code> — 라인은 꺼진 상태로 남았다. (그 뒤 rmmod → <code>free_irq</code>가 디스크립터를 정리하고 재등록 때 다시 켜진다.)</li><li><code>disable_irq</code>를 부른 스레드는 <strong><code>D</code> 상태로 영원히</strong> 멈췄다. 스택이 정확히 말해 준다: <code>f6_thread</code> → <code>disable_irq</code> → <code>__synchronize_irq</code> → <code>schedule</code>. <code>synchronize_irq</code>는 "이 IRQ의 스레드가 다 끝나길" 기다리는데, <strong>기다리는 주체가 바로 그 스레드</strong>다. 자기 자신의 종료를 기다리는 꼴이다.</li><li>lockdep(디버그 커널에 켜져 있음)은 이걸 <strong>못 잡는다</strong> — 락이 아니라 wait queue 대기이기 때문이다. hung task 감지기(<code>khungtaskd</code>)만 알려 준다. 기본값 120초라 실무에서는 "장치가 2분 뒤부터 이상해요"로 나타난다.</li><li>hard handler 안에서 <code>disable_irq()</code>를 부르면 더 나쁘다: <code>synchronize_irq</code>가 <code>IRQD_IRQ_INPROGRESS</code>가 풀리길 <strong>스핀</strong>하므로 그 CPU가 그대로 굳는다. 이건 실행하지 않았다(게스트가 멈춰 출력을 얻기 어렵다). 소스(<code>kernel/irq/manage.c</code>의 <code>__synchronize_hardirq</code>) 근거의 설명이다.</li></ul>
+<hr>
+<h2 id="10-irq가-막혀-있는-시간-irqsoff-tracer와-irq-시간-회계">10. IRQ가 막혀 있는 시간 — irqsoff tracer와 IRQ 시간 회계<a class="anchor" href="#10-irq가-막혀-있는-시간-irqsoff-tracer와-irq-시간-회계" aria-label="link">#</a></h2>
+<h3 id="10-1-예제-13-irqsoff-tracer로-누가-인터럽트를-오래-막았나-찾기">10.1 예제 13 — irqsoff tracer로 "누가 인터럽트를 오래 막았나" 찾기<a class="anchor" href="#10-1-예제-13-irqsoff-tracer로-누가-인터럽트를-오래-막았나-찾기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>irqsoff</code> tracer는 <strong>CPU에서 IRQ가 꺼져 있던 가장 긴 구간</strong>을 자동으로 기록한다. 드라이버가 <code>local_irq_save()</code> 후 300 ms를 busy-wait 하는 최악의 코드를 CPU1에서 돌린다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># g_misc.sh (c) 부분
+mount -t tracefs none /sys/kernel/tracing; T=/sys/kernel/tracing
+echo irqsoff &gt; $T/current_tracer; echo 0 &gt; $T/tracing_max_latency
+sleep 1; echo "baseline max (1 s idle): $(cat $T/tracing_max_latency) us"
+echo 0 &gt; $T/tracing_max_latency
+taskset 2 sh -c 'echo 300 &gt; /sys/kernel/debug/f6_irq/irqsoff'
+echo "after 300 ms irqsoff: $(cat $T/tracing_max_latency) us"
+echo 0 &gt; $T/tracing_on
+cat $T/trace</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>baseline max (1 s idle): 14047 us
+after 300 ms irqsoff: 316757 us
+# tracer: irqsoff
+#
+# irqsoff latency trace v1.1.5 on 6.18.55-dbg
+# --------------------------------------------------------------------
+# latency: 316757 us, #613/613, CPU#1 | (M:PREEMPT VP:0, KP:0, SP:0 HP:0 #P:4)
+#    -----------------
+#    | task: sh-104 (uid:0 nice:0 policy:0 rt_prio:0)
+#    -----------------
+#  =&gt; started at: irqsoff_set
+#  =&gt; ended at:   simple_attr_write_xsigned.isra.0
+#
+...
+      sh-104       1d....    2us : trace_hardirqs_off &lt;-irqsoff_set
+      sh-104       1d....    5us : unwind_find_stack.constprop.0() &lt;-arch_stack_walk
+...
+      sh-104       1d....   42us+: __delay() &lt;-__const_udelay
+      sh-104       1d....   66us#: arch_timer_evtstrm_available() &lt;-__delay
+      sh-104       1d.... 1100us : __delay() &lt;-__const_udelay
+...
+      sh-104       1d.... 315662us#: arch_timer_evtstrm_available() &lt;-__delay
+      sh-104       1d.... 316754us!: irqsoff_set &lt;-simple_attr_write_xsigned.isra.0
+      sh-104       1d.... 316955us+: tracer_hardirqs_on &lt;-simple_attr_write_xsigned.isra.0
+      sh-104       1d.... 316975us : &lt;stack trace&gt;
+ =&gt; simple_attr_write_xsigned.isra.0
+ =&gt; simple_attr_write
+ =&gt; debugfs_attr_write
+ =&gt; vfs_write
+ =&gt; ksys_write
+ =&gt; __arm64_sys_write
+ =&gt; invoke_syscall.constprop.0
+ =&gt; el0_svc_common.constprop.0
+ =&gt; do_el0_svc
+ =&gt; el0_svc
+ =&gt; el0t_64_sync_handler
+ =&gt; el0t_64_sync</code></pre></figure>
+<p>(트레이스 646줄 중 머리, <code>mdelay</code> 루프의 처음과 끝, 마지막 스택만 남겼다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>헤더 한 줄이 답이다: <strong><code>latency: 316757 us ... CPU#1</code>, <code>started at: irqsoff_set</code>, <code>ended at: simple_attr_write_xsigned</code></strong>. 어떤 함수가 IRQ를 끄고 어디서 켰는지가 그대로 나온다. 실무에서 "가끔 수 ms 지터"의 범인을 찾는 1순위 도구다.</li><li>끝 지점이 <code>irqsoff_set</code>이 아니라 호출자인 이유: <code>local_irq_restore()</code>가 인라인되어 호출자 쪽 주소로 기록됐다.</li><li>기다리는 동안 1 ms마다 <code>__delay()</code>가 보인다 — <code>mdelay(300)</code>이 <code>udelay(1000)</code>을 300번 부르는 구현이다.</li><li>아무것도 안 해도 baseline 최대값이 14 ms였다. TCG + lockdep 환경에서 커널 자체의 IRQ-off 구간이 길게 측정된 것이다(앞선 실행에서는 69 ms까지 나왔다). 그래서 데모는 300 ms로 크게 잡았다. 실제 보드에서 baseline이 수백 µs를 넘으면 조사 대상이다.</li><li>이 300 ms 동안 CPU1에 affinity된 IRQ는 전부 대기했다. 다른 CPU는 영향이 없다 — <code>local_irq_disable()</code>은 <strong>이 CPU만</strong> 막는다(F4의 "spin_lock_irqsave가 다른 CPU는 못 막는다"와 같은 이야기).</li></ul>
+<h3 id="10-2-예제-12-proc-stat의-irq-시간-config_irq_time_accounting">10.2 예제 12 — <code>/proc/stat</code>의 irq 시간 (<code>CONFIG_IRQ_TIME_ACCOUNTING</code>)<a class="anchor" href="#10-2-예제-12-proc-stat의-irq-시간-config_irq_time_accounting" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>/proc/stat</code>의 <code>cpu0</code> 줄 6번째 칸(irq 시간, USER_HZ=100 단위)이 hard handler 길이에 따라 늘어나는지 본다. <code>hard_us</code>를 0 → 200 → 1000 µs로 바꿔 매번 500번 쏜다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># g_misc.sh (b) 부분
+insmod /f6_irq.ko mode=0
+for us in 0 200 1000; do
+  echo $us &gt; /sys/module/f6_irq/parameters/hard_us
+  a=$(grep "^cpu0 " /proc/stat); echo 500 &gt; /sys/kernel/debug/f6_irq/fire; b=$(grep "^cpu0 " /proc/stat)
+  echo "hard_us=$us  before: $a"; echo "hard_us=$us  after:  $b"
+done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>hard_us=0  before: cpu0 7 0 374 834 0 83 39 0 0 0
+hard_us=0  after:  cpu0 7 0 377 980 0 138 44 0 0 0
+hard_us=200  before: cpu0 7 0 377 985 0 138 45 0 0 0
+hard_us=200  after:  cpu0 7 0 380 1156 0 199 50 0 0 0
+hard_us=1000  before: cpu0 7 0 381 1165 0 200 50 0 0 0
+hard_us=1000  after:  cpu0 7 0 384 1357 0 330 55 0 0 0</code></pre></figure>
+<p>칸 순서는 <code>user nice system idle iowait irq softirq steal guest guest_nice</code>다. irq 칸 증가분만 뽑으면:</p>
+<figure class="chart"><svg viewBox="0 0 600 270" xmlns="http://www.w3.org/2000/svg">
+  <line x1="70" y1="220" x2="580" y2="220" stroke="currentColor"/>
+  <line x1="70" y1="30" x2="70" y2="220" stroke="currentColor"/>
+  <text x="64" y="224" font-size="12" text-anchor="end">0</text>
+  <text x="64" y="151" font-size="12" text-anchor="end">50</text>
+  <text x="64" y="78" font-size="12" text-anchor="end">100</text>
+  <line x1="70" y1="147" x2="580" y2="147" stroke="#888" stroke-dasharray="3,4"/>
+  <line x1="70" y1="74" x2="580" y2="74" stroke="#888" stroke-dasharray="3,4"/>
+  <rect x="120" y="139.7" width="90" height="80.3" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+  <rect x="270" y="130.9" width="90" height="89.1" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+  <rect x="420" y="30.2" width="90" height="189.8" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+  <line x1="270" y1="125.1" x2="360" y2="125.1" stroke="#e08a3c" stroke-width="2" stroke-dasharray="5,3"/>
+  <line x1="420" y1="66.7" x2="510" y2="66.7" stroke="#e08a3c" stroke-width="2" stroke-dasharray="5,3"/>
+  <text x="165" y="133" font-size="12" text-anchor="middle">55</text>
+  <text x="315" y="118" font-size="12" text-anchor="middle">61</text>
+  <text x="465" y="24" font-size="12" text-anchor="middle">130</text>
+  <text x="165" y="240" font-size="12" text-anchor="middle">hard_us = 0</text>
+  <text x="315" y="240" font-size="12" text-anchor="middle">hard_us = 200</text>
+  <text x="465" y="240" font-size="12" text-anchor="middle">hard_us = 1000</text>
+  <text x="80" y="22" font-size="12">cpu0 irq 칸 증가 (10 ms 단위), 500회씩</text>
+  <text x="300" y="262" font-size="12" text-anchor="middle">주황 점선 = 55 + 기대 증가분(500 × hard_us)</text>
+</svg></figure>
+<p>그림 6 — handler를 오래 끌면 그 시간이 <code>/proc/stat</code>의 irq 칸에 쌓인다. 기대치 대비 +200 µs는 61 vs 65, +1000 µs는 130 vs 105로 오차가 있다(TCG에서 <code>udelay</code>와 IRQ 오버헤드가 일정하지 않다).</p>
+<p>출력에서 볼 것: hard handler가 1 ms씩 500번이면 0.5 s = 50 칸이 irq로 가야 한다. 실제로 55 → 130으로 크게 늘었다. 기준선 55칸(0.55 s)이 큰 것은 TCG에서 이 CPU가 받는 모든 IRQ(타이머·IPI·우리 IRQ)의 진입·퇴장 비용이 크기 때문이다. <code>CONFIG_IRQ_TIME_ACCOUNTING</code>이 꺼진 커널에서는 이 칸이 tick 샘플링 추정치라 이렇게 정밀하지 않다. 실무에서는 <code>top</code>/<code>mpstat</code>의 <code>%irq</code>, <code>%soft</code>로 같은 값을 본다.</p>
+<hr>
+<h2 id="11-커널-안에서는-무슨-일이-일어나나">11. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#11-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<h3 id="11-1-자료구조">11.1 자료구조<a class="anchor" href="#11-1-자료구조" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 660 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect x="10" y="20" width="250" height="230" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="20" y="42" font-size="13">struct irq_desc (virq 22)</text>
+  <text x="20" y="68" font-size="12">handle_irq = handle_fasteoi_irq</text>
+  <text x="20" y="90" font-size="12">action → irqaction 리스트</text>
+  <text x="20" y="112" font-size="12">kstat_irqs (CPU별 카운트)</text>
+  <text x="20" y="134" font-size="12">depth (disable 중첩)</text>
+  <text x="20" y="156" font-size="12">istate (ONESHOT, SPURIOUS…)</text>
+  <text x="20" y="178" font-size="12">irq_count, irqs_unhandled</text>
+  <text x="20" y="200" font-size="12">threads_active, wait_for_threads</text>
+  <text x="20" y="222" font-size="12">lock (raw spinlock)</text>
+  <text x="20" y="242" font-size="12">irq_data ↓</text>
+  <rect x="10" y="270" width="250" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="20" y="290" font-size="12">irq_data: hwirq 112, domain</text>
+  <text x="20" y="310" font-size="12">chip = gic_chip, affinity</text>
+  <rect x="320" y="20" width="330" height="110" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="330" y="42" font-size="13">struct irqaction "f6_a"</text>
+  <text x="330" y="64" font-size="12">handler = f6_hard, dev_id = &amp;f6</text>
+  <text x="330" y="84" font-size="12">thread_fn, thread (task_struct)</text>
+  <text x="330" y="104" font-size="12">flags = IRQF_SHARED …</text>
+  <text x="330" y="122" font-size="12">next ↓</text>
+  <rect x="320" y="160" width="330" height="80" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="330" y="182" font-size="13">struct irqaction "f6_b"</text>
+  <text x="330" y="204" font-size="12">handler = f6_b_handler, dev_id = 쿠키</text>
+  <text x="330" y="226" font-size="12">next = NULL</text>
+  <rect x="320" y="262" width="330" height="58" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="330" y="284" font-size="12">gic_chip: irq_mask / irq_unmask / irq_eoi</text>
+  <text x="330" y="304" font-size="12">irq_set_type / irq_set_affinity …</text>
+  <line x1="260" y1="90" x2="317" y2="60" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="480" y1="130" x2="480" y2="157" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="135" y1="250" x2="135" y2="267" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="260" y1="300" x2="317" y2="292" stroke="currentColor" marker-end="url(#ah5)"/>
+</svg></figure>
+<p>그림 7 — genirq의 세 구조체. <code>irq_desc</code>는 virq마다 하나(관리 정보), <code>irqaction</code>은 <code>request_irq</code> 한 번마다 하나(드라이버 함수), <code>irq_chip</code>은 컨트롤러 종류마다 하나(mask/EOI 같은 하드웨어 조작).</p>
+<h3 id="11-2-api-커널-경로-요약">11.2 API → 커널 경로 요약<a class="anchor" href="#11-2-api-커널-경로-요약" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>드라이버가 부르는 것</th><th>커널 안</th><th>이 노트에서 확인한 곳</th></tr></thead><tbody><tr><td><code>platform_get_irq()</code></td><td><code>of_irq_get</code> → <code>irq_create_fwspec_mapping</code> → domain <code>translate</code>/<code>alloc</code></td><td>예제 4 <code>virq=22 hwirq=112</code></td></tr><tr><td><code>request_threaded_irq()</code></td><td><code>irqaction</code> 할당 → <code>__setup_irq</code> → 스레드 생성(<code>kthread_create(irq_thread, ...)</code> + <code>sched_set_fifo</code>) → <code>irq_startup</code> → <code>gic_unmask_irq</code></td><td>예제 5 <code>irq/22-f6_irq</code>, FIFO 50</td></tr><tr><td>인터럽트 발생</td><td>그림 1 경로 → <code>__handle_irq_event_percpu</code> → <code>action-&gt;handler</code></td><td>예제 7, 예제 8 call trace</td></tr><tr><td><code>IRQ_WAKE_THREAD</code> 반환</td><td><code>__irq_wake_thread</code> → <code>wake_up_process</code> → (IRQ 퇴장 시 선점) → <code>irq_thread</code> → <code>irq_thread_fn</code> → <code>thread_fn</code> → <code>irq_finalize_oneshot</code> → <code>unmask_threaded_irq</code></td><td>예제 6, 예제 7</td></tr><tr><td><code>IRQ_NONE</code> 반복</td><td><code>note_interrupt</code> → <code>__report_bad_irq</code> → <code>irq_disable</code></td><td>예제 8</td></tr><tr><td><code>disable_irq()</code></td><td><code>__disable_irq</code> (depth++) → <code>synchronize_irq</code> (hard 스핀 + 스레드 대기)</td><td>예제 10</td></tr><tr><td><code>/proc/irq/N/smp_affinity</code> 쓰기</td><td><code>irq_set_affinity</code> → <code>chip-&gt;irq_set_affinity</code>(<code>gic_set_affinity</code>) → effective 갱신 → 스레드 affinity는 다음 깨어날 때</td><td>예제 5</td></tr></tbody></table></div>
+<h3 id="11-3-다시-만나는-곳">11.3 다시 만나는 곳<a class="anchor" href="#11-3-다시-만나는-곳" aria-label="link">#</a></h3>
+<ul class="tasks"><li><strong>F2</strong>: hard handler = hardirq 컨텍스트, thread_fn = process 컨텍스트. 어디서 무엇이 금지되는지의 근거.</li><li><strong>F4</strong>: handler와 process 코드가 같은 데이터를 쓰면 <code>spin_lock_irqsave</code>. threaded handler끼리는 mutex도 된다.</li><li><strong>F7</strong>: softirq/tasklet/workqueue — threaded IRQ 말고 다른 bottom half. <code>irq_exit_rcu()</code>에서 softirq가 도는 장면.</li><li><strong>F8</strong>: hard handler의 <code>ktime_get()</code> 타임스탬프, hrtimer.</li><li><strong>G·H6</strong>: GPIO 인터럽트(<code>gpiod_to_irq</code>), I2C 센서 드라이버의 <code>devm_request_threaded_irq(NULL, ..., IRQF_ONESHOT)</code> 실물.</li><li><strong>M5·N</strong>: <code>cyclictest</code>, PREEMPT_RT(모든 handler가 강제 스레드화), <code>isolcpus</code>와 IRQ affinity.</li></ul>
+<hr>
+<h2 id="12-embedded-실무에서-다시-보기">12. Embedded 실무에서 다시 보기<a class="anchor" href="#12-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="12-1-i2c-imu의-data-ready-인터럽트">12.1 I2C IMU의 data-ready 인터럽트<a class="anchor" href="#12-1-i2c-imu의-data-ready-인터럽트" aria-label="link">#</a></h3>
+<p>예를 들어 센서 키트의 IMU가 INT 핀(GPIO, level-low)으로 "샘플 준비됨"을 알린다면, 인터럽트를 끄려면 <strong>I2C로 상태 레지스터를 읽어야</strong> 한다. I2C 전송은 sleep하므로 hard handler에서 못 한다. 그래서 표준형은 다음과 같다 (실행하지 않은 구조 예시 — H6에서 실제 드라이버로 다룬다).</p>
+<figure class="code"><span class="lang">c</span><pre><code>static irqreturn_t imu_hard(int irq, void *p)
+{
+	struct imu *st = p;
+
+	st-&gt;ts = ktime_get_boottime_ns();	/* 시각은 여기서: 지터 최소 */
+	return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t imu_thread(int irq, void *p)
+{
+	struct imu *st = p;
+	int ret;
+
+	ret = regmap_bulk_read(st-&gt;map, IMU_REG_DATA, st-&gt;buf, sizeof(st-&gt;buf)); /* I2C, sleep */
+	if (ret)
+		return IRQ_NONE;
+	imu_push_sample(st, st-&gt;buf, st-&gt;ts);	/* 읽으면 장치가 INT를 내린다 */
+	return IRQ_HANDLED;
+}
+
+/* probe 안 */
+ret = devm_request_threaded_irq(dev, client-&gt;irq, imu_hard, imu_thread,
+				IRQF_ONESHOT, "imu", st);</code></pre></figure>
+<p><code>IRQF_ONESHOT</code>이 있으므로 thread가 I2C로 상태를 읽어 INT를 내릴 때까지 라인이 mask되어 폭풍이 안 난다. hard handler를 둔 이유는 오로지 타임스탬프다.</p>
+<h3 id="12-2-가끔-샘플이-수-ms-늦어요">12.2 "가끔 샘플이 수 ms 늦어요"<a class="anchor" href="#12-2-가끔-샘플이-수-ms-늦어요" aria-label="link">#</a></h3>
+<p>진단 순서: (1) <code>/proc/interrupts</code>로 IRQ가 어느 CPU로 가는지, 다른 시끄러운 IRQ(이더넷, eMMC)와 같은 CPU인지 (2) irqsoff tracer로 IRQ-off 최대 구간과 범인 함수 (3) <code>irq_handler_entry</code> → <code>sched_wakeup</code> → <code>sched_switch</code> 이벤트로 스레드가 늦게 뜨는 이유(더 높은 RT 태스크?) (4) 필요하면 <code>chrt -f -p 80 &lt;irq 스레드 PID&gt;</code>로 IMU 스레드 우선순위를 올리고, affinity를 한 CPU에 고정.</p>
+<h3 id="12-3-부팅하자마자-cpu-하나가-100">12.3 부팅하자마자 CPU 하나가 100%<a class="anchor" href="#12-3-부팅하자마자-cpu-하나가-100" aria-label="link">#</a></h3>
+<p><code>top</code>에서 <code>%irq</code>/<code>%hi</code>가 높고 <code>/proc/interrupts</code>의 한 줄이 초당 수만씩 늘면 폭풍이다. DT의 트리거 타입(극성 포함), 장치 초기화 순서(IRQ를 먼저 켜고 장치 리셋을 나중에 하면 플로팅 핀), 공유 라인의 <code>IRQ_NONE</code> 규칙을 확인한다. 공유가 아니면 대개 몇 초 뒤 "nobody cared"가 나와 단서가 된다.</p>
+<h3 id="12-4-suspend-중-깨우기-참고-실행하지-않음">12.4 suspend 중 깨우기 (참고, 실행하지 않음)<a class="anchor" href="#12-4-suspend-중-깨우기-참고-실행하지-않음" aria-label="link">#</a></h3>
+<p>버튼·RTC·모뎀 IRQ로 시스템을 깨우려면 <code>enable_irq_wake()</code>(또는 <code>device_init_wakeup</code> + <code>dev_pm_set_wake_irq</code>)를 쓴다. 예제 4의 <code>/sys/kernel/irq/22/wakeup disabled</code>가 이 상태를 보여 주는 칸이다. 깊이는 PM 모듈에서 다룬다.</p>
+<hr>
+<h2 id="13-흔한-실수와-증상">13. 흔한 실수와 증상<a class="anchor" href="#13-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>hard handler에서 I2C/SPI 읽기, <code>mutex_lock</code>, <code>msleep</code></td><td><code>BUG: sleeping function called from invalid context</code>, 데드락</td><td>hardirq 컨텍스트에서 sleep</td><td>threaded handler로 옮기기</td></tr><tr><td><code>request_threaded_irq(irq, NULL, fn, 0, ...)</code></td><td><code>-EINVAL</code>, "Threaded irq requested with handler=NULL and !ONESHOT"</td><td>기본 hard handler가 장치를 ack 못 함</td><td><code>IRQF_ONESHOT</code> 추가 (예제 11)</td></tr><tr><td>공유 라인에서 무조건 <code>IRQ_HANDLED</code></td><td>고장 난 이웃 장치의 폭풍이 감지되지 않고 CPU만 탐</td><td>커널은 반환값 OR로 판단</td><td>상태 레지스터 확인 후 <code>IRQ_NONE</code> (예제 9)</td></tr><tr><td>level 인터럽트 상태 비트를 안 지움</td><td>"irq N: nobody cared" 후 장치 무응답</td><td>폭풍 → 커널이 라인 disable</td><td>handler에서 ack, DT 트리거 타입 확인 (예제 8)</td></tr><tr><td>handler 안에서 <code>disable_irq()</code></td><td>스레드 <code>D</code> 상태 고착(hung task), hard면 CPU 고착</td><td>자기 자신을 <code>synchronize_irq</code>로 기다림</td><td><code>disable_irq_nosync()</code> (예제 10)</td></tr><tr><td>disable/enable 횟수 불일치</td><td>장치가 영원히 인터럽트를 안 받음 / "Unbalanced enable" 경고</td><td>depth 카운트</td><td>쌍 맞추기, debugfs <code>ddepth</code> 확인</td></tr><tr><td>virq 번호를 하드코딩 (<code>request_irq(45, ...)</code>)</td><td>다른 보드·커널에서 엉뚱한 장치</td><td>virq는 동적 할당</td><td><code>platform_get_irq()</code>/<code>gpiod_to_irq()</code></td></tr><tr><td>타임스탬프를 thread_fn에서 찍음</td><td>샘플 시각에 수백 µs~ms 지터</td><td>스레드 깨우기 지연 (그림 4)</td><td>hard handler에서 찍어 전달</td></tr><tr><td>오래 <code>local_irq_save()</code> / <code>spin_lock_irqsave()</code></td><td>다른 IRQ 지연, 오디오 끊김, 타임아웃</td><td>그 CPU의 IRQ가 막힘</td><td>구간 축소, irqsoff tracer로 범인 찾기 (예제 13)</td></tr><tr><td><code>free_irq</code> 전에 장치 인터럽트를 안 끔</td><td>rmmod 후 "nobody cared" 또는 해제된 메모리 접근</td><td>장치는 계속 IRQ를 냄</td><td>remove에서 장치 IRQ enable 비트부터 끄기 (devm 순서 주의)</td></tr></tbody></table></div>
+<hr>
+<h2 id="14-면접에서-이렇게-말한다">14. 면접에서 이렇게 말한다<a class="anchor" href="#14-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> Walk me through what happens on an ARM64 Linux system when a peripheral raises an interrupt.</p>
+<p><strong>A.</strong> 장치가 선을 올리면 GIC Distributor가 pending으로 잡고 대상 CPU의 CPU interface가 IRQ를 건다. CPU는 VBAR_EL1의 IRQ 벡터(<code>el1h_64_irq</code> 또는 <code>el0t_64_irq</code>)로 들어가 레지스터를 저장하고, <code>el1_interrupt</code>가 IRQ 스택으로 바꿔 <code>handle_arch_irq</code>, 즉 <code>gic_handle_irq</code>를 부른다. GIC 드라이버는 IAR을 읽어 hwirq를 얻고 <code>generic_handle_domain_irq</code>로 irq_domain에서 Linux IRQ 번호의 <code>irq_desc</code>를 찾는다. 그 디스크립터의 flow handler(<code>handle_fasteoi_irq</code>)가 등록된 handler들을 부르고 EOI를 쓴다. 나갈 때 softirq와 선점 검사가 돈다.</p>
+<blockquote><p>The device asserts its line, the GIC distributor marks it pending and signals the target CPU. The CPU takes the IRQ exception through the vector table, the arm64 entry code saves registers, switches to the IRQ stack and calls handle_arch_irq, which is gic_handle_irq. That reads the IAR to get the hardware IRQ number, maps it through the irq_domain to the Linux IRQ descriptor, and calls the flow handler — handle_fasteoi_irq for GIC SPIs — which runs the driver's handlers and writes EOI. On exit, the kernel runs pending softirqs and checks for preemption, which is when a woken IRQ thread gets to run.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "GICv2와 v3의 차이는?" → v3는 CPU interface를 시스템 레지스터(ICC_IAR1_EL1 등)로, CPU별 Redistributor, MSI용 LPI/ITS, 8개 넘는 CPU 지원.</p>
+<p><strong>Q.</strong> What's the difference between a Linux IRQ number and a hardware IRQ number?</p>
+<p><strong>A.</strong> hwirq는 인터럽트 컨트롤러 안의 번호(GIC INTID, GPIO 핀 번호)이고, Linux IRQ 번호는 커널 전체에서 유일한 가상 번호다. 컨트롤러가 계층으로 여러 개라 hwirq만으로는 겹치기 때문에, 컨트롤러마다 irq_domain이 hwirq ↔ virq 매핑을 들고 있다. virq는 동적으로 할당되니 드라이버는 <code>platform_get_irq()</code>로 받아야 하고 하드코딩하면 안 된다. 예를 들어 DT의 SPI 80은 GIC hwirq 112였고 virq는 22였다.</p>
+<blockquote><p>The hwirq is the number local to one interrupt controller — a GIC INTID or a GPIO pin. The Linux IRQ number is a global, dynamically allocated number. Each controller has an irq_domain that maps its hwirqs to Linux IRQs, typically created when the device tree is parsed. Drivers should always get the number from platform_get_irq or gpiod_to_irq, never hard-code it.</p></blockquote>
+<p><strong>Q.</strong> Explain top half and bottom half. When do you use a threaded IRQ?</p>
+<p><strong>A.</strong> top half는 hardirq 컨텍스트에서 IRQ가 꺼진 채 도는 부분이라 짧아야 하고 sleep할 수 없다. bottom half는 나머지 일을 나중에 하는 것으로, softirq·tasklet·workqueue·threaded IRQ가 있다. 처리에 sleep이 필요하면(I2C/SPI 장치 읽기) threaded IRQ를 쓴다. <code>request_threaded_irq</code>로 hard handler와 thread_fn을 주면 커널이 <code>irq/N-name</code> SCHED_FIFO 50 스레드를 만들고 hard가 <code>IRQ_WAKE_THREAD</code>를 반환하면 깨운다. 실측에서 hard는 수 µs, 깨우기는 그보다 훨씬 길어서, 타임스탬프는 hard에서 찍는다.</p>
+<blockquote><p>The top half runs in hard interrupt context with interrupts disabled on that CPU, so it must be short and can't sleep. The bottom half defers the rest — softirqs, workqueues, or a threaded handler. I use a threaded IRQ whenever handling needs to sleep, like reading an I2C sensor: the hard handler captures a timestamp and returns IRQ_WAKE_THREAD, and the kernel wakes a dedicated SCHED_FIFO thread to do the bus transaction. It's also what PREEMPT_RT does for almost every interrupt.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "threaded IRQ의 단점은?" → 스케줄링 지연(다른 RT 태스크에 밀릴 수 있음), 컨텍스트 스위치 비용, ONESHOT이면 그동안 라인이 mask되어 다음 인터럽트도 늦어짐.</p>
+<p><strong>Q.</strong> Why does request_threaded_irq with a NULL primary handler require IRQF_ONESHOT?</p>
+<p><strong>A.</strong> handler가 NULL이면 기본 hard handler가 그냥 스레드만 깨우고 장치는 ack하지 못한다. level 인터럽트라면 EOI 직후 다시 들어오고, 스레드가 돌 틈 없이 폭풍이 된다. ONESHOT은 thread_fn이 끝날 때까지 라인을 mask해 두었다가 끝나면 unmask하므로 이 문제를 막는다. 그래서 커널이 그 조합을 <code>-EINVAL</code>로 거부한다.</p>
+<blockquote><p>With a NULL primary handler, the default one just wakes the thread and can't quiet the device. For a level-triggered line the interrupt would fire again immediately after EOI, before the thread ever runs. IRQF_ONESHOT keeps the line masked until the thread function returns, so the kernel rejects the combination without it.</p></blockquote>
+<p><strong>Q.</strong> What happens if an interrupt handler keeps returning IRQ_NONE?</p>
+<p><strong>A.</strong> genirq의 <code>note_interrupt</code>가 unhandled 횟수를 센다. 10만 번 창에서 99,900번 넘게 처리되지 않으면 "irq N: nobody cared"와 스택, handler 목록을 찍고 그 라인을 disable한다. 시스템을 살리려고 장치 하나를 희생하는 것이다. 보통 원인은 level 인터럽트를 ack 안 했거나 트리거 타입이 틀린 경우다. 공유 라인에서는 다른 handler가 HANDLED를 반환하면 감지가 안 된다는 점도 주의한다.</p>
+<blockquote><p>The core counts unhandled interrupts in note_interrupt. If more than 99,900 out of a 100,000-interrupt window go unhandled, it prints "irq N: nobody cared" with a stack trace and the handler list, then disables the line. Root causes are usually a level interrupt that isn't acknowledged in the device, or a wrong trigger type in the device tree.</p></blockquote>
+<p><strong>Q.</strong> disable_irq versus disable_irq_nosync — what's the trap?</p>
+<p><strong>A.</strong> <code>disable_irq</code>는 mask 후 실행 중인 hard handler와 thread가 끝날 때까지 기다린다. 그래서 그 IRQ의 handler나 thread 안에서 부르면 자기 자신을 기다리는 deadlock이 된다. 실험에서 thread_fn 안에서 불렀더니 스레드가 <code>__synchronize_irq</code>에서 D 상태로 굳고 hung task 경고만 나왔다. lockdep도 못 잡는다. handler 안에서는 <code>disable_irq_nosync</code>를 써야 하고, disable은 중첩 카운트라 enable 횟수를 맞춰야 한다.</p>
+<blockquote><p>disable_irq masks the line and then waits for any running handler and thread to finish. Calling it from that IRQ's own handler or thread waits on itself and deadlocks — lockdep won't catch it, only the hung-task detector. Inside the handler use disable_irq_nosync. Also, disables nest, so every disable needs a matching enable.</p></blockquote>
+<p><strong>Q.</strong> How do you control which CPU handles an interrupt, and why would you?</p>
+<p><strong>A.</strong> <code>/proc/irq/N/smp_affinity</code>(마스크)나 <code>smp_affinity_list</code>에 쓰고, 실제 적용 값은 <code>effective_affinity</code>로 확인한다. GIC SPI는 한 번에 한 CPU로만 가므로 마스크 중 하나가 골라진다. threaded handler의 스레드도 그 CPU를 따라간다. 실시간 CPU를 IRQ에서 격리하거나, 센서 IRQ를 처리 태스크와 같은 CPU에 두려고 쓴다. 임베디드에서는 irqbalance를 끄고 정적으로 지정하는 편이 지터가 적다.</p>
+<blockquote><p>I write a CPU mask to /proc/irq/N/smp_affinity and confirm what the controller actually programmed in effective_affinity — a GIC SPI targets a single CPU. The IRQ thread follows that CPU. I'd use it to keep interrupts off an isolated real-time core, or to co-locate a sensor IRQ with the task that consumes the data. On embedded systems I usually disable irqbalance and set affinities statically.</p></blockquote>
+<p><strong>Q.</strong> How would you debug interrupt latency or jitter on an embedded Linux board?</p>
+<p><strong>A.</strong> 먼저 <code>/proc/interrupts</code>로 횟수와 CPU 분포를 보고, ftrace의 <code>irq_handler_entry/exit</code>와 <code>sched_wakeup/sched_switch</code>로 hard 처리와 스레드 실행 시점의 간격을 잰다. IRQ-off 구간이 의심되면 irqsoff tracer로 최대 구간과 시작·끝 함수를 찾는다. 스레드가 늦게 뜨면 RT 우선순위와 affinity를 조정한다. 전체 시스템 지연은 <code>cyclictest</code>로 기준선을 잡는다.</p>
+<blockquote><p>Start with /proc/interrupts for counts and CPU distribution. Then ftrace: irq_handler_entry/exit plus sched_wakeup and sched_switch show the gap between the hard handler and the thread actually running. If something is masking interrupts, the irqsoff tracer reports the worst interrupts-off section and the functions that started and ended it. Then tune the IRQ thread priority and affinity, and use cyclictest for a system-wide baseline.</p></blockquote>
+<hr>
+<h2 id="15-직접-해보기">15. 직접 해보기<a class="anchor" href="#15-직접-해보기" aria-label="link">#</a></h2>
+<ol class="tasks"><li>(개념) DT에 <code>interrupts = &lt;GIC_SPI 5 IRQ_TYPE_LEVEL_HIGH&gt;</code>라고 쓰면 <code>/proc/interrupts</code>의 hwirq 칸에는 무엇이 나오나? PPI 11은? 정답/힌트: SPI는 +32 → 37, PPI는 +16 → 27 (arch_timer 줄).</li><li>(관찰) 예제 4 상태에서 <code>cat /proc/interrupts</code> 전체를 보고 <code>IPI0:</code> 같은 줄을 찾아라. 각 줄 끝의 이름(예: <code>Rescheduling interrupts</code>)은 어디서 오나? 예제 7의 function_graph에서 <code>ipi_handler</code>가 어떤 flow handler 아래서 불렸는지와 연결하라. 정답/힌트: 이름은 <code>arch/arm64/kernel/smp.c</code>의 <code>ipi_types[]</code> 배열. IPI는 GIC SGI(hwirq 0–15)를 쓰고 CPU별이라 <code>handle_percpu_devid_irq</code> 아래에서 불린다.</li><li>(코드) mode=1에서 hard handler를 빼고 <code>devm_request_threaded_irq(dev, irq, NULL, f6_thread, IRQF_ONESHOT, ...)</code>로 바꿔 1000번 측정하라. <code>p2h</code>는 그대로 두고 thread 시작 시각만 비교하면 hard handler가 있을 때와 차이가 있나? 정답/힌트: 기본 handler가 <code>IRQ_WAKE_THREAD</code>만 반환하므로 깨우기 지연 분포는 비슷하다. 차이는 "정확한 시각을 hard에서 못 찍는다"는 점.</li><li>(관찰) 예제 5에 바쁜 루프 <code>taskset 1 sh -c 'while :; do :; done' &amp;</code>(CPU0, SCHED_NORMAL)를 먼저 띄우고 측정하라. 그다음 바쁜 루프를 <code>chrt -f 60</code>으로 띄우면? 정답/힌트(실행하지 않은 예상): NORMAL 루프는 FIFO 50 스레드를 못 막는다. FIFO 60 루프는 같은 CPU의 FIFO 50 스레드를 굶겨 <code>fire</code>가 타임아웃날 것이다(hard handler는 계속 돈다). RT 우선순위 설계가 왜 중요한지 보인다.</li><li>(ftrace) 예제 7을 <code>set_graph_function=irq_thread_fn</code>으로 바꿔 스레드 쪽 트리를 보고 <code>irq_finalize_oneshot</code> → <code>unmask_threaded_irq</code> → <code>gic_unmask_irq</code>를 찾아라. 정답/힌트: <code>irq_thread_fn</code> 안에서 <code>f6_thread</code> 다음에 finalize가 보인다.</li><li>(실험) <code>threadirqs</code> 커널 인자를 <code>-append</code>에 추가해 부팅하고 <code>ps</code>로 <code>irq/</code> 스레드 목록을 예제 5와 비교하라. <code>uart-pl011</code>도 스레드가 생기나? 정답/힌트: <code>CONFIG_IRQ_FORCED_THREADING=y</code>라 <code>IRQF_NO_THREAD</code>가 아닌 대부분의 handler가 스레드로 옮겨 간다. 타이머 같은 것은 남는다.</li><li>(개념) 공유 라인에서 장치 A가 ONESHOT, 장치 B가 ONESHOT 없이 등록하려 하면 어떻게 되나? <code>request_irq</code>가 자동으로 붙이는 <code>IRQF_COND_ONESHOT</code>은 이 문제를 어떻게 푸나? 정답/힌트: 공유 조건이 안 맞으면 <code>__setup_irq</code>가 <code>Flags mismatch irq N. ...</code>을 찍고 <code>-EBUSY</code>를 반환한다(랩 소스 <code>kernel/irq/manage.c</code>의 <code>mismatch:</code> 레이블). COND_ONESHOT은 "기존 등록이 ONESHOT이면 맞춰 주겠다"는 동의다.</li></ol>
+<hr>
+<h2 id="16-용어-사전">16. 용어 사전<a class="anchor" href="#16-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>GIC</td><td>Generic Interrupt Controller</td><td>ARM 표준 인터럽트 컨트롤러, NVIC + 라우터 역할</td></tr><tr><td>Distributor (GICD)</td><td>GIC 전역 부분</td><td>SPI의 enable·pending·우선순위·대상 CPU 관리</td></tr><tr><td>CPU interface / Redistributor</td><td>GIC CPU별 부분</td><td>IAR 읽기·EOI 쓰기 창구 (v3는 sysreg + Redistributor)</td></tr><tr><td>SGI / PPI / SPI / LPI</td><td>GIC 인터럽트 종류</td><td>IPI / CPU별 장치 / 공유 장치 / MSI</td></tr><tr><td>IAR, EOI</td><td>Acknowledge, End Of Interrupt</td><td>번호 받기(pending → active), 처리 끝 알리기</td></tr><tr><td>hwirq</td><td>hardware IRQ number</td><td>컨트롤러 안의 번호 (GIC INTID 등)</td></tr><tr><td>virq</td><td>Linux IRQ number</td><td>커널 전역 번호, <code>/proc/interrupts</code> 첫 칸</td></tr><tr><td>irq_domain</td><td>번호 변환표</td><td>컨트롤러별 hwirq ↔ virq 매핑</td></tr><tr><td>irq_desc</td><td>IRQ 디스크립터</td><td>virq마다 하나: flow handler, action 리스트, 통계</td></tr><tr><td>irqaction</td><td>등록 레코드</td><td><code>request_irq</code> 한 번 = 하나, handler·thread_fn·dev_id</td></tr><tr><td>irq_chip</td><td>컨트롤러 조작 함수 묶음</td><td>mask/unmask/eoi/set_type/set_affinity</td></tr><tr><td>flow handler</td><td>트리거별 공통 절차</td><td><code>handle_fasteoi_irq</code>, <code>handle_edge_irq</code>, <code>handle_level_irq</code></td></tr><tr><td>top half</td><td>hard handler</td><td>hardirq 컨텍스트, 짧게, sleep 금지</td></tr><tr><td>bottom half</td><td>지연 처리</td><td>softirq, tasklet, workqueue, threaded IRQ</td></tr><tr><td>threaded IRQ</td><td>스레드 handler</td><td><code>irq/N-name</code> SCHED_FIFO 50 커널 스레드에서 <code>thread_fn</code> 실행</td></tr><tr><td>IRQF_ONESHOT</td><td>플래그</td><td>thread_fn 끝날 때까지 라인 mask</td></tr><tr><td>IRQF_SHARED</td><td>플래그</td><td>한 라인을 여러 장치가 공유</td></tr><tr><td>IRQ_WAKE_THREAD</td><td>반환값</td><td>hard 끝, 스레드 깨워 달라</td></tr><tr><td>spurious IRQ</td><td>가짜/처리 안 된 인터럽트</td><td>대량이면 "nobody cared" 후 disable</td></tr><tr><td>affinity</td><td>대상 CPU</td><td><code>smp_affinity</code>(희망) vs <code>effective_affinity</code>(실제)</td></tr><tr><td>irqbalance</td><td>유저 데몬</td><td>IRQ affinity를 주기적으로 재배치</td></tr><tr><td>irqsoff tracer</td><td>ftrace tracer</td><td>IRQ가 꺼져 있던 최장 구간과 범인 함수 기록</td></tr></tbody></table></div>
+<hr>
+<h2 id="17-요약-체크리스트">17. 요약 &amp; 체크리스트<a class="anchor" href="#17-요약-체크리스트" aria-label="link">#</a></h2>
+<p>arm64 Linux에서 인터럽트는 GIC가 받아 CPU에 IRQ 예외를 걸고, 하나뿐인 벡터에서 <code>gic_handle_irq</code>가 IAR로 hwirq를 읽어 irq_domain으로 virq의 <code>irq_desc</code>를 찾고, flow handler(<code>handle_fasteoi_irq</code>)가 드라이버가 등록한 <code>irqaction</code> handler를 부른 뒤 EOI를 쓴다. 드라이버는 <code>devm_request_irq</code>(짧은 MMIO 처리) 또는 <code>devm_request_threaded_irq</code>(sleep이 필요한 처리, SCHED_FIFO 50 스레드)를 고르고, handler는 <code>IRQ_HANDLED</code>/<code>IRQ_NONE</code>/<code>IRQ_WAKE_THREAD</code>로 결과를 알린다. 실측에서 top half는 수 µs, 스레드 깨우기는 그보다 수십 배 길고 꼬리가 길었으므로 타임스탬프는 hard에서 찍는다. <code>IRQ_NONE</code> 폭풍은 "nobody cared"로 라인이 꺼지고, handler 안의 <code>disable_irq</code>는 자기 자신을 기다리는 deadlock이다. affinity는 <code>/proc/irq/N/smp_affinity</code>로 옮기고 <code>effective_affinity</code>로 확인하며, IRQ-off 지연은 irqsoff tracer로 찾는다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>장치 핀에서 드라이버 handler까지 arm64 함수 이름으로 경로를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>GIC SGI/PPI/SPI와 INTID 오프셋(+16, +32)을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>hwirq, virq, irq_domain의 관계를 <code>/proc/interrupts</code> 한 줄로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>/sys/kernel/irq/N</code>, <code>/proc/irq/N</code>, <code>/sys/kernel/debug/irq/irqs/N</code>에서 무엇을 읽는지 안다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>request_irq</code>/<code>request_threaded_irq</code>/<code>devm_</code> 버전 중 상황에 맞는 것을 고를 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>IRQF_ONESHOT</code>이 왜 필요한지, handler=NULL이면 왜 필수인지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>반환값 세 가지와 공유 라인에서 <code>IRQ_NONE</code>의 의미를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"nobody cared"의 판정 조건과 흔한 원인을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>disable_irq</code>와 <code>disable_irq_nosync</code>의 차이와 deadlock 시나리오를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>IRQ affinity를 바꾸고 효과를 <code>/proc/interrupts</code>로 확인할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>ftrace irq 이벤트·function_graph·irqsoff tracer로 IRQ 경로와 지연을 측정할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>I2C 센서의 threaded IRQ 핸들러를 타임스탬프 위치까지 고려해 짤 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — Linux generic IRQ handling: https://docs.kernel.org/core-api/genericirq.html</li><li>docs.kernel.org — IRQ domain (irq_domain interrupt number mapping library): https://docs.kernel.org/core-api/irq/irq-domain.html</li><li>docs.kernel.org — SMP IRQ affinity: https://docs.kernel.org/core-api/irq/irq-affinity.html</li><li>docs.kernel.org — ftrace: https://docs.kernel.org/trace/ftrace.html</li><li>Linux Device Drivers, 3rd ed. (Corbet, Rubini, Kroah-Hartman), 10장 "Interrupt Handling" — threaded IRQ 이전 시대 책이지만 top/bottom half 개념의 원전</li><li>Bootlin "Linux kernel and driver development" 교육 슬라이드 — Interrupt management 장: https://bootlin.com/doc/training/linux-kernel/</li><li>Arm GIC Architecture Specification (GICv3/v4, IHI 0069) — IAR/EOI, Distributor/Redistributor</li><li>랩 소스 위치 (elixir.bootlin.com에서 v6.18로 같은 경로): <code>arch/arm64/kernel/entry-common.c</code>(<code>el1_interrupt</code>, <code>do_interrupt_handler</code>), <code>drivers/irqchip/irq-gic.c</code>(<code>gic_handle_irq</code>, <code>gic_set_affinity</code>), <code>kernel/irq/irqdesc.c</code>(<code>generic_handle_domain_irq</code>), <code>kernel/irq/chip.c</code>(<code>handle_fasteoi_irq</code>), <code>kernel/irq/handle.c</code>, <code>kernel/irq/manage.c</code>(<code>request_threaded_irq</code>, <code>irq_thread</code>, <code>disable_irq</code>), <code>kernel/irq/spurious.c</code>(<code>note_interrupt</code>), <code>kernel/irq/debugfs.c</code></li></ul>
+    <div class="nav"><a class="prev" href="2026-10-10_F5_memory_barriers.html"><span class="dir">← 이전</span><span class="nm">F5. 메모리 배리어와 순서 — compiler barrier · smp_mb/rmb/wmb · READ_ONCE/WRITE_ONCE · acquire/release · MMIO·DMA 순서</span></a><a class="next" href="2026-10-10_F7_deferred_work.html"><span class="dir">다음 →</span><span class="nm">F7. 지연 작업 — softirq · tasklet · workqueue · BH workqueue · kthread, 언제 무엇을</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l2"><a href="#1-하드웨어-경로-gic와-arm64-예외">1. 하드웨어 경로 — GIC와 arm64 예외</a></li><li class="l3"><a href="#1-1-gic-인터럽트-종류와-intid">1.1 GIC 인터럽트 종류와 INTID</a></li><li class="l3"><a href="#1-2-gic-한-번의-처리-iar-읽기와-eoi-쓰기">1.2 GIC 한 번의 처리 — IAR 읽기와 EOI 쓰기</a></li><li class="l3"><a href="#1-3-cpu-쪽-벡터-하나-그리고-irq-스택">1.3 CPU 쪽 — 벡터 하나, 그리고 IRQ 스택</a></li><li class="l2"><a href="#2-실습-준비-f6-irq-노드와-f6_irq-드라이버">2. 실습 준비 — f6-irq 노드와 f6_irq 드라이버</a></li><li class="l3"><a href="#2-1-무엇을-하나">2.1 무엇을 하나</a></li><li class="l3"><a href="#2-2-예제-1-dt-조각과-dtb-만들기">2.2 예제 1 — DT 조각과 dtb 만들기</a></li><li class="l3"><a href="#2-3-예제-2-드라이버-f6_irq-네-조각을-합쳐-한-파일">2.3 예제 2 — 드라이버 f6_irq (네 조각을 합쳐 한 파일)</a></li><li class="l3"><a href="#2-4-예제-3-빌드와-부팅-스크립트">2.4 예제 3 — 빌드와 부팅 스크립트</a></li><li class="l2"><a href="#3-번호가-두-개-linux-irq-번호-vs-hwirq-irq_domain">3. 번호가 두 개 — Linux IRQ 번호 vs hwirq (irq_domain)</a></li><li class="l3"><a href="#3-1-직관">3.1 직관</a></li><li class="l3"><a href="#3-2-예제-4-등록하고-20번-쏜-뒤-관찰-지점-다섯-곳">3.2 예제 4 — 등록하고 20번 쏜 뒤 관찰 지점 다섯 곳</a></li><li class="l2"><a href="#4-등록-api-request_irq부터-request_threaded_irq까지">4. 등록 API — request_irq부터 request_threaded_irq까지</a></li><li class="l3"><a href="#4-1-flow-handler-드라이버-handler를-부르기-전의-트리거별-절차">4.1 flow handler — 드라이버 handler를 부르기 전의 "트리거별 절차"</a></li><li class="l3"><a href="#4-2-api-표">4.2 API 표</a></li><li class="l3"><a href="#4-3-handler-반환값">4.3 handler 반환값</a></li><li class="l3"><a href="#4-4-주요-플래그">4.4 주요 플래그</a></li><li class="l3"><a href="#4-5-어떤-걸-쓸까-결정-흐름">4.5 어떤 걸 쓸까 — 결정 흐름</a></li><li class="l3"><a href="#4-6-예제-11-handler-null인데-irqf_oneshot을-빼면">4.6 예제 11 — handler=NULL인데 IRQF_ONESHOT을 빼면</a></li><li class="l2"><a href="#5-top-half-bottom-half-와-threaded-irq">5. top half / bottom half 와 threaded IRQ</a></li><li class="l3"><a href="#5-1-용어-정리">5.1 용어 정리</a></li><li class="l3"><a href="#5-2-예제-5-스레드-확인-우선순위-1000번-측정-affinity">5.2 예제 5 — 스레드 확인, 우선순위, 1000번 측정, affinity</a></li><li class="l3"><a href="#5-3-측정-결과-top-half는-짧고-스레드-깨우기는-비싸다">5.3 측정 결과 — top half는 짧고, 스레드 깨우기는 비싸다</a></li><li class="l3"><a href="#5-4-예제-6-ftrace-이벤트로-본-한-번의-왕복">5.4 예제 6 — ftrace 이벤트로 본 한 번의 왕복</a></li><li class="l2"><a href="#6-예제-7-function_graph로-gic_handle_irq-내부-보기">6. 예제 7 — function_graph로 gic_handle_irq 내부 보기</a></li><li class="l2"><a href="#7-irq-affinity-어느-cpu가-받나">7. IRQ affinity — 어느 CPU가 받나</a></li><li class="l3"><a href="#7-1-정의">7.1 정의</a></li><li class="l3"><a href="#7-2-예제-5-결과-다시-읽기">7.2 예제 5 결과 다시 읽기</a></li><li class="l3"><a href="#7-3-왜-바꾸나-실무-기준">7.3 왜 바꾸나 — 실무 기준</a></li><li class="l2"><a href="#8-irq_none-spurious-감지-인터럽트-폭풍">8. IRQ_NONE, spurious 감지, 인터럽트 폭풍</a></li><li class="l3"><a href="#8-1-커널의-감시-규칙-kernel-irq-spurious-c의-note_interrupt">8.1 커널의 감시 규칙 (kernel/irq/spurious.c의 note_interrupt)</a></li><li class="l3"><a href="#8-2-예제-8-폭풍-만들기와-nobody-cared">8.2 예제 8 — 폭풍 만들기와 "nobody cared"</a></li><li class="l3"><a href="#8-3-예제-9-공유-라인이면-한-명만-irq_handled여도-산다">8.3 예제 9 — 공유 라인이면 한 명만 IRQ_HANDLED여도 산다</a></li><li class="l2"><a href="#9-disable_irq-vs-disable_irq_nosync-자기-자신을-기다리는-deadlock">9. disable_irq vs disable_irq_nosync — 자기 자신을 기다리는 deadlock</a></li><li class="l3"><a href="#9-1-정의">9.1 정의</a></li><li class="l3"><a href="#9-2-예제-10-thread_fn-안에서-disable_irq-를-부르면">9.2 예제 10 — thread_fn 안에서 disable_irq()를 부르면</a></li><li class="l2"><a href="#10-irq가-막혀-있는-시간-irqsoff-tracer와-irq-시간-회계">10. IRQ가 막혀 있는 시간 — irqsoff tracer와 IRQ 시간 회계</a></li><li class="l3"><a href="#10-1-예제-13-irqsoff-tracer로-누가-인터럽트를-오래-막았나-찾기">10.1 예제 13 — irqsoff tracer로 "누가 인터럽트를 오래 막았나" 찾기</a></li><li class="l3"><a href="#10-2-예제-12-proc-stat의-irq-시간-config_irq_time_accounting">10.2 예제 12 — /proc/stat의 irq 시간 (CONFIG_IRQ_TIME_ACCOUNTING)</a></li><li class="l2"><a href="#11-커널-안에서는-무슨-일이-일어나나">11. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l3"><a href="#11-1-자료구조">11.1 자료구조</a></li><li class="l3"><a href="#11-2-api-커널-경로-요약">11.2 API → 커널 경로 요약</a></li><li class="l3"><a href="#11-3-다시-만나는-곳">11.3 다시 만나는 곳</a></li><li class="l2"><a href="#12-embedded-실무에서-다시-보기">12. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#12-1-i2c-imu의-data-ready-인터럽트">12.1 I2C IMU의 data-ready 인터럽트</a></li><li class="l3"><a href="#12-2-가끔-샘플이-수-ms-늦어요">12.2 "가끔 샘플이 수 ms 늦어요"</a></li><li class="l3"><a href="#12-3-부팅하자마자-cpu-하나가-100">12.3 부팅하자마자 CPU 하나가 100%</a></li><li class="l3"><a href="#12-4-suspend-중-깨우기-참고-실행하지-않음">12.4 suspend 중 깨우기 (참고, 실행하지 않음)</a></li><li class="l2"><a href="#13-흔한-실수와-증상">13. 흔한 실수와 증상</a></li><li class="l2"><a href="#14-면접에서-이렇게-말한다">14. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#15-직접-해보기">15. 직접 해보기</a></li><li class="l2"><a href="#16-용어-사전">16. 용어 사전</a></li><li class="l2"><a href="#17-요약-체크리스트">17. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

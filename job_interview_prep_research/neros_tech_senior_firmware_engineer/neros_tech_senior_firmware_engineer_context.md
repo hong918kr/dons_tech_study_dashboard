@@ -1,6 +1,7 @@
 # Neros Technologies — Senior Firmware Engineer, Platform · Context
 
-> **최종 갱신**: 2026-10-03 · **상태**: 🧪 Technical screen 추가 확정 (2026-10-08 목 11am · 1시간 · 코딩) → 통과 시 온사이트
+> **최종 갱신**: 2026-10-09 · **상태**: ✅ Technical screen 완료 (10-08, C로 ring buffer + 보너스 extract_packet) · 결과 대기 → 온사이트 가능성 높음 [Don 자평]
+> ✅ **2026-10-08 technical screen (1시간, Jon Kotowski)**: 시작하자마자 "Python or C?" → **C 선택**. Task 1 = 외부 버퍼를 받는 byte ring buffer (struct부터 직접, `rb_init(rb_t*, uint8_t *rb_buf, uint8_t capacity)`, is_empty/is_full, push_byte/pop_byte, **bulk push/pop all-or-nothing**, `rb_peek(rb, uint8_t offset, …)`). Task 2 (보너스) = `extract_packet` 함수 하나, 라이브러리로 `CRC.c` 제공. Don: 잘 풀었다고 느낌. 들은 정보: **FW 엔지니어 17명, Test 엔지니어 3명, + full stack (embedded를 테스트할 수 있는)** → §6. 재구성: `technicalScreenPrep/site/lecture/2026-10-09_L09_screen_recap.html`
 > 🧪 **2026-10-02 리크루터 연락: Michael Honor 인터뷰 잘 봤음 → 온사이트 전에 technical screen 1세션 추가.** 2026-10-08(목) 11:00, 1시간, **코딩 위주** 예상. 주제: **pytest · ring buffer · Python/C 둘 다 가능 · system design**. 면접관 **Jon Kotowski** — 공개 검색상 Neros Full Stack Engineer [추정, Datanyze 단일 출처 + ZoomInfo 스니펫]. 준비: `technicalScreenPrep/index.html` → §6
 > ✅ **2026-10-01(목) HM Michael Honor (Firmware Test 리드) 인터뷰 완료 → 10-02 통과(다음 단계 진행)** — 15분 늦게 시작해 실제 약 30분. 임베디드 퀴즈 위주(UART/I2C/SPI 차이, PCIe를 SW에서 어떻게 쓰나, 8b/10b, Git/PR/rebase) + 테스트 철학 2문항. **Python은 안 물어봄.** ~~"결과 곧 알려 주겠다"~~ → 10-02 리크루터: 잘 봤음, technical screen 추가 → §6
 > 🏢 **온사이트 대비**: `onsitePrep/site/start.html` (Tour 30분 · 경력 발표 1시간 · 1:1 C/C++ · ring buffer · generic system design)
@@ -334,6 +335,9 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 | 2026-10-02 | **리크루터 연락 — Michael 인터뷰 통과, 온사이트 전 technical screen 1세션 추가** | 2026-10-08(목) 11:00, 1시간, 코딩 위주 예상. 주제: pytest · ring buffer · Python/C 둘 다 가능 · system design. 면접관 **Jon Kotowski** — Neros Full Stack Engineer [추정, Datanyze 단일 출처; ZoomInfo 스니펫도 같은 직함, 과거 Hoonigan SWE·모바일 앱 개발 이력은 동명이인 가능성]. LinkedIn은 로그인 조회·친구 신청 하지 않음 (Don 지시) |
 | 2026-10-02 | **technical screen 준비 사이트 생성** | `technicalScreenPrep/` — D-6 게임 플랜, 노트 5 (면접관·형식 분석 / pytest 실전 / ring buffer Python·C·꼬리 질문 / test·tooling system design: 프레임워크·HIL 팜·CI 결과 대시보드 / 말하면서 코딩·역질문), Python 문제 7 (ring buffer, pytest 테스트 작성 2문제는 **mutant 9개 채점**, HIL conftest는 pytester 채점, thread-safe ring, stream framer, onsitePrep C 링버퍼를 ctypes로 테스트). `.venv`에 pytest 8.4.2. 전 모범답안 PASS. 보기: `technicalScreenPrep/index.html` |
 | 2026-10-03 | **매일 타이핑 드릴 + 직군별 테스트 설계 추가 · 트랙 교정 전략 정리** | Don: Python을 거의 안 써서 문법을 다시 손에 붙여야 함 → `technicalScreenPrep/drills/` Python 10 + C 10 × 5일(100개, 정답 전부 실행 검증), 브라우저 트레이너 `site/drills.html` + `drill.py new/check`. system design 대비 `technicalScreenPrep/design/` S00~S09 (Flight · Radio · Ground/Peripherals · Video/FPGA · Platform · Linux/Autonomy · Factory · Integration, 시나리오 카드 16장). **전략**: 테스트 트랙 → 개발 트랙 교정은 스크린·온사이트에서 꺼내지 않고, 온사이트 발표로 개발 깊이를 보여 준 뒤 **오퍼 단계에서 리크루터 채널로** (직함 Senior · 밴드 · factory test FW = FW 개발 범위 · 6개월 후 platform 이동 검토). 10-06 저녁 기준 Python ring buffer 15분 미달이면 스크린에서 ring buffer는 C로 제안 |
+| 2026-10-04 ~ 10-08 | 스크린 준비 강의 L00~L08 | 특별강의(ring buffer · pytest · LeetCode) · Python 문법 · 임베디드 테스트 프레임워크 10종(실행 검증) · 임베디드 C/C++ · 매일 몸풀기 · 예상 시나리오 · 마지막 체크업 · pytest 처음부터 (`technicalScreenPrep/lecture/`) |
+| 2026-10-08 | **✅ Technical screen 완료 (Jon Kotowski, 1시간, C 선택)** | Task 1 C ring buffer(외부 버퍼 · bulk all-or-nothing · peek offset), Task 2 보너스 extract_packet(CRC.c 제공). 코딩만. Don 자평 잘 풀었음. FW 17 · Test 3 · full stack 정보 |
+| 2026-10-09 | 스크린 재구성 + 온사이트 방향 정리 | `technicalScreenPrep/lecture/recap/` 참고 풀이 + 테스트 13개(ASan/UBSan 통과). 재구성 중 extract_packet의 **가짜 sync + 큰 LEN → 영원히 NEED_MORE(데드락)** 엣지 발견 · 수정. 강의 L09 |
 
 ---
 
@@ -378,17 +382,26 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 - **결과** [확인됨 2026-10-02 리크루터]: 잘 봤음 → 온사이트 전에 technical screen 1세션 추가 (아래)
 - **다음 라운드에 반영**: 온사이트는 임베디드 지식 비중이 클 것. 퀴즈형 질문에 **"한 문장 정의 → 왜 → 예시"** 30초 답 틀로 대비. factory test FW를 발표의 연결고리로
 
-### 2026-10-08 · Technical screen (1시간, 예정) · 면접관 Jon Kotowski (Full Stack Engineer [추정])
+### 2026-10-08 · Technical screen (1시간, 완료) · 면접관 Jon Kotowski (Full Stack Engineer [추정])
 - **일정** [확인됨 2026-10-02 리크루터]: 2026-10-08(목) 11:00, 1시간. 온사이트 **전에** 추가된 1세션
 - **형식** [확인됨 리크루터]: 코딩 위주 예상. 주제 — **pytest**, **ring buffer**, **Python/C 둘 다 가능**, **system design**
 - **면접관** [추정]: Jon Kotowski — Datanyze 기준 Neros Full Stack Engineer (단일 출처), ZoomInfo 검색 스니펫도 같은 직함 [18]. Neros "Full-Stack Software Engineer III" 공고 [19]: React/Node/TS, Electron, Python(Django/Flask), SQL/NoSQL·Redis·time-series, event-driven, CI, nice-to-have InfluxDB·Grafana·telemetry → **코드 품질 · 테스트 · 데이터/설계 소통**을 볼 가능성 [추정]
 - **해석** [추정]: Michael 라운드(퀴즈형)에서 비어 있던 코딩·Python·pytest를 온사이트 전에 확인하려는 단계. 긍정 신호지만 통과해야 온사이트
 - **준비**: `technicalScreenPrep/index.html` (START HERE) — 1시간 예상: 자기소개 5 → ring buffer 25 → pytest 15 → system design 10 → 역질문 5
 - **주의**: LinkedIn 로그인 조회 · 친구 신청 하지 않음 (Don 지시)
-- 받은 질문: (인터뷰 후 기록)
-- 내 답 / 결과: (인터뷰 후 기록)
-- 잘한 점 / 아쉬운 점: (인터뷰 후 기록)
-- 다음 라운드에 반영할 것: (인터뷰 후 기록)
+- **실제 진행** [확인됨 Don 10-08]: 시작하자마자 "Python으로 할래, C로 할래?" → Don "둘 다 괜찮다, C로 하겠다". 행동 · 경력 질문 없이 **코딩만**(예상과 일치, L06 시나리오 D + A 조합)
+- **Task 1 — C ring buffer** (전형적인 문제, struct부터 직접 정의):
+  - 자료구조: `size_t count, head, tail`, `uint8_t *storage`, `capacity`
+  - `rb_init(rb_t *rb, uint8_t *rb_buf, uint8_t capacity)` — **버퍼를 밖에서 받는다** (정적 할당, rb는 소유 안 함)
+  - `rb_is_empty`, `rb_is_full`, `rb_push_byte`, `rb_pop_byte`
+  - `rb_push(rb_t *rb, uint8_t *items, size_t len)` — 남은 자리 < len이면 false (**all-or-nothing**), `rb_pop`도 같은 방식 (들어 있는 개수 < len이면 false)
+  - `rb_peek(rb, uint8_t offset, …)` — tail에서 offset번째를 꺼내지 않고 보기
+- **Task 2 — 보너스 `extract_packet`**: 함수 하나 구현, 라이브러리로 `CRC.c` 제공. 프레임 형식 세부는 기록 없음 → 재구성은 [추정] (SYNC · LEN · PAYLOAD · CRC). `rb_peek(offset)`이 Task 2에서 헤더 · CRC를 꺼내지 않고 보기 위한 것이었을 가능성 [추정]
+- **들은 정보** [확인됨 Don 10-08, 해석 확인 필요]: **FW 엔지니어 17명, Test 엔지니어 3명, 그리고 full stack**(embedded를 테스트할 수 있는 사람). 10-01 Michael: FW 15 · Test 2 → 2주 사이 FW +2, Test +1 [추정: 채용 진행 중]
+- **결과**: 대기. Don 자평 "잘 푼 것 같다" → 온사이트 가능성 높음 [추정]
+- 잘한 점: C를 망설임 없이 선택 (강점 언어), 전형 문제를 완주 (Don 자평)
+- 아쉬운 점 / 기억할 것: (Don: 실제로 막혔던 곳 · Task 2를 어디까지 했는지 · 테스트를 보여 줬는지 — 기록 필요)
+- 다음 라운드에 반영: 온사이트 1:1에서 같은 ring buffer를 **ISR-safe(SPSC) · DMA · memcpy 두 조각**으로 확장하는 질문 대비, 패킷 파서(상태 머신 · CRC · resync) C로 한 번 더. 재구성 · 참고 풀이: `technicalScreenPrep/lecture/recap/` (테스트 통과)
 
 ### 리크루터 안내 온사이트 구성 (2026-09-16 Devin) [확인됨]
 1. **Tour 30분**

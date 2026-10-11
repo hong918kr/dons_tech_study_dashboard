@@ -1,0 +1,1499 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>H11. PCIe (Linux 관점) — enumeration, config space, BAR, pci_driver, MSI/MSI-X, 디버그</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="H/2026-10-10_H11_pcie_linux">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">H. HW 접근 · 버스 · H11. PCIe (Linux 관점) — enumeration, config space, BAR, pci_driver, MSI/MSI-X, 디버그</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">H. HW 접근 · 버스 · HW Access &amp; Buses</div>
+      <h1>H11. PCIe (Linux 관점) — enumeration, config space, BAR, pci_driver, MSI/MSI-X, 디버그</h1>
+      <div class="meta"><span>184분 읽기</span><span>1813줄</span><span>53개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: Linux가 부팅 때 host bridge(DT의 <code>pci-host-ecam-generic</code>, SoC의 DWC 컨트롤러)에서 출발해 버스를 스캔하고 BAR·bridge window를 배정하는 과정을 dmesg 한 줄 한 줄로 읽을 수 있다 · <code>struct pci_dev</code> ↔ sysfs ↔ config space를 오가며 lspci 없이도 장치를 해부할 수 있다 · <code>pcim_enable_device</code> → <code>pcim_iomap_region</code> → <code>pci_alloc_irq_vectors</code> → <code>dma_set_mask_and_coherent</code>로 이어지는 현대식 <code>pci_driver</code>를 직접 짜서 MSI/INTx로 인터럽트를 받을 수 있다 · AER 복구, remove/rescan, SR-IOV, VFIO 유저 공간 드라이버가 커널의 어디에 걸리는지 설명할 수 있다 <strong>왜 필요한가</strong>: NVMe·Wi-Fi·5G 모뎀·AI 가속기(Hailo, Jetson의 NVMe, i.MX8의 PCIe Wi-Fi)는 전부 PCIe로 붙는다. 면접에서는 "probe에서 뭘 하나요?", "MSI-X가 왜 좋나요?", "BAR 할당이 실패하면?", "VFIO는 뭐고 왜 IOMMU가 필요한가요?"가 나온다 <strong>Don 기준 난이도</strong>: PCIe 프로토콜·LTSSM·config space·BAR·MSI-X 테이블·AER 레지스터는 SSD 펌웨어(장치 쪽)에서 이미 몸에 붙어 있다 / 새로 배울 부분은 <strong>호스트 쪽 Linux 소프트웨어</strong>: PCI core가 그 레지스터들을 언제 누가 읽고 쓰는지, 드라이버가 쓰는 managed API, irq_domain을 통한 MSI 배선, IOMMU와 DMA mask, VFIO <strong>선행 노트</strong>: D1(discoverable vs DT), G2·G3(디바이스 모델·probe 수명주기), H1(MMIO), H6(irq_domain), H9(DMA) — H6·H9는 없어도 읽을 수 있게 필요한 만큼 다시 설명한다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-don이-서-있던-자리의-반대편">0. 큰 그림 — Don이 서 있던 자리의 반대편<a class="anchor" href="#0-큰-그림-don이-서-있던-자리의-반대편" aria-label="link">#</a></h2>
+<p>Don이 SSD 펌웨어에서 본 PCIe는 <strong>엔드포인트 쪽</strong>이었다. 호스트가 config space를 읽으면 대답하고, BAR에 주소가 써지면 그 주소로 들어오는 TLP를 받고, MSI-X 테이블에 호스트가 써 둔 주소·데이터로 메모리 쓰기를 날리면 인터럽트가 됐다. 그 "호스트"가 바로 이 노트의 주인공인 <strong>Linux PCI 서브시스템</strong>이다. 이번에는 반대편 자리에 앉아서, 그 config read를 누가 언제 보내는지, BAR 주소를 누가 정하는지, MSI-X 테이블에 무슨 값을 써 넣는지를 본다.</p>
+<p>bare-metal 비유로 말하면 이렇다.</p>
+<div class="tw"><table><thead><tr><th>Don이 아는 것 (장치/펌웨어 쪽)</th><th>Linux 호스트 쪽의 이름</th></tr></thead><tbody><tr><td>호스트 BIOS/UEFI가 enumeration 해 줌</td><td>임베디드 ARM에서는 <strong>커널이 직접</strong> 한다 (<code>pci_host_probe</code>)</td></tr><tr><td>Root Complex의 ECAM 주소</td><td>DT <code>pcie@...</code> 노드의 <code>reg</code>, 드라이버 <code>pci-host-generic</code> 또는 <code>pcie-designware</code> 계열</td></tr><tr><td>config space 0x00~0xFFF</td><td><code>struct pci_dev</code> + <code>/sys/bus/pci/devices/&lt;BDF&gt;/config</code></td></tr><tr><td>BAR에 할당된 주소</td><td><code>pdev-&gt;resource[i]</code>, <code>/proc/iomem</code>, sysfs <code>resource</code></td></tr><tr><td>MSI-X 테이블의 Message Address/Data</td><td>irq_domain이 채운다 (GICv2m 또는 GICv3 ITS의 doorbell)</td></tr><tr><td>장치 펌웨어의 인터럽트 핸들러</td><td><code>request_irq(pci_irq_vector(pdev, n), ...)</code></td></tr><tr><td>AER 상태 레지스터</td><td><code>aerdrv</code> + 드라이버의 <code>pci_error_handlers</code></td></tr><tr><td>NVMe 호스트 드라이버 (<code>nvme.ko</code>)</td><td><code>struct pci_driver</code> 하나 — 오늘 직접 짜 볼 그것</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 680 370" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="10" width="640" height="44" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="30" text-anchor="middle" font-size="13" font-weight="bold">유저 공간</text>
+  <text x="340" y="47" text-anchor="middle" font-size="12">lspci · /sys/bus/pci · /dev/nvme0n1 · eth1 · VFIO 유저 드라이버 (SPDK, DPDK)</text>
+  <rect x="20" y="74" width="300" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="95" text-anchor="middle" font-size="13" font-weight="bold">struct pci_driver</text>
+  <text x="170" y="113" text-anchor="middle" font-size="12">nvme · e1000e · igb · h11_edu</text>
+  <rect x="360" y="74" width="300" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="510" y="95" text-anchor="middle" font-size="13" font-weight="bold">vfio-pci + IOMMU</text>
+  <text x="510" y="113" text-anchor="middle" font-size="12">장치를 통째로 유저에게 넘김</text>
+  <rect x="20" y="144" width="640" height="62" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="340" y="165" text-anchor="middle" font-size="13" font-weight="bold">PCI core (drivers/pci)</text>
+  <text x="340" y="183" text-anchor="middle" font-size="12">스캔 → BAR·window·버스번호 배정 → struct pci_dev → id_table 매칭 → probe()</text>
+  <text x="340" y="199" text-anchor="middle" font-size="12">MSI/MSI-X · AER · PM/ASPM · SR-IOV · hotplug · sysfs</text>
+  <rect x="20" y="226" width="300" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="170" y="247" text-anchor="middle" font-size="13" font-weight="bold">pci-host-generic</text>
+  <text x="170" y="265" text-anchor="middle" font-size="12">ECAM 표준 (QEMU virt, 서버)</text>
+  <rect x="360" y="226" width="300" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="510" y="247" text-anchor="middle" font-size="13" font-weight="bold">pcie-designware + glue</text>
+  <text x="510" y="265" text-anchor="middle" font-size="12">i.MX8 · RK3588 · Tegra · Qualcomm</text>
+  <rect x="20" y="296" width="640" height="60" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="317" text-anchor="middle" font-size="13" font-weight="bold">하드웨어 — Don이 펌웨어로 서 있던 자리</text>
+  <text x="340" y="337" text-anchor="middle" font-size="12">Root Complex (ECAM, MSI 컨트롤러) → Root Port → Switch → Endpoint (BAR, MSI-X, AER)</text>
+  <line x1="170" y1="276" x2="170" y2="294" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="510" y1="276" x2="510" y2="294" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="170" y1="206" x2="170" y2="224" stroke="currentColor" marker-start="url(#ah1)"/>
+  <line x1="510" y1="206" x2="510" y2="224" stroke="currentColor" marker-start="url(#ah1)"/>
+  <line x1="170" y1="124" x2="170" y2="142" stroke="currentColor" marker-start="url(#ah1)"/>
+  <line x1="510" y1="124" x2="510" y2="142" stroke="currentColor" marker-start="url(#ah1)"/>
+  <line x1="170" y1="56" x2="170" y2="72" stroke="currentColor" marker-start="url(#ah1)"/>
+  <line x1="510" y1="56" x2="510" y2="72" stroke="currentColor" marker-start="url(#ah1)"/>
+</svg></figure>
+<p>그림 1 — Linux PCI 스택. host bridge 드라이버만 SoC마다 다르고(DT로 시작), 그 위의 PCI core와 <code>pci_driver</code> API는 x86 서버든 i.MX8이든 같다.</p>
+<h3 id="0-1-이-노트의-랩-구성">0.1 이 노트의 랩 구성<a class="anchor" href="#0-1-이-노트의-랩-구성" aria-label="link">#</a></h3>
+<p>D1에서는 QEMU 기본 장치만 봤다. 이번에는 Don의 실무 토폴로지에 가깝게 <strong>Root Port 3개 + 그 뒤의 엔드포인트</strong>를 꽂는다. 모든 예제는 아래 스크립트 하나로 부팅한다 (VM <code>elinux</code>, Ubuntu 26.04, 호스트 커널 <code>uname -r</code> = <code>7.0.0-38-generic</code>, QEMU 10.2.1; 게스트는 랩 커널 <strong>6.18.55</strong>).</p>
+<figure class="code"><span class="lang">sh</span><pre><code># ~/.elinux_scratch/H11/run.sh  — VM 안에서 실행. g.sh = 게스트가 부팅 후 실행할 스크립트
+W=/var/tmp/H11
+rm -rf $W/rootfs &amp;&amp; mkdir -p $W/rootfs &amp;&amp; cp -a /var/lab/build/rootfs/. $W/rootfs/
+cp -a $W/payload/. $W/rootfs/                       # 정적 바이너리·.ko
+cp /Users/donh/.elinux_scratch/H11/$S $W/rootfs/g.sh
+(cd $W/rootfs &amp;&amp; find . | cpio -o -H newc --quiet | gzip) &gt; $W/h11_initrd.gz
+[ -f $W/h11_nvme.img ] || truncate -s 64M $W/h11_nvme.img
+timeout 180 qemu-system-aarch64 -machine ${MACH:-virt} -cpu cortex-a57 -m 512M -smp 2 -nographic \
+  -kernel /var/lab/out/Image -initrd $W/h11_initrd.gz \
+  -append "console=ttyAMA0 quiet LAB_CMD=sh~/g.sh" -nic none \
+  -device pcie-root-port,id=rp1,bus=pcie.0,chassis=1,slot=1,addr=0x10 \
+  -device pcie-root-port,id=rp2,bus=pcie.0,chassis=2,slot=2,addr=0x11 \
+  -device pcie-root-port,id=rp3,bus=pcie.0,chassis=3,slot=3,addr=0x12 \
+  -device edu,id=h11edu,bus=rp1 \
+  -drive file=$W/h11_nvme.img,if=none,id=h11nv,format=raw \
+  -device nvme,serial=h11nvme01,drive=h11nv,bus=rp2 \
+  -netdev user,id=h11n0 -device e1000e,id=h11e1k,netdev=h11n0,bus=rp3 \
+  -netdev user,id=h11n1 -device virtio-net-pci,netdev=h11n1,bus=pcie.0,addr=0x2 \
+  -monitor unix:$W/h11_mon.sock,server,nowait "$@"</code></pre></figure>
+<figure class="code"><pre><code>pcie.0 (bus 00, ECAM 0x40_1000_0000)
+ +- 00:00.0  1b36:0008  host bridge (QEMU gpex)
+ +- 00:02.0  1af4:1000  virtio-net-pci          (root complex integrated, MSI-X)
+ +- 00:10.0  1b36:000c  PCIe Root Port rp1 --- bus 01: 01:00.0 1234:11e8 edu   (MSI, 1 MiB BAR0)
+ +- 00:11.0  1b36:000c  PCIe Root Port rp2 --- bus 02: 02:00.0 1b36:0010 nvme  (MSI-X 65)
+ +- 00:12.0  1b36:000c  PCIe Root Port rp3 --- bus 03: 03:00.0 8086:10d3 e1000e(MSI-X 5, AER)</code></pre></figure>
+<p><code>edu</code>는 QEMU가 교육용으로 만든 가짜 장치다(<code>docs/specs/edu.rst</code>). BAR0 1 MiB 안에 ID 레지스터(0x00 = <code>0x010000ed</code>), liveness(0x04, 쓴 값의 비트 반전을 돌려줌), 인터럽트 상태/올리기/ack(0x24/0x60/0x64), DMA 엔진(0x80~0x98, 내부 버퍼는 장치 주소 0x40000)이 있고, MSI 1벡터와 INTx를 지원한다. <strong>DMA 주소 능력이 28비트</strong>라는 점이 나중에 중요해진다. 드라이버 연습에는 완벽한 장치다.</p>
+<hr>
+<h2 id="1-host-bridge-모든-것은-dt-노드-하나에서-시작한다">1. Host bridge — 모든 것은 DT 노드 하나에서 시작한다<a class="anchor" href="#1-host-bridge-모든-것은-dt-노드-하나에서-시작한다" aria-label="link">#</a></h2>
+<h3 id="1-1-직관">1.1 직관<a class="anchor" href="#1-1-직관" aria-label="link">#</a></h3>
+<p>D1에서 봤듯 PCIe 아래의 장치들은 스스로 말하지만, <strong>Root Complex 자체</strong>는 그렇지 않다. CPU 주소 공간의 어디에 ECAM이 있는지, 어느 CPU 주소 구간을 PCI 메모리 공간으로 쓸지(window), INTx A~D가 GIC의 몇 번으로 가는지, MSI는 어느 컨트롤러가 받는지 — 이 네 가지를 DT가 알려 주고, host bridge 드라이버가 그걸로 <code>struct pci_host_bridge</code>를 만든 뒤 PCI core에 "이제 스캔해"라고 넘긴다.</p>
+<figure class="code"><span class="lang">dts</span><pre><code>pcie@10000000 {
+    compatible = "pci-host-ecam-generic";
+    device_type = "pci";
+    reg = &lt;0x40 0x10000000 0x00 0x10000000&gt;;          /* ECAM 256 MiB = 256 버스 x 1 MiB */
+    bus-range = &lt;0x00 0xff&gt;;
+    ranges = &lt;0x01000000 0x00 0x00 0x00 0x3eff0000 0x00 0x10000&gt;,        /* I/O */
+             &lt;0x02000000 0x00 0x10000000 0x00 0x10000000 0x00 0x2eff0000&gt;, /* 32-bit MEM */
+             &lt;0x03000000 0x80 0x00 0x80 0x00 0x80 0x00&gt;;                  /* 64-bit MEM */
+    interrupt-map = &lt; ... &gt;;                           /* INTx A-D → GIC SPI */
+    msi-map = &lt;0x00 &amp;v2m 0x00 0x10000&gt;;                /* RID → MSI 컨트롤러 */
+};</code></pre></figure>
+<p>(랩 <code>out/virt.dts</code>의 해당 노드를 줄여 옮긴 것 — <code>interrupt-map</code>의 32줄은 생략.)</p>
+<p><code>ranges</code>의 첫 셀(<code>0x02000000</code> 등)은 PCI 주소 공간 종류다: <code>01</code> = I/O, <code>02</code> = 32비트 MEM, <code>03</code> = 64비트 MEM (prefetchable이면 <code>0x43000000</code>처럼 bit 30이 선다). 이 3셀 PCI 주소 → 2셀 CPU 주소 → 2셀 크기 형식은 D4에서 다뤘다.</p>
+<h3 id="1-2-예제-1-부팅-로그에서-host-bridge-초기화-읽기">1.2 예제 1 — 부팅 로그에서 host bridge 초기화 읽기<a class="anchor" href="#1-2-예제-1-부팅-로그에서-host-bridge-초기화-읽기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>pci-host-generic</code>이 DT의 <code>ranges</code>와 ECAM을 어떻게 해석했는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>dmesg | grep -iE "pci|pcie" | head -80        # 게스트 g_explore.sh</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.430746] pci-host-generic 4010000000.pcie: host bridge /pcie@10000000 ranges:
+[    0.431227] pci-host-generic 4010000000.pcie:       IO 0x003eff0000..0x003effffff -&gt; 0x0000000000
+[    0.431641] pci-host-generic 4010000000.pcie:      MEM 0x0010000000..0x003efeffff -&gt; 0x0010000000
+[    0.431702] pci-host-generic 4010000000.pcie:      MEM 0x8000000000..0xffffffffff -&gt; 0x8000000000
+[    0.432250] pci-host-generic 4010000000.pcie: Memory resource size exceeds max for 32 bits
+[    0.432756] pci-host-generic 4010000000.pcie: ECAM at [mem 0x4010000000-0x401fffffff] for [bus 00-ff]
+[    0.434944] pci-host-generic 4010000000.pcie: PCI host bridge to bus 0000:00
+[    0.435256] pci_bus 0000:00: root bus resource [bus 00-ff]
+[    0.435321] pci_bus 0000:00: root bus resource [io  0x0000-0xffff]
+[    0.435358] pci_bus 0000:00: root bus resource [mem 0x10000000-0x3efeffff]
+[    0.435365] pci_bus 0000:00: root bus resource [mem 0x8000000000-0xffffffffff]</code></pre></figure>
+<p>출력에서 볼 것: <code>IO 0x3eff0000 -&gt; 0x0</code>은 CPU 주소 0x3eff0000에 쓰면 PCI I/O 공간 0번지로 간다는 뜻(ARM에는 x86 <code>in/out</code> 명령이 없어서 I/O 공간도 MMIO 창으로 흉내 낸다). 32비트 창은 CPU 주소 = PCI 주소(1:1)이고, 64비트 창은 512 GiB짜리다. "Memory resource size exceeds max for 32 bits"는 64비트 창이 4 GiB를 넘는다는 정보성 경고라 무시해도 된다. 마지막 4줄의 <strong>root bus resource</strong>가 이후 모든 BAR 배정의 "총 예산"이다.</p>
+<h3 id="1-3-ecam과-dwc-임베디드에서-실제로-만나는-쪽">1.3 ECAM과 DWC — 임베디드에서 실제로 만나는 쪽<a class="anchor" href="#1-3-ecam과-dwc-임베디드에서-실제로-만나는-쪽" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>항목</th><th><code>pci-host-ecam-generic</code> (QEMU, 서버 SoC)</th><th>DesignWare 기반 (<code>pcie-designware-host.c</code> + glue)</th></tr></thead><tbody><tr><td>config 접근</td><td>ECAM: <code>base + (bus&lt;&lt;20 + dev&lt;&lt;15 + fn&lt;&lt;12 + reg)</code> 그대로 MMIO</td><td>자기 버스(RC)는 DBI 레지스터, 하위 버스는 <strong>iATU 창 하나를 매번 다시 프로그램</strong>해서 CfgRd0/CfgRd1 생성</td></tr><tr><td>링크 업</td><td>펌웨어/모델이 이미 올려 둠</td><td>glue 드라이버가 PHY·클럭·리셋(PERST#)·LTSSM enable을 직접 하고 <code>dw_pcie_wait_for_link()</code>로 기다림</td></tr><tr><td>MSI</td><td>GICv2m / GICv3 ITS (<code>msi-map</code>)</td><td>DWC 내장 MSI 컨트롤러(<code>dw_pcie_msi</code>, iMSI-RX) 또는 ITS</td></tr><tr><td>드라이버 예</td><td><code>pci-host-generic</code></td><td><code>pci-imx6.c</code>(i.MX6/8), <code>pcie-dw-rockchip.c</code>, <code>pcie-tegra194.c</code>, <code>pcie-qcom.c</code></td></tr><tr><td>진입 함수</td><td><code>pci_host_common_probe</code> → <code>pci_host_common_init</code> → <code>pci_host_probe</code></td><td>glue의 probe → <code>dw_pcie_host_init()</code> → <code>pci_host_probe</code></td></tr></tbody></table></div>
+<p>Don의 bring-up 경험이 가장 빛나는 곳이 오른쪽 열이다. i.MX8 보드에서 "Wi-Fi 카드가 안 보인다"의 90%는 PCI core가 아니라 glue 드라이버 단계 — REFCLK, PERST# 타이밍, PHY 전원, <code>dw_pcie_wait_for_link</code> 타임아웃("Phy link never came up") — 에서 끝난다. 랩 커널에도 <code>CONFIG_PCIE_DW_HOST=y</code>, <code>CONFIG_PCI_IMX6_HOST=y</code>, <code>CONFIG_PCIE_ROCKCHIP_DW_HOST=y</code>가 켜져 있다 (QEMU에 DWC 모델이 없어 실행은 못 함). 어느 쪽이든 결국 <code>pci_host_probe()</code>를 부르고, 거기서부터는 같은 PCI core다.</p>
+<blockquote><p>함정: DWC SoC에서 <code>lspci</code>에 Root Port만 보이고 엔드포인트가 없으면 "링크가 안 올라왔다"는 뜻이다. Root Port 자체는 SoC 안에 있으니 링크와 무관하게 항상 보인다. dmesg에서 glue 드라이버의 "Link up"/"Phy link never came up" 줄부터 찾는다.</p></blockquote>
+<hr>
+<h2 id="2-enumeration과-자원-배정-dmesg를-순서대로-읽는-법">2. Enumeration과 자원 배정 — dmesg를 순서대로 읽는 법<a class="anchor" href="#2-enumeration과-자원-배정-dmesg를-순서대로-읽는-법" aria-label="link">#</a></h2>
+<h3 id="2-1-흐름">2.1 흐름<a class="anchor" href="#2-1-흐름" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 430" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="180" y="18" text-anchor="middle" font-size="13" font-weight="bold">커널 함수 (drivers/pci)</text>
+  <text x="530" y="18" text-anchor="middle" font-size="13" font-weight="bold">이때 찍히는 dmesg</text>
+  <rect x="20" y="30" width="320" height="42" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="30" y="48" font-size="12">1. pci_host_common_probe</text>
+  <text x="30" y="64" font-size="12">DT ranges · ECAM ioremap</text>
+  <rect x="20" y="86" width="320" height="42" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="104" font-size="12">2. pci_host_probe → pci_scan_root_bus_bridge</text>
+  <text x="30" y="120" font-size="12">→ pci_scan_child_bus → pci_scan_slot</text>
+  <rect x="20" y="142" width="320" height="42" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="160" font-size="12">3. pci_scan_device: Vendor ID 읽기</text>
+  <text x="30" y="176" font-size="12">0xFFFF가 아니면 장치 있음</text>
+  <rect x="20" y="198" width="320" height="42" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="216" font-size="12">4. pci_setup_device → __pci_read_base</text>
+  <text x="30" y="232" font-size="12">BAR에 all-ones 쓰고 읽어 크기 측정</text>
+  <rect x="20" y="254" width="320" height="42" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="272" font-size="12">5. 브리지면 pci_scan_bridge_extend</text>
+  <text x="30" y="288" font-size="12">버스 번호 배정 → 하위 버스 재귀 스캔</text>
+  <rect x="20" y="310" width="320" height="42" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="328" font-size="12">6. pci_assign_unassigned_root_bus_resources</text>
+  <text x="30" y="344" font-size="12">아래→위로 창 크기 합산, 위→아래로 주소 배정</text>
+  <rect x="20" y="366" width="320" height="42" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="384" font-size="12">7. pci_bus_add_devices → device_attach</text>
+  <text x="30" y="400" font-size="12">id_table 매칭 → 드라이버 probe()</text>
+  <line x1="180" y1="72" x2="180" y2="84" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="180" y1="128" x2="180" y2="140" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="180" y1="184" x2="180" y2="196" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="180" y1="240" x2="180" y2="252" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="180" y1="296" x2="180" y2="308" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="180" y1="352" x2="180" y2="364" stroke="currentColor" marker-end="url(#ah2)"/>
+  <path d="M340,275 C380,275 380,107 342,107" fill="none" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah2)"/>
+  <text x="372" y="196" font-size="12">재귀</text>
+  <text x="410" y="56" font-size="12">host bridge ... ranges:</text>
+  <text x="410" y="112" font-size="12">PCI host bridge to bus 0000:00</text>
+  <text x="410" y="168" font-size="12">[1234:11e8] type 00 class 0x00ff00</text>
+  <text x="410" y="224" font-size="12">BAR 0 [mem 0x00000000-0x000fffff]</text>
+  <text x="410" y="272" font-size="12">bridge configuration invalid</text>
+  <text x="410" y="288" font-size="12">busn_res: end is updated to 01</text>
+  <text x="410" y="328" font-size="12">bridge window [mem ...]: assigned</text>
+  <text x="410" y="344" font-size="12">BAR 0 [mem 0x10000000-...]: assigned</text>
+  <text x="410" y="392" font-size="12">h11_edu 0000:01:00.0: ...</text>
+</svg></figure>
+<p>그림 2 — 부팅 enumeration. 스캔 단계(2~5)에서는 BAR "크기"만 알고 주소는 0으로 찍힌다. 주소는 전부 스캔이 끝난 뒤 6단계에서 한꺼번에 정해진다.</p>
+<p>Don이 펌웨어에서 경험한 것과 다른 점 두 가지:</p>
+<ol><li><strong>스캔과 배정이 분리돼 있다.</strong> 스캔 중의 <code>BAR 0 [mem 0x00000000-0x000fffff]</code>는 "크기 1 MiB"라는 뜻일 뿐 주소가 아니다. 모든 장치의 크기를 알아야 브리지 창 크기를 정할 수 있기 때문이다.</li><li><strong>x86 PC와 달리 펌웨어가 아무것도 안 해 놓는다.</strong> x86에서는 BIOS가 이미 BAR를 배정해 두고 Linux는 대부분 "claim"만 한다. QEMU <code>-kernel</code> 부팅이나 대부분의 ARM 보드는 U-Boot가 PCI를 건드리지 않거나 건드려도 Linux가 다시 하므로 <code>bridge configuration invalid ([bus 00-00]), reconfiguring</code>이 찍힌다 — 에러가 아니라 "버스 번호가 비어 있어서 내가 정한다"는 뜻이다.</li></ol>
+<h3 id="2-2-예제-2-부팅-enumeration-로그-전체-따라가기">2.2 예제 2 — 부팅 enumeration 로그 전체 따라가기<a class="anchor" href="#2-2-예제-2-부팅-enumeration-로그-전체-따라가기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 그림 2의 각 단계가 실제 로그 어디에 해당하는지. (예제 1과 같은 부팅의 다음 부분, 일부 줄 생략 <code>...</code>)</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.436670] pci 0000:00:00.0: [1b36:0008] type 00 class 0x060000 conventional PCI endpoint
+[    0.440861] pci 0000:00:02.0: [1af4:1000] type 00 class 0x020000 conventional PCI endpoint
+[    0.441138] pci 0000:00:02.0: BAR 0 [io  0x0000-0x001f]
+[    0.441193] pci 0000:00:02.0: BAR 1 [mem 0x00000000-0x00000fff]
+[    0.441228] pci 0000:00:02.0: BAR 4 [mem 0x00000000-0x00003fff 64bit pref]
+[    0.441294] pci 0000:00:02.0: ROM [mem 0x00000000-0x0007ffff pref]
+[    0.442665] pci 0000:00:10.0: [1b36:000c] type 01 class 0x060400 PCIe Root Port
+[    0.443187] pci 0000:00:10.0: BAR 0 [mem 0x00000000-0x00000fff]
+[    0.443291] pci 0000:00:10.0: PCI bridge to [bus 00]
+[    0.445691] pci 0000:00:10.0: enabling Extended Tags
+...
+[    0.450986] pci 0000:00:10.0: bridge configuration invalid ([bus 00-00]), reconfiguring
+[    0.451402] pci 0000:00:11.0: bridge configuration invalid ([bus 00-00]), reconfiguring
+[    0.451722] pci 0000:00:12.0: bridge configuration invalid ([bus 00-00]), reconfiguring
+[    0.452749] pci 0000:01:00.0: [1234:11e8] type 00 class 0x00ff00 conventional PCI endpoint
+[    0.452812] pci 0000:01:00.0: BAR 0 [mem 0x00000000-0x000fffff]
+[    0.454559] pci_bus 0000:01: busn_res: [bus 01-ff] end is updated to 01
+[    0.455480] pci 0000:02:00.0: [1b36:0010] type 00 class 0x010802 PCIe Endpoint
+[    0.455545] pci 0000:02:00.0: BAR 0 [mem 0x00000000-0x00003fff 64bit]
+[    0.456785] pci 0000:02:00.0: ASPM: default states L0s
+[    0.457002] pci_bus 0000:02: busn_res: [bus 02-ff] end is updated to 02
+[    0.457482] pci 0000:03:00.0: [8086:10d3] type 00 class 0x020000 PCIe Endpoint
+...
+[    0.459104] pci 0000:00:10.0: bridge window [io  0x1000-0x0fff] to [bus 01] add_size 1000
+[    0.459381] pci 0000:00:10.0: bridge window [mem 0x00100000-0x000fffff 64bit pref] to [bus 01] add_size 200000 add_align 100000
+[    0.459559] pci 0000:00:10.0: bridge window [mem 0x00100000-0x001fffff] to [bus 01] add_size 100000 add_align 100000
+...
+[    0.460578] pci 0000:00:10.0: bridge window [mem 0x10000000-0x101fffff]: assigned
+[    0.460688] pci 0000:00:10.0: bridge window [mem 0x8000000000-0x80001fffff 64bit pref]: assigned
+[    0.460714] pci 0000:00:11.0: bridge window [mem 0x10200000-0x103fffff]: assigned
+...
+[    0.461438] pci 0000:01:00.0: BAR 0 [mem 0x10000000-0x100fffff]: assigned
+[    0.461499] pci 0000:00:10.0: PCI bridge to [bus 01]
+[    0.461562] pci 0000:00:10.0:   bridge window [io  0x1000-0x1fff]
+[    0.461901] pci 0000:00:10.0:   bridge window [mem 0x10000000-0x101fffff]
+[    0.462166] pci 0000:00:10.0:   bridge window [mem 0x8000000000-0x80001fffff 64bit pref]</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>type 00</code>/<code>type 01</code>은 Header Type(엔드포인트/브리지). <code>class 0x010802</code>는 NVMe(01 mass storage, 08 NVM, 02 NVMe 인터페이스).</li><li>버스 번호는 깊이 우선으로 매겨진다. 처음엔 <code>[bus 01-ff]</code>로 하위 전부를 잡았다가 스캔이 끝나면 <code>end is updated to 01</code>로 줄인다 (subordinate bus number 확정).</li><li><code>add_size 200000</code>: Root Port 아래에는 <strong>나중에 핫플러그될 장치를 위한 여유분</strong>을 더 잡는다 (<code>pci=hpmemsize=</code>, <code>hpiosize=</code>로 조정). 그래서 edu는 1 MiB인데 rp1의 MEM 창은 2 MiB(<code>0x10000000-0x101fffff</code>)가 됐다. 브리지 창은 1 MiB 단위 정렬이다(PCI-to-PCI bridge 규격).</li><li>브리지에 창이 세 개다: I/O, 32비트 non-prefetchable MEM, 64비트 prefetchable MEM. NVMe의 BAR0처럼 <strong>64비트지만 non-prefetchable</strong>인 BAR는 32비트 non-pref 창에 들어가야 한다 (브리지의 non-pref 창은 32비트뿐이다). 큰 GPU·가속기 BAR가 pref여야 하는 이유다.</li></ul>
+<h3 id="2-3-예제-3-can-t-assign-no-space-직접-만들기">2.3 예제 3 — "can't assign; no space" 직접 만들기<a class="anchor" href="#2-3-예제-3-can-t-assign-no-space-직접-만들기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: BAR 배정 실패가 어떻게 보이는지. 64비트 창을 없애는 <code>highmem=off</code> 머신에 1 GiB BAR를 가진 <code>ivshmem-plain</code>을 꽂는다 (32비트 창은 <code>0x10000000-0x3efeffff</code> = 약 752 MiB).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>MACH=virt,highmem=off ./run.sh g_nospace.sh \
+  -object memory-backend-memfd,id=h11shm,size=1G,share=on \
+  -device ivshmem-plain,memdev=h11shm,bus=pcie.0,addr=0x5
+# 게스트: dmesg | grep -E "00:05.0|no space|failed to assign|can't assign|root bus resource"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.896559] pci_bus 0000:00: root bus resource [bus 00-0f]
+[    0.896612] pci_bus 0000:00: root bus resource [io  0x0000-0xffff]
+[    0.896648] pci_bus 0000:00: root bus resource [mem 0x10000000-0x3efeffff]
+[    0.905738] pci 0000:00:05.0: [1af4:1110] type 00 class 0x050000 conventional PCI endpoint
+[    0.905806] pci 0000:00:05.0: BAR 0 [mem 0x00000000-0x000000ff]
+[    0.905826] pci 0000:00:05.0: BAR 2 [mem 0x00000000-0x3fffffff 64bit pref]
+[    0.933735] pci 0000:00:05.0: BAR 2 [mem size 0x40000000 64bit pref]: can't assign; no space
+[    0.933795] pci 0000:00:05.0: BAR 2 [mem size 0x40000000 64bit pref]: failed to assign
+[    0.934649] pci 0000:00:05.0: BAR 0 [mem 0x10d88000-0x10d880ff]: assigned
+[    0.935085] pci 0000:00:05.0: BAR 0 [mem 0x10d88000-0x10d880ff]: releasing
+[    0.935137] pci 0000:00:05.0: BAR 2 [mem size 0x40000000 64bit pref]: can't assign; no space
+[    0.935146] pci 0000:00:05.0: BAR 2 [mem size 0x40000000 64bit pref]: failed to assign
+[    0.935245] pci 0000:00:05.0: BAR 0 [mem 0x10308000-0x103080ff]: assigned</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>$ cat /sys/bus/pci/devices/0000:00:05.0/resource | head -3
+0x0000000010308000 0x00000000103080ff 0x0000000000040200
+0x0000000000000000 0x0000000000000000 0x0000000000000000
+0x0000000000000000 0x0000000000000000 0x0000000000000000</code></pre></figure>
+<p>출력에서 볼 것: 장치는 <strong>여전히 enumeration되어 lspci에 보인다</strong>. BAR 2만 0으로 남는다. 커널이 한 번 실패한 뒤 이미 배정한 BAR를 <code>releasing</code> 하고 다시 시도(재배정 패스)했지만 그래도 안 된다. 드라이버가 이 장치에 붙으면 <code>pcim_iomap_region(pdev, 2, ...)</code>가 실패하고, 드라이버마다 "BAR 2 is not assigned" 류의 에러로 probe가 실패한다. 실제 보드에서 이 증상은 "DT <code>ranges</code>의 MEM 창이 장치 BAR 합보다 작다"가 1순위 원인이다. (참고: <code>highmem=off</code>는 이 데모만을 위한 것이고, 이 부팅에서는 virtio-net·e1000e 프로브도 덩달아 실패했다 — 64비트 창이 사라진 부작용이다.)</p>
+<p>대응책:</p>
+<div class="tw"><table><thead><tr><th>원인</th><th>대응</th></tr></thead><tbody><tr><td>DT <code>ranges</code>의 창이 작다</td><td>SoC가 허용하는 한 창을 키운다 (DWC면 iATU 창 수·크기도 확인)</td></tr><tr><td>펌웨어가 브리지 창을 작게 잡아 둠 (x86/UEFI)</td><td>부트 인자 <code>pci=realloc</code> — 커널이 브리지 창을 풀고 다시 계산하게 한다</td></tr><tr><td>핫플러그 여유분이 다른 장치 자리를 먹음</td><td><code>pci=hpmemsize=0</code>, <code>hpmmiosize=</code>, <code>hpmmioprefsize=</code> 조정</td></tr><tr><td>64비트 pref BAR인데 64비트 창이 없음</td><td>64비트 prefetchable 창을 DT <code>ranges</code>에 추가 (<code>0x43000000</code>)</td></tr><tr><td>리사이즈 가능한 BAR(ReBAR)</td><td>드라이버가 <code>pci_resize_resource()</code>로 줄이거나 키움 (GPU 드라이버에서 씀)</td></tr></tbody></table></div>
+<hr>
+<h2 id="3-struct-pci_dev와-sysfs-커널의-장치-객체를-파일로-보기">3. <code>struct pci_dev</code>와 sysfs — 커널의 장치 객체를 파일로 보기<a class="anchor" href="#3-struct-pci_dev와-sysfs-커널의-장치-객체를-파일로-보기" aria-label="link">#</a></h2>
+<h3 id="3-1-지도">3.1 지도<a class="anchor" href="#3-1-지도" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg">
+  <text x="105" y="20" text-anchor="middle" font-size="13" font-weight="bold">config space (장치)</text>
+  <text x="340" y="20" text-anchor="middle" font-size="13" font-weight="bold">struct pci_dev (커널)</text>
+  <text x="575" y="20" text-anchor="middle" font-size="13" font-weight="bold">sysfs 파일 (유저)</text>
+  <g font-size="12">
+  <rect x="20" y="32" width="170" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="30" y="52">0x00 Vendor · Device</text>
+  <rect x="255" y="32" width="170" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="265" y="52">vendor, device</text>
+  <rect x="490" y="32" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="500" y="52">vendor, device</text>
+  <rect x="20" y="72" width="170" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="30" y="92">0x08 Class Code</text>
+  <rect x="255" y="72" width="170" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="265" y="92">class</text>
+  <rect x="490" y="72" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="500" y="92">class</text>
+  <rect x="20" y="112" width="170" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="30" y="132">0x04 Command</text>
+  <rect x="255" y="112" width="170" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="265" y="132">enable_cnt · busmaster</text>
+  <rect x="490" y="112" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="500" y="132">enable</text>
+  <rect x="20" y="152" width="170" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="30" y="172">0x10-0x24 BAR0-5</text>
+  <rect x="255" y="152" width="170" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="265" y="172">resource[0..5]</text>
+  <rect x="490" y="152" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="500" y="172">resource, resourceN</text>
+  <rect x="20" y="192" width="170" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="30" y="212">0x3C/0x3D INTx</text>
+  <rect x="255" y="192" width="170" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="265" y="212">irq, pin</text>
+  <rect x="490" y="192" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="500" y="212">irq</text>
+  <rect x="20" y="232" width="170" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="30" y="252">cap 05/11 MSI(-X)</text>
+  <rect x="255" y="232" width="170" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="265" y="252">msi_enabled, msix_cap</text>
+  <rect x="490" y="232" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="500" y="252">msi_irqs/</text>
+  <rect x="20" y="272" width="170" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="30" y="292">cap 01 PM (PMCSR)</text>
+  <rect x="255" y="272" width="170" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="265" y="292">current_state</text>
+  <rect x="490" y="272" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="500" y="292">power_state</text>
+  <rect x="20" y="312" width="170" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="30" y="332">ext cap 0x100 AER</text>
+  <rect x="255" y="312" width="170" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="265" y="332">aer_cap, aer_info</text>
+  <rect x="490" y="312" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="500" y="332">aer_dev_*</text>
+  </g>
+  <g stroke="currentColor" stroke-width="1">
+  <line x1="190" y1="47" x2="255" y2="47"/><line x1="425" y1="47" x2="490" y2="47"/>
+  <line x1="190" y1="87" x2="255" y2="87"/><line x1="425" y1="87" x2="490" y2="87"/>
+  <line x1="190" y1="127" x2="255" y2="127"/><line x1="425" y1="127" x2="490" y2="127"/>
+  <line x1="190" y1="167" x2="255" y2="167"/><line x1="425" y1="167" x2="490" y2="167"/>
+  <line x1="190" y1="207" x2="255" y2="207"/><line x1="425" y1="207" x2="490" y2="207"/>
+  <line x1="190" y1="247" x2="255" y2="247"/><line x1="425" y1="247" x2="490" y2="247"/>
+  <line x1="190" y1="287" x2="255" y2="287"/><line x1="425" y1="287" x2="490" y2="287"/>
+  <line x1="190" y1="327" x2="255" y2="327"/><line x1="425" y1="327" x2="490" y2="327"/>
+  </g>
+  <text x="340" y="368" text-anchor="middle" font-size="12">config 파일 = 4 KiB 전체를 pci_read_config_*()로 읽는 창 (root만 64 B 넘게 읽음)</text>
+</svg></figure>
+<p>그림 3 — 같은 정보가 세 층에 있다. sysfs의 대부분은 config space를 그대로 보여 주는 게 아니라 <strong><code>struct pci_dev</code>에 캐시된 값</strong>을 보여 준다 (<code>irq</code>는 config 0x3C가 아니라 커널의 virq다 — 예제 4에서 확인).</p>
+<p><code>struct pci_dev</code>(include/linux/pci.h)의 필드 중 드라이버가 실제로 만지는 것:</p>
+<div class="tw"><table><thead><tr><th>필드</th><th>뜻</th></tr></thead><tbody><tr><td><code>vendor</code>, <code>device</code>, <code>subsystem_vendor</code>, <code>subsystem_device</code>, <code>class</code>, <code>revision</code></td><td>매칭에 쓰는 ID</td></tr><tr><td><code>bus</code>, <code>devfn</code></td><td>위치. <code>PCI_SLOT(devfn)</code>, <code>PCI_FUNC(devfn)</code>, 이름은 <code>pci_name(pdev)</code> = "0000:01:00.0"</td></tr><tr><td><code>dev</code></td><td>내장된 <code>struct device</code> — <code>dev_info(&amp;pdev-&gt;dev, ...)</code>, devres, DMA API 전부 이걸로</td></tr><tr><td><code>resource[]</code></td><td>BAR 0~5, ROM, (SR-IOV면 VF BAR, 브리지면 창). <code>pci_resource_start/len/flags(pdev, bar)</code></td></tr><tr><td><code>irq</code></td><td>INTx virq. MSI를 켜면 첫 벡터로 바뀐다. <strong>직접 쓰지 말고 <code>pci_irq_vector()</code></strong></td></tr><tr><td><code>msi_enabled</code>, <code>msix_enabled</code></td><td>현재 어떤 인터럽트 모드인지</td></tr><tr><td><code>dma_mask</code> (= <code>dev.dma_mask</code>)</td><td><code>dma_set_mask_and_coherent()</code>가 바꾸는 값</td></tr><tr><td><code>current_state</code></td><td>D0/D3hot/D3cold</td></tr><tr><td><code>driver</code></td><td>붙은 <code>struct pci_driver</code> (없으면 NULL)</td></tr></tbody></table></div>
+<h3 id="3-2-예제-4-sysfs로-edu-해부하기">3.2 예제 4 — sysfs로 edu 해부하기<a class="anchor" href="#3-2-예제-4-sysfs로-edu-해부하기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 드라이버가 없는 상태의 edu를 sysfs만으로 읽기. BusyBox <code>lspci</code>는 <code>-k</code>, <code>-m</code>만 되고 <code>-v</code>/<code>-t</code>/<code>-x</code>는 없다 — 그래서 sysfs와 아래 예제 5의 C 디코더를 쓴다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /sys/bus/pci/devices/0000:01:00.0
+ls
+cat vendor device class irq enable; cat resource | head -2
+readlink -f .
+lspci -k
+grep -iE "pci|PCI Bus" /proc/iomem
+cat reset_method</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>aer                       enable                    rescan
+ari_enabled               irq                       reset
+broken_parity_status      link                      reset_method
+class                     local_cpulist             resource
+config                    local_cpus                resource0
+consistent_dma_mask_bits  modalias                  revision
+d3cold_allowed            msi_bus                   subsystem
+device                    numa_node                 subsystem_device
+devspec                   power                     subsystem_vendor
+dma_mask_bits             power_state               uevent
+driver_override           remove                    vendor
+0x1234
+0x11e8
+0x00ff00
+0
+0
+0x0000000010000000 0x00000000100fffff 0x0000000000040200
+0x0000000000000000 0x0000000000000000 0x0000000000000000
+/sys/devices/platform/4010000000.pcie/pci0000:00/0000:00:10.0/0000:01:00.0
+03:00.0 Class 0200: 8086:10d3 e1000e
+00:10.0 Class 0604: 1b36:000c pcieport
+02:00.0 Class 0108: 1b36:0010
+01:00.0 Class 00ff: 1234:11e8
+00:00.0 Class 0600: 1b36:0008
+00:12.0 Class 0604: 1b36:000c pcieport
+00:11.0 Class 0604: 1b36:000c pcieport
+00:02.0 Class 0200: 1af4:1000 virtio-pci
+10000000-3efeffff : pcie@10000000
+  10000000-101fffff : PCI Bus 0000:01
+  10200000-103fffff : PCI Bus 0000:02
+  10400000-106fffff : PCI Bus 0000:03
+4010000000-401fffffff : PCI ECAM
+8000000000-ffffffffff : pcie@10000000
+  8000000000-80001fffff : PCI Bus 0000:01
+  8000200000-80003fffff : PCI Bus 0000:02
+  8000400000-80005fffff : PCI Bus 0000:03
+    8000600000-8000603fff : virtio-pci-modern
+bus</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>driver</code> 링크가 없다 = 아직 아무 드라이버도 안 붙음. <code>irq</code> = 0, <code>enable</code> = 0 (Command 레지스터의 Memory Space도 꺼져 있다 — 예제 5에서 <code>cmd 0000</code>).</li><li><code>resource</code>의 셋째 열 <code>0x40200</code>은 <code>IORESOURCE_MEM</code>(0x200) + <code>IORESOURCE_SIZEALIGN</code>(0x40000) 플래그다. <code>resource0</code>은 BAR0를 <strong>mmap할 수 있는 파일</strong>이다 (<code>/dev/mem</code> 대신 쓰는 유저 공간 MMIO 창. VFIO가 나오기 전의 UIO식 접근).</li><li>경로 <code>/sys/devices/platform/4010000000.pcie/pci0000:00/0000:00:10.0/0000:01:00.0</code>가 곧 <strong>토폴로지</strong>다. <code>lspci -t</code>가 없어도 경로가 트리를 말해 준다. 부모가 Root Port <code>00:10.0</code>, 그 부모가 DT에서 만든 platform device다 (D1 §7).</li><li><code>/proc/iomem</code>에서 bridge window가 "PCI Bus 0000:01" 이름으로 계층을 이룬다. <code>02:00.0</code>(NVMe)는 드라이버가 없어서 BAR가 아직 claim되지 않아 이름 줄이 없다.</li><li><code>reset_method</code>가 <code>bus</code>다: edu는 FLR도 PM reset도 없지만, 혼자 Root Port 아래에 있으므로 Secondary Bus Reset을 쓸 수 있다.</li><li><code>lspci -k</code>의 마지막 열이 드라이버다. NVMe(<code>02:00.0</code>)는 <code>nvme</code>가 모듈(<code>=m</code>)이라 아직 비어 있다.</li></ul>
+<hr>
+<h2 id="4-config-space-직접-해독하기-미니-lspci-vvv">4. Config space 직접 해독하기 — 미니 <code>lspci -vvv</code><a class="anchor" href="#4-config-space-직접-해독하기-미니-lspci-vvv" aria-label="link">#</a></h2>
+<h3 id="4-1-예제-5-h11_cfg-헤더-bar-capability-리스트">4.1 예제 5 — <code>h11_cfg</code>: 헤더·BAR·capability 리스트<a class="anchor" href="#4-1-예제-5-h11_cfg-헤더-bar-capability-리스트" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: sysfs <code>config</code> 파일만으로 Header Type, BAR 원시값, capability 체인(PM, MSI, MSI-X, PCIe cap의 Link 속도/폭), extended capability(0x100~)를 읽는다. Don이 SSD 펌웨어에서 장치 쪽으로 채워 넣던 그 구조를 호스트 쪽에서 읽어 보는 것이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* h11_cfg: sysfs config 파일을 읽어 헤더·BAR·capability 리스트를 해석하는 미니 lspci -vvv */
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+static uint8_t c[4096];
+static unsigned r16(int o) { return c[o] | c[o + 1] &lt;&lt; 8; }
+static unsigned r32(int o) { return r16(o) | (unsigned)r16(o + 2) &lt;&lt; 16; }
+static const char *spd[] = { "?", "2.5GT/s", "5GT/s", "8GT/s", "16GT/s", "32GT/s", "64GT/s" };
+
+int main(int argc, char **argv)
+{
+    char p[256];
+    if (argc &lt; 2) { fprintf(stderr, "usage: %s DDDD:BB:DD.F\n", argv[0]); exit(1); }
+    snprintf(p, sizeof p, "/sys/bus/pci/devices/%s/config", argv[1]);
+    int fd = open(p, O_RDONLY);
+    if (fd &lt; 0) { perror(p); exit(1); }
+    ssize_t n = pread(fd, c, sizeof c, 0);
+    if (n &lt; 64) { perror("pread"); exit(1); }
+    close(fd);
+    unsigned ht = c[0x0e] &amp; 0x7f;
+    printf("%s [%04x:%04x] class %06x hdr type %u, cfg %zd B, cmd %04x sts %04x\n",
+           argv[1], r16(0), r16(2), r32(8) &gt;&gt; 8, ht, n, r16(4), r16(6));
+    for (int i = 0; i &lt; (ht ? 2 : 6); i++) {
+        unsigned v = r32(0x10 + 4 * i);
+        if (!v) continue;
+        int is64 = !(v &amp; 1) &amp;&amp; (v &amp; 6) == 4;
+        printf("  BAR%d %s%s%s raw=%08x\n", i, v &amp; 1 ? "I/O" : "MEM",
+               is64 ? " 64bit" : "", !(v &amp; 1) &amp;&amp; (v &amp; 8) ? " pref" : "", v);
+        i += is64;
+    }
+    if (ht == 1) printf("  bus pri=%02x sec=%02x sub=%02x\n", c[0x18], c[0x19], c[0x1a]);
+    if (c[0x3d]) printf("  INTx pin %c (line %u)\n", 'A' + c[0x3d] - 1, c[0x3c]);
+    for (int o = (r16(6) &amp; 0x10) ? c[0x34] &amp; 0xfc : 0; o; o = c[o + 1] &amp; 0xfc) {
+        unsigned id = c[o], ctl = r16(o + 2);
+        printf("  [%02x] cap %02x ", o, id);
+        if (id == 0x01) printf("PM v%u, state D%u\n", ctl &amp; 7, r16(o + 4) &amp; 3);
+        else if (id == 0x05) printf("MSI: enable=%u count=%u/%u 64bit=%u\n", ctl &amp; 1,
+                                   1 &lt;&lt; ((ctl &gt;&gt; 4) &amp; 7), 1 &lt;&lt; ((ctl &gt;&gt; 1) &amp; 7), (ctl &gt;&gt; 7) &amp; 1);
+        else if (id == 0x11) printf("MSI-X: enable=%u size=%u table BAR%u+0x%x PBA BAR%u+0x%x\n",
+                                   ctl &gt;&gt; 15, (ctl &amp; 0x7ff) + 1, r32(o + 4) &amp; 7, r32(o + 4) &amp; ~7u,
+                                   r32(o + 8) &amp; 7, r32(o + 8) &amp; ~7u);
+        else if (id == 0x10) {
+            unsigned lc = r32(o + 12), ls = r16(o + 18);
+            printf("PCIe v%u type %u: LnkCap %s x%u, LnkSta %s x%u\n", ctl &amp; 0xf, (ctl &gt;&gt; 4) &amp; 0xf,
+                   spd[(lc &amp; 0xf) &lt; 7 ? lc &amp; 0xf : 0], (lc &gt;&gt; 4) &amp; 0x3f,
+                   spd[(ls &amp; 0xf) &lt; 7 ? ls &amp; 0xf : 0], (ls &gt;&gt; 4) &amp; 0x3f);
+        } else printf("(other)\n");
+    }
+    for (int o = n &gt; 256 ? 0x100 : 0; o &amp;&amp; r32(o); o = r32(o) &gt;&gt; 20)
+        printf("  [%03x] ext cap %04x v%u\n", o, r32(o) &amp; 0xffff, (r32(o) &gt;&gt; 16) &amp; 0xf);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>gcc -std=gnu11 -Wall -Wextra -O2 -static ~/.elinux_scratch/H11/h11_cfg.c -o payload/h11_cfg   # 경고 0
+# 게스트 (드라이버 로드 전):
+for d in 0000:00:10.0 0000:01:00.0 0000:02:00.0 0000:03:00.0 0000:00:02.0; do /h11_cfg $d; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0000:00:10.0 [1b36:000c] class 060400 hdr type 1, cfg 4096 B, cmd 0407 sts 0010
+  BAR0 MEM raw=10781000
+  bus pri=00 sec=01 sub=01
+  INTx pin A (line 15)
+  [54] cap 10 PCIe v2 type 4: LnkCap 16GT/s x32, LnkSta 16GT/s x32
+  [48] cap 11 MSI-X: enable=1 size=1 table BAR0+0x0 PBA BAR0+0x800
+  [40] cap 0d (other)
+  [100] ext cap 0001 v2
+  [148] ext cap 000d v1
+0000:01:00.0 [1234:11e8] class 00ff00 hdr type 0, cfg 256 B, cmd 0000 sts 0010
+  BAR0 MEM raw=10000000
+  INTx pin A (line 0)
+  [40] cap 05 MSI: enable=0 count=1/1 64bit=1
+0000:02:00.0 [1b36:0010] class 010802 hdr type 0, cfg 4096 B, cmd 0000 sts 0010
+  BAR0 MEM 64bit raw=10200004
+  INTx pin A (line 0)
+  [40] cap 11 MSI-X: enable=0 size=65 table BAR0+0x2000 PBA BAR0+0x3000
+  [80] cap 10 PCIe v2 type 0: LnkCap 2.5GT/s x1, LnkSta 2.5GT/s x1
+  [60] cap 01 PM v3, state D0
+0000:03:00.0 [8086:10d3] class 020000 hdr type 0, cfg 4096 B, cmd 0406 sts 0010
+  BAR0 MEM raw=10480000
+  BAR1 MEM raw=104a0000
+  BAR2 I/O raw=00003001
+  BAR3 MEM raw=104c0000
+  INTx pin A (line 19)
+  [c8] cap 01 PM v2, state D0
+  [d0] cap 05 MSI: enable=0 count=1/1 64bit=1
+  [e0] cap 10 PCIe v1 type 0: LnkCap 2.5GT/s x1, LnkSta 2.5GT/s x1
+  [a0] cap 11 MSI-X: enable=1 size=5 table BAR3+0x0 PBA BAR3+0x2000
+  [100] ext cap 0001 v2
+  [140] ext cap 0003 v1
+0000:00:02.0 [1af4:1000] class 020000 hdr type 0, cfg 256 B, cmd 0407 sts 0010
+  BAR0 I/O raw=00005001
+  BAR1 MEM raw=10780000
+  BAR4 MEM 64bit pref raw=0060000c
+  INTx pin A (line 19)
+  [98] cap 11 MSI-X: enable=1 size=4 table BAR1+0x0 PBA BAR1+0x800
+  [84] cap 09 (other)
+  [70] cap 09 (other)
+  [60] cap 09 (other)
+  [50] cap 09 (other)
+  [40] cap 09 (other)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>cmd 레지스터가 드라이버 상태를 말해 준다.</strong> 드라이버가 붙은 Root Port·e1000e·virtio는 <code>0406</code>/<code>0407</code>(bit1 Memory, bit2 Bus Master, bit10 INTx Disable), 드라이버가 없는 edu·NVMe는 <code>0000</code>. Linux는 enumeration 때 BAR 주소는 쓰지만 <strong>decode는 켜지 않는다</strong> — <code>pci_enable_device()</code>가 켠다.</li><li><strong>bit10(INTx Disable)이 선 장치는 MSI/MSI-X를 쓰는 중</strong>이다. MSI를 켜면 커널이 INTx를 끈다.</li><li>엔드포인트의 <code>INTx pin A (line 0)</code>: Interrupt Line 레지스터(0x3C)는 x86 BIOS 시절 유물이라 ARM에서는 의미가 없다. 진짜 INTx virq는 커널이 DT <code>interrupt-map</code>으로 계산해 <code>pdev-&gt;irq</code>에 넣는다 (예제 7에서 15).</li><li>edu는 <code>cfg 256 B</code> — conventional PCI 장치라 extended config가 없다. Root Port 뒤에 붙어 있어도 PCIe cap이 없다 (QEMU가 허용하는 구성).</li><li>NVMe의 MSI-X 테이블이 <strong>BAR0+0x2000</strong>: Don이 SSD에서 구현하던 바로 그 배치(doorbell 영역 뒤에 MSI-X table/PBA). size=65 = admin 1 + I/O 64.</li><li>확장 cap <code>0001</code> = AER, <code>000d</code> = ACS, <code>0003</code> = Device Serial Number. QEMU Root Port의 <code>LnkCap 16GT/s x32</code>는 모델 기본값이라 의미 없다.</li><li><code>cap 09</code>(Vendor Specific) 5개는 virtio 1.0의 common/notify/isr/device/pci-cfg 구조 위치 표시다.</li></ul>
+<h3 id="4-2-예제-6-bar-크기-재기-all-ones-쓰기-를-손으로">4.2 예제 6 — BAR 크기 재기 (all-ones 쓰기)를 손으로<a class="anchor" href="#4-2-예제-6-bar-크기-재기-all-ones-쓰기-를-손으로" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 그림 2의 4단계(<code>__pci_read_base</code>)가 하는 일을 유저 공간에서 그대로 해 본다. <strong>드라이버가 없는 장치에서만</strong> 한다 — 측정 중에는 BAR 주소가 망가져 있으므로 드라이버가 그 BAR로 접근하면 안 된다. 커널도 똑같이 측정 중에는 Command의 decode 비트를 끈다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* h11_barsize: config space의 BAR에 all-ones를 써서 크기를 읽는다 (드라이버 없는 장치에서만!) */
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+
+static int fd;
+static uint32_t rd32(off_t o) { uint32_t v; if (pread(fd, &amp;v, 4, o) != 4) { perror("pread"); exit(1); } return v; }
+static void wr32(off_t o, uint32_t v) { if (pwrite(fd, &amp;v, 4, o) != 4) { perror("pwrite"); exit(1); } }
+static uint16_t rd16(off_t o) { uint16_t v; if (pread(fd, &amp;v, 2, o) != 2) { perror("pread"); exit(1); } return v; }
+static void wr16(off_t o, uint16_t v) { if (pwrite(fd, &amp;v, 2, o) != 2) { perror("pwrite"); exit(1); } }
+
+int main(int argc, char **argv)
+{
+    char p[256];
+    if (argc &lt; 3) { fprintf(stderr, "usage: %s BDF barN\n", argv[0]); exit(1); }
+    snprintf(p, sizeof p, "/sys/bus/pci/devices/%s/config", argv[1]);
+    if ((fd = open(p, O_RDWR)) &lt; 0) { perror(p); exit(1); }
+    off_t bar = 0x10 + 4 * atoi(argv[2]);
+    uint16_t cmd = rd16(0x04);
+    wr16(0x04, cmd &amp; ~0x3);                 /* 1) I/O·Memory decode 끄기 */
+    uint32_t orig = rd32(bar);
+    wr32(bar, 0xffffffff);                  /* 2) all-ones 쓰기 */
+    uint32_t mask = rd32(bar);              /* 3) 하드와이어된 0 비트가 크기를 알려 준다 */
+    wr32(bar, orig);                        /* 4) 원래 주소 복구 */
+    wr16(0x04, cmd);                        /* 5) decode 복구 */
+    uint32_t m = mask &amp; ((orig &amp; 1) ? ~0x3u : ~0xfu);
+    printf("cmd=%04x orig=%08x after-ones=%08x -&gt; size=0x%x (%u KiB) restored=%08x\n",
+           cmd, orig, mask, ~m + 1, (~m + 1) / 1024, rd32(bar));
+    close(fd);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>/h11_barsize 0000:01:00.0 0     # edu BAR0
+/h11_barsize 0000:02:00.0 0     # nvme BAR0 (64비트 BAR의 하위 dword만)
+/h11_barsize 0000:03:00.0 2     # e1000e BAR2 (I/O)</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>cmd=0000 orig=10000000 after-ones=fff00000 -&gt; size=0x100000 (1024 KiB) restored=10000000
+cmd=0000 orig=10200004 after-ones=ffffc004 -&gt; size=0x4000 (16 KiB) restored=10200004
+cmd=0406 orig=00003001 after-ones=ffffffe1 -&gt; size=0x20 (0 KiB) restored=00003001</code></pre></figure>
+<p>출력에서 볼 것: <code>fff00000</code> → 하위 20비트가 0으로 고정 = 1 MiB. NVMe는 <code>...c004</code>: 하위 4비트 <code>0100</code>이 "64비트 MEM, non-pref" 타입 비트로 남는다 (64비트 BAR라면 정식으로는 상위 dword도 all-ones를 써 봐야 한다 — 커널 <code>__pci_read_base</code>가 그렇게 한다). I/O BAR는 하위 2비트만 플래그라 32바이트(KiB로 나누면 0). 세 번째 줄은 <strong>e1000e 드라이버가 붙어 있는 상태</strong>에서 돌렸다 — 측정하는 몇 µs 동안 decode가 꺼지므로 실제 장비에서는 하면 안 된다 (QEMU라 무사했다).</p>
+<blockquote><p>BusyBox에는 <code>setpci</code>가 없다. 정식 <code>pciutils</code>가 있으면 <code>setpci -s 01:00.0 COMMAND</code> (읽기), <code>setpci -s 01:00.0 BASE_ADDRESS_0=ffffffff</code> 처럼 쓴다. 없을 때는 위처럼 sysfs <code>config</code>에 <code>pwrite</code>하거나 <code>dd ... of=config bs=1 seek=&lt;offset&gt; conv=notrunc</code>를 쓴다. 어느 쪽이든 <strong>커널 몰래 레지스터를 바꾸는 것</strong>이라 드라이버의 캐시된 상태와 어긋날 수 있다.</p></blockquote>
+<hr>
+<h2 id="5-pci_driver-쓰기-probe에서-무엇을-어떤-순서로-하나">5. <code>pci_driver</code> 쓰기 — probe에서 무엇을 어떤 순서로 하나<a class="anchor" href="#5-pci_driver-쓰기-probe에서-무엇을-어떤-순서로-하나" aria-label="link">#</a></h2>
+<h3 id="5-1-직관-don의-펌웨어-init을-커널-api로-번역">5.1 직관 — Don의 펌웨어 init을 커널 API로 번역<a class="anchor" href="#5-1-직관-don의-펌웨어-init을-커널-api로-번역" aria-label="link">#</a></h3>
+<p>SSD 펌웨어가 호스트 드라이버였다면 이렇게 했을 것이다: 장치 ID 확인 → BAR 주소 얻기 → 메모리 decode·bus master 켜기 → 레지스터 매핑 → DMA 가능한 주소 범위 확인 → 인터럽트 벡터 배정·핸들러 등록 → 장치 초기화. Linux <code>probe()</code>도 정확히 이 순서이고, 각 단계에 API가 하나씩 있다.</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>API (6.18 기준 권장)</th><th>뒤에서 하는 일</th></tr></thead><tbody><tr><td>매칭</td><td><code>struct pci_device_id</code> 테이블 + <code>MODULE_DEVICE_TABLE(pci, ...)</code></td><td>PCI core가 vendor/device/class 비교 후 <code>probe(pdev, id)</code> 호출. modalias로 udev 자동 로드</td></tr><tr><td>켜기</td><td><code>pcim_enable_device(pdev)</code></td><td>Command의 Memory/I/O decode ON, 상위 브리지도 enable, D0로. <code>pcim_</code>이라 detach 때 자동 disable</td></tr><tr><td>BAR 매핑</td><td><code>pcim_iomap_region(pdev, bar, name)</code></td><td><code>pci_request_region</code> + <code>pci_iomap</code>. <code>/proc/iomem</code>에 이름 등록. 실패 시 <code>IOMEM_ERR_PTR</code></td></tr><tr><td>DMA 허가</td><td><code>pci_set_master(pdev)</code></td><td>Command bit2 Bus Master Enable. <strong>없으면 DMA도 MSI도 안 나간다</strong> (MSI는 메모리 쓰기다)</td></tr><tr><td>DMA 범위</td><td><code>dma_set_mask_and_coherent(&amp;pdev-&gt;dev, DMA_BIT_MASK(n))</code></td><td>장치가 낼 수 있는 주소 비트 수를 DMA API에 알림 (§8)</td></tr><tr><td>인터럽트</td><td><code>pci_alloc_irq_vectors(pdev, min, max, PCI_IRQ_MSIX or MSI or INTX)</code></td><td>MSI-X → MSI → INTx 순으로 시도, 벡터 개수 반환. managed 장치면 자동 해제</td></tr><tr><td>핸들러</td><td><code>devm_request_irq(dev, pci_irq_vector(pdev, i), ...)</code></td><td>i번째 벡터의 Linux virq를 얻어 등록</td></tr><tr><td>저장</td><td><code>pci_set_drvdata(pdev, priv)</code></td><td>remove·PM·AER 콜백에서 <code>pci_get_drvdata()</code>로 꺼냄</td></tr></tbody></table></div>
+<h3 id="5-2-api-버전-함정-pcim_iomap_regions-는-deprecated">5.2 API 버전 함정 — <code>pcim_iomap_regions()</code>는 deprecated<a class="anchor" href="#5-2-api-버전-함정-pcim_iomap_regions-는-deprecated" aria-label="link">#</a></h3>
+<p>인터넷의 드라이버 예제(LDD3, 블로그, 많은 in-tree 드라이버)는 이렇게 쓴다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 옛 방식 — 6.18 소스 주석: "This function is DEPRECATED. Do not use it in new code." */
+ret = pcim_iomap_regions(pdev, BIT(0), "drv");
+base = pcim_iomap_table(pdev)[0];</code></pre></figure>
+<p>6.18의 <code>drivers/pci/devres.c</code>에서 직접 확인했다: <code>pcim_iomap_regions()</code>와 <code>pcim_iomap_table()</code>은 둘 다 <strong>DEPRECATED</strong> 주석이 붙어 있고, 대체는 <code>pcim_iomap_region()</code>(단수, 6.11 무렵 공개 API가 됨 — 버전은 기억 기반)이다. 반환값이 포인터라 BAR마다 한 번씩 부르고 <code>IS_ERR()</code>로 검사한다. 해제가 필요하면 <code>pcim_iounmap_region()</code>. 비관리형(<code>pci_enable_device</code> + <code>pci_request_regions</code> + <code>pci_iomap</code> + 수동 해제)도 여전히 동작하지만, 새 코드는 managed(<code>pcim_</code>/<code>devm_</code>)로 쓰는 것이 리뷰어 기대치다. 면접에서 "pcim_iomap_regions는 deprecated 됐고 지금은 pcim_iomap_region을 쓴다"는 말 한마디가 "최근 커널을 실제로 만져 봤다"는 신호가 된다.</p>
+<p>ID 테이블 매크로:</p>
+<div class="tw"><table><thead><tr><th>매크로</th><th>매칭</th></tr></thead><tbody><tr><td><code>PCI_DEVICE(0x1234, 0x11e8)</code></td><td>vendor+device, subsystem은 아무거나</td></tr><tr><td><code>PCI_DEVICE_DATA(VENDOR, DEV, data)</code></td><td><code>PCI_VENDOR_ID_&lt;VENDOR&gt;</code>·<code>PCI_DEVICE_ID_&lt;VENDOR&gt;_&lt;DEV&gt;</code> 상수 이름으로 + <code>driver_data</code></td></tr><tr><td><code>PCI_DEVICE_SUB(v, d, sv, sd)</code></td><td>subsystem ID까지 (같은 칩, 다른 보드)</td></tr><tr><td><code>PCI_DEVICE_CLASS(PCI_CLASS_STORAGE_EXPRESS, 0xffffff)</code></td><td>클래스로 — <code>nvme</code>가 이걸로 모든 NVMe 장치를 잡는다</td></tr><tr><td><code>PCI_VDEVICE(INTEL, 0x10d3)</code></td><td><code>PCI_VENDOR_ID_INTEL</code> 축약형</td></tr></tbody></table></div>
+<p><code>driver_data</code>는 칩 변형별 설정 구조체 포인터를 실어 보내는 데 쓴다 (<code>(const struct chip_info *)id-&gt;driver_data</code>).</p>
+<h3 id="5-3-예제-7-h11_edu-bar0-msi-intx-irq-왕복-측정">5.3 예제 7 — <code>h11_edu</code>: BAR0, MSI/INTx, IRQ 왕복 측정<a class="anchor" href="#5-3-예제-7-h11_edu-bar0-msi-intx-irq-왕복-측정" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 5.1 표의 순서를 그대로 구현한 드라이버. probe에서 edu ID를 읽고, MSI(가능하면) 또는 INTx(<code>intx=1</code>) 벡터 하나를 받아, edu의 "인터럽트 올리기" 레지스터를 1000번 써서 핸들러까지의 시간을 잰다. 세 조각으로 나눠 싣는다 (한 파일 <code>h11_edu.c</code>, 116줄).</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* h11_edu: QEMU edu(1234:11e8) PCI 드라이버 — BAR0 매핑, MSI/INTx, IRQ 왕복 지연 측정 */
+#include &lt;linux/module.h&gt;
+#include &lt;linux/pci.h&gt;
+#include &lt;linux/interrupt.h&gt;
+#include &lt;linux/completion.h&gt;
+#include &lt;linux/ktime.h&gt;
+#include &lt;linux/sort.h&gt;
+
+#define EDU_ID 0x00
+#define EDU_LIVE 0x04
+#define EDU_IRQ_STATUS 0x24
+#define EDU_IRQ_RAISE 0x60
+#define EDU_IRQ_ACK 0x64
+#define NLAT 1000
+
+static bool intx;                       /* 1 → MSI를 쓰지 않고 INTx만 */
+module_param(intx, bool, 0444);
+
+struct h11 {
+	void __iomem *bar;
+	struct completion done;
+	u64 t_irq;
+	unsigned int count;
+	u64 lat[NLAT];
+};
+
+static irqreturn_t h11_irq(int irq, void *arg)
+{
+	struct h11 *h = arg;
+	u32 st = readl(h-&gt;bar + EDU_IRQ_STATUS);
+
+	if (!st)
+		return IRQ_NONE;                /* INTx 공유 라인: 내 것이 아님 */
+	h-&gt;t_irq = ktime_get_ns();
+	writel(st, h-&gt;bar + EDU_IRQ_ACK);       /* level INTx라면 여기서 라인이 내려간다 */
+	h-&gt;count++;
+	complete(&amp;h-&gt;done);
+	return IRQ_HANDLED;
+}
+
+static int cmp_u64(const void *a, const void *b)
+{
+	u64 x = *(const u64 *)a, y = *(const u64 *)b;
+
+	return x &lt; y ? -1 : x &gt; y;
+}</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>static int h11_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+{
+	struct h11 *h;
+	int ret, nvec, i;
+
+	h = devm_kzalloc(&amp;pdev-&gt;dev, sizeof(*h), GFP_KERNEL);
+	if (!h)
+		return -ENOMEM;
+	ret = pcim_enable_device(pdev);         /* devres: remove 때 자동 disable */
+	if (ret)
+		return ret;
+	h-&gt;bar = pcim_iomap_region(pdev, 0, "h11_edu");  /* request + ioremap BAR0 */
+	if (IS_ERR(h-&gt;bar))
+		return PTR_ERR(h-&gt;bar);
+	pci_set_master(pdev);
+	writel(0x12345678, h-&gt;bar + EDU_LIVE);
+	dev_info(&amp;pdev-&gt;dev, "id=%08x live=%08x BAR0 %pR\n", readl(h-&gt;bar + EDU_ID),
+		 readl(h-&gt;bar + EDU_LIVE), &amp;pdev-&gt;resource[0]);
+
+	nvec = pci_alloc_irq_vectors(pdev, 1, 1,
+				     intx ? PCI_IRQ_INTX : PCI_IRQ_MSIX | PCI_IRQ_MSI | PCI_IRQ_INTX);
+	if (nvec &lt; 0)
+		return nvec;
+	init_completion(&amp;h-&gt;done);
+	ret = devm_request_irq(&amp;pdev-&gt;dev, pci_irq_vector(pdev, 0), h11_irq,
+			       pdev-&gt;msi_enabled ? 0 : IRQF_SHARED, "h11_edu", h);
+	if (ret)
+		return ret;
+	dev_info(&amp;pdev-&gt;dev, "irq %d via %s\n", pci_irq_vector(pdev, 0),
+		 pdev-&gt;msix_enabled ? "MSI-X" : pdev-&gt;msi_enabled ? "MSI" : "INTx");
+
+	for (i = 0; i &lt; NLAT; i++) {            /* raise → handler 까지 걸린 시간 */
+		u64 t0 = ktime_get_ns();
+
+		reinit_completion(&amp;h-&gt;done);
+		writel(1 &lt;&lt; (i % 8), h-&gt;bar + EDU_IRQ_RAISE);
+		if (!wait_for_completion_timeout(&amp;h-&gt;done, HZ))
+			return dev_err_probe(&amp;pdev-&gt;dev, -ETIMEDOUT, "no irq at %d\n", i);
+		h-&gt;lat[i] = h-&gt;t_irq - t0;
+	}
+	sort(h-&gt;lat, NLAT, sizeof(u64), cmp_u64, NULL);
+	dev_info(&amp;pdev-&gt;dev, "%u irqs, latency ns min=%llu p50=%llu p90=%llu p99=%llu\n",
+		 h-&gt;count, h-&gt;lat[0], h-&gt;lat[NLAT / 2], h-&gt;lat[NLAT * 9 / 10], h-&gt;lat[NLAT * 99 / 100]);
+	pci_set_drvdata(pdev, h);
+	return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>static void h11_remove(struct pci_dev *pdev)
+{
+	struct h11 *h = pci_get_drvdata(pdev);
+
+	dev_info(&amp;pdev-&gt;dev, "remove: handled %u irqs\n", h-&gt;count);
+}   /* 나머지(IRQ, 벡터, BAR, enable)는 devres가 역순으로 정리 */
+
+static const struct pci_device_id h11_ids[] = {
+	{ PCI_DEVICE(0x1234, 0x11e8) },
+	{ }
+};
+MODULE_DEVICE_TABLE(pci, h11_ids);
+
+static struct pci_driver h11_driver = {
+	.name = "h11_edu",
+	.id_table = h11_ids,
+	.probe = h11_probe,
+	.remove = h11_remove,
+};
+module_pci_driver(h11_driver);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("H11 edu PCI driver demo");</code></pre></figure>
+<figure class="code"><span class="lang">make</span><pre><code>obj-m += h11_edu.o h11_dma.o</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/H11/mod &amp;&amp; make -C /var/lab/out/linux-build M=$PWD modules -j2   # warning 0개
+# 게스트 g_drv.sh
+insmod /h11_edu.ko; dmesg | grep h11_edu
+grep -E "h11|CPU0" /proc/interrupts
+ls -l /sys/bus/pci/devices/0000:01:00.0/driver; ls /sys/bus/pci/devices/0000:01:00.0/msi_irqs
+cat /sys/bus/pci/devices/0000:01:00.0/irq
+/h11_cfg 0000:01:00.0 | grep MSI
+grep h11 /proc/iomem
+rmmod h11_edu; insmod /h11_edu.ko intx=1; dmesg | grep h11_edu | tail -3
+grep h11 /proc/interrupts; cat /sys/bus/pci/devices/0000:01:00.0/irq
+rmmod h11_edu; dmesg | tail -2</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[    1.173845] h11_edu: loading out-of-tree module taints kernel.
+[    1.178961] h11_edu 0000:01:00.0: enabling device (0000 -&gt; 0002)
+[    1.180090] h11_edu 0000:01:00.0: id=010000ed live=edcba987 BAR0 [mem 0x10000000-0x100fffff]
+[    1.181882] h11_edu 0000:01:00.0: irq 30 via MSI
+[    1.285826] h11_edu 0000:01:00.0: 1000 irqs, latency ns min=9088 p50=35632 p90=57040 p99=169120
+           CPU0       CPU1       
+ 30:       1000          0 GICv2m-PCI-MSI-0000:01:00.0   0 Edge      h11_edu
+lrwxrwxrwx    1 0        0                0 Oct 11 03:47 /sys/bus/pci/devices/0000:01:00.0/driver -&gt; ../../../../../../bus/pci/drivers/h11_edu
+30
+30
+  [40] cap 05 MSI: enable=1 count=1/1 64bit=1
+      10000000-100fffff : h11_edu
+=== insmod INTx
+[    1.413422] h11_edu 0000:01:00.0: id=010000ed live=edcba987 BAR0 [mem 0x10000000-0x100fffff]
+[    1.413854] h11_edu 0000:01:00.0: irq 15 via INTx
+[    1.423958] h11_edu 0000:01:00.0: 1000 irqs, latency ns min=2592 p50=2704 p90=2928 p99=36992
+ 15:       1000          0 GIC-0  35 Level     h11_edu
+15
+[    1.423958] h11_edu 0000:01:00.0: 1000 irqs, latency ns min=2592 p50=2704 p90=2928 p99=36992
+[    1.463128] h11_edu 0000:01:00.0: remove: handled 1000 irqs</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>enabling device (0000 -&gt; 0002)</code>: <code>pcim_enable_device</code>가 Command를 0 → Memory decode(bit1)로 바꿨다는 PCI core 메시지. 예제 5의 <code>cmd 0000</code>과 짝을 이룬다.</li><li><code>live=edcba987</code> = <code>~0x12345678</code>. BAR 매핑과 <code>readl/writel</code>이 실제 장치에 닿았다는 증거 (H1).</li><li>MSI일 때 <code>/proc/interrupts</code>의 칩 이름이 <code>GICv2m-PCI-MSI-0000:01:00.0</code>, 트리거는 <code>Edge</code>. sysfs <code>irq</code>도 30으로 <strong>바뀌었다</strong> (MSI를 켜면 <code>pdev-&gt;irq</code>가 첫 MSI virq로 교체된다). <code>msi_irqs/</code> 디렉터리에 <code>30</code>이 생겼다.</li><li>INTx일 때는 <code>GIC-0 35 Level</code> — DT <code>interrupt-map</code>이 edu의 INTA(Root Port 뒤 슬롯 0)를 GIC SPI 3(hwirq 35)로 매핑했다. Level이므로 핸들러가 ack(0x64)를 쓰지 않으면 같은 인터럽트가 계속 들어온다 (interrupt storm → "nobody cared" → 커널이 IRQ를 끔).</li><li><code>/proc/iomem</code>에 BAR0 영역이 <code>h11_edu</code> 이름으로 claim됐다 (<code>pci_request_region</code>). 다른 드라이버가 같은 BAR를 요청하면 <code>-EBUSY</code>.</li><li>remove 콜백은 카운터 출력만 한다. IRQ 해제 → 벡터 해제 → iounmap/release → disable은 devres가 <strong>등록 역순</strong>으로 처리한다. 순서가 중요하다: IRQ를 먼저 free해야 벡터를 지울 수 있다.</li></ul>
+<h3 id="5-4-probe-작성-체크리스트와-함정">5.4 probe 작성 체크리스트와 함정<a class="anchor" href="#5-4-probe-작성-체크리스트와-함정" aria-label="link">#</a></h3>
+<ul><li>probe에서 실패하면 <strong>이미 한 일을 되돌리는 코드가 필요 없다</strong>(devres). 비관리형 API를 섞으면 그 부분만 직접 되돌려야 한다 — 섞지 말 것.</li><li><code>pci_set_master()</code>를 빼먹으면 MMIO는 되는데 DMA와 MSI가 조용히 안 된다. 예제 14(VFIO)에서 정확히 이 증상을 다시 만난다.</li><li><code>pdev-&gt;irq</code>를 직접 <code>request_irq</code>에 넣는 옛 코드는 MSI-X 다중 벡터에서 틀린다. 항상 <code>pci_irq_vector(pdev, i)</code>.</li><li>INTx는 공유될 수 있으니 <code>IRQF_SHARED</code> + "내 장치가 올린 게 아니면 <code>IRQ_NONE</code>". MSI는 장치 전용이라 공유 플래그가 필요 없다.</li><li>probe는 sleep 가능한 프로세스 컨텍스트다 (F 모듈). 긴 초기화(펌웨어 로드 G10, 링크 대기)는 괜찮지만, 부팅 시간을 줄이려면 <code>.driver.probe_type = PROBE_PREFER_ASYNCHRONOUS</code>를 고려한다.</li></ul>
+<hr>
+<h2 id="6-인터럽트-intx-msi-msi-x가-linux-virq가-되기까지">6. 인터럽트 — INTx, MSI, MSI-X가 Linux virq가 되기까지<a class="anchor" href="#6-인터럽트-intx-msi-msi-x가-linux-virq가-되기까지" aria-label="link">#</a></h2>
+<h3 id="6-1-세-방식-비교-don이-아는-것을-linux-쪽에서">6.1 세 방식 비교 (Don이 아는 것을 Linux 쪽에서)<a class="anchor" href="#6-1-세-방식-비교-don이-아는-것을-linux-쪽에서" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th></th><th>INTx</th><th>MSI</th><th>MSI-X</th></tr></thead><tbody><tr><td>전달</td><td>PCIe에서는 Assert/Deassert_INTx 메시지 → RC가 가상 선으로</td><td>장치가 메모리 쓰기 (주소=MSI 컨트롤러 doorbell, 데이터=벡터 번호)</td><td>같음, 벡터마다 주소·데이터가 따로</td></tr><tr><td>벡터 수</td><td>4개 선(A~D)을 여러 장치가 공유</td><td>1~32, <strong>연속·2의 거듭제곱</strong>, 주소 1개</td><td>최대 2048, 테이블(BAR 안)</td></tr><tr><td>마스킹</td><td>장치 레지스터</td><td>선택적 per-vector mask</td><td>벡터마다 mask 비트</td></tr><tr><td>CPU별 affinity</td><td>불가(선 하나)</td><td>벡터 하나라면 한 CPU</td><td>벡터마다 다른 CPU — NVMe의 per-CPU 큐</td></tr><tr><td>트리거</td><td>level</td><td>edge</td><td>edge</td></tr><tr><td>Linux 플래그</td><td><code>PCI_IRQ_INTX</code> (옛 이름 <code>PCI_IRQ_LEGACY</code>, 6.8~6.9 무렵 교체 — 버전은 기억 기반)</td><td><code>PCI_IRQ_MSI</code></td><td><code>PCI_IRQ_MSIX</code> (+ <code>PCI_IRQ_AFFINITY</code>)</td></tr></tbody></table></div>
+<h3 id="6-2-irq_domain-경로">6.2 irq_domain 경로<a class="anchor" href="#6-2-irq_domain-경로" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="340" y="18" text-anchor="middle" font-size="13" font-weight="bold">하드웨어 경로 — 메모리 쓰기가 인터럽트가 된다</text>
+  <rect x="20" y="30" width="150" height="52" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="95" y="51" text-anchor="middle" font-size="12">edu / NVMe</text>
+  <text x="95" y="69" text-anchor="middle" font-size="12">MSI(-X) 엔트리</text>
+  <rect x="235" y="30" width="200" height="52" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="335" y="51" text-anchor="middle" font-size="12">MemWr TLP</text>
+  <text x="335" y="69" text-anchor="middle" font-size="12">addr=doorbell, data=N</text>
+  <rect x="500" y="30" width="160" height="52" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="580" y="51" text-anchor="middle" font-size="12">GICv2m: SPI N</text>
+  <text x="580" y="69" text-anchor="middle" font-size="12">ITS: DevID+EvID → LPI</text>
+  <line x1="170" y1="56" x2="233" y2="56" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="435" y1="56" x2="498" y2="56" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="340" y="118" text-anchor="middle" font-size="13" font-weight="bold">커널 경로 — 계층형 irq_domain (H6)</text>
+  <rect x="20" y="132" width="200" height="58" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="120" y="155" text-anchor="middle" font-size="12">PCI-MSI 도메인</text>
+  <text x="120" y="173" text-anchor="middle" font-size="12">msi_desc: 엔트리 → virq</text>
+  <rect x="240" y="132" width="200" height="58" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="155" text-anchor="middle" font-size="12">GICv2m / ITS 도메인</text>
+  <text x="340" y="173" text-anchor="middle" font-size="12">doorbell 주소·데이터 배정</text>
+  <rect x="460" y="132" width="200" height="58" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="560" y="155" text-anchor="middle" font-size="12">GIC 도메인</text>
+  <text x="560" y="173" text-anchor="middle" font-size="12">hwirq (SPI/LPI 번호)</text>
+  <line x1="220" y1="161" x2="238" y2="161" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="440" y1="161" x2="458" y2="161" stroke="currentColor" marker-end="url(#ah3)"/>
+  <rect x="20" y="222" width="300" height="74" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="243" font-size="12">probe 시점 (설정)</text>
+  <text x="30" y="261" font-size="12">pci_alloc_irq_vectors()</text>
+  <text x="30" y="279" font-size="12">→ 엔트리에 주소·데이터 쓰고 enable</text>
+  <rect x="360" y="222" width="300" height="74" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="370" y="243" font-size="12">인터럽트 시점 (실행)</text>
+  <text x="370" y="261" font-size="12">GIC IAR → hwirq → virq 30</text>
+  <text x="370" y="279" font-size="12">→ handle_edge_irq → h11_irq()</text>
+  <line x1="120" y1="190" x2="120" y2="220" stroke="currentColor" marker-start="url(#ah3)"/>
+  <line x1="560" y1="190" x2="560" y2="220" stroke="currentColor" marker-end="url(#ah3)"/>
+  <rect x="20" y="318" width="640" height="68" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="30" y="339" font-size="12">/proc/interrupts 의 칩 이름이 도메인을 말해 준다:</text>
+  <text x="30" y="357" font-size="12">GICv2m-PCI-MSI-0000:01:00.0 (v2m 프레임: SPI 재사용, 장치 구분 없음)</text>
+  <text x="30" y="375" font-size="12">ITS-PCI-MSI-0000:01:00.0 (ITS: DeviceID로 장치를 구분 → MSI 격리 가능 → VFIO 안전)</text>
+</svg></figure>
+<p>그림 4 — MSI 경로. probe 때 <code>pci_alloc_irq_vectors()</code>가 도메인 계층을 따라 내려가며 "이 장치는 이 주소에 이 값을 써라"를 MSI(-X) 엔트리에 프로그램하고, 런타임에는 GIC가 받은 번호를 같은 계층을 거꾸로 타고 올라가 virq → 핸들러로 바꾼다.</p>
+<p>Don이 SSD 쪽에서 MSI-X 테이블에 "누군가 써 준 값"을 보고 메모리 쓰기를 날렸다면, 그 "누군가"가 <code>GICv2m</code> 또는 <code>ITS</code> irq_domain의 <code>irq_compose_msi_msg</code> 콜백이다. GICv2m은 SPI 몇 개를 MSI용으로 떼어 doorbell 하나(프레임 주소)에 데이터=SPI 번호를 쓰게 하는 단순한 방식이고, GICv3 ITS는 장치의 RequesterID(DeviceID)와 데이터(EventID)를 테이블로 번역해 LPI를 만든다.</p>
+<h3 id="6-3-예제-8-nvme의-msi-x-벡터와-큐">6.3 예제 8 — NVMe의 MSI-X 벡터와 큐<a class="anchor" href="#6-3-예제-8-nvme의-msi-x-벡터와-큐" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 실제 드라이버 <code>nvme.ko</code>가 MSI-X를 어떻게 쓰는지. (<code>CONFIG_BLK_DEV_NVME=m</code>이라 랩 빌드 트리의 <code>.ko</code>를 initramfs에 넣어 insmod)</p>
+<figure class="code"><span class="lang">sh</span><pre><code>insmod /nvme-core.ko; insmod /nvme.ko; sleep 2
+dmesg | grep nvme | grep -v taint
+grep -E "CPU0|nvme" /proc/interrupts
+ls /sys/bus/pci/devices/0000:02:00.0/msi_irqs | wc -l
+/h11_cfg 0000:02:00.0 | grep -E "MSI|PCIe|PM"
+cat /sys/bus/pci/devices/0000:02:00.0/power_state /sys/bus/pci/devices/0000:02:00.0/power/runtime_status \
+    /sys/bus/pci/devices/0000:02:00.0/current_link_speed /sys/bus/pci/devices/0000:02:00.0/current_link_width
+ls /sys/bus/pci/devices/0000:02:00.0/link; cat /sys/module/pcie_aspm/parameters/policy
+lspci -k | grep 02:00; ls /dev/nvme*</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[    1.378508] nvme nvme0: pci function 0000:02:00.0
+[    1.378621] nvme 0000:02:00.0: enabling device (0000 -&gt; 0002)
+[    1.404398] nvme nvme0: 2/0/0 default/read/poll queues
+[    1.409847] nvme nvme0: Ignoring bogus Namespace Identifiers
+           CPU0       CPU1       
+ 30:         12          0 GICv2m-PCI-MSIX-0000:02:00.0   0 Edge      nvme0q0
+ 31:          1          0 GICv2m-PCI-MSIX-0000:02:00.0   1 Edge      nvme0q1
+ 32:          0          0 GICv2m-PCI-MSIX-0000:02:00.0   2 Edge      nvme0q2
+3
+  [40] cap 11 MSI-X: enable=1 size=65 table BAR0+0x2000 PBA BAR0+0x3000
+  [80] cap 10 PCIe v2 type 0: LnkCap 2.5GT/s x1, LnkSta 2.5GT/s x1
+  [60] cap 01 PM v3, state D0
+D0
+active
+2.5 GT/s PCIe
+1
+l0s_aspm
+[default] performance powersave powersupersave 
+02:00.0 Class 0108: 1b36:0010 nvme
+/dev/nvme0n1  /dev/nvme0</code></pre></figure>
+<p>출력에서 볼 것: 장치는 MSI-X 65개를 광고하지만 드라이버는 <strong>CPU 수(2) + admin 1 = 3개</strong>만 받았다. <code>nvme</code>는 <code>pci_alloc_irq_vectors_affinity(..., PCI_IRQ_ALL_TYPES | PCI_IRQ_AFFINITY, ...)</code>로 I/O 큐마다 벡터를 CPU에 고정 분산(managed affinity)한다. <code>nvme0q0</code>이 admin 큐(Identify 등으로 12번 울림), <code>nvme0q1/q2</code>가 CPU별 I/O 큐다. Don이 SSD 펌웨어에서 "호스트가 CQ마다 다른 MSI-X 벡터를 지정한다"고 보던 그 구성의 호스트 쪽 모습이다. <code>link/l0s_aspm</code> 파일은 §11에서 다시 본다.</p>
+<h3 id="6-4-예제-9-gicv3-its로-바꾸면-이름이-바뀐다">6.4 예제 9 — GICv3 ITS로 바꾸면 이름이 바뀐다<a class="anchor" href="#6-4-예제-9-gicv3-its로-바꾸면-이름이-바뀐다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 장치·같은 드라이버라도 MSI 컨트롤러가 바뀌면 도메인 이름이 바뀐다. <code>MACH=virt,gic-version=3,its=on</code>으로 부팅해 <code>h11_edu</code>를 다시 올렸다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>=== GICv2m (기본)
+ 33:       1000          0 GICv2m-PCI-MSI-0000:01:00.0   0 Edge      h11_edu
+ 16:          0          0 GICv2m-PCI-MSIX-0000:00:10.0   0 Edge      PCIe PME, aerdrv, PCIe bwctrl
+=== GICv3 + ITS
+ 33:       1000          0 ITS-PCI-MSI-0000:01:00.0   0 Edge      h11_edu
+ 16:          0          0 ITS-PCI-MSIX-0000:00:10.0   0 Edge      PCIe PME, aerdrv, PCIe bwctrl</code></pre></figure>
+<p>(두 부팅의 <code>/proc/interrupts</code>에서 해당 줄만 모았다.) 드라이버 코드는 한 글자도 안 바뀌었다 — irq_domain 계층이 차이를 흡수한다. Root Port의 <code>PCIe PME, aerdrv, PCIe bwctrl</code>는 portdrv가 Root Port의 MSI-X 벡터 하나를 PME·AER·대역폭 제어 서비스가 <strong>공유</strong>한다는 뜻이다.</p>
+<hr>
+<h2 id="7-측정-msi-vs-intx-왕복-지연-에뮬레이터-주의">7. 측정 — MSI vs INTx 왕복 지연 (에뮬레이터 주의)<a class="anchor" href="#7-측정-msi-vs-intx-왕복-지연-에뮬레이터-주의" aria-label="link">#</a></h2>
+<h3 id="7-1-예제-10-세-가지-구성에서-반복-측정">7.1 예제 10 — 세 가지 구성에서 반복 측정<a class="anchor" href="#7-1-예제-10-세-가지-구성에서-반복-측정" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 7의 드라이버로 MSI와 INTx를 번갈아 3회씩, 세 구성에서 잰다. 각 줄은 1000회의 백분위수다. 측정 구간은 "드라이버가 raise 레지스터에 <code>writel</code> 직전 → 핸들러 진입 후 <code>ktime_get_ns</code>"이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># g_lat.sh: for r in 1 2 3; do for m in 0 1; do insmod /h11_edu.ko intx=$m; dmesg | grep latency | tail -1; rmmod h11_edu; done; done
+./run.sh g_lat.sh                                  # GICv2m, -smp 2
+./run.sh g_lat.sh -smp 1                           # GICv2m, CPU 1개
+MACH=virt,gic-version=3,its=on ./run.sh g_lat.sh   # GICv3 ITS, -smp 2</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>=== GICv2m, smp 2   (홀수 줄 MSI, 짝수 줄 INTx)
+1000 irqs, latency ns min=8624 p50=41712 p90=65168 p99=531168
+1000 irqs, latency ns min=2576 p50=2704 p90=3824 p99=13280
+1000 irqs, latency ns min=3040 p50=3296 p90=6208 p99=20832
+1000 irqs, latency ns min=2624 p50=2784 p90=5840 p99=20208
+1000 irqs, latency ns min=13680 p50=38544 p90=55920 p99=173584
+1000 irqs, latency ns min=2544 p50=2704 p90=3040 p99=9136
+=== GICv2m, smp 1
+1000 irqs, latency ns min=2496 p50=2592 p90=2704 p99=8000
+1000 irqs, latency ns min=2320 p50=2528 p90=6576 p99=37872
+1000 irqs, latency ns min=2448 p50=2624 p90=2672 p99=5840
+1000 irqs, latency ns min=2368 p50=2464 p90=2544 p99=6368
+1000 irqs, latency ns min=2448 p50=2624 p90=3872 p99=10544
+1000 irqs, latency ns min=2336 p50=2464 p90=3712 p99=11344
+=== GICv3 ITS, smp 2
+1000 irqs, latency ns min=103376 p50=106752 p90=114160 p99=137120
+1000 irqs, latency ns min=2592 p50=2720 p90=2832 p99=10832
+1000 irqs, latency ns min=103504 p50=111120 p90=131264 p99=268304
+1000 irqs, latency ns min=2416 p50=2544 p90=2624 p99=6576
+1000 irqs, latency ns min=103408 p50=131632 p90=288672 p99=421328
+1000 irqs, latency ns min=2416 p50=2512 p90=2784 p99=14336</code></pre></figure>
+<p>(dmesg 접두어 <code>[time] h11_edu 0000:01:00.0:</code>는 지웠다.)</p>
+<p>smp 2에서 MSI가 실행마다 3 µs와 40 µs를 오가는 게 이상해서, insmod를 어느 CPU에서 돌리는지 고정해 봤다 (MSI의 effective affinity는 CPU0).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>for r in 1 2; do for c in 0 1; do echo "insmod on CPU$c:"; taskset -c $c /sbin/insmod /h11_edu.ko; dmesg | grep latency | tail -1; rmmod h11_edu; done; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>insmod on CPU0:
+[    1.363182] h11_edu 0000:01:00.0: 1000 irqs, latency ns min=3408 p50=3664 p90=7344 p99=30080
+insmod on CPU1:
+[    1.604848] h11_edu 0000:01:00.0: 1000 irqs, latency ns min=7920 p50=42880 p90=86000 p99=167168
+insmod on CPU0:
+[    1.726307] h11_edu 0000:01:00.0: 1000 irqs, latency ns min=3280 p50=3504 p90=9248 p99=47584
+insmod on CPU1:
+[    1.880233] h11_edu 0000:01:00.0: 1000 irqs, latency ns min=8000 p50=9040 p90=13168 p99=32848</code></pre></figure>
+<h3 id="7-2-차트">7.2 차트<a class="anchor" href="#7-2-차트" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+  <text x="340" y="18" text-anchor="middle" font-size="13" font-weight="bold">IRQ 왕복 지연 p50 (3회 중앙값, 로그 축) — QEMU TCG</text>
+  <g stroke="currentColor" stroke-opacity="0.25" stroke-width="1">
+    <line x1="80" y1="40" x2="640" y2="40"/><line x1="80" y1="113.3" x2="640" y2="113.3"/><line x1="80" y1="186.7" x2="640" y2="186.7"/>
+  </g>
+  <line x1="80" y1="260" x2="640" y2="260" stroke="currentColor"/>
+  <line x1="80" y1="40" x2="80" y2="260" stroke="currentColor"/>
+  <text x="72" y="264" text-anchor="end" font-size="12">1 µs</text>
+  <text x="72" y="191" text-anchor="end" font-size="12">10 µs</text>
+  <text x="72" y="117" text-anchor="end" font-size="12">100 µs</text>
+  <text x="72" y="44" text-anchor="end" font-size="12">1 ms</text>
+  <rect x="146" y="229.3" width="40" height="30.7" rx="3" fill="#4a7bd0" fill-opacity="0.85" stroke="#4a7bd0"/>
+  <rect x="194" y="231.3" width="40" height="28.7" rx="3" fill="#e08a3c" fill-opacity="0.85" stroke="#e08a3c"/>
+  <rect x="316" y="143.7" width="40" height="116.3" rx="3" fill="#4a7bd0" fill-opacity="0.85" stroke="#4a7bd0"/>
+  <rect x="364" y="228.3" width="40" height="31.7" rx="3" fill="#e08a3c" fill-opacity="0.85" stroke="#e08a3c"/>
+  <rect x="486" y="110" width="40" height="150" rx="3" fill="#4a7bd0" fill-opacity="0.85" stroke="#4a7bd0"/>
+  <rect x="534" y="230.3" width="40" height="29.7" rx="3" fill="#e08a3c" fill-opacity="0.85" stroke="#e08a3c"/>
+  <text x="166" y="223" text-anchor="middle" font-size="12">2.6</text>
+  <text x="214" y="225" text-anchor="middle" font-size="12">2.5</text>
+  <text x="336" y="137" text-anchor="middle" font-size="12">38.5</text>
+  <text x="384" y="222" text-anchor="middle" font-size="12">2.7</text>
+  <text x="506" y="104" text-anchor="middle" font-size="12">111</text>
+  <text x="554" y="224" text-anchor="middle" font-size="12">2.5</text>
+  <text x="190" y="280" text-anchor="middle" font-size="12">GICv2m · smp 1</text>
+  <text x="360" y="280" text-anchor="middle" font-size="12">GICv2m · smp 2</text>
+  <text x="530" y="280" text-anchor="middle" font-size="12">GICv3 ITS · smp 2</text>
+  <rect x="230" y="302" width="14" height="14" rx="2" fill="#4a7bd0" fill-opacity="0.85" stroke="#4a7bd0"/>
+  <text x="250" y="314" font-size="12">MSI</text>
+  <rect x="310" y="302" width="14" height="14" rx="2" fill="#e08a3c" fill-opacity="0.85" stroke="#e08a3c"/>
+  <text x="330" y="314" font-size="12">INTx</text>
+  <text x="420" y="314" font-size="12">단위 µs</text>
+</svg></figure>
+<p>그림 5 — 예제 10의 p50 (각 구성 3회의 중앙값: smp1 MSI 2624/INTx 2464 ns, smp2 MSI 38544/INTx 2704 ns, ITS MSI 111120/INTx 2544 ns).</p>
+<h3 id="7-3-이-숫자를-어떻게-읽어야-하나-실제-hw와-반대일-수-있다">7.3 이 숫자를 어떻게 읽어야 하나 — <strong>실제 HW와 반대일 수 있다</strong><a class="anchor" href="#7-3-이-숫자를-어떻게-읽어야-하나-실제-hw와-반대일-수-있다" aria-label="link">#</a></h3>
+<p>에뮬레이터에서는 <strong>INTx가 MSI보다 빠르거나 같게</strong> 나왔다. 실제 실리콘에서 이 결론을 내리면 안 된다. 이유:</p>
+<ul class="tasks"><li>QEMU TCG에서 INTx는 <code>pci_set_irq()</code> → GIC 상태 비트 변경으로 끝나는 함수 호출이다. MSI는 edu가 "메모리 쓰기"를 에뮬레이트해 GICv2m 프레임 → GIC로 가거나, ITS면 <strong>게스트 메모리에 있는 ITS 테이블(디바이스·인터럽트 변환 테이블)과 LPI pending 테이블을 에뮬레이터가 읽고 쓰는</strong> 경로라 훨씬 길다 (ITS 100 µs대).</li><li>smp 2에서 MSI가 느린 건 위 taskset 실험이 보여 주듯 <strong>raise를 쓴 vCPU와 인터럽트를 받는 vCPU가 다를 때</strong> 생기는 vCPU 스레드 간 깨우기 비용으로 보인다 (MSI 대상 CPU0, insmod가 CPU1이면 느림). INTx가 왜 같은 영향을 덜 받는지는 QEMU 내부까지 확인하지 않았다 — 추정으로만 남긴다.</li><li>실제 HW에서 MSI가 유리한 이유는 지연 수 µs 차이가 아니라 구조다: (1) INTx는 Assert 메시지와 데이터 DMA 쓰기 사이의 순서가 보장되지 않아 핸들러가 장치 레지스터를 <strong>읽어서 flush</strong>해야 하지만, MSI는 같은 posted write 스트림이라 데이터가 먼저 도착해 있다. (2) 공유 라인이 없어 다른 장치 핸들러를 돌지 않는다. (3) MSI-X는 큐마다·CPU마다 벡터를 나눠 락 없이 처리한다(NVMe). (4) level 선 ack을 위한 MMIO 쓰기가 없다.</li><li>측정 방법 자체는 실 보드에서 그대로 쓸 수 있다: 장치 레지스터 쓰기 직전 타임스탬프와 핸들러 진입 타임스탬프. 실 보드라면 scope로 GPIO 토글을 함께 찍어 교차 검증하는 것이 Don 방식이다.</li></ul>
+<hr>
+<h2 id="8-dma-mask-iommu-그리고-조용한-데이터-손상">8. DMA — mask, IOMMU, 그리고 조용한 데이터 손상<a class="anchor" href="#8-dma-mask-iommu-그리고-조용한-데이터-손상" aria-label="link">#</a></h2>
+<h3 id="8-1-직관">8.1 직관<a class="anchor" href="#8-1-직관" aria-label="link">#</a></h3>
+<p>장치가 DMA로 쓸 주소는 CPU 물리 주소가 아니라 <strong>버스(DMA) 주소</strong>다. 둘이 같으려면 IOMMU가 없고 오프셋도 없어야 한다. 그리고 장치가 낼 수 있는 주소 비트 수(DMA mask)가 메모리가 있는 곳까지 닿아야 한다. edu는 28비트(256 MiB 미만)만 낼 수 있는데, QEMU virt의 RAM은 0x4000_0000(1 GiB)부터 시작한다 — <strong>RAM 어디에도 닿을 수 없는 장치</strong>다. 실무에서 32비트 DMA만 되는 오래된 Wi-Fi·USB 칩을 4 GiB 넘는 RAM이 있는 SoC에 붙일 때와 같은 문제다.</p>
+<h3 id="8-2-예제-11-h11_dma-mask를-정직하게-거짓으로-iommu-없이-있이">8.2 예제 11 — <code>h11_dma</code>: mask를 정직하게/거짓으로, IOMMU 없이/있이<a class="anchor" href="#8-2-예제-11-h11_dma-mask를-정직하게-거짓으로-iommu-없이-있이" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>dma_set_mask_and_coherent()</code>의 반환값, <code>dmam_alloc_coherent()</code>가 준 DMA 주소, edu DMA 엔진으로 RAM→장치→RAM 왕복한 데이터가 일치하는지.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* h11_dma: edu의 DMA 엔진으로 RAM→장치→RAM 왕복. DMA mask와 IOMMU의 효과를 본다 */
+#include &lt;linux/module.h&gt;
+#include &lt;linux/pci.h&gt;
+#include &lt;linux/dma-mapping.h&gt;
+#include &lt;linux/delay.h&gt;
+
+#define EDU_DMA_SRC 0x80
+#define EDU_DMA_DST 0x88
+#define EDU_DMA_CNT 0x90
+#define EDU_DMA_CMD 0x98
+#define EDU_BUF 0x40000                         /* edu 내부 4 KiB 버퍼의 "장치 주소" */
+
+static unsigned int mask_bits = 28;             /* edu 기본 DMA 능력 = 28비트 */
+module_param(mask_bits, uint, 0444);
+
+static int edu_dma(void __iomem *bar, u64 src, u64 dst, u32 cnt, u32 dir)
+{
+	int i;
+
+	writeq(src, bar + EDU_DMA_SRC);
+	writeq(dst, bar + EDU_DMA_DST);
+	writeq(cnt, bar + EDU_DMA_CNT);
+	writeq(1 | dir, bar + EDU_DMA_CMD);     /* bit0 start, bit1 = 1 이면 EDU→RAM */
+	for (i = 0; i &lt; 100 &amp;&amp; (readq(bar + EDU_DMA_CMD) &amp; 1); i++)
+		msleep(5);
+	return (readq(bar + EDU_DMA_CMD) &amp; 1) ? -ETIMEDOUT : 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>static int h11_dma_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+{
+	void __iomem *bar;
+	dma_addr_t h;
+	u8 *buf;
+	int ret, i;
+
+	ret = pcim_enable_device(pdev);
+	if (ret)
+		return ret;
+	bar = pcim_iomap_region(pdev, 0, "h11_dma");
+	if (IS_ERR(bar))
+		return PTR_ERR(bar);
+	pci_set_master(pdev);                           /* Bus Master Enable: 없으면 DMA가 막힌다 */
+	ret = dma_set_mask_and_coherent(&amp;pdev-&gt;dev, DMA_BIT_MASK(mask_bits));
+	dev_info(&amp;pdev-&gt;dev, "dma_set_mask_and_coherent(%u bits) = %d, iommu=%s\n",
+		 mask_bits, ret, device_iommu_mapped(&amp;pdev-&gt;dev) ? "yes" : "no");
+	if (ret)
+		return ret;
+	buf = dmam_alloc_coherent(&amp;pdev-&gt;dev, PAGE_SIZE, &amp;h, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	for (i = 0; i &lt; 1024; i++)
+		buf[i] = i ^ 0x5a;
+	ret = edu_dma(bar, h, EDU_BUF, 1024, 0);               /* RAM → edu */
+	if (!ret)
+		ret = edu_dma(bar, EDU_BUF, h + 2048, 1024, 2);  /* edu → RAM(+2 KiB) */
+	dev_info(&amp;pdev-&gt;dev, "cpu va=%px dma handle=%pad ret=%d match=%s\n", buf, &amp;h, ret,
+		 memcmp(buf, buf + 2048, 1024) ? "NO" : "yes");
+	return ret;
+}
+
+static const struct pci_device_id h11_dma_ids[] = {
+	{ PCI_DEVICE(0x1234, 0x11e8) },
+	{ }
+};
+MODULE_DEVICE_TABLE(pci, h11_dma_ids);
+static struct pci_driver h11_dma_driver = {
+	.name = "h11_dma", .id_table = h11_dma_ids, .probe = h11_dma_probe,
+};
+module_pci_driver(h11_dma_driver);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("H11 edu DMA demo");</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code># (1) IOMMU 없음 (기본 virt)
+insmod /h11_dma.ko                 # 정직하게 28비트
+rmmod h11_dma; insmod /h11_dma.ko mask_bits=32    # 거짓말: 32비트라고 주장
+# (2) SMMUv3 켬
+MACH=virt,iommu=smmuv3 ./run.sh g_dma.sh
+# (3) 거짓말 케이스를 QEMU 게스트 에러 로그와 함께
+./run.sh g_dma2.sh -d guest_errors</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>=== (1) IOMMU 없음
+[    1.239343] h11_dma 0000:01:00.0: enabling device (0000 -&gt; 0002)
+[    1.240064] h11_dma 0000:01:00.0: dma_set_mask_and_coherent(28 bits) = -5, iommu=no
+[    1.240519] h11_dma 0000:01:00.0: probe with driver h11_dma failed with error -5
+[    1.312060] h11_dma 0000:01:00.0: dma_set_mask_and_coherent(32 bits) = 0, iommu=no
+[    1.750366] h11_dma 0000:01:00.0: cpu va=ffff000004496000 dma handle=0x0000000044496000 ret=0 match=NO
+=== (2) SMMUv3   (smmu의 cmdq/evtq 할당 줄 등 일부 생략)
+0 1 2 3 4 5 6 7
+../../../../../../kernel/iommu_groups/5
+[    0.682683] arm-smmu-v3 9050000.smmuv3: ias 44-bit, oas 44-bit (features 0x01088705)
+[    1.339858] h11_dma 0000:01:00.0: dma_set_mask_and_coherent(28 bits) = 0, iommu=yes
+[    1.561404] h11_dma 0000:01:00.0: cpu va=ffff800080065000 dma handle=0x000000000ffff000 ret=0 match=yes
+[    1.627512] h11_dma 0000:01:00.0: dma_set_mask_and_coherent(32 bits) = 0, iommu=yes
+[    1.844935] h11_dma 0000:01:00.0: cpu va=ffff800080043000 dma handle=0x000000000ffff000 ret=0 match=yes
+=== (3) 거짓 mask + -d guest_errors (QEMU stderr가 게스트 콘솔에 섞여 나옴)
+EDU: clamping DMA 0x00000000436a5000 to 0x00000000036a5000!EDU: clamping DMA 0x00000000436a5800 to 0x00000000036a5800![    2.318238] h11_dma: loading out-of-tree module taints kernel.
+[    2.338562] h11_dma 0000:01:00.0: dma_set_mask_and_coherent(32 bits) = 0, iommu=no
+[    2.749668] h11_dma 0000:01:00.0: cpu va=ffff0000036a5000 dma handle=0x00000000436a5000 ret=0 match=NO</code></pre></figure>
+<p>출력에서 볼 것 — 이 노트에서 가장 중요한 출력 중 하나다:</p>
+<ul><li><strong>정직한 28비트 mask는 <code>-EIO</code>(-5)로 거부된다.</strong> IOMMU가 없으면 DMA 주소 = 물리 주소인데, 28비트 안에 RAM이 한 바이트도 없으니 DMA API가 "이 장치는 이 시스템에서 DMA 불가"라고 정확히 말해 준 것이다. 드라이버는 여기서 멈추는 게 맞다.</li><li><strong>32비트라고 거짓말하면 모든 API가 성공(ret=0)하고 데이터만 틀린다(match=NO).</strong> 장치는 상위 비트를 잘라 0x036a5000 — RAM도 아닌 곳 — 에 썼다. 실제 HW였다면 다른 장치 레지스터나 다른 프로세스의 메모리를 조용히 덮어썼을 것이다. "DMA mask는 장치 데이터시트의 주소 비트 수를 그대로 적는다"가 규칙이다.</li><li><strong>SMMUv3를 켜면 28비트로 성공한다.</strong> 장치가 보는 주소(IOVA) <code>0x0ffff000</code>은 28비트 안이고, SMMU가 이를 실제 RAM(1 GiB 위)으로 번역한다. IOMMU의 실용적 가치 중 하나: 주소 능력이 부족한 장치를 살린다. 또 하나는 격리 — 장치가 매핑되지 않은 메모리를 건드리면 SMMU fault가 난다(§12의 VFIO가 이걸 전제로 한다).</li><li><code>iommu_groups/5</code>: SMMU가 있으면 장치마다 IOMMU 그룹이 생긴다 (그룹 = 서로 격리할 수 없는 장치 묶음).</li></ul>
+<p>DMA API의 나머지(streaming <code>dma_map_single</code>/<code>dma_map_sg</code>, 캐시 동기화, <code>dma_sync_*</code>)는 H9에서 다룬다. PCI 드라이버 입장에서 기억할 것: <code>dma_set_mask_and_coherent()</code>는 probe에서 <code>pci_set_master()</code> 뒤, 버퍼 할당 전에. 64비트를 먼저 시도하고 실패하면 32비트로 내려가는 패턴이 흔했지만, 현재 커널에서는 64비트 mask 설정이 사실상 실패하지 않으므로 "64비트 가능한 장치는 <code>DMA_BIT_MASK(64)</code> 한 번"이 권장이다.</p>
+<hr>
+<h2 id="9-수명주기-enable-reset-remove-rescan-bind-unbind">9. 수명주기 — enable, reset, remove/rescan, bind/unbind<a class="anchor" href="#9-수명주기-enable-reset-remove-rescan-bind-unbind" aria-label="link">#</a></h2>
+<h3 id="9-1-예제-12-sysfs로-장치를-끄고-켜고-지우고-다시-찾기">9.1 예제 12 — sysfs로 장치를 끄고 켜고 지우고 다시 찾기<a class="anchor" href="#9-1-예제-12-sysfs로-장치를-끄고-켜고-지우고-다시-찾기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: G3에서 본 driver core의 bind/unbind가 PCI에서는 어떻게 보이는지, 그리고 PCI만의 <code>enable</code>, <code>reset</code>, <code>remove</code>, <code>rescan</code>.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /sys/bus/pci/devices/0000:01:00.0
+cat enable; echo 1 &gt; enable; cat enable; /h11_cfg 0000:01:00.0 | head -1; echo 0 &gt; enable; cat enable
+insmod /h11_edu.ko; echo 1 &gt; reset; dmesg | tail -3
+/h11_cfg 0000:01:00.0 | head -1; rmmod h11_edu
+insmod /h11_edu.ko; dmesg -c &gt; /dev/null
+echo 1 &gt; /sys/bus/pci/devices/0000:01:00.0/remove; dmesg -c; ls /sys/bus/pci/devices | tr "\n" " "
+echo 1 &gt; /sys/bus/pci/rescan; dmesg -c | grep -v latency
+ls -l /sys/bus/pci/devices/0000:01:00.0/driver | sed 's/.*-&gt; //'
+echo 0000:01:00.0 &gt; /sys/bus/pci/drivers/h11_edu/unbind; dmesg -c
+echo 0000:01:00.0 &gt; /sys/bus/pci/drivers/h11_edu/bind; dmesg -c | tail -2</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>=== enable
+0
+1
+0000:01:00.0 [1234:11e8] class 00ff00 hdr type 0, cfg 256 B, cmd 0002 sts 0010
+0
+=== reset
+[    1.227873] h11_edu 0000:01:00.0: 1000 irqs, latency ns min=5328 p50=28672 p90=30288 p99=37968
+[    1.230070] h11_edu 0000:01:00.0: resetting
+[    1.238391] h11_edu 0000:01:00.0: reset done
+0000:01:00.0 [1234:11e8] class 00ff00 hdr type 0, cfg 256 B, cmd 0406 sts 0010
+=== remove/rescan
+[    1.395018] h11_edu 0000:01:00.0: remove: handled 1000 irqs
+0000:00:00.0 0000:00:02.0 0000:00:10.0 0000:00:11.0 0000:00:12.0 0000:02:00.0 0000:03:00.0 
+[    1.413906] pci 0000:01:00.0: [1234:11e8] type 00 class 0x00ff00 conventional PCI endpoint
+[    1.414433] pci 0000:01:00.0: BAR 0 [mem 0x10000000-0x100fffff]
+[    1.414945] pci_bus 0000:01: busn_res: [bus 01] end is updated to 01
+[    1.415465] pci_bus 0000:02: busn_res: [bus 02] end is updated to 02
+[    1.415913] pci_bus 0000:03: busn_res: [bus 03] end is updated to 03
+[    1.416263] pci 0000:01:00.0: BAR 0 [mem 0x10000000-0x100fffff]: assigned
+[    1.416897] h11_edu 0000:01:00.0: id=010000ed live=edcba987 BAR0 [mem 0x10000000-0x100fffff]
+[    1.417542] h11_edu 0000:01:00.0: irq 30 via MSI
+../../../../../../bus/pci/drivers/h11_edu
+=== unbind/bind
+[    1.459418] h11_edu 0000:01:00.0: remove: handled 1000 irqs
+[    1.466826] h11_edu 0000:01:00.0: irq 30 via MSI
+[    1.533691] h11_edu 0000:01:00.0: 1000 irqs, latency ns min=11632 p50=27792 p90=30000 p99=50128</code></pre></figure>
+<p>(rescan 직후 probe의 latency 줄은 <code>grep -v latency</code>로 걸렀다. 마지막 <code>../bus/pci/drivers/h11_edu</code>는 <code>ls -l driver</code> 결과다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>enable</code>에 1을 쓰면 <code>pci_enable_device()</code>가 불려 cmd가 <code>0002</code>(Memory decode)가 된다. 드라이버 없이 장치를 켜는 디버그용 스위치다 (<code>resource0</code> mmap 전에 필요).</li><li><code>reset</code>: 드라이버가 붙은 상태에서도 된다. PCI core가 config를 저장 → 드라이버의 <code>reset_prepare</code> → 리셋(여기서는 <code>reset_method</code>=bus, Root Port의 Secondary Bus Reset) → config 복원 → <code>reset_done</code>. 리셋 후 cmd가 <code>0406</code>으로 <strong>복원</strong>된 게 그 증거다. Don의 SSD 세계로 말하면 호스트가 FLR/Hot Reset을 날리고 config를 다시 써 주는 그 시퀀스다.</li><li><code>remove</code>: 드라이버 <code>remove()</code> → <code>pci_dev</code> 삭제. 디렉터리 목록에서 <code>0000:01:00.0</code>이 사라졌다. 장치는 물리적으로 그대로 있다 — 커널이 잊었을 뿐.</li><li><code>rescan</code>: 전체 버스를 다시 스캔해서 <strong>새로 보이는</strong> 장치만 추가한다. 같은 BAR 주소를 다시 배정받았고 <code>h11_edu</code>가 자동으로 probe됐다. 핫플러그 슬롯이 없는 보드에서 "부팅 후 늦게 전원이 들어오는 PCIe 장치(예: 모뎀)"를 붙이는 실전 기법이다 (FPGA 비트스트림 로드 후 rescan도 같은 패턴).</li><li><code>unbind</code>/<code>bind</code>: <code>pci_dev</code>는 남기고 드라이버만 떼었다 붙인다 (G3의 driver core 경로). §12에서 <code>driver_override</code>와 함께 VFIO로 넘길 때 쓴다.</li></ul>
+<h3 id="9-2-hotplug">9.2 Hotplug<a class="anchor" href="#9-2-hotplug" aria-label="link">#</a></h3>
+<p>진짜 PCIe 핫플러그(Slot Capabilities의 Presence Detect, Attention Button)는 <code>pciehp</code>(<code>CONFIG_HOTPLUG_PCI_PCIE</code>) 서비스가 Root Port/Downstream Port에 붙어 처리한다 — 랩 커널은 이 옵션이 꺼져 있어 실행하지 못했다 (<code># CONFIG_HOTPLUG_PCI_PCIE is not set</code>). 동작 원리는 같다: 장치 등장 → <code>pci_rescan_bus()</code> 경로, 장치 제거 → <code>pci_stop_and_remove_bus_device()</code> 경로. 드라이버 입장에서 중요한 점은 <strong>surprise removal</strong>: 장치가 사라진 뒤 MMIO 읽기는 <code>0xffffffff</code>를 돌려준다. 그래서 견고한 드라이버는 <code>readl() == ~0</code>을 "장치 사라짐"으로 의심하고 <code>pci_device_is_present()</code>로 확인한다 (NVMe 드라이버가 그렇게 한다).</p>
+<hr>
+<h2 id="10-aer-에러를-커널이-받고-드라이버가-복구한다">10. AER — 에러를 커널이 받고 드라이버가 복구한다<a class="anchor" href="#10-aer-에러를-커널이-받고-드라이버가-복구한다" aria-label="link">#</a></h2>
+<h3 id="10-1-흐름">10.1 흐름<a class="anchor" href="#10-1-흐름" aria-label="link">#</a></h3>
+<p>Don은 AER 레지스터(Uncorrectable/Correctable Status, Mask, Severity, Header Log)를 장치 쪽에서 세팅해 본 사람이다. 호스트 쪽 이야기는 이렇다: 장치가 ERR_COR/ERR_NONFATAL/ERR_FATAL 메시지를 올려 보냄 → Root Port가 Root Error Status에 기록하고 인터럽트(위에서 본 <code>aerdrv</code> MSI-X 벡터) → <strong><code>aerdrv</code></strong>(drivers/pci/pcie/aer.c)가 소스 장치를 찾아 상태 레지스터를 읽고 로그 → correctable이면 기록 후 클리어, uncorrectable이면 <code>pcie_do_recovery()</code>가 해당 브리지 아래 모든 드라이버의 <code>pci_error_handlers</code>를 순서대로 부른다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 드라이버 쪽 — 형태만 보이는 스케치 (실행하지 않음, e1000e·nvme·igb가 이 구조를 갖는다) */
+static pci_ers_result_t drv_error_detected(struct pci_dev *pdev, pci_channel_state_t state)
+{
+	/* state: pci_channel_io_normal(비치명) / io_frozen(치명, MMIO 막힘) / io_perm_failure */
+	if (state == pci_channel_io_perm_failure)
+		return PCI_ERS_RESULT_DISCONNECT;
+	/* 큐 정지, 진행 중 I/O 중단. frozen이면 MMIO 하지 말 것 */
+	return PCI_ERS_RESULT_NEED_RESET;
+}
+static pci_ers_result_t drv_slot_reset(struct pci_dev *pdev)
+{
+	/* 링크 리셋 후: pci_restore_state(), 다시 enable, 장치 재초기화 */
+	return PCI_ERS_RESULT_RECOVERED;
+}
+static void drv_resume(struct pci_dev *pdev) { /* 큐 재시작 */ }
+
+static const struct pci_error_handlers drv_err_handler = {
+	.error_detected = drv_error_detected,
+	.slot_reset = drv_slot_reset,
+	.resume = drv_resume,
+};
+/* struct pci_driver 안에: .err_handler = &amp;drv_err_handler, */</code></pre></figure>
+<p>6.18의 <code>struct pci_error_handlers</code>에는 이 외에 <code>mmio_enabled</code>, <code>reset_prepare</code>/<code>reset_done</code>(예제 12의 sysfs reset이 부르는 쪽), <code>cor_error_detected</code>가 있다.</p>
+<h3 id="10-2-예제-13-qemu-모니터로-aer-에러-주입">10.2 예제 13 — QEMU 모니터로 AER 에러 주입<a class="anchor" href="#10-2-예제-13-qemu-모니터로-aer-에러-주입" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: correctable, uncorrectable non-fatal, fatal 에러를 Root Port <code>rp3</code>(그 아래 e1000e)에 주입하고 커널 로그·복구·sysfs 카운터를 본다. QEMU HMP 명령 <code>pcie_aer_inject_error</code>를 모니터 소켓으로 보낸다. 상태 값은 AER 레지스터 비트 그대로: correctable <code>0x1</code>(Receiver Error), uncorrectable <code>0x4000</code>(Completion Timeout, 기본 severity non-fatal), <code>0x10</code>(Data Link Protocol Error, 기본 fatal).</p>
+<figure class="code"><span class="lang">sh</span><pre><code># VM 쪽 (게스트가 READY를 찍으면 주입)
+for c in "pcie_aer_inject_error -c rp3 0x1" "pcie_aer_inject_error rp3 0x4000" "pcie_aer_inject_error rp3 0x10"; do
+  echo "$c" | socat - UNIX-CONNECT:/var/tmp/H11/h11_mon.sock | tr -d "\r" | grep "^OK"; sleep 3; done
+# 게스트: ip link set eth1 up; echo READY; sleep 14; dmesg | grep -iE "aer|e1000e|pcieport" ...; cat aer_* 카운터</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>OK id: rp3 root bus: 0000:00, bus: 0 devfn: 12.0
+OK id: rp3 root bus: 0000:00, bus: 0 devfn: 12.0
+OK id: rp3 root bus: 0000:00, bus: 0 devfn: 12.0
+--- 게스트 dmesg (부팅 줄 일부 생략)
+[    1.034254] pcieport 0000:00:12.0: AER: enabled with IRQ 20
+[    2.502391] e1000e 0000:03:00.0 eth1: NIC Link is Up 1000 Mbps Full Duplex, Flow Control: Rx/Tx
+[    3.387085] pcieport 0000:00:12.0: AER: Correctable error message received from 0000:00:12.0
+[    3.387402] pcieport 0000:00:12.0: PCIe Bus Error: severity=Correctable, type=Physical Layer, (Receiver ID)
+[    3.387439] pcieport 0000:00:12.0:   device [1b36:000c] error status/mask=00000001/0000e000
+[    3.387486] pcieport 0000:00:12.0:    [ 0] RxErr                  (First)
+[    6.395020] pcieport 0000:00:12.0: AER: Uncorrectable (Non-Fatal) error message received from 0000:00:12.0
+[    6.395204] pcieport 0000:00:12.0: PCIe Bus Error: severity=Uncorrectable (Non-Fatal), type=Transaction Layer, (Requester ID)
+[    6.395218] pcieport 0000:00:12.0:   device [1b36:000c] error status/mask=00004000/02400000
+[    6.395228] pcieport 0000:00:12.0:    [14] CmpltTO                (First)
+[    6.549758] pcieport 0000:00:12.0: AER: Root Port link has been reset (0)
+[    6.616112] pcieport 0000:00:12.0: AER: device recovery successful
+[    7.105688] e1000e 0000:03:00.0 eth1: NIC Link is Up 1000 Mbps Full Duplex, Flow Control: Rx/Tx
+[    9.406297] pcieport 0000:00:12.0: AER: Uncorrectable (Fatal) error message received from 0000:00:12.0
+[    9.406510] pcieport 0000:00:12.0: PCIe Bus Error: severity=Uncorrectable (Fatal), type=Data Link Layer, (Receiver ID)
+[    9.406529] pcieport 0000:00:12.0:   device [1b36:000c] error status/mask=00000010/02400000
+[    9.406543] pcieport 0000:00:12.0:    [ 4] DLP                    (First)
+[    9.556807] pcieport 0000:00:12.0: AER: Root Port link has been reset (0)
+[    9.617919] pcieport 0000:00:12.0: AER: device recovery successful
+[   10.109724] e1000e 0000:03:00.0 eth1: NIC Link is Up 1000 Mbps Full Duplex, Flow Control: Rx/Tx
+--- sysfs 카운터 (cat aer_rootport_total_err_cor / _fatal / _nonfatal, 그다음 grep -v " 0$" aer_dev_*)
+1
+1
+1
+/sys/bus/pci/devices/0000:00:12.0/aer_dev_correctable:RxErr 1
+/sys/bus/pci/devices/0000:00:12.0/aer_dev_correctable:TOTAL_ERR_COR 1
+/sys/bus/pci/devices/0000:00:12.0/aer_dev_nonfatal:CmpltTO 1
+/sys/bus/pci/devices/0000:00:12.0/aer_dev_nonfatal:TOTAL_ERR_NONFATAL 1
+/sys/bus/pci/devices/0000:00:12.0/aer_dev_fatal:DLP 1
+/sys/bus/pci/devices/0000:00:12.0/aer_dev_fatal:TOTAL_ERR_FATAL 1
+3: eth1: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500 qdisc pfifo_fast qlen 1000</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>Correctable(RxErr)은 <strong>로그만</strong> 남기고 끝났다. 실무에서 수천 개씩 쌓이면 링크 신호 품질(SI) 문제의 신호다 — Don이 scope로 잡던 그 영역. 레이트 리밋이 걸려 있어 로그는 줄어들 수 있지만 sysfs 카운터는 정확하다.</li><li>Uncorrectable은 non-fatal도, fatal도 <strong>Root Port 링크 리셋(Secondary Bus Reset)</strong> → e1000e의 <code>error_detected</code> → <code>slot_reset</code> → <code>resume</code>을 거쳐 "device recovery successful", 그리고 e1000e가 링크를 다시 올렸다(NIC Link is Up). 인터페이스는 UP으로 살아 있다. (non-fatal인데도 링크 리셋을 한 것은 e1000e의 <code>error_detected</code>가 <code>NEED_RESET</code>을 돌려주기 때문이다 — 6.18 <code>drivers/pci/pcie/err.c</code>의 <code>pcie_do_recovery</code>는 status가 <code>NEED_RESET</code>이거나 state가 frozen이면 <code>reset_subordinates</code>를 부른다.)</li><li>처음엔 e1000e 자체에 주입했는데 아무 일도 없었다. 조사해 보니 QEMU e1000e 모델은 DEVCTL의 에러 보고 enable 비트가 쓰기 불가(읽으면 항상 0)라 메시지를 올리지 못한다. 그래서 Root Port(이 비트가 <code>0x000f</code>로 켜져 있음)에 주입했다. 실 장비에서도 "AER가 안 찍힌다"의 첫 확인은 장치 DEVCTL의 CERE/NFERE/FERE/URRE 비트와 Root Port의 Root Error Command다.</li><li><code>aer_dev_*</code> sysfs 파일은 장치마다 있고, Root Port에는 <code>aer_rootport_total_*</code>이 더 있다. 현장 장비 모니터링 스크립트가 읽기 좋은 위치다.</li><li>랩 커널에는 <code>CONFIG_PCIE_DPC</code>(Downstream Port Containment)가 꺼져 있다. DPC가 켜진 하드웨어에서는 fatal 에러 때 포트가 스스로 링크를 끊어 오염 전파를 막고, 복구 경로가 DPC 쪽으로 간다.</li></ul>
+<hr>
+<h2 id="11-전원-관리-d-state-runtime-pm-aspm-짧게-깊은-내용은-n5">11. 전원 관리 — D-state, runtime PM, ASPM (짧게, 깊은 내용은 N5)<a class="anchor" href="#11-전원-관리-d-state-runtime-pm-aspm-짧게-깊은-내용은-n5" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>층</th><th>무엇</th><th>Linux에서 보이는 곳</th></tr></thead><tbody><tr><td>장치 D-state</td><td>D0(동작) / D3hot(전원 유지, config만 응답) / D3cold(전원 차단)</td><td><code>power_state</code> 파일, <code>pci_set_power_state()</code>, PM cap의 PMCSR</td></tr><tr><td>runtime PM</td><td>사용하지 않을 때 드라이버가 D3로 보내고 쓸 때 깨움</td><td><code>power/control</code>(on/auto), <code>power/runtime_status</code>, 드라이버의 <code>pm_runtime_*</code> (N5)</td></tr><tr><td>시스템 suspend</td><td>전체 suspend 때 <code>pci_pm_suspend</code> → 드라이버 <code>.driver.pm</code> 콜백</td><td><code>struct dev_pm_ops</code>, <code>DEFINE_SIMPLE_DEV_PM_OPS</code></td></tr><tr><td>링크 ASPM</td><td>링크 유휴 시 L0s/L1(+L1 substates)</td><td><code>/sys/module/pcie_aspm/parameters/policy</code>, 장치 <code>link/</code> 디렉터리의 <code>l0s_aspm</code>, <code>l1_aspm</code> 등</td></tr></tbody></table></div>
+<p>예제 8 출력이 이걸 보여 줬다: NVMe는 <code>D0</code>, runtime <code>active</code>, 링크 <code>2.5 GT/s</code> x1, <code>link/l0s_aspm</code> 파일 하나(장치가 L0s만 광고 — 부팅 로그의 <code>ASPM: default states L0s</code>), 정책은 <code>[default]</code>. 실무 함정: 일부 Wi-Fi/모뎀 칩은 ASPM L1에서 깨어나는 지연 때문에 패킷 드롭·링크 다운이 생겨 드라이버가 <code>pci_disable_link_state(pdev, PCIE_LINK_STATE_L1)</code>로 끄는 quirk를 넣는다. 반대로 배터리 장비는 L1.2를 켜야 대기 전력이 맞는다 — 둘 다 bring-up 때 자주 맞닥뜨린다.</p>
+<hr>
+<h2 id="12-vfio-유저-공간-드라이버-spdk-dpdk의-세계">12. VFIO — 유저 공간 드라이버 (SPDK·DPDK의 세계)<a class="anchor" href="#12-vfio-유저-공간-드라이버-spdk-dpdk의-세계" aria-label="link">#</a></h2>
+<h3 id="12-1-직관">12.1 직관<a class="anchor" href="#12-1-직관" aria-label="link">#</a></h3>
+<p>SPDK는 NVMe를 커널 <code>nvme</code> 드라이버 없이 <strong>유저 공간 폴링 드라이버</strong>로 돌린다. Don이 SSD 펌웨어 쪽에서 "호스트 IOPS가 커널 스택 오버헤드로 묶인다"는 얘기를 들었다면 그 해결책이 이것이다. 그러려면 유저 프로세스가 (1) BAR를 mmap하고, (2) 인터럽트를 받고(또는 폴링), (3) <strong>안전하게</strong> DMA할 수 있어야 한다. (3)이 핵심이다: 유저 프로세스가 장치에 아무 물리 주소나 DMA하라고 시키면 커널 메모리를 덮어쓸 수 있다. 그래서 VFIO는 <strong>IOMMU로 장치의 DMA를 그 프로세스가 등록한 메모리로만 제한</strong>하고, MSI도 장치별로 격리(ITS의 DeviceID)될 때만 허락한다.</p>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="170" y="18" text-anchor="middle" font-size="13" font-weight="bold">커널 드라이버 (h11_edu, nvme)</text>
+  <text x="510" y="18" text-anchor="middle" font-size="13" font-weight="bold">VFIO 유저 드라이버 (h11_vfio, SPDK)</text>
+  <line x1="340" y1="28" x2="340" y2="392" stroke="currentColor" stroke-dasharray="4 4" stroke-opacity="0.5"/>
+  <rect x="20" y="34" width="300" height="44" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="170" y="61" text-anchor="middle" font-size="12">앱: read/write, 블록·네트워크 스택</text>
+  <rect x="360" y="34" width="300" height="68" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="510" y="55" text-anchor="middle" font-size="12">앱 = 드라이버</text>
+  <text x="510" y="73" text-anchor="middle" font-size="12">mmap된 BAR에 직접 load/store</text>
+  <text x="510" y="91" text-anchor="middle" font-size="12">eventfd로 IRQ, 또는 폴링</text>
+  <text x="170" y="98" text-anchor="middle" font-size="12">syscall</text>
+  <line x1="170" y1="78" x2="170" y2="110" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="20" y="112" width="300" height="96" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="134" text-anchor="middle" font-size="12">커널 pci_driver</text>
+  <text x="170" y="154" text-anchor="middle" font-size="12">pcim_iomap_region → readl/writel</text>
+  <text x="170" y="174" text-anchor="middle" font-size="12">request_irq → 핸들러</text>
+  <text x="170" y="194" text-anchor="middle" font-size="12">DMA API (dma_map_*)</text>
+  <rect x="360" y="122" width="300" height="86" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="510" y="144" text-anchor="middle" font-size="12">vfio-pci (얇은 커널 부분)</text>
+  <text x="510" y="164" text-anchor="middle" font-size="12">region info · config 가상화</text>
+  <text x="510" y="184" text-anchor="middle" font-size="12">MSI → eventfd 연결</text>
+  <text x="510" y="200" text-anchor="middle" font-size="12">MAP_DMA → IOMMU 페이지 테이블</text>
+  <line x1="510" y1="102" x2="510" y2="120" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="20" y="236" width="300" height="44" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="170" y="263" text-anchor="middle" font-size="12">IOMMU 선택 (없어도 동작)</text>
+  <rect x="360" y="236" width="300" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="510" y="257" text-anchor="middle" font-size="12">IOMMU 필수 (SMMUv3) +</text>
+  <text x="510" y="273" text-anchor="middle" font-size="12">격리된 MSI 필수 (GICv3 ITS)</text>
+  <line x1="170" y1="208" x2="170" y2="234" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="510" y1="208" x2="510" y2="234" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="20" y="308" width="640" height="44" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="335" text-anchor="middle" font-size="12">PCIe 장치 (같은 edu, 같은 BAR, 같은 MSI)</text>
+  <line x1="170" y1="280" x2="170" y2="306" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="510" y1="280" x2="510" y2="306" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="340" y="378" text-anchor="middle" font-size="12">VFIO: group(/dev/vfio/N) → container(/dev/vfio/vfio) → device fd</text>
+</svg></figure>
+<p>그림 6 — 커널 드라이버와 VFIO 유저 드라이버. 데이터 경로(MMIO·DMA)는 둘 다 장치에 직접 닿는다. 차이는 누가 그 경로를 쥐고 있고, 무엇이 안전을 보장하느냐다.</p>
+<h3 id="12-2-예제-14-h11_vfio-edu를-유저-공간에서-구동">12.2 예제 14 — <code>h11_vfio</code>: edu를 유저 공간에서 구동<a class="anchor" href="#12-2-예제-14-h11_vfio-edu를-유저-공간에서-구동" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>driver_override</code>로 edu를 <code>vfio-pci</code>에 넘기고, 정적 C 프로그램이 VFIO 컨테이너/그룹/장치 API로 BAR0를 mmap해 ID를 읽고, MSI를 eventfd로 3번 받는다. 랩 커널은 <code>CONFIG_VFIO_PCI=y</code>, <code>CONFIG_VFIO_IOMMU_TYPE1=y</code>, <code>CONFIG_IOMMUFD</code>는 꺼져 있으므로 전통적인 group/container API를 쓴다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* h11_vfio: VFIO로 edu를 유저 공간에서 구동 — BAR0 mmap, MSI를 eventfd로 받기 */
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/ioctl.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/eventfd.h&gt;
+#include &lt;linux/vfio.h&gt;
+#define DIE(m) do { perror(m); exit(1); } while (0)
+
+int main(int argc, char **argv)
+{
+    if (argc &lt; 3) { fprintf(stderr, "usage: %s /dev/vfio/N BDF\n", argv[0]); exit(1); }
+    int ctr = open("/dev/vfio/vfio", O_RDWR);                     /* 1) container */
+    if (ctr &lt; 0) DIE("vfio");
+    printf("api=%d type1=%d\n", ioctl(ctr, VFIO_GET_API_VERSION),
+           ioctl(ctr, VFIO_CHECK_EXTENSION, VFIO_TYPE1_IOMMU));
+    int grp = open(argv[1], O_RDWR);                              /* 2) group */
+    if (grp &lt; 0) DIE(argv[1]);
+    struct vfio_group_status gs = { .argsz = sizeof gs };
+    if (ioctl(grp, VFIO_GROUP_GET_STATUS, &amp;gs) || !(gs.flags &amp; VFIO_GROUP_FLAGS_VIABLE))
+        DIE("group not viable (모든 장치가 vfio에 bind 되어야 함)");
+    if (ioctl(grp, VFIO_GROUP_SET_CONTAINER, &amp;ctr)) DIE("SET_CONTAINER");
+    if (ioctl(ctr, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU)) DIE("SET_IOMMU");
+    int dev = ioctl(grp, VFIO_GROUP_GET_DEVICE_FD, argv[2]);       /* 3) device */
+    if (dev &lt; 0) DIE("GET_DEVICE_FD");
+    struct vfio_device_info di = { .argsz = sizeof di };
+    if (ioctl(dev, VFIO_DEVICE_GET_INFO, &amp;di)) DIE("GET_INFO");
+    struct vfio_region_info ri = { .argsz = sizeof ri, .index = VFIO_PCI_BAR0_REGION_INDEX };
+    if (ioctl(dev, VFIO_DEVICE_GET_REGION_INFO, &amp;ri)) DIE("REGION_INFO");
+    printf("regions=%u irqs=%u flags=%x  BAR0 size=0x%llx offset=0x%llx flags=%x\n",
+           di.num_regions, di.num_irqs, di.flags, ri.size, ri.offset, ri.flags);
+    volatile uint32_t *bar = mmap(NULL, ri.size, PROT_READ | PROT_WRITE, MAP_SHARED, dev, ri.offset);
+    if (bar == MAP_FAILED) DIE("mmap BAR0");
+    bar[1] = 0xcafe0000;                                          /* liveness: 반전되어 돌아옴 */
+    printf("edu id=%08x live=%08x (user-space MMIO)\n", bar[0], bar[1]);
+
+    struct vfio_region_info cr = { .argsz = sizeof cr, .index = VFIO_PCI_CONFIG_REGION_INDEX };
+    uint16_t cmd;                                                 /* 4) Bus Master Enable */
+    if (ioctl(dev, VFIO_DEVICE_GET_REGION_INFO, &amp;cr) || pread(dev, &amp;cmd, 2, cr.offset + 4) != 2) DIE("cfg");
+    cmd |= 0x4;
+    if (pwrite(dev, &amp;cmd, 2, cr.offset + 4) != 2) DIE("cfg write");
+    int efd = eventfd(0, 0);                                      /* 5) MSI → eventfd */
+    char b[sizeof(struct vfio_irq_set) + sizeof(int)];
+    struct vfio_irq_set *is = (struct vfio_irq_set *)b;
+    *is = (struct vfio_irq_set){ .argsz = sizeof b, .index = VFIO_PCI_MSI_IRQ_INDEX, .start = 0,
+        .count = 1, .flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER };
+    *(int *)is-&gt;data = efd;
+    if (ioctl(dev, VFIO_DEVICE_SET_IRQS, is)) DIE("SET_IRQS");
+    for (int i = 0; i &lt; 3; i++) {
+        uint64_t cnt;
+        bar[0x60 / 4] = 1u &lt;&lt; i;                                  /* raise */
+        if (read(efd, &amp;cnt, 8) != 8) DIE("read eventfd");
+        printf("irq #%d: eventfd=%llu status=%x\n", i, (unsigned long long)cnt, bar[0x24 / 4]);
+        bar[0x64 / 4] = bar[0x24 / 4];                            /* ack */
+    }
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>gcc -std=gnu11 -Wall -Wextra -O2 -static ~/.elinux_scratch/H11/h11_vfio.c -o payload/h11_vfio   # 경고 0
+# 게스트 g_vfio.sh
+D=0000:01:00.0
+G=$(basename $(readlink /sys/bus/pci/devices/$D/iommu_group)); echo "group $G:"; ls /sys/kernel/iommu_groups/$G/devices
+echo vfio-pci &gt; /sys/bus/pci/devices/$D/driver_override
+echo $D &gt; /sys/bus/pci/drivers_probe
+ls -l /sys/bus/pci/devices/$D/driver | sed 's/.*-&gt; //'; ls /dev/vfio
+/h11_vfio /dev/vfio/$G $D
+dmesg | grep -iE "vfio" | tail -5</code></pre></figure>
+<p>처음엔 SMMUv3만 켜고(GICv2m 그대로) 돌렸다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>$ MACH=virt,iommu=smmuv3 ./run.sh g_vfio.sh
+group 5:
+0000:01:00.0
+../../../../../../bus/pci/drivers/vfio-pci
+5     vfio
+api=0 type1=1
+SET_IOMMU: Operation not permitted
+[    1.084904] VFIO - User Level meta-driver version: 0.3
+[    1.683931] vfio_iommu_type1_attach_group: No interrupt remapping support.  Use the module param "allow_unsafe_interrupts" to enable VFIO IOMMU support on this platform</code></pre></figure>
+<p>GICv2m은 MSI를 장치별로 격리할 수 없다(어느 장치든 같은 doorbell에 아무 SPI 번호나 쓸 수 있다). 그래서 VFIO가 거부했다. GICv3 ITS(DeviceID로 장치를 구분)를 켜서 다시 돌렸다. 그런데 이번엔 BAR는 읽히는데 첫 인터럽트에서 영원히 멈췄다 (<code>timeout</code>으로 종료). 원인은 <strong>Bus Master Enable</strong>: <code>vfio-pci</code>는 장치를 리셋한 뒤 BME를 켜 주지 않는다. MSI도 장치가 내는 메모리 쓰기이므로 BME가 꺼져 있으면 나가지 않는다. 위 코드의 4) 단계(config region을 통해 Command bit2 세팅)를 추가한 최종 결과:</p>
+<figure class="code"><span class="lang">text</span><pre><code>$ MACH=virt,gic-version=3,its=on,iommu=smmuv3 ./run.sh g_vfio.sh
+group 5:
+0000:01:00.0
+../../../../../../bus/pci/drivers/vfio-pci
+5     vfio
+api=0 type1=1
+regions=9 irqs=5 flags=3  BAR0 size=0x100000 offset=0x0 flags=7
+edu id=010000ed live=3501ffff (user-space MMIO)
+irq #0: eventfd=1 status=1
+irq #1: eventfd=1 status=2
+irq #2: eventfd=1 status=4
+[    1.618970] VFIO - User Level meta-driver version: 0.3
+[    2.979851] vfio-pci 0000:01:00.0: enabling device (0000 -&gt; 0002)
+[    2.980702] vfio-pci 0000:01:00.0: resetting
+[    2.995924] vfio-pci 0000:01:00.0: reset done</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>api=0</code>: <code>VFIO_API_VERSION</code>은 원래 0이다 (에러 아님). <code>type1=1</code>: Type1 IOMMU 백엔드 사용 가능.</li><li><code>regions=9</code>: BAR0~5, ROM, config, VGA 순의 고정 인덱스(<code>VFIO_PCI_*_REGION_INDEX</code>). <code>irqs=5</code>: INTx, MSI, MSI-X, ERR, REQ. BAR0 <code>flags=7</code> = READ, WRITE, MMAP 가능. BAR0의 offset이 0인 건 "device fd 안에서 이 region이 시작하는 위치"이고, 인덱스별로 <code>index &lt;&lt; 40</code> 오프셋을 쓰는 게 vfio-pci 구현이다 (BAR0는 0).</li><li><code>live=3501ffff</code> = <code>~0xcafe0000</code>. 유저 프로세스의 store가 장치 레지스터에 닿았다 — 커널 드라이버 한 줄 없이.</li><li><code>vfio-pci</code>가 open 시점에 장치를 <strong>리셋</strong>했다 (이전 사용자의 상태를 지우기 위해). 리셋 후 Command는 decode만 켜진 <code>0002</code>라 BME를 유저가 직접 켜야 했다.</li><li>이 상태에서 DMA를 하려면 <code>VFIO_IOMMU_MAP_DMA</code>로 내 버퍼(vaddr)를 IOVA에 매핑하고, 장치에는 그 IOVA를 준다 — SPDK가 hugepage를 IOVA로 등록하는 것이 바로 이것이다. (이 예제에서는 하지 않았다. 예제 11에서 SMMU가 IOVA <code>0x0ffff000</code>을 준 것과 같은 원리다.)</li><li>유저 드라이버의 비용: 커널의 에러 처리(AER 복구), 전원 관리, 다른 서브시스템 통합(블록 계층, netdev)을 포기하고 직접 만든다. 그래서 SPDK/DPDK처럼 "장치를 통째로 한 앱이 쓰는" 경우와 가상머신 패스스루(QEMU/KVM이 VFIO 사용자)에 쓴다. 단순히 레지스터 몇 개를 만지려는 용도라면 UIO(<code>uio_pci_generic</code>: IOMMU 없이 INTx만, DMA 안전 보장 없음)도 있지만 새 설계에서는 VFIO가 표준이다.</li></ul>
+<hr>
+<h2 id="13-sr-iov-장치-하나가-여러-pci-함수로">13. SR-IOV — 장치 하나가 여러 PCI 함수로<a class="anchor" href="#13-sr-iov-장치-하나가-여러-pci-함수로" aria-label="link">#</a></h2>
+<h3 id="13-1-예제-15-qemu-igb로-vf-만들기">13.1 예제 15 — QEMU <code>igb</code>로 VF 만들기<a class="anchor" href="#13-1-예제-15-qemu-igb로-vf-만들기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: SR-IOV를 지원하는 PF(Physical Function)에 <code>sriov_numvfs</code>를 쓰면 VF(Virtual Function)가 새 <code>pci_dev</code>로 나타나고, VF 드라이버(<code>igbvf</code>)가 probe되는 것. (Root Port <code>rp4</code>와 <code>-device igb</code>를 추가로 꽂음)</p>
+<figure class="code"><span class="lang">sh</span><pre><code>./run.sh g_sriov.sh -device pcie-root-port,id=rp4,bus=pcie.0,chassis=4,slot=4,addr=0x13 \
+  -netdev user,id=h11n2 -device igb,netdev=h11n2,bus=rp4
+# 게스트
+P=/sys/bus/pci/devices/0000:04:00.0
+cat $P/sriov_totalvfs $P/sriov_numvfs $P/sriov_offset $P/sriov_stride
+/h11_cfg 0000:04:00.0 | grep ext
+echo 2 &gt; $P/sriov_numvfs
+dmesg | grep -E "04:|igbvf|SR-IOV|VF" | grep -vE "BAR|bridge|Extended|ASPM|assigned|PTP|PHC" | tail -12
+lspci | grep "^04"; ls -l $P/virtfn* | sed 's/.*virtfn/virtfn/'
+readlink /sys/bus/pci/devices/0000:04:10.0/physfn
+echo 0 &gt; $P/sriov_numvfs; lspci | grep -c "^04"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>7
+0
+128
+2
+  [100] ext cap 0001 v1
+  [150] ext cap 000e v1
+  [160] ext cap 0010 v1
+[    4.090740] igbvf 0000:04:10.0: PF still in reset state. Is the PF interface up?
+[    4.090798] igbvf 0000:04:10.0: Assigning random MAC address.
+[    4.092116] igbvf 0000:04:10.0: PF still resetting
+[    4.093873] igbvf 0000:04:10.0: Intel(R) 82576 Virtual Function
+[    4.093975] igbvf 0000:04:10.0: Address: b6:b0:11:3f:b2:eb
+[    4.094812] pci 0000:04:10.2: [8086:10ca] type 00 class 0x020000 PCIe Endpoint
+[    4.095770] igbvf 0000:04:10.2: enabling device (0000 -&gt; 0002)
+[    4.099821] igbvf 0000:04:10.2: PF still in reset state. Is the PF interface up?
+[    4.099897] igbvf 0000:04:10.2: Assigning random MAC address.
+[    4.102125] igbvf 0000:04:10.2: PF still resetting
+[    4.104295] igbvf 0000:04:10.2: Intel(R) 82576 Virtual Function
+[    4.104333] igbvf 0000:04:10.2: Address: 56:ab:a0:9b:a5:2c
+04:10.2 Class 0200: 8086:10ca
+04:10.0 Class 0200: 8086:10ca
+04:00.0 Class 0200: 8086:10c9
+virtfn0 -&gt; ../0000:04:10.0
+virtfn1 -&gt; ../0000:04:10.2
+../0000:04:00.0
+1</code></pre></figure>
+<p>출력에서 볼 것: SR-IOV ext cap(<code>0010</code>)의 First VF Offset 128, VF Stride 2 → VF의 RID = PF RID + 128 + 2n → <code>04:10.0</code>, <code>04:10.2</code>. VF는 config space를 스캔해서 찾은 게 아니라 <strong>PF의 SR-IOV cap을 보고 커널이 만든</strong> <code>pci_dev</code>다 (<code>pci_iov_add_virtfn</code>). <code>virtfn*</code>/<code>physfn</code> 링크가 PF-VF 관계를 보여 준다. "PF still in reset state"는 PF 인터페이스를 <code>ip link up</code> 하지 않아서 나는 정보성 메시지다. 드라이버 쪽에서는 PF 드라이버가 <code>.sriov_configure</code> 콜백을 구현해야 <code>sriov_numvfs</code> 쓰기가 동작하고, 그 안에서 <code>pci_enable_sriov(pdev, n)</code>을 부른다. 실무: VF를 VFIO로 VM이나 컨테이너에 넘기는 게 일반적 용도이고, NVMe SSD도 SR-IOV(가상 컨트롤러)를 지원하는 모델이 있다.</p>
+<hr>
+<h2 id="14-커널-안에서는-무슨-일이-일어나나-probe-가-불리기까지">14. 커널 안에서는 무슨 일이 일어나나 — <code>probe()</code>가 불리기까지<a class="anchor" href="#14-커널-안에서는-무슨-일이-일어나나-probe-가-불리기까지" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="20" width="300" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="42" font-size="12">pci_bus_add_device(pdev)</text>
+  <rect x="20" y="74" width="300" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="96" font-size="12">device_attach → bus_for_each_drv</text>
+  <rect x="20" y="128" width="300" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="150" font-size="12">pci_bus_match → pci_match_device</text>
+  <rect x="20" y="182" width="300" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="204" font-size="12">really_probe → pci_device_probe</text>
+  <rect x="20" y="236" width="300" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="258" font-size="12">pcibios_alloc_irq · pci_dev_get</text>
+  <rect x="20" y="290" width="300" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="312" font-size="12">local_pci_probe (NUMA 노드 CPU에서)</text>
+  <rect x="20" y="344" width="300" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="30" y="366" font-size="12">drv->probe(pdev, id) = h11_probe</text>
+  <line x1="170" y1="54" x2="170" y2="72" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="170" y1="108" x2="170" y2="126" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="170" y1="162" x2="170" y2="180" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="170" y1="216" x2="170" y2="234" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="170" y1="270" x2="170" y2="288" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="170" y1="324" x2="170" y2="342" stroke="currentColor" marker-end="url(#ah5)"/>
+  <text x="350" y="42" font-size="12">부팅: pci_bus_add_devices / rescan / VF 생성</text>
+  <text x="350" y="96" font-size="12">insmod 시: driver_register → 반대 방향 순회</text>
+  <text x="350" y="142" font-size="12">1) driver_override 가 있으면 그 이름만</text>
+  <text x="350" y="160" font-size="12">2) new_id 로 추가한 동적 ID</text>
+  <text x="350" y="178" font-size="12">3) id_table (vendor·device·class)</text>
+  <text x="350" y="258" font-size="12">INTx virq를 pdev->irq 에 준비</text>
+  <text x="350" y="312" font-size="12">장치와 가까운 CPU에서 probe 실행</text>
+  <text x="350" y="366" font-size="12">실패 시 devres 전부 역순 해제</text>
+  <text x="20" y="408" font-size="12">remove 는 역방향: device_release_driver → pci_device_remove → drv->remove → devres 해제</text>
+</svg></figure>
+<p>그림 7 — PCI 장치에 드라이버가 붙는 경로. 위 절반(<code>device_attach</code>, <code>really_probe</code>)은 G3에서 본 driver core 그대로이고, PCI가 끼워 넣는 것은 매칭 규칙(<code>pci_bus_match</code>)과 <code>pci_device_probe</code>다.</p>
+<p>정리하면, 이 노트에서 쓴 API는 커널의 이런 곳으로 이어진다:</p>
+<div class="tw"><table><thead><tr><th>드라이버가 부른 것</th><th>커널 안</th><th>관련 노트</th></tr></thead><tbody><tr><td><code>pcim_enable_device</code></td><td><code>pci_enable_device_flags</code> → <code>pci_enable_resources</code>(Command bit) → <code>pci_enable_bridge</code>(상위 브리지도) → <code>pci_set_power_state(D0)</code> + devres 등록</td><td>G3 (devres)</td></tr><tr><td><code>pcim_iomap_region</code></td><td><code>pci_request_region</code>(<code>__request_region</code>, /proc/iomem) + <code>pci_iomap</code> → <code>ioremap</code></td><td>H1</td></tr><tr><td><code>pci_set_master</code></td><td>Command bit2 + <code>pcibios_set_master</code></td><td>H9</td></tr><tr><td><code>pci_alloc_irq_vectors</code></td><td><code>__pci_enable_msix_range</code> / <code>__pci_enable_msi_range</code> → <code>msi_domain_alloc_irqs</code> → irq_domain 계층 → <code>irq_compose_msi_msg</code> → MSI(-X) 엔트리 쓰기</td><td>H6</td></tr><tr><td><code>devm_request_irq</code></td><td><code>request_threaded_irq</code> → <code>irq_desc</code>에 <code>irqaction</code> 연결</td><td>F 모듈(인터럽트 컨텍스트)</td></tr><tr><td><code>dma_set_mask_and_coherent</code></td><td><code>dma_supported</code> → dma-direct(물리 주소 범위 검사) 또는 iommu-dma(IOVA 할당기 한계 설정)</td><td>H9</td></tr><tr><td>sysfs <code>config</code> 읽기</td><td><code>pci_read_config</code> → <code>pci_user_read_config_*</code> → <code>bus-&gt;ops-&gt;read</code>(ECAM: <code>pci_generic_config_read</code>)</td><td>—</td></tr><tr><td>sysfs <code>remove</code>/<code>rescan</code></td><td><code>pci_stop_and_remove_bus_device_locked</code> / <code>pci_rescan_bus</code></td><td>G9 (hotplug·uevent)</td></tr><tr><td><code>vfio-pci</code></td><td><code>vfio_pci_core</code> → <code>vfio_iommu_type1</code>(IOMMU 매핑) + <code>vfio_virqfd</code>/eventfd</td><td>—</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-embedded-실무에서-다시-보기">15. Embedded 실무에서 다시 보기<a class="anchor" href="#15-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<p><strong>장면 1 — i.MX8M Plus 보드의 PCIe Wi-Fi가 안 잡힌다.</strong> <code>lspci</code>에 Root Port(<code>16c3:abcd</code> 같은 Synopsys ID)만 있고 엔드포인트가 없다. PCI core 문제가 아니라 링크 문제다. 확인 순서: dmesg의 <code>imx6q-pcie</code> 메시지("Phy link never came up") → DT의 <code>reset-gpio</code>(PERST#) 극성·지연, <code>clocks</code>(REFCLK 소스: 내부/외부), <code>vpcie-supply</code>(카드 3.3V) → 카드 쪽 <code>W_DISABLE#</code>. Don의 scope로 REFCLK와 PERST# 타이밍을 찍는 것이 가장 빠르다. 링크가 올라오고 나면 그 뒤는 이 노트의 enumeration 그대로다.</p>
+<p><strong>장면 2 — Jetson Orin + NVMe에서 "BAR 0: no space".</strong> 큰 BAR(수십 MB의 CMB/PMR이 있는 엔터프라이즈 NVMe, 또는 AI 가속기 카드)를 꽂으면 SoC의 32비트 non-pref 창이 모자라 예제 3과 같은 로그가 난다. 대응은 DT <code>ranges</code>의 창 확인, 64비트 prefetchable 창 존재 확인, 핫플러그 여유분 조정. 장치가 64비트 BAR이면서 non-prefetchable이면 브리지 뒤에서 32비트 창에 들어가야 한다는 규칙이 가장 자주 발목을 잡는다.</p>
+<p><strong>장면 3 — 로봇 센서 키트의 FPGA 프레임 그래버(PCIe).</strong> 직접 <code>pci_driver</code>를 쓴다. 이 노트의 <code>h11_edu</code> 골격 그대로: <code>PCI_DEVICE(0x10ee, 0x7024)</code>(Xilinx) → <code>pcim_iomap_region</code> → MSI-X 벡터를 DMA 채널마다 하나씩 → <code>dma_set_mask_and_coherent(64)</code> → 프레임 버퍼는 <code>dma_alloc_coherent</code> 또는 V4L2 videobuf2(I 모듈)로. FPGA를 부팅 후 프로그래밍한다면 그 뒤 <code>echo 1 &gt; /sys/bus/pci/rescan</code>(예제 12).</p>
+<p><strong>장면 4 — 현장 장비의 간헐적 링크 문제 모니터링.</strong> 차량·드론 진동 환경에서 커넥터 문제로 correctable 에러가 쌓인다. 예제 13의 <code>aer_dev_correctable</code> 카운터를 주기적으로 수집하는 데몬 하나가 "현장 리턴 원인 분석"을 몇 주 앞당긴다. <code>current_link_speed</code>/<code>current_link_width</code>가 기대보다 낮으면(Gen3 x4 기대인데 Gen1 x1) 링크 트레이닝 강등이다 — Don의 LTSSM 경험이 그대로 쓰이는 지점이다.</p>
+<hr>
+<h2 id="16-흔한-실수와-증상">16. 흔한 실수와 증상<a class="anchor" href="#16-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td><code>pci_set_master()</code> 누락</td><td>MMIO는 되는데 DMA 결과가 비어 있고 MSI가 안 옴</td><td>Command bit2(BME) 꺼짐 — MSI도 메모리 쓰기</td><td>probe에서 enable 직후 <code>pci_set_master</code> (VFIO면 유저가 config로 켬)</td></tr><tr><td>DMA mask를 장치 능력보다 크게</td><td>API는 성공, 데이터만 깨짐(다른 메모리 덮어씀)</td><td>장치가 상위 주소 비트를 버림 (예제 11)</td><td>데이터시트의 주소 비트 수 그대로 <code>DMA_BIT_MASK(n)</code></td></tr><tr><td><code>pdev-&gt;irq</code>로 <code>request_irq</code></td><td>MSI-X 다중 벡터에서 엉뚱한 벡터, INTx와 MSI 혼동</td><td><code>pdev-&gt;irq</code>는 INTx/첫 벡터 하나뿐</td><td><code>pci_irq_vector(pdev, i)</code></td></tr><tr><td>INTx 핸들러에서 ack 누락</td><td>"irq N: nobody cared", IRQ disabled</td><td>level 트리거 — 라인이 계속 high</td><td>핸들러 안에서 장치 인터럽트 상태 클리어</td></tr><tr><td><code>pcim_iomap_regions</code>/<code>pcim_iomap_table</code> 새 코드에 사용</td><td>리뷰에서 지적, 향후 제거 대상</td><td>6.x에서 deprecated</td><td><code>pcim_iomap_region(pdev, bar, name)</code> + <code>IS_ERR</code></td></tr><tr><td>관리형·비관리형 API 혼용</td><td>remove 후 double free / 언바인드 시 WARN</td><td>devres가 이미 해제한 것을 수동으로 또 해제</td><td>한쪽(pcim/devm)으로 통일</td></tr><tr><td>장치 사라짐(<code>0xffffffff</code>) 미처리</td><td>surprise removal·AER 후 무한 루프, 잘못된 상태값 처리</td><td>장치 없는 MMIO 읽기는 all-ones</td><td><code>readl()==~0</code>이면 <code>pci_device_is_present()</code> 확인</td></tr><tr><td>BAR "no space" 무시</td><td>probe에서 <code>pcim_iomap_region</code> 실패</td><td>브리지 창·DT ranges 부족</td><td>창 확대, <code>pci=realloc</code>, <code>hpmemsize</code> 조정</td></tr><tr><td>VFIO에 IOMMU/격리 MSI 없이 시도</td><td><code>SET_IOMMU: Operation not permitted</code>, "No interrupt remapping support"</td><td>type1은 IOMMU와 MSI 격리 필요</td><td>SMMU + GICv3 ITS (또는 <code>allow_unsafe_interrupts</code>는 신뢰 환경에서만)</td></tr><tr><td>드라이버 붙은 장치에 setpci로 BAR/Command 쓰기</td><td>드라이버가 갑자기 timeout, 시스템 hang</td><td>커널 몰래 decode·주소 변경</td><td>디버그는 unbind 후, 또는 <code>enable</code>/<code>reset</code> 같은 sysfs 경유</td></tr></tbody></table></div>
+<hr>
+<h2 id="17-면접에서-이렇게-말한다">17. 면접에서 이렇게 말한다<a class="anchor" href="#17-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> "Walk me through what a PCI driver's probe function does."</p>
+<p><strong>A.</strong> ID 테이블 매칭으로 probe가 불리면, 장치를 켜고(<code>pcim_enable_device</code>), 쓸 BAR를 요청·매핑하고(<code>pcim_iomap_region</code>), bus mastering을 켜고, DMA mask를 장치 주소 능력에 맞게 설정하고, <code>pci_alloc_irq_vectors</code>로 MSI-X→MSI→INTx 순으로 벡터를 받아 <code>pci_irq_vector</code>로 핸들러를 등록한 뒤, 장치를 초기화하고 drvdata를 저장한다. managed API를 써서 실패나 remove 때 자동 역순 정리가 되게 한다.</p>
+<blockquote><p>"Probe is called after the PCI core matches the device against my id_table. I enable the device with pcim_enable_device, request and map the BARs I need with pcim_iomap_region — the plural pcim_iomap_regions is deprecated now — set bus mastering, set the DMA mask to what the hardware can actually address, then allocate interrupt vectors with pci_alloc_irq_vectors, preferring MSI-X, and request each one through pci_irq_vector. Then I initialize the hardware and store my private struct with pci_set_drvdata. Because everything is devres-managed, an error path or remove unwinds automatically in reverse order."</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Why must pci_set_master be called?" → BME가 꺼져 있으면 장치가 DMA도 MSI도 못 낸다. MSI는 메모리 쓰기이기 때문이다.</p>
+<p><strong>Q.</strong> "How does Linux enumerate PCIe devices on an ARM SoC with no BIOS?"</p>
+<p><strong>A.</strong> DT의 host bridge 노드에서 시작한다. host bridge 드라이버(ECAM generic이나 DWC glue)가 ECAM·주소 창·인터럽트 매핑을 받아 <code>pci_host_probe</code>를 부르면, PCI core가 버스 0부터 깊이 우선으로 Vendor ID를 읽어 장치를 찾고, BAR에 all-ones를 써 크기를 재고, 브리지를 만나면 버스 번호를 주고 재귀한다. 스캔이 끝나면 아래에서 위로 브리지 창 크기를 합산하고 위에서 아래로 주소를 배정한 다음, 장치를 등록해 드라이버 매칭을 일으킨다.</p>
+<blockquote><p>"On ARM there's usually no firmware doing enumeration, so the kernel does it. The host bridge is described in the device tree — ECAM base, the memory and I/O windows in ranges, interrupt-map and msi-map. The host driver, pci-host-generic or a DesignWare glue driver, calls pci_host_probe. The core scans depth-first: reads the vendor ID, sizes each BAR by writing all ones, assigns bus numbers to bridges and recurses. Only after the whole scan does it size the bridge windows bottom-up and assign addresses top-down, then it adds the devices so drivers can bind."</p></blockquote>
+<p><strong>Q.</strong> "What's the difference between MSI and MSI-X, and why does NVMe use MSI-X?"</p>
+<p><strong>A.</strong> 둘 다 장치가 메모리 쓰기로 인터럽트를 보내는 방식이다. MSI는 주소 하나에 연속된 최대 32개 벡터, MSI-X는 BAR 안의 테이블로 최대 2048개 벡터를 각각 다른 주소·데이터·마스크로 갖는다. 그래서 MSI-X는 큐마다 벡터를 주고 각 벡터를 다른 CPU에 고정할 수 있다. NVMe는 CPU당 submission/completion 큐 쌍을 두고 completion 인터럽트를 그 CPU로 보내 락과 캐시 이동을 없앤다. 랩에서도 nvme가 CPU 2개에 I/O 큐 2개 + admin 1개 = MSI-X 3벡터를 썼다.</p>
+<blockquote><p>"Both are in-band memory writes, so there's no shared wire and the interrupt is ordered behind the device's DMA writes. MSI gives one address and up to 32 contiguous vectors; MSI-X has a table in a BAR with up to 2048 entries, each with its own address, data and mask bit. That lets NVMe give every CPU its own queue pair and its own interrupt vector with managed affinity, so completions are handled on the submitting CPU without locks. In my QEMU lab, the nvme driver took exactly three vectors on a two-CPU guest: one admin queue and one I/O queue per CPU."</p></blockquote>
+<p><strong>꼬리 질문</strong>: "How does the MSI address get programmed?" → <code>pci_alloc_irq_vectors</code>가 PCI-MSI irq_domain → GICv2m/ITS domain을 거치며 <code>irq_compose_msi_msg</code>가 doorbell 주소·데이터를 만들고, PCI core가 그 값을 MSI-X 테이블 엔트리에 쓴다.</p>
+<p><strong>Q.</strong> "A device shows up in lspci but the driver fails with 'BAR 0: no space'. How do you debug?"</p>
+<p><strong>A.</strong> 부팅 로그에서 그 BAR의 크기와 64비트/prefetchable 여부, 상위 브리지의 창, root bus resource를 본다. 대부분 host bridge의 창(DT <code>ranges</code>)이 작거나, 64비트 non-pref BAR가 32비트 창에 안 들어가거나, 핫플러그 여유분이 공간을 먹은 경우다. <code>/proc/iomem</code>으로 실제 배치를 보고, 창을 키우거나 <code>pci=realloc</code>, <code>hpmemsize</code>를 조정한다.</p>
+<blockquote><p>"First I read the enumeration log: the BAR size and type, the parent bridge windows, and the root bus resources from the host bridge. Then /proc/iomem to see what's actually placed. Typical causes are a too-small window in the device tree ranges, a 64-bit non-prefetchable BAR that has to fit in the 32-bit window behind a bridge, or hotplug padding. Fixes are enlarging the window, adding a 64-bit prefetchable window, pci=realloc to let the kernel redo bridge windows, or tuning hpmemsize."</p></blockquote>
+<p><strong>Q.</strong> "What is VFIO and why does it require an IOMMU?"</p>
+<p><strong>A.</strong> VFIO는 PCI 장치를 유저 공간 프로세스에 안전하게 넘기는 프레임워크다. BAR를 mmap하게 해 주고, 인터럽트를 eventfd로 전달하고, DMA는 프로세스가 등록한 메모리만 IOMMU 페이지 테이블에 매핑한다. IOMMU 없이 장치가 아무 물리 주소에 DMA할 수 있으면 유저가 커널 메모리를 덮어쓸 수 있으니 안전을 보장할 수 없다. 같은 이유로 MSI도 장치별로 격리돼야 한다 — 실제로 GICv2m에서는 "No interrupt remapping support"로 거부됐고 GICv3 ITS에서 동작했다. SPDK·DPDK·VM 패스스루가 이걸 쓴다.</p>
+<blockquote><p>"VFIO hands a device to user space safely. The process gets the BARs through mmap, interrupts through eventfds, and does DMA only to memory it explicitly maps with VFIO_IOMMU_MAP_DMA, which programs the IOMMU. Without an IOMMU the device could DMA anywhere, so user space could corrupt the kernel. MSI has to be isolated too: in my lab VFIO refused to attach on GICv2m with 'no interrupt remapping support' and worked once I switched to GICv3 with the ITS, which identifies the device by its requester ID. SPDK, DPDK and VM passthrough are the main users."</p></blockquote>
+<p><strong>꼬리 질문</strong>: "What is an IOMMU group?" → IOMMU가 서로 구분할 수 없는 장치 묶음(예: ACS 없는 스위치 뒤). 그룹 안의 모든 장치가 vfio에 bind되거나 드라이버가 없어야 group이 viable하다.</p>
+<p><strong>Q.</strong> "How does Linux handle a PCIe uncorrectable error?"</p>
+<p><strong>A.</strong> 장치가 ERR_NONFATAL/FATAL 메시지를 보내면 Root Port의 AER 서비스가 인터럽트를 받아 소스 장치의 AER 레지스터를 읽어 로그를 남기고, <code>pcie_do_recovery</code>가 그 아래 드라이버들의 <code>error_detected</code>를 부른다. 드라이버가 리셋이 필요하다고 답하면 링크(Secondary Bus) 리셋 후 <code>slot_reset</code>, 그리고 <code>resume</code>. Correctable은 로그와 카운터만 남는다. 랩에서 QEMU로 에러를 주입해 e1000e가 링크 리셋 후 복구되는 것을 확인했다.</p>
+<blockquote><p>"The device sends an error message upstream; the root port's AER service gets the interrupt, finds the source, logs the status and header log, and for uncorrectable errors runs pcie_do_recovery. Every driver below that port gets error_detected; if one asks for a reset, the core resets the link, calls slot_reset so the driver can restore state, then resume. Correctable errors are just logged and counted in sysfs. I injected all three kinds into a QEMU root port and watched e1000e recover through a secondary bus reset."</p></blockquote>
+<p><strong>Q.</strong> "Kernel driver or user-space driver for a custom PCIe FPGA?"</p>
+<p><strong>A.</strong> 다른 커널 서브시스템(V4L2, netdev, 블록)과 통합해야 하거나, 전원 관리·AER 복구·여러 프로세스 공유가 필요하면 커널 드라이버. 장치 하나를 한 앱이 독점하고 최저 지연·폴링이 목표면 VFIO 유저 드라이버. 개발 초기 bring-up에는 VFIO가 빠르게 레지스터를 만져 볼 수 있어 편하고, 제품화 단계에서 커널 드라이버로 옮기는 경우가 많다.</p>
+<blockquote><p>"If the device needs to plug into kernel frameworks — V4L2 for a camera, netdev, block — or needs power management, error recovery and sharing across processes, it's a kernel driver. If one application owns the device and wants minimum latency with polling, a VFIO user-space driver is attractive. For early bring-up I like VFIO because I can poke registers and test DMA from a C program without rebooting, then move the proven sequence into a kernel driver."</p></blockquote>
+<hr>
+<h2 id="18-직접-해보기">18. 직접 해보기<a class="anchor" href="#18-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong>: 예제 2에서 rp1의 MEM 창이 2 MiB인 이유를 두 가지 요인(장치 BAR, 핫플러그 여유분)으로 설명하라. 정답/힌트: edu BAR 1 MiB + <code>add_size 100000</code> 여유분, 1 MiB 정렬.</li><li><strong>개념</strong>: 64비트 non-prefetchable BAR를 가진 장치가 Root Port 뒤에 있을 때 어느 브리지 창에 들어가야 하나, 왜? 정답/힌트: 브리지의 non-pref 창은 32비트(Memory Base/Limit)뿐이다 — 64비트 창은 prefetchable 전용.</li><li><strong>코드</strong>: <code>h11_cfg</code>에 extended capability 이름(0x0001 AER, 0x000d ACS, 0x0010 SR-IOV, 0x0003 DSN, 0x000e ARI)을 출력하도록 고치고, AER cap이면 Uncorrectable/Correctable Status 레지스터(+0x04, +0x10)도 출력하라. 예제 13 직후 Root Port에서 돌려 보라. 정답/힌트: 커널은 로그 후 상태를 클리어하므로 0이 정상이다 — 클리어 전에 보려면 어떻게? (<code>aer_dev_*</code> 카운터)</li><li><strong>코드</strong>: <code>h11_edu</code>를 MSI-X만 허용(<code>PCI_IRQ_MSIX</code>)으로 바꿔 insmod하면 무슨 일이? 정답/힌트: edu는 MSI-X cap이 없으므로 <code>pci_alloc_irq_vectors</code>가 음수 에러 코드를 돌려주고 probe가 실패한다 (어떤 에러 코드인지는 직접 확인해 볼 것 — 이 노트에서는 실행하지 않았다).</li><li><strong>코드</strong>: <code>h11_dma</code>에 IRQ 완료 통지(DMA cmd bit2 = 완료 시 인터럽트 0x100)를 추가해 <code>msleep</code> 폴링을 completion으로 바꿔라. SMMUv3 부팅에서 확인. 정답/힌트: <code>EDU_DMA_CMD</code>에 <code>1 | dir | 4</code>, 핸들러에서 status <code>0x100</code> ack.</li><li><strong>관찰</strong>: 예제 12의 <code>reset</code>을 드라이버 없이 했을 때와 있을 때 cmd 레지스터 값이 어떻게 다른지 <code>h11_cfg</code>로 비교하고 이유를 설명하라. 정답/힌트: 리셋은 config를 0으로 만들지만 PCI core가 저장했던 상태를 복원한다 — 저장 시점의 값이 무엇이었나.</li><li><strong>VFIO</strong>: <code>h11_vfio</code>에 <code>VFIO_IOMMU_MAP_DMA</code>로 4 KiB 버퍼를 IOVA <code>0x100000</code>에 매핑하고, edu DMA로 버퍼 내용을 장치 → 버퍼로 복사해 확인하라. 정답/힌트: <code>struct vfio_iommu_type1_dma_map { .vaddr, .iova, .size, .flags = READ|WRITE }</code>, edu DMA 주소에는 IOVA를 쓴다. 28비트 안이어야 한다.</li></ol>
+<hr>
+<h2 id="19-용어-사전">19. 용어 사전<a class="anchor" href="#19-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>ECAM</td><td>Enhanced Configuration Access Mechanism</td><td>config space를 MMIO 한 덩어리로 매핑하는 표준 (버스당 1 MiB)</td></tr><tr><td>host bridge</td><td>Root Complex의 소프트웨어 표현</td><td><code>struct pci_host_bridge</code>, DT 노드 하나에서 생성</td></tr><tr><td>DWC</td><td>Synopsys DesignWare PCIe 컨트롤러</td><td>대부분의 ARM SoC PCIe의 IP. <code>pcie-designware</code> + SoC별 glue</td></tr><tr><td>iATU</td><td>internal Address Translation Unit</td><td>DWC에서 CPU 주소 창을 PCI 주소·config 요청으로 번역하는 창</td></tr><tr><td>BAR</td><td>Base Address Register</td><td>장치 레지스터/메모리 창의 위치. 크기는 all-ones 쓰기로 측정</td></tr><tr><td>bridge window</td><td>브리지가 하위로 전달하는 주소 범위</td><td>I/O, 32비트 MEM, 64비트 pref MEM 세 종류</td></tr><tr><td><code>struct pci_dev</code></td><td>커널의 PCI 함수 객체</td><td>ID, 위치, resource, irq, DMA mask, 상태</td></tr><tr><td><code>pci_driver</code></td><td>PCI 드라이버 구조체</td><td><code>id_table</code>, <code>probe</code>, <code>remove</code>, <code>err_handler</code>, <code>sriov_configure</code></td></tr><tr><td>devres / managed API</td><td>장치 수명에 묶인 자원</td><td><code>pcim_*</code>, <code>devm_*</code> — detach 때 역순 자동 해제</td></tr><tr><td>MSI / MSI-X</td><td>메시지 시그널 인터럽트</td><td>장치의 메모리 쓰기로 인터럽트. MSI-X는 벡터별 테이블</td></tr><tr><td>GICv2m</td><td>GICv2용 MSI 프레임</td><td>SPI를 MSI로 재사용. 장치 격리 없음</td></tr><tr><td>ITS</td><td>GICv3 Interrupt Translation Service</td><td>DeviceID/EventID → LPI 번역. 장치별 격리</td></tr><tr><td>irq_domain</td><td>하드웨어 IRQ 번호 → Linux virq 매핑 계층</td><td>PCI-MSI → v2m/ITS → GIC 계층</td></tr><tr><td>DMA mask</td><td>장치가 낼 수 있는 DMA 주소 비트 수</td><td><code>dma_set_mask_and_coherent</code> — 거짓이면 조용한 메모리 손상</td></tr><tr><td>IOMMU / SMMU</td><td>장치용 MMU</td><td>IOVA → 물리 주소 번역, DMA 격리</td></tr><tr><td>AER</td><td>Advanced Error Reporting</td><td>PCIe 에러 상태 레지스터와 Linux 복구 프레임워크</td></tr><tr><td>DPC</td><td>Downstream Port Containment</td><td>fatal 에러 시 포트가 링크를 끊어 오염 차단</td></tr><tr><td>SR-IOV</td><td>Single Root I/O Virtualization</td><td>PF 하나에서 VF 여러 개 생성</td></tr><tr><td>VFIO</td><td>Virtual Function I/O</td><td>장치를 IOMMU 보호 아래 유저 공간에 넘기는 프레임워크</td></tr><tr><td>IOMMU group</td><td>격리 불가능한 장치 묶음</td><td>VFIO 할당의 최소 단위</td></tr><tr><td><code>driver_override</code></td><td>sysfs 파일</td><td>이 장치는 지정한 드라이버에만 매칭</td></tr><tr><td>ASPM</td><td>Active State Power Management</td><td>링크 유휴 시 L0s/L1 진입</td></tr><tr><td>D-state</td><td>장치 전원 상태</td><td>D0, D3hot, D3cold</td></tr></tbody></table></div>
+<hr>
+<h2 id="20-요약-체크리스트">20. 요약 &amp; 체크리스트<a class="anchor" href="#20-요약-체크리스트" aria-label="link">#</a></h2>
+<p>Linux PCI는 DT의 host bridge 노드(ECAM generic 또는 DWC glue)에서 출발해 <code>pci_host_probe</code> → 스캔(Vendor ID, BAR 크기, 버스 번호) → 자원 배정(브리지 창 합산, 주소 배정) → 장치 등록 → id_table 매칭 → <code>probe()</code>로 이어진다. 드라이버는 <code>pcim_enable_device</code>, <code>pcim_iomap_region</code>(복수형은 deprecated), <code>pci_set_master</code>, <code>dma_set_mask_and_coherent</code>, <code>pci_alloc_irq_vectors</code> + <code>pci_irq_vector</code>라는 정해진 순서를 managed API로 쓴다. MSI는 irq_domain 계층(PCI-MSI → GICv2m/ITS → GIC)을 거쳐 virq가 되고, <code>/proc/interrupts</code>의 칩 이름이 그 경로를 말해 준다. DMA mask는 장치 능력 그대로 — 거짓이면 조용한 손상이고, IOMMU는 주소 능력 부족과 격리를 해결한다. sysfs(<code>config</code>, <code>resource</code>, <code>enable</code>, <code>reset</code>, <code>remove</code>, <code>rescan</code>, <code>driver_override</code>, <code>sriov_numvfs</code>, <code>aer_dev_*</code>)만으로 대부분의 디버그와 실험이 가능하고, VFIO는 IOMMU와 격리된 MSI를 전제로 장치를 유저 공간 드라이버에 넘긴다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>DT host bridge 노드의 <code>reg</code>, <code>ranges</code>, <code>interrupt-map</code>, <code>msi-map</code>이 각각 무엇인지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>ECAM host와 DWC host의 차이, DWC 보드에서 "엔드포인트가 안 보임"의 첫 확인 지점을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>부팅 enumeration 로그에서 스캔 단계와 배정 단계를 구분하고, bridge window·<code>add_size</code>를 읽을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"BAR N: can't assign; no space"의 원인 후보와 대응(<code>ranges</code>, 64비트 pref 창, <code>pci=realloc</code>, <code>hpmemsize</code>)을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>sysfs와 C 프로그램으로 config space의 헤더·BAR·capability 체인을 해독할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>BAR 크기 측정 절차(decode 끄기 → all-ones → 읽기 → 복구)를 코드로 짤 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>현대식 <code>pci_driver</code> probe를 managed API로 처음부터 짤 수 있고, <code>pcim_iomap_regions</code>가 deprecated임을 안다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>pci_alloc_irq_vectors</code>/<code>pci_irq_vector</code>로 MSI-X → MSI → INTx 폴백을 구현하고 <code>/proc/interrupts</code>로 확인할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>MSI 메시지가 irq_domain 계층을 통해 virq가 되는 경로와 GICv2m/ITS의 차이를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>DMA mask와 IOMMU의 관계를 예제 11의 세 결과(거부, 손상, 성공)로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>AER 복구 순서(<code>error_detected</code> → reset → <code>slot_reset</code> → <code>resume</code>)와 sysfs 카운터 위치를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>VFIO group/container/device 흐름으로 BAR mmap과 MSI eventfd를 구현할 수 있고, IOMMU·격리 MSI·BME가 왜 필요한지 안다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — "How To Write Linux PCI Drivers": https://docs.kernel.org/PCI/pci.html</li><li>docs.kernel.org — "The MSI Driver Guide HOWTO": https://docs.kernel.org/PCI/msi-howto.html</li><li>docs.kernel.org — "PCI Error Recovery": https://docs.kernel.org/PCI/pci-error-recovery.html</li><li>docs.kernel.org — "The PCI Express Advanced Error Reporting Driver Guide HOWTO": https://docs.kernel.org/PCI/pcieaer-howto.html</li><li>docs.kernel.org — "VFIO - Virtual Function I/O": https://docs.kernel.org/driver-api/vfio.html</li><li>docs.kernel.org — "PCI Express I/O Virtualization Howto" (SR-IOV): https://docs.kernel.org/PCI/pci-iov-howto.html</li><li>docs.kernel.org — "Dynamic DMA mapping using the generic device": https://docs.kernel.org/core-api/dma-api.html</li><li>커널 소스(6.18): <code>drivers/pci/probe.c</code>(스캔), <code>drivers/pci/setup-bus.c</code>(창·배정), <code>drivers/pci/devres.c</code>(<code>pcim_iomap_region</code>, deprecated 주석), <code>drivers/pci/msi/</code>, <code>drivers/pci/pcie/aer.c</code>, <code>drivers/pci/controller/pci-host-common.c</code>, <code>drivers/pci/controller/dwc/pcie-designware-host.c</code>, <code>drivers/vfio/pci/</code> — https://elixir.bootlin.com/linux/v6.18/source</li><li>QEMU 문서 — edu 장치 명세 <code>docs/specs/edu.rst</code>, PCIe 토폴로지 <code>docs/pcie.txt</code> (QEMU 소스 트리)</li><li>Bootlin — "Linux kernel and driver development" 교육 자료(PCI 장)</li><li>J. Corbet, A. Rubini, G. Kroah-Hartman, "Linux Device Drivers, 3rd ed." 12장 PCI Drivers (API가 오래되었으므로 개념용)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-10_H10_mailbox_hwspinlock.html"><span class="dir">← 이전</span><span class="nm">H10. 메일박스 · 하드웨어 스핀락 — 이종 코어 통신의 하드웨어 기본기</span></a><a class="next" href="2026-10-10_H12_usb_linux.html"><span class="dir">다음 →</span><span class="nm">H12. USB (Linux 관점) — host / gadget, usbcore, usb_driver, URB, configfs gadget, 디버그</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-don이-서-있던-자리의-반대편">0. 큰 그림 — Don이 서 있던 자리의 반대편</a></li><li class="l3"><a href="#0-1-이-노트의-랩-구성">0.1 이 노트의 랩 구성</a></li><li class="l2"><a href="#1-host-bridge-모든-것은-dt-노드-하나에서-시작한다">1. Host bridge — 모든 것은 DT 노드 하나에서 시작한다</a></li><li class="l3"><a href="#1-1-직관">1.1 직관</a></li><li class="l3"><a href="#1-2-예제-1-부팅-로그에서-host-bridge-초기화-읽기">1.2 예제 1 — 부팅 로그에서 host bridge 초기화 읽기</a></li><li class="l3"><a href="#1-3-ecam과-dwc-임베디드에서-실제로-만나는-쪽">1.3 ECAM과 DWC — 임베디드에서 실제로 만나는 쪽</a></li><li class="l2"><a href="#2-enumeration과-자원-배정-dmesg를-순서대로-읽는-법">2. Enumeration과 자원 배정 — dmesg를 순서대로 읽는 법</a></li><li class="l3"><a href="#2-1-흐름">2.1 흐름</a></li><li class="l3"><a href="#2-2-예제-2-부팅-enumeration-로그-전체-따라가기">2.2 예제 2 — 부팅 enumeration 로그 전체 따라가기</a></li><li class="l3"><a href="#2-3-예제-3-can-t-assign-no-space-직접-만들기">2.3 예제 3 — "can't assign; no space" 직접 만들기</a></li><li class="l2"><a href="#3-struct-pci_dev와-sysfs-커널의-장치-객체를-파일로-보기">3. struct pci_dev와 sysfs — 커널의 장치 객체를 파일로 보기</a></li><li class="l3"><a href="#3-1-지도">3.1 지도</a></li><li class="l3"><a href="#3-2-예제-4-sysfs로-edu-해부하기">3.2 예제 4 — sysfs로 edu 해부하기</a></li><li class="l2"><a href="#4-config-space-직접-해독하기-미니-lspci-vvv">4. Config space 직접 해독하기 — 미니 lspci -vvv</a></li><li class="l3"><a href="#4-1-예제-5-h11_cfg-헤더-bar-capability-리스트">4.1 예제 5 — h11_cfg: 헤더·BAR·capability 리스트</a></li><li class="l3"><a href="#4-2-예제-6-bar-크기-재기-all-ones-쓰기-를-손으로">4.2 예제 6 — BAR 크기 재기 (all-ones 쓰기)를 손으로</a></li><li class="l2"><a href="#5-pci_driver-쓰기-probe에서-무엇을-어떤-순서로-하나">5. pci_driver 쓰기 — probe에서 무엇을 어떤 순서로 하나</a></li><li class="l3"><a href="#5-1-직관-don의-펌웨어-init을-커널-api로-번역">5.1 직관 — Don의 펌웨어 init을 커널 API로 번역</a></li><li class="l3"><a href="#5-2-api-버전-함정-pcim_iomap_regions-는-deprecated">5.2 API 버전 함정 — pcim_iomap_regions()는 deprecated</a></li><li class="l3"><a href="#5-3-예제-7-h11_edu-bar0-msi-intx-irq-왕복-측정">5.3 예제 7 — h11_edu: BAR0, MSI/INTx, IRQ 왕복 측정</a></li><li class="l3"><a href="#5-4-probe-작성-체크리스트와-함정">5.4 probe 작성 체크리스트와 함정</a></li><li class="l2"><a href="#6-인터럽트-intx-msi-msi-x가-linux-virq가-되기까지">6. 인터럽트 — INTx, MSI, MSI-X가 Linux virq가 되기까지</a></li><li class="l3"><a href="#6-1-세-방식-비교-don이-아는-것을-linux-쪽에서">6.1 세 방식 비교 (Don이 아는 것을 Linux 쪽에서)</a></li><li class="l3"><a href="#6-2-irq_domain-경로">6.2 irq_domain 경로</a></li><li class="l3"><a href="#6-3-예제-8-nvme의-msi-x-벡터와-큐">6.3 예제 8 — NVMe의 MSI-X 벡터와 큐</a></li><li class="l3"><a href="#6-4-예제-9-gicv3-its로-바꾸면-이름이-바뀐다">6.4 예제 9 — GICv3 ITS로 바꾸면 이름이 바뀐다</a></li><li class="l2"><a href="#7-측정-msi-vs-intx-왕복-지연-에뮬레이터-주의">7. 측정 — MSI vs INTx 왕복 지연 (에뮬레이터 주의)</a></li><li class="l3"><a href="#7-1-예제-10-세-가지-구성에서-반복-측정">7.1 예제 10 — 세 가지 구성에서 반복 측정</a></li><li class="l3"><a href="#7-2-차트">7.2 차트</a></li><li class="l3"><a href="#7-3-이-숫자를-어떻게-읽어야-하나-실제-hw와-반대일-수-있다">7.3 이 숫자를 어떻게 읽어야 하나 — 실제 HW와 반대일 수 있다</a></li><li class="l2"><a href="#8-dma-mask-iommu-그리고-조용한-데이터-손상">8. DMA — mask, IOMMU, 그리고 조용한 데이터 손상</a></li><li class="l3"><a href="#8-1-직관">8.1 직관</a></li><li class="l3"><a href="#8-2-예제-11-h11_dma-mask를-정직하게-거짓으로-iommu-없이-있이">8.2 예제 11 — h11_dma: mask를 정직하게/거짓으로, IOMMU 없이/있이</a></li><li class="l2"><a href="#9-수명주기-enable-reset-remove-rescan-bind-unbind">9. 수명주기 — enable, reset, remove/rescan, bind/unbind</a></li><li class="l3"><a href="#9-1-예제-12-sysfs로-장치를-끄고-켜고-지우고-다시-찾기">9.1 예제 12 — sysfs로 장치를 끄고 켜고 지우고 다시 찾기</a></li><li class="l3"><a href="#9-2-hotplug">9.2 Hotplug</a></li><li class="l2"><a href="#10-aer-에러를-커널이-받고-드라이버가-복구한다">10. AER — 에러를 커널이 받고 드라이버가 복구한다</a></li><li class="l3"><a href="#10-1-흐름">10.1 흐름</a></li><li class="l3"><a href="#10-2-예제-13-qemu-모니터로-aer-에러-주입">10.2 예제 13 — QEMU 모니터로 AER 에러 주입</a></li><li class="l2"><a href="#11-전원-관리-d-state-runtime-pm-aspm-짧게-깊은-내용은-n5">11. 전원 관리 — D-state, runtime PM, ASPM (짧게, 깊은 내용은 N5)</a></li><li class="l2"><a href="#12-vfio-유저-공간-드라이버-spdk-dpdk의-세계">12. VFIO — 유저 공간 드라이버 (SPDK·DPDK의 세계)</a></li><li class="l3"><a href="#12-1-직관">12.1 직관</a></li><li class="l3"><a href="#12-2-예제-14-h11_vfio-edu를-유저-공간에서-구동">12.2 예제 14 — h11_vfio: edu를 유저 공간에서 구동</a></li><li class="l2"><a href="#13-sr-iov-장치-하나가-여러-pci-함수로">13. SR-IOV — 장치 하나가 여러 PCI 함수로</a></li><li class="l3"><a href="#13-1-예제-15-qemu-igb로-vf-만들기">13.1 예제 15 — QEMU igb로 VF 만들기</a></li><li class="l2"><a href="#14-커널-안에서는-무슨-일이-일어나나-probe-가-불리기까지">14. 커널 안에서는 무슨 일이 일어나나 — probe()가 불리기까지</a></li><li class="l2"><a href="#15-embedded-실무에서-다시-보기">15. Embedded 실무에서 다시 보기</a></li><li class="l2"><a href="#16-흔한-실수와-증상">16. 흔한 실수와 증상</a></li><li class="l2"><a href="#17-면접에서-이렇게-말한다">17. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#18-직접-해보기">18. 직접 해보기</a></li><li class="l2"><a href="#19-용어-사전">19. 용어 사전</a></li><li class="l2"><a href="#20-요약-체크리스트">20. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

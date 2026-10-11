@@ -1,0 +1,515 @@
+# 🧾 L09 · 10-08 technical screen 재구성 — C ring buffer · extract_packet, 그리고 온사이트 방향
+
+> 2026-10-08, Jon Kotowski와 1시간. 시작하자마자 **"Python or C?"** → Don이 **C** 선택. **Task 1**은 외부 버퍼를 받는 byte ring buffer(struct부터 직접), **Task 2(보너스)**는 `CRC.c` 라이브러리를 쓰는 `extract_packet` 함수 하나였다. 행동 질문 없이 코딩만 — [L06](2026-10-05_L06_screen_scenarios.md)의 예상(시나리오 A + D)과 맞았다. 이 페이지는 **Don이 기억한 API 그대로** 문제를 다시 세우고, 참고 풀이와 테스트를 실제로 돌려 검증한 것이다 (`make -C lecture/recap test`, `-Wall -Wextra -Werror` + ASan/UBSan). 기억에 없는 세부(패킷 형식, CRC 종류, peek 반환 방식)는 **[추정]**이다. 마지막 절이 **온사이트 준비 방향**.
+
+## 0. 한눈에
+
+| 항목 | 내용 |
+|---|---|
+| 형식 | 1시간 · 코딩만 · 언어 선택 (Don: C) |
+| Task 1 | ring buffer: `size_t count, head, tail` · `uint8_t *storage` · `capacity`, `rb_init(rb, rb_buf, uint8_t capacity)`, is_empty / is_full, push_byte / pop_byte, **bulk `rb_push` / `rb_pop`은 all-or-nothing**, `rb_peek(rb, uint8_t offset, …)` |
+| Task 2 (보너스) | `extract_packet` 하나 구현, `CRC.c` 제공 (**테이블 방식** → [L10](2026-10-09_L10_crc_table.md)) |
+| 들은 정보 | **FW 엔지니어 17명 · Test 엔지니어 3명 · + full stack(embedded를 테스트할 수 있는)** — 10-01 Michael 때는 FW 15 · Test 2 |
+| Don 자평 | 잘 풀었다 → 온사이트 가능성 높음 [추정] |
+| 이 페이지에서 새로 찾은 것 | Task 2 재구성 중 **가짜 sync + 큰 LEN → 영원히 "need more"(데드락)** 엣지 — 테스트로 재현 · 수정 (5.4절) |
+
+---
+
+## 1. Task 1 · 문제 재구성 (Don 기억 기준)
+
+> "Implement a byte ring buffer in C. The caller provides the storage. Define the struct yourself."
+
+| 함수 | 동작 (Don 기억) | 재구성에서 정한 세부 [추정] |
+|---|---|---|
+| `rb_init(rb_t *rb, uint8_t *rb_buf, uint8_t capacity)` | 밖에서 받은 버퍼로 초기화 | head = tail = count = 0 |
+| `rb_is_empty` / `rb_is_full` | | `count == 0` / `count == capacity` |
+| `rb_push_byte(rb, uint8_t byte)` / `rb_pop_byte(rb, uint8_t *out)` | 한 바이트 | 가득 / 비면 false (pop 결과는 `*out`으로) |
+| `rb_push(rb, items, len)` | 남은 자리 < len이면 **false** | **아무것도 안 넣는다** (부분 쓰기 없음) |
+| `rb_pop(rb, items, len)` | 들어 있는 것 < len이면 **false** | **아무것도 안 뺀다** |
+| `rb_peek(rb, uint8_t offset, …)` | tail에서 offset번째 보기 | `bool rb_peek(const rb_t*, uint8_t offset, uint8_t *out)` — 범위 밖이면 false, 소비 안 함 [확인됨 Don: 출력 인자 이름 `*out`] |
+
+- 면접관이 "외부 버퍼 + `uint8_t capacity`"로 준 의미 [추정]: 펌웨어 스타일(정적 버퍼, malloc 없음)을 아는지, 그리고 **용량이 2의 거듭제곱이 아닐 수 있다** → 마스크 대신 `%`가 필요
+- `rb_peek(offset)`이 들어 있는 이유 [추정]: Task 2에서 **헤더와 CRC를 꺼내지 않고 들여다보려고** — 두 문제가 이어져 있었다
+
+## 2. Task 1 · 참고 풀이
+
+```c
+typedef struct {
+    uint8_t *storage;      /* 호출자가 준 버퍼 (정적 배열 등) — rb 는 소유하지 않는다 */
+    size_t   capacity;
+    size_t   head;         /* 다음에 쓸 칸 */
+    size_t   tail;         /* 다음에 읽을 칸 */
+    size_t   count;        /* 들어 있는 바이트 수 → full/empty 구분 */
+} rb_t;
+
+void rb_init(rb_t *rb, uint8_t *rb_buf, uint8_t capacity);
+bool rb_is_empty(const rb_t *rb);
+bool rb_is_full(const rb_t *rb);
+bool rb_push_byte(rb_t *rb, uint8_t byte);
+bool rb_pop_byte(rb_t *rb, uint8_t *out);
+bool rb_push(rb_t *rb, const uint8_t *items, size_t len);   /* 전부 들어갈 자리 없으면 false, 아무것도 안 넣음 */
+bool rb_pop(rb_t *rb, uint8_t *items, size_t len);          /* len 개 미만이면 false, 아무것도 안 뺌 */
+bool rb_peek(const rb_t *rb, uint8_t offset, uint8_t *out);  /* tail 에서 offset 번째를 꺼내지 않고 보기 */
+```
+
+```c
+void rb_init(rb_t *rb, uint8_t *rb_buf, uint8_t capacity)
+{
+    rb->storage = rb_buf;
+    rb->capacity = capacity;
+    rb->head = rb->tail = rb->count = 0;
+}
+
+bool rb_is_empty(const rb_t *rb) { return rb->count == 0; }
+bool rb_is_full(const rb_t *rb)  { return rb->count == rb->capacity; }
+
+bool rb_push_byte(rb_t *rb, uint8_t byte)
+{
+    if (rb_is_full(rb))
+        return false;
+    rb->storage[rb->head] = byte;
+    rb->head = (rb->head + 1) % rb->capacity;
+    rb->count++;
+    return true;
+}
+
+bool rb_pop_byte(rb_t *rb, uint8_t *out)
+{
+    if (rb_is_empty(rb))
+        return false;
+    *out = rb->storage[rb->tail];
+    rb->tail = (rb->tail + 1) % rb->capacity;
+    rb->count--;
+    return true;
+}
+
+bool rb_push(rb_t *rb, const uint8_t *items, size_t len)
+{
+    if (len > rb->capacity - rb->count)          /* 남은 자리 < len → 전부 거절 (부분 쓰기 없음) */
+        return false;
+    for (size_t i = 0; i < len; i++)
+        rb_push_byte(rb, items[i]);
+    return true;
+}
+
+bool rb_pop(rb_t *rb, uint8_t *items, size_t len)
+{
+    if (len > rb->count)                         /* 들어 있는 것 < len → 전부 거절 */
+        return false;
+    for (size_t i = 0; i < len; i++)
+        rb_pop_byte(rb, &items[i]);
+    return true;
+}
+
+bool rb_peek(const rb_t *rb, uint8_t offset, uint8_t *out)
+{
+    if (offset >= rb->count)
+        return false;
+    *out = rb->storage[(rb->tail + offset) % rb->capacity];
+    return true;
+}
+```
+
+| 결정 | 이유 (면접에서 말할 것) |
+|---|---|
+| `count`로 full/empty 구분 | head == tail이 빈 것인지 가득 찬 것인지 모호함을 없앤다. 용량 전부 사용 |
+| `% capacity` | 용량이 임의 값(uint8_t)이라 `& (N-1)` 마스크를 못 쓴다 |
+| bulk는 먼저 **검사 후** 실행 | all-or-nothing — 실패하면 상태가 그대로 (호출자가 재시도하기 쉬움, 프레임이 반쪽으로 안 들어감) |
+| bulk를 `push_byte` 반복으로 | 가장 단순하고 맞추기 쉽다. 성능이 필요하면 wrap 지점에서 `memcpy` 두 번 (4절) |
+| peek은 `const rb_t*` | 보기만 한다는 것을 타입으로 약속 |
+| NULL 검사 생략 | 이 재구성에선 생략. 실무 API라면 `rb`, `items`, `byte` NULL 검사 또는 assert — 면접에서 "I'd add NULL checks / asserts at the API boundary"라고 말하면 충분 |
+
+## 3. Task 1 · 테스트 (면접에서 "how would you test it?"에 그대로)
+
+```c
+static void test_init_empty(void)
+{
+    uint8_t buf[4];
+    rb_t rb;
+    rb_init(&rb, buf, sizeof buf);
+    uint8_t b;
+    assert(rb_is_empty(&rb) && !rb_is_full(&rb));
+    assert(!rb_pop_byte(&rb, &b) && !rb_peek(&rb, 0, &b));
+}
+
+static void test_fifo_and_full(void)
+{
+    uint8_t buf[3], b;
+    rb_t rb;
+    rb_init(&rb, buf, sizeof buf);
+    assert(rb_push_byte(&rb, 1) && rb_push_byte(&rb, 2) && rb_push_byte(&rb, 3));
+    assert(rb_is_full(&rb) && !rb_push_byte(&rb, 4));          /* 용량 전부 사용, 넘치면 거절 */
+    assert(rb_pop_byte(&rb, &b) && b == 1);
+}
+
+static void test_wraparound(void)
+{
+    uint8_t buf[3], b;
+    rb_t rb;
+    rb_init(&rb, buf, sizeof buf);
+    for (uint8_t i = 0; i < 20; i++) {                          /* 여러 바퀴 */
+        assert(rb_push_byte(&rb, i));
+        assert(rb_pop_byte(&rb, &b) && b == i);
+    }
+    assert(rb_is_empty(&rb));
+}
+
+static void test_bulk_all_or_nothing(void)
+{
+    uint8_t buf[5], out[5];
+    rb_t rb;
+    rb_init(&rb, buf, sizeof buf);
+    const uint8_t a[] = {1, 2, 3}, big[] = {9, 9, 9};
+    assert(rb_push(&rb, a, 3));
+    assert(!rb_push(&rb, big, 3) && rb.count == 3);             /* 자리 2개 < 3 → 아무것도 안 넣음 */
+    assert(!rb_pop(&rb, out, 4) && rb.count == 3);              /* 3개 < 4 → 아무것도 안 뺌 */
+    assert(rb_pop(&rb, out, 3) && memcmp(out, a, 3) == 0);
+    assert(rb_push(&rb, a, 0) && rb_pop(&rb, out, 0));          /* len 0 은 성공, 변화 없음 */
+}
+
+static void test_peek_offset(void)
+{
+    uint8_t buf[4], b;
+    rb_t rb;
+    rb_init(&rb, buf, sizeof buf);
+    const uint8_t a[] = {10, 20, 30};
+    rb_push(&rb, a, 3);
+    rb_pop_byte(&rb, &b);
+    rb_push_byte(&rb, 40);
+    rb_push_byte(&rb, 50);                                      /* wrap 된 상태: 20 30 40 50 */
+    assert(rb_peek(&rb, 0, &b) && b == 20);
+    assert(rb_peek(&rb, 3, &b) && b == 50);
+    assert(!rb_peek(&rb, 4, &b) && rb.count == 4);              /* 범위 밖, 소비 안 함 */
+}
+
+int main(void)
+{
+    test_init_empty();
+    test_fifo_and_full();
+    test_wraparound();
+    test_bulk_all_or_nothing();
+    test_peek_offset();
+    puts("test_rb: PASS");
+    return 0;
+}
+```
+
+실행 결과:
+
+```text
+test_rb: PASS
+test_packet: PASS
+```
+
+| 테스트 | 잡는 버그 |
+|---|---|
+| `test_init_empty` | 초기 상태, 빈 상태에서 pop · peek |
+| `test_fifo_and_full` | 용량 전부 사용, 넘침 거절 (한 칸 비우기 off-by-one) |
+| `test_wraparound` | `%` 빠뜨림 → 배열 밖 접근 (ASan이 잡는다) |
+| `test_bulk_all_or_nothing` | 부분 쓰기 / 부분 읽기 버그, len 0 |
+| `test_peek_offset` | wrap 된 상태에서 offset 계산, 범위 밖 offset |
+
+## 4. Task 1 · 꼬리 질문과 온사이트에서 나올 확장
+
+| 질문 | 답의 핵심 |
+|---|---|
+| "The producer is a UART ISR, consumer is main. Is this safe?" | **아니다** — push와 pop이 둘 다 `count`를 고친다 (read-modify-write 경쟁). 해결: ① 짧은 critical section(인터럽트 끄기), ② count를 없애고 **free-running head/tail** (head는 ISR만, tail은 main만 쓰기 = SPSC) + C11 atomics acquire/release ([L05 C 06](2026-10-04_L05_warmup.md), [onsitePrep N05](../../onsitePrep/site/notes/2026-10-01_N05_ring_buffer_onsite.html)) |
+| "Make bulk push faster." | wrap 지점까지 `memcpy` 한 번 + 나머지 앞에서 한 번 ([L03 10절](2026-10-04_L03_embedded_c_basics.md)) |
+| "Why `uint8_t capacity`? What breaks?" | 최대 255 바이트. `rb_peek`의 `uint8_t offset`도 같은 한계. 큰 버퍼면 `size_t`로 — API 타입이 섞이면 경고 · 버그의 원인 |
+| "Return how many were written instead of false?" | 부분 쓰기 버전: `size_t rb_write(rb, items, len)` → 쓴 개수 반환 (UART 스트림엔 이쪽이 자연스럽다). 프레임 단위면 all-or-nothing이 맞다 — **정책 선택**을 말로 |
+| "Overwrite oldest when full?" | tail을 한 칸 밀고 `dropped++` — 로그 · 텔레메트리용. 명령 큐엔 쓰지 않는다 |
+| "Feed it from DMA?" | circular DMA + NDTR로 head 계산, half/full/idle 인터럽트, 캐시 invalidate ([onsitePrep dma_circular_rx.c](../../onsitePrep/site/code/dma_circular_rx.c.html)) |
+| "How do you test the ISR version?" | host: 두 스레드로 수백만 개 시퀀스 번호 + ThreadSanitizer. 타깃: 최대 baud 카운터 패턴 + 플래시 쓰기 부하, drop 카운터 0 |
+
+---
+
+## 5. Task 2 · `extract_packet` (보너스) 재구성
+
+> "Implement `extract_packet`. A CRC library (`CRC.c`) is provided." — 함수 하나. 패킷 형식 · CRC 종류 · 시그니처는 기억에 없음 → 아래는 **가장 전형적인 형태로 [추정]**한 것.
+
+### 5.1 가정한 형식과 시그니처
+
+```text
+SYNC (0xAA) | LEN (1 byte) | PAYLOAD (LEN bytes) | CRC8 (over LEN + PAYLOAD)
+```
+
+```c
+#define PKT_SYNC       0xAAu
+#define PKT_NEED_MORE  (-1)   /* 아직 완전한 패킷이 없다 (앞쪽 쓰레기만 버렸을 수 있음) */
+#define PKT_TOO_BIG    (-2)   /* 패킷은 맞지만 out 버퍼가 작다 → 그 패킷은 버림 */
+
+/* 성공: payload 길이(0..255)를 돌려주고 그 프레임을 rb 에서 제거, payload 를 out 에 복사 */
+int extract_packet(rb_t *rb, uint8_t *out, size_t out_cap);
+```
+
+```c
+#include "crc.h"
+
+uint8_t crc8(const uint8_t *data, size_t len)    /* CRC-8/SMBUS: poly 0x07, init 0 — check("123456789") = 0xF4 */
+{
+    uint8_t crc = 0;
+    while (len--) {
+        crc ^= *data++;
+        for (int i = 0; i < 8; i++)
+            crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+    }
+    return crc;
+}
+```
+
+> 실제 면접의 `CRC.c`는 **테이블(lookup table) 방식**이었다 [확인됨 Don]. 위는 같은 결과를 내는 비트 방식이다. 테이블 방식이 어떻게 만들어지고 왜 같은 값이 나오는지는 **[L10 CRC 테이블 방식](2026-10-09_L10_crc_table.md)** — `extract_packet` 입장에서는 `crc8(data, len)` 호출만 같으면 내부 구현은 상관없다.
+
+### 5.2 알고리즘 — 왜 `rb_peek(offset)`이 필요했나
+
+| 단계 | 할 일 | 쓰는 함수 |
+|---|---|---|
+| 1 | 앞쪽 쓰레기를 SYNC가 나올 때까지 버린다 | `rb_peek(0)` · `rb_pop_byte` |
+| 2 | LEN을 **꺼내지 않고** 본다. 없으면 "need more" | `rb_peek(1)` |
+| 3 | 프레임 전체(LEN + 3)가 다 왔는지 count로 확인. 아직이면 **아무것도 버리지 않고** "need more" | `rb->count` |
+| 4 | LEN + PAYLOAD를 peek으로 복사해 CRC 계산, 받은 CRC와 비교 | `rb_peek(1..LEN+2)` · `crc8` |
+| 5 | CRC가 틀리면 **SYNC 한 바이트만** 버리고 1로 (그 뒤에 진짜 프레임이 있을 수 있다) | `rb_pop_byte` |
+| 6 | 맞으면 프레임을 pop해서 payload를 out에 복사, 길이 반환 | `rb_pop` |
+
+- 핵심: **확인이 끝나기 전에는 꺼내지 않는다(peek)** → 프레임이 반만 왔을 때 데이터를 잃지 않는다. 그래서 Task 1에 `rb_peek(offset)`이 있었다고 보는 게 자연스럽다
+
+### 5.3 참고 풀이
+
+```c
+int extract_packet(rb_t *rb, uint8_t *out, size_t out_cap)
+{
+    uint8_t b, len, crc_rx;
+    uint8_t body[1 + 255];                         /* LEN + PAYLOAD (CRC 계산용) */
+
+    for (;;) {
+        /* 1) sync 찾기: 앞쪽 쓰레기 버리기 */
+        while (rb_peek(rb, 0, &b) && b != PKT_SYNC)
+            rb_pop_byte(rb, &b);
+        /* 2) 헤더(SYNC + LEN)가 다 왔나 */
+        if (!rb_peek(rb, 1, &len))
+            return PKT_NEED_MORE;
+        /* 3) 프레임 전체(SYNC + LEN + PAYLOAD + CRC)가 다 왔나 — peek 만, 아직 안 뺌 */
+        size_t frame = (size_t)len + 3;
+        if (frame > rb->capacity) {                /* 버퍼에 절대 다 못 들어오는 길이 = 가짜 sync */
+            rb_pop_byte(rb, &b);                   /*  → 안 버리면 영원히 NEED_MORE (데드락) */
+            continue;
+        }
+        if (rb->count < frame)
+            return PKT_NEED_MORE;
+        /* 4) CRC 확인: LEN 과 PAYLOAD 를 peek 으로 복사 */
+        for (size_t i = 0; i <= len; i++)
+            rb_peek(rb, (uint8_t)(1 + i), &body[i]);
+        rb_peek(rb, (uint8_t)(len + 2), &crc_rx);
+        if (crc8(body, (size_t)len + 1) != crc_rx) {
+            rb_pop_byte(rb, &b);                   /* 가짜 sync 일 수 있다 → sync 한 바이트만 버리고 다시 찾기 */
+            continue;
+        }
+        /* 5) 정상 프레임: rb 에서 제거하고 payload 복사 */
+        if (len > out_cap) {
+            for (size_t i = 0; i < frame; i++)
+                rb_pop_byte(rb, &b);
+            return PKT_TOO_BIG;
+        }
+        rb_pop_byte(rb, &b);                       /* SYNC */
+        rb_pop_byte(rb, &b);                       /* LEN */
+        rb_pop(rb, out, len);                      /* PAYLOAD */
+        rb_pop_byte(rb, &b);                       /* CRC */
+        return len;
+    }
+}
+```
+
+### 5.4 테스트 — 그리고 재구성 중 찾은 버그
+
+```c
+static uint8_t store[64];
+static rb_t rb;
+static uint8_t out[16];
+
+static void reset(void) { rb_init(&rb, store, sizeof store); }
+
+static void test_crc_known_vector(void)
+{
+    assert(crc8((const uint8_t *)"123456789", 9) == 0xF4);      /* 라이브러리부터 검증 */
+}
+
+static void test_one_packet(void)
+{
+    uint8_t f[16];
+    const uint8_t p[] = {1, 2, 3};
+    reset();
+    rb_push(&rb, f, frame(f, p, 3));
+    assert(extract_packet(&rb, out, sizeof out) == 3 && memcmp(out, p, 3) == 0);
+    assert(rb_is_empty(&rb));
+}
+
+static void test_split_arrival(void)
+{
+    uint8_t f[16];
+    const uint8_t p[] = {7, 8};
+    size_t n = frame(f, p, 2);
+    reset();
+    rb_push(&rb, f, 3);                                         /* 반만 도착 */
+    assert(extract_packet(&rb, out, sizeof out) == PKT_NEED_MORE && rb.count == 3);   /* 버리지 않고 기다림 */
+    rb_push(&rb, f + 3, n - 3);
+    assert(extract_packet(&rb, out, sizeof out) == 2 && out[1] == 8);
+}
+
+static void test_garbage_then_packet(void)
+{
+    uint8_t f[16];
+    const uint8_t junk[] = {0x00, 0x13, 0x37}, p[] = {5};
+    reset();
+    rb_push(&rb, junk, 3);
+    rb_push(&rb, f, frame(f, p, 1));
+    assert(extract_packet(&rb, out, sizeof out) == 1 && out[0] == 5);
+}
+
+static void test_bad_crc_skipped_next_found(void)
+{
+    uint8_t f[16], g[16];
+    const uint8_t p[] = {1, 2}, q[] = {9};
+    size_t n = frame(f, p, 2);
+    f[n - 1] ^= 0xFF;                                           /* CRC 깨뜨리기 */
+    reset();
+    rb_push(&rb, f, n);
+    rb_push(&rb, g, frame(g, q, 1));
+    assert(extract_packet(&rb, out, sizeof out) == 1 && out[0] == 9);
+}
+
+static void test_two_packets_back_to_back_and_empty_payload(void)
+{
+    uint8_t f[16], g[16];
+    const uint8_t p[] = {4};
+    reset();
+    rb_push(&rb, f, frame(f, p, 1));
+    rb_push(&rb, g, frame(g, p, 0));                            /* 길이 0 payload */
+    assert(extract_packet(&rb, out, sizeof out) == 1);
+    assert(extract_packet(&rb, out, sizeof out) == 0);
+    assert(extract_packet(&rb, out, sizeof out) == PKT_NEED_MORE);
+}
+
+static void test_out_buffer_too_small(void)
+{
+    uint8_t f[16];
+    const uint8_t p[] = {1, 2, 3, 4};
+    reset();
+    rb_push(&rb, f, frame(f, p, 4));
+    assert(extract_packet(&rb, out, 2) == PKT_TOO_BIG && rb_is_empty(&rb));   /* 버리고 다음으로 */
+}
+
+static void test_fake_sync_with_impossible_length(void)
+{
+    uint8_t small[8], f[8];
+    const uint8_t fake[] = {PKT_SYNC, 200}, p[] = {6};          /* 버퍼(8)에 절대 못 들어올 길이 */
+    rb_init(&rb, small, sizeof small);
+    rb_push(&rb, fake, 2);
+    rb_push(&rb, f, frame(f, p, 1));
+    assert(extract_packet(&rb, out, sizeof out) == 1 && out[0] == 6);     /* 데드락 없이 회복 */
+}
+
+int main(void)
+{
+    test_crc_known_vector();
+    test_one_packet();
+    test_split_arrival();
+    test_garbage_then_packet();
+    test_bad_crc_skipped_next_found();
+    test_two_packets_back_to_back_and_empty_payload();
+    test_out_buffer_too_small();
+    test_fake_sync_with_impossible_length();
+    puts("test_packet: PASS");
+    return 0;
+}
+```
+
+| 테스트 | 시나리오 |
+|---|---|
+| `test_crc_known_vector` | 주어진 라이브러리부터 표준 값으로 검증 |
+| `test_one_packet` | 정상 1개 |
+| `test_split_arrival` | 반만 도착 → need more, **아무것도 안 버림** → 나머지 도착 → 성공 |
+| `test_garbage_then_packet` | 앞쪽 쓰레기 |
+| `test_bad_crc_skipped_next_found` | CRC 틀린 프레임 뒤의 정상 프레임 |
+| `test_two_packets_back_to_back_and_empty_payload` | 연속 2개 + 길이 0 |
+| `test_out_buffer_too_small` | 출력 버퍼가 작으면 TOO_BIG, 프레임은 버리고 다음으로 |
+| `test_fake_sync_with_impossible_length` | **데드락 버그** — 아래 |
+
+> **찾은 버그**: 노이즈로 생긴 가짜 0xAA 뒤에 LEN = 200이 오면, 프레임(203바이트)이 **용량 8짜리 버퍼에는 절대 다 들어올 수 없다**. 처음 버전은 "아직 다 안 왔다"며 영원히 `PKT_NEED_MORE`를 돌려주고, 버퍼가 차서 진짜 패킷도 못 들어온다 → 링크가 멈춤. 수정: `LEN + 3 > capacity`면 가짜 sync로 보고 한 바이트 버린다. 수정 전 코드로 이 테스트를 돌리면 assert 실패를 실제로 확인했다.
+>
+> 면접 · 온사이트에서 쓸 문장: **"I'd also test a false sync followed by an impossible length — a naive parser waits forever and the link stalls."** — 테스트 엔지니어다운 엣지 케이스
+
+| 꼬리 질문 | 답의 핵심 |
+|---|---|
+| "CRC16 instead?" | 프레임 끝 2바이트, 엔디언 확인 (little/big), 라이브러리 함수 시그니처만 바뀐다 |
+| "Byte-by-byte from an ISR?" | peek 대신 **상태 머신**(WAIT_SYNC → LEN → PAYLOAD → CRC)으로 바이트마다 처리 — 버퍼 재스캔 없음 |
+| "Timeout between bytes?" | 마지막 바이트 이후 N ms 지나면 상태 리셋 (반쪽 프레임에 영원히 매달리지 않게) |
+| "Escape sequences?" | SYNC가 payload에 나올 수 있다 → 길이 기반이면 괜찮지만 resync가 늦을 수 있음. 대안: COBS / SLIP |
+| "How would you test this on the rig?" | 실제 UART로 프레임 + 노이즈 + 비트 오류 주입, 처리량 · CRC 오류 카운터 · resync 시간 측정 ([S02](../design/2026-10-03_S02_radio_link_connectivity.md)) |
+
+## 6. 회고 — Don이 채울 칸
+
+- 실제로 쓴 struct · 함수와 위 재구성의 차이: (Don: …)
+- 막힌 곳 · 시간이 오래 걸린 곳: (Don: …)
+- Task 2를 어디까지 했나 (설계만 / 일부 / 완성): (Don: …)
+- 테스트를 코드로 보여 줬나 / 말로 했나: (Don: …)
+- 면접관이 반응한 지점 · 추가로 물은 것: (Don: …)
+- 다음엔 다르게 할 것: (Don: …)
+
+---
+
+## 7. 온사이트 준비 방향
+
+### 7.1 지금 아는 것
+
+| 사실 | 출처 |
+|---|---|
+| 온사이트 구성: **Tour 30분 · 내 경력 발표 1시간 · 1:1 여러 개(기본 C/C++, ring buffer 구현, generic system design)** | [확인됨 2026-09-16 리크루터 Devin] |
+| Senior FW Platform 쪽 HM이 들어올 수도 있다 | [확인됨 Don] |
+| FW 17명 · Test 3명 · + full stack (embedded 테스트 가능) | [확인됨 Don 10-08] |
+| 테스트 FW가 가장 급하다 · 연내 최대 5명 · **factory test FW 없음** · STM32 사용 | [확인됨 10-01 Michael] |
+| 스크린은 **C 코딩만** (ring buffer → 패킷 추출) | [확인됨 Don 10-08] |
+
+> 해석 [추정]: 테스트 조직은 **3명 + full stack**의 작은 팀이고, 펌웨어(17명)를 테스트할 **인프라를 세울 사람**을 찾는다. 스크린이 순수 C였다는 건 "**펌웨어를 직접 읽고 쓸 수 있는 테스트 엔지니어**"를 원한다는 신호 — Don의 포지셔닝("FW engineer who builds test infrastructure")과 정확히 맞는다.
+
+### 7.2 우선순위 (준비 시간이 오래 걸리는 것부터)
+
+| 순위 | 무엇 | 왜 | 자료 |
+|---|---|---|---|
+| **1** | **1시간 경력 발표** | 온사이트에서 가장 큰 블록, 준비 시간 최장. **개발 깊이를 보여 줄 유일한 무대** (트랙 교정 전략의 핵심) | [onsitePrep N03 발표 가이드](../../onsitePrep/site/notes/2026-10-01_N03_presentation_1hour.html) · [FTE N09 스토리라인](../../firmwareTestEngineerPrep/site/notes/2026-09-29_N09_resume_storylines.html) |
+| **2** | **C 심화** — 스크린의 연장 | 1:1에 ring buffer가 예고돼 있고, 이미 기본은 보여 줬다 → **ISR-safe(SPSC) · DMA · memcpy 두 조각 · 오버라이트**, 그리고 **바이트 단위 패킷 파서 상태 머신 + CRC 테이블** | 4절 · 5절 꼬리 질문 · [onsitePrep N05](../../onsitePrep/site/notes/2026-10-01_N05_ring_buffer_onsite.html) · [N04 C/C++](../../onsitePrep/site/notes/2026-10-01_N04_c_cpp_fundamentals.html) · [L03](2026-10-04_L03_embedded_c_basics.md) · [L04](2026-10-04_L04_embedded_cpp_basics.md) |
+| **3** | **system design — 테스트 인프라 쪽으로** | "generic"이라 했지만 면접관이 테스트 조직이면 HIL · factory · CI 결과로 갈 가능성. full stack이 팀에 있으니 **데이터 · 대시보드** 축도 | [N04](../notes/2026-10-02_N04_system_design_test_tooling.md) · [S00 지도](../design/2026-10-03_S00_overview.md) · [S07 factory](../design/2026-10-03_S07_manufacturing_factory_test.md) · [S08 통합](../design/2026-10-03_S08_system_integration_release.md) · [S09 카드](../design/2026-10-03_S09_scenario_cards.md) · [onsitePrep N06](../../onsitePrep/site/notes/2026-10-01_N06_generic_system_design.html) |
+| **4** | **factory test FW 비전** | Michael이 직접 "없다, 필요하다"고 한 것 = Don이 들어가서 가장 먼저 만들 수 있는 것 | [onsitePrep N08](../../onsitePrep/site/notes/2026-10-01_N08_factory_test_firmware.html) · [S07](../design/2026-10-03_S07_manufacturing_factory_test.md) |
+| 5 | Python · pytest · HIL 하네스 | 테스트 팀원(3명 · full stack)이 1:1에 들어오면 나올 수 있다 | [L08](2026-10-08_L08_pytest_from_zero.md) · [L00](2026-10-04_L00_special_lecture.md) · [문제 04 conftest](../python/problems/04_hil_conftest.md) |
+| 6 | 임베디드 퀴즈 복습 | Michael 스타일(UART/I2C/SPI, PCIe SW 관점, 8b/10b) | [onsitePrep N07](../../onsitePrep/site/notes/2026-10-01_N07_embedded_quiz_bank.html) |
+| 7 | 사람 · Tour · 역질문 | 팀 규모가 작으니 "첫 90일에 무엇을 세우겠나"가 나올 수 있다 | [S09 카드 16](../design/2026-10-03_S09_scenario_cards.md) · [onsitePrep N09](../../onsitePrep/site/notes/2026-10-01_N09_interviewers_behavioral.html) |
+
+### 7.3 발표의 방향 (가장 중요)
+
+- 줄거리: **"I'm a firmware engineer who builds the test infrastructure around real hardware."**
+- 메인 사례 하나를 **바닥까지** (bring-up → 루트코즈 → 재발 방지 테스트) — Apple factory test-node, SSD production FW의 디버깅, 챔버 테스트 플랫폼 중 선택 (Don: 어느 사례가 가장 깊게 말할 수 있나)
+- 기술 깊이를 보여 줄 슬라이드: 실제 신호 · 버스 · 펌웨어 코드 수준 (개발자급이라는 증거 → 오퍼 단계 레벨 협상의 근거)
+- 마지막 슬라이드: **"At Neros: factory test firmware + HIL for 1,000+ drones a week"** — 들은 사실(factory test FW 없음, 테스트 팀 3명)을 연결
+
+### 7.4 리크루터에게 물어볼 것 (결과 연락이 오면)
+
+1. 온사이트 날짜와 길이 · 면접관 명단(역할)
+2. 1시간 발표가 FW Test 트랙에서도 그대로인지, 형식(슬라이드 · 화이트보드 · 노트북)
+3. 1:1 코딩이 화이트보드인지 노트북인지 · 언어 선택이 또 있는지
+4. (오퍼 단계 전략 그대로) 레벨 · 밴드 이야기는 **아직 꺼내지 않는다** — [컨텍스트 파일 §5 10-03](../../neros_tech_senior_firmware_engineer_context.md)
+
+### 7.5 날짜가 잡히기 전 — 이번 주 제안
+
+| 날 | 할 것 |
+|---|---|
+| 1~2일 | 발표 메인 사례 고르기 + 슬라이드 뼈대 20장 (제목 · 한 문장씩) |
+| 3일 | C: ISR-safe SPSC ring + 바이트 상태 머신 패킷 파서를 빈 파일로 (테스트 포함) |
+| 4일 | system design: S09 카드 12 · 14 · 16 + N04 문제 C를 10분 타이머로 |
+| 5일 | 발표 1차 리허설 (녹음) · 퀴즈 N07 복습 |
+| 이후 | 날짜가 잡히면 [onsitePrep START HERE](../../onsitePrep/index.html)의 "날짜가 잡히면 — 전체 코스" |
+
+## 체크
+
+- [ ] 6절 회고 칸 채우기 (기억이 생생할 때)
+- [ ] `make -C lecture/recap test`로 참고 풀이 확인, 내 풀이와 다른 점 메모
+- [ ] 5.4절 데드락 엣지를 내 말로 설명
+- [ ] 7.3절 발표 메인 사례 결정
+- [ ] 리크루터 연락 오면 7.4절 질문 4개

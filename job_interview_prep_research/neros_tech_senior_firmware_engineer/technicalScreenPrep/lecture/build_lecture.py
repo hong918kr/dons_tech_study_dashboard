@@ -3,6 +3,7 @@
 lecture/ 아래 md 를 만든다. 그래서 강의에 보이는 코드 = 실제로 실행·검증한 코드.
 
   python3 lecture/build_lecture.py          # md 생성 (build_notes_site.py 가 자동 호출)
+  python3 lecture/crc/explain.py            # L10 숫자 출력 다시 생성
   python3 lecture/build_lecture.py --test   # lecture/code/ 의 pytest 전부 (L00 · L01) + code_c/ C (L03) + code_cpp/ C++ (L04) + warmup/ (L05)
   bash lecture/frameworks/run_all.sh        # L02 프레임워크 예제 10종 실행
 
@@ -22,12 +23,16 @@ SOURCES = {
     "l04_embedded_cpp_basics.md.in": "2026-10-04_L04_embedded_cpp_basics.md",
     "l05_warmup.md.in": "2026-10-04_L05_warmup.md",
     "l06_screen_scenarios.md.in": "2026-10-05_L06_screen_scenarios.md",
+    "l07_final_checkup.md.in": "2026-10-07_L07_final_checkup.md",
+    "l08_pytest_from_zero.md.in": "2026-10-08_L08_pytest_from_zero.md",
+    "l09_screen_recap.md.in": "2026-10-09_L09_screen_recap.md",
+    "l10_crc_table.md.in": "2026-10-09_L10_crc_table.md",
 }
 WARMUP = HERE / "warmup"
 WARM = re.compile(r"^\{\{warmup (py|c)\}\}$")
 INC = re.compile(r"^\{\{include ([\w./-]+)(?:#(\w+))?\}\}$")
 LANG = {".py": "python", ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".robot": "robot",
-        ".feature": "gherkin", ".yml": "yaml", ".yaml": "yaml", ".sh": "bash", ".json": "json"}
+        ".feature": "gherkin", ".yml": "yaml", ".yaml": "yaml", ".sh": "bash", ".json": "json", ".txt": "text"}
 
 
 def lang_of(path):
@@ -115,7 +120,10 @@ def test():
                          capture_output=True, text=True)
     print("L06 buggy ring:", (bug.stdout.strip().splitlines() or ["?"])[-1])
     rc |= 0 if "3 failed" in bug.stdout else 1
-    for d in ("code_c", "code_cpp", "warmup"):          # L03 C · L04 C++ · L05 몸풀기
+    p101 = HERE / "pytest101"                            # L08: 실패 예제(step1b) 빼고 전부 통과해야
+    rc |= subprocess.run([py, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--rootdir", str(p101),
+                          *sorted(str(f) for f in p101.glob("step*.py") if "failing" not in f.name)]).returncode
+    for d in ("code_c", "code_cpp", "warmup", "recap", "crc"):          # L03 C · L04 C++ · L05 몸풀기
         rc |= subprocess.run(["make", "-s", "-C", str(HERE / d), "test"]).returncode
         subprocess.run(["make", "-s", "-C", str(HERE / d), "clean"])
     return rc

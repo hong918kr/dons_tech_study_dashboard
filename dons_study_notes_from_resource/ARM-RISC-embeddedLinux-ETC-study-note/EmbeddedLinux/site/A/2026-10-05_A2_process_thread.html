@@ -1,0 +1,1473 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A2. 프로세스와 스레드 — fork·exec·wait, pthread, 그리고 커널에선 둘 다 task_struct</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="A/2026-10-05_A2_process_thread">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">A. 유저스페이스 · 시스템 프로그래밍 · A2. 프로세스와 스레드 — fork·exec·wait, pthread, 그리고 커널에선 둘 다 task_struct</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">A. 유저스페이스 · 시스템 프로그래밍 · Userspace &amp; Syscalls</div>
+      <h1>A2. 프로세스와 스레드 — fork·exec·wait, pthread, 그리고 커널에선 둘 다 <code>task_struct</code></h1>
+      <div class="meta"><span>154분 읽기</span><span>1882줄</span><span>66개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: fork/exec/wait로 자식 프로세스를 띄우고 종료 이유를 해석할 수 있다 · 좀비·고아·D 상태를 <code>ps</code>와 <code>/proc</code>로 찾아낼 수 있다 · PID/TGID/TID와 pthread의 공유 범위를 정확히 말할 수 있다 · nice·SCHED_FIFO·CPU affinity·context switch 카운터를 직접 만져 볼 수 있다 <strong>왜 필요한가</strong>: "process vs thread 차이?", "zombie가 뭐고 어떻게 없애나?", "fork는 왜 빠른가(COW)?", "D state 프로세스는 왜 kill이 안 되나?" — Embedded Linux 1차 면접의 단골이고, 실무에선 센서 데몬·워치독·런처 코드가 전부 이 API 위에 있다 <strong>Don 기준 난이도</strong>: RTOS 태스크·스택·컨텍스트 스위치·우선순위는 이미 안다 / 주소 공간 분리, fork의 COW, 좀비 회수, Linux가 프로세스와 스레드를 같은 <code>task_struct</code>로 다룬다는 점이 새롭다 <strong>선행 노트</strong>: A1</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-rtos-태스크-프로세스-스레드">0. 큰 그림 — RTOS 태스크, 프로세스, 스레드<a class="anchor" href="#0-큰-그림-rtos-태스크-프로세스-스레드" aria-label="link">#</a></h2>
+<p>Don이 SSD 펌웨어에서 쓰던 RTOS를 떠올려 보자. 태스크마다 스택과 TCB(Task Control Block)가 있고, 스케줄러가 우선순위대로 TCB를 골라 레지스터를 복원한다. 그런데 <strong>모든 태스크가 같은 주소 공간</strong>을 본다. 태스크 A가 포인터를 잘못 써서 태스크 B의 전역 변수를 덮어써도 아무도 막지 않는다 (MPU를 켜서 영역을 나누지 않았다면).</p>
+<p>Linux는 이 그림에 두 가지를 얹는다.</p>
+<ul><li><strong>프로세스(process)</strong> = 자기만의 가상 주소 공간(page table)을 가진 실행 단위. MMU가 다른 프로세스의 메모리를 아예 "안 보이게" 한다. RTOS 태스크를 MPU로 격리한 것보다 훨씬 강한 격리다. 파일 디스크립터 테이블, 시그널 핸들러, 현재 디렉터리 같은 "자원 묶음"도 프로세스 단위로 따로 가진다.</li><li><strong>스레드(thread)</strong> = 한 프로세스 안에서 주소 공간과 자원을 <strong>공유</strong>하며 따로 스케줄되는 실행 흐름. 스택·레지스터·TID만 각자 가진다. RTOS 태스크와 가장 닮은 것이 바로 이 스레드다.</li></ul>
+<p>그리고 Linux의 핵심 반전: 커널 안에서는 <strong>프로세스도 스레드도 같은 구조체 <code>task_struct</code></strong> 하나로 표현된다. 커널에게 스케줄 단위는 그냥 "task"이고, 두 task가 주소 공간(<code>mm_struct</code>)을 공유하면 우리가 스레드라고 부르고, 공유하지 않으면 프로세스라고 부를 뿐이다. 이 관점을 8절에서 <code>clone()</code> 플래그로 확인한다.</p>
+<figure class="chart"><svg viewBox="0 0 660 330" xmlns="http://www.w3.org/2000/svg">
+<text x="165" y="22" text-anchor="middle" font-size="14">프로세스 2개 (fork)</text>
+<text x="495" y="22" text-anchor="middle" font-size="14">프로세스 1개 + 스레드 3개</text>
+<rect x="15" y="35" width="140" height="240" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="85" y="56" text-anchor="middle" font-size="13">PID 100</text>
+<rect x="175" y="35" width="140" height="240" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="245" y="56" text-anchor="middle" font-size="13">PID 200</text>
+<rect x="25" y="68" width="120" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="85" y="86" text-anchor="middle" font-size="12">code</text>
+<rect x="25" y="98" width="120" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="85" y="116" text-anchor="middle" font-size="12">data / bss</text>
+<rect x="25" y="128" width="120" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="85" y="146" text-anchor="middle" font-size="12">heap</text>
+<rect x="25" y="158" width="120" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="85" y="176" text-anchor="middle" font-size="12">stack</text>
+<rect x="25" y="188" width="120" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="85" y="206" text-anchor="middle" font-size="12">fd table</text>
+<rect x="25" y="218" width="120" height="44" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="85" y="236" text-anchor="middle" font-size="12">page table A</text>
+<text x="85" y="254" text-anchor="middle" font-size="12">(mm_struct A)</text>
+<rect x="185" y="68" width="120" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="245" y="86" text-anchor="middle" font-size="12">code</text>
+<rect x="185" y="98" width="120" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="245" y="116" text-anchor="middle" font-size="12">data / bss</text>
+<rect x="185" y="128" width="120" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="245" y="146" text-anchor="middle" font-size="12">heap</text>
+<rect x="185" y="158" width="120" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="245" y="176" text-anchor="middle" font-size="12">stack</text>
+<rect x="185" y="188" width="120" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="245" y="206" text-anchor="middle" font-size="12">fd table</text>
+<rect x="185" y="218" width="120" height="44" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="245" y="236" text-anchor="middle" font-size="12">page table B</text>
+<text x="245" y="254" text-anchor="middle" font-size="12">(mm_struct B)</text>
+<rect x="345" y="35" width="300" height="240" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="495" y="56" text-anchor="middle" font-size="13">PID(TGID) 300 — 공유 영역</text>
+<rect x="360" y="68" width="270" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="495" y="86" text-anchor="middle" font-size="12">code · data / bss · heap</text>
+<rect x="360" y="98" width="270" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="495" y="116" text-anchor="middle" font-size="12">fd table · signal handlers · cwd</text>
+<rect x="360" y="128" width="270" height="26" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="495" y="146" text-anchor="middle" font-size="12">page table 1개 (mm_struct 공유)</text>
+<rect x="360" y="170" width="82" height="92" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="401" y="192" text-anchor="middle" font-size="12">TID 300</text>
+<text x="401" y="212" text-anchor="middle" font-size="12">stack</text>
+<text x="401" y="230" text-anchor="middle" font-size="12">regs</text>
+<text x="401" y="248" text-anchor="middle" font-size="12">errno</text>
+<rect x="454" y="170" width="82" height="92" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="495" y="192" text-anchor="middle" font-size="12">TID 301</text>
+<text x="495" y="212" text-anchor="middle" font-size="12">stack</text>
+<text x="495" y="230" text-anchor="middle" font-size="12">regs</text>
+<text x="495" y="248" text-anchor="middle" font-size="12">errno</text>
+<rect x="548" y="170" width="82" height="92" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="589" y="192" text-anchor="middle" font-size="12">TID 302</text>
+<text x="589" y="212" text-anchor="middle" font-size="12">stack</text>
+<text x="589" y="230" text-anchor="middle" font-size="12">regs</text>
+<text x="589" y="248" text-anchor="middle" font-size="12">errno</text>
+<text x="165" y="300" text-anchor="middle" font-size="13">주소 공간이 완전히 분리된다</text>
+<text x="165" y="320" text-anchor="middle" font-size="12">(MPU로 격리한 RTOS 태스크보다 강함)</text>
+<text x="495" y="300" text-anchor="middle" font-size="13">주소 공간을 공유, 스택·레지스터만 각자</text>
+<text x="495" y="320" text-anchor="middle" font-size="12">(RTOS 태스크와 가장 닮은 모습)</text>
+</svg></figure>
+<p>그림 1 — 왼쪽은 fork로 만든 두 프로세스(각자 page table), 오른쪽은 한 프로세스 안의 스레드 3개(page table 하나를 공유하고 스택·레지스터·errno만 각자).</p>
+<div class="tw"><table><thead><tr><th>항목</th><th>RTOS 태스크 (FreeRTOS 등)</th><th>Linux 프로세스</th><th>Linux 스레드 (pthread)</th></tr></thead><tbody><tr><td>주소 공간</td><td>전 태스크 공유 (MPU 선택)</td><td>프로세스마다 따로 (MMU)</td><td>같은 프로세스 안에서 공유</td></tr><tr><td>만드는 API</td><td><code>xTaskCreate</code></td><td><code>fork()</code> (+ <code>exec</code>)</td><td><code>pthread_create()</code></td></tr><tr><td>스택</td><td>생성 시 크기 지정</td><td>커널이 자동 확장 (최대 <code>ulimit -s</code>)</td><td>기본 8 MiB 가상 (실사용분만 물리 할당)</td></tr><tr><td>제어 블록</td><td>TCB</td><td><code>task_struct</code></td><td><code>task_struct</code> (같은 구조체!)</td></tr><tr><td>한쪽이 죽으면</td><td>보통 시스템 전체가 위험</td><td>그 프로세스만 죽는다</td><td>프로세스 전체가 죽는다 (SIGSEGV 등)</td></tr><tr><td>통신</td><td>전역 변수, 큐</td><td>IPC 필요 (pipe, socket, shm — A7)</td><td>전역 변수 + 락 (A8)</td></tr><tr><td>생성 비용</td><td>작다 (TCB·스택 할당뿐)</td><td>수십~수백 us (10절 측정)</td><td>수십 us (10절 측정)</td></tr></tbody></table></div>
+<p>센서 키트에 대입해 보면 이렇다. 카메라 파이프라인·GNSS 파서·CAN 모터 제어를 <strong>각각 별도 프로세스</strong>로 돌리면 GNSS 파서가 segfault 나도 모터 제어는 산다(systemd가 파서만 재시작). 반대로 IMU 1 kHz 읽기 스레드와 필터 스레드는 같은 버퍼를 공유해야 하니 <strong>한 프로세스 안의 스레드</strong>로 둔다. "격리가 필요하면 프로세스, 공유가 필요하면 스레드"가 첫 번째 설계 기준이다.</p>
+<p>이 노트의 실습 환경: Lima Ubuntu VM <code>elinux</code> (aarch64, 4 vCPU). <code>uname -r</code> 출력은 <code>7.0.0-34-generic</code>, 페이지 크기 4096, <code>CONFIG_HZ=1000</code>, <code>CONFIG_PREEMPT_DYNAMIC=y</code>(현재 lazy 선점 모드). 모든 예제는 <code>gcc -std=gnu11 -Wall -Wextra -O2</code>(스레드 예제는 <code>-pthread</code>)로 경고 0개로 빌드했다.</p>
+<hr>
+<h2 id="1-프로세스-만들기-fork">1. 프로세스 만들기 — <code>fork()</code><a class="anchor" href="#1-프로세스-만들기-fork" aria-label="link">#</a></h2>
+<h3 id="1-1-직관-나를-통째로-복제하고-반환값으로-누가-누군지-구분">1.1 직관: "나를 통째로 복제하고, 반환값으로 누가 누군지 구분"<a class="anchor" href="#1-1-직관-나를-통째로-복제하고-반환값으로-누가-누군지-구분" aria-label="link">#</a></h3>
+<p><code>fork()</code>는 호출한 프로세스를 거의 그대로 복제한다. 코드·데이터·힙·스택·열린 fd·시그널 핸들러가 전부 복사된 <strong>두 번째 프로세스</strong>가 생기고, 두 프로세스 모두 <code>fork()</code> 다음 줄부터 실행을 이어 간다. 구분하는 방법은 반환값 하나뿐이다.</p>
+<ul><li>부모에게는 자식의 PID(양수)를 돌려준다.</li><li>자식에게는 0을 돌려준다.</li><li>실패하면 부모에게 -1 (자식은 안 생김). 흔한 원인: <code>EAGAIN</code>(프로세스 수 제한 <code>RLIMIT_NPROC</code>), <code>ENOMEM</code>.</li></ul>
+<p>bare-metal 비유로는 "현재 태스크의 TCB와 스택을 memcpy해서 새 태스크로 등록하고, 새 태스크의 r0(반환 레지스터)만 0으로 바꿔 둔 것"이다. 실제로 커널은 자식의 저장된 레지스터 중 반환값 레지스터(arm64는 x0)를 0으로 만들어 둔다.</p>
+<h3 id="1-2-부모의-의무-wait-로-회수하기">1.2 부모의 의무: <code>wait()</code>로 회수하기<a class="anchor" href="#1-2-부모의-의무-wait-로-회수하기" aria-label="link">#</a></h3>
+<p>자식이 끝나면 커널은 자식의 대부분 자원(메모리, fd)을 해제하지만 <strong>종료 상태(exit status)와 자원 사용량을 담은 <code>task_struct</code>는 남겨 둔다</strong>. 부모가 <code>wait()</code>/<code>waitpid()</code>로 그 값을 읽어 갈 때까지다. 이것이 4절의 좀비다.</p>
+<p><code>waitpid(pid, &amp;status, options)</code>의 인자:</p>
+<ul><li><code>pid &gt; 0</code>: 그 자식만, <code>pid == -1</code>: 아무 자식이나, <code>pid == 0</code>: 같은 프로세스 그룹의 자식.</li><li><code>options</code>: <code>WNOHANG</code>(끝난 자식이 없으면 바로 0 반환 — 폴링용), <code>WUNTRACED</code>(정지된 자식도 보고), <code>WCONTINUED</code>.</li><li>더 기다릴 자식이 없으면 -1 + <code>errno = ECHILD</code>.</li></ul>
+<p><code>status</code>는 정수 하나에 여러 정보가 비트로 packed 되어 있어서 매크로로 풀어야 한다.</p>
+<div class="tw"><table><thead><tr><th>매크로</th><th>참이면</th><th>짝 매크로</th></tr></thead><tbody><tr><td><code>WIFEXITED(st)</code></td><td><code>exit()</code>/<code>return</code>으로 정상 종료</td><td><code>WEXITSTATUS(st)</code> → 종료 코드 하위 8비트 (0~255)</td></tr><tr><td><code>WIFSIGNALED(st)</code></td><td>시그널로 죽음</td><td><code>WTERMSIG(st)</code> → 시그널 번호, <code>WCOREDUMP(st)</code> → core 생성 여부</td></tr><tr><td><code>WIFSTOPPED(st)</code></td><td>정지됨 (<code>WUNTRACED</code>일 때만 보고)</td><td><code>WSTOPSIG(st)</code></td></tr><tr><td><code>WIFCONTINUED(st)</code></td><td>SIGCONT로 재개 (<code>WCONTINUED</code>일 때만)</td><td>없음</td></tr></tbody></table></div>
+<h3 id="1-3-예제-1-fork-3번-자식마다-다른-방식으로-죽이고-status-해석하기">1.3 예제 1 — fork 3번, 자식마다 다른 방식으로 죽이고 status 해석하기<a class="anchor" href="#1-3-예제-1-fork-3번-자식마다-다른-방식으로-죽이고-status-해석하기" aria-label="link">#</a></h3>
+<p>정상 종료(42), segfault, SIGTERM으로 죽은 자식 세 개를 만들고 부모가 <code>waitpid(-1, ...)</code> 루프로 전부 회수하며 이유를 출력한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex1: fork 3 children, decode how each one ended
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;signal.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/wait.h&gt;
+
+static void decode(pid_t pid, int st) {
+    if (WIFEXITED(st))
+        printf("child %d: exited, status=%d\n", pid, WEXITSTATUS(st));
+    else if (WIFSIGNALED(st))
+        printf("child %d: killed by signal %d (%s)%s\n", pid, WTERMSIG(st),
+               strsignal(WTERMSIG(st)), WCOREDUMP(st) ? " core" : "");
+    else if (WIFSTOPPED(st))
+        printf("child %d: stopped by signal %d\n", pid, WSTOPSIG(st));
+}
+
+int main(void) {
+    printf("parent pid=%d\n", getpid());
+    for (int i = 0; i &lt; 3; i++) {
+        fflush(stdout);                 /* flush before fork! */
+        pid_t pid = fork();
+        if (pid &lt; 0) { perror("fork"); exit(1); }
+        if (pid == 0) {                 /* child */
+            if (i == 0) exit(42);       /* normal exit */
+            if (i == 1) { int *p = NULL; return *(volatile int *)p; } /* SIGSEGV */
+            pause();                    /* i == 2: wait to be killed */
+            exit(0);
+        }
+        printf("forked child %d (i=%d)\n", pid, i);
+        if (i == 2) { usleep(100000); kill(pid, SIGTERM); }
+    }
+    int st; pid_t pid;
+    while ((pid = waitpid(-1, &amp;st, 0)) &gt; 0)
+        decode(pid, st);
+    perror("waitpid (expected ECHILD)");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'mkdir -p /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex1_wait.c -o /tmp/A2/ex1_wait &amp;&amp; cd /tmp/A2 &amp;&amp; ./ex1_wait'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>parent pid=31689
+forked child 31690 (i=0)
+forked child 31691 (i=1)
+forked child 31692 (i=2)
+child 31690: exited, status=42
+child 31691: killed by signal 11 (Segmentation fault)
+child 31692: killed by signal 15 (Terminated)
+waitpid (expected ECHILD): No child processes</code></pre></figure>
+<p>출력에서 볼 것: 같은 <code>status</code> 정수가 매크로에 따라 "종료 코드 42", "시그널 11", "시그널 15"로 해석된다. 마지막 <code>ECHILD</code>는 "회수할 자식이 더 없다"는 정상 종료 조건이다. PID는 실행마다 다르다. segfault 난 자식의 <code>core</code> 표시가 없는 것은 VM의 core 크기 제한(<code>ulimit -c</code> 0) 때문이다.</p>
+<p>셸의 <code>$?</code>도 같은 규칙을 따른다. 셸은 시그널로 죽은 자식을 <code>128 + 시그널 번호</code>로 보여 준다(SIGSEGV면 139). 그래서 CI 로그에서 "exit code 139"를 보면 바로 "segfault"라고 읽으면 된다.</p>
+<h3 id="1-4-함정-fork-전에-stdout을-flush하지-않으면-출력이-두-번-나온다">1.4 함정 — fork 전에 stdout을 flush하지 않으면 출력이 두 번 나온다<a class="anchor" href="#1-4-함정-fork-전에-stdout을-flush하지-않으면-출력이-두-번-나온다" aria-label="link">#</a></h3>
+<p>예제 1에는 <code>fork()</code> 바로 앞에 <code>fflush(stdout)</code>가 있다. 이걸 빼면(파일 <code>ex1b_dupbuf.c</code>, 나머지는 동일) 어떻게 되는지 보자. stdout을 파이프나 파일로 돌리면 차이가 드러난다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; ./ex1b_dupbuf | cat'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>parent pid=31695
+parent pid=31695
+forked child 31697 (i=0)
+forked child 31698 (i=1)
+forked child 31699 (i=2)
+child 31697: exited, status=42
+child 31698: killed by signal 11 (Segmentation fault)
+child 31699: killed by signal 15 (Terminated)
+waitpid (expected ECHILD): No child processes</code></pre></figure>
+<p>출력에서 볼 것: <code>parent pid=</code> 줄이 두 번 찍혔다. 이유는 stdio 버퍼다. 출력이 터미널이 아니면 glibc는 stdout을 <strong>full buffering</strong>(4 KiB 정도 모아서 한 번에 <code>write</code>)한다. 아직 <code>write</code>되지 않은 "parent pid=..." 문자열이 유저 메모리 버퍼에 있는 채로 fork하면 그 버퍼도 자식에게 복사된다. <code>exit(42)</code>한 자식은 종료하면서 버퍼를 flush하므로 같은 줄이 한 번 더 나온다(시그널로 죽은 자식들은 flush하지 못해서 중복이 없다). 규칙: <strong>fork 전에 <code>fflush(stdout)</code>, 자식에서 exec 실패 시엔 <code>exit()</code>가 아니라 <code>_exit()</code></strong>. <code>_exit()</code>는 stdio 버퍼를 flush하지 않고 <code>atexit</code> 핸들러도 돌리지 않는 "커널에 바로 종료 요청"이다.</p>
+<h3 id="1-5-strace로-보면-fork는-clone-이다">1.5 strace로 보면 fork는 <code>clone()</code>이다<a class="anchor" href="#1-5-strace로-보면-fork는-clone-이다" aria-label="link">#</a></h3>
+<p>glibc의 <code>fork()</code>는 실제로 <code>clone</code> syscall을 부른다. 다음 절의 exec 예제(예제 3)를 strace로 보면 확인된다 (긴 출력 중 앞부분만 남기고 생략했다).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; strace -f -e trace=clone,clone3,execve,wait4,exit_group ./ex3_exec 2&gt;&amp;1 | head -16'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>execve("./ex3_exec", ["./ex3_exec"], 0xffffde338ed8 /* 19 vars */) = 0
+parent pid=187491
+clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLDstrace: Process 187492 attached
+, child_tidptr=0xe660629c0030) = 187492
+[pid 187491] wait4(187492child  pid=187492, about to exec
+ &lt;unfinished ...&gt;
+[pid 187492] execve("/usr/local/sbin/sh", ["sh", "-c", "echo \"in exec'd sh: pid=$$ ppid="...], 0xffffc858d0b8 /* 19 vars */) = -1 ENOENT (No such file or directory)
+[pid 187492] execve("/usr/local/bin/sh", ["sh", "-c", "echo \"in exec'd sh: pid=$$ ppid="...], 0xffffc858d0b8 /* 19 vars */) = -1 ENOENT (No such file or directory)
+[pid 187492] execve("/usr/sbin/sh", ["sh", "-c", "echo \"in exec'd sh: pid=$$ ppid="...], 0xffffc858d0b8 /* 19 vars */) = -1 ENOENT (No such file or directory)
+[pid 187492] execve("/usr/bin/sh", ["sh", "-c", "echo \"in exec'd sh: pid=$$ ppid="...], 0xffffc858d0b8 /* 19 vars */) = 0
+in exec'd sh: pid=187492 ppid=187491
+[pid 187492] exit_group(7)              = ?
+[pid 187492] +++ exited with 7 +++
+&lt;... wait4 resumed&gt;, [{WIFEXITED(s) &amp;&amp; WEXITSTATUS(s) == 7}], 0, NULL) = 187492
+--- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=187492, si_uid=501, si_status=7, si_utime=0, si_stime=0} ---
+...</code></pre></figure>
+<p>출력에서 볼 것: (1) <code>fork()</code>는 <code>clone(flags=...|SIGCHLD)</code>로 바뀐다. 공유 플래그(<code>CLONE_VM</code> 등)가 하나도 없다 = "전부 복사". <code>SIGCHLD</code>는 "자식이 죽으면 부모에게 SIGCHLD를 보내라"는 뜻이다. (2) <code>wait()</code>는 <code>wait4</code> syscall이다. (3) 자식 종료 후 부모에게 실제로 SIGCHLD가 배달된다. (4) <code>execvp</code>는 PATH를 앞에서부터 하나씩 <code>execve</code>로 시도한다 — ENOENT가 3번 난 뒤 <code>/usr/bin/sh</code>에서 성공한다.</p>
+<hr>
+<h2 id="2-copy-on-write-fork가-빠른-이유">2. Copy-on-Write — fork가 빠른 이유<a class="anchor" href="#2-copy-on-write-fork가-빠른-이유" aria-label="link">#</a></h2>
+<h3 id="2-1-직관">2.1 직관<a class="anchor" href="#2-1-직관" aria-label="link">#</a></h3>
+<p>1 GiB를 쓰는 프로세스가 fork할 때 1 GiB를 정말 복사한다면 fork 한 번에 수백 ms가 걸릴 것이다. Linux는 <strong>page table만 복사하고, 데이터 페이지는 공유</strong>한다. 대신 부모·자식 양쪽의 해당 PTE를 <strong>읽기 전용(RO)</strong>으로 바꿔 둔다. 어느 쪽이든 그 페이지에 <strong>쓰는 순간</strong> MMU가 permission fault를 내고, 커널의 page fault handler가 "아, COW 페이지구나" 하고 그때서야 4 KiB 한 페이지를 복사해서 쓴 쪽의 PTE를 새 페이지(RW)로 바꾼다. 이것이 copy-on-write(COW)다.</p>
+<p>Don의 펌웨어 언어로는: "MMU abort가 났는데 에러 처리가 아니라 정상 경로로, 페이지를 하나 복사하고 PTE를 고친 뒤 같은 명령을 재실행한다". page fault의 자세한 경로는 A5에서 다룬다.</p>
+<figure class="chart"><svg viewBox="0 0 660 290" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="160" y="22" text-anchor="middle" font-size="14">(a) fork 직후</text>
+<text x="500" y="22" text-anchor="middle" font-size="14">(b) 자식이 페이지에 쓴 뒤</text>
+<line x1="330" y1="35" x2="330" y2="270" stroke="currentColor" stroke-opacity="0.3" stroke-dasharray="4 4"/>
+<rect x="15" y="50" width="130" height="44" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="80" y="69" text-anchor="middle" font-size="13">부모 PTE</text>
+<text x="80" y="86" text-anchor="middle" font-size="12">VA 0x...304 RO</text>
+<rect x="15" y="160" width="130" height="44" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="80" y="179" text-anchor="middle" font-size="13">자식 PTE</text>
+<text x="80" y="196" text-anchor="middle" font-size="12">VA 0x...304 RO</text>
+<rect x="200" y="105" width="115" height="44" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="257" y="124" text-anchor="middle" font-size="13">물리 페이지 P</text>
+<text x="257" y="141" text-anchor="middle" font-size="12">x=100 (공유)</text>
+<line x1="145" y1="72" x2="198" y2="118" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="145" y1="182" x2="198" y2="138" stroke="currentColor" marker-end="url(#ah2)"/>
+<text x="160" y="240" text-anchor="middle" font-size="12">PTE만 복사, 데이터는 한 벌</text>
+<text x="160" y="258" text-anchor="middle" font-size="12">양쪽 다 쓰기 금지로 표시</text>
+<rect x="345" y="50" width="130" height="44" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="410" y="69" text-anchor="middle" font-size="13">부모 PTE</text>
+<text x="410" y="86" text-anchor="middle" font-size="12">VA 0x...304 RW</text>
+<rect x="345" y="160" width="130" height="44" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="410" y="179" text-anchor="middle" font-size="13">자식 PTE</text>
+<text x="410" y="196" text-anchor="middle" font-size="12">VA 0x...304 RW</text>
+<rect x="530" y="50" width="115" height="44" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="587" y="69" text-anchor="middle" font-size="13">물리 페이지 P</text>
+<text x="587" y="86" text-anchor="middle" font-size="12">x=100</text>
+<rect x="530" y="160" width="115" height="44" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="587" y="179" text-anchor="middle" font-size="13">새 페이지 P'</text>
+<text x="587" y="196" text-anchor="middle" font-size="12">x=999 (복사본)</text>
+<line x1="475" y1="72" x2="528" y2="72" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="475" y1="182" x2="528" y2="182" stroke="currentColor" marker-end="url(#ah2)"/>
+<text x="500" y="240" text-anchor="middle" font-size="12">자식의 write → page fault → 4 KiB 복사</text>
+<text x="500" y="258" text-anchor="middle" font-size="12">같은 가상 주소, 다른 물리 페이지</text>
+</svg></figure>
+<p>그림 2 — fork 직후에는 부모·자식 PTE가 같은 물리 페이지를 읽기 전용으로 가리킨다. 한쪽이 쓰면 그 페이지만 복사되고 둘은 갈라진다.</p>
+<h3 id="2-2-예제-2-같은-주소-다른-값-그리고-페이지마다-한-번의-fault">2.2 예제 2 — 같은 주소, 다른 값, 그리고 페이지마다 한 번의 fault<a class="anchor" href="#2-2-예제-2-같은-주소-다른-값-그리고-페이지마다-한-번의-fault" aria-label="link">#</a></h3>
+<p>64 MiB 버퍼를 부모가 다 채운 뒤 fork한다. 자식은 변수 <code>x</code>와 버퍼 절반(8192 페이지)에 쓰고, 그동안 늘어난 minor page fault 수를 <code>getrusage</code>로 센다. minor fault란 디스크 I/O 없이 메모리 안에서 해결된 page fault다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex2: copy-on-write — same virtual address, different physical page after write
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/resource.h&gt;
+#include &lt;sys/wait.h&gt;
+
+#define SZ (64UL &lt;&lt; 20)   /* 64 MiB */
+
+static long minflt(void) {
+    struct rusage ru; getrusage(RUSAGE_SELF, &amp;ru); return ru.ru_minflt;
+}
+
+int main(void) {
+    char *buf = malloc(SZ);
+    if (!buf) { perror("malloc"); exit(1); }
+    memset(buf, 'A', SZ);               /* touch every page in parent */
+    int x = 100;
+
+    pid_t pid = fork();
+    if (pid &lt; 0) { perror("fork"); exit(1); }
+    if (pid == 0) {
+        printf("child : &amp;x=%p x=%d\n", (void *)&amp;x, x);
+        x = 999;
+        long f0 = minflt();
+        for (size_t i = 0; i &lt; SZ / 2; i += 4096) buf[i] = 'B'; /* write half */
+        long f1 = minflt();
+        printf("child : x=%d after write; wrote %lu pages, minor faults +%ld\n",
+               x, SZ / 2 / 4096, f1 - f0);
+        fflush(stdout);
+        _exit(0);
+    }
+    waitpid(pid, NULL, 0);
+    printf("parent: &amp;x=%p x=%d buf[0]=%c\n", (void *)&amp;x, x, buf[0]);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex2_cow.c -o ex2_cow &amp;&amp; ./ex2_cow'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>child : &amp;x=0xffffc8cb1204 x=100
+child : x=999 after write; wrote 8192 pages, minor faults +8192
+parent: &amp;x=0xffffc8cb1204 x=100 buf[0]=A</code></pre></figure>
+<p>출력에서 볼 것: (1) <code>&amp;x</code>가 부모·자식에서 <strong>같은 가상 주소</strong>인데 값은 자식 999, 부모 100이다 — 가상 주소가 같아도 물리 페이지가 다르다. (2) 8192 페이지에 쓰자 minor fault가 정확히 8192번 늘었다. 페이지 하나당 COW fault 한 번이다. 주소 값은 ASLR 때문에 실행마다 다르다.</p>
+<h3 id="2-3-함정과-실무-포인트">2.3 함정과 실무 포인트<a class="anchor" href="#2-3-함정과-실무-포인트" aria-label="link">#</a></h3>
+<ul><li><strong>fork 비용은 RSS에 비례한다.</strong> 데이터는 안 복사해도 page table은 복사하니까. 10절에서 부모 RSS 0 → 1024 MiB일 때 fork가 73 → 299 us로 늘어나는 것을 직접 잰다. 큰 버퍼를 잡은 카메라 데몬에서 <code>system()</code>(내부적으로 fork+exec)을 자주 부르면 의외로 느려진다.</li><li><strong>fork 후 부모가 계속 쓰면 메모리가 두 배가 될 수 있다.</strong> 자식이 오래 살면서 부모가 버퍼를 갱신하면 COW로 페이지가 하나씩 복사되어 결국 두 벌이 된다. 메모리가 빡빡한 보드에서 OOM의 원인이 된다.</li><li><strong>멀티스레드 프로세스에서 fork하면 자식에는 fork를 부른 스레드 하나만 있다.</strong> 다른 스레드가 잡고 있던 mutex는 잠긴 채로 복사되어 자식에서 영원히 풀리지 않는다. 그래서 POSIX는 "멀티스레드 프로그램에서 fork한 자식은 exec 전까지 async-signal-safe 함수만 쓰라"고 한다. 실무 규칙: 스레드가 있는 프로그램에서는 fork 직후 바로 exec하거나 <code>posix_spawn</code>을 쓴다.</li></ul>
+<hr>
+<h2 id="3-새-프로그램-실행하기-exec-패밀리">3. 새 프로그램 실행하기 — <code>exec</code> 패밀리<a class="anchor" href="#3-새-프로그램-실행하기-exec-패밀리" aria-label="link">#</a></h2>
+<h3 id="3-1-직관-프로세스는-그대로-안에-든-프로그램만-갈아-끼운다">3.1 직관: "프로세스는 그대로, 안에 든 프로그램만 갈아 끼운다"<a class="anchor" href="#3-1-직관-프로세스는-그대로-안에-든-프로그램만-갈아-끼운다" aria-label="link">#</a></h3>
+<p><code>execve(path, argv, envp)</code>는 현재 프로세스의 주소 공간을 버리고 새 ELF 파일을 적재해서 그 <code>main</code>부터 실행한다. <strong>PID는 그대로</strong>이고 성공하면 <strong>절대 반환하지 않는다</strong>(돌아올 코드가 사라졌으니까). 반환했다면 실패한 것이다.</p>
+<p>펌웨어 비유: 부트로더가 같은 CPU·같은 태스크 슬롯에서 새 이미지를 로드하고 엔트리 포인트로 점프하는 것. 셸이 명령을 실행하는 방법이 바로 "fork → 자식에서 exec → 부모는 wait"이다.</p>
+<h3 id="3-2-이름-규칙-글자-하나씩-뜻이-있다">3.2 이름 규칙 — 글자 하나씩 뜻이 있다<a class="anchor" href="#3-2-이름-규칙-글자-하나씩-뜻이-있다" aria-label="link">#</a></h3>
+<p>커널 syscall은 <code>execve</code> 하나(그리고 fd 기반 <code>execveat</code>)이고 나머지는 glibc 래퍼다.</p>
+<div class="tw"><table><thead><tr><th>함수</th><th>인자 전달</th><th>PATH 검색</th><th>환경 변수</th></tr></thead><tbody><tr><td><code>execl</code></td><td>가변 인자 목록 (l = list)</td><td>아니오</td><td>현재 <code>environ</code></td></tr><tr><td><code>execlp</code></td><td>목록</td><td>예 (p = PATH)</td><td>현재 <code>environ</code></td></tr><tr><td><code>execle</code></td><td>목록</td><td>아니오</td><td>직접 지정 (e = env)</td></tr><tr><td><code>execv</code></td><td>배열 (v = vector)</td><td>아니오</td><td>현재 <code>environ</code></td></tr><tr><td><code>execvp</code></td><td>배열</td><td>예</td><td>현재 <code>environ</code></td></tr><tr><td><code>execvpe</code></td><td>배열</td><td>예</td><td>직접 지정 (GNU 확장)</td></tr><tr><td><code>execve</code></td><td>배열</td><td>아니오</td><td>직접 지정 (진짜 syscall)</td></tr><tr><td><code>fexecve</code></td><td>배열</td><td>해당 없음 (fd로 지정)</td><td>직접 지정</td></tr></tbody></table></div>
+<p><code>argv[0]</code>은 관례상 프로그램 이름이고, 목록과 배열 모두 마지막에 <code>NULL</code>이 있어야 한다. 목록형에서는 <code>(char *)NULL</code>로 캐스팅해서 넘긴다(가변 인자에서 0이 int로 넘어가는 문제 방지).</p>
+<h3 id="3-3-exec-후에-남는-것과-사라지는-것">3.3 exec 후에 남는 것과 사라지는 것<a class="anchor" href="#3-3-exec-후에-남는-것과-사라지는-것" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>남는 것</th><th>사라지거나 초기화되는 것</th></tr></thead><tbody><tr><td>PID, PPID, 프로세스 그룹, 세션</td><td>코드·데이터·힙·스택 (주소 공간 전체)</td></tr><tr><td>열린 fd (<code>O_CLOEXEC</code>/<code>FD_CLOEXEC</code>가 없는 것)</td><td><code>O_CLOEXEC</code> fd</td></tr><tr><td>현재 디렉터리, umask, rlimit</td><td>시그널 핸들러 (기본 동작으로 리셋, 무시 설정은 유지)</td></tr><tr><td>실 UID/GID, nice 값, CPU affinity, 스케줄링 정책</td><td>다른 스레드들 (exec하면 스레드 하나만 남음)</td></tr><tr><td>시그널 마스크, 대기 중 시그널</td><td>mmap 영역, 공유 메모리 attach, atexit 핸들러</td></tr></tbody></table></div>
+<p>"fd가 exec 너머로 새는 것"은 실무 버그의 단골이다. 예를 들어 센서 데몬이 <code>/dev/spidev0.0</code>을 열어 둔 채 <code>system("ip link ...")</code>을 부르면 그 fd가 <code>ip</code> 프로세스에도 열려 있다. 그래서 요즘 코드는 <code>open(..., O_CLOEXEC)</code>를 기본으로 쓴다 (A3에서 다시).</p>
+<h3 id="3-4-예제-3-fork-exec-pid가-유지되는-것과-exec-실패-처리">3.4 예제 3 — fork + exec: PID가 유지되는 것과 exec 실패 처리<a class="anchor" href="#3-4-예제-3-fork-exec-pid가-유지되는-것과-exec-실패-처리" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex3: fork + exec — PID stays, program image is replaced
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/wait.h&gt;
+
+int main(void) {
+    printf("parent pid=%d\n", getpid());
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid &lt; 0) { perror("fork"); exit(1); }
+    if (pid == 0) {
+        printf("child  pid=%d, about to exec\n", getpid());
+        fflush(stdout);
+        /* sh -c prints its own PID ($$) and parent PID ($PPID) */
+        char *argv[] = { "sh", "-c", "echo \"in exec'd sh: pid=$$ ppid=$PPID\"; exit 7", NULL };
+        execvp("sh", argv);            /* returns only on error */
+        perror("execvp");
+        _exit(127);
+    }
+    int st;
+    if (waitpid(pid, &amp;st, 0) &lt; 0) { perror("waitpid"); exit(1); }
+    printf("parent: child exit status=%d\n", WEXITSTATUS(st));
+
+    /* exec failure path: a program that doesn't exist */
+    pid = fork();
+    if (pid == 0) {
+        execlp("no_such_prog", "no_such_prog", (char *)NULL);
+        perror("execlp");
+        _exit(127);                    /* shell convention: 127 = not found */
+    }
+    waitpid(pid, &amp;st, 0);
+    printf("parent: second child exit status=%d\n", WEXITSTATUS(st));
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex3_exec.c -o ex3_exec &amp;&amp; ./ex3_exec'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>parent pid=33323
+child  pid=33324, about to exec
+in exec'd sh: pid=33324 ppid=33323
+execlp: No such file or directory
+parent: child exit status=7
+parent: second child exit status=127</code></pre></figure>
+<p>출력에서 볼 것: exec된 <code>sh</code>가 출력한 <code>$$</code>(33324)가 exec 전 자식의 PID와 같다 — 프로그램은 바뀌었지만 프로세스는 그대로다. 부모는 <code>sh</code>의 <code>exit 7</code>을 status로 받는다. 없는 프로그램을 exec하면 <code>execlp</code>가 <strong>반환</strong>하고, 관례대로 <code>_exit(127)</code>("command not found"와 같은 코드)로 끝낸다.</p>
+<h3 id="3-5-posix_spawn-fork-exec를-한-번에">3.5 <code>posix_spawn</code> — fork+exec를 한 번에<a class="anchor" href="#3-5-posix_spawn-fork-exec를-한-번에" aria-label="link">#</a></h3>
+<p><code>posix_spawn()</code>은 "자식을 만들어 바로 다른 프로그램을 실행"하는 표준 API다. glibc는 내부에서 <code>clone(CLONE_VM|CLONE_VFORK)</code>를 써서 부모의 page table을 복사하지 않는다. 그래서 부모 RSS가 커도 비용이 늘지 않는다(10절 측정). 자식에서 fd 재배치(<code>posix_spawn_file_actions_adddup2</code>)나 시그널 마스크 설정 정도는 할 수 있다. 큰 메모리를 쥔 데몬이 외부 툴을 실행해야 한다면 <code>system()</code> 대신 <code>posix_spawn</code>이 정답이다.</p>
+<p><code>vfork()</code>는 그 원조다. 자식이 부모의 주소 공간을 <strong>그대로 빌려 쓰고</strong>(복사도 COW도 없음) 부모는 자식이 exec하거나 <code>_exit</code>할 때까지 멈춘다. 자식이 변수를 바꾸거나 <code>return</code>하면 부모 스택이 망가지므로 "exec 아니면 <code>_exit</code>"만 허용된다. 직접 쓰기보다는 <code>posix_spawn</code>에 맡기는 것이 안전하다.</p>
+<hr>
+<h2 id="4-종료-좀비-고아">4. 종료, 좀비, 고아<a class="anchor" href="#4-종료-좀비-고아" aria-label="link">#</a></h2>
+<h3 id="4-1-종료-경로-세-가지">4.1 종료 경로 세 가지<a class="anchor" href="#4-1-종료-경로-세-가지" aria-label="link">#</a></h3>
+<ul><li><code>return</code> from <code>main</code> → <code>exit(code)</code>와 같다.</li><li><code>exit(code)</code>: <code>atexit</code> 핸들러 실행 → stdio 버퍼 flush → <code>_exit(code)</code>.</li><li><code>_exit(code)</code> (또는 <code>_Exit</code>): 곧장 커널의 <code>exit_group</code> syscall. 프로세스의 <strong>모든 스레드</strong>를 끝낸다.</li></ul>
+<p>종료 코드는 하위 8비트만 전달된다. <code>exit(256)</code>은 부모에게 0으로 보인다. 관례: 0 = 성공, 1 = 일반 오류, 2 = 사용법 오류, 126 = 실행 권한 없음, 127 = 명령 없음, 128+N = 시그널 N으로 죽음(셸 표기).</p>
+<h3 id="4-2-좀비-zombie-죽었는데-회수되지-않은-자식">4.2 좀비(zombie) — 죽었는데 회수되지 않은 자식<a class="anchor" href="#4-2-좀비-zombie-죽었는데-회수되지-않은-자식" aria-label="link">#</a></h3>
+<p>자식이 종료하면 커널은 메모리·fd를 정리하고 부모에게 SIGCHLD를 보낸다. 그러나 <code>task_struct</code>(PID, 종료 코드, CPU 사용 시간)는 <strong>부모가 wait할 때까지</strong> 남긴다. 이 상태가 <code>Z</code>(zombie), <code>ps</code>에서 <code>&lt;defunct&gt;</code>다. 좀비는 메모리를 거의 안 먹지만 <strong>PID를 하나 차지</strong>한다. 부모가 영원히 wait하지 않으면 PID가 계속 쌓여 결국 <code>fork()</code>가 <code>EAGAIN</code>으로 실패한다.</p>
+<p>좀비는 이미 죽었으므로 <code>kill -9</code>로 없앨 수 없다. 없애는 방법은 (1) 부모가 wait하게 고치거나 (2) 부모를 죽여서 좀비를 init에 넘기는 것(init이 회수한다)이다.</p>
+<figure class="chart"><svg viewBox="0 0 660 250" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="64" font-size="13">부모</text>
+<text x="20" y="164" font-size="13">자식</text>
+<line x1="60" y1="60" x2="640" y2="60" stroke="#4a7bd0" stroke-width="3"/>
+<line x1="110" y1="60" x2="110" y2="156" stroke="currentColor" marker-end="url(#ah5)"/>
+<text x="110" y="45" text-anchor="middle" font-size="12">fork()</text>
+<line x1="110" y1="160" x2="400" y2="160" stroke="#e08a3c" stroke-width="3"/>
+<line x1="220" y1="150" x2="220" y2="170" stroke="currentColor"/>
+<text x="220" y="190" text-anchor="middle" font-size="12">exec()</text>
+<text x="165" y="150" text-anchor="middle" font-size="12">자식 코드</text>
+<text x="310" y="150" text-anchor="middle" font-size="12">새 프로그램</text>
+<text x="400" y="190" text-anchor="middle" font-size="12">exit(42)</text>
+<rect x="400" y="145" width="130" height="30" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-dasharray="4 3"/>
+<text x="465" y="165" text-anchor="middle" font-size="12">zombie (Z)</text>
+<line x1="400" y1="140" x2="400" y2="72" stroke="currentColor" stroke-dasharray="3 3" marker-end="url(#ah5)"/>
+<text x="405" y="105" font-size="12">SIGCHLD</text>
+<line x1="530" y1="145" x2="530" y2="72" stroke="currentColor" marker-end="url(#ah5)"/>
+<text x="530" y="45" text-anchor="middle" font-size="12">waitpid() → status 42</text>
+<text x="530" y="215" text-anchor="middle" font-size="12">여기서 task_struct 해제</text>
+<text x="250" y="235" text-anchor="middle" font-size="12">좀비 구간 = exit부터 부모의 wait까지</text>
+</svg></figure>
+<p>그림 3 — fork에서 회수까지의 타임라인. 자식이 <code>exit</code>한 뒤 부모가 <code>waitpid</code>할 때까지가 좀비 구간이다. 이 구간이 끝나지 않으면 좀비가 쌓인다.</p>
+<h3 id="4-3-고아-orphan-와-reparenting">4.3 고아(orphan)와 reparenting<a class="anchor" href="#4-3-고아-orphan-와-reparenting" aria-label="link">#</a></h3>
+<p>반대로 <strong>부모가 먼저 죽으면</strong> 자식은 고아가 된다. 커널은 고아를 다른 프로세스에 입양시킨다(reparenting). 기본 입양처는 PID 1(init, 보통 systemd)이고, init은 자식이 죽을 때마다 wait해서 좀비를 치워 준다. 그래서 "고아는 문제가 아니고 좀비가 문제"다.</p>
+<h3 id="4-4-예제-4-좀비를-만들어-ps로-보고-고아의-새-부모-확인하기">4.4 예제 4 — 좀비를 만들어 ps로 보고, 고아의 새 부모 확인하기<a class="anchor" href="#4-4-예제-4-좀비를-만들어-ps로-보고-고아의-새-부모-확인하기" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex4: make a zombie and an orphan, observe them with ps
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/wait.h&gt;
+
+int main(void) {
+    pid_t z = fork();
+    if (z &lt; 0) { perror("fork"); exit(1); }
+    if (z == 0) _exit(3);                  /* exits immediately -&gt; zombie */
+
+    pid_t mid = fork();
+    if (mid &lt; 0) { perror("fork"); exit(1); }
+    if (mid == 0) {                        /* middle process */
+        pid_t o = fork();
+        if (o == 0) {                      /* grandchild -&gt; orphan */
+            sleep(1);                      /* wait until 'mid' died */
+            printf("orphan %d: my parent is now %d\n", getpid(), getppid());
+            fflush(stdout);
+            sleep(2);
+            _exit(0);
+        }
+        _exit(0);                          /* mid exits; grandchild orphaned */
+    }
+    waitpid(mid, NULL, 0);                 /* reap mid, but NOT z yet */
+    sleep(2);
+
+    char cmd[128];
+    snprintf(cmd, sizeof cmd, "ps -o pid,ppid,stat,cmd -p %d,%d", getpid(), z);
+    printf("--- before wait (zombie %d) ---\n", z); fflush(stdout);
+    if (system(cmd) &lt; 0) perror("system");
+
+    int st;
+    waitpid(z, &amp;st, 0);
+    printf("--- after wait: reaped %d, status=%d ---\n", z, WEXITSTATUS(st)); fflush(stdout);
+    if (system(cmd) &lt; 0) perror("system");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex4_zombie.c -o ex4_zombie &amp;&amp; ./ex4_zombie; sleep 2; ps -o pid,comm -p 1'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>orphan 33329: my parent is now 1
+--- before wait (zombie 33327) ---
+    PID    PPID STAT CMD
+  33326   33289 S    ./ex4_zombie
+  33327   33326 Z    [ex4_zombie] &lt;defunct&gt;
+--- after wait: reaped 33327, status=3 ---
+    PID    PPID STAT CMD
+  33326   33289 S    ./ex4_zombie
+    PID COMMAND
+      1 systemd</code></pre></figure>
+<p>출력에서 볼 것: (1) 회수 전에는 자식 33327이 <code>STAT Z</code>, <code>&lt;defunct&gt;</code>로 남아 있다. (2) <code>waitpid</code> 후에는 <code>ps</code> 목록에서 아예 사라진다 — 이제 진짜로 PID가 반환됐다. (3) 중간 프로세스가 죽은 뒤 손자(orphan)의 <code>getppid()</code>가 1, 즉 systemd로 바뀌었다.</p>
+<h3 id="4-5-예제-5-subreaper-고아는-init-말고-나한테-줘">4.5 예제 5 — subreaper: "고아는 init 말고 나한테 줘"<a class="anchor" href="#4-5-예제-5-subreaper-고아는-init-말고-나한테-줘" aria-label="link">#</a></h3>
+<p><code>prctl(PR_SET_CHILD_SUBREAPER, 1)</code>을 부른 프로세스는 자기 <strong>자손</strong> 중 고아가 생기면 init 대신 그 고아를 입양한다. systemd가 서비스별로, 컨테이너 런타임의 init(tini 등)이 컨테이너 안에서 이 기능을 쓴다. 장비의 "슈퍼바이저" 프로세스가 자기 밑의 워커들을 끝까지 책임지게 할 때 유용하다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex5: become a child subreaper — orphans get reparented to us, not to PID 1
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/prctl.h&gt;
+#include &lt;sys/wait.h&gt;
+
+int main(void) {
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1) &lt; 0) { perror("prctl"); exit(1); }
+    printf("subreaper pid=%d\n", getpid()); fflush(stdout);
+
+    pid_t mid = fork();
+    if (mid &lt; 0) { perror("fork"); exit(1); }
+    if (mid == 0) {
+        if (fork() == 0) {                 /* grandchild */
+            sleep(1);
+            printf("grandchild %d: ppid=%d\n", getpid(), getppid());
+            fflush(stdout);
+            _exit(5);
+        }
+        _exit(0);                          /* orphan the grandchild */
+    }
+    int st; pid_t p;
+    while ((p = wait(&amp;st)) &gt; 0)            /* we reap BOTH mid and grandchild */
+        printf("subreaper reaped %d (status %d)\n", p, WEXITSTATUS(st));
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex5_subreaper.c -o ex5_subreaper &amp;&amp; ./ex5_subreaper'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>subreaper pid=33947
+grandchild 33949: ppid=33947
+subreaper reaped 33948 (status 0)
+subreaper reaped 33949 (status 5)</code></pre></figure>
+<p>출력에서 볼 것: 손자의 새 부모가 1이 아니라 subreaper(33947)다. 그래서 subreaper는 자기가 직접 fork하지 않은 손자(33949)의 종료 코드 5까지 <code>wait()</code>로 받는다.</p>
+<h3 id="4-6-좀비를-안-만드는-방법-정리">4.6 좀비를 안 만드는 방법 정리<a class="anchor" href="#4-6-좀비를-안-만드는-방법-정리" aria-label="link">#</a></h3>
+<ul><li>동기적으로: 자식마다 <code>waitpid(pid, &amp;st, 0)</code>.</li><li>이벤트 루프에서: SIGCHLD를 받으면 <code>while (waitpid(-1, &amp;st, WNOHANG) &gt; 0) ;</code>로 끝난 자식을 전부 회수 (시그널은 합쳐질 수 있으니 반드시 루프). 시그널 처리 상세는 A6.</li><li>자식 상태에 관심이 없다면: <code>signal(SIGCHLD, SIG_IGN)</code> 또는 <code>sigaction</code>에 <code>SA_NOCLDWAIT</code> — 커널이 자식을 자동 회수한다(대신 <code>wait</code>로 상태를 받을 수 없다).</li><li>이중 fork: 손자를 고아로 만들어 init에 맡긴다 (11절 데몬).</li><li>Linux 5.3+의 <code>pidfd_open()</code> + <code>poll()</code>/<code>epoll</code>: 자식 종료를 fd 이벤트로 받는다 (A4와 짝).</li></ul>
+<hr>
+<h2 id="5-프로세스-상태-r-s-d-t-z">5. 프로세스 상태 — R, S, D, T, Z<a class="anchor" href="#5-프로세스-상태-r-s-d-t-z" aria-label="link">#</a></h2>
+<h3 id="5-1-상태-전이도">5.1 상태 전이도<a class="anchor" href="#5-1-상태-전이도" aria-label="link">#</a></h3>
+<p><code>ps</code>의 <code>STAT</code> 첫 글자(또는 <code>/proc/&lt;pid&gt;/status</code>의 <code>State:</code>)가 task의 상태다. RTOS의 Ready/Running/Blocked/Suspended와 거의 일대일로 대응하는데, Linux는 Blocked를 <strong>S와 D 두 종류</strong>로 나눈다는 점이 핵심이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="20" y="30" width="150" height="40" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="95" y="55" text-anchor="middle" font-size="13">fork() / clone()</text>
+<rect x="250" y="170" width="180" height="50" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="340" y="191" text-anchor="middle" font-size="13">R: running / runnable</text>
+<text x="340" y="209" text-anchor="middle" font-size="12">CPU 위 또는 runqueue</text>
+<rect x="470" y="30" width="200" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="570" y="51" text-anchor="middle" font-size="13">S: interruptible sleep</text>
+<text x="570" y="69" text-anchor="middle" font-size="12">시그널로도 깨어남</text>
+<rect x="470" y="310" width="200" height="50" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="570" y="331" text-anchor="middle" font-size="13">D: uninterruptible sleep</text>
+<text x="570" y="349" text-anchor="middle" font-size="12">시그널 무시, kill -9도 대기</text>
+<rect x="20" y="170" width="150" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="95" y="191" text-anchor="middle" font-size="13">T: stopped</text>
+<text x="95" y="209" text-anchor="middle" font-size="12">SIGSTOP, 디버거</text>
+<rect x="250" y="330" width="180" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340" y="351" text-anchor="middle" font-size="13">Z: zombie</text>
+<text x="340" y="369" text-anchor="middle" font-size="12">task_struct만 남음</text>
+<rect x="20" y="330" width="150" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888" stroke-dasharray="4 3"/>
+<text x="95" y="360" text-anchor="middle" font-size="13">사라짐 (reaped)</text>
+<line x1="150" y1="70" x2="258" y2="168" stroke="currentColor" marker-end="url(#ah3)"/>
+<line x1="430" y1="175" x2="518" y2="82" stroke="currentColor" marker-end="url(#ah3)"/>
+<line x1="560" y1="82" x2="432" y2="190" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="464" y="128" text-anchor="end" font-size="12">block</text>
+<text x="530" y="130" font-size="12">wake_up 또는 signal</text>
+<line x1="430" y1="205" x2="518" y2="308" stroke="currentColor" marker-end="url(#ah3)"/>
+<line x1="560" y1="308" x2="432" y2="215" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="470" y="282" text-anchor="end" font-size="12">I/O 대기</text>
+<text x="515" y="262" font-size="12">wake_up만</text>
+<line x1="250" y1="185" x2="172" y2="185" stroke="currentColor" marker-end="url(#ah3)"/>
+<line x1="170" y1="205" x2="248" y2="205" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="210" y="178" text-anchor="middle" font-size="12">SIGSTOP</text>
+<text x="210" y="222" text-anchor="middle" font-size="12">SIGCONT</text>
+<line x1="340" y1="220" x2="340" y2="328" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="348" y="280" font-size="12">exit</text>
+<line x1="250" y1="355" x2="172" y2="355" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="210" y="347" text-anchor="middle" font-size="12">wait</text>
+</svg></figure>
+<p>그림 4 — task 상태 전이도. S와 D는 둘 다 "무언가를 기다리며 잠든" 상태지만, S는 시그널로도 깨어나고 D는 기다리던 사건(wake_up)으로만 깨어난다.</p>
+<div class="tw"><table><thead><tr><th>STAT</th><th>커널 상태 상수</th><th>뜻</th><th>RTOS 대응</th></tr></thead><tbody><tr><td>R</td><td><code>TASK_RUNNING</code></td><td>CPU에서 실행 중이거나 runqueue에서 차례를 기다림</td><td>Running + Ready</td></tr><tr><td>S</td><td><code>TASK_INTERRUPTIBLE</code></td><td>이벤트 대기, 시그널이 오면 깨어나 syscall이 <code>EINTR</code>로 끝날 수 있음</td><td>Blocked</td></tr><tr><td>D</td><td><code>TASK_UNINTERRUPTIBLE</code> (<code>TASK_KILLABLE</code> 포함)</td><td>이벤트 대기, 시그널로 깨어나지 않음</td><td>타임아웃 없는 Blocked</td></tr><tr><td>T</td><td><code>__TASK_STOPPED</code></td><td>SIGSTOP/SIGTSTP로 정지</td><td>Suspended</td></tr><tr><td>t</td><td><code>__TASK_TRACED</code></td><td>디버거(ptrace)가 정지시킴</td><td>디버거 halt</td></tr><tr><td>Z</td><td><code>EXIT_ZOMBIE</code></td><td>종료, 부모의 wait 대기</td><td>없음</td></tr><tr><td>I</td><td><code>TASK_IDLE</code></td><td>커널 스레드 전용 "할 일 없음" 대기, load average에 안 잡힘</td><td>idle 태스크</td></tr></tbody></table></div>
+<p><code>STAT</code> 두 번째 글자 이후는 부가 정보다: <code>s</code> 세션 리더, <code>l</code> 멀티스레드, <code>+</code> 포그라운드 프로세스 그룹, <code>&lt;</code> 높은 우선순위(음수 nice), <code>N</code> 낮은 우선순위.</p>
+<h3 id="5-2-예제-6-다섯-가지-상태를-한-화면에-만들기">5.2 예제 6 — 다섯 가지 상태를 한 화면에 만들기<a class="anchor" href="#5-2-예제-6-다섯-가지-상태를-한-화면에-만들기" aria-label="link">#</a></h3>
+<p>바쁜 루프(R), <code>pause()</code>(S), SIGSTOP(T), 회수 안 된 자식(Z), 그리고 <strong>vfork 부모(D)</strong>를 만든다. <code>vfork()</code>를 부른 부모는 자식이 exec/exit할 때까지 커널 안에서 <code>TASK_KILLABLE</code>로 기다리는데, <code>TASK_KILLABLE</code>은 <code>TASK_UNINTERRUPTIBLE</code>에 "SIGKILL만은 받는다"는 비트를 더한 것이라 <code>ps</code>에는 D로 보인다. 드라이버 없이 D 상태를 만들어 볼 수 있는 손쉬운 방법이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex6: put children into R, S, T, Z and D, then look at them with ps
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;signal.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/wait.h&gt;
+
+static pid_t spawn(int kind) {
+    pid_t pid = fork();
+    if (pid &lt; 0) { perror("fork"); exit(1); }
+    if (pid) return pid;
+    switch (kind) {
+    case 'R': for (volatile unsigned long i = 0;; i++) ; /* busy loop */
+    case 'S': pause(); break;                  /* interruptible sleep */
+    case 'Z': _exit(0);                        /* zombie until reaped */
+    case 'D': if (vfork() == 0) { sleep(3); _exit(0); } /* parent waits in D */
+              pause(); break;
+    }
+    _exit(0);
+}
+
+int main(void) {
+    pid_t r = spawn('R'), s = spawn('S'), t = spawn('S'), z = spawn('Z'), d = spawn('D');
+    kill(t, SIGSTOP);                          /* stopped -&gt; T */
+    sleep(1);
+    char cmd[200];
+    snprintf(cmd, sizeof cmd,
+        "ps -o pid,ppid,stat,wchan:24,cmd --ppid %d,%d", getpid(), d);
+    fflush(stdout);
+    if (system(cmd) &lt; 0) perror("system");
+    printf("main=%d R=%d S=%d T=%d Z=%d D=%d\n", getpid(), r, s, t, z, d);
+    kill(r, SIGKILL); kill(s, SIGKILL); kill(t, SIGKILL); kill(d, SIGKILL);
+    while (wait(NULL) &gt; 0) ;
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex6_states.c -o ex6_states &amp;&amp; ./ex6_states'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>    PID    PPID STAT WCHAN                    CMD
+  34476   34475 R    -                        ./ex6_states
+  34477   34475 S    poll_schedule_timeout.co ./ex6_states
+  34478   34475 T    do_signal_stop           ./ex6_states
+  34479   34475 Z    -                        [ex6_states] &lt;defunct&gt;
+  34480   34475 D    kernel_clone             ./ex6_states
+  34481   34480 S    hrtimer_nanosleep        ./ex6_states
+  34482   34475 S    do_wait                  sh -c -- ps -o pid,ppid,stat,wchan:24,cmd --ppid 34475,34480
+main=34475 R=34476 S=34477 T=34478 Z=34479 D=34480</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><code>WCHAN</code>("wait channel")은 그 task가 커널의 <strong>어느 함수 안에서 잠들어 있는지</strong>를 보여 준다. 디버깅에서 가장 유용한 칼럼이다.</li><li>S 자식은 <code>pause()</code>를 불렀는데 wchan이 <code>poll_schedule_timeout</code>이다. arm64에는 <code>pause</code> syscall이 없어서 glibc가 <code>ppoll(NULL, 0, NULL, NULL)</code>로 구현하기 때문이다(칼럼 폭 24에서 잘림).</li><li>D 상태 34480은 <code>kernel_clone</code> 안(vfork 완료 대기)에 있고, 그 자식 34481은 <code>sleep(3)</code> 중이라 <code>hrtimer_nanosleep</code>에서 S다.</li><li><code>system()</code>이 만든 <code>sh</code>는 <code>do_wait</code>, 즉 <code>ps</code>가 끝나기를 wait 중이다.</li></ul>
+<h3 id="5-3-d-상태가-드라이버-개발자에게-중요한-이유">5.3 D 상태가 드라이버 개발자에게 중요한 이유<a class="anchor" href="#5-3-d-상태가-드라이버-개발자에게-중요한-이유" aria-label="link">#</a></h3>
+<p>D 상태는 대부분 <strong>커널 코드(드라이버 포함)가 "중간에 끊기면 안 되는" 대기</strong>를 할 때 생긴다. 예를 들어 블록 장치 I/O 완료, 페이지 캐시에 페이지를 읽어 오는 중, 일부 드라이버의 <code>wait_event()</code> 같은 곳이다.</p>
+<div class="tw"><table><thead><tr><th>드라이버의 대기 API (F3)</th><th>태스크 상태</th><th>시그널이 오면</th></tr></thead><tbody><tr><td><code>wait_event(wq, cond)</code></td><td>D (<code>TASK_UNINTERRUPTIBLE</code>)</td><td>무시, cond가 참이 될 때까지</td></tr><tr><td><code>wait_event_killable(wq, cond)</code></td><td>D로 보임 (<code>TASK_KILLABLE</code>)</td><td>SIGKILL만 받고 <code>-ERESTARTSYS</code> 반환</td></tr><tr><td><code>wait_event_interruptible(wq, cond)</code></td><td>S (<code>TASK_INTERRUPTIBLE</code>)</td><td>깨어나서 <code>-ERESTARTSYS</code> 반환</td></tr><tr><td><code>wait_event_interruptible_timeout(...)</code></td><td>S</td><td>시그널 또는 타임아웃</td></tr><tr><td><code>wait_for_completion(&amp;c)</code></td><td>D</td><td>무시</td></tr></tbody></table></div>
+<p>실무에서 보이는 증상과 의미:</p>
+<ul class="tasks"><li><strong><code>kill -9</code>가 안 듣는 프로세스</strong>: 거의 항상 D 상태다. 하드웨어 응답(예: I2C 센서가 clock stretching을 끝내지 않음, DMA 완료 인터럽트가 안 옴)을 <code>wait_event()</code>나 <code>wait_for_completion()</code>으로 <strong>타임아웃 없이</strong> 기다리는 드라이버가 범인이다. 시그널이 "대기 중"으로 쌓여 있다가 D에서 빠져나오는 순간 처리된다.</li><li><strong>load average가 CPU 사용률에 비해 높음</strong>: Linux의 load average는 R뿐 아니라 D 상태 task 수도 더한다. CPU는 놀고 있는데 load가 8이면 D에 갇힌 task를 의심한다 (<code>ps -eo stat,pid,wchan,cmd</code>에서 D 찾기 → 셸 예시는 아래).</li><li><strong>dmesg의 "task ... blocked for more than 120 seconds"</strong>: 커널의 hung task detector(<code>khungtaskd</code>)가 D 상태로 <code>/proc/sys/kernel/hung_task_timeout_secs</code>(이 VM은 120) 이상 머문 task를 찾아 스택을 찍어 준다. 이 스택이 곧 "어느 드라이버의 어느 대기에서 막혔나"의 답이다.</li></ul>
+<figure class="code"><span class="lang">sh</span><pre><code># D 상태 task와 그 wait channel 찾기 (+ 커널 스택은 root 필요)
+ps -eo stat,pid,wchan:32,cmd | awk '$1 ~ /^D/'
+sudo cat /proc/&lt;pid&gt;/stack</code></pre></figure>
+<p>드라이버 작성 규칙(F3에서 자세히): 유저가 기다리는 <code>read()</code>/<code>ioctl()</code> 경로에서는 기본적으로 <code>wait_event_interruptible</code>(또는 최소 <code>_killable</code>)을 쓰고 <strong>타임아웃</strong>을 두며, 반환값 <code>-ERESTARTSYS</code>를 그대로 위로 올린다. "하드웨어가 응답 안 하면 영원히 D"인 드라이버는 리뷰에서 반드시 지적된다.</p>
+<hr>
+<h2 id="6-pid-tgid-tid-이름이-헷갈리는-이유">6. PID, TGID, TID — 이름이 헷갈리는 이유<a class="anchor" href="#6-pid-tgid-tid-이름이-헷갈리는-이유" aria-label="link">#</a></h2>
+<h3 id="6-1-정의">6.1 정의<a class="anchor" href="#6-1-정의" aria-label="link">#</a></h3>
+<p>커널은 모든 task에 고유 번호 <code>pid</code>를 준다. 같은 스레드 그룹(=유저가 말하는 프로세스)에 속한 task들은 리더의 <code>pid</code>를 <code>tgid</code>(thread group ID)로 공유한다. 문제는 <strong>유저 공간 API의 이름이 커널과 반대</strong>라는 점이다.</p>
+<div class="tw"><table><thead><tr><th>유저 공간에서 부르는 이름</th><th>얻는 방법</th><th>커널 <code>task_struct</code> 필드</th></tr></thead><tbody><tr><td>PID (프로세스 ID)</td><td><code>getpid()</code></td><td><code>tgid</code></td></tr><tr><td>TID (스레드 ID)</td><td><code>gettid()</code> (glibc 2.30+)</td><td><code>pid</code></td></tr><tr><td>PPID</td><td><code>getppid()</code></td><td><code>real_parent-&gt;tgid</code></td></tr><tr><td><code>pthread_t</code></td><td><code>pthread_self()</code></td><td>없음 (glibc 내부 포인터, 커널은 모름)</td></tr></tbody></table></div>
+<p>메인 스레드는 TID == PID다. <code>pthread_t</code>는 TID가 아니라 glibc가 쓰는 스레드 디스크립터의 주소일 뿐이라 <code>ps</code>나 <code>/proc</code>에서 찾을 수 없다. 로그에 스레드를 찍을 때는 <code>gettid()</code>를 쓴다.</p>
+<h3 id="6-2-예제-8-getpid-vs-gettid-proc-pid-task-그리고-스레드별-errno">6.2 예제 8 — getpid vs gettid, <code>/proc/&lt;pid&gt;/task</code>, 그리고 스레드별 errno<a class="anchor" href="#6-2-예제-8-getpid-vs-gettid-proc-pid-task-그리고-스레드별-errno" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex8: getpid vs gettid, /proc/&lt;pid&gt;/task, and errno is per-thread
+#define _GNU_SOURCE
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;pthread.h&gt;
+
+static pthread_barrier_t bar;
+
+static void *worker(void *arg) {
+    long id = (long)arg;
+    if (id == 1) close(-1);              /* sets errno = EBADF in THIS thread */
+    pthread_barrier_wait(&amp;bar);
+    printf("thread %ld: getpid=%d gettid=%d pthread_self=%#lx errno=%d\n",
+           id, getpid(), gettid(), (unsigned long)pthread_self(), errno);
+    fflush(stdout);
+    pthread_barrier_wait(&amp;bar);          /* stay alive while main inspects /proc */
+    pthread_barrier_wait(&amp;bar);
+    return NULL;
+}
+
+int main(void) {
+    pthread_t th[2];
+    pthread_barrier_init(&amp;bar, NULL, 3);
+    for (long i = 0; i &lt; 2; i++)
+        if (pthread_create(&amp;th[i], NULL, worker, (void *)(i + 1))) { perror("pthread_create"); exit(1); }
+    pthread_barrier_wait(&amp;bar);
+    printf("main    : getpid=%d gettid=%d errno=%d\n", getpid(), gettid(), errno);
+    pthread_barrier_wait(&amp;bar);
+    char cmd[160];
+    snprintf(cmd, sizeof cmd,
+             "ls /proc/%d/task; grep -E '^(Tgid|Pid|PPid|Threads):' /proc/%d/status;"
+             " ps -L -o pid,lwp,nlwp,stat,comm -p %d", getpid(), getpid(), getpid());
+    fflush(stdout);
+    if (system(cmd) &lt; 0) perror("system");
+    pthread_barrier_wait(&amp;bar);
+    for (int i = 0; i &lt; 2; i++) pthread_join(th[i], NULL);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex8_tid.c -o ex8_tid -pthread &amp;&amp; ./ex8_tid'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>thread 2: getpid=34894 gettid=34939 pthread_self=0xe4fff5b0f160 errno=0
+thread 1: getpid=34894 gettid=34938 pthread_self=0xe4fff631f160 errno=9
+main    : getpid=34894 gettid=34894 errno=0
+34894
+34938
+34939
+Tgid:	34894
+Pid:	34894
+PPid:	2266
+Threads:	3
+    PID     LWP NLWP STAT COMMAND
+  34894   34894    3 Ssl  ex8_tid
+  34894   34938    3 Ssl  ex8_tid
+  34894   34939    3 Ssl  ex8_tid</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li>세 스레드 모두 <code>getpid()</code>는 34894, <code>gettid()</code>는 각자 다르다. 메인 스레드는 TID == PID.</li><li><code>/proc/34894/task/</code> 아래에 TID마다 디렉터리가 있다. 각 <code>/proc/34894/task/&lt;tid&gt;/status</code>, <code>stat</code>, <code>stack</code>이 스레드 단위 정보다.</li><li><code>/proc/&lt;pid&gt;/status</code>의 <code>Tgid</code>/<code>Pid</code>는 커널 용어 그대로다. <code>Threads: 3</code>.</li><li><code>ps -L</code>은 스레드를 한 줄씩 보여 준다. <code>LWP</code>(light-weight process)가 TID, <code>NLWP</code>가 스레드 수. STAT <code>Ssl</code> = 잠자는 중, 세션 리더, 멀티스레드.</li><li><strong>errno는 스레드마다 따로다.</strong> thread 1만 <code>close(-1)</code>로 <code>EBADF</code>(9)를 만들었고 다른 스레드의 errno는 0이다. glibc의 <code>errno</code>는 전역 변수가 아니라 <code>(*__errno_location())</code>, 즉 스레드 로컬 저장소(TLS)에 있는 값이다.</li></ul>
+<h3 id="6-3-proc-pid-status에서-자주-보는-줄">6.3 <code>/proc/&lt;pid&gt;/status</code>에서 자주 보는 줄<a class="anchor" href="#6-3-proc-pid-status에서-자주-보는-줄" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>grep -E "^(Name|State|Tgid|Pid|PPid|Threads|Cpus_allowed_list|voluntary|nonvol)" /proc/self/status</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Name:	grep
+State:	R (running)
+Tgid:	187632
+Pid:	187632
+PPid:	2266
+Threads:	1
+Cpus_allowed_list:	0-3
+voluntary_ctxt_switches:	24
+nonvoluntary_ctxt_switches:	4</code></pre></figure>
+<p>출력에서 볼 것: 상태(R), 스레드 수, 허용 CPU 목록(9절 affinity), 그리고 context switch 카운터 두 개(9.4절). 그 밖에 <code>VmRSS</code>(실제 물리 메모리), <code>SigBlk</code>/<code>SigCgt</code>(막은/잡은 시그널 비트맵 — A6)도 디버깅에 자주 쓴다.</p>
+<hr>
+<h2 id="7-pthreads-만들기-기다리기-떼어-놓기">7. pthreads — 만들기, 기다리기, 떼어 놓기<a class="anchor" href="#7-pthreads-만들기-기다리기-떼어-놓기" aria-label="link">#</a></h2>
+<h3 id="7-1-기본-api">7.1 기본 API<a class="anchor" href="#7-1-기본-api" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>함수</th><th>하는 일</th><th>주의</th></tr></thead><tbody><tr><td><code>pthread_create(&amp;t, attr, fn, arg)</code></td><td>새 스레드에서 <code>fn(arg)</code> 실행</td><td>실패 시 <strong>errno가 아니라 반환값</strong>으로 에러 코드</td></tr><tr><td><code>pthread_join(t, &amp;ret)</code></td><td>스레드 종료 대기 + 반환값 받기</td><td>join 안 하면 스레드판 좀비(스택 등이 회수 안 됨)</td></tr><tr><td><code>pthread_detach(t)</code></td><td>"아무도 join 안 함, 끝나면 알아서 정리"</td><td>detach한 스레드는 join 불가</td></tr><tr><td><code>pthread_exit(ret)</code></td><td>현재 스레드만 종료</td><td>메인에서 부르면 다른 스레드는 계속 실행</td></tr><tr><td><code>pthread_attr_setstacksize</code></td><td>스택 크기 지정</td><td>기본은 <code>ulimit -s</code>(이 VM 8192 KiB)</td></tr><tr><td><code>pthread_setname_np(t, "imu")</code></td><td>스레드 이름 (15자 + NUL)</td><td><code>ps -L -o comm</code>, <code>top -H</code>에 보임 — 실무 필수</td></tr></tbody></table></div>
+<p>주의할 차이: 프로세스는 <code>exit()</code> 하나로 끝나지만, <strong>어느 스레드든 <code>exit()</code>를 부르면 프로세스 전체(모든 스레드)가 끝난다</strong>. 스레드 하나만 끝내려면 <code>fn</code>에서 <code>return</code>하거나 <code>pthread_exit</code>를 쓴다. 또 어느 스레드에서 segfault가 나도 프로세스 전체가 죽는다 — 격리가 없다는 뜻이다.</p>
+<h3 id="7-2-예제-7-전역-카운터-공유와-레이스-미리보기">7.2 예제 7 — 전역 카운터 공유와 레이스 미리보기<a class="anchor" href="#7-2-예제-7-전역-카운터-공유와-레이스-미리보기" aria-label="link">#</a></h3>
+<p>스레드 4개가 공유 카운터를 각각 100만 번 증가시킨다. 하나는 그냥 <code>++</code>, 하나는 atomic 연산.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex7: threads share globals — a plain counter loses updates, an atomic one doesn't
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;pthread.h&gt;
+
+#define NT 4
+#define N  1000000
+
+static volatile long plain;          /* volatile does NOT make ++ atomic */
+static long atomic_cnt;
+
+static void *worker(void *arg) {
+    (void)arg;
+    for (int i = 0; i &lt; N; i++) {
+        plain++;                                         /* load, add, store */
+        __atomic_fetch_add(&amp;atomic_cnt, 1, __ATOMIC_RELAXED); /* one atomic RMW */
+    }
+    return NULL;
+}
+
+int main(void) {
+    pthread_t th[NT];
+    for (int i = 0; i &lt; NT; i++) {
+        int e = pthread_create(&amp;th[i], NULL, worker, NULL);
+        if (e) { fprintf(stderr, "pthread_create: %d\n", e); exit(1); }
+    }
+    for (int i = 0; i &lt; NT; i++) pthread_join(th[i], NULL);
+    printf("expected %d\n", NT * N);
+    printf("plain    %ld (lost %ld)\n", plain, (long)NT * N - plain);
+    printf("atomic   %ld\n", atomic_cnt);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex7_race.c -o ex7_race -pthread &amp;&amp; ./ex7_race &amp;&amp; ./ex7_race'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>expected 4000000
+plain    2640597 (lost 1359403)
+atomic   4000000
+expected 4000000
+plain    2745272 (lost 1254728)
+atomic   4000000</code></pre></figure>
+<p>출력에서 볼 것: 일반 <code>++</code>는 매번 다른 값으로 100만 번 이상을 잃어버린다. <code>plain++</code>은 load → add → store 세 단계라 두 스레드가 같은 값을 읽고 둘 다 +1을 저장하면 하나가 사라진다(lost update). <code>volatile</code>은 "레지스터에 캐시하지 말라"일 뿐 원자성을 주지 않는다. <code>__atomic_fetch_add</code>는 arm64에서 하나의 원자적 read-modify-write(LSE <code>ldadd</code> 명령, LSE가 없는 CPU에서는 <code>ldxr/stxr</code> 재시도 루프)로 실행되어 한 번도 잃지 않는다.</p>
+<p>Don에게 익숙한 장면: ISR과 메인 루프가 공유하던 카운터를 인터럽트 disable로 보호했던 것. 멀티코어 Linux에서는 "인터럽트 끄기"가 다른 코어를 막지 못하므로 atomic이나 mutex가 필요하다. mutex·condvar·futex는 A8에서, 커널의 spinlock·atomic은 F4에서 다룬다.</p>
+<h3 id="7-3-thread-safety-체크리스트">7.3 thread-safety 체크리스트<a class="anchor" href="#7-3-thread-safety-체크리스트" aria-label="link">#</a></h3>
+<ul><li><strong>thread-safe 함수</strong>: 여러 스레드가 동시에 불러도 안전한 함수. POSIX 함수 대부분은 thread-safe이지만 예외가 있다: <code>strtok</code>, <code>localtime</code>, <code>gmtime</code>, <code>rand</code>, <code>strerror</code>(구현에 따라), <code>getenv</code>/<code>setenv</code> 조합 등. 대체: <code>strtok_r</code>, <code>localtime_r</code>, <code>rand_r</code>, <code>strerror_r</code>.</li><li><strong>reentrant(재진입 가능)와는 다르다.</strong> reentrant는 "같은 스레드에서 실행 도중 다시 들어와도(시그널 핸들러 등) 안전"이라는 더 강한 조건이다. 시그널 핸들러에서는 async-signal-safe 함수만 써야 한다(A6).</li><li><strong>stdio는 내부 락이 있어</strong> <code>printf</code> 한 번의 출력이 다른 스레드 출력과 섞이지 않는다. 대신 그 락 때문에 고빈도 로그가 병목이 될 수 있다.</li><li><code>static</code> 지역 변수, 전역 버퍼를 돌려주는 함수는 thread-unsafe의 신호다.</li><li>스레드별 데이터가 필요하면 <code>__thread</code>(또는 C11 <code>_Thread_local</code>) 변수를 쓴다. errno가 바로 이 방식이다.</li></ul>
+<hr>
+<h2 id="8-clone-프로세스와-스레드는-플래그-차이일-뿐">8. <code>clone()</code> — 프로세스와 스레드는 플래그 차이일 뿐<a class="anchor" href="#8-clone-프로세스와-스레드는-플래그-차이일-뿐" aria-label="link">#</a></h2>
+<h3 id="8-1-strace로-본-pthread_create">8.1 strace로 본 pthread_create<a class="anchor" href="#8-1-strace로-본-pthread_create" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; strace -f -e trace=clone,clone3 ./ex7_race 2&gt;&amp;1 | head -4'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0xfd280e98f588, parent_tid=0xfd280e98f230, exit_signal=0, stack=0xfd280e180000, stack_size=0x80ea40, tls=0xfd280e98f880}strace: Process 187498 attached
+ =&gt; {parent_tid=[187498]}, 88) = 187498
+[pid 187497] clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0xfd280e17f588, parent_tid=0xfd280e17f230, exit_signal=0, stack=0xfd280d970000, stack_size=0x80ea40, tls=0xfd280e17f880}strace: Process 187499 attached
+ =&gt; {parent_tid=[187499]}, 88) = 187499</code></pre></figure>
+<p>출력에서 볼 것: <code>pthread_create</code>도 결국 <code>clone3</code> syscall이고, fork와의 차이는 <strong>플래그</strong>뿐이다. 1.5절의 fork는 <code>CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD</code>(공유 없음)였다. 스택(<code>stack=</code>, 약 8 MiB)은 glibc가 미리 <code>mmap</code>해서 넘겨준다 — 커널은 스레드 스택을 만들어 주지 않는다.</p>
+<div class="tw"><table><thead><tr><th>플래그</th><th>공유하는 것</th><th>fork</th><th>pthread</th></tr></thead><tbody><tr><td><code>CLONE_VM</code></td><td>주소 공간 (<code>mm_struct</code>)</td><td>복사</td><td>공유</td></tr><tr><td><code>CLONE_FILES</code></td><td>fd 테이블 (<code>files_struct</code>)</td><td>복사</td><td>공유</td></tr><tr><td><code>CLONE_FS</code></td><td>cwd, root, umask (<code>fs_struct</code>)</td><td>복사</td><td>공유</td></tr><tr><td><code>CLONE_SIGHAND</code></td><td>시그널 핸들러 테이블</td><td>복사</td><td>공유</td></tr><tr><td><code>CLONE_THREAD</code></td><td>같은 스레드 그룹(TGID)에 넣음</td><td>아니오</td><td>예</td></tr><tr><td><code>CLONE_SETTLS</code></td><td>새 TLS 포인터 설정 (arm64 <code>TPIDR_EL0</code>)</td><td>아니오</td><td>예</td></tr><tr><td><code>CLONE_CHILD_CLEARTID</code></td><td>종료 시 tid 변수를 0으로 + futex wake (<code>pthread_join</code>의 원리)</td><td>예</td><td>예</td></tr><tr><td><code>CLONE_VFORK</code></td><td>자식이 exec/exit할 때까지 부모 정지</td><td>아니오</td><td>아니오 (<code>vfork</code>, <code>posix_spawn</code>이 사용)</td></tr></tbody></table></div>
+<p>이 플래그들을 섞으면 "fd는 공유하지만 주소 공간은 따로" 같은 중간 형태도 만들 수 있다. 컨테이너의 namespace(<code>CLONE_NEWPID</code>, <code>CLONE_NEWNET</code> …)도 같은 syscall의 플래그다(L8).</p>
+<h3 id="8-2-task_struct-관계도">8.2 <code>task_struct</code> 관계도<a class="anchor" href="#8-2-task_struct-관계도" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="120" y="20" text-anchor="middle" font-size="13">스레드 그룹 (TGID 300)</text>
+<rect x="20" y="30" width="200" height="56" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="120" y="52" text-anchor="middle" font-size="13">task_struct (leader)</text>
+<text x="120" y="72" text-anchor="middle" font-size="12">pid=300 tgid=300</text>
+<rect x="20" y="110" width="200" height="56" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="120" y="132" text-anchor="middle" font-size="13">task_struct</text>
+<text x="120" y="152" text-anchor="middle" font-size="12">pid=301 tgid=300</text>
+<rect x="20" y="190" width="200" height="56" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="120" y="212" text-anchor="middle" font-size="13">task_struct</text>
+<text x="120" y="232" text-anchor="middle" font-size="12">pid=302 tgid=300</text>
+<rect x="290" y="30" width="170" height="50" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="375" y="51" text-anchor="middle" font-size="13">mm_struct</text>
+<text x="375" y="69" text-anchor="middle" font-size="12">VMA + page table</text>
+<rect x="290" y="115" width="170" height="50" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="375" y="136" text-anchor="middle" font-size="13">files_struct</text>
+<text x="375" y="154" text-anchor="middle" font-size="12">fd table</text>
+<rect x="290" y="200" width="170" height="50" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="375" y="221" text-anchor="middle" font-size="13">signal_struct</text>
+<text x="375" y="239" text-anchor="middle" font-size="12">sighand, rlimit</text>
+<line x1="220" y1="55" x2="288" y2="55" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="220" y1="135" x2="288" y2="62" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="220" y1="215" x2="288" y2="70" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="220" y1="65" x2="288" y2="135" stroke="currentColor" stroke-opacity="0.5" marker-end="url(#ah4)"/>
+<line x1="220" y1="145" x2="288" y2="142" stroke="currentColor" stroke-opacity="0.5" marker-end="url(#ah4)"/>
+<line x1="220" y1="225" x2="288" y2="150" stroke="currentColor" stroke-opacity="0.5" marker-end="url(#ah4)"/>
+<line x1="220" y1="75" x2="288" y2="215" stroke="currentColor" stroke-opacity="0.3" marker-end="url(#ah4)"/>
+<line x1="220" y1="155" x2="288" y2="222" stroke="currentColor" stroke-opacity="0.3" marker-end="url(#ah4)"/>
+<line x1="220" y1="235" x2="288" y2="230" stroke="currentColor" stroke-opacity="0.3" marker-end="url(#ah4)"/>
+<text x="580" y="20" text-anchor="middle" font-size="13">fork한 자식</text>
+<rect x="500" y="30" width="160" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="580" y="51" text-anchor="middle" font-size="13">mm_struct</text>
+<text x="580" y="69" text-anchor="middle" font-size="12">복사본 (COW)</text>
+<rect x="500" y="115" width="160" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="580" y="136" text-anchor="middle" font-size="13">files_struct</text>
+<text x="580" y="154" text-anchor="middle" font-size="12">복사본</text>
+<rect x="500" y="200" width="160" height="70" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="580" y="222" text-anchor="middle" font-size="13">task_struct</text>
+<text x="580" y="242" text-anchor="middle" font-size="12">pid=400 tgid=400</text>
+<text x="580" y="260" text-anchor="middle" font-size="12">real_parent → 300</text>
+<line x1="560" y1="200" x2="560" y2="167" stroke="currentColor" marker-end="url(#ah4)"/>
+<polyline points="660,235 672,235 672,55 662,55" fill="none" stroke="currentColor" marker-end="url(#ah4)"/>
+<text x="20" y="300" font-size="12">CLONE_VM · CLONE_FILES · CLONE_SIGHAND · CLONE_THREAD</text>
+<text x="20" y="318" font-size="12">→ 포인터만 공유하고 참조 카운트를 올린다</text>
+<text x="660" y="300" text-anchor="end" font-size="12">플래그 없는 clone (fork)</text>
+<text x="660" y="318" text-anchor="end" font-size="12">→ 구조체를 새로 만들어 복사한다</text>
+<text x="340" y="348" text-anchor="middle" font-size="12">커널 스케줄러가 보는 단위는 언제나 task_struct 하나하나다</text>
+</svg></figure>
+<p>그림 5 — 스레드 3개는 각자 <code>task_struct</code>를 갖지만 <code>mm</code>, <code>files</code>, <code>signal</code> 포인터가 같은 구조체를 가리킨다. fork한 자식은 그 구조체들의 복사본을 따로 가진다.</p>
+<p><code>task_struct</code>는 커널에서 가장 큰 구조체 중 하나로, 대략 이런 필드가 있다 (F1에서 자세히).</p>
+<figure class="code"><pre><code>struct task_struct {
+    unsigned int        __state;      /* TASK_RUNNING, TASK_INTERRUPTIBLE, ... */
+    void               *stack;        /* kernel stack (16 KiB on arm64) */
+    int                 prio, static_prio;  /* nice -&gt; static_prio */
+    unsigned int        policy;       /* SCHED_NORMAL, SCHED_FIFO, ... */
+    struct sched_entity se;           /* fair class (EEVDF) bookkeeping */
+    cpumask_t           cpus_mask;    /* affinity */
+    struct mm_struct   *mm;           /* NULL for kernel threads */
+    pid_t               pid, tgid;
+    struct task_struct *real_parent, *parent;
+    struct list_head    children, sibling;
+    struct files_struct *files;
+    struct signal_struct *signal;
+    struct sighand_struct *sighand;
+    unsigned long       nvcsw, nivcsw; /* voluntary / involuntary ctxt switches */
+    char                comm[16];     /* name shown by ps */
+    /* ... hundreds more ... */
+};</code></pre></figure>
+<p>이 필드들이 유저 공간 어디서 보이는지 연결해 두면 좋다: <code>__state</code> → <code>ps STAT</code>, <code>comm</code> → <code>ps comm</code>과 <code>pthread_setname_np</code>, <code>nvcsw/nivcsw</code> → <code>/proc/&lt;pid&gt;/status</code>의 ctxt_switches, <code>cpus_mask</code> → <code>Cpus_allowed_list</code>. 커널 스레드(<code>kthreadd</code>, <code>kworker/...</code>)는 <code>mm == NULL</code>인 task다 — 유저 주소 공간이 없다.</p>
+<p>드라이버 코드에서는 <code>current</code> 매크로가 "지금 이 syscall을 부른 task의 <code>task_struct *</code>"다. 예를 들어 드라이버의 <code>.read</code>에서 <code>current-&gt;pid</code>, <code>current-&gt;comm</code>으로 누가 호출했는지 로그를 찍을 수 있다.</p>
+<hr>
+<h2 id="9-유저-공간에서-보이는-스케줄링">9. 유저 공간에서 보이는 스케줄링<a class="anchor" href="#9-유저-공간에서-보이는-스케줄링" aria-label="link">#</a></h2>
+<p>깊은 스케줄러 내부(EEVDF, 스케줄링 클래스, 선점 모델)는 F1과 N1·N2에서 다룬다. 여기서는 <strong>유저 코드가 만질 수 있는 손잡이 네 개</strong>만 본다: nice, 실시간 정책, CPU affinity, 그리고 context switch 카운터.</p>
+<h3 id="9-1-정책과-우선순위-한눈에">9.1 정책과 우선순위 한눈에<a class="anchor" href="#9-1-정책과-우선순위-한눈에" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>정책</th><th>클래스</th><th>우선순위 손잡이</th><th>성격</th></tr></thead><tbody><tr><td><code>SCHED_OTHER</code> (=<code>SCHED_NORMAL</code>)</td><td>fair (6.6부터 EEVDF, 그전 CFS)</td><td>nice -20 ~ +19</td><td>기본값. CPU 시간을 가중치 비율로 나눔</td></tr><tr><td><code>SCHED_BATCH</code></td><td>fair</td><td>nice</td><td>배치 작업, 깨어날 때 선점 덜 함</td></tr><tr><td><code>SCHED_IDLE</code></td><td>fair</td><td>없음</td><td>정말 남는 시간에만</td></tr><tr><td><code>SCHED_FIFO</code></td><td>rt</td><td>1 ~ 99</td><td>더 높은 RT가 오거나 스스로 block할 때까지 계속 실행</td></tr><tr><td><code>SCHED_RR</code></td><td>rt</td><td>1 ~ 99</td><td>FIFO + 같은 우선순위끼리 time slice</td></tr><tr><td><code>SCHED_DEADLINE</code></td><td>dl</td><td>runtime/deadline/period</td><td>EDF. 주기 작업용 (N2)</td></tr></tbody></table></div>
+<p>RTOS 관점에서 보면 <code>SCHED_FIFO</code>가 "고정 우선순위 선점형 스케줄러"에 가장 가깝다. 반대로 <code>SCHED_OTHER</code>의 nice는 우선순위가 아니라 <strong>CPU 몫의 비율</strong>이다. nice 값이 1 낮아질 때마다 가중치가 약 1.25배가 되도록 표(<code>sched_prio_to_weight</code>)가 정해져 있다: nice 0 = 1024, nice 5 = 335.</p>
+<h3 id="9-2-예제-12-nice가-cpu-몫을-바꾸는-정도-그리고-sched_fifo의-권한">9.2 예제 12 — nice가 CPU 몫을 바꾸는 정도, 그리고 SCHED_FIFO의 권한<a class="anchor" href="#9-2-예제-12-nice가-cpu-몫을-바꾸는-정도-그리고-sched_fifo의-권한" aria-label="link">#</a></h3>
+<p>같은 CPU(3번)에 묶인 두 개의 CPU hog를 nice 0과 nice 5로 2초 돌려 루프 횟수를 비교한다. 그다음 <code>SCHED_FIFO</code>로 바꿔 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex12: nice changes CFS/EEVDF share; SCHED_FIFO needs privilege (CAP_SYS_NICE)
+#define _GNU_SOURCE
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sched.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/resource.h&gt;
+#include &lt;sys/wait.h&gt;
+
+static void hog(int niceval) {
+    cpu_set_t s; CPU_ZERO(&amp;s); CPU_SET(3, &amp;s);
+    if (sched_setaffinity(0, sizeof s, &amp;s) &lt; 0) { perror("affinity"); exit(1); }
+    if (setpriority(PRIO_PROCESS, 0, niceval) &lt; 0) { perror("setpriority"); exit(1); }
+    struct timespec t0, t; unsigned long n = 0;
+    clock_gettime(CLOCK_MONOTONIC, &amp;t0);
+    do { clock_gettime(CLOCK_MONOTONIC, &amp;t); n++; } while (t.tv_sec - t0.tv_sec &lt; 2);
+    printf("nice %2d: %lu loops\n", niceval, n);
+    fflush(stdout);
+    _exit(0);
+}
+
+int main(void) {
+    int nv[2] = { 0, 5 };
+    for (int i = 0; i &lt; 2; i++) { pid_t p = fork();
+        if (p &lt; 0) { perror("fork"); exit(1); }
+        if (p == 0) hog(nv[i]); }
+    while (wait(NULL) &gt; 0) ;
+
+    struct sched_param sp = { .sched_priority = 50 };
+    if (sched_setscheduler(0, SCHED_FIFO, &amp;sp) &lt; 0)
+        printf("SCHED_FIFO prio 50: failed: %s\n", strerror(errno));
+    else
+        printf("SCHED_FIFO prio 50: ok, policy now %d (SCHED_FIFO=%d)\n",
+               sched_getscheduler(0), SCHED_FIFO);
+    printf("FIFO prio range: %d..%d\n",
+           sched_get_priority_min(SCHED_FIFO), sched_get_priority_max(SCHED_FIFO));
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex12_sched.c -o ex12_sched &amp;&amp; ./ex12_sched &amp;&amp; echo "--- with sudo" &amp;&amp; sudo ./ex12_sched'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>nice  0: 52304741 loops
+nice  5: 17219856 loops
+SCHED_FIFO prio 50: failed: Operation not permitted
+FIFO prio range: 1..99
+--- with sudo
+nice  0: 74157737 loops
+nice  5: 24355199 loops
+SCHED_FIFO prio 50: ok, policy now 1 (SCHED_FIFO=1)
+FIFO prio range: 1..99</code></pre></figure>
+<p>출력에서 볼 것: (1) 루프 비율이 52.3M / 17.2M ≈ 3.04, 74.2M / 24.4M ≈ 3.04로 가중치 비율 1024 / 335 ≈ 3.06과 거의 같다. nice는 "누가 먼저"가 아니라 "몫을 얼마나"다. (2) 일반 사용자는 <code>SCHED_FIFO</code>로 못 바꾼다(<code>EPERM</code>). <code>CAP_SYS_NICE</code> 권한이나 <code>RLIMIT_RTPRIO</code>(<code>ulimit -r</code>)가 필요하다. (3) 절대 루프 수가 두 실행에서 다른 것은 VM 위라 호스트 상황에 따라 CPU 속도가 흔들리기 때문이다 — 비율만 본다.</p>
+<p>셸에서는 <code>nice</code>/<code>renice</code>, <code>chrt</code>로 같은 일을 한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'chrt -p $$; sudo chrt -f 30 sleep 5 &amp; sleep 0.5; ps -o pid,cls,rtprio,ni,pri,cmd -C sleep; wait'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>pid 186504's current scheduling policy: SCHED_OTHER
+pid 186504's current scheduling priority: 0
+pid 186504's current runtime parameter: 2100000
+    PID CLS RTPRIO  NI PRI CMD
+ 186614  TS      -   0  19 sleep 3
+ 186628  FF     30   -  70 sleep 5
+ 186630  TS      -   0  19 sleep 0.5</code></pre></figure>
+<p>출력에서 볼 것: <code>CLS</code> 칼럼이 <code>TS</code>(time sharing = SCHED_OTHER)와 <code>FF</code>(SCHED_FIFO)로 구분되고 FIFO task는 <code>RTPRIO 30</code>이 붙는다. <code>sleep 3</code>은 VM에서 동시에 돌던 다른 프로세스라 무시한다. <code>runtime parameter: 2100000</code>은 EEVDF가 이 task에 주는 slice(ns)로, 이 VM의 <code>/sys/kernel/debug/sched/base_slice_ns</code> 값 2100000(2.1 ms)과 같다.</p>
+<blockquote><p>주의: SCHED_FIFO task가 무한 루프를 돌면 같은 CPU의 일반 task는 굶는다. Linux는 이를 막기 위해 기본으로 RT task가 1초 중 0.95초까지만 쓰게 제한한다(<code>/proc/sys/kernel/sched_rt_runtime_us</code> = 950000). RT 튜닝은 N2에서 다룬다.</p></blockquote>
+<h3 id="9-3-예제-9-cpu-affinity로-한-코어에-묶기">9.3 예제 9 — CPU affinity로 한 코어에 묶기<a class="anchor" href="#9-3-예제-9-cpu-affinity로-한-코어에-묶기" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex9: CPU affinity — pin this process to one CPU and watch sched_getcpu()
+#define _GNU_SOURCE
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;sched.h&gt;
+#include &lt;unistd.h&gt;
+
+static void show(const char *tag) {
+    cpu_set_t set;
+    if (sched_getaffinity(0, sizeof set, &amp;set) &lt; 0) { perror("getaffinity"); exit(1); }
+    printf("%-10s allowed:", tag);
+    for (int c = 0; c &lt; CPU_SETSIZE; c++) if (CPU_ISSET(c, &amp;set)) printf(" %d", c);
+    printf("  (count=%d) now on cpu %d\n", CPU_COUNT(&amp;set), sched_getcpu());
+}
+
+int main(void) {
+    printf("online CPUs = %ld\n", sysconf(_SC_NPROCESSORS_ONLN));
+    show("default");
+    cpu_set_t set;
+    CPU_ZERO(&amp;set);
+    CPU_SET(2, &amp;set);                       /* pin to CPU 2 */
+    if (sched_setaffinity(0, sizeof set, &amp;set) &lt; 0) { perror("setaffinity"); exit(1); }
+    show("pinned");
+    int moved = 0;
+    for (int i = 0; i &lt; 1000; i++) { usleep(100); if (sched_getcpu() != 2) moved++; }
+    printf("after 1000 sleeps: times seen off cpu 2 = %d\n", moved);
+    char cmd[64];
+    snprintf(cmd, sizeof cmd, "taskset -p %d", getpid());
+    fflush(stdout);
+    if (system(cmd) &lt; 0) perror("system");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex9_affinity.c -o ex9_affinity &amp;&amp; ./ex9_affinity'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>online CPUs = 4
+default    allowed: 0 1 2 3  (count=4) now on cpu 2
+pinned     allowed: 2  (count=1) now on cpu 2
+after 1000 sleeps: times seen off cpu 2 = 0
+pid 35498's current affinity mask: 4</code></pre></figure>
+<p>출력에서 볼 것: 마스크를 CPU 2 하나로 바꾸자 1000번 잠들고 깨어나도 항상 CPU 2에서 실행된다. <code>taskset</code>은 같은 마스크를 16진수 비트맵(<code>4</code> = 비트 2)으로 보여 준다. <code>sched_setaffinity(0, ...)</code>의 0은 "호출한 스레드"다 — affinity는 <strong>스레드 단위</strong> 속성이라 멀티스레드 프로그램에서는 <code>pthread_setaffinity_np</code>로 스레드마다 지정한다. affinity는 fork와 exec 너머로 상속된다.</p>
+<p>실무 용도: Jetson·i.MX8 같은 SoC에서 IMU 읽기 스레드를 한 코어에 고정해 캐시를 덥게 유지하고 마이그레이션 지터를 없앤다. 그 코어를 커널 부팅 인자 <code>isolcpus=</code>로 일반 task에서 비워 두는 기법은 N2에서 다룬다. 셸에서는 <code>taskset -c 2 ./prog</code>, <code>taskset -p -c 2 &lt;pid&gt;</code>.</p>
+<h3 id="9-4-예제-11-voluntary-vs-nonvoluntary-context-switch">9.4 예제 11 — voluntary vs nonvoluntary context switch<a class="anchor" href="#9-4-예제-11-voluntary-vs-nonvoluntary-context-switch" aria-label="link">#</a></h3>
+<p><code>/proc/&lt;pid&gt;/status</code>의 두 카운터는 지연 문제를 진단할 때 1순위로 보는 값이다.</p>
+<ul class="tasks"><li><code>voluntary_ctxt_switches</code>: task가 <strong>스스로</strong> CPU를 내려놓은 횟수 (sleep, I/O 대기, 락 대기 = block).</li><li><code>nonvoluntary_ctxt_switches</code>: 실행 중에 <strong>빼앗긴</strong> 횟수 (time slice 소진, 더 높은 우선순위 task 등장 = preemption).</li></ul>
+<p>sleeper 하나와 CPU hog 두 개를 모두 CPU 1에 묶고 2초 동안 돌려 비교한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex11: voluntary vs nonvoluntary context switches (sleeper vs CPU hogs on one CPU)
+#define _GNU_SOURCE
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sched.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/wait.h&gt;
+
+static void report(const char *who) {
+    char line[128];
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) { perror("fopen"); exit(1); }
+    while (fgets(line, sizeof line, f))
+        if (strstr(line, "ctxt_switches")) printf("%-8s %s", who, line);
+    fclose(f);
+    fflush(stdout);
+}
+
+static void child(int kind) {
+    cpu_set_t s; CPU_ZERO(&amp;s); CPU_SET(1, &amp;s);       /* everyone on CPU 1 */
+    if (sched_setaffinity(0, sizeof s, &amp;s) &lt; 0) { perror("affinity"); exit(1); }
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &amp;t0);
+    do {
+        if (kind == 0) usleep(1000);                  /* sleeper: blocks often */
+        clock_gettime(CLOCK_MONOTONIC, &amp;t);            /* hogs: spin */
+    } while (t.tv_sec - t0.tv_sec &lt; 2);
+    report(kind == 0 ? "sleeper" : "hog");
+    _exit(0);
+}
+
+int main(void) {
+    for (int k = 0; k &lt; 3; k++) {                      /* 1 sleeper + 2 hogs */
+        pid_t p = fork();
+        if (p &lt; 0) { perror("fork"); exit(1); }
+        if (p == 0) child(k == 0 ? 0 : 1);
+    }
+    while (wait(NULL) &gt; 0) ;
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex11_ctxt.c -o ex11_ctxt &amp;&amp; ./ex11_ctxt'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>hog      voluntary_ctxt_switches:	0
+hog      nonvoluntary_ctxt_switches:	806
+hog      voluntary_ctxt_switches:	0
+hog      nonvoluntary_ctxt_switches:	808
+sleeper  voluntary_ctxt_switches:	1550
+sleeper  nonvoluntary_ctxt_switches:	1</code></pre></figure>
+<p>출력에서 볼 것: hog는 스스로 양보한 적이 0번이고 2초 동안 약 800번 선점당했다. sleeper는 <code>usleep</code>마다 스스로 잠들어 voluntary가 1550번이고 거의 선점당하지 않는다(깨어나면 할 일이 짧아서 금방 다시 잔다). 2초 동안 1 ms씩 잤는데 2000번이 아니라 1550번인 것은 sleep 자체의 오버슈트와 깨어난 뒤 CPU를 기다린 시간 때문이다.</p>
+<p>진단 규칙: <strong>실시간이어야 할 스레드의 nonvoluntary가 빠르게 증가한다면 누군가에게 CPU를 빼앗기고 있다</strong>는 뜻이다 — 우선순위(SCHED_FIFO)나 affinity·isolcpus를 검토한다. voluntary가 비정상적으로 많다면 락 경합이나 너무 잦은 짧은 I/O를 의심한다. 측정 방법: 일정 간격으로 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/status</code>를 두 번 읽어 차이를 본다(스레드별 값).</p>
+<hr>
+<h2 id="10-생성-비용-측정-fork-vs-vfork-vs-posix_spawn-vs-pthread_create">10. 생성 비용 측정 — fork vs vfork vs posix_spawn vs pthread_create<a class="anchor" href="#10-생성-비용-측정-fork-vs-vfork-vs-posix_spawn-vs-pthread_create" aria-label="link">#</a></h2>
+<h3 id="10-1-예제-10-부모-크기를-바꿔-가며-2000번-생성-회수">10.1 예제 10 — 부모 크기를 바꿔 가며 2000번 생성+회수<a class="anchor" href="#10-1-예제-10-부모-크기를-바꿔-가며-2000번-생성-회수" aria-label="link">#</a></h3>
+<p>부모가 0 / 64 / 256 / 1024 MiB를 할당해 다 건드린 상태에서 네 가지 방법으로 "만들고 회수하기"를 반복해 1회 평균을 잰다. <code>posix_spawn</code>은 <code>/bin/true</code>를 실제로 exec까지 하므로 비교 대상이 조금 다르다(exec 비용 포함).</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex10: cost of creating+reaping: fork, vfork, posix_spawn, pthread_create
+#define _GNU_SOURCE
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;spawn.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;pthread.h&gt;
+#include &lt;sys/wait.h&gt;
+
+#define N 2000
+extern char **environ;
+
+static double now_us(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &amp;ts);
+    return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
+}
+static void *nop(void *a) { return a; }
+static size_t mb;          /* static: safe across vfork */
+static char *big;
+
+int main(int argc, char **argv) {
+    mb = argc &gt; 1 ? strtoul(argv[1], NULL, 0) : 0;
+    if (mb) { big = malloc(mb &lt;&lt; 20); if (!big) { perror("malloc"); exit(1); }
+              memset(big, 1, mb &lt;&lt; 20); }          /* make the parent "heavy" */
+    double t0, t;
+
+    t0 = now_us();
+    for (int i = 0; i &lt; N; i++) { pid_t p = fork(); if (p == 0) _exit(0);
+        if (p &lt; 0) { perror("fork"); exit(1); } waitpid(p, NULL, 0); }
+    t = (now_us() - t0) / N; printf("RSS=%4zuMB fork+wait          %8.1f us\n", mb, t);
+
+    t0 = now_us();
+    for (int i = 0; i &lt; N; i++) { pid_t p = vfork(); if (p == 0) _exit(0);
+        if (p &lt; 0) { perror("vfork"); exit(1); } waitpid(p, NULL, 0); }
+    t = (now_us() - t0) / N; printf("RSS=%4zuMB vfork+wait         %8.1f us\n", mb, t);
+
+    char *av[] = { "/bin/true", NULL };
+    t0 = now_us();
+    for (int i = 0; i &lt; N / 4; i++) { pid_t p;
+        if (posix_spawn(&amp;p, "/bin/true", NULL, NULL, av, environ)) { perror("spawn"); exit(1); }
+        waitpid(p, NULL, 0); }
+    t = (now_us() - t0) / (N / 4); printf("RSS=%4zuMB posix_spawn(true)  %8.1f us\n", mb, t);
+
+    t0 = now_us();
+    for (int i = 0; i &lt; N; i++) { pthread_t th;
+        if (pthread_create(&amp;th, NULL, nop, NULL)) { perror("pthread_create"); exit(1); }
+        pthread_join(th, NULL); }
+    t = (now_us() - t0) / N; printf("RSS=%4zuMB pthread_create+join %8.1f us\n", mb, t);
+    free(big);
+    return 0;
+}</code></pre></figure>
+<p><code>mb</code>와 <code>big</code>을 <code>static</code>으로 둔 이유: <code>vfork</code> 자식이 부모 스택을 공유하므로 GCC가 지역 변수에 <code>-Wclobbered</code> 경고를 낸다(처음엔 지역 변수로 썼다가 이 경고를 보고 고쳤다).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex10_cost.c -o ex10_cost -pthread &amp;&amp; for m in 0 64 256 1024; do for k in 1 2 3 4 5; do ./ex10_cost $m; done; done'</code></pre></figure>
+<p>한 번 실행의 출력 예 (전체 20회 중 RSS 1024 MiB 첫 실행):</p>
+<figure class="code"><span class="lang">text</span><pre><code>RSS=1024MB fork+wait             298.2 us
+RSS=1024MB vfork+wait             36.9 us
+RSS=1024MB posix_spawn(true)     182.4 us
+RSS=1024MB pthread_create+join     37.4 us</code></pre></figure>
+<p>크기별 5회 실행의 중앙값 (단위 us, VM 위라 실행마다 10~20% 흔들린다):</p>
+<div class="tw"><table><thead><tr><th>부모 RSS</th><th>fork+wait</th><th>vfork+wait</th><th>pthread_create+join</th><th>posix_spawn(/bin/true)</th></tr></thead><tbody><tr><td>0 MiB</td><td>72.6</td><td>41.7</td><td>41.6</td><td>198.7</td></tr><tr><td>64 MiB</td><td>114.2</td><td>41.5</td><td>44.4</td><td>192.9</td></tr><tr><td>256 MiB</td><td>153.2</td><td>39.6</td><td>38.9</td><td>191.6</td></tr><tr><td>1024 MiB</td><td>299.0</td><td>36.0</td><td>37.4</td><td>182.4</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 640 340" xmlns="http://www.w3.org/2000/svg">
+<text x="320" y="22" text-anchor="middle" font-size="14">프로세스/스레드 생성+회수 1회 비용 (us, 5회 중앙값)</text>
+<line x1="70" y1="270.0" x2="620" y2="270.0" stroke="currentColor" stroke-opacity="0.15"/>
+<text x="64" y="274.0" text-anchor="end" font-size="12">0</text>
+<line x1="70" y1="215.0" x2="620" y2="215.0" stroke="currentColor" stroke-opacity="0.15"/>
+<text x="64" y="219.0" text-anchor="end" font-size="12">80</text>
+<line x1="70" y1="160.0" x2="620" y2="160.0" stroke="currentColor" stroke-opacity="0.15"/>
+<text x="64" y="164.0" text-anchor="end" font-size="12">160</text>
+<line x1="70" y1="105.0" x2="620" y2="105.0" stroke="currentColor" stroke-opacity="0.15"/>
+<text x="64" y="109.0" text-anchor="end" font-size="12">240</text>
+<line x1="70" y1="50.0" x2="620" y2="50.0" stroke="currentColor" stroke-opacity="0.15"/>
+<text x="64" y="54.0" text-anchor="end" font-size="12">320</text>
+<line x1="70" y1="270" x2="620" y2="270" stroke="currentColor"/>
+<line x1="70" y1="50" x2="70" y2="270" stroke="currentColor"/>
+<rect x="86.8" y="220.1" width="22" height="49.9" fill="#4a7bd0"/>
+<text x="97.8" y="216.1" text-anchor="middle" font-size="12">73</text>
+<rect x="112.8" y="241.3" width="22" height="28.7" fill="#3f9a6b"/>
+<text x="123.8" y="237.3" text-anchor="middle" font-size="12">42</text>
+<rect x="138.8" y="241.4" width="22" height="28.6" fill="#e08a3c"/>
+<text x="149.8" y="237.4" text-anchor="middle" font-size="12">42</text>
+<rect x="164.8" y="133.4" width="22" height="136.6" fill="#888"/>
+<text x="175.8" y="129.4" text-anchor="middle" font-size="12">199</text>
+<text x="138.8" y="288" text-anchor="middle" font-size="12">부모 RSS 0 MB</text>
+<rect x="224.2" y="191.5" width="22" height="78.5" fill="#4a7bd0"/>
+<text x="235.2" y="187.5" text-anchor="middle" font-size="12">114</text>
+<rect x="250.2" y="241.5" width="22" height="28.5" fill="#3f9a6b"/>
+<text x="261.2" y="237.5" text-anchor="middle" font-size="12">42</text>
+<rect x="276.2" y="239.5" width="22" height="30.5" fill="#e08a3c"/>
+<text x="287.2" y="235.5" text-anchor="middle" font-size="12">44</text>
+<rect x="302.2" y="137.4" width="22" height="132.6" fill="#888"/>
+<text x="313.2" y="133.4" text-anchor="middle" font-size="12">193</text>
+<text x="276.2" y="288" text-anchor="middle" font-size="12">부모 RSS 64 MB</text>
+<rect x="361.8" y="164.7" width="22" height="105.3" fill="#4a7bd0"/>
+<text x="372.8" y="160.7" text-anchor="middle" font-size="12">153</text>
+<rect x="387.8" y="242.8" width="22" height="27.2" fill="#3f9a6b"/>
+<text x="398.8" y="238.8" text-anchor="middle" font-size="12">40</text>
+<rect x="413.8" y="243.3" width="22" height="26.7" fill="#e08a3c"/>
+<text x="424.8" y="239.3" text-anchor="middle" font-size="12">39</text>
+<rect x="439.8" y="138.3" width="22" height="131.7" fill="#888"/>
+<text x="450.8" y="134.3" text-anchor="middle" font-size="12">192</text>
+<text x="413.8" y="288" text-anchor="middle" font-size="12">부모 RSS 256 MB</text>
+<rect x="499.2" y="64.4" width="22" height="205.6" fill="#4a7bd0"/>
+<text x="510.2" y="60.4" text-anchor="middle" font-size="12">299</text>
+<rect x="525.2" y="245.2" width="22" height="24.8" fill="#3f9a6b"/>
+<text x="536.2" y="241.2" text-anchor="middle" font-size="12">36</text>
+<rect x="551.2" y="244.3" width="22" height="25.7" fill="#e08a3c"/>
+<text x="562.2" y="240.3" text-anchor="middle" font-size="12">37</text>
+<rect x="577.2" y="144.6" width="22" height="125.4" fill="#888"/>
+<text x="588.2" y="140.6" text-anchor="middle" font-size="12">182</text>
+<text x="551.2" y="288" text-anchor="middle" font-size="12">부모 RSS 1024 MB</text>
+<rect x="40" y="306" width="12" height="12" fill="#4a7bd0"/>
+<text x="57" y="317" font-size="12">fork+wait</text>
+<rect x="140" y="306" width="12" height="12" fill="#3f9a6b"/>
+<text x="157" y="317" font-size="12">vfork+wait</text>
+<rect x="245" y="306" width="12" height="12" fill="#e08a3c"/>
+<text x="262" y="317" font-size="12">pthread_create+join</text>
+<rect x="420" y="306" width="12" height="12" fill="#888"/>
+<text x="437" y="317" font-size="12">posix_spawn(/bin/true)</text>
+</svg></figure>
+<p>그림 6 — 직접 잰 생성+회수 1회 비용. fork만 부모 RSS에 비례해서 커지고, 주소 공간을 복사하지 않는 vfork·pthread_create·posix_spawn은 부모 크기와 무관하다.</p>
+<h3 id="10-2-해석">10.2 해석<a class="anchor" href="#10-2-해석" aria-label="link">#</a></h3>
+<ul class="tasks"><li><strong>fork는 RSS에 비례</strong>한다. 데이터는 COW로 공유해도 page table 항목(1 GiB면 PTE 26만 개)을 복사하고 모두 쓰기 금지로 바꿔야 하기 때문이다. 0 → 1024 MiB에서 약 4배.</li><li><strong>pthread_create는 부모 크기와 무관</strong>하다. <code>CLONE_VM</code>이라 page table을 복사하지 않는다. 스택 <code>mmap</code>, TLS 설정, task 생성 정도가 비용이다.</li><li><strong>posix_spawn은 일정</strong>하다. 내부적으로 <code>CLONE_VM|CLONE_VFORK</code>라 복사가 없고, 대부분의 시간은 <code>/bin/true</code>를 exec하고 동적 링크하는 비용이다. "큰 프로세스에서 외부 명령 실행"이면 1024 MiB에서 이미 fork+exec보다 빠르다(fork 299 us + exec 비용).</li><li>절대값은 VM(Apple Silicon 위 가상화)이라 실제 보드와 다르다. Cortex-A53급 보드에서는 수 배 느릴 수 있다. <strong>비교와 추세</strong>를 보는 측정이다.</li></ul>
+<p>실무 결론: 1초에 수백 번 "작업 단위"를 만들 일이 있으면 스레드 풀을 미리 만들어 재사용하고, 큰 데몬에서 외부 명령은 <code>posix_spawn</code>으로 실행한다. 반대로 하루 몇 번 재시작되는 워커 프로세스라면 비용은 무시해도 되고 격리의 이점이 크다.</p>
+<hr>
+<h2 id="11-데몬-프로세스-그룹-세션">11. 데몬, 프로세스 그룹, 세션<a class="anchor" href="#11-데몬-프로세스-그룹-세션" aria-label="link">#</a></h2>
+<h3 id="11-1-용어-세-개">11.1 용어 세 개<a class="anchor" href="#11-1-용어-세-개" aria-label="link">#</a></h3>
+<ul><li><strong>프로세스 그룹(process group, PGID)</strong>: 셸 파이프라인 하나(<code>cat log</code> 파이프 <code>grep err</code>)가 한 그룹이다. Ctrl-C의 SIGINT는 <strong>그룹 전체</strong>에 간다. <code>kill -TERM -&lt;pgid&gt;</code>처럼 음수 PID로 그룹 전체에 시그널을 보낼 수 있다.</li><li><strong>세션(session, SID)</strong>: 로그인 하나에 해당하는 그룹들의 묶음. 세션은 <strong>제어 터미널(controlling terminal)</strong> 하나를 가질 수 있고, 그 터미널이 닫히면 SIGHUP이 간다.</li><li><strong>데몬(daemon)</strong>: 제어 터미널 없이 백그라운드에서 사는 서비스 프로세스 (<code>sshd</code>, <code>systemd-journald</code>, 우리의 센서 데몬).</li></ul>
+<h3 id="11-2-고전적인-daemonize-double-fork-setsid">11.2 고전적인 daemonize (double fork + setsid)<a class="anchor" href="#11-2-고전적인-daemonize-double-fork-setsid" aria-label="link">#</a></h3>
+<ol><li><code>fork()</code> 후 부모는 종료 → 셸에 즉시 돌아감, 자식은 프로세스 그룹 리더가 아님이 보장된다.</li><li>자식이 <code>setsid()</code> → 새 세션·새 그룹의 리더가 되고 제어 터미널과 끊어진다.</li><li>한 번 더 <code>fork()</code> 후 중간 프로세스 종료 → 손자는 세션 리더가 아니므로 나중에 터미널을 열어도 제어 터미널을 다시 얻지 않는다. 손자는 고아가 되어 init(또는 subreaper)이 입양한다.</li><li><code>chdir("/")</code>(마운트 해제 방해 방지), <code>umask</code> 설정, stdin/stdout/stderr를 <code>/dev/null</code>로.</li></ol>
+<h3 id="11-3-예제-13-daemonize-후-pgid-sid-tty-확인">11.3 예제 13 — daemonize 후 PGID·SID·TTY 확인<a class="anchor" href="#11-3-예제-13-daemonize-후-pgid-sid-tty-확인" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// ex13: classic double-fork daemonize, then look at PGID / SID / TTY
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/stat.h&gt;
+#include &lt;sys/wait.h&gt;
+
+int main(void) {
+    printf("launcher: pid=%d pgid=%d sid=%d\n", getpid(), getpgrp(), getsid(0));
+    fflush(stdout);
+    pid_t p = fork();
+    if (p &lt; 0) { perror("fork"); exit(1); }
+    if (p &gt; 0) {                         /* launcher waits for 1st child, then exits */
+        waitpid(p, NULL, 0);
+        sleep(1);
+        char cmd[96];
+        snprintf(cmd, sizeof cmd, "ps -o pid,ppid,pgid,sid,tty,stat,cmd -C ex13_daemon");
+        fflush(stdout);
+        if (system(cmd) &lt; 0) perror("system");
+        return 0;
+    }
+    if (setsid() &lt; 0) { perror("setsid"); _exit(1); } /* new session, no ctty */
+    p = fork();                           /* 2nd fork: not a session leader */
+    if (p &lt; 0) { perror("fork"); _exit(1); }
+    if (p &gt; 0) _exit(0);                  /* 1st child exits -&gt; daemon orphaned */
+    umask(022);
+    if (chdir("/") &lt; 0) { perror("chdir"); _exit(1); }
+    printf("daemon  : pid=%d ppid=%d pgid=%d sid=%d\n",
+           getpid(), getppid(), getpgrp(), getsid(0));
+    fflush(stdout);
+    int fd = open("/dev/null", O_RDWR);   /* detach stdio */
+    if (fd &lt; 0) { perror("open"); _exit(1); }
+    dup2(fd, 0); dup2(fd, 1); dup2(fd, 2);
+    sleep(3);                             /* "work" */
+    _exit(0);
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex13_daemon.c -o ex13_daemon &amp;&amp; ./ex13_daemon; sleep 3'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>launcher: pid=187182 pgid=187151 sid=187151
+daemon  : pid=187184 ppid=1 pgid=187183 sid=187183
+    PID    PPID    PGID     SID TT       STAT CMD
+ 187182  187151  187151  187151 ?        S    ./ex13_daemon
+ 187184       1  187183  187183 ?        S    ./ex13_daemon</code></pre></figure>
+<p>출력에서 볼 것: (1) launcher는 자기를 실행한 셸(187151)의 그룹·세션에 속해 있다. (2) 데몬은 PPID 1(init에 입양), PGID·SID가 187183 — 이미 종료한 <strong>중간 프로세스</strong>(<code>setsid</code>를 부른 쪽)의 번호다. 그래서 데몬 자신(187184)은 세션 리더가 아니다. 이것이 두 번째 fork의 목적이다. (3) <code>limactl shell</code>은 터미널 없이 실행되어 launcher의 TTY도 <code>?</code>이지만, 터미널에서 실행했다면 launcher만 <code>pts/0</code> 같은 TTY를 갖는다.</p>
+<h3 id="11-4-요즘-방식-systemd에-맡긴다">11.4 요즘 방식 — systemd에 맡긴다<a class="anchor" href="#11-4-요즘-방식-systemd에-맡긴다" aria-label="link">#</a></h3>
+<p>systemd 기반 장비(대부분의 Yocto·Debian·Ubuntu 이미지)에서는 위 과정을 <strong>하지 않는 것이 정석</strong>이다. 프로그램은 포그라운드로 실행되고 stdout/stderr에 로그를 쓰면, systemd가 프로세스 관리·재시작·로그(journald)·cgroup 정리를 다 해 준다. 예를 들어 센서 데몬 unit 파일:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[Unit]
+Description=IMU sensor daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/imu-daemon --rate 1000
+Restart=on-failure
+RestartSec=1
+CPUAffinity=2
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=50
+
+[Install]
+WantedBy=multi-user.target</code></pre></figure>
+<p><code>Type=simple</code>이면 systemd가 fork+exec한 프로세스 자체가 서비스다. <code>Restart=on-failure</code>는 비정상 종료(0이 아닌 종료 코드, 시그널) 시 재시작한다 — 그 판단 근거가 바로 4절의 wait status다. <code>CPUAffinity</code>, <code>CPUSchedulingPolicy</code>는 9절의 손잡이를 설정 파일로 거는 것이다. systemd는 L1에서, BusyBox init 환경은 C7·K2에서 다룬다.</p>
+<hr>
+<h2 id="12-커널-안에서는-무슨-일이-일어나나">12. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#12-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<h3 id="12-1-syscall에서-커널-함수까지">12.1 syscall에서 커널 함수까지<a class="anchor" href="#12-1-syscall에서-커널-함수까지" aria-label="link">#</a></h3>
+<p>유저 API 하나하나가 커널의 어느 함수로 이어지는지 지도부터 보자 (6.x ~ 7.0 기준, 함수 이름은 <code>kernel/fork.c</code>, <code>fs/exec.c</code>, <code>kernel/exit.c</code>).</p>
+<figure class="code"><pre><code>fork() / pthread_create()
+  -&gt; clone / clone3 syscall
+     -&gt; kernel_clone(args)
+        -&gt; copy_process()
+             dup_task_struct()        new task_struct + kernel stack
+             copy_files()   CLONE_FILES ? refcount++ : dup_fd()
+             copy_fs(), copy_sighand(), copy_signal()
+             copy_mm()      CLONE_VM    ? refcount++ : dup_mm() -&gt; dup_mmap()
+                                          (copies VMAs + PTEs, marks private pages RO = COW)
+             copy_thread()  child regs, x0 = 0 on arm64
+             alloc_pid()
+        -&gt; wake_up_new_task()       state = TASK_RUNNING, enqueue on a CPU
+        -&gt; (CLONE_VFORK) wait_for_vfork_done()   parent sleeps killable ("D")
+
+execve()
+  -&gt; do_execveat_common() -&gt; bprm_execve()
+     -&gt; exec_binprm() -&gt; search_binary_handler() -&gt; load_elf_binary()
+        -&gt; begin_new_exec()   kill other threads, exec_mmap(): drop old mm,
+                               close O_CLOEXEC fds, reset signal handlers
+        -&gt; map PT_LOAD segments, set up stack (argv, envp, auxv), start_thread()
+
+exit() / _exit()
+  -&gt; exit_group -&gt; do_group_exit() -&gt; do_exit()
+     -&gt; exit_mm(), exit_files(), exit_fs() ...  release resources
+     -&gt; exit_notify()   reparent children (forget_original_parent -&gt; find_new_reaper),
+                        send SIGCHLD, state = EXIT_ZOMBIE (or auto-reap)
+     -&gt; do_task_dead() -&gt; __schedule()   never returns
+
+wait4() / waitpid()
+  -&gt; kernel_wait4() -&gt; do_wait()  sleeps on current-&gt;signal-&gt;wait_chldexit
+     -&gt; wait_task_zombie() -&gt; copy status to user -&gt; release_task()   PID freed</code></pre></figure>
+<p>몇 가지 연결 고리:</p>
+<ul class="tasks"><li><strong>COW의 실체</strong>: <code>dup_mmap()</code>이 부모의 각 VMA를 복사하면서 private 쓰기 가능 페이지의 PTE를 부모·자식 모두 쓰기 금지로 만든다. 나중의 write fault는 <code>handle_mm_fault()</code> → <code>do_wp_page()</code>(write-protect fault 처리)에서 페이지를 복사한다. 상세는 A5와 F9.</li><li><strong>좀비의 실체</strong>: <code>exit_notify()</code> 이후 <code>task_struct</code>는 <code>EXIT_ZOMBIE</code> 상태로 남아 <code>release_task()</code>를 기다린다. 부모가 <code>SIGCHLD</code>를 <code>SIG_IGN</code>으로 설정했으면 <code>exit_notify()</code>가 곧바로 자동 회수 경로를 탄다.</li><li><strong>reparenting의 실체</strong>: <code>find_new_reaper()</code>가 먼저 같은 스레드 그룹의 살아 있는 다른 스레드, 그다음 <code>PR_SET_CHILD_SUBREAPER</code>가 설정된 조상, 마지막으로 PID namespace의 init을 고른다. 4.5절 실험이 이 순서 그대로다.</li><li><strong>D 상태의 실체</strong>: 드라이버가 <code>wait_event(wq, cond)</code>를 부르면 매크로가 <code>current</code>를 <code>TASK_UNINTERRUPTIBLE</code>로 바꿔 wait queue에 넣고 <code>schedule()</code>을 부른다. 다른 곳(보통 IRQ 핸들러)이 <code>wake_up(&amp;wq)</code>를 부를 때까지 runqueue에 없다. <code>_interruptible</code> 버전은 <code>TASK_INTERRUPTIBLE</code>로 잠들고 깨어난 뒤 <code>signal_pending(current)</code>를 확인해 <code>-ERESTARTSYS</code>를 돌려준다.</li></ul>
+<h3 id="12-2-드라이버를-쓸-때-다시-만나는-지점">12.2 드라이버를 쓸 때 다시 만나는 지점<a class="anchor" href="#12-2-드라이버를-쓸-때-다시-만나는-지점" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>이 노트의 개념</th><th>드라이버/커널에서 다시 나오는 곳</th><th>노트</th></tr></thead><tbody><tr><td><code>task_struct</code>, <code>current</code></td><td>드라이버 함수 안의 <code>current-&gt;pid</code>, <code>current-&gt;comm</code>, 권한 검사</td><td>F1, G2</td></tr><tr><td>S vs D 상태</td><td><code>wait_event_interruptible</code> vs <code>wait_event</code>, <code>-ERESTARTSYS</code> 처리</td><td>F3</td></tr><tr><td>blocking <code>read()</code>가 S로 잠드는 것</td><td>드라이버 <code>.read</code>에서 데이터가 없으면 wait queue에서 잠들고 IRQ가 <code>wake_up</code></td><td>F3, G2</td></tr><tr><td>커널 스레드 (<code>mm == NULL</code>)</td><td><code>kthread_run()</code>으로 만든 폴링 스레드, <code>kworker</code>(workqueue)</td><td>F7</td></tr><tr><td>스레드 간 공유 데이터 레이스</td><td>spinlock / mutex / atomic, 프로세스 컨텍스트 vs 인터럽트 컨텍스트</td><td>F4</td></tr><tr><td>우선순위, SCHED_FIFO</td><td>threaded IRQ 핸들러는 SCHED_FIFO 50으로 도는 커널 스레드</td><td>F6, N2</td></tr><tr><td><code>clone</code> 플래그 공유</td><td><code>files_struct</code> → fd → <code>struct file</code> → 드라이버의 <code>file_operations</code></td><td>A3, G2</td></tr></tbody></table></div>
+<p>Don의 RTOS 경험과 연결하면: RTOS에서 "센서 태스크가 세마포어를 기다리다 ISR이 give하면 깬다"였던 패턴이, Linux에서는 "유저 스레드가 <code>read()</code>로 들어와 드라이버의 wait queue에서 S 상태로 잠들고, IRQ 핸들러가 <code>wake_up_interruptible()</code>로 깨운다"가 된다. 잠드는 주체가 <strong>유저 스레드의 <code>task_struct</code></strong>라는 점만 다르다.</p>
+<hr>
+<h2 id="13-embedded-실무에서-다시-보기">13. Embedded 실무에서 다시 보기<a class="anchor" href="#13-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="13-1-센서-키트-프로세스-구조-정하기">13.1 센서 키트 프로세스 구조 정하기<a class="anchor" href="#13-1-센서-키트-프로세스-구조-정하기" aria-label="link">#</a></h3>
+<p>로봇 센서 키트(IMU 1 kHz, 카메라 30 fps, GNSS 10 Hz, CAN 모터 500 Hz, LiDAR UDP)를 예로 들면 흔한 설계는 이렇다.</p>
+<div class="tw"><table><thead><tr><th>구성 요소</th><th>프로세스/스레드</th><th>이유</th></tr></thead><tbody><tr><td>IMU 읽기 + 필터</td><td>한 프로세스 안 스레드 2개, 읽기 스레드는 SCHED_FIFO + affinity</td><td>같은 링버퍼 공유, 지터 최소화</td></tr><tr><td>카메라 캡처</td><td>별도 프로세스</td><td>크고 복잡한 라이브러리(V4L2, GStreamer), 크래시 격리</td></tr><tr><td>GNSS 파서</td><td>별도 프로세스</td><td>외부 입력 파싱 = 버그 위험, 죽어도 재시작</td></tr><tr><td>CAN 모터 제어</td><td>별도 프로세스, SCHED_FIFO 높은 우선순위</td><td>안전 관련, 다른 컴포넌트와 격리</td></tr><tr><td>슈퍼바이저</td><td>systemd 또는 subreaper 프로세스</td><td>재시작 정책, 상태 보고</td></tr></tbody></table></div>
+<h3 id="13-2-예제-14-작은-슈퍼바이저-크래시하면-재시작">13.2 예제 14 — 작은 슈퍼바이저: 크래시하면 재시작<a class="anchor" href="#13-2-예제-14-작은-슈퍼바이저-크래시하면-재시작" aria-label="link">#</a></h3>
+<p>systemd가 없는 최소 이미지(BusyBox)에서는 직접 슈퍼바이저를 짜기도 한다. 워커를 <code>posix_spawnp</code>로 띄우고, 비정상 종료면 백오프 후 재시작하고, 3번을 넘으면 포기한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// ex14: tiny supervisor — spawn a worker, restart it when it crashes (max 3)
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;spawn.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/wait.h&gt;
+
+extern char **environ;
+
+static pid_t start_worker(int gen) {
+    char script[96];
+    /* stand-in for a sensor daemon: runs briefly, then "crashes" (SIGSEGV) */
+    snprintf(script, sizeof script, "echo \"worker gen %d pid $$ up\"; sleep 0.2; kill -SEGV $$", gen);
+    char *argv[] = { "sh", "-c", script, NULL };
+    pid_t pid;
+    int e = posix_spawnp(&amp;pid, "sh", NULL, NULL, argv, environ);
+    if (e) { fprintf(stderr, "posix_spawnp: %s\n", strerror(e)); exit(1); }
+    return pid;
+}
+
+int main(void) {
+    int restarts = 0;
+    pid_t w = start_worker(0);
+    for (;;) {
+        int st;
+        if (waitpid(w, &amp;st, 0) &lt; 0) { perror("waitpid"); exit(1); }
+        if (WIFEXITED(st) &amp;&amp; WEXITSTATUS(st) == 0) { puts("worker finished cleanly"); break; }
+        if (WIFSIGNALED(st))
+            printf("supervisor: worker %d died by signal %d\n", w, WTERMSIG(st));
+        else
+            printf("supervisor: worker %d exited %d\n", w, WEXITSTATUS(st));
+        if (++restarts &gt; 3) { puts("supervisor: too many restarts, giving up"); return 1; }
+        fflush(stdout);
+        usleep(100000 * restarts);           /* simple linear backoff */
+        w = start_worker(restarts);
+    }
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/A2 &amp;&amp; gcc -std=gnu11 -Wall -Wextra -O2 /Users/donh/.elinux_scratch/A2/ex14_supervisor.c -o ex14_supervisor &amp;&amp; ./ex14_supervisor; echo "exit=$?"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>worker gen 0 pid 201004 up
+supervisor: worker 201004 died by signal 11
+worker gen 1 pid 201006 up
+supervisor: worker 201006 died by signal 11
+worker gen 2 pid 201008 up
+supervisor: worker 201008 died by signal 11
+worker gen 3 pid 201010 up
+supervisor: worker 201010 died by signal 11
+supervisor: too many restarts, giving up
+exit=1</code></pre></figure>
+<p>출력에서 볼 것: 매 세대 새 PID로 재시작되고, 종료 이유(시그널 11)를 wait status로 정확히 구분한다. 실제 제품이라면 여기에 재시작 횟수 로그, 하드웨어 워치독 kick 중단(I9), 상태 LED 같은 정책이 붙는다.</p>
+<h3 id="13-3-kill이-안-되는-프로세스-현장-디버깅">13.3 "kill이 안 되는 프로세스" 현장 디버깅<a class="anchor" href="#13-3-kill이-안-되는-프로세스-현장-디버깅" aria-label="link">#</a></h3>
+<p>현장에서 카메라 앱이 멈추고 <code>kill -9</code>도 안 듣는다는 리포트가 왔다고 하자. 순서:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>ps -eo pid,stat,wchan:32,cmd | grep -i cam     # STAT D? wchan은?
+sudo cat /proc/&lt;pid&gt;/stack                      # 커널 스택: 어느 드라이버 함수에서 잠들었나
+dmesg | grep -i "blocked for more than"         # hung task 경고가 있었나</code></pre></figure>
+<p>wchan이나 스택에 <code>vb2_...</code>, <code>wait_for_completion</code>, 특정 ISP 드라이버 함수가 보이면 "하드웨어 완료 인터럽트를 타임아웃 없이 기다리는 드라이버"가 원인이다. 유저 공간에서 할 수 있는 일은 없고, 드라이버의 대기를 timeout + interruptible로 고치는 것이 해법이다(F3).</p>
+<h3 id="13-4-스레드-이름은-디버깅의-반이다">13.4 스레드 이름은 디버깅의 반이다<a class="anchor" href="#13-4-스레드-이름은-디버깅의-반이다" aria-label="link">#</a></h3>
+<p>스레드가 10개쯤 되는 데몬에서 <code>top -H</code>가 전부 <code>imu-daemon</code>으로 보이면 어떤 스레드가 CPU를 먹는지 알 수 없다. 스레드를 만들자마자 <code>pthread_setname_np(t, "imu-read")</code>를 부르는 습관을 들인다. 이름은 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/comm</code>에 기록되고 <code>ps -L -o tid,comm,stat</code>, <code>top -H</code>, <code>perf</code>, 커널 hung task 메시지에 그대로 나온다.</p>
+<hr>
+<h2 id="14-흔한-실수와-증상">14. 흔한 실수와 증상<a class="anchor" href="#14-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>자식을 wait하지 않음</td><td><code>ps</code>에 <code>&lt;defunct&gt;</code> 누적, 결국 fork가 <code>EAGAIN</code></td><td>종료한 자식의 <code>task_struct</code>가 회수 안 됨</td><td><code>waitpid</code>, SIGCHLD 핸들러에서 <code>WNOHANG</code> 루프, 또는 <code>SIG_IGN</code></td></tr><tr><td>fork 전에 stdout flush 안 함</td><td>로그 줄이 두 번 찍힘 (파일·파이프로 리다이렉트할 때만)</td><td>사용자 공간 stdio 버퍼가 자식에 복사됨</td><td>fork 전 <code>fflush(NULL)</code>, 자식은 <code>_exit</code></td></tr><tr><td>exec 실패 후 자식이 <code>return</code></td><td>부모 코드가 두 벌로 계속 실행</td><td>exec는 실패 시 반환함</td><td>exec 다음 줄에 <code>perror</code> + <code>_exit(127)</code></td></tr><tr><td>멀티스레드에서 fork 후 복잡한 일</td><td>자식이 가끔 영원히 멈춤</td><td>다른 스레드가 잡고 있던 mutex가 잠긴 채 복사</td><td>fork 직후 exec, 또는 <code>posix_spawn</code></td></tr><tr><td>큰 데몬에서 <code>system()</code> 남발</td><td>지연 스파이크, 메모리 압박</td><td>fork가 RSS에 비례, COW로 페이지 복사</td><td><code>posix_spawn</code>, 또는 별도 작은 헬퍼 프로세스</td></tr><tr><td>공유 변수를 <code>volatile</code>로만 보호</td><td>카운터 값이 틀림, 재현 어려움</td><td><code>++</code>는 load-add-store, 원자적 아님</td><td>atomic 또는 mutex (A8)</td></tr><tr><td><code>pthread_create</code> 에러를 errno로 확인</td><td>에러가 무시되거나 엉뚱한 메시지</td><td>pthread 함수는 에러 코드를 <strong>반환</strong></td><td><code>int e = pthread_create(...); if (e) strerror(e)</code></td></tr><tr><td>스레드에서 <code>exit()</code> 호출</td><td>프로세스 전체가 갑자기 종료</td><td><code>exit</code>는 <code>exit_group</code>, 모든 스레드 종료</td><td>스레드는 <code>return</code> 또는 <code>pthread_exit</code></td></tr><tr><td>드라이버에서 타임아웃 없는 <code>wait_event</code></td><td>앱이 D 상태로 멈추고 <code>kill -9</code> 불가, hung task 경고</td><td><code>TASK_UNINTERRUPTIBLE</code> 무한 대기</td><td><code>wait_event_interruptible_timeout</code> + <code>-ERESTARTSYS</code> 처리</td></tr><tr><td>SCHED_FIFO 스레드가 busy loop</td><td>같은 CPU의 다른 일이 굶음, 셸 무응답</td><td>RT는 스스로 block할 때까지 실행</td><td>block하는 구조로, affinity로 격리, RT throttling 이해</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-면접에서-이렇게-말한다">15. 면접에서 이렇게 말한다<a class="anchor" href="#15-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> What is the difference between a process and a thread in Linux?</p>
+<p><strong>A.</strong> 프로세스는 자기만의 주소 공간과 fd 테이블 같은 자원을 가진 단위이고, 스레드는 그 자원을 공유하면서 스택·레지스터만 따로 가지는 실행 흐름이다. 커널 안에서는 둘 다 <code>task_struct</code>이고 <code>clone()</code> 플래그(<code>CLONE_VM</code>, <code>CLONE_FILES</code>, <code>CLONE_THREAD</code> …)로 무엇을 공유할지가 정해질 뿐이다. 그래서 스케줄러는 스레드 하나하나를 독립된 task로 스케줄한다.</p>
+<blockquote><p>A process owns an address space and resources like the file descriptor table; threads share those and only have their own stack, registers and TID. Inside the kernel both are a task_struct — the difference is just which clone flags were used, like CLONE_VM, CLONE_FILES and CLONE_THREAD. The scheduler schedules each thread as an independent task. In practice I use processes for isolation and restartability, and threads when components need to share memory cheaply.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "그럼 <code>getpid()</code>는 스레드마다 다른가?" → 같다. <code>getpid()</code>는 TGID, 스레드마다 다른 건 <code>gettid()</code>.</p>
+<p><strong>Q.</strong> How does fork work, and why is it fast?</p>
+<p><strong>A.</strong> fork는 호출한 프로세스를 복제해서 부모에겐 자식 PID, 자식에겐 0을 돌려준다. 메모리를 실제로 복사하지 않고 page table만 복사한 뒤 양쪽을 읽기 전용으로 표시하는 copy-on-write를 쓴다. 누가 쓰면 그 페이지만 page fault 경로에서 복사된다. 그래도 page table 복사 비용은 남아서, 제가 측정해 보니 부모 RSS 0에서 1 GiB로 늘리면 fork+wait가 약 73 us에서 300 us로 늘었다.</p>
+<blockquote><p>fork duplicates the calling process; it returns the child's PID to the parent and zero to the child. It doesn't copy memory up front — it copies the page tables and marks private pages read-only in both, so a write triggers a page fault that copies just that page. That's copy-on-write. The page table copy still scales with RSS: when I measured it, fork plus wait went from about 70 microseconds to about 300 as the parent grew from zero to one gigabyte, which is why large daemons should use posix_spawn.</p></blockquote>
+<p><strong>Q.</strong> What is a zombie process and how do you get rid of it?</p>
+<p><strong>A.</strong> 이미 종료했지만 부모가 아직 wait하지 않아 종료 상태를 담은 <code>task_struct</code>가 남아 있는 프로세스다. 이미 죽었으니 kill로는 못 없앤다. 부모가 <code>waitpid</code>로 회수하게 고치거나, SIGCHLD를 <code>SIG_IGN</code>으로 두거나, 부모가 죽으면 init이 입양해 회수한다. 고아는 반대로 부모가 먼저 죽은 살아 있는 프로세스이고 init이나 subreaper가 입양한다.</p>
+<blockquote><p>A zombie has already exited, but its parent hasn't called wait yet, so the kernel keeps the task_struct with the exit status. You can't kill it because it's already dead. The fix is in the parent: reap with waitpid, usually in a SIGCHLD handler looping with WNOHANG, or set SIGCHLD to SIG_IGN. If the parent dies, the zombie gets reparented to init or a subreaper, which reaps it. Zombies matter because each one holds a PID.</p></blockquote>
+<p><strong>Q.</strong> A process is stuck and kill -9 doesn't work. What's going on?</p>
+<p><strong>A.</strong> 거의 확실히 D 상태, 즉 uninterruptible sleep이다. 커널 코드가 시그널에 깨지 않는 대기를 하고 있어서 SIGKILL도 대기 중으로만 남는다. <code>ps</code>의 STAT과 WCHAN, <code>/proc/&lt;pid&gt;/stack</code>, dmesg의 hung task 경고로 어느 드라이버의 어느 대기인지 찾는다. 보통 하드웨어 완료를 타임아웃 없이 기다리는 드라이버가 원인이라 드라이버를 interruptible/killable + timeout으로 고친다.</p>
+<blockquote><p>It's almost certainly in D state, uninterruptible sleep — kernel code is waiting in a way that signals can't interrupt, so SIGKILL just stays pending. I'd check STAT and WCHAN in ps, read /proc/pid/stack, and look for hung-task warnings in dmesg to find which driver wait it's stuck in. The usual root cause is a driver waiting for a hardware completion without a timeout; the fix is wait_event_interruptible or killable with a timeout, and propagating -ERESTARTSYS.</p></blockquote>
+<p><strong>Q.</strong> What is the difference between fork and exec? Why are they separate?</p>
+<p><strong>A.</strong> fork는 프로세스를 새로 만들고, exec는 현재 프로세스 안의 프로그램을 바꾼다(PID 유지, 성공 시 반환 없음). 둘이 분리되어 있어서 fork와 exec 사이에 자식에서 fd 리다이렉션, 시그널 마스크, uid, affinity 설정 같은 준비를 할 수 있다. 셸의 파이프와 리다이렉션이 이 틈으로 구현된다. 그 준비를 표준화한 것이 <code>posix_spawn</code>이다.</p>
+<blockquote><p>fork creates a new process; exec replaces the program running in the current process — same PID, and it doesn't return on success. Keeping them separate lets the child set things up in between: redirect file descriptors, change signal masks, drop privileges, set CPU affinity. That's exactly how shells implement pipes and redirection. posix_spawn packages the common setups without the cost of copying the address space.</p></blockquote>
+<p><strong>Q.</strong> How would you make a sensor-reading thread more deterministic on Linux?</p>
+<p><strong>A.</strong> 먼저 <code>SCHED_FIFO</code>로 적절한 RT 우선순위를 주고, <code>pthread_setaffinity_np</code>로 한 코어에 고정한다. 가능하면 그 코어를 <code>isolcpus</code>로 비워 두고 IRQ affinity도 옮긴다. <code>mlockall</code>로 page fault를 막는다. 그리고 <code>/proc/&lt;pid&gt;/task/&lt;tid&gt;/status</code>의 nonvoluntary context switch와 cyclictest 같은 도구로 실제로 선점·지연이 줄었는지 측정한다.</p>
+<blockquote><p>I'd give it SCHED_FIFO with an appropriate priority, pin it to a core with pthread_setaffinity_np, and ideally isolate that core and move IRQs away. I'd mlockall to avoid page faults at runtime. Then I'd verify with numbers: the thread's nonvoluntary context-switch count in /proc should stay flat, and cyclictest or timestamps on each sample show the latency distribution. Without measurement it's just guessing.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "SCHED_FIFO 스레드가 무한 루프를 돌면?" → 같은 CPU의 일반 task가 굶는다. RT throttling(기본 1초 중 0.95초)이 최소한의 안전장치.</p>
+<p><strong>Q.</strong> What do the voluntary and nonvoluntary context switch counters tell you?</p>
+<p><strong>A.</strong> voluntary는 task가 스스로 block해서 CPU를 내놓은 횟수, nonvoluntary는 실행 중에 선점당한 횟수다. 실험에서 CPU hog는 2초에 voluntary 0, nonvoluntary 약 800이었고 sleeper는 voluntary 1550, nonvoluntary 1이었다. RT 스레드의 nonvoluntary가 늘면 누군가 CPU를 빼앗고 있다는 뜻이고, voluntary가 폭증하면 락 경합이나 잘게 쪼개진 I/O를 의심한다.</p>
+<blockquote><p>Voluntary switches count how often the task blocked on its own — sleep, I/O, a lock. Nonvoluntary counts how often it was preempted while runnable. In a quick test a CPU hog showed zero voluntary and about 800 nonvoluntary switches in two seconds, while a sleeper had 1550 voluntary and one nonvoluntary. For a real-time thread, a rising nonvoluntary count means something is stealing its CPU.</p></blockquote>
+<hr>
+<h2 id="16-직접-해보기">16. 직접 해보기<a class="anchor" href="#16-직접-해보기" aria-label="link">#</a></h2>
+<ol class="tasks"><li>(개념) <code>fork()</code>를 3번 연달아 부르는 코드(<code>fork(); fork(); fork();</code>)는 프로세스를 몇 개 만드나? 각 프로세스가 <code>printf("x\n")</code>를 한 번씩 하면 몇 줄이 나오나? 출력을 파이프로 보내면서 <code>fflush</code>가 없다면 어떻게 달라질 수 있나? 정답/힌트: 총 8개(원본 포함), 8줄. <code>printf</code>가 fork 전에 있었다면 버퍼 복제로 줄 수가 늘어난다(1.4절).</li><li>(코드) 예제 1을 고쳐 자식 하나가 <code>raise(SIGSTOP)</code>로 스스로 멈추게 하고, 부모가 <code>waitpid(..., WUNTRACED)</code>로 정지를 감지한 뒤 <code>SIGCONT</code>를 보내 끝까지 회수하게 만들어라. 정답/힌트: <code>WIFSTOPPED</code>/<code>WSTOPSIG</code>로 정지 감지 → <code>kill(pid, SIGCONT)</code> → 다시 <code>waitpid</code>.</li><li>(관찰) 아무 멀티스레드 프로그램(예: 예제 8 변형)을 띄우고 <code>/proc/&lt;pid&gt;/task/*/comm</code>과 <code>/proc/&lt;pid&gt;/task/*/status</code>의 <code>voluntary_ctxt_switches</code>를 스레드별로 출력하는 셸 한 줄을 만들어라. 정답/힌트: <code>for t in /proc/&lt;pid&gt;/task/*; do echo $(cat $t/comm) $(grep ^voluntary $t/status); done</code></li><li>(코드) SIGCHLD 핸들러에서 <code>waitpid(-1, &amp;st, WNOHANG)</code> 루프로 자식을 회수하는 프로그램을 짜고, 자식 10개가 거의 동시에 죽어도 좀비가 하나도 남지 않는지 <code>ps</code>로 확인하라. 루프 대신 <code>waitpid</code>를 한 번만 부르면 어떻게 되는지도 비교하라. 정답/힌트: 시그널은 합쳐지므로 한 번만 부르면 좀비가 남을 수 있다. 상세는 A6.</li><li>(관찰) <code>strace -f -e trace=clone,clone3,execve,wait4 sh -c 'ls | wc -l'</code>을 실행하고 셸이 파이프라인을 위해 몇 번 clone하고 어느 프로세스가 무엇을 exec하는지 그려 보라. 정답/힌트: 셸이 명령마다 자식을 만들고(clone, flags에 SIGCHLD) 각 자식이 <code>ls</code>, <code>wc</code>를 exec한다. 자식 사이를 pipe fd가 잇는다(A7).</li><li>(측정) 예제 10에 "스레드 풀 재사용"(미리 만든 스레드에 condvar로 일을 넘기기) 경로를 추가해 1회 작업 디스패치 비용을 재고 <code>pthread_create+join</code>과 비교하라. 정답/힌트: 디스패치는 보통 수 us 수준으로 생성보다 훨씬 싸다. condvar는 A8.</li><li>(개념) 왜 <code>kill -9</code>는 좀비에도, D 상태 task에도 즉시 효과가 없나? 두 경우의 이유를 각각 한 문장으로 말하라. 정답/힌트: 좀비는 이미 죽어서 받을 주체가 없고(부모의 wait만 필요), D 상태는 커널이 시그널 확인을 하지 않는 대기에 있어서 깨어날 때까지 pending으로만 남는다.</li></ol>
+<hr>
+<h2 id="17-용어-사전">17. 용어 사전<a class="anchor" href="#17-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>process</td><td>프로세스</td><td>자기 주소 공간과 자원(fd 테이블 등)을 가진 실행 단위</td></tr><tr><td>thread</td><td>스레드</td><td>주소 공간을 공유하고 스택·레지스터만 따로 가진 실행 흐름</td></tr><tr><td>task</td><td>태스크</td><td>커널의 스케줄 단위, <code>task_struct</code> 하나</td></tr><tr><td><code>task_struct</code></td><td>태스크 구조체</td><td>커널이 task마다 유지하는 상태·자원 포인터 묶음 (TCB에 해당)</td></tr><tr><td>PID / TGID / TID</td><td>프로세스·스레드 그룹·스레드 ID</td><td>유저 PID = 커널 tgid, 유저 TID = 커널 pid</td></tr><tr><td>fork</td><td>포크</td><td>현재 프로세스를 복제해 자식을 만드는 syscall (실제로는 clone)</td></tr><tr><td>copy-on-write (COW)</td><td>쓰기 시 복사</td><td>페이지를 공유하다가 쓰는 순간 그 페이지만 복사</td></tr><tr><td>exec</td><td>실행 이미지 교체</td><td>현재 프로세스에 새 프로그램을 적재, PID 유지</td></tr><tr><td>vfork</td><td>브이포크</td><td>주소 공간을 빌려 쓰고 부모를 멈추는 fork, exec 직전용</td></tr><tr><td>posix_spawn</td><td>포직스 스폰</td><td>복사 없이 자식 생성 + exec을 한 번에</td></tr><tr><td>wait status</td><td>종료 상태</td><td>정상 종료 코드 또는 시그널 번호가 packed된 정수, <code>W*</code> 매크로로 해석</td></tr><tr><td>zombie</td><td>좀비</td><td>종료했지만 부모가 회수하지 않은 task, <code>Z</code>, <code>&lt;defunct&gt;</code></td></tr><tr><td>orphan</td><td>고아</td><td>부모가 먼저 죽은 살아 있는 프로세스, init이나 subreaper가 입양</td></tr><tr><td>subreaper</td><td>서브리퍼</td><td><code>PR_SET_CHILD_SUBREAPER</code>로 자손 고아를 입양하는 프로세스</td></tr><tr><td>uninterruptible sleep (D)</td><td>인터럽트 불가 대기</td><td>시그널로 깨지 않는 커널 대기, <code>kill -9</code>도 대기</td></tr><tr><td>wchan</td><td>wait channel</td><td>task가 잠들어 있는 커널 함수 이름</td></tr><tr><td>nice</td><td>나이스 값</td><td>fair 클래스에서 CPU 몫을 정하는 가중치 (-20 ~ 19)</td></tr><tr><td>SCHED_FIFO</td><td>실시간 FIFO 정책</td><td>고정 우선순위 선점형, block할 때까지 실행</td></tr><tr><td>CPU affinity</td><td>CPU 친화도</td><td>task가 실행될 수 있는 CPU 집합</td></tr><tr><td>voluntary / nonvoluntary ctxt switch</td><td>자발적 / 비자발적 문맥 전환</td><td>스스로 block한 횟수 / 선점당한 횟수</td></tr><tr><td>process group / session</td><td>프로세스 그룹 / 세션</td><td>작업 제어 단위 / 로그인·제어 터미널 단위</td></tr><tr><td>daemon</td><td>데몬</td><td>제어 터미널 없이 백그라운드에서 사는 서비스 프로세스</td></tr><tr><td><code>current</code></td><td>현재 태스크</td><td>커널 코드에서 지금 실행 중인 task의 <code>task_struct</code> 포인터</td></tr></tbody></table></div>
+<hr>
+<h2 id="18-요약-체크리스트">18. 요약 &amp; 체크리스트<a class="anchor" href="#18-요약-체크리스트" aria-label="link">#</a></h2>
+<p>Linux에서 프로세스는 자기 주소 공간과 자원을 가진 격리 단위이고, 스레드는 그것을 공유하는 실행 흐름이며, 커널에게는 둘 다 <code>clone()</code> 플래그만 다른 <code>task_struct</code>다. 프로세스는 <code>fork</code>(COW로 page table만 복사)로 만들고 <code>exec</code>로 프로그램을 바꾸며, 부모는 반드시 <code>wait</code>로 종료 상태를 회수해야 좀비가 남지 않는다. 부모가 먼저 죽으면 고아는 init이나 subreaper에 입양된다. task 상태 중 D(uninterruptible sleep)는 드라이버의 타임아웃 없는 대기에서 생기며 <code>kill -9</code>가 안 듣는 원인이다. 유저 공간에서는 nice, SCHED_FIFO, affinity로 스케줄링에 개입하고, <code>/proc/&lt;pid&gt;/status</code>의 context switch 카운터로 결과를 측정한다. 생성 비용은 fork만 RSS에 비례하므로 큰 프로세스에서는 <code>posix_spawn</code>, 잦은 작업에는 스레드 풀을 쓴다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>프로세스·스레드·RTOS 태스크의 차이를 주소 공간과 공유 자원 기준으로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>fork + exec + waitpid로 자식을 실행하고 <code>W*</code> 매크로로 종료 이유를 해석하는 코드를 짤 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>copy-on-write가 어떻게 동작하고 fork 비용이 왜 RSS에 비례하는지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>fork 전 <code>fflush</code>, exec 실패 후 <code>_exit(127)</code>이 필요한 이유를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>좀비와 고아를 구분하고, 좀비를 막는 방법 세 가지와 subreaper를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>R, S, D, T, Z 상태와 WCHAN을 <code>ps</code>로 읽고, D 상태가 드라이버의 어떤 대기에서 생기는지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>PID/TGID/TID의 관계를 알고 <code>gettid</code>, <code>/proc/&lt;pid&gt;/task</code>로 스레드를 찾을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>pthread create/join/detach와 errno가 스레드별인 이유, thread-safe 함수 대체(<code>_r</code>)를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>fork와 pthread_create가 <code>clone</code> 플래그 차이일 뿐이라는 것을 strace로 보여 줄 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>nice와 SCHED_FIFO의 차이를 설명하고 <code>chrt</code>, <code>taskset</code>, <code>sched_setaffinity</code>를 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>voluntary / nonvoluntary context switch 카운터로 지연 원인을 추정할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>double fork + setsid 데몬과 systemd <code>Type=simple</code> 서비스의 차이를 말할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul class="tasks"><li>man7.org: <a href="https://man7.org/linux/man-pages/man2/fork.2.html">fork(2)</a>, <a href="https://man7.org/linux/man-pages/man2/execve.2.html">execve(2)</a>, <a href="https://man7.org/linux/man-pages/man2/wait.2.html">wait(2)</a>, <a href="https://man7.org/linux/man-pages/man2/clone.2.html">clone(2)</a>, <a href="https://man7.org/linux/man-pages/man7/pthreads.7.html">pthreads(7)</a>, <a href="https://man7.org/linux/man-pages/man2/gettid.2.html">gettid(2)</a>, <a href="https://man7.org/linux/man-pages/man5/proc_pid_status.5.html">proc_pid_status(5)</a>, <a href="https://man7.org/linux/man-pages/man7/sched.7.html">sched(7)</a>, <a href="https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html">sched_setaffinity(2)</a>, <a href="https://man7.org/linux/man-pages/man2/prctl.2.html">prctl(2)</a>, <a href="https://man7.org/linux/man-pages/man3/posix_spawn.3.html">posix_spawn(3)</a>, <a href="https://man7.org/linux/man-pages/man7/credentials.7.html">credentials(7)</a>, <a href="https://man7.org/linux/man-pages/man1/ps.1.html">ps(1)</a></li><li>Michael Kerrisk, "The Linux Programming Interface" — 24~28장(프로세스 생성·종료·감시·exec), 29~33장(스레드), 34장(프로세스 그룹·세션·작업 제어), 35장(우선순위·스케줄링), 37장(데몬)</li><li>OSTEP (Operating Systems: Three Easy Pieces) — 5장 "Process API", 26장 "Concurrency: An Introduction"</li><li>커널 문서: <a href="https://docs.kernel.org/scheduler/index.html">Scheduler (docs.kernel.org)</a>, <a href="https://docs.kernel.org/scheduler/sched-eevdf.html">EEVDF Scheduler</a></li><li>커널 소스 (elixir.bootlin.com): <code>kernel/fork.c</code> (<code>kernel_clone</code>, <code>copy_process</code>), <code>fs/exec.c</code> (<code>begin_new_exec</code>), <code>kernel/exit.c</code> (<code>do_exit</code>, <code>exit_notify</code>, <code>find_new_reaper</code>, <code>do_wait</code>), <code>include/linux/sched.h</code> (<code>struct task_struct</code>), <code>include/linux/wait.h</code> (<code>wait_event*</code>)</li><li>Bootlin, "Embedded Linux system development" 교육 슬라이드 (bootlin.com/training/embedded-linux)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-05_A1_linux_big_picture.html"><span class="dir">← 이전</span><span class="nm">A1. Linux 전체 구조와 "everything is a file" — 커널·유저 경계, syscall, VFS, /proc·/sys·/dev 한 장 지도</span></a><a class="next" href="2026-10-05_A3_file_io_device_access.html"><span class="dir">다음 →</span><span class="nm">A3. 파일 I/O와 디바이스 접근 — fd 하나로 파일·pipe·센서·레지스터까지 다루는 법</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-rtos-태스크-프로세스-스레드">0. 큰 그림 — RTOS 태스크, 프로세스, 스레드</a></li><li class="l2"><a href="#1-프로세스-만들기-fork">1. 프로세스 만들기 — fork()</a></li><li class="l3"><a href="#1-1-직관-나를-통째로-복제하고-반환값으로-누가-누군지-구분">1.1 직관: "나를 통째로 복제하고, 반환값으로 누가 누군지 구분"</a></li><li class="l3"><a href="#1-2-부모의-의무-wait-로-회수하기">1.2 부모의 의무: wait()로 회수하기</a></li><li class="l3"><a href="#1-3-예제-1-fork-3번-자식마다-다른-방식으로-죽이고-status-해석하기">1.3 예제 1 — fork 3번, 자식마다 다른 방식으로 죽이고 status 해석하기</a></li><li class="l3"><a href="#1-4-함정-fork-전에-stdout을-flush하지-않으면-출력이-두-번-나온다">1.4 함정 — fork 전에 stdout을 flush하지 않으면 출력이 두 번 나온다</a></li><li class="l3"><a href="#1-5-strace로-보면-fork는-clone-이다">1.5 strace로 보면 fork는 clone()이다</a></li><li class="l2"><a href="#2-copy-on-write-fork가-빠른-이유">2. Copy-on-Write — fork가 빠른 이유</a></li><li class="l3"><a href="#2-1-직관">2.1 직관</a></li><li class="l3"><a href="#2-2-예제-2-같은-주소-다른-값-그리고-페이지마다-한-번의-fault">2.2 예제 2 — 같은 주소, 다른 값, 그리고 페이지마다 한 번의 fault</a></li><li class="l3"><a href="#2-3-함정과-실무-포인트">2.3 함정과 실무 포인트</a></li><li class="l2"><a href="#3-새-프로그램-실행하기-exec-패밀리">3. 새 프로그램 실행하기 — exec 패밀리</a></li><li class="l3"><a href="#3-1-직관-프로세스는-그대로-안에-든-프로그램만-갈아-끼운다">3.1 직관: "프로세스는 그대로, 안에 든 프로그램만 갈아 끼운다"</a></li><li class="l3"><a href="#3-2-이름-규칙-글자-하나씩-뜻이-있다">3.2 이름 규칙 — 글자 하나씩 뜻이 있다</a></li><li class="l3"><a href="#3-3-exec-후에-남는-것과-사라지는-것">3.3 exec 후에 남는 것과 사라지는 것</a></li><li class="l3"><a href="#3-4-예제-3-fork-exec-pid가-유지되는-것과-exec-실패-처리">3.4 예제 3 — fork + exec: PID가 유지되는 것과 exec 실패 처리</a></li><li class="l3"><a href="#3-5-posix_spawn-fork-exec를-한-번에">3.5 posix_spawn — fork+exec를 한 번에</a></li><li class="l2"><a href="#4-종료-좀비-고아">4. 종료, 좀비, 고아</a></li><li class="l3"><a href="#4-1-종료-경로-세-가지">4.1 종료 경로 세 가지</a></li><li class="l3"><a href="#4-2-좀비-zombie-죽었는데-회수되지-않은-자식">4.2 좀비(zombie) — 죽었는데 회수되지 않은 자식</a></li><li class="l3"><a href="#4-3-고아-orphan-와-reparenting">4.3 고아(orphan)와 reparenting</a></li><li class="l3"><a href="#4-4-예제-4-좀비를-만들어-ps로-보고-고아의-새-부모-확인하기">4.4 예제 4 — 좀비를 만들어 ps로 보고, 고아의 새 부모 확인하기</a></li><li class="l3"><a href="#4-5-예제-5-subreaper-고아는-init-말고-나한테-줘">4.5 예제 5 — subreaper: "고아는 init 말고 나한테 줘"</a></li><li class="l3"><a href="#4-6-좀비를-안-만드는-방법-정리">4.6 좀비를 안 만드는 방법 정리</a></li><li class="l2"><a href="#5-프로세스-상태-r-s-d-t-z">5. 프로세스 상태 — R, S, D, T, Z</a></li><li class="l3"><a href="#5-1-상태-전이도">5.1 상태 전이도</a></li><li class="l3"><a href="#5-2-예제-6-다섯-가지-상태를-한-화면에-만들기">5.2 예제 6 — 다섯 가지 상태를 한 화면에 만들기</a></li><li class="l3"><a href="#5-3-d-상태가-드라이버-개발자에게-중요한-이유">5.3 D 상태가 드라이버 개발자에게 중요한 이유</a></li><li class="l2"><a href="#6-pid-tgid-tid-이름이-헷갈리는-이유">6. PID, TGID, TID — 이름이 헷갈리는 이유</a></li><li class="l3"><a href="#6-1-정의">6.1 정의</a></li><li class="l3"><a href="#6-2-예제-8-getpid-vs-gettid-proc-pid-task-그리고-스레드별-errno">6.2 예제 8 — getpid vs gettid, /proc/&lt;pid&gt;/task, 그리고 스레드별 errno</a></li><li class="l3"><a href="#6-3-proc-pid-status에서-자주-보는-줄">6.3 /proc/&lt;pid&gt;/status에서 자주 보는 줄</a></li><li class="l2"><a href="#7-pthreads-만들기-기다리기-떼어-놓기">7. pthreads — 만들기, 기다리기, 떼어 놓기</a></li><li class="l3"><a href="#7-1-기본-api">7.1 기본 API</a></li><li class="l3"><a href="#7-2-예제-7-전역-카운터-공유와-레이스-미리보기">7.2 예제 7 — 전역 카운터 공유와 레이스 미리보기</a></li><li class="l3"><a href="#7-3-thread-safety-체크리스트">7.3 thread-safety 체크리스트</a></li><li class="l2"><a href="#8-clone-프로세스와-스레드는-플래그-차이일-뿐">8. clone() — 프로세스와 스레드는 플래그 차이일 뿐</a></li><li class="l3"><a href="#8-1-strace로-본-pthread_create">8.1 strace로 본 pthread_create</a></li><li class="l3"><a href="#8-2-task_struct-관계도">8.2 task_struct 관계도</a></li><li class="l2"><a href="#9-유저-공간에서-보이는-스케줄링">9. 유저 공간에서 보이는 스케줄링</a></li><li class="l3"><a href="#9-1-정책과-우선순위-한눈에">9.1 정책과 우선순위 한눈에</a></li><li class="l3"><a href="#9-2-예제-12-nice가-cpu-몫을-바꾸는-정도-그리고-sched_fifo의-권한">9.2 예제 12 — nice가 CPU 몫을 바꾸는 정도, 그리고 SCHED_FIFO의 권한</a></li><li class="l3"><a href="#9-3-예제-9-cpu-affinity로-한-코어에-묶기">9.3 예제 9 — CPU affinity로 한 코어에 묶기</a></li><li class="l3"><a href="#9-4-예제-11-voluntary-vs-nonvoluntary-context-switch">9.4 예제 11 — voluntary vs nonvoluntary context switch</a></li><li class="l2"><a href="#10-생성-비용-측정-fork-vs-vfork-vs-posix_spawn-vs-pthread_create">10. 생성 비용 측정 — fork vs vfork vs posix_spawn vs pthread_create</a></li><li class="l3"><a href="#10-1-예제-10-부모-크기를-바꿔-가며-2000번-생성-회수">10.1 예제 10 — 부모 크기를 바꿔 가며 2000번 생성+회수</a></li><li class="l3"><a href="#10-2-해석">10.2 해석</a></li><li class="l2"><a href="#11-데몬-프로세스-그룹-세션">11. 데몬, 프로세스 그룹, 세션</a></li><li class="l3"><a href="#11-1-용어-세-개">11.1 용어 세 개</a></li><li class="l3"><a href="#11-2-고전적인-daemonize-double-fork-setsid">11.2 고전적인 daemonize (double fork + setsid)</a></li><li class="l3"><a href="#11-3-예제-13-daemonize-후-pgid-sid-tty-확인">11.3 예제 13 — daemonize 후 PGID·SID·TTY 확인</a></li><li class="l3"><a href="#11-4-요즘-방식-systemd에-맡긴다">11.4 요즘 방식 — systemd에 맡긴다</a></li><li class="l2"><a href="#12-커널-안에서는-무슨-일이-일어나나">12. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l3"><a href="#12-1-syscall에서-커널-함수까지">12.1 syscall에서 커널 함수까지</a></li><li class="l3"><a href="#12-2-드라이버를-쓸-때-다시-만나는-지점">12.2 드라이버를 쓸 때 다시 만나는 지점</a></li><li class="l2"><a href="#13-embedded-실무에서-다시-보기">13. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#13-1-센서-키트-프로세스-구조-정하기">13.1 센서 키트 프로세스 구조 정하기</a></li><li class="l3"><a href="#13-2-예제-14-작은-슈퍼바이저-크래시하면-재시작">13.2 예제 14 — 작은 슈퍼바이저: 크래시하면 재시작</a></li><li class="l3"><a href="#13-3-kill이-안-되는-프로세스-현장-디버깅">13.3 "kill이 안 되는 프로세스" 현장 디버깅</a></li><li class="l3"><a href="#13-4-스레드-이름은-디버깅의-반이다">13.4 스레드 이름은 디버깅의 반이다</a></li><li class="l2"><a href="#14-흔한-실수와-증상">14. 흔한 실수와 증상</a></li><li class="l2"><a href="#15-면접에서-이렇게-말한다">15. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#16-직접-해보기">16. 직접 해보기</a></li><li class="l2"><a href="#17-용어-사전">17. 용어 사전</a></li><li class="l2"><a href="#18-요약-체크리스트">18. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

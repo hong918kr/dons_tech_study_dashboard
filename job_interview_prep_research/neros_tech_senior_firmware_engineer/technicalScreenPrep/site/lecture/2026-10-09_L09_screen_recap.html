@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>L09 · 10-08 technical screen 재구성 — C ring buffer · extract_packet, 그리고 온사이트 방향</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="lecture/2026-10-09_L09_screen_recap">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">특별강의 · L09 · 10-08 technical screen 재구성 — C ring buffer · extract_packet, 그리고 온사이트 방향</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">특별강의 · Special Lecture</div>
+      <h1>🧾 L09 · 10-08 technical screen 재구성 — C ring buffer · extract_packet, 그리고 온사이트 방향</h1>
+      <div class="meta"><span>32분 읽기</span><span>515줄</span><span>18개 절</span></div>
+    </div>
+    <blockquote><p>2026-10-08, Jon Kotowski와 1시간. 시작하자마자 <strong>"Python or C?"</strong> → Don이 <strong>C</strong> 선택. <strong>Task 1</strong>은 외부 버퍼를 받는 byte ring buffer(struct부터 직접), <strong>Task 2(보너스)</strong>는 <code>CRC.c</code> 라이브러리를 쓰는 <code>extract_packet</code> 함수 하나였다. 행동 질문 없이 코딩만 — <a href="2026-10-05_L06_screen_scenarios.html">L06</a>의 예상(시나리오 A + D)과 맞았다. 이 페이지는 <strong>Don이 기억한 API 그대로</strong> 문제를 다시 세우고, 참고 풀이와 테스트를 실제로 돌려 검증한 것이다 (<code>make -C lecture/recap test</code>, <code>-Wall -Wextra -Werror</code> + ASan/UBSan). 기억에 없는 세부(패킷 형식, CRC 종류, peek 반환 방식)는 <strong>[추정]</strong>이다. 마지막 절이 <strong>온사이트 준비 방향</strong>.</p></blockquote>
+<h2 id="0-한눈에">0. 한눈에<a class="anchor" href="#0-한눈에" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>항목</th><th>내용</th></tr></thead><tbody><tr><td>형식</td><td>1시간 · 코딩만 · 언어 선택 (Don: C)</td></tr><tr><td>Task 1</td><td>ring buffer: <code>size_t count, head, tail</code> · <code>uint8_t *storage</code> · <code>capacity</code>, <code>rb_init(rb, rb_buf, uint8_t capacity)</code>, is_empty / is_full, push_byte / pop_byte, <strong>bulk <code>rb_push</code> / <code>rb_pop</code>은 all-or-nothing</strong>, <code>rb_peek(rb, uint8_t offset, …)</code></td></tr><tr><td>Task 2 (보너스)</td><td><code>extract_packet</code> 하나 구현, <code>CRC.c</code> 제공 (<strong>테이블 방식</strong> → <a href="2026-10-09_L10_crc_table.html">L10</a>)</td></tr><tr><td>들은 정보</td><td><strong>FW 엔지니어 17명 · Test 엔지니어 3명 · + full stack(embedded를 테스트할 수 있는)</strong> — 10-01 Michael 때는 FW 15 · Test 2</td></tr><tr><td>Don 자평</td><td>잘 풀었다 → 온사이트 가능성 높음 [추정]</td></tr><tr><td>이 페이지에서 새로 찾은 것</td><td>Task 2 재구성 중 <strong>가짜 sync + 큰 LEN → 영원히 "need more"(데드락)</strong> 엣지 — 테스트로 재현 · 수정 (5.4절)</td></tr></tbody></table></div>
+<hr>
+<h2 id="1-task-1-문제-재구성-don-기억-기준">1. Task 1 · 문제 재구성 (Don 기억 기준)<a class="anchor" href="#1-task-1-문제-재구성-don-기억-기준" aria-label="link">#</a></h2>
+<blockquote><p>"Implement a byte ring buffer in C. The caller provides the storage. Define the struct yourself."</p></blockquote>
+<div class="tw"><table><thead><tr><th>함수</th><th>동작 (Don 기억)</th><th>재구성에서 정한 세부 [추정]</th></tr></thead><tbody><tr><td><code>rb_init(rb_t *rb, uint8_t *rb_buf, uint8_t capacity)</code></td><td>밖에서 받은 버퍼로 초기화</td><td>head = tail = count = 0</td></tr><tr><td><code>rb_is_empty</code> / <code>rb_is_full</code></td><td></td><td><code>count == 0</code> / <code>count == capacity</code></td></tr><tr><td><code>rb_push_byte(rb, uint8_t byte)</code> / <code>rb_pop_byte(rb, uint8_t *out)</code></td><td>한 바이트</td><td>가득 / 비면 false (pop 결과는 <code>*out</code>으로)</td></tr><tr><td><code>rb_push(rb, items, len)</code></td><td>남은 자리 &lt; len이면 <strong>false</strong></td><td><strong>아무것도 안 넣는다</strong> (부분 쓰기 없음)</td></tr><tr><td><code>rb_pop(rb, items, len)</code></td><td>들어 있는 것 &lt; len이면 <strong>false</strong></td><td><strong>아무것도 안 뺀다</strong></td></tr><tr><td><code>rb_peek(rb, uint8_t offset, …)</code></td><td>tail에서 offset번째 보기</td><td><code>bool rb_peek(const rb_t*, uint8_t offset, uint8_t *out)</code> — 범위 밖이면 false, 소비 안 함 [확인됨 Don: 출력 인자 이름 <code>*out</code>]</td></tr></tbody></table></div>
+<ul><li>면접관이 "외부 버퍼 + <code>uint8_t capacity</code>"로 준 의미 [추정]: 펌웨어 스타일(정적 버퍼, malloc 없음)을 아는지, 그리고 <strong>용량이 2의 거듭제곱이 아닐 수 있다</strong> → 마스크 대신 <code>%</code>가 필요</li><li><code>rb_peek(offset)</code>이 들어 있는 이유 [추정]: Task 2에서 <strong>헤더와 CRC를 꺼내지 않고 들여다보려고</strong> — 두 문제가 이어져 있었다</li></ul>
+<h2 id="2-task-1-참고-풀이">2. Task 1 · 참고 풀이<a class="anchor" href="#2-task-1-참고-풀이" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">c</span><pre><code>typedef struct {
+    uint8_t *storage;      /* 호출자가 준 버퍼 (정적 배열 등) — rb 는 소유하지 않는다 */
+    size_t   capacity;
+    size_t   head;         /* 다음에 쓸 칸 */
+    size_t   tail;         /* 다음에 읽을 칸 */
+    size_t   count;        /* 들어 있는 바이트 수 → full/empty 구분 */
+} rb_t;
+
+void rb_init(rb_t *rb, uint8_t *rb_buf, uint8_t capacity);
+bool rb_is_empty(const rb_t *rb);
+bool rb_is_full(const rb_t *rb);
+bool rb_push_byte(rb_t *rb, uint8_t byte);
+bool rb_pop_byte(rb_t *rb, uint8_t *out);
+bool rb_push(rb_t *rb, const uint8_t *items, size_t len);   /* 전부 들어갈 자리 없으면 false, 아무것도 안 넣음 */
+bool rb_pop(rb_t *rb, uint8_t *items, size_t len);          /* len 개 미만이면 false, 아무것도 안 뺌 */
+bool rb_peek(const rb_t *rb, uint8_t offset, uint8_t *out);  /* tail 에서 offset 번째를 꺼내지 않고 보기 */</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>void rb_init(rb_t *rb, uint8_t *rb_buf, uint8_t capacity)
+{
+    rb-&gt;storage = rb_buf;
+    rb-&gt;capacity = capacity;
+    rb-&gt;head = rb-&gt;tail = rb-&gt;count = 0;
+}
+
+bool rb_is_empty(const rb_t *rb) { return rb-&gt;count == 0; }
+bool rb_is_full(const rb_t *rb)  { return rb-&gt;count == rb-&gt;capacity; }
+
+bool rb_push_byte(rb_t *rb, uint8_t byte)
+{
+    if (rb_is_full(rb))
+        return false;
+    rb-&gt;storage[rb-&gt;head] = byte;
+    rb-&gt;head = (rb-&gt;head + 1) % rb-&gt;capacity;
+    rb-&gt;count++;
+    return true;
+}
+
+bool rb_pop_byte(rb_t *rb, uint8_t *out)
+{
+    if (rb_is_empty(rb))
+        return false;
+    *out = rb-&gt;storage[rb-&gt;tail];
+    rb-&gt;tail = (rb-&gt;tail + 1) % rb-&gt;capacity;
+    rb-&gt;count--;
+    return true;
+}
+
+bool rb_push(rb_t *rb, const uint8_t *items, size_t len)
+{
+    if (len &gt; rb-&gt;capacity - rb-&gt;count)          /* 남은 자리 &lt; len → 전부 거절 (부분 쓰기 없음) */
+        return false;
+    for (size_t i = 0; i &lt; len; i++)
+        rb_push_byte(rb, items[i]);
+    return true;
+}
+
+bool rb_pop(rb_t *rb, uint8_t *items, size_t len)
+{
+    if (len &gt; rb-&gt;count)                         /* 들어 있는 것 &lt; len → 전부 거절 */
+        return false;
+    for (size_t i = 0; i &lt; len; i++)
+        rb_pop_byte(rb, &amp;items[i]);
+    return true;
+}
+
+bool rb_peek(const rb_t *rb, uint8_t offset, uint8_t *out)
+{
+    if (offset &gt;= rb-&gt;count)
+        return false;
+    *out = rb-&gt;storage[(rb-&gt;tail + offset) % rb-&gt;capacity];
+    return true;
+}</code></pre></figure>
+<div class="tw"><table><thead><tr><th>결정</th><th>이유 (면접에서 말할 것)</th></tr></thead><tbody><tr><td><code>count</code>로 full/empty 구분</td><td>head == tail이 빈 것인지 가득 찬 것인지 모호함을 없앤다. 용량 전부 사용</td></tr><tr><td><code>% capacity</code></td><td>용량이 임의 값(uint8_t)이라 <code>&amp; (N-1)</code> 마스크를 못 쓴다</td></tr><tr><td>bulk는 먼저 <strong>검사 후</strong> 실행</td><td>all-or-nothing — 실패하면 상태가 그대로 (호출자가 재시도하기 쉬움, 프레임이 반쪽으로 안 들어감)</td></tr><tr><td>bulk를 <code>push_byte</code> 반복으로</td><td>가장 단순하고 맞추기 쉽다. 성능이 필요하면 wrap 지점에서 <code>memcpy</code> 두 번 (4절)</td></tr><tr><td>peek은 <code>const rb_t*</code></td><td>보기만 한다는 것을 타입으로 약속</td></tr><tr><td>NULL 검사 생략</td><td>이 재구성에선 생략. 실무 API라면 <code>rb</code>, <code>items</code>, <code>byte</code> NULL 검사 또는 assert — 면접에서 "I'd add NULL checks / asserts at the API boundary"라고 말하면 충분</td></tr></tbody></table></div>
+<h2 id="3-task-1-테스트-면접에서-how-would-you-test-it-에-그대로">3. Task 1 · 테스트 (면접에서 "how would you test it?"에 그대로)<a class="anchor" href="#3-task-1-테스트-면접에서-how-would-you-test-it-에-그대로" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">c</span><pre><code>static void test_init_empty(void)
+{
+    uint8_t buf[4];
+    rb_t rb;
+    rb_init(&amp;rb, buf, sizeof buf);
+    uint8_t b;
+    assert(rb_is_empty(&amp;rb) &amp;&amp; !rb_is_full(&amp;rb));
+    assert(!rb_pop_byte(&amp;rb, &amp;b) &amp;&amp; !rb_peek(&amp;rb, 0, &amp;b));
+}
+
+static void test_fifo_and_full(void)
+{
+    uint8_t buf[3], b;
+    rb_t rb;
+    rb_init(&amp;rb, buf, sizeof buf);
+    assert(rb_push_byte(&amp;rb, 1) &amp;&amp; rb_push_byte(&amp;rb, 2) &amp;&amp; rb_push_byte(&amp;rb, 3));
+    assert(rb_is_full(&amp;rb) &amp;&amp; !rb_push_byte(&amp;rb, 4));          /* 용량 전부 사용, 넘치면 거절 */
+    assert(rb_pop_byte(&amp;rb, &amp;b) &amp;&amp; b == 1);
+}
+
+static void test_wraparound(void)
+{
+    uint8_t buf[3], b;
+    rb_t rb;
+    rb_init(&amp;rb, buf, sizeof buf);
+    for (uint8_t i = 0; i &lt; 20; i++) {                          /* 여러 바퀴 */
+        assert(rb_push_byte(&amp;rb, i));
+        assert(rb_pop_byte(&amp;rb, &amp;b) &amp;&amp; b == i);
+    }
+    assert(rb_is_empty(&amp;rb));
+}
+
+static void test_bulk_all_or_nothing(void)
+{
+    uint8_t buf[5], out[5];
+    rb_t rb;
+    rb_init(&amp;rb, buf, sizeof buf);
+    const uint8_t a[] = {1, 2, 3}, big[] = {9, 9, 9};
+    assert(rb_push(&amp;rb, a, 3));
+    assert(!rb_push(&amp;rb, big, 3) &amp;&amp; rb.count == 3);             /* 자리 2개 &lt; 3 → 아무것도 안 넣음 */
+    assert(!rb_pop(&amp;rb, out, 4) &amp;&amp; rb.count == 3);              /* 3개 &lt; 4 → 아무것도 안 뺌 */
+    assert(rb_pop(&amp;rb, out, 3) &amp;&amp; memcmp(out, a, 3) == 0);
+    assert(rb_push(&amp;rb, a, 0) &amp;&amp; rb_pop(&amp;rb, out, 0));          /* len 0 은 성공, 변화 없음 */
+}
+
+static void test_peek_offset(void)
+{
+    uint8_t buf[4], b;
+    rb_t rb;
+    rb_init(&amp;rb, buf, sizeof buf);
+    const uint8_t a[] = {10, 20, 30};
+    rb_push(&amp;rb, a, 3);
+    rb_pop_byte(&amp;rb, &amp;b);
+    rb_push_byte(&amp;rb, 40);
+    rb_push_byte(&amp;rb, 50);                                      /* wrap 된 상태: 20 30 40 50 */
+    assert(rb_peek(&amp;rb, 0, &amp;b) &amp;&amp; b == 20);
+    assert(rb_peek(&amp;rb, 3, &amp;b) &amp;&amp; b == 50);
+    assert(!rb_peek(&amp;rb, 4, &amp;b) &amp;&amp; rb.count == 4);              /* 범위 밖, 소비 안 함 */
+}
+
+int main(void)
+{
+    test_init_empty();
+    test_fifo_and_full();
+    test_wraparound();
+    test_bulk_all_or_nothing();
+    test_peek_offset();
+    puts("test_rb: PASS");
+    return 0;
+}</code></pre></figure>
+<p>실행 결과:</p>
+<figure class="code"><span class="lang">text</span><pre><code>test_rb: PASS
+test_packet: PASS</code></pre></figure>
+<div class="tw"><table><thead><tr><th>테스트</th><th>잡는 버그</th></tr></thead><tbody><tr><td><code>test_init_empty</code></td><td>초기 상태, 빈 상태에서 pop · peek</td></tr><tr><td><code>test_fifo_and_full</code></td><td>용량 전부 사용, 넘침 거절 (한 칸 비우기 off-by-one)</td></tr><tr><td><code>test_wraparound</code></td><td><code>%</code> 빠뜨림 → 배열 밖 접근 (ASan이 잡는다)</td></tr><tr><td><code>test_bulk_all_or_nothing</code></td><td>부분 쓰기 / 부분 읽기 버그, len 0</td></tr><tr><td><code>test_peek_offset</code></td><td>wrap 된 상태에서 offset 계산, 범위 밖 offset</td></tr></tbody></table></div>
+<h2 id="4-task-1-꼬리-질문과-온사이트에서-나올-확장">4. Task 1 · 꼬리 질문과 온사이트에서 나올 확장<a class="anchor" href="#4-task-1-꼬리-질문과-온사이트에서-나올-확장" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>질문</th><th>답의 핵심</th></tr></thead><tbody><tr><td>"The producer is a UART ISR, consumer is main. Is this safe?"</td><td><strong>아니다</strong> — push와 pop이 둘 다 <code>count</code>를 고친다 (read-modify-write 경쟁). 해결: ① 짧은 critical section(인터럽트 끄기), ② count를 없애고 <strong>free-running head/tail</strong> (head는 ISR만, tail은 main만 쓰기 = SPSC) + C11 atomics acquire/release (<a href="2026-10-04_L05_warmup.html">L05 C 06</a>, <a href="../../../onsitePrep/site/notes/2026-10-01_N05_ring_buffer_onsite.html">onsitePrep N05</a>)</td></tr><tr><td>"Make bulk push faster."</td><td>wrap 지점까지 <code>memcpy</code> 한 번 + 나머지 앞에서 한 번 (<a href="2026-10-04_L03_embedded_c_basics.html">L03 10절</a>)</td></tr><tr><td>"Why <code>uint8_t capacity</code>? What breaks?"</td><td>최대 255 바이트. <code>rb_peek</code>의 <code>uint8_t offset</code>도 같은 한계. 큰 버퍼면 <code>size_t</code>로 — API 타입이 섞이면 경고 · 버그의 원인</td></tr><tr><td>"Return how many were written instead of false?"</td><td>부분 쓰기 버전: <code>size_t rb_write(rb, items, len)</code> → 쓴 개수 반환 (UART 스트림엔 이쪽이 자연스럽다). 프레임 단위면 all-or-nothing이 맞다 — <strong>정책 선택</strong>을 말로</td></tr><tr><td>"Overwrite oldest when full?"</td><td>tail을 한 칸 밀고 <code>dropped++</code> — 로그 · 텔레메트리용. 명령 큐엔 쓰지 않는다</td></tr><tr><td>"Feed it from DMA?"</td><td>circular DMA + NDTR로 head 계산, half/full/idle 인터럽트, 캐시 invalidate (<a href="../../../onsitePrep/site/code/dma_circular_rx.c.html">onsitePrep dma_circular_rx.c</a>)</td></tr><tr><td>"How do you test the ISR version?"</td><td>host: 두 스레드로 수백만 개 시퀀스 번호 + ThreadSanitizer. 타깃: 최대 baud 카운터 패턴 + 플래시 쓰기 부하, drop 카운터 0</td></tr></tbody></table></div>
+<hr>
+<h2 id="5-task-2-extract_packet-보너스-재구성">5. Task 2 · <code>extract_packet</code> (보너스) 재구성<a class="anchor" href="#5-task-2-extract_packet-보너스-재구성" aria-label="link">#</a></h2>
+<blockquote><p>"Implement <code>extract_packet</code>. A CRC library (<code>CRC.c</code>) is provided." — 함수 하나. 패킷 형식 · CRC 종류 · 시그니처는 기억에 없음 → 아래는 <strong>가장 전형적인 형태로 [추정]</strong>한 것.</p></blockquote>
+<h3 id="5-1-가정한-형식과-시그니처">5.1 가정한 형식과 시그니처<a class="anchor" href="#5-1-가정한-형식과-시그니처" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>SYNC (0xAA) | LEN (1 byte) | PAYLOAD (LEN bytes) | CRC8 (over LEN + PAYLOAD)</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>#define PKT_SYNC       0xAAu
+#define PKT_NEED_MORE  (-1)   /* 아직 완전한 패킷이 없다 (앞쪽 쓰레기만 버렸을 수 있음) */
+#define PKT_TOO_BIG    (-2)   /* 패킷은 맞지만 out 버퍼가 작다 → 그 패킷은 버림 */
+
+/* 성공: payload 길이(0..255)를 돌려주고 그 프레임을 rb 에서 제거, payload 를 out 에 복사 */
+int extract_packet(rb_t *rb, uint8_t *out, size_t out_cap);</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>#include "crc.h"
+
+uint8_t crc8(const uint8_t *data, size_t len)    /* CRC-8/SMBUS: poly 0x07, init 0 — check("123456789") = 0xF4 */
+{
+    uint8_t crc = 0;
+    while (len--) {
+        crc ^= *data++;
+        for (int i = 0; i &lt; 8; i++)
+            crc = (crc &amp; 0x80) ? (uint8_t)((crc &lt;&lt; 1) ^ 0x07) : (uint8_t)(crc &lt;&lt; 1);
+    }
+    return crc;
+}</code></pre></figure>
+<blockquote><p>실제 면접의 <code>CRC.c</code>는 <strong>테이블(lookup table) 방식</strong>이었다 [확인됨 Don]. 위는 같은 결과를 내는 비트 방식이다. 테이블 방식이 어떻게 만들어지고 왜 같은 값이 나오는지는 <strong><a href="2026-10-09_L10_crc_table.html">L10 CRC 테이블 방식</a></strong> — <code>extract_packet</code> 입장에서는 <code>crc8(data, len)</code> 호출만 같으면 내부 구현은 상관없다.</p></blockquote>
+<h3 id="5-2-알고리즘-왜-rb_peek-offset-이-필요했나">5.2 알고리즘 — 왜 <code>rb_peek(offset)</code>이 필요했나<a class="anchor" href="#5-2-알고리즘-왜-rb_peek-offset-이-필요했나" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>단계</th><th>할 일</th><th>쓰는 함수</th></tr></thead><tbody><tr><td>1</td><td>앞쪽 쓰레기를 SYNC가 나올 때까지 버린다</td><td><code>rb_peek(0)</code> · <code>rb_pop_byte</code></td></tr><tr><td>2</td><td>LEN을 <strong>꺼내지 않고</strong> 본다. 없으면 "need more"</td><td><code>rb_peek(1)</code></td></tr><tr><td>3</td><td>프레임 전체(LEN + 3)가 다 왔는지 count로 확인. 아직이면 <strong>아무것도 버리지 않고</strong> "need more"</td><td><code>rb-&gt;count</code></td></tr><tr><td>4</td><td>LEN + PAYLOAD를 peek으로 복사해 CRC 계산, 받은 CRC와 비교</td><td><code>rb_peek(1..LEN+2)</code> · <code>crc8</code></td></tr><tr><td>5</td><td>CRC가 틀리면 <strong>SYNC 한 바이트만</strong> 버리고 1로 (그 뒤에 진짜 프레임이 있을 수 있다)</td><td><code>rb_pop_byte</code></td></tr><tr><td>6</td><td>맞으면 프레임을 pop해서 payload를 out에 복사, 길이 반환</td><td><code>rb_pop</code></td></tr></tbody></table></div>
+<ul><li>핵심: <strong>확인이 끝나기 전에는 꺼내지 않는다(peek)</strong> → 프레임이 반만 왔을 때 데이터를 잃지 않는다. 그래서 Task 1에 <code>rb_peek(offset)</code>이 있었다고 보는 게 자연스럽다</li></ul>
+<h3 id="5-3-참고-풀이">5.3 참고 풀이<a class="anchor" href="#5-3-참고-풀이" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>int extract_packet(rb_t *rb, uint8_t *out, size_t out_cap)
+{
+    uint8_t b, len, crc_rx;
+    uint8_t body[1 + 255];                         /* LEN + PAYLOAD (CRC 계산용) */
+
+    for (;;) {
+        /* 1) sync 찾기: 앞쪽 쓰레기 버리기 */
+        while (rb_peek(rb, 0, &amp;b) &amp;&amp; b != PKT_SYNC)
+            rb_pop_byte(rb, &amp;b);
+        /* 2) 헤더(SYNC + LEN)가 다 왔나 */
+        if (!rb_peek(rb, 1, &amp;len))
+            return PKT_NEED_MORE;
+        /* 3) 프레임 전체(SYNC + LEN + PAYLOAD + CRC)가 다 왔나 — peek 만, 아직 안 뺌 */
+        size_t frame = (size_t)len + 3;
+        if (frame &gt; rb-&gt;capacity) {                /* 버퍼에 절대 다 못 들어오는 길이 = 가짜 sync */
+            rb_pop_byte(rb, &amp;b);                   /*  → 안 버리면 영원히 NEED_MORE (데드락) */
+            continue;
+        }
+        if (rb-&gt;count &lt; frame)
+            return PKT_NEED_MORE;
+        /* 4) CRC 확인: LEN 과 PAYLOAD 를 peek 으로 복사 */
+        for (size_t i = 0; i &lt;= len; i++)
+            rb_peek(rb, (uint8_t)(1 + i), &amp;body[i]);
+        rb_peek(rb, (uint8_t)(len + 2), &amp;crc_rx);
+        if (crc8(body, (size_t)len + 1) != crc_rx) {
+            rb_pop_byte(rb, &amp;b);                   /* 가짜 sync 일 수 있다 → sync 한 바이트만 버리고 다시 찾기 */
+            continue;
+        }
+        /* 5) 정상 프레임: rb 에서 제거하고 payload 복사 */
+        if (len &gt; out_cap) {
+            for (size_t i = 0; i &lt; frame; i++)
+                rb_pop_byte(rb, &amp;b);
+            return PKT_TOO_BIG;
+        }
+        rb_pop_byte(rb, &amp;b);                       /* SYNC */
+        rb_pop_byte(rb, &amp;b);                       /* LEN */
+        rb_pop(rb, out, len);                      /* PAYLOAD */
+        rb_pop_byte(rb, &amp;b);                       /* CRC */
+        return len;
+    }
+}</code></pre></figure>
+<h3 id="5-4-테스트-그리고-재구성-중-찾은-버그">5.4 테스트 — 그리고 재구성 중 찾은 버그<a class="anchor" href="#5-4-테스트-그리고-재구성-중-찾은-버그" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static uint8_t store[64];
+static rb_t rb;
+static uint8_t out[16];
+
+static void reset(void) { rb_init(&amp;rb, store, sizeof store); }
+
+static void test_crc_known_vector(void)
+{
+    assert(crc8((const uint8_t *)"123456789", 9) == 0xF4);      /* 라이브러리부터 검증 */
+}
+
+static void test_one_packet(void)
+{
+    uint8_t f[16];
+    const uint8_t p[] = {1, 2, 3};
+    reset();
+    rb_push(&amp;rb, f, frame(f, p, 3));
+    assert(extract_packet(&amp;rb, out, sizeof out) == 3 &amp;&amp; memcmp(out, p, 3) == 0);
+    assert(rb_is_empty(&amp;rb));
+}
+
+static void test_split_arrival(void)
+{
+    uint8_t f[16];
+    const uint8_t p[] = {7, 8};
+    size_t n = frame(f, p, 2);
+    reset();
+    rb_push(&amp;rb, f, 3);                                         /* 반만 도착 */
+    assert(extract_packet(&amp;rb, out, sizeof out) == PKT_NEED_MORE &amp;&amp; rb.count == 3);   /* 버리지 않고 기다림 */
+    rb_push(&amp;rb, f + 3, n - 3);
+    assert(extract_packet(&amp;rb, out, sizeof out) == 2 &amp;&amp; out[1] == 8);
+}
+
+static void test_garbage_then_packet(void)
+{
+    uint8_t f[16];
+    const uint8_t junk[] = {0x00, 0x13, 0x37}, p[] = {5};
+    reset();
+    rb_push(&amp;rb, junk, 3);
+    rb_push(&amp;rb, f, frame(f, p, 1));
+    assert(extract_packet(&amp;rb, out, sizeof out) == 1 &amp;&amp; out[0] == 5);
+}
+
+static void test_bad_crc_skipped_next_found(void)
+{
+    uint8_t f[16], g[16];
+    const uint8_t p[] = {1, 2}, q[] = {9};
+    size_t n = frame(f, p, 2);
+    f[n - 1] ^= 0xFF;                                           /* CRC 깨뜨리기 */
+    reset();
+    rb_push(&amp;rb, f, n);
+    rb_push(&amp;rb, g, frame(g, q, 1));
+    assert(extract_packet(&amp;rb, out, sizeof out) == 1 &amp;&amp; out[0] == 9);
+}
+
+static void test_two_packets_back_to_back_and_empty_payload(void)
+{
+    uint8_t f[16], g[16];
+    const uint8_t p[] = {4};
+    reset();
+    rb_push(&amp;rb, f, frame(f, p, 1));
+    rb_push(&amp;rb, g, frame(g, p, 0));                            /* 길이 0 payload */
+    assert(extract_packet(&amp;rb, out, sizeof out) == 1);
+    assert(extract_packet(&amp;rb, out, sizeof out) == 0);
+    assert(extract_packet(&amp;rb, out, sizeof out) == PKT_NEED_MORE);
+}
+
+static void test_out_buffer_too_small(void)
+{
+    uint8_t f[16];
+    const uint8_t p[] = {1, 2, 3, 4};
+    reset();
+    rb_push(&amp;rb, f, frame(f, p, 4));
+    assert(extract_packet(&amp;rb, out, 2) == PKT_TOO_BIG &amp;&amp; rb_is_empty(&amp;rb));   /* 버리고 다음으로 */
+}
+
+static void test_fake_sync_with_impossible_length(void)
+{
+    uint8_t small[8], f[8];
+    const uint8_t fake[] = {PKT_SYNC, 200}, p[] = {6};          /* 버퍼(8)에 절대 못 들어올 길이 */
+    rb_init(&amp;rb, small, sizeof small);
+    rb_push(&amp;rb, fake, 2);
+    rb_push(&amp;rb, f, frame(f, p, 1));
+    assert(extract_packet(&amp;rb, out, sizeof out) == 1 &amp;&amp; out[0] == 6);     /* 데드락 없이 회복 */
+}
+
+int main(void)
+{
+    test_crc_known_vector();
+    test_one_packet();
+    test_split_arrival();
+    test_garbage_then_packet();
+    test_bad_crc_skipped_next_found();
+    test_two_packets_back_to_back_and_empty_payload();
+    test_out_buffer_too_small();
+    test_fake_sync_with_impossible_length();
+    puts("test_packet: PASS");
+    return 0;
+}</code></pre></figure>
+<div class="tw"><table><thead><tr><th>테스트</th><th>시나리오</th></tr></thead><tbody><tr><td><code>test_crc_known_vector</code></td><td>주어진 라이브러리부터 표준 값으로 검증</td></tr><tr><td><code>test_one_packet</code></td><td>정상 1개</td></tr><tr><td><code>test_split_arrival</code></td><td>반만 도착 → need more, <strong>아무것도 안 버림</strong> → 나머지 도착 → 성공</td></tr><tr><td><code>test_garbage_then_packet</code></td><td>앞쪽 쓰레기</td></tr><tr><td><code>test_bad_crc_skipped_next_found</code></td><td>CRC 틀린 프레임 뒤의 정상 프레임</td></tr><tr><td><code>test_two_packets_back_to_back_and_empty_payload</code></td><td>연속 2개 + 길이 0</td></tr><tr><td><code>test_out_buffer_too_small</code></td><td>출력 버퍼가 작으면 TOO_BIG, 프레임은 버리고 다음으로</td></tr><tr><td><code>test_fake_sync_with_impossible_length</code></td><td><strong>데드락 버그</strong> — 아래</td></tr></tbody></table></div>
+<blockquote><p><strong>찾은 버그</strong>: 노이즈로 생긴 가짜 0xAA 뒤에 LEN = 200이 오면, 프레임(203바이트)이 <strong>용량 8짜리 버퍼에는 절대 다 들어올 수 없다</strong>. 처음 버전은 "아직 다 안 왔다"며 영원히 <code>PKT_NEED_MORE</code>를 돌려주고, 버퍼가 차서 진짜 패킷도 못 들어온다 → 링크가 멈춤. 수정: <code>LEN + 3 &gt; capacity</code>면 가짜 sync로 보고 한 바이트 버린다. 수정 전 코드로 이 테스트를 돌리면 assert 실패를 실제로 확인했다.</p>
+<p>면접 · 온사이트에서 쓸 문장: <strong>"I'd also test a false sync followed by an impossible length — a naive parser waits forever and the link stalls."</strong> — 테스트 엔지니어다운 엣지 케이스</p></blockquote>
+<div class="tw"><table><thead><tr><th>꼬리 질문</th><th>답의 핵심</th></tr></thead><tbody><tr><td>"CRC16 instead?"</td><td>프레임 끝 2바이트, 엔디언 확인 (little/big), 라이브러리 함수 시그니처만 바뀐다</td></tr><tr><td>"Byte-by-byte from an ISR?"</td><td>peek 대신 <strong>상태 머신</strong>(WAIT_SYNC → LEN → PAYLOAD → CRC)으로 바이트마다 처리 — 버퍼 재스캔 없음</td></tr><tr><td>"Timeout between bytes?"</td><td>마지막 바이트 이후 N ms 지나면 상태 리셋 (반쪽 프레임에 영원히 매달리지 않게)</td></tr><tr><td>"Escape sequences?"</td><td>SYNC가 payload에 나올 수 있다 → 길이 기반이면 괜찮지만 resync가 늦을 수 있음. 대안: COBS / SLIP</td></tr><tr><td>"How would you test this on the rig?"</td><td>실제 UART로 프레임 + 노이즈 + 비트 오류 주입, 처리량 · CRC 오류 카운터 · resync 시간 측정 (<a href="../design/2026-10-03_S02_radio_link_connectivity.html">S02</a>)</td></tr></tbody></table></div>
+<h2 id="6-회고-don이-채울-칸">6. 회고 — Don이 채울 칸<a class="anchor" href="#6-회고-don이-채울-칸" aria-label="link">#</a></h2>
+<ul><li>실제로 쓴 struct · 함수와 위 재구성의 차이: (Don: …)</li><li>막힌 곳 · 시간이 오래 걸린 곳: (Don: …)</li><li>Task 2를 어디까지 했나 (설계만 / 일부 / 완성): (Don: …)</li><li>테스트를 코드로 보여 줬나 / 말로 했나: (Don: …)</li><li>면접관이 반응한 지점 · 추가로 물은 것: (Don: …)</li><li>다음엔 다르게 할 것: (Don: …)</li></ul>
+<hr>
+<h2 id="7-온사이트-준비-방향">7. 온사이트 준비 방향<a class="anchor" href="#7-온사이트-준비-방향" aria-label="link">#</a></h2>
+<h3 id="7-1-지금-아는-것">7.1 지금 아는 것<a class="anchor" href="#7-1-지금-아는-것" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>사실</th><th>출처</th></tr></thead><tbody><tr><td>온사이트 구성: <strong>Tour 30분 · 내 경력 발표 1시간 · 1:1 여러 개(기본 C/C++, ring buffer 구현, generic system design)</strong></td><td>[확인됨 2026-09-16 리크루터 Devin]</td></tr><tr><td>Senior FW Platform 쪽 HM이 들어올 수도 있다</td><td>[확인됨 Don]</td></tr><tr><td>FW 17명 · Test 3명 · + full stack (embedded 테스트 가능)</td><td>[확인됨 Don 10-08]</td></tr><tr><td>테스트 FW가 가장 급하다 · 연내 최대 5명 · <strong>factory test FW 없음</strong> · STM32 사용</td><td>[확인됨 10-01 Michael]</td></tr><tr><td>스크린은 <strong>C 코딩만</strong> (ring buffer → 패킷 추출)</td><td>[확인됨 Don 10-08]</td></tr></tbody></table></div>
+<blockquote><p>해석 [추정]: 테스트 조직은 <strong>3명 + full stack</strong>의 작은 팀이고, 펌웨어(17명)를 테스트할 <strong>인프라를 세울 사람</strong>을 찾는다. 스크린이 순수 C였다는 건 "<strong>펌웨어를 직접 읽고 쓸 수 있는 테스트 엔지니어</strong>"를 원한다는 신호 — Don의 포지셔닝("FW engineer who builds test infrastructure")과 정확히 맞는다.</p></blockquote>
+<h3 id="7-2-우선순위-준비-시간이-오래-걸리는-것부터">7.2 우선순위 (준비 시간이 오래 걸리는 것부터)<a class="anchor" href="#7-2-우선순위-준비-시간이-오래-걸리는-것부터" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>순위</th><th>무엇</th><th>왜</th><th>자료</th></tr></thead><tbody><tr><td><strong>1</strong></td><td><strong>1시간 경력 발표</strong></td><td>온사이트에서 가장 큰 블록, 준비 시간 최장. <strong>개발 깊이를 보여 줄 유일한 무대</strong> (트랙 교정 전략의 핵심)</td><td><a href="../../../onsitePrep/site/notes/2026-10-01_N03_presentation_1hour.html">onsitePrep N03 발표 가이드</a> · <a href="../../../firmwareTestEngineerPrep/site/notes/2026-09-29_N09_resume_storylines.html">FTE N09 스토리라인</a></td></tr><tr><td><strong>2</strong></td><td><strong>C 심화</strong> — 스크린의 연장</td><td>1:1에 ring buffer가 예고돼 있고, 이미 기본은 보여 줬다 → <strong>ISR-safe(SPSC) · DMA · memcpy 두 조각 · 오버라이트</strong>, 그리고 <strong>바이트 단위 패킷 파서 상태 머신 + CRC 테이블</strong></td><td>4절 · 5절 꼬리 질문 · <a href="../../../onsitePrep/site/notes/2026-10-01_N05_ring_buffer_onsite.html">onsitePrep N05</a> · <a href="../../../onsitePrep/site/notes/2026-10-01_N04_c_cpp_fundamentals.html">N04 C/C++</a> · <a href="2026-10-04_L03_embedded_c_basics.html">L03</a> · <a href="2026-10-04_L04_embedded_cpp_basics.html">L04</a></td></tr><tr><td><strong>3</strong></td><td><strong>system design — 테스트 인프라 쪽으로</strong></td><td>"generic"이라 했지만 면접관이 테스트 조직이면 HIL · factory · CI 결과로 갈 가능성. full stack이 팀에 있으니 <strong>데이터 · 대시보드</strong> 축도</td><td><a href="../notes/2026-10-02_N04_system_design_test_tooling.html">N04</a> · <a href="../design/2026-10-03_S00_overview.html">S00 지도</a> · <a href="../design/2026-10-03_S07_manufacturing_factory_test.html">S07 factory</a> · <a href="../design/2026-10-03_S08_system_integration_release.html">S08 통합</a> · <a href="../design/2026-10-03_S09_scenario_cards.html">S09 카드</a> · <a href="../../../onsitePrep/site/notes/2026-10-01_N06_generic_system_design.html">onsitePrep N06</a></td></tr><tr><td><strong>4</strong></td><td><strong>factory test FW 비전</strong></td><td>Michael이 직접 "없다, 필요하다"고 한 것 = Don이 들어가서 가장 먼저 만들 수 있는 것</td><td><a href="../../../onsitePrep/site/notes/2026-10-01_N08_factory_test_firmware.html">onsitePrep N08</a> · <a href="../design/2026-10-03_S07_manufacturing_factory_test.html">S07</a></td></tr><tr><td>5</td><td>Python · pytest · HIL 하네스</td><td>테스트 팀원(3명 · full stack)이 1:1에 들어오면 나올 수 있다</td><td><a href="2026-10-08_L08_pytest_from_zero.html">L08</a> · <a href="2026-10-04_L00_special_lecture.html">L00</a> · <a href="../problems/04_hil_conftest.html">문제 04 conftest</a></td></tr><tr><td>6</td><td>임베디드 퀴즈 복습</td><td>Michael 스타일(UART/I2C/SPI, PCIe SW 관점, 8b/10b)</td><td><a href="../../../onsitePrep/site/notes/2026-10-01_N07_embedded_quiz_bank.html">onsitePrep N07</a></td></tr><tr><td>7</td><td>사람 · Tour · 역질문</td><td>팀 규모가 작으니 "첫 90일에 무엇을 세우겠나"가 나올 수 있다</td><td><a href="../design/2026-10-03_S09_scenario_cards.html">S09 카드 16</a> · <a href="../../../onsitePrep/site/notes/2026-10-01_N09_interviewers_behavioral.html">onsitePrep N09</a></td></tr></tbody></table></div>
+<h3 id="7-3-발표의-방향-가장-중요">7.3 발표의 방향 (가장 중요)<a class="anchor" href="#7-3-발표의-방향-가장-중요" aria-label="link">#</a></h3>
+<ul><li>줄거리: <strong>"I'm a firmware engineer who builds the test infrastructure around real hardware."</strong></li><li>메인 사례 하나를 <strong>바닥까지</strong> (bring-up → 루트코즈 → 재발 방지 테스트) — Apple factory test-node, SSD production FW의 디버깅, 챔버 테스트 플랫폼 중 선택 (Don: 어느 사례가 가장 깊게 말할 수 있나)</li><li>기술 깊이를 보여 줄 슬라이드: 실제 신호 · 버스 · 펌웨어 코드 수준 (개발자급이라는 증거 → 오퍼 단계 레벨 협상의 근거)</li><li>마지막 슬라이드: <strong>"At Neros: factory test firmware + HIL for 1,000+ drones a week"</strong> — 들은 사실(factory test FW 없음, 테스트 팀 3명)을 연결</li></ul>
+<h3 id="7-4-리크루터에게-물어볼-것-결과-연락이-오면">7.4 리크루터에게 물어볼 것 (결과 연락이 오면)<a class="anchor" href="#7-4-리크루터에게-물어볼-것-결과-연락이-오면" aria-label="link">#</a></h3>
+<ol><li>온사이트 날짜와 길이 · 면접관 명단(역할)</li><li>1시간 발표가 FW Test 트랙에서도 그대로인지, 형식(슬라이드 · 화이트보드 · 노트북)</li><li>1:1 코딩이 화이트보드인지 노트북인지 · 언어 선택이 또 있는지</li><li>(오퍼 단계 전략 그대로) 레벨 · 밴드 이야기는 <strong>아직 꺼내지 않는다</strong> — <a href="../../../neros_tech_senior_firmware_engineer_context.html">컨텍스트 파일 §5 10-03</a></li></ol>
+<h3 id="7-5-날짜가-잡히기-전-이번-주-제안">7.5 날짜가 잡히기 전 — 이번 주 제안<a class="anchor" href="#7-5-날짜가-잡히기-전-이번-주-제안" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>날</th><th>할 것</th></tr></thead><tbody><tr><td>1~2일</td><td>발표 메인 사례 고르기 + 슬라이드 뼈대 20장 (제목 · 한 문장씩)</td></tr><tr><td>3일</td><td>C: ISR-safe SPSC ring + 바이트 상태 머신 패킷 파서를 빈 파일로 (테스트 포함)</td></tr><tr><td>4일</td><td>system design: S09 카드 12 · 14 · 16 + N04 문제 C를 10분 타이머로</td></tr><tr><td>5일</td><td>발표 1차 리허설 (녹음) · 퀴즈 N07 복습</td></tr><tr><td>이후</td><td>날짜가 잡히면 <a href="../../../onsitePrep/index.html">onsitePrep START HERE</a>의 "날짜가 잡히면 — 전체 코스"</td></tr></tbody></table></div>
+<h2 id="체크">체크<a class="anchor" href="#체크" aria-label="link">#</a></h2>
+<ul class="tasks"><li class="task"><label><input type="checkbox" > 6절 회고 칸 채우기 (기억이 생생할 때)</label></li><li class="task"><label><input type="checkbox" > <code>make -C lecture/recap test</code>로 참고 풀이 확인, 내 풀이와 다른 점 메모</label></li><li class="task"><label><input type="checkbox" > 5.4절 데드락 엣지를 내 말로 설명</label></li><li class="task"><label><input type="checkbox" > 7.3절 발표 메인 사례 결정</label></li><li class="task"><label><input type="checkbox" > 리크루터 연락 오면 7.4절 질문 4개</label></li></ul>
+    <div class="nav"><a class="prev" href="2026-10-08_L08_pytest_from_zero.html"><span class="dir">← 이전</span><span class="nm">L08 · pytest 처음부터 — 무엇이 어떤 역할인지 아주 쉽게</span></a><a class="next" href="2026-10-09_L10_crc_table.html"><span class="dir">다음 →</span><span class="nm">L10 · CRC 테이블 방식 — 처음부터 천천히 (스크린의 CRC.c 이해하기)</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-한눈에">0. 한눈에</a></li><li class="l2"><a href="#1-task-1-문제-재구성-don-기억-기준">1. Task 1 · 문제 재구성 (Don 기억 기준)</a></li><li class="l2"><a href="#2-task-1-참고-풀이">2. Task 1 · 참고 풀이</a></li><li class="l2"><a href="#3-task-1-테스트-면접에서-how-would-you-test-it-에-그대로">3. Task 1 · 테스트 (면접에서 "how would you test it?"에 그대로)</a></li><li class="l2"><a href="#4-task-1-꼬리-질문과-온사이트에서-나올-확장">4. Task 1 · 꼬리 질문과 온사이트에서 나올 확장</a></li><li class="l2"><a href="#5-task-2-extract_packet-보너스-재구성">5. Task 2 · extract_packet (보너스) 재구성</a></li><li class="l3"><a href="#5-1-가정한-형식과-시그니처">5.1 가정한 형식과 시그니처</a></li><li class="l3"><a href="#5-2-알고리즘-왜-rb_peek-offset-이-필요했나">5.2 알고리즘 — 왜 rb_peek(offset)이 필요했나</a></li><li class="l3"><a href="#5-3-참고-풀이">5.3 참고 풀이</a></li><li class="l3"><a href="#5-4-테스트-그리고-재구성-중-찾은-버그">5.4 테스트 — 그리고 재구성 중 찾은 버그</a></li><li class="l2"><a href="#6-회고-don이-채울-칸">6. 회고 — Don이 채울 칸</a></li><li class="l2"><a href="#7-온사이트-준비-방향">7. 온사이트 준비 방향</a></li><li class="l3"><a href="#7-1-지금-아는-것">7.1 지금 아는 것</a></li><li class="l3"><a href="#7-2-우선순위-준비-시간이-오래-걸리는-것부터">7.2 우선순위 (준비 시간이 오래 걸리는 것부터)</a></li><li class="l3"><a href="#7-3-발표의-방향-가장-중요">7.3 발표의 방향 (가장 중요)</a></li><li class="l3"><a href="#7-4-리크루터에게-물어볼-것-결과-연락이-오면">7.4 리크루터에게 물어볼 것 (결과 연락이 오면)</a></li><li class="l3"><a href="#7-5-날짜가-잡히기-전-이번-주-제안">7.5 날짜가 잡히기 전 — 이번 주 제안</a></li><li class="l2"><a href="#체크">체크</a></li></ol></aside>
+</div><script>
+const KEY='neros_tsp_notes_read_v1', TKEY='neros_tsp_notes_theme', CKEY='neros_tsp_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

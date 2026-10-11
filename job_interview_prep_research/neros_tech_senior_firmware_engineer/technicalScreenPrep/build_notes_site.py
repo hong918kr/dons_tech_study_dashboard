@@ -29,7 +29,7 @@ OUT = ROOT / "site"
 COLLECTIONS = [
     {"key": "lecture", "dir": ROOT / "lecture",
      "title_ko": "특별강의", "title_en": "Special Lecture",
-     "blurb": "L00 ring buffer · pytest · LeetCode 15 / L01 필수 Python 문법 / L02 임베디드 테스트 프레임워크 10종 / L03 임베디드 C 기본기 / L04 임베디드 C++ 기본기 / L05 매일 몸풀기 / L06 스크린 예상 시나리오. 코드는 전부 실행 검증본.",
+     "blurb": "L00 ring buffer · pytest · LeetCode 15 / L01 필수 Python 문법 / L02 임베디드 테스트 프레임워크 10종 / L03 임베디드 C 기본기 / L04 임베디드 C++ 기본기 / L05 매일 몸풀기 / L06 스크린 예상 시나리오 / L07 마지막 체크업. 코드는 전부 실행 검증본.",
      "src_hint": "lecture"},
     {"key": "plan", "dir": ROOT / "plan",
      "title_ko": "게임 플랜", "title_en": "Game Plan",
@@ -591,6 +591,7 @@ def hub_page(colls, totals):
     <div class="stat"><b>{totals["sections"]}</b><span>절</span></div>
   </div>
   <p class="lead"><a href="start.html"><b>🧭 START HERE — 어디서부터 볼까 (남은 시간별 코스)</b></a></p>
+  <p class="lead" style="font-size:20px"><a href="lecture/2026-10-09_L09_screen_recap.html"><b>🧾 10-08 스크린 재구성 + 온사이트 방향 (L09)</b></a> · <a href="lecture/2026-10-09_L10_crc_table.html"><b>🧮 L10 CRC 테이블 방식</b></a> · <a href="lecture/2026-10-07_L07_final_checkup.html">L07 마지막 체크업</a> · <a href="lecture/2026-10-08_L08_pytest_from_zero.html"><b>🐣 L08 pytest 처음부터</b></a></p>
   <p class="lead"><a href="lecture/2026-10-04_L00_special_lecture.html"><b>🎓 L00 특별강의 — ring buffer · pytest · Python LeetCode 15</b></a> · <a href="lecture/2026-10-04_L01_python_syntax.html"><b>📗 L01 필수 Python 문법</b></a> · <a href="lecture/2026-10-04_L02_embedded_test_frameworks.html"><b>🧰 L02 임베디드 테스트 프레임워크 10종</b></a> · <a href="lecture/2026-10-04_L03_embedded_c_basics.html"><b>🔧 L03 임베디드 C 기본기</b></a> · <a href="lecture/2026-10-04_L04_embedded_cpp_basics.html"><b>⚙️ L04 임베디드 C++ 기본기</b></a> · <a href="lecture/2026-10-04_L05_warmup.html"><b>🔥 L05 매일 몸풀기</b></a> · <a href="lecture/2026-10-05_L06_screen_scenarios.html"><b>🎯 L06 스크린 예상 시나리오</b></a></p>
   <p class="lead"><a href="drills.html"><b>⌨️ 드릴 트레이너 — 매일 Python 10 + C 10 타이핑</b></a> · <a href="design/2026-10-03_S00_overview.html"><b>🏗️ 직군별 테스트 설계 지도</b></a></p>
   <p class="lead"><a href="coding.html"><b>→ Python 문제 7개</b></a> — 문제 · starter · 모범답안 · <code>python3 python/run.py NN</code> 채점 (pytest · mutant)</p>

@@ -2,6 +2,14 @@
 
 > 2026-10-08(목) 11:00, 1시간, **코딩 위주**. 주제는 pytest · ring buffer · Python/C · system design, 면접관은 Full Stack 엔지니어로 추정되는 Jon Kotowski. 자료는 노트 5개 + Python 문제 7개(starter · 모범답안 · `run.py` 채점) + **매일 타이핑 드릴 100개** + **직군별 테스트 설계 10편**이다. **남은 시간에 맞는 코스 하나만** 골라 위에서부터 내려간다.
 
+## 🧾 스크린 끝 (10-08) — 재구성 · 온사이트 방향
+
+> **[L09 스크린 재구성 + 온사이트 준비 방향](lecture/2026-10-09_L09_screen_recap.md)** · **[L10 CRC 테이블 방식](lecture/2026-10-09_L10_crc_table.md)** — C ring buffer(외부 버퍼 · bulk all-or-nothing · peek offset) · 보너스 extract_packet(CRC) 참고 풀이와 테스트, 회고 칸, 온사이트 우선순위. 온사이트 자료: [onsitePrep](../onsitePrep/index.html)
+
+## ✅ (지난) 마지막 체크업 (10-07 밤 2시간 + 10-08 9:00~11:40)
+
+> **[L08 pytest 처음부터 — 아주 쉽게](lecture/2026-10-08_L08_pytest_from_zero.md)** (20분) → **[L07 마지막 체크업](lecture/2026-10-07_L07_final_checkup.md)** — 오늘 밤 · 내일 오전 시간표, ring buffer · pytest · C 치트시트, 말할 문장, 역질문, 체크리스트. ⚠️ 면접 시간 12:00 vs 11:00 (첫 안내) 초대 메일로 확인.
+
 ## 🎓 먼저 — 특별강의 L00 · L01 · L02
 
 | # | 강의 | 내용 |
@@ -12,6 +20,10 @@
 | L03 | [임베디드 C 기본기 — 테스트 엔지니어용 가벼운 복습](lecture/2026-10-04_L03_embedded_c_basics.md) | 고정 폭 타입 · 비트 · 포인터 · 문자열 · memmove · 엔디언 · volatile/static · 패딩 · 매크로 · ring · CRC · tick wrap · ISR · 퀴즈 20 |
 | L04 | [임베디드 C++ 기본기 — 테스트 엔지니어용](lecture/2026-10-04_L04_embedded_cpp_basics.md) | 쓰는 것/끄는 것 · 참조 · enum class/constexpr · RAII · 템플릿 RingBuffer · 인터페이스 DI · 테스트 seam · extern "C" · 함정 · 퀴즈 15 |
 | L05 | [🔥 매일 몸풀기 — Python 8 + C 6](lecture/2026-10-04_L05_warmup.md) | 한 문제 = 구현 + 테스트 + main. Two Sum(dict) 2 · 투 포인터 2 · 이진 탐색 · BST · ring buffer · 괄호 / reverse str · linked list · strcpy · atoi · ring buffer 2종(count · free-running). `new.py` → playground 빈 파일 (계속 추가) |
+| L10 | [🧮 CRC 테이블 방식](lecture/2026-10-09_L10_crc_table.md) | 스크린의 CRC.c — 파라미터 7개 · 비트 방식 → 테이블 생성 → 조회, 한 바이트 손 계산, CRC-8/16/32 · 니블 테이블 · 테스트 |
+| L09 | [🧾 10-08 스크린 재구성 · 온사이트 방향](lecture/2026-10-09_L09_screen_recap.md) | Task 1 C ring buffer · Task 2 extract_packet 참고 풀이 + 테스트 13개, 데드락 엣지, 온사이트 우선순위 |
+| L08 | [🐣 pytest 처음부터](lecture/2026-10-08_L08_pytest_from_zero.md) | 단어 6개(테스트 함수 · assert · raises · parametrize · fixture · Mock) — 예제 + 실제 실행 화면 |
+| L07 | [✅ 마지막 체크업](lecture/2026-10-07_L07_final_checkup.md) | 밤 2시간 + 아침 9:00~11:40 시간표 · 치트시트 · 대사 · 체크리스트 |
 | L06 | [🎯 스크린 예상 시나리오 6개](lecture/2026-10-05_L06_screen_scenarios.md) | A ring buffer→pytest→확장(~40%) · B 텔레메트리 로그 처리 · C 버그 있는 코드에 테스트 · D C로 · E 드라이버+mock · F LeetCode — 1시간 진행표 · 꼬리 질문 사다리 · 모의 문제 2개(실행 검증) |
 
 > **[특별강의: ring buffer · pytest · Python LeetCode 15](lecture/2026-10-04_L00_special_lecture.md)** — Part 1 ring buffer 개념 → Part 2 pytest 개념 → Part 3 LeetCode Tier S(622 · 346 · 359 · 146) → A → B. 코드는 전부 pytest 37개 통과본 (`python3 lecture/build_lecture.py --test`).

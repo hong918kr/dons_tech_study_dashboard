@@ -1,0 +1,1580 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>F4. 동시성과 락 — spinlock · mutex · semaphore · rwlock · atomic · RCU · seqlock · per-CPU</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="F/2026-10-10_F4_locking">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">F. 커널 핵심 메커니즘 · F4. 동시성과 락 — spinlock · mutex · semaphore · rwlock · atomic · RCU · seqlock · per-CPU</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">F. 커널 핵심 메커니즘 · Kernel Mechanisms</div>
+      <h1>F4. 동시성과 락 — spinlock · mutex · semaphore · rwlock · atomic · RCU · seqlock · per-CPU</h1>
+      <div class="meta"><span>179분 읽기</span><span>1994줄</span><span>68개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: 커널 안의 동시성이 어디서 오는지(SMP·선점·hardirq·softirq) 그림으로 설명하고, "이 데이터를 누가 또 만지나"로 <code>spin_lock</code>/<code>_bh</code>/<code>_irq</code>/<code>_irqsave</code>/mutex를 고를 수 있다 · spinlock vs mutex, raw_spinlock vs spinlock(PREEMPT_RT), atomic·refcount·per-CPU의 차이를 실제 측정값으로 말할 수 있다 · RCU의 reader/updater/grace period와 seqlock의 retry를 코드로 짜고 설명할 수 있다 · lockdep 경고(circular dependency, inconsistent lock state, invalid wait context, sleeping in atomic)와 <code>/proc/lock_stat</code>을 직접 읽을 수 있다 <strong>왜 필요한가</strong>: "spinlock과 mutex의 차이는?", "인터럽트 핸들러와 공유하는 데이터는 어떻게 보호하나?", "RCU가 뭔가?"는 Linux 드라이버 면접의 <strong>최빈출 질문</strong>이고, 실무 드라이버 버그(가끔 멈춤, 가끔 값이 틀림, 부팅 때 lockdep 경고)의 절반이 여기서 나온다 <strong>Don 기준 난이도</strong>: ISR과 메인 루프 사이 공유 변수를 IRQ 마스크로 지키는 법, 멀티코어 SSD 펌웨어의 공유 메모리 락, RTOS mutex·semaphore는 이미 안다 / 새로 배울 부분은 "선점·softirq까지 포함한 4가지 동시성 원천", spinlock 변형 고르기, sleep 가능 여부 규칙, RCU·seqlock·per-CPU 같은 Linux 고유 도구, 그리고 lockdep이라는 "일어나지 않은 deadlock까지 잡는" 검사기 <strong>선행 노트</strong>: A8(유저스페이스 동기화 — futex·pthread mutex·C11 atomics), E4 §5·§10(atomic context, <code>int++</code> 레이스) — F2(실행 컨텍스트)·F5(메모리 배리어)·F6(인터럽트)·F7(지연 작업)·M7(커널 디버그 도구)로 이어진다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-커널-안의-동시성은-어디서-오나">0. 큰 그림 — 커널 안의 동시성은 어디서 오나<a class="anchor" href="#0-큰-그림-커널-안의-동시성은-어디서-오나" aria-label="link">#</a></h2>
+<p>A8에서는 유저 프로세스의 스레드끼리 경쟁했다. 거기서는 "스레드를 만들지 않으면 동시성이 없다." 커널 코드는 다르다. 드라이버 함수 하나는 <strong>내가 아무것도 하지 않아도</strong> 네 방향에서 동시에 찔린다.</p>
+<p>Don의 SSD 펌웨어로 비유하면 이렇다. 펌웨어에서는 "메인 루프 ↔ ISR" 두 주체만 신경 쓰면 됐고, 멀티코어 컨트롤러면 "코어 0 ↔ 코어 1" 공유 메모리가 하나 더 있었다. 커널에서는 여기에 <strong>선점(preemption)</strong> 이 붙는다. 같은 CPU에서도 내 함수가 아무 명령 사이에서나 멈추고 다른 태스크가 같은 함수를 실행할 수 있다(RTOS의 preemptive 스케줄러와 같다). 그리고 ISR이 두 층이다. 진짜 하드웨어 인터럽트(<strong>hardirq</strong>)와, hardirq가 끝날 때 이어서 도는 <strong>softirq</strong>(네트워크 수신, 블록 완료, 타이머 콜백 등 "나중에 처리할 일"; F7).</p>
+<figure class="chart"><svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="220" y="150" width="240" height="70" rx="8" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="340" y="178" text-anchor="middle" font-size="13" font-weight="bold">공유 데이터</text>
+  <text x="340" y="200" text-anchor="middle" font-size="12">예: IMU 샘플 FIFO · 통계 카운터</text>
+  <rect x="15" y="20" width="250" height="78" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="140" y="42" text-anchor="middle" font-size="13" font-weight="bold">① SMP — 다른 CPU</text>
+  <text x="140" y="62" text-anchor="middle" font-size="12">같은 read()가 CPU 2개에서 동시에</text>
+  <text x="140" y="84" text-anchor="middle" font-size="12">막는 법: 락 · atomic</text>
+  <rect x="415" y="20" width="250" height="78" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="540" y="42" text-anchor="middle" font-size="13" font-weight="bold">② 선점 — 같은 CPU의 다른 태스크</text>
+  <text x="540" y="62" text-anchor="middle" font-size="12">명령 사이 아무 곳에서 교체</text>
+  <text x="540" y="84" text-anchor="middle" font-size="12">막는 법: preempt_disable</text>
+  <rect x="15" y="272" width="250" height="78" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="140" y="294" text-anchor="middle" font-size="13" font-weight="bold">③ hardirq — 인터럽트 핸들러</text>
+  <text x="140" y="314" text-anchor="middle" font-size="12">내 코드 한가운데 끼어든다</text>
+  <text x="140" y="336" text-anchor="middle" font-size="12">막는 법: local_irq_save</text>
+  <rect x="415" y="272" width="250" height="78" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="540" y="294" text-anchor="middle" font-size="13" font-weight="bold">④ softirq · tasklet · timer</text>
+  <text x="540" y="314" text-anchor="middle" font-size="12">IRQ 끝이나 ksoftirqd에서 실행</text>
+  <text x="540" y="336" text-anchor="middle" font-size="12">막는 법: local_bh_disable</text>
+  <line x1="200" y1="98" x2="260" y2="148" stroke="#4a7bd0" marker-end="url(#ah1)"/>
+  <line x1="480" y1="98" x2="420" y2="148" stroke="#e08a3c" marker-end="url(#ah1)"/>
+  <line x1="200" y1="272" x2="260" y2="222" stroke="#3f9a6b" marker-end="url(#ah1)"/>
+  <line x1="480" y1="272" x2="420" y2="222" stroke="#888" marker-end="url(#ah1)"/>
+  <text x="340" y="250" text-anchor="middle" font-size="12">spin_lock = ①+② 차단</text>
+  <text x="340" y="268" text-anchor="middle" font-size="12">_bh = +④ · _irqsave = +③④</text>
+  <text x="340" y="372" text-anchor="middle" font-size="12">펌웨어: ③만(+멀티코어면 ①) — 커널: 넷 다 기본으로 켜져 있다</text>
+</svg></figure>
+<p>그림 1 — 드라이버의 공유 데이터를 찌르는 네 방향. 각 방향마다 막는 장치가 따로 있고, <code>spin_lock</code>의 변형(<code>_bh</code>, <code>_irq</code>, <code>_irqsave</code>)은 "어느 방향까지 막을지"를 고르는 스위치다(§4).</p>
+<h3 id="0-1-이-노트의-지도">0.1 이 노트의 지도<a class="anchor" href="#0-1-이-노트의-지도" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>도구</th><th>한 줄 정의</th><th>기다리는 방식</th><th>잠들어도 되는 곳에서만?</th><th>절</th></tr></thead><tbody><tr><td><code>spinlock_t</code></td><td>짧은 구간 상호 배제, 선점 꺼짐</td><td>busy-wait (돈다)</td><td>아니다, 어디서나 (IRQ 포함)</td><td>§3, §4</td></tr><tr><td><code>raw_spinlock_t</code></td><td>PREEMPT_RT에서도 진짜로 도는 spinlock</td><td>busy-wait</td><td>아니다</td><td>§4.4</td></tr><tr><td><code>struct mutex</code></td><td>주인(owner) 있는 잠드는 락</td><td>잠깐 돌다가 잠든다</td><td><strong>예</strong> (process context만)</td><td>§5</td></tr><tr><td><code>struct semaphore</code></td><td>개수 세는 잠드는 락 (legacy)</td><td>잠든다</td><td>예</td><td>§6</td></tr><tr><td><code>rwlock_t</code> / <code>rw_semaphore</code></td><td>읽기 여럿·쓰기 하나</td><td>돈다 / 잠든다</td><td>아니다 / 예</td><td>§7</td></tr><tr><td><code>atomic_t</code>, <code>refcount_t</code>, bitops</td><td>변수 하나를 락 없이 원자적으로</td><td>없음 (하드웨어 명령)</td><td>어디서나</td><td>§8</td></tr><tr><td>per-CPU 변수</td><td>CPU마다 따로 가진 사본</td><td>없음 (공유 자체를 없앰)</td><td>어디서나 (선점만 주의)</td><td>§9</td></tr><tr><td>RCU</td><td>읽기는 락 없이, 쓰기는 복사 후 교체 + 나중에 해제</td><td>읽기 쪽 없음, 쓰기 쪽이 grace period를 기다림</td><td>읽기는 어디서나</td><td>§11</td></tr><tr><td><code>seqlock_t</code></td><td>쓰기 우선, 읽기는 "바뀌었으면 다시"</td><td>읽기 쪽이 retry</td><td>읽기는 어디서나</td><td>§12</td></tr><tr><td>lockdep</td><td>락 사용 규칙 위반을 런타임에 증명하는 검사기</td><td>—</td><td>—</td><td>§13</td></tr></tbody></table></div>
+<hr>
+<h2 id="1-실습-준비-디버그-커널-smp-4-모듈-하나-부팅-하나">1. 실습 준비 — 디버그 커널, <code>-smp 4</code>, 모듈 하나 = 부팅 하나<a class="anchor" href="#1-실습-준비-디버그-커널-smp-4-모듈-하나-부팅-하나" aria-label="link">#</a></h2>
+<h3 id="1-1-예제-1-두-커널의-락-관련-설정-비교">1.1 예제 1 — 두 커널의 락 관련 설정 비교<a class="anchor" href="#1-1-예제-1-두-커널의-락-관련-설정-비교" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 랩에는 커널이 두 개 있다. <code>out/Image</code>(defconfig 기반, 양산 커널과 비슷)와 <code>out/Image-dbg</code>(lockdep·lock_stat·atomic sleep 검사 켬). 같은 버그가 어느 커널에서 보이고 어느 커널에서 숨는지가 이 노트의 교재다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>uname -r      # VM 호스트 커널 (랩 모듈은 여기 넣지 않는다)
+for f in linux-build linux-build-dbg; do echo "== $f"
+  grep -E "^(# )?CONFIG_(PREEMPT|PREEMPT_RT|PROVE_LOCKING|LOCK_STAT|DEBUG_ATOMIC_SLEEP|PROVE_RAW_LOCK_NESTING|PROVE_RCU|SMP|QUEUED_SPINLOCKS|QUEUED_RWLOCKS|MUTEX_SPIN_ON_OWNER|PREEMPT_RCU|RCU_CPU_STALL_TIMEOUT)[= ]" /var/lab/out/$f/.config
+done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>7.0.0-38-generic
+== linux-build
+CONFIG_PREEMPT=y
+CONFIG_PREEMPT_RCU=y
+CONFIG_SMP=y
+CONFIG_MUTEX_SPIN_ON_OWNER=y
+CONFIG_QUEUED_SPINLOCKS=y
+CONFIG_QUEUED_RWLOCKS=y
+# CONFIG_PROVE_LOCKING is not set
+# CONFIG_LOCK_STAT is not set
+# CONFIG_DEBUG_ATOMIC_SLEEP is not set
+CONFIG_RCU_CPU_STALL_TIMEOUT=21
+== linux-build-dbg
+CONFIG_PREEMPT=y
+CONFIG_PREEMPT_RCU=y
+CONFIG_SMP=y
+CONFIG_MUTEX_SPIN_ON_OWNER=y
+CONFIG_QUEUED_SPINLOCKS=y
+CONFIG_QUEUED_RWLOCKS=y
+CONFIG_PROVE_LOCKING=y
+CONFIG_PROVE_RAW_LOCK_NESTING=y
+CONFIG_LOCK_STAT=y
+CONFIG_DEBUG_ATOMIC_SLEEP=y
+CONFIG_PROVE_RCU=y
+CONFIG_RCU_CPU_STALL_TIMEOUT=21</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>두 커널 다 <code>CONFIG_PREEMPT=y</code>(완전 선점)이고 <code>PREEMPT_RT</code>는 아니다. 그래서 <code>spinlock_t</code>는 진짜 spinlock이다(§4.4에서 RT라면 무엇이 바뀌는지 본다).</li><li><code>QUEUED_SPINLOCKS</code>(qspinlock), <code>MUTEX_SPIN_ON_OWNER</code>(mutex의 optimistic spinning), <code>PREEMPT_RCU</code>(선점 가능한 RCU reader)가 켜져 있다. 이 셋이 §3·§5·§11의 측정값을 설명한다.</li><li>디버그 커널에만 <code>PROVE_LOCKING</code>(lockdep), <code>LOCK_STAT</code>, <code>DEBUG_ATOMIC_SLEEP</code>, <code>PROVE_RAW_LOCK_NESTING</code>이 있다. 양산 커널(왼쪽)에서는 같은 버그가 <strong>아무 말 없이</strong> 지나간다.</li></ul>
+<h3 id="1-2-예제-2-게스트-실행기-run_guest-sh">1.2 예제 2 — 게스트 실행기 <code>run_guest.sh</code><a class="anchor" href="#1-2-예제-2-게스트-실행기-run_guest-sh" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>.ko</code>와 테스트 스크립트를 랩 initramfs 사본에 넣고, <code>LAB_CMD=sh~/t.sh</code>로 실행 후 자동 종료하는 스크립트. 이 노트의 모든 게스트 출력은 이것으로 얻었다 (E4의 실행기와 같은 구조, 기본 커널만 <code>Image-dbg</code>, 기본 CPU 수만 4).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# usage: run_guest.sh &lt;tag&gt; &lt;test.sh&gt; [extra kernel args] ; env KIMG, FILES, SMP, TMO
+set -e
+tag=$1; t=$2; extra=$3
+W=/var/tmp/F4/run_$tag
+rm -rf "/var/tmp/F4/run_${tag:?}" &amp;&amp; mkdir -p "$W/r"
+cp -a /var/lab/build/rootfs/. $W/r/
+for f in $FILES; do cp $f $W/r/; done
+cp $t $W/r/t.sh
+(cd $W/r &amp;&amp; find . | cpio -o -H newc --quiet | gzip) &gt; $W/i.gz
+KIMG=${KIMG:-/var/lab/out/Image-dbg}
+timeout ${TMO:-180} qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp ${SMP:-4} -m 512M -nographic -no-reboot \
+  -kernel $KIMG -initrd $W/i.gz -append "console=ttyAMA0 quiet $extra LAB_CMD=sh~/t.sh" 2&gt;&amp;1 | tr -d '\r'</code></pre></figure>
+<p>모듈 빌드는 커널마다 빌드 트리가 다르다. 디버그 커널용 모듈(vermagic <code>6.18.55-dbg</code>)을 일반 커널에 넣으면 로드가 거부되므로 두 벌을 만든다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># build.sh &lt;mod&gt; [dbg|std]  →  /var/tmp/F4/&lt;dbg|std&gt;/&lt;mod&gt;/&lt;mod&gt;.ko
+KB=/var/lab/out/linux-build-dbg        # std 이면 /var/lab/out/linux-build
+D=/var/tmp/F4/$k/$m
+mkdir -p $D &amp;&amp; cp /Users/donh/.elinux_scratch/F4/$m.c $D/ &amp;&amp; echo "obj-m += $m.o" &gt; $D/Kbuild
+make -s -C $KB M=$D -j2 modules</code></pre></figure>
+<p>출력에서 볼 것: 모든 모듈은 <code>-Wall</code> 계열 Kbuild 기본 경고에서 <strong>경고 0개</strong>로 빌드됐다(<code>make -s</code>는 경고가 있으면 그대로 찍는다). 게스트 출력에서 <code>Flash device refused suspend ...</code> 같은 poweroff 잡음 줄과, 콘솔과 <code>dmesg</code>에 같은 줄이 두 번 찍히는 중복은 노트에서 지웠다.</p>
+<blockquote><p>QEMU는 KVM 없이 TCG(소프트웨어 에뮬레이션)로 돈다. 아래 처리량 숫자는 <strong>상대 비교용</strong>이다. 실제 Cortex-A 칩의 절대값과 다르고, 특히 원자 명령·배리어 비용은 TCG가 실리콘과 다르게 흉내 낸다. 같은 VM에서 다른 작업이 동시에 돌아서 실행마다 흔들리므로 3회 실행의 중앙값을 쓴다.</p></blockquote>
+<hr>
+<h2 id="2-문제를-먼저-보자-카운터-하나-cpu-넷">2. 문제를 먼저 보자 — 카운터 하나, CPU 넷<a class="anchor" href="#2-문제를-먼저-보자-카운터-하나-cpu-넷" aria-label="link">#</a></h2>
+<h3 id="2-1-직관">2.1 직관<a class="anchor" href="#2-1-직관" aria-label="link">#</a></h3>
+<p>E4 §10에서 <code>int++</code>가 SMP에서 원자적이지 않다는 것을 봤다. 여기서는 같은 레이스를 <strong>여섯 가지 방법으로 고치고, 각각의 비용을 잰다.</strong> 이 숫자 하나가 "spinlock vs mutex vs atomic vs per-CPU"를 고르는 감각을 준다.</p>
+<p><code>plain++</code>는 arm64에서 <code>ldr</code> → <code>add</code> → <code>str</code> 세 명령이다. 두 CPU가 같은 값을 읽고 각자 +1을 쓰면 하나가 덮인다(lost update). Don이 아는 말로 하면 read-modify-write가 버스 트랜잭션 하나가 아니라는 것이다.</p>
+<h3 id="2-2-예제-3-f4_race-여섯-가지-보호-방법">2.2 예제 3 — <code>f4_race</code>: 여섯 가지 보호 방법<a class="anchor" href="#2-2-예제-3-f4_race-여섯-가지-보호-방법" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: CPU마다 kthread 하나(<code>kthread_bind</code>로 고정), 각자 <code>loops</code>번 증가. 보호 방법만 바꿔 가며 결과 값과 걸린 시간을 찍는다. (모듈이 길어서 두 조각으로 나눴다. 실제로는 한 파일이다.)</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f4_race: 4 kthreads x loops increments, one shared counter, 6 ways to protect it */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/kthread.h&gt;
+#include &lt;linux/mutex.h&gt;
+#include &lt;linux/percpu.h&gt;
+#include &lt;linux/ktime.h&gt;
+#include &lt;linux/delay.h&gt;
+
+enum { M_NONE, M_SPIN, M_IRQSAVE, M_MUTEX, M_ATOMIC, M_PCPU, M_NR };
+static const char * const name[] = { "none", "spinlock", "spin_irqsave", "mutex", "atomic", "percpu" };
+static int loops = 200000;
+module_param(loops, int, 0444);
+static int mask = 0x3f;		/* bit i = run mode i */
+module_param(mask, int, 0444);
+static DEFINE_SPINLOCK(f4_spin);
+static DEFINE_MUTEX(f4_mutex);
+static unsigned long plain;
+static atomic_long_t f4_atomic;
+static DEFINE_PER_CPU(unsigned long, f4_pcpu);
+static atomic_t ready, go, running;
+static DECLARE_COMPLETION(f4_done);
+static int mode;
+
+static int f4_worker(void *arg)
+{
+	unsigned long flags;
+	int i;
+
+	atomic_inc(&amp;ready);
+	while (!atomic_read(&amp;go))
+		cpu_relax();
+	for (i = 0; i &lt; loops; i++) {
+		switch (mode) {
+		case M_NONE:    WRITE_ONCE(plain, READ_ONCE(plain) + 1); break;
+		case M_SPIN:    spin_lock(&amp;f4_spin); plain++; spin_unlock(&amp;f4_spin); break;
+		case M_IRQSAVE: spin_lock_irqsave(&amp;f4_spin, flags); plain++;
+				spin_unlock_irqrestore(&amp;f4_spin, flags); break;
+		case M_MUTEX:   mutex_lock(&amp;f4_mutex); plain++; mutex_unlock(&amp;f4_mutex); break;
+		case M_ATOMIC:  atomic_long_inc(&amp;f4_atomic); break;
+		case M_PCPU:    this_cpu_inc(f4_pcpu); break;
+		}
+	}
+	if (atomic_dec_and_test(&amp;running))
+		complete(&amp;f4_done);
+	return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* f4_race.c (계속) — 모드마다 스레드 4개를 만들어 동시에 출발시키고 시간을 잰다 */
+static int __init f4_race_init(void)
+{
+	unsigned int n = num_online_cpus(), i, cpu;
+	unsigned long total, exp = (unsigned long)n * loops;
+	s64 us;
+	ktime_t t0;
+
+	for (mode = 0; mode &lt; M_NR; mode++) {
+		if (!(mask &amp; BIT(mode)))
+			continue;
+		plain = 0; atomic_long_set(&amp;f4_atomic, 0);
+		for_each_possible_cpu(cpu)
+			per_cpu(f4_pcpu, cpu) = 0;
+		atomic_set(&amp;ready, 0); atomic_set(&amp;go, 0); atomic_set(&amp;running, n);
+		reinit_completion(&amp;f4_done);
+		for (i = 0; i &lt; n; i++) {
+			struct task_struct *t = kthread_create(f4_worker, NULL, "f4_race/%u", i);
+
+			if (IS_ERR(t))
+				return PTR_ERR(t);
+			kthread_bind(t, i);
+			wake_up_process(t);
+		}
+		while (atomic_read(&amp;ready) &lt; n)
+			msleep(1);
+		t0 = ktime_get();
+		atomic_set(&amp;go, 1);
+		wait_for_completion(&amp;f4_done);
+		us = ktime_us_delta(ktime_get(), t0);
+		total = mode == M_ATOMIC ? atomic_long_read(&amp;f4_atomic) : plain;
+		if (mode == M_PCPU) {
+			total = 0;
+			for_each_possible_cpu(cpu)
+				total += per_cpu(f4_pcpu, cpu);
+		}
+		pr_info("%-12s total=%lu lost=%lu time=%lldus Mops/s=%llu.%02llu\n",
+			name[mode], total, exp - total, us,
+			div64_s64(exp, us), div64_s64(exp * 100, us) % 100);
+	}
+	return 0;
+}
+
+static void __exit f4_race_exit(void) { }
+module_init(f4_race_init);
+module_exit(f4_race_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("F4: counter race and its fixes");</code></pre></figure>
+<p>테스트 스크립트 <code>t_race.sh</code>는 커널 인자 <code>f4loops=</code>를 읽어 <code>insmod /f4_race.ko loops=...</code> 후 <code>dmesg | grep f4_race:</code>만 한다. 일반 커널(<code>out/Image</code>, lockdep 없음)에서 CPU당 100만 번씩 세 번 돌렸다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>for i in 1 2 3; do
+  KIMG=/var/lab/out/Image FILES=/var/tmp/F4/std/f4_race/f4_race.ko ./run_guest.sh race_std t_race.sh f4loops=1000000
+done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55 up 0.90s
+[    1.134007] f4_race: none         total=1837135 lost=2162865 time=95188us Mops/s=42.02
+[    2.738078] f4_race: spinlock     total=4000000 lost=0 time=1596184us Mops/s=2.50
+[    4.090656] f4_race: spin_irqsave total=4000000 lost=0 time=1338240us Mops/s=2.98
+[    4.613758] f4_race: mutex        total=4000000 lost=0 time=508705us Mops/s=7.86
+[    4.955827] f4_race: atomic       total=4000000 lost=0 time=335652us Mops/s=11.91
+[    5.003757] f4_race: percpu       total=4000000 lost=0 time=39642us Mops/s=100.90
+lab initramfs: 6.18.55 up 1.01s
+[    1.260778] f4_race: none         total=1821507 lost=2178493 time=60044us Mops/s=66.61
+[    5.027193] f4_race: spinlock     total=4000000 lost=0 time=3748075us Mops/s=1.06
+[    6.536110] f4_race: spin_irqsave total=4000000 lost=0 time=1498721us Mops/s=2.66
+[    7.265103] f4_race: mutex        total=4000000 lost=0 time=718849us Mops/s=5.56
+[    7.570953] f4_race: atomic       total=4000000 lost=0 time=284240us Mops/s=14.07
+[    7.638732] f4_race: percpu       total=4000000 lost=0 time=54914us Mops/s=72.84
+lab initramfs: 6.18.55 up 1.11s
+[    1.452853] f4_race: none         total=1800563 lost=2199437 time=96159us Mops/s=41.59
+[    3.859509] f4_race: spinlock     total=4000000 lost=0 time=2399201us Mops/s=1.66
+[    5.484298] f4_race: spin_irqsave total=4000000 lost=0 time=1612124us Mops/s=2.48
+[    6.003934] f4_race: mutex        total=4000000 lost=0 time=510962us Mops/s=7.82
+[    6.373602] f4_race: atomic       total=4000000 lost=0 time=355972us Mops/s=11.23
+[    6.426893] f4_race: percpu       total=4000000 lost=0 time=41151us Mops/s=97.20</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>none</code>: 400만 번 중 <strong>약 216만 번(54%)이 사라졌다.</strong> E4(같은 실험, 38만 손실)보다 손실이 큰 것은 이번에는 네 스레드가 <code>go</code> 신호로 정확히 동시에 출발하기 때문이다. 빠르지만 <strong>값이 틀린</strong> 결과는 속도로 치지 않는다.</li><li>고친 다섯 방법은 전부 정확히 4000000이다. 차이는 비용뿐이다.</li><li><code>this_cpu_inc</code>(per-CPU)는 보호 없는 <code>none</code>보다도 빠르다. 공유를 없앴으니 캐시 라인이 CPU 사이를 오가지 않는다(§9).</li><li>이 극단적인 경합(4개 CPU가 쉬지 않고 같은 락을 잡음)에서는 <strong>spinlock이 mutex보다 느렸다.</strong> 의외지만 이유가 있다 — §5.4와 §10에서 lock_stat으로 확인한다.</li></ul>
+<h3 id="2-3-같은-모듈을-디버그-커널에서">2.3 같은 모듈을 디버그 커널에서<a class="anchor" href="#2-3-같은-모듈을-디버그-커널에서" aria-label="link">#</a></h3>
+<p>같은 모듈을 lockdep 커널용으로 빌드해서 CPU당 2만 번만 돌렸다(VM이 다른 빌드로 바빠 부팅부터 45초가 걸린 실행이다).</p>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 44.94s
+[   50.919322] f4_race: none         total=80000 lost=0 time=21147us Mops/s=3.78
+[  135.114983] f4_race: spinlock     total=80000 lost=0 time=84088419us Mops/s=0.00
+[  138.533257] f4_race: spin_irqsave total=80000 lost=0 time=3389083us Mops/s=0.02
+[  139.463418] f4_race: mutex        total=80000 lost=0 time=893682us Mops/s=0.08
+[  139.512449] f4_race: atomic       total=80000 lost=0 time=9176us Mops/s=8.71
+[  139.554238] f4_race: percpu       total=80000 lost=0 time=6008us Mops/s=13.31</code></pre></figure>
+<p>출력에서 볼 것: 경합하는 spinlock 8만 번에 <strong>84초</strong>가 걸렸다. lockdep은 락을 잡을 때마다 의존 그래프를 갱신하고(전역 상태), <code>DEBUG_SPINLOCK</code>은 owner·magic 검사를 더한다. 그래서 <strong>디버그 커널은 개발·CI용이지 성능 측정용이 아니다.</strong> 그리고 <code>none</code>이 <code>lost=0</code>인 것은 스레드가 너무 짧게 돌아 겹치지 않았을 뿐이다 — 레이스는 "이번에 안 보였다"가 "없다"를 뜻하지 않는다.</p>
+<hr>
+<h2 id="3-spinlock-잠깐이면-서서-기다린다">3. spinlock — "잠깐이면 서서 기다린다"<a class="anchor" href="#3-spinlock-잠깐이면-서서-기다린다" aria-label="link">#</a></h2>
+<h3 id="3-1-직관">3.1 직관<a class="anchor" href="#3-1-직관" aria-label="link">#</a></h3>
+<p>화장실 앞에서 문 손잡이를 계속 돌려 보는 사람을 떠올리자. 안에 있는 사람이 금방 나온다면 자리를 뜨는 것(잠들기)보다 서서 기다리는 편이 빠르다. 이것이 spinlock이다. 펌웨어로 치면 멀티코어 SoC의 하드웨어 세마포어 레지스터를 <code>while (HWSEM_LOCK != 0);</code>으로 폴링하는 것과 같다.</p>
+<h3 id="3-2-정의와-규칙">3.2 정의와 규칙<a class="anchor" href="#3-2-정의와-규칙" aria-label="link">#</a></h3>
+<p><code>spinlock_t</code>를 잡으면 커널은 두 가지를 한다.</p>
+<ol><li><strong>이 CPU의 선점을 끈다</strong> (<code>preempt_disable()</code>). 락을 쥔 태스크가 선점당하면 다른 CPU들이 그 태스크가 다시 돌 때까지 헛돌기 때문이다. 단일 코어 커널(<code>CONFIG_SMP=n</code>)에서는 spinlock이 사실상 이것만 남는다.</li><li><strong>다른 CPU와 경쟁해 락 변수를 원자적으로 얻는다.</strong> arm64에서는 qspinlock(MCS 큐 기반, 대기자가 각자 자기 캐시 라인에서 돈다)으로 구현된다.</li></ol>
+<p>그래서 spinlock을 쥔 구간은 <strong>atomic context</strong>다(F2). 규칙은 펌웨어 ISR 규칙과 같다.</p>
+<ul><li>잠들 수 있는 것은 아무것도 부르지 않는다: <code>msleep</code>, <code>mutex_lock</code>, <code>kmalloc(GFP_KERNEL)</code>, <code>copy_to_user</code>/<code>copy_from_user</code>(page fault로 잠들 수 있음), I2C/SPI 동기 전송.</li><li>구간은 짧게: 수십~수백 ns 수준의 포인터 조작·카운터·리스트 연결. 루프로 하드웨어를 폴링하지 않는다.</li><li>같은 CPU에서 같은 락을 두 번 잡으면 그 자리에서 영원히 돈다(재귀 금지).</li></ul>
+<h3 id="3-3-api-한눈에">3.3 API 한눈에<a class="anchor" href="#3-3-api-한눈에" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>API</th><th>추가로 막는 것</th><th>언제</th></tr></thead><tbody><tr><td><code>spin_lock</code> / <code>spin_unlock</code></td><td>선점 (+ 다른 CPU)</td><td>process context끼리, 또는 IRQ 핸들러 <strong>안에서</strong> 쓸 때</td></tr><tr><td><code>spin_lock_bh</code> / <code>spin_unlock_bh</code></td><td>+ 이 CPU의 softirq</td><td>process context ↔ softirq·tasklet·timer_list 공유 데이터</td></tr><tr><td><code>spin_lock_irq</code> / <code>spin_unlock_irq</code></td><td>+ 이 CPU의 IRQ (끝나면 <strong>무조건 켬</strong>)</td><td>IRQ가 켜져 있다고 <strong>확신</strong>할 때만</td></tr><tr><td><code>spin_lock_irqsave(l, flags)</code> / <code>spin_unlock_irqrestore(l, flags)</code></td><td>+ 이 CPU의 IRQ (끝나면 <strong>원래 상태로 복원</strong>)</td><td>process ↔ hardirq 공유, 또는 호출자 상태를 모를 때</td></tr><tr><td><code>spin_trylock</code></td><td>—</td><td>못 잡으면 바로 0 반환 (기다리지 않음)</td></tr><tr><td><code>DEFINE_SPINLOCK(x)</code> / <code>spin_lock_init(&amp;x)</code></td><td>—</td><td>정적 / 동적(구조체 안) 초기화</td></tr></tbody></table></div>
+<p><code>_irqsave</code>의 <code>flags</code>는 포인터가 아니라 <strong>변수 이름</strong>을 넘긴다(매크로다). 펌웨어의 <code>primask = __get_PRIMASK(); __disable_irq(); ... __set_PRIMASK(primask);</code> 패턴과 정확히 같다.</p>
+<h3 id="3-4-함정">3.4 함정<a class="anchor" href="#3-4-함정" aria-label="link">#</a></h3>
+<ul><li><strong>"단일 코어니까 spinlock 필요 없다"</strong> — 선점과 IRQ는 단일 코어에도 있다. 그리고 같은 드라이버가 4코어 i.MX8에서도 돈다.</li><li><strong>락으로 보호하는 것은 코드가 아니라 데이터다.</strong> "이 락은 <code>fifo_head</code>, <code>fifo_tail</code>, <code>count</code>를 보호한다"고 구조체 옆에 주석으로 적는 것이 커널 관행이다.</li><li><strong>IRQ 끄는 시간도 지연이다.</strong> <code>_irqsave</code> 구간이 길면 다른 장치의 인터럽트 지연(latency)이 늘어난다. 측정은 <code>irqsoff</code> tracer(M5)로 한다.</li></ul>
+<hr>
+<h2 id="4-어떤-변형을-쓰나-_bh-_irq-_irqsave">4. 어떤 변형을 쓰나 — <code>_bh</code>, <code>_irq</code>, <code>_irqsave</code><a class="anchor" href="#4-어떤-변형을-쓰나-_bh-_irq-_irqsave" aria-label="link">#</a></h2>
+<h3 id="4-1-직관-같은-cpu의-인터럽트가-같은-락을-원하면">4.1 직관 — 같은 CPU의 인터럽트가 같은 락을 원하면<a class="anchor" href="#4-1-직관-같은-cpu의-인터럽트가-같은-락을-원하면" aria-label="link">#</a></h3>
+<p>SMP에서 다른 CPU가 락을 기다리는 것은 문제없다. 락을 쥔 CPU가 곧 풀어 줄 테니까. 문제는 <strong>락을 쥔 바로 그 CPU에 인터럽트가 들어와서, 핸들러가 같은 락을 잡으려 할 때</strong>다. 핸들러는 돌고, 락을 풀어야 할 코드는 핸들러 밑에 깔려서 다시 실행될 수 없다. 이것이 IRQ self-deadlock이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="20" y="24" font-size="13" font-weight="bold">CPU1 한 개 위에서 일어나는 일 (시간 →)</text>
+  <line x1="20" y1="150" x2="660" y2="150" stroke="currentColor" marker-end="url(#ah2)"/>
+  <rect x="30" y="100" width="190" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="125" y="118" text-anchor="middle" font-size="12">process context</text>
+  <text x="125" y="136" text-anchor="middle" font-size="12">spin_lock(L) 성공, IRQ 켜짐</text>
+  <line x1="230" y1="40" x2="230" y2="150" stroke="#d0564a" stroke-dasharray="4 3"/>
+  <text x="236" y="54" font-size="12">타이머 IRQ 도착</text>
+  <rect x="240" y="64" width="240" height="44" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="360" y="82" text-anchor="middle" font-size="12">hardirq 핸들러</text>
+  <text x="360" y="100" text-anchor="middle" font-size="12">spin_lock(L) → L이 잠겨 있다</text>
+  <rect x="490" y="64" width="170" height="44" rx="5" fill="#d0564a" fill-opacity="0.06" stroke="#d0564a" stroke-dasharray="4 3"/>
+  <text x="575" y="82" text-anchor="middle" font-size="12">영원히 돈다</text>
+  <text x="575" y="100" text-anchor="middle" font-size="12">(IRQ 꺼진 채)</text>
+  <path d="M 360 112 C 340 190, 160 190, 125 150" fill="none" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah2)"/>
+  <text x="250" y="200" text-anchor="middle" font-size="12">L을 풀 코드는 핸들러 밑에 깔려 다시 돌 수 없다</text>
+  <text x="340" y="236" text-anchor="middle" font-size="12">처방: process 쪽에서 spin_lock_irqsave → 락을 쥔 동안 이 CPU에는 IRQ가 안 들어온다</text>
+</svg></figure>
+<p>그림 2 — IRQ self-deadlock. 다른 CPU였다면 기다리면 끝났을 일이, 같은 CPU라서 영원히 끝나지 않는다. 펌웨어에서 "메인 루프가 쥔 세마포어를 ISR이 폴링"하는 버그와 같은 모양이다.</p>
+<h3 id="4-2-고르는-법-이-데이터를-또-누가-만지나">4.2 고르는 법 — "이 데이터를 또 누가 만지나"<a class="anchor" href="#4-2-고르는-법-이-데이터를-또-누가-만지나" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="20" width="320" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="180" y="41" text-anchor="middle" font-size="13">hardirq 핸들러도 이 데이터를 만지나?</text>
+  <text x="180" y="60" text-anchor="middle" font-size="12">(request_irq 핸들러, HARD hrtimer)</text>
+  <rect x="400" y="20" width="260" height="50" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="530" y="41" text-anchor="middle" font-size="12">process 쪽: spin_lock_irqsave</text>
+  <text x="530" y="60" text-anchor="middle" font-size="12">IRQ 핸들러 쪽: spin_lock</text>
+  <rect x="20" y="110" width="320" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="180" y="131" text-anchor="middle" font-size="13">softirq · tasklet · timer_list도?</text>
+  <text x="180" y="150" text-anchor="middle" font-size="12">(NAPI poll, 타이머 콜백)</text>
+  <rect x="400" y="110" width="260" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="530" y="131" text-anchor="middle" font-size="12">process 쪽: spin_lock_bh</text>
+  <text x="530" y="150" text-anchor="middle" font-size="12">softirq 쪽: spin_lock</text>
+  <rect x="20" y="200" width="320" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="180" y="221" text-anchor="middle" font-size="13">락을 쥔 채 잠들어야 하나?</text>
+  <text x="180" y="240" text-anchor="middle" font-size="12">(I2C 전송 · GFP_KERNEL · copy_to_user)</text>
+  <rect x="400" y="200" width="260" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="530" y="221" text-anchor="middle" font-size="12">mutex</text>
+  <text x="530" y="240" text-anchor="middle" font-size="12">(process context 전용)</text>
+  <rect x="20" y="290" width="320" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="180" y="311" text-anchor="middle" font-size="13">process context끼리, 짧은 구간</text>
+  <text x="180" y="330" text-anchor="middle" font-size="12">(리스트 연결, 카운터 몇 개)</text>
+  <rect x="400" y="290" width="260" height="50" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="530" y="311" text-anchor="middle" font-size="12">spin_lock</text>
+  <text x="530" y="330" text-anchor="middle" font-size="12">(mutex여도 틀리지는 않다)</text>
+  <line x1="340" y1="45" x2="398" y2="45" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="340" y1="135" x2="398" y2="135" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="340" y1="225" x2="398" y2="225" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="340" y1="315" x2="398" y2="315" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="369" y="39" text-anchor="middle" font-size="12">예</text>
+  <text x="369" y="129" text-anchor="middle" font-size="12">예</text>
+  <text x="369" y="219" text-anchor="middle" font-size="12">예</text>
+  <line x1="180" y1="70" x2="180" y2="108" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="180" y1="160" x2="180" y2="198" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="180" y1="250" x2="180" y2="288" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="196" y="94" font-size="12">아니오</text>
+  <text x="196" y="184" font-size="12">아니오</text>
+  <text x="196" y="274" font-size="12">아니오</text>
+  <text x="340" y="378" text-anchor="middle" font-size="12">먼저 물을 것: 변수 하나면 atomic · 읽기가 압도적이면 RCU/seqlock · CPU별로 쪼개지면 per-CPU</text>
+</svg></figure>
+<p>그림 3 — spinlock 변형 고르기. 위에서부터 "가장 강한 경쟁자"를 찾는다. 경쟁자가 강할수록 process 쪽 락이 더 많이 막아야 하고, 경쟁자 자신(IRQ·softirq 쪽)은 이미 그 문맥 안이라 그냥 <code>spin_lock</code>이면 된다.</p>
+<p>핵심 규칙 두 줄:</p>
+<ul><li><strong>process 쪽은 "나를 끊고 들어올 수 있는 가장 강한 경쟁자"를 막는다.</strong> hardirq가 경쟁자면 IRQ까지, softirq가 경쟁자면 BH까지.</li><li><strong>IRQ 핸들러 안에서는 그냥 <code>spin_lock</code>이다.</strong> 이 CPU의 IRQ는 이미 꺼져 있고(Linux는 핸들러 실행 중 같은 CPU의 IRQ를 중첩시키지 않는다), 다른 CPU와의 경쟁은 spinlock 자체가 막는다.</li></ul>
+<h3 id="4-3-예제-4-진짜-self-deadlock-lockdep-없는-일반-커널">4.3 예제 4 — 진짜 self-deadlock (lockdep 없는 일반 커널)<a class="anchor" href="#4-3-예제-4-진짜-self-deadlock-lockdep-없는-일반-커널" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: process context에서 <code>raw_spin_lock</code>(IRQ 켜진 채)으로 락을 쥐고, 같은 CPU에 0.5 ms 뒤 터지는 hardirq 모드 hrtimer를 건 다음 5 ms 바쁘게 기다린다. 타이머 콜백도 같은 락을 잡는다. 모듈 전체(<code>mode</code> 0~3)는 아래와 같다. 이 절에서는 <code>mode=2</code>를 쓴다. <code>HRTIMER_MODE_REL_HARD</code>는 콜백을 softirq로 미루지 않고 <strong>타이머 인터럽트 안에서 바로</strong> 실행하라는 뜻이라, 장치 IRQ 없이도 "hardirq 핸들러"를 만들 수 있다. (<code>raw_spinlock_t</code>를 쓴 이유는 §4.5에서 본다.)</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f4_irqlock: a lock shared with a hardirq-context hrtimer callback */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/hrtimer.h&gt;
+#include &lt;linux/spinlock.h&gt;
+#include &lt;linux/delay.h&gt;
+
+/* 0 = raw_spin_lock in process ctx (BUG)   1 = raw_spin_lock_irqsave (OK)
+ * 2 = real self-deadlock                   3 = spinlock_t inside hard hrtimer */
+static int mode;
+module_param(mode, int, 0444);
+static DEFINE_RAW_SPINLOCK(f4_raw_lock);
+static DEFINE_SPINLOCK(f4_stat_lock);
+static unsigned long f4_samples;
+static struct hrtimer f4_timer;
+
+static enum hrtimer_restart f4_tick(struct hrtimer *t)	/* runs in hardirq */
+{
+	if (mode == 3) {
+		spin_lock(&amp;f4_stat_lock);
+		f4_samples++;
+		spin_unlock(&amp;f4_stat_lock);
+	} else {
+		raw_spin_lock(&amp;f4_raw_lock);	/* IRQs already off here: fine */
+		f4_samples++;
+		raw_spin_unlock(&amp;f4_raw_lock);
+	}
+	return HRTIMER_NORESTART;
+}</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* f4_irqlock.c (계속) */
+static int __init f4_irqlock_init(void)
+{
+	unsigned long flags;
+
+	hrtimer_setup(&amp;f4_timer, f4_tick, CLOCK_MONOTONIC, HRTIMER_MODE_REL_HARD);
+	if (mode == 2) {	/* hold the lock (IRQs ON) while the timer fires here */
+		raw_spin_lock(&amp;f4_raw_lock);
+		hrtimer_start(&amp;f4_timer, us_to_ktime(500), HRTIMER_MODE_REL_HARD);
+		pr_info("cpu%d holds f4_raw_lock, IRQs ON, timer due in 500us\n",
+			smp_processor_id());
+		mdelay(5);
+		raw_spin_unlock(&amp;f4_raw_lock);
+		pr_info("never printed\n");
+		return 0;
+	}
+	hrtimer_start(&amp;f4_timer, us_to_ktime(500), HRTIMER_MODE_REL_HARD);
+	msleep(20);		/* let lockdep record the hardirq-side usage first */
+	if (mode == 1) {
+		raw_spin_lock_irqsave(&amp;f4_raw_lock, flags);	/* local IRQs OFF */
+		f4_samples = 0;
+		raw_spin_unlock_irqrestore(&amp;f4_raw_lock, flags);
+	} else {
+		raw_spin_lock(&amp;f4_raw_lock);			/* local IRQs ON  */
+		f4_samples = 0;
+		raw_spin_unlock(&amp;f4_raw_lock);
+	}
+	pr_info("mode=%d done\n", mode);
+	return 0;
+}
+
+static void __exit f4_irqlock_exit(void) { hrtimer_cancel(&amp;f4_timer); }
+module_init(f4_irqlock_init);
+module_exit(f4_irqlock_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("F4: lock shared with hardirq - irqsave or deadlock");</code></pre></figure>
+<p><code>t_one.sh</code>는 커널 인자 <code>f4mod=</code>, <code>f4arg=</code>를 읽어 <code>insmod</code> 하고 1초 뒤 <code>dmesg</code>를 찍는 범용 테스트 스크립트다. 일반 커널, CPU 2개, 60초 제한으로 돌렸다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>SMP=2 TMO=60 KIMG=/var/lab/out/Image FILES=/var/tmp/F4/std/f4_irqlock/f4_irqlock.ko \
+  ./run_guest.sh irq2 t_one.sh "loglevel=6 f4mod=f4_irqlock f4arg=mode=2"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55 up 0.72s
+[    0.879550] f4_irqlock: loading out-of-tree module taints kernel.
+[   21.890228] rcu: INFO: rcu_preempt detected stalls on CPUs/tasks:
+[   21.891280] rcu: 	1-...0: (1 GPs behind) idle=84dc/1/0x4000000000000000 softirq=120/121 fqs=2603
+[   21.891656] rcu: 	(detected by 0, t=5252 jiffies, g=-971, q=25 ncpus=2)
+qemu-system-aarch64: terminating on signal 15 from pid 767374 (timeout)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>insmod</code>가 영영 돌아오지 않았고, 정확히 <strong>21초 뒤</strong>(<code>CONFIG_RCU_CPU_STALL_TIMEOUT=21</code>) CPU 0이 "CPU 1이 RCU grace period를 끝내 주지 않는다"고 보고했다(<code>detected by 0</code>, 멈춘 CPU는 <code>1-...</code>). CPU 1은 IRQ가 꺼진 핸들러 안에서 돌고 있으니 스케줄러도 타이머 틱도 못 돈다. 양산 장비라면 이 상태로 하드웨어 워치독이 리셋할 때까지 멈춰 있다 — Don이 현장에서 "가끔 멈춤"으로 받던 버그의 전형이다.</li><li><code>cpu1 holds f4_raw_lock ...</code>이라는 <code>pr_info</code>조차 콘솔에 나오지 않았다. 메시지는 커널 로그 버퍼에 들어갔지만, 콘솔로 내보낼 기회가 오기 전에 그 CPU가 멈췄다. <strong>멈춤 직전 로그가 없다고 해서 그 코드에 안 갔다는 뜻이 아니다.</strong></li><li>매번 재현되지도 않는다. 이 예제는 타이머를 일부러 같은 CPU, 같은 시점에 맞췄다. 실제 장비에서는 "IRQ가 하필 그 몇 µs 구간에 들어올 때"만 터져서 몇 시간~며칠에 한 번 멈춘다. 그래서 다음 절의 lockdep이 필요하다.</li></ul>
+<h3 id="4-4-예제-5-lockdep은-deadlock이-일어나기-전에-잡는다-mode-0">4.4 예제 5 — lockdep은 deadlock이 일어나기 전에 잡는다 (<code>mode=0</code>)<a class="anchor" href="#4-4-예제-5-lockdep은-deadlock이-일어나기-전에-잡는다-mode-0" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 이번에는 타이머를 먼저 한 번 터뜨려(락이 hardirq 안에서 쓰인다는 사실을 lockdep이 기록), 20 ms 뒤 process context에서 IRQ를 켠 채 같은 락을 잡는다. 실제로는 deadlock이 <strong>일어나지 않는</strong> 타이밍이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>FILES=/var/tmp/F4/dbg/f4_irqlock/f4_irqlock.ko ./run_guest.sh irq0 t_one.sh "loglevel=1 f4mod=f4_irqlock f4arg=mode=0"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 12.18s
+[   14.226713] 
+[   14.228080] ================================
+[   14.230180] WARNING: inconsistent lock state
+[   14.231003] 6.18.55-dbg #1 Tainted: G           O       
+[   14.231539] --------------------------------
+[   14.232510] inconsistent {IN-HARDIRQ-W} -&gt; {HARDIRQ-ON-W} usage.
+[   14.236381] insmod/94 [HC0[0]:SC0[0]:HE1:SE1] takes:
+[   14.236560] ffffd7c3c2d00028 (f4_raw_lock){?...}-{2:2}, at: f4_irqlock_init+0xf0/0xf70 [f4_irqlock]
+[   14.237973] {IN-HARDIRQ-W} state was registered at:
+[   14.238110]   lock_acquire+0x22c/0x378
+[   14.238511]   _raw_spin_lock+0x58/0xb0
+[   14.238627]   f4_tick+0x38/0x98 [f4_irqlock]
+[   14.238726]   __hrtimer_run_queues+0x1fc/0x3e8
+[   14.238824]   hrtimer_interrupt+0xe8/0x250
+[   14.238901]   arch_timer_handler_virt+0x3c/0x60
+...                                      (gic_handle_irq → el1_interrupt → do_idle 경로 생략)
+[   14.249160] irq event stamp: 945
+[   14.249835] hardirqs last  enabled at (945): [&lt;ffffd7c3d304d6a0&gt;] _raw_spin_unlock_irqrestore+0x68/0xa0
+[   14.250477] hardirqs last disabled at (944): [&lt;ffffd7c3d304d270&gt;] _raw_spin_lock_irqsave+0xa8/0xd0
+[   14.250966] softirqs last  enabled at (922): [&lt;ffffd7c3d1af631c&gt;] handle_softirqs+0x454/0x4b0
+[   14.251808] softirqs last disabled at (917): [&lt;ffffd7c3d1a10804&gt;] __do_softirq+0x1c/0x28
+[   14.253357] 
+[   14.253357] other info that might help us debug this:
+[   14.253756]  Possible unsafe locking scenario:
+[   14.253756] 
+[   14.254081]        CPU0
+[   14.254225]        ----
+[   14.254840]   lock(f4_raw_lock);
+[   14.255066]   &lt;Interrupt&gt;
+[   14.255218]     lock(f4_raw_lock);
+[   14.255449] 
+[   14.255449]  *** DEADLOCK ***
+[   14.255449] 
+[   14.256607] no locks held by insmod/94.
+[   14.257049] 
+[   14.257049] stack backtrace:
+...
+[   14.260844]  print_usage_bug.part.0+0x250/0x280
+[   14.261084]  mark_lock+0x92c/0xb70
+[   14.261286]  __lock_acquire+0x984/0x15d8
+[   14.262278]  lock_acquire+0x22c/0x378
+[   14.262370]  _raw_spin_lock+0x58/0xb0
+[   14.262453]  f4_irqlock_init+0xf0/0xf70 [f4_irqlock]
+[   14.262568]  do_one_initcall+0x84/0x380
+...
+[   14.266519] f4_irqlock: mode=0 done</code></pre></figure>
+<p>출력에서 볼 것 (lockdep 경고는 위에서부터 이렇게 읽는다):</p>
+<ul><li><code>inconsistent {IN-HARDIRQ-W} -&gt; {HARDIRQ-ON-W} usage.</code> — 이 락 클래스는 이전에 <strong>hardirq 안에서 잡혔고</strong>(IN-HARDIRQ-W, W는 write/배타 획득), 지금은 <strong>hardirq가 켜진 상태에서 잡히려 한다</strong>(HARDIRQ-ON-W). 둘이 공존하면 그림 2의 시나리오가 가능하다.</li><li><code>[HC0[0]:SC0[0]:HE1:SE1]</code> — 지금 문맥: hardirq 중 아님(HC0), softirq 중 아님(SC0), hardirq 켜짐(HE1), softirq 켜짐(SE1).</li><li><code>{?...}</code> — 락 클래스의 사용 상태 요약. 첫 자리 <code>?</code>는 "hardirq 안에서 쓰였고 IRQ가 켜진 곳에서도 쓰였다"는 뜻이다(문제 그 자체).</li><li><code>{IN-HARDIRQ-W} state was registered at:</code> 아래 스택이 <strong>증거 1</strong>(콜백 <code>f4_tick</code>이 타이머 인터럽트 안에서 잡음), 마지막 stack backtrace가 <strong>증거 2</strong>(<code>f4_irqlock_init</code>이 IRQ 켠 채로 잡음).</li><li><code>Possible unsafe locking scenario</code> — lockdep이 그림 2를 텍스트로 그려 준다.</li><li>마지막 줄 <code>mode=0 done</code>: <strong>실제로는 아무 일도 없었다.</strong> lockdep은 "두 사용 패턴이 공존한다"는 것만으로 deadlock 가능성을 증명한다. 확률 낮은 버그를 첫 실행에서 잡는 이유다.</li></ul>
+<h3 id="4-5-예제-6-_irqsave로-고치면-mode-1">4.5 예제 6 — <code>_irqsave</code>로 고치면 (<code>mode=1</code>)<a class="anchor" href="#4-5-예제-6-_irqsave로-고치면-mode-1" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>FILES=/var/tmp/F4/dbg/f4_irqlock/f4_irqlock.ko ./run_guest.sh irq1 t_one.sh "loglevel=1 f4mod=f4_irqlock f4arg=mode=1"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 11.83s
+[   14.022998] f4_irqlock: mode=1 done</code></pre></figure>
+<p>출력에서 볼 것: 같은 락, 같은 타이머, process 쪽만 <code>raw_spin_lock_irqsave</code>로 바꿨다. 경고가 사라졌다. 콜백 쪽은 그대로 <code>raw_spin_lock</code>이다(§4.2 핵심 규칙 두 번째 줄).</p>
+<h3 id="4-6-_irq-vs-_irqsave">4.6 <code>_irq</code> vs <code>_irqsave</code><a class="anchor" href="#4-6-_irq-vs-_irqsave" aria-label="link">#</a></h3>
+<p><code>spin_unlock_irq</code>는 IRQ를 <strong>무조건 켠다.</strong> 호출자가 이미 IRQ를 끈 상태였다면(다른 <code>_irqsave</code> 구간 안에서 내 함수가 불렸다면) 내 함수가 끝나는 순간 호출자의 IRQ 보호가 몰래 풀린다. 그래서:</p>
+<ul><li>함수가 항상 IRQ 켜진 process context(예: <code>ioctl</code>, <code>probe</code>)에서만 불린다고 확신하면 <code>_irq</code> (flags 저장·복원 비용이 조금 적다).</li><li>여러 곳(다른 락 안, IRQ 핸들러, 타이머)에서 불릴 수 있는 헬퍼 함수면 <code>_irqsave</code>. 확신이 없으면 <code>_irqsave</code>.</li></ul>
+<h3 id="4-7-raw_spinlock-vs-spinlock-그리고-preempt_rt-예제-7-mode-3">4.7 raw_spinlock vs spinlock, 그리고 PREEMPT_RT — 예제 7 (<code>mode=3</code>)<a class="anchor" href="#4-7-raw_spinlock-vs-spinlock-그리고-preempt_rt-예제-7-mode-3" aria-label="link">#</a></h3>
+<p>일반 커널에서 <code>spinlock_t</code>는 <code>raw_spinlock_t</code>를 감싼 것에 불과하다. 차이는 <strong>PREEMPT_RT</strong> 커널(실시간 패치, 6.12부터 메인라인에 통합)에서 생긴다.</p>
+<div class="tw"><table><thead><tr><th></th><th>일반 커널 (<code>PREEMPT</code>)</th><th>PREEMPT_RT 커널</th></tr></thead><tbody><tr><td><code>spinlock_t</code></td><td>진짜 spinlock (선점 끔)</td><td><strong>잠드는 rt_mutex</strong> (priority inheritance, 선점 가능)</td></tr><tr><td><code>raw_spinlock_t</code></td><td>진짜 spinlock</td><td>진짜 spinlock (그대로)</td></tr><tr><td><code>request_irq</code> 핸들러</td><td>hardirq에서 실행</td><td>기본적으로 <strong>스레드</strong>로 실행 (force-threaded)</td></tr><tr><td>HARD hrtimer 콜백, irqchip 코드, 스케줄러 내부</td><td>hardirq</td><td>여전히 hardirq</td></tr></tbody></table></div>
+<p>그래서 규칙은 이렇다. 드라이버는 거의 항상 <code>spinlock_t</code>를 쓴다. <strong>RT에서도 진짜 hardirq로 남는 곳</strong>(irqchip 드라이버, <code>HRTIMER_MODE_HARD</code> 콜백, <code>IRQF_NO_THREAD</code> 핸들러, 스케줄러·printk 내부)에서만 <code>raw_spinlock_t</code>를 쓴다. RT가 아닌 커널에서도 디버그 옵션 <code>PROVE_RAW_LOCK_NESTING</code>이 이 규칙을 검사한다. 위 모듈의 <code>mode=3</code>은 HARD hrtimer 콜백에서 <code>spinlock_t</code>를 잡는다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 9.22s
+[   10.413397] 
+[   10.414757] =============================
+[   10.415095] [ BUG: Invalid wait context ]
+[   10.415748] 6.18.55-dbg #1 Tainted: G           O       
+[   10.416228] -----------------------------
+[   10.416473] swapper/3/0 is trying to lock:
+[   10.416743] ffffd4bc2150c070 (f4_stat_lock){....}-{3:3}, at: f4_tick+0x70/0x98 [f4_irqlock]
+[   10.419420] other info that might help us debug this:
+[   10.420296] context-{2:2}
+[   10.420718] no locks held by swapper/3/0.
+[   10.421037] stack backtrace:
+...
+[   10.424998]  _raw_spin_lock+0x58/0xb0
+[   10.425104]  f4_tick+0x70/0x98 [f4_irqlock]
+[   10.425208]  __hrtimer_run_queues+0x1fc/0x3e8
+[   10.425304]  hrtimer_interrupt+0xe8/0x250
+...
+[   10.435398] f4_irqlock: mode=3 done</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>{3:3}</code>은 이 락의 wait type(3 = <code>LD_WAIT_CONFIG</code>, "RT에서는 잠드는 락"), <code>context-{2:2}</code>는 현재 문맥이 허용하는 최대 wait type(2 = <code>LD_WAIT_SPIN</code>, "진짜로 돌아야 하는 곳")이다. 3 &gt; 2라서 "이 문맥에서 이 락을 잡으면 RT 커널에서는 hardirq 안에서 잠들게 된다"는 경고다. 위 두 예제가 <code>raw_spinlock_t</code>를 쓴 이유가 이것이다. 처음 <code>spinlock_t</code>로 짰을 때 정확히 이 경고가 먼저 나와서 <code>inconsistent</code> 경고를 볼 수 없었다.</li><li>스택에 <code>_raw_spin_lock</code>이 보인다. 일반 커널에서 <code>spin_lock()</code>은 그대로 <code>raw_spin_lock()</code>으로 내려간다는 증거다.</li><li>일반 <code>request_irq</code> 핸들러 안의 <code>spinlock_t</code>는 이 경고를 내지 않는다. RT에서는 그 핸들러가 스레드로 돌기 때문이다. lockdep은 "RT였다면 이 문맥이 스레드가 되나"까지 구분한다.</li></ul>
+<hr>
+<h2 id="5-mutex-오래-걸리면-자리를-비우고-잔다">5. mutex — "오래 걸리면 자리를 비우고 잔다"<a class="anchor" href="#5-mutex-오래-걸리면-자리를-비우고-잔다" aria-label="link">#</a></h2>
+<h3 id="5-1-정의">5.1 정의<a class="anchor" href="#5-1-정의" aria-label="link">#</a></h3>
+<p><code>struct mutex</code>는 <strong>잠드는(sleeping) 락</strong>이다. 못 잡으면 태스크를 대기 리스트에 넣고 <code>schedule()</code>로 CPU를 양보한다. 락이 풀리면 깨어난다. RTOS의 mutex와 같은 개념이고, A8의 pthread mutex(futex)의 커널판이다.</p>
+<div class="tw"><table><thead><tr><th>규칙 (<code>Documentation/locking/mutex-design.rst</code>)</th><th>이유</th></tr></thead><tbody><tr><td>한 번에 한 태스크만 쥔다, <strong>잡은 태스크만 푼다</strong></td><td>owner 필드에 <code>task_struct</code> 포인터를 기록한다. 디버그·optimistic spinning·PI가 이것을 쓴다</td></tr><tr><td>재귀 잠금 금지</td><td>같은 태스크가 두 번 잡으면 자기 자신을 영원히 기다린다</td></tr><tr><td><strong>process context에서만</strong> (hardirq·softirq·tasklet·timer 콜백 금지)</td><td>잠들 수 없는 문맥이다</td></tr><tr><td>쥔 채로 태스크가 종료되면 안 된다, 쥔 동안 메모리를 해제하면 안 된다</td><td>디버그 커널이 검사한다</td></tr><tr><td>반드시 API로 초기화 (<code>DEFINE_MUTEX</code>, <code>mutex_init</code>)</td><td>lockdep 클래스 등록</td></tr></tbody></table></div>
+<p>API는 네 가지 맛이 있다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 실행하지 않은 코드 조각 — 드라이버 .write 에서의 전형적인 모양 */
+static ssize_t f4_write(struct file *f, const char __user *buf, size_t n, loff_t *pos)
+{
+	struct f4_dev *d = f-&gt;private_data;
+	ssize_t ret;
+
+	if (mutex_lock_interruptible(&amp;d-&gt;lock))	/* Ctrl-C로 깨면 -EINTR */
+		return -ERESTARTSYS;			/* 시그널 처리 후 syscall 재시작 */
+	ret = f4_i2c_write_cfg(d, buf, n);		/* 잠들어도 되는 구간 */
+	mutex_unlock(&amp;d-&gt;lock);
+	return ret;
+}
+/* mutex_lock(&amp;l)            : 시그널로 못 깸 (D 상태) — 짧게 확실히 끝날 때
+ * mutex_lock_interruptible  : 시그널로 깸 → 0이 아니면 실패 — 유저가 부른 syscall 경로
+ * mutex_lock_killable       : SIGKILL 같은 치명적 시그널로만 깸
+ * mutex_trylock(&amp;l)         : 성공하면 1 (pthread_mutex_trylock은 성공이 0 — 반대!)
+ * guard(mutex)(&amp;l);         : 스코프 끝에서 자동 unlock (linux/cleanup.h, 6.5+) */</code></pre></figure>
+<h3 id="5-2-mutex는-바로-잠들지-않는다-세-단계-경로">5.2 mutex는 바로 잠들지 않는다 — 세 단계 경로<a class="anchor" href="#5-2-mutex는-바로-잠들지-않는다-세-단계-경로" aria-label="link">#</a></h3>
+<ol><li><strong>fast path</strong>: owner가 0이면 <code>cmpxchg</code>로 owner = current. 경합 없으면 원자 명령 하나로 끝(futex의 fast path와 같은 생각).</li><li><strong>optimistic spinning (mid path)</strong>: owner가 <strong>지금 다른 CPU에서 실행 중</strong>이면 곧 풀 가능성이 높다. 잠들고 깨는 비용(수 µs)보다 잠깐 도는 게 싸므로, owner가 실행 중인 동안만 돈다. 여러 대기자가 한꺼번에 owner를 폴링하지 않도록 MCS 큐(<code>osq</code>)로 한 명씩 줄을 세운다. (<code>CONFIG_MUTEX_SPIN_ON_OWNER=y</code>, 예제 1에서 확인)</li><li><strong>slow path</strong>: owner가 잠들었거나 선점됐으면 <code>wait_list</code>에 들어가 <code>schedule()</code>.</li></ol>
+<p>그래서 "mutex = 무조건 context switch"는 틀린 말이다. 짧은 구간이면 mutex도 사실상 spin으로 끝난다.</p>
+<h3 id="5-3-예제-8-spinlock-안에서-mutex를-잡으면">5.3 예제 8 — spinlock 안에서 mutex를 잡으면<a class="anchor" href="#5-3-예제-8-spinlock-안에서-mutex를-잡으면" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 실무에서 가장 흔한 버그. "FIFO는 spinlock으로 보호하는데, 그 안에서 I2C로 레지스터 하나만 더 읽자" — I2C 어댑터는 내부에서 mutex(버스 락)를 잡는다. 이 모양을 그대로 만든다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f4_sleep: taking a mutex while holding a spinlock */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/spinlock.h&gt;
+#include &lt;linux/mutex.h&gt;
+
+static DEFINE_SPINLOCK(f4_fifo_lock);
+static DEFINE_MUTEX(f4_i2c_mutex);	/* think: i2c adapter bus lock */
+
+static int __init f4_sleep_init(void)
+{
+	spin_lock(&amp;f4_fifo_lock);	/* atomic context starts: preempt_count++ */
+	mutex_lock(&amp;f4_i2c_mutex);	/* may sleep -&gt; BUG even if uncontended */
+	mutex_unlock(&amp;f4_i2c_mutex);
+	spin_unlock(&amp;f4_fifo_lock);
+	pr_info("returned (the bug did not hang this time)\n");
+	return 0;
+}
+
+static void __exit f4_sleep_exit(void) { }
+module_init(f4_sleep_init);
+module_exit(f4_sleep_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("F4: sleeping lock inside spinlock");</code></pre></figure>
+<p>디버그 커널:</p>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 4.26s
+[    4.499656] f4_sleep: loading out-of-tree module taints kernel.
+[    4.508994] BUG: sleeping function called from invalid context at kernel/locking/mutex.c:575
+[    4.509047] in_atomic(): 1, irqs_disabled(): 0, non_block: 0, pid: 86, name: insmod
+[    4.509069] preempt_count: 1, expected: 0
+[    4.509083] RCU nest depth: 0, expected: 0
+[    4.509130] 1 lock held by insmod/86:
+[    4.509161]  #0: ffffb1bd1319f020 (f4_fifo_lock){+.+.}-{3:3}, at: f4_sleep_init+0x28/0xfa0 [f4_sleep]
+...
+[    4.512038]  __might_resched+0x174/0x248
+[    4.512054]  __might_sleep+0x4c/0x98
+[    4.512067]  __mutex_lock+0x74/0x820
+[    4.512083]  mutex_lock_nested+0x2c/0x40
+[    4.512096]  f4_sleep_init+0x34/0xfa0 [f4_sleep]
+...
+[    4.515340] [ BUG: Invalid wait context ]
+[    4.515436] 6.18.55-dbg #1 Tainted: G        W  O       
+[    4.515567] -----------------------------
+[    4.515640] insmod/86 is trying to lock:
+[    4.515713] ffffb1bd1319f0c0 (f4_i2c_mutex){....}-{4:4}, at: f4_sleep_init+0x34/0xfa0 [f4_sleep]
+[    4.515962] other info that might help us debug this:
+[    4.516061] context-{5:5}
+[    4.516111] 1 lock held by insmod/86:
+[    4.516183]  #0: ffffb1bd1319f020 (f4_fifo_lock){+.+.}-{3:3}, at: f4_sleep_init+0x28/0xfa0 [f4_sleep]
+...
+[    4.518764] f4_sleep: returned (the bug did not hang this time)</code></pre></figure>
+<p>일반 커널(같은 소스, lockdep·<code>DEBUG_ATOMIC_SLEEP</code> 없음):</p>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55 up 1.15s
+[    1.360343] f4_sleep: returned (the bug did not hang this time)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>디버그 커널은 <strong>두 검사기가 따로</strong> 잡았다. ① <code>DEBUG_ATOMIC_SLEEP</code>: <code>mutex_lock</code> 첫머리의 <code>might_sleep()</code>이 <code>preempt_count: 1</code>(spinlock이 올린 값)을 보고 <code>BUG: sleeping function called from invalid context</code>를 찍었다. ② lockdep: 쥐고 있는 <code>f4_fifo_lock</code>의 wait type <code>{3:3}</code>(spin 계열)보다 새로 잡으려는 <code>f4_i2c_mutex</code>의 <code>{4:4}</code>(LD_WAIT_SLEEP)가 커서 <code>Invalid wait context</code>.</li><li><strong>mutex가 비어 있어서 실제로 잠들지 않았는데도</strong> 잡았다. <code>might_sleep()</code>은 "잠들 수도 있는 함수"가 입구에서 외치는 것이라 경합 여부와 상관없다.</li><li>일반 커널은 조용히 성공했다. 경합이 없으면 mutex fast path가 잠들지 않기 때문이다. 양산에서 경합이 생기는 순간 spinlock(선점 꺼짐)을 쥔 채 <code>schedule()</code>로 들어가 <code>scheduling while atomic</code> 또는 멈춤이 된다. <strong>새 드라이버는 반드시 디버그 커널로 한 번 돌린다.</strong></li></ul>
+<h3 id="5-4-측정-해석-왜-이-실험에서-mutex가-spinlock보다-빨랐나">5.4 측정 해석 — 왜 이 실험에서 mutex가 spinlock보다 빨랐나<a class="anchor" href="#5-4-측정-해석-왜-이-실험에서-mutex가-spinlock보다-빨랐나" aria-label="link">#</a></h3>
+<p>§2의 표에서 mutex(7.8 Mops/s)가 spinlock(1.7)보다 빨랐다. 교과서는 "짧은 구간이면 spinlock이 싸다"고 한다. 둘 다 맞다.</p>
+<ul><li>교과서의 말은 <strong>경합이 적을 때</strong>다. 경합이 없으면 둘 다 원자 명령 하나지만, mutex는 잠들 가능성 때문에 process context에서만 쓸 수 있고, 경합 시 잠들고 깨는 비용이 크다.</li><li>이 실험은 <strong>4개 CPU가 쉬지 않고 같은 락을 두드리는 최악의 경합</strong>이다. qspinlock은 공정(FIFO)해서 락이 매번 <strong>다른 CPU로 넘어가고</strong>, 그때마다 락 변수와 <code>plain</code>의 캐시 라인이 CPU 사이를 이동한다. mutex는 불공정하다. 방금 푼 CPU가 바로 다시 잡을 수 있고(optimistic spinning·lock stealing), 나머지는 잠들어 경쟁에서 빠진다. 같은 CPU가 연속으로 잡으니 캐시 라인이 이동하지 않는다.</li><li>이 해석은 §10의 lock_stat 숫자(spinlock은 획득의 79%가 경합, mutex는 slow path까지 간 경합이 거의 없음)와 맞는다. 다만 QEMU TCG는 원자 명령(LL/SC)을 비싸게 흉내 내므로 실제 칩에서는 차이 크기가 다를 수 있다.</li><li>교훈: <strong>락 하나를 4개 CPU가 두드리는 설계 자체가 문제다.</strong> 정답은 락 종류 바꾸기가 아니라 공유를 없애는 것(per-CPU, §9)이나 읽기 쪽 락을 없애는 것(RCU, §11)이다.</li></ul>
+<hr>
+<h2 id="6-semaphore-개수-세는-열쇠-legacy">6. semaphore — 개수 세는 열쇠 (legacy)<a class="anchor" href="#6-semaphore-개수-세는-열쇠-legacy" aria-label="link">#</a></h2>
+<p><code>struct semaphore</code>는 카운터 + 대기 리스트다. <code>down()</code>은 카운터를 줄이고 0이면 잠들고, <code>up()</code>은 카운터를 늘리고 대기자를 깨운다. RTOS의 counting semaphore와 같다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 실행하지 않은 코드 조각 — API 모양 */
+#include &lt;linux/semaphore.h&gt;
+static struct semaphore f4_slots;
+sema_init(&amp;f4_slots, 4);			/* DMA 디스크립터 4개 */
+if (down_interruptible(&amp;f4_slots))		/* 0이면 획득, -EINTR이면 시그널 */
+	return -ERESTARTSYS;
+/* ... 디스크립터 하나 사용 ... */
+up(&amp;f4_slots);					/* up()은 IRQ 문맥에서도 호출 가능 */
+/* down_trylock(): 획득하면 0 반환 — mutex_trylock/spin_trylock(성공 1)과 반대! */</code></pre></figure>
+<p>새 코드에서 semaphore를 쓸 일은 드물다.</p>
+<div class="tw"><table><thead><tr><th>하려는 일</th><th>쓸 것</th><th>semaphore 대신인 이유</th></tr></thead><tbody><tr><td>상호 배제 (카운트 1)</td><td><code>mutex</code></td><td>owner 추적, optimistic spinning, lockdep 검사, 디버그</td></tr><tr><td>"일이 끝나면 알려 줘" (IRQ가 process를 깨움)</td><td><code>completion</code> (F3)</td><td>의도가 명확, 수명 문제 없음</td></tr><tr><td>이벤트 대기</td><td><code>wait_queue</code> + <code>wait_event_*</code> (F3)</td><td>조건식을 직접 표현</td></tr><tr><td>진짜로 N개 자원 세기</td><td>semaphore 또는 atomic + wait_queue</td><td>이 경우만 semaphore가 자연스럽다</td></tr></tbody></table></div>
+<p>semaphore는 owner가 없어서 "누가 쥐고 있나"를 디버그 도구가 알려 주지 못한다. 그래서 커널 커뮤니티는 binary semaphore를 mutex로 바꾸는 작업을 오래 해 왔다.</p>
+<hr>
+<h2 id="7-읽기는-여럿-쓰기는-하나-rwlock과-rw_semaphore">7. 읽기는 여럿, 쓰기는 하나 — rwlock과 rw_semaphore<a class="anchor" href="#7-읽기는-여럿-쓰기는-하나-rwlock과-rw_semaphore" aria-label="link">#</a></h2>
+<h3 id="7-1-정의">7.1 정의<a class="anchor" href="#7-1-정의" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th></th><th><code>rwlock_t</code></th><th><code>struct rw_semaphore</code></th></tr></thead><tbody><tr><td>기다리는 방식</td><td>spin</td><td>sleep</td></tr><tr><td>읽기</td><td><code>read_lock</code> / <code>read_unlock</code> (+ <code>_bh</code>, <code>_irq</code>, <code>_irqsave</code>)</td><td><code>down_read</code> / <code>up_read</code></td></tr><tr><td>쓰기</td><td><code>write_lock</code> / <code>write_unlock</code></td><td><code>down_write</code> / <code>up_write</code>, <code>downgrade_write</code></td></tr><tr><td>쓰는 곳</td><td>드물다. 대부분 RCU로 대체됨</td><td><code>mm-&gt;mmap_lock</code>(주소 공간), 파일시스템 메타데이터</td></tr></tbody></table></div>
+<p>직관은 A8 §5의 pthread rwlock과 같다. 함정도 같다. <strong>읽기 락도 락 변수에 쓴다</strong>(reader 카운트 증가). 그래서 읽기만 하는 CPU 4개도 같은 캐시 라인을 두고 싸운다.</p>
+<h3 id="7-2-예제-9-쓰기-없이-읽기만-다섯-가지-방법의-비용">7.2 예제 9 — 쓰기 없이 읽기만, 다섯 가지 방법의 비용<a class="anchor" href="#7-2-예제-9-쓰기-없이-읽기만-다섯-가지-방법의-비용" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 쓰는 쪽이 전혀 없을 때 각 읽기 방법이 얼마나 비싼가. 구조는 <code>f4_race</code>와 같고(CPU마다 kthread, <code>go</code> 신호로 동시 출발) 스레드 함수만 다르다. 아래는 다른 부분만 발췌했다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* f4_rmostly.c 발췌 — 실행 골격(kthread 4개 생성·bind·go·completion·시간 측정)은 f4_race와 동일 */
+static DEFINE_SPINLOCK(f4_sl);
+static DEFINE_RWLOCK(f4_rw);
+static DECLARE_RWSEM(f4_rwsem);
+static DEFINE_SEQLOCK(f4_sq);
+static struct { u64 a, b; } f4_cfg = { 1, 2 }, *f4_cfgp = &amp;f4_cfg;
+
+static int f4_rd(void *arg)
+{
+	u64 s = 0;
+	unsigned int seq;
+	int i;
+
+	atomic_inc(&amp;ready);
+	while (!atomic_read(&amp;go))
+		cpu_relax();
+	for (i = 0; i &lt; loops; i++) {
+		switch (mode) {
+		case R_SPIN:   spin_lock(&amp;f4_sl); s += f4_cfg.a; spin_unlock(&amp;f4_sl); break;
+		case R_RWLOCK: read_lock(&amp;f4_rw); s += f4_cfg.a; read_unlock(&amp;f4_rw); break;
+		case R_RWSEM:  down_read(&amp;f4_rwsem); s += f4_cfg.a; up_read(&amp;f4_rwsem); break;
+		case R_SEQ:    do { seq = read_seqbegin(&amp;f4_sq); s += f4_cfg.a; }
+			       while (read_seqretry(&amp;f4_sq, seq)); break;
+		case R_RCU:    rcu_read_lock(); s += rcu_dereference(f4_cfgp)-&gt;a;
+			       rcu_read_unlock(); break;
+		}
+	}
+	if (atomic_dec_and_test(&amp;running))
+		complete(&amp;f4_done);
+	return s == 0;		/* use s so the loop is not optimized away */
+}</code></pre></figure>
+<p>일반 커널, CPU당 100만 번 읽기, 3회:</p>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55 up 1.00s
+[    2.554806] f4_rmostly: spinlock     readers=4 time=1395524us Mreads/s=2
+[    3.587561] f4_rmostly: rwlock       readers=4 time=1016459us Mreads/s=3
+[    4.457763] f4_rmostly: rw_semaphore readers=4 time=857456us Mreads/s=4
+[    4.482321] f4_rmostly: seqlock      readers=4 time=15018us Mreads/s=266
+[    4.565241] f4_rmostly: rcu          readers=4 time=80756us Mreads/s=49
+lab initramfs: 6.18.55 up 0.77s
+[    1.720640] f4_rmostly: spinlock     readers=4 time=838315us Mreads/s=4
+[    2.764504] f4_rmostly: rwlock       readers=4 time=1034106us Mreads/s=3
+[    3.812447] f4_rmostly: rw_semaphore readers=4 time=1031160us Mreads/s=3
+[    3.831100] f4_rmostly: seqlock      readers=4 time=13612us Mreads/s=293
+[    3.932524] f4_rmostly: rcu          readers=4 time=94518us Mreads/s=42
+lab initramfs: 6.18.55 up 0.96s
+[    2.465072] f4_rmostly: spinlock     readers=4 time=1385550us Mreads/s=2
+[    3.541859] f4_rmostly: rwlock       readers=4 time=1063103us Mreads/s=3
+[    4.709456] f4_rmostly: rw_semaphore readers=4 time=1158390us Mreads/s=3
+[    4.739937] f4_rmostly: seqlock      readers=4 time=16342us Mreads/s=244
+[    4.849287] f4_rmostly: rcu          readers=4 time=98233us Mreads/s=40</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <text x="340" y="22" text-anchor="middle" font-size="13" font-weight="bold">읽기만 4개 CPU — 읽기 쪽 비용 (Mreads/s, 로그 눈금)</text>
+  <text x="162" y="67" text-anchor="end" font-size="12">spinlock</text>
+  <rect x="170" y="50" width="64.5" height="26" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+  <text x="240.5" y="67" font-size="12">2.9</text>
+  <text x="162" y="107" text-anchor="end" font-size="12">rwlock (read_lock)</text>
+  <rect x="170" y="90" width="82.2" height="26" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+  <text x="258.2" y="107" font-size="12">3.9</text>
+  <text x="162" y="147" text-anchor="end" font-size="12">rw_semaphore</text>
+  <rect x="170" y="130" width="82.4" height="26" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+  <text x="258.4" y="147" font-size="12">3.9</text>
+  <text x="162" y="187" text-anchor="end" font-size="12">seqlock (reader)</text>
+  <rect x="170" y="170" width="339.6" height="26" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+  <text x="515.6" y="187" font-size="12">266.3</text>
+  <text x="162" y="227" text-anchor="end" font-size="12">rcu_read_lock</text>
+  <rect x="170" y="210" width="227.7" height="26" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+  <text x="403.7" y="227" font-size="12">42.3</text>
+  <line x1="170" y1="44" x2="170" y2="246" stroke="currentColor"/>
+  <line x1="170" y1="246" x2="590" y2="246" stroke="currentColor"/>
+  <line x1="170.0" y1="246" x2="170.0" y2="251" stroke="currentColor"/>
+  <text x="170.0" y="265" text-anchor="middle" font-size="12">1</text>
+  <line x1="310.0" y1="246" x2="310.0" y2="251" stroke="currentColor"/>
+  <text x="310.0" y="265" text-anchor="middle" font-size="12">10</text>
+  <line x1="450.0" y1="246" x2="450.0" y2="251" stroke="currentColor"/>
+  <text x="450.0" y="265" text-anchor="middle" font-size="12">100</text>
+  <line x1="590.0" y1="246" x2="590.0" y2="251" stroke="currentColor"/>
+  <text x="590.0" y="265" text-anchor="middle" font-size="12">1000</text>
+  <text x="340" y="286" text-anchor="middle" font-size="12">쓰는 쪽 없음, CPU당 100만 번 읽기, 랩 커널 QEMU TCG -smp 4, 3회 중앙값</text>
+</svg></figure>
+<p>그림 4 — 읽기만 하는 CPU 4개의 처리량(위 3회 실행의 <code>time</code> 중앙값으로 계산, 로그 눈금). 락 계열 셋은 2.9~3.9 Mreads/s로 거의 같고, 락 변수에 쓰지 않는 seqlock·RCU reader는 10~90배 빠르다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>rwlock·rw_semaphore는 읽기 전용인데도 spinlock보다 별로 낫지 않다.</strong> 네 CPU가 모두 같은 reader 카운트 변수를 원자적으로 증감하니 그 캐시 라인이 계속 CPU 사이를 오간다. "읽기가 많으니 rwlock"은 직관과 달리 대개 이득이 없다. 구간이 길 때(읽는 동안 오래 머무를 때)만 의미가 있다.</li><li>seqlock reader는 시퀀스 번호를 <strong>읽기만</strong> 하고(<code>read_seqbegin</code> → 읽기 → <code>read_seqretry</code>), RCU reader는 공유 변수에 아무것도 쓰지 않는다. 그래서 CPU가 늘어도 서로 방해하지 않는다.</li><li>여기서는 seqlock이 RCU보다 빨랐다. 이 커널은 <code>PREEMPT_RCU</code>라서 <code>rcu_read_lock()</code>이 현재 태스크의 <code>rcu_read_lock_nesting</code> 카운터를 올리고 내리고, unlock 때 "특별 처리 필요?" 검사를 한다(태스크 로컬이라 CPU 간 경합은 없다). 비선점 커널(<code>PREEMPT_NONE</code>)에서는 <code>rcu_read_lock()</code>이 사실상 아무 명령도 아니다. 둘의 차이보다 "락 계열과 100배 차이"가 핵심이다.</li></ul>
+<h3 id="7-3-함정">7.3 함정<a class="anchor" href="#7-3-함정" aria-label="link">#</a></h3>
+<ul><li><code>read_lock</code> 안에서 <code>write_lock</code>으로 올리면(upgrade) 자기 자신을 기다리는 deadlock이다. rw_semaphore에도 upgrade는 없다(반대 방향 <code>downgrade_write</code>만 있다).</li><li>쓰기가 드물게라도 길면, rw_semaphore는 쓰는 쪽이 기다리는 동안 새 reader를 막는다(writer starvation 방지). 그래서 "읽기는 절대 안 막힌다"고 가정하면 안 된다.</li></ul>
+<hr>
+<h2 id="8-atomic_t-refcount_t-atomic-bitops-변수-하나면-락이-필요-없다">8. atomic_t · refcount_t · atomic bitops — 변수 하나면 락이 필요 없다<a class="anchor" href="#8-atomic_t-refcount_t-atomic-bitops-변수-하나면-락이-필요-없다" aria-label="link">#</a></h2>
+<h3 id="8-1-정의">8.1 정의<a class="anchor" href="#8-1-정의" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>타입·API</th><th>하는 일</th><th>순서 보장(F5)</th></tr></thead><tbody><tr><td><code>atomic_t</code>(int), <code>atomic64_t</code>, <code>atomic_long_t</code></td><td><code>atomic_read/set</code>, <code>atomic_inc/dec/add/sub</code></td><td>값을 반환하지 않는 연산은 <strong>순서 보장 없음</strong>(relaxed)</td></tr><tr><td><code>atomic_inc_return</code>, <code>atomic_dec_and_test</code>, <code>atomic_cmpxchg</code>, <code>atomic_try_cmpxchg</code></td><td>결과를 돌려주는 RMW</td><td><strong>fully ordered</strong> (<code>_relaxed</code>·<code>_acquire</code>·<code>_release</code> 변형 있음)</td></tr><tr><td><code>refcount_t</code></td><td><code>refcount_set/inc/dec_and_test</code></td><td>객체 수명 관리 전용. overflow·underflow·0에서 증가를 <strong>잡아서 경고</strong></td></tr><tr><td><code>set_bit</code>, <code>clear_bit</code>, <code>test_and_set_bit</code>, <code>test_and_clear_bit</code></td><td><code>unsigned long</code> 비트맵의 한 비트를 원자적으로</td><td><code>test_and_*</code>는 fully ordered</td></tr><tr><td><code>__set_bit</code>, <code>__clear_bit</code></td><td>같은 일, <strong>비원자</strong></td><td>이미 락을 쥐었을 때만</td></tr></tbody></table></div>
+<p>arm64에서 atomic은 두 방식 중 하나로 실행된다. ARMv8.0의 LL/SC(<code>ldxr</code>/<code>stxr</code> 루프, 실패하면 다시)와 ARMv8.1 LSE(<code>ldadd</code>, <code>stadd</code>, <code>cas</code> 같은 한 방 명령)다. 커널은 <code>CONFIG_ARM64_LSE_ATOMICS=y</code>로 둘 다 넣어 두고 부팅 때 CPU 기능을 보고 패치한다(alternatives). 이 랩의 <code>-cpu cortex-a57</code>은 ARMv8.0이라 LL/SC로 돈다. Don이 SSD 펌웨어에서 Cortex-R의 <code>LDREX</code>/<code>STREX</code>로 짜던 그 루프다.</p>
+<h3 id="8-2-예제-10-atomic_t는-조용히-넘치고-refcount_t는-거부한다">8.2 예제 10 — <code>atomic_t</code>는 조용히 넘치고, <code>refcount_t</code>는 거부한다<a class="anchor" href="#8-2-예제-10-atomic_t는-조용히-넘치고-refcount_t는-거부한다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 참조 카운트를 <code>atomic_t</code>로 짜면 생기는 문제와, <code>refcount_t</code>가 그것을 어떻게 잡는지. 덤으로 <code>test_and_set_bit</code>을 "바쁨" 플래그로 쓰는 관용구.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f4_atom: atomic_t wraps silently, refcount_t refuses; atomic bitops as a busy flag */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/atomic.h&gt;
+#include &lt;linux/refcount.h&gt;
+#include &lt;linux/bitops.h&gt;
+
+#define F4_BUSY 0			/* bit number in f4_flags */
+static unsigned long f4_flags;
+
+static int __init f4_atom_init(void)
+{
+	atomic_t a = ATOMIC_INIT(INT_MAX);
+	refcount_t r = REFCOUNT_INIT(1);
+	int old;
+
+	atomic_inc(&amp;a);				/* no check: wraps */
+	pr_info("atomic_t   INT_MAX + 1 = %d\n", atomic_read(&amp;a));
+
+	old = atomic_cmpxchg(&amp;a, INT_MIN, 7);	/* if (a == INT_MIN) a = 7 */
+	pr_info("cmpxchg    old=%d new=%d\n", old, atomic_read(&amp;a));
+
+	pr_info("refcount   dec_and_test -&gt; %d (last put: free the object)\n",
+		refcount_dec_and_test(&amp;r));
+	refcount_inc(&amp;r);			/* get() on a freed object: bug */
+	pr_info("refcount   after inc on 0 = 0x%x (saturated)\n", refcount_read(&amp;r));
+
+	pr_info("bitops     1st test_and_set_bit -&gt; %d\n", test_and_set_bit(F4_BUSY, &amp;f4_flags));
+	pr_info("bitops     2nd test_and_set_bit -&gt; %d (already busy)\n",
+		test_and_set_bit(F4_BUSY, &amp;f4_flags));
+	clear_bit(F4_BUSY, &amp;f4_flags);
+	return 0;
+}
+
+static void __exit f4_atom_exit(void) { }
+module_init(f4_atom_init);
+module_exit(f4_atom_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("F4: atomic_t vs refcount_t, atomic bitops");</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55 up 0.77s
+[    0.887842] f4_atom: atomic_t   INT_MAX + 1 = -2147483648
+[    0.887885] f4_atom: cmpxchg    old=-2147483648 new=7
+[    0.887908] f4_atom: refcount   dec_and_test -&gt; 1 (last put: free the object)
+[    0.887975] refcount_t: addition on 0; use-after-free.
+[    0.888153] WARNING: CPU: 0 PID: 81 at lib/refcount.c:25 refcount_warn_saturate+0x120/0x144
+[    0.890739] ---[ end trace 0000000000000000 ]---
+[    0.890953] f4_atom: refcount   after inc on 0 = 0xc0000000 (saturated)
+[    0.890973] f4_atom: bitops     1st test_and_set_bit -&gt; 0
+[    0.890986] f4_atom: bitops     2nd test_and_set_bit -&gt; 1 (already busy)</code></pre></figure>
+<p>(<code>grep</code>으로 <code>f4_atom:</code>, <code>refcount_t</code>, <code>WARNING</code>, <code>end trace</code> 줄만 남겼다. 사이의 레지스터 덤프와 call trace는 생략.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>atomic_t</code>는 <code>INT_MAX + 1</code>에서 <strong>경고 없이</strong> 음수로 넘어갔다. 참조 카운트를 <code>atomic_t</code>로 쓰면, 버그로 get이 넘치거나 put이 한 번 더 불릴 때 카운트가 0을 지나 객체가 해제되고 다른 사용자는 해제된 메모리를 쓴다(use-after-free, 보안 취약점의 단골).</li><li><code>refcount_t</code>는 0에서 증가하려 하자 <strong>일반 커널에서도</strong> <code>refcount_t: addition on 0; use-after-free.</code> 경고를 내고, 값을 <code>0xc0000000</code>(<code>REFCOUNT_SATURATED</code>)에 고정했다. 이후로는 증가도 감소도 안 되므로 객체가 해제되지 않는다(메모리를 새게 두는 쪽이 해제된 메모리를 쓰는 쪽보다 안전하다는 설계).</li><li><code>test_and_set_bit</code>은 이전 비트 값을 돌려준다. 0이면 "내가 처음 세웠다 → 일을 시작", 1이면 "누가 이미 하는 중"이다. 락 없이 "한 번만 실행" 보장을 만드는 관용구다.</li><li>객체 수명은 <code>refcount_t</code>, 그 위의 표준 래퍼는 <code>struct kref</code>(<code>kref_get</code>/<code>kref_put(ref, release_fn)</code>)다. 드라이버 모델(<code>struct device</code>)이 전부 이걸로 수명을 센다(G 모듈).</li></ul>
+<h3 id="8-3-함정">8.3 함정<a class="anchor" href="#8-3-함정" aria-label="link">#</a></h3>
+<ul><li><strong>atomic 변수 두 개는 원자적이지 않다.</strong> <code>atomic_inc(&amp;head); atomic_dec(&amp;free);</code> 사이에 다른 CPU가 끼어들 수 있다. 여러 변수의 일관성이 필요하면 락이다.</li><li><code>atomic_read</code>/<code>atomic_set</code>은 그냥 <code>READ_ONCE</code>/<code>WRITE_ONCE</code>다. 원자적 RMW가 아니다.</li><li>반환값 없는 <code>atomic_inc</code>는 순서를 보장하지 않는다. "데이터를 쓰고 플래그를 올린다"류 publish에는 <code>smp_store_release</code>나 <code>atomic_set_release</code> 같은 순서 있는 API를 쓴다(F5).</li></ul>
+<hr>
+<h2 id="9-per-cpu-변수-공유를-없애면-락도-필요-없다">9. per-CPU 변수 — 공유를 없애면 락도 필요 없다<a class="anchor" href="#9-per-cpu-변수-공유를-없애면-락도-필요-없다" aria-label="link">#</a></h2>
+<h3 id="9-1-직관과-정의">9.1 직관과 정의<a class="anchor" href="#9-1-직관과-정의" aria-label="link">#</a></h3>
+<p>통계 카운터를 CPU마다 따로 두고, 읽을 때만 합친다. 펌웨어에서 코어별 로그 버퍼를 따로 두고 호스트가 읽을 때 합치던 것과 같다. 쓰는 쪽은 자기 CPU 사본만 만지므로 다른 CPU와 경쟁이 없다. 남은 위험은 <strong>같은 CPU의 선점과 IRQ</strong>뿐이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 실행하지 않은 코드 조각 — per-CPU API 모양 (§2의 f4_race가 this_cpu_inc를 실제로 썼다) */
+static DEFINE_PER_CPU(u64, f4_rx_pkts);
+
+this_cpu_inc(f4_rx_pkts);		/* 한 번의 연산: 선점·IRQ에 안전 */
+
+int cpu = get_cpu();			/* preempt_disable() + 현재 CPU 번호 */
+struct f4_stats *s = per_cpu_ptr(&amp;f4_stats, cpu);
+s-&gt;bytes += len; s-&gt;pkts++;		/* 여러 필드: 이 사이 다른 CPU로 옮겨 가면 안 됨 */
+put_cpu();				/* preempt_enable() */
+
+u64 sum = 0;
+for_each_possible_cpu(cpu)		/* 읽는 쪽: 모든 사본을 합친다 (근사값이어도 되는 통계) */
+	sum += per_cpu(f4_rx_pkts, cpu);</code></pre></figure>
+<div class="tw"><table><thead><tr><th>API</th><th>의미</th></tr></thead><tbody><tr><td><code>DEFINE_PER_CPU(type, name)</code> / <code>alloc_percpu(type)</code></td><td>정적 / 동적 per-CPU 변수</td></tr><tr><td><code>this_cpu_inc/add/read/write(var)</code></td><td>현재 CPU 사본에 <strong>한 번의</strong> 연산. 선점·IRQ에 안전</td></tr><tr><td><code>__this_cpu_*</code></td><td>같은 일, 보호 없음. 이미 선점·IRQ가 꺼진 곳에서만</td></tr><tr><td><code>get_cpu()</code> / <code>put_cpu()</code></td><td>선점 끄고 CPU 번호 / 선점 켬. 여러 단계 갱신용</td></tr><tr><td><code>per_cpu(var, cpu)</code>, <code>per_cpu_ptr(p, cpu)</code></td><td>특정 CPU의 사본 (보통 합산할 때)</td></tr></tbody></table></div>
+<h3 id="9-2-함정">9.2 함정<a class="anchor" href="#9-2-함정" aria-label="link">#</a></h3>
+<ul><li><code>get_cpu()</code>와 <code>put_cpu()</code> 사이에서 잠들면 안 된다(선점이 꺼져 있다). 즉 이 구간도 atomic context다.</li><li>같은 per-CPU 변수를 IRQ 핸들러도 여러 단계로 갱신하면 <code>get_cpu()</code>만으로는 부족하다. <code>local_irq_save()</code>가 필요하다.</li><li>합산은 순간 스냅샷이 아니다. 다른 CPU가 더하는 중에 읽으므로 "대략"이다. 정확한 값이 매번 필요하면 per-CPU가 맞는 도구가 아니다. 커널은 이 절충을 <code>percpu_counter</code>(로컬에 모아 두다가 임계값을 넘으면 전역에 반영)로 포장해 둔다.</li></ul>
+<hr>
+<h2 id="10-측정-정답-다섯-가지의-비용-그리고-proc-lock_stat">10. 측정 — 정답 다섯 가지의 비용, 그리고 <code>/proc/lock_stat</code><a class="anchor" href="#10-측정-정답-다섯-가지의-비용-그리고-proc-lock_stat" aria-label="link">#</a></h2>
+<h3 id="10-1-처리량-차트">10.1 처리량 차트<a class="anchor" href="#10-1-처리량-차트" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <text x="340" y="22" text-anchor="middle" font-size="13" font-weight="bold">카운터 증가 처리량 — CPU 4개 × 100만 번 (Mops/s, 클수록 좋음)</text>
+  <text x="142" y="67" text-anchor="end" font-size="12">none (보호 없음)</text>
+  <rect x="150" y="50" width="184.9" height="26" fill="#d0564a" fill-opacity="0.75" stroke="#d0564a"/>
+  <text x="340.9" y="67" font-size="12">42.02  ← 값이 틀림 (54% 손실)</text>
+  <text x="142" y="107" text-anchor="end" font-size="12">spinlock</text>
+  <rect x="150" y="90" width="7.3" height="26" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+  <text x="163.3" y="107" font-size="12">1.66</text>
+  <text x="142" y="147" text-anchor="end" font-size="12">spin_irqsave</text>
+  <rect x="150" y="130" width="11.7" height="26" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+  <text x="167.7" y="147" font-size="12">2.66</text>
+  <text x="142" y="187" text-anchor="end" font-size="12">mutex</text>
+  <rect x="150" y="170" width="34.4" height="26" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+  <text x="190.4" y="187" font-size="12">7.82</text>
+  <text x="142" y="227" text-anchor="end" font-size="12">atomic_long_inc</text>
+  <rect x="150" y="210" width="52.4" height="26" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+  <text x="208.4" y="227" font-size="12">11.91</text>
+  <text x="142" y="267" text-anchor="end" font-size="12">this_cpu_inc</text>
+  <rect x="150" y="250" width="427.7" height="26" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+  <text x="583.7" y="267" font-size="12">97.20</text>
+  <line x1="150" y1="44" x2="150" y2="286" stroke="currentColor"/>
+  <line x1="150" y1="286" x2="590" y2="286" stroke="currentColor"/>
+  <line x1="150.0" y1="286" x2="150.0" y2="291" stroke="currentColor"/>
+  <text x="150.0" y="305" text-anchor="middle" font-size="12">0</text>
+  <line x1="260.0" y1="286" x2="260.0" y2="291" stroke="currentColor"/>
+  <text x="260.0" y="305" text-anchor="middle" font-size="12">25</text>
+  <line x1="370.0" y1="286" x2="370.0" y2="291" stroke="currentColor"/>
+  <text x="370.0" y="305" text-anchor="middle" font-size="12">50</text>
+  <line x1="480.0" y1="286" x2="480.0" y2="291" stroke="currentColor"/>
+  <text x="480.0" y="305" text-anchor="middle" font-size="12">75</text>
+  <line x1="590.0" y1="286" x2="590.0" y2="291" stroke="currentColor"/>
+  <text x="590.0" y="305" text-anchor="middle" font-size="12">100</text>
+  <text x="340" y="326" text-anchor="middle" font-size="12">QEMU TCG(-smp 4, cortex-a57), 랩 커널 6.18.55 (lockdep 없음), 3회 중앙값</text>
+</svg></figure>
+<p>그림 5 — §2 <code>f4_race</code>의 3회 실행 중앙값(Mops/s). 빨간 막대는 빠르지만 값이 틀렸다. 같은 정답이라도 공유를 없앤 per-CPU가 락보다 약 60배 빠르다(QEMU TCG 기준, 실제 칩에서는 비율이 다르다).</p>
+<h3 id="10-2-예제-11-proc-lock_stat으로-경합-보기">10.2 예제 11 — <code>/proc/lock_stat</code>으로 경합 보기<a class="anchor" href="#10-2-예제-11-proc-lock_stat으로-경합-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 디버그 커널의 <code>LOCK_STAT</code>은 락 클래스마다 경합 횟수, 기다린 시간, 쥔 시간을 센다. <code>f4_race</code>를 spinlock과 mutex 모드만(<code>mask=0x0a</code>) CPU당 3000번 돌리고 통계를 읽는다. 게스트 안 스크립트:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>echo 1 &gt; /proc/sys/kernel/lock_stat     # 수집 켜기 (게스트 안이라 전역 설정을 바꿔도 된다)
+echo 0 &gt; /proc/lock_stat                # 통계 초기화
+insmod /f4_race.ko loops=3000 mask=0x0a
+dmesg | grep f4_race: | grep -v taints
+echo 0 &gt; /proc/sys/kernel/lock_stat
+head -4 /proc/lock_stat
+grep -A6 -E "^ +f4_(spin|mutex):" /proc/lock_stat</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 25.86s
+[   57.068722] f4_race: spinlock     total=12000 lost=0 time=28501645us Mops/s=0.00
+[   57.416518] f4_race: mutex        total=12000 lost=0 time=304221us Mops/s=0.03
+lock_stat version 0.4
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                              class name    con-bounces    contentions   waittime-min   waittime-max waittime-total   waittime-avg    acq-bounces   acquisitions   holdtime-min   holdtime-max holdtime-total   holdtime-avg
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                 f4_spin:          2322           9475           0.83      160881.17   112615143.68       11885.50          10720          12000           0.70        8316.67      102929.06           8.58
+                                 -------
+                                 f4_spin           9475          [&lt;00000000814f513a&gt;] f4_worker+0x198/0x270 [f4_race]
+                                 -------
+                                 f4_spin           9475          [&lt;00000000814f513a&gt;] f4_worker+0x198/0x270 [f4_race]
+
+.............................................................................................................................................................................................................................
+--
+                                f4_mutex:             5              5          55.70       19889.38       47502.29        9500.46            667          12000           1.90       55353.04      585971.86          48.83
+                                --------
+                                f4_mutex              5          [&lt;000000001d67b645&gt;] f4_worker+0x1bc/0x270 [f4_race]
+                                --------
+                                f4_mutex              5          [&lt;000000001d67b645&gt;] f4_worker+0x1bc/0x270 [f4_race]
+
+.............................................................................................................................................................................................................................</code></pre></figure>
+<p>출력 읽는 법 (시간 단위는 µs):</p>
+<div class="tw"><table><thead><tr><th>열</th><th>뜻</th><th><code>f4_spin</code></th><th><code>f4_mutex</code></th></tr></thead><tbody><tr><td><code>acquisitions</code></td><td>획득 횟수</td><td>12000</td><td>12000</td></tr><tr><td><code>contentions</code></td><td>바로 못 잡고 기다린 횟수</td><td><strong>9475 (79%)</strong></td><td><strong>5</strong></td></tr><tr><td><code>waittime-avg</code></td><td>한 번 기다린 평균 시간</td><td>11885.50</td><td>9500.46</td></tr><tr><td><code>acq-bounces</code></td><td>직전과 <strong>다른 CPU</strong>가 획득한 횟수</td><td><strong>10720 (89%)</strong></td><td><strong>667 (6%)</strong></td></tr><tr><td><code>holdtime-avg</code></td><td>한 번 쥔 평균 시간</td><td>8.58</td><td>48.83</td></tr></tbody></table></div>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>spinlock은 획득의 89%가 CPU를 바꿔 가며 일어났다</strong>(<code>acq-bounces</code>). qspinlock이 공정하게 순서대로 넘겨 준 결과고, 매번 캐시 라인이 이동했다. §5.4의 해석과 맞는다.</li><li><strong>mutex는 6%만 CPU가 바뀌었다.</strong> 같은 CPU가 연속으로 다시 잡았다는 뜻이다. <code>contentions</code>가 5뿐인 이유는 측정 방식에 있다. <code>kernel/locking/mutex.c</code>를 보면 <code>lock_contended()</code>는 trylock과 optimistic spinning이 <strong>둘 다 실패해서 slow path로 갈 때만</strong> 불린다. 돌다가 잡은 경우는 경합으로 세지 않는다.</li><li>아래 <code>f4_worker+0x198</code> 줄은 경합이 일어난 <strong>호출 위치</strong>다. 실제 시스템에서는 여기서 "어느 함수의 어느 락이 병목인가"를 바로 찾는다.</li><li>디버그 커널이라 절대 시간(spinlock 28초!)은 의미가 없다. lock_stat은 <strong>비율과 위치</strong>를 본다.</li></ul>
+<hr>
+<h2 id="11-rcu-읽는-쪽은-아무것도-하지-않는다">11. RCU — 읽는 쪽은 아무것도 하지 않는다<a class="anchor" href="#11-rcu-읽는-쪽은-아무것도-하지-않는다" aria-label="link">#</a></h2>
+<h3 id="11-1-직관-게시판-비유">11.1 직관 — 게시판 비유<a class="anchor" href="#11-1-직관-게시판-비유" aria-label="link">#</a></h3>
+<p>회사 게시판의 공지를 바꾼다고 하자. 지우고 다시 쓰는 동안 읽던 사람이 반쯤 지워진 글을 보면 안 된다. RCU(Read-Copy-Update)의 방법은 이렇다.</p>
+<ol><li><strong>Copy</strong>: 새 공지를 따로 써서 완성한다.</li><li><strong>Update(publish)</strong>: 게시판의 핀 하나를 새 종이로 옮겨 꽂는다. 포인터 하나 바꾸기라 원자적이다. 이제부터 오는 사람은 새 공지를 본다.</li><li><strong>기다리기(grace period)</strong>: 핀을 옮기기 <strong>전부터</strong> 옛 공지를 읽고 있던 사람이 모두 자리를 뜰 때까지 기다린다.</li><li><strong>해제</strong>: 그다음 옛 종이를 버린다.</li></ol>
+<p>읽는 사람은 아무것도 하지 않는다. 락도 원자 명령도, 기다림도 없다. 대가는 쓰는 쪽이 치른다(복사 + 기다림). 그래서 <strong>읽기가 압도적으로 많고, 잠깐 옛 값을 봐도 괜찮은 데이터</strong>(라우팅 테이블, 설정, 장치 목록, 파일 시스템 dentry 캐시)에 쓴다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="260" y="36" width="215" height="186" fill="#888" fill-opacity="0.12" stroke="#888" stroke-dasharray="4 3"/>
+  <text x="367" y="30" text-anchor="middle" font-size="12">grace period</text>
+  <line x1="260" y1="36" x2="260" y2="252" stroke="#d0564a"/>
+  <text x="14" y="70" font-size="12">CPU0 reader</text>
+  <text x="14" y="120" font-size="12">CPU1 reader</text>
+  <text x="14" y="170" font-size="12">CPU2 reader</text>
+  <text x="14" y="252" font-size="12">CPU3 updater</text>
+  <rect x="150" y="52" width="180" height="28" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="240" y="71" text-anchor="middle" font-size="12">옛 B를 본다 (아직 유효)</text>
+  <rect x="300" y="102" width="130" height="28" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="365" y="121" text-anchor="middle" font-size="12">새 B'를 본다</text>
+  <rect x="180" y="152" width="290" height="28" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="325" y="171" text-anchor="middle" font-size="12">옛 B를 본다 — 가장 늦게 끝나는 기존 reader</text>
+  <rect x="520" y="102" width="130" height="28" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="585" y="121" text-anchor="middle" font-size="12">새 B'를 본다</text>
+  <line x1="120" y1="246" x2="660" y2="246" stroke="currentColor" marker-end="url(#ah4)"/>
+  <circle cx="260" cy="246" r="5" fill="#d0564a"/>
+  <circle cx="500" cy="246" r="5" fill="#3f9a6b"/>
+  <text x="260" y="272" text-anchor="middle" font-size="12">① list_replace_rcu</text>
+  <text x="260" y="290" text-anchor="middle" font-size="12">(B' 공개)</text>
+  <text x="367" y="236" text-anchor="middle" font-size="12">② 기다림</text>
+  <text x="500" y="272" text-anchor="middle" font-size="12">③ kfree(옛 B)</text>
+  <text x="500" y="290" text-anchor="middle" font-size="12">(kfree_rcu가 대신)</text>
+  <text x="340" y="320" text-anchor="middle" font-size="12">reader 막대 = rcu_read_lock ~ rcu_read_unlock 구간. ①보다 먼저 시작한 막대가 모두 끝나야 ③</text>
+</svg></figure>
+<p>그림 6 — RCU 타임라인. ① 이후에 시작한 reader(CPU1, 오른쪽 막대)는 새 B'만 보므로 기다릴 필요가 없다. ① 이전에 시작한 reader(CPU0, CPU2)가 옛 B를 쥐고 있을 수 있으므로, 그들이 모두 끝날 때(grace period 끝)까지 옛 B를 해제하지 않는다.</p>
+<h3 id="11-2-api-다섯-개면-된다">11.2 API — 다섯 개면 된다<a class="anchor" href="#11-2-api-다섯-개면-된다" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>쪽</th><th>API</th><th>하는 일</th></tr></thead><tbody><tr><td>reader</td><td><code>rcu_read_lock()</code> / <code>rcu_read_unlock()</code></td><td>읽기 구간 표시. 이 안에서 잠들면 안 된다(일반 RCU)</td></tr><tr><td>reader</td><td><code>rcu_dereference(p)</code></td><td>공유 포인터 읽기. 컴파일러·CPU가 순서를 바꾸지 않게 하고, lockdep(<code>PROVE_RCU</code>)이 "RCU 구간 안인가"를 검사</td></tr><tr><td>updater</td><td><code>rcu_assign_pointer(p, v)</code></td><td>새 객체 공개. release 순서(객체 초기화가 포인터 공개보다 먼저 보이게)</td></tr><tr><td>updater</td><td><code>synchronize_rcu()</code></td><td>grace period가 끝날 때까지 <strong>잠들어</strong> 기다림 (process context만)</td></tr><tr><td>updater</td><td><code>call_rcu(&amp;obj-&gt;rcu, fn)</code> / <code>kfree_rcu(obj, rcu)</code></td><td>기다리지 않고 "grace period 뒤에 fn 실행 / kfree" 예약 (atomic context에서도 가능)</td></tr></tbody></table></div>
+<p>리스트용 래퍼: <code>list_add_rcu</code>, <code>list_del_rcu</code>, <code>list_replace_rcu</code>, <code>list_for_each_entry_rcu</code>. <strong>updater끼리는 여전히 서로 배제해야 한다</strong>(보통 spinlock이나 mutex). RCU는 reader와 updater 사이만 풀어 준다.</p>
+<p>grace period를 커널은 어떻게 아나? 간단히 말하면, 모든 CPU가 한 번씩 <strong>quiescent state</strong>(RCU reader 구간 밖에 있음이 확실한 지점: context switch, idle, 유저 모드 실행)를 지나가면 그 이전에 시작한 reader는 모두 끝났다. 커널은 CPU마다 이 통과를 기록하고, RCU grace-period kthread가 모두 통과했는지 확인한다. reader 쪽 코드에는 아무 표시도 필요 없다 — 그래서 reader가 공짜다. (§4.3의 RCU stall 경고는 이 통과를 21초 동안 못 한 CPU를 보고한 것이다.)</p>
+<h3 id="11-3-예제-12-reader-3개는-락-없이-writer는-항목을-계속-교체">11.3 예제 12 — reader 3개는 락 없이, writer는 항목을 계속 교체<a class="anchor" href="#11-3-예제-12-reader-3개는-락-없이-writer는-항목을-계속-교체" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 센서 보정값 8개가 든 리스트를 reader kthread 3개가 쉬지 않고 훑는다. 각 항목에는 검증 필드(<code>check == gain ^ 0xA5A5A5A5</code>)가 있어서, 해제된 항목을 보면 <code>bad</code>가 오른다. writer는 2000번 항목을 새것으로 교체한다. <code>mode=0</code>은 <code>kfree_rcu</code>, <code>mode=1</code>은 일부러 버그(교체 직후 바로 <code>kfree</code>, 그 전에 재사용을 흉내 내 검증 필드를 망가뜨림).</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f4_rcu: lock-free readers vs a writer that replaces list entries */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/kthread.h&gt;
+#include &lt;linux/rculist.h&gt;
+#include &lt;linux/slab.h&gt;
+#include &lt;linux/delay.h&gt;
+
+static int mode;	/* 0 = kfree_rcu   1 = BUG: kfree right away */
+module_param(mode, int, 0444);
+struct f4_cfg { struct list_head node; u32 gain, check; struct rcu_head rcu; };
+static LIST_HEAD(f4_list);
+static DEFINE_SPINLOCK(f4_wlock);		/* writers only */
+static atomic_long_t reads, bad;
+static struct task_struct *rd[3];
+static struct f4_cfg *slot[8];		/* writer-side index of entries */
+
+static int f4_reader(void *arg)
+{
+	struct f4_cfg *c;
+
+	while (!kthread_should_stop()) {
+		rcu_read_lock();			/* no lock, no atomic, no wait */
+		list_for_each_entry_rcu(c, &amp;f4_list, node)
+			if (READ_ONCE(c-&gt;check) != (READ_ONCE(c-&gt;gain) ^ 0xA5A5A5A5))
+				atomic_long_inc(&amp;bad);	/* saw a freed/poisoned entry */
+		rcu_read_unlock();
+		atomic_long_inc(&amp;reads);
+		cond_resched();
+	}
+	return 0;
+}
+
+static void __exit f4_rcu_exit(void)
+{
+	int i;
+
+	for (i = 0; i &lt; 8; i++) {
+		list_del_rcu(&amp;slot[i]-&gt;node);
+		kfree_rcu(slot[i], rcu);
+	}
+}
+module_exit(f4_rcu_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("F4: RCU-protected list");</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* f4_rcu.c (계속) — 초기 리스트, reader 시작, writer 루프 */
+static int __init f4_rcu_init(void)
+{
+	struct f4_cfg *c, *old;
+	ktime_t t0;
+	int i;
+
+	for (i = 0; i &lt; 8; i++) {
+		c = kmalloc(sizeof(*c), GFP_KERNEL);
+		if (!c)
+			return -ENOMEM;
+		c-&gt;gain = i; c-&gt;check = i ^ 0xA5A5A5A5;
+		list_add_tail(&amp;c-&gt;node, &amp;f4_list);
+		slot[i] = c;
+	}
+	for (i = 0; i &lt; 3; i++)
+		rd[i] = kthread_run(f4_reader, NULL, "f4_rcu_rd/%d", i);
+	for (i = 0; i &lt; 2000; i++) {		/* writer: replace entries in turn */
+		c = kmalloc(sizeof(*c), GFP_KERNEL);
+		if (!c)
+			break;
+		c-&gt;gain = 100 + i; c-&gt;check = c-&gt;gain ^ 0xA5A5A5A5;
+		spin_lock(&amp;f4_wlock);
+		old = slot[i % 8];
+		list_replace_rcu(&amp;old-&gt;node, &amp;c-&gt;node);	/* publish (release) */
+		slot[i % 8] = c;
+		spin_unlock(&amp;f4_wlock);
+		if (mode == 0) {
+			kfree_rcu(old, rcu);		/* free after a grace period */
+		} else {
+			WRITE_ONCE(old-&gt;check, 0xdead);	/* what reuse would look like */
+			kfree(old);			/* readers may still hold it! */
+		}
+		usleep_range(50, 100);
+	}
+	for (i = 0; i &lt; 3; i++)
+		kthread_stop(rd[i]);
+	t0 = ktime_get();
+	synchronize_rcu();
+	pr_info("mode=%d reads=%ld bad=%ld synchronize_rcu=%lldus\n", mode,
+		atomic_long_read(&amp;reads), atomic_long_read(&amp;bad),
+		ktime_us_delta(ktime_get(), t0));
+	return 0;
+}
+module_init(f4_rcu_init);</code></pre></figure>
+<p>(노트에서는 읽기 좋게 <code>module_init</code> 위치만 옮겼다. 실제 파일은 init 뒤에 exit가 온다. 데모라서 <code>kthread_run</code>의 <code>IS_ERR</code> 검사는 생략했다 — 실제 드라이버에서는 반드시 검사한다.)</p>
+<p>일반 커널, <code>mode=0</code> 두 번 + 같은 부팅에서 다음 절의 <code>f4_seq</code>도 함께, 그리고 <code>mode=1</code> 두 번:</p>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55 up 0.89s
+[    1.725113] f4_rcu: mode=0 reads=6192875 bad=0 synchronize_rcu=10806us
+lab initramfs: 6.18.55 up 1.17s
+[    1.939613] f4_rcu: mode=0 reads=6408653 bad=0 synchronize_rcu=18149us
+lab initramfs: 6.18.55 up 0.88s
+[    1.559733] f4_rcu: mode=1 reads=6982617 bad=3 synchronize_rcu=5764us
+lab initramfs: 6.18.55 up 0.97s
+[    1.689463] f4_rcu: mode=1 reads=6563677 bad=2 synchronize_rcu=8070us</code></pre></figure>
+<p>디버그 커널(<code>PROVE_RCU</code>, lockdep 켬), <code>mode=0</code>:</p>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 5.93s
+[    8.154345] f4_rcu: mode=0 reads=658828 bad=0 synchronize_rcu=9401us</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>mode=0</code>: reader 3개가 약 600만 번 리스트를 훑는 동안 writer가 2000번 교체했는데 <strong><code>bad=0</code></strong>. reader 코드에는 락이 하나도 없다. 교체 중인 항목을 읽던 reader는 옛 항목을 끝까지 안전하게 읽었다.</li><li><code>mode=1</code>: 같은 실험에서 600만 번 중 <strong>2~3번</strong> 해제된 항목을 읽었다. 확률이 100만분의 1 수준이라 테스트에서는 거의 안 보이고 양산에서 가끔 터진다. 더 나쁜 경우 해제된 메모리를 slab이 재사용해 <code>node.next</code>가 쓰레기가 되면 reader가 Oops를 낸다. 이 버그는 디버그 커널에서 KASAN(<code>use-after-free</code>)으로 잡는다(M7).</li><li><code>synchronize_rcu()</code> 한 번에 5~18 ms가 걸렸다. <strong>grace period는 비싸다.</strong> 그래서 writer가 매번 기다리지 않도록 <code>kfree_rcu</code>/<code>call_rcu</code>로 해제를 예약하고 바로 다음 일을 한다. 커널은 예약된 콜백을 모아서 한 grace period에 한꺼번에 처리한다.</li><li>디버그 커널에서 reads가 10분의 1로 줄었다. <code>PROVE_RCU</code>가 <code>rcu_read_lock()</code>도 lockdep에 기록하기 때문이다.</li></ul>
+<h3 id="11-4-rcu-함정">11.4 RCU 함정<a class="anchor" href="#11-4-rcu-함정" aria-label="link">#</a></h3>
+<ul><li><strong>reader 구간 안에서 잠들기 금지</strong>(일반 RCU). 잠들어야 하면 SRCU(<code>srcu_read_lock</code>)를 쓴다.</li><li><strong>reader 구간 밖으로 포인터를 들고 나가지 않는다.</strong> <code>rcu_read_unlock()</code> 뒤에는 그 객체가 언제든 해제될 수 있다. 오래 쓸 거면 구간 안에서 <code>refcount_inc_not_zero()</code>로 참조를 잡고 나온다.</li><li>RCU는 "옛 값을 잠깐 봐도 되는" 데이터에만 맞다. 읽은 값으로 다시 쓰기를 결정하는 read-modify-write에는 맞지 않는다.</li><li>모듈을 내릴 때 <code>call_rcu</code> 콜백이 남아 있으면 모듈 코드가 사라진 뒤 콜백이 불린다. exit에서 <code>rcu_barrier()</code>로 대기한다(<code>kfree_rcu</code>는 모듈 코드를 부르지 않아 이 문제가 없다).</li></ul>
+<hr>
+<h2 id="12-seqlock-쓰는-쪽은-절대-기다리지-않는다">12. seqlock — 쓰는 쪽은 절대 기다리지 않는다<a class="anchor" href="#12-seqlock-쓰는-쪽은-절대-기다리지-않는다" aria-label="link">#</a></h2>
+<h3 id="12-1-직관과-정의">12.1 직관과 정의<a class="anchor" href="#12-1-직관과-정의" aria-label="link">#</a></h3>
+<p>seqlock은 <strong>시퀀스 번호 + writer용 spinlock</strong>이다. writer는 시작할 때 번호를 홀수로, 끝날 때 짝수로 올린다. reader는 락을 잡지 않고 ① 번호를 읽고(홀수면 기다림) ② 데이터를 복사하고 ③ 번호가 그대로인지 확인해서, 바뀌었으면 처음부터 다시 읽는다.</p>
+<ul><li><strong>writer 우선</strong>: reader가 몇 명이든 writer는 기다리지 않는다. 대신 reader가 retry한다.</li><li>데이터가 작고(복사가 싸고), 쓰기가 잦지 않고, <strong>포인터가 아닌 값</strong>일 때 맞는다. (reader가 읽는 도중 writer가 객체를 해제하면 retry 전에 이미 잘못된 메모리를 읽는다 — 포인터면 RCU를 쓴다.)</li><li>대표 사용처: 시간. <code>jiffies_64</code>(<code>kernel/time/jiffies.c</code>의 <code>jiffies_seq</code>, 32비트 CPU에서 64비트 값을 찢어지지 않게 읽기)와 timekeeping(<code>kernel/time/timekeeping.c</code>의 <code>struct tk_data</code> 안 <code>seq</code>, <code>ktime_get()</code>이 매번 이 retry 루프를 돈다). 타이머 IRQ가 시간을 갱신하고, 수많은 reader가 읽기만 한다.</li></ul>
+<h3 id="12-2-예제-13-두-단어짜리-타임스탬프-seqlock-있이-없이">12.2 예제 13 — 두 단어짜리 타임스탬프, seqlock 있이·없이<a class="anchor" href="#12-2-예제-13-두-단어짜리-타임스탬프-seqlock-있이-없이" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: writer가 <code>(sec, ~sec)</code> 쌍을 2만 번 갱신하는 동안 reader 3개가 같은 쌍을 보호 없이 한 번, seqlock으로 한 번 읽어 <strong>찢어진 읽기</strong>(sec와 ~sec가 짝이 안 맞음)를 센다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f4_seq: a 2-word timestamp pair read with and without a seqlock */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/kthread.h&gt;
+#include &lt;linux/seqlock.h&gt;
+#include &lt;linux/delay.h&gt;
+
+static DEFINE_SEQLOCK(f4_ts_lock);
+static u64 f4_sec, f4_nsec_x;		/* invariant: f4_nsec_x == ~f4_sec */
+static atomic_long_t torn_raw, torn_seq, retries, reads;
+
+static int f4_reader(void *arg)
+{
+	unsigned int seq;
+	u64 a, b;
+
+	while (!kthread_should_stop()) {
+		a = READ_ONCE(f4_sec); b = READ_ONCE(f4_nsec_x);	/* no protection */
+		if (b != ~a)
+			atomic_long_inc(&amp;torn_raw);
+		do {						/* seqlock reader */
+			seq = read_seqbegin(&amp;f4_ts_lock);
+			a = READ_ONCE(f4_sec); b = READ_ONCE(f4_nsec_x);
+		} while (read_seqretry(&amp;f4_ts_lock, seq) &amp;&amp; atomic_long_inc_return(&amp;retries));
+		if (b != ~a)
+			atomic_long_inc(&amp;torn_seq);
+		atomic_long_inc(&amp;reads);
+		cond_resched();
+	}
+	return 0;
+}
+
+static int __init f4_seq_init(void)
+{
+	struct task_struct *rd[3];
+	int i, j;
+
+	f4_nsec_x = ~0ULL;
+	for (i = 0; i &lt; 3; i++)
+		rd[i] = kthread_run(f4_reader, NULL, "f4_seq_rd/%d", i);
+	for (i = 0; i &lt; 20000; i++) {		/* writer never waits for readers */
+		write_seqlock(&amp;f4_ts_lock);
+		WRITE_ONCE(f4_sec, i);
+		for (j = 0; j &lt; 50; j++)	/* widen the update window */
+			cpu_relax();
+		WRITE_ONCE(f4_nsec_x, ~(u64)i);
+		write_sequnlock(&amp;f4_ts_lock);
+		if (!(i % 64))
+			cond_resched();
+	}
+	for (i = 0; i &lt; 3; i++)
+		kthread_stop(rd[i]);
+	pr_info("reads=%ld torn_without_seqlock=%ld torn_with_seqlock=%ld retries=%ld\n",
+		atomic_long_read(&amp;reads), atomic_long_read(&amp;torn_raw),
+		atomic_long_read(&amp;torn_seq), atomic_long_read(&amp;retries));
+	return 0;
+}
+
+static void __exit f4_seq_exit(void) { }
+module_init(f4_seq_init);
+module_exit(f4_seq_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("F4: seqlock reader retry");</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55 up 0.90s
+[    1.846425] f4_seq: reads=86822 torn_without_seqlock=20862 torn_with_seqlock=0 retries=440
+lab initramfs: 6.18.55 up 0.89s
+[    1.763510] f4_seq: reads=110729 torn_without_seqlock=26011 torn_with_seqlock=0 retries=601
+lab initramfs: 6.18.55-dbg up 5.93s
+[    8.450501] f4_seq: reads=68753 torn_without_seqlock=609 torn_with_seqlock=0 retries=213</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>보호 없는 읽기는 <strong>약 24%가 찢어졌다</strong>(sec는 새 값, ~sec는 옛 값). 64비트 변수 두 개, 또는 32비트 CPU의 64비트 변수 하나가 정확히 이 모양이다.</li><li>seqlock 읽기는 <strong>0번</strong> 찢어졌고, 그 대가로 0.5% 정도 다시 읽었다(<code>retries</code>). writer는 한 번도 reader를 기다리지 않았다.</li><li>같은 retry 루프가 <code>ktime_get()</code> 안에 있다. 드라이버에서 타임스탬프를 찍을 때마다 이 패턴을 공짜로 쓰고 있는 것이다(F8).</li></ul>
+<hr>
+<h2 id="13-lock-ordering과-lockdep-일어나지-않은-deadlock-잡기">13. lock ordering과 lockdep — 일어나지 않은 deadlock 잡기<a class="anchor" href="#13-lock-ordering과-lockdep-일어나지-않은-deadlock-잡기" aria-label="link">#</a></h2>
+<h3 id="13-1-abba-deadlock">13.1 ABBA deadlock<a class="anchor" href="#13-1-abba-deadlock" aria-label="link">#</a></h3>
+<p>락이 두 개 이상이면 <strong>잡는 순서</strong>가 문제다. 경로 1은 A → B, 경로 2는 B → A로 잡으면, 두 CPU가 동시에 각자 첫 락을 잡은 순간 서로의 두 번째 락을 영원히 기다린다(A8 §10에서 유저 공간판을 봤다). 처방은 단순하다. <strong>모든 경로가 같은 순서로 잡는다</strong>, 그리고 그 순서를 주석·문서로 남긴다(예: <code>mm/rmap.c</code> 첫머리의 락 순서 주석).</p>
+<p>lockdep은 개별 락이 아니라 <strong>락 클래스</strong>(같은 곳에서 초기화된 락들의 묶음, 보통 변수 이름)를 노드로 하는 그래프를 런타임에 그린다. "B를 쥔 채로 A를 잡았다"를 볼 때마다 B → A 간선을 추가하고, 새 간선이 <strong>사이클</strong>을 만들면 경고한다. 실제 deadlock이 일어날 필요가 없다. 두 경로가 <strong>각각 한 번씩, 다른 시간에</strong> 실행되기만 하면 된다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+  <marker id="ah5r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#d0564a"/></marker></defs>
+  <text x="150" y="22" text-anchor="middle" font-size="13" font-weight="bold">코드 (시간을 달리해 한 번씩 실행)</text>
+  <rect x="20" y="36" width="260" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="150" y="58" text-anchor="middle" font-size="12">t=1 ioctl 경로</text>
+  <text x="150" y="78" text-anchor="middle" font-size="12">lock(cfg) → lock(buf)</text>
+  <rect x="20" y="108" width="260" height="56" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="150" y="130" text-anchor="middle" font-size="12">t=2 read 경로</text>
+  <text x="150" y="150" text-anchor="middle" font-size="12">lock(buf) → lock(cfg)</text>
+  <text x="500" y="22" text-anchor="middle" font-size="13" font-weight="bold">lockdep의 클래스 그래프</text>
+  <rect x="350" y="70" width="130" height="40" rx="20" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="415" y="95" text-anchor="middle" font-size="12">f4_cfg_mutex</text>
+  <rect x="530" y="70" width="130" height="40" rx="20" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="595" y="95" text-anchor="middle" font-size="12">f4_buf_mutex</text>
+  <path d="M 450 70 C 480 40, 530 40, 560 68" fill="none" stroke="currentColor" marker-end="url(#ah5)"/>
+  <text x="505" y="40" text-anchor="middle" font-size="12">t=1에 기록</text>
+  <path d="M 560 112 C 530 142, 480 142, 450 112" fill="none" stroke="#d0564a" stroke-dasharray="5 3" marker-end="url(#ah5r)"/>
+  <text x="505" y="158" text-anchor="middle" font-size="12">t=2 새 간선 → 사이클!</text>
+  <line x1="20" y1="190" x2="660" y2="190" stroke="#888" stroke-dasharray="2 3"/>
+  <text x="340" y="214" text-anchor="middle" font-size="13" font-weight="bold">언젠가 두 경로가 동시에 돌면 (lockdep이 그려 주는 시나리오)</text>
+  <rect x="40" y="228" width="280" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="180" y="250" text-anchor="middle" font-size="12">CPU0: cfg 쥠</text>
+  <text x="180" y="270" text-anchor="middle" font-size="12">buf 기다림 …</text>
+  <rect x="360" y="228" width="280" height="56" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="500" y="250" text-anchor="middle" font-size="12">CPU1: buf 쥠</text>
+  <text x="500" y="270" text-anchor="middle" font-size="12">cfg 기다림 …</text>
+  <line x1="322" y1="248" x2="358" y2="248" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="358" y1="268" x2="322" y2="268" stroke="currentColor" marker-end="url(#ah5)"/>
+  <text x="340" y="314" text-anchor="middle" font-size="12">서로가 쥔 락을 기다린다 = 영원히 멈춤 (mutex라면 두 태스크가 D 상태, hung task 경고)</text>
+</svg></figure>
+<p>그림 7 — ABBA를 lockdep이 보는 방식. 위: 실제로는 겹치지 않은 두 실행이 그래프에 간선을 하나씩 남기고, 두 번째 간선이 사이클을 만드는 순간 경고한다. 아래: 그 사이클이 실제로 겹칠 때 일어날 일.</p>
+<h3 id="13-2-예제-14-f4_abba-겹치지-않아도-잡힌다">13.2 예제 14 — <code>f4_abba</code>: 겹치지 않아도 잡힌다<a class="anchor" href="#13-2-예제-14-f4_abba-겹치지-않아도-잡힌다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 태스크가 두 경로를 <strong>순서대로</strong> 한 번씩 실행한다. 동시 실행이 아니므로 실제 deadlock은 절대 일어나지 않는다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f4_abba: two code paths take the same two mutexes in opposite order */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/mutex.h&gt;
+
+static DEFINE_MUTEX(f4_cfg_mutex);	/* protects sensor config  */
+static DEFINE_MUTEX(f4_buf_mutex);	/* protects sample buffer  */
+
+static void f4_ioctl_path(void)		/* ioctl(SET_RATE): cfg -&gt; buf */
+{
+	mutex_lock(&amp;f4_cfg_mutex);
+	mutex_lock(&amp;f4_buf_mutex);
+	pr_info("ioctl path: cfg -&gt; buf ok\n");
+	mutex_unlock(&amp;f4_buf_mutex);
+	mutex_unlock(&amp;f4_cfg_mutex);
+}
+
+static void f4_read_path(void)		/* read(): buf -&gt; cfg  (BUG) */
+{
+	mutex_lock(&amp;f4_buf_mutex);
+	mutex_lock(&amp;f4_cfg_mutex);
+	pr_info("read path : buf -&gt; cfg ok\n");
+	mutex_unlock(&amp;f4_cfg_mutex);
+	mutex_unlock(&amp;f4_buf_mutex);
+}
+
+static int __init f4_abba_init(void)
+{
+	f4_ioctl_path();	/* lockdep records cfg -&gt; buf      */
+	f4_read_path();		/* buf -&gt; cfg closes a cycle       */
+	return 0;
+}
+
+static void __exit f4_abba_exit(void) { }
+module_init(f4_abba_init);
+module_exit(f4_abba_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("F4: ABBA lock order, caught by lockdep");</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 14.81s
+[   17.073973] f4_abba: ioctl path: cfg -&gt; buf ok
+[   17.074414] 
+[   17.076289] ======================================================
+[   17.076703] WARNING: possible circular locking dependency detected
+[   17.077545] 6.18.55-dbg #1 Tainted: G           O       
+[   17.078742] ------------------------------------------------------
+[   17.079711] insmod/94 is trying to acquire lock:
+[   17.080049] ffffc3b7e2b32078 (f4_cfg_mutex){+.+.}-{4:4}, at: f4_abba_init+0x6c/0xfb8 [f4_abba]
+[   17.082185] 
+[   17.082185] but task is already holding lock:
+[   17.082554] ffffc3b7e2b32118 (f4_buf_mutex){+.+.}-{4:4}, at: f4_abba_init+0x60/0xfb8 [f4_abba]
+[   17.083224] 
+[   17.083224] which lock already depends on the new lock.
+[   17.083224] 
+[   17.083792] 
+[   17.083792] the existing dependency chain (in reverse order) is:
+[   17.084277] 
+[   17.084277] -&gt; #1 (f4_buf_mutex){+.+.}-{4:4}:
+[   17.084666]        lock_acquire+0x22c/0x378
+[   17.085330]        __mutex_lock+0xb8/0x820
+[   17.085649]        mutex_lock_nested+0x2c/0x40
+[   17.085965]        f4_abba_init+0x38/0xfb8 [f4_abba]
+[   17.086145]        do_one_initcall+0x84/0x380
+...
+[   17.087509] -&gt; #0 (f4_cfg_mutex){+.+.}-{4:4}:
+[   17.087649]        check_prev_add+0x110/0xdc0
+[   17.087731]        __lock_acquire+0x12fc/0x15d8
+[   17.087813]        lock_acquire+0x22c/0x378
+[   17.087889]        __mutex_lock+0xb8/0x820
+[   17.087964]        mutex_lock_nested+0x2c/0x40
+[   17.088044]        f4_abba_init+0x6c/0xfb8 [f4_abba]
+...
+[   17.091359] other info that might help us debug this:
+[   17.091359] 
+[   17.091897]  Possible unsafe locking scenario:
+[   17.091897] 
+[   17.092305]        CPU0                    CPU1
+[   17.092609]        ----                    ----
+[   17.092904]   lock(f4_buf_mutex);
+[   17.093171]                                lock(f4_cfg_mutex);
+[   17.094230]                                lock(f4_buf_mutex);
+[   17.094650]   lock(f4_cfg_mutex);
+[   17.094924] 
+[   17.094924]  *** DEADLOCK ***
+[   17.094924] 
+[   17.095310] 1 lock held by insmod/94:
+[   17.095643]  #0: ffffc3b7e2b32118 (f4_buf_mutex){+.+.}-{4:4}, at: f4_abba_init+0x60/0xfb8 [f4_abba]
+...
+[   17.113066] f4_abba: read path : buf -&gt; cfg ok</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>trying to acquire lock: f4_cfg_mutex</code> / <code>already holding lock: f4_buf_mutex</code> — 지금 이 순간 buf → cfg 간선을 만들려 한다.</li><li><code>the existing dependency chain (in reverse order)</code> — 이미 있는 반대 방향 경로. <code>-&gt; #1 (f4_buf_mutex)</code>의 스택(<code>f4_abba_init+0x38</code>, 즉 <code>f4_ioctl_path</code> 인라인)은 "cfg를 쥔 채 buf를 잡은" 옛 기록이다. 체인이 길면 A → B → C → A처럼 세 개 이상의 락을 거친 사이클도 보여 준다.</li><li><code>Possible unsafe locking scenario</code> — 그림 7 아래 그림의 텍스트판.</li><li>마지막 줄 <code>read path : buf -&gt; cfg ok</code> — <strong>실제로는 멈추지 않았다.</strong> 이것이 lockdep의 가치다. 테스트에서 한 번도 겹치지 않은 경로 조합도 잡는다.</li><li><code>{+.+.}-{4:4}</code>: 앞은 IRQ 사용 상태(이 mutex는 IRQ 켜진 process context에서만 쓰였다), 뒤는 wait type(4 = sleeping lock).</li></ul>
+<h3 id="13-3-예제-15-lockdep이-그린-그래프를-직접-보기">13.3 예제 15 — lockdep이 그린 그래프를 직접 보기<a class="anchor" href="#13-3-예제-15-lockdep이-그린-그래프를-직접-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 모듈을 넣은 뒤 <code>/proc/lockdep</code>(클래스와 간선)과 <code>/proc/lockdep_stats</code>를 읽는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>insmod /f4_abba.ko
+grep -A3 -E "f4_(cfg|buf)_mutex$" /proc/lockdep
+grep -E "lock-classes|direct dependencies|dependency chains:|debug_locks" /proc/lockdep_stats</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0000000064a53937 FD:    2 BD:    1 +.+.: f4_cfg_mutex
+ -&gt; [00000000e0689058] f4_buf_mutex
+
+00000000e0689058 FD:    1 BD:    2 +.+.: f4_buf_mutex
+
+ lock-classes:                          715 [max: 8192]
+ direct dependencies:                  3330 [max: 32768]
+ indirect dependencies:               11675
+ all direct dependencies:             29620
+ dependency chains:                    3488 [max: 65536]
+ debug_locks:                             0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>f4_cfg_mutex -&gt; f4_buf_mutex</code> 간선 하나만 있다. 사이클을 만드는 buf → cfg 간선은 경고와 함께 <strong>추가가 거부됐다.</strong> <code>FD</code>(forward dependencies)·<code>BD</code>(backward)는 그 클래스에서 앞뒤로 닿는 클래스 수다.</li><li>부팅만 했는데 커널 전체에 락 클래스 715개, 직접 의존 3330개가 이미 기록돼 있다. lockdep은 내 모듈만이 아니라 <strong>커널 전체의 락 순서</strong>를 검사한다. 내 드라이버의 락이 I2C 코어나 네트워크 스택의 락과 엮인 사이클도 잡힌다.</li><li><strong><code>debug_locks: 0</code></strong> — 첫 경고를 낸 순간 lockdep은 스스로 꺼진다. 망가진 상태에서 계속 검사하면 거짓 경고가 쏟아지기 때문이다. 그래서 <strong>첫 lockdep 경고가 가장 중요하고</strong>, 하나를 고친 뒤 다시 부팅해야 다음 문제가 보인다. CI에서 부팅 로그에 lockdep 경고가 하나라도 있으면 실패로 처리하는 이유다.</li></ul>
+<h3 id="13-4-lockdep이-잡는-것-정리">13.4 lockdep이 잡는 것 정리<a class="anchor" href="#13-4-lockdep이-잡는-것-정리" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>경고 제목</th><th>뜻</th><th>이 노트 예제</th></tr></thead><tbody><tr><td><code>possible circular locking dependency detected</code></td><td>락 순서 사이클 (ABBA)</td><td>예제 14</td></tr><tr><td><code>inconsistent {IN-HARDIRQ-W} -&gt; {HARDIRQ-ON-W} usage</code></td><td>IRQ 안에서 쓰는 락을 IRQ 켠 채 잡음</td><td>예제 5</td></tr><tr><td><code>inconsistent {IN-SOFTIRQ-W} -&gt; {SOFTIRQ-ON-W} usage</code></td><td>softirq 안에서 쓰는 락을 BH 켠 채 잡음 → <code>_bh</code> 필요</td><td>(같은 원리)</td></tr><tr><td><code>Invalid wait context</code></td><td>문맥이 허용하는 것보다 "더 잠드는" 락을 잡음</td><td>예제 7, 8</td></tr><tr><td><code>possible recursive locking detected</code></td><td>같은 클래스 락을 또 잡음 (중첩이 정당하면 <code>mutex_lock_nested</code>·<code>spin_lock_nested</code>로 subclass 지정)</td><td>—</td></tr><tr><td><code>suspicious RCU usage</code> (<code>PROVE_RCU</code>)</td><td>RCU 구간 밖에서 <code>rcu_dereference</code> 등</td><td>—</td></tr><tr><td><code>BUG: sleeping function called from invalid context</code> (<code>DEBUG_ATOMIC_SLEEP</code>, lockdep과 별개)</td><td>atomic context에서 잠들 수 있는 함수 호출</td><td>예제 8</td></tr></tbody></table></div>
+<p>코드에서 lockdep에게 가정을 알려 주는 방법도 있다. <code>lockdep_assert_held(&amp;d-&gt;lock)</code>를 "이 함수는 락을 쥔 채 불려야 한다"는 헬퍼 맨 앞에 두면, 락 없이 부른 호출자를 디버그 커널이 잡는다. 일반 커널에서는 코드가 사라진다.</p>
+<hr>
+<h2 id="14-어떤-것을-고르나-결정-표">14. 어떤 것을 고르나 — 결정 표<a class="anchor" href="#14-어떤-것을-고르나-결정-표" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>상황 (예: 센서 키트 드라이버)</th><th>고를 것</th><th>이유</th></tr></thead><tbody><tr><td>통계 카운터 하나 (<code>rx_errors++</code>)</td><td><code>atomic_t</code>/<code>atomic_long_t</code>, 많이 쓰이면 per-CPU</td><td>변수 하나에는 락이 필요 없다</td></tr><tr><td>객체 수명 (open 횟수, 참조)</td><td><code>refcount_t</code> / <code>kref</code></td><td>overflow·use-after-free를 잡아 준다</td></tr><tr><td>"지금 진행 중" 플래그 하나</td><td><code>test_and_set_bit</code></td><td>락 없는 1회 실행 보장</td></tr><tr><td>IMU IRQ 핸들러와 <code>read()</code>가 공유하는 링버퍼 인덱스</td><td><code>spin_lock_irqsave</code> (IRQ 쪽은 <code>spin_lock</code>)</td><td>hardirq가 경쟁자</td></tr><tr><td>timer_list·tasklet 콜백과 공유</td><td><code>spin_lock_bh</code></td><td>softirq가 경쟁자</td></tr><tr><td><code>ioctl</code>이 I2C로 센서를 설정 (잠들어야 함)</td><td><code>mutex</code> (<code>mutex_lock_interruptible</code>)</td><td>쥔 채 잠든다</td></tr><tr><td>N개 하드웨어 슬롯 세기</td><td><code>semaphore</code> 또는 atomic + wait queue</td><td>카운팅</td></tr><tr><td>"일 끝나면 깨워 줘"</td><td><code>completion</code> (F3)</td><td>락이 아니라 이벤트</td></tr><tr><td>읽기 압도적, 포인터로 교체 가능한 설정·목록</td><td>RCU (<code>rcu_dereference</code>/<code>rcu_assign_pointer</code>/<code>kfree_rcu</code>)</td><td>reader 비용 0</td></tr><tr><td>작은 값 몇 개, writer가 기다리면 안 됨 (타임스탬프 쌍)</td><td>seqlock / seqcount</td><td>reader retry, writer 우선</td></tr><tr><td>CPU별로 쪼갤 수 있는 통계·캐시</td><td>per-CPU + 읽을 때 합산</td><td>공유 자체를 없앰</td></tr><tr><td>읽기 많고 구간이 긴데 RCU가 안 맞음</td><td><code>rw_semaphore</code></td><td>드물다, 측정하고 고른다</td></tr><tr><td>irqchip·스케줄러·HARD hrtimer 안</td><td><code>raw_spinlock_t</code></td><td>PREEMPT_RT에서도 돌아야 함</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-커널-안에서는-무슨-일이-일어나나">15. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#15-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<p>세 가지 대표 API가 커널 안에서 어떤 함수로 내려가는지 6.18 소스 기준으로 따라가 보자. 위 예제들의 스택 트레이스에 나온 이름(<code>_raw_spin_lock</code>, <code>mutex_lock_nested</code>, <code>__mutex_lock</code>, <code>__might_sleep</code>)이 전부 이 경로 위에 있다.</p>
+<figure class="chart"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="110" y="22" text-anchor="middle" font-size="13" font-weight="bold">spin_lock(&amp;l)</text>
+  <text x="340" y="22" text-anchor="middle" font-size="13" font-weight="bold">mutex_lock(&amp;m)</text>
+  <text x="570" y="22" text-anchor="middle" font-size="13" font-weight="bold">RCU</text>
+  <rect x="15" y="36" width="190" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="110" y="54" text-anchor="middle" font-size="12">_raw_spin_lock</text>
+  <text x="110" y="72" text-anchor="middle" font-size="12">→ __raw_spin_lock</text>
+  <rect x="15" y="100" width="190" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="110" y="118" text-anchor="middle" font-size="12">preempt_disable()</text>
+  <text x="110" y="136" text-anchor="middle" font-size="12">spin_acquire (lockdep)</text>
+  <rect x="15" y="164" width="190" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="110" y="182" text-anchor="middle" font-size="12">queued_spin_lock</text>
+  <text x="110" y="200" text-anchor="middle" font-size="12">cmpxchg 0 → LOCKED</text>
+  <rect x="15" y="228" width="190" height="58" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="110" y="248" text-anchor="middle" font-size="12">실패 시 slowpath</text>
+  <text x="110" y="266" text-anchor="middle" font-size="12">MCS 큐에 줄 서서</text>
+  <text x="110" y="282" text-anchor="middle" font-size="12">자기 노드에서 spin</text>
+  <line x1="110" y1="80" x2="110" y2="98" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="110" y1="144" x2="110" y2="162" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="110" y1="208" x2="110" y2="226" stroke="currentColor" marker-end="url(#ah6)"/>
+  <rect x="245" y="36" width="190" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="54" text-anchor="middle" font-size="12">might_sleep()</text>
+  <text x="340" y="72" text-anchor="middle" font-size="12">atomic 문맥이면 BUG</text>
+  <rect x="245" y="100" width="190" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="118" text-anchor="middle" font-size="12">__mutex_trylock_fast</text>
+  <text x="340" y="136" text-anchor="middle" font-size="12">owner 0 → current</text>
+  <rect x="245" y="164" width="190" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="182" text-anchor="middle" font-size="12">optimistic spin (osq)</text>
+  <text x="340" y="200" text-anchor="middle" font-size="12">owner가 실행 중인 동안</text>
+  <rect x="245" y="228" width="190" height="58" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="340" y="248" text-anchor="middle" font-size="12">wait_list에 추가</text>
+  <text x="340" y="266" text-anchor="middle" font-size="12">TASK_UNINTERRUPTIBLE</text>
+  <text x="340" y="282" text-anchor="middle" font-size="12">schedule() — 잠든다</text>
+  <line x1="340" y1="80" x2="340" y2="98" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="340" y1="144" x2="340" y2="162" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="340" y1="208" x2="340" y2="226" stroke="currentColor" marker-end="url(#ah6)"/>
+  <rect x="475" y="36" width="190" height="44" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="570" y="54" text-anchor="middle" font-size="12">rcu_read_lock()</text>
+  <text x="570" y="72" text-anchor="middle" font-size="12">태스크의 nesting++</text>
+  <rect x="475" y="100" width="190" height="44" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="570" y="118" text-anchor="middle" font-size="12">kfree_rcu / call_rcu</text>
+  <text x="570" y="136" text-anchor="middle" font-size="12">CPU별 콜백 큐에 예약</text>
+  <rect x="475" y="164" width="190" height="44" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="570" y="182" text-anchor="middle" font-size="12">GP kthread가 모든 CPU의</text>
+  <text x="570" y="200" text-anchor="middle" font-size="12">quiescent state 확인</text>
+  <rect x="475" y="228" width="190" height="58" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="570" y="248" text-anchor="middle" font-size="12">grace period 끝</text>
+  <text x="570" y="266" text-anchor="middle" font-size="12">RCU softirq/kthread가</text>
+  <text x="570" y="282" text-anchor="middle" font-size="12">콜백 실행 (kfree)</text>
+  <line x1="570" y1="144" x2="570" y2="162" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="570" y1="208" x2="570" y2="226" stroke="currentColor" marker-end="url(#ah6)"/>
+  <rect x="15" y="316" width="650" height="88" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="338" text-anchor="middle" font-size="12">드라이버에서 다시 만나는 곳</text>
+  <text x="340" y="360" text-anchor="middle" font-size="12">IRQ 핸들러 ↔ read(): spinlock_irqsave (F6, H3) · ioctl의 I2C/SPI 전송: mutex (I1, I2)</text>
+  <text x="340" y="380" text-anchor="middle" font-size="12">장치 목록·설정 교체: RCU · 타임스탬프: seqlock 기반 ktime_get (F8)</text>
+  <text x="340" y="398" text-anchor="middle" font-size="12">wait queue·completion 내부도 spinlock으로 보호된 리스트다 (F3)</text>
+</svg></figure>
+<p>그림 8 — 세 API의 커널 내부 경로. spinlock은 "선점 끄기 + 원자 명령(+ 실패 시 MCS 큐)", mutex는 "might_sleep 검사 + 원자 명령(+ 돌기 + 잠들기)", RCU reader는 태스크 로컬 카운터뿐이고 무거운 일은 전부 updater 쪽 grace period 기계가 한다.</p>
+<p>구조체로 보면:</p>
+<figure class="code"><pre><code>spinlock_t                         struct mutex
+  raw_spinlock_t rlock               atomic_long_t owner      &lt;- task_struct* | flag bits
+    arch_spinlock_t raw_lock         raw_spinlock_t wait_lock &lt;- wait_list 보호
+      (qspinlock: 32-bit val)        struct optimistic_spin_queue osq
+    [lockdep_map dep_map]            struct list_head wait_list
+                                     [lockdep_map dep_map]
+
+seqlock_t                          struct rcu_head (객체 안에 넣어 둔다)
+  seqcount_spinlock_t seqcount       struct rcu_head *next
+  spinlock_t lock                    void (*func)(struct rcu_head *)</code></pre></figure>
+<p>(<code>[ ]</code>는 <code>CONFIG_DEBUG_LOCK_ALLOC</code>일 때만 있는 필드. 그래서 디버그 커널에서는 락 하나의 크기가 커진다. 정확한 필드 구성은 커널 버전과 설정에 따라 다르다 — <code>include/linux/spinlock_types.h</code>, <code>include/linux/mutex_types.h</code>, <code>include/linux/seqlock_types.h</code>, <code>include/linux/types.h</code> 참고.)</p>
+<p>모듈 연결:</p>
+<ul><li><strong>F2(실행 컨텍스트)</strong>: "잠들어도 되나"의 근거인 <code>preempt_count</code>. spinlock이 이것을 올리고, <code>might_sleep()</code>이 이것을 읽는다.</li><li><strong>F3(잠자기와 깨우기)</strong>: mutex의 slow path가 쓰는 <code>schedule()</code>, 그리고 wait queue·completion.</li><li><strong>F5(메모리 배리어)</strong>: <code>rcu_assign_pointer</code>(release), <code>rcu_dereference</code>(dependency ordering), seqlock의 <code>smp_rmb</code>, atomic의 relaxed/ordered 구분.</li><li><strong>F6·F7(인터럽트·지연 작업)</strong>: <code>_irqsave</code>와 <code>_bh</code>를 고르는 근거가 되는 hardirq·softirq·threaded IRQ.</li><li><strong>H 모듈(char 드라이버)·I 모듈(I2C·SPI)</strong>: 실제 드라이버에서 이 노트의 결정 표를 적용하는 곳.</li><li><strong>M7(커널 디버그 도구)</strong>: lockdep·KCSAN·KASAN을 켠 커널 빌드와 CI.</li></ul>
+<hr>
+<h2 id="16-embedded-실무에서-다시-보기">16. Embedded 실무에서 다시 보기<a class="anchor" href="#16-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="16-1-장면-1-imu-fifo-irq-핸들러와-read-가-같은-링버퍼를-쓴다">16.1 장면 1 — IMU FIFO: IRQ 핸들러와 <code>read()</code>가 같은 링버퍼를 쓴다<a class="anchor" href="#16-1-장면-1-imu-fifo-irq-핸들러와-read-가-같은-링버퍼를-쓴다" aria-label="link">#</a></h3>
+<p>1 kHz IMU의 data-ready IRQ가 샘플을 링버퍼에 넣고, 유저 프로세스의 <code>read()</code>가 꺼낸다. 핸들러 쪽은 <code>spin_lock</code>, <code>read()</code> 쪽은 <code>spin_lock_irqsave</code>. 그리고 <strong><code>copy_to_user</code>는 락 밖에서</strong> 한다(page fault로 잠들 수 있다).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* 실행하지 않은 코드 조각 — 구조만 */
+static irqreturn_t imu_isr(int irq, void *p)		/* hardirq */
+{
+	struct imu *d = p;
+
+	spin_lock(&amp;d-&gt;lock);				/* 이 CPU의 IRQ는 이미 꺼짐 */
+	ring_push(&amp;d-&gt;ring, imu_read_fifo_mmio(d));	/* MMIO만, I2C 금지 */
+	spin_unlock(&amp;d-&gt;lock);
+	wake_up_interruptible(&amp;d-&gt;wq);			/* F3 */
+	return IRQ_HANDLED;
+}
+
+static ssize_t imu_read(struct file *f, char __user *ubuf, size_t n, loff_t *pos)
+{
+	struct imu *d = f-&gt;private_data;
+	struct imu_sample tmp[16];
+	unsigned long flags;
+	size_t cnt;
+
+	spin_lock_irqsave(&amp;d-&gt;lock, flags);		/* IRQ가 경쟁자 */
+	cnt = ring_pop_many(&amp;d-&gt;ring, tmp, min(n / sizeof(tmp[0]), ARRAY_SIZE(tmp)));
+	spin_unlock_irqrestore(&amp;d-&gt;lock, flags);
+	if (copy_to_user(ubuf, tmp, cnt * sizeof(tmp[0])))	/* 락 밖에서 */
+		return -EFAULT;
+	return cnt * sizeof(tmp[0]);
+}</code></pre></figure>
+<p>IMU가 I2C 장치라서 IRQ에서 바로 읽을 수 없다면? 핸들러에서 읽지 말고 threaded IRQ(<code>request_threaded_irq</code>)의 스레드 함수에서 I2C로 읽는다. 그 스레드는 process context라 mutex를 쓸 수 있다(F6, F7).</p>
+<h3 id="16-2-장면-2-카메라-드라이버의-가끔-멈춤">16.2 장면 2 — 카메라 드라이버의 "가끔 멈춤"<a class="anchor" href="#16-2-장면-2-카메라-드라이버의-가끔-멈춤" aria-label="link">#</a></h3>
+<p>V4L2 카메라 드라이버의 <code>stop_streaming</code>(process context)이 <code>buf_lock</code>을 <code>spin_lock</code>으로 잡는데, 프레임 완료 IRQ도 같은 락을 잡는다. 테스트에서는 멀쩡하고, 현장에서 며칠에 한 번 멈춘다(예제 4의 RCU stall 메시지가 로그에 남아 있다면 행운이다). 디버그 커널로 한 번만 돌렸으면 예제 5의 <code>inconsistent {IN-HARDIRQ-W} -&gt; {HARDIRQ-ON-W}</code>로 첫날 잡혔다. <strong>팀 CI에 <code>PROVE_LOCKING</code> 커널 부팅 + 기능 테스트를 넣는 것</strong>이 가장 싼 보험이다.</p>
+<h3 id="16-3-장면-3-can-모터-컨트롤러-설정-테이블">16.3 장면 3 — CAN 모터 컨트롤러 설정 테이블<a class="anchor" href="#16-3-장면-3-can-모터-컨트롤러-설정-테이블" aria-label="link">#</a></h3>
+<p>모터 8개의 보정 파라미터 테이블을 제어 루프(1 kHz, RT 스레드)가 매 주기 읽고, 가끔(분 단위) 유저 공간 튜닝 도구가 <code>ioctl</code>로 바꾼다. 제어 루프가 mutex를 기다리면 지터가 생긴다. 예제 12처럼 <strong>새 테이블을 할당해 채우고 <code>rcu_assign_pointer</code>로 교체, 옛 것은 <code>kfree_rcu</code></strong>. 제어 루프는 <code>rcu_read_lock</code> + <code>rcu_dereference</code>로 읽어서 절대 기다리지 않는다.</p>
+<h3 id="16-4-장면-4-preempt_rt-커널로-가는-드론">16.4 장면 4 — PREEMPT_RT 커널로 가는 드론<a class="anchor" href="#16-4-장면-4-preempt_rt-커널로-가는-드론" aria-label="link">#</a></h3>
+<p>지연 요구 때문에 PREEMPT_RT 커널로 바꿨더니 <code>BUG: sleeping function called from invalid context</code>가 쏟아진다. 원인은 대개 ① <code>local_irq_disable()</code>이나 <code>preempt_disable()</code> 뒤에 <code>spinlock_t</code>를 잡는 코드(RT에서는 그 락이 잠드는 락), ② HARD 모드 hrtimer나 <code>IRQF_NO_THREAD</code> 핸들러 안의 <code>spinlock_t</code>(예제 7). 일반 커널에서 <code>PROVE_RAW_LOCK_NESTING</code>을 켜 두면 RT로 옮기기 전에 같은 문제를 미리 본다.</p>
+<hr>
+<h2 id="17-흔한-실수와-증상">17. 흔한 실수와 증상<a class="anchor" href="#17-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>IRQ와 공유하는 락을 process 쪽에서 <code>spin_lock</code>으로</td><td>드물게 완전 멈춤, RCU stall·watchdog 리셋</td><td>IRQ가 같은 CPU에서 같은 락을 기다림 (그림 2)</td><td>process 쪽 <code>spin_lock_irqsave</code></td></tr><tr><td>spinlock 안에서 <code>mutex_lock</code>, <code>msleep</code>, <code>kmalloc(GFP_KERNEL)</code>, <code>copy_to_user</code></td><td><code>BUG: sleeping function called from invalid context</code>, <code>scheduling while atomic</code></td><td>spinlock = atomic context</td><td>락 밖으로 옮기거나 mutex로, 할당은 <code>GFP_ATOMIC</code> 또는 미리</td></tr><tr><td>두 경로가 락 두 개를 반대 순서로</td><td>가끔 두 태스크가 D 상태로 영구 정지, hung task 경고</td><td>ABBA (그림 7)</td><td>전역 락 순서를 정해 문서화, lockdep으로 검증</td></tr><tr><td>헬퍼 함수에서 <code>spin_unlock_irq</code></td><td>호출자의 IRQ 보호가 몰래 풀려 다른 곳에서 레이스</td><td><code>_irq</code>는 무조건 IRQ를 켠다</td><td>문맥을 모르면 <code>_irqsave</code></td></tr><tr><td>참조 카운트를 <code>atomic_t</code>로</td><td>드문 use-after-free, 메모리 손상</td><td>overflow·underflow를 안 잡음</td><td><code>refcount_t</code>/<code>kref</code></td></tr><tr><td>RCU reader 밖으로 포인터를 들고 나감</td><td>드문 Oops, 쓰레기 값</td><td>grace period 뒤 해제됨</td><td>구간 안에서 <code>refcount_inc_not_zero</code></td></tr><tr><td>교체 직후 <code>kfree</code> (RCU 대기 없음)</td><td>예제 12의 <code>bad=2~3</code>, KASAN use-after-free</td><td>기존 reader가 아직 읽는 중</td><td><code>kfree_rcu</code> / <code>call_rcu</code> / <code>synchronize_rcu</code></td></tr><tr><td>읽기 많으니 <code>rwlock</code></td><td>기대한 확장성이 안 나옴</td><td>reader도 락 변수에 쓴다 (그림 4)</td><td>RCU·seqlock·per-CPU, 측정 후 결정</td></tr><tr><td>HARD hrtimer·irqchip 안에서 <code>spinlock_t</code></td><td><code>Invalid wait context</code>, RT 커널에서 BUG</td><td>RT에서 <code>spinlock_t</code>는 잠드는 락</td><td><code>raw_spinlock_t</code></td></tr><tr><td>디버그 커널로 한 번도 안 돌림</td><td>위의 모든 버그가 양산까지 숨는다</td><td>일반 커널은 검사하지 않음 (예제 8 일반 커널 출력)</td><td>CI에 <code>PROVE_LOCKING</code>·<code>DEBUG_ATOMIC_SLEEP</code>·KASAN 커널</td></tr></tbody></table></div>
+<hr>
+<h2 id="18-면접에서-이렇게-말한다">18. 면접에서 이렇게 말한다<a class="anchor" href="#18-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> What's the difference between a spinlock and a mutex? When do you use each?</p>
+<p><strong>A.</strong> spinlock은 못 잡으면 그 자리에서 돌며 기다리고, 쥔 동안 선점이 꺼져서 잠들 수 없다. 그래서 IRQ 핸들러를 포함한 어떤 문맥에서도 쓸 수 있지만 구간이 아주 짧아야 한다. mutex는 못 잡으면 잠든다. owner가 있고, 잡은 태스크만 풀 수 있고, process context에서만 쓴다. 쥔 채로 I2C 전송·메모리 할당·<code>copy_to_user</code> 같은 잠드는 일을 해야 하면 mutex다. 요즘 mutex는 owner가 다른 CPU에서 실행 중이면 잠깐 돌다가(optimistic spinning) 잠드니 짧은 구간에서도 생각보다 싸다.</p>
+<blockquote><p>A spinlock busy-waits and disables preemption while held, so the holder must never sleep — but it can be used from any context, including hard IRQ handlers, as long as the critical section is very short. A mutex puts the waiter to sleep, has an owner, can only be released by that owner, and is only usable in process context. If I need to sleep while holding the lock — an I2C transfer, a GFP_KERNEL allocation, copy_to_user — I must use a mutex. Modern mutexes also spin optimistically while the owner is running on another CPU, so they're cheaper than people expect. In my measurements on a 4-CPU QEMU guest, a heavily contended mutex even beat the spinlock because the mutex let the same CPU re-acquire it, while the fair qspinlock bounced the cache line every time — but the real fix there was per-CPU counters, which were about 60x faster than either.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Can you take a mutex in an interrupt handler?" → 안 된다. 잠들 수 있기 때문이다. threaded IRQ의 스레드 함수에서는 된다.</p>
+<p><strong>Q.</strong> When do you need spin_lock_irqsave instead of spin_lock?</p>
+<p><strong>A.</strong> 같은 데이터를 hardirq 핸들러도 만질 때, process 쪽에서 <code>_irqsave</code>를 쓴다. 안 그러면 락을 쥔 CPU에 그 IRQ가 들어와 핸들러가 같은 락을 기다리며 영원히 돈다. 락을 풀 코드가 핸들러 밑에 깔려 있기 때문이다. 핸들러 쪽은 이미 IRQ가 꺼져 있으니 그냥 <code>spin_lock</code>이다. softirq·tasklet·타이머와 공유하면 <code>_bh</code>. <code>_irq</code>는 호출자가 IRQ 켠 상태임을 확신할 때만, 모르면 <code>_irqsave</code>.</p>
+<blockquote><p>Use the irqsave variant on the process-context side whenever the same lock is also taken from a hard IRQ handler on any CPU. Otherwise the interrupt can arrive on the CPU that already holds the lock, and the handler spins forever, because the code that would release the lock is underneath it on the same CPU. Inside the handler a plain spin_lock is enough since local interrupts are already disabled. For data shared with softirqs, tasklets or timers it's spin_lock_bh. And I prefer irqsave over spin_lock_irq unless I'm certain interrupts are enabled on entry, because spin_unlock_irq unconditionally re-enables them. I reproduced this on a QEMU guest: lockdep reported "inconsistent IN-HARDIRQ-W to HARDIRQ-ON-W usage" before any hang happened, and without lockdep the real deadlock only showed up as an RCU stall 21 seconds later.</p></blockquote>
+<p><strong>Q.</strong> What is RCU and when would you use it?</p>
+<p><strong>A.</strong> Read-Copy-Update. reader는 <code>rcu_read_lock</code>/<code>rcu_dereference</code>만 하고 락도 원자 명령도 없이 읽는다. writer는 새 사본을 만들어 <code>rcu_assign_pointer</code>로 포인터를 바꿔 공개하고, 옛 객체는 그 전부터 읽던 reader가 모두 끝날 때까지(grace period) 기다렸다가 해제한다 — <code>synchronize_rcu</code>로 기다리거나 <code>call_rcu</code>/<code>kfree_rcu</code>로 예약. 읽기가 압도적이고 잠깐 옛 값을 봐도 되는 데이터, 예를 들어 설정 테이블·장치 목록·라우팅 테이블에 쓴다. writer끼리는 여전히 락이 필요하다.</p>
+<blockquote><p>RCU lets readers run with essentially zero overhead — no locks, no atomic writes to shared memory — inside rcu_read_lock and rcu_read_unlock, fetching pointers with rcu_dereference. An updater builds a new copy, publishes it with rcu_assign_pointer, and defers freeing the old version until a grace period has elapsed, meaning every reader that might have seen the old pointer has finished. You either block in synchronize_rcu or defer with call_rcu or kfree_rcu. The kernel detects the end of a grace period by waiting for every CPU to pass through a quiescent state, like a context switch or idle. It fits read-mostly data where briefly seeing the old version is fine — routing tables, config tables, device lists. Updaters still need their own lock. In my test, three lock-free readers did six million list walks while a writer replaced entries two thousand times with zero bad reads; switching to an immediate kfree produced two or three use-after-free reads per run.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Can you sleep inside an RCU read-side critical section?" → 일반 RCU에서는 안 된다. 필요하면 SRCU.</p>
+<p><strong>Q.</strong> What is a seqlock and where is it used?</p>
+<p><strong>A.</strong> 시퀀스 카운터 + writer용 spinlock이다. writer는 시작·끝에서 카운터를 올리고 reader는 락 없이 읽은 뒤 카운터가 바뀌었으면 다시 읽는다. writer가 절대 reader를 기다리지 않는 writer 우선 구조라, 자주 읽히고 가끔 쓰이는 작은 값, 대표적으로 jiffies_64와 timekeeping에 쓴다. 포인터를 따라가는 데이터에는 안 맞는다(그건 RCU).</p>
+<blockquote><p>A seqlock is a sequence counter plus a spinlock for writers. Writers bump the counter to odd before updating and to even after; readers take no lock, read the data, and retry if the counter changed or was odd. Writers never wait for readers, so it's ideal for small, frequently read values with an occasional writer — the classic users are jiffies_64 on 32-bit and the timekeeping core behind ktime_get. It doesn't work for data you dereference through pointers, because a reader could follow a freed pointer before it gets the chance to retry; that's RCU's job.</p></blockquote>
+<p><strong>Q.</strong> How do you prevent and debug deadlocks in the kernel?</p>
+<p><strong>A.</strong> 예방은 락 순서를 전역으로 정해서 문서화하고, 락을 쥔 채 다른 서브시스템을 부르는 일을 줄이는 것. 검증은 lockdep — 락 클래스 그래프를 런타임에 그려서 사이클, IRQ 안전성 위반, 잘못된 wait context를 <strong>실제 deadlock 없이</strong> 보고한다. 이미 멈춘 시스템에서는 hung task 경고, SysRq <code>w</code>(blocked task 덤프), RCU stall·soft lockup 메시지의 스택을 본다.</p>
+<blockquote><p>Prevention is mostly discipline: a documented global lock order, short critical sections, and not calling into other subsystems while holding my locks. For verification I run a kernel with PROVE_LOCKING. Lockdep tracks lock classes and builds a dependency graph at runtime, so it reports an ABBA cycle as "possible circular locking dependency detected" even if the two paths ran at different times and never actually deadlocked — I demonstrated exactly that with a module that took two mutexes in opposite orders sequentially. It also catches IRQ-unsafe usage and invalid wait contexts. One caveat: lockdep disables itself after the first splat, so you fix them one at a time. For a box that's already hung, I look at hung-task warnings, SysRq-w output, and RCU stall or soft-lockup backtraces.</p></blockquote>
+<p><strong>Q.</strong> What's the difference between atomic_t and refcount_t?</p>
+<p><strong>A.</strong> 둘 다 원자 카운터지만 <code>atomic_t</code>는 일반 정수라 넘쳐도 아무 말 없이 감싼다. <code>refcount_t</code>는 객체 수명 전용이라 overflow·underflow·0에서 증가를 감지해 경고하고 값을 포화시켜, use-after-free 대신 메모리 누수로 끝나게 한다. 참조 카운트는 <code>refcount_t</code>나 그 위의 <code>kref</code>를 쓴다.</p>
+<blockquote><p>atomic_t is a general-purpose atomic integer — it wraps silently on overflow. refcount_t is meant only for reference counts: it detects overflow, underflow and increment-from-zero, warns, and saturates the counter so the object leaks instead of being freed while still in use. On my test kernel, refcount_inc after the count hit zero printed "refcount_t: addition on 0; use-after-free" and pinned the value at 0xc0000000, while atomic_inc on INT_MAX just wrapped to INT_MIN. For object lifetimes I use refcount_t or kref on top of it.</p></blockquote>
+<p><strong>Q.</strong> What are per-CPU variables and why are they fast?</p>
+<p><strong>A.</strong> CPU마다 따로 가진 사본이다. 각 CPU가 자기 사본만 갱신하니 캐시 라인이 CPU 사이를 오가지 않고 락도 필요 없다. 남는 위험은 같은 CPU의 선점·IRQ뿐이라 <code>this_cpu_inc</code> 같은 한 번 연산이나 <code>get_cpu</code>/<code>put_cpu</code>로 막는다. 읽을 때 모든 CPU를 합산하므로 정확한 순간값이 필요 없는 통계에 맞는다.</p>
+<blockquote><p>Per-CPU variables give each CPU its own copy, so updates never contend and the cache line never bounces between cores. The only remaining hazards are preemption and interrupts on the same CPU, which this_cpu operations handle in a single instruction, or get_cpu and put_cpu for multi-step updates. Readers sum across all CPUs, so the value is approximate at any instant — perfect for statistics like packet counters. In my four-CPU test, per-CPU increments were roughly sixty times faster than a spinlock-protected counter and faster than even the unprotected, incorrect version.</p></blockquote>
+<p><strong>Q.</strong> What changes with PREEMPT_RT regarding locks?</p>
+<p><strong>A.</strong> <code>spinlock_t</code>와 <code>rwlock_t</code>가 priority inheritance가 있는 잠드는 락(rt_mutex 기반)으로 바뀌고, 대부분의 IRQ 핸들러가 스레드로 돈다. 그래서 진짜로 돌아야 하는 곳(irqchip, 스케줄러, HARD hrtimer 콜백)만 <code>raw_spinlock_t</code>를 쓴다. <code>local_irq_disable()</code> 뒤에 <code>spinlock_t</code>를 잡는 코드는 RT에서 깨진다. 일반 커널에서도 <code>PROVE_RAW_LOCK_NESTING</code>으로 미리 검사할 수 있다.</p>
+<blockquote><p>Under PREEMPT_RT, spinlock_t and rwlock_t become sleeping, priority-inheriting locks built on rt_mutex, and most interrupt handlers run as threads, so critical sections become preemptible. Code that truly has to spin — irqchip drivers, scheduler internals, hrtimer callbacks in hard mode — must use raw_spinlock_t. Patterns like disabling interrupts and then taking a spinlock_t break on RT. You can catch those on a non-RT kernel with PROVE_RAW_LOCK_NESTING; I hit exactly that as an "Invalid wait context" splat when I took a spinlock_t in a hard-mode hrtimer callback.</p></blockquote>
+<hr>
+<h2 id="19-직접-해보기">19. 직접 해보기<a class="anchor" href="#19-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong> — 단일 코어(<code>CONFIG_SMP=n</code>), <code>CONFIG_PREEMPT=y</code> 커널에서 <code>spin_lock()</code>은 무엇으로 줄어드나? 그래도 <code>_irqsave</code>가 필요한 경우는? 정답/힌트: 선점 끄기(<code>preempt_disable</code>)만 남는다. IRQ 핸들러와 공유하는 데이터면 단일 코어에서도 IRQ를 꺼야 한다(선점 끄기는 IRQ를 막지 않는다).</li><li><strong>코드</strong> — <code>f4_irqlock</code>에 <code>mode=4</code>를 추가해 hrtimer를 <code>HRTIMER_MODE_REL_SOFT</code>(softirq에서 콜백)로 바꾸고 process 쪽은 <code>raw_spin_lock</code>을 쓴다. lockdep 경고의 제목이 어떻게 바뀌는지 예측하고 확인하라. 그다음 <code>_bh</code>로 고쳐라. 정답/힌트: <code>inconsistent {IN-SOFTIRQ-W} -&gt; {SOFTIRQ-ON-W} usage</code>가 예상된다. process 쪽을 <code>raw_spin_lock_bh</code>로 바꾸면 사라진다. (이 과제는 노트 작성 때 실행하지 않았다 — 직접 돌려서 확인할 것)</li><li><strong>측정</strong> — <code>f4_race</code>를 <code>-smp 1</code>과 <code>-smp 2</code>로도 돌려 spinlock·mutex·atomic의 처리량이 CPU 수에 따라 어떻게 변하는지 표로 만들어라. <code>none</code>의 손실은 <code>-smp 1</code>에서 0이 되나? 0이면 안전하다는 뜻인가? 정답/힌트: 경합이 줄어 락 비용이 급격히 낮아진다. <code>-smp 1</code>에서 손실이 0으로 나와도 선점이 load와 store 사이에 끼면 잃을 수 있으므로 안전하지 않다(E4 §10).</li><li><strong>관찰</strong> — 디버그 커널 게스트에서 <code>cat /proc/lockdep_stats</code>, <code>head -50 /proc/lockdep</code>, <code>grep -c "" /proc/lockdep_chains</code>를 보고, 부팅만으로 락 클래스가 몇 개 생기는지 세라. 그다음 <code>f4_abba</code>를 넣기 전후로 <code>debug_locks</code> 값이 어떻게 바뀌는지 확인하라. 정답/힌트: 예제 15에서 클래스 715개, 경고 후 <code>debug_locks: 0</code>. 경고 전에는 1이다.</li><li><strong>코드</strong> — 예제 12의 writer를 <code>mode=2</code>로 확장해 <code>synchronize_rcu()</code> 후 <code>kfree()</code>(동기 방식)로 바꾸고 전체 실행 시간을 <code>kfree_rcu</code>와 비교하라. 정답/힌트: 교체 2000번 × grace period(수 ms)라 writer가 수 초 이상 걸린다. 결과는 같이 <code>bad=0</code>이다. 그래서 대량 교체에는 <code>kfree_rcu</code>/<code>call_rcu</code>를 쓴다.</li><li><strong>설계</strong> — 1 kHz IRQ가 갱신하는 <code>struct imu_state { s32 ax, ay, az; u64 ts; }</code>를 여러 유저 스레드가 <code>ioctl</code>로 최신값을 읽어 간다. spinlock_irqsave, seqlock, RCU 중 무엇을 고를지 근거와 함께 써라. 정답/힌트: 작은 값 묶음 + writer가 IRQ라 기다리면 안 됨 + reader 다수 → seqlock. writer는 IRQ 핸들러 하나뿐이라 IRQ 안에서 <code>write_seqlock</code>, reader는 process context에서 <code>read_seqbegin</code>/<code>read_seqretry</code> 루프(IRQ가 끼어들면 그냥 한 번 더 읽는다). process 쪽에도 writer가 생기면 그쪽은 <code>write_seqlock_irqsave</code>. spinlock_irqsave도 정답이지만 reader가 읽는 동안 IRQ를 막아 IMU 지연이 늘어난다.</li><li><strong>관찰</strong> — 일반 커널 게스트에서 예제 4(<code>mode=2</code>)를 <code>-smp 1</code>로 돌리면 RCU stall 메시지가 나올까? 예측하고 확인하라. 정답/힌트: 멈춘 CPU를 보고해 줄 다른 CPU가 없고, 유일한 CPU는 IRQ가 꺼진 채 돈다. 메시지 없이 그냥 멈출 가능성이 높다(직접 확인할 것 — 노트 작성 때 실행하지 않았다). 양산 장비에서 하드웨어 워치독이 필요한 이유다.</li></ol>
+<hr>
+<h2 id="20-용어-사전">20. 용어 사전<a class="anchor" href="#20-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>critical section</td><td>임계 구역</td><td>공유 데이터를 만지는, 한 번에 하나만 실행돼야 하는 코드 구간</td></tr><tr><td>race condition</td><td>경쟁 상태</td><td>실행 순서에 따라 결과가 달라지는 버그</td></tr><tr><td>lost update</td><td>갱신 손실</td><td>두 RMW가 겹쳐 한쪽 결과가 덮이는 것</td></tr><tr><td>atomic context</td><td>원자 문맥</td><td>잠들 수 없는 실행 상태 (spinlock 보유, IRQ, softirq, 선점 끔)</td></tr><tr><td>spinlock</td><td>스핀락</td><td>못 잡으면 돌며 기다리는 락, 쥔 동안 선점 꺼짐</td></tr><tr><td>qspinlock</td><td>큐 스핀락</td><td>MCS 큐 기반의 공정한 spinlock 구현 (arm64·x86 기본)</td></tr><tr><td>raw_spinlock_t</td><td>원시 스핀락</td><td>PREEMPT_RT에서도 진짜 spin하는 락</td></tr><tr><td>mutex</td><td>뮤텍스</td><td>owner 있는 잠드는 락, process context 전용</td></tr><tr><td>optimistic spinning</td><td>낙관적 스핀</td><td>owner가 실행 중이면 잠들기 전에 잠깐 도는 mutex 최적화</td></tr><tr><td>semaphore</td><td>세마포어</td><td>개수를 세는 잠드는 락 (legacy)</td></tr><tr><td>rwlock / rw_semaphore</td><td>읽기·쓰기 락</td><td>읽기 여럿, 쓰기 하나 (spin / sleep)</td></tr><tr><td>atomic_t</td><td>원자 정수</td><td>락 없이 원자적 RMW 가능한 정수</td></tr><tr><td>refcount_t</td><td>참조 카운트</td><td>overflow·underflow·0에서 증가를 잡는 수명 전용 카운터</td></tr><tr><td>per-CPU variable</td><td>CPU별 변수</td><td>CPU마다 따로 둔 사본, 공유가 없어 락 불필요</td></tr><tr><td>RCU</td><td>Read-Copy-Update</td><td>읽기는 락 없이, 쓰기는 복사·교체·지연 해제</td></tr><tr><td>grace period</td><td>유예 기간</td><td>교체 전에 시작한 모든 RCU reader가 끝날 때까지의 시간</td></tr><tr><td>quiescent state</td><td>휴지 상태</td><td>CPU가 RCU reader 구간 밖임이 확실한 지점 (context switch, idle)</td></tr><tr><td>seqlock</td><td>시퀀스 락</td><td>시퀀스 번호로 reader가 retry하는 writer 우선 락</td></tr><tr><td>lockdep</td><td>락 검증기</td><td>락 클래스 의존 그래프로 deadlock 가능성을 런타임에 증명</td></tr><tr><td>lock class</td><td>락 클래스</td><td>lockdep이 같은 것으로 보는 락들의 묶음 (보통 초기화 위치·변수 이름)</td></tr><tr><td>lock_stat</td><td>락 통계</td><td>경합 횟수·대기·보유 시간 (<code>/proc/lock_stat</code>)</td></tr><tr><td>ABBA deadlock</td><td>순서 역전 교착</td><td>두 경로가 두 락을 반대 순서로 잡아 서로 기다림</td></tr><tr><td>PREEMPT_RT</td><td>실시간 선점</td><td>spinlock을 잠드는 락으로, IRQ를 스레드로 바꾸는 커널 설정</td></tr><tr><td>wait type</td><td>대기 유형</td><td>lockdep이 락·문맥에 매기는 "얼마나 잠드나" 등급 (spin·config·sleep)</td></tr></tbody></table></div>
+<hr>
+<h2 id="21-요약-체크리스트">21. 요약 &amp; 체크리스트<a class="anchor" href="#21-요약-체크리스트" aria-label="link">#</a></h2>
+<p>커널 코드는 SMP·선점·hardirq·softirq라는 네 방향에서 동시에 실행되므로, 공유 데이터마다 "누가 또 만지나"를 먼저 묻는다. 변수 하나면 atomic(수명이면 refcount_t), CPU별로 쪼갤 수 있으면 per-CPU, 읽기가 압도적이면 RCU나 seqlock, 그 밖에는 락이다. 락은 잠들어야 하면 mutex, 아니면 spinlock이고, spinlock은 경쟁자가 hardirq면 <code>_irqsave</code>, softirq면 <code>_bh</code>를 쓴다. 측정해 보면 락 종류보다 <strong>공유를 줄이는 설계</strong>가 수십 배 차이를 낸다(per-CPU 97 Mops/s vs spinlock 1.7). 이 규칙 위반은 일반 커널에서 조용히 숨었다가 현장에서 "가끔 멈춤"으로 나타나므로, lockdep·<code>DEBUG_ATOMIC_SLEEP</code> 커널로 반드시 한 번 돌린다. lockdep은 실제 deadlock 없이도 사이클·IRQ 안전성·wait context 위반을 증명하고, 첫 경고 뒤에는 꺼진다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>커널 동시성의 네 원천과 각각을 막는 장치를 그림으로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>spinlock과 mutex의 차이를 문맥·잠듦·owner·비용으로 30초 안에 영어로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"이 데이터를 또 누가 만지나"로 <code>spin_lock</code>/<code>_bh</code>/<code>_irq</code>/<code>_irqsave</code>/mutex를 고를 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>IRQ self-deadlock이 왜 같은 CPU에서만 생기는지 설명하고 재현할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>raw_spinlock_t</code>가 필요한 곳과 PREEMPT_RT에서 바뀌는 것을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>mutex의 fast path·optimistic spinning·slow path를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>atomic_t</code>와 <code>refcount_t</code>의 차이를 실제 경고 메시지와 함께 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>per-CPU 변수를 <code>this_cpu_inc</code>/<code>get_cpu</code>로 쓰고 합산할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>RCU의 reader·updater·grace period를 타임라인으로 그리고, <code>kfree_rcu</code>로 리스트 항목을 교체하는 코드를 짤 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>seqlock reader의 retry 루프를 짜고 언제 RCU 대신 seqlock인지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>lockdep의 <code>circular dependency</code>, <code>inconsistent lock state</code>, <code>Invalid wait context</code> 경고를 위에서부터 읽을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>/proc/lock_stat</code>에서 contentions·acq-bounces·호출 위치로 병목 락을 찾을 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — Locking 문서 모음: <a href="https://docs.kernel.org/locking/locktypes.html">Lock types and their rules</a>, <a href="https://docs.kernel.org/kernel-hacking/locking.html">Unreliable Guide To Locking</a>, <a href="https://docs.kernel.org/locking/mutex-design.html">Generic Mutex Subsystem</a>, <a href="https://docs.kernel.org/locking/seqlock.html">Sequence counters and sequential locks</a>, <a href="https://docs.kernel.org/locking/lockdep-design.html">Runtime locking correctness validator (lockdep)</a>, <a href="https://docs.kernel.org/locking/lockstat.html">Lock Statistics</a></li><li>docs.kernel.org — RCU: <a href="https://docs.kernel.org/RCU/whatisRCU.html">What is RCU? – "Read, Copy, Update"</a>, <a href="https://docs.kernel.org/RCU/checklist.html">Review Checklist for RCU Patches</a></li><li>docs.kernel.org — <a href="https://docs.kernel.org/core-api/this_cpu_ops.html">this_cpu operations</a>, <a href="https://docs.kernel.org/core-api/atomic_ops.html">Semantics and Behavior of Atomic and Bitmask Operations</a></li><li>랩 커널 소스(<code>/var/lab/src/linux-6.18.55</code>, 또는 elixir.bootlin.com의 v6.18): <code>kernel/locking/mutex.c</code>, <code>kernel/locking/qspinlock.c</code>, <code>include/linux/spinlock_api_smp.h</code>, <code>kernel/locking/lockdep.c</code>, <code>kernel/locking/lockdep_proc.c</code>, <code>kernel/rcu/tree.c</code>, <code>kernel/rcu/tree_plugin.h</code>, <code>include/linux/seqlock.h</code>, <code>kernel/time/jiffies.c</code>, <code>lib/refcount.c</code></li><li>Paul E. McKenney, "Is Parallel Programming Hard, And, If So, What Can You Do About It?" (perfbook) — RCU·per-CPU·락 확장성의 원전</li><li>Jonathan Corbet 외, "Linux Device Drivers, 3rd ed." 5장 Concurrency and Race Conditions (오래됐지만 spinlock·semaphore 기본 개념은 유효; API 일부는 바뀜)</li><li>Bootlin, "Linux kernel and driver development" 교육 슬라이드 — Locking 장</li><li>OSTEP 28장 Locks, 29장 Lock-based Concurrent Data Structures, 32장 Common Concurrency Problems (deadlock)</li><li>이 노트와 이어지는 노트: A8(유저 동기화·futex), E4(atomic context), F2, F3, F5, F6, F7, M7</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-10_F3_sleep_wakeup.html"><span class="dir">← 이전</span><span class="nm">F3. 잠자기와 깨우기 — wait queue, wait_event, completion, schedule()</span></a><a class="next" href="2026-10-10_F5_memory_barriers.html"><span class="dir">다음 →</span><span class="nm">F5. 메모리 배리어와 순서 — compiler barrier · smp_mb/rmb/wmb · READ_ONCE/WRITE_ONCE · acquire/release · MMIO·DMA 순서</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-커널-안의-동시성은-어디서-오나">0. 큰 그림 — 커널 안의 동시성은 어디서 오나</a></li><li class="l3"><a href="#0-1-이-노트의-지도">0.1 이 노트의 지도</a></li><li class="l2"><a href="#1-실습-준비-디버그-커널-smp-4-모듈-하나-부팅-하나">1. 실습 준비 — 디버그 커널, -smp 4, 모듈 하나 = 부팅 하나</a></li><li class="l3"><a href="#1-1-예제-1-두-커널의-락-관련-설정-비교">1.1 예제 1 — 두 커널의 락 관련 설정 비교</a></li><li class="l3"><a href="#1-2-예제-2-게스트-실행기-run_guest-sh">1.2 예제 2 — 게스트 실행기 run_guest.sh</a></li><li class="l2"><a href="#2-문제를-먼저-보자-카운터-하나-cpu-넷">2. 문제를 먼저 보자 — 카운터 하나, CPU 넷</a></li><li class="l3"><a href="#2-1-직관">2.1 직관</a></li><li class="l3"><a href="#2-2-예제-3-f4_race-여섯-가지-보호-방법">2.2 예제 3 — f4_race: 여섯 가지 보호 방법</a></li><li class="l3"><a href="#2-3-같은-모듈을-디버그-커널에서">2.3 같은 모듈을 디버그 커널에서</a></li><li class="l2"><a href="#3-spinlock-잠깐이면-서서-기다린다">3. spinlock — "잠깐이면 서서 기다린다"</a></li><li class="l3"><a href="#3-1-직관">3.1 직관</a></li><li class="l3"><a href="#3-2-정의와-규칙">3.2 정의와 규칙</a></li><li class="l3"><a href="#3-3-api-한눈에">3.3 API 한눈에</a></li><li class="l3"><a href="#3-4-함정">3.4 함정</a></li><li class="l2"><a href="#4-어떤-변형을-쓰나-_bh-_irq-_irqsave">4. 어떤 변형을 쓰나 — _bh, _irq, _irqsave</a></li><li class="l3"><a href="#4-1-직관-같은-cpu의-인터럽트가-같은-락을-원하면">4.1 직관 — 같은 CPU의 인터럽트가 같은 락을 원하면</a></li><li class="l3"><a href="#4-2-고르는-법-이-데이터를-또-누가-만지나">4.2 고르는 법 — "이 데이터를 또 누가 만지나"</a></li><li class="l3"><a href="#4-3-예제-4-진짜-self-deadlock-lockdep-없는-일반-커널">4.3 예제 4 — 진짜 self-deadlock (lockdep 없는 일반 커널)</a></li><li class="l3"><a href="#4-4-예제-5-lockdep은-deadlock이-일어나기-전에-잡는다-mode-0">4.4 예제 5 — lockdep은 deadlock이 일어나기 전에 잡는다 (mode=0)</a></li><li class="l3"><a href="#4-5-예제-6-_irqsave로-고치면-mode-1">4.5 예제 6 — _irqsave로 고치면 (mode=1)</a></li><li class="l3"><a href="#4-6-_irq-vs-_irqsave">4.6 _irq vs _irqsave</a></li><li class="l3"><a href="#4-7-raw_spinlock-vs-spinlock-그리고-preempt_rt-예제-7-mode-3">4.7 raw_spinlock vs spinlock, 그리고 PREEMPT_RT — 예제 7 (mode=3)</a></li><li class="l2"><a href="#5-mutex-오래-걸리면-자리를-비우고-잔다">5. mutex — "오래 걸리면 자리를 비우고 잔다"</a></li><li class="l3"><a href="#5-1-정의">5.1 정의</a></li><li class="l3"><a href="#5-2-mutex는-바로-잠들지-않는다-세-단계-경로">5.2 mutex는 바로 잠들지 않는다 — 세 단계 경로</a></li><li class="l3"><a href="#5-3-예제-8-spinlock-안에서-mutex를-잡으면">5.3 예제 8 — spinlock 안에서 mutex를 잡으면</a></li><li class="l3"><a href="#5-4-측정-해석-왜-이-실험에서-mutex가-spinlock보다-빨랐나">5.4 측정 해석 — 왜 이 실험에서 mutex가 spinlock보다 빨랐나</a></li><li class="l2"><a href="#6-semaphore-개수-세는-열쇠-legacy">6. semaphore — 개수 세는 열쇠 (legacy)</a></li><li class="l2"><a href="#7-읽기는-여럿-쓰기는-하나-rwlock과-rw_semaphore">7. 읽기는 여럿, 쓰기는 하나 — rwlock과 rw_semaphore</a></li><li class="l3"><a href="#7-1-정의">7.1 정의</a></li><li class="l3"><a href="#7-2-예제-9-쓰기-없이-읽기만-다섯-가지-방법의-비용">7.2 예제 9 — 쓰기 없이 읽기만, 다섯 가지 방법의 비용</a></li><li class="l3"><a href="#7-3-함정">7.3 함정</a></li><li class="l2"><a href="#8-atomic_t-refcount_t-atomic-bitops-변수-하나면-락이-필요-없다">8. atomic_t · refcount_t · atomic bitops — 변수 하나면 락이 필요 없다</a></li><li class="l3"><a href="#8-1-정의">8.1 정의</a></li><li class="l3"><a href="#8-2-예제-10-atomic_t는-조용히-넘치고-refcount_t는-거부한다">8.2 예제 10 — atomic_t는 조용히 넘치고, refcount_t는 거부한다</a></li><li class="l3"><a href="#8-3-함정">8.3 함정</a></li><li class="l2"><a href="#9-per-cpu-변수-공유를-없애면-락도-필요-없다">9. per-CPU 변수 — 공유를 없애면 락도 필요 없다</a></li><li class="l3"><a href="#9-1-직관과-정의">9.1 직관과 정의</a></li><li class="l3"><a href="#9-2-함정">9.2 함정</a></li><li class="l2"><a href="#10-측정-정답-다섯-가지의-비용-그리고-proc-lock_stat">10. 측정 — 정답 다섯 가지의 비용, 그리고 /proc/lock_stat</a></li><li class="l3"><a href="#10-1-처리량-차트">10.1 처리량 차트</a></li><li class="l3"><a href="#10-2-예제-11-proc-lock_stat으로-경합-보기">10.2 예제 11 — /proc/lock_stat으로 경합 보기</a></li><li class="l2"><a href="#11-rcu-읽는-쪽은-아무것도-하지-않는다">11. RCU — 읽는 쪽은 아무것도 하지 않는다</a></li><li class="l3"><a href="#11-1-직관-게시판-비유">11.1 직관 — 게시판 비유</a></li><li class="l3"><a href="#11-2-api-다섯-개면-된다">11.2 API — 다섯 개면 된다</a></li><li class="l3"><a href="#11-3-예제-12-reader-3개는-락-없이-writer는-항목을-계속-교체">11.3 예제 12 — reader 3개는 락 없이, writer는 항목을 계속 교체</a></li><li class="l3"><a href="#11-4-rcu-함정">11.4 RCU 함정</a></li><li class="l2"><a href="#12-seqlock-쓰는-쪽은-절대-기다리지-않는다">12. seqlock — 쓰는 쪽은 절대 기다리지 않는다</a></li><li class="l3"><a href="#12-1-직관과-정의">12.1 직관과 정의</a></li><li class="l3"><a href="#12-2-예제-13-두-단어짜리-타임스탬프-seqlock-있이-없이">12.2 예제 13 — 두 단어짜리 타임스탬프, seqlock 있이·없이</a></li><li class="l2"><a href="#13-lock-ordering과-lockdep-일어나지-않은-deadlock-잡기">13. lock ordering과 lockdep — 일어나지 않은 deadlock 잡기</a></li><li class="l3"><a href="#13-1-abba-deadlock">13.1 ABBA deadlock</a></li><li class="l3"><a href="#13-2-예제-14-f4_abba-겹치지-않아도-잡힌다">13.2 예제 14 — f4_abba: 겹치지 않아도 잡힌다</a></li><li class="l3"><a href="#13-3-예제-15-lockdep이-그린-그래프를-직접-보기">13.3 예제 15 — lockdep이 그린 그래프를 직접 보기</a></li><li class="l3"><a href="#13-4-lockdep이-잡는-것-정리">13.4 lockdep이 잡는 것 정리</a></li><li class="l2"><a href="#14-어떤-것을-고르나-결정-표">14. 어떤 것을 고르나 — 결정 표</a></li><li class="l2"><a href="#15-커널-안에서는-무슨-일이-일어나나">15. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#16-embedded-실무에서-다시-보기">16. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#16-1-장면-1-imu-fifo-irq-핸들러와-read-가-같은-링버퍼를-쓴다">16.1 장면 1 — IMU FIFO: IRQ 핸들러와 read()가 같은 링버퍼를 쓴다</a></li><li class="l3"><a href="#16-2-장면-2-카메라-드라이버의-가끔-멈춤">16.2 장면 2 — 카메라 드라이버의 "가끔 멈춤"</a></li><li class="l3"><a href="#16-3-장면-3-can-모터-컨트롤러-설정-테이블">16.3 장면 3 — CAN 모터 컨트롤러 설정 테이블</a></li><li class="l3"><a href="#16-4-장면-4-preempt_rt-커널로-가는-드론">16.4 장면 4 — PREEMPT_RT 커널로 가는 드론</a></li><li class="l2"><a href="#17-흔한-실수와-증상">17. 흔한 실수와 증상</a></li><li class="l2"><a href="#18-면접에서-이렇게-말한다">18. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#19-직접-해보기">19. 직접 해보기</a></li><li class="l2"><a href="#20-용어-사전">20. 용어 사전</a></li><li class="l2"><a href="#21-요약-체크리스트">21. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

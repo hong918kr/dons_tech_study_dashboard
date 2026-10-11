@@ -1,0 +1,1491 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>H12. USB (Linux 관점) — host / gadget, usbcore, usb_driver, URB, configfs gadget, 디버그</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="H/2026-10-10_H12_usb_linux">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">H. HW 접근 · 버스 · H12. USB (Linux 관점) — host / gadget, usbcore, usb_driver, URB, configfs gadget, 디버그</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">H. HW 접근 · 버스 · HW Access &amp; Buses</div>
+      <h1>H12. USB (Linux 관점) — host / gadget, usbcore, usb_driver, URB, configfs gadget, 디버그</h1>
+      <div class="meta"><span>196분 읽기</span><span>1913줄</span><span>66개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: USB 디스크립터 계층(device → configuration → interface → endpoint)과 sysfs 이름(<code>1-4.1:1.0</code>)을 읽고 "어느 드라이버가 어느 interface에 붙었나"를 바로 말할 수 있다 · <code>usb_driver</code>를 <code>new_id</code>로 기존 장치에 붙이고 interrupt URB를 제출·재제출하고, 핫 언플러그(<code>device_del</code>)에서 <code>disconnect</code>가 안전하게 정리되는 것을 실측으로 보여 줄 수 있다 · URB completion이 어떤 문맥(실측: softirq/BH)에서 도는지, 그래서 왜 <code>GFP_ATOMIC</code>인지 설명할 수 있다 · <code>dummy_hcd</code> + configfs로 ACM + mass storage gadget을 조립해 <strong>같은 커널 안의 host 쪽에서</strong> <code>/dev/ttyACM0</code>·<code>/dev/sdb</code>로 끝까지 시험할 수 있다 <strong>왜 필요한가</strong>: Embedded Linux 장비는 거의 다 USB를 양쪽으로 쓴다. 위로는 PC에 붙는 디버그 콘솔·펌웨어 업데이트·Ethernet-over-USB(gadget), 아래로는 USB 카메라·LTE 모뎀·FTDI 시리얼(host). 면접에서는 "USB 드라이버는 왜 interface에 붙나?", "URB completion에서 하면 안 되는 일은?", "configfs gadget 만드는 순서는?", "장치가 갑자기 뽑히면 드라이버는?"으로 나온다 <strong>Don 기준 난이도</strong>: NVMe/PCIe 경험 덕분에 "호스트가 주도하는 큐 기반 프로토콜", "Identify 같은 자기소개 데이터", "DMA 버퍼 소유권", "핫플러그 시 in-flight 명령 정리"는 이미 몸에 있다 / 새로 배울 부분은 USB 고유 용어(endpoint·interface·class), Linux의 usbcore·URB API, gadget 프레임워크(UDC·composite·configfs) <strong>선행 노트</strong>: G2(디바이스 모델·bus/driver 매칭), G8(configfs — 거기서 UDC가 없어 멈춘 gadget 조립을 여기서 끝낸다), G9(hotplug·uevent·modalias), F4(인터럽트 문맥·softirq), F8(메모리 할당 GFP 플래그), H8(TTY — <code>ttyACM</code>·<code>ttyGS</code>·<code>ttyUSB</code>), H9(DMA)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>SSD 시절의 NVMe를 떠올려 보자. 호스트가 Submission Queue에 명령을 넣고, 드라이브는 처리 후 Completion Queue에 결과를 넣고 MSI-X로 알린다. 드라이브는 <strong>스스로 말을 걸지 못한다</strong>. 항상 호스트가 시킨 일만 한다. 그리고 처음 붙으면 호스트가 Identify로 "너 누구냐"를 묻는다.</p>
+<p>USB도 똑같은 성격의 버스다. <strong>모든 전송은 호스트가 시작한다</strong>(장치는 호스트가 "데이터 있어?" 하고 물어볼 때만 답한다). 처음 꽂히면 호스트가 <strong>디스크립터</strong>(USB판 Identify 데이터)를 읽어서 장치가 무엇인지 알아낸다. 다른 점은 버스가 hub를 통해 나무 모양으로 퍼지고, 장치가 아무 때나 <strong>뽑힌다</strong>는 것이다.</p>
+<p>Embedded Linux 엔지니어는 USB를 두 방향으로 만난다.</p>
+<ul><li><strong>Host 역할</strong>: 센서 키트 SoC에 USB 카메라(UVC), LTE 모뎀, FTDI USB-시리얼(GNSS), USB 메모리가 꽂힌다. Linux가 PC처럼 호스트가 된다. 드라이버는 <code>usb_driver</code>다.</li><li><strong>Device(gadget) 역할</strong>: 같은 SoC의 OTG 포트를 개발자 PC에 꽂으면 SoC가 "USB 장치"가 된다. PC에는 시리얼 포트(디버그 콘솔), 네트워크 카드(Ethernet-over-USB), USB 디스크(펌웨어 업데이트)로 보인다. Linux에서는 이걸 <strong>gadget</strong>이라 부르고, configfs로 조립한다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="230" y="20" width="220" height="290" rx="8" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="44" text-anchor="middle" font-size="14">센서 키트 SoC (Linux)</text>
+  <text x="340" y="64" text-anchor="middle" font-size="12">예: i.MX8M Plus, AM62, Orin</text>
+  <rect x="250" y="80" width="180" height="90" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="102" text-anchor="middle" font-size="13">USB Host 포트 (xHCI)</text>
+  <text x="340" y="124" text-anchor="middle" font-size="12">usbcore + usb_driver</text>
+  <text x="340" y="144" text-anchor="middle" font-size="12">Linux = 호스트</text>
+  <rect x="250" y="190" width="180" height="100" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="212" text-anchor="middle" font-size="13">OTG 포트 (DWC3 등)</text>
+  <text x="340" y="234" text-anchor="middle" font-size="12">UDC + gadget functions</text>
+  <text x="340" y="254" text-anchor="middle" font-size="12">Linux = USB 장치</text>
+  <text x="340" y="274" text-anchor="middle" font-size="12">(role switch로 host도 가능)</text>
+  <rect x="20" y="70" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="105" y="90" text-anchor="middle" font-size="12">USB 카메라 (UVC)</text>
+  <rect x="20" y="110" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="105" y="130" text-anchor="middle" font-size="12">LTE 모뎀 (cdc_mbim)</text>
+  <rect x="20" y="150" width="170" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="105" y="170" text-anchor="middle" font-size="12">FTDI GNSS (ftdi_sio)</text>
+  <line x1="190" y1="85" x2="248" y2="115" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="190" y1="125" x2="248" y2="125" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="190" y1="165" x2="248" y2="135" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="105" y="56" text-anchor="middle" font-size="13">아래로: 장치를 붙인다</text>
+  <rect x="490" y="180" width="170" height="120" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="575" y="202" text-anchor="middle" font-size="13">개발자 PC (호스트)</text>
+  <text x="575" y="226" text-anchor="middle" font-size="12">/dev/ttyACM0 콘솔</text>
+  <text x="575" y="248" text-anchor="middle" font-size="12">usb0 네트워크 (NCM)</text>
+  <text x="575" y="270" text-anchor="middle" font-size="12">USB 디스크 (업데이트)</text>
+  <line x1="432" y1="240" x2="488" y2="240" stroke="currentColor" marker-start="url(#ah1)" marker-end="url(#ah1)"/>
+  <text x="575" y="166" text-anchor="middle" font-size="13">위로: 내가 장치가 된다</text>
+</svg></figure>
+<p>그림 1 — 한 SoC가 USB를 두 방향으로 쓴다. 왼쪽은 host 스택(이 노트 §2~§9), 오른쪽은 gadget 스택(§10~§12).</p>
+<p>이 노트의 실습은 전부 랩 QEMU 게스트(Linux 6.18.55, arm64 <code>virt</code>)에서 돌린다. QEMU가 가짜 xHCI 컨트롤러와 USB 키보드·디스크·FTDI 시리얼을 흉내 내 주므로 <strong>host 쪽은 진짜 드라이버 경로</strong>를 그대로 탄다. gadget 쪽은 <code>dummy_hcd</code>라는 커널 모듈이 "가짜 UDC와 가짜 host 컨트롤러를 선으로 이어 주는" 역할을 해서, <strong>같은 게스트 안에서</strong> gadget을 만들고 host로 인식시키는 end-to-end 시험이 된다. VM 호스트 커널은 <code>uname -r</code> 기준 <code>7.0.0-38-generic</code>이지만, 아래 모든 출력은 그 안에서 돈 QEMU 게스트(6.18.55)의 것이다.</p>
+<div class="tw"><table><thead><tr><th>실습</th><th>무엇을</th><th>절</th></tr></thead><tbody><tr><td>QEMU <code>qemu-xhci</code> + <code>usb-kbd</code>/<code>usb-storage</code>/<code>usb-serial</code>/<code>usb-tablet</code></td><td>sysfs 이름, 디스크립터 디코드, 클래스 드라이버</td><td>§2~§4</td></tr><tr><td><code>h12_drv</code> 모듈</td><td><code>new_id</code> 바인딩, interrupt URB, completion 문맥, 핫 언플러그</td><td>§5~§7</td></tr><tr><td>xHCI tracepoint (usbmon 대체)</td><td>storage 읽기 한 번의 버스 트랜잭션</td><td>§8</td></tr><tr><td><code>h12_usbfs</code></td><td>libusb 없이 usbfs로 유저 공간 드라이버</td><td>§9</td></tr><tr><td><code>dummy_hcd</code> + configfs gadget</td><td>ACM + mass storage를 조립해 같은 커널의 host가 인식</td><td>§10</td></tr><tr><td>처리량 측정</td><td>dummy_hcd bulk 속도 vs 속도 등급, QEMU xHCI</td><td>§12</td></tr></tbody></table></div>
+<hr>
+<h2 id="1-usb-기본-토폴로지-전송-종류-디스크립터">1. USB 기본 — 토폴로지, 전송 종류, 디스크립터<a class="anchor" href="#1-usb-기본-토폴로지-전송-종류-디스크립터" aria-label="link">#</a></h2>
+<h3 id="1-1-직관-호스트가-모든-것을-묻는-나무">1.1 직관 — "호스트가 모든 것을 묻는 나무"<a class="anchor" href="#1-1-직관-호스트가-모든-것을-묻는-나무" aria-label="link">#</a></h3>
+<ul><li><strong>토폴로지</strong>: 호스트 컨트롤러 안에 <strong>root hub</strong>가 있고, 거기에 장치나 hub가 붙고, hub 아래 또 붙는다(tiered star). 최대 7계층, 버스 하나에 주소 127개.</li><li><strong>주소</strong>: 꽂힌 순간 장치는 주소 0이다. 호스트가 <code>SET_ADDRESS</code>로 1~127 중 하나를 준다. 그래서 <code>devnum</code>은 꽂을 때마다 바뀐다. 변하지 않는 것은 <strong>포트 경로</strong>(어느 hub의 몇 번 포트)이고, Linux sysfs 이름은 이 경로로 짓는다.</li><li><strong>endpoint</strong>: 장치 안의 "우편함". 번호(0~15)와 방향(IN = 장치→호스트, OUT = 호스트→장치)이 있다. endpoint 0은 모든 장치에 있는 <strong>제어용 양방향 채널</strong>이다. NVMe로 치면 endpoint 0 = Admin Queue, 나머지 endpoint = I/O Queue다.</li><li><strong>pipe</strong>: 호스트 쪽에서 본 "특정 장치의 특정 endpoint로 가는 통로". Linux 코드의 <code>usb_rcvintpipe(udev, 0x81)</code> 같은 매크로가 이 통로 값을 만든다.</li></ul>
+<h3 id="1-2-전송-종류-4가지">1.2 전송 종류 4가지<a class="anchor" href="#1-2-전송-종류-4가지" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>종류</th><th>보장</th><th>대역폭·지연</th><th>대표 용도</th><th>endpoint 예</th></tr></thead><tbody><tr><td>control</td><td>신뢰(재시도), 셋업 8바이트 + 데이터 + 상태</td><td>작고 느림</td><td>디스크립터 읽기, 설정 명령</td><td>0 (모든 장치)</td></tr><tr><td>bulk</td><td>신뢰(재시도), 남는 대역폭을 씀</td><td>크지만 지연 보장 없음</td><td>저장장치, 시리얼 데이터, 네트워크</td><td>0x81 IN, 0x02 OUT</td></tr><tr><td>interrupt</td><td>신뢰, <strong>주기적으로 폴링</strong> (<code>bInterval</code>)</td><td>작지만 지연 상한 보장</td><td>키보드·마우스, 상태 알림</td><td>0x81 IN (HID)</td></tr><tr><td>isochronous</td><td><strong>재시도 없음</strong>, 대역폭 예약</td><td>일정한 속도</td><td>오디오, 웹캠 영상</td><td>0x82 IN (UVC)</td></tr></tbody></table></div>
+<p>"interrupt 전송"이라는 이름이 헷갈리는데, 장치가 인터럽트를 거는 게 아니다. <strong>호스트가 정해진 주기로 "새 데이터 있어?" 하고 묻는 것</strong>이다(polling). 장치가 할 말이 없으면 NAK로 답하고, 호스트 컨트롤러가 하드웨어로 다음 주기에 다시 묻는다. 드라이버 입장에서는 "URB를 하나 걸어 두면 데이터가 왔을 때 completion이 불린다"로 보이니, 결과적으로 인터럽트처럼 쓰인다.</p>
+<p>속도 등급: Low 1.5 Mb/s, Full 12 Mb/s, High 480 Mb/s(USB 2.0), SuperSpeed 5 Gb/s(USB 3.x Gen1) 이상. sysfs <code>speed</code> 파일은 이 값을 Mb/s로 보여 준다(<code>12</code>, <code>480</code>, <code>5000</code>).</p>
+<h3 id="1-3-디스크립터-계층">1.3 디스크립터 계층<a class="anchor" href="#1-3-디스크립터-계층" aria-label="link">#</a></h3>
+<p>장치는 자기소개를 <strong>디스크립터</strong>라는 정해진 형식의 바이트열로 들고 있다. 모든 디스크립터의 첫 두 바이트는 <code>bLength</code>, <code>bDescriptorType</code>이라서, 바이트열을 처음부터 길이만큼씩 건너뛰며 읽으면 된다(§3에서 직접 디코드한다).</p>
+<ul><li><strong>Device descriptor</strong>(타입 1, 18바이트): <code>idVendor</code>/<code>idProduct</code>, USB 버전, endpoint 0 최대 패킷, configuration 개수.</li><li><strong>Configuration descriptor</strong>(타입 2): 전력(<code>MaxPower</code>), 자가 전원 여부, interface 개수, 그리고 <code>wTotalLength</code> — 이 configuration에 딸린 모든 디스크립터를 합친 길이. 장치는 configuration 하나를 골라(<code>SET_CONFIGURATION</code>) 쓴다. 실제로는 거의 다 configuration이 1개다.</li><li><strong>Interface descriptor</strong>(타입 4): <strong>기능 하나</strong>. class/subclass/protocol(예: 03/01/01 = HID 부트 키보드, 08/06/50 = Mass Storage SCSI BOT). 같은 interface에 <strong>alternate setting</strong>이 여러 개 있을 수 있다(예: 웹캠의 대역폭별 설정).</li><li><strong>Endpoint descriptor</strong>(타입 5): 주소(0x81 = 1번 IN), 전송 종류, <code>wMaxPacketSize</code>, <code>bInterval</code>.</li><li>그 외: String(타입 3, UTF-16LE 문자열), IAD(타입 0x0b, interface 여러 개를 한 기능으로 묶음), class-specific(0x21 HID, 0x24 CDC), SuperSpeed endpoint companion(0x30), OTG(0x09).</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="20" width="300" height="48" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="170" y="40" text-anchor="middle" font-size="13">Device: idVendor 1d6b, idProduct 0104</text>
+  <text x="170" y="58" text-anchor="middle" font-size="12">sysfs: /sys/bus/usb/devices/3-1</text>
+  <line x1="170" y1="68" x2="170" y2="88" stroke="currentColor" marker-end="url(#ah2)"/>
+  <rect x="20" y="90" width="300" height="48" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="110" text-anchor="middle" font-size="13">Configuration 1 (MaxPower 250mA)</text>
+  <text x="170" y="128" text-anchor="middle" font-size="12">bConfigurationValue = 1</text>
+  <line x1="80" y1="138" x2="80" y2="168" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="170" y1="138" x2="250" y2="168" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="260" y1="138" x2="430" y2="168" stroke="currentColor" marker-end="url(#ah2)"/>
+  <rect x="20" y="170" width="140" height="56" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="90" y="190" text-anchor="middle" font-size="13">Interface 0</text>
+  <text x="90" y="208" text-anchor="middle" font-size="12">CDC ACM 제어</text>
+  <text x="90" y="222" text-anchor="middle" font-size="11">3-1:1.0</text>
+  <rect x="180" y="170" width="140" height="56" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="250" y="190" text-anchor="middle" font-size="13">Interface 1</text>
+  <text x="250" y="208" text-anchor="middle" font-size="12">CDC 데이터</text>
+  <text x="250" y="222" text-anchor="middle" font-size="11">3-1:1.1</text>
+  <rect x="360" y="170" width="150" height="56" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="435" y="190" text-anchor="middle" font-size="13">Interface 2</text>
+  <text x="435" y="208" text-anchor="middle" font-size="12">Mass Storage</text>
+  <text x="435" y="222" text-anchor="middle" font-size="11">3-1:1.2</text>
+  <rect x="14" y="160" width="312" height="74" rx="8" fill="none" stroke="#3f9a6b" stroke-dasharray="5 4"/>
+  <text x="170" y="252" text-anchor="middle" font-size="12">IAD: 두 interface = ACM 기능 하나</text>
+  <line x1="90" y1="226" x2="90" y2="276" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="250" y1="226" x2="250" y2="276" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="435" y1="226" x2="435" y2="276" stroke="currentColor" marker-end="url(#ah2)"/>
+  <rect x="20" y="278" width="140" height="44" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="90" y="297" text-anchor="middle" font-size="12">EP 0x85 IN</text>
+  <text x="90" y="314" text-anchor="middle" font-size="12">interrupt</text>
+  <rect x="180" y="278" width="140" height="44" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="250" y="297" text-anchor="middle" font-size="12">0x81 IN, 0x02 OUT</text>
+  <text x="250" y="314" text-anchor="middle" font-size="12">bulk EP 2개</text>
+  <rect x="360" y="278" width="150" height="44" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="435" y="297" text-anchor="middle" font-size="12">0x86 IN, 0x07 OUT</text>
+  <text x="435" y="314" text-anchor="middle" font-size="12">bulk EP 2개</text>
+  <rect x="530" y="20" width="135" height="302" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="597" y="44" text-anchor="middle" font-size="13">sysfs 이름 규칙</text>
+  <text x="597" y="74" text-anchor="middle" font-size="12">버스-포트.포트</text>
+  <text x="597" y="94" text-anchor="middle" font-size="12">예: 1-4.1</text>
+  <text x="597" y="114" text-anchor="middle" font-size="11">(버스1, 포트4 hub,</text>
+  <text x="597" y="130" text-anchor="middle" font-size="11">그 hub의 포트1)</text>
+  <text x="597" y="164" text-anchor="middle" font-size="12">장치:config.intf</text>
+  <text x="597" y="184" text-anchor="middle" font-size="12">예: 1-4.1:1.0</text>
+  <text x="597" y="218" text-anchor="middle" font-size="12">usbN = root hub</text>
+  <text x="597" y="238" text-anchor="middle" font-size="12">N-0:1.0 = 그 hub의</text>
+  <text x="597" y="256" text-anchor="middle" font-size="12">interface</text>
+  <text x="597" y="290" text-anchor="middle" font-size="12">드라이버는</text>
+  <text x="597" y="308" text-anchor="middle" font-size="12">interface에 붙는다</text>
+</svg></figure>
+<p>그림 2 — 디스크립터 계층과 sysfs 이름. 예는 §10에서 만든 composite gadget(ACM + mass storage)을 host 쪽에서 본 모습 그대로다. interface마다 sysfs 노드가 따로 있고, <strong>드라이버는 interface 단위로 붙는다</strong>(<code>3-1:1.0</code>과 <code>3-1:1.1</code>은 <code>cdc_acm</code>, <code>3-1:1.2</code>는 <code>usb-storage</code>).</p>
+<p><strong>Don 경험과 연결</strong>: NVMe Identify Controller 데이터에 VID/모델명/큐 개수가 들어 있듯, USB device descriptor에는 VID/PID/configuration 개수가 들어 있다. 차이는 USB가 "한 장치 = 여러 기능(interface)"을 기본으로 한다는 점이다. 하나의 USB 장치가 시리얼 포트이면서 동시에 디스크일 수 있고, Linux는 각 interface에 서로 다른 드라이버를 붙인다. NVMe로 치면 namespace마다 다른 드라이버가 붙는 셈이다.</p>
+<hr>
+<h2 id="2-linux-host-스택-hcd-usbcore-hub-드라이버-열거-enumeration">2. Linux host 스택 — HCD, usbcore, hub 드라이버, 열거(enumeration)<a class="anchor" href="#2-linux-host-스택-hcd-usbcore-hub-드라이버-열거-enumeration" aria-label="link">#</a></h2>
+<h3 id="2-1-계층">2.1 계층<a class="anchor" href="#2-1-계층" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="15" width="640" height="40" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="40" text-anchor="middle" font-size="13">유저: /dev/input/event0 · /dev/sda · /dev/ttyUSB0 · /dev/ttyACM0 · usbfs</text>
+  <rect x="20" y="75" width="640" height="40" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="100" text-anchor="middle" font-size="13">상위 서브시스템: input · SCSI(sd) · TTY · net · V4L2 · ALSA</text>
+  <line x1="100" y1="115" x2="100" y2="133" stroke="currentColor" marker-start="url(#ah3)"/>
+  <line x1="260" y1="115" x2="260" y2="133" stroke="currentColor" marker-start="url(#ah3)"/>
+  <line x1="420" y1="115" x2="420" y2="133" stroke="currentColor" marker-start="url(#ah3)"/>
+  <line x1="580" y1="115" x2="580" y2="133" stroke="currentColor" marker-start="url(#ah3)"/>
+  <rect x="20" y="135" width="160" height="50" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="100" y="157" text-anchor="middle" font-size="13">usbhid</text>
+  <text x="100" y="175" text-anchor="middle" font-size="11">interface 03/xx/xx</text>
+  <rect x="185" y="135" width="150" height="50" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="260" y="157" text-anchor="middle" font-size="13">usb-storage</text>
+  <text x="260" y="175" text-anchor="middle" font-size="11">interface 08/06/50</text>
+  <rect x="340" y="135" width="160" height="50" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="420" y="157" text-anchor="middle" font-size="13">ftdi_sio, cdc_acm</text>
+  <text x="420" y="175" text-anchor="middle" font-size="11">VID:PID 또는 class</text>
+  <rect x="505" y="135" width="155" height="50" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="582" y="157" text-anchor="middle" font-size="13">h12_drv, usbfs</text>
+  <text x="582" y="175" text-anchor="middle" font-size="11">new_id / 유저 공간</text>
+  <text x="340" y="205" text-anchor="middle" font-size="12">interface 드라이버 (struct usb_driver) — usb_submit_urb()로 URB를 내려보낸다</text>
+  <line x1="340" y1="210" x2="340" y2="228" stroke="currentColor" marker-end="url(#ah3)"/>
+  <rect x="20" y="230" width="640" height="62" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="252" text-anchor="middle" font-size="14">usbcore (drivers/usb/core)</text>
+  <text x="340" y="272" text-anchor="middle" font-size="12">버스 타입 usb_bus_type · 드라이버 매칭 · URB 관리 · usbfs · 전원 관리</text>
+  <text x="340" y="287" text-anchor="middle" font-size="12">hub 드라이버(hub_wq): 포트 감시, 리셋, 주소 할당, 디스크립터 읽기 = 열거</text>
+  <line x1="340" y1="292" x2="340" y2="310" stroke="currentColor" marker-end="url(#ah3)"/>
+  <rect x="20" y="312" width="640" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="340" y="337" text-anchor="middle" font-size="13">HCD (struct hc_driver): xhci-hcd · ehci-hcd · ohci-hcd · dwc2 · dummy_hcd</text>
+  <line x1="340" y1="352" x2="340" y2="368" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="340" y="388" text-anchor="middle" font-size="13">HW: 호스트 컨트롤러 (QEMU qemu-xhci, PCI 0000:00:02.0) → root hub → 장치</text>
+</svg></figure>
+<p>그림 3 — Linux USB host 스택. interface 드라이버는 HW를 직접 만지지 않는다. URB를 usbcore에 주면 HCD가 컨트롤러의 링(xHCI의 TRB ring)에 넣는다.</p>
+<ul><li><strong>HCD(Host Controller Driver)</strong>: 컨트롤러 HW를 다루는 드라이버. USB 3.x는 xHCI(<code>xhci-hcd</code>) 하나로 모든 속도를 다룬다. USB 2.0 시대에는 EHCI(High) + OHCI/UHCI(Full/Low) 짝이었다. SoC에서는 DWC3의 host 모드가 내부적으로 xHCI다. HCD는 <code>struct hc_driver</code>(<code>urb_enqueue</code>, <code>urb_dequeue</code>, <code>hub_control</code> …)를 구현한다.</li><li><strong>usbcore</strong>: <code>usb_bus_type</code>을 등록하고, 장치(<code>struct usb_device</code>)와 interface(<code>struct usb_interface</code>)를 driver core에 올린다. URB 제출·취소·완료를 중개한다. 장치 드라이버 입장의 "OS"다.</li><li><strong>hub 드라이버</strong>: root hub와 외부 hub 모두를 다루는 usbcore 안의 드라이버. 포트 상태 변화(연결/해제)를 <code>hub_wq</code> 워크큐에서 처리한다.</li></ul>
+<h3 id="2-2-열거-enumeration-꽂는-순간-일어나는-일">2.2 열거(enumeration) — 꽂는 순간 일어나는 일<a class="anchor" href="#2-2-열거-enumeration-꽂는-순간-일어나는-일" aria-label="link">#</a></h3>
+<ol><li>hub가 포트 상태 변화를 알린다(root hub는 HCD 인터럽트, 외부 hub는 hub의 interrupt endpoint).</li><li>hub 드라이버가 포트를 <strong>리셋</strong>한다. 장치는 주소 0, 기본 상태가 된다. 속도가 이때 정해진다.</li><li>주소 0으로 <code>GET_DESCRIPTOR(DEVICE)</code> 앞부분을 읽어 endpoint 0의 최대 패킷 크기를 안다.</li><li><code>SET_ADDRESS</code>로 새 주소를 준다(xHCI에서는 컨트롤러가 Address Device 명령으로 대신 한다).</li><li>Device descriptor 전체, Configuration descriptor(먼저 9바이트, 그다음 <code>wTotalLength</code>만큼 전체), String descriptor를 읽는다.</li><li><code>struct usb_device</code>를 만들고 <code>device_add</code> → usbcore의 "generic" 장치 드라이버(<code>usb</code>)가 configuration을 고르고 <code>SET_CONFIGURATION</code>을 보낸다.</li><li>configuration 안의 interface마다 <code>struct usb_interface</code>를 만들고 <code>device_add</code> → <strong>uevent(MODALIAS=usb:v…p…ic…)</strong> → 맞는 interface 드라이버의 <code>probe(intf, id)</code> 호출. 모듈이 없으면 udev/mdev가 modalias로 <code>modprobe</code>.</li></ol>
+<p>NVMe 비유: 1~2는 PCIe 링크 업 + 컨트롤러 리셋, 5는 Identify, 6은 "Set Features로 큐 개수 설정", 7은 namespace 스캔 후 블록 장치 등록이다.</p>
+<h3 id="2-3-예제-1-qemu에-usb-장치-4개-꽂고-토폴로지-보기">2.3 예제 1 — QEMU에 USB 장치 4개 꽂고 토폴로지 보기<a class="anchor" href="#2-3-예제-1-qemu에-usb-장치-4개-꽂고-토폴로지-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>qemu-xhci</code>에 키보드·USB 디스크·FTDI 시리얼·태블릿을 꽂고 BusyBox <code>lsusb</code>와 <code>/sys/bus/usb/devices</code> 이름을 본다. VM에서 돌린 QEMU 명령(요지):</p>
+<figure class="code"><span class="lang">sh</span><pre><code># VM 쪽 (/var/tmp/H12). usb-serial의 반대편은 VM의 socat이 받는다
+socat UNIX-LISTEN:/var/tmp/H12/ser.sock SYSTEM:'while read l; do echo "$l" &gt;&gt; /var/tmp/H12/ser.log; echo "HOST-GOT:$l"; done' &amp;
+qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic \
+  -kernel /var/lab/out/Image -initrd i1.gz \
+  -device qemu-xhci,id=xhci \
+  -device usb-kbd,id=kbd0 \
+  -drive if=none,id=d0,file=/var/tmp/H12/h12_disk.img,format=raw \
+  -device usb-storage,drive=d0,id=stor0 \
+  -chardev socket,id=s0,path=/var/tmp/H12/ser.sock \
+  -device usb-serial,chardev=s0,id=ser0 \
+  -device usb-tablet,id=tab0 \
+  -append "console=ttyAMA0 quiet LAB_CMD=sh~/g.sh"</code></pre></figure>
+<p><code>h12_disk.img</code>는 VM에서 <code>mkfs.vfat -n H12DISK</code>로 만든 16 MiB 이미지에 <code>mcopy</code>로 <code>HELLO.TXT</code>를 넣은 것이다. 게스트 스크립트 <code>g.sh</code>의 첫 부분:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>lsusb
+ls -1 /sys/bus/usb/devices | tr '\n' ' '; echo
+for d in /sys/bus/usb/devices/*-*; do
+  case $d in *:*) continue;; esac
+  n=${d##*/}
+  printf "%-6s %-28s speed=%-4s if0-driver=%s\n" "$n" "$(cat $d/product)" "$(cat $d/speed)" \
+    "$(basename $(readlink $d/$n:1.0/driver) 2&gt;/dev/null)"
+done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55 up 0.93s
+== lsusb (busybox)
+Bus 001 Device 001: ID 1d6b:0002 Linux 6.18.55 xhci-hcd xHCI Host Controller
+Bus 001 Device 003: ID 0403:6001 QEMU QEMU USB SERIAL
+Bus 001 Device 005: ID 0627:0001 QEMU QEMU USB Tablet
+Bus 001 Device 002: ID 0627:0001 QEMU QEMU USB Keyboard
+Bus 002 Device 002: ID 46f4:0001 QEMU QEMU USB HARDDRIVE
+Bus 002 Device 001: ID 1d6b:0003 Linux 6.18.55 xhci-hcd xHCI Host Controller
+Bus 001 Device 004: ID 0409:55aa QEMU QEMU USB Hub
+== /sys/bus/usb/devices
+1-0:1.0 1-1 1-1:1.0 1-3 1-3:1.0 1-4 1-4.1 1-4.1:1.0 1-4:1.0 2-0:1.0 2-2 2-2:1.0 usb1 usb2 
+== per-device: product / driver of interface 0
+1-1    QEMU USB Keyboard            speed=480  if0-driver=usbhid
+1-3    QEMU USB SERIAL              speed=12   if0-driver=
+1-4    QEMU USB Hub                 speed=12   if0-driver=hub
+1-4.1  QEMU USB Tablet              speed=12   if0-driver=usbhid
+2-2    QEMU USB HARDDRIVE           speed=5000 if0-driver=usb-storage</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>xHCI 컨트롤러 하나가 버스 두 개</strong>를 만든다. <code>usb1</code>(1d6b:0002, USB 2.0 root hub)과 <code>usb2</code>(1d6b:0003, USB 3.x root hub). USB 3 장치(디스크, <code>speed=5000</code>)는 2번 버스에, 나머지는 1번 버스에 붙었다. 1d6b는 "Linux Foundation" VID로, root hub는 커널이 흉내 내는 가상 장치다.</li><li><code>1-4.1</code> — 태블릿은 <strong>hub 뒤</strong>에 있다. <code>qemu-xhci</code>의 USB 2 포트가 4개인데, QEMU는 빈 포트가 하나만 남으면 다음 장치를 위해 hub(<code>0409:55aa</code>)를 자동으로 끼운다. 그래서 이름이 "버스 1, 포트 4(hub), 그 hub의 포트 1"이 됐다. 진짜 보드에서도 내장 hub 칩 뒤 장치는 이렇게 점으로 이어진 이름을 갖는다.</li><li><code>devnum</code>(Device 00N)은 열거 순서대로 붙은 번호라 매번 달라질 수 있지만, <code>1-4.1</code>은 포트를 바꾸지 않는 한 같다. <strong>udev 규칙이나 스크립트에서 특정 포트를 가리킬 때는 경로 이름을 쓴다.</strong></li><li>FTDI 시리얼(<code>1-3</code>)은 interface 드라이버가 비어 있다. <code>ftdi_sio</code>가 랩 커널에서 모듈(<code>=m</code>)이고 아직 로드하지 않았기 때문이다(§4.2에서 insmod).</li><li>BusyBox <code>lsusb</code>는 <code>/sys</code>를 읽어 한 줄씩만 보여 준다. <code>-t</code>(트리)나 <code>-v</code>(디스크립터 상세)는 지원하지 않는다(§3.4). 데스크톱의 usbutils <code>lsusb -t</code>·<code>lsusb -v</code>가 하는 일을 §3에서 직접 짠다.</li></ul>
+<h3 id="2-4-sysfs의-장치-노드와-interface-노드">2.4 sysfs의 장치 노드와 interface 노드<a class="anchor" href="#2-4-sysfs의-장치-노드와-interface-노드" aria-label="link">#</a></h3>
+<p>같은 구성으로 다시 부팅해 키보드 interface와 장치 노드의 파일들을 봤다:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /sys/bus/usb/devices/1-1:1.0
+for f in bInterfaceNumber bInterfaceClass bInterfaceSubClass bInterfaceProtocol bNumEndpoints modalias; do echo "$f=$(cat $f)"; done
+ls -1d ep_* | cat; readlink driver; ls -1 /sys/bus/usb/devices/1-1/ | tr '\n' ' '
+for f in bConfigurationValue speed busnum devnum devpath maxchild; do echo "$f=$(cat /sys/bus/usb/devices/1-4.1/$f)"; done
+cat /sys/bus/usb/devices/1-1:1.0/uevent</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== interface attrs 1-1:1.0
+bInterfaceNumber=00
+bInterfaceClass=03
+bInterfaceSubClass=01
+bInterfaceProtocol=01
+bNumEndpoints=01
+modalias=usb:v0627p0001d0000dc00dsc00dp00ic03isc01ip01in00
+ep_81
+../../../../../../../../bus/usb/drivers/usbhid
+1-1:1.0 authorized avoid_reset_quirk bConfigurationValue bDeviceClass bDeviceProtocol bDeviceSubClass bMaxPacketSize0 bMaxPower bNumConfigurations bNumInterfaces bcdDevice bmAttributes busnum configuration descriptors dev devnum devpath devspec driver ep_00 idProduct idVendor ltm_capable manufacturer maxchild port power product quirks removable remove rx_lanes serial speed subsystem tx_lanes uevent urbnum version wakeup 
+== bConfigurationValue/speed/busnum/devnum/devpath of 1-4.1
+bConfigurationValue=1
+speed=12
+busnum=1
+devnum=5
+devpath=4.1
+maxchild=0
+== uevent 1-1:1.0
+DEVTYPE=usb_interface
+DRIVER=usbhid
+PRODUCT=627/1/0
+TYPE=0/0/0
+INTERFACE=3/1/1
+MODALIAS=usb:v0627p0001d0000dc00dsc00dp00ic03isc01ip01in00</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>장치 노드</strong>(<code>1-1</code>)에는 <code>idVendor</code>, <code>descriptors</code>, <code>bConfigurationValue</code>, <code>ep_00</code>(제어 endpoint), <code>urbnum</code>(지금까지 제출된 URB 수)이 있다. <strong>interface 노드</strong>(<code>1-1:1.0</code>)에는 class/subclass/protocol, 자기 endpoint(<code>ep_81</code>), 그리고 <code>driver</code> 링크가 있다. 드라이버 링크는 interface 쪽에 있다는 것이 핵심이다.</li><li><code>modalias</code> 문자열은 VID(v), PID(p), bcdDevice(d), 장치 class(dc/dsc/dp), interface class(ic/isc/ip), interface 번호(in)를 한 줄로 붙인 것이다. 모듈의 <code>MODULE_DEVICE_TABLE(usb, …)</code>가 만든 alias와 glob 매칭되어 자동 로드된다(G9).</li><li><code>bConfigurationValue</code>는 <strong>쓰기도 된다</strong>. <code>echo 0 &gt; bConfigurationValue</code>는 configuration을 해제(모든 interface 드라이버 분리), <code>echo 1</code>은 다시 설정한다. <code>authorized</code>에 0을 쓰면 장치를 논리적으로 끊는다(보안 정책에 쓰는 USB authorization). 이 쓰기들은 이 노트에서 실행하지 않았다.</li></ul>
+<hr>
+<h2 id="3-디스크립터를-직접-읽기-lsusb-v를-손으로-짜-보기">3. 디스크립터를 직접 읽기 — <code>lsusb -v</code>를 손으로 짜 보기<a class="anchor" href="#3-디스크립터를-직접-읽기-lsusb-v를-손으로-짜-보기" aria-label="link">#</a></h2>
+<h3 id="3-1-어디서-읽나">3.1 어디서 읽나<a class="anchor" href="#3-1-어디서-읽나" aria-label="link">#</a></h3>
+<ul><li><code>/sys/bus/usb/devices/&lt;장치&gt;/descriptors</code> — usbcore가 열거 때 읽어 <strong>캐시해 둔 원본 바이트</strong>. device descriptor(18바이트) 뒤에 configuration 디스크립터 묶음이 붙어 있다. 읽어도 버스 트래픽이 생기지 않는다.</li><li><code>/dev/bus/usb/BBB/DDD</code>(usbfs 노드)를 <code>read()</code>해도 같은 바이트가 나온다(§9). 데스크톱 <code>lsusb -v</code>는 이걸 읽는다.</li><li><code>/sys/kernel/debug/usb/devices</code> — 모든 장치를 사람이 읽는 텍스트로 요약(예전 <code>/proc/bus/usb/devices</code> 형식).</li></ul>
+<h3 id="3-2-예제-2-정적-c-디코더-h12_desc">3.2 예제 2 — 정적 C 디코더 <code>h12_desc</code><a class="anchor" href="#3-2-예제-2-정적-c-디코더-h12_desc" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>descriptors</code> 파일을 <code>bLength</code>만큼씩 건너뛰며 타입별로 해석한다. BusyBox 게스트에는 공유 libc가 없으므로 VM에서 <code>gcc -static</code>으로 빌드해 initramfs에 넣었다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* h12_desc.c - decode /sys/bus/usb/devices/&lt;dev&gt;/descriptors (raw USB descriptors) */
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+
+static const char *xfer[] = { "control", "isoc", "bulk", "interrupt" };
+
+int main(int argc, char **argv)
+{
+	char path[256];
+	uint8_t b[4096];
+	if (argc != 2) { fprintf(stderr, "usage: %s &lt;sysfs-dev e.g. 1-1&gt;\n", argv[0]); exit(1); }
+	snprintf(path, sizeof(path), "/sys/bus/usb/devices/%s/descriptors", argv[1]);
+	int fd = open(path, O_RDONLY);
+	if (fd &lt; 0) { perror(path); exit(1); }
+	ssize_t n = read(fd, b, sizeof(b));
+	if (n &lt; 18) { perror("read"); exit(1); }
+	close(fd);
+	printf("%s: %zd bytes\n", path, n);
+	for (ssize_t i = 0; i + 2 &lt;= n &amp;&amp; b[i] &gt;= 2; i += b[i]) {
+		uint8_t *d = &amp;b[i];
+		switch (d[1]) {
+		case 1: /* DEVICE */
+			printf("DEVICE  bcdUSB=%x.%02x class=%02x mps0=%u idVendor=%04x idProduct=%04x nConf=%u\n",
+			       d[3], d[2], d[4], d[7], d[8] | d[9] &lt;&lt; 8, d[10] | d[11] &lt;&lt; 8, d[17]);
+			break;
+		case 2: /* CONFIGURATION */
+			printf(" CONFIG  value=%u wTotalLength=%u nIf=%u attr=0x%02x MaxPower=%umA\n",
+			       d[5], d[2] | d[3] &lt;&lt; 8, d[4], d[7], d[8] * 2);
+			break;
+		case 4: /* INTERFACE */
+			printf("  IF    num=%u alt=%u nEP=%u class=%02x sub=%02x proto=%02x\n",
+			       d[2], d[3], d[4], d[5], d[6], d[7]);
+			break;
+		case 5: /* ENDPOINT */
+			printf("   EP   0x%02x %-3s %-9s wMaxPacket=%u bInterval=%u\n",
+			       d[2], (d[2] &amp; 0x80) ? "IN" : "OUT", xfer[d[3] &amp; 3],
+			       d[4] | d[5] &lt;&lt; 8, d[6]);
+			break;
+		case 0x21: printf("   (class-specific 0x21, HID or CDC functional, len %u)\n", d[0]); break;
+		case 0x24: printf("   (CS_INTERFACE 0x24, CDC functional, len %u)\n", d[0]); break;
+		case 0x09: printf("  OTG   bmAttributes=0x%02x (HNP/SRP capable bits)\n", d[2]); break;
+		case 0x30: printf("    SS-EP-companion bMaxBurst=%u\n", d[2]); break;
+		case 0x0b: printf("  IAD   firstIf=%u count=%u class=%02x\n", d[2], d[3], d[4]); break;
+		default: printf("   (type 0x%02x len %u)\n", d[1], d[0]);
+		}
+	}
+	return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>gcc -static -O2 -Wall -Wextra h12_desc.c -o h12_desc    # VM, 경고 0
+h12_desc 1-1; h12_desc 2-2; h12_desc 1-3                # QEMU 게스트</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== DESC kbd
+/sys/bus/usb/devices/1-1/descriptors: 52 bytes
+DEVICE  bcdUSB=2.00 class=00 mps0=64 idVendor=0627 idProduct=0001 nConf=1
+ CONFIG  value=1 wTotalLength=34 nIf=1 attr=0xa0 MaxPower=100mA
+  IF    num=0 alt=0 nEP=1 class=03 sub=01 proto=01
+   (class-specific 0x21, HID or CDC functional, len 9)
+   EP   0x81 IN  interrupt wMaxPacket=8 bInterval=7
+== DESC storage
+/sys/bus/usb/devices/2-2/descriptors: 62 bytes
+DEVICE  bcdUSB=3.00 class=00 mps0=9 idVendor=46f4 idProduct=0001 nConf=1
+ CONFIG  value=1 wTotalLength=44 nIf=1 attr=0xc0 MaxPower=0mA
+  IF    num=0 alt=0 nEP=2 class=08 sub=06 proto=50
+   EP   0x81 IN  bulk      wMaxPacket=1024 bInterval=0
+    SS-EP-companion bMaxBurst=15
+   EP   0x02 OUT bulk      wMaxPacket=1024 bInterval=0
+    SS-EP-companion bMaxBurst=15
+== DESC serial
+/sys/bus/usb/devices/1-3/descriptors: 50 bytes
+DEVICE  bcdUSB=2.00 class=00 mps0=8 idVendor=0403 idProduct=6001 nConf=1
+ CONFIG  value=1 wTotalLength=32 nIf=1 attr=0xa0 MaxPower=100mA
+  IF    num=0 alt=0 nEP=2 class=ff sub=ff proto=ff
+   EP   0x81 IN  bulk      wMaxPacket=64 bInterval=0
+   EP   0x02 OUT bulk      wMaxPacket=64 bInterval=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>크기 계산이 맞는다: 키보드 52 = device 18 + <code>wTotalLength</code> 34. 그 34 = config 9 + interface 9 + HID 9 + endpoint 7.</li><li><strong>장치 class가 00</strong>("interface에서 정한다")이고, 진짜 정체는 interface class에 있다: 키보드 03/01/01(HID, boot, keyboard), 디스크 08/06/50(Mass Storage, SCSI, Bulk-Only Transport), FTDI ff/ff/ff(vendor-specific — 그래서 class 드라이버가 아니라 VID:PID로 매칭하는 <code>ftdi_sio</code>가 필요하다).</li><li><code>mps0=9</code>인 디스크: USB 3에서는 endpoint 0 최대 패킷을 2의 지수로 적는다(2^9 = 512). bulk <code>wMaxPacket</code>도 USB 2 High-Speed는 512, SuperSpeed는 1024, Full-Speed FTDI는 64다. 같은 "bulk"라도 속도 등급마다 패킷 크기가 다르다.</li><li><code>bInterval=7</code>(High-Speed interrupt): 주기 = 2^(7-1) × 125 µs = 8 ms. debugfs가 아래에서 <code>Ivl=8ms</code>로 계산해 보여 준다. Full/Low-Speed에서는 <code>bInterval</code>이 그냥 ms 단위다. 이 해석 차이는 실무에서 자주 틀린다.</li><li><code>attr=0xa0</code>: bit7(항상 1) + bit5 <strong>remote wakeup</strong> 지원(키보드로 시스템 깨우기). <code>0xc0</code>: bit6 자가 전원.</li></ul>
+<h3 id="3-3-예제-3-debugfs-usb-devices-한-장치-블록">3.3 예제 3 — debugfs <code>usb/devices</code> 한 장치 블록<a class="anchor" href="#3-3-예제-3-debugfs-usb-devices-한-장치-블록" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>awk 'BEGIN{RS=""} /Keyboard/' /sys/kernel/debug/usb/devices</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>T:  Bus=01 Lev=01 Prnt=01 Port=00 Cnt=01 Dev#=  2 Spd=480  MxCh= 0
+D:  Ver= 2.00 Cls=00(&gt;ifc ) Sub=00 Prot=00 MxPS=64 #Cfgs=  1
+P:  Vendor=0627 ProdID=0001 Rev= 0.00
+S:  Manufacturer=QEMU
+S:  Product=QEMU USB Keyboard
+S:  SerialNumber=68284-0000:00:02.0-1
+C:* #Ifs= 1 Cfg#= 1 Atr=a0 MxPwr=100mA
+I:* If#= 0 Alt= 0 #EPs= 1 Cls=03(HID  ) Sub=01 Prot=01 Driver=usbhid
+E:  Ad=81(I) Atr=03(Int.) MxPS=   8 Ivl=8ms</code></pre></figure>
+<p>출력에서 볼 것: 줄 머리글자가 계층이다 — <code>T</code>(토폴로지: 버스, 계층 Lev, 부모, 포트 번호는 0부터), <code>D</code>/<code>P</code>(장치), <code>S</code>(문자열), <code>C:*</code>(현재 configuration, <code>*</code> = 활성), <code>I:*</code>(interface, <strong>어느 드라이버가 붙었는지</strong> <code>Driver=</code>), <code>E</code>(endpoint). 현장에서 "이 장치에 드라이버가 안 붙었다"를 확인하는 가장 빠른 한 화면이다(<code>Driver=(none)</code>).</p>
+<h3 id="3-4-busybox-lsusb의-한계">3.4 BusyBox <code>lsusb</code>의 한계<a class="anchor" href="#3-4-busybox-lsusb의-한계" aria-label="link">#</a></h3>
+<p>랩 BusyBox의 <code>lsusb</code>는 <code>-t</code>, <code>-v</code>를 줘도 같은 한 줄 목록만 출력한다(§10.6 출력 맨 위에서 확인). 양산 rootfs(Buildroot/Yocto)에는 usbutils를 넣어 <code>lsusb -t</code>(트리 + 드라이버 + 속도)와 <code>lsusb -v -d VID:PID</code>(전체 디스크립터)를 쓰는 것이 보통이다. 없을 때는 위의 sysfs <code>descriptors</code> + debugfs로 충분하다. 데스크톱 <code>lsusb -t</code>의 출력 형식 예(이 랩에서 실행하지 않음, 형식만 기억에서 옮김):</p>
+<figure class="code"><span class="lang">text</span><pre><code>/:  Bus 001.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/4p, 480M
+    |__ Port 001: Dev 002, If 0, Class=Human Interface Device, Driver=usbhid, 480M</code></pre></figure>
+<hr>
+<h2 id="4-클래스-드라이버가-붙는-모습-디스크와-시리얼">4. 클래스 드라이버가 붙는 모습 — 디스크와 시리얼<a class="anchor" href="#4-클래스-드라이버가-붙는-모습-디스크와-시리얼" aria-label="link">#</a></h2>
+<h3 id="4-1-예제-4-usb-디스크-usb-storage-scsi-dev-sda">4.1 예제 4 — USB 디스크: usb-storage → SCSI → <code>/dev/sda</code><a class="anchor" href="#4-1-예제-4-usb-디스크-usb-storage-scsi-dev-sda" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: interface 08/06/50에 <code>usb-storage</code>가 붙고, 그 위에 SCSI 디스크 <code>sd</code>가 올라가는 2단 구조.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>dmesg | grep -E "usb 1-1:|usb 2-2:|usb-storage|sd 0:|sda" | head -14
+mkdir -p /mnt/u; mount -t vfat /dev/sda /mnt/u &amp;&amp; ls -l /mnt/u | cat &amp;&amp; cat /mnt/u/HELLO.TXT
+cat /sys/block/sda/device/vendor /sys/block/sda/device/model; readlink -f /sys/block/sda | cut -d/ -f1-12
+umount /mnt/u</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== dmesg usb enumerate
+[    0.791598] usbcore: registered new interface driver usb-storage
+[    1.041437] usb 1-1: new high-speed USB device number 2 using xhci_hcd
+[    1.310105] usb 2-2: new SuperSpeed USB device number 2 using xhci_hcd
+[    1.330652] usb-storage 2-2:1.0: USB Mass Storage device detected
+[    1.332563] scsi host0: usb-storage 2-2:1.0
+[    2.379584] sd 0:0:0:0: Power-on or device reset occurred
+[    2.383605] sd 0:0:0:0: [sda] 32768 512-byte logical blocks: (16.8 MB/16.0 MiB)
+[    2.384591] sd 0:0:0:0: [sda] Write Protect is off
+[    2.384632] sd 0:0:0:0: [sda] Mode Sense: 63 00 10 08
+[    2.384935] sd 0:0:0:0: [sda] Write cache: enabled, read cache: enabled, supports DPO and FUA
+[    2.410669]  sda:
+[    2.410993] sd 0:0:0:0: [sda] Attached SCSI disk
+== mount storage
+total 2
+-rwxr-xr-x    1 0        0               28 Oct 10 20:46 HELLO.TXT
+hello from qemu usb-storage
+QEMU    
+QEMU HARDDISK   
+/sys/devices/platform/4010000000.pcie/pci0000:00/0000:00:02.0/usb2/2-2/2-2:1.0/host0/target0:0:0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>usb-storage 2-2:1.0</code> — 드라이버는 interface(<code>:1.0</code>)에 붙었고, 그 아래에 SCSI 호스트 <code>host0</code>이 생겼다. sysfs 경로가 <strong>PCIe 컨트롤러 → USB 버스 → 장치 → interface → SCSI host → target</strong>의 부모-자식 사슬 그대로다(G2의 디바이스 트리). 장비에서 "어느 물리 포트의 디스크가 sda냐"를 알아내는 방법이 이 경로다.</li><li>usb-storage는 SCSI 명령(READ(10) 등)을 USB bulk로 감싸 보내는 "어댑터"다(§8에서 실제 버스 트랜잭션을 본다). UAS(USB Attached SCSI)는 같은 일을 스트림으로 병렬화한 신형 프로토콜이고 드라이버는 <code>uas</code>다.</li></ul>
+<h3 id="4-2-예제-5-ftdi-usb-시리얼-vm의-socat과-대화">4.2 예제 5 — FTDI USB-시리얼: VM의 socat과 대화<a class="anchor" href="#4-2-예제-5-ftdi-usb-시리얼-vm의-socat과-대화" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: QEMU <code>usb-serial</code>은 FTDI FT232(<code>0403:6001</code>)를 흉내 내고, 반대쪽 끝은 QEMU chardev(여기서는 VM의 유닉스 소켓)에 연결된다. 게스트에서 <code>ftdi_sio</code>를 넣으면 <code>/dev/ttyUSB0</code>이 생기고, 그 포트로 쓴 바이트가 VM의 socat에 도착한다. 센서 키트에서 GNSS 모듈이 FTDI 칩으로 붙는 상황과 같다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>insmod /usbserial.ko; insmod /ftdi_sio.ko; sleep 1
+dmesg | grep -iE "ftdi|ttyUSB" | tail -3
+stty -F /dev/ttyUSB0 115200 raw -echo
+cat /dev/ttyUSB0 &gt; /tmp/rx &amp; P=$!; sleep 1
+echo "hello-from-guest" &gt; /dev/ttyUSB0; sleep 2; kill $P; echo "guest received: $(cat /tmp/rx)"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== usb-serial
+[    3.634685] usbserial: USB Serial support registered for FTDI USB Serial Device
+[    3.635187] ftdi_sio 1-3:1.0: FTDI USB Serial Device converter detected
+[    3.637396] usb 1-3: FTDI USB Serial Device converter now attached to ttyUSB0
+guest received: HOST-GOT:hello-from-guest
+VM-side socat log:
+hello-from-guest</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>게스트 → QEMU FTDI 에뮬레이션 → 유닉스 소켓 → VM의 socat(<code>while read l; do …; echo "HOST-GOT:$l"; done</code>) → 다시 게스트. 줄이 왕복했다. <code>VM-side socat log</code>는 VM 쪽에서 남긴 기록이다.</li><li><code>ftdi_sio</code>는 <code>usb-serial</code> 프레임워크(<code>usbserial.ko</code>) 위의 드라이버다. 프레임워크가 TTY 쪽(<code>ttyUSB</code>, termios, 버퍼링)을 다 해 주고, 칩 드라이버는 "baud 설정을 어떤 vendor control 요청으로 보내나", "bulk IN 패킷 앞 2바이트 상태 헤더를 떼기" 정도만 구현한다. H8의 TTY 계층과 이어진다.</li><li>함정(실제로 겪음): <code>cat</code>을 백그라운드로 띄우자마자 <code>echo</code>를 하던 초기 버전은 첫 실행은 성공했지만 다음 두 실행에서 응답이 비었다(<code>guest received:</code> 뒤가 빈 줄). 읽는 쪽이 포트를 열기 전에 도착한 바이트는 사라질 수 있다. 시리얼 시험 스크립트에서는 <strong>읽는 쪽을 먼저 열고 기다린 다음 쓴다</strong>(위 스크립트의 <code>sleep 1</code>).</li></ul>
+<hr>
+<h2 id="5-usb_driver-드라이버는-interface에-붙는다">5. <code>usb_driver</code> — 드라이버는 interface에 붙는다<a class="anchor" href="#5-usb_driver-드라이버는-interface에-붙는다" aria-label="link">#</a></h2>
+<h3 id="5-1-왜-interface인가">5.1 왜 interface인가<a class="anchor" href="#5-1-왜-interface인가" aria-label="link">#</a></h3>
+<p>USB 장치 하나가 여러 기능을 가질 수 있기 때문이다. 웹캠 하나 = 영상(interface 0, 1) + 마이크(interface 2, 3). 영상은 <code>uvcvideo</code>, 마이크는 <code>snd-usb-audio</code>가 가져가야 한다. 그래서 usbcore는 <strong>interface마다 <code>struct device</code>를 만들고</strong>, 일반 드라이버는 <code>struct usb_driver</code>로 interface에 붙는다. 장치 전체에 붙는 <code>struct usb_device_driver</code>도 있지만, 일반 드라이버가 쓸 일은 거의 없다(usbcore의 generic 드라이버와 일부 특수 드라이버용).</p>
+<div class="tw"><table><thead><tr><th>구조체</th><th>무엇</th><th>어디서 얻나</th></tr></thead><tbody><tr><td><code>struct usb_device</code></td><td>물리 장치 하나 (주소, 속도, ep0, 디스크립터 캐시)</td><td><code>interface_to_usbdev(intf)</code></td></tr><tr><td><code>struct usb_interface</code></td><td>기능 하나 (<code>dev</code>, <code>altsetting[]</code>, <code>cur_altsetting</code>)</td><td><code>probe()</code>의 첫 인자</td></tr><tr><td><code>struct usb_host_interface</code></td><td>alternate setting 하나 (<code>desc</code>, <code>endpoint[]</code>)</td><td><code>intf-&gt;cur_altsetting</code></td></tr><tr><td><code>struct usb_host_endpoint</code> / <code>usb_endpoint_descriptor</code></td><td>endpoint (주소, 종류, maxp, interval)</td><td><code>alt-&gt;endpoint[i].desc</code> 또는 <code>usb_find_int_in_endpoint()</code></td></tr><tr><td><code>struct usb_driver</code></td><td>interface 드라이버 (<code>probe</code>, <code>disconnect</code>, <code>id_table</code>, <code>suspend</code>/<code>resume</code>)</td><td>직접 정의</td></tr></tbody></table></div>
+<h3 id="5-2-id_table-매크로">5.2 <code>id_table</code> 매크로<a class="anchor" href="#5-2-id_table-매크로" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>매크로</th><th>무엇으로 매칭</th><th>쓰는 곳</th></tr></thead><tbody><tr><td><code>USB_DEVICE(vid, pid)</code></td><td>VID:PID</td><td>특정 칩 드라이버 (<code>ftdi_sio</code>, <code>cp210x</code>)</td></tr><tr><td><code>USB_DEVICE_AND_INTERFACE_INFO(vid, pid, cl, sc, pr)</code></td><td>VID:PID + interface class</td><td>한 장치 여러 interface 중 하나만 (LTE 모뎀의 특정 포트)</td></tr><tr><td><code>USB_DEVICE_INTERFACE_NUMBER(vid, pid, num)</code></td><td>VID:PID + interface 번호</td><td>모뎀의 n번 interface만</td></tr><tr><td><code>USB_INTERFACE_INFO(cl, sc, pr)</code></td><td>interface class/subclass/protocol</td><td>class 드라이버 (<code>usb-storage</code>, <code>cdc_acm</code>, <code>usbhid</code>)</td></tr><tr><td><code>USB_DEVICE_INFO(cl, sc, pr)</code></td><td>장치 class</td><td>hub 등</td></tr></tbody></table></div>
+<p><code>MODULE_DEVICE_TABLE(usb, ids)</code>를 쓰면 모듈에 <code>usb:v…p…</code> alias가 들어가서 §2.4의 <code>modalias</code>와 매칭되어 자동 로드된다. <code>driver_info</code> 필드에 칩별 quirk 포인터를 넣어 <code>probe</code>에서 <code>id-&gt;driver_info</code>로 꺼내 쓰는 것이 관용구다.</p>
+<h3 id="5-3-동적-바인딩-new_id-bind-unbind">5.3 동적 바인딩 — <code>new_id</code>, <code>bind</code>, <code>unbind</code><a class="anchor" href="#5-3-동적-바인딩-new_id-bind-unbind" aria-label="link">#</a></h3>
+<p><code>id_table</code>에 없는 장치를 개발 중에 붙여 보고 싶을 때(새 PID 시제품, 다른 드라이버가 이미 잡은 장치) 다시 빌드할 필요가 없다.</p>
+<ul><li><code>/sys/bus/usb/drivers/&lt;drv&gt;/new_id</code>에 <code>"VID PID [intf-class]"</code>를 쓰면 동적 id가 추가되고 즉시 매칭을 다시 돈다.</li><li><code>/sys/bus/usb/drivers/&lt;drv&gt;/unbind</code>에 interface 이름(<code>1-1:1.0</code>)을 쓰면 그 드라이버를 떼어 낸다. <code>bind</code>는 반대.</li><li>이미 다른 드라이버가 잡고 있는 interface는 매칭 대상이 아니다. 그래서 순서가 <strong>unbind → new_id</strong>다.</li></ul>
+<h3 id="5-4-드라이버-코드-h12_drv-1-3-상태와-completion-핸들러">5.4 드라이버 코드 <code>h12_drv</code> (1/3) — 상태와 completion 핸들러<a class="anchor" href="#5-4-드라이버-코드-h12_drv-1-3-상태와-completion-핸들러" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: QEMU USB 키보드의 interrupt IN endpoint(0x81)에 URB를 걸어 두고, 키를 누를 때마다 completion에서 8바이트 boot report를 출력한다. completion이 어떤 문맥에서 도는지도 같이 찍는다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* h12_drv: minimal usb_driver for a HID boot keyboard interface (bound via new_id) */
+#include &lt;linux/module.h&gt;
+#include &lt;linux/usb.h&gt;
+#include &lt;linux/slab.h&gt;
+
+struct h12 {
+	struct usb_interface *intf;
+	struct urb *urb;
+	struct usb_anchor anchor;
+	u8 *buf;
+	dma_addr_t dma;
+	int count;
+};
+
+static void h12_irq(struct urb *urb)		/* completion: atomic context */
+{
+	struct h12 *h = urb-&gt;context;
+	int ret;
+
+	switch (urb-&gt;status) {
+	case 0:
+		break;
+	case -ENOENT: case -ECONNRESET: case -ESHUTDOWN:	/* killed / unplugged */
+		dev_info(&amp;h-&gt;intf-&gt;dev, "urb stopped, status=%d after %d reports\n",
+			 urb-&gt;status, h-&gt;count);
+		return;
+	default:					/* transient error: retry */
+		goto resubmit;
+	}
+	h-&gt;count++;
+	dev_info(&amp;h-&gt;intf-&gt;dev, "report#%d [%*ph] hardirq=%d softirq=%d in_interrupt=%d irqs_off=%d\n",
+		 h-&gt;count, urb-&gt;actual_length, h-&gt;buf, !!in_hardirq(),
+		 !!in_serving_softirq(), !!in_interrupt(), irqs_disabled());
+resubmit:
+	usb_anchor_urb(urb, &amp;h-&gt;anchor);		/* giveback unanchored it */
+	ret = usb_submit_urb(urb, GFP_ATOMIC);		/* no sleeping here */
+	if (ret) {
+		usb_unanchor_urb(urb);
+		dev_err(&amp;h-&gt;intf-&gt;dev, "resubmit failed %d\n", ret);
+	}
+}</code></pre></figure>
+<h3 id="5-5-드라이버-코드-2-3-probe-intf-id">5.5 드라이버 코드 (2/3) — <code>probe(intf, id)</code><a class="anchor" href="#5-5-드라이버-코드-2-3-probe-intf-id" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static int h12_probe(struct usb_interface *intf, const struct usb_device_id *id)
+{
+	struct usb_device *udev = interface_to_usbdev(intf);
+	struct usb_host_interface *alt = intf-&gt;cur_altsetting;
+	struct usb_endpoint_descriptor *ep;
+	struct h12 *h;
+	u8 *rd;
+	int ret, len;
+
+	if (alt-&gt;desc.bInterfaceClass != USB_CLASS_HID || alt-&gt;desc.bInterfaceProtocol != 1)
+		return -ENODEV;				/* only boot keyboards */
+	ret = usb_find_int_in_endpoint(alt, &amp;ep);
+	if (ret)
+		return ret;
+	/* synchronous control transfer: HID GET_DESCRIPTOR(Report), may sleep */
+	rd = kmalloc(128, GFP_KERNEL);			/* DMA-able, never the stack */
+	if (!rd)
+		return -ENOMEM;
+	len = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), USB_REQ_GET_DESCRIPTOR,
+			      USB_DIR_IN | USB_RECIP_INTERFACE, 0x22 &lt;&lt; 8,
+			      alt-&gt;desc.bInterfaceNumber, rd, 128, USB_CTRL_GET_TIMEOUT);
+	dev_info(&amp;intf-&gt;dev, "report descriptor: %d bytes, starts [%*ph]\n",
+		 len, len &gt; 8 ? 8 : max(len, 0), rd);
+	kfree(rd);
+
+	h = devm_kzalloc(&amp;intf-&gt;dev, sizeof(*h), GFP_KERNEL);
+	if (!h)
+		return -ENOMEM;
+	h-&gt;intf = intf;
+	init_usb_anchor(&amp;h-&gt;anchor);
+	h-&gt;urb = usb_alloc_urb(0, GFP_KERNEL);
+	if (!h-&gt;urb)
+		return -ENOMEM;
+	h-&gt;buf = usb_alloc_coherent(udev, 8, GFP_KERNEL, &amp;h-&gt;dma);
+	if (!h-&gt;buf) {
+		usb_free_urb(h-&gt;urb);
+		return -ENOMEM;
+	}
+	usb_fill_int_urb(h-&gt;urb, udev, usb_rcvintpipe(udev, ep-&gt;bEndpointAddress),
+			 h-&gt;buf, 8, h12_irq, h, ep-&gt;bInterval);
+	h-&gt;urb-&gt;transfer_dma = h-&gt;dma;
+	h-&gt;urb-&gt;transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+	usb_set_intfdata(intf, h);
+	usb_anchor_urb(h-&gt;urb, &amp;h-&gt;anchor);
+	ret = usb_submit_urb(h-&gt;urb, GFP_KERNEL);
+	if (ret) {
+		usb_unanchor_urb(h-&gt;urb);
+		usb_free_coherent(udev, 8, h-&gt;buf, h-&gt;dma);
+		usb_free_urb(h-&gt;urb);
+		return ret;
+	}
+	dev_info(&amp;intf-&gt;dev, "bound: ep 0x%02x maxp %d bInterval %d, int URB submitted\n",
+		 ep-&gt;bEndpointAddress, usb_endpoint_maxp(ep), ep-&gt;bInterval);
+	return 0;
+}</code></pre></figure>
+<h3 id="5-6-드라이버-코드-3-3-disconnect와-등록">5.6 드라이버 코드 (3/3) — <code>disconnect</code>와 등록<a class="anchor" href="#5-6-드라이버-코드-3-3-disconnect와-등록" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static void h12_disconnect(struct usb_interface *intf)
+{
+	struct h12 *h = usb_get_intfdata(intf);
+
+	dev_info(&amp;intf-&gt;dev, "disconnect: state=%d, killing anchored URBs\n",
+		 interface_to_usbdev(intf)-&gt;state);
+	usb_kill_anchored_urbs(&amp;h-&gt;anchor);		/* waits for completion to finish */
+	usb_free_coherent(interface_to_usbdev(intf), 8, h-&gt;buf, h-&gt;dma);
+	usb_free_urb(h-&gt;urb);
+	dev_info(&amp;intf-&gt;dev, "disconnect done, %d reports total\n", h-&gt;count);
+}
+
+static const struct usb_device_id h12_ids[] = {
+	{ }	/* empty: we bind only through /sys/bus/usb/drivers/h12_drv/new_id */
+};
+MODULE_DEVICE_TABLE(usb, h12_ids);
+
+static struct usb_driver h12_driver = {
+	.name = "h12_drv",
+	.probe = h12_probe,
+	.disconnect = h12_disconnect,
+	.id_table = h12_ids,
+};
+module_usb_driver(h12_driver);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("H12 demo usb_driver: interrupt URB on a HID keyboard");</code></pre></figure>
+<figure class="code"><span class="lang">make</span><pre><code># Kbuild
+obj-m := h12_drv.o</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>make -C /var/lab/out/linux-build M=$PWD clean &gt;/dev/null    # VM, /var/tmp/H12/drv
+make -C /var/lab/out/linux-build M=$PWD modules -j2 2&gt;&amp;1 | grep -v "Entering\|Leaving"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>  CC [M]  h12_drv.o
+  MODPOST Module.symvers
+  CC [M]  h12_drv.mod.o
+  CC [M]  .module-common.o
+  LD [M]  h12_drv.ko</code></pre></figure>
+<p>코드에서 볼 것:</p>
+<ul><li><code>probe</code>는 <strong>process 문맥</strong>이라 잠들 수 있다 — <code>usb_control_msg</code>(동기, 잠듦), <code>GFP_KERNEL</code> 할당이 모두 여기서는 괜찮다. completion(<code>h12_irq</code>)은 <strong>원자 문맥</strong>이라 <code>GFP_ATOMIC</code>만 쓴다.</li><li>버퍼는 <code>usb_alloc_coherent</code>(DMA coherent 메모리) + <code>URB_NO_TRANSFER_DMA_MAP</code>. 매번 매핑하지 않아도 되는 작은 주기 버퍼의 관용구다. <code>kmalloc</code> 버퍼를 줘도 된다(usbcore가 streaming DMA 매핑을 해 준다). <strong>스택 버퍼는 절대 안 된다</strong> — DMA 불가(<code>VMAP_STACK</code>이면 스택이 vmalloc 영역이라 물리적으로 연속이 아니다). 그래서 report descriptor 읽기도 <code>kmalloc</code>을 썼다.</li><li><code>h</code> 자체는 <code>devm_kzalloc</code> — interface <code>dev</code>에 묶여 unbind 때 자동 해제된다. 그러나 URB와 coherent 버퍼는 <code>disconnect</code>에서 직접 정리한다. URB는 <strong>completion이 끝났음이 보장된 뒤에만</strong> 해제할 수 있기 때문이다(§6.4).</li><li><code>id_table</code>이 비어 있으므로 insmod만으로는 아무것에도 붙지 않는다. <code>new_id</code>로만 붙는다.</li></ul>
+<h3 id="5-7-예제-6-unbind-new_id-키-입력-핫-언플러그">5.7 예제 6 — unbind → new_id → 키 입력 → 핫 언플러그<a class="anchor" href="#5-7-예제-6-unbind-new_id-키-입력-핫-언플러그" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 실제 QEMU 게스트에서 <code>usbhid</code>를 떼고 <code>h12_drv</code>를 붙인 뒤, <strong>QEMU 모니터</strong>(HMP, 유닉스 소켓)로 키를 보내고 마지막에 <code>device_del kbd0</code>으로 키보드를 진짜로 뽑는다. <code>expect</code>가 게스트 콘솔을 조종하고, 모니터 명령은 VM에서 socat으로 보낸다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># VM 쪽: QEMU를 모니터 소켓과 함께 띄움 (expect의 spawn)
+qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic \
+  -kernel /var/lab/out/Image -initrd /var/tmp/H12/i2.gz \
+  -device qemu-xhci,id=xhci -device usb-kbd,id=kbd0 -device usb-tablet,id=tab0 \
+  -monitor unix:/var/tmp/H12/mon.sock,server=on,wait=off -append "console=ttyAMA0 quiet"
+# VM 쪽: 모니터 명령 (expect 안에서 exec)
+(echo 'sendkey a'; sleep 0.5) | socat - UNIX-CONNECT:/var/tmp/H12/mon.sock
+(echo 'sendkey shift-b'; sleep 0.5) | socat - UNIX-CONNECT:/var/tmp/H12/mon.sock
+(echo 'device_del kbd0'; sleep 0.5) | socat - UNIX-CONNECT:/var/tmp/H12/mon.sock</code></pre></figure>
+<p>게스트 콘솔(expect 기록, 터미널 줄바꿈만 합침):</p>
+<figure class="code"><span class="lang">text</span><pre><code>~ # sleep 2; insmod /h12_drv.ko; dmesg -n 1; ls /sys/bus/usb/drivers | cat
+h12_drv
+hub
+usb
+usb-storage
+usbfs
+usbhid
+~ # echo -n 1-1:1.0 &gt; /sys/bus/usb/drivers/usbhid/unbind; echo 0627 0001 &gt; /sys/bus/usb/drivers/h12_drv/new_id; sleep 1
+~ # for i in 1-1:1.0 1-2:1.0; do echo $i $(basename $(readlink /sys/bus/usb/devices/$i/driver)); done; cat /sys/bus/usb/drivers/h12_drv/new_id; dmesg | grep h12
+1-1:1.0 h12_drv
+1-2:1.0 usbhid
+0627 0001
+[    5.291538] h12_drv: loading out-of-tree module taints kernel.
+[    5.299811] usbcore: registered new interface driver h12_drv
+[    5.446647] h12_drv 1-1:1.0: report descriptor: 63 bytes, starts [05 01 09 06 a1 01 75 01]
+[    5.447230] h12_drv 1-1:1.0: bound: ep 0x81 maxp 8 bInterval 7, int URB submitted
+~ # sleep 1; cat /sys/bus/usb/devices/1-1/urbnum; dmesg | grep report#
+23
+[    6.645199] h12_drv 1-1:1.0: report#1 [00 00 04 00 00 00 00 00] hardirq=0 softirq=1 in_interrupt=1 irqs_off=0
+[    6.654305] h12_drv 1-1:1.0: report#2 [00 00 00 00 00 00 00 00] hardirq=0 softirq=1 in_interrupt=1 irqs_off=0
+[    7.153368] h12_drv 1-1:1.0: report#3 [02 00 00 00 00 00 00 00] hardirq=0 softirq=1 in_interrupt=1 irqs_off=0
+[    7.163224] h12_drv 1-1:1.0: report#4 [02 00 05 00 00 00 00 00] hardirq=0 softirq=1 in_interrupt=1 irqs_off=0
+[    7.173181] h12_drv 1-1:1.0: report#5 [02 00 00 00 00 00 00 00] hardirq=0 softirq=1 in_interrupt=1 irqs_off=0
+[    7.183148] h12_drv 1-1:1.0: report#6 [00 00 00 00 00 00 00 00] hardirq=0 softirq=1 in_interrupt=1 irqs_off=0
+~ # sleep 2; dmesg | tail -n 6; ls /sys/bus/usb/devices | tr '\n' ' '; echo
+[    7.173181] h12_drv 1-1:1.0: report#5 [02 00 00 00 00 00 00 00] hardirq=0 softirq=1 in_interrupt=1 irqs_off=0
+[    7.183148] h12_drv 1-1:1.0: report#6 [00 00 00 00 00 00 00 00] hardirq=0 softirq=1 in_interrupt=1 irqs_off=0
+[    8.756114] usb 1-1: USB disconnect, device number 2
+[    8.757410] h12_drv 1-1:1.0: urb stopped, status=-108 after 6 reports
+[    8.757568] h12_drv 1-1:1.0: disconnect: state=0, killing anchored URBs
+[    8.758039] h12_drv 1-1:1.0: disconnect done, 6 reports total
+1-0:1.0 1-2 1-2:1.0 2-0:1.0 usb1 usb2 
+~ # rmmod h12_drv; poweroff -f</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>바인딩</strong>: <code>1-1:1.0</code>(키보드)은 <code>h12_drv</code>, <code>1-2:1.0</code>(태블릿)은 그대로 <code>usbhid</code>. 두 장치 다 VID:PID가 <code>0627:0001</code>이라 <code>new_id</code>는 둘 다에 맞지만, 태블릿 interface는 이미 <code>usbhid</code>가 잡고 있어서 대상이 아니었다. 그리고 <code>probe</code>가 protocol 1(키보드)이 아니면 <code>-ENODEV</code>를 돌려주므로, 태블릿을 unbind했어도 붙지 않는다.</li><li><strong>동기 control 전송</strong>: probe 안의 <code>usb_control_msg(GET_DESCRIPTOR, HID Report)</code>가 63바이트를 읽었다. <code>05 01 09 06 a1 01</code> = Usage Page(Generic Desktop), Usage(Keyboard), Collection(Application) — HID report descriptor의 전형적인 시작이다.</li><li><strong>report 해석</strong>: boot keyboard report는 [modifier, reserved, key1..key6]. <code>sendkey a</code> → <code>04</code>(HID usage 'a') 눌림 + 전부 0(뗌). <code>sendkey shift-b</code> → modifier <code>02</code>(Left Shift) → <code>02 .. 05</code>('b') → 'b' 뗌 → shift 뗌. 키 한 번이 report 2개 이상이다. interrupt 전송은 "변화가 있을 때만 데이터"라 아무 키도 안 누르는 동안 report가 없다(호스트 컨트롤러가 8 ms마다 묻고 NAK를 받는 중).</li><li><strong>completion 문맥</strong>: <code>hardirq=0 softirq=1 in_interrupt=1 irqs_off=0</code> — 하드웨어 인터럽트 핸들러 안은 아니지만 <strong>softirq(BH) 안</strong>이다. 즉 원자 문맥이라 잠들면 안 된다. 왜 hardirq가 아닌지는 §6.5와 §8.2, §13에서 소스와 trace로 확인한다(xHCI는 <code>HCD_BH</code> 플래그로 completion을 BH 워크큐로 미룬다).</li><li><strong>핫 언플러그 순서</strong>: <code>USB disconnect</code> → 걸려 있던 URB가 <code>status=-108</code>(<code>-ESHUTDOWN</code>)로 먼저 돌아오고 → 그다음 <code>disconnect()</code>가 불렸다. <code>state=0</code>은 <code>USB_STATE_NOTATTACHED</code>. 이미 끝난 URB에 <code>usb_kill_anchored_urbs</code>를 해도 즉시 돌아온다.</li><li><code>urbnum=23</code> — 열거부터 지금까지 이 장치로 제출된 URB 수(대부분 열거 중 control 전송). 장치가 "살아서 일하고 있는지"를 볼 때 쓰는 카운터다.</li></ul>
+<p>같은 실험을 <code>device_del</code> 대신 <code>rmmod h12_drv</code>로 한 번 더 했다(키 하나만 보낸 뒤, 별도 부팅):</p>
+<figure class="code"><span class="lang">text</span><pre><code>~ # rmmod h12_drv; sleep 1; dmesg | tail -n 3; ...
+[    5.675871] h12_drv 1-1:1.0: urb stopped, status=-108 after 2 reports
+[    5.675945] h12_drv 1-1:1.0: disconnect: state=7, killing anchored URBs
+[    5.676011] h12_drv 1-1:1.0: disconnect done, 2 reports total</code></pre></figure>
+<p>장치가 멀쩡히 붙어 있는데도(<code>state=7</code> = <code>USB_STATE_CONFIGURED</code>) URB가 <code>disconnect</code> 전에 끝났다. 이유는 <code>drivers/usb/core/driver.c</code>의 <code>usb_unbind_interface()</code>가 <code>driver-&gt;disconnect(intf)</code>를 부르기 <strong>직전에</strong> <code>usb_disable_interface()</code>로 그 interface의 endpoint에 걸린 URB를 모두 끝내기 때문이다(드라이버가 <code>soft_unbind = 1</code>을 설정하고 장치가 살아 있을 때만 예외). 그래도 <code>disconnect</code>에서 kill을 지우면 안 된다: <code>soft_unbind</code> 드라이버, ep0 등 다른 endpoint로 보낸 URB, 그리고 <strong>workqueue·타이머·열린 파일의 <code>write()</code>처럼 드라이버 스스로 URB를 새로 제출하는 경로</strong>를 멈추는 것은 드라이버 몫이다. disconnect의 규칙은 "제출 경로를 막고 → 남은 URB를 kill(기다림) → 그다음 해제"다.</p>
+<hr>
+<h2 id="6-urb-usb의-명령-하나">6. URB — USB의 "명령 하나"<a class="anchor" href="#6-urb-usb의-명령-하나" aria-label="link">#</a></h2>
+<h3 id="6-1-직관">6.1 직관<a class="anchor" href="#6-1-직관" aria-label="link">#</a></h3>
+<p><strong>URB(USB Request Block)</strong> = "이 장치의 이 endpoint로 이 버퍼만큼 보내/받아 줘, 끝나면 이 함수를 불러 줘"라는 요청서다. NVMe의 SQ entry + 완료 콜백에 해당한다. 드라이버는 URB를 usbcore에 맡기고(<code>usb_submit_urb</code>) 바로 돌아온다(비동기). 전송이 끝나면(성공·실패·취소) HCD가 URB를 돌려주고 usbcore가 <code>urb-&gt;complete(urb)</code>를 부른다.</p>
+<p><code>struct urb</code>의 주요 필드:</p>
+<div class="tw"><table><thead><tr><th>필드</th><th>뜻</th></tr></thead><tbody><tr><td><code>dev</code>, <code>pipe</code></td><td>대상 장치와 endpoint(방향·종류 포함). <code>usb_sndbulkpipe</code>, <code>usb_rcvintpipe</code>, <code>usb_rcvctrlpipe</code> …</td></tr><tr><td><code>transfer_buffer</code>, <code>transfer_buffer_length</code></td><td>데이터 버퍼(DMA 가능한 메모리)와 길이</td></tr><tr><td><code>transfer_dma</code> + <code>URB_NO_TRANSFER_DMA_MAP</code></td><td>드라이버가 이미 DMA 주소를 갖고 있을 때(<code>usb_alloc_coherent</code>)</td></tr><tr><td><code>actual_length</code></td><td>실제로 옮겨진 바이트 수 (짧은 패킷이면 요청보다 작다)</td></tr><tr><td><code>status</code></td><td>완료 상태 (0 = 성공, 음수 errno)</td></tr><tr><td><code>complete</code>, <code>context</code></td><td>완료 콜백과 그 인자</td></tr><tr><td><code>interval</code></td><td>interrupt/isoc 폴링 주기</td></tr><tr><td><code>transfer_flags</code></td><td><code>URB_SHORT_NOT_OK</code>, <code>URB_ZERO_PACKET</code>, <code>URB_NO_TRANSFER_DMA_MAP</code> …</td></tr><tr><td><code>setup_packet</code></td><td>control 전송의 8바이트 셋업</td></tr></tbody></table></div>
+<h3 id="6-2-생명주기">6.2 생명주기<a class="anchor" href="#6-2-생명주기" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="20" width="150" height="50" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="95" y="42" text-anchor="middle" font-size="13">usb_alloc_urb()</text>
+  <text x="95" y="60" text-anchor="middle" font-size="12">probe, GFP_KERNEL</text>
+  <line x1="170" y1="45" x2="203" y2="45" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="205" y="20" width="160" height="50" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="285" y="42" text-anchor="middle" font-size="13">usb_fill_int_urb()</text>
+  <text x="285" y="60" text-anchor="middle" font-size="12">pipe, 버퍼, 콜백</text>
+  <line x1="365" y1="45" x2="403" y2="45" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="405" y="20" width="255" height="50" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="532" y="42" text-anchor="middle" font-size="13">usb_submit_urb() → HCD 큐</text>
+  <text x="532" y="60" text-anchor="middle" font-size="12">소유권이 HCD로 넘어감</text>
+  <line x1="532" y1="70" x2="532" y2="108" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="405" y="110" width="255" height="56" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="532" y="132" text-anchor="middle" font-size="13">HW 전송 (xHCI TRB ring)</text>
+  <text x="532" y="152" text-anchor="middle" font-size="12">장치가 NAK면 HW가 계속 폴링</text>
+  <line x1="532" y1="166" x2="532" y2="203" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="405" y="205" width="255" height="56" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="532" y="227" text-anchor="middle" font-size="13">IRQ → usb_hcd_giveback_urb()</text>
+  <text x="532" y="247" text-anchor="middle" font-size="12">xHCI: hardirq에서 BH로 넘김</text>
+  <line x1="405" y1="233" x2="333" y2="233" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="100" y="205" width="230" height="56" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="215" y="227" text-anchor="middle" font-size="13">urb-&gt;complete(urb)</text>
+  <text x="215" y="247" text-anchor="middle" font-size="12">원자 문맥 (실측: softirq)</text>
+  <path d="M215,205 C215,140 330,110 403,58" fill="none" stroke="#3f9a6b" stroke-dasharray="5 4" marker-end="url(#ah4)"/>
+  <text x="200" y="118" text-anchor="middle" font-size="12">status 0 → 재제출</text>
+  <text x="200" y="136" text-anchor="middle" font-size="12">usb_submit_urb(GFP_ATOMIC)</text>
+  <line x1="215" y1="261" x2="215" y2="293" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="60" y="295" width="310" height="50" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="215" y="317" text-anchor="middle" font-size="13">-ENOENT / -ECONNRESET / -ESHUTDOWN</text>
+  <text x="215" y="335" text-anchor="middle" font-size="12">재제출하지 않고 끝 → usb_free_urb()</text>
+  <rect x="405" y="295" width="255" height="50" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="532" y="317" text-anchor="middle" font-size="13">usb_kill_urb / kill_anchored</text>
+  <text x="532" y="335" text-anchor="middle" font-size="12">취소 + completion 끝까지 대기</text>
+  <line x1="405" y1="320" x2="372" y2="320" stroke="currentColor" marker-end="url(#ah4)"/>
+</svg></figure>
+<p>그림 4 — URB 생명주기. 제출하는 순간 URB와 버퍼의 소유권은 HCD에 있다. completion이 불려야 드라이버에게 돌아온다. interrupt IN은 completion에서 다시 제출하는 고리로 "계속 듣기"를 만든다.</p>
+<h3 id="6-3-완료-상태-코드">6.3 완료 상태 코드<a class="anchor" href="#6-3-완료-상태-코드" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th><code>urb-&gt;status</code></th><th>뜻</th><th>completion에서 할 일</th></tr></thead><tbody><tr><td><code>0</code></td><td>성공 (<code>actual_length</code> 확인)</td><td>데이터 처리, 필요하면 재제출</td></tr><tr><td><code>-ENOENT</code></td><td><code>usb_kill_urb</code>로 취소됨</td><td>재제출 금지, 그냥 반환</td></tr><tr><td><code>-ECONNRESET</code></td><td><code>usb_unlink_urb</code>(비동기 취소)</td><td>재제출 금지</td></tr><tr><td><code>-ESHUTDOWN</code> (-108)</td><td>장치 제거, endpoint 비활성, HC 정지</td><td>재제출 금지 (§5.7 실측)</td></tr><tr><td><code>-EPIPE</code></td><td>endpoint STALL (장치가 거부)</td><td><code>usb_clear_halt()</code> — 잠드는 함수라 workqueue에서</td></tr><tr><td><code>-EPROTO</code>, <code>-EILSEQ</code>, <code>-ETIME</code></td><td>비트 스터핑·CRC·응답 없음 (잡음, 뽑히는 중)</td><td>몇 번 재시도 후 포기, 보통 곧 disconnect가 온다</td></tr><tr><td><code>-EOVERFLOW</code></td><td>babble — 장치가 요청보다 더 보냄</td><td>버퍼 크기·maxpacket 확인</td></tr><tr><td><code>-EREMOTEIO</code></td><td><code>URB_SHORT_NOT_OK</code>인데 짧은 패킷</td><td>프로토콜 오류로 처리</td></tr></tbody></table></div>
+<h3 id="6-4-취소와-정리-kill-unlink-poison-anchor">6.4 취소와 정리 — kill, unlink, poison, anchor<a class="anchor" href="#6-4-취소와-정리-kill-unlink-poison-anchor" aria-label="link">#</a></h3>
+<ul><li><code>usb_kill_urb(urb)</code>: 취소하고 <strong>completion이 끝날 때까지 기다린다</strong>. 그래서 잠들 수 있는 문맥(disconnect, release, suspend)에서만 쓴다. 돌아온 뒤에는 그 URB를 안전하게 해제·재사용할 수 있다. kill이 진행되는 동안의 재제출은 실패한다.</li><li><code>usb_unlink_urb(urb)</code>: 비동기 취소. 원자 문맥에서도 쓸 수 있지만 돌아왔을 때 아직 끝나지 않았을 수 있다.</li><li><code>usb_poison_urb(urb)</code>: kill + 이후 재제출을 영구히 막음(<code>usb_unpoison_urb</code>로 해제). suspend/reset 경로에서 쓴다.</li><li><strong>anchor</strong>(<code>struct usb_anchor</code>): URB 여러 개를 묶는 리스트. 제출 전에 <code>usb_anchor_urb()</code>, giveback 시 usbcore가 자동으로 떼어 낸다(그래서 h12_drv는 재제출 전에 다시 anchor했다). <code>usb_kill_anchored_urbs()</code>, <code>usb_wait_anchor_empty_timeout()</code>, <code>usb_scuttle_anchored_urbs()</code>로 한 번에 정리한다. 네트워크·시리얼 드라이버처럼 <strong>bulk OUT URB가 여러 개 떠 있는</strong> 드라이버에서 특히 유용하다.</li></ul>
+<p><strong>Don 경험과 연결</strong>: SSD 펌웨어에서 PCIe 링크가 끊기거나 컨트롤러 리셋이 오면 "in-flight 명령을 전부 abort 상태로 완료시키고, 완료 콜백이 다 돈 다음에 버퍼를 반납"했을 것이다. <code>usb_kill_anchored_urbs</code>가 정확히 그 "drain"이다. 그리고 "완료 콜백 안에서는 블로킹 금지"도 ISR에서 블로킹 금지와 같은 규칙이다.</p>
+<h3 id="6-5-completion-문맥-실측이-말해-준-것">6.5 completion 문맥 — 실측이 말해 준 것<a class="anchor" href="#6-5-completion-문맥-실측이-말해-준-것" aria-label="link">#</a></h3>
+<p>§5.7의 측정은 <code>hardirq=0 softirq=1 in_interrupt=1</code>이었다. 정리하면:</p>
+<ul><li>completion은 <strong>항상 원자 문맥</strong>이라고 가정하고 짠다. 문서(<code>usb_hcd_giveback_urb</code> 주석)도 "Context: atomic"이다.</li><li>실제 문맥은 HCD에 따라 다르다. <code>HCD_BH</code> 플래그가 있는 HCD(xHCI, EHCI — 랩 소스에서 확인)와 모든 root hub URB는 BH 문맥(6.18 소스에서는 <code>system_bh_highpri_wq</code>/<code>system_bh_wq</code> BH 워크큐), 그렇지 않은 HCD는 HCD가 giveback을 부른 문맥 그대로(하드 IRQ일 수도 있다). <code>dummy_hcd</code>는 <code>HCD_BH</code>가 없지만 giveback을 <code>HRTIMER_MODE_REL_SOFT</code> 타이머 콜백에서 하므로 역시 softirq다(소스 읽기로 확인, 측정은 xHCI에서만 함).</li><li>그러므로 completion에서는: 잠드는 함수(<code>mutex_lock</code>, <code>usb_control_msg</code>, <code>msleep</code>, <code>GFP_KERNEL</code>, <code>copy_to_user</code>) 금지. 데이터는 링버퍼에 넣고 <code>wake_up</code>하거나, 무거운 일은 <code>schedule_work</code>로 넘긴다. 공유 상태는 <code>spin_lock_irqsave</code>로 보호한다.</li></ul>
+<hr>
+<h2 id="7-동기-헬퍼-usb_control_msg-usb_bulk_msg">7. 동기 헬퍼 — <code>usb_control_msg</code>, <code>usb_bulk_msg</code><a class="anchor" href="#7-동기-헬퍼-usb_control_msg-usb_bulk_msg" aria-label="link">#</a></h2>
+<p>URB를 직접 다루기 번거로운 "한 번 묻고 답 받기"에는 동기 헬퍼를 쓴다. 내부에서 URB를 하나 만들어 제출하고 completion을 <strong>잠들어 기다린다</strong>.</p>
+<div class="tw"><table><thead><tr><th>함수</th><th>용도</th><th>반환</th></tr></thead><tbody><tr><td><code>usb_control_msg(udev, pipe, bRequest, bmRequestType, wValue, wIndex, data, size, timeout_ms)</code></td><td>ep0 control 전송 (설정 쓰기, 상태 읽기, vendor 명령)</td><td>전송 바이트 수 또는 음수 errno</td></tr><tr><td><code>usb_control_msg_recv()</code> / <code>usb_control_msg_send()</code></td><td>위의 편의판: 내부에서 DMA 가능 버퍼를 할당·복사, 짧은 응답을 에러로 처리</td><td>0 또는 음수 errno</td></tr><tr><td><code>usb_bulk_msg(udev, pipe, data, len, &amp;actual, timeout_ms)</code></td><td>bulk 한 번</td><td>0 또는 음수 errno (<code>-ETIMEDOUT</code>)</td></tr><tr><td><code>usb_interrupt_msg()</code></td><td>interrupt endpoint 한 번</td><td>위와 같음</td></tr><tr><td><code>usb_get_descriptor()</code>, <code>usb_string()</code>, <code>usb_clear_halt()</code>, <code>usb_set_interface()</code>, <code>usb_reset_device()</code></td><td>표준 요청 래퍼</td><td>상황별</td></tr></tbody></table></div>
+<p>규칙:</p>
+<ul><li>process 문맥에서만(probe, <code>read</code>/<code>write</code>/<code>ioctl</code> 구현, workqueue). completion·타이머·spinlock 안에서 부르면 "scheduling while atomic" BUG다.</li><li>데이터 버퍼는 <code>kmalloc</code>(DMA 가능). 스택 변수 주소를 넘기는 것은 고전적 버그다 — 그래서 <code>_recv/_send</code> 변형이 생겼다.</li><li>timeout은 ms(<code>USB_CTRL_GET_TIMEOUT</code> = 5000, <code>include/linux/usb.h</code>). 실시간성이 필요한 데이터 경로에는 동기 헬퍼 대신 URB를 여러 개 띄워 둔다(파이프라이닝).</li></ul>
+<p>h12_drv의 probe에서 <code>usb_control_msg(GET_DESCRIPTOR, wValue=0x2200, wIndex=interface)</code>로 HID report descriptor 63바이트를 읽은 것이 예다(§5.7 출력).</p>
+<hr>
+<h2 id="8-버스-들여다보기-usbmon-그리고-이-랩의-대안">8. 버스 들여다보기 — usbmon, 그리고 이 랩의 대안<a class="anchor" href="#8-버스-들여다보기-usbmon-그리고-이-랩의-대안" aria-label="link">#</a></h2>
+<h3 id="8-1-usbmon-랩-커널에서는-꺼져-있음">8.1 usbmon (랩 커널에서는 꺼져 있음)<a class="anchor" href="#8-1-usbmon-랩-커널에서는-꺼져-있음" aria-label="link">#</a></h3>
+<p><code>usbmon</code>은 usbcore 안의 훅으로 <strong>모든 URB의 제출·완료</strong>를 기록하는 커널 내장 "버스 분석기"다. HW 분석기(Beagle, Ellisys)처럼 패킷 단위는 아니고 URB 단위지만, 대부분의 드라이버 디버깅에는 충분하다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>ls /sys/kernel/debug/usb; uname -r</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>devices  ehci     ohci     xhci
+6.18.55-dbg</code></pre></figure>
+<p>랩 커널은 <code># CONFIG_USB_MON is not set</code>이라 <code>usbmon</code> 디렉터리가 없다(일반 커널·디버그 커널 둘 다 <code>.config</code>에서 확인). usbmon은 usbcore의 훅이 <code>CONFIG_USB_MON</code>으로 컴파일되어야 동작하므로 out-of-tree로 붙일 수 없다. 켜진 커널에서의 사용법은 다음과 같다(<strong>이 랩에서 실행하지 않음</strong>, Documentation/usb/usbmon.rst 기준):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>modprobe usbmon                             # =m일 때
+cat /sys/kernel/debug/usb/usbmon/1u         # 버스 1, 텍스트 'u' 형식 (0u = 모든 버스)
+# 바이너리 인터페이스 /dev/usbmonN 은 Wireshark·tcpdump(-i usbmon1)가 읽는다</code></pre></figure>
+<p>텍스트 한 줄의 구성은 <code>URB 태그, 타임스탬프(µs), 이벤트(S=submit, C=callback, E=error), 주소 "Bo:1:002:2"(종류 B/I/C/Z + 방향 i/o : 버스 : 장치 : endpoint), 상태, 길이, 데이터 앞부분</code>이다. 예를 들어 저장장치 읽기는 <code>Bo</code>(bulk OUT)로 31바이트 CBW <code>55534243…</code>("USBC"), <code>Bi</code>로 데이터, <code>Bi</code>로 13바이트 CSW <code>55534253…</code>("USBS")가 S/C 쌍으로 보인다.</p>
+<h3 id="8-2-예제-7-대안-xhci-tracepoint로-storage-읽기-한-번-보기">8.2 예제 7 — 대안: xHCI tracepoint로 storage 읽기 한 번 보기<a class="anchor" href="#8-2-예제-7-대안-xhci-tracepoint로-storage-읽기-한-번-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 랩의 디버그 커널(<code>Image-dbg</code>, <code>CONFIG_TRACING=y</code>)에는 xHCI 드라이버의 tracepoint가 있다. URB가 xHCI 링에 들어가고(<code>xhci_urb_enqueue</code>) 돌아오는(<code>xhci_urb_giveback</code>) 순간을 찍으면 usbmon과 비슷한 그림을 얻는다. QEMU USB 디스크에서 4 KiB를 <code>O_DIRECT</code>로 한 번 읽는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>mount -t tracefs none /sys/kernel/tracing; cd /sys/kernel/tracing
+ls events | grep -i -E "xhci|usb" | tr '\n' ' '; echo
+ls events/xhci-hcd | grep urb | tr '\n' ' '; echo
+echo 1 &gt; events/xhci-hcd/xhci_urb_enqueue/enable; echo 1 &gt; events/xhci-hcd/xhci_urb_giveback/enable
+echo &gt; trace
+dd if=/dev/sda of=/dev/null bs=4096 count=1 skip=100 iflag=direct 2&gt;&amp;1 | tail -1
+echo 0 &gt; tracing_on
+grep -v "^#" trace | sed 's/^ *//' | cut -c1-230</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>musb xhci-hcd 
+xhci_dbg_cancel_urb xhci_urb_dequeue xhci_urb_enqueue xhci_urb_giveback 
+4096 bytes (4.0KB) copied, 0.050902 seconds, 78.6KB/s
+usb-storage-58      [000] .....    11.044184: xhci_urb_enqueue: 2-1 ep2out-bulk: urb 0000000004ea86a5 pipe 3221291520 slot 1 length 0/31 sgs 0/0 stream 0 flags 00000004
+usb-storage-58      [000] d.h2.    11.053300: xhci_urb_giveback: 2-1 ep2out-bulk: urb 0000000004ea86a5 pipe 3221291520 slot 1 length 31/31 sgs 0/0 stream 0 flags 00000004
+usb-storage-58      [000] .....    11.054550: xhci_urb_enqueue: 2-1 ep1in-bulk: urb 00000000ac748f96 pipe 3221258880 slot 1 length 0/4096 sgs 1/1 stream 0 flags 00040201
+usb-storage-58      [000] d.h2.    11.054708: xhci_urb_giveback: 2-1 ep1in-bulk: urb 00000000ac748f96 pipe 3221258880 slot 1 length 4096/4096 sgs 1/1 stream 0 flags 00040201
+usb-storage-58      [000] .....    11.055255: xhci_urb_enqueue: 2-1 ep1in-bulk: urb 0000000004ea86a5 pipe 3221258880 slot 1 length 0/13 sgs 0/0 stream 0 flags 00000204
+usb-storage-58      [000] d.h2.    11.055409: xhci_urb_giveback: 2-1 ep1in-bulk: urb 0000000004ea86a5 pipe 3221258880 slot 1 length 13/13 sgs 0/0 stream 0 flags 00000204</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>Bulk-Only Transport 3단계</strong>가 그대로 보인다: ① <code>ep2out-bulk 31/31</code> = CBW(Command Block Wrapper, SCSI READ(10) 명령을 담은 31바이트) → ② <code>ep1in-bulk 4096/4096</code> = 데이터(scatter-gather 1개) → ③ <code>ep1in-bulk 13/13</code> = CSW(Command Status Wrapper). 이 부팅에는 디스크만 꽂아서 장치 이름이 <code>2-1</code>이다(§2.3과 다름).</li><li>제출 주체는 <code>usb-storage-58</code> 커널 스레드(usb-storage의 제어 스레드)다. 이 스레드가 한 단계씩 제출하고(<code>usb_sg_init</code>/<code>usb_sg_wait</code> 등) 잠들어 기다린다. 포인터 값(<code>urb 0000…</code>)은 해시된 값이고 실행마다 다르다.</li><li><strong>giveback 줄의 플래그 <code>d.h2.</code></strong>: <code>d</code> = IRQ 꺼짐, <code>h</code> = <strong>하드 IRQ 안</strong>. xHCI는 하드 IRQ(<code>xhci_irq</code> → 이벤트 링 처리 → <code>xhci_giveback_urb_in_irq</code>)에서 URB를 돌려주고, 이 tracepoint는 그 안에서 <code>usb_hcd_giveback_urb()</code> 바로 앞에 있다(<code>drivers/usb/host/xhci-ring.c</code>). 그다음 usbcore가 completion을 BH로 미루기 때문에 드라이버의 completion은 §5.7처럼 softirq에서 돈다. <strong>"HCD는 hardirq, 드라이버 completion은 BH"</strong> 두 단계를 두 실험으로 모두 확인했다.</li></ul>
+<h3 id="8-3-그-밖의-도구">8.3 그 밖의 도구<a class="anchor" href="#8-3-그-밖의-도구" aria-label="link">#</a></h3>
+<ul><li><code>dmesg</code> + dynamic debug(랩 커널 <code>CONFIG_DYNAMIC_DEBUG=y</code>, 예: 커널 인자 <code>dyndbg="module xhci_hcd +p"</code>) — 열거 실패, 리셋, 대역폭 오류의 상세 로그.</li><li><code>/sys/kernel/debug/usb/xhci/&lt;pci&gt;/</code> — xHCI 링·포트 상태 덤프(위 <code>ls</code>에서 <code>xhci</code> 디렉터리).</li><li>HW 프로토콜 분석기 — 신호 품질, 타이밍, LPM 문제처럼 소프트웨어로 안 보이는 것. Don이 scope·로직 분석기로 PCIe/I2C를 보던 자리다.</li></ul>
+<hr>
+<h2 id="9-유저-공간-usb-드라이버-usbfs와-libusb">9. 유저 공간 USB 드라이버 — usbfs와 libusb<a class="anchor" href="#9-유저-공간-usb-드라이버-usbfs와-libusb" aria-label="link">#</a></h2>
+<h3 id="9-1-언제-쓰나">9.1 언제 쓰나<a class="anchor" href="#9-1-언제-쓰나" aria-label="link">#</a></h3>
+<p>커널 드라이버가 필요 없는 장치가 많다: 펌웨어 업데이트 툴(DFU, 벤더 부트로더), 시험 지그, 저속 계측기. 이럴 때 <strong>libusb</strong>로 유저 공간에서 디스크립터 읽기, control/bulk/interrupt 전송을 한다. libusb는 Linux에서 <strong>usbfs</strong>(<code>/dev/bus/usb/BBB/DDD</code> 문자 장치, 메이저 189)의 ioctl을 감싼 라이브러리다. 커널 쪽은 usbcore 안의 <code>usbfs</code> 드라이버(§5.7 드라이버 목록의 <code>usbfs</code>)가 "interface를 claim한 유저 프로세스"를 대신하는 interface 드라이버 역할을 한다.</p>
+<p>장점: 크래시해도 커널이 안전, 배포·디버그가 쉬움. 단점: 지연이 크고 다른 커널 서브시스템(input, net, tty)에 장치를 노출할 수 없다.</p>
+<h3 id="9-2-예제-8-libusb-없이-usbfs-ioctl로-키보드-읽기">9.2 예제 8 — libusb 없이 usbfs ioctl로 키보드 읽기<a class="anchor" href="#9-2-예제-8-libusb-없이-usbfs-ioctl로-키보드-읽기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: usbfs 노드 <code>read()</code>(캐시된 디스크립터), <code>USBDEVFS_CONTROL</code>(문자열 디스크립터), 커널 드라이버 떼기(<code>USBDEVFS_DISCONNECT</code>), interface claim, interrupt endpoint 읽기, 원래 드라이버 되돌리기(<code>USBDEVFS_CONNECT</code>). libusb의 <code>libusb_detach_kernel_driver</code>, <code>libusb_claim_interface</code>, <code>libusb_interrupt_transfer</code>가 내부에서 하는 일이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* h12_usbfs.c - user-space USB driver via usbfs (what libusb does underneath) */
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;sys/ioctl.h&gt;
+#include &lt;linux/usbdevice_fs.h&gt;
+#include &lt;linux/usb/ch9.h&gt;
+
+int main(int argc, char **argv)
+{
+	unsigned char buf[255];
+	if (argc != 2) { fprintf(stderr, "usage: %s /dev/bus/usb/BBB/DDD\n", argv[0]); exit(1); }
+	int fd = open(argv[1], O_RDWR);
+	if (fd &lt; 0) { perror(argv[1]); exit(1); }
+
+	/* 0. read() on a usbfs node returns the cached device(+config) descriptors */
+	if (read(fd, buf, 18) != 18) { perror("read"); exit(1); }
+	printf("idVendor=%02x%02x idProduct=%02x%02x iProduct=%u\n", buf[9], buf[8], buf[11], buf[10], buf[15]);
+	/* 1. control transfer on ep0: GET_DESCRIPTOR(STRING, iProduct) */
+	struct usbdevfs_ctrltransfer ct = {
+		.bRequestType = USB_DIR_IN, .bRequest = USB_REQ_GET_DESCRIPTOR,
+		.wValue = (USB_DT_STRING &lt;&lt; 8) | buf[15], .wIndex = 0x0409,
+		.wLength = sizeof(buf), .timeout = 1000, .data = buf };
+	int n = ioctl(fd, USBDEVFS_CONTROL, &amp;ct);
+	if (n &lt; 0) { perror("USBDEVFS_CONTROL"); exit(1); }
+	printf("iProduct (%d bytes UTF-16LE): ", n);
+	for (int i = 2; i &lt; n; i += 2) putchar(buf[i]);
+	putchar('\n');
+
+	/* 2. claim interface 0: fails while a kernel driver owns it */
+	unsigned int ifnum = 0;
+	if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &amp;ifnum) &lt; 0)
+		printf("CLAIMINTERFACE: %s -&gt; detaching kernel driver\n", strerror(errno));
+	struct usbdevfs_ioctl dc = { .ifno = 0, .ioctl_code = USBDEVFS_DISCONNECT };
+	if (ioctl(fd, USBDEVFS_IOCTL, &amp;dc) &lt; 0) perror("USBDEVFS_DISCONNECT");
+	if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &amp;ifnum) &lt; 0) { perror("CLAIM"); exit(1); }
+	puts("interface 0 claimed by user space");
+
+	/* 3. read interrupt IN ep 0x81 (USBDEVFS_BULK also handles interrupt eps) */
+	for (int k = 0; k &lt; 4; k++) {
+		struct usbdevfs_bulktransfer bt = { .ep = 0x81, .len = 8, .timeout = 5000, .data = buf };
+		n = ioctl(fd, USBDEVFS_BULK, &amp;bt);
+		if (n &lt; 0) { perror("USBDEVFS_BULK"); break; }
+		printf("report %d:", k);
+		for (int i = 0; i &lt; n; i++) printf(" %02x", buf[i]);
+		putchar('\n');
+	}
+	ioctl(fd, USBDEVFS_RELEASEINTERFACE, &amp;ifnum);
+	struct usbdevfs_ioctl cn = { .ifno = 0, .ioctl_code = USBDEVFS_CONNECT };
+	if (ioctl(fd, USBDEVFS_IOCTL, &amp;cn) &lt; 0) perror("USBDEVFS_CONNECT");
+	close(fd);
+	return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>ls -l /dev/bus/usb/001/ | cat; basename $(readlink /sys/bus/usb/devices/1-1:1.0/driver)
+h12_usbfs /dev/bus/usb/001/002 &amp; sleep 2
+# (VM에서 QEMU 모니터로 sendkey x, sendkey y)
+sleep 2; wait; basename $(readlink /sys/bus/usb/devices/1-1:1.0/driver)</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>total 0
+crw-------    1 0        0         189,   0 Jan  1  1970 001
+crw-------    1 0        0         189,   1 Oct 11 03:52 002
+usbhid
+~ # h12_usbfs /dev/bus/usb/001/002 &amp; sleep 2
+idVendor=0627 idProduct=0001 iProduct=4
+iProduct (36 bytes UTF-16LE): QEMU USB Keyboard
+CLAIMINTERFACE: Device or resource busy -&gt; detaching kernel driver
+interface 0 claimed by user space
+~ # report 0: 00 00 1b 00 00 00 00 00
+report 1: 00 00 00 00 00 00 00 00
+report 2: 00 00 1c 00 00 00 00 00
+report 3: 00 00 00 00 00 00 00 00
+sleep 2; wait; basename $(readlink /sys/bus/usb/devices/1-1:1.0/driver)
+usbhid</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>노드 이름 <code>001/002</code> = 버스 1, devnum 2. 메이저 189가 usbfs 장치 노드다(devtmpfs가 자동으로 만든다). 양산 장비에서는 udev 규칙으로 권한을 열어 줘야 일반 유저 프로세스가 쓸 수 있다(<code>crw-------</code> 상태로는 root만).</li><li><code>CLAIMINTERFACE: Device or resource busy</code> — 커널 드라이버(<code>usbhid</code>)가 잡은 interface는 유저가 claim할 수 없다. <code>USBDEVFS_DISCONNECT</code>로 떼어 낸 뒤에야 claim됐다. 끝나고 <code>USBDEVFS_CONNECT</code>로 돌려주자 다시 <code>usbhid</code>가 붙었다.</li><li><code>1b</code>, <code>1c</code> = HID usage 'x', 'y'. §5.7의 커널 드라이버와 똑같은 report를 유저 공간에서 받았다.</li><li>함정(실제로 겪음): 처음 버전은 문자열 index를 <code>2</code>로 고정했더니 <code>iProduct (30 bytes UTF-16LE): QEMU USB Mouse</code>가 나왔다. QEMU의 HID 장치들은 문자열 테이블을 공유하고 키보드의 <code>iProduct</code>는 4다. <strong>index는 반드시 device descriptor에서 읽는다.</strong></li></ul>
+<hr>
+<h2 id="10-gadget-쪽-linux가-usb-장치가-될-때">10. Gadget 쪽 — Linux가 USB 장치가 될 때<a class="anchor" href="#10-gadget-쪽-linux가-usb-장치가-될-때" aria-label="link">#</a></h2>
+<h3 id="10-1-계층">10.1 계층<a class="anchor" href="#10-1-계층" aria-label="link">#</a></h3>
+<p>host 스택을 거울에 비춘 모양이다.</p>
+<div class="tw"><table><thead><tr><th>host 쪽</th><th>gadget 쪽</th><th>하는 일</th></tr></thead><tbody><tr><td>HCD (<code>xhci-hcd</code>)</td><td><strong>UDC 드라이버</strong> (<code>dwc3</code>, <code>ci_hdrc</code>, <code>dwc2</code>, <code>cdns3</code>, <code>tegra-xudc</code>, <code>dummy_udc</code>)</td><td>컨트롤러 HW. gadget 쪽은 "장치 컨트롤러"</td></tr><tr><td>usbcore</td><td><strong>gadget core</strong> (<code>udc-core</code>) + <strong>composite 프레임워크</strong> (<code>libcomposite</code>)</td><td>ep0 표준 요청(GET_DESCRIPTOR, SET_CONFIGURATION) 자동 처리, 디스크립터 조립</td></tr><tr><td>interface 드라이버 (<code>usb_driver</code>)</td><td><strong>function 드라이버</strong> (<code>usb_f_acm</code>, <code>usb_f_ncm</code>, <code>usb_f_mass_storage</code>, <code>usb_f_fs</code> …)</td><td>interface 하나(또는 IAD로 묶인 몇 개)를 구현</td></tr><tr><td>URB</td><td><strong><code>struct usb_request</code></strong> + <code>usb_ep_queue()</code></td><td>전송 요청. 완료 콜백 <code>req-&gt;complete</code></td></tr><tr><td><code>usb_driver</code> 등록</td><td><strong>configfs</strong> <code>/sys/kernel/config/usb_gadget/</code> (또는 레거시 <code>g_*</code> 모듈)</td><td>어떤 기능을 어떤 VID/PID로 내보낼지 조립</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="165" y="22" text-anchor="middle" font-size="14">gadget 쪽 (장치가 된 Linux)</text>
+  <text x="515" y="22" text-anchor="middle" font-size="14">host 쪽 (같은 게스트)</text>
+  <rect x="20" y="35" width="290" height="48" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="165" y="55" text-anchor="middle" font-size="13">configfs: mkdir · echo · ln -s</text>
+  <text x="165" y="73" text-anchor="middle" font-size="12">/sys/kernel/config/usb_gadget/h12g</text>
+  <line x1="165" y1="83" x2="165" y2="101" stroke="currentColor" marker-end="url(#ah5)"/>
+  <rect x="20" y="103" width="290" height="48" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="165" y="123" text-anchor="middle" font-size="13">composite (libcomposite)</text>
+  <text x="165" y="141" text-anchor="middle" font-size="12">ep0 요청 처리, 디스크립터 조립</text>
+  <line x1="90" y1="151" x2="90" y2="169" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="240" y1="151" x2="240" y2="169" stroke="currentColor" marker-end="url(#ah5)"/>
+  <rect x="20" y="171" width="140" height="56" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="90" y="193" text-anchor="middle" font-size="13">usb_f_acm</text>
+  <text x="90" y="213" text-anchor="middle" font-size="12">/dev/ttyGS0</text>
+  <rect x="170" y="171" width="140" height="56" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="240" y="193" text-anchor="middle" font-size="13">mass_storage</text>
+  <text x="240" y="213" text-anchor="middle" font-size="12">lun.0 = 이미지 파일</text>
+  <line x1="90" y1="227" x2="140" y2="255" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="240" y1="227" x2="190" y2="255" stroke="currentColor" marker-end="url(#ah5)"/>
+  <text x="165" y="245" text-anchor="middle" font-size="11">usb_ep_queue(req)</text>
+  <rect x="20" y="257" width="290" height="48" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="165" y="277" text-anchor="middle" font-size="13">UDC: dummy_udc.0</text>
+  <text x="165" y="295" text-anchor="middle" font-size="12">(실제 보드: dwc3, ci_hdrc …)</text>
+  <rect x="20" y="330" width="640" height="56" rx="8" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="340" y="352" text-anchor="middle" font-size="13">dummy_hcd.ko — 가짜 UDC와 가짜 HCD를 메모리 안에서 직결</text>
+  <text x="340" y="372" text-anchor="middle" font-size="12">(실제 보드에서는 이 자리에 USB 케이블과 PC의 xHCI가 있다)</text>
+  <line x1="165" y1="305" x2="165" y2="328" stroke="currentColor" marker-start="url(#ah5)" marker-end="url(#ah5)"/>
+  <line x1="515" y1="305" x2="515" y2="328" stroke="currentColor" marker-start="url(#ah5)" marker-end="url(#ah5)"/>
+  <rect x="370" y="257" width="290" height="48" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="515" y="277" text-anchor="middle" font-size="13">HCD: dummy_hcd (버스 3)</text>
+  <text x="515" y="295" text-anchor="middle" font-size="12">장치 3-1, high-speed</text>
+  <line x1="515" y1="255" x2="515" y2="237" stroke="currentColor" marker-end="url(#ah5)"/>
+  <rect x="370" y="171" width="290" height="64" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="515" y="193" text-anchor="middle" font-size="13">usbcore 열거 → interface 드라이버</text>
+  <text x="515" y="213" text-anchor="middle" font-size="12">3-1:1.0, 1.1 → cdc_acm</text>
+  <text x="515" y="229" text-anchor="middle" font-size="12">3-1:1.2 → usb-storage</text>
+  <line x1="440" y1="171" x2="440" y2="153" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="590" y1="171" x2="590" y2="153" stroke="currentColor" marker-end="url(#ah5)"/>
+  <rect x="370" y="103" width="140" height="48" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="440" y="132" text-anchor="middle" font-size="13">/dev/ttyACM0</text>
+  <rect x="520" y="103" width="140" height="48" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="590" y="132" text-anchor="middle" font-size="13">/dev/sdb</text>
+  <line x1="160" y1="199" x2="368" y2="127" stroke="#888" stroke-dasharray="4 4"/>
+  <text x="300" y="92" text-anchor="middle" font-size="11">ttyGS0 ↔ ttyACM0 루프백</text>
+</svg></figure>
+<p>그림 5 — gadget 스택과 dummy_hcd. 왼쪽은 장치가 된 Linux, 오른쪽은 같은 커널 안의 host. 실제 제품에서는 아래 빨간 상자 자리에 케이블과 PC가 있다.</p>
+<h3 id="10-2-composite와-function">10.2 composite와 function<a class="anchor" href="#10-2-composite와-function" aria-label="link">#</a></h3>
+<ul><li><strong>gadget driver</strong>: UDC에 바인딩되는 "장치 전체"의 드라이버. 한 UDC에는 gadget driver 하나만 붙는다. configfs가 만드는 gadget, 레거시 <code>g_serial</code>·<code>g_ether</code>·<code>g_mass_storage</code>·<code>g_multi</code>·<code>g_zero</code>가 모두 composite 기반 gadget driver다.</li><li><strong>function</strong>: 기능 하나의 구현. <code>usb_function</code>이 자기 interface·endpoint 디스크립터와 <code>set_alt</code>(호스트가 SET_CONFIGURATION/SET_INTERFACE 했을 때 endpoint를 켜는 콜백), <code>setup</code>(class 요청 처리)을 제공한다.</li></ul>
+<div class="tw"><table><thead><tr><th>function (configfs 이름)</th><th>모듈</th><th>호스트에서 보이는 것</th><th>제품에서의 용도</th></tr></thead><tbody><tr><td><code>acm</code></td><td><code>usb_f_acm</code> + <code>u_serial</code></td><td><code>/dev/ttyACM0</code> (Windows 10+ 기본 드라이버)</td><td><strong>디버그 콘솔</strong>, 명령 셸, 로그</td></tr><tr><td><code>gser</code></td><td><code>usb_f_serial</code></td><td>vendor 시리얼</td><td>레거시</td></tr><tr><td><code>ncm</code> / <code>ecm</code> / <code>rndis</code> / <code>eem</code></td><td><code>usb_f_ncm</code> 등 + <code>u_ether</code></td><td>네트워크 인터페이스 (<code>usb0</code>, <code>enx…</code>)</td><td><strong>Ethernet-over-USB</strong>: ssh·scp·웹 UI. NCM은 macOS·Linux·Windows 11 기본 지원, RNDIS는 구형 Windows용(보안 문제로 퇴출 중)</td></tr><tr><td><code>mass_storage</code></td><td><code>usb_f_mass_storage</code></td><td>USB 디스크</td><td>이미지·로그 내보내기, 업데이트 파일 받기</td></tr><tr><td><code>ffs</code> (FunctionFS)</td><td><code>usb_f_fs</code></td><td>유저 공간이 정한 무엇이든</td><td>ADB, MTP, 벤더 프로토콜, DFU를 유저 데몬으로</td></tr><tr><td><code>uvc</code>, <code>uac2</code>, <code>hid</code>, <code>midi</code>, <code>printer</code></td><td>각 <code>usb_f_*</code></td><td>웹캠, 오디오, HID 등</td><td>장치를 웹캠처럼 보이게</td></tr></tbody></table></div>
+<p>랩 커널의 <code>.config</code>: <code>CONFIG_USB_GADGET=y</code>, <code>CONFIG_USB_LIBCOMPOSITE=m</code>, <code>CONFIG_USB_F_ACM=m</code>, <code>CONFIG_USB_F_NCM=m</code>, <code>CONFIG_USB_F_MASS_STORAGE=m</code>, <code>CONFIG_USB_F_FS=m</code>, <code>CONFIG_USB_CONFIGFS=m</code> 등. 그러나 <code>CONFIG_USB_DUMMY_HCD</code>는 꺼져 있고 QEMU <code>virt</code>에는 진짜 UDC가 없다. G8 예제 13이 "<code>ls /sys/class/udc</code>가 비어 있어서 마지막 한 줄(<code>echo … &gt; UDC</code>)을 못 했다"에서 멈춘 이유다. 여기서는 <code>dummy_hcd.c</code>를 out-of-tree로 빌드해서 그 자리를 채운다.</p>
+<h3 id="10-3-예제-9-dummy_hcd를-out-of-tree로-빌드">10.3 예제 9 — <code>dummy_hcd</code>를 out-of-tree로 빌드<a class="anchor" href="#10-3-예제-9-dummy_hcd를-out-of-tree로-빌드" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 커널 소스 트리의 드라이버 파일 하나를 그대로 복사해 랩 빌드 트리에 대고 모듈로 빌드할 수 있다(필요한 심볼 — gadget core, usbcore HCD API — 은 커널에 이미 built-in).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>mkdir -p /var/tmp/H12/dummy &amp;&amp; cd /var/tmp/H12/dummy
+cp /var/lab/src/linux-6.18.55/drivers/usb/gadget/udc/dummy_hcd.c .
+echo "obj-m := dummy_hcd.o" &gt; Kbuild
+make -C /var/lab/out/linux-build M=$PWD modules -j2 2&gt;&amp;1 | grep -iE "warn|error|LD"
+modinfo dummy_hcd.ko | grep -E "parm|vermagic"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>  LD [M]  dummy_hcd.ko
+vermagic:       6.18.55 SMP preempt mod_unload aarch64
+parm:           is_super_speed:true to simulate SuperSpeed connection (bool)
+parm:           is_high_speed:true to simulate HighSpeed connection (bool)
+parm:           num:number of emulated controllers (uint)</code></pre></figure>
+<p>출력에서 볼 것: 경고 0, vermagic이 랩 커널(<code>6.18.55 SMP preempt</code>)과 같다. 기본은 High-Speed, <code>is_super_speed=1</code>이면 SuperSpeed, <code>is_high_speed=0</code>이면 Full-Speed 연결을 흉내 낸다(§12에서 셋 다 측정).</p>
+<h3 id="10-4-예제-10-configfs로-acm-mass-storage-gadget-조립-같은-커널이-host로-인식">10.4 예제 10 — configfs로 ACM + mass storage gadget 조립 → 같은 커널이 host로 인식<a class="anchor" href="#10-4-예제-10-configfs로-acm-mass-storage-gadget-조립-같은-커널이-host로-인식" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: G8에서 멈춘 조립을 끝까지 한다. 순서는 <strong>모듈 → gadget 디렉터리 → 장치 디스크립터 값 → 문자열 → configuration → function 생성·설정 → configuration에 링크 → UDC에 바인딩</strong>이다. 랩 모듈(<code>libcomposite.ko</code>, <code>u_serial.ko</code>, <code>usb_f_acm.ko</code>, <code>usb_f_mass_storage.ko</code>, host 쪽 <code>cdc-acm.ko</code>)은 <code>/var/lab/build/linux</code>에서 복사했다. QEMU 쪽에는 비교용 <code>usb-storage</code> 하나만 꽂았다(그래서 그 디스크가 <code>sda</code>, gadget 디스크가 <code>sdb</code>가 된다).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>mount -t configfs none /sys/kernel/config
+for m in dummy_hcd libcomposite u_serial usb_f_acm usb_f_mass_storage cdc-acm; do insmod /$m.ko; done
+echo "== UDC list"; ls /sys/class/udc | cat; cat /sys/class/udc/dummy_udc.0/state
+echo "== new bus"; lsusb
+dd if=/dev/zero of=/tmp/h12_lun.img bs=1M count=32 2&gt;/dev/null; mkfs.vfat -n H12LUN /tmp/h12_lun.img &gt;/dev/null
+G=/sys/kernel/config/usb_gadget/h12g
+mkdir $G &amp;&amp; cd $G || exit 1
+echo 0x1d6b &gt; idVendor; echo 0x0104 &gt; idProduct; echo 0x0200 &gt; bcdUSB; echo 0x0100 &gt; bcdDevice
+echo 0xEF &gt; bDeviceClass; echo 0x02 &gt; bDeviceSubClass; echo 0x01 &gt; bDeviceProtocol
+mkdir strings/0x409
+echo "H12 Lab" &gt; strings/0x409/manufacturer; echo "H12 Sensor Kit" &gt; strings/0x409/product; echo "H12-0001" &gt; strings/0x409/serialnumber
+mkdir -p configs/c.1/strings/0x409; echo "ACM+MSC" &gt; configs/c.1/strings/0x409/configuration; echo 250 &gt; configs/c.1/MaxPower
+mkdir functions/acm.gs0 functions/mass_storage.0
+echo /tmp/h12_lun.img &gt; functions/mass_storage.0/lun.0/file; echo 1 &gt; functions/mass_storage.0/lun.0/removable
+ln -s functions/acm.gs0 configs/c.1/; ln -s functions/mass_storage.0 configs/c.1/
+echo "== tree"; find . -maxdepth 3 | grep -v "os_desc\|webusb" | sort | head -40
+echo dummy_udc.0 &gt; UDC; sleep 3
+echo "== after bind"; cat UDC; cat /sys/class/udc/dummy_udc.0/state /sys/class/udc/dummy_udc.0/current_speed
+lsusb
+dmesg | grep -E "usb 3-1|cdc_acm|usb-storage 3-1|sd 1:|sdb|g_|configfs|dummy" | head -20</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== UDC list
+dummy_udc.0
+not attached
+== new bus
+Bus 003 Device 001: ID 1d6b:0002 Linux 6.18.55 dummy_hcd Dummy host controller
+Bus 002 Device 002: ID 46f4:0001 QEMU QEMU USB HARDDRIVE
+Bus 001 Device 001: ID 1d6b:0002 Linux 6.18.55 xhci-hcd xHCI Host Controller
+Bus 002 Device 001: ID 1d6b:0003 Linux 6.18.55 xhci-hcd xHCI Host Controller
+== tree
+.
+./UDC
+./bDeviceClass
+./bDeviceProtocol
+./bDeviceSubClass
+./bMaxPacketSize0
+./bcdDevice
+./bcdUSB
+./configs
+./configs/c.1
+./configs/c.1/MaxPower
+./configs/c.1/acm.gs0
+./configs/c.1/bmAttributes
+./configs/c.1/mass_storage.0
+./configs/c.1/strings
+./functions
+./functions/acm.gs0
+./functions/acm.gs0/port_num
+./functions/acm.gs0/protocol
+./functions/mass_storage.0
+./functions/mass_storage.0/lun.0
+./functions/mass_storage.0/stall
+./idProduct
+./idVendor
+./max_speed
+./strings
+./strings/0x409
+./strings/0x409/manufacturer
+./strings/0x409/product
+./strings/0x409/serialnumber
+== after bind
+dummy_udc.0
+configured
+high-speed
+Bus 003 Device 001: ID 1d6b:0002 Linux 6.18.55 dummy_hcd Dummy host controller
+Bus 002 Device 002: ID 46f4:0001 QEMU QEMU USB HARDDRIVE
+Bus 001 Device 001: ID 1d6b:0002 Linux 6.18.55 xhci-hcd xHCI Host Controller
+Bus 002 Device 001: ID 1d6b:0003 Linux 6.18.55 xhci-hcd xHCI Host Controller
+Bus 003 Device 002: ID 1d6b:0104 H12 Lab H12 Sensor Kit
+[    0.000000] Machine model: linux,dummy-virt
+[    0.007287] Console: colour dummy device 80x25
+[    4.097535] dummy_hcd: loading out-of-tree module taints kernel.
+[    4.104976] dummy_hcd dummy_hcd.0: USB Host+Gadget Emulator, driver 02 May 2005
+[    4.105299] dummy_hcd dummy_hcd.0: Dummy host controller
+[    4.105331] dummy_hcd dummy_hcd.0: new USB bus registered, assigned bus number 3
+[    4.220656] usbcore: registered new interface driver cdc_acm
+[    4.220714] cdc_acm: USB Abstract Control Model driver for USB modems and ISDN adapters
+[    5.021545] usb 3-1: new high-speed USB device number 2 using dummy_hcd
+[    5.159894] usb 3-1: Dual-Role OTG device on HNP port
+[    5.292422] cdc_acm 3-1:1.0: ttyACM0: USB ACM device
+[    5.294940] usb-storage 3-1:1.2: USB Mass Storage device detected
+[    5.296226] scsi host1: usb-storage 3-1:1.2
+[    6.312889] sd 1:0:0:0: Power-on or device reset occurred
+[    6.321385] sd 1:0:0:0: [sdb] 65536 512-byte logical blocks: (33.6 MB/32.0 MiB)
+[    6.322353] sd 1:0:0:0: [sdb] Write Protect is off
+[    6.322396] sd 1:0:0:0: [sdb] Mode Sense: 0f 00 00 00
+[    6.323217] sd 1:0:0:0: [sdb] Write cache: enabled, read cache: enabled, doesn't support DPO or FUA
+[    6.353968]  sdb:
+[    6.355546] sd 1:0:0:0: [sdb] Attached SCSI removable disk</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>dummy_hcd</code>를 넣는 순간 <strong>UDC 하나(<code>dummy_udc.0</code>)와 USB 버스 하나(버스 3, root hub <code>1d6b:0002</code>)</strong>가 동시에 생겼다. G8에서 비어 있던 <code>/sys/class/udc</code>가 채워졌다. 상태는 아직 <code>not attached</code>(케이블 안 꽂힘).</li><li>configfs 디렉터리는 mkdir만으로 속성 파일이 생긴다. <code>functions/acm.gs0</code>처럼 이름은 <code>&lt;function 종류&gt;.&lt;인스턴스 이름&gt;</code>이고, 종류 부분으로 <code>usb_f_acm</code>의 function 드라이버를 찾는다. <code>configs/c.1/acm.gs0</code>은 심볼릭 링크다.</li><li><code>echo dummy_udc.0 &gt; UDC</code> = <strong>케이블을 꽂는 순간</strong>. 곧바로 host 쪽 hub 드라이버가 <code>3-1</code>을 열거했다. 장치 class <code>0xEF/02/01</code>(Miscellaneous, IAD 사용)로 선언했기 때문에 host가 IAD를 보고 ACM 두 interface를 한 기능으로 묶어 <code>cdc_acm</code>에 준다. 이걸 빼면 Windows는 composite ACM을 제대로 인식하지 못한다(Linux는 대체로 관대하다).</li><li>같은 커널에서 gadget 쪽은 <code>/dev/ttyGS0</code>, host 쪽은 <code>/dev/ttyACM0</code>과 <code>/dev/sdb</code>를 갖게 됐다. <code>Dual-Role OTG device on HNP port</code>는 composite가 OTG 디스크립터를 넣었기 때문이다(랩 커널 <code>CONFIG_USB_OTG=y</code>).</li><li><code>[sdb] Attached SCSI removable disk</code> — <code>lun.0/removable=1</code>을 썼기 때문에 removable로 보인다.</li></ul>
+<h3 id="10-5-예제-11-end-to-end-시험-디스크립터-시리얼-루프백-디스크-뽑기">10.5 예제 11 — end-to-end 시험: 디스크립터, 시리얼 루프백, 디스크, 뽑기<a class="anchor" href="#10-5-예제-11-end-to-end-시험-디스크립터-시리얼-루프백-디스크-뽑기" aria-label="link">#</a></h3>
+<p>같은 조립 스크립트 뒤에 붙여 한 번에 실행했다(이 출력은 별도 부팅이라 타임스탬프가 위와 다르다).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>h12_desc 3-1
+cat /sys/kernel/debug/usb/devices | awk 'BEGIN{RS=""} /H12 Sensor/'
+for i in /sys/bus/usb/devices/3-1:1.*; do echo "${i##*/} -&gt; $(basename $(readlink $i/driver))"; done
+ls -l /dev/ttyACM0 /dev/ttyGS0 /dev/sdb | cat
+stty -F /dev/ttyACM0 raw -echo; stty -F /dev/ttyGS0 raw -echo
+cat /dev/ttyGS0 &gt; /tmp/gs.rx &amp; P1=$!; cat /dev/ttyACM0 &gt; /tmp/acm.rx &amp; P2=$!; sleep 0.5
+echo "host-&gt;gadget: hello device" &gt; /dev/ttyACM0
+echo "gadget-&gt;host: hello host" &gt; /dev/ttyGS0; sleep 1; kill $P1 $P2
+echo "ttyGS0 got: $(cat /tmp/gs.rx)"; echo "ttyACM0 got: $(cat /tmp/acm.rx)"
+mkdir -p /mnt/h; mount -t vfat /dev/sdb /mnt/h &amp;&amp; echo "written by USB host via dummy_hcd" &gt; /mnt/h/FROMHOST.TXT &amp;&amp; sync &amp;&amp; umount /mnt/h
+echo "" &gt; $G/UDC; sleep 2                      # 케이블 뽑기
+echo "UDC=[$(cat $G/UDC)] udc-state=$(cat /sys/class/udc/dummy_udc.0/state)"; ls /sys/bus/usb/devices | tr "\n" " "; echo; dmesg | grep -E "usb 3-1: USB disconnect"
+mkdir -p /mnt/g; mount -o loop,ro /tmp/h12_lun.img /mnt/g &amp;&amp; cat /mnt/g/FROMHOST.TXT; umount /mnt/g</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== DESC 3-1
+/sys/bus/usb/devices/3-1/descriptors: 119 bytes
+DEVICE  bcdUSB=2.00 class=ef mps0=64 idVendor=1d6b idProduct=0104 nConf=1
+ CONFIG  value=1 wTotalLength=101 nIf=3 attr=0x80 MaxPower=250mA
+  OTG   bmAttributes=0x03 (HNP/SRP capable bits)
+  IAD   firstIf=0 count=2 class=02
+  IF    num=0 alt=0 nEP=1 class=02 sub=02 proto=01
+   (CS_INTERFACE 0x24, CDC functional, len 5)
+   (CS_INTERFACE 0x24, CDC functional, len 5)
+   (CS_INTERFACE 0x24, CDC functional, len 4)
+   (CS_INTERFACE 0x24, CDC functional, len 5)
+   EP   0x85 IN  interrupt wMaxPacket=10 bInterval=9
+  IF    num=1 alt=0 nEP=2 class=0a sub=00 proto=00
+   EP   0x81 IN  bulk      wMaxPacket=512 bInterval=0
+   EP   0x02 OUT bulk      wMaxPacket=512 bInterval=0
+  IF    num=2 alt=0 nEP=2 class=08 sub=06 proto=50
+   EP   0x86 IN  bulk      wMaxPacket=512 bInterval=0
+   EP   0x07 OUT bulk      wMaxPacket=512 bInterval=1
+== debugfs 3-1
+T:  Bus=03 Lev=01 Prnt=01 Port=00 Cnt=01 Dev#=  2 Spd=480  MxCh= 0
+D:  Ver= 2.00 Cls=ef(misc ) Sub=02 Prot=01 MxPS=64 #Cfgs=  1
+P:  Vendor=1d6b ProdID=0104 Rev= 1.00
+S:  Manufacturer=H12 Lab
+S:  Product=H12 Sensor Kit
+S:  SerialNumber=H12-0001
+C:* #Ifs= 3 Cfg#= 1 Atr=80 MxPwr=250mA
+A:  FirstIf#= 0 IfCount= 2 Cls=02(comm.) Sub=02 Prot=01
+I:* If#= 0 Alt= 0 #EPs= 1 Cls=02(comm.) Sub=02 Prot=01 Driver=cdc_acm
+E:  Ad=85(I) Atr=03(Int.) MxPS=  10 Ivl=32ms
+I:* If#= 1 Alt= 0 #EPs= 2 Cls=0a(data ) Sub=00 Prot=00 Driver=cdc_acm
+E:  Ad=81(I) Atr=02(Bulk) MxPS= 512 Ivl=0ms
+E:  Ad=02(O) Atr=02(Bulk) MxPS= 512 Ivl=0ms
+I:* If#= 2 Alt= 0 #EPs= 2 Cls=08(stor.) Sub=06 Prot=50 Driver=usb-storage
+E:  Ad=86(I) Atr=02(Bulk) MxPS= 512 Ivl=0ms
+E:  Ad=07(O) Atr=02(Bulk) MxPS= 512 Ivl=125us
+
+== interfaces/drivers
+3-1:1.0 -&gt; cdc_acm
+3-1:1.1 -&gt; cdc_acm
+3-1:1.2 -&gt; usb-storage
+brw-------    1 0        0           8,  16 Oct 11 04:05 /dev/sdb
+crw-------    1 0        0         166,   0 Oct 11 04:05 /dev/ttyACM0
+crw-------    1 0        0         510,   0 Oct 11 04:05 /dev/ttyGS0
+== tty loopback
+ttyGS0 got: host-&gt;gadget: hello device
+ttyACM0 got: gadget-&gt;host: hello host
+== mass storage from host side
+== unbind UDC (cable unplug)
+UDC=[] udc-state=configured
+1-0:1.0 2-0:1.0 2-1 2-1:1.0 3-0:1.0 usb1 usb2 usb3 
+[   16.414618] usb 3-1: USB disconnect, device number 2
+== backing file seen from gadget side
+written by USB host via dummy_hcd</code></pre></figure>
+<p>(실제 실행에는 루프백과 뽑기 사이에 §12의 처리량 측정도 들어 있었다. 그 부분은 §12에 따로 싣는다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>우리가 configfs에 쓴 값이 그대로 디스크립터가 됐다</strong>: <code>idVendor=1d6b idProduct=0104</code>, <code>class=ef</code>, <code>MaxPower=250mA</code>, 문자열 3개. 우리가 쓰지 않은 부분(IAD, CDC functional 디스크립터 4개, endpoint 번호 0x85/0x81/0x02/0x86/0x07, <code>wMaxPacket=512</code>)은 <strong>composite와 function 드라이버가 자동으로 채웠다</strong>. endpoint 번호는 UDC가 가진 endpoint 중 남는 것을 <code>usb_ep_autoconfig()</code>가 골라 준 결과라 UDC마다 다르다.</li><li>이 구조가 그림 2의 예 그대로다: <code>3-1:1.0</code>, <code>3-1:1.1</code> → <code>cdc_acm</code>, <code>3-1:1.2</code> → <code>usb-storage</code>.</li><li><strong>루프백</strong>: host 쪽 <code>/dev/ttyACM0</code>에 쓴 줄이 gadget 쪽 <code>/dev/ttyGS0</code>에서 읽히고, 반대 방향도 된다. 실제 제품의 "PC에 꽂으면 시리얼 콘솔이 뜨는" 기능이 이 한 쌍이다. 보드 쪽에서는 <code>ttyGS0</code>에 getty를 붙인다(systemd <code>serial-getty@ttyGS0.service</code>).</li><li><strong>디스크</strong>: host가 <code>sdb</code>를 FAT로 마운트해 파일을 쓰고, 케이블을 뽑은 뒤(UDC 해제) gadget 쪽에서 원본 이미지를 loop 마운트하니 그 파일이 있다. <strong>주의</strong>: gadget이 연결된 동안 gadget 쪽에서 같은 이미지를 rw로 마운트하면 안 된다. 두 OS가 같은 FAT를 동시에 쓰는 것이라 파일시스템이 깨진다. 펌웨어 업데이트를 이 방식으로 할 때는 "연결 해제 → 검사 → 적용" 순서를 지킨다.</li><li><strong>뽑기</strong>: <code>UDC</code>에 빈 문자열을 쓰자 host 쪽에 <code>USB disconnect</code>가 나고 <code>3-1</code> 노드들이 사라졌다. 그런데 <code>udc-state</code>는 여전히 <code>configured</code>로 읽혔다. dummy_udc에서 관찰한 값이고, 이 sysfs 속성이 언바인드 때 갱신되지 않는 것으로 보인다 — 상태 판단은 <code>UDC</code> 파일과 host 쪽 결과로 하자.</li><li><code>bInterval=9</code>(HS) → <code>Ivl=32ms</code> = 2^(9-1) × 125 µs. ACM 알림 endpoint는 거의 쓰이지 않으니 느슨하게 잡혀 있다.</li></ul>
+<h3 id="10-6-예제-12-레거시-g_mass_storage-한-줄-그리고-busybox-lsusb-t">10.6 예제 12 — 레거시 <code>g_mass_storage</code> 한 줄, 그리고 BusyBox <code>lsusb -t</code><a class="anchor" href="#10-6-예제-12-레거시-g_mass_storage-한-줄-그리고-busybox-lsusb-t" aria-label="link">#</a></h3>
+<p>configfs 이전에는 기능 조합마다 <code>g_*</code> 모듈이 있었고, 모듈 파라미터로 설정했다. 지금도 간단한 시험이나 initramfs 안 업데이트 모드에서 쓴다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>lsusb -t 2&gt;&amp;1 | head -3; lsusb -v 2&gt;&amp;1 | head -2
+insmod /dummy_hcd.ko; insmod /libcomposite.ko; insmod /usb_f_mass_storage.ko
+dd if=/dev/zero of=/tmp/h12_g.img bs=1M count=8 2&gt;/dev/null
+insmod /g_mass_storage.ko file=/tmp/h12_g.img removable=1; sleep 3
+lsusb | grep -v "1d6b:000"; cat /sys/class/udc/dummy_udc.0/function
+dmesg | grep -E "Mass Storage Gadget|g_mass_storage|usb 3-1:" | head -6
+mount -t configfs none /sys/kernel/config; echo "configfs gadgets: $(ls /sys/kernel/config/usb_gadget | wc -l)"
+rmmod g_mass_storage; sleep 1; dmesg | grep "USB disconnect" | tail -1</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== busybox lsusb -t / -v ?
+Bus 002 Device 002: ID 46f4:0001 QEMU QEMU USB HARDDRIVE
+Bus 001 Device 001: ID 1d6b:0002 Linux 6.18.55 xhci-hcd xHCI Host Controller
+Bus 002 Device 001: ID 1d6b:0003 Linux 6.18.55 xhci-hcd xHCI Host Controller
+Bus 002 Device 002: ID 46f4:0001 QEMU QEMU USB HARDDRIVE
+Bus 001 Device 001: ID 1d6b:0002 Linux 6.18.55 xhci-hcd xHCI Host Controller
+== legacy g_mass_storage
+Bus 002 Device 002: ID 46f4:0001 QEMU QEMU USB HARDDRIVE
+Bus 003 Device 002: ID 0525:a4a5 Linux 6.18.55 with dummy_udc Mass Storage Gadget
+g_mass_storage
+[    2.250285] g_mass_storage gadget.0: Mass Storage Gadget, version: 2009/09/11
+[    2.250393] g_mass_storage gadget.0: userspace failed to provide iSerialNumber
+[    2.250413] g_mass_storage gadget.0: g_mass_storage ready
+[    2.472068] usb 3-1: new high-speed USB device number 2 using dummy_hcd
+[    2.610560] usb 3-1: Dual-Role OTG device on HNP port
+configfs gadgets: 0
+[    5.384046] usb 3-1: USB disconnect, device number 2</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>BusyBox <code>lsusb</code>는 <code>-t</code>/<code>-v</code>를 무시하고 같은 목록을 출력했다(§3.4).</li><li><code>g_mass_storage</code>는 insmod 즉시 <strong>첫 번째 UDC에 스스로 바인딩</strong>한다. VID:PID <code>0525:a4a5</code>(NetChip 시절 Linux-USB 기본값), <code>function</code> 속성은 <code>g_mass_storage</code>. configfs에는 아무것도 생기지 않는다(<code>configfs gadgets: 0</code>). 한 UDC에는 gadget driver 하나뿐이라 레거시 모듈과 configfs gadget을 같은 UDC에 동시에 쓸 수 없다.</li><li><code>userspace failed to provide iSerialNumber</code> — 시리얼 번호가 없으면 Windows가 포트를 바꿀 때마다 새 장치로 인식한다. 제품에서는 configfs <code>strings/0x409/serialnumber</code>에 보드 고유 번호(SoC UID 등)를 넣는다.</li><li><code>rmmod</code>가 곧 케이블 뽑기다.</li></ul>
+<h3 id="10-7-functionfs-유저-공간-function-실행하지-않음">10.7 FunctionFS — 유저 공간 function (실행하지 않음)<a class="anchor" href="#10-7-functionfs-유저-공간-function-실행하지-않음" aria-label="link">#</a></h3>
+<p><code>usb_f_fs</code>(configfs 이름 <code>ffs.&lt;인스턴스&gt;</code>)를 쓰면 function을 유저 공간 데몬이 구현한다. 순서(Documentation/usb/functionfs.rst 기준, <strong>이 노트에서 실행하지 않음</strong>):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>mkdir functions/ffs.h12; ln -s functions/ffs.h12 configs/c.1/
+mkdir -p /dev/ffs-h12 &amp;&amp; mount -t functionfs h12 /dev/ffs-h12
+# 데몬이 /dev/ffs-h12/ep0 에 디스크립터 + 문자열 블롭을 write() → ep1, ep2 … 파일이 생김
+# 그다음에야 echo &lt;udc&gt; &gt; UDC  (디스크립터가 준비되기 전에 바인딩하면 실패)</code></pre></figure>
+<p>Android의 ADB, MTP 데몬과 많은 벤더의 DFU/업데이트 데몬이 이 방식이다. 커널 모듈을 새로 쓰지 않고 USB 프로토콜을 구현할 수 있다는 것이 장점이다.</p>
+<hr>
+<h2 id="11-otg와-dual-role-임베디드-soc의-현실">11. OTG와 dual-role — 임베디드 SoC의 현실<a class="anchor" href="#11-otg와-dual-role-임베디드-soc의-현실" aria-label="link">#</a></h2>
+<h3 id="11-1-하나의-포트-두-역할">11.1 하나의 포트, 두 역할<a class="anchor" href="#11-1-하나의-포트-두-역할" aria-label="link">#</a></h3>
+<p>임베디드 SoC의 USB 컨트롤러는 대부분 <strong>dual-role</strong>(DRD)이다. 같은 IP가 host(xHCI/EHCI)도 되고 device(UDC)도 된다. 대표 IP:</p>
+<div class="tw"><table><thead><tr><th>IP</th><th>쓰는 SoC (예)</th><th>Linux 드라이버</th></tr></thead><tbody><tr><td>Synopsys DWC3</td><td>i.MX8M Plus, AM62, Rockchip, Qualcomm, Jetson 일부</td><td><code>dwc3</code> (host 모드는 내부적으로 <code>xhci-plat</code>)</td></tr><tr><td>ChipIdea</td><td>i.MX6/7, i.MX8M Mini/Nano</td><td><code>ci_hdrc</code> + <code>ci_hdrc_imx</code></td></tr><tr><td>Synopsys DWC2</td><td>Raspberry Pi(BCM2835), STM32MP1</td><td><code>dwc2</code></td></tr><tr><td>Cadence USBSS</td><td>TI J7/AM64</td><td><code>cdns3</code></td></tr><tr><td>NVIDIA XUSB</td><td>Jetson Orin</td><td><code>xhci-tegra</code> + <code>tegra-xudc</code></td></tr></tbody></table></div>
+<p>역할을 정하는 방법:</p>
+<ul><li><strong>Device Tree 고정</strong>: <code>dr_mode = "host" | "peripheral" | "otg";</code> (DWC3, ChipIdea, DWC2 공통 속성). 개발 보드의 Type-C 디버그 포트는 <code>peripheral</code>로 고정하는 일이 많다.</li><li><strong>role switch</strong>: <code>usb-role-switch;</code> 속성 + Type-C 포트 컨트롤러(TCPM, <code>tps6598x</code>, <code>fusb302</code> …)나 ID 핀(<code>usb-conn-gpio</code>)이 케이블 방향을 감지해 <code>usb_role_switch_set_role()</code>을 부른다. sysfs <code>/sys/class/usb_role/&lt;스위치&gt;/role</code>에서 현재 역할을 보고, 드라이버가 허용하면 써서 바꿀 수 있다. 랩 커널에는 <code>CONFIG_USB_ROLE_SWITCH=y</code>, <code>CONFIG_USB_CONN_GPIO=y</code>가 켜져 있지만 QEMU에 해당 HW가 없어 실행하지 않았다.</li><li>"OTG"는 원래 USB 2.0 OTG 스펙(HNP/SRP로 역할을 협상)을 뜻하지만, 실무에서는 대부분 "dual-role 포트"라는 뜻으로 쓴다. HNP는 거의 쓰이지 않는다.</li></ul>
+<figure class="code"><span class="lang">dts</span><pre><code>/* 예: DWC3를 device 전용으로 (i.MX8M Plus EVK 스타일, 형식만 — 실행하지 않음) */
+&amp;usb_dwc3_0 {
+	dr_mode = "peripheral";
+	status = "okay";
+};</code></pre></figure>
+<h3 id="11-2-제품에서-usb를-쓰는-장면">11.2 제품에서 USB를 쓰는 장면<a class="anchor" href="#11-2-제품에서-usb를-쓰는-장면" aria-label="link">#</a></h3>
+<ul><li><strong>디버그 콘솔</strong>: ACM function + <code>serial-getty@ttyGS0</code>. UART 핀이 없는 양산 케이스에서도 USB 케이블 하나로 셸에 들어간다. 보안상 양산 이미지에서는 끄거나 인증을 건다.</li><li><strong>Ethernet-over-USB</strong>: NCM(또는 RNDIS+ECM 조합)으로 <code>usb0</code>에 고정 IP(관례상 <code>192.168.7.2</code> 같은 사설 대역)를 주고 ssh·scp·웹 UI. BeagleBone, Jetson 개발 키트가 이 방식이다(Jetson은 RNDIS + ECM + ACM + mass storage 조합을 기본 제공).</li><li><strong>펌웨어 업데이트</strong>: ① 부트로더 단계 — U-Boot의 <code>ums</code>(USB mass storage), <code>dfu</code>, <code>fastboot</code> 명령(이건 커널이 아니라 U-Boot의 gadget 스택이다). ② SoC ROM 리커버리 — i.MX의 SDP(<code>uuu</code> 도구), Jetson RCM 모드, Rockchip maskrom: SoC ROM 코드가 USB 장치가 되어 PC에서 이미지를 받는다. ③ Linux 실행 중 — mass storage 노출 후 PC가 파일을 놓으면 검증·적용, 또는 FunctionFS 데몬.</li><li><strong>Host 쪽</strong>: USB 카메라(UVC) — isochronous 대역폭 예약 실패(<code>-ENOSPC</code>, "not enough bandwidth")가 흔한 함정, LTE 모뎀(<code>option</code>/<code>qmi_wwan</code>/<code>cdc_mbim</code> + ModemManager), USB 허브 뒤 여러 장치의 전력 예산(<code>bMaxPower</code> 합계), 그리고 udev 규칙으로 포트 경로 기반 고정 이름(<code>/dev/gnss0</code>).</li></ul>
+<hr>
+<h2 id="12-처리량-측정-dummy_hcd-bulk-그리고-에뮬레이터의-한계">12. 처리량 측정 — dummy_hcd bulk, 그리고 에뮬레이터의 한계<a class="anchor" href="#12-처리량-측정-dummy_hcd-bulk-그리고-에뮬레이터의-한계" aria-label="link">#</a></h2>
+<h3 id="12-1-예제-13-o_direct-순차-읽기-벤치마크">12.1 예제 13 — <code>O_DIRECT</code> 순차 읽기 벤치마크<a class="anchor" href="#12-1-예제-13-o_direct-순차-읽기-벤치마크" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 요청 크기(4 KiB~1 MiB)별로 블록 장치를 16 MiB씩 <code>O_DIRECT</code> + <code>pread</code>로 읽어 MB/s와 요청당 시간을 잰다. 페이지 캐시를 우회하므로 매 요청이 실제로 USB(가상)를 지난다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* h12_bw.c - O_DIRECT sequential read throughput of a block device per request size */
+#define _GNU_SOURCE
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;time.h&gt;
+
+static double now(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &amp;t);
+	return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+int main(int argc, char **argv)
+{
+	static const size_t sizes[] = { 4096, 16384, 65536, 262144, 1048576 };
+	const size_t total = 16 &lt;&lt; 20;			/* 16 MiB per size */
+	if (argc != 3) { fprintf(stderr, "usage: %s /dev/sdX label\n", argv[0]); exit(1); }
+	int fd = open(argv[1], O_RDONLY | O_DIRECT);
+	if (fd &lt; 0) { perror(argv[1]); exit(1); }
+	void *buf;
+	if (posix_memalign(&amp;buf, 4096, 1 &lt;&lt; 20)) { perror("posix_memalign"); exit(1); }
+	for (unsigned i = 0; i &lt; sizeof(sizes) / sizeof(sizes[0]); i++) {
+		size_t bs = sizes[i], done = 0;
+		double t0 = now();
+		while (done &lt; total) {
+			ssize_t n = pread(fd, buf, bs, done);
+			if (n &lt;= 0) { perror("pread"); exit(1); }
+			done += n;
+		}
+		double dt = now() - t0;
+		printf("%s bs=%7zu  %6.1f MB/s  (%.0f us/req)\n", argv[2], bs,
+		       total / dt / 1e6, dt / (total / bs) * 1e6);
+	}
+	close(fd);
+	return 0;
+}</code></pre></figure>
+<p>예제 11과 같은 부팅에서의 결과(gadget = <code>sdb</code> via dummy_hcd High-Speed, 비교 = QEMU <code>usb-storage</code> <code>sda</code> via xHCI SuperSpeed):</p>
+<figure class="code"><span class="lang">text</span><pre><code>== bandwidth
+gadget-dummy_hcd bs=   4096     4.2 MB/s  (977 us/req)
+gadget-dummy_hcd bs=  16384    15.5 MB/s  (1056 us/req)
+gadget-dummy_hcd bs=  65536    54.8 MB/s  (1196 us/req)
+gadget-dummy_hcd bs= 262144    58.7 MB/s  (4468 us/req)
+gadget-dummy_hcd bs=1048576    66.5 MB/s  (15760 us/req)
+qemu-xhci-storage bs=   4096    12.7 MB/s  (323 us/req)
+qemu-xhci-storage bs=  16384    24.8 MB/s  (660 us/req)
+qemu-xhci-storage bs=  65536    68.9 MB/s  (951 us/req)
+qemu-xhci-storage bs= 262144   222.3 MB/s  (1179 us/req)
+qemu-xhci-storage bs=1048576   247.1 MB/s  (4244 us/req)</code></pre></figure>
+<p>그리고 <code>dummy_hcd</code>를 세 속도(<code>is_high_speed=0</code> → Full, 기본 → High, <code>is_super_speed=1</code> → Super)로 각각 3번씩 부팅해 측정했다(9 부팅). gadget 측 결과의 예(Full-Speed 첫 실행):</p>
+<figure class="code"><span class="lang">text</span><pre><code>#### fs run1
+speed=full-speed maxp=0040
+gadget bs=   4096     1.6 MB/s  (2586 us/req)
+gadget bs=  16384     3.7 MB/s  (4442 us/req)
+gadget bs=  65536     4.4 MB/s  (15006 us/req)
+gadget bs= 262144     4.3 MB/s  (61655 us/req)
+gadget bs=1048576     2.9 MB/s  (356856 us/req)</code></pre></figure>
+<p>3회 중앙값(MB/s):</p>
+<div class="tw"><table><thead><tr><th>요청 크기</th><th>gadget FS</th><th>gadget HS</th><th>gadget SS</th><th>QEMU usb-storage (xHCI)</th></tr></thead><tbody><tr><td>4 KiB</td><td>1.6</td><td>2.5</td><td>2.4</td><td>7.5</td></tr><tr><td>16 KiB</td><td>2.6</td><td>10.2</td><td>11.2</td><td>31.8</td></tr><tr><td>64 KiB</td><td>4.2</td><td>31.5</td><td>37.7</td><td>122.2</td></tr><tr><td>256 KiB</td><td>4.3</td><td>46.4</td><td>64.6</td><td>354.4</td></tr><tr><td>1 MiB</td><td>4.0</td><td>52.5</td><td>94.7</td><td>608.9</td></tr></tbody></table></div>
+<p>(QEMU 열은 9번 부팅 모두에서 잰 값의 중앙값.)</p>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+  <line x1="70" y1="300" x2="430" y2="300" stroke="currentColor"/>
+  <line x1="70" y1="40" x2="70" y2="300" stroke="currentColor"/>
+  <line x1="70" y1="300.0" x2="430" y2="300.0" stroke="#888" stroke-opacity="0.4" stroke-dasharray="3 3"/>
+  <text x="62" y="304.0" text-anchor="end" font-size="12">1</text>
+  <line x1="70" y1="213.3" x2="430" y2="213.3" stroke="#888" stroke-opacity="0.4" stroke-dasharray="3 3"/>
+  <text x="62" y="217.3" text-anchor="end" font-size="12">10</text>
+  <line x1="70" y1="126.7" x2="430" y2="126.7" stroke="#888" stroke-opacity="0.4" stroke-dasharray="3 3"/>
+  <text x="62" y="130.7" text-anchor="end" font-size="12">100</text>
+  <line x1="70" y1="40.0" x2="430" y2="40.0" stroke="#888" stroke-opacity="0.4" stroke-dasharray="3 3"/>
+  <text x="62" y="44.0" text-anchor="end" font-size="12">1000</text>
+  <line x1="70" y1="293.1" x2="430" y2="293.1" stroke="#3f9a6b" stroke-dasharray="6 3"/>
+  <text x="426" y="288.1" text-anchor="end" font-size="11">실제 Full-Speed bulk 상한 약 1.2</text>
+  <text x="95.0" y="318" text-anchor="middle" font-size="12">4K</text>
+  <text x="167.5" y="318" text-anchor="middle" font-size="12">16K</text>
+  <text x="240.0" y="318" text-anchor="middle" font-size="12">64K</text>
+  <text x="312.5" y="318" text-anchor="middle" font-size="12">256K</text>
+  <text x="385.0" y="318" text-anchor="middle" font-size="12">1M</text>
+  <text x="250" y="340" text-anchor="middle" font-size="12">요청 크기 (O_DIRECT pread 한 번)</text>
+  <text x="18" y="170" text-anchor="middle" font-size="12" transform="rotate(-90 18 170)">MB/s (로그 축)</text>
+  <text x="340" y="22" text-anchor="middle" font-size="13">순차 읽기 처리량 — 3회 중앙값, QEMU TCG 게스트 안</text>
+  <polyline points="95.0,224.2 167.5,169.8 240.0,119.1 312.5,79.0 385.0,58.7" fill="none" stroke="#d0564a" stroke-width="2"/>
+  <circle cx="95.0" cy="224.2" r="3.5" fill="#d0564a"/>
+  <circle cx="167.5" cy="169.8" r="3.5" fill="#d0564a"/>
+  <circle cx="240.0" cy="119.1" r="3.5" fill="#d0564a"/>
+  <circle cx="312.5" cy="79.0" r="3.5" fill="#d0564a"/>
+  <circle cx="385.0" cy="58.7" r="3.5" fill="#d0564a"/>
+  <text x="393.0" y="62.7" font-size="12">608.9</text>
+  <polyline points="95.0,267.0 167.5,209.1 240.0,163.4 312.5,143.1 385.0,128.7" fill="none" stroke="#e08a3c" stroke-width="2"/>
+  <circle cx="95.0" cy="267.0" r="3.5" fill="#e08a3c"/>
+  <circle cx="167.5" cy="209.1" r="3.5" fill="#e08a3c"/>
+  <circle cx="240.0" cy="163.4" r="3.5" fill="#e08a3c"/>
+  <circle cx="312.5" cy="143.1" r="3.5" fill="#e08a3c"/>
+  <circle cx="385.0" cy="128.7" r="3.5" fill="#e08a3c"/>
+  <text x="393.0" y="132.7" font-size="12">94.7</text>
+  <polyline points="95.0,265.5 167.5,212.6 240.0,170.1 312.5,155.6 385.0,150.9" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+  <circle cx="95.0" cy="265.5" r="3.5" fill="#4a7bd0"/>
+  <circle cx="167.5" cy="212.6" r="3.5" fill="#4a7bd0"/>
+  <circle cx="240.0" cy="170.1" r="3.5" fill="#4a7bd0"/>
+  <circle cx="312.5" cy="155.6" r="3.5" fill="#4a7bd0"/>
+  <circle cx="385.0" cy="150.9" r="3.5" fill="#4a7bd0"/>
+  <text x="393.0" y="154.9" font-size="12">52.5</text>
+  <polyline points="95.0,282.3 167.5,264.0 240.0,246.0 312.5,245.1 385.0,247.8" fill="none" stroke="#3f9a6b" stroke-width="2"/>
+  <circle cx="95.0" cy="282.3" r="3.5" fill="#3f9a6b"/>
+  <circle cx="167.5" cy="264.0" r="3.5" fill="#3f9a6b"/>
+  <circle cx="240.0" cy="246.0" r="3.5" fill="#3f9a6b"/>
+  <circle cx="312.5" cy="245.1" r="3.5" fill="#3f9a6b"/>
+  <circle cx="385.0" cy="247.8" r="3.5" fill="#3f9a6b"/>
+  <text x="393.0" y="251.8" font-size="12">4.0</text>
+  <line x1="455" y1="70" x2="480" y2="70" stroke="#d0564a" stroke-width="3"/>
+  <text x="488" y="74" font-size="12">QEMU usb-storage (xHCI)</text>
+  <line x1="455" y1="94" x2="480" y2="94" stroke="#e08a3c" stroke-width="3"/>
+  <text x="488" y="98" font-size="12">gadget via dummy_hcd SS</text>
+  <line x1="455" y1="118" x2="480" y2="118" stroke="#4a7bd0" stroke-width="3"/>
+  <text x="488" y="122" font-size="12">gadget via dummy_hcd HS</text>
+  <line x1="455" y1="142" x2="480" y2="142" stroke="#3f9a6b" stroke-width="3"/>
+  <text x="488" y="146" font-size="12">gadget via dummy_hcd FS</text>
+  <text x="455" y="190" font-size="12">값은 실행마다 크게 흔들린다</text>
+  <text x="455" y="208" font-size="12">(VM을 다른 작업과 공유)</text>
+  <text x="455" y="232" font-size="12">FS가 물리 한계를 넘는 것 =</text>
+  <text x="455" y="250" font-size="12">dummy_hcd는 타이밍 모델이</text>
+  <text x="455" y="268" font-size="12">대략적이라는 증거</text>
+</svg></figure>
+<p>그림 6 — 요청 크기별 순차 읽기 처리량(로그 축). 직접 측정한 값, VM(M2 위 Lima) 안의 QEMU TCG 게스트에서.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>요청 크기가 커질수록 처리량이 오른다</strong>: 작은 요청은 "요청당 고정 비용"(SCSI 명령 → CBW → 데이터 → CSW, 그리고 dummy_hcd의 125 µs 타이머 틱 대기)이 지배한다. 4 KiB에서 HS가 요청당 약 1~1.7 ms — 실제 하드웨어에서도 USB 저장장치는 작은 I/O에 약하다. 센서 로그를 USB 디스크에 쓸 때 큰 단위로 묶어 쓰는 이유다.</li><li><strong>속도 등급 순서는 맞지만 절대값은 믿으면 안 된다</strong>: Full-Speed(12 Mb/s) gadget이 4 MB/s 넘게 나왔다. 실제 Full-Speed bulk는 프로토콜 오버헤드 포함 약 1.2 MB/s가 상한이다. <code>dummy_hcd</code>의 대역폭 모델은 "틱마다 속도별 바이트 예산"(<code>dummy_timer()</code>: FS <code>64 × 19</code>바이트, HS <code>512 × 13 × 8</code>바이트, SS <code>490000</code>바이트)인데 틱이 1 ms가 아니라 125 µs(<code>DUMMY_TIMER_INT_NSECS</code>)마다 돌 수 있어 실제보다 빨라진다. 소스 주석도 "simplistic model for one frame's bandwidth"라고 밝힌다.</li><li>gadget 쪽 상한은 USB가 아니라 <strong>CPU</strong>(TCG 에뮬레이션, 한 커널이 host·gadget 양쪽 일을 다 함, <code>f_mass_storage</code>의 16 KiB 버퍼 <code>FSG_BUFLEN</code> 2개 사이의 복사)가 정한다. QEMU usb-storage가 훨씬 빠른 것은 QEMU가 디스크 이미지를 직접 복사해 주기 때문이다(실제 USB 3 디스크도 아니다).</li><li>같은 설정의 반복 측정이 ±30~50% 흔들렸다(VM을 다른 작업과 공유). 그래서 3회 중앙값을 그렸다. <strong>에뮬레이터 처리량 숫자로 실제 보드 성능을 말하면 안 된다</strong> — 실제 보드에서는 <code>dd</code>/<code>fio</code>로 다시 재고, 높게는 HS에서 35~40 MB/s, USB 3 Gen1에서 300~400 MB/s 정도가 일반적인 실측 범위다(경험적 범위, 이 노트에서 측정하지 않음).</li></ul>
+<hr>
+<h2 id="13-커널-안에서는-무슨-일이-일어나나">13. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#13-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<h3 id="13-1-host-쪽-usb_submit_urb-에서-complete-까지">13.1 host 쪽: <code>usb_submit_urb()</code>에서 <code>complete()</code>까지<a class="anchor" href="#13-1-host-쪽-usb_submit_urb-에서-complete-까지" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="170" y="22" text-anchor="middle" font-size="13">제출 (process 또는 BH 문맥)</text>
+  <text x="510" y="22" text-anchor="middle" font-size="13">완료 (IRQ → BH)</text>
+  <rect x="20" y="35" width="300" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="170" y="60" text-anchor="middle" font-size="12">드라이버: usb_submit_urb(urb, gfp)</text>
+  <line x1="170" y1="75" x2="170" y2="93" stroke="currentColor" marker-end="url(#ah7)"/>
+  <rect x="20" y="95" width="300" height="52" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="116" text-anchor="middle" font-size="12">usbcore: 파이프·길이·interval 검사</text>
+  <text x="170" y="136" text-anchor="middle" font-size="12">usb_hcd_submit_urb() + DMA 매핑</text>
+  <line x1="170" y1="147" x2="170" y2="165" stroke="currentColor" marker-end="url(#ah7)"/>
+  <rect x="20" y="167" width="300" height="52" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="170" y="188" text-anchor="middle" font-size="12">hc_driver-&gt;urb_enqueue</text>
+  <text x="170" y="208" text-anchor="middle" font-size="12">xhci_urb_enqueue: TRB 작성, doorbell</text>
+  <line x1="170" y1="219" x2="170" y2="237" stroke="currentColor" marker-end="url(#ah7)"/>
+  <rect x="20" y="239" width="300" height="40" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="170" y="264" text-anchor="middle" font-size="12">xHCI HW가 장치와 트랜잭션 (DMA)</text>
+  <line x1="320" y1="259" x2="358" y2="259" stroke="currentColor" marker-end="url(#ah7)"/>
+  <rect x="360" y="239" width="300" height="40" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="510" y="264" text-anchor="middle" font-size="12">이벤트 링에 Transfer Event + MSI</text>
+  <line x1="510" y1="239" x2="510" y2="221" stroke="currentColor" marker-end="url(#ah7)"/>
+  <rect x="360" y="167" width="300" height="52" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="510" y="188" text-anchor="middle" font-size="12">hardirq: xhci_irq → handle_tx_event</text>
+  <text x="510" y="208" text-anchor="middle" font-size="12">xhci_giveback_urb_in_irq (tracepoint)</text>
+  <line x1="510" y1="167" x2="510" y2="149" stroke="currentColor" marker-end="url(#ah7)"/>
+  <rect x="360" y="95" width="300" height="52" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="510" y="116" text-anchor="middle" font-size="12">usb_hcd_giveback_urb: HCD_BH면</text>
+  <text x="510" y="136" text-anchor="middle" font-size="12">리스트에 넣고 BH 워크큐로 queue_work</text>
+  <line x1="510" y1="95" x2="510" y2="77" stroke="currentColor" marker-end="url(#ah7)"/>
+  <rect x="360" y="35" width="300" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="510" y="60" text-anchor="middle" font-size="12">BH: 언매핑, unanchor, urb-&gt;complete()</text>
+  <path d="M360,50 C340,50 340,50 322,55" fill="none" stroke="#3f9a6b" stroke-dasharray="4 4" marker-end="url(#ah7)"/>
+  <rect x="20" y="310" width="640" height="96" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="333" text-anchor="middle" font-size="13">gadget 쪽 거울상</text>
+  <text x="340" y="356" text-anchor="middle" font-size="12">function: usb_ep_queue(ep, req, GFP_ATOMIC) → UDC 드라이버 ep 큐 → HW</text>
+  <text x="340" y="376" text-anchor="middle" font-size="12">UDC IRQ → usb_gadget_giveback_request() → req-&gt;complete(ep, req)</text>
+  <text x="340" y="396" text-anchor="middle" font-size="12">ep0 요청: UDC → composite_setup() → function-&gt;setup()</text>
+</svg></figure>
+<p>그림 7 — URB 한 개의 커널 경로(xHCI 기준)와 gadget 쪽 대응. 초록 점선은 completion 안의 재제출.</p>
+<p>경로를 소스 위치와 함께 정리하면(랩 소스 <code>linux-6.18.55</code> 기준):</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>함수</th><th>파일</th></tr></thead><tbody><tr><td>제출 검사</td><td><code>usb_submit_urb()</code> — pipe 종류와 endpoint 종류 일치, 최대 길이, interrupt <code>interval</code> 보정</td><td><code>drivers/usb/core/urb.c</code></td></tr><tr><td>HCD로</td><td><code>usb_hcd_submit_urb()</code> → <code>map_urb_for_dma()</code> → <code>hcd-&gt;driver-&gt;urb_enqueue</code></td><td><code>drivers/usb/core/hcd.c</code></td></tr><tr><td>xHCI 링</td><td><code>xhci_urb_enqueue()</code> (<code>trace_xhci_urb_enqueue</code>) → TRB 작성 → doorbell 레지스터 쓰기</td><td><code>drivers/usb/host/xhci.c</code>, <code>xhci-ring.c</code></td></tr><tr><td>IRQ</td><td><code>xhci_irq()</code> → 이벤트 링 처리 → <code>xhci_giveback_urb_in_irq()</code> (<code>trace_xhci_urb_giveback</code>)</td><td><code>drivers/usb/host/xhci-ring.c</code></td></tr><tr><td>giveback</td><td><code>usb_hcd_giveback_urb()</code> — <code>HCD_BH</code>면 interrupt/isoc은 <code>system_bh_highpri_wq</code>, 나머지는 <code>system_bh_wq</code>로</td><td><code>drivers/usb/core/hcd.c</code></td></tr><tr><td>completion</td><td><code>__usb_hcd_giveback_urb()</code> → DMA 언매핑, <code>usb_unanchor_urb()</code>, <code>urb-&gt;complete(urb)</code></td><td><code>drivers/usb/core/hcd.c</code></td></tr><tr><td>드라이버 매칭</td><td><code>usb_probe_interface()</code> → <code>usb_match_id()</code>(+ 동적 id) → <code>driver-&gt;probe</code></td><td><code>drivers/usb/core/driver.c</code></td></tr><tr><td>해제</td><td><code>usb_unbind_interface()</code> → <code>usb_disable_interface()</code>(URB 정리) → <code>driver-&gt;disconnect</code></td><td><code>drivers/usb/core/driver.c</code></td></tr><tr><td>열거</td><td><code>hub_event()</code> → <code>hub_port_connect()</code> → <code>hub_port_init()</code> → <code>usb_new_device()</code></td><td><code>drivers/usb/core/hub.c</code></td></tr></tbody></table></div>
+<p>NVMe와 비교하면 doorbell + 완료 큐 + MSI의 구조가 xHCI와 거의 같다. xHCI도 "명령 링/전송 링(SQ 역할)과 이벤트 링(CQ 역할)" 구조다. Don이 SSD 쪽에서 본 "호스트가 doorbell을 치면 컨트롤러가 링에서 descriptor를 읽고, 완료되면 완료 엔트리 + 인터럽트"를 그대로 반대편에서 보는 셈이다.</p>
+<p><strong>다른 노트와 다시 만나는 지점</strong>:</p>
+<ul><li><code>probe</code>/<code>disconnect</code>, <code>new_id</code>, <code>bind</code>/<code>unbind</code>, <code>modalias</code> → G2·G3·G9 (bus/driver 매칭 일반론의 USB 판).</li><li>completion 원자 문맥, BH 워크큐 → F4(인터럽트 하반부), F5(동기화: completion 안에서 spinlock만).</li><li><code>usb_alloc_coherent</code>, <code>URB_NO_TRANSFER_DMA_MAP</code>, 스택 버퍼 금지 → H9(DMA).</li><li><code>ttyUSB</code>/<code>ttyACM</code>/<code>ttyGS</code> → H8(TTY). usb-storage → <code>sd</code> → J(스토리지).</li><li>configfs gadget → G8(configfs 일반론). FunctionFS 데몬, udev 규칙 → L(유저스페이스 시스템).</li></ul>
+<hr>
+<h2 id="14-embedded-실무에서-다시-보기">14. Embedded 실무에서 다시 보기<a class="anchor" href="#14-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="14-1-센서-키트의-gnss가-가끔-ttyusb1이-된다">14.1 센서 키트의 GNSS가 "가끔 <code>ttyUSB1</code>이 된다"<a class="anchor" href="#14-1-센서-키트의-gnss가-가끔-ttyusb1이-된다" aria-label="link">#</a></h3>
+<p>FTDI가 둘 이상이면 <code>ttyUSB</code> 번호는 열거 순서로 정해진다. 해결은 <strong>포트 경로나 시리얼 번호로 udev 고정 이름</strong>을 주는 것이다(udev 규칙 형식, 이 랩 BusyBox에는 udev가 없어 실행하지 않음):</p>
+<figure class="code"><span class="lang">text</span><pre><code># /etc/udev/rules.d/70-sensorkit.rules
+SUBSYSTEM=="tty", KERNELS=="1-4.1:1.0", SYMLINK+="gnss0"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{serial}=="FT9XYZ12", SYMLINK+="imu-uart"</code></pre></figure>
+<p><code>KERNELS=="1-4.1:1.0"</code>는 §2.3의 경로 이름이다 — "보드의 내장 hub 4번 포트 뒤 1번 포트"는 항상 GNSS라는 하드웨어 사실을 이름으로 고정한다.</p>
+<h3 id="14-2-pc에-꽂으면-콘솔-네트워크가-뜨는-개발-보드">14.2 PC에 꽂으면 콘솔 + 네트워크가 뜨는 개발 보드<a class="anchor" href="#14-2-pc에-꽂으면-콘솔-네트워크가-뜨는-개발-보드" aria-label="link">#</a></h3>
+<p>부팅 스크립트(systemd 서비스)에서 configfs gadget을 조립한다. §10.4와 같은 순서에 NCM을 더한 형태다(형식, 이 랩에서는 ACM + mass storage만 실행):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>modprobe libcomposite
+G=/sys/kernel/config/usb_gadget/kit
+mkdir -p $G/strings/0x409 $G/configs/c.1/strings/0x409 $G/functions/acm.usb0 $G/functions/ncm.usb0
+echo 0x1d6b &gt; $G/idVendor; echo 0x0104 &gt; $G/idProduct     # 제품에서는 회사 VID/PID
+cat /sys/devices/soc0/serial_number &gt; $G/strings/0x409/serialnumber 2&gt;/dev/null
+ln -s $G/functions/acm.usb0 $G/configs/c.1/; ln -s $G/functions/ncm.usb0 $G/configs/c.1/
+ls /sys/class/udc &gt; $G/UDC                                 # 첫 UDC에 바인딩
+ip addr add 192.168.7.2/24 dev usb0; ip link set usb0 up
+systemctl start serial-getty@ttyGS0</code></pre></figure>
+<p>함정: <code>1d6b:0104</code>(Linux Foundation "Multifunction Composite Gadget")는 개발용이다. 양산 제품은 자기 VID/PID를 써야 하고, Windows 호환을 위해 <code>bDeviceClass 0xEF/02/01</code> + IAD(§10.4)를 지킨다. 시리얼 번호를 SoC 고유값으로 채워야 PC가 보드마다 같은 COM 포트를 기억한다(§10.6).</p>
+<h3 id="14-3-usb-카메라가-두-대째부터-안-열린다">14.3 USB 카메라가 두 대째부터 안 열린다<a class="anchor" href="#14-3-usb-카메라가-두-대째부터-안-열린다" aria-label="link">#</a></h3>
+<p>UVC 카메라는 isochronous endpoint로 대역폭을 <strong>예약</strong>한다. 같은 버스(같은 root hub, 혹은 같은 USB 2 hub의 TT)에 두 대를 높은 해상도로 열면 예약이 실패해 <code>VIDIOC_STREAMON</code>이 <code>-ENOSPC</code>로 실패하고 dmesg에 대역폭 부족이 찍힌다. 해결: 압축 포맷(MJPEG)으로 바꿔 작은 alternate setting을 쓰게 하거나, 카메라를 서로 다른 컨트롤러/root 포트에 나눠 꽂는다. 이 문제는 debugfs <code>usb/devices</code>의 <code>I:</code> 줄(현재 alternate setting)과 <code>E:</code> 줄(<code>MxPS</code>)로 확인한다.</p>
+<h3 id="14-4-현장-장비에서-usb-장치가-가끔-끊긴다">14.4 현장 장비에서 USB 장치가 "가끔 끊긴다"<a class="anchor" href="#14-4-현장-장비에서-usb-장치가-가끔-끊긴다" aria-label="link">#</a></h3>
+<p>dmesg에 <code>usb 1-1: USB disconnect</code> 직후 같은 장치가 다시 붙는 패턴이 반복되면: ① 전원 — hub 전력 예산 초과나 VBUS 강하(<code>bMaxPower</code> 합계 확인, 셀프 파워 hub), ② autosuspend — <code>power/control</code>이 <code>auto</code>인 장치가 깨어날 때 실패(<code>echo on &gt; /sys/bus/usb/devices/1-1/power/control</code>로 시험), ③ EMI·케이블 — <code>-EPROTO</code>/<code>-EILSEQ</code>가 completion에 찍힌다(§6.3). 드라이버 쪽은 §5.7처럼 disconnect가 언제 와도 안전해야 하고, 유저 공간 데몬은 장치 노드가 사라졌다 다시 생기는 것을 udev 이벤트로 처리해야 한다(G9).</p>
+<hr>
+<h2 id="15-흔한-실수와-증상">15. 흔한 실수와 증상<a class="anchor" href="#15-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>completion에서 <code>GFP_KERNEL</code>, <code>mutex_lock</code>, <code>usb_control_msg</code></td><td>"BUG: scheduling while atomic", 간헐 데드락</td><td>completion은 원자 문맥(실측 softirq)</td><td><code>GFP_ATOMIC</code>, spinlock, 무거운 일은 <code>schedule_work</code></td></tr><tr><td>스택 버퍼로 <code>usb_control_msg</code>/URB</td><td><code>VMAP_STACK</code> 경고, DMA 오류, 메모리 손상</td><td>스택은 DMA 불가</td><td><code>kmalloc</code>/<code>usb_alloc_coherent</code>, 또는 <code>usb_control_msg_recv/send</code></td></tr><tr><td><code>disconnect</code>에서 URB kill 없이 해제</td><td>뽑을 때 use-after-free, 커널 oops</td><td>completion이 해제된 메모리 접근</td><td>제출 경로 차단 → <code>usb_kill_urb</code>/<code>usb_kill_anchored_urbs</code> → 해제</td></tr><tr><td>completion에서 <code>-ESHUTDOWN</code>/<code>-ENOENT</code>에도 재제출</td><td>뽑을 때 에러 로그 폭주, CPU 100%</td><td>실패한 재제출을 다시 재제출하는 고리</td><td>해당 status에서는 return</td></tr><tr><td>재제출 전 re-anchor 누락</td><td><code>usb_kill_anchored_urbs</code>가 URB를 못 죽임</td><td>giveback이 URB를 anchor에서 뗌</td><td>재제출 직전 <code>usb_anchor_urb</code></td></tr><tr><td>열린 파일이 disconnect 후 장치 접근</td><td>뽑은 뒤 <code>read()</code>에서 oops</td><td>드라이버 상태가 해제됨</td><td>kref + <code>disconnected</code> 플래그 + mutex, <code>-ENODEV</code> 반환 (usb-skeleton 패턴)</td></tr><tr><td><code>bInterval</code>을 ms로 해석 (HS/SS에서)</td><td>폴링 주기 계산이 크게 틀림</td><td>HS/SS는 2^(n-1) × 125 µs</td><td>속도 등급별로 해석 (§3.2)</td></tr><tr><td>configfs gadget에서 function 링크 전에 <code>UDC</code> 바인딩</td><td><code>echo … &gt; UDC</code>가 실패하거나 기능이 빠짐</td><td>바인딩 시점에 configuration이 확정됨</td><td>조립을 다 끝내고 마지막에 <code>UDC</code></td></tr><tr><td>gadget 연결 중 같은 이미지를 gadget 쪽에서 rw 마운트</td><td>FAT 손상</td><td>두 OS가 같은 블록을 동시에 씀</td><td>연결 해제 후 마운트, 또는 <code>ro</code></td></tr><tr><td>장치 이름(<code>ttyUSB0</code>, <code>sda</code>)을 하드코딩</td><td>재부팅·재연결 후 다른 장치를 엶</td><td>열거 순서로 번호 부여</td><td>포트 경로·시리얼로 udev 고정 이름 (§14.1)</td></tr></tbody></table></div>
+<hr>
+<h2 id="16-면접에서-이렇게-말한다">16. 면접에서 이렇게 말한다<a class="anchor" href="#16-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> Why do Linux USB drivers bind to interfaces rather than devices?</p>
+<p><strong>A.</strong> USB 장치 하나가 여러 기능(interface)을 가질 수 있기 때문이다. 웹캠의 영상과 마이크는 서로 다른 드라이버가 맡아야 한다. 그래서 usbcore는 interface마다 <code>struct device</code>를 만들고 <code>usb_driver</code>는 <code>probe(intf, id)</code>로 interface에 붙는다. sysfs에서도 <code>1-1</code>(장치)과 <code>1-1:1.0</code>(interface)이 따로 있고, <code>driver</code> 링크는 interface에 있다.</p>
+<blockquote><p>Because a USB device is a container of functions. Each interface descriptor is one function with its own class, subclass and protocol — a webcam exposes video interfaces for uvcvideo and audio interfaces for snd-usb-audio. usbcore creates a struct usb_interface, which is a struct device, per interface in the active configuration, and usb_driver's probe gets that interface. You reach the parent with interface_to_usbdev. In sysfs that's bus-port.port:config.interface, like 1-4.1:1.0, and the driver symlink lives on the interface node.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "그럼 interface 두 개를 한 드라이버가 써야 하면?" → 하나에 probe되고 <code>usb_driver_claim_interface()</code>로 다른 interface도 claim한다(cdc_acm이 제어+데이터 interface를 이렇게 잡는다).</p>
+<p><strong>Q.</strong> Walk me through what happens when a USB device is plugged in.</p>
+<p><strong>A.</strong> hub가 포트 변화를 알리고, hub_wq가 포트를 리셋해 속도를 정하고, 주소 0으로 device descriptor를 읽어 ep0 크기를 알고, 주소를 주고, device·configuration·string 디스크립터를 읽는다. <code>usb_device</code>를 등록하면 generic 드라이버가 configuration을 고르고 SET_CONFIGURATION, 그다음 interface마다 device_add → uevent의 modalias로 모듈이 로드되고 probe가 불린다.</p>
+<blockquote><p>The hub reports a port status change — for the root hub that's the host controller interrupt. hub_wq debounces, resets the port, which fixes the speed, reads the first bytes of the device descriptor at address 0 to learn ep0's max packet size, assigns an address — on xHCI the controller does that with an Address Device command — then reads the full device, configuration and string descriptors. usb_new_device registers the usb_device; the generic usb device driver picks a configuration and sends SET_CONFIGURATION; each interface becomes a device, the uevent carries a modalias like usb:v0627p0001…ic03isc01ip01, udev or modprobe loads the matching module, and usb_probe_interface calls the driver's probe.</p></blockquote>
+<p><strong>Q.</strong> What is a URB and what are the rules in its completion handler?</p>
+<p><strong>A.</strong> URB는 endpoint 하나에 대한 비동기 전송 요청이다. alloc → fill → submit 하면 소유권이 HCD로 넘어가고, 끝나면 completion이 불린다. completion은 원자 문맥이다 — 내가 xHCI에서 재 보니 softirq(BH)였고 HCD에 따라 hardirq일 수도 있다. 그래서 잠들면 안 되고 재제출은 GFP_ATOMIC, status가 -ENOENT/-ECONNRESET/-ESHUTDOWN이면 재제출하지 않는다.</p>
+<blockquote><p>A URB is an asynchronous request block for one endpoint: you allocate it, fill it with the pipe, a DMA-able buffer and a completion callback, and submit it; from then until the callback the HCD owns it. The callback runs in atomic context — I measured in_serving_softirq true on xHCI because xHCI sets HCD_BH and usbcore defers giveback to a BH workqueue, but you must assume it could be hard IRQ. So no sleeping, GFP_ATOMIC for resubmission, spinlocks only, hand heavy work to a workqueue. Check urb-&gt;status: zero means process actual_length; -ENOENT, -ECONNRESET or -ESHUTDOWN mean it was killed or the device is gone, so don't resubmit; -EPIPE is a stall that needs usb_clear_halt from process context.</p></blockquote>
+<p><strong>Q.</strong> How do you make a USB driver safe against surprise removal?</p>
+<p><strong>A.</strong> disconnect는 언제든 온다. 순서는 (1) 새 제출 경로 막기(플래그, mutex), (2) <code>usb_kill_urb</code>/<code>usb_kill_anchored_urbs</code>로 남은 URB와 completion이 끝나길 기다리기, (3) 그다음 해제. 열린 파일이 있으면 kref로 객체 수명을 늘리고 이후 호출은 -ENODEV. QEMU에서 device_del로 실제 뽑아 보니 URB가 -ESHUTDOWN으로 먼저 돌아오고 그다음 disconnect가 불렸다.</p>
+<blockquote><p>Disconnect can come at any time, including while userspace holds the device open. In disconnect I first stop every submission path — set a disconnected flag under the I/O mutex so read, write and workqueues bail out — then usb_kill_urb or usb_kill_anchored_urbs, which waits for any running completion, and only then free URBs and buffers. If file handles can outlive the interface, the state is refcounted with a kref and released on the last close; later calls return -ENODEV. I tested it with a QEMU monitor device_del: the interrupt URB completed with -ESHUTDOWN, then disconnect ran and cleaned up without warnings. Also, usbcore itself flushes the interface's endpoints before calling disconnect unless soft_unbind is set, but that doesn't cover your own workqueues or other endpoints.</p></blockquote>
+<p><strong>Q.</strong> Explain the Linux USB gadget stack and how you would expose a serial console and Ethernet over USB.</p>
+<p><strong>A.</strong> UDC 드라이버(DWC3, ChipIdea)가 HW, libcomposite가 ep0와 디스크립터 조립, function 드라이버(acm, ncm, mass_storage, ffs)가 기능이다. configfs에서 gadget 디렉터리를 만들고 VID/PID·문자열, configuration, function을 만들어 링크하고 마지막에 UDC 이름을 쓴다. 보드 쪽은 ttyGS0에 getty, usb0에 IP. 나는 QEMU에서 dummy_hcd로 ACM + mass storage를 만들어 같은 커널이 ttyACM0와 sdb로 인식하는 것까지 시험했다.</p>
+<blockquote><p>Three layers: the UDC driver for the device controller — dwc3, chipidea, dwc2 — the composite framework in libcomposite that answers standard ep0 requests and assembles descriptors, and function drivers like acm, ncm, mass_storage, or FunctionFS for userspace functions. With configfs I mkdir a gadget under /sys/kernel/config/usb_gadget, set idVendor, idProduct and the strings including a per-board serial number, create a configuration, create acm.usb0 and ncm.usb0, symlink them into the configuration, and finally write the UDC name to UDC — that's the cable-plug moment. On the board, a getty on ttyGS0 and an address on usb0. I verified the whole flow in QEMU using dummy_hcd, which loops a virtual UDC back into a virtual host controller in the same kernel: the host side bound cdc_acm and usb-storage, and ttyACM0 to ttyGS0 loopback worked both ways.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Windows에서 composite ACM이 안 잡히면?" → 장치 class를 0xEF/02/01(IAD)로, 그리고 고유 시리얼 번호.</p>
+<p><strong>Q.</strong> When would you write a userspace USB driver with libusb instead of a kernel driver?</p>
+<p><strong>A.</strong> 커널의 다른 서브시스템(input, net, tty, block)에 장치를 노출할 필요가 없고, 지연 요구가 느슨하고, 크래시 격리와 배포 편의가 중요할 때 — 펌웨어 업데이트 툴, 시험 지그, 계측기. libusb는 usbfs ioctl을 감싼 것이고, 커널 드라이버가 잡은 interface는 detach 후 claim해야 한다.</p>
+<blockquote><p>When the device doesn't need to appear as a standard kernel interface — no input device, netdev, tty or block device — and latency needs are modest: firmware updaters, DFU tools, test fixtures, lab instruments. It's easier to ship and a bug can't crash the kernel. libusb on Linux is a wrapper over usbfs: open /dev/bus/usb/BBB/DDD, USBDEVFS_CONTROL, claim the interface, USBDEVFS_BULK or async URBs with USBDEVFS_SUBMITURB. If a kernel driver already owns the interface, claim fails with EBUSY and you detach it first — I did exactly that against a keyboard and then reattached usbhid. For streaming, high-rate or shared devices, a kernel driver is the right answer.</p></blockquote>
+<p><strong>Q.</strong> How do you debug a USB device that enumerates but doesn't work?</p>
+<p><strong>A.</strong> 1) debugfs <code>usb/devices</code>나 <code>lsusb -t</code>로 드라이버가 interface에 붙었는지, 2) <code>lsusb -v</code>/sysfs <code>descriptors</code>로 class·endpoint가 기대대로인지, 3) dmesg와 dynamic debug, 4) usbmon(또는 Wireshark)으로 URB 단위 트래픽 — STALL, 짧은 패킷, 타임아웃, 5) 필요하면 HW 분석기. 이 랩은 usbmon이 꺼져 있어 xHCI tracepoint로 BOT의 CBW/데이터/CSW를 봤다.</p>
+<blockquote><p>First, is a driver bound to the right interface — /sys/kernel/debug/usb/devices or lsusb -t shows Driver= per interface. Second, do the descriptors say what I think — class, alternate settings, endpoint types and max packet sizes, via lsusb -v or the sysfs descriptors file. Third, dmesg with dynamic debug on the class driver and the HCD. Fourth, usbmon with Wireshark to see every URB submit and completion — stalls, short packets, -EPROTO, timeouts. On a kernel without usbmon, the xhci-hcd tracepoints give enqueue and giveback per URB; I used them to see the CBW, data and CSW of a mass-storage read. Last, a hardware analyzer for signal integrity or link power management issues.</p></blockquote>
+<p><strong>Q.</strong> What's the difference between dr_mode host, peripheral and otg, and what is a role switch?</p>
+<p><strong>A.</strong> 임베디드 SoC USB 컨트롤러는 대부분 dual-role이다. DT <code>dr_mode</code>로 host 전용, peripheral(gadget) 전용, otg(둘 다)를 정한다. otg/dual-role이면 Type-C 컨트롤러나 ID 핀이 <code>usb_role_switch</code>로 역할을 바꾸고, sysfs <code>/sys/class/usb_role/*/role</code>에 보인다.</p>
+<blockquote><p>Most SoC controllers — DWC3, ChipIdea, DWC2 — are dual-role. The device tree property dr_mode fixes the role: host instantiates the xHCI or EHCI side, peripheral registers a UDC for gadgets, otg allows both. In practice "OTG" means dual-role; HNP is rarely used. With usb-role-switch in DT, a Type-C port controller or a GPIO ID pin driver calls usb_role_switch_set_role when the cable or data role changes, and the current role is visible under /sys/class/usb_role. A typical dev board keeps its debug Type-C port in peripheral mode for the ACM console and NCM networking.</p></blockquote>
+<hr>
+<h2 id="17-직접-해보기">17. 직접 해보기<a class="anchor" href="#17-직접-해보기" aria-label="link">#</a></h2>
+<ol><li>(개념) <code>1-4.1:1.0</code>과 <code>2-0:1.0</code>의 각 숫자가 무엇인지 말하라. 왜 <code>devnum</code>이 아니라 이 경로 이름으로 udev 규칙을 쓰는가? 정답/힌트: 버스 1 → 포트 4(hub) → 포트 1, configuration 1, interface 0 / 버스 2의 root hub interface. <code>devnum</code>은 열거 순서로 바뀐다.</li><li>(계산) High-Speed interrupt endpoint의 <code>bInterval=4</code>, Full-Speed의 <code>bInterval=4</code>는 각각 몇 ms 주기인가? 정답/힌트: HS 2^(4-1) × 125 µs = 1 ms, FS 4 ms.</li><li>(코드) <code>h12_drv</code>를 고쳐 report를 64개짜리 링버퍼에 넣고, misc device(G7)의 <code>read()</code>가 <code>wait_event_interruptible</code>로 기다렸다가 돌려주게 하라. completion에서는 spinlock + <code>wake_up</code>만 쓴다. 정답/힌트: disconnect에서 <code>disconnected=true</code> 후 <code>wake_up</code>, <code>read()</code>는 <code>-ENODEV</code>.</li><li>(관찰) §5.7을 다시 하되 <code>device_del</code> 직전에 게스트에서 <code>cat /sys/bus/usb/devices/1-1/urbnum</code>을 두 번(키 입력 전후) 읽어 보라. report 하나당 urbnum이 얼마씩 느는가? 정답/힌트: 재제출 1회 = 1 증가.</li><li>(gadget) §10.4의 gadget에 <code>ncm.usb0</code>을 추가하고(<code>usb_f_ncm.ko</code>, <code>u_ether.ko</code>, host 쪽 <code>usbnet.ko</code>·<code>cdc_ncm.ko</code>는 <code>/var/lab/build/linux</code>에 있다), 같은 게스트에서 gadget 쪽 <code>usb0</code>과 host 쪽 새 인터페이스에 서로 다른 IP를 주고 <code>ping</code>이 되는지 보라. 정답/힌트: 같은 커널 안의 두 인터페이스라 라우팅이 로컬로 빠질 수 있으니 네트워크 네임스페이스(<code>unshare -n</code>)로 한쪽을 분리해야 실제 USB를 탄다.</li><li>(관찰) 디버그 커널에서 §8.2의 tracepoint를 켠 채 <code>h12_bw</code>로 64 KiB 읽기 한 번을 하고, CBW/데이터/CSW의 길이와 sg 개수를 확인하라. 정답/힌트: 데이터 URB <code>length 0/65536</code>, 사이의 enqueue→giveback 간격이 요청 시간 대부분.</li><li>(설계) 센서 키트 양산 이미지에서 USB ACM 콘솔을 남겨야 한다면 보안상 무엇을 해야 하나? 정답/힌트: getty 대신 인증 필요한 로그인, 혹은 공장 모드에서만 gadget 조립, 시리얼 번호·VID/PID 정책.</li></ol>
+<hr>
+<h2 id="18-용어-사전">18. 용어 사전<a class="anchor" href="#18-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>HCD</td><td>Host Controller Driver</td><td>xHCI/EHCI 같은 호스트 컨트롤러 드라이버, <code>struct hc_driver</code></td></tr><tr><td>xHCI</td><td>eXtensible Host Controller Interface</td><td>USB 3.x 표준 호스트 컨트롤러, 모든 속도를 한 IP로</td></tr><tr><td>usbcore</td><td>USB 코어</td><td>버스 등록, 매칭, URB 중개, hub 드라이버, usbfs</td></tr><tr><td>root hub</td><td>루트 허브</td><td>컨트롤러 안의 가상 hub, <code>usbN</code>, VID 1d6b</td></tr><tr><td>enumeration</td><td>열거</td><td>리셋 → 주소 → 디스크립터 → SET_CONFIGURATION → probe</td></tr><tr><td>descriptor</td><td>디스크립터</td><td>장치의 자기소개 바이트열 (<code>bLength</code>, <code>bDescriptorType</code>로 시작)</td></tr><tr><td>interface</td><td>인터페이스</td><td>기능 하나, 드라이버가 붙는 단위</td></tr><tr><td>alternate setting</td><td>대체 설정</td><td>같은 interface의 다른 endpoint 구성 (대역폭별)</td></tr><tr><td>endpoint</td><td>엔드포인트</td><td>방향이 있는 데이터 채널, 0번은 제어</td></tr><tr><td>IAD</td><td>Interface Association Descriptor</td><td>여러 interface를 한 기능으로 묶음 (CDC ACM, UVC)</td></tr><tr><td>URB</td><td>USB Request Block</td><td>endpoint 하나에 대한 비동기 전송 요청</td></tr><tr><td>anchor</td><td>앵커</td><td>URB 묶음, 한 번에 kill/wait</td></tr><tr><td><code>HCD_BH</code></td><td>HCD 플래그</td><td>completion을 BH 워크큐로 미룸 (xHCI, EHCI)</td></tr><tr><td>usbmon</td><td>USB 모니터</td><td>URB 단위 버스 기록, Wireshark 입력</td></tr><tr><td>usbfs</td><td>USB 파일시스템 노드</td><td><code>/dev/bus/usb/BBB/DDD</code>, libusb의 바탕</td></tr><tr><td>UDC</td><td>USB Device Controller</td><td>gadget 쪽 컨트롤러 (dwc3, ci_hdrc, dummy_udc)</td></tr><tr><td>composite</td><td>컴포지트 프레임워크</td><td>여러 function을 한 장치로, ep0 처리 (<code>libcomposite</code>)</td></tr><tr><td>function</td><td>기능 드라이버</td><td>acm, ncm, mass_storage, ffs 등</td></tr><tr><td>FunctionFS</td><td>유저 공간 function</td><td>ep0/epN 파일로 유저 데몬이 USB 기능 구현</td></tr><tr><td>dummy_hcd</td><td>가상 UDC + HCD</td><td>같은 커널 안에서 gadget을 host에 연결하는 시험용 모듈</td></tr><tr><td>dr_mode</td><td>dual-role 모드</td><td>DT 속성 host/peripheral/otg</td></tr><tr><td>role switch</td><td>역할 전환</td><td><code>usb_role_switch</code>, Type-C/ID 핀이 host↔device 전환</td></tr><tr><td>BOT</td><td>Bulk-Only Transport</td><td>mass storage 프로토콜: CBW → 데이터 → CSW</td></tr></tbody></table></div>
+<hr>
+<h2 id="19-요약-체크리스트">19. 요약 &amp; 체크리스트<a class="anchor" href="#19-요약-체크리스트" aria-label="link">#</a></h2>
+<p>USB는 호스트가 모든 전송을 시작하는 나무 모양 버스이고, 장치는 디스크립터(device → configuration → interface → endpoint)로 자신을 소개한다. Linux host 쪽은 HCD(xHCI) → usbcore(+hub 드라이버의 열거) → interface 드라이버(<code>usb_driver</code>) 3층이며, 드라이버는 <strong>interface</strong>에 붙고 sysfs 이름은 포트 경로(<code>1-4.1:1.0</code>)다. 데이터는 URB로 비동기 제출하고, completion은 원자 문맥(이 랩 xHCI에서 실측 softirq; HCD는 hardirq에서 giveback)이라 <code>GFP_ATOMIC</code>과 spinlock만 쓴다. 핫 언플러그에서 URB는 <code>-ESHUTDOWN</code>으로 돌아오고, <code>disconnect</code>는 제출 경로 차단 → kill → 해제 순서를 지킨다. gadget 쪽은 UDC → composite → function이고 configfs로 조립하며, <code>dummy_hcd</code>로 같은 커널 안에서 ACM 루프백과 mass storage를 end-to-end로 시험할 수 있다. 에뮬레이터 처리량은 순서만 믿고 절대값은 믿지 않는다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>디스크립터 계층과 class/subclass/protocol로 장치 정체를 읽어 낼 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>sysfs 이름 <code>버스-포트.포트:config.interface</code>를 해석하고 udev 규칙에 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>열거 과정을 리셋부터 probe까지 단계별로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>usb_driver</code>의 id_table 매크로를 골라 쓰고, <code>new_id</code>/<code>unbind</code>로 동적 바인딩할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>interrupt URB를 alloc/fill/submit/재제출하는 드라이버를 코드로 짤 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>completion이 원자 문맥인 이유와 status별 처리를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>disconnect에서 안전한 정리 순서를 말하고 hot-unplug로 검증할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>usb_control_msg</code>/<code>usb_bulk_msg</code>를 언제 쓰고 언제 쓰면 안 되는지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>usbmon(또는 xHCI tracepoint)으로 BOT의 CBW/데이터/CSW를 찾아낼 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>usbfs ioctl(libusb 내부)로 interface를 detach·claim하고 전송할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>configfs로 ACM + mass storage(+NCM) gadget을 조립하고 UDC에 바인딩할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>dr_mode와 role switch, 그리고 제품에서 USB 콘솔·네트워크·업데이트를 어떻게 쓰는지 설명할 수 있다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — USB 드라이버 API: https://docs.kernel.org/driver-api/usb/index.html (URB: <code>driver-api/usb/URB.html</code>, "Writing USB Device Drivers": <code>driver-api/usb/writing_usb_driver.html</code>)</li><li>docs.kernel.org — USB gadget API: https://docs.kernel.org/driver-api/usb/gadget.html</li><li>docs.kernel.org — configfs gadget: https://docs.kernel.org/usb/gadget_configfs.html , FunctionFS: https://docs.kernel.org/usb/functionfs.html , usbmon: https://docs.kernel.org/usb/usbmon.html</li><li>커널 소스(랩 <code>linux-6.18.55</code>, elixir.bootlin.com에서도 열람): <code>drivers/usb/core/{urb.c,hcd.c,driver.c,hub.c,devio.c}</code>, <code>drivers/usb/host/xhci-ring.c</code>, <code>drivers/usb/gadget/udc/dummy_hcd.c</code>, <code>drivers/usb/gadget/composite.c</code>, <code>drivers/usb/usb-skeleton.c</code>(disconnect·kref 패턴의 표본)</li><li><code>include/uapi/linux/usbdevice_fs.h</code> — usbfs ioctl 정의</li><li>Bootlin, "Linux kernel and driver development training" 슬라이드의 USB 장</li><li>Jan Axelson, "USB Complete" — 프로토콜 기초(전송 종류, 디스크립터, 열거)</li><li>USB-IF 사양: USB 2.0 Specification 9장(장치 프레임워크), Mass Storage Bulk-Only Transport, CDC/ACM, HID 1.11</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-10_H11_pcie_linux.html"><span class="dir">← 이전</span><span class="nm">H11. PCIe (Linux 관점) — enumeration, config space, BAR, pci_driver, MSI/MSI-X, 디버그</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l2"><a href="#1-usb-기본-토폴로지-전송-종류-디스크립터">1. USB 기본 — 토폴로지, 전송 종류, 디스크립터</a></li><li class="l3"><a href="#1-1-직관-호스트가-모든-것을-묻는-나무">1.1 직관 — "호스트가 모든 것을 묻는 나무"</a></li><li class="l3"><a href="#1-2-전송-종류-4가지">1.2 전송 종류 4가지</a></li><li class="l3"><a href="#1-3-디스크립터-계층">1.3 디스크립터 계층</a></li><li class="l2"><a href="#2-linux-host-스택-hcd-usbcore-hub-드라이버-열거-enumeration">2. Linux host 스택 — HCD, usbcore, hub 드라이버, 열거(enumeration)</a></li><li class="l3"><a href="#2-1-계층">2.1 계층</a></li><li class="l3"><a href="#2-2-열거-enumeration-꽂는-순간-일어나는-일">2.2 열거(enumeration) — 꽂는 순간 일어나는 일</a></li><li class="l3"><a href="#2-3-예제-1-qemu에-usb-장치-4개-꽂고-토폴로지-보기">2.3 예제 1 — QEMU에 USB 장치 4개 꽂고 토폴로지 보기</a></li><li class="l3"><a href="#2-4-sysfs의-장치-노드와-interface-노드">2.4 sysfs의 장치 노드와 interface 노드</a></li><li class="l2"><a href="#3-디스크립터를-직접-읽기-lsusb-v를-손으로-짜-보기">3. 디스크립터를 직접 읽기 — lsusb -v를 손으로 짜 보기</a></li><li class="l3"><a href="#3-1-어디서-읽나">3.1 어디서 읽나</a></li><li class="l3"><a href="#3-2-예제-2-정적-c-디코더-h12_desc">3.2 예제 2 — 정적 C 디코더 h12_desc</a></li><li class="l3"><a href="#3-3-예제-3-debugfs-usb-devices-한-장치-블록">3.3 예제 3 — debugfs usb/devices 한 장치 블록</a></li><li class="l3"><a href="#3-4-busybox-lsusb의-한계">3.4 BusyBox lsusb의 한계</a></li><li class="l2"><a href="#4-클래스-드라이버가-붙는-모습-디스크와-시리얼">4. 클래스 드라이버가 붙는 모습 — 디스크와 시리얼</a></li><li class="l3"><a href="#4-1-예제-4-usb-디스크-usb-storage-scsi-dev-sda">4.1 예제 4 — USB 디스크: usb-storage → SCSI → /dev/sda</a></li><li class="l3"><a href="#4-2-예제-5-ftdi-usb-시리얼-vm의-socat과-대화">4.2 예제 5 — FTDI USB-시리얼: VM의 socat과 대화</a></li><li class="l2"><a href="#5-usb_driver-드라이버는-interface에-붙는다">5. usb_driver — 드라이버는 interface에 붙는다</a></li><li class="l3"><a href="#5-1-왜-interface인가">5.1 왜 interface인가</a></li><li class="l3"><a href="#5-2-id_table-매크로">5.2 id_table 매크로</a></li><li class="l3"><a href="#5-3-동적-바인딩-new_id-bind-unbind">5.3 동적 바인딩 — new_id, bind, unbind</a></li><li class="l3"><a href="#5-4-드라이버-코드-h12_drv-1-3-상태와-completion-핸들러">5.4 드라이버 코드 h12_drv (1/3) — 상태와 completion 핸들러</a></li><li class="l3"><a href="#5-5-드라이버-코드-2-3-probe-intf-id">5.5 드라이버 코드 (2/3) — probe(intf, id)</a></li><li class="l3"><a href="#5-6-드라이버-코드-3-3-disconnect와-등록">5.6 드라이버 코드 (3/3) — disconnect와 등록</a></li><li class="l3"><a href="#5-7-예제-6-unbind-new_id-키-입력-핫-언플러그">5.7 예제 6 — unbind → new_id → 키 입력 → 핫 언플러그</a></li><li class="l2"><a href="#6-urb-usb의-명령-하나">6. URB — USB의 "명령 하나"</a></li><li class="l3"><a href="#6-1-직관">6.1 직관</a></li><li class="l3"><a href="#6-2-생명주기">6.2 생명주기</a></li><li class="l3"><a href="#6-3-완료-상태-코드">6.3 완료 상태 코드</a></li><li class="l3"><a href="#6-4-취소와-정리-kill-unlink-poison-anchor">6.4 취소와 정리 — kill, unlink, poison, anchor</a></li><li class="l3"><a href="#6-5-completion-문맥-실측이-말해-준-것">6.5 completion 문맥 — 실측이 말해 준 것</a></li><li class="l2"><a href="#7-동기-헬퍼-usb_control_msg-usb_bulk_msg">7. 동기 헬퍼 — usb_control_msg, usb_bulk_msg</a></li><li class="l2"><a href="#8-버스-들여다보기-usbmon-그리고-이-랩의-대안">8. 버스 들여다보기 — usbmon, 그리고 이 랩의 대안</a></li><li class="l3"><a href="#8-1-usbmon-랩-커널에서는-꺼져-있음">8.1 usbmon (랩 커널에서는 꺼져 있음)</a></li><li class="l3"><a href="#8-2-예제-7-대안-xhci-tracepoint로-storage-읽기-한-번-보기">8.2 예제 7 — 대안: xHCI tracepoint로 storage 읽기 한 번 보기</a></li><li class="l3"><a href="#8-3-그-밖의-도구">8.3 그 밖의 도구</a></li><li class="l2"><a href="#9-유저-공간-usb-드라이버-usbfs와-libusb">9. 유저 공간 USB 드라이버 — usbfs와 libusb</a></li><li class="l3"><a href="#9-1-언제-쓰나">9.1 언제 쓰나</a></li><li class="l3"><a href="#9-2-예제-8-libusb-없이-usbfs-ioctl로-키보드-읽기">9.2 예제 8 — libusb 없이 usbfs ioctl로 키보드 읽기</a></li><li class="l2"><a href="#10-gadget-쪽-linux가-usb-장치가-될-때">10. Gadget 쪽 — Linux가 USB 장치가 될 때</a></li><li class="l3"><a href="#10-1-계층">10.1 계층</a></li><li class="l3"><a href="#10-2-composite와-function">10.2 composite와 function</a></li><li class="l3"><a href="#10-3-예제-9-dummy_hcd를-out-of-tree로-빌드">10.3 예제 9 — dummy_hcd를 out-of-tree로 빌드</a></li><li class="l3"><a href="#10-4-예제-10-configfs로-acm-mass-storage-gadget-조립-같은-커널이-host로-인식">10.4 예제 10 — configfs로 ACM + mass storage gadget 조립 → 같은 커널이 host로 인식</a></li><li class="l3"><a href="#10-5-예제-11-end-to-end-시험-디스크립터-시리얼-루프백-디스크-뽑기">10.5 예제 11 — end-to-end 시험: 디스크립터, 시리얼 루프백, 디스크, 뽑기</a></li><li class="l3"><a href="#10-6-예제-12-레거시-g_mass_storage-한-줄-그리고-busybox-lsusb-t">10.6 예제 12 — 레거시 g_mass_storage 한 줄, 그리고 BusyBox lsusb -t</a></li><li class="l3"><a href="#10-7-functionfs-유저-공간-function-실행하지-않음">10.7 FunctionFS — 유저 공간 function (실행하지 않음)</a></li><li class="l2"><a href="#11-otg와-dual-role-임베디드-soc의-현실">11. OTG와 dual-role — 임베디드 SoC의 현실</a></li><li class="l3"><a href="#11-1-하나의-포트-두-역할">11.1 하나의 포트, 두 역할</a></li><li class="l3"><a href="#11-2-제품에서-usb를-쓰는-장면">11.2 제품에서 USB를 쓰는 장면</a></li><li class="l2"><a href="#12-처리량-측정-dummy_hcd-bulk-그리고-에뮬레이터의-한계">12. 처리량 측정 — dummy_hcd bulk, 그리고 에뮬레이터의 한계</a></li><li class="l3"><a href="#12-1-예제-13-o_direct-순차-읽기-벤치마크">12.1 예제 13 — O_DIRECT 순차 읽기 벤치마크</a></li><li class="l2"><a href="#13-커널-안에서는-무슨-일이-일어나나">13. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l3"><a href="#13-1-host-쪽-usb_submit_urb-에서-complete-까지">13.1 host 쪽: usb_submit_urb()에서 complete()까지</a></li><li class="l2"><a href="#14-embedded-실무에서-다시-보기">14. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#14-1-센서-키트의-gnss가-가끔-ttyusb1이-된다">14.1 센서 키트의 GNSS가 "가끔 ttyUSB1이 된다"</a></li><li class="l3"><a href="#14-2-pc에-꽂으면-콘솔-네트워크가-뜨는-개발-보드">14.2 PC에 꽂으면 콘솔 + 네트워크가 뜨는 개발 보드</a></li><li class="l3"><a href="#14-3-usb-카메라가-두-대째부터-안-열린다">14.3 USB 카메라가 두 대째부터 안 열린다</a></li><li class="l3"><a href="#14-4-현장-장비에서-usb-장치가-가끔-끊긴다">14.4 현장 장비에서 USB 장치가 "가끔 끊긴다"</a></li><li class="l2"><a href="#15-흔한-실수와-증상">15. 흔한 실수와 증상</a></li><li class="l2"><a href="#16-면접에서-이렇게-말한다">16. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#17-직접-해보기">17. 직접 해보기</a></li><li class="l2"><a href="#18-용어-사전">18. 용어 사전</a></li><li class="l2"><a href="#19-요약-체크리스트">19. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

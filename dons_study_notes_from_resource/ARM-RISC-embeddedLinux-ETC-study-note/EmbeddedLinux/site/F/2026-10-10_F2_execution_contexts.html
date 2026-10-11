@@ -1,0 +1,1547 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>F2. 실행 컨텍스트 — process / hardirq / softirq / NMI, atomic 컨텍스트, "잠들어도 되나" 규칙</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="F/2026-10-10_F2_execution_contexts">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">F. 커널 핵심 메커니즘 · F2. 실행 컨텍스트 — process / hardirq / softirq / NMI, atomic 컨텍스트, "잠들어도 되나" 규칙</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">F. 커널 핵심 메커니즘 · Kernel Mechanisms</div>
+      <h1>F2. 실행 컨텍스트 — process / hardirq / softirq / NMI, atomic 컨텍스트, "잠들어도 되나" 규칙</h1>
+      <div class="meta"><span>195분 읽기</span><span>1886줄</span><span>52개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: 드라이버 코드 한 줄을 보고 "이건 process·hardirq·softirq·NMI 중 어디서 도나, 지금 잠들어도 되나"를 근거와 함께 답할 수 있다 · <code>preempt_count</code> 값(예: <code>0x000101</code>, <code>0x010001</code>)을 비트 칸별로 풀어 읽고 <code>in_task()</code>·<code>in_hardirq()</code>·<code>in_serving_softirq()</code>·<code>in_atomic()</code>·<code>irqs_disabled()</code>가 각각 무엇을 보는지 설명할 수 있다 · "BUG: sleeping function called from invalid context"·"scheduling while atomic"·lockdep 경고를 읽고 원인 줄을 찾을 수 있다 · 컨텍스트별로 쓸 수 있는 API(mutex, <code>GFP_*</code>, spinlock 변형, <code>copy_to_user</code>, printk)를 표로 고를 수 있다 <strong>왜 필요한가</strong>: "Why can't you sleep in an interrupt handler?"는 드라이버 면접 최빈출 질문이고, 실무 첫 크래시의 절반은 "atomic 컨텍스트에서 잠들 수 있는 함수 호출"이다. contents.md가 이 항목을 <strong>가장 많이 틀리는 개념</strong>으로 꼽은 이유다 <strong>Don 기준 난이도</strong>: "ISR 안에서는 기다리지 않는다"는 펌웨어 감각은 이미 있다 / 새로 배울 부분은 ISR이 hardirq·softirq 두 층으로 나뉘고, 스핀락·<code>preempt_disable</code>·<code>local_irq_disable</code>·RCU 읽기 구간처럼 <strong>ISR이 아닌데도 잠들면 안 되는 곳</strong>이 많으며, 커널이 이 상태를 <code>preempt_count</code> 한 변수에 기록한다는 것 <strong>선행 노트</strong>: E3(커널 모듈), E4(커널 프로그래밍 제약 — §5에서 "scheduling while atomic"을 처음 봤다). 이어지는 노트: F3(잠자기와 깨우기), F4(락), F6(인터럽트 처리), F7(지연 작업), F8(타이머), F9(GFP 플래그)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>Don의 SSD 펌웨어를 떠올려 보자. 코드가 도는 장소는 두세 군데였다. <strong>메인 루프(또는 RTOS 태스크)</strong> 와 <strong>ISR</strong>, 그리고 Cortex-R이면 FIQ 정도. 규칙도 단순했다: ISR은 짧게, ISR 안에서 세마포어를 기다리지 않는다, 긴 일은 플래그를 세우고 태스크가 한다.</p>
+<p>Linux 커널도 뼈대는 같다. 다만 장소가 더 잘게 나뉘어 있고, 각 장소에 이름이 있다.</p>
+<ul class="tasks"><li><strong>process context</strong>: 어떤 태스크(<code>task_struct</code>)를 대신해서 도는 코드. 유저가 부른 syscall(<code>read</code>, <code>ioctl</code>), 드라이버 <code>probe()</code>, 커널 스레드, workqueue 작업, threaded IRQ 핸들러. RTOS 태스크에 해당한다. <strong>잠들 수 있다.</strong></li><li><strong>hardirq context</strong>: 하드웨어 인터럽트 핸들러(top half). Don이 알던 ISR 그 자체. <strong>잠들 수 없다.</strong></li><li><strong>softirq context</strong>: hardirq가 끝나는 길목(<code>irq_exit</code>)이나 <code>ksoftirqd</code> 스레드에서 도는 "소프트웨어 인터럽트". timer 콜백, tasklet, 네트워크 수신 처리. 펌웨어로 치면 "ISR 끝에서 PendSV로 넘겨 처리하는 2단계 핸들러"다. <strong>잠들 수 없다.</strong></li><li><strong>NMI context</strong>: 막을 수 없는 인터럽트. perf 샘플링·hard lockup 감지용. arm64에서는 GICv3 우선순위 마스킹으로 흉내 낸 pseudo-NMI. <strong>거의 아무것도 할 수 없다.</strong></li></ul>
+<p>그리고 함정이 하나 더 있다. process context 안에서도 <strong>스핀락을 잡거나, 선점을 끄거나, IRQ를 끄거나, RCU 읽기 구간에 들어가면</strong> 그 구간은 잠들 수 없다. 이런 구간과 interrupt context를 합쳐 <strong>atomic context</strong>라고 부른다. 드라이버 버그 대부분은 이 "process인데 atomic인" 구간에서 나온다.</p>
+<figure class="chart"><svg viewBox="0 0 680 390" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340" y="20" text-anchor="middle" font-size="13" font-weight="bold">한 CPU 위의 시간축 — IRQ 하나가 컨텍스트 세 개를 지나간다</text>
+<text x="12" y="56" text-anchor="start" font-size="13">process 컨텍스트</text>
+<text x="12" y="72" text-anchor="start" font-size="12">(insmod)</text>
+<line x1="170" y1="60" x2="670" y2="60" stroke="#888" stroke-dasharray="4 3"/>
+<text x="12" y="116" text-anchor="start" font-size="13">hardirq</text>
+<text x="12" y="132" text-anchor="start" font-size="12">(IRQ 스택, IRQ 꺼짐)</text>
+<line x1="170" y1="120" x2="670" y2="120" stroke="#888" stroke-dasharray="4 3"/>
+<text x="12" y="176" text-anchor="start" font-size="13">softirq</text>
+<text x="12" y="192" text-anchor="start" font-size="12">(IRQ 켜짐)</text>
+<line x1="170" y1="180" x2="670" y2="180" stroke="#888" stroke-dasharray="4 3"/>
+<text x="12" y="236" text-anchor="start" font-size="13">irq 스레드</text>
+<text x="12" y="252" text-anchor="start" font-size="12">(process 컨텍스트)</text>
+<line x1="170" y1="240" x2="670" y2="240" stroke="#888" stroke-dasharray="4 3"/>
+<rect x="170" y="45" width="100" height="30" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="220" y="65" text-anchor="middle" font-size="13">insmod</text>
+<rect x="275" y="105" width="120" height="30" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="335" y="125" text-anchor="middle" font-size="13">f2_hard()</text>
+<text x="335" y="152" text-anchor="middle" font-size="12">pc=0x010001</text>
+<rect x="400" y="165" width="130" height="30" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="465" y="185" text-anchor="middle" font-size="12">TIMER · TASKLET</text>
+<text x="465" y="212" text-anchor="middle" font-size="12">pc=0x000101</text>
+<rect x="535" y="45" width="40" height="30" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<rect x="580" y="225" width="90" height="30" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="625" y="245" text-anchor="middle" font-size="12">f2_thread</text>
+<text x="625" y="272" text-anchor="middle" font-size="12">pc=0x000000</text>
+<line x1="270" y1="75" x2="278" y2="103" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="395" y1="135" x2="403" y2="163" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="530" y1="165" x2="538" y2="77" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="575" y1="75" x2="583" y2="223" stroke="currentColor" marker-end="url(#ah1)"/>
+<text x="262" y="98" text-anchor="middle" font-size="12">①</text>
+<text x="388" y="158" text-anchor="middle" font-size="12">②</text>
+<text x="548" y="112" text-anchor="middle" font-size="12">③</text>
+<text x="20" y="305" text-anchor="start" font-size="12">① GIC가 IRQ 22를 올림 → el1_interrupt → irq_enter_rcu (HARDIRQ 칸 +1)</text>
+<text x="20" y="327" text-anchor="start" font-size="12">② 핸들러가 tasklet 예약 · IRQ_WAKE_THREAD → irq_exit_rcu()가 softirq 실행</text>
+<text x="20" y="349" text-anchor="start" font-size="12">③ softirq 끝 → 가로챘던 insmod로 복귀 → 스케줄러가 RT 스레드 irq/22-f2_ctx 실행</text>
+<text x="20" y="371" text-anchor="start" font-size="12">current는 ①~③ 내내 insmod(가로채인 쪽)이고, 마지막 칸에서야 irq 스레드로 바뀐다</text>
+</svg></figure>
+<p>그림 1 — 이 노트의 실험 모듈이 실제로 만든 장면을 §6의 출력(<code>pc</code> 값)과 §8의 ftrace(순서·<code>insmod</code>)를 합쳐 그린 것. 같은 CPU에서 insmod가 돌다가 IRQ가 들어오면 hardirq → softirq → 원래 태스크 → irq 스레드 순으로 컨텍스트가 바뀐다. <code>pc</code>는 그 순간의 <code>preempt_count</code>다.</p>
+<h3 id="0-1-펌웨어-용어로-옮겨-보기">0.1 펌웨어 용어로 옮겨 보기<a class="anchor" href="#0-1-펌웨어-용어로-옮겨-보기" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>Don이 아는 것 (bare-metal / RTOS)</th><th>Linux에서 대응하는 것</th><th>잠들기(블로킹)</th><th>비고</th></tr></thead><tbody><tr><td>RTOS 태스크</td><td>process context (유저 프로세스의 syscall, 커널 스레드)</td><td>가능</td><td><code>current</code>가 바로 그 태스크</td></tr><tr><td>ISR (NVIC 핸들러)</td><td>hardirq</td><td>불가</td><td>IRQ가 꺼진 채, CPU별 IRQ 스택에서 실행</td></tr><tr><td>ISR 끝에서 PendSV로 미룬 처리</td><td>softirq (timer·tasklet·NET_RX·RCU …)</td><td>불가</td><td>IRQ는 켜져 있다. hardirq가 끼어들 수 있다</td></tr><tr><td>우선순위 0 / NMI / FIQ</td><td>NMI, arm64 pseudo-NMI</td><td>불가 (락도 거의 불가)</td><td>perf, watchdog</td></tr><tr><td><code>__disable_irq()</code> 구간</td><td><code>local_irq_disable()</code> / <code>spin_lock_irqsave()</code></td><td>불가</td><td>펌웨어와 같다</td></tr><tr><td>스케줄러 잠금 (<code>vTaskSuspendAll</code>)</td><td><code>preempt_disable()</code> / <code>spin_lock()</code></td><td>불가</td><td>펌웨어보다 훨씬 자주 쓴다</td></tr><tr><td>"태스크에 알림 보내고 끝내기"</td><td><code>wake_up</code>, <code>complete</code>, <code>queue_work</code>, <code>IRQ_WAKE_THREAD</code></td><td>어디서나 가능</td><td>잠드는 쪽이 아니라 깨우는 쪽</td></tr></tbody></table></div>
+<blockquote><p>한 줄 요약: <strong>"잠들 수 있나?"는 함수가 아니라 그 함수가 불린 문맥이 결정한다.</strong> 같은 <code>kmalloc(GFP_KERNEL)</code>이 <code>probe()</code>에서는 맞고 타이머 콜백에서는 버그다.</p></blockquote>
+<hr>
+<h2 id="1-실습-준비-디버그-커널에서-모듈-하나-qemu-부팅-하나">1. 실습 준비 — 디버그 커널에서 모듈 하나 = QEMU 부팅 하나<a class="anchor" href="#1-실습-준비-디버그-커널에서-모듈-하나-qemu-부팅-하나" aria-label="link">#</a></h2>
+<h3 id="1-1-예제-1-디버그-커널-설정-확인">1.1 예제 1 — 디버그 커널 설정 확인<a class="anchor" href="#1-1-예제-1-디버그-커널-설정-확인" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 이 노트의 모든 실험은 공용 랩의 <strong>디버그 커널</strong>(<code>/var/lab/out/Image-dbg</code>, 6.18.55-dbg)에서 돌린다. 어떤 검사가 켜져 있는지 먼저 본다. VM 호스트 커널과 비교하려고 <code>uname -r</code>도 찍는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>uname -r                                   # VM 호스트 (랩 모듈을 여기 넣지 않는다)
+grep -E "^(# )?CONFIG_(PREEMPT|PREEMPT_RCU|DEBUG_ATOMIC_SLEEP|PROVE_LOCKING|ARM64_PSEUDO_NMI|IRQ_FORCED_THREADING|SOFTIRQ_ON_OWN_STACK|PREEMPT_RT|HZ)[= ]" \
+    /var/lab/out/linux-build-dbg/.config
+grep -E "^(# )?CONFIG_(DEBUG_ATOMIC_SLEEP|PROVE_LOCKING)[= ]" /var/lab/out/linux-build/.config</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>7.0.0-38-generic
+CONFIG_IRQ_FORCED_THREADING=y
+CONFIG_PREEMPT=y
+CONFIG_PREEMPT_RCU=y
+CONFIG_HZ=250
+# CONFIG_ARM64_PSEUDO_NMI is not set
+CONFIG_SOFTIRQ_ON_OWN_STACK=y
+CONFIG_PROVE_LOCKING=y
+CONFIG_DEBUG_ATOMIC_SLEEP=y
+# CONFIG_PROVE_LOCKING is not set
+# CONFIG_DEBUG_ATOMIC_SLEEP is not set</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>디버그 커널은 <code>PREEMPT=y</code>(완전 선점), <code>PREEMPT_RCU=y</code>, <code>DEBUG_ATOMIC_SLEEP=y</code>, <code>PROVE_LOCKING=y</code>(lockdep). 마지막 두 줄은 일반 랩 커널(<code>out/Image</code>)로, 두 검사가 <strong>꺼져 있다</strong>. E4 §5에서 봤듯 같은 버그가 일반 커널에서는 조용히 지나간다.</li><li><code>PREEMPT_RCU=y</code>라서 <code>rcu_read_lock()</code>이 <code>preempt_count</code>를 건드리지 않는다(§5에서 확인). <code>PREEMPT_RT</code> 줄은 아예 없다 — RT 커널이 아니다.</li><li><code>ARM64_PSEUDO_NMI</code>가 꺼져 있고, QEMU <code>virt</code>의 인터럽트 컨트롤러도 GICv2(<code>arm,cortex-a15-gic</code>)라 pseudo-NMI를 쓸 수 없다. 그래서 <strong>이 노트의 NMI 관련 내용은 소스 읽기로만 확인했고 실행하지 않았다</strong>(§2.4).</li></ul>
+<h3 id="1-2-예제-2-게스트-실행기">1.2 예제 2 — 게스트 실행기<a class="anchor" href="#1-2-예제-2-게스트-실행기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>.ko</code>와 테스트 스크립트를 랩 initramfs 사본에 넣고, 커널 인자 <code>LAB_CMD=sh~/t.sh</code>로 스크립트를 한 번 돌린 뒤 꺼지는 실행기. E4의 실행기와 같고, 기본 커널만 <code>Image-dbg</code>, CPU는 2개(<code>-smp 2</code>)다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# usage: run_guest.sh &lt;tag&gt; &lt;test.sh&gt; [extra kernel args] ; env FILES, SMP, TMO, KIMG
+set -e
+tag=$1; t=$2; extra=$3
+W=/var/tmp/F2/run_$tag
+rm -rf $W &amp;&amp; mkdir -p $W/r
+cp -a /var/lab/build/rootfs/. $W/r/
+for f in $FILES; do cp $f $W/r/; done
+cp $t $W/r/t.sh
+(cd $W/r &amp;&amp; find . | cpio -o -H newc --quiet | gzip) &gt; $W/i.gz
+KIMG=${KIMG:-/var/lab/out/Image-dbg}
+timeout ${TMO:-150} qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp ${SMP:-2} -m 512M -nographic -no-reboot \
+  -kernel $KIMG -initrd $W/i.gz -append "console=ttyAMA0 quiet $extra LAB_CMD=sh~/t.sh" 2&gt;&amp;1 | tr -d '\r'</code></pre></figure>
+<p>모듈은 <strong>디버그 커널의 빌드 트리</strong>로 빌드한다. <code>vermagic</code>이 <code>6.18.55-dbg</code>라서 일반 랩 커널에는 로드되지 않는다(섞지 말 것).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>mkdir -p /var/tmp/F2/f2_ctx &amp;&amp; cd /var/tmp/F2/f2_ctx
+echo "obj-m += f2_ctx.o" &gt; Kbuild
+make -C /var/lab/out/linux-build-dbg M=$PWD -j2 modules
+modinfo f2_ctx.ko | grep -E "vermagic|parm"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>make: Entering directory '/var/lab/build/linux-dbg'
+make[1]: Entering directory '/var/tmp/F2/f2_ctx'
+  CC [M]  f2_ctx.o
+  MODPOST Module.symvers
+  CC [M]  f2_ctx.mod.o
+  CC [M]  .module-common.o
+  LD [M]  f2_ctx.ko
+make[1]: Leaving directory '/var/tmp/F2/f2_ctx'
+make: Leaving directory '/var/lab/build/linux-dbg'
+vermagic:       6.18.55-dbg SMP preempt mod_unload aarch64
+parm:           bug:int
+parm:           nothread:bool</code></pre></figure>
+<p>출력에서 볼 것: 경고 0개. 파라미터 두 개 — <code>bug</code>(0이면 관찰만, 1~4는 일부러 규칙을 어기는 모드, §10)와 <code>nothread</code>(IRQ를 스레드 없이 등록, §7).</p>
+<hr>
+<h2 id="2-네-가지-실행-컨텍스트-정의">2. 네 가지 실행 컨텍스트 — 정의<a class="anchor" href="#2-네-가지-실행-컨텍스트-정의" aria-label="link">#</a></h2>
+<h3 id="2-1-process-context-누군가를-대신해서-도는-코드">2.1 process context — "누군가를 대신해서" 도는 코드<a class="anchor" href="#2-1-process-context-누군가를-대신해서-도는-코드" aria-label="link">#</a></h3>
+<p><strong>정의</strong>: 커널 코드가 특정 태스크를 대신해 실행되는 상태. 그 태스크가 <code>current</code>(현재 CPU에서 도는 <code>task_struct</code>를 가리키는 매크로, arm64에서는 <code>sp_el0</code> 레지스터에 들어 있다)다.</p>
+<p>세 가지 성질이 이 정의에서 나온다.</p>
+<ol class="tasks"><li><strong><code>current</code>가 의미가 있다.</strong> <code>current-&gt;pid</code>, <code>current-&gt;comm</code>, 시그널, 권한(<code>current_cred()</code>)이 "지금 이 일을 시킨 주체"다.</li><li><strong>잠들 수 있다.</strong> 잠든다는 것은 <code>schedule()</code>을 불러 <code>current</code>를 대기 상태로 두고 CPU를 다른 태스크에 넘기는 것이다. 나중에 깨우면 같은 커널 스택에서 이어서 돈다. 재울 <code>task_struct</code>와 보관할 스택이 있으니 가능하다.</li><li><strong>유저 메모리에 접근할 수 있다(유저 프로세스라면).</strong> <code>current-&gt;mm</code>이 그 프로세스의 주소 공간이므로 <code>copy_from_user()</code>가 그 공간에서 읽는다. 페이지가 없으면 page fault가 나고, 처리하려면 디스크에서 읽어야 할 수도 있으니 — 다시 2번, 잠들 수 있어야 한다.</li></ol>
+<p><strong>커널 스레드(kthread)</strong> 도 process context다. <code>kthread_run()</code>으로 만든 스레드, workqueue를 처리하는 <code>kworker/N:M</code>, threaded IRQ의 <code>irq/NN-이름</code>, <code>ksoftirqd/N</code>이 다 커널 스레드다. 차이는 <strong>유저 주소 공간이 없다</strong>는 것(<code>current-&gt;mm == NULL</code>). 그래서 잠들 수는 있지만 <code>copy_to_user()</code>로 "누군가의 유저 메모리"에 쓸 수는 없다(§6에서 <code>mm=none</code>으로 확인).</p>
+<h3 id="2-2-hardirq-context-top-half">2.2 hardirq context — top half<a class="anchor" href="#2-2-hardirq-context-top-half" aria-label="link">#</a></h3>
+<p><strong>정의</strong>: CPU가 IRQ 예외를 받아 커널의 인터럽트 진입 코드(<code>el1_interrupt</code>/<code>el0_interrupt</code>)를 거쳐 <code>request_irq()</code>로 등록한 핸들러를 부르는 동안의 상태.</p>
+<ul><li><strong><code>current</code>는 "가로채인 태스크"</strong> 다. hardirq는 아무 태스크나 끊고 들어온다. idle 태스크(<code>swapper/N</code>)일 수도, 아무 상관 없는 유저 프로세스일 수도 있다. 그러니 <code>current</code>를 보고 판단하는 코드는 hardirq에서 의미가 없다.</li><li><strong>IRQ가 꺼진 채 돈다.</strong> Linux는 hardirq 핸들러를 중첩시키지 않는다(같은 CPU에서 핸들러 실행 중 다른 IRQ가 끼어들지 않음). §6 출력의 <code>irqoff=1</code>이 그 증거다.</li><li><strong>CPU별 IRQ 스택</strong>에서 돈다(arm64 <code>IRQ_STACK_SIZE</code> = 16 KiB, E4 §4.2). 가로챈 태스크의 스택을 더 파먹지 않으려는 것이다.</li><li><strong>잠들 수 없다.</strong> 재울 "자기 태스크"가 없고, 잠들면 가로채인 무고한 태스크가 대신 잠들며, IRQ 스택은 CPU에 하나뿐이라 다른 곳으로 옮길 수도 없다. 자세한 이유는 §9.2.</li></ul>
+<h3 id="2-3-softirq-context-bottom-half의-실행-엔진">2.3 softirq context — bottom half의 실행 엔진<a class="anchor" href="#2-3-softirq-context-bottom-half의-실행-엔진" aria-label="link">#</a></h3>
+<p><strong>정의</strong>: 커널이 정해 둔 10개의 "소프트웨어 인터럽트 벡터"(§7.3의 <code>/proc/softirqs</code> 출력의 행)의 핸들러가 도는 상태. hardirq 핸들러가 <code>raise_softirq()</code>로 "할 일 있음" 비트를 세워 두면, 나중에 커널이 그 비트를 보고 처리한다.</p>
+<p>드라이버가 softirq 벡터를 직접 추가하지는 않는다. 드라이버가 만나는 softirq는 이런 모습이다.</p>
+<div class="tw"><table><thead><tr><th>드라이버가 쓰는 것</th><th>실제로 도는 softirq 벡터</th><th>비고</th></tr></thead><tbody><tr><td><code>timer_list</code> 콜백 (<code>mod_timer</code>)</td><td>TIMER</td><td>F8</td></tr><tr><td><code>hrtimer</code>를 <code>HRTIMER_MODE_*_SOFT</code>로 시작</td><td>HRTIMER</td><td>기본 모드는 hardirq (§6)</td></tr><tr><td>tasklet (<code>tasklet_schedule</code>)</td><td>TASKLET (<code>tasklet_hi_schedule</code>은 HI)</td><td>새 코드에서는 퇴출 중, F7</td></tr><tr><td>BH workqueue (<code>system_bh_wq</code>, <code>WQ_BH</code>)</td><td>softirq 문맥</td><td>tasklet의 후계</td></tr><tr><td>NAPI 폴링 (네트워크 드라이버)</td><td>NET_RX / NET_TX</td><td></td></tr><tr><td>RCU 콜백 (<code>call_rcu</code>)</td><td>RCU</td><td>F4</td></tr></tbody></table></div>
+<p>softirq는 <strong>어디서 실행되나</strong>가 헷갈리는 지점이다. 실행 장소가 둘이다.</p>
+<ol><li><strong><code>irq_exit_rcu()</code></strong> — hardirq를 끝내고 나가는 길에, <code>in_interrupt()</code>가 거짓이고(즉 softirq나 BH 금지 구간을 가로챈 게 아니고) 대기 중인 softirq가 있으면 그 자리에서 <code>handle_softirqs()</code>를 돈다. 이때 <code>current</code>는 여전히 가로채인 태스크다.</li><li><strong><code>ksoftirqd/N</code></strong> — CPU마다 하나 있는 커널 스레드. process context에서 <code>raise_softirq()</code>를 부르면 이 스레드를 깨운다. 또 <code>handle_softirqs()</code>가 2 ms(<code>MAX_SOFTIRQ_TIME</code>)나 10회 재시작(<code>MAX_SOFTIRQ_RESTART</code>)을 넘기면 나머지를 여기로 넘긴다(네트워크 폭주 때 유저 태스크가 굶지 않게).</li></ol>
+<p>어느 쪽에서 돌든 <strong>softirq 핸들러 입장에서는 같은 softirq context</strong>다. <code>ksoftirqd</code> 안에서 돌아도 <code>preempt_count</code>의 softirq 칸이 서 있으므로 잠들 수 없다(§6에서 <code>ksoftirqd/0</code>인데 <code>serv=1 atom=1</code>).</p>
+<p>softirq는 hardirq와 달리 <strong>IRQ를 켠 채</strong> 돈다. 그래서 softirq 처리 중에 hardirq가 끼어들 수 있다(§8 ftrace에서 확인). 같은 CPU에서 softirq끼리는 중첩되지 않는다.</p>
+<h3 id="2-4-nmi와-arm64-pseudo-nmi-실행하지-않음-소스-확인만">2.4 NMI와 arm64 pseudo-NMI (실행하지 않음 — 소스 확인만)<a class="anchor" href="#2-4-nmi와-arm64-pseudo-nmi-실행하지-않음-소스-확인만" aria-label="link">#</a></h3>
+<p><strong>NMI</strong>(Non-Maskable Interrupt)는 IRQ를 꺼도 들어오는 인터럽트다. x86은 하드웨어 NMI 핀이 있고, perf 샘플링과 hard lockup 감지(IRQ가 꺼진 채 멈춘 CPU 찾기)에 쓴다.</p>
+<p>arm64에는 오랫동안 아키텍처 NMI가 없었다. 그래서 커널은 <strong>GICv3의 우선순위 마스크(<code>ICC_PMR_EL1</code>)</strong> 로 흉내 낸다: <code>local_irq_disable()</code>이 PSTATE.I 비트 대신 PMR을 "보통 우선순위만 막는" 값으로 쓰고, 높은 우선순위 인터럽트만 통과시킨다. 이게 pseudo-NMI이고 <code>CONFIG_ARM64_PSEUDO_NMI=y</code> + 부트 인자 <code>irqchip.gicv3_pseudo_nmi=1</code>이 필요하다. 랩 소스 <code>arch/arm64/kernel/entry-common.c</code>:</p>
+<figure class="code"><span class="lang">c</span><pre><code>static void noinstr el1_interrupt(struct pt_regs *regs,
+				  void (*handler)(struct pt_regs *))
+{
+	write_sysreg(DAIF_PROCCTX_NOIRQ, daif);
+
+	if (IS_ENABLED(CONFIG_ARM64_PSEUDO_NMI) &amp;&amp; regs_irqs_disabled(regs))
+		__el1_pnmi(regs, handler);
+	else
+		__el1_irq(regs, handler);
+}</code></pre></figure>
+<p>"IRQ가 꺼진 상태에서 들어온 인터럽트"는 pseudo-NMI밖에 없으므로 그 경우 <code>irqentry_nmi_enter()</code> 경로를 탄다. <code>include/linux/hardirq.h</code>의 <code>__nmi_enter()</code>는 <code>__preempt_count_add(NMI_OFFSET + HARDIRQ_OFFSET)</code>, 즉 <code>preempt_count</code>에 <code>0x110000</code>을 더한다 — NMI 안에서는 <code>in_nmi()</code>와 <code>in_hardirq()</code>가 둘 다 참이다.</p>
+<p>NMI 핸들러는 <strong>어떤 락도 기다릴 수 없다</strong>(락 주인이 바로 그 CPU의, NMI에 가로채인 코드일 수 있다). 그래서 lockless 자료구조, <code>irq_work</code>로 나중에 처리하기, printk의 지연 출력 같은 특수 수단만 쓴다. 드라이버 작성자가 NMI 핸들러를 쓸 일은 거의 없다. 면접에서는 "가장 제약이 심한 문맥, lockless만 가능"이라고 말할 수 있으면 된다.</p>
+<h3 id="2-5-한-장-요약">2.5 한 장 요약<a class="anchor" href="#2-5-한-장-요약" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>컨텍스트</th><th>진입</th><th><code>current</code>의 의미</th><th>IRQ 상태</th><th>스택</th><th>잠들기</th><th>대표 예</th></tr></thead><tbody><tr><td>process (유저 태스크)</td><td>syscall, 예외</td><td>일을 시킨 프로세스</td><td>켜짐</td><td>태스크 커널 스택 16 KiB</td><td>가능</td><td><code>read</code>/<code>ioctl</code> 핸들러, <code>probe</code></td></tr><tr><td>process (kthread)</td><td>스케줄러</td><td>그 커널 스레드 (<code>mm</code> 없음)</td><td>켜짐</td><td>태스크 커널 스택</td><td>가능</td><td><code>kworker</code>, <code>irq/NN-…</code>, <code>ksoftirqd</code></td></tr><tr><td>softirq</td><td><code>irq_exit</code>, <code>local_bh_enable</code>, <code>ksoftirqd</code></td><td>가로채인 태스크 또는 <code>ksoftirqd</code></td><td>켜짐</td><td>CPU별 IRQ 스택 (<code>SOFTIRQ_ON_OWN_STACK</code>) 또는 ksoftirqd 스택</td><td>불가</td><td>timer 콜백, tasklet, NAPI</td></tr><tr><td>hardirq</td><td>IRQ 예외</td><td>가로채인 태스크</td><td>꺼짐</td><td>CPU별 IRQ 스택</td><td>불가</td><td><code>request_irq</code> 핸들러, hrtimer(기본)</td></tr><tr><td>NMI</td><td>NMI / pseudo-NMI</td><td>가로채인 태스크</td><td>꺼짐</td><td>IRQ 스택</td><td>불가, 락도 불가</td><td>perf, hard lockup 감지</td></tr></tbody></table></div>
+<hr>
+<h2 id="3-preempt_count-컨텍스트를-기록하는-32비트">3. <code>preempt_count</code> — 컨텍스트를 기록하는 32비트<a class="anchor" href="#3-preempt_count-컨텍스트를-기록하는-32비트" aria-label="link">#</a></h2>
+<h3 id="3-1-직관">3.1 직관<a class="anchor" href="#3-1-직관" aria-label="link">#</a></h3>
+<p>커널은 "지금 어느 컨텍스트인가"를 매번 계산하지 않는다. <strong>카운터 하나에 칸을 나눠서 기록</strong>한다. hardirq에 들어가면 hardirq 칸을 +1, softirq를 처리하기 시작하면 softirq 칸을 +1, 스핀락을 잡으면 preempt 칸을 +1. 나갈 때 -1. 펌웨어에서 "ISR 중첩 깊이" 변수와 "스케줄러 잠금 카운트" 변수를 하나의 워드에 비트필드로 합쳐 둔 것과 같다. 이 카운터가 <code>preempt_count</code>이고, <strong>0이면 선점해도 되고(잠들어도 되고), 0이 아니면 안 된다</strong>가 기본 규칙이다.</p>
+<h3 id="3-2-예제-3-랩-소스에서-비트-배치-확인">3.2 예제 3 — 랩 소스에서 비트 배치 확인<a class="anchor" href="#3-2-예제-3-랩-소스에서-비트-배치-확인" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 칸의 위치와 폭을 추측하지 않고 랩 커널 소스에서 직접 읽는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>sed -n 13,53p /var/lab/src/linux-6.18.55/include/linux/preempt.h</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/*
+ * We put the hardirq and softirq counter into the preemption
+ * counter. The bitmask has the following meaning:
+ *
+ * - bits 0-7 are the preemption count (max preemption depth: 256)
+ * - bits 8-15 are the softirq count (max # of softirqs: 256)
+ *
+ * The hardirq count could in theory be the same as the number of
+ * interrupts in the system, but we run all interrupt handlers with
+ * interrupts disabled, so we cannot have nesting interrupts. Though
+ * there are a few palaeontologic drivers which reenable interrupts in
+ * the handler, so we need more than one bit here.
+ *
+ *         PREEMPT_MASK:	0x000000ff
+ *         SOFTIRQ_MASK:	0x0000ff00
+ *         HARDIRQ_MASK:	0x000f0000
+ *             NMI_MASK:	0x00f00000
+ * PREEMPT_NEED_RESCHED:	0x80000000
+ */
+#define PREEMPT_BITS	8
+#define SOFTIRQ_BITS	8
+#define HARDIRQ_BITS	4
+#define NMI_BITS	4
+
+#define PREEMPT_SHIFT	0
+#define SOFTIRQ_SHIFT	(PREEMPT_SHIFT + PREEMPT_BITS)
+#define HARDIRQ_SHIFT	(SOFTIRQ_SHIFT + SOFTIRQ_BITS)
+#define NMI_SHIFT	(HARDIRQ_SHIFT + HARDIRQ_BITS)
+
+#define __IRQ_MASK(x)	((1UL &lt;&lt; (x))-1)
+
+#define PREEMPT_MASK	(__IRQ_MASK(PREEMPT_BITS) &lt;&lt; PREEMPT_SHIFT)
+#define SOFTIRQ_MASK	(__IRQ_MASK(SOFTIRQ_BITS) &lt;&lt; SOFTIRQ_SHIFT)
+#define HARDIRQ_MASK	(__IRQ_MASK(HARDIRQ_BITS) &lt;&lt; HARDIRQ_SHIFT)
+#define NMI_MASK	(__IRQ_MASK(NMI_BITS)     &lt;&lt; NMI_SHIFT)
+
+#define PREEMPT_OFFSET	(1UL &lt;&lt; PREEMPT_SHIFT)
+#define SOFTIRQ_OFFSET	(1UL &lt;&lt; SOFTIRQ_SHIFT)
+#define HARDIRQ_OFFSET	(1UL &lt;&lt; HARDIRQ_SHIFT)
+#define NMI_OFFSET	(1UL &lt;&lt; NMI_SHIFT)
+
+#define SOFTIRQ_DISABLE_OFFSET	(2 * SOFTIRQ_OFFSET)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>칸 네 개: <strong>PREEMPT 0~7, SOFTIRQ 8~15, HARDIRQ 16~19, NMI 20~23</strong>. 마스크는 <code>0xff</code>, <code>0xff00</code>, <code>0xf0000</code>, <code>0xf00000</code>.</li><li>softirq 칸은 <strong>두 가지 의미를 함께 센다</strong>. softirq를 <strong>처리 중</strong>이면 <code>SOFTIRQ_OFFSET</code>(0x100)을, <code>local_bh_disable()</code>로 <strong>금지만</strong> 했으면 <code>SOFTIRQ_DISABLE_OFFSET</code>(0x200)을 더한다. 그래서 bit 8(0x100)이 서 있으면 "실행 중", 짝수 배수만 있으면 "금지 중"으로 구분한다. 이 트릭 때문에 <code>in_serving_softirq()</code>와 <code>in_softirq()</code>가 다르다.</li><li>주석의 <code>PREEMPT_NEED_RESCHED: 0x80000000</code>은 x86 방식이다. <strong>arm64는 다르다</strong>: <code>arch/arm64/include/asm/preempt.h</code>에 <code>#define PREEMPT_NEED_RESCHED BIT(32)</code> — <code>thread_info</code>의 64비트 필드 위쪽 32비트를 need_resched 플래그로 쓰고, <strong>반전 논리</strong>(0이면 "resched 필요")라서 "count == 0이고 resched 필요"를 64비트 값 하나가 0인지로 한 번에 검사한다. 또 arm64의 <code>preempt_count()</code>는 <strong>태스크별</strong>(<code>current_thread_info()-&gt;preempt.count</code>)이다.</li></ul>
+<h3 id="3-3-판정-매크로-무엇을-보나">3.3 판정 매크로 — 무엇을 보나<a class="anchor" href="#3-3-판정-매크로-무엇을-보나" aria-label="link">#</a></h3>
+<p>같은 파일(랩 소스 <code>include/linux/preempt.h</code> 113~186행)에서 정의를 그대로 옮기면:</p>
+<div class="tw"><table><thead><tr><th>매크로</th><th>정의 (non-RT)</th><th>참이 되는 때</th><th>드라이버에서 써도 되나</th></tr></thead><tbody><tr><td><code>in_nmi()</code></td><td><code>preempt_count() &amp; NMI_MASK</code></td><td>NMI 처리 중</td><td>디버그용</td></tr><tr><td><code>in_hardirq()</code></td><td><code>preempt_count() &amp; HARDIRQ_MASK</code></td><td>hardirq 핸들러 안 (NMI 안도 포함)</td><td>디버그용</td></tr><tr><td><code>in_serving_softirq()</code></td><td><code>softirq_count() &amp; SOFTIRQ_OFFSET</code></td><td>softirq 핸들러를 <strong>실행 중</strong></td><td>디버그용</td></tr><tr><td><code>in_task()</code></td><td><code>!(preempt_count() &amp; (NMI_MASK or HARDIRQ_MASK or SOFTIRQ_OFFSET))</code></td><td>process context (BH 금지 구간도 task로 침)</td><td>가끔 (예: 통계를 어디에 셀지)</td></tr><tr><td><code>in_softirq()</code></td><td><code>softirq_count()</code></td><td>softirq 실행 중 <strong>또는 BH 금지 중</strong></td><td>폐기 예정 (주석: deprecated)</td></tr><tr><td><code>in_interrupt()</code></td><td><code>irq_count()</code> = NMI+HARDIRQ+SOFTIRQ 칸</td><td>위 셋 중 하나라도, <strong>BH 금지도 포함</strong></td><td>폐기 예정</td></tr><tr><td><code>in_atomic()</code></td><td><code>preempt_count() != 0</code></td><td>칸 중 하나라도 0이 아님</td><td><strong>쓰지 말 것</strong> (주석: "Do not use in_atomic() in driver code")</td></tr><tr><td><code>irqs_disabled()</code></td><td>(preempt_count와 별개) 로컬 CPU의 IRQ 마스크</td><td><code>local_irq_disable</code>, <code>spin_lock_irqsave</code> 구간, hardirq</td><td>단언(assert)용</td></tr><tr><td><code>preemptible()</code></td><td><code>preempt_count() == 0 &amp;&amp; !irqs_disabled()</code></td><td>선점 가능</td><td>디버그용</td></tr></tbody></table></div>
+<p>(표 셀 안에는 <code>|</code>를 쓸 수 없어서 원문의 <code>NMI_MASK | HARDIRQ_MASK | SOFTIRQ_OFFSET</code>을 "or"로 적었다.)</p>
+<p><code>in_atomic()</code>을 드라이버에서 쓰지 말라는 이유가 두 가지 있다. 첫째, <strong>IRQ만 끈 구간은 <code>preempt_count</code>가 0</strong>이라 <code>in_atomic()</code>이 거짓을 돌려준다(§5에서 실측). 둘째, <code>CONFIG_PREEMPT_COUNT</code>가 꺼진 구성에서는 <code>spin_lock()</code>이 카운트를 올리지 않을 수 있다. "지금 잠들어도 되나"를 런타임에 묻는 코드를 짜지 말고, <strong>호출 문맥을 설계로 정해서 API 문서에 적는 것</strong>이 커널의 방식이다(예: "이 함수는 process context에서만 부를 것, might sleep").</p>
+<figure class="chart"><svg viewBox="0 0 680 430" xmlns="http://www.w3.org/2000/svg">
+<text x="340" y="20" text-anchor="middle" font-size="13" font-weight="bold">preempt_count 비트 배치 (include/linux/preempt.h) — 실측값 분해</text>
+<text x="10" y="48" text-anchor="start" font-size="12">비트</text>
+<text x="10" y="78" text-anchor="start" font-size="12">preempt_count</text>
+<text x="10" y="108" text-anchor="start" font-size="12">마스크</text>
+<text x="210.0" y="48" text-anchor="middle" font-size="12">31–24</text>
+<rect x="180" y="56" width="60" height="34" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="210.0" y="78" text-anchor="middle" font-size="12" font-weight="bold">미사용</text>
+<text x="210.0" y="108" text-anchor="middle" font-size="12">—</text>
+<text x="275.0" y="48" text-anchor="middle" font-size="12">23–20</text>
+<rect x="240" y="56" width="70" height="34" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="275.0" y="78" text-anchor="middle" font-size="12" font-weight="bold">NMI</text>
+<text x="275.0" y="108" text-anchor="middle" font-size="12">0xf00000</text>
+<text x="350.0" y="48" text-anchor="middle" font-size="12">19–16</text>
+<rect x="310" y="56" width="80" height="34" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="350.0" y="78" text-anchor="middle" font-size="12" font-weight="bold">HARDIRQ</text>
+<text x="350.0" y="108" text-anchor="middle" font-size="12">0x0f0000</text>
+<text x="460.0" y="48" text-anchor="middle" font-size="12">15–8</text>
+<rect x="390" y="56" width="140" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="460.0" y="78" text-anchor="middle" font-size="12" font-weight="bold">SOFTIRQ</text>
+<text x="460.0" y="108" text-anchor="middle" font-size="12">0x00ff00</text>
+<text x="600.0" y="48" text-anchor="middle" font-size="12">7–0</text>
+<rect x="530" y="56" width="140" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="600.0" y="78" text-anchor="middle" font-size="12" font-weight="bold">PREEMPT</text>
+<text x="600.0" y="108" text-anchor="middle" font-size="12">0x0000ff</text>
+<line x1="10" y1="120" x2="670" y2="120" stroke="currentColor"/>
+<text x="10" y="145" text-anchor="start" font-size="12">0x000000 init (insmod)</text>
+<text x="210.0" y="145" text-anchor="middle" font-size="13">0</text>
+<text x="275.0" y="145" text-anchor="middle" font-size="13">0</text>
+<text x="350.0" y="145" text-anchor="middle" font-size="13">0</text>
+<text x="460.0" y="145" text-anchor="middle" font-size="13">0</text>
+<text x="600.0" y="145" text-anchor="middle" font-size="13">0</text>
+<text x="10" y="177" text-anchor="start" font-size="12">0x000002 spin_lock 2개</text>
+<text x="210.0" y="177" text-anchor="middle" font-size="13">0</text>
+<text x="275.0" y="177" text-anchor="middle" font-size="13">0</text>
+<text x="350.0" y="177" text-anchor="middle" font-size="13">0</text>
+<text x="460.0" y="177" text-anchor="middle" font-size="13">0</text>
+<text x="600.0" y="177" text-anchor="middle" font-size="13" font-weight="bold">2</text>
+<text x="10" y="209" text-anchor="start" font-size="12">0x000201 spin_lock_bh</text>
+<text x="210.0" y="209" text-anchor="middle" font-size="13">0</text>
+<text x="275.0" y="209" text-anchor="middle" font-size="13">0</text>
+<text x="350.0" y="209" text-anchor="middle" font-size="13">0</text>
+<text x="460.0" y="209" text-anchor="middle" font-size="13" font-weight="bold">2</text>
+<text x="600.0" y="209" text-anchor="middle" font-size="13" font-weight="bold">1</text>
+<text x="10" y="241" text-anchor="start" font-size="12">0x000101 timer_list</text>
+<text x="210.0" y="241" text-anchor="middle" font-size="13">0</text>
+<text x="275.0" y="241" text-anchor="middle" font-size="13">0</text>
+<text x="350.0" y="241" text-anchor="middle" font-size="13">0</text>
+<text x="460.0" y="241" text-anchor="middle" font-size="13" font-weight="bold">1</text>
+<text x="600.0" y="241" text-anchor="middle" font-size="13" font-weight="bold">1</text>
+<text x="10" y="273" text-anchor="start" font-size="12">0x010001 hardirq</text>
+<text x="210.0" y="273" text-anchor="middle" font-size="13">0</text>
+<text x="275.0" y="273" text-anchor="middle" font-size="13">0</text>
+<text x="350.0" y="273" text-anchor="middle" font-size="13" font-weight="bold">1</text>
+<text x="460.0" y="273" text-anchor="middle" font-size="13">0</text>
+<text x="600.0" y="273" text-anchor="middle" font-size="13" font-weight="bold">1</text>
+<text x="10" y="305" text-anchor="start" font-size="12">0x000200 강제 스레드 IRQ</text>
+<text x="210.0" y="305" text-anchor="middle" font-size="13">0</text>
+<text x="275.0" y="305" text-anchor="middle" font-size="13">0</text>
+<text x="350.0" y="305" text-anchor="middle" font-size="13">0</text>
+<text x="460.0" y="305" text-anchor="middle" font-size="13" font-weight="bold">2</text>
+<text x="600.0" y="305" text-anchor="middle" font-size="13">0</text>
+<text x="10" y="337" text-anchor="start" font-size="12">0x110000 NMI (미실행)</text>
+<text x="210.0" y="337" text-anchor="middle" font-size="13">0</text>
+<text x="275.0" y="337" text-anchor="middle" font-size="13" font-weight="bold">1</text>
+<text x="350.0" y="337" text-anchor="middle" font-size="13" font-weight="bold">1</text>
+<text x="460.0" y="337" text-anchor="middle" font-size="13">0</text>
+<text x="600.0" y="337" text-anchor="middle" font-size="13">0</text>
+<text x="10" y="369" text-anchor="start" font-size="12">0xffffffff bug3 언더플로</text>
+<text x="210.0" y="369" text-anchor="middle" font-size="13" font-weight="bold">ff</text>
+<text x="275.0" y="369" text-anchor="middle" font-size="13" font-weight="bold">f</text>
+<text x="350.0" y="369" text-anchor="middle" font-size="13" font-weight="bold">f</text>
+<text x="460.0" y="369" text-anchor="middle" font-size="13" font-weight="bold">ff</text>
+<text x="600.0" y="369" text-anchor="middle" font-size="13" font-weight="bold">ff</text>
+<line x1="180" y1="124" x2="180" y2="380" stroke="#888"/>
+<line x1="240" y1="124" x2="240" y2="380" stroke="#888"/>
+<line x1="310" y1="124" x2="310" y2="380" stroke="#888"/>
+<line x1="390" y1="124" x2="390" y2="380" stroke="#888"/>
+<line x1="530" y1="124" x2="530" y2="380" stroke="#888"/>
+<line x1="670" y1="124" x2="670" y2="380" stroke="#888"/>
+<text x="10" y="402" text-anchor="start" font-size="12">SOFTIRQ 칸: 1 = softirq 실행 중 (SOFTIRQ_OFFSET 0x100), 2 = BH 금지 (SOFTIRQ_DISABLE_OFFSET 0x200)</text>
+<text x="10" y="422" text-anchor="start" font-size="12">arm64: 64비트 preempt 필드의 bit 32 = need_resched 플래그 (반전 논리: 0이면 resched 필요)</text>
+</svg></figure>
+<p>그림 2 — <code>preempt_count</code>의 칸과, 이 노트에서 실제로 찍힌 값을 칸별로 분해한 것. NMI 행만 계산값(실행 안 함)이다. 마지막 행은 §10.3에서 카운트가 언더플로되어 모든 칸이 1로 찬 실제 값이다.</p>
+<hr>
+<h2 id="4-실험-모듈-f2_ctx-모든-컨텍스트에서-같은-함수를-부른다">4. 실험 모듈 <code>f2_ctx</code> — 모든 컨텍스트에서 같은 함수를 부른다<a class="anchor" href="#4-실험-모듈-f2_ctx-모든-컨텍스트에서-같은-함수를-부른다" aria-label="link">#</a></h2>
+<h3 id="4-1-설계">4.1 설계<a class="anchor" href="#4-1-설계" aria-label="link">#</a></h3>
+<p>아이디어는 단순하다. <code>f2_show("이름")</code> 함수 하나가 <code>preempt_count</code>와 판정 매크로 결과, <code>current</code>의 이름·PID, 유저 주소 공간 유무, CPU 번호를 한 줄로 찍는다. 이 함수를 (1) <code>module_init</code>(process context) 안에서 여러 가지 락·금지 상태로, (2) 모든 지연 실행 수단(timer, hrtimer 두 모드, tasklet, BH workqueue, workqueue, kthread)의 콜백에서, (3) 진짜 하드웨어 IRQ의 hardirq 핸들러와 irq 스레드에서 부른다.</p>
+<p>IRQ는 D4에서 쓴 방법을 빌린다. GIC의 비어 있는 SPI 80번에 <strong>DT 수정 없이</strong> 모듈 안에서 매핑을 만들고(<code>irq_create_fwspec_mapping</code>), <code>irq_set_irqchip_state(..., IRQCHIP_STATE_PENDING, true)</code>로 GIC의 pending 비트를 직접 세워 인터럽트를 만든다. 실제 장치 IRQ와 똑같이 GIC → <code>gic_handle_irq</code> → 핸들러 경로를 탄다.</p>
+<p>출력 필드: <code>pc</code>=<code>preempt_count</code>, <code>task</code>=<code>in_task()</code>, <code>hard</code>=<code>in_hardirq()</code>, <code>serv</code>=<code>in_serving_softirq()</code>, <code>bh</code>=<code>in_softirq()</code>, <code>intr</code>=<code>in_interrupt()</code>, <code>nmi</code>=<code>in_nmi()</code>, <code>atom</code>=<code>in_atomic()</code>, <code>irqoff</code>=<code>irqs_disabled()</code>, <code>rcu</code>=<code>rcu_preempt_depth()</code>, <code>mm</code>=<code>current-&gt;mm</code> 유무, <code>[comm/pid cpuN]</code>.</p>
+<h3 id="4-2-조각-1-헤더-파라미터-출력-함수">4.2 조각 1 — 헤더, 파라미터, 출력 함수<a class="anchor" href="#4-2-조각-1-헤더-파라미터-출력-함수" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* f2_ctx: 실행 컨텍스트마다 preempt_count와 판정 매크로를 찍는다 */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#include &lt;linux/module.h&gt;
+#include &lt;linux/hardirq.h&gt;
+#include &lt;linux/sched.h&gt;
+#include &lt;linux/rcupdate.h&gt;
+#include &lt;linux/spinlock.h&gt;
+#include &lt;linux/mutex.h&gt;
+#include &lt;linux/timer.h&gt;
+#include &lt;linux/hrtimer.h&gt;
+#include &lt;linux/interrupt.h&gt;
+#include &lt;linux/workqueue.h&gt;
+#include &lt;linux/kthread.h&gt;
+#include &lt;linux/completion.h&gt;
+#include &lt;linux/delay.h&gt;
+#include &lt;linux/slab.h&gt;
+#include &lt;linux/of.h&gt;
+#include &lt;linux/irqdomain.h&gt;
+
+/* 0: 조사만, 1: timer에서 mutex, 2: hardirq에서 GFP_KERNEL,
+ * 3: spin_lock_irqsave 안에서 msleep, 4: rcu_read_lock 안에서 msleep */
+static int bug;
+module_param(bug, int, 0444);
+static bool nothread;		/* 1이면 thread_fn 없이 request_irq() */
+module_param(nothread, bool, 0444);
+
+static void f2_show(const char *where)
+{
+	unsigned int pc = preempt_count();
+
+	pr_info("%-13s pc=0x%06x task=%d hard=%d serv=%d bh=%d intr=%d nmi=%d atom=%d irqoff=%d rcu=%d mm=%s [%s/%d cpu%d]\n",
+		where, pc, !!in_task(), !!in_hardirq(), !!in_serving_softirq(),
+		!!in_softirq(), !!in_interrupt(), !!in_nmi(), !!in_atomic(),
+		!!irqs_disabled(), rcu_preempt_depth(),
+		current-&gt;mm ? "user" : "none", current-&gt;comm,
+		current-&gt;pid, raw_smp_processor_id());
+}
+
+static DEFINE_SPINLOCK(f2_lock);
+static DEFINE_SPINLOCK(f2_lock2);
+static DEFINE_MUTEX(f2_mutex);</code></pre></figure>
+<p><code>raw_smp_processor_id()</code>를 쓴 이유: process context에서 선점이 켜진 채 <code>smp_processor_id()</code>를 부르면 <code>CONFIG_DEBUG_PREEMPT</code> 커널이 경고한다(값이 다음 순간 틀릴 수 있으므로). 여기서는 "찍는 순간의 CPU"만 알면 되니 raw 버전이 맞다.</p>
+<h3 id="4-3-조각-2-process-context-안의-여러-atomic-만들기">4.3 조각 2 — process context 안의 여러 "atomic 만들기"<a class="anchor" href="#4-3-조각-2-process-context-안의-여러-atomic-만들기" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static void f2_survey_process(void)
+{
+	unsigned long flags;
+
+	f2_show("init");
+	spin_lock(&amp;f2_lock);
+	f2_show("spin_lock");
+	spin_lock(&amp;f2_lock2);
+	f2_show("spin_lock x2");
+	spin_unlock(&amp;f2_lock2);
+	spin_unlock(&amp;f2_lock);
+	spin_lock_irqsave(&amp;f2_lock, flags);
+	f2_show("lock_irqsave");
+	spin_unlock_irqrestore(&amp;f2_lock, flags);
+	spin_lock_bh(&amp;f2_lock);
+	f2_show("spin_lock_bh");
+	spin_unlock_bh(&amp;f2_lock);
+	preempt_disable();
+	f2_show("preempt_off");
+	preempt_enable();
+	local_irq_disable();
+	f2_show("irq_disable");
+	local_irq_enable();
+	local_bh_disable();
+	f2_show("bh_disable");
+	local_bh_enable();
+	rcu_read_lock();
+	f2_show("rcu_read_lock");
+	rcu_read_unlock();
+	mutex_lock(&amp;f2_mutex);
+	f2_show("mutex_lock");
+	mutex_unlock(&amp;f2_mutex);
+}</code></pre></figure>
+<h3 id="4-4-조각-3-지연-실행-수단들의-콜백">4.4 조각 3 — 지연 실행 수단들의 콜백<a class="anchor" href="#4-4-조각-3-지연-실행-수단들의-콜백" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>/* ---- 지연 실행 수단들 ---- */
+static DECLARE_COMPLETION(f2_done);
+static struct timer_list f2_timer;
+static struct hrtimer f2_hrt_hard, f2_hrt_soft;
+static struct tasklet_struct f2_tl;
+static struct work_struct f2_work, f2_bh_work;
+static int f2_virq;
+
+static void f2_timer_fn(struct timer_list *t)
+{
+	f2_show("timer_list");
+	if (bug == 1) {
+		mutex_lock(&amp;f2_mutex);		/* 금지: 잠들 수 있는 락 */
+		mutex_unlock(&amp;f2_mutex);
+	}
+	complete(&amp;f2_done);
+}
+
+static enum hrtimer_restart f2_hrt_fn(struct hrtimer *h)
+{
+	f2_show(h == &amp;f2_hrt_hard ? "hrtimer" : "hrtimer_soft");
+	complete(&amp;f2_done);
+	return HRTIMER_NORESTART;
+}
+
+static void f2_tl_fn(struct tasklet_struct *t)
+{
+	f2_show("tasklet");
+	complete(&amp;f2_done);
+}
+
+static void f2_work_fn(struct work_struct *w)
+{
+	f2_show(w == &amp;f2_work ? "workqueue" : "bh_workqueue");
+	if (w == &amp;f2_work)
+		msleep(1);			/* process context: OK */
+	complete(&amp;f2_done);
+}
+
+static int f2_kthread_fn(void *arg)
+{
+	f2_show("kthread");
+	complete(&amp;f2_done);
+	return 0;
+}</code></pre></figure>
+<h3 id="4-5-조각-4-irq-핸들러-두-개-gic-매핑-정리-함수">4.5 조각 4 — IRQ 핸들러 두 개, GIC 매핑, 정리 함수<a class="anchor" href="#4-5-조각-4-irq-핸들러-두-개-gic-매핑-정리-함수" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static irqreturn_t f2_hard(int irq, void *dev)
+{
+	f2_show("hardirq");
+	if (bug == 2) {
+		void *p = kmalloc(64, GFP_KERNEL);	/* 금지 */
+
+		kfree(p);
+	}
+	if (nothread) {
+		complete(&amp;f2_done);
+		return IRQ_HANDLED;
+	}
+	tasklet_schedule(&amp;f2_tl);		/* hardirq에서 softirq 예약 */
+	return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t f2_thread(int irq, void *dev)
+{
+	f2_show("irq_thread");
+	msleep(1);				/* irq thread는 잠들 수 있다 */
+	complete(&amp;f2_done);
+	return IRQ_HANDLED;
+}
+
+static int f2_map_irq(void)
+{
+	struct irq_fwspec fs = {
+		.param_count = 3,
+		.param = { 0 /* GIC_SPI */, 80, IRQ_TYPE_EDGE_RISING },
+	};
+	struct device_node *gic;
+	int virq;
+
+	gic = of_find_compatible_node(NULL, NULL, "arm,cortex-a15-gic");
+	if (!gic)
+		return -ENODEV;
+	fs.fwnode = of_fwnode_handle(gic);
+	virq = irq_create_fwspec_mapping(&amp;fs);
+	of_node_put(gic);
+	return virq ? virq : -EINVAL;
+}</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>static void __exit f2_exit(void)
+{
+	free_irq(f2_virq, NULL);
+	irq_dispose_mapping(f2_virq);
+	tasklet_kill(&amp;f2_tl);
+	timer_delete_sync(&amp;f2_timer);
+	hrtimer_cancel(&amp;f2_hrt_hard);
+	hrtimer_cancel(&amp;f2_hrt_soft);
+	cancel_work_sync(&amp;f2_work);
+	cancel_work_sync(&amp;f2_bh_work);
+}
+module_init(f2_init);
+module_exit(f2_exit);
+MODULE_DESCRIPTION("F2: execution contexts and preempt_count");
+MODULE_LICENSE("GPL");</code></pre></figure>
+<p><code>f2_hard</code>가 <code>IRQ_WAKE_THREAD</code>를 돌려주면 커널이 이 IRQ의 스레드(<code>irq/22-f2_ctx</code>)를 깨워 <code>f2_thread</code>를 부른다. <code>IRQF_ONESHOT</code>은 "스레드 핸들러가 끝날 때까지 이 IRQ 줄을 마스크해 둬라"라는 뜻으로, 레벨 트리거 장치에서 핸들러가 원인을 지우기 전에 IRQ가 다시 들어오는 폭주를 막는다(F6). 데모라서 init 실패 경로의 정리(타이머·매핑 해제)는 생략했다.</p>
+<h3 id="4-6-조각-5-init-차례로-실행하고-기다리기">4.6 조각 5 — init: 차례로 실행하고 기다리기<a class="anchor" href="#4-6-조각-5-init-차례로-실행하고-기다리기" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>#define F2_WAIT(n) do { int i; for (i = 0; i &lt; (n); i++) \
+	if (!wait_for_completion_timeout(&amp;f2_done, HZ)) pr_err("timeout\n"); } while (0)
+
+static int __init f2_init(void)
+{
+	unsigned long flags;
+	int ret;
+
+	f2_survey_process();
+	timer_setup(&amp;f2_timer, f2_timer_fn, 0);
+	hrtimer_setup(&amp;f2_hrt_hard, f2_hrt_fn, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	hrtimer_setup(&amp;f2_hrt_soft, f2_hrt_fn, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
+	tasklet_setup(&amp;f2_tl, f2_tl_fn);
+	INIT_WORK(&amp;f2_work, f2_work_fn);
+	INIT_WORK(&amp;f2_bh_work, f2_work_fn);
+
+	if (bug == 3) {
+		spin_lock_irqsave(&amp;f2_lock, flags);
+		msleep(5);				/* 금지 */
+		spin_unlock_irqrestore(&amp;f2_lock, flags);
+	}
+	if (bug == 4) {
+		rcu_read_lock();
+		msleep(5);				/* 금지 */
+		rcu_read_unlock();
+	}
+
+	mod_timer(&amp;f2_timer, jiffies + 1);			F2_WAIT(1);
+	hrtimer_start(&amp;f2_hrt_hard, ms_to_ktime(1), HRTIMER_MODE_REL);	F2_WAIT(1);
+	hrtimer_start(&amp;f2_hrt_soft, ms_to_ktime(1), HRTIMER_MODE_REL_SOFT); F2_WAIT(1);
+	tasklet_schedule(&amp;f2_tl);				F2_WAIT(1);
+	queue_work(system_bh_wq, &amp;f2_bh_work);			F2_WAIT(1);
+	schedule_work(&amp;f2_work);				F2_WAIT(1);
+	kthread_run(f2_kthread_fn, NULL, "f2_kthread");		F2_WAIT(1);
+
+	f2_virq = f2_map_irq();
+	if (f2_virq &lt; 0)
+		return f2_virq;
+	if (nothread)
+		ret = request_irq(f2_virq, f2_hard, 0, "f2_ctx", NULL);
+	else
+		ret = request_threaded_irq(f2_virq, f2_hard, f2_thread,
+					   IRQF_ONESHOT, "f2_ctx", NULL);
+	if (ret)
+		return ret;
+	pr_info("virq=%d (GIC SPI 80) -&gt; set PENDING\n", f2_virq);
+	irq_set_irqchip_state(f2_virq, IRQCHIP_STATE_PENDING, true);
+	F2_WAIT(nothread ? 1 : 2);		/* (tasklet +) irq_thread */
+	return 0;
+}</code></pre></figure>
+<p><code>F2_WAIT</code>는 각 콜백이 <code>complete()</code>를 부를 때까지 기다린다. <strong>기다리는 쪽(init, process)은 잠들고, 깨우는 쪽(timer·hardirq 등, atomic)은 <code>complete()</code>만 부른다</strong> — 이 노트 전체의 패턴이 코드 한 줄에 들어 있다. <code>complete()</code>는 잠들지 않으므로 어느 문맥에서나 부를 수 있다.</p>
+<hr>
+<h2 id="5-예제-4-무엇이-process-context를-atomic으로-만드나">5. 예제 4 — 무엇이 process context를 atomic으로 만드나<a class="anchor" href="#5-예제-4-무엇이-process-context를-atomic으로-만드나" aria-label="link">#</a></h2>
+<p>무엇을 확인하나: 같은 <code>insmod</code>(process context) 안에서 락·금지 API 하나씩만 바꿨을 때 <code>preempt_count</code>와 판정 매크로가 어떻게 바뀌는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># 게스트 안 (t.sh)
+uname -r
+insmod /f2_ctx.ko
+dmesg | grep "f2_ctx:"
+grep f2_ctx /proc/interrupts
+ps | grep -E "irq/.*f2|ksoftirqd|f2_k" | grep -v grep
+rmmod f2_ctx</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 11.95s
+6.18.55-dbg
+[   13.344735] f2_ctx: loading out-of-tree module taints kernel.
+[   13.361681] f2_ctx: init          pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=0 rcu=0 mm=user [insmod/75 cpu0]
+[   13.362167] f2_ctx: spin_lock     pc=0x000001 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=1 irqoff=0 rcu=0 mm=user [insmod/75 cpu0]
+[   13.362308] f2_ctx: spin_lock x2  pc=0x000002 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=1 irqoff=0 rcu=0 mm=user [insmod/75 cpu0]
+[   13.362383] f2_ctx: lock_irqsave  pc=0x000001 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=1 irqoff=1 rcu=0 mm=user [insmod/75 cpu0]
+[   13.362439] f2_ctx: spin_lock_bh  pc=0x000201 task=1 hard=0 serv=0 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=user [insmod/75 cpu0]
+[   13.362496] f2_ctx: preempt_off   pc=0x000001 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=1 irqoff=0 rcu=0 mm=user [insmod/75 cpu0]
+[   13.362556] f2_ctx: irq_disable   pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=1 rcu=0 mm=user [insmod/75 cpu0]
+[   13.362604] f2_ctx: bh_disable    pc=0x000200 task=1 hard=0 serv=0 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=user [insmod/75 cpu0]
+[   13.362706] f2_ctx: rcu_read_lock pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=0 rcu=1 mm=user [insmod/75 cpu0]
+[   13.362881] f2_ctx: mutex_lock    pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=0 rcu=0 mm=user [insmod/75 cpu0]</code></pre></figure>
+<p>(전체 출력의 앞부분. 나머지는 §6에서 본다. 타임스탬프·PID는 실행마다 다르다.)</p>
+<p>출력에서 볼 것 — 한 줄씩:</p>
+<div class="tw"><table><thead><tr><th>상태</th><th><code>pc</code></th><th>무엇이 올렸나</th><th><code>atom</code></th><th><code>irqoff</code></th><th>잠들어도 되나</th></tr></thead><tbody><tr><td><code>init</code></td><td><code>0x000000</code></td><td>없음</td><td>0</td><td>0</td><td><strong>된다</strong></td></tr><tr><td><code>spin_lock</code></td><td><code>0x000001</code></td><td>스핀락이 선점을 끈다 (+1)</td><td>1</td><td>0</td><td>안 된다</td></tr><tr><td><code>spin_lock x2</code></td><td><code>0x000002</code></td><td>락 두 개 = 2. 중첩 깊이를 센다</td><td>1</td><td>0</td><td>안 된다</td></tr><tr><td><code>lock_irqsave</code></td><td><code>0x000001</code></td><td>선점 끔 +1, <strong>IRQ 꺼짐</strong>은 <code>pc</code>가 아니라 <code>irqoff</code>에</td><td>1</td><td>1</td><td>안 된다</td></tr><tr><td><code>spin_lock_bh</code></td><td><code>0x000201</code></td><td>BH 금지(0x200) + 선점 끔(1)</td><td>1</td><td>0</td><td>안 된다</td></tr><tr><td><code>preempt_off</code></td><td><code>0x000001</code></td><td><code>preempt_disable()</code></td><td>1</td><td>0</td><td>안 된다</td></tr><tr><td><code>irq_disable</code></td><td><code>0x000000</code></td><td><strong><code>pc</code>는 그대로 0</strong></td><td><strong>0</strong></td><td>1</td><td>안 된다</td></tr><tr><td><code>bh_disable</code></td><td><code>0x000200</code></td><td><code>local_bh_disable()</code></td><td>1</td><td>0</td><td>안 된다</td></tr><tr><td><code>rcu_read_lock</code></td><td><code>0x000000</code></td><td><strong><code>pc</code>는 0</strong>, <code>rcu=1</code></td><td><strong>0</strong></td><td>0</td><td>안 된다</td></tr><tr><td><code>mutex_lock</code></td><td><code>0x000000</code></td><td>mutex는 <code>pc</code>를 건드리지 않는다</td><td>0</td><td>0</td><td><strong>된다</strong></td></tr></tbody></table></div>
+<p>여기서 꼭 가져갈 세 가지:</p>
+<ol><li><strong><code>in_atomic()</code>은 두 군데를 놓친다.</strong> <code>local_irq_disable()</code> 구간(<code>irq_disable</code> 줄)과 <code>PREEMPT_RCU</code> 커널의 <code>rcu_read_lock()</code> 구간(<code>rcu_read_lock</code> 줄)에서 <code>atom=0</code>이다. 하지만 둘 다 잠들면 안 된다. IRQ를 끈 채 잠들면 그 CPU는 타이머 인터럽트를 못 받고, RCU 읽기 구간에서 잠들면 grace period가 끝나지 않는다. <code>might_sleep()</code>의 검사(§9.3)는 그래서 <code>preempt_count</code>만이 아니라 <code>irqs_disabled()</code>와 RCU 깊이도 따로 본다.</li><li><strong><code>PREEMPT_RCU</code>가 아닌 커널(예: <code>PREEMPT_NONE</code>/<code>VOLUNTARY</code> 서버 커널)에서는</strong> <code>rcu_read_lock()</code>이 그냥 <code>preempt_disable()</code>이다. 랩 소스 <code>include/linux/rcupdate.h</code> 91~94행: <code>static inline void __rcu_read_lock(void) { preempt_disable(); }</code>. 같은 코드라도 커널 구성에 따라 <code>pc</code>가 0 또는 1이 된다 — "pc만 보고 판단하지 말라"의 또 다른 이유다.</li><li><strong><code>mutex_lock</code>을 잡은 상태는 atomic이 아니다.</strong> mutex를 잡은 채 잠드는 것(예: mutex 안에서 <code>msleep</code>, I2C 전송)은 합법이다. mutex는 "잠드는 락"이다. 반대로 spinlock을 잡은 채 잠드는 것은 금지다. 이 대비가 F4의 "spinlock vs mutex" 질문의 핵심이다.</li></ol>
+<p><code>bh</code> 열도 보자. <code>spin_lock_bh</code>와 <code>bh_disable</code> 줄에서 <code>bh=1</code>, <code>intr=1</code>인데 <code>serv=0</code>, <code>task=1</code>이다. <strong>softirq를 금지했을 뿐 softirq 안에 있는 것은 아니므로</strong> <code>in_task()</code>는 참이고 <code>in_interrupt()</code>는 참이다. <code>in_interrupt()</code>라는 이름이 오해를 부르는 대표 사례이고, 그래서 폐기 예정이다.</p>
+<blockquote><p>함정: <code>in_atomic()</code>이나 <code>in_interrupt()</code>로 "atomic이면 <code>GFP_ATOMIC</code>, 아니면 <code>GFP_KERNEL</code>"을 고르는 코드는 위의 두 구멍 때문에 틀린다. 호출자가 문맥을 알고 있으니 <strong>호출자가 gfp 플래그를 인자로 넘겨 주는 것</strong>이 커널 API의 관례다(<code>kmalloc(size, gfp)</code>, <code>skb_copy(skb, gfp)</code> 등).</p></blockquote>
+<hr>
+<h2 id="6-예제-5-컨텍스트별-실측-표">6. 예제 5 — 컨텍스트별 실측 표<a class="anchor" href="#6-예제-5-컨텍스트별-실측-표" aria-label="link">#</a></h2>
+<p>무엇을 확인하나: 같은 <code>f2_show()</code>를 timer·hrtimer·tasklet·BH workqueue·workqueue·kthread·hardirq·irq 스레드에서 불렀을 때의 값. 같은 실행(§5)의 뒷부분이다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[   13.366270] f2_ctx: timer_list    pc=0x000101 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [swapper/0/0 cpu0]
+[   13.368181] f2_ctx: hrtimer       pc=0x010001 task=0 hard=1 serv=0 bh=0 intr=1 nmi=0 atom=1 irqoff=1 rcu=0 mm=none [swapper/0/0 cpu0]
+[   13.370631] f2_ctx: hrtimer_soft  pc=0x000101 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [swapper/0/0 cpu0]
+[   13.371087] f2_ctx: tasklet       pc=0x000100 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [ksoftirqd/0/14 cpu0]
+[   13.372445] f2_ctx: bh_workqueue  pc=0x000100 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [ksoftirqd/1/22 cpu1]
+[   13.373033] f2_ctx: workqueue     pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=0 rcu=0 mm=none [kworker/1:2/57 cpu1]
+[   13.385541] f2_ctx: kthread       pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=0 rcu=0 mm=none [f2_kthread/76 cpu1]
+[   13.393278] f2_ctx: virq=22 (GIC SPI 80) -&gt; set PENDING
+[   13.393934] f2_ctx: hardirq       pc=0x010001 task=0 hard=1 serv=0 bh=0 intr=1 nmi=0 atom=1 irqoff=1 rcu=0 mm=none [swapper/0/0 cpu0]
+[   13.395044] f2_ctx: tasklet       pc=0x000101 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [swapper/0/0 cpu0]
+[   13.395441] f2_ctx: irq_thread    pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=0 rcu=0 mm=none [irq/22-f2_ctx/77 cpu0]
+ 22:          1          0 GIC-0 112 Edge      f2_ctx
+   14 0         0:00 [ksoftirqd/0]
+   22 0         0:00 [ksoftirqd/1]
+   77 0         0:00 [irq/22-f2_ctx]
+[   14.336497] reboot: Power down</code></pre></figure>
+<p>출력에서 볼 것 — 정리하면:</p>
+<div class="tw"><table><thead><tr><th>콜백</th><th><code>pc</code></th><th>판정</th><th><code>current</code></th><th><code>mm</code></th><th>해석</th></tr></thead><tbody><tr><td><code>timer_list</code></td><td><code>0x000101</code></td><td>softirq 실행 중</td><td><code>swapper/0</code> (idle)</td><td>none</td><td>TIMER softirq가 idle을 가로챘다. 하위 1은 idle 태스크 자신의 선점 금지</td></tr><tr><td><code>hrtimer</code> (<code>HRTIMER_MODE_REL</code>)</td><td><code>0x010001</code></td><td><strong>hardirq</strong></td><td><code>swapper/0</code></td><td>none</td><td>기본 hrtimer는 타이머 IRQ 안에서 바로 돈다. <code>irqoff=1</code></td></tr><tr><td><code>hrtimer_soft</code> (<code>..._REL_SOFT</code>)</td><td><code>0x000101</code></td><td>softirq 실행 중</td><td><code>swapper/0</code></td><td>none</td><td>HRTIMER softirq로 미뤄서 돈다</td></tr><tr><td><code>tasklet</code> (process에서 예약)</td><td><code>0x000100</code></td><td>softirq 실행 중</td><td><code>ksoftirqd/0</code></td><td>none</td><td>process에서 raise → ksoftirqd가 처리. 가로챈 태스크가 없으니 하위 0</td></tr><tr><td><code>bh_workqueue</code></td><td><code>0x000100</code></td><td>softirq 실행 중</td><td><code>ksoftirqd/1</code></td><td>none</td><td><code>system_bh_wq</code> 작업도 softirq 문맥</td></tr><tr><td><code>workqueue</code></td><td><code>0x000000</code></td><td>process</td><td><code>kworker/1:2</code></td><td>none</td><td>잠들 수 있다 (<code>msleep(1)</code> 성공)</td></tr><tr><td><code>kthread</code></td><td><code>0x000000</code></td><td>process</td><td><code>f2_kthread</code></td><td>none</td><td>잠들 수 있다</td></tr><tr><td><code>hardirq</code> (<code>f2_hard</code>)</td><td><code>0x010001</code></td><td>hardirq</td><td><code>swapper/0</code></td><td>none</td><td>IRQ 22, <code>irqoff=1</code></td></tr><tr><td><code>tasklet</code> (hardirq에서 예약)</td><td><code>0x000101</code></td><td>softirq 실행 중</td><td><code>swapper/0</code></td><td>none</td><td><code>irq_exit</code>에서 바로 실행됐다</td></tr><tr><td><code>irq_thread</code> (<code>f2_thread</code>)</td><td><code>0x000000</code></td><td>process</td><td><code>irq/22-f2_ctx</code></td><td>none</td><td>잠들 수 있다 (<code>msleep(1)</code> 성공)</td></tr></tbody></table></div>
+<p>해석 포인트 다섯 가지.</p>
+<p><strong>(1) <code>pc</code>의 위쪽 칸은 "지금 내가 어디 있나", 아래쪽 칸은 "가로채인 쪽이 무엇을 쥐고 있었나"다.</strong> hardirq의 <code>0x010001</code>에서 HARDIRQ 칸 1은 우리 핸들러, PREEMPT 칸 1은 가로채인 idle 태스크의 몫이다(idle 태스크는 선점 금지 상태로 돈다 — <code>init_idle_preempt_count()</code>가 <code>PREEMPT_DISABLED</code>로 설정). 이 노트를 쓰는 중 다른 실행에서는 hardirq가 <code>insmod</code>의 <code>spin_unlock_irqrestore()</code> 직후를 가로채 <code>0x010001 … mm=user [insmod/74 cpu0]</code>이 찍혔다 — <code>spin_unlock_irqrestore</code>는 IRQ를 먼저 복원하고 선점 카운트를 나중에 내리기 때문에 그 틈에 들어온 것이다. 그래서 IRQ 안에서 본 <code>pc</code>의 하위 칸 값은 실행마다 0일 수도 1일 수도 있다.</p>
+<p><strong>(2) <code>current</code>는 hardirq·softirq에서 "희생자"다.</strong> 같은 hardirq 핸들러가 이번 실행에서는 <code>swapper/0</code>, 다른 실행(§10.4의 출력)에서는 <code>insmod/73</code>으로 찍혔다. <code>mm</code> 열도 그에 따라 none/user로 바뀐다. 즉 hardirq 안에서 <code>current-&gt;mm</code>이 있다고 <code>copy_to_user()</code>를 하면, <strong>우연히 가로챈 아무 프로세스의 메모리에</strong> 쓰게 된다. 그래서 "interrupt context에서는 유저 메모리 접근 불가"가 규칙이다.</p>
+<p><strong>(3) 같은 tasklet이 두 곳에서 돌았다.</strong> process(insmod)에서 <code>tasklet_schedule()</code> → <code>raise_softirq</code>가 "지금 interrupt 안이 아니니" <code>ksoftirqd/0</code>을 깨웠고, 거기서 돌았다(<code>pc=0x000100</code>). hardirq에서 예약한 tasklet은 그 hardirq의 <code>irq_exit_rcu()</code>에서 곧바로 돌았다(<code>pc=0x000101</code>, <code>current</code>=가로채인 idle). 어느 쪽이 될지는 타이밍에 달려 있다 — 이 노트를 쓰는 중 다른 실행에서는 process에서 예약한 tasklet이 <code>ksoftirqd</code>가 아니라 <code>insmod</code> 위에서(<code>pc=0x000100 … [insmod/73 cpu1]</code>) 돌았다. ksoftirqd가 스케줄되기 전에 같은 CPU의 다른 출구(IRQ 복귀 등)가 먼저 처리한 것이다. <strong>드라이버는 softirq가 어느 태스크 위에서 돌지 가정하면 안 된다.</strong></p>
+<p><strong>(4) hrtimer는 기본이 hardirq다.</strong> 과제 설명처럼 "6.x hrtimer는 softirq에서 돌 수도 있다"는 말은 반만 맞다. 랩 소스 <code>kernel/time/hrtimer.c</code>의 <code>__hrtimer_setup()</code>:</p>
+<figure class="code"><span class="lang">c</span><pre><code>	bool softtimer = !!(mode &amp; HRTIMER_MODE_SOFT);
+	...
+	if (IS_ENABLED(CONFIG_PREEMPT_RT) &amp;&amp; !(mode &amp; HRTIMER_MODE_HARD))
+		softtimer = true;</code></pre></figure>
+<p>non-RT 커널에서는 <code>HRTIMER_MODE_*_SOFT</code>를 줄 때만 softirq, 아니면 hardirq다. <strong>PREEMPT_RT 커널에서는 반대로 <code>HRTIMER_MODE_*_HARD</code>를 명시하지 않으면 전부 softirq로 옮겨진다.</strong> 그래서 "hrtimer 콜백에서 무엇을 해도 되나"는 RT 여부에 따라 달라지고, 안전한 답은 "hardirq 규칙을 따른다"다.</p>
+<p><strong>(5) <code>ps</code>의 마지막 세 줄</strong>: <code>ksoftirqd/0</code>, <code>ksoftirqd/1</code>(CPU마다 하나)과 <code>irq/22-f2_ctx</code>(우리 IRQ의 스레드). <code>/proc/interrupts</code>의 <code>GIC-0 112 Edge</code>는 hwirq 112 = SPI 80 + 32(D4의 "+32 함정")다.</p>
+<hr>
+<h2 id="7-threaded-irq와-강제-스레드화-같은-핸들러-다른-문맥">7. threaded IRQ와 강제 스레드화 — 같은 핸들러, 다른 문맥<a class="anchor" href="#7-threaded-irq와-강제-스레드화-같은-핸들러-다른-문맥" aria-label="link">#</a></h2>
+<h3 id="7-1-threaded-irq는-process-context다">7.1 threaded IRQ는 process context다<a class="anchor" href="#7-1-threaded-irq는-process-context다" aria-label="link">#</a></h3>
+<p>§6의 <code>irq_thread</code> 줄이 보여 주듯 <code>request_threaded_irq()</code>의 <code>thread_fn</code>은 커널 스레드 <code>irq/NN-이름</code> 안에서 돈다. <code>pc=0</code>, <code>task=1</code>, <code>irqoff=0</code> — 완전한 process context이고, 잠들어도 된다. 그래서 <strong>I2C/SPI 센서처럼 "레지스터를 읽으려면 버스 전송(잠듦)이 필요한" 장치는 threaded IRQ가 정답</strong>이다. hardirq 쪽(primary handler)은 "내 IRQ가 맞나" 확인과 <code>IRQ_WAKE_THREAD</code> 반환만 한다. 많은 I2C 드라이버는 primary handler를 <code>NULL</code>로 두고 <code>IRQF_ONESHOT</code>만 준다.</p>
+<p>irq 스레드는 실시간 스케줄링 클래스(SCHED_FIFO)로 만들어져서 보통 유저 태스크보다 먼저 돈다. 이 노트를 쓰는 중 돌린 ftrace(이전 실행, depth 9)에서 <code>__irq_wake_thread()</code> 아래에 <code>enqueue_task_rt()</code>가 찍힌 것으로 RT 큐에 들어가는 것을 확인했다(그 출력은 길어서 싣지 않았다).</p>
+<h3 id="7-2-예제-6-threadirqs-부트-인자-hardirq-핸들러가-스레드로-쫓겨난다">7.2 예제 6 — <code>threadirqs</code> 부트 인자: hardirq 핸들러가 스레드로 쫓겨난다<a class="anchor" href="#7-2-예제-6-threadirqs-부트-인자-hardirq-핸들러가-스레드로-쫓겨난다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>nothread=1</code>로 IRQ를 <strong>스레드 없이</strong> <code>request_irq()</code>만 해서 등록한 뒤, 일반 부팅과 <code>threadirqs</code> 부팅에서 같은 핸들러의 문맥을 비교한다. <code>CONFIG_IRQ_FORCED_THREADING=y</code> 커널은 <code>threadirqs</code>를 주면 대부분의 hardirq 핸들러를 강제로 스레드로 옮긴다(PREEMPT_RT 커널은 기본이 이 동작이다).</p>
+<figure class="code"><span class="lang">sh</span><pre><code># 게스트 안 (t.sh) — 커널 인자만 바꿔 두 번 부팅
+echo "cmdline: $(grep -o threadirqs /proc/cmdline)"
+insmod /f2_ctx.ko nothread=1
+dmesg | grep "f2_ctx: \(hardirq\|virq\)"
+grep f2_ctx /proc/interrupts
+ps | grep "irq/22" | grep -v grep</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 7.24s
+cmdline: 
+[    7.829084] f2_ctx: virq=22 (GIC SPI 80) -&gt; set PENDING
+[    7.829614] f2_ctx: hardirq       pc=0x010001 task=0 hard=1 serv=0 bh=0 intr=1 nmi=0 atom=1 irqoff=1 rcu=0 mm=none [swapper/0/0 cpu0]
+ 22:          1          0 GIC-0 112 Edge      f2_ctx
+[    8.121339] reboot: Power down</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 7.65s
+cmdline: threadirqs
+[    8.718514] f2_ctx: virq=22 (GIC SPI 80) -&gt; set PENDING
+[    8.720252] f2_ctx: hardirq       pc=0x000200 task=1 hard=0 serv=0 bh=1 intr=1 nmi=0 atom=1 irqoff=1 rcu=0 mm=none [irq/22-f2_ctx/83 cpu0]
+ 22:          1          0 GIC-0 112 Edge      f2_ctx
+   83 0         0:00 [irq/22-f2_ctx]
+[    9.914462] reboot: Power down</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li>일반 부팅: <code>f2_hard</code>가 hardirq(<code>pc=0x010001</code>, <code>hard=1</code>), <code>irq/22</code> 스레드는 없다.</li><li><code>threadirqs</code> 부팅: <strong>같은 <code>f2_hard</code>가</strong> <code>irq/22-f2_ctx</code> 스레드 안에서 돌았다. <code>task=1</code>, <code>hard=0</code> — 이제 hardirq가 아니다. 그런데 <code>pc=0x000200</code>, <code>bh=1</code>, <code>irqoff=1</code>, <code>atom=1</code>이다. 강제 스레드화된 핸들러는 랩 소스 <code>kernel/irq/manage.c</code>의 <code>irq_forced_thread_fn()</code>에서 이렇게 불린다:</li></ul>
+<figure class="code"><span class="lang">c</span><pre><code>static irqreturn_t irq_forced_thread_fn(struct irq_desc *desc, struct irqaction *action)
+{
+	irqreturn_t ret;
+
+	local_bh_disable();
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		local_irq_disable();
+	ret = irq_thread_fn(desc, action);
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		local_irq_enable();
+	local_bh_enable();
+	return ret;
+}</code></pre></figure>
+<p>즉 hardirq용으로 쓴 코드가 스레드에서도 <strong>hardirq와 같은 전제(BH 금지, IRQ 꺼짐)</strong> 로 돌게 해서 기존 드라이버를 깨뜨리지 않는다. 핸들러 입장에서는 여전히 잠들면 안 된다. 또 <code>intr=1</code>(BH 금지 때문)인데 <code>task=1</code>인 이상한 조합이 나온다 — <code>in_interrupt()</code>를 믿으면 안 되는 또 하나의 예.</p>
+<ul><li><code>IRQF_ONESHOT</code>, <code>IRQF_NO_THREAD</code>, <code>IRQF_PERCPU</code>가 붙은 IRQ는 강제 스레드화에서 빠진다(<code>irq_setup_forced_threading()</code> 1311행). §6의 기본 모드(<code>IRQF_ONESHOT</code> + thread_fn)는 그래서 <code>threadirqs</code>에서도 primary handler가 hardirq로 남는다(아래 예제 7).</li></ul>
+<h3 id="7-3-예제-7-threadirqs에서-softirq는-어디로-가나">7.3 예제 7 — <code>threadirqs</code>에서 softirq는 어디로 가나<a class="anchor" href="#7-3-예제-7-threadirqs에서-softirq는-어디로-가나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>threadirqs</code> 부팅에서 기본 모드(<code>bug=0</code>) 모듈을 넣고 <code>/proc/softirqs</code>, 커널 스레드 목록, 콜백 문맥을 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /proc/softirqs
+ps | grep -E "ksoftirqd|irq/|kworker/0|migration|rcu_preempt" | grep -v grep
+insmod /f2_ctx.ko
+dmesg | grep "f2_ctx: \(hardirq\|tasklet\|irq_thread\|virq\|timer_list\|hrtimer\)"
+ps | grep "irq/22" | grep -v grep</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 10.05s
+                    CPU0       CPU1       
+          HI:          0          0
+       TIMER:        131        307
+      NET_TX:          0          0
+      NET_RX:          0          0
+       BLOCK:          0          0
+    IRQ_POLL:          0          0
+     TASKLET:          0          1
+       SCHED:       1025       1276
+     HRTIMER:          0          0
+         RCU:        645        478
+== kernel threads (ps)
+    9 0         0:00 [kworker/0:0-rcu]
+   10 0         0:00 [kworker/0:0H-ev]
+   11 0         0:00 [kworker/0:1-dev]
+   14 0         0:00 [ksoftirqd/0]
+   16 0         0:00 [rcu_preempt]
+   19 0         0:00 [migration/0]
+   22 0         0:00 [migration/1]
+   24 0         0:00 [ksoftirqd/1]
+   59 0         0:00 [kworker/0:1H]
+   62 0         0:00 [irq/16-virtio0-]
+   63 0         0:00 [irq/17-virtio0-]
+   64 0         0:00 [irq/18-virtio0-]
+   66 0         0:00 [irq/19-rtc-pl03]
+   67 0         0:00 [irq/21-GPIO Key]
+   68 0         0:00 [kworker/0:2-eve]
+   69 0         0:00 [irq/13-uart-pl0]
+== insmod (threadirqs=threadirqs)
+[   11.582320] f2_ctx: timer_list    pc=0x000100 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [ktimers/1/23 cpu1]
+[   11.584668] f2_ctx: hrtimer       pc=0x010001 task=0 hard=1 serv=0 bh=0 intr=1 nmi=0 atom=1 irqoff=1 rcu=0 mm=none [swapper/0/0 cpu0]
+[   11.586511] f2_ctx: hrtimer_soft  pc=0x000100 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [ktimers/0/15 cpu0]
+[   11.587327] f2_ctx: tasklet       pc=0x000100 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [ksoftirqd/1/24 cpu1]
+[   11.623368] f2_ctx: virq=22 (GIC SPI 80) -&gt; set PENDING
+[   11.626732] f2_ctx: hardirq       pc=0x010001 task=0 hard=1 serv=0 bh=0 intr=1 nmi=0 atom=1 irqoff=1 rcu=0 mm=none [swapper/0/0 cpu0]
+[   11.627552] f2_ctx: irq_thread    pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=0 rcu=0 mm=none [irq/22-f2_ctx/88 cpu0]
+[   11.627673] f2_ctx: tasklet       pc=0x000100 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [ksoftirqd/0/14 cpu0]
+   88 0         0:00 [irq/22-f2_ctx]
+[   12.287896] reboot: Power down</code></pre></figure>
+<p>(부팅 인자에 <code>threadirqs</code>. 위쪽 "== insmod" 줄의 <code>threadirqs=threadirqs</code>가 그 확인이다.)</p>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><code>/proc/softirqs</code>의 10개 행이 softirq 벡터 전부다(HI=0 … RCU=9). TIMER·SCHED·RCU가 부팅만으로 수백~수천 번 돌았다. TASKLET 1은 부팅 중 누군가 쓴 것이다.</li><li><code>threadirqs</code>라서 virtio·RTC·GPIO 키·UART의 IRQ가 전부 <code>irq/NN-이름</code> 스레드를 가졌다.</li><li><code>timer_list</code>와 <code>hrtimer_soft</code> 콜백이 <code>ktimers/N</code> 스레드에서 돌았다(<code>pc=0x000100</code>, 가로챈 태스크 없음). 강제 스레드화 모드에서는 타이머 softirq를 전용 스레드 <code>ktimers/N</code>이 맡는다(랩 소스 <code>kernel/softirq.c</code>의 <code>.thread_comm = "ktimers/%u"</code>). 기본 hrtimer(<code>hrtimer</code> 줄)는 여전히 hardirq다.</li><li>hardirq에서 예약한 tasklet이 <code>irq_exit</code>이 아니라 <code>ksoftirqd/0</code>에서 돌았다. <code>invoke_softirq()</code>가 <code>force_irqthreads()</code>이면 그 자리에서 처리하지 않고 <code>wakeup_softirqd()</code>만 하기 때문이다(<code>kernel/softirq.c</code> 487~507행).</li><li>결론: <strong>같은 드라이버 코드라도 커널 구성(<code>threadirqs</code>, PREEMPT_RT)에 따라 어느 스레드 위에서 도는지가 바뀐다.</strong> 바뀌지 않는 것은 "그 콜백 종류의 규칙"(timer 콜백은 잠들면 안 된다)이다. 규칙을 콜백 종류에 묶어서 외우고, 스레드 이름에 묶어서 외우지 말 것.</li></ul>
+<hr>
+<h2 id="8-예제-8-ftrace로-중첩을-직접-보기">8. 예제 8 — ftrace로 중첩을 직접 보기<a class="anchor" href="#8-예제-8-ftrace로-중첩을-직접-보기" aria-label="link">#</a></h2>
+<p>무엇을 확인하나: hardirq 안에서 softirq를 예약하고(<code>softirq_raise</code>), hardirq가 끝나는 <code>irq_exit_rcu()</code>에서 그 softirq가 실행되는(<code>softirq_entry</code>) 순서를 함수 그래프로 본다. <code>function_graph</code> 추적기를 우리 모듈 함수와 IRQ·softirq 핵심 함수로만 제한하고, <code>irq</code> 이벤트 5개를 함께 켠다(이벤트는 그래프 안에 <code>/* … */</code> 주석으로 끼어든다).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>mount -t tracefs none /sys/kernel/tracing
+cd /sys/kernel/tracing
+for f in handle_irq_event __handle_irq_event_percpu __irq_wake_thread __tasklet_schedule irq_exit_rcu do_softirq_own_stack __do_softirq handle_softirqs tasklet_action ":mod:f2_ctx"; do
+  echo "$f" &gt;&gt; set_ftrace_filter
+done
+echo 1 &gt; options/funcgraph-proc
+echo function_graph &gt; current_tracer
+for e in irq_handler_entry irq_handler_exit softirq_raise softirq_entry softirq_exit; do echo 1 &gt; events/irq/$e/enable; done
+echo &gt; trace
+insmod /f2_ctx.ko
+echo 0 &gt; tracing_on
+cat trace &gt; /tmp/tr.txt
+# f2_hard가 찍힌 CPU의 줄만 골라 그 주변을 출력 (나머지 필터 스크립트는 생략)</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code> 0)    &lt;idle&gt;-0    =&gt;   insmod-74   
+ 0)   insmod-74    |               |    handle_irq_event() {
+ 0)   insmod-74    |               |      __handle_irq_event_percpu() {
+ 0)   insmod-74    |               |        /* irq_handler_entry: irq=22 name=f2_ctx */
+ 0)   insmod-74    |               |        f2_hard [f2_ctx]() {
+ 0)   insmod-74    | + 43.584 us   |          f2_show [f2_ctx]();
+ 0)   insmod-74    |               |          __tasklet_schedule() {
+ 0)   insmod-74    |               |            /* softirq_raise: vec=6 [action=TASKLET] */
+ 0)   insmod-74    | + 28.512 us   |          }
+ 0)   insmod-74    | ! 150.624 us  |        }
+ 0)   insmod-74    |               |        /* irq_handler_exit: irq=22 ret=handled */
+ 0)   insmod-74    | + 64.336 us   |        __irq_wake_thread();
+ 0)   insmod-74    | ! 480.672 us  |      }
+ 0)   insmod-74    | ! 853.920 us  |    }
+ 0)   insmod-74    |               |  /* irq_handler_entry: irq=1 name=IPI */
+ 0)   insmod-74    |               |  /* irq_handler_exit: irq=1 ret=handled */
+ 0)   insmod-74    |               |  /* irq_handler_entry: irq=11 name=arch_timer */
+ 0)   insmod-74    |               |  /* softirq_raise: vec=1 [action=TIMER] */
+ 0)   insmod-74    |               |  /* softirq_raise: vec=9 [action=RCU] */
+ 0)   insmod-74    |               |  /* softirq_raise: vec=7 [action=SCHED] */
+ 0)   insmod-74    |               |  /* irq_handler_exit: irq=11 ret=handled */
+ 0)   insmod-74    |               |    irq_exit_rcu() {
+ 0)   insmod-74    |               |      do_softirq_own_stack() {
+ 0)   insmod-74    |               |        __do_softirq() {
+ 0)   insmod-74    |               |          handle_softirqs() {
+ 0)   insmod-74    |               |            /* softirq_entry: vec=1 [action=TIMER] */
+ 0)   insmod-74    |               |            /* softirq_exit: vec=1 [action=TIMER] */
+ 0)   insmod-74    |               |            /* softirq_entry: vec=6 [action=TASKLET] */
+ 0)   insmod-74    |               |            tasklet_action() {
+ 0)   insmod-74    |               |              f2_tl_fn [f2_ctx]() {
+ 0)   insmod-74    | + 46.544 us   |                f2_show [f2_ctx]();
+ 0)   insmod-74    | + 65.792 us   |              }
+ 0)   insmod-74    | ! 127.840 us  |            }
+ 0)   insmod-74    |               |            /* softirq_exit: vec=6 [action=TASKLET] */
+ 0)   insmod-74    |               |            /* softirq_entry: vec=7 [action=SCHED] */
+ 0)   insmod-74    |               |            /* softirq_exit: vec=7 [action=SCHED] */
+ 0)   insmod-74    |               |            /* softirq_entry: vec=9 [action=RCU] */
+ 0)   insmod-74    |               |            /* softirq_exit: vec=9 [action=RCU] */
+ 0)   insmod-74    | ! 516.048 us  |          }
+ 0)   insmod-74    | ! 523.056 us  |        }
+ 0)   insmod-74    | ! 531.616 us  |      }
+ 0)   insmod-74    | ! 547.216 us  |    }
+ 0)   insmod-74    =&gt;   irq/22--76  
+ 0)   irq/22--76   |               |  f2_thread [f2_ctx]() {
+ 0)   irq/22--76   | + 37.968 us   |    f2_show [f2_ctx]();
+== tasklet from process context
+ 1)   insmod-74    | ! 110.464 us  |    }
+ ------------------------------------------
+ 1)   insmod-74    =&gt;   ksoftir-22  
+ ------------------------------------------
+
+ 1)   ksoftir-22   |               |  handle_softirqs() {
+ 1)   ksoftir-22   |               |  /* softirq_entry: vec=6 [action=TASKLET] */
+ 1)   ksoftir-22   |               |    tasklet_action() {
+ 1)   ksoftir-22   |               |      f2_tl_fn [f2_ctx]() {
+ 1)   ksoftir-22   | + 68.000 us   |        f2_show [f2_ctx]();
+ 1)   ksoftir-22   | ! 113.552 us  |      }
+ 1)   ksoftir-22   | ! 168.960 us  |    }
+ 1)   ksoftir-22   |               |  /* softirq_exit: vec=6 [action=TASKLET] */
+ 1)   ksoftir-22   | ! 216.832 us  |  }
+ ------------------------------------------
+ 1)   ksoftir-22   =&gt;   insmod-74   
+ ------------------------------------------</code></pre></figure>
+<p>(트레이스 앞뒤를 잘랐다. <code>!</code>·<code>#</code>는 실행 시간이 100 us·1 ms를 넘었다는 표시이고, TCG 에뮬레이션 + lockdep이라 실기보다 수십 배 느리다. <code>ksoftir-22</code>는 <code>ksoftirqd/1</code>의 잘린 이름이다.)</p>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong>hardirq 구간</strong>: <code>handle_irq_event()</code> → <code>irq_handler_entry: irq=22 name=f2_ctx</code> → <code>f2_hard()</code> 안에서 <code>__tasklet_schedule()</code> → <code>softirq_raise: vec=6 [action=TASKLET]</code> → <code>irq_handler_exit</code> → <code>__irq_wake_thread()</code>(irq 스레드 깨우기). 핸들러는 softirq를 <strong>예약만</strong> 하고 실행하지 않는다.</li><li>그 뒤 같은 예외 진입 안에서 GIC가 대기 중이던 IPI(irq=1)와 타이머(irq=11)를 연달아 처리했다 — <code>gic_handle_irq()</code>가 IAR 레지스터를 1020 이상이 나올 때까지 루프로 읽기 때문이다(<code>drivers/irqchip/irq-gic.c</code> 340행). 타이머 핸들러가 TIMER·RCU·SCHED softirq를 raise했다.</li><li><strong>softirq 구간</strong>: <code>irq_exit_rcu()</code> → <code>do_softirq_own_stack()</code>(CPU별 스택으로 전환, <code>SOFTIRQ_ON_OWN_STACK=y</code>) → <code>handle_softirqs()</code>가 벡터 번호 순서로 TIMER(1) → TASKLET(6, 여기서 <code>f2_tl_fn</code>) → SCHED(7) → RCU(9)를 처리했다. 이 전체가 여전히 <code>insmod-74</code>라는 이름 아래에 있다 — <code>current</code>는 바뀌지 않았다.</li><li><strong>process 구간</strong>: 마지막에 <code>insmod-74 =&gt; irq/22--76</code> 컨텍스트 스위치, <code>f2_thread()</code>가 스레드에서 돈다.</li><li>아래쪽 <code>== tasklet from process context</code> 부분: process에서 예약한 tasklet은 CPU 1에서 <code>insmod-74 =&gt; ksoftir-22</code> 스위치 후 <code>ksoftirqd/1</code>의 <code>handle_softirqs()</code>에서 돌았다. 처리 후 다시 <code>insmod</code>로 돌아간다.</li></ul>
+<p>softirq가 IRQ를 켠 채 돈다는 것은 같은 스크립트의 <strong>앞선 실행</strong>에서 우연히 잡혔다. RCU softirq를 처리하는 도중에 타이머 hardirq가 끼어들었고, 그 hardirq의 <code>irq_exit_rcu()</code>는 이미 softirq 처리 중(<code>in_interrupt()</code> 참)이라 softirq를 다시 돌리지 않고 5.664 us 만에 빠져나왔다:</p>
+<figure class="code"><span class="lang">text</span><pre><code> 0)   insmod-75    |               |            /* softirq_entry: vec=9 [action=RCU] */
+ 0)   insmod-75    |               |            /* irq_handler_entry: irq=11 name=arch_timer */
+ 0)   insmod-75    |               |            /* irq_handler_exit: irq=11 ret=handled */
+ 0)   insmod-75    |   5.664 us    |            irq_exit_rcu();
+ 0)   insmod-75    |               |            /* softirq_exit: vec=9 [action=RCU] */</code></pre></figure>
+<p>이게 그림 1의 "softirq 도중에 hardirq가 끼어들 수 있다"의 실물이다. 반대(hardirq 도중 softirq)는 일어나지 않는다.</p>
+<hr>
+<h2 id="9-잠들어도-되나-규칙">9. "잠들어도 되나" 규칙<a class="anchor" href="#9-잠들어도-되나-규칙" aria-label="link">#</a></h2>
+<h3 id="9-1-잠든다-schedule-을-부른다">9.1 잠든다 = <code>schedule()</code>을 부른다<a class="anchor" href="#9-1-잠든다-schedule-을-부른다" aria-label="link">#</a></h3>
+<p>커널에서 "잠든다(sleep, block)"는 정확히 <strong>현재 태스크를 대기 상태로 바꾸고 <code>schedule()</code>을 불러 CPU를 넘기는 것</strong>이다. 시간이 걸리는 것(busy-wait)과는 다르다: <code>udelay(100)</code>은 100 us 동안 CPU를 붙잡고 돌 뿐 잠들지 않으므로 atomic에서도 합법이다(길면 나쁠 뿐이다). 반대로 <code>kmalloc(GFP_KERNEL)</code>은 보통 1 us도 안 걸리지만 <strong>메모리가 부족하면 회수(reclaim)하느라 잠들 수 있으므로</strong> atomic에서 불법이다. 기준은 "오래 걸리나"가 아니라 "<code>schedule()</code>에 닿을 수 있나"다.</p>
+<p>잠들 수 있는 대표 API와 atomic에서 쓰는 대안:</p>
+<div class="tw"><table><thead><tr><th>잠들 수 있는 것</th><th>왜 잠드나</th><th>atomic 문맥의 대안</th></tr></thead><tbody><tr><td><code>msleep</code>, <code>usleep_range</code>, <code>ssleep</code></td><td>타이머를 걸고 <code>schedule()</code></td><td><code>udelay</code>/<code>ndelay</code> (짧게), 아니면 hrtimer·workqueue로 나눔</td></tr><tr><td><code>mutex_lock</code>, <code>down</code> (semaphore)</td><td>경합하면 대기 큐에서 잠듦</td><td><code>spin_lock</code> 계열</td></tr><tr><td><code>wait_event*</code>, <code>wait_for_completion*</code></td><td>조건이 될 때까지 잠듦</td><td>기다리지 말고 <code>wake_up</code>/<code>complete</code>로 상대를 깨우기만</td></tr><tr><td><code>kmalloc</code>/<code>kzalloc</code>(<code>GFP_KERNEL</code>), <code>vmalloc</code></td><td>메모리 회수·I/O</td><td><code>GFP_ATOMIC</code>/<code>GFP_NOWAIT</code> (실패 가능성 처리), 미리 할당한 풀</td></tr><tr><td><code>copy_from_user</code>/<code>copy_to_user</code>/<code>get_user</code></td><td>유저 페이지 fault 처리 (디스크 I/O 가능)</td><td>process context에서 미리 복사해 둠</td></tr><tr><td><code>i2c_transfer</code>, <code>spi_sync</code>, <code>regmap</code>(버스 기반)</td><td>버스 완료를 기다림</td><td>threaded IRQ·workqueue로 옮김, <code>spi_async</code></td></tr><tr><td><code>request_firmware</code>, <code>flush_work</code>, <code>synchronize_rcu</code></td><td>다른 작업 완료를 기다림</td><td><code>call_rcu</code>, 비동기 API</td></tr></tbody></table></div>
+<h3 id="9-2-왜-각-문맥에서-잠들-수-없나">9.2 왜 각 문맥에서 잠들 수 없나<a class="anchor" href="#9-2-왜-각-문맥에서-잠들-수-없나" aria-label="link">#</a></h3>
+<p><strong>hardirq</strong> — 면접 최빈출 질문의 답:</p>
+<ol><li><strong>재울 대상이 없다.</strong> hardirq는 태스크가 아니다. <code>current</code>는 가로채인 무고한 태스크라서, 여기서 <code>schedule()</code>하면 그 태스크가 이유 없이 잠들고 핸들러의 나머지는 그 태스크가 깨어날 때까지 멈춘다.</li><li><strong>IRQ 스택은 CPU에 하나다.</strong> 핸들러는 CPU별 IRQ 스택 위에 프레임을 쌓고 있다. 다른 태스크로 넘어가면 그 CPU에서 다음 IRQ가 같은 스택을 덮어쓴다. 태스크 스택처럼 "잠든 동안 보관"할 수 없다.</li><li><strong>IRQ가 꺼져 있고, 인터럽트 줄이 끝나지 않았다.</strong> 핸들러가 끝나야 EOI를 쓰고 IRQ를 다시 켠다. 잠들면 이 CPU는 타이머 tick조차 못 받고, 그 IRQ 줄(레벨 트리거라면 계속 assert)이 막힌다.</li><li><strong>가로챈 코드가 락을 쥐고 있을 수 있다.</strong> 가로채인 태스크가 잡고 있던 락을 핸들러가 기다리면 영원히 안 풀린다(주인은 핸들러 밑에 깔려 있다).</li><li><strong>스케줄러가 금지한다.</strong> <code>preempt_count</code>의 HARDIRQ 칸이 0이 아니면 <code>schedule()</code> 안의 <code>schedule_debug()</code>가 "scheduling while atomic"을 낸다.</li></ol>
+<p><strong>softirq</strong> — 1, 2(<code>SOFTIRQ_ON_OWN_STACK</code>일 때), 4, 5가 그대로 적용된다. 게다가 softirq는 "지금 이 CPU의 나머지 softirq 처리 전체"를 대표하므로 잠들면 그 CPU의 네트워크·타이머·RCU 처리가 다 멈춘다. <code>ksoftirqd</code> 안에서 돌 때도 softirq 칸이 서 있으므로 같은 규칙이다.</p>
+<p><strong>스핀락을 잡은 process 문맥</strong> — 스핀락은 "기다리는 쪽이 돌면서(spin) 기다린다"는 전제의 락이다. 주인이 잠들면, 같은 CPU에 새로 스케줄된 태스크나 다른 CPU들이 그 락을 기다리며 CPU를 태운다. 단일 CPU에서 같은 락을 다시 잡으려 하면 영원히 돈다. 또 <code>spin_lock()</code>은 선점을 끄므로(<code>pc</code> +1) 잠드는 순간 <code>schedule_debug()</code>에 걸린다.</p>
+<p><strong><code>local_irq_disable()</code>/<code>spin_lock_irqsave()</code> 구간</strong> — IRQ를 끈 채 잠들면 깨워 줄 타이머 IRQ도 못 받는다. <code>preempt_count</code>가 0이어도 금지다.</p>
+<p><strong>RCU 읽기 구간</strong> — RCU writer는 "모든 CPU가 읽기 구간을 한 번씩 벗어날 때까지"(grace period) 기다렸다가 옛 데이터를 해제한다. 읽기 구간에서 잠들면 grace period가 끝나지 않아 메모리 해제가 쌓인다. 잠들어야 하면 SRCU(<code>srcu_read_lock</code>)를 쓴다(F4).</p>
+<h3 id="9-3-might_sleep-과-debug_atomic_sleep-사고-전에-잡는-장치">9.3 <code>might_sleep()</code>과 <code>DEBUG_ATOMIC_SLEEP</code> — 사고 전에 잡는 장치<a class="anchor" href="#9-3-might_sleep-과-debug_atomic_sleep-사고-전에-잡는-장치" aria-label="link">#</a></h3>
+<p>E4 §5.3에서 봤듯 잠들 <strong>수도</strong> 있는 함수의 입구에는 <code>might_sleep()</code> 주석이 박혀 있다. 랩 소스에서 실제 위치 몇 개:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>grep -n "might_sleep();" /var/lab/src/linux-6.18.55/kernel/locking/mutex.c | head -2
+sed -n 113,116p /var/lab/src/linux-6.18.55/kernel/sched/completion.c
+grep -n "might_fault();" /var/lab/src/linux-6.18.55/include/linux/uaccess.h | head -2</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>271:	might_sleep();
+575:	might_sleep();
+__wait_for_common(struct completion *x,
+		  long (*action)(long), long timeout, int state)
+{
+	might_sleep();
+106:	might_fault();
+142:	might_fault();</code></pre></figure>
+<p><code>mutex.c</code> 271행은 lockdep이 꺼진 구성의 <code>mutex_lock()</code> 입구, 575행은 lockdep 구성(<code>mutex_lock_nested</code> → <code>__mutex_lock_common</code>)의 입구다. 디버그 커널은 후자를 타므로 §10.1의 경고가 575행을 가리킨다. <code>copy_from_user</code> 계열은 <code>might_fault()</code> → <code>__might_fault()</code> → <code>__might_sleep()</code>으로 이어진다(<code>mm/memory.c</code> 7125행).</p>
+<p><code>CONFIG_DEBUG_ATOMIC_SLEEP=y</code>이면 <code>__might_sleep()</code> → <code>__might_resched()</code>(<code>kernel/sched/core.c</code> 8882행)가 검사한다:</p>
+<figure class="code"><span class="lang">c</span><pre><code>	/* WARN_ON_ONCE() by default, no rate limit required: */
+	rcu_sleep_check();
+
+	if ((resched_offsets_ok(offsets) &amp;&amp; !irqs_disabled() &amp;&amp;
+	     !is_idle_task(current) &amp;&amp; !current-&gt;non_block_count) ||
+	    system_state == SYSTEM_BOOTING || system_state &gt; SYSTEM_RUNNING ||
+	    oops_in_progress)
+		return;
+
+	if (time_before(jiffies, prev_jiffy + HZ) &amp;&amp; prev_jiffy)
+		return;
+	prev_jiffy = jiffies;</code></pre></figure>
+<p>읽는 법:</p>
+<ul><li>통과 조건은 "<code>preempt_count</code>가 기대값과 같고(<code>resched_offsets_ok</code>) <strong>그리고</strong> IRQ가 켜져 있고 <strong>그리고</strong> idle 태스크가 아님". 셋 중 하나라도 어긋나면 <code>BUG: sleeping function called from invalid context</code>를 찍는다. §5에서 본 <code>in_atomic()</code>의 구멍(IRQ만 끈 구간)을 <code>irqs_disabled()</code>로 메운다.</li><li><code>rcu_sleep_check()</code>가 RCU 읽기 구간을 따로 검사한다(<code>PREEMPT_RCU</code>에서 <code>pc</code>에 안 보이는 구멍을 메움).</li><li><strong>부팅 중(<code>SYSTEM_BOOTING</code>)에는 검사하지 않는다.</strong> 그래서 built-in 드라이버의 probe 버그는 모듈로 넣었을 때에야 보이기도 한다.</li><li><strong>1초(HZ)에 한 번만</strong> 찍는다. 첫 경고만 믿고, 같은 초에 생긴 두 번째 위반은 안 보일 수 있다는 것을 기억하자.</li></ul>
+<p>두 메시지의 차이(E4 §5.4에서 정리했다): <strong>"sleeping function called from invalid context" = 잠들 수 있는 함수를 불렀다(사고 예고, 디버그 옵션 필요)</strong>, <strong>"scheduling while atomic" = 실제로 <code>schedule()</code>에 들어갔다(사고 발생, 옵션 없이도 항상 검사)</strong>.</p>
+<figure class="chart"><svg viewBox="0 0 680 520" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="170" y="10" width="340" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="340" y="32" text-anchor="middle" font-size="13" font-weight="bold">이 줄의 코드가 지금 잠들어도 되나?</text>
+<line x1="220" y1="44" x2="220" y2="68" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="20" y="70" width="400" height="52" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="220" y="91" text-anchor="middle" font-size="13" font-weight="bold">① 인터럽트 컨텍스트인가?</text>
+<text x="220" y="111" text-anchor="middle" font-size="12">in_task() == 0 → hardirq · softirq · NMI</text>
+<line x1="420" y1="96" x2="438" y2="96" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="429" y="88" text-anchor="middle" font-size="12">예</text>
+<line x1="220" y1="122" x2="220" y2="148" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="250" y="140" text-anchor="middle" font-size="12">아니오</text>
+<rect x="20" y="150" width="400" height="52" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="220" y="171" text-anchor="middle" font-size="13" font-weight="bold">② preempt_count ≠ 0 인가?</text>
+<text x="220" y="191" text-anchor="middle" font-size="12">spin_lock · preempt_disable · local_bh_disable</text>
+<line x1="420" y1="176" x2="438" y2="176" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="429" y="168" text-anchor="middle" font-size="12">예</text>
+<line x1="220" y1="202" x2="220" y2="228" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="250" y="220" text-anchor="middle" font-size="12">아니오</text>
+<rect x="20" y="230" width="400" height="52" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="220" y="251" text-anchor="middle" font-size="13" font-weight="bold">③ IRQ가 꺼져 있나?</text>
+<text x="220" y="271" text-anchor="middle" font-size="12">local_irq_disable · spin_lock_irqsave → irqs_disabled()</text>
+<line x1="420" y1="256" x2="438" y2="256" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="429" y="248" text-anchor="middle" font-size="12">예</text>
+<line x1="220" y1="282" x2="220" y2="308" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="250" y="300" text-anchor="middle" font-size="12">아니오</text>
+<rect x="20" y="310" width="400" height="52" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="220" y="331" text-anchor="middle" font-size="13" font-weight="bold">④ RCU 읽기 구간 안인가?</text>
+<text x="220" y="351" text-anchor="middle" font-size="12">rcu_read_lock() — PREEMPT_RCU면 pc에 안 보임</text>
+<line x1="420" y1="336" x2="438" y2="336" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="429" y="328" text-anchor="middle" font-size="12">예</text>
+<line x1="220" y1="362" x2="220" y2="398" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="250" y="380" text-anchor="middle" font-size="12">아니오</text>
+<rect x="440" y="70" width="230" height="292" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="555" y="100" text-anchor="middle" font-size="13" font-weight="bold">잠들면 안 된다 (atomic)</text>
+<text x="458" y="135" text-anchor="start" font-size="12">· mutex · msleep 금지</text>
+<text x="458" y="162" text-anchor="start" font-size="12">· wait_event · schedule 금지</text>
+<text x="458" y="189" text-anchor="start" font-size="12">· copy_to_user 금지</text>
+<text x="458" y="216" text-anchor="start" font-size="12">· kmalloc(GFP_ATOMIC)</text>
+<text x="458" y="243" text-anchor="start" font-size="12">· 락은 spinlock 계열만</text>
+<text x="458" y="270" text-anchor="start" font-size="12">· 긴 일은 workqueue로</text>
+<text x="458" y="297" text-anchor="start" font-size="12">· 또는 irq 스레드로 넘김</text>
+<text x="458" y="324" text-anchor="start" font-size="12">· 할당 실패(NULL) 처리</text>
+<rect x="20" y="400" width="400" height="60" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="220" y="424" text-anchor="middle" font-size="13" font-weight="bold">잠들어도 된다 (process 컨텍스트)</text>
+<text x="220" y="446" text-anchor="middle" font-size="12">mutex · msleep · wait_event · GFP_KERNEL · copy_from_user</text>
+<text x="340" y="500" text-anchor="middle" font-size="12">DEBUG_ATOMIC_SLEEP 커널은 ①~③을 might_sleep()에서, ④는 RCU 검사로 자동으로 잡는다</text>
+</svg></figure>
+<p>그림 3 — 코드 한 줄 앞에서 던질 질문 네 개. ①은 "누가 불렀나"(콜백 종류), ②~④는 "그 사이에 무엇을 쥐었나"(락·금지 상태)다. 하나라도 "예"면 오른쪽 규칙을 따른다.</p>
+<hr>
+<h2 id="10-일부러-어기기-실측-로그-네-개">10. 일부러 어기기 — 실측 로그 네 개<a class="anchor" href="#10-일부러-어기기-실측-로그-네-개" aria-label="link">#</a></h2>
+<p>네 실험 모두 같은 <code>f2_ctx.ko</code>에 <code>bug=N</code>만 바꿔 각각 새로 부팅한 게스트에서 돌렸다(rate limit과 lockdep의 "첫 보고 후 꺼짐"을 피하려고 한 부팅에 한 위반). 각 테스트 스크립트는 <code>insmod /f2_ctx.ko bug=N</code> 후 <code>dmesg</code>를 거른다.</p>
+<h3 id="10-1-예제-9-timer-콜백-softirq-에서-mutex_lock-bug-1">10.1 예제 9 — timer 콜백(softirq)에서 <code>mutex_lock</code> (<code>bug=1</code>)<a class="anchor" href="#10-1-예제-9-timer-콜백-softirq-에서-mutex_lock-bug-1" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: timer 콜백에서 경합 없는 mutex를 잡는다. 실제로 잠들지는 않지만(경합이 없으니 즉시 획득) 디버그 커널이 잡는지.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[   10.396008] f2_ctx: loading out-of-tree module taints kernel.
+[   10.429196] f2_ctx: timer_list    pc=0x000101 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [swapper/1/0 cpu1]
+[   10.429412] BUG: sleeping function called from invalid context at kernel/locking/mutex.c:575
+[   10.429476] in_atomic(): 1, irqs_disabled(): 0, non_block: 0, pid: 0, name: swapper/1
+[   10.429516] preempt_count: 101, expected: 0
+[   10.429547] RCU nest depth: 0, expected: 0
+[   10.429651] 1 lock held by swapper/1/0:
+[   10.429763]  #0: ffff80008000bdc8 ((&amp;f2_timer)){+.-.}-{0:0}, at: call_timer_fn+0x8/0x320
+[   10.434651] CPU: 1 UID: 0 PID: 0 Comm: swapper/1 Tainted: G           O        6.18.55-dbg #1 PREEMPT 
+[   10.436297] Tainted: [O]=OOT_MODULE
+[   10.436330] Hardware name: linux,dummy-virt (DT)
+[   10.436535] Call trace:
+[   10.436977]  show_stack+0x30/0x90 (C)
+[   10.437173]  dump_stack_lvl+0x70/0x98
+[   10.437203]  dump_stack+0x18/0x24
+[   10.437226]  __might_resched+0x174/0x248
+[   10.437259]  __might_sleep+0x4c/0x98
+[   10.437281]  __mutex_lock+0x74/0x820
+[   10.437335]  mutex_lock_nested+0x2c/0x40
+[   10.437357]  f2_timer_fn+0x5c/0x88 [f2_ctx]
+[   10.438819]  call_timer_fn+0xb8/0x320
+[   10.438853]  __run_timer_base+0x2c4/0x3e0
+[   10.438930]  run_timer_softirq+0x3c/0x70
+[   10.438966]  handle_softirqs+0x12c/0x4b0
+[   10.439009]  __do_softirq+0x1c/0x28
+[   10.439038]  ____do_softirq+0x18/0x30
+[   10.439061]  call_on_irq_stack+0x30/0x48
+[   10.439095]  do_softirq_own_stack+0x24/0x50
+[   10.439127]  __irq_exit_rcu+0x16c/0x1b8
+[   10.439148]  irq_exit_rcu+0x18/0x48
+[   10.439183]  el1_interrupt+0x3c/0x58
+[   10.439222]  el1h_64_irq_handler+0x18/0x30
+[   10.439257]  el1h_64_irq+0x6c/0x70
+[   10.439653]  default_idle_call+0xbc/0x2e8 (P)
+[   10.439787]  do_idle+0x284/0x2e0
+[   10.439830]  cpu_startup_entry+0x40/0x50
+[   10.439869]  secondary_start_kernel+0x13c/0x168
+[   10.439906]  __secondary_switched+0xc0/0xc8
+...
+[   10.453645] =============================
+[   10.453792] [ BUG: Invalid wait context ]
+[   10.453903] 6.18.55-dbg #1 Tainted: G        W  O       
+[   10.454033] -----------------------------
+[   10.454108] swapper/1/0 is trying to lock:
+[   10.454186] ffffc129b9c4e118 (f2_mutex){+.+.}-{4:4}, at: f2_timer_fn+0x5c/0x88 [f2_ctx]
+[   10.454473] other info that might help us debug this:
+[   10.454594] context-{3:3}
+[   10.454657] 1 lock held by swapper/1/0:
+[   10.454752]  #0: ffff80008000bdc8 ((&amp;f2_timer)){+.-.}-{0:0}, at: call_timer_fn+0x8/0x320
+[   10.455072] stack backtrace:
+...
+[   10.458899]  __lock_acquire+0x96c/0x15d8
+[   10.458996]  lock_acquire+0x22c/0x378
+[   10.459076]  __mutex_lock+0xb8/0x820
+[   10.459156]  mutex_lock_nested+0x2c/0x40
+[   10.459240]  f2_timer_fn+0x5c/0x88 [f2_ctx]
+...</code></pre></figure>
+<p>(콜 트레이스 일부와 lockdep 두 번째 보고의 나머지를 생략했다.)</p>
+<p>출력에서 볼 것 — 위에서부터 읽는 법:</p>
+<ul><li><code>at kernel/locking/mutex.c:575</code> — <code>__mutex_lock_common()</code>의 <code>might_sleep()</code> 줄(§9.3의 grep 결과와 같은 줄 번호).</li><li><code>in_atomic(): 1, irqs_disabled(): 0, … name: swapper/1</code> — atomic이지만 IRQ는 켜져 있다 → hardirq가 아니다. <code>current</code>가 idle(<code>swapper/1</code>)이다 → interrupt 문맥이 idle을 가로챘다.</li><li><strong><code>preempt_count: 101</code></strong> — 그림 2로 분해하면 SOFTIRQ 칸 1(softirq 실행 중) + PREEMPT 칸 1(idle 태스크 몫). "softirq 안에서 잠들 수 있는 함수를 불렀다"가 숫자 하나로 확정된다.</li><li><code>1 lock held: ((&amp;f2_timer))</code> — lockdep이 timer 콜백 실행을 가짜 락으로 기록한다. 어떤 타이머인지 이름으로 알려 준다.</li><li>콜 트레이스를 <strong>아래에서 위로</strong> 읽으면 문맥이 보인다: <code>default_idle_call</code> (idle) → <code>el1h_64_irq</code> (IRQ 예외) → <code>irq_exit_rcu</code> → <code>do_softirq_own_stack</code> → <code>handle_softirqs</code> → <code>run_timer_softirq</code> → <code>call_timer_fn</code> → <code>f2_timer_fn</code> → <code>mutex_lock_nested</code> → <code>__might_sleep</code>. §8의 ftrace와 같은 경로다.</li><li>이어서 lockdep이 <strong><code>[ BUG: Invalid wait context ]</code></strong> 를 따로 냈다. lockdep은 락마다 "대기 종류"를 매긴다(<code>include/linux/lockdep_types.h</code>: 0 INV, 1 FREE, 2 SPIN, 3 CONFIG, 4 SLEEP). <code>f2_mutex</code>는 <code>{4:4}</code> = 잠드는 락, 지금 문맥 <code>context-{3:3}</code>은 softirq가 허용하는 최대치 3(<code>spinlock_t</code> 수준). 4 &gt; 3이라 위반이다. 이 검사는 <code>DEBUG_ATOMIC_SLEEP</code>과 독립이라 둘 중 하나만 켜져 있어도 잡힌다.</li></ul>
+<p>고치는 법: 콜백에서 하려던 일을 <code>schedule_work()</code>로 넘기고 work 함수에서 mutex를 잡는다(§6의 <code>workqueue</code> 줄이 그 문맥). 또는 공유 데이터를 <code>spin_lock_bh()</code>로 보호하도록 바꾼다(F4).</p>
+<h3 id="10-2-예제-10-hardirq-핸들러에서-kmalloc-gfp_kernel-bug-2">10.2 예제 10 — hardirq 핸들러에서 <code>kmalloc(GFP_KERNEL)</code> (<code>bug=2</code>)<a class="anchor" href="#10-2-예제-10-hardirq-핸들러에서-kmalloc-gfp_kernel-bug-2" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: IRQ 핸들러에서 <code>GFP_KERNEL</code> 할당. 메모리가 넉넉하므로 실제로 잠들지 않고 성공한다 — 일반 커널에서는 아무 일 없이 지나가는 <strong>잠복 버그</strong>다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[   12.516520] f2_ctx: hardirq       pc=0x010001 task=0 hard=1 serv=0 bh=0 intr=1 nmi=0 atom=1 irqoff=1 rcu=0 mm=none [swapper/0/0 cpu0]
+...
+[   12.521266] WARNING: inconsistent lock state
+[   12.521921] 6.18.55-dbg #1 Tainted: G           O       
+[   12.522468] --------------------------------
+[   12.522847] inconsistent {HARDIRQ-ON-W} -&gt; {IN-HARDIRQ-W} usage.
+[   12.523395] swapper/0/0 [HC1[1]:SC0[0]:HE0:SE1] takes:
+[   12.523889] ffffb89536039228 (fs_reclaim){?.+.}-{0:0}, at: __kmalloc_cache_noprof+0x64/0x608
+[   12.526571] {HARDIRQ-ON-W} state was registered at:
+[   12.527280]   lock_acquire+0x22c/0x378
+[   12.528119]   fs_reclaim_acquire+0xd0/0xf0
+[   12.528677]   mem_cgroup_css_alloc+0x74/0x6c0
+[   12.529221]   cgroup_init_subsys+0xb8/0x218
+[   12.529710]   cgroup_init+0x1f4/0x468
+[   12.530224]   start_kernel+0x768/0x780
+[   12.530738]   __primary_switched+0x88/0x98
+...
+[   12.534205]  Possible unsafe locking scenario:
+[   12.534205] 
+[   12.534462]        CPU0
+[   12.534587]        ----
+[   12.534803]   lock(fs_reclaim);
+[   12.535090]   &lt;Interrupt&gt;
+[   12.535278]     lock(fs_reclaim);
+[   12.535868] 
+[   12.535868]  *** DEADLOCK ***
+...
+[   12.546671]  fs_reclaim_acquire+0xd0/0xf0
+[   12.547154]  __kmalloc_cache_noprof+0x64/0x608
+[   12.547457]  f2_hard+0xb4/0xd0 [f2_ctx]
+...
+[   12.554013] BUG: sleeping function called from invalid context at include/linux/sched/mm.h:321
+[   12.554141] in_atomic(): 1, irqs_disabled(): 1, non_block: 0, pid: 0, name: swapper/0
+[   12.554178] preempt_count: 10001, expected: 0
+[   12.554194] RCU nest depth: 0, expected: 0
+[   12.554239] INFO: lockdep is turned off.
+...
+[   12.559127]  f2_hard+0xb4/0xd0 [f2_ctx]
+[   12.559158]  __handle_irq_event_percpu+0xb0/0x3a0
+[   12.559176]  handle_irq_event+0x4c/0xc0
+[   12.559194]  handle_fasteoi_irq+0xfc/0x1a8
+[   12.559209]  handle_irq_desc+0x3c/0x68
+[   12.559226]  generic_handle_domain_irq+0x24/0x40
+[   12.559244]  gic_handle_irq+0x40/0xe0
+[   12.559257]  call_on_irq_stack+0x30/0x48
+[   12.559274]  do_interrupt_handler+0x88/0x98
+[   12.559292]  el1_interrupt+0x38/0x58
+...</code></pre></figure>
+<p>(lockdep 보고의 콜 트레이스와 두 번째 보고의 앞부분 일부를 생략했다.)</p>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong>lockdep이 먼저</strong> 잡았다: <code>inconsistent {HARDIRQ-ON-W} -&gt; {IN-HARDIRQ-W} usage</code>, 대상은 <code>fs_reclaim</code>. <code>fs_reclaim</code>은 진짜 락이 아니라 "이 할당은 메모리 회수에 들어갈 수 있다"를 표시하는 lockdep용 가짜 락이다. 부팅 때 IRQ가 켜진 상태에서 쓰였는데(<code>HARDIRQ-ON-W</code>, <code>mem_cgroup_css_alloc</code>에서 등록) 이번엔 hardirq 안에서 쓰였다(<code>IN-HARDIRQ-W</code>). lockdep의 시나리오 그림 — <code>lock(fs_reclaim); &lt;Interrupt&gt; lock(fs_reclaim); *** DEADLOCK ***</code> — 은 "회수 중인 코드를 IRQ가 끊고 들어와 또 회수하면 교착"이라는 뜻이다.</li><li><code>swapper/0/0 [HC1[1]:SC0[0]:HE0:SE1]</code> — lockdep의 문맥 표기. HC=hardirq 문맥 1, SC=softirq 문맥 0, HE=hardirq 켜짐 0(꺼짐), SE=softirq 켜짐 1. <code>preempt_count</code>와 같은 정보를 다른 형식으로 보여 준다.</li><li>이어서 <code>__might_resched</code>: <strong><code>preempt_count: 10001</code></strong> = HARDIRQ 칸 1 + PREEMPT 칸 1(idle). <strong><code>irqs_disabled(): 1</code></strong> — hardirq는 IRQ가 꺼진 채 돈다는 §2.2의 실물. 위치 <code>include/linux/sched/mm.h:321</code>은 <code>might_alloc()</code>의 <code>might_sleep_if(gfpflags_allow_blocking(gfp_mask))</code> 줄이다.</li><li><code>INFO: lockdep is turned off.</code> — lockdep은 첫 보고 후 스스로 꺼진다. <strong>lockdep 경고는 부팅당 첫 번째만 믿을 수 있다.</strong> 그래서 이 노트는 위반 하나마다 새로 부팅했다.</li><li>그 뒤 tasklet·irq 스레드는 정상적으로 돌았다(할당은 성공했으므로). 증상 없는 버그라는 점이 무섭다.</li></ul>
+<p>고치는 법: <code>GFP_ATOMIC</code>으로 바꾸고 NULL을 처리하거나, 할당 자체를 probe 때 미리 해 둔다. 센서 드라이버라면 FIFO 버퍼를 probe에서 <code>devm_kzalloc</code>으로 잡아 두고 IRQ에서는 쓰기만 하는 것이 정석이다.</p>
+<h3 id="10-3-예제-11-spin_lock_irqsave-안에서-msleep-bug-3">10.3 예제 11 — <code>spin_lock_irqsave</code> 안에서 <code>msleep</code> (<code>bug=3</code>)<a class="anchor" href="#10-3-예제-11-spin_lock_irqsave-안에서-msleep-bug-3" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: E4 §5.2는 <code>spin_lock</code> + <code>msleep</code>이었다. 여기서는 IRQ까지 끈 상태에서 잠들면 무슨 일이 연쇄적으로 생기는지 본다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dbg up 11.47s
+[   12.482772] BUG: scheduling while atomic: insmod/72/0x00000002
+[   12.498404] BUG: spinlock wrong CPU on CPU#0, insmod/72
+[   12.498632]  lock: f2_lock+0x0/0x48 [f2_ctx], .magic: dead4ead, .owner: insmod/72, .owner_cpu: 1
+...
+[   12.499059]  do_raw_spin_unlock+0x10c/0x120
+[   12.499114]  _raw_spin_unlock_irqrestore+0x38/0xa0
+[   12.499148]  f2_init+0x2c8/0xde8 [f2_ctx]
+...
+[   12.503504] BUG: sleeping function called from invalid context at kernel/sched/completion.c:116
+[   12.503589] in_atomic(): 1, irqs_disabled(): 0, non_block: 0, pid: 72, name: insmod
+[   12.503623] preempt_count: ffffffff, expected: 0
+...
+[   12.504592] ------------[ cut here ]------------
+[   12.504665] WARNING: CPU: 0 PID: 72 at kernel/irq/irqdesc.c:666 handle_irq_desc+0x4c/0x68
+...
+[   12.510278] pc : handle_irq_desc+0x4c/0x68
+...
+[   12.513225] Call trace:
+[   12.513311]  handle_irq_desc+0x4c/0x68 (P)
+[   12.513414]  gic_handle_irq+0x40/0xe0
+[   12.513497]  call_on_irq_stack+0x30/0x48
+[   12.513586]  do_interrupt_handler+0x88/0x98
+[   12.513677]  el1_interrupt+0x38/0x58
+[   12.513765]  el1h_64_irq_handler+0x18/0x30
+[   12.513853]  el1h_64_irq+0x6c/0x70
+[   12.513991]  __might_resched+0x154/0x248 (P)
+[   12.514106]  __might_sleep+0x4c/0x98
+[   12.514187]  wait_for_completion_timeout+0x44/0x1c0
+[   12.514292]  f2_init+0x350/0xde8 [f2_ctx]
+[   12.514438]  do_one_initcall+0x84/0x380
+...
+[   12.522248] BUG: scheduling while atomic: insmod/72/0x00000000
+...
+qemu-system-aarch64: terminating on signal 15 from pid 758622 (timeout)</code></pre></figure>
+<p>(콘솔 출력. 게스트가 멈춰서 <code>dmesg</code>를 찍는 줄까지 가지 못했고, 실행기의 <code>timeout</code>이 QEMU를 끝냈다. 중간의 레지스터 덤프와 콜 트레이스 일부를 생략했다.)</p>
+<p>출력에서 볼 것 — 버그 하나가 줄줄이 사고를 낸다:</p>
+<ol><li><code>scheduling while atomic: insmod/72/0x00000002</code> — <code>msleep()</code>은 입구에 <code>might_sleep()</code>이 없어서(랩 소스 <code>kernel/time/sleep_timeout.c</code> 313~319행: 루프 안에서 바로 <code>schedule_timeout_uninterruptible()</code>) 사고 예고 없이 <strong>실제 <code>schedule()</code>에서</strong> 걸렸다. <code>0x2</code> = 스핀락 1 + <code>schedule()</code> 진입 때의 선점 끔 1.</li><li>스케줄러는 경고 후 <code>preempt_count</code>를 강제로 바로잡고 태스크를 재운다. 깨어난 <code>insmod</code>는 <strong>CPU 1에서 잡은 스핀락을 CPU 0에서 풀었다</strong>: <code>BUG: spinlock wrong CPU on CPU#0 … .owner_cpu: 1</code>. 스핀락을 잡은 채 잠들면 다른 CPU로 옮겨질 수 있다는 것이 그대로 드러났다(<code>CONFIG_DEBUG_SPINLOCK</code>의 검사, lockdep이 켜면 함께 켜진다).</li><li>바로잡힌 카운트에서 <code>spin_unlock_irqrestore()</code>가 1을 또 빼서 <strong>언더플로</strong>: 다음 <code>wait_for_completion_timeout()</code>의 <code>might_sleep()</code>이 <code>preempt_count: ffffffff</code>를 찍었다(그림 2 마지막 행).</li><li>그다음 IRQ가 들어오자 <code>handle_irq_desc()</code>의 <code>WARN_ON_ONCE(!in_hardirq() &amp;&amp; …)</code>가 터졌다(<code>kernel/irq/irqdesc.c:666</code>). <code>0xffffffff + 0x10000</code>(HARDIRQ_OFFSET)은 32비트에서 <code>0x0000ffff</code>가 되어 HARDIRQ 칸이 0 — <strong>커널이 자기가 hardirq 안에 있다는 사실조차 모르게 됐다.</strong> 이 IRQ는 <code>-EPERM</code>으로 버려진다.</li><li><code>scheduling while atomic: insmod/72/0x00000000</code> — 이번엔 카운트가 0인데도 걸렸다. <code>__schedule()</code> 안에서는 정상이면 1이어야 하는데(<code>in_atomic_preempt_off()</code>는 <code>!= 1</code>을 검사) 언더플로 때문에 0이 됐기 때문이다. 그 뒤 게스트는 응답하지 않았고 <code>timeout</code>이 끝냈다.</li></ol>
+<p>이 노트를 쓰는 중 앞선 <code>bug=3</code> 실행(같은 코드 경로)에서는 1·3·5번 메시지만 나오고 게스트가 끝까지 살아남았다. <strong>같은 버그가 실행마다 다른 증상을 낸다</strong> — 현장의 "가끔 멈춘다" 버그가 대개 이런 모습이다. 첫 번째 BUG 줄만 원인이고 나머지는 전부 2차 피해라는 것을 기억하자: <strong>로그는 위에서부터, 첫 BUG만 고친다.</strong></p>
+<h3 id="10-4-예제-12-rcu_read_lock-안에서-msleep-bug-4">10.4 예제 12 — <code>rcu_read_lock</code> 안에서 <code>msleep</code> (<code>bug=4</code>)<a class="anchor" href="#10-4-예제-12-rcu_read_lock-안에서-msleep-bug-4" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>preempt_count</code>가 0인 "숨은 atomic"(§5의 <code>rcu_read_lock</code> 줄)에서 잠들면 잡히는지.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[   13.913216] f2_ctx: loading out-of-tree module taints kernel.
+[   13.933259] ------------[ cut here ]------------
+[   13.933286] Voluntary context switch within RCU read-side critical section!
+[   13.933717] WARNING: CPU: 0 PID: 73 at kernel/rcu/tree_plugin.h:332 rcu_note_context_switch+0x7a4/0x7f8
+[   13.935226] Modules linked in: f2_ctx(O+)
+[   13.936372] CPU: 0 UID: 0 PID: 73 Comm: insmod Tainted: G           O        6.18.55-dbg #1 PREEMPT 
+[   13.936503] Tainted: [O]=OOT_MODULE
+[   13.936533] Hardware name: linux,dummy-virt (DT)
+[   13.936697] pstate: 600000c5 (nZCv daIF -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[   13.936743] pc : rcu_note_context_switch+0x7a4/0x7f8
+[   13.936788] lr : rcu_note_context_switch+0x7a4/0x7f8
+[   13.936825] sp : ffff800080893880
+...
+[   13.937461] Call trace:
+[   13.937653]  rcu_note_context_switch+0x7a4/0x7f8 (P)
+[   13.937805]  __schedule+0x104/0x1088
+[   13.937882]  schedule+0x48/0x140
+[   13.937908]  schedule_timeout+0x94/0x140
+[   13.937931]  msleep+0x50/0x80
+[   13.937957]  f2_init+0x32c/0xde8 [f2_ctx]
+...
+[   13.939003] ---[ end trace 0000000000000000 ]---
+[   13.955951] f2_ctx: timer_list    pc=0x000101 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [swapper/0/0 cpu0]
+[   13.958248] f2_ctx: hrtimer       pc=0x010001 task=0 hard=1 serv=0 bh=0 intr=1 nmi=0 atom=1 irqoff=1 rcu=0 mm=none [swapper/0/0 cpu0]
+[   13.961148] f2_ctx: hrtimer_soft  pc=0x000101 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [swapper/0/0 cpu0]
+[   13.961907] f2_ctx: tasklet       pc=0x000100 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [ksoftirqd/0/14 cpu0]
+[   13.963226] f2_ctx: bh_workqueue  pc=0x000100 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=none [ksoftirqd/0/14 cpu0]
+[   13.964123] f2_ctx: workqueue     pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=0 rcu=0 mm=none [kworker/1:1/32 cpu1]
+[   13.977579] f2_ctx: kthread       pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=0 rcu=0 mm=none [f2_kthread/74 cpu1]
+[   13.987070] f2_ctx: virq=22 (GIC SPI 80) -&gt; set PENDING
+[   13.987575] f2_ctx: hardirq       pc=0x010001 task=0 hard=1 serv=0 bh=0 intr=1 nmi=0 atom=1 irqoff=1 rcu=0 mm=user [insmod/73 cpu0]
+[   13.988334] f2_ctx: tasklet       pc=0x000101 task=0 hard=0 serv=1 bh=1 intr=1 nmi=0 atom=1 irqoff=0 rcu=0 mm=user [insmod/73 cpu0]
+[   13.988554] f2_ctx: irq_thread    pc=0x000000 task=1 hard=0 serv=0 bh=0 intr=0 nmi=0 atom=0 irqoff=0 rcu=0 mm=none [irq/22-f2_ctx/75 cpu0]</code></pre></figure>
+<p>(레지스터 덤프와 콜 트레이스 아래쪽을 생략했다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>Voluntary context switch within RCU read-side critical section!</code> — <code>kernel/rcu/tree_plugin.h:332</code>의 <code>WARN_ONCE(!preempt &amp;&amp; rcu_preempt_depth() &gt; 0, …)</code>. <code>PREEMPT_RCU</code>에서는 읽기 구간 안에서 <strong>선점당하는 것(involuntary)은 허용</strong>되지만(RCU가 그 태스크를 추적해서 grace period를 미룬다), <strong>스스로 잠드는 것(voluntary)은 금지</strong>다. 이 검사는 스케줄러의 <code>rcu_note_context_switch()</code>에 있어 디버그 옵션 없이도 동작한다(<code>WARN_ONCE</code>라 부팅당 한 번).</li><li><code>preempt_count</code> 기반 검사는 아무 말도 하지 않았다(카운트가 0이므로). <code>msleep</code> 대신 <code>mutex_lock</code>이었다면 <code>__might_resched()</code>의 <code>rcu_sleep_check()</code>와 <code>RCU nest depth: 1, expected: 0</code> 줄이 함께 나왔을 것이다(이 조합은 실행하지 않았다).</li><li>같은 실행의 <code>hardirq</code> 줄이 <code>mm=user [insmod/73 cpu0]</code>이다. §6 (2)에서 말한 "hardirq의 <code>current</code>는 아무나"의 실례.</li></ul>
+<h3 id="10-5-로그-메시지-의미-빠른-표">10.5 로그 메시지 → 의미 빠른 표<a class="anchor" href="#10-5-로그-메시지-의미-빠른-표" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>메시지</th><th>누가 내나</th><th>뜻</th><th>먼저 볼 것</th></tr></thead><tbody><tr><td><code>BUG: sleeping function called from invalid context at 파일:줄</code></td><td><code>__might_resched</code> (<code>DEBUG_ATOMIC_SLEEP</code>)</td><td>잠들 수 있는 함수를 atomic에서 불렀다 (아직 안 잠들었을 수도)</td><td><code>preempt_count:</code> 값을 칸별로 분해, <code>irqs_disabled():</code></td></tr><tr><td><code>BUG: scheduling while atomic: 이름/PID/0x…</code></td><td><code>schedule_debug</code> (항상)</td><td>실제로 <code>schedule()</code>에 들어갔다</td><td>끝의 hex = <code>preempt_count</code> (보통 +1 된 값)</td></tr><tr><td><code>[ BUG: Invalid wait context ]</code></td><td>lockdep</td><td>문맥이 허용하지 않는 종류의 락 (mutex in softirq 등)</td><td><code>context-{a:b}</code>와 락의 <code>{x:y}</code></td></tr><tr><td><code>inconsistent {HARDIRQ-ON-W} -&gt; {IN-HARDIRQ-W} usage</code></td><td>lockdep</td><td>같은 락을 IRQ 켠 채로도, hardirq 안에서도 잡는다 → 교착 가능</td><td>그 락을 process 쪽에서 <code>_irqsave</code>로 잡고 있는지</td></tr><tr><td><code>Voluntary context switch within RCU read-side critical section!</code></td><td>RCU</td><td>RCU 읽기 구간에서 잠들었다</td><td><code>rcu_read_lock</code> 범위, SRCU 필요 여부</td></tr><tr><td><code>BUG: spinlock wrong CPU</code> / <code>preempt_count: ffffffff</code></td><td>spinlock debug / might_sleep</td><td>앞선 버그의 2차 피해</td><td><strong>무시하고 첫 BUG로 올라간다</strong></td></tr></tbody></table></div>
+<hr>
+<h2 id="11-결정표-y-컨텍스트에서-x-해도-되나">11. 결정표 — "Y 컨텍스트에서 X 해도 되나"<a class="anchor" href="#11-결정표-y-컨텍스트에서-x-해도-되나" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 450" xmlns="http://www.w3.org/2000/svg">
+<text x="219.5" y="30" text-anchor="middle" font-size="12" font-weight="bold">process</text>
+<text x="219.5" y="47" text-anchor="middle" font-size="12">ioctl·probe</text>
+<text x="302.5" y="30" text-anchor="middle" font-size="12" font-weight="bold">kthread·wq</text>
+<text x="302.5" y="47" text-anchor="middle" font-size="12">irq 스레드</text>
+<text x="385.5" y="30" text-anchor="middle" font-size="12" font-weight="bold">spinlock</text>
+<text x="385.5" y="47" text-anchor="middle" font-size="12">잡은 채</text>
+<text x="468.5" y="30" text-anchor="middle" font-size="12" font-weight="bold">softirq</text>
+<text x="468.5" y="47" text-anchor="middle" font-size="12">timer 등</text>
+<text x="551.5" y="30" text-anchor="middle" font-size="12" font-weight="bold">hardirq</text>
+<text x="551.5" y="47" text-anchor="middle" font-size="12">top half</text>
+<text x="634.5" y="30" text-anchor="middle" font-size="12" font-weight="bold">NMI</text>
+<text x="634.5" y="47" text-anchor="middle" font-size="12">(perf 등)</text>
+<text x="10" y="81" text-anchor="start" font-size="12">msleep · wait_event</text>
+<rect x="182" y="62" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="219.5" y="81" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="265" y="62" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="302.5" y="81" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="348" y="62" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="385.5" y="81" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="431" y="62" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="468.5" y="81" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="514" y="62" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="551.5" y="81" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="597" y="62" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="634.5" y="81" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<text x="10" y="115" text-anchor="start" font-size="12">mutex_lock</text>
+<rect x="182" y="96" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="219.5" y="115" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="265" y="96" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="302.5" y="115" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="348" y="96" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="385.5" y="115" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="431" y="96" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="468.5" y="115" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="514" y="96" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="551.5" y="115" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="597" y="96" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="634.5" y="115" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<text x="10" y="149" text-anchor="start" font-size="12">kmalloc(GFP_KERNEL)</text>
+<rect x="182" y="130" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="219.5" y="149" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="265" y="130" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="302.5" y="149" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="348" y="130" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="385.5" y="149" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="431" y="130" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="468.5" y="149" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="514" y="130" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="551.5" y="149" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="597" y="130" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="634.5" y="149" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<text x="10" y="183" text-anchor="start" font-size="12">kmalloc(GFP_ATOMIC)</text>
+<rect x="182" y="164" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="219.5" y="183" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="265" y="164" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="302.5" y="183" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="348" y="164" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="385.5" y="183" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="431" y="164" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="468.5" y="183" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="514" y="164" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="551.5" y="183" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="597" y="164" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="634.5" y="183" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<text x="10" y="217" text-anchor="start" font-size="12">spin_lock</text>
+<rect x="182" y="198" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="219.5" y="217" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="265" y="198" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="302.5" y="217" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="348" y="198" width="75" height="28" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="385.5" y="217" text-anchor="middle" font-size="13" font-weight="bold">△</text>
+<rect x="431" y="198" width="75" height="28" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="468.5" y="217" text-anchor="middle" font-size="13" font-weight="bold">△</text>
+<rect x="514" y="198" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="551.5" y="217" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="597" y="198" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="634.5" y="217" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<text x="10" y="251" text-anchor="start" font-size="12">spin_lock_irqsave</text>
+<rect x="182" y="232" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="219.5" y="251" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="265" y="232" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="302.5" y="251" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="348" y="232" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="385.5" y="251" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="431" y="232" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="468.5" y="251" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="514" y="232" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="551.5" y="251" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="597" y="232" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="634.5" y="251" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<text x="10" y="285" text-anchor="start" font-size="12">copy_to_user</text>
+<rect x="182" y="266" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="219.5" y="285" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="265" y="266" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="302.5" y="285" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="348" y="266" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="385.5" y="285" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="431" y="266" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="468.5" y="285" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="514" y="266" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="551.5" y="285" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<rect x="597" y="266" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="634.5" y="285" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<text x="10" y="319" text-anchor="start" font-size="12">printk · pr_info</text>
+<rect x="182" y="300" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="219.5" y="319" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="265" y="300" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="302.5" y="319" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="348" y="300" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="385.5" y="319" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="431" y="300" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="468.5" y="319" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="514" y="300" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="551.5" y="319" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="597" y="300" width="75" height="28" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="634.5" y="319" text-anchor="middle" font-size="13" font-weight="bold">△</text>
+<text x="10" y="353" text-anchor="start" font-size="12">wake_up · queue_work</text>
+<rect x="182" y="334" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="219.5" y="353" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="265" y="334" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="302.5" y="353" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="348" y="334" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="385.5" y="353" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="431" y="334" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="468.5" y="353" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="514" y="334" width="75" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="551.5" y="353" text-anchor="middle" font-size="13" font-weight="bold">O</text>
+<rect x="597" y="334" width="75" height="28" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="634.5" y="353" text-anchor="middle" font-size="13" font-weight="bold">X</text>
+<text x="10" y="392" text-anchor="start" font-size="12">O 가능   △ 조건부 (아래 결정표의 메모 참고)   X 금지</text>
+<text x="10" y="414" text-anchor="start" font-size="12">X의 이유: 잠들 수 있다 (mutex · msleep · GFP_KERNEL · page fault), 또는 그 문맥에 없는 것을 쓴다</text>
+<text x="10" y="436" text-anchor="start" font-size="12">(copy_to_user는 current의 유저 주소 공간이 '내 호출자'일 때만 의미가 있다)</text>
+</svg></figure>
+<p>그림 4 — API × 컨텍스트 행렬. "spinlock 잡은 채" 열은 process 문맥이라도 스핀락(또는 <code>preempt_disable</code>, <code>local_irq_disable</code>, RCU 읽기)을 쥔 구간이다.</p>
+<p>같은 내용을 메모와 함께 표로:</p>
+<div class="tw"><table><thead><tr><th>하고 싶은 것</th><th>process (syscall·probe)</th><th>kthread · workqueue · irq 스레드</th><th>spinlock 등 쥔 구간</th><th>softirq (timer·tasklet)</th><th>hardirq</th><th>NMI</th></tr></thead><tbody><tr><td>잠들기 (<code>msleep</code>, <code>wait_event</code>)</td><td>O</td><td>O</td><td>X</td><td>X</td><td>X</td><td>X</td></tr><tr><td><code>mutex_lock</code></td><td>O</td><td>O</td><td>X</td><td>X (lockdep <code>Invalid wait context</code>)</td><td>X</td><td>X</td></tr><tr><td><code>kmalloc(GFP_KERNEL)</code></td><td>O</td><td>O</td><td>X</td><td>X</td><td>X</td><td>X</td></tr><tr><td><code>kmalloc(GFP_ATOMIC)</code></td><td>O (불필요하게 비관적)</td><td>O</td><td>O</td><td>O</td><td>O</td><td>X</td></tr><tr><td><code>spin_lock</code></td><td>O</td><td>O</td><td>△ 락 순서 규칙 지킬 것</td><td>△ 같은 데이터를 hardirq도 만지면 <code>_irqsave</code></td><td>O</td><td>X (<code>raw_spin_trylock</code> 정도만)</td></tr><tr><td><code>spin_lock_bh</code></td><td>O</td><td>O</td><td>△</td><td>불필요 (이미 BH 문맥)</td><td>X (hardirq에서 BH enable 금지)</td><td>X</td></tr><tr><td><code>spin_lock_irqsave</code></td><td>O</td><td>O</td><td>O</td><td>O</td><td>O</td><td>X</td></tr><tr><td><code>copy_to_user</code>/<code>copy_from_user</code></td><td>O (호출한 프로세스의 메모리)</td><td>X (<code>mm</code> 없음)</td><td>X (fault 시 잠듦)</td><td>X</td><td>X</td><td>X</td></tr><tr><td><code>printk</code>/<code>pr_info</code>/<code>dev_info</code></td><td>O</td><td>O</td><td>O</td><td>O</td><td>O</td><td>△ 저장만 되고 출력은 나중</td></tr><tr><td><code>wake_up</code>, <code>complete</code>, <code>queue_work</code>, <code>tasklet_schedule</code></td><td>O</td><td>O</td><td>O</td><td>O</td><td>O</td><td>X (<code>irq_work</code>로 우회)</td></tr><tr><td><code>udelay</code>(짧게)</td><td>O (가능하면 <code>usleep_range</code>)</td><td>O</td><td>O</td><td>O</td><td>O (수 us 이내로)</td><td>O</td></tr></tbody></table></div>
+<p>(△ 칸의 조건은 F4에서 자세히 다룬다. NMI 열은 소스·문서 기반이고 실행하지 않았다.)</p>
+<p>외우는 요령: <strong>잠드는 것(행 1~3, <code>copy_*_user</code>)은 맨 왼쪽 두 열에서만.</strong> 깨우는 것·<code>GFP_ATOMIC</code>·<code>_irqsave</code> 락은 NMI만 빼고 어디서나.</p>
+<hr>
+<h2 id="12-커널-안에서는-무슨-일이-일어나나">12. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#12-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<p>hardirq 하나가 들어와 softirq까지 처리되는 경로를 <code>preempt_count</code> 변화와 함께 따라가면 이렇다. 함수 이름은 랩 소스(6.18.55)의 <code>arch/arm64/kernel/entry-common.c</code>, <code>kernel/softirq.c</code>, <code>drivers/irqchip/irq-gic.c</code>, <code>kernel/irq/</code>에서 확인했고, §8 ftrace·§10.1 콜 트레이스에 실제로 찍힌 이름들이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 470" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="210" y="20" text-anchor="middle" font-size="13" font-weight="bold">호출 경로 (arm64, 6.18)</text>
+<text x="545" y="20" text-anchor="middle" font-size="13" font-weight="bold">preempt_count · 상태</text>
+<rect x="20" y="34" width="380" height="28" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="210" y="53" text-anchor="middle" font-size="12">el1h_64_irq (예외 벡터, entry.S)</text>
+<text x="420" y="53" text-anchor="start" font-size="12">가로챈 코드의 pc 그대로</text>
+<line x1="210" y1="62" x2="210" y2="68" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="70" width="380" height="28" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="210" y="89" text-anchor="middle" font-size="12">el1h_64_irq_handler → el1_interrupt</text>
+<text x="420" y="89" text-anchor="start" font-size="12">DAIF로 IRQ 마스크</text>
+<line x1="210" y1="98" x2="210" y2="104" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="106" width="380" height="28" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="210" y="125" text-anchor="middle" font-size="12">__el1_irq: irq_enter_rcu()</text>
+<text x="420" y="125" text-anchor="start" font-size="12">pc += 0x10000 (HARDIRQ)</text>
+<line x1="210" y1="134" x2="210" y2="140" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="142" width="380" height="28" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="210" y="161" text-anchor="middle" font-size="12">do_interrupt_handler → call_on_irq_stack</text>
+<text x="420" y="161" text-anchor="start" font-size="12">CPU별 IRQ 스택으로 전환</text>
+<line x1="210" y1="170" x2="210" y2="176" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="178" width="380" height="28" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="210" y="197" text-anchor="middle" font-size="12">gic_handle_irq → handle_fasteoi_irq</text>
+<text x="420" y="197" text-anchor="start" font-size="12">IAR 읽기, 루프로 여러 IRQ</text>
+<line x1="210" y1="206" x2="210" y2="212" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="214" width="380" height="28" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="210" y="233" text-anchor="middle" font-size="12">handle_irq_event → f2_hard()</text>
+<text x="420" y="233" text-anchor="start" font-size="12">in_hardirq()=1, irqs_disabled()=1</text>
+<line x1="210" y1="242" x2="210" y2="248" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="250" width="380" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="210" y="269" text-anchor="middle" font-size="12">irq_exit_rcu()</text>
+<text x="420" y="269" text-anchor="start" font-size="12">pc -= 0x10000</text>
+<line x1="210" y1="278" x2="210" y2="284" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="286" width="380" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="210" y="305" text-anchor="middle" font-size="12">invoke_softirq → handle_softirqs</text>
+<text x="420" y="305" text-anchor="start" font-size="12">pc += 0x100, IRQ 다시 켬</text>
+<line x1="210" y1="314" x2="210" y2="320" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="322" width="380" height="28" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="210" y="341" text-anchor="middle" font-size="12">tasklet_action → f2_tl_fn()</text>
+<text x="420" y="341" text-anchor="start" font-size="12">in_serving_softirq()=1</text>
+<line x1="210" y1="350" x2="210" y2="356" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="358" width="380" height="28" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="210" y="377" text-anchor="middle" font-size="12">exit_to_kernel_mode</text>
+<text x="420" y="377" text-anchor="start" font-size="12">pc==0이고 need_resched면 선점</text>
+<text x="20" y="412" text-anchor="start" font-size="12">irq_exit_rcu에서 in_interrupt()가 참이면(softirq·BH 금지 구간을 가로챈 경우) softirq를 미룬다.</text>
+<text x="20" y="434" text-anchor="start" font-size="12">handle_softirqs가 2 ms 또는 10회 재시작을 넘기거나 need_resched면 나머지는 ksoftirqd/N로 넘긴다.</text>
+<text x="20" y="456" text-anchor="start" font-size="12">process 컨텍스트에서 raise된 softirq는 ksoftirqd를 깨우거나 local_bh_enable() 때 처리된다.</text>
+</svg></figure>
+<p>그림 5 — arm64에서 EL1(커널 실행 중)에 IRQ가 들어왔을 때의 경로. 유저 모드(EL0)를 가로챘다면 <code>el0t_64_irq</code> → <code>el0_interrupt</code>로 들어오고 나머지는 같다.</p>
+<p>핵심 함수 세 개를 소스로 확인해 두자. <code>kernel/softirq.c</code>의 <code>__irq_exit_rcu()</code>:</p>
+<figure class="code"><span class="lang">c</span><pre><code>static inline void __irq_exit_rcu(void)
+{
+#ifndef __ARCH_IRQ_EXIT_IRQS_DISABLED
+	local_irq_disable();
+#else
+	lockdep_assert_irqs_disabled();
+#endif
+	account_hardirq_exit(current);
+	preempt_count_sub(HARDIRQ_OFFSET);
+	if (!in_interrupt() &amp;&amp; local_softirq_pending())
+		invoke_softirq();
+	...</code></pre></figure>
+<p>hardirq 칸을 먼저 내리고, <strong>그래도 <code>in_interrupt()</code>가 거짓일 때만</strong>(즉 가로챈 코드가 softirq 처리 중이거나 BH 금지 중이 아닐 때만) softirq를 돈다. §8의 "RCU softirq 안에 끼어든 타이머 IRQ가 softirq를 다시 돌리지 않은" 장면이 이 <code>if</code>다.</p>
+<p>드라이버 작성 때 이 지식이 다시 나오는 곳:</p>
+<ul class="tasks"><li><strong>F3 (잠자기와 깨우기)</strong>: <code>wait_event_interruptible()</code>은 process 쪽, <code>wake_up()</code>은 IRQ 쪽 — §4.6의 <code>complete()</code> 패턴의 일반형.</li><li><strong>F4 (락)</strong>: "데이터를 누가 만지나"(process만? softirq도? hardirq도?)에 따라 <code>spin_lock</code> / <code>spin_lock_bh</code> / <code>spin_lock_irqsave</code>를 고르는 규칙이 이 노트의 컨텍스트 구분에서 바로 나온다.</li><li><strong>F6 (인터럽트 처리)</strong>: <code>request_threaded_irq</code>, <code>IRQF_ONESHOT</code>, IRQ affinity.</li><li><strong>F7 (지연 작업)</strong>: softirq·tasklet·BH workqueue·workqueue·kthread 중 무엇을 고를지 = "잠들어야 하나"가 첫 질문.</li><li><strong>F8 (타이머)</strong>: <code>timer_list</code>는 softirq, <code>hrtimer</code>는 모드에 따라 hardirq/softirq.</li><li><strong>F9 (메모리)</strong>: <code>GFP_KERNEL</code>/<code>GFP_ATOMIC</code>/<code>GFP_NOWAIT</code> 선택.</li><li><strong>H 모듈 (I2C/SPI 드라이버)</strong>: 버스 전송은 잠드므로 IRQ에서 바로 못 한다 → threaded IRQ.</li></ul>
+<hr>
+<h2 id="13-embedded-실무에서-다시-보기">13. Embedded 실무에서 다시 보기<a class="anchor" href="#13-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="13-1-장면-1-imu의-data-ready-irq에서-i2c로-fifo-읽기">13.1 장면 1 — IMU의 data-ready IRQ에서 I2C로 FIFO 읽기<a class="anchor" href="#13-1-장면-1-imu의-data-ready-irq에서-i2c로-fifo-읽기" aria-label="link">#</a></h3>
+<p>예를 들어 센서 키트의 IMU(BMI270 같은 I2C 6축 센서)가 1.6 kHz로 data-ready 핀을 올린다. 첫 구현에서 흔히 <code>request_irq()</code> 핸들러 안에서 <code>i2c_smbus_read_i2c_block_data()</code>를 부른다. <code>i2c_transfer()</code>는 버스 완료를 <code>wait_for_completion</code>으로 기다리므로 <strong>hardirq에서 잠드는</strong> 버그다. 디버그 커널이면 §10.2와 같은 "sleeping function called" + <code>preempt_count: 10001</code>이 바로 찍힌다. 고친 모양(개념 스케치 — 이 노트에서 컴파일·실행하지 않았다):</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* hardirq는 타임스탬프만, 버스 접근은 irq 스레드에서 */
+static irqreturn_t imu_hard(int irq, void *p)
+{
+	struct imu *st = p;
+
+	st-&gt;ts = ktime_get_boottime_ns();	/* IRQ 시각은 여기서 잡아야 정확 */
+	return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t imu_thread(int irq, void *p)
+{
+	struct imu *st = p;
+	u8 buf[12];
+
+	mutex_lock(&amp;st-&gt;lock);			/* process context: OK */
+	if (i2c_smbus_read_i2c_block_data(st-&gt;client, 0x0c, sizeof(buf), buf) == sizeof(buf))
+		imu_push(st, buf, st-&gt;ts);
+	mutex_unlock(&amp;st-&gt;lock);
+	return IRQ_HANDLED;
+}
+/* probe: devm_request_threaded_irq(dev, irq, imu_hard, imu_thread, IRQF_ONESHOT, "imu", st); */</code></pre></figure>
+<p>IIO 서브시스템에서는 이 패턴이 <code>iio_triggered_buffer_setup()</code>의 "pollfunc"(top half는 <code>iio_pollfunc_store_time</code>, bottom half는 스레드)로 표준화되어 있다(I2).</p>
+<h3 id="13-2-장면-2-can-모터-컨트롤러-제어-루프를-1-khz-hrtimer로">13.2 장면 2 — CAN 모터 컨트롤러 제어 루프를 1 kHz hrtimer로<a class="anchor" href="#13-2-장면-2-can-모터-컨트롤러-제어-루프를-1-khz-hrtimer로" aria-label="link">#</a></h3>
+<p>hrtimer 콜백(기본 hardirq)에서 SPI CAN 컨트롤러(MCP2518FD 같은)로 프레임을 보내고 싶다. <code>spi_sync()</code>는 잠들므로 불가. 선택지: (1) 콜백에서는 <code>wake_up_process()</code>로 SCHED_FIFO kthread를 깨우고 kthread가 <code>spi_sync()</code>, (2) <code>spi_async()</code>로 비동기 전송(완료 콜백도 atomic 문맥), (3) 아예 kthread에서 <code>hrtimer_sleeper</code>/<code>clock_nanosleep</code> 기반 주기 루프. 실무에서는 (1)이나 (3)이 지터·디버깅 면에서 낫다(M5·N1의 지연 측정과 연결).</p>
+<h3 id="13-3-장면-3-현장-로그의-preempt_count로-원인-범위-좁히기">13.3 장면 3 — 현장 로그의 <code>preempt_count</code>로 원인 범위 좁히기<a class="anchor" href="#13-3-장면-3-현장-로그의-preempt_count로-원인-범위-좁히기" aria-label="link">#</a></h3>
+<p>고객 장비의 <code>dmesg</code>에 이런 줄이 있다고 하자: <code>in_atomic(): 1, irqs_disabled(): 0 … preempt_count: 201</code>. 그림 2로 분해하면 SOFTIRQ 칸 2 = <strong>BH 금지</strong>, PREEMPT 칸 1 = 스핀락 하나. 즉 "<code>spin_lock_bh()</code>를 잡은 process 코드에서 잠들 수 있는 함수를 불렀다"까지 콜 트레이스를 보기 전에 좁혀진다. <code>preempt_count: 10000</code>에 <code>irqs_disabled(): 1</code>이면 hardirq 핸들러, <code>100</code>이면 ksoftirqd에서 돈 softirq/tasklet이다. 이 해석을 30초 안에 하는 것이 Embedded Linux 엔지니어의 기본기다.</p>
+<h3 id="13-4-장면-4-preempt_rt-커널로-옮겼더니-드라이버가-깨졌다">13.4 장면 4 — PREEMPT_RT 커널로 옮겼더니 드라이버가 깨졌다<a class="anchor" href="#13-4-장면-4-preempt_rt-커널로-옮겼더니-드라이버가-깨졌다" aria-label="link">#</a></h3>
+<p>로봇 제어용으로 PREEMPT_RT 커널을 쓰면: <code>spinlock_t</code>가 잠드는 rt_mutex로 바뀌고, hardirq 핸들러가 기본으로 스레드화되며(§7.2와 비슷), non-HARD hrtimer가 softirq로 옮겨진다(§6 (4)). 그래서 "진짜 hardirq에서 돌아야 하는" 코드(IRQ 컨트롤러 드라이버, <code>IRQF_NO_THREAD</code> 핸들러, <code>HRTIMER_MODE_HARD</code> 콜백)에서 <code>spinlock_t</code>를 잡으면 RT에서는 "잠드는 락을 hardirq에서 잡는" 버그가 된다. 그런 곳은 <code>raw_spinlock_t</code>를 쓴다. 이 노트의 lockdep <code>Invalid wait context</code> 검사(<code>{3:3}</code>의 CONFIG 등급)가 바로 RT에서 깨질 코드를 non-RT 커널에서 미리 잡아 주는 장치다. (이 노트의 랩에는 RT 커널이 없어 실행하지 않았다.)</p>
+<hr>
+<h2 id="14-흔한-실수와-증상">14. 흔한 실수와 증상<a class="anchor" href="#14-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>IRQ 핸들러에서 I2C/SPI 동기 전송</td><td>디버그 커널: "sleeping function called", <code>preempt_count: 10001</code>. 일반 커널: 가끔 "scheduling while atomic"·멈춤</td><td>버스 전송은 완료를 기다리며 잠듦</td><td>threaded IRQ (<code>request_threaded_irq</code> + <code>IRQF_ONESHOT</code>)</td></tr><tr><td>timer 콜백에서 <code>mutex_lock</code></td><td>"sleeping function called", <code>preempt_count: 101</code> 또는 <code>100</code>, lockdep <code>Invalid wait context</code></td><td>timer 콜백은 softirq</td><td><code>spin_lock_bh</code>로 바꾸거나 일을 workqueue로</td></tr><tr><td>hardirq에서 <code>GFP_KERNEL</code></td><td>평소엔 정상, 메모리 부족 때만 크래시. lockdep <code>fs_reclaim</code> inconsistent</td><td>할당이 회수로 들어가면 잠듦</td><td><code>GFP_ATOMIC</code> + NULL 처리, 또는 probe에서 미리 할당</td></tr><tr><td>스핀락 안에서 <code>msleep</code>·<code>copy_from_user</code></td><td>"scheduling while atomic", 2차로 spinlock wrong CPU·카운트 언더플로·hang</td><td>스핀락은 선점을 끈다</td><td>락 밖에서 복사·대기 후 짧게 락, 또는 mutex로</td></tr><tr><td><code>in_atomic()</code>/<code>in_interrupt()</code>로 gfp 고르기</td><td>IRQ만 끈 구간·RCU 구간에서 <code>GFP_KERNEL</code>이 선택됨</td><td>두 매크로의 구멍 (§5)</td><td>호출자가 gfp를 인자로 넘김</td></tr><tr><td><code>rcu_read_lock</code> 안에서 잠드는 함수 호출</td><td><code>Voluntary context switch within RCU read-side critical section!</code>, non-PREEMPT_RCU 커널에선 "scheduling while atomic"</td><td>RCU 읽기 구간은 atomic</td><td>구간 밖으로 빼거나 SRCU</td></tr><tr><td>hardirq에서 <code>current</code>나 <code>current-&gt;mm</code> 사용</td><td>엉뚱한 프로세스 이름 로그, 엉뚱한 메모리에 쓰기</td><td><code>current</code>는 가로채인 태스크</td><td>필요한 정보는 process 문맥에서 미리 저장</td></tr><tr><td>process와 hardirq가 공유하는 데이터를 process에서 <code>spin_lock</code>만으로 보호</td><td>드물게 완전 교착 (lockdep: <code>{HARDIRQ-ON-W} -&gt; {IN-HARDIRQ-W}</code>)</td><td>락을 쥔 사이 같은 CPU에서 IRQ가 와서 같은 락을 기다림</td><td>process 쪽은 <code>spin_lock_irqsave</code></td></tr><tr><td>첫 BUG 뒤에 나온 메시지를 원인으로 오인</td><td>엉뚱한 곳(완료 대기, IRQ 처리)을 고치게 됨</td><td>2차 피해 (§10.3)</td><td>로그는 위에서부터, 첫 BUG만</td></tr><tr><td>양산 커널에서만 테스트</td><td>잠복 버그가 현장에서 터짐</td><td><code>DEBUG_ATOMIC_SLEEP</code>·lockdep 꺼짐</td><td>개발·CI 커널에 둘 다 켜기</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-면접에서-이렇게-말한다">15. 면접에서 이렇게 말한다<a class="anchor" href="#15-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> "Why can't you sleep in an interrupt handler?"</p>
+<p><strong>A.</strong> 핸들러는 태스크가 아니라서 재울 대상이 없다. <code>current</code>는 가로채인 남의 태스크이고, 핸들러는 CPU당 하나뿐인 IRQ 스택 위에서 IRQ가 꺼진 채 돈다. 잠들면 무고한 태스크가 멈추고, 스택은 덮어써지고, 그 CPU는 타이머조차 못 받는다. 가로챈 코드가 쥔 락을 기다리면 교착이다. 그래서 잠들어야 하는 일은 threaded IRQ나 workqueue로 넘긴다.</p>
+<blockquote><p>An interrupt handler doesn't run on behalf of any task — <code>current</code> is just whatever task got interrupted, and the handler runs on the per-CPU IRQ stack with interrupts disabled. If it called schedule(), you'd put an unrelated task to sleep, leave the IRQ stack in use while another interrupt could reuse it, and stall that CPU's timer tick; and if the interrupted code held a lock you need, you'd deadlock. The kernel enforces this with the hardirq bits in preempt_count — you get "scheduling while atomic". So anything that can block, like an I2C transfer, goes to a threaded IRQ handler or a workqueue.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "softirq에서는요?" → 같은 이유로 안 된다. ksoftirqd에서 돌 때도 softirq 칸이 서 있어 마찬가지.</p>
+<p><strong>Q.</strong> "What's the difference between process context and interrupt context?"</p>
+<p><strong>A.</strong> process context는 어떤 태스크를 대신해 도는 코드라 <code>current</code>가 의미 있고, 잠들 수 있고, 유저 프로세스라면 그 메모리에 접근할 수 있다. interrupt context(hardirq·softirq·NMI)는 비동기로 끼어든 코드라 셋 다 불가다. 판별은 <code>preempt_count</code>의 hardirq·softirq·NMI 칸으로 하고 <code>in_task()</code>가 그 요약이다.</p>
+<blockquote><p>Process context means the kernel is executing on behalf of a specific task — a syscall, a probe, a kernel thread — so <code>current</code> is meaningful, you can sleep, and for user tasks you can access user memory. Interrupt context — hardirq, softirq, NMI — is asynchronous: <code>current</code> is incidental, you can't sleep, and you can't touch user memory. The kernel tracks it in the preempt_count bit fields, and in_task() summarizes it.</p></blockquote>
+<p><strong>Q.</strong> "What is atomic context? Is holding a spinlock in process context atomic?"</p>
+<p><strong>A.</strong> 잠들면 안 되는 모든 구간이다. interrupt context 전부 + process context에서 스핀락을 쥐었거나, <code>preempt_disable</code>, <code>local_bh_disable</code>, <code>local_irq_disable</code>, RCU 읽기 구간 안일 때. 그러니 그렇다, 스핀락을 쥔 process 코드는 atomic이다. 단 <code>in_atomic()</code>은 IRQ만 끈 구간과 PREEMPT_RCU의 RCU 구간을 못 본다.</p>
+<blockquote><p>Atomic context is anywhere you must not sleep: all interrupt contexts, plus process context while holding a spinlock, with preemption or bottom halves disabled, with local interrupts disabled, or inside an RCU read-side section. So yes, a spinlock makes process context atomic — spin_lock() bumps preempt_count. One caveat: in_atomic() misses the irqs-disabled-only case and preemptible-RCU read sections, which is why drivers shouldn't use it to pick GFP flags.</p></blockquote>
+<p><strong>Q.</strong> "Explain preempt_count."</p>
+<p><strong>A.</strong> 태스크별 32비트 카운터로, 칸이 넷이다: bit 0~7 선점 금지 깊이, 8~15 softirq(실행 중이면 0x100, BH 금지면 0x200씩), 16~19 hardirq, 20~23 NMI. 0이면 선점 가능. 예를 들어 <code>0x101</code>은 softirq 실행 중 + 스핀락 하나, <code>0x10001</code>은 hardirq 안. 경고 로그의 이 숫자만 봐도 문맥을 안다.</p>
+<blockquote><p>It's a per-task counter split into fields: bits 0–7 count preempt-disable nesting, 8–15 softirq — 0x100 while serving a softirq, 0x200 per local_bh_disable — 16–19 hardirq, 20–23 NMI. Zero means preemptible. So "preempt_count: 101" in a splat means "inside a softirq with one more preempt-disable", and 0x10001 means hardirq. On arm64 it lives in thread_info and need_resched is folded into the upper 32 bits, inverted, so a single 64-bit compare decides whether to preempt.</p></blockquote>
+<p><strong>Q.</strong> "When would you use a threaded IRQ instead of a regular one?"</p>
+<p><strong>A.</strong> 인터럽트 처리에 잠드는 일이 필요할 때 — I2C/SPI 센서처럼 원인 레지스터를 읽는 데 버스 전송이 필요한 경우가 대표적이다. hardirq 쪽은 타임스탬프만 잡고 <code>IRQ_WAKE_THREAD</code>, 스레드(SCHED_FIFO)에서 버스 전송. <code>IRQF_ONESHOT</code>으로 스레드가 끝날 때까지 줄을 마스크한다.</p>
+<blockquote><p>Whenever handling the interrupt requires something that sleeps — the classic case is an I2C or SPI sensor where even reading the status register is a bus transaction. The hard handler just timestamps and returns IRQ_WAKE_THREAD; the thread_fn runs in an irq/NN kthread with SCHED_FIFO priority, in process context, so it can take mutexes and do i2c_transfer. IRQF_ONESHOT keeps the line masked until the thread finishes, which matters for level-triggered sources.</p></blockquote>
+<p><strong>Q.</strong> "Where do softirqs run? What is ksoftirqd?"</p>
+<p><strong>A.</strong> 두 곳이다. 보통은 hardirq가 끝나는 <code>irq_exit</code> 길목에서, 가로챈 태스크 위에서 바로 돈다. process 문맥에서 raise됐거나, 한 번에 2 ms·10회를 넘기면 CPU별 <code>ksoftirqd/N</code> 스레드가 처리한다 — 네트워크 폭주 때 유저 태스크가 굶지 않게. 어디서 돌든 softirq 문맥이라 잠들 수 없다.</p>
+<blockquote><p>Mostly on the way out of a hard interrupt — irq_exit checks pending bits and runs handle_softirqs right there, on top of whatever task was interrupted. If they're raised from process context, or if processing exceeds about 2 ms or 10 restarts, the rest is deferred to the per-CPU ksoftirqd thread so a packet flood can't starve user tasks. Either way it's softirq context: interrupts enabled, but no sleeping.</p></blockquote>
+<p><strong>Q.</strong> "How would you find a sleep-in-atomic bug before it ships?"</p>
+<p><strong>A.</strong> 개발·CI 커널에 <code>CONFIG_DEBUG_ATOMIC_SLEEP</code>과 lockdep(<code>PROVE_LOCKING</code>)을 켠다. 그러면 실제로 잠들지 않은 잠복 버그(메모리 넉넉할 때의 <code>GFP_KERNEL</code> 등)도 <code>might_sleep()</code> 지점에서 잡힌다. 경고는 1초에 한 번, lockdep은 첫 보고 후 꺼지므로 하나씩 고치고 다시 돌린다.</p>
+<blockquote><p>Run development and CI kernels with CONFIG_DEBUG_ATOMIC_SLEEP and lockdep. Then every might_sleep() annotation — in mutex_lock, GFP_KERNEL allocations, copy_from_user — checks preempt_count, irqs_disabled and RCU depth, so you catch the latent bugs that only actually sleep under memory pressure. Lockdep adds wait-context checks, like a mutex in a timer callback. Note it's rate-limited and lockdep disables itself after the first splat, so fix them one at a time.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "hrtimer 콜백은 어느 문맥이에요?" → non-RT에서 기본은 hardirq, <code>HRTIMER_MODE_*_SOFT</code>면 softirq. PREEMPT_RT에서는 <code>_HARD</code>를 명시하지 않으면 softirq로 옮겨진다.</p>
+<hr>
+<h2 id="16-직접-해보기">16. 직접 해보기<a class="anchor" href="#16-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong>: <code>preempt_count: 202</code>, <code>irqs_disabled(): 0</code>인 경고가 떴다. 어떤 상황인가? — 정답/힌트: SOFTIRQ 칸 2(BH 금지 한 번), PREEMPT 칸 2(스핀락 두 개 또는 스핀락 + preempt_disable). <code>spin_lock_bh</code> 안에서 또 <code>spin_lock</code>을 잡은 process 코드.</li><li><strong>개념</strong>: <code>local_irq_disable()</code> 직후 <code>in_atomic()</code>은 무엇을 돌려주나? 그 상태에서 <code>mutex_lock</code>을 부르면 디버그 커널은 잡는가? — 정답/힌트: 0을 돌려준다(§5). 그래도 <code>__might_resched</code>의 <code>!irqs_disabled()</code> 조건 때문에 잡힌다. 실제로 <code>bug=5</code> 모드를 추가해 확인해 보라.</li><li><strong>코드</strong>: <code>f2_ctx</code>에 <code>bug=5</code>(hrtimer HARD 콜백에서 <code>kmalloc(GFP_KERNEL)</code>)와 <code>bug=6</code>(<code>HRTIMER_MODE_REL_SOFT</code> 콜백에서 같은 일)을 추가하고, 두 경고의 <code>preempt_count</code>와 <code>irqs_disabled()</code> 값을 비교하라. — 정답/힌트: 예상은 <code>10001</code>(또는 <code>10000</code>)·1 대 <code>101</code>(또는 <code>100</code>)·0. 하위 칸은 가로챈 태스크에 따라 바뀐다.</li><li><strong>코드</strong>: §10.1의 버그를 두 가지로 고쳐 보라: (a) timer 콜백에서 <code>schedule_work()</code>로 넘기고 work에서 mutex, (b) mutex를 spinlock으로 바꾸고 process 쪽은 <code>spin_lock_bh</code>. 둘 다 디버그 커널에서 경고 0개인지 확인. — 정답/힌트: (b)에서 process 쪽을 그냥 <code>spin_lock</code>으로 두면 lockdep이 <code>{SOFTIRQ-ON-W} -&gt; {IN-SOFTIRQ-W}</code> 형태의 inconsistent 보고를 낼 것으로 예상된다(§10.2의 hardirq판과 같은 구조, 이 노트에서는 실행하지 않았다).</li><li><strong>관찰</strong>: <code>threadirqs</code> 부팅에서 <code>cat /proc/softirqs</code>를 1초 간격으로 두 번 찍고, <code>ps</code>로 <code>ktimers/N</code>과 <code>ksoftirqd/N</code>이 있는지 본 뒤, 일반 부팅과 비교하라. — 정답/힌트: <code>ktimers/N</code>은 강제 스레드화 모드에서만 생긴다(§7.3).</li><li><strong>ftrace</strong>: §8 스크립트에서 <code>set_ftrace_filter</code>에 <code>run_timer_softirq</code>와 <code>call_timer_fn</code>, 모듈의 <code>f2_timer_fn</code>을 넣어 timer 콜백이 <code>irq_exit_rcu</code> 아래에서 도는지 <code>ksoftirqd</code> 아래에서 도는지 확인하라. — 정답/힌트: 대부분 idle을 가로챈 <code>irq_exit_rcu</code> 아래(<code>&lt;idle&gt;-0</code>)로 찍힌다.</li><li><strong>읽기</strong>: 랩 소스 <code>kernel/softirq.c</code>에서 <code>local_bh_enable()</code> → <code>__local_bh_enable_ip()</code>를 찾아 "BH를 다시 켤 때 대기 중인 softirq를 그 자리에서 처리한다"는 부분을 찾아라. softirq의 세 번째 실행 장소다. — 정답/힌트: 랩 소스 445행 <code>if (unlikely(!in_interrupt() &amp;&amp; local_softirq_pending()))</code> 아래의 <code>do_softirq();</code>. 같은 함수 첫 줄의 <code>WARN_ON_ONCE(in_hardirq())</code>는 hardirq에서 <code>spin_unlock_bh</code>를 부르면 안 되는 이유이기도 하다.</li></ol>
+<hr>
+<h2 id="17-용어-사전">17. 용어 사전<a class="anchor" href="#17-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>process context</td><td>프로세스 문맥</td><td>어떤 태스크를 대신해 도는 커널 코드. <code>current</code>가 의미 있고 잠들 수 있다</td></tr><tr><td>interrupt context</td><td>인터럽트 문맥</td><td>hardirq·softirq·NMI의 총칭. 잠들 수 없다</td></tr><tr><td>hardirq</td><td>하드 인터럽트</td><td><code>request_irq</code> 핸들러(top half). IRQ 꺼진 채 CPU별 IRQ 스택에서 실행</td></tr><tr><td>softirq</td><td>소프트 인터럽트</td><td>10개 고정 벡터(TIMER, NET_RX, TASKLET, RCU …)의 지연 처리. IRQ 켜진 채 실행</td></tr><tr><td>bottom half (BH)</td><td>하반부</td><td>hardirq 뒤로 미룬 처리. 커널 API에서 "BH"는 보통 softirq를 뜻함(<code>local_bh_disable</code>)</td></tr><tr><td>ksoftirqd/N</td><td>softirq 스레드</td><td>CPU별 커널 스레드. 넘친 softirq와 process에서 raise된 softirq를 처리</td></tr><tr><td>tasklet</td><td>태스크릿</td><td>softirq 위의 동적 작업 단위. 퇴출 중이며 BH workqueue가 후계</td></tr><tr><td>threaded IRQ</td><td>스레드형 IRQ</td><td><code>thread_fn</code>이 <code>irq/NN-이름</code> 커널 스레드(SCHED_FIFO)에서 도는 IRQ. process context</td></tr><tr><td>forced threading</td><td>강제 스레드화</td><td><code>threadirqs</code>·PREEMPT_RT에서 일반 IRQ 핸들러를 스레드로 옮기는 것</td></tr><tr><td>NMI / pseudo-NMI</td><td>마스크 불가 인터럽트</td><td>IRQ를 꺼도 들어옴. arm64는 GICv3 우선순위로 흉내 냄</td></tr><tr><td>atomic context</td><td>원자 문맥</td><td>잠들면 안 되는 모든 구간 (interrupt context + 락·금지 구간)</td></tr><tr><td><code>preempt_count</code></td><td>선점 카운트</td><td>선점 금지 깊이·softirq·hardirq·NMI 칸을 담은 태스크별 카운터</td></tr><tr><td><code>current</code></td><td>현재 태스크</td><td>이 CPU에서 지금 도는 <code>task_struct</code>. interrupt context에서는 가로채인 태스크</td></tr><tr><td><code>might_sleep()</code></td><td>잠들 수도 있음 표시</td><td>잠들 수 있는 함수 입구의 주석. 디버그 커널에서 문맥을 검사</td></tr><tr><td><code>DEBUG_ATOMIC_SLEEP</code></td><td>디버그 옵션</td><td><code>might_sleep()</code> 검사를 켜는 Kconfig</td></tr><tr><td>lockdep</td><td>락 검증기</td><td>락 순서·IRQ 안전성·대기 종류를 런타임에 검증 (<code>PROVE_LOCKING</code>)</td></tr><tr><td>grace period</td><td>유예 기간</td><td>모든 CPU가 RCU 읽기 구간을 한 번 벗어날 때까지의 시간</td></tr><tr><td><code>GFP_ATOMIC</code></td><td>원자 할당 플래그</td><td>잠들지 않는 할당. 비상 예비분을 쓰며 실패할 수 있다</td></tr></tbody></table></div>
+<hr>
+<h2 id="18-요약-체크리스트">18. 요약 &amp; 체크리스트<a class="anchor" href="#18-요약-체크리스트" aria-label="link">#</a></h2>
+<p>커널 코드는 네 문맥 중 하나에서 돈다: 태스크를 대신하는 <strong>process</strong>(잠들 수 있음), IRQ 핸들러인 <strong>hardirq</strong>, 그 뒤로 미룬 <strong>softirq</strong>(timer·tasklet·NAPI), 그리고 <strong>NMI</strong>. 이 상태는 태스크별 <code>preempt_count</code>의 칸(PREEMPT 0~7, SOFTIRQ 8~15, HARDIRQ 16~19, NMI 20~23)에 기록되고, <code>in_task()</code>·<code>in_hardirq()</code>·<code>in_serving_softirq()</code>가 그 칸을 읽는다. process 문맥이라도 스핀락·<code>preempt_disable</code>·<code>local_bh_disable</code>·<code>local_irq_disable</code>·RCU 읽기 구간 안이면 <strong>atomic</strong>이라 잠들 수 없다 — 그리고 IRQ만 끈 구간과 PREEMPT_RCU의 RCU 구간은 <code>preempt_count</code>에 안 보인다. 잠든다는 것은 <code>schedule()</code>에 닿는 것이고, mutex·<code>msleep</code>·<code>wait_event</code>·<code>GFP_KERNEL</code>·<code>copy_*_user</code>·I2C/SPI 동기 전송이 그렇다. 잠들어야 하는 일은 threaded IRQ·workqueue·kthread로 넘기고, atomic 쪽은 <code>GFP_ATOMIC</code>·spinlock 계열·<code>wake_up</code>/<code>complete</code>/<code>queue_work</code>만 쓴다. 개발 커널에는 <code>DEBUG_ATOMIC_SLEEP</code>과 lockdep을 켜서 잠복 버그를 <code>might_sleep()</code> 지점에서 잡고, 로그의 <code>preempt_count</code> 숫자를 칸별로 풀어 문맥을 읽는다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>process / hardirq / softirq / NMI 문맥을 <code>current</code>, IRQ 상태, 스택, 잠들기 가능 여부로 구분해 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"왜 IRQ 핸들러에서 잠들 수 없나"를 다섯 가지 이유로 영어로 답할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>preempt_count</code>의 네 칸과 마스크를 그리고, <code>0x101</code>·<code>0x201</code>·<code>0x10001</code>을 분해할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>in_serving_softirq()</code>와 <code>in_softirq()</code>, <code>in_task()</code>와 <code>in_interrupt()</code>의 차이를 BH 금지 예로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>in_atomic()</code>이 놓치는 두 경우를 말하고, 왜 드라이버가 그걸로 gfp를 고르면 안 되는지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>softirq가 <code>irq_exit</code>·<code>ksoftirqd</code>·<code>local_bh_enable</code>에서 실행된다는 것과 각각의 조건을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>hrtimer 기본 모드가 hardirq이고 <code>_SOFT</code>·PREEMPT_RT에서 바뀐다는 것을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>threaded IRQ를 <code>request_threaded_irq</code> + <code>IRQF_ONESHOT</code>으로 짜고, primary/thread 각각에서 할 일을 나눌 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"sleeping function called from invalid context"와 "scheduling while atomic"의 차이를 말하고, 로그에서 원인 줄을 찾을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>lockdep의 <code>Invalid wait context</code>와 <code>{HARDIRQ-ON-W} -&gt; {IN-HARDIRQ-W}</code> 보고가 무엇을 뜻하는지 읽을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>결정표(그림 4)를 보지 않고 mutex·<code>GFP_*</code>·spinlock 변형·<code>copy_to_user</code>가 어느 문맥에서 되는지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>ftrace <code>function_graph</code> + <code>irq</code> 이벤트로 hardirq → softirq 중첩을 직접 보여 줄 수 있다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — Unreliable Guide To Hacking The Linux Kernel (문맥별 규칙의 원조 문서): https://docs.kernel.org/kernel-hacking/hacking.html</li><li>docs.kernel.org — Unreliable Guide To Locking (문맥별 락 선택): https://docs.kernel.org/kernel-hacking/locking.html</li><li>docs.kernel.org — Workqueue (BH workqueue 포함): https://docs.kernel.org/core-api/workqueue.html</li><li>docs.kernel.org — ftrace: https://docs.kernel.org/trace/ftrace.html</li><li>docs.kernel.org — Runtime locking correctness validator (lockdep): https://docs.kernel.org/locking/lockdep-design.html</li><li>docs.kernel.org — What is RCU?: https://docs.kernel.org/RCU/whatisRCU.html</li><li>랩 소스 (Linux 6.18.55, <code>/var/lab/src/linux-6.18.55</code>): <code>include/linux/preempt.h</code>, <code>arch/arm64/include/asm/preempt.h</code>, <code>include/linux/hardirq.h</code>, <code>kernel/softirq.c</code>(<code>__irq_exit_rcu</code>, <code>handle_softirqs</code>, <code>invoke_softirq</code>), <code>kernel/sched/core.c</code>(<code>__might_resched</code>), <code>kernel/irq/manage.c</code>(<code>irq_setup_forced_threading</code>, <code>irq_forced_thread_fn</code>), <code>kernel/time/hrtimer.c</code>(<code>__hrtimer_setup</code>), <code>arch/arm64/kernel/entry-common.c</code>(<code>el1_interrupt</code>)</li><li>elixir.bootlin.com에서 같은 파일 보기: https://elixir.bootlin.com/linux/latest/source/include/linux/preempt.h</li><li>Jonathan Corbet, Alessandro Rubini, Greg Kroah-Hartman, "Linux Device Drivers, 3rd ed." 10장 Interrupt Handling, 7장 Time, Delays, and Deferred Work (API는 오래됐지만 문맥 개념은 그대로)</li><li>Robert Love, "Linux Kernel Development, 3rd ed." 7장 Interrupts and Interrupt Handlers, 8장 Bottom Halves and Deferring Work</li><li>이 스터디의 E4(§5 atomic context 첫 소개), D4(GIC SPI 번호와 pending 주입), F4·F6·F7·F8·F9 노트</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-10_F1_scheduler.html"><span class="dir">← 이전</span><span class="nm">F1. 프로세스·스케줄러 (커널 관점) — task_struct, EEVDF, 스케줄링 클래스, preemption</span></a><a class="next" href="2026-10-10_F3_sleep_wakeup.html"><span class="dir">다음 →</span><span class="nm">F3. 잠자기와 깨우기 — wait queue, wait_event, completion, schedule()</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l3"><a href="#0-1-펌웨어-용어로-옮겨-보기">0.1 펌웨어 용어로 옮겨 보기</a></li><li class="l2"><a href="#1-실습-준비-디버그-커널에서-모듈-하나-qemu-부팅-하나">1. 실습 준비 — 디버그 커널에서 모듈 하나 = QEMU 부팅 하나</a></li><li class="l3"><a href="#1-1-예제-1-디버그-커널-설정-확인">1.1 예제 1 — 디버그 커널 설정 확인</a></li><li class="l3"><a href="#1-2-예제-2-게스트-실행기">1.2 예제 2 — 게스트 실행기</a></li><li class="l2"><a href="#2-네-가지-실행-컨텍스트-정의">2. 네 가지 실행 컨텍스트 — 정의</a></li><li class="l3"><a href="#2-1-process-context-누군가를-대신해서-도는-코드">2.1 process context — "누군가를 대신해서" 도는 코드</a></li><li class="l3"><a href="#2-2-hardirq-context-top-half">2.2 hardirq context — top half</a></li><li class="l3"><a href="#2-3-softirq-context-bottom-half의-실행-엔진">2.3 softirq context — bottom half의 실행 엔진</a></li><li class="l3"><a href="#2-4-nmi와-arm64-pseudo-nmi-실행하지-않음-소스-확인만">2.4 NMI와 arm64 pseudo-NMI (실행하지 않음 — 소스 확인만)</a></li><li class="l3"><a href="#2-5-한-장-요약">2.5 한 장 요약</a></li><li class="l2"><a href="#3-preempt_count-컨텍스트를-기록하는-32비트">3. preempt_count — 컨텍스트를 기록하는 32비트</a></li><li class="l3"><a href="#3-1-직관">3.1 직관</a></li><li class="l3"><a href="#3-2-예제-3-랩-소스에서-비트-배치-확인">3.2 예제 3 — 랩 소스에서 비트 배치 확인</a></li><li class="l3"><a href="#3-3-판정-매크로-무엇을-보나">3.3 판정 매크로 — 무엇을 보나</a></li><li class="l2"><a href="#4-실험-모듈-f2_ctx-모든-컨텍스트에서-같은-함수를-부른다">4. 실험 모듈 f2_ctx — 모든 컨텍스트에서 같은 함수를 부른다</a></li><li class="l3"><a href="#4-1-설계">4.1 설계</a></li><li class="l3"><a href="#4-2-조각-1-헤더-파라미터-출력-함수">4.2 조각 1 — 헤더, 파라미터, 출력 함수</a></li><li class="l3"><a href="#4-3-조각-2-process-context-안의-여러-atomic-만들기">4.3 조각 2 — process context 안의 여러 "atomic 만들기"</a></li><li class="l3"><a href="#4-4-조각-3-지연-실행-수단들의-콜백">4.4 조각 3 — 지연 실행 수단들의 콜백</a></li><li class="l3"><a href="#4-5-조각-4-irq-핸들러-두-개-gic-매핑-정리-함수">4.5 조각 4 — IRQ 핸들러 두 개, GIC 매핑, 정리 함수</a></li><li class="l3"><a href="#4-6-조각-5-init-차례로-실행하고-기다리기">4.6 조각 5 — init: 차례로 실행하고 기다리기</a></li><li class="l2"><a href="#5-예제-4-무엇이-process-context를-atomic으로-만드나">5. 예제 4 — 무엇이 process context를 atomic으로 만드나</a></li><li class="l2"><a href="#6-예제-5-컨텍스트별-실측-표">6. 예제 5 — 컨텍스트별 실측 표</a></li><li class="l2"><a href="#7-threaded-irq와-강제-스레드화-같은-핸들러-다른-문맥">7. threaded IRQ와 강제 스레드화 — 같은 핸들러, 다른 문맥</a></li><li class="l3"><a href="#7-1-threaded-irq는-process-context다">7.1 threaded IRQ는 process context다</a></li><li class="l3"><a href="#7-2-예제-6-threadirqs-부트-인자-hardirq-핸들러가-스레드로-쫓겨난다">7.2 예제 6 — threadirqs 부트 인자: hardirq 핸들러가 스레드로 쫓겨난다</a></li><li class="l3"><a href="#7-3-예제-7-threadirqs에서-softirq는-어디로-가나">7.3 예제 7 — threadirqs에서 softirq는 어디로 가나</a></li><li class="l2"><a href="#8-예제-8-ftrace로-중첩을-직접-보기">8. 예제 8 — ftrace로 중첩을 직접 보기</a></li><li class="l2"><a href="#9-잠들어도-되나-규칙">9. "잠들어도 되나" 규칙</a></li><li class="l3"><a href="#9-1-잠든다-schedule-을-부른다">9.1 잠든다 = schedule()을 부른다</a></li><li class="l3"><a href="#9-2-왜-각-문맥에서-잠들-수-없나">9.2 왜 각 문맥에서 잠들 수 없나</a></li><li class="l3"><a href="#9-3-might_sleep-과-debug_atomic_sleep-사고-전에-잡는-장치">9.3 might_sleep()과 DEBUG_ATOMIC_SLEEP — 사고 전에 잡는 장치</a></li><li class="l2"><a href="#10-일부러-어기기-실측-로그-네-개">10. 일부러 어기기 — 실측 로그 네 개</a></li><li class="l3"><a href="#10-1-예제-9-timer-콜백-softirq-에서-mutex_lock-bug-1">10.1 예제 9 — timer 콜백(softirq)에서 mutex_lock (bug=1)</a></li><li class="l3"><a href="#10-2-예제-10-hardirq-핸들러에서-kmalloc-gfp_kernel-bug-2">10.2 예제 10 — hardirq 핸들러에서 kmalloc(GFP_KERNEL) (bug=2)</a></li><li class="l3"><a href="#10-3-예제-11-spin_lock_irqsave-안에서-msleep-bug-3">10.3 예제 11 — spin_lock_irqsave 안에서 msleep (bug=3)</a></li><li class="l3"><a href="#10-4-예제-12-rcu_read_lock-안에서-msleep-bug-4">10.4 예제 12 — rcu_read_lock 안에서 msleep (bug=4)</a></li><li class="l3"><a href="#10-5-로그-메시지-의미-빠른-표">10.5 로그 메시지 → 의미 빠른 표</a></li><li class="l2"><a href="#11-결정표-y-컨텍스트에서-x-해도-되나">11. 결정표 — "Y 컨텍스트에서 X 해도 되나"</a></li><li class="l2"><a href="#12-커널-안에서는-무슨-일이-일어나나">12. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#13-embedded-실무에서-다시-보기">13. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#13-1-장면-1-imu의-data-ready-irq에서-i2c로-fifo-읽기">13.1 장면 1 — IMU의 data-ready IRQ에서 I2C로 FIFO 읽기</a></li><li class="l3"><a href="#13-2-장면-2-can-모터-컨트롤러-제어-루프를-1-khz-hrtimer로">13.2 장면 2 — CAN 모터 컨트롤러 제어 루프를 1 kHz hrtimer로</a></li><li class="l3"><a href="#13-3-장면-3-현장-로그의-preempt_count로-원인-범위-좁히기">13.3 장면 3 — 현장 로그의 preempt_count로 원인 범위 좁히기</a></li><li class="l3"><a href="#13-4-장면-4-preempt_rt-커널로-옮겼더니-드라이버가-깨졌다">13.4 장면 4 — PREEMPT_RT 커널로 옮겼더니 드라이버가 깨졌다</a></li><li class="l2"><a href="#14-흔한-실수와-증상">14. 흔한 실수와 증상</a></li><li class="l2"><a href="#15-면접에서-이렇게-말한다">15. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#16-직접-해보기">16. 직접 해보기</a></li><li class="l2"><a href="#17-용어-사전">17. 용어 사전</a></li><li class="l2"><a href="#18-요약-체크리스트">18. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>
