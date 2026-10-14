@@ -1,6 +1,6 @@
 # Neros Technologies — Senior Firmware Engineer, Platform · Context
 
-> **최종 갱신**: 2026-10-09 · **상태**: ✅ Technical screen 완료 (10-08, C로 ring buffer + 보너스 extract_packet) · 결과 대기 → 온사이트 가능성 높음 [Don 자평]
+> **최종 갱신**: 2026-10-14 · **상태**: 🏢 **온사이트 10-22(목) 10:30~14:30 PDT 확정** [확인됨 10-14 코디네이터 Jazmin Vu 메일] — 1100 Knox St, Torrance. 투어(Michael Honar) → **패널 발표 11:00~12:00** (Balapranesh Elango · Michael Aguayo · Adam Kibit · Michael Honar · Gil Vargas · Jon Kotowski) → 점심(Michael Honar) → 1:1 **Adam 30분 · Michael Honar 45분 · Jon Kotowski 45분**. ⚠️ **발표 PDF/PPT 48시간 전 제출 필수(미제출 시 취소 가능) → 마감 10-20 11:00 PDT, 10-19 제출 목표**. 준비: `onsiteKit/index.html` (K01 일정 · 패널)
 > ✅ **2026-10-08 technical screen (1시간, Jon Kotowski)**: 시작하자마자 "Python or C?" → **C 선택**. Task 1 = 외부 버퍼를 받는 byte ring buffer (struct부터 직접, `rb_init(rb_t*, uint8_t *rb_buf, uint8_t capacity)`, is_empty/is_full, push_byte/pop_byte, **bulk push/pop all-or-nothing**, `rb_peek(rb, uint8_t offset, …)`). Task 2 (보너스) = `extract_packet` 함수 하나, 라이브러리로 `CRC.c` 제공. Don: 잘 풀었다고 느낌. 들은 정보: **FW 엔지니어 17명, Test 엔지니어 3명, + full stack (embedded를 테스트할 수 있는)** → §6. 재구성: `technicalScreenPrep/site/lecture/2026-10-09_L09_screen_recap.html`
 > 🧪 **2026-10-02 리크루터 연락: Michael Honor 인터뷰 잘 봤음 → 온사이트 전에 technical screen 1세션 추가.** 2026-10-08(목) 11:00, 1시간, **코딩 위주** 예상. 주제: **pytest · ring buffer · Python/C 둘 다 가능 · system design**. 면접관 **Jon Kotowski** — 공개 검색상 Neros Full Stack Engineer [추정, Datanyze 단일 출처 + ZoomInfo 스니펫]. 준비: `technicalScreenPrep/index.html` → §6
 > ✅ **2026-10-01(목) HM Michael Honor (Firmware Test 리드) 인터뷰 완료 → 10-02 통과(다음 단계 진행)** — 15분 늦게 시작해 실제 약 30분. 임베디드 퀴즈 위주(UART/I2C/SPI 차이, PCIe를 SW에서 어떻게 쓰나, 8b/10b, Git/PR/rebase) + 테스트 철학 2문항. **Python은 안 물어봄.** ~~"결과 곧 알려 주겠다"~~ → 10-02 리크루터: 잘 봤음, technical screen 추가 → §6
@@ -27,7 +27,10 @@
 - **인터뷰 포맷** [확인됨 2026-09-16]: ✅ 리크루터 콜 → **HM Adam Kibit 45분 기술** → 온사이트 (Tour 30분 · **경력 발표 1시간** · 1:1 기술 여러 개: C/C++, **ring buffer**, generic system design)
 - **✅ 2026-10-01 Michael Honor 인터뷰 결과 요약**: 퀴즈형 임베디드 질문 + "정의 안 된 것의 테스트 케이스", "done의 의미". FW 조직 **15명**(LinkedIn 12 → Adam 13 → Michael 15), Michael 밑 FW Test 2명, **테스트 펌웨어가 가장 급함 → 연내 최대 5명 추가 채용**, **factory test firmware가 아직 없음(나중에 필요)**, **STM(STM32) 사용 = 자체 실리콘 없음**. 개발 인력 약 70명 / 전체 약 260명(나머지 테크니션). 다음: 결과 대기 → 온사이트 대비 (`onsitePrep/`)
 - **🔀 포지션 전환 (2026-09-27)**: Adam 인터뷰 뒤 **Firmware Test Engineer** (JD [17], base **$145.5–204K**) 로 HM 30분 인터뷰 제안. **적합도는 오히려 ⭐⭐⭐⭐** (HIL·테스트 자동화·Python·I2C/SPI/UART·RF 테스트 — 레쥬메와 직결). 대신 ① 밴드 상단 $204K ≈ Don이 말한 최저선 $200K ② 개발→테스트 트랙 = **레벨·커리어 방향 하향** ③ 5+년 "software testing" 요구. 자세한 분석은 **§8**
-- **🧪 다음 액션 (2026-10-02)**: ① **10-08(목) 11am technical screen** 준비 — `technicalScreenPrep/` D-6 플랜(ring buffer Python 12분 · C 5분, pytest로 남의 코드 테스트 25분, test·tooling system design 10분 요약) ② 면접관 Jon Kotowski는 Full Stack [추정] → 임베디드 퀴즈보다 코드 품질 · 테스트 · 설계 소통 중심으로 대비 ③ LinkedIn 로그인 조회 · 친구 신청 하지 않음 ④ 온사이트 준비(`onsitePrep/`)는 스크린 이후로
+- **🏢 다음 액션 (2026-10-14)**: 10-22 확정 → ① Jazmin에게 식이 제한 답장 (K01 7절 초안) ② **발표 PDF 10-19 제출** (M0 9절 점검표) ③ 1:1 예상 매핑 [추정]: Jon = Python 코딩 · Michael Honar = HW/test design · Adam 30분 = system design 압축판 또는 디렉터 대화 ④ 면접관 LinkedIn은 로그인 조회 · 연결 없이 경력 참고만 (Don 지시)
+- ~~**🏢 다음 액션 (2026-10-12)**~~: Devin 콜로 형식 확정 → 새 **`onsiteKit/`**(K00 계획 · M0 발표 · M1 system design · M2 Python 코딩 + C01~C07 · M3 HW/test design · Q&A 로그). 코딩 40% 비중 — 지난 스크린에서 **ring buffer overflow case를 놓쳤다**는 피드백. 코디네이터 연락(10-13 예상) 때 K00 4절 질문.
+- ~~**🏢 다음 액션 (2026-10-11)**~~: ✅ 3라운드(Adam → Michael → Jon) 통과, **온사이트 초대 확정**. ① 10-12(월) 오전 Devin 통화에서 **날짜 결정** + 패널 명단 · 발표 형식 · 코딩 환경 확인 (`onsitePrep` P01 2절 질문 7개) ② 발표 메인 스토리 결정 → 슬라이드 → 리허설 3회 (N11) ③ 1:1 코딩 S등급(패킷 파서 · 비트 · CRC) · system design S등급(logging · OTA · MCU↔companion 프로토콜) (N10) ④ 레벨 · 밴드는 오퍼 단계까지 보류
+- ~~🧪 다음 액션 (2026-10-02)~~: ① **10-08(목) 11am technical screen** 준비 — `technicalScreenPrep/` D-6 플랜(ring buffer Python 12분 · C 5분, pytest로 남의 코드 테스트 25분, test·tooling system design 10분 요약) ② 면접관 Jon Kotowski는 Full Stack [추정] → 임베디드 퀴즈보다 코드 품질 · 테스트 · 설계 소통 중심으로 대비 ③ LinkedIn 로그인 조회 · 친구 신청 하지 않음 ④ 온사이트 준비(`onsitePrep/`)는 스크린 이후로
 - ~~다음 액션 (2026-09-27)~~: ① 일정 링크에 날짜 4개+ 제출 (서두르되, 준비 시간 2~3일 확보되게) ② **제출 전에 Jazmin/Devin에게 확인 질문** — 원래 Senior/Principal 트랙은 closed인지, 레벨·밴드는 어떻게 되는지, 이 HM이 누구인지 ③ 수락 여부 결정 기준 정하기 (§8.4) ④ §8.5 준비 항목
 - ~~다음 액션 (2026-09-22)~~: ① 2026-09-24(목)까지 연락 없으면 리크루터 Devin에게 짧은 follow-up 메일 ② Adam 인터뷰 기억나는 질문을 §6에 기록 ③ 기다리는 동안 온사이트 대비: 경력 발표 1시간 초안, ring buffer 맨손 구현
 - ~~이전 다음 액션 (2026-09-16)~~: ① ~~**Adam(HM) 45분 기술 인터뷰 준비** — HM 준비 노트의 스토리 A·B·C 실제 디테일 채우기 + Board B 변종 구조·MCU↔컴패니언 프로토콜 화이트보드 연습 ② 온사이트 대비: 1시간 발표 초안, ring buffer 맨손 구현, generic system design ③ ~~Bazel 미니 프로젝트~~ → 특정 JD 없는 req로 확인돼 우선순위 하향~~ (인터뷰 완료)
@@ -206,6 +209,8 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
        ② 본인 경력 발표 1시간 (가장 큰 challenge, issue resolving/debugging, bring-up 경험)
        ③ 1:1 기술 인터뷰 여러 개: 기본 C/C++, ring buffer 구현, generic system design (드론 설계 아님)
 ```
+- **2026-10-12 갱신 [확인됨 Devin 콜]**: 발표 = 40분 분량 + Q&A ≈ 1시간 (소프트웨어 · 자동화 · SW test · system test · 아티팩트 · 대시보드 · 짧은 스토리 · 문제 해결 전략). 1:1 면접관 **Adam Kibit (FW Director) · Michael Honar (FW Test Manager) · Michael B (Sr FW)**, 주제 **① embedded system design(scheduler · task 수 · stack · PSP · rx/tx · motor, '배우기 좋아하나') ② 코딩(비슷한 유형, 웬만하면 Python, ring buffer라고 힌트 안 줄 듯) ③ HW design/test design(고장 난 PDB + 회로도, 테스트 안 된 새 서브시스템 통합 순서 · 결과 정리)**. 노트북은 보안상 현장 지급. 항공 · 호텔 · 식비 회사 부담.
+- **2026-10-11 갱신 [확인됨 Don]**: Adam → Michael Honor → Jon Kotowski **3라운드 통과 → 온사이트 초대**. 10-12 Devin과 날짜 결정. 구성 동일(Tour 30 · 발표 1h · 1:1 C/C++ · 코딩 · generic system design), FW Platform 엔지니어도 면접관 가능
 - **2026-10-02 갱신 [확인됨 리크루터]** — FW Test 트랙 실제 경로: ✅ Adam 45m (09-18) → 🔀 FW Test 전환 (09-27) → ✅ **Michael Honor HM** (10-01, 통과) → 🧪 **Technical screen 1h** (10-08 목 11am, Jon Kotowski, 코딩 위주: pytest · ring buffer · Python/C · system design) → 온사이트 (위 구성)
 - ~~이전 추정 (2026-09-14): 팀원 45분 기술 폰스크린 → Torrance 온사이트(C 코딩 / Bazel·빌드 딥다이브 / 플랫폼 설계 / 미션)~~ → 2026-09-16 리크루터 안내로 교체. **빌드 시스템 딥다이브는 확인된 온사이트 항목에 없음.**
 - Glassdoor 후기: "transparent and well communicated", 포커스 영역을 미리 알려줌 [7]. 표본이 적음.
@@ -338,6 +343,9 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 | 2026-10-04 ~ 10-08 | 스크린 준비 강의 L00~L08 | 특별강의(ring buffer · pytest · LeetCode) · Python 문법 · 임베디드 테스트 프레임워크 10종(실행 검증) · 임베디드 C/C++ · 매일 몸풀기 · 예상 시나리오 · 마지막 체크업 · pytest 처음부터 (`technicalScreenPrep/lecture/`) |
 | 2026-10-08 | **✅ Technical screen 완료 (Jon Kotowski, 1시간, C 선택)** | Task 1 C ring buffer(외부 버퍼 · bulk all-or-nothing · peek offset), Task 2 보너스 extract_packet(CRC.c 제공). 코딩만. Don 자평 잘 풀었음. FW 17 · Test 3 · full stack 정보 |
 | 2026-10-09 | 스크린 재구성 + 온사이트 방향 정리 | `technicalScreenPrep/lecture/recap/` 참고 풀이 + 테스트 13개(ASan/UBSan 통과). 재구성 중 extract_packet의 **가짜 sync + 큰 LEN → 영원히 NEED_MORE(데드락)** 엣지 발견 · 수정. 강의 L09 |
+| 2026-10-11 | **✅ 온사이트 초대 확정 (3라운드 통과) · 날짜 정하는 Devin 통화 예정 · 10일 계획** | Adam → Michael Honor → Jon Kotowski 통과 → **온사이트 초대** [확인됨 Don]. 10-12(월) 오전 Devin과 **온사이트 날짜를 정하는 통화**(시간 미정). 온사이트 = Tour 30분 · 경력 발표 1시간(한 일 · 하는 일 · challenging problem) · 1:1 여러 개(C/C++ · ring buffer 같은 코딩 · generic/necessary system design), Adam 말대로 **FW Platform 엔지니어도 면접관 가능**. ring buffer는 스크린에서 했으니 건너뛸 가능성 [추정]. `onsitePrep/`에 P01 10일 계획(D-10=10-11, 온사이트≈10-21 가정) · N10 예상 문제 뱅크 · N11 발표 스토리 워크북 + 새 C 코드 3개(패킷 파서 상태 머신 · 고정 블록 메모리 풀 · 소프트 타이머, `make -C code test` 통과) |
+| 2026-10-12 | **📞 Devin 콜 — 온사이트 형식 확정 · 날짜 10-22/23 제안** | Don 가능일 10-22, 10-23 전달 → 코디네이터가 10-13쯤 연락. 노트북 현장 지급(보안). Tour 30 → 발표 40분+Q&A → 1:1 Adam · Michael Honar · Michael B (system design · Python 코딩 · HW/test design 각 45분) → 점심. **피드백: 지난 ring buffer는 거의 다 했지만 overflow case 누락.** 항공 · 호텔 · 식비 지원. → 새 `onsiteKit/` (Python 문제 7개 정답 + 연습 파일, `python3 code/run_all.py` 7/7) |
+| 2026-10-14 | **📧 온사이트 확정 메일 (Jazmin Vu, Talent Coordinator)** | **10-22(목)** 10:30 투어(Michael Honar) · 11:00 패널 발표(Elango · Aguayo · Kibit · Honar · Vargas · Kotowski) · 12:00 점심(Honar) · 12:30 1:1 Adam(30분) · 13:00 1:1 Michael Honar(45분) · 13:45 1:1 Jon Kotowski(45분). 발표 PDF/PPT **48시간 전 제출 필수**(민감 정보면 30분 일찍 와서 그쪽 노트북으로). 식이 제한 회신 요청. 주소 1100 Knox Street, Torrance 90502 · 로비 앞 방문자 주차 · 키오스크 체크인(신분증 · 법적 이름). Devin 콜 대비 변화: Michael B(= Michael Aguayo)는 패널로, 1:1에 Jon 추가, Adam 30분. 면접관 공개 정보: LinkedIn 비로그인 조회는 대부분 차단(HTTP 999/404) — Michael Aguayo 공개 페이지만 열림(현재 Neros, UC Irvine 컴퓨터공학), Elango · Vargas는 공개 정보 없음. → `onsiteKit` K01 추가, 일정표 재조정 |
 
 ---
 
@@ -398,7 +406,7 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
   - `rb_peek(rb, uint8_t offset, …)` — tail에서 offset번째를 꺼내지 않고 보기
 - **Task 2 — 보너스 `extract_packet`**: 함수 하나 구현, 라이브러리로 `CRC.c` 제공. 프레임 형식 세부는 기록 없음 → 재구성은 [추정] (SYNC · LEN · PAYLOAD · CRC). `rb_peek(offset)`이 Task 2에서 헤더 · CRC를 꺼내지 않고 보기 위한 것이었을 가능성 [추정]
 - **들은 정보** [확인됨 Don 10-08, 해석 확인 필요]: **FW 엔지니어 17명, Test 엔지니어 3명, 그리고 full stack**(embedded를 테스트할 수 있는 사람). 10-01 Michael: FW 15 · Test 2 → 2주 사이 FW +2, Test +1 [추정: 채용 진행 중]
-- **결과**: 대기. Don 자평 "잘 푼 것 같다" → 온사이트 가능성 높음 [추정]
+- **결과**: ~~대기, 온사이트 가능성 높음 [추정]~~ → **✅ 통과, 온사이트 초대** [확인됨 Don 10-11]. 날짜는 10-12 Devin 통화에서 결정
 - 잘한 점: C를 망설임 없이 선택 (강점 언어), 전형 문제를 완주 (Don 자평)
 - 아쉬운 점 / 기억할 것: (Don: 실제로 막혔던 곳 · Task 2를 어디까지 했는지 · 테스트를 보여 줬는지 — 기록 필요)
 - 다음 라운드에 반영: 온사이트 1:1에서 같은 ring buffer를 **ISR-safe(SPSC) · DMA · memcpy 두 조각**으로 확장하는 질문 대비, 패킷 파서(상태 머신 · CRC · resync) C로 한 번 더. 재구성 · 참고 풀이: `technicalScreenPrep/lecture/recap/` (테스트 통과)

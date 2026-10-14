@@ -1,6 +1,8 @@
+<!-- theme: pastel -->
 # Scout AI — Senior Embedded Software Engineer · Context
 
-> **최종 갱신**: 2026-10-04 · **상태**: 🔍 조사중
+> **최종 갱신**: 2026-10-13 · **상태**: 💻 Technical screen 일정 선택 중 (리크루터 콜 10-12 통과 · ⚠ Ashby로 10-14 11:19 AM PT 전까지 가능 시간 제출)
+> **⚡ 테크니컬 스크린 준비**: [2026-10-12_scout_technical_screen_prep.html](2026-10-12_scout_technical_screen_prep.html) — 문제 은행 Tier1 8 · Tier2 10 · Debug 8 · D-5 플랜
 > **JD**: https://job-boards.greenhouse.io/scoutai/jobs/5387985008 · **위치**: Sunnyvale, CA / onsite [추정] · **연봉 밴드**: $210,000 – $265,000 base + bonus + equity
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
@@ -16,8 +18,8 @@
 - **적합도**: ⭐⭐⭐½ — bring-up·버스 디버그·datasheet→driver는 강하지만, **"Strong experience in embedded linux"가 필수**인데 레쥬메는 bare-metal·RTOS 쪽이라 갭이 핵심 · **커리어 방향**: ⭐⭐⭐⭐ — physical AI·robotics 회사 + edge 추론 컴퓨트 바로 옆에서 일함
 - **핵심 어필**: ① Apple에서 신규 칩 통합 시 PCIe/I2C/SPMI/RFFE 인터페이스 루트코즈 ② SK hynix에서 FPGA/SoC bring-up (I2C·SPI·DMA·SRAM/DRAM) ③ DSO·protocol analyzer·JTAG·logic analyzer로 신호/버스 단위 디버그 ④ bring-up → NPI → MP 전 주기, factory test 설계 (= "센서 데이터 품질 검증 툴")
 - **최대 갭/리스크**: ① Embedded Linux 실무(kernel driver, device tree, V4L2, IIO, Yocto/Buildroot) ② CAN 경험 없음 ③ 카메라 파이프라인(MIPI CSI-2 / GMSL) ④ 34명 규모 초기 스타트업 + 국방 미션(TS clearance 가능성) ⑤ 상한 $265K는 Hark 구두 $250K와 비슷하지만 Apple 대비 total comp 비교 필요
-- **예상 인터뷰 포맷**: 리크루터 → HM → 기술 스크린(C/임베디드/Linux) → 온사이트(과거 프로젝트 **발표** + **실습 과제**) [추정 — Glassdoor의 직군 미상 후기 1건][9]
-- **다음 액션**: ① 아래 4.8 스터디 후보 목록에서 Embedded Linux 트랙 확정 ② 레쥬메에 Linux·sensor·bring-up 키워드 보강(3.5) 후 지원 ③ Hark BSP 노트(B03 Linux BSP) 재활용
+- **인터뷰 포맷** [확인됨 — 리크루터 콜·메일 10-12]: 리크루터 → **Technical screen**(CoderPad, 언어 자유, 45분 = 경험 15 + 코딩 30, 센서·과열 감지류 · 메일상 범위: practical technical exercises + **experience building and scaling hardware systems**) → **Final 4라운드**(CEO 30 · CTO 30 · HW 엔지니어 45 · 임베디드 엔지니어 45)
+- **다음 액션**: ⓪ **Ashby 링크로 스크린 일정 제출 — 10-14(수) 11:19 AM PT 마감**, 추천 10-19~10-20 (Neros 온사이트 10-22/23 주 피하기) ① **Technical screen 준비** — [준비 문서](2026-10-12_scout_technical_screen_prep.html)의 D-5 플랜, T1-1·T1-2·T1-5 최우선 ② 스크린 날짜 확정되면 플랜 역산 ③ 통과 시 Final 4라운드(CEO·CTO·HW·임베디드) 준비
 
 ---
 
@@ -25,7 +27,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| 팀 / 조직 | 미명시. hardware·robotics·AI 엔지니어와 협업 [JD]. 사내 공고상 Robotics SWE·Vehicle Integration Technician·Drone Technician·Mechanical Eng와 같은 하드웨어 쪽 조직 [추정][8] |
+| 팀 / 조직 | **회사 63명, 그중 엔지니어 25명. 임베디드 팀은 현재 2명이고 둘 다 조지아(Georgia) 근무 → 이 자리는 세 번째 임베디드 엔지니어이자 Sunnyvale 오피스의 첫 임베디드 엔지니어** [확인됨 — 리크루터 10-12]. hardware·robotics·AI 엔지니어와 협업 [JD] |
 | 레벨 | Senior (연차 미명시 — 밴드로 보면 5~10년차 IC) [추정] |
 | 위치 / 근무형태 | Sunnyvale, CA. 공고에 remote 표기 없음 → onsite [추정]. 필드 테스트는 Paso Robles 인근(중부 CA 군 기지)에서 진행 [추정][3][8] |
 | 연봉 밴드 / Equity | **$210K–$265K base** + bonus + "meaningful equity", 의료보험 본인부담 $0, 점심 제공, 이전 지원(조건부) [확인됨][JD] |
@@ -196,17 +198,27 @@ Fury가 **camera-only**이므로 센서 스택의 중심은 카메라다. 여기
 ## 4. 예상 인터뷰
 
 ### 4.1 프로세스
+**[확인됨 — 리크루터 Bobby, 2026-10-12]**
 ```
-리크루터 콜 (30m) → HM 콜 (기술 배경·동기, 45m)
-→ 기술 스크린 (C 코딩 + 임베디드/Linux 개념, 60m)
-→ 온사이트 Sunnyvale: 과거 프로젝트 발표 + 실습(hands-on) + 기술 라운드 2~3 + 창업자/리더십
-→ 레퍼런스 → 오퍼
+리크루터 콜 (10-12 완료)
+→ Technical screen: CoderPad, C 또는 C++, 45분
+     15분 = 경험 이야기 / 30분 = 코딩 1문제 (엣지 케이스 테스트, 임베디드 관점)
+     리크루터 키워드: Array · Item · State · Edge · debug · embedded constraint
+     주제: 센서, time·temp, 과열 감지 ("return overheating")
+→ Final 4라운드: CEO 30분 · CTO 30분 · HW 엔지니어 45분 · 임베디드 엔지니어 45분
 ```
-- 근거: Glassdoor "Scout AI" 페이지 요약에 "3라운드, 온사이트에서 formal presentation과 hands-on practical exam"이 있다. 다만 직군이 미상이고 동명 채용 플랫폼과 섞여 있다 [추정][9]
+- 리크루터 피드백: "it goes well". Don은 스크린을 최대한 빨리 잡아 달라고 요청
+- **공식 안내 메일 (Bobby, 2026-10-12 11:19 AM)** [확인됨]: 45분 · Virtual · CoderPad · Focus = *practical technical exercises, problem solving, and discussion of your experience building and scaling hardware systems*. 일정은 Ashby 링크로 선택, **48시간 안에 가능 시간 제출**("moving quickly", 면접관 일정 확보 목적). 언어는 가장 편한 것 자유 선택. Tips: 사고 과정 말하기 · 질문하기 · 간결하게 · 협업하듯 tradeoff 논의 · 막혀도 계속 말하기 · 서두르지 않기
+- 콜 메모와 비교해 **새로 생긴 것**: ① 경험 파트 주제가 "building and scaling hardware systems"로 구체화 → 준비 문서 §7 스토리 A·B·C ② "exercises" 복수형 → 본 문제 + 변형 가능성 ③ 언어 자유 ④ 48시간 마감
+- 준비 문서: [2026-10-12_scout_technical_screen_prep.html](2026-10-12_scout_technical_screen_prep.html)
+
+~~이전 추정: 리크루터 → HM → 기술 스크린 60분 → 온사이트(발표 + 실습)~~ — 리크루터 안내로 교정. HM 콜 단계는 없고, 발표·실습 과제 언급도 없었다
+- 이전 근거: Glassdoor "Scout AI" 페이지 요약에 "3라운드, 온사이트에서 formal presentation과 hands-on practical exam"이 있다. 다만 직군이 미상이고 동명 채용 플랫폼과 섞여 있다 [추정][9]
 - 초기 국방 하드웨어 스타트업(Anduril·Neros) 패턴으로 보면 실습은 "datasheet 주고 드라이버/레지스터 시퀀스 작성", "logic analyzer 캡처 해석", "보드에서 센서 읽기"일 가능성이 있다 [추정]
 
 ### 4.2 실제 보고된 질문
-- 아직 없음. Glassdoor/Blind/Reddit에서 이 직군 후기를 찾지 못했다(2026-10-03 기준). 리크루터 콜 때 라운드 구성을 꼭 물어볼 것
+- 공개 후기는 아직 없음(2026-10-03 기준).
+- [확인됨 — 리크루터 10-12] 코딩 주제 힌트: "Leetcode-ish, Scout engineering type of problem", 센서 시계열(time, temp)에서 과열 감지·반환. 엣지 케이스 테스트와 임베디드 제약을 본다
 
 ### 4.3 JD 기반 예상 기술 질문
 | 카테고리 | 질문 | 왜 나올지 (JD 근거) |
@@ -279,6 +291,77 @@ Fury가 **camera-only**이므로 센서 스택의 중심은 카메라다. 여기
 - [ ] **Hark Embedded AI 노트 재사용** (2.9 표): G1·G2·G3·G6·G7, H1·H7, J6, K2, N3, O2 — `dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/`
 - [ ] **J. 회사·제품 이해**: Fury VLA 개념, Ox 오케스트레이터, Army UxS·ISV, ROS 2 기초(센서 메시지·타임스탬프) [추정]
 
+### 4.9 리크루터 콜 준비 — 2026-10-12(월) 10:00 · Bobby Celestin
+**콜의 목적은 세 가지다**
+1. **탈락 조건 통과**: U.S. Person, 클리어런스 의향, Sunnyvale onsite, 국방 미션, Embedded Linux — 짧고 분명하게 "Yes"
+2. **정보 얻기**: 프로세스·타임라인, HM·팀 구성, Linux와 MCU 비중, 레벨, 보상 구조
+3. **보상 포지셔닝**: 숫자는 먼저 말하지 않는다. 말해야 하면 "공고 밴드의 상단"
+
+리크루터 콜은 기술 면접이 아니다. 20~30분 안에 **"말이 잘 통하고, 필수 조건이 맞고, 진짜 관심 있는 사람"**으로 보이면 된다 [추정].
+
+**예상 흐름과 답변 (영어 초안)**
+
+| 질문 | 답변 요지 |
+|---|---|
+| Tell me about yourself (60초, 리크루터용) | 아래 초안 ① |
+| Why Scout? | 아래 초안 ② |
+| Why leave Apple so soon? (Dec 2025 입사) | 아래 초안 ③ — Apple 험담 금지, "방향"으로 답한다 |
+| **Embedded Linux 경험은?** (가장 중요) | 아래 초안 ④ — 사실대로 말하되 강점부터 |
+| U.S. Person인가? | "Yes." (사실 확인 후 답할 것) |
+| 클리어런스 받을 의향은? | "Yes, I'm willing to go through the TS process." |
+| Sunnyvale onsite 가능? | "Yes — I'm already in the Bay Area, so the commute is easy." 필드 테스트(Paso Robles 인근) 출장도 괜찮다고 말할 것 |
+| 국방·자율 무기 미션에 대해 | "I'm comfortable with and motivated by the defense mission — I've been focusing my search on defense and robotics." |
+| 다른 진행 중인 프로세스? | 회사명은 말하지 않는다. "I'm in later stages with a couple of other companies, so I'd like to understand Scout's timeline." — 너무 세게 압박하지 않는다 |
+| 희망 연봉? | 아래 초안 ⑤ |
+| 현재 연봉? | 말하지 않는다. CA Labor Code 432.3상 고용주는 이전 급여를 물을 수 없다 → "I'd prefer to focus on the value for this role." |
+| 입사 가능 시점 | "Typically two weeks' notice after an offer." (본인 상황에 맞게) |
+| 비자 스폰서 필요? | "No." |
+
+**① Tell me about yourself (리크루터용, 60초)**
+> I'm an embedded systems engineer who works right at the hardware–software boundary. At Apple I'm in the wireless chipset integration group — I bring up new silicon on shipping platforms and root-cause interface failures like I2C, SPMI and PCIe, down to the signal level with scopes and protocol analyzers. Before that I spent about seven years at SK hynix and Solidigm on SSD firmware: bringing up new chips on FPGA, verifying buses like I2C and SPI, and shipping production C/C++ firmware for customers like Google and Meta. What I enjoy most is getting new hardware to talk and proving the data coming out of it is right — and that's exactly what this role is about: bringing up sensors on new platforms.
+
+**② Why Scout?**
+> Two reasons. First, I want to move into robotics and physical AI, and Scout is one of the few places where a foundation model is actually driving real vehicles in the field. Second, Fury is camera-first and learns from real driving data — so the quality of sensor data directly decides how good the model is. That's the layer I'm strongest at, and at a team this size I could own it end to end.
+
+**③ Why leave Apple?**
+> Apple has been great experience for silicon integration at scale. But my long-term goal is robotics and autonomous systems, and I'd rather make that move now and build sensor and platform software for robots than stay on consumer devices.
+
+**④ Embedded Linux — 정직하게, 강점부터**
+> My production work has mostly been bare-metal and RTOS on Cortex-R/M and Xtensa — the "bottom half" of a driver: registers, interrupts, DMA, and bring-up with a scope. Linux has been my daily environment for tooling and test infrastructure. Over the past few weeks I've been going deep on the Linux kernel side — device tree, platform/I2C/SPI drivers, IIO, V4L2, and CAN with SocketCAN — building and booting kernels in a QEMU lab. So the hardware side is where I'm strongest, and I'm ramping fast on the kernel framework side.
+
+- 주의: **Linux 드라이버를 제품에 출시했다고 말하지 않는다**. 실제로 직접 해 본 범위(QEMU 랩, 모듈 빌드 등)만 말하고, 본인 경험에 맞게 문장을 고친다
+- 리크루터가 깊게 파고들지는 않는다. "HM 단계에서 더 자세히 이야기할 수 있다"로 넘긴다
+
+**⑤ 희망 연봉**
+> I'd like to learn more about the level and the full package first. I saw the posted range of $210K to $265K — given my experience with bring-up and integration, I'd expect to be toward the upper end of that range, and I'm also interested in understanding the equity component.
+
+- 근거: 다른 진행 건의 Hark 구두 base ~$250K + 사이닝 $100K. 하한선을 먼저 말하지 않는다
+- 레벨이 Senior가 아니라 Staff로 열릴 수 있는지도 물어볼 것
+
+**리크루터에게 물을 질문 (우선순위 순, 5~6개만)**
+1. What does the interview process look like from here, and what's the typical timeline? (단계 수, 기술 스크린 형식, 온사이트에 **발표 + 실습 과제**가 있는지 [9])
+2. Who is the hiring manager, and how big is the embedded / hardware team today?
+3. How is the role split between embedded Linux on the compute side and MCU firmware? Which sensors and compute platform are you using today?
+4. Is this a Senior-level role, or is there flexibility on level? How is the compensation structured — base, bonus, and equity (options or RSUs, vesting)?
+5. What does onsite vs. field time look like — how often do engineers go to the test site?
+6. (시간이 남으면) Who owns deploying Fury onto vehicle compute — does embedded work on the camera-to-GPU path? → 2.9 가설 확인
+
+**하지 말 것**
+- edge AI·ML을 앞세우지 않는다. 메시지는 **"센서 데이터를 믿을 수 있게 만드는 사람"**이다 (2.9)
+- 숫자를 먼저 말하지 않는다. 현재 연봉을 공개하지 않는다
+- 다른 회사 이름을 말하지 않는다. Apple을 험담하지 않는다
+- 너무 길게 답하지 않는다. 한 답변에 30~60초면 충분하다
+
+**콜 전 체크리스트**
+- [ ] U.S. Person 여부 최종 확인 (답이 확실해야 함)
+- [ ] 이 페이지 · 레쥬메 PDF · JD(부록 A)를 화면에 띄워 두기
+- [ ] ①~⑤ 소리 내서 2번 읽기 (특히 ④ Embedded Linux)
+- [ ] 조용한 장소, 이어폰, 메모장 · 9:55에 입장
+- [ ] 콜 직후 메모: 프로세스·HM 이름·밴드·타임라인 → 5. 진행 로그에 기록
+
+**콜 후 감사 메일 (짧게, 당일)**
+> Hi Bobby, thanks for taking the time today and for walking me through the role and the process. I'm even more excited about the sensor bring-up work on Fury's platforms. Looking forward to the next steps. Best, Don
+
 ---
 
 ## 5. 진행 로그
@@ -287,6 +370,13 @@ Fury가 **camera-only**이므로 센서 스택의 중심은 카메라다. 여기
 |---|---|---|
 | 2026-10-03 | 컨텍스트 파일 생성 (JD 조사) | Greenhouse 공고 5387985008 (최초 08-12, 갱신 10-01). 적합도 ⭐3.5 / 방향 ⭐4. 미지원. Embedded Linux 필수 → 스터디 목록 확정 예정 |
 | 2026-10-04 | 가설 검증: "이 자리 = Hark Embedded AI 역량?" | 결론 절반만 맞음 — edge inference는 AI Engineer 공고에 배정, 임베디드는 센서·FW 층. Hark 노트 재사용도 표 추가(2.9). 준비 비중 Linux/센서 70 : edge AI 30 |
+| 2026-10-08 | **리크루터 연락** (Bobby Celestin, bobby@scoutco.ai) | 지원 후 리크루터 콜 요청 메일. ModernLoop 링크로 일정 선택 |
+| 2026-10-11 | 리크루터 콜 일정 확정 + 준비 | **2026-10-12(월) 10:00**. 4.9 준비 섹션 작성. 공고 여전히 열려 있음(10-01 갱신), 4월 이후 새 보도자료 없음 |
+| 2026-10-12 | **리크루터 콜 완료** (Bobby) — "it goes well" | 다음: Technical screen (CoderPad C/C++ 45분, 센서·과열 감지류). Final 4라운드(CEO·CTO·HW·임베디드). 회사 63명/엔지니어 25명, 임베디드 2명(조지아) → Sunnyvale 첫 임베디드. 스크린 ASAP 요청 |
+| 2026-10-12 | **리크루터 공식 메일** — Technical interview 초대 | Ashby 일정 링크, 48시간 안에 가능 시간 제출(→ 10-14 11:19 AM PT). Focus에 "experience building and scaling hardware systems" 추가 확인. 언어 자유 |
+| 2026-10-12 | Technical screen 준비 문서 작성 | `2026-10-12_scout_technical_screen_prep.md/.html` — Tier1 8 · Tier2 10 · Debug 8 · D-5 플랜. 테스트 기대값은 참조 C 코드로 검증(ASan/UBSan ALL PASS) |
+| 2026-10-12 | 연습 사이트 구축 | `technicalScreenPrep/` — 18문제 + Debug 드릴, 문제 영어·풀이 한국어·SVG 차트, stub/solution 전부 ASan/UBSan 검증 |
+| 2026-10-13 | 메일 반영 업데이트 | 준비 문서에 §2.6 Tips→행동 규칙, §6.0 날짜 추천, §7 scaling 스토리 A·B·C 추가 |
 
 ---
 

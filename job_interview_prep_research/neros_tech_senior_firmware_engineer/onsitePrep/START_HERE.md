@@ -1,20 +1,28 @@
 # 🧭 START HERE — Neros 온사이트 준비, 어디서부터 볼까
 
-> 온사이트 구성은 **Tour 30분 → 내 경력 발표 1시간 → 1:1 기술 여러 개**(C/C++ · ring buffer · generic system design)다. 날짜는 아직 미정. **발표와 ring buffer가 가장 오래 걸리니 그 둘부터** 시작한다. 남은 시간에 맞는 코스 하나만 골라 위에서부터 내려간다.
+> 온사이트 구성은 **Tour 30분 → 내 경력 발표 1시간 → 1:1 기술 여러 개**(C/C++ · 코딩 · generic system design)다. **온사이트 초대 확정** — Adam(09-18) → Michael Honor(10-01) → Jon Kotowski(10-08 technical screen) 3라운드 통과. 날짜는 **10-12 Devin 통화에서 결정**. ring buffer는 스크린에서 했으니 이번엔 **발표가 가장 오래 걸리는 준비**다. 남은 시간에 맞는 코스 하나만 골라 위에서부터 내려간다.
+
+## 🆕 10-12 Devin 콜로 형식 확정 → 새 키트로
+
+> 발표 40분 · embedded system design · **Python 코딩** · HW/test design. 이 폴더는 형식 확정 전 자료다. 지금은 **[onsiteKit](../../onsiteKit/index.html)** 에서 시작.
+
+## 🗓️ (이전) 온사이트 10일 계획 (10-11~)
+
+> **[P01 10일 계획](plan/2026-10-11_P01_onsite_10day_plan.md)** (Devin 콜 질문 · 날짜별 일정 · 체크리스트) → **[N10 예상 문제 뱅크](notes/2026-10-11_N10_onsite_expected_problems.md)** (1:1 코딩 S/A/B · 개념 20 · system design 10 · Platform 엔지니어 관점) → **[N11 발표 스토리 워크북](notes/2026-10-11_N11_presentation_story_workbook.md)** (스토리 표 · 2/5/20분 버전 · 리허설 기록). 새 C 코드: [패킷 파서 상태 머신](code/packet_parser_sm.c) · [메모리 풀](code/mem_pool.c) · [소프트 타이머](code/soft_timer.c) (`make -C code test`)
 
 ## 🧾 10-08 technical screen 반영 (먼저 읽기)
 
-> 스크린은 **C 코딩만**: ring buffer(외부 버퍼 · bulk all-or-nothing · peek offset) → 보너스 extract_packet(CRC). Don 자평 잘 풀었음. 들은 정보: **FW 17명 · Test 3명 · + full stack**. 재구성 · 참고 풀이 · **온사이트 우선순위(발표 → C 심화 → 테스트 인프라 system design → factory test FW 비전)**: [L09](../../technicalScreenPrep/site/lecture/2026-10-09_L09_screen_recap.html)
+> 스크린은 **C 코딩만**: ring buffer(외부 버퍼 · bulk all-or-nothing · peek offset) → 보너스 extract_packet(CRC). → **통과, 온사이트 초대**. 들은 정보: **FW 17명 · Test 3명 · + full stack**. 재구성 · 참고 풀이 · **온사이트 우선순위(발표 → C 심화 → 테스트 인프라 system design → factory test FW 비전)**: [L09](../../technicalScreenPrep/site/lecture/2026-10-09_L09_screen_recap.html)
 
-## ⏱️ 지금 바로 (결과 통보 전, 2~3시간)
+## ⏱️ 시간이 2~3시간뿐일 때 — 빠른 코스
 
 | 순서 | 시간 | 볼 것 | 왜 |
 |---|---|---|---|
-| 1 | 15분 | [P00 게임 플랜](plan/2026-10-01_P00_onsite_game_plan.md) | 전체 그림과 우선순위 |
-| 2 | 20분 | [N01 회사 스택 지도](notes/2026-10-01_N01_company_stack_map.md) — 0절 요약, 4절 면접관별 관심사 | 누가 무엇을 물을지 |
-| 3 | 60분 | [N03 발표](notes/2026-10-01_N03_presentation_1hour.md) — **4절 메인 사례 고르기**, 표 채우기 | 가장 오래 걸리는 준비 |
-| 4 | 40분 | [N05 ring buffer](notes/2026-10-01_N05_ring_buffer_onsite.md) → 보지 않고 1회 작성 | 확정된 코딩 주제 |
-| 5 | 20분 | [N07 퀴즈 뱅크](notes/2026-10-01_N07_embedded_quiz_bank.md) — A절 Michael 퀴즈 복기 | PCIe를 SW 관점으로 다시 |
+| 1 | 15분 | [P01 10일 계획](plan/2026-10-11_P01_onsite_10day_plan.md) — 0절 비중, 2절 Devin 질문 | 전체 그림과 우선순위 |
+| 2 | 60분 | [N11 발표 워크북](notes/2026-10-11_N11_presentation_story_workbook.md) — **4절 메인 스토리 고르기**, 5절 표 채우기 | 가장 오래 걸리는 준비 |
+| 3 | 40분 | [N10 예상 문제](notes/2026-10-11_N10_onsite_expected_problems.md) 1절 S등급 — [패킷 파서](code/packet_parser_sm.c)를 보지 않고 1회 | 스크린 다음 단계의 코딩 |
+| 4 | 20분 | [N10 3절](notes/2026-10-11_N10_onsite_expected_problems.md) — system design S등급 하나를 10분 화이트보드 | Platform 엔지니어 대비 |
+| 5 | 20분 | [N10 2절](notes/2026-10-11_N10_onsite_expected_problems.md) 개념 질문 10개 | 퀴즈형 대비 |
 
 ## ⏱️ 온사이트 날짜가 잡히면 — 전체 코스
 
