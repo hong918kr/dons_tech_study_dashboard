@@ -1,6 +1,6 @@
 # Nimble Robotics — Senior Robotics Firmware Engineer · Context
 
-> **최종 갱신**: 2026-10-07 · **상태**: 📞 리크루터
+> **최종 갱신**: 2026-10-17 · **상태**: ❌ 불합격 (리크루터 콜 후)
 > **JD**: https://job-boards.greenhouse.io/nimblerobotics/jobs/4384912009 · **위치**: San Francisco, CA (**full-time SF office** [확인됨 리크루터]) · **연봉 밴드**: $180,000 – $230,000 + "generous equity"
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
@@ -17,7 +17,8 @@
 - **핵심 어필**: ① 신규 silicon/FPGA FW bring-up (Cortex-R8/R82/M0+, bare-metal) ② PCIe/I2C/SPMI/RFFE 인터페이스 레벨 root cause (DSO·protocol analyzer) ③ production FW의 error reporting/handling 설계 + NPI→MP 팩토리 테스트 설계
 - **최대 갭/리스크**: 모터 제어(FOC·commutation·encoder)·CAN/CAN-FD·functional safety 경험 없음 / JD의 "4+ yrs production robotics or automation" / 밴드 상단 $230K는 Apple·Hark($250K 구두) 대비 낮을 수 있음 / 주 50–60시간 문화 [추정] [6]
 - **예상 인터뷰 포맷**: 리크루터 → HM 기술 스크린(1h) → **72h take-home**(SW + robotics/embedded) → 코딩·도메인·시스템 디자인 → **CEO 라운드** [추정 — SWE 후기 기반] [7][8]
-- **다음 액션**: Nar Ammar에게 회신 → 첫 콜에서 레벨·팀(actuation vs. sensing vs. safety)·take-home 여부·onsite 일수·equity 확인. 콜 전에 BLDC/FOC + CAN 개념 1회독.
+- **결과 (2026-10-17)**: 리크루터 콜 진행 후 ❌ 불합격 통보 → 포지션 종료. 회고는 6장 참고
+- ~~**다음 액션**: Nar Ammar에게 회신 → 첫 콜에서 레벨·팀(actuation vs. sensing vs. safety)·take-home 여부·onsite 일수·equity 확인. 콜 전에 BLDC/FOC + CAN 개념 1회독.~~ (종료)
 
 ---
 
@@ -252,10 +253,19 @@ Recruiter (Nar Ammar) 콜 30m
 |---|---|---|
 | 2026-10-06 | Nar Ammar(Nimble)가 먼저 연락 · 컨텍스트 파일 생성 (JD·회사 조사) | Nar Ammar의 직함(리크루터/HM)은 미확인 — 공개 검색 결과 없음 |
 | 2026-10-07 | Nar Ammar(리크루터) 메일: Robot team, full-time SF office, 30분 intro video call 요청 (다음 주 7am–2pm PT) | 레쥬메 + 가능 시간 회신 |
+| 2026-10-17 | 리크루터 intro call 진행 → ❌ 불합격 통보 | 사유는 따로 기록 안 함. 포지션 종료 |
 
 ---
 
 ## 6. 인터뷰 노트 & 회고
+
+### 2026-10-17 · Recruiter intro call → 불합격 · 리크루터 Nar Ammar
+- 진행: 30분 intro video call (Robot team, full-time SF office) → 불합격 통보
+- 사유: 따로 기록 안 함 (기록할 게 생기면 여기에 추가)
+- 회고 / 다음 회사에 가져갈 교훈 [추정 — 0·3장 분석 기준]:
+  - JD의 중심축이 **실시간 모터 제어 + CAN + 로보틱스 양산 연차**인 자리는 bring-up·디버그 강점만으로는 1차 필터를 넘기 어렵다 → robotics 액추에이션 FW 자리를 노리려면 FOC/CAN 실습 포트폴리오를 먼저 만들어 둔다
+  - 리크루터가 먼저 연락한 경우에도 리크루터 콜 자체가 스크리닝이다 → 콜 전에 "도메인 갭 + 이미 진행 중인 학습"을 30초 답변으로 준비
+  - 재사용 자산: 이 파일의 4.3 예상 질문표(CAN·FOC·safe-state·HIL triage), 4.6 Tell-me-about-yourself 초안 → 다른 robotics FW 지원 때 그대로 활용
 
 <!-- 라운드마다 추가:
 ### YYYY-MM-DD · <라운드명> · 면접관 <역할>

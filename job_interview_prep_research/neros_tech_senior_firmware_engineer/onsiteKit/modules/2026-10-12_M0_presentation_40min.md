@@ -20,6 +20,8 @@
 
 > **Neros에서 이게 중요한 이유:** FW Test 팀은 3명이고 factory test FW가 아직 없다 [확인됨 이전 라운드]. "테스트 인프라를 처음부터 세울 수 있는 사람"인지 보는 자리다.
 
+> 🖼️ **슬라이드 10장 (10-15 개편)**: [Neros Onsite Presentation](https://claude.ai/artifact/87T6yzGt4vrDvws7UtrHvt). Don의 굵직한 프로젝트 4개 + 레쥬메 기준: 표지 → 경력·프로젝트 4개 → ① 대량 테스트 인프라 → ② 검증용 FW → ③ NVMe 텔레메트리 → ④ 신규 칩셋 bring-up~MP → 문제 접근법(Isolate/Capture/Stress/Scale + 짧은 스토리) → 드론에 대응시키면 → 첫 90일 → Q&A. 아래 2절의 16장 표는 이전 초안이에요. 남은 빈칸은 주황색 `[Don: …]`이에요.
+
 ## 1-1. 패널 6명에 맞추기
 
 | 청중 | 관심 [추정] | 슬라이드에서 챙길 것 |

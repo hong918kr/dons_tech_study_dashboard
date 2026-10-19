@@ -1,0 +1,1776 @@
+# J5. 전원 차단 안전성 — fsync · write barrier · 저널 모드 · eMMC 캐시 · 로그 저장 설계
+
+> **이 노트를 다 읽으면**: 앱 버퍼에서 NAND까지 데이터가 머무는 6개 지점과 각 지점을 넘기는 호출(fflush · fsync · FLUSH · FUA)을 그림으로 설명할 수 있다 · "temp에 쓰고 fsync → rename → 디렉터리 fsync" 패턴의 각 단계가 왜 필요한지 dm-log-writes 재생 결과로 증명할 수 있다 · fsync가 장치에 보내는 FLUSH/FUA를 tracefs로 직접 보고 `write_cache`·NVMe VWC·eMMC cache/reliable write와 연결할 수 있다 · fsync EIO를 "한 번만 보고되는 치명적 에러"로 다루고, 필드 로봇용 append-only 로그 저장소(CRC + seq + 세그먼트 회전)를 짜고 kill 테스트로 검증할 수 있다
+> **왜 필요한가**: "전원이 갑자기 나가도 설정 파일이 안 깨지게 하려면?", "fsync는 장치까지 무엇을 보내나?", "fsync가 EIO면 다시 부르면 되나?"는 Embedded Linux 면접 단골이고, 실무에서는 현장 로봇이 배터리 분리 후 부팅 불가 · 로그 0바이트 · 설정 초기화로 돌아오는 사고의 원인 분석으로 다시 나온다
+> **Don 기준 난이도**: PLP 캡, 메타데이터 flush, write cache, NVMe Flush/FUA 처리는 Don이 장치 쪽에서 직접 구현한 내용이다 / 새로 배울 부분은 그 **반대편 — 호스트(Linux)가 무엇을 약속하고, 앱이 무엇을 해야 그 약속을 받는가**
+> **선행 노트**: A3(파일 I/O — fflush/fsync 기초, O_DIRECT 정렬), I11 §6(blk-mq — request와 tracepoint), J1(임베디드 저장장치). 같은 모듈의 J2(ext4/F2FS 저널링 모드 내부), J4(UBIFS/JFFS2 전원 차단 내성)와 짝을 이룬다 — 이 노트는 파일시스템 내부가 아니라 **앱 ↔ 커널 ↔ 장치를 관통하는 내구성 계약**을 다룬다
+
+---
+
+## 0. 큰 그림 — "저장됐다"는 말의 여섯 가지 뜻
+
+Don이 SSD 펌웨어에서 PLP(Power Loss Protection)를 설계할 때 질문은 이것이었다: "호스트가 완료를 받은 쓰기는, 지금 전원이 빠져도 살아남는가?" 장치 쪽 답은 캐패시터 에너지로 DRAM write cache와 매핑 테이블을 NAND에 dump하는 것이었다.
+
+Linux 쪽에도 똑같은 질문이 있다. 다만 데이터가 머무는 곳이 훨씬 많다. 앱이 `fprintf`로 쓴 한 줄은 장치 캐시에 도달하기 전에 이미 세 군데(앱 버퍼, stdio 버퍼, page cache)를 거치고, 그 각각이 서로 다른 사건(앱 crash, 커널 panic, 전원 차단)에 서로 다르게 반응한다.
+
+```svg
+<svg viewBox="0 0 680 470" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><text x="150.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">데이터가 머무는 곳</text><text x="400.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">다음 층으로 넘기는 것</text><text x="595.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">살아남는 사건</text><rect x="30" y="34" width="240" height="36" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="150.0" y="56.5" font-size="13" text-anchor="middle">앱 버퍼 (구조체 · 링버퍼)</text><text x="595.0" y="56.0" font-size="12" text-anchor="middle">앱 crash에도 소실</text><line x1="150.0" y1="72.0" x2="150.0" y2="96.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah1)"/><text x="290.0" y="82.0" font-size="12" text-anchor="start">write() 직접 호출</text><rect x="30" y="100" width="240" height="36" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="150.0" y="122.5" font-size="13" text-anchor="middle">stdio 버퍼 (FILE *)</text><text x="595.0" y="122.0" font-size="12" text-anchor="middle">앱 crash에도 소실</text><line x1="150.0" y1="138.0" x2="150.0" y2="162.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah1)"/><text x="290.0" y="148.0" font-size="12" text-anchor="start">fflush() → write()</text><rect x="30" y="166" width="240" height="46" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="150.0" y="185.1" font-size="13" text-anchor="middle">page cache — dirty page</text><text x="150.0" y="202.1" font-size="13" text-anchor="middle">(커널 RAM)</text><text x="595.0" y="193.0" font-size="12" text-anchor="middle">앱 crash O · 전원 X</text><line x1="150.0" y1="214.0" x2="150.0" y2="238.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah1)"/><text x="290.0" y="224.0" font-size="12" text-anchor="start">writeback (30 s 뒤) · fsync</text><text x="290.0" y="239.0" font-size="12" text-anchor="start">sync_file_range · O_DIRECT도 여기까지</text><rect x="30" y="242" width="240" height="46" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="150.0" y="261.1" font-size="13" text-anchor="middle">block layer · 드라이버 큐</text><text x="150.0" y="278.1" font-size="13" text-anchor="middle">(bio → request → 명령)</text><text x="595.0" y="269.0" font-size="12" text-anchor="middle">앱 crash O · 전원 X</text><line x1="150.0" y1="290.0" x2="150.0" y2="314.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah1)"/><text x="290.0" y="300.0" font-size="12" text-anchor="start">드라이버가 장치로 디스패치</text><text x="290.0" y="315.0" font-size="12" text-anchor="start">(장치가 완료 응답 = 캐시에 받았다)</text><rect x="30" y="318" width="240" height="46" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="150.0" y="337.1" font-size="13" text-anchor="middle">장치 휘발 캐시</text><text x="150.0" y="354.1" font-size="13" text-anchor="middle">(eMMC cache · NVMe DRAM)</text><text x="595.0" y="345.0" font-size="12" text-anchor="middle">PLP 없으면 전원 X</text><line x1="150.0" y1="366.0" x2="150.0" y2="390.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah1)"/><text x="290.0" y="376.0" font-size="12" text-anchor="start">FLUSH 명령 · FUA 쓰기</text><text x="290.0" y="391.0" font-size="12" text-anchor="start">fsync가 끝에 보내는 것</text><rect x="30" y="394" width="240" height="36" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="150.0" y="416.6" font-size="13" text-anchor="middle">NAND (비휘발)</text><text x="595.0" y="416.0" font-size="12" text-anchor="middle">전원 차단 O</text><text x="340.0" y="456.0" font-size="12" text-anchor="middle">빨강·주황 = 전원이 나가면 사라질 수 있는 곳 · 초록 = 비휘발. fsync가 반환했다 = 이 파일의 데이터가 초록 칸에 있다</text></svg>
+```
+그림 1 — 쓰기 경로와 휘발 지점. 앱이 "저장했다"고 믿는 순간은 보통 page cache(주황)까지다. fsync가 반환해야 비로소 초록 칸에 있다.
+
+이 노트의 핵심 문장 세 개를 먼저 적어 둔다.
+
+- **`write()` 반환은 "커널이 받았다"는 뜻이지 "디스크에 있다"는 뜻이 아니다.** 아래 예제 1에서 4 MiB가 30초 넘게 RAM에만 있었다.
+- **fsync는 두 가지를 한다**: dirty page를 장치로 내려보내고(writeback), 장치에게 FLUSH(또는 FUA 쓰기)를 보내 장치 휘발 캐시까지 비운다. 두 번째가 없으면, PLP가 없는 장치에서는 데이터가 장치 DRAM 캐시 안에서 죽는다.
+- **원자성은 fsync가 주지 않는다.** fsync는 "언제"를 정할 뿐이다. "옛것 아니면 새것, 중간은 없다"는 앱이 rename 패턴이나 CRC + seq 로그로 직접 만들어야 한다.
+
+임베디드 장비에서 이게 문제가 되는 장면은 분명하다. 센서 키트를 단 로봇이라면 배터리 커넥터가 빠지거나, 운영자가 비상 정지로 전원을 끊거나, 모터 기동 전류로 brown-out이 난다. 그다음 부팅에서 설정 파일이 0바이트이거나 캘리브레이션 값이 초기화되어 있으면, 그건 거의 항상 이 노트의 패턴 중 하나를 빼먹은 결과다.
+
+### 0.1 실습 환경
+
+모든 예제는 Lima VM `elinux`(Ubuntu 26.04, VM 커널 `7.0.0-38-generic`) 안의 QEMU 랩에서 실행했다. 전원 차단·장치 에러 흉내(dm-log-writes, dm-flakey, dm error target, fail_make_request)는 **전부 QEMU 게스트(커널 `6.18.55-fs`, `/var/lab/out/Image-fs`) 안에서만** 했다. 이 커널은 랩 설정에 dm-flakey/log-writes/dust/delay, `FAULT_INJECTION` + `fail_make_request`, `BLK_DEV_IO_TRACE`, NVMe를 더한 것이다.
+
+게스트 rootfs는 랩 BusyBox initramfs를 `/var/tmp/J5/rootfs`로 복사하고, 필요한 dm·nvme 모듈(`.ko`), VM의 `dmsetup`(공유 라이브러리 포함), 그리고 이 노트의 정적 링크 바이너리(`gcc -static`)를 `/j5/`에 넣어 다시 묶었다. ext4 이미지는 BusyBox에 `mkfs.ext4`가 없으므로 VM 쪽에서 만든다.
+
+```sh
+# VM: ext4 이미지를 만들고 게스트 부팅 (LAB_CMD = 게스트 안에서 실행할 명령, 공백은 ~)
+mkfs.ext4 -q -F -E lazy_itable_init=0,lazy_journal_init=0 d.img 32M
+qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -smp 2 -nographic \
+  -kernel /var/lab/out/Image-fs -initrd /var/tmp/J5/j5.cpio.gz \
+  -drive if=none,id=d0,file=d.img,format=raw,cache=writeback -device virtio-blk-device,drive=d0 \
+  -append "console=ttyAMA0 quiet LAB_CMD=/j5/g_xxx.sh"
+```
+
+`lazy_itable_init=0`은 마운트 뒤 백그라운드에서 inode 테이블을 0으로 채우는 ext4lazyinit 스레드를 없애려고 넣었다. 이게 있으면 dm-log-writes 로그와 장치 쓰기량 측정에 엉뚱한 쓰기가 섞인다.
+
+주의 하나. virtio-mmio 장치는 명령줄의 **역순**으로 `vda`, `vdb`가 된다. 디스크 두 개(데이터 + 로그)를 붙일 때 처음에 순서를 반대로 붙여서 로그 디스크에 마운트를 시도했다가 `Invalid argument`를 받았다. 게스트 스크립트에서 `/sys/block/vdX/size`를 찍어 확인하는 습관이 필요하다.
+
+### 0.2 예제 1 — write() 한 데이터는 page cache에 얼마나 머무나
+
+무엇을 확인하나: 4 MiB를 쓰고 아무것도 안 하면 `/proc/meminfo`의 `Dirty`가 언제 0이 되는지.
+
+```sh
+#!/bin/sh
+# guest: write() 한 데이터가 page cache에 dirty로 얼마나 머무나
+mount -t ext4 /dev/vda /mnt/a || exit 1
+cd /proc/sys/vm; for k in dirty_expire_centisecs dirty_writeback_centisecs dirty_background_ratio dirty_ratio; do echo "$k = $(cat $k)"; done
+grep -o 'commit=[0-9]*' /proc/mounts || echo "ext4 commit interval: default (5 s)"
+dd if=/dev/zero of=/mnt/a/blob bs=1M count=4 2>/dev/null
+t=0; while [ $t -le 40 ]; do
+  echo "t=${t}s $(grep -E '^(Dirty|Writeback):' /proc/meminfo | tr -s ' ' | tr '\n' ' ')"
+  sleep 5; t=$((t+5)); done
+```
+
+```text
+dirty_expire_centisecs = 3000
+dirty_writeback_centisecs = 500
+dirty_background_ratio = 10
+dirty_ratio = 20
+ext4 commit interval: default (5 s)
+t=0s Dirty: 4096 kB Writeback: 0 kB 
+t=5s Dirty: 4096 kB Writeback: 0 kB 
+t=10s Dirty: 4116 kB Writeback: 0 kB 
+t=15s Dirty: 4116 kB Writeback: 0 kB 
+t=20s Dirty: 4116 kB Writeback: 0 kB 
+t=25s Dirty: 4116 kB Writeback: 0 kB 
+t=30s Dirty: 4116 kB Writeback: 0 kB 
+t=35s Dirty: 20 kB Writeback: 0 kB 
+t=40s Dirty: 24 kB Writeback: 0 kB 
+```
+
+출력에서 볼 것: 4096 kB가 **30초 동안** 그대로 RAM에 있다가 30~35초 사이에 사라졌다. `dirty_expire_centisecs = 3000`(30초 지난 dirty page를 내림)과 `dirty_writeback_centisecs = 500`(flusher가 5초마다 깸)이 만든 창이다. 10초에 20 kB가 늘어난 것은 ext4 저널 커밋(5초 주기) 뒤 제자리 쓰기(checkpoint)를 기다리는 inode·비트맵 메타데이터 버퍼로 보인다(어떤 버퍼인지까지는 확인하지 않았다). 즉 **기본 설정의 Linux에서 fsync 없이 쓴 데이터는 최대 30초+α 동안 전원 차단에 무방비**다. Don의 SSD로 치면 "호스트가 30초 동안 Write 명령을 아예 안 보낸" 상태다.
+
+---
+
+## 1. 쓰기 경로와 휘발 지점 — 데이터는 어디에 머물다 죽나
+
+### 1.1 층별 정리
+
+| 층 | 누가 관리 | 다음 층으로 넘기는 것 | 얼마나 머무나 (기본값) | 무엇에 살아남나 |
+|---|---|---|---|---|
+| 앱 버퍼 | 앱 | `write()` | 앱 마음대로 | 아무것도 (앱 crash에도 소실) |
+| stdio 버퍼 (`FILE *`) | libc | `fflush()`, 버퍼 가득, `fclose()` | 버퍼 4~8 KiB 찰 때까지 | 아무것도 |
+| page cache (dirty) | 커널 | writeback, `fsync`, `sync_file_range` | 최대 30 s (`dirty_expire`) | **앱 crash, `kill -9`에는 산다** · 커널 panic·전원에는 죽는다 |
+| 파일시스템 메타데이터 (jbd2 트랜잭션) | ext4/jbd2 | 저널 커밋 | 최대 5 s (`commit=`) | 앱 crash에는 산다 |
+| block layer · 드라이버 큐 | 커널 | 드라이버 디스패치 | 수 µs~ms | 앱 crash에는 산다 |
+| 장치 휘발 캐시 | 장치 FW | FLUSH 명령, FUA 쓰기, FW 자체 정책 | 장치 마음대로 (ms~s) | PLP가 있으면 전원에도 산다 |
+| NAND | 장치 FW | — | — | 전원 차단에 산다 (단, 쓰다 끊긴 페이지와 paired page는 예외) |
+
+이 표에서 놓치기 쉬운 두 가지:
+
+- **프로세스 crash와 전원 차단은 완전히 다르다.** 앱이 SIGSEGV로 죽어도 `write()`까지 한 데이터는 page cache에 남아 결국 디스크로 간다. 그래서 개발 중 "kill로 테스트해 봤는데 안전했다"는 말은 전원 차단에 대해 아무것도 증명하지 못한다. 아래 §7.2의 kill 테스트도 이 점을 정확히 의식하고 설계했다(QEMU 프로세스 전체를 죽인다 = 게스트 RAM 전체가 사라진다).
+- **장치 캐시는 장치 FW의 영역이다.** Linux는 장치에게 "FLUSH 해라"라고 말할 수 있을 뿐, 그걸 진짜 하는지는 FW 정직성에 달렸다. 싸구려 SD 카드·USB 메모리는 FLUSH를 무시하는 경우가 실제로 있다(이 노트에서 측정하지 않음, 업계에서 알려진 현상).
+
+### 1.2 bare-metal 비유
+
+| Linux | Don의 SSD FW에서 비슷한 것 |
+|---|---|
+| page cache dirty page | 호스트 DRAM에 있는, 아직 Write 명령으로 안 온 데이터 (FW가 볼 수 없음) |
+| writeback | 호스트가 마침내 NVMe Write를 큐에 넣음 |
+| 장치 쓰기 완료 | FW가 DRAM write cache에 받고 CQE를 돌려줌 |
+| REQ_PREFLUSH → Flush 명령 | FW가 write cache + 매핑 테이블을 NAND로 내림 |
+| REQ_FUA → FUA 비트 | 이 쓰기만은 NAND 프로그램이 끝나야 CQE |
+| 저널 커밋 블록 | FW 메타데이터 로그의 "commit 레코드" |
+| fsync 반환 | 호스트 입장의 "PLP 경계 통과" |
+
+---
+
+## 2. 내구성 API 총정리 — 무엇이 진짜로 디스크까지 가나
+
+### 2.1 한 장 표
+
+A3 §7에서 fflush/fsync/fdatasync의 기본을 봤다. 여기서는 **장치 캐시까지 가는가(FLUSH/FUA를 보내는가)**를 기준으로 전부 다시 분류한다. "트레이스로 확인"은 §4의 tracefs 출력으로 이 노트에서 직접 본 것이다.
+
+| API | 하는 일 | 장치 FLUSH/FUA | 내구성 | 근거 |
+|---|---|---|---|---|
+| `fflush(f)` | stdio 버퍼 → `write()` | 없음 | 없음 | A3 ex9 |
+| `write()` | 유저 → page cache | 없음 | 없음 | 예제 1 |
+| `close()` | fd 정리 | 없음 | 없음 (ext4는 O_TRUNC 뒤 close에서 writeback을 **시작**만 함 — §3.4) | 예제 3 |
+| `sync_file_range(..., WAIT_BEFORE, WRITE, WAIT_AFTER)` | 범위의 dirty page를 장치로 내리고 완료 대기 | **없음** | **없음** — 메타데이터도, 장치 캐시도 안 건드림 | 트레이스로 확인 |
+| `O_DIRECT` 쓰기 | page cache 우회, 장치로 바로 | **없음** | **없음** — 장치 캐시에 머물 수 있음, 할당 메타데이터도 저널에 안 감 | 트레이스로 확인 |
+| `fdatasync(fd)` | 데이터 + "다시 읽는 데 필요한" 메타데이터(크기, 블록 할당) | FLUSH (또는 커밋의 PREFLUSH+FUA) | 이 파일의 데이터 | 트레이스로 확인 |
+| `fsync(fd)` | fdatasync + 모든 메타데이터(mtime 등) | 저널 커밋 PREFLUSH+FUA | 이 파일 전체 상태 | 트레이스로 확인 |
+| `O_DSYNC` / `O_SYNC` | 매 `write()`가 fdatasync / fsync 효과 | 매번 | 매 write 반환 시점 | 예제 2 비용 |
+| `syncfs(fd)` | 그 fd가 속한 파일시스템 전체 | FLUSH | 그 FS 전체 | 예제 13 |
+| `sync()` | 시스템 전체 | FLUSH | Linux에서는 완료를 기다린다(POSIX는 시작만 요구) | — |
+| `fsync(dirfd)` | 디렉터리 엔트리(파일 생성·rename·unlink) | 저널 커밋 | 이름의 존재 | 예제 3 |
+| `msync(MS_SYNC)` | mmap dirty page | fsync와 같은 경로 | mmap한 범위 | 이 노트에서 실행 안 함 |
+
+가장 많이 틀리는 두 줄이 **`O_DIRECT`와 `sync_file_range`** 다. 둘 다 "page cache를 건너뛰니까/내려보내니까 안전하겠지"라는 착각을 부른다. 하지만 둘 다 장치에 FLUSH를 보내지 않고, 파일 크기·블록 할당 같은 메타데이터를 저널에 커밋하지도 않는다. 데이터베이스가 O_DIRECT를 쓰면서도 반드시 fdatasync를 같이 부르는 이유다.
+
+`fsync`와 `fdatasync`의 차이는 "덮어쓰기"에서 크게 드러난다. 크기·블록이 안 바뀌는 덮어쓰기는 fdatasync가 저널 커밋 없이 데이터 쓰기 + FLUSH 하나로 끝나고, fsync는 mtime 때문에 저널 커밋까지 한다(§4.2 출력에서 요청 수가 2개 vs 6개).
+
+### 2.2 예제 2 — 내구성의 비용: 레코드 하나 append에 몇 µs?
+
+무엇을 확인하나: 256 B 레코드를 400번 append하면서 매번 아무것도 안 함 / fdatasync / fsync / O_DSYNC일 때 지연(p50, p90, p99)을 잰다. 그리고 QEMU `-drive cache=` 모드를 바꿔 "장치가 FLUSH를 어떻게 처리하느냐"가 이 비용을 얼마나 바꾸는지 본다.
+
+```c
+/* j5_lat: 레코드 하나(256 B)를 append할 때 내구성 방식별 지연 측정 */
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+static void die(const char *m) { perror(m); exit(1); }
+static double now_us(void) {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1e6 + t.tv_nsec / 1e3;
+}
+static int cmp(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+int main(int argc, char **argv) {
+    if (argc != 4) { fprintf(stderr, "usage: %s file none|fdatasync|fsync|odsync N\n", argv[0]); return 2; }
+    const char *mode = argv[2];
+    int n = atoi(argv[3]);
+    int fl = O_WRONLY | O_CREAT | O_TRUNC | O_APPEND;
+    if (!strcmp(mode, "odsync")) fl |= O_DSYNC;
+    int fd = open(argv[1], fl, 0644);
+    if (fd < 0) die("open");
+    char rec[256];
+    double *lat = malloc(sizeof(double) * n), sum = 0;
+    if (!lat) die("malloc");
+    for (int i = 0; i < n; i++) {
+        memset(rec, 'a' + i % 26, sizeof rec);
+        double t0 = now_us();
+        if (write(fd, rec, sizeof rec) != sizeof rec) die("write");
+        if (!strcmp(mode, "fdatasync") && fdatasync(fd)) die("fdatasync");
+        if (!strcmp(mode, "fsync") && fsync(fd)) die("fsync");
+        lat[i] = now_us() - t0;
+        sum += lat[i];
+    }
+    qsort(lat, n, sizeof(double), cmp);
+    printf("%-9s n=%d mean=%8.1f p50=%8.1f p90=%8.1f p99=%8.1f us\n", mode, n,
+           sum / n, lat[n / 2], lat[n * 9 / 10], lat[n * 99 / 100]);
+    close(fd);
+    return 0;
+}
+```
+
+```sh
+#!/bin/sh
+# guest: ext4 on vda, measure per-record latency for each durability mode
+mount -t ext4 /dev/vda /mnt/a || exit 1
+echo "write_cache=$(cat /sys/block/vda/queue/write_cache) fua=$(cat /sys/block/vda/queue/fua)"
+for m in none fdatasync fsync odsync; do /j5/j5_lat /mnt/a/lat_$m.bin $m 400; done
+umount /mnt/a
+```
+
+VM 쪽에서는 cache 모드 5가지(`writeback`, `writethrough`, `none`, `directsync`, `unsafe`)마다 새 256 MiB ext4 이미지를 만들고 `-drive ...,cache=<모드>`로 한 번씩 부팅해 위 스크립트를 돌렸다.
+
+```text
+== cache=writeback
+write_cache=write back fua=0
+none      n=400 mean=    39.6 p50=    30.0 p90=    38.1 p99=   187.3 us
+fdatasync n=400 mean=  2379.4 p50=  2201.8 p90=  2962.2 p99=  3525.1 us
+fsync     n=400 mean=  2341.5 p50=  2096.5 p90=  3059.8 p99=  4710.0 us
+odsync    n=400 mean=  2349.4 p50=  2055.6 p90=  3144.8 p99=  4285.4 us
+== cache=writethrough
+write_cache=write through fua=0
+none      n=400 mean=    39.7 p50=    30.2 p90=    37.1 p99=   165.0 us
+fdatasync n=400 mean=  2281.6 p50=  1984.6 p90=  3079.1 p99=  6439.4 us
+fsync     n=400 mean=  2689.0 p50=  2487.8 p90=  3831.3 p99=  8286.5 us
+odsync    n=400 mean=  3051.4 p50=  1873.6 p90=  2876.9 p99=  8892.3 us
+== cache=none
+write_cache=write back fua=0
+none      n=400 mean=    40.2 p50=    30.3 p90=    37.3 p99=   208.8 us
+fdatasync n=400 mean=  2253.1 p50=  1985.8 p90=  2979.5 p99=  3920.3 us
+fsync     n=400 mean=  2297.5 p50=  2086.1 p90=  2912.8 p99=  4124.0 us
+odsync    n=400 mean=  2614.4 p50=  2335.8 p90=  3392.0 p99=  7196.8 us
+== cache=directsync
+write_cache=write through fua=0
+none      n=400 mean=    39.9 p50=    30.7 p90=    37.2 p99=   174.0 us
+fdatasync n=400 mean=  2246.2 p50=  1924.0 p90=  2777.1 p99=  8754.6 us
+fsync     n=400 mean=  1674.7 p50=  1540.2 p90=  2120.8 p99=  3067.2 us
+odsync    n=400 mean=  1515.2 p50=  1446.3 p90=  1832.5 p99=  2492.8 us
+== cache=unsafe
+write_cache=write back fua=0
+none      n=400 mean=    40.0 p50=    30.1 p90=    37.5 p99=   195.2 us
+fdatasync n=400 mean=  1216.1 p50=  1126.8 p90=  1386.3 p99=  2057.9 us
+fsync     n=400 mean=  1246.0 p50=  1130.1 p90=  1536.0 p99=  3770.7 us
+odsync    n=400 mean=  1176.7 p50=  1121.8 p90=  1358.3 p99=  2150.8 us
+```
+
+비교용으로 같은 정적 바이너리를 VM 자체(ext4, 가상 디스크, 커널 7.0)에서도 돌렸다.
+
+```text
+none      n=400 mean=     0.4 p50=     0.3 p90=     0.3 p99=     1.4 us
+fdatasync n=400 mean=   263.1 p50=   219.4 p90=   262.9 p99=  1465.9 us
+fsync     n=400 mean=   245.9 p50=   217.3 p90=   278.0 p99=  1251.0 us
+odsync    n=400 mean=   228.1 p50=   207.8 p90=   250.5 p99=   653.2 us
+```
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><line x1="70.0" y1="270.0" x2="660.0" y2="270.0" stroke="#888" stroke-width="0.6" stroke-dasharray="4 3"/><text x="64.0" y="274.0" font-size="12" text-anchor="end">0.1 us</text><line x1="70.0" y1="224.0" x2="660.0" y2="224.0" stroke="#888" stroke-width="0.6" stroke-dasharray="4 3"/><text x="64.0" y="228.0" font-size="12" text-anchor="end">1 us</text><line x1="70.0" y1="178.0" x2="660.0" y2="178.0" stroke="#888" stroke-width="0.6" stroke-dasharray="4 3"/><text x="64.0" y="182.0" font-size="12" text-anchor="end">10 us</text><line x1="70.0" y1="132.0" x2="660.0" y2="132.0" stroke="#888" stroke-width="0.6" stroke-dasharray="4 3"/><text x="64.0" y="136.0" font-size="12" text-anchor="end">100 us</text><line x1="70.0" y1="86.0" x2="660.0" y2="86.0" stroke="#888" stroke-width="0.6" stroke-dasharray="4 3"/><text x="64.0" y="90.0" font-size="12" text-anchor="end">1 ms</text><line x1="70.0" y1="40.0" x2="660.0" y2="40.0" stroke="#888" stroke-width="0.6" stroke-dasharray="4 3"/><text x="64.0" y="44.0" font-size="12" text-anchor="end">10 ms</text><line x1="70.0" y1="40.0" x2="70.0" y2="270.0" stroke="currentColor" stroke-width="1.4"/><line x1="70.0" y1="270.0" x2="660.0" y2="270.0" stroke="currentColor" stroke-width="1.4"/><rect x="83.2" y="156.1" width="15" height="113.9" fill="#888" fill-opacity="0.75"/><rect x="101.2" y="70.2" width="15" height="199.8" fill="#4a7bd0" fill-opacity="0.75"/><rect x="119.2" y="71.2" width="15" height="198.8" fill="#e08a3c" fill-opacity="0.75"/><rect x="137.2" y="71.6" width="15" height="198.4" fill="#3f9a6b" fill-opacity="0.75"/><text x="119.2" y="288.0" font-size="12" text-anchor="middle">writeback</text><rect x="181.5" y="155.9" width="15" height="114.1" fill="#888" fill-opacity="0.75"/><rect x="199.5" y="72.3" width="15" height="197.7" fill="#4a7bd0" fill-opacity="0.75"/><rect x="217.5" y="67.8" width="15" height="202.2" fill="#e08a3c" fill-opacity="0.75"/><rect x="235.5" y="73.5" width="15" height="196.5" fill="#3f9a6b" fill-opacity="0.75"/><text x="217.5" y="288.0" font-size="12" text-anchor="middle">writethrough</text><rect x="279.8" y="155.9" width="15" height="114.1" fill="#888" fill-opacity="0.75"/><rect x="297.8" y="72.3" width="15" height="197.7" fill="#4a7bd0" fill-opacity="0.75"/><rect x="315.8" y="71.3" width="15" height="198.7" fill="#e08a3c" fill-opacity="0.75"/><rect x="333.8" y="69.1" width="15" height="200.9" fill="#3f9a6b" fill-opacity="0.75"/><text x="315.8" y="288.0" font-size="12" text-anchor="middle">none</text><rect x="378.2" y="155.6" width="15" height="114.4" fill="#888" fill-opacity="0.75"/><rect x="396.2" y="72.9" width="15" height="197.1" fill="#4a7bd0" fill-opacity="0.75"/><rect x="414.2" y="77.4" width="15" height="192.6" fill="#e08a3c" fill-opacity="0.75"/><rect x="432.2" y="78.6" width="15" height="191.4" fill="#3f9a6b" fill-opacity="0.75"/><text x="414.2" y="288.0" font-size="12" text-anchor="middle">directsync</text><rect x="476.5" y="156.0" width="15" height="114.0" fill="#888" fill-opacity="0.75"/><rect x="494.5" y="83.6" width="15" height="186.4" fill="#4a7bd0" fill-opacity="0.75"/><rect x="512.5" y="83.6" width="15" height="186.4" fill="#e08a3c" fill-opacity="0.75"/><rect x="530.5" y="83.7" width="15" height="186.3" fill="#3f9a6b" fill-opacity="0.75"/><text x="512.5" y="288.0" font-size="12" text-anchor="middle">unsafe</text><rect x="574.8" y="248.1" width="15" height="21.9" fill="#888" fill-opacity="0.75"/><rect x="592.8" y="116.3" width="15" height="153.7" fill="#4a7bd0" fill-opacity="0.75"/><rect x="610.8" y="116.5" width="15" height="153.5" fill="#e08a3c" fill-opacity="0.75"/><rect x="628.8" y="117.4" width="15" height="152.6" fill="#3f9a6b" fill-opacity="0.75"/><text x="610.8" y="288.0" font-size="12" text-anchor="middle">VM 호스트</text><text x="365.0" y="306.0" font-size="12" text-anchor="middle">QEMU -drive cache= 모드 (게스트 ext4 · virtio-blk) · 마지막 묶음은 VM 자체 ext4</text><rect x="80" y="14" width="12" height="12" fill="#888" fill-opacity="0.75"/><text x="96.0" y="25.0" font-size="12" text-anchor="start">write만</text><rect x="158" y="14" width="12" height="12" fill="#4a7bd0" fill-opacity="0.75"/><text x="174.0" y="25.0" font-size="12" text-anchor="start">fdatasync</text><rect x="260" y="14" width="12" height="12" fill="#e08a3c" fill-opacity="0.75"/><text x="276.0" y="25.0" font-size="12" text-anchor="start">fsync</text><rect x="330" y="14" width="12" height="12" fill="#3f9a6b" fill-opacity="0.75"/><text x="346.0" y="25.0" font-size="12" text-anchor="start">O_DSYNC</text><text x="670.0" y="25.0" font-size="12" text-anchor="end">256 B 레코드 1개당 p50 지연 (로그 축)</text></svg>
+```
+그림 5 — 위 측정의 p50을 로그 축으로. 어느 환경이든 "write만"과 "내구성 있는 write" 사이에 약 2~3자릿수 차이가 있다.
+
+출력에서 볼 것:
+
+- **write만 하면 30 µs(게스트, TCG 에뮬레이션) / 0.3 µs(VM 네이티브)**, fdatasync를 붙이면 2 ms / 220 µs. 어느 쪽이든 **약 70~700배**다. 이 비율이 로그 설계(§7)의 출발점이다. "레코드마다 fsync"는 초당 수백 건이 한계다.
+- `cache=unsafe`는 QEMU가 게스트의 FLUSH를 **무시**하는 모드다. fdatasync가 2.2 ms → 1.1 ms로 절반이 됐다. 즉 나머지 절반이 VM 호스트 쪽에서 진짜 `fdatasync`를 하는 비용이었다. 실장비에서 이 차이가 "장치 캐시 flush 비용"에 해당한다. 측정이 빨라졌다고 좋아할 일이 아니다 — unsafe는 이름 그대로 전원 차단 시 데이터 손실을 허용하는 설정이다.
+- `writethrough`/`directsync`에서는 게스트가 `write_cache=write through`를 본다. QEMU가 virtio 설정 공간의 WCE(write cache enable) 비트를 0으로 보고한 것이다. 이 경우 게스트는 FLUSH를 아예 보내지 않고(§4.3), 대신 QEMU가 매 쓰기를 동기로 처리한다. `directsync`의 fsync/O_DSYNC가 오히려 조금 빠른 것은 FLUSH 왕복이 빠졌기 때문이다.
+- 모든 모드에서 `fua=0`이다. virtio-blk는 FUA를 광고하지 않는다. 그러면 block layer가 FUA를 "쓰기 + 뒤따르는 FLUSH"로 흉내 낸다(§4.2에서 직접 본다).
+- 이 숫자는 TCG 에뮬레이션 + Mac 위 가상 디스크라 절대값은 의미가 적다. 실보드 eMMC에서 fdatasync는 보통 수 ms~수십 ms이고, 캐시 flush가 큰 eMMC는 100 ms를 넘기도 한다(측정하지 않음 — 일반적으로 알려진 범위).
+
+흔한 함정: 벤치마크를 `cache=unsafe` VM이나 "write through"로 바꾼 장치에서 돌리고 "fsync가 싸다"고 결론 내리는 것.
+
+---
+## 3. 원자적 갱신 — temp에 쓰고, fsync, rename, 디렉터리 fsync
+
+### 3.1 직관 — 설정 파일 하나를 바꾸는 네 가지 방법
+
+로봇이 캘리브레이션 결과를 `/data/calib.json`에 저장한다고 하자. 흔히 보는 코드 네 가지다.
+
+| 이름 | 코드 | 문제 |
+|---|---|---|
+| naive | `open(O_TRUNC)` → `write` → `close` | truncate가 먼저 디스크에 가면 빈 파일. fsync가 없으니 내구성도 없음 |
+| naive_fsync | `open(O_TRUNC)` → `write` → `fsync` → `close` | fsync 전 순간에 끊기면 빈 파일 · 반쯤 쓴 파일 가능 |
+| inplace | `open` (truncate 없이) → `pwrite(0)` → `fsync` | 쓰는 도중 끊기면 앞 블록은 새것, 뒤 블록은 옛것 = **찢긴 파일** |
+| atomic | temp에 `write` → `fsync(temp)` → `rename(temp, 진짜)` → `fsync(디렉터리)` | 언제 끊겨도 옛것 아니면 새것 |
+
+rename이 원자적이라는 것은 POSIX가 보장한다: `rename(old, new)`가 끝난 뒤 `new`라는 이름은 옛 파일 아니면 새 파일을 가리키고, 그 중간(이름이 없는 순간)은 다른 프로세스에게 보이지 않는다. 다만 이 원자성은 **실행 중인 시스템에서 다른 프로세스가 보는 관점**이다. 전원 차단 뒤에도 그런지는 파일시스템이 rename을 저널(btrfs는 COW 트랜잭션)로 원자적으로 커밋해 주느냐(ext4 · F2FS · XFS · btrfs는 해 준다)와, rename이 가리키는 **새 inode의 데이터가 rename보다 먼저 디스크에 있느냐**에 달렸다. 두 번째를 보장하는 게 `fsync(temp)`다.
+
+```svg
+<svg viewBox="0 0 680 384" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><text x="20.0" y="24.0" font-size="13" text-anchor="start" font-weight="bold">원자적 갱신 (atomic)</text><rect x="20" y="38" width="110" height="32" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="75.0" y="58.5" font-size="13" text-anchor="middle">write(tmp)</text><rect x="170" y="38" width="110" height="32" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="225.0" y="58.5" font-size="13" text-anchor="middle">fsync(tmp)</text><rect x="320" y="38" width="160" height="32" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="400.0" y="58.5" font-size="13" text-anchor="middle">rename(tmp→cfg)</text><rect x="540" y="38" width="120" height="32" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="600.0" y="58.5" font-size="13" text-anchor="middle">fsync(dir)</text><line x1="132.0" y1="54.0" x2="168.0" y2="54.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah2)"/><line x1="282.0" y1="54.0" x2="318.0" y2="54.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah2)"/><line x1="482.0" y1="54.0" x2="538.0" y2="54.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah2)"/><line x1="150.0" y1="74.0" x2="150.0" y2="96.0" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ah2)"/><rect x="90.0" y="98" width="120" height="28" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="150.0" y="116.2" font-size="12" text-anchor="middle">옛 cfg 그대로</text><line x1="300.0" y1="74.0" x2="300.0" y2="96.0" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ah2)"/><rect x="240.0" y="98" width="120" height="28" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="300.0" y="116.2" font-size="12" text-anchor="middle">옛 cfg 그대로</text><line x1="510.0" y1="74.0" x2="510.0" y2="96.0" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ah2)"/><rect x="432.0" y="98" width="156" height="28" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="510.0" y="116.2" font-size="12" text-anchor="middle">옛 또는 새 (둘 다 온전)</text><line x1="600.0" y1="74.0" x2="600.0" y2="130.0" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ah2)"/><rect x="540.0" y="132" width="120" height="28" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="600.0" y="150.2" font-size="12" text-anchor="middle">새 cfg 보장</text><text x="20.0" y="182.0" font-size="12" text-anchor="start">각 화살표 아래 = 그 사이에서 전원이 나갔을 때 재부팅 후 보이는 cfg</text><text x="20.0" y="218.0" font-size="13" text-anchor="start" font-weight="bold">naive 덮어쓰기 (O_TRUNC)</text><rect x="40" y="232" width="140" height="32" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="110.0" y="252.6" font-size="13" text-anchor="middle">open(O_TRUNC)</text><rect x="220" y="232" width="120" height="32" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="280.0" y="252.6" font-size="13" text-anchor="middle">write(cfg)</text><rect x="400" y="232" width="100" height="32" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="450.0" y="252.6" font-size="13" text-anchor="middle">close()</text><line x1="182.0" y1="248.0" x2="218.0" y2="248.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah2)"/><line x1="342.0" y1="248.0" x2="398.0" y2="248.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah2)"/><rect x="520" y="232" width="140" height="32" rx="6" fill="#888" fill-opacity="0.12" stroke="#888" stroke-dasharray="4 3"/><text x="590.0" y="252.2" font-size="12" text-anchor="middle">(30 s 뒤 writeback)</text><line x1="502.0" y1="248.0" x2="518.0" y2="248.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah2)"/><line x1="200.0" y1="268.0" x2="200.0" y2="290.0" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ah2)"/><rect x="122.0" y="292" width="156" height="28" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="200.0" y="310.2" font-size="12" text-anchor="middle">빈 파일 (0 B)</text><line x1="370.0" y1="268.0" x2="370.0" y2="290.0" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ah2)"/><rect x="292.0" y="292" width="156" height="28" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="370.0" y="310.2" font-size="12" text-anchor="middle">빈 파일 · 0 채움</text><line x1="540.0" y1="268.0" x2="540.0" y2="290.0" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ah2)"/><rect x="462.0" y="292" width="156" height="28" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="540.0" y="310.2" font-size="12" text-anchor="middle">옛 · 빈 · 새 아무거나</text><text x="20.0" y="348.0" font-size="12" text-anchor="start">덮어쓰기 + fsync(inplace)도 장치가 요청 중간에서 끊기면 헤더는 새것, 본문은 옛것인 "찢긴" 파일이 된다</text><text x="20.0" y="368.0" font-size="12" text-anchor="start">(이 노트의 dm-log-writes 실측: atomic 1054개 crash point 전부 정상, naive는 140개 중 113개 비정상)</text></svg>
+```
+그림 2 — 원자적 갱신 패턴의 각 단계 사이에서 전원이 나가면 무엇이 보이나(위), 그리고 naive 덮어쓰기(아래).
+
+각 단계가 빠지면 생기는 일:
+
+- **`fsync(temp)`를 빼면**: rename(메타데이터)이 저널에 먼저 커밋되고 temp의 데이터는 아직 delayed allocation(지연 할당) 상태로 RAM에 있을 수 있다. 재부팅하면 `cfg`라는 이름이 **블록이 없는(또는 unwritten) 새 inode**를 가리킨다 → 0바이트 또는 0으로 찬 파일. ext4는 이걸 막는 휴리스틱(`auto_da_alloc`, §3.4)이 있지만, 이런 휴리스틱의 유무와 범위는 파일시스템마다 다르고(XFS·btrfs에도 비슷한 것이 있다고 알려져 있지만 이 노트에서 확인하지 않았다) 내구성을 주지도 않으므로 기대면 안 된다.
+- **`fsync(dir)`를 빼면**: rename 자체가 아직 저널에 커밋되지 않았을 수 있다. 재부팅하면 옛 cfg가 보인다. 파일은 온전하지만, 앱은 "새 설정을 저장했다"고 이미 사용자·서버에 응답했을 수 있다(= ack한 내용을 잃음). 새 파일을 **처음 만들 때**는 더 심하다: 디렉터리 fsync가 없으면 파일 자체가 없을 수 있다.
+- **temp를 같은 디렉터리(같은 파일시스템)에 두지 않으면**: rename이 `EXDEV`로 실패한다. `/tmp`(tmpfs)에 temp를 만들고 `/data`로 rename하는 실수가 흔하다.
+
+### 3.2 예제 3 — 패턴 코드와 strace
+
+무엇을 확인하나: 이 노트에서 계속 쓸 설정 갱신 프로그램. 6000 B(블록 두 개에 걸침) 설정을 4가지 방식(+ fsync 없는 rename)으로 N번 갱신한다. 각 버전 뒤에 "앱이 완료라고 믿는 시점"을 외부 명령으로 알린다(예제 4에서 dm-log-writes 마크로 쓴다). 내용에는 버전 번호와 본문 CRC32를 넣어 검사기로 "온전한가"를 판정한다.
+
+```c
+/* CRC-32 (IEEE 802.3, reflected 0xEDB88320) — bitwise, small */
+#include <stddef.h>
+#include <stdint.h>
+static inline uint32_t crc32_ieee(const void *buf, size_t n) {
+    const uint8_t *p = buf;
+    uint32_t c = 0xFFFFFFFFu;
+    while (n--) {
+        c ^= *p++;
+        for (int k = 0; k < 8; k++) c = (c >> 1) ^ (0xEDB88320u & -(c & 1u));
+    }
+    return ~c;
+}
+```
+
+```c
+/* j5_cfg: 설정 파일 6000 B를 N번 갱신 — naive / naive_fsync / inplace / rename / atomic */
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include "j5_crc.h"
+#define LEN 6000
+static void die(const char *m) { perror(m); exit(1); }
+static void fill(char *b, unsigned v) {            /* 헤더 64 B + 본문, CRC는 본문에 대해 */
+    memset(b, 'A' + v % 26, LEN);
+    uint32_t c = crc32_ieee(b + 64, LEN - 64);
+    int h = snprintf(b, 64, "J5CFG ver=%08u len=%u crc=%08x", v, LEN, c);
+    memset(b + h, ' ', 63 - h); b[63] = '\n';
+}
+static void put(const char *path, const char *b, int flags, int do_fsync) {
+    int fd = open(path, O_WRONLY | O_CREAT | flags, 0644);
+    if (fd < 0) die("open");
+    if (pwrite(fd, b, LEN, 0) != LEN) die("pwrite");
+    if (do_fsync && fsync(fd)) die("fsync");
+    if (close(fd)) die("close");
+}
+int main(int argc, char **argv) {
+    if (argc < 5) { fprintf(stderr, "usage: %s dir mode first last [markcmd]\n", argv[0]); return 2; }
+    const char *dir = argv[1], *mode = argv[2];
+    char cfg[256], tmp[256], b[LEN], cmd[300];
+    srand(getpid());
+    snprintf(cfg, sizeof cfg, "%s/cfg.txt", dir);
+    snprintf(tmp, sizeof tmp, "%s/cfg.txt.tmp", dir);
+    for (unsigned v = atoi(argv[3]); v <= (unsigned)atoi(argv[4]); v++) {
+        fill(b, v);
+        if (!strcmp(mode, "naive")) put(cfg, b, O_TRUNC, 0);
+        else if (!strcmp(mode, "naive_fsync")) put(cfg, b, O_TRUNC, 1);
+        else if (!strcmp(mode, "inplace")) put(cfg, b, 0, 1);
+        else if (!strcmp(mode, "rename") || !strcmp(mode, "atomic")) {
+            int atomic = !strcmp(mode, "atomic");
+            put(tmp, b, O_TRUNC, atomic);                 /* 1) temp에 쓰고 (atomic이면 fsync) */
+            if (rename(tmp, cfg)) die("rename");          /* 2) 원자적으로 교체 */
+            if (atomic) {                                 /* 3) 디렉터리 엔트리도 내구화 */
+                int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+                if (dfd < 0 || fsync(dfd)) die("fsync dir");
+                close(dfd);
+            }
+        } else { fprintf(stderr, "bad mode\n"); return 2; }
+        if (argc > 5) {                                   /* "앱이 완료라고 믿는 시점"을 로그에 표시 */
+            snprintf(cmd, sizeof cmd, "%s v%u", argv[5], v);
+            if (system(cmd) != 0) die("markcmd");
+        }
+        usleep(300000 + rand() % 200000);              /* 커밋 주기와 위상이 맞물리지 않게 지터 */
+    }
+    return 0;
+}
+```
+
+```c
+/* j5_cfgchk: dump된 cfg.txt 판정 → OK v=N / EMPTY / TORN / MISSING */
+#include <stdio.h>
+#include <string.h>
+#include "j5_crc.h"
+#define LEN 6000
+int main(int argc, char **argv) {
+    static char b[LEN + 1];
+    FILE *f = argc > 1 ? fopen(argv[1], "rb") : NULL;
+    if (!f) { puts("MISSING"); return 0; }
+    size_t n = fread(b, 1, sizeof b, f);
+    fclose(f);
+    unsigned v, len, crc;
+    if (n == 0) { puts("EMPTY"); return 0; }
+    if (n != LEN || sscanf(b, "J5CFG ver=%u len=%u crc=%x", &v, &len, &crc) != 3) { printf("TORN size=%zu\n", n); return 0; }
+    if (crc32_ieee(b + 64, LEN - 64) != crc) { printf("TORN crc v=%u\n", v); return 0; }
+    for (size_t i = 64; i < LEN; i++)
+        if (b[i] != (char)('A' + v % 26)) { printf("TORN body v=%u\n", v); return 0; }
+    printf("OK v=%u\n", v);
+    return 0;
+}
+```
+
+VM에서 정적 바이너리를 strace로 돌려 syscall 순서를 확인했다(VM 커널 7.0).
+
+```sh
+strace -e trace=openat,pwrite64,fsync,rename,renameat,renameat2,close ./j5_cfg /var/tmp/J5/st atomic 1 1
+strace -e trace=openat,pwrite64,fsync,close ./j5_cfg /var/tmp/J5/st naive 2 2
+```
+
+```text
+openat(AT_FDCWD, "/var/tmp/J5/st/cfg.txt.tmp", O_WRONLY|O_CREAT|O_TRUNC, 0644) = 3
+pwrite64(3, "J5CFG ver=00000001 len=6000 crc="..., 6000, 0) = 6000
+fsync(3)                                = 0
+close(3)                                = 0
+renameat(AT_FDCWD, "/var/tmp/J5/st/cfg.txt.tmp", AT_FDCWD, "/var/tmp/J5/st/cfg.txt") = 0
+openat(AT_FDCWD, "/var/tmp/J5/st", O_RDONLY|O_DIRECTORY) = 3
+fsync(3)                                = 0
+close(3)                                = 0
+openat(AT_FDCWD, "/var/tmp/J5/st/cfg.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644) = 3
+pwrite64(3, "J5CFG ver=00000002 len=6000 crc="..., 6000, 0) = 6000
+close(3)                                = 0
+```
+
+출력에서 볼 것: atomic은 fsync가 두 번(파일, 디렉터리) 나오고 그 사이에 rename(정적 glibc에서는 `renameat`)이 있다. naive는 fsync가 하나도 없다. 디렉터리를 `O_RDONLY|O_DIRECTORY`로 열어 fsync하는 것이 Linux에서 디렉터리 엔트리를 내구화하는 표준 방법이다.
+
+### 3.3 예제 4 — dm-log-writes: 모든 crash 지점을 재생해 보기
+
+"전원을 뽑아 보는" 테스트는 운에 맡기는 표본 조사다. dm-log-writes는 반대로 **블록 장치에 간 모든 쓰기를 순서대로 별도 디스크에 기록**한다. 그 로그를 원본 이미지에 처음부터 하나씩 다시 적용하면서 매 지점에서 파일시스템을 검사하면, "이 순간 전원이 나갔다면?"을 **모든 지점에 대해** 결정적으로 확인할 수 있다. xfstests의 `replay-log` 도구가 이 일을 하는 표준 도구고, btrfs·ext4 개발자들이 fsync 버그를 찾는 데 쓴다.
+
+무엇을 확인하나: 예제 3의 다섯 가지 갱신 방식(+ 마운트 옵션 변형)을 log-writes 위에서 한 번씩 돌려 로그를 남기고, 그 로그의 모든 지점에서 "여기서 전원이 나갔다면 cfg.txt는 어떤 상태인가"를 판정한다.
+
+로그 형식은 `drivers/md/dm-log-writes.c` 주석에 "braindead simple"이라고 적혀 있을 만큼 단순하다(6.18.55 소스에서 확인):
+
+```text
+sector 0          : struct log_write_super { le64 magic=0x6a736677736872, version=1, nr_entries; le32 sectorsize; }
+sector 1 ..       : [ 1 sector: struct log_write_entry { le64 sector, nr_sectors, flags, data_len; } ][ nr_sectors of data ]
+flags             : FLUSH=1  FUA=2  DISCARD=4  MARK=8  METADATA=16   (MARK: data_len bytes of text inside the entry sector)
+```
+
+이 VM에는 xfstests가 없어서 **`replay-log`를 쓰지 않고 최소 재생기를 직접 짰다.** 기능은 (1) 엔트리를 순서대로 이미지에 적용, (2) `start` 마크 이후 매 엔트리마다(또는 FLUSH/FUA 엔트리마다) 검사 명령 실행, (3) `tear` 모드에서는 여러 섹터짜리 쓰기의 **앞 절반만 적용된 순간**도 crash 지점으로 검사한다. 마지막 기능은 replay-log에는 없는, 장치가 요청 중간에서 끊기는 상황(torn write)을 흉내 내기 위한 추가다.
+
+```c
+/* j5_replay: dm-log-writes 로그를 이미지에 순서대로 재생, 각 crash point마다 검사 명령 실행 (최소 구현) */
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+struct lw_super { uint64_t magic, version, nr_entries; uint32_t sectorsize; } __attribute__((packed));
+struct lw_entry { uint64_t sector, nr_sectors, flags, data_len; };
+enum { F_FLUSH = 1, F_FUA = 2, F_DISCARD = 4, F_MARK = 8, F_META = 16 };
+static void die(const char *m) { perror(m); exit(1); }
+int main(int argc, char **argv) {
+    if (argc != 5) { fprintf(stderr, "usage: %s log img flush|all|tear checkcmd\n", argv[0]); return 2; }
+    int lg = open(argv[1], O_RDONLY), im = open(argv[2], O_RDWR);
+    if (lg < 0 || im < 0) die("open");
+    struct lw_super s;
+    if (pread(lg, &s, sizeof s, 0) != sizeof s) die("super");
+    if (s.magic != 0x6a736677736872ULL) { fprintf(stderr, "bad magic\n"); return 1; }
+    uint32_t ss = s.sectorsize;
+    off_t pos = ss;
+    char mark[128] = "-", cmd[512];
+    static char buf[1 << 20];
+    int tear = !strcmp(argv[3], "tear"), all = tear || !strcmp(argv[3], "all"), started = 0, points = 0;
+    for (uint64_t i = 0; i < s.nr_entries; i++) {
+        char sec[4096];
+        if (pread(lg, sec, ss, pos) != (ssize_t)ss) die("entry");
+        struct lw_entry e; memcpy(&e, sec, sizeof e);
+        pos += ss;
+        if (e.flags & F_MARK) {
+            size_t l = e.data_len < sizeof mark - 1 ? e.data_len : sizeof mark - 1;
+            memcpy(mark, sec + sizeof e, l); mark[l] = 0;
+            if (!strcmp(mark, "start")) started = 1;
+            continue;
+        }
+        if (!(e.flags & F_DISCARD) && e.nr_sectors) {
+            size_t len = e.nr_sectors * ss;
+            if (len > sizeof buf) { fprintf(stderr, "entry too big\n"); return 1; }
+            if (pread(lg, buf, len, pos) != (ssize_t)len) die("data");
+            if (tear && started && e.nr_sectors >= 2) {      /* 요청의 앞 절반만 매체에 닿은 순간 */
+                size_t h = (e.nr_sectors / 2) * ss;
+                if (pwrite(im, buf, h, e.sector * ss) != (ssize_t)h) die("tear");
+                snprintf(cmd, sizeof cmd, "%s %" PRIu64 " T %s", argv[4], i, mark);
+                if (system(cmd) != 0) fprintf(stderr, "check failed\n");
+                points++;
+            }
+            if (pwrite(im, buf, len, e.sector * ss) != (ssize_t)len) die("replay");
+            pos += len;
+        }
+        int crash = all || (e.flags & (F_FLUSH | F_FUA));
+        if (!started || !crash) continue;
+        snprintf(cmd, sizeof cmd, "%s %" PRIu64 " %s%s%s %s", argv[4], i,
+                 e.flags & F_FLUSH ? "F" : "", e.nr_sectors ? "W" : "", e.flags & F_FUA ? "U" : "", mark);
+        if (system(cmd) != 0) fprintf(stderr, "check failed at %" PRIu64 "\n", i);
+        points++;
+    }
+    fprintf(stderr, "entries=%" PRIu64 " sectorsize=%u crash_points=%d\n", s.nr_entries, ss, points);
+    return 0;
+}
+```
+
+검사 명령은 VM 쪽에서 돈다. 이미지를 복사해 `e2fsck -fy`로 저널을 재생(= 커널 마운트가 하는 복구와 같은 일)한 뒤, `debugfs`로 마운트 없이 파일을 꺼내 검사기에 넣는다. VM 커널에 ext4 이미지를 마운트하지 않으므로 VM 호스트 커널은 건드리지 않는다.
+
+```sh
+#!/bin/bash
+# host: crash point 하나 판정 — 이미지 복사 → e2fsck(저널 replay) → cfg.txt 꺼내서 검사
+# args: idx flags lastmark   (env: IMG, WD)
+cp --sparse=always $IMG $WD/ck.img
+e2fsck -fy $WD/ck.img >/dev/null 2>&1; rc=$?
+rm -f $WD/out; debugfs -R "dump /cfg.txt $WD/out" $WD/ck.img >/dev/null 2>&1
+echo "$1 $2 $3 fsck=$rc $(/var/tmp/J5/h_cfgchk $WD/out)"
+```
+
+게스트 쪽: log-writes 타깃을 만들고, 마운트하고, v0을 확실히 저장한 뒤 `start` 마크를 찍고 30번 갱신한다. 각 버전이 끝날 때마다 `dmsetup message ... mark vN`으로 "앱이 완료라고 믿는 시점"을 로그에 새긴다.
+
+```sh
+#!/bin/sh
+# guest: log-writes(vda=data, vdb=log) 위에서 설정 갱신 워크로드 기록. args: mode mountopts
+MODE=$1; OPT=${2:-rw}
+cd /j5; insmod dm-mod.ko; insmod dm-log-writes.ko
+S=$(cat /sys/block/vda/size); echo "vda=$S vdb=$(cat /sys/block/vdb/size) sectors"
+dmsetup --noudevsync create j5lw --table "0 $S log-writes /dev/vda /dev/vdb" && dmsetup --noudevsync mknodes
+mount -t ext4 -o $OPT /dev/mapper/j5lw /mnt/a || exit 1
+/j5/j5_cfg /mnt/a atomic 0 0 && sync
+dmsetup message j5lw 0 mark start
+/j5/j5_cfg /mnt/a $MODE 1 30 "dmsetup message j5lw 0 mark"
+dmsetup message j5lw 0 mark end
+umount /mnt/a
+dmsetup status j5lw; dmsetup remove j5lw
+echo "J5 LW DONE $MODE $OPT"
+```
+
+```sh
+#!/bin/bash
+# host: one dm-log-writes run + replay. args: mode mountopts
+MODE=$1; OPT=${2:-rw}; TAG=${MODE}_${OPT//,/_}
+WD=/var/tmp/J5/lw_$TAG; rm -rf $WD; mkdir -p $WD; cd $WD
+mkfs.ext4 -q -F -E lazy_itable_init=0,lazy_journal_init=0 base.img 32M
+cp base.img data.img; truncate -s 256M log.img
+timeout 600 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -smp 2 -nographic -kernel /var/lab/out/Image-fs -initrd /var/tmp/J5/j5.cpio.gz \
+  -drive if=none,id=d1,file=log.img,format=raw -device virtio-blk-device,drive=d1 \
+  -drive if=none,id=d0,file=data.img,format=raw -device virtio-blk-device,drive=d0 \
+  -append "console=ttyAMA0 quiet LAB_CMD=/j5/g_lw.sh~$MODE~$OPT" > guest.txt 2>&1
+grep -E "J5 LW DONE|log-writes|mount" guest.txt
+cp base.img replay.img
+IMG=$WD/replay.img WD=$WD /var/tmp/J5/h_replay log.img replay.img ${RMODE:-tear} /Users/donh/.elinux_scratch/J5/h_check.sh > points.txt
+```
+
+먼저 로그 안을 들여다보자. naive 모드 로그의 앞부분이다(VM에서 파이썬으로 엔트리를 나열, 열 = 번호 · 섹터 · 섹터 수 · 플래그 · 마크).
+
+```text
+19 0 0 MARK v1
+20 0 0 MARK v2
+...
+30 0 0 MARK v12
+31 40 8 META 
+32 48 8 META 
+...
+37 12664 16 - 
+38 12680 16 - 
+...
+48 12840 16 - 
+49 200 8 META 
+...
+53 232 8 META 
+54 240 0 FLUSH|FUA|META 
+55 240 8 FUA|META 
+56 0 0 MARK v13
+```
+
+(엔트리 19~59 중 반복 줄을 `...`로 줄였다.)
+
+출력에서 볼 것:
+
+- 마크 v1~v12가 먼저 쭉 나오고, **데이터 쓰기 12개(37~48, 각 16섹터 = 8 KiB, 매번 다른 위치)가 그 뒤에** 나온다. dm-log-writes는 쓰기를 완료 즉시 로그에 쓰지 않고 "flush되지 않은 블록" 목록에 모아 두었다가 **다음 FLUSH가 올 때 그 앞에 붙여** 기록한다(소스의 `list_splice_init(&lc->unflushed_blocks, ...)`). "FLUSH 전의 쓰기는 장치가 아직 보장하지 않은 것"이라는 crash 모델을 로그 형식 자체가 반영한 것이다.
+- 데이터가 매번 다른 블록(12664, 12680, …)에 간다. O_TRUNC가 옛 블록을 해제하지만, 해제된 블록은 그 트랜잭션이 커밋되기 전까지 재사용하지 않는다(커밋 전에 crash하면 옛 inode가 그 블록을 여전히 가리키니까).
+- 49~55가 jbd2 커밋 하나다. 저널 블록들(META) → `FLUSH|FUA|META`(0섹터, 빈 preflush) → `FUA|META`(커밋 블록). 이것이 §4에서 볼 PREFLUSH+FUA 커밋의 블록 장치 쪽 모습이다.
+
+이제 재생 결과. naive의 FLUSH/FUA 지점만 뽑으면:
+
+```text
+54 FU v12 fsck=1 OK v=0
+55 WU v12 fsck=1 EMPTY
+84 FU v23 fsck=1 EMPTY
+85 WU v23 fsck=1 EMPTY
+107 FU end fsck=1 EMPTY
+108 WU end fsck=1 OK v=30
+```
+
+(열 = 엔트리 번호, 종류(F=flush, W=데이터, U=FUA, T=절반 적용), 그 순간까지 앱이 완료라고 믿은 버전, e2fsck 종료 코드(1 = 고친 것 있음, 저널 재생 포함), 판정)
+
+앱은 v12까지 "저장 완료"라고 믿었는데, 첫 커밋 직후(55)에 전원이 나가면 **파일이 0바이트**다. 그 지점의 이미지를 e2fsck에 넣어 보면 이유가 나온다.
+
+```text
+/var/tmp/J5/lw_naive_rw/ck.img: recovering journal
+Truncating orphaned inode 13 (uid=0, gid=0, mode=0100644, size=0)
+User:     0   Group:     0   Project:     0   Size: 0
+```
+
+커밋된 트랜잭션에는 cfg.txt의 inode가 **truncate 진행 중(orphan 목록에 올라간, size 0) 상태**로 들어 있었다. 다음 O_TRUNC의 truncate가 그 트랜잭션에 들어갔고 새 데이터는 아직 붙지 않은 순간이 커밋된 것이다. 복구는 orphan inode를 size 0으로 잘라 마무리한다. 이 log-writes 실행 두 번(지터 유무)에서 커밋 3번이 모두 이 상태를 잡았는데, 왜 매번 그 틈에 커밋이 걸렸는지(타이머? log-writes의 동기 로그 쓰기가 바꾼 타이밍?)는 확인하지 않았다. 아래 dm-flakey 실험(예제 5)에서는 naive가 "옛 버전"과 "빈 파일"을 섞어서 냈다.
+
+### 3.4 ext4 `auto_da_alloc` — 앱의 실수를 줄여 주는 휴리스틱
+
+ext4는 delayed allocation(데이터 블록 할당을 writeback 때로 미룸) 때문에 2009년경 "rename으로 바꾼 설정 파일이 크래시 후 0바이트" 사고가 대량으로 났다(당시 KDE·GNOME 설정 파일 사례로 유명하다). 그래서 들어간 것이 `auto_da_alloc`(기본 켜짐)이다. 6.18.55 소스에서 확인한 동작:
+
+- **replace-via-rename**: `ext4_rename()`이 기존 파일을 덮어쓰는 rename이면 `ext4_alloc_da_blocks(old.inode)` — 새 파일의 지연 할당 블록을 즉시 할당하고 writeback을 시작한다(`fs/ext4/namei.c`). 그러면 data=ordered 규칙(§5) 덕분에 rename이 들어간 트랜잭션이 커밋되기 전에 데이터가 먼저 디스크에 간다.
+- **replace-via-truncate**: `ext4_truncate()`가 크기 0으로 자르면 `EXT4_STATE_DA_ALLOC_CLOSE` 표시를 하고, `ext4_release_file()`(마지막 close)에서 `ext4_alloc_da_blocks()`를 부른다(`fs/ext4/inode.c`, `fs/ext4/file.c`).
+- 둘 다 **writeback을 시작할 뿐 기다리지 않는다**(`filemap_flush`). 내구성을 주는 게 아니라 "빈 파일" 확률을 줄이는 장치다.
+
+예제 4를 `noauto_da_alloc` 마운트 옵션과 data=writeback으로도 돌린 전체 결과다. 각 실행의 crash 지점 수는 로그 엔트리 수 + tear 지점 수다.
+
+아래 표는 각 실행의 `points.txt`(한 줄 = crash 지점 하나의 판정)를 VM 쪽 파이썬 스크립트로 집계한 것이다. 판정 규칙: 마지막 마크가 vN이면 ack 버전 = N, 디스크 버전이 N이면 ok, N+1이면 new, 그보다 작으면 lost.
+
+```text
+run                                      pts  ok  new lost empty torn miss | flushpts bad | first bad point
+atomic_rw                                1054  994  60    0     0    0    0 |  134    0 | None
+atomic_rw_data=writeback                 1052  992  60    0     0    0    0 |  133    0 | None
+inplace_rw                                287   17 240    0     0   30    0 |   71    0 | 25 T acked=0 -> TORN crc v=1
+naive_fsync_rw                            490  430  60    0     0    0    0 |   73    0 | None
+naive_rw                                  140   27   0   47    66    0    0 |   18    5 | 31 T acked=12 -> OK v=0
+naive_rw_noauto_da_alloc                   67   26   0   13    28    0    0 |   16    5 | 38 T acked=13 -> OK v=0
+rename_rw                                 143   34   0  109     0    0    0 |   16    3 | 38 T acked=13 -> OK v=0
+rename_rw_data=writeback                  137   32   0  105     0    0    0 |   16    3 | 38 T acked=13 -> OK v=0
+rename_rw_noauto_da_alloc                  95   33   0   17    38    7    0 |   20    7 | 37 T acked=12 -> OK v=0
+```
+
+(ok = ack한 버전 그대로, new = 그보다 하나 새 버전(아직 ack 전이지만 온전) — 둘 다 정상. lost = 온전하지만 ack한 것보다 옛 버전, empty = 0바이트, torn = 내용 깨짐, miss = 파일 없음.)
+
+```svg
+<svg viewBox="0 0 680 342" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><text x="202.0" y="57.0" font-size="12" text-anchor="end">atomic</text><rect x="210.0" y="44" width="424.4" height="18" fill="#3f9a6b" fill-opacity="0.75"/><rect x="634.4" y="44" width="25.6" height="18" fill="#4a7bd0" fill-opacity="0.75"/><text x="202.0" y="85.0" font-size="12" text-anchor="end">atomic, data=writeback</text><rect x="210.0" y="72" width="424.3" height="18" fill="#3f9a6b" fill-opacity="0.75"/><rect x="634.3" y="72" width="25.7" height="18" fill="#4a7bd0" fill-opacity="0.75"/><text x="202.0" y="113.0" font-size="12" text-anchor="end">naive_fsync (O_TRUNC+fsync)</text><rect x="210.0" y="100" width="394.9" height="18" fill="#3f9a6b" fill-opacity="0.75"/><rect x="604.9" y="100" width="55.1" height="18" fill="#4a7bd0" fill-opacity="0.75"/><text x="202.0" y="141.0" font-size="12" text-anchor="end">inplace (덮어쓰기+fsync)</text><rect x="210.0" y="128" width="26.7" height="18" fill="#3f9a6b" fill-opacity="0.75"/><rect x="236.7" y="128" width="376.3" height="18" fill="#4a7bd0" fill-opacity="0.75"/><rect x="613.0" y="128" width="47.0" height="18" fill="#888" fill-opacity="0.75"/><text x="202.0" y="169.0" font-size="12" text-anchor="end">rename (fsync 없음)</text><rect x="210.0" y="156" width="107.0" height="18" fill="#3f9a6b" fill-opacity="0.75"/><rect x="317.0" y="156" width="343.0" height="18" fill="#e08a3c" fill-opacity="0.75"/><text x="202.0" y="197.0" font-size="12" text-anchor="end">rename, data=writeback</text><rect x="210.0" y="184" width="105.1" height="18" fill="#3f9a6b" fill-opacity="0.75"/><rect x="315.1" y="184" width="344.9" height="18" fill="#e08a3c" fill-opacity="0.75"/><text x="202.0" y="225.0" font-size="12" text-anchor="end">rename, noauto_da_alloc</text><rect x="210.0" y="212" width="156.3" height="18" fill="#3f9a6b" fill-opacity="0.75"/><rect x="366.3" y="212" width="80.5" height="18" fill="#e08a3c" fill-opacity="0.75"/><rect x="446.8" y="212" width="213.2" height="18" fill="#d0564a" fill-opacity="0.75"/><text x="202.0" y="253.0" font-size="12" text-anchor="end">naive (O_TRUNC, fsync 없음)</text><rect x="210.0" y="240" width="86.8" height="18" fill="#3f9a6b" fill-opacity="0.75"/><rect x="296.8" y="240" width="151.1" height="18" fill="#e08a3c" fill-opacity="0.75"/><rect x="447.9" y="240" width="212.1" height="18" fill="#d0564a" fill-opacity="0.75"/><text x="202.0" y="281.0" font-size="12" text-anchor="end">naive, noauto_da_alloc</text><rect x="210.0" y="268" width="174.6" height="18" fill="#3f9a6b" fill-opacity="0.75"/><rect x="384.6" y="268" width="87.3" height="18" fill="#e08a3c" fill-opacity="0.75"/><rect x="471.9" y="268" width="188.1" height="18" fill="#d0564a" fill-opacity="0.75"/><text x="210.0" y="308.0" font-size="12" text-anchor="middle">0%</text><text x="322.5" y="308.0" font-size="12" text-anchor="middle">25%</text><text x="435.0" y="308.0" font-size="12" text-anchor="middle">50%</text><text x="547.5" y="308.0" font-size="12" text-anchor="middle">75%</text><text x="660.0" y="308.0" font-size="12" text-anchor="middle">100%</text><rect x="20" y="14" width="12" height="12" fill="#3f9a6b" fill-opacity="0.75"/><text x="36.0" y="25.0" font-size="12" text-anchor="start">ack 버전</text><rect x="90.0" y="14" width="12" height="12" fill="#4a7bd0" fill-opacity="0.75"/><text x="106.0" y="25.0" font-size="12" text-anchor="start">더 새 버전</text><rect x="174.4" y="14" width="12" height="12" fill="#e08a3c" fill-opacity="0.75"/><text x="190.4" y="25.0" font-size="12" text-anchor="start">옛 버전 = ack 유실</text><rect x="291.2" y="14" width="12" height="12" fill="#d0564a" fill-opacity="0.75"/><text x="307.2" y="25.0" font-size="12" text-anchor="start">빈 파일 · 0 채움</text><rect x="415.2" y="14" width="12" height="12" fill="#888" fill-opacity="0.75"/><text x="431.2" y="25.0" font-size="12" text-anchor="start">찢김</text><text x="340.0" y="330.0" font-size="12" text-anchor="middle">dm-log-writes 재생: 모든 쓰기 경계 + 요청 절반 지점을 crash point로 (총 67~1054개)</text></svg>
+```
+그림 6 — 위 표를 비율로. 초록·파랑만 있는 줄이 "어느 순간 끊겨도 정상"인 방식이다.
+
+출력에서 볼 것:
+
+- **atomic은 1054개 crash 지점 전부 정상**(ack 버전 또는 그 다음 버전). data=writeback에서도 같았다. fsync(temp)가 데이터를 먼저 내구화하므로 저널 모드의 데이터 순서 보장에 기대지 않기 때문이다.
+- **naive(O_TRUNC, fsync 없음)는 140개 중 113개가 비정상**: 47개는 옛 버전(ack 유실), 66개는 빈 파일. `auto_da_alloc`이 켜져 있어도 빈 파일이 나왔다 — truncate와 write 사이 틈은 휴리스틱으로 못 막는다.
+- **rename(fsync 없음)은 빈 파일 0개, 옛 버전 109개.** `auto_da_alloc`의 rename 휴리스틱이 "옛것 아니면 새것"은 지켜 줬지만, ack한 버전을 잃는 것(내구성)은 못 막았다. `noauto_da_alloc`으로 끄면 빈 파일 38개 + "torn" 7개가 나왔는데, 그 7개를 꺼내 보면 크기는 6000인데 **내용이 전부 0**이었다(extent가 `[u]` unwritten 상태 — 할당만 되고 데이터는 안 쓰인 블록을 0으로 읽는다). 즉 휴리스틱이 하던 일이 정확히 이 구멍을 막는 것이었다.
+- **naive_fsync는 crash 지점 490개 모두 정상**이었지만, 이건 이 실험에서 커밋이 O_TRUNC와 fsync 사이 짧은 틈에 안 걸렸을 뿐이다. 그 틈에 커밋이 걸리면 위 naive와 같은 빈 파일이 된다(구조상 막는 장치가 없다).
+- **inplace(덮어쓰기 + fsync)는 tear 지점에서 30개가 찢겼다.** 헤더(첫 블록)는 v1인데 본문(둘째 블록)은 v0의 'A'인 파일이다. 장치가 6 KiB 요청을 앞 절반만 쓰고 끊긴 상황이다. tear 모드 없이(요청 단위로만) 재생하면 이 실패는 **안 보인다** — 처음 돌렸을 때 실제로 0개였다. 재생 도구의 crash 모델이 무엇을 포함하는지가 결과를 바꾼다.
+
+이 재생의 한계를 정직하게 적어 둔다. (1) 로그 순서대로 앞에서부터 적용하는 "prefix" 모델만 봤다. 실제 장치는 FLUSH 사이의 쓰기를 **임의 순서로 일부만** 영속화할 수 있다. 그 조합까지 보려면 FLUSH 구간 안의 부분집합을 다 시도해야 한다(CrashMonkey 같은 연구 도구가 하는 일, 여기서는 안 함). (2) torn은 "요청의 앞 절반" 한 가지만 흉내 냈다. (3) 파일시스템은 ext4 하나다. F2FS·XFS는 결과가 다를 수 있다.
+
+### 3.5 예제 5 — dm-flakey `drop_writes`: "T초에 전원이 나갔는데 OS는 모른다"
+
+dm-flakey는 "up 구간 동안은 정상, down 구간에는 오동작"하는 타깃이다. `drop_writes` 기능을 주면 down 구간의 쓰기를 **성공으로 응답하면서 실제로는 버린다.** up=T초, down=3600초로 만들면 "테이블을 만든 뒤 T초에 장치 전원이 나갔는데 호스트는 계속 돈다"가 된다. 워크로드가 끝나고 umount까지 해도(전부 버려짐) VM 쪽 이미지에는 T초 시점의 디스크 상태만 남는다.
+
+무엇을 확인하나: 방식별로 "끊긴 시점 직전에 ack한 버전"이 디스크에 남는지.
+
+```sh
+#!/bin/sh
+# guest: T초 뒤부터 모든 write를 조용히 버리는 dm-flakey 위에서 설정 갱신 (= T초에 전원 차단, OS는 모름)
+MODE=$1; T=$2
+dmesg -n 1; cd /j5; insmod dm-mod.ko; insmod dm-flakey.ko
+S=$(cat /sys/block/vda/size)
+dmsetup --noudevsync create j5fl --table "0 $S flakey /dev/vda 0 $T 3600 1 drop_writes" && dmsetup --noudevsync mknodes
+T0=$(cut -d' ' -f1 /proc/uptime)
+mount -t ext4 /dev/mapper/j5fl /mnt/a || exit 1
+/j5/j5_cfg /mnt/a atomic 0 0; sync
+printf '#!/bin/sh\necho "ACK $1 t=$(cut -d" " -f1 /proc/uptime)"\n' > /tmp/ack; chmod +x /tmp/ack
+/j5/j5_cfg /mnt/a $MODE 1 25 /tmp/ack
+umount /mnt/a
+echo "T0=$T0 CUT=$T"
+```
+
+VM 쪽은 이미지를 새로 만들고 부팅한 뒤, 시리얼 출력에서 `T0 + T`초 이전의 마지막 `ACK`를 찾고, 이미지를 `e2fsck -fy` → `debugfs dump` → `j5_cfgchk`로 판정한다(예제 4의 `h_check.sh`와 같은 방식).
+
+모드 5개 × 끊는 시점 5개(5, 7, 9, 11, 13초)를 돌렸다(`xargs -P 3`).
+
+```text
+atomic run=1 cut=5s last_acked_before_cut=v11 fsck=1 disk: OK v=11
+atomic run=2 cut=7s last_acked_before_cut=v15 fsck=1 disk: OK v=15
+atomic run=3 cut=9s last_acked_before_cut=v20 fsck=1 disk: OK v=20
+atomic run=4 cut=11s last_acked_before_cut=v25 fsck=1 disk: OK v=25
+atomic run=5 cut=13s last_acked_before_cut=v25 fsck=0 disk: OK v=25
+inplace run=1 cut=5s last_acked_before_cut=v11 fsck=1 disk: OK v=11
+inplace run=2 cut=7s last_acked_before_cut=v16 fsck=1 disk: OK v=16
+inplace run=3 cut=9s last_acked_before_cut=v21 fsck=1 disk: OK v=21
+inplace run=4 cut=11s last_acked_before_cut=v25 fsck=1 disk: OK v=25
+inplace run=5 cut=13s last_acked_before_cut=v25 fsck=0 disk: OK v=25
+naive run=1 cut=5s last_acked_before_cut=v11 fsck=1 disk: OK v=0
+naive run=2 cut=7s last_acked_before_cut=v16 fsck=1 disk: OK v=13
+naive run=3 cut=9s last_acked_before_cut=v20 fsck=1 disk: OK v=13
+naive run=4 cut=11s last_acked_before_cut=v25 fsck=1 disk: EMPTY
+naive run=5 cut=13s last_acked_before_cut=v25 fsck=0 disk: OK v=25
+naive_fsync run=1 cut=5s last_acked_before_cut=v11 fsck=1 disk: OK v=11
+naive_fsync run=2 cut=7s last_acked_before_cut=v15 fsck=1 disk: OK v=15
+naive_fsync run=3 cut=9s last_acked_before_cut=v20 fsck=1 disk: OK v=20
+naive_fsync run=4 cut=11s last_acked_before_cut=v25 fsck=1 disk: OK v=25
+naive_fsync run=5 cut=13s last_acked_before_cut=v25 fsck=0 disk: OK v=25
+rename run=1 cut=5s last_acked_before_cut=v11 fsck=1 disk: OK v=0
+rename run=2 cut=7s last_acked_before_cut=v16 fsck=1 disk: OK v=13
+rename run=3 cut=9s last_acked_before_cut=v20 fsck=1 disk: OK v=13
+rename run=4 cut=11s last_acked_before_cut=v25 fsck=1 disk: OK v=13
+rename run=5 cut=13s last_acked_before_cut=v25 fsck=0 disk: OK v=25
+```
+
+출력에서 볼 것:
+
+- fsync가 있는 세 방식(atomic, inplace, naive_fsync)은 매번 **끊기기 직전 ack한 버전**이 디스크에 있었다.
+- fsync가 없는 두 방식은 v0(아무 커밋도 안 걸림) · v13(첫 5초 커밋이 잡은 버전) · 빈 파일이 나왔다. ack한 v11~v25를 다 잃었다. 저장 시점이 앱이 아니라 **ext4 커밋 타이머(5초)** 로 정해진다는 것이 그대로 보인다.
+- cut=13s는 워크로드와 umount가 끝난 뒤라 전부 정상이다(fsck=0, 대조군).
+- 이 실험은 bio 단위로 버리므로 inplace의 torn write는 재현되지 않는다(예제 4의 tear 재생에서만 보였다).
+
+---
+## 4. fsync는 장치에 무엇을 보내나 — REQ_PREFLUSH · REQ_FUA
+
+### 4.1 정의 — "write barrier"의 현재 모습
+
+옛 커널(2010년, 2.6.37 무렵 이전 — 버전은 기억에 의존)에는 "barrier 요청"이라는 개념이 있었다. 장벽 앞의 모든 쓰기가 끝나야 장벽 뒤 쓰기를 시작하는, 큐 전체의 순서를 강제하는 무거운 장치였다. 지금은 없어졌고 두 개의 요청 플래그로 대체됐다. (ext4의 `barrier=1`/`nobarrier` 마운트 옵션 이름은 그 시절의 흔적이다.)
+
+| 플래그 | 뜻 | NVMe | eMMC | virtio-blk |
+|---|---|---|---|---|
+| `REQ_PREFLUSH` | 이 요청을 처리하기 **전에** 장치 휘발 캐시를 비워라 (그 전에 완료된 쓰기를 영속화) | Flush 명령 (opcode 0x00) | CMD6 SWITCH로 EXT_CSD `FLUSH_CACHE`[32] = 1 | `VIRTIO_BLK_T_FLUSH` |
+| `REQ_FUA` | **이 쓰기 자체는** 비휘발 매체에 닿은 뒤에 완료를 알려라 | Write 명령 CDW12 bit 30 (커널 구조체 `control` 필드의 bit 14 = `0x4000`) | reliable write (CMD23 인자 bit 31) — 지원할 때만 | 없음 → block layer가 "쓰기 + FLUSH"로 흉내 |
+
+핵심은 **순서는 이제 파일시스템이 직접 관리한다**는 것이다. jbd2는 저널 블록들을 쓰고 **완료를 기다린 뒤** 커밋 블록을 `REQ_PREFLUSH | REQ_FUA`로 보낸다(`fs/jbd2/commit.c`, `JBD2_BARRIER` 플래그일 때). PREFLUSH가 "앞에서 완료된 저널 블록들을 장치 캐시에서 NAND로 내려라"를, FUA가 "커밋 블록 자체도 NAND까지"를 보장한다. 커밋 블록이 디스크에 있으면 트랜잭션 전체가 있다는 것, 이것이 저널링의 원자성이다.
+
+```svg
+<svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><rect x="0" y="14" width="190" height="28" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="95.0" y="32.2" font-size="12" text-anchor="middle">ext4 / jbd2</text><line x1="95.0" y1="44.0" x2="95.0" y2="400.0" stroke="#888" stroke-width="1.4" stroke-dasharray="4 3"/><rect x="240" y="14" width="190" height="28" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="335.0" y="32.2" font-size="12" text-anchor="middle">block layer (blk-flush)</text><line x1="335.0" y1="44.0" x2="335.0" y2="400.0" stroke="#888" stroke-width="1.4" stroke-dasharray="4 3"/><rect x="477" y="14" width="190" height="28" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="572.0" y="32.2" font-size="12" text-anchor="middle">NVMe 장치 (VWC=1, FUA 지원)</text><line x1="572.0" y1="44.0" x2="572.0" y2="400.0" stroke="#888" stroke-width="1.4" stroke-dasharray="4 3"/><line x1="95.0" y1="70.0" x2="329.0" y2="70.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="215.0" y="65.0" font-size="12" text-anchor="middle">WS 16776+8 (파일 데이터)</text><line x1="335.0" y1="92.0" x2="566.0" y2="92.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="453.5" y="87.0" font-size="12" text-anchor="middle">Write slba=16776</text><line x1="572.0" y1="114.0" x2="341.0" y2="114.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="453.5" y="109.0" font-size="12" text-anchor="middle">완료 (캐시에 받음)</text><line x1="95.0" y1="150.0" x2="329.0" y2="150.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="215.0" y="145.0" font-size="12" text-anchor="middle">WSM 192, 208 (저널 블록)</text><line x1="335.0" y1="172.0" x2="566.0" y2="172.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="453.5" y="167.0" font-size="12" text-anchor="middle">Write slba=192, 208</text><line x1="572.0" y1="194.0" x2="341.0" y2="194.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="453.5" y="189.0" font-size="12" text-anchor="middle">완료</text><line x1="95.0" y1="230.0" x2="329.0" y2="230.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="215.0" y="225.0" font-size="12" text-anchor="middle">커밋 블록: PREFLUSH | FUA</text><text x="327.0" y="275.0" font-size="12" text-anchor="end">① 먼저 빈 FLUSH (rwbs FF)</text><line x1="335.0" y1="270.0" x2="566.0" y2="270.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="453.5" y="265.0" font-size="12" text-anchor="middle">Flush 명령</text><line x1="572.0" y1="292.0" x2="341.0" y2="292.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="453.5" y="287.0" font-size="12" text-anchor="middle">완료 (캐시 → NAND)</text><text x="327.0" y="339.0" font-size="12" text-anchor="end">② 커밋 블록 (rwbs WFSM)</text><line x1="335.0" y1="334.0" x2="566.0" y2="334.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="453.5" y="329.0" font-size="12" text-anchor="middle">Write slba=216, ctrl=0x4000 (FUA)</text><line x1="572.0" y1="356.0" x2="341.0" y2="356.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="453.5" y="351.0" font-size="12" text-anchor="middle">완료 (NAND에 쓴 뒤)</text><line x1="335.0" y1="382.0" x2="101.0" y2="382.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah3)"/><text x="215.0" y="377.0" font-size="12" text-anchor="middle">fsync() 반환</text><text x="340.0" y="412.0" font-size="12" text-anchor="middle">virtio-blk(fua=0)에서는 ②가 "쓰기 + 뒤따르는 FLUSH"로 바뀐다 (POSTFLUSH 에뮬레이션)</text></svg>
+```
+그림 3 — 예제 7에서 실제로 잡은 fsync 한 번의 요청 순서(NVMe). 커밋 블록 하나가 "빈 Flush + FUA 쓰기" 둘로 쪼개진다.
+
+block layer 안에서 이 쪼개기를 하는 게 `block/blk-flush.c`의 상태 기계다. `blk_insert_flush()`가 요청을 보고 필요한 단계를 고른다(6.18.55 소스):
+
+```c
+	if (blk_rq_sectors(rq))
+		policy |= REQ_FSEQ_DATA;
+
+	/*
+	 * Check which flushes we need to sequence for this operation.
+	 */
+	if (blk_queue_write_cache(q)) {
+		if (rq->cmd_flags & REQ_PREFLUSH)
+			policy |= REQ_FSEQ_PREFLUSH;
+		if ((rq->cmd_flags & REQ_FUA) && !supports_fua)
+			policy |= REQ_FSEQ_POSTFLUSH;
+	}
+```
+
+즉 (1) 장치에 쓰기 캐시가 없으면(`write through`) 아무 flush도 안 하고, (2) 캐시가 있으면 PREFLUSH 단계를 넣고, (3) 장치가 FUA를 못 하면 FUA 대신 POSTFLUSH(쓰기 뒤 FLUSH)를 넣는다.
+
+### 4.2 예제 6 · 7 — tracefs로 fsync가 보내는 요청 보기
+
+무엇을 확인하나: 이미 할당된 4 KiB 블록 하나를 덮어쓴 뒤 각각 (a) 아무것도 안 함 (b) `sync_file_range` (c) O_DIRECT (d) fdatasync (e) fsync를 했을 때, `block:block_rq_issue` 트레이스포인트에 어떤 요청이 나오는지. NVMe에서는 `nvme:nvme_setup_cmd`도 켜서 실제 NVMe 명령(opcode, FUA 비트)까지 본다. 마지막으로 sysfs `write_cache`를 `write through`로 바꾸고 다시 fsync한다.
+
+```c
+/* j5_w: 4 KiB 한 번 쓰고 선택한 내구성 호출을 한다 (트레이스 관찰용) */
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+static void die(const char *m) { perror(m); exit(1); }
+int main(int argc, char **argv) {
+    if (argc != 3) { fprintf(stderr, "usage: %s file buf|fsync|fdatasync|direct|direct+fdatasync|sfr\n", argv[0]); return 2; }
+    const char *m = argv[2];
+    int direct = !strncmp(m, "direct", 6);
+    int fd = open(argv[1], O_WRONLY | O_CREAT | (direct ? O_DIRECT : 0), 0644);
+    if (fd < 0) die("open");
+    void *buf;
+    if (posix_memalign(&buf, 4096, 4096)) die("memalign");
+    memset(buf, 'J', 4096);
+    if (pwrite(fd, buf, 4096, 0) != 4096) die("pwrite");
+    if (!strcmp(m, "fsync") && fsync(fd)) die("fsync");
+    if (strstr(m, "fdatasync") && fdatasync(fd)) die("fdatasync");
+    if (!strcmp(m, "sfr") &&
+        sync_file_range(fd, 0, 4096, SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER))
+        die("sync_file_range");
+    close(fd);
+    return 0;
+}
+```
+
+```sh
+#!/bin/sh
+# guest: which requests (rwbs) does each durability call send to the device?
+D=${1:-vda}
+case $D in nvme*) insmod /j5/nvme-core.ko; insmod /j5/nvme.ko; sleep 2;; esac
+mount -t ext4 -o noatime /dev/$D /mnt/a || exit 1
+T=/sys/kernel/tracing; mount -t tracefs none $T
+/j5/j5_w /mnt/a/f buf; sync; sleep 1      # 파일과 블록을 미리 할당
+echo "dev=$D write_cache=$(cat /sys/block/$D/queue/write_cache) fua=$(cat /sys/block/$D/queue/fua)"
+echo 1 > $T/events/block/block_rq_issue/enable
+[ -d $T/events/nvme ] && echo 1 > $T/events/nvme/nvme_setup_cmd/enable
+run() { echo > $T/trace; /j5/j5_w /mnt/a/f $1; sleep 0.3; echo "--- $1 ($2)"; grep -v '^#' $T/trace | sed 's/^.*: block_rq_issue: /  /; s/^.*nvme_setup_cmd: .*cmd=(/  nvme: (/' | cut -c1-110; }
+run buf "write only"
+run sfr "sync_file_range"
+run direct "O_DIRECT, no fsync"
+run fdatasync "overwrite + fdatasync"
+run fsync "overwrite + fsync"
+echo "write through" > /sys/block/$D/queue/write_cache
+echo "write_cache=$(cat /sys/block/$D/queue/write_cache)"
+run fsync "fsync with write_cache=write through"
+umount /mnt/a
+```
+
+rwbs 읽는 법(`blk_fill_rwbs()`): 첫 글자 `F` = PREFLUSH, 그다음 `W`/`R` = 쓰기/읽기(`FF`의 두 번째 F는 REQ_OP_FLUSH 자체), 그 뒤 `F` = FUA, `S` = sync, `M` = metadata. 나머지 열은 `장치 major,minor  rwbs  바이트  ()  섹터 + 섹터수  ioprio  [프로세스]`다.
+
+**예제 6 — virtio-blk** (`write_cache=write back`, `fua=0`):
+
+```text
+dev=vda write_cache=write back fua=0
+--- buf (write only)
+--- sfr (sync_file_range)
+  254,0 WS 4096 () 16776 + 8 be,0,4 [j5_w]
+--- direct (O_DIRECT, no fsync)
+  254,0 WS 4096 () 16776 + 8 be,0,4 [j5_w]
+--- fdatasync (overwrite + fdatasync)
+  254,0 WS 4096 () 16776 + 8 be,0,4 [j5_w]
+  254,0 FF 0 () 0 + 0 none,0,0 [kworker/1:1H]
+--- fsync (overwrite + fsync)
+  254,0 WS 4096 () 16776 + 8 be,0,4 [j5_w]
+  254,0 WSM 4096 () 192 + 8 be,0,3 [jbd2/vda-8]
+  254,0 WSM 4096 () 208 + 8 be,0,3 [jbd2/vda-8]
+  254,0 FF 0 () 0 + 0 none,0,0 [kworker/1:1H]
+  254,0 WSM 4096 () 216 + 8 be,0,3 [kworker/0:1H]
+  254,0 FF 0 () 0 + 0 none,0,0 [kworker/0:1H]
+write_cache=write through
+--- fsync (fsync with write_cache=write through)
+  254,0 WS 4096 () 16776 + 8 be,0,4 [j5_w]
+  254,0 WSM 8192 () 224 + 16 be,0,3 [jbd2/vda-8]
+  254,0 WSM 4096 () 240 + 8 be,0,3 [jbd2/vda-8]
+```
+
+**예제 7 — NVMe** (QEMU `-device nvme`, `write_cache=write back`, `fua=1`):
+
+```text
+dev=nvme0n1 write_cache=write back fua=1
+--- buf (write only)
+--- sfr (sync_file_range)
+  nvme: (nvme_cmd_write slba=16776, len=7, ctrl=0x0, dsmgmt=0, reftag=0)
+  259,0 WS 4096 () 16776 + 8 be,0,4 [j5_w]
+--- direct (O_DIRECT, no fsync)
+  nvme: (nvme_cmd_write slba=16776, len=7, ctrl=0x0, dsmgmt=0, reftag=0)
+  259,0 WS 4096 () 16776 + 8 be,0,4 [j5_w]
+--- fdatasync (overwrite + fdatasync)
+  nvme: (nvme_cmd_write slba=16776, len=7, ctrl=0x0, dsmgmt=0, reftag=0)
+  259,0 WS 4096 () 16776 + 8 be,0,4 [j5_w]
+  nvme: (nvme_cmd_flush cdw10=00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00)
+  259,0 FF 0 () 0 + 0 none,0,0 [kworker/0:1H]
+--- fsync (overwrite + fsync)
+  nvme: (nvme_cmd_write slba=16776, len=7, ctrl=0x0, dsmgmt=0, reftag=0)
+  259,0 WS 4096 () 16776 + 8 be,0,4 [j5_w]
+  nvme: (nvme_cmd_write slba=192, len=7, ctrl=0x0, dsmgmt=0, reftag=0)
+  259,0 WSM 4096 () 192 + 8 be,0,3 [jbd2/nvme0n1-8]
+  nvme: (nvme_cmd_write slba=208, len=7, ctrl=0x0, dsmgmt=0, reftag=0)
+  259,0 WSM 4096 () 208 + 8 be,0,3 [jbd2/nvme0n1-8]
+  nvme: (nvme_cmd_flush cdw10=00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00)
+  259,0 FF 0 () 0 + 0 none,0,0 [kworker/1:1H]
+  nvme: (nvme_cmd_write slba=216, len=7, ctrl=0x4000, dsmgmt=0, reftag=0)
+  259,0 WFSM 4096 () 216 + 8 be,0,3 [kworker/1:1H]
+write_cache=write through
+--- fsync (fsync with write_cache=write through)
+  nvme: (nvme_cmd_write slba=16776, len=7, ctrl=0x0, dsmgmt=0, reftag=0)
+  259,0 WS 4096 () 16776 + 8 be,0,4 [j5_w]
+  nvme: (nvme_cmd_write slba=224, len=15, ctrl=0x0, dsmgmt=0, reftag=0)
+  259,0 WSM 8192 () 224 + 16 be,0,3 [jbd2/nvme0n1-8]
+  nvme: (nvme_cmd_write slba=240, len=7, ctrl=0x0, dsmgmt=0, reftag=0)
+  259,0 WSM 4096 () 240 + 8 be,0,3 [jbd2/nvme0n1-8]
+```
+
+(NVMe 드라이버의 `nvme_prep_rq()`가 `nvme_setup_cmd()`로 명령을 만든 다음 `nvme_start_request()`를 부르고, `block_rq_issue`는 그 안에서 찍히므로 nvme 줄이 먼저 나온다. `len`은 0 기반 블록 수라 `len=7` = 8블록 = 4 KiB.)
+
+출력에서 볼 것:
+
+- **write만**: 아무 요청도 없다. 데이터는 page cache에만 있다.
+- **sync_file_range, O_DIRECT**: 데이터 쓰기 `WS` 하나만 간다. **FLUSH가 없다.** NVMe에서 보면 `ctrl=0x0`(FUA 없음) Write 하나뿐이다. Don의 SSD라면 이 데이터는 DRAM write cache에 들어가고 CQE가 나간 상태 — PLP가 없으면 전원 차단에 죽는다. §2.1 표의 "내구성 없음"의 증거다.
+- **fdatasync(덮어쓰기)**: 데이터 쓰기 + 빈 FLUSH(`FF`, NVMe `nvme_cmd_flush`). 크기·블록이 안 바뀌어서 저널 커밋이 필요 없고, `ext4_sync_file()`이 `needs_barrier`로 `blkdev_issue_flush()`만 따로 보낸 것이다. 요청 2개.
+- **fsync(덮어쓰기)**: mtime이 바뀌어서 jbd2 커밋이 돈다. 데이터 `WS` → 저널 블록 `WSM` ×2 → 커밋. 커밋 블록이 장치마다 다르게 쪼개진다.
+- NVMe(`fua=1`): **빈 Flush 명령 → 커밋 블록 Write(`ctrl=0x4000` = FUA 비트, rwbs `WFSM`)**. 그림 3 그대로다.
+- virtio(`fua=0`): **FF → 커밋 블록 WSM → FF**. FUA를 못 하니 block layer가 쓰기 뒤에 FLUSH를 하나 더 붙였다(POSTFLUSH). 커밋 블록을 kworker가 내보내는 것도 flush 상태 기계가 대신 디스패치하기 때문이다.
+- **`write through`로 바꾸면 FLUSH도 FUA도 전부 사라진다.** 같은 fsync인데 장치에는 평범한 쓰기 3개만 간다.
+
+### 4.3 `/sys/block/X/queue/write_cache` — 바꾸면 장치가 바뀌나?
+
+아니다. 이게 함정이다. 6.18.55 `block/blk-sysfs.c`의 `queue_wc_store()`는 `write through`를 받으면 `BLK_FLAG_WRITE_CACHE_DISABLED` **소프트웨어 플래그**만 켠다. 그러면 `submit_bio_noacct()`가 FLUSH/FUA 비트를 지워 버린다:
+
+```c
+	if (op_is_flush(bio->bi_opf)) {
+		if (WARN_ON_ONCE(bio_op(bio) != REQ_OP_WRITE &&
+				 bio_op(bio) != REQ_OP_ZONE_APPEND))
+			goto end_io;
+		if (!bdev_write_cache(bdev)) {
+			bio->bi_opf &= ~(REQ_PREFLUSH | REQ_FUA);
+			if (!bio_sectors(bio)) {
+				status = BLK_STS_OK;
+				goto end_io;
+			}
+		}
+	}
+```
+
+빈 FLUSH는 장치에 가지도 않고 즉시 성공 처리된다. **NVMe 장치의 캐시는 여전히 켜져 있다**(NVMe 쪽에 Set Features로 캐시를 끄는 명령을 보내지 않는다). 그러니 PLP 없는 장치에 `write through`를 쓰면 "fsync가 빨라졌다"가 아니라 "fsync가 거짓말을 하기 시작했다"다. 이 설정이 정당한 경우는 하나뿐이다: **장치에 PLP가 있어서 캐시 내용이 전원 차단에도 살아남는다는 것을 아는 경우.** 그래서 PLP가 있는 엔터프라이즈 SSD는 아예 VWC=0을 보고하거나, Flush를 받아도 PLP 덕에 즉시 완료하는 식으로 처리한다(Don이 만든 쪽).
+
+드라이버가 이 속성의 초기값을 정하는 곳(6.18.55):
+
+| 드라이버 | 코드 | 결정 근거 |
+|---|---|---|
+| NVMe | `drivers/nvme/host/core.c`: VWC가 있으면 `BLK_FEAT_WRITE_CACHE`와 `BLK_FEAT_FUA`를 함께 켬 | Identify Controller의 VWC 비트 |
+| virtio-blk | `drivers/block/virtio_blk.c`: `virtblk_get_cache_mode()` 결과로 `BLK_FEAT_WRITE_CACHE` | `VIRTIO_BLK_F_FLUSH` + config `wce` |
+| MMC/eMMC | `drivers/mmc/core/block.c`: reliable write 지원이면 `WRITE_CACHE + FUA`, 아니면 캐시가 켜졌을 때만 `WRITE_CACHE` | EXT_CSD `REL_PARAM`/`REL_WR_SEC_C`, `CACHE_CTRL` |
+
+
+virtio-blk에는 따로 `cache_type` sysfs 속성이 있어서, 이건 진짜로 장치(QEMU)에 WCE 비트를 써 넣는다(`virtio_cwrite8(..., wce)`). 같은 "write through"라도 경로가 다르다.
+
+### 4.4 eMMC — 캐시, flush, reliable write (스펙 기반 정리, 실행 안 함)
+
+QEMU의 SD/eMMC 모델은 EXT_CSD 캐시 기능을 흉내 내지 않아서 이 절은 실행하지 않았다. JEDEC eMMC 5.x 스펙과 위 커널 코드를 기준으로 정리한다.
+
+- **캐시 존재·크기**: EXT_CSD `CACHE_SIZE`[252:249] (KiB 단위). 0이 아니면 휘발 캐시가 있다.
+- **캐시 켜기**: EXT_CSD `CACHE_CTRL`[33] = 1. 커널은 카드 초기화 때 켠다(`drivers/mmc/core/mmc.c`의 `EXT_CSD_CACHE_CTRL` 스위치).
+- **flush**: EXT_CSD `FLUSH_CACHE`[32]에 1을 쓰는 CMD6. 커널은 `REQ_OP_FLUSH`를 받으면 `mmc_flush_cache()` → 버스 ops의 `flush_cache`(= `drivers/mmc/core/mmc.c`의 `_mmc_flush_cache()`)로 이걸 한다. 이 명령은 캐시 크기에 따라 수십~수백 ms 걸릴 수 있다(카드마다 다름).
+- **reliable write**: CMD23(SET_BLOCK_COUNT) 인자의 bit 31. "이 쓰기가 중간에 끊겨도 옛 데이터 아니면 새 데이터"(섹터 단위 원자성)와 "캐시를 거치지 않음"을 준다. 커널은 `REQ_FUA` 쓰기를 reliable write로 보낸다(`do_rel_wr = (req->cmd_flags & REQ_FUA) && ...`).
+- **cache를 끄면?** `CACHE_CTRL`=0이면 쓰기 성능이 크게 떨어지지만 flush가 필요 없다. 반대로 eMMC가 캐시를 "켜졌다"고 하면서 flush를 대충 처리하면 호스트는 알 방법이 없다 — 장비 qualification에서 전원 차단 시험(아래 §7.2 같은 시험을 실보드 + 릴레이로)을 하는 이유다.
+- **Don 연결**: eMMC 캐시 flush는 Don의 SSD에서 Flush 명령 처리와 같은 일이다. 차이는 eMMC는 보통 PLP 캡이 없어서, flush 전에 전원이 빠지면 캐시 내용은 그냥 사라진다는 것이다. 그리고 MLC/TLC eMMC는 프로그램 중 전원이 빠지면 **이미 써 둔 paired page(같은 워드라인의 lower page)까지 깨질 수 있다** — Don이 NAND 쪽에서 아는 그 현상이다. 그래서 "fsync가 끝난 데이터"조차 그 뒤 다른 쓰기 도중의 전원 차단으로 깨질 수 있고, 장비용 eMMC를 고를 때 "power-loss 보호" 기능(벤더 고유)을 따로 확인한다.
+
+### 4.5 NVMe VWC와 Don의 SSD — 계약 지도
+
+```svg
+<svg viewBox="0 0 680 440" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><rect x="20" y="12" width="300" height="30" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="170.0" y="31.6" font-size="13" text-anchor="middle" font-weight="bold">호스트 (Linux) — 약속하는 쪽</text><rect x="360" y="12" width="300" height="30" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="510.0" y="31.6" font-size="13" text-anchor="middle" font-weight="bold">장치 (Don의 SSD FW) — 지키는 쪽</text><rect x="20" y="56" width="300" height="34" rx="6" fill="#4a7bd0" fill-opacity="0.06" stroke="#4a7bd0"/><text x="170.0" y="77.2" font-size="12" text-anchor="middle">write() 반환</text><rect x="360" y="56" width="300" height="34" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/><text x="510.0" y="77.2" font-size="12" text-anchor="middle">(장치는 아직 모름)</text><line x1="322.0" y1="73.0" x2="358.0" y2="73.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah4)"/><rect x="20" y="100" width="300" height="34" rx="6" fill="#4a7bd0" fill-opacity="0.06" stroke="#4a7bd0"/><text x="170.0" y="121.2" font-size="12" text-anchor="middle">writeback: WRITE 명령</text><rect x="360" y="100" width="300" height="34" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/><text x="510.0" y="121.2" font-size="12" text-anchor="middle">DRAM write cache에 받고 완료</text><line x1="322.0" y1="117.0" x2="358.0" y2="117.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah4)"/><rect x="20" y="144" width="300" height="34" rx="6" fill="#4a7bd0" fill-opacity="0.06" stroke="#4a7bd0"/><text x="170.0" y="165.2" font-size="12" text-anchor="middle">REQ_PREFLUSH → Flush 명령</text><rect x="360" y="144" width="300" height="34" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/><text x="510.0" y="165.2" font-size="12" text-anchor="middle">캐시 데이터 + 매핑 테이블 flush</text><line x1="322.0" y1="161.0" x2="358.0" y2="161.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah4)"/><rect x="20" y="188" width="300" height="34" rx="6" fill="#4a7bd0" fill-opacity="0.06" stroke="#4a7bd0"/><text x="170.0" y="209.2" font-size="12" text-anchor="middle">REQ_FUA → FUA 비트</text><rect x="360" y="188" width="300" height="34" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/><text x="510.0" y="209.2" font-size="12" text-anchor="middle">이 쓰기만은 NAND 프로그램 뒤 완료</text><line x1="322.0" y1="205.0" x2="358.0" y2="205.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah4)"/><rect x="20" y="232" width="300" height="34" rx="6" fill="#4a7bd0" fill-opacity="0.06" stroke="#4a7bd0"/><text x="170.0" y="253.2" font-size="12" text-anchor="middle">write_cache 속성 (VWC로 결정)</text><rect x="360" y="232" width="300" height="34" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/><text x="510.0" y="253.2" font-size="12" text-anchor="middle">Identify VWC 비트 보고</text><line x1="322.0" y1="249.0" x2="358.0" y2="249.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah4)"/><rect x="20" y="276" width="300" height="34" rx="6" fill="#4a7bd0" fill-opacity="0.06" stroke="#4a7bd0"/><text x="170.0" y="297.2" font-size="12" text-anchor="middle">fsync() 반환 = 내구성 약속</text><rect x="360" y="276" width="300" height="34" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/><text x="510.0" y="297.2" font-size="12" text-anchor="middle">PLP: 캡 에너지로 캐시 dump</text><line x1="322.0" y1="293.0" x2="358.0" y2="293.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah4)"/><rect x="20" y="320" width="300" height="34" rx="6" fill="#4a7bd0" fill-opacity="0.06" stroke="#4a7bd0"/><text x="170.0" y="341.2" font-size="12" text-anchor="middle">fsync() = -EIO</text><rect x="360" y="320" width="300" height="34" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/><text x="510.0" y="341.2" font-size="12" text-anchor="middle">program fail · 쓰기 에러 상태 보고</text><line x1="322.0" y1="337.0" x2="358.0" y2="337.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah4)"/><rect x="20" y="364" width="300" height="34" rx="6" fill="#4a7bd0" fill-opacity="0.06" stroke="#4a7bd0"/><text x="170.0" y="385.2" font-size="12" text-anchor="middle">저널 커밋 순서 (FLUSH가 장벽)</text><rect x="360" y="364" width="300" height="34" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/><text x="510.0" y="385.2" font-size="12" text-anchor="middle">Flush 이전 쓰기 전부 먼저 영속화</text><line x1="322.0" y1="381.0" x2="358.0" y2="381.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah4)"/><text x="340.0" y="420.0" font-size="12" text-anchor="middle">PLP가 있으면 장치는 VWC=0(쓰기 캐시 없음)이라고 보고하거나 Flush를 사실상 no-op으로 처리할 수 있다</text><text x="340.0" y="438.0" font-size="12" text-anchor="middle">PLP가 없는데 호스트가 write_cache를 "write through"로 바꾸면 = Flush를 안 보내는 거짓 계약</text></svg>
+```
+그림 4 — 호스트의 내구성 약속(왼쪽)과 그것을 지키는 장치 FW의 일(오른쪽). Don이 SSD에서 만든 것은 오른쪽 열이다.
+
+- NVMe Identify Controller의 VWC(Volatile Write Cache) 필드 bit 0 = 휘발 캐시 있음. 리눅스는 이걸 보고 `write_cache`를 정한다(위 표). VWC=0인 장치에는 Flush를 아예 안 보낸다.
+- Flush 명령의 의미(NVMe 스펙): 그 시점까지 **완료된** 쓰기를 비휘발 매체에 반영. 아직 완료 안 된(큐에 있는) 쓰기는 대상이 아니다. 그래서 jbd2가 저널 블록 완료를 **기다린 뒤** PREFLUSH를 보낸다 — 순서 책임은 호스트에 있다.
+- FUA: 그 Write 하나만 매체에 닿은 뒤 완료. 그 앞의 쓰기들에 대해서는 아무 말도 안 한다(그래서 커밋 블록은 PREFLUSH + FUA 둘 다 필요).
+- Don의 PLP 설계와의 대응: PLP 캡이 "완료된 쓰기는 다 산다"를 보장하면 장치는 VWC=0을 보고해도 된다. 그러면 호스트는 Flush 비용을 아예 안 낸다. PLP가 있는데 VWC=1을 보고하고 Flush를 즉시 완료하는 FW도 흔하다. 어느 쪽이든 **호스트가 믿는 계약을 장치가 지키는 것**이 핵심이고, 계약이 깨지는 곳은 보통 (1) PLP 없는 장치가 Flush를 무시하거나 (2) 호스트 쪽 설정이 FLUSH를 지우는(write through, `nobarrier`, QEMU `cache=unsafe`) 경우다.
+
+---
+
+## 5. 저널 모드와 torn write — 파일시스템이 대신 해 주는 것, 안 해 주는 것
+
+### 5.1 ext4 data= 모드가 주는 보장 (요약 — 내부는 J2)
+
+| 모드 | 저널에 들어가는 것 | crash 뒤 보장 | 이 노트의 관찰 |
+|---|---|---|---|
+| `data=ordered` (기본) | 메타데이터만. 단, 커밋 전에 그 트랜잭션이 할당한 블록의 데이터를 먼저 쓴다 | 새로 할당된 블록이 남의 옛 데이터(stale data)를 보이는 일은 없다 | atomic 1054/1054 정상 |
+| `data=writeback` | 메타데이터만, 데이터 순서 보장 없음 | 메타데이터는 일관. 파일 내용은 쓰레기·0·옛 데이터일 수 있다 | rename 결과가 ordered와 거의 같았다(이번 실험 범위에선 차이가 안 드러남) |
+| `data=journal` | 데이터까지 저널에 | 데이터도 트랜잭션 단위로 원자적 | 실행 안 함 |
+
+중요한 구분: **data=ordered는 "새 블록에 남의 데이터가 보이지 않는다"(보안·일관성)를 주는 것이지, "앱이 원하는 원자성"을 주는 게 아니다.** 덮어쓰기(inplace)는 새 블록 할당이 없으므로 ordered의 순서 규칙과 무관하고, 예제 4에서 그대로 찢겼다. data=journal도 "write() 한 번"이 트랜잭션 하나에 들어간다는 보장은 없다(큰 쓰기는 여러 트랜잭션에 걸칠 수 있다). 앱 수준 원자성은 앱이 rename이나 CRC로 만든다.
+
+### 5.2 sector atomicity와 torn write
+
+- 장치가 보장하는 원자 단위는 보통 **논리 섹터 하나**(512 B 또는 4 KiB)다. 그보다 큰 요청은 중간에서 끊길 수 있다. NVMe는 Identify의 AWUPF(Atomic Write Unit Power Fail)로 "전원 차단에도 원자적인 크기"를 따로 광고한다. Don의 FW라면 AWUPF를 몇으로 보고했는지가 바로 이 숫자다.
+- Linux 6.11부터 `RWF_ATOMIC`(pwritev2 플래그)과 `statx()`의 `STATX_WRITE_ATOMIC`으로 장치가 지원하는 원자 쓰기 크기를 묻고 쓸 수 있다(블록 장치 6.11, ext4·XFS는 그 뒤 6.13 무렵, O_DIRECT 조건 — 버전은 기억에 의존). 이 노트에서는 실행하지 않았다 — virtio-blk는 원자 쓰기 한도를 광고하지 않는다.
+- 결론: **원자 단위를 모르는 장치에서 덮어쓰기로 무언가를 갱신하려면, 갱신 단위마다 CRC를 붙여 "찢겼다"를 감지할 수 있게 해야 한다.** 예제 4의 검사기가 헤더의 CRC로 찢긴 파일을 잡은 것이 그 예다. DB의 "double write buffer"(MySQL InnoDB)나 "full page write"(PostgreSQL)도 같은 문제를 푸는 장치다.
+
+---
+
+## 6. fsync 에러 의미론 — 한 번만 말해 준다
+
+### 6.1 배경 — fsyncgate (2018)
+
+2018년 PostgreSQL 개발자들이 발견한 문제가 있다: PostgreSQL은 "fsync가 실패하면 나중에 다시 fsync하면 된다"고 가정했는데, Linux에서는 **writeback 에러가 난 page를 clean으로 표시하고 버린다.** 그러면 두 번째 fsync는 내려보낼 dirty page가 없으니 성공(0)을 돌려준다. 데이터는 디스크에 없는데 앱은 저장됐다고 믿게 된다. 이 일이 "fsyncgate"로 불리며 LWN에 크게 다뤄졌다. 그 뒤 PostgreSQL은 fsync 실패 시 **PANIC으로 죽고 WAL에서 복구**하도록 바뀌었다.
+
+커널 쪽에서는 4.13 무렵 `errseq_t`(에러 + 시퀀스 카운터)가 도입되어 "에러를 놓치는 fd가 없도록" 바뀌었고, 그 뒤(4.16~4.17 무렵) "아직 아무도 본 적 없는 에러는 그 뒤에 연 fd도 보게" 보강됐다(버전 번호는 기억에 의존 — 현재 동작은 아래에서 6.18로 확인했다). 하지만 **"에러가 난 데이터를 커널이 다시 쓰려고 들고 있는다"는 바뀌지 않았다.** 이 절의 예제가 6.18에서 그걸 확인한다.
+
+### 6.2 예제 8 — write 성공, fsync EIO 한 번, 그다음 0
+
+무엇을 확인하나: (A) 파일 데이터 블록 하나만 에러가 나게 dm 테이블을 바꾼다(그 섹터 8개만 dm `error` 타깃, 나머지는 `linear`) — 저널은 멀쩡하다. (B) `fail_make_request`로 디스크 전체 쓰기를 실패시킨다. 각각에서 fsync를 여러 fd로 여러 번 부르고, 마지막에 page cache를 버리고 디스크에 실제로 무엇이 있는지 읽는다.
+
+```c
+/* j5_fsyncerr: writeback 에러는 fsync에 몇 번, 어느 fd에 보고되나 · 그 뒤 데이터는? */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/fiemap.h>
+#include <linux/fs.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+static void die(const char *m) { perror(m); exit(1); }
+static void rep(const char *what, int r) { printf("%-36s -> %d %s\n", what, r, r ? strerror(errno) : ""); }
+static char peek(int fd) { char c = '?'; if (pread(fd, &c, 1, 0) != 1) c = '!'; return c; }
+int main(int argc, char **argv) {
+    if (argc != 4) { fprintf(stderr, "usage: %s file break_cmd fix_cmd\n", argv[0]); return 2; }
+    char b[4096], cmd[512];
+    int fd = open(argv[1], O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) die("open");
+    memset(b, 'O', sizeof b);
+    if (pwrite(fd, b, sizeof b, 0) != sizeof b || fsync(fd)) die("setup");
+    struct { struct fiemap f; struct fiemap_extent e; } m = { .f = { .fm_length = ~0ULL, .fm_extent_count = 1 } };
+    if (ioctl(fd, FS_IOC_FIEMAP, &m)) die("fiemap");
+    unsigned long long sec = m.e.fe_physical / 512;
+    printf("old data 'O' durable at sector %llu\n", sec);
+    int fd_before = open(argv[1], O_RDONLY);           /* 에러 전에 열어 둔 두 번째 fd */
+    memset(b, 'N', sizeof b);
+    rep("pwrite 'N' (page cache only)", pwrite(fd, b, sizeof b, 0) == sizeof b ? 0 : -1);
+    snprintf(cmd, sizeof cmd, "%s %llu", argv[2], sec);
+    if (system(cmd)) die("break_cmd");
+    rep("fsync(fd) #1", fsync(fd));
+    rep("fsync(fd) #2", fsync(fd));
+    rep("fsync(fd_before) (opened before)", fsync(fd_before));
+    int fd_after = open(argv[1], O_RDONLY);
+    rep("fsync(fd_after) (opened after)", fsync(fd_after));
+    printf("read via page cache: '%c'\n", peek(fd));
+    if (system(argv[3])) die("fix_cmd");
+    rep("fsync(fd) #3 after device fixed", fsync(fd));
+    int dc = open("/proc/sys/vm/drop_caches", O_WRONLY);
+    if (dc < 0 || write(dc, "3", 1) != 1) die("drop_caches");
+    printf("read after drop_caches: '%c'  <- what the disk really has\n", peek(fd));
+    return 0;
+}
+```
+
+```sh
+#!/bin/sh
+# guest: fsync 에러 의미론 — A) 그 파일의 데이터 블록만 에러(dm error target) B) 디스크 전체 fail_make_request
+dmesg -n 1; cd /j5; insmod dm-mod.ko
+S=$(cat /sys/block/vda/size)
+echo "0 $S linear /dev/vda 0" | dmsetup --noudevsync create j5e && dmsetup --noudevsync mknodes
+mount -t ext4 /dev/mapper/j5e /mnt/a || exit 1
+cat > /tmp/brk <<'X'
+#!/bin/sh
+# $1 = data sector of the file: map 8 sectors there to the "error" target
+S=$(cat /sys/block/vda/size); A=$1; E=$((A+8))
+printf "0 $A linear /dev/vda 0\n$A 8 error\n$E $((S-E)) linear /dev/vda $E\n" > /tmp/tbl
+dmsetup --noudevsync suspend --nolockfs j5e && dmsetup --noudevsync reload j5e /tmp/tbl && dmsetup --noudevsync resume j5e
+dmsetup table j5e | sed 's/^/  table: /'
+X
+cat > /tmp/fix <<'X'
+#!/bin/sh
+S=$(cat /sys/block/vda/size)
+echo "0 $S linear /dev/vda 0" > /tmp/tbl
+dmsetup --noudevsync suspend --nolockfs j5e && dmsetup --noudevsync reload j5e /tmp/tbl && dmsetup --noudevsync resume j5e
+X
+chmod +x /tmp/brk /tmp/fix
+echo "=== A) only the file's data block fails (ext4, $(uname -r))"
+/j5/j5_fsyncerr /mnt/a/f /tmp/brk /tmp/fix
+dmesg | grep -iE "error|ext4|I/O" | tail -6 | sed 's/^/  dmesg: /'
+umount /mnt/a; dmsetup remove j5e
+echo "=== B) whole disk fails (fail_make_request on vda)"
+F=/sys/kernel/debug/fail_make_request
+echo 100 > $F/probability; echo -1 > $F/times; echo 0 > $F/verbose
+mount -t ext4 /dev/vda /mnt/a || exit 1
+printf '#!/bin/sh\necho 1 > /sys/block/vda/make-it-fail\n' > /tmp/brk2; printf '#!/bin/sh\necho 0 > /sys/block/vda/make-it-fail\n' > /tmp/fix2; chmod +x /tmp/brk2 /tmp/fix2
+/j5/j5_fsyncerr /mnt/a/g /tmp/brk2 /tmp/fix2
+grep /mnt/a /proc/mounts | cut -d" " -f1-4 | sed "s/^/  mount state now: /"
+dmesg | grep -iE "ext4|jbd2|I/O" | tail -5 | sed 's/^/  dmesg: /'
+```
+
+```text
+=== A) only the file's data block fails (ext4, 6.18.55-fs)
+old data 'O' durable at sector 16776
+pwrite 'N' (page cache only)         -> 0 
+  table: 0 16776 linear 254:0 0
+  table: 16776 8 error 
+  table: 16784 114288 linear 254:0 16784
+fsync(fd) #1                         -> -1 Input/output error
+fsync(fd) #2                         -> 0 
+fsync(fd_before) (opened before)     -> -1 Input/output error
+fsync(fd_after) (opened after)       -> 0 
+read via page cache: 'N'
+fsync(fd) #3 after device fixed      -> 0 
+read after drop_caches: 'O'  <- what the disk really has
+  dmesg: [    3.864881] EXT4-fs (dm-0): mounted filesystem a4565c16-acc5-4981-9577-73c3e7424a3c r/w with ordered data mode. Quota mode: none.
+  dmesg: [    4.333160] EXT4-fs warning (device dm-0): ext4_end_bio:368: I/O error 10 writing to inode 13 starting block 2097)
+  dmesg: [    4.333836] Buffer I/O error on device dm-0, logical block 2097
+=== B) whole disk fails (fail_make_request on vda)
+old data 'O' durable at sector 16784
+pwrite 'N' (page cache only)         -> 0 
+fsync(fd) #1                         -> -1 Input/output error
+fsync(fd) #2                         -> -1 Input/output error
+fsync(fd_before) (opened before)     -> -1 Input/output error
+fsync(fd_after) (opened after)       -> -1 Input/output error
+read via page cache: 'N'
+fsync(fd) #3 after device fixed      -> -1 Read-only file system
+read after drop_caches: 'O'  <- what the disk really has
+  mount state now: /dev/vda /mnt/a ext4 rw,relatime,emergency_ro
+  dmesg: [    5.283359] JBD2: I/O error when updating journal superblock for vda-8.
+  dmesg: [    5.285767] EXT4-fs error (device vda): ext4_journal_check_start:87: comm j5_fsyncerr: Detected aborted journal
+  dmesg: [    5.286354] Buffer I/O error on dev vda, logical block 0, lost sync page write
+  dmesg: [    5.286389] EXT4-fs (vda): I/O error while writing superblock
+  dmesg: [    5.286467] EXT4-fs (vda): Remounting filesystem read-only
+```
+
+출력에서 볼 것 (A — 데이터 블록만 실패, 이게 fsyncgate 상황):
+
+- `pwrite`는 성공(0)했다. 에러는 writeback 때 난다.
+- `fsync #1` = EIO, **`fsync #2` = 0**. 같은 fd에 에러는 한 번만 보고된다(`file_check_and_advance_wb_err()`가 fd의 `f_wb_err`를 앞으로 당긴다).
+- 에러 **전에** 열어 둔 `fd_before`는 EIO를 받는다(그 fd도 아직 그 에러를 못 봤으니까). 에러가 이미 `fd`에 보고된 **뒤에** 연 `fd_after`는 0을 받는다. 6.18.55의 `errseq_sample()` 주석 "If nobody has seen this error yet, then we can be the first"가 정확히 이 규칙이다: 아무도 안 봤으면 새로 연 fd도 보고, 누가 이미 봤으면 새 fd는 못 본다.
+- page cache를 통해 읽으면 'N'(새 데이터)이 보인다. **장치를 고친 뒤 fsync #3도 0**이다. 커널이 다시 쓰지 않았다는 뜻이다(page가 이미 clean).
+- `drop_caches` 뒤 읽으면 **'O' — 디스크에는 옛 데이터**가 있다. 앱은 fsync #2, #3의 0을 믿으면 데이터를 잃은 줄도 모른다.
+
+(B — 디스크 전체 실패): 저널 쓰기까지 실패하면 jbd2가 abort되고 ext4가 read-only로 전환한다. 이때는 fsync가 계속 EIO, 나중엔 EROFS를 돌려주므로 "놓칠" 일은 없지만 파일시스템 전체가 멈춘다. `/proc/mounts`에 `emergency_ro`가 보이는 것은 6.x ext4의 새 표시다(옛 커널은 그냥 `ro`).
+
+### 6.3 그래서 앱은 어떻게 해야 하나
+
+- **fsync EIO는 치명적 에러다.** 다시 fsync해서 0을 받아도 아무 의미가 없다. 그 사이에 쓴 데이터가 디스크에 있다고 가정하면 안 된다.
+- 해야 할 일: (1) 데이터를 앱 메모리에 아직 들고 있으면 **새 파일에 처음부터 다시 쓰고** fsync(같은 page를 다시 dirty로 만들기), (2) 들고 있지 않으면 로그·WAL로부터 복구하는 경로로 가거나 프로세스를 죽여 재시작 복구에 맡긴다(PostgreSQL 방식), (3) 장비라면 에러를 상태 보고(헬스 토픽, 에러 LED)로 올린다 — 저장장치가 죽어 가는 신호다.
+- `close()`의 반환값도 확인하자(NFS 등에서는 close가 writeback 에러를 돌려준다). 단, close가 0이라고 내구성이 생기는 건 아니다.
+- 여러 프로세스가 같은 파일을 쓰면, 에러는 각 fd에 한 번씩 간다. "다른 프로세스가 이미 에러를 먹어 버려서 내가 못 받는" 상황은 내 fd가 에러 전에 열려 있었다면 4.13 이후 생기지 않는다(예제의 `fd_before`).
+
+---
+## 7. 필드 로봇의 로그·기록 저장 설계
+
+### 7.1 요구 사항부터
+
+센서 키트 로봇의 주행 로그(이벤트, 에러, 상태 스냅샷)라면 요구는 대략 이렇다.
+
+- **전원이 언제 나가도 로그 파일이 깨지지 않을 것.** 마지막 몇 개 레코드를 잃는 건 괜찮지만, 앞부분까지 못 읽게 되면 안 된다.
+- **잃어도 되는 범위(data-loss window)를 숫자로 말할 수 있을 것.** "최대 100 ms 분량 또는 20개 레코드".
+- **eMMC 수명 안에서 돌 것.** 레코드가 64 B인데 fsync마다 4 KiB 데이터 + 저널 블록 몇 개를 쓰면 쓰기 증폭이 수백 배다(아래 예제 10에서 실측).
+- **꽉 차도 장비가 멈추지 않을 것.** 오래된 것부터 덮어쓰기(ring), 그리고 rootfs와 분리된 파티션.
+
+설계 요소별로 정리하면:
+
+| 요소 | 왜 | 이 노트의 구현 |
+|---|---|---|
+| append-only 레코드 | 덮어쓰기는 찢김을 만든다. 끝에 붙이기만 하면 찢겨도 꼬리만 깨진다 | 64 B 고정 레코드 |
+| 레코드마다 CRC32 + seq | 복구 스캔이 "어디까지가 온전한가"를 스스로 판정 | `magic, seq, t, payload, crc` |
+| 고정 크기 세그먼트 + 회전 | 파일 크기가 안 변하면 fdatasync가 메타데이터 커밋을 안 한다 · 오래된 세그먼트 재사용 | 4 × 64 KiB |
+| 미리 할당 (0으로 채우기) | `fallocate`만 하면 unwritten extent라 첫 쓰기 때 extent 변환이 메타데이터 커밋을 부른다 | 처음 한 번 0을 써서 fsync |
+| fsync 묶기 (batch) | 레코드마다 fsync는 비용·마모가 수백 배 | 20개마다 fdatasync (= 100 ms 창) |
+| 세그먼트 헤더에 세대(gen) + 첫 seq | 재사용된 세그먼트의 옛 레코드를 새 것으로 착각하지 않게 | 레코드 seq가 `first + slot - 1`과 맞아야 유효 |
+| 재시작하면 새 세그먼트 | 찢긴 꼬리 뒤에 이어 쓰면, 그 뒤에 남은 옛 레코드가 우연히 seq가 맞을 수 있다 | 부팅마다 gen+1 |
+| 별도 파티션 | 로그가 rootfs를 가득 채워 부팅 불가가 되는 사고 방지 · 마모를 한 영역에 가둠 | (설계 권고) |
+
+### 7.2 예제 9 — kill 테스트: QEMU를 무작위 시점에 `kill -9`
+
+무엇을 확인하나: 64 B 레코드를 초당 200개 쓰는 writer를 내구성 방식별로 돌리고, QEMU 프로세스를 2~12초 사이 무작위 시점에 `kill -9`한다. writer는 "여기까지는 저장됐다"고 믿는 시점(ack)마다 시리얼 콘솔에 `A <seq>`를 찍는다. kill 뒤 VM 쪽에서 이미지를 검사해 **ack했는데 사라진 레코드**와 **깨진 레코드**를 센다. 방식마다 20번.
+
+먼저 이 실험이 무엇을 흉내 내는지 정확히 해 두자. `kill -9 qemu`는 **게스트 RAM 전체(page cache 포함)를 순간에 없앤다** — 전원 차단과 같다. 하지만 QEMU가 이미 VM 호스트 파일에 `write()`한 데이터는 VM 호스트의 page cache에 남아 결국 디스크로 간다. 즉 이 실험의 가상 장치는 "**휘발 캐시가 없는(write-through) 장치**"처럼 행동한다. 장치 캐시가 날아가는 경우는 예제 4의 FLUSH 지점 재생이 담당한다. 두 실험을 합쳐야 전체 그림이 된다.
+
+```c
+/* j5_seqw: 64 B 레코드(seq+CRC)를 200개/s로 append, 내구 시점마다 "A <seq>" 출력 (kill 테스트용) */
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include "j5_crc.h"
+struct rec { uint32_t magic, seq; uint64_t t; char pay[44]; uint32_t crc; };
+_Static_assert(sizeof(struct rec) == 64, "rec size");
+static void die(const char *m) { perror(m); exit(1); }
+int main(int argc, char **argv) {
+    if (argc != 3) { fprintf(stderr, "usage: %s file none|fdatasync|batch|odsync\n", argv[0]); return 2; }
+    const char *s = argv[2];
+    int batch = !strcmp(s, "batch") ? 20 : (!strcmp(s, "fdatasync") ? 1 : 0);
+    int fd = open(argv[1], O_WRONLY | O_CREAT | O_APPEND | (!strcmp(s, "odsync") ? O_DSYNC : 0), 0644);
+    if (fd < 0) die("open");
+    char line[32];
+    dprintf(1, "READY %s\n", s);
+    for (uint32_t seq = 1;; seq++) {
+        struct rec r = { .magic = 0x4352354a, .seq = seq, .t = seq };
+        memset(r.pay, 'a' + seq % 26, sizeof r.pay);
+        r.crc = crc32_ieee(&r, offsetof(struct rec, crc));
+        if (write(fd, &r, sizeof r) != sizeof r) die("write");
+        if (batch && seq % batch == 0 && fdatasync(fd)) die("fdatasync");
+        if (!batch || seq % batch == 0) {          /* 이 seq까지는 "저장됐다"고 앱이 믿는 시점 */
+            int n = snprintf(line, sizeof line, "A %u\n", seq);
+            if (write(1, line, n) != n) die("ack");
+        }
+        usleep(5000);
+    }
+}
+```
+
+```c
+/* j5_seqchk: kill 후 덤프한 log.bin 검사 — 유효 레코드 수, 마지막 seq, 0으로 찬 레코드, CRC 불량 */
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "j5_crc.h"
+struct rec { uint32_t magic, seq; uint64_t t; char pay[44]; uint32_t crc; };
+int main(int argc, char **argv) {
+    FILE *f = fopen(argv[1], "rb");
+    unsigned acked = argc > 2 ? strtoul(argv[2], 0, 10) : 0, last = 0, valid = 0, zero = 0, bad = 0, gap = 0;
+    struct rec r;
+    size_t n = 0, sz = 0;
+    if (f) while ((n = fread(&r, 1, sizeof r, f)) == sizeof r) {
+        sz += n;
+        const uint8_t *p = (const uint8_t *)&r; int allz = 1;
+        for (size_t i = 0; i < sizeof r; i++) if (p[i]) { allz = 0; break; }
+        if (allz) { zero++; continue; }
+        if (r.magic != 0x4352354a || crc32_ieee(&r, offsetof(struct rec, crc)) != r.crc) { bad++; continue; }
+        if (r.seq != last + 1) gap++;
+        last = r.seq; valid++;
+    }
+    printf("size=%zu valid=%u last=%u acked=%u lost_acked=%u zero=%u crcbad=%u gaps=%u tail=%zu\n",
+           sz + n, valid, last, acked, acked > last ? acked - last : 0, zero, bad, gap, n);
+    return 0;
+}
+```
+
+```sh
+#!/bin/sh
+# guest: kill 테스트 writer 시작 (파일/디렉터리는 미리 만들고 sync — 레코드 내구성만 본다)
+mount -t ext4 /dev/vda /mnt/a || exit 1
+case $1 in
+ring|ringbug) mkdir -p /mnt/a/ring; sync; [ $1 = ring ] && exec /j5/j5_ringw /mnt/a/ring; exec /j5/j5_ringw_bug /mnt/a/ring;;
+*) touch /mnt/a/log.bin; sync; exec /j5/j5_seqw /mnt/a/log.bin $1;;
+esac
+```
+
+```sh
+#!/bin/bash
+# host: kill -9 QEMU at a random moment, then check what survived. args: strategy run
+ST=$1; RUN=$2; WD=/var/tmp/J5/kill/${ST}_$RUN; rm -rf $WD; mkdir -p $WD; cd $WD
+mkfs.ext4 -q -F -E lazy_itable_init=0,lazy_journal_init=0 d.img 32M
+qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -smp 2 -nographic -kernel /var/lab/out/Image-fs -initrd /var/tmp/J5/j5.cpio.gz \
+  -drive if=none,id=d0,file=d.img,format=raw,cache=${CACHE:-writeback} -device virtio-blk-device,drive=d0 \
+  -append "console=ttyAMA0 quiet LAB_CMD=/j5/g_kill.sh~$ST" > serial.txt 2>&1 < /dev/null &
+QP=$!
+for i in $(seq 300); do grep -q READY serial.txt && break; sleep 0.1; done
+D=$(( 2000 + RANDOM % 10000 )); sleep $(printf "%d.%03d" $((D/1000)) $((D%1000)))
+kill -9 $QP; wait $QP 2>/dev/null
+ACK=$(grep -a -o '^A [0-9]*' serial.txt | tail -1 | cut -d' ' -f2); ACK=${ACK:-0}
+cp --sparse=always d.img ck.img; e2fsck -fy ck.img > fsck.txt 2>&1; RC=$?
+if [ "${ST#ring}" != "$ST" ]; then debugfs -R "rdump /ring $WD" ck.img >/dev/null 2>&1; R=$(/var/tmp/J5/h_ringrec $WD/ring $ACK | tail -1)
+else debugfs -R "dump /log.bin $WD/log.bin" ck.img >/dev/null 2>&1; R=$(/var/tmp/J5/h_seqchk $WD/log.bin $ACK); fi
+echo "$ST $RUN kill_ms=$D fsck=$RC $R"
+rm -f d.img ck.img
+```
+
+아래 표는 결과 줄들을 방식별로 집계한 것이다(lost_acked = ack한 마지막 seq − 복구된 마지막 seq, corrupt = 0으로 찬 레코드·CRC 불량·구멍이 하나라도 있는 실행 수).
+
+```text
+strategy   runs  runs_lost_acked  sum_lost_acked  max_lost_acked  mean_unacked_survived  runs_corrupt(holes/zero/crc)
+none         20         20           23006            1998                0.0                  0
+fdatasync    20          0               0               0                0.1                  0
+batch        20          0               0               0                1.0                  0
+odsync       20          0               0               0                0.1                  0
+ring         20          0               0               0                1.1                  0
+ringbug      10          0               0               0                0.0                  6
+```
+
+none의 개별 실행 몇 줄(나머지도 모양이 같다):
+
+```text
+none 3 kill_ms=2866 fsck=1 size=0 valid=0 last=0 acked=501 lost_acked=501 zero=0 crcbad=0 gaps=0 tail=0
+none 14 kill_ms=11741 fsck=1 size=0 valid=0 last=0 acked=1998 lost_acked=1998 zero=0 crcbad=0 gaps=0 tail=0
+batch 1 kill_ms=8586 fsck=1 size=93440 valid=1460 last=1460 acked=1460 lost_acked=0 zero=0 crcbad=0 gaps=0 tail=0
+```
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><text x="185.0" y="30.0" font-size="13" text-anchor="middle" font-weight="bold">kill -9 뒤 잃은 ack 레코드 (20회 평균)</text><line x1="60.0" y1="50.0" x2="60.0" y2="240.0" stroke="currentColor" stroke-width="1.4"/><line x1="60.0" y1="240.0" x2="310.0" y2="240.0" stroke="currentColor" stroke-width="1.4"/><text x="54.0" y="244.0" font-size="12" text-anchor="end">0</text><line x1="60.0" y1="240.0" x2="310.0" y2="240.0" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/><text x="54.0" y="180.7" font-size="12" text-anchor="end">400</text><line x1="60.0" y1="176.7" x2="310.0" y2="176.7" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/><text x="54.0" y="117.3" font-size="12" text-anchor="end">800</text><line x1="60.0" y1="113.3" x2="310.0" y2="113.3" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/><text x="54.0" y="54.0" font-size="12" text-anchor="end">1200</text><line x1="60.0" y1="50.0" x2="310.0" y2="50.0" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/><rect x="71.0" y="57.9" width="28" height="182.1" fill="#d0564a" fill-opacity="0.75"/><text x="85.0" y="51.9" font-size="12" text-anchor="middle">1150</text><text x="85.0" y="256.0" font-size="11" text-anchor="middle">none</text><rect x="121.0" y="240.0" width="28" height="1.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="135.0" y="234.0" font-size="12" text-anchor="middle">0</text><text x="135.0" y="256.0" font-size="11" text-anchor="middle">fdatasync</text><rect x="171.0" y="240.0" width="28" height="1.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="185.0" y="234.0" font-size="12" text-anchor="middle">0</text><text x="185.0" y="256.0" font-size="11" text-anchor="middle">batch(20)</text><rect x="221.0" y="240.0" width="28" height="1.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="235.0" y="234.0" font-size="12" text-anchor="middle">0</text><text x="235.0" y="256.0" font-size="11" text-anchor="middle">O_DSYNC</text><rect x="271.0" y="240.0" width="28" height="1.0" fill="#3f9a6b" fill-opacity="0.75"/><text x="285.0" y="234.0" font-size="12" text-anchor="middle">0</text><text x="285.0" y="256.0" font-size="11" text-anchor="middle">ring</text><text x="530.0" y="30.0" font-size="13" text-anchor="middle" font-weight="bold">레코드(64 B) 1개당 장치 쓰기량</text><line x1="400.0" y1="50.0" x2="400.0" y2="240.0" stroke="currentColor" stroke-width="1.4"/><line x1="400.0" y1="240.0" x2="660.0" y2="240.0" stroke="currentColor" stroke-width="1.4"/><text x="394.0" y="224.9" font-size="12" text-anchor="end">0.1</text><line x1="400.0" y1="220.9" x2="660.0" y2="220.9" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/><text x="394.0" y="161.6" font-size="12" text-anchor="end">1</text><line x1="400.0" y1="157.6" x2="660.0" y2="157.6" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/><text x="394.0" y="98.3" font-size="12" text-anchor="end">10 KiB</text><line x1="400.0" y1="94.3" x2="660.0" y2="94.3" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/><rect x="412.0" y="217.0" width="28" height="23.0" fill="#4a7bd0" fill-opacity="0.75"/><text x="426.0" y="211.0" font-size="12" text-anchor="middle">0.12</text><text x="426.0" y="256.0" font-size="11" text-anchor="middle">none</text><rect x="464.0" y="81.0" width="28" height="159.0" fill="#4a7bd0" fill-opacity="0.75"/><text x="478.0" y="75.0" font-size="12" text-anchor="middle">16.18</text><text x="478.0" y="256.0" font-size="11" text-anchor="middle">fdatasync</text><rect x="516.0" y="157.5" width="28" height="82.5" fill="#4a7bd0" fill-opacity="0.75"/><text x="530.0" y="151.5" font-size="12" text-anchor="middle">1.00</text><text x="530.0" y="256.0" font-size="11" text-anchor="middle">batch(20)</text><rect x="568.0" y="81.0" width="28" height="159.0" fill="#4a7bd0" fill-opacity="0.75"/><text x="582.0" y="75.0" font-size="12" text-anchor="middle">16.20</text><text x="582.0" y="256.0" font-size="11" text-anchor="middle">O_DSYNC</text><rect x="620.0" y="176.2" width="28" height="63.8" fill="#4a7bd0" fill-opacity="0.75"/><text x="634.0" y="170.2" font-size="12" text-anchor="middle">0.51</text><text x="634.0" y="256.0" font-size="11" text-anchor="middle">ring</text><text x="340.0" y="282.0" font-size="12" text-anchor="middle">왼쪽: 20회 kill (ext4, cache=writeback) · 오른쪽: 10초 기록 후 /sys/block/vda/stat 차이 ÷ 기록 수</text></svg>
+```
+그림 7 — 왼쪽: kill 20번에서 잃은 ack 레코드 평균. 오른쪽: 예제 10에서 잰 레코드당 장치 쓰기량(로그 축).
+
+출력에서 볼 것:
+
+- **none은 20번 모두 파일이 0바이트**였다. 최대 12초를 썼는데도 하나도 안 남았다. 데이터가 30초 dirty 창(예제 1) 안에 있었고, 파일 크기 확장도 delayed allocation 때문에 커밋되지 않았다. 앱은 최대 1998개를 "썼다"고 믿었다.
+- **fdatasync, O_DSYNC, batch, ring은 120번 중 ack 유실 0, 깨진 레코드 0.** batch는 최대 19개(100 ms)를 잃을 수 있게 설계했지만 ack한 것은 하나도 안 잃었다 — 설계한 계약 그대로다.
+- `mean_unacked_survived` 1.0(batch)·1.1(ring): ack 줄이 시리얼로 나가기 전에 kill된 경우다. 레코드는 디스크에 있는데 VM 쪽이 ack를 못 본 것 — 보수적인 쪽 오차라 괜찮다.
+- **ringbug 10번 중 6번에서 레코드 3개짜리 구멍(holes=3)**. 이건 처음 짠 링 버퍼의 진짜 버그였다(아래 7.4).
+- 참고: 캠페인 도중 initramfs를 다시 만드는 실수를 해서 none의 12번째 실행이 부팅에 실패했다(커널 패닉, initrd 없음). 그 줄은 버리고 같은 조건으로 다시 돌린 결과를 넣었다. 링 결과 1~12번은 처음에 VM 쪽 검사 스크립트의 셸 비교 버그로 잘못 판정되어 다시 돌렸다.
+
+### 7.3 예제 10 — 마모 비용: 레코드 하나가 장치에 몇 바이트를 쓰나
+
+무엇을 확인하나: 같은 writer를 방식별로 10초씩 돌리고 `/sys/block/vda/stat`의 쓰기 섹터(7번째 필드)와 flush 횟수(16번째 필드) 차이를 레코드 수로 나눈다. 마지막에 `sync`까지 포함한다(none도 결국 쓰이는 양을 공정하게 세려고).
+
+```sh
+#!/bin/sh
+# guest: 전략별로 10초 동안 200 rec/s 기록 → 장치에 실제로 쓰인 바이트·flush 횟수 (/sys/block/vda/stat)
+dmesg -n 1
+mount -t ext4 /dev/vda /mnt/a || exit 1
+for s in none fdatasync batch odsync ring; do
+  rm -rf /mnt/a/w; mkdir /mnt/a/w; sync; sleep 1
+  set -- $(cat /sys/block/vda/stat); W0=$7; F0=${16}
+  if [ $s = ring ]; then /j5/j5_ringw /mnt/a/w > /tmp/out & else /j5/j5_seqw /mnt/a/w/log.bin $s > /tmp/out & fi
+  P=$!; sleep 10; kill $P; wait $P 2>/dev/null; sync
+  set -- $(cat /sys/block/vda/stat); W1=$7; F1=${16}
+  N=$(grep -c '^A' /tmp/out); L=$(grep '^A' /tmp/out | tail -1 | cut -d' ' -f2)
+  echo "$s last_acked=$L written_KiB=$(( (W1-W0)/2 )) flushes=$((F1-F0))"
+done
+```
+
+```text
+none last_acked=1667 written_KiB=192 flushes=6
+fdatasync last_acked=1198 written_KiB=19384 flushes=2408
+batch last_acked=1640 written_KiB=1648 flushes=167
+odsync last_acked=1284 written_KiB=20804 flushes=2581
+ring last_acked=1660 written_KiB=844 flushes=98
+```
+
+출력에서 볼 것:
+
+- **fdatasync 매번: 레코드(64 B)당 16.2 KiB = 쓰기 증폭 약 260배.** 매번 4 KiB 데이터 블록 + 파일 크기가 바뀌니 저널 커밋(저널 블록 + 커밋 블록) + flush 2번(PREFLUSH, virtio는 FUA 대신 POSTFLUSH). flush도 1198개 레코드에 2408번.
+- **batch(20개마다): 1.0 KiB/레코드.** 16배 줄었다. 대신 최대 100 ms 분량을 잃을 수 있다.
+- **ring: 0.51 KiB/레코드**, batch의 절반. 고정 크기·미리 채운 세그먼트라 크기 변경도 extent 변환도 없어서, fdatasync가 저널 커밋 없이 "데이터 블록 + FLUSH"만 한다(§4.2의 fdatasync 덮어쓰기와 같은 경로). 같은 내구성 창에서 마모가 절반이다.
+- 실제 eMMC에서 이 숫자에 FTL의 쓰기 증폭(작은 쓰기 → 페이지 단위 프로그램, GC)이 또 곱해진다. Don에게 익숙한 계산이다: 8 GB eMMC, 3000 P/E, 호스트 쓰기 16 KiB × 200/s = 3.2 MB/s면 하루 270 GB — 수 개월이면 수명 끝이다. batch·ring으로 줄이는 게 설계의 핵심이다.
+
+### 7.4 예제 11 — 링 로그 저장소: CRC + seq, 세그먼트 회전, 복구 스캔
+
+무엇을 확인하나: §7.1 표의 설계를 그대로 옮긴 저장소. 헤더 파일에 형식과 복구 스캔, writer는 복구 → 새 세그먼트 → 20개마다 fdatasync, 복구 도구는 세그먼트별 유효 레코드와 전체 구멍 수를 출력한다. 예제 9의 `ring` 행이 이 코드의 kill 테스트 결과다.
+
+```c
+/* j5_ring.h: 세그먼트 4개 x 64 KiB 링 로그. slot0 = 세그먼트 헤더(gen, first_seq), slot1.. = 64 B 레코드 */
+#include <fcntl.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include "j5_crc.h"
+#define NSEG 4
+#define SEGSZ (64 * 1024)
+#define SLOTS (SEGSZ / 64)
+#define M_REC 0x4352354au   /* "J5RC" */
+#define M_SEG 0x4753354au   /* "J5SG" */
+struct rec { uint32_t magic, seq; uint64_t t; char pay[44]; uint32_t crc; };
+static inline int rec_ok(const struct rec *r, uint32_t magic) {
+    return r->magic == magic && crc32_ieee(r, offsetof(struct rec, crc)) == r->crc;
+}
+static inline void rec_seal(struct rec *r) { r->crc = crc32_ieee(r, offsetof(struct rec, crc)); }
+struct ring { int fd[NSEG]; uint32_t gen[NSEG], first[NSEG], cnt[NSEG]; };
+/* 복구 스캔: 각 세그먼트 헤더를 읽고, first_seq부터 연속인 레코드만 센다 (CRC·seq 둘 다 맞아야) */
+static inline int ring_scan(struct ring *g, const char *dir, int create) {
+    char p[256];
+    for (int s = 0; s < NSEG; s++) {
+        snprintf(p, sizeof p, "%s/seg%d", dir, s);
+        g->fd[s] = open(p, O_RDWR | (create ? O_CREAT : 0), 0644);
+        if (g->fd[s] < 0) return -1;
+        g->gen[s] = g->first[s] = g->cnt[s] = 0;
+        struct rec r;
+        if (pread(g->fd[s], &r, 64, 0) != 64 || !rec_ok(&r, M_SEG)) continue;
+        g->gen[s] = r.seq; g->first[s] = (uint32_t)r.t;
+        for (uint32_t i = 1; i < SLOTS; i++) {
+            if (pread(g->fd[s], &r, 64, (off_t)i * 64) != 64) break;
+            if (!rec_ok(&r, M_REC) || r.seq != g->first[s] + i - 1) break;   /* 찢긴 꼬리·이전 세대 */
+            g->cnt[s]++;
+        }
+    }
+    return 0;
+}
+static inline int ring_newest(const struct ring *g) {        /* gen이 가장 큰 세그먼트 = 현재 head */
+    int b = -1;
+    for (int s = 0; s < NSEG; s++) if (g->gen[s] && (b < 0 || g->gen[s] > g->gen[b])) b = s;
+    return b;
+}
+```
+
+```c
+/* j5_ringw: 링 로그 writer — 복구 후 이어 쓰기, 20개마다 fdatasync, 세그먼트 회전 */
+#define _GNU_SOURCE
+#include "j5_ring.h"
+static void die(const char *m) { perror(m); exit(1); }
+static void seg_start(struct ring *g, int s, uint32_t gen, uint32_t first) {
+    struct rec h = { .magic = M_SEG, .seq = gen, .t = first };
+    rec_seal(&h);
+    if (pwrite(g->fd[s], &h, 64, 0) != 64 || fdatasync(g->fd[s])) die("seg header");
+    g->gen[s] = gen; g->first[s] = first; g->cnt[s] = 0;
+}
+int main(int argc, char **argv) {
+    if (argc != 2) { fprintf(stderr, "usage: %s dir\n", argv[0]); return 2; }
+    struct ring g;
+    if (ring_scan(&g, argv[1], 1)) die("open seg");
+    int s = ring_newest(&g);
+    if (s < 0) {                                       /* 처음: 0으로 미리 채워 할당까지 끝낸다 */
+        static char z[SEGSZ];
+        for (int i = 0; i < NSEG; i++)
+            if (pwrite(g.fd[i], z, SEGSZ, 0) != SEGSZ || fsync(g.fd[i])) die("format");
+        s = 0; seg_start(&g, 0, 1, 1);
+    } else {                                           /* 재시작: 찢긴 꼬리 뒤에 이어 쓰지 않고 새 세그먼트로 */
+        uint32_t next = g.first[s] + g.cnt[s];
+        int n = (s + 1) % NSEG;
+        seg_start(&g, n, g.gen[s] + 1, next);
+        s = n;
+    }
+    uint32_t seq = g.first[s] + g.cnt[s];
+    char line[32];
+    dprintf(1, "READY ring seg=%d gen=%u next_seq=%u\n", s, g.gen[s], seq);
+    for (;; seq++) {
+        if (1 + g.cnt[s] == SLOTS) {                   /* 꽉 참 → 가장 오래된 세그먼트를 재사용 */
+            int n = (s + 1) % NSEG;
+            if (fdatasync(g.fd[s])) die("fdatasync old seg");   /* 이 줄이 없으면 꼬리 3개가 샌다 (kill 테스트로 발견) */
+            seg_start(&g, n, g.gen[s] + 1, seq);
+            s = n;
+        }
+        struct rec r = { .magic = M_REC, .seq = seq, .t = seq };
+        memset(r.pay, 'a' + seq % 26, sizeof r.pay);
+        rec_seal(&r);
+        if (pwrite(g.fd[s], &r, 64, (off_t)(1 + g.cnt[s]) * 64) != 64) die("pwrite");
+        g.cnt[s]++;
+        if (seq % 20 == 0) {
+            if (fdatasync(g.fd[s])) die("fdatasync");
+            int n = snprintf(line, sizeof line, "A %u\n", seq);
+            if (write(1, line, n) != n) die("ack");
+        }
+        usleep(5000);
+    }
+}
+```
+
+```c
+/* j5_ringrec: 링 로그 복구 스캔 결과 출력 (kill 후 검사·재부팅 시 복구) */
+#include "j5_ring.h"
+int main(int argc, char **argv) {
+    struct ring g;
+    if (argc < 2 || ring_scan(&g, argv[1], 0)) { perror("scan"); return 1; }
+    unsigned acked = argc > 2 ? strtoul(argv[2], 0, 10) : 0, lo = 0, hi = 0, total = 0;
+    for (int s = 0; s < NSEG; s++) {
+        printf("seg%d gen=%u first=%u valid=%u\n", s, g.gen[s], g.first[s], g.cnt[s]);
+        if (!g.cnt[s]) continue;
+        total += g.cnt[s];
+        if (!lo || g.first[s] < lo) lo = g.first[s];
+        if (g.first[s] + g.cnt[s] - 1 > hi) hi = g.first[s] + g.cnt[s] - 1;
+    }
+    printf("recovered seq %u..%u (%u records) holes=%u acked=%u lost_acked=%u\n", lo, hi, total,
+           total ? hi - lo + 1 - total : 0, acked, acked > hi ? acked - hi : 0);
+    return 0;
+}
+```
+
+**kill 테스트가 잡은 버그.** 처음 짠 writer에는 위 코드의 `fdatasync old seg` 줄이 없었다. 세그먼트가 꽉 차면 새 세그먼트의 헤더만 fdatasync하고 옛 세그먼트의 마지막 레코드 몇 개(마지막 batch fdatasync 뒤에 쓴 것)는 page cache에 둔 채로 넘어갔다. 그런데 다음 ack(`A 1040`)는 "1040까지 저장됨"이라고 말한다. kill하면:
+
+```text
+seg0 gen=1 first=1 valid=1020
+seg1 gen=2 first=1024 valid=497
+seg2 gen=0 first=0 valid=0
+seg3 gen=0 first=0 valid=0
+recovered seq 1..1520 (1517 records) holes=3 acked=1520 lost_acked=0
+```
+
+seq 1021~1023이 없다. "마지막 ack ≤ 복구된 마지막 seq"만 보는 검사로는 안 잡히고(lost_acked=0), **구멍 수**를 세야 보인다. 고친 뒤 20번 kill에서 구멍 0. 교훈: 내구성 코드는 "ack 시점에 그 ack가 덮는 모든 파일을 fdatasync했는가"를 파일 단위로 따져야 하고, 테스트는 마지막 값뿐 아니라 **연속성**을 검사해야 한다.
+
+복구를 실제 장비처럼 재부팅으로 해 보자. 링 writer를 7.3초 뒤 kill하고, 같은 이미지로 다시 부팅해 복구 스캔 → 이어 쓰기 → 다시 스캔한다.
+
+```sh
+#!/bin/sh
+# guest: kill된 뒤 다시 부팅 — 복구 스캔 후 이어 쓰기
+mount -t ext4 /dev/vda /mnt/a || exit 1
+echo "--- recovery scan after power cut"; /j5/j5_ringrec /mnt/a/ring
+echo "--- resume writer for 2 s"; timeout 2 /j5/j5_ringw /mnt/a/ring | head -1
+echo "--- scan again"; /j5/j5_ringrec /mnt/a/ring
+```
+
+```text
+A 1160
+A 1180
+lab initramfs: 6.18.55-fs up 1.61s
+--- recovery scan after power cut
+seg0 gen=1 first=1 valid=1023
+seg1 gen=2 first=1024 valid=157
+seg2 gen=0 first=0 valid=0
+seg3 gen=0 first=0 valid=0
+recovered seq 1..1180 (1180 records) holes=0 acked=0 lost_acked=0
+--- resume writer for 2 s
+READY ring seg=2 gen=3 next_seq=1181
+--- scan again
+seg0 gen=1 first=1 valid=1023
+seg1 gen=2 first=1024 valid=157
+seg2 gen=0 first=0 valid=0
+seg3 gen=0 first=0 valid=0
+recovered seq 1..1200 (1200 records) holes=0 acked=0 lost_acked=0
+```
+
+출력에서 볼 것: 마지막 ack가 1180이었고 복구도 정확히 1..1180, 구멍 없음. 재시작한 writer는 seg1의 꼬리에 이어 쓰지 않고 **seg2를 gen=3으로 새로 열어** 1181부터 쓴다. (두 번째 스캔의 seg2 valid=20은 `| head -1`이 첫 줄 뒤 파이프를 닫아 writer가 첫 ack(1200)를 쓰려다 SIGPIPE로 끝났기 때문이다. 복구 스캔 출력의 `acked=0`은 인자를 안 준 것이다.)
+
+### 7.5 journald는 어떻게 하나
+
+systemd-journald도 같은 문제를 같은 방식으로 푼다: append-only 파일, 엔트리마다 해시·seqnum, 파일이 깨지면 그 파일을 버리고(`~` 접미사로 이름 변경) 새 파일을 연다. 장비에서 만지는 설정은 `/etc/systemd/journald.conf`다. VM(Ubuntu 26.04, systemd 259)의 기본 파일:
+
+```sh
+grep -E "^#?(Storage|SyncIntervalSec|RateLimitIntervalSec|RateLimitBurst|SystemMaxUse|Compress)=" /etc/systemd/journald.conf
+man -P cat journald.conf | grep -A6 "SyncIntervalSec="
+```
+
+```text
+#Storage=persistent
+#Compress=yes
+#SyncIntervalSec=5m
+#RateLimitIntervalSec=30s
+#RateLimitBurst=10000
+#SystemMaxUse=
+       SyncIntervalSec=
+           The timeout before synchronizing journal files to disk. After
+           syncing, journal files are placed in the OFFLINE state. Note that
+           syncing is unconditionally done immediately after a log message of
+           priority CRIT, ALERT or EMERG has been logged. This setting hence
+           applies only to messages of the levels ERR, WARNING, NOTICE, INFO,
+           DEBUG. The default timeout is 5 minutes.
+```
+
+장비 관점의 해석:
+
+- **`SyncIntervalSec=5m`**: 일반 로그는 최대 5분 분량을 전원 차단에 잃을 수 있다. CRIT 이상은 즉시 sync. 로봇이 "넘어지기 직전 30초"를 원한다면 이 창이 너무 길다 → 줄이거나(마모와 교환), 중요한 이벤트를 CRIT으로 올리거나, 별도 링 로그(위 예제)를 둔다.
+- **`Storage=`**: `volatile`(RAM `/run/log/journal`만 — 마모 0, 전원 차단에 전부 소실), `persistent`(`/var/log/journal`), `auto`(디렉터리가 있으면 persistent). Ubuntu 기본 파일의 주석은 `persistent`를 보여 준다. upstream 기본값은 오래 `auto`였다(기억에 의존 — 배포판·버전마다 확인할 것). eMMC 장비에서는 `volatile` + 중요한 것만 따로 영속화하는 구성이 흔하다.
+- **`RateLimitIntervalSec`/`RateLimitBurst`**: 서비스 하나가 30초에 10000줄을 넘기면 버린다. 센서 드라이버가 에러를 초당 수천 번 찍는 상황에서 eMMC를 지키는 장치다.
+- **`SystemMaxUse=`**: 로그가 차지할 최대 용량. 별도 파티션이 아니라면 반드시 정한다.
+
+---
+
+## 8. 하드웨어의 도움 — hold-up, power-fail 인터럽트, brown-out
+
+소프트웨어가 아무리 잘해도 "fsync 사이의 창"은 남는다. 그 창을 닫는 건 하드웨어다. Don이 SSD에서 PLP 캡으로 한 일을 보드 수준에서 하는 것이다.
+
+### 8.1 예제 12 — hold-up 시간 계산
+
+무엇을 확인하나: 슈퍼캡으로 몇 ms를 버틸 수 있나. 쓸 수 있는 에너지는 캡 전압이 레귤레이터 최소 입력 전압까지 떨어질 때까지다.
+
+```python
+# 슈퍼캡 hold-up 시간 = 쓸 수 있는 에너지 / 부하 전력  (E = 1/2 C (V1^2 - V2^2))
+def holdup(c_f, v1, v2, p_w, eff=0.85):
+    e = 0.5 * c_f * (v1 ** 2 - v2 ** 2) * eff
+    return e, e / p_w
+for c, v1, v2, p in [(0.47, 5.0, 3.0, 2.5), (1.0, 5.0, 3.0, 2.5), (1.0, 5.0, 3.0, 6.0), (10.0, 5.0, 3.0, 6.0)]:
+    e, t = holdup(c, v1, v2, p)
+    print(f"C={c:5.2f} F  {v1}->{v2} V  load={p:4.1f} W  usable={e:6.2f} J  hold-up={t*1000:7.0f} ms")
+```
+
+```text
+C= 0.47 F  5.0->3.0 V  load= 2.5 W  usable=  3.20 J  hold-up=   1278 ms
+C= 1.00 F  5.0->3.0 V  load= 2.5 W  usable=  6.80 J  hold-up=   2720 ms
+C= 1.00 F  5.0->3.0 V  load= 6.0 W  usable=  6.80 J  hold-up=   1133 ms
+C=10.00 F  5.0->3.0 V  load= 6.0 W  usable= 68.00 J  hold-up=  11333 ms
+```
+
+출력에서 볼 것: SoC 보드(6 W)를 1 F로 약 1.1초 버틴다. 이 시간 안에 할 일은 "dirty page를 내리고 FLUSH" 하나다(예제 13에서 8 MiB에 약 43 ms). 모터·센서 전원은 이 캡에서 떼어 놓아야 한다(부하가 커지면 시간이 바로 줄어든다). 효율 0.85, 전압 범위는 예시 가정이다.
+
+### 8.2 예제 13 — power-fail GPIO → syncfs → read-only remount
+
+보드의 전원 감시 IC(또는 PMIC)가 입력 전압이 떨어지면 "power-good" 신호를 내린다. 이걸 GPIO 인터럽트로 받아서 즉시 파일시스템을 정리한다. 여기서는 유저 공간 데몬으로 짰다(GPIO 문자 장치 v2 uAPI로 falling edge를 블로킹 read). 게스트에서 gpio-sim(가상 GPIO 칩, configfs로 만든다 — A4 참고)의 `pull`을 바꿔 전원 경보를 흉내 낸다.
+
+```c
+/* j5_pfi: power-good GPIO가 떨어지면(falling edge) 즉시 syncfs + read-only remount */
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <linux/gpio.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mount.h>
+#include <time.h>
+#include <unistd.h>
+static void die(const char *m) { perror(m); exit(1); }
+static long dirty_kb(void) {
+    char l[128]; long v = -1; FILE *f = fopen("/proc/meminfo", "r");
+    while (f && fgets(l, sizeof l, f)) if (sscanf(l, "Dirty: %ld", &v) == 1) break;
+    if (f) fclose(f);
+    return v;
+}
+static double ms(struct timespec a, struct timespec b) { return (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6; }
+int main(int argc, char **argv) {
+    if (argc != 4) { fprintf(stderr, "usage: %s /dev/gpiochipN line mountpoint\n", argv[0]); return 2; }
+    int chip = open(argv[1], O_RDONLY), mnt = open(argv[3], O_RDONLY | O_DIRECTORY);
+    if (chip < 0 || mnt < 0) die("open");
+    struct gpio_v2_line_request req = { .num_lines = 1, .offsets = { (unsigned)atoi(argv[2]) } };
+    strcpy(req.consumer, "j5-pfi");
+    req.config.flags = GPIO_V2_LINE_FLAG_INPUT | GPIO_V2_LINE_FLAG_EDGE_FALLING;
+    if (ioctl(chip, GPIO_V2_GET_LINE_IOCTL, &req)) die("GPIO_V2_GET_LINE_IOCTL");
+    printf("armed: waiting for power-good falling edge\n"); fflush(stdout);
+    struct gpio_v2_line_event ev;                       /* 블로킹 read = 인터럽트 대기 */
+    if (read(req.fd, &ev, sizeof ev) != sizeof ev) die("read event");
+    struct timespec t0, t1, t2;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    long d0 = dirty_kb();
+    if (syncfs(mnt)) die("syncfs");                    /* 이 파일시스템의 dirty 전부 + FLUSH */
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    if (mount(NULL, argv[3], NULL, MS_REMOUNT | MS_RDONLY, NULL)) die("remount ro");
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    printf("edge ts=%llu ns, dirty=%ld kB -> syncfs %.1f ms (dirty now %ld kB) -> remount ro %.1f ms\n",
+           (unsigned long long)ev.timestamp_ns, d0, ms(t0, t1), dirty_kb(), ms(t1, t2));
+    return 0;
+}
+```
+
+```sh
+#!/bin/sh
+# guest: gpio-sim으로 power-good 라인을 만들고, dirty 8 MB가 있을 때 전원 경보를 흉내 낸다
+dmesg -n 1
+mount -t ext4 /dev/vda /mnt/a || exit 1
+mount -t configfs none /sys/kernel/config
+G=/sys/kernel/config/gpio-sim/j5sim; mkdir -p $G/bank0; echo 1 > $G/bank0/num_lines; echo 1 > $G/live
+CH=$(cat $G/bank0/chip_name); P=$(ls -d /sys/devices/platform/gpio-sim.*/$CH/sim_gpio0)/pull
+echo pull-up > $P                                   # 정상 전원 = high
+/j5/j5_pfi /dev/$CH 0 /mnt/a & PID=$!
+sleep 1; dd if=/dev/urandom of=/mnt/a/blob bs=1M count=8 2>/dev/null
+echo pull-down > $P                                 # 전원 이상 → falling edge
+wait $PID
+echo "touch after ro: $(touch /mnt/a/x 2>&1)"
+```
+
+```text
+armed: waiting for power-good falling edge
+edge ts=3301844080 ns, dirty=8192 kB -> syncfs 43.5 ms (dirty now 24 kB) -> remount ro 15.5 ms
+touch after ro: touch: /mnt/a/x: Read-only file system
+```
+
+출력에서 볼 것: 8 MiB dirty가 있던 상태에서 `syncfs`가 43.5 ms에 끝났고(이 파일시스템의 dirty 전부 + FLUSH), read-only remount가 15.5 ms. 그 뒤로는 쓰기가 `EROFS`로 거부된다 — 전원이 진짜로 꺼지는 순간 진행 중인 쓰기가 없게 만드는 게 목적이다. 실보드라면 이 시간이 예제 12의 hold-up 예산 안에 들어와야 한다(eMMC 캐시 flush는 더 오래 걸릴 수 있다).
+
+실무 변형:
+
+- 커널 안에서 처리: 전원 경보 IRQ 핸들러(threaded IRQ)에서 `emergency_sync()`(SysRq-S가 쓰는 것, 비동기로 sync 작업을 띄움)나 `orderly_poweroff()`를 부르는 드라이버. 유저 데몬보다 빠르고 스케줄링에 덜 흔들린다.
+- `gpio-keys`로 KEY_POWER 이벤트를 만들어 systemd-logind가 poweroff하게 하는 방법도 있지만, 정상 종료는 수 초가 걸려 hold-up 예산을 넘기기 쉽다.
+
+### 8.3 brown-out
+
+전압이 "완전히 꺼지지 않고 애매하게 낮아지는" 상태가 더 위험하다. SoC는 돌지만 eMMC 내부 전압이 프로그램에 부족하면 NAND 프로그램이 약하게 되어 나중에 읽기 에러가 된다. 대책은 하드웨어다: 전압 감시 IC로 임계 아래면 **확실하게 리셋**(BOR, brown-out reset)을 걸고, eMMC VCC가 SoC보다 늦게 떨어지게 전원 시퀀스를 설계한다. 소프트웨어는 이걸 고칠 수 없고, 예제 13 같은 경보 처리로 "그 순간 쓰기 중이 아니게" 만드는 것까지가 몫이다.
+
+---
+
+## 9. 커널 안에서는 무슨 일이 일어나나
+
+```svg
+<svg viewBox="0 0 680 470" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><rect x="20" y="12" width="400" height="34" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="220.0" y="33.2" font-size="12" text-anchor="middle">fsync(fd) / fdatasync(fd)</text><text x="436.0" y="33.0" font-size="12" text-anchor="start">syscall</text><line x1="220.0" y1="48.0" x2="220.0" y2="56.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah8)"/><rect x="20" y="58" width="400" height="34" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="220.0" y="79.2" font-size="12" text-anchor="middle">vfs_fsync_range() → f_op-&gt;fsync</text><text x="436.0" y="79.0" font-size="12" text-anchor="start">fs/sync.c</text><line x1="220.0" y1="94.0" x2="220.0" y2="102.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah8)"/><rect x="20" y="104" width="400" height="34" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="220.0" y="125.2" font-size="12" text-anchor="middle">ext4_sync_file()</text><text x="436.0" y="125.0" font-size="12" text-anchor="start">fs/ext4/fsync.c</text><line x1="220.0" y1="140.0" x2="220.0" y2="148.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah8)"/><rect x="20" y="150" width="400" height="34" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="220.0" y="171.2" font-size="12" text-anchor="middle">file_write_and_wait_range()</text><text x="436.0" y="171.0" font-size="12" text-anchor="start">① dirty page → bio, 완료 대기</text><line x1="220.0" y1="186.0" x2="220.0" y2="194.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah8)"/><rect x="20" y="196" width="400" height="34" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="220.0" y="217.2" font-size="12" text-anchor="middle">ext4_fsync_journal() → ext4_fc_commit()</text><text x="436.0" y="217.0" font-size="12" text-anchor="start">② jbd2 커밋 (필요할 때만)</text><line x1="220.0" y1="232.0" x2="220.0" y2="240.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah8)"/><rect x="20" y="242" width="400" height="34" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="220.0" y="263.2" font-size="12" text-anchor="middle">jbd2 커밋 블록: REQ_PREFLUSH | REQ_FUA</text><text x="436.0" y="263.0" font-size="12" text-anchor="start">fs/jbd2/commit.c</text><line x1="220.0" y1="278.0" x2="220.0" y2="286.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah8)"/><rect x="20" y="288" width="400" height="34" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="220.0" y="309.2" font-size="12" text-anchor="middle">blkdev_issue_flush() (needs_barrier)</text><text x="436.0" y="309.0" font-size="12" text-anchor="start">③ 커밋이 장벽을 안 보냈으면</text><line x1="220.0" y1="324.0" x2="220.0" y2="332.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah8)"/><rect x="20" y="334" width="400" height="34" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="220.0" y="355.2" font-size="12" text-anchor="middle">submit_bio_noacct() → blk_insert_flush()</text><text x="436.0" y="355.0" font-size="12" text-anchor="start">write_cache 꺼짐 → 플래그 제거</text><line x1="220.0" y1="370.0" x2="220.0" y2="378.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah8)"/><rect x="20" y="380" width="400" height="34" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="220.0" y="401.2" font-size="12" text-anchor="middle">드라이버: virtio FLUSH · NVMe Flush/FUA · MMC CMD6</text><text x="436.0" y="401.0" font-size="12" text-anchor="start">I11 blk-mq</text><line x1="220.0" y1="416.0" x2="220.0" y2="424.0" stroke="currentColor" stroke-width="1.4" marker-end="url(#ah8)"/><rect x="20" y="426" width="400" height="34" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="220.0" y="447.2" font-size="12" text-anchor="middle">file_check_and_advance_wb_err()</text><text x="436.0" y="447.0" font-size="12" text-anchor="start">④ errseq: 에러를 fd마다 한 번 보고</text></svg>
+```
+그림 8 — `fsync()` 한 번이 지나가는 커널 함수들 (6.18.55 기준, ext4).
+
+1. **syscall → VFS**: `fsync(fd)` → `do_fsync()` → `vfs_fsync_range()`(`fs/sync.c`) → `file->f_op->fsync`. ext4는 `ext4_sync_file()`(`fs/ext4/fsync.c`).
+2. **데이터 내리기**: `file_write_and_wait_range()`(`mm/filemap.c`) → `filemap_fdatawrite_wbc()` → `do_writepages()` → `ext4_writepages()`. 여기서 delayed allocation 블록이 실제로 할당되고 bio가 만들어진다. 완료까지 기다린다. 이 단계에서 에러가 나면 `mapping_set_error()` → `mapping->wb_err`(errseq)에 기록된다.
+3. **메타데이터 커밋**: `ext4_fsync_journal()` → `ext4_fc_commit()` — fast commit 기능이 꺼져 있으면(기본) 바로 `jbd2_complete_transaction()`으로 jbd2 전체 커밋을 기다린다. fdatasync면 `i_datasync_tid`, fsync면 `i_sync_tid`를 기준으로 "이 inode가 마지막으로 바뀐 트랜잭션"까지 커밋됐는지 보고, 이미 됐으면 건너뛴다(예제 6의 fdatasync가 커밋 없이 끝난 이유). jbd2 커밋 스레드는 저널 블록을 쓰고 기다린 뒤 커밋 블록을 `REQ_PREFLUSH | REQ_FUA`로 낸다(`fs/jbd2/commit.c`의 `journal_submit_commit_record()`).
+4. **장벽이 안 나간 경우**: 커밋이 필요 없었거나 커밋이 데이터 장치에 장벽을 보내지 않을 거라면 `needs_barrier`로 `blkdev_issue_flush()`를 직접 보낸다(예제 6의 fdatasync → `FF`).
+5. **block layer**: `submit_bio_noacct()`가 `write_cache`가 꺼진 큐에서는 PREFLUSH/FUA를 지운다(§4.3). 남은 flush 요청은 `blk_insert_flush()`가 PREFLUSH → DATA → POSTFLUSH 단계로 쪼개고, 여러 fsync의 flush를 하나로 합치기도 한다(flush 큐의 pending 리스트).
+6. **드라이버**: `REQ_OP_FLUSH`를 virtio-blk는 `VIRTIO_BLK_T_FLUSH`, NVMe는 `nvme_setup_flush()`(Flush opcode), MMC는 `mmc_blk_mq_issue_rq()` → `mmc_flush_cache()` → `_mmc_flush_cache()`(CMD6 FLUSH_CACHE)로 바꾼다. `REQ_FUA` 쓰기는 NVMe에서 `NVME_RW_FUA`(control bit 14), MMC에서 reliable write가 된다.
+7. **에러 보고**: 마지막에 `file_check_and_advance_wb_err(file)`가 `mapping->wb_err`와 `file->f_wb_err`를 비교해 새 에러가 있으면 한 번 돌려주고 fd의 표시를 앞으로 당긴다(예제 8).
+
+**드라이버를 쓸 때 다시 만나는 곳** (I11 §6의 blk-mq 드라이버를 기준으로):
+
+- 블록 드라이버는 `queue_limits.features`에 `BLK_FEAT_WRITE_CACHE`(장치에 휘발 캐시 있음)와 `BLK_FEAT_FUA`(FUA를 직접 처리 가능)를 정직하게 켜야 한다. 캐시가 있는데 `WRITE_CACHE`를 안 켜면 block layer가 FLUSH를 아예 안 보내서 fsync가 거짓말을 한다. 반대로 켜 놓고 `queue_rq`에서 `REQ_OP_FLUSH`를 처리하지 않으면 마찬가지다.
+- `queue_rq`에서 `req_op(rq) == REQ_OP_FLUSH`를 받으면 장치 캐시 flush 명령을 내고 **장치가 끝났다고 할 때** 완료시켜야 한다. RAM 디스크처럼 캐시가 없으면 features를 안 켜면 그만이다(I11의 `i11_blk`가 그랬다).
+- 에러는 `blk_mq_end_request(rq, BLK_STS_IOERR)`처럼 정확히 올려야 한다. 그게 `mapping_set_error()`를 거쳐 앱의 fsync EIO가 된다. 에러를 삼키는 드라이버는 fsyncgate보다 나쁜, "에러가 아예 안 보이는" 상황을 만든다.
+- MTD/UBI 쪽(raw NAND)은 이 경로가 아니다 — UBIFS는 자체 저널과 `ubi_sync()`로 내구성을 다룬다(J4).
+
+---
+
+## 10. Embedded 실무에서 다시 보기
+
+### 10.1 장면 1 — "배터리 빼면 캘리브레이션이 날아가요"
+
+증상: 현장에서 배터리를 분리한 로봇이 재부팅 후 IMU 캘리브레이션이 기본값이다. `calib.json`은 0바이트다. 코드를 보면 `std::ofstream(path, trunc) << json;` 한 줄이다(= naive). 고치는 법: 같은 디렉터리의 temp에 쓰고 `fsync` → `rename` → 디렉터리 `fsync`(예제 3의 atomic). 읽는 쪽은 파싱·CRC 실패 시 **백업 파일(이전 버전)로 폴백**하게 해서 이중으로 막는다. 테스트는 예제 4(log-writes 재생)를 CI에 넣거나, 실보드에서 릴레이로 전원을 수백 번 끊는다.
+
+### 10.2 장면 2 — 로그가 eMMC를 1년 만에 죽였다
+
+증상: 필드 장비 eMMC의 `EXT_CSD` 수명 추정값(`DEVICE_LIFE_TIME_EST_TYP_A/B`, `mmc extcsd read`로 확인)이 1년 만에 바닥. 원인: 로깅 라이브러리가 레코드마다 `fsync`(예제 10의 260배 증폭). 고치는 법: 링 로그 + 100 ms batch(마모 1/30), journald `SyncIntervalSec`와 `RateLimit` 조정, 디버그 로그는 `Storage=volatile`. 그리고 "잃어도 되는 창"을 요구사항 문서에 숫자로 적는다.
+
+### 10.3 장면 3 — 벤치마크에서는 빨랐는데
+
+증상: 개발 보드에서 DB 쓰기가 빨라 좋아했는데, 양산 보드에서 전원 차단 시험 후 DB가 깨진다. 원인 후보: 개발 중에 누가 `echo "write through" > /sys/block/mmcblk0/queue/write_cache` 또는 `mount -o nobarrier`를 넣었다(§4.3). 또는 VM/QEMU 환경에서 `cache=unsafe`로 측정했다. 확인: `cat /sys/block/*/queue/write_cache`, `/proc/mounts`의 `nobarrier`, 그리고 예제 6처럼 tracefs로 fsync 때 `FF`가 나가는지 본다.
+
+### 10.4 장면 4 — fsync EIO를 무시한 기록 장치
+
+증상: 블랙박스 기록이 사고 시점만 비어 있다. 로그에는 에러가 없다. 원인: eMMC가 마모로 쓰기 에러를 내기 시작했는데, 앱이 fsync 반환값을 안 보거나 "재시도"로 넘어갔다(예제 8의 #2 = 0). 고치는 법: fsync EIO → 즉시 헬스 상태 "storage failing"으로 올리고, 다른 파티션·RAM 버퍼로 전환, 데이터는 새 파일에 다시 쓰기.
+
+---
+
+## 11. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| `O_TRUNC`로 열어 덮어쓰기, fsync 없음 | 재부팅 후 설정 파일 0바이트 | truncate 메타데이터가 데이터보다 먼저 커밋 | temp + fsync + rename + 디렉터리 fsync |
+| rename만 하고 temp fsync 안 함 | 0바이트·0으로 찬 파일 (ext4 외 FS, 또는 `noauto_da_alloc`) | rename 커밋 시 새 inode 데이터가 아직 미할당 | rename 전에 `fsync(temp)` |
+| 디렉터리 fsync 생략 | 새로 만든 파일이 사라짐 · 옛 버전으로 돌아감 | 디렉터리 엔트리가 아직 저널에 없음 | `open(dir, O_DIRECTORY)` + `fsync` |
+| `O_DIRECT`면 안전하다고 생각 | 전원 차단 후 마지막 쓰기 소실 | 장치 캐시에 머묾, FLUSH 없음 | O_DIRECT + fdatasync (또는 O_DSYNC) |
+| `sync_file_range`를 내구성 API로 사용 | 위와 같음 + 크기 메타데이터 소실 | 메타데이터 커밋도 FLUSH도 안 함 | writeback 조절용으로만, 내구성은 fdatasync |
+| fsync EIO 후 재시도해서 0을 받고 진행 | 데이터가 조용히 사라짐 | 에러 page가 clean으로 표시됨, 에러는 fd당 한 번 | EIO = 치명적. 다시 쓰기 또는 크래시 복구 경로 |
+| `write_cache`를 write through로, `nobarrier` | 벤치마크는 빨라짐, 전원 시험에서 FS 손상 | FLUSH/FUA가 지워짐, 장치 캐시는 그대로 | PLP 있는 장치에서만. 기본값 유지 |
+| 레코드마다 fsync | 처리량 수백 건/s 한계 · eMMC 조기 마모 | 레코드당 16 KiB 쓰기 + flush 2번 | batch + 고정 크기 세그먼트(링) |
+| 링 회전 때 옛 세그먼트 fsync 누락 | 복구 시 세그먼트 경계에 구멍 | ack가 덮는 파일 중 하나를 안 내림 | 회전 전 fdatasync, 복구 검사에 연속성 포함 |
+| kill 테스트만으로 전원 안전 검증 | 실제 전원 차단에서 장치 캐시 손실 | 프로세스 kill은 page cache·장치 캐시를 살려 둠 | log-writes 재생(FLUSH 지점) + 실보드 전원 차단 시험 |
+
+---
+
+## 12. 면접에서 이렇게 말한다
+
+**Q.** How do you guarantee a config file survives a sudden power loss?
+
+**A.** 같은 디렉터리의 temp 파일에 쓰고 fsync, rename으로 교체, 그다음 디렉터리를 fsync한다. rename은 원자적이라 재부팅 후엔 옛것 아니면 새것만 보이고, temp fsync가 "rename보다 데이터가 먼저 디스크에" 를, 디렉터리 fsync가 "rename 자체의 내구성"을 준다. 읽는 쪽은 CRC를 검사하고 실패하면 백업으로 폴백한다. 이걸 dm-log-writes로 모든 crash 지점을 재생해 검증했다.
+
+> I never overwrite in place. I write the new contents to a temp file in the same directory, fsync it, rename it over the old file, and then fsync the directory. Rename is atomic, so after a crash I see either the old or the new file; the first fsync makes sure the data is on disk before the rename is committed, and the directory fsync makes the rename itself durable. On the read side I validate a CRC and fall back to a backup copy. I've verified this by replaying a dm-log-writes trace at every crash point — the atomic pattern stayed consistent at all of them, while the truncate-and-write version produced empty files.
+
+**꼬리 질문**: "fsync(temp) 없이 rename만 하면?" → ext4는 `auto_da_alloc`이 대부분 막아 주지만 내구성은 없고, 다른 FS에서는 0바이트 파일이 될 수 있다.
+
+**Q.** What does fsync actually do, all the way down to the device?
+
+**A.** 두 단계다. 먼저 이 파일의 dirty page를 writeback해서 완료를 기다리고, 필요하면 저널 커밋을 한다. jbd2는 저널 블록을 쓴 뒤 커밋 블록을 PREFLUSH+FUA로 보낸다. block layer가 이걸 "빈 FLUSH 명령 → FUA 쓰기"로 쪼개고, 장치가 FUA를 못 하면 쓰기 뒤 FLUSH를 하나 더 붙인다. NVMe라면 Flush 명령과 FUA 비트가 붙은 Write, eMMC라면 CMD6 FLUSH_CACHE와 reliable write다. tracefs로 직접 봤다.
+
+> Two phases. First it writes back the file's dirty pages and waits for them, then, if metadata changed, it forces a journal commit. jbd2 writes the journal blocks, waits, and submits the commit block with REQ_PREFLUSH and REQ_FUA. The block layer turns that into an empty flush followed by a FUA write — on NVMe that's a Flush command and then a Write with the FUA bit set; if the device doesn't support FUA, it emulates it with a post-flush. If the queue says write-through, the flags are stripped and nothing extra is sent. I've traced this with block_rq_issue and the nvme_setup_cmd tracepoint.
+
+**꼬리 질문**: "fdatasync는 뭐가 다른가?" → 크기·블록이 안 바뀐 덮어쓰기면 저널 커밋 없이 데이터 쓰기 + FLUSH 하나로 끝난다.
+
+**Q.** Is O_DIRECT durable? What about sync_file_range?
+
+**A.** 둘 다 아니다. O_DIRECT는 page cache만 건너뛸 뿐 장치 휘발 캐시에 머물 수 있고, 블록 할당 메타데이터도 커밋하지 않는다. sync_file_range는 dirty page를 내려보내기만 하고 FLUSH도 메타데이터 커밋도 안 한다. 트레이스에서 둘 다 평범한 쓰기 하나만 나가는 걸 확인했다. 내구성은 fdatasync/fsync나 O_DSYNC로만 얻는다.
+
+> No to both. O_DIRECT bypasses the page cache, but the data can still sit in the device's volatile cache, and allocation metadata isn't committed. sync_file_range only starts and waits for writeback; it sends no cache flush and commits no metadata. In a block trace both show up as a single plain write with no flush. For durability you still need fdatasync, fsync, or O_DSYNC.
+
+**Q.** fsync returned EIO. Can you just call fsync again?
+
+**A.** 안 된다. Linux는 writeback 에러가 난 page를 clean으로 표시하고, 에러는 fd당 한 번만 보고한다(errseq). 두 번째 fsync는 0을 돌려주지만 디스크에는 옛 데이터가 있다. 6.18에서 직접 확인했다. EIO는 치명적으로 다뤄야 한다: 메모리에 데이터가 있으면 새로 다시 쓰고, 없으면 WAL 같은 것으로 복구하거나 프로세스를 내려 재시작 복구에 맡긴다. PostgreSQL이 2018년 이 문제(fsyncgate) 이후 PANIC으로 바꾼 이유다.
+
+> No. When writeback fails, Linux marks the pages clean and reports the error once per file descriptor through errseq. A second fsync returns zero even though the disk still has the old data — I reproduced exactly that on a 6.18 kernel with a dm error target under one data block. So EIO from fsync is fatal: rewrite the data from memory if you still have it, otherwise recover from a log or crash and let restart recovery handle it. That's what PostgreSQL changed to after the 2018 fsyncgate discussion.
+
+**Q.** How would you design logging on a field robot with eMMC?
+
+**A.** append-only 고정 크기 레코드에 seq와 CRC를 넣고, 미리 채운 고정 크기 세그먼트를 링으로 돌린다. fsync는 레코드마다가 아니라 100 ms나 N개마다 묶는다 — 잃어도 되는 창을 요구사항으로 정한다. 크기가 안 변하니 fdatasync가 저널 커밋을 안 해서 마모가 줄어든다. 복구는 세그먼트 헤더의 세대와 seq 연속성으로 온전한 접두부만 받아들인다. 실측으로 레코드마다 fsync는 64 B당 16 KiB, 링 batch는 0.5 KiB였다. 로그 파티션을 분리하고 journald는 rate limit과 sync 간격을 조정한다.
+
+> Append-only fixed-size records with a sequence number and CRC, written into preallocated, zero-filled segments used as a ring. I batch fdatasync every N records or 100 ms, so the acceptable loss window is an explicit requirement. Because file sizes never change, fdatasync doesn't need a journal commit, which cuts wear — in my measurements per-record fsync cost about 16 KiB of device writes per 64-byte record, while the batched ring was about half a KiB. Recovery scans segment headers by generation and accepts only the contiguous valid prefix. Logs go on their own partition, and I tune journald's rate limits and sync interval.
+
+**꼬리 질문**: "그걸 어떻게 테스트하나?" → kill 테스트(게스트 RAM 손실)와 log-writes FLUSH 지점 재생(장치 캐시 손실)을 둘 다 한다. kill만으로는 장치 캐시 손실을 못 본다.
+
+**Q.** What's the difference between REQ_PREFLUSH and REQ_FUA, and why does a journal commit need both?
+
+**A.** PREFLUSH는 "이 요청 전에 이미 완료된 쓰기를 장치 캐시에서 매체로 내려라", FUA는 "이 쓰기 자체를 매체에 쓴 뒤 완료해라"다. 커밋 블록은 앞의 저널 블록들이 먼저 영속화된 뒤에만 의미가 있으니 PREFLUSH가 필요하고, 커밋 블록 자체도 영속화되어야 fsync가 반환될 수 있으니 FUA가 필요하다. SSD FW 쪽에서 내가 Flush와 FUA를 처리하던 것과 정확히 대응한다.
+
+> PREFLUSH means "before this request, make everything that has already completed durable" — it becomes a cache flush command. FUA means "complete this particular write only once it's on stable media". A journal commit record is only valid if the journal blocks before it are durable, hence the preflush, and the commit itself must be durable before fsync returns, hence FUA. On the SSD firmware side I implemented exactly those two behaviors: the Flush command drained the write cache and mapping table, and FUA writes bypassed the cache acknowledgement.
+
+**Q.** Your device has power-loss protection capacitors. Can you turn off barriers?
+
+**A.** PLP가 장치 캐시 전체를 보호한다고 확실히 알 때만이다. 그 경우 장치가 VWC=0을 보고하는 게 가장 깔끔하고, 그러면 Linux는 알아서 flush를 안 보낸다. 호스트에서 write_cache를 write through로 바꾸는 건 장치에 아무것도 안 알리고 FLUSH만 지우는 것이라, PLP가 없는 장치에 쓰면 거짓 계약이 된다. 또 PLP는 장치 캐시만 지킬 뿐 page cache는 못 지키므로 앱의 fsync는 여전히 필요하다.
+
+> Only if I know the PLP covers the entire volatile cache. The cleanest way is for the device to report VWC=0, and Linux then stops sending flushes on its own. Writing "write through" into the sysfs attribute doesn't change the device at all — it just strips the flush and FUA flags in the block layer — so on a device without PLP it's a broken contract. And PLP only protects the device cache, not the page cache, so applications still need fsync.
+
+---
+
+## 13. 직접 해보기
+
+1. (개념) `fsync` 대신 `syncfs`를 쓰면 무엇이 더 내구화되고 무엇을 잃나? 정답/힌트: 같은 FS의 모든 파일이 내구화되지만 비용이 크고, 그 FS의 다른 파일들의 writeback 에러까지 보고받을 수 있다(errseq가 superblock에도 있다, `sb->s_wb_err`).
+2. (코드) 예제 3의 `j5_cfg`에 "rename 전에 기존 cfg를 `cfg.bak`으로 하드링크"를 추가하고, 읽는 쪽 `j5_cfgchk`가 실패하면 `.bak`을 보게 바꿔라. 예제 4로 재생해 `.bak` 폴백이 언제 쓰이는지 세어라. 정답/힌트: `link()` 뒤에도 디렉터리 fsync가 필요하다.
+3. (관찰) 예제 6의 스크립트를 `mount -o nobarrier`로 다시 돌려 fsync 때 `FF`/`WFSM`이 사라지는지 보라. 정답/힌트: jbd2의 `JBD2_BARRIER` 플래그가 꺼져 커밋 블록이 평범한 `WSM`이 된다.
+4. (관찰) `fail_make_request`의 `probability`를 10으로, `times`를 3으로 바꿔 예제 8 (B)를 다시 돌려라. ext4가 언제 read-only로 가고, 그 전까지 fsync가 몇 번 EIO를 내는지 기록하라. 정답/힌트: 저널 쓰기가 한 번이라도 실패하면 jbd2 abort → `emergency_ro`.
+5. (코드) 링 로그 writer에 "batch 크기 대신 시간 기준(마지막 fdatasync 후 100 ms)" 정책을 넣고, 예제 10 방식으로 마모를 다시 재라. 정답/힌트: 레코드 속도가 낮을 때 마모가 batch(20개)보다 늘고, 손실 창은 시간으로 고정된다.
+6. (재생 도구) `j5_replay`에 "FLUSH 구간 안의 쓰기 중 임의 부분집합만 적용" 모드를 추가해 atomic이 여전히 전부 정상인지 확인하라. 정답/힌트: 저널 블록 일부만 있고 커밋 블록이 있는 경우는 jbd2가 저널 블록 체크섬(`journal_checksum`/v3)으로 걸러야 한다 — 그게 체크섬 기능이 있는 이유다.
+7. (실보드) 릴레이로 보드 전원을 무작위로 끊는 지그를 만들어 예제 9의 writer를 1000번 돌려라. 결과가 QEMU kill 테스트와 다르면 그 차이가 장치 캐시·eMMC 동작이다. 정답/힌트: 같은 검사기(`j5_seqchk`, `j5_ringrec`)를 그대로 쓸 수 있다.
+
+---
+
+## 14. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| durability (내구성) | 전원이 나가도 남음 | fsync가 반환한 뒤에만 약속된다 |
+| page cache dirty page | 아직 디스크에 안 간 파일 데이터 | 기본 30초까지 RAM에 머문다 |
+| writeback | dirty page를 장치로 내리는 것 | flusher 스레드 또는 fsync가 한다 |
+| delayed allocation | 블록 할당을 writeback까지 미룸 | ext4·XFS·F2FS. 0바이트 파일 문제의 원인 |
+| `auto_da_alloc` | ext4 replace 패턴 휴리스틱 | rename/truncate 뒤 할당·writeback 시작 |
+| REQ_PREFLUSH | 앞선 완료 쓰기를 영속화 | 장치 FLUSH 명령이 된다 |
+| REQ_FUA | 이 쓰기 자체를 영속화 후 완료 | NVMe FUA 비트, eMMC reliable write |
+| VWC | Volatile Write Cache (NVMe) | Identify 필드, Linux `write_cache`의 근거 |
+| write_cache 속성 | `/sys/block/X/queue/write_cache` | write through로 바꾸면 FLUSH/FUA를 지울 뿐 |
+| reliable write | eMMC 원자·직접 쓰기 | CMD23 bit 31, 커널이 FUA에 사용 |
+| CACHE_CTRL / FLUSH_CACHE | eMMC EXT_CSD[33] / [32] | 캐시 켜기 / 캐시 비우기 |
+| torn write | 요청 일부만 매체에 닿음 | 섹터·AWUPF보다 큰 쓰기에서 가능 |
+| AWUPF | Atomic Write Unit Power Fail | NVMe가 보장하는 전원 차단 원자 크기 |
+| data=ordered | ext4 기본 저널 모드 | 커밋 전에 새 블록의 데이터를 먼저 쓴다 |
+| orphan inode | 처리 중에 crash에 대비해 목록에 올린 inode | 복구 때 truncate/삭제를 마무리 |
+| errseq_t | 에러 + 시퀀스 카운터 | fd마다 writeback 에러를 한 번씩 보고 |
+| fsyncgate | 2018 PostgreSQL 사건 | fsync 재시도가 데이터 손실을 숨김 |
+| dm-log-writes | 모든 쓰기를 로그 디스크에 기록하는 dm 타깃 | crash 지점 재생 테스트용 |
+| dm-flakey | 주기적으로 오동작하는 dm 타깃 | `drop_writes`, `error_writes` |
+| fail_make_request | 블록 I/O 실패 주입 | debugfs + `/sys/block/X/make-it-fail` |
+| PLP | Power Loss Protection | 캡 에너지로 장치 캐시를 dump |
+| hold-up time | 전원 끊긴 뒤 버티는 시간 | E = 1/2 C (V1² − V2²) ÷ P |
+| brown-out | 전압이 애매하게 낮아짐 | BOR로 확실히 리셋해야 한다 |
+
+---
+
+## 15. 요약 & 체크리스트
+
+데이터는 앱 버퍼 → stdio → page cache → block layer → 장치 휘발 캐시 → NAND를 지나고, `write()`는 page cache까지만 간다(예제 1에서 30초). fsync는 writeback + 저널 커밋 + FLUSH/FUA로 NAND까지 밀어 넣는다(예제 6·7에서 NVMe Flush 명령과 FUA 비트까지 확인). `O_DIRECT`와 `sync_file_range`는 FLUSH를 보내지 않으므로 내구성이 없다. 원자성은 앱이 만든다: 설정 파일은 temp + fsync + rename + 디렉터리 fsync(예제 4에서 1054개 crash 지점 전부 정상, naive는 113/140 실패), 로그는 append-only + CRC + seq + 고정 세그먼트 링 + 묶은 fdatasync(예제 9·10에서 ack 유실 0, 마모 1/30). fsync EIO는 한 번만 보고되고 page는 clean이 되므로 치명적으로 다룬다(예제 8). 마지막 창은 하드웨어(hold-up 캡, power-fail GPIO → syncfs → ro remount, BOR)로 닫는다. 그리고 `write_cache=write through`·`nobarrier`·`cache=unsafe`는 PLP를 확신할 때만이다 — Don이 SSD에서 지키던 계약의 호스트 쪽 절반이다.
+
+- [ ] 데이터가 머무는 6개 지점과 각 지점을 넘기는 호출을 그림으로 그릴 수 있다
+- [ ] 앱 crash, 커널 panic, 전원 차단이 각각 어디까지를 잃는지 말할 수 있다
+- [ ] fsync와 fdatasync가 장치에 보내는 요청의 차이를 트레이스 출력으로 설명할 수 있다
+- [ ] O_DIRECT와 sync_file_range가 내구성을 주지 않는 이유를 말할 수 있다
+- [ ] temp + fsync + rename + 디렉터리 fsync를 코드로 짜고 각 단계를 빼면 생기는 일을 말할 수 있다
+- [ ] ext4 `auto_da_alloc`이 무엇을 막고 무엇을 못 막는지 말할 수 있다
+- [ ] REQ_PREFLUSH와 REQ_FUA를 NVMe·eMMC·virtio 명령으로 바꿔 말할 수 있다
+- [ ] `write_cache`를 write through로 바꾸는 것이 장치에 무엇을 하는지(아무것도 안 함) 설명할 수 있다
+- [ ] fsync EIO 뒤 두 번째 fsync가 0인 이유와 앱이 해야 할 일을 말할 수 있다
+- [ ] CRC + seq + 세그먼트 링 로그를 짜고 복구 스캔으로 연속 구간을 찾을 수 있다
+- [ ] dm-log-writes 재생과 kill 테스트가 각각 무엇을 흉내 내는지 구분할 수 있다
+- [ ] hold-up 시간을 계산하고 power-fail GPIO 처리 흐름을 설계할 수 있다
+
+---
+
+## 참고 자료
+
+- man7.org: [fsync(2)](https://man7.org/linux/man-pages/man2/fsync.2.html), [sync_file_range(2)](https://man7.org/linux/man-pages/man2/sync_file_range.2.html), [open(2)](https://man7.org/linux/man-pages/man2/open.2.html) (O_DIRECT, O_SYNC, O_DSYNC), [rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html), [syncfs(2)](https://man7.org/linux/man-pages/man2/syncfs.2.html)
+- Michael Kerrisk, The Linux Programming Interface — 13장 File I/O Buffering
+- docs.kernel.org: [Explicit volatile write back cache control](https://docs.kernel.org/block/writeback_cache_control.html) (REQ_PREFLUSH/REQ_FUA의 정의 문서)
+- docs.kernel.org: [ext4 General Information](https://docs.kernel.org/admin-guide/ext4.html) (data= 모드, `auto_da_alloc`, `barrier`)
+- docs.kernel.org: [dm-log-writes](https://docs.kernel.org/admin-guide/device-mapper/log-writes.html), [dm-flakey](https://docs.kernel.org/admin-guide/device-mapper/dm-flakey.html), [Fault injection capabilities](https://docs.kernel.org/fault-injection/fault-injection.html)
+- 커널 소스(6.18.55): `fs/ext4/fsync.c`(`ext4_sync_file`), `fs/jbd2/commit.c`, `block/blk-flush.c`, `block/blk-core.c`(`submit_bio_noacct`), `block/blk-sysfs.c`(`queue_wc_store`), `mm/filemap.c`(`file_check_and_advance_wb_err`), `lib/errseq.c`, `drivers/md/dm-log-writes.c`, `drivers/mmc/core/block.c`, `drivers/nvme/host/core.c` — [elixir.bootlin.com](https://elixir.bootlin.com/linux/v6.18/source)에서 같은 경로로 볼 수 있다
+- xfstests의 `src/log-writes/replay-log.c` (이 노트의 `j5_replay`가 흉내 낸 원본 도구)
+- PostgreSQL wiki: [Fsync Errors](https://wiki.postgresql.org/wiki/Fsync_Errors) (fsyncgate 정리)
+- OSTEP 42장 "Crash Consistency: FSCK and Journaling", 44장 "Flash-based SSDs"
+- NVM Express Base Specification — Flush 명령, Write의 FUA, Identify Controller VWC, AWUPF
+- JEDEC JESD84-B51 (eMMC 5.1) — EXT_CSD CACHE_CTRL[33], FLUSH_CACHE[32], CACHE_SIZE[252:249], reliable write
+- systemd: `man journald.conf` (Storage=, SyncIntervalSec=, RateLimitIntervalSec=)

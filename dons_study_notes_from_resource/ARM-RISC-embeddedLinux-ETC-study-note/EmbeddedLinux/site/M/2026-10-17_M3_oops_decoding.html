@@ -1,0 +1,1293 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M3. Oops·panic 해독 — 콜스택, PC/LR, addr2line, decode_stacktrace.sh, System.map, BUG/WARN</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="M/2026-10-17_M3_oops_decoding">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">M. 디버깅 · 트레이싱 · M3. Oops·panic 해독 — 콜스택, PC/LR, addr2line, decode_stacktrace.sh, System.map, BUG/WARN</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">M. 디버깅 · 트레이싱 · Debug &amp; Trace</div>
+      <h1>M3. Oops·panic 해독 — 콜스택, PC/LR, addr2line, decode_stacktrace.sh, System.map, BUG/WARN</h1>
+      <div class="meta"><span>173분 읽기</span><span>1673줄</span><span>51개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: arm64 Oops를 첫 줄부터 <code>---[ end trace ]---</code>까지 한 줄씩 읽고 ESR을 비트 단위로 풀 수 있다 · <code>faddr2line</code>·<code>decode_stacktrace.sh</code>·<code>addr2line</code>·<code>gdb</code>·<code>decodecode</code>·<code>pahole</code>로 <code>pc</code>를 소스 줄·구조체 멤버까지 바꾸고, 각 도구가 <strong>언제 틀린 답을 내는지</strong> 안다 · KASLR 주소를 <code>System.map</code> 주소로 되돌리고, 0x10·<code>6b6b…</code>·<code>dead…100</code>·<code>4141…</code> 같은 주소 패턴만 보고 버그 종류를 추정할 수 있다 · Oops / panic / BUG / WARN / lockup을 구별하고 <code>panic_on_oops</code>·<code>panic_on_warn</code>의 의미를 설명할 수 있다 <strong>왜 필요한가</strong>: 면접 단골 질문이 "Here's an oops — walk me through it", "oops 로그 보면 뭐부터 봐요?"다. 실무에서는 고객 장비의 콘솔 로그 한 덩어리(또는 pstore 파일 하나)만 받고 원인을 찾아야 하는 일이 매주 생긴다 <strong>Don 기준 난이도</strong>: Cortex-M HardFault 분석(CFSR/BFAR/stacked PC/LR → map 파일 → 소스 줄)은 이미 몸으로 안다 — Oops는 <strong>같은 일을 MMU·KASLR·모듈·인라인이 있는 세계에서 하는 것</strong>이다 / 새로 배울 부분은 ESR 필드, frame record 기반 unwinder의 맹점, 모듈 섹션 오프셋, KASLR 보정, 크래시 지점 ≠ 버그 지점 사고법 <strong>선행 노트</strong>: E3(커널 모듈), E4(커널 제약 — §4 스택 overflow, §8.3 Oops 첫 읽기·그림 4), E6(유저↔커널 경계, <code>el0_svc</code>), F4(락), F9(slab 할당자), M1(printk·콘솔·earlycon), M2(<code>/proc/modules</code>·taint 비트 표) — M4(kgdb·JTAG), M8(KASAN·lockdep 같은 탐지기), L7(pstore·kdump로 크래시 회수)로 이어진다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>Don이 SSD 펌웨어에서 HardFault를 잡던 순서를 떠올려 보자. ① HardFault_Handler가 예외 스택 프레임(r0–r3, r12, LR, PC, xPSR)과 CFSR·HFSR·BFAR·MMFAR를 RAM/UART에 덤프한다. ② CFSR 비트를 보고 "precise bus fault, BFAR 유효" 같은 <strong>원인</strong>을 정한다. ③ stacked PC를 <code>.map</code> 파일이나 <code>arm-none-eabi-addr2line</code>에 넣어 <strong>소스 줄</strong>을 찾는다. ④ stacked LR로 <strong>누가 불렀는지</strong> 본다. ⑤ BFAR 값 자체(0x00000010? 0xDEADBEEF?)에서 <strong>버그 종류</strong>를 추정한다.</p>
+<p>Linux 커널의 Oops도 정확히 이 다섯 단계다. 차이는 세 가지뿐이다.</p>
+<ul><li>커널이 덤프를 <strong>알아서, 사람이 읽을 수 있게</strong> 찍어 준다 (ESR 필드 해석, 심볼 이름, 콜스택까지).</li><li>주소가 <strong>KASLR로 매 부팅 무작위</strong>라서 <code>System.map</code>과 바로 비교할 수 없고, 모듈은 로드될 때마다 다른 곳에 놓인다.</li><li>대부분의 경우 <strong>시스템이 죽지 않는다</strong>. Oops는 "현재 태스크를 죽이고 계속 간다"가 기본이다. 그래서 "죽었다"가 아니라 "이상해졌다"로 보고되는 버그가 많다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <text x="10" y="22" font-size="13">Cortex-M (Don이 아는 세계)</text>
+  <rect x="10" y="34" width="150" height="56" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="85" y="58" text-anchor="middle" font-size="12">Fault 발생</text>
+  <text x="85" y="76" text-anchor="middle" font-size="12">MemManage/BusFault</text>
+  <rect x="178" y="34" width="150" height="56" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="253" y="58" text-anchor="middle" font-size="12">HardFault_Handler</text>
+  <text x="253" y="76" text-anchor="middle" font-size="12">(내가 짠 핸들러)</text>
+  <rect x="346" y="34" width="150" height="56" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="421" y="58" text-anchor="middle" font-size="12">CFSR · BFAR</text>
+  <text x="421" y="76" text-anchor="middle" font-size="12">stacked PC · LR 덤프</text>
+  <rect x="514" y="34" width="156" height="56" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="592" y="58" text-anchor="middle" font-size="12">리셋 또는 정지</text>
+  <text x="592" y="76" text-anchor="middle" font-size="12">(시스템 전체)</text>
+  <line x1="160" y1="62" x2="176" y2="62" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="328" y1="62" x2="344" y2="62" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="496" y1="62" x2="512" y2="62" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="10" y="134" font-size="13">Linux arm64 (이 노트)</text>
+  <rect x="10" y="146" width="150" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="85" y="170" text-anchor="middle" font-size="12">Data Abort / BRK</text>
+  <text x="85" y="188" text-anchor="middle" font-size="12">(EL1에서 동기 예외)</text>
+  <rect x="178" y="146" width="150" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="253" y="170" text-anchor="middle" font-size="12">do_mem_abort</text>
+  <text x="253" y="188" text-anchor="middle" font-size="12">bug_brk_handler</text>
+  <rect x="346" y="146" width="150" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="421" y="170" text-anchor="middle" font-size="12">die(): Oops 출력</text>
+  <text x="421" y="188" text-anchor="middle" font-size="12">ESR · FAR · pc · lr</text>
+  <rect x="514" y="146" width="156" height="56" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="592" y="170" text-anchor="middle" font-size="12">태스크만 kill</text>
+  <text x="592" y="188" text-anchor="middle" font-size="12">또는 panic</text>
+  <line x1="160" y1="174" x2="176" y2="174" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="328" y1="174" x2="344" y2="174" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="496" y1="174" x2="512" y2="174" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="10" y="226" width="660" height="62" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="340" y="250" text-anchor="middle" font-size="12">사람이 하는 일은 같다: 원인(ESR/CFSR) → 위치(pc → 소스 줄) → 호출자(lr, Call trace)</text>
+  <text x="340" y="272" text-anchor="middle" font-size="12">→ 주소 값의 의미(FAR/BFAR) → 크래시 지점이 진짜 버그 지점인가?</text>
+</svg></figure>
+<p>그림 1 — HardFault 분석과 Oops 분석은 같은 다섯 단계다. Linux는 덤프를 커널이 해석까지 해서 찍어 주고, 기본 동작이 "시스템 정지"가 아니라 "현재 태스크만 죽이고 계속"이라는 점이 다르다.</p>
+<h3 id="0-1-이-노트의-실험-진짜-oops-14개">0.1 이 노트의 실험 — 진짜 Oops 14개<a class="anchor" href="#0-1-이-노트의-실험-진짜-oops-14개" aria-label="link">#</a></h3>
+<p>이 노트의 모든 로그는 랩 커널 <code>6.18.55-trace</code>(<code>/var/lab/out/Image-trace</code>, <code>vmlinux-trace</code>에 DWARF5 전체 디버그 정보)를 QEMU <code>virt</code>(cortex-a57, 2 CPU, TCG)로 부팅해서 실제로 받은 콘솔 출력이다. VM 호스트 커널은 <code>uname -r</code> → <code>7.0.0-38-generic</code>이고, 버그 모듈은 <strong>호스트에 절대 넣지 않고</strong> 일회용 QEMU 게스트에만 넣었다.</p>
+<p>버그는 실험용 모듈 하나(<code>m3_bugs.ko</code>)에 모아 두고, <code>/sys/module/m3_bugs/parameters/trigger</code>에 이름을 쓰면 해당 버그 하나가 실행되게 했다. 이 노트는 버그 코드가 아니라 <strong>출력을 읽는 법</strong>이 주제라서 모듈 소스는 싣지 않는다. 각 트리거가 하는 일은 한 문장으로만 적는다.</p>
+<div class="tw"><table><thead><tr><th>트리거</th><th>모듈이 하는 일 (한 문장)</th><th>결과 (커널이 찍은 첫 줄)</th><th>절</th></tr></thead><tbody><tr><td><code>null</code></td><td>조회 함수가 NULL을 돌려줬는데 확인 없이 그 구조체의 <code>irq</code> 멤버를 읽는다</td><td><code>Unable to handle kernel NULL pointer dereference at virtual address 0000000000000010</code></td><td>§2–§6</td></tr><tr><td><code>uaf</code></td><td>객체를 <code>kfree</code>한 뒤 그 객체의 함수 포인터 테이블을 따라 호출한다 (<code>slab_debug=P</code>)</td><td><code>Unable to handle kernel paging request at virtual address 006b6b6b6b6b6b6b</code></td><td>§9.2</td></tr><tr><td><code>bugon</code></td><td>magic 값이 틀린 구조체로 <code>BUG_ON</code> 검사를 한다</td><td><code>kernel BUG at m3_bugs.c:47!</code></td><td>§8.2</td></tr><tr><td><code>warn</code></td><td>0인 모듈 파라미터를 <code>WARN_ON_ONCE</code>로 검사한다 (두 번 호출)</td><td><code>WARNING: CPU: 0 PID: 79 at m3_bugs.c:96 ...</code></td><td>§8.3</td></tr><tr><td><code>warnf</code></td><td>메시지가 붙은 <code>WARN(1, ...)</code>을 한 번 친다</td><td><code>m3: sensor imu0 timed out (-110)</code></td><td>§8.3</td></tr><tr><td><code>div0</code></td><td>정수 100을 0으로 나눈다</td><td><code>m3_bugs: 100 / 0 = 0</code> (트랩 없음)</td><td>§9.7</td></tr><tr><td><code>stack</code></td><td>지역 배열을 가진 함수를 10만 번 재귀 호출한다</td><td><code>Insufficient stack space to handle exception!</code></td><td>§9.6</td></tr><tr><td><code>sleep</code></td><td>스핀락을 잡은 채 <code>msleep(10)</code> 한다</td><td><code>BUG: scheduling while atomic: sh/79/0x00000002</code></td><td>§8.4</td></tr><tr><td><code>list</code></td><td>연결 리스트 노드를 가진 객체에 문자 <code>'A'</code>를 24바이트 덮어쓴 뒤 리스트를 순회하며 출력한다</td><td><code>Unable to handle kernel paging request at virtual address 0041414141414139</code></td><td>§9.4</td></tr><tr><td><code>dbldel</code></td><td>같은 리스트 노드에 <code>list_del</code>을 두 번 한다</td><td><code>... at virtual address dead000000000108</code></td><td>§9.3</td></tr><tr><td><code>misalign</code></td><td>홀수 주소에 있는 <code>atomic_t</code>에 <code>atomic_inc_return</code>을 한다</td><td><code>FSC = 0x21: alignment fault</code></td><td>§9.5</td></tr><tr><td><code>warn</code> + <code>panic_on_warn=1</code></td><td>위 <code>warn</code>과 같다</td><td><code>Kernel panic - not syncing: kernel: panic_on_warn set ...</code></td><td>§8.5</td></tr><tr><td><code>null</code> + <code>oops=panic</code></td><td>위 <code>null</code>과 같다</td><td><code>Kernel panic - not syncing: Oops: Fatal exception</code></td><td>§8.5</td></tr><tr><td><code>null</code> + <code>nokaslr</code></td><td>위 <code>null</code>과 같다</td><td>모듈 주소가 <code>0xffff80007bfa0000</code>로 고정</td><td>§7</td></tr><tr><td>(별도 모듈)</td><td>모듈 init에서 선점을 끈 채 30초 동안 <code>mdelay</code>로 바쁘게 기다린다</td><td><code>watchdog: BUG: soft lockup - CPU#1 stuck for 13s!</code></td><td>§8.6</td></tr></tbody></table></div>
+<p>실행 하네스는 이렇게 생겼다. 랩 BusyBox initramfs를 복사해 모듈과 스크립트 <code>t.sh</code>를 넣고, <code>LAB_CMD=sh~/t.sh</code>로 그 스크립트 하나만 돌린 뒤 꺼지게 한다(E4 §1.2와 같은 방식).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# run.sh &lt;tag&gt; &lt;bug&gt; [extra kernel args]  — VM 호스트에서 실행
+set -e
+tag=$1; bug=$2; extra=$3
+W=/var/tmp/M3/run_$tag; rm -rf $W; mkdir -p $W/r
+cp -a /var/lab/build/rootfs/. $W/r/
+cp /var/tmp/M3/m3_bugs/trace/m3_bugs.ko $W/r/
+cat &gt; $W/r/t.sh &lt;&lt;T
+insmod /m3_bugs.ko
+grep m3_bugs /proc/modules
+cat /sys/module/m3_bugs/sections/.text
+sh -c 'echo $bug &gt; /sys/module/m3_bugs/parameters/trigger'
+echo "rc=\$?"
+T
+(cd $W/r &amp;&amp; find . | cpio -o -H newc --quiet | gzip) &gt; $W/i.gz
+timeout 150 qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -m 512M \
+  -nographic -no-reboot -kernel /var/lab/out/Image-trace -initrd $W/i.gz \
+  -append "console=ttyAMA0 $extra LAB_CMD=sh~/t.sh" 2&gt;&amp;1 | tr -d '\r' &gt; $W/console.txt || true
+echo "exit; lines=$(wc -l &lt; $W/console.txt)"</code></pre></figure>
+<p>출력에서 볼 것: <code>echo</code>를 <code>sh -c '...'</code>로 한 번 감싼 이유는, Oops가 나면 <strong>echo를 실행한 프로세스가 커널에 의해 죽기</strong> 때문이다. 감싸 두면 바깥 셸은 살아서 <code>rc=139</code>(128 + SIGSEGV 11)를 찍고 다음 줄로 간다. <code>/proc/modules</code>의 로드 주소와 <code>/sys/module/m3_bugs/sections/.text</code>는 §6–§7에서 주소 계산에 쓴다. TCG 에뮬레이션이고 VM을 17명이 같이 쓰는 중이라 타임스탬프·도구 실행 시간은 실제 보드 수치가 아니다.</p>
+<hr>
+<h2 id="1-oops란-무엇인가-정의-세-줄">1. Oops란 무엇인가 — 정의 세 줄<a class="anchor" href="#1-oops란-무엇인가-정의-세-줄" aria-label="link">#</a></h2>
+<ul><li><strong>Oops</strong>: 커널 모드에서 처리할 수 없는 예외(잘못된 주소 접근, <code>BUG()</code>의 <code>brk</code> 명령, 정의되지 않은 명령 등)가 났을 때 커널이 진단 정보를 찍고 <strong>현재 태스크를 죽이는</strong> 것. 커널 자체는 계속 돈다. 이름 그대로 "앗, 실수".</li><li><strong>panic</strong>: 커널이 "더 진행하면 안 된다"고 판단하고 <strong>모든 CPU를 멈추는</strong> 것. <code>Kernel panic - not syncing: &lt;이유&gt;</code>로 시작한다. 인터럽트 문맥에서 Oops가 나거나, <code>panic_on_oops</code>가 켜져 있거나, init이 죽거나, 스택이 넘치면 panic으로 간다.</li><li><strong>WARN</strong>: "이 조건은 버그지만 계속 갈 수는 있다"는 경고. 콜스택을 찍고 taint <code>W</code>를 남기고 <strong>그대로 다음 명령으로 진행한다</strong>. 아무도 죽지 않는다.</li></ul>
+<p><code>BUG</code>는 이름이 헷갈린다. <code>BUG()</code>/<code>BUG_ON()</code> 매크로는 <strong>Oops를 일부러 일으키는 것</strong>이고(<code>kernel BUG at file:line!</code>), <code>BUG: scheduling while atomic</code>, <code>BUG: soft lockup</code> 같은 <code>BUG:</code> 접두어 메시지는 <strong>커널의 검사기가 문제를 보고하는 것</strong>(대개 태스크를 죽이지 않는다)이다. §8에서 하나씩 실제 로그로 비교한다.</p>
+<hr>
+<h2 id="2-arm64-oops-해부-한-줄씩">2. arm64 Oops 해부 — 한 줄씩<a class="anchor" href="#2-arm64-oops-해부-한-줄씩" aria-label="link">#</a></h2>
+<p><code>null</code> 트리거의 Oops 전체다(부팅 로그 앞부분 생략, 줄 앞의 <code>[    59.0xxxxx][   T80]</code> 접두어는 시각과 <code>PRINTK_CALLER</code>가 붙인 "태스크 80" 표시다).</p>
+<figure class="code"><span class="lang">text</span><pre><code>[   59.025707][   T80] Unable to handle kernel NULL pointer dereference at virtual address 0000000000000010
+[   59.025829][   T80] Mem abort info:
+[   59.025856][   T80]   ESR = 0x0000000096000006
+[   59.025919][   T80]   EC = 0x25: DABT (current EL), IL = 32 bits
+[   59.025960][   T80]   SET = 0, FnV = 0
+[   59.025981][   T80]   EA = 0, S1PTW = 0
+[   59.026007][   T80]   FSC = 0x06: level 2 translation fault
+[   59.026034][   T80] Data abort info:
+[   59.026051][   T80]   ISV = 0, ISS = 0x00000006, ISS2 = 0x00000000
+[   59.026066][   T80]   CM = 0, WnR = 0, TnD = 0, TagAccess = 0
+[   59.026081][   T80]   GCS = 0, Overlay = 0, DirtyBit = 0, Xs = 0
+[   59.026131][   T80] user pgtable: 4k pages, 48-bit VAs, pgdp=00000000456a0000
+[   59.026177][   T80] [0000000000000010] pgd=080000004500b403, p4d=080000004500b403, pud=080000004500c403, pmd=0000000000000000
+[   59.030266][   T80] Internal error: Oops: 0000000096000006 [#1]  SMP
+[   59.051074][   T80] Modules linked in: m3_bugs(OE)
+[   59.055396][   T80] CPU: 1 UID: 0 PID: 80 Comm: sh Tainted: G           OE       6.18.55-trace #1 PREEMPT 
+[   59.059561][   T80] Tainted: [O]=OOT_MODULE, [E]=UNSIGNED_MODULE
+[   59.063021][   T80] Hardware name: linux,dummy-virt (DT)
+[   59.064170][   T80] pstate: 60000005 (nZCv daif -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[   59.066671][   T80] pc : m3_get_irq.constprop.0+0xc/0xa10 [m3_bugs]
+[   59.071073][   T80] lr : m3_trigger+0x1fc/0x210 [m3_bugs]
+[   59.071322][   T80] sp : ffff8000804fbc50
+[   59.071459][   T80] x29: ffff8000804fbc50 x28: ffff000004fdc600 x27: 0000000000000000
+...  (x26 ~ x1 생략)
+[   59.085301][   T80] x2 : 000000000000000a x1 : ffffcd3f667be044 x0 : 0000000000000000
+[   59.085301][   T80] Call trace:
+[   59.086040][   T80]  m3_get_irq.constprop.0+0xc/0xa10 [m3_bugs] (P)
+[   59.088443][   T80]  param_attr_store+0x80/0x110
+[   59.088637][   T80]  module_attr_store+0x2c/0x50
+[   59.088919][   T80]  sysfs_kf_write+0x84/0xa8
+[   59.089174][   T80]  kernfs_fop_write_iter+0x134/0x210
+[   59.089381][   T80]  vfs_write+0x248/0x390
+[   59.089562][   T80]  ksys_write+0x6c/0x110
+[   59.089728][   T80]  __arm64_sys_write+0x20/0x38
+[   59.089941][   T80]  invoke_syscall.constprop.0+0x48/0xf0
+[   59.092464][   T80]  el0_svc_common.constprop.0+0x40/0xf0
+[   59.095035][   T80]  do_el0_svc+0x24/0x40
+[   59.095249][   T80]  el0_svc+0x40/0x180
+[   59.095426][   T80]  el0t_64_sync_handler+0xa0/0xf0
+[   59.095584][   T80]  el0t_64_sync+0x198/0x1a0
+[   59.096093][   T80] Code: ffffcd3f aa1e03e9 d503201f d2800000 (b9401000) 
+[   59.096879][   T80] ---[ end trace 0000000000000000 ]---
+Segmentation fault
+rc=139</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 470" xmlns="http://www.w3.org/2000/svg">
+  <rect x="8" y="8" width="404" height="454" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="16" y="32" font-size="12">Unable to handle kernel NULL pointer deref ... 0x10</text>
+  <text x="16" y="62" font-size="12">ESR = 0x96000006  EC = 0x25: DABT (current EL)</text>
+  <text x="16" y="92" font-size="12">FSC = 0x06: level 2 translation fault   WnR = 0</text>
+  <text x="16" y="122" font-size="12">[0000000000000010] pgd=... pud=... pmd=0000000000000000</text>
+  <text x="16" y="152" font-size="12">Internal error: Oops: 0000000096000006 [#1]  SMP</text>
+  <text x="16" y="182" font-size="12">Modules linked in: m3_bugs(OE)</text>
+  <text x="16" y="212" font-size="12">CPU: 1 UID: 0 PID: 80 Comm: sh Tainted: G  OE</text>
+  <text x="16" y="242" font-size="12">pstate: 60000005 (nZCv daif -PAN -UAO ...)</text>
+  <text x="16" y="272" font-size="12">pc : m3_get_irq.constprop.0+0xc/0xa10 [m3_bugs]</text>
+  <text x="16" y="302" font-size="12">lr : m3_trigger+0x1fc/0x210 [m3_bugs]</text>
+  <text x="16" y="332" font-size="12">sp : ffff8000804fbc50   x29 ... x0 : 0000000000000000</text>
+  <text x="16" y="362" font-size="12">Call trace: m3_get_irq... (P) / param_attr_store+0x80</text>
+  <text x="16" y="392" font-size="12">Code: ffffcd3f aa1e03e9 d503201f d2800000 (b9401000)</text>
+  <text x="16" y="422" font-size="12">---[ end trace 0000000000000000 ]---</text>
+  <text x="16" y="452" font-size="12">Segmentation fault   (echo 프로세스가 SIGSEGV로 죽음)</text>
+  <g stroke="currentColor" stroke-dasharray="3,3">
+    <line x1="412" y1="28" x2="424" y2="28"/><line x1="412" y1="58" x2="424" y2="58"/>
+    <line x1="412" y1="88" x2="424" y2="88"/><line x1="412" y1="118" x2="424" y2="118"/>
+    <line x1="412" y1="148" x2="424" y2="148"/><line x1="412" y1="178" x2="424" y2="178"/>
+    <line x1="412" y1="208" x2="424" y2="208"/><line x1="412" y1="238" x2="424" y2="238"/>
+    <line x1="412" y1="268" x2="424" y2="268"/><line x1="412" y1="298" x2="424" y2="298"/>
+    <line x1="412" y1="328" x2="424" y2="328"/><line x1="412" y1="358" x2="424" y2="358"/>
+    <line x1="412" y1="388" x2="424" y2="388"/><line x1="412" y1="418" x2="424" y2="418"/>
+    <line x1="412" y1="448" x2="424" y2="448"/>
+  </g>
+  <text x="430" y="32" font-size="12">① 무엇이: 접근 종류 + FAR</text>
+  <text x="430" y="62" font-size="12">② 왜: 예외 신드롬 (§3)</text>
+  <text x="430" y="92" font-size="12">③ L2 테이블에 매핑 없음, 읽기</text>
+  <text x="430" y="122" font-size="12">④ show_pte: 어디서 끊겼나</text>
+  <text x="430" y="152" font-size="12">⑤ 몇 번째 Oops — 항상 [#1]</text>
+  <text x="430" y="182" font-size="12">⑥ 용의자 목록 + taint</text>
+  <text x="430" y="212" font-size="12">⑦ 누가: CPU · PID · 명령</text>
+  <text x="430" y="242" font-size="12">⑧ SPSR: 플래그 · IRQ 마스크 · EL</text>
+  <text x="430" y="272" font-size="12" font-weight="bold">⑨ 죽은 곳 = ELR (stacked PC)</text>
+  <text x="430" y="302" font-size="12" font-weight="bold">⑩ x30 = 돌아갈 곳 (stacked LR)</text>
+  <text x="430" y="332" font-size="12">⑪ 레지스터: x0 = 0 → NULL</text>
+  <text x="430" y="362" font-size="12">⑫ 경로: frame record 체인 (§4)</text>
+  <text x="430" y="392" font-size="12">⑬ 명령어: ( ) 안이 죽은 명령</text>
+  <text x="430" y="422" font-size="12">⑭ 끝 — Oops면 태스크만 죽음</text>
+  <text x="430" y="452" font-size="12">⑮ 유저가 보는 결과</text>
+</svg></figure>
+<p>그림 2 — Oops 해부도(<code>null</code> 트리거의 실제 값). 굵게 표시한 ⑨·⑩이 HardFault의 stacked PC·LR에 해당하고, ①·②가 BFAR·CFSR에 해당한다. E4 그림 4의 9단계 해부를 arm64 필드까지 더 쪼갠 것이다.</p>
+<h3 id="2-1-줄별-의미표">2.1 줄별 의미표<a class="anchor" href="#2-1-줄별-의미표" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>줄</th><th>뜻</th><th>이번 값에서 읽을 것</th><th>Cortex-M 대응</th></tr></thead><tbody><tr><td><code>Unable to handle kernel NULL pointer dereference at virtual address 0000000000000010</code></td><td>커널 모드 data abort. 주소가 첫 페이지(&lt; <code>PAGE_SIZE</code>) 안이면 "NULL pointer dereference", 아니면 "paging request"라고 쓴다</td><td>FAR = 0x10. NULL + 0x10이다 → 구조체 포인터가 NULL이고 오프셋 0x10의 멤버를 읽었다</td><td>BFAR/MMFAR</td></tr><tr><td><code>Mem abort info:</code> ~ <code>Xs = 0</code></td><td>ESR_EL1을 필드별로 풀어 준 것</td><td>EC 0x25 = 현재 EL(커널)의 data abort, FSC 0x06 = L2 translation fault, WnR 0 = 읽기</td><td>CFSR(MMFSR/BFSR)</td></tr><tr><td><code>user pgtable: 4k pages, 48-bit VAs, pgdp=...</code></td><td>주소가 유저 영역(TTBR0)이라 유저 페이지 테이블을 걸었다는 뜻. 커널 주소면 <code>swapper pgtable</code></td><td>0x10은 유저 주소 공간 쪽이다. 커널 코드가 유저 주소를 만진 것</td><td>없음 (MPU는 단일 맵)</td></tr><tr><td><code>[0000000000000010] pgd=... pmd=0000000000000000</code></td><td><code>show_pte()</code>가 4단계 테이블을 따라가며 각 항목 값 출력</td><td><code>pmd=0</code> — L2 단계에서 끊겼다. FSC "level 2"와 일치한다</td><td>없음</td></tr><tr><td><code>Internal error: Oops: 0000000096000006 [#1]  SMP</code></td><td><code>die()</code>가 찍는 머리줄. 콜론 뒤 숫자는 ESR, <code>[#1]</code>은 부팅 후 몇 번째 die인가</td><td><strong>#1이 아닌 Oops는 앞선 Oops의 후유증일 수 있다</strong> — 항상 #1부터 본다</td><td>없음</td></tr><tr><td><code>Modules linked in: m3_bugs(OE)</code></td><td>로드된 모듈 전부와 각 모듈의 taint</td><td>용의자는 out-of-tree(O)·서명 없음(E) 모듈 하나</td><td>없음</td></tr><tr><td><code>CPU: 1 UID: 0 PID: 80 Comm: sh Tainted: G ... OE ... 6.18.55-trace #1 PREEMPT</code></td><td>죽은 CPU, 현재 태스크(echo를 실행한 <code>sh</code>), taint 문자열, 커널 버전·빌드 번호와 선점 모델</td><td>시스템콜 문맥(프로세스 문맥)에서 죽었다. 인터럽트 문맥이면 panic으로 갔을 것이다</td><td>현재 태스크 ID (RTOS)</td></tr><tr><td><code>Tainted: [O]=OOT_MODULE, [E]=UNSIGNED_MODULE</code></td><td>taint 문자의 풀이 (비트 표는 M2)</td><td>커뮤니티에 보고하면 "out-of-tree 모듈 없이 재현되나?"부터 묻는다</td><td>없음</td></tr><tr><td><code>pstate: 60000005 (nZCv daif ...)</code></td><td>예외 직전의 PSTATE(SPSR_EL1). 대문자 = 1</td><td>N=0 Z=1 C=1 V=0, <code>daif</code> 소문자 = IRQ·FIQ 모두 <strong>열려 있음</strong>, 하위 4비트 0x5 = EL1h</td><td>stacked xPSR</td></tr><tr><td><code>pc : m3_get_irq.constprop.0+0xc/0xa10 [m3_bugs]</code></td><td>ELR_EL1 — 예외를 낸 명령의 주소를 <code>심볼+오프셋/크기 [모듈]</code>로</td><td>죽은 곳. <code>.constprop.0</code>은 GCC가 상수 인자를 박아 복제한 함수라는 표시</td><td>stacked PC</td></tr><tr><td><code>lr : m3_trigger+0x1fc/0x210 [m3_bugs]</code></td><td>x30 — 마지막 <code>bl</code>의 복귀 주소</td><td>누가 불렀나(대개). 단 §4.3처럼 <strong>낡은 값</strong>일 수 있다</td><td>stacked LR</td></tr><tr><td><code>sp</code>, <code>x29</code> ~ <code>x0</code></td><td>범용 레지스터 31개</td><td><code>x0 = 0</code> — NULL 포인터가 x0에 있었다</td><td>r0–r12</td></tr><tr><td><code>Call trace:</code></td><td>frame record(x29 체인)를 따라간 콜스택. <code>(P)</code>는 pc에서 온 첫 줄</td><td>위에서 아래로 = 안쪽에서 바깥쪽(유저 syscall 진입 <code>el0t_64_sync</code>까지)</td><td>수동 스택 워크</td></tr><tr><td><code>Code: ... (b9401000)</code></td><td>pc 앞 4개 + pc의 명령어 워드. 괄호 안이 죽은 명령</td><td><code>b9401000</code> = <code>ldr w0, [x0, #16]</code> (§5)</td><td>없음</td></tr><tr><td><code>---[ end trace 0000000000000000 ]---</code></td><td>출력 끝. 숫자는 예전 trace id 자리(현재 0)</td><td>이 뒤 <code>Segmentation fault</code>는 유저가 본 결과</td><td>—</td></tr></tbody></table></div>
+<h3 id="2-2-pstate-읽는-법">2.2 pstate 읽는 법<a class="anchor" href="#2-2-pstate-읽는-법" aria-label="link">#</a></h3>
+<p><code>pstate</code>는 예외가 나기 직전 CPU 상태다. 이번 실험에서 세 가지 값이 나왔다.</p>
+<div class="tw"><table><thead><tr><th>값</th><th>표시</th><th>의미</th><th>어느 실험</th></tr></thead><tbody><tr><td><code>60000005</code></td><td><code>nZCv daif</code></td><td>플래그 Z·C, 인터럽트 전부 허용, EL1h</td><td>null, uaf, bugon, warn… (평범한 프로세스 문맥)</td></tr><tr><td><code>000000c5</code></td><td><code>nzcv daIF</code></td><td><strong>IRQ·FIQ 마스크</strong>(I, F 대문자)</td><td>list — <code>printk</code> 내부에서 IRQ를 끈 채로 죽었다</td></tr><tr><td><code>200003c5</code></td><td><code>nzCv DAIF</code></td><td>D·A·I·F 전부 마스크</td><td>bugon 뒤의 후속 WARN — idle 진입 중</td></tr></tbody></table></div>
+<p>IRQ가 꺼진 상태에서 죽었다면 "스핀락(<code>spin_lock_irqsave</code>) 구간 안이었나?"를 먼저 의심한다. 실제로 list 실험은 Oops 뒤에 <code>note: sh[79] exited with irqs disabled</code>가 따라 나왔다 — 이 태스크가 IRQ를 끈 채로 죽어서, 커널이 대신 그 사실을 기록한 것이다.</p>
+<hr>
+<h2 id="3-esr-왜-죽었나-를-비트로-읽기">3. ESR — "왜 죽었나"를 비트로 읽기<a class="anchor" href="#3-esr-왜-죽었나-를-비트로-읽기" aria-label="link">#</a></h2>
+<p>ESR_EL1(Exception Syndrome Register)은 Cortex-M의 CFSR에 해당한다. 예외 원인을 32비트에 담는다(상위 32비트는 ISS2로 FEAT_LS64 같은 확장용).</p>
+<ul><li><strong>EC</strong>(Exception Class, 비트 31:26): 예외의 큰 분류. 0x25 = 현재 EL의 data abort, 0x24 = 하위 EL(유저)의 data abort, 0x21 = 현재 EL의 instruction abort, 0x3c = BRK 명령, 0x00 = 알 수 없음(UNDEF 명령 등).</li><li><strong>IL</strong>(비트 25): 명령어 길이. 1 = 32비트 명령(A64는 항상 1).</li><li><strong>ISS</strong>(비트 24:0): EC별 세부 정보. data abort라면 아래 필드가 있다.</li></ul>
+<div class="tw"><table><thead><tr><th>ISS 필드</th><th>비트</th><th>뜻</th></tr></thead><tbody><tr><td>ISV</td><td>24</td><td>1이면 비트 23:14에 "어떤 레지스터로 몇 바이트 로드/스토어했나"가 유효 (커널 abort에서는 대개 0)</td></tr><tr><td>SET</td><td>12:11</td><td>동기 에러 타입 (RAS 확장)</td></tr><tr><td>FnV</td><td>10</td><td><strong>FAR not Valid</strong>. 1이면 FAR 값을 믿지 말 것 (Cortex-M의 BFARVALID=0과 같은 의미, 극성은 반대)</td></tr><tr><td>EA</td><td>9</td><td>External Abort — 버스(인터커넥트)가 에러 응답을 돌려줌. Don이 아는 "bus error"가 이것이다</td></tr><tr><td>CM</td><td>8</td><td>캐시 유지보수 명령(<code>dc</code>)이 낸 abort</td></tr><tr><td>S1PTW</td><td>7</td><td>페이지 테이블을 걷다가(stage 2) 난 abort</td></tr><tr><td>WnR</td><td>6</td><td><strong>Write not Read</strong> — 1 = 쓰기, 0 = 읽기</td></tr><tr><td>DFSC</td><td>5:0</td><td>Data Fault Status Code — 0x04–0x07 translation fault L0–L3, 0x09–0x0b access flag, 0x0d–0x0f permission fault, 0x10 동기 external abort, 0x21 alignment fault</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg">
+  <text x="20" y="22" font-size="13">ESR = 0x96000006 (null 트리거)  = 1001 0110 0000 ... 0000 0110</text>
+  <rect x="20" y="36" width="120" height="44" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="80" y="54" text-anchor="middle" font-size="12">EC [31:26]</text>
+  <text x="80" y="72" text-anchor="middle" font-size="12">100101 = 0x25</text>
+  <rect x="140" y="36" width="40" height="44" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="160" y="54" text-anchor="middle" font-size="12">IL</text>
+  <text x="160" y="72" text-anchor="middle" font-size="12">1</text>
+  <rect x="180" y="36" width="480" height="44" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="420" y="54" text-anchor="middle" font-size="12">ISS [24:0]</text>
+  <text x="420" y="72" text-anchor="middle" font-size="12">0x0000006</text>
+  <line x1="180" y1="80" x2="20" y2="120" stroke="currentColor" stroke-dasharray="3,3"/>
+  <line x1="660" y1="80" x2="660" y2="120" stroke="currentColor" stroke-dasharray="3,3"/>
+  <rect x="20" y="120" width="50" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="45" y="140" text-anchor="middle" font-size="12">ISV</text>
+  <text x="45" y="160" text-anchor="middle" font-size="12">0</text>
+  <rect x="70" y="120" width="130" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="135" y="140" text-anchor="middle" font-size="12">[23:13]</text>
+  <text x="135" y="160" text-anchor="middle" font-size="12">ISV=1일 때만</text>
+  <rect x="200" y="120" width="56" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="228" y="140" text-anchor="middle" font-size="12">SET</text>
+  <text x="228" y="160" text-anchor="middle" font-size="12">00</text>
+  <rect x="256" y="120" width="50" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="281" y="140" text-anchor="middle" font-size="12">FnV</text>
+  <text x="281" y="160" text-anchor="middle" font-size="12">0</text>
+  <rect x="306" y="120" width="44" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="328" y="140" text-anchor="middle" font-size="12">EA</text>
+  <text x="328" y="160" text-anchor="middle" font-size="12">0</text>
+  <rect x="350" y="120" width="44" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="372" y="140" text-anchor="middle" font-size="12">CM</text>
+  <text x="372" y="160" text-anchor="middle" font-size="12">0</text>
+  <rect x="394" y="120" width="60" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="424" y="140" text-anchor="middle" font-size="12">S1PTW</text>
+  <text x="424" y="160" text-anchor="middle" font-size="12">0</text>
+  <rect x="454" y="120" width="50" height="50" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="479" y="140" text-anchor="middle" font-size="12">WnR</text>
+  <text x="479" y="160" text-anchor="middle" font-size="12">0 읽기</text>
+  <rect x="504" y="120" width="156" height="50" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="582" y="140" text-anchor="middle" font-size="12">DFSC [5:0]</text>
+  <text x="582" y="160" text-anchor="middle" font-size="12">000110 = L2 transl.</text>
+  <text x="20" y="206" font-size="13">이 노트에서 실제로 나온 ESR 6개</text>
+  <line x1="20" y1="214" x2="660" y2="214" stroke="currentColor"/>
+  <text x="20" y="236" font-size="12">0x96000006  DABT  WnR=0  DFSC 0x06 L2 transl.  → null: 0x10 읽기</text>
+  <text x="20" y="262" font-size="12">0x96000004  DABT  WnR=0  DFSC 0x04 L0 transl.  → uaf 6b6b…, list 4141…</text>
+  <text x="20" y="288" font-size="12">0x96000044  DABT  WnR=1  DFSC 0x04 L0 transl.  → dbldel: dead…108 쓰기</text>
+  <text x="20" y="314" font-size="12">0x96000021  DABT  WnR=0  DFSC 0x21 alignment   → misalign: ldxr 홀수 주소</text>
+  <text x="20" y="340" font-size="12">0x96000047  DABT  WnR=1  DFSC 0x07 L3 transl.  → stack: guard page 쓰기</text>
+  <text x="20" y="366" font-size="12">0xf2000800  EC 0x3c BRK  imm 0x800 = BUG_BRK_IMM  → bugon</text>
+  <text x="20" y="400" font-size="12">0x96 = EC 0x25 + IL 1 → "커널이 데이터 접근하다 죽음"의 지문. 0x92로 시작하면 유저(EL0) 쪽 data abort</text>
+</svg></figure>
+<p>그림 3 — ESR 비트 필드와 이번 실험의 실제 값. 상위 바이트 <code>0x96</code>만 봐도 "커널 data abort"임을 안다. 그다음 WnR(읽기/쓰기)과 DFSC(무슨 종류의 fault)를 본다.</p>
+<h3 id="3-1-예제-esr-해독기-esr-py">3.1 예제 — ESR 해독기 (<code>esr.py</code>)<a class="anchor" href="#3-1-예제-esr-해독기-esr-py" aria-label="link">#</a></h3>
+<p>커널이 이미 풀어서 찍어 주지만, 면접이나 다른 아키텍처 로그(예: 어떤 BSP는 ESR만 숫자로 찍는다)에서 직접 풀 수 있어야 한다. 이번 실험에 나온 EC·FSC만 담은 작은 해독기다.</p>
+<figure class="code"><span class="lang">python</span><pre><code>#!/usr/bin/env python3
+"""esr.py — decode arm64 ESR_ELx values seen in oopses (subset of Arm ARM D24)."""
+import sys
+EC = {0x15: "SVC64", 0x18: "MSR/MRS trap", 0x20: "IABT (lower EL)",
+      0x21: "IABT (current EL)", 0x22: "PC alignment", 0x24: "DABT (lower EL)",
+      0x25: "DABT (current EL)", 0x26: "SP alignment", 0x2f: "SError",
+      0x3c: "BRK (AArch64)", 0x00: "Unknown/UNDEF"}
+FSC = {0x04: "L0 translation", 0x05: "L1 translation", 0x06: "L2 translation",
+       0x07: "L3 translation", 0x09: "L1 access flag", 0x0b: "L3 access flag",
+       0x0d: "L1 permission", 0x0f: "L3 permission", 0x10: "sync external abort",
+       0x21: "alignment", 0x30: "TLB conflict"}
+BRK = {0x800: "BUG()/WARN() (BUG_BRK_IMM)", 0x900: "KASAN", 0x400: "KGDB",
+       0x004: "kprobes", 0x100: "FAULT_BRK"}
+
+def decode(esr):
+    ec, il, iss = (esr &gt;&gt; 26) &amp; 0x3f, (esr &gt;&gt; 25) &amp; 1, esr &amp; 0x1ffffff
+    out = [f"ESR=0x{esr:016x}  EC=0x{ec:02x} {EC.get(ec, '?')}  IL={32 if il else 16}"]
+    if ec in (0x24, 0x25, 0x20, 0x21):
+        f = lambda b, w=1: (iss &gt;&gt; b) &amp; ((1 &lt;&lt; w) - 1)
+        out.append(f"  ISV={f(24)} SET={f(11,2)} FnV={f(10)} EA={f(9)} CM={f(8)}"
+                   f" S1PTW={f(7)} WnR={f(6)}  FSC=0x{f(0,6):02x} {FSC.get(f(0,6), '?')}")
+        out.append("  -&gt; " + ("WRITE" if f(6) else "READ") + " access"
+                   + ("" if f(10) == 0 else ", FAR NOT valid"))
+    elif ec == 0x3c:
+        out.append(f"  BRK imm=0x{iss &amp; 0xffff:03x}: {BRK.get(iss &amp; 0xffff, '?')}")
+    return "\n".join(out)
+
+for a in sys.argv[1:]:
+    print(decode(int(a, 16)))</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>python3 esr.py 96000006 96000004 96000044 96000021 96000047 f2000800</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>ESR=0x0000000096000006  EC=0x25 DABT (current EL)  IL=32
+  ISV=0 SET=0 FnV=0 EA=0 CM=0 S1PTW=0 WnR=0  FSC=0x06 L2 translation
+  -&gt; READ access
+ESR=0x0000000096000004  EC=0x25 DABT (current EL)  IL=32
+  ISV=0 SET=0 FnV=0 EA=0 CM=0 S1PTW=0 WnR=0  FSC=0x04 L0 translation
+  -&gt; READ access
+ESR=0x0000000096000044  EC=0x25 DABT (current EL)  IL=32
+  ISV=0 SET=0 FnV=0 EA=0 CM=0 S1PTW=0 WnR=1  FSC=0x04 L0 translation
+  -&gt; WRITE access
+ESR=0x0000000096000021  EC=0x25 DABT (current EL)  IL=32
+  ISV=0 SET=0 FnV=0 EA=0 CM=0 S1PTW=0 WnR=0  FSC=0x21 alignment
+  -&gt; READ access
+ESR=0x0000000096000047  EC=0x25 DABT (current EL)  IL=32
+  ISV=0 SET=0 FnV=0 EA=0 CM=0 S1PTW=0 WnR=1  FSC=0x07 L3 translation
+  -&gt; WRITE access
+ESR=0x00000000f2000800  EC=0x3c BRK (AArch64)  IL=32
+  BRK imm=0x800: BUG()/WARN() (BUG_BRK_IMM)</code></pre></figure>
+<p>출력에서 볼 것: translation fault의 <strong>레벨</strong>이 주소 종류를 알려 준다. 0x10은 유저 영역이라 PGD·PUD는 있고 L2(PMD)에서 비었다(<code>pmd=0</code>). <code>6b6b…</code>·<code>4141…</code>·<code>dead…</code> 같은 쓰레기 주소는 아예 <strong>유효 주소 범위 밖</strong>(non-canonical)이라 L0에서 바로 실패한다 — 커널이 <code>address between user and kernel address ranges</code>라고 덧붙인다. 스택 guard page는 매핑 구조는 다 있고 마지막 L3 PTE만 비어 있어서 L3 fault다. 그리고 <code>misalign</code>의 <code>ldxr</code>은 <strong>로드</strong>라서 WnR=0이다 — atomic 증가지만 첫 명령은 읽기(load-exclusive)다.</p>
+<h3 id="3-2-cortex-m-hardfault-arm64-oops-대응표">3.2 Cortex-M HardFault ↔ arm64 Oops 대응표<a class="anchor" href="#3-2-cortex-m-hardfault-arm64-oops-대응표" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>Cortex-M (ARMv7-M/v8-M)</th><th>arm64 Oops</th><th>메모</th></tr></thead><tbody><tr><td>CFSR (MMFSR·BFSR·UFSR)</td><td>ESR_EL1 — <code>Mem abort info:</code> 블록</td><td>둘 다 "원인 레지스터". arm64는 EC로 먼저 크게 나눈다</td></tr><tr><td>MMFAR / BFAR</td><td>FAR_EL1 — <code>at virtual address ...</code></td><td>결함 주소</td></tr><tr><td>MMARVALID / BFARVALID = 1</td><td>FnV = 0</td><td>극성 반대. FnV=1이면 주소를 믿지 마라</td></tr><tr><td>BFSR.PRECISERR</td><td>EA=1, 동기 external abort (DFSC 0x10)</td><td>버스가 에러 응답 — 전원 꺼진 블록·클록 없는 IP의 레지스터 접근</td></tr><tr><td>BFSR.IMPRECISERR</td><td>SError (EC 0x2f), <code>SError Interrupt on CPU</code></td><td>비동기 — pc가 원인 명령이 아니다</td></tr><tr><td>MMFSR.DACCVIOL (MPU 위반)</td><td>permission fault (DFSC 0x0d–0x0f)</td><td>읽기 전용 페이지 쓰기, PAN 위반 등</td></tr><tr><td>UFSR.UNALIGNED</td><td>alignment fault (DFSC 0x21)</td><td>arm64는 일반 load/store는 정렬 안 돼도 되지만 exclusive/atomic·Device 메모리는 안 된다 (§9.5)</td></tr><tr><td>UFSR.DIVBYZERO (<code>CCR.DIV_0_TRP</code>=1일 때)</td><td><strong>없음</strong> — <code>sdiv</code>/<code>udiv</code>는 0을 돌려준다</td><td>§9.7</td></tr><tr><td>UFSR.UNDEFINSTR</td><td>EC 0x00 <code>Internal error: Oops - Undefined instruction</code></td><td></td></tr><tr><td>BKPT 명령</td><td>BRK 명령 (EC 0x3c) — <code>BUG()</code>가 쓰는 방법</td><td>imm 0x800 = BUG</td></tr><tr><td>MSTKERR / STKERR, MSPLIM</td><td>VMAP_STACK guard page + <code>Insufficient stack space</code></td><td>§9.6, E4 §4</td></tr><tr><td>stacked PC</td><td><code>pc :</code> (ELR_EL1)</td><td></td></tr><tr><td>stacked LR</td><td><code>lr :</code> (x30)</td><td></td></tr><tr><td>stacked xPSR</td><td><code>pstate:</code> (SPSR_EL1)</td><td></td></tr><tr><td>EXC_RETURN 값으로 MSP/PSP 판단</td><td><code>CPU: … PID: … Comm:</code> + 마지막 <code>el0t_64_sync</code> 프레임</td><td>어느 문맥에서 왔나</td></tr><tr><td><code>.map</code> 파일 + <code>addr2line</code></td><td><code>System.map</code> + <code>faddr2line</code>/<code>decode_stacktrace.sh</code></td><td>KASLR 보정이 추가 (§7)</td></tr><tr><td>HardFault = 시스템 정지</td><td>Oops = 태스크만 죽음, panic = 시스템 정지</td><td>기본값이 다르다 (§8)</td></tr></tbody></table></div>
+<hr>
+<h2 id="4-call-trace-콜스택은-어떻게-만들어지고-어디서-거짓말하나">4. Call trace — 콜스택은 어떻게 만들어지고, 어디서 거짓말하나<a class="anchor" href="#4-call-trace-콜스택은-어떻게-만들어지고-어디서-거짓말하나" aria-label="link">#</a></h2>
+<h3 id="4-1-직관-frame-record-체인">4.1 직관 — frame record 체인<a class="anchor" href="#4-1-직관-frame-record-체인" aria-label="link">#</a></h3>
+<p>arm64 커널은 <code>CONFIG_FRAME_POINTER=y</code>로 빌드된다(이 랩 커널도 그렇다). 함수가 다른 함수를 부르려면 자기 복귀 주소(x30)를 어딘가 보관해야 하므로, 프롤로그에서 <strong>x29(frame pointer)와 x30(LR) 한 쌍</strong>을 스택에 넣고 x29가 그 쌍을 가리키게 한다. 이 16바이트 쌍을 <strong>frame record</strong>라고 한다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>stp  x29, x30, [sp, #-32]!     // [sp] = 이전 x29, [sp+8] = 내 복귀 주소
+mov  x29, sp                   // x29 → 방금 만든 frame record</code></pre></figure>
+<p>unwinder(<code>arch/arm64/kernel/stacktrace.c</code>)는 Oops 순간의 <code>pc</code>를 첫 줄로 찍고(<code>(P)</code> 표시), 그다음부터 x29가 가리키는 frame record에서 "복귀 주소"를 읽어 한 줄 찍고, "이전 x29"를 따라 다음 record로 간다. Don이 Cortex-M에서 스택 메모리를 덤프해 손으로 LR 비슷한 값을 찾던 일을, 커널은 x29 체인 덕분에 정확하게 자동으로 한다.</p>
+<p>맨 위 <code>(P)</code> 말고 <code>(C)</code>가 붙는 줄도 있다. <code>show_stack+0x30/0x90 (C)</code>처럼 <strong>현재 실행 중인 함수에서 직접 unwind를 시작했다</strong>는 표시다 — panic이나 <code>dump_stack()</code>이 자기 자리에서 콜스택을 찍을 때 나온다.</p>
+<h3 id="4-2-맹점-1-leaf-함수의-호출자가-사라진다">4.2 맹점 1 — leaf 함수의 호출자가 사라진다<a class="anchor" href="#4-2-맹점-1-leaf-함수의-호출자가-사라진다" aria-label="link">#</a></h3>
+<p><code>null</code> Oops의 Call trace를 다시 보자.</p>
+<figure class="code"><span class="lang">text</span><pre><code> pc : m3_get_irq.constprop.0+0xc/0xa10 [m3_bugs]
+ lr : m3_trigger+0x1fc/0x210 [m3_bugs]
+ sp : ffff8000804fbc50
+ x29: ffff8000804fbc50 ...
+ Call trace:
+  m3_get_irq.constprop.0+0xc/0xa10 [m3_bugs] (P)
+  param_attr_store+0x80/0x110
+  module_attr_store+0x2c/0x50</code></pre></figure>
+<p><code>m3_trigger</code>가 <strong>Call trace에 없다</strong>. <code>lr</code>에만 있다. 이유는 <code>m3_get_irq</code>가 leaf 함수(다른 함수를 안 부름)라서 frame record를 만들지 않았기 때문이다. 실제 기계어가 이를 보여 준다(§6.4의 <code>objdump</code> 출력에서 발췌):</p>
+<figure class="code"><span class="lang">text</span><pre><code>0000000000000008 &lt;m3_get_irq.constprop.0&gt;:
+   8:	d503201f 	nop
+   c:	d503201f 	nop
+  10:	d2800000 	mov	x0, #0x0                   	// #0
+  14:	b9401000 	ldr	w0, [x0, #16]
+  18:	d65f03c0 	ret</code></pre></figure>
+<p><code>stp x29, x30</code>이 없다. 그래서 Oops 순간 x29는 여전히 <strong>호출자 <code>m3_trigger</code>의 frame record</strong>를 가리키고 있었다(<code>x29 == sp == ffff8000804fbc50</code>인 것도 그 증거다 — leaf가 sp를 안 건드렸다). unwinder는 첫 줄을 <code>pc</code>로 찍은 뒤 x29의 record를 읽는데, 그 record에 든 것은 <strong><code>m3_trigger</code>의 복귀 주소, 즉 <code>param_attr_store+0x80</code></strong>이다. <code>m3_trigger</code> 자신의 위치(<code>+0x1fc</code>)는 x30 레지스터에만 있었고, unwinder는 x30을 콜스택 줄로 쓰지 않는다.</p>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <text x="20" y="22" font-size="13">CPU 레지스터 (Oops 순간)</text>
+  <rect x="20" y="34" width="250" height="34" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="30" y="56" font-size="12">pc = m3_get_irq+0xc (leaf)</text>
+  <rect x="20" y="74" width="250" height="34" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="30" y="96" font-size="12">x30 (lr) = m3_trigger+0x1fc</text>
+  <rect x="20" y="114" width="250" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="136" font-size="12">x29 = ffff8000804fbc50</text>
+  <text x="330" y="22" font-size="13">커널 스택 (높은 주소가 아래)</text>
+  <rect x="330" y="34" width="330" height="60" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="56" font-size="12">m3_trigger의 frame record @ ...bc50</text>
+  <text x="340" y="80" font-size="12">[+0] 이전 x29   [+8] param_attr_store+0x80</text>
+  <rect x="330" y="104" width="330" height="60" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="126" font-size="12">param_attr_store의 frame record</text>
+  <text x="340" y="150" font-size="12">[+0] 이전 x29   [+8] module_attr_store+0x2c</text>
+  <rect x="330" y="174" width="330" height="40" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="199" font-size="12">... sysfs_kf_write ... el0t_64_sync</text>
+  <line x1="270" y1="131" x2="328" y2="64" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="495" y1="94" x2="495" y2="102" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="495" y1="164" x2="495" y2="172" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="20" y="252" font-size="13">unwinder가 찍는 Call trace</text>
+  <rect x="20" y="262" width="300" height="30" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="30" y="282" font-size="12">1. m3_get_irq+0xc (P) ← pc에서</text>
+  <rect x="20" y="296" width="300" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="316" font-size="12">2. param_attr_store+0x80 ← x29 record</text>
+  <rect x="20" y="330" width="300" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="350" font-size="12">3. module_attr_store+0x2c ← 다음 record</text>
+  <rect x="350" y="262" width="310" height="98" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="360" y="286" font-size="12">빠진 줄: m3_trigger+0x1fc</text>
+  <text x="360" y="310" font-size="12">leaf가 x30을 스택에 안 저장했으므로</text>
+  <text x="360" y="334" font-size="12">이 값은 lr 줄에만 있다</text>
+  <text x="360" y="354" font-size="12">→ 항상 pc · lr · Call trace를 같이 읽는다</text>
+  <text x="20" y="390" font-size="12">비교: uaf의 m3_uaf는 kfree를 불러 frame을 만든다 → m3_trigger가 Call trace에 나온다</text>
+</svg></figure>
+<p>그림 4 — frame record 체인과 leaf 함수 맹점. 첫 줄은 pc, 둘째 줄부터는 x29 체인에서 온다. leaf 함수에서 죽으면 바로 위 호출자는 <code>lr</code>에만 남는다.</p>
+<p><code>bugon</code>도 같다. <code>m3_check.constprop.0.isra.0</code>이 leaf라서 Call trace는 <code>m3_check...</code> 다음 바로 <code>param_attr_store</code>로 넘어가고, <code>m3_trigger+0x8c</code>는 <code>lr</code>에만 있다. 반대로 <code>uaf</code>의 <code>m3_uaf</code>는 <code>kmalloc</code>·<code>kfree</code>를 부르는 non-leaf라서 Call trace에 <code>m3_trigger+0x174/0x210</code>가 제대로 나온다.</p>
+<h3 id="4-3-맹점-2-lr은-마지막-bl의-복귀-주소-일-뿐이다">4.3 맹점 2 — lr은 "마지막 bl의 복귀 주소"일 뿐이다<a class="anchor" href="#4-3-맹점-2-lr은-마지막-bl의-복귀-주소-일-뿐이다" aria-label="link">#</a></h3>
+<p><code>uaf</code> Oops의 머리 부분이다.</p>
+<figure class="code"><span class="lang">text</span><pre><code> pc : m3_uaf+0x48/0x80 [m3_bugs]
+ lr : m3_uaf+0x44/0x80 [m3_bugs]</code></pre></figure>
+<p><code>lr</code>이 같은 함수 안, pc 바로 앞을 가리킨다. "자기가 자기를 불렀나?"가 아니다. <code>objdump</code>로 보면(§6.4) <code>m3_uaf+0x40</code>(파일 오프셋 0x168)이 <code>bl kfree</code>이고, 0x44가 그 복귀 지점이다. 즉 <strong>lr = "이 함수가 마지막으로 부른 함수(kfree)에서 돌아온 자리"</strong>다. 이것만으로 "죽기 직전에 <code>kfree</code>를 불렀다"는 강력한 단서가 된다 — use-after-free다.</p>
+<p><code>warnf</code>에서는 <code>pc</code>와 <code>lr</code>이 똑같이 <code>m3_trigger+0xb8</code>였다. <code>WARN(1, fmt, ...)</code>이 메시지를 먼저 <code>__warn_printk()</code>로 찍고(<code>bl</code>), 그 복귀 지점에 바로 <code>brk</code> 명령이 있기 때문이다. lr은 호출자 정보가 아니라 <strong>x30 레지스터의 현재 값</strong>이라는 것을 기억한다.</p>
+<h3 id="4-4-맹점-3-인라인과-constprop-isra">4.4 맹점 3 — 인라인과 <code>.constprop</code>/<code>.isra</code><a class="anchor" href="#4-4-맹점-3-인라인과-constprop-isra" aria-label="link">#</a></h3>
+<ul><li><code>m3_get_irq.constprop.0</code>: GCC가 "이 함수는 항상 같은 상수 인자로 불린다"는 걸 알고 그 상수를 박은 복제본을 만들었다. 원래 함수 이름 뒤에 <code>.constprop.N</code>이 붙는다.</li><li><code>m3_check.constprop.0.isra.0</code>: 거기에 더해 IPA-SRA(인자를 구조체 포인터 대신 필요한 필드 값만 넘기도록 바꿈)까지 했다.</li><li>조회 함수 <code>m3_lookup</code>은 아예 <strong>인라인돼서 사라졌다</strong>. 기계어에 <code>mov x0, #0x0</code>(조회 결과 NULL을 상수로 박음)만 남았다. Call trace에는 인라인된 함수가 나오지 않는다 — <code>faddr2line</code>의 <code>(inlined by)</code> 체인으로만 보인다(§6.2).</li><li><code>bugon</code>의 <code>m3_check</code>는 컴파일러가 "magic은 항상 틀린 값"임을 증명해서 비교를 없애고 <strong>무조건 <code>brk #0x800</code></strong> 한 줄로 만들어 버렸다(§6.4 objdump). 그래서 <code>pc</code>가 함수 시작 +0x8이다.</li></ul>
+<p>이 접미사들은 "다른 함수"가 아니라 같은 소스 함수의 최적화 버전이다. <code>faddr2line</code>·<code>gdb</code>에는 접미사까지 포함한 이름 그대로 넣는다.</p>
+<hr>
+<h2 id="5-code-줄-죽은-명령어를-직접-보기">5. <code>Code:</code> 줄 — 죽은 명령어를 직접 보기<a class="anchor" href="#5-code-줄-죽은-명령어를-직접-보기" aria-label="link">#</a></h2>
+<p><code>Code:</code>에는 pc 앞 4개 명령과 pc의 명령, 총 5워드(리틀엔디언 32비트 값)가 찍히고 <strong>괄호 안이 예외를 낸 명령</strong>이다. 커널 트리의 <code>scripts/decodecode</code>가 이를 역어셈블한다(크로스 환경이면 <code>ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-</code>, 이 VM은 네이티브 arm64라 <code>ARCH</code>만).</p>
+<h3 id="5-1-예제-null-dbldel-misalign-list-bugon의-code-해독">5.1 예제 — null·dbldel·misalign·list·bugon의 Code: 해독<a class="anchor" href="#5-1-예제-null-dbldel-misalign-list-bugon의-code-해독" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>S=/var/lab/src/linux-6.18.55/scripts
+grep "Code:" oops/null.txt | ARCH=arm64 $S/decodecode
+for t in dbldel misalign list bugon; do
+  grep "Code:" oops/$t.txt | ARCH=arm64 $S/decodecode | sed -n "/All code/,/trapping/p"
+done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[ 59.096093][ T80] Code: ffffcd3f aa1e03e9 d503201f d2800000 (b9401000)
+All code
+========
+   0:	ffffcd3f 	.inst	0xffffcd3f ; undefined
+   4:	aa1e03e9 	mov	x9, x30
+   8:	d503201f 	nop
+   c:	d2800000 	mov	x0, #0x0                   	// #0
+  10:*	b9401000 	ldr	w0, [x0, #16]		&lt;-- trapping instruction
+
+Code starting with the faulting instruction
+===========================================
+   0:	b9401000 	ldr	w0, [x0, #16]
+All code
+========
+   0:	d2802001 	mov	x1, #0x100                 	// #256
+   4:	f2fbd5a1 	movk	x1, #0xdead, lsl #48
+   8:	f9000443 	str	x3, [x2, #8]
+   c:	91008822 	add	x2, x1, #0x22
+  10:*	f9000422 	str	x2, [x1, #8]		&lt;-- trapping instruction
+All code
+========
+   0:	d0000001 	adrp	x1, 0x2000
+   4:	91022021 	add	x1, x1, #0x88
+   8:	91000421 	add	x1, x1, #0x1
+   c:	f9800031 	prfm	pstl1strm, [x1]
+  10:*	885f7c20 	ldxr	w0, [x1]		&lt;-- trapping instruction
+All code
+========
+   0:	91000400 	add	x0, x0, #0x1
+   4:	eb0600bf 	cmp	x5, x6
+   8:	540005a0 	b.eq	0xbc  // b.none
+   c:	aa0503e4 	mov	x4, x5
+  10:*	38646845 	ldrb	w5, [x2, x4]		&lt;-- trapping instruction
+All code
+========
+   0:	541d0b18 	bc.hi	0x3a160  // bc.pmore
+   4:	ffffc8db 	.inst	0xffffc8db ; undefined
+   8:	aa1e03e9 	mov	x9, x30
+   c:	d503201f 	nop
+  10:*	d4210000 	brk	#0x800		&lt;-- trapping instruction</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>null</strong>: <code>mov x0, #0</code> 다음 <code>ldr w0, [x0, #16]</code> — 0 + 16에서 32비트를 읽는다. 소스가 없어도 "NULL 포인터의 오프셋 0x10, 4바이트 멤버"까지 읽힌다. 이 오프셋을 구조체 멤버 이름으로 바꾸는 것은 §6.5의 <code>pahole</code>이다.</li><li><strong>dbldel</strong>: <code>x1 = 0xdead000000000100</code>을 만들고 <code>[x1 + 8]</code>에 <strong>쓴다</strong>(<code>str</code>). <code>0xdead000000000100</code>은 <code>LIST_POISON1</code>, x2 = x1 + 0x22 = <code>LIST_POISON2</code>(<code>dead000000000122</code>)다. <code>list_del()</code>이 끝난 노드의 <code>next</code>/<code>prev</code>에 박아 두는 독 값이다 — "이미 지운 노드를 또 지웠다"(§9.3).</li><li><strong>misalign</strong>: 주소에 <code>+1</code>을 더한 뒤 <code>ldxr</code>(load-exclusive) — exclusive 접근은 자연 정렬이 필수다(§9.5).</li><li><strong>list</strong>: <code>ldrb w5, [x2, x4]</code> — 바이트 단위 문자열 읽기. <code>printk</code>의 <code>%s</code> 처리기다(§9.4).</li><li><strong>bugon</strong>: <code>brk #0x800</code> — <code>BUG()</code>는 일부러 넣은 브레이크포인트 명령이다. ESR의 <code>f2000800</code>과 같은 숫자다.</li></ul>
+<p>null과 bugon에 보이는 <code>.inst 0xffffc8db</code>, <code>mov x9, x30</code>, <code>nop</code>은 <strong>ftrace의 흔적</strong>이다. 커널은 모든 함수 앞에 <code>nop</code> 두 개(patchable function entry)를 넣어 두고, 부팅 때 첫 nop을 <code>mov x9, x30</code>으로 바꿔 ftrace가 언제든 훅을 걸 수 있게 한다. 함수 바로 앞 8바이트에는 ftrace ops 포인터(커널 주소의 상위 32비트 <code>ffffcd3f</code>가 보인다)가 들어간다. 그래서 <code>Code:</code> 바이트는 <strong>디스크의 <code>.ko</code>와 다를 수 있다</strong> — 실행 중 패치된 내용이 찍히기 때문이다. <code>.ko</code>의 objdump에는 같은 자리가 <code>nop nop</code>이다(M5 ftrace).</p>
+<hr>
+<h2 id="6-해독-도구-상자-어떤-도구를-언제-쓰고-언제-틀리나">6. 해독 도구 상자 — 어떤 도구를 언제 쓰고, 언제 틀리나<a class="anchor" href="#6-해독-도구-상자-어떤-도구를-언제-쓰고-언제-틀리나" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <text x="20" y="22" font-size="13">입력</text>
+  <rect x="20" y="34" width="170" height="40" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="105" y="58" text-anchor="middle" font-size="12">Oops 텍스트</text>
+  <rect x="20" y="84" width="170" height="40" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="105" y="108" text-anchor="middle" font-size="12">vmlinux (같은 빌드)</text>
+  <rect x="20" y="134" width="170" height="40" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="105" y="158" text-anchor="middle" font-size="12">모듈 .ko (디버그 정보)</text>
+  <rect x="20" y="184" width="170" height="40" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="105" y="208" text-anchor="middle" font-size="12">소스 트리 · System.map</text>
+  <text x="250" y="22" font-size="13">도구</text>
+  <rect x="250" y="34" width="190" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="345" y="56" text-anchor="middle" font-size="12">decode_stacktrace.sh</text>
+  <rect x="250" y="74" width="190" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="345" y="96" text-anchor="middle" font-size="12">faddr2line</text>
+  <rect x="250" y="114" width="190" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="345" y="136" text-anchor="middle" font-size="12">addr2line -j 섹션</text>
+  <rect x="250" y="154" width="190" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="345" y="176" text-anchor="middle" font-size="12">gdb list / info line</text>
+  <rect x="250" y="194" width="190" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="345" y="216" text-anchor="middle" font-size="12">decodecode · objdump -dr</text>
+  <rect x="250" y="234" width="190" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="345" y="256" text-anchor="middle" font-size="12">pahole -C 구조체</text>
+  <text x="500" y="22" font-size="13">출력</text>
+  <rect x="500" y="34" width="160" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="580" y="56" text-anchor="middle" font-size="12">로그 전체에 파일:줄</text>
+  <rect x="500" y="74" width="160" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="580" y="96" text-anchor="middle" font-size="12">줄 + inlined 체인</text>
+  <rect x="500" y="114" width="160" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="580" y="136" text-anchor="middle" font-size="12">섹션 오프셋 → 줄</text>
+  <rect x="500" y="154" width="160" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="580" y="176" text-anchor="middle" font-size="12">줄 + 주변 소스</text>
+  <rect x="500" y="194" width="160" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="580" y="216" text-anchor="middle" font-size="12">죽은 명령어</text>
+  <rect x="500" y="234" width="160" height="34" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="580" y="256" text-anchor="middle" font-size="12">오프셋 → 멤버 이름</text>
+  <line x1="190" y1="54" x2="248" y2="51" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="190" y1="104" x2="248" y2="91" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="190" y1="154" x2="248" y2="131" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="190" y1="154" x2="248" y2="251" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="190" y1="204" x2="248" y2="171" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="190" y1="54" x2="248" y2="211" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="440" y1="51" x2="498" y2="51" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="440" y1="91" x2="498" y2="91" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="440" y1="131" x2="498" y2="131" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="440" y1="171" x2="498" y2="171" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="440" y1="211" x2="498" y2="211" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="440" y1="251" x2="498" y2="251" stroke="currentColor" marker-end="url(#ah5)"/>
+  <rect x="20" y="296" width="640" height="94" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="30" y="320" font-size="12">전제: vmlinux·.ko가 Oops를 낸 바로 그 빌드 (build-id 일치). 다르면 줄이 조용히 틀린다</text>
+  <text x="30" y="344" font-size="12">함정: 함수가 .text 밖(.text.unlikely 등)에 있으면 decode_stacktrace.sh가 틀린 줄</text>
+  <text x="30" y="368" font-size="12">교차 확인: 같은 주소를 도구 두 개로 풀어서 답이 같을 때만 믿는다 (§6.3)</text>
+</svg></figure>
+<p>그림 5 — 해독 파이프라인. 입력 네 가지(로그·vmlinux·.ko·소스)가 다 있어야 하고, 도구마다 받는 주소 형식이 다르다.</p>
+<div class="tw"><table><thead><tr><th>도구</th><th>입력</th><th>장점</th><th>실패하는 경우</th></tr></thead><tbody><tr><td><code>scripts/decode_stacktrace.sh vmlinux 소스 모듈디렉터리 &lt; oops.txt</code></td><td>Oops 로그 전체</td><td>한 번에 모든 줄을 파일:줄로, <code>Code:</code>도 자동 해독</td><td>함수가 <code>.text</code> 밖 섹션에 있으면 <strong>틀린 줄</strong>(§6.3). 큰 vmlinux에서 느림(이번 실측 2분 24초, 공유 VM 부하 상태)</td></tr><tr><td><code>scripts/faddr2line 파일 심볼+off/size</code></td><td><code>pc</code>·Call trace 한 줄</td><td>섹션을 제대로 찾음, <code>(inlined by)</code> 체인</td><td><code>/size</code>가 실제 함수 크기와 다르면 거부(§6.2) — 그땐 <code>/size</code>를 떼고 다시</td></tr><tr><td><code>addr2line -fi -e 파일 [-j 섹션] 주소</code></td><td>섹션 기준 오프셋 또는 nokaslr 절대 주소</td><td>가장 기본, 어디서나 있음</td><td>섹션을 잘못 주면 다른 함수가 나옴</td></tr><tr><td><code>gdb 파일 -ex 'list *(심볼+off)'</code></td><td>심볼+오프셋</td><td>주변 소스까지 보여 줌, <code>info line</code></td><td>모듈을 커널 주소로 보려면 <code>add-symbol-file</code>에 섹션 주소를 다 줘야 함</td></tr><tr><td><code>scripts/decodecode</code></td><td><code>Code:</code> 줄</td><td>소스·심볼 없이도 동작</td><td>ftrace 패치 등으로 바이트가 디스크와 다를 수 있음</td></tr><tr><td><code>objdump -dr</code>(+<code>-S</code>, <code>-l</code>)</td><td><code>.ko</code>/vmlinux</td><td>함수 전체 기계어, 재배치 정보</td><td><code>.ko</code>는 재배치 전이라 <code>bl</code> 대상이 엉뚱하게 표시됨(§6.4) — 반드시 <code>-r</code></td></tr><tr><td><code>pahole -C 구조체 파일</code></td><td>구조체 이름</td><td>오프셋 → 멤버 이름</td><td>BTF/DWARF 없는 빌드에선 불가</td></tr></tbody></table></div>
+<h3 id="6-1-예제-decode_stacktrace-sh로-로그-전체-풀기-그리고-틀린-답">6.1 예제 — <code>decode_stacktrace.sh</code>로 로그 전체 풀기 (그리고 틀린 답)<a class="anchor" href="#6-1-예제-decode_stacktrace-sh로-로그-전체-풀기-그리고-틀린-답" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/M3
+S=/var/lab/src/linux-6.18.55/scripts; V=/var/lab/out/vmlinux-trace
+time $S/decode_stacktrace.sh $V /var/lab/src/linux-6.18.55 /var/tmp/M3/m3_bugs/trace \
+     &lt; oops/null.txt 2&gt;&amp;1 | sed -n "/pc :/,\$p" | grep -v " x[0-9]"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[   59.066671][   T80] pc : m3_get_irq.constprop.0 (/var/tmp/M3/m3_bugs/m3_bugs.c:20) m3_bugs
+[   59.071073][   T80] lr : m3_trigger (/var/tmp/M3/m3_bugs/m3_bugs.c:90 (discriminator 1)) m3_bugs
+[   59.071322][   T80] sp : ffff8000804fbc50
+[   59.085301][   T80] Call trace:
+[   59.086040][   T80] m3_get_irq.constprop.0 (/var/tmp/M3/m3_bugs/m3_bugs.c:20) m3_bugs (P)
+[   59.088443][   T80]  param_attr_store (kernel/params.c:591)
+[   59.088637][   T80]  module_attr_store (kernel/params.c:909)
+[   59.088919][   T80]  sysfs_kf_write (fs/sysfs/file.c:147)
+[   59.089174][   T80]  kernfs_fop_write_iter (fs/kernfs/file.c:352)
+[   59.089381][   T80]  vfs_write (fs/read_write.c:593 fs/read_write.c:686)
+[   59.089562][   T80]  ksys_write (fs/read_write.c:738)
+[   59.089728][   T80]  __arm64_sys_write (fs/read_write.c:746)
+...  (invoke_syscall ~ el0t_64_sync 생략)
+[   59.096093][   T80] Code: ffffcd3f aa1e03e9 d503201f d2800000 (b9401000)
+All code
+========
+   0:	ffffcd3f 	.inst	0xffffcd3f ; undefined
+   4:	aa1e03e9 	mov	x9, x30
+   8:	d503201f 	nop
+   c:	d2800000 	mov	x0, #0x0                   	// #0
+  10:*	b9401000 	ldr	w0, [x0, #16]		&lt;-- trapping instruction
+...
+real	2m24.213s</code></pre></figure>
+<p>출력에서 볼 것: 커널 쪽 줄은 전부 맞다(<code>vfs_write (fs/read_write.c:593 fs/read_write.c:686)</code>처럼 인라인 체인도 공백으로 이어 붙여 준다). 그런데 <strong>pc 줄의 <code>m3_bugs.c:20</code>은 틀렸다</strong>. 20번 줄은 <code>m3_get_irq</code>가 아니라 다른 작은 함수 <code>m3_start</code>의 줄이다. 함수 이름은 맞게 찍고 줄 번호만 틀리니 알아채기 어렵다.</p>
+<h3 id="6-2-예제-faddr2line-크기-불일치-경고와-인라인-체인">6.2 예제 — <code>faddr2line</code>: 크기 불일치 경고와 인라인 체인<a class="anchor" href="#6-2-예제-faddr2line-크기-불일치-경고와-인라인-체인" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>K=m3_bugs/trace/m3_bugs.ko
+$S/faddr2line $K m3_get_irq.constprop.0+0xc/0xa10 m3_get_irq.constprop.0+0xc \
+  m3_uaf+0x48/0x80 m3_double_del+0x54/0x80 m3_misalign+0x38/0x60 \
+  m3_list_bug+0xcc/0xe8 m3_trigger+0x1fc/0x210</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>skipping m3_get_irq.constprop.0 address at 0x14 due to size mismatch (0xa10 != 0x14)
+no match for m3_get_irq.constprop.0+0xc/0xa10
+m3_get_irq.constprop.0+0xc/0x14:
+m3_get_irq at /var/tmp/M3/m3_bugs/m3_bugs.c:34 (discriminator 1)
+
+m3_uaf+0x48/0x80:
+m3_uaf at /var/tmp/M3/m3_bugs/m3_bugs.c:43
+
+m3_double_del+0x54/0x80:
+__list_del at /var/lab/src/linux-6.18.55/include/linux/list.h:210
+(inlined by) __list_del_entry at /var/lab/src/linux-6.18.55/include/linux/list.h:233
+(inlined by) list_del at /var/lab/src/linux-6.18.55/include/linux/list.h:244
+(inlined by) m3_double_del at /var/tmp/M3/m3_bugs/m3_bugs.c:77
+
+m3_misalign+0x38/0x60:
+__ll_sc_atomic_add_return at /var/lab/src/linux-6.18.55/arch/arm64/include/asm/atomic_ll_sc.h:95 (discriminator 2)
+(inlined by) arch_atomic_add_return at /var/lab/src/linux-6.18.55/arch/arm64/include/asm/atomic.h:52 (discriminator 2)
+(inlined by) raw_atomic_add_return at /var/lab/src/linux-6.18.55/include/linux/atomic/atomic-arch-fallback.h:564 (discriminator 2)
+(inlined by) raw_atomic_inc_return at /var/lab/src/linux-6.18.55/include/linux/atomic/atomic-arch-fallback.h:1020 (discriminator 2)
+(inlined by) atomic_inc_return at /var/lab/src/linux-6.18.55/include/linux/atomic/atomic-instrumented.h:454 (discriminator 2)
+(inlined by) m3_misalign at /var/tmp/M3/m3_bugs/m3_bugs.c:83 (discriminator 2)
+
+m3_list_bug+0xcc/0xe8:
+m3_list_bug at /var/tmp/M3/m3_bugs/m3_bugs.c:67 (discriminator 4)
+
+m3_trigger+0x1fc/0x210:
+m3_trigger at /var/tmp/M3/m3_bugs/m3_bugs.c:90 (discriminator 1)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>크기 불일치</strong>: Oops는 <code>m3_get_irq.constprop.0</code>의 크기를 <code>0xa10</code>이라고 찍었지만 ELF 심볼표의 실제 크기는 <code>0x14</code>(20바이트, 명령 5개)다. 커널의 kallsyms는 모듈 심볼의 크기를 따로 저장하지 않고 "다음 심볼까지의 거리"로 계산하는데, 이 함수는 모듈 텍스트 영역의 <strong>마지막 심볼</strong>이라 "다음 심볼"이 없고, 기본값인 텍스트 영역 끝까지가 크기로 잡혔다(<code>0x...55f0 + 0xa10 = 0x...6000</code>, 4 KiB 페이지 경계와 맞아떨어진다). <code>faddr2line</code>은 크기가 다르면 "다른 빌드일 수 있다"며 거부한다. <code>/size</code>를 떼면 바로 풀린다. 별도 모듈의 lockup 실험에서도 <code>m3_lock_init+0x30/0xfb0</code>처럼 같은 현상이 보였다.</li><li><strong>정답은 34번 줄</strong>(<code>return d-&gt;irq</code>에 해당하는 줄, <code>discriminator 1</code>은 같은 줄 안의 두 번째 기본 블록이라는 DWARF 표시). §6.1의 20번 줄은 틀렸다.</li><li><strong>inlined by 체인</strong>: <code>m3_double_del+0x54</code>의 실제 명령은 <code>include/linux/list.h:210</code>의 <code>__list_del()</code> 안에 있다. 모듈 77번 줄의 <code>list_del()</code> 호출이 세 단계 인라인으로 펼쳐진 것이다. Call trace에는 <code>m3_double_del</code> 하나만 보이지만 faddr2line은 "커널 헤더의 이 줄에서, 내 코드의 이 줄을 거쳐" 죽었다고 알려 준다. <code>misalign</code>은 여섯 단계 — atomic API가 LL/SC 구현까지 인라인된 끝에 <code>ldxr</code>이 있다.</li><li><code>m3_trigger+0x1fc</code>(lr) → 90번 줄: <code>m3_get_irq</code>를 부른 줄이다. §4.2에서 Call trace에 빠졌던 호출자를 여기서 찾는다.</li></ul>
+<h3 id="6-3-왜-decode_stacktrace-sh가-틀렸나-text-unlikely">6.3 왜 <code>decode_stacktrace.sh</code>가 틀렸나 — <code>.text.unlikely</code><a class="anchor" href="#6-3-왜-decode_stacktrace-sh가-틀렸나-text-unlikely" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>readelf -sW m3_bugs.ko | grep -E "m3_(get_irq|uaf|trigger|start|check|double|misalign|list)"
+readelf -SW m3_bugs.ko | grep -E " \.text( |\.unlikely)"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>    40: 0000000000000008    16 FUNC    LOCAL  DEFAULT   12 m3_start
+    44: 00000000000000c8    80 FUNC    LOCAL  DEFAULT   12 m3_misalign
+    52: 0000000000000128   108 FUNC    LOCAL  DEFAULT   12 m3_uaf
+    55: 0000000000000008    20 FUNC    LOCAL  DEFAULT   21 m3_get_irq.constprop.0
+    57: 00000000000001a8    12 FUNC    LOCAL  DEFAULT   12 m3_check.constprop.0.isra.0
+    60: 00000000000001c8   108 FUNC    LOCAL  DEFAULT   12 m3_double_del
+    62: 0000000000000248   224 FUNC    LOCAL  DEFAULT   12 m3_list_bug
+    64: 0000000000000330   528 FUNC    LOCAL  DEFAULT   12 m3_trigger
+    71: 0000000000000000    16 OBJECT  LOCAL  DEFAULT   14 m3_list
+  [12] .text             PROGBITS        0000000000000000 0000d0 000540 00  AX  0   0 32
+  [21] .text.unlikely    PROGBITS        0000000000000000 0007c0 00001c 00  AX  0   0  8</code></pre></figure>
+<p>출력에서 볼 것: <code>m3_get_irq.constprop.0</code>은 섹션 <strong>21번 <code>.text.unlikely</code></strong>의 오프셋 8에 있고, <code>m3_start</code>는 섹션 <strong>12번 <code>.text</code></strong>의 같은 오프셋 8에 있다. GCC는 "항상 NULL 역참조로 끝나는 함수 = 거의 실행되지 않을 경로"라고 판단해 <code>.text.unlikely</code>(cold 섹션)로 옮겼다. <code>decode_stacktrace.sh</code>는 모듈 심볼 값(8) + 오프셋(0xc) = 0x14를 계산한 뒤 <strong>섹션을 지정하지 않고</strong> addr2line에 넘겼고, addr2line은 <code>.text</code>의 0x14 = <code>m3_start</code> 안의 줄(20)을 돌려줬다. <code>addr2line</code>으로 두 섹션을 직접 비교하면 분명하다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/M3/m3_bugs/trace
+addr2line -fi -e m3_bugs.ko -j .text 0x14
+addr2line -fi -e m3_bugs.ko -j .text.unlikely 0x14</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>m3_start
+/var/tmp/M3/m3_bugs/m3_bugs.c:20
+m3_get_irq
+/var/tmp/M3/m3_bugs/m3_bugs.c:34 (discriminator 1)</code></pre></figure>
+<p>교훈: <strong>모듈의 줄 번호는 섹션을 알아야 정확하다</strong>. 이상한 줄이 나오면 <code>readelf -s</code>로 그 함수가 어느 섹션(<code>Ndx</code> 열)에 있는지부터 본다. 커널 쪽에서도 <code>__init</code> 함수(<code>.init.text</code>), cold 경로(<code>.text.unlikely</code>), <code>noinstr</code> 함수(<code>.noinstr.text</code>)가 같은 함정을 만든다. <code>faddr2line</code>은 심볼표에서 섹션까지 찾아 쓰기 때문에 맞았다.</p>
+<h3 id="6-4-예제-objdump-dr과-gdb로-죽은-명령과-줄을-확인">6.4 예제 — <code>objdump -dr</code>과 gdb로 죽은 명령과 줄을 확인<a class="anchor" href="#6-4-예제-objdump-dr과-gdb로-죽은-명령과-줄을-확인" aria-label="link">#</a></h3>
+<p><code>uaf</code>의 pc <code>m3_uaf+0x48</code>을 기계어로 확인한다. <code>m3_uaf</code>는 <code>.text</code> 0x128에서 시작하므로 pc는 0x128 + 0x48 = 0x170이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>objdump -d --no-show-raw-insn m3_bugs.ko | sed -n "/&lt;m3_uaf&gt;:/,/^\$/p"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0000000000000128 &lt;m3_uaf&gt;:
+ 128:	nop
+ 12c:	nop
+ 130:	paciasp
+ 134:	adrp	x0, 0 &lt;kmalloc_caches&gt;
+ 138:	stp	x29, x30, [sp, #-32]!
+ 13c:	mov	x2, #0x30                  	// #48
+ 140:	mov	x29, sp
+ 144:	mov	w1, #0xcc0                 	// #3264
+ 148:	ldr	x0, [x0]
+ 14c:	bl	0 &lt;__kmalloc_cache_noprof&gt;
+ 150:	cbz	x0, 18c &lt;m3_uaf+0x64&gt;
+ 154:	adrp	x1, 0 &lt;m3_start-0x8&gt;
+ 158:	add	x1, x1, #0x0
+ 15c:	str	x19, [sp, #16]
+ 160:	mov	x19, x0
+ 164:	str	x1, [x0, #24]
+ 168:	bl	0 &lt;kfree&gt;
+ 16c:	ldr	x0, [x19, #24]
+ 170:	ldr	x1, [x0]
+ 174:	mov	x0, x19
+ 178:	blr	x1
+ 17c:	ldr	x19, [sp, #16]
+ 180:	ldp	x29, x30, [sp], #32
+ 184:	autiasp
+ 188:	ret
+...</code></pre></figure>
+<p>출력에서 볼 것: 0x168 <code>bl kfree</code> → 0x16c <code>ldr x0, [x19, #24]</code>(해제된 객체의 오프셋 24 = 함수 포인터 테이블 포인터를 읽음, 이 읽기는 성공 — 메모리는 아직 매핑돼 있고 내용이 <code>6b</code>로 칠해져 있다) → <strong>0x170 <code>ldr x1, [x0]</code></strong>(그 쓰레기 포인터 <code>6b6b…</code>를 따라감 → fault). <code>lr = m3_uaf+0x44</code> = 0x16c = kfree의 복귀 지점, <code>x0 = 6b6b6b6b6b6b6b6b</code>가 레지스터 덤프와 정확히 맞는다. <code>paciasp</code>/<code>autiasp</code>는 포인터 인증(PAC, <code>CONFIG_ARM64_PTR_AUTH_KERNEL=y</code>)으로 복귀 주소에 서명하는 명령이다. <code>kmalloc</code> 크기 <code>0x30</code>(48)과 GFP 값 <code>0xcc0</code>(<code>GFP_KERNEL</code>)도 기계어에 그대로 보인다.</p>
+<p><code>.ko</code>를 objdump할 때 <strong>반드시 <code>-r</code>을 붙여야 하는 이유</strong>는 <code>null</code>의 호출 지점에서 보인다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>objdump -dr --no-show-raw-insn m3_bugs.ko | sed -n "/&lt;m3_trigger&gt;:/,/^\$/p" | grep -A4 " 528:"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code> 528:	bl	8 &lt;m3_start&gt;
+			528: R_AARCH64_CALL26	m3_get_irq.constprop.0
+ 52c:	mov	w1, w0
+ 530:	adrp	x0, 0 &lt;m3_start-0x8&gt;
+			530: R_AARCH64_ADR_PREL_PG_HI21	.rodata.str1.8+0x38</code></pre></figure>
+<p><code>.ko</code>는 링크 전 오브젝트라서 <code>bl</code>의 목적지가 아직 채워지지 않았고, objdump는 같은 섹션의 오프셋 8 = <code>m3_start</code>라고 <strong>잘못 표시</strong>한다. 재배치 항목(<code>R_AARCH64_CALL26 m3_get_irq.constprop.0</code>)이 진짜 목적지다. §6.3과 똑같은 섹션 혼동이다. 그리고 <code>m3_trigger</code> 시작 0x330 + 0x1fc = <strong>0x52c</strong> — Oops의 <code>lr</code>이 바로 이 <code>bl</code> 다음 명령이다.</p>
+<p><code>.text.unlikely</code>의 <code>m3_get_irq</code>를 줄 정보와 함께 보면 34번 줄이 다시 확인된다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>objdump -dl m3_bugs.ko -j .text.unlikely      # 앞부분(파일 머리, -0x8 슬롯) 생략</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0000000000000008 &lt;m3_get_irq.constprop.0&gt;:
+m3_get_irq():
+/var/tmp/M3/m3_bugs/m3_bugs.c:31
+   8:	d503201f 	nop
+   c:	d503201f 	nop
+/var/tmp/M3/m3_bugs/m3_bugs.c:34
+  10:	d2800000 	mov	x0, #0x0                   	// #0
+/var/tmp/M3/m3_bugs/m3_bugs.c:34 (discriminator 1)
+  14:	b9401000 	ldr	w0, [x0, #16]
+/var/tmp/M3/m3_bugs/m3_bugs.c:35
+  18:	d65f03c0 	ret</code></pre></figure>
+<p>gdb는 <code>.ko</code>를 직접 열어 <code>list *(심볼+오프셋)</code>으로 줄과 주변 소스를 보여 준다(소스 10줄 출력은 이 노트에서 생략).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>gdb -q -batch -ex "list *(m3_uaf+0x48)" -ex "info line *(m3_uaf+0x48)" m3_bugs.ko</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0x170 is in m3_uaf (m3_bugs.c:43).
+...  (소스 38~47번 줄 생략)
+Line 43 of "m3_bugs.c" starts at address 0x170 &lt;m3_uaf+72&gt; and ends at 0x180 &lt;m3_uaf+88&gt;.</code></pre></figure>
+<p>vmlinux 쪽 주소도 같은 방식이다. Call trace의 <code>vfs_write+0x248</code>을 넣으면 인라인된 <code>new_sync_write</code>의 줄이 나온다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>gdb -q -batch -ex "list *(vfs_write+0x248)" /var/lab/out/vmlinux-trace | head -2</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0xffff8000804ad4c0 is in vfs_write (/var/lab/src/linux-6.18.55/fs/read_write.c:593).
+588	</code></pre></figure>
+<p>실행 중인 커널 주소 그대로 gdb에 넣고 싶을 때(예: JTAG·kgdb 세션, M4)는 모듈 섹션의 <strong>런타임 주소</strong>를 <code>add-symbol-file</code>에 다 알려 줘야 한다. 섹션 주소는 <code>/sys/module/&lt;모듈&gt;/sections/</code>에 있다(root 필요).</p>
+<figure class="code"><span class="lang">sh</span><pre><code># 게스트에서 미리 읽어 둔 값: .text 0xffffd7be87ff50a0, .text.unlikely 0xffffd7be87ff55e8
+gdb -q -batch -ex "add-symbol-file m3_bugs.ko 0xffffd7be87ff50a0 -s .text.unlikely 0xffffd7be87ff55e8" \
+    -ex "info symbol 0xffffd7be87ff55fc" /var/lab/out/vmlinux-trace</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>add symbol table from file "m3_bugs.ko" at
+	.text_addr = 0xffffd7be87ff50a0
+	.text.unlikely_addr = 0xffffd7be87ff55e8
+m3_get_irq.constprop + 12 in section .text.unlikely of /var/tmp/M3/m3_bugs/trace/m3_bugs.ko</code></pre></figure>
+<p>출력에서 볼 것: 런타임 pc <code>0xffffd7be87ff55fc</code>(= <code>.text.unlikely</code> 시작 + 0x14)를 넣으니 <code>m3_get_irq.constprop + 12</code>(0xc)가 나왔다 — Oops의 <code>+0xc</code>와 같다. <code>.text.unlikely</code> 주소를 빼먹고 <code>.text</code>만 주면 gdb도 §6.3과 똑같이 틀린다.</p>
+<h3 id="6-5-예제-pahole-오프셋을-멤버-이름으로">6.5 예제 — <code>pahole</code>: 오프셋을 멤버 이름으로<a class="anchor" href="#6-5-예제-pahole-오프셋을-멤버-이름으로" aria-label="link">#</a></h3>
+<p>NULL + 0x10에서 4바이트를 읽었다(<code>ldr w0, [x0, #16]</code>). 무슨 멤버인가?</p>
+<figure class="code"><span class="lang">sh</span><pre><code>pahole -C m3_dev m3_bugs.ko; pahole -C m3_ent m3_bugs.ko</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>struct m3_dev {
+	char                       name[16];             /*     0    16 */
+	u32                        irq;                  /*    16     4 */
+	u32                        magic;                /*    20     4 */
+	const struct m3_ops  *     ops;                  /*    24     8 */
+	struct list_head           node;                 /*    32    16 */
+
+	/* size: 48, cachelines: 1, members: 5 */
+	/* last cacheline: 48 bytes */
+};
+
+struct m3_ent {
+	char                       tag[8];               /*     0     8 */
+	struct list_head           node;                 /*     8    16 */
+
+	/* size: 24, cachelines: 1, members: 2 */
+	/* last cacheline: 24 bytes */
+};</code></pre></figure>
+<p>출력에서 볼 것: 오프셋 16, 크기 4 = <code>irq</code>. <code>uaf</code>의 <code>[x0, #24]</code> = <code>ops</code>(함수 포인터 테이블), <code>size: 48</code> = objdump의 <code>mov x2, #0x30</code>. <code>m3_ent</code>의 <code>node</code>가 오프셋 8이라는 것은 §9.4에서 <code>0x...39</code>(= <code>0x...41</code> − 8)를 설명하는 열쇠다. 커널 구조체라면 <code>pahole -C task_struct vmlinux</code>처럼 vmlinux에 대고 같은 일을 한다(BTF가 있으면 디버그 정보 없이도 된다).</p>
+<hr>
+<h2 id="7-kaslr과-system-map-주소를-빌드-결과물과-맞추기">7. KASLR과 System.map — 주소를 빌드 결과물과 맞추기<a class="anchor" href="#7-kaslr과-system-map-주소를-빌드-결과물과-맞추기" aria-label="link">#</a></h2>
+<h3 id="7-1-직관">7.1 직관<a class="anchor" href="#7-1-직관" aria-label="link">#</a></h3>
+<p>Cortex-M의 <code>.map</code> 파일 주소는 플래시에 구운 주소 그대로다. Linux arm64는 <code>CONFIG_RANDOMIZE_BASE=y</code>(KASLR)라서 부팅마다 커널 전체가 무작위 오프셋만큼 옮겨진다. <code>System.map</code>(빌드 때 <code>nm vmlinux</code>로 만든 심볼표)과 <code>vmlinux</code>의 주소는 <strong>오프셋 0 기준</strong>이다. Oops에 심볼 이름이 찍히면(<code>CONFIG_KALLSYMS=y</code>) 신경 쓸 필요가 없지만, 날 주소만 있는 경우(레지스터 값, 메모리 덤프, kallsyms 없는 빌드, JTAG로 읽은 PC)에는 보정이 필요하다.</p>
+<h3 id="7-2-예제-런타임-주소-system-map-주소">7.2 예제 — 런타임 주소 → System.map 주소<a class="anchor" href="#7-2-예제-런타임-주소-system-map-주소" aria-label="link">#</a></h3>
+<p>게스트에서 root로 kallsyms를 읽고(<code>kptr_restrict</code>가 0이라 주소가 보인다 — M1·M2), 호스트의 System.map과 비교했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># 게스트 (runall의 ks 실행)
+cat /proc/sys/kernel/kptr_restrict
+grep -E " (_text|vfs_write)$" /proc/kallsyms
+grep -E "m3_(get_irq|uaf|trigger)" /proc/kallsyms
+for s in .text .text.unlikely .data .bss; do echo "$s $(cat /sys/module/m3_bugs/sections/$s)"; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0
+ffffd7bea5a00000 T _text
+ffffd7bea5ead278 T vfs_write
+ffffd7be87ff51c8 t m3_uaf	[m3_bugs]
+ffffd7be87ff55f0 t m3_get_irq.constprop.0	[m3_bugs]
+ffffd7be87ff53d0 t m3_trigger	[m3_bugs]
+.text 0xffffd7be87ff50a0
+.text.unlikely 0xffffd7be87ff55e8
+.data 0xffffd7be87ff7078
+.bss 0xffffd7be87ff7088</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code># VM 호스트
+grep -E " (vfs_write|_text|_stext|string)$" /var/lab/out/linux-build-trace/System.map
+python3 -c "print(hex(0xffffd7bea5a00000-0xffff800080000000))"
+python3 -c "print(hex(0xffffd7bea5ead278-0x57be25a00000))"
+addr2line -fi -e /var/lab/out/vmlinux-trace 0xffff8000804ad4c0</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>ffff800080000000 T _text
+ffff800080010000 T _stext
+ffff8000804ad278 T vfs_write
+ffff8000816f3d80 t string
+0x57be25a00000
+0xffff8000804ad278
+new_sync_write
+/var/lab/src/linux-6.18.55/fs/read_write.c:593
+vfs_write
+/var/lab/src/linux-6.18.55/fs/read_write.c:686</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>KASLR 오프셋 = 런타임 <code>_text</code> − System.map <code>_text</code></strong> = <code>0x57be25a00000</code>. 이걸 런타임 <code>vfs_write</code>에서 빼면 System.map 값 <code>ffff8000804ad278</code>과 정확히 같다.</li><li><code>0xffff8000804ad4c0</code> = <code>vfs_write</code>(…d278) + 0x248, 즉 Call trace의 <code>vfs_write+0x248</code>을 System.map 기준 절대 주소로 만든 것이다. addr2line은 인라인 체인(<code>new_sync_write</code> → <code>vfs_write</code>)까지 준다. 위 decode_stacktrace의 <code>vfs_write (fs/read_write.c:593 fs/read_write.c:686)</code>와 일치한다.</li><li>모듈은 커널 이미지와 <strong>별도로</strong> 무작위 배치된다(<code>2G module region forced by RANDOMIZE_MODULE_REGION_FULL</code>이 부팅 로그에 있다). 모듈 주소는 KASLR 오프셋으로 못 되돌리고, <strong>섹션 시작 주소를 빼서 섹션 오프셋</strong>으로 만든다: <code>0x...55f0 − 0x...55e8 = 0x8</code>(심볼표 값과 같다), pc는 <code>+0xc</code> → 섹션 오프셋 0x14.</li><li><code>m3_uaf</code>의 런타임 주소 <code>...51c8</code> − <code>.text</code> <code>...50a0</code> = <code>0x128</code> — 심볼표의 <code>m3_uaf</code> 값과 같다.</li></ul>
+<p>panic 메시지에는 커널이 이 오프셋을 직접 찍어 준다. <code>oops=panic</code> 실험의 끝부분이다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] Kernel panic - not syncing: Oops: Fatal exception
+[   T79] SMP: stopping secondary CPUs
+[   T79] Kernel Offset: 0x3354cd000000 from 0xffff800080000000
+[   T79] PHYS_OFFSET: 0x40000000
+[   T79] CPU features: 0x104000,04027800,40004000,0400421b
+[   T79] Memory Limit: none
+[   T79] ---[ end Kernel panic - not syncing: Oops: Fatal exception ]---</code></pre></figure>
+<p><code>Kernel Offset: X from 0xffff800080000000</code>은 "이 부팅에서 <code>_text</code> = 0xffff800080000000 + X"라는 뜻이다. 그 부팅의 런타임 <code>vfs_write</code> = <code>0xffff8000804ad278 + 0x3354cd000000</code> = <code>0xffffb3554d4ad278</code>(직접 계산한 값). 필드에서 받은 panic 로그에 날 주소가 있다면 이 줄로 System.map 기준 주소를 만든다.</p>
+<h3 id="7-3-nokaslr-디버깅할-때는-끄는-것도-방법">7.3 <code>nokaslr</code> — 디버깅할 때는 끄는 것도 방법<a class="anchor" href="#7-3-nokaslr-디버깅할-때는-끄는-것도-방법" aria-label="link">#</a></h3>
+<p><code>nokaslr</code> 부팅 인자로 같은 <code>null</code> 버그를 냈더니:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.000000][    T0] KASLR disabled on command line
+...
+m3_bugs 12288 0 - Live 0xffff80007bfa0000 (OE)
+0xffff80007bfa00a0
+...
+[   T79] pc : m3_get_irq.constprop.0+0xc/0xa10 [m3_bugs]
+[   T79] Code: ffff8000 aa1e03e9 d503201f d2800000 (b9401000) </code></pre></figure>
+<p>출력에서 볼 것: 모듈 주소가 <code>0xffff80007bfa0000</code>처럼 커널 기본 주소(<code>0xffff800080000000</code>) 바로 아래 고정 영역으로 왔다. 커널 이미지도 System.map 주소 그대로 돈다 — 그래서 JTAG·kgdb 세션(M4)이나 반복 재현 실험에서는 <code>nokaslr</code>이 편하다. <code>Code:</code> 첫 워드가 <code>ffff8000</code>으로 바뀐 것도 보인다(§5의 ftrace ops 포인터 상위 32비트가 주소에 따라 달라짐). 양산 이미지에서는 KASLR을 끄지 않는다. 보안 기능이기 때문이다.</p>
+<h3 id="7-4-p-kptr_restrict와-주소-숨김">7.4 <code>%p</code>·<code>kptr_restrict</code>와 주소 숨김<a class="anchor" href="#7-4-p-kptr_restrict와-주소-숨김" aria-label="link">#</a></h3>
+<p>Oops의 레지스터 덤프(<code>x0</code>~<code>x29</code>, <code>sp</code>)는 날 주소를 그대로 찍는다(디버깅용 예외 — <code>pc</code>/<code>lr</code>은 <code>%pS</code>로 심볼+오프셋). 하지만 일반 <code>printk("%p")</code>는 해시값을, <code>/proc/kallsyms</code>는 <code>kptr_restrict</code>가 1 이상이고 CAP_SYSLOG가 없으면 0을 보여 준다(M1 §<code>%p</code> 해싱, M2 <code>/proc/modules</code>). 필드 로그 분석 때 "주소가 다 0이에요"라는 말을 들으면 이것이다. 그래서 <strong>Oops를 심볼 이름과 함께 찍는 <code>CONFIG_KALLSYMS</code></strong>가 양산에서도 중요하다 — 끄면 이미지는 조금 작아지지만 필드 Oops가 날 주소뿐이 된다.</p>
+<hr>
+<h2 id="8-oops-panic-bug-warn-lockup-무엇이-다른가">8. Oops · panic · BUG · WARN · lockup — 무엇이 다른가<a class="anchor" href="#8-oops-panic-bug-warn-lockup-무엇이-다른가" aria-label="link">#</a></h2>
+<h3 id="8-1-한-장-비교">8.1 한 장 비교<a class="anchor" href="#8-1-한-장-비교" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>종류</th><th>첫 줄</th><th>일으키는 것</th><th>그 뒤</th><th>taint</th></tr></thead><tbody><tr><td>Oops (fault)</td><td><code>Unable to handle kernel ...</code> → <code>Internal error: Oops: &lt;ESR&gt; [#N]</code></td><td>MMU abort, alignment, undefined instruction</td><td>현재 태스크 SIGSEGV로 죽음, 커널은 계속</td><td><code>D</code></td></tr><tr><td>Oops (BUG)</td><td><code>kernel BUG at file:line!</code> → <code>Internal error: Oops - BUG: &lt;ESR&gt;</code></td><td><code>BUG()</code>/<code>BUG_ON()</code> = <code>brk #0x800</code></td><td>위와 같다</td><td><code>D</code></td></tr><tr><td>WARN</td><td><code>WARNING: CPU: N PID: P at file:line func+off</code></td><td><code>WARN_ON()</code>/<code>WARN()</code> = 같은 <code>brk</code>, 다른 분기</td><td><strong>다음 명령으로 진행</strong>, 아무도 안 죽음</td><td><code>W</code></td></tr><tr><td>검사기 BUG</td><td><code>BUG: scheduling while atomic</code>, <code>BUG: sleeping function called from invalid context</code></td><td>스케줄러·<code>might_sleep()</code> 검사</td><td>대개 계속 (콜스택만)</td><td><code>W</code></td></tr><tr><td>lockup</td><td><code>watchdog: BUG: soft lockup - CPU#N stuck for Ns!</code></td><td>watchdog 타이머</td><td>계속 (반복 보고)</td><td><code>L</code></td></tr><tr><td>panic</td><td><code>Kernel panic - not syncing: &lt;이유&gt;</code></td><td><code>panic()</code> 직접 호출 또는 정책</td><td>모든 CPU 정지, <code>panic=N</code>이면 N초 뒤 리부트</td><td>—</td></tr></tbody></table></div>
+<p>panic이 "not syncing"이라고 말하는 것은 "디스크 버퍼를 sync하지 않고 멈춘다"는 오래된 표현이다. 이 랩 커널은 <code>CONFIG_PANIC_TIMEOUT=0</code>이라 panic 뒤 영원히 멈춰 있고, QEMU는 <code>timeout</code>에 의해 종료됐다(<code>terminating on signal 15 ... (timeout)</code>).</p>
+<h3 id="8-2-bug_on-그리고-첫-oops-뒤의-커널은-믿을-수-없다">8.2 BUG_ON — 그리고 첫 Oops 뒤의 커널은 믿을 수 없다<a class="anchor" href="#8-2-bug_on-그리고-첫-oops-뒤의-커널은-믿을-수-없다" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] ------------[ cut here ]------------
+[   T79] kernel BUG at m3_bugs.c:47!
+[   T79] Internal error: Oops - BUG: 00000000f2000800 [#1]  SMP
+[   T79] Modules linked in: m3_bugs(OE)
+[   T79] CPU: 0 UID: 0 PID: 79 Comm: sh Tainted: G           OE       6.18.55-trace #1 PREEMPT 
+[   T79] pc : m3_check.constprop.0.isra.0+0x8/0x20 [m3_bugs]
+[   T79] lr : m3_trigger+0x8c/0x210 [m3_bugs]
+[   T79] Call trace:
+[   T79]  m3_check.constprop.0.isra.0+0x8/0x20 [m3_bugs] (P)
+[   T79]  param_attr_store+0x80/0x110
+...
+[   T79] Code: 541d0b18 ffffc8db aa1e03e9 d503201f (d4210000) 
+[   T79] ---[ end trace 0000000000000000 ]---
+[   T79] note: sh[79] exited with irqs disabled
+[   T79] note: sh[79] exited with preempt_count 1
+[    T0] ------------[ cut here ]------------
+[    T0] WARNING: CPU: 0 PID: 0 at kernel/context_tracking.c:127 ct_kernel_exit.constprop.0+0x15c/0x180
+[    T0] CPU: 0 UID: 0 PID: 0 Comm: swapper/0 Tainted: G      D    OE       6.18.55-trace #1 PREEMPT 
+[    T0] Tainted: [D]=DIE, [O]=OOT_MODULE, [E]=UNSIGNED_MODULE
+[    T0] pstate: 200003c5 (nzCv DAIF -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[    T0] Call trace:
+[    T0]  ct_kernel_exit.constprop.0+0x15c/0x180 (P)
+[    T0]  ct_idle_enter+0x10/0x20
+[    T0]  default_idle_call+0x2c/0x148
+[    T0]  do_idle+0x2b0/0x2f0
+...</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>kernel BUG at m3_bugs.c:47!</code> — 파일과 줄이 <strong>로그에 바로 있다</strong>. <code>BUG()</code>는 <code>brk</code> 명령과 함께 <code>__bug_table</code> 섹션에 "이 brk 주소 = 이 파일:줄"을 기록해 두고, 핸들러(<code>report_bug()</code>)가 pc로 표를 찾아 찍는다. 그래서 BUG/WARN은 해독 도구 없이도 줄이 나온다.</li><li>숫자 <code>f2000800</code>은 ESR이다. EC 0x3c(BRK), imm 0x800.</li><li>그 뒤가 중요하다. 태스크가 <strong>IRQ를 끄고 preempt_count 1인 채로</strong> 죽었다(<code>note: ... exited with ...</code>). 그 상태가 idle 태스크(<code>swapper/0</code>, PID 0)까지 번져 context tracking 검사기가 WARN을 쳤다. 이 WARN은 <code>m3_bugs</code>와 아무 관계 없는 <code>kernel/context_tracking.c</code>를 가리킨다. 그리고 taint에 <strong><code>D</code>(DIE)</strong>가 붙어 있다 — "이미 한 번 죽은 커널"이라는 표시다.</li><li>교훈: <strong>로그에 크래시가 여러 개면 항상 첫 번째(<code>[#1]</code>, 또는 taint에 <code>D</code>/<code>W</code>가 아직 없는 것)부터 본다</strong>. 나머지는 후유증일 가능성이 크다. 커뮤니티도 taint <code>D</code>가 있는 보고는 "첫 Oops를 보여 달라"고 돌려보낸다.</li></ul>
+<h3 id="8-3-warn-계속-달리는-경고-그리고-_once">8.3 WARN — 계속 달리는 경고, 그리고 <code>_ONCE</code><a class="anchor" href="#8-3-warn-계속-달리는-경고-그리고-_once" aria-label="link">#</a></h3>
+<p><code>warn</code> 실험은 트리거를 <strong>두 번</strong> 썼고, 그 뒤 taint 값을 읽었다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] ------------[ cut here ]------------
+[   T79] WARNING: CPU: 0 PID: 79 at m3_bugs.c:96 m3_trigger+0x134/0x210 [m3_bugs]
+[   T79] Modules linked in: m3_bugs(OE)
+[   T79] CPU: 0 UID: 0 PID: 79 Comm: sh Tainted: G           OE       6.18.55-trace #1 PREEMPT 
+[   T79] pc : m3_trigger+0x134/0x210 [m3_bugs]
+[   T79] lr : m3_trigger+0x64/0x210 [m3_bugs]
+[   T79] Call trace:
+[   T79]  m3_trigger+0x134/0x210 [m3_bugs] (P)
+[   T79]  param_attr_store+0x80/0x110
+...
+[   T79] ---[ end trace 0000000000000000 ]---
+rc=0
+rc2=0
+12800</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>rc=0</code> — echo가 <strong>성공</strong>했다. WARN은 아무도 죽이지 않는다. <code>Internal error</code>, <code>Code:</code> 줄도 없다.</li><li>두 번째 트리거(<code>rc2=0</code>)는 <strong>아무것도 찍지 않았다</strong>. <code>WARN_ON_ONCE</code>는 호출 지점마다 한 번만 찍는다(지점별 static 플래그). 필드 로그에서 WARN이 한 번만 보인다고 한 번만 일어난 것이 아니다.</li><li>taint <code>12800</code> = <code>0x3200</code> = 비트 9(<code>W</code>, WARN) + 12(<code>O</code>) + 13(<code>E</code>). 경고 이후 이 커널의 모든 Oops 헤더에 <code>W</code>가 찍힌다(비트 표는 M2).</li><li><code>warnf</code>의 <code>WARN(1, "m3: sensor %s timed out (%d)\n", ...)</code>은 메시지 한 줄이 <code>cut here</code> 바로 아래에 먼저 나온다: <code>m3: sensor imu0 timed out (-110)</code>. 드라이버에서 WARN을 쓸 거면 <strong>메시지 있는 형태</strong>가 필드 분석에 훨씬 낫다. (§4.3에서 본 대로 이 경우 pc와 lr이 같다.)</li></ul>
+<h3 id="8-4-bug-scheduling-while-atomic-검사기의-보고">8.4 BUG: scheduling while atomic — 검사기의 보고<a class="anchor" href="#8-4-bug-scheduling-while-atomic-검사기의-보고" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] BUG: scheduling while atomic: sh/79/0x00000002
+[   T79] Modules linked in: m3_bugs(OE)
+[   T79] Preemption disabled at:
+[   T79] [&lt;ffffc54834294568&gt;] m3_trigger+0x198/0x210 [m3_bugs]
+[   T79] CPU: 1 UID: 0 PID: 79 Comm: sh Tainted: G           OE       6.18.55-trace #1 PREEMPT 
+[   T79] Call trace:
+[   T79]  show_stack+0x30/0x90 (C)
+[   T79]  dump_stack_lvl+0x70/0x98
+[   T79]  dump_stack+0x18/0x24
+[   T79]  __schedule_bug+0x88/0xa8
+[   T79]  __schedule+0xa00/0xc28
+[   T79]  schedule+0x34/0xe0
+[   T79]  schedule_timeout+0x88/0x128
+[   T79]  msleep+0x3c/0x70
+[   T79]  m3_trigger+0x1a0/0x210 [m3_bugs]
+...
+[   T79] DEBUG_LOCKS_WARN_ON(val &gt; preempt_count())
+[   T79] WARNING: CPU: 1 PID: 79 at kernel/sched/core.c:5846 preempt_count_sub+0x90/0x158
+[   T79] CPU: 1 UID: 0 PID: 79 Comm: sh Tainted: G        W  OE       6.18.55-trace #1 PREEMPT 
+[   T79] Call trace:
+[   T79]  preempt_count_sub+0x90/0x158 (P)
+[   T79]  _raw_spin_unlock+0x20/0x58
+[   T79]  m3_trigger+0x1a8/0x210 [m3_bugs]
+...
+[   T79] m3_bugs: slept under spinlock
+rc=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>sh/79/0x00000002</code> = 명령/PID/preempt_count. 스핀락이 1, <code>__schedule</code> 진입이 1을 더했다.</li><li><code>Preemption disabled at: m3_trigger+0x198</code> — <strong>선점을 끈 위치</strong>(= <code>spin_lock</code>)를 따로 알려 준다(<code>CONFIG_DEBUG_PREEMPT</code>). 콜스택은 잠든 곳(<code>msleep</code>)이고 이 줄은 락을 잡은 곳이다. 둘 다 있어야 원인이 보인다.</li><li>스케줄러는 보고 뒤 preempt_count를 강제로 맞춰 계속 가므로, 나중의 <code>spin_unlock</code>이 카운트를 0 아래로 내리려 해서 <strong>두 번째 WARN</strong>이 나왔다. 역시 첫 보고가 원인, 두 번째는 후유증이다. 줄 사이에 <code>** replaying previous printk message **</code>가 끼어든 것은 콘솔 출력이 겹쳤을 때 printk가 하는 일이다(M1).</li><li>이 커널은 <code>DEBUG_ATOMIC_SLEEP</code>이 꺼져 있어 <code>msleep</code> 진입 시점이 아니라 <strong>실제로 잠들 때</strong> 잡혔다. 켜면 <code>BUG: sleeping function called from invalid context</code>로 더 일찍 잡힌다(E4 §5.4, M8).</li></ul>
+<h3 id="8-5-정책-panic_on_oops-panic_on_warn">8.5 정책 — <code>panic_on_oops</code>, <code>panic_on_warn</code><a class="anchor" href="#8-5-정책-panic_on_oops-panic_on_warn" aria-label="link">#</a></h3>
+<p><code>oops=panic</code>(= sysctl <code>kernel.panic_on_oops=1</code>)으로 같은 <code>null</code> 버그를 내면 Oops 끝에 이 줄이 붙고 시스템이 멈춘다(§7.2의 출력).</p>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] ---[ end trace 0000000000000000 ]---
+[   T79] Kernel panic - not syncing: Oops: Fatal exception</code></pre></figure>
+<p><code>panic_on_warn=1</code>(= <code>kernel.panic_on_warn</code>)이면 <strong>WARN 하나로</strong> panic이 된다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] WARNING: CPU: 1 PID: 79 at m3_bugs.c:96 m3_trigger+0x134/0x210 [m3_bugs]
+...
+[   T79] Kernel panic - not syncing: kernel: panic_on_warn set ...
+[   T79] Call trace:
+[   T79]  show_stack+0x30/0x90 (C)
+...
+[   T79] Kernel Offset: 0x50c869600000 from 0xffff800080000000
+[   T79] ---[ end Kernel panic - not syncing: kernel: panic_on_warn set ... ]---</code></pre></figure>
+<div class="tw"><table><thead><tr><th>설정</th><th>부팅 인자 / sysctl</th><th>언제 쓰나</th></tr></thead><tbody><tr><td>Oops → panic</td><td><code>oops=panic</code> / <code>kernel.panic_on_oops=1</code></td><td><strong>양산 임베디드 기본값으로 권장</strong>. 반쯤 죽은 커널(락 잡은 채 죽은 태스크, 꺼진 IRQ)로 계속 도는 것보다 증거(pstore, L7)를 남기고 리부트하는 편이 안전하다</td></tr><tr><td>panic 후 리부트</td><td><code>panic=5</code> / <code>kernel.panic=5</code></td><td>위와 짝. 0이면 영원히 멈춤(이 랩)</td></tr><tr><td>WARN → panic</td><td><code>panic_on_warn=1</code> / <code>kernel.panic_on_warn=1</code></td><td>퍼징(syzkaller), CI, 안전 인증 제품. 보통 제품은 너무 공격적</td></tr><tr><td>soft lockup → panic</td><td><code>softlockup_panic=1</code> / <code>kernel.softlockup_panic</code></td><td>실시간 제어 장비에서 "멈춤 = 고장"일 때</td></tr><tr><td>hung task → panic</td><td><code>kernel.hung_task_panic=1</code></td><td>D 상태로 오래 멈춘 태스크</td></tr><tr><td>누적 한도</td><td><code>kernel.oops_limit</code>(기본 10000), <code>kernel.warn_limit</code></td><td>그 횟수를 넘으면 panic (반복 Oops로 공격하는 것 방지)</td></tr></tbody></table></div>
+<p>Oops가 <strong>인터럽트 문맥</strong>에서 나면 설정과 상관없이 <code>Fatal exception in interrupt</code>로 panic이다. 죽일 "현재 태스크"가 의미가 없기 때문이다. 스택 overflow도 설정과 상관없이 panic이다(§9.6).</p>
+<h3 id="8-6-lockup-별도-모듈로-soft-lockup-내-보기">8.6 lockup — 별도 모듈로 soft lockup 내 보기<a class="anchor" href="#8-6-lockup-별도-모듈로-soft-lockup-내-보기" aria-label="link">#</a></h3>
+<p>선점을 끈 채 30초 바쁘게 기다리는 별도 모듈(<code>m3_lock.ko</code>)을 <code>watchdog_thresh=5</code>로 부팅한 게스트에서 insmod했다. soft lockup 기준은 <code>2 × watchdog_thresh</code> = 10초다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>5
+[   17.550883][   T77] m3_lock: loading out-of-tree module taints kernel.
+[   30.374426][    C1] watchdog: BUG: soft lockup - CPU#1 stuck for 13s! [insmod:77]
+[   30.374640][    C1] Modules linked in: m3_lock(OE+)
+[   30.382309][    C1] CPU: 1 UID: 0 PID: 77 Comm: insmod Tainted: G           OE       6.18.55-trace #1 PREEMPT 
+[   30.386824][    C1] pstate: 80000005 (Nzcv daif -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[   30.386910][    C1] pc : arch_timer_read_cntvct_el0+0x8/0x10
+[   30.387443][    C1] lr : __delay_cycles+0x5c/0xa8
+[   30.388225][    C1] Call trace:
+[   30.388591][    C1]  arch_timer_read_cntvct_el0+0x8/0x10 (P)
+[   30.394876][    C1]  __delay+0x5c/0xd8
+[   30.394936][    C1]  __const_udelay+0x2c/0x40
+[   30.394954][    C1]  m3_lock_init+0x30/0xfb0 [m3_lock]
+[   30.395570][    C1]  do_one_initcall+0x5c/0x280
+[   30.395591][    C1]  do_init_module+0x5c/0x270
+[   30.395617][    C1]  load_module+0x1ba0/0x2258
+...
+[   42.374933][    C1] watchdog: BUG: soft lockup - CPU#1 stuck for 24s! [insmod:77]
+[   42.375309][    C1] CPU: 1 UID: 0 PID: 77 Comm: insmod Tainted: G           OEL      6.18.55-trace #1 PREEMPT 
+[   42.375397][    C1] Tainted: [O]=OOT_MODULE, [E]=UNSIGNED_MODULE, [L]=SOFTLOCKUP
+...
+[   64.764135][    C0] BUG: workqueue lockup - pool cpus=1 node=0 flags=0x0 nice=0 stuck for 46s!
+[   64.765903][    C0]     pending: psi_avgs_work, deferred_probe_timeout_work_func
+...
+rc=0
+28672</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><code>[C1]</code> — 이 보고는 태스크(<code>T77</code>)가 아니라 <strong>CPU 1의 hrtimer 인터럽트</strong>가 찍었다(<code>PRINTK_CALLER</code>). watchdog은 각 CPU의 타이머 인터럽트에서 "그 CPU의 watchdog 스레드가 최근에 돌았나"를 확인한다. 찍힌 pc·Call trace는 <strong>인터럽트 순간 그 CPU가 하던 일</strong>이다 — 루프 안 아무 지점이다. 그래서 lockup 보고를 여러 번 비교하면(<code>__delay+0x5c</code> → <code>+0x90</code>) 루프의 범위가 보인다.</li><li><code>stuck for 13s</code> — 기준 10초인데 13초, 이후 24s·35s로 반복 보고. TCG에서 타이머가 늦게 돌기 때문에 숫자가 실제 하드웨어보다 거칠다.</li><li><code>Modules linked in: m3_lock(OE+)</code> — <code>+</code>는 "로드 중"(init 함수가 아직 안 끝남) 표시다.</li><li>CPU 1이 묶이자 그 CPU의 workqueue도 멈춰 46초 뒤 <code>BUG: workqueue lockup</code>이 <strong>다른 CPU(C0)</strong>에서 보고됐다. 하나의 원인이 여러 검사기를 깨운다.</li><li>30초 뒤 init이 끝나 <code>rc=0</code>. 시스템은 살았고, taint <code>28672</code> = <code>0x7000</code> = <code>O</code>·<code>E</code>·<code>L</code>(비트 14, SOFTLOCKUP).</li><li>이 밖의 "멈춤" 보고는 이번에 실행하지 않았다(가이드): hard lockup(<code>watchdog: CPU1: Watchdog detected hard LOCKUP on cpu 1</code> — IRQ까지 꺼진 루프, buddy 검출기는 이웃 CPU가 보고), hung task(<code>INFO: task &lt;이름&gt;:&lt;pid&gt; blocked for more than 120 seconds.</code> — D 상태로 오래 잠든 태스크), RCU stall(<code>rcu: INFO: rcu_preempt detected stalls on CPUs/tasks:</code>).</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 500" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah6" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <text x="20" y="22" font-size="13">1단계: 첫 줄 패턴으로 종류를 정한다</text>
+  <rect x="20" y="32" width="280" height="30" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="30" y="52" font-size="12">Unable to handle kernel ...</text>
+  <rect x="20" y="68" width="280" height="30" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="30" y="88" font-size="12">kernel BUG at file:line!</text>
+  <rect x="20" y="104" width="280" height="30" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="30" y="124" font-size="12">WARNING: CPU: N PID: P at ...</text>
+  <rect x="20" y="140" width="280" height="30" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="30" y="160" font-size="12">BUG: scheduling while atomic</text>
+  <rect x="20" y="176" width="280" height="30" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="30" y="196" font-size="12">watchdog: BUG: soft lockup</text>
+  <rect x="20" y="212" width="280" height="30" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="30" y="232" font-size="12">Insufficient stack space ...</text>
+  <rect x="20" y="248" width="280" height="30" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="30" y="268" font-size="12">Kernel panic - not syncing: X</text>
+  <g stroke="currentColor"><line x1="300" y1="47" x2="358" y2="47" marker-end="url(#ah6)"/><line x1="300" y1="83" x2="358" y2="83" marker-end="url(#ah6)"/><line x1="300" y1="119" x2="358" y2="119" marker-end="url(#ah6)"/><line x1="300" y1="155" x2="358" y2="155" marker-end="url(#ah6)"/><line x1="300" y1="191" x2="358" y2="191" marker-end="url(#ah6)"/><line x1="300" y1="227" x2="358" y2="227" marker-end="url(#ah6)"/><line x1="300" y1="263" x2="358" y2="263" marker-end="url(#ah6)"/></g>
+  <text x="365" y="52" font-size="12">MMU fault → ESR + FAR 패턴 (아래 2단계)</text>
+  <text x="365" y="88" font-size="12">BUG_ON → 줄이 로그에 있음, 조건 확인</text>
+  <text x="365" y="124" font-size="12">WARN → 계속 실행, 첫 번째만 본다</text>
+  <text x="365" y="160" font-size="12">문맥 위반 → 락 잡은 곳 + 잠든 곳</text>
+  <text x="365" y="196" font-size="12">CPU 독점 → 보고 여러 개의 pc 비교</text>
+  <text x="365" y="232" font-size="12">스택 overflow → 재귀 · 큰 지역 변수</text>
+  <text x="365" y="268" font-size="12">X 문장이 원인 → 그 앞의 첫 보고</text>
+  <text x="20" y="312" font-size="13">2단계: FAR(주소) 값으로 버그 종류를 추정한다</text>
+  <rect x="20" y="322" width="280" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="340" font-size="12">0x0 ~ 0xfff (첫 페이지)</text>
+  <rect x="20" y="352" width="280" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="370" font-size="12">6b6b6b6b... (또는 5a5a..., a5)</text>
+  <rect x="20" y="382" width="280" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="400" font-size="12">dead000000000100 / 122 (+8)</text>
+  <rect x="20" y="412" width="280" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="430" font-size="12">41414141..., 20202020... (ASCII)</text>
+  <rect x="20" y="442" width="280" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="460" font-size="12">FSC 0x21, 홀수 · 비정렬 주소</text>
+  <rect x="20" y="472" width="280" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="30" y="490" font-size="12">태스크 스택 하한 바로 아래</text>
+  <g stroke="currentColor"><line x1="300" y1="335" x2="358" y2="335" marker-end="url(#ah6)"/><line x1="300" y1="365" x2="358" y2="365" marker-end="url(#ah6)"/><line x1="300" y1="395" x2="358" y2="395" marker-end="url(#ah6)"/><line x1="300" y1="425" x2="358" y2="425" marker-end="url(#ah6)"/><line x1="300" y1="455" x2="358" y2="455" marker-end="url(#ah6)"/><line x1="300" y1="485" x2="358" y2="485" marker-end="url(#ah6)"/></g>
+  <text x="365" y="340" font-size="12">NULL + 멤버 오프셋 → pahole</text>
+  <text x="365" y="370" font-size="12">해제 후 사용 (UAF) → KASAN (M8)</text>
+  <text x="365" y="400" font-size="12">list_del 두 번 / 지운 노드 사용</text>
+  <text x="365" y="430" font-size="12">문자열이 포인터를 덮음 → overflow</text>
+  <text x="365" y="460" font-size="12">atomic · Device 메모리 정렬 위반</text>
+  <text x="365" y="490" font-size="12">guard page → 스택 overflow</text>
+</svg></figure>
+<p>그림 6 — "이건 무슨 크래시인가" 결정 트리. 첫 줄 패턴이 종류를, FAR 값이 버그 유형을 알려 준다. 빨강은 태스크나 시스템이 죽는 것, 주황은 계속 달리는 보고다.</p>
+<hr>
+<h2 id="9-주소-패턴과-사례-숫자만-보고-버그를-추정하기">9. 주소 패턴과 사례 — 숫자만 보고 버그를 추정하기<a class="anchor" href="#9-주소-패턴과-사례-숫자만-보고-버그를-추정하기" aria-label="link">#</a></h2>
+<h3 id="9-1-패턴-표">9.1 패턴 표<a class="anchor" href="#9-1-패턴-표" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>FAR 값</th><th>의미</th><th>이번 실험</th><th>다음 행동</th></tr></thead><tbody><tr><td><code>0x0</code>~<code>0xfff</code></td><td>NULL + 멤버 오프셋. 커널이 "NULL pointer dereference"라고 쓴다</td><td><code>0x10</code> (null)</td><td><code>pahole -C &lt;구조체&gt;</code>로 오프셋 → 멤버. 그 포인터를 돌려준 함수의 에러 경로 확인</td></tr><tr><td><code>6b6b6b6b6b6b6b6b</code></td><td><code>POISON_FREE</code> — 해제된 slab 객체를 칠한 값. slab poisoning(<code>slab_debug=P</code> 또는 <code>SLUB_DEBUG_ON</code>)이 켜져 있어야 보인다</td><td><code>006b6b6b6b6b6b6b</code> (uaf)</td><td>해제 지점 찾기 — KASAN이면 alloc/free 콜스택을 다 준다(M8)</td></tr><tr><td><code>5a5a5a5a…</code></td><td><code>POISON_INUSE</code> — 할당은 됐지만 초기화 안 한 slab 객체</td><td>—</td><td>초기화 누락, <code>kzalloc</code> 고려</td></tr><tr><td><code>dead000000000100</code> / <code>…122</code></td><td><code>LIST_POISON1/2</code> — <code>list_del()</code>이 끝난 노드에 박는 값(<code>0xdead…</code> = <code>CONFIG_ILLEGAL_POINTER_VALUE</code>)</td><td><code>dead000000000108</code> 쓰기 (dbldel)</td><td>같은 노드 두 번 삭제, 삭제 후 순회. 락 없이 두 경로가 지우는 레이스가 흔한 원인</td></tr><tr><td><code>4141…</code>, <code>2020…</code> 같은 ASCII</td><td>문자열·패킷 데이터가 포인터 자리를 덮어썼다</td><td><code>0041414141414139</code> (list)</td><td>바이트를 문자로 바꿔 보고("AAAA") 그 데이터를 쓰는 코드의 길이 검사를 본다</td></tr><tr><td>정렬 안 된 주소 + FSC 0x21</td><td>exclusive/atomic 또는 Device 메모리의 비정렬 접근</td><td><code>...4089</code> + <code>ldxr</code> (misalign)</td><td>구조체 <code>__packed</code>, 버퍼 + 1 같은 포인터 연산</td></tr><tr><td>태스크 스택 하한 바로 아래</td><td>VMAP_STACK guard page</td><td><code>0xffff800080507fc8</code> (stack)</td><td>재귀, 큰 지역 배열 (E4 §4)</td></tr><tr><td><code>ffff0000…</code> (48비트 VA)</td><td>선형 맵 — <code>kmalloc</code>·페이지 메모리</td><td>레지스터 <code>x19 = ffff0000052c8ae0</code></td><td>slab 객체 포인터</td></tr><tr><td><code>ffff8000…</code></td><td>vmalloc 영역 — 커널 스택, <code>vmalloc</code>, ioremap</td><td><code>sp = ffff8000804fbc50</code></td><td>스택 포인터·ioremap 주소</td></tr></tbody></table></div>
+<p>상위 바이트가 <code>00</code>으로 보이는 것(<code>006b6b…</code>, <code>0041…</code>)은 실제로는 <code>6b6b…</code>/<code>4141…</code>이다. arm64는 주소의 최상위 바이트를 태그로 쓸 수 있는 TBI를 지원하므로, 커널의 fault 처리기(<code>do_mem_abort()</code>)는 FAR에서 태그를 뗀 값(<code>untagged_addr(far)</code>)을 찍는다. 레지스터 덤프의 <code>x0 : 6b6b6b6b6b6b6b6b</code>가 원래 값이다.</p>
+<h3 id="9-2-사례-use-after-free-slab_debug-p">9.2 사례 — use-after-free (<code>slab_debug=P</code>)<a class="anchor" href="#9-2-사례-use-after-free-slab_debug-p" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] Unable to handle kernel paging request at virtual address 006b6b6b6b6b6b6b
+[   T79]   ESR = 0x0000000096000004
+[   T79]   FSC = 0x04: level 0 translation fault
+[   T79] [006b6b6b6b6b6b6b] address between user and kernel address ranges
+[   T79] Internal error: Oops: 0000000096000004 [#1]  SMP
+[   T79] pc : m3_uaf+0x48/0x80 [m3_bugs]
+[   T79] lr : m3_uaf+0x44/0x80 [m3_bugs]
+[   T79] x20: ffff000006193f38 x19: ffff000006194500 x18: 0000000000000000
+[   T79] x2 : 0000000000000000 x1 : 0000000000000000 x0 : 6b6b6b6b6b6b6b6b
+[   T79] Call trace:
+[   T79]  m3_uaf+0x48/0x80 [m3_bugs] (P)
+[   T79]  m3_trigger+0x174/0x210 [m3_bugs]
+[   T79] Code: aa0003f3 f9000c01 97ffff81 f9400e60 (f9400001) </code></pre></figure>
+<p>읽는 순서: FAR이 <code>6b</code> 반복 → 해제된 객체에서 읽은 포인터를 따라갔다. <code>x19 = ffff000006194500</code>은 선형 맵의 slab 객체(= 해제된 그 객체), <code>x0 = 6b6b…</code>는 거기서 읽은 오프셋 24의 값. lr이 <code>kfree</code> 복귀 지점(§4.3). <code>Code:</code>의 <code>97ffff81</code>은 <code>bl</code>(= <code>kfree</code>), <code>f9400e60</code> = <code>ldr x0, [x19, #24]</code>, 괄호 안 <code>ldr x1, [x0]</code>. 소스 없이도 "kfree 직후 그 객체의 +24 포인터를 역참조" 까지 나온다.</p>
+<p><strong>slab poisoning이 없었다면?</strong> 해제된 메모리에는 예전 값(<code>&amp;m3_ops</code>)이 그대로 남아 있어서 호출이 <strong>성공</strong>했을 것이다. UAF는 대개 조용히 지나가다 나중에 다른 객체가 그 메모리를 재사용할 때 엉뚱한 곳에서 터진다. 개발 빌드에서 <code>slab_debug=P</code>(또는 <code>slab_debug=FZPU</code>) 부팅 인자로 poisoning을 켜는 이유다. KASAN(M8)은 첫 잘못된 접근에서 alloc·free 콜스택까지 붙여서 바로 잡는다.</p>
+<h3 id="9-3-사례-list_del-두-번-dead-108">9.3 사례 — list_del 두 번 (<code>dead…108</code>)<a class="anchor" href="#9-3-사례-list_del-두-번-dead-108" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] Unable to handle kernel paging request at virtual address dead000000000108
+[   T79]   ESR = 0x0000000096000044
+[   T79]   CM = 0, WnR = 1, TnD = 0, TagAccess = 0
+[   T79] pc : m3_double_del+0x54/0x80 [m3_bugs]
+[   T79] lr : m3_double_del+0x28/0x80 [m3_bugs]
+[   T79] x2 : dead000000000122 x1 : dead000000000100 x0 : ffff000005088e60
+[   T79] Call trace:
+[   T79]  m3_double_del+0x54/0x80 [m3_bugs] (P)
+[   T79]  m3_trigger+0x128/0x210 [m3_bugs]
+[   T79] Code: d2802001 f2fbd5a1 f9000443 91008822 (f9000422) </code></pre></figure>
+<p><code>list_del(entry)</code>은 <code>entry-&gt;next-&gt;prev = entry-&gt;prev</code> 를 하고 나서 <code>entry-&gt;next = LIST_POISON1</code>, <code>entry-&gt;prev = LIST_POISON2</code>를 박는다. 두 번째 <code>list_del</code>에서 <code>entry-&gt;next</code>가 <code>dead…100</code>이므로 <code>next-&gt;prev</code>(= <code>+8</code>)에 <strong>쓰기</strong> → <code>dead…108</code>, WnR=1. 레지스터에 <code>x1 = LIST_POISON1</code>, <code>x2 = LIST_POISON2</code>가 그대로 있다. faddr2line은 <code>include/linux/list.h:210</code>의 <code>__list_del</code> 안이라고 알려 줬다(§6.2). <code>CONFIG_DEBUG_LIST</code>(또는 <code>LIST_HARDENED</code>)가 켜져 있으면 fault 전에 <code>list_del corruption. next-&gt;prev should be ..., but was dead000000000122</code> 같은 보고로 잡힌다 — 이 랩 커널은 둘 다 꺼져 있다.</p>
+<h3 id="9-4-사례-크래시-지점-버그-지점-list">9.4 사례 — 크래시 지점 ≠ 버그 지점 (<code>list</code>)<a class="anchor" href="#9-4-사례-크래시-지점-버그-지점-list" aria-label="link">#</a></h3>
+<p>이 실험은 이 노트에서 가장 중요한 교훈이다. <strong>pc가 커널 코어(<code>lib/vsprintf.c</code>)에 있다.</strong></p>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] m3_bugs: tag 
+[   T79] m3_bugs: tag AAAAAAAA
+[   T79] Unable to handle kernel paging request at virtual address 0041414141414139
+[   T79]   ESR = 0x0000000096000004
+[   T79] [0041414141414139] address between user and kernel address ranges
+[   T79] Internal error: Oops: 0000000096000004 [#1]  SMP
+[   T79] pstate: 000000c5 (nzcv daIF -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[   T79] pc : string+0x50/0x140
+[   T79] lr : vsnprintf+0x1f8/0x638
+[   T79] x5 : 0000000000000008 x4 : 0000000000000000 x3 : ffffffff00080a00
+[   T79] x2 : 4141414141414139 x1 : ffff80008057ba38 x0 : ffff80008057ba3f
+[   T79] Call trace:
+[   T79]  string+0x50/0x140 (P)
+[   T79]  vsnprintf+0x1f8/0x638
+[   T79]  vprintk_store+0x110/0x4a0
+[   T79]  vprintk_emit+0xb4/0x340
+[   T79]  vprintk_default+0x3c/0x50
+[   T79]  vprintk+0x38/0x80
+[   T79]  _printk+0x68/0xa0
+[   T79]  m3_list_bug+0xcc/0xe8 [m3_bugs]
+[   T79]  m3_trigger+0x130/0x210 [m3_bugs]
+[   T79] Code: 91000400 eb0600bf 540005a0 aa0503e4 (38646845) 
+[   T79] note: sh[79] exited with irqs disabled</code></pre></figure>
+<p><code>decode_stacktrace.sh</code>는 <code>pc : string (lib/vsprintf.c:653 lib/vsprintf.c:735)</code>, <code>m3_list_bug (m3_bugs.c:67 (discriminator 4))</code>라고 풀었다. 추리:</p>
+<ol><li>pc는 <code>string()</code> — printk의 <code>%s</code> 처리기. <code>ldrb w5, [x2, x4]</code>로 문자열의 바이트를 읽다가 죽었다. 문자열 주소 x2 = <code>4141414141414139</code>.</li><li>'A' = 0x41. 그 주소는 <code>"AAAAAAAA"</code>에서 8을 뺀 값이다. §6.5의 <code>pahole</code>: <code>struct m3_ent</code>는 <code>tag[8]</code> 다음 오프셋 8에 <code>node</code>. <code>list_for_each_entry</code>는 <code>node.next</code>에서 8을 빼 엔트리 주소를 만든다(<code>container_of</code>). 즉 <strong>어떤 엔트리의 <code>node.next</code>가 'A'로 덮여 있었고</strong>, 그 가짜 엔트리의 <code>tag</code>를 출력하려다 죽었다.</li><li>바로 앞에 <code>tag AAAAAAAA</code>가 찍혔다 — 덮어쓰인 엔트리를 정상적으로 출력한 뒤, 그 엔트리의 <code>next</code>를 따라간 것이다.</li><li>그러니 버그는 printk가 아니라 <strong>이 엔트리를 덮어쓴 코드</strong>다(8바이트 <code>tag</code>에 24바이트를 써서 <code>node</code>의 <code>next</code>·<code>prev</code>까지 침범). 그 코드는 Call trace에 <strong>없다</strong> — 이미 끝났기 때문이다.</li></ol>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah7" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <line x1="20" y1="150" x2="660" y2="150" stroke="currentColor" marker-end="url(#ah7)"/>
+  <text x="600" y="172" font-size="12">시간</text>
+  <rect x="20" y="40" width="140" height="80" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="90" y="62" text-anchor="middle" font-size="12">① 버그 지점</text>
+  <text x="90" y="84" text-anchor="middle" font-size="12">tag[8]에 24바이트</text>
+  <text x="90" y="106" text-anchor="middle" font-size="12">node.next = AAAA</text>
+  <rect x="180" y="40" width="140" height="80" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="250" y="62" text-anchor="middle" font-size="12">② 조용함</text>
+  <text x="250" y="84" text-anchor="middle" font-size="12">다른 노드 추가</text>
+  <text x="250" y="106" text-anchor="middle" font-size="12">아무 보고 없음</text>
+  <rect x="340" y="40" width="140" height="80" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="410" y="62" text-anchor="middle" font-size="12">③ 순회</text>
+  <text x="410" y="84" text-anchor="middle" font-size="12">tag 출력 2번 성공</text>
+  <text x="410" y="106" text-anchor="middle" font-size="12">next = 0x4141...</text>
+  <rect x="500" y="40" width="160" height="80" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="580" y="62" text-anchor="middle" font-size="12">④ 크래시 지점</text>
+  <text x="580" y="84" text-anchor="middle" font-size="12">printk → string()</text>
+  <text x="580" y="106" text-anchor="middle" font-size="12">pc = lib/vsprintf.c</text>
+  <line x1="90" y1="120" x2="90" y2="146" stroke="#d0564a"/>
+  <line x1="250" y1="120" x2="250" y2="146" stroke="#888"/>
+  <line x1="410" y1="120" x2="410" y2="146" stroke="#888"/>
+  <line x1="580" y1="120" x2="580" y2="146" stroke="#e08a3c"/>
+  <rect x="20" y="190" width="640" height="96" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="214" font-size="12">Call trace에는 ④만 있다. ①은 이미 끝난 코드라 스택에 흔적이 없다</text>
+  <text x="30" y="238" font-size="12">단서: FAR = ASCII 'A' − 8 → 문자열이 list 포인터를 덮었고, container_of로 8을 뺐다</text>
+  <text x="30" y="262" font-size="12">더 일찍 잡으려면: CONFIG_DEBUG_LIST(②의 list_add에서), KASAN(①의 쓰기에서) — M8</text>
+</svg></figure>
+<p>그림 7 — 크래시 지점 ≠ 버그 지점. 메모리 오염 버그는 오염을 <strong>사용하는</strong> 코드에서 터진다. pc가 커널 코어 함수(<code>string</code>, <code>memcpy</code>, <code>list_*</code>, <code>kfree</code>)에 있으면 먼저 "누가 나쁜 데이터를 넘겼나"를 Call trace 아래쪽에서 찾는다.</p>
+<h3 id="9-5-사례-정렬-fault-misalign">9.5 사례 — 정렬 fault (<code>misalign</code>)<a class="anchor" href="#9-5-사례-정렬-fault-misalign" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] Unable to handle kernel paging request at virtual address ffffcadb174c4089
+[   T79]   ESR = 0x0000000096000021
+[   T79]   FSC = 0x21: alignment fault
+[   T79] swapper pgtable: 4k pages, 48-bit VAs, pgdp=0000000043567000
+[   T79] [ffffcadb174c4089] pgd=100000004418a003, p4d=100000004418a003, pud=100000004510d403, pmd=100000004510e403, pte=00e800004510ff03
+[   T79] pc : m3_misalign+0x38/0x60 [m3_bugs]
+[   T79] lr : m3_trigger+0x15c/0x210 [m3_bugs]
+[   T79] x2 : 000000000000000a x1 : ffffcadb174c4089 x0 : 00000000ffffffea
+[   T79] Code: d0000001 91022021 91000421 f9800031 (885f7c20) </code></pre></figure>
+<p>이번엔 <code>swapper pgtable</code>(커널 주소)이고 <strong>PTE까지 전부 유효하다</strong>(<code>pte=00e8…ff03</code>). 페이지는 멀쩡히 있다 — 문제는 주소 끝자리 <code>…89</code>(홀수)다. arm64는 일반 메모리에 대한 보통의 <code>ldr</code>/<code>str</code>은 비정렬이어도 하드웨어가 처리하지만, <code>ldxr</code>/<code>stxr</code>(exclusive) 같은 atomic 명령과 Device 메모리(MMIO) 접근은 자연 정렬이 필수다. Cortex-M에서 <code>UNALIGN_TRP</code>나 <code>LDREX</code> 정렬 fault를 본 적이 있다면 같은 이야기다. 실무 원인은 <code>__packed</code> 구조체 안의 <code>atomic_t</code>/<code>spinlock_t</code>, 또는 패킷 버퍼 + 1 같은 포인터 연산이다. 드라이버의 <code>readl()</code>을 비정렬 MMIO 주소로 해도 같은 FSC가 나온다.</p>
+<h3 id="9-6-사례-스택-overflow-stack">9.6 사례 — 스택 overflow (<code>stack</code>)<a class="anchor" href="#9-6-사례-스택-overflow-stack" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>[    C1] Insufficient stack space to handle exception!
+[    C1] ESR: 0x0000000096000047 -- DABT (current EL)
+[    C1] FAR: 0xffff800080507fc8
+[    C1] Task stack:     [0xffff800080508000..0xffff80008050c000]
+[    C1] IRQ stack:      [0xffff800080008000..0xffff80008000c000]
+[    C1] Overflow stack: [0xffff00001fed1140..0xffff00001fed2140]
+[    C1] pc : __pi_memset_generic+0x50/0x188
+[    C1] lr : m3_recurse+0x3c/0xa0 [m3_bugs]
+[    C1] sp : ffff800080507fc0
+[    C1] Kernel panic - not syncing: kernel stack overflow
+[    C1] Call trace:
+...
+[    C1]  __bad_stack+0x80/0x88
+[    C1]  __pi_memset_generic+0x50/0x188 (P)
+[    C1]  m3_recurse+0x80/0xa0 [m3_bugs]
+...  (m3_recurse+0x80 줄이 수십 번 반복)
+[    C1]  m3_trigger+0x1c4/0x210 [m3_bugs]</code></pre></figure>
+<p>FAR <code>…7fc8</code>은 태스크 스택 하한 <code>…8000</code>의 <strong>0x38바이트 아래</strong>, guard page다. 형식이 일반 Oops와 다르다: <code>Mem abort info</code> 해석 대신 <code>ESR:</code>/<code>FAR:</code> 한 줄씩, 그리고 세 스택의 범위. 예외 진입 코드가 sp를 검사해 CPU별 Overflow stack으로 갈아타고 바로 panic한다(태스크를 정상 종료시킬 스택이 없으니까). pc가 <code>memset</code>인 이유(지역 배열 0 초기화, <code>CONFIG_INIT_STACK_ALL_ZERO</code>)와 16 KiB 스택 이야기는 E4 §4.4에서 같은 형식의 로그로 자세히 다뤘다. 여기서 볼 것은 <strong>반복되는 Call trace 줄 = 재귀</strong>라는 패턴뿐이다.</p>
+<h3 id="9-7-사례-0으로-나누기는-트랩이-아니다-div0">9.7 사례 — 0으로 나누기는 트랩이 아니다 (<code>div0</code>)<a class="anchor" href="#9-7-사례-0으로-나누기는-트랩이-아니다-div0" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>[   T79] m3_bugs: 100 / 0 = 0
+rc=0</code></pre></figure>
+<p>Oops가 없다. A64의 <code>sdiv</code>/<code>udiv</code>는 제수가 0이면 <strong>결과 0을 돌려줄 뿐 예외를 내지 않는다</strong>(아키텍처 정의). x86은 <code>#DE</code> 예외 → <code>divide error: 0000</code> Oops를 내고, Cortex-M은 <code>CCR.DIV_0_TRP</code>를 켜면 UsageFault를 낸다. 그래서 arm64에서는 0 나누기가 <strong>조용히 틀린 값</strong>이 된다. "x86에서는 죽던 버그가 ARM 보드에선 안 죽는다"는 이식 함정이고, UBSAN(M8)의 <code>-fsanitize=integer-divide-by-zero</code>로만 잡힌다.</p>
+<hr>
+<h2 id="10-현장-워크플로-붙여-넣은-oops-하나만-받았을-때">10. 현장 워크플로 — 붙여 넣은 Oops 하나만 받았을 때<a class="anchor" href="#10-현장-워크플로-붙여-넣은-oops-하나만-받았을-때" aria-label="link">#</a></h2>
+<p>고객이 슬랙에 콘솔 로그를 붙여 넣었다. 할 일을 순서대로 적는다.</p>
+<ol><li><strong>첫 보고를 찾는다.</strong> <code>[#1]</code>, taint에 <code>D</code>/<code>W</code>가 아직 없는 것. 그 앞 수십 줄(드라이버 에러, 타임아웃, <code>-EIO</code>)도 같이 확보한다 — 원인은 종종 Oops 전에 찍혀 있다.</li><li><strong>종류를 정한다</strong>(그림 6). Oops / BUG / WARN / 검사기 / lockup / panic.</li><li><strong>빌드를 고정한다.</strong> <code>Linux version</code>·<code>CPU:</code> 줄의 버전 문자열(<code>6.18.55-trace #1</code>)과 Tainted의 모듈 목록으로 <strong>정확히 같은 빌드의 vmlinux와 .ko</strong>를 구한다. 빌드 서버에 이미지마다 디버그 심볼(vmlinux, <code>.ko</code> 디버그 판, <code>System.map</code>)을 build-id와 함께 보관해 두는 것이 이 단계의 전제다. 다른 빌드로 풀면 줄 번호가 <strong>오류 없이 조용히</strong> 틀린다.</li><li><strong>원인 필드</strong>: ESR → EC·WnR·DFSC, FAR 패턴(§9.1).</li><li><strong>위치</strong>: <code>pc</code>를 <code>faddr2line</code>(크기가 안 맞으면 <code>/size</code> 제거), 의심스러우면 <code>readelf -s</code>로 섹션 확인 후 <code>addr2line -j</code>. 인라인 체인까지 본다.</li><li><strong>호출자</strong>: <code>lr</code>과 Call trace를 같이 본다. leaf면 lr이 유일한 호출자 정보다(§4.2). lr이 같은 함수 안이면 "마지막으로 부른 함수"다(§4.3).</li><li><strong>데이터</strong>: 레지스터 중 FAR과 같은 값, 0, poison 값을 찾고, <code>Code:</code>를 decodecode로 풀어 어느 레지스터가 베이스였는지 본다. 오프셋은 <code>pahole</code>로 멤버 이름이 된다.</li><li><strong>크래시 지점이 버그 지점인가?</strong> pc가 커널 코어 함수면 데이터가 어디서 왔는지 거슬러 올라간다(§9.4).</li><li><strong>재현과 탐지기</strong>: 같은 조건을 KASAN·<code>DEBUG_LIST</code>·lockdep 켠 빌드에서 재현한다(M8). 날 주소만 있으면 §7의 KASLR 보정.</li></ol>
+<p>로그가 아예 없다면? L7(pstore/ramoops로 다음 부팅에 회수, kdump로 메모리 전체), M1(earlycon), M4(JTAG로 멈춘 CPU의 PC·<code>__log_buf</code> 직접 읽기)로 간다.</p>
+<hr>
+<h2 id="11-커널-안에서는-무슨-일이-일어나나">11. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#11-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah8" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="20" width="200" height="40" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="120" y="45" text-anchor="middle" font-size="12">ldr w0, [x0, #16] → abort</text>
+  <rect x="20" y="80" width="200" height="40" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="120" y="105" text-anchor="middle" font-size="12">el1h_64_sync → el1_abort</text>
+  <rect x="20" y="140" width="200" height="40" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="120" y="165" text-anchor="middle" font-size="12">do_mem_abort(far, esr)</text>
+  <rect x="20" y="200" width="200" height="40" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="120" y="225" text-anchor="middle" font-size="12">do_page_fault</text>
+  <rect x="20" y="260" width="200" height="40" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="120" y="285" text-anchor="middle" font-size="12">__do_kernel_fault</text>
+  <g stroke="currentColor"><line x1="120" y1="60" x2="120" y2="78" marker-end="url(#ah8)"/><line x1="120" y1="120" x2="120" y2="138" marker-end="url(#ah8)"/><line x1="120" y1="180" x2="120" y2="198" marker-end="url(#ah8)"/><line x1="120" y1="240" x2="120" y2="258" marker-end="url(#ah8)"/></g>
+  <rect x="250" y="20" width="200" height="40" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="350" y="45" text-anchor="middle" font-size="12">brk #0x800 (BUG/WARN)</text>
+  <rect x="250" y="80" width="200" height="40" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="350" y="105" text-anchor="middle" font-size="12">bug_brk_handler</text>
+  <rect x="250" y="140" width="200" height="40" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="350" y="165" text-anchor="middle" font-size="12">report_bug(pc) → __bug_table</text>
+  <rect x="250" y="200" width="200" height="40" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="350" y="225" text-anchor="middle" font-size="12">WARN: __warn, pc += 4</text>
+  <g stroke="currentColor"><line x1="350" y1="60" x2="350" y2="78" marker-end="url(#ah8)"/><line x1="350" y1="120" x2="350" y2="138" marker-end="url(#ah8)"/><line x1="350" y1="180" x2="350" y2="198" marker-end="url(#ah8)"/></g>
+  <text x="350" y="262" text-anchor="middle" font-size="12">→ 계속 실행</text>
+  <rect x="480" y="140" width="180" height="40" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="570" y="165" text-anchor="middle" font-size="12">die("Oops", regs, esr)</text>
+  <rect x="480" y="200" width="180" height="40" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="570" y="225" text-anchor="middle" font-size="12">__die: 헤더·레지스터·Code</text>
+  <rect x="480" y="260" width="180" height="56" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="570" y="282" text-anchor="middle" font-size="12">panic 정책 또는</text>
+  <text x="570" y="302" text-anchor="middle" font-size="12">make_task_dead(SIGSEGV)</text>
+  <g stroke="currentColor"><line x1="220" y1="280" x2="478" y2="165" marker-end="url(#ah8)"/><line x1="450" y1="160" x2="478" y2="160" marker-end="url(#ah8)"/><line x1="570" y1="180" x2="570" y2="198" marker-end="url(#ah8)"/><line x1="570" y1="240" x2="570" y2="258" marker-end="url(#ah8)"/></g>
+  <text x="470" y="118" font-size="12">BUG: die("Oops - BUG")</text>
+</svg></figure>
+<p>그림 8 — 커널 안의 경로. MMU abort와 BUG의 <code>brk</code>는 다른 입구로 들어와 같은 <code>die()</code>에서 만난다. WARN은 <code>die()</code>에 가지 않고 pc를 다음 명령으로 넘겨 계속 실행한다.</p>
+<ul class="tasks"><li><strong>fault 경로</strong> (<code>arch/arm64/mm/fault.c</code>): <code>do_mem_abort()</code>가 ESR의 DFSC로 처리 함수 표를 찾는다(translation fault → <code>do_translation_fault</code> → <code>do_page_fault</code>). 커널 모드이고 유저 주소 처리로 해결이 안 되면 <code>__do_kernel_fault()</code>가 먼저 <strong>exception table</strong>을 본다. <code>copy_from_user()</code>처럼 "fault가 나도 되는" 명령이면 fixup 주소로 점프해서 <code>-EFAULT</code>를 돌려주고 끝이다(E6, <code>get_user</code>). 표에 없으면 <code>die_kernel_fault()</code>가 <code>Unable to handle kernel ...</code>, <code>mem_abort_decode()</code>(Mem abort info 블록), <code>show_pte()</code>를 찍고 <code>die()</code>를 부른다.</li><li><strong>BUG/WARN 경로</strong>: <code>BUG()</code>/<code>WARN()</code>은 <code>brk #0x800</code>과 <code>__bug_table</code> 항목(주소·파일·줄·플래그)을 만든다. debug 예외 → <code>bug_brk_handler()</code> → <code>report_bug()</code>가 pc로 표를 찾아 <code>kernel BUG at …</code> 또는 <code>WARNING: …</code>을 찍는다. BUG면 <code>die("Oops - BUG", …)</code>, WARN이면 <code>arm64_skip_faulting_instruction()</code>으로 pc += 4 하고 돌아간다.</li><li><strong><code>die()</code></strong> (<code>arch/arm64/kernel/traps.c</code>): <code>die_lock</code>을 잡고 <code>console_verbose()</code>(콘솔 레벨을 최대로 — <code>quiet</code>여도 Oops가 보이는 이유, M1), <code>__die()</code>가 <code>Internal error: %s: %016lx [#%d] SMP</code>, 모듈 목록, <code>show_regs()</code>, Call trace, <code>Code:</code>를 찍는다. taint <code>D</code>를 더하고, <code>in_interrupt()</code>면 <code>panic("Fatal exception in interrupt")</code>, <code>panic_on_oops</code>면 <code>panic("Fatal exception")</code>, 아니면 <code>make_task_dead(SIGSEGV)</code> — 유저가 본 <code>Segmentation fault</code>/<code>rc=139</code>다.</li><li>드라이버를 쓸 때 다시 만나는 지점: <code>BUG_ON</code>은 리뷰에서 거의 거부된다(시스템을 죽이니까). 복구 가능한 상황은 <code>WARN_ON_ONCE</code> + 에러 반환(<code>if (WARN_ON_ONCE(!dev)) return -EINVAL;</code>)이 커널 관례다(E5). 유저 포인터는 반드시 exception table을 쓰는 <code>copy_*_user</code> 계열로 만져야 Oops가 아니라 <code>-EFAULT</code>가 된다(E6, G4).</li></ul>
+<hr>
+<h2 id="12-embedded-실무에서-다시-보기">12. Embedded 실무에서 다시 보기<a class="anchor" href="#12-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<p><strong>센서 키트 IMU 드라이버의 probe NULL.</strong> i.MX8 보드에서 IMU 드라이버가 <code>devm_regulator_get_optional()</code>의 반환값을 NULL 검사만 하고 쓰면, 실패 시 돌아온 <code>ERR_PTR(-ENODEV)</code>(= <code>0xffffffffffffffed</code>)에 멤버 오프셋을 더한 주소가 FAR로 찍힌다(오프셋이 크면 0 근처로 넘어가기도 한다). <strong>FAR이 <code>0xffff…fff</code>에 가까운 작은 음수면 <code>ERR_PTR</code> 역참조</strong>다(<code>IS_ERR</code> 대신 <code>!ptr</code> 검사). 작은 양수(0x10)는 NULL, 큰 음수 근처는 ERR_PTR — 이 두 패턴만 알아도 bring-up Oops의 절반은 첫 줄에서 끝난다. (이 FAR 패턴은 이번 랩에서 실행하지 않았다 — 가이드.)</p>
+<p><strong>전원 꺼진 블록의 레지스터 접근.</strong> 런타임 PM으로 클록이 꺼진 IP의 레지스터를 <code>readl()</code>하면 SoC에 따라 동기 external abort(<code>EA = 1</code>, <code>FSC = 0x10</code>)나 비동기 <code>SError Interrupt</code>가 난다. SError는 pc가 원인 명령이 아닐 수 있다(BFSR.IMPRECISERR와 같다). Don의 RF 칩 bring-up 경험 — "버스 에러가 나면 먼저 클록·전원·리셋" — 이 그대로 통한다(N5 런타임 PM, H 모듈). (가이드 — QEMU virt에서는 재현하지 않았다.)</p>
+<p><strong>필드 장비의 로그 회수.</strong> 양산 드론·카메라에는 UART가 없다. <code>panic_on_oops=1</code> + <code>panic=5</code> + ramoops(L7)로 Oops 텍스트를 다음 부팅에 <code>/sys/fs/pstore/dmesg-ramoops-0</code>로 회수하고, 빌드 서버의 build-id 매칭 vmlinux·<code>.ko</code>로 §10 순서를 돌린다. 모듈의 디버그 정보는 이미지에서 strip되므로(<code>INSTALL_MOD_STRIP=1</code>) <strong>strip 전 <code>.ko</code>를 따로 보관</strong>해야 한다 — 없으면 Call trace의 <code>[모듈]</code> 줄은 함수+오프셋까지만 읽힌다.</p>
+<p><strong>벤더 BSP 모듈.</strong> 소스 없는 벤더 <code>.ko</code>(GPU, Wi-Fi)에서 Oops가 나면 <code>Tainted: P</code>(proprietary)가 붙고 커뮤니티 지원은 끝이다. 그래도 <code>Code:</code>와 <code>objdump -dr</code>로 죽은 명령과 오프셋까지는 직접 볼 수 있어 벤더에 보낼 버그 리포트의 질이 달라진다.</p>
+<hr>
+<h2 id="13-흔한-실수와-증상">13. 흔한 실수와 증상<a class="anchor" href="#13-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>마지막 Oops부터 읽는다</td><td>원인과 무관한 코어 함수를 쫓는다</td><td>첫 Oops의 후유증(§8.2)</td><td><code>[#1]</code>, taint <code>D</code>/<code>W</code> 없는 첫 보고부터</td></tr><tr><td>Call trace만 보고 lr을 안 본다</td><td>호출자를 못 찾는다</td><td>leaf 함수는 frame record를 안 만든다(§4.2)</td><td>pc·lr·Call trace를 함께 읽는다</td></tr><tr><td>다른 빌드의 vmlinux/.ko로 해독</td><td>그럴듯하지만 틀린 줄 번호</td><td>오프셋이 빌드마다 다르다</td><td>build-id 일치하는 디버그 심볼 보관</td></tr><tr><td><code>decode_stacktrace.sh</code> 결과를 그대로 믿는다</td><td>함수명은 맞고 줄이 다른 함수</td><td><code>.text.unlikely</code> 등 섹션 미지정(§6.3)</td><td><code>faddr2line</code>, <code>readelf -s</code> 섹션 확인 후 <code>addr2line -j</code></td></tr><tr><td><code>faddr2line</code>이 "size mismatch"로 거부하자 포기</td><td><code>no match</code></td><td>kallsyms 크기가 다음 심볼 거리</td><td><code>/size</code>를 떼고 다시</td></tr><tr><td><code>.ko</code>를 <code>objdump -d</code>만으로 읽음</td><td><code>bl</code>이 엉뚱한 함수를 가리킴</td><td>재배치 전 오브젝트</td><td><code>objdump -dr</code></td></tr><tr><td>날 주소를 System.map과 바로 비교</td><td>심볼이 안 맞는다</td><td>KASLR</td><td><code>Kernel Offset</code> 또는 <code>_text</code> 차이를 뺀다, 모듈은 섹션 시작을 뺀다</td></tr><tr><td>pc가 <code>string</code>/<code>memcpy</code>라 커널 버그라고 결론</td><td>엉뚱한 곳에 패치</td><td>크래시 지점 ≠ 버그 지점(§9.4)</td><td>나쁜 데이터를 넘긴 호출자·오염원 추적, KASAN</td></tr><tr><td>0 나누기가 안 죽으니 괜찮다고 판단</td><td>조용히 틀린 값</td><td>arm64 <code>sdiv</code>는 트랩 없음</td><td>UBSAN, 제수 검사</td></tr><tr><td>양산에서 <code>panic_on_oops=0</code></td><td>반쯤 죽은 커널로 계속 동작, 락·IRQ 꺼진 채</td><td>Oops는 태스크만 죽인다</td><td><code>panic_on_oops=1</code> + <code>panic=N</code> + pstore</td></tr></tbody></table></div>
+<hr>
+<h2 id="14-면접에서-이렇게-말한다">14. 면접에서 이렇게 말한다<a class="anchor" href="#14-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> Here's a kernel oops. Walk me through how you read it.</p>
+<p><strong>A.</strong> 첫 Oops인지(<code>[#1]</code>, taint) 확인 → 첫 줄과 ESR로 종류(커널 data abort, 읽기, L2 translation fault)와 FAR(0x10) → <code>Modules linked in</code>·taint로 용의자 → <code>pc</code>를 <code>faddr2line</code>으로 소스 줄과 인라인 체인 → <code>lr</code>과 Call trace로 호출 경로(leaf면 lr만이 호출자) → 레지스터와 <code>Code:</code>로 어느 포인터가 NULL이었는지, <code>pahole</code>로 오프셋을 멤버 이름으로 → 마지막으로 크래시 지점이 진짜 버그 지점인지 판단한다.</p>
+<blockquote><p>First I make sure it's the first oops — the [#1] and no D taint — because later ones are often fallout. The first line plus the ESR tell me what happened: here a kernel-mode data abort, a read, translation fault, at address 0x10. Then Modules linked in and the taint flags give me suspects. I take the pc, symbol plus offset, and run faddr2line against the exact same build's module to get the file, line and inline chain. Then lr and the call trace for the call path — if the faulting function is a leaf, the caller only shows up in lr. The registers and the Code line tell me which register held the bad pointer, and pahole turns the offset into a struct member. Last question: is the crash site the bug site, or did someone corrupt the data earlier?</p></blockquote>
+<p><strong>꼬리 질문</strong>: "decode_stacktrace.sh가 틀린 줄을 줄 수 있나?" → 함수가 <code>.text.unlikely</code> 같은 다른 섹션에 있으면 그렇다. 실제로 겪었고 faddr2line/<code>addr2line -j</code>로 교차 확인했다.</p>
+<p><strong>Q.</strong> The faulting address is 0x10. What does that tell you?</p>
+<p><strong>A.</strong> 첫 페이지 안의 작은 주소는 NULL 포인터 + 멤버 오프셋이다. 0x10이면 오프셋 16의 멤버다. <code>Code:</code>의 <code>ldr w0, [x0, #16]</code>이 4바이트 읽기임을 확인하고, <code>pahole</code>로 그 구조체의 16번 오프셋 멤버를 찾는다. 그다음은 "왜 그 포인터가 NULL이었나" — 대개 조회·할당 함수의 실패 반환값을 확인하지 않은 것이다.</p>
+<blockquote><p>A small address in the first page means a NULL struct pointer plus a member offset — here offset 16. The Code line shows ldr w0, [x0, #16], so a 32-bit load with x0 equal to zero. pahole on the struct tells me which member sits at offset 16; in my lab it was the irq field. Then the real question is why the pointer was NULL — usually a lookup or allocation whose failure return wasn't checked. If the address were something like 6b6b6b6b, I'd think use-after-free instead, and dead000000000100 or 122 means a list entry that was already deleted.</p></blockquote>
+<p><strong>Q.</strong> What's the difference between an oops, a panic, a BUG and a WARN?</p>
+<p><strong>A.</strong> Oops는 커널 모드 예외로 현재 태스크만 죽이고 계속 간다(taint D). panic은 모든 CPU를 멈춘다. <code>BUG_ON</code>은 일부러 Oops를 내는 것(<code>brk</code>)이고, WARN은 콜스택만 찍고 계속 실행한다(taint W). Oops가 인터럽트 문맥이면 panic이고, <code>panic_on_oops</code>/<code>panic_on_warn</code>으로 정책을 바꾼다.</p>
+<blockquote><p>An oops is an unhandled exception in kernel mode: the kernel prints the report and kills the current task, but keeps running, tainted D. A panic stops all CPUs. BUG_ON deliberately triggers an oops through a brk instruction; WARN prints the same kind of report and then just continues, tainted W. An oops in interrupt context always becomes a panic, and panic_on_oops or panic_on_warn turn the others into panics. On production embedded devices I set panic_on_oops plus a reboot timeout and capture the log with pstore, because a half-dead kernel holding locks is worse than a clean reboot.</p></blockquote>
+<p><strong>Q.</strong> Why might the function that called the crashing function be missing from the call trace?</p>
+<p><strong>A.</strong> arm64 unwinder는 x29 frame record 체인을 따라간다. leaf 함수는 frame record를 안 만들어서 x29가 여전히 호출자의 record를 가리키고, 그 record에는 호출자의 <strong>복귀 주소</strong>(한 단계 위)만 있다. 호출자 자신의 위치는 x30(lr)에만 있다. 인라인된 함수도 Call trace에 안 나오며 faddr2line의 inlined-by 체인으로만 보인다.</p>
+<blockquote><p>The arm64 unwinder walks the chain of frame records — x29 and x30 pairs pushed in each prologue. A leaf function doesn't push one, so x29 still points at the caller's record, which holds the caller's return address — one level up. The caller's own position is only in lr. I saw exactly that: the pc was in a small getter, and its caller appeared only on the lr line. Inlined functions never appear either; faddr2line's inlined-by chain shows them.</p></blockquote>
+<p><strong>Q.</strong> You only have a raw address from a field log. How do you map it to a symbol with KASLR on?</p>
+<p><strong>A.</strong> 커널 이미지는 panic 로그의 <code>Kernel Offset: X</code>나 런타임 <code>_text</code>와 System.map <code>_text</code>의 차이로 오프셋을 구해 빼면 System.map 주소가 된다. 모듈은 별도 무작위 배치라 <code>/sys/module/&lt;m&gt;/sections/</code> 시작 주소를 빼서 섹션 오프셋으로 만들고 <code>addr2line -j &lt;섹션&gt;</code> 또는 gdb <code>add-symbol-file</code>에 섹션 주소를 다 준다.</p>
+<blockquote><p>For the kernel image I subtract the KASLR offset — either from the Kernel Offset line in the panic, or runtime _text minus System.map _text — and then addr2line against vmlinux. Modules are randomized separately, so I subtract the section base from /sys/module/name/sections and use addr2line with -j for that section, or give gdb add-symbol-file every section address. For repeatable debugging sessions I'll just boot with nokaslr.</p></blockquote>
+<p><strong>Q.</strong> The pc is inside printk's string(). Is this a printk bug?</p>
+<p><strong>A.</strong> 거의 아니다. 코어 함수에서 죽으면 나쁜 데이터를 넘긴 쪽을 의심한다. 실험에서 FAR이 ASCII 'A' − 8이었다 — 문자열이 리스트 포인터를 덮었고 <code>container_of</code>가 8을 뺐다. 버그는 덮어쓴 코드였고 Call trace에는 없었다. <code>DEBUG_LIST</code>나 KASAN으로 더 일찍 잡는다.</p>
+<blockquote><p>Almost never. When the pc is in a core helper like string, memcpy or list code, I look for who passed bad data. In my lab the address was 0x4141414141414139 — ASCII A's minus 8 — so string data had overwritten a list pointer and container_of subtracted the member offset. The real bug was an earlier buffer overrun that had already returned, so it's not on the stack at all. I'd reproduce with CONFIG_DEBUG_LIST or KASAN to catch it at the write.</p></blockquote>
+<p><strong>Q.</strong> How does this map to Cortex-M HardFault debugging you've done?</p>
+<p><strong>A.</strong> 1:1이다. CFSR ↔ ESR, BFAR/MMFAR ↔ FAR(BFARVALID ↔ FnV 반대 극성), stacked PC/LR/xPSR ↔ pc/lr/pstate, imprecise bus fault ↔ SError, map 파일 ↔ System.map + KASLR 보정. 차이는 Linux는 해석까지 찍어 주고, 기본이 시스템 정지가 아닌 태스크 종료라는 것.</p>
+<blockquote><p>It's almost one to one. CFSR maps to ESR, BFAR and MMFAR to FAR — with FnV as the inverted BFARVALID — and the stacked PC, LR and xPSR to the pc, lr and pstate lines. An imprecise bus fault is an SError on arm64. The map file becomes System.map plus a KASLR correction. The differences are that Linux decodes everything for you, and that by default it kills only the current task instead of halting the system — which is why I'd turn on panic_on_oops on a product.</p></blockquote>
+<hr>
+<h2 id="15-직접-해보기">15. 직접 해보기<a class="anchor" href="#15-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong> — ESR <code>0x92000047</code>을 손으로 풀어라. EC·WnR·DFSC는? 커널 모드인가? 정답/힌트: EC = 0x24(하위 EL = 유저 모드 data abort), WnR = 1, DFSC 0x07 L3 translation. 커널 Oops가 아니라 유저 프로세스의 page fault(대개 정상 처리되거나 SIGSEGV)다.</li><li><strong>개념</strong> — FAR이 <code>fffffffffffffff4</code>였다. 무엇을 의심하나? 정답/힌트: <code>ERR_PTR(-12)</code>(<code>-ENOMEM</code>) 역참조. <code>IS_ERR()</code> 검사 누락.</li><li><strong>해독 과제</strong> — §8.6 lockup 로그의 <code>m3_lock_init+0x30/0xfb0</code>을 <code>faddr2line</code>으로 풀어 보라. 처음에 무슨 메시지가 나오나? 정답/힌트: size mismatch로 거부된다. <code>/0xfb0</code>를 떼면 된다. <code>0xfb0</code>이 왜 그렇게 큰지 §6.2로 설명해 보라.</li><li><strong>해독 과제</strong> — §9.4 <code>list</code> Oops의 <code>string+0x50/0x140</code>을 vmlinux-trace로 <code>faddr2line</code>하고, 출력의 두 줄(653, 735)이 각각 무슨 함수인지 말하라. 정답/힌트: <code>string_nocheck</code>(vsprintf.c:653)가 <code>string</code>(735)에 인라인됐다. 실제 출력은 §9.4 위 문단.</li><li><strong>관찰 과제</strong> — QEMU 게스트에서 <code>echo 1 &gt; /proc/sys/kernel/panic_on_oops</code> 후 같은 Oops를 내고, panic 줄의 <code>Kernel Offset</code>으로 Call trace의 <code>vfs_write</code> 런타임 주소를 계산해 System.map과 대조하라. 정답/힌트: §7.2. 오프셋을 더하면 런타임, 빼면 System.map.</li><li><strong>코드 과제</strong> — <code>__packed</code> 구조체 안에 <code>atomic_t</code>를 둔 모듈을 만들어 <code>atomic_inc</code>를 해 보고, FSC가 0x21인지, 그리고 <code>__packed</code>를 빼면 사라지는지 확인하라. 정답/힌트: 필드 오프셋이 홀수가 되게 <code>u8</code> 하나를 앞에 둔다. <code>ldxr</code>/<code>stxr</code> 또는 LSE의 <code>ldadd</code> 명령이 정렬을 요구한다(CPU에 따라 명령이 다름 — cortex-a57은 LSE 없음).</li><li><strong>관찰 과제</strong> — <code>uaf</code>를 <code>slab_debug=P</code> 없이 돌려 보라. 무슨 일이 일어나나? 왜 그런가? 정답/힌트: 아마 아무 일도 안 일어난다(해제된 메모리에 옛 값이 남음). §9.2. Image-kasan에서 돌리면 KASAN 리포트가 나온다(M8).</li></ol>
+<hr>
+<h2 id="16-용어-사전">16. 용어 사전<a class="anchor" href="#16-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>Oops</td><td>커널 모드 예외 보고</td><td>현재 태스크를 죽이고 커널은 계속 돈다</td></tr><tr><td>panic</td><td>커널 정지</td><td><code>Kernel panic - not syncing:</code>. 모든 CPU 정지</td></tr><tr><td>ESR_EL1</td><td>Exception Syndrome Register</td><td>예외 원인. EC·IL·ISS. CFSR에 해당</td></tr><tr><td>FAR_EL1</td><td>Fault Address Register</td><td>결함 주소. BFAR/MMFAR에 해당</td></tr><tr><td>ELR_EL1</td><td>Exception Link Register</td><td>예외를 낸 명령 주소 = Oops의 <code>pc</code></td></tr><tr><td>EC</td><td>Exception Class</td><td>ESR 31:26. 0x25 커널 data abort, 0x3c BRK</td></tr><tr><td>DFSC</td><td>Data Fault Status Code</td><td>translation/permission/alignment 등 종류</td></tr><tr><td>WnR</td><td>Write not Read</td><td>1이면 쓰기 접근</td></tr><tr><td>frame record</td><td>x29·x30 쌍</td><td>함수 프롤로그가 스택에 넣는 연결 리스트 노드, unwinder가 따라감</td></tr><tr><td>leaf 함수</td><td>다른 함수를 안 부르는 함수</td><td>frame record를 안 만들 수 있음 → 호출자가 Call trace에서 빠짐</td></tr><tr><td>taint</td><td>오염 플래그</td><td>커널이 "정상이 아님"을 기록한 비트. <code>D</code> DIE, <code>W</code> WARN, <code>O</code> OOT, <code>E</code> 서명 없음, <code>L</code> softlockup</td></tr><tr><td>KASLR</td><td>커널 주소 무작위화</td><td>부팅마다 이미지 위치가 바뀜, <code>Kernel Offset</code>으로 보정</td></tr><tr><td>System.map</td><td>빌드 시점 심볼표</td><td>KASLR 오프셋 0 기준 주소</td></tr><tr><td>kallsyms</td><td>런타임 심볼표</td><td>Oops에 심볼 이름을 찍는 근거, <code>/proc/kallsyms</code></td></tr><tr><td>faddr2line</td><td>커널 스크립트</td><td><code>심볼+off/size</code> → 파일:줄 + 인라인 체인</td></tr><tr><td>decode_stacktrace.sh</td><td>커널 스크립트</td><td>Oops 로그 전체를 파일:줄로 변환</td></tr><tr><td>decodecode</td><td>커널 스크립트</td><td><code>Code:</code> 줄 역어셈블</td></tr><tr><td>pahole</td><td>DWARF/BTF 도구</td><td>구조체 레이아웃·멤버 오프셋</td></tr><tr><td><code>.text.unlikely</code></td><td>cold 코드 섹션</td><td>거의 실행 안 되는 함수를 모아 둔 섹션, 줄 번호 도구의 함정</td></tr><tr><td>POISON_FREE (0x6b)</td><td>slab 독 값</td><td>해제된 객체를 칠한 값 → UAF 신호</td></tr><tr><td>LIST_POISON1/2</td><td>리스트 독 값</td><td><code>dead…100</code>/<code>dead…122</code>, 삭제된 노드</td></tr><tr><td>VMAP_STACK</td><td>vmalloc 커널 스택</td><td>guard page로 overflow를 즉시 잡음</td></tr><tr><td>soft lockup</td><td>CPU 독점</td><td>한 CPU에서 <code>2 × watchdog_thresh</code>초 이상 스케줄 안 됨</td></tr></tbody></table></div>
+<hr>
+<h2 id="17-요약-체크리스트">17. 요약 &amp; 체크리스트<a class="anchor" href="#17-요약-체크리스트" aria-label="link">#</a></h2>
+<p>Oops는 HardFault 덤프를 커널이 해석까지 해서 찍어 주는 것이다. 첫 Oops를 고르고, 첫 줄·ESR(EC·WnR·DFSC)·FAR로 "무엇이 왜"를, <code>pc</code>→<code>faddr2line</code>으로 "어디서"를, <code>lr</code>·Call trace로 "누가"를, 레지스터·<code>Code:</code>·<code>pahole</code>로 "어떤 데이터"를 읽는다. 도구는 같은 빌드의 심볼이 있어야 맞고, 섹션(<code>.text.unlikely</code>)·kallsyms 크기·재배치 전 objdump 같은 함정 때문에 두 도구로 교차 확인한다. KASLR은 <code>Kernel Offset</code>/<code>_text</code> 차이로, 모듈은 섹션 시작 주소로 보정한다. 주소 패턴(0x10, <code>6b6b</code>, <code>dead…100/122</code>, ASCII, 홀수 주소, 스택 하한)은 버그 유형을 바로 알려 주고, 메모리 오염 버그는 크래시 지점과 버그 지점이 다르다는 것을 항상 기억한다. Oops·panic·BUG·WARN·lockup은 보고 형식과 "그 뒤"가 다르며, 양산 장비는 <code>panic_on_oops</code> + 리부트 + pstore가 기본 정책이다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>arm64 Oops의 모든 줄(첫 줄 ~ end trace)이 무엇인지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>ESR 값을 EC·IL·WnR·DFSC로 손으로 풀 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Cortex-M CFSR/BFAR/stacked PC·LR과 ESR/FAR/pc·lr을 대응시켜 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>leaf 함수의 호출자가 Call trace에서 빠지는 이유를 frame record로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>faddr2line</code>, <code>decode_stacktrace.sh</code>, <code>addr2line -j</code>, <code>gdb list</code>, <code>decodecode</code>, <code>pahole</code>을 써서 pc를 소스 줄·멤버 이름으로 바꿀 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>decode_stacktrace.sh</code>가 틀리는 경우(.text.unlikely)와 <code>faddr2line</code> size mismatch를 설명하고 우회할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>KASLR 런타임 주소를 System.map 주소로, 모듈 주소를 섹션 오프셋으로 바꿀 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>0x10, <code>6b6b…</code>, <code>dead…100/122</code>, ASCII, 비정렬, 스택 하한 패턴을 보고 버그 유형을 추정할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Oops·panic·BUG·WARN·soft lockup의 첫 줄과 "그 뒤"를 구별할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>panic_on_oops</code>·<code>panic_on_warn</code>·<code>panic=</code>의 의미와 양산 권장값을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>크래시 지점 ≠ 버그 지점 사례를 하나 들어 추리 과정을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>붙여 넣은 Oops 하나로 시작하는 현장 워크플로 9단계를 말할 수 있다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — "Bug hunting" (<code>admin-guide/bug-hunting</code>): Oops 읽기, <code>faddr2line</code>, <code>decode_stacktrace.sh</code>, <code>gdb</code> 사용 — https://docs.kernel.org/admin-guide/bug-hunting.html</li><li>docs.kernel.org — "Tainted kernels" (<code>admin-guide/tainted-kernels</code>): taint 문자·비트 표 — https://docs.kernel.org/admin-guide/tainted-kernels.html</li><li>docs.kernel.org — "Reporting issues" (<code>admin-guide/reporting-issues</code>): 첫 Oops, taint, 디코드된 로그를 보고하는 법 — https://docs.kernel.org/admin-guide/reporting-issues.html</li><li>docs.kernel.org — "Softlockup detector and hardlockup detector" (<code>admin-guide/lockup-watchdogs</code>) — https://docs.kernel.org/admin-guide/lockup-watchdogs.html</li><li>커널 소스 (6.18.55, elixir.bootlin.com에서 열람): <code>arch/arm64/mm/fault.c</code>(<code>do_mem_abort</code>, <code>die_kernel_fault</code>, <code>mem_abort_decode</code>, <code>show_pte</code>), <code>arch/arm64/kernel/traps.c</code>(<code>die</code>, <code>__die</code>, <code>bug_brk_handler</code>), <code>arch/arm64/kernel/stacktrace.c</code>(unwinder), <code>lib/bug.c</code>(<code>report_bug</code>), <code>include/linux/poison.h</code>, <code>scripts/faddr2line</code>, <code>scripts/decode_stacktrace.sh</code>, <code>scripts/decodecode</code></li><li>Arm Architecture Reference Manual for A-profile (DDI 0487) — ESR_EL1, FAR_EL1, ISS encoding for Data Abort</li><li>Arm, "ARMv7-M Architecture Reference Manual" — CFSR/HFSR/BFAR (대응표의 Cortex-M 쪽)</li><li>관련 노트: E4 §4·§8(스택 overflow·Oops 첫 읽기), M1(printk·콘솔), M2(taint 표·<code>/proc/modules</code>), M4(kgdb/JTAG), M8(KASAN·lockdep·UBSAN), L7(pstore·kdump)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-17_M2_kernel_state.html"><span class="dir">← 이전</span><span class="nm">M2. 커널 상태 들여다보기 — /proc · /sys · debugfs로 하는 bring-up 진단 체크리스트</span></a><a class="next" href="2026-10-17_M4_kernel_debugger.html"><span class="dir">다음 →</span><span class="nm">M4. 커널 디버거 — kgdb, JTAG + OpenOCD/Lauterbach, Magic SysRq, vmlinux 심볼</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l3"><a href="#0-1-이-노트의-실험-진짜-oops-14개">0.1 이 노트의 실험 — 진짜 Oops 14개</a></li><li class="l2"><a href="#1-oops란-무엇인가-정의-세-줄">1. Oops란 무엇인가 — 정의 세 줄</a></li><li class="l2"><a href="#2-arm64-oops-해부-한-줄씩">2. arm64 Oops 해부 — 한 줄씩</a></li><li class="l3"><a href="#2-1-줄별-의미표">2.1 줄별 의미표</a></li><li class="l3"><a href="#2-2-pstate-읽는-법">2.2 pstate 읽는 법</a></li><li class="l2"><a href="#3-esr-왜-죽었나-를-비트로-읽기">3. ESR — "왜 죽었나"를 비트로 읽기</a></li><li class="l3"><a href="#3-1-예제-esr-해독기-esr-py">3.1 예제 — ESR 해독기 (esr.py)</a></li><li class="l3"><a href="#3-2-cortex-m-hardfault-arm64-oops-대응표">3.2 Cortex-M HardFault ↔ arm64 Oops 대응표</a></li><li class="l2"><a href="#4-call-trace-콜스택은-어떻게-만들어지고-어디서-거짓말하나">4. Call trace — 콜스택은 어떻게 만들어지고, 어디서 거짓말하나</a></li><li class="l3"><a href="#4-1-직관-frame-record-체인">4.1 직관 — frame record 체인</a></li><li class="l3"><a href="#4-2-맹점-1-leaf-함수의-호출자가-사라진다">4.2 맹점 1 — leaf 함수의 호출자가 사라진다</a></li><li class="l3"><a href="#4-3-맹점-2-lr은-마지막-bl의-복귀-주소-일-뿐이다">4.3 맹점 2 — lr은 "마지막 bl의 복귀 주소"일 뿐이다</a></li><li class="l3"><a href="#4-4-맹점-3-인라인과-constprop-isra">4.4 맹점 3 — 인라인과 .constprop/.isra</a></li><li class="l2"><a href="#5-code-줄-죽은-명령어를-직접-보기">5. Code: 줄 — 죽은 명령어를 직접 보기</a></li><li class="l3"><a href="#5-1-예제-null-dbldel-misalign-list-bugon의-code-해독">5.1 예제 — null·dbldel·misalign·list·bugon의 Code: 해독</a></li><li class="l2"><a href="#6-해독-도구-상자-어떤-도구를-언제-쓰고-언제-틀리나">6. 해독 도구 상자 — 어떤 도구를 언제 쓰고, 언제 틀리나</a></li><li class="l3"><a href="#6-1-예제-decode_stacktrace-sh로-로그-전체-풀기-그리고-틀린-답">6.1 예제 — decode_stacktrace.sh로 로그 전체 풀기 (그리고 틀린 답)</a></li><li class="l3"><a href="#6-2-예제-faddr2line-크기-불일치-경고와-인라인-체인">6.2 예제 — faddr2line: 크기 불일치 경고와 인라인 체인</a></li><li class="l3"><a href="#6-3-왜-decode_stacktrace-sh가-틀렸나-text-unlikely">6.3 왜 decode_stacktrace.sh가 틀렸나 — .text.unlikely</a></li><li class="l3"><a href="#6-4-예제-objdump-dr과-gdb로-죽은-명령과-줄을-확인">6.4 예제 — objdump -dr과 gdb로 죽은 명령과 줄을 확인</a></li><li class="l3"><a href="#6-5-예제-pahole-오프셋을-멤버-이름으로">6.5 예제 — pahole: 오프셋을 멤버 이름으로</a></li><li class="l2"><a href="#7-kaslr과-system-map-주소를-빌드-결과물과-맞추기">7. KASLR과 System.map — 주소를 빌드 결과물과 맞추기</a></li><li class="l3"><a href="#7-1-직관">7.1 직관</a></li><li class="l3"><a href="#7-2-예제-런타임-주소-system-map-주소">7.2 예제 — 런타임 주소 → System.map 주소</a></li><li class="l3"><a href="#7-3-nokaslr-디버깅할-때는-끄는-것도-방법">7.3 nokaslr — 디버깅할 때는 끄는 것도 방법</a></li><li class="l3"><a href="#7-4-p-kptr_restrict와-주소-숨김">7.4 %p·kptr_restrict와 주소 숨김</a></li><li class="l2"><a href="#8-oops-panic-bug-warn-lockup-무엇이-다른가">8. Oops · panic · BUG · WARN · lockup — 무엇이 다른가</a></li><li class="l3"><a href="#8-1-한-장-비교">8.1 한 장 비교</a></li><li class="l3"><a href="#8-2-bug_on-그리고-첫-oops-뒤의-커널은-믿을-수-없다">8.2 BUG_ON — 그리고 첫 Oops 뒤의 커널은 믿을 수 없다</a></li><li class="l3"><a href="#8-3-warn-계속-달리는-경고-그리고-_once">8.3 WARN — 계속 달리는 경고, 그리고 _ONCE</a></li><li class="l3"><a href="#8-4-bug-scheduling-while-atomic-검사기의-보고">8.4 BUG: scheduling while atomic — 검사기의 보고</a></li><li class="l3"><a href="#8-5-정책-panic_on_oops-panic_on_warn">8.5 정책 — panic_on_oops, panic_on_warn</a></li><li class="l3"><a href="#8-6-lockup-별도-모듈로-soft-lockup-내-보기">8.6 lockup — 별도 모듈로 soft lockup 내 보기</a></li><li class="l2"><a href="#9-주소-패턴과-사례-숫자만-보고-버그를-추정하기">9. 주소 패턴과 사례 — 숫자만 보고 버그를 추정하기</a></li><li class="l3"><a href="#9-1-패턴-표">9.1 패턴 표</a></li><li class="l3"><a href="#9-2-사례-use-after-free-slab_debug-p">9.2 사례 — use-after-free (slab_debug=P)</a></li><li class="l3"><a href="#9-3-사례-list_del-두-번-dead-108">9.3 사례 — list_del 두 번 (dead…108)</a></li><li class="l3"><a href="#9-4-사례-크래시-지점-버그-지점-list">9.4 사례 — 크래시 지점 ≠ 버그 지점 (list)</a></li><li class="l3"><a href="#9-5-사례-정렬-fault-misalign">9.5 사례 — 정렬 fault (misalign)</a></li><li class="l3"><a href="#9-6-사례-스택-overflow-stack">9.6 사례 — 스택 overflow (stack)</a></li><li class="l3"><a href="#9-7-사례-0으로-나누기는-트랩이-아니다-div0">9.7 사례 — 0으로 나누기는 트랩이 아니다 (div0)</a></li><li class="l2"><a href="#10-현장-워크플로-붙여-넣은-oops-하나만-받았을-때">10. 현장 워크플로 — 붙여 넣은 Oops 하나만 받았을 때</a></li><li class="l2"><a href="#11-커널-안에서는-무슨-일이-일어나나">11. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#12-embedded-실무에서-다시-보기">12. Embedded 실무에서 다시 보기</a></li><li class="l2"><a href="#13-흔한-실수와-증상">13. 흔한 실수와 증상</a></li><li class="l2"><a href="#14-면접에서-이렇게-말한다">14. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#15-직접-해보기">15. 직접 해보기</a></li><li class="l2"><a href="#16-용어-사전">16. 용어 사전</a></li><li class="l2"><a href="#17-요약-체크리스트">17. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

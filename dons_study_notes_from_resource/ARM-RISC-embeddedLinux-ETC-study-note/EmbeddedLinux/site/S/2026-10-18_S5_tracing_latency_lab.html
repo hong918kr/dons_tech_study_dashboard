@@ -1,0 +1,1460 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>S5. 트레이싱 실습 — IRQ→유저 지연을 끝에서 끝까지 재고, ftrace로 증명하고, PREEMPT vs PREEMPT_RT를 비교하기</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="S/2026-10-18_S5_tracing_latency_lab">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">S. 실습 프로젝트 · S5. 트레이싱 실습 — IRQ→유저 지연을 끝에서 끝까지 재고, ftrace로 증명하고, PREEMPT vs PREEMPT_RT를 비교하기</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">S. 실습 프로젝트 · Hands-on Labs</div>
+      <h1>S5. 트레이싱 실습 — IRQ→유저 지연을 끝에서 끝까지 재고, ftrace로 증명하고, PREEMPT vs PREEMPT_RT를 비교하기</h1>
+      <div class="meta"><span>186분 읽기</span><span>1850줄</span><span>69개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: "알려진 시각에 IRQ를 일으키고 hard IRQ에서 타임스탬프를 찍는" 측정 모듈과 SCHED_FIFO 대기 스레드를 직접 만들어 IRQ→핸들러→깨어남→유저 구간을 쪼개 잴 수 있다 · 그 경로를 trace-cmd 이벤트, function_graph, kprobe + hist 트리거 + synthetic event로 "실제로 그 길로 갔다"고 증명할 수 있다 · cyclictest·rtla timerlat으로 Image-trace(PREEMPT)와 Image-rt(PREEMPT_RT)를 idle/stress-ng/나쁜 드라이버 부하, CPU 격리 유무로 같은 조건에서 비교하고 그 숫자를 정직하게 설명할 수 있다 · 이 전부를 GitHub 저장소 <code>irq-latency-lab</code> + 3분 데모로 보여 줄 수 있다 <strong>왜 필요한가</strong>: 로보틱스·드론·국방·차량 면접에서 "PREEMPT_RT 써 봤나요? 지연은 얼마였고 어떻게 쟀나요? 어디서 시간이 샜는지 어떻게 알았나요?"는 거의 정해진 질문 순서다. 이 프로젝트는 그 세 질문에 "직접 만든 측정기 + 트레이스 증거 + 비교 실험"으로 답하게 해 준다 <strong>Don 기준 난이도</strong>: SSD 펌웨어에서 ISR 진입·태스크 깨어남 시각을 GPIO 토글과 로직 분석기로 쟀던 감각, "최악값이 스펙"이라는 감각은 이미 있다 / 새로 손에 붙일 것은 Linux 쪽 계약(hrtimer HARD 모드, swait, threaded IRQ, PREEMPT_RT에서 <code>spinlock_t</code>가 잠드는 락이 되는 것)과 ftrace의 고급 기능(hist 트리거, synthetic event, kprobe event)이다 <strong>선행 노트</strong>: M5(ftrace — §5.5 hist 트리거, §5.6 synthetic event, §6 kprobe, §11 trace-cmd), N1(지연 사슬 §3, PREEMPT_RT가 바꾸는 것 §5), N2(CPU 격리 §6, IRQ affinity §8), N3(cyclictest·rtla 측정법, TCG 경고 §0.1, 공정 비교 §10), F6(인터럽트 처리), F8(hrtimer), F3(sleep/wakeup), F4(locking), G7(misc device), H4(GPIO), S1(QEMU 랩), S2(첫 char driver)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-무엇을-만들고-무엇을-증명하나">0. 큰 그림 — 무엇을 만들고 무엇을 증명하나<a class="anchor" href="#0-큰-그림-무엇을-만들고-무엇을-증명하나" aria-label="link">#</a></h2>
+<h3 id="0-1-목표-한-줄">0.1 목표 한 줄<a class="anchor" href="#0-1-목표-한-줄" aria-label="link">#</a></h3>
+<p>"타이머가 정확히 t에 터지도록 예약했다. 내 RT 스레드는 유저 공간에서 언제 돌기 시작했나? 그 차이는 어느 구간에서 생겼나? PREEMPT_RT는 그중 어느 구간을 줄이나?" — 이것을 <strong>직접 만든 측정기</strong>로 재고, <strong>ftrace로 경로를 증명</strong>하고, <strong>표준 도구(cyclictest, rtla timerlat)로 교차 확인</strong>한다.</p>
+<p>Don의 SSD 경험으로 바꾸면 이렇다. 펌웨어에서 "NVMe doorbell → ISR 진입 → 명령 처리 태스크 깨어남"을 잴 때 ISR 첫 줄과 태스크 첫 줄에서 GPIO를 토글하고 로직 분석기로 봤다. 여기서는 GPIO 대신 <code>ktime_get_ns()</code>(CLOCK_MONOTONIC) 타임스탬프를 4곳에서 찍고, 로직 분석기 대신 ftrace가 "그 사이에 CPU가 무엇을 했나"를 보여 준다.</p>
+<h3 id="0-2-최종-결과물">0.2 최종 결과물<a class="anchor" href="#0-2-최종-결과물" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>결과물</th><th>위치</th><th>면접에서 보여 줄 것</th></tr></thead><tbody><tr><td>Git 저장소 <code>irq-latency-lab</code></td><td><code>~/.elinux_scratch/S5/irq-latency-lab/</code> (커밋 2개)</td><td>README, 모듈 2개, 유저 프로그램 2개, 게스트 스크립트, <code>plot.py</code></td></tr><tr><td>측정 모듈 <code>s5_irqlat.ko</code></td><td><code>kmod/</code></td><td>hrtimer HARD + swait로 hard IRQ에서 깨우기</td></tr><tr><td>나쁜 드라이버 <code>s5_hog.ko</code></td><td><code>kmod/</code></td><td><code>spinlock_t</code> 4 ms 보유 — PREEMPT_RT가 없애는 지연원</td></tr><tr><td>RT 대기 스레드 <code>s5_waiter</code>, GPIO 경로 <code>s5_gpio</code></td><td><code>user/</code></td><td>SCHED_FIFO 90 + <code>mlockall</code> + CPU 고정</td></tr><tr><td>ftrace 증명 스크립트</td><td><code>guest/phase_ftrace.sh</code></td><td>trace-cmd, function_graph, kprobe + hist + synthetic</td></tr><tr><td>결과 표와 SVG 8개</td><td><code>results/summary.txt</code>, <code>docs/*.svg</code></td><td>"어느 구간이 움직였나" 그림</td></tr></tbody></table></div>
+<p>먼저 결과부터 보자. 아래 그림이 이 프로젝트의 한 장 요약이다(실측, QEMU TCG).</p>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="24" font-size="13">idle, 각 구간의 p50 (us)</text>
+<text x="122" y="53" font-size="12" text-anchor="end">PREEMPT</text>
+<rect x="130.0" y="38" width="177.7" height="22" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<text x="218.8" y="53" font-size="12" text-anchor="middle">irq 174</text>
+<rect x="307.7" y="38" width="89.0" height="22" fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c"/>
+<text x="352.2" y="53" font-size="12" text-anchor="middle">wake 87</text>
+<rect x="396.7" y="38" width="29.2" height="22" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<text x="431.8" y="53" font-size="12">= 290 us</text>
+<text x="122" y="83" font-size="12" text-anchor="end">PREEMPT_RT</text>
+<rect x="130.0" y="68" width="223.8" height="22" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<text x="241.9" y="83" font-size="12" text-anchor="middle">irq 219</text>
+<rect x="353.8" y="68" width="85.8" height="22" fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c"/>
+<text x="396.7" y="83" font-size="12" text-anchor="middle">wake 84</text>
+<rect x="439.6" y="68" width="17.4" height="22" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<text x="463.0" y="83" font-size="12">= 321 us</text>
+<line x1="130.0" y1="96" x2="130.0" y2="100" stroke="currentColor"/>
+<text x="130.0" y="113" font-size="12" text-anchor="middle">0</text>
+<line x1="232.0" y1="96" x2="232.0" y2="100" stroke="currentColor"/>
+<text x="232.0" y="113" font-size="12" text-anchor="middle">100</text>
+<line x1="334.0" y1="96" x2="334.0" y2="100" stroke="currentColor"/>
+<text x="334.0" y="113" font-size="12" text-anchor="middle">200</text>
+<line x1="436.0" y1="96" x2="436.0" y2="100" stroke="currentColor"/>
+<text x="436.0" y="113" font-size="12" text-anchor="middle">300</text>
+<line x1="538.0" y1="96" x2="538.0" y2="100" stroke="currentColor"/>
+<text x="538.0" y="113" font-size="12" text-anchor="middle">400</text>
+<line x1="640.0" y1="96" x2="640.0" y2="100" stroke="currentColor"/>
+<text x="640.0" y="113" font-size="12" text-anchor="middle">500</text>
+<line x1="130" y1="96" x2="640" y2="96" stroke="currentColor"/>
+<text x="10" y="142" font-size="13">s5_hog 부하, total 상위 1% 표본의 구간별 평균 (us)</text>
+<text x="122" y="171" font-size="12" text-anchor="end">PREEMPT</text>
+<rect x="130.0" y="156" width="86.6" height="22" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<text x="173.3" y="171" font-size="12" text-anchor="middle">irq 849</text>
+<rect x="216.6" y="156" width="386.5" height="22" fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c"/>
+<text x="409.8" y="171" font-size="12" text-anchor="middle">wake 3789</text>
+<rect x="603.1" y="156" width="11.4" height="22" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<text x="122" y="201" font-size="12" text-anchor="end">PREEMPT_RT</text>
+<rect x="130.0" y="186" width="195.4" height="22" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<text x="227.7" y="201" font-size="12" text-anchor="middle">irq 1916</text>
+<rect x="325.4" y="186" width="69.0" height="22" fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c"/>
+<text x="359.9" y="201" font-size="12" text-anchor="middle">wake 676</text>
+<rect x="394.4" y="186" width="10.1" height="22" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<text x="410.5" y="201" font-size="12">= 2691 us</text>
+<line x1="130.0" y1="214" x2="130.0" y2="218" stroke="currentColor"/>
+<text x="130.0" y="231" font-size="12" text-anchor="middle">0</text>
+<line x1="232.0" y1="214" x2="232.0" y2="218" stroke="currentColor"/>
+<text x="232.0" y="231" font-size="12" text-anchor="middle">1000</text>
+<line x1="334.0" y1="214" x2="334.0" y2="218" stroke="currentColor"/>
+<text x="334.0" y="231" font-size="12" text-anchor="middle">2000</text>
+<line x1="436.0" y1="214" x2="436.0" y2="218" stroke="currentColor"/>
+<text x="436.0" y="231" font-size="12" text-anchor="middle">3000</text>
+<line x1="538.0" y1="214" x2="538.0" y2="218" stroke="currentColor"/>
+<text x="538.0" y="231" font-size="12" text-anchor="middle">4000</text>
+<line x1="640.0" y1="214" x2="640.0" y2="218" stroke="currentColor"/>
+<text x="640.0" y="231" font-size="12" text-anchor="middle">5000</text>
+<line x1="130" y1="214" x2="640" y2="214" stroke="currentColor"/>
+</svg></figure>
+<p>그림 1 — 측정한 지연 경로의 구간별 시간(실측). 위: idle에서 각 구간의 p50. 아래: 나쁜 드라이버(<code>s5_hog</code>) 부하에서 end-to-end 상위 1% 표본만 골라 구간별 평균을 쌓았다(PREEMPT 행의 합계는 약 4750 µs라 오른쪽 라벨이 생략됨). PREEMPT에서는 꼬리가 거의 전부 <strong>wake 구간</strong>(hard IRQ → 대기 스레드가 다시 실행)에 있고, PREEMPT_RT에서는 그 구간이 사라진다. 숫자 자체는 에뮬레이터 숫자다(아래 경고).</p>
+<h3 id="0-3-설계-결정-테스트-모듈인가-gpio-sim인가">0.3 설계 결정 — 테스트 모듈인가, gpio-sim인가<a class="anchor" href="#0-3-설계-결정-테스트-모듈인가-gpio-sim인가" aria-label="link">#</a></h3>
+<p>과제는 "알려진 시각에 IRQ를 일으키고 hard IRQ 핸들러에서 타임스탬프를 찍는 것"이다. 후보는 둘이었고, <strong>둘 다 만들었다</strong>. 역할이 다르기 때문이다.</p>
+<div class="tw"><table><thead><tr><th>기준</th><th>A. 자체 모듈 <code>s5_irqlat</code> (hrtimer)</th><th>B. gpio-sim + GPIO chardev v2</th></tr></thead><tbody><tr><td>IRQ 발생 시각</td><td><strong>정확히 안다</strong> — 예약한 만료 시각 <code>hrtimer_get_expires()</code></td><td>모른다 — sysfs <code>pull</code> write 직전 유저 시각이 대용</td></tr><tr><td>hard IRQ 타임스탬프</td><td>직접 찍음 (<code>s5_timer_fn</code>)</td><td>gpiolib-cdev가 <code>edge_irq_handler()</code>에서 찍어 <code>timestamp_ns</code>로 넘김</td></tr><tr><td>커널 코드 작성</td><td>108줄 모듈</td><td>0줄 (gpio-sim은 Image-trace/rt에 built-in)</td></tr><tr><td>실제 드라이버 경로와의 닮음</td><td>타이머 IRQ → 깨우기. timerlat/cyclictest와 같은 구조</td><td>센서 DRDY GPIO와 같은 경로: irq_sim → hard IRQ → <strong>threaded IRQ</strong> → kfifo → 깨우기</td></tr><tr><td>잴 수 있는 구간</td><td>irq / wake / ret / total 4개</td><td>trig→hardirq, hardirq→user 2개</td></tr></tbody></table></div>
+<p>결론: <strong>"IRQ latency"의 정확한 원점이 필요하면 A</strong>, <strong>실제 드라이버 경로(threaded IRQ 포함)를 보여 주려면 B</strong>. 면접 설명도 이 표 그대로 하면 된다. 실제 보드에서는 B의 "트리거"가 진짜 GPIO 엣지가 되고, 원점은 scope로 잰다(M11).</p>
+<h3 id="0-4-꼭-기억할-경고-tcg-숫자">0.4 꼭 기억할 경고 — TCG 숫자<a class="anchor" href="#0-4-꼭-기억할-경고-tcg-숫자" aria-label="link">#</a></h3>
+<blockquote><p><strong>TCG 경고</strong>: 모든 측정은 Mac(M2) → Lima VM <code>elinux</code>(호스트 커널 <code>7.0.0-38-generic</code>) → QEMU 10.2.1 TCG 게스트에서 했다. CPU가 소프트웨어로 에뮬레이션되고 vCPU는 호스트 스레드다. 그래서 p50이 수백 µs, max가 수십 ms인 것은 <strong>실제 하드웨어 성능이 아니다</strong>. 이 노트에서 믿을 것은 (1) 측정 방법, (2) 같은 파라미터에서의 <strong>상대 비교와 분포의 모양</strong>, (3) 트레이스가 원인을 가리키는 방식이다. 실제 i.MX8·AM62·Orin이라면 같은 명령으로 수 µs~수십 µs가 나온다. N3 §0.1, N1 §6과 같은 결론이고, 이 노트 §10에서 그 결론을 이번 데이터로 다시 확인한다.</p></blockquote>
+<hr>
+<h2 id="1-준비물과-저장소-레이아웃">1. 준비물과 저장소 레이아웃<a class="anchor" href="#1-준비물과-저장소-레이아웃" aria-label="link">#</a></h2>
+<h3 id="1-1-준비물">1.1 준비물<a class="anchor" href="#1-1-준비물" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>항목</th><th>이 노트에서 쓴 것</th><th>확인 방법</th></tr></thead><tbody><tr><td>VM</td><td>Lima <code>elinux</code>, aarch64, kernel <code>7.0.0-38-generic</code>, gcc 15.2</td><td><code>uname -r</code></td></tr><tr><td>커널</td><td><code>/var/lab/out/Image-trace</code> (6.18.55-trace), <code>Image-rt</code> (6.18.55-rt)</td><td>아래 예제 1</td></tr><tr><td>모듈 빌드 트리</td><td><code>/var/lab/out/linux-build-trace</code>, <code>linux-build-rt</code></td><td>vermagic이 다르다</td></tr><tr><td>게스트 rootfs</td><td><code>rootfs-trace.ext4</code> 위의 <strong>qcow2 overlay</strong> (복사 금지)</td><td>trace-cmd 3.2.0, cyclictest 2.50, rtla 6.18.55, stress-ng 0.17.06</td></tr><tr><td>QEMU</td><td><code>qemu-system-aarch64</code> 10.2.1, <code>-smp 2 -m 1G</code></td><td><code>--version</code></td></tr></tbody></table></div>
+<h3 id="1-2-예제-1-두-커널의-차이를-먼저-확인한다">1.2 예제 1 — 두 커널의 차이를 먼저 확인한다<a class="anchor" href="#1-2-예제-1-두-커널의-차이를-먼저-확인한다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 비교 대상 두 커널이 무엇이 같고 무엇이 다른지. 비교 실험은 "다른 것이 정확히 무엇인가"부터 적는다(N3 §10.1).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>uname -r
+for k in trace rt; do echo "== $k"; grep -E "^CONFIG_(PREEMPT|PREEMPT_RT|HZ|NO_HZ_FULL|RT_GROUP_SCHED|GPIO_SIM|9P_FS|HIST_TRIGGERS|SYNTH_EVENTS|KPROBE_EVENTS|TIMERLAT_TRACER)=" /var/lab/out/linux-build-$k/.config | tr "\n" " "; echo; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>7.0.0-38-generic
+== trace
+CONFIG_PREEMPT=y CONFIG_RT_GROUP_SCHED=y CONFIG_HZ=250 CONFIG_GPIO_SIM=y CONFIG_9P_FS=y CONFIG_TIMERLAT_TRACER=y CONFIG_KPROBE_EVENTS=y CONFIG_SYNTH_EVENTS=y CONFIG_HIST_TRIGGERS=y 
+== rt
+CONFIG_NO_HZ_FULL=y CONFIG_PREEMPT=y CONFIG_PREEMPT_RT=y CONFIG_HZ=1000 CONFIG_GPIO_SIM=y CONFIG_9P_FS=y CONFIG_TIMERLAT_TRACER=y CONFIG_KPROBE_EVENTS=y CONFIG_SYNTH_EVENTS=y CONFIG_HIST_TRIGGERS=y </code></pre></figure>
+<p>출력에서 볼 것: 차이는 <strong>PREEMPT_RT, HZ(250 vs 1000), NO_HZ_FULL(rt만), RT_GROUP_SCHED(trace만)</strong> 넷이다. <code>PREEMPT_DYNAMIC</code>이 없으므로 trace 커널을 부트 인자로 voluntary로 바꿀 수는 없다 — 이 노트의 "non-RT"는 full PREEMPT다. 보고서에는 "PREEMPT_RT 효과"가 아니라 "이 네 가지 차이의 합"이라고 적어야 정직하다. gpio-sim, 9p, hist/synthetic/kprobe 이벤트는 둘 다 built-in이라 추가 모듈이 필요 없다.</p>
+<h3 id="1-3-저장소-레이아웃">1.3 저장소 레이아웃<a class="anchor" href="#1-3-저장소-레이아웃" aria-label="link">#</a></h3>
+<figure class="code"><pre><code>irq-latency-lab/
+  README.md
+  kmod/     s5_irqlat.c  s5_hog.c  Kbuild  Makefile     (make K=trace / K=rt)
+  user/     s5_waiter.c  s5_gpio.c                      (static build in the VM)
+  guest/    init.sh (PID 1)  lib_load.sh  phase_smoke.sh  phase_matrix.sh
+            phase_ftrace.sh  phase_gpio.sh  phase_rtgroup.sh  phase_isocheck.sh
+  host/     prepare.sh  run_guest.sh  run_matrix.sh  run_extra.sh
+            initramfs_init.sh  plot.py
+  results/  summary.txt  matrix.log  raw_outputs.tgz
+  docs/     8 SVG charts</code></pre></figure>
+<p>소스는 Mac 쪽 <code>~/.elinux_scratch/S5/irq-latency-lab/</code>(VM에서 같은 절대 경로로 읽기 전용)에 있고, 빌드 산출물·게스트 이미지·결과는 VM의 <code>/var/tmp/S5/</code>에 만든다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<rect x="10" y="30" width="200" height="280" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="110" y="22" font-size="13" text-anchor="middle">Lima VM (elinux, 호스트 역할)</text>
+<rect x="20" y="45" width="180" height="40" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="70" font-size="12" text-anchor="middle">prepare.sh (빌드)</text>
+<rect x="20" y="100" width="180" height="40" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="125" font-size="12" text-anchor="middle">run_guest.sh (QEMU)</text>
+<rect x="20" y="155" width="180" height="40" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="180" font-size="12" text-anchor="middle">plot.py (표 + SVG)</text>
+<rect x="20" y="220" width="180" height="75" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="110" y="240" font-size="12" text-anchor="middle">9p 공유 /var/tmp/S5/share</text>
+<text x="110" y="260" font-size="12" text-anchor="middle">bin/ ko/ guest/</text>
+<text x="110" y="280" font-size="12" text-anchor="middle">out/ (결과)</text>
+<rect x="250" y="30" width="420" height="280" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="460" y="22" font-size="13" text-anchor="middle">QEMU 게스트 (TCG, -smp 2, -m 1G)</text>
+<rect x="265" y="45" width="185" height="40" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="357" y="70" font-size="12" text-anchor="middle">Image-trace 또는 Image-rt</text>
+<rect x="470" y="45" width="185" height="40" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="562" y="70" font-size="12" text-anchor="middle">initramfs /init</text>
+<rect x="470" y="105" width="185" height="40" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="562" y="130" font-size="12" text-anchor="middle">switch_root → PID 1</text>
+<rect x="265" y="105" width="185" height="40" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="357" y="122" font-size="12" text-anchor="middle">/dev/vda = qcow2</text>
+<text x="357" y="140" font-size="12" text-anchor="middle">overlay of rootfs-trace</text>
+<rect x="265" y="170" width="390" height="125" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="460" y="190" font-size="12" text-anchor="middle">phase_*.sh — CPU1에서 측정</text>
+<text x="280" y="215" font-size="12">insmod s5_irqlat.ko · (s5_hog.ko)</text>
+<text x="280" y="237" font-size="12">s5_waiter / s5_gpio — FIFO 90, mlockall</text>
+<text x="280" y="259" font-size="12">cyclictest · rtla timerlat · stress-ng</text>
+<text x="280" y="281" font-size="12">trace-cmd · tracefs hist/synthetic/kprobe</text>
+<line x1="195" y1="120" x2="262" y2="70" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="450" y1="65" x2="467" y2="65" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="562" y1="85" x2="562" y2="102" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="562" y1="145" x2="562" y2="167" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="262" y1="255" x2="198" y2="255" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="110" y1="85" x2="110" y2="97" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="110" y1="217" x2="110" y2="198" stroke="currentColor" marker-end="url(#ah1)"/>
+</svg></figure>
+<p>그림 2 — 실험 장치 전체. VM이 호스트 역할을 하고, 게스트는 매번 새로 부팅해 측정 스크립트를 PID 1로 돌린 뒤 결과를 9p 공유 디렉터리에 쓰고 스스로 꺼진다.</p>
+<hr>
+<h2 id="2-step-1-측정-모듈-s5_irqlat-알려진-시각의-hard-irq">2. Step 1 — 측정 모듈 <code>s5_irqlat</code>: 알려진 시각의 hard IRQ<a class="anchor" href="#2-step-1-측정-모듈-s5_irqlat-알려진-시각의-hard-irq" aria-label="link">#</a></h2>
+<h3 id="2-1-무엇을-만드나">2.1 무엇을 만드나<a class="anchor" href="#2-1-무엇을-만드나" aria-label="link">#</a></h3>
+<ul><li>misc device <code>/dev/s5_irqlat</code> (G7). <code>open()</code>하면 hrtimer가 <code>period_us</code>(기본 1000) 주기로 돈다.</li><li>타이머 콜백 <code>s5_timer_fn()</code>은 <strong>hard IRQ 문맥</strong>에서 돈다. 여기서 <code>t_hardirq</code>를 찍고, 예약 만료 시각 <code>t_expire</code>와 함께 저장한 뒤 대기자 하나를 깨운다.</li><li><code>read()</code>는 다음 만료까지 잠들고, 깨어나 커널 안에서 다시 돌기 시작한 시각 <code>t_kwake</code>를 찍어 <code>struct s5_sample</code>을 돌려준다. 유저는 <code>read()</code>가 돌아온 직후 <code>t_user</code>를 찍는다.</li></ul>
+<p>구간 정의는 이것이 전부다.</p>
+<div class="tw"><table><thead><tr><th>구간</th><th>식</th><th>이 구간에 들어 있는 것</th></tr></thead><tbody><tr><td>irq</td><td><code>t_hardirq − t_expire</code></td><td>타이머 HW → GIC → 예외 진입 → <code>hrtimer_interrupt</code> → 콜백 호출. <strong>IRQ off 구간</strong>이 여기를 늘린다</td></tr><tr><td>wake</td><td><code>t_kwake − t_hardirq</code></td><td><code>try_to_wake_up</code> → IRQ 종료 → (선점 가능해질 때까지 대기) → <code>__schedule</code> → 대기자 재개. <strong>preempt off 구간, 비선점 락</strong>이 여기를 늘린다</td></tr><tr><td>ret</td><td><code>t_user − t_kwake</code></td><td>샘플 복사, <code>copy_to_user</code>, syscall 복귀</td></tr><tr><td>total</td><td><code>t_user − t_expire</code></td><td>cyclictest가 재는 것과 같은 의미의 end-to-end</td></tr></tbody></table></div>
+<h3 id="2-2-코드-1-2-타이머-콜백">2.2 코드 (1/2) — 타이머 콜백<a class="anchor" href="#2-2-코드-1-2-타이머-콜백" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인가: hard IRQ 문맥에서 타임스탬프를 찍고, PREEMPT_RT에서도 합법적인 방법으로 대기자를 깨운다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* s5_irqlat: an hrtimer fires at a KNOWN absolute time, its callback runs in
+ * hard-IRQ context (HRTIMER_MODE_ABS_PINNED_HARD keeps it there even on
+ * PREEMPT_RT), stamps itself and wakes ONE reader blocked in read(). */
+#include &lt;linux/module.h&gt;
+#include &lt;linux/miscdevice.h&gt;
+#include &lt;linux/hrtimer.h&gt;
+#include &lt;linux/swait.h&gt;
+#include &lt;linux/fs.h&gt;
+#include &lt;linux/uaccess.h&gt;
+
+struct s5_sample { u64 seq, t_expire, t_hardirq, t_kwake; u32 cpu, missed; };
+
+static unsigned int period_us = 1000;
+module_param(period_us, uint, 0444);
+
+static struct hrtimer s5_timer;
+static DECLARE_SWAIT_QUEUE_HEAD(s5_wq);	/* raw lock: legal in hardirq on RT */
+static DEFINE_RAW_SPINLOCK(s5_lock);
+static struct s5_sample s5_last;
+static u64 s5_seq, s5_read_seq;
+static atomic_t s5_busy = ATOMIC_INIT(0);
+
+static noinline enum hrtimer_restart s5_timer_fn(struct hrtimer *t)
+{
+	u64 now = ktime_get_ns();		/* == CLOCK_MONOTONIC */
+
+	raw_spin_lock(&amp;s5_lock);
+	if (s5_seq == s5_read_seq) {	/* keep the OLDEST unread expiry */
+		s5_last.t_expire = ktime_to_ns(hrtimer_get_expires(t));
+		s5_last.t_hardirq = now;
+		s5_last.cpu = smp_processor_id();
+	}
+	s5_seq++;
+	raw_spin_unlock(&amp;s5_lock);
+	swake_up_one(&amp;s5_wq);
+	hrtimer_forward_now(t, us_to_ktime(period_us));
+	return HRTIMER_RESTART;
+}</code></pre></figure>
+<p>세 가지 결정이 핵심이다.</p>
+<ol><li><strong><code>HRTIMER_MODE_ABS_PINNED_HARD</code></strong>. PREEMPT_RT에서는 모드에 <code>_HARD</code>가 없는 hrtimer 콜백이 hard IRQ가 아니라 softirq(<code>ktimers/N</code> 스레드 문맥)로 밀려난다. 그러면 "hard IRQ 타임스탬프"가 거짓말이 된다. <code>_HARD</code>는 두 커널 모두에서 콜백을 hard IRQ에 둔다. <code>_PINNED</code>는 타이머를 <code>open()</code>한 CPU에 고정한다(대기자를 먼저 CPU1에 고정하므로 타이머도 CPU1).</li><li><strong><code>wait_queue_head_t</code>가 아니라 swait</strong>. 일반 wait queue는 <code>spinlock_t</code>로 보호되는데, PREEMPT_RT에서 <code>spinlock_t</code>는 잠들 수 있는 rt_mutex 기반 락이라 hard IRQ에서 잡으면 안 된다. swait(simple wait queue)는 <code>raw_spinlock_t</code>라 hard IRQ에서 깨워도 된다. completion이 내부에서 swait를 쓰는 이유도 이것이다(F3, N1 §5).</li><li><strong>가장 오래된 미처리 만료를 보존</strong>. 대기자가 늦어서 여러 주기를 놓치면 "처음 놓친 만료"부터 재야 진짜 지연이다. 이 줄을 처음에 안 넣었다가 실제로 틀린 결과를 얻었다(§2.6).</li></ol>
+<p><code>ktime_get_ns()</code>는 CLOCK_MONOTONIC과 같은 시계다. 그래서 유저가 <code>clock_gettime(CLOCK_MONOTONIC)</code>으로 찍은 값과 그대로 뺄 수 있다. gpiolib-cdev의 <code>timestamp_ns</code>도 기본값이 같은 시계다.</p>
+<h3 id="2-3-코드-2-2-read-와-open">2.3 코드 (2/2) — read()와 open()<a class="anchor" href="#2-3-코드-2-2-read-와-open" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>static ssize_t s5_read(struct file *f, char __user *buf, size_t len, loff_t *o)
+{
+	struct s5_sample s;
+	u64 kwake;
+	int ret;
+
+	if (len &lt; sizeof(s))
+		return -EINVAL;
+	ret = swait_event_interruptible_exclusive(s5_wq,
+			READ_ONCE(s5_seq) != s5_read_seq);
+	if (ret)
+		return ret;
+	raw_spin_lock_irq(&amp;s5_lock);
+	kwake = ktime_get_ns();			/* reader is running again */
+	s = s5_last;
+	s.seq = s5_seq;
+	s.missed = s5_seq - s5_read_seq - 1;	/* periods we slept through */
+	s5_read_seq = s5_seq;
+	raw_spin_unlock_irq(&amp;s5_lock);
+	s.t_kwake = kwake;
+	return copy_to_user(buf, &amp;s, sizeof(s)) ? -EFAULT : sizeof(s);
+}
+
+static int s5_open(struct inode *i, struct file *f)
+{
+	if (atomic_cmpxchg(&amp;s5_busy, 0, 1))
+		return -EBUSY;			/* one waiter at a time */
+	s5_seq = s5_read_seq = 0;
+	/* PINNED: the timer stays on the opener's CPU (pin the waiter first) */
+	hrtimer_start(&amp;s5_timer, ktime_add_us(ktime_get(), period_us),
+		      HRTIMER_MODE_ABS_PINNED_HARD);
+	return 0;
+}
+
+static int s5_release(struct inode *i, struct file *f)
+{
+	hrtimer_cancel(&amp;s5_timer);
+	atomic_set(&amp;s5_busy, 0);
+	return 0;
+}</code></pre></figure>
+<p>나머지(<code>file_operations</code>, <code>miscdevice</code>, <code>hrtimer_setup()</code> 호출, <code>module_init/exit</code>)는 S2·G7의 misc 드라이버와 같아서 생략했다(저장소 <code>kmod/s5_irqlat.c</code> 전체 108줄). 6.18에서는 타이머 초기화가 <code>hrtimer_init()</code> + <code>.function</code> 대입이 아니라 <code>hrtimer_setup(&amp;s5_timer, s5_timer_fn, CLOCK_MONOTONIC, HRTIMER_MODE_ABS_PINNED_HARD)</code> 한 번이다(6.18 소스에는 <code>hrtimer_init()</code>이 더 이상 없다 — <code>hrtimer.h</code>를 grep해 확인).</p>
+<p><code>kwake</code>를 <strong>락을 잡고 IRQ를 끈 뒤에</strong> 찍는 것도 일부러다. 락 밖에서 찍으면 찍은 직후 다음 hard IRQ가 끼어들어 <code>s5_last</code>를 바꿀 수 있고, 그러면 <code>t_kwake &lt; t_hardirq</code>가 되어 음수(부호 없는 정수라 거대한 수)가 나온다. 이것도 실제로 밟았다(§2.6).</p>
+<h3 id="2-4-빌드">2.4 빌드<a class="anchor" href="#2-4-빌드" aria-label="link">#</a></h3>
+<p><code>Makefile</code>은 소스를 <code>/var/tmp/S5/build-&lt;k&gt;</code>로 복사해 빌드한다(Mac 홈은 VM에서 읽기 전용이라 <code>M=</code>을 소스 디렉터리로 줄 수 없다).</p>
+<figure class="code"><span class="lang">make</span><pre><code># Build for one lab kernel: make K=trace  (or K=rt). Output goes to /var/tmp/S5/build-$(K)
+K ?= trace
+KDIR ?= /var/lab/out/linux-build-$(K)
+OUT ?= /var/tmp/S5/build-$(K)
+all:
+	mkdir -p $(OUT) &amp;&amp; cp Kbuild s5_irqlat.c s5_hog.c $(OUT)/
+	$(MAKE) -C $(KDIR) M=$(OUT) modules
+clean:
+	rm -rf $(OUT)</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /Users/donh/.elinux_scratch/S5/irq-latency-lab/kmod &amp;&amp; make K=rt clean &amp;&amp; make K=rt
+modinfo /var/tmp/S5/build-rt/s5_irqlat.ko | grep -E "^(name|vermagic|parm|description)"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>mkdir -p /var/tmp/S5/build-rt &amp;&amp; cp Kbuild s5_irqlat.c s5_hog.c /var/tmp/S5/build-rt/
+make -C /var/lab/out/linux-build-rt M=/var/tmp/S5/build-rt modules
+make[1]: Entering directory '/var/lab/build/linux-rt'
+make[2]: Entering directory '/var/tmp/S5/build-rt'
+  CC [M]  s5_irqlat.o
+  CC [M]  s5_hog.o
+  MODPOST Module.symvers
+  CC [M]  s5_irqlat.mod.o
+  CC [M]  .module-common.o
+  LD [M]  s5_irqlat.ko
+  CC [M]  s5_hog.mod.o
+  LD [M]  s5_hog.ko
+make[2]: Leaving directory '/var/tmp/S5/build-rt'
+make[1]: Leaving directory '/var/lab/build/linux-rt'
+description:    S5 known-time hard-IRQ -&gt; reader wakeup latency probe
+name:           s5_irqlat
+vermagic:       6.18.55-rt SMP preempt_rt mod_unload aarch64
+parm:           period_us:uint</code></pre></figure>
+<p>같은 소스를 <code>K=trace</code>로 빌드하면 vermagic이 <code>6.18.55-trace SMP preempt mod_unload aarch64</code>가 된다. 두 빌드 모두 경고 0개였다.</p>
+<p><strong>체크포인트</strong>: 이 단계가 끝나면 <code>/var/tmp/S5/build-trace/</code>와 <code>build-rt/</code>에 <code>s5_irqlat.ko</code>, <code>s5_hog.ko</code>가 있고, <code>modinfo -F vermagic</code>이 각각 <code>preempt</code>, <code>preempt_rt</code>를 보여야 한다.</p>
+<h3 id="2-5-흔한-실패">2.5 흔한 실패<a class="anchor" href="#2-5-흔한-실패" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td><code>insmod: Invalid module format</code>, dmesg에 <code>version magic</code></td><td>trace용 .ko를 rt 커널에 넣음</td><td>커널마다 따로 빌드, <code>ko/&lt;uname -r&gt;/</code>로 나눠 두기</td></tr><tr><td><code>make: ... Permission denied</code> (M= 경로)</td><td>Mac 홈은 VM에서 읽기 전용</td><td><code>/var/tmp/S5/build-&lt;k&gt;</code>로 복사해서 빌드</td></tr><tr><td><code>implicit declaration of function 'hrtimer_init'</code></td><td>6.18에서 제거된 API</td><td><code>hrtimer_setup()</code></td></tr><tr><td>RT 커널에서 <code>BUG: sleeping function called from invalid context</code></td><td>hard IRQ에서 <code>wake_up()</code>(spinlock_t) 사용</td><td>swait 또는 <code>wake_up_process()</code></td></tr></tbody></table></div>
+<h3 id="2-6-실제로-밟은-버그-두-개-측정기가-틀리면-결론이-틀린다">2.6 실제로 밟은 버그 두 개 — 측정기가 틀리면 결론이 틀린다<a class="anchor" href="#2-6-실제로-밟은-버그-두-개-측정기가-틀리면-결론이-틀린다" aria-label="link">#</a></h3>
+<p><strong>버그 1: 음수 wake.</strong> 첫 버전은 <code>kwake = ktime_get_ns()</code>를 락 밖에서 찍었다. 첫 스모크 실행(Image-trace, 2000 표본)의 실제 출력:</p>
+<figure class="code"><span class="lang">text</span><pre><code>samples 2000 on cpu 1 prio 90, missed periods 20
+irq       p50  183.4  p99  1164.2  p99.9  6202.9  max  25581.3 us
+wake      p50   93.1  p99   535.9  p99.9   942.8  max 18446744073709528.0 us
+ret       p50   27.3  p99   198.9  p99.9   553.1  max    666.6 us
+total     p50  313.2  p99  1578.5  p99.9  6850.1  max  26397.8 us</code></pre></figure>
+<p>wake max가 2^64에 가까운 수다 — <code>t_kwake − t_hardirq</code>가 음수가 되어 부호 없는 정수로 감겼다. 원인: <code>kwake</code>를 찍은 뒤 락을 잡기 전 사이에 다음 hard IRQ가 들어와 <code>s5_last</code>를 새 값으로 바꿨다. 고침: IRQ를 끄고 락을 잡은 뒤에 <code>kwake</code>를 찍는다(§2.3 코드).</p>
+<p><strong>버그 2: 최악을 못 보는 측정기.</strong> 둘째 버전은 콜백이 매번 <code>s5_last</code>를 덮어썼다. 대기자가 4 ms 늦으면 그동안 만료가 4번 쌓이는데, 대기자는 <strong>가장 최근</strong> 만료 기준으로 wake를 계산한다. 그래서 <code>s5_hog</code>(4 ms 락 보유)를 걸어도 이렇게 나왔다(Image-trace, 30000 표본, 실제 출력):</p>
+<figure class="code"><span class="lang">text</span><pre><code>wake      p50  166.2  p99   899.1  p99.9  2739.1  max  38376.6 us</code></pre></figure>
+<p>같은 조건에서 "가장 오래된 미처리 만료 보존"으로 고친 뒤:</p>
+<figure class="code"><span class="lang">text</span><pre><code>samples 30000 on cpu 1 prio 90, missed periods 2135
+wake      p50   76.1  p99  3894.3  p99.9  4109.4  max  11708.5 us</code></pre></figure>
+<p>p99가 899 µs에서 <strong>3894 µs</strong>로 바뀌었다 — 4 ms 락이 비로소 보인다. 그리고 <code>missed periods 2135</code>가 "대기자가 주기를 통째로 놓쳤다"는 사실을 따로 알려 준다. 교훈: <strong>측정기는 "늦은 표본"을 버리거나 덮어쓰는 순간 최악값을 숨긴다.</strong> cyclictest가 다음 예정 시각을 절대 시각으로 들고 다니며 늦은 만큼을 그대로 보고하는 이유가 이것이다(N3 §2). 같은 함정이 ftrace synthetic event에서도 다시 나온다(§6.5).</p>
+<hr>
+<h2 id="3-step-2-유저-rt-대기-스레드-s5_waiter">3. Step 2 — 유저 RT 대기 스레드 <code>s5_waiter</code><a class="anchor" href="#3-step-2-유저-rt-대기-스레드-s5_waiter" aria-label="link">#</a></h2>
+<h3 id="3-1-코드">3.1 코드<a class="anchor" href="#3-1-코드" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인가: SCHED_FIFO 90, <code>mlockall</code>, CPU1 고정으로 <code>read()</code>에 잠든 스레드가 표본마다 4구간을 계산하고, 끝에 백분위를 출력하며 원자료를 CSV로 남긴다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// s5_waiter: SCHED_FIFO + mlockall thread pinned to one CPU, blocked in
+// read(/dev/s5_irqlat). Prints percentiles of 4 segments, writes CSV.
+#define _GNU_SOURCE
+#include &lt;fcntl.h&gt;
+#include &lt;sched.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+
+struct s5_sample { uint64_t seq, t_expire, t_hardirq, t_kwake; uint32_t cpu, missed; };
+#define DIE(m) do { perror(m); exit(1); } while (0)
+static int cmp(const void *a, const void *b)
+{ uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x &gt; y ? 1 : x &lt; y ? -1 : 0; }
+static void pct(const char *name, uint64_t *v, int n)
+{
+	qsort(v, n, sizeof(*v), cmp);
+	printf("%-9s p50 %6.1f  p99 %7.1f  p99.9 %7.1f  max %8.1f us\n", name,
+	       v[n / 2] / 1e3, v[n * 99 / 100] / 1e3, v[n * 999 / 1000] / 1e3, v[n - 1] / 1e3);
+}
+int main(int argc, char **argv)
+{
+	int cpu = argc &gt; 1 ? atoi(argv[1]) : 1, prio = argc &gt; 2 ? atoi(argv[2]) : 90;
+	int n = argc &gt; 3 ? atoi(argv[3]) : 10000, missed = 0;
+	cpu_set_t set; CPU_ZERO(&amp;set); CPU_SET(cpu, &amp;set);
+	struct sched_param sp = { .sched_priority = prio };
+	if (sched_setaffinity(0, sizeof(set), &amp;set)) DIE("affinity");
+	if (prio &amp;&amp; sched_setscheduler(0, SCHED_FIFO, &amp;sp)) DIE("SCHED_FIFO");
+	if (mlockall(MCL_CURRENT | MCL_FUTURE)) DIE("mlockall");
+	uint64_t *seg[4];
+	for (int k = 0; k &lt; 4; k++)
+		if (!(seg[k] = calloc(n, sizeof(uint64_t)))) DIE("calloc");
+	int fd = open("/dev/s5_irqlat", O_RDONLY);	/* starts the timer on this CPU */
+	if (fd &lt; 0) DIE("open /dev/s5_irqlat");
+	for (int i = 0; i &lt; n; i++) {
+		struct s5_sample s; struct timespec ts;
+		if (read(fd, &amp;s, sizeof(s)) != sizeof(s)) DIE("read");
+		clock_gettime(CLOCK_MONOTONIC, &amp;ts);
+		uint64_t u = ts.tv_sec * 1000000000ull + ts.tv_nsec;
+		seg[0][i] = s.t_hardirq - s.t_expire;	/* IRQ latency         */
+		seg[1][i] = s.t_kwake - s.t_hardirq;	/* wakeup + switch     */
+		seg[2][i] = u - s.t_kwake;		/* copy + syscall exit */
+		seg[3][i] = u - s.t_expire;		/* end to end          */
+		missed += s.missed;
+	}
+	close(fd);
+	printf("samples %d on cpu %d prio %d, missed periods %d\n", n, cpu, prio, missed);
+	pct("irq", seg[0], n); pct("wake", seg[1], n); pct("ret", seg[2], n); pct("total", seg[3], n);
+	return 0;
+}</code></pre></figure>
+<p>지면 때문에 CSV 출력 부분(인자 4번째 = 파일 경로, <code>fprintf</code> 한 줄)을 뺐다. 저장소의 <code>user/s5_waiter.c</code>(62줄)에는 들어 있다. 순서가 중요하다: <strong>고정 → FIFO → mlockall → open</strong>. <code>open()</code>이 타이머를 그 CPU에 고정해 시작하므로, 고정을 먼저 해야 타이머와 대기자가 같은 CPU에 있다. 버퍼는 측정 루프 전에 <code>calloc</code>하고 <code>mlockall(MCL_FUTURE)</code>로 잠가 루프 중 page fault가 없게 한다(N1 §8, N2 §9).</p>
+<h3 id="3-2-빌드-왜-static인가">3.2 빌드 — 왜 static인가<a class="anchor" href="#3-2-빌드-왜-static인가" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>gcc -std=gnu11 -Wall -Wextra -O2 -static user/s5_waiter.c -o /var/tmp/S5/share/bin/s5_waiter
+gcc -std=gnu11 -Wall -Wextra -O2 -static -pthread user/s5_gpio.c -o /var/tmp/S5/share/bin/s5_gpio
+ls -la /var/tmp/S5/share/bin</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>total 1488
+drwxrwxr-x 2 donh donh   4096 Oct 18 16:29 .
+drwxrwxr-x 3 donh donh   4096 Oct 18 16:29 ..
+-rwxrwxr-x 1 donh donh 800592 Oct 18 16:29 s5_gpio
+-rwxrwxr-x 1 donh donh 716288 Oct 18 16:29 s5_waiter</code></pre></figure>
+<p>경고 0개. VM은 Ubuntu 26.04(glibc가 더 새것), 게스트는 Ubuntu 24.04다. 동적 링크 바이너리는 게스트에서 <code>GLIBC_2.xx not found</code>로 실패할 수 있다. static으로 만들면 게스트 glibc와 무관하고, TCG 게스트 안에서 gcc를 돌리는 것보다 훨씬 빠르다.</p>
+<p><strong>체크포인트</strong>: <code>share/bin/</code>에 static 바이너리 2개(<code>file</code>로 보면 <code>statically linked</code>).</p>
+<hr>
+<h2 id="4-step-3-게스트-부팅-장치-initramfs-switch_root-pid-1-9p-공유">4. Step 3 — 게스트 부팅 장치: initramfs → switch_root → PID 1, 9p 공유<a class="anchor" href="#4-step-3-게스트-부팅-장치-initramfs-switch_root-pid-1-9p-공유" aria-label="link">#</a></h2>
+<h3 id="4-1-왜-이렇게-하나">4.1 왜 이렇게 하나<a class="anchor" href="#4-1-왜-이렇게-하나" aria-label="link">#</a></h3>
+<ul><li><strong>systemd 없이 PID 1로 측정 스크립트를 돌린다.</strong> systemd 게스트는 부하 걸린 호스트에서 부팅에 수 분이 걸리고, 서비스들이 측정에 소음을 더한다(N3 §1). 그리고 아래 §4.4의 RT_GROUP_SCHED 함정도 피한다.</li><li><strong>rootfs는 qcow2 overlay.</strong> <code>rootfs-trace.ext4</code>는 공용 읽기 전용 이미지다. 쓰기는 overlay 파일에만 간다.</li><li><strong>입출력은 virtio-9p 공유 디렉터리.</strong> overlay를 mount하지 않고도(VM에 nbd 모듈을 올리지 않고도) 게스트에 파일을 넣고 결과를 꺼낸다. 두 커널 모두 <code>CONFIG_9P_FS=y</code>, <code>NET_9P_VIRTIO=y</code>다.</li><li><strong>2파일 initramfs.</strong> 커널은 rootfs의 <code>/sbin/init</code> 대신 initramfs의 <code>/init</code>을 먼저 실행한다. 여기서 vda와 9p를 mount한 뒤 <code>switch_root</code>로 9p 위의 스크립트를 PID 1로 넘긴다.</li></ul>
+<h3 id="4-2-코드-init-게스트-init-sh-실행기">4.2 코드 — <code>/init</code>, 게스트 <code>init.sh</code>, 실행기<a class="anchor" href="#4-2-코드-init-게스트-init-sh-실행기" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/busybox sh
+# /init of a 2-file initramfs: mount the qcow2 rootfs + 9p share, then hand PID 1
+# to the share's guest/init.sh (no systemd -&gt; no service noise, no cgroup setup).
+/bin/busybox --install -s /bin
+mkdir -p /proc /dev /newroot
+mount -t proc proc /proc
+mount -t devtmpfs dev /dev
+mount -o rw /dev/vda /newroot || exec sh
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=262144 s5 /newroot/mnt || exec sh
+umount /proc; umount /dev
+exec switch_root /newroot /bin/bash /mnt/guest/init.sh</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# PID 1 in the guest. Kernel cmdline: s5phase=a,b,c  s5tag=&lt;label&gt;
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
+mkdir -p /dev/pts /dev/shm; mount -t devpts pts /dev/pts
+mount -t tmpfs tmp /tmp; mount -t tmpfs shm /dev/shm
+mount -t tracefs none /sys/kernel/tracing; mount -t debugfs none /sys/kernel/debug
+mount -t cgroup2 none /sys/fs/cgroup; mount -t configfs none /sys/kernel/config
+hostname s5
+PHASE=$(sed -n 's/.*s5phase=\([^ ]*\).*/\1/p' /proc/cmdline)
+TAG=$(sed -n 's/.*s5tag=\([^ ]*\).*/\1/p' /proc/cmdline)
+OUT=/mnt/out/$(uname -r)_${TAG:-x}; mkdir -p $OUT
+{ echo "S5START $(uname -r) phase=$PHASE tag=$TAG"; cat /proc/cmdline; nproc
+  cat /sys/devices/system/cpu/isolated /sys/devices/system/cpu/nohz_full 2&gt;/dev/null; } | tee $OUT/env.txt
+cp -a /mnt/bin /tmp/bin   # run from tmpfs: no 9p page faults in the measured path
+insmod /mnt/ko/$(uname -r)/s5_irqlat.ko &amp;&amp; echo "s5_irqlat loaded: $(ls -l /dev/s5_irqlat)"
+for p in ${PHASE//,/ }; do
+  mkdir -p $OUT/$p
+  bash /mnt/guest/phase_$p.sh $OUT/$p 2&gt;&amp;1 | tee $OUT/$p/log.txt; sync
+done
+echo S5END; sync; mount -o remount,ro / ; sleep 1
+echo o &gt; /proc/sysrq-trigger; sleep 60</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# usage: run_guest.sh &lt;trace|rt&gt; &lt;phases&gt; &lt;tag&gt; [extra kernel args...]
+set -e
+K=$1; P=$2; T=$3; shift 3; X="$*"
+W=/var/tmp/S5
+[ -f $W/s5.qcow2 ] || qemu-img create -q -f qcow2 -F raw -b /var/lab/out/rootfs-trace.ext4 $W/s5.qcow2
+timeout ${S5_TIMEOUT:-1800} qemu-system-aarch64 -no-reboot -machine virt -cpu cortex-a57,pmu=on \
+  -smp 2 -m 1G -nographic -kernel /var/lab/out/Image-$K -initrd $W/s5_initramfs.cpio.gz \
+  -drive file=$W/s5.qcow2,if=virtio,format=qcow2 \
+  -virtfs local,path=$W/share,mount_tag=s5,security_model=none,id=s5fs \
+  -append "console=ttyAMA0 earlycon=pl011,0x9000000 panic=1 quiet s5phase=$P s5tag=$T $X" \
+  &gt; $W/console_${K}_$T.log 2&gt;&amp;1 || true
+echo "guest $K/$T done: $(tail -c 300 $W/console_${K}_$T.log | grep -a -c S5END) S5END marker(s)"</code></pre></figure>
+<p><code>host/prepare.sh</code>가 모듈 두 벌, static 바이너리, initramfs(<code>/var/lab/build/rootfs/bin/busybox</code> + 위 <code>/init</code>을 <code>cpio -H newc</code>로 묶음)를 만들고 게스트 스크립트를 공유 디렉터리에 복사한다. 커널이 모르는 <code>이름=값</code> 인자(<code>S5D=30</code> 같은)는 init의 환경 변수가 되므로 단계 스크립트의 매개변수를 커맨드라인으로 바꿀 수 있다(N3 §1.1과 같은 기법).</p>
+<h3 id="4-3-예제-2-스모크-부팅">4.3 예제 2 — 스모크 부팅<a class="anchor" href="#4-3-예제-2-스모크-부팅" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>/Users/donh/.elinux_scratch/S5/irq-latency-lab/host/prepare.sh
+cd /var/tmp/S5 &amp;&amp; time S5_TIMEOUT=400 /Users/donh/.elinux_scratch/S5/irq-latency-lab/host/run_guest.sh trace smoke smoke
+grep -a -v "^\[" console_trace_smoke.log</code></pre></figure>
+<p>첫 스모크(버그 1을 고치기 전) 실행의 시간과 콘솔 끝부분:</p>
+<figure class="code"><span class="lang">text</span><pre><code>guest trace/smoke done: 1 S5END marker(s)
+
+real	0m8.091s
+...
+S5START 6.18.55-trace phase=smoke tag=smoke
+console=ttyAMA0 earlycon=pl011,0x9000000 panic=1 quiet s5phase=smoke s5tag=smoke 
+2
+
+s5_irqlat loaded: crw------- 1 root root 10, 258 Oct 18 23:30 /dev/s5_irqlat
+Linux s5 6.18.55-trace #1 SMP PREEMPT Sat Oct 17 23:37:47 PDT 2026 aarch64 aarch64 aarch64 GNU/Linux
+0.00 0.00 0.00 1/66 105
+...
+cyclictest V 2.50
+
+rtla version 6.18.55
+
+trace-cmd version 3.2.0 (not-a-git-repo)
+stress-ng, version 0.17.06 (gcc 13.2.0, aarch64 Linux 6.18.55-trace)
+S5END
+[    7.188829][    T1] sysrq: Power Off
+[    7.194842][   T64] reboot: Power down</code></pre></figure>
+<p>(가운데 <code>...</code>는 생략. 측정 줄은 §2.6의 버그 1 출력이다.) 버그 1을 고친 뒤 같은 스모크의 측정 줄:</p>
+<figure class="code"><span class="lang">text</span><pre><code>samples 2000 on cpu 1 prio 90, missed periods 83
+irq       p50  163.6  p99  2341.6  p99.9  5438.1  max  37272.1 us
+wake      p50  135.7  p99  1014.4  p99.9  2256.1  max   2340.1 us
+ret       p50   33.7  p99   322.7  p99.9  2185.7  max   2459.5 us
+total     p50  374.9  p99  2565.4  p99.9  5827.8  max  38340.3 us</code></pre></figure>
+<p>출력에서 볼 것: 부팅부터 전원 꺼짐까지 <strong>8초</strong>. <code>systemd</code> 부팅(수 분)보다 훨씬 빨라 실험을 수십 번 돌릴 수 있다. <code>/dev/s5_irqlat</code>은 misc major 10이다. 측정 줄의 값은 실행마다 다르다.</p>
+<p><strong>체크포인트</strong>: 콘솔 로그에 <code>S5START</code> → 단계 출력 → <code>S5END</code> → <code>reboot: Power down</code>이 보이고, <code>/var/tmp/S5/share/out/6.18.55-trace_smoke/</code>에 결과가 있어야 한다.</p>
+<h3 id="4-4-예제-3-image-trace의-rt_group_sched-함정을-systemd-없이-재현">4.4 예제 3 — Image-trace의 RT_GROUP_SCHED 함정을 systemd 없이 재현<a class="anchor" href="#4-4-예제-3-image-trace의-rt_group_sched-함정을-systemd-없이-재현" aria-label="link">#</a></h3>
+<p>N1·N3에서 본 함정: Image-trace는 <code>CONFIG_RT_GROUP_SCHED=y</code>라서, systemd가 만든 세션 cgroup(cpu 컨트롤러 켜짐) 안의 셸에서는 RT 런타임 예산이 0이라 <code>chrt -f</code>가 실패한다. 처방은 <code>echo $$ &gt; /sys/fs/cgroup/cgroup.procs</code>(루트 cgroup으로 이동). 같은 메커니즘을 PID 1 게스트에서 cgroup 하나로 재현했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>C=/sys/fs/cgroup; zcat /proc/config.gz | grep -E "^CONFIG_RT_GROUP_SCHED=" || echo "CONFIG_RT_GROUP_SCHED is not set"
+echo +cpu &gt; $C/cgroup.subtree_control; mkdir -p $C/s5_session; ls $C/s5_session | grep -E "^cpu\.rt" || echo "(no cpu.rt_* files)"
+sh -c "echo \$\$ &gt; $C/s5_session/cgroup.procs; grep 0:: /proc/self/cgroup; chrt -f 90 true &amp;&amp; echo 'chrt -f 90: OK' || echo 'chrt -f 90: FAILED'"
+sh -c "echo \$\$ &gt; $C/s5_session/cgroup.procs; echo \$\$ &gt; $C/cgroup.procs; grep 0:: /proc/self/cgroup; chrt -f 90 true &amp;&amp; echo 'after moving to root cgroup: OK'"</code></pre></figure>
+<p>Image-trace:</p>
+<figure class="code"><span class="lang">text</span><pre><code>CONFIG_RT_GROUP_SCHED=y
+(no cpu.rt_* files)
+0::/s5_session
+chrt: failed to set pid 0's policy: Operation not permitted
+chrt -f 90: FAILED
+0::/
+after moving to root cgroup: OK</code></pre></figure>
+<p>Image-rt:</p>
+<figure class="code"><span class="lang">text</span><pre><code>CONFIG_RT_GROUP_SCHED is not set
+(no cpu.rt_* files)
+0::/s5_session
+chrt -f 90: OK
+0::/
+after moving to root cgroup: OK</code></pre></figure>
+<p>출력에서 볼 것: 같은 명령이 trace 커널에서만 EPERM이다. cgroup v2에는 <code>cpu.rt_runtime_us</code> 파일이 보이지 않는다 — 조절 손잡이가 없으니 하위 cgroup의 RT 예산은 0으로 남고, "권한 문제"처럼 보이는 에러가 난다. 실무에서 "root인데 SCHED_FIFO가 안 된다"는 질문의 답 중 하나가 이것이다. 이 노트의 측정은 모두 루트 cgroup의 PID 1 아래에서 돌아 이 함정에 걸리지 않는다.</p>
+<h3 id="4-5-흔한-실패">4.5 흔한 실패<a class="anchor" href="#4-5-흔한-실패" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td><code>Kernel panic - not syncing: Attempted to kill init!</code></td><td>sysrq <code>o</code>는 비동기라 PID 1이 먼저 끝남</td><td><code>echo o &gt; /proc/sysrq-trigger; sleep 60</code> + <code>panic=1</code> + <code>-no-reboot</code></td></tr><tr><td>결과 디렉터리가 비어 있음</td><td>QEMU를 kill해서 page cache 손실</td><td>단계마다 <code>sync</code>, 끝에 <code>remount,ro</code></td></tr><tr><td><code>mv: failed to preserve ownership ... Operation not permitted</code></td><td>9p <code>security_model=none</code>은 chown 불가</td><td>무해. 원하면 <code>cp</code>로</td></tr><tr><td>측정 중 대기자가 <code>D</code> 상태로 <code>kworker/u8:1</code>을 깨움 (§4.6)</td><td>바이너리가 9p 위에 있어 <code>mlockall</code>의 page-in이 9p I/O</td><td><code>/tmp</code>(tmpfs)로 복사해서 실행</td></tr><tr><td><code>qemu-img: Failed to get "write" lock</code></td><td>같은 overlay를 두 QEMU가 염</td><td>게스트는 순서대로, 또는 overlay를 하나 더</td></tr></tbody></table></div>
+<h3 id="4-6-예제-4-9p가-측정-경로에-끼어든-모습-실제로-밟은-함정">4.6 예제 4 — 9p가 측정 경로에 끼어든 모습 (실제로 밟은 함정)<a class="anchor" href="#4-6-예제-4-9p가-측정-경로에-끼어든-모습-실제로-밟은-함정" aria-label="link">#</a></h3>
+<p>초기 버전은 <code>/mnt/bin/s5_waiter</code>(9p)를 직접 실행했다. trace-cmd 이벤트를 보니 대기자가 표본마다 이랬다(일부 발췌):</p>
+<figure class="code"><span class="lang">text</span><pre><code>          &lt;idle&gt;-0     [001]     4.761770: sched_switch:         swapper/1:0 [120] R ==&gt; s5_waiter:108 [9]
+       s5_waiter-108   [001]     4.761843: sched_waking:         comm=kworker/u8:1 pid=33 prio=120 target_cpu=000
+       s5_waiter-108   [001]     4.762079: sched_switch:         s5_waiter:108 [9] D ==&gt; swapper/1:0 [120]
+          &lt;idle&gt;-0     [001]     4.762305: irq_handler_entry:    irq=2 name=IPI
+          &lt;idle&gt;-0     [001]     4.762328: irq_handler_exit:     irq=2 ret=handled
+          &lt;idle&gt;-0     [001]     4.762369: sched_switch:         swapper/1:0 [120] R ==&gt; s5_waiter:108 [9]</code></pre></figure>
+<p>출력에서 볼 것: 대기자가 <code>S</code>(우리 swait)가 아니라 <strong><code>D</code></strong>(uninterruptible, I/O 대기)로 잠들고, 매번 CPU0의 <code>kworker/u8:1</code>을 깨운다. <code>mlockall(MCL_CURRENT)</code>이 700 KB static 바이너리의 모든 페이지를 9p에서 끌어오는 중이었다. 측정 루프가 시작된 뒤에도 CSV를 9p에 쓰면 같은 일이 생긴다. 그래서 <code>init.sh</code>는 바이너리를 <code>/tmp</code>로 복사하고, 단계 스크립트는 CSV를 <code>/tmp</code>에 쓴 뒤 끝나고 옮긴다. <strong>측정 경로에 네트워크/공유 파일시스템을 두지 말 것</strong> — 실제 장비에서 NFS root로 RT 테스트를 하면 똑같이 당한다.</p>
+<hr>
+<h2 id="5-step-4-첫-측정-idle-stress-ng-나쁜-드라이버">5. Step 4 — 첫 측정: idle / stress-ng / 나쁜 드라이버<a class="anchor" href="#5-step-4-첫-측정-idle-stress-ng-나쁜-드라이버" aria-label="link">#</a></h2>
+<h3 id="5-1-부하-세-가지">5.1 부하 세 가지<a class="anchor" href="#5-1-부하-세-가지" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>이름</th><th>무엇</th><th>왜</th></tr></thead><tbody><tr><td>idle</td><td>아무것도 없음</td><td>기준선. 단, idle은 "좋은" 조건이 아니다 — idle 탈출 비용이 있다</td></tr><tr><td>stress</td><td><code>stress-ng --cpu 2 --vm 1 --vm-bytes 64M --io 1</code></td><td>유저 연산 + syscall + page fault + I/O 부하 (과제 지정)</td></tr><tr><td>hog</td><td><code>s5_hog.ko</code>: CPU1에 묶인 FIFO 1 kthread가 40 ms마다 <code>spinlock_t</code>를 4 ms 쥠</td><td>"폴링하며 락을 오래 쥐는 나쁜 드라이버". <strong>PREEMPT_RT가 없애도록 설계된 지연원</strong></td></tr></tbody></table></div>
+<p>hog를 따로 만든 이유: TCG에서는 호스트 소음이 커서 일반 부하로는 두 커널 차이가 묻힌다(N3 §10.2의 결론). 원인을 아는 지연원을 넣으면 "RT가 무엇을 고치는가"를 TCG에서도 분명히 보일 수 있다. N3의 <code>n3_spike</code>(IRQ off / preempt off)와 N1 §5의 락 보유 실험의 측정 버전이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+/* s5_hog: a "badly written driver" — a FIFO-1 kthread bound to one CPU that
+ * holds a spinlock_t for hog_us every period_ms. On PREEMPT (non-RT)
+ * spin_lock() disables preemption, so even a FIFO-95 task on that CPU waits.
+ * On PREEMPT_RT spinlock_t is an rt_mutex: the holder can be preempted. */
+#include &lt;linux/module.h&gt;
+#include &lt;linux/kthread.h&gt;
+#include &lt;linux/delay.h&gt;
+#include &lt;linux/spinlock.h&gt;
+#include &lt;linux/sched.h&gt;
+
+static int cpu = 1, hog_us = 4000, period_ms = 40;
+module_param(cpu, int, 0444);
+module_param(hog_us, int, 0444);
+module_param(period_ms, int, 0444);
+
+static DEFINE_SPINLOCK(s5_hog_lock);
+static struct task_struct *s5_hog_task;
+static unsigned long s5_hogs;
+
+static int s5_hog_fn(void *unused)
+{
+	sched_set_fifo_low(current);			/* SCHED_FIFO prio 1 */
+	while (!kthread_should_stop()) {
+		msleep_interruptible(period_ms);
+		spin_lock(&amp;s5_hog_lock);
+		udelay(hog_us);				/* "polling a status bit" */
+		spin_unlock(&amp;s5_hog_lock);
+		s5_hogs++;
+	}
+	return 0;
+}
+
+static int __init s5_hog_init(void)
+{
+	s5_hog_task = kthread_create(s5_hog_fn, NULL, "s5_hog/%d", cpu);
+	if (IS_ERR(s5_hog_task))
+		return PTR_ERR(s5_hog_task);
+	kthread_bind(s5_hog_task, cpu);
+	wake_up_process(s5_hog_task);
+	pr_info("s5_hog: cpu=%d hog_us=%d period_ms=%d\n", cpu, hog_us, period_ms);
+	return 0;
+}
+
+static void __exit s5_hog_exit(void)
+{
+	kthread_stop(s5_hog_task);
+	pr_info("s5_hog: %lu lock holds\n", s5_hogs);
+}
+module_init(s5_hog_init);
+module_exit(s5_hog_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("S5 spinlock_t holder (latency source PREEMPT_RT removes)");</code></pre></figure>
+<p>PREEMPT에서 <code>spin_lock()</code>은 <code>preempt_disable()</code>을 포함하므로 4 ms 동안 CPU1에서는 우선순위와 상관없이 아무도 선점하지 못한다. IRQ는 켜져 있으니 타이머 hard IRQ는 제때 돈다 — 그래서 <strong>irq 구간은 멀쩡하고 wake 구간만 늘어날 것</strong>이라고 예측할 수 있다. PREEMPT_RT에서 <code>spinlock_t</code>는 rt_mutex라 쥔 채로도 선점되고, FIFO 90 대기자가 바로 CPU를 가져간다(N1 §5).</p>
+<h3 id="5-2-측정-단계-스크립트">5.2 측정 단계 스크립트<a class="anchor" href="#5-2-측정-단계-스크립트" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code># lib_load.sh — background "scenarios", identical on every kernel
+scen_on() {
+  case $1 in
+    stress) stress-ng --cpu 2 --vm 1 --vm-bytes 64M --io 1 --timeout 600s -q &amp; LOADPID=$!; sleep 2 ;;
+    hog)    insmod /mnt/ko/$(uname -r)/s5_hog.ko cpu=1 hog_us=4000 period_ms=40 ;;
+  esac
+}
+scen_off() {
+  case $1 in
+    stress) kill $LOADPID 2&gt;/dev/null; pkill stress-ng; wait 2&gt;/dev/null; sleep 1 ;;
+    hog)    rmmod s5_hog; dmesg | grep s5_hog | tail -1 ;;
+  esac
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code># phase_matrix.sh — per scenario: s5_waiter, cyclictest, rtla timerlat, all on CPU1
+O=$1; . /mnt/guest/lib_load.sh; D=${S5D:-20}; N=$((D*1000))
+CT="cyclictest -m -a 1 -t 1 -p 95 -i 1000 -h 20000 -q -D $D"
+TL="/usr/local/bin/rtla timerlat hist -c 1 -d ${D}s -P f:95 -b 10 -E 2000 --no-aa"
+for s in ${S5SCEN:-idle stress hog}; do
+  echo "######## scenario $s  loadavg(guest) $(cat /proc/loadavg)"; scen_on $s
+  /tmp/bin/s5_waiter 1 90 $N /tmp/lat_$s.csv; mv /tmp/lat_$s.csv $O/
+  $CT --histfile=$O/cyc_$s.hist &gt; $O/cyc_$s.txt 2&gt;&amp;1; grep -E "^# (Min|Avg|Max) Lat|Overflows" $O/cyc_$s.hist
+  $TL &gt; $O/tl_$s.txt 2&gt;&amp;1; grep -m4 -E "^(count|min|avg|max):" $O/tl_$s.txt
+  scen_off $s
+done</code></pre></figure>
+<p>세 측정기 모두 <strong>CPU1, 1 ms 주기, 30초</strong>(<code>S5D=30</code>)로 맞췄다. <code>/usr/local/bin/rtla</code>를 쓴 이유: <code>/usr/bin/rtla</code>는 Ubuntu 래퍼라 6.18 커널과 맞지 않는다(랩 README). 우선순위는 s5_waiter 90, cyclictest·timerlat 95다.</p>
+<h3 id="5-3-예제-5-image-trace-preempt-결과">5.3 예제 5 — Image-trace (PREEMPT) 결과<a class="anchor" href="#5-3-예제-5-image-trace-preempt-결과" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>S5_TIMEOUT=1500 host/run_guest.sh trace matrix,gpio base S5D=30</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>######## scenario idle  loadavg(guest) 0.08 0.02 0.01 2/66 106
+samples 30000 on cpu 1 prio 90, missed periods 153
+irq       p50  174.2  p99   764.6  p99.9  3879.7  max  43070.9 us
+wake      p50   87.2  p99   513.7  p99.9  1658.6  max   6769.9 us
+ret       p50   28.6  p99   208.5  p99.9   768.6  max  26804.1 us
+total     p50  288.3  p99  1335.9  p99.9  5242.2  max  43536.4 us
+# Min Latencies: 00073
+# Avg Latencies: 00373
+# Max Latencies: 64392
+# Histogram Overflows: 00013
+count:    29582     29582     29581 
+min:          2        48       112 
+avg:        210       295       364 
+max:      17796     20021     20526 
+######## scenario stress  loadavg(guest) 0.52 0.15 0.05 1/67 117
+samples 30000 on cpu 1 prio 90, missed periods 211
+irq       p50  135.4  p99  1276.0  p99.9  7759.1  max  43143.2 us
+wake      p50  137.7  p99   500.2  p99.9  1265.7  max  26699.3 us
+ret       p50   39.7  p99   140.0  p99.9   477.3  max   5383.7 us
+total     p50  323.7  p99  1754.2  p99.9  8982.1  max  43587.2 us
+...
+######## scenario hog  loadavg(guest) 3.76 1.67 0.63 1/67 136
+samples 30000 on cpu 1 prio 90, missed periods 2135
+irq       p50  137.7  p99   366.8  p99.9  2663.2  max  22873.4 us
+wake      p50   76.1  p99  3894.3  p99.9  4109.4  max  11708.5 us
+ret       p50   26.1  p99    89.8  p99.9   229.3  max   6239.5 us
+total     p50  236.2  p99  4037.7  p99.9  4548.6  max  23733.5 us
+# Min Latencies: 00061
+# Avg Latencies: 00325
+# Max Latencies: 27256
+# Histogram Overflows: 00001
+count:    26661     26661     26661 
+min:          3        54       114 
+avg:        186       388       498 
+max:      57489     65345     65517 </code></pre></figure>
+<p>(<code>...</code>는 stress의 cyclictest/timerlat 줄 생략 — 전체는 <code>results/raw_outputs.tgz</code>.) timerlat의 세 열은 IRQ / Thr(커널 스레드) / Usr(유저 스레드) 단계다(N3 §7).</p>
+<h3 id="5-4-예제-6-image-rt-preempt_rt-결과-같은-명령">5.4 예제 6 — Image-rt (PREEMPT_RT) 결과, 같은 명령<a class="anchor" href="#5-4-예제-6-image-rt-preempt_rt-결과-같은-명령" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>######## scenario idle  loadavg(guest) 0.00 0.00 0.00 2/85 126
+samples 30000 on cpu 1 prio 90, missed periods 37
+irq       p50  219.4  p99   429.7  p99.9  3049.1  max  17206.5 us
+wake      p50   84.1  p99   319.2  p99.9   788.4  max   4280.5 us
+ret       p50   17.1  p99   210.0  p99.9   399.3  max   5011.0 us
+total     p50  323.9  p99   750.1  p99.9  3502.3  max  18063.1 us
+...
+######## scenario hog  loadavg(guest) 4.30 1.96 0.75 1/86 156
+samples 30000 on cpu 1 prio 90, missed periods 116
+irq       p50  354.6  p99   816.0  p99.9  3578.4  max  20353.8 us
+wake      p50  117.7  p99   388.0  p99.9  1469.6  max  10761.6 us
+ret       p50   21.6  p99   111.5  p99.9   363.0  max   2703.7 us
+total     p50  478.7  p99  1408.2  p99.9  4503.1  max  20875.7 us
+# Min Latencies: 00056
+# Avg Latencies: 00457
+# Max Latencies: 53013
+# Histogram Overflows: 00003
+count:    29109     29109     29109 
+min:          25        57       103 
+avg:        230       396       474 
+max:      30445     30541     30644 </code></pre></figure>
+<p>출력에서 볼 것 (두 커널 비교):</p>
+<ul><li><strong>hog에서 wake p99: PREEMPT 3894 µs vs PREEMPT_RT 388 µs.</strong> 4 ms 락 보유가 PREEMPT에서는 wake 구간에 그대로 나타나고 RT에서는 사라진다. irq 구간 p99는 PREEMPT에서 오히려 367 µs로 작다 — 예측대로 IRQ는 막히지 않았다.</li><li><strong>missed periods: 2135 vs 116.</strong> PREEMPT에서 대기자는 30000주기 중 약 7%를 통째로 놓쳤다(4 ms / 40 ms의 비율 10%와 같은 자릿수).</li><li>hog 아래 PREEMPT의 <code>loadavg</code>가 3.76인 것은 FIFO 1 kthread가 매 40 ms마다 4 ms씩 돌기 때문이다.</li><li>idle의 max는 두 커널 모두 수십 ms다 — 이것은 호스트 쪽 vCPU 정지다(N3 §8). PREEMPT_RT는 OS 밖의 정지를 줄이지 못한다.</li></ul>
+<p><strong>체크포인트</strong>: <code>share/out/6.18.55-&lt;k&gt;_base/matrix/</code>에 <code>lat_{idle,stress,hog}.csv</code>, <code>cyc_*.hist</code>, <code>tl_*.txt</code> 9개 파일이 있고, PREEMPT hog의 wake p99가 수 ms, PREEMPT_RT hog의 wake p99가 그보다 한 자릿수 작아야 한다.</p>
+<hr>
+<h2 id="6-step-5-ftrace로-경로를-증명한다">6. Step 5 — ftrace로 경로를 증명한다<a class="anchor" href="#6-step-5-ftrace로-경로를-증명한다" aria-label="link">#</a></h2>
+<p>측정기가 "wake 구간이 4 ms"라고 말해도, 면접관은 "그 4 ms가 정말 그 락 때문인지 어떻게 아나?"라고 묻는다. 측정 숫자를 트레이스 증거로 받쳐야 한다. 각 지점을 무엇으로 관찰하는지부터 지도를 그린다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<text x="85" y="30" font-size="13" text-anchor="middle">경로의 지점</text>
+<text x="245" y="30" font-size="13" text-anchor="middle">tracepoint</text>
+<text x="405" y="30" font-size="13" text-anchor="middle">동적 / graph</text>
+<text x="520" y="30" font-size="13" text-anchor="middle">모듈 시각</text>
+<rect x="10" y="44" width="150" height="28" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="85" y="63" font-size="12" text-anchor="middle">타이머 만료 (예정 시각)</text>
+<text x="245" y="63" font-size="12" text-anchor="middle">—</text>
+<text x="405" y="63" font-size="12" text-anchor="middle">—</text>
+<text x="520" y="63" font-size="12" text-anchor="middle">t_expire</text>
+<line x1="160" y1="58" x2="168" y2="58" stroke="currentColor" stroke-opacity="0.4"/>
+<rect x="10" y="80" width="150" height="28" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="85" y="99" font-size="12" text-anchor="middle">arch_timer IRQ</text>
+<text x="245" y="99" font-size="12" text-anchor="middle">irq_handler_entry</text>
+<text x="405" y="99" font-size="12" text-anchor="middle">—</text>
+<text x="520" y="99" font-size="12" text-anchor="middle">—</text>
+<line x1="160" y1="94" x2="168" y2="94" stroke="currentColor" stroke-opacity="0.4"/>
+<rect x="10" y="116" width="150" height="28" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="85" y="135" font-size="12" text-anchor="middle">콜백 s5_timer_fn</text>
+<text x="245" y="135" font-size="12" text-anchor="middle">hrtimer_expire_entry</text>
+<text x="405" y="135" font-size="12" text-anchor="middle">kprobe s5/hardirq</text>
+<text x="520" y="135" font-size="12" text-anchor="middle">t_hardirq</text>
+<line x1="160" y1="130" x2="168" y2="130" stroke="currentColor" stroke-opacity="0.4"/>
+<rect x="10" y="152" width="150" height="28" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="85" y="171" font-size="12" text-anchor="middle">swake_up_one()</text>
+<text x="245" y="171" font-size="12" text-anchor="middle">sched_waking</text>
+<text x="405" y="171" font-size="12" text-anchor="middle">graph s5_timer_fn</text>
+<text x="520" y="171" font-size="12" text-anchor="middle">—</text>
+<line x1="160" y1="166" x2="168" y2="166" stroke="currentColor" stroke-opacity="0.4"/>
+<rect x="10" y="188" width="150" height="28" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="85" y="207" font-size="12" text-anchor="middle">→ s5_waiter 전환</text>
+<text x="245" y="207" font-size="12" text-anchor="middle">sched_switch</text>
+<text x="405" y="207" font-size="12" text-anchor="middle">—</text>
+<text x="520" y="207" font-size="12" text-anchor="middle">—</text>
+<line x1="160" y1="202" x2="168" y2="202" stroke="currentColor" stroke-opacity="0.4"/>
+<rect x="10" y="224" width="150" height="28" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="85" y="243" font-size="12" text-anchor="middle">s5_read 안에서 재개</text>
+<text x="245" y="243" font-size="12" text-anchor="middle">—</text>
+<text x="405" y="243" font-size="12" text-anchor="middle">graph s5_read</text>
+<text x="520" y="243" font-size="12" text-anchor="middle">t_kwake</text>
+<line x1="160" y1="238" x2="168" y2="238" stroke="currentColor" stroke-opacity="0.4"/>
+<rect x="10" y="260" width="150" height="28" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="85" y="279" font-size="12" text-anchor="middle">read() 반환 (유저)</text>
+<text x="245" y="279" font-size="12" text-anchor="middle">—</text>
+<text x="405" y="279" font-size="12" text-anchor="middle">—</text>
+<text x="520" y="279" font-size="12" text-anchor="middle">t_user</text>
+<line x1="160" y1="274" x2="168" y2="274" stroke="currentColor" stroke-opacity="0.4"/>
+<path d="M569,58 L575,58 L575,130 L569,130" fill="none" stroke="#4a7bd0" stroke-width="1.6"/>
+<text x="581" y="98" font-size="12">irq</text>
+<path d="M569,130 L575,130 L575,238 L569,238" fill="none" stroke="#e08a3c" stroke-width="1.6"/>
+<text x="581" y="188" font-size="12">wake</text>
+<path d="M569,238 L575,238 L575,274 L569,274" fill="none" stroke="#3f9a6b" stroke-width="1.6"/>
+<text x="581" y="260" font-size="12">ret</text>
+<path d="M622,166 L628,166 L628,202 L622,202" fill="none" stroke="#d0564a" stroke-width="1.6"/>
+<text x="642" y="184" font-size="12" text-anchor="middle" transform="rotate(-90 642 184)">wakeup_latency</text>
+<path d="M646,130 L652,130 L652,202 L646,202" fill="none" stroke="#888" stroke-width="1.6"/>
+<text x="666" y="166" font-size="12" text-anchor="middle" transform="rotate(-90 666 166)">irq_to_run</text>
+<text x="10" y="312" font-size="12">파랑·주황·초록 괄호 = s5_waiter 구간 · 빨강 = wakeup_latency · 회색 = irq_to_run (synthetic)</text>
+</svg></figure>
+<p>그림 3 — ftrace 이벤트 지도. 경로의 각 지점(왼쪽)을 어떤 tracepoint·동적 probe·function_graph가 관찰하고, 모듈이 어디서 타임스탬프를 찍는지. 오른쪽 괄호는 s5_waiter의 세 구간과, 아래 §6.4에서 만드는 synthetic event 두 개가 각각 어디서 어디까지를 재는지 보여 준다.</p>
+<h3 id="6-1-단계-스크립트-앞부분">6.1 단계 스크립트 (앞부분)<a class="anchor" href="#6-1-단계-스크립트-앞부분" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>O=$1; T=/sys/kernel/tracing; . /mnt/guest/lib_load.sh; W=/tmp/bin/s5_waiter
+EV="-e irq:irq_handler_entry -e irq:irq_handler_exit -e timer:hrtimer_expire_entry -e timer:hrtimer_expire_exit -e sched:sched_waking -e sched:sched_switch"
+echo "== (a) trace-cmd events, CPU1 only"
+trace-cmd record -q -o /tmp/ev.dat -M 2 $EV $W 1 90 300 &gt; $O/ev_waiter.txt
+trace-cmd report -i /tmp/ev.dat &gt; $O/ev.txt 2&gt;/dev/null; wc -l $O/ev.txt
+echo "== (b) function_graph"
+trace-cmd record -q -o /tmp/fg.dat -M 2 -p function_graph -g s5_timer_fn -g s5_read --max-graph-depth 3 $W 1 90 50 &gt; /dev/null
+trace-cmd report -i /tmp/fg.dat &gt; $O/fg.txt 2&gt;/dev/null; wc -l $O/fg.txt</code></pre></figure>
+<p><code>-M 2</code>는 CPU 마스크(비트 1 = CPU1)다. trace 파일을 9p가 아니라 <code>/tmp</code>에 쓰는 이유는 §4.6과 같다.</p>
+<h3 id="6-2-예제-7-이벤트-한-주기-trace-cmd-report">6.2 예제 7 — 이벤트 한 주기 (trace-cmd report)<a class="anchor" href="#6-2-예제-7-이벤트-한-주기-trace-cmd-report" aria-label="link">#</a></h3>
+<p>Image-trace, idle, 200번째 <code>s5_timer_fn</code> 만료 주변(실제 출력, 열 일부 자름):</p>
+<figure class="code"><span class="lang">text</span><pre><code>       s5_waiter-108   [001]     3.641331: sched_switch:         s5_waiter:108 [9] S ==&gt; swapper/1:0 [120]
+          &lt;idle&gt;-0     [001]     3.642124: irq_handler_entry:    irq=11 name=arch_timer
+          &lt;idle&gt;-0     [001]     3.642134: hrtimer_expire_entry: hrtimer=0xffffc0d8d25a3098 now=3575252864 function=s5_timer_fn/0x0
+          &lt;idle&gt;-0     [001]     3.642139: sched_waking:         comm=s5_waiter pid=108 prio=9 target_cpu=001
+          &lt;idle&gt;-0     [001]     3.642153: hrtimer_expire_exit:  hrtimer=0xffffc0d8d25a3098
+          &lt;idle&gt;-0     [001]     3.642171: irq_handler_exit:     irq=11 ret=handled
+          &lt;idle&gt;-0     [001]     3.642198: sched_switch:         swapper/1:0 [120] R ==&gt; s5_waiter:108 [9]
+       s5_waiter-108   [001]     3.642325: sched_switch:         s5_waiter:108 [9] S ==&gt; swapper/1:0 [120]</code></pre></figure>
+<p>Image-rt, 같은 위치:</p>
+<figure class="code"><span class="lang">text</span><pre><code>     ksoftirqd/1-30    [001]     2.961547: sched_switch:         ksoftirqd/1:30 [120] S ==&gt; swapper/1:0 [120]
+          &lt;idle&gt;-0     [001]     2.962356: irq_handler_entry:    irq=11 name=arch_timer
+          &lt;idle&gt;-0     [001]     2.962363: hrtimer_expire_entry: hrtimer=0xffffd1a3830b9098 now=2910006720 function=s5_timer_fn/0x0
+          &lt;idle&gt;-0     [001]     2.962368: sched_waking:         comm=s5_waiter pid=128 prio=9 target_cpu=001
+          &lt;idle&gt;-0     [001]     2.962379: hrtimer_expire_exit:  hrtimer=0xffffd1a3830b9098
+          &lt;idle&gt;-0     [001]     2.962381: hrtimer_expire_entry: hrtimer=0xffff00003fdd3a78 now=2910006720 function=tick_nohz_handler/0x0
+          &lt;idle&gt;-0     [001]     2.962404: hrtimer_expire_exit:  hrtimer=0xffff00003fdd3a78
+          &lt;idle&gt;-0     [001]     2.962417: irq_handler_exit:     irq=11 ret=handled
+          &lt;idle&gt;-0     [001]     2.962424: sched_waking:         comm=ksoftirqd/1 pid=30 prio=120 target_cpu=001
+          &lt;idle&gt;-0     [001]     2.962454: sched_switch:         swapper/1:0 [120] R ==&gt; s5_waiter:128 [9]
+       s5_waiter-128   [001]     2.962525: sched_switch:         s5_waiter:128 [9] S ==&gt; ksoftirqd/1:30 [120]</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>경로가 그림 3 그대로다: <code>irq_handler_entry arch_timer</code> → <code>hrtimer_expire_entry function=s5_timer_fn</code> → <strong>IRQ 안에서</strong> <code>sched_waking comm=s5_waiter</code> → <code>irq_handler_exit</code> → <code>sched_switch ==&gt; s5_waiter</code>. trace 커널에서 IRQ 진입부터 전환까지 74 µs(3.642124 → 3.642198).</li><li><code>[9]</code>는 커널 내부 우선순위 표기다: FIFO 90 → <code>99 − 90 = 9</code>. <code>[120]</code>은 nice 0 SCHED_OTHER.</li><li>RT 커널에서도 <code>s5_timer_fn</code>은 <code>&lt;idle&gt;-0</code> 문맥, 즉 <strong>hard IRQ 안</strong>에서 돈다 — <code>_HARD</code> 모드가 먹었다. 반면 tick 처리 뒤 <code>ksoftirqd/1</code>이 깨어난다. PREEMPT_RT에서는 softirq 처리 대부분이 스레드로 밀려나기 때문이다. 대기자(FIFO 90)가 먼저 돌고, <code>ksoftirqd</code>(SCHED_OTHER)는 대기자가 잠든 뒤에야 돈다.</li><li><code>irq=11</code>은 Linux IRQ 번호다. 게스트의 <code>/proc/interrupts</code>에서 확인하면 <code>11: ... GIC-0  27 Level  arch_timer</code>(PPI 27 = EL1 virtual timer)다.</li></ul>
+<h3 id="6-3-예제-8-function_graph-콜백-안에서-시간이-어디-쓰였나">6.3 예제 8 — function_graph: 콜백 안에서 시간이 어디 쓰였나<a class="anchor" href="#6-3-예제-8-function_graph-콜백-안에서-시간이-어디-쓰였나" aria-label="link">#</a></h3>
+<p>Image-trace (실제 출력, 열 일부 자름):</p>
+<figure class="code"><span class="lang">text</span><pre><code>          &lt;idle&gt;-0     [001]    10.172881: funcgraph_entry:                   |  s5_timer_fn() {
+          &lt;idle&gt;-0     [001]    10.172886: funcgraph_entry:                   |    ktime_get() {
+          &lt;idle&gt;-0     [001]    10.172887: funcgraph_entry:        1.664 us   |      arch_counter_read();
+          &lt;idle&gt;-0     [001]    10.172892: funcgraph_exit:         6.096 us   |    }
+          &lt;idle&gt;-0     [001]    10.172893: funcgraph_entry:                   |    _raw_spin_lock() {
+          &lt;idle&gt;-0     [001]    10.172895: funcgraph_entry:        1.248 us   |      preempt_count_add();
+          &lt;idle&gt;-0     [001]    10.172898: funcgraph_exit:         4.448 us   |    }
+          &lt;idle&gt;-0     [001]    10.172900: funcgraph_entry:                   |    _raw_spin_unlock() {
+          &lt;idle&gt;-0     [001]    10.172901: funcgraph_entry:        1.168 us   |      preempt_count_sub();
+          &lt;idle&gt;-0     [001]    10.172904: funcgraph_exit:         3.920 us   |    }
+          &lt;idle&gt;-0     [001]    10.172905: funcgraph_entry:                   |    swake_up_one() {
+          &lt;idle&gt;-0     [001]    10.172907: funcgraph_entry:        1.840 us   |      _raw_spin_lock_irqsave();
+          &lt;idle&gt;-0     [001]    10.172911: funcgraph_entry:      + 37.088 us  |      try_to_wake_up();
+          &lt;idle&gt;-0     [001]    10.172950: funcgraph_entry:        1.968 us   |      _raw_spin_unlock_irqrestore();
+          &lt;idle&gt;-0     [001]    10.172953: funcgraph_exit:       + 47.872 us  |    }
+          &lt;idle&gt;-0     [001]    10.172955: funcgraph_entry:                   |    hrtimer_cb_get_time() {
+          &lt;idle&gt;-0     [001]    10.172957: funcgraph_entry:        2.752 us   |      __hrtimer_cb_get_time();
+          &lt;idle&gt;-0     [001]    10.172961: funcgraph_exit:         5.760 us   |    }
+          &lt;idle&gt;-0     [001]    10.172963: funcgraph_entry:        1.504 us   |    hrtimer_forward();
+          &lt;idle&gt;-0     [001]    10.172966: funcgraph_exit:       + 85.280 us  |  }
+       s5_waiter-114   [001]    10.173063: funcgraph_entry:        8.256 us   |      finish_task_switch.isra.0();
+       s5_waiter-114   [001]    10.173073: funcgraph_entry:        1.664 us   |      preempt_count_sub();
+       s5_waiter-114   [001]    10.173076: funcgraph_exit:       ! 862.672 us |    }
+       s5_waiter-114   [001]    10.173078: funcgraph_entry:                   |    prepare_to_swait_event() {</code></pre></figure>
+<p>Image-rt의 같은 콜백(일부):</p>
+<figure class="code"><span class="lang">text</span><pre><code>          &lt;idle&gt;-0     [001]     8.723265: funcgraph_entry:                   |  s5_timer_fn() {
+          &lt;idle&gt;-0     [001]     8.723273: funcgraph_entry:        1.248 us   |    _raw_spin_lock();
+          &lt;idle&gt;-0     [001]     8.723275: funcgraph_entry:        1.248 us   |    _raw_spin_unlock();
+          &lt;idle&gt;-0     [001]     8.723279: funcgraph_entry:                   |    swake_up_one() {
+          &lt;idle&gt;-0     [001]     8.723284: funcgraph_entry:      + 17.456 us  |      try_to_wake_up();
+          &lt;idle&gt;-0     [001]     8.723305: funcgraph_exit:       + 26.784 us  |    }
+          &lt;idle&gt;-0     [001]     8.723318: funcgraph_exit:       + 52.288 us  |  }</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>콜백 85 µs 중 <strong><code>try_to_wake_up()</code>이 37 µs</strong>로 가장 크다 — 대기자를 run queue에 넣고 선점 필요 표시(<code>TIF_NEED_RESCHED</code>)를 하는 일이다. 나머지는 function_graph 자신의 오버헤드가 크게 섞인 숫자다(TCG에서 함수 하나 기록에 1~2 µs). 이 표시 깃발이 IRQ 복귀 경로에서 <code>__schedule()</code>로 이어진다.</li><li><code>s5_waiter</code> 쪽의 <code>! 862.672 us</code> 닫는 괄호는 <code>schedule()</code>에서 잠들어 있던 시간이다(1 ms 주기에서 일하지 않는 시간). <code>!</code>는 100 µs 이상, <code>+</code>는 10 µs 이상 표시(M5 §4).</li><li>RT 커널에서는 <code>_raw_spin_lock()</code> 아래에 <code>preempt_count_add()</code>가 안 보인다. 디버그 옵션 차이다 — trace 커널은 <code>CONFIG_DEBUG_PREEMPT=y</code>, <code>PREEMPT_TRACER=y</code>라 <code>preempt_count_add()</code>가 추적 가능한 실제 함수가 되고, rt 커널에는 이 옵션들이 없다 — 두 커널 설정이 "PREEMPT_RT만 다른 것은 아니다"라는 §1.2의 경고가 여기서도 보인다.</li><li><code>-g</code>로 그래프를 모듈 함수에 걸 수 있다는 것 자체가 확인 포인트다: 모듈 함수도 ftrace 패치 지점(<code>patchable-function-entry</code>)을 갖는다(M5 §2).</li></ul>
+<h3 id="6-4-예제-9-kprobe-hist-트리거-synthetic-event로-wakeup-latency-히스토그램">6.4 예제 9 — kprobe + hist 트리거 + synthetic event로 wakeup latency 히스토그램<a class="anchor" href="#6-4-예제-9-kprobe-hist-트리거-synthetic-event로-wakeup-latency-히스토그램" aria-label="link">#</a></h3>
+<p>트레이스 파일을 다 받아 사후 분석하는 대신, <strong>커널 안에서 바로 히스토그램을 만든다</strong>. 장시간 테스트에서 버퍼 넘침 없이 분포만 모을 때 쓰는 방법이다(M5 §5.5–5.6).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /sys/kernel/tracing; echo 0 &gt; tracing_on; echo &gt; trace
+echo 'p:s5/hardirq s5_irqlat:s5_timer_fn' &gt;&gt; kprobe_events
+echo 'wakeup_latency u64 lat; pid_t pid; int prio' &gt;&gt; synthetic_events
+echo 'irq_to_run u64 lat' &gt;&gt; synthetic_events
+echo 'hist:keys=pid:ts0=common_timestamp.usecs if comm=="s5_waiter"' &gt;&gt; events/sched/sched_waking/trigger
+echo 'hist:keys=next_pid:wlat=common_timestamp.usecs-$ts0:onmatch(sched.sched_waking).trace(wakeup_latency,$wlat,next_pid,next_prio):onmax($wlat).save(prev_comm,prev_prio) if next_comm=="s5_waiter"' &gt;&gt; events/sched/sched_switch/trigger
+echo 'hist:keys=common_cpu:t1=common_timestamp.usecs' &gt;&gt; events/s5/hardirq/trigger
+echo 'hist:keys=common_cpu:ilat=common_timestamp.usecs-$t1:onmatch(s5.hardirq).trace(irq_to_run,$ilat) if next_comm=="s5_waiter"' &gt;&gt; events/sched/sched_switch/trigger
+echo 'hist:keys=lat.log2:sort=lat' &gt;&gt; events/synthetic/wakeup_latency/trigger
+echo 'hist:keys=lat.log2:sort=lat' &gt;&gt; events/synthetic/irq_to_run/trigger
+echo 1 &gt; events/synthetic/wakeup_latency/enable; echo 1 &gt; events/synthetic/irq_to_run/enable</code></pre></figure>
+<p>한 줄씩 읽는 법:</p>
+<ol><li><code>p:s5/hardirq s5_irqlat:s5_timer_fn</code> — 모듈 함수 입구에 kprobe event를 만든다. 형식은 <code>p:[그룹/]이름 [모듈:]심볼</code>. 이제 <code>events/s5/hardirq</code>가 tracepoint처럼 생긴다.</li><li>synthetic event 두 개를 선언한다. 필드 타입은 C 선언처럼 쓴다.</li><li><code>sched_waking</code>에서, 깨어나는 태스크가 <code>s5_waiter</code>이면 pid를 키로 시각을 변수 <code>ts0</code>에 저장한다.</li><li><code>sched_switch</code>에서, 다음 태스크가 <code>s5_waiter</code>이면 같은 pid(<code>next_pid</code>) 키로 <code>ts0</code>을 찾아 차이 <code>wlat</code>를 계산하고(<code>onmatch</code>), synthetic event <code>wakeup_latency</code>를 발생시키며(<code>.trace</code>), 최댓값이 갱신될 때 그 순간의 <code>prev_comm</code>, <code>prev_prio</code>를 저장한다(<code>onmax().save()</code>). <strong>"최악일 때 직전에 CPU를 쥐고 있던 놈"을 커널이 알아서 기억한다.</strong></li><li>kprobe 지점에서 CPU 번호를 키로 시각 <code>t1</code>을 저장하고, <code>sched_switch</code>에서 같은 CPU 키로 차이를 내 <code>irq_to_run</code>을 만든다.</li><li>synthetic event 위에 다시 hist를 걸어 <code>lat.log2</code>(2의 거듭제곱 구간)로 센다.</li></ol>
+<p>그다음 대기자를 5000표본 돌리고 hist 파일을 읽는다. 시나리오를 바꿀 때는 트리거를 <code>'!'</code> 접두어로 같은 문자열을 써서 역순으로 지우고 다시 건다(<code>:clear</code>로 지우려던 시도는 <code>onmax</code> 액션이 있는 트리거에서 <code>Invalid argument</code>로 실패했다 — 실제로 밟음).</p>
+<p>Image-trace, <strong>hog</strong> (실제 출력에서 Totals 블록 일부 생략):</p>
+<figure class="code"><span class="lang">text</span><pre><code>-- wakeup_latency
+{ lat: ~ 2^5  } hitcount:          4
+{ lat: ~ 2^6  } hitcount:       3834
+{ lat: ~ 2^7  } hitcount:        985
+{ lat: ~ 2^8  } hitcount:         19
+{ lat: ~ 2^9  } hitcount:          4
+{ lat: ~ 2^12 } hitcount:        112
+    Hits: 4958
+-- irq_to_run
+{ lat: ~ 2^6  } hitcount:        220
+{ lat: ~ 2^7  } hitcount:       4543
+{ lat: ~ 2^8  } hitcount:         73
+{ lat: ~ 2^9  } hitcount:          8
+{ lat: ~ 2^10 } hitcount:        110
+    Hits: 4954
+{ next_pid:        143 } hitcount:       4958
+	max:       3972  prev_comm: s5_hog/1                          prev_prio:         98
+          &lt;idle&gt;-0       [001] d..5.    31.448550: wakeup_latency: lat=51 pid=143 prio=9
+          &lt;idle&gt;-0       [001] d..5.    31.448571: irq_to_run: lat=87
+          &lt;idle&gt;-0       [001] d..5.    31.449502: wakeup_latency: lat=46 pid=143 prio=9</code></pre></figure>
+<p>Image-rt, <strong>hog</strong>:</p>
+<figure class="code"><span class="lang">text</span><pre><code>-- wakeup_latency
+{ lat: ~ 2^5  } hitcount:        277
+{ lat: ~ 2^6  } hitcount:        589
+{ lat: ~ 2^7  } hitcount:       2827
+{ lat: ~ 2^8  } hitcount:       1226
+{ lat: ~ 2^9  } hitcount:         70
+{ lat: ~ 2^10 } hitcount:          9
+{ lat: ~ 2^11 } hitcount:          1
+{ lat: ~ 2^12 } hitcount:          1
+    Hits: 5000
+{ next_pid:        163 } hitcount:       5000
+	max:       3675  prev_comm: swapper/1                         prev_prio:        120</code></pre></figure>
+<p>비교용 Image-trace, <strong>idle</strong>:</p>
+<figure class="code"><span class="lang">text</span><pre><code>-- wakeup_latency
+{ lat: ~ 2^6  } hitcount:        597
+{ lat: ~ 2^7  } hitcount:       2994
+{ lat: ~ 2^8  } hitcount:       1195
+{ lat: ~ 2^9  } hitcount:        200
+{ lat: ~ 2^10 } hitcount:          1
+{ lat: ~ 2^11 } hitcount:          2
+    Hits: 4989
+{ next_pid:        118 } hitcount:       4989
+	max:       1419  prev_comm: swapper/1                         prev_prio:        120</code></pre></figure>
+<p>출력에서 볼 것 — <strong>이것이 이 프로젝트의 증거 한 장</strong>이다:</p>
+<ul><li>PREEMPT + hog: <code>2^12</code>(4096~8191 µs) 칸에 <strong>112번</strong>. idle에는 이 칸이 없다. 5000표본 중 112번 ≈ 2.2%. <code>onmax</code>가 기억한 최악 3972 µs 순간의 <code>prev_comm</code>은 <strong><code>s5_hog/1</code></strong>, <code>prev_prio 98</code>(= FIFO 1의 커널 표기 <code>99 − 1</code>). 측정기가 본 wake p99 ≈ 3.9 ms의 범인이 커널 안에서 이름으로 지목됐다.</li><li>PREEMPT_RT + hog: <code>2^12</code> 칸은 1번뿐이고, 최악의 <code>prev_comm</code>은 <code>swapper/1</code>(idle) — 락 보유자가 아니라 호스트 쪽 정지다.</li><li>synthetic event가 트레이스 버퍼에도 한 줄씩 남는다(<code>wakeup_latency: lat=51 pid=143 prio=9</code>). 플래그 <code>d..5.</code>는 IRQ off, preempt 깊이 5 — <code>sched_switch</code> tracepoint 안에서 발생했기 때문이다.</li></ul>
+<h3 id="6-5-함정-irq_to_run이-4-ms를-못-본-이유">6.5 함정 — <code>irq_to_run</code>이 4 ms를 못 본 이유<a class="anchor" href="#6-5-함정-irq_to_run이-4-ms를-못-본-이유" aria-label="link">#</a></h3>
+<p>같은 hog 실행에서 <code>irq_to_run</code>(kprobe → sched_switch)은 <code>2^12</code> 칸이 없고 <code>2^10</code>(1024~2047 µs)에 110번이 있다. 4 ms 막혔는데 왜 1~2 ms인가? 키가 <code>common_cpu</code>인 변수 <code>t1</code>은 <strong>같은 키의 다음 이벤트가 오면 덮어써진다</strong>. 대기자가 4 ms 막혀 있는 동안 타이머 hard IRQ가 1 ms마다 와서 <code>t1</code>을 갱신했고, 결국 "마지막 hard IRQ부터 전환까지"(1주기 이하)만 쟀다. §2.6의 버그 2와 <strong>정확히 같은 함정</strong>이다. <code>wakeup_latency</code>는 <code>sched_waking</code>이 대기자가 실제로 잠들어 있을 때 한 번만 발생하므로 이 문제가 없다. 교훈: synthetic event의 시작 이벤트는 "구간마다 한 번만 일어나는 이벤트"를 고르거나, 시작 쪽에 필터를 걸어야 한다.</p>
+<p><strong>체크포인트</strong>: <code>events/synthetic/wakeup_latency/hist</code>가 보이고, PREEMPT + hog에서 <code>2^12</code> 칸과 <code>prev_comm: s5_hog/1</code>이 나와야 한다. 끝나면 <code>kprobe_events</code>, <code>synthetic_events</code>를 비우고(<code>echo '!wakeup_latency' &gt;&gt; synthetic_events</code>, <code>echo '-:s5/hardirq' &gt;&gt; kprobe_events</code>) 트리거가 0개인지 <code>error_log</code>로 확인한다. 이 노트의 스크립트는 트리거만 지우고 이벤트 정의는 남겨 둔 채 전원을 껐다(출력 마지막의 <code>events after teardown</code>).</p>
+<hr>
+<h2 id="7-step-6-gpio-sim-경로-실제-gpio-드라이버의-길">7. Step 6 — gpio-sim 경로: 실제 GPIO 드라이버의 길<a class="anchor" href="#7-step-6-gpio-sim-경로-실제-gpio-드라이버의-길" aria-label="link">#</a></h2>
+<h3 id="7-1-gpio-sim-칩-만들기-configfs">7.1 gpio-sim 칩 만들기 (configfs)<a class="anchor" href="#7-1-gpio-sim-칩-만들기-configfs" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>G=/sys/kernel/config/gpio-sim/s5_sim
+mkdir -p $G/gpio-bank0 &amp;&amp; echo 8 &gt; $G/gpio-bank0/num_lines &amp;&amp; echo 1 &gt; $G/live
+DEV=$(cat $G/dev_name); CHIP=$(cat $G/gpio-bank0/chip_name)
+PULL=/sys/devices/platform/$DEV/$CHIP/sim_gpio0/pull
+echo "chip $CHIP dev $DEV pull=$PULL"; gpiodetect 2&gt;/dev/null | grep -i sim</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>chip gpiochip1 dev gpio-sim.0 pull=/sys/devices/platform/gpio-sim.0/gpiochip1/sim_gpio0/pull
+gpiochip1 [gpio-sim.0:node0] (8 lines)</code></pre></figure>
+<p>칩 이름에 <code>s5_</code> 접두어를 붙여 다른 작성자와 충돌하지 않게 했다. <code>pull</code>에 <code>pull-up</code>/<code>pull-down</code>을 쓰면 입력 라인의 값이 바뀌고, 엣지 인터럽트가 걸려 있으면 IRQ가 난다(H4).</p>
+<h3 id="7-2-코드-gpio-v2-uapi로-엣지-이벤트-기다리기">7.2 코드 — GPIO v2 uAPI로 엣지 이벤트 기다리기<a class="anchor" href="#7-2-코드-gpio-v2-uapi로-엣지-이벤트-기다리기" aria-label="link">#</a></h3>
+<p>libgpiod 없이 커널 uAPI(<code>linux/gpio.h</code>)를 직접 썼다. 의존성이 없고, 커널이 무엇을 주는지(<code>timestamp_ns</code>, <code>line_seqno</code>)가 그대로 보인다. 아래는 핵심 부분(전체 81줄 중 백분위 함수와 인자 처리 일부 생략).</p>
+<figure class="code"><span class="lang">c</span><pre><code>static int n; static const char *pull; static volatile uint64_t *t0;
+
+static void *toggler(void *arg)
+{
+	(void)arg;
+	int fd = open(pull, O_WRONLY);
+	if (fd &lt; 0) DIE("open pull");
+	for (int i = 1; i &lt;= n; i++) {
+		const char *v = (i &amp; 1) ? "pull-up" : "pull-down";
+		usleep(2000);
+		t0[i] = now();				/* T0: "the sensor asserts DRDY" */
+		if (write(fd, v, strlen(v)) &lt; 0) DIE("write pull");
+	}
+	close(fd);
+	return NULL;
+}
+
+int main(int argc, char **argv)
+{
+	/* ... args, calloc t0/a/b/c ... */
+	int chip = open(argv[1], O_RDONLY);
+	struct gpio_v2_line_request req = { .offsets = { 0 }, .num_lines = 1, .event_buffer_size = 64,
+		.config.flags = GPIO_V2_LINE_FLAG_INPUT | GPIO_V2_LINE_FLAG_EDGE_RISING | GPIO_V2_LINE_FLAG_EDGE_FALLING };
+	strcpy(req.consumer, "s5_gpio");
+	if (ioctl(chip, GPIO_V2_GET_LINE_IOCTL, &amp;req)) DIE("GET_LINE");
+	cpu_set_t set; CPU_ZERO(&amp;set); CPU_SET(1, &amp;set);
+	struct sched_param sp = { .sched_priority = 90 };
+	if (sched_setaffinity(0, sizeof(set), &amp;set) || sched_setscheduler(0, SCHED_FIFO, &amp;sp)) DIE("rt");
+	if (mlockall(MCL_CURRENT | MCL_FUTURE)) DIE("mlockall");
+	pthread_t th; pthread_attr_t at; pthread_attr_init(&amp;at);
+	CPU_ZERO(&amp;set); CPU_SET(0, &amp;set);		/* toggler: CPU0, SCHED_OTHER */
+	pthread_attr_setaffinity_np(&amp;at, sizeof(set), &amp;set);
+	pthread_attr_setinheritsched(&amp;at, PTHREAD_EXPLICIT_SCHED);
+	struct sched_param op = { 0 }; pthread_attr_setschedpolicy(&amp;at, SCHED_OTHER);
+	pthread_attr_setschedparam(&amp;at, &amp;op);
+	if (pthread_create(&amp;th, &amp;at, toggler, NULL)) DIE("pthread");
+	for (int i = 0; i &lt; n; i++) {
+		struct gpio_v2_line_event ev;
+		if (read(req.fd, &amp;ev, sizeof(ev)) != sizeof(ev)) DIE("read event");
+		uint64_t u = now(), s = ev.line_seqno;
+		a[i] = ev.timestamp_ns - t0[s];		/* write() -&gt; hard IRQ   */
+		b[i] = u - ev.timestamp_ns;		/* hard IRQ -&gt; user      */
+		c[i] = u - t0[s];			/* end to end            */
+	}
+	pthread_join(th, NULL);
+	/* ... print percentiles ... */
+}</code></pre></figure>
+<p><code>line_seqno</code>는 라인 요청 이후 1부터 세는 이벤트 번호라 토글 번호와 그대로 짝이 맞는다(양 엣지를 모두 요청했으므로 토글 1번 = 이벤트 1개). <code>PTHREAD_EXPLICIT_SCHED</code>를 빼면 토글러 스레드가 부모의 FIFO 90을 물려받는다 — 비교 조건이 바뀌므로 명시적으로 SCHED_OTHER로 만들었다.</p>
+<h3 id="7-3-커널-안의-길">7.3 커널 안의 길<a class="anchor" href="#7-3-커널-안의-길" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 350" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<text x="205" y="24" font-size="13" text-anchor="middle">CPU0 (toggler, IRQ 처리)</text>
+<text x="555" y="24" font-size="13" text-anchor="middle">CPU1 (RT waiter)</text>
+<rect x="10" y="40" width="390" height="32" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="205" y="61" font-size="12" text-anchor="middle">T0 기록 → write("pull-up") (sysfs)</text>
+<rect x="10" y="88" width="390" height="32" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="205" y="109" font-size="12" text-anchor="middle">gpio_sim_apply_pull() → irq_work_queue()</text>
+<line x1="205" y1="72" x2="205" y2="86" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="10" y="136" width="390" height="32" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="205" y="157" font-size="12" text-anchor="middle">self-IPI → irq_sim_handle_irq() (IRQ_WORK_INIT_HARD)</text>
+<line x1="205" y1="120" x2="205" y2="134" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="10" y="184" width="390" height="32" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="205" y="205" font-size="12" text-anchor="middle">edge_irq_handler(): timestamp_ns 기록 (hard IRQ)</text>
+<line x1="205" y1="168" x2="205" y2="182" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="10" y="232" width="390" height="32" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="205" y="253" font-size="12" text-anchor="middle">IRQ_WAKE_THREAD → irq/29-s5_gpio (FIFO 50)</text>
+<line x1="205" y1="216" x2="205" y2="230" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="10" y="280" width="390" height="32" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="205" y="301" font-size="12" text-anchor="middle">edge_irq_thread(): kfifo_in + wake_up_poll()</text>
+<line x1="205" y1="264" x2="205" y2="278" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="440" y="40" width="230" height="32" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="555" y="61" font-size="12" text-anchor="middle">read(line fd)에서 잠듦</text>
+<rect x="440" y="280" width="230" height="32" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="555" y="301" font-size="12" text-anchor="middle">깨어남 → read() 반환, T3 기록</text>
+<line x1="400" y1="296" x2="437" y2="296" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="418" y="330" font-size="12" text-anchor="middle">wakeup IPI</text>
+<line x1="455" y1="72" x2="455" y2="277" stroke="#3f9a6b" stroke-dasharray="4 3"/>
+<text x="468" y="120" font-size="12">trig→hardirq</text>
+<text x="468" y="140" font-size="12">= timestamp_ns − T0</text>
+<text x="468" y="200" font-size="12">hardirq→user</text>
+<text x="468" y="220" font-size="12">= T3 − timestamp_ns</text>
+</svg></figure>
+<p>그림 4 — gpio-sim 경로(소스 <code>drivers/gpio/gpio-sim.c</code>, <code>kernel/irq/irq_sim.c</code>, <code>drivers/gpio/gpiolib-cdev.c</code> 6.18.55 기준). sysfs write가 <code>irq_work_queue()</code>로 IRQ를 "주입"하고, irq_sim의 irq_work는 <code>IRQ_WORK_INIT_HARD</code>라 RT에서도 hard IRQ(self-IPI)로 돈다. gpiolib-cdev는 <code>request_threaded_irq()</code>로 hard 핸들러(타임스탬프만)와 스레드 핸들러(kfifo에 넣고 깨우기)를 나눈다.</p>
+<h3 id="7-4-예제-10-두-커널에서">7.4 예제 10 — 두 커널에서<a class="anchor" href="#7-4-예제-10-두-커널에서" aria-label="link">#</a></h3>
+<p>대기 중 스레드 목록과 IRQ 줄(Image-trace):</p>
+<figure class="code"><span class="lang">text</span><pre><code>== threads while waiting
+  162  FF     90   1 s5_gpio
+  162  TS      -   0 s5_gpio
+  164  FF     50   0 irq/29-s5_gpio
+ 29:       1156          0  irq_sim   0 Edge      s5_gpio</code></pre></figure>
+<p>Image-rt에서는 같은 줄 위에 <code>irq_work/0</code>, <code>irq_work/1</code>(FF 1) 스레드가 더 보인다(PREEMPT_RT는 HARD가 아닌 irq_work를 스레드에서 처리한다).</p>
+<figure class="code"><span class="lang">text</span><pre><code>   23  FF      1   0 irq_work/0
+   26  FF      1   1 irq_work/1
+  182  FF     90   1 s5_gpio
+  182  TS      -   0 s5_gpio
+  184  FF     50   0 irq/29-s5_gpio
+ 29:       1273          0  irq_sim   0 Edge      s5_gpio</code></pre></figure>
+<p>측정(3000 이벤트, idle / stress):</p>
+<div class="tw"><table><thead><tr><th>커널</th><th>조건</th><th>trig→hardirq p50 / p99</th><th>hardirq→user p50 / p99</th><th>total p99 / max</th></tr></thead><tbody><tr><td>PREEMPT</td><td>idle</td><td>88.8 / 311.1</td><td>301.6 / 1006.6</td><td>1254.3 / 11402.6</td></tr><tr><td>PREEMPT</td><td>stress</td><td>94.0 / 312.7</td><td>351.2 / 4393.2</td><td>4575.6 / 21475.0</td></tr><tr><td>PREEMPT_RT</td><td>idle</td><td>61.2 / 201.0</td><td>174.4 / 560.8</td><td>656.1 / 10429.7</td></tr><tr><td>PREEMPT_RT</td><td>stress</td><td>93.6 / 824.3</td><td>338.0 / 1156.8</td><td>1677.4 / 23844.3</td></tr></tbody></table></div>
+<p>(단위 µs, 원출력은 <code>s5_gpio</code>가 찍은 <code>trig-&gt;hardirq p50 ... max ... us</code> 줄들.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>irq 스레드 <code>irq/29-s5_gpio</code>가 FIFO 50으로 CPU0에 있다.</strong> threaded IRQ의 기본값이다(<code>irq/&lt;번호&gt;-&lt;이름&gt;</code>, SCHED_FIFO 50). hard IRQ가 CPU0(토글러가 write한 CPU, self-IPI)에서 났으니 스레드도 CPU0에서 돌고, 그다음 CPU1의 대기자를 <strong>CPU 간 IPI</strong>로 깨운다. 그래서 이 경로의 hardirq→user가 hrtimer 경로의 wake보다 길다(스레드 전환 + 원격 깨우기 두 단계).</li><li>stress에서 PREEMPT의 hardirq→user p99가 4.4 ms로 뛴다. stress-ng가 CPU0에 있고, irq 스레드가 거기서 같이 경쟁하기 때문이다. 실무 처방은 IRQ affinity로 이 IRQ를 RT CPU 쪽(또는 조용한 CPU)으로 옮기고, irq 스레드 우선순위를 <code>chrt</code>로 조정하는 것이다(N2 §4, §8).</li><li><code>/proc/interrupts</code>의 <code>irq_sim 0 Edge s5_gpio</code> — 칩이 <code>irq_sim</code> 도메인, 이름은 우리가 준 consumer 문자열이다.</li><li>이 경로의 원점(T0)은 sysfs write 직전 유저 시각이라 "IRQ latency"가 아니라 "소프트웨어 트리거 → hard IRQ"다. 그래서 RT vs non-RT 판단은 §5의 hrtimer 경로로 하고, 이 표는 "실제 드라이버 경로의 모양"을 보여 주는 용도다.</li></ul>
+<hr>
+<h2 id="8-step-7-cyclictest-rtla-timerlat으로-교차-확인">8. Step 7 — cyclictest + rtla timerlat으로 교차 확인<a class="anchor" href="#8-step-7-cyclictest-rtla-timerlat으로-교차-확인" aria-label="link">#</a></h2>
+<h3 id="8-1-왜-직접-만든-측정기만으로는-안-되나">8.1 왜 직접 만든 측정기만으로는 안 되나<a class="anchor" href="#8-1-왜-직접-만든-측정기만으로는-안-되나" aria-label="link">#</a></h3>
+<p>내 측정기가 맞는지, 표준 도구와 같은 경향을 보이는지 확인해야 한다(오실로스코프를 믿기 전에 기준 신호를 넣는 것과 같다). cyclictest는 업계 표준 숫자(유저 깨어남 지연), timerlat은 같은 것을 IRQ / Thr / Usr 단계로 쪼갠다(N3 §2, §7). 세 측정기 모두 같은 CPU, 같은 주기, 같은 시간이다.</p>
+<h3 id="8-2-결과-두-번-돌렸다">8.2 결과 — 두 번 돌렸다<a class="anchor" href="#8-2-결과-두-번-돌렸다" aria-label="link">#</a></h3>
+<p>같은 매트릭스를 두 번 돌렸다: 1차(16:50~17:08, VM 호스트 load average 1.8~7.0 — 다른 작성자들이 동시에 빌드 중), 2차(17:15~17:26, load average 0.7~1.2). 아래는 <code>host/plot.py</code>가 원자료에서 계산한 p99(µs)다.</p>
+<div class="tw"><table><thead><tr><th>측정기 · 커널</th><th>idle 1차 / 2차</th><th>stress 1차 / 2차</th><th>hog 1차 / 2차</th></tr></thead><tbody><tr><td>s5_waiter total · PREEMPT</td><td>1336 / 482</td><td>1754 / 521</td><td><strong>4038 / 3966</strong></td></tr><tr><td>s5_waiter total · PREEMPT_RT</td><td>750 / 1474</td><td>3761 / 381</td><td>1408 / 534</td></tr><tr><td>s5_waiter wake · PREEMPT</td><td>514 / 268</td><td>500 / 230</td><td><strong>3894 / 3773</strong></td></tr><tr><td>s5_waiter wake · PREEMPT_RT</td><td>319 / 521</td><td>1630 / 135</td><td>388 / 254</td></tr><tr><td>cyclictest · PREEMPT</td><td>1568 / 899</td><td>3148 / 340</td><td><strong>3434 / 3756</strong></td></tr><tr><td>cyclictest · PREEMPT_RT</td><td>636 / 1219</td><td>2914 / 273</td><td>1719 / 350</td></tr><tr><td>timerlat Thr · PREEMPT</td><td>610 / 690</td><td>1570 / 400</td><td><strong>3960 / 3870</strong></td></tr><tr><td>timerlat Thr · PREEMPT_RT</td><td>710 / 670</td><td>2410 / 550</td><td>1290 / 740</td></tr></tbody></table></div>
+<p>missed periods(s5_waiter, 30000주기 중): PREEMPT hog 2135 / 2013, PREEMPT_RT hog 116 / 13.</p>
+<p>cyclictest 30초 히스토그램을 같은 축에 겹치면 이렇다(1차 실행).</p>
+<figure class="chart"><svg viewBox="0 0 660 360" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" font-size="14">cyclictest 30 s, CPU1, FIFO 95 — PREEMPT vs PREEMPT_RT (QEMU TCG)</text>
+<line x1="70" y1="290" x2="600" y2="290" stroke="currentColor"/>
+<line x1="70" y1="60" x2="70" y2="290" stroke="currentColor"/>
+<line x1="70.0" y1="290" x2="70.0" y2="294" stroke="currentColor"/>
+<text x="70.0" y="308" font-size="12" text-anchor="middle">10us</text>
+<line x1="202.5" y1="290" x2="202.5" y2="294" stroke="currentColor"/>
+<text x="202.5" y="308" font-size="12" text-anchor="middle">100us</text>
+<line x1="335.0" y1="290" x2="335.0" y2="294" stroke="currentColor"/>
+<text x="335.0" y="308" font-size="12" text-anchor="middle">1ms</text>
+<line x1="467.5" y1="290" x2="467.5" y2="294" stroke="currentColor"/>
+<text x="467.5" y="308" font-size="12" text-anchor="middle">10ms</text>
+<line x1="600.0" y1="290" x2="600.0" y2="294" stroke="currentColor"/>
+<text x="600.0" y="308" font-size="12" text-anchor="middle">100ms</text>
+<line x1="66" y1="251.7" x2="70" y2="251.7" stroke="currentColor"/>
+<text x="62" y="255.7" font-size="12" text-anchor="end">1e0</text>
+<line x1="66" y1="213.3" x2="70" y2="213.3" stroke="currentColor"/>
+<text x="62" y="217.3" font-size="12" text-anchor="end">1e1</text>
+<line x1="66" y1="175.0" x2="70" y2="175.0" stroke="currentColor"/>
+<text x="62" y="179.0" font-size="12" text-anchor="end">1e2</text>
+<line x1="66" y1="136.7" x2="70" y2="136.7" stroke="currentColor"/>
+<text x="62" y="140.7" font-size="12" text-anchor="end">1e3</text>
+<line x1="66" y1="98.3" x2="70" y2="98.3" stroke="currentColor"/>
+<text x="62" y="102.3" font-size="12" text-anchor="end">1e4</text>
+<line x1="66" y1="60.0" x2="70" y2="60.0" stroke="currentColor"/>
+<text x="62" y="64.0" font-size="12" text-anchor="end">1e5</text>
+<text x="335" y="326" font-size="12" text-anchor="middle">latency (log)</text>
+<text x="20" y="48" font-size="12">count (log)</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,290.0 103.1,290.0 103.1,290.0 119.7,290.0 119.7,290.0 136.2,290.0 136.2,290.0 152.8,290.0 152.8,290.0 169.4,290.0 169.4,251.7 185.9,251.7 185.9,194.0 202.5,194.0 202.5,175.0 219.1,175.0 219.1,135.7 235.6,135.7 235.6,108.5 252.2,108.5 252.2,96.9 268.8,96.9 268.8,104.1 285.3,104.1 285.3,124.1 301.9,124.1 301.9,144.1 318.4,144.1 318.4,149.7 335.0,149.7 335.0,164.0 351.6,164.0 351.6,175.2 368.1,175.2 368.1,182.7 384.7,182.7 384.7,186.9 401.2,186.9 401.2,191.1 417.8,191.1 417.8,198.1 434.4,198.1 434.4,204.5 450.9,204.5 450.9,206.6 467.5,206.6 467.5,228.6 484.1,228.6 484.1,213.3 500.6,213.3 500.6,240.1 517.2,240.1 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#4a7bd0" stroke-width="1.8" stroke-dasharray="5 3"/>
+<line x1="420" y1="70" x2="442" y2="70" stroke="#4a7bd0" stroke-width="2" stroke-dasharray="5 3"/>
+<text x="448" y="74" font-size="12">trace idle</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,290.0 103.1,290.0 103.1,290.0 119.7,290.0 119.7,290.0 136.2,290.0 136.2,290.0 152.8,290.0 152.8,217.0 169.4,217.0 169.4,187.6 185.9,187.6 185.9,159.8 202.5,159.8 202.5,133.1 219.1,133.1 219.1,130.9 235.6,130.9 235.6,105.3 252.2,105.3 252.2,88.6 268.8,88.6 268.8,144.1 285.3,144.1 285.3,135.8 301.9,135.8 301.9,155.3 318.4,155.3 318.4,182.7 335.0,182.7 335.0,196.2 351.6,196.2 351.6,206.6 368.1,206.6 368.1,210.3 384.7,210.3 384.7,206.6 401.2,206.6 401.2,211.7 417.8,211.7 417.8,224.9 434.4,224.9 434.4,217.0 450.9,217.0 450.9,251.7 467.5,251.7 467.5,228.6 484.1,228.6 484.1,251.7 500.6,251.7 500.6,251.7 517.2,251.7 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#e08a3c" stroke-width="1.8" stroke-dasharray="5 3"/>
+<line x1="420" y1="88" x2="442" y2="88" stroke="#e08a3c" stroke-width="2" stroke-dasharray="5 3"/>
+<text x="448" y="92" font-size="12">rt idle</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,290.0 103.1,290.0 103.1,290.0 119.7,290.0 119.7,290.0 136.2,290.0 136.2,290.0 152.8,290.0 152.8,290.0 169.4,290.0 169.4,228.6 185.9,228.6 185.9,193.5 202.5,193.5 202.5,142.6 219.1,142.6 219.1,106.4 235.6,106.4 235.6,96.0 252.2,96.0 252.2,110.8 268.8,110.8 268.8,122.1 285.3,122.1 285.3,140.3 301.9,140.3 301.9,163.8 318.4,163.8 318.4,172.5 335.0,172.5 335.0,173.1 351.6,173.1 351.6,180.7 368.1,180.7 368.1,197.4 384.7,197.4 384.7,198.1 401.2,198.1 401.2,144.2 417.8,144.2 417.8,199.5 434.4,199.5 434.4,219.3 450.9,219.3 450.9,240.1 467.5,240.1 467.5,251.7 484.1,251.7 484.1,233.4 500.6,233.4 500.6,290.0 517.2,290.0 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#4a7bd0" stroke-width="1.8"/>
+<line x1="420" y1="106" x2="442" y2="106" stroke="#4a7bd0" stroke-width="2"/>
+<text x="448" y="110" font-size="12">trace hog</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,290.0 103.1,290.0 103.1,290.0 119.7,290.0 119.7,290.0 136.2,290.0 136.2,290.0 152.8,290.0 152.8,251.7 169.4,251.7 169.4,173.0 185.9,173.0 185.9,151.3 202.5,151.3 202.5,145.6 219.1,145.6 219.1,138.2 235.6,138.2 235.6,125.0 252.2,125.0 252.2,109.3 268.8,109.3 268.8,112.7 285.3,112.7 285.3,99.3 301.9,99.3 301.9,109.3 318.4,109.3 318.4,151.8 335.0,151.8 335.0,169.8 351.6,169.8 351.6,173.9 368.1,173.9 368.1,175.3 384.7,175.3 384.7,177.1 401.2,177.1 401.2,197.4 417.8,197.4 417.8,204.5 434.4,204.5 434.4,217.0 450.9,217.0 450.9,219.3 467.5,219.3 467.5,240.1 484.1,240.1 484.1,240.1 500.6,240.1 500.6,290.0 517.2,290.0 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#e08a3c" stroke-width="1.8"/>
+<line x1="420" y1="124" x2="442" y2="124" stroke="#e08a3c" stroke-width="2"/>
+<text x="448" y="128" font-size="12">rt hog</text>
+<text x="20" y="350" font-size="12">dashed = idle, solid = s5_hog (spinlock_t 4 ms / 40 ms on CPU1)</text>
+</svg></figure>
+<p>그림 5 — cyclictest 히스토그램, PREEMPT(파랑) vs PREEMPT_RT(주황), 점선 idle / 실선 hog(실측, 로그-로그). PREEMPT + hog에는 2~5 ms에 <strong>섬</strong>(봉우리 밖의 작은 무리)이 생긴다 — 섬의 위치는 범인의 길이(4 ms), 높이는 빈도(40 ms마다)다(N3 §4.5). PREEMPT_RT + hog에는 그 섬이 없다. 20 ms 이상의 꼬리는 네 곡선 모두에 있다 — 호스트 정지다.</p>
+<p>s5_waiter의 구간을 나눠 그리면 "어느 구간이 움직였나"가 바로 보인다.</p>
+<figure class="chart"><svg viewBox="0 0 660 360" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" font-size="14">s5_waiter segments under s5_hog — which segment moves?</text>
+<line x1="70" y1="290" x2="600" y2="290" stroke="currentColor"/>
+<line x1="70" y1="60" x2="70" y2="290" stroke="currentColor"/>
+<line x1="70.0" y1="290" x2="70.0" y2="294" stroke="currentColor"/>
+<text x="70.0" y="308" font-size="12" text-anchor="middle">10us</text>
+<line x1="202.5" y1="290" x2="202.5" y2="294" stroke="currentColor"/>
+<text x="202.5" y="308" font-size="12" text-anchor="middle">100us</text>
+<line x1="335.0" y1="290" x2="335.0" y2="294" stroke="currentColor"/>
+<text x="335.0" y="308" font-size="12" text-anchor="middle">1ms</text>
+<line x1="467.5" y1="290" x2="467.5" y2="294" stroke="currentColor"/>
+<text x="467.5" y="308" font-size="12" text-anchor="middle">10ms</text>
+<line x1="600.0" y1="290" x2="600.0" y2="294" stroke="currentColor"/>
+<text x="600.0" y="308" font-size="12" text-anchor="middle">100ms</text>
+<line x1="66" y1="251.7" x2="70" y2="251.7" stroke="currentColor"/>
+<text x="62" y="255.7" font-size="12" text-anchor="end">1e0</text>
+<line x1="66" y1="213.3" x2="70" y2="213.3" stroke="currentColor"/>
+<text x="62" y="217.3" font-size="12" text-anchor="end">1e1</text>
+<line x1="66" y1="175.0" x2="70" y2="175.0" stroke="currentColor"/>
+<text x="62" y="179.0" font-size="12" text-anchor="end">1e2</text>
+<line x1="66" y1="136.7" x2="70" y2="136.7" stroke="currentColor"/>
+<text x="62" y="140.7" font-size="12" text-anchor="end">1e3</text>
+<line x1="66" y1="98.3" x2="70" y2="98.3" stroke="currentColor"/>
+<text x="62" y="102.3" font-size="12" text-anchor="end">1e4</text>
+<line x1="66" y1="60.0" x2="70" y2="60.0" stroke="currentColor"/>
+<text x="62" y="64.0" font-size="12" text-anchor="end">1e5</text>
+<text x="335" y="326" font-size="12" text-anchor="middle">latency (log)</text>
+<text x="20" y="48" font-size="12">count (log)</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,290.0 103.1,290.0 103.1,251.7 119.7,251.7 119.7,221.8 136.2,221.8 136.2,183.5 152.8,183.5 152.8,144.9 169.4,144.9 169.4,93.3 185.9,93.3 185.9,99.6 202.5,99.6 202.5,117.3 219.1,117.3 219.1,130.1 235.6,130.1 235.6,141.4 252.2,141.4 252.2,157.2 268.8,157.2 268.8,180.7 285.3,180.7 285.3,190.7 301.9,190.7 301.9,206.6 318.4,206.6 318.4,213.3 335.0,213.3 335.0,224.9 351.6,224.9 351.6,224.9 368.1,224.9 368.1,228.6 384.7,228.6 384.7,210.3 401.2,210.3 401.2,143.7 417.8,143.7 417.8,221.8 434.4,221.8 434.4,233.4 450.9,233.4 450.9,240.1 467.5,240.1 467.5,251.7 484.1,251.7 484.1,290.0 500.6,290.0 500.6,290.0 517.2,290.0 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#4a7bd0" stroke-width="1.8"/>
+<line x1="420" y1="70" x2="442" y2="70" stroke="#4a7bd0" stroke-width="2"/>
+<text x="448" y="74" font-size="12">trace hog: wake</text>
+<polyline points="70.0,206.6 86.6,206.6 86.6,209.0 103.1,209.0 103.1,221.8 119.7,221.8 119.7,210.3 136.2,210.3 136.2,198.8 152.8,198.8 152.8,180.5 169.4,180.5 169.4,150.4 185.9,150.4 185.9,119.7 202.5,119.7 202.5,98.9 219.1,98.9 219.1,92.7 235.6,92.7 235.6,124.3 252.2,124.3 252.2,148.7 268.8,148.7 268.8,172.0 285.3,172.0 285.3,180.9 301.9,180.9 301.9,185.6 318.4,185.6 318.4,192.5 335.0,192.5 335.0,200.2 351.6,200.2 351.6,201.0 368.1,201.0 368.1,204.5 384.7,204.5 384.7,209.0 401.2,209.0 401.2,221.8 417.8,221.8 417.8,228.6 434.4,228.6 434.4,228.6 450.9,228.6 450.9,228.6 467.5,228.6 467.5,251.7 484.1,251.7 484.1,233.4 500.6,233.4 500.6,233.4 517.2,233.4 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#4a7bd0" stroke-width="1.8" stroke-dasharray="5 3"/>
+<line x1="420" y1="88" x2="442" y2="88" stroke="#4a7bd0" stroke-width="2" stroke-dasharray="5 3"/>
+<text x="448" y="92" font-size="12">trace hog: irq</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,290.0 103.1,290.0 103.1,290.0 119.7,290.0 119.7,210.3 136.2,210.3 136.2,175.3 152.8,175.3 152.8,149.1 169.4,149.1 169.4,115.3 185.9,115.3 185.9,103.8 202.5,103.8 202.5,107.4 219.1,107.4 219.1,106.8 235.6,106.8 235.6,111.4 252.2,111.4 252.2,128.2 268.8,128.2 268.8,156.7 285.3,156.7 285.3,176.6 301.9,176.6 301.9,189.8 318.4,189.8 318.4,194.0 335.0,194.0 335.0,187.6 351.6,187.6 351.6,211.7 368.1,211.7 368.1,219.3 384.7,219.3 384.7,224.9 401.2,224.9 401.2,233.4 417.8,233.4 417.8,224.9 434.4,224.9 434.4,251.7 450.9,251.7 450.9,290.0 467.5,290.0 467.5,251.7 484.1,251.7 484.1,290.0 500.6,290.0 500.6,290.0 517.2,290.0 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#e08a3c" stroke-width="1.8"/>
+<line x1="420" y1="106" x2="442" y2="106" stroke="#e08a3c" stroke-width="2"/>
+<text x="448" y="110" font-size="12">rt hog: wake</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,251.7 103.1,251.7 103.1,290.0 119.7,290.0 119.7,190.7 136.2,190.7 136.2,162.3 152.8,162.3 152.8,165.7 169.4,165.7 169.4,157.0 185.9,157.0 185.9,148.8 202.5,148.8 202.5,138.2 219.1,138.2 219.1,132.3 235.6,132.3 235.6,126.9 252.2,126.9 252.2,118.9 268.8,118.9 268.8,88.4 285.3,88.4 285.3,117.4 301.9,117.4 301.9,159.9 318.4,159.9 318.4,179.4 335.0,179.4 335.0,180.2 351.6,180.2 351.6,181.7 368.1,181.7 368.1,187.6 384.7,187.6 384.7,201.0 401.2,201.0 401.2,207.7 417.8,207.7 417.8,209.0 434.4,209.0 434.4,233.4 450.9,233.4 450.9,251.7 467.5,251.7 467.5,233.4 484.1,233.4 484.1,240.1 500.6,240.1 500.6,240.1 517.2,240.1 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#e08a3c" stroke-width="1.8" stroke-dasharray="5 3"/>
+<line x1="420" y1="124" x2="442" y2="124" stroke="#e08a3c" stroke-width="2" stroke-dasharray="5 3"/>
+<text x="448" y="128" font-size="12">rt hog: irq</text>
+<text x="20" y="350" font-size="12">solid = hardirq -> reader running (wake), dashed = expire -> hardirq (irq)</text>
+</svg></figure>
+<p>그림 6 — s5_hog 부하에서 s5_waiter 구간별 히스토그램(실측). 실선 = wake, 점선 = irq. PREEMPT의 wake(파랑 실선)만 4 ms 근처에 섬이 있다. irq 구간(점선)은 두 커널이 비슷하다 — 락 보유는 IRQ를 막지 않았다.</p>
+<h3 id="8-3-읽는-법">8.3 읽는 법<a class="anchor" href="#8-3-읽는-법" aria-label="link">#</a></h3>
+<ul><li><strong>세 측정기가 같은 결론을 낸다</strong>: PREEMPT + hog에서 p99가 3.4~4.0 ms로 뛰고(1차·2차 모두, 오차 10% 안), PREEMPT_RT + hog에서는 그 섬이 없다. timerlat은 그 증가가 <strong>IRQ 단계가 아니라 Thr 단계</strong>라고 말한다(IRQ p99 860 / 280 µs, Thr p99 3960 / 3870 µs) — 우리 측정기의 "irq는 그대로, wake만 증가"와 같은 결론이다. 이것이 서로 다른 세 측정기의 교차 확인이다.</li><li><strong>stress와 idle의 차이는 주장할 수 없다.</strong> PREEMPT_RT stress의 p99가 1차 3761, 2차 381 — <strong>열 배</strong>가 같은 커널, 같은 명령에서 달라졌다. 1차 때 호스트 load가 높았다. 실행 간 흔들림이 커널 간 차이보다 크다. N3 §10.2의 결론과 같다.</li><li><strong>TCG에서는 idle이 stress보다 나쁠 때가 많다</strong>(2차: PREEMPT_RT idle 1474 vs stress 381). vCPU가 idle(WFI)로 들어가면 QEMU가 호스트 스레드를 재우고, 깨어날 때 호스트 스케줄러를 거친다. 바쁜 vCPU는 그 비용이 없다. 실제 보드의 cpuidle 탈출 비용과 같은 모양이라, cyclictest가 기본으로 <code>/dev/cpu_dma_latency</code>에 0을 쓰는 이유도 여기 있다(N1 §3, N5). s5_waiter는 그 설정을 하지 않으므로 idle에서 cyclictest와 숫자가 다를 수 있다 — 확장 과제다.</li></ul>
+<hr>
+<h2 id="9-step-8-cpu-격리-isolcpus-nohz_full">9. Step 8 — CPU 격리 (isolcpus / nohz_full)<a class="anchor" href="#9-step-8-cpu-격리-isolcpus-nohz_full" aria-label="link">#</a></h2>
+<h3 id="9-1-부트-인자">9.1 부트 인자<a class="anchor" href="#9-1-부트-인자" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>커널</th><th>추가 인자</th></tr></thead><tbody><tr><td>Image-trace</td><td><code>isolcpus=1 irqaffinity=0</code> (NO_HZ_FULL, RCU_NOCB_CPU 없음)</td></tr><tr><td>Image-rt</td><td><code>isolcpus=1 nohz_full=1 rcu_nocbs=1 irqaffinity=0</code></td></tr></tbody></table></div>
+<figure class="code"><span class="lang">sh</span><pre><code>S5_TIMEOUT=1500 host/run_guest.sh trace matrix iso S5D=30 isolcpus=1 irqaffinity=0
+S5_TIMEOUT=1500 host/run_guest.sh rt    matrix iso S5D=30 isolcpus=1 nohz_full=1 rcu_nocbs=1 irqaffinity=0</code></pre></figure>
+<h3 id="9-2-예제-11-격리가-실제로-먹혔는지-먼저-증명한다">9.2 예제 11 — 격리가 "실제로 먹혔는지" 먼저 증명한다<a class="anchor" href="#9-2-예제-11-격리가-실제로-먹혔는지-먼저-증명한다" aria-label="link">#</a></h3>
+<p>결과를 보기 전에 격리 자체를 확인한다(N2 §6에서 강조한 순서). <code>phase_isocheck.sh</code>는 init의 affinity, stress-ng 작업자가 도는 CPU, CPU별 IRQ 수를 본다. Image-rt, 격리 부팅:</p>
+<figure class="code"><span class="lang">text</span><pre><code>isolated=1 nohz_full=1
+Cpus_allowed_list:	0
+      1   0 stress-ng
+      2   0 stress-ng-cpu
+      1   0 stress-ng-io
+      2   0 stress-ng-vm
+           CPU0       CPU1       
+ 11:       7741        205 GIC-0  27 Level     arch_timer
+ 19:       3464          0 GICv2m-PCI-MSIX-0000:00:03.0   1 
+ 20:          0          0 GICv2m-PCI-MSIX-0000:00:03.0   2 
+IPI0:        26         18       Rescheduling interrupts
+IPI1:         0         18       Function call interrupts</code></pre></figure>
+<p>같은 커널, 격리 인자 없이:</p>
+<figure class="code"><span class="lang">text</span><pre><code>isolated= nohz_full=(null)
+Cpus_allowed_list:	0-1
+      1   0 stress-ng-cpu
+      2   0 stress-ng-vm
+      1   1 stress-ng
+      1   1 stress-ng-cpu
+      1   1 stress-ng-io
+           CPU0       CPU1       
+ 11:       6897       6285 GIC-0  27 Level     arch_timer
+ 19:       2667          0 GICv2m-PCI-MSIX-0000:00:03.0   1 
+ 20:          0       1976 GICv2m-PCI-MSIX-0000:00:03.0   2 
+IPI0:      2408       2625       Rescheduling interrupts
+IPI1:       977       1069       Function call interrupts</code></pre></figure>
+<p>(<code>/proc/interrupts</code>는 virtio 줄 일부만 남김.) 출력에서 볼 것:</p>
+<ul><li><strong>init(PID 1)의 허용 CPU가 <code>0</code>뿐</strong> → 그 자식인 stress-ng 작업자가 전부 CPU0에 있다. 격리하지 않으면 CPU1에도 3개가 있다. <code>isolcpus=</code>는 "명시적으로 고정하지 않은 태스크는 격리 CPU에 오지 않는다"이다(N2 §6). 그래서 게스트 <code>nproc</code>이 격리 부팅에서 1을 출력했다(<code>nproc</code>은 affinity를 센다).</li><li><strong>CPU1의 arch_timer IRQ가 205번 vs 6285번</strong> — <code>nohz_full=1</code>로 CPU1의 주기 tick이 멈췄다(HZ=1000이면 약 6초에 6000번이어야 한다).</li><li><strong>IRQ 20(virtio 큐 하나)이 CPU1에서 1976번 → 0번</strong> — <code>irqaffinity=0</code>이 옮겼다. 다만 이것은 이 게스트에서 그 큐가 managed IRQ가 아니었기 때문이다. NVMe·멀티큐 NIC 같은 managed IRQ는 <code>irqaffinity</code>로 못 옮긴다(N2 §8).</li></ul>
+<h3 id="9-3-결과">9.3 결과<a class="anchor" href="#9-3-결과" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>측정기 p99 (µs)</th><th>PREEMPT 비격리 1차 / 2차</th><th>PREEMPT 격리</th><th>PREEMPT_RT 비격리 1차 / 2차</th><th>PREEMPT_RT 격리</th></tr></thead><tbody><tr><td>s5_waiter total, idle</td><td>1336 / 482</td><td>1865</td><td>750 / 1474</td><td>1420</td></tr><tr><td>s5_waiter total, stress</td><td>1754 / 521</td><td>769</td><td>3761 / 381</td><td><strong>280</strong></td></tr><tr><td>s5_waiter total, hog</td><td>4038 / 3966</td><td>3510</td><td>1408 / 534</td><td>413</td></tr><tr><td>cyclictest, stress</td><td>3148 / 340</td><td>355</td><td>2914 / 273</td><td>307</td></tr><tr><td>timerlat Thr, stress</td><td>1570 / 400</td><td>360</td><td>2410 / 550</td><td>480</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 660 360" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" font-size="14">cyclictest 30 s under stress-ng — without vs with isolcpus=1</text>
+<line x1="70" y1="290" x2="600" y2="290" stroke="currentColor"/>
+<line x1="70" y1="60" x2="70" y2="290" stroke="currentColor"/>
+<line x1="70.0" y1="290" x2="70.0" y2="294" stroke="currentColor"/>
+<text x="70.0" y="308" font-size="12" text-anchor="middle">10us</text>
+<line x1="202.5" y1="290" x2="202.5" y2="294" stroke="currentColor"/>
+<text x="202.5" y="308" font-size="12" text-anchor="middle">100us</text>
+<line x1="335.0" y1="290" x2="335.0" y2="294" stroke="currentColor"/>
+<text x="335.0" y="308" font-size="12" text-anchor="middle">1ms</text>
+<line x1="467.5" y1="290" x2="467.5" y2="294" stroke="currentColor"/>
+<text x="467.5" y="308" font-size="12" text-anchor="middle">10ms</text>
+<line x1="600.0" y1="290" x2="600.0" y2="294" stroke="currentColor"/>
+<text x="600.0" y="308" font-size="12" text-anchor="middle">100ms</text>
+<line x1="66" y1="251.7" x2="70" y2="251.7" stroke="currentColor"/>
+<text x="62" y="255.7" font-size="12" text-anchor="end">1e0</text>
+<line x1="66" y1="213.3" x2="70" y2="213.3" stroke="currentColor"/>
+<text x="62" y="217.3" font-size="12" text-anchor="end">1e1</text>
+<line x1="66" y1="175.0" x2="70" y2="175.0" stroke="currentColor"/>
+<text x="62" y="179.0" font-size="12" text-anchor="end">1e2</text>
+<line x1="66" y1="136.7" x2="70" y2="136.7" stroke="currentColor"/>
+<text x="62" y="140.7" font-size="12" text-anchor="end">1e3</text>
+<line x1="66" y1="98.3" x2="70" y2="98.3" stroke="currentColor"/>
+<text x="62" y="102.3" font-size="12" text-anchor="end">1e4</text>
+<line x1="66" y1="60.0" x2="70" y2="60.0" stroke="currentColor"/>
+<text x="62" y="64.0" font-size="12" text-anchor="end">1e5</text>
+<text x="335" y="326" font-size="12" text-anchor="middle">latency (log)</text>
+<text x="20" y="48" font-size="12">count (log)</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,290.0 103.1,290.0 103.1,290.0 119.7,290.0 119.7,290.0 136.2,290.0 136.2,290.0 152.8,290.0 152.8,290.0 169.4,290.0 169.4,290.0 185.9,290.0 185.9,240.1 202.5,240.1 202.5,192.5 219.1,192.5 219.1,148.6 235.6,148.6 235.6,114.9 252.2,114.9 252.2,103.3 268.8,103.3 268.8,104.8 285.3,104.8 285.3,116.0 301.9,116.0 301.9,132.9 318.4,132.9 318.4,132.2 335.0,132.2 335.0,140.5 351.6,140.5 351.6,154.3 368.1,154.3 368.1,156.8 384.7,156.8 384.7,164.3 401.2,164.3 401.2,175.9 417.8,175.9 417.8,181.7 434.4,181.7 434.4,191.1 450.9,191.1 450.9,204.5 467.5,204.5 467.5,203.5 484.1,203.5 484.1,209.0 500.6,209.0 500.6,228.6 517.2,228.6 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#4a7bd0" stroke-width="1.8"/>
+<line x1="420" y1="70" x2="442" y2="70" stroke="#4a7bd0" stroke-width="2"/>
+<text x="448" y="74" font-size="12">trace stress</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,290.0 103.1,290.0 103.1,290.0 119.7,290.0 119.7,290.0 136.2,290.0 136.2,290.0 152.8,290.0 152.8,199.5 169.4,199.5 169.4,162.2 185.9,162.2 185.9,166.8 202.5,166.8 202.5,102.1 219.1,102.1 219.1,89.3 235.6,89.3 235.6,117.1 252.2,117.1 252.2,146.0 268.8,146.0 268.8,160.2 285.3,160.2 285.3,180.9 301.9,180.9 301.9,199.5 318.4,199.5 318.4,204.5 335.0,204.5 335.0,209.0 351.6,209.0 351.6,206.6 368.1,206.6 368.1,215.1 384.7,215.1 384.7,215.1 401.2,215.1 401.2,213.3 417.8,213.3 417.8,224.9 434.4,224.9 434.4,251.7 450.9,251.7 450.9,251.7 467.5,251.7 467.5,251.7 484.1,251.7 484.1,240.1 500.6,240.1 500.6,251.7 517.2,251.7 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#3f9a6b" stroke-width="1.8"/>
+<line x1="420" y1="88" x2="442" y2="88" stroke="#3f9a6b" stroke-width="2"/>
+<text x="448" y="92" font-size="12">trace-iso stress</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,290.0 103.1,290.0 103.1,290.0 119.7,290.0 119.7,290.0 136.2,290.0 136.2,290.0 152.8,290.0 152.8,290.0 169.4,290.0 169.4,290.0 185.9,290.0 185.9,211.7 202.5,211.7 202.5,154.9 219.1,154.9 219.1,114.5 235.6,114.5 235.6,118.3 252.2,118.3 252.2,151.6 268.8,151.6 268.8,123.6 285.3,123.6 285.3,102.8 301.9,102.8 301.9,107.8 318.4,107.8 318.4,128.3 335.0,128.3 335.0,149.4 351.6,149.4 351.6,149.2 368.1,149.2 368.1,161.7 384.7,161.7 384.7,149.3 401.2,149.3 401.2,176.2 417.8,176.2 417.8,187.6 434.4,187.6 434.4,198.1 450.9,198.1 450.9,201.8 467.5,201.8 467.5,215.1 484.1,215.1 484.1,228.6 500.6,228.6 500.6,290.0 517.2,290.0 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#e08a3c" stroke-width="1.8"/>
+<line x1="420" y1="106" x2="442" y2="106" stroke="#e08a3c" stroke-width="2"/>
+<text x="448" y="110" font-size="12">rt stress</text>
+<polyline points="70.0,290.0 86.6,290.0 86.6,290.0 103.1,290.0 103.1,290.0 119.7,290.0 119.7,290.0 136.2,290.0 136.2,290.0 152.8,290.0 152.8,290.0 169.4,290.0 169.4,290.0 185.9,290.0 185.9,211.7 202.5,211.7 202.5,132.2 219.1,132.2 219.1,106.9 235.6,106.9 235.6,86.5 252.2,86.5 252.2,125.6 268.8,125.6 268.8,171.4 285.3,171.4 285.3,179.8 301.9,179.8 301.9,206.6 318.4,206.6 318.4,211.7 335.0,211.7 335.0,224.9 351.6,224.9 351.6,251.7 368.1,251.7 368.1,219.3 384.7,219.3 384.7,240.1 401.2,240.1 401.2,213.3 417.8,213.3 417.8,228.6 434.4,228.6 434.4,228.6 450.9,228.6 450.9,233.4 467.5,233.4 467.5,240.1 484.1,240.1 484.1,251.7 500.6,251.7 500.6,290.0 517.2,290.0 517.2,290.0 533.8,290.0 533.8,290.0 550.3,290.0 550.3,290.0 566.9,290.0 566.9,290.0 583.4,290.0 583.4,290.0 600.0,290.0" fill="none" stroke="#d0564a" stroke-width="1.8"/>
+<line x1="420" y1="124" x2="442" y2="124" stroke="#d0564a" stroke-width="2"/>
+<text x="448" y="128" font-size="12">rt-iso stress</text>
+<text x="20" y="350" font-size="12">iso: isolcpus=1 irqaffinity=0 (+nohz_full=1 rcu_nocbs=1 on rt)</text>
+</svg></figure>
+<p>그림 7 — stress-ng 부하에서 cyclictest 히스토그램, 비격리(1차) vs 격리(실측). 격리 곡선이 왼쪽으로 몰려 보인다.</p>
+<figure class="chart"><svg viewBox="0 0 660 360" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="24" font-size="14">s5_waiter end-to-end p99 (expire -> user), per kernel / scenario</text>
+<line x1="70" y1="290" x2="600" y2="290" stroke="currentColor"/>
+<line x1="70" y1="60" x2="70" y2="290" stroke="currentColor"/>
+<line x1="66" y1="290.0" x2="600" y2="290.0" stroke="currentColor" stroke-opacity="0.2"/>
+<text x="62" y="294.0" font-size="12" text-anchor="end">100us</text>
+<line x1="66" y1="213.3" x2="600" y2="213.3" stroke="currentColor" stroke-opacity="0.2"/>
+<text x="62" y="217.3" font-size="12" text-anchor="end">1ms</text>
+<line x1="66" y1="136.7" x2="600" y2="136.7" stroke="currentColor" stroke-opacity="0.2"/>
+<text x="62" y="140.7" font-size="12" text-anchor="end">10ms</text>
+<line x1="66" y1="60.0" x2="600" y2="60.0" stroke="currentColor" stroke-opacity="0.2"/>
+<text x="62" y="64.0" font-size="12" text-anchor="end">100ms</text>
+<text x="158.3" y="308" font-size="12" text-anchor="middle">idle</text>
+<rect x="87.7" y="203.7" width="33.3" height="86.3" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<rect x="123.0" y="222.9" width="33.3" height="67.1" fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c"/>
+<rect x="158.3" y="192.6" width="33.3" height="97.4" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<rect x="193.7" y="201.7" width="33.3" height="88.3" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/>
+<text x="335.0" y="308" font-size="12" text-anchor="middle">stress</text>
+<rect x="264.3" y="194.6" width="33.3" height="95.4" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<rect x="299.7" y="169.2" width="33.3" height="120.8" fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c"/>
+<rect x="335.0" y="222.1" width="33.3" height="67.9" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<rect x="370.3" y="255.8" width="33.3" height="34.2" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/>
+<text x="511.7" y="308" font-size="12" text-anchor="middle">hog</text>
+<rect x="441.0" y="166.9" width="33.3" height="123.1" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<rect x="476.3" y="201.9" width="33.3" height="88.1" fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c"/>
+<rect x="511.7" y="171.5" width="33.3" height="118.5" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<rect x="547.0" y="242.8" width="33.3" height="47.2" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/>
+<rect x="80" y="320" width="12" height="12" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<text x="98" y="331" font-size="12">trace</text>
+<rect x="220" y="320" width="12" height="12" fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c"/>
+<text x="238" y="331" font-size="12">rt</text>
+<rect x="360" y="320" width="12" height="12" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<text x="378" y="331" font-size="12">trace-iso</text>
+<rect x="500" y="320" width="12" height="12" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/>
+<text x="518" y="331" font-size="12">rt-iso</text>
+<text x="20" y="48" font-size="12">p99 (log)</text>
+</svg></figure>
+<p>그림 8 — s5_waiter end-to-end p99를 커널·격리·부하별로(실측, 로그 축, 1차 실행 기준). 파랑 trace, 주황 rt, 초록 trace-iso, 빨강 rt-iso.</p>
+<h3 id="9-4-정직하게-읽기">9.4 정직하게 읽기<a class="anchor" href="#9-4-정직하게-읽기" aria-label="link">#</a></h3>
+<ul><li>그림 7만 보면 "격리가 stress 아래 p99를 3148 → 355 µs로 줄였다"고 말하고 싶어진다. 그런데 <strong>격리하지 않은 2차 실행이 340 µs</strong>다. 1차의 나쁜 숫자는 격리 부재가 아니라 그때의 호스트 부하 탓일 가능성이 크다. 이 데이터로 주장할 수 있는 것은 "격리 시 stress 부하에서도 p99가 조용한 호스트의 비격리 수준(약 300 µs대)을 유지했다"까지다.</li><li><strong>격리는 hog를 못 막는다</strong>: PREEMPT 격리 + hog의 p99는 3510 µs. <code>s5_hog</code>는 <code>kthread_bind()</code>로 CPU1에 <strong>명시적으로 고정</strong>됐기 때문이다. isolcpus는 스케줄러가 "자동으로" 옮기는 것만 막는다. 실무에서는 per-CPU kworker, 드라이버가 CPU에 고정한 kthread, 그 CPU로 라우팅된 IRQ가 이런 식으로 격리를 뚫는다 — 확인 방법이 §9.2의 <code>ps -o psr</code>과 <code>/proc/interrupts</code>다.</li><li>격리의 효과를 TCG에서 분명히 보이려면 호스트 부하를 고정하거나(조용한 시간대), 같은 조건을 여러 번 반복해 분포의 분포를 봐야 한다. 실제 보드에서는 격리 효과가 호스트 소음 없이 바로 보인다(N2 §11.2의 TCG 측정도 같은 한계를 적었다).</li></ul>
+<hr>
+<h2 id="10-step-9-분석-템플릿-숫자를-어떻게-설명하나">10. Step 9 — 분석 템플릿: 숫자를 어떻게 설명하나<a class="anchor" href="#10-step-9-분석-템플릿-숫자를-어떻게-설명하나" aria-label="link">#</a></h2>
+<h3 id="10-1-순서">10.1 순서<a class="anchor" href="#10-1-순서" aria-label="link">#</a></h3>
+<ol><li><strong>측정기를 먼저 검증한다.</strong> 원인을 아는 지연원(s5_hog 4 ms)을 넣었을 때 측정기가 그 크기(3.9 ms)를 보는가? 처음 버전은 못 봤다(§2.6).</li><li><strong>세 측정기로 교차 확인한다.</strong> 자체 측정기, cyclictest, timerlat이 같은 방향인가? (§8.3: 셋 다 PREEMPT + hog p99 ≈ 3.4~4.0 ms.)</li><li><strong>트레이스로 원인을 지목한다.</strong> hist <code>onmax().save(prev_comm)</code>가 <code>s5_hog/1</code>을 가리켰다(§6.4).</li><li><strong>실행 간 흔들림을 먼저 잰다.</strong> 같은 조건 두 번(1차/2차)의 차이가 커널 간 차이보다 크면 주장하지 않는다(§8.3의 stress, §9.4의 격리).</li><li><strong>설정 차이를 다 적는다.</strong> PREEMPT_RT 외에도 HZ, NO_HZ_FULL, RT_GROUP_SCHED, 디버그 옵션이 다르다(§1.2).</li><li><strong>TCG 한계를 적는다.</strong> 절대값은 에뮬레이터 숫자, 상대 모양만.</li></ol>
+<h3 id="10-2-n1-n3와-비교">10.2 N1·N3와 비교<a class="anchor" href="#10-2-n1-n3와-비교" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>노트</th><th>무엇을 쟀나</th><th>결론</th><th>이 노트와의 관계</th></tr></thead><tbody><tr><td>N1 §6</td><td>cyclictest idle/부하, trace vs rt, 20초</td><td>TCG에서는 섞인 결과, RT 우위 주장 불가</td><td>같은 결론(stress, idle)</td></tr><tr><td>N1 §5</td><td>FIFO 1 kthread가 락을 20 ms × 20회 보유, 막힌 횟수</td><td>PREEMPT + <code>spinlock_t</code>만 약 20번 막힘, RT + <code>spinlock_t</code>은 기준선</td><td><strong>같은 메커니즘을 분포로 재현</strong>: 이 노트는 4 ms × 40 ms 주기, p99와 hist 섬으로</td></tr><tr><td>N3 §10.2</td><td>60초 × 3회(trace, rt, trace 재측정)</td><td>실행 간 차이 &gt; 커널 간 차이</td><td>이 노트의 1차/2차 비교가 같은 현상을 다시 보여 줌 (rt stress p99 3761 vs 381)</td></tr><tr><td>N3 §4.4</td><td>icount 모드</td><td>호스트 소음 제거, bimodal</td><td>이 노트는 실시간 TCG만 — icount 반복은 확장 과제</td></tr></tbody></table></div>
+<p>차이점 하나: N3는 "TCG에서 두 커널 차이를 주장할 수 없다"로 끝났고, 이 노트는 <strong>원인을 아는 지연원(spinlock_t 보유)을 넣었을 때는 TCG에서도 차이가 재현 가능하게 보인다</strong>를 보였다. 일반 부하에서의 차이는 여전히 주장할 수 없다 — 두 결론은 모순이 아니다. "RT는 OS 안의 비선점 구간을 없앤다. 호스트 정지 같은 OS 밖 지연은 그대로다."</p>
+<h3 id="10-3-보고서-템플릿-이-실험으로-채운-예">10.3 보고서 템플릿 (이 실험으로 채운 예)<a class="anchor" href="#10-3-보고서-템플릿-이-실험으로-채운-예" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>Latency Report - S5 irq-latency-lab, 2026-10-18
+Question    : does PREEMPT_RT remove the wakeup delay caused by a driver holding
+              a spinlock_t for 4 ms every 40 ms on the RT CPU?
+Platform    : QEMU 10.2.1 'virt' TCG (cortex-a57 model), -smp 2, -m 1G, Lima VM on Apple M2
+              host load average 1.8-7.0 (run 1) and 0.7-1.2 (run 2)   &lt;-- dominant noise
+Kernels     : 6.18.55-trace (PREEMPT, HZ=250, RT_GROUP_SCHED)
+              6.18.55-rt    (PREEMPT_RT, HZ=1000, NO_HZ_FULL)
+Boot        : init=PID-1 script (no systemd); isolation runs add isolcpus=1 irqaffinity=0
+              (+ nohz_full=1 rcu_nocbs=1 on rt)
+Probes      : s5_irqlat (hrtimer ABS_PINNED_HARD, 4 timestamps), cyclictest 2.50
+              (-m -a1 -t1 -p95 -i1000 -h20000 -D30), rtla timerlat hist (-c1 -P f:95)
+Load        : idle / stress-ng cpu2 vm1 io1 / s5_hog (FIFO1, spinlock_t 4 ms per 40 ms, CPU1)
+Results p99 (us), run1/run2      PREEMPT        PREEMPT_RT
+  s5_waiter wake, hog            3894 / 3773     388 / 254
+  cyclictest, hog                3434 / 3756    1719 / 350
+  timerlat Thr, hog              3960 / 3870    1290 / 740
+  missed periods, hog            2135 / 2013     116 / 13
+Root cause  : hist trigger onmax(): prev_comm=s5_hog/1 at max 3972 us (PREEMPT only)
+Not claimed : idle-vs-stress and isolation effects (run-to-run spread &gt; effect)
+Conclusion  : PREEMPT_RT removes the spinlock_t-induced 4 ms tail (all 3 probes, 2 runs).
+Next        : repeat on target HW with GPIO+scope (M11), 1 h+ runs, cpu_dma_latency=0</code></pre></figure>
+<p>이 템플릿 구조는 N3 §11과 같다. 면접에서 "어떻게 측정하고 보고했나"에 이 한 장을 그대로 말하면 된다.</p>
+<hr>
+<h2 id="11-커널-안에서는-무슨-일이-일어나나">11. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#11-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<p>hrtimer 경로 한 표본이 지나가는 길(arm64, 6.18 기준, 핵심 함수만):</p>
+<figure class="code"><pre><code>arch timer (CNTV, PPI 27) fires at t_expire
+  -&gt; GIC -&gt; el1_interrupt -&gt; gic_handle_irq
+  -&gt; handle_percpu_devid_irq -&gt; arch_timer_handler_virt
+  -&gt; hrtimer_interrupt -&gt; __hrtimer_run_queues
+       -&gt; s5_timer_fn()            t_hardirq = ktime_get_ns()
+            -&gt; swake_up_one -&gt; try_to_wake_up   (sched_waking, set NEED_RESCHED)
+  &lt;- irq exit: preemptible?  PREEMPT: only if preempt_count == 0
+                             (s5_hog holds spin_lock -&gt; count &gt; 0 -&gt; WAIT 4 ms)
+                             PREEMPT_RT: spinlock_t = rt_mutex, count == 0 -&gt; switch now
+  -&gt; __schedule -&gt; context_switch            (sched_switch ==&gt; s5_waiter)
+  -&gt; s5_read resumes after swait_event       t_kwake
+  -&gt; copy_to_user -&gt; ret_to_user             t_user (clock_gettime in userspace)</code></pre></figure>
+<p>드라이버 작성 때 다시 만나는 지점:</p>
+<div class="tw"><table><thead><tr><th>이 노트에서</th><th>드라이버 실무에서</th><th>참고 노트</th></tr></thead><tbody><tr><td>hrtimer <code>_HARD</code> 모드</td><td>RT 커널에서 타이머 콜백이 어느 문맥인지 — softirq로 밀리면 지연이 스레드 우선순위를 따른다</td><td>F8, N1 §5</td></tr><tr><td>swait / <code>wake_up_process</code></td><td>hard IRQ에서 깨울 때 RT에서도 안전한 API</td><td>F3, F6</td></tr><tr><td><code>request_threaded_irq</code> + <code>IRQ_WAKE_THREAD</code></td><td>gpiolib-cdev처럼 hard 핸들러는 타임스탬프만, 무거운 일은 스레드에서. RT에서는 모든 IRQ가 기본으로 스레드화</td><td>F6, F7, H4</td></tr><tr><td><code>spinlock_t</code> vs <code>raw_spinlock_t</code></td><td>RT에서 잠드는 락과 진짜 스핀락. hard IRQ 경로에는 raw만</td><td>F4, N1 §5</td></tr><tr><td><code>udelay</code> 폴링</td><td>락을 쥔 채 폴링하는 코드가 지연 꼬리를 만든다 — <code>readx_poll_timeout</code> + 락 밖 폴링, 또는 IRQ 대기</td><td>H1, N1</td></tr><tr><td>misc device + blocking read</td><td>센서 데이터 준비 → 유저 깨우기의 표준 형태</td><td>G4, G6, G7, S2</td></tr></tbody></table></div>
+<hr>
+<h2 id="12-embedded-실무에서-다시-보기">12. Embedded 실무에서 다시 보기<a class="anchor" href="#12-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<ul><li><strong>센서 키트의 IMU DRDY 지연</strong>: IMU가 1 kHz로 DRDY GPIO를 올리고, 드라이버는 threaded IRQ에서 SPI로 읽어 IIO 버퍼에 넣는다(S4). "가끔 샘플이 늦다"는 보고가 오면, 이 노트의 순서대로 한다 — gpiolib/IIO 타임스탬프(hard IRQ 시각)와 유저 수신 시각의 차이를 분포로 재고, wakeup_latency hist를 <code>onmax().save(prev_comm)</code>과 함께 걸어 범인을 이름으로 찾는다. 범인이 다른 드라이버의 락 보유면 RT 커널 또는 그 드라이버 수정, 범인이 IRQ 스레드 경쟁이면 IRQ affinity와 <code>chrt</code>.</li><li><strong>1 kHz 모터 제어 루프의 CI</strong>: <code>irq-latency-lab</code>의 <code>phase_matrix.sh</code>를 그대로 CI 잡으로 만들 수 있다. 실제 보드에서 커널 업데이트마다 hog 없는 stress 시나리오를 1시간 돌리고, p99.99와 max가 기준을 넘으면 실패시킨다(N3 §13.2).</li><li><strong>"벤더 BSP 드라이버가 RT를 망친다"</strong>: 벤더 드라이버가 <code>spin_lock_irqsave</code> 안에서 수 ms 폴링하면, PREEMPT_RT에서도 <code>raw_spinlock_t</code>나 <code>local_irq_save</code>라면 지연이 남는다. 이 노트의 hist 트리거 한 줄이 벤더에게 보낼 증거가 된다.</li><li><strong>Don의 SSD 경험과의 연결</strong>: SSD에서 "GC 태스크가 FTL 락을 오래 쥐어 호스트 명령 처리 태스크가 늦다"를 QoS 꼬리(p99.99)로 봤던 것과 같은 그림이다. 차이는 Linux가 그 락을 RT 커널에서 선점 가능한 락으로 바꿔 준다는 것, 그리고 ftrace가 로직 분석기 없이 범인 이름을 준다는 것이다.</li></ul>
+<hr>
+<h2 id="13-흔한-실수와-증상-이-노트에서-실제로-재현한-것">13. 흔한 실수와 증상 — 이 노트에서 실제로 재현한 것<a class="anchor" href="#13-흔한-실수와-증상-이-노트에서-실제로-재현한-것" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>타임스탬프를 락 밖에서 찍음</td><td>wake max 18446744073709528 µs</td><td>다음 hard IRQ가 사이에 끼어 음수 → 부호 없는 수</td><td>IRQ off + 락 안에서 찍기 (§2.6)</td></tr><tr><td>늦은 표본을 최신 값으로 덮어씀</td><td>4 ms 락을 걸어도 p99 899 µs</td><td>최악을 놓치는 측정기</td><td>가장 오래된 미처리 만료 보존 + missed 카운트</td></tr><tr><td>synthetic 시작 변수를 매 이벤트가 덮어씀</td><td>irq_to_run이 4 ms 대신 1~2 ms</td><td>같은 키의 다음 이벤트가 변수 갱신</td><td>구간당 한 번 일어나는 시작 이벤트 사용 (§6.5)</td></tr><tr><td>측정 바이너리·로그를 9p/NFS에 둠</td><td>대기자가 D 상태, kworker 깨움</td><td>page-in, write가 원격 FS I/O</td><td>tmpfs로 복사, 로그는 끝나고 저장 (§4.6)</td></tr><tr><td>systemd 세션에서 chrt (Image-trace)</td><td><code>Operation not permitted</code></td><td>RT_GROUP_SCHED, 하위 cgroup RT 예산 0</td><td><code>echo $$ &gt; /sys/fs/cgroup/cgroup.procs</code> (§4.4)</td></tr><tr><td>한 번 재고 결론</td><td>rt stress p99 3761 vs 381</td><td>호스트 부하에 따른 실행 간 흔들림</td><td>같은 조건 반복, 흔들림 &gt; 차이면 주장 안 함 (§8.3)</td></tr><tr><td>격리만 믿음</td><td>격리 CPU에서도 p99 3.5 ms</td><td>CPU에 bind된 kthread는 isolcpus를 무시</td><td><code>ps -o psr</code>, <code>/proc/interrupts</code>로 격리 CPU 손님 확인 (§9.4)</td></tr><tr><td><code>:clear</code>로 onmax 트리거 초기화</td><td><code>echo: write error: Invalid argument</code></td><td>같은 스펙 매칭 실패</td><td><code>!</code>로 지우고 다시 걸기</td></tr><tr><td>RT 커널에서 hrtimer 기본 모드</td><td>"hard IRQ" 타임스탬프가 사실은 ktimers 스레드 시각</td><td>RT는 비-HARD hrtimer를 softirq로</td><td><code>HRTIMER_MODE_*_HARD</code></td></tr></tbody></table></div>
+<hr>
+<h2 id="14-확장-과제-포트폴리오를-한-단계-더">14. 확장 과제 — 포트폴리오를 한 단계 더<a class="anchor" href="#14-확장-과제-포트폴리오를-한-단계-더" aria-label="link">#</a></h2>
+<ol><li><strong>icount 모드로 반복</strong>: <code>-icount shift=3,sleep=off</code>로 같은 매트릭스를 돌려 호스트 소음 없이 stress·격리 효과가 보이는지(N3 §4.4).</li><li><strong>s5_waiter에 <code>/dev/cpu_dma_latency</code> 0 쓰기 옵션</strong> 추가 후 idle 결과 비교.</li><li><strong>자체 tracepoint</strong>: <code>TRACE_EVENT(s5_sample, ...)</code>를 모듈에 넣어(M5 §5.7) kprobe 대신 쓰고, synthetic event를 tracepoint 필드로 만들기.</li><li><strong>IRQ 스레드 우선순위 실험</strong>: gpio 경로에서 <code>chrt -f -p 95 &lt;irq/29 pid&gt;</code>와 IRQ affinity를 CPU1로 바꿔 hardirq→user가 어떻게 바뀌는지.</li><li><strong>hog 변형</strong>: <code>raw_spinlock_t</code>, <code>local_irq_save</code>, <code>preempt_disable</code> 버전을 만들어 "PREEMPT_RT가 못 고치는 것"을 같은 그림으로(N1 §10, N3 <code>n3_spike</code>).</li><li><strong>실제 보드</strong>: Raspberry Pi 5 / BeaglePlay(S3)에서 GPIO 루프백(출력 핀 → 입력 핀)으로 진짜 엣지를 만들고, scope로 원점을 재서(M11) 소프트웨어 타임스탬프와 비교.</li><li><strong>rtla timerlat <code>-a</code></strong>(auto-analysis)로 hog 첫 스파이크에서 멈추고 범인 분석(N3 §7.4).</li></ol>
+<hr>
+<h2 id="15-github와-면접에서-보여-주기">15. GitHub와 면접에서 보여 주기<a class="anchor" href="#15-github와-면접에서-보여-주기" aria-label="link">#</a></h2>
+<h3 id="15-1-readme-구성-저장소에-이미-있음">15.1 README 구성 (저장소에 이미 있음)<a class="anchor" href="#15-1-readme-구성-저장소에-이미-있음" aria-label="link">#</a></h3>
+<ol><li>한 줄 요약 + TCG 경고(맨 위)</li><li>측정 구간 그림(ASCII 또는 <code>docs/s5_timeline.svg</code>)</li><li>설계 결정: hrtimer 모듈 vs gpio-sim, HARD 모드, swait, 가장 오래된 표본 보존</li><li>실행법 4줄(<code>prepare.sh</code>, <code>run_guest.sh trace smoke smoke</code>, <code>run_matrix.sh</code>, <code>plot.py</code>)</li><li>결과 표(§10.3) + 그림 5, 6</li><li>"측정기 버그 두 개와 교훈"(§2.6) — 면접관이 가장 좋아하는 부분</li><li>한계와 다음 단계(실제 HW, scope)</li></ol>
+<h3 id="15-2-3분-데모-스크립트">15.2 3분 데모 스크립트<a class="anchor" href="#15-2-3분-데모-스크립트" aria-label="link">#</a></h3>
+<ol><li>(20초) 문제 정의: "IRQ에서 내 RT 스레드까지 얼마나 걸리고, 어디서 새나?"</li><li>(40초) 구간 그림(그림 1)과 모듈의 세 결정(HARD, swait, oldest sample).</li><li>(40초) <code>run_guest.sh trace matrix base S5SCEN=hog S5D=10</code> 라이브 실행 → wake p99가 수 ms로 뜨는 것.</li><li>(40초) ftrace hist 출력: <code>2^12</code> 칸, <code>prev_comm: s5_hog/1</code>.</li><li>(40초) 같은 명령을 <code>rt</code>로 → 섬이 사라짐. TCG 한계와 "실행 간 흔들림을 먼저 쟀다"는 문장으로 마무리.</li></ol>
+<h3 id="15-3-보여-줄-숫자">15.3 보여 줄 숫자<a class="anchor" href="#15-3-보여-줄-숫자" aria-label="link">#</a></h3>
+<ul><li>PREEMPT + hog wake p99 <strong>3.9 ms</strong> vs PREEMPT_RT <strong>0.25~0.39 ms</strong> (두 번 측정)</li><li>missed periods <strong>2135 vs 116</strong> (30000주기 중)</li><li>hist 최악 <strong>3972 µs, prev_comm=s5_hog/1</strong></li><li>격리 확인: CPU1 arch_timer IRQ <strong>205 vs 6285</strong> (nohz_full), stress-ng 작업자 전부 CPU0</li><li>그리고 "이 숫자는 TCG 숫자다, 실제 보드에서는 µs 단위"라는 한 문장</li></ul>
+<hr>
+<h2 id="16-면접에서-이렇게-말한다">16. 면접에서 이렇게 말한다<a class="anchor" href="#16-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> "How did you measure interrupt-to-userspace latency, and how do you know where the time went?"</p>
+<p><strong>A.</strong> 알려진 시각에 만료하는 hrtimer를 HARD 모드로 걸어 hard IRQ에서 타임스탬프를 찍고, 유저 RT 스레드가 깨어난 시각까지 네 지점으로 쪼갰다. 그리고 sched_waking/sched_switch에 hist 트리거와 synthetic event를 걸어 커널 안에서 분포를 만들고, 최댓값일 때 직전 태스크 이름을 저장해 범인을 지목했다.</p>
+<blockquote><p>I built a small kernel module whose hrtimer expires at a known absolute time in hard-IRQ context, so I get four timestamps: expiry, handler, back-in-kernel, and back-in-userspace. That splits latency into IRQ, wakeup, and return segments. To prove the path I used trace-cmd with irq, timer and sched events, function_graph on the callback, and an in-kernel histogram: a synthetic wakeup_latency event from sched_waking to sched_switch with an onmax action that saves prev_comm. Under an injected 4 ms spinlock holder, the max entry named the offending kthread directly.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Why not just use cyclictest?" → 쓴다. 교차 확인용으로 같은 CPU·주기에서 cyclictest와 timerlat을 같이 돌렸고 같은 결론이었다. 자체 측정기는 "어느 구간"인지를 주고, timerlat도 IRQ/thread 단계로 같은 답을 줬다.</p>
+<p><strong>Q.</strong> "What exactly does PREEMPT_RT fix, and what doesn't it fix?"</p>
+<p><strong>A.</strong> 비선점 구간을 없앤다 — <code>spinlock_t</code>가 잠들 수 있는 rt_mutex가 되고, IRQ 핸들러와 softirq가 스레드로 간다. 그래서 락을 오래 쥔 드라이버 때문에 생기는 4 ms 꼬리가 사라졌다. 하지만 <code>raw_spinlock_t</code>, <code>local_irq_save</code>, 펌웨어·하이퍼바이저 정지는 그대로다. 측정에서도 20 ms 이상의 꼬리는 두 커널에 다 있었고, 그건 호스트 정지였다.</p>
+<blockquote><p>PREEMPT_RT shrinks non-preemptible regions: spinlock_t becomes an rt_mutex-based sleeping lock, and interrupt handlers and softirqs run in threads. In my lab, a FIFO-1 kthread holding a spinlock_t for 4 ms every 40 ms pushed the p99 wakeup latency to about 3.9 ms on PREEMPT, and on PREEMPT_RT the island disappeared. What RT does not fix is anything outside its model: raw spinlocks, explicit irq-off sections, firmware or hypervisor stalls. Both kernels still showed tens-of-ms tails from the emulator host.</p></blockquote>
+<p><strong>Q.</strong> "Your numbers are from QEMU. Are they meaningful?"</p>
+<p><strong>A.</strong> 절대값은 의미 없다고 먼저 말한다. 의미 있는 것은 같은 파라미터에서의 상대 비교와 모양이다. 그리고 같은 매트릭스를 두 번 돌려 실행 간 흔들림을 쟀다 — stress에서는 그 흔들림이 열 배라 커널 차이를 주장하지 않았고, hog 효과는 두 번 다 10% 안에서 재현돼서 주장했다.</p>
+<blockquote><p>The absolute values are emulator numbers, so I only claim relative shape under identical parameters. I ran the whole matrix twice to measure run-to-run variance. For generic stress load the variance was about 10x, larger than the kernel difference, so I don't claim anything there. The spinlock effect reproduced within about 10 percent in both runs across three different probes, so that one I do claim. On real hardware I'd confirm with a GPIO loopback and a scope.</p></blockquote>
+<p><strong>Q.</strong> "Why did you use a simple wait queue instead of a normal wait queue in the IRQ handler?"</p>
+<p><strong>A.</strong> PREEMPT_RT에서 일반 wait queue의 락은 <code>spinlock_t</code>라 잠들 수 있는 락이고, hard IRQ에서 잡으면 안 된다. swait는 raw spinlock이라 hard IRQ에서 안전하다. completion도 내부에 swait를 쓴다. 타이머도 <code>_HARD</code> 모드여야 RT에서 콜백이 hard IRQ에 남는다.</p>
+<blockquote><p>On PREEMPT_RT a regular wait_queue_head is protected by a spinlock_t, which is a sleeping lock there, so you must not take it from hard-IRQ context. A swait queue uses a raw spinlock and is safe to wake from hard IRQ; completions use it internally. For the same reason the hrtimer is started in HRTIMER_MODE_ABS_PINNED_HARD, otherwise RT would defer the callback to the softirq thread and my "hard-IRQ timestamp" would be wrong.</p></blockquote>
+<p><strong>Q.</strong> "You isolated a CPU but still saw 3.5 ms latency on it. Why?"</p>
+<p><strong>A.</strong> isolcpus는 스케줄러가 자동으로 옮기는 태스크만 막는다. 그 CPU에 명시적으로 bind된 kthread, per-CPU 작업, 그 CPU로 라우팅된 IRQ는 그대로 온다. <code>ps -o psr</code>와 <code>/proc/interrupts</code>로 격리 CPU에 누가 남아 있는지 확인했고, 범인은 그 CPU에 bind된 hog 스레드였다.</p>
+<blockquote><p>isolcpus only removes the CPU from load balancing and default affinity. Anything explicitly bound to that CPU — a driver's kthread, per-CPU workers, IRQs routed there — still runs on it. I verified isolation with ps psr, the init task's Cpus_allowed_list and per-CPU interrupt counts, and the remaining offender was a kthread bound with kthread_bind.</p></blockquote>
+<p><strong>Q.</strong> "Your gpio path shows a threaded IRQ. Where does that latency come from and how would you tune it?"</p>
+<p><strong>A.</strong> gpiolib-cdev는 hard 핸들러에서 타임스탬프만 찍고 IRQ_WAKE_THREAD를 반환한다. 그다음 <code>irq/29-s5_gpio</code>(FIFO 50) 스레드가 이벤트를 kfifo에 넣고 대기자를 깨운다. 그 스레드가 CPU0에서 stress-ng와 경쟁하고, 다른 CPU의 대기자를 IPI로 깨우니 두 단계가 생긴다. 튜닝은 IRQ affinity, IRQ 스레드 우선순위, 대기자와의 CPU 배치다.</p>
+<blockquote><p>gpiolib-cdev timestamps the edge in the hard handler and returns IRQ_WAKE_THREAD; the irq thread, SCHED_FIFO 50 by default, then pushes the event into a kfifo and wakes the reader. In my setup that thread ran on CPU0 next to the stress load and had to wake the reader on CPU1 with an IPI, which doubled the hops. I'd tune it with IRQ affinity, the irq thread's priority via chrt, and by placing the consumer thread deliberately relative to the irq thread.</p></blockquote>
+<hr>
+<h2 id="17-직접-해보기">17. 직접 해보기<a class="anchor" href="#17-직접-해보기" aria-label="link">#</a></h2>
+<ol><li>(개념) <code>s5_timer_fn</code>이 <code>s5_last</code>를 무조건 덮어쓰면 어떤 지연이 숨겨지나? 정답/힌트: 대기자가 N주기 늦을 때 wake가 최신 hard IRQ 기준이 되어 최대 1주기로 잘린다 — §2.6 버그 2.</li><li>(코드) <code>s5_hog</code>에 <code>mode=raw</code> 파라미터를 추가해 <code>raw_spinlock_t</code>로 같은 실험을 하라. PREEMPT_RT에서 섬이 다시 생겨야 한다. 정답/힌트: <code>DEFINE_RAW_SPINLOCK</code> + <code>raw_spin_lock()</code> — RT도 선점하지 못한다.</li><li>(관찰) PREEMPT_RT 게스트에서 hrtimer 모드를 <code>HRTIMER_MODE_ABS_PINNED</code>(HARD 없음)로 바꾸고 trace-cmd로 <code>s5_timer_fn</code>이 어느 태스크 문맥에서 도는지 보라. 정답/힌트: <code>&lt;idle&gt;-0</code>(hard IRQ)이 아니라 softirq 처리 스레드(6.18 RT에서는 <code>ktimers/1</code>) 문맥이 보이고, irq 구간에 스레드 스케줄링 지연이 더해진다.</li><li>(ftrace) <code>irq_to_run</code>을 §6.5 함정 없이 고쳐라. 정답/힌트: 시작 이벤트를 <code>sched_waking</code>으로 바꾸거나, 모듈 tracepoint에 seq를 넣어 키로 쓴다.</li><li>(분석) 1차/2차 실행 표(§8.2)에서 "주장할 수 있는 것"과 "없는 것"을 각각 두 줄로 써라. 정답/힌트: hog 효과는 주장 가능(재현 10% 안, 세 측정기 일치), stress·격리 효과는 불가(흔들림 열 배).</li><li>(확장) <code>irqaffinity=0</code> 없이 격리만 했을 때 <code>/proc/interrupts</code>에서 CPU1에 남는 IRQ를 찾아라. 정답/힌트: virtio 큐 IRQ 하나가 CPU1에 남는다(§9.2의 IRQ 20).</li></ol>
+<hr>
+<h2 id="18-용어-사전">18. 용어 사전<a class="anchor" href="#18-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>IRQ latency</td><td>하드웨어 사건 → 핸들러 첫 줄</td><td>이 노트의 irq 구간. IRQ off 구간이 늘린다</td></tr><tr><td>wakeup(scheduling) latency</td><td>깨우기 → 그 태스크가 CPU에서 실행</td><td>wake 구간. preempt off·비선점 락이 늘린다</td></tr><tr><td>hrtimer HARD 모드</td><td><code>HRTIMER_MODE_*_HARD</code></td><td>PREEMPT_RT에서도 콜백을 hard IRQ 문맥에 유지</td></tr><tr><td>swait</td><td>simple wait queue</td><td>raw spinlock 기반, hard IRQ에서 깨워도 RT 안전</td></tr><tr><td>threaded IRQ</td><td><code>request_threaded_irq</code></td><td>hard 핸들러 + <code>irq/N-name</code> 커널 스레드(기본 FIFO 50)</td></tr><tr><td>irq_sim</td><td>IRQ 시뮬레이터</td><td>gpio-sim이 쓰는 소프트웨어 IRQ 도메인, irq_work로 주입</td></tr><tr><td>hist trigger</td><td><code>hist:keys=...</code></td><td>이벤트를 커널 안에서 키별로 집계하는 ftrace 트리거</td></tr><tr><td>synthetic event</td><td><code>synthetic_events</code></td><td>두 이벤트 사이 값(지연)으로 만든 새 이벤트</td></tr><tr><td>onmatch / onmax</td><td>hist 액션</td><td>짝이 맞으면 이벤트 발생 / 최댓값 갱신 때 필드 저장</td></tr><tr><td>kprobe event</td><td><code>kprobe_events</code></td><td>임의 함수 입구에 만든 동적 이벤트</td></tr><tr><td>isolcpus</td><td>부트 인자</td><td>스케줄러 자동 배치에서 CPU 제외</td></tr><tr><td>nohz_full</td><td>부트 인자</td><td>태스크 하나만 있을 때 그 CPU의 주기 tick 정지</td></tr><tr><td>RT_GROUP_SCHED</td><td>커널 옵션</td><td>cgroup별 RT 시간 예산. 하위 cgroup 기본 0 → FIFO 실패</td></tr><tr><td>missed periods</td><td>이 노트의 지표</td><td>대기자가 통째로 놓친 타이머 주기 수</td></tr><tr><td>TCG</td><td>QEMU Tiny Code Generator</td><td>소프트웨어 CPU 에뮬레이션. 타이밍이 실제 HW가 아님</td></tr></tbody></table></div>
+<hr>
+<h2 id="19-요약-체크리스트">19. 요약 &amp; 체크리스트<a class="anchor" href="#19-요약-체크리스트" aria-label="link">#</a></h2>
+<p>알려진 시각에 만료하는 HARD hrtimer와 swait로 만든 측정 모듈, SCHED_FIFO 대기 스레드로 IRQ→유저 지연을 irq / wake / ret 구간으로 쪼개 쟀다. trace-cmd 이벤트와 function_graph로 경로를 확인하고, kprobe + hist 트리거 + synthetic event로 wakeup latency 분포를 커널 안에서 만들었으며, <code>onmax().save(prev_comm)</code>이 4 ms <code>spinlock_t</code> 보유자를 이름으로 지목했다. cyclictest·rtla timerlat이 같은 결론을 냈다: PREEMPT에서 그 락이 wake 구간에 3.4~4.0 ms 섬을 만들고, PREEMPT_RT에서는 사라진다(두 번 측정, 재현). 반면 일반 stress 부하와 CPU 격리의 효과는 TCG의 실행 간 흔들림(열 배)보다 작아서 주장하지 않았다. 측정기 버그 두 개(음수 wake, 최악 숨김)와 같은 모양의 synthetic event 함정을 실제로 밟고 고쳤다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>hrtimer <code>_HARD</code> 모드와 swait를 고른 이유를 PREEMPT_RT 기준으로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>irq / wake / ret 구간을 정의하고 각 구간을 늘리는 원인(IRQ off, preempt off, 비선점 락)을 짝지을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>늦은 표본을 덮어쓰는 측정기가 왜 최악값을 숨기는지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>initramfs → switch_root → PID 1 + 9p로 측정 게스트를 8초 만에 돌릴 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>RT_GROUP_SCHED 때문에 <code>chrt</code>가 EPERM인 상황을 재현하고 고칠 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>trace-cmd 이벤트 한 주기를 읽고 <code>[9]</code>, <code>&lt;idle&gt;-0</code>, <code>ksoftirqd</code>의 의미를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>kprobe event, hist 트리거, synthetic event, <code>onmax().save()</code>를 직접 걸고 지울 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>synthetic 시작 변수 덮어쓰기 함정을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>gpio-sim + GPIO v2 uAPI로 threaded IRQ 경로를 재고 irq 스레드를 찾을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>격리가 먹혔는지 <code>Cpus_allowed_list</code>, <code>ps -o psr</code>, <code>/proc/interrupts</code>로 증명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>실행 간 흔들림을 재고, 흔들림보다 작은 차이는 주장하지 않는 보고서를 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>이 프로젝트를 3분 데모와 README로 보여 줄 수 있다</span></label></li></ul>
+<h3 id="자체-점검-이-노트를-쓰며-확인한-것">자체 점검 (이 노트를 쓰며 확인한 것)<a class="anchor" href="#자체-점검-이-노트를-쓰며-확인한-것" aria-label="link">#</a></h3>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>모든 출력 블록은 VM/QEMU에서 실제로 실행한 결과다(생략은 <code>...</code>로 표시)</span></label></li><li class="task"><label><input type="checkbox" ><span>코드 블록은 60줄 이내, 경고 0개로 빌드됨(모듈 2개 × 커널 2개, 유저 2개)</span></label></li><li class="task"><label><input type="checkbox" ><span>SVG 8개 모두 XML 파싱 통과, 텍스트 fill 지정 없음</span></label></li><li class="task"><label><input type="checkbox" ><span>표 셀에 파이프 문자 없음</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>Linux kernel documentation, "Event Histograms" — <code>hist</code> 트리거, synthetic event, <code>onmatch</code>/<code>onmax</code>: https://docs.kernel.org/trace/histogram.html</li><li>Linux kernel documentation, "Kprobe-based Event Tracing": https://docs.kernel.org/trace/kprobetrace.html</li><li>Linux kernel documentation, "ftrace - Function Tracer": https://docs.kernel.org/trace/ftrace.html</li><li>Linux kernel documentation, "Timerlat tracer": https://docs.kernel.org/trace/timerlat-tracer.html</li><li>Linux kernel documentation, "Real-Time preemption" (PREEMPT_RT): https://docs.kernel.org/core-api/real-time/index.html</li><li>Linux kernel documentation, "GPIO Character Device Userspace API (v2)": https://docs.kernel.org/userspace-api/gpio/chardev.html</li><li>Linux kernel documentation, "Configfs GPIO Simulator": https://docs.kernel.org/admin-guide/gpio/gpio-sim.html</li><li>Linux kernel documentation, "The kernel's command-line parameters" (isolcpus, nohz_full, irqaffinity): https://docs.kernel.org/admin-guide/kernel-parameters.html</li><li>rt-tests (cyclictest) 소스: https://git.kernel.org/pub/scm/utils/rt-tests/rt-tests.git</li><li>커널 소스 (elixir.bootlin.com, v6.18): <code>kernel/time/hrtimer.c</code>, <code>kernel/sched/swait.c</code>, <code>kernel/irq/irq_sim.c</code>, <code>drivers/gpio/gpio-sim.c</code>, <code>drivers/gpio/gpiolib-cdev.c</code>, <code>kernel/trace/trace_events_hist.c</code></li><li>관련 노트: M5, N1, N2, N3, F3, F4, F6, F8, G7, H4, S1, S2, S4, M11</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-18_S4_iio_imu_driver_portfolio.html"><span class="dir">← 이전</span><span class="nm">S4. I2C IMU IIO 드라이버 — 포트폴리오 프로젝트: regmap + 버퍼 + FIFO 타임스탬프 + 하드웨어 없는 테스트 하네스</span></a><a class="next" href="2026-10-18_S6_yocto_custom_image.html"><span class="dir">다음 →</span><span class="nm">S6. Yocto 커스텀 이미지 프로젝트 — meta-donlab layer 하나에 드라이버 · 데몬 · 커널 패치 · 이미지를 담고 kas로 재현한다</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-무엇을-만들고-무엇을-증명하나">0. 큰 그림 — 무엇을 만들고 무엇을 증명하나</a></li><li class="l3"><a href="#0-1-목표-한-줄">0.1 목표 한 줄</a></li><li class="l3"><a href="#0-2-최종-결과물">0.2 최종 결과물</a></li><li class="l3"><a href="#0-3-설계-결정-테스트-모듈인가-gpio-sim인가">0.3 설계 결정 — 테스트 모듈인가, gpio-sim인가</a></li><li class="l3"><a href="#0-4-꼭-기억할-경고-tcg-숫자">0.4 꼭 기억할 경고 — TCG 숫자</a></li><li class="l2"><a href="#1-준비물과-저장소-레이아웃">1. 준비물과 저장소 레이아웃</a></li><li class="l3"><a href="#1-1-준비물">1.1 준비물</a></li><li class="l3"><a href="#1-2-예제-1-두-커널의-차이를-먼저-확인한다">1.2 예제 1 — 두 커널의 차이를 먼저 확인한다</a></li><li class="l3"><a href="#1-3-저장소-레이아웃">1.3 저장소 레이아웃</a></li><li class="l2"><a href="#2-step-1-측정-모듈-s5_irqlat-알려진-시각의-hard-irq">2. Step 1 — 측정 모듈 s5_irqlat: 알려진 시각의 hard IRQ</a></li><li class="l3"><a href="#2-1-무엇을-만드나">2.1 무엇을 만드나</a></li><li class="l3"><a href="#2-2-코드-1-2-타이머-콜백">2.2 코드 (1/2) — 타이머 콜백</a></li><li class="l3"><a href="#2-3-코드-2-2-read-와-open">2.3 코드 (2/2) — read()와 open()</a></li><li class="l3"><a href="#2-4-빌드">2.4 빌드</a></li><li class="l3"><a href="#2-5-흔한-실패">2.5 흔한 실패</a></li><li class="l3"><a href="#2-6-실제로-밟은-버그-두-개-측정기가-틀리면-결론이-틀린다">2.6 실제로 밟은 버그 두 개 — 측정기가 틀리면 결론이 틀린다</a></li><li class="l2"><a href="#3-step-2-유저-rt-대기-스레드-s5_waiter">3. Step 2 — 유저 RT 대기 스레드 s5_waiter</a></li><li class="l3"><a href="#3-1-코드">3.1 코드</a></li><li class="l3"><a href="#3-2-빌드-왜-static인가">3.2 빌드 — 왜 static인가</a></li><li class="l2"><a href="#4-step-3-게스트-부팅-장치-initramfs-switch_root-pid-1-9p-공유">4. Step 3 — 게스트 부팅 장치: initramfs → switch_root → PID 1, 9p 공유</a></li><li class="l3"><a href="#4-1-왜-이렇게-하나">4.1 왜 이렇게 하나</a></li><li class="l3"><a href="#4-2-코드-init-게스트-init-sh-실행기">4.2 코드 — /init, 게스트 init.sh, 실행기</a></li><li class="l3"><a href="#4-3-예제-2-스모크-부팅">4.3 예제 2 — 스모크 부팅</a></li><li class="l3"><a href="#4-4-예제-3-image-trace의-rt_group_sched-함정을-systemd-없이-재현">4.4 예제 3 — Image-trace의 RT_GROUP_SCHED 함정을 systemd 없이 재현</a></li><li class="l3"><a href="#4-5-흔한-실패">4.5 흔한 실패</a></li><li class="l3"><a href="#4-6-예제-4-9p가-측정-경로에-끼어든-모습-실제로-밟은-함정">4.6 예제 4 — 9p가 측정 경로에 끼어든 모습 (실제로 밟은 함정)</a></li><li class="l2"><a href="#5-step-4-첫-측정-idle-stress-ng-나쁜-드라이버">5. Step 4 — 첫 측정: idle / stress-ng / 나쁜 드라이버</a></li><li class="l3"><a href="#5-1-부하-세-가지">5.1 부하 세 가지</a></li><li class="l3"><a href="#5-2-측정-단계-스크립트">5.2 측정 단계 스크립트</a></li><li class="l3"><a href="#5-3-예제-5-image-trace-preempt-결과">5.3 예제 5 — Image-trace (PREEMPT) 결과</a></li><li class="l3"><a href="#5-4-예제-6-image-rt-preempt_rt-결과-같은-명령">5.4 예제 6 — Image-rt (PREEMPT_RT) 결과, 같은 명령</a></li><li class="l2"><a href="#6-step-5-ftrace로-경로를-증명한다">6. Step 5 — ftrace로 경로를 증명한다</a></li><li class="l3"><a href="#6-1-단계-스크립트-앞부분">6.1 단계 스크립트 (앞부분)</a></li><li class="l3"><a href="#6-2-예제-7-이벤트-한-주기-trace-cmd-report">6.2 예제 7 — 이벤트 한 주기 (trace-cmd report)</a></li><li class="l3"><a href="#6-3-예제-8-function_graph-콜백-안에서-시간이-어디-쓰였나">6.3 예제 8 — function_graph: 콜백 안에서 시간이 어디 쓰였나</a></li><li class="l3"><a href="#6-4-예제-9-kprobe-hist-트리거-synthetic-event로-wakeup-latency-히스토그램">6.4 예제 9 — kprobe + hist 트리거 + synthetic event로 wakeup latency 히스토그램</a></li><li class="l3"><a href="#6-5-함정-irq_to_run이-4-ms를-못-본-이유">6.5 함정 — irq_to_run이 4 ms를 못 본 이유</a></li><li class="l2"><a href="#7-step-6-gpio-sim-경로-실제-gpio-드라이버의-길">7. Step 6 — gpio-sim 경로: 실제 GPIO 드라이버의 길</a></li><li class="l3"><a href="#7-1-gpio-sim-칩-만들기-configfs">7.1 gpio-sim 칩 만들기 (configfs)</a></li><li class="l3"><a href="#7-2-코드-gpio-v2-uapi로-엣지-이벤트-기다리기">7.2 코드 — GPIO v2 uAPI로 엣지 이벤트 기다리기</a></li><li class="l3"><a href="#7-3-커널-안의-길">7.3 커널 안의 길</a></li><li class="l3"><a href="#7-4-예제-10-두-커널에서">7.4 예제 10 — 두 커널에서</a></li><li class="l2"><a href="#8-step-7-cyclictest-rtla-timerlat으로-교차-확인">8. Step 7 — cyclictest + rtla timerlat으로 교차 확인</a></li><li class="l3"><a href="#8-1-왜-직접-만든-측정기만으로는-안-되나">8.1 왜 직접 만든 측정기만으로는 안 되나</a></li><li class="l3"><a href="#8-2-결과-두-번-돌렸다">8.2 결과 — 두 번 돌렸다</a></li><li class="l3"><a href="#8-3-읽는-법">8.3 읽는 법</a></li><li class="l2"><a href="#9-step-8-cpu-격리-isolcpus-nohz_full">9. Step 8 — CPU 격리 (isolcpus / nohz_full)</a></li><li class="l3"><a href="#9-1-부트-인자">9.1 부트 인자</a></li><li class="l3"><a href="#9-2-예제-11-격리가-실제로-먹혔는지-먼저-증명한다">9.2 예제 11 — 격리가 "실제로 먹혔는지" 먼저 증명한다</a></li><li class="l3"><a href="#9-3-결과">9.3 결과</a></li><li class="l3"><a href="#9-4-정직하게-읽기">9.4 정직하게 읽기</a></li><li class="l2"><a href="#10-step-9-분석-템플릿-숫자를-어떻게-설명하나">10. Step 9 — 분석 템플릿: 숫자를 어떻게 설명하나</a></li><li class="l3"><a href="#10-1-순서">10.1 순서</a></li><li class="l3"><a href="#10-2-n1-n3와-비교">10.2 N1·N3와 비교</a></li><li class="l3"><a href="#10-3-보고서-템플릿-이-실험으로-채운-예">10.3 보고서 템플릿 (이 실험으로 채운 예)</a></li><li class="l2"><a href="#11-커널-안에서는-무슨-일이-일어나나">11. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#12-embedded-실무에서-다시-보기">12. Embedded 실무에서 다시 보기</a></li><li class="l2"><a href="#13-흔한-실수와-증상-이-노트에서-실제로-재현한-것">13. 흔한 실수와 증상 — 이 노트에서 실제로 재현한 것</a></li><li class="l2"><a href="#14-확장-과제-포트폴리오를-한-단계-더">14. 확장 과제 — 포트폴리오를 한 단계 더</a></li><li class="l2"><a href="#15-github와-면접에서-보여-주기">15. GitHub와 면접에서 보여 주기</a></li><li class="l3"><a href="#15-1-readme-구성-저장소에-이미-있음">15.1 README 구성 (저장소에 이미 있음)</a></li><li class="l3"><a href="#15-2-3분-데모-스크립트">15.2 3분 데모 스크립트</a></li><li class="l3"><a href="#15-3-보여-줄-숫자">15.3 보여 줄 숫자</a></li><li class="l2"><a href="#16-면접에서-이렇게-말한다">16. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#17-직접-해보기">17. 직접 해보기</a></li><li class="l2"><a href="#18-용어-사전">18. 용어 사전</a></li><li class="l2"><a href="#19-요약-체크리스트">19. 요약 &amp; 체크리스트</a></li><li class="l3"><a href="#자체-점검-이-노트를-쓰며-확인한-것">자체 점검 (이 노트를 쓰며 확인한 것)</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

@@ -383,14 +383,14 @@
 | G 드라이버 모델 | 10 | 10 | 0 | 2026-10-10 G1–G10 작성 (sensorkit 공통 예제, char/misc/sysfs/poll/udev/펌웨어) |
 | H HW 접근·버스 | 12 | 12 | 0 | 2026-10-10 H1–H12 작성 (edu PCI·가짜 I2C/SPI 컨트롤러·SMMU·dummy_hcd) |
 | I 서브시스템 | 11 | 11 | 0 | 2026-10-11 I1–I11 작성 (Image-sub 가상 드라이버: vivid/vimc·vkms·snd·CAN 컨트롤러·IIO·nandsim) |
-| J 스토리지·FS | 5 | 0 | 0 | |
-| K rootfs·빌드 | 7 | 0 | 0 | |
-| L 시스템·OTA·보안 | 8 | 0 | 0 | |
-| M 디버깅 | 11 | 0 | 0 | |
-| N 실시간·전원 | 6 | 0 | 0 | |
-| O 이종 코어 | 5 | 0 | 0 | |
-| P bring-up 실무 | 7 | 0 | 0 | |
-| Q 도메인 | 7 | 0 | 0 | |
-| R 인터뷰 | 6 | 0 | 0 | |
-| S 실습 | 7 | 0 | 0 | |
-| **합계** | **153** | **84** | **0** | 모듈 A (10-05) · B–H (10-10) · I (10-11) 완료 |
+| J 스토리지·FS | 5 | 5 | 0 | 2026-10-17 J1–J5 작성 (Image-fs: F2FS·EROFS·JFFS2·dm-flakey/log-writes·fault injection) |
+| K rootfs·빌드 | 7 | 7 | 0 | 2026-10-17 K1–K7 작성 (Buildroot·Yocto는 빌드 없이 가이드 — 실제 빌드는 나중에) |
+| L 시스템·OTA·보안 | 8 | 8 | 0 | 2026-10-17 L1–L8 작성 (Image-sec + systemd 게스트 rootfs-sysd: RAUC/SWUpdate A/B 롤백·FIT 서명·TF-A TBB·TPM 봉인·kdump·podman) |
+| M 디버깅 | 11 | 11 | 0 | 2026-10-17~18 M1–M11 작성 (Image-trace/-kasan + rootfs-trace: oops 해독·kgdb/gdbstub·ftrace·perf·eBPF·KASAN/KFENCE·GPIO 타이밍) |
+| N 실시간·전원 | 6 | 6 | 0 | 2026-10-17~18 N1–N6 작성 (Image-rt PREEMPT_RT: cyclictest/rtla·CPU 격리·s2idle·runtime PM) |
+| O 이종 코어 | 5 | 5 | 0 | 2026-10-18 O1–O5 작성 (Image-dom: reserved-memory·ivshmem AMP, 가짜 remoteproc+rpmsg, Cortex-M QEMU ↔ Linux 프레이밍·A/B 업데이트, dma-buf·toy accel, SoC mainline 매트릭스) |
+| P bring-up 실무 | 7 | 7 | 0 | 2026-10-18 P1–P7 작성 (단계별 DT bring-up·고장 재현, 패치 스택, i2c-stub+regmap 드라이버, 회로도→DT, rebase/bisect, KUnit/kselftest CI, checkpatch·v2) |
+| Q 도메인 | 7 | 7 | 0 | 2026-10-18 Q1–Q7 작성 (CSI-2 계산·imx219 DT, vimc/vivid 파이프라인, PTP·PPS, SocketCAN·slcan MCU, IIO IMU·gpsd·LiDAR UDP, ROS 2 Jazzy, 데이터 품질 툴 sdq) |
+| R 인터뷰 | 6 | 6 | 0 | 2026-10-18 R1–R6 작성 (개념 Top 50·전날 밤 요약, 7개 "무슨 일이" 실제 트레이스, 화이트보드 7문제 빌드·실행, 디버깅 시나리오 9개, 센서 키트 설계 계산, Don 스토리 STAR 템플릿) |
+| S 실습 | 7 | 7 | 0 | 2026-10-18 S1–S7 작성 (랩 처음부터 빌드 386 s, char driver 8단계 git, BeaglePlay 추천·U-Boot/DTB 크로스 빌드, IIO IMU 드라이버+에뮬레이터 포트폴리오, RT vs 비RT 지연 p99 3.9 ms→0.4 ms, meta-donlab layer(빌드는 가이드), CAN 센서 키트 CI 25/25) |
+| **합계** | **153** | **153** | **0** | 모듈 A (10-05) · B–H (10-10) · I (10-11) · J–L (10-17) · M–S (10-18) 완료 — 전체 완료 |

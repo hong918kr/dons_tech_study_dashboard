@@ -1,0 +1,1238 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>N3. 지연 측정 — cyclictest, rtla(osnoise/timerlat), hwlat, 히스토그램 해석</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="N/2026-10-17_N3_latency_measurement">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">N. 실시간 · 전원 · N3. 지연 측정 — cyclictest, rtla(osnoise/timerlat), hwlat, 히스토그램 해석</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">N. 실시간 · 전원 · Real-time &amp; PM</div>
+      <h1>N3. 지연 측정 — cyclictest, rtla(osnoise/timerlat), hwlat, 히스토그램 해석</h1>
+      <div class="meta"><span>164분 읽기</span><span>1633줄</span><span>61개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: cyclictest를 올바른 옵션·부하·시간으로 돌려 히스토그램과 백분위를 낼 수 있다 · rtla timerlat으로 지연을 "IRQ 단계 vs thread 단계"로 가르고 <code>--auto</code>로 첫 스파이크의 범인을 잡을 수 있다 · osnoise/hwlat으로 "OS 안의 소음"과 "OS 밖의 소음"을 구분할 수 있다 · 두 커널·두 설정을 공정하게 비교한 결과를 설계 리뷰용 한 장으로 보고할 수 있다 <strong>왜 필요한가</strong>: 로보틱스·드론·차량 면접에서 "PREEMPT_RT 써 봤나요?" 다음 질문은 거의 항상 "그래서 지연이 얼마였고, 어떻게 쟀나요?"다. 숫자 없이 "RT 패치를 넣었더니 좋아졌다"는 답은 통과하지 못한다. <strong>Don 기준 난이도</strong>: scope로 IRQ→GPIO 응답을 재 본 경험, "최악값이 스펙이다"라는 감각은 이미 있다 / 새로 배울 것은 Linux에서 소프트웨어로 지연을 재는 도구들, 각 도구가 "어디서부터 어디까지"를 재는지, 히스토그램·백분위·측정 시간의 통계적 의미 <strong>선행 노트</strong>: N1(Linux는 실시간인가 — 지연 원인), N2(실시간 튜닝), F1(스케줄러 — 직접 만든 깨어남 지연 루프 §8, <code>wakeup_rt</code> tracer §9), F8(시간·타이머·hrtimer), M5(ftrace 기초·irqsoff/preemptoff tracer). 하드웨어 측정은 M11.</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-지연이-얼마냐-는-질문의-정답-형식">0. 큰 그림 — "지연이 얼마냐"는 질문의 정답 형식<a class="anchor" href="#0-큰-그림-지연이-얼마냐-는-질문의-정답-형식" aria-label="link">#</a></h2>
+<p>SSD 펌웨어 시절을 떠올려 보자. "이 커맨드의 latency는 몇 µs입니까?"라는 질문에 평균 하나로 답한 적은 없을 것이다. QoS 스펙은 "4K random read, QD1, 99.99 percentile ≤ X µs, 측정 시간 Y 분, preconditioning 후"처럼 <strong>분포·조건·시간</strong>이 함께 붙는다. Linux 실시간 지연도 똑같다. 정답 형식은 이렇다:</p>
+<figure class="code"><span class="lang">text</span><pre><code>"&lt;하드웨어&gt;에서 &lt;커널/설정&gt;으로, &lt;부하&gt;를 걸고 &lt;시간&gt; 동안 &lt;도구/옵션&gt;으로 쟀더니
+ p99 = a us, p99.99 = b us, max = c us 였다. 히스토그램은 이렇다."</code></pre></figure>
+<p>이 노트는 이 한 문장을 만들고 방어하는 법을 다룬다. 도구는 네 개다.</p>
+<figure class="chart"><svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="14">지연을 재는 도구는 "어디서부터 어디까지"가 다르다</text>
+<rect x="20" y="40" width="190" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="30" y="60" font-size="13">HW (scope·LA, M11)</text>
+<text x="30" y="80" font-size="12">핀 이벤트 → GPIO 토글</text>
+<rect x="20" y="100" width="190" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="30" y="120" font-size="13">hwlat / hwnoise</text>
+<text x="30" y="140" font-size="12">OS 밖(펌웨어·EL3·HV)</text>
+<rect x="20" y="160" width="190" height="50" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="30" y="180" font-size="13">osnoise</text>
+<text x="30" y="200" font-size="12">CPU를 뺏긴 시간 합</text>
+<rect x="20" y="220" width="190" height="50" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="30" y="240" font-size="13">timerlat / cyclictest</text>
+<text x="30" y="260" font-size="12">타이머 → 깨어남 지연</text>
+<rect x="240" y="40" width="400" height="230" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="255" y="62" font-size="13">무엇을 답하나</text>
+<text x="255" y="90" font-size="12">HW: 실제 핀에서 반응까지 — 고객이 보는 진짜 숫자</text>
+<text x="255" y="120" font-size="12">hwlat: IRQ까지 끈 루프에서도 시간이 사라지나?</text>
+<text x="255" y="140" font-size="12">→ 사라지면 OS 탓이 아니다 (SMI, TF-A, 호스트)</text>
+<text x="255" y="180" font-size="12">osnoise: 내 스레드가 돌 때 누가 끼어드나?</text>
+<text x="255" y="200" font-size="12">→ IRQ, softirq, NMI, 다른 thread별로 센다</text>
+<text x="255" y="240" font-size="12">timerlat: 깨어나야 할 때 얼마나 늦나?</text>
+<text x="255" y="260" font-size="12">→ IRQ 단계 vs thread 단계로 나눠 준다</text>
+</svg></figure>
+<p>그림 1 — 네 가지 측정 도구가 각각 답하는 질문. 아래로 갈수록 "OS 안쪽"의 증상, 위로 갈수록 "OS 밖·실제 핀"에 가깝다.</p>
+<p>bare-metal 비유로 정리하면:</p>
+<div class="tw"><table><thead><tr><th>Linux 도구</th><th>Don이 아는 bare-metal 대응</th><th>무엇을 재나</th></tr></thead><tbody><tr><td>cyclictest</td><td>주기 타이머 ISR에서 "기대 시각 vs 실제 진입 시각"을 기록하는 자체 측정 루프</td><td>유저 RT 스레드의 타이머 깨어남 지연(전 구간 합)</td></tr><tr><td>timerlat</td><td>같은 측정을 ISR 진입 시점과 태스크 진입 시점 두 곳에서 동시에</td><td>IRQ latency와 thread latency를 분리</td></tr><tr><td>osnoise</td><td>바쁜 루프를 돌리며 "루프 한 바퀴가 비정상적으로 길어진 순간"을 찾는 것</td><td>워크로드가 빼앗긴 시간과 그 원인 분류</td></tr><tr><td>hwlat</td><td>인터럽트를 모두 끄고 TSC/카운터를 연속으로 읽어 "구멍"을 찾는 것</td><td>OS가 통제 못 하는 정지(SMI, 펌웨어, 하이퍼바이저)</td></tr><tr><td>scope + GPIO (M11)</td><td>그대로 같다</td><td>외부 관찰자 기준 실제 응답 시간</td></tr></tbody></table></div>
+<h3 id="0-1-이-노트의-실험-환경과-꼭-기억할-경고">0.1 이 노트의 실험 환경과 꼭 기억할 경고<a class="anchor" href="#0-1-이-노트의-실험-환경과-꼭-기억할-경고" aria-label="link">#</a></h3>
+<p>모든 실행은 Mac의 Lima VM(<code>elinux</code>, 호스트 커널 <code>7.0.0-38-generic</code>, aarch64) 안에서 QEMU TCG로 띄운 게스트에서 했다. 게스트 커널은 랩의 <code>Image-trace</code>(6.18.55-trace, <code>PREEMPT</code>, ftrace 전부)와 <code>Image-rt</code>(6.18.55-rt, <code>PREEMPT_RT</code>), rootfs는 <code>rootfs-trace.ext4</code>(Ubuntu 24.04 + rt-tests 2.50 + stress-ng + rtla 6.18.55)다.</p>
+<blockquote><p><strong>TCG 경고 (이 노트 전체에 적용)</strong>: 이 게스트에는 진짜 하드웨어가 없다. CPU는 소프트웨어 에뮬레이션이고, VM 호스트는 다른 작성자 16명이 동시에 쓰고 있었다(측정 중 <code>uptime</code> load average 10~23, 코어 6개). 그래서 <strong>절대 숫자는 RT 성능이 아니라 에뮬레이터와 호스트 부하를 반영한다.</strong> 이 노트에서 배울 것은 (1) 측정 방법, (2) 상대 비교와 분포의 모양, (3) 도구가 원인을 가리키는 방식이다. 실제 i.MX8·AM62·Orin 보드라면 같은 명령으로 수 µs~수십 µs 단위가 나온다.</p></blockquote>
+<p>두 가지 시간 모드로 실험했다. 이 구분 자체가 이 노트의 중요한 교훈이 된다.</p>
+<div class="tw"><table><thead><tr><th>모드</th><th>QEMU 옵션</th><th>게스트 시간의 의미</th><th>무엇을 보여 주나</th></tr></thead><tbody><tr><td>실시간 TCG</td><td>(기본, multi-thread TCG)</td><td>호스트 실제 시간. 호스트가 vCPU 스레드를 재우면 게스트 시간은 계속 흐른다</td><td>"OS 밖의 정지"가 지연을 지배할 때 어떻게 보이나 — SMI·하이퍼바이저와 같은 상황</td></tr><tr><td>icount</td><td><code>-icount shift=3,sleep=off</code></td><td>명령어 1개 = 8 ns인 가상 시간. 호스트가 느려도 게스트 시간이 같이 멈춘다</td><td>게스트 안의 원인(IRQ off, preempt off, 부하)이 깨끗하게 드러난다</td></tr></tbody></table></div>
+<p>icount 모드는 "명령어 수로 정해지는 장난감 시계"다. 캐시 미스·버스 대기·DRAM 지연은 모델링되지 않고, vCPU 두 개가 한 호스트 스레드에서 번갈아(round-robin) 돈다. 그러니 이 모드의 숫자도 실제 HW 숫자가 아니다. 다만 호스트 부하에 덜 흔들려서 <strong>같은 실험을 반복했을 때 모양이 재현된다.</strong></p>
+<hr>
+<h2 id="1-실습-준비-systemd-없이-바로-측정-스크립트를-pid-1로">1. 실습 준비 — systemd 없이 바로 측정 스크립트를 PID 1로<a class="anchor" href="#1-실습-준비-systemd-없이-바로-측정-스크립트를-pid-1로" aria-label="link">#</a></h2>
+<p>systemd 게스트는 부하 걸린 호스트에서 부팅에 수 분이 걸리고, 백그라운드 서비스가 측정에 소음을 더한다. 그래서 커널 커맨드라인 <code>init=/root/n3/init.sh</code>로 <strong>측정 스크립트를 PID 1로</strong> 띄웠다. 커널은 이해 못 하는 <code>이름=값</code> 인자를 init의 환경 변수로 넘겨 주므로(<code>N3D=30</code> 같은), 스크립트 매개변수를 커맨드라인으로 바꿀 수 있다.</p>
+<h3 id="1-1-예제-1-pid-1-측정-스크립트와-qemu-실행">1.1 예제 1 — PID 1 측정 스크립트와 QEMU 실행<a class="anchor" href="#1-1-예제-1-pid-1-측정-스크립트와-qemu-실행" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인가: 최소한의 마운트(proc, sys, tracefs, debugfs)만 하고, 커맨드라인의 <code>n3phase=</code>로 고른 실험을 차례로 돌린 뒤 결과를 rootfs에 남기고 전원을 끈다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# /root/n3/init.sh — PID 1 for N3 experiments: no systemd, run phases, power off.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc; mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2&gt;/dev/null; mkdir -p /dev/pts /dev/shm
+mount -t devpts pts /dev/pts; mount -t tmpfs tmp /tmp; mount -t tmpfs shm /dev/shm
+mount -t tracefs none /sys/kernel/tracing; mount -t debugfs none /sys/kernel/debug
+mount -t cgroup2 none /sys/fs/cgroup 2&gt;/dev/null
+hostname n3
+PHASE=$(sed -n 's/.*n3phase=\([^ ]*\).*/\1/p' /proc/cmdline)
+OUT=/root/n3/out/$(uname -r)_$PHASE$N3TAG; rm -rf $OUT; mkdir -p $OUT
+echo "N3START $(uname -r) phase=$PHASE"
+for p in ${PHASE//,/ }; do
+  mkdir -p $OUT/$p
+  bash /root/n3/phase_$p.sh $OUT/$p 2&gt;&amp;1 | tee $OUT/$p/log.txt; sync
+done
+echo N3END; sync; sleep 1
+echo o &gt; /proc/sysrq-trigger; sleep 60</code></pre></figure>
+<p>VM 쪽에서는 이렇게 띄웠다 (<code>QX</code>에 icount 옵션을 넣거나 비운다).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>timeout 5400 qemu-system-aarch64 -no-reboot -machine virt -cpu cortex-a57,pmu=on -smp 2 -m 1G \
+  -nographic $QX -kernel /var/lab/out/Image-$K \
+  -drive file=/var/tmp/N3/n3_root.ext4,if=virtio,format=raw \
+  -append "console=ttyAMA0 root=/dev/vda rw rootwait panic=1 init=/root/n3/init.sh n3phase=$P $X"</code></pre></figure>
+<p>출력에서 볼 것: 부팅 로그 끝의 <code>Run /root/n3/init.sh as init process</code> 다음 줄이 곧바로 <code>N3START</code>다. 결과 파일은 QEMU가 끝난 뒤 VM에서 <code>debugfs -R "rdump /root/n3/out &lt;dir&gt;" n3_root.ext4</code>로 꺼냈다(이미지를 mount하지 않으므로 sudo도 필요 없다).</p>
+<p>함정 두 개를 실제로 밟았다.</p>
+<ul><li><code>echo o &gt; /proc/sysrq-trigger</code>는 전원 끄기를 <strong>작업 큐에 넣고 바로 돌아온다.</strong> 곧바로 PID 1이 끝나면 <code>Kernel panic - not syncing: Attempted to kill init!</code>이 먼저 난다. 그래서 <code>sleep 60</code>을 붙이고, 그래도 끝나지 않을 때를 대비해 <code>panic=1</code> + QEMU <code>-no-reboot</code>로 "panic이면 QEMU 종료"를 만들었다.</li><li>QEMU를 <code>kill</code>로 죽였더니 게스트 page cache에만 있던 결과 디렉터리가 통째로 사라졌다(<code>e2fsck</code>가 고친 뒤에도 비어 있었다). 그래서 실험 하나가 끝날 때마다 <code>sync</code>한다. 측정 장비에서 결과를 잃는 가장 흔한 이유가 이것이다.</li></ul>
+<h3 id="1-2-예제-2-일부러-지연을-만드는-모듈-n3_spike">1.2 예제 2 — 일부러 지연을 만드는 모듈 <code>n3_spike</code><a class="anchor" href="#1-2-예제-2-일부러-지연을-만드는-모듈-n3_spike" aria-label="link">#</a></h3>
+<p>원인을 아는 지연을 넣어야 도구가 그것을 제대로 가리키는지 확인할 수 있다. 오실로스코프를 믿기 전에 기준 신호를 넣어 보는 것과 같다.</p>
+<p>무엇을 확인하는 코드인가: 지정한 CPU에 묶인 kthread가 <code>period_ms</code>마다 <code>us</code> 마이크로초 동안 <strong>IRQ를 끄고</strong>(mode=0) 또는 <strong>선점만 끄고</strong>(mode=1) 바쁘게 돈다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* n3_spike: a kthread bound to one CPU that, every period_ms, burns `us`
+ * microseconds with IRQs off (mode=0) or with only preemption off (mode=1).
+ * It is a deliberate latency source for cyclictest / rtla experiments. */
+#include &lt;linux/module.h&gt;
+#include &lt;linux/kthread.h&gt;
+#include &lt;linux/delay.h&gt;
+#include &lt;linux/irqflags.h&gt;
+#include &lt;linux/preempt.h&gt;
+
+static int cpu = 1, us = 300, period_ms = 50, mode;
+module_param(cpu, int, 0444);
+module_param(us, int, 0444);
+module_param(period_ms, int, 0444);
+module_param(mode, int, 0444);
+
+static struct task_struct *n3_task;
+static unsigned long n3_spikes;
+static noinline void n3_burn(void)
+{
+	unsigned long flags;
+	if (mode == 0) {
+		local_irq_save(flags);
+		udelay(us);
+		local_irq_restore(flags);
+	} else {
+		preempt_disable();
+		udelay(us);
+		preempt_enable();
+	}
+	n3_spikes++;
+}
+
+static int n3_fn(void *unused)
+{
+	while (!kthread_should_stop()) {
+		msleep_interruptible(period_ms);
+		n3_burn();
+	}
+	return 0;
+}
+static int __init n3_init(void)
+{
+	n3_task = kthread_create(n3_fn, NULL, "n3_spike/%d", cpu);
+	if (IS_ERR(n3_task))
+		return PTR_ERR(n3_task);
+	kthread_bind(n3_task, cpu);
+	wake_up_process(n3_task);
+	pr_info("n3_spike: cpu=%d us=%d period=%dms mode=%s\n", cpu, us,
+		period_ms, mode ? "preempt_off" : "irq_off");
+	return 0;
+}
+static void __exit n3_exit(void)
+{
+	kthread_stop(n3_task);
+	pr_info("n3_spike: %lu spikes injected\n", n3_spikes);
+}
+module_init(n3_init);
+module_exit(n3_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("N3 latency spike injector");</code></pre></figure>
+<p>빌드는 커널마다 따로 한다(vermagic이 다르다). Kbuild는 <code>obj-m += n3_spike.o</code> 한 줄이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>make -C /var/lab/out/linux-build-trace M=$PWD modules   # -&gt; vermagic 6.18.55-trace
+make -C /var/lab/out/linux-build-rt    M=$PWD modules   # -&gt; vermagic 6.18.55-rt
+modinfo -F vermagic n3_spike.ko</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>6.18.55-trace SMP preempt mod_unload aarch64
+6.18.55-rt SMP preempt_rt mod_unload aarch64</code></pre></figure>
+<p>출력에서 볼 것: 같은 소스라도 <code>preempt</code> 대 <code>preempt_rt</code>로 vermagic이 갈린다. 두 커널 모두 경고 0개로 빌드됐다(처음엔 <code>missing MODULE_DESCRIPTION()</code> modpost 경고가 나서 한 줄 추가했다).</p>
+<blockquote><p>PREEMPT_RT에서도 <code>local_irq_save()</code>는 진짜로 CPU의 IRQ를 끄고, <code>preempt_disable()</code>도 진짜로 선점을 막는다. RT 커널이 "잠들 수 있게" 바꾸는 것은 <code>spinlock_t</code>이지 이 두 API가 아니다(N1). 그래서 이 모듈은 두 커널 모두에서 같은 종류의 지연을 만든다.</p></blockquote>
+<hr>
+<h2 id="2-cyclictest-무엇을-재는가">2. cyclictest — 무엇을 재는가<a class="anchor" href="#2-cyclictest-무엇을-재는가" aria-label="link">#</a></h2>
+<h3 id="2-1-직관-알람을-7시에-맞췄는데-7시-몇-분에-일어났나">2.1 직관 — "알람을 7시에 맞췄는데 7시 몇 분에 일어났나"<a class="anchor" href="#2-1-직관-알람을-7시에-맞췄는데-7시-몇-분에-일어났나" aria-label="link">#</a></h3>
+<p>cyclictest는 SCHED_FIFO 스레드 하나(또는 CPU마다 하나)를 만들고, 그 스레드가 아래 루프를 끝없이 돈다. F1 §8.1에서 직접 만든 <code>f1_lat</code>이 바로 이 루프였다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>next = now + interval
+loop:
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, next)   # 절대 시각까지 잔다
+    now = clock_gettime(CLOCK_MONOTONIC)
+    latency = now - next                                     # 늦은 만큼
+    record(latency)  -&gt; min / avg / max / histogram[latency]
+    next += interval</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="22" font-size="14">cyclictest 한 주기 (interval = 1000 us)</text>
+<line x1="40" y1="200" x2="640" y2="200" stroke="currentColor" marker-end="url(#ah2)"/>
+<text x="600" y="220" font-size="12">시간</text>
+<line x1="120" y1="60" x2="120" y2="210" stroke="#4a7bd0" stroke-dasharray="4 3"/>
+<text x="70" y="52" font-size="12">expected (next)</text>
+<rect x="120" y="150" width="80" height="40" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="128" y="167" font-size="12">IRQ 지연</text>
+<text x="128" y="183" font-size="12">(irq off)</text>
+<rect x="200" y="150" width="70" height="40" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="208" y="167" font-size="12">hrtimer</text>
+<text x="208" y="183" font-size="12">handler</text>
+<rect x="270" y="150" width="170" height="40" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="278" y="167" font-size="12">wakeup → 스케줄</text>
+<text x="278" y="183" font-size="12">(preempt off, RT 경쟁)</text>
+<rect x="440" y="150" width="100" height="40" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="448" y="167" font-size="12">ctx switch</text>
+<text x="448" y="183" font-size="12">+ 유저 복귀</text>
+<line x1="540" y1="60" x2="540" y2="210" stroke="#d0564a" stroke-dasharray="4 3"/>
+<text x="500" y="52" font-size="12">actual (now)</text>
+<line x1="124" y1="90" x2="536" y2="90" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="536" y1="90" x2="124" y2="90" stroke="currentColor" marker-end="url(#ah2)"/>
+<text x="230" y="82" font-size="13">latency = now − next (cyclictest가 기록)</text>
+<text x="20" y="245" font-size="12">루프: clock_nanosleep(ABSTIME, next) → clock_gettime(now) → 차이 기록 → next += interval</text>
+<text x="20" y="265" font-size="12">주황·초록 = 커널 IRQ 경로 (timerlat의 IRQ latency),  빨강·회색까지 = thread latency</text>
+<text x="20" y="285" font-size="12">cyclictest 값은 네 구간의 합이다 — 어디서 늦었는지는 알려 주지 않는다</text>
+</svg></figure>
+<p>그림 2 — cyclictest의 측정 모델. 기대 시각(파란 점선)과 스레드가 실제로 시계를 읽은 시각(빨간 점선)의 차이가 "latency" 한 숫자로 기록된다.</p>
+<h3 id="2-2-정의-네-구간의-합">2.2 정의 — 네 구간의 합<a class="anchor" href="#2-2-정의-네-구간의-합" aria-label="link">#</a></h3>
+<p>cyclictest가 보고하는 한 샘플은 다음의 합이다.</p>
+<div class="tw"><table><thead><tr><th>구간</th><th>무엇이 늘리나</th><th>커널 쪽 이름</th></tr></thead><tbody><tr><td>① 타이머 만료 → IRQ 진입</td><td>IRQ off 구간(<code>local_irq_save</code>, 긴 hardirq), 깊은 idle 상태 탈출, 펌웨어·하이퍼바이저 정지</td><td>arch timer PPI → GIC → <code>el1_interrupt</code></td></tr><tr><td>② hrtimer 처리</td><td>같은 시각에 만료된 다른 hrtimer들</td><td><code>hrtimer_interrupt</code> → <code>__hrtimer_run_queues</code> → <code>hrtimer_wakeup</code></td></tr><tr><td>③ wakeup → 실제 선택</td><td>preempt off 구간, 더 높은 우선순위 RT 태스크, (비 RT 커널의) 긴 softirq</td><td><code>try_to_wake_up</code> → <code>need_resched</code> → <code>schedule()</code></td></tr><tr><td>④ context switch + 유저 복귀</td><td>캐시·TLB 상태, 유저 쪽 page fault(그래서 <code>-m</code>)</td><td><code>__schedule</code> → <code>cpu_switch_to</code> → <code>ret_to_user</code></td></tr></tbody></table></div>
+<p>중요한 점: <strong>cyclictest는 합만 준다.</strong> "max가 2 ms"는 알려 주지만 ①인지 ③인지는 모른다. 그걸 가르는 도구가 7절의 timerlat이다.</p>
+<h3 id="2-3-옵션-업계-표준-커맨드라인-한-줄-해부">2.3 옵션 — 업계 표준 커맨드라인 한 줄 해부<a class="anchor" href="#2-3-옵션-업계-표준-커맨드라인-한-줄-해부" aria-label="link">#</a></h3>
+<p>RT 커뮤니티(예: OSADL 장기 측정)에서 가장 흔히 보는 형태는 이렇다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cyclictest -m -S -p 95 -i 1000 -h 400 -q -D 24h --histfile=/var/log/ct.hist</code></pre></figure>
+<div class="tw"><table><thead><tr><th>옵션</th><th>뜻</th><th>왜 쓰나</th></tr></thead><tbody><tr><td><code>-m</code> (<code>--mlockall</code>)</td><td>현재·미래 메모리 전부 잠금</td><td>측정 루프의 page fault를 없앤다(A5). 빼면 첫 몇 샘플·메모리 압박 시 튄다</td></tr><tr><td><code>-S</code> (<code>--smp</code>)</td><td><code>-a -t</code> + 모든 스레드 같은 우선순위</td><td>CPU마다 측정 스레드 하나씩, 각자 자기 CPU에 고정</td></tr><tr><td><code>-p 95</code></td><td>SCHED_FIFO 우선순위 95</td><td>측정 스레드가 다른 RT 작업에 밀리지 않게. 관례적으로 99는 비워 둔다(시스템의 최우선 RT 작업용). 제품의 실제 RT 스레드와 같은 우선순위로 재는 것도 좋다</td></tr><tr><td><code>-i 1000</code></td><td>주기 1000 µs</td><td>기본값. 제어 루프 주기에 맞춰 바꾸기도 한다</td></tr><tr><td><code>-h 400</code></td><td>0~400 µs를 1 µs 버킷으로 히스토그램</td><td>400 µs를 넘는 샘플은 "Histogram Overflows"로 따로 센다</td></tr><tr><td><code>-q</code></td><td>끝날 때 요약만 출력</td><td>화면 갱신 자체가 부하가 되는 것을 막는다</td></tr><tr><td><code>-D 24h</code></td><td>측정 시간 (<code>m</code>, <code>h</code>, <code>d</code> 접미사)</td><td>5절 — 짧은 측정은 거짓말한다</td></tr><tr><td><code>--histfile=</code></td><td>히스토그램을 파일로</td><td>나중에 백분위·그림을 만든다</td></tr><tr><td><code>--policy=fifo</code></td><td>정책 지정(other, batch, idle, fifo, rr)</td><td>SCHED_OTHER로 돌려 "RT가 아니면 어떤가" 비교</td></tr><tr><td><code>-a 1 -t 1</code></td><td>스레드 1개를 CPU1에</td><td>격리한 CPU(N2의 <code>isolcpus</code>) 하나만 볼 때</td></tr><tr><td><code>--mainaffinity=0</code></td><td>측정 스레드가 아닌 메인(출력) 스레드를 CPU0에</td><td>메인 스레드가 측정 CPU를 건드리지 않게</td></tr><tr><td><code>-b 300</code> + <code>--tracemark</code></td><td>300 µs 넘으면 ftrace를 멈추고(trace marker도 기록) 종료</td><td>9절 — 스파이크 순간의 트레이스 보존</td></tr><tr><td><code>--json=</code></td><td>결과를 JSON으로</td><td>CI에서 자동 비교</td></tr><tr><td><code>--spike=200</code></td><td>200 µs 넘는 샘플을 하나하나 기록</td><td>언제 튀었는지 시각 확인</td></tr></tbody></table></div>
+<blockquote><p>rt-tests 2.x에서 cyclictest의 내장 tracer 옵션(옛 <code>-f</code>, <code>-w</code> 등)은 없어졌다. <code>-b</code>는 이제 "tracing_on을 0으로 쓰고 끝내기"만 한다. 무엇을 기록할지는 우리가 ftrace(M5)나 trace-cmd로 미리 켜 둬야 한다. 아래 출력은 게스트 rootfs의 cyclictest 2.50 <code>--help</code>에서 확인한 것이다.</p></blockquote>
+<figure class="code"><span class="lang">text</span><pre><code>cyclictest V 2.50
+-b USEC  --breaktrace=USEC send break trace command when latency &gt; USEC
+-h       --histogram=US    dump a latency histogram to stdout after the run
+                           US is the max latency time to be tracked in microseconds
+			   This option runs all threads at the same priority.
+	 --histfile=&lt;path&gt; dump the latency histogram to &lt;path&gt; instead of stdout
+-S       --smp             Standard SMP testing: options -a -t and same priority
+                           of all threads
+         --tracemark       write a trace mark when -b latency is exceeded
+...</code></pre></figure>
+<p>(긴 도움말에서 몇 줄만 남겼다.) <code>/dev/cpu_dma_latency</code>에 0을 써서 CPU가 깊은 idle에 들어가지 않게 하는 것도 cyclictest의 기본 동작이다(<code>--default-system</code>이면 하지 않는다). 그래서 출력 첫 줄에 <code># /dev/cpu_dma_latency set to 0us</code>가 찍힌다. <strong>이것 자체가 시스템 튜닝이다</strong> — 제품 설정에 PM QoS 요청이 없다면, cyclictest 결과는 제품보다 좋게 나온다. 공정하게 비교하려면 이 점을 보고서에 적는다.</p>
+<hr>
+<h2 id="3-부하-걸기-idle-시스템의-숫자는-아무-의미가-없다">3. 부하 걸기 — idle 시스템의 숫자는 아무 의미가 없다<a class="anchor" href="#3-부하-걸기-idle-시스템의-숫자는-아무-의미가-없다" aria-label="link">#</a></h2>
+<h3 id="3-1-왜-부하가-필수인가">3.1 왜 부하가 필수인가<a class="anchor" href="#3-1-왜-부하가-필수인가" aria-label="link">#</a></h3>
+<p>idle 시스템의 cyclictest는 "아무도 방해하지 않을 때"의 숫자다. 제품은 그렇게 돌지 않는다. 센서 키트라면 카메라 DMA가 메모리 대역폭을 먹고, LiDAR UDP가 NET_RX softirq를 일으키고, 로깅이 eMMC에 쓰고, 다른 프로세스가 <code>fork()</code>/<code>exec()</code>를 한다. 지연의 최악값은 <strong>이런 일들과 타이머가 겹칠 때</strong> 나온다. 그래서 측정에는 "최악의 현실적인 부하"를 일부러 건다.</p>
+<div class="tw"><table><thead><tr><th>부하 도구</th><th>무엇을 흔드나</th><th>예</th></tr></thead><tbody><tr><td><code>stress-ng --cpu N</code></td><td>CPU 연산, 스케줄러 경쟁</td><td><code>stress-ng --cpu 4 --timeout 1h</code></td></tr><tr><td><code>stress-ng --vm N --vm-bytes 256M</code></td><td>메모리 할당·page fault·캐시/TLB</td><td>메모리 대역폭 압박</td></tr><tr><td><code>stress-ng --io N</code> / <code>--hdd N</code></td><td><code>sync()</code> 호출, 블록 I/O, 파일시스템 락, writeback</td><td>로깅·녹화가 있는 장비</td></tr><tr><td><code>hackbench -l 100000 -g 4</code></td><td>소켓/파이프 메시지 폭풍 → wakeup·context switch 폭주</td><td>스케줄러 경로 스트레스</td></tr><tr><td><code>ping -f &lt;peer&gt;</code> (root) 또는 <code>iperf3</code></td><td>NIC IRQ, NET_RX softirq</td><td>네트워크 장비, LiDAR</td></tr><tr><td><code>make -j$(nproc)</code> 커널 빌드</td><td>모든 것(fork/exec, 파일 I/O, 메모리)</td><td>"현실적인 혼합 부하" 고전</td></tr><tr><td>제품 자체 워크로드</td><td>카메라 스트리밍, 추론, 로깅</td><td><strong>최종 측정은 반드시 이것으로</strong></td></tr></tbody></table></div>
+<p>OSADL 같은 장기 측정 랩은 보통 여러 개를 섞어 건다. 이 노트의 "loaded" 부하는 <code>stress-ng --cpu 2 --vm 1 --vm-bytes 64M --io 1 --hdd 1</code> + <code>hackbench -s 512 -g 2 -P</code>다(icount 실험에서는 I/O 계열을 빼고 CPU·메모리·hackbench만 — I/O 에뮬레이션이 icount에서 극단적으로 느려져 실험이 끝나지 않았다). 네트워크 부하는 이 랩의 QEMU user-mode 네트워크(slirp)로는 의미 있는 IRQ 폭풍을 만들 수 없어 <strong>가이드(실행 안 함)</strong>로만 둔다.</p>
+<h3 id="3-2-부하를-걸-때의-함정">3.2 부하를 걸 때의 함정<a class="anchor" href="#3-2-부하를-걸-때의-함정" aria-label="link">#</a></h3>
+<ul><li><strong>부하가 측정 스레드보다 높은 우선순위면 안 된다.</strong> stress-ng는 기본 SCHED_OTHER다. 부하를 <code>chrt -f 99</code>로 돌리면 "측정"이 아니라 "굶기기"가 된다.</li><li><strong>부하가 정말 돌고 있는지 확인한다.</strong> <code>stress-ng</code>가 권한 문제로 일부 stressor를 건너뛰는 일이 흔하다. <code>top</code>이나 <code>mpstat 1</code>로 CPU가 실제로 100%인지 본다.</li><li><strong>부하와 측정의 길이를 맞춘다.</strong> 부하가 측정보다 먼저 끝나면 후반부는 idle 측정이다. 이 노트의 스크립트는 부하를 측정 시간 + 5초로 걸었다.</li><li><strong>열·주파수.</strong> 실제 보드에서는 오래 돌리면 thermal throttling으로 클럭이 떨어진다. 그것도 현실이니 숨기지 말고 <code>cpufreq</code> 상태(N5)를 함께 기록한다.</li></ul>
+<hr>
+<h2 id="4-히스토그램과-백분위-평균은-거의-아무것도-말하지-않는다">4. 히스토그램과 백분위 — 평균은 거의 아무것도 말하지 않는다<a class="anchor" href="#4-히스토그램과-백분위-평균은-거의-아무것도-말하지-않는다" aria-label="link">#</a></h2>
+<h3 id="4-1-예제-3-cyclictest-idle-vs-loaded-실시간-tcg-image-trace">4.1 예제 3 — cyclictest idle vs loaded (실시간 TCG, Image-trace)<a class="anchor" href="#4-1-예제-3-cyclictest-idle-vs-loaded-실시간-tcg-image-trace" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 커널·같은 게스트에서 부하 없음과 부하 있음을 60초씩 잰다. 그리고 <strong>VM 호스트가 바쁠 때와 조용할 때</strong> 두 번 반복했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cyclictest -m -S -p 95 -i 1000 -h 20000 -q -D 60 --histfile=$O/idle.hist
+stress-ng --cpu 2 --vm 1 --vm-bytes 64M --io 1 --hdd 1 --hdd-bytes 16M --timeout 65s -q &amp;
+hackbench -s 512 -l 100000000 -g 2 -P &gt;/dev/null 2&gt;&amp;1 &amp;
+cyclictest -m -S -p 95 -i 1000 -h 20000 -q -D 60 --histfile=$O/load.hist</code></pre></figure>
+<p>호스트가 조용할 때(load average 약 4)의 idle 요약(<code>--histfile</code> 끝부분):</p>
+<figure class="code"><span class="lang">text</span><pre><code># /dev/cpu_dma_latency set to 0us
+# Min Latencies: 00052 00044
+# Avg Latencies: 00201 00370
+# Max Latencies: 22072 22509
+# Histogram Overflows: 00002 00003</code></pre></figure>
+<p>같은 조건의 loaded:</p>
+<figure class="code"><span class="lang">text</span><pre><code># Min Latencies: 00057 00079
+# Avg Latencies: 00494 00508
+# Max Latencies: 25248 26670
+# Histogram Overflows: 00006 00007</code></pre></figure>
+<p>숫자 두 개씩은 스레드 0(CPU0), 스레드 1(CPU1)이다. 출력에서 볼 것: 평균은 200~500 µs인데 max는 22~27 ms다. <strong>max가 평균의 50~100배</strong>다. 평균만 보고 "0.5 ms 지연 시스템"이라고 말하면 안 되는 이유가 이것이다. <code>-h 20000</code>이라 20 ms를 넘은 샘플은 Overflows로 따로 셌다.</p>
+<h3 id="4-2-예제-4-백분위를-직접-계산하는-스크립트">4.2 예제 4 — 백분위를 직접 계산하는 스크립트<a class="anchor" href="#4-2-예제-4-백분위를-직접-계산하는-스크립트" aria-label="link">#</a></h3>
+<p>cyclictest는 min/avg/max만 준다. p99.9 같은 백분위는 히스토그램에서 우리가 계산한다. 이 스크립트를 VM에서 결과 파일에 돌렸다.</p>
+<p>무엇을 확인하는 코드인가: 1 µs 버킷 히스토그램을 누적해서 p50/p99/p99.9/p99.99를 구한다. 오버플로 샘플도 전체 개수에는 넣고, 백분위가 오버플로 구간에 떨어지면 <code>&gt;20000</code>처럼 "히스토그램 범위 밖"이라고 정직하게 표시한다.</p>
+<figure class="code"><span class="lang">python</span><pre><code>#!/usr/bin/env python3
+"""n3_pct.py: percentiles from a cyclictest --histfile (1 us buckets).
+usage: n3_pct.py file.hist [label]  -&gt; one line per thread + merged"""
+import sys
+
+def load(path):
+    rows, meta = [], {}
+    for line in open(path):
+        if line.startswith('#'):
+            if ':' in line:
+                k, v = line[1:].split(':', 1)
+                meta[k.strip()] = v.split()
+            continue
+        f = line.split()
+        if f:
+            rows.append([int(x) for x in f])
+    return rows, meta
+
+def pct(counts, over, q):
+    """smallest bucket b with cum(b) &gt;= q * total; None if inside overflow"""
+    total = sum(counts) + over
+    need, cum = q * total, 0
+    for b, c in enumerate(counts):
+        cum += c
+        if cum &gt;= need:
+            return b
+    return None
+
+rows, meta = load(sys.argv[1])
+nthr = len(rows[0]) - 1
+over = [int(x) for x in meta['Histogram Overflows']]
+mx = [int(x) for x in meta['Max Latencies']]
+H = len(rows)
+qs = [0.5, 0.99, 0.999, 0.9999]
+print(f"{'thr':&gt;5} {'n':&gt;7} {'p50':&gt;6} {'p99':&gt;7} {'p99.9':&gt;7} {'p99.99':&gt;7} {'max':&gt;8}  over")
+series = [[r[t + 1] for r in rows] for t in range(nthr)]
+series.append([sum(r[1:]) for r in rows])
+over.append(sum(over)); mx.append(max(mx))
+for t, s in enumerate(series):
+    name = f"T{t}" if t &lt; nthr else "all"
+    ps = [pct(s, over[t], q) for q in qs]
+    txt = [f"{p:&gt;7}" if p is not None else f"{'&gt;' + str(H):&gt;7}" for p in ps]
+    print(f"{name:&gt;5} {sum(s) + over[t]:&gt;7} " + " ".join(txt) + f" {mx[t]:&gt;8}  {over[t]}")</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>python3 -I n3_pct.py idle.hist; python3 -I n3_pct.py load.hist</code></pre></figure>
+<p>호스트가 조용할 때(위 4.1의 두 파일):</p>
+<figure class="code"><span class="lang">text</span><pre><code>  thr       n    p50     p99   p99.9  p99.99      max  over
+   T0   59430     188     390    3538   14657    22072  2
+   T1   59404     354     669    3559   15786    22509  3
+  all  118834     270     581    3559   14940    22509  5
+  thr       n    p50     p99   p99.9  p99.99      max  over
+   T0   58944     463     833    5399  &gt;20000    25248  6
+   T1   57074     480     807    5480  &gt;20000    26670  7
+  all  116018     471     820    5414  &gt;20000    26670  13</code></pre></figure>
+<p>호스트가 바쁠 때(load average 15~23, 같은 명령):</p>
+<figure class="code"><span class="lang">text</span><pre><code>  thr       n    p50     p99   p99.9  p99.99      max  over
+   T0   39944     410    7015  &gt;20000  &gt;20000   176108  97
+   T1   39136     403    7167  &gt;20000  &gt;20000   174260  97
+  all   79080     407    7085  &gt;20000  &gt;20000   176108  194
+  thr       n    p50     p99   p99.9  p99.99      max  over
+   T0   28252     524   10051  &gt;20000  &gt;20000   890987  105
+   T1   25394     583   11348  &gt;20000  &gt;20000   891499  116
+  all   53646     548   10670  &gt;20000  &gt;20000   891499  221</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>n(샘플 수)</strong>: 60초 × 1000 Hz = 스레드당 60000이어야 한다. 조용할 때는 59000대, 바쁠 때는 25000~40000이다. 주기를 통째로 놓친 것이다. 샘플 수 확인은 측정의 "건전성 검사"다.</li><li><strong>p50은 거의 안 변했다</strong>(270 → 407 µs). 하지만 p99는 581 → 7085 µs로 12배, max는 22 ms → 176 ms로 8배. 게스트·커널·명령이 모두 같고 <strong>바뀐 것은 측정 환경(호스트 부하)뿐</strong>이다. 10절의 "공정 비교" 규칙이 왜 필요한지 보여 주는 실험이다.</li><li>부하를 걸면 p50이 오른다(270 → 471 µs). 캐시·TLB가 부하에 오염되고 wakeup 경로가 더 길어지기 때문이다. 실제 보드에서도 같은 방향이다.</li></ul>
+<h3 id="4-3-히스토그램-그림-로그-축으로-그린다">4.3 히스토그램 그림 — 로그 축으로 그린다<a class="anchor" href="#4-3-히스토그램-그림-로그-축으로-그린다" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 660 340" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="14">cyclictest 60 s, Image-trace, 실시간 TCG — 호스트 부하에 따라</text>
+<line x1="60" y1="280" x2="590" y2="280" stroke="currentColor"/>
+<line x1="60" y1="56" x2="60" y2="280" stroke="currentColor"/>
+<line x1="60.0" y1="280" x2="60.0" y2="284" stroke="currentColor"/>
+<text x="60.0" y="298" font-size="12" text-anchor="middle">10us</text>
+<line x1="192.5" y1="280" x2="192.5" y2="284" stroke="currentColor"/>
+<text x="192.5" y="298" font-size="12" text-anchor="middle">100us</text>
+<line x1="325.0" y1="280" x2="325.0" y2="284" stroke="currentColor"/>
+<text x="325.0" y="298" font-size="12" text-anchor="middle">1ms</text>
+<line x1="457.5" y1="280" x2="457.5" y2="284" stroke="currentColor"/>
+<text x="457.5" y="298" font-size="12" text-anchor="middle">10ms</text>
+<line x1="590.0" y1="280" x2="590.0" y2="284" stroke="currentColor"/>
+<text x="590.0" y="298" font-size="12" text-anchor="middle">100ms</text>
+<line x1="56" y1="262.8" x2="60" y2="262.8" stroke="currentColor"/>
+<text x="52" y="266.8" font-size="12" text-anchor="end">1e0</text>
+<line x1="56" y1="193.8" x2="60" y2="193.8" stroke="currentColor"/>
+<text x="52" y="197.8" font-size="12" text-anchor="end">1e2</text>
+<line x1="56" y1="124.9" x2="60" y2="124.9" stroke="currentColor"/>
+<text x="52" y="128.9" font-size="12" text-anchor="end">1e4</text>
+<line x1="56" y1="56.0" x2="60" y2="56.0" stroke="currentColor"/>
+<text x="52" y="60.0" font-size="12" text-anchor="end">1e6</text>
+<text x="325.0" y="316" font-size="12" text-anchor="middle">latency (log)</text>
+<text x="14" y="44" font-size="12">count (log)</text>
+<polyline points="60.0,280.0 73.3,280.0 73.3,280.0 86.5,280.0 86.5,280.0 99.8,280.0 99.8,280.0 113.0,280.0 113.0,280.0 126.2,280.0 126.2,280.0 139.5,280.0 139.5,215.8 152.8,215.8 152.8,209.1 166.0,209.1 166.0,191.4 179.2,191.4 179.2,172.9 192.5,172.9 192.5,144.8 205.8,144.8 205.8,135.0 219.0,135.0 219.0,104.1 232.2,104.1 232.2,125.8 245.5,125.8 245.5,132.5 258.8,132.5 258.8,103.5 272.0,103.5 272.0,123.3 285.2,123.3 285.2,159.9 298.5,159.9 298.5,169.1 311.8,169.1 311.8,188.1 325.0,188.1 325.0,206.5 338.2,206.5 338.2,214.6 351.5,214.6 351.5,221.3 364.8,221.3 364.8,217.9 378.0,217.9 378.0,214.6 391.2,214.6 391.2,213.4 404.5,213.4 404.5,210.0 417.8,210.0 417.8,217.9 431.0,217.9 431.0,233.6 444.2,233.6 444.2,238.7 457.5,238.7 457.5,221.3 470.7,221.3 470.7,223.3 484.0,223.3 484.0,242.0 497.2,242.0 497.2,280.0 510.5,280.0 510.5,280.0 523.8,280.0 523.8,280.0 537.0,280.0 537.0,280.0 550.2,280.0 550.2,280.0 563.5,280.0 563.5,280.0 576.8,280.0 576.8,280.0 590.0,280.0" fill="none" stroke="#4a7bd0" stroke-width="1.6"/>
+<rect x="602" y="238.7" width="10" height="41.3" fill="#4a7bd0" fill-opacity="0.5" stroke="#4a7bd0"/>
+<line x1="504.2" y1="56" x2="504.2" y2="280" stroke="#4a7bd0" stroke-dasharray="3 3"/>
+<line x1="340" y1="58.0" x2="360" y2="58.0" stroke="#4a7bd0" stroke-width="2"/>
+<text x="366" y="62.0" font-size="12">조용 idle (max 22.5ms)</text>
+<polyline points="60.0,280.0 73.3,280.0 73.3,280.0 86.5,280.0 86.5,280.0 99.8,280.0 99.8,280.0 113.0,280.0 113.0,280.0 126.2,280.0 126.2,280.0 139.5,280.0 139.5,280.0 152.8,280.0 152.8,262.8 166.0,262.8 166.0,252.4 179.2,252.4 179.2,207.2 192.5,207.2 192.5,197.4 205.8,197.4 205.8,180.2 219.0,180.2 219.0,170.6 232.2,170.6 232.2,153.3 245.5,153.3 245.5,133.2 258.8,133.2 258.8,115.3 272.0,115.3 272.0,103.1 285.2,103.1 285.2,108.6 298.5,108.6 298.5,119.3 311.8,119.3 311.8,159.9 325.0,159.9 325.0,192.0 338.2,192.0 338.2,199.2 351.5,199.2 351.5,204.2 364.8,204.2 364.8,213.4 378.0,213.4 378.0,205.8 391.2,205.8 391.2,217.9 404.5,217.9 404.5,204.5 417.8,204.5 417.8,213.4 431.0,213.4 431.0,217.2 444.2,217.2 444.2,219.5 457.5,219.5 457.5,219.5 470.7,219.5 470.7,217.2 484.0,217.2 484.0,225.6 497.2,225.6 497.2,280.0 510.5,280.0 510.5,280.0 523.8,280.0 523.8,280.0 537.0,280.0 537.0,280.0 550.2,280.0 550.2,280.0 563.5,280.0 563.5,280.0 576.8,280.0 576.8,280.0 590.0,280.0" fill="none" stroke="#3f9a6b" stroke-width="1.6"/>
+<rect x="616" y="224.4" width="10" height="55.6" fill="#3f9a6b" fill-opacity="0.5" stroke="#3f9a6b"/>
+<line x1="513.9" y1="56" x2="513.9" y2="280" stroke="#3f9a6b" stroke-dasharray="3 3"/>
+<line x1="340" y1="76.0" x2="360" y2="76.0" stroke="#3f9a6b" stroke-width="2"/>
+<text x="366" y="80.0" font-size="12">조용 loaded (max 26.7ms)</text>
+<polyline points="60.0,280.0 73.3,280.0 73.3,280.0 86.5,280.0 86.5,280.0 99.8,280.0 99.8,280.0 113.0,280.0 113.0,280.0 126.2,280.0 126.2,280.0 139.5,280.0 139.5,280.0 152.8,280.0 152.8,280.0 166.0,280.0 166.0,242.0 179.2,242.0 179.2,199.0 192.5,199.0 192.5,162.5 205.8,162.5 205.8,125.6 219.0,125.6 219.0,124.9 232.2,124.9 232.2,130.8 245.5,130.8 245.5,130.4 258.8,130.4 258.8,135.9 272.0,135.9 272.0,129.6 285.2,129.6 285.2,131.9 298.5,131.9 298.5,134.0 311.8,134.0 311.8,134.7 325.0,134.7 325.0,138.0 338.2,138.0 338.2,143.4 351.5,143.4 351.5,146.5 364.8,146.5 364.8,151.3 378.0,151.3 378.0,152.9 391.2,152.9 391.2,157.4 404.5,157.4 404.5,166.2 417.8,166.2 417.8,172.0 431.0,172.0 431.0,178.4 444.2,178.4 444.2,186.9 457.5,186.9 457.5,188.0 470.7,188.0 470.7,193.7 484.0,193.7 484.0,201.0 497.2,201.0 497.2,262.8 510.5,262.8 510.5,280.0 523.8,280.0 523.8,280.0 537.0,280.0 537.0,280.0 550.2,280.0 550.2,280.0 563.5,280.0 563.5,280.0 576.8,280.0 576.8,280.0 590.0,280.0" fill="none" stroke="#e08a3c" stroke-width="1.6"/>
+<rect x="630" y="183.9" width="10" height="96.1" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/>
+<line x1="340" y1="94.0" x2="360" y2="94.0" stroke="#e08a3c" stroke-width="2"/>
+<text x="366" y="98.0" font-size="12">바쁨 idle (max 176.1ms)</text>
+<polyline points="60.0,280.0 73.3,280.0 73.3,280.0 86.5,280.0 86.5,280.0 99.8,280.0 99.8,280.0 113.0,280.0 113.0,280.0 126.2,280.0 126.2,280.0 139.5,280.0 139.5,280.0 152.8,280.0 152.8,262.8 166.0,262.8 166.0,220.4 179.2,220.4 179.2,180.4 192.5,180.4 192.5,173.6 205.8,173.6 205.8,170.0 219.0,170.0 219.0,151.2 232.2,151.2 232.2,130.7 245.5,130.7 245.5,135.9 258.8,135.9 258.8,132.8 272.0,132.8 272.0,135.3 285.2,135.3 285.2,140.2 298.5,140.2 298.5,144.6 311.8,144.6 311.8,140.9 325.0,140.9 325.0,143.4 338.2,143.4 338.2,143.0 351.5,143.0 351.5,147.8 364.8,147.8 364.8,145.9 378.0,145.9 378.0,147.7 391.2,147.7 391.2,147.6 404.5,147.6 404.5,155.1 417.8,155.1 417.8,162.7 431.0,162.7 431.0,167.0 444.2,167.0 444.2,177.5 457.5,177.5 457.5,185.4 470.7,185.4 470.7,189.5 484.0,189.5 484.0,199.2 497.2,199.2 497.2,280.0 510.5,280.0 510.5,280.0 523.8,280.0 523.8,280.0 537.0,280.0 537.0,280.0 550.2,280.0 550.2,280.0 563.5,280.0 563.5,280.0 576.8,280.0 576.8,280.0 590.0,280.0" fill="none" stroke="#d0564a" stroke-width="1.6"/>
+<rect x="644" y="182.0" width="10" height="98.0" fill="#d0564a" fill-opacity="0.5" stroke="#d0564a"/>
+<line x1="340" y1="112.0" x2="360" y2="112.0" stroke="#d0564a" stroke-width="2"/>
+<text x="366" y="116.0" font-size="12">바쁨 loaded (max 891.5ms)</text>
+<text x="598" y="316" font-size="12">&gt;20ms</text>
+</svg></figure>
+<p>그림 3 — 실제 측정 히스토그램(Image-trace, 실시간 TCG, 60초, 두 CPU 합산). x축·y축 모두 로그. 오른쪽 막대는 20 ms를 넘은 오버플로 샘플 수, 점선은 max. 조용한 호스트의 분포(파랑·초록)는 수백 µs에 뾰족한 봉우리와 수 ms까지 얇은 꼬리, 바쁜 호스트의 분포(주황·빨강)는 꼬리가 두꺼운 고원이다.</p>
+<p>왜 로그 y축인가: 1 µs 버킷 하나에 수만 개가 몰리고 꼬리 버킷에는 1~2개가 있다. 선형 y축이면 꼬리가 0처럼 보여 사라진다. RT 세계의 히스토그램(OSADL 등)은 거의 항상 <strong>로그 y축</strong>이다. 이 노트는 범위가 µs~수백 ms로 넓어서 x축도 로그(10구간/decade로 다시 묶음)로 그렸다. 실제 보드의 결과(수~수백 µs)라면 x축은 선형 1 µs 버킷으로 그리는 것이 보통이다.</p>
+<p>그림 생성 스크립트는 같은 히스토그램 파일을 읽어 10구간/decade로 다시 묶고 좌표를 Python으로 계산해 SVG를 쓴다(이 노트의 히스토그램 그림 3장이 모두 같은 스크립트 출력이다. 50줄이 넘어 본문에는 핵심 부분만).</p>
+<figure class="code"><span class="lang">python</span><pre><code>edges = [10.0 * 10 ** (i / 10) for i in range(41)]          # 10 us .. 100 ms, 10 bins/decade
+def xp(v): return L + (math.log10(v) - 1) / 4 * (R - L)      # log x
+def yp(c): return B - ((math.log10(c) + 0.5) / 6.5) * (B - T) if c &gt; 0 else B   # log y
+for us, c in enumerate(counts):                               # counts[us] = 1 us bucket
+    if c: bins[min(39, int(10 * (math.log10(max(us, 10)) - 1)))] += c</code></pre></figure>
+<h3 id="4-4-icount-모드에서-같은-측정-두-봉우리-bimodal">4.4 icount 모드에서 같은 측정 — 두 봉우리(bimodal)<a class="anchor" href="#4-4-icount-모드에서-같은-측정-두-봉우리-bimodal" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 660 340" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="14">cyclictest 30 s, Image-trace, icount 모드</text>
+<line x1="60" y1="280" x2="590" y2="280" stroke="currentColor"/>
+<line x1="60" y1="56" x2="60" y2="280" stroke="currentColor"/>
+<line x1="60.0" y1="280" x2="60.0" y2="284" stroke="currentColor"/>
+<text x="60.0" y="298" font-size="12" text-anchor="middle">10us</text>
+<line x1="192.5" y1="280" x2="192.5" y2="284" stroke="currentColor"/>
+<text x="192.5" y="298" font-size="12" text-anchor="middle">100us</text>
+<line x1="325.0" y1="280" x2="325.0" y2="284" stroke="currentColor"/>
+<text x="325.0" y="298" font-size="12" text-anchor="middle">1ms</text>
+<line x1="457.5" y1="280" x2="457.5" y2="284" stroke="currentColor"/>
+<text x="457.5" y="298" font-size="12" text-anchor="middle">10ms</text>
+<line x1="590.0" y1="280" x2="590.0" y2="284" stroke="currentColor"/>
+<text x="590.0" y="298" font-size="12" text-anchor="middle">100ms</text>
+<line x1="56" y1="262.8" x2="60" y2="262.8" stroke="currentColor"/>
+<text x="52" y="266.8" font-size="12" text-anchor="end">1e0</text>
+<line x1="56" y1="193.8" x2="60" y2="193.8" stroke="currentColor"/>
+<text x="52" y="197.8" font-size="12" text-anchor="end">1e2</text>
+<line x1="56" y1="124.9" x2="60" y2="124.9" stroke="currentColor"/>
+<text x="52" y="128.9" font-size="12" text-anchor="end">1e4</text>
+<line x1="56" y1="56.0" x2="60" y2="56.0" stroke="currentColor"/>
+<text x="52" y="60.0" font-size="12" text-anchor="end">1e6</text>
+<text x="325.0" y="316" font-size="12" text-anchor="middle">latency (log)</text>
+<text x="14" y="44" font-size="12">count (log)</text>
+<polyline points="60.0,280.0 73.3,280.0 73.3,280.0 86.5,280.0 86.5,280.0 99.8,280.0 99.8,280.0 113.0,280.0 113.0,280.0 126.2,280.0 126.2,280.0 139.5,280.0 139.5,280.0 152.8,280.0 152.8,280.0 166.0,280.0 166.0,280.0 179.2,280.0 179.2,280.0 192.5,280.0 192.5,103.4 205.8,103.4 205.8,117.3 219.0,117.3 219.0,167.2 232.2,167.2 232.2,198.0 245.5,198.0 245.5,252.4 258.8,252.4 258.8,205.5 272.0,205.5 272.0,175.2 285.2,175.2 285.2,220.4 298.5,220.4 298.5,280.0 311.8,280.0 311.8,262.8 325.0,262.8 325.0,280.0 338.2,280.0 338.2,280.0 351.5,280.0 351.5,262.8 364.8,262.8 364.8,280.0 378.0,280.0 378.0,280.0 391.2,280.0 391.2,280.0 404.5,280.0 404.5,280.0 417.8,280.0 417.8,280.0 431.0,280.0 431.0,280.0 444.2,280.0 444.2,280.0 457.5,280.0 457.5,280.0 470.7,280.0 470.7,280.0 484.0,280.0 484.0,280.0 497.2,280.0 497.2,280.0 510.5,280.0 510.5,280.0 523.8,280.0 523.8,280.0 537.0,280.0 537.0,280.0 550.2,280.0 550.2,280.0 563.5,280.0 563.5,280.0 576.8,280.0 576.8,280.0 590.0,280.0" fill="none" stroke="#4a7bd0" stroke-width="1.6"/>
+<line x1="360.2" y1="56" x2="360.2" y2="280" stroke="#4a7bd0" stroke-dasharray="3 3"/>
+<line x1="340" y1="58.0" x2="360" y2="58.0" stroke="#4a7bd0" stroke-width="2"/>
+<text x="366" y="62.0" font-size="12">idle (max 1.8ms)</text>
+<polyline points="60.0,280.0 73.3,280.0 73.3,280.0 86.5,280.0 86.5,280.0 99.8,280.0 99.8,280.0 113.0,280.0 113.0,280.0 126.2,280.0 126.2,280.0 139.5,280.0 139.5,280.0 152.8,280.0 152.8,280.0 166.0,280.0 166.0,280.0 179.2,280.0 179.2,280.0 192.5,280.0 192.5,147.6 205.8,147.6 205.8,129.3 219.0,129.3 219.0,111.1 232.2,111.1 232.2,125.1 245.5,125.1 245.5,222.2 258.8,222.2 258.8,177.8 272.0,177.8 272.0,135.6 285.2,135.6 285.2,175.9 298.5,175.9 298.5,202.8 311.8,202.8 311.8,252.4 325.0,252.4 325.0,229.9 338.2,229.9 338.2,252.4 351.5,252.4 351.5,280.0 364.8,280.0 364.8,280.0 378.0,280.0 378.0,280.0 391.2,280.0 391.2,280.0 404.5,280.0 404.5,280.0 417.8,280.0 417.8,280.0 431.0,280.0 431.0,280.0 444.2,280.0 444.2,280.0 457.5,280.0 457.5,280.0 470.7,280.0 470.7,280.0 484.0,280.0 484.0,280.0 497.2,280.0 497.2,280.0 510.5,280.0 510.5,280.0 523.8,280.0 523.8,280.0 537.0,280.0 537.0,280.0 550.2,280.0 550.2,280.0 563.5,280.0 563.5,280.0 576.8,280.0 576.8,280.0 590.0,280.0" fill="none" stroke="#d0564a" stroke-width="1.6"/>
+<line x1="349.7" y1="56" x2="349.7" y2="280" stroke="#d0564a" stroke-dasharray="3 3"/>
+<line x1="340" y1="76.0" x2="360" y2="76.0" stroke="#d0564a" stroke-width="2"/>
+<text x="366" y="80.0" font-size="12">loaded (max 1.5ms)</text>
+</svg></figure>
+<p>그림 4 — icount 모드(호스트 소음 제거)의 cyclictest 30초. 100~200 µs의 주 봉우리 옆에 300~600 µs의 두 번째 봉우리가 있다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>  thr       n    p50     p99   p99.9  p99.99      max  over
+   T0   29999     121     150     233     397     1842  0
+   T1   29824     121     436     467     570      591  0
+  all   59823     121     193     465     565     1842  0
+  thr       n    p50     p99   p99.9  p99.99      max  over
+   T0   29990     193     221     245    1072     1536  0
+   T1   20308     192     597     678     808     1191  0
+  all   50298     193     451     656    1069     1536  0</code></pre></figure>
+<p>(위 두 블록이 idle, 아래가 loaded.) 출력에서 볼 것: 스레드별로 나눠 보면 두 번째 봉우리는 <strong>거의 CPU1(T1)에서만</strong> 나온다(T0 p99 = 150 µs, T1 p99 = 436 µs). icount 모드는 두 vCPU를 한 호스트 스레드에서 번갈아 실행하는데, 그 교대 구조가 CPU1에 고정된 추가 지연을 만든 것으로 보인다. 이 해석은 에뮬레이터 내부 동작에 대한 추정이다. 일반 원칙은 확실하다:</p>
+<h3 id="4-5-히스토그램-모양-읽기">4.5 히스토그램 모양 읽기<a class="anchor" href="#4-5-히스토그램-모양-읽기" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>모양</th><th>뜻</th><th>실제 보드에서 흔한 원인</th></tr></thead><tbody><tr><td>뾰족한 봉우리 하나 + 얇은 꼬리가 금방 끊김</td><td>건강함. 꼬리 끝이 max</td><td>잘 튜닝된 PREEMPT_RT</td></tr><tr><td>봉우리 + 꼬리가 길게 고원처럼 이어짐</td><td>원인이 여러 개, 빈도도 다양</td><td>비 RT 커널 + 부하, 공유 자원 경쟁(메모리 대역폭, 락)</td></tr><tr><td>두 봉우리(bimodal)</td><td><strong>서로 다른 경로 두 개</strong>가 섞였다</td><td>idle 탈출 vs 이미 깨어 있음, CPU별 차이(격리 CPU vs 아닌 CPU), 주기적 작업과 겹친 경우</td></tr><tr><td>주 봉우리에서 떨어진 작은 섬</td><td>드물지만 <strong>일정한 크기</strong>의 지연원</td><td>주기적으로 IRQ를 끄는 드라이버, 일정한 길이의 펌웨어 호출(SMC), 타이머 tick 작업</td></tr><tr><td>오버플로가 0이 아님</td><td>히스토그램 범위가 모자랐다</td><td><code>-h</code>를 늘리거나 max를 따로 보고</td></tr></tbody></table></div>
+<p>bimodal을 보면 <strong>먼저 스레드(CPU)별로 쪼개 본다</strong> — 위 icount 예처럼 한 CPU의 문제인 경우가 많다. 그다음 "작은 섬"의 크기를 재고, 그 크기와 같은 길이의 작업(예: 10 ms마다 400 µs IRQ off 하는 드라이버)을 찾는다. 섬의 위치 = 범인의 길이, 섬의 높이 = 범인의 빈도 × 측정 주기와 겹칠 확률이다.</p>
+<hr>
+<h2 id="5-얼마나-오래-재야-하나-짧은-측정은-거짓말한다">5. 얼마나 오래 재야 하나 — 짧은 측정은 거짓말한다<a class="anchor" href="#5-얼마나-오래-재야-하나-짧은-측정은-거짓말한다" aria-label="link">#</a></h2>
+<h3 id="5-1-직관-드문-사건을-만날-확률">5.1 직관 — 드문 사건을 만날 확률<a class="anchor" href="#5-1-직관-드문-사건을-만날-확률" aria-label="link">#</a></h3>
+<p>최악의 지연은 "드문 일 두 개가 겹칠 때" 생긴다(타이머 만료 순간에 마침 긴 IRQ off 구간이 돌고 있다 등). 어떤 스파이크가 평균 한 시간에 한 번 생긴다고 하자(포아송 가정). T 동안 측정해서 그것을 한 번이라도 볼 확률은 <code>1 - exp(-T / 1h)</code>다.</p>
+<div class="tw"><table><thead><tr><th>측정 시간</th><th>한 시간에 한 번 생기는 스파이크를 볼 확률</th></tr></thead><tbody><tr><td>1분</td><td>1.6%</td></tr><tr><td>10분</td><td>15%</td></tr><tr><td>1시간</td><td>63%</td></tr><tr><td>3시간</td><td>95%</td></tr><tr><td>24시간</td><td>거의 100%</td></tr></tbody></table></div>
+<p>(값은 Python으로 계산했다: <code>1 - math.exp(-T/3600)</code>.) 95%를 원하면 "평균 간격의 3배"를 재야 한다(<code>-ln 0.05 ≈ 3</code>). 반대로 말하면 "N개 샘플에서 한 번도 안 나왔다"는 결과는 그 사건의 확률이 대략 <code>3/N</code>보다 작다는 것만 말해 준다(통계의 "rule of three"). 1 kHz로 1시간이면 N = 360만 → p99.9999 근처까지만 근거가 생긴다.</p>
+<p>그래서 업계의 관행은 개발 중 수십 분, 릴리스 판정 수 시간~24시간, 장기 품질 판정 며칠이다(OSADL QA Farm은 보드마다 장기간 반복 측정한 히스토그램을 공개한다).</p>
+<h3 id="5-2-예제-5-max-vs-측정-시간-image-rt-부하-cpu1">5.2 예제 5 — max vs 측정 시간 (Image-rt, 부하, CPU1)<a class="anchor" href="#5-2-예제-5-max-vs-측정-시간-image-rt-부하-cpu1" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 부하를 계속 걸어 둔 채 cyclictest를 1초(3번), 10초(2번), 60초, 300초 돌리고 각 결과의 p99/p99.9/max를 비교한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>load_on 900; sleep 3          # stress-ng cpu/vm/io/hdd + hackbench (3.1절)
+for D in 1 1 1 10 10 60 300; do
+  cyclictest -m -p 95 -a 1 -t 1 -i 1000 -h 20000 -q -D $D --histfile=$O/d$D.$RANDOM.hist
+done
+for f in d1.9111 d1.4274 d1.29837 d10.14835 d10.32069 d60.22571 d300.3455; do
+  echo "== $f"; python3 -I n3_pct.py $f.hist | sed -n 2p; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== d1.9111
+   T0    1000     194     333     364     374      374  0
+== d1.4274
+   T0     990     138     602    3493    3493     3493  0
+== d1.29837
+   T0     982     115     961    4935    4935     4935  0
+== d10.14835
+   T0    9877     165     414    4692   14533    14533  0
+== d10.32069
+   T0    9895     275     365    4069   18677    18677  0
+== d60.22571
+   T0   59379     208     369    4008   16679    21409  1
+== d300.3455
+   T0  297018     148     249    3712   16524    39182  13</code></pre></figure>
+<p>(열: 스레드, n, p50, p99, p99.9, p99.99, max, overflow. 파일 이름 뒤 숫자는 <code>$RANDOM</code>이라 실행 순서와 무관하다.)</p>
+<figure class="chart"><svg viewBox="0 0 660 340" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="14">측정 시간을 늘리면 max만 자란다 (Image-rt, 부하, CPU1, 실시간 TCG)</text>
+<line x1="70" y1="270" x2="600" y2="270" stroke="currentColor"/>
+<line x1="70" y1="50" x2="70" y2="270" stroke="currentColor"/>
+<line x1="121.7" y1="270" x2="121.7" y2="274" stroke="currentColor"/>
+<text x="121.7" y="288" font-size="12" text-anchor="middle">1 s</text>
+<line x1="293.9" y1="270" x2="293.9" y2="274" stroke="currentColor"/>
+<text x="293.9" y="288" font-size="12" text-anchor="middle">10 s</text>
+<line x1="427.9" y1="270" x2="427.9" y2="274" stroke="currentColor"/>
+<text x="427.9" y="288" font-size="12" text-anchor="middle">60 s</text>
+<line x1="548.3" y1="270" x2="548.3" y2="274" stroke="currentColor"/>
+<text x="548.3" y="288" font-size="12" text-anchor="middle">300 s</text>
+<line x1="66" y1="270.0" x2="600" y2="270.0" stroke="#888" stroke-opacity="0.3"/>
+<text x="62" y="274.0" font-size="12" text-anchor="end">100us</text>
+<line x1="66" y1="196.7" x2="600" y2="196.7" stroke="#888" stroke-opacity="0.3"/>
+<text x="62" y="200.7" font-size="12" text-anchor="end">1ms</text>
+<line x1="66" y1="123.3" x2="600" y2="123.3" stroke="#888" stroke-opacity="0.3"/>
+<text x="62" y="127.3" font-size="12" text-anchor="end">10ms</text>
+<line x1="66" y1="50.0" x2="600" y2="50.0" stroke="#888" stroke-opacity="0.3"/>
+<text x="62" y="54.0" font-size="12" text-anchor="end">100ms</text>
+<text x="335.0" y="306" font-size="12" text-anchor="middle">측정 시간 (log)</text>
+<circle cx="121.7" cy="228.0" r="4" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<circle cx="121.7" cy="156.8" r="4" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<circle cx="121.7" cy="145.8" r="4" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<circle cx="293.9" cy="111.4" r="4" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<circle cx="293.9" cy="103.4" r="4" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<circle cx="427.9" cy="99.1" r="4" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<circle cx="548.3" cy="79.8" r="4" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<polyline points="121.7,145.8 293.9,103.4 427.9,99.1 548.3,79.8" fill="none" stroke="#d0564a" stroke-width="1.5"/>
+<circle cx="121.7" cy="228.9" r="4" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<circle cx="121.7" cy="156.8" r="4" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<circle cx="121.7" cy="145.8" r="4" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<circle cx="293.9" cy="147.4" r="4" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<circle cx="293.9" cy="152.0" r="4" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<circle cx="427.9" cy="152.5" r="4" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<circle cx="548.3" cy="154.9" r="4" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<polyline points="121.7,145.8 293.9,147.4 427.9,152.5 548.3,154.9" fill="none" stroke="#e08a3c" stroke-width="1.5"/>
+<circle cx="121.7" cy="231.7" r="4" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<circle cx="121.7" cy="212.8" r="4" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<circle cx="121.7" cy="197.9" r="4" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<circle cx="293.9" cy="224.8" r="4" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<circle cx="293.9" cy="228.8" r="4" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<circle cx="427.9" cy="228.4" r="4" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<circle cx="548.3" cy="240.9" r="4" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<polyline points="121.7,197.9 293.9,224.8 427.9,228.4 548.3,240.9" fill="none" stroke="#4a7bd0" stroke-width="1.5"/>
+<circle cx="110" cy="56" r="4" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<text x="120" y="60" font-size="12">max</text>
+<circle cx="110" cy="74" r="4" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="120" y="78" font-size="12">p99.9</text>
+<circle cx="110" cy="92" r="4" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="120" y="96" font-size="12">p99</text>
+<text x="76" y="322" font-size="12">1 s를 3번, 10 s를 2번 반복 — 같은 1 s 측정의 max가 374 us ~ 4935 us로 13배 흔들린다</text>
+</svg></figure>
+<p>그림 5 — 위 실행 결과를 그린 것. 빨강 max는 측정 시간에 따라 0.37 ms → 39 ms로 계속 자라고, 주황 p99.9는 10초 이후 3.7~4.7 ms에서 거의 변하지 않는다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>같은 1초 측정 세 번의 max가 374 µs, 3493 µs, 4935 µs</strong> — 13배 차이. 1초짜리 측정 하나로 "max 374 µs"라고 보고했다면 운이 좋았을 뿐이다.</li><li><strong>max는 측정 시간과 함께 단조롭게 커진다</strong>(10 s: 14.5~18.7 ms, 60 s: 21.4 ms, 300 s: 39.2 ms). 측정을 더 늘리면 더 커질 가능성이 높다. "max가 더 이상 자라지 않는 시간"을 찾는 것이 측정 시간 결정의 기준이다.</li><li><strong>p99.9는 10초 이후 안정</strong>(4.7 → 4.0 → 3.7 ms). 백분위는 짧은 측정에서도 비교적 안정적으로 추정되지만, 제어 루프가 깨지는 것은 max다. 그래서 보고서에는 둘 다 쓴다: "p99.9는 분포의 몸통, max는 측정 시간 동안 관측된 최악".</li><li>300초 측정에서도 n = 297018로 기대값(300000)보다 약 3000 적다. 부하 아래서 주기를 놓친 샘플이다.</li></ul>
+<hr>
+<h2 id="6-osnoise-바쁜-워크로드는-무엇에게-시간을-빼앗기나">6. osnoise — 바쁜 워크로드는 무엇에게 시간을 빼앗기나<a class="anchor" href="#6-osnoise-바쁜-워크로드는-무엇에게-시간을-빼앗기나" aria-label="link">#</a></h2>
+<h3 id="6-1-직관과-정의">6.1 직관과 정의<a class="anchor" href="#6-1-직관과-정의" aria-label="link">#</a></h3>
+<p>cyclictest·timerlat은 "자다가 깨는" 워크로드를 흉내 낸다. 그런데 폴링 드라이버, DPDK식 패킷 처리, 추론 루프처럼 <strong>CPU를 계속 쥐고 도는</strong> 워크로드도 있다. 그런 워크로드에게 중요한 질문은 "얼마나 늦게 깨나"가 아니라 "돌고 있는 동안 얼마나 자주, 얼마나 오래 끊기나"다.</p>
+<p>osnoise tracer는 CPU마다 kthread 하나를 띄워 <code>runtime</code> 동안 시계를 연속으로 읽는다. 두 읽기 사이 간격이 임계값(<code>-T</code>, 기본 1 µs)을 넘으면 "noise"로 세고, 그 사이에 발생한 IRQ·softirq·NMI·다른 thread를 tracepoint로 추적해 원인별 카운트를 붙인다. 아무 OS 이벤트도 없었는데 시간이 사라졌으면 <strong>HW</strong> 칸으로 간다(12.2절).</p>
+<p><code>rtla osnoise top</code> 열의 뜻:</p>
+<div class="tw"><table><thead><tr><th>열</th><th>뜻</th></tr></thead><tbody><tr><td>Period / Runtime</td><td>주기 수, 측정 스레드가 돈 시간 합(µs)</td></tr><tr><td>Noise</td><td>빼앗긴 시간 합(µs)</td></tr><tr><td>% CPU Aval</td><td>워크로드가 실제로 쓸 수 있었던 비율 = (Runtime − Noise) / Runtime</td></tr><tr><td>Max Noise</td><td>한 주기 안 노이즈 합의 최대</td></tr><tr><td>Max Single</td><td>노이즈 한 번의 최대 길이</td></tr><tr><td>HW / NMI / IRQ / Softirq / Thread</td><td>원인별 발생 <strong>횟수</strong></td></tr></tbody></table></div>
+<h3 id="6-2-예제-6-함정-임계값이-플랫폼보다-작으면-전부-노이즈가-된다">6.2 예제 6 — 함정: 임계값이 플랫폼보다 작으면 전부 노이즈가 된다<a class="anchor" href="#6-2-예제-6-함정-임계값이-플랫폼보다-작으면-전부-노이즈가-된다" aria-label="link">#</a></h3>
+<p>기본 임계값(1 µs)으로 TCG 게스트에서 돌린 결과다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>rtla osnoise top -d 20 -q</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>                                          Operating System Noise                                                                          
+duration:   0 00:00:21 | time is in us
+CPU Period       Runtime        Noise  % CPU Aval   Max Noise   Max Single          HW          NMI          IRQ      Softirq       Thread
+  0 #19         19000146     19000063     0.00043     1000129        17196     5086764            0         4730          593          120
+  1 #20         20000072     19999838     0.00116     1000037        23630     5328975            0         5000          449          119</code></pre></figure>
+<p>출력에서 볼 것: CPU 가용률 0.0004% — 측정 시간 전부가 노이즈다. HW 노이즈가 20초에 500만 번. 이 게스트는 에뮬레이션이라 시계를 두 번 읽는 루프 한 바퀴가 이미 1 µs를 자주 넘는다. <strong>측정 도구의 해상도·임계값이 플랫폼에 맞지 않으면 숫자가 의미를 잃는다.</strong> 실제 보드라면 기본값 1 µs가 적절하지만, 느린 코어나 VM에서는 <code>-T</code>로 올린다.</p>
+<h3 id="6-3-예제-7-t-50으로-다시-조용할-때-시끄러운-이웃이-있을-때-rt-우선순위를-줬을-때">6.3 예제 7 — <code>-T 50</code>으로 다시: 조용할 때, 시끄러운 이웃이 있을 때, RT 우선순위를 줬을 때<a class="anchor" href="#6-3-예제-7-t-50으로-다시-조용할-때-시끄러운-이웃이-있을-때-rt-우선순위를-줬을-때" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 임계값 50 µs로 (a) 조용한 시스템, (b) CPU1에 <code>stress-ng --cpu 1</code>(SCHED_OTHER 계산 부하) + n3_spike(100 ms마다 2 ms IRQ off), (c) CPU1에 stress-ng만 두고 osnoise 스레드를 SCHED_FIFO 95로(<code>-P f:95</code>).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>rtla osnoise top -T 50 -d 20 -q
+stress-ng --cpu 1 --taskset 1 --timeout 50s -q &amp;
+insmod /root/n3/n3_spike-trace.ko cpu=1 us=2000 period_ms=100 mode=0
+rtla osnoise top -T 50 -d 20 -q
+rmmod n3_spike; stress-ng --cpu 1 --taskset 1 --timeout 25s -q &amp;
+rtla osnoise top -T 50 -P f:95 -d 20 -q</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== osnoise top -T 50, quiet
+CPU Period       Runtime        Noise  % CPU Aval   Max Noise   Max Single          HW          NMI          IRQ      Softirq       Thread
+  0 #19         19000093      1427495    92.48690      116191        33075        1718            0         4741          333          156
+  1 #19         19006039      1314005    93.08638      110103        32108        1831            0         4754          551          100
+== osnoise top -T 50, noisy: stress-ng CPU1 + n3_spike irq-off 2000us/100ms CPU1
+  0 #19         19000479      1692751    91.09100      127642        36051        2185            0         4761          334          192
+  1 #19         19015877     10545106    44.54578      579619        52234         421            0         4708          731         2235
+== osnoise top -T 50 -P f:95, stress-ng on CPU1
+[   99.991462][    C0] sched: RT throttling activated
+  0 #19         19001349      1941406    89.78279      132163        53271        2222            0         4818          538          263
+  1 #19         19009653      2282806    87.99133      149570        55462        2202            0         4748          618           97</code></pre></figure>
+<p>(제목 줄 생략.) 출력에서 볼 것:</p>
+<ul><li><strong>IRQ 횟수 약 4750 = 19초 × 250 Hz</strong>. Image-trace는 <code>HZ=250</code>이라 scheduler tick이 초당 250번이다. 조용한 시스템의 IRQ 노이즈는 거의 다 tick이다. (Image-rt는 <code>HZ=1000</code> + <code>NO_HZ_FULL</code> — 6.4에서 비교.)</li><li><strong>조용할 때 가용률 92~93%</strong>. 남은 7%는 HW 노이즈(약 1700~1800회) — 8절에서 보듯 에뮬레이터/호스트가 vCPU를 멈춘 시간이다. 실제 보드라면 99.9% 이상을 기대한다.</li><li><strong>시끄러운 이웃</strong>: CPU1의 가용률이 44.5%로 반토막. Thread 칸이 100 → 2235회로 뛰었다. stress-ng와 n3_spike kthread가 osnoise 스레드(SCHED_OTHER)와 CPU를 나눠 썼기 때문이다. CPU0은 거의 그대로(91%) — 노이즈가 CPU별로 분리돼 보이는 것이 osnoise의 장점이다.</li><li><strong><code>-P f:95</code></strong>: osnoise 스레드를 SCHED_FIFO 95로 올리자 같은 stress-ng가 있어도 CPU1 가용률이 88%로 회복, Thread 칸은 97회. 일반 스레드는 RT 스레드를 끊지 못한다. 대신 커널이 <code>sched: RT throttling activated</code>를 찍었다 — RT 태스크가 1초 중 0.95초를 넘게 쓰려 하자 RT throttling(F1 §5.2, N2)이 끼어들어 나머지 시간을 일반 태스크에 준 것이고, 그 시간이 다시 노이즈로 잡힌다. <strong>바쁜 루프를 RT로 돌리는 제품이라면 이 throttling이 주기적 노이즈원이 된다.</strong></li></ul>
+<p>같은 측정을 <strong>Image-rt</strong>(PREEMPT_RT, <code>HZ=1000</code>)에서 하면 열의 모양이 달라진다:</p>
+<figure class="code"><span class="lang">text</span><pre><code>== osnoise top -T 50, quiet   (6.18.55-rt)
+CPU Period       Runtime        Noise  % CPU Aval   Max Noise   Max Single          HW          NMI          IRQ      Softirq       Thread
+  0 #19         19000100      2552407    86.56634      194174        56286        3459            0        18727            0          540
+  1 #19         19002263      2722554    85.67247      200719        70301        2957            0        18688            0          691
+== osnoise top -T 50, noisy: stress-ng CPU1 + n3_spike irq-off 2000us/100ms CPU1
+  0 #18         18003372      2388539    86.73282      193630        19378        3639            0        17695            0          601
+  1 #18         18002380     10780406    40.11677      627046        29281        1031            0        17535            0         5290</code></pre></figure>
+<ul><li>IRQ 횟수가 19초에 약 18700 — <code>HZ=1000</code>이라 tick이 4배다. (<code>NO_HZ_FULL</code>이 켜져 있어도 <code>nohz_full=</code> 부트 인자로 CPU를 지정하지 않았으니 tick은 멈추지 않는다 — N2.)</li><li><strong>Softirq 칸이 0</strong>이다. PREEMPT_RT에서는 softirq가 IRQ 출구가 아니라 스레드 문맥에서 돌기 때문에 osnoise는 그것을 Thread 노이즈로 센다. 같은 도구라도 커널 설정에 따라 "어느 칸에 들어가나"가 바뀐다는 것을 알고 읽어야 한다.</li></ul>
+<blockquote><p>이 RT 게스트에서 <code>rtla osnoise top -P f:95</code>(바쁜 루프를 SCHED_FIFO 95로 100% 돌림)를 실행하자 게스트 전체가 멈춰 20분 동안 돌아오지 않았다(콘솔 메시지도 없어 QEMU를 강제 종료했다). 같은 명령이 Image-trace에서는 RT throttling 메시지와 함께 끝났다. <strong>원인은 확인하지 못했다.</strong> 가장 그럴듯한 가설: PREEMPT_RT에서는 타이머 softirq 처리가 낮은 RT 우선순위의 커널 스레드(<code>ktimers/N</code>)에서 도는데, FIFO 95 루프가 CPU를 독점하면 그 스레드가 굶어 rtla의 종료 타이머조차 처리되지 않는다. 6.12 이후 RT throttling 자리를 대신하는 fair server(deadline server)는 SCHED_OTHER 태스크에게 시간을 보장할 뿐 더 낮은 RT 스레드를 구해 주지 않는다. 교훈은 확실하다: <strong>RT 커널에서 100% 바쁜 RT 루프가 커널의 RT 스레드(타이머, softirq, IRQ 스레드)보다 우선순위가 높으면 시스템이 멈출 수 있다.</strong> RT 우선순위로 osnoise를 돌릴 때는 <code>-r</code>(runtime)을 <code>-p</code>(period)보다 작게 줘 여유를 둔다.</p></blockquote>
+<h3 id="6-4-예제-8-rtla-osnoise-hist와-s-정지-트레이스">6.4 예제 8 — <code>rtla osnoise hist</code>와 <code>-s</code> 정지 + 트레이스<a class="anchor" href="#6-4-예제-8-rtla-osnoise-hist와-s-정지-트레이스" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>rtla osnoise hist -T 50 -d 20 -b 100 -E 100 &gt; noisy.hist   # 100 us 버킷 100개</code></pre></figure>
+<p>시끄러운 이웃이 있을 때 결과의 끝부분(CPU0, CPU1 두 열):</p>
+<figure class="code"><span class="lang">text</span><pre><code>7700          0         6 
+7800          0        14 
+7900          0        15 
+8000          0        11 
+8100          0         3 
+...
+9800          1         0 
+over:         4        17 
+count:     6988      4733 
+min:          0         0 
+avg:     192.93   1478.77 
+max:      25000     90000 </code></pre></figure>
+<p>(0인 줄과 중간 일부 생략.) 출력에서 볼 것: CPU1에는 7.7~8.1 ms 근처에 노이즈 샘플이 몰려 있다 — 2 ms IRQ off와 stress-ng의 CFS time slice가 겹친 고정 크기 덩어리로 보인다(정확한 분해는 하지 않았다). CPU1 평균 노이즈 1478 µs 대 CPU0 193 µs.</p>
+<p><code>-s 5000 -t</code>로 "5 ms 넘는 단일 노이즈에서 멈추고 트레이스 저장"을 걸었다(n3_spike는 1초마다 8 ms IRQ off).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>rtla osnoise top -s 5000 -T 50 -t -q -d 60; echo "rc=$?"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>  Saving trace to osnoise_trace.txt
+osnoise hit stop tracing
+rc=2</code></pre></figure>
+<p>저장된 트레이스(778줄)의 마지막 줄:</p>
+<figure class="code"><span class="lang">text</span><pre><code>osnoise/0-119     [000] ....1   131.551631: sample_threshold: start 131.541696352 duration 9678400 ns interference 0</code></pre></figure>
+<p>그리고 그 직전 다른 줄들:</p>
+<figure class="code"><span class="lang">text</span><pre><code>rtla-118     [000] d..3.   131.119376: thread_noise:     rtla:118 start 131.115486688 duration 3794096 ns
+osnoise/0-119     [000] ....1   131.119408: sample_threshold: start 131.115297808 duration 4108736 ns interference 3</code></pre></figure>
+<p>출력에서 볼 것: 정지를 일으킨 것은 n3_spike가 있는 CPU1이 아니라 <strong>CPU0의 9.68 ms짜리 노이즈, <code>interference 0</code></strong>이었다 — OS 이벤트가 하나도 없었는데 시간이 사라졌다, 즉 HW(여기서는 호스트) 노이즈다. 두 번째로 볼 것은 CPU0에서 <strong>rtla 자신</strong>(<code>rtla:118</code>)이 3.8 ms 노이즈를 만들었다는 점이다. 측정 도구의 수집 스레드도 CPU를 쓴다. 그래서 rtla에는 <code>-H &lt;cpus&gt;</code>(housekeeping: rtla 자신을 이 CPU들에만)와 <code>-c &lt;cpus&gt;</code>(측정할 CPU) 옵션이 있다. 실제 측정에서는 <code>-c 2-3 -H 0</code>처럼 측정 대상과 수집기를 분리한다.</p>
+<hr>
+<h2 id="7-timerlat-지연을-irq-단계-와-thread-단계-로-가른다">7. timerlat — 지연을 "IRQ 단계"와 "thread 단계"로 가른다<a class="anchor" href="#7-timerlat-지연을-irq-단계-와-thread-단계-로-가른다" aria-label="link">#</a></h2>
+<h3 id="7-1-직관">7.1 직관<a class="anchor" href="#7-1-직관" aria-label="link">#</a></h3>
+<p>cyclictest의 한 숫자를 두 개로 쪼갠다. 타이머가 만료되면 <strong>timerlat의 hrtimer 콜백(IRQ 문맥)</strong>이 먼저 "지금 몇 µs 늦었나"를 기록하고(IRQ latency), 측정 스레드를 깨운다. 스레드가 실제로 돌기 시작하면 다시 기록한다(Thread latency). 사용자 스레드 모드에서는 유저 공간으로 돌아온 시각도 잰다(Ret user).</p>
+<figure class="chart"><svg viewBox="0 0 660 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="22" font-size="14">timerlat: 같은 타이머로 두 지점을 잰다</text>
+<line x1="40" y1="250" x2="640" y2="250" stroke="currentColor" marker-end="url(#ah3)"/>
+<line x1="90" y1="50" x2="90" y2="260" stroke="#4a7bd0" stroke-dasharray="4 3"/>
+<text x="50" y="275" font-size="12">타이머 만료 시각</text>
+<rect x="90" y="190" width="120" height="40" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="98" y="215" font-size="12">IRQ 못 받음</text>
+<line x1="210" y1="50" x2="210" y2="260" stroke="#e08a3c"/>
+<text x="168" y="275" font-size="12">timerlat IRQ 진입</text>
+<rect x="210" y="190" width="50" height="40" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="216" y="215" font-size="12">IRQ</text>
+<rect x="260" y="190" width="200" height="40" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="268" y="207" font-size="12">thread 깨움 → 아직 못 돎</text>
+<text x="268" y="223" font-size="12">(preempt off, 다른 RT 등)</text>
+<line x1="460" y1="50" x2="460" y2="260" stroke="#d0564a"/>
+<text x="410" y="275" font-size="12">timerlat thread 실행</text>
+<line x1="94" y1="80" x2="206" y2="80" stroke="#e08a3c" marker-end="url(#ah3)"/>
+<text x="98" y="72" font-size="13">IRQ latency</text>
+<line x1="94" y1="130" x2="456" y2="130" stroke="#d0564a" marker-end="url(#ah3)"/>
+<text x="220" y="122" font-size="13">Thread latency (IRQ latency 포함)</text>
+<text x="20" y="300" font-size="12">IRQ latency 큼 → 누군가 IRQ를 막았다 (local_irq_save, 긴 hardirq, 펌웨어/하이퍼바이저)</text>
+<text x="20" y="320" font-size="12">IRQ 작고 Thread만 큼 → 스케줄링 문제 (preempt off, 우선순위, 긴 softirq·thread)</text>
+</svg></figure>
+<p>그림 6 — timerlat의 두 측정점. 두 값의 <strong>차이</strong>가 진단의 핵심이다.</p>
+<p>판별 규칙은 표 하나로 외운다.</p>
+<div class="tw"><table><thead><tr><th>IRQ latency</th><th>Thread latency</th><th>의심할 곳</th></tr></thead><tbody><tr><td>작다</td><td>작다</td><td>정상</td></tr><tr><td>크다</td><td>크다(IRQ와 비슷)</td><td>IRQ가 막혔다: <code>local_irq_save</code>/<code>spin_lock_irqsave</code> 긴 구간, 긴 hardirq 핸들러, idle 탈출, OS 밖 정지</td></tr><tr><td>작다</td><td>크다</td><td>IRQ는 제때 왔는데 스레드가 못 돌았다: <code>preempt_disable</code>/<code>spin_lock</code>(비 RT) 구간, 더 높은 RT 태스크, 긴 softirq</td></tr></tbody></table></div>
+<h3 id="7-2-예제-9-rtla-timerlat-top-조용할-때-irq-off-스파이크-preempt-off-스파이크">7.2 예제 9 — <code>rtla timerlat top</code>: 조용할 때, IRQ off 스파이크, preempt off 스파이크<a class="anchor" href="#7-2-예제-9-rtla-timerlat-top-조용할-때-irq-off-스파이크-preempt-off-스파이크" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 측정을 세 번 한다. n3_spike로 CPU1에 500 ms마다 20 ms짜리 (a) IRQ off, (b) preempt off 구간을 넣었을 때 IRQ 열과 Thread 열이 어떻게 다르게 반응하는가. <strong>icount 모드</strong>(호스트 소음 제거)에서 실행했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>rtla timerlat top -d 20 -q
+insmod /root/n3/n3_spike-trace.ko cpu=1 us=20000 period_ms=500 mode=0
+rtla timerlat top -d 20 -q; rmmod n3_spike
+insmod /root/n3/n3_spike-trace.ko cpu=1 us=20000 period_ms=500 mode=1
+rtla timerlat top -d 20 -q; rmmod n3_spike</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== timerlat top quiet
+CPU COUNT      |      cur       min       avg       max |      cur       min       avg       max |      cur       min       avg       max
+  0 #19967     |       25        17        22        50 |       95        86        95       345 |      202       193       201       529
+  1 #19946     |       84        17       182       686 |      365        87       349      1347 |      679       179       682      1665
+== timerlat top with n3_spike mode=0 (20000us every 500ms on CPU1)
+  0 #19921     |       17         8        22       196 |      307        87       277     52737 |      414       192       425     52951
+  1 #19247     |       79        17        76     20008 |      160       130       192     20448 |      250       180       304     20536
+[  279.735430][  T211] n3_spike: 83 spikes injected
+== timerlat top with n3_spike mode=1 (20000us every 500ms on CPU1)
+  0 #19988     |       20        16        22       211 |       87        85       104       738 |      177       176       216       854
+  1 #19255     |      194        23        74       397 |      274       103       223     19970 |      365       175       326     20061
+[  324.846365][  T218] n3_spike: 83 spikes injected</code></pre></figure>
+<p>(헤더 두 줄과 ALL 합계 줄은 생략했다. 세 열 묶음은 왼쪽부터 IRQ, Thread, Ret user, 단위 µs.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>IRQ off(mode=0)</strong>: CPU1의 IRQ max가 20008 µs — 주입한 20 ms가 거의 그대로 IRQ 단계에 찍혔다. Thread max(20448)는 IRQ max + 수백 µs. "IRQ 크고 Thread도 비슷" → IRQ가 막혔다.</li><li><strong>preempt off(mode=1)</strong>: CPU1의 IRQ max는 397 µs로 조용할 때(686)와 같은 수준이다. 그런데 Thread max는 19970 µs. "IRQ 작고 Thread만 큼" → 스케줄링 문제. timerlat이 아니라 cyclictest였다면 두 경우 모두 "max 20 ms" 한 숫자였다.</li><li>IRQ off 실험에서 CPU0의 Thread max가 52737 µs로 튀었다. CPU0에는 스파이크를 넣지 않았다. icount 모드는 vCPU 두 개를 한 호스트 스레드에서 번갈아 돌리므로, CPU1이 IRQ를 끈 채 오래 돌면 CPU0의 실행 기회 배분에도 영향이 있을 수 있다 — <strong>이 노트에서는 원인을 확정하지 못했다</strong>. 실제 보드라면 CPU 간 의존(IPI 응답 대기, 같은 락, RCU)부터 의심하고 7.4의 <code>--auto</code>로 CPU0을 따로 잡는다.</li><li>조용할 때도 CPU1의 평균(182 µs)이 CPU0(22 µs)보다 훨씬 크다. 4.4절의 icount 히스토그램에서 본 "두 번째 봉우리"와 같은 현상(에뮬레이터의 vCPU 교대)이다.</li></ul>
+<h3 id="7-3-예제-10-rtla-timerlat-hist">7.3 예제 10 — <code>rtla timerlat hist</code><a class="anchor" href="#7-3-예제-10-rtla-timerlat-hist" aria-label="link">#</a></h3>
+<p><code>top</code>이 요약이라면 <code>hist</code>는 분포다. 옵션은 cyclictest의 <code>-h</code>와 같은 역할이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>rtla timerlat hist -d 30 -b 100 -E 200 &gt; tl_load.hist     # 100 us 버킷 200개 = 0~20 ms</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code># RTLA timerlat histogram
+# Time unit is microseconds (us)
+# Duration:   0 00:00:37
+Index   IRQ-000   Thr-000   Usr-000   IRQ-001   Thr-001   Usr-001
+0          6754         4         0      6942         0         0 
+over:        27        37        47        26        37        41 
+count:    13771     13771     13771     16380     16380     16380 
+min:         16        74       131        13       100       157 
+avg:        892      1264      1592       597       920      1144 
+max:    1003663   1006335   1006609    530378    573537    573788 </code></pre></figure>
+<p>(실시간 TCG 모드, 호스트가 바쁠 때(load average 약 23) 부하를 걸고 잰 결과에서 버킷 0과 요약 줄만 남겼다.) 출력에서 볼 것: <code>-d 30</code>을 줬는데 <code>Duration</code>이 37초이고, count가 30초 × 1000 Hz = 30000에 한참 못 미친다(13771, 16380). 측정 스레드가 주기를 놓친 것이다. max가 1초(1003663 µs)다 — 게스트 vCPU가 호스트에서 통째로 1초 동안 실행되지 못한 것으로 보인다. 같은 구간 커널 로그에는 <code>rcu: INFO: rcu_preempt detected stalls</code>(khugepaged가 RCU read 구간에서 선점된 채 오래 못 돌았다)도 찍혔다. <strong>count가 기대값과 다르면 그 자체가 결과다</strong> — 측정이 측정 대상을 따라가지 못했다는 뜻이니 max 숫자보다 먼저 보고한다.</p>
+<h3 id="7-4-예제-11-rtla-timerlat-top-a-us-첫-스파이크에서-멈추고-자동-분석">7.4 예제 11 — <code>rtla timerlat top -a &lt;us&gt;</code>: 첫 스파이크에서 멈추고 자동 분석<a class="anchor" href="#7-4-예제-11-rtla-timerlat-top-a-us-첫-스파이크에서-멈추고-자동-분석" aria-label="link">#</a></h3>
+<p><code>-a 8000</code>(<code>--auto</code>)은 다음을 한 번에 켠다(6.18.55 <code>timerlat_top.c</code> 소스에서 확인): IRQ·thread 어느 쪽이든 8000 µs를 넘으면 트레이싱 정지, IRQ에서 스택 트레이스 저장(<code>print_stack</code>), 트레이스를 <code>timerlat_trace.txt</code>로 저장, 그리고 멈춘 지점의 <strong>auto-analysis</strong> 출력.</p>
+<p>무엇을 확인하나: IRQ off 10 ms 스파이크(1초마다)를 넣고 8 ms에서 멈추게 했다. 실시간 TCG 모드, 호스트가 비교적 조용할 때.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>insmod /root/n3/n3_spike-trace.ko cpu=1 us=10000 period_ms=1000 mode=0
+rtla timerlat top -a 8000 -q -d 60; echo "rc=$?"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>  Saving trace to timerlat_trace.txt
+...
+  1 #20        |     9879       102       666      9879 |      472       249       389      1120 |      659       388       561      1260
+...
+timerlat hit stop tracing
+## CPU 1 hit stop tracing, analyzing it ##
+  IRQ handler delay:                                        75.07 us (0.76 %)
+  IRQ latency:                                            9879.82 us
+  Blocking thread:
+                       swapper/1:228      
+    Blocking thread stack trace
+                -&gt; timerlat_irq
+                -&gt; __hrtimer_run_queues
+                -&gt; hrtimer_interrupt
+                -&gt; arch_timer_handler_virt
+                -&gt; handle_percpu_devid_irq
+                -&gt; handle_irq_desc
+                -&gt; generic_handle_domain_irq
+                -&gt; gic_handle_irq
+                -&gt; call_on_irq_stack
+                -&gt; do_interrupt_handler
+                -&gt; el1_interrupt
+                -&gt; el1h_64_irq_handler
+                -&gt; el1h_64_irq
+                -&gt; n3_burn
+                -&gt; n3_fn
+                -&gt; kthread
+                -&gt; ret_from_fork
+------------------------------------------------------------------------
+     IRQ latency:                                         9879.82 us (100%)
+
+Max timerlat IRQ latency from idle: 404.66 us in cpu 0
+rc=2</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>시작 20회 만에(<code>#20</code>) CPU1의 <strong>IRQ latency 9879 µs</strong>에서 멈췄다. thread 단계까지 가지도 않았다 — IRQ 단계에서 이미 임계값을 넘었다.</li><li>스택 트레이스가 결정적 증거다. 타이머 IRQ(<code>el1h_64_irq</code>)가 <strong><code>n3_burn</code> 안에서</strong> 들어왔다. 즉 IRQ가 늦게 들어온 이유는 <code>n3_burn</code>이 IRQ를 끄고 있었기 때문이고, <code>local_irq_restore()</code> 순간 대기 중이던 타이머 IRQ가 바로 그 자리에서 처리된 것이다. ("Blocking thread: swapper/1:228"의 이름 표기는 믿기 어렵다 — PID 228은 <code>insmod</code>(T227) 직후에 생긴 kthread, 즉 <code>n3_spike/1</code>일 가능성이 높다. IRQ off 경우에는 분석기가 "누가 돌고 있었나"를 IRQ 진입 직전 이벤트로 추정하는데 그 정보가 부족했던 것으로 보인다. <strong>이름보다 스택을 믿는다.</strong>)</li><li><code>rc=2</code>는 "임계값에 걸려 멈췄다"는 종료 코드다(<code>utils.h</code>의 <code>enum result</code>: PASSED=0, ERROR=1, FAILED=2). CI에서 자동 판정에 그대로 쓴다.</li></ul>
+<p>같은 방법으로 <strong>preempt off</strong> 스파이크를 잡은 결과(호스트가 바쁠 때의 실행, 20 ms 스파이크, 임계값 15 ms):</p>
+<figure class="code"><span class="lang">text</span><pre><code>## CPU 1 hit stop tracing, analyzing it ##
+  IRQ handler delay:                                      3218.80 us (15.75 %)
+  IRQ latency:                                            3244.91 us
+  Timerlat IRQ duration:                                    67.79 us (0.33 %)
+  Blocking thread:                                       15208.00 us (74.42 %)
+                      n3_spike/1:327                     15208.00 us
+    Blocking thread stack trace
+                -&gt; timerlat_irq
+                ...
+                -&gt; el1h_64_irq
+                -&gt; __delay_cycles
+                -&gt; __delay
+                -&gt; __udelay
+                -&gt; n3_burn
+                -&gt; n3_fn
+                -&gt; kthread
+                -&gt; ret_from_fork
+  IRQ interference                                        1859.68 us (9.10 %)
+                arch_timer:11                              599.04 us
+                arch_timer:11                              238.22 us
+                arch_timer:11                              150.78 us
+                arch_timer:11                              114.88 us
+                arch_timer:11                              756.75 us
+  Softirq interference                                      18.13 us (0.09 %)
+                     SCHED:7                                18.13 us
+------------------------------------------------------------------------
+  Thread latency:                                        20435.86 us (100%)</code></pre></figure>
+<p>(스택 중간 GIC 경로 10줄은 위와 같아서 <code>...</code>로 생략.) 이번에는 <strong>Thread latency 20435 µs 중 74%(15208 µs)가 "Blocking thread: n3_spike/1"</strong>이라고 이름까지 정확히 짚었다. IRQ는 3.2 ms 늦었는데(호스트 소음), 그 뒤 15 ms를 n3_spike가 선점 불가 상태로 CPU를 쥐고 있었다. 나머지는 다른 타이머 IRQ 간섭(9%) 등이다. 합이 100%가 되도록 나눠 주는 것이 auto-analysis의 가치다.</p>
+<h3 id="7-5-auto-analysis가-범인-없음-을-말할-때">7.5 auto-analysis가 "범인 없음"을 말할 때<a class="anchor" href="#7-5-auto-analysis가-범인-없음-을-말할-때" aria-label="link">#</a></h3>
+<p>같은 preempt off 실험을 호스트가 조용할 때 다시 돌렸더니, 이번에는 n3_spike가 아닌 다른 이벤트에서 먼저 멈췄다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>## CPU 0 hit stop tracing, analyzing it ##
+  IRQ handler delay:                                        97.50 us (1.11 %)
+  IRQ latency:                                            8775.28 us
+  Blocking thread:
+                       swapper/0:0        
+    Blocking thread stack trace
+                -&gt; timerlat_irq
+                ...
+                -&gt; el1h_64_irq
+                -&gt; default_idle_call
+                -&gt; do_idle
+                -&gt; cpu_startup_entry
+                -&gt; rest_init
+                -&gt; start_kernel
+                -&gt; __primary_switched
+------------------------------------------------------------------------
+     IRQ latency:                                         8775.28 us (100%)</code></pre></figure>
+<p>CPU0이 <strong>idle 상태(<code>default_idle_call</code>)</strong>에서 IRQ를 8.7 ms 늦게 받았다. 게스트 OS 안에는 IRQ를 막은 코드가 없다. idle의 CPU가 타이머 IRQ에 늦게 반응하는 경우는 (1) 깊은 idle 상태의 탈출 지연(실제 보드에서는 수십~수백 µs. <code>--dma-latency 0</code>이나 <code>--deepest-idle-state</code>로 확인), (2) CPU가 아예 멈춰 있었음(펌웨어·하이퍼바이저)이다. 이 게스트에서는 (2) — QEMU의 vCPU 스레드가 호스트에서 실행되지 못한 시간이다. 이런 "OS 안에 범인이 없는" 스파이크를 직접 증명하는 도구가 8절의 hwlat이다. 이 경우 auto-analysis 출력이 "IRQ handler delay: (exit from idle)"로 표시되기도 한다(바쁜 호스트에서 잡은 IRQ off 실험의 출력 첫 줄이 <code>IRQ handler delay: (exit from idle) 1762.06 us</code>였다).</p>
+<hr>
+<h2 id="8-hwlat과-hwnoise-os-밖-에서-사라진-시간을-찾는다">8. hwlat과 hwnoise — "OS 밖"에서 사라진 시간을 찾는다<a class="anchor" href="#8-hwlat과-hwnoise-os-밖-에서-사라진-시간을-찾는다" aria-label="link">#</a></h2>
+<h3 id="8-1-직관">8.1 직관<a class="anchor" href="#8-1-직관" aria-label="link">#</a></h3>
+<p>IRQ를 끄고 시계만 계속 읽는 루프를 생각하자. OS는 이 루프를 방해할 방법이 없다(IRQ off, 선점 불가). 그런데도 연속된 두 읽기 사이가 10 µs 벌어졌다면? CPU가 그 사이 <strong>OS가 모르는 일</strong>을 한 것이다. x86의 고전적 범인은 SMI(BIOS가 System Management Mode로 CPU를 빼앗음)이고, arm64에서는 EL3의 secure monitor(TF-A BL31이 SMC·PSCI·SCMI·RAS 처리), EL2 하이퍼바이저, 그리고 가상 머신이라면 호스트 스케줄러다. Don의 경험으로 말하면 "디버거가 halt를 건 시간"이나 "SSD 컨트롤러에서 다른 코어가 버스를 잡아 내 코어가 stall된 시간"을 소프트웨어만으로 찾아내는 방법이다.</p>
+<div class="tw"><table><thead><tr><th>도구</th><th>방식</th><th>출력</th></tr></thead><tbody><tr><td><code>hwlat</code> tracer</td><td><code>window</code>(기본 1 s)마다 <code>width</code>(기본 0.5 s) 동안 IRQ off로 <code>trace_clock_local()</code> 연속 읽기. CPU를 돌아가며(round-robin)</td><td>창마다 최대 간격: inner(두 연속 읽기 사이)/outer(루프 반복 사이), 초과 횟수 count</td></tr><tr><td><code>rtla hwnoise</code></td><td>osnoise를 IRQ off로 돌림(IRQ·softirq·thread 소음이 원천 차단됨)</td><td>CPU별 남은 노이즈 = HW 노이즈, 가용률 %</td></tr></tbody></table></div>
+<h3 id="8-2-예제-12-hwlat-tracer를-tracefs로-직접-실시간-tcg">8.2 예제 12 — hwlat tracer를 tracefs로 직접 (실시간 TCG)<a class="anchor" href="#8-2-예제-12-hwlat-tracer를-tracefs로-직접-실시간-tcg" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>T=/sys/kernel/tracing
+echo 10 &gt; $T/tracing_thresh            # us
+echo hwlat &gt; $T/current_tracer
+grep . $T/hwlat_detector/width $T/hwlat_detector/window $T/hwlat_detector/mode
+sleep 30; echo 0 &gt; $T/tracing_on
+cat $T/trace</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>/sys/kernel/tracing/hwlat_detector/width:500000
+/sys/kernel/tracing/hwlat_detector/window:1000000
+/sys/kernel/tracing/hwlat_detector/mode:none [round-robin] per-cpu
+# tracer: hwlat
+#
+# entries-in-buffer/entries-written: 30/30   #P:2
+...
+           &lt;...&gt;-383     [001] dn...  1106.401782: #1     inner/outer(us):  703/1702  ts:1792313350.520562352 count:1631
+           &lt;...&gt;-383     [000] d....  1107.425285: #2     inner/outer(us): 5499/7059  ts:1792313351.544254304 count:307
+           &lt;...&gt;-383     [001] d....  1108.450574: #3     inner/outer(us):  101/694   ts:1792313352.569479296 count:217
+           &lt;...&gt;-383     [000] d....  1109.474081: #4     inner/outer(us): 1565/2516  ts:1792313353.594244992 count:384
+           &lt;...&gt;-383     [001] d....  1110.497114: #5     inner/outer(us):   44/30    ts:1792313354.616247616 count:142
+           &lt;...&gt;-383     [000] d....  1111.521709: #6     inner/outer(us):   66/35    ts:1792313355.640923200 count:180
+...
+           &lt;...&gt;-383     [000] d....  1117.667590: #12    inner/outer(us): 23802/2366  ts:1792313361.787478064 count:1287
+...
+           &lt;...&gt;-383     [000] d....  1121.761270: #16    inner/outer(us): 4310/1492  ts:1792313365.880248112 count:166</code></pre></figure>
+<p>(30개 중 일부. 헤더 주석 줄 일부 생략.) 출력에서 볼 것:</p>
+<ul><li><strong>30초에 30개 샘플</strong> — 1초 창마다 빠짐없이 임계값(10 µs)을 넘었다. 실제 보드에서 정상이라면 이 트레이스는 거의 비어 있어야 한다.</li><li><code>[001]</code>, <code>[000]</code>이 번갈아 나온다 — round-robin 모드로 CPU를 옮겨 다닌다.</li><li>최대 23802 µs = <strong>IRQ를 끈 CPU에서 24 ms가 사라졌다.</strong> 게스트 OS는 그 순간 아무것도 하지 않았다. QEMU의 vCPU 스레드가 호스트에서 실행되지 못했거나(다른 작성자들의 QEMU·빌드와 경쟁), TCG가 번역·I/O 처리로 vCPU 실행을 멈춘 시간이다. <code>count:1631</code>은 0.5초 창 안에서 10 µs 초과 간격이 1631번 있었다는 뜻이다.</li><li>이 숫자는 7.5절에서 auto-analysis가 "idle 중 IRQ가 8.7 ms 늦었는데 OS 안에 범인 없음"이라고 한 것을 정확히 설명한다. 4.2절 cyclictest의 max(22 ms)와 크기도 같다. <strong>즉 이 게스트에서 cyclictest max를 결정한 것은 커널이 아니라 에뮬레이터·호스트다.</strong></li></ul>
+<h3 id="8-3-예제-13-rtla-hwnoise">8.3 예제 13 — <code>rtla hwnoise</code><a class="anchor" href="#8-3-예제-13-rtla-hwnoise" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>rtla hwnoise -d 20 -q</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>                                          Hardware-related Noise                                   
+duration:   0 00:00:20 | time is in us
+CPU Period       Runtime        Noise  % CPU Aval   Max Noise   Max Single          HW          NMI
+  0 #19         14250011      4707156    66.96735      336020        23625     2919368            0 
+  1 #20         15000003      4783160    68.11227      307692        21361     2964471            0 </code></pre></figure>
+<p>출력에서 볼 것: 열은 주기 수(<code>#19</code>), 실행 시간 합, 노이즈 합, CPU 가용률, 한 주기 최대 노이즈, 단일 최대 노이즈, HW 노이즈 횟수, NMI 횟수다. IRQ를 끈 상태에서 <strong>실행 시간의 약 33%가 사라졌다</strong>(가용률 67~68%). 단일 최대 23.6 ms는 hwlat의 23.8 ms와 일치한다. 실행 시간이 14.25초인 것은 hwnoise가 기본으로 주기의 75%만 IRQ off로 돌기 때문으로 보인다(19주기 × 0.75 s ≈ 14.25 s). 실제 arm64 보드라면 가용률은 99.99% 이상이어야 하고, 그렇지 않으면 TF-A(EL3) 쪽 호출 빈도·길이를 펌웨어 팀과 확인한다.</p>
+<blockquote><p>hwlat/hwnoise는 <strong>측정하는 동안 CPU를 IRQ off로 오래 붙잡는다.</strong> 제품이 돌고 있는 시스템에서 켜면 그 자체가 지연원이 된다. 양산 전 검증이나 격리된 CPU에서만 쓴다.</p></blockquote>
+<hr>
+<h2 id="9-스파이크의-원인-추적-넓게-재고-좁혀서-잡는다">9. 스파이크의 원인 추적 — 넓게 재고, 좁혀서 잡는다<a class="anchor" href="#9-스파이크의-원인-추적-넓게-재고-좁혀서-잡는다" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 660 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="22" font-size="14">스파이크 원인 추적 순서 — 넓게 재고, 좁혀서 잡는다</text>
+<rect x="20" y="40" width="300" height="50" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="30" y="60" font-size="13">1. cyclictest -h 부하+장시간</text>
+<text x="30" y="80" font-size="12">분포·p99.9·max 확보 — "문제가 있다"</text>
+<rect x="20" y="110" width="300" height="50" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="30" y="130" font-size="13">2. rtla timerlat top/hist</text>
+<text x="30" y="150" font-size="12">IRQ 단계냐 thread 단계냐 가른다</text>
+<rect x="20" y="180" width="300" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="30" y="200" font-size="13">3. rtla timerlat top -a 임계값</text>
+<text x="30" y="220" font-size="12">첫 스파이크에서 멈춤 + auto-analysis</text>
+<rect x="20" y="250" width="300" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="30" y="270" font-size="13">4. 남은 의심 → 전용 트레이서</text>
+<text x="30" y="290" font-size="12">osnoise -s, cyclictest -b, irqsoff(M5)</text>
+<rect x="20" y="320" width="300" height="50" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="30" y="340" font-size="13">5. 고치고 1번을 같은 조건으로 재측정</text>
+<text x="30" y="360" font-size="12">전/후 히스토그램을 한 그림에</text>
+<line x1="170" y1="90" x2="170" y2="108" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="170" y1="160" x2="170" y2="178" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="170" y1="230" x2="170" y2="248" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="170" y1="300" x2="170" y2="318" stroke="currentColor" marker-end="url(#ah6)"/>
+<rect x="350" y="110" width="290" height="120" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="362" y="132" font-size="13">auto-analysis가 말해 주는 것</text>
+<text x="362" y="156" font-size="12">IRQ handler delay 큼 → IRQ off 구간</text>
+<text x="362" y="176" font-size="12">(exit from idle) → idle 탈출 비용</text>
+<text x="362" y="196" font-size="12">Blocking thread: 이름 + 스택</text>
+<text x="362" y="216" font-size="12">IRQ/Softirq interference: 누가 끼었나</text>
+<rect x="350" y="250" width="290" height="70" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="362" y="272" font-size="13">트레이스에 아무것도 없으면?</text>
+<text x="362" y="292" font-size="12">OS 밖 → hwlat/hwnoise로 확인</text>
+<text x="362" y="310" font-size="12">(SMI, EL3 펌웨어, 하이퍼바이저)</text>
+</svg></figure>
+<p>그림 7 — 지연 스파이크 원인 추적 워크플로. 1~2단계는 트레이싱을 끈 "측정", 3~4단계는 트레이싱을 켠 "분석"이다. 분석 단계의 숫자는 트레이싱 오버헤드가 섞이므로 보고용 숫자로 쓰지 않는다.</p>
+<p>timerlat <code>--auto</code>(7.4절)가 대부분의 경우 3단계에서 끝내 준다. 하지만 "내 제품 스레드(cyclictest 같은 유저 RT 스레드)가 늦은 바로 그 순간"의 전체 문맥을 보고 싶을 때는 cyclictest <code>-b</code>와 ftrace를 같이 쓴다.</p>
+<h3 id="9-1-예제-14-cyclictest-b-ftrace-이벤트로-스파이크-순간-잡기">9.1 예제 14 — cyclictest <code>-b</code> + ftrace 이벤트로 스파이크 순간 잡기<a class="anchor" href="#9-1-예제-14-cyclictest-b-ftrace-이벤트로-스파이크-순간-잡기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: sched·irq·timer 이벤트를 켠 상태에서 cyclictest를 CPU1에 하나 돌리고, 8 ms를 넘는 순간 트레이싱을 멈추게 한다. CPU1에는 n3_spike가 1초마다 10 ms IRQ off를 한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>T=/sys/kernel/tracing
+echo 0 &gt; $T/tracing_on; echo &gt; $T/trace; echo 8192 &gt; $T/buffer_size_kb
+for e in sched/sched_switch sched/sched_wakeup sched/sched_waking irq/irq_handler_entry \
+         irq/irq_handler_exit timer/hrtimer_expire_entry timer/hrtimer_expire_exit; do
+  echo 1 &gt; $T/events/$e/enable; done
+echo 1 &gt; $T/tracing_on
+insmod /root/n3/n3_spike-trace.ko cpu=1 us=10000 period_ms=1000 mode=0
+cyclictest -m -p 95 -a 1 -t 1 -i 1000 -q -D 30 -b 8000 --tracemark; echo "rc=$?"
+rmmod n3_spike; cat $T/trace &gt; trace.txt</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>INFO: debugfs mountpoint: /sys/kernel/debug/tracing/
+[ 1163.551552][  T402] NOTICE: Automounting of tracing to debugfs is deprecated and will be removed in 2030
+# /dev/cpu_dma_latency set to 0us
+T: 0 (  403) P:95 I:1000 C:    955 Min:     79 Act: 9724 Avg:  337 Max:    9724
+# Thread Ids: 00403
+# Break thread: 403
+# Break value: 9724
+rc=0
+[ 1164.639977][  T404] n3_spike: 2 spikes injected</code></pre></figure>
+<p>출력에서 볼 것: 955번째 주기에서 9724 µs가 나와 멈췄다(<code>Break value</code>). n3_spike는 그동안 2번 실행됐다 — 두 번째 스파이크에서 잡혔다. cyclictest는 아직 옛 경로 <code>/sys/kernel/debug/tracing</code>을 쓰고, 그 때문에 커널이 "debugfs 아래 tracing 자동 마운트는 deprecated"라고 경고했다. 보드의 cyclictest가 오래된 버전이면 tracefs 마운트 위치를 확인할 것.</p>
+<p>트레이스 끝부분(CPU1 위주로 발췌, 긴 줄은 잘랐다):</p>
+<figure class="code"><span class="lang">text</span><pre><code>&lt;idle&gt;-0       [001] d.s3.  1164.523660: sched_waking: comm=n3_spike/1 pid=401 prio=120 target_cpu=001
+&lt;idle&gt;-0       [001] d..2.  1164.523753: sched_switch: prev_comm=swapper/1 ... ==&gt; next_comm=n3_spike/1 next_pid=401
+n3_spike/1-401 [001] d.h..  1164.523854: irq_handler_entry: irq=11 name=arch_timer
+n3_spike/1-401 [001] d.h..  1164.523859: hrtimer_expire_entry: ... function=hrtimer_wakeup now=1164448344848
+n3_spike/1-401 [001] dNh3.  1164.523870: sched_wakeup: comm=cyclictest pid=403 prio=4 target_cpu=001
+n3_spike/1-401 [001] d..2.  1164.523908: sched_switch: prev_comm=n3_spike/1 ... ==&gt; next_comm=cyclictest next_pid=403
+cyclictest-403 [001] d..2.  1164.524005: sched_switch: prev_comm=cyclictest ... prev_state=S ==&gt; next_comm=n3_spike/1
+n3_spike/1-401 [001] d.h..  1164.534126: irq_handler_entry: irq=11 name=arch_timer
+n3_spike/1-401 [001] d.h..  1164.534139: hrtimer_expire_entry: ... function=hrtimer_wakeup now=1164458621664
+n3_spike/1-401 [001] dNh..  1164.534191: hrtimer_expire_entry: hrtimer=0000000067357890 function=hrtimer_wakeup ...
+n3_spike/1-401 [001] dNh3.  1164.534201: sched_wakeup: comm=cyclictest pid=403 prio=4 target_cpu=001
+n3_spike/1-401 [001] dNh..  1164.534206: hrtimer_expire_entry: ... function=tick_nohz_handler ...
+n3_spike/1-401 [001] dNh..  1164.534370: irq_handler_exit: irq=11 ret=handled
+n3_spike/1-401 [001] d..2.  1164.534505: sched_switch: prev_comm=n3_spike/1 ... ==&gt; next_comm=cyclictest next_pid=403
+cyclictest-403 [001] ...1.  1164.535030: tracing_mark_write: hit latency threshold (9724 &gt; 8000)</code></pre></figure>
+<p>읽는 법(타임라인으로):</p>
+<ol><li>523.753 ms: softirq(<code>d.s3.</code>, 타이머 softirq)가 msleep에서 깬 <code>n3_spike/1</code>이 CPU1에 올라온다.</li><li>523.854 ms: n3_spike가 아직 IRQ를 끄기 전, 타이머 IRQ가 들어와 cyclictest(prio 4로 보이는 것은 커널 내부 prio 값 = 99−95)를 깨우고, cyclictest가 한 주기를 처리한 뒤 524.005 ms에 다시 잔다(<code>prev_state=S</code>). CPU는 n3_spike에게 돌아간다.</li><li>524.005 ms ~ 534.126 ms: <strong>CPU1에 이벤트가 하나도 없다.</strong> 그 사이 cyclictest의 다음 만료(약 524.9 ms)가 있었는데 IRQ가 안 들어왔다. n3_spike가 <code>local_irq_save()</code> 후 10 ms <code>udelay</code>를 도는 구간이다. IRQ off 구간 안에서는 어떤 이벤트도 발생할 수 없으므로 "빈 구간" 자체가 증거다.</li><li>534.126 ms: IRQ가 풀리자마자 밀려 있던 타이머 IRQ가 n3_spike 문맥에서 처리된다. 한 번의 IRQ에서 <strong>hrtimer 세 개</strong>(cyclictest 메인 스레드 pid 402, 측정 스레드 403, tick)가 한꺼번에 만료된다 — 늦은 IRQ는 쌓였던 일을 한꺼번에 처리하므로 IRQ 처리 자체도 길어진다(534.126 → 534.370, 약 240 µs).</li><li>534.505 ms: cyclictest로 전환, 535.030 ms에 임계값 초과를 확인하고 trace marker를 쓴 뒤 트레이싱을 멈췄다.</li></ol>
+<p>이벤트 트레이스는 "IRQ off 구간 안"을 보여 주지 못한다. <strong>누가</strong> IRQ를 껐는지 함수 단위로 보려면 M5의 <code>irqsoff</code> tracer(Image-trace에 있음, Image-rt에는 없음)나 timerlat <code>-a</code>의 IRQ 스택(7.4절, <code>n3_burn</code>이 찍힘)을 쓴다. 9.1의 방식이 강한 곳은 "스파이크 전후 수 ms 동안 시스템 전체에서 무슨 일이 있었나"라는 문맥이다.</p>
+<h3 id="9-2-osnoise로-잡기-s-단일-노이즈-임계값-t-트레이스-저장">9.2 osnoise로 잡기 — <code>-s</code>(단일 노이즈 임계값) + <code>-t</code>(트레이스 저장)<a class="anchor" href="#9-2-osnoise로-잡기-s-단일-노이즈-임계값-t-트레이스-저장" aria-label="link">#</a></h3>
+<p>워크로드가 주기적 스레드가 아니라 "계속 도는 바쁜 루프"(폴링 드라이버, DPDK, 추론 루프)라면 같은 일을 osnoise로 한다. <code>rtla osnoise top -s 5000 -T 50 -t</code>는 단일 노이즈가 5000 µs를 넘으면 멈추고 트레이스를 <code>osnoise_trace.txt</code>로 저장한다. 실행 결과는 6.4절에 있다.</p>
+<hr>
+<h2 id="10-커널-설정을-공정하게-비교하기">10. 커널·설정을 공정하게 비교하기<a class="anchor" href="#10-커널-설정을-공정하게-비교하기" aria-label="link">#</a></h2>
+<h3 id="10-1-규칙">10.1 규칙<a class="anchor" href="#10-1-규칙" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>같게 맞출 것</th><th>이유</th></tr></thead><tbody><tr><td>하드웨어(가능하면 같은 개체), 펌웨어(TF-A, U-Boot) 버전</td><td>개체 차이·펌웨어 SMC 경로가 OS 밖 소음을 바꾼다</td></tr><tr><td>부하 스크립트·시작 순서</td><td>부하가 다르면 비교가 아니다</td></tr><tr><td>측정 시간·주기·우선순위·CPU 배치</td><td>max는 시간에 따라 자란다(5절)</td></tr><tr><td>부트 인자(<code>isolcpus</code>, <code>nohz_full</code>, <code>irqaffinity</code>, cpuidle), cpufreq governor/고정 주파수</td><td>튜닝 차이를 커널 차이로 착각하지 않게</td></tr><tr><td>온도·전원(배터리/어댑터)</td><td>thermal throttling</td></tr><tr><td>도구 버전(rt-tests, rtla)</td><td>측정 방식·기본값이 바뀐다</td></tr></tbody></table></div>
+<p>그리고 <strong>한 번씩이 아니라 번갈아 여러 번</strong>(A-B-A-B) 돌린다. 측정 환경 자체가 얼마나 흔들리는지를 같이 재야 차이가 "진짜"인지 알 수 있다.</p>
+<h3 id="10-2-예제-15-image-trace-vs-image-rt-그리고-같은-커널의-재측정">10.2 예제 15 — Image-trace vs Image-rt, 그리고 같은 커널의 재측정<a class="anchor" href="#10-2-예제-15-image-trace-vs-image-rt-그리고-같은-커널의-재측정" aria-label="link">#</a></h3>
+<p>호스트가 비교적 조용한 같은 시간대(load average 2~4)에 Image-trace → Image-rt → Image-trace 순으로, 같은 스크립트(4.1절 명령, 60초, 두 CPU 합산)로 돌렸다. 아래 숫자는 모두 4.2의 스크립트 출력에서 <code>all</code> 줄만 모은 것이다(단위 µs).</p>
+<div class="tw"><table><thead><tr><th>실행</th><th>상태</th><th>n</th><th>p50</th><th>p99</th><th>p99.9</th><th>p99.99</th><th>max</th><th>over</th></tr></thead><tbody><tr><td>① trace (01:31)</td><td>idle</td><td>118834</td><td>270</td><td>581</td><td>3559</td><td>14940</td><td>22509</td><td>5</td></tr><tr><td>① trace</td><td>loaded</td><td>116018</td><td>471</td><td>820</td><td>5414</td><td>&gt;20000</td><td>26670</td><td>13</td></tr><tr><td>② rt (01:56)</td><td>idle</td><td>117640</td><td>262</td><td>804</td><td>4735</td><td>19759</td><td>24134</td><td>11</td></tr><tr><td>② rt</td><td>loaded</td><td>117509</td><td>342</td><td>759</td><td>5329</td><td>&gt;20000</td><td>33879</td><td>15</td></tr><tr><td>③ trace 재측정 (02:26)</td><td>idle</td><td>118003</td><td>478</td><td>966</td><td>3233</td><td>13936</td><td>27166</td><td>3</td></tr><tr><td>③ trace 재측정</td><td>loaded</td><td>117720</td><td>297</td><td>490</td><td>3630</td><td>15288</td><td>28885</td><td>5</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 660 340" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="14">cyclictest 60 s — Image-trace vs Image-rt (실시간 TCG)</text>
+<line x1="60" y1="280" x2="590" y2="280" stroke="currentColor"/>
+<line x1="60" y1="56" x2="60" y2="280" stroke="currentColor"/>
+<line x1="60.0" y1="280" x2="60.0" y2="284" stroke="currentColor"/>
+<text x="60.0" y="298" font-size="12" text-anchor="middle">10us</text>
+<line x1="192.5" y1="280" x2="192.5" y2="284" stroke="currentColor"/>
+<text x="192.5" y="298" font-size="12" text-anchor="middle">100us</text>
+<line x1="325.0" y1="280" x2="325.0" y2="284" stroke="currentColor"/>
+<text x="325.0" y="298" font-size="12" text-anchor="middle">1ms</text>
+<line x1="457.5" y1="280" x2="457.5" y2="284" stroke="currentColor"/>
+<text x="457.5" y="298" font-size="12" text-anchor="middle">10ms</text>
+<line x1="590.0" y1="280" x2="590.0" y2="284" stroke="currentColor"/>
+<text x="590.0" y="298" font-size="12" text-anchor="middle">100ms</text>
+<line x1="56" y1="262.8" x2="60" y2="262.8" stroke="currentColor"/>
+<text x="52" y="266.8" font-size="12" text-anchor="end">1e0</text>
+<line x1="56" y1="193.8" x2="60" y2="193.8" stroke="currentColor"/>
+<text x="52" y="197.8" font-size="12" text-anchor="end">1e2</text>
+<line x1="56" y1="124.9" x2="60" y2="124.9" stroke="currentColor"/>
+<text x="52" y="128.9" font-size="12" text-anchor="end">1e4</text>
+<line x1="56" y1="56.0" x2="60" y2="56.0" stroke="currentColor"/>
+<text x="52" y="60.0" font-size="12" text-anchor="end">1e6</text>
+<text x="325.0" y="316" font-size="12" text-anchor="middle">latency (log)</text>
+<text x="14" y="44" font-size="12">count (log)</text>
+<polyline points="60.0,280.0 73.3,280.0 73.3,280.0 86.5,280.0 86.5,280.0 99.8,280.0 99.8,280.0 113.0,280.0 113.0,280.0 126.2,280.0 126.2,280.0 139.5,280.0 139.5,215.8 152.8,215.8 152.8,209.1 166.0,209.1 166.0,191.4 179.2,191.4 179.2,172.9 192.5,172.9 192.5,144.8 205.8,144.8 205.8,135.0 219.0,135.0 219.0,104.1 232.2,104.1 232.2,125.8 245.5,125.8 245.5,132.5 258.8,132.5 258.8,103.5 272.0,103.5 272.0,123.3 285.2,123.3 285.2,159.9 298.5,159.9 298.5,169.1 311.8,169.1 311.8,188.1 325.0,188.1 325.0,206.5 338.2,206.5 338.2,214.6 351.5,214.6 351.5,221.3 364.8,221.3 364.8,217.9 378.0,217.9 378.0,214.6 391.2,214.6 391.2,213.4 404.5,213.4 404.5,210.0 417.8,210.0 417.8,217.9 431.0,217.9 431.0,233.6 444.2,233.6 444.2,238.7 457.5,238.7 457.5,221.3 470.7,221.3 470.7,223.3 484.0,223.3 484.0,242.0 497.2,242.0 497.2,280.0 510.5,280.0 510.5,280.0 523.8,280.0 523.8,280.0 537.0,280.0 537.0,280.0 550.2,280.0 550.2,280.0 563.5,280.0 563.5,280.0 576.8,280.0 576.8,280.0 590.0,280.0" fill="none" stroke="#4a7bd0" stroke-width="1.6"/>
+<rect x="602" y="238.7" width="10" height="41.3" fill="#4a7bd0" fill-opacity="0.5" stroke="#4a7bd0"/>
+<line x1="504.2" y1="56" x2="504.2" y2="280" stroke="#4a7bd0" stroke-dasharray="3 3"/>
+<line x1="340" y1="58.0" x2="360" y2="58.0" stroke="#4a7bd0" stroke-width="2"/>
+<text x="366" y="62.0" font-size="12">trace idle (max 22.5ms)</text>
+<polyline points="60.0,280.0 73.3,280.0 73.3,280.0 86.5,280.0 86.5,280.0 99.8,280.0 99.8,280.0 113.0,280.0 113.0,280.0 126.2,280.0 126.2,280.0 139.5,280.0 139.5,280.0 152.8,280.0 152.8,262.8 166.0,262.8 166.0,252.4 179.2,252.4 179.2,207.2 192.5,207.2 192.5,197.4 205.8,197.4 205.8,180.2 219.0,180.2 219.0,170.6 232.2,170.6 232.2,153.3 245.5,153.3 245.5,133.2 258.8,133.2 258.8,115.3 272.0,115.3 272.0,103.1 285.2,103.1 285.2,108.6 298.5,108.6 298.5,119.3 311.8,119.3 311.8,159.9 325.0,159.9 325.0,192.0 338.2,192.0 338.2,199.2 351.5,199.2 351.5,204.2 364.8,204.2 364.8,213.4 378.0,213.4 378.0,205.8 391.2,205.8 391.2,217.9 404.5,217.9 404.5,204.5 417.8,204.5 417.8,213.4 431.0,213.4 431.0,217.2 444.2,217.2 444.2,219.5 457.5,219.5 457.5,219.5 470.7,219.5 470.7,217.2 484.0,217.2 484.0,225.6 497.2,225.6 497.2,280.0 510.5,280.0 510.5,280.0 523.8,280.0 523.8,280.0 537.0,280.0 537.0,280.0 550.2,280.0 550.2,280.0 563.5,280.0 563.5,280.0 576.8,280.0 576.8,280.0 590.0,280.0" fill="none" stroke="#e08a3c" stroke-width="1.6"/>
+<rect x="616" y="224.4" width="10" height="55.6" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/>
+<line x1="513.9" y1="56" x2="513.9" y2="280" stroke="#e08a3c" stroke-dasharray="3 3"/>
+<line x1="340" y1="76.0" x2="360" y2="76.0" stroke="#e08a3c" stroke-width="2"/>
+<text x="366" y="80.0" font-size="12">trace loaded (max 26.7ms)</text>
+<polyline points="60.0,280.0 73.3,280.0 73.3,280.0 86.5,280.0 86.5,280.0 99.8,280.0 99.8,280.0 113.0,280.0 113.0,280.0 126.2,280.0 126.2,206.8 139.5,206.8 139.5,190.5 152.8,190.5 152.8,182.2 166.0,182.2 166.0,170.5 179.2,170.5 179.2,160.5 192.5,160.5 192.5,150.9 205.8,150.9 205.8,129.5 219.0,129.5 219.0,118.7 232.2,118.7 232.2,110.5 245.5,110.5 245.5,103.6 258.8,103.6 258.8,115.9 272.0,115.9 272.0,143.4 285.2,143.4 285.2,162.9 298.5,162.9 298.5,168.0 311.8,168.0 311.8,175.8 325.0,175.8 325.0,184.9 338.2,184.9 338.2,190.3 351.5,190.3 351.5,192.2 364.8,192.2 364.8,192.0 378.0,192.0 378.0,190.2 391.2,190.2 391.2,206.8 404.5,206.8 404.5,205.1 417.8,205.1 417.8,210.4 431.0,210.4 431.0,221.3 444.2,221.3 444.2,228.3 457.5,228.3 457.5,221.3 470.7,221.3 470.7,222.2 484.0,222.2 484.0,229.9 497.2,229.9 497.2,280.0 510.5,280.0 510.5,280.0 523.8,280.0 523.8,280.0 537.0,280.0 537.0,280.0 550.2,280.0 550.2,280.0 563.5,280.0 563.5,280.0 576.8,280.0 576.8,280.0 590.0,280.0" fill="none" stroke="#3f9a6b" stroke-width="1.6"/>
+<rect x="630" y="226.9" width="10" height="53.1" fill="#3f9a6b" fill-opacity="0.5" stroke="#3f9a6b"/>
+<line x1="508.2" y1="56" x2="508.2" y2="280" stroke="#3f9a6b" stroke-dasharray="3 3"/>
+<line x1="340" y1="94.0" x2="360" y2="94.0" stroke="#3f9a6b" stroke-width="2"/>
+<text x="366" y="98.0" font-size="12">rt idle (max 24.1ms)</text>
+<polyline points="60.0,280.0 73.3,280.0 73.3,280.0 86.5,280.0 86.5,280.0 99.8,280.0 99.8,280.0 113.0,280.0 113.0,280.0 126.2,280.0 126.2,280.0 139.5,280.0 139.5,280.0 152.8,280.0 152.8,246.3 166.0,246.3 166.0,231.6 179.2,231.6 179.2,186.4 192.5,186.4 192.5,158.3 205.8,158.3 205.8,142.2 219.0,142.2 219.0,143.3 232.2,143.3 232.2,121.2 245.5,121.2 245.5,109.5 258.8,109.5 258.8,109.3 272.0,109.3 272.0,120.8 285.2,120.8 285.2,112.6 298.5,112.6 298.5,138.9 311.8,138.9 311.8,175.6 325.0,175.6 325.0,188.8 338.2,188.8 338.2,188.6 351.5,188.6 351.5,194.8 364.8,194.8 364.8,199.6 378.0,199.6 378.0,209.1 391.2,209.1 391.2,208.7 404.5,208.7 404.5,203.6 417.8,203.6 417.8,207.9 431.0,207.9 431.0,217.9 444.2,217.9 444.2,220.4 457.5,220.4 457.5,238.7 470.7,238.7 470.7,222.2 484.0,222.2 484.0,221.3 497.2,221.3 497.2,280.0 510.5,280.0 510.5,280.0 523.8,280.0 523.8,280.0 537.0,280.0 537.0,280.0 550.2,280.0 550.2,280.0 563.5,280.0 563.5,280.0 576.8,280.0 576.8,280.0 590.0,280.0" fill="none" stroke="#d0564a" stroke-width="1.6"/>
+<rect x="644" y="222.2" width="10" height="57.8" fill="#d0564a" fill-opacity="0.5" stroke="#d0564a"/>
+<line x1="527.7" y1="56" x2="527.7" y2="280" stroke="#d0564a" stroke-dasharray="3 3"/>
+<line x1="340" y1="112.0" x2="360" y2="112.0" stroke="#d0564a" stroke-width="2"/>
+<text x="366" y="116.0" font-size="12">rt loaded (max 33.9ms)</text>
+<text x="598" y="316" font-size="12">&gt;20ms</text>
+</svg></figure>
+<p>그림 8 — ①(trace)과 ②(rt)의 히스토그램을 같은 축에 겹쳐 그렸다. 몸통의 위치는 조금씩 다르지만, 1 ms 이상의 꼬리와 20 ms 근처 max는 네 곡선이 거의 같다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li>②의 rt loaded p50(342)이 ①의 trace loaded p50(471)보다 낮다. 여기서 멈추면 "RT가 부하 아래 몸통을 줄였다"고 말하고 싶어진다.</li><li>그런데 <strong>③ 같은 trace 커널을 다시 재니 loaded p50이 297</strong>로, rt보다 더 낮게 나왔다. idle p50은 반대로 270 → 478로 올랐다. 같은 커널, 같은 스크립트인데 실행 간 차이가 커널 간 차이보다 크다.</li><li>max는 22~34 ms로 모두 비슷하다 — 8절에서 본 호스트의 vCPU 정지(최대 약 24 ms)가 상한을 정한다. PREEMPT_RT는 OS 안의 비선점 구간을 줄이는 기술이지, OS 밖 정지를 줄이지 못한다.</li><li><strong>결론: 이 환경에서는 두 커널의 차이를 주장할 수 없다.</strong> 이것이 공정 비교의 핵심이다 — 측정 환경의 흔들림(③ − ①)을 먼저 재고, 커널 차이(② − ①)가 그보다 확실히 클 때만 차이를 말한다. 실제 보드에서라면 PREEMPT_RT의 효과(max가 ms → 수십 µs)가 이 흔들림보다 훨씬 커서 분명하게 보인다(N1).</li></ul>
+<hr>
+<h2 id="11-설계-리뷰용-보고-한-장으로-말하기">11. 설계 리뷰용 보고 — 한 장으로 말하기<a class="anchor" href="#11-설계-리뷰용-보고-한-장으로-말하기" aria-label="link">#</a></h2>
+<h3 id="11-1-무엇을-반드시-넣나">11.1 무엇을 반드시 넣나<a class="anchor" href="#11-1-무엇을-반드시-넣나" aria-label="link">#</a></h3>
+<p>리뷰어가 숫자를 믿으려면 "재현 가능한 조건"과 "분포"가 있어야 한다. Don이 SSD QoS 리포트에 preconditioning 상태, QD, 측정 시간을 적었던 것과 같다.</p>
+<ol><li>목적과 요구사항: "1 kHz 제어 루프, 스레드 깨어남 지연 p99.99 ≤ 100 µs, max ≤ 200 µs"</li><li>조건: HW·펌웨어·커널(config 해시)·부트 인자·도구 버전·부하·시간·온도</li><li>결과 표: p50/p99/p99.9/p99.99/max/overflow/n, CPU별</li><li>히스토그램: 로그 y축, 비교 대상은 같은 축에 겹쳐서</li><li>최악값 분석: timerlat auto-analysis 요약(IRQ인가 thread인가, 범인 함수)</li><li>한계: 측정 시간, 측정 방식(자체 측정인지 GPIO+scope인지), 알려진 소음</li><li>결론과 다음 행동</li></ol>
+<h3 id="11-2-템플릿-이-노트의-실험으로-채운-예">11.2 템플릿 (이 노트의 실험으로 채운 예)<a class="anchor" href="#11-2-템플릿-이-노트의-실험으로-채운-예" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>Latency Report — N3 lab, 2026-10-18
+Requirement : (lab exercise) periodic wakeup latency of a SCHED_FIFO 95 thread, 1 kHz
+Hardware    : QEMU 'virt' TCG (cortex-a57 model), -smp 2, -m 1G, inside Lima VM on Apple M2
+              host load average 2-4 during runs (shared with 16 other jobs)  &lt;-- dominant noise
+Kernels     : 6.18.55-trace (PREEMPT, HZ=250)  vs  6.18.55-rt (PREEMPT_RT, HZ=1000)
+Boot args   : none for isolation (no isolcpus/nohz_full), init=/root/n3/init.sh (no systemd)
+Tools       : cyclictest 2.50 (-m -S -p 95 -i 1000 -h 20000 -q -D 60), rtla 6.18.55
+Load        : stress-ng --cpu 2 --vm 1 --io 1 --hdd 1 + hackbench -g 2 -P
+Duration    : 60 s per run (too short for release; see max-vs-duration test)
+Results (us, both CPUs merged):
+  run              p50   p99  p99.9  p99.99    max   n
+  trace loaded #1  471   820   5414  &gt;20000  26670  116018
+  rt    loaded     342   759   5329  &gt;20000  33879  117509
+  trace loaded #2  297   490   3630   15288  28885  117720
+Worst case  : hwlat/hwnoise show 20-24 ms gaps with IRQs off -&gt; outside the guest OS
+Conclusion  : run-to-run variance &gt; kernel difference; no claim possible on this platform.
+Next        : repeat on target HW (i.MX8/AM62) for 24 h, add GPIO+scope cross-check (M11)</code></pre></figure>
+<p>영문으로 쓴 이유: 실제 리뷰 문서는 대부분 영어다. 이 템플릿을 그대로 채우면 면접에서 "어떻게 측정하고 보고했나"에 대한 답이 된다.</p>
+<hr>
+<h2 id="12-커널-안에서는-무슨-일이-일어나나">12. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#12-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<h3 id="12-1-cyclictest의-한-샘플이-지나가는-길">12.1 cyclictest의 한 샘플이 지나가는 길<a class="anchor" href="#12-1-cyclictest의-한-샘플이-지나가는-길" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>user  : clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &amp;next)
+kernel: __arm64_sys_clock_nanosleep -&gt; common_nsleep -&gt; hrtimer_nanosleep
+        -&gt; do_nanosleep: hrtimer_sleeper 시작, set_current_state(TASK_INTERRUPTIBLE), schedule()
+  ...   (CPU runs something else, or idles)
+HW    : CNTV 비교값 도달 -&gt; arch timer PPI(IRQ 11 on QEMU virt) -&gt; GIC
+kernel: el1_interrupt / el0_interrupt -&gt; gic_handle_irq -&gt; arch_timer_handler_virt
+        -&gt; hrtimer_interrupt -&gt; __hrtimer_run_queues -&gt; hrtimer_wakeup -&gt; wake_up_process
+        -&gt; (RT 태스크가 더 높으면) need_resched -&gt; IRQ 출구에서 preempt_schedule_irq / schedule
+        -&gt; __schedule -&gt; context_switch -&gt; cpu_switch_to
+user  : clock_nanosleep 리턴 -&gt; clock_gettime(vDSO, syscall 없이 CNTVCT 읽기) -&gt; now - next</code></pre></figure>
+<p>같은 경로가 timerlat의 auto-analysis 스택 트레이스(7.4절)에 그대로 찍혀 나온다: <code>arch_timer_handler_virt → hrtimer_interrupt → __hrtimer_run_queues → timerlat_irq</code>. F6(인터럽트 처리), F8(hrtimer), F1(스케줄러 §7 preemption)의 내용이 한 줄로 이어지는 지점이다. 드라이버를 쓸 때는 "내 ISR이 오래 IRQ를 끄면 ①이 늘고, 내 <code>spin_lock</code>·<code>preempt_disable</code> 구간이 길면 ③이 는다"로 다시 만난다.</p>
+<h3 id="12-2-osnoise-timerlat-tracer-kernel-trace-trace_osnoise-c">12.2 osnoise / timerlat tracer — <code>kernel/trace/trace_osnoise.c</code><a class="anchor" href="#12-2-osnoise-timerlat-tracer-kernel-trace-trace_osnoise-c" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 660 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="22" font-size="14">rtla timerlat 한 주기 — 유저 도구, tracefs, 커널 tracer</text>
+<rect x="20" y="40" width="200" height="60" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="30" y="62" font-size="13">rtla (유저)</text>
+<text x="30" y="82" font-size="12">설정 쓰기 + 결과 읽기</text>
+<rect x="250" y="40" width="390" height="60" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="260" y="62" font-size="13">/sys/kernel/tracing/osnoise/</text>
+<text x="260" y="82" font-size="12">timerlat_period_us, stop_tracing_us, print_stack, cpus</text>
+<rect x="20" y="140" width="200" height="60" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="30" y="162" font-size="13">timerlat_irq()</text>
+<text x="30" y="182" font-size="12">hrtimer 콜백, IRQ 문맥</text>
+<rect x="250" y="140" width="190" height="60" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="260" y="162" font-size="13">측정 스레드</text>
+<text x="260" y="182" font-size="12">timerlatu/N (유저)</text>
+<rect x="470" y="140" width="170" height="60" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="480" y="162" font-size="13">ring buffer</text>
+<text x="480" y="182" font-size="12">timerlat_sample</text>
+<line x1="220" y1="70" x2="246" y2="70" stroke="currentColor" marker-end="url(#ah9)"/>
+<line x1="220" y1="170" x2="246" y2="170" stroke="currentColor" marker-end="url(#ah9)"/>
+<line x1="120" y1="200" x2="120" y2="240" stroke="currentColor"/>
+<line x1="120" y1="240" x2="550" y2="240" stroke="currentColor"/>
+<line x1="550" y1="240" x2="550" y2="204" stroke="currentColor" marker-end="url(#ah9)"/>
+<line x1="345" y1="200" x2="345" y2="240" stroke="currentColor"/>
+<text x="130" y="258" font-size="12">context=0 (IRQ)</text>
+<text x="355" y="258" font-size="12">context=1, 2 (thread, ret user)</text>
+<line x1="550" y1="140" x2="550" y2="110" stroke="currentColor"/>
+<line x1="550" y1="110" x2="120" y2="110" stroke="currentColor"/>
+<line x1="120" y1="110" x2="120" y2="104" stroke="currentColor" marker-end="url(#ah9)"/>
+<text x="300" y="126" font-size="12">rtla가 읽어 통계·hist·auto-analysis</text>
+<text x="20" y="290" font-size="12">측정 스레드는 timerlat_fd를 read()하며 잠들고, timerlat_irq가 깨운다 (-k면 커널 스레드)</text>
+<text x="20" y="310" font-size="12">stop_tracing_us를 넘으면 커널이 트레이싱을 멈추고, 그 순간의 버퍼가 분석 대상이 된다</text>
+</svg></figure>
+<p>그림 9 — rtla timerlat의 구성. rtla는 tracefs 설정 파일을 쓰고, 커널의 hrtimer 콜백(<code>timerlat_irq</code>)이 IRQ latency를 기록한 뒤 측정 스레드를 깨우며, 스레드가 thread·ret-user latency를 기록한다. 결과는 링 버퍼를 거쳐 rtla가 읽는다.</p>
+<p>두 tracer는 한 파일에 산다(6.18.55 기준).</p>
+<div class="tw"><table><thead><tr><th>함수</th><th>역할</th></tr></thead><tbody><tr><td><code>osnoise_main()</code> → <code>run_osnoise()</code></td><td>CPU마다 kthread. <code>runtime</code> 동안 <code>time_get()</code>(= <code>trace_clock_local()</code>)을 연속으로 읽으며 두 읽기 사이 간격이 <code>tracing_thresh</code>(기본 1 µs)를 넘으면 noise로 친다</td></tr><tr><td><code>osnoise_trace_irq_entry()</code> 등 tracepoint 콜백</td><td>IRQ·softirq·NMI·thread 진입/퇴장 시각을 기록해 noise를 원인별로 분류(<code>irq_noise</code>, <code>softirq_noise</code>, <code>nmi_noise</code>, <code>thread_noise</code> 이벤트)</td></tr><tr><td><code>run_osnoise()</code>의 <code>hw_count</code></td><td>간격이 벌어졌는데 그 사이 IRQ·NMI 카운트가 하나도 늘지 않았다 → "HW noise" (OS가 본 적 없는 정지)</td></tr><tr><td><code>timerlat_irq()</code></td><td>hrtimer 콜백. <code>now - abs_period</code>를 IRQ latency로 기록(<code>context=0</code>)하고 측정 스레드를 깨운다</td></tr><tr><td><code>timerlat_main()</code></td><td>깨어난 스레드가 다시 시각을 읽어 thread latency(<code>context=1</code>) 기록, 다음 주기 hrtimer를 건다</td></tr><tr><td>사용자 스레드 모드(<code>-u</code>, rtla 6.x 기본)</td><td>rtla가 만든 유저 스레드가 <code>/sys/kernel/tracing/osnoise/per_cpu/cpuN/timerlat_fd</code>를 read하며 잔다. 유저로 돌아온 시각(<code>context=2</code>, "Ret user")까지 잰다</td></tr></tbody></table></div>
+<p>기본값: osnoise <code>period = runtime = 1 s</code>(<code>DEFAULT_SAMPLE_PERIOD/RUNTIME</code>), timerlat <code>period = 1000 µs</code>(<code>DEFAULT_TIMERLAT_PERIOD</code>). 설정 파일은 <code>/sys/kernel/tracing/osnoise/</code>(<code>period_us</code>, <code>runtime_us</code>, <code>stop_tracing_us</code>, <code>stop_tracing_total_us</code>, <code>timerlat_period_us</code>, <code>print_stack</code>, <code>cpus</code>, <code>options</code>)에 있다. rtla는 이 파일들을 써 주는 "자동 설정 + 통계 + 분석기"다 — tracefs를 손으로 만질 줄 알면 rtla 없는 보드에서도 같은 측정을 할 수 있다.</p>
+<h3 id="12-3-hwlat-kernel-trace-trace_hwlat-c">12.3 hwlat — <code>kernel/trace/trace_hwlat.c</code><a class="anchor" href="#12-3-hwlat-kernel-trace-trace_hwlat-c" aria-label="link">#</a></h3>
+<p><code>kthread_fn()</code>이 <code>window</code>(기본 1 s)마다 한 번, <code>local_irq_disable()</code> 후 <code>get_sample()</code>을 <code>width</code>(기본 0.5 s) 동안 돈다. <code>get_sample()</code>은 <code>trace_clock_local()</code>을 연속으로 두 번 읽어 그 차이(inner)와 루프 사이 차이(outer)를 보고, <code>tracing_thresh</code>(hwlat에서는 기본 10 µs)를 넘으면 샘플로 남긴다. IRQ를 껐으니 OS가 끼어들 수 없다. 그런데도 시간이 사라졌다면 <strong>OS 밖</strong>이다: x86에서는 SMI(System Management Interrupt), arm64에서는 EL3 secure monitor(TF-A의 SMC 처리, RAS 펌웨어 처리)나 EL2 하이퍼바이저, 그리고 가상 머신이라면 호스트 스케줄러. NMI는 OS가 볼 수 있으므로 <code>nmi-total</code>/<code>nmi-count</code>로 따로 표시해 준다(arm64에서는 pseudo-NMI를 켠 경우만 의미가 있다).</p>
+<h3 id="12-4-cyclictest-b가-하는-일">12.4 cyclictest <code>-b</code>가 하는 일<a class="anchor" href="#12-4-cyclictest-b가-하는-일" aria-label="link">#</a></h3>
+<p>rt-tests 2.x의 <code>-b USEC</code>는 지연이 USEC를 넘는 순간 <code>/sys/kernel/tracing/tracing_on</code>에 0을 쓰고(<code>--tracemark</code>면 그 직전 <code>trace_marker</code>에 "hit latency threshold" 문자열을 쓴다) 측정을 끝낸다. ftrace의 링 버퍼는 덮어쓰기 모드라, 멈춘 순간 버퍼에는 "스파이크 직전 수 ms~수 초"가 남는다. bare-metal에서 trace buffer를 순환 기록하다가 assert에서 트리거를 걸어 멈추는 것과 똑같다.</p>
+<hr>
+<h2 id="13-embedded-실무에서-다시-보기">13. Embedded 실무에서 다시 보기<a class="anchor" href="#13-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="13-1-장면-1-벤더가-max-20-µs라고-합니다">13.1 장면 1 — "벤더가 max 20 µs라고 합니다"<a class="anchor" href="#13-1-장면-1-벤더가-max-20-µs라고-합니다" aria-label="link">#</a></h3>
+<p>i.MX8M Plus BSP를 받았는데 벤더 문서에 "PREEMPT_RT, cyclictest max 20 µs"라고 적혀 있다. 확인 순서:</p>
+<ol><li>벤더에게 <strong>측정 조건 전체</strong>를 받는다: 커맨드라인, 측정 시간, 부하, 커널 config, 부트 인자(<code>isolcpus</code>, <code>nohz_full</code>, cpuidle 설정), 보드 리비전, CPU 주파수 고정 여부.</li><li>같은 조건으로 재현한다. 재현이 안 되면 거기서 멈추고 차이를 찾는다.</li><li><strong>우리 조건</strong>으로 다시 잰다: 제품 부하(카메라 스트리밍 + 추론 + 로깅 + 네트워크), 제품 cpuidle 설정(cyclictest가 <code>/dev/cpu_dma_latency</code>=0을 걸어 idle을 막는 효과를 빼려면 <code>--default-system</code> 또는 제품과 같은 PM QoS), 최소 수 시간~24시간.</li><li>최악값이 나오면 timerlat <code>--auto</code>로 원인을 잡는다. 벤더 숫자와 우리 숫자의 차이가 "어느 드라이버/기능을 켰기 때문인지"까지 말할 수 있으면 협상이 된다.</li></ol>
+<h3 id="13-2-장면-2-1-khz-모터-제어-루프의-회귀-테스트-ci">13.2 장면 2 — 1 kHz 모터 제어 루프의 회귀 테스트(CI)<a class="anchor" href="#13-2-장면-2-1-khz-모터-제어-루프의-회귀-테스트-ci" aria-label="link">#</a></h3>
+<p>커널을 올릴 때마다 지연이 나빠지지 않았는지 자동으로 본다. <code>rtla timerlat</code>의 종료 코드(0 = 통과, 2 = 임계값 초과)가 그대로 CI 판정이 된다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># CI 단계 예시 (가이드 — 이 노트의 랩에서 CI로 돌리지는 않았다)
+rtla timerlat hist -c 2-3 -d 1h -T 100 --no-aa -b 1 -E 200 &gt; tl_$(uname -r).hist
+rc=$?
+[ $rc -eq 2 ] &amp;&amp; { echo "FAIL: thread latency &gt; 100 us"; exit 1; }
+cyclictest -m -a 2-3 -t 2 -p 95 -i 1000 -h 400 -q -D 1h --json=ct_$(uname -r).json</code></pre></figure>
+<p>결과 JSON·히스토그램은 아티팩트로 남기고 4.2의 스크립트로 이전 빌드와 p99.9·max를 비교한다.</p>
+<h3 id="13-3-장면-3-센서-키트에서-가끔-imu-샘플이-늦다">13.3 장면 3 — 센서 키트에서 "가끔 IMU 샘플이 늦다"<a class="anchor" href="#13-3-장면-3-센서-키트에서-가끔-imu-샘플이-늦다" aria-label="link">#</a></h3>
+<ol><li>유저 앱의 타임스탬프로 증상을 수치화한다(늦은 샘플의 빈도·크기).</li><li>같은 CPU에서 <code>rtla timerlat top -c &lt;cpu&gt; -a &lt;임계값&gt;</code>. IRQ 단계면 IRQ off 구간(드라이버 <code>spin_lock_irqsave</code>), thread 단계면 우선순위·preempt off.</li><li>auto-analysis가 범인을 못 가리키면(7.5절처럼 idle에서 늦음) <code>rtla hwnoise</code>로 OS 밖 정지를 확인한다. arm64 SoC에서 흔한 OS 밖 원인: TF-A(EL3)에서 처리하는 PSCI/SCMI 호출, 보안 모니터, DDR 주파수 전환(DVFS), RAS 에러 처리 펌웨어.</li><li>최종 확인은 M11처럼 GPIO + scope로 "IMU DRDY 핀 → 앱 처리 완료 GPIO"를 직접 잰다. 소프트웨어 자체 측정은 자기 자신이 멈춘 시간을 못 잴 수 있기 때문이다(아래 13.4).</li></ol>
+<h3 id="13-4-장면-4-소프트웨어-측정-vs-하드웨어-측정">13.4 장면 4 — 소프트웨어 측정 vs 하드웨어 측정<a class="anchor" href="#13-4-장면-4-소프트웨어-측정-vs-하드웨어-측정" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>항목</th><th>cyclictest/timerlat (자체 측정)</th><th>GPIO + scope/LA (M11)</th></tr></thead><tbody><tr><td>기준 시계</td><td>같은 CPU의 시계(CNTVCT)</td><td>외부 장비의 독립 시계</td></tr><tr><td>재는 구간</td><td>타이머 만료 → 스레드 실행</td><td>실제 외부 이벤트(핀) → 실제 응답(핀)</td></tr><tr><td>놓치는 것</td><td>타이머 하드웨어 자체의 지연, 외부 IRQ 경로(GPIO 컨트롤러·GIC 라우팅), 측정 코드도 같이 멈춘 경우</td><td>내부 원인(어느 함수인지)</td></tr><tr><td>장점</td><td>원인 분석(트레이스·스택)과 바로 연결, 대량 샘플, CI 자동화</td><td>고객이 보는 진짜 숫자, 측정이 측정 대상에 영향 거의 없음</td></tr><tr><td>결론</td><td>원인 찾기와 회귀 테스트용</td><td>스펙 검증·최종 보고용</td></tr></tbody></table></div>
+<p>둘은 경쟁 관계가 아니다. SSD 시절 "펌웨어 내부 타임스탬프 로그"와 "PCIe 분석기 트레이스"를 같이 쓴 것과 같다. 시간 축 맞추기는 M11에서 다룬다.</p>
+<hr>
+<h2 id="14-흔한-실수와-증상">14. 흔한 실수와 증상<a class="anchor" href="#14-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>idle 시스템에서 10초 측정</td><td>"max 15 µs!" → 현장에서 수 ms 지연</td><td>드문 이벤트를 만날 확률이 0에 가깝다</td><td>제품 부하 + 수 시간 이상, max와 p99.99 함께 보고</td></tr><tr><td>평균만 보고</td><td>"평균 8 µs라 충분"</td><td>제어 루프는 최악값에 깨진다</td><td>p99/p99.9/p99.99/max + 히스토그램</td></tr><tr><td><code>-m</code> 생략</td><td>측정 시작 직후나 메모리 압박 때 수백 µs 튐</td><td>측정 스레드의 page fault</td><td><code>-m</code> (제품 앱도 <code>mlockall</code>, A5·N2)</td></tr><tr><td>우선순위 너무 낮게/정책 없이</td><td>SCHED_OTHER 수준의 ms 지연</td><td><code>-p</code> 생략 시 기본 0 = SCHED_OTHER</td><td><code>-p 95</code> 이상, 제품 RT 스레드와 같은 우선순위로</td></tr><tr><td><code>/dev/cpu_dma_latency</code> 효과를 모름</td><td>측정은 좋은데 제품은 나쁨</td><td>cyclictest가 idle을 막아 idle 탈출 지연이 숨겨짐</td><td>제품과 같은 PM QoS로 측정, 또는 <code>--default-system</code>으로 비교</td></tr><tr><td>히스토그램 범위가 작음</td><td>Overflows가 0이 아닌데 그림에 안 보임</td><td><code>-h 400</code> 밖 샘플</td><td>오버플로 개수·max를 따로 보고, <code>-h</code>를 키움</td></tr><tr><td>측정 도구 자체의 부하를 무시</td><td><code>rtla ... -t</code>/function tracer를 켜면 지연이 커짐</td><td>트레이싱 오버헤드</td><td>측정 단계(트레이싱 끔)와 원인 분석 단계(트레이싱 켬)를 분리</td></tr><tr><td>VM·에뮬레이터 숫자를 RT 성능으로 보고</td><td>수 ms 지연, 재현 안 됨</td><td>호스트 스케줄링이 게스트 시간을 훔친다</td><td>hwlat/hwnoise로 OS 밖 소음 확인, 실제 보드에서 측정</td></tr><tr><td>비교 실험의 조건 불일치</td><td>"새 커널이 2배 좋아짐" → 재현 안 됨</td><td>부하·시간·보드 온도·주파수가 달랐다</td><td>같은 HW·부하·시간·config, 번갈아 여러 번</td></tr><tr><td>샘플 수 확인 안 함</td><td>60초 측정인데 샘플이 기대값보다 훨씬 적음</td><td>측정 스레드가 주기를 놓침(이 노트 4.2의 바쁜 호스트)</td><td><code>n</code>을 기대값(시간 × 주파수 × 스레드)과 비교</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-면접에서-이렇게-말한다">15. 면접에서 이렇게 말한다<a class="anchor" href="#15-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> Your vendor claims 20 µs max latency on this SoC. How do you verify it?</p>
+<p><strong>A.</strong> 먼저 측정 조건 전체(cyclictest 커맨드라인, 시간, 부하, 커널 config, 부트 인자, cpuidle·주파수 설정)를 받아 그대로 재현한다. 재현되면 우리 조건 — 제품 부하, 제품 PM 설정, 최소 수 시간~24시간 — 으로 다시 잰다. 결과는 max 하나가 아니라 p99/p99.9/p99.99/max와 로그 스케일 히스토그램으로 보고한다. 최악값은 timerlat <code>--auto</code>로 원인을 확인하고, 최종 수치는 GPIO와 scope로 외부에서 한 번 교차 검증한다.</p>
+<blockquote><p>First I'd ask for the exact conditions: cyclictest command line, duration, load, kernel config and boot arguments, cpuidle and frequency settings. I'd reproduce their number under those conditions. Then I'd measure under our conditions — our real workload, our power-management settings, and hours, ideally 24 hours, not minutes — because a max from a short idle run is meaningless. I'd report p99, p99.9, p99.99 and max with a log-scale histogram, use rtla timerlat with auto-analysis to explain the worst case, and cross-check the final number externally with a GPIO toggle on a scope.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "cyclictest가 <code>/dev/cpu_dma_latency</code>에 0을 쓴다는 게 왜 중요한가?" → idle 진입을 막아 idle 탈출 지연이 결과에서 빠진다. 제품이 같은 PM QoS 요청을 하지 않으면 결과가 실제보다 좋게 나온다.</p>
+<p><strong>Q.</strong> Average latency is 8 µs but the max is 2 ms. What do you do next?</p>
+<p><strong>A.</strong> 평균은 무시하고 꼬리를 본다. 히스토그램으로 2 ms가 한 번인지, 일정한 크기의 섬인지 확인하고, CPU별로 나눈다. 그다음 <code>rtla timerlat top -a 1000</code>으로 첫 스파이크에서 멈춰 auto-analysis를 본다. IRQ latency가 크면 IRQ off 구간(드라이버의 <code>spin_lock_irqsave</code>, 긴 hardirq), thread만 크면 preempt off·우선순위·softirq다. 스택 트레이스가 함수까지 가리킨다. 트레이스에 아무것도 없으면 <code>rtla hwnoise</code>로 펌웨어·하이퍼바이저를 의심한다.</p>
+<blockquote><p>The average doesn't matter; the tail does. I'd look at the histogram to see whether the 2 ms is a one-off or a recurring island, and split it per CPU. Then I'd run rtla timerlat top with --auto at, say, 1 ms so it stops at the first spike and prints the analysis. If the IRQ latency is large, something kept interrupts disabled — a driver holding a spinlock with irqsave or a long hardirq handler. If only the thread latency is large, it's preemption-disabled code, a higher-priority task or softirq work. The saved stack usually points at the function. If the OS trace shows nothing, I'd run rtla hwnoise to check for firmware or hypervisor stalls.</p></blockquote>
+<p><strong>Q.</strong> What exactly does cyclictest measure?</p>
+<p><strong>A.</strong> SCHED_FIFO 스레드가 <code>clock_nanosleep(TIMER_ABSTIME)</code>로 다음 절대 시각까지 자고, 깨어나서 <code>clock_gettime</code>으로 읽은 시각과 기대 시각의 차이다. 타이머 IRQ 지연, hrtimer 처리, wakeup에서 스케줄링까지, context switch와 유저 복귀가 모두 합쳐진 한 숫자다. 구간을 나누려면 timerlat을 쓴다.</p>
+<blockquote><p>A SCHED_FIFO thread sleeps with clock_nanosleep on an absolute deadline, wakes up, reads the clock and records how late it is. That one number includes the timer interrupt latency, the hrtimer processing, the wakeup-to-schedule delay and the context switch back to user space. It tells you how late, not why — for the breakdown I use timerlat, which records the latency both in the timer IRQ and in the thread.</p></blockquote>
+<p><strong>Q.</strong> What's the difference between osnoise and timerlat?</p>
+<p><strong>A.</strong> osnoise는 "바쁜 워크로드가 빼앗긴 시간"을 잰다 — 처리량 중심의 HPC·DPDK형 작업에 맞다. 루프를 돌며 시간 구멍을 찾아 IRQ·softirq·NMI·thread·HW로 분류한다. timerlat은 "깨어나야 할 때 얼마나 늦나"를 잰다 — 주기적 제어 루프에 맞다. 둘 다 같은 커널 파일(<code>trace_osnoise.c</code>)의 tracer이고 rtla가 프런트엔드다.</p>
+<blockquote><p>osnoise measures how much time a busy workload loses to interference, and classifies it into IRQ, softirq, NMI, thread and hardware noise — that fits polling or HPC-style workloads. timerlat measures how late a periodic thread wakes up, split into IRQ and thread latency — that fits control loops. Both are in-kernel tracers in trace_osnoise.c, and rtla is the user-space front end that configures them and analyzes the results.</p></blockquote>
+<p><strong>Q.</strong> How long should a latency test run, and why?</p>
+<p><strong>A.</strong> 드문 이벤트를 만날 확률 때문에 길어야 한다. 한 시간에 한 번 생기는 스파이크를 1분 측정이 잡을 확률은 1.6%, 1시간이면 63%, 3시간이면 95%다. 그래서 개발 중에는 수십 분, 릴리스 판정은 수 시간~24시간 이상, 장기 안정성은 며칠 돌린다. 측정 시간을 늘리면 max는 거의 항상 커진다 — 그 증가가 멈추는지를 본다.</p>
+<blockquote><p>Long enough to meet the rare events. If a spike happens once an hour, a one-minute run catches it with about 1.6 percent probability, one hour about 63 percent, three hours about 95 percent. So minutes during development, many hours or 24 hours for a release decision, days for long-term qualification. The max almost always grows with duration; what you want to see is that it stops growing.</p></blockquote>
+<p><strong>Q.</strong> Your trace shows the timer IRQ arrived 3 ms late but nothing in the OS had interrupts disabled. What could it be?</p>
+<p><strong>A.</strong> OS 밖이다. x86이면 SMI, arm64면 EL3 secure monitor(TF-A의 SMC 처리, PSCI/SCMI, RAS 펌웨어), 가상화 환경이면 하이퍼바이저·호스트 스케줄링. idle 탈출이 깊은 경우도 있다. <code>hwlat</code> tracer나 <code>rtla hwnoise</code>로 IRQ를 끈 상태에서도 시간이 사라지는지 확인하고, 펌웨어 팀과 함께 SMC 호출 경로를 본다. 이 노트의 QEMU 실험에서는 hwlat이 호스트가 vCPU를 멈춘 시간을 그대로 잡았다.</p>
+<blockquote><p>Then it's outside the OS. On x86 that's classically SMIs; on arm64 it's EL3 — the secure monitor handling SMCs, PSCI or SCMI calls, RAS firmware — or a hypervisor if we're virtualized. Deep idle exit is another candidate. I'd run the hwlat tracer or rtla hwnoise, which spin with interrupts disabled and report time gaps; if gaps show up there, the OS can't be the cause. In my QEMU lab, hwlat caught exactly that — host scheduling stalls of the vCPU thread.</p></blockquote>
+<p><strong>Q.</strong> How do you compare two kernels fairly?</p>
+<p><strong>A.</strong> 같은 보드(가능하면 같은 개체), 같은 부하, 같은 시간, 같은 부트 인자·주파수·온도 조건, 같은 도구 버전. 한 번씩이 아니라 번갈아 여러 번(A-B-A-B) 돌려 측정 환경의 흔들림을 본다. 보고는 p50/p99/p99.9/p99.99/max 표 + 같은 축의 겹친 히스토그램.</p>
+<blockquote><p>Same board, ideally the same unit; same workload, same duration, same boot arguments, frequency and thermal conditions, same tool versions. I alternate runs, A-B-A-B, so I can see how much the environment itself drifts. In my lab the same kernel's max changed eightfold just because the host got busier — that's the variance you have to rule out before claiming a kernel is better. The report is a percentile table plus overlaid histograms on the same axes.</p></blockquote>
+<hr>
+<h2 id="16-직접-해보기">16. 직접 해보기<a class="anchor" href="#16-직접-해보기" aria-label="link">#</a></h2>
+<ol><li>(개념) cyclictest의 한 샘플을 네 구간으로 나눠 말하고, 각 구간을 늘리는 원인을 하나씩 들어라. 정답/힌트: 그림 2와 2.2절의 표.</li><li>(계산) 30분에 한 번 생기는 2 ms 스파이크가 있다. 10분, 1시간, 3시간 측정이 그것을 한 번이라도 볼 확률은? 정답/힌트: <code>1 - exp(-T/30min)</code> → 28%, 86%, 99.8%.</li><li>(코드) 4.2의 <code>n3_pct.py</code>를 고쳐 <code>--json</code> 출력(cyclictest <code>--json=</code>)에서도 같은 표를 만들어라. 정답/힌트: JSON에 스레드별 histogram 딕셔너리가 들어 있다 — 먼저 실제 파일을 열어 구조를 확인한다.</li><li>(실험) <code>n3_spike</code>를 mode=1(preempt off)로 넣고 cyclictest와 <code>rtla timerlat top</code>을 각각 돌려 결과를 비교하라. cyclictest만으로는 IRQ off와 구분이 되는가? 정답/힌트: 안 된다. timerlat의 IRQ 열이 조용한지가 구분점(7.2절).</li><li>(실험) <code>rtla osnoise top</code>을 <code>-P f:95</code> 없이/있이 돌려 Thread 노이즈 열이 어떻게 바뀌는지 보라. 정답/힌트: 6.3절. osnoise 스레드가 RT면 일반 스레드는 끼어들지 못하고 IRQ·softirq만 남는다.</li><li>(관찰) <code>/sys/kernel/tracing/osnoise/</code> 디렉터리의 파일을 손으로 설정해 rtla 없이 timerlat을 돌려 보라(<code>echo timerlat &gt; current_tracer</code>, <code>cat trace</code>). 정답/힌트: <code>timerlat_period_us</code>, <code>stop_tracing_us</code>, <code>print_stack</code>. rtla가 하는 일이 이 파일 쓰기라는 것을 확인.</li><li>(보고) 이 노트의 Image-trace 결과와 Image-rt 결과로 11.2절의 보고서 템플릿을 채워라. 정답/힌트: 조건 표에 "QEMU TCG, 호스트 load average"를 반드시 적는다.</li></ol>
+<hr>
+<h2 id="17-용어-사전">17. 용어 사전<a class="anchor" href="#17-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>latency (wakeup latency)</td><td>깨어남 지연</td><td>기대 시각과 실제 실행 시각의 차이</td></tr><tr><td>jitter</td><td>지터</td><td>지연의 흔들림. 보통 max−min 또는 분포 폭</td></tr><tr><td>cyclictest</td><td>rt-tests의 측정 도구</td><td>주기적으로 자고 깨어나며 지연 히스토그램을 만든다</td></tr><tr><td>rtla</td><td>Real-Time Linux Analysis</td><td>커널 <code>tools/tracing/rtla</code>. osnoise/timerlat/hwnoise 프런트엔드</td></tr><tr><td>osnoise</td><td>OS noise tracer</td><td>바쁜 워크로드가 빼앗긴 시간을 원인별로 센다</td></tr><tr><td>timerlat</td><td>timer latency tracer</td><td>IRQ latency와 thread latency를 분리해 잰다</td></tr><tr><td>hwlat</td><td>hardware latency detector</td><td>IRQ를 끄고 시간 구멍을 찾아 OS 밖 정지를 탐지</td></tr><tr><td>hwnoise</td><td>rtla 하위 명령</td><td>IRQ를 끈 osnoise. OS 밖 소음만 남긴다</td></tr><tr><td>auto-analysis</td><td>rtla timerlat 자동 분석</td><td>멈춘 샘플의 지연을 구성 요소별 %로 분해</td></tr><tr><td>percentile (p99.9)</td><td>백분위</td><td>샘플의 99.9%가 이 값 이하</td></tr><tr><td>histogram overflow</td><td>히스토그램 범위 초과</td><td><code>-h</code> 상한을 넘은 샘플 수</td></tr><tr><td>SMI</td><td>System Management Interrupt</td><td>x86 펌웨어가 OS 몰래 CPU를 쓰는 인터럽트</td></tr><tr><td>EL3 / secure monitor</td><td>arm64 최고 예외 레벨</td><td>TF-A BL31이 SMC·PSCI를 처리하는 곳. OS 밖 정지의 arm64 대응물</td></tr><tr><td>PM QoS (<code>/dev/cpu_dma_latency</code>)</td><td>전원 관리 지연 요구</td><td>열어 둔 동안 idle 상태 깊이를 제한</td></tr><tr><td>icount</td><td>QEMU 명령어 계수 모드</td><td>명령어 수로 게스트 시간을 진행시키는 결정적 시계</td></tr></tbody></table></div>
+<hr>
+<h2 id="18-요약-체크리스트">18. 요약 &amp; 체크리스트<a class="anchor" href="#18-요약-체크리스트" aria-label="link">#</a></h2>
+<p>지연은 한 숫자가 아니라 <strong>조건이 붙은 분포</strong>다. cyclictest는 SCHED_FIFO 스레드의 타이머 깨어남 지연을 전 구간 합으로 재고, <code>-m -S -p 95 -i 1000 -h N -q -D 시간 --histfile</code>로 돌려 백분위와 로그 히스토그램을 만든다. 측정에는 제품 수준의 부하와 긴 시간이 필수다. 짧은 측정의 max는 거의 항상 실제 최악값보다 작다. 원인 분석은 rtla timerlat으로 IRQ 단계와 thread 단계를 가르고, <code>--auto</code>로 첫 스파이크에서 멈춰 스택까지 확인한다. osnoise는 바쁜 워크로드의 소음을 원인별로, hwlat/hwnoise는 OS 밖 정지를 보여 준다. 비교는 같은 HW·부하·시간에서 번갈아 여러 번 하고, 최종 수치는 HW(GPIO + scope)로 교차 검증한다. 이 노트의 숫자는 QEMU TCG라 절대값은 의미가 없고, 방법과 모양만 가져간다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>cyclictest가 재는 구간을 그림으로 그리고 네 부분으로 나눠 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>표준 cyclictest 커맨드라인의 각 옵션(<code>-m -S -p -i -h -q -D --histfile -b</code>)의 이유를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>부하 도구(stress-ng, hackbench, ping -f, make -j)로 현실적인 부하를 설계할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>히스토그램 파일에서 p99/p99.9/p99.99를 계산하는 스크립트를 짤 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>로그 y축 히스토그램의 모양(꼬리, bimodal, 섬)을 원인 후보와 연결할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>측정 시간과 드문 이벤트를 잡을 확률의 관계를 계산할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>rtla timerlat top/hist</code>로 IRQ latency와 thread latency를 가르고 해석할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>rtla timerlat top -a</code>의 auto-analysis 출력에서 범인 함수를 찾을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>rtla osnoise top/hist</code>의 열(IRQ, Softirq, Thread, HW, NMI)을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>hwlat/hwnoise 결과가 무엇을 뜻하는지, arm64에서 OS 밖 원인 후보를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>cyclictest <code>-b</code> + ftrace로 스파이크 순간의 트레이스를 남길 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>두 커널을 공정하게 비교하고 설계 리뷰용 보고서를 쓸 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>Linux 커널 문서 — RTLA: https://docs.kernel.org/tools/rtla/index.html (<code>rtla-timerlat-top</code>, <code>rtla-osnoise-top</code>, <code>rtla-hwnoise</code> 등 하위 페이지)</li><li>Linux 커널 문서 — OSNOISE Tracer: https://docs.kernel.org/trace/osnoise-tracer.html</li><li>Linux 커널 문서 — Timerlat tracer: https://docs.kernel.org/trace/timerlat-tracer.html</li><li>Linux 커널 문서 — Hardware Latency Detector: https://docs.kernel.org/trace/hwlat_detector.html</li><li>rt-tests 소스(cyclictest): https://git.kernel.org/pub/scm/utils/rt-tests/rt-tests.git</li><li>Linux Foundation Realtime wiki — cyclictest 사용법: https://wiki.linuxfoundation.org/realtime/documentation/howto/tools/cyclictest/start</li><li>OSADL Realtime QA Farm(장기 latency 측정·히스토그램 예): https://www.osadl.org/ (QA Farm Realtime 메뉴)</li><li>커널 소스(6.18.55): <code>kernel/trace/trace_osnoise.c</code>, <code>kernel/trace/trace_hwlat.c</code>, <code>tools/tracing/rtla/src/timerlat_top.c</code>, <code>tools/tracing/rtla/src/timerlat_aa.c</code> — https://elixir.bootlin.com/linux/v6.18/source</li><li>Daniel Bristot de Oliveira, "Demystifying the real-time Linux scheduling latency" (ECRTS 2020) — timerlat/osnoise의 이론적 배경</li><li>관련 노트: N1, N2, F1 §8~9, F6, F8, M5, M11, A5</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-17_N2_realtime_tuning.html"><span class="dir">← 이전</span><span class="nm">N2. 실시간 튜닝 — SCHED_FIFO/DEADLINE, 우선순위 설계, CPU 격리(isolcpus·nohz_full·cpuset), IRQ affinity, mlockall</span></a><a class="next" href="2026-10-17_N4_linux_rtos_mcu_split.html"><span class="dir">다음 →</span><span class="nm">N4. Linux vs RTOS vs MCU 분담 — 무엇을 MCU로 내리나, 아키텍처 판단 기준</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-지연이-얼마냐-는-질문의-정답-형식">0. 큰 그림 — "지연이 얼마냐"는 질문의 정답 형식</a></li><li class="l3"><a href="#0-1-이-노트의-실험-환경과-꼭-기억할-경고">0.1 이 노트의 실험 환경과 꼭 기억할 경고</a></li><li class="l2"><a href="#1-실습-준비-systemd-없이-바로-측정-스크립트를-pid-1로">1. 실습 준비 — systemd 없이 바로 측정 스크립트를 PID 1로</a></li><li class="l3"><a href="#1-1-예제-1-pid-1-측정-스크립트와-qemu-실행">1.1 예제 1 — PID 1 측정 스크립트와 QEMU 실행</a></li><li class="l3"><a href="#1-2-예제-2-일부러-지연을-만드는-모듈-n3_spike">1.2 예제 2 — 일부러 지연을 만드는 모듈 n3_spike</a></li><li class="l2"><a href="#2-cyclictest-무엇을-재는가">2. cyclictest — 무엇을 재는가</a></li><li class="l3"><a href="#2-1-직관-알람을-7시에-맞췄는데-7시-몇-분에-일어났나">2.1 직관 — "알람을 7시에 맞췄는데 7시 몇 분에 일어났나"</a></li><li class="l3"><a href="#2-2-정의-네-구간의-합">2.2 정의 — 네 구간의 합</a></li><li class="l3"><a href="#2-3-옵션-업계-표준-커맨드라인-한-줄-해부">2.3 옵션 — 업계 표준 커맨드라인 한 줄 해부</a></li><li class="l2"><a href="#3-부하-걸기-idle-시스템의-숫자는-아무-의미가-없다">3. 부하 걸기 — idle 시스템의 숫자는 아무 의미가 없다</a></li><li class="l3"><a href="#3-1-왜-부하가-필수인가">3.1 왜 부하가 필수인가</a></li><li class="l3"><a href="#3-2-부하를-걸-때의-함정">3.2 부하를 걸 때의 함정</a></li><li class="l2"><a href="#4-히스토그램과-백분위-평균은-거의-아무것도-말하지-않는다">4. 히스토그램과 백분위 — 평균은 거의 아무것도 말하지 않는다</a></li><li class="l3"><a href="#4-1-예제-3-cyclictest-idle-vs-loaded-실시간-tcg-image-trace">4.1 예제 3 — cyclictest idle vs loaded (실시간 TCG, Image-trace)</a></li><li class="l3"><a href="#4-2-예제-4-백분위를-직접-계산하는-스크립트">4.2 예제 4 — 백분위를 직접 계산하는 스크립트</a></li><li class="l3"><a href="#4-3-히스토그램-그림-로그-축으로-그린다">4.3 히스토그램 그림 — 로그 축으로 그린다</a></li><li class="l3"><a href="#4-4-icount-모드에서-같은-측정-두-봉우리-bimodal">4.4 icount 모드에서 같은 측정 — 두 봉우리(bimodal)</a></li><li class="l3"><a href="#4-5-히스토그램-모양-읽기">4.5 히스토그램 모양 읽기</a></li><li class="l2"><a href="#5-얼마나-오래-재야-하나-짧은-측정은-거짓말한다">5. 얼마나 오래 재야 하나 — 짧은 측정은 거짓말한다</a></li><li class="l3"><a href="#5-1-직관-드문-사건을-만날-확률">5.1 직관 — 드문 사건을 만날 확률</a></li><li class="l3"><a href="#5-2-예제-5-max-vs-측정-시간-image-rt-부하-cpu1">5.2 예제 5 — max vs 측정 시간 (Image-rt, 부하, CPU1)</a></li><li class="l2"><a href="#6-osnoise-바쁜-워크로드는-무엇에게-시간을-빼앗기나">6. osnoise — 바쁜 워크로드는 무엇에게 시간을 빼앗기나</a></li><li class="l3"><a href="#6-1-직관과-정의">6.1 직관과 정의</a></li><li class="l3"><a href="#6-2-예제-6-함정-임계값이-플랫폼보다-작으면-전부-노이즈가-된다">6.2 예제 6 — 함정: 임계값이 플랫폼보다 작으면 전부 노이즈가 된다</a></li><li class="l3"><a href="#6-3-예제-7-t-50으로-다시-조용할-때-시끄러운-이웃이-있을-때-rt-우선순위를-줬을-때">6.3 예제 7 — -T 50으로 다시: 조용할 때, 시끄러운 이웃이 있을 때, RT 우선순위를 줬을 때</a></li><li class="l3"><a href="#6-4-예제-8-rtla-osnoise-hist와-s-정지-트레이스">6.4 예제 8 — rtla osnoise hist와 -s 정지 + 트레이스</a></li><li class="l2"><a href="#7-timerlat-지연을-irq-단계-와-thread-단계-로-가른다">7. timerlat — 지연을 "IRQ 단계"와 "thread 단계"로 가른다</a></li><li class="l3"><a href="#7-1-직관">7.1 직관</a></li><li class="l3"><a href="#7-2-예제-9-rtla-timerlat-top-조용할-때-irq-off-스파이크-preempt-off-스파이크">7.2 예제 9 — rtla timerlat top: 조용할 때, IRQ off 스파이크, preempt off 스파이크</a></li><li class="l3"><a href="#7-3-예제-10-rtla-timerlat-hist">7.3 예제 10 — rtla timerlat hist</a></li><li class="l3"><a href="#7-4-예제-11-rtla-timerlat-top-a-us-첫-스파이크에서-멈추고-자동-분석">7.4 예제 11 — rtla timerlat top -a &lt;us&gt;: 첫 스파이크에서 멈추고 자동 분석</a></li><li class="l3"><a href="#7-5-auto-analysis가-범인-없음-을-말할-때">7.5 auto-analysis가 "범인 없음"을 말할 때</a></li><li class="l2"><a href="#8-hwlat과-hwnoise-os-밖-에서-사라진-시간을-찾는다">8. hwlat과 hwnoise — "OS 밖"에서 사라진 시간을 찾는다</a></li><li class="l3"><a href="#8-1-직관">8.1 직관</a></li><li class="l3"><a href="#8-2-예제-12-hwlat-tracer를-tracefs로-직접-실시간-tcg">8.2 예제 12 — hwlat tracer를 tracefs로 직접 (실시간 TCG)</a></li><li class="l3"><a href="#8-3-예제-13-rtla-hwnoise">8.3 예제 13 — rtla hwnoise</a></li><li class="l2"><a href="#9-스파이크의-원인-추적-넓게-재고-좁혀서-잡는다">9. 스파이크의 원인 추적 — 넓게 재고, 좁혀서 잡는다</a></li><li class="l3"><a href="#9-1-예제-14-cyclictest-b-ftrace-이벤트로-스파이크-순간-잡기">9.1 예제 14 — cyclictest -b + ftrace 이벤트로 스파이크 순간 잡기</a></li><li class="l3"><a href="#9-2-osnoise로-잡기-s-단일-노이즈-임계값-t-트레이스-저장">9.2 osnoise로 잡기 — -s(단일 노이즈 임계값) + -t(트레이스 저장)</a></li><li class="l2"><a href="#10-커널-설정을-공정하게-비교하기">10. 커널·설정을 공정하게 비교하기</a></li><li class="l3"><a href="#10-1-규칙">10.1 규칙</a></li><li class="l3"><a href="#10-2-예제-15-image-trace-vs-image-rt-그리고-같은-커널의-재측정">10.2 예제 15 — Image-trace vs Image-rt, 그리고 같은 커널의 재측정</a></li><li class="l2"><a href="#11-설계-리뷰용-보고-한-장으로-말하기">11. 설계 리뷰용 보고 — 한 장으로 말하기</a></li><li class="l3"><a href="#11-1-무엇을-반드시-넣나">11.1 무엇을 반드시 넣나</a></li><li class="l3"><a href="#11-2-템플릿-이-노트의-실험으로-채운-예">11.2 템플릿 (이 노트의 실험으로 채운 예)</a></li><li class="l2"><a href="#12-커널-안에서는-무슨-일이-일어나나">12. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l3"><a href="#12-1-cyclictest의-한-샘플이-지나가는-길">12.1 cyclictest의 한 샘플이 지나가는 길</a></li><li class="l3"><a href="#12-2-osnoise-timerlat-tracer-kernel-trace-trace_osnoise-c">12.2 osnoise / timerlat tracer — kernel/trace/trace_osnoise.c</a></li><li class="l3"><a href="#12-3-hwlat-kernel-trace-trace_hwlat-c">12.3 hwlat — kernel/trace/trace_hwlat.c</a></li><li class="l3"><a href="#12-4-cyclictest-b가-하는-일">12.4 cyclictest -b가 하는 일</a></li><li class="l2"><a href="#13-embedded-실무에서-다시-보기">13. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#13-1-장면-1-벤더가-max-20-µs라고-합니다">13.1 장면 1 — "벤더가 max 20 µs라고 합니다"</a></li><li class="l3"><a href="#13-2-장면-2-1-khz-모터-제어-루프의-회귀-테스트-ci">13.2 장면 2 — 1 kHz 모터 제어 루프의 회귀 테스트(CI)</a></li><li class="l3"><a href="#13-3-장면-3-센서-키트에서-가끔-imu-샘플이-늦다">13.3 장면 3 — 센서 키트에서 "가끔 IMU 샘플이 늦다"</a></li><li class="l3"><a href="#13-4-장면-4-소프트웨어-측정-vs-하드웨어-측정">13.4 장면 4 — 소프트웨어 측정 vs 하드웨어 측정</a></li><li class="l2"><a href="#14-흔한-실수와-증상">14. 흔한 실수와 증상</a></li><li class="l2"><a href="#15-면접에서-이렇게-말한다">15. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#16-직접-해보기">16. 직접 해보기</a></li><li class="l2"><a href="#17-용어-사전">17. 용어 사전</a></li><li class="l2"><a href="#18-요약-체크리스트">18. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

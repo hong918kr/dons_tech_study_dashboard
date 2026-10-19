@@ -1,0 +1,2184 @@
+# L6. 런타임 보안 — dm-verity · dm-crypt · TPM/TEE · AppArmor/SELinux · capabilities · seccomp · systemd 하드닝으로 "부팅 이후"를 지키기
+
+> **이 노트를 다 읽으면**: 부팅 이후의 방어를 "무결성 · 기밀성 · 접근 통제 · 최소 권한" 네 층으로 나눠 설계할 수 있다 · LUKS2 data 파티션의 키를 TPM에 PCR 정책으로 봉인(seal)하고, PCR이 바뀌면 unseal이 실패하는 것을 직접 보여 줄 수 있다 · AppArmor 프로파일을 complain → enforce로 만들고 DENIED 로그를 읽고 고칠 수 있다 · "root 권한이 딱 하나 필요한 데몬"을 capabilities + systemd 샌드박스로 비root로 돌리고 `systemd-analyze security` 점수로 증명할 수 있다
+> **왜 필요한가**: 국방·카메라·로봇 회사 면접의 보안 질문("장비를 누가 뜯어 가면 비밀은 어떻게 지키나?", "AppArmor와 SELinux 중 뭘 쓰겠나?", "root가 필요한 데몬을 어떻게 돌리나?")은 secure boot(L5) 다음에 반드시 이어지고, 입사 후에는 systemd unit 하드닝·키 프로비저닝·CVE 대응을 바로 맡게 된다
+> **Don 기준 난이도**: SSD 펌웨어의 암호화 엔진(AES-XTS), 키 계층(MEK/DEK), 서명 검증, 보안 디버그 잠금(JTAG lock)은 이미 안다 / Linux가 그걸 "device-mapper 타깃 + 커널 keyring + TPM 드라이버 + LSM 훅 + 프로세스 자격(cred)"으로 나눠 놓은 구조, 그리고 유저스페이스 권한 모델(capabilities, seccomp, MAC)이 새로 배울 부분
+> **선행 노트**: J3(dm-verity 입문 — 해시 트리·변조 실험), L5(secure boot·measured boot), C5(TF-A·OP-TEE 부트 체인), L1(systemd), A2(프로세스·자격), E6(syscall 진입) — L8(namespace·cgroup)은 있으면 좋다
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+SSD 펌웨어에서 보안은 대부분 **부팅 시점**에 끝났다. ROM이 서명된 FW를 검증하고, FW가 올라오면 그 다음은 "우리 코드만 돈다"가 전제였다. 런타임 공격 표면은 NVMe 명령 파서와 vendor-unique 명령, 그리고 JTAG 정도였다.
+
+Linux 장비는 다르다. secure boot(L5)로 **부팅까지** 믿을 수 있게 만들어도, 부팅이 끝나면 수십 개의 데몬이 네트워크·USB·카메라 입력을 파싱하며 돈다. 그중 하나만 뚫려도(버퍼 오버플로, 명령 주입) 공격자는 그 프로세스의 권한을 얻는다. 그 프로세스가 root라면 장비 전체가 넘어간다. 게다가 장비는 **물리적으로 공격자 손에 들어간다**(드론이 추락하거나, 카메라가 벽에서 뜯겨 나간다). eMMC를 떼서 리더기에 꽂으면 OS가 막아 줄 수 있는 것은 없다 — 암호화만 남는다.
+
+그래서 런타임 보안은 **여러 겹**이다. 한 겹이 뚫려도 다음 겹이 피해를 줄인다(defence in depth).
+
+```svg
+<svg viewBox="0 0 680 372" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="14" font-weight="bold">공격은 위에서 들어오고, 신뢰는 아래에서 올라간다</text>
+<rect x="20" y="36" width="640" height="38" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="32" y="60" font-size="13">앱·서비스 — 최소 권한: 비root User=, capabilities, seccomp, Landlock</text>
+<text x="648" y="60" font-size="12" text-anchor="end" font-weight="bold">§8–§11</text>
+<rect x="20" y="80" width="640" height="38" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="32" y="104" font-size="13">강제 접근 통제(MAC) — AppArmor · SELinux (LSM 훅)</text>
+<text x="648" y="104" font-size="12" text-anchor="end" font-weight="bold">§6–§7</text>
+<rect x="20" y="124" width="640" height="38" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="32" y="148" font-size="13">커널 자기 보호 — lockdown · Yama · 모듈 서명 · /dev/mem 제한</text>
+<text x="648" y="148" font-size="12" text-anchor="end" font-weight="bold">§6, §12</text>
+<rect x="20" y="168" width="640" height="38" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="32" y="192" font-size="13">무결성 — dm-verity(루트) · fs-verity(파일) · IMA/EVM(측정·평가)</text>
+<text x="648" y="192" font-size="12" text-anchor="end" font-weight="bold">§2, J3</text>
+<rect x="20" y="212" width="640" height="38" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="32" y="236" font-size="13">기밀성 — dm-crypt/LUKS2 data 파티션 + 키는 TPM·TEE·HW 키에</text>
+<text x="648" y="236" font-size="12" text-anchor="end" font-weight="bold">§3–§5</text>
+<rect x="20" y="256" width="640" height="38" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="32" y="280" font-size="13">부트 — secure boot(서명 검증) · measured boot(PCR 측정)</text>
+<text x="648" y="280" font-size="12" text-anchor="end" font-weight="bold">L5, C5</text>
+<rect x="20" y="300" width="640" height="38" rx="5" fill="#888" fill-opacity="0.15" stroke="#888"/>
+<text x="32" y="324" font-size="13">하드웨어 — OTP 퓨즈 · HUK · TPM 칩 · JTAG/디버그 잠금</text>
+<text x="648" y="324" font-size="12" text-anchor="end" font-weight="bold">L5, P</text>
+<text x="340" y="362" font-size="12" text-anchor="middle">이 노트는 위 다섯 층(파랑·초록·주황 위쪽)을 다룬다. 부트·HW 층은 L5·C5에서.</text>
+</svg>
+```
+그림 1 — 방어 계층(defence in depth). 위쪽 층은 "뚫렸을 때 피해를 줄이는" 장치, 아래쪽 층은 "위 층이 믿을 근거"를 만드는 장치다.
+
+Don의 SSD 경험으로 옮기면 이렇다.
+
+| SSD 펌웨어 | Linux 장비 | 이 노트 |
+|---|---|---|
+| ROM이 FW 서명 검증 | secure boot 체인 | L5 |
+| FW 코드 영역 CRC/해시 | dm-verity(블록), fs-verity(파일), IMA | §2 |
+| 사용자 데이터 AES-XTS 암호화, MEK를 퓨즈 키로 감쌈 | dm-crypt/LUKS2, 키를 TPM·TEE·CAAM으로 감쌈 | §3–§5 |
+| 태스크마다 MPU 영역 | 프로세스마다 uid·capabilities·MAC 프로파일·seccomp | §6–§10 |
+| 양산 FW에서 vendor 명령·JTAG 잠금 | 양산 이미지에서 시리얼 콘솔·ssh·debugfs·`/dev/mem` 정리 | §12 |
+
+### 0.1 이 노트의 실험 환경
+
+모든 실행은 Mac의 Lima VM `elinux`(aarch64, 호스트 커널 `7.0.0-38-generic`) 안에서 했다. 두 종류다.
+
+- **VM 호스트에서**: 정적 C 예제 빌드·실행(seccomp, Landlock, capabilities), `swtpm` + `tpm2-tools`로 TPM 봉인 실험.
+- **QEMU 게스트에서**: 랩 커널 `Image-sec`(6.18.55-sec, AppArmor·SELinux·Landlock·Yama·Lockdown·IMA/EVM·TPM TIS·trusted keys) + Ubuntu Base 24.04 + systemd 255 rootfs(`rootfs-sysd.ext4`)를 TCG로 부팅하고, `swtpm`을 QEMU의 `tpm-tis-device`로 붙였다. 두 번째 virtio 디스크(64 MiB)를 LUKS2 data 파티션으로 쓴다.
+
+게스트는 KVM 없는 TCG 에뮬레이션이라 **시간 수치는 실제 보드 성능이 아니다**. 숫자는 "상대 비교"로만 본다. 출력의 PID·UUID·salt·해시·audit 타임스탬프는 실행마다 다르다.
+
+```sh
+# VM 호스트: 게스트 부팅 준비 (작업 디렉터리는 /var/tmp/L6)
+cp --sparse=always /var/lab/out/rootfs-sysd.ext4 /var/tmp/L6/l6_root.ext4
+truncate -s 64M /var/tmp/L6/l6_data.img
+sudo mount -o loop /var/tmp/L6/l6_root.ext4 /var/tmp/L6/mnt   # 내 복사본에만 파일을 넣는다
+sudo mkdir -p /var/tmp/L6/mnt/root/l6 && sudo cp l6d l6svc l6_cap l6_seccomp l6_landlock l6_fsverity g_*.sh l6-hard@.service /var/tmp/L6/mnt/root/l6/
+sudo umount /var/tmp/L6/mnt
+```
+
+게스트 실행은 `expect` 스크립트 하나로 자동화했다(부팅 → root 자동 로그인 → `sh /root/l6/g_xxx.sh` 차례로 실행 → poweroff). QEMU 명령의 핵심 부분은 이렇다.
+
+```sh
+# run_guest.sh 핵심 — swtpm을 유닉스 소켓으로 띄우고 QEMU에 TPM TIS 장치로 붙인다
+swtpm socket --tpm2 --tpmstate dir=/var/tmp/L6/gtpm \
+  --ctrl type=unixio,path=/var/tmp/L6/swtpm.sock --daemon --pid file=/var/tmp/L6/gswtpm.pid
+qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -m 1G -nographic \
+  -kernel /var/lab/out/Image-sec \
+  -drive file=/var/tmp/L6/l6_root.ext4,if=virtio,format=raw \
+  -drive file=/var/tmp/L6/l6_data.img,if=virtio,format=raw \
+  -chardev socket,id=chrtpm,path=/var/tmp/L6/swtpm.sock \
+  -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis-device,tpmdev=tpm0 \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+  -append "console=ttyAMA0 root=/dev/vda rw rootwait ima_policy=tcb ima_hash=sha256"
+```
+
+`tpm-tis-device`는 ARM `virt` 머신용 MMIO TPM이다(x86의 `tpm-tis`는 ISA 버스). QEMU가 Device Tree에 `tcg,tpm-tis-mmio` 노드를 넣어 주므로 커널의 `tpm_tis` 드라이버(platform 드라이버, `Image-sec`에 built-in)가 그대로 probe한다 — D 모듈에서 본 "DT 노드 → compatible → probe" 흐름 그대로다.
+
+---
+
+## 1. 위협 모델 — 무엇을, 누구로부터 지키나
+
+보안 설계는 기능 목록이 아니라 **위협 모델**에서 시작한다. "AppArmor 넣자"가 아니라 "누가 무엇을 노리나 → 그걸 막는 가장 싼 층은 어디인가"를 먼저 묻는다.
+
+### 1.1 자산 (지킬 것)
+
+예를 들어 국방 정찰 드론의 센서 키트라면:
+
+| 자산 | 예 | 깨지면 |
+|---|---|---|
+| 코드 무결성 | rootfs, 커널 모듈, 펌웨어 블롭 | 공격자 코드가 장비를 조종 |
+| 비밀 (기밀성) | 비행 로그, 촬영 영상, 임무 데이터, 캘리브레이션 | 정보 유출 |
+| 자격 증명 | 기기 인증서 개인 키, VPN 키, 클라우드 토큰 | 장비 사칭, 백엔드 침투 |
+| 가용성 | 비행 제어, 영상 스트림 | 임무 실패 |
+
+### 1.2 공격자 (누구로부터)
+
+| 공격자 | 할 수 있는 것 | 막는 층 |
+|---|---|---|
+| 원격 (네트워크) | 노출된 서비스의 버그를 이용해 그 프로세스 권한 획득 | 최소 권한(§8–§11), MAC(§6–§7), 패치(§12) |
+| 로컬 비특권 코드 | 이미 뚫린 데몬에서 권한 상승 시도 | capabilities, seccomp, Yama, lockdown |
+| 물리 — 비파괴 | 시리얼 콘솔, USB, 부트 모드 핀, JTAG | 디버그 잠금(§12), secure boot(L5) |
+| 물리 — 저장장치 탈착 | eMMC를 떼서 읽기·쓰기 | 읽기: dm-crypt(§3). 쓰기(변조): dm-verity·IMA/EVM(§2) |
+| 물리 — 고급 | 버스 프로빙, 글리치, 콜드 부트 | TPM/TEE·HW 키(§4–§5), 완전 방어는 불가 |
+
+### 1.3 원칙 세 가지
+
+1. **최소 권한**: 각 프로세스는 자기 일에 필요한 것만 가진다. root는 "모든 것"이므로 기본값이 되면 안 된다.
+2. **깊이 방어**: 한 층에 의존하지 않는다. 데몬 버그(1층 실패) → seccomp가 위험한 syscall을 막고(2층) → AppArmor가 파일 접근을 막고(3층) → 저장된 비밀은 TPM에 묶여 있다(4층).
+3. **신뢰의 뿌리에서 사슬을 잇는다**: 런타임 검증(dm-verity 루트 해시, IMA 정책, TPM PCR)이 의미 있으려면 그 기준값을 L5의 secure boot가 지켜야 한다. 루트 해시를 수정 가능한 파일에 두면 dm-verity는 장식이다.
+
+---
+## 2. 무결성 — "디스크의 내용이 우리가 만든 그대로인가"
+
+### 2.1 세 가지 도구, 세 가지 단위
+
+| 도구 | 단위 | 언제 검증 | 기준값은 어디 | 적합한 곳 |
+|---|---|---|---|---|
+| dm-verity | 블록 장치 전체 | 블록을 읽을 때마다 | 루트 해시 32 B (커널 cmdline·서명된 FIT·initramfs) | 읽기전용 rootfs 파티션 |
+| fs-verity | 파일 하나 | 페이지를 읽을 때마다 | 파일 digest (서명 또는 IMA 정책이 확인) | RW 파일시스템 위의 일부 큰 파일 (모델 가중치, APK) |
+| IMA | 파일 하나 | open/exec/mmap 시점에 파일 전체 해시 | 측정 로그 + TPM PCR10 (원격 증명), 또는 xattr 서명(appraisal) | 실행 파일·설정 감사, 원격 증명 |
+| EVM | inode 메타데이터 | IMA appraisal 때 | `security.evm` xattr의 HMAC/서명 | 오프라인 xattr 변조 방지 |
+
+J3 10절에서 dm-verity의 해시 트리를 만들고 바이트 하나를 바꿔 `I/O error`·`SIGBUS`가 나는 것을 이미 봤다. 여기서는 **양산에서 dm-verity를 어떻게 운용하나**만 더한다.
+
+### 2.2 dm-verity — 양산 운용에서 추가로 정해야 하는 것
+
+**(1) 루트 해시를 누가 지키나.** 루트 해시는 32바이트지만 이게 전부다. 선택지는 셋이다.
+
+- 서명된 커널 cmdline이나 FIT 이미지 안에 넣는다(`dm-mod.create=` + `CONFIG_DM_INIT`, initramfs 없이 바로 verity 루트로 부팅). 부트로더가 FIT 서명을 검증하므로(L5) 루트 해시도 보호된다. 가장 흔한 방식이다.
+- 서명된 initramfs 안의 스크립트가 `veritysetup open`을 한다.
+- 커널이 직접 서명을 확인한다: `CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG`를 켜고 테이블에 `root_hash_sig_key_desc <키 설명>`을 주면, 루트 해시에 대한 PKCS#7 서명을 커널 keyring의 키로 검증한다. 루트 해시를 서명되지 않은 곳에서 받아도 된다(예: A/B 슬롯의 메타데이터). 이 랩 커널은 이 옵션이 **꺼져 있다**(`# CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG is not set`) — 그래서 이 부분은 가이드다.
+
+`CONFIG_DM_INIT` 형식 예(가이드, 실행 안 함 — 값은 J3 방식으로 만든 이미지의 것이라고 가정):
+
+```text
+dm-mod.create="vroot,,,ro,0 409600 verity 1 /dev/mmcblk0p2 /dev/mmcblk0p3 4096 4096 51200 1 sha256 <root_hash_hex> <salt_hex> 1 panic_on_corruption"
+root=/dev/dm-0 rootwait
+```
+
+**(2) 변조를 발견하면 무엇을 하나.** 테이블의 선택 인자로 정한다.
+
+| 옵션 | 동작 | 언제 |
+|---|---|---|
+| (없음) | 해당 블록 읽기만 `-EIO` | 개발 |
+| `ignore_corruption` | 로그만 남기고 읽기 허용 | 진단용, 양산 금지 |
+| `restart_on_corruption` | 재부팅 | A/B와 결합: bootcount가 슬롯을 바꾼다 (L4) |
+| `panic_on_corruption` | 커널 panic | panic → pstore 기록 → 재부팅 (L7) |
+| `check_at_most_once` | 블록당 한 번만 검증 | 느린 CPU. 검증 후 변조는 못 잡는다 |
+
+Android는 `restart_on_corruption`과 "다음 부팅에 eio 모드" 상태 기계를 쓴다. 필드 장비에서 핵심은 **변조 = 재부팅 루프**가 되지 않게 L4의 bootcount·롤백과 엮는 것이다.
+
+**(3) 플래시 비트 에러와 변조를 구분할 수 있나 — FEC.** eMMC 읽기 디스터브나 NAND 비트 플립은 "변조"와 똑같이 해시 불일치로 보인다. `CONFIG_DM_VERITY_FEC`를 켜고 `veritysetup format --fec-device=... --fec-roots=2` 처럼 Reed-Solomon 패리티를 만들면, 해시가 틀린 블록을 패리티로 복구해 본다. 복구된 데이터의 해시가 맞으면 정상으로 넘어간다. 패리티 오버헤드는 `--fec-roots`로 정하는데 기본 2는 약 0.8% 수준이다(RS(255,253)을 여러 블록에 인터리브). SSD의 LDPC/BCH ECC와 같은 역할을 **파일시스템 위에서 한 번 더** 하는 셈이다. 이 랩 커널은 FEC도 꺼져 있다(가이드).
+
+**(4) 키 관리 관점.** dm-verity 자체에는 비밀이 없다. 지켜야 하는 것은 **서명 키**(빌드 서버의 HSM)와 **루트 해시의 전달 경로**뿐이다. 그래서 dm-verity는 dm-crypt보다 운용이 쉽다. "무결성은 verity, 기밀성은 crypt"로 나누고, rootfs는 보통 **verity만**(코드에 비밀이 없게 설계), data 파티션은 **crypt**(필요하면 `dm-integrity`로 인증 암호화 추가)로 간다.
+
+### 2.3 fs-verity — 파일 하나에 dm-verity를
+
+fs-verity는 파일 하나에 Merkle 트리를 붙이고 그 파일을 **읽기전용으로 봉인**한다. ext4·f2fs·btrfs가 지원한다. 파일 digest(루트 해시 + 파라미터의 해시)를 `FS_IOC_MEASURE_VERITY`로 읽어서 기대값과 비교하면 된다. 큰 모델 가중치 파일(수백 MB)을 RW 파티션에 OTA로 받아 두고 "이게 우리가 배포한 그 파일인가"를 확인할 때 쓴다 — 파일 전체를 매번 해시하지 않고 읽는 페이지만 검증한다.
+
+아래 C 코드는 파일에 verity를 켜고 digest를 출력한 뒤, 쓰기 open이 막히는지 확인한다. ext4는 `-O verity` 기능 플래그가 있어야 한다. 게스트 안에서 LUKS 볼륨(§3)에 `mkfs.ext4 -O verity`로 만든 파일시스템에 대해 실행했다.
+
+```c
+/* l6_fsverity.c — enable fs-verity on one file, print its digest, show it is now immutable */
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/fsverity.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+int main(int argc, char **argv)
+{
+    if (argc < 2) { fprintf(stderr, "usage: %s FILE\n", argv[0]); return 2; }
+    int fd = open(argv[1], O_RDONLY);           /* must be opened read-only */
+    if (fd < 0) { perror("open"); return 1; }
+
+    struct fsverity_enable_arg ea = {
+        .version = 1,
+        .hash_algorithm = FS_VERITY_HASH_ALG_SHA256,
+        .block_size = 4096,
+    };
+    if (ioctl(fd, FS_IOC_ENABLE_VERITY, &ea) && errno != EEXIST) {
+        perror("FS_IOC_ENABLE_VERITY"); return 1;
+    }
+
+    struct { struct fsverity_digest d; unsigned char buf[64]; } m = { .d.digest_size = 64 };
+    if (ioctl(fd, FS_IOC_MEASURE_VERITY, &m)) { perror("FS_IOC_MEASURE_VERITY"); return 1; }
+    printf("fs-verity digest (alg %u, %u bytes): ", m.d.digest_algorithm, m.d.digest_size);
+    for (unsigned i = 0; i < m.d.digest_size; i++) printf("%02x", m.d.digest[i]);
+    printf("\n");
+    close(fd);
+
+    fd = open(argv[1], O_WRONLY | O_APPEND);
+    printf("open(O_WRONLY) after enable -> %s\n", fd < 0 ? strerror(errno) : "OK (?)");
+    return 0;
+}
+```
+
+```text
+fs-verity digest (alg 1, 32 bytes): c0854de50b36c0c6c875932adb5cff9fab9b840799b0a6a1e19b003d1ff2a6ce
+open(O_WRONLY) after enable -> Operation not permitted
+```
+
+출력에서 볼 것: digest는 SHA-256(알고리즘 1) 32바이트. verity가 켜진 뒤에는 root라도 쓰기 open이 `Operation not permitted`로 막힌다 — 파일을 바꾸려면 새 파일을 만들어 교체(rename)해야 한다. 이 digest를 서명해 두고 런타임에 비교하는 것이 서명 검증이다(커널 내장 서명 `CONFIG_FS_VERITY_BUILTIN_SIGNATURES`는 이 커널에서 꺼져 있고, 요즘 권장은 유저스페이스 또는 IMA/IPE가 digest를 검사하는 방식이다).
+
+### 2.4 IMA — 무엇이 실행됐는지 "측정"하고 기록한다
+
+**IMA(Integrity Measurement Architecture)** 는 LSM 훅(exec, mmap, open, 모듈 로드, 펌웨어 로드)에서 파일 전체를 해시해서 **측정 로그**에 추가하고, 같은 값을 TPM **PCR10**에 extend한다. 두 가지 모드가 있다.
+
+- **measure(측정)**: 막지는 않고 기록만 한다. 원격 서버가 TPM quote(서명된 PCR 값)와 측정 로그를 받아서 "이 장비에서 뭐가 실행됐는지"를 검증한다(원격 증명, remote attestation).
+- **appraise(평가)**: 파일의 `security.ima` xattr(해시 또는 서명)과 비교해서 다르면 **실행·열기를 거부**한다. EVM이 그 xattr 자체를 HMAC/서명으로 보호한다.
+
+정책은 부팅 인자 `ima_policy=tcb`(내장 정책: root가 연 파일, 모든 exec·mmap 실행 파일, 모듈·펌웨어)로 켜거나 `/sys/kernel/security/ima/policy`에 규칙을 쓴다. 이 랩 커널의 기본 해시는 SHA-1(`CONFIG_IMA_DEFAULT_HASH="sha1"`)이라 부팅 인자에 `ima_hash=sha256`을 줬다.
+
+게스트에서 정책과 측정 로그를 보고, 스크립트를 두 번 실행하고, 내용을 바꿔 다시 실행했다.
+
+```sh
+# g_ima.sh — IMA measurement log under ima_policy=tcb
+I=/sys/kernel/security/ima
+echo "== policy"; cat $I/policy
+echo "== count"; cat $I/runtime_measurements_count
+echo "== first lines"; head -3 $I/ascii_runtime_measurements | cut -c1-150
+printf '#!/bin/sh\necho v1\n' > /root/l6_ima.sh; chmod +x /root/l6_ima.sh
+/root/l6_ima.sh; /root/l6_ima.sh
+echo "== after 2 runs of v1"; grep l6_ima.sh $I/ascii_runtime_measurements | cut -c1-150
+sha256sum /root/l6_ima.sh
+sed -i s/v1/v2/ /root/l6_ima.sh; /root/l6_ima.sh
+echo "== after change"; grep l6_ima.sh $I/ascii_runtime_measurements | cut -c1-150
+echo "== count"; cat $I/runtime_measurements_count
+echo "== PCR10 (IMA extends it)"; TPM2TOOLS_TCTI=device:/dev/tpmrm0 tpm2_pcrread sha256:10
+```
+
+```text
+== policy
+dont_measure fsmagic=0x9fa0
+dont_measure fsmagic=0x62656572
+dont_measure fsmagic=0x64626720
+dont_measure func=FILE_CHECK fsmagic=0x1021994
+dont_measure fsmagic=0x1cd1
+dont_measure fsmagic=0x42494e4d
+dont_measure fsmagic=0x73636673
+dont_measure fsmagic=0xf97cff8c
+dont_measure fsmagic=0x43415d53
+dont_measure fsmagic=0x27e0eb
+dont_measure fsmagic=0x63677270
+dont_measure fsmagic=0x6e736673
+dont_measure fsmagic=0xde5e81e4
+measure func=MMAP_CHECK mask=MAY_EXEC
+measure func=BPRM_CHECK mask=MAY_EXEC
+measure func=FILE_CHECK mask=^MAY_READ euid=0
+measure func=FILE_CHECK mask=^MAY_READ uid=0
+measure func=MODULE_CHECK
+measure func=FIRMWARE_CHECK
+measure func=POLICY_CHECK
+== count
+827
+== first lines
+10 6bdad7efa602f84ca31ffe3f11ff7c476e25dcdd ima-ng sha256:7b6436b0c98f62380866d9432c2af0ee08ce16a171bda6951aecd95ee1307d61 boot_aggregate
+10 2d4e1c294fd2f86d39c96ad01e31dfee08390ca7 ima-ng sha256:4456d1bd9f11cd8c69d26f08f2b1c1dad419c973f6da80c6773904f353fcb3c6 /usr/lib/systemd/systemd
+10 c83dbb84deac152e9b8d25f562e8d717ce7632c9 ima-ng sha256:49005ef8e9db9a45691ff875e6ca18dd8723c7ec5c1a863a276a1186dbf22774 /usr/lib/aarch64-linux-gnu/
+v1
+v1
+== after 2 runs of v1
+10 6da48175b633c53fe0f8756ff8db0bf52d7621d0 ima-ng sha256:667f61a069b75f1f57fc561623da00e013e144221e8ea54de2803da9dd8aa952 /root/l6_ima.sh
+667f61a069b75f1f57fc561623da00e013e144221e8ea54de2803da9dd8aa952  /root/l6_ima.sh
+v2
+== after change
+10 6da48175b633c53fe0f8756ff8db0bf52d7621d0 ima-ng sha256:667f61a069b75f1f57fc561623da00e013e144221e8ea54de2803da9dd8aa952 /root/l6_ima.sh
+10 4ec44eb42e4570e91cc7e05d0a32880c27cb2efc ima-ng sha256:268005d39f7e216d686f4e63ed1e4b4a1b6a06552b5ca4d1a17e1a176e3ce249 /root/l6_ima.sh
+== count
+833
+== PCR10 (IMA extends it)
+  sha256:
+    10: 0x6669CBF3E06553EB90B42026D6345274229054CD1BF18642280CEC79120655D5
+```
+
+출력에서 볼 것: 정책 앞부분의 `dont_measure fsmagic=...`은 proc·sysfs·securityfs·tmpfs(`0x1021994`) 같은 가상 파일시스템을 제외하는 규칙이고, 그 뒤가 tcb 정책의 본체다(실행·mmap 실행, root가 읽는 파일, 모듈·펌웨어·정책). 로그 한 줄은 `PCR 템플릿해시 템플릿이름 파일해시 경로`다. 첫 줄은 항상 `boot_aggregate`(측정 시작 시점의 PCR 0–9 요약 — 여기서는 펌웨어 측정이 없어 의미 없는 값이다). 같은 파일을 두 번 실행해도 **한 줄만** 남는다 — IMA는 inode의 `i_version`이 바뀌지 않으면 다시 측정하지 않는다. 내용을 바꾸면 **새 해시로 한 줄이 더** 생긴다. `sha256sum`과 로그의 `sha256:` 값이 같다. 부팅 직후에 이미 측정이 800개가 넘는다는 점에 주목한다 — tcb 정책은 root가 읽는 모든 파일을 측정하므로 원격 증명 서버가 "허용 목록"을 관리해야 한다. 그래서 양산에서는 **dm-verity rootfs + data 파티션의 실행 파일만 IMA** 처럼 범위를 좁힌다.
+
+> 함정: PCR10은 IMA가 계속 extend하므로 **PCR10에 키를 봉인하면 안 된다**(§4). 측정할 때마다 값이 바뀐다.
+
+**appraisal 맛보기(가이드, 실행 안 함).** 양산 흐름은 이렇다. 빌드 때 `evmctl ima_sign --key priv.pem file`로 각 파일에 `security.ima` 서명 xattr을 붙이고(파일시스템 이미지가 xattr을 보존해야 한다), 공개 키를 `.ima` keyring에 넣는다(커널 빌드에 내장하거나 서명된 initramfs에서 `evmctl import`). 정책에 `appraise func=BPRM_CHECK appraise_type=imasig`를 넣으면 서명 없는 실행 파일은 `Permission denied`로 실행이 거부된다. 읽기전용 dm-verity rootfs라면 이 일은 verity가 더 싸게 해 주므로, appraisal은 **RW 파티션에 OTA로 들어오는 실행 파일**에 쓰는 것이 맞다. 최근 커널(6.12+)에는 "이 디바이스(verity) 또는 이 fs-verity digest에서 온 실행 파일만 허용"을 정책으로 쓰는 **IPE(Integrity Policy Enforcement) LSM**도 들어왔다.
+
+---
+
+## 3. 기밀성 — dm-crypt와 LUKS2
+
+### 3.1 직관
+
+dm-crypt는 SSD의 인라인 AES 엔진과 같은 일을 **커널 블록 계층**에서 한다. 위의 파일시스템은 평문 블록을 읽고 쓰고, 아래 디스크에는 암호문만 내려간다. 섹터 번호가 IV(초기화 벡터) 역할을 해서 같은 평문이라도 위치마다 다른 암호문이 된다(`aes-xts-plain64` — SSD의 AES-XTS와 같은 모드).
+
+**LUKS2**는 그 위의 **키 관리 형식**이다. 디스크 앞부분에 헤더를 두고:
+
+- 실제로 데이터를 암호화하는 **볼륨 키**(= SSD의 MEK/DEK)는 랜덤으로 한 번 만든다.
+- 볼륨 키를 여러 **keyslot**에 각각 다른 방식으로 감싸서 저장한다(passphrase, 키 파일, TPM 토큰, 복구 키). 비밀번호를 바꿔도 데이터를 재암호화할 필요가 없다 — keyslot 하나만 다시 쓴다.
+- `tokens` 영역에 "이 keyslot의 비밀은 TPM에서 꺼내라" 같은 메타데이터(JSON)를 둔다. systemd-cryptenroll이 여기에 `systemd-tpm2` 토큰을 쓴다.
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="20" y="20" width="200" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="120" y="45" font-size="13" text-anchor="middle">ext4 (평문 블록)</text>
+<line x1="120" y1="60" x2="120" y2="88" stroke="currentColor" marker-end="url(#ah2)"/>
+<rect x="20" y="90" width="200" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="120" y="115" font-size="13" text-anchor="middle">dm-crypt aes-xts-plain64</text>
+<line x1="120" y1="130" x2="120" y2="158" stroke="currentColor" marker-end="url(#ah2)"/>
+<rect x="20" y="160" width="200" height="40" rx="5" fill="#888" fill-opacity="0.15" stroke="#888"/>
+<text x="120" y="185" font-size="13" text-anchor="middle">/dev/vdb (암호문만)</text>
+<rect x="290" y="20" width="370" height="250" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/>
+<text x="304" y="40" font-size="13" font-weight="bold">LUKS2 헤더 (디스크 앞 16 MiB)</text>
+<rect x="304" y="52" width="342" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="316" y="74" font-size="12">keyslot 0: 키 파일로 감싼 볼륨 키 (pbkdf2)</text>
+<rect x="304" y="92" width="342" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="316" y="114" font-size="12">keyslot 1: TPM이 unseal한 비밀로 감싼 볼륨 키</text>
+<rect x="304" y="132" width="342" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="316" y="154" font-size="12">keyslot 2: 복구 키 (공장·서비스 센터 보관)</text>
+<rect x="304" y="172" width="342" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="316" y="194" font-size="12">token 0: systemd-tpm2 (봉인 blob, PCR 목록)</text>
+<rect x="304" y="212" width="342" height="44" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="316" y="231" font-size="12">digest: 꺼낸 볼륨 키가 맞는지 확인용</text>
+<text x="316" y="248" font-size="12">segment: 데이터 영역 위치 · cipher · sector size</text>
+<line x1="288" y1="110" x2="224" y2="110" stroke="currentColor" marker-end="url(#ah2)"/>
+<text x="254" y="102" font-size="12" text-anchor="middle">볼륨 키</text>
+<text x="120" y="232" font-size="12" text-anchor="middle">어느 keyslot이든 하나만</text>
+<text x="120" y="250" font-size="12" text-anchor="middle">열리면 같은 볼륨 키가 나온다</text>
+</svg>
+```
+그림 2 — dm-crypt(암호화 엔진)와 LUKS2(키 관리 헤더)의 역할 분담. 볼륨 키는 하나, 그걸 감싸는 방법(keyslot)은 여러 개다.
+
+### 3.2 게스트에서 LUKS2 data 파티션 만들기
+
+두 번째 virtio 디스크 `/dev/vdb`에 LUKS2를 만들고, 열고, ext4를 올리고, 원본 디스크에 평문이 남는지 확인했다. 키는 패스프레이즈가 아니라 **32바이트 랜덤 키 파일**이다(장비에는 사람이 입력할 패스프레이즈가 없다). 키 파일이 고엔트로피라 PBKDF는 의미가 작아서 TCG 시간 절약을 위해 `pbkdf2`, 100 ms로 줄였다 — 사람이 고르는 패스프레이즈라면 기본값 `argon2id`를 쓴다.
+
+```sh
+# g_luks.sh (앞부분)
+export DM_DISABLE_UDEV=1   # this rootfs has no dm udev rules (dmsetup pkg absent): skip udev sync
+export TPM2TOOLS_TCTI=device:/dev/tpmrm0
+ls -l /dev/tpm0 /dev/tpmrm0; cat /sys/class/tpm/tpm0/tpm_version_major
+grep -E "vd[ab]$" /proc/partitions
+umask 077; head -c 32 /dev/urandom > /run/l6.key
+echo "== luksFormat"; t0=$(date +%s.%N); cryptsetup luksFormat --type luks2 --batch-mode \
+  --cipher aes-xts-plain64 --key-size 512 --pbkdf pbkdf2 --iter-time 100 /dev/vdb /run/l6.key
+echo "luksFormat took $(echo "$(date +%s.%N) - $t0" | bc 2>/dev/null || python3 -c "print(round($(date +%s.%N)-$t0,2))") s (TCG)"
+cryptsetup luksDump /dev/vdb | sed -n '1,40p' | grep -vE "^\s*$"
+cryptsetup open --key-file /run/l6.key /dev/vdb l6data
+echo "== dm status (volume key lives in the kernel keyring)"; cryptsetup status l6data; grep -E "logon" /proc/keys | cut -c1-110
+mkfs.ext4 -q -O verity /dev/mapper/l6data && mkdir -p /mnt/l6 && mount /dev/mapper/l6data /mnt/l6
+echo "TOP-SECRET-calibration-L6" > /mnt/l6/calib.txt; sync
+echo "== fs-verity on a file inside the encrypted fs"; /root/l6/l6_fsverity /mnt/l6/calib.txt
+umount /mnt/l6; cryptsetup close l6data
+echo "== plaintext visible on raw disk?"; grep -c TOP-SECRET /dev/vdb || echo "no (ciphertext only)"
+```
+
+```text
+crw-rw---- 1 tss root  10,   224 Jan  1  1970 /dev/tpm0
+crw-rw---- 1 tss tss  251, 65536 Oct 18 05:09 /dev/tpmrm0
+2
+ 254        0    3145728 vda
+ 254       16      65536 vdb
+== luksFormat
+luksFormat took 6.97 s (TCG)
+LUKS header information
+Version:       	2
+Epoch:         	3
+Metadata area: 	16384 [bytes]
+Keyslots area: 	16744448 [bytes]
+UUID:          	d4da8739-6faf-4785-98d4-858c1cabf9f6
+Label:         	(no label)
+Subsystem:     	(no subsystem)
+Flags:       	(no flags)
+Data segments:
+  0: crypt
+	offset: 16777216 [bytes]
+	length: (whole device)
+	cipher: aes-xts-plain64
+	sector: 512 [bytes]
+Keyslots:
+  0: luks2
+	Key:        512 bits
+	Priority:   normal
+	Cipher:     aes-xts-plain64
+	Cipher key: 512 bits
+	PBKDF:      pbkdf2
+	Hash:       sha256
+	Iterations: 3604
+	Salt:       ... (32 bytes, omitted)
+	AF stripes: 4000
+	AF hash:    sha256
+	Area offset:32768 [bytes]
+	Area length:258048 [bytes]
+	Digest ID:  0
+Tokens:
+Digests:
+  0: pbkdf2
+	Hash:       sha256
+	Iterations: 3856
+	Salt:       ... (32 bytes, omitted)
+== dm status (volume key lives in the kernel keyring)
+/dev/mapper/l6data is active.
+  type:    LUKS2
+  cipher:  aes-xts-plain64
+  keysize: 512 bits
+  key location: keyring
+  device:  /dev/vdb
+  sector size:  512
+  offset:  32768 sectors
+  size:    98304 sectors
+  mode:    read/write
+== fs-verity on a file inside the encrypted fs
+fs-verity digest (alg 1, 32 bytes): c0854de50b36c0c6c875932adb5cff9fab9b840799b0a6a1e19b003d1ff2a6ce
+open(O_WRONLY) after enable -> Operation not permitted
+== plaintext visible on raw disk?
+0
+no (ciphertext only)
+```
+
+출력에서 볼 것:
+
+- `/dev/tpm0`(raw)과 `/dev/tpmrm0`(커널 resource manager)이 생겼다 — QEMU의 `tpm-tis-device`를 `tpm_tis`가 probe한 결과다. 여러 프로세스가 TPM을 같이 쓸 때는 항상 `tpmrm0`을 쓴다(§4.2).
+- `luksDump`: 볼륨 키 512비트(AES-256-XTS는 키 두 개라 512비트), keyslot 0 하나, `Tokens:` 비어 있음, 데이터 `offset: 16777216 [bytes]` — 앞 16 MiB가 LUKS2 헤더(두 벌 + keyslot 영역)다. 64 MiB 디스크면 25%가 헤더다. 작은 파티션이면 `--luks2-keyslots-size`/`--luks2-metadata-size`로 줄일 수 있다.
+- `cryptsetup status`의 `key location: keyring`: cryptsetup은 볼륨 키를 커널 **keyring**(`logon` 타입 — 유저스페이스가 다시 읽을 수 없는 키)에 넣고 dm-crypt 테이블에는 키 대신 그 키의 이름(`:64:logon:cryptsetup:<uuid>-d0` 형식)을 쓴다 — 이 rootfs에는 `dmsetup`이 없어 테이블 문자열은 직접 확인하지 못했다(cryptsetup 2.x 문서 기준). 그래서 옛날처럼 `dmsetup table --showkeys`로 16진 키가 새어 나오지 않는다. `/proc/keys`의 grep이 아무것도 출력하지 않은 것은 dm-crypt가 키를 가져간 뒤 cryptsetup이 keyring의 키를 정리했기 때문으로 보인다.
+- 데이터 영역 `size: 98304 sectors` = 48 MiB. 64 MiB 디스크에서 16 MiB가 헤더다. luksFormat 약 7초는 TCG 수치다(실제 보드에서는 PBKDF 시간 설정이 대부분을 차지한다).
+- **처음 실행에서는 `cryptsetup open`이 10분 넘게 멈췄다.** 이 rootfs에는 `dmsetup` 패키지가 없어 device-mapper udev 규칙(`55-dm.rules` 등)이 없는데, libdevmapper는 기본적으로 "udev가 장치 노드를 처리했다"는 확인(udev cookie)을 기다린다. 스크립트 맨 위의 `DM_DISABLE_UDEV=1`이 그 대기를 끈다. 최소 rootfs를 직접 만들 때(K1–K3) 자주 만나는 함정이다.
+- 원본 디스크를 `grep`해도 평문이 없다(`0` 그리고 `no (ciphertext only)`).
+
+### 3.3 그럼 키는 어디에 두나 — 이게 진짜 문제다
+
+위 실험의 키 파일 `/run/l6.key`를 eMMC에 평문으로 두면 암호화는 의미가 없다(디스크를 떼면 키도 같이 떼진다). 장비에는 패스프레이즈를 입력할 사람도 없다. 그래서 **"키를 이 장비의 하드웨어에 묶는다"** 가 핵심이다.
+
+| 방법 | 원리 | 장점 | 약점 | 대표 SoC/보드 |
+|---|---|---|---|---|
+| TPM 2.0 봉인 + PCR 정책 | 키를 TPM의 SRK로 감싸고 "PCR이 이 값일 때만 풀어라" 정책을 건다 | 표준, 측정 부팅과 결합, 도구 성숙 | 별도 칩 비용, SPI/I2C 버스 스니핑(→ 세션 암호화) | x86, i.MX8 + SLB9670, 산업용 게이트웨이 |
+| fTPM (OP-TEE TA) | TPM을 TrustZone 안의 소프트웨어로 구현 | 칩 추가 비용 0 | 저장소(RPMB) 필요, TEE 버그 = TPM 버그 | Jetson Orin(fTPM), 일부 Arm 보드 |
+| OP-TEE secure storage | TA가 키를 보관, HUK에서 파생한 키로 암호화해 REE FS 또는 RPMB에 저장 | TA 안에서만 키 사용 가능 | TA 개발·서명 필요 | i.MX, STM32MP1, TI AM6x |
+| SoC 키 엔진 (CAAM black key / blob, TI·Jetson 키 슬롯) | 퓨즈의 OTPMK·HUK로 키를 감싼 blob만 저장, 평문 키는 엔진 밖으로 안 나옴 | 가장 강함, 커널 trusted key `caam` 소스 지원 | SoC 종속, 문서가 NDA인 경우 | NXP i.MX6/7/8 (CAAM), i.MX8ULP·93 (ELE) |
+| 커널 trusted + encrypted keys | 커널 keyring 키를 TPM/TEE/CAAM으로 감싼 blob으로 저장, encrypted key는 trusted key로 감쌈 | 키가 유저스페이스에 평문으로 안 나옴 | blob 보관·로드 절차 필요 | 위의 백엔드 아무거나 |
+| 키를 rootfs·평문 파일에 | — | 쉬움 | **보안 아님** | (안티패턴) |
+
+이 표에서 앞의 넷은 "키를 감싸는 뿌리", 다섯째(trusted keys)는 "그 뿌리를 커널 keyring에서 쓰는 방법"이다. 다음 절에서 TPM 봉인을 직접 해 본다.
+
+---
+## 4. TPM 2.0 — 측정하고, 봉인하고, 증명하는 작은 보안 칩
+
+### 4.1 직관 — "값을 되돌릴 수 없는 레지스터"와 "조건부 금고"
+
+TPM(Trusted Platform Module)은 SPI/I2C(또는 펌웨어 구현)로 붙는 작은 보안 마이크로컨트롤러다. Don에게 익숙한 말로는 **"쓰기 규칙이 특수한 레지스터 몇 개 + 그 레지스터 값에 따라 열리는 키 금고 + 서명 엔진"** 이다.
+
+- **PCR(Platform Configuration Register)**: SHA-256 PCR 24개(뱅크마다). 리셋 때 0이고, **쓰기는 extend만** 된다: `PCR_new = H(PCR_old ‖ measurement)`. 값을 원하는 값으로 "설정"할 방법이 없다 — 되돌리려면 리셋(재부팅)뿐이다. 부트 단계마다 다음 단계를 해시해서 extend하면(measured boot, L5), 최종 PCR 값은 "이번 부팅에 무엇이 어떤 순서로 실행됐나"의 요약이 된다.
+- **봉인(seal)**: 비밀을 TPM 안의 키(SRK, storage root key)로 감싸서 TPM **밖에** blob으로 저장한다. blob에 **정책**을 붙인다: "PCR 7과 11이 지금 이 값일 때만 풀어라". 풀기(unseal)는 TPM 안에서만 일어나고, 정책이 안 맞으면 TPM이 거절한다.
+- **키 계층**: EK(Endorsement Key, 제조사가 인증서를 박은 TPM 고유 키 — "이 칩은 진짜 TPM이다"), SRK(저장 계층의 루트 — 봉인 blob의 부모), AK(Attestation Key — PCR quote에 서명, 원격 증명용).
+- **NV 인덱스**: TPM 안의 작은 비휘발 저장소(수 KB). 단조 카운터(롤백 방지 — L4의 "옛 펌웨어로 다운그레이드 금지")나 작은 인증서를 둔다.
+
+| PCR | 관례적 내용 (TCG PC Client / systemd 관례) |
+|---|---|
+| 0–7 | 펌웨어·부트로더·secure boot 정책 (7 = secure boot 상태·인증서) |
+| 8–9 | 부트로더가 측정한 커널 cmdline·initrd (GRUB 관례) |
+| 10 | IMA 측정 로그 |
+| 11 | systemd: UKI(커널+initrd+cmdline 묶음)와 부팅 단계 |
+| 12–15 | systemd: cmdline·sysext·시스템 ID 등 (15 = `systemd-pcrextend`가 쓰는 machine-id·파일시스템 등) |
+| 16 | 디버그 (누구나 리셋 가능) |
+
+임베디드 ARM 보드는 이 관례를 그대로 따르지 않는 경우가 많다(U-Boot의 `measured boot`는 EFI TCG2 이벤트 로그 규칙을 따른다 — L5). **"어느 PCR에 무엇이 들어가나"를 제품마다 문서로 정해야** 봉인 정책을 쓸 수 있다.
+
+```svg
+<svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="22" font-size="13" font-weight="bold">공장 / 첫 부팅: 봉인</text>
+<rect x="20" y="34" width="150" height="40" rx="5" fill="#888" fill-opacity="0.15" stroke="#888"/>
+<text x="95" y="59" font-size="13" text-anchor="middle">PCR7, PCR11 읽기</text>
+<line x1="170" y1="54" x2="198" y2="54" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="200" y="34" width="190" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="295" y="59" font-size="13" text-anchor="middle">policy = H(PolicyPCR)</text>
+<line x1="390" y1="54" x2="418" y2="54" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="420" y="34" width="240" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="540" y="59" font-size="13" text-anchor="middle">TPM2_Create(키, policy)</text>
+<line x1="540" y1="74" x2="540" y2="100" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="420" y="102" width="240" height="40" rx="5" fill="#888" fill-opacity="0.15" stroke="#888"/>
+<text x="540" y="120" font-size="12" text-anchor="middle">seal.pub + seal.priv (blob)</text>
+<text x="540" y="136" font-size="12" text-anchor="middle">→ eMMC에 저장해도 안전</text>
+<text x="20" y="176" font-size="13" font-weight="bold">매 부팅: unseal</text>
+<rect x="20" y="190" width="300" height="150" rx="6" fill="#3f9a6b" fill-opacity="0.06" stroke="#3f9a6b"/>
+<text x="34" y="212" font-size="13" font-weight="bold">정상 부팅</text>
+<text x="34" y="236" font-size="12">같은 부트로더·커널 → 같은 PCR 값</text>
+<text x="34" y="258" font-size="12">PolicyPCR 세션 digest = policy</text>
+<rect x="34" y="272" width="272" height="52" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="170" y="294" font-size="13" text-anchor="middle">TPM2_Unseal → 키</text>
+<text x="170" y="314" font-size="12" text-anchor="middle">→ cryptsetup open 성공</text>
+<rect x="360" y="190" width="300" height="150" rx="6" fill="#d0564a" fill-opacity="0.06" stroke="#d0564a"/>
+<text x="374" y="212" font-size="13" font-weight="bold">변조된 부팅</text>
+<text x="374" y="236" font-size="12">다른 initrd 측정 → PCR11 값이 다름</text>
+<text x="374" y="258" font-size="12">세션 digest ≠ policy</text>
+<rect x="374" y="272" width="272" height="52" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="510" y="294" font-size="13" text-anchor="middle">TPM_RC_POLICY_FAIL (0x99d)</text>
+<text x="510" y="314" font-size="12" text-anchor="middle">→ 키 없음, data 파티션 잠김</text>
+<line x1="540" y1="142" x2="510" y2="188" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah3)"/>
+<line x1="500" y1="142" x2="200" y2="188" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah3)"/>
+</svg>
+```
+그림 3 — PCR 정책으로 봉인한 키. blob 자체는 디스크에 둬도 되고, "푸는 조건"이 부팅 상태에 묶인다.
+
+### 4.2 swtpm으로 봉인·unseal 실험 (VM 호스트)
+
+먼저 게스트 없이 VM 호스트에서 `swtpm`(소프트웨어 TPM 2.0 에뮬레이터, libtpms 기반)을 TCP로 띄우고 `tpm2-tools` 5.7로 전 과정을 해 본다. VM 호스트의 실제 TPM이나 전역 상태는 건드리지 않는다.
+
+```sh
+#!/bin/bash
+# l6_tpm_seal.sh — seal a LUKS key to PCR7+PCR11 in swtpm, extend PCR11, unseal fails
+set -e
+D=/var/tmp/L6/tpm; rm -rf $D; mkdir -p $D/state; cd $D
+swtpm socket --tpm2 --tpmstate dir=$D/state --flags startup-clear \
+  --server type=tcp,port=23321 --ctrl type=tcp,port=23322 --daemon --pid file=$D/swtpm.pid
+export TPM2TOOLS_TCTI="swtpm:host=127.0.0.1,port=23321"
+sleep 0.5
+tpm2_getcap properties-fixed | grep -A1 -E "TPM2_PT_MANUFACTURER|TPM2_PT_FAMILY_INDICATOR" | grep -E "raw|value"
+echo "== PCR 7,11 before"; tpm2_pcrread sha256:7,11
+head -c 32 /dev/urandom > luks.key
+# 1) policy = "PCR7 and PCR11 must equal their current values"
+tpm2_pcrread -Q -o pcr.bin sha256:7,11
+tpm2_createpolicy -Q --policy-pcr -l sha256:7,11 -f pcr.bin -L pcr.policy
+xxd -p pcr.policy | tr -d '\n'; echo "  <- policy digest"
+# 2) storage root key (SRK-like primary) + sealed data object under it
+tpm2_createprimary -Q -C o -g sha256 -G ecc -c srk.ctx
+tpm2_flushcontext -t
+tpm2_create -Q -C srk.ctx -L pcr.policy -i luks.key -u seal.pub -r seal.priv
+tpm2_flushcontext -t   # no resource manager here: drop transient handles
+ls -l seal.pub seal.priv | awk '{print $5, $9}'
+# 3) unseal while PCRs match
+tpm2_load -Q -C srk.ctx -u seal.pub -r seal.priv -c seal.ctx
+tpm2_flushcontext -t
+tpm2_unseal -c seal.ctx -p pcr:sha256:7,11 > out1.key
+cmp luks.key out1.key && echo "unseal #1: OK, key matches"
+# 4) something new got measured -> PCR11 changes
+tpm2_pcrextend 11:sha256=$(echo -n "evil-initrd" | sha256sum | cut -d' ' -f1)
+echo "== PCR 11 after extend"; tpm2_pcrread sha256:11
+tpm2_unseal -c seal.ctx -p pcr:sha256:7,11 > out2.key 2> err.txt || { echo "unseal #2: FAILED"; grep "ERROR: Esys" err.txt; }
+kill $(cat $D/swtpm.pid)
+```
+
+```text
+  raw: 0x322E3000
+  raw: 0x49424D00
+== PCR 7,11 before
+  sha256:
+    7 : 0x0000000000000000000000000000000000000000000000000000000000000000
+    11: 0x0000000000000000000000000000000000000000000000000000000000000000
+384378caeddc9690b2ac9589827a756a5c46c8b33178b2fe468c80531b97a53e  <- policy digest
+160 seal.priv
+80 seal.pub
+unseal #1: OK, key matches
+== PCR 11 after extend
+  sha256:
+    11: 0x7249F96F96EC08BF0CA1C982F9C24B172916C4C1606A343F9D3ECF746D186243
+unseal #2: FAILED
+ERROR: Esys_Unseal(0x99D) - tpm:session(1):a policy check failed
+```
+
+출력에서 볼 것:
+
+- `0x322E3000`은 ASCII `"2.0"`(TPM 2.0 family), `0x49424D00`은 `"IBM"`(swtpm/libtpms의 제조사 ID). 실제 칩이면 `IFX`(Infineon), `NTC`(Nuvoton), `STM` 등이 나온다.
+- PCR이 모두 0이다. swtpm만 띄우고 아무것도 측정하지 않았기 때문이다.
+- policy digest는 "PCR7·11이 이 값"이라는 조건의 해시 32바이트다. 이 값이 blob(`seal.pub`)에 같이 들어간다.
+- PCR11을 extend한 뒤 unseal은 `0x99D — a policy check failed`로 실패한다. 0x99d는 `TPM_RC_POLICY_FAIL`(0x09d)에 "세션 1번에서 났다"는 비트가 붙은 값이다.
+- `tpm2_flushcontext -t`가 필요한 이유: 이 실험은 resource manager 없이 swtpm에 직접 붙었다. TPM의 transient 객체 슬롯은 3개 정도라서 도구가 남긴 핸들을 지우지 않으면 `0x902 out of memory for object contexts`가 난다(처음에 실제로 이 에러를 만났다). 장비에서는 커널의 `/dev/tpmrm0`이 이 일을 대신한다.
+
+### 4.3 게스트에서: 진짜 커널 드라이버 + LUKS 열기
+
+이번에는 게스트 안에서 `/dev/tpmrm0`으로 같은 일을 하고, unseal한 키를 바로 `cryptsetup open`에 파이프로 넘긴다. 키가 파일로 디스크에 내려가지 않는다(`--key-file -`).
+
+```sh
+# g_luks.sh (뒷부분)
+echo "== seal key to PCR 7,11"; cd /run; tpm2_pcrread sha256:7,10,11
+tpm2_pcrread -Q -o pcr.bin sha256:7,11
+tpm2_createpolicy -Q --policy-pcr -l sha256:7,11 -f pcr.bin -L pcr.pol
+tpm2_createprimary -Q -C o -g sha256 -G ecc -c srk.ctx
+tpm2_create -Q -C srk.ctx -L pcr.pol -i /run/l6.key -u seal.pub -r seal.priv
+tpm2_load -Q -C srk.ctx -u seal.pub -r seal.priv -c seal.ctx
+echo "== boot N: unseal -> open"
+tpm2_unseal -c seal.ctx -p pcr:sha256:7,11 | cryptsetup open --key-file - /dev/vdb l6data && ls /dev/mapper/l6data && cryptsetup close l6data
+tpm2_pcrextend 11:sha256=$(echo -n tampered-initrd | sha256sum | cut -d' ' -f1)
+echo "== after PCR11 extend"; tpm2_unseal -c seal.ctx -p pcr:sha256:7,11 2>&1 >/dev/null | grep ERROR: | head -1
+```
+
+```text
+== seal key to PCR 7,11
+  sha256:
+    7 : 0x0000000000000000000000000000000000000000000000000000000000000000
+    10: 0xDCE0179BFD5EC787AF0C7FDC546E5E78DCAD8A1233C4169AFA97A210C56594C0
+    11: 0x0000000000000000000000000000000000000000000000000000000000000000
+== boot N: unseal -> open
+/dev/mapper/l6data
+== after PCR11 extend
+ERROR:esys:src/tss2-esys/api/Esys_Unseal.c:98:Esys_Unseal() Esys Finish ErrorCode (0x0000099d)
+```
+
+출력에서 볼 것: 게스트에서는 PCR10이 이미 0이 아니다 — §2.4의 IMA가 부팅 중 측정한 값을 extend했기 때문이다. PCR7·11은 0이다. QEMU `-kernel` 직접 부팅이라 펌웨어·부트로더가 측정을 하지 않았다. **실제 제품에서는 이 상태(측정이 없는 상태)에 봉인하면 안 된다** — 공격자가 측정 없는 다른 커널로 부팅해도 PCR이 똑같이 0이기 때문이다. 정책이 의미 있으려면 L5의 measured boot가 PCR을 채워야 한다. 여기서는 PCR11 extend로 "부팅 체인이 달라졌다"를 흉내 냈다.
+
+### 4.4 systemd-cryptenroll — 위 과정을 한 줄로
+
+systemd 248+의 `systemd-cryptenroll`은 TPM 봉인 blob과 PCR 목록을 LUKS2 **token**에 JSON으로 저장하고, 부팅 때 `systemd-cryptsetup`이 `/etc/crypttab`의 `tpm2-device=auto`를 보고 자동으로 unseal한다. 손으로 blob 파일을 관리할 필요가 없다.
+
+```sh
+# g_luks.sh (마지막)
+systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 --unlock-key-file=/run/l6.key /dev/vdb
+cryptsetup luksDump /dev/vdb | grep -A8 "^Tokens:"
+/usr/lib/systemd/systemd-cryptsetup attach l6tpm /dev/vdb - tpm2-device=auto && ls /dev/mapper/l6tpm
+/usr/lib/systemd/systemd-cryptsetup detach l6tpm
+shred -u /run/l6.key
+```
+
+```text
+== systemd-cryptenroll (PCR 7 only)
+TPM2 device supports SHA256 PCR bank but none of the selected PCRs are valid! Firmware apparently did not initialize any of the selected PCRs. Proceeding anyway with SHA256 bank. PCR policy effectively unenforced!
+New TPM2 token enrolled as key slot 1.
+Tokens:
+  0: systemd-tpm2
+	tpm2-hash-pcrs:   7
+	tpm2-pcr-bank:    sha256
+	tpm2-pubkey:
+	            (null)
+	tpm2-pubkey-pcrs:
+	tpm2-primary-alg: ecc
+	tpm2-blob:        00 9e 00 20 24 82 4c d2 fe 7a 71 10 d4 79 db 4c
+/dev/mapper/l6tpm
+```
+
+출력에서 볼 것: 첫 줄의 경고가 이 노트의 핵심 교훈을 그대로 말해 준다 — `none of the selected PCRs are valid! Firmware apparently did not initialize any of the selected PCRs … PCR policy effectively unenforced!` systemd는 PCR 7이 0(측정한 펌웨어가 없음)인 것을 알아채고 "이 정책은 아무것도 지키지 않는다"고 경고한다(§4.3). 그래도 등록은 됐다: 새 keyslot 1과 `systemd-tpm2` token이 생겼고 token에 PCR 목록과 봉인 blob이 들어 있다. `attach`는 키 파일 없이(`-`) TPM만으로 열렸다. 양산 이미지라면 `/etc/crypttab`에 `l6data /dev/disk/by-partlabel/data - tpm2-device=auto`처럼 한 줄 쓰면 된다. 원래 키 파일(keyslot 0)은 공장에서 **복구 키로 바꾸거나 지운다**(`systemd-cryptenroll --wipe-slot=0`) — 남겨 두면 그게 약한 고리다.
+
+PCR 선택 요령:
+
+- PCR 7만: secure boot 정책(인증서)이 같으면 열린다. 커널 업데이트에도 안 깨진다. 대신 "같은 키로 서명된 다른 커널"도 연다.
+- PCR 11(UKI)까지: 커널·initrd가 바뀌면 안 열린다. OTA마다 재봉인해야 한다. systemd 252+는 **서명된 PCR 정책**(`--tpm2-public-key`, `systemd-measure`로 만든 서명)으로 "이 키로 서명된 PCR11 값이면 열어라"를 지원해서 OTA 문제를 푼다.
+- PIN 추가: `--tpm2-with-pin=yes` — TPM이 PIN 시도 횟수를 하드웨어로 제한(dictionary attack lockout)한다. 무인 장비에는 보통 안 쓴다.
+
+### 4.5 커널 trusted keys — 키를 커널 안에서만 쓰기
+
+유저스페이스가 키를 한 번이라도 평문으로 들고 있으면(위의 `tpm2_unseal | cryptsetup`) 그 프로세스의 메모리 덤프로 새어 나갈 수 있다. 커널 **trusted key**는 커널이 직접 TPM(또는 TEE, CAAM)에 봉인·해제를 요청하고, 유저스페이스에는 **봉인 blob만** 보여 준다. **encrypted key**는 trusted key(또는 user key)로 감싼 키다. dm-crypt(`cryptsetup --volume-key-keyring`), EVM HMAC 키, eCryptfs, fscrypt가 이 키를 쓸 수 있다.
+
+```sh
+# g_keys.sh — kernel trusted + encrypted keys backed by the TPM
+export TPM2TOOLS_TCTI=device:/dev/tpmrm0
+cd /run; tpm2_createprimary -Q -C o -g sha256 -G rsa -c prim.ctx
+tpm2_evictcontrol -C o -c prim.ctx 0x81000001
+tpm2_getcap handles-persistent
+K=$(keyctl add trusted l6kmk "new 32 keyhandle=0x81000001" @u); echo "trusted key id=$K"
+keyctl show @u
+echo "== what userspace gets back: TPM-wrapped blob (hex, first 64 chars)"
+keyctl pipe $K | cut -c1-64; keyctl pipe $K | wc -c
+keyctl pipe $K > /run/l6kmk.blob
+E=$(keyctl add encrypted l6enc "new trusted:l6kmk 32" @u); echo "encrypted key id=$E"
+keyctl print $E | cut -c1-80
+echo "== reload after 'reboot' (unlink + load blob)"
+keyctl unlink $E @u; keyctl unlink $K @u
+K2=$(keyctl add trusted l6kmk "load $(cat /run/l6kmk.blob) keyhandle=0x81000001" @u) && echo "reloaded id=$K2"
+keyctl show @u
+tpm2_evictcontrol -Q -C o -c 0x81000001
+```
+
+```text
+persistent-handle: 0x81000001
+action: persisted
+- 0x81000001
+trusted key id=1002053629
+Keyring
+ 294224226 --alswrv      0 65534  keyring: _uid.0
+1002053629 --alswrv      0     0   \_ trusted: l6kmk
+== what userspace gets back: TPM-wrapped blob (hex, first 64 chars)
+3081e906066781050a0105a003010101020500810000010430002e0008000b00
+472
+encrypted key id=773276114
+default trusted:l6kmk 32 e7b0c884cef359cc7bca6b6bf0d317f400b7f48e945386ff662f07a
+== reload after 'reboot' (unlink + load blob)
+reloaded id=741590330
+Keyring
+ 294224226 --alswrv      0 65534  keyring: _uid.0
+ 741590330 --alswrv      0     0   \_ trusted: l6kmk
+```
+
+출력에서 볼 것: `keyctl pipe`로 읽어도 나오는 것은 **TPM이 감싼 blob**(16진 문자열)뿐이다 — 32바이트 키 평문은 커널 메모리에만 있다. blob을 파일로 저장해 두고 다음 부팅에 `load`하면 같은 키가 돌아온다(blob은 이 TPM에서만 풀린다). TPM2에서는 부모 키가 **persistent handle**(`0x81000001`)에 있어야 해서 `tpm2_evictcontrol`로 먼저 만들었다. 백엔드는 부팅 인자 `trusted.source=tpm|tee|caam|dcp`로 고른다(이 커널은 `TRUSTED_KEYS_TPM`, `TRUSTED_KEYS_TEE`가 켜져 있다).
+
+---
+
+## 5. TEE와 OP-TEE — SoC 안의 "두 번째 세계"
+
+### 5.1 직관
+
+TPM이 **별도 칩**이라면, TEE(Trusted Execution Environment)는 **같은 CPU 안의 격리된 실행 환경**이다. Arm TrustZone은 버스 트랜잭션에 NS(Non-Secure) 비트를 붙여서 메모리·주변장치를 Secure/Non-secure로 나눈다. Secure world의 메모리는 Linux(Normal world)가 MMU를 어떻게 설정해도 접근할 수 없다(TZASC/TZC-400 같은 주소 공간 컨트롤러가 버스에서 막는다). SSD 컨트롤러에 "보안 코어 + 그 코어만 볼 수 있는 SRAM과 키 레지스터"가 있었다면 그게 같은 발상이다.
+
+**OP-TEE**는 Linaro가 관리하는 오픈소스 TEE OS다. C5에서 본 부트 체인의 BL32 자리에 들어간다.
+
+```svg
+<svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="170" y="22" font-size="14" font-weight="bold" text-anchor="middle">Normal world (Linux)</text>
+<text x="510" y="22" font-size="14" font-weight="bold" text-anchor="middle">Secure world (OP-TEE)</text>
+<rect x="20" y="36" width="300" height="110" rx="6" fill="#4a7bd0" fill-opacity="0.06" stroke="#4a7bd0"/>
+<text x="32" y="56" font-size="12" font-weight="bold">EL0</text>
+<rect x="32" y="64" width="130" height="40" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="97" y="82" font-size="12" text-anchor="middle">client app</text>
+<text x="97" y="97" font-size="12" text-anchor="middle">libteec</text>
+<rect x="176" y="64" width="132" height="40" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="242" y="82" font-size="12" text-anchor="middle">tee-supplicant</text>
+<text x="242" y="97" font-size="12" text-anchor="middle">(파일·RPMB 대행)</text>
+<text x="32" y="130" font-size="12">/dev/tee0 · /dev/teepriv0</text>
+<rect x="360" y="36" width="300" height="110" rx="6" fill="#d0564a" fill-opacity="0.06" stroke="#d0564a"/>
+<text x="372" y="56" font-size="12" font-weight="bold">S-EL0</text>
+<rect x="372" y="64" width="130" height="40" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="437" y="82" font-size="12" text-anchor="middle">Trusted App</text>
+<text x="437" y="97" font-size="12" text-anchor="middle">(키 보관·서명)</text>
+<rect x="516" y="64" width="132" height="40" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="582" y="82" font-size="12" text-anchor="middle">fTPM TA</text>
+<text x="582" y="97" font-size="12" text-anchor="middle">→ /dev/tpmrm0</text>
+<rect x="20" y="160" width="300" height="60" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="32" y="182" font-size="12" font-weight="bold">EL1 Linux kernel</text>
+<text x="32" y="204" font-size="12">optee 드라이버 · ftpm · trusted(tee)</text>
+<rect x="360" y="160" width="300" height="60" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="372" y="182" font-size="12" font-weight="bold">S-EL1 OP-TEE OS (BL32)</text>
+<text x="372" y="204" font-size="12">TA 로더·서명 검증 · secure storage · HUK</text>
+<rect x="20" y="250" width="640" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="270" font-size="13" text-anchor="middle" font-weight="bold">EL3 TF-A BL31 — secure monitor (SMC 처리, world 전환, PSCI)</text>
+<text x="340" y="287" font-size="12" text-anchor="middle">SMC 호출 = Don이 아는 SVC 예외의 "한 단계 위" 버전</text>
+<line x1="170" y1="220" x2="170" y2="248" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="510" y1="248" x2="510" y2="222" stroke="currentColor" marker-end="url(#ah4)"/>
+<text x="178" y="240" font-size="12">SMC</text>
+<line x1="242" y1="104" x2="242" y2="158" stroke="currentColor" stroke-dasharray="4 3" marker-start="url(#ah4)"/>
+<rect x="20" y="310" width="300" height="50" rx="6" fill="#888" fill-opacity="0.15" stroke="#888"/>
+<text x="170" y="331" font-size="12" text-anchor="middle">REE FS: /var/lib/tee (암호화된 파일)</text>
+<text x="170" y="349" font-size="12" text-anchor="middle">또는 eMMC RPMB (재생 공격 방지)</text>
+<rect x="360" y="310" width="300" height="50" rx="6" fill="#888" fill-opacity="0.15" stroke="#888"/>
+<text x="510" y="331" font-size="12" text-anchor="middle">HUK(퓨즈) → SSK → TA별 키 → 파일 키</text>
+<text x="510" y="349" font-size="12" text-anchor="middle">키 평문은 Secure world 밖으로 안 나감</text>
+</svg>
+```
+그림 4 — OP-TEE의 world 분할. Linux는 TA에게 "이 데이터에 서명해 줘"를 SMC로 부탁할 뿐 키를 보지 못한다. 저장은 Linux의 tee-supplicant가 대행하지만 내용은 암호화돼 있다.
+
+### 5.2 흐름
+
+1. 앱이 `libteec`의 `TEEC_OpenSession(UUID)`를 부르면 → `/dev/tee0` ioctl → 커널 `optee` 드라이버가 공유 메모리를 준비하고 SMC → TF-A BL31이 Secure world로 전환 → OP-TEE OS가 TA(UUID로 찾은 서명된 ELF)를 로드한다.
+2. TA가 파일을 저장하려 하면 OP-TEE OS는 직접 eMMC를 못 만지므로(드라이버가 Linux에 있다) **RPC**로 Normal world의 `tee-supplicant`에게 "이 암호화된 블록을 `/var/lib/tee/...`에 써 줘"라고 부탁한다.
+3. 저장 키 계층: SoC 퓨즈의 **HUK**(Hardware Unique Key) → SSK(Secure Storage Key) → TA별 TSK → 파일별 FEK. eMMC를 떼어 가도 HUK 없이는 못 푼다.
+4. 롤백 공격(옛 파일로 덮어쓰기)은 REE FS만으로는 못 막는다 → eMMC의 **RPMB**(인증된 쓰기 카운터가 있는 파티션, J1)에 저장하거나 해시 트리 루트를 RPMB에 둔다.
+
+### 5.3 이 랩에서는 — 가이드(실행 안 함)
+
+`Image-sec`에는 `CONFIG_TEE=y`, `CONFIG_OPTEE=y`, `CONFIG_TRUSTED_KEYS_TEE=y`가 켜져 있지만 `CONFIG_TCG_FTPM_TEE`는 꺼져 있다. OP-TEE를 실제로 돌리려면 optee_os(qemu_v8 플랫폼)를 빌드하고, TF-A를 `SPD=opteed`와 `BL32=tee-header_v2.bin …`으로 다시 빌드해 `flash.bin`을 만들고(C5의 랩 TF-A는 BL32 없이 빌드됐다), 유저스페이스 `optee_client`(tee-supplicant)와 `optee_test`(xtest)를 게스트 rootfs에 넣어야 한다. 이번 노트에서는 시간 대비 효과가 낮아 **빌드하지 않았다**. 절차 요약:
+
+```sh
+# 가이드(실행 안 함) — OP-TEE on QEMU virt (arm64)
+make -C optee_os O=/var/tmp/L6/optee PLATFORM=vexpress-qemu_armv8a CFG_ARM64_core=y \
+     CROSS_COMPILE64=aarch64-linux-gnu- -j2
+make -C tfa PLAT=qemu SPD=opteed BL32=/var/tmp/L6/optee/core/tee-header_v2.bin \
+     BL32_EXTRA1=/var/tmp/L6/optee/core/tee-pager_v2.bin BL32_EXTRA2=/var/tmp/L6/optee/core/tee-pageable_v2.bin \
+     BL33=u-boot.bin all fip
+# guest: tee-supplicant & ; ls -l /dev/tee0 /dev/teepriv0 ; xtest -l 0
+```
+
+Linaro의 `optee/build` 저장소(`make -f qemu_v8.mk`)가 이 모든 것을 한 번에 묶어 주는 공식 경로다. 실제 보드에서는 NXP·TI·ST BSP가 OP-TEE를 이미 포함한다(`meta-arm`, `meta-ti`, `meta-imx`).
+
+### 5.4 TPM vs TEE 고르기
+
+| 질문 | TPM (dTPM 칩) | TEE (OP-TEE) |
+|---|---|---|
+| 무엇인가 | 정해진 API(TPM 2.0 명령)만 하는 칩 | 내가 만든 코드(TA)를 돌리는 격리 환경 |
+| 측정 부팅·원격 증명 | 표준 지원 (PCR, quote) | fTPM TA를 올리면 TPM처럼 쓸 수 있음 |
+| 키를 쓰는 연산 | TPM이 지원하는 알고리즘만 | 아무 로직이나 (예: 영상 워터마크 서명) |
+| 물리 공격 내성 | 칩 자체가 탬퍼 대응 (인증된 제품) | SoC 수준, 사이드채널에 약할 수 있음 |
+| 비용 | 칩 + 보드 면적 | 0 (SoC에 이미 있음), 대신 개발·인증 |
+| 함정 | SPI 버스 스니핑 → 세션 암호화(`CONFIG_TCG_TPM2_HMAC`) | TEE 코드 버그가 전체 보안을 무너뜨림 |
+
+---
+## 6. LSM — 커널 안의 "두 번째 허가 검사"
+
+### 6.1 직관 — DAC 다음에 오는 MAC
+
+Linux의 기본 권한 검사는 **DAC(Discretionary Access Control)** 다: 파일의 owner/group/other `rwx` 비트와 프로세스의 uid/gid를 비교한다. "Discretionary"인 이유는 파일 주인이 마음대로 권한을 바꿀 수 있어서다. 그리고 **root(uid 0)는 DAC를 무시한다**(정확히는 `CAP_DAC_OVERRIDE`가 있으면 — §8).
+
+**LSM(Linux Security Modules)** 은 커널의 주요 결정 지점(파일 open, exec, 소켓 bind, ptrace, 모듈 로드, mount …) 약 250곳에 **훅**을 박아 두고, 보안 모듈이 거기서 "거부"를 낼 수 있게 한 프레임워크다. 훅은 DAC 검사가 **통과한 뒤에** 불린다. 그래서 LSM은 권한을 **줄일 수만** 있고 늘릴 수는 없다. AppArmor·SELinux처럼 관리자가 정한 정책을 프로세스가 바꿀 수 없는 것을 **MAC(Mandatory Access Control)** 이라 한다 — root도 정책을 벗어날 수 없다(§7의 실험에서 root가 `/etc/shadow`를 못 읽는다).
+
+Don의 말로: DAC는 "태스크가 스스로 설정하는 MPU 영역", MAC는 "부트 때 잠근 MPU 영역 — 그 뒤에는 특권 코드도 못 바꾸는 것".
+
+```svg
+<svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="20" y="16" width="260" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="150" y="38" font-size="13" text-anchor="middle">open("/etc/shadow", O_RDONLY)</text>
+<line x1="150" y1="50" x2="150" y2="68" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="70" width="260" height="34" rx="5" fill="#888" fill-opacity="0.15" stroke="#888"/>
+<text x="150" y="92" font-size="13" text-anchor="middle">path walk (각 디렉터리 x 권한)</text>
+<line x1="150" y1="104" x2="150" y2="122" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="124" width="260" height="46" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="150" y="143" font-size="13" text-anchor="middle">DAC: inode_permission()</text>
+<text x="150" y="161" font-size="12" text-anchor="middle">rwx 비트, 실패 시 CAP_DAC_OVERRIDE?</text>
+<line x1="150" y1="170" x2="150" y2="188" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="190" width="260" height="46" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="150" y="209" font-size="13" text-anchor="middle">security_file_open()</text>
+<text x="150" y="227" font-size="12" text-anchor="middle">등록된 LSM을 순서대로 호출</text>
+<line x1="150" y1="236" x2="150" y2="254" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="256" width="260" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="150" y="278" font-size="13" text-anchor="middle">f_op-&gt;open() (드라이버·FS)</text>
+<text x="150" y="316" font-size="12" text-anchor="middle">어느 단계든 거부하면 -EACCES / -EPERM</text>
+<text x="150" y="334" font-size="12" text-anchor="middle">LSM은 권한을 줄이기만 한다</text>
+<rect x="340" y="16" width="320" height="300" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/>
+<text x="354" y="38" font-size="13" font-weight="bold">LSM 스택 (이 랩 커널의 기본 순서)</text>
+<rect x="354" y="50" width="292" height="30" rx="4" fill="#888" fill-opacity="0.15" stroke="#888"/>
+<text x="366" y="70" font-size="12">capability — 항상 첫 번째 (commoncap)</text>
+<rect x="354" y="86" width="292" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="366" y="106" font-size="12">landlock — 비특권 자기 샌드박스</text>
+<rect x="354" y="122" width="292" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="366" y="142" font-size="12">lockdown — 커널 무결성·기밀성 모드</text>
+<rect x="354" y="158" width="292" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="366" y="178" font-size="12">yama — ptrace 범위 제한</text>
+<rect x="354" y="194" width="292" height="30" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="366" y="214" font-size="12">apparmor 또는 selinux — 하나만 (exclusive)</text>
+<rect x="354" y="230" width="292" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="366" y="250" font-size="12">bpf — eBPF 프로그램을 훅에 붙임</text>
+<rect x="354" y="266" width="292" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="366" y="286" font-size="12">ima, evm — 항상 마지막 (측정·평가)</text>
+<line x1="282" y1="213" x2="338" y2="160" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah5)"/>
+<text x="340" y="350" font-size="12">빨강 = "major" LSM: 하나만 활성. 초록 = 겹쳐 쌓기 가능.</text>
+<text x="340" y="368" font-size="12">순서는 CONFIG_LSM 또는 부팅 인자 lsm= 로 정한다.</text>
+</svg>
+```
+그림 5 — `open()`이 거치는 검사 순서와 LSM 스택. DAC가 허락해도 LSM 하나가 거부하면 끝이다.
+
+### 6.2 exclusive LSM과 stackable LSM
+
+LSM은 처음(2.6)에는 하나만 쓸 수 있었다. 지금은 여러 개를 쌓을 수 있지만, 프로세스·inode에 자기 **보안 레이블(security blob)** 을 크게 붙이는 "major" 모듈들(SELinux, AppArmor, Smack, TOMOYO)은 `LSM_FLAG_EXCLUSIVE`가 붙어 있어 **하나만** 활성화된다. 목록에서 먼저 나온 것이 이긴다.
+
+랩 커널은 `CONFIG_LSM="landlock,lockdown,yama,loadpin,safesetid,integrity,apparmor,selinux,bpf"`로 빌드됐다. 부팅 인자 `lsm=`로 순서와 구성을 바꿔 가며 BusyBox initramfs로 네 번 부팅했다(VM 호스트에서, 게스트당 약 2초).
+
+```sh
+#!/bin/bash
+# run_lsm.sh — boot Image-sec + busybox initramfs with different LSM/lockdown args
+D=/var/tmp/L6; cd $D && rm -rf ir && mkdir ir && cp -a /var/lab/build/rootfs/. ir/ && cp /Users/donh/.elinux_scratch/L6/l6lsm.sh ir/ && (cd ir && find . | cpio -o -H newc --quiet | gzip) > l6_ir.gz
+for A in "" "lsm=landlock,lockdown,yama,integrity,selinux,bpf" "lsm=capability,yama" "lockdown=confidentiality"; do
+  echo "################ append: ${A:-(default)}"
+  timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -kernel /var/lab/out/Image-sec \
+    -initrd $D/l6_ir.gz -append "console=ttyAMA0 quiet $A LAB_CMD=sh~/l6lsm.sh" 2>&1 | grep -vE "^\[|reboot|^$|Power down" | tr -d '\r'
+done
+```
+
+게스트 안에서 도는 `l6lsm.sh`:
+
+```sh
+mount -t securityfs none /sys/kernel/security 2>/dev/null
+echo "cmdline: $(cat /proc/cmdline | sed 's/console=ttyAMA0 //; s/ LAB_CMD.*//')"
+echo "lsm:      $(cat /sys/kernel/security/lsm)"
+echo "lockdown: $(cat /sys/kernel/security/lockdown)"
+dmesg | grep -E "LSM:|SELinux:|AppArmor:|landlock:|Yama:|Lockdown:" | sed 's/^\[[ 0-9.]*\] //' | head -8
+if grep -q 'lockdown=' /proc/cmdline; then
+  echo "-- dd /dev/mem:";   dd if=/dev/mem of=/dev/null bs=4096 count=1 skip=262144 2>&1 | head -1
+  echo "-- /proc/kcore:";   dd if=/proc/kcore of=/dev/null bs=64 count=1 2>&1 | head -1
+  dmesg | grep -i lockdown: | sed 's/^\[[ 0-9.]*\] //' | tail -3
+fi
+```
+
+```text
+################ append: (default)
+lab initramfs: 6.18.55-sec up 1.52s
+cmdline: quiet
+lsm:      capability,landlock,lockdown,yama,apparmor,bpf,ima,evm
+lockdown: [none] integrity confidentiality
+LSM: initializing lsm=capability,landlock,lockdown,yama,apparmor,bpf,ima,evm
+landlock: Up and running.
+Yama: becoming mindful.
+AppArmor: AppArmor initialized
+AppArmor: AppArmor Filesystem Enabled
+AppArmor: AppArmor sha256 policy hashing enabled
+################ append: lsm=landlock,lockdown,yama,integrity,selinux,bpf
+lab initramfs: 6.18.55-sec up 1.49s
+cmdline: quiet lsm=landlock,lockdown,yama,integrity,selinux,bpf
+lsm:      capability,landlock,lockdown,yama,selinux,bpf,ima,evm
+lockdown: [none] integrity confidentiality
+LSM: initializing lsm=capability,landlock,lockdown,yama,selinux,bpf,ima,evm
+landlock: Up and running.
+Yama: becoming mindful.
+SELinux:  Initializing.
+################ append: lsm=capability,yama
+lab initramfs: 6.18.55-sec up 1.35s
+cmdline: quiet lsm=capability,yama
+lsm:      capability,yama,ima,evm
+lockdown: [none] integrity confidentiality
+LSM: initializing lsm=capability,yama,ima,evm
+Yama: becoming mindful.
+################ append: lockdown=confidentiality
+lab initramfs: 6.18.55-sec up 1.52s
+cmdline: quiet lockdown=confidentiality
+lsm:      capability,landlock,lockdown,yama,apparmor,bpf,ima,evm
+lockdown: none integrity [confidentiality]
+LSM: initializing lsm=capability,landlock,lockdown,yama,apparmor,bpf,ima,evm
+landlock: Up and running.
+Yama: becoming mindful.
+AppArmor: AppArmor initialized
+Lockdown: swapper/0: use of tracefs is restricted; see man kernel_lockdown.7
+Lockdown: swapper/0: use of tracefs is restricted; see man kernel_lockdown.7
+Lockdown: swapper/0: use of tracefs is restricted; see man kernel_lockdown.7
+Lockdown: swapper/0: use of tracefs is restricted; see man kernel_lockdown.7
+-- dd /dev/mem:
+dd: can't open '/dev/mem': Operation not permitted
+-- /proc/kcore:
+dd: can't open '/proc/kcore': No such file or directory
+Lockdown: swapper/0: use of tracefs is restricted; see man kernel_lockdown.7
+Lockdown: swapper/0: hibernation is restricted; see man kernel_lockdown.7
+Lockdown: dd: /dev/mem,kmem,port is restricted; see man kernel_lockdown.7
+```
+
+출력에서 볼 것:
+
+- **기본**: 실제 활성 목록은 `capability,landlock,lockdown,yama,apparmor,bpf,ima,evm`. `CONFIG_LSM`에 있던 `selinux`는 빠졌다 — apparmor가 먼저 나왔고 둘 다 exclusive라서다. `loadpin`, `safesetid`는 이 커널에 빌드되지 않아 목록에서 조용히 무시됐다. `integrity`는 6.x에서 `ima,evm` 두 LSM으로 바뀌었고 항상 **맨 뒤**에 붙는다.
+- **`lsm=…,selinux,…`**: apparmor를 빼고 selinux를 넣으니 `SELinux: Initializing.`이 나온다. 정책이 로드되지 않았으므로 SELinux는 아무것도 막지 않는다(정책 로드 전에는 사실상 비활성). Ubuntu rootfs에는 SELinux 정책이 없어서 이 이상은 개념으로만 다룬다(§6.4).
+- **`lsm=capability,yama`**: 최소 구성. 그래도 `ima,evm`은 붙는다(LSM_ORDER_LAST).
+- **`lockdown=confidentiality`**: `/dev/mem` open이 `Operation not permitted`, 커널 로그 `Lockdown: dd: /dev/mem,kmem,port is restricted`. tracefs·hibernation도 막힌다. `/proc/kcore`는 이 커널에 `CONFIG_PROC_KCORE`가 없어 원래 없다.
+
+### 6.3 lockdown과 Yama — 작지만 효과 큰 두 모듈
+
+**lockdown** 은 "root라도 실행 중인 커널을 고칠 수 없게" 하는 LSM이다. secure boot로 커널을 검증해도 root가 `/dev/mem`에 쓰거나, 서명 안 된 모듈을 넣거나, `kexec_load`로 다른 커널을 띄우면 의미가 없기 때문이다.
+
+| 모드 | 막는 것 (일부) |
+|---|---|
+| `integrity` | `/dev/mem`·`/dev/kmem`·`/dev/port`, 서명 없는 모듈, 서명 없는 kexec 이미지, `iopl`/`ioperm`, MSR 쓰기, ACPI 테이블 덮어쓰기, 부팅 후 커널 파라미터 일부, hibernation |
+| `confidentiality` | 위 + 커널 메모리를 **읽는** 경로: `/proc/kcore`, kprobes·BPF로 커널 메모리 읽기, tracefs, perf 일부 |
+
+양산 장비는 최소 `integrity`, 가능하면 `confidentiality`. 커널 config로 강제하려면 `CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY`. 단, `confidentiality`는 현장 디버깅 도구(ftrace, BPF 트레이싱 — M 모듈)도 막으므로 **개발 빌드와 양산 빌드의 차이**로 관리한다. 런타임에 더 엄격한 쪽으로만 바꿀 수 있다(`echo confidentiality > /sys/kernel/security/lockdown`), 되돌릴 수는 없다.
+
+**Yama** 는 `ptrace` 범위를 제한한다. 기본 Linux 규칙은 "같은 uid면 서로 ptrace 가능"이다. 그러면 카메라 데몬이 뚫렸을 때 같은 uid의 다른 데몬 메모리를 읽어 키를 빼낼 수 있다. `kernel.yama.ptrace_scope`:
+
+| 값 | 의미 |
+|---|---|
+| 0 | 고전 규칙 (같은 uid면 attach 가능) |
+| 1 | 자기 자손만 attach 가능 (Ubuntu 기본) |
+| 2 | `CAP_SYS_PTRACE` 필요 |
+| 3 | 아무도 못 함, 재부팅 전까지 되돌릴 수 없음 |
+
+게스트에서 `nobody`가 자기 자손이 아닌(형제) `nobody` 프로세스에 `strace -p`를 해 봤다.
+
+```sh
+# g_cap.sh 마지막 부분
+NB="setpriv --reuid=nobody --regid=nogroup --clear-groups"
+$NB sleep 300 & sleep 1; T=$(pgrep -u nobody -n sleep); echo "target pid owner: $(ps -o user= -p $T)"
+for s in 1 0; do echo $s > /proc/sys/kernel/yama/ptrace_scope
+  echo "ptrace_scope=$s:"; $NB timeout 3 strace -p $T 2>&1 | head -1; done
+echo 1 > /proc/sys/kernel/yama/ptrace_scope; kill $T
+```
+
+```text
+== 8. Yama ptrace_scope
+target pid owner: nobody
+ptrace_scope=1:
+strace: attach: ptrace(PTRACE_SEIZE, 459): Operation not permitted
+ptrace_scope=0:
+strace: Process 459 attached
+```
+
+출력에서 볼 것: 같은 uid인데도 scope 1에서는 `PTRACE_SEIZE … Operation not permitted`, scope 0에서는 attach된다. 양산 장비는 디버거를 쓸 일이 없으므로 **2 또는 3**이 맞다. (이 값 변경은 게스트 안에서만 했다.)
+
+### 6.4 SELinux vs AppArmor — 임베디드에서 무엇을 고르나
+
+| 항목 | AppArmor | SELinux |
+|---|---|---|
+| 기준 | **경로**(`/usr/bin/foo`가 `/var/lib/foo/**`에 쓰기) | **레이블**(type: `camera_t` 도메인이 `camera_data_t` 파일에 쓰기) |
+| 파일시스템 요구 | 없음 | 모든 파일에 `security.selinux` xattr 레이블 (이미지 빌드 때 labeling) |
+| 정책 작성 | 프로그램별 프로파일, 사람이 읽기 쉬움 | type enforcement 규칙 + 컴파일(refpolicy, `checkpolicy`), 학습 곡선 큼 |
+| 기본 동작 | 프로파일 없는 프로세스는 제약 없음 (unconfined) | 정책이 모든 것에 적용 (unconfined 도메인도 정책의 일부) |
+| 하드 링크·rename 우회 | 경로 기반이라 주의 필요 | 레이블이 inode에 붙어 있어 강함 |
+| 대표 사용처 | Ubuntu, Debian, SUSE, Yocto `meta-security` | Android(전 기기 enforcing), RHEL/Fedora, 자동차 일부 |
+| 임베디드 부담 | 작음: 데몬 몇 개만 프로파일링 | 큼: 전체 정책, 레이블 관리, read-only rootfs면 빌드 때 레이블 필수 |
+
+**정리**: 데몬이 10개 내외인 장비에서 "노출된 서비스 몇 개만 가두고 싶다"면 AppArmor가 비용 대비 효과가 좋다. 규제(국방·의료)나 고객이 "모든 프로세스에 MAC"을 요구하거나, Android처럼 서드파티 코드가 도는 플랫폼이면 SELinux다. Yocto는 `meta-selinux` 레이어로 레이블이 붙은 이미지를 만들 수 있다. 셋째 선택지로 **Smack**(단순 레이블, Tizen·AGL 자동차)이 있다.
+
+---
+
+## 7. AppArmor 실습 — 데몬 하나를 가두기
+
+### 7.1 시나리오
+
+`l6d`는 설정 파일 `/etc/l6_cfg`를 읽고 상태 파일 `/var/lib/l6/state`를 쓰는 작은 데몬이다. 버그 때문에(혹은 공격자가 조종해서) `/etc/shadow`도 읽으려 한다. **root로 실행**한다 — DAC로는 아무것도 막히지 않는 최악의 경우다. 정적 C 바이너리라서 프로파일에 공유 라이브러리 규칙이 필요 없다.
+
+```c
+/* l6d.c — tiny "daemon" for the AppArmor demo: read cfg, write state, peek at shadow */
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+static void op(const char *what, const char *path, int flags)
+{
+    char buf[64];
+    int fd = open(path, flags, 0644);
+    if (fd < 0) { printf("l6d: %-5s %-20s -> %s\n", what, path, strerror(errno)); return; }
+    if (flags == O_RDONLY) {
+        ssize_t n = read(fd, buf, sizeof buf - 1);
+        buf[n > 0 ? n : 0] = 0;
+        buf[strcspn(buf, "\n")] = 0;
+        printf("l6d: %-5s %-20s -> OK \"%.20s\"\n", what, path, buf);
+    } else {
+        dprintf(fd, "pid=%d ok\n", getpid());
+        printf("l6d: %-5s %-20s -> OK\n", what, path);
+    }
+    close(fd);
+}
+
+int main(void)
+{
+    printf("l6d: uid=%d\n", getuid());
+    op("read", "/etc/l6_cfg", O_RDONLY);
+    op("write", "/var/lib/l6/state", O_WRONLY | O_CREAT | O_TRUNC);
+    op("read", "/etc/shadow", O_RDONLY);
+    return 0;
+}
+```
+
+### 7.2 complain → enforce → 고치기
+
+AppArmor 프로파일은 "이 실행 파일 경로가 exec되면 이 규칙을 적용"이다. 처음에는 **complain 모드**(위반을 허용하고 로그만 남김)로 시작해서, 실제 동작에서 필요한 접근을 모은 뒤 **enforce**로 바꾼다. 일부러 `/var/lib/l6/state` 쓰기 규칙을 빠뜨린 프로파일로 시작했다.
+
+```sh
+# g_aa.sh — AppArmor profile for l6d: complain -> enforce -> fix
+install -m 755 /root/l6/l6d /usr/local/bin/l6d
+echo "mode=night fps=30" > /etc/l6_cfg; mkdir -p /var/lib/l6
+P=/etc/apparmor.d/usr.local.bin.l6d
+cat > $P <<'PROF'
+abi <abi/4.0>,
+include <tunables/global>
+profile l6d /usr/local/bin/l6d flags=(complain) {
+  /etc/l6_cfg r,
+}
+PROF
+echo "== load (complain)"; apparmor_parser -r $P && aa-status | grep -E "l6d|complain mode"
+/usr/local/bin/l6d
+echo "== audit (complain)"; journalctl -k -b --no-pager -o cat | grep 'profile="l6d"' | grep -o 'apparmor="[A-Z]*" operation="[a-z]*".*name="[^"]*"'
+sed -i 's/ flags=(complain)//' $P; apparmor_parser -r $P
+echo "== enforce"; aa-status | grep -E "l6d|enforce mode" | head -3
+/usr/local/bin/l6d
+echo "== audit (enforce)"; journalctl -k -b --no-pager -o cat | grep 'apparmor="DENIED"' | grep -o 'apparmor="[A-Z]*" operation="[a-z]*".*name="[^"]*".*requested_mask="[a-z]*"'
+echo "== fix: allow state dir only"
+sed -i 's|^  /etc/l6_cfg r,|  /etc/l6_cfg r,\n  /var/lib/l6/state w,|' $P; cat $P; apparmor_parser -r $P
+/usr/local/bin/l6d
+```
+
+```text
+== load (complain)
+5 profiles are in complain mode.
+   l6d
+0 processes are in complain mode.
+l6d: uid=0
+l6d: read  /etc/l6_cfg          -> OK "mode=night fps=30"
+l6d: write /var/lib/l6/state    -> OK
+l6d: read  /etc/shadow          -> OK "root::20704:0:99999:"
+== audit (complain)
+apparmor="ALLOWED" operation="mknod" class="file" profile="l6d" name="/var/lib/l6/state"
+apparmor="ALLOWED" operation="open" class="file" profile="l6d" name="/var/lib/l6/state"
+apparmor="ALLOWED" operation="open" class="file" profile="l6d" name="/etc/shadow"
+== enforce
+8 profiles are in enforce mode.
+   l6d
+0 processes are in enforce mode.
+l6d: uid=0
+l6d: read  /etc/l6_cfg          -> OK "mode=night fps=30"
+l6d: write /var/lib/l6/state    -> Permission denied
+l6d: read  /etc/shadow          -> Permission denied
+== audit (enforce)
+apparmor="DENIED" operation="open" class="file" profile="l6d" name="/var/lib/l6/state" pid=431 comm="l6d" requested_mask="wc"
+apparmor="DENIED" operation="open" class="file" profile="l6d" name="/etc/shadow" pid=431 comm="l6d" requested_mask="r"
+== fix: allow state dir only
+abi <abi/4.0>,
+include <tunables/global>
+profile l6d /usr/local/bin/l6d {
+  /etc/l6_cfg r,
+  /var/lib/l6/state w,
+}
+l6d: uid=0
+l6d: read  /etc/l6_cfg          -> OK "mode=night fps=30"
+l6d: write /var/lib/l6/state    -> OK
+l6d: read  /etc/shadow          -> Permission denied
+```
+
+출력에서 볼 것:
+
+- **complain**: 세 접근이 모두 성공하고(`/etc/shadow`의 첫 20바이트까지 읽혔다 — root 비밀번호가 비어 있는 랩 이미지라 `root::`), 로그에 `apparmor="ALLOWED"`가 남는다. 이 로그가 프로파일 초안의 재료다. `aa-logprof`가 이 로그를 읽어 규칙을 대화형으로 제안한다(이 랩에서는 손으로 했다).
+- **enforce**: **uid=0인데도** `state` 쓰기와 `/etc/shadow` 읽기가 `Permission denied`다. 로그의 `requested_mask="wc"`는 write+create, `"r"`은 read. 어떤 규칙이 빠졌는지 그대로 알려 준다.
+- **고친 뒤**: 필요한 `state` 쓰기만 허용하고 `/etc/shadow`는 계속 막힌다. 이게 최소 권한 프로파일이다.
+
+### 7.3 실무 요령과 함정
+
+- 프로파일 이름(`profile l6d`)과 붙는 경로(`/usr/local/bin/l6d`)는 다를 수 있다. 실행 파일 경로가 바뀌면(OTA로 `/opt/...`로 이동) 프로파일이 **붙지 않고 unconfined로 돈다** — 경로 기반의 대표 함정이다. `aa-status`의 "processes are in enforce mode" 수를 부팅 테스트에서 검사하라.
+- 동적 링크 프로그램은 `include <abstractions/base>`(libc, `/etc/ld.so.cache` 등)가 필요하다.
+- systemd unit에서 `AppArmorProfile=l6d`로 서비스에 프로파일을 지정할 수도 있다(exec 경로와 무관).
+- 프로파일은 부팅 때 `apparmor.service`가 `/etc/apparmor.d/`를 컴파일해 로드한다. 느린 SoC에서는 캐시(`/var/cache/apparmor`) 또는 빌드 때 미리 컴파일한 바이너리 정책을 쓴다. 읽기전용 rootfs면 캐시를 이미지에 같이 굽는다.
+- K4 노트에서 본 Ubuntu 24.04+의 "비특권 user namespace 제한"(`kernel.apparmor_restrict_unprivileged_userns`)도 AppArmor 기능이다 — MAC가 프로파일 없는 프로그램에도 정책을 거는 예다.
+
+---
+
+## 8. Capabilities — root를 41조각으로 나누기
+
+### 8.1 직관
+
+전통적 Unix는 uid 0이면 모든 검사를 통과했다. **capabilities**는 root의 힘을 41개(커널 6.18 기준, `CAP_CHECKPOINT_RESTORE`가 40번)로 쪼갠 것이다. 프로세스는 필요한 조각만 가진다. 커널 검사는 "uid가 0인가"가 아니라 `capable(CAP_NET_BIND_SERVICE)`처럼 **조각 단위**다.
+
+임베디드에서 자주 만나는 것:
+
+| capability | 필요한 일 | 예 |
+|---|---|---|
+| `CAP_NET_BIND_SERVICE` | 1024 미만 포트 bind | RTSP 554, HTTP 80 |
+| `CAP_NET_ADMIN` | 인터페이스·라우팅·방화벽 설정, CAN 비트레이트 설정 | `ip link set can0 type can bitrate 500000` |
+| `CAP_NET_RAW` | raw/packet 소켓 | ping, LiDAR raw 패킷 캡처 |
+| `CAP_SYS_TIME` | 시스템 시계 설정 | GNSS → 시계 동기 데몬 |
+| `CAP_SYS_NICE` | 실시간 우선순위(`SCHED_FIFO`), CPU affinity | 모터 제어 루프 (N 모듈) |
+| `CAP_IPC_LOCK` | `mlockall` 한도 초과 | 실시간 프로세스 페이지 고정 |
+| `CAP_SYS_RAWIO` | `/dev/mem`, `ioperm`, 일부 SG_IO | 레거시 레지스터 툴 (피해야 함) |
+| `CAP_SYS_ADMIN` | mount, 그 밖의 수많은 것 — "새 root" | 거의 주면 안 된다 |
+| `CAP_SYS_MODULE` | 모듈 로드 | 주면 커널 장악 |
+| `CAP_DAC_OVERRIDE` | 파일 rwx 무시 | root가 아무 파일이나 읽는 이유 |
+
+### 8.2 다섯 개의 집합
+
+프로세스마다 64비트 마스크 다섯 개가 있다(`/proc/<pid>/status`의 `Cap*` 줄).
+
+```svg
+<svg viewBox="0 0 680 390" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="110" y="22" font-size="13" font-weight="bold" text-anchor="middle">exec 전 프로세스 (P)</text>
+<rect x="20" y="34" width="180" height="32" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="55" font-size="12" text-anchor="middle">Bounding — 상한선</text>
+<rect x="20" y="72" width="180" height="32" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="93" font-size="12" text-anchor="middle">Inheritable</text>
+<rect x="20" y="110" width="180" height="32" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="131" font-size="12" text-anchor="middle">Ambient — 비root에게 상속</text>
+<rect x="20" y="148" width="180" height="32" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="169" font-size="12" text-anchor="middle">Permitted / Effective</text>
+<text x="340" y="22" font-size="13" font-weight="bold" text-anchor="middle">실행 파일 (F, xattr)</text>
+<rect x="250" y="34" width="180" height="32" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="55" font-size="12" text-anchor="middle">F.permitted</text>
+<rect x="250" y="72" width="180" height="32" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="93" font-size="12" text-anchor="middle">F.inheritable</text>
+<rect x="250" y="110" width="180" height="32" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="131" font-size="12" text-anchor="middle">F.effective (1비트)</text>
+<text x="340" y="166" font-size="12" text-anchor="middle">setcap cap_x+ep 로 기록</text>
+<text x="570" y="22" font-size="13" font-weight="bold" text-anchor="middle">exec 후 (P')</text>
+<rect x="480" y="34" width="180" height="146" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="570" y="62" font-size="12" text-anchor="middle">P'.amb = F 있으면 0</text>
+<text x="570" y="86" font-size="12" text-anchor="middle">P'.perm =</text>
+<text x="570" y="104" font-size="12" text-anchor="middle">(F.perm AND P.bnd)</text>
+<text x="570" y="122" font-size="12" text-anchor="middle">OR (P.inh AND F.inh)</text>
+<text x="570" y="140" font-size="12" text-anchor="middle">OR P'.amb</text>
+<text x="570" y="164" font-size="12" text-anchor="middle">P'.eff = F.eff ? perm : amb</text>
+<line x1="200" y1="110" x2="478" y2="110" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah6)"/>
+<line x1="430" y1="60" x2="478" y2="80" stroke="currentColor" marker-end="url(#ah6)"/>
+<rect x="20" y="210" width="640" height="160" rx="6" fill="#888" fill-opacity="0.08" stroke="#888"/>
+<text x="34" y="234" font-size="13" font-weight="bold">한 줄 요약</text>
+<text x="34" y="258" font-size="12">Bounding: 이 프로세스와 자손이 절대 넘을 수 없는 상한 (capsh --drop, CapabilityBoundingSet=)</text>
+<text x="34" y="280" font-size="12">Permitted: 지금 켤 수 있는 것 · Effective: 지금 켜져 있어 커널 검사에 쓰이는 것</text>
+<text x="34" y="302" font-size="12">File caps: 실행 파일에 붙여 exec 때 Permitted로 올림 (setuid-root의 대체)</text>
+<text x="34" y="324" font-size="12">Ambient: file caps 없는 일반 프로그램에 exec 너머로 전달 (systemd AmbientCapabilities=)</text>
+<text x="34" y="346" font-size="12">no_new_privs: exec로 권한이 늘어나는 모든 경로(setuid, file caps)를 막는다</text>
+</svg>
+```
+그림 6 — capability 집합과 `execve()` 때의 변환 규칙(`man 7 capabilities`). 커널 구현은 `security/commoncap.c`의 `cap_bprm_creds_from_file()`.
+
+### 8.3 실험 — 비root가 포트 80을 bind하고 시계를 맞추려면
+
+아래 C 프로그램은 자기 `Cap*` 집합을 출력하고, `127.0.0.1:80` bind와 `clock_settime()`(현재 시각을 그대로 다시 설정 — 시계를 바꾸지 않는다)을 시도한다.
+
+```c
+/* l6_cap.c — what can this process do? bind :80 and clock_settime need caps */
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
+
+static void show_caps(void)
+{
+    char line[256];
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) { perror("status"); return; }
+    while (fgets(line, sizeof line, f))
+        if (!strncmp(line, "Cap", 3) || !strncmp(line, "NoNewPrivs", 10))
+            fputs(line, stdout);
+    fclose(f);
+}
+
+int main(void)
+{
+    printf("uid=%d euid=%d\n", getuid(), geteuid());
+    show_caps();
+
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) { perror("socket"); return 1; }
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(80),
+                             .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0)
+        printf("bind(127.0.0.1:80)      -> FAIL %s\n", strerror(errno));
+    else
+        printf("bind(127.0.0.1:80)      -> OK\n");
+    close(s);
+
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);       /* set the clock to itself */
+    if (clock_settime(CLOCK_REALTIME, &now) < 0)
+        printf("clock_settime(REALTIME) -> FAIL %s\n", strerror(errno));
+    else
+        printf("clock_settime(REALTIME) -> OK\n");
+    return 0;
+}
+```
+
+먼저 VM 호스트(Ubuntu 26.04, 일반 사용자)에서 실행했다.
+
+```sh
+gcc -std=gnu11 -Wall -Wextra -O2 -static l6_cap.c -o /var/tmp/L6/l6_cap && /var/tmp/L6/l6_cap
+sysctl net.ipv4.ip_unprivileged_port_start
+```
+
+```text
+uid=501 euid=501
+CapInh:	0000000000000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+bind(127.0.0.1:80)      -> OK
+clock_settime(REALTIME) -> FAIL Operation not permitted
+net.ipv4.ip_unprivileged_port_start = 0
+```
+
+출력에서 볼 것: 모든 집합이 0인데 **bind가 성공했다**. VM 호스트는 `net.ipv4.ip_unprivileged_port_start = 0`이라 "특권 포트"가 아예 없다(최신 Ubuntu 데스크톱 기본값). 커널 기본값은 1024다 — 게스트에서 다시 본다. 이런 sysctl 하나가 보안 가정을 바꾼다는 점이 교훈이다.
+
+게스트(Ubuntu Base, 기본 sysctl)에서 `nobody`로 실행 → file caps 부여 → 다시 실행 → root인데 bounding set에서 뺀 경우를 차례로 봤다.
+
+```sh
+# g_cap.sh (앞부분)
+install -m 755 /root/l6/l6_cap /usr/local/bin/l6_cap
+sysctl net.ipv4.ip_unprivileged_port_start
+NB="setpriv --reuid=nobody --regid=nogroup --clear-groups"
+echo "== 1. nobody, no file caps"; $NB /usr/local/bin/l6_cap
+setcap cap_net_bind_service,cap_sys_time+ep /usr/local/bin/l6_cap
+echo "== 2. getcap"; getcap /usr/local/bin/l6_cap
+echo "== 3. nobody, file caps"; $NB /usr/local/bin/l6_cap
+setcap -r /usr/local/bin/l6_cap
+echo "== 5. root, bounding set without NET_BIND_SERVICE/SYS_TIME"
+capsh --drop=cap_net_bind_service,cap_sys_time -- -c /usr/local/bin/l6_cap
+echo "== 6. capsh --decode"; capsh --decode=000001ffffffffff | cut -c1-120; capsh --decode=0000000002000400
+echo "== 7. capsh --print as root"; capsh --print | head -8
+```
+
+```text
+net.ipv4.ip_unprivileged_port_start = 1024
+== 1. nobody, no file caps
+uid=65534 euid=65534
+CapInh:	0000000000000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+bind(127.0.0.1:80)      -> FAIL Permission denied
+clock_settime(REALTIME) -> FAIL Operation not permitted
+== 2. getcap
+/usr/local/bin/l6_cap cap_net_bind_service,cap_sys_time=ep
+== 3. nobody, file caps
+uid=65534 euid=65534
+CapInh:	0000000000000000
+CapPrm:	0000000002000400
+CapEff:	0000000002000400
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+bind(127.0.0.1:80)      -> OK
+clock_settime(REALTIME) -> OK
+== 5. root, bounding set without NET_BIND_SERVICE/SYS_TIME
+uid=0 euid=0
+CapInh:	0000000000000000
+CapPrm:	000001fffdfffbff
+CapEff:	000001fffdfffbff
+CapBnd:	000001fffdfffbff
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+bind(127.0.0.1:80)      -> FAIL Permission denied
+clock_settime(REALTIME) -> FAIL Operation not permitted
+== 6. capsh --decode
+0x000001ffffffffff=cap_chown,cap_dac_override,cap_dac_read_search,cap_fowner,cap_fsetid,cap_kill,cap_setgid,cap_setuid,c
+0x0000000002000400=cap_net_bind_service,cap_sys_time
+== 7. capsh --print as root
+Current: =ep
+Bounding set =cap_chown,cap_dac_override,cap_dac_read_search,cap_fowner,cap_fsetid,cap_kill,cap_setgid,cap_setuid,cap_setpcap,cap_linux_immutable,cap_net_bind_service,cap_net_broadcast,cap_net_admin,cap_net_raw,cap_ipc_lock,cap_ipc_owner,cap_sys_module,cap_sys_rawio,cap_sys_chroot,cap_sys_ptrace,cap_sys_pacct,cap_sys_admin,cap_sys_boot,cap_sys_nice,cap_sys_resource,cap_sys_time,cap_sys_tty_config,cap_mknod,cap_lease,cap_audit_write,cap_audit_control,cap_setfcap,cap_mac_override,cap_mac_admin,cap_syslog,cap_wake_alarm,cap_block_suspend,cap_audit_read,cap_perfmon,cap_bpf,cap_checkpoint_restore
+Ambient set =
+Current IAB:
+Securebits: 00/0x0/1'b0 (no-new-privs=0)
+ secure-noroot: no (unlocked)
+ secure-no-suid-fixup: no (unlocked)
+ secure-keep-caps: no (unlocked)
+```
+
+출력에서 볼 것:
+
+- **1**: `nobody`는 bind(`Permission denied`)와 시계 설정(`Operation not permitted`) 모두 실패. 같은 "권한 없음"이라도 errno가 다르다 — 소켓 계층은 `EACCES`, 시간 계층은 `EPERM`을 돌려준다.
+- **2–3**: `setcap … +ep`(permitted + effective 비트)를 붙이자 `CapPrm`/`CapEff`가 `0x2000400`이 되고 둘 다 성공한다. `0x400` = bit 10 = `CAP_NET_BIND_SERVICE`, `0x2000000` = bit 25 = `CAP_SYS_TIME`(6번이 해독해 준다). file caps는 `security.capability` xattr에 저장되므로 **xattr을 보존하지 않는 복사·이미지 생성(tar 옵션, 일부 mkfs 도구)에서 사라진다** — 양산 빌드에서 자주 깨지는 지점이다. 정적 바이너리에도 똑같이 동작한다(동적 로더와 무관).
+- **5**: uid 0인데도 실패한다. `capsh --drop`이 bounding set에서 두 비트를 뺐기 때문에 exec 뒤 root의 `CapPrm`이 `0x1fffdfffbff`(두 비트가 빠진 값)다. **"root냐 아니냐"가 아니라 "그 capability가 있느냐"** 를 커널은 본다.
+- **7**: `capsh --print`의 `Bounding set`이 41개 이름을 다 보여 준다. 마지막이 `cap_checkpoint_restore`(40번)다.
+
+### 8.4 no_new_privs와 file caps — 첫 실험에서 틀린 결론을 낼 뻔했다
+
+`no_new_privs`(NNP)는 "exec로 권한이 늘어나는 것"을 막는 프로세스 플래그다. 그러면 file caps도 막혀야 한다. 처음에는 root 셸에서 `setpriv --reuid=nobody --no-new-privs l6_cap`으로 시험했는데 **caps가 그대로 생겼다**.
+
+```text
+== 4. nobody, file caps + no_new_privs
+uid=65534 euid=65534
+CapInh:	0000000000000000
+CapPrm:	0000000002000400
+CapEff:	0000000002000400
+CapBnd:	000001ffffffffff
+CapAmb:	0000000000000000
+NoNewPrivs:	1
+bind(127.0.0.1:80)      -> OK
+clock_settime(REALTIME) -> OK
+```
+
+커널 코드(`security/commoncap.c`, 6.18.55)를 보면 NNP일 때의 규칙은 "새 permitted를 **exec 직전의 permitted와 교집합**"이다(`new->cap_permitted = cap_intersect(new->cap_permitted, old->cap_permitted)`). 즉 "늘어나지 않게"이지 "없애라"가 아니다. 위 실험은 root가 시작한 `setpriv`가 `setresuid` 뒤에도 permitted를 들고 있는 상태에서 exec했으므로 "늘어난 것"이 없었다. 정말 비특권인 부모(`nobody` 셸)가 NNP를 걸고 exec하면 결과가 달라진다.
+
+```sh
+# g_cap2.sh
+setcap cap_net_bind_service,cap_sys_time+ep /usr/local/bin/l6_cap
+NB="setpriv --reuid=nobody --regid=nogroup --clear-groups"
+echo "== a. setpriv(root) --reuid + --no-new-privs: what the parent still holds"
+$NB --no-new-privs grep -E "^Cap(Prm|Eff)|NoNewPrivs" /proc/self/status
+echo "== b. nobody shell -> setpriv --no-new-privs -> l6_cap"
+$NB setpriv --no-new-privs /usr/local/bin/l6_cap | grep -E "CapPrm|NoNewPrivs|bind|clock"
+setcap -r /usr/local/bin/l6_cap
+```
+
+```text
+== a. setpriv(root) --reuid + --no-new-privs: what the parent still holds
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+NoNewPrivs:	1
+== b. nobody shell -> setpriv --no-new-privs -> l6_cap
+CapPrm:	0000000000000000
+NoNewPrivs:	1
+bind(127.0.0.1:80)      -> FAIL Permission denied
+clock_settime(REALTIME) -> FAIL Operation not permitted
+```
+
+출력에서 볼 것: (b)에서 file caps가 있는데도 `CapPrm: 0`, 둘 다 실패. 이게 systemd의 `NoNewPrivileges=yes`가 하는 일이다 — 그래서 **NNP 서비스에 권한을 주려면 file caps가 아니라 `AmbientCapabilities=`** 를 써야 한다(§10). 실무 교훈: 보안 실험은 "부모가 이미 무엇을 들고 있었나"까지 확인해야 결론이 맞다.
+
+---
+
+## 9. seccomp-bpf와 Landlock — 프로세스가 스스로 문을 잠근다
+
+### 9.1 seccomp-bpf — syscall 방화벽
+
+**seccomp-bpf**는 프로세스가 "앞으로 나는 이 syscall들만 쓴다"는 필터(classic BPF 프로그램)를 커널에 등록하는 기능이다. 이후 모든 syscall 진입 때 커널이 필터를 돌려 `ALLOW`/`ERRNO`/`KILL`/`TRAP`/`LOG`/`USER_NOTIF`를 정한다. E6에서 본 arm64 syscall 진입 경로(`el0_svc` → `el0_svc_common`)에서 `syscall_trace_enter()` → `__secure_computing()`이 이 필터를 실행한다. 필터는 **한 번 걸면 풀 수 없고**, fork/exec 너머로 상속된다.
+
+Don의 말로: "SVC 핸들러 맨 앞에 syscall 번호 화이트리스트 테이블을 두고, 태스크마다 다른 테이블을 쓰게 한 것". 공격자가 데몬에서 코드 실행을 얻어도 `execve`, `ptrace`, `mount`, `init_module`이 막혀 있으면 할 수 있는 게 크게 준다.
+
+libseccomp 없이 BPF를 직접 쓴 예다(이 VM에는 `seccomp.h` 헤더가 없다). `uname`은 `EPERM`으로 실패하게, `mkdirat`는 프로세스를 죽이게 했다. arm64에는 `mkdir` syscall이 없고 glibc `mkdir()`이 `mkdirat`를 부른다는 점도 확인할 수 있다.
+
+```c
+/* l6_seccomp.c — raw seccomp-bpf: uname() -> EPERM, then mkdir() -> kill */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/prctl.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/utsname.h>
+#include <unistd.h>
+
+#define LD_NR   BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr))
+#define DENY(nr, act) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (nr), 0, 1), \
+                      BPF_STMT(BPF_RET | BPF_K, (act))
+
+int main(void)
+{
+    struct sock_filter f[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_AARCH64, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),   /* wrong ABI */
+        LD_NR,
+        DENY(__NR_uname,    SECCOMP_RET_ERRNO | EPERM),
+        DENY(__NR_mkdirat,  SECCOMP_RET_KILL_PROCESS),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog prog = { .len = sizeof f / sizeof f[0], .filter = f };
+
+    /* unprivileged seccomp requires no_new_privs */
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) { perror("NNP"); exit(1); }
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) { perror("seccomp"); exit(1); }
+    printf("filter installed (%u insns)\n", prog.len);
+
+    struct utsname u;
+    if (uname(&u) < 0) printf("uname()  -> %s\n", strerror(errno));
+    printf("getpid() -> %d (allowed)\n", getpid());
+    fflush(stdout);
+    mkdir("/tmp/l6_never", 0755);              /* SIGSYS here */
+    printf("not reached\n");
+    return 0;
+}
+```
+
+VM 호스트(일반 사용자):
+
+```text
+filter installed (9 insns)
+uname()  -> Operation not permitted
+getpid() -> 1723358 (allowed)
+bash: line 1: 1723358 Bad system call            ./l6_seccomp
+exit=159
+```
+
+게스트(`nobody`)와 커널 audit 로그:
+
+```text
+filter installed (9 insns)
+uname()  -> Operation not permitted
+getpid() -> 488 (allowed)
+Bad system call (core dumped)
+exit=159
+audit: type=1326 audit(1792297999.823:112): auid=0 uid=65534 gid=65534 ses=1 subj=unconfined pid=488 comm="l6_seccomp" exe="/root/l6/l6_seccomp" sig=31 arch=c00000b7 syscall=34 compat=0 ip=0x4133e0 code=0x80000000
+```
+
+출력에서 볼 것: `uname`은 `EPERM`으로 실패하고 프로그램은 계속 돈다. `mkdir`에서 `SIGSYS`(31)로 죽어 셸 종료 코드가 128+31 = **159**다. 커널 audit 레코드 `type=1326`(AUDIT_SECCOMP)에 `sig=31 arch=c00000b7 syscall=34`가 찍힌다 — `0xc00000b7`은 `AUDIT_ARCH_AARCH64`, 34는 arm64의 `__NR_mkdirat`. **arch 검사가 첫 명령인 이유**: 같은 CPU에서 다른 ABI(예: 32비트 compat)로 syscall을 부르면 번호 체계가 달라 필터를 우회할 수 있기 때문이다. 필터를 직접 쓰는 일은 드물고, 보통 systemd `SystemCallFilter=`(§10)나 libseccomp, 컨테이너 런타임의 기본 프로파일(L8)을 쓴다.
+
+### 9.2 Landlock — 비특권 프로세스의 파일 접근 샌드박스
+
+**Landlock**(5.13+)은 root도 정책 파일도 필요 없이 **프로세스가 스스로** "나는 이 디렉터리만 읽고 이 디렉터리만 쓴다"를 거는 LSM이다. seccomp가 "어떤 syscall"을 막는다면 Landlock은 "어떤 **객체**(경로, 6.7+는 TCP 포트)"를 막는다. AppArmor와 달리 관리자가 아니라 **개발자가 코드에 넣는다** — 파서처럼 위험한 부분을 실행하기 직전에 스스로 잠그면 된다.
+
+```c
+/* l6_landlock.c — unprivileged self-sandbox: read only $1, write only $2 */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/landlock.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#define RD (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR)
+#define WR (LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_MAKE_REG)
+
+static void allow(int rs, const char *path, __u64 acc)
+{
+    struct landlock_path_beneath_attr pb = { .allowed_access = acc };
+    pb.parent_fd = open(path, O_PATH | O_CLOEXEC);
+    if (pb.parent_fd < 0) { perror(path); exit(1); }
+    if (syscall(SYS_landlock_add_rule, rs, LANDLOCK_RULE_PATH_BENEATH, &pb, 0))
+        { perror("add_rule"); exit(1); }
+    close(pb.parent_fd);
+}
+
+static void try(const char *path, int flags)
+{
+    int fd = open(path, flags, 0644);
+    printf("open(%-22s %s) -> %s\n", path, flags == O_RDONLY ? "R" : "W",
+           fd < 0 ? strerror(errno) : "OK");
+    if (fd >= 0) close(fd);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 3) { fprintf(stderr, "usage: %s RO_DIR RW_DIR\n", argv[0]); return 2; }
+    int abi = syscall(SYS_landlock_create_ruleset, NULL, 0,
+                      LANDLOCK_CREATE_RULESET_VERSION);
+    printf("landlock ABI = %d\n", abi);
+    if (abi < 1) { perror("landlock"); return 1; }
+
+    struct landlock_ruleset_attr ra = { .handled_access_fs = RD | WR };
+    int rs = syscall(SYS_landlock_create_ruleset, &ra, sizeof ra, 0);
+    if (rs < 0) { perror("create_ruleset"); return 1; }
+    allow(rs, argv[1], RD);
+    allow(rs, argv[2], RD | WR);
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) { perror("NNP"); return 1; }
+    if (syscall(SYS_landlock_restrict_self, rs, 0)) { perror("restrict"); return 1; }
+    close(rs);
+
+    char p[256];
+    snprintf(p, sizeof p, "%s/cfg", argv[1]);      try(p, O_RDONLY);
+    snprintf(p, sizeof p, "%s/cfg", argv[1]);      try(p, O_WRONLY);
+    snprintf(p, sizeof p, "%s/out.log", argv[2]);  try(p, O_WRONLY | O_CREAT);
+    try("/etc/passwd", O_RDONLY);
+    return 0;
+}
+```
+
+VM 호스트(커널 7.0)와 게스트(6.18.55-sec):
+
+```text
+--- VM host (uname -r: 7.0.0-38-generic)
+landlock ABI = 8
+open(/var/tmp/L6/ro/cfg     R) -> OK
+open(/var/tmp/L6/ro/cfg     W) -> Permission denied
+open(/var/tmp/L6/rw/out.log W) -> OK
+open(/etc/passwd            R) -> Permission denied
+--- QEMU guest (6.18.55-sec), as nobody
+landlock ABI = 7
+open(/tmp/l6ro/cfg          R) -> OK
+open(/tmp/l6ro/cfg          W) -> Permission denied
+open(/tmp/l6rw/out.log      W) -> OK
+open(/etc/passwd            R) -> Permission denied
+```
+
+출력에서 볼 것: 허용한 디렉터리 안에서만 열리고, 나머지(`/etc/passwd` 읽기, RO 디렉터리 쓰기)는 `Permission denied`. **ABI 버전이 커널마다 다르다**(호스트 7.0 = 8, 게스트 6.18 = 7). ABI가 올라갈 때마다 다룰 수 있는 접근 종류가 늘었다(2: 파일 rename/link 간 이동, 3: truncate, 4: TCP bind/connect, 5: ioctl, 6: abstract unix socket·signal 범위 …). 코드는 런타임에 ABI를 물어보고 **모르는 비트는 빼고** 정책을 만들어야 오래된 커널에서도 동작한다(best-effort).
+
+---
+## 10. systemd 하드닝 — 위의 모든 것을 unit 파일 몇 줄로
+
+### 10.1 직관
+
+§8–§9의 capabilities, NNP, seccomp, 그리고 L8에서 볼 mount namespace를 **데몬 코드를 고치지 않고** 적용하는 가장 쉬운 방법이 systemd unit의 샌드박스 옵션이다. systemd(PID 1)가 서비스를 fork한 뒤 exec하기 직전에 namespace를 만들고, 자격을 바꾸고, seccomp 필터를 건다(L1에서 본 `ExecStart` 실행 경로). 데몬 입장에서는 "처음부터 좁은 세상에서 태어난" 것이다.
+
+```svg
+<svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg">
+<rect x="250" y="150" width="180" height="70" rx="8" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c"/>
+<text x="340" y="180" font-size="14" text-anchor="middle" font-weight="bold">l6svc 프로세스</text>
+<text x="340" y="202" font-size="12" text-anchor="middle">uid 63434 (동적)</text>
+<rect x="20" y="20" width="200" height="104" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="32" y="40" font-size="13" font-weight="bold">신원</text>
+<text x="32" y="62" font-size="12">DynamicUser=yes</text>
+<text x="32" y="80" font-size="12">NoNewPrivileges=yes</text>
+<text x="32" y="98" font-size="12">RestrictSUIDSGID=yes</text>
+<text x="32" y="116" font-size="12">→ cred, no_new_privs</text>
+<rect x="240" y="20" width="200" height="104" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="252" y="40" font-size="13" font-weight="bold">capabilities</text>
+<text x="252" y="62" font-size="12">CapabilityBoundingSet=</text>
+<text x="252" y="80" font-size="12">AmbientCapabilities=</text>
+<text x="252" y="98" font-size="12">  CAP_NET_BIND_SERVICE</text>
+<text x="252" y="116" font-size="12">→ bounding, ambient</text>
+<rect x="460" y="20" width="200" height="104" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="472" y="40" font-size="13" font-weight="bold">파일시스템</text>
+<text x="472" y="62" font-size="12">ProtectSystem=strict</text>
+<text x="472" y="80" font-size="12">ProtectHome · PrivateTmp</text>
+<text x="472" y="98" font-size="12">StateDirectory=l6svc</text>
+<text x="472" y="116" font-size="12">→ mount namespace (ro bind)</text>
+<rect x="20" y="246" width="200" height="104" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="32" y="266" font-size="13" font-weight="bold">syscall</text>
+<text x="32" y="288" font-size="12">SystemCallFilter=</text>
+<text x="32" y="306" font-size="12">  @system-service</text>
+<text x="32" y="324" font-size="12">MemoryDenyWriteExecute</text>
+<text x="32" y="342" font-size="12">→ seccomp-bpf</text>
+<rect x="240" y="246" width="200" height="104" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="252" y="266" font-size="13" font-weight="bold">장치·커널</text>
+<text x="252" y="288" font-size="12">PrivateDevices=yes</text>
+<text x="252" y="306" font-size="12">ProtectKernelTunables</text>
+<text x="252" y="324" font-size="12">ProtectKernelModules · Clock</text>
+<text x="252" y="342" font-size="12">→ 최소 /dev, ro /proc/sys</text>
+<rect x="460" y="246" width="200" height="104" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="472" y="266" font-size="13" font-weight="bold">네트워크</text>
+<text x="472" y="288" font-size="12">RestrictAddressFamilies=</text>
+<text x="472" y="306" font-size="12">  AF_INET AF_INET6 AF_UNIX</text>
+<text x="472" y="324" font-size="12">IPAddressDeny= (cgroup BPF)</text>
+<text x="472" y="342" font-size="12">→ seccomp(socket), BPF</text>
+<line x1="220" y1="124" x2="262" y2="150" stroke="currentColor"/>
+<line x1="340" y1="124" x2="340" y2="150" stroke="currentColor"/>
+<line x1="460" y1="124" x2="418" y2="150" stroke="currentColor"/>
+<line x1="220" y1="246" x2="262" y2="220" stroke="currentColor"/>
+<line x1="340" y1="246" x2="340" y2="220" stroke="currentColor"/>
+<line x1="460" y1="246" x2="418" y2="220" stroke="currentColor"/>
+</svg>
+```
+그림 7 — systemd 샌드박스 옵션과 그 밑의 커널 메커니즘(→ 뒤). 여섯 방향의 벽이 데몬을 둘러싼다.
+
+### 10.2 실험 대상 — "카메라 데몬" l6svc
+
+`l6svc`는 TCP 80을 listen하고(→ `CAP_NET_BIND_SERVICE` 필요), 상태 파일을 `$STATE_DIRECTORY`(systemd가 주는 환경 변수, 없으면 `/var/lib/l6svc`)에 쓰고, 인자에 따라 일부러 나쁜 짓(`/etc`에 쓰기, `mount()`)을 한다. 템플릿 unit(`l6-naive@.service`, `l6-hard@.service`)의 `%i`로 모드를 넘긴다.
+
+```c
+/* l6svc.c — "camera daemon" for systemd hardening: bind :80, write state, misbehave on request */
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mount.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+static void caps(void)
+{
+    char l[128];
+    FILE *f = fopen("/proc/self/status", "r");
+    while (f && fgets(l, sizeof l, f))
+        if (!strncmp(l, "CapEff", 6) || !strncmp(l, "CapAmb", 6) || !strncmp(l, "CapBnd", 6))
+            printf("l6svc: %s", l);
+    if (f) fclose(f);
+}
+
+int main(int argc, char **argv)
+{
+    const char *mode = argc > 1 ? argv[1] : "serve";
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    printf("l6svc: mode=%s uid=%d gid=%d\n", mode, getuid(), getgid());
+    caps();
+
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(80) };
+    if (s < 0 || bind(s, (struct sockaddr *)&a, sizeof a) || listen(s, 4))
+        printf("l6svc: bind :80 -> %s\n", strerror(errno));
+    else
+        printf("l6svc: bind :80 -> OK\n");
+
+    const char *st = getenv("STATE_DIRECTORY") ? getenv("STATE_DIRECTORY") : "/var/lib/l6svc";
+    char p[256];
+    snprintf(p, sizeof p, "%s/frames.idx", st);
+    int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    printf("l6svc: write %s -> %s\n", p, fd < 0 ? strerror(errno) : "OK");
+    if (fd >= 0) close(fd);
+
+    if (!strcmp(mode, "write-etc")) {
+        fd = open("/etc/l6svc_tamper", O_WRONLY | O_CREAT, 0644);
+        printf("l6svc: write /etc/l6svc_tamper -> %s\n", fd < 0 ? strerror(errno) : "OK");
+    } else if (!strcmp(mode, "mount")) {
+        printf("l6svc: calling mount() ...\n");
+        int r = mount("none", "/mnt", "tmpfs", 0, NULL);
+        printf("l6svc: mount -> %s\n", r ? strerror(errno) : "OK (tmpfs on /mnt)");
+    }
+    pause();
+    return 0;
+}
+```
+
+naive unit은 `ExecStart=` 한 줄뿐이다(root, 모든 capability). 하드닝 unit:
+
+```text
+# /etc/systemd/system/l6-hard@.service
+[Unit]
+Description=L6 camera daemon (hardened, mode %i)
+[Service]
+ExecStart=/usr/local/bin/l6svc %i
+DynamicUser=yes
+StateDirectory=l6svc
+UMask=0077
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+```
+
+비교용으로 root 그대로에 `ProtectSystem=strict` **한 줄만** 더한 `l6-ps@.service`도 만들었다.
+
+### 10.3 `systemd-analyze security` — 점수로 보기
+
+`systemd-analyze security <unit>`은 unit의 샌드박스 설정을 약 80개 항목으로 채점해 **노출도(exposure) 0.0(안전)~10.0(위험)** 을 낸다. 실제 실행 중인 프로세스를 보는 게 아니라 **unit 설정**을 본다.
+
+```sh
+# g_sd.sh (앞부분)
+systemctl stop swupdate.service 2>/dev/null   # 콘솔 소음 줄이기 (게스트 안에서만)
+install -m 755 /root/l6/l6svc /usr/local/bin/l6svc; mkdir -p /var/lib/l6svc
+cat > /etc/systemd/system/l6-naive@.service <<'U'
+[Unit]
+Description=L6 camera daemon (naive, mode %i)
+[Service]
+ExecStart=/usr/local/bin/l6svc %i
+U
+cp /root/l6/l6-hard@.service /root/l6/l6-ps@.service /etc/systemd/system/
+systemctl daemon-reload
+echo "== exposure naive"; systemd-analyze security --no-pager l6-naive@serve.service | tail -1
+echo "== exposure ps-only"; systemd-analyze security --no-pager l6-ps@serve.service | tail -1
+echo "== exposure hard";  systemd-analyze security --no-pager l6-hard@serve.service | tail -1
+echo "== naive: first lines"; systemd-analyze security --no-pager l6-naive@serve.service | head -8
+```
+
+```text
+== exposure naive
+→ Overall exposure level for l6-naive@serve.service: 9.6 UNSAFE :-{
+== exposure ps-only
+→ Overall exposure level for l6-ps@serve.service: 9.2 UNSAFE :-{
+== exposure hard
+→ Overall exposure level for l6-hard@serve.service: 1.4 OK :-)
+== naive: first lines
+  NAME                                                        DESCRIPTION                                                             EXPOSURE
+✗ RootDirectory=/RootImage=                                   Service runs within the host's root directory                                0.1
+  SupplementaryGroups=                                        Service runs as root, option does not matter
+  RemoveIPC=                                                  Service runs as root, option does not apply
+✗ User=/DynamicUser=                                          Service runs as root user                                                    0.4
+✗ CapabilityBoundingSet=~CAP_SYS_TIME                         Service processes may change the system clock                                0.2
+✗ NoNewPrivileges=                                            Service processes may acquire new privileges                                 0.2
+✓ AmbientCapabilities=                                        Service process does not receive ambient capabilities
+```
+
+하드닝 unit에 남은 감점 항목(첫 번째 실행에서 `grep "^✗"`로 뽑은 것):
+
+```text
+✗ RootDirectory=/RootImage=                                   Service runs within the host's root directory                                       0.1
+✗ AmbientCapabilities=                                        Service process receives ambient capabilities                                       0.1
+✗ RestrictAddressFamilies=~AF_UNIX                            Service may allocate local sockets                                                  0.1
+✗ RestrictAddressFamilies=~AF_(INET|INET6)                    Service may allocate Internet sockets                                               0.3
+✗ CapabilityBoundingSet=~CAP_NET_(BIND_SERVICE|BROADCAST|RAW) Service has elevated networking privileges                                          0.1
+✗ PrivateNetwork=                                             Service has access to the host's network                                            0.5
+✗ PrivateUsers=                                               Service has access to other users                                                   0.2
+✗ DeviceAllow=                                                Service has a device ACL with some special devices: char-rtc:r                      0.1
+✗ IPAddressDeny=                                              Service does not define an IP address allow list                                    0.2
+```
+
+```svg
+<svg viewBox="0 0 680 210" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="13" font-weight="bold">systemd-analyze security 노출도 (0 = 안전, 10 = 위험)</text>
+<text x="240" y="63" font-size="12" text-anchor="end">l6-naive@ (root, 설정 없음)</text>
+<rect x="250" y="44" width="374.4" height="28" fill="#d0564a" fill-opacity="0.5" stroke="#d0564a"/>
+<text x="618.4" y="63" font-size="12" text-anchor="end">9.6</text>
+<text x="240" y="107" font-size="12" text-anchor="end">l6-ps@ (root + ProtectSystem)</text>
+<rect x="250" y="88" width="358.8" height="28" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c"/>
+<text x="602.8" y="107" font-size="12" text-anchor="end">9.2</text>
+<text x="240" y="151" font-size="12" text-anchor="end">l6-hard@ (§10.2 전체)</text>
+<rect x="250" y="132" width="54.6" height="28" fill="#3f9a6b" fill-opacity="0.5" stroke="#3f9a6b"/>
+<text x="310.6" y="151" font-size="12">1.4</text>
+<line x1="250" y1="40" x2="250" y2="172" stroke="currentColor"/>
+<line x1="250" y1="172" x2="640" y2="172" stroke="currentColor"/>
+<line x1="250.0" y1="172" x2="250.0" y2="177" stroke="currentColor"/>
+<text x="250.0" y="191" font-size="12" text-anchor="middle">0</text>
+<line x1="328.0" y1="172" x2="328.0" y2="177" stroke="currentColor"/>
+<text x="328.0" y="191" font-size="12" text-anchor="middle">2</text>
+<line x1="406.0" y1="172" x2="406.0" y2="177" stroke="currentColor"/>
+<text x="406.0" y="191" font-size="12" text-anchor="middle">4</text>
+<line x1="484.0" y1="172" x2="484.0" y2="177" stroke="currentColor"/>
+<text x="484.0" y="191" font-size="12" text-anchor="middle">6</text>
+<line x1="562.0" y1="172" x2="562.0" y2="177" stroke="currentColor"/>
+<text x="562.0" y="191" font-size="12" text-anchor="middle">8</text>
+<line x1="640.0" y1="172" x2="640.0" y2="177" stroke="currentColor"/>
+<text x="640.0" y="191" font-size="12" text-anchor="middle">10</text>
+</svg>
+```
+그림 8 — 같은 바이너리, unit 설정만 다른 세 서비스의 노출도(게스트에서 측정, 낮을수록 좋다). `ProtectSystem=strict` 한 줄은 점수로는 0.4밖에 안 줄지만 실제 피해(시스템 파일 변조)는 크게 막는다 — 점수는 "체크리스트 충족도"이지 위험의 정확한 측정이 아니다.
+
+출력에서 볼 것: naive 9.6 `UNSAFE` → hard 1.4 `OK`. 남은 감점은 이 데몬의 **본업에 필요한 것**(인터넷 소켓, 80 포트 capability)과 `PrivateNetwork`/`IPAddressDeny`(네트워크 서비스라 못 씀, `IPAddressAllow=`로 관리 망만 허용할 수 있다), `RootDirectory`(별도 이미지로 실행 — `RootImage=` + dm-verity로 갈 수 있다) 정도다. 0을 목표로 하는 게 아니라 **남은 항목마다 "왜 필요한지"를 설명할 수 있으면** 된다.
+
+### 10.4 실제로 막히는지 확인
+
+```sh
+# g_sd.sh (뒷부분)
+for u in l6-naive@serve l6-hard@serve; do systemctl start $u; sleep 6; echo "== $u"
+  journalctl -b -u $u --no-pager -o cat | grep l6svc:
+  P=$(systemctl show -p MainPID --value $u); ps -o user,pid,comm -p $P | tail -1
+  grep -E "^(NoNewPrivs|Seccomp|Seccomp_filters)" /proc/$P/status; systemctl stop $u; done
+echo "== ProtectSystem=strict (root service)"; systemctl start l6-naive@write-etc l6-ps@write-etc; sleep 3
+for u in l6-naive@write-etc l6-ps@write-etc; do echo "$u: $(journalctl -b -u $u --no-pager -o cat | grep tamper)"; done
+awk '$5=="/" || $5=="/var" || $5=="/etc" {print $5, $6}' /proc/$(systemctl show -p MainPID --value l6-ps@write-etc)/mountinfo
+systemctl stop l6-naive@write-etc l6-ps@write-etc; rm -f /etc/l6svc_tamper
+echo "== SystemCallFilter"; systemctl start l6-naive@mount; sleep 3
+journalctl -b -u l6-naive@mount --no-pager -o cat | grep "l6svc: mount"; systemctl stop l6-naive@mount; umount /mnt 2>/dev/null
+systemctl start l6-hard@mount; for i in $(seq 30); do [ "$(systemctl show -p ActiveState --value l6-hard@mount)" = failed ] && break; sleep 1; done
+journalctl -b -u l6-hard@mount --no-pager -o cat | grep -E "l6svc: (calling|mount)|SYS|Failed"
+systemctl show -p Result -p ExecMainCode -p ExecMainStatus l6-hard@mount
+journalctl -b -k --no-pager -o cat | grep -E "type=1326" | grep l6svc | tail -1
+```
+
+```text
+== l6-naive@serve
+l6svc: mode=serve uid=0 gid=0
+l6svc: CapEff:	000001ffffffffff
+l6svc: CapBnd:	000001ffffffffff
+l6svc: CapAmb:	0000000000000000
+l6svc: bind :80 -> OK
+l6svc: write /var/lib/l6svc/frames.idx -> OK
+root         597 l6svc
+NoNewPrivs:	0
+Seccomp:	0
+Seccomp_filters:	0
+== l6-hard@serve
+l6svc: mode=serve uid=63434 gid=63434
+l6svc: CapEff:	0000000000000400
+l6svc: CapBnd:	0000000000000400
+l6svc: CapAmb:	0000000000000400
+l6svc: bind :80 -> OK
+l6svc: write /var/lib/l6svc/frames.idx -> OK
+63434        622 l6svc
+NoNewPrivs:	1
+Seccomp:	2
+Seccomp_filters:	22
+== ProtectSystem=strict (root service)
+l6-naive@write-etc: l6svc: write /etc/l6svc_tamper -> OK
+l6-ps@write-etc: l6svc: write /etc/l6svc_tamper -> Read-only file system
+/ ro,relatime
+== SystemCallFilter
+l6svc: mount -> OK (tmpfs on /mnt)
+l6svc: calling mount() ...
+l6-hard@mount.service: Main process exited, code=dumped, status=31/SYS
+l6-hard@mount.service: Failed with result 'core-dump'.
+Result=core-dump
+ExecMainCode=3
+ExecMainStatus=31
+audit: type=1326 audit(1792300300.047:106): auid=4294967295 uid=63434 gid=63434 ses=4294967295 subj=unconfined pid=720 comm="l6svc" exe="/usr/local/bin/l6svc" sig=31 arch=c00000b7 syscall=40 compat=0 ip=0x41444c code=0x80000000
+```
+
+출력에서 볼 것:
+
+- **naive**: uid 0, `CapEff` 전부(`0x1ffffffffff`), seccomp 없음.
+- **hard**: 동적 uid(`DynamicUser`가 61184–65519 범위에서 할당), `CapEff = CapBnd = CapAmb = 0x400`(= `CAP_NET_BIND_SERVICE` 하나). 비root인데 80 포트 bind 성공 — **ambient capability** 덕분이다. NNP가 켜져 있어 file caps(§8.4)로는 불가능한 일이다. `Seccomp: 2`(filter 모드), 필터 22개(systemd가 그룹마다 따로 걸어서 여러 개다). 상태 파일은 `StateDirectory=`가 만들어 준 `/var/lib/l6svc`(`DynamicUser=`일 때는 systemd.exec(5)에 따라 `/var/lib/private/l6svc`를 가리키는 심볼릭 링크다)에 써진다.
+- **ProtectSystem=strict**: root 서비스인데도 `/etc` 쓰기가 `Read-only file system`(`EROFS`) — 서비스의 mount namespace에서 `/`가 `ro`로 다시 bind mount됐기 때문이다(`mountinfo`). 같은 root naive 서비스는 `/etc`를 마음대로 바꾼다.
+- **SystemCallFilter**: naive는 `/mnt`에 tmpfs를 mount해 버린다. hard는 `mount()`를 부르는 순간 `SIGSYS`로 죽는다: `Main process exited, code=dumped, status=31/SYS`, `Result=core-dump`(`ExecMainCode=3` = `CLD_DUMPED`). SIGSYS의 기본 동작이 core dump라서 systemd-coredump(L7)가 덤프를 받았다. 커널 audit에는 `syscall=40`(arm64 `__NR_mount`)과 `sig=31`이 남는다 — 현장에서 "서비스가 가끔 죽는다"의 원인을 찾을 때 이 줄이 결정적이다. systemd의 기본 동작은 **kill**이다. 디버깅 중에는 `SystemCallErrorNumber=EPERM`으로 "죽이지 말고 실패시키기"를 쓸 수 있고, `SystemCallLog=`로 로그만 남기게도 할 수 있다.
+
+### 10.5 자주 쓰는 지시자 정리
+
+| 지시자 | 효과 | 커널 메커니즘 | 임베디드 주의 |
+|---|---|---|---|
+| `User=` / `DynamicUser=yes` | 비root 실행 / 실행 때마다 임시 uid | `setresuid` | DynamicUser는 파일 소유가 매번 다를 수 있어 `StateDirectory=` 와 함께 |
+| `NoNewPrivileges=yes` | setuid·file caps로 권한 상승 불가 | `PR_SET_NO_NEW_PRIVS` | setuid 헬퍼(ping 등)를 부르는 데몬은 깨진다 |
+| `CapabilityBoundingSet=` | 상한선 | bounding set | 비워 두면(`=`) 전부 제거 |
+| `AmbientCapabilities=` | 비root에게 지정 caps 부여 | ambient set | bounding에도 넣어야 한다 |
+| `ProtectSystem=strict` | `/` 전체 읽기전용, `/dev` `/proc` `/sys` 제외 | mount ns + ro bind | 쓰기 경로는 `StateDirectory=`, `ReadWritePaths=` |
+| `PrivateTmp=yes` | 서비스 전용 `/tmp` | mount ns | 다른 서비스와 `/tmp`로 소켓 공유하던 코드가 깨짐 |
+| `PrivateDevices=yes` | `/dev`에 null·zero·random 등만 | mount ns + device cgroup | 센서·카메라 데몬은 `DeviceAllow=/dev/video0 rw`와 함께 `PrivateDevices=no` |
+| `DeviceAllow=` | 허용 장치 목록 | cgroup v2 device BPF | 이름이 아니라 major:minor로 적용됨 |
+| `ProtectKernelTunables/Modules/Logs` | `/proc/sys` ro, 모듈 로드 금지, dmesg 금지 | mount ns + caps + seccomp | |
+| `SystemCallFilter=@system-service` | 일반 서비스용 syscall 묶음만 허용 | seccomp-bpf | 목록: `systemd-analyze syscall-filter` |
+| `SystemCallArchitectures=native` | compat ABI 차단 | seccomp arch 검사 | §9.1의 arch 검사와 같은 이유 |
+| `MemoryDenyWriteExecute=yes` | W+X 메모리 금지 | seccomp(`mmap`/`mprotect` 인자 검사) | **JIT(Python 일부, Java, LuaJIT, 일부 GStreamer 플러그인)** 은 깨진다 |
+| `RestrictAddressFamilies=` | 소켓 종류 제한 | seccomp(`socket` 인자) | CAN 데몬은 `AF_CAN`, netlink 쓰면 `AF_NETLINK` 추가 |
+| `IPAddressAllow/Deny=` | IP 방화벽 | cgroup BPF | 관리 VLAN만 허용 |
+| `AppArmorProfile=` | 프로파일 지정 | AppArmor | §7 |
+
+---
+
+## 11. 최소 권한 설계 — 로봇·카메라 데몬 하나를 처음부터
+
+### 11.1 질문 순서
+
+새 데몬을 넣을 때 이 순서로 묻는다.
+
+1. **입력이 신뢰할 수 없는가?** (네트워크, USB, 외부 센서 패킷, 사용자 파일) → 그렇다면 가장 강하게 가둔다. 파서는 별도 프로세스로 분리하는 것도 고려한다.
+2. **root가 필요한 일이 정확히 무엇인가?** 대부분 capability 하나, 장치 파일 하나, 또는 sysfs 경로 하나다.
+3. 장치 접근이면 → capability가 아니라 **파일 권한**으로 푼다: udev 규칙(L2)으로 `/dev/video0`을 `video` 그룹에, 데몬은 `SupplementaryGroups=video`.
+4. 남은 것이 진짜 커널 권한이면 → `AmbientCapabilities=` + `CapabilityBoundingSet=`에 그것만.
+5. 한 번만 필요한 특권 작업(예: 부팅 때 CAN 비트레이트 설정)은 → **별도 oneshot 서비스**로 분리하고 본 데몬은 권한 없이 돈다. systemd-networkd의 `.network` 파일로 CAN 비트레이트를 설정하면 데몬이 `CAP_NET_ADMIN`을 가질 필요가 없다.
+6. 파일 쓰기는 `StateDirectory=`/`LogsDirectory=`/`RuntimeDirectory=`만.
+7. 마지막으로 `systemd-analyze security`로 남은 항목을 설명할 수 있는지 확인하고, AppArmor 프로파일(선택)을 붙인다.
+
+### 11.2 예 — 센서 키트 데몬들
+
+| 데몬 | 필요한 것 | 주는 방법 | 주지 말 것 |
+|---|---|---|---|
+| 카메라 스트리머 (RTSP 554) | `/dev/video*`, `/dev/media*`, 554 포트 | `SupplementaryGroups=video`, `DeviceAllow=char-video4linux rw`, `AmbientCapabilities=CAP_NET_BIND_SERVICE` (또는 8554 포트로 바꿔 caps 0개) | root, `CAP_SYS_ADMIN` |
+| IMU 수집 (I2C/IIO) | `/dev/iio:device0`, sysfs 트리거 설정 | udev 규칙으로 그룹 권한, sysfs 속성은 udev `RUN`/tmpfiles로 그룹 쓰기 허용 | `CAP_SYS_RAWIO`, `/dev/mem` |
+| GNSS 시간 동기 | `/dev/ttyS1`, 시계 설정 | `dialout` 그룹 + `AmbientCapabilities=CAP_SYS_TIME` (chrony 방식) | root |
+| 모터 제어 (CAN, 실시간) | `AF_CAN` 소켓, `SCHED_FIFO` | `RestrictAddressFamilies=AF_CAN AF_UNIX`, `AmbientCapabilities=CAP_SYS_NICE` 또는 `CPUSchedulingPolicy=fifo`(systemd가 대신 설정, caps 불필요) | `CAP_NET_ADMIN` (비트레이트는 networkd가) |
+| OTA 에이전트 (L4) | 파티션 쓰기, 재부팅 요청 | 이건 거의 root여야 한다 → 그래서 **입력(업데이트 번들)을 서명 검증**하고, 네트워크 다운로드는 비특권 프로세스로 분리 | 다운로드와 설치를 같은 root 프로세스에서 |
+
+> 핵심 문장: "root가 필요한 데몬"은 대부분 **"root가 필요한 일 하나를 가진 데몬"** 이다. 그 하나를 capability·장치 권한·별도 oneshot으로 떼어 내면 나머지는 비root로 돈다.
+
+---
+
+## 12. 양산 이미지 — 디버그 인터페이스와 패치 위생
+
+### 12.1 개발 빌드 vs 양산 빌드
+
+SSD 펌웨어에서 양산 FW는 vendor-unique 명령을 잠그고 UART 로그를 끄고 JTAG를 퓨즈로 막았다. Linux 장비에서 같은 목록:
+
+| 인터페이스 | 위험 | 양산 조치 |
+|---|---|---|
+| 시리얼 콘솔 + 자동 로그인 (이 랩 이미지처럼) | 물리 접근 = root 셸 | `serial-getty` 비활성, 커널 `console=` 제거 또는 로그만, U-Boot `bootdelay=-2`·환경 변수 잠금 (L5) |
+| U-Boot 셸 | `bootargs` 바꿔 `init=/bin/sh` | 서명된 FIT + 환경 고정, 셸 비활성 |
+| ssh | 기본 비밀번호, 공유 키 | 비밀번호 로그인 금지, 장비별 키 또는 인증서, 필요할 때만 켜는 서비스 |
+| root 비밀번호 비어 있음 | 이 랩의 `/etc/shadow`처럼 `root::` | 잠금(`passwd -l root`) |
+| `/dev/mem`, `/dev/kmem` | 커널·장치 메모리 직접 접근 | `CONFIG_DEVMEM=n` 또는 `STRICT_DEVMEM` + lockdown |
+| debugfs, tracefs | 커널 내부 노출·조작 | 마운트 안 함, lockdown confidentiality, 또는 `CONFIG_DEBUG_FS=n` |
+| kexec | 서명 안 된 커널로 교체 | `CONFIG_KEXEC_SIG` + lockdown, 또는 `kernel.kexec_load_disabled=1` |
+| 모듈 로드 | 커널 코드 주입 | `CONFIG_MODULE_SIG_FORCE`, 부팅 후 `kernel.modules_disabled=1` |
+| JTAG/SWD | 전부 | SoC 퓨즈로 잠금 또는 인증 디버그 (L5, P) |
+| USB 가젯·OTG | 장비가 키보드·네트워크로 위장 | 필요 없으면 DT에서 비활성 |
+| core dump | 메모리의 비밀이 파일로 | `Storage=none` 또는 암호화된 data 파티션에만 (L7) |
+
+빌드 시스템에서 이 차이를 **이미지 기능으로** 관리한다(Yocto `IMAGE_FEATURES`의 `debug-tweaks`·`allow-empty-password`를 양산 이미지에서 빼는 것 — K4·K5).
+
+### 12.2 패치 위생 — CVE는 런타임 보안의 일부다
+
+위의 모든 층은 "알려진 버그를 이용한 공격"에는 시간을 벌어 줄 뿐이다. 결국 고쳐야 한다.
+
+- **LTS 커널을 고르고 따라간다**: 이 랩의 6.18.y처럼 장기 지원 커널을 쓰고 stable 업데이트를 주기적으로 반영한다. 벤더 BSP 커널(오래된 4.x/5.x)이 가장 큰 위험이다.
+- **SBOM으로 무엇이 들어 있는지 안다**: K7 노트의 SPDX SBOM(Yocto `create-spdx`)과 `cve-check`로 이미지의 패키지·버전을 CVE DB와 대조한다.
+- **VEX로 "해당 없음"을 기록한다**: 커널은 CVE가 매주 수십 개 나온다(2024년부터 커널 팀이 CNA). 대부분은 쓰지 않는 드라이버다. VEX(Vulnerability Exploitability eXchange)로 "이 CVE는 `CONFIG_X=n`이라 영향 없음"을 남겨 두면 고객·감사 대응이 된다(K7).
+- **OTA가 보안 기능이다**: 패치를 내보낼 수 없으면 소용없다(L4). EU CRA(Cyber Resilience Act) 같은 규제는 지원 기간 동안 보안 업데이트 제공을 요구한다.
+
+---
+## 13. 커널 안에서는 무슨 일이 일어나나
+
+이 노트의 기능들은 커널 안에서 서로 다른 곳에 산다. "어느 시점에, 어느 구조체를 보고 결정하나"로 정리하면 이렇다.
+
+```svg
+<svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="20" y="16" width="640" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="340" y="38" font-size="13" text-anchor="middle">유저 프로세스: svc #0 (syscall 번호 x8, 인자 x0–x5)</text>
+<line x1="340" y1="50" x2="340" y2="68" stroke="currentColor" marker-end="url(#ah9)"/>
+<rect x="20" y="70" width="640" height="46" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="34" y="90" font-size="13" font-weight="bold">el0_svc → syscall_trace_enter → __secure_computing()</text>
+<text x="34" y="108" font-size="12">seccomp: task-&gt;seccomp.filter 의 BPF를 seccomp_data(nr, arch, args)로 실행 → ALLOW / ERRNO / KILL</text>
+<line x1="340" y1="116" x2="340" y2="134" stroke="currentColor" marker-end="url(#ah9)"/>
+<rect x="20" y="136" width="310" height="128" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="34" y="156" font-size="13" font-weight="bold">open/read 경로</text>
+<text x="34" y="178" font-size="12">do_filp_open → may_open</text>
+<text x="34" y="196" font-size="12">  inode_permission (DAC + capable)</text>
+<text x="34" y="214" font-size="12">do_dentry_open → security_file_open</text>
+<text x="34" y="232" font-size="12">  landlock · apparmor · ima_file_check</text>
+<text x="34" y="250" font-size="12">bio → dm-verity 검증 / dm-crypt 복호</text>
+<rect x="350" y="136" width="310" height="128" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="364" y="156" font-size="13" font-weight="bold">execve 경로</text>
+<text x="364" y="178" font-size="12">bprm_execve → security_bprm_check</text>
+<text x="364" y="196" font-size="12">  ima_bprm_check (측정·평가)</text>
+<text x="364" y="214" font-size="12">begin_new_exec → bprm_creds_from_file</text>
+<text x="364" y="232" font-size="12">  cap_bprm_creds_from_file (file caps)</text>
+<text x="364" y="250" font-size="12">  apparmor: 새 프로파일로 전환</text>
+<rect x="20" y="282" width="640" height="56" rx="5" fill="#888" fill-opacity="0.15" stroke="#888"/>
+<text x="34" y="302" font-size="13" font-weight="bold">struct cred (task-&gt;cred) — 결정의 재료</text>
+<text x="34" y="322" font-size="12">uid/gid · cap_* 5개 집합 · LSM blob (AppArmor label, Landlock domain)</text>
+<rect x="20" y="352" width="640" height="56" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="34" y="372" font-size="13" font-weight="bold">키·TPM</text>
+<text x="34" y="392" font-size="12">keyctl → security/keys (tpm2_seal_trusted) → drivers/char/tpm (tpmrm0)</text>
+</svg>
+```
+그림 9 — 이 노트의 메커니즘이 커널 안에서 걸리는 지점. seccomp는 syscall 입구, LSM은 각 객체 연산 직전, verity·crypt는 블록 I/O, capability·MAC 레이블은 `struct cred`에 산다.
+
+코드 위치(6.18 기준, elixir.bootlin.com에서 찾을 이름):
+
+| 기능 | 파일 | 핵심 함수·구조체 |
+|---|---|---|
+| LSM 프레임워크 | `security/security.c`, `include/linux/lsm_hook_defs.h` | `security_file_open()`, `call_int_hook()` (6.9+ static call 기반), `DEFINE_LSM()`, `lsm=` 파싱 `ordered_lsm_parse()` |
+| capability | `security/commoncap.c`, `kernel/capability.c` | `cap_capable()`, `ns_capable()`, `cap_bprm_creds_from_file()` |
+| AppArmor | `security/apparmor/` | `apparmor_file_open()`, `aa_path_perm()`, 정책 DFA 매칭 |
+| Landlock | `security/landlock/fs.c`, `ruleset.c` | `hook_file_open()`, `landlock_restrict_self` syscall |
+| Yama | `security/yama/yama_lsm.c` | `yama_ptrace_access_check()` |
+| lockdown | `security/lockdown/lockdown.c` | `security_locked_down(LOCKDOWN_DEV_MEM)` — 호출부는 `drivers/char/mem.c`의 `open_port()` 등 |
+| seccomp | `kernel/seccomp.c` | `__secure_computing()`, `seccomp_run_filters()` (cBPF를 내부 eBPF로 변환해 실행) |
+| IMA | `security/integrity/ima/` | `process_measurement()`, `ima_store_measurement()`, `ima_pcr_extend()` |
+| dm-crypt | `drivers/md/dm-crypt.c` | `crypt_map()`, `kcryptd_crypt()` → crypto API `skcipher` (HW 엔진 드라이버로 내려감: CAAM, Jetson SE …) |
+| dm-verity | `drivers/md/dm-verity-target.c`, `dm-verity-fec.c` | `verity_map()`, `verity_verify_io()`, `verity_fec_decode()` |
+| fs-verity | `fs/verity/` | `fsverity_ioctl_enable()`, 읽기 때 `fsverity_verify_blocks()` |
+| TPM | `drivers/char/tpm/` | `tpm_tis_core.c`, `tpm2-space.c`(`/dev/tpmrm0`), `tpm2_pcr_extend()` |
+| trusted keys | `security/keys/trusted-keys/` | `trusted_tpm2.c`(`tpm2_seal_trusted()`), `trusted_tee.c`, `trusted_caam.c` |
+
+**드라이버를 쓸 때 다시 만나는 지점**:
+
+- 드라이버의 `ioctl`에서 위험한 명령을 받으면 `capable(CAP_SYS_ADMIN)` 대신 **가장 좁은 capability**로 검사한다(`CAP_NET_ADMIN`, `CAP_SYS_RAWIO`). G5에서 본 ioctl 핸들러가 이 검사를 하는 자리다.
+- 레지스터를 유저에게 `mmap`으로 노출하는 드라이버(G5의 `remap_pfn_range`)는 lockdown·`STRICT_DEVMEM`을 우회하는 통로가 될 수 있다. 꼭 필요할 때만, 필요한 범위만 노출한다.
+- 하드웨어 암호 엔진(CAAM, Jetson SE, TI SA2UL) 드라이버는 crypto API에 `skcipher`로 등록되고, dm-crypt는 그걸 자동으로 쓴다(`/proc/crypto`의 `driver`와 `priority`로 확인). SSD의 인라인 AES 엔진처럼 **블록 계층 인라인 암호화**(`blk-crypto`, eMMC/UFS ICE)를 쓰는 SoC도 있다 — fscrypt가 이걸 쓴다.
+- 펌웨어 로드(`request_firmware`)는 IMA `FIRMWARE_CHECK` 정책 대상이다. 서명된 펌웨어만 허용하는 정책이 걸린 장비에서 드라이버 개발 중 "펌웨어가 안 올라온다"면 IMA를 의심한다.
+
+---
+
+## 14. Embedded 실무에서 다시 보기
+
+### 14.1 국방 정찰 드론 — 추락 후 회수 시나리오
+
+요구: "적이 기체를 회수해도 임무 데이터·키가 유출되지 않아야 한다."
+
+- rootfs는 dm-verity(비밀 없음), 임무 데이터·로그는 LUKS2 data 파티션.
+- LUKS 키는 dTPM에 PCR 7(secure boot 상태) + PCR 11(커널·initrd)로 봉인. 다른 커널로 부팅하면 풀리지 않는다.
+- eMMC만 떼어 가면: 암호문만. 보드째 가져가서 정상 부팅하면 키가 풀린다 → 그래서 **원격 무효화**(지상국 명령으로 TPM 키 삭제 = `tpm2_evictcontrol`/LUKS keyslot 지우기 — 사실상 즉시 crypto-erase)와 **변조 감지 스위치**(케이스 개봉 시 키 삭제)를 추가한다. J1에서 본 "암호화 + 키 파기 = 안전 삭제"다.
+- 운용 중에는 비행 제어 데몬이 데이터 파티션에 쓰지만, 영상 스트리머는 쓰기 권한이 없다(서로 다른 `DynamicUser`, `ReadWritePaths`).
+
+### 14.2 보안 카메라 — 인터넷에 노출된 데몬
+
+- RTSP/HTTP 서버가 가장 큰 공격 표면. §10의 하드닝 unit + AppArmor 프로파일 + 8554 포트로 바꿔 capability 0개.
+- 클라우드 인증용 장비 개인 키는 파일이 아니라 TPM/TEE 안에서 쓴다(PKCS#11 `tpm2-pkcs11`, OpenSSL `tpm2` provider). 키가 메모리에 평문으로 존재하지 않으니 데몬이 뚫려도 키를 복사해 갈 수 없다(서명 오라클로 악용은 가능 — 그래서 MAC로 그 데몬이 TPM에 접근하는 범위도 제한).
+- 원격 증명: 백엔드가 장비 접속 때 TPM quote(PCR + IMA 로그)를 요구해서 "변조된 펌웨어"를 접속 거부.
+
+### 14.3 Jetson·i.MX 계열 AI 박스 — 모델 가중치 보호
+
+- 모델 파일(수백 MB)은 지적 재산이다. data 파티션 dm-crypt로 저장하고, 무결성은 fs-verity digest를 서명해 확인한다(§2.3).
+- 추론 프로세스는 GPU 장치(`/dev/nvhost-*`, `/dev/dri/renderD*`)만 `DeviceAllow=`로 허용. `MemoryDenyWriteExecute=`는 CUDA JIT·TensorRT와 충돌할 수 있으니 실제로 돌려 보고 결정한다.
+- 컨테이너로 배포한다면 L8의 seccomp 기본 프로파일·rootless 실행이 같은 역할을 한다.
+
+### 14.4 부팅 테스트에 보안 회귀 검사 넣기
+
+보안 설정은 조용히 깨진다(OTA로 경로가 바뀌어 AppArmor 프로파일이 안 붙거나, xattr이 사라져 file caps가 없어지거나). CI의 부팅 테스트(QEMU 또는 실기)에 이런 검사를 넣는다.
+
+```sh
+# 가이드 — CI 부팅 테스트에서 보안 회귀 검사 (이 노트의 명령들을 묶은 것)
+test "$(cat /sys/kernel/security/lockdown | grep -o '\[.*\]')" = "[integrity]" || echo "FAIL lockdown"
+aa-status --enforced | grep -qx '[1-9][0-9]*' || echo "FAIL apparmor"
+for u in camera imu gnss; do
+  s=$(systemd-analyze security --no-pager $u.service | awk '/Overall exposure/ {print $(NF-2)}')
+  awk -v s="$s" 'BEGIN{exit !(s <= 3.0)}' || echo "FAIL $u exposure $s"
+done
+! systemctl is-enabled serial-getty@ttyS0.service >/dev/null 2>&1 || echo "FAIL serial getty enabled"
+```
+
+---
+
+## 15. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| LUKS 키 파일을 rootfs에 평문으로 둠 | 암호화했는데 eMMC 덤프로 데이터가 다 나옴 | 키와 데이터가 같은 매체 | TPM/TEE/CAAM 봉인, 키 파일은 tmpfs에만 잠깐 |
+| 측정 없는 부팅 상태의 PCR(전부 0)에 봉인 | 공격자의 다른 커널도 키를 연다 | measured boot가 PCR을 안 채움 | L5 measured boot 확인, 봉인 전에 PCR이 0이 아닌지 검사 |
+| PCR10(IMA)이나 매 부팅 바뀌는 PCR에 봉인 | 다음 부팅에 unseal 실패, 장비 data 잠김 | 측정 로그가 매번 다름 | 안정된 PCR(7, 서명 정책 11) 선택, 복구 keyslot 유지 |
+| OTA로 커널 바꾸고 재봉인 안 함 | 업데이트 후 data 파티션 못 엶 | PCR 11 값이 바뀜 | 서명된 PCR 정책(`--tpm2-public-key`), 또는 OTA 단계에서 재봉인 |
+| AppArmor 프로파일 경로와 실제 경로 불일치 | 정책이 있는데 아무것도 안 막힘 | 경로 기반 attach 실패, unconfined로 실행 | `aa-status`의 confined 프로세스 수를 테스트, `AppArmorProfile=` 사용 |
+| file caps를 줬는데 동작 안 함 | 비root 실행 시 `EPERM` | 이미지 생성 중 xattr 소실, 또는 NNP 서비스 | `getcap`으로 이미지 검사, systemd면 `AmbientCapabilities=` |
+| `SystemCallFilter` 추가 후 서비스가 랜덤하게 죽음 | `status=31/SYS`, 재시작 루프 | 드문 경로에서만 쓰는 syscall이 필터에 없음 | audit `type=1326`의 `syscall=` 번호 확인 → 그룹 추가, 개발 중엔 `SystemCallErrorNumber=EPERM` |
+| `MemoryDenyWriteExecute=yes`를 JIT 쓰는 프로그램에 | 시작하자마자 crash 또는 mmap 실패 | W+X 매핑 금지 | 해당 서비스만 끄고 다른 지시자로 보완 |
+| `PrivateDevices=yes`인 센서 데몬 | `/dev/i2c-1: No such file or directory` | 서비스의 `/dev`가 최소 집합 | `PrivateDevices=no` + `DeviceAllow=` 목록 |
+| 양산 이미지에 개발용 자동 로그인·빈 root 비밀번호 | 시리얼 콘솔 = root 셸 | 개발 기능이 이미지 기능으로 분리 안 됨 | 이미지 레시피에서 `debug-tweaks` 제거, 부팅 테스트로 검사 |
+
+---
+
+## 16. 면접에서 이렇게 말한다
+
+**Q.** How do you protect secrets on a device that someone can physically take apart?
+
+**A.** 비밀을 저장장치에 평문으로 두지 않는 것이 출발점이다. data 파티션은 dm-crypt/LUKS2로 암호화하고, 볼륨 키는 이 장비의 하드웨어에만 풀리는 형태로 감싼다 — TPM에 PCR 정책으로 봉인하거나, OP-TEE secure storage나 SoC 키 엔진(CAAM blob)으로 감싼다. PCR 정책은 measured boot와 묶여서 다른 커널로 부팅하면 키가 안 나온다. rootfs는 비밀이 없게 설계하고 dm-verity로 무결성만 지킨다. 그래도 보드째 가져가 정상 부팅하는 공격은 남으니, 원격 키 파기·탬퍼 스위치·JTAG 퓨즈 잠금·콘솔 제거를 더한다. 그리고 장비 인증 키 같은 건 아예 TPM/TEE 밖으로 안 나오게 그 안에서 서명만 시킨다.
+
+> I start from "no secret is stored in plaintext on removable storage". The data partition is LUKS2 with dm-crypt, and the volume key is wrapped by hardware that only exists on this board — sealed in a TPM with a PCR policy, or wrapped by OP-TEE secure storage or the SoC key engine like NXP CAAM. The PCR policy ties the key to measured boot, so a different kernel can't unseal it. The rootfs holds no secrets and is protected by dm-verity for integrity only. That still leaves "steal the whole board and boot it normally", so I add remote key revocation, a tamper switch that destroys the key, fused-off JTAG and no production console. Device identity keys never leave the TPM or TEE at all — the daemon asks them to sign.
+
+**꼬리 질문**: "TPM과 SoC 사이 SPI 버스를 스니핑하면?" → TPM2 세션 암호화(parameter encryption, 커널 `CONFIG_TCG_TPM2_HMAC`), 또는 SoC 내부 키 엔진/fTPM 선택.
+
+**Q.** AppArmor or SELinux on an embedded product — which and why?
+
+**A.** 둘 다 LSM 기반 MAC이고 동시에 하나만 쓸 수 있다. AppArmor는 경로 기반이라 파일시스템 레이블이 필요 없고 프로파일을 노출된 데몬 몇 개에만 붙이면 된다 — 데몬 10개 내외 장비에서 비용 대비 효과가 좋다. SELinux는 inode 레이블 기반이라 rename·하드 링크 우회에 강하고 시스템 전체를 덮지만, 정책 개발과 이미지 빌드 때 레이블링 비용이 크다. 고객이나 규제가 전체 MAC를 요구하거나, Android처럼 서드파티 코드가 도는 플랫폼이면 SELinux, 아니면 AppArmor로 시작하고 systemd 샌드박스·seccomp를 먼저 깐다.
+
+> Both are LSM-based mandatory access control, and only one of them can be active. AppArmor is path-based, needs no filesystem labels, and I can confine just the few network-facing daemons — that's a great cost-benefit for a device with ten-ish services. SELinux is label-based, so it's robust against rename and hard-link tricks and covers the whole system, but policy development and labeling the image at build time cost a lot. If a customer or regulation demands system-wide MAC, or third-party code runs on the platform like Android, I'd pick SELinux. Otherwise I start with AppArmor, after the cheaper layers: systemd sandboxing and seccomp.
+
+**꼬리 질문**: "AppArmor 프로파일이 실제로 적용되는지 어떻게 아나?" → `aa-status`의 enforce 모드 프로세스 수, `/proc/<pid>/attr/current`, 부팅 테스트에 넣는다(§14.4).
+
+**Q.** How do you run a daemon that needs one root-only thing?
+
+**A.** 먼저 "root가 필요한 일"이 정확히 뭔지 쪼갠다. 대부분 capability 하나(`CAP_NET_BIND_SERVICE`, `CAP_SYS_TIME`)거나 장치 파일 권한이다. 장치면 udev 규칙으로 그룹 권한을 주고, capability면 systemd에서 `User=`/`DynamicUser=`로 비root 실행 + `AmbientCapabilities=`와 `CapabilityBoundingSet=`에 그것 하나만 준다. `NoNewPrivileges`가 켜져 있으면 file caps는 안 먹히니까 ambient가 정답이다. 부팅 때 한 번만 필요한 특권 작업은 별도 oneshot 서비스로 떼어 낸다. 그리고 `ProtectSystem=strict`, `SystemCallFilter=@system-service` 같은 샌드박스를 더하고 `systemd-analyze security`로 확인한다 — 직접 해 보니 9.6에서 1.4까지 내려갔다.
+
+> I first pin down exactly what needs root — usually one capability like CAP_NET_BIND_SERVICE or CAP_SYS_TIME, or just access to a device node. Device access I solve with udev rules and a group. For a capability, I run the service as a non-root or DynamicUser with AmbientCapabilities and CapabilityBoundingSet set to that single capability — ambient, because with NoNewPrivileges file capabilities don't apply. A privileged step needed once at boot goes into a separate oneshot unit. Then I add ProtectSystem=strict, a system-service syscall filter and the rest, and check with systemd-analyze security; in my lab the same binary went from 9.6 to 1.4 exposure.
+
+**Q.** What's the difference between dm-verity, fs-verity and IMA?
+
+**A.** dm-verity는 블록 장치 전체를 해시 트리로 읽을 때마다 검증한다 — 읽기전용 rootfs용, 기준값은 루트 해시 하나. fs-verity는 같은 아이디어를 RW 파일시스템 위의 **파일 하나**에 적용하고 그 파일을 불변으로 만든다. IMA는 open/exec 시점에 파일 전체를 해시해서 측정 로그와 TPM PCR10에 기록(원격 증명)하거나, xattr 서명과 비교해 실행을 거부(appraisal)한다. 정리하면 verity 두 개는 "읽는 블록이 맞나", IMA는 "무엇이 실행됐나 / 실행해도 되나"다.
+
+> dm-verity verifies a whole block device against a hash tree on every read; it's for a read-only rootfs and its trust anchor is one root hash. fs-verity applies the same Merkle-tree idea to a single file on a read-write filesystem and makes that file immutable. IMA hashes whole files at open or exec time; it either records them in a measurement log extended into TPM PCR 10 for remote attestation, or appraises them against a signature in an xattr and refuses to run them. So the verity pair answers "is this block what we shipped", IMA answers "what ran, and may it run".
+
+**Q.** Walk me through sealing a disk key to the TPM.
+
+**A.** PCR 7·11처럼 부팅 체인을 대표하는 PCR을 고르고, 그 현재 값으로 PolicyPCR digest를 만든다. SRK 아래에 그 정책을 단 sealed data 객체로 키를 넣으면 TPM은 blob(public/private)만 돌려준다 — 이건 디스크에 둬도 된다. 부팅 때 blob을 load하고 policy 세션에서 PCR을 만족시키면 unseal된다. PCR 하나라도 다르면 `TPM_RC_POLICY_FAIL`이다. 실제로 swtpm으로 해 봤고, PCR11을 extend하니 0x99d로 실패했다. 운영에서는 systemd-cryptenroll이 이걸 LUKS2 token으로 관리하고, OTA 때 PCR이 바뀌는 문제는 서명된 PCR 정책으로 푼다.
+
+> I choose PCRs that represent the boot chain, say 7 and 11, and build a PolicyPCR digest from their current values. I create a sealed-data object with that policy under the SRK; the TPM returns only the public and private blobs, which are safe to store on disk. At boot I load the blob, satisfy the policy in a policy session and unseal; if any selected PCR differs, the TPM returns TPM_RC_POLICY_FAIL. I did this with swtpm — after extending PCR 11, unseal failed with 0x99d. In production systemd-cryptenroll stores it as a LUKS2 token, and signed PCR policies solve the "OTA changed the PCR" problem.
+
+**Q.** What is seccomp, and how is it different from capabilities and LSMs?
+
+**A.** capability는 "이 프로세스가 특권 연산을 할 자격이 있나"(자격), LSM/MAC는 "이 주체가 이 객체에 이 연산을 해도 되나"(객체 정책), seccomp는 "이 프로세스가 이 syscall을 부를 수 있나"(syscall 표면 축소)다. seccomp는 syscall 입구에서 BPF로 번호와 인자를 검사하므로 파일 경로 같은 객체는 못 본다 — 그건 Landlock이나 AppArmor 몫이다. 셋은 보완 관계라 같이 쓴다.
+
+> Capabilities answer "is this process entitled to a privileged operation", an LSM like AppArmor answers "may this subject do this operation on this object", and seccomp answers "may this process make this syscall at all". Seccomp runs a BPF filter at syscall entry over the number and raw arguments, so it can't reason about paths — that's what Landlock or AppArmor are for. They complement each other, so I layer all three.
+
+**꼬리 질문**: "seccomp 필터에서 arch를 먼저 검사하는 이유?" → compat ABI는 syscall 번호가 달라 우회 가능(§9.1).
+
+**Q.** What do you lock down in a production image that's open in a dev image?
+
+**A.** 시리얼 콘솔 로그인과 U-Boot 셸, 빈 root 비밀번호, 비밀번호 ssh, debugfs/tracefs, `/dev/mem`, 서명 없는 모듈과 kexec, core dump, JTAG. 커널은 lockdown integrity 이상, 모듈 서명 강제, Yama ptrace_scope 2 이상. 그리고 이걸 이미지 기능으로 분리해서 CI 부팅 테스트가 양산 이미지에서 검사하게 한다.
+
+> Serial console login and the U-Boot shell, empty root password, password ssh, debugfs and tracefs, /dev/mem, unsigned modules and kexec, core dumps, and JTAG via fuses. On the kernel side lockdown in at least integrity mode, enforced module signatures and Yama ptrace_scope 2 or higher. I keep those as image features rather than manual steps, and a CI boot test checks the production image for them.
+
+---
+
+## 17. 직접 해보기
+
+1. **개념**: `CONFIG_LSM`에 `apparmor,selinux` 순서로 있는데 `cat /sys/kernel/security/lsm`에 selinux가 없다. 왜인가? SELinux로 바꾸려면 무엇을 해야 하나?
+   정답/힌트: 둘 다 exclusive, 먼저 나온 것이 이긴다. 부팅 인자 `lsm=...,selinux,...`(apparmor 제외) 또는 `security=selinux`, 그리고 정책·파일 레이블이 있어야 의미가 있다.
+2. **TPM**: §4.2 스크립트를 고쳐서 PCR 7 하나에만 봉인하고, PCR 11을 extend해도 unseal이 **성공**하는 것을 보여라. 그다음 PCR 16(디버그 PCR)을 `tpm2_pcrreset 16`으로 리셋할 수 있는지, PCR 11은 왜 리셋이 안 되는지 확인하라.
+   정답/힌트: 정책에 없는 PCR은 영향 없음. PCR 16은 locality 0에서 리셋 가능, 나머지는 `TPM_RC_LOCALITY`.
+3. **AppArmor**: `l6d`가 `/var/lib/l6/` 아래 아무 파일이나 만들 수 있게 프로파일을 바꾸되 `/var/lib/l6/keys/`만은 막아라. `deny` 규칙과 `**` glob을 써라.
+   정답/힌트: `/var/lib/l6/** w,` + `deny /var/lib/l6/keys/** rw,` — deny가 allow보다 우선.
+4. **capabilities**: `l6_cap`에 `cap_net_bind_service+p`(effective 비트 없이)만 주면 어떻게 되나? 프로그램 안에서 `capset()`으로 effective를 켜면? (libcap 없이 `SYS_capset` syscall로)
+   정답/힌트: permitted에는 있지만 effective가 0이라 bind 실패. capset으로 effective를 켜면 성공 — "capability-aware" 프로그램의 방식.
+5. **seccomp**: `l6_seccomp`의 `DENY(__NR_uname, ...)`를 `SECCOMP_RET_LOG`로 바꾸고 실행해서 audit 로그에 무엇이 남는지 보라. `SECCOMP_RET_TRAP`이면 `SIGSYS` 핸들러에서 `si_syscall`을 출력하라.
+   정답/힌트: LOG는 허용 + `type=1326 ... code=0x7ffc0000`. TRAP은 `siginfo_t.si_syscall`에 번호.
+6. **systemd**: `l6-hard@.service`에서 `AmbientCapabilities=`를 지우고 `systemd-analyze security` 점수와 실제 bind 결과가 어떻게 바뀌는지 비교하라. 그다음 포트를 8080으로 바꿔 capability 0개로 만들어라.
+   정답/힌트: 점수는 조금 내려가고 bind는 `Permission denied`. 8080이면 caps 없이 동작.
+7. **관찰**: 하드닝 서비스의 `/proc/<pid>/mountinfo`, `/proc/<pid>/status`(`Seccomp_filters`), `ls -l /proc/<pid>/ns/`를 naive 서비스와 비교하고, 어느 지시자가 어느 namespace를 만들었는지 짝지어라(L8로 이어진다).
+   정답/힌트: `ProtectSystem`·`PrivateTmp`·`PrivateDevices` → mnt ns, `ProtectHostname` → uts ns, `PrivateNetwork` → net ns.
+
+---
+
+## 18. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| defence in depth | 깊이 방어 | 한 층이 뚫려도 다음 층이 막게 여러 겹을 둔다 |
+| DAC | Discretionary Access Control | 파일 주인이 정하는 rwx 권한, root는 우회 |
+| MAC | Mandatory Access Control | 관리자 정책, root도 못 바꿈 (AppArmor, SELinux) |
+| LSM | Linux Security Modules | 커널 결정 지점의 보안 훅 프레임워크 |
+| exclusive LSM | 하나만 활성 가능한 major LSM | SELinux, AppArmor, Smack, TOMOYO |
+| capability | root 권한의 조각 | `CAP_NET_BIND_SERVICE` 등 41개 |
+| bounding / ambient set | capability 상한 / 비root 상속 집합 | systemd `CapabilityBoundingSet=`, `AmbientCapabilities=` |
+| file capabilities | 실행 파일 xattr의 caps | `setcap`, setuid-root의 대체 |
+| no_new_privs | 권한 상승 금지 플래그 | exec로 setuid·file caps 이득 불가 |
+| seccomp-bpf | syscall 필터 | syscall 입구에서 BPF로 허용·거부 |
+| Landlock | 비특권 자기 샌드박스 LSM | 프로세스가 스스로 파일·포트 접근 제한 |
+| Yama | ptrace 범위 제한 LSM | `ptrace_scope` 0–3 |
+| lockdown | 커널 자기 보호 LSM | root의 커널 변조·읽기 경로 차단 |
+| dm-verity | 블록 무결성 타깃 | 해시 트리, 루트 해시로 검증 |
+| FEC | Forward Error Correction | verity 블록을 Reed-Solomon으로 복구 |
+| fs-verity | 파일 단위 verity | 파일 digest, 활성화 후 불변 |
+| IMA / EVM | 무결성 측정·평가 / 메타데이터 보호 | 측정 로그 + PCR10, xattr 서명·HMAC |
+| dm-crypt | 블록 암호화 타깃 | `aes-xts-plain64` 등 |
+| LUKS2 | 디스크 암호화 헤더 형식 | 볼륨 키 + 여러 keyslot + token |
+| TPM 2.0 | 보안 칩 표준 | PCR, 봉인, 키 계층, NV |
+| PCR | Platform Configuration Register | extend만 되는 측정 레지스터 |
+| seal / unseal | 봉인 / 해제 | 정책(PCR 값)을 만족할 때만 비밀을 꺼냄 |
+| EK / SRK / AK | Endorsement / Storage Root / Attestation Key | 칩 신원 / 봉인 부모 / quote 서명 |
+| fTPM | firmware TPM | TEE 안의 소프트웨어 TPM |
+| TEE / TrustZone | 신뢰 실행 환경 / Arm의 HW 격리 | Secure world에서 TA 실행 |
+| OP-TEE / TA | 오픈소스 TEE OS / Trusted Application | S-EL1 OS / S-EL0 앱 |
+| tee-supplicant | Normal world 보조 데몬 | TEE 대신 파일·RPMB 접근 |
+| HUK | Hardware Unique Key | SoC 퓨즈의 기기 고유 키 |
+| CAAM | NXP 암호 가속·보증 모듈 | black key·blob로 키 보호 |
+| trusted / encrypted key | 커널 keyring 키 유형 | TPM/TEE/CAAM으로 감싼 키 / 그 키로 감싼 키 |
+| remote attestation | 원격 증명 | TPM quote + 측정 로그로 장비 상태 증명 |
+| SBOM / VEX | 구성 목록 / 취약점 영향 진술 | 이미지에 무엇이 있고 CVE가 해당되는지 |
+
+---
+
+## 19. 요약 & 체크리스트
+
+부팅 이후의 보안은 네 갈래다. **무결성**은 dm-verity(rootfs 블록), fs-verity(개별 파일), IMA(무엇이 실행됐나)가 맡고 그 기준값은 secure boot(L5)가 지킨다. **기밀성**은 dm-crypt/LUKS2가 맡지만 진짜 문제는 키다 — TPM PCR 정책 봉인, OP-TEE secure storage, SoC 키 엔진, 커널 trusted keys로 "이 보드에서, 이 부팅 상태에서만" 풀리게 만든다. **접근 통제**는 LSM이 맡는다: DAC 다음에 AppArmor/SELinux(하나만), lockdown·Yama·Landlock(겹쳐 쌓기). **최소 권한**은 capabilities·NNP·seccomp를 systemd unit 몇 줄로 데몬에 입혀서 만든다. 이 노트의 실험에서 root `l6d`는 AppArmor 때문에 `/etc/shadow`를 못 읽었고, 같은 `l6svc` 바이너리가 unit 설정만으로 노출도 9.6 → 1.4, uid 0 → 동적 uid, capability 41개 → 1개가 됐고, 금지된 `mount()`는 SIGSYS로 죽었다. TPM에 봉인한 LUKS 키는 PCR11이 바뀌자 `0x99d`로 거부됐다.
+
+- [ ] 위협 모델(자산·공격자)에서 시작해 방어 층을 고르는 순서를 설명할 수 있다
+- [ ] dm-verity의 루트 해시를 지키는 세 가지 방법과 `restart_on_corruption`/FEC의 역할을 설명할 수 있다
+- [ ] dm-verity · fs-verity · IMA의 차이를 한 문장씩 말할 수 있다
+- [ ] LUKS2의 볼륨 키·keyslot·token 구조를 그리고, 키 저장 선택지 5가지를 비교할 수 있다
+- [ ] tpm2-tools로 PCR 정책 봉인·unseal을 하고 PCR 변화로 실패하는 것을 보여 줄 수 있다
+- [ ] systemd-cryptenroll로 TPM 자동 잠금 해제를 설정하고 PCR 선택의 트레이드오프를 말할 수 있다
+- [ ] OP-TEE의 world 분할(EL3/S-EL1/S-EL0, tee-supplicant, HUK)을 그릴 수 있다
+- [ ] `lsm=`로 LSM 구성을 바꾸고 exclusive/stackable의 차이를 설명할 수 있다
+- [ ] AppArmor 프로파일을 complain → enforce로 만들고 DENIED 로그로 고칠 수 있다
+- [ ] capability 다섯 집합과 file caps·ambient·NNP의 관계를 실험으로 설명할 수 있다
+- [ ] seccomp-bpf 필터와 Landlock 규칙을 C로 직접 짤 수 있다
+- [ ] 데몬 하나를 하드닝하고 `systemd-analyze security` 점수와 남은 항목을 설명할 수 있다
+
+## 참고 자료
+
+- man7.org: [capabilities(7)](https://man7.org/linux/man-pages/man7/capabilities.7.html), [seccomp(2)](https://man7.org/linux/man-pages/man2/seccomp.2.html), [landlock(7)](https://man7.org/linux/man-pages/man7/landlock.7.html), [kernel_lockdown(7)](https://man7.org/linux/man-pages/man7/kernel_lockdown.7.html), [keyctl(1)](https://man7.org/linux/man-pages/man1/keyctl.1.html), [systemd.exec(5)](https://man7.org/linux/man-pages/man5/systemd.exec.5.html), [systemd-cryptenroll(1)](https://man7.org/linux/man-pages/man1/systemd-cryptenroll.1.html)
+- docs.kernel.org: [LSM 사용자 문서](https://docs.kernel.org/admin-guide/LSM/index.html) (AppArmor, SELinux, Yama, Landlock), [Landlock 유저 API](https://docs.kernel.org/userspace-api/landlock.html), [Seccomp BPF](https://docs.kernel.org/userspace-api/seccomp_filter.html), [dm-verity](https://docs.kernel.org/admin-guide/device-mapper/verity.html), [dm-crypt](https://docs.kernel.org/admin-guide/device-mapper/dm-crypt.html), [fs-verity](https://docs.kernel.org/filesystems/fsverity.html), [Trusted and Encrypted Keys](https://docs.kernel.org/security/keys/trusted-encrypted.html), [TPM](https://docs.kernel.org/security/tpm/index.html), [TEE 서브시스템](https://docs.kernel.org/tee/index.html)
+- cryptsetup / LUKS2: https://gitlab.com/cryptsetup/cryptsetup (LUKS2 on-disk format 문서 포함)
+- tpm2-tools: https://github.com/tpm2-software/tpm2-tools · swtpm: https://github.com/stefanberger/swtpm
+- OP-TEE 문서: https://optee.readthedocs.io/ (architecture, secure storage, QEMU v8 빌드)
+- AppArmor: https://apparmor.net/ · IMA/EVM: https://ima-doc.readthedocs.io/
+- Kerrisk, "The Linux Programming Interface" 39장(Capabilities), 38장(Writing Secure Privileged Programs)
+- 커널 소스(elixir.bootlin.com, v6.18): `security/security.c`, `security/commoncap.c`, `kernel/seccomp.c`, `security/landlock/`, `drivers/md/dm-crypt.c`, `drivers/md/dm-verity-target.c`, `security/keys/trusted-keys/`, `drivers/char/tpm/`
+- 이 노트 시리즈: J3(dm-verity 입문), J1(RPMB·안전 삭제), C5(TF-A·OP-TEE 부트), L1(systemd), L2(udev 권한), L4(OTA·롤백), L5(secure/measured boot), L7(코어 덤프 정책), L8(namespace·cgroup·컨테이너 seccomp), K4·K5(이미지 기능), K7(SBOM·VEX), G5(ioctl·mmap 권한 검사), E6(syscall 진입)

@@ -1,0 +1,1328 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>P5. 커널 업그레이드·리베이스 — 패치 스택을 새 LTS로 옮기고, 깨진 API를 고치고, 회귀를 bisect로 잡는다</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="P/2026-10-18_P5_kernel_upgrade_rebase">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">P. Bring-up · BSP 실무 · P5. 커널 업그레이드·리베이스 — 패치 스택을 새 LTS로 옮기고, 깨진 API를 고치고, 회귀를 bisect로 잡는다</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">P. Bring-up · BSP 실무 · Bring-up &amp; BSP</div>
+      <h1>P5. 커널 업그레이드·리베이스 — 패치 스택을 새 LTS로 옮기고, 깨진 API를 고치고, 회귀를 bisect로 잡는다</h1>
+      <div class="meta"><span>163분 읽기</span><span>1635줄</span><span>53개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: 제품이 옛 커널에 갇히는 이유와 LTS·CIP SLTS 수명을 근거로 "언제 올릴지"를 말할 수 있다 · 패치 스택을 인벤토리하고 upstreamed / obsolete / needs-port / keep으로 분류한 뒤 <code>git cherry</code>, <code>git rebase --onto</code>, zdiff3 충돌 해결, <code>git range-diff</code>로 새 base에 옮길 수 있다 · 6.1 시절 스타일 드라이버가 6.18에서 왜 11개 에러를 내는지 읽고 포팅해서 실제 게스트에 올릴 수 있다 · <code>git bisect run</code>으로 회귀 커밋을 자동으로 찾고, stable 릴리스의 <code>Fixes:</code>/<code>Cc: stable</code> 태그로 "우리에게 필요한 수정"을 골라낼 수 있다 <strong>왜 필요한가</strong>: "벤더 BSP 커널 5.15를 6.x LTS로 올려라"(contents.md 시나리오)는 장수 제품을 만드는 회사(국방·차량·산업 로봇)에서 1~2년마다 반드시 돌아오는 프로젝트이고, 면접에서는 "커널 업그레이드를 어떻게 계획하고 회귀를 어떻게 막나?"로 나온다 <strong>Don 기준 난이도</strong>: SSD 펌웨어를 새 컨트롤러 세대·새 벤더 SDK로 이식하던 경험(공통 코드 vs 플랫폼 코드 분리, 회귀 테스트 매트릭스)은 그대로 쓴다 / 새로 배울 부분은 git의 스택 이동 도구(<code>--onto</code>, patch-id, range-diff, bisect run), 커널 내부 API가 "안정성을 약속하지 않는다"는 문화, stable 트리의 태그 체계 <strong>선행 노트</strong>: E7(릴리스 모델·LTS·CIP·패치 보내기 — 이 노트는 E7 §2·§4를 전제로 한다), P2(BSP 구조·패치 스택 관리 기초), E3(모듈 빌드), G3(platform driver 수명주기), H3(I2C 드라이버) — 테스트 자동화는 P6, upstream으로 보내 스택 줄이기는 P7</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>제품 커널은 "upstream LTS + 벤더 BSP 패치 + 우리 패치"의 3층 케이크다(P2). 업그레이드란 이 케이크의 <strong>맨 아래층을 바꾸고 위 두 층을 다시 올리는 일</strong>이다. 아래층이 바뀌면 위층 패치 중 일부는 이미 아래층에 들어가 있고(upstreamed), 일부는 대상이 사라졌고(obsolete), 일부는 문맥이나 API가 바뀌어 손으로 고쳐야 하며(needs port), 나머지는 그대로 올라간다(keep). 이 분류를 먼저 하고, 옮기고, 고치고, 회귀를 확인하는 것이 업그레이드 프로젝트 전체다.</p>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="30" width="200" height="72" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="120" y="56" text-anchor="middle" font-size="14">1. 인벤토리</text>
+  <text x="120" y="78" text-anchor="middle" font-size="12">git log old..product</text>
+  <text x="120" y="94" text-anchor="middle" font-size="12">git cherry · 파일 상태</text>
+  <rect x="240" y="30" width="200" height="72" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="56" text-anchor="middle" font-size="14">2. 분류</text>
+  <text x="340" y="78" text-anchor="middle" font-size="12">upstreamed · obsolete</text>
+  <text x="340" y="94" text-anchor="middle" font-size="12">needs port · keep</text>
+  <rect x="460" y="30" width="200" height="72" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="560" y="56" text-anchor="middle" font-size="14">3. 옮기기</text>
+  <text x="560" y="78" text-anchor="middle" font-size="12">git rebase --onto</text>
+  <text x="560" y="94" text-anchor="middle" font-size="12">(drop 목록 반영)</text>
+  <rect x="20" y="148" width="200" height="72" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="120" y="174" text-anchor="middle" font-size="14">4. 충돌 · API 포팅</text>
+  <text x="120" y="196" text-anchor="middle" font-size="12">zdiff3 · range-diff</text>
+  <text x="120" y="212" text-anchor="middle" font-size="12">컴파일 에러 = 할 일 목록</text>
+  <rect x="240" y="148" width="200" height="72" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="340" y="174" text-anchor="middle" font-size="14">5. 회귀 테스트</text>
+  <text x="340" y="196" text-anchor="middle" font-size="12">빌드 · 부팅 · 모듈 로드</text>
+  <text x="340" y="212" text-anchor="middle" font-size="12">KUnit · kselftest · 성능</text>
+  <rect x="460" y="148" width="200" height="72" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="560" y="174" text-anchor="middle" font-size="14">6. 유지</text>
+  <text x="560" y="196" text-anchor="middle" font-size="12">bisect run · stable 머지</text>
+  <text x="560" y="212" text-anchor="middle" font-size="12">Fixes: · Cc: stable</text>
+  <line x1="220" y1="66" x2="238" y2="66" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="440" y1="66" x2="458" y2="66" stroke="currentColor" marker-end="url(#ah1)"/>
+  <path d="M560 102 L560 124 L120 124 L120 146" fill="none" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="220" y1="184" x2="238" y2="184" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="440" y1="184" x2="458" y2="184" stroke="currentColor" marker-end="url(#ah1)"/>
+  <path d="M560 220 L560 240 L8 240 L8 66 L18 66" fill="none" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah1)"/>
+  <text x="300" y="236" text-anchor="middle" font-size="12">다음 LTS 때 같은 순서로 반복 (스택이 작을수록 싸다)</text>
+</svg></figure>
+<p>그림 1 — 커널 업그레이드 파이프라인. 1~3은 git 작업, 4는 사람이 판단하는 작업, 5~6은 자동화할수록 다음 업그레이드가 싸진다.</p>
+<p>bare-metal 비유로 보면 이렇다. SSD 펌웨어에서 새 컨트롤러 세대로 넘어갈 때 "칩 벤더 HAL/SDK v2 → v3 + 우리 FTL 코드"를 옮기던 일과 같다. SDK가 함수 이름과 인자를 바꾸면 컴파일 에러가 할 일 목록이 되고, 우리가 SDK에 넣어 둔 핫픽스 중 일부는 v3에 이미 들어가 있고, 일부 기능은 v3에서 없어졌다. 차이는 두 가지다.</p>
+<ul><li>리눅스 커널은 <strong>내부 API 안정성을 약속하지 않는다</strong>(<code>Documentation/process/stable-api-nonsense.rst</code>). 유저 공간 ABI(syscall, sysfs)는 지키지만, 드라이버가 쓰는 커널 내부 함수는 매 릴리스 바뀐다. 그래서 "in-tree에 들어간 드라이버는 API를 바꾸는 사람이 같이 고쳐 주고, out-of-tree 드라이버는 우리가 고친다".</li><li>위층이 git 커밋 단위로 관리되므로 <strong>git이 분류의 절반을 자동으로 해 준다</strong>(patch-id 비교, 3-way merge). 나머지 절반은 사람이 의미를 판단한다.</li></ul>
+<h3 id="이-노트의-실습-환경">이 노트의 실습 환경<a class="anchor" href="#이-노트의-실습-환경" aria-label="link">#</a></h3>
+<ul><li>Lima VM <code>elinux</code> (aarch64, 호스트 커널 <code>uname -r</code> = <code>7.0.0-38-generic</code>, git 2.53.0, gcc 15.2.0). git 실습은 VM의 <code>/var/tmp/P5/</code> 아래 합성(synthetic) 저장소에서 한다.</li><li>커널 모듈은 랩 커널 <strong>6.18.55-dom</strong>(<code>/var/lab/out/Image-dom</code>, 빌드 트리 <code>linux-build-dom</code>)으로 빌드하고 QEMU <code>virt</code> 게스트(TCG, KVM 없음)에서 insmod 했다. 19명이 VM을 같이 쓰는 중이라 부팅·실행 시간은 실제 하드웨어 값이 아니다.</li><li>커널 소스는 <code>/var/lab/src/linux-6.18.55</code> (git 저장소가 아니라 tarball 트리). 그래서 <strong>진짜 커널 히스토리로 rebase·bisect는 하지 않았다</strong> — 대신 커널 업그레이드에서 실제로 생기는 상황(upstream이 같은 수정을 먼저 넣음, API 인자 변경, 파일 삭제, 빌드 깨진 커밋)을 그대로 재현한 작은 저장소로 실습한다. 진짜 커널 트리에서의 명령은 "가이드(실행 안 함)"로 표시했다.</li><li>stable 실습 자료는 kernel.org에서 받은 실제 파일이다: <code>patch-6.18.55-56.xz</code>(136 KB), <code>ChangeLog-6.18.56</code>(645 KB).</li></ul>
+<hr>
+<h2 id="1-lts-stable-주기와-수명-언제까지-버틸-수-있나">1. LTS · stable 주기와 수명 — "언제까지 버틸 수 있나"<a class="anchor" href="#1-lts-stable-주기와-수명-언제까지-버틸-수-있나" aria-label="link">#</a></h2>
+<p>E7 §1~§2에서 kernel.org 데이터로 직접 쟀다. 여기서는 업그레이드 판단에 필요한 것만 다시 정리한다.</p>
+<h3 id="1-1-트리-안-문서가-말하는-것">1.1 트리 안 문서가 말하는 것<a class="anchor" href="#1-1-트리-안-문서가-말하는-것" aria-label="link">#</a></h3>
+<p>먼저 커널 소스 자체가 stable·LTS를 어떻게 설명하는지 확인한다. 날짜는 바뀌어도 이 규칙은 잘 안 바뀐다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/lab/src/linux-6.18.55
+grep -n "stable updates for a little" Documentation/process/2.Process.rst
+grep -n "purely a matter" -A2 Documentation/process/2.Process.rst
+grep -n "^There are three options" -A6 Documentation/process/stable-kernel-rules.rst'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>113:kernel. Kernels will typically receive stable updates for a little more
+136:The selection of a kernel for long-term support is purely a matter of a
+137-maintainer having the need and the time to maintain that release.  There
+138-are no known plans for long-term support for any specific upcoming
+43:There are three options to submit a change to -stable trees:
+44-
+45-1. Add a 'stable tag' to the description of a patch you then submit for
+46-   mainline inclusion.
+47-2. Ask the stable team to pick up a patch already mainlined.
+48-3. Submit a patch to the stable team that is equivalent to a change already
+49-   mainlined.</code></pre></figure>
+<p>출력에서 볼 것: (1) 일반 stable은 "한 개발 주기보다 조금 더" 산다(약 3개월, E7 측정 75~100일). (2) LTS 지정은 "maintainer가 필요와 시간이 있을 때"의 결정이라 <strong>트리 문서에는 수명이 적혀 있지 않다</strong>. 수명은 <code>https://www.kernel.org/category/releases.html</code>을 봐야 한다. (3) stable에 수정을 넣는 방법은 세 가지다(E7 §5.11). 10절에서 "받는 쪽"에서 이 태그를 쓴다.</p>
+<h3 id="1-2-lts-수명-지도">1.2 LTS 수명 지도<a class="anchor" href="#1-2-lts-수명-지도" aria-label="link">#</a></h3>
+<p>아래 그림의 시작일은 E7이 kernel.org 디렉터리 목록으로 잰 값(2026-10-03 기준 span에서 역산), EOL은 E7이 2026-10-10에 받은 <code>releases.html</code>의 projected EOL이다. CIP 연장선은 "LTS 시작 + 약 10년"으로 그린 <strong>개략치</strong>다(CIP가 공개하는 정확한 EOL은 CIP 웹사이트에서 확인 — 기억 기반).</p>
+<figure class="chart"><svg viewBox="0 0 680 290" xmlns="http://www.w3.org/2000/svg">
+  <line x1="60" y1="240" x2="660" y2="240" stroke="currentColor"/>
+  <g font-size="12" text-anchor="middle">
+    <line x1="60" y1="240" x2="60" y2="245" stroke="currentColor"/><text x="60" y="258">2020</text>
+    <line x1="140" y1="240" x2="140" y2="245" stroke="currentColor"/><text x="140" y="258">2022</text>
+    <line x1="220" y1="240" x2="220" y2="245" stroke="currentColor"/><text x="220" y="258">2024</text>
+    <line x1="300" y1="240" x2="300" y2="245" stroke="currentColor"/><text x="300" y="258">2026</text>
+    <line x1="380" y1="240" x2="380" y2="245" stroke="currentColor"/><text x="380" y="258">2028</text>
+    <line x1="460" y1="240" x2="460" y2="245" stroke="currentColor"/><text x="460" y="258">2030</text>
+    <line x1="540" y1="240" x2="540" y2="245" stroke="currentColor"/><text x="540" y="258">2032</text>
+    <line x1="620" y1="240" x2="620" y2="245" stroke="currentColor"/><text x="620" y="258">2034</text>
+  </g>
+  <g font-size="13">
+    <text x="12" y="44">5.10</text><text x="12" y="78">5.15</text><text x="12" y="112">6.1</text>
+    <text x="12" y="146">6.6</text><text x="12" y="180">6.12</text><text x="12" y="214">6.18</text>
+  </g>
+  <rect x="98" y="30" width="200" height="18" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <line x1="298" y1="39" x2="498" y2="39" stroke="#3f9a6b" stroke-dasharray="5 4" stroke-width="2"/>
+  <rect x="133" y="64" width="165" height="18" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <rect x="178" y="98" width="160" height="18" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <line x1="338" y1="107" x2="578" y2="107" stroke="#3f9a6b" stroke-dasharray="5 4" stroke-width="2"/>
+  <rect x="213" y="132" width="125" height="18" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="255" y="166" width="163" height="18" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <line x1="418" y1="175" x2="655" y2="175" stroke="#3f9a6b" stroke-dasharray="5 4" stroke-width="2"/>
+  <rect x="296" y="200" width="122" height="18" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <line x1="332" y1="22" x2="332" y2="240" stroke="#d0564a" stroke-dasharray="3 3"/>
+  <text x="336" y="20" font-size="12">오늘 (2026-10)</text>
+  <g font-size="12">
+    <text x="345" y="80">EOL 2026-12</text>
+    <text x="345" y="148">EOL 2027-12</text>
+    <text x="425" y="214">EOL 2028-12 (랩 커널)</text>
+    <text x="440" y="34">CIP</text>
+    <text x="520" y="102">CIP 6.1</text>
+    <text x="560" y="170">CIP 6.12</text>
+  </g>
+  <rect x="60" y="268" width="14" height="10" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="80" y="277" font-size="12">kernel.org LTS (projected EOL)</text>
+  <line x1="300" y1="273" x2="330" y2="273" stroke="#3f9a6b" stroke-dasharray="5 4" stroke-width="2"/>
+  <text x="336" y="277" font-size="12">CIP SLTS 연장 (개략, 약 10년)</text>
+</svg></figure>
+<p>그림 2 — 살아 있는 LTS 6개와 CIP SLTS 연장(5.10, 6.1, 6.12). 회색 막대(5.10·5.15)는 2026-12에 kernel.org 지원이 끝난다. 6.18이 랩 커널이다. CIP 브랜치 목록(4.4, 4.19, 5.10, 6.1, 6.12)은 E7 예제 6에서 <code>git ls-remote</code>로 확인한 값이다.</p>
+<p>읽는 법:</p>
+<ul><li><strong>5.15 벤더 BSP 제품은 지금(2026-10) 두 달 남았다.</strong> contents.md 시나리오 "5.15를 6.x LTS로 올려라"가 바로 지금 해야 하는 일이다. EOL 뒤에도 커널은 동작하지만, CVE 수정이 더 이상 공짜로 오지 않는다.</li><li>목표 LTS를 고를 때는 <strong>"우리 제품의 남은 수명 ≤ 목표 LTS의 남은 수명"</strong>이 되는 것을 고른다. 10년 장비면 CIP가 고른 버전(6.12)이 유리하다. 최신 6.18은 kernel.org 기준으로는 가장 길지만 CIP가 고를지는 아직 모른다(2026-10 기준 CIP 브랜치에 없음).</li><li>LTS 수명은 <strong>연장되기도 줄기도 한다</strong>. 처음 2년 예정이던 것이 수요가 있으면 늘어난다(E7 §2.1). 계획은 "projected EOL"로 세우되, 분기마다 releases.html을 다시 본다.</li></ul>
+<h3 id="1-3-cip-slts-한-줄-정리">1.3 CIP SLTS 한 줄 정리<a class="anchor" href="#1-3-cip-slts-한-줄-정리" aria-label="link">#</a></h3>
+<p>CIP(Civil Infrastructure Platform, Linux Foundation 프로젝트)는 kernel.org LTS 중 일부를 골라 <strong>약 10년</strong> 유지한다. 브랜치는 <code>linux-6.1.y-cip</code>처럼 <code>-cip</code> 접미어가 붙고, 일정한 주기로 태그(<code>v6.1.x-cipN</code>)를 낸다(태그 형식은 기억 기반 — CIP 저장소로 확인 필요). 철도·전력·공장 장비처럼 "10년 넘게 필드에 있고 커널을 자주 못 올리는" 제품이 대상이다. 국방·차량 장비도 같은 고민을 하므로, 면접에서 "LTS 수명보다 제품 수명이 길면?"에 CIP를 꺼낼 수 있어야 한다. 단, CIP도 <strong>보드 지원은 CIP 참조 보드만</strong> 테스트한다 — 우리 BSP 패치는 여전히 우리 몫이다.</p>
+<hr>
+<h2 id="2-왜-제품은-옛-커널에-갇히나">2. 왜 제품은 옛 커널에 갇히나<a class="anchor" href="#2-왜-제품은-옛-커널에-갇히나" aria-label="link">#</a></h2>
+<h3 id="2-1-갇히는-이유">2.1 갇히는 이유<a class="anchor" href="#2-1-갇히는-이유" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>이유</th><th>실제 모습</th><th>업그레이드 때 비용</th></tr></thead><tbody><tr><td>벤더 BSP가 그 버전에만 있다</td><td>SoC 벤더가 5.15 BSP만 배포, 6.x BSP는 다음 해</td><td>벤더가 새 BSP를 낼 때까지 기다리거나 직접 포팅</td></tr><tr><td>out-of-tree 드라이버</td><td>NPU·카메라 ISP·Wi-Fi 바이너리 블롭 + 소스 일부</td><td>내부 API 변경마다 우리가 고침 (6절)</td></tr><tr><td>패치 스택이 크다</td><td>"핫픽스"가 수백 개 쌓였고 출처가 기록 안 됨</td><td>분류에 시간이 대부분 든다 (3절)</td></tr><tr><td>인증·검증 비용</td><td>차량·국방·의료는 커널을 바꾸면 재검증</td><td>테스트 자동화가 없으면 수개월</td></tr><tr><td>유저 공간 의존</td><td>오래된 사용자 도구가 사라진 sysfs·ioctl·debugfs를 씀</td><td>커널은 ABI를 지키지만 debugfs·벤더 ioctl은 예외</td></tr><tr><td>담당자가 없다</td><td>처음 BSP를 올린 사람이 퇴사</td><td>왜 그 패치가 있는지 아무도 모름</td></tr></tbody></table></div>
+<h3 id="2-2-머무르는-비용은-시간이-갈수록-커진다">2.2 머무르는 비용은 시간이 갈수록 커진다<a class="anchor" href="#2-2-머무르는-비용은-시간이-갈수록-커진다" aria-label="link">#</a></h3>
+<p>옛 커널에 머물면 매달 두 가지가 쌓인다. (1) upstream에서 고쳐진 버그가 우리 트리에는 없다 — stable 트리는 EOL 이후 수정을 받지 않는다. (2) upstream과 우리 트리의 거리가 벌어져, 나중에 옮길 때 충돌과 API 변경이 늘어난다. 10절에서 볼 것처럼 <strong>6.18.56 stable 한 번에 402개 수정</strong>이 들어간다. EOL 이후에는 이것들을 우리가 직접 골라 backport해야 한다.</p>
+<p>그래서 실무 원칙은 두 가지다.</p>
+<ul><li><strong>stable point release는 정기적으로(주~월 단위) 머지</strong>한다. 이건 "작은 업그레이드"이고 거의 공짜다(E7 §4).</li><li><strong>LTS 이동은 1~2년마다 계획된 프로젝트</strong>로 한다. 이때 패치 스택을 줄이는 것(upstream에 보내기, P7)이 다음 이동의 비용을 결정한다.</li></ul>
+<blockquote><p>Don 경험과 연결: SSD 펌웨어에서 "이전 세대 코드 브랜치에 핫픽스만 계속 얹다가 신규 세대 이식 때 수백 개 diff를 분류하던" 상황과 같다. 그때 효과가 있던 규칙(커밋 메시지에 출처·이슈 번호, 플랫폼 공통 코드는 공통 브랜치에만)이 커널에서도 그대로 통한다.</p></blockquote>
+<hr>
+<h2 id="3-업그레이드-계획-인벤토리와-분류">3. 업그레이드 계획 — 인벤토리와 분류<a class="anchor" href="#3-업그레이드-계획-인벤토리와-분류" aria-label="link">#</a></h2>
+<h3 id="3-1-네-가지-분류">3.1 네 가지 분류<a class="anchor" href="#3-1-네-가지-분류" aria-label="link">#</a></h3>
+<p>패치 하나하나를 아래 네 칸 중 하나에 넣는 것이 계획의 핵심이다.</p>
+<div class="tw"><table><thead><tr><th>분류</th><th>판단 기준</th><th>할 일</th><th>실습 저장소의 예</th></tr></thead><tbody><tr><td>upstreamed</td><td>같은 수정이 새 base에 이미 있다 (patch-id 같음, 또는 의미상 같은 수정)</td><td>drop. 커밋 메시지의 upstream sha로 확인</td><td><code>PRODUCT: sensor: fix channel bound check</code></td></tr><tr><td>obsolete</td><td>패치가 고치던 파일·기능이 새 base에서 사라졌다</td><td>drop. 대체 기능이 필요한지만 확인</td><td><code>PRODUCT: watchdog_old: shorten timeout</code></td></tr><tr><td>needs port</td><td>대상은 있지만 문맥·API가 바뀌어 그대로 안 붙는다</td><td>손으로 고친다 (5·6절)</td><td><code>PRODUCT: imu: count samples</code></td></tr><tr><td>keep</td><td>새 base에 그대로 붙는다</td><td>그대로. 단 upstream 후보인지 표시</td><td><code>PRODUCT: board: add p5 kit config</code></td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="20" width="240" height="56" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="140" y="43" text-anchor="middle" font-size="13">upstream에 이미 있나?</text>
+  <text x="140" y="63" text-anchor="middle" font-size="12">git cherry '-' · upstream sha</text>
+  <rect x="20" y="110" width="240" height="56" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="140" y="133" text-anchor="middle" font-size="13">대상 코드가 사라졌나?</text>
+  <text x="140" y="153" text-anchor="middle" font-size="12">파일 DELETED · 기능 제거</text>
+  <rect x="20" y="200" width="240" height="56" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="140" y="223" text-anchor="middle" font-size="13">새 base에 깨끗이 붙나?</text>
+  <text x="140" y="243" text-anchor="middle" font-size="12">rebase 충돌 · 빌드 에러 없음</text>
+  <rect x="440" y="20" width="220" height="56" rx="8" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="550" y="43" text-anchor="middle" font-size="13">drop (upstreamed)</text>
+  <text x="550" y="63" text-anchor="middle" font-size="12">스택이 줄어든다</text>
+  <rect x="440" y="110" width="220" height="56" rx="8" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="550" y="133" text-anchor="middle" font-size="13">drop (obsolete)</text>
+  <text x="550" y="153" text-anchor="middle" font-size="12">대체 기능 필요한지 확인</text>
+  <rect x="440" y="200" width="220" height="56" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="550" y="223" text-anchor="middle" font-size="13">keep</text>
+  <text x="550" y="243" text-anchor="middle" font-size="12">upstream 후보로 표시 (P7)</text>
+  <rect x="200" y="268" width="240" height="28" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="320" y="287" text-anchor="middle" font-size="13">needs port — 손으로 고친다</text>
+  <line x1="260" y1="48" x2="438" y2="48" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="350" y="42" text-anchor="middle" font-size="12">예</text>
+  <line x1="260" y1="138" x2="438" y2="138" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="350" y="132" text-anchor="middle" font-size="12">예</text>
+  <line x1="260" y1="228" x2="438" y2="228" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="350" y="222" text-anchor="middle" font-size="12">예</text>
+  <line x1="140" y1="76" x2="140" y2="108" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="150" y="96" font-size="12">아니오</text>
+  <line x1="140" y1="166" x2="140" y2="198" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="150" y="186" font-size="12">아니오</text>
+  <path d="M140 256 L140 282 L198 282" fill="none" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="80" y="278" font-size="12">아니오</text>
+</svg></figure>
+<p>그림 3 — 패치 하나를 분류하는 순서. 위 두 질문은 git이 대부분 자동으로 답해 준다(<code>git cherry</code>, 파일 존재 여부). 세 번째는 실제로 옮겨 봐야 안다.</p>
+<h3 id="3-2-예제-1-실습-저장소-만들기">3.2 예제 1 — 실습 저장소 만들기<a class="anchor" href="#3-2-예제-1-실습-저장소-만들기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 커널 업그레이드의 전형적인 상황을 담은 작은 저장소를 만든다. upstream <code>v1.0 → v2.0</code>(그 사이에 버그 수정, API 인자 변경, 파일 삭제), 벤더 <code>bsp-1.0</code>(v1.0 위 2개)과 <code>bsp-2.0</code>(v2.0 위로 벤더가 직접 옮긴 2개, 내용 일부 변경), 그리고 우리 <code>product</code> 스택 4개.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# P5 lab2: synthetic upstream v1.0 -&gt; v2.0, vendor bsp-1.0/bsp-2.0, product stack on bsp-1.0
+set -e
+R=/var/tmp/P5/lab2; rm -rf $R; mkdir -p $R; cd $R; git init -q -b master .
+export GIT_AUTHOR_NAME=p5 GIT_AUTHOR_EMAIL=p5@lab GIT_COMMITTER_NAME=p5 GIT_COMMITTER_EMAIL=p5@lab
+n=0; c() { n=$((n+1)); export GIT_AUTHOR_DATE="2026-01-01T00:$(printf %02d $n):00Z" \
+           GIT_COMMITTER_DATE="2026-01-01T00:$(printf %02d $n):00Z"; git add -A; git commit -qm "$1"; }
+mkdir -p include drivers board
+printf 'int sensor_read(int ch);\n' &gt; include/sensor_api.h
+printf '%s\n' '#include "../include/sensor_api.h"' '#define NCH 4' 'int sensor_read(int ch)' '{' \
+  '	if (ch &gt; NCH)' '		return -1;' '	return ch * 10;' '}' &gt; drivers/sensor.c
+printf '%s\n' '#include "../include/sensor_api.h"' 'int imu_sample(void)' '{' \
+  '	int v = sensor_read(0);' '	return v;' '}' &gt; drivers/imu.c
+printf 'int wdt_timeout = 30;\n' &gt; drivers/watchdog_old.c
+c "initial: v1.0 tree"; git tag v1.0
+git checkout -qb bsp-1.0                                   # ---- vendor BSP on v1.0
+printf 'int soc_clk_rate = 24000000;\n' &gt; drivers/soc_clk.c; c "BSP: soc: add clock driver"
+printf 'int board_init(void) { return 0; }\n' &gt; board/soc_board.c; c "BSP: soc: board init"
+git checkout -qb product                                   # ---- our stack on bsp-1.0
+printf 'const char *kit = "p5kit";\n' &gt; board/p5kit.c; c "PRODUCT: board: add p5 kit config"
+sed -i 's/if (ch &gt; NCH)/if (ch &gt;= NCH)/' drivers/sensor.c; c "PRODUCT: sensor: fix channel bound check"
+sed -i -e 's/^int imu_sample/static int imu_count;\nint imu_sample/' \
+       -e 's/^\tint v = sensor_read(0);/&amp;\n\timu_count++;/' drivers/imu.c; c "PRODUCT: imu: count samples"
+sed -i 's/30/10/' drivers/watchdog_old.c; c "PRODUCT: watchdog_old: shorten timeout"
+git checkout -q master                                     # ---- upstream moves to v2.0
+sed -i 's/if (ch &gt; NCH)/if (ch &gt;= NCH)/' drivers/sensor.c; c "sensor: fix channel bound check"
+printf '%s\n' 'struct sensor_dev { int id; };' 'int sensor_read(struct sensor_dev *sd, int ch);' &gt; include/sensor_api.h
+sed -i -e 's/int sensor_read(int ch)/int sensor_read(struct sensor_dev *sd, int ch)/' \
+       -e 's/^\tif (ch &gt;= NCH)/\t(void)sd;\n\tif (ch &gt;= NCH)/' drivers/sensor.c
+sed -i -e 's/^int imu_sample/static struct sensor_dev imu_sd;\nint imu_sample/' \
+       -e 's/sensor_read(0)/sensor_read(\&amp;imu_sd, 0)/' drivers/imu.c; c "sensor: pass device to sensor_read()"
+git rm -q drivers/watchdog_old.c; c "watchdog_old: remove obsolete driver"; git tag v2.0
+git checkout -qb bsp-2.0; mkdir -p board                   # ---- vendor ports its BSP to v2.0
+printf 'int soc_clk_rate = 25000000;\n' &gt; drivers/soc_clk.c; c "BSP: soc: add clock driver (v2)"
+printf 'int board_init(void) { return 0; }\n' &gt; board/soc_board.c; c "BSP: soc: board init"
+git checkout -q product; git log --oneline --graph --all</code></pre></figure>
+<p>(처음 만든 긴 버전(heredoc·python 치환)을 노트용으로 <code>printf</code>/<code>sed</code>로 줄인 것이다. 이 짧은 버전을 다시 돌려 아래 출력이 해시까지 똑같이 나오는 것을 확인했다.)</p>
+<figure class="code"><span class="lang">text</span><pre><code>* 49c193a BSP: soc: board init
+* 0760b43 BSP: soc: add clock driver (v2)
+* b94f412 watchdog_old: remove obsolete driver
+* 1cd47cb sensor: pass device to sensor_read()
+* 0b2c474 sensor: fix channel bound check
+| * 9fa9eb7 PRODUCT: watchdog_old: shorten timeout
+| * 7ddb7a8 PRODUCT: imu: count samples
+| * af12ce4 PRODUCT: sensor: fix channel bound check
+| * 701d8ca PRODUCT: board: add p5 kit config
+| * d62562b BSP: soc: board init
+| * 574bdba BSP: soc: add clock driver
+|/  
+* 9c50b91 initial: v1.0 tree</code></pre></figure>
+<p>출력에서 볼 것: <code>product</code>는 <code>bsp-1.0</code> 위에 있고, <code>bsp-1.0</code>은 <code>v1.0</code> 위에 있다. 업그레이드 목표는 <strong>우리 커밋 4개만</strong> <code>bsp-2.0</code> 위로 옮기는 것이다. 벤더 커밋 2개(<code>574bdba</code>, <code>d62562b</code>)는 벤더가 이미 <code>bsp-2.0</code>으로 옮겨 놓았으니 우리가 옮기면 안 된다. 날짜를 고정했으므로 같은 스크립트를 돌리면 해시도 같다.</p>
+<h3 id="3-3-예제-2-인벤토리-범위-고르기-git-cherry-파일-상태">3.3 예제 2 — 인벤토리: 범위 고르기, <code>git cherry</code>, 파일 상태<a class="anchor" href="#3-3-예제-2-인벤토리-범위-고르기-git-cherry-파일-상태" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: (A) 범위를 잘못 잡으면 벤더 커밋까지 "우리 것"으로 섞인다, (B) 바른 범위, (C) <code>git cherry</code>로 "이미 upstream에 있는 것" 찾기, (D) 각 커밋이 건드린 파일이 새 base에서 어떤 상태인지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/P5/lab2
+echo "## A. wrong range: bsp-2.0..product"; git log --oneline bsp-2.0..product
+echo "## B. right range: bsp-1.0..product"; git log --oneline bsp-1.0..product
+echo "## C. git cherry -v bsp-2.0 product bsp-1.0"; git cherry -v bsp-2.0 product bsp-1.0
+echo "## D. touched files vs new base"
+for c in $(git rev-list --reverse bsp-1.0..product); do
+  printf "%s %-45s " $(git log -1 --format=%h $c) "$(git log -1 --format=%s $c)"
+  for f in $(git diff-tree --no-commit-id --name-only -r $c); do
+    if git cat-file -e bsp-2.0:$f 2&gt;/dev/null; then
+      if git diff --quiet bsp-1.0 bsp-2.0 -- $f; then s=same; else s=changed; fi
+    else if git cat-file -e bsp-1.0:$f 2&gt;/dev/null; then s=DELETED; else s=new; fi; fi
+    printf "%s(%s) " $f $s
+  done; echo
+done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>## A. wrong range: bsp-2.0..product
+9fa9eb7 PRODUCT: watchdog_old: shorten timeout
+7ddb7a8 PRODUCT: imu: count samples
+af12ce4 PRODUCT: sensor: fix channel bound check
+701d8ca PRODUCT: board: add p5 kit config
+d62562b BSP: soc: board init
+574bdba BSP: soc: add clock driver
+## B. right range: bsp-1.0..product
+9fa9eb7 PRODUCT: watchdog_old: shorten timeout
+7ddb7a8 PRODUCT: imu: count samples
+af12ce4 PRODUCT: sensor: fix channel bound check
+701d8ca PRODUCT: board: add p5 kit config
+## C. git cherry -v bsp-2.0 product bsp-1.0
++ 701d8ca3398c91bdf05af31bfc03fc67d7fc2b90 PRODUCT: board: add p5 kit config
+- af12ce4c2a0a156e06c4ea78ca0349732c894d38 PRODUCT: sensor: fix channel bound check
++ 7ddb7a8883746a7f1d75e4b1a57aba1cf6d64f06 PRODUCT: imu: count samples
++ 9fa9eb718d62f522431012dc03e5c82207994099 PRODUCT: watchdog_old: shorten timeout
+## D. touched files vs new base
+701d8ca PRODUCT: board: add p5 kit config             board/p5kit.c(new) 
+af12ce4 PRODUCT: sensor: fix channel bound check      drivers/sensor.c(changed) 
+7ddb7a8 PRODUCT: imu: count samples                   drivers/imu.c(changed) 
+9fa9eb7 PRODUCT: watchdog_old: shorten timeout        drivers/watchdog_old.c(DELETED) </code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>A는 6개, B는 4개다. <code>bsp-2.0..product</code>는 "bsp-2.0에 없는 product 커밋"이라 <strong>옛 벤더 커밋까지 포함</strong>된다. 벤더 커밋은 bsp-2.0에서 내용이 바뀌어(클럭 24 MHz → 25 MHz) 해시도 patch-id도 다르기 때문이다. 우리 스택의 진짜 범위는 <strong>옛 base부터</strong>(B)다. 이게 4절 <code>--onto</code>가 필요한 이유다.</li><li><code>git cherry &lt;upstream&gt; &lt;head&gt; &lt;limit&gt;</code>은 <code>limit..head</code>의 각 커밋에 대해 "upstream에 같은 patch-id가 있으면 <code>-</code>, 없으면 <code>+</code>"를 찍는다. <code>af12ce4</code>가 <code>-</code> — upstream <code>0b2c474</code>와 diff가 글자 하나까지 같다. <strong>해시는 다르지만 patch-id가 같다.</strong></li><li>D의 <code>DELETED</code>는 obsolete 후보, <code>changed</code>는 충돌 후보(needs port 가능), <code>new</code>는 keep 후보다. 진짜 커널에서는 이 스크립트를 수백 개 커밋에 돌려 스프레드시트로 만든다.</li></ul>
+<p>진짜 커널에서는 (가이드, 실행 안 함):</p>
+<figure class="code"><span class="lang">sh</span><pre><code># 우리 스택 범위: 벤더 BSP 태그(옛 base)부터 제품 브랜치까지
+git log --oneline --no-merges lf-5.15.y..product-5.15 &gt; stack.txt   # 태그 이름은 벤더마다 다르다
+git cherry -v v6.18.55 product-5.15 lf-5.15.y &gt; cherry.txt          # '-' = 같은 patch-id가 6.18.55에 있음
+# 커밋 메시지에 남긴 upstream sha가 새 base에 있는지 (E7 §4.4의 cherry-pick -x 관습)
+git log --format='%h %(trailers:key=commit,valueonly)' lf-5.15.y..product-5.15
+git merge-base --is-ancestor &lt;upstream-sha&gt; v6.18.55 &amp;&amp; echo "already in 6.18.55"</code></pre></figure>
+<p>함정: patch-id는 <strong>diff가 완전히 같을 때만</strong> 같다. backport하면서 문맥을 손봤거나 다르게 고쳤으면 <code>+</code>로 나온다. 그래서 <code>git cherry</code>의 <code>-</code>는 "확실히 upstream", <code>+</code>는 "아직 모름"이다. <code>+</code> 중 상당수는 커밋 메시지의 <code>commit &lt;sha&gt; upstream.</code> 줄이나 제목 검색(<code>git log --grep</code>, <code>git log -S</code>)으로 사람이 다시 확인해야 한다.</p>
+<hr>
+<h2 id="4-git-rebase-onto-스택만-잘라서-옮기기">4. <code>git rebase --onto</code> — 스택만 잘라서 옮기기<a class="anchor" href="#4-git-rebase-onto-스택만-잘라서-옮기기" aria-label="link">#</a></h2>
+<h3 id="4-1-직관">4.1 직관<a class="anchor" href="#4-1-직관" aria-label="link">#</a></h3>
+<p><code>git rebase &lt;base&gt;</code>는 "현재 브랜치에서 <code>&lt;base&gt;</code>에 없는 커밋을 전부 <code>&lt;base&gt;</code> 위에 다시 쌓는다". 문제는 <strong>"base에 없는 커밋"이 우리 커밋보다 많을 때</strong>다(예제 2의 A). <code>--onto</code>는 "어디서부터 잘라서(옛 base) 어디에 붙일지(새 base)"를 따로 지정한다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>git rebase --onto &lt;새 base&gt; &lt;옛 base&gt; &lt;브랜치&gt;
+   = &lt;옛 base&gt;..&lt;브랜치&gt; 범위의 커밋을 &lt;새 base&gt; 위에 차례로 cherry-pick 하고, &lt;브랜치&gt;를 그 끝으로 옮긴다</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <line x1="64" y1="70" x2="246" y2="70" stroke="currentColor"/>
+  <line x1="264" y1="70" x2="366" y2="70" stroke="#4a7bd0"/>
+  <line x1="394" y1="70" x2="496" y2="70" stroke="#3f9a6b"/>
+  <line x1="60" y1="80" x2="100" y2="160" stroke="currentColor"/>
+  <line x1="124" y1="170" x2="396" y2="170" stroke="currentColor"/>
+  <circle cx="50" cy="70" r="14" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="50" y="74" text-anchor="middle" font-size="12">v1</text>
+  <circle cx="130" cy="70" r="14" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="130" y="74" text-anchor="middle" font-size="12">U1</text>
+  <circle cx="190" cy="70" r="14" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="190" y="74" text-anchor="middle" font-size="12">U2</text>
+  <circle cx="250" cy="70" r="14" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="250" y="74" text-anchor="middle" font-size="12">U3</text>
+  <circle cx="320" cy="70" r="14" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="320" y="74" text-anchor="middle" font-size="12">B1'</text>
+  <circle cx="380" cy="70" r="14" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="380" y="74" text-anchor="middle" font-size="12">B2'</text>
+  <circle cx="450" cy="70" r="14" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="450" y="74" text-anchor="middle" font-size="12">P1'</text>
+  <circle cx="510" cy="70" r="14" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="510" y="74" text-anchor="middle" font-size="12">P3'</text>
+  <text x="250" y="44" text-anchor="middle" font-size="12">v2.0</text>
+  <text x="380" y="44" text-anchor="middle" font-size="12">bsp-2.0 (새 base)</text>
+  <text x="560" y="74" font-size="12">product (후)</text>
+  <circle cx="110" cy="170" r="14" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="110" y="174" text-anchor="middle" font-size="12">B1</text>
+  <circle cx="170" cy="170" r="14" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="170" y="174" text-anchor="middle" font-size="12">B2</text>
+  <circle cx="230" cy="170" r="14" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="230" y="174" text-anchor="middle" font-size="12">P1</text>
+  <circle cx="290" cy="170" r="14" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="290" y="174" text-anchor="middle" font-size="12">P2</text>
+  <circle cx="350" cy="170" r="14" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="350" y="174" text-anchor="middle" font-size="12">P3</text>
+  <circle cx="410" cy="170" r="14" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="410" y="174" text-anchor="middle" font-size="12">P4</text>
+  <text x="170" y="205" text-anchor="middle" font-size="12">bsp-1.0 (옛 base)</text>
+  <text x="440" y="174" font-size="12">product (전)</text>
+  <rect x="208" y="148" width="226" height="44" rx="10" fill="none" stroke="#e08a3c" stroke-dasharray="5 4"/>
+  <text x="321" y="140" text-anchor="middle" font-size="12">bsp-1.0..product = 옮길 범위</text>
+  <path d="M232 154 C 300 120, 400 110, 446 86" fill="none" stroke="#3f9a6b" stroke-dasharray="4 3" marker-end="url(#ah3)"/>
+  <path d="M352 154 C 420 130, 480 110, 506 86" fill="none" stroke="#3f9a6b" stroke-dasharray="4 3" marker-end="url(#ah3)"/>
+  <text x="290" y="228" text-anchor="middle" font-size="12">P2: upstream U1과 같은 diff → drop</text>
+  <text x="410" y="248" text-anchor="middle" font-size="12">P4: 대상 파일을 U3가 삭제 → drop</text>
+  <text x="20" y="282" font-size="13">git rebase -i --onto bsp-2.0 bsp-1.0 product   (B1, B2는 옮기지 않는다)</text>
+</svg></figure>
+<p>그림 4 — <code>--onto</code>의 세 인자. 옛 base(<code>bsp-1.0</code>)는 "여기까지는 내 것이 아니다"라는 경계, 새 base(<code>bsp-2.0</code>)는 "여기 위에 붙인다"는 목적지다. 옮긴 커밋은 내용이 같아도 부모가 달라졌으니 새 해시(P1', P3')를 받는다.</p>
+<h3 id="4-2-예제-3-그냥-git-rebase-bsp-2-0을-하면">4.2 예제 3 — 그냥 <code>git rebase bsp-2.0</code>을 하면<a class="anchor" href="#4-2-예제-3-그냥-git-rebase-bsp-2-0을-하면" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>--onto</code> 없이 새 base만 주면 무슨 일이 생기는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/P5/lab2; git checkout -q -b wrong product
+git rebase bsp-2.0 2&gt;&amp;1 | head -12; git status --short
+git rebase --abort; git checkout -q product; git branch -D wrong'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>warning: skipped previously applied commit d62562b
+warning: skipped previously applied commit af12ce4
+hint: use --reapply-cherry-picks to include skipped commits
+hint: Disable this message with "git config set advice.skippedCherryPicks false"
+Rebasing (1/4)Auto-merging drivers/soc_clk.c
+CONFLICT (add/add): Merge conflict in drivers/soc_clk.c
+error: could not apply 574bdba... BSP: soc: add clock driver
+hint: Resolve all conflicts manually, mark them as resolved with
+hint: "git add/rm &lt;conflicted_files&gt;", then run "git rebase --continue".
+hint: You can instead skip this commit: run "git rebase --skip".
+hint: To abort and get back to the state before "git rebase", run "git rebase --abort".
+hint: Disable this message with "git config set advice.mergeConflict false"
+AA drivers/soc_clk.c
+Deleted branch wrong (was 9fa9eb7).</code></pre></figure>
+<p>출력에서 볼 것: git은 patch-id가 같은 두 커밋(벤더의 <code>board init</code>, 우리의 <code>fix channel bound check</code>)은 알아서 건너뛰었다. 하지만 <strong>벤더가 내용을 바꿔 옮긴 클럭 드라이버 커밋</strong>(<code>574bdba</code>)을 우리 커밋처럼 다시 쌓으려다 add/add 충돌이 났다. 커널 BSP에서는 이런 벤더 커밋이 수천 개라, 이 방식으로는 끝이 안 난다. 벤더 커밋은 벤더가 옮긴 것을 믿고, <strong>우리 범위만</strong> 옮긴다.</p>
+<h3 id="4-3-예제-4-onto-drop-목록-충돌-해결-range-diff">4.3 예제 4 — <code>--onto</code> + drop 목록 + 충돌 해결 + range-diff<a class="anchor" href="#4-3-예제-4-onto-drop-목록-충돌-해결-range-diff" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 인벤토리 결과(upstreamed·obsolete)를 todo 목록에 자동 반영해 drop하고, 남은 충돌 하나를 zdiff3 표시로 읽어 해결한 뒤, <code>range-diff</code>로 "전 스택 vs 후 스택"을 검토하고 빌드까지 확인한다. <code>git rebase -i</code>의 편집기를 스크립트로 바꿔(<code>GIT_SEQUENCE_EDITOR</code>) 비대화식으로 돌린다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# todo_edit.sh — non-interactive "editor" for git rebase -i: "pick &lt;sha&gt;" -&gt; "drop &lt;sha&gt;" for every sha in $DROP
+for s in $DROP; do sed -i "s/^pick $s/drop $s/" "$1"; done
+sed -i -e '/^#/d' -e '/^$/d' "$1"; cat "$1"</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# P5 lab2 steps: inventory -&gt; rebase --onto (drop) -&gt; resolve -&gt; range-diff -&gt; build
+cd /var/tmp/P5/lab2 || exit 1
+export GIT_COMMITTER_NAME=p5 GIT_COMMITTER_EMAIL=p5@lab GIT_COMMITTER_DATE=2026-01-01T01:00:00Z
+git config merge.conflictStyle zdiff3
+git branch -f product-bsp1 product                     # backup of the old stack
+echo "### 1. inventory"; git cherry -v bsp-2.0 product bsp-1.0
+UP=$(git cherry bsp-2.0 product bsp-1.0 | awk '/^-/{print substr($2,1,7)}')   # already upstream
+OBS=$(git log --format=%h bsp-1.0..product -- drivers/watchdog_old.c)          # file gone upstream
+export DROP="$UP $OBS"; echo "drop: $DROP"
+echo "### 2. rebase --onto bsp-2.0 bsp-1.0 product"
+GIT_SEQUENCE_EDITOR=/Users/donh/.elinux_scratch/P5/git/todo_edit.sh \
+  git rebase -i --empty=drop --onto bsp-2.0 bsp-1.0 product 2&gt;&amp;1 | grep -v '^hint:'
+echo "### 3. conflict (zdiff3)"; git status --short; cat drivers/imu.c
+printf '%s\n' '#include "../include/sensor_api.h"' 'static struct sensor_dev imu_sd;' \
+  'static int imu_count;' 'int imu_sample(void)' '{' '	int v = sensor_read(&amp;imu_sd, 0);' \
+  '	imu_count++;' '	return v;' '}' &gt; drivers/imu.c
+git add drivers/imu.c &amp;&amp; GIT_EDITOR=true git rebase --continue 2&gt;&amp;1 | tail -1
+echo "### 4. new stack"; git log --oneline bsp-2.0..product
+echo "### 5. range-diff"; git range-diff --no-color --creation-factor=95 bsp-1.0..product-bsp1 bsp-2.0..product
+echo "### 6. build check"
+for f in drivers/*.c board/*.c; do gcc -std=gnu11 -Wall -Wextra -c "$f" -o /dev/null &amp;&amp; echo "OK $f"; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>### 1. inventory
++ 701d8ca3398c91bdf05af31bfc03fc67d7fc2b90 PRODUCT: board: add p5 kit config
+- af12ce4c2a0a156e06c4ea78ca0349732c894d38 PRODUCT: sensor: fix channel bound check
++ 7ddb7a8883746a7f1d75e4b1a57aba1cf6d64f06 PRODUCT: imu: count samples
++ 9fa9eb718d62f522431012dc03e5c82207994099 PRODUCT: watchdog_old: shorten timeout
+drop: af12ce4 9fa9eb7
+### 2. rebase --onto bsp-2.0 bsp-1.0 product
+pick 701d8ca # PRODUCT: board: add p5 kit config
+drop af12ce4 # PRODUCT: sensor: fix channel bound check
+pick 7ddb7a8 # PRODUCT: imu: count samples
+drop 9fa9eb7 # PRODUCT: watchdog_old: shorten timeout
+Rebasing (1/4)Rebasing (2/4)Rebasing (3/4)Auto-merging drivers/imu.c
+CONFLICT (content): Merge conflict in drivers/imu.c
+error: could not apply 7ddb7a8... PRODUCT: imu: count samples
+Could not apply 7ddb7a8... # PRODUCT: imu: count samples
+### 3. conflict (zdiff3)
+UU drivers/imu.c
+#include "../include/sensor_api.h"
+&lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD
+static struct sensor_dev imu_sd;
+||||||| parent of 7ddb7a8 (PRODUCT: imu: count samples)
+=======
+static int imu_count;
+&gt;&gt;&gt;&gt;&gt;&gt;&gt; 7ddb7a8 (PRODUCT: imu: count samples)
+int imu_sample(void)
+{
+&lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD
+	int v = sensor_read(&amp;imu_sd, 0);
+||||||| parent of 7ddb7a8 (PRODUCT: imu: count samples)
+	int v = sensor_read(0);
+=======
+	int v = sensor_read(0);
+	imu_count++;
+&gt;&gt;&gt;&gt;&gt;&gt;&gt; 7ddb7a8 (PRODUCT: imu: count samples)
+	return v;
+}
+Rebasing (4/4)Successfully rebased and updated refs/heads/product.
+### 4. new stack
+0aafd5a PRODUCT: imu: count samples
+5e990cb PRODUCT: board: add p5 kit config
+### 5. range-diff
+1:  701d8ca = 1:  5e990cb PRODUCT: board: add p5 kit config
+2:  af12ce4 &lt; -:  ------- PRODUCT: sensor: fix channel bound check
+3:  7ddb7a8 ! 2:  0aafd5a PRODUCT: imu: count samples
+    @@ Commit message
+      ## drivers/imu.c ##
+     @@
+      #include "../include/sensor_api.h"
+    + static struct sensor_dev imu_sd;
+     +static int imu_count;
+      int imu_sample(void)
+      {
+    - 	int v = sensor_read(0);
+    + 	int v = sensor_read(&amp;imu_sd, 0);
+     +	imu_count++;
+      	return v;
+      }
+4:  9fa9eb7 &lt; -:  ------- PRODUCT: watchdog_old: shorten timeout
+### 6. build check
+OK drivers/imu.c
+OK drivers/sensor.c
+OK drivers/soc_clk.c
+OK board/p5kit.c
+OK board/soc_board.c</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>todo 목록이 곧 분류표</strong>다. <code>pick</code>=keep/needs-port, <code>drop</code>=upstreamed/obsolete. 진짜 업그레이드에서는 이 todo 파일을 리뷰 받고 저장소에 남긴다(왜 drop했는지 한 줄 주석과 함께).</li><li>4개 중 2개만 남았고 새 해시(<code>5e990cb</code>, <code>0aafd5a</code>)를 받았다. 벤더 커밋은 옮기지 않았다(<code>bsp-2.0..product</code>가 2개).</li><li>range-diff의 기호: <code>=</code> 같은 커밋(내용 동일), <code>&lt;</code> 왼쪽(전)에만 있음 = drop된 것, <code>!</code> 짝은 있지만 내용이 바뀜. <code>!</code> 아래는 <strong>diff의 diff</strong>다: 첫 열은 "전→후"의 변화, 둘째 열은 원래 diff 기호다. <code>- 	int v = sensor_read(0);</code> / <code>+ 	int v = sensor_read(&amp;imu_sd, 0);</code>는 "우리 패치의 문맥 줄이 새 API로 바뀌었다"는 뜻이고, <code>+imu_count++</code> 줄 자체(둘째 열 <code>+</code>)는 그대로다 — 즉 <strong>우리 의도는 보존되고 문맥만 바뀌었다</strong>. 리뷰어는 range-diff만 보고 포팅이 맞는지 판단할 수 있다.</li><li><code>--creation-factor=95</code>: range-diff는 "얼마나 바뀌어야 다른 커밋으로 볼지"를 비용으로 정한다(기본 60). 이 예제처럼 작은 커밋에서 문맥이 크게 바뀌면 기본값에서는 짝을 못 찾고 <code>&lt;</code>와 <code>&gt;</code> 두 줄로 나온다 — 실제로 기본값으로 돌렸을 때 <code>3: 7ddb7a8 &lt; -: -------</code>와 <code>-: ------- &gt; 2: ...</code>로 따로 나왔다. 짝이 안 맞으면 이 값을 올린다.</li><li>빌드 확인은 범위가 작아도 반드시 한다. 충돌 없이 붙은 커밋도 <strong>의미상 깨졌을 수 있다</strong>(아래 5.3).</li></ul>
+<h3 id="4-4-함정-onto에서는-upstream-패치가-자동으로-빠지지-않을-수-있다">4.4 함정 — <code>--onto</code>에서는 upstream 패치가 자동으로 빠지지 않을 수 있다<a class="anchor" href="#4-4-함정-onto에서는-upstream-패치가-자동으로-빠지지-않을-수-있다" aria-label="link">#</a></h3>
+<p>예제 3(plain rebase)에서는 git이 <code>af12ce4</code>를 "skipped previously applied commit"으로 자동으로 건너뛰었다. 그런데 처음 이 실습을 <code>--onto</code>로 돌렸을 때, drop 목록에 <code>af12ce4</code>를 넣지 않았더니 git은 그것을 <strong>그대로 pick했고 충돌</strong>이 났다(실제 출력 일부):</p>
+<figure class="code"><span class="lang">text</span><pre><code>Rebasing (1/4)Rebasing (2/4)Auto-merging drivers/sensor.c
+CONFLICT (content): Merge conflict in drivers/sensor.c
+error: could not apply af12ce4... PRODUCT: sensor: fix channel bound check</code></pre></figure>
+<p>이유: rebase가 "이미 적용된 커밋"을 거르는 비교 대상은 <strong><code>&lt;upstream&gt;</code> 인자</strong>다. <code>--onto bsp-2.0 bsp-1.0</code>에서 <code>&lt;upstream&gt;</code>은 <code>bsp-1.0</code>(옛 base)이고, 거기에는 그 수정이 없다. 그래서 새 base(bsp-2.0)에 같은 수정이 있어도 걸러지지 않는다(이 동작은 이 VM의 git 2.53.0에서 관찰한 것이다). 게다가 upstream이 같은 줄 근처(<code>(void)sd;</code> 추가)를 또 바꿨기 때문에 "적용하면 빈 커밋"이 되지도 않고 충돌이 됐다. <strong>그래서 <code>--onto</code>를 쓸 때는 <code>git cherry</code>로 먼저 <code>-</code>를 찾아 직접 drop 한다</strong> — 예제 4가 그렇게 했다.</p>
+<hr>
+<h2 id="5-충돌-해결-전략">5. 충돌 해결 전략<a class="anchor" href="#5-충돌-해결-전략" aria-label="link">#</a></h2>
+<h3 id="5-1-원칙-충돌은-두-의도의-합-이다">5.1 원칙 — 충돌은 "두 의도의 합"이다<a class="anchor" href="#5-1-원칙-충돌은-두-의도의-합-이다" aria-label="link">#</a></h3>
+<p>충돌 표시는 세 칸을 보여 준다(zdiff3): <code>HEAD</code>(새 base 쪽 = upstream이 바꾼 결과), <code>|||||||</code> 아래 공통 조상(옛 코드), <code>=======</code> 아래 우리 커밋이 바꾼 결과. 해결은 "둘 중 하나 고르기"가 아니라 <strong>upstream의 변경 의도(API에 sd 추가)와 우리 의도(카운터 증가)를 둘 다 살리는 것</strong>이다. 공통 조상 칸이 없으면(기본 <code>merge</code> 스타일) 누가 무엇을 바꿨는지 추측해야 해서 실수가 는다. 커널 문서 <code>Documentation/process/backporting.rst</code>도 "Merge styles and diff3" 절에서 <code>git config merge.conflictStyle diff3</code>를 권하고, Git 2.35에 추가된 <code>zdiff3</code>를 소개한다(트리에서 확인).</p>
+<h3 id="5-2-충돌-해결-체크리스트">5.2 충돌 해결 체크리스트<a class="anchor" href="#5-2-충돌-해결-체크리스트" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>단계</th><th>명령·행동</th><th>왜</th></tr></thead><tbody><tr><td>1. 조상 칸 보기</td><td><code>merge.conflictStyle zdiff3</code></td><td>누가 무엇을 바꿨는지 분리</td></tr><tr><td>2. upstream 쪽 의도 찾기</td><td><code>git log -L:'\&lt;imu_sample\&gt;':drivers/imu.c bsp-1.0..bsp-2.0</code><br><code>git log bsp-1.0..bsp-2.0 -- drivers/imu.c</code></td><td>어떤 커밋이 왜 바꿨나 (backporting.rst의 git log 절)</td></tr><tr><td>3. 우리 의도 다시 읽기</td><td><code>git show REBASE_HEAD</code></td><td>커밋 메시지·diff로 목적 확인</td></tr><tr><td>4. 합쳐 쓰기</td><td>에디터 / <code>git mergetool</code></td><td>두 의도 모두 보존</td></tr><tr><td>5. 메시지에 흔적</td><td>본문에 <code>[ Don: adapted to sensor_read(sd, ch) API ]</code></td><td>다음 사람이 range-diff <code>!</code>를 이해</td></tr><tr><td>6. 같은 충돌 반복 자동화</td><td><code>git config rerere.enabled true</code></td><td>다시 rebase할 때 같은 해결을 재사용</td></tr><tr><td>7. 빌드·테스트</td><td><code>make W=1</code>, 부팅, 해당 드라이버 테스트</td><td>텍스트 충돌이 없어도 의미가 깨질 수 있다</td></tr></tbody></table></div>
+<p>(2·6·7 행의 명령은 이 노트에서 실행하지 않았다. <code>git log -L</code>·<code>git log -G</code> 사용법은 backporting.rst에 그대로 있다.)</p>
+<h3 id="5-3-충돌이-없는데-깨지는-경우-의미-충돌">5.3 충돌이 없는데 깨지는 경우 — 의미 충돌<a class="anchor" href="#5-3-충돌이-없는데-깨지는-경우-의미-충돌" aria-label="link">#</a></h3>
+<p>git의 3-way merge는 <strong>줄 단위 텍스트</strong>만 본다. 다음은 충돌 없이 붙지만 깨진다.</p>
+<ul><li>upstream이 함수의 <strong>잠금 규칙</strong>을 바꿨다(예: 이제 호출자가 lock을 잡아야 함). 우리 패치는 옛 규칙으로 호출 → 컴파일은 되고 lockdep(M8)에서만 걸린다.</li><li>upstream이 함수 <strong>반환값 의미</strong>를 바꿨다(0/1 → 0/-errno). 우리 <code>if (ret == 1)</code>은 조용히 죽은 코드가 된다.</li><li>upstream이 리소스를 <strong>devm으로 바꿨다</strong>. 우리 패치의 <code>remove()</code>에 남은 수동 해제가 이중 해제가 된다.</li><li>다른 파일에서 같은 기능을 upstream이 이미 추가 → 우리 패치와 <strong>두 번</strong> 등록.</li></ul>
+<p>backporting.rst의 "Gotchas" 절(Function arguments, Error handling, Refactored code)이 바로 이 목록이다. 대응은 7절의 회귀 테스트와 리뷰어가 보는 range-diff다.</p>
+<hr>
+<h2 id="6-api-변화-6-1-시절-드라이버가-6-18에서-깨지는-모습">6. API 변화 — 6.1 시절 드라이버가 6.18에서 깨지는 모습<a class="anchor" href="#6-api-변화-6-1-시절-드라이버가-6-18에서-깨지는-모습" aria-label="link">#</a></h2>
+<h3 id="6-1-예제-5-트리에서-직접-확인한-api-모양-6-18-55">6.1 예제 5 — 트리에서 직접 확인한 API 모양 (6.18.55)<a class="anchor" href="#6-1-예제-5-트리에서-직접-확인한-api-모양-6-18-55" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 이 노트에서 쓰는 API 변화가 랩 트리에 실제로 어떤 모양인지, 옛 이름이 헤더에 남아 있는지 grep으로 확인한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# P5: verify API shapes in the 6.18.55 tree
+cd /var/lab/src/linux-6.18.55
+grep -n "(\*remove)" include/linux/platform_device.h include/linux/spi/spi.h include/linux/i2c.h
+grep -n "(\*probe)(struct i2c_client" include/linux/i2c.h
+grep -n "class_create(" include/linux/device/class.h
+grep -n "define timer_container_of\|int timer_delete_sync" include/linux/timer.h
+grep -n "void hrtimer_setup(" include/linux/hrtimer.h
+grep -n "define MODULE_IMPORT_NS" include/linux/module.h
+grep -n "Static allocation of GPIO base" drivers/gpio/gpiolib.c
+grep -n "must not\* be included" include/linux/gpio.h
+for s in from_timer del_timer_sync hrtimer_init strlcpy no_llseek devm_gpio_request probe_new remove_new; do
+  printf "%-18s %s\n" $s "$(grep -rwl $s include/linux | wc -l) headers"; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>include/linux/platform_device.h:233:	void (*remove)(struct platform_device *);
+include/linux/spi/spi.h:350:	void			(*remove)(struct spi_device *spi);
+include/linux/i2c.h:275:	void (*remove)(struct i2c_client *client);
+274:	int (*probe)(struct i2c_client *client);
+226:struct class * __must_check class_create(const char *name);
+132:#define timer_container_of(var, callback_timer, timer_fieldname)	\
+165:extern int timer_delete_sync_try(struct timer_list *timer);
+166:extern int timer_delete_sync(struct timer_list *timer);
+230:extern void hrtimer_setup(struct hrtimer *timer, enum hrtimer_restart (*function)(struct hrtimer *),
+307:#define MODULE_IMPORT_NS(ns)	MODULE_INFO(import_ns, ns)
+1137:				 "Static allocation of GPIO base is deprecated, use dynamic allocation.\n");
+3: * NOTE: This header *must not* be included.
+from_timer         0 headers
+del_timer_sync     0 headers
+hrtimer_init       0 headers
+strlcpy            0 headers
+no_llseek          0 headers
+devm_gpio_request  0 headers
+probe_new          0 headers
+remove_new         0 headers</code></pre></figure>
+<p>이걸 표로 정리하면 다음과 같다. <strong>"6.18.55 모양"과 "옛 이름 0개"는 위 출력으로 검증했다.</strong> "바뀐 버전" 열은 기억 기반이다(정확한 버전은 <code>git log -S&lt;이름&gt;</code>으로 mainline 히스토리에서 확인 필요 — 이 트리는 git 히스토리가 없다).</p>
+<div class="tw"><table><thead><tr><th>항목</th><th>6.1 시절</th><th>6.18.55 (검증)</th><th>바뀐 시점 (기억 기반)</th></tr></thead><tbody><tr><td>platform <code>.remove</code></td><td><code>int (*remove)(struct platform_device *)</code></td><td><code>void (*remove)(...)</code></td><td><code>remove_new</code>로 과도기(6.3경) → <code>.remove</code>가 void (6.11경)</td></tr><tr><td>i2c <code>.probe</code></td><td><code>probe(client, id)</code> + <code>probe_new(client)</code></td><td><code>int (*probe)(struct i2c_client *)</code></td><td>6.3경 단일 인자로, <code>probe_new</code> 제거</td></tr><tr><td><code>class_create</code></td><td><code>class_create(THIS_MODULE, name)</code> (매크로)</td><td><code>class_create(const char *name)</code></td><td>6.4경</td></tr><tr><td>타이머 해제</td><td><code>del_timer_sync()</code></td><td><code>timer_delete_sync()</code></td><td>이름 변경 후 옛 이름 제거 (6.15~6.16경)</td></tr><tr><td>타이머 콜백</td><td><code>from_timer(var, t, field)</code></td><td><code>timer_container_of(...)</code></td><td>6.16경</td></tr><tr><td>hrtimer 초기화</td><td><code>hrtimer_init()</code> + <code>.function =</code></td><td><code>hrtimer_setup(timer, fn, clock, mode)</code></td><td>6.15경</td></tr><tr><td>문자열 복사</td><td><code>strlcpy()</code></td><td><code>strscpy()</code> (2인자 형태 가능)</td><td>6.8경 제거</td></tr><tr><td>llseek</td><td><code>.llseek = no_llseek</code></td><td>없음 → <code>noop_llseek</code> 또는 필드 생략</td><td>6.12경 제거</td></tr><tr><td>심볼 네임스페이스</td><td><code>MODULE_IMPORT_NS(IIO)</code></td><td><code>MODULE_IMPORT_NS("IIO")</code> (문자열)</td><td>6.13경</td></tr><tr><td>레거시 GPIO</td><td><code>gpio_request()</code>, <code>devm_gpio_request()</code></td><td>헤더는 "must not be included", <code>devm_gpio_request</code> 없음, <code>gpio_request</code>·<code>devm_gpio_request_one</code>은 아직 있음</td><td>단계적 제거 진행 중</td></tr><tr><td>modpost</td><td><code>MODULE_DESCRIPTION</code> 없어도 조용</td><td><code>WARNING: missing MODULE_DESCRIPTION()</code></td><td>6.11경</td></tr></tbody></table></div>
+<p>레거시 GPIO 숫자 공간(global GPIO number space)은 <strong>6.18.55에서 아직 완전히 없어지지 않았다</strong>: <code>CONFIG_GPIOLIB_LEGACY</code>가 <code>def_bool y</code>로 남아 있고 <code>gpio_request()</code>도 있다. 대신 gpiolib는 정적 base 할당에 "deprecated" 경고를 찍고, 일부 devm 래퍼는 이미 제거됐다. 새 코드는 무조건 <code>gpiod_*</code>(descriptor) API를 쓴다(H 모듈·D4).</p>
+<h3 id="6-2-예제-6-6-1-시절-스타일-드라이버를-6-18에서-빌드하면">6.2 예제 6 — 6.1 시절 스타일 드라이버를 6.18에서 빌드하면<a class="anchor" href="#6-2-예제-6-6-1-시절-스타일-드라이버를-6-18에서-빌드하면" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 센서 키트 BSP에 있을 법한 out-of-tree 드라이버(platform driver + I2C driver + class + 타이머 + 레거시 GPIO)를 6.1 시절 API로 쓰고, <code>linux-build-dom</code>(6.18.55)으로 빌드해 진짜 에러를 본다. 이 코드는 6.1 트리에서는 빌드됐을 모양이다(6.1 트리로 직접 빌드해 보지는 않았다 — 기억 기반).</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+#include &lt;linux/module.h&gt;
+#include &lt;linux/platform_device.h&gt;
+#include &lt;linux/i2c.h&gt;
+#include &lt;linux/gpio.h&gt;
+#include &lt;linux/fs.h&gt;
+struct p5_dev { struct timer_list timer; char name[16]; };
+static struct p5_dev p5;
+static struct class *p5_class;
+static struct platform_device *p5_pdev;
+static int gpio = -1;		/* legacy global GPIO number */
+static void p5_timer_fn(struct timer_list *t)
+{
+	struct p5_dev *d = from_timer(d, t, timer);
+	pr_info("p5: timer fired for %s\n", d-&gt;name);
+}
+static const struct file_operations p5_fops = { .owner = THIS_MODULE, .llseek = no_llseek };
+
+static int p5_probe(struct platform_device *pdev)
+{
+	if (gpio_is_valid(gpio) &amp;&amp; devm_gpio_request(&amp;pdev-&gt;dev, gpio, "p5"))
+		return -EBUSY;
+	strlcpy(p5.name, "p5-legacy", sizeof(p5.name));
+	timer_setup(&amp;p5.timer, p5_timer_fn, 0);
+	mod_timer(&amp;p5.timer, jiffies + HZ / 10);
+	dev_info(&amp;pdev-&gt;dev, "probe %s fops=%ps\n", p5.name, &amp;p5_fops);
+	return 0;
+}
+static int p5_remove(struct platform_device *pdev)
+{
+	del_timer_sync(&amp;p5.timer);
+	return 0;
+}
+static struct platform_driver p5_drv = {
+	.probe = p5_probe, .remove = p5_remove, .driver = { .name = "p5_legacy" } };
+static int p5_i2c_probe(struct i2c_client *c, const struct i2c_device_id *id) { return 0; }
+static struct i2c_driver p5_i2c = { .driver = { .name = "p5_sensor" },
+	.probe = p5_i2c_probe };
+static int __init p5_init(void)
+{
+	p5_class = class_create(THIS_MODULE, "p5_legacy");
+	if (IS_ERR(p5_class)) return PTR_ERR(p5_class);
+	i2c_add_driver(&amp;p5_i2c);
+	platform_driver_register(&amp;p5_drv);
+	p5_pdev = platform_device_register_simple("p5_legacy", -1, NULL, 0);
+	return 0;
+}
+static void __exit p5_exit(void)
+{
+	platform_device_unregister(p5_pdev);
+	platform_driver_unregister(&amp;p5_drv);
+	i2c_del_driver(&amp;p5_i2c);
+	class_destroy(p5_class);
+}
+module_init(p5_init); module_exit(p5_exit);
+MODULE_LICENSE("GPL"); MODULE_IMPORT_NS(P5_DUMMY_NS);</code></pre></figure>
+<figure class="code"><span class="lang">make</span><pre><code>obj-m := p5_legacy.o</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cp -r /Users/donh/.elinux_scratch/P5/old /var/tmp/P5/old; cd /var/tmp/P5/old
+make -C /var/lab/out/linux-build-dom M=$PWD modules 2&gt;&amp;1 | grep -E "error|warning|Error"
+echo "--- error count: $(make -C /var/lab/out/linux-build-dom M=$PWD modules 2&gt;&amp;1 | grep -c " error: ")"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>p5_legacy.c:14:28: error: implicit declaration of function ‘from_timer’; did you mean ‘mod_timer’? [-Wimplicit-function-declaration]
+p5_legacy.c:14:45: error: ‘timer’ undeclared (first use in this function); did you mean ‘ktimerd’?
+p5_legacy.c:17:81: error: ‘no_llseek’ undeclared here (not in a function); did you mean ‘noop_llseek’?
+p5_legacy.c:21:36: error: implicit declaration of function ‘devm_gpio_request’; did you mean ‘devm_gpio_request_one’? [-Wimplicit-function-declaration]
+p5_legacy.c:23:9: error: implicit declaration of function ‘strlcpy’; did you mean ‘strncpy’? [-Wimplicit-function-declaration]
+p5_legacy.c:31:9: error: implicit declaration of function ‘del_timer_sync’ [-Wimplicit-function-declaration]
+p5_legacy.c:35:38: error: initialization of ‘void (*)(struct platform_device *)’ from incompatible pointer type ‘int (*)(struct platform_device *)’ [-Wincompatible-pointer-types]
+p5_legacy.c:38:18: error: initialization of ‘int (*)(struct i2c_client *)’ from incompatible pointer type ‘int (*)(struct i2c_client *, const struct i2c_device_id *)’ [-Wincompatible-pointer-types]
+/var/lab/src/linux-6.18.55/include/linux/init.h:174:22: error: passing argument 1 of ‘class_create’ from incompatible pointer type [-Wincompatible-pointer-types]
+p5_legacy.c:41:20: error: too many arguments to function ‘class_create’; expected 1, have 2
+p5_legacy.c:56:41: error: expected ‘,’ or ‘;’ before ‘P5_DUMMY_NS’
+make[3]: *** [/var/lab/src/linux-6.18.55/scripts/Makefile.build:287: p5_legacy.o] Error 1
+make[2]: *** [/var/lab/src/linux-6.18.55/Makefile:2050: .] Error 2
+make[1]: *** [/var/lab/src/linux-6.18.55/Makefile:248: __sub-make] Error 2
+make: *** [/var/lab/src/linux-6.18.55/Makefile:248: __sub-make] Error 2
+--- error count: 11</code></pre></figure>
+<p>출력에서 볼 것 — <strong>에러 메시지 종류가 곧 포팅 유형</strong>이다.</p>
+<ul><li><code>implicit declaration of function</code> (5개): 함수가 <strong>없어졌거나 이름이 바뀌었다</strong>. gcc의 "did you mean" 힌트는 반쯤만 맞다: <code>noop_llseek</code>는 맞지만 <code>strncpy</code>(→ 정답은 <code>strscpy</code>), <code>mod_timer</code>(→ 정답 <code>timer_container_of</code>)는 틀린 힌트다. 정답은 upstream에서 그 함수를 지운 커밋 메시지나 <code>Documentation/</code>에 있다.</li><li><code>incompatible pointer type</code> (3개): 콜백 <strong>시그니처가 바뀌었다</strong>. 커널은 이 경고를 에러로 올린다(<code>scripts/Makefile.extrawarn</code>의 <code>-Werror=incompatible-pointer-types</code> — 트리에서 확인). 예전처럼 경고로 넘어갔다면 <code>int</code> 반환을 <code>void</code>로 부르는 미묘한 ABI 버그가 됐을 것이다.</li><li><code>too many arguments</code> (1개): 인자 <strong>개수</strong>가 바뀌었다(<code>class_create</code>에서 owner가 빠짐).</li><li><code>expected ‘,’ or ‘;’</code> (1개): <strong>매크로 문법</strong>이 바뀌었다. <code>MODULE_IMPORT_NS</code>가 이제 문자열 리터럴을 받는다 — 에러 메시지만으로는 이유가 안 보이는 유형이라 가장 시간을 잡아먹는다.</li><li><code>gpio_is_valid()</code>는 에러가 없다 — 레거시 GPIO 헤더는 아직 있다(6.1절). <strong>빌드가 된다고 끝이 아니다</strong>: 레거시 숫자 GPIO는 런타임에 base가 바뀌면 다른 핀을 잡는다.</li></ul>
+<h3 id="6-3-예제-7-포팅하고-빌드하기">6.3 예제 7 — 포팅하고 빌드하기<a class="anchor" href="#6-3-예제-7-포팅하고-빌드하기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 위 11개 에러를 6.18.55 API로 고친다. 레거시 GPIO 번호는 descriptor API(<code>devm_gpiod_get_optional</code>)로 바꾸고, 그 김에 <code>init</code>의 에러 경로도 고친다(옛 코드는 등록 실패를 무시했다 — 업그레이드는 숨은 버그를 고칠 기회다).</p>
+<figure class="code"><span class="lang">c</span><pre><code>// SPDX-License-Identifier: GPL-2.0
+#include &lt;linux/module.h&gt;
+#include &lt;linux/platform_device.h&gt;
+#include &lt;linux/i2c.h&gt;
+#include &lt;linux/gpio/consumer.h&gt;
+struct p5_dev { struct timer_list timer; char name[16]; };
+static struct p5_dev p5;
+static const struct class *p5_class;	/* 6.4+: const, no owner */
+static struct platform_device *p5_pdev;
+static void p5_timer_fn(struct timer_list *t)
+{
+	struct p5_dev *d = timer_container_of(d, t, timer);
+	pr_info("p5: timer fired for %s\n", d-&gt;name);
+}
+static const struct file_operations p5_fops = { .owner = THIS_MODULE, .llseek = noop_llseek };
+static int p5_probe(struct platform_device *pdev)
+{
+	struct gpio_desc *g = devm_gpiod_get_optional(&amp;pdev-&gt;dev, "p5", GPIOD_OUT_LOW);
+	if (IS_ERR(g)) return PTR_ERR(g);
+	strscpy(p5.name, "p5-ported");
+	timer_setup(&amp;p5.timer, p5_timer_fn, 0);
+	mod_timer(&amp;p5.timer, jiffies + HZ / 10);
+	dev_info(&amp;pdev-&gt;dev, "probe %s gpio=%s fops=%ps\n", p5.name, g ? "yes" : "none", &amp;p5_fops);
+	return 0;
+}
+static void p5_remove(struct platform_device *pdev)
+{
+	timer_delete_sync(&amp;p5.timer);
+}
+static struct platform_driver p5_drv = {
+	.probe = p5_probe, .remove = p5_remove, .driver = { .name = "p5_legacy" } };
+static int p5_i2c_probe(struct i2c_client *c) { return 0; }
+static struct i2c_driver p5_i2c = { .driver = { .name = "p5_sensor" }, .probe = p5_i2c_probe };
+static int __init p5_init(void)
+{
+	int ret;
+	p5_class = class_create("p5_legacy");
+	if (IS_ERR(p5_class)) return PTR_ERR(p5_class);
+	ret = i2c_add_driver(&amp;p5_i2c);
+	if (ret) goto err_class;
+	ret = platform_driver_register(&amp;p5_drv);
+	if (ret) goto err_i2c;
+	p5_pdev = platform_device_register_simple("p5_legacy", -1, NULL, 0);
+	if (!IS_ERR(p5_pdev)) return 0;
+	ret = PTR_ERR(p5_pdev);
+	platform_driver_unregister(&amp;p5_drv);
+err_i2c:	i2c_del_driver(&amp;p5_i2c);
+err_class:	class_destroy(p5_class);
+	return ret;
+}
+static void __exit p5_exit(void)
+{
+	platform_device_unregister(p5_pdev);
+	platform_driver_unregister(&amp;p5_drv);
+	i2c_del_driver(&amp;p5_i2c);
+	class_destroy(p5_class);
+}
+module_init(p5_init); module_exit(p5_exit);
+MODULE_LICENSE("GPL"); MODULE_IMPORT_NS("P5_DUMMY_NS");
+MODULE_DESCRIPTION("P5 legacy driver ported to 6.18");</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cp -r /Users/donh/.elinux_scratch/P5/new /var/tmp/P5/new; cd /var/tmp/P5/new
+make -C /var/lab/out/linux-build-dom M=$PWD modules 2&gt;&amp;1 | grep -v "Entering\|Leaving"
+modinfo -F vermagic p5_ported.ko; modinfo -F import_ns p5_ported.ko'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>  CC [M]  p5_ported.o
+  MODPOST Module.symvers
+  CC [M]  p5_ported.mod.o
+  CC [M]  .module-common.o
+  LD [M]  p5_ported.ko
+6.18.55-dom SMP preempt mod_unload aarch64
+P5_DUMMY_NS</code></pre></figure>
+<p>출력에서 볼 것: 경고 0개. <code>MODULE_DESCRIPTION</code>을 넣기 전 초안을 같은 6.18.55 소스의 <code>linux-build-trace</code>로 빌드했을 때는 <code>WARNING: modpost: missing MODULE_DESCRIPTION() in p5_ported.o</code>가 나왔다(실제 출력) — 새 커널은 <strong>경고도 늘어난다</strong>. CI에서 경고를 에러로 처리하면 업그레이드 첫날 빌드가 깨지므로, 업그레이드 브랜치에서는 경고 목록도 할 일 목록으로 관리한다.</p>
+<p>포팅 대응표(에러 → 수정):</p>
+<div class="tw"><table><thead><tr><th>에러</th><th>옛 코드</th><th>새 코드</th></tr></thead><tbody><tr><td><code>from_timer</code> 없음</td><td><code>from_timer(d, t, timer)</code></td><td><code>timer_container_of(d, t, timer)</code></td></tr><tr><td><code>no_llseek</code> 없음</td><td><code>.llseek = no_llseek</code></td><td><code>.llseek = noop_llseek</code> (또는 필드 생략)</td></tr><tr><td><code>devm_gpio_request</code> 없음</td><td>전역 GPIO 번호</td><td><code>devm_gpiod_get_optional(dev, "p5", GPIOD_OUT_LOW)</code> + DT <code>p5-gpios</code></td></tr><tr><td><code>strlcpy</code> 없음</td><td><code>strlcpy(dst, src, sizeof(dst))</code></td><td><code>strscpy(dst, src)</code> (배열이면 크기 자동)</td></tr><tr><td><code>del_timer_sync</code> 없음</td><td><code>del_timer_sync(&amp;t)</code></td><td><code>timer_delete_sync(&amp;t)</code></td></tr><tr><td>platform <code>.remove</code> 타입</td><td><code>int p5_remove(...)</code> + <code>return 0</code></td><td><code>void p5_remove(...)</code></td></tr><tr><td>i2c <code>.probe</code> 타입</td><td><code>probe(client, id)</code></td><td><code>probe(client)</code>, id가 필요하면 <code>i2c_client_get_device_id(client)</code></td></tr><tr><td><code>class_create</code> 인자</td><td><code>class_create(THIS_MODULE, name)</code></td><td><code>class_create(name)</code></td></tr><tr><td><code>MODULE_IMPORT_NS</code></td><td><code>MODULE_IMPORT_NS(NS)</code></td><td><code>MODULE_IMPORT_NS("NS")</code></td></tr></tbody></table></div>
+<p>(<code>i2c_client_get_device_id</code>는 6.18.55 <code>include/linux/i2c.h</code>에 있는 것을 grep으로 확인한 이름이다 — 아래 함정 참조.)</p>
+<p>함정: <code>.remove</code>를 <code>void</code>로 바꿀 때 <strong>옛 <code>remove</code>가 에러를 반환하던 경로</strong>를 확인한다. driver core는 원래부터 remove의 반환값을 무시했다(그래서 void로 바뀌었다). 옛 코드가 "에러면 정리를 덜 하고 return"했다면 그건 원래부터 누수 버그였다 — void로 바꾸면서 끝까지 정리하도록 고친다.</p>
+<h3 id="6-4-예제-8-image-dom-게스트에서-올리기-다른-커널용-ko는-거부된다">6.4 예제 8 — Image-dom 게스트에서 올리기 (+ 다른 커널용 .ko는 거부된다)<a class="anchor" href="#6-4-예제-8-image-dom-게스트에서-올리기-다른-커널용-ko는-거부된다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 포팅한 모듈이 실제로 probe·타이머·remove까지 동작하는지, 그리고 <strong>같은 소스·같은 6.18.55라도 다른 빌드 트리(-trace)로 만든 .ko는 거부된다</strong>는 것을 본다. BusyBox initramfs 복사본에 두 .ko와 테스트 스크립트를 넣고 <code>LAB_CMD</code>로 실행했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# /p5test.sh — runs inside the 6.18.55-dom guest
+echo "## uname -r: $(uname -r)"
+echo "## 1. module built for 6.18.55-trace"
+insmod /p5_ported_trace.ko; echo "insmod rc=$?"; dmesg | tail -1
+echo "## 2. module built for 6.18.55-dom"
+insmod /p5_ported_dom.ko; echo "insmod rc=$?"; sleep 1
+dmesg | grep -i p5 | tail -3
+for d in /sys/class/p5_legacy /sys/bus/platform/drivers/p5_legacy /sys/bus/i2c/drivers/p5_sensor; do [ -d $d ] &amp;&amp; echo "exists $d"; done
+cat /proc/modules | grep p5
+echo "## 3. rmmod"; rmmod p5_ported; echo "rmmod rc=$?"; ls /sys/class | grep -c p5_legacy</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/P5; rm -rf rootfs; mkdir rootfs; cp -a /var/lab/build/rootfs/. rootfs/
+cp p5_ported_dom.ko p5_ported_trace.ko rootfs/; cp /Users/donh/.elinux_scratch/P5/p5test.sh rootfs/; chmod +x rootfs/p5test.sh
+(cd rootfs &amp;&amp; find . | cpio -o -H newc --quiet | gzip) &gt; p5_initrd.gz
+timeout 240 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -kernel /var/lab/out/Image-dom \
+  -initrd p5_initrd.gz -append "console=ttyAMA0 quiet LAB_CMD=/p5test.sh" 2&gt;&amp;1 | tail -22'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-dom up 16.04s
+## uname -r: 6.18.55-dom
+## 1. module built for 6.18.55-trace
+insmod: can't insert '/p5_ported_trace.ko': invalid module format[   18.701038][   T70] p5_ported: version magic '6.18.55-trace SMP preempt mod_unload aarch64' should be '6.18.55-dom SMP preempt mod_unload aarch64'
+
+insmod rc=1
+[   18.701038][   T70] p5_ported: version magic '6.18.55-trace SMP preempt mod_unload aarch64' should be '6.18.55-dom SMP preempt mod_unload aarch64'
+## 2. module built for 6.18.55-dom
+insmod rc=0
+[   18.883254][   T73] p5_ported: module verification failed: signature and/or required key missing - tainting kernel
+[   18.917661][   T73] p5_legacy p5_legacy: probe p5-ported gpio=none fops=p5_fops [p5_ported]
+[   19.019269][    C0] p5: timer fired for p5-ported
+exists /sys/class/p5_legacy
+exists /sys/bus/platform/drivers/p5_legacy
+exists /sys/bus/i2c/drivers/p5_sensor
+p5_ported 12288 0 - Live 0xffffc767e2f7d000 (OE)
+## 3. rmmod
+rmmod rc=0
+0
+[   20.740490][   T83] reboot: Power down</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>version magic '6.18.55-trace ...' should be '6.18.55-dom ...'</code> → <code>invalid module format</code>(-ENOEXEC). 커널 버전 숫자가 같아도 <strong>LOCALVERSION이 다르면 거부</strong>된다. 업그레이드 뒤 "예전 .ko를 rootfs에 그대로 두었다"가 부팅 후 장치가 안 뜨는 흔한 원인이다. (콘솔에서 커널 메시지와 insmod 출력이 한 줄에 섞인 것은 printk와 stdout이 같은 시리얼로 나오기 때문이다.)</li><li>dom용은 로드되어 probe → 100 ms 뒤 타이머 → <code>rmmod</code>로 <code>class</code>까지 깨끗이 사라졌다(<code>grep -c</code> 결과 0). <code>(OE)</code> taint는 out-of-tree(O) + 서명 없음(E)이다(E7 §6.4). <code>gpio=none</code>은 DT에 <code>p5-gpios</code>가 없어서 optional GPIO가 NULL로 온 것 — 정상이다.</li><li>부팅 16초, 타임스탬프는 TCG + 공유 VM 부하 값이라 실제 HW 시간이 아니다.</li></ul>
+<h3 id="6-5-예제-9-config도-옮겨야-한다-scripts-diffconfig">6.5 예제 9 — config도 옮겨야 한다: <code>scripts/diffconfig</code><a class="anchor" href="#6-5-예제-9-config도-옮겨야-한다-scripts-diffconfig" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 커널을 올리면 <code>.config</code>도 옮겨야 한다(<code>make olddefconfig</code>로 새 심볼은 기본값, 없어진 심볼은 버려짐). 그때 <strong>무엇이 조용히 사라졌는지</strong> 보는 도구가 <code>scripts/diffconfig</code>다. 여기서는 같은 6.18.55의 두 랩 config(trace → dom)로 시연한다. 진짜 업그레이드에서는 "옛 커널 .config"와 "새 커널에서 olddefconfig한 .config"를 비교한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/lab/src/linux-6.18.55
+python3 -I scripts/diffconfig /var/lab/out/linux-build-trace/.config /var/lab/out/linux-build-dom/.config &gt; /var/tmp/P5/dc.txt
+grep -c "^-" /var/tmp/P5/dc.txt; grep -c "^+" /var/tmp/P5/dc.txt; grep -c "^ " /var/tmp/P5/dc.txt
+grep "^ " /var/tmp/P5/dc.txt | head -8; grep "^-" /var/tmp/P5/dc.txt | sed -n 11,30p'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>17
+187
+61
+ ADXL345_I2C n -&gt; m
+ BMI160_I2C n -&gt; m
+ BMP280 n -&gt; m
+ CAN m -&gt; y
+ CAN_BCM m -&gt; y
+ CAN_DEV m -&gt; y
+ CAN_GS_USB n -&gt; m
+ CAN_GW m -&gt; y
+-GDB_SCRIPTS y
+-MODULE_ALLOW_BTF_MISMATCH n
+-NET_SCH_BPF n
+-PAHOLE_HAS_LANG_EXCLUDE y
+-PAHOLE_HAS_SPLIT_BTF y
+-PROBE_EVENTS_BTF_ARGS y
+-SCHED_CLASS_EXT n</code></pre></figure>
+<p>출력에서 볼 것: <code>-</code>(사라짐) 17개, <code>+</code>(새로 생김) 187개, 값 변경 61개. <code>-</code> 목록의 <code>GDB_SCRIPTS</code>, <code>PROBE_EVENTS_BTF_ARGS</code> 등은 dom에서 <code>DEBUG_INFO</code>를 끄자 <strong>의존성 때문에 자동으로 빠진 것</strong>이다 — 아무도 직접 끄지 않았다. 커널 업그레이드에서도 똑같이, 심볼 이름이 바뀌거나 의존성이 바뀌면 olddefconfig가 조용히 기능을 끈다. 업그레이드 체크리스트에 "diffconfig의 <code>-</code> 줄을 전부 사람이 확인"을 넣는다. defconfig 조각(K5의 <code>.cfg</code> fragment)을 쓰면 <code>scripts/kconfig/merge_config.sh</code>가 "요청한 값이 최종 config에 없다"를 경고해 준다.</p>
+<hr>
+<h2 id="7-coccinelle-기계적-변경을-수백-파일에-가이드-실행-안-함">7. Coccinelle — 기계적 변경을 수백 파일에 (가이드, 실행 안 함)<a class="anchor" href="#7-coccinelle-기계적-변경을-수백-파일에-가이드-실행-안-함" aria-label="link">#</a></h2>
+<p>이 VM에는 <code>spatch</code>(Coccinelle)가 없다(<code>which spatch</code> → 없음). 설치는 공용 상태 변경이라 하지 않았다. 아래는 가이드다.</p>
+<p>Coccinelle는 <strong>C 문법을 이해하는 패치 도구</strong>다. sed는 텍스트를 바꾸지만 spatch는 "이 함수 호출의 첫 인자가 <code>THIS_MODULE</code>이면 지워라"처럼 구조로 바꾼다. upstream이 API를 바꿀 때 in-tree 수백 개 드라이버를 한 번에 고치는 데 쓰고, 그 semantic patch(<code>.cocci</code>)는 보통 커밋 메시지나 <code>scripts/coccinelle/</code>에 남는다. 우리 out-of-tree 드라이버 수십 개에 같은 변환을 적용할 때 유용하다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>// p5_class_create.cocci — class_create(THIS_MODULE, name) -&gt; class_create(name)   (guide, not executed)
+@@
+expression name;
+@@
+- class_create(THIS_MODULE, name)
++ class_create(name)</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>// p5_remove_void.cocci — int remove() that always returns 0 -&gt; void   (guide, not executed)
+@r@
+identifier drv, fn;
+@@
+struct platform_driver drv = { ..., .remove = fn, ... };
+@@
+identifier r.fn, pdev;
+@@
+- int
++ void
+  fn(struct platform_device *pdev)
+  {
+  ...
+- return 0;
+  }</code></pre></figure>
+<p>사용(가이드): <code>spatch --sp-file p5_class_create.cocci --dir drivers/our_bsp --in-place</code>. in-tree 검사는 <code>make coccicheck MODE=report</code>(트리의 <code>Documentation/dev-tools/coccinelle.rst</code>에 사용법이 있다 — 확인함), 트리에는 <code>scripts/coccinelle/api/</code> 아래 <code>platform_get_irq.cocci</code>, <code>stream_open.cocci</code>, <code>string_choices.cocci</code> 같은 규칙이 들어 있다(<code>ls</code>로 확인). 두 번째 규칙처럼 "반환 경로가 여러 개"인 경우는 규칙이 놓치는 경우가 있으니, spatch 결과도 <strong>빌드 + range-diff로 리뷰</strong>한다.</p>
+<hr>
+<h2 id="8-회귀-테스트-올렸다-와-제품으로-쓸-수-있다-사이">8. 회귀 테스트 — "올렸다"와 "제품으로 쓸 수 있다" 사이<a class="anchor" href="#8-회귀-테스트-올렸다-와-제품으로-쓸-수-있다-사이" aria-label="link">#</a></h2>
+<p>업그레이드 브랜치는 아래 층을 순서대로 통과해야 한다. 위 층일수록 비싸고 느리다. 자동화(P6)가 업그레이드 주기를 결정한다.</p>
+<div class="tw"><table><thead><tr><th>층</th><th>무엇을</th><th>도구·명령</th><th>이 노트에서</th></tr></thead><tbody><tr><td>1. 빌드</td><td>커널·DT·모든 out-of-tree 모듈, 경고 0</td><td><code>make W=1</code>, <code>make dtbs_check</code>(D7)</td><td>예제 6·7</td></tr><tr><td>2. config</td><td>사라진·바뀐 심볼 확인</td><td><code>scripts/diffconfig</code></td><td>예제 9</td></tr><tr><td>3. 부팅</td><td>콘솔·rootfs 마운트·init 완료, 시간 비교</td><td>QEMU/보드 부팅 스크립트, <code>systemd-analyze</code>(M10)</td><td>예제 8 (initramfs)</td></tr><tr><td>4. 장치</td><td>모든 장치가 probe됐나, deferred probe 남았나</td><td><code>/sys/kernel/debug/devices_deferred</code>, <code>dmesg</code> grep, 장치 노드 목록 diff</td><td>가이드</td></tr><tr><td>5. 단위 테스트</td><td>커널 내부 로직</td><td>KUnit, kselftest — <strong>P6</strong></td><td>P6 참조</td></tr><tr><td>6. 기능</td><td>센서 데이터·CAN·카메라 파이프라인 end-to-end</td><td>HIL 테스트(P6), Q7 품질 툴</td><td>가이드</td></tr><tr><td>7. 성능</td><td>지연·처리량·부팅 시간·전력</td><td><code>cyclictest</code>(N), <code>perf stat</code>(M6), iperf3, 같은 HW에서 N회 반복</td><td>가이드</td></tr><tr><td>8. 장시간</td><td>메모리 누수·드물게 나는 hang</td><td>72시간 soak, kmemleak(M8)</td><td>가이드</td></tr></tbody></table></div>
+<h3 id="8-1-부팅-후-무엇이-달라졌나-를-기계적으로-비교하기-가이드">8.1 "부팅 후 무엇이 달라졌나"를 기계적으로 비교하기 (가이드)<a class="anchor" href="#8-1-부팅-후-무엇이-달라졌나-를-기계적으로-비교하기-가이드" aria-label="link">#</a></h3>
+<p>옛 커널과 새 커널에서 같은 명령을 돌려 텍스트로 저장하고 diff 한다. 사람 눈으로 dmesg를 읽는 것보다 훨씬 많이 잡는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># guide (not executed here): run on old and new kernel, then diff the two directories
+mkdir -p snap; cd snap
+dmesg --notime                       &gt; dmesg.txt          # 타임스탬프 제거 → diff 가능
+grep -E "WARNING|BUG:|Oops|probe.*failed|deferred" dmesg.txt &gt; problems.txt
+cat /sys/kernel/debug/devices_deferred &gt; deferred.txt     # debugfs 필요
+ls -l /dev /dev/v4l/by-path /dev/serial/by-path &gt; devnodes.txt 2&gt;&amp;1
+for d in /sys/bus/*/drivers/*; do echo "$d $(ls $d | grep -c :)"; done &gt; drivers.txt
+lsmod | sort &gt; lsmod.txt; cat /proc/interrupts &gt; irqs.txt
+# diff -ru snap-5.15 snap-6.18 → 사라진 장치·새 경고·바인딩 안 된 드라이버</code></pre></figure>
+<h3 id="8-2-성능-비교의-규칙-가이드">8.2 성능 비교의 규칙 (가이드)<a class="anchor" href="#8-2-성능-비교의-규칙-가이드" aria-label="link">#</a></h3>
+<ul><li><strong>같은 HW, 같은 rootfs, 같은 config 의도</strong>(diffconfig로 확인)에서만 비교한다. TCG QEMU 숫자는 비교에 쓰지 않는다(이 노트의 부팅 시간도 마찬가지).</li><li>한 번이 아니라 <strong>N회 반복 후 중앙값과 분산</strong>을 본다(<code>perf stat -r 10</code>, <code>cyclictest</code> 히스토그램 최대값). 커널 업그레이드의 성능 차이는 대개 몇 % 수준이라 노이즈와 구분해야 한다.</li><li>차이가 나면 9절의 bisect로 범위를 좁힌다. 이때 테스트 스크립트는 "임계값을 넘으면 bad"로 만든다.</li></ul>
+<hr>
+<h2 id="9-git-bisect-run-회귀-커밋을-자동으로-찾기">9. <code>git bisect run</code> — 회귀 커밋을 자동으로 찾기<a class="anchor" href="#9-git-bisect-run-회귀-커밋을-자동으로-찾기" aria-label="link">#</a></h2>
+<h3 id="9-1-직관">9.1 직관<a class="anchor" href="#9-1-직관" aria-label="link">#</a></h3>
+<p>"5.15에서는 되는데 6.18에서는 안 된다"는 그 사이 수만 커밋 중 하나(또는 몇 개)의 탓이다. 이진 탐색이면 log2(N)번 테스트로 찾는다: 3만 커밋이면 약 15번. 사람이 매번 빌드·부팅·판정하는 대신, <strong>판정 스크립트의 종료 코드</strong>로 git이 다음 커밋을 고르게 하는 것이 <code>git bisect run</code>이다.</p>
+<div class="tw"><table><thead><tr><th>스크립트 종료 코드</th><th>의미</th></tr></thead><tbody><tr><td>0</td><td>good</td></tr><tr><td>1 ~ 127 (125 제외)</td><td>bad</td></tr><tr><td>125</td><td>이 커밋은 테스트 불가 → skip (빌드 깨짐 등)</td></tr><tr><td>128 이상</td><td>bisect 중단 (스크립트 자체 오류로 취급)</td></tr></tbody></table></div>
+<p>(종료 코드 규칙은 <code>git help bisect</code>의 "bisect run" 절 기준이다.)</p>
+<h3 id="9-2-예제-10-32커밋-중-회귀-하나-빌드-깨진-커밋-하나">9.2 예제 10 — 32커밋 중 회귀 하나 + 빌드 깨진 커밋 하나<a class="anchor" href="#9-2-예제-10-32커밋-중-회귀-하나-빌드-깨진-커밋-하나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 링버퍼 "드라이버"에 32개 커밋을 쌓되, rev 20이 wrap 버그(<code>% N</code> → <code>&amp; N</code>)를 넣고, rev 24는 빌드를 깨뜨리고 rev 25가 고친다. 판정 스크립트는 빌드 실패면 125, 테스트 실패면 1을 반환한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# P5 lab3: 32 commits of a tiny ring-buffer "driver"; #20 introduces a wrap bug, #24 breaks the build (#25 fixes it)
+set -e
+R=/var/tmp/P5/lab3; rm -rf $R; mkdir -p $R; cd $R; git init -q -b main .
+export GIT_AUTHOR_NAME=p5 GIT_AUTHOR_EMAIL=p5@lab GIT_COMMITTER_NAME=p5 GIT_COMMITTER_EMAIL=p5@lab
+cat &gt; ring.c &lt;&lt;'X'
+#include &lt;stdio.h&gt;
+#define N 8
+static int buf[N]; static unsigned head, tail;
+static void put(int v) { buf[head] = v; head = (head + 1) % N; }
+static int get(void) { int v = buf[tail]; tail = (tail + 1) % N; return v; }
+int main(void)
+{
+	int bad = 0;
+	for (int i = 0; i &lt; 100; i++) { put(i); if (get() != i) bad++; }
+	printf("bad=%d\n", bad);
+	return bad != 0;
+}
+X
+for i in $(seq 1 32); do
+	D="2026-02-01T00:$(printf %02d $i):00Z"; export GIT_AUTHOR_DATE=$D GIT_COMMITTER_DATE=$D
+	echo "/* rev $i */" &gt; notes.h; msg="notes: rev $i"
+	if [ $i = 24 ]; then sed -i 's/int bad = 0;/int bad = 0/' ring.c; msg="ring: refactor counters (breaks build)"; fi
+	if [ $i = 25 ]; then sed -i 's/int bad = 0$/int bad = 0;/' ring.c; msg="ring: fix build"; fi
+	if [ $i = 20 ]; then sed -i 's/head = (head + 1) % N;/head = (head + 1) \&amp; N;/' ring.c; msg="ring: use mask instead of modulo"; fi
+	git add -A; git commit -qm "$msg"
+	[ $i = 1 ] &amp;&amp; git tag v1-good
+done
+echo "HEAD=$(git log --oneline -1)"</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# bisect_test.sh — git bisect run script: 0 = good, 1..124 = bad, 125 = cannot test (skip)
+gcc -std=gnu11 -Wall -Wextra -O2 ring.c -o /tmp/p5_ring 2&gt;/dev/null || exit 125
+timeout 5 /tmp/p5_ring</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'bash /Users/donh/.elinux_scratch/P5/git/lab3_setup.sh; cd /var/tmp/P5/lab3
+git bisect start HEAD v1-good; time git bisect run /Users/donh/.elinux_scratch/P5/git/bisect_test.sh
+echo "--- log"; git bisect log | grep -v "^git"; git bisect reset &gt;/dev/null 2&gt;&amp;1'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>HEAD=ee3b82d notes: rev 32
+Bisecting: 15 revisions left to test after this (roughly 4 steps)
+[7ad9839c665c6cdfe669d1a987a8af54fb9ba0d4] notes: rev 16
+running '/Users/donh/.elinux_scratch/P5/git/bisect_test.sh'
+bad=0
+Bisecting: 7 revisions left to test after this (roughly 3 steps)
+[9bdeed37686f22109dd2bf4fb89b398ad529085f] ring: refactor counters (breaks build)
+running '/Users/donh/.elinux_scratch/P5/git/bisect_test.sh'
+Bisecting: 7 revisions left to test after this (roughly 3 steps)
+[88bdd4e8d6e57bce4d0193c004097813227a3d83] notes: rev 19
+running '/Users/donh/.elinux_scratch/P5/git/bisect_test.sh'
+bad=0
+Bisecting: 5 revisions left to test after this (roughly 3 steps)
+[7a2c978cfd2806c06fc68773aa19636fefcca373] notes: rev 26
+running '/Users/donh/.elinux_scratch/P5/git/bisect_test.sh'
+bad=87
+Bisecting: 2 revisions left to test after this (roughly 2 steps)
+[15b5713c402accb6b284a3a80d0739c3083ef04d] notes: rev 23
+running '/Users/donh/.elinux_scratch/P5/git/bisect_test.sh'
+bad=87
+Bisecting: 1 revision left to test after this (roughly 1 step)
+[8f87af78f150333663d2c9d492602c73be4837bf] notes: rev 21
+running '/Users/donh/.elinux_scratch/P5/git/bisect_test.sh'
+bad=87
+Bisecting: 0 revisions left to test after this (roughly 0 steps)
+[4aed3d83c9ac996b0d13e1146a73618a6ec681d2] ring: use mask instead of modulo
+running '/Users/donh/.elinux_scratch/P5/git/bisect_test.sh'
+bad=87
+4aed3d83c9ac996b0d13e1146a73618a6ec681d2 is the first bad commit
+commit 4aed3d83c9ac996b0d13e1146a73618a6ec681d2
+Author: p5 &lt;p5@lab&gt;
+Date:   Sun Feb 1 00:20:00 2026 +0000
+
+    ring: use mask instead of modulo
+
+ notes.h | 2 +-
+ ring.c  | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+bisect found first bad commit
+
+real	0m2.241s
+user	0m0.300s
+sys	0m0.212s
+--- log
+# bad: [ee3b82d3563b951d46289b2650e7d4ae58c31d82] notes: rev 32
+# good: [0bd8243aaafa8bf161ae7af5f3872e9094ec4997] notes: rev 1
+# good: [7ad9839c665c6cdfe669d1a987a8af54fb9ba0d4] notes: rev 16
+# skip: [9bdeed37686f22109dd2bf4fb89b398ad529085f] ring: refactor counters (breaks build)
+# good: [88bdd4e8d6e57bce4d0193c004097813227a3d83] notes: rev 19
+# bad: [7a2c978cfd2806c06fc68773aa19636fefcca373] notes: rev 26
+# bad: [15b5713c402accb6b284a3a80d0739c3083ef04d] notes: rev 23
+# bad: [8f87af78f150333663d2c9d492602c73be4837bf] notes: rev 21
+# bad: [4aed3d83c9ac996b0d13e1146a73618a6ec681d2] ring: use mask instead of modulo
+# first bad commit: [4aed3d83c9ac996b0d13e1146a73618a6ec681d2] ring: use mask instead of modulo</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>7번 테스트(그중 1번 skip)로 31개 후보 중 범인을 찾았다. rev 24는 빌드가 깨져 125 → <code># skip:</code>으로 기록됐고, git은 다른 커밋(rev 19, rev 26)을 대신 골랐다. <strong>빌드 깨진 커밋을 bad로 판정하면 엉뚱한 커밋을 범인으로 지목한다</strong> — 125가 그래서 있다.</li><li><code>bad=87</code>: 100개 중 87개가 틀림 — <code>(head + 1) &amp; 8</code>은 0 또는 8이라 head가 버퍼 밖(<code>buf[8]</code>)을 쓴다. 모듈러를 마스크로 바꿀 때는 <code>&amp; (N - 1)</code>이고 N이 2의 거듭제곱이어야 한다. Don에게 익숙한 펌웨어 링버퍼 버그다.</li><li><code>git bisect log</code>는 재현 기록이다. 버그 리포트·upstream 메일에 그대로 붙인다(<code>Documentation/admin-guide/bug-bisect.rst</code>도 log 저장을 권한다).</li><li>2.2초(공유 VM, 컴파일 7번 포함) — 진짜 커널 bisect는 단계마다 빌드 + 부팅이라 한 단계 수 분~수십 분이다. 그래서 스크립트를 미리 견고하게 짜는 것이 핵심이다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 320" xmlns="http://www.w3.org/2000/svg">
+  <rect x="152" y="68" width="304" height="24" fill="#3f9a6b" fill-opacity="0.12" stroke="none"/>
+  <rect x="456" y="68" width="208" height="24" fill="#d0564a" fill-opacity="0.12" stroke="none"/>
+  <line x1="160" y1="80" x2="656" y2="80" stroke="currentColor"/>
+  <text x="10" y="84" font-size="13">rev 1 → 32</text>
+  <text x="300" y="108" text-anchor="middle" font-size="12">good (rev 1~19)</text>
+  <text x="560" y="108" text-anchor="middle" font-size="12">bad (rev 20~32)</text>
+  <circle cx="400" cy="80" r="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="400" y="62" text-anchor="middle" font-size="12">1</text>
+  <circle cx="528" cy="80" r="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="528" y="62" text-anchor="middle" font-size="12">2</text>
+  <circle cx="448" cy="80" r="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="448" y="62" text-anchor="middle" font-size="12">3</text>
+  <circle cx="560" cy="80" r="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="560" y="62" text-anchor="middle" font-size="12">4</text>
+  <circle cx="512" cy="80" r="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="512" y="62" text-anchor="middle" font-size="12">5</text>
+  <circle cx="480" cy="80" r="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="480" y="62" text-anchor="middle" font-size="12">6</text>
+  <circle cx="464" cy="80" r="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="464" y="62" text-anchor="middle" font-size="12">7</text>
+  <text x="464" y="40" text-anchor="middle" font-size="12">첫 bad = rev 20</text>
+  <line x1="464" y1="44" x2="464" y2="54" stroke="currentColor"/>
+  <g font-size="12">
+    <text x="10" y="149">시작</text><rect x="160" y="140" width="496" height="10" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+    <text x="10" y="167">1: rev16 good</text><rect x="400" y="158" width="256" height="10" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+    <text x="10" y="185">2: rev24 skip</text><rect x="400" y="176" width="256" height="10" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+    <text x="10" y="203">3: rev19 good</text><rect x="448" y="194" width="208" height="10" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+    <text x="10" y="221">4: rev26 bad</text><rect x="448" y="212" width="112" height="10" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+    <text x="10" y="239">5: rev23 bad</text><rect x="448" y="230" width="64" height="10" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+    <text x="10" y="257">6: rev21 bad</text><rect x="448" y="248" width="32" height="10" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+    <text x="10" y="275">7: rev20 bad</text><rect x="448" y="266" width="16" height="10" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  </g>
+  <text x="10" y="306" font-size="12">막대 = 남은 후보 구간 [마지막 good, 처음 bad]. skip(2)은 구간을 줄이지 못하고 한 단계를 쓴다.</text>
+</svg></figure>
+<p>그림 5 — 예제 10의 실제 bisect 경로. 위 줄의 숫자는 테스트 순서, 아래 막대는 각 단계 뒤 남은 구간이다. 7단계 뒤 구간이 rev 19(good)와 rev 20(bad) 사이로 좁혀져 rev 20이 범인이다.</p>
+<h3 id="9-3-커널에서의-bisect-run-스크립트-가이드-실행-안-함">9.3 커널에서의 bisect run 스크립트 (가이드, 실행 안 함)<a class="anchor" href="#9-3-커널에서의-bisect-run-스크립트-가이드-실행-안-함" aria-label="link">#</a></h3>
+<p>랩 커널 소스는 git 저장소가 아니어서 실제 커널 bisect는 돌리지 않았다. 아래는 QEMU 부팅 + 모듈 테스트를 판정으로 쓰는 형태다. 핵심은 <strong>빌드 실패 = 125, 부팅 실패(타임아웃) = bad인지 skip인지 미리 정책을 정하는 것</strong>이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# kbisect.sh — guide only. usage: git bisect run ./kbisect.sh   (run at the top of a kernel git tree)
+O=/var/tmp/P5/kb; mkdir -p $O
+cp /path/to/product.config $O/.config &amp;&amp; make O=$O olddefconfig &gt;/dev/null || exit 125
+make O=$O -j2 Image modules &gt;/dev/null 2&gt;&amp;1 || exit 125          # 빌드 실패 → skip
+make -C $O M=$PWD/../p5_driver modules &gt;/dev/null 2&gt;&amp;1 || exit 125
+# initramfs에 모듈 + 테스트 스크립트를 넣는다 (예제 8과 같은 방식)
+timeout 300 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic \
+  -kernel $O/arch/arm64/boot/Image -initrd test_initrd.gz \
+  -append "console=ttyAMA0 LAB_CMD=/p5test.sh" &gt; $O/console.log 2&gt;&amp;1
+rc=$?; [ $rc = 124 ] &amp;&amp; exit 1                                     # 부팅 hang → bad (정책)
+grep -q "P5_TEST_PASS" $O/console.log &amp;&amp; exit 0 || exit 1</code></pre></figure>
+<p>실무 요령:</p>
+<ul><li><strong>두 LTS 사이를 bisect할 때 good/bad 지점은 mainline 태그</strong>(<code>v5.15</code>, <code>v6.18</code>)로 잡는다. stable 태그(<code>v5.15.180</code>)는 mainline의 조상이 아니라 옆 가지라서 bisect가 "merge base가 good인지" 묻고 헤맨다.</li><li>우리 패치 스택이 있어야 재현되는 버그면, 각 단계에서 스택을 붙여야 한다 → 판정 스크립트 안에서 <code>git cherry-pick</code>을 하거나, 우리 드라이버를 out-of-tree로 빌드한다(위 스크립트).</li><li>단계가 비싸면 먼저 <strong>대략 범위</strong>를 좁힌다: mainline 릴리스 태그(6.0, 6.1, …)만 먼저 테스트 → 범인 릴리스를 찾고 → 그 안에서 bisect. <code>git bisect skip</code>이 많으면 <code>git bisect visualize</code>로 남은 후보를 보고 사람이 판단한다.</li></ul>
+<hr>
+<h2 id="10-stable-backport-받는-쪽과-보내는-쪽">10. stable backport — 받는 쪽과 보내는 쪽<a class="anchor" href="#10-stable-backport-받는-쪽과-보내는-쪽" aria-label="link">#</a></h2>
+<h3 id="10-1-태그-복습-e7-5-11과-트리-문서">10.1 태그 복습 (E7 §5.11과 트리 문서)<a class="anchor" href="#10-1-태그-복습-e7-5-11과-트리-문서" aria-label="link">#</a></h3>
+<ul><li><code>Fixes: &lt;12자 sha&gt; ("&lt;제목&gt;")</code> — 이 수정이 고치는 커밋. stable 팀과 AUTOSEL 도구가 "어느 stable에 넣을지"를 이걸로 계산한다.</li><li><code>Cc: stable@vger.kernel.org</code> — Option 1. mainline에 머지되면 자동으로 stable 후보가 된다. <code># 6.1.x</code> 같은 주석으로 버전 범위, <code># a1f84a3: ...</code>로 선행 패치를 지정할 수 있다(1.1절 grep 출력의 문서 위치 근처, stable-kernel-rules.rst).</li><li>stable 트리에 들어간 커밋은 본문 첫 줄에 <code>commit &lt;40자 sha&gt; upstream.</code> 또는 <code>[ Upstream commit &lt;sha&gt; ]</code>가 붙는다.</li><li><code>Stable-dep-of:</code> — "이 커밋은 그 자체는 수정이 아니지만, 저 수정을 붙이기 위한 선행 패치로 같이 들어왔다".</li></ul>
+<h3 id="10-2-예제-11-실제-stable-릴리스-한-개를-분류하기-6-18-56">10.2 예제 11 — 실제 stable 릴리스 한 개를 분류하기 (6.18.56)<a class="anchor" href="#10-2-예제-11-실제-stable-릴리스-한-개를-분류하기-6-18-56" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: kernel.org에서 받은 <code>ChangeLog-6.18.56</code>에서 커밋 수와 태그 분포를 세고, 센서 키트가 쓰는 서브시스템(iio, gpio, i2c, media, can)의 수정만 골라낸다. "우리 제품에 이번 stable이 무엇을 주나"를 판단하는 작업이다.</p>
+<figure class="code"><span class="lang">python</span><pre><code>#!/usr/bin/env python3
+# P5: triage one stable release — which fixes touch "our" subsystems, and what tags they carry
+import re, sys
+cl = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+commits = re.split(r"\n(?=commit [0-9a-f]{40}\n)", cl)[1:]
+print("commits in ChangeLog:", len(commits))
+tags = {"upstream sha line": r"\[ Upstream commit [0-9a-f]{40} \]|commit [0-9a-f]{40} upstream\.",
+        "Fixes:": r"\n\s+Fixes: [0-9a-f]{12}", "Cc: stable": r"\n\s+Cc: &lt;?stable@", "Stable-dep-of:": r"Stable-dep-of:",
+        "Signed-off-by: Sasha Levin": r"Signed-off-by: Sasha Levin", "Signed-off-by: Greg Kroah-Hartman": r"Signed-off-by: Greg Kroah-Hartman"}
+for k, rx in tags.items():
+    print(f"  {k:36s} {sum(1 for c in commits if re.search(rx, c)):4d}")
+print("fixes in our subsystems (by subject prefix):")
+pre = ("iio:", "gpio:", "gpiolib", "i2c:", "media:", "can:")
+for c in commits:
+    subj = c.split("\n")[4].strip() if len(c.split("\n")) &gt; 4 else ""
+    if subj.lower().startswith(pre):
+        fx = re.search(r"Fixes: ([0-9a-f]{12})", c)
+        st = "Cc:stable" if re.search(r"Cc: &lt;?stable@", c) else "-"
+        print(f"  {subj[:66]:66s} {('Fixes:' + fx.group(1)) if fx else 'no-Fixes':20s} {st}")</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'mkdir -p /var/tmp/P5/dl &amp;&amp; cd /var/tmp/P5/dl
+curl -s --max-time 60 -O https://cdn.kernel.org/pub/linux/kernel/v6.x/incr/patch-6.18.55-56.xz \
+                      -O https://cdn.kernel.org/pub/linux/kernel/v6.x/ChangeLog-6.18.56
+python3 -I /Users/donh/.elinux_scratch/P5/stable_triage.py ChangeLog-6.18.56'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>commits in ChangeLog: 402
+  upstream sha line                     400
+  Fixes:                                346
+  Cc: stable                            229
+  Stable-dep-of:                         33
+  Signed-off-by: Sasha Levin            166
+  Signed-off-by: Greg Kroah-Hartman     281
+fixes in our subsystems (by subject prefix):
+  iio: adc: adi-axi-adc: Initialize state mutex                      Fixes:7ecb8ee5c93b   -
+  iio: adc: adi-axi-adc: Make use of dev_err_probe()                 no-Fixes             -
+  iio: buffer-dmaengine: fix sg entry iteration when building dma_ve Fixes:7a86d469983a   Cc:stable
+  iio: adc: ad4030: fix invalid oversampling_ratio validation        Fixes:949abd1ca5a4   Cc:stable
+  iio: adc: ad4030: Use BIT macro to improve code readability        no-Fixes             -
+  iio: adc: aspeed: propagate reset deassert errors                  Fixes:edf7550a1f93   Cc:stable
+  iio: adc: aspeed: Simplify with dev_err_probe                      no-Fixes             -
+  iio: trigger: cancel reenable_work before freeing trigger          Fixes:9020ef659885   Cc:stable
+  iio: proximity: vl53l0x-i2c: claim direct mode for raw reads       Fixes:762186c6e7b1   Cc:stable
+  ...
+  iio: pressure: bmp280: fix out-of-bounds access in sampling freque Fixes:10b40ffba2f9   Cc:stable
+  ...
+  iio: imu: adis16480: fix unprotected debugfs reads                 Fixes:9bf94f836e32   Cc:stable
+  ...
+  i2c: xiic: don't clobber msg-&gt;len to signal block-read completion  Fixes:e4c1ff772e1a   Cc:stable
+  i2c: xiic: preserve PEC byte length in SMBus block read setup      Fixes:e4c1ff772e1a   Cc:stable
+  i2c: at91: release DMA channels when probe defers                  Fixes:f7eeb1af8537   -
+  ...</code></pre></figure>
+<p>(실제 목록은 54줄이다. 여기에는 처음 9줄과 센서 키트에 관련된 줄 몇 개만 남기고 <code>...</code>로 줄였다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>6.18.55 다음 stable 한 번에 <strong>402개</strong>, 그중 400개가 upstream sha를 달고 있다 = stable은 새 코드가 아니라 <strong>mainline 커밋의 복사본</strong>이다. 346개(86%)가 <code>Fixes:</code>를 갖는다.</li><li><code>Cc: stable</code>은 229개뿐이다. 나머지는 작성자가 stable을 요청하지 않았는데 <code>Fixes:</code> 태그나 AUTOSEL(기계학습 기반 자동 선별, 기억 기반)로 stable 팀이 고른 것이다 — Sasha Levin 서명 166개가 대략 그 흐름이다. 그래서 <strong>우리가 upstream에 보내는 수정에도 <code>Fixes:</code>를 꼭 단다</strong>(그래야 다른 사람의 stable에도 들어간다).</li><li><code>no-Fixes</code> 커밋(<code>Make use of dev_err_probe()</code>, <code>Use BIT macro …</code>)은 수정이 아닌데 들어왔다. 아래처럼 <code>Stable-dep-of:</code>가 붙어 있다 — 진짜 수정이 붙으려면 문맥이 필요해서 같이 들어온 <strong>선행 패치</strong>다. 우리가 backport할 때도 똑같이 "선행 패치를 같이 가져오느냐, 수정을 고쳐서 붙이느냐"를 결정해야 한다(backporting.rst의 "Prerequisite vs. incidental patches").</li></ul>
+<figure class="code"><span class="lang">text</span><pre><code>    iio: adc: adi-axi-adc: Make use of dev_err_probe()
+    
+    [ Upstream commit 634a6316617e2ced7016b002d0b284a1502e9601 ]
+    ...
+    Signed-off-by: Nuno Sá &lt;nuno.sa@analog.com&gt;
+    Signed-off-by: Jonathan Cameron &lt;Jonathan.Cameron@huawei.com&gt;
+    Stable-dep-of: 549b71ce0506 ("iio: adc: adi-axi-adc: Initialize state mutex")
+    Signed-off-by: Sasha Levin &lt;sashal@kernel.org&gt;
+    Signed-off-by: Greg Kroah-Hartman &lt;gregkh@linuxfoundation.org&gt;</code></pre></figure>
+<p>(ChangeLog에서 해당 커밋 본문만 잘라 낸 것이고, 가운데 설명 문단은 <code>...</code>로 줄였다.)</p>
+<h3 id="10-3-예제-12-stable-incremental-patch를-트리-일부에-적용하기">10.3 예제 12 — stable incremental patch를 트리 일부에 적용하기<a class="anchor" href="#10-3-예제-12-stable-incremental-patch를-트리-일부에-적용하기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: BMP280(센서 키트의 기압계, dom 커널에 <code>BMP280=m</code>)의 수정이 우리 트리에 붙는지 확인한다. 전체 트리 대신 <code>drivers/iio/pressure</code>만 복사한 작은 저장소에 <code>git apply --include</code>로 그 경로의 hunk만 적용한다. 벤더 트리에 stable을 "통째로 머지"할 수 없을 때 서브시스템 단위로 가져오는 방식이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/var/tmp/P5/stable; rm -rf $S; mkdir -p $S/drivers/iio
+cp -r /var/lab/src/linux-6.18.55/drivers/iio/pressure $S/drivers/iio/ &amp;&amp; cd $S &amp;&amp; git init -q -b v6.18.55-subset .
+git add -A &amp;&amp; GIT_AUTHOR_NAME=p5 GIT_AUTHOR_EMAIL=p5@lab GIT_COMMITTER_NAME=p5 GIT_COMMITTER_EMAIL=p5@lab \
+  git commit -qm "v6.18.55: drivers/iio/pressure only"
+P=/var/tmp/P5/dl/patch-6.18.55-56
+echo "### files the patch touches here:"; git apply --stat -p1 --include="drivers/iio/pressure/*" $P
+echo "### check + apply"; git apply --check -p1 --include="drivers/iio/pressure/*" $P &amp;&amp; \
+  git apply -p1 --include="drivers/iio/pressure/*" $P &amp;&amp; git diff --stat &amp;&amp; git diff | sed -n 1,40p'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>### files the patch touches here:
+ drivers/iio/pressure/bmp280-core.c |    2 +-
+ drivers/iio/pressure/rohm-bm1390.c |    2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+### check + apply
+ drivers/iio/pressure/bmp280-core.c | 2 +-
+ drivers/iio/pressure/rohm-bm1390.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+diff --git a/drivers/iio/pressure/bmp280-core.c b/drivers/iio/pressure/bmp280-core.c
+index 0ebe0b6..c7b90df 100644
+--- a/drivers/iio/pressure/bmp280-core.c
++++ b/drivers/iio/pressure/bmp280-core.c
+@@ -836,7 +836,7 @@ static int bmp280_write_sampling_frequency(struct bmp280_data *data,
+ 					   int val, int val2)
+ {
+ 	const int (*avail)[2] = data-&gt;chip_info-&gt;sampling_freq_avail;
+-	const int n = data-&gt;chip_info-&gt;num_sampling_freq_avail;
++	const int n = data-&gt;chip_info-&gt;num_sampling_freq_avail / 2;
+ 	int ret, prev;
+ 	int i;
+ 
+diff --git a/drivers/iio/pressure/rohm-bm1390.c b/drivers/iio/pressure/rohm-bm1390.c
+index dac27fd..3b48c1c 100644
+--- a/drivers/iio/pressure/rohm-bm1390.c
++++ b/drivers/iio/pressure/rohm-bm1390.c
+@@ -289,7 +289,7 @@ static int bm1390_read_data(struct bm1390_data *data,
+ 	if (warn)
+ 		dev_warn(data-&gt;dev, "Failed to stop measurement (%d)\n", warn);
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ static int bm1390_read_raw(struct iio_dev *idev,</code></pre></figure>
+<p>출력에서 볼 것: BMP280 수정은 <strong>한 글자(<code>/ 2</code>)</strong>다. ChangeLog 설명대로 <code>sampling_freq_avail</code>은 <code>[정수부, 소수부]</code> 쌍의 배열인데 개수를 "평탄화한 원소 수"로 세어 2배만큼 배열 밖을 읽었다(out-of-bounds). 이런 수정이 매주 수백 개 들어온다. 우리 트리가 6.18.y를 따라가면 공짜로 받고, EOL된 트리라면 이걸 우리가 찾아서 붙여야 한다. 실제 운영에서는 이 diff 대신 <strong>mainline 커밋을 <code>git cherry-pick -x</code></strong> 하는 것이 원칙이다(backporting.rst: "cherry-pick이 <code>git am</code>보다 낫다 — 코드가 움직인 것을 git이 안다").</p>
+<h3 id="10-4-보내는-쪽-우리가-고친-버그를-stable로-요약">10.4 보내는 쪽 — 우리가 고친 버그를 stable로 (요약)<a class="anchor" href="#10-4-보내는-쪽-우리가-고친-버그를-stable로-요약" aria-label="link">#</a></h3>
+<ol><li>mainline 기준으로 고친다(우리 트리가 6.6이어도). </li><li>커밋에 <code>Fixes:</code>(버그를 넣은 커밋)와 <code>Cc: stable@vger.kernel.org</code>를 단다(Option 1).</li><li>옛 stable에서 그대로 안 붙는다는 메일(FAILED patch)이 오면, 그 트리에 맞게 고친 버전을 <code>commit &lt;sha&gt; upstream.</code> 형식으로 보낸다(Option 3, E7 §5.11).</li><li>우리 제품 트리에는 mainline 커밋을 <code>cherry-pick -x</code>로 미리 넣고, 다음 stable 머지 때 patch-id로 자연히 합쳐지게 한다(예제 3의 "skipped previously applied commit").</li></ol>
+<hr>
+<h2 id="11-커널-안에서는-무슨-일이-일어나나">11. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#11-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<p>업그레이드에서 만나는 에러 두 종류 — "빌드가 안 된다"(6절)와 "빌드는 되는데 로드가 안 된다"(예제 8) — 는 커널 안의 서로 다른 지점에서 생긴다.</p>
+<figure class="chart"><svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="140" y="18" text-anchor="middle" font-size="13">모듈 로드 (kernel/module/)</text>
+  <text x="530" y="18" text-anchor="middle" font-size="13">driver core (drivers/base/)</text>
+  <rect x="20" y="30" width="260" height="40" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="150" y="55" text-anchor="middle" font-size="12">insmod → (f)init_module()</text>
+  <rect x="20" y="90" width="260" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="150" y="115" text-anchor="middle" font-size="12">load_module()</text>
+  <rect x="20" y="150" width="260" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="150" y="175" text-anchor="middle" font-size="12">check_modinfo(): vermagic 비교</text>
+  <rect x="290" y="150" width="84" height="40" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="332" y="175" text-anchor="middle" font-size="12">-ENOEXEC</text>
+  <rect x="20" y="210" width="260" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="150" y="235" text-anchor="middle" font-size="12">simplify_symbols(): 심볼 해석 · CRC</text>
+  <rect x="20" y="270" width="260" height="40" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="150" y="295" text-anchor="middle" font-size="12">do_init_module() → p5_init()</text>
+  <rect x="390" y="30" width="280" height="40" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="530" y="55" text-anchor="middle" font-size="12">platform_driver_register(&amp;p5_drv)</text>
+  <rect x="390" y="90" width="280" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="530" y="115" text-anchor="middle" font-size="12">driver_register() → 버스 match</text>
+  <rect x="390" y="150" width="280" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="530" y="175" text-anchor="middle" font-size="12">platform_probe() → drv-&gt;probe(pdev)</text>
+  <rect x="390" y="210" width="280" height="40" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="530" y="235" text-anchor="middle" font-size="12">rmmod → ... → platform_remove()</text>
+  <rect x="390" y="270" width="280" height="40" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="530" y="295" text-anchor="middle" font-size="12">drv-&gt;remove(dev): 반환값 없음 (void)</text>
+  <line x1="150" y1="70" x2="150" y2="88" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="150" y1="130" x2="150" y2="148" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="150" y1="190" x2="150" y2="208" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="150" y1="250" x2="150" y2="268" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="280" y1="170" x2="288" y2="170" stroke="#d0564a" marker-end="url(#ah6)"/>
+  <path d="M280 290 L335 290 L335 50 L388 50" fill="none" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="530" y1="70" x2="530" y2="88" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="530" y1="130" x2="530" y2="148" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="530" y1="190" x2="530" y2="208" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah6)"/>
+  <line x1="530" y1="250" x2="530" y2="268" stroke="currentColor" marker-end="url(#ah6)"/>
+  <text x="20" y="332" font-size="12">빌드 에러(6절)는 이 그림 이전, 헤더의 구조체·함수 선언에서 난다. 로드 에러는 왼쪽 열에서 난다.</text>
+</svg></figure>
+<p>그림 6 — 모듈 로드 경로(왼쪽)와 driver core가 우리 콜백을 부르는 경로(오른쪽). 함수 이름은 6.18.55 <code>kernel/module/main.c</code>, <code>drivers/base/platform.c</code>에서 grep으로 확인했다.</p>
+<ul><li><strong>API 변화의 정체는 "콜백 테이블의 타입"이다.</strong> <code>struct platform_driver</code>는 driver core가 부르는 함수 포인터 테이블이다(G3). 6.18.55의 <code>drivers/base/platform.c</code>:</li></ul>
+<figure class="code"><span class="lang">c</span><pre><code>static void platform_remove(struct device *_dev)
+{
+	struct platform_driver *drv = to_platform_driver(_dev-&gt;driver);
+	struct platform_device *dev = to_platform_device(_dev);
+
+	if (drv-&gt;remove)
+		drv-&gt;remove(dev);
+}</code></pre></figure>
+<p>core가 반환값을 안 쓰므로 타입을 <code>void</code>로 바꿨고, 그 순간 모든 드라이버의 <code>.remove = fn</code> 대입이 타입 에러가 된다. bare-metal로 치면 <strong>벡터 테이블 엔트리의 함수 타입이 바뀐 것</strong>이다. i2c도 같다: <code>drivers/i2c/i2c-core-base.c</code>의 <code>i2c_device_probe()</code>가 <code>driver-&gt;probe(client)</code>(593행)를 부른다.</p>
+<ul><li><strong>로드 시 검사는 <code>check_modinfo()</code>의 vermagic 비교가 첫 관문이다.</strong> 6.18.55 <code>kernel/module/main.c</code>의 <code>check_modinfo()</code>는 모듈의 <code>vermagic</code> 문자열이 커널의 <code>VERMAGIC_STRING</code>과 다르면 <code>"version magic '%s' should be '%s'"</code>를 찍고 <code>-ENOEXEC</code>를 반환한다 — 예제 8의 출력 그대로다. vermagic에는 커널 릴리스 문자열(LOCALVERSION 포함)과 <code>SMP preempt mod_unload</code> 같은 핵심 config 플래그가 들어간다.</li><li><strong>dom 커널은 <code>CONFIG_MODVERSIONS</code>가 꺼져 있다</strong>(<code># CONFIG_MODVERSIONS is not set</code>, <code>linux-build-dom/.config</code> 950행). MODVERSIONS가 켜져 있으면 심볼마다 CRC(함수 시그니처·구조체 레이아웃의 해시)를 비교해 <code>"disagrees about version of symbol"</code>(<code>kernel/module/version.c</code>)로 거부한다. 꺼져 있으면 <strong>vermagic만 맞추면 구조체 레이아웃이 달라도 로드된다</strong> — 그래서 "같은 버전 문자열인데 config가 다른 커널"에 모듈을 억지로 올리면(예: <code>modprobe --force</code>) 메모리 깨짐으로 이어진다. 업그레이드 원칙: <strong>out-of-tree 모듈은 정확히 그 커널의 빌드 트리로 다시 빌드한다.</strong> Android GKI는 반대로 KMI(커널-모듈 인터페이스)를 CRC로 고정해 이 문제를 제도로 막는다(E7 §2.4, 기억 기반).</li><li>서명: dom은 <code>CONFIG_MODULE_SIG=y</code>, <code>MODULE_SIG_FORCE</code> 꺼짐 → 서명 없는 모듈은 로드되고 <code>E</code> taint만 붙는다(예제 8). secure boot 제품(L5)에서는 FORCE를 켜므로, 업그레이드 때 <strong>모듈 서명 키와 빌드 파이프라인도 같이 옮겨야</strong> 한다.</li></ul>
+<p>드라이버 작성 때 다시 만나는 곳: G3(platform 수명주기 — probe/remove 대칭), H3(I2C <code>probe(client)</code>와 <code>id_table</code>/<code>of_match_table</code>), D4·H(gpiod), F(타이머 API), E3(Kbuild·vermagic·modinfo).</p>
+<hr>
+<h2 id="12-embedded-실무에서-다시-보기">12. Embedded 실무에서 다시 보기<a class="anchor" href="#12-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="12-1-센서-키트-bsp를-5-15-6-18로-작업-계획-예">12.1 센서 키트 BSP를 5.15 → 6.18로 (작업 계획 예)<a class="anchor" href="#12-1-센서-키트-bsp를-5-15-6-18로-작업-계획-예" aria-label="link">#</a></h3>
+<p>"i.MX8 기반 센서 키트, 벤더 BSP 5.15 + 우리 패치 120개, out-of-tree 드라이버 4개(IMU, 카메라 serializer, CAN 보조 MCU, 전원 관리)"라면:</p>
+<ol><li><strong>1주차 — 결정과 인벤토리.</strong> 벤더에 6.18 BSP가 있는지, 없으면 mainline 6.18의 해당 SoC 지원 범위(DT·드라이버)를 확인(E7 예제 7 방식). 우리 120개를 예제 2 스크립트로 스프레드시트화: 제목 접두어, 파일, <code>git cherry</code> 결과, upstream sha trailer.</li><li><strong>2주차 — 분류 회의.</strong> upstreamed/obsolete는 근거와 함께 drop 목록으로, needs port는 담당자 배정. keep 중 upstream 가능한 것은 P7 백로그로.</li><li><strong>3~4주차 — 옮기기와 포팅.</strong> <code>rebase -i --onto</code> + drop 목록, rerere 켜기. out-of-tree 드라이버 4개는 예제 6처럼 에러 목록 → 대응표 → 포팅. 가능하면 이 기회에 in-tree로 넣는다(다음 업그레이드에서 API 변경을 남이 고쳐 준다).</li><li><strong>5~6주차 — 회귀.</strong> 8절 표의 1~7층. 부팅 스냅샷 diff, 센서별 데이터 품질(Q7), CAN 부하, 카메라 프레임 드롭, 전력(N5), RT 지연(N3).</li><li><strong>이후 — 유지.</strong> 6.18.y stable을 2~4주 주기로 머지(예제 11·12의 triage를 매번), 회귀가 나오면 bisect run.</li></ol>
+<h3 id="12-2-out-of-tree-드라이버를-여러-커널에서-동시에-빌드해야-할-때">12.2 out-of-tree 드라이버를 여러 커널에서 동시에 빌드해야 할 때<a class="anchor" href="#12-2-out-of-tree-드라이버를-여러-커널에서-동시에-빌드해야-할-때" aria-label="link">#</a></h3>
+<p>필드에 5.15 장비와 6.18 장비가 섞여 있으면 한 소스가 두 커널을 지원해야 한다. 흔한 방법은 <code>LINUX_VERSION_CODE</code> 분기다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#include &lt;linux/version.h&gt;
+#if LINUX_VERSION_CODE &gt;= KERNEL_VERSION(6, 11, 0)
+static void p5_remove(struct platform_device *pdev)
+#else
+static int p5_remove(struct platform_device *pdev)
+#endif
+{
+	timer_delete_sync(&amp;p5.timer);	/* 5.15에는 timer_delete_sync가 없을 수 있다 → compat 헤더 */
+#if LINUX_VERSION_CODE &lt; KERNEL_VERSION(6, 11, 0)
+	return 0;
+#endif
+}</code></pre></figure>
+<p>(위 코드는 문법 예시이고 빌드하지 않았다. 버전 경계 6.11은 기억 기반이라 실제로는 해당 API가 들어온 커밋으로 확인해야 한다.) 분기가 수십 개가 되면 <code>p5_compat.h</code> 한 곳에 모으고(<code>#define timer_delete_sync del_timer_sync</code> 같은 shim), 가능하면 <strong>벤더 stable 백포트가 버전 숫자와 API를 어긋나게 만드는 경우</strong>(벤더가 새 API를 옛 버전에 backport)를 대비해 버전 대신 <strong>기능 검사</strong>(Kconfig 심볼, 헤더의 매크로 존재)를 쓴다. 장기적으로는 in-tree로 넣는 것이 가장 싸다.</p>
+<h3 id="12-3-업그레이드-후-imu가-가끔-0을-읽는다-bisect-적용">12.3 "업그레이드 후 IMU가 가끔 0을 읽는다" — bisect 적용<a class="anchor" href="#12-3-업그레이드-후-imu가-가끔-0을-읽는다-bisect-적용" aria-label="link">#</a></h3>
+<p>증상은 새 커널에서만, 재현율 30%. 판정 스크립트는 "부팅 후 IMU를 1000번 읽어 0이 하나라도 있으면 bad"로 만들고, 재현율이 낮으므로 <strong>한 단계에서 10회 반복</strong>(1회라도 bad면 bad)한다. 범위는 우리 스택을 제외한 mainline 태그 사이로 잡고, 우리 드라이버는 out-of-tree 빌드로 매 단계 붙인다(9.3절 스크립트). 범인이 I2C 컨트롤러 드라이버의 clock stretching 처리 변경 같은 커밋으로 나오면, 그 커밋의 <code>Fixes:</code>가 달린 후속 수정이 이미 stable에 있는지(예제 11 방식)부터 본다. Don의 장점: 버스 장애 root cause 경험이 있으니, bisect로 커밋을 찾은 뒤 로직 분석기로 I2C 파형을 비교(M11)해 <strong>왜</strong>를 증명할 수 있다.</p>
+<h3 id="12-4-벤더가-bsp를-안-올려-줄-때">12.4 벤더가 BSP를 안 올려 줄 때<a class="anchor" href="#12-4-벤더가-bsp를-안-올려-줄-때" aria-label="link">#</a></h3>
+<p>벤더가 5.15에서 멈췄다면 선택지는 (1) 벤더 5.15 + 우리가 stable/보안 수정 backport(EOL 후에는 CIP 5.10/6.1 같은 트리를 참고하거나 상용 지원), (2) mainline 6.18로 가고 벤더 드라이버를 우리가 포팅, (3) 다음 하드웨어 리비전에서 SoC 변경. 면접에서는 "비용·위험·제품 수명"을 기준으로 비교하는 것을 보여 주면 된다(E7 §3, P2).</p>
+<hr>
+<h2 id="13-흔한-실수와-증상">13. 흔한 실수와 증상<a class="anchor" href="#13-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td><code>git rebase &lt;새 base&gt;</code>만 사용</td><td>벤더 커밋 수천 개가 충돌</td><td>옛 base 경계를 안 줌</td><td><code>git rebase --onto &lt;새&gt; &lt;옛&gt; &lt;브랜치&gt;</code></td></tr><tr><td><code>--onto</code>에서 upstream된 패치가 자동으로 빠질 거라 믿음</td><td>이미 있는 수정이 충돌·중복</td><td>거르기 비교 대상이 <code>&lt;upstream&gt;</code>(옛 base)</td><td><code>git cherry</code>로 <code>-</code>를 찾아 todo에서 drop</td></tr><tr><td>충돌을 "한쪽 채택"으로 해결</td><td>기능 사라짐 또는 새 API 무시</td><td>두 의도 중 하나만 살림</td><td>zdiff3로 조상 칸 보고 둘 다 살림, range-diff 리뷰</td></tr><tr><td>충돌 없으면 끝이라고 생각</td><td>런타임 이중 해제·락 위반</td><td>의미 충돌(5.3)</td><td>빌드 + 부팅 + lockdep/KASAN + 기능 테스트</td></tr><tr><td>옛 .ko를 rootfs에 그대로</td><td><code>invalid module format</code>, 장치 미생성</td><td>vermagic 불일치</td><td>모든 out-of-tree 모듈을 새 빌드 트리로 재빌드, 패키지 버전 묶기</td></tr><tr><td><code>make olddefconfig</code> 후 config 확인 안 함</td><td>기능이 조용히 꺼짐</td><td>심볼 이름·의존성 변경</td><td><code>scripts/diffconfig</code>의 <code>-</code> 줄 전수 확인, fragment + merge_config.sh</td></tr><tr><td>bisect 스크립트가 빌드 실패에 1 반환</td><td>엉뚱한 커밋이 범인</td><td>테스트 불가를 bad로 판정</td><td>빌드 실패·환경 오류는 <code>exit 125</code></td></tr><tr><td>stable 태그로 bisect 범위 지정</td><td>bisect가 merge base부터 헤맴</td><td>stable 태그는 mainline 조상이 아님</td><td>mainline 태그(<code>v5.15</code>, <code>v6.18</code>) 사이로</td></tr><tr><td>backport에 출처 안 남김</td><td>다음 업그레이드 때 upstreamed 판정 불가</td><td><code>-x</code> 미사용</td><td><code>cherry-pick -x</code>, <code>commit &lt;sha&gt; upstream.</code></td></tr><tr><td>내부 API 변경을 "버그"로 문의</td><td>upstream에서 무시당함</td><td>내부 API는 안정성 약속 없음</td><td>stable-api-nonsense.rst — in-tree로 넣거나 직접 포팅</td></tr></tbody></table></div>
+<hr>
+<h2 id="14-면접에서-이렇게-말한다">14. 면접에서 이렇게 말한다<a class="anchor" href="#14-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> How would you plan a kernel upgrade from a vendor 5.15 BSP to 6.18 LTS?</p>
+<p><strong>A.</strong> 먼저 목표 LTS의 수명과 SoC의 upstream 지원을 확인해 버전을 정한다. 다음으로 우리 패치 스택을 인벤토리해 upstreamed·obsolete·needs port·keep으로 분류하고, <code>rebase --onto</code>로 우리 범위만 새 base에 옮긴다. out-of-tree 드라이버는 컴파일 에러를 할 일 목록 삼아 포팅하고, 빌드·config diff·부팅·장치 probe·기능·성능 순서로 회귀를 막는다. 끝나면 stable을 정기적으로 머지하는 체계를 만든다.</p>
+<blockquote><p>First I confirm the target: the LTS's projected end of life versus our product lifetime, and how much of our SoC is supported upstream or in the vendor's new BSP. Then I inventory our patch stack and classify every patch as already upstream, obsolete, needs porting, or carried as is — git cherry and the upstream SHAs in our commit messages do half of that automatically. I move only our range with git rebase --onto, port the out-of-tree drivers using the compile errors as a to-do list, and review the result with git range-diff. Validation goes in layers: build with no warnings, a config diff, boot, every device probed, functional tests on the sensors, and performance against the old kernel on the same hardware. After that we merge stable releases on a fixed cadence so the next upgrade is smaller.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "패치가 수백 개면?" → 분류를 스크립트로 자동화하고(예제 2), 서브시스템별 담당자에게 나누고, 이 기회에 upstream 가능한 것을 보내 스택을 줄인다.</p>
+<p><strong>Q.</strong> What does <code>git rebase --onto</code> do and when do you need it?</p>
+<p><strong>A.</strong> <code>--onto &lt;새 base&gt; &lt;옛 base&gt; &lt;브랜치&gt;</code>는 "옛 base부터 브랜치 끝까지"만 잘라서 새 base 위에 다시 쌓는다. 벤더 BSP 위에 우리 패치가 있을 때, 벤더가 새 BSP를 따로 만들어 줬다면 벤더 커밋은 옮기면 안 되므로 <code>--onto</code>가 필요하다. 주의할 점은 이미 적용된 패치를 거르는 기준이 옛 base라서, upstream에 들어간 우리 패치는 <code>git cherry</code>로 찾아 직접 drop해야 한다는 것이다.</p>
+<blockquote><p>It takes the commits in old-base..branch and replays them on top of a new base. You need it whenever the branch sits on something you don't own — for example our product patches on top of a vendor BSP, when the vendor has already produced their own BSP for the new kernel. A plain rebase onto the new BSP would try to replay the vendor's old commits too. One catch I've seen: with --onto, the automatic skipping of already-applied patches compares against the old base, so I run git cherry against the new base first and drop the patches that are already upstream explicitly.</p></blockquote>
+<p><strong>Q.</strong> How do you resolve a rebase conflict safely?</p>
+<p><strong>A.</strong> zdiff3 스타일로 공통 조상까지 보고, upstream이 그 줄을 왜 바꿨는지 <code>git log -L</code>이나 커밋 메시지로 확인한 뒤, 두 의도를 모두 살려 합친다. 커밋 본문에 어떻게 고쳤는지 한 줄 남기고, range-diff로 "전/후 패치"를 비교해 리뷰받는다. 충돌이 없던 커밋도 의미 충돌이 있을 수 있으니 빌드와 런타임 테스트로 확인한다.</p>
+<blockquote><p>I turn on the zdiff3 conflict style so I can see the common ancestor, then look up why upstream changed those lines — git log -L on the function, or the commit message. The resolution has to keep both intents: upstream's new API and our feature. I note the adaptation in the commit body, and reviewers look at git range-diff, which shows exactly how our patch changed during the port. And I don't trust a clean rebase either; semantic conflicts like changed locking rules only show up in build and runtime tests.</p></blockquote>
+<p><strong>Q.</strong> Our driver stopped building on the new kernel with "incompatible pointer type" on <code>.remove</code>. What happened?</p>
+<p><strong>A.</strong> 6.x에서 platform driver의 <code>.remove</code>가 <code>int</code> 반환에서 <code>void</code>로 바뀌었다. driver core는 원래 반환값을 쓰지 않았기 때문이다. 함수를 <code>void</code>로 바꾸고, 혹시 에러를 반환하며 정리를 건너뛰던 경로가 있었다면 그건 원래부터 누수였으니 끝까지 정리하게 고친다. 비슷하게 i2c <code>probe</code>가 인자 하나로, <code>class_create</code>가 owner 없이 바뀌었다.</p>
+<blockquote><p>The platform bus changed the remove callback to return void, because the driver core never used the return value anyway. So I change the function to void, and I check any early-return error paths — if the old code skipped cleanup on error, that was already a leak and now it has to clean up unconditionally. The same kind of change hit I2C probe, which now takes only the client, and class_create, which lost the owner argument. In 6.18 the kernel turns incompatible-pointer-type into an error, which is good: it catches callback ABI mismatches at build time.</p></blockquote>
+<p><strong>Q.</strong> How do you find which commit introduced a regression between two kernels?</p>
+<p><strong>A.</strong> <code>git bisect run</code>으로 자동화한다. 판정 스크립트는 빌드 실패면 125(skip), 테스트 통과면 0, 실패면 1을 반환한다. 범위는 mainline 태그 사이로 잡고, 단계가 비싸면 릴리스 단위로 먼저 좁힌다. 재현율이 낮으면 한 단계에서 여러 번 돌린다. 찾은 뒤에는 그 커밋의 후속 수정이 stable에 이미 있는지 본다.</p>
+<blockquote><p>I script it with git bisect run: the test script exits 0 for good, 1 for bad, and 125 when the revision can't be tested, like a build failure — otherwise a broken build gets blamed. I bisect between mainline tags, not stable tags, because stable tags aren't ancestors of mainline. If each step is a full build and boot, I first narrow it to a release, then bisect inside it, and for flaky bugs I repeat the test several times per step. Once I have the commit, I check whether a later fix carrying a Fixes: tag for it is already in stable.</p></blockquote>
+<p><strong>Q.</strong> What are <code>Fixes:</code> and <code>Cc: stable</code> for?</p>
+<p><strong>A.</strong> <code>Fixes:</code>는 이 수정이 고치는 원래 커밋을 가리켜, stable 팀과 도구가 어느 버전에 backport할지 계산하게 한다. <code>Cc: stable@vger.kernel.org</code>는 mainline에 들어가면 stable로 자동으로 가져가라는 요청이다. 실제로 6.18.56 stable의 402개 커밋 중 346개가 <code>Fixes:</code>를, 229개가 <code>Cc: stable</code>을 달고 있었다. 받는 쪽에서는 이 태그로 우리 서브시스템 수정을 골라낸다.</p>
+<blockquote><p>Fixes: points at the commit that introduced the bug, so the stable team and their tooling can work out which stable trees need the fix. Cc: stable asks for an automatic backport once the patch lands in mainline. When I counted one real stable release, 6.18.56, 346 of its 402 commits had a Fixes: tag but only 229 had Cc: stable — the rest were picked up via Fixes: tags or automated selection. So I always add Fixes:, and on the receiving side I use these tags to triage which fixes matter for our drivers.</p></blockquote>
+<p><strong>Q.</strong> Why can't we just keep the old kernel forever?</p>
+<p><strong>A.</strong> 커널은 계속 동작하지만, EOL 뒤에는 보안·버그 수정이 더 이상 오지 않는다. stable 하나에 수백 개 수정이 들어오는데 그걸 우리가 직접 골라 붙여야 하고, upstream과 거리가 벌어질수록 다음 업그레이드가 비싸진다. 장수 제품이면 CIP SLTS처럼 10년 유지되는 트리에 맞추거나, 1~2년 주기로 LTS를 옮기는 비용을 계획에 넣는다.</p>
+<blockquote><p>It keeps running, but after end of life the fixes stop arriving. A single stable release carries a few hundred fixes; on an EOL kernel we would have to find and backport the relevant ones ourselves, and every month the distance to upstream grows, so the eventual upgrade gets more expensive. For a long-lived product I'd either align with a CIP super-long-term kernel, which is maintained for about ten years, or budget an LTS move every one to two years and keep the patch stack small so it stays cheap.</p></blockquote>
+<hr>
+<h2 id="15-직접-해보기">15. 직접 해보기<a class="anchor" href="#15-직접-해보기" aria-label="link">#</a></h2>
+<ol><li>(개념) 그림 2를 보고, 2026-10에 출시해 7년 필드 지원해야 하는 장비에 6.6·6.12·6.18 중 무엇을 고르겠나? 근거 두 개. 정답/힌트: kernel.org projected EOL(6.18이 가장 길다)과 CIP 채택(6.12는 CIP 브랜치 있음). 7년이면 kernel.org만으로는 어느 것도 부족 → CIP 6.12 정렬 또는 중간에 LTS 이동 계획.</li><li>(git) 예제 1 저장소의 <code>product</code> 끝에 <code>drivers/sensor.c</code>의 <code>return ch * 10;</code>을 <code>return ch * 100;</code>으로 바꾸는 커밋을 추가하고 예제 4를 다시 돌려라. 무엇으로 분류되고 range-diff는 어떻게 나오나? 정답/힌트: 바꾼 줄은 upstream이 안 건드려 충돌 없이 붙는다(keep). 그런데 range-diff는 <code>=</code>가 아니라 <code>!</code>다 — hunk 헤더(<code>@@ ... int sensor_read(struct sensor_dev *sd, int ch)</code>)와 문맥 줄(<code>(void)sd;</code>)이 바뀌었기 때문이다. <code>!</code>라도 둘째 열의 <code>-</code>/<code>+</code> 줄(우리 변경)이 같으면 의도는 보존된 것이다(직접 돌려 확인함).</li><li>(git) 예제 4에서 <code>git config rerere.enabled true</code>를 켜고, 해결 후 <code>git reset --hard product-bsp1</code>로 되돌려 다시 rebase하라. 두 번째에는 무엇이 달라지나? 정답/힌트: 두 번째에는 충돌 메시지 바로 뒤에 <code>Resolved 'drivers/imu.c' using previous resolution.</code>이 나오고 파일에 이미 해결본이 들어가 있다(직접 돌려 확인함). 단 상태는 여전히 <code>UU</code>라 <code>git diff</code>로 확인한 뒤 <code>git add</code> 해야 한다(<code>rerere.autoUpdate</code>를 켜면 자동 stage).</li><li>(코드) 예제 6의 옛 드라이버에 <code>hrtimer_init()</code> + <code>.function =</code> 초기화를 넣어 에러를 확인하고 <code>hrtimer_setup()</code>으로 포팅하라. 정답/힌트: 6.18.55의 시그니처는 <code>hrtimer_setup(timer, fn, clock_id, mode)</code>(예제 5 출력 230행). 콜백 반환 타입은 <code>enum hrtimer_restart</code>.</li><li>(bisect) 예제 10의 판정 스크립트를 <code>exit 125</code> 없이(빌드 실패도 1) 바꿔 다시 돌려라. 범인은 무엇으로 나오나? 정답/힌트: 빌드가 깨진 rev 24가 bad로 판정된다. 이번 경로에서는 rev 24가 진짜 범인(rev 20)보다 뒤라 결과가 같을 수도 있다 — 버그를 rev 26으로 옮기면 rev 24가 범인으로 잘못 나온다.</li><li>(stable) 예제 11 스크립트를 고쳐 <code>drivers/net/can/</code>과 <code>net/can/</code>을 건드린 커밋을 <strong>파일 경로 기준</strong>으로 골라라(제목 접두어 대신). 힌트: incremental patch의 <code>diff --git</code> 줄과 ChangeLog를 함께 쓰거나, ChangeLog의 각 커밋 본문만으로는 파일 경로가 없다는 점에 주의. 정답/힌트: ChangeLog에는 파일 목록이 없다 → 진짜로는 <code>linux-stable</code> git에서 <code>git log v6.18.55..v6.18.56 -- net/can drivers/net/can</code>이 정답(가이드).</li><li>(관찰) 예제 8 게스트에서 <code>cat /proc/sys/kernel/tainted</code> 값을 읽고 비트를 해석하라. dom용 모듈 로드 전후로 어떻게 바뀌나? 정답/힌트: O(4096) + E(8192) = 12288 근처(다른 taint가 없다면). E7 §6.4의 taint 표.</li></ol>
+<hr>
+<h2 id="16-용어-사전">16. 용어 사전<a class="anchor" href="#16-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>LTS (longterm)</td><td>장기 지원 커널</td><td>1년에 하나쯤 지정, 몇 년 동안 stable 수정을 받음</td></tr><tr><td>EOL</td><td>End of Life</td><td>그 트리에 더 이상 수정이 나오지 않는 시점</td></tr><tr><td>CIP SLTS</td><td>Super Long Term Support</td><td>일부 LTS를 약 10년 유지하는 산업용 트리</td></tr><tr><td>패치 스택</td><td>patch stack</td><td>base 위에 쌓인 우리(·벤더) 커밋 목록</td></tr><tr><td>upstreamed</td><td>이미 upstream에 있음</td><td>같은 수정이 새 base에 있어 drop 대상</td></tr><tr><td>obsolete</td><td>쓸모 없어짐</td><td>대상 코드·기능이 사라져 drop 대상</td></tr><tr><td>patch-id</td><td>diff 내용 해시</td><td>커밋 해시가 달라도 같은 변경을 알아보는 키</td></tr><tr><td><code>git cherry</code></td><td>스택 대조</td><td>각 커밋이 upstream에 있으면 <code>-</code>, 없으면 <code>+</code></td></tr><tr><td><code>rebase --onto</code></td><td>범위 지정 rebase</td><td>옛 base..브랜치를 새 base 위로</td></tr><tr><td>zdiff3</td><td>충돌 표시 스타일</td><td>HEAD·공통 조상·우리 쪽을 3칸으로 보여 줌</td></tr><tr><td>rerere</td><td>reuse recorded resolution</td><td>같은 충돌 해결을 기억해 재사용</td></tr><tr><td>range-diff</td><td>시리즈 비교</td><td>전·후 커밋 시리즈를 짝지어 diff의 diff로 보여 줌</td></tr><tr><td>의미 충돌</td><td>semantic conflict</td><td>텍스트 충돌은 없지만 동작이 깨지는 경우</td></tr><tr><td>vermagic</td><td>모듈 버전 문자열</td><td>커널 릴리스 + 핵심 config, 다르면 로드 거부</td></tr><tr><td>MODVERSIONS</td><td>심볼 CRC 검사</td><td>심볼 시그니처 해시로 ABI 불일치 탐지</td></tr><tr><td>Coccinelle (spatch)</td><td>semantic patch 도구</td><td>C 구조를 이해하고 대량 변환</td></tr><tr><td><code>git bisect run</code></td><td>자동 이진 탐색</td><td>스크립트 종료 코드(0/1/125)로 범인 커밋 찾기</td></tr><tr><td><code>Fixes:</code></td><td>원인 커밋 태그</td><td>stable backport 범위 계산의 근거</td></tr><tr><td><code>Cc: stable</code></td><td>stable 요청 태그</td><td>mainline 머지 후 자동 backport 요청</td></tr><tr><td><code>Stable-dep-of:</code></td><td>선행 패치 표시</td><td>수정을 붙이려고 같이 들어온 패치</td></tr><tr><td>diffconfig</td><td>config 비교 스크립트</td><td>사라짐(-)·생김(+)·변경 심볼 목록</td></tr></tbody></table></div>
+<hr>
+<h2 id="17-요약-체크리스트">17. 요약 &amp; 체크리스트<a class="anchor" href="#17-요약-체크리스트" aria-label="link">#</a></h2>
+<p>커널 업그레이드는 "제품 = LTS + 벤더 BSP + 우리 패치"에서 맨 아래층을 바꾸고 위층을 다시 올리는 프로젝트다. 언제 올릴지는 LTS의 projected EOL(5.10·5.15는 2026-12)과 제품 수명, CIP SLTS 채택 여부로 정한다. 실행은 인벤토리 → 분류(upstreamed·obsolete·needs port·keep) → <code>git rebase -i --onto &lt;새&gt; &lt;옛&gt; &lt;브랜치&gt;</code>(git cherry의 <code>-</code>와 삭제된 파일 대상 커밋은 todo에서 drop) → zdiff3로 두 의도를 합치는 충돌 해결 → range-diff 리뷰 순서다. out-of-tree 드라이버는 컴파일 에러 유형(없어진 함수, 바뀐 콜백 타입, 인자 수, 매크로 문법)이 곧 포팅 목록이며, 6.18.55에서 <code>.remove</code>는 void, i2c <code>.probe</code>는 인자 하나, <code>class_create(name)</code>, <code>timer_container_of</code>/<code>timer_delete_sync</code>, <code>strscpy</code>, <code>MODULE_IMPORT_NS("NS")</code>다. 새 커널에는 모듈을 그 빌드 트리로 다시 빌드해야 하고(vermagic), config는 diffconfig로 사라진 심볼을 확인한다. 회귀는 빌드·부팅·probe·기능·성능 층으로 막고, 회귀 커밋은 0/1/125 규칙의 <code>git bisect run</code>으로 찾는다. 업그레이드 뒤에는 stable을 정기 머지하며 <code>Fixes:</code>·<code>Cc: stable</code>·<code>Stable-dep-of:</code> 태그로 우리 서브시스템 수정을 triage한다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>LTS·CIP 수명표를 보고 제품에 맞는 목표 커널을 근거와 함께 고를 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>제품이 옛 커널에 갇히는 이유 다섯 가지와 머무르는 비용을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>패치 스택을 인벤토리하고 네 가지로 분류하는 스크립트를 짤 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>git cherry</code>의 <code>+</code>/<code>-</code>와 patch-id의 한계를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>git rebase --onto</code>의 세 인자와 plain rebase와의 차이를 그림으로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>zdiff3 충돌 표시를 읽고 두 의도를 살려 해결할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>range-diff 출력의 <code>=</code>, <code>&lt;</code>, <code>&gt;</code>, <code>!</code>와 diff의 diff를 읽을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>옛 API 드라이버의 컴파일 에러를 유형별로 읽고 6.18 API로 포팅할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>vermagic·MODVERSIONS·모듈 서명이 업그레이드에 미치는 영향을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>diffconfig로 config 이동에서 사라진 기능을 찾을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>0/1/125 규칙으로 <code>git bisect run</code> 판정 스크립트를 짤 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>stable ChangeLog에서 우리 서브시스템 수정과 선행 패치를 골라낼 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>커널 트리 문서 (6.18.55에서 확인): <code>Documentation/process/2.Process.rst</code>, <code>Documentation/process/stable-kernel-rules.rst</code>, <code>Documentation/process/backporting.rst</code>, <code>Documentation/process/stable-api-nonsense.rst</code>, <code>Documentation/admin-guide/bug-bisect.rst</code>, <code>Documentation/admin-guide/verify-bugs-and-bisect-regressions.rst</code>, <code>Documentation/dev-tools/coccinelle.rst</code> — 온라인: https://docs.kernel.org/process/backporting.html , https://docs.kernel.org/process/stable-kernel-rules.html</li><li>kernel.org 릴리스 목록: https://www.kernel.org/category/releases.html</li><li>stable 파일: https://cdn.kernel.org/pub/linux/kernel/v6.x/ (<code>ChangeLog-6.18.56</code>, <code>incr/patch-6.18.55-56.xz</code>)</li><li>CIP: https://www.cip-project.org/ , https://git.kernel.org/pub/scm/linux/kernel/git/cip/linux-cip.git</li><li>git 문서: https://git-scm.com/docs/git-rebase (<code>--onto</code>, <code>--empty</code>), https://git-scm.com/docs/git-range-diff , https://git-scm.com/docs/git-cherry , https://git-scm.com/docs/git-bisect , https://git-scm.com/docs/git-rerere</li><li>Coccinelle: https://coccinelle.gitlabpages.inria.fr/website/</li><li>소스 위치 (elixir): https://elixir.bootlin.com/linux/v6.18.55/source/drivers/base/platform.c , https://elixir.bootlin.com/linux/v6.18.55/source/kernel/module/main.c</li><li>이 노트와 이어지는 노트: E7(릴리스 모델·패치 보내기), P2(BSP·패치 스택), P6(KUnit·kselftest·CI), P7(upstream 기여), G3, H3, M8, K5</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-18_P4_schematic_to_dt.html"><span class="dir">← 이전</span><span class="nm">P4. 회로도 읽고 DT 쓰기 — net 하나를 끝까지 따라가서 프로퍼티 한 줄로 옮기기</span></a><a class="next" href="2026-10-18_P6_testing_ci.html"><span class="dir">다음 →</span><span class="nm">P6. 테스트와 CI — KUnit · kselftest · LAVA · HIL · 생산 테스트, 그리고 "부팅해서 TAP을 읽는" CI 잡</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l3"><a href="#이-노트의-실습-환경">이 노트의 실습 환경</a></li><li class="l2"><a href="#1-lts-stable-주기와-수명-언제까지-버틸-수-있나">1. LTS · stable 주기와 수명 — "언제까지 버틸 수 있나"</a></li><li class="l3"><a href="#1-1-트리-안-문서가-말하는-것">1.1 트리 안 문서가 말하는 것</a></li><li class="l3"><a href="#1-2-lts-수명-지도">1.2 LTS 수명 지도</a></li><li class="l3"><a href="#1-3-cip-slts-한-줄-정리">1.3 CIP SLTS 한 줄 정리</a></li><li class="l2"><a href="#2-왜-제품은-옛-커널에-갇히나">2. 왜 제품은 옛 커널에 갇히나</a></li><li class="l3"><a href="#2-1-갇히는-이유">2.1 갇히는 이유</a></li><li class="l3"><a href="#2-2-머무르는-비용은-시간이-갈수록-커진다">2.2 머무르는 비용은 시간이 갈수록 커진다</a></li><li class="l2"><a href="#3-업그레이드-계획-인벤토리와-분류">3. 업그레이드 계획 — 인벤토리와 분류</a></li><li class="l3"><a href="#3-1-네-가지-분류">3.1 네 가지 분류</a></li><li class="l3"><a href="#3-2-예제-1-실습-저장소-만들기">3.2 예제 1 — 실습 저장소 만들기</a></li><li class="l3"><a href="#3-3-예제-2-인벤토리-범위-고르기-git-cherry-파일-상태">3.3 예제 2 — 인벤토리: 범위 고르기, git cherry, 파일 상태</a></li><li class="l2"><a href="#4-git-rebase-onto-스택만-잘라서-옮기기">4. git rebase --onto — 스택만 잘라서 옮기기</a></li><li class="l3"><a href="#4-1-직관">4.1 직관</a></li><li class="l3"><a href="#4-2-예제-3-그냥-git-rebase-bsp-2-0을-하면">4.2 예제 3 — 그냥 git rebase bsp-2.0을 하면</a></li><li class="l3"><a href="#4-3-예제-4-onto-drop-목록-충돌-해결-range-diff">4.3 예제 4 — --onto + drop 목록 + 충돌 해결 + range-diff</a></li><li class="l3"><a href="#4-4-함정-onto에서는-upstream-패치가-자동으로-빠지지-않을-수-있다">4.4 함정 — --onto에서는 upstream 패치가 자동으로 빠지지 않을 수 있다</a></li><li class="l2"><a href="#5-충돌-해결-전략">5. 충돌 해결 전략</a></li><li class="l3"><a href="#5-1-원칙-충돌은-두-의도의-합-이다">5.1 원칙 — 충돌은 "두 의도의 합"이다</a></li><li class="l3"><a href="#5-2-충돌-해결-체크리스트">5.2 충돌 해결 체크리스트</a></li><li class="l3"><a href="#5-3-충돌이-없는데-깨지는-경우-의미-충돌">5.3 충돌이 없는데 깨지는 경우 — 의미 충돌</a></li><li class="l2"><a href="#6-api-변화-6-1-시절-드라이버가-6-18에서-깨지는-모습">6. API 변화 — 6.1 시절 드라이버가 6.18에서 깨지는 모습</a></li><li class="l3"><a href="#6-1-예제-5-트리에서-직접-확인한-api-모양-6-18-55">6.1 예제 5 — 트리에서 직접 확인한 API 모양 (6.18.55)</a></li><li class="l3"><a href="#6-2-예제-6-6-1-시절-스타일-드라이버를-6-18에서-빌드하면">6.2 예제 6 — 6.1 시절 스타일 드라이버를 6.18에서 빌드하면</a></li><li class="l3"><a href="#6-3-예제-7-포팅하고-빌드하기">6.3 예제 7 — 포팅하고 빌드하기</a></li><li class="l3"><a href="#6-4-예제-8-image-dom-게스트에서-올리기-다른-커널용-ko는-거부된다">6.4 예제 8 — Image-dom 게스트에서 올리기 (+ 다른 커널용 .ko는 거부된다)</a></li><li class="l3"><a href="#6-5-예제-9-config도-옮겨야-한다-scripts-diffconfig">6.5 예제 9 — config도 옮겨야 한다: scripts/diffconfig</a></li><li class="l2"><a href="#7-coccinelle-기계적-변경을-수백-파일에-가이드-실행-안-함">7. Coccinelle — 기계적 변경을 수백 파일에 (가이드, 실행 안 함)</a></li><li class="l2"><a href="#8-회귀-테스트-올렸다-와-제품으로-쓸-수-있다-사이">8. 회귀 테스트 — "올렸다"와 "제품으로 쓸 수 있다" 사이</a></li><li class="l3"><a href="#8-1-부팅-후-무엇이-달라졌나-를-기계적으로-비교하기-가이드">8.1 "부팅 후 무엇이 달라졌나"를 기계적으로 비교하기 (가이드)</a></li><li class="l3"><a href="#8-2-성능-비교의-규칙-가이드">8.2 성능 비교의 규칙 (가이드)</a></li><li class="l2"><a href="#9-git-bisect-run-회귀-커밋을-자동으로-찾기">9. git bisect run — 회귀 커밋을 자동으로 찾기</a></li><li class="l3"><a href="#9-1-직관">9.1 직관</a></li><li class="l3"><a href="#9-2-예제-10-32커밋-중-회귀-하나-빌드-깨진-커밋-하나">9.2 예제 10 — 32커밋 중 회귀 하나 + 빌드 깨진 커밋 하나</a></li><li class="l3"><a href="#9-3-커널에서의-bisect-run-스크립트-가이드-실행-안-함">9.3 커널에서의 bisect run 스크립트 (가이드, 실행 안 함)</a></li><li class="l2"><a href="#10-stable-backport-받는-쪽과-보내는-쪽">10. stable backport — 받는 쪽과 보내는 쪽</a></li><li class="l3"><a href="#10-1-태그-복습-e7-5-11과-트리-문서">10.1 태그 복습 (E7 §5.11과 트리 문서)</a></li><li class="l3"><a href="#10-2-예제-11-실제-stable-릴리스-한-개를-분류하기-6-18-56">10.2 예제 11 — 실제 stable 릴리스 한 개를 분류하기 (6.18.56)</a></li><li class="l3"><a href="#10-3-예제-12-stable-incremental-patch를-트리-일부에-적용하기">10.3 예제 12 — stable incremental patch를 트리 일부에 적용하기</a></li><li class="l3"><a href="#10-4-보내는-쪽-우리가-고친-버그를-stable로-요약">10.4 보내는 쪽 — 우리가 고친 버그를 stable로 (요약)</a></li><li class="l2"><a href="#11-커널-안에서는-무슨-일이-일어나나">11. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#12-embedded-실무에서-다시-보기">12. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#12-1-센서-키트-bsp를-5-15-6-18로-작업-계획-예">12.1 센서 키트 BSP를 5.15 → 6.18로 (작업 계획 예)</a></li><li class="l3"><a href="#12-2-out-of-tree-드라이버를-여러-커널에서-동시에-빌드해야-할-때">12.2 out-of-tree 드라이버를 여러 커널에서 동시에 빌드해야 할 때</a></li><li class="l3"><a href="#12-3-업그레이드-후-imu가-가끔-0을-읽는다-bisect-적용">12.3 "업그레이드 후 IMU가 가끔 0을 읽는다" — bisect 적용</a></li><li class="l3"><a href="#12-4-벤더가-bsp를-안-올려-줄-때">12.4 벤더가 BSP를 안 올려 줄 때</a></li><li class="l2"><a href="#13-흔한-실수와-증상">13. 흔한 실수와 증상</a></li><li class="l2"><a href="#14-면접에서-이렇게-말한다">14. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#15-직접-해보기">15. 직접 해보기</a></li><li class="l2"><a href="#16-용어-사전">16. 용어 사전</a></li><li class="l2"><a href="#17-요약-체크리스트">17. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

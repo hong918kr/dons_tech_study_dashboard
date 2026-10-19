@@ -1,0 +1,1304 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>S1. QEMU 랩 만들기 — 보드 없이 TF-A → U-Boot → Linux → BusyBox 부트 체인을 소스부터 직접 세운다</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="S/2026-10-18_S1_qemu_lab_build">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">S. 실습 프로젝트 · S1. QEMU 랩 만들기 — 보드 없이 TF-A → U-Boot → Linux → BusyBox 부트 체인을 소스부터 직접 세운다</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">S. 실습 프로젝트 · Hands-on Labs</div>
+      <h1>S1. QEMU 랩 만들기 — 보드 없이 TF-A → U-Boot → Linux → BusyBox 부트 체인을 소스부터 직접 세운다</h1>
+      <div class="meta"><span>158분 읽기</span><span>1752줄</span><span>57개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: <code>/var/lab</code>이 어떻게 만들어졌는지 재현해서 내 GitHub 저장소 하나로 "소스 받기 → 검증 → 빌드 → 부팅"을 <code>make</code> 한 번에 돌릴 수 있다 · tinyconfig + fragment로 QEMU <code>virt</code> 전용 6 MB 커널을 5분 안에 만들고, 빠진 옵션을 자동으로 잡는다 · 같은 커널을 세 가지 경로(직접 <code>-kernel</code>, U-Boot, TF-A secure → U-Boot → <code>booti</code>)로 부팅하고 무엇이 다른지 증거로 말할 수 있다 · virtio-blk ext4 rootfs, user 네트워크 + 9p 파일 공유, gdbstub("JTAG") 워크플로를 붙인다 <strong>왜 필요한가</strong>: "보드 없이 어떻게 공부/개발했나?", "부트 체인을 직접 빌드해 봤나?", "커널 설정을 어떻게 최소화하나?"는 Embedded Linux 면접의 단골 질문이고, S2–S7 실습 전부가 이 랩 위에서 돈다 <strong>Don 기준 난이도</strong>: 부트 단계(ROM → 부트로더 → 펌웨어), 이미지 레이아웃, JTAG 디버깅은 SSD/RF bring-up에서 이미 해 봤다 / 새로 배울 부분은 Kconfig fragment 병합, U-Boot·TF-A·BusyBox 각자의 빌드 관례(O=, BUILD_BASE=, CONFIG_PREFIX=), QEMU의 fw_cfg·gdbstub·9p, 재현 가능한 Makefile 설계 <strong>선행 노트</strong>: C1(부트 지도), C3(U-Boot 사용), C5(TF-A), C6(커널 시작), E2(커널 설정·빌드), K2(BusyBox), K3(Buildroot), M4(커널 디버거) — 개념은 거기서 배우고, 여기서는 손으로 만든다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-무엇을-만들고-끝나면-무엇이-남나">0. 큰 그림 — 무엇을 만들고, 끝나면 무엇이 남나<a class="anchor" href="#0-큰-그림-무엇을-만들고-끝나면-무엇이-남나" aria-label="link">#</a></h2>
+<p>지금까지 146개 노트는 <code>/var/lab</code>에 <strong>이미 만들어져 있는</strong> 커널·U-Boot·TF-A·initramfs를 빌려 썼다. 실무에서는 다르다. 새 보드가 오면(Don이 Apple에서 새 실리콘을 받을 때처럼) <strong>부트 체인 전체를 소스에서 직접 세우는 것</strong>이 첫 주 일이다. S1은 그 첫 주를 보드 없이 연습하는 프로젝트다.</p>
+<p>최종 산출물은 두 가지다.</p>
+<div class="tw"><table><thead><tr><th>산출물</th><th>위치</th><th>내용</th></tr></thead><tbody><tr><td>랩 빌더 저장소</td><td>Mac <code>~/.elinux_scratch/S1/qemu-lab/</code> (그대로 GitHub에 올린다)</td><td><code>Makefile</code>, 커널 fragment, <code>/init</code>, expect 스크립트, 체크섬, Buildroot 외부 트리 골격, README</td></tr><tr><td>빌드 결과</td><td>VM <code>/var/tmp/S1/out/</code></td><td><code>Image</code>(6.2 MB), <code>vmlinux</code>, <code>u-boot.bin</code>, <code>flash.bin</code>(TF-A BL1+FIP), <code>initramfs.cpio.gz</code>, <code>rootfs.ext4</code></td></tr></tbody></table></div>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 420">
+<defs><marker id="ah1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<rect x="10" y="10" width="660" height="400" rx="8" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="24" y="32" font-size="13">Mac (M2, macOS) — 소스: ~/.elinux_scratch/S1/qemu-lab (VM 에서는 읽기 전용)</text>
+<rect x="30" y="46" width="620" height="352" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="44" y="68" font-size="13">Lima VM elinux — Ubuntu 26.04 aarch64 · 산출물 /var/tmp/S1</text>
+<text x="50" y="126" font-size="12">VM 쪽 (호스트 역할)</text>
+<rect x="50" y="136" width="170" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="60" y="156" font-size="12">out/Image, flash.bin</text>
+<rect x="50" y="176" width="170" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="60" y="196" font-size="12">터미널 (-nographic)</text>
+<rect x="50" y="216" width="170" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="60" y="236" font-size="12">out/rootfs.ext4</text>
+<rect x="50" y="256" width="170" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="60" y="276" font-size="12">curl 127.0.0.1:43100</text>
+<rect x="50" y="296" width="170" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="60" y="316" font-size="12">/var/tmp/S1/share</text>
+<rect x="50" y="336" width="170" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="60" y="356" font-size="12">gdb out/vmlinux</text>
+<rect x="240" y="86" width="396" height="300" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="254" y="106" font-size="13">qemu-system-aarch64 -M virt · TCG (KVM 없음)</text>
+<text x="256" y="126" font-size="12">QEMU 장치</text>
+<text x="436" y="126" font-size="12">CPU 예외 레벨 (cortex-a57)</text>
+<rect x="256" y="136" width="150" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="266" y="156" font-size="12">-bios / -kernel</text>
+<rect x="256" y="176" width="150" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="266" y="196" font-size="12">pl011 @0x09000000</text>
+<rect x="256" y="216" width="150" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="266" y="236" font-size="12">virtio-blk (mmio)</text>
+<rect x="256" y="256" width="150" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="266" y="276" font-size="12">virtio-net (user)</text>
+<rect x="256" y="296" width="150" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="266" y="316" font-size="12">virtio-9p host0</text>
+<rect x="256" y="336" width="150" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="266" y="356" font-size="12">gdbstub :43101</text>
+<g stroke="currentColor" marker-end="url(#ah1)"><line x1="220" y1="151" x2="254" y2="151"/><line x1="220" y1="191" x2="254" y2="191"/><line x1="220" y1="231" x2="254" y2="231"/><line x1="220" y1="271" x2="254" y2="271"/><line x1="220" y1="311" x2="254" y2="311"/><line x1="220" y1="351" x2="254" y2="351"/></g>
+<rect x="436" y="136" width="186" height="36" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="446" y="159" font-size="12">EL3 TF-A BL1 · BL2 · BL31</text>
+<rect x="436" y="190" width="186" height="36" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="446" y="213" font-size="12">EL2/EL1 U-Boot (BL33)</text>
+<rect x="436" y="244" width="186" height="36" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="446" y="267" font-size="12">EL1 Linux 6.18.55-s1</text>
+<rect x="436" y="298" width="186" height="36" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="446" y="321" font-size="12">EL0 BusyBox /init, sh</text>
+<g stroke="currentColor" marker-end="url(#ah1)"><line x1="529" y1="172" x2="529" y2="188"/><line x1="529" y1="226" x2="529" y2="242"/><line x1="529" y1="280" x2="529" y2="296"/></g>
+<text x="436" y="356" font-size="12">EL3 단계는 secure=on 일 때만</text>
+<line x1="406" y1="246" x2="436" y2="262" stroke="currentColor" stroke-dasharray="3 3"/>
+<line x1="406" y1="191" x2="436" y2="262" stroke="currentColor" stroke-dasharray="3 3"/>
+</svg></figure>
+<p>그림 1 — 랩 구조. Mac에는 소스(저장소)만 있고, Lima VM이 빌드 호스트 역할을 하며, 그 안의 QEMU <code>virt</code> 머신이 "보드"다. 왼쪽 VM 쪽 자원이 QEMU 장치(가운데)를 통해 게스트 CPU의 예외 레벨 스택(오른쪽)과 만난다.</p>
+<p>bare-metal 비유로 정리하면 이렇다.</p>
+<div class="tw"><table><thead><tr><th>이 랩</th><th>Don이 아는 세계</th></tr></thead><tbody><tr><td>QEMU <code>virt</code> 머신</td><td>레퍼런스 보드 (회로도 = QEMU가 만든 Device Tree)</td></tr><tr><td><code>flash.bin</code> (BL1 @0x0)</td><td>Boot ROM + SPI NOR 이미지</td></tr><tr><td>TF-A BL31</td><td>EL3 secure monitor (SSD로 치면 보안 부트 ROM 코드 + 전원 관리 펌웨어)</td></tr><tr><td>U-Boot</td><td>2단 부트로더 (SSD FW의 loader)</td></tr><tr><td><code>-gdb tcp::43101 -S</code></td><td>JTAG 프로브 연결 + reset halt</td></tr><tr><td><code>LAB_CMD=</code> 커널 인자</td><td>양산 테스트 지그의 "명령 하나 실행 후 결과 찍고 전원 끄기"</td></tr><tr><td><code>make all</code> 두 번째 실행이 아무것도 안 함</td><td>재현 가능한 펌웨어 빌드 (같은 입력 → 재빌드 없음)</td></tr></tbody></table></div>
+<h3 id="0-1-var-lab은-어떻게-만들어졌나-참고한-스크립트">0.1 <code>/var/lab</code>은 어떻게 만들어졌나 — 참고한 스크립트<a class="anchor" href="#0-1-var-lab은-어떻게-만들어졌나-참고한-스크립트" aria-label="link">#</a></h3>
+<p>과제는 <code>/var/lab/build_lab.sh</code>를 참고하라고 했지만, <strong>실제 VM에는 그 기본 스크립트가 남아 있지 않다</strong> (2026-10-18 확인). 남아 있는 것은 후속 커널 변형용 스크립트 6개다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'ls /var/lab/*.sh; ls /var/lab/build /var/lab/dl'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>/var/lab/build_lab_domfs.sh
+/var/lab/build_lab_mn.sh
+/var/lab/build_lab_opq.sh
+/var/lab/build_lab_sec.sh
+/var/lab/build_lab_sysd.sh
+/var/lab/build_lab_tracefs.sh
+/var/lab/build:
+busybox
+linux
+linux-dbg
+...
+tfa
+trace-root
+u-boot
+
+/var/lab/dl:
+busybox-1.37.0.tar.bz2
+linux-6.18.55.tar.xz
+tfa-v2.15.0.tar.gz
+u-boot-v2026.10.tar.gz
+ubuntu-base-24.04.5-base-arm64.tar.gz</code></pre></figure>
+<p>(<code>build/</code>의 커널 변형 디렉터리 9개는 <code>...</code>로 줄였다.)</p>
+<p>그래서 기본 랩의 설계는 <strong>남은 흔적</strong>(빌드 디렉터리의 <code>.config</code>, <code>rootfs/init</code>, README의 "Verified" 메모)과 후속 스크립트의 패턴에서 역으로 읽었다. 후속 스크립트(<code>build_lab_sec.sh</code>, <code>build_lab_opq.sh</code>)에서 가져온 설계 결정은 다음과 같다.</p>
+<div class="tw"><table><thead><tr><th><code>/var/lab</code> 스크립트의 패턴</th><th>이유</th><th>S1에서</th></tr></thead><tbody><tr><td>소스는 <code>src/</code> 한 벌, 빌드는 <code>O=$L/build/linux-&lt;변형&gt;</code></td><td>소스 트리를 깨끗하게 두고 변형을 여러 개 만든다 (E2 §4)</td><td><code>O=$(B)/build/linux</code>, U-Boot도 <code>O=</code>, TF-A는 <code>BUILD_BASE=</code></td></tr><tr><td>이전 변형의 <code>.config</code>를 복사 → <code>scripts/config -e/-d/-m</code> → <code>olddefconfig</code></td><td>설정을 "차이"로 관리</td><td>같은 사상을 <code>merge_config.sh</code> + fragment 파일로 (git diff가 깔끔)</td></tr><tr><td><code>for o in ...; do grep "^CONFIG_$o=" ... echo MISSING</code></td><td>Kconfig가 의존성 때문에 옵션을 <strong>조용히</strong> 끈 걸 잡는다</td><td><code>scripts/check-fragment.sh</code>로 자동화, 실패 시 빌드 중단</td></tr><tr><td><code>step "smoke boot"</code>: <code>timeout ... LAB_CMD=uname~-r</code></td><td>빌드 직후 부팅 검증</td><td>모든 부팅 예제가 <code>LAB_CMD</code>로 자동 종료</td></tr><tr><td><code>set -euo pipefail</code>, <code>step()</code> 타임스탬프</td><td>실패를 숨기지 않고, 단계별 시간을 남긴다</td><td>Make의 <code>.DELETE_ON_ERROR</code>, <code>/usr/bin/time</code></td></tr><tr><td><code>cp ... $L/out/...</code> + <code>ln -sfn $K $L/out/linux-build-&lt;k&gt;</code></td><td>산출물 디렉터리(out)와 빌드 트리 분리</td><td><code>out/Image</code>, <code>out/vmlinux -&gt; build/linux/vmlinux</code></td></tr></tbody></table></div>
+<p>셸 스크립트 대신 <strong>Makefile</strong>을 고른 이유는 하나다: <code>/var/lab</code> 스크립트는 매번 처음부터 다시 돌지만, Make는 <strong>파일 타임스탬프로 "무엇이 바뀌었나"를 추적</strong>해서 바뀐 하류만 다시 만든다(§13). 포트폴리오에서 "idempotent rebuild"를 보여 주기 좋다.</p>
+<hr>
+<h2 id="1-준비물-빌드-호스트">1. 준비물 — 빌드 호스트<a class="anchor" href="#1-준비물-빌드-호스트" aria-label="link">#</a></h2>
+<p>실행 환경: Mac(M2) → Lima VM <code>elinux</code> (Ubuntu 26.04.1, aarch64, 호스트 커널 <code>7.0.0-38-generic</code>, gcc 15.2, QEMU 10.2.1). VM이 aarch64라서 <strong>크로스 컴파일러가 필요 없다</strong> (<code>CROSS_COMPILE</code> 비움, B1 §10). x86 Linux 호스트라면 <code>gcc-aarch64-linux-gnu</code>를 추가하고 모든 make에 <code>CROSS_COMPILE=aarch64-linux-gnu-</code>를 붙이면 된다.</p>
+<h3 id="1-1-패키지-목록-설치하지-말고-확인만">1.1 패키지 목록 (설치하지 말고 확인만)<a class="anchor" href="#1-1-패키지-목록-설치하지-말고-확인만" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>패키지</th><th>누가 쓰나</th></tr></thead><tbody><tr><td><code>build-essential bc bison flex</code></td><td>커널·U-Boot Kconfig/빌드</td></tr><tr><td><code>libssl-dev</code></td><td>커널(서명 도구), U-Boot <code>mkimage</code>, TF-A <code>fiptool</code></td></tr><tr><td><code>libgnutls28-dev uuid-dev</code></td><td>U-Boot 호스트 도구 (<code>mkeficapsule</code>, <code>mkimage</code>)</td></tr><tr><td><code>python3-pyelftools python3-setuptools swig</code></td><td>U-Boot <code>binman</code>·pylibfdt</td></tr><tr><td><code>libelf-dev</code></td><td>커널 objtool 류</td></tr><tr><td><code>device-tree-compiler</code></td><td><code>dtc</code> (U-Boot, TF-A, DT 실험)</td></tr><tr><td><code>cpio e2fsprogs</code></td><td>initramfs, <code>mkfs.ext4 -d</code></td></tr><tr><td><code>qemu-system-arm qemu-utils</code></td><td><code>qemu-system-aarch64</code>, <code>qemu-img</code></td></tr><tr><td><code>gdb expect curl xz-utils bzip2 gnupg</code></td><td>디버깅, 스크립트 부팅, 다운로드·검증</td></tr></tbody></table></div>
+<p>이 표를 스크립트로 만든 것이 <code>scripts/check-host.sh</code>다. <strong>설치는 하지 않고</strong> 빠진 것만 출력한다(공용 VM이라 apt 상태를 바꾸지 않는다는 규칙).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat &gt; scripts/check-host.sh &lt;&lt;'EOF'
+#!/bin/bash
+pk="build-essential bc bison flex libssl-dev libgnutls28-dev uuid-dev libelf-dev python3-pyelftools python3-setuptools swig device-tree-compiler cpio e2fsprogs qemu-system-arm qemu-utils gdb expect curl xz-utils bzip2 gnupg"
+miss=""
+for p in $pk; do dpkg -s "$p" &gt;/dev/null 2&gt;&amp;1 || miss="$miss $p"; done
+printf "%-24s %s\n" arch "$(uname -m)" kernel "$(uname -r)" cpus "$(nproc)" \
+  gcc "$(gcc -dumpfullversion)" qemu "$(qemu-system-aarch64 --version | head -1 | awk '{print $4}')" \
+  kvm "$( [ -e /dev/kvm ] &amp;&amp; echo yes || echo 'no (TCG only)')" free_disk "$(df -h --output=avail /var/tmp | tail -1 | tr -d ' ')"
+[ -z "$miss" ] &amp;&amp; echo "packages: all $(echo $pk | wc -w) present" || { echo "MISSING:$miss"; echo "sudo apt-get install -y$miss"; exit 1; }
+EOF
+limactl shell elinux -- bash /Users/donh/.elinux_scratch/S1/qemu-lab/scripts/check-host.sh</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>arch                     aarch64
+kernel                   7.0.0-38-generic
+cpus                     6
+gcc                      15.2.0
+qemu                     10.2.1
+kvm                      no (TCG only)
+free_disk                30G
+packages: all 22 present</code></pre></figure>
+<p>출력에서 볼 것: <code>kvm no</code> — Lima VM 안에서는 KVM이 없어서 QEMU가 <strong>TCG(명령어 번역)</strong> 로 돈다. 이 노트의 부팅 시간은 전부 TCG 숫자라서 실제 Cortex-A57 보드의 숫자가 아니다.</p>
+<p>체크포인트: <strong>이 단계가 끝나면 <code>packages: all 22 present</code>가 보여야 한다.</strong> <code>MISSING:</code>이 나오면 마지막 줄의 apt 명령을 자기 머신에서(공용 VM이 아닌 곳에서) 실행한다.</p>
+<h3 id="1-2-리소스-예산">1.2 리소스 예산<a class="anchor" href="#1-2-리소스-예산" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>자원</th><th>이 랩에서 쓴 양</th><th>규칙</th></tr></thead><tbody><tr><td>CPU</td><td><code>-j2</code></td><td>7명이 VM 6코어를 공유</td></tr><tr><td>디스크</td><td>소스 2.1 GB + 빌드 0.9 GB + out 85 MB, 최대 3.1 GB</td><td><code>/var/tmp/S1</code> (VM의 <code>/tmp</code>는 2 GB tmpfs라 커널 빌드가 넘친다)</td></tr><tr><td>게스트 RAM</td><td>512 MB, TF-A 경로만 1024 MB</td><td>게스트 ≤ 1 GB</td></tr><tr><td>포트</td><td>43100 (hostfwd), 43101 (gdbstub)</td><td><code>43000 + 100 × 1</code></td></tr></tbody></table></div>
+<hr>
+<h2 id="2-저장소-레이아웃">2. 저장소 레이아웃<a class="anchor" href="#2-저장소-레이아웃" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">text</span><pre><code>qemu-lab/                       (Mac: ~/.elinux_scratch/S1/qemu-lab, VM에서는 읽기 전용)
+  Makefile                      전체 파이프라인 (아래 단계별로 발췌)
+  README.md                     빠른 시작, 측정값, 알려진 함정
+  checksums/SHA256SUMS          고정한 tarball 해시 4개
+  config/kernel-virt.fragment   tinyconfig 위에 얹는 46개 옵션
+  rootfs/init                   initramfs와 ext4 rootfs 공용 /init
+  rootfs/udhcpc.script          최소 DHCP 스크립트
+  scripts/check-host.sh         준비물 점검
+  scripts/check-fragment.sh     fragment 옵션 생존 검사
+  scripts/tfa-booti.exp         TF-A → U-Boot → booti 자동화
+  buildroot-external/           BR2_EXTERNAL 골격 (가이드, 실행 안 함)
+
+/var/tmp/S1/                    (B=, 모든 산출물. 지워도 make all로 복구)
+  dl/       tarball (캐시 /var/lab/dl 로의 symlink 또는 새로 받은 파일)
+  src/      linux u-boot tfa busybox  (tarball을 푼 것)
+  build/    linux u-boot tfa busybox  (O= / BUILD_BASE= 출력)
+  rootfs/   BusyBox install 트리 + /init
+  out/      Image vmlinux u-boot.bin flash.bin initramfs.cpio.gz rootfs.ext4
+  .stamp/   verified, src-&lt;name&gt;, rootfs</code></pre></figure>
+<p>핵심 설계: <strong>저장소(입력)는 읽기 전용이어도 된다.</strong> VM에서 Mac 홈은 읽기 전용으로 마운트되는데, 그래도 빌드가 된다는 것이 "소스와 산출물이 완전히 분리됐다"는 증거다. Makefile 맨 위의 변수들이 이 분리를 정의한다.</p>
+<figure class="code"><span class="lang">make</span><pre><code>SHELL   := /bin/bash
+TOP     := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+B       ?= /var/tmp/S1
+JOBS    ?= 2
+DL_CACHE ?= /var/lab/dl
+DL      := $(B)/dl
+SRC     := $(B)/src
+BLD     := $(B)/build
+OUT     := $(B)/out
+STAMP   := $(B)/.stamp
+KVER  := 6.18.55
+UBVER := 2026.10
+TFVER := 2.15.0
+BBVER := 1.37.0
+.DELETE_ON_ERROR:
+all: $(OUT)/Image $(OUT)/u-boot.bin $(OUT)/flash.bin $(OUT)/initramfs.cpio.gz $(OUT)/rootfs.ext4</code></pre></figure>
+<p><code>.DELETE_ON_ERROR</code>는 레시피가 중간에 실패하면 반쯤 만들어진 타깃 파일을 지운다. 이게 없으면 §6의 Kconfig 실패 뒤 망가진 <code>.config</code>가 "최신"으로 남아 다음 <code>make</code>가 그냥 지나간다 — 실제로 이 랩을 만들면서 처음에 빠뜨렸던 줄이다.</p>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 410">
+<defs><marker id="ah2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<text x="10" y="30" font-size="13">dl/ (캐시 링크)</text>
+<text x="145" y="30" font-size="13">검증 · 풀기</text>
+<text x="275" y="30" font-size="13">build/ (O= 출력)</text>
+<text x="475" y="30" font-size="13">out/</text>
+<rect x="10" y="50" width="120" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="20" y="72" font-size="13">linux 6.18.55</text>
+<rect x="10" y="100" width="120" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="20" y="122" font-size="13">u-boot 2026.10</text>
+<rect x="10" y="150" width="120" height="34" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="20" y="172" font-size="13">tfa 2.15.0</text>
+<rect x="10" y="200" width="120" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="20" y="222" font-size="13">busybox 1.37.0</text>
+<rect x="145" y="50" width="110" height="184" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="155" y="130" font-size="13">sha256sum -c</text><text x="155" y="150" font-size="13">tar -x → src/</text>
+<rect x="275" y="50" width="180" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="285" y="72" font-size="13">tinyconfig + fragment</text>
+<rect x="275" y="100" width="180" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="285" y="122" font-size="13">qemu_arm64_defconfig</text>
+<rect x="275" y="150" width="180" height="34" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="285" y="172" font-size="13">PLAT=qemu all fip + dd</text>
+<rect x="275" y="200" width="180" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="285" y="222" font-size="13">defconfig + STATIC=y</text>
+<rect x="475" y="50" width="150" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="485" y="72" font-size="13">Image + vmlinux</text>
+<rect x="475" y="100" width="150" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="485" y="122" font-size="13">u-boot.bin</text>
+<rect x="475" y="150" width="150" height="34" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/><text x="485" y="172" font-size="13">flash.bin (64 MiB)</text>
+<rect x="475" y="200" width="150" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="485" y="222" font-size="13">rootfs/ (트리)</text>
+<g stroke="currentColor" marker-end="url(#ah2)">
+<line x1="130" y1="67" x2="143" y2="67"/><line x1="130" y1="117" x2="143" y2="117"/><line x1="130" y1="167" x2="143" y2="167"/><line x1="130" y1="217" x2="143" y2="217"/>
+<line x1="255" y1="67" x2="273" y2="67"/><line x1="255" y1="117" x2="273" y2="117"/><line x1="255" y1="167" x2="273" y2="167"/><line x1="255" y1="217" x2="273" y2="217"/>
+<line x1="455" y1="67" x2="473" y2="67"/><line x1="455" y1="117" x2="473" y2="117"/><line x1="455" y1="167" x2="473" y2="167"/><line x1="455" y1="217" x2="473" y2="217"/>
+</g>
+<path d="M520,134 L440,148" stroke="currentColor" stroke-dasharray="4 3" fill="none" marker-end="url(#ah2)"/>
+<text x="500" y="147" font-size="12">BL33=</text>
+<rect x="340" y="270" width="160" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="350" y="292" font-size="13">initramfs.cpio.gz</text>
+<rect x="520" y="270" width="130" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="530" y="292" font-size="13">rootfs.ext4</text>
+<g stroke="currentColor" fill="none" marker-end="url(#ah2)">
+<path d="M530,234 L440,268"/><path d="M570,234 L580,268"/>
+<path d="M625,67 L662,67 L662,287 L652,287"/>
+</g>
+<text x="478" y="258" font-size="12">+ /boot/Image</text>
+<rect x="160" y="340" width="490" height="34" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="172" y="362" font-size="13">make run-{direct,uboot,tfa,disk,net,gdb}</text>
+<g stroke="currentColor" marker-end="url(#ah2)"><line x1="420" y1="304" x2="420" y2="338"/><line x1="585" y1="304" x2="585" y2="338"/></g>
+<text x="10" y="398" font-size="12">모든 산출물이 파일 타깃 + .stamp/ 이라서 두 번째 make 는 "Nothing to be done" — 바뀐 입력의 하류만 다시 만든다</text>
+</svg></figure>
+<p>그림 2 — 빌드 파이프라인. 각 행이 컴포넌트 하나이고, 점선은 컴포넌트 사이 의존성(U-Boot가 TF-A FIP의 BL33으로 들어가고, 커널 Image가 ext4의 <code>/boot</code>로 들어간다).</p>
+<hr>
+<h2 id="3-step-1-소스-받기와-검증">3. Step 1 — 소스 받기와 검증<a class="anchor" href="#3-step-1-소스-받기와-검증" aria-label="link">#</a></h2>
+<h3 id="3-1-왜-검증하나">3.1 왜 검증하나<a class="anchor" href="#3-1-왜-검증하나" aria-label="link">#</a></h3>
+<p>공급망 공격(빌드 서버가 받은 tarball이 바꿔치기된 경우)과 단순 손상(잘린 다운로드)을 막는 두 단계가 있다.</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>무엇을 보장</th><th>도구</th></tr></thead><tbody><tr><td>해시 (sha256)</td><td>"내가 고정한 바로 그 바이트"인지</td><td><code>sha256sum -c SHA256SUMS</code></td></tr><tr><td>서명 (GPG)</td><td>"그 바이트를 릴리스 담당자가 만들었는지"</td><td><code>gpg --verify x.tar.sign</code></td></tr></tbody></table></div>
+<p>해시는 <strong>저장소에 고정</strong>해 두면 이후 빌드에서 인터넷 없이도 검사된다(Buildroot의 <code>.hash</code> 파일, Yocto의 <code>SRC_URI[sha256sum]</code>이 같은 개념, K3 §5). 서명은 해시를 처음 고정할 때 한 번 확인한다.</p>
+<h3 id="3-2-makefile-캐시가-있으면-링크-없으면-다운로드">3.2 Makefile — 캐시가 있으면 링크, 없으면 다운로드<a class="anchor" href="#3-2-makefile-캐시가-있으면-링크-없으면-다운로드" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">make</span><pre><code>K_URL  := https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$(KVER).tar.xz
+UB_URL := https://source.denx.de/u-boot/u-boot/-/archive/v$(UBVER)/u-boot-v$(UBVER).tar.gz
+TF_URL := https://github.com/ARM-software/arm-trusted-firmware/archive/refs/tags/v$(TFVER).tar.gz
+BB_URL := https://busybox.net/downloads/busybox-$(BBVER).tar.bz2
+
+$(DL)/%:
+	@mkdir -p $(DL)
+	@if [ -f $(DL_CACHE)/$* ]; then ln -sf $(DL_CACHE)/$* $@; echo "cache  $*"; \
+	 else case $* in $(K_TAR)) u=$(K_URL);; $(UB_TAR)) u=$(UB_URL);; $(TF_TAR)) u=$(TF_URL);; *) u=$(BB_URL);; esac; \
+	      echo "fetch  $$u"; curl -fL --retry 3 -o $@.part $$u &amp;&amp; mv $@.part $@; fi
+fetch: $(addprefix $(DL)/,$(K_TAR) $(UB_TAR) $(TF_TAR) $(BB_TAR))
+$(STAMP)/verified: $(TOP)/checksums/SHA256SUMS | fetch
+	@mkdir -p $(STAMP); cd $(DL) &amp;&amp; sha256sum -c $&lt; &amp;&amp; touch $@
+verify: $(STAMP)/verified</code></pre></figure>
+<p><code>/var/lab/dl</code>의 tarball은 읽기 전용 캐시로 <strong>symlink만</strong> 건다(복사하면 220 MB 낭비). <code>.part</code>로 받고 <code>mv</code>하는 것은 다운로드가 중간에 끊겨도 잘린 파일이 완성품처럼 남지 않게 하려는 것이다. U-Boot·TF-A URL은 git 태그 아카이브인데, 이 형식은 서버가 즉석에서 만들어서 <strong>해시가 영원히 같다는 보장이 약하다</strong> — 그래서 실무에서는 git 커밋 해시를 같이 고정한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp &amp;&amp; make -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 verify; \
+  make -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 verify'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>make: Entering directory '/Users/donh/.elinux_scratch/S1/qemu-lab'
+cache  linux-6.18.55.tar.xz
+cache  u-boot-v2026.10.tar.gz
+cache  tfa-v2.15.0.tar.gz
+cache  busybox-1.37.0.tar.bz2
+linux-6.18.55.tar.xz: OK
+u-boot-v2026.10.tar.gz: OK
+tfa-v2.15.0.tar.gz: OK
+busybox-1.37.0.tar.bz2: OK
+make: Leaving directory '/Users/donh/.elinux_scratch/S1/qemu-lab'
+make: Entering directory '/Users/donh/.elinux_scratch/S1/qemu-lab'
+make: Nothing to be done for 'verify'.
+make: Leaving directory '/Users/donh/.elinux_scratch/S1/qemu-lab'</code></pre></figure>
+<p>출력에서 볼 것: 두 번째 실행은 <code>Nothing to be done</code> — 스탬프 파일 <code>.stamp/verified</code>가 <code>SHA256SUMS</code>보다 새것이라서다.</p>
+<h3 id="3-3-고정한-해시가-업스트림과-같은지-처음-한-번">3.3 고정한 해시가 업스트림과 같은지 — 처음 한 번<a class="anchor" href="#3-3-고정한-해시가-업스트림과-같은지-처음-한-번" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'mkdir -p /var/tmp/S1/verify &amp;&amp; cd /var/tmp/S1/verify &amp;&amp; \
+  curl -sfLO https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc &amp;&amp; \
+  curl -sfLO https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.55.tar.sign &amp;&amp; \
+  curl -sfLO https://busybox.net/downloads/busybox-1.37.0.tar.bz2.sha256; \
+  grep " linux-6.18.55.tar.xz" sha256sums.asc; cat busybox-1.37.0.tar.bz2.sha256; \
+  sha256sum /var/lab/dl/linux-6.18.55.tar.xz /var/lab/dl/busybox-1.37.0.tar.bz2'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>f410638061a165c12f42ab871d2f3fcd525515359b5faeee80969cff84524df9  linux-6.18.55.tar.xz
+3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4  busybox-1.37.0.tar.bz2
+f410638061a165c12f42ab871d2f3fcd525515359b5faeee80969cff84524df9  /var/lab/dl/linux-6.18.55.tar.xz
+3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4  /var/lab/dl/busybox-1.37.0.tar.bz2</code></pre></figure>
+<h3 id="3-4-gpg-서명-격리된-keyring으로">3.4 GPG 서명 — 격리된 keyring으로<a class="anchor" href="#3-4-gpg-서명-격리된-keyring으로" aria-label="link">#</a></h3>
+<p>kernel.org의 <code>.tar.sign</code>은 <strong>압축을 푼 <code>.tar</code></strong> 에 대한 서명이다(xz 압축 결과는 xz 버전마다 바이트가 달라질 수 있어서). 그래서 <code>xz -cd</code>로 풀면서 파이프로 검증한다. 공용 VM의 <code>~/.gnupg</code>를 건드리지 않도록 <code>GNUPGHOME</code>을 내 디렉터리로 돌린다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/S1/verify &amp;&amp; export GNUPGHOME=$PWD/gnupg &amp;&amp; mkdir -p -m700 $GNUPGHOME &amp;&amp; \
+  gpg --batch --auto-key-locate clear,wkd --locate-keys torvalds@kernel.org gregkh@kernel.org 2&gt;&amp;1 | tail -4; \
+  xz -cd /var/lab/dl/linux-6.18.55.tar.xz | gpg --batch --verify linux-6.18.55.tar.sign - 2&gt;&amp;1 | tail -4; \
+  gpg --batch --verify sha256sums.asc 2&gt;&amp;1 | tail -2'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>      ABAF11C65A2970B130ABE3C479BE3E4300411886
+uid           [ unknown] Linus Torvalds &lt;torvalds@kernel.org&gt;
+sub   rsa2048 2011-09-20 [E]
+
+gpg: Good signature from "Greg Kroah-Hartman &lt;gregkh@kernel.org&gt;" [unknown]
+gpg: WARNING: This key is not certified with a trusted signature!
+gpg:          There is no indication that the signature belongs to the owner.
+Primary key fingerprint: 647F 2865 4894 E3BD 4571  99BE 38DB BDC8 6092 693E
+gpg:                using RSA key B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1
+gpg: Can't check signature: No public key</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>Good signature from "Greg Kroah-Hartman"</code> — 안정판(6.18.y)은 stable 메인테이너가 서명한다. <code>WARNING: not certified</code>는 "이 키를 내가 직접 신뢰한다고 표시한 적이 없다"는 뜻이지 서명이 틀렸다는 뜻이 아니다. 지문(<code>647F 2865 …</code>)을 kernel.org 서명 안내 페이지와 대조하는 것이 마지막 단계다.</li><li><code>sha256sums.asc</code>는 kernel.org <strong>자동 서명 키</strong>(<code>B886…</code>)로 서명돼 있어서 그 키를 받지 않으면 <code>No public key</code>가 나온다. 해시 목록 자체의 출처 검증까지 하려면 그 키도 WKD로 받는다.</li><li>BusyBox는 <code>.sig</code>(DSA, keyid <code>47B70C55ACC9965B</code>)를 제공한다. U-Boot·TF-A 태그 아카이브에는 서명이 없다 — 이 경우 <strong>git 태그 서명</strong>(<code>git tag -v</code>)이 대안이다.</li></ul>
+<p>체크포인트: <strong><code>sha256sum -c</code>가 4개 모두 <code>OK</code>, 커널 tarball에 <code>Good signature</code>.</strong></p>
+<hr>
+<h2 id="4-step-2-소스-풀기">4. Step 2 — 소스 풀기<a class="anchor" href="#4-step-2-소스-풀기" aria-label="link">#</a></h2>
+<figure class="code"><span class="lang">make</span><pre><code>$(STAMP)/src-%: $(STAMP)/verified
+	@mkdir -p $(SRC)/$*; tar -xf $(DL)/$(TAR_$*) -C $(SRC)/$* --strip-components=1 &amp;&amp; touch $@
+TAR_linux := $(K_TAR)
+TAR_u-boot := $(UB_TAR)
+TAR_tfa := $(TF_TAR)
+TAR_busybox := $(BB_TAR)</code></pre></figure>
+<p><code>--strip-components=1</code>은 tarball마다 다른 최상위 이름(<code>arm-trusted-firmware-2.15.0/</code>, <code>u-boot-2026.10/</code>)을 <code>src/tfa</code>, <code>src/u-boot</code>처럼 버전 없는 이름으로 맞춘다. 그래야 Makefile의 나머지가 버전을 몰라도 된다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp &amp;&amp; for s in u-boot tfa busybox linux; do \
+  /usr/bin/time -f "$s extract: %e s" make -s -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 /var/tmp/S1/.stamp/src-$s; done; \
+  du -sh /var/tmp/S1/src/*'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>u-boot extract: 1.26 s
+tfa extract: 0.22 s
+busybox extract: 0.27 s
+linux extract: 5.96 s
+20M	/var/tmp/S1/src/busybox
+1.7G	/var/tmp/S1/src/linux
+61M	/var/tmp/S1/src/tfa
+360M	/var/tmp/S1/src/u-boot</code></pre></figure>
+<p>체크포인트: <strong><code>src/</code> 아래 네 디렉터리, 커널 1.7 GB.</strong> 디스크가 빠듯하면 커널만 <code>/var/lab/src/linux-6.18.55</code>를 <code>O=</code>로 빌드해도 된다(소스 트리를 읽기만 하므로 허용, NOTES_SPEC QEMU 랩 절).</p>
+<hr>
+<h2 id="5-step-3-u-boot-qemu_arm64_defconfig">5. Step 3 — U-Boot (<code>qemu_arm64_defconfig</code>)<a class="anchor" href="#5-step-3-u-boot-qemu_arm64_defconfig" aria-label="link">#</a></h2>
+<p>U-Boot은 이 랩에서 두 번 쓰인다: (1) <code>-bios u-boot.bin</code>으로 단독 실행(EL1/EL2, 비보안), (2) TF-A FIP 안의 <strong>BL33</strong>. 같은 바이너리가 두 역할을 다 한다 — <code>qemu_arm64_defconfig</code>가 <code>CONFIG_POSITION_INDEPENDENT=y</code>, <code>CONFIG_TEXT_BASE=0</code>이라서 어디에 올라가도 스스로 재배치하기 때문이다(C4에서 본 relocation).</p>
+<figure class="code"><span class="lang">make</span><pre><code>$(OUT)/u-boot.bin: $(STAMP)/src-u-boot
+	$(MAKE) -C $(SRC)/u-boot O=$(BLD)/u-boot qemu_arm64_defconfig
+	$(MAKE) -C $(SRC)/u-boot O=$(BLD)/u-boot -j$(JOBS)
+	@mkdir -p $(OUT); cp $(BLD)/u-boot/u-boot.bin $@
+uboot: $(OUT)/u-boot.bin</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp &amp;&amp; /usr/bin/time -f "u-boot build: %e s wall, %U s user" \
+  make -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 uboot &gt; /var/tmp/S1/uboot.log 2&gt;&amp;1; tail -15 /var/tmp/S1/uboot.log; \
+  ls -la /var/tmp/S1/out'
+limactl shell elinux -- bash -lc 'grep -E "^CONFIG_(BOOTCOMMAND|TEXT_BASE|POSITION_INDEPENDENT)=" /var/lab/build/u-boot/.config'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>...
+  RELOC   u-boot-nodtb.bin
+  SYM     u-boot.sym
+  COPY    u-boot.bin
+  DTC     arch/arm/dts/qemu-arm.dtb
+  DTC     arch/arm/dts/qemu-arm64.dtb
+  COPY    dts/dt.dtb
+  OFCHK   .config
+make[1]: Leaving directory '/var/tmp/S1/src/u-boot'
+make: Leaving directory '/Users/donh/.elinux_scratch/S1/qemu-lab'
+u-boot build: 27.45 s wall, 43.26 s user
+...
+-rw-rw-r-- 1 donh donh 1504208 Oct 18 16:30 u-boot.bin
+CONFIG_POSITION_INDEPENDENT=y
+CONFIG_TEXT_BASE=0x00000000
+CONFIG_BOOTCOMMAND="bootflow scan -lb"</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>27초, 1,504,208 바이트 — 랩의 <code>/var/lab/out/u-boot.bin</code>과 <strong>크기가 바이트 단위로 같다</strong>. 그런데 <code>cmp</code>하면 다르다(아래). 빌드 날짜 문자열 <code>U-Boot 2026.10 (Oct 18 2026 - 16:29:47 -0700)</code>이 바이너리에 박히기 때문이다. 완전히 같은 바이너리(reproducible build)를 원하면 <code>SOURCE_DATE_EPOCH</code>를 고정한다(B5 §7).</li><li>기본 부트 명령이 <code>bootflow scan -lb</code> — 모든 boot device를 훑어서 처음 찾은 것으로 부팅한다. §9에서 이게 QEMU fw_cfg에서 커널을 찾는 걸 본다.</li></ul>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cmp /var/tmp/S1/out/u-boot.bin /var/lab/out/u-boot.bin &amp;&amp; echo uboot-identical'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>/var/tmp/S1/out/u-boot.bin /var/lab/out/u-boot.bin differ: byte 1249469, line 5556</code></pre></figure>
+<p>체크포인트: <strong><code>out/u-boot.bin</code> 약 1.5 MB.</strong></p>
+<hr>
+<h2 id="6-step-4-tf-a-plat-qemu-와-flash-bin">6. Step 4 — TF-A (<code>PLAT=qemu</code>)와 <code>flash.bin</code><a class="anchor" href="#6-step-4-tf-a-plat-qemu-와-flash-bin" aria-label="link">#</a></h2>
+<p>TF-A의 단계(BL1 → BL2 → BL31 → BL33)와 FIP는 C5 §2에서 배웠다. 여기서는 만드는 법만 본다.</p>
+<figure class="code"><span class="lang">make</span><pre><code>TFA_REL := $(BLD)/tfa/qemu/release
+$(OUT)/flash.bin: $(OUT)/u-boot.bin $(STAMP)/src-tfa
+	$(MAKE) -C $(SRC)/tfa PLAT=qemu BUILD_BASE=$(BLD)/tfa BL33=$(OUT)/u-boot.bin -j$(JOBS) all fip
+	dd if=/dev/zero of=$@.tmp bs=1M count=64 status=none
+	dd if=$(TFA_REL)/bl1.bin of=$@.tmp bs=4096 conv=notrunc status=none
+	dd if=$(TFA_REL)/fip.bin of=$@.tmp seek=64 bs=4096 conv=notrunc status=none
+	mv $@.tmp $@
+tfa: $(OUT)/flash.bin</code></pre></figure>
+<p>결정마다 이유가 있다.</p>
+<div class="tw"><table><thead><tr><th>결정</th><th>이유</th></tr></thead><tbody><tr><td><code>BL33=$(OUT)/u-boot.bin</code></td><td>FIP에 U-Boot를 넣는다. 의존성에 <code>u-boot.bin</code>이 있어서 U-Boot가 바뀌면 FIP도 다시 만든다</td></tr><tr><td><code>BUILD_BASE=</code></td><td>TF-A는 <code>O=</code>가 아니라 이 변수로 출력 위치를 바꾼다 (<code>build/&lt;plat&gt;/&lt;release or debug&gt;/</code>)</td></tr><tr><td><code>bl1.bin</code>을 offset 0</td><td>QEMU <code>virt</code>에서 <code>-bios</code> 파일은 flash0(주소 0x0)에 매핑되고, secure=on이면 CPU가 EL3에서 0x0부터 실행한다 = Boot ROM 자리</td></tr><tr><td><code>fip.bin</code>을 <code>seek=64</code> × 4 KiB = 0x40000</td><td>TF-A qemu 플랫폼의 BL2가 FIP를 flash의 256 KiB 위치에서 찾는다 (TF-A qemu 플랫폼 문서의 <code>dd</code> 레시피와 같다)</td></tr><tr><td>64 MiB로 패딩</td><td>QEMU flash 장치는 64 MiB 크기 이미지를 기대한다</td></tr><tr><td><code>.tmp</code> 후 <code>mv</code></td><td>dd 중간 실패 시 반쪽 flash.bin이 남지 않게</td></tr></tbody></table></div>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp &amp;&amp; /usr/bin/time -f "tfa build: %e s wall, %U s user" \
+  make -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 tfa &gt; /var/tmp/S1/tfa.log 2&gt;&amp;1; \
+  grep -E "Built|error|Error|tfa build|dd " /var/tmp/S1/tfa.log | tail -15; ls -la /var/tmp/S1/build/tfa/qemu/release/*.bin'
+limactl shell elinux -- bash -lc '/var/tmp/S1/build/tfa/qemu/release/tools/fiptool/fiptool info /var/tmp/S1/build/tfa/qemu/release/fip.bin'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>  CC      lib/libfdt/fdt_strerror.c
+Built /var/tmp/S1/build/tfa/qemu/release/tools/fiptool/fiptool successfully
+Built /var/tmp/S1/build/tfa/qemu/release/bl1.bin successfully
+Built /var/tmp/S1/build/tfa/qemu/release/bl2.bin successfully
+Built /var/tmp/S1/build/tfa/qemu/release/bl31.bin successfully
+Built /var/tmp/S1/build/tfa/qemu/release/fip.bin successfully
+dd if=/dev/zero of=/var/tmp/S1/out/flash.bin.tmp bs=1M count=64 status=none
+dd if=/var/tmp/S1/build/tfa/qemu/release/bl1.bin of=/var/tmp/S1/out/flash.bin.tmp bs=4096 conv=notrunc status=none
+dd if=/var/tmp/S1/build/tfa/qemu/release/fip.bin of=/var/tmp/S1/out/flash.bin.tmp seek=64 bs=4096 conv=notrunc status=none
+tfa build: 2.73 s wall, 3.96 s user
+-rwxrwxr-x 1 donh donh   22832 Oct 18 16:30 /var/tmp/S1/build/tfa/qemu/release/bl1.bin
+-rwxrwxr-x 1 donh donh   25072 Oct 18 16:30 /var/tmp/S1/build/tfa/qemu/release/bl2.bin
+-rwxrwxr-x 1 donh donh   49255 Oct 18 16:30 /var/tmp/S1/build/tfa/qemu/release/bl31.bin
+-rw-rw-r-- 1 donh donh 1578711 Oct 18 16:30 /var/tmp/S1/build/tfa/qemu/release/fip.bin
+Trusted Boot Firmware BL2: offset=0xB0, size=0x61F0, cmdline="--tb-fw"
+EL3 Runtime Firmware BL31: offset=0x62A0, size=0xC067, cmdline="--soc-fw"
+Non-Trusted Firmware BL33: offset=0x12307, size=0x16F3D0, cmdline="--nt-fw"</code></pre></figure>
+<p>출력에서 볼 것: 2.7초. BL1 22 KB, BL31 49 KB — EL3 펌웨어는 SSD FW의 ROM 코드처럼 작다. FIP의 BL33 크기 <code>0x16F3D0</code> = 1,504,208 = <code>u-boot.bin</code> 크기 그대로. FIP는 "UUID로 이름 붙은 이미지들의 목차 + 본문"이다 (Don에게는 SSD 펌웨어 패키지의 섹션 헤더와 같은 것).</p>
+<p>체크포인트: <strong><code>out/flash.bin</code> 정확히 67,108,864 바이트, <code>fiptool info</code>에 BL2/BL31/BL33 세 줄.</strong></p>
+<hr>
+<h2 id="7-step-5-커널-tinyconfig-virt-fragment">7. Step 5 — 커널: <code>tinyconfig</code> + virt fragment<a class="anchor" href="#7-step-5-커널-tinyconfig-virt-fragment" aria-label="link">#</a></h2>
+<h3 id="7-1-무엇을-고르나">7.1 무엇을 고르나<a class="anchor" href="#7-1-무엇을-고르나" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>출발점</th><th><code>=y</code> 개수 (실측)</th><th>-j2 빌드</th><th>쓸모</th></tr></thead><tbody><tr><td><code>defconfig</code> (arm64)</td><td>3295 <code>=y</code> + 1273 <code>=m</code></td><td>수십 분 (랩 <code>Image</code>가 이것 기반, 42.7 MB)</td><td>실제 보드 수백 종 지원</td></tr><tr><td><code>tinyconfig</code> + fragment</td><td><strong>718 <code>=y</code>, 0 <code>=m</code></strong></td><td><strong>294 초</strong></td><td>QEMU <code>virt</code>만</td></tr></tbody></table></div>
+<p>같은 소스에서 <code>make defconfig</code>(설정만, 빌드 안 함)로 센 값이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'mkdir -p /var/tmp/S1/build/defcfg &amp;&amp; make -s -C /var/tmp/S1/src/linux O=/var/tmp/S1/build/defcfg defconfig &gt;/dev/null &amp;&amp; \
+  echo "defconfig: $(grep -c "=y" /var/tmp/S1/build/defcfg/.config) =y, $(grep -c "=m" /var/tmp/S1/build/defcfg/.config) =m"; \
+  echo "s1: $(grep -c "=y" /var/tmp/S1/build/linux/.config) =y, $(grep -c "=m" /var/tmp/S1/build/linux/.config) =m"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>defconfig: 3295 =y, 1273 =m
+s1: 718 =y, 0 =m</code></pre></figure>
+<p>E2 §5에서 tinyconfig로 최소 커널을 손으로 만들어 봤다. S1은 그걸 <strong>fragment 파일 + 자동 검사</strong>로 재현 가능하게 만든다.</p>
+<h3 id="7-2-fragment-qemu-virt가-실제로-쓰는-하드웨어만">7.2 fragment — QEMU <code>virt</code>가 실제로 쓰는 하드웨어만<a class="anchor" href="#7-2-fragment-qemu-virt가-실제로-쓰는-하드웨어만" aria-label="link">#</a></h3>
+<p>QEMU <code>virt</code>의 DT(<code>/var/lab/out/virt.dts</code>)를 보면 장치는 몇 개 안 된다: GIC, arch timer, PL011 UART(0x09000000), PL031 RTC, PCIe ECAM, virtio-mmio 32개, fw_cfg, flash. fragment는 이 목록을 그대로 옮긴 것이다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>CONFIG_LOCALVERSION="-s1"
+CONFIG_SMP=y
+CONFIG_PRINTK=y
+CONFIG_PRINTK_TIME=y
+CONFIG_KALLSYMS=y
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+CONFIG_MULTIUSER=y
+CONFIG_FUTEX=y
+CONFIG_POSIX_TIMERS=y
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_BINFMT_ELF=y
+CONFIG_BINFMT_SCRIPT=y
+CONFIG_TTY=y
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_DRV_PL031=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_SHMEM=y
+CONFIG_TMPFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_BLOCK=y
+CONFIG_EXT4_FS=y
+CONFIG_PCI=y
+CONFIG_PCI_HOST_GENERIC=y
+CONFIG_VIRTIO_MENU=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_NET=y
+CONFIG_INET=y
+CONFIG_UNIX=y
+CONFIG_PACKET=y
+CONFIG_NETDEVICES=y
+CONFIG_NET_CORE=y
+CONFIG_VIRTIO_NET=y
+CONFIG_NET_9P=y
+CONFIG_NET_9P_VIRTIO=y
+CONFIG_9P_FS=y
+CONFIG_DEBUG_KERNEL=y
+CONFIG_DEBUG_INFO_DWARF5=y
+CONFIG_GDB_SCRIPTS=y</code></pre></figure>
+<p>옵션별 이유(실제 파일에는 주석으로 그룹을 나눴다).</p>
+<div class="tw"><table><thead><tr><th>그룹</th><th>옵션</th><th>없으면</th></tr></thead><tbody><tr><td>콘솔</td><td><code>SERIAL_AMBA_PL011(_CONSOLE)</code>, <code>TTY</code>, <code>PRINTK</code></td><td>아무 출력 없이 멈춘 것처럼 보인다 (C6 §5)</td></tr><tr><td>initramfs</td><td><code>BLK_DEV_INITRD</code>, <code>RD_GZIP</code></td><td>"Unable to mount root fs"</td></tr><tr><td>유저 실행</td><td><code>BINFMT_ELF</code>, <code>BINFMT_SCRIPT</code>, <code>MULTIUSER</code>, <code>FUTEX</code>, <code>POSIX_TIMERS</code></td><td><code>/init</code>(셸 스크립트) 실행 실패, BusyBox 일부 applet 실패</td></tr><tr><td>파일시스템</td><td><code>PROC_FS</code>, <code>SYSFS</code>, <code>DEVTMPFS(_MOUNT)</code>, <code>SHMEM</code>+<code>TMPFS</code>, <code>EXT4_FS</code></td><td><code>/proc</code> 없음, <code>/dev</code> 비어 있음, ext4 rootfs 불가</td></tr><tr><td>버스</td><td><code>PCI</code>, <code>PCI_HOST_GENERIC</code>, <code>VIRTIO_MMIO</code>, <code>VIRTIO_PCI</code></td><td>QEMU 기본 NIC(virtio-net-pci), <code>-device virtio-*-device</code> 인식 안 됨</td></tr><tr><td>장치</td><td><code>VIRTIO_BLK</code>, <code>VIRTIO_NET</code>, <code>RTC_DRV_PL031</code></td><td>디스크·네트워크·시계 없음</td></tr><tr><td>네트워크</td><td><code>NET</code>, <code>INET</code>, <code>UNIX</code>, <code>PACKET</code></td><td><code>udhcpc</code>가 raw socket(<code>AF_PACKET</code>)을 못 연다</td></tr><tr><td>호스트 공유</td><td><code>NET_9P(_VIRTIO)</code>, <code>9P_FS</code></td><td><code>-virtfs</code> 공유 마운트 불가</td></tr><tr><td>디버깅</td><td><code>DEBUG_INFO_DWARF5</code>, <code>GDB_SCRIPTS</code>, <code>KALLSYMS</code>, <code>IKCONFIG_PROC</code></td><td>gdb에 소스 줄 없음, <code>lx-*</code> 명령 없음, oops에 함수 이름 없음</td></tr></tbody></table></div>
+<p><code>ARM_GIC_V3</code>, <code>ARM_ARCH_TIMER</code>, <code>ARM_PSCI_FW</code>, <code>COMMON_CLK</code>는 넣지 않았다 — arm64 아키텍처 Kconfig가 <code>select</code>로 강제로 켠다. 결과 <code>.config</code>로 확인했다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+CONFIG_EXPERT=y
+# CONFIG_MODULES is not set
+CONFIG_SLUB_TINY=y
+CONFIG_PCI_HOST_GENERIC=y
+CONFIG_ARM_PSCI_FW=y
+CONFIG_COMMON_CLK=y
+CONFIG_ARM_ARCH_TIMER=y
+CONFIG_ARM_GIC_V3=y</code></pre></figure>
+<p>tinyconfig가 남긴 성격도 보인다: <code>CC_OPTIMIZE_FOR_SIZE</code>(-Os), <code>SLUB_TINY</code>, <code>MODULES</code> 꺼짐. 모듈 실습(S2)은 계속 랩의 <code>linux-build</code>를 쓰고, 이 커널로 하고 싶으면 fragment에 <code>CONFIG_MODULES=y</code>를 더한다(§15 확장 과제).</p>
+<h3 id="7-3-makefile-merge-후-검사">7.3 Makefile — merge 후 검사<a class="anchor" href="#7-3-makefile-merge-후-검사" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">make</span><pre><code>KO := $(BLD)/linux
+$(KO)/.config: $(STAMP)/src-linux $(TOP)/config/kernel-virt.fragment
+	$(MAKE) -C $(SRC)/linux O=$(KO) tinyconfig
+	cd $(KO) &amp;&amp; $(SRC)/linux/scripts/kconfig/merge_config.sh -m -O $(KO) $(KO)/.config $(TOP)/config/kernel-virt.fragment
+	$(MAKE) -C $(SRC)/linux O=$(KO) olddefconfig
+	@$(TOP)/scripts/check-fragment.sh $(TOP)/config/kernel-virt.fragment $@
+$(OUT)/Image: $(KO)/.config
+	$(MAKE) -C $(SRC)/linux O=$(KO) -j$(JOBS) Image scripts_gdb
+	@mkdir -p $(OUT); cp $(KO)/arch/arm64/boot/Image $@; ln -sf $(KO)/vmlinux $(OUT)/vmlinux
+kernel: $(OUT)/Image</code></pre></figure>
+<p><code>merge_config.sh -m</code>는 "병합만 하고 olddefconfig는 하지 마라"는 뜻이다. 병합 직후의 <code>.config</code>는 의존성이 안 맞을 수 있어서 <code>olddefconfig</code>가 Kconfig 규칙대로 정리한다 — 그리고 <strong>이때 의존성이 안 맞는 옵션은 조용히 꺼진다.</strong> 그걸 잡는 게 <code>check-fragment.sh</code>다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# fragment 의 CONFIG_X=값 이 최종 .config 에 그대로 살아남았는지 검사
+frag=$1; cfg=$2; bad=0
+while IFS= read -r l; do
+  case $l in CONFIG_*=*) grep -qxF "$l" "$cfg" || { echo "DROPPED: $l -&gt; $(grep -E "^(# )?${l%%=*}[= ]" "$cfg" || echo absent)"; bad=1; };; esac
+done &lt; "$frag"
+[ $bad = 0 ] &amp;&amp; echo "fragment OK: $(grep -c '^CONFIG_' "$frag") options applied, $(grep -c '=y' "$cfg") =y total"
+exit $bad</code></pre></figure>
+<h3 id="7-4-실제로-걸린-함정-config_tmpfs가-사라졌다">7.4 실제로 걸린 함정 — <code>CONFIG_TMPFS</code>가 사라졌다<a class="anchor" href="#7-4-실제로-걸린-함정-config_tmpfs가-사라졌다" aria-label="link">#</a></h3>
+<p>첫 fragment에는 <code>CONFIG_SHMEM=y</code>가 없었다. 결과:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp &amp;&amp; /usr/bin/time -f "kconfig: %e s" make -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 \
+  /var/tmp/S1/build/linux/.config &gt; /var/tmp/S1/kconfig.log 2&gt;&amp;1; tail -5 /var/tmp/S1/kconfig.log'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>DROPPED: CONFIG_TMPFS=y -&gt; absent
+make: *** [Makefile:75: /var/tmp/S1/build/linux/.config] Error 1
+make: Leaving directory '/Users/donh/.elinux_scratch/S1/qemu-lab'
+Command exited with non-zero status 2
+kconfig: 6.99 s</code></pre></figure>
+<p>원인: <code>fs/Kconfig</code>의 <code>config TMPFS</code>는 <code>depends on SHMEM</code>이고, <code>init/Kconfig</code>의 <code>SHMEM</code>은 <code>bool "Use full shmem filesystem" if EXPERT</code> + <code>default y</code>다. tinyconfig는 <code>allnoconfig</code>에 <code>kernel/configs/tiny.config</code>(+ <code>tiny-base.config</code>의 <code>CONFIG_EXPERT=y</code>)를 얹은 것이라, EXPERT 때문에 보이게 된 <code>SHMEM</code>까지 n으로 내리므로 <code>SHMEM</code>이 꺼지고, 그 아래 <code>TMPFS</code>는 아예 메뉴에서 사라져 <code>.config</code>에 줄조차 없다(<code>absent</code>). E2 §2의 "<code>depends on</code>은 조용히 진다" 규칙의 실물이다. 고친 뒤:</p>
+<figure class="code"><span class="lang">text</span><pre><code>Value of CONFIG_SHMEM is redefined by fragment /Users/donh/.elinux_scratch/S1/qemu-lab/config/kernel-virt.fragment:
+Previous value: # CONFIG_SHMEM is not set
+New value: CONFIG_SHMEM=y
+...
+fragment OK: 46 options applied, 718 =y total</code></pre></figure>
+<p>검사 스크립트가 없었다면 이 커널은 빌드도 부팅도 잘 됐을 것이고, 나중에 <code>mount -t tmpfs</code>에서야 "unknown filesystem type"으로 터졌을 것이다. <strong>Kconfig 결과를 검증하는 단계가 빌드에 들어 있어야 한다</strong> — 이게 면접에서 말할 포인트다.</p>
+<h3 id="7-5-빌드-시간과-크기">7.5 빌드 — 시간과 크기<a class="anchor" href="#7-5-빌드-시간과-크기" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp &amp;&amp; /usr/bin/time -f "kernel build: %e s wall, %U s user, %S s sys, maxrss %M KB" \
+  make -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 kernel &gt; /var/tmp/S1/kernel.log 2&gt;&amp;1'
+limactl shell elinux -- bash -lc 'cd /var/tmp/S1; tail -1 kernel.log; grep -c " CC " kernel.log; ls -la out/Image /var/lab/out/Image build/linux/vmlinux; \
+  size build/linux/vmlinux; du -sh build/linux'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>kernel build: 293.70 s wall, 444.95 s user, 68.53 s sys, maxrss 319592 KB
+985
+-rwxrwxr-x 1 donh donh  6197256 Oct 18 16:35 out/Image
+-rw-rw-r-- 1 donh donh 42740224 Oct 10 10:05 /var/lab/out/Image
+-rwxrwxr-x 1 donh donh 97870344 Oct 18 16:35 build/linux/vmlinux
+   text	   data	    bss	    dec	    hex	filename
+4149264	1840816	 387592	6377672	 6150c8	build/linux/vmlinux
+791M	/var/tmp/S1/build/linux</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>294초(4분 54초), C 파일 985개.</strong> 다른 작성자 빌드와 CPU를 나눠 쓰는 중이라(load average 7 근처) 혼자 쓰면 더 빠르다. user 445 s / wall 294 s ≈ 1.5 — <code>-j2</code>가 거의 꽉 찼다.</li><li><code>Image</code> 6.2 MB vs 랩 defconfig <code>Image</code> 42.7 MB — <strong>약 7분의 1.</strong></li><li><code>vmlinux</code> 98 MB인데 <code>size</code>로 본 실제 코드+데이터는 6.4 MB. 나머지 90 MB는 DWARF5 디버그 정보다. gdb에는 <code>vmlinux</code>, 부팅에는 <code>Image</code>를 쓰는 이유(E2 §10).</li></ul>
+<p>체크포인트: <strong><code>out/Image</code> 약 6 MB, <code>out/vmlinux</code> 심볼릭 링크.</strong></p>
+<hr>
+<h2 id="8-step-6-busybox-static과-initramfs">8. Step 6 — BusyBox static과 initramfs<a class="anchor" href="#8-step-6-busybox-static과-initramfs" aria-label="link">#</a></h2>
+<h3 id="8-1-makefile">8.1 Makefile<a class="anchor" href="#8-1-makefile" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">make</span><pre><code>BBO := $(BLD)/busybox
+$(BBO)/busybox: $(STAMP)/src-busybox
+	@mkdir -p $(BBO)   # BusyBox 의 O= 는 커널과 달리 디렉터리를 만들어 주지 않는다
+	$(MAKE) -C $(SRC)/busybox O=$(BBO) defconfig
+	sed -i -e 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' -e 's/^CONFIG_TC=y/# CONFIG_TC is not set/' \
+	  -e 's/^CONFIG_SHA1_HWACCEL=y/# CONFIG_SHA1_HWACCEL is not set/' \
+	  -e 's/^CONFIG_SHA256_HWACCEL=y/# CONFIG_SHA256_HWACCEL is not set/' $(BBO)/.config
+	$(MAKE) -C $(BBO) oldconfig &lt;/dev/null &gt;/dev/null
+	$(MAKE) -C $(BBO) -j$(JOBS)
+busybox: $(BBO)/busybox
+$(STAMP)/rootfs: $(BBO)/busybox $(TOP)/rootfs/init $(TOP)/rootfs/udhcpc.script
+	rm -rf $(B)/rootfs; $(MAKE) -C $(BBO) CONFIG_PREFIX=$(B)/rootfs install &gt;/dev/null
+	cd $(B)/rootfs &amp;&amp; mkdir -p proc sys dev tmp etc mnt root usr/share/udhcpc boot
+	install -m755 $(TOP)/rootfs/init $(B)/rootfs/init
+	install -m755 $(TOP)/rootfs/udhcpc.script $(B)/rootfs/usr/share/udhcpc/default.script
+	@mkdir -p $(STAMP); touch $@
+$(OUT)/initramfs.cpio.gz: $(STAMP)/rootfs
+	@mkdir -p $(OUT); cd $(B)/rootfs &amp;&amp; find . | LC_ALL=C sort | cpio -o -H newc -R 0:0 --quiet | gzip -9 &gt; $@</code></pre></figure>
+<p>static 링크를 고른 이유는 K2 §3에 있다: initramfs에 glibc 공유 라이브러리를 넣을 필요가 없어서 rootfs가 "실행 파일 하나 + 심볼릭 링크 수백 개"로 끝난다. <code>cpio -R 0:0</code>은 내 uid(501) 소유 파일을 root 소유로 기록한다 — root 권한 없이 rootfs를 만드는 요령. <code>LC_ALL=C sort</code>는 파일 순서를 고정해 같은 입력이면 같은 cpio가 나오게 한다.</p>
+<h3 id="8-2-실제로-걸린-함정-세-개">8.2 실제로 걸린 함정 세 개<a class="anchor" href="#8-2-실제로-걸린-함정-세-개" aria-label="link">#</a></h3>
+<p>첫 시도 — 출력 디렉터리:</p>
+<figure class="code"><span class="lang">text</span><pre><code>/bin/sh: 1: cd: can't cd to /var/tmp/S1/build/busybox
+Makefile:106: *** output directory "/var/tmp/S1/build/busybox" does not exist.  Stop.</code></pre></figure>
+<p>커널과 U-Boot는 <code>O=</code> 디렉터리를 만들어 주지만 BusyBox는 안 만든다 → <code>mkdir -p</code> 추가.</p>
+<p>두 번째 — SHA1 하드웨어 가속:</p>
+<figure class="code"><span class="lang">text</span><pre><code>/var/tmp/S1/src/busybox/libbb/hash_md5_sha.c:1316:35: error: ‘sha1_process_block64_shaNI’ undeclared (first use in this function); did you mean ‘sha1_process_block64’?
+make[4]: *** [/var/tmp/S1/src/busybox/scripts/Makefile.build:198: libbb/hash_md5_sha.o] Error 1</code></pre></figure>
+<p>BusyBox 1.37 <code>defconfig</code>는 <code>SHA1_HWACCEL=y</code>인데, 그 구현(<code>shaNI</code>)은 x86 전용이다. aarch64에서는 빌드가 깨진다 → 끈다. 랩의 <code>/var/lab/build/busybox/.config</code>도 꺼져 있었다(역으로 읽은 결정 중 하나).</p>
+<p>세 번째 — <code>tc</code> applet. 랩 config에서 꺼져 있길래 이유를 확인하려고 일부러 켜서 그 파일 하나만 컴파일해 봤다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/S1/build/busybox &amp;&amp; cp .config /var/tmp/S1/bb.config.bak &amp;&amp; \
+  sed -i "s/^# CONFIG_TC is not set/CONFIG_TC=y/" .config &amp;&amp; make oldconfig &lt;/dev/null &gt;/dev/null 2&gt;&amp;1; \
+  make networking/tc.o 2&gt;&amp;1 | grep -E "error" | head -3; cp /var/tmp/S1/bb.config.bak .config; make oldconfig &lt;/dev/null &gt;/dev/null 2&gt;&amp;1'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>/var/tmp/S1/src/busybox/networking/tc.c:236:27: error: ‘TCA_CBQ_MAX’ undeclared (first use in this function); did you mean ‘TCA_CBS_MAX’?
+/var/tmp/S1/src/busybox/networking/tc.c:249:16: error: ‘TCA_CBQ_RATE’ undeclared (first use in this function); did you mean ‘TCA_TBF_RATE64’?
+/var/tmp/S1/src/busybox/networking/tc.c:255:16: error: ‘TCA_CBQ_LSSOPT’ undeclared (first use in this function)</code></pre></figure>
+<p>호스트의 커널 UAPI 헤더(VM은 7.0)에서 CBQ qdisc 정의가 빠졌기 때문이다. <strong>유저 공간 프로그램은 빌드 호스트의 커널 헤더에 묶인다</strong> — 크로스 툴체인이 자기 sysroot에 커널 헤더를 따로 들고 다니는 이유(B1 §9).</p>
+<h3 id="8-3-성공한-빌드">8.3 성공한 빌드<a class="anchor" href="#8-3-성공한-빌드" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp &amp;&amp; /usr/bin/time -f "busybox build: %e s wall, %U s user" \
+  make -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 busybox &gt; /var/tmp/S1/bb.log 2&gt;&amp;1; tail -4 /var/tmp/S1/bb.log; \
+  file /var/tmp/S1/build/busybox/busybox; ls -la /var/tmp/S1/build/busybox/busybox'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code> Library resolv is needed, can't exclude it (yet)
+Final link with: m resolv
+make: Leaving directory '/Users/donh/.elinux_scratch/S1/qemu-lab'
+busybox build: 43.13 s wall, 56.60 s user
+/var/tmp/S1/build/busybox/busybox: ELF 64-bit LSB executable, ARM aarch64, version 1 (GNU/Linux), statically linked, BuildID[sha1]=2a286d68bbc57c114d015a56901a0809947438aa, for GNU/Linux 3.7.0, stripped
+-rwxrwxr-x 1 donh donh 2242744 Oct 18 16:37 /var/tmp/S1/build/busybox/busybox</code></pre></figure>
+<p>빌드 로그에는 glibc static 링크 경고(<code>getaddrinfo</code>류 함수는 static이어도 런타임에 NSS 공유 라이브러리를 찾는다)와 <code>-Wunused-result</code> 경고가 섞여 나온다. BusyBox 업스트림 코드의 경고라 고치지 않는다 — 이 노트의 "경고 0개" 규칙은 내가 쓴 C 코드에 대한 것이다.</p>
+<h3 id="8-4-init-랩-init의-확장판">8.4 <code>/init</code> — 랩 <code>/init</code>의 확장판<a class="anchor" href="#8-4-init-랩-init의-확장판" aria-label="link">#</a></h3>
+<p>랩의 <code>/var/lab/build/rootfs/init</code>(9줄)를 출발점으로, 네트워크와 9p를 붙였다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# S1 qemu-lab /init (initramfs 와 ext4 rootfs 공용)
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2&gt;/dev/null
+echo "s1-lab: $(uname -r) up $(cut -d' ' -f1 /proc/uptime)s root=$(awk '$2=="/"{print $1}' /proc/mounts)"
+# 네트워크: eth0 이 있으면 DHCP (QEMU user net = 10.0.2.0/24)
+if [ -e /sys/class/net/eth0 ]; then
+  ip link set lo up; ip link set eth0 up
+  udhcpc -i eth0 -q -n -t 5 -s /usr/share/udhcpc/default.script &gt;/dev/null 2&gt;&amp;1 \
+    &amp;&amp; echo "s1-lab: eth0 $(ip -4 -o addr show eth0 | awk '{print $4}')"
+fi
+# 9p 호스트 공유: -virtfs ...,mount_tag=host0
+if cat /sys/bus/virtio/drivers/9pnet_virtio/virtio*/mount_tag 2&gt;/dev/null | grep -q host0 &amp;&amp; \
+   mkdir -p /mnt/host &amp;&amp; mount -t 9p -o trans=virtio,version=9p2000.L host0 /mnt/host; then
+  echo "s1-lab: 9p host0 -&gt; /mnt/host"
+fi
+# LAB_CMD=cmd~args : 명령 하나 실행 후 poweroff (공백 대신 ~)
+for a in $(cat /proc/cmdline); do case $a in LAB_CMD=*) C="${a#LAB_CMD=}";; esac; done
+if [ -n "$C" ]; then sh -c "$(echo "$C" | tr '~' ' ')"; sync; poweroff -f; fi
+exec setsid cttyhack /bin/sh</code></pre></figure>
+<p>설계 메모:</p>
+<ul><li>9p는 <strong>장치가 있을 때만</strong> 마운트한다. 처음에는 무조건 <code>mount -t 9p</code>를 시도했더니 <code>-virtfs</code>가 없는 부팅마다 <code>9pnet_virtio: no channels available for device host0</code> 커널 메시지가 찍혔다. sysfs의 <code>mount_tag</code> 속성으로 먼저 확인하도록 바꿨다.</li><li><code>LAB_CMD</code>는 커널이 모르는 인자라서 <code>Unknown kernel command line parameters "LAB_CMD=..." will be passed to user space</code>로 넘어온다(C6 §6). <code>~</code>를 공백으로 바꾸는 이유: 커널 커맨드라인은 공백으로 인자를 자르기 때문.</li><li><code>setsid cttyhack sh</code>는 셸에 controlling tty를 줘서 Ctrl-C가 먹게 한다(K2 §8).</li><li><code>sync</code> 후 <code>poweroff -f</code>: ext4 rootfs로 부팅했을 때 쓴 내용이 디스크에 남게 한다(§11).</li></ul>
+<p>체크포인트: <strong><code>out/initramfs.cpio.gz</code> 약 1.2 MB.</strong></p>
+<hr>
+<h2 id="9-step-7-부팅-①-직접-kernel">9. Step 7 — 부팅 ①: 직접 <code>-kernel</code><a class="anchor" href="#9-step-7-부팅-①-직접-kernel" aria-label="link">#</a></h2>
+<p>가장 짧은 경로다. QEMU가 부트로더 역할까지 한다: <code>Image</code>와 initrd, 자기가 만든 DTB를 RAM(0x40000000부터)에 직접 놓고, 작은 부트 스텁(아래 gdb 출력의 0x40000000 명령 3개)으로 <code>x0=DTB 주소</code>를 넣고 커널로 점프한다(C1 §5).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/S1 &amp;&amp; /usr/bin/time -f "wall %e s" timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic \
+  -kernel out/Image -initrd out/initramfs.cpio.gz \
+  -append "console=ttyAMA0 earlycon=pl011,0x9000000 LAB_CMD=cat~/proc/version;cat~/proc/device-tree/psci/method;echo;free~-m;ls~/sys/bus/virtio/devices" &gt; boot1.log 2&gt;&amp;1; cat boot1.log'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x411fd070]
+[    0.000000] Linux version 6.18.55-s1 (donh@lima-elinux) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #1 SMP Sun Oct 18 16:35:53 PDT 2026
+[    0.000000] Machine model: linux,dummy-virt
+[    0.000000] earlycon: pl11 at MMIO 0x0000000009000000 (options '')
+[    0.000000] psci: probing for conduit method from DT.
+[    0.000000] psci: PSCIv1.1 detected in firmware.
+[    0.000000] psci: SMC Calling Convention v1.0
+...
+[    0.037653] CPU: All CPU(s) started at EL1
+[    0.061744] Memory: 504048K/524288K available (3904K kernel code, 676K rwdata, 1060K rodata, 320K init, 382K bss, 19420K reserved, 0K cma-reserved)
+[    0.136978] 9000000.pl011: ttyAMA0 at MMIO 0x9000000 (irq = 13, base_baud = 0) is a PL011 rev1
+...
+[    0.200652] Unpacking initramfs...
+[    0.234799] pci 0000:00:01.0: [1af4:1000] type 00 class 0x020000 conventional PCI endpoint
+[    0.383879] rtc-pl031 9010000.pl031: registered as rtc0
+[    0.439713] Freeing unused kernel memory: 320K
+[    0.440470] Run /init as init process
+s1-lab: 6.18.55-s1 up 0.52s root=rootfs
+s1-lab: eth0 10.0.2.15/24
+[    0.747976] 9pnet_virtio: no channels available for device host0
+Linux version 6.18.55-s1 (donh@lima-elinux) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #1 SMP Sun Oct 18 16:35:53 PDT 2026
+hvc 
+              total        used        free      shared  buff/cache   available
+Mem:            495           8         485           2           2         480
+Swap:             0           0           0
+virtio0
+[    0.807800] reboot: Power down
+wall 0.96 s</code></pre></figure>
+<p>(144줄 중 핵심만 남기고 <code>...</code>로 줄였다. <code>ls</code> 색상 제어 문자는 지웠다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>QEMU 시작부터 전원 꺼짐까지 0.96초.</strong> <code>/init</code>까지 0.44초. 이 측정은 9p 마운트 조건을 고치기 전 <code>/init</code>으로 했다 — <code>9pnet_virtio: no channels available</code> 줄이 그 흔적이고, §8.4의 수정으로 사라졌다.</li><li><code>CPU: All CPU(s) started at EL1</code> — 직접 부팅에서는 EL3·EL2 펌웨어가 없다.</li><li><code>psci/method</code>가 <code>hvc</code>, <code>SMC Calling Convention v1.0</code> — PSCI 펌웨어 역할을 <strong>QEMU 자신이</strong> 한다. §10의 TF-A 경로와 비교할 증거다.</li><li><code>-netdev</code>를 주지 않았는데 <code>eth0 10.0.2.15</code>가 생겼다. QEMU <code>virt</code>는 <code>-nic</code>/<code>-netdev</code>가 없으면 <strong>기본 NIC(virtio-net-pci, user 모드)</strong> 를 하나 붙인다(<code>pci 0000:00:01.0: [1af4:1000]</code> = virtio-net). 네트워크를 정말 없애려면 <code>-nic none</code>.</li><li><code>Memory: ... 3904K kernel code</code> — defconfig 커널이면 이 숫자가 수십 MB다.</li></ul>
+<p>같은 initramfs로 랩 defconfig 커널과 3회씩 비교했다(<code>quiet</code>, <code>LAB_CMD=true</code>).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/S1; \
+  for i in 1 2 3; do /usr/bin/time -f "s1 Image direct: %e s" timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic \
+    -kernel out/Image -initrd out/initramfs.cpio.gz -append "console=ttyAMA0 quiet LAB_CMD=true" 2&gt;&amp;1 | grep -aE "wall|direct|s1-lab"; done; \
+  for i in 1 2 3; do /usr/bin/time -f "lab Image direct: %e s" timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic \
+    -kernel /var/lab/out/Image -initrd out/initramfs.cpio.gz -append "console=ttyAMA0 quiet LAB_CMD=true" 2&gt;&amp;1 | grep -aE "direct|s1-lab"; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>s1-lab: 6.18.55-s1 up 0.55s root=rootfs
+s1-lab: eth0 10.0.2.15/24
+s1 Image direct: 1.01 s
+s1-lab: 6.18.55-s1 up 0.48s root=rootfs
+s1-lab: eth0 10.0.2.15/24
+s1 Image direct: 0.82 s
+s1-lab: 6.18.55-s1 up 0.46s root=rootfs
+s1-lab: eth0 10.0.2.15/24
+s1 Image direct: 0.80 s
+s1-lab: 6.18.55 up 1.10s root=rootfs
+s1-lab: eth0 10.0.2.15/24
+lab Image direct: 1.67 s
+s1-lab: 6.18.55 up 0.96s root=rootfs
+s1-lab: eth0 10.0.2.15/24
+lab Image direct: 1.45 s
+s1-lab: 6.18.55 up 1.00s root=rootfs
+s1-lab: eth0 10.0.2.15/24
+lab Image direct: 1.49 s</code></pre></figure>
+<p>작은 커널이 <code>/init</code>까지 약 2배 빠르다(0.46–0.55 s vs 0.96–1.10 s). initcall이 적기 때문이다(C7). TCG 수치라서 실제 보드에서는 비율도 달라질 수 있다. 하나 더: 내가 만든 initramfs가 <strong>랩 커널에서도 그대로 돈다</strong> — 유저 공간과 커널은 syscall ABI로만 묶여 있어서다(E6).</p>
+<p>체크포인트: <strong><code>s1-lab: 6.18.55-s1 up ...</code>과 <code>reboot: Power down</code>이 보여야 한다.</strong> 대화형으로 쓰려면 <code>make B=/var/tmp/S1 run-direct</code>, 종료는 <code>Ctrl-A x</code>.</p>
+<hr>
+<h2 id="10-step-8-부팅-②-u-boot-bios-커널은-fw_cfg에서">10. Step 8 — 부팅 ②: U-Boot <code>-bios</code>, 커널은 fw_cfg에서<a class="anchor" href="#10-step-8-부팅-②-u-boot-bios-커널은-fw_cfg에서" aria-label="link">#</a></h2>
+<p><code>-bios u-boot.bin</code>과 <code>-kernel</code>을 <strong>같이</strong> 주면 QEMU는 커널을 RAM에 직접 놓지 않고 <strong>fw_cfg</strong>(QEMU가 펌웨어에 파일을 건네는 MMIO 장치, <code>fw-cfg@9020000</code>)에 넣어 둔다. U-Boot의 <code>bootflow scan</code>이 <code>qfw</code> bootmeth로 그걸 찾아 로드한다. 디스크 이미지를 만들지 않고도 "부트로더가 커널을 로드해서 <code>booti</code>하는" 진짜 경로를 탄다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/S1 &amp;&amp; /usr/bin/time -f "wall %e s" timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic \
+  -bios out/u-boot.bin -kernel out/Image -initrd out/initramfs.cpio.gz \
+  -append "console=ttyAMA0 LAB_CMD=cat~/proc/device-tree/psci/method;echo;cat~/proc/cmdline" 2&gt;&amp;1 | grep -av "^\[" | sed "s/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b[78]//g"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>U-Boot 2026.10 (Oct 18 2026 - 16:29:47 -0700)
+
+DRAM:  512 MiB
+using memory 0x5e44f000-0x5f48f000 for malloc()
+Core:  51 devices, 14 uclasses, devicetree: board
+Flash: 64 MiB
+Loading Environment from Flash...*** Warning - bad CRC, using default environment
+
+In:    serial,usbkbd
+Out:   serial,vidconsole
+Err:   serial,vidconsole
+No USB controllers found
+Net:   eth0: virtio-net#32
+
+Hit any key to stop autoboot: 2Hit any key to stop autoboot: 1Hit any key to stop autoboot: 0
+Scanning for bootflows in all bootdevs
+Seq  Method       State   Uclass    Part  Name                      Filename
+---  -----------  ------  --------  ----  ------------------------  ----------------
+Scanning global bootmeth 'efi_mgr':
+Cannot persist EFI variables without system partition
+Missing TPMv2 device for EFI_TCG_PROTOCOL
+Missing RNG device for EFI_RNG_PROTOCOL
+Scanning bootdev 'fw-cfg@9020000.bootdev':
+loading kernel to address 40400000 size 5e9008 initrd 44000000 size 1275e3
+  0  qfw          ready   qfw          0  qfw
+** Booting bootflow 'qfw' with qfw
+## Flattened Device Tree blob at 5e34ed80
+   Booting using the fdt blob at 0x5e34ed80
+Working FDT set to 5e34ed80
+   Loading Ramdisk to 5d206000, end 5d32d5e3 ... OK
+   Loading Device Tree to 000000005d103000, end 000000005d205fff ... OK
+Working FDT set to 5d103000
+
+Starting kernel ...
+
+s1-lab: 6.18.55-s1 up 0.47s root=rootfs
+s1-lab: eth0 10.0.2.15/24
+hvc 
+console=ttyAMA0 LAB_CMD=cat~/proc/device-tree/psci/method;echo;cat~/proc/cmdline
+wall 3.11 s</code></pre></figure>
+<p>(커널 로그 <code>[ ...]</code> 줄은 걸렀고, 카운트다운의 ANSI 제어 문자는 지웠다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>size 5e9008</code> = 6,197,256 = <code>out/Image</code> 크기 그대로. <code>devicetree: board</code> — U-Boot는 QEMU가 만든 DT를 자기 DT로 쓰고(<code>fdtcontroladdr</code>), 그걸 커널에 넘긴다(C3 §6).</li><li><code>bad CRC, using default environment</code> — flash에 저장된 환경 변수가 없다는 정상 메시지(C3 §4).</li><li>커널 커맨드라인은 <code>-append</code> 값 그대로 — qfw bootmeth가 fw_cfg의 cmdline도 같이 가져온다.</li><li>3.11초 중 <strong>2초가 <code>bootdelay</code> 카운트다운</strong>이다(다른 실행에서는 3.21초). 실제 제품에서 부팅 시간을 줄일 때 가장 먼저 0으로 만드는 값(C7).</li><li>PSCI는 여전히 <code>hvc</code> = QEMU. U-Boot는 EL1/EL2에서 돌고 PSCI를 제공하지 않는다.</li></ul>
+<p>체크포인트: <strong><code>** Booting bootflow 'qfw' with qfw</code>와 <code>s1-lab:</code> 줄.</strong></p>
+<hr>
+<h2 id="11-step-9-부팅-③-tf-a-secure-u-boot-ext4load-booti">11. Step 9 — 부팅 ③: TF-A secure → U-Boot → <code>ext4load</code> + <code>booti</code><a class="anchor" href="#11-step-9-부팅-③-tf-a-secure-u-boot-ext4load-booti" aria-label="link">#</a></h2>
+<p>이번엔 실제 보드와 같은 전체 체인이다. 커널은 fw_cfg가 아니라 <strong>virtio-blk 디스크의 ext4 파일시스템</strong>에서 U-Boot가 직접 읽는다.</p>
+<h3 id="11-1-ext4-rootfs-mkfs-ext4-d-root-권한-불필요">11.1 ext4 rootfs — <code>mkfs.ext4 -d</code> (root 권한 불필요)<a class="anchor" href="#11-1-ext4-rootfs-mkfs-ext4-d-root-권한-불필요" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">make</span><pre><code>$(OUT)/rootfs.ext4: $(STAMP)/rootfs $(OUT)/Image
+	rm -rf $(B)/rootfs-disk; cp -a $(B)/rootfs $(B)/rootfs-disk; cp $(OUT)/Image $(B)/rootfs-disk/boot/Image
+	rm -f $@; mkfs.ext4 -q -L s1root -E root_owner=0:0 -d $(B)/rootfs-disk $@ 64M
+images: $(OUT)/initramfs.cpio.gz $(OUT)/rootfs.ext4</code></pre></figure>
+<p><code>mkfs.ext4 -d &lt;dir&gt;</code>는 디렉터리 내용을 채운 채로 파일시스템을 만든다 — <code>sudo mount -o loop</code>가 필요 없다. 처음 버전은 <code>rootfs/boot/</code>에 <code>Image</code>를 직접 복사했는데, 그러면 다음에 initramfs를 다시 만들 때 6 MB 커널이 initramfs 안에도 들어간다. 그래서 디스크용 사본 <code>rootfs-disk/</code>를 따로 만든다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'debugfs -R "ls -l /boot" /var/tmp/S1/out/rootfs.ext4 2&gt;/dev/null; \
+  dumpe2fs -h /var/tmp/S1/out/rootfs.ext4 2&gt;/dev/null | grep -E "volume name|Block count|Free blocks|Block size"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>    107   40775 (2)    501   1000    4096 18-Oct-2026 16:38 .
+      2   40755 (2)      0      0    4096 18-Oct-2026 16:38 ..
+    108  100775 (1)    501   1000   6197256 18-Oct-2026 16:38 Image
+
+Filesystem volume name:   s1root
+Block count:              16384
+Free blocks:              12396
+Block size:               4096</code></pre></figure>
+<p>출력에서 볼 것: 루트 디렉터리(<code>..</code>, inode 2)는 <code>root_owner=0:0</code> 덕에 0:0이지만, 그 아래 파일은 <strong>내 uid 501:1000 그대로</strong>다. <code>-d</code>는 파일 소유자를 복사하기 때문이다. BusyBox 랩에서는 상관없지만, 제품 이미지에서는 <code>fakeroot</code> 또는 Buildroot의 device table로 소유자를 고친다(K3 §7).</p>
+<h3 id="11-2-직접-부팅으로-ext4-rootfs-확인-root-dev-vda">11.2 직접 부팅으로 ext4 rootfs 확인 (<code>root=/dev/vda</code>)<a class="anchor" href="#11-2-직접-부팅으로-ext4-rootfs-확인-root-dev-vda" aria-label="link">#</a></h3>
+<p>TF-A 경로 전에, 디스크 자체가 좋은지 <code>-kernel</code>로 먼저 확인한다(한 번에 한 변수만 바꾸는 bring-up 습관). 사본에 쓰고, 꺼진 뒤 VM에서 읽어서 영속성을 확인한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/S1 &amp;&amp; cp out/rootfs.ext4 disk-test.ext4 &amp;&amp; /usr/bin/time -f "wall %e s" timeout 90 \
+  qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -kernel out/Image \
+  -append "console=ttyAMA0 quiet root=/dev/vda rw init=/init LAB_CMD=df~-h~/;echo~persisted-\$(date~+%s)~&gt;~/root/note.txt" \
+  -drive if=none,id=d0,file=disk-test.ext4,format=raw -device virtio-blk-device,drive=d0 2&gt;&amp;1; \
+  debugfs -R "cat /root/note.txt" disk-test.ext4 2&gt;/dev/null; e2fsck -fn disk-test.ext4 2&gt;&amp;1 | tail -1'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>s1-lab: 6.18.55-s1 up 0.45s root=/dev/root
+s1-lab: eth0 10.0.2.15/24
+Filesystem                Size      Used Available Use% Mounted on
+/dev/root                56.0M      7.5M     43.9M  15% /
+[    0.717798] reboot: Power down
+wall 0.85 s
+persisted-1792367076
+s1root: 433/16384 files (0.5% non-contiguous), 3988/16384 blocks</code></pre></figure>
+<p>출력에서 볼 것: <code>-initrd</code> 없이 <code>root=/dev/vda</code>로 부팅했다. <code>init=/init</code>이 필요한 이유는 BusyBox 기본 init(<code>/sbin/init</code>)이 <code>/etc/inittab</code>을 찾기 때문이다 — 우리는 같은 <code>/init</code> 스크립트를 쓴다. 게스트가 쓴 <code>note.txt</code>를 VM에서 <code>debugfs</code>로 읽었고, <code>e2fsck -fn</code>이 깨끗하다(<code>sync</code> 후 poweroff 덕).</p>
+<h3 id="11-3-tf-a-경로-expect로-u-boot-조작">11.3 TF-A 경로 — expect로 U-Boot 조작<a class="anchor" href="#11-3-tf-a-경로-expect로-u-boot-조작" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>#!/usr/bin/expect -f
+# TF-A(BL1→BL2→BL31) → U-Boot(BL33) → 자동부팅 중단 → ext4load + booti 수동 실행
+set out [lindex $argv 0]
+set cmd [lindex $argv 1]
+if {$cmd eq ""} { set cmd "uname~-a" }
+set timeout 240
+spawn qemu-system-aarch64 -machine virt,secure=on -cpu cortex-a57 -m 1024 -nographic \
+  -bios $out/flash.bin \
+  -drive if=none,id=d0,file=$out/rootfs.ext4,format=raw,snapshot=on -device virtio-blk-device,drive=d0
+expect "Hit any key to stop autoboot" { send " " }
+expect "=&gt; " { send "virtio scan; ext4ls virtio 0 /boot\r" }
+expect "=&gt; " { send "ext4load virtio 0 \${kernel_addr_r} /boot/Image\r" }
+expect "=&gt; " { send "setenv bootargs \"console=ttyAMA0 root=/dev/vda rw init=/init LAB_CMD=$cmd\"\r" }
+expect "=&gt; " { send "booti \${kernel_addr_r} - \${fdtcontroladdr}\r" }
+expect {
+  "reboot: Power down" { exit 0 }
+  "Kernel panic" { puts "\n*** kernel panic"; exit 2 }
+  timeout { puts "\n*** timeout"; exit 1 }
+  eof { exit 0 }
+}</code></pre></figure>
+<p>결정 메모:</p>
+<ul><li><code>-m 1024</code>: TF-A qemu 플랫폼은 BL33(U-Boot)을 DRAM 시작 + 512 MiB = <code>0x60000000</code>에 올린다. <code>-m 512</code>면 그 주소에 RAM이 없다(C5 §3에서 소스로 증명). 랩 README는 1057을 썼지만 1024로도 된다 — 게스트 ≤ 1 GB 규칙을 지키는 값.</li><li><code>snapshot=on</code>: 쓰기를 임시 파일로 보내서 <code>out/rootfs.ext4</code>가 변하지 않는다. <code>make</code>의 타임스탬프도 유지된다.</li><li><code>booti ${kernel_addr_r} - ${fdtcontroladdr}</code>: 가운데 <code>-</code>는 "initrd 없음". DT는 U-Boot가 QEMU에게서 받은 것(<code>fdtcontroladdr</code>)을 그대로 넘긴다. 랩 README 경고대로 <code>/var/lab/out/virt.dtb</code>는 <code>-kernel</code> 부팅 전용이라 여기에 쓰면 안 된다.</li></ul>
+<h3 id="11-4-첫-시도의-실패-빈-커맨드라인">11.4 첫 시도의 실패 — 빈 커맨드라인<a class="anchor" href="#11-4-첫-시도의-실패-빈-커맨드라인" aria-label="link">#</a></h3>
+<p>처음 스크립트는 <code>setenv bootargs console=... LAB_CMD=cat~a;echo;...</code>처럼 따옴표 없이 보냈다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>=&gt; setenv bootargs console=ttyAMA0 root=/dev/vda rw init=/init LAB_CMD=cat~/proc/device-tree/psci/method;echo;dmesg~|~grep~-m1~-i~psci:~PSCIv;cat~/proc/cmdline
+syntax error
+=&gt; booti ${kernel_addr_r} - ${fdtcontroladdr}
+...
+[    0.000000] Kernel command line: 
+[    0.657507] VFS: Cannot open root device "" or unknown-block(0,0): error -6
+[    0.658470] Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)</code></pre></figure>
+<p>U-Boot의 hush 셸은 <code>;</code>를 명령 구분자로, <code>|</code>를 문법 오류로 본다. <code>setenv</code>가 실패해서 <code>bootargs</code>가 비었고, 커널은 <code>root=</code> 없이 떠서 panic했다. 그런데 panic 뒤 QEMU가 꺼지지 않아 expect가 240초 timeout까지 기다렸다 → (1) 값을 큰따옴표로 감싸고, (2) <code>"Kernel panic"</code> 패턴을 추가해 즉시 실패하게 고쳤다. <strong>자동화 스크립트는 성공 패턴만이 아니라 실패 패턴도 기다려야 한다.</strong></p>
+<h3 id="11-5-성공">11.5 성공<a class="anchor" href="#11-5-성공" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/S1 &amp;&amp; /usr/bin/time -f "wall %e s" /Users/donh/.elinux_scratch/S1/qemu-lab/scripts/tfa-booti.exp \
+  /var/tmp/S1/out "cat~/proc/device-tree/psci/method;echo;cat~/proc/cmdline" &gt; boot3.log 2&gt;&amp;1; \
+  sed "s/\x1b\[[0-9;?]*[a-zA-Z]//g" boot3.log | grep -av "^\[ "; grep -a "psci:" boot3.log'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>spawn qemu-system-aarch64 -machine virt,secure=on -cpu cortex-a57 -m 1024 -nographic -bios /var/tmp/S1/out/flash.bin -drive if=none,id=d0,file=/var/tmp/S1/out/rootfs.ext4,format=raw,snapshot=on -device virtio-blk-device,drive=d0
+NOTICE:  Booting Trusted Firmware
+NOTICE:  BL1: v2.15.0(release):
+NOTICE:  BL1: Built : 16:30:20, Oct 18 2026
+NOTICE:  BL1: Booting BL2
+NOTICE:  BL2: v2.15.0(release):
+NOTICE:  BL2: Built : 16:30:21, Oct 18 2026
+NOTICE:  BL1: Booting BL31
+NOTICE:  BL31: v2.15.0(release):
+NOTICE:  BL31: Built : 16:30:21, Oct 18 2026
+
+
+U-Boot 2026.10 (Oct 18 2026 - 16:29:47 -0700)
+
+DRAM:  1 GiB
+using memory 0x7e44f000-0x7f48f000 for malloc()
+Core:  51 devices, 14 uclasses, devicetree: board
+Flash: 32 MiB
+Loading Environment from Flash...*** Warning - bad CRC, using default environment
+
+In:    serial,usbkbd
+Out:   serial,vidconsole
+Err:   serial,vidconsole
+No USB controllers found
+Net:   eth0: virtio-net#32
+
+Hit any key to stop autoboot: 2Hit any key to stop autoboot: 0
+=&gt; virtio scan; ext4ls virtio 0 /boot
+            ./
+            ../
+  6197256   Image
+
+1 file(s), 2 dir(s)
+
+=&gt; ext4load virtio 0 ${kernel_addr_r} /boot/Image
+6197256 bytes read in 9 ms (656.7 MiB/s)
+=&gt; setenv bootargs "console=ttyAMA0 root=/dev/vda rw init=/init LAB_CMD=cat~/proc/device-tree/psci/method;echo;cat~/proc/cmdline"
+=&gt; booti ${kernel_addr_r} - ${fdtcontroladdr}
+## Flattened Device Tree blob at 7e44cce0
+   Booting using the fdt blob at 0x7e44cce0
+Working FDT set to 7e44cce0
+   Loading Device Tree to 000000007d426000, end 000000007d42b087 ... OK
+Working FDT set to 7d426000
+
+Starting kernel ...
+
+s1-lab: 6.18.55-s1 up 0.44s root=/dev/root
+s1-lab: eth0 10.0.2.15/24
+smc 
+console=ttyAMA0 root=/dev/vda rw init=/init LAB_CMD=cat~/proc/device-tree/psci/method;echo;cat~/proc/cmdline
+wall 1.20 s
+[    0.000000] psci: probing for conduit method from DT.
+[    0.000000] psci: PSCIv1.1 detected in firmware.
+[    0.000000] psci: Using standard PSCI v0.2 function IDs
+[    0.000000] psci: MIGRATE_INFO_TYPE not supported.
+[    0.000000] psci: SMC Calling Convention v1.5</code></pre></figure>
+<p>(커널 로그 <code>[ ...]</code> 줄은 걸렀다. 같은 명령의 직전 실행은 <code>wall 1.88 s</code>였다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>BL1: Booting BL2</code> → <code>BL1: Booting BL31</code> — BL2가 일을 마치면 제어가 BL1을 거쳐 BL31로 간다(qemu 플랫폼은 BL2가 S-EL1에서 돌고 BL1이 EL3에서 BL31로 넘겨 준다, C5 §2). BL31 다음 줄은 바로 U-Boot 배너 — BL33 진입.</li><li><code>Built : 16:30:20</code> — 방금 내가 빌드한 그 TF-A다.</li><li><code>Flash: 32 MiB</code> (②에서는 64 MiB) — secure=on이면 QEMU <code>virt</code>가 첫 번째 flash를 secure 세계 전용으로 돌리기 때문으로 보인다(QEMU virt 문서의 secure 설명). 비보안 U-Boot가 보는 flash가 달라진다는 점만 기억하면 된다.</li><li><strong><code>psci/method</code>가 <code>smc</code>, <code>SMC Calling Convention v1.5</code></strong> — ①②의 <code>hvc</code>/v1.0과 다르다. PSCI(CPU on/off, system off)를 이제 <strong>TF-A BL31이 EL3에서</strong> 처리한다. 마지막의 <code>poweroff</code>도 SMC → BL31 → QEMU 전원 끄기로 갔다.</li><li><code>6197256 bytes read in 9 ms</code> (직전 실행은 25 ms) — 페이지 캐시에 올라간 이미지 파일을 TCG virtio로 읽은 속도라 실제 eMMC 숫자로 쓰면 안 된다.</li></ul>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 330">
+<defs><marker id="ah3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+<text x="10" y="40" font-size="13">① 직접 -kernel (secure=off) — 측정 0.8~1.0 s</text>
+<rect x="10" y="50" width="484" height="40" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="252" y="75" font-size="12" text-anchor="middle">QEMU 내장 로더: Image · initrd · DTB 를 RAM 에 놓고 x0=DTB 로 점프</text>
+<rect x="502" y="50" width="74" height="40" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="539" y="75" font-size="12" text-anchor="middle">Linux EL1</text>
+<line x1="494" y1="70" x2="502" y2="70" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="584" y="50" width="74" height="40" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="621" y="75" font-size="12" text-anchor="middle">/init</text>
+<line x1="576" y1="70" x2="584" y2="70" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="10" y="110" font-size="12">PSCI = QEMU 가 직접 처리 (method hvc) · DTB = QEMU 생성, /chosen 은 QEMU 가 패치</text>
+<text x="10" y="140" font-size="13">② -bios u-boot.bin (secure=off) — 3.1~3.2 s (bootdelay 2 s 포함)</text>
+<rect x="10" y="150" width="238" height="40" rx="4" fill="#888" fill-opacity="0.12" stroke="#888" stroke-dasharray="4 3"/>
+<text x="129" y="175" font-size="12" text-anchor="middle">EL3 펌웨어 없음</text>
+<rect x="256" y="150" width="74" height="40" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="293" y="175" font-size="12" text-anchor="middle">U-Boot</text>
+<line x1="248" y1="170" x2="256" y2="170" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="338" y="150" width="74" height="40" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="375" y="175" font-size="12" text-anchor="middle">qfw load</text>
+<line x1="330" y1="170" x2="338" y2="170" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="420" y="150" width="74" height="40" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="457" y="175" font-size="12" text-anchor="middle">booti</text>
+<line x1="412" y1="170" x2="420" y2="170" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="502" y="150" width="74" height="40" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="539" y="175" font-size="12" text-anchor="middle">Linux EL1</text>
+<line x1="494" y1="170" x2="502" y2="170" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="584" y="150" width="74" height="40" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="621" y="175" font-size="12" text-anchor="middle">/init</text>
+<line x1="576" y1="170" x2="584" y2="170" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="10" y="210" font-size="12">PSCI = QEMU (hvc) · DTB = U-Boot 가 받은 QEMU DT · 커널·initrd 출처 = fw_cfg</text>
+<text x="10" y="240" font-size="13">③ secure=on -bios flash.bin — 1.2~1.9 s (autoboot 즉시 중단)</text>
+<rect x="10" y="250" width="74" height="40" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="47" y="275" font-size="12" text-anchor="middle">BL1 EL3</text>
+<rect x="92" y="250" width="74" height="40" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="129" y="275" font-size="12" text-anchor="middle">BL2</text>
+<line x1="84" y1="270" x2="92" y2="270" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="174" y="250" width="74" height="40" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="211" y="275" font-size="12" text-anchor="middle">BL31</text>
+<line x1="166" y1="270" x2="174" y2="270" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="256" y="250" width="74" height="40" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="293" y="275" font-size="12" text-anchor="middle">U-Boot</text>
+<line x1="248" y1="270" x2="256" y2="270" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="338" y="250" width="74" height="40" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="375" y="275" font-size="12" text-anchor="middle">ext4load</text>
+<line x1="330" y1="270" x2="338" y2="270" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="420" y="250" width="74" height="40" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="457" y="275" font-size="12" text-anchor="middle">booti</text>
+<line x1="412" y1="270" x2="420" y2="270" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="502" y="250" width="74" height="40" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="539" y="275" font-size="12" text-anchor="middle">Linux EL1</text>
+<line x1="494" y1="270" x2="502" y2="270" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="584" y="250" width="74" height="40" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="621" y="275" font-size="12" text-anchor="middle">/init</text>
+<line x1="576" y1="270" x2="584" y2="270" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="10" y="310" font-size="12">PSCI = TF-A BL31 (method smc, SMCCC v1.5) · 커널 출처 = virtio-blk ext4 /boot/Image</text>
+</svg></figure>
+<p>그림 3 — 세 부팅 경로 비교. 오른쪽 두 칸(Linux, /init)은 같고, 왼쪽에서 누가 커널을 RAM에 놓고 PSCI를 누가 제공하는지가 다르다. 시간은 QEMU 프로세스 시작부터 poweroff까지의 wall time(TCG).</p>
+<div class="tw"><table><thead><tr><th></th><th>① <code>-kernel</code></th><th>② <code>-bios u-boot.bin</code></th><th>③ <code>secure=on flash.bin</code></th></tr></thead><tbody><tr><td>처음 실행되는 코드</td><td>QEMU 부트 스텁 @0x40000000 (EL1)</td><td>U-Boot @0x0 flash (EL1, virtualization=off라 EL2 없음)</td><td>TF-A BL1 @0x0 (EL3)</td></tr><tr><td>커널을 RAM에 놓는 주체</td><td>QEMU</td><td>U-Boot (fw_cfg 읽기)</td><td>U-Boot (virtio-blk ext4)</td></tr><tr><td>DT</td><td>QEMU 생성, QEMU가 /chosen 패치</td><td>QEMU 생성 → U-Boot → 커널</td><td>같음, secure 장치는 빠짐</td></tr><tr><td>PSCI conduit</td><td><code>hvc</code> (QEMU)</td><td><code>hvc</code> (QEMU)</td><td><code>smc</code> (TF-A BL31)</td></tr><tr><td>필요한 RAM</td><td>512 MB</td><td>512 MB</td><td>1024 MB (BL33 @0x60000000)</td></tr><tr><td>측정 wall time</td><td>0.80–1.01 s</td><td>3.11–3.21 s (bootdelay 2 s 포함)</td><td>1.20–1.88 s (autoboot 즉시 중단)</td></tr><tr><td>언제 쓰나</td><td>커널·드라이버 개발 루프</td><td>부트로더 명령·환경 실험</td><td>secure boot, PSCI, OP-TEE, 실제 보드 흉내</td></tr></tbody></table></div>
+<p>체크포인트: <strong>③에서 <code>smc</code>가 출력되면 전체 체인이 내 빌드로 돈 것이다.</strong></p>
+<hr>
+<h2 id="12-step-10-네트워크와-호스트-파일-공유-ssh-없이">12. Step 10 — 네트워크와 호스트 파일 공유 (ssh 없이)<a class="anchor" href="#12-step-10-네트워크와-호스트-파일-공유-ssh-없이" aria-label="link">#</a></h2>
+<h3 id="12-1-구성">12.1 구성<a class="anchor" href="#12-1-구성" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>기능</th><th>QEMU 옵션</th><th>게스트 쪽</th></tr></thead><tbody><tr><td>user 모드 NAT</td><td><code>-netdev user,id=n0 -device virtio-net-device,netdev=n0</code></td><td><code>udhcpc</code> → 10.0.2.15, gw 10.0.2.2, DNS 10.0.2.3</td></tr><tr><td>호스트 → 게스트 포트</td><td><code>hostfwd=tcp:127.0.0.1:43100-:80</code></td><td>게스트 80번에 BusyBox <code>httpd</code></td></tr><tr><td>파일 공유</td><td><code>-virtfs local,path=/var/tmp/S1/share,mount_tag=host0,security_model=none,id=h0</code></td><td><code>mount -t 9p -o trans=virtio host0 /mnt/host</code></td></tr></tbody></table></div>
+<p>user 모드(slirp)는 root 권한도 tap 장치도 필요 없어서 공용 VM에 맞다. 대신 게스트로 들어오는 연결은 <code>hostfwd</code>로 연 포트만 된다. <code>hostfwd</code>를 <code>127.0.0.1</code>에 묶은 것은 VM 밖으로 포트를 열지 않으려는 것이다. virtio-fs(<code>vhost-user-fs</code>)도 QEMU에는 있지만 VM에 <code>virtiofsd</code>가 없어서(설치 안 함) 9p를 골랐다 — 9p는 QEMU 안에서 서버가 돌아 별도 데몬이 필요 없다.</p>
+<h3 id="12-2-실행-한-번에-4가지-확인">12.2 실행 — 한 번에 4가지 확인<a class="anchor" href="#12-2-실행-한-번에-4가지-확인" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/S1 &amp;&amp; mkdir -p share &amp;&amp; echo "hello from VM host $(date +%T)" &gt; share/hello.txt &amp;&amp; rm -f share/from_guest.txt; \
+ (timeout 90 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -kernel out/Image -initrd out/initramfs.cpio.gz \
+  -append "console=ttyAMA0 quiet LAB_CMD=cat~/mnt/host/hello.txt;uname~-r~&gt;~/mnt/host/from_guest.txt;ip~route;cat~/etc/resolv.conf;nslookup~kernel.org~|~tail~-2;httpd~-p~80~-h~/mnt/host;sleep~8" \
+  -netdev user,id=n0,hostfwd=tcp:127.0.0.1:43100-:80 -device virtio-net-device,netdev=n0 \
+  -virtfs local,path=/var/tmp/S1/share,mount_tag=host0,security_model=none,id=h0 &gt; net.log 2&gt;&amp;1 &amp;); \
+ for i in $(seq 1 40); do curl -s --max-time 2 http://127.0.0.1:43100/hello.txt &amp;&amp; break; sleep 0.5; done; echo "curl try=$i"; \
+ sleep 9; cat net.log; echo ---; cat share/from_guest.txt'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>hello from VM host 16:57:03
+curl try=3
+s1-lab: 6.18.55-s1 up 0.42s root=rootfs
+s1-lab: eth0 10.0.2.15/24
+s1-lab: 9p host0 -&gt; /mnt/host
+hello from VM host 16:57:03
+default via 10.0.2.2 dev eth0 
+10.0.2.0/24 dev eth0 scope link  src 10.0.2.15 
+nameserver 10.0.2.3
+Address: 172.105.4.254
+
+[    8.705810] reboot: Power down
+---
+6.18.55-s1</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>첫 줄: VM에서 <code>curl 127.0.0.1:43100</code>이 <strong>게스트의 httpd가 9p로 서빙한 파일</strong>을 받았다 (VM → hostfwd → 게스트 80 → 9p → VM 디렉터리, 한 바퀴).</li><li>게스트가 <code>uname -r</code>을 <code>/mnt/host/from_guest.txt</code>에 썼고 VM에서 그대로 읽혔다 — ssh도 scp도 없이 양방향 파일 전송.</li><li><code>nslookup kernel.org</code>가 실제 주소를 받았다 — slirp가 DNS를 VM의 리졸버로 중계한다.</li><li><code>-device virtio-net-device</code>(MMIO)를 명시하면 §9의 기본 PCI NIC는 생기지 않는다.</li></ul>
+<p>이게 드라이버 개발 루프의 핵심이다: VM에서 <code>.ko</code>나 테스트 바이너리를 빌드해 <code>share/</code>에 두면, 게스트를 다시 만들지 않고 <code>/mnt/host/x.ko</code>로 바로 <code>insmod</code>한다(S2에서 쓴다).</p>
+<p>체크포인트: <strong><code>s1-lab: 9p host0 -&gt; /mnt/host</code>와 <code>from_guest.txt</code>.</strong></p>
+<hr>
+<h2 id="13-step-11-gdbstub-이-랩의-jtag">13. Step 11 — gdbstub: 이 랩의 JTAG<a class="anchor" href="#13-step-11-gdbstub-이-랩의-jtag" aria-label="link">#</a></h2>
+<p>M4 §3에서 개념(QEMU gdbstub = JTAG 프로브)을 배웠다. 여기서는 내 커널로 "reset halt → 첫 명령 → <code>start_kernel</code> → 드라이버 probe" 순서를 따라간다. 실제 보드에서 Lauterbach/OpenOCD로 하는 첫 세션과 같은 순서다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/S1 &amp;&amp; (timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic \
+  -kernel out/Image -initrd out/initramfs.cpio.gz -append "console=ttyAMA0 nokaslr LAB_CMD=true" \
+  -gdb tcp:127.0.0.1:43101 -S &gt; gdbq.log 2&gt;&amp;1 &amp;); sleep 1; \
+  timeout 100 gdb -q -batch -iex "set auto-load safe-path /" -ex "file build/linux/vmlinux" -ex "source build/linux/vmlinux-gdb.py" \
+  -ex "target remote 127.0.0.1:43101" -ex "info registers pc" -ex "x/3i \$pc" \
+  -ex "hbreak start_kernel" -ex "continue" -ex "info registers pc sp" \
+  -ex "hbreak pl011_probe" -ex "continue" -ex "bt 8" -ex "lx-version" -ex "p init_task.comm" -ex "delete" -ex "detach" 2&gt;&amp;1 | grep -v "^warning: could not"; \
+  sleep 3; tail -3 gdbq.log'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0x0000000040000000 in ?? ()
+pc             0x40000000          0x40000000
+=&gt; 0x40000000:	ldr	x0, 0x40000018
+   0x40000004:	mov	x1, xzr
+   0x40000008:	mov	x2, xzr
+Hardware assisted breakpoint 1 at 0xffff8000804f0728: file /var/tmp/S1/src/linux/init/main.c, line 872.
+
+Breakpoint 1, start_kernel () at /var/tmp/S1/src/linux/init/main.c:872
+872		char *command_line;
+pc             0xffff8000804f0728  0xffff8000804f0728 &lt;start_kernel&gt;
+sp             0xffff800080543ec0  0xffff800080543ec0
+Hardware assisted breakpoint 2 at 0xffff80008023e848: file /var/tmp/S1/src/linux/drivers/tty/serial/amba-pl011.c, line 2902.
+
+Breakpoint 2, pl011_probe (dev=0xffff000000d67000, id=0xffff80008040eb50 &lt;pl011_ids&gt;) at /var/tmp/S1/src/linux/drivers/tty/serial/amba-pl011.c:2902
+2902		struct vendor_data *vendor = id-&gt;data;
+#0  pl011_probe (dev=0xffff000000d67000, id=0xffff80008040eb50 &lt;pl011_ids&gt;) at /var/tmp/S1/src/linux/drivers/tty/serial/amba-pl011.c:2902
+#1  0xffff800080210b24 in amba_probe (dev=0xffff000000d67000) at /var/tmp/S1/src/linux/drivers/amba/bus.c:282
+#2  0xffff800080249984 in call_driver_probe (dev=0xffff000000d67000, drv=0xffff8000805d9db8 &lt;pl011_driver&gt;) at /var/tmp/S1/src/linux/drivers/base/dd.c:640
+#3  really_probe (dev=dev@entry=0xffff000000d67000, drv=drv@entry=0xffff8000805d9db8 &lt;pl011_driver&gt;) at /var/tmp/S1/src/linux/drivers/base/dd.c:718
+#4  0xffff800080249b70 in __driver_probe_device (drv=drv@entry=0xffff8000805d9db8 &lt;pl011_driver&gt;, dev=dev@entry=0xffff000000d67000) at /var/tmp/S1/src/linux/drivers/base/dd.c:880
+#5  0xffff800080249c20 in driver_probe_device (drv=drv@entry=0xffff8000805d9db8 &lt;pl011_driver&gt;, dev=dev@entry=0xffff000000d67000) at /var/tmp/S1/src/linux/drivers/base/dd.c:910
+#6  0xffff800080249cf8 in __device_attach_driver (drv=0xffff8000805d9db8 &lt;pl011_driver&gt;, _data=0xffff80008068bbd0) at /var/tmp/S1/src/linux/drivers/base/dd.c:1038
+#7  0xffff800080247eb4 in bus_for_each_drv (bus=&lt;optimized out&gt;, start=start@entry=0x0, data=data@entry=0xffff80008068bbd0, fn=fn@entry=0xffff800080249ca0 &lt;__device_attach_driver&gt;) at /var/tmp/S1/src/linux/drivers/base/bus.c:462
+Linux version 6.18.55-s1 (donh@lima-elinux) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #1 SMP Sun Oct 18 16:35:53 PDT 2026
+$1 = "swapper/0\000\000\000\000\000\000"
+[Inferior 1 (process 1) detached]
+s1-lab: 6.18.55-s1 up 0.43s root=rootfs
+s1-lab: eth0 10.0.2.15/24
+[    0.625072] reboot: Power down</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><code>-S</code>로 <strong>리셋 직후 멈춘</strong> CPU의 PC는 <code>0x40000000</code> — §9에서 말한 QEMU 부트 스텁이다. <code>ldr x0, 0x40000018</code>(DTB 주소 로드), <code>mov x1, xzr</code>, <code>mov x2, xzr</code>가 <strong>arm64 부팅 프로토콜</strong>(x0=DTB, x1–x3=0)을 그대로 보여 준다(C6 §2).</li><li><code>hbreak</code>(하드웨어 브레이크포인트)를 쓴 이유: MMU가 켜지기 전에는 가상 주소 <code>0xffff8000...</code>에 소프트웨어 브레이크(메모리에 BRK 명령 쓰기)를 걸 수 없다. JTAG에서 flash 코드에 HW breakpoint를 쓰는 것과 같은 이유.</li><li><code>bt</code>: <code>bus_for_each_drv → __device_attach_driver → driver_probe_device → really_probe → call_driver_probe → amba_probe → pl011_probe</code> — G 모듈의 driver model 매칭 경로가 실물 스택으로 나왔다(G3, D3).</li><li><code>lx-version</code>, <code>init_task.comm</code> — <code>scripts_gdb</code> 타깃으로 만든 <code>vmlinux-gdb.py</code>가 커널 자료구조를 읽는다. <code>nokaslr</code>은 이 커널엔 <code>RANDOMIZE_BASE</code>가 없어 사실 필요 없지만, defconfig 커널에서도 같은 명령이 되도록 습관으로 넣는다.</li><li><code>detach</code> 후 게스트가 정상 부팅해서 꺼졌다 — 디버거가 상태를 망가뜨리지 않았다.</li></ul>
+<p>체크포인트: <strong><code>Breakpoint 2, pl011_probe</code>와 8단 backtrace.</strong> Makefile의 <code>run-gdb</code> 타깃이 QEMU 쪽 명령을 담고 있다.</p>
+<hr>
+<h2 id="14-step-12-한-번에-다시-만들기-idempotent-rebuild">14. Step 12 — 한 번에 다시 만들기 (idempotent rebuild)<a class="anchor" href="#14-step-12-한-번에-다시-만들기-idempotent-rebuild" aria-label="link">#</a></h2>
+<h3 id="14-1-두-번째-make-all은-아무것도-안-한다">14.1 두 번째 <code>make all</code>은 아무것도 안 한다<a class="anchor" href="#14-1-두-번째-make-all은-아무것도-안-한다" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp &amp;&amp; M="make -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1"; \
+  $M all 2&gt;&amp;1 | tail -2; $M -q all; echo "make -q exit=$?"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>make: Nothing to be done for 'all'.
+make: Leaving directory '/Users/donh/.elinux_scratch/S1/qemu-lab'
+make -q exit=0</code></pre></figure>
+<p><code>make -q</code>의 종료 코드 0은 "모든 타깃이 최신"이라는 뜻이다. CI에서 "산출물이 소스와 맞는가"를 검사하는 데 쓸 수 있다.</p>
+<h3 id="14-2-init을-고치면-rootfs와-이미지-두-개만">14.2 <code>/init</code>을 고치면 → rootfs와 이미지 두 개만<a class="anchor" href="#14-2-init을-고치면-rootfs와-이미지-두-개만" aria-label="link">#</a></h3>
+<p>§8.4에서 9p 마운트 조건을 고친 직후 <code>make -n</code>(실행하지 않고 할 일만 출력)을 찍었다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp &amp;&amp; make -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 -n all | grep -vE "^make" | cut -c1-110; \
+  /usr/bin/time -f "rebuild after init edit: %e s" make -s -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 all'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>rm -rf /var/tmp/S1/rootfs; make -C /var/tmp/S1/build/busybox CONFIG_PREFIX=/var/tmp/S1/rootfs install &gt;/dev/nu
+cd /var/tmp/S1/rootfs &amp;&amp; mkdir -p proc sys dev tmp etc mnt root usr/share/udhcpc boot
+install -m755 /Users/donh/.elinux_scratch/S1/qemu-lab/rootfs/init /var/tmp/S1/rootfs/init
+install -m755 /Users/donh/.elinux_scratch/S1/qemu-lab/rootfs/udhcpc.script /var/tmp/S1/rootfs/usr/share/udhcpc
+mkdir -p /var/tmp/S1/.stamp; touch /var/tmp/S1/.stamp/rootfs
+mkdir -p /var/tmp/S1/out; cd /var/tmp/S1/rootfs &amp;&amp; find . | LC_ALL=C sort | cpio -o -H newc -R 0:0 --quiet | g
+rm -rf /var/tmp/S1/rootfs-disk; cp -a /var/tmp/S1/rootfs /var/tmp/S1/rootfs-disk; cp /var/tmp/S1/out/Image /va
+rm -f /var/tmp/S1/out/rootfs.ext4; mkfs.ext4 -q -L s1root -E root_owner=0:0 -d /var/tmp/S1/rootfs-disk /var/tm
+rebuild after init edit: 4.66 s</code></pre></figure>
+<p>커널·U-Boot·TF-A·BusyBox 컴파일은 하나도 없다. 4.7초.</p>
+<h3 id="14-3-fragment를-touch하면-설정은-다시-컴파일은-0개">14.3 fragment를 <code>touch</code>하면 → 설정은 다시, 컴파일은 0개<a class="anchor" href="#14-3-fragment를-touch하면-설정은-다시-컴파일은-0개" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>touch ~/.elinux_scratch/S1/qemu-lab/config/kernel-virt.fragment
+limactl shell elinux -- bash -lc 'cd /var/tmp &amp;&amp; /usr/bin/time -f "rebuild after touching fragment: %e s" \
+  make -C /Users/donh/.elinux_scratch/S1/qemu-lab B=/var/tmp/S1 all &gt; /var/tmp/S1/rebuild.log 2&gt;&amp;1; tail -1 /var/tmp/S1/rebuild.log; \
+  grep -cE " (CC|LD|AR) " /var/tmp/S1/rebuild.log; grep -vE "Entering|Leaving|^#|^$|redefined|Previous value|New value|^Using|^Merging" /var/tmp/S1/rebuild.log | cut -c1-100'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>rebuild after touching fragment: 14.33 s
+0
+make -C /var/tmp/S1/src/linux O=/var/tmp/S1/build/linux tinyconfig
+  GEN     Makefile
+cd /var/tmp/S1/build/linux &amp;&amp; /var/tmp/S1/src/linux/scripts/kconfig/merge_config.sh -m -O /var/tmp/S1/build/li
+make -C /var/tmp/S1/src/linux O=/var/tmp/S1/build/linux olddefconfig
+  GEN     Makefile
+fragment OK: 46 options applied, 718 =y total
+make -C /var/tmp/S1/src/linux O=/var/tmp/S1/build/linux -j2 Image scripts_gdb
+  SYNC    include/config/auto.conf
+  CALL    /var/tmp/S1/src/linux/scripts/checksyscalls.sh
+rm -rf /var/tmp/S1/rootfs-disk; cp -a /var/tmp/S1/rootfs /var/tmp/S1/rootfs-disk; cp /var/tmp/S1/out/Image /va
+rm -f /var/tmp/S1/out/rootfs.ext4; mkfs.ext4 -q -L s1root -E root_owner=0:0 -d /var/tmp/S1/rootfs-disk /var/tm
+rebuild after touching fragment: 14.33 s</code></pre></figure>
+<p>(<code>GEN Makefile</code> 반복 줄은 하나만 남겼다.)</p>
+<p>출력에서 볼 것: Make 입장에서는 fragment가 새로워져서 <code>.config</code>를 다시 만들었지만, 내용이 같으므로 Kbuild의 <code>syncconfig</code>가 <code>auto.conf</code>를 비교해서 <strong>다시 컴파일한 오브젝트가 0개</strong>다(E2 §8의 fixdep 이야기). 두 겹의 증분 판단 — Make는 파일 시각, Kbuild는 설정 내용과 헤더 의존성.</p>
+<p>주의: Mac에서 <code>touch</code>한 직후 VM에서 바로 <code>make -n</code>을 돌렸을 때 한 번은 <code>Nothing to be done</code>이 나왔다. Lima의 공유 마운트가 mtime을 늦게 반영하는 경우가 있다 — 이상하면 몇 초 뒤 다시 돌린다.</p>
+<h3 id="14-4-클린-빌드-총-시간">14.4 클린 빌드 총 시간<a class="anchor" href="#14-4-클린-빌드-총-시간" aria-label="link">#</a></h3>
+<figure class="chart"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 300">
+<text x="20" y="28" font-size="14">클린 빌드 단계별 wall time (초, -j2, Lima VM on M2) — 합계 약 386 s</text>
+<text x="260" y="67" font-size="13" text-anchor="end">Linux 커널 (tinyconfig+fragment)</text>
+<rect x="270" y="50" width="323.1" height="24" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="599.1" y="67" font-size="13">293.7 s</text>
+<text x="260" y="103" font-size="13" text-anchor="end">BusyBox static</text>
+<rect x="270" y="86" width="47.4" height="24" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="323.4" y="103" font-size="13">43.1 s</text>
+<text x="260" y="139" font-size="13" text-anchor="end">U-Boot qemu_arm64</text>
+<rect x="270" y="122" width="30.2" height="24" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="306.2" y="139" font-size="13">27.5 s</text>
+<text x="260" y="175" font-size="13" text-anchor="end">이미지 (cpio + ext4)</text>
+<rect x="270" y="158" width="12.3" height="24" fill="#888" fill-opacity="0.6" stroke="#888"/>
+<text x="288.3" y="175" font-size="13">11.2 s</text>
+<text x="260" y="211" font-size="13" text-anchor="end">tar 풀기 4개</text>
+<rect x="270" y="194" width="8.5" height="24" fill="#888" fill-opacity="0.6" stroke="#888"/>
+<text x="284.5" y="211" font-size="13">7.7 s</text>
+<text x="260" y="247" font-size="13" text-anchor="end">TF-A PLAT=qemu</text>
+<rect x="270" y="230" width="3.0" height="24" fill="#d0564a" fill-opacity="0.6" stroke="#d0564a"/>
+<text x="279.0" y="247" font-size="13">2.7 s</text>
+<line x1="270" y1="44" x2="270" y2="266" stroke="currentColor"/>
+<line x1="270.0" y1="266" x2="270.0" y2="271" stroke="currentColor"/><text x="270.0" y="286" font-size="12" text-anchor="middle">0</text>
+<line x1="380.0" y1="266" x2="380.0" y2="271" stroke="currentColor"/><text x="380.0" y="286" font-size="12" text-anchor="middle">100</text>
+<line x1="490.0" y1="266" x2="490.0" y2="271" stroke="currentColor"/><text x="490.0" y="286" font-size="12" text-anchor="middle">200</text>
+<line x1="600.0" y1="266" x2="600.0" y2="271" stroke="currentColor"/><text x="600.0" y="286" font-size="12" text-anchor="middle">300</text>
+</svg></figure>
+<p>그림 4 — 클린 빌드 단계별 wall time. 커널이 전체의 76%. 다른 작성자들과 CPU를 공유하던 중의 측정이다.</p>
+<div class="tw"><table><thead><tr><th>산출물</th><th>크기</th></tr></thead><tbody><tr><td><code>Image</code></td><td>6,197,256 B (랩 defconfig 42,740,224 B)</td></tr><tr><td><code>vmlinux</code></td><td>97,870,344 B (text+data+bss 6.4 MB, 나머지 DWARF)</td></tr><tr><td><code>u-boot.bin</code></td><td>1,504,208 B</td></tr><tr><td><code>bl1.bin</code> · <code>bl2.bin</code> · <code>bl31.bin</code></td><td>22,832 · 25,072 · 49,255 B</td></tr><tr><td><code>fip.bin</code> / <code>flash.bin</code></td><td>1,578,711 B / 67,108,864 B</td></tr><tr><td><code>busybox</code> (static, stripped)</td><td>2,242,744 B</td></tr><tr><td><code>initramfs.cpio.gz</code></td><td>1,209,826 B</td></tr><tr><td><code>rootfs.ext4</code></td><td>64 MiB (사용 7.5 MB)</td></tr><tr><td>디스크 최대 사용</td><td><code>/var/tmp/S1</code> 3.1 GB (소스 2.1 GB가 대부분)</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-buildroot-경로-가이드-실행-안-함">15. Buildroot 경로 — 가이드(실행 안 함)<a class="anchor" href="#15-buildroot-경로-가이드-실행-안-함" aria-label="link">#</a></h2>
+<p>Don의 결정(무거운 빌드는 가이드만)에 따라 이 절은 <strong>실행하지 않았다.</strong> config만 만드는 가벼운 단계는 Buildroot 트리가 VM에 이미 있으면 돌려도 되지만, 확인 결과 없다(K3가 쓰던 <code>/var/tmp/K3/</code>는 정리됐고, 다른 곳에도 <code>Config.in.legacy</code>가 있는 트리가 없다). Buildroot를 새로 받는 것도 이번 범위 밖이라 config 단계도 실행하지 않았다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'ls -d /var/tmp/K3/k3_buildroot; find /var/tmp /home /opt -maxdepth 4 -name Config.in.legacy 2&gt;/dev/null | wc -l'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>ls: cannot access '/var/tmp/K3/k3_buildroot': No such file or directory
+0</code></pre></figure>
+<p>출력에서 볼 것: Buildroot 트리의 표식 파일(<code>Config.in.legacy</code>)이 0개 — 쓸 수 있는 트리가 없다.</p>
+<h3 id="15-1-손으로-만든-것과-buildroot의-대응">15.1 손으로 만든 것과 Buildroot의 대응<a class="anchor" href="#15-1-손으로-만든-것과-buildroot의-대응" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>S1 Makefile</th><th>Buildroot</th></tr></thead><tbody><tr><td><code>checksums/SHA256SUMS</code></td><td>패키지마다 <code>&lt;pkg&gt;.hash</code> + <code>BR2_DOWNLOAD_FORCE_CHECK_HASHES</code></td></tr><tr><td><code>dl/</code> 캐시 symlink</td><td><code>BR2_DL_DIR</code> (여러 빌드가 공유)</td></tr><tr><td>호스트 gcc 그대로</td><td>툴체인: internal(직접 빌드) 또는 <strong>external</strong>(Bootlin 등 미리 빌드된 것, K3 §4)</td></tr><tr><td><code>kernel-virt.fragment</code></td><td><code>BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES</code></td></tr><tr><td>BusyBox <code>sed</code> 3줄</td><td><code>BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES</code></td></tr><tr><td><code>rootfs/init</code> 설치</td><td><code>BR2_ROOTFS_OVERLAY</code></td></tr><tr><td><code>mkfs.ext4 -d</code> + <code>cpio -R 0:0</code></td><td><code>BR2_TARGET_ROOTFS_EXT2_4</code>, <code>BR2_TARGET_ROOTFS_CPIO</code> + fakeroot (소유자 문제를 해결해 준다)</td></tr><tr><td>TF-A <code>dd</code> 레시피</td><td><code>BR2_TARGET_ARM_TRUSTED_FIRMWARE</code> + post-image 스크립트/genimage</td></tr><tr><td><code>.stamp/</code> 증분</td><td>패키지별 <code>.stamp_*</code> — 단, <strong>설정 변경을 추적하지 않는다</strong> (K3 §10)</td></tr></tbody></table></div>
+<h3 id="15-2-br2_external-골격-파일은-만들었고-빌드는-안-했다">15.2 BR2_EXTERNAL 골격 (파일은 만들었고, 빌드는 안 했다)<a class="anchor" href="#15-2-br2_external-골격-파일은-만들었고-빌드는-안-했다" aria-label="link">#</a></h3>
+<p>저장소의 <code>buildroot-external/</code>:</p>
+<figure class="code"><span class="lang">text</span><pre><code>buildroot-external/
+  external.desc                      name: S1QEMU
+  Config.in                          (자체 패키지 Config.in 을 source 할 자리)
+  external.mk                        include package/*/*.mk
+  configs/s1_qemu_aarch64_defconfig
+  board/s1qemu/linux-s1.fragment
+  board/s1qemu/overlay/etc/hostname</code></pre></figure>
+<p><code>configs/s1_qemu_aarch64_defconfig</code> — 업스트림 <code>qemu_aarch64_virt_defconfig</code>(K3 §2에서 실물을 봤다)에 external 툴체인과 fragment를 얹은 것이다. 심볼 이름은 K3에서 실제로 확인한 것과 Buildroot 매뉴얼 기준이며, <strong>이 파일 자체로 빌드해 보지는 않았다.</strong></p>
+<figure class="code"><span class="lang">text</span><pre><code>BR2_aarch64=y
+BR2_cortex_a57=y
+BR2_TOOLCHAIN_EXTERNAL=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_AARCH64_GLIBC_STABLE=y
+BR2_SYSTEM_DHCP="eth0"
+BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_S1QEMU_PATH)/board/s1qemu/overlay"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="board/qemu/post-image.sh"
+BR2_ROOTFS_POST_SCRIPT_ARGS="$(BR2_DEFCONFIG)"
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.55"
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/qemu/aarch64-virt/linux.config"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_S1QEMU_PATH)/board/s1qemu/linux-s1.fragment"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="128M"
+BR2_TARGET_UBOOT=y
+BR2_TARGET_UBOOT_BUILD_SYSTEM_KCONFIG=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION=y
+BR2_TARGET_UBOOT_CUSTOM_VERSION_VALUE="2026.10"
+BR2_TARGET_UBOOT_BOARD_DEFCONFIG="qemu_arm64"</code></pre></figure>
+<h3 id="15-3-돌린다면-가이드-실행-안-함">15.3 돌린다면 (가이드 — 실행 안 함)<a class="anchor" href="#15-3-돌린다면-가이드-실행-안-함" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>git clone https://gitlab.com/buildroot.org/buildroot.git /var/tmp/S1/buildroot     # 또는 릴리스 tarball + 서명 확인
+cd /var/tmp/S1/buildroot &amp;&amp; git checkout &lt;LTS 태그&gt;
+make O=/var/tmp/S1/br BR2_EXTERNAL=/Users/donh/.elinux_scratch/S1/qemu-lab/buildroot-external s1_qemu_aarch64_defconfig
+make -C /var/tmp/S1/br show-info | head            # 패키지 목록 확인 (빌드 전)
+make -C /var/tmp/S1/br -j2                          # 여기부터가 무거운 빌드: 실행하지 않는다
+qemu-system-aarch64 -M virt -cpu cortex-a57 -m 512M -nographic \
+  -kernel /var/tmp/S1/br/images/Image -append "rootwait root=/dev/vda console=ttyAMA0" \
+  -drive file=/var/tmp/S1/br/images/rootfs.ext4,if=none,format=raw,id=hd0 -device virtio-blk-device,drive=hd0 \
+  -netdev user,id=n0 -device virtio-net-device,netdev=n0</code></pre></figure>
+<p>예상되는 막힘(실행하지 않았으므로 확인 안 된 위험 목록):</p>
+<ul><li>U-Boot 2026.10은 호스트 도구 빌드에 gnutls/openssl이 필요하다 → <code>BR2_TARGET_UBOOT_NEEDS_GNUTLS=y</code> 류의 옵션이 필요할 수 있다.</li><li>external 툴체인의 커널 헤더 버전 &lt; 타깃 커널이면 괜찮지만, 반대면 Buildroot가 거부한다(B5 §4).</li><li>TF-A까지 Buildroot로 만들려면 <code>BR2_TARGET_ARM_TRUSTED_FIRMWARE_PLATFORM="qemu"</code>, <code>..._UBOOT_AS_BL33=y</code>, 그리고 §6의 <code>dd</code> 레시피를 post-image 스크립트로 옮겨야 한다.</li></ul>
+<hr>
+<h2 id="16-흔한-실패와-고치는-법">16. 흔한 실패와 고치는 법<a class="anchor" href="#16-흔한-실패와-고치는-법" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실패</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>fragment 옵션 증발</td><td><code>DROPPED: CONFIG_TMPFS=y -&gt; absent</code> (검사 없으면 무증상)</td><td><code>depends on SHMEM</code>, tinyconfig가 SHMEM을 끔</td><td>의존 옵션을 fragment에 추가, <code>check-fragment.sh</code> 유지</td></tr><tr><td>망가진 <code>.config</code>가 남음</td><td>실패 뒤 <code>make</code>가 그냥 통과</td><td>레시피 실패해도 타깃 파일 존재</td><td><code>.DELETE_ON_ERROR:</code></td></tr><tr><td>BusyBox O=</td><td><code>output directory ... does not exist</code></td><td>BusyBox는 O= 디렉터리를 안 만든다</td><td><code>mkdir -p $(BBO)</code></td></tr><tr><td>BusyBox SHA1</td><td><code>sha1_process_block64_shaNI undeclared</code></td><td>x86 전용 가속이 defconfig에 켜짐</td><td><code>SHA1_HWACCEL</code>, <code>SHA256_HWACCEL</code> 끄기</td></tr><tr><td>BusyBox tc</td><td><code>TCA_CBQ_MAX undeclared</code></td><td>호스트 커널 UAPI에서 CBQ 제거</td><td><code>CONFIG_TC</code> 끄기</td></tr><tr><td>U-Boot <code>setenv</code></td><td><code>syntax error</code> → <code>Kernel command line:</code> 빈 줄 → VFS panic</td><td>hush가 <code>;</code>와 파이프 문자를 해석</td><td>값 전체를 큰따옴표로</td></tr><tr><td>TF-A 무출력</td><td><code>-bios flash.bin</code>인데 아무것도 안 나옴</td><td><code>secure=on</code> 빠짐 (BL1은 EL3에서만 의미)</td><td><code>-machine virt,secure=on</code></td></tr><tr><td>TF-A가 BL2에서 멈춤</td><td><code>BL2: Built : ...</code> 다음 무출력</td><td><code>-m 512</code>, BL33 주소 0x60000000에 RAM 없음</td><td><code>-m 1024</code></td></tr><tr><td>expect가 4분 기다림</td><td>panic 뒤 timeout</td><td>성공 패턴만 기다림</td><td><code>"Kernel panic"</code> 패턴 추가</td></tr><tr><td>initramfs에 커널이 들어감</td><td>initramfs가 갑자기 7 MB</td><td>rootfs 트리 공유</td><td>디스크용 사본 <code>rootfs-disk/</code></td></tr><tr><td>9p 커널 경고</td><td><code>9pnet_virtio: no channels available for device host0</code></td><td>장치 없이 mount 시도</td><td>sysfs <code>mount_tag</code> 먼저 확인</td></tr><tr><td><code>-nic</code> 없는데 eth0</td><td>예상 밖 PCI NIC</td><td>virt 기본 NIC</td><td>원하면 <code>-nic none</code></td></tr></tbody></table></div>
+<hr>
+<h2 id="17-확장-과제">17. 확장 과제<a class="anchor" href="#17-확장-과제" aria-label="link">#</a></h2>
+<ol><li><strong>reproducible build</strong>: <code>SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)</code>와 <code>KBUILD_BUILD_TIMESTAMP</code>, <code>KBUILD_BUILD_HOST</code>를 고정해서 두 번 빌드한 <code>Image</code>·<code>u-boot.bin</code>이 <code>cmp</code>로 같아지게 만든다(§5에서 다른 바이트를 확인했다). 정답/힌트: U-Boot는 <code>SOURCE_DATE_EPOCH</code>, 커널은 <code>KBUILD_BUILD_TIMESTAMP/USER/HOST</code>.</li><li><strong>모듈 지원</strong>: fragment에 <code>CONFIG_MODULES=y</code>, <code>CONFIG_MODULE_UNLOAD=y</code>를 넣고 <code>modules_prepare</code> 타깃을 추가해 S2의 hello 모듈을 이 커널로 빌드 → 9p로 넘겨서 <code>insmod</code>. 힌트: <code>make -C build/linux M=$PWD</code>.</li><li><strong>U-Boot 자동 부팅</strong>: expect 대신 <code>boot.scr</code>(<code>mkimage -T script</code>)를 ext4 <code>/boot</code>에 넣고 U-Boot의 <code>bootflow scan</code>이 스스로 찾게 한다(C3 §5).</li><li><strong>TF-A + OP-TEE</strong>: <code>SPD=opteed</code>, BL32=OP-TEE로 FIP를 다시 만든다(C5 §6). RAM 지도가 바뀌는 걸 확인한다.</li><li><strong>CI</strong>: GitHub Actions(ubuntu-24.04-arm 러너)에서 <code>make all</code> + 세 부팅을 <code>LAB_CMD</code>로 돌리고 <code>s1-lab:</code> 줄을 grep하는 스모크 테스트. 산출물 해시를 아티팩트로 남긴다.</li><li><strong>SMP·성능</strong>: <code>-smp 4</code>와 <code>-cpu max</code>로 부팅 시간을 다시 재고, <code>/proc/cpuinfo</code>와 <code>psci</code> CPU_ON 로그를 비교한다.</li><li><strong>U-Boot/TF-A도 gdb로</strong>: <code>-S</code> 상태에서 <code>add-symbol-file build/tfa/qemu/release/bl1/bl1.elf</code>로 EL3 첫 명령을, U-Boot는 relocation 주소(<code>bdinfo</code>의 <code>relocaddr</code>)를 고려해 <code>add-symbol-file u-boot &lt;relocaddr&gt;</code>로 디버깅한다.</li></ol>
+<hr>
+<h2 id="18-면접과-github에서-보여-주기">18. 면접과 GitHub에서 보여 주기<a class="anchor" href="#18-면접과-github에서-보여-주기" aria-label="link">#</a></h2>
+<h3 id="18-1-readme-목차-저장소-readme-md-초안이-이미-있다">18.1 README 목차 (저장소 <code>README.md</code> 초안이 이미 있다)<a class="anchor" href="#18-1-readme-목차-저장소-readme-md-초안이-이미-있다" aria-label="link">#</a></h3>
+<ol><li>한 줄 소개: "Board-less ARM64 Linux lab: TF-A → U-Boot → Linux → BusyBox, built from verified sources with one idempotent Makefile"</li><li>그림 1(구조), 그림 3(부팅 경로) — PNG로 내보내서 첨부</li><li>Quick start: <code>check-host.sh</code> → <code>make all</code> → <code>make run-tfa</code></li><li>측정표: 빌드 시간(그림 4), 크기, 부팅 시간 — "TCG on Lima/M2, not real hardware" 명시</li><li>설계 결정: fragment + 생존 검사, O=/BUILD_BASE= 분리, 체크섬 고정, <code>.DELETE_ON_ERROR</code></li><li>Lessons learned: §16 표의 상위 5개 (실패 로그 그대로)</li><li>Roadmap: §17</li></ol>
+<h3 id="18-2-2분-데모-스크립트">18.2 2분 데모 스크립트<a class="anchor" href="#18-2-2분-데모-스크립트" aria-label="link">#</a></h3>
+<ol><li><code>make -q all; echo $?</code> → <code>0</code> ("다 최신이다")</li><li><code>make run-tfa</code> → BL1/BL2/BL31 NOTICE → U-Boot <code>ext4load</code> → 커널 → <code>smc</code> 출력. "PSCI가 TF-A로 바뀐 게 이 한 단어로 보인다."</li><li><code>run-direct</code>와 비교해 <code>hvc</code> — "같은 커널, 같은 DT 노드, 다른 펌웨어 제공자"</li><li><code>run-gdb</code> + gdb에서 <code>hbreak pl011_probe</code> → backtrace. "보드가 오면 JTAG로 이 순서를 그대로 한다."</li><li>fragment 한 줄 지우고 <code>make</code> → <code>DROPPED:</code>로 빌드가 멈추는 것 보여 주기</li></ol>
+<h3 id="18-3-보여-줄-숫자">18.3 보여 줄 숫자<a class="anchor" href="#18-3-보여-줄-숫자" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>숫자</th><th>값</th><th>말할 문장</th></tr></thead><tbody><tr><td>커널 크기</td><td>42.7 MB → 6.2 MB</td><td>defconfig 대비 7분의 1, 718개 옵션</td></tr><tr><td>커널 빌드</td><td>294 s at -j2</td><td>반복 루프가 5분이면 설정 실험을 하루에 수십 번 한다</td></tr><tr><td>부팅</td><td><code>/init</code>까지 0.46–0.55 s vs 0.96–1.10 s</td><td>initcall 수가 부팅 시간을 결정한다 (TCG 수치)</td></tr><tr><td>증분</td><td>수정 없음 0 s, <code>/init</code> 수정 4.7 s, fragment touch 14 s · 컴파일 0개</td><td>Make와 Kbuild의 두 겹 증분</td></tr></tbody></table></div>
+<h3 id="18-4-면접-q-a">18.4 면접 Q&amp;A<a class="anchor" href="#18-4-면접-q-a" aria-label="link">#</a></h3>
+<p><strong>Q.</strong> "You don't have the board yet. How do you start the BSP work?"</p>
+<p><strong>A.</strong> QEMU <code>virt</code>로 같은 아키텍처의 부트 체인을 먼저 세운다. TF-A BL1/BL2/BL31, U-Boot, 최소 커널, BusyBox까지 소스에서 빌드하고, 세 가지 부팅 경로로 각 단계를 따로 검증했다. 보드가 오면 바뀌는 건 플랫폼 포트(TF-A <code>PLAT</code>, U-Boot defconfig, DT, 커널 fragment)뿐이고 파이프라인·검증 스크립트·디버그 방식은 그대로 쓴다.</p>
+<blockquote><p>I build the same boot chain on QEMU virt first: TF-A BL1/BL2/BL31, U-Boot as BL33, a minimal kernel and a static BusyBox, all from checksum-verified sources through one Makefile. I boot it three ways — direct kernel, U-Boot, and the full secure-world chain — so each stage is validated in isolation. When silicon arrives, only the platform ports change: the TF-A platform, U-Boot defconfig, device tree and kernel fragment. The pipeline, smoke tests and gdb workflow carry over.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "What does QEMU's -kernel skip?" → 펌웨어 전체와 커널 로딩, PSCI 제공자(QEMU가 hvc로 대신), DT의 /chosen 패치까지.</p>
+<p><strong>Q.</strong> "How do you keep a minimal kernel config maintainable?"</p>
+<p><strong>A.</strong> 전체 <code>.config</code>를 커밋하지 않고 <code>tinyconfig</code> 위에 얹는 fragment로 관리한다. 병합 후 <code>olddefconfig</code>가 의존성 때문에 옵션을 조용히 끌 수 있어서, fragment의 모든 줄이 최종 <code>.config</code>에 살아남았는지 검사하고 아니면 빌드를 멈춘다. 실제로 <code>TMPFS</code>가 <code>SHMEM</code> 의존성 때문에 사라진 걸 이렇게 잡았다.</p>
+<blockquote><p>I keep a small fragment on top of tinyconfig instead of a full .config, merge it with merge_config.sh, and then verify that every fragment line survived olddefconfig — Kconfig silently drops options whose dependencies aren't met. That check caught CONFIG_TMPFS disappearing because SHMEM was off in tinyconfig.</p></blockquote>
+<p><strong>Q.</strong> "How can you tell which firmware handles PSCI on a running system?"</p>
+<p><strong>A.</strong> DT의 <code>/psci</code> 노드 <code>method</code> 속성과 부팅 로그의 SMCCC 버전을 본다. QEMU 직접 부팅에서는 <code>hvc</code>와 SMCCC v1.0이고, TF-A 경로에서는 <code>smc</code>와 v1.5였다. <code>hvc</code>는 EL2(여기서는 QEMU 에뮬레이션), <code>smc</code>는 EL3 secure monitor로 트랩한다.</p>
+<blockquote><p>Read /proc/device-tree/psci/method and the "SMC Calling Convention" line in dmesg. In my lab the direct boot shows hvc and SMCCC 1.0 — QEMU emulates PSCI — while the TF-A boot shows smc and SMCCC 1.5, meaning BL31 at EL3 services CPU_ON and SYSTEM_OFF.</p></blockquote>
+<p><strong>Q.</strong> "Why did your TF-A boot hang with 512 MB?"</p>
+<p><strong>A.</strong> TF-A qemu 플랫폼이 BL33을 DRAM 시작 + 512 MiB인 0x60000000에 로드하도록 고정돼 있어서, RAM이 512 MB면 그 주소가 존재하지 않는다. BL2가 BL33을 복사하다 data abort로 조용히 멈춘다. 1 GB로 올리면 된다. 실제 보드에서도 "부트로더 로드 주소와 실장 DRAM 크기 불일치"는 흔한 bring-up 버그다.</p>
+<blockquote><p>The qemu TF-A port loads BL33 at DRAM base plus 512 MiB, 0x60000000. With 512 MB of RAM that address doesn't exist, so BL2 aborts while copying U-Boot and the console just stops after "BL2: Built". Giving the guest 1 GB fixes it. On real boards the same class of bug is a load address that doesn't match the populated DRAM.</p></blockquote>
+<p><strong>Q.</strong> "How do you debug the kernel before the console comes up?"</p>
+<p><strong>A.</strong> QEMU gdbstub를 JTAG처럼 쓴다. <code>-S</code>로 리셋 직후 멈추고, <code>vmlinux</code>를 심볼로 로드한 뒤 하드웨어 브레이크포인트로 <code>start_kernel</code>이나 문제 드라이버의 probe에 건다. MMU 켜기 전에는 소프트웨어 브레이크를 못 쓰기 때문이다. 콘솔 전에는 <code>earlycon=pl011,0x9000000</code>으로 UART를 직접 찌른다.</p>
+<blockquote><p>I treat the QEMU gdbstub as a JTAG probe: start halted with -S, load vmlinux symbols, and use hardware breakpoints on start_kernel or the driver's probe, since software breakpoints don't work before the MMU is on. For output before the console driver binds, earlycon pokes the PL011 directly.</p></blockquote>
+<p><strong>Q.</strong> "What makes your build reproducible and incremental?"</p>
+<p><strong>A.</strong> 입력은 해시로 고정한 tarball과 저장소 파일, 출력은 전부 별도 디렉터리의 파일 타깃이다. 두 번째 <code>make</code>는 아무것도 하지 않고(<code>make -q</code> 종료 코드 0), <code>/init</code>을 고치면 rootfs와 이미지만 4.7초에 다시 만든다. 바이트 단위 재현성은 빌드 타임스탬프를 고정해야 해서 다음 단계로 남겨 뒀다 — U-Boot 바이너리가 날짜 문자열 때문에 다르다는 걸 확인했다.</p>
+<blockquote><p>Inputs are pinned tarballs plus repo files; every output is a file target in a separate build directory. A second make is a no-op, editing /init rebuilds only the rootfs and images in under five seconds, and touching the kernel fragment re-runs Kconfig but recompiles zero objects. Bit-for-bit reproducibility is the next step: my U-Boot differs from the lab's only in the embedded build date, so pinning SOURCE_DATE_EPOCH is the fix.</p></blockquote>
+<p><strong>Q.</strong> "Buildroot or hand-rolled Makefile?"</p>
+<p><strong>A.</strong> 학습과 bring-up 초기에는 손으로 만든 파이프라인이 각 컴포넌트의 빌드 관례를 드러내서 좋다. 제품으로 가면 Buildroot(또는 Yocto)가 툴체인, 라이선스, 소유권(fakeroot), 패키지 해시를 관리해 준다. 내 저장소에는 같은 설정을 BR2_EXTERNAL 트리로 옮긴 골격이 있다.</p>
+<blockquote><p>Hand-rolled first, because it exposes each component's build conventions — O=, BUILD_BASE=, CONFIG_PREFIX=, FIP packing. For a product I'd move to Buildroot or Yocto for toolchain management, license reports, fakeroot ownership and per-package hashes; my repo already carries a BR2_EXTERNAL skeleton with the same kernel fragment.</p></blockquote>
+<hr>
+<h2 id="19-직접-해보기">19. 직접 해보기<a class="anchor" href="#19-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><code>/var/tmp/&lt;내 ID&gt;</code>를 지우고 <code>make B=... all</code>을 처음부터 돌려 그림 4의 숫자를 자기 측정으로 바꿔라. 정답/힌트: 다른 작업이 없으면 커널이 더 빨라야 한다.</li><li>fragment에서 <code>CONFIG_PACKET=y</code>를 지우고 부팅해 <code>s1-lab: eth0</code> 줄이 사라지는 이유를 설명하라. 정답/힌트: <code>udhcpc</code>는 <code>AF_PACKET</code> raw socket으로 DHCP를 보낸다.</li><li><code>tfa-booti.exp</code>에서 <code>-m 1024</code>를 <code>-m 600</code>으로 바꿔 어디서 멈추는지 기록하라(랩 README는 540에서 U-Boot reset loop를 봤다). 정답/힌트: BL33 로드 주소와 U-Boot 재배치 주소(RAM 꼭대기 근처)를 둘 다 생각한다.</li><li>②번 부팅에서 <code>bootdelay</code>를 0으로 만들어 wall time이 몇 초 줄어드는지 재라. 정답/힌트: QEMU를 <code>-S</code>로 두지 않고, U-Boot 프롬프트에서 <code>setenv bootdelay 0; saveenv</code>는 flash 환경이 필요하다 — 대신 defconfig에 <code>CONFIG_BOOTDELAY=0</code>.</li><li>gdb로 <code>hbreak do_one_initcall</code>을 걸고 <code>continue</code>를 10번 하며 <code>p fn</code>을 찍어 initcall 순서를 관찰하라. 정답/힌트: C6 §7의 initcall 레벨 순서와 비교.</li><li><code>mkfs.ext4 -d</code>가 만든 이미지의 파일 소유자를 0:0으로 만드는 방법 두 가지를 찾아라. 정답/힌트: <code>fakeroot</code>로 <code>chown</code> 후 <code>mkfs.ext4 -d</code>, 또는 <code>debugfs -w</code>의 <code>set_inode_field</code>.</li><li>9p 대신 <code>mkfs.ext4 -d</code>로 만든 두 번째 virtio 디스크로 파일을 넘기는 방식과 장단점을 비교하라. 정답/힌트: 디스크 방식은 게스트 실행 중 호스트가 쓰면 안 된다(파일시스템 캐시 불일치).</li></ol>
+<hr>
+<h2 id="20-용어-사전">20. 용어 사전<a class="anchor" href="#20-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>QEMU <code>virt</code></td><td>가상 ARM 보드</td><td>실제 SoC가 아닌 QEMU 전용 머신, DT를 QEMU가 생성</td></tr><tr><td>TCG</td><td>Tiny Code Generator</td><td>KVM 없이 게스트 명령을 호스트 명령으로 번역하는 QEMU 엔진</td></tr><tr><td>fw_cfg</td><td>firmware configuration device</td><td>QEMU가 커널·initrd·cmdline을 펌웨어에 건네는 MMIO 장치</td></tr><tr><td>qfw</td><td>U-Boot fw_cfg 드라이버</td><td><code>bootflow</code>의 qfw bootmeth가 fw_cfg에서 커널을 읽는다</td></tr><tr><td>FIP</td><td>Firmware Image Package</td><td>BL2·BL31·BL33을 UUID 목차로 묶은 TF-A 이미지</td></tr><tr><td>BL33</td><td>non-trusted firmware</td><td>TF-A가 마지막에 넘겨주는 비보안 부트로더 (여기서는 U-Boot)</td></tr><tr><td>PSCI conduit</td><td><code>hvc</code> 또는 <code>smc</code></td><td>커널이 PSCI 호출을 어느 예외 레벨로 트랩할지</td></tr><tr><td>tinyconfig</td><td>최소 커널 설정</td><td>allnoconfig + <code>tiny.config</code>, 크기 최적화</td></tr><tr><td>config fragment</td><td>설정 조각</td><td>기본 설정 위에 덮어쓸 <code>CONFIG_</code> 줄 모음</td></tr><tr><td><code>merge_config.sh</code></td><td>fragment 병합 스크립트</td><td><code>scripts/kconfig/</code> 안, <code>-m</code>은 olddefconfig 생략</td></tr><tr><td><code>O=</code> / <code>BUILD_BASE=</code></td><td>out-of-tree 빌드</td><td>소스 트리를 깨끗하게 두고 출력만 다른 곳에</td></tr><tr><td><code>mkfs.ext4 -d</code></td><td>디렉터리로 채운 ext4 생성</td><td>loop mount·root 권한 없이 rootfs 이미지</td></tr><tr><td>9p (virtio-9p)</td><td>Plan 9 파일 프로토콜</td><td>QEMU가 호스트 디렉터리를 게스트에 공유</td></tr><tr><td>hostfwd</td><td>slirp 포트 포워딩</td><td>호스트 포트를 user 모드 게스트 포트로 연결</td></tr><tr><td>gdbstub</td><td>QEMU 내장 gdb 서버</td><td><code>-gdb tcp::PORT -S</code>, 이 랩의 JTAG</td></tr><tr><td><code>.DELETE_ON_ERROR</code></td><td>GNU Make 특수 타깃</td><td>실패한 레시피의 반쪽 타깃 파일 삭제</td></tr><tr><td>idempotent</td><td>멱등</td><td>같은 입력으로 다시 실행해도 결과·작업이 변하지 않음</td></tr></tbody></table></div>
+<hr>
+<h2 id="21-요약-셀프-체크">21. 요약 &amp; 셀프 체크<a class="anchor" href="#21-요약-셀프-체크" aria-label="link">#</a></h2>
+<p>S1은 <code>/var/lab</code>을 "빌려 쓰는 랩"에서 "내가 다시 만들 수 있는 랩"으로 바꾼다. 해시로 고정한 4개 tarball에서 출발해 U-Boot(27 s), TF-A(3 s), tinyconfig + 46줄 fragment 커널(294 s, 6.2 MB), static BusyBox(43 s)를 하나의 Makefile로 만들고, 같은 커널을 QEMU 직접·U-Boot(fw_cfg)·TF-A secure(ext4 + <code>booti</code>) 세 경로로 띄워 PSCI 제공자가 <code>hvc</code>에서 <code>smc</code>로 바뀌는 것까지 증거로 남겼다. virtio-blk ext4, user 네트워크 + hostfwd + 9p, gdbstub 하드웨어 브레이크포인트로 개발 루프를 갖췄고, 두 번째 <code>make</code>가 아무것도 안 하는 증분 빌드와, 빌드 중 실제로 부딪친 7가지 실패(옵션 증발, BusyBox 3종, U-Boot 따옴표, TF-A 메모리, expect timeout)를 고친 기록이 포트폴리오의 핵심 내용이다. Buildroot 경로는 BR2_EXTERNAL 골격까지만 만들고 빌드는 가이드로 남겼다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span><code>check-host.sh</code>의 패키지 22개가 각각 무엇에 쓰이는지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>sha256 고정과 GPG 서명 확인의 차이, kernel.org <code>.tar.sign</code>이 <code>.tar</code>에 대한 서명인 이유를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>U-Boot <code>O=</code>, TF-A <code>BUILD_BASE=</code>/<code>BL33=</code>, BusyBox <code>O=</code>/<code>CONFIG_PREFIX=</code>를 외워서 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>flash.bin</code>의 레이아웃(BL1 @0, FIP @0x40000, 64 MiB)을 그릴 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>tinyconfig + fragment로 커널을 만들고, 옵션이 조용히 빠지는 이유와 검출 방법을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>BusyBox static initramfs를 root 권한 없이 만들 수 있다 (<code>cpio -R 0:0</code>)</span></label></li><li class="task"><label><input type="checkbox" ><span>세 부팅 경로에서 누가 커널을 RAM에 놓고 누가 PSCI를 제공하는지 표로 그릴 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>U-Boot에서 <code>ext4load</code> + <code>booti</code>로 수동 부팅하고, hush 따옴표 함정을 피할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>mkfs.ext4 -d</code>로 rootfs 디스크를 만들고 <code>root=/dev/vda</code>로 부팅할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>user 네트워크 + hostfwd + 9p로 ssh 없이 파일과 포트를 주고받을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>gdbstub로 리셋 직후부터 <code>start_kernel</code>, 드라이버 probe까지 따라갈 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Makefile이 idempotent하다는 것을 <code>make -q</code>와 증분 재빌드로 증명할 수 있다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>TF-A 문서, "QEMU virt Armv8-A" 플랫폼 페이지 — <code>PLAT=qemu</code>, <code>dd</code> 레시피, 메모리 지도: https://trustedfirmware-a.readthedocs.io/en/latest/plat/qemu.html</li><li>U-Boot 문서, "QEMU ARM" 보드 페이지: https://docs.u-boot.org/en/latest/board/emulation/qemu-arm.html</li><li>QEMU 문서, "'virt' generic virtual platform": https://www.qemu.org/docs/master/system/arm/virt.html</li><li>QEMU 문서, gdbstub: https://www.qemu.org/docs/master/system/gdb.html</li><li>Linux 커널 문서, Kconfig 언어와 <code>make</code> 타깃 (docs.kernel.org/kbuild/), arm64 부팅 프로토콜 "Booting AArch64 Linux": https://docs.kernel.org/arch/arm64/booting.html</li><li>Linux 커널 문서, v9fs: https://docs.kernel.org/filesystems/9p.html</li><li>kernel.org, "Linux kernel releases PGP signatures": https://www.kernel.org/signature.html</li><li>Buildroot 사용자 매뉴얼 (BR2_EXTERNAL, external toolchain): https://buildroot.org/downloads/manual/manual.html</li><li>소스 위치: <code>scripts/kconfig/merge_config.sh</code>, <code>kernel/configs/tiny.config</code>, <code>init/Kconfig</code>(SHMEM), <code>fs/Kconfig</code>(TMPFS) — elixir.bootlin.com의 v6.18 트리</li><li>이 랩의 선행 노트: C1, C3, C4, C5, C6, C7, E2, K2, K3, M4, B1, B5</li></ul>
+    <div class="nav"><a class="next" href="2026-10-18_S2_first_module_chardev.html"><span class="dir">다음 →</span><span class="nm">S2. 첫 모듈 · char device — hello 모듈에서 blocking read·poll·mutex·selftest까지 8단계로 직접 만들기</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-무엇을-만들고-끝나면-무엇이-남나">0. 큰 그림 — 무엇을 만들고, 끝나면 무엇이 남나</a></li><li class="l3"><a href="#0-1-var-lab은-어떻게-만들어졌나-참고한-스크립트">0.1 /var/lab은 어떻게 만들어졌나 — 참고한 스크립트</a></li><li class="l2"><a href="#1-준비물-빌드-호스트">1. 준비물 — 빌드 호스트</a></li><li class="l3"><a href="#1-1-패키지-목록-설치하지-말고-확인만">1.1 패키지 목록 (설치하지 말고 확인만)</a></li><li class="l3"><a href="#1-2-리소스-예산">1.2 리소스 예산</a></li><li class="l2"><a href="#2-저장소-레이아웃">2. 저장소 레이아웃</a></li><li class="l2"><a href="#3-step-1-소스-받기와-검증">3. Step 1 — 소스 받기와 검증</a></li><li class="l3"><a href="#3-1-왜-검증하나">3.1 왜 검증하나</a></li><li class="l3"><a href="#3-2-makefile-캐시가-있으면-링크-없으면-다운로드">3.2 Makefile — 캐시가 있으면 링크, 없으면 다운로드</a></li><li class="l3"><a href="#3-3-고정한-해시가-업스트림과-같은지-처음-한-번">3.3 고정한 해시가 업스트림과 같은지 — 처음 한 번</a></li><li class="l3"><a href="#3-4-gpg-서명-격리된-keyring으로">3.4 GPG 서명 — 격리된 keyring으로</a></li><li class="l2"><a href="#4-step-2-소스-풀기">4. Step 2 — 소스 풀기</a></li><li class="l2"><a href="#5-step-3-u-boot-qemu_arm64_defconfig">5. Step 3 — U-Boot (qemu_arm64_defconfig)</a></li><li class="l2"><a href="#6-step-4-tf-a-plat-qemu-와-flash-bin">6. Step 4 — TF-A (PLAT=qemu)와 flash.bin</a></li><li class="l2"><a href="#7-step-5-커널-tinyconfig-virt-fragment">7. Step 5 — 커널: tinyconfig + virt fragment</a></li><li class="l3"><a href="#7-1-무엇을-고르나">7.1 무엇을 고르나</a></li><li class="l3"><a href="#7-2-fragment-qemu-virt가-실제로-쓰는-하드웨어만">7.2 fragment — QEMU virt가 실제로 쓰는 하드웨어만</a></li><li class="l3"><a href="#7-3-makefile-merge-후-검사">7.3 Makefile — merge 후 검사</a></li><li class="l3"><a href="#7-4-실제로-걸린-함정-config_tmpfs가-사라졌다">7.4 실제로 걸린 함정 — CONFIG_TMPFS가 사라졌다</a></li><li class="l3"><a href="#7-5-빌드-시간과-크기">7.5 빌드 — 시간과 크기</a></li><li class="l2"><a href="#8-step-6-busybox-static과-initramfs">8. Step 6 — BusyBox static과 initramfs</a></li><li class="l3"><a href="#8-1-makefile">8.1 Makefile</a></li><li class="l3"><a href="#8-2-실제로-걸린-함정-세-개">8.2 실제로 걸린 함정 세 개</a></li><li class="l3"><a href="#8-3-성공한-빌드">8.3 성공한 빌드</a></li><li class="l3"><a href="#8-4-init-랩-init의-확장판">8.4 /init — 랩 /init의 확장판</a></li><li class="l2"><a href="#9-step-7-부팅-①-직접-kernel">9. Step 7 — 부팅 ①: 직접 -kernel</a></li><li class="l2"><a href="#10-step-8-부팅-②-u-boot-bios-커널은-fw_cfg에서">10. Step 8 — 부팅 ②: U-Boot -bios, 커널은 fw_cfg에서</a></li><li class="l2"><a href="#11-step-9-부팅-③-tf-a-secure-u-boot-ext4load-booti">11. Step 9 — 부팅 ③: TF-A secure → U-Boot → ext4load + booti</a></li><li class="l3"><a href="#11-1-ext4-rootfs-mkfs-ext4-d-root-권한-불필요">11.1 ext4 rootfs — mkfs.ext4 -d (root 권한 불필요)</a></li><li class="l3"><a href="#11-2-직접-부팅으로-ext4-rootfs-확인-root-dev-vda">11.2 직접 부팅으로 ext4 rootfs 확인 (root=/dev/vda)</a></li><li class="l3"><a href="#11-3-tf-a-경로-expect로-u-boot-조작">11.3 TF-A 경로 — expect로 U-Boot 조작</a></li><li class="l3"><a href="#11-4-첫-시도의-실패-빈-커맨드라인">11.4 첫 시도의 실패 — 빈 커맨드라인</a></li><li class="l3"><a href="#11-5-성공">11.5 성공</a></li><li class="l2"><a href="#12-step-10-네트워크와-호스트-파일-공유-ssh-없이">12. Step 10 — 네트워크와 호스트 파일 공유 (ssh 없이)</a></li><li class="l3"><a href="#12-1-구성">12.1 구성</a></li><li class="l3"><a href="#12-2-실행-한-번에-4가지-확인">12.2 실행 — 한 번에 4가지 확인</a></li><li class="l2"><a href="#13-step-11-gdbstub-이-랩의-jtag">13. Step 11 — gdbstub: 이 랩의 JTAG</a></li><li class="l2"><a href="#14-step-12-한-번에-다시-만들기-idempotent-rebuild">14. Step 12 — 한 번에 다시 만들기 (idempotent rebuild)</a></li><li class="l3"><a href="#14-1-두-번째-make-all은-아무것도-안-한다">14.1 두 번째 make all은 아무것도 안 한다</a></li><li class="l3"><a href="#14-2-init을-고치면-rootfs와-이미지-두-개만">14.2 /init을 고치면 → rootfs와 이미지 두 개만</a></li><li class="l3"><a href="#14-3-fragment를-touch하면-설정은-다시-컴파일은-0개">14.3 fragment를 touch하면 → 설정은 다시, 컴파일은 0개</a></li><li class="l3"><a href="#14-4-클린-빌드-총-시간">14.4 클린 빌드 총 시간</a></li><li class="l2"><a href="#15-buildroot-경로-가이드-실행-안-함">15. Buildroot 경로 — 가이드(실행 안 함)</a></li><li class="l3"><a href="#15-1-손으로-만든-것과-buildroot의-대응">15.1 손으로 만든 것과 Buildroot의 대응</a></li><li class="l3"><a href="#15-2-br2_external-골격-파일은-만들었고-빌드는-안-했다">15.2 BR2_EXTERNAL 골격 (파일은 만들었고, 빌드는 안 했다)</a></li><li class="l3"><a href="#15-3-돌린다면-가이드-실행-안-함">15.3 돌린다면 (가이드 — 실행 안 함)</a></li><li class="l2"><a href="#16-흔한-실패와-고치는-법">16. 흔한 실패와 고치는 법</a></li><li class="l2"><a href="#17-확장-과제">17. 확장 과제</a></li><li class="l2"><a href="#18-면접과-github에서-보여-주기">18. 면접과 GitHub에서 보여 주기</a></li><li class="l3"><a href="#18-1-readme-목차-저장소-readme-md-초안이-이미-있다">18.1 README 목차 (저장소 README.md 초안이 이미 있다)</a></li><li class="l3"><a href="#18-2-2분-데모-스크립트">18.2 2분 데모 스크립트</a></li><li class="l3"><a href="#18-3-보여-줄-숫자">18.3 보여 줄 숫자</a></li><li class="l3"><a href="#18-4-면접-q-a">18.4 면접 Q&amp;A</a></li><li class="l2"><a href="#19-직접-해보기">19. 직접 해보기</a></li><li class="l2"><a href="#20-용어-사전">20. 용어 사전</a></li><li class="l2"><a href="#21-요약-셀프-체크">21. 요약 &amp; 셀프 체크</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

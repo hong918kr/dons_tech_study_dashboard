@@ -1,0 +1,1257 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M8. 버그 탐지기 — KASAN · KFENCE · kmemleak · UBSAN · KCSAN · lockdep · CONFIG_DEBUG_</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="M/2026-10-17_M8_bug_detectors">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">M. 디버깅 · 트레이싱 · M8. 버그 탐지기 — KASAN · KFENCE · kmemleak · UBSAN · KCSAN · lockdep · CONFIG_DEBUG_</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">M. 디버깅 · 트레이싱 · Debug &amp; Trace</div>
+      <h1>M8. 버그 탐지기 — KASAN · KFENCE · kmemleak · UBSAN · KCSAN · lockdep · <code>CONFIG_DEBUG_*</code></h1>
+      <div class="meta"><span>150분 읽기</span><span>1549줄</span><span>55개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: KASAN 리포트(slab-out-of-bounds, use-after-free, stack/global OOB)를 첫 줄부터 마지막 shadow 덤프까지 읽고 버그 줄을 짚을 수 있다 · KASAN의 1:8 shadow memory·redzone·quarantine, KFENCE의 guard page 샘플링, kmemleak의 mark-and-sweep, UBSAN·KCSAN의 원리를 그림으로 설명할 수 있다 · 각 탐지기의 비용(이미지 크기·부팅 시간·메모리·syscall 비용)을 실측값으로 말할 수 있다 · "개발 PC → CI → 양산 필드"에 어떤 탐지기를 켤지 근거를 대며 고를 수 있다 <strong>왜 필요한가</strong>: "드라이버에서 가끔 메모리가 깨진다, 어떻게 찾나?", "KASAN을 양산에 켤 수 있나? KFENCE는? MTE는?"은 커널·드라이버 면접의 단골이고, 실무에서는 "1주일에 한 번 나는 패닉"(contents.md 시나리오)을 재현 가능한 한 줄짜리 리포트로 바꾸는 도구다 <strong>Don 기준 난이도</strong>: SSD 펌웨어에서 쓰던 메모리 가드 패턴(canary, fill pattern 0xDEADBEEF, MPU 가드 영역, 해제 후 poison)은 이미 안다 / 새로 배울 부분은 "컴파일러가 모든 load/store 앞에 검사 코드를 심는다"는 발상, shadow memory 인코딩, 샘플링 탐지기(KFENCE)와 하드웨어 태그(MTE)의 비용 모델, KUnit 테스트 스위트로 탐지기 자체를 검증하는 법 <strong>선행 노트</strong>: E2(커널 config·빌드), E3(모듈), E4 §5(DEBUG_ATOMIC_SLEEP)·§7(KASAN 스택 크기), F2 §10(문맥 위반 로그), F4 §13(lockdep), F9 §9(slab_debug·page_owner), M3(Oops 해독) — M1(printk)·M5(ftrace)·L7(크래시 수집)과 이어진다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>메모리 버그의 가장 나쁜 성질은 <strong>원인과 증상이 시간·공간으로 떨어져 있다</strong>는 것이다. 드라이버 A가 버퍼 끝을 4바이트 넘겨 썼다(원인, t0). 그 4바이트는 옆 객체 — 예를 들어 네트워크 스택의 <code>sk_buff</code> 포인터 — 위에 있었다. 몇 초 뒤, 혹은 몇 시간 뒤 네트워크 코드가 그 포인터를 따라가다 <code>Unable to handle kernel paging request</code>로 죽는다(증상, t1). M3에서 배운 Oops 해독을 아무리 잘해도 콜스택은 <strong>네트워크 코드</strong>를 가리킨다. 범인 드라이버는 스택 어디에도 없다.</p>
+<p>Don이 SSD 펌웨어에서 겪었던 "어느 날 FTL 테이블 한 엔트리가 깨져 있다"와 같은 종류다. 그때 했던 일 — 버퍼 앞뒤에 canary를 두고, 해제한 메모리를 0xDEADBEEF로 채우고, MPU로 가드 영역을 만들어 쓰는 순간 abort가 나게 하기 — 을 Linux 커널은 <strong>체계적인 도구 모음</strong>으로 갖고 있다. 이 노트의 주인공들이다.</p>
+<figure class="chart"><svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <line x1="30" y1="150" x2="630" y2="150" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah1)"/>
+  <text x="600" y="172" font-size="12">시간</text>
+  <rect x="40" y="70" width="170" height="60" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="125" y="95" font-size="13" text-anchor="middle">t0 원인: 드라이버가</text>
+  <text x="125" y="115" font-size="13" text-anchor="middle">버퍼 끝을 4B 넘겨 씀</text>
+  <rect x="440" y="70" width="190" height="60" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="535" y="95" font-size="13" text-anchor="middle">t1 증상: 남의 코드에서</text>
+  <text x="535" y="115" font-size="13" text-anchor="middle">Oops (스택에 범인 없음)</text>
+  <text x="325" y="105" font-size="13" text-anchor="middle">몇 초 ~ 몇 시간, 재현 불가</text>
+  <line x1="215" y1="100" x2="435" y2="100" stroke="#888" stroke-dasharray="5 4"/>
+  <line x1="125" y1="135" x2="125" y2="190" stroke="#3f9a6b" stroke-width="1.5" marker-end="url(#ah1)"/>
+  <rect x="30" y="195" width="300" height="88" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="180" y="218" font-size="13" text-anchor="middle">탐지기: t0 그 명령에서 바로 리포트</text>
+  <text x="180" y="240" font-size="12" text-anchor="middle">KASAN · KFENCE · UBSAN · KCSAN · lockdep</text>
+  <text x="180" y="262" font-size="12" text-anchor="middle">범인 줄 + 할당/해제 스택이 같이 나온다</text>
+  <rect x="350" y="195" width="280" height="88" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="490" y="218" font-size="13" text-anchor="middle">사후 검사기: 나중에 발견</text>
+  <text x="490" y="240" font-size="12" text-anchor="middle">slab_debug(F9) · kmemleak · DEBUG_LIST</text>
+  <text x="490" y="262" font-size="12" text-anchor="middle">"깨졌다"는 알지만 언제인지는 모름</text>
+</svg></figure>
+<p>그림 1 — 메모리 버그는 원인(t0)과 증상(t1)이 떨어져 있다. 탐지기의 가치는 t1을 t0으로 당겨 오는 것이다.</p>
+<p>탐지기는 크게 네 부류다.</p>
+<div class="tw"><table><thead><tr><th>부류</th><th>원리</th><th>예</th><th>비용</th></tr></thead><tbody><tr><td>컴파일러 계측 (모든 접근)</td><td>컴파일러가 load/store·연산 앞에 검사 호출을 심는다</td><td>KASAN generic/SW_TAGS, UBSAN, KCSAN</td><td>크다 (2~3배 느림, 메모리 1/8 이상)</td></tr><tr><td>샘플링</td><td>할당 일부만 특별한 페이지에 놓는다</td><td>KFENCE</td><td>거의 0 → 양산 가능</td></tr><tr><td>하드웨어 태그</td><td>CPU가 포인터 태그와 메모리 태그를 비교</td><td>KASAN HW_TAGS (arm64 MTE)</td><td>작다 (ARMv8.5+ 칩 필요)</td></tr><tr><td>런타임 상태 추적</td><td>커널 자료구조에 검사 로직을 넣는다</td><td>lockdep, DEBUG_ATOMIC_SLEEP, DEBUG_OBJECTS, DEBUG_LIST, DMA_API_DEBUG, kmemleak, slab_debug</td><td>기능별로 작음~중간</td></tr></tbody></table></div>
+<p>이 노트는 랩의 <strong><code>Image-kasan</code></strong>(6.18.55-kasan) 커널로 각 탐지기를 직접 돌린다. 버그를 일부러 만드는 코드는 새로 짜지 않는다. 대신 <strong>커널 업스트림이 탐지기 검증용으로 들고 있는 테스트 스위트</strong> — KASAN KUnit <code>kasan_test</code>, KFENCE KUnit <code>kfence_test</code>, <code>lib/test_ubsan.c</code>, <code>samples/kmemleak/kmemleak-test.c</code> — 를 그대로 돌려 "진짜 리포트"를 얻는다. 이것이 실무에서도 맞는 방법이다: 새 SoC·새 컴파일러에서 KASAN이 제대로 동작하는지부터 이 스위트로 확인한다.</p>
+<h3 id="0-1-실행-환경">0.1 실행 환경<a class="anchor" href="#0-1-실행-환경" aria-label="link">#</a></h3>
+<ul><li>VM: Lima <code>elinux</code> (aarch64, Ubuntu 26.04, <code>uname -r</code> = <code>7.0.0-38-generic</code>). 게스트는 QEMU <code>virt</code> + <code>-cpu cortex-a57 -smp 2 -m 1G</code>, <strong>TCG 에뮬레이션</strong>(KVM 없음). 모든 시간 측정은 TCG + 17명이 같이 쓰는 VM 부하 위의 값이라 <strong>실기 숫자가 아니다</strong>. 비율(같은 조건에서 커널 A 대 B)만 의미가 있다.</li><li>커널: <code>/var/lab/out/Image-trace</code>(6.18.55-trace, 기준선 — ftrace 전부 + 전체 DWARF) 과 <code>/var/lab/out/Image-kasan</code>(6.18.55-kasan = trace 설정 + 아래 탐지기 전부).</li><li>게스트 유저랜드: BusyBox initramfs 복사본(<code>/var/tmp/M8/</code>) + 정적 링크 테스트 바이너리 + <code>.ko</code>. 실행기는 아래 스크립트다(이후 예제가 전부 이걸 쓴다).</li></ul>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# m8_run.sh KERNEL TAG SCRIPT [extra cmdline]  -&gt; /var/tmp/M8/TAG.log
+set -e
+K=$1; TAG=$2; SCR=$3; shift 3; EXTRA="$*"
+W=/var/tmp/M8; R=$W/r_$TAG
+rm -rf $R; mkdir -p $R; cp -a /var/lab/build/rootfs/. $R/
+mkdir -p $R/m8; cp $W/m8_bench $R/m8/ 2&gt;/dev/null || true
+cp $W/ko/*.ko $R/m8/ 2&gt;/dev/null || true
+cp $SCR $R/m8/t.sh; chmod +x $R/m8/t.sh
+(cd $R &amp;&amp; find . | cpio -o -H newc --quiet | gzip -1) &gt; $W/i_$TAG.gz
+rm -rf $R
+T0=$(date +%s.%N)
+timeout ${TMO:-900} qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -m ${MEM:-1G} -nographic \
+  -kernel /var/lab/out/$K -initrd $W/i_$TAG.gz \
+  -append "console=ttyAMA0 LAB_CMD=sh~/m8/t.sh $EXTRA" &gt; $W/$TAG.log 2&gt;&amp;1 || true
+T1=$(date +%s.%N)
+echo "HOSTWALL $(echo "$T1 - $T0" | bc)" &gt;&gt; $W/$TAG.log
+rm -f $W/i_$TAG.gz</code></pre></figure>
+<p>랩 initramfs의 <code>/init</code>은 <code>LAB_CMD=</code>에 준 명령 하나를 실행하고 전원을 끈다(C 모듈 이후 공용 랩 규칙). 여기서는 그 명령이 <code>sh /m8/t.sh</code>이고, 예제마다 <code>t.sh</code> 내용만 바꾼다.</p>
+<h2 id="1-디버그-커널이라는-물건-kernel-hacking-메뉴와-랩의-image-kasan">1. 디버그 커널이라는 물건 — <code>Kernel hacking</code> 메뉴와 랩의 <code>Image-kasan</code><a class="anchor" href="#1-디버그-커널이라는-물건-kernel-hacking-메뉴와-랩의-image-kasan" aria-label="link">#</a></h2>
+<p>탐지기는 전부 <strong>Kconfig 옵션</strong>이다(E2). <code>make menuconfig</code>의 맨 아래 <code>Kernel hacking</code> 메뉴(<code>lib/Kconfig.debug</code>, <code>lib/Kconfig.kasan</code>, <code>lib/Kconfig.kfence</code>, <code>lib/Kconfig.ubsan</code>, <code>lib/Kconfig.kcsan</code>)에 모여 있고, 대부분 <code>CONFIG_DEBUG_KERNEL=y</code>가 있어야 보인다. 실무에서는 같은 소스로 <strong>두 벌의 커널</strong>을 만든다: 양산용(탐지기 거의 없음)과 디버그용(아래 옵션 다수). 랩도 그렇게 되어 있다.</p>
+<h3 id="1-1-예제-1-두-커널의-탐지기-옵션-비교">1.1 예제 1 — 두 커널의 탐지기 옵션 비교<a class="anchor" href="#1-1-예제-1-두-커널의-탐지기-옵션-비교" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 기준 커널(<code>Image-trace</code>)과 디버그 커널(<code>Image-kasan</code>)이 정확히 어떤 탐지기 옵션에서 다른지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>for k in trace kasan; do echo "== $k"
+  grep -E "^CONFIG_(KASAN|KASAN_GENERIC|KASAN_INLINE|KASAN_VMALLOC|KASAN_STACK|KASAN_KUNIT_TEST|KFENCE|KFENCE_SAMPLE_INTERVAL|KFENCE_NUM_OBJECTS|KFENCE_KUNIT_TEST|DEBUG_KMEMLEAK|DEBUG_KMEMLEAK_AUTO_SCAN|UBSAN|UBSAN_BOUNDS|UBSAN_SHIFT|UBSAN_BOOL|UBSAN_ENUM|TEST_UBSAN|KCSAN|PROVE_LOCKING|LOCK_STAT|DEBUG_ATOMIC_SLEEP|DEBUG_OBJECTS|DEBUG_OBJECTS_TIMERS|DEBUG_LIST|DEBUG_SG|DEBUG_PAGEALLOC|SLUB_DEBUG|SLUB_DEBUG_ON|DMA_API_DEBUG|DEBUG_VM|KUNIT)=" \
+    /var/lab/build/linux-$k/.config | sed "s/^CONFIG_//" | paste -sd" " | fold -s -w 100
+done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== trace
+SLUB_DEBUG=y
+== kasan
+DMA_API_DEBUG=y UBSAN=y UBSAN_BOUNDS=y UBSAN_SHIFT=y UBSAN_BOOL=y UBSAN_ENUM=y TEST_UBSAN=m 
+DEBUG_PAGEALLOC=y SLUB_DEBUG=y SLUB_DEBUG_ON=y DEBUG_KMEMLEAK=y DEBUG_KMEMLEAK_AUTO_SCAN=y 
+DEBUG_OBJECTS=y DEBUG_OBJECTS_TIMERS=y DEBUG_VM=y KASAN=y KASAN_GENERIC=y KASAN_INLINE=y 
+KASAN_STACK=y KASAN_VMALLOC=y KASAN_KUNIT_TEST=m KFENCE=y KFENCE_SAMPLE_INTERVAL=100 
+KFENCE_NUM_OBJECTS=255 KFENCE_KUNIT_TEST=m PROVE_LOCKING=y LOCK_STAT=y DEBUG_ATOMIC_SLEEP=y 
+DEBUG_LIST=y DEBUG_SG=y KUNIT=y</code></pre></figure>
+<p>출력에서 볼 것: 기준 커널에는 <code>SLUB_DEBUG=y</code>(코드만 들어 있고 부팅 인자 <code>slab_debug=</code>로 켬, F9 §9)뿐이다. 디버그 커널은 KASAN generic(inline + 스택 + vmalloc), KFENCE(100 ms, 255 객체), kmemleak(자동 스캔), UBSAN 4종, lockdep(+LOCK_STAT), DEBUG_ATOMIC_SLEEP, DEBUG_OBJECTS(+timer), DEBUG_LIST/SG/PAGEALLOC/VM, SLUB_DEBUG_ON(=<code>slab_debug</code>가 기본 켜짐), DMA_API_DEBUG와 KUnit 테스트 모듈(=m)을 갖는다. <code>KCSAN</code>은 줄에 없다 — KASAN과 같이 켤 수 없다(§7). <code>UBSAN_DIV_ZERO</code>·<code>UBSAN_ALIGNMENT</code>도 없다(출력에 없는 옵션은 <code>is not set</code>). 실무에서 "디버그 커널"이라고 하면 대략 이 묶음이다. 아래 비용 측정(§10)도 이 묶음 전체의 비용이라는 점을 기억하자.</p>
+<p>랩 문제 하나: 처음 빌드된 <code>Image-kasan</code>에는 KUnit 테스트 모듈이 빠져 있었다(빌드 스크립트의 <code>KASAN_KUNIT_TEST=m</code> 지정 방식 문제). 랩 관리자가 같은 버전으로 다시 빌드해 위처럼 <code>=m</code>이 들어갔고, 이 노트의 모든 실행은 다시 빌드된 커널(<code>#2</code>)로 했다. 실무에서도 흔한 함정이다 — <code>scripts/config</code>로 넣은 값은 <code>olddefconfig</code>가 의존성 때문에 조용히 지울 수 있으니 <strong>빌드 후 <code>.config</code>를 꼭 grep으로 확인한다</strong>.</p>
+<h3 id="1-2-lockdep-이미-f4에서-돌려-봤다-요약">1.2 lockdep — 이미 F4에서 돌려 봤다 (요약)<a class="anchor" href="#1-2-lockdep-이미-f4에서-돌려-봤다-요약" aria-label="link">#</a></h3>
+<p>lockdep(<code>CONFIG_PROVE_LOCKING</code>)은 F4 §13에서 실제로 돌렸다. 핵심만 다시 정리한다. lockdep은 개별 락이 아니라 <strong>락 클래스</strong>(같은 <code>spin_lock_init</code> 자리에서 초기화된 락 전부)를 단위로, "A를 쥔 채 B를 잡았다"는 <strong>순서 간선</strong>과 "이 락은 hardirq 안에서도 쓰인다" 같은 <strong>사용 상태</strong>를 기록한다. 그래서 실제 deadlock이 한 번도 일어나지 않아도 ABBA 사이클(<code>possible circular locking dependency detected</code>)과 IRQ 상태 불일치(<code>inconsistent {IN-HARDIRQ-W} -&gt; {HARDIRQ-ON-W} usage</code>)를 <strong>처음 그 경로를 지나는 순간</strong> 보고한다. F4 예제 14(<code>f4_abba</code>)는 두 스레드가 겹치지 않게 돌아도 잡히는 것을, 예제 15는 <code>/proc/lockdep</code>에 쌓인 의존 그래프를 보여 줬다. F2 §10은 같은 디버그 커널에서 <code>DEBUG_ATOMIC_SLEEP</code>(E4 §5)이 "BUG: sleeping function called from invalid context"를 찍는 네 가지 문맥 위반을 다뤘다. 이 노트에서 새로 볼 것은 딱 하나다: <strong>lockdep은 첫 보고 뒤 스스로 꺼진다</strong>(<code>debug_locks=0</code>). 한 부팅에 한 개의 lockdep 버그만 볼 수 있다는 뜻이고, CI가 "lockdep 경고 0개"를 판정할 때 이 값을 본다.</p>
+<h4 id="예제-2-image-kasan의-lockdep-상태와-통계">예제 2 — <code>Image-kasan</code>의 lockdep 상태와 통계<a class="anchor" href="#예제-2-image-kasan의-lockdep-상태와-통계" aria-label="link">#</a></h4>
+<p>무엇을 확인하나: 탐지기가 잔뜩 켜진 커널이 부팅 직후 이미 몇 개의 락 클래스·의존 간선을 추적하고 있는지, <code>debug_locks</code>가 살아 있는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># 게스트 t_misc.sh 안에서
+grep -E "lock-classes|direct dependencies|dependency chains|in-hardirq chains|hardirq-safe locks|debug_locks" /proc/lockdep_stats</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code> lock-classes:                          793 [max: 8192]
+ direct dependencies:                  5178 [max: 32768]
+ indirect dependencies:               17256
+ all direct dependencies:             45838
+ dependency chains:                    5195 [max: 65536]
+ in-hardirq chains:                      29
+ hardirq-safe locks:                     22
+ max locking depth:                      12
+ debug_locks:                             1</code></pre></figure>
+<p>출력에서 볼 것: BusyBox 셸이 뜬 직후(부팅 약 22초, TCG)인데도 793개 락 클래스와 5178개 직접 의존 간선이 이미 기록돼 있다. 대괄호 <code>[max: …]</code>가 lockdep 표의 크기 상한이고(부팅 로그에 <code>memory used by lock dependency info: 6941 kB</code>가 찍힌다), 상한에 닿으면 lockdep은 "BUG: MAX_LOCKDEP_KEYS too low!" 같은 메시지와 함께 꺼진다. 마지막 줄 <code>debug_locks: 1</code>이 "lockdep이 아직 살아 있다"는 표시다. 어떤 lockdep 경고든 한 번 나면(그리고 §3에서 볼 KASAN 리포트가 나도) 이 값이 0이 된다. 참고로 <code>/proc/sys/kernel/debug_locks</code> 같은 sysctl 파일은 없다 — 이 줄이 유일한 런타임 확인 지점이다.</p>
+<hr>
+<h2 id="2-kasan의-원리-컴파일러가-모든-load-store-앞에-검사를-심는다">2. KASAN의 원리 — 컴파일러가 모든 load/store 앞에 검사를 심는다<a class="anchor" href="#2-kasan의-원리-컴파일러가-모든-load-store-앞에-검사를-심는다" aria-label="link">#</a></h2>
+<h3 id="2-1-직관-주소마다-붙은-접근-허가-비트맵">2.1 직관 — "주소마다 붙은 접근 허가 비트맵"<a class="anchor" href="#2-1-직관-주소마다-붙은-접근-허가-비트맵" aria-label="link">#</a></h3>
+<p>Don이 SSD 펌웨어에서 "이 DRAM 영역은 지금 써도 되나"를 검사하려 했다면 아마 <strong>비트맵 하나</strong>를 두고, 버퍼를 할당할 때 비트를 켜고 해제할 때 끄고, 모든 접근 전에 비트를 확인했을 것이다. 문제는 "모든 접근 전에"다 — 손으로는 불가능하다. KASAN(Kernel Address SANitizer)은 이걸 <strong>컴파일러</strong>에게 시킨다. <code>-fsanitize=kernel-address</code>로 빌드하면 gcc/clang이 커널의 모든 load/store 앞에 "이 주소의 허가 비트를 보고, 금지면 리포트 함수를 불러라"는 코드를 끼워 넣는다. 그 허가 비트맵이 <strong>shadow memory</strong>다.</p>
+<h3 id="2-2-정의-shadow-memory-1-8-인코딩-generic-kasan">2.2 정의 — shadow memory 1:8 인코딩 (generic KASAN)<a class="anchor" href="#2-2-정의-shadow-memory-1-8-인코딩-generic-kasan" aria-label="link">#</a></h3>
+<ul><li>커널 메모리 <strong>8바이트(granule)마다 shadow 1바이트</strong>. 그래서 shadow는 커널 주소 공간의 1/8을 차지한다.</li><li>주소 → shadow 주소: <code>shadow = (addr &gt;&gt; 3) + KASAN_SHADOW_OFFSET</code>. arm64 48비트 VA·generic에서 <code>KASAN_SHADOW_OFFSET = 0xdfff800000000000</code>(<code>arch/arm64/Kconfig</code>).</li><li>shadow 값의 뜻: <code>0x00</code> = 8바이트 전부 접근 가능, <code>0x01</code>~<code>0x07</code> = 앞의 N바이트만 가능(객체 끝이 granule 중간에 있을 때), 음수(최상위 비트 1) = 전부 금지이고 값이 <strong>이유</strong>를 말한다.</li></ul>
+<div class="tw"><table><thead><tr><th>shadow 값</th><th>매크로 (<code>mm/kasan/kasan.h</code>)</th><th>뜻</th></tr></thead><tbody><tr><td><code>fc</code></td><td><code>KASAN_SLAB_REDZONE</code></td><td>slab 객체 뒤 redzone</td></tr><tr><td><code>fb</code></td><td><code>KASAN_SLAB_FREE</code></td><td>해제된 slab 객체</td></tr><tr><td><code>fa</code></td><td><code>KASAN_SLAB_FREE_META</code></td><td>해제된 객체 + 해제 스택 메타데이터</td></tr><tr><td><code>fe</code></td><td><code>KASAN_PAGE_REDZONE</code></td><td><code>kmalloc_large</code>(페이지 단위) 뒤 redzone</td></tr><tr><td><code>ff</code></td><td><code>KASAN_PAGE_FREE</code></td><td>해제된 페이지</td></tr><tr><td><code>f9</code></td><td><code>KASAN_GLOBAL_REDZONE</code></td><td>전역 변수 뒤 redzone</td></tr><tr><td><code>f1</code>/<code>f2</code>/<code>f3</code></td><td><code>KASAN_STACK_LEFT/MID/RIGHT</code></td><td>스택 변수 사이 redzone</td></tr><tr><td><code>f8</code></td><td><code>KASAN_VMALLOC_INVALID</code></td><td>vmalloc 영역의 빈 공간</td></tr><tr><td><code>ca</code>/<code>cb</code></td><td><code>KASAN_ALLOCA_LEFT/RIGHT</code></td><td><code>alloca</code>/VLA 앞뒤</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 660 330" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <text x="20" y="28" font-size="13">커널 메모리: kmalloc(13) → kmalloc-16 칸 + 뒤 redzone</text>
+  <rect x="60" y="45" width="160" height="44" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="140" y="72" font-size="12" text-anchor="middle">8B 전부 유효</text>
+  <rect x="220" y="45" width="100" height="44" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="270" y="72" font-size="12" text-anchor="middle">5B 유효</text>
+  <rect x="320" y="45" width="60" height="44" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="350" y="72" font-size="12" text-anchor="middle">3B</text>
+  <rect x="380" y="45" width="160" height="44" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="460" y="72" font-size="12" text-anchor="middle">redzone 8B</text>
+  <text x="60" y="106" font-size="12">0x...00</text>
+  <text x="220" y="106" font-size="12">0x...08</text>
+  <text x="380" y="106" font-size="12">0x...10</text>
+  <line x1="140" y1="112" x2="190" y2="200" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="300" y1="112" x2="250" y2="200" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="460" y1="112" x2="310" y2="200" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="400" y="152" font-size="12">shadow = (addr &gt;&gt; 3)</text>
+  <text x="400" y="170" font-size="12">  + 0xdfff800000000000</text>
+  <text x="20" y="196" font-size="13">shadow memory (granule당 1B):</text>
+  <rect x="160" y="205" width="60" height="40" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="190" y="230" font-size="13" text-anchor="middle">00</text>
+  <rect x="220" y="205" width="60" height="40" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="250" y="230" font-size="13" text-anchor="middle">05</text>
+  <rect x="280" y="205" width="60" height="40" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="310" y="230" font-size="13" text-anchor="middle">fc</text>
+  <text x="20" y="280" font-size="12">검사(4바이트 store): s = shadow[addr]; s == 0 이면 통과, 아니면</text>
+  <text x="20" y="300" font-size="12">(addr &amp; 7) + 3 &gt;= s 이면 __asan_report_store4_noabort(addr) 호출</text>
+  <text x="20" y="320" font-size="12">음수(fc, fb …)는 부호 있는 비교에서 항상 금지가 된다</text>
+</svg></figure>
+<p>그림 2 — generic KASAN의 1:8 shadow. 객체 끝이 granule 중간이면 shadow에 "앞 N바이트만 유효"를 적고, 그 뒤는 이유 코드(<code>fc</code> = slab redzone)로 막는다.</p>
+<h3 id="2-3-예제-3-컴파일러가-심는-코드를-직접-보기">2.3 예제 3 — 컴파일러가 심는 코드를 직접 보기<a class="anchor" href="#2-3-예제-3-컴파일러가-심는-코드를-직접-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>*p = v</code> 한 줄이 KASAN 빌드에서 몇 개의 명령이 되는지. 커널을 빌드하지 않고 VM의 gcc 15로 함수 하나만 커널과 같은 플래그(<code>scripts/Makefile.kasan</code>: <code>-fsanitize=kernel-address -fasan-shadow-offset=...</code>, inline이면 <code>asan-instrumentation-with-call-threshold=10000</code>, outline이면 <code>0</code>)로 어셈블한다. 실행하지 않는 코드라 안전하다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* m8_inst.c: KASAN 계측이 store 하나 앞에 무엇을 심는지 보기 (실행하지 않고 어셈블리만 본다) */
+void set_u32(unsigned int *p, unsigned int v)
+{
+	*p = v;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>F="-O2 -fsanitize=kernel-address -fasan-shadow-offset=0xdfff800000000000"
+gcc $F --param asan-instrumentation-with-call-threshold=10000 -S -o - m8_inst.c   # INLINE
+gcc $F --param asan-instrumentation-with-call-threshold=0     -S -o - m8_inst.c   # OUTLINE</code></pre></figure>
+<p>INLINE (지시어 줄은 걸러 냈다):</p>
+<figure class="code"><span class="lang">text</span><pre><code>set_u32:
+.LASANPC0:
+.LFB0:
+	lsr	x4, x0, 3
+	mov	x3, 140737488355328
+	movk	x3, 0xdfff, lsl 48
+	ldrsb	w4, [x4, x3]
+	and	x3, x0, 7
+	add	w3, w3, 3
+	cmp	w4, 0
+	ccmp	w3, w4, 1, ne
+	bge	.L11
+	str	w1, [x0]
+	ret
+.L11:
+	stp	x29, x30, [sp, -32]!
+	mov	x29, sp
+	str	x0, [sp, 16]
+	str	w1, [sp, 28]
+	bl	__asan_report_store4_noabort
+	ldr	x2, [sp, 16]
+	ldr	w1, [sp, 28]
+	str	w1, [x2]
+	ldp	x29, x30, [sp], 32
+	ret</code></pre></figure>
+<p>OUTLINE:</p>
+<figure class="code"><span class="lang">text</span><pre><code>set_u32:
+	stp	x29, x30, [sp, -32]!
+	mov	x29, sp
+	stp	x19, x20, [sp, 16]
+	mov	x19, x0
+	mov	w20, w1
+	bl	__asan_store4_noabort
+	str	w20, [x19]
+	ldp	x19, x20, [sp, 16]
+	ldp	x29, x30, [sp], 32
+	ret</code></pre></figure>
+<p>출력에서 볼 것: INLINE에서 진짜 일은 <code>str w1, [x0]</code> 한 줄이고, 그 앞 9개 명령이 그림 2의 검사 그대로다 — <code>lsr x4, x0, 3</code>(addr &gt;&gt; 3), <code>mov/movk</code>로 <code>0xdfff800000000000</code>을 만들고(<code>140737488355328</code> = <code>0x800000000000</code>), <code>ldrsb</code>로 shadow를 <strong>부호 있게</strong> 읽고(그래서 <code>fc</code> 같은 값이 음수), <code>(addr &amp; 7) + 3</code>(4바이트 접근의 마지막 바이트)과 비교한다. 정상 경로는 분기 하나로 빠져나간다. OUTLINE은 같은 검사를 <code>__asan_store4_noabort()</code>(<code>mm/kasan/generic.c</code>의 <code>DEFINE_ASAN_LOAD_STORE(4)</code>) 호출로 바꿔 코드가 작지만 매번 함수 호출 비용이 든다. 랩 커널은 <code>KASAN_INLINE</code>이다 — 커널 문서 기준 inline이 빠르고 이미지가 크다. <code>_noabort</code>는 "리포트 후 계속 진행"이라는 뜻이다(커널은 기본적으로 첫 리포트에서 멈추지 않는다, <code>kasan.fault=panic</code>으로 바꿀 수 있다).</p>
+<h3 id="2-4-redzone과-quarantine-옆을-막고-해제한-건-바로-돌려주지-않는다">2.4 redzone과 quarantine — "옆을 막고, 해제한 건 바로 돌려주지 않는다"<a class="anchor" href="#2-4-redzone과-quarantine-옆을-막고-해제한-건-바로-돌려주지-않는다" aria-label="link">#</a></h3>
+<p>shadow 비트맵만으로는 부족하다. 두 객체가 딱 붙어 있으면 A를 넘어 쓴 바이트가 <strong>B의 정상 영역</strong>이라 shadow가 <code>00</code>이다. 그래서 KASAN은 slab 할당자(SLUB)에 끼어들어 두 가지를 더 한다.</p>
+<ul class="tasks"><li><strong>redzone</strong>: 객체 뒤에 금지 구역을 둔다(shadow <code>fc</code>). <code>kmalloc(13)</code>이면 13~15번 바이트는 granule 부분값(<code>05</code>)으로, 그 뒤는 redzone으로 막힌다. 그래서 <code>kmalloc_oob_right</code>처럼 1바이트만 넘겨도 잡힌다.</li><li><strong>quarantine</strong>(generic 전용): <code>kfree()</code>된 객체를 즉시 free list로 돌려보내지 않고 FIFO 격리 구역에 잠시 둔다. shadow는 <code>fb</code>/<code>fa</code>. 그동안 누가 그 주소를 만지면 use-after-free로 잡힌다. 즉시 재사용되면 UAF 접근이 <strong>새 주인의 정상 데이터</strong>를 건드리는 것이라 못 잡는다. 격리 구역 크기는 전체 RAM의 1/32(<code>QUARANTINE_FRACTION 32</code>, <code>mm/kasan/quarantine.c</code>) 이고 CPU마다 1 MiB 배치로 비운다.</li><li><strong>스택 기록</strong>: 할당·해제할 때의 콜스택을 stack depot(중복 제거 저장소)에 넣고 객체 메타데이터에 핸들만 적는다. 리포트에 "Allocated by task …", "Freed by task …"가 나오는 이유다. Don의 펌웨어 경험으로 치면 "버퍼 헤더에 할당자 LR을 적어 두기"를 커널이 자동으로 해 주는 셈이다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <text x="20" y="26" font-size="13">slab 한 페이지 (kmalloc-128, KASAN generic)</text>
+  <rect x="20" y="40" width="130" height="44" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="85" y="67" font-size="12" text-anchor="middle">객체 A (사용 중)</text>
+  <rect x="150" y="40" width="60" height="44" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="180" y="67" font-size="12" text-anchor="middle">rz fc</text>
+  <rect x="210" y="40" width="130" height="44" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="275" y="67" font-size="12" text-anchor="middle">객체 B (해제됨) fb</text>
+  <rect x="340" y="40" width="60" height="44" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="370" y="67" font-size="12" text-anchor="middle">rz fc</text>
+  <rect x="400" y="40" width="130" height="44" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="465" y="67" font-size="12" text-anchor="middle">객체 C (사용 중)</text>
+  <text x="85" y="108" font-size="12" text-anchor="middle">A[128] 쓰기</text>
+  <line x1="150" y1="96" x2="170" y2="88" stroke="#d0564a" marker-end="url(#ah3)"/>
+  <text x="290" y="108" font-size="12" text-anchor="middle">B 해제 후 읽기 → UAF</text>
+  <line x1="275" y1="120" x2="275" y2="170" stroke="currentColor" marker-end="url(#ah3)"/>
+  <rect x="120" y="175" width="430" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="335" y="197" font-size="13" text-anchor="middle">quarantine FIFO (RAM의 1/32): kfree한 객체가 여기서 대기</text>
+  <text x="335" y="216" font-size="12" text-anchor="middle">B → … → 오래된 것부터 진짜 free list로</text>
+  <line x1="550" y1="200" x2="610" y2="200" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="618" y="205" font-size="12">재사용</text>
+  <rect x="20" y="245" width="620" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="330" y="264" font-size="12" text-anchor="middle">객체 메타데이터: alloc stack 핸들 + free stack 핸들 → stack depot</text>
+  <text x="330" y="281" font-size="12" text-anchor="middle">리포트의 "Allocated by task …" / "Freed by task …" 가 여기서 나온다</text>
+</svg></figure>
+<p>그림 3 — redzone은 옆 객체로 넘어가는 접근을, quarantine은 해제 직후 재사용으로 UAF가 숨는 것을 막는다.</p>
+<h3 id="2-5-kasan의-세-가지-모드">2.5 KASAN의 세 가지 모드<a class="anchor" href="#2-5-kasan의-세-가지-모드" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>모드</th><th>Kconfig</th><th>원리</th><th>shadow</th><th>잡는 정밀도</th><th>비용</th><th>쓰는 곳</th></tr></thead><tbody><tr><td>Generic</td><td><code>KASAN_GENERIC</code></td><td>컴파일러 계측 + 1:8 shadow</td><td>메모리의 1/8</td><td>바이트 단위, quarantine</td><td>가장 큼</td><td>개발·CI (모든 아키텍처)</td></tr><tr><td>Software tag-based</td><td><code>KASAN_SW_TAGS</code></td><td>arm64 TBI(포인터 최상위 바이트 무시)에 8비트 태그, 16B granule, 계측은 태그 비교</td><td>1/16 (<code>KASAN_SHADOW_SCALE_SHIFT := 4</code>)</td><td>16B 단위, 확률적(태그 충돌 1/256)</td><td>중간</td><td>arm64 개발 기기에서 실기 테스트</td></tr><tr><td>Hardware tag-based</td><td><code>KASAN_HW_TAGS</code></td><td>arm64 <strong>MTE</strong>(ARMv8.5): 4비트 태그를 CPU가 load/store마다 비교, 계측 없음</td><td>없음 (태그는 HW 저장)</td><td>16B 단위, 충돌 1/16</td><td>작음 (sync &lt; asymm &lt; async 순으로 느림)</td><td><strong>양산 후보</strong> (MTE 칩: Pixel 8+, 일부 Cortex-A7xx/X 계열)</td></tr></tbody></table></div>
+<p>HW_TAGS는 부팅 인자 <code>kasan=on/off</code>, <code>kasan.mode=sync/async/asymm</code>, <code>kasan.stacktrace=off</code>(스택 수집 끄기, 비용 절감) 등을 받는다. sync는 위반한 바로 그 명령에서 tag check fault가 나서 정확한 리포트가 나오고, async는 "어디선가 위반이 있었다"는 플래그만 남겨 다음 커널 진입 때 보고한다(정확도↓ 비용↓). 랩의 QEMU <code>-cpu cortex-a57</code>에는 MTE가 없어서 HW_TAGS는 <strong>가이드(실행 안 함)</strong> 이다. QEMU는 <code>-machine virt,mte=on -cpu max</code>로 MTE를 에뮬레이션할 수 있지만 그 커널은 따로 빌드해야 한다.</p>
+<h2 id="3-kasan-리포트-읽기-업스트림-kasan_test-kunit-스위트로">3. KASAN 리포트 읽기 — 업스트림 <code>kasan_test</code> KUnit 스위트로<a class="anchor" href="#3-kasan-리포트-읽기-업스트림-kasan_test-kunit-스위트로" aria-label="link">#</a></h2>
+<h3 id="3-1-kunit과-kasan_test">3.1 KUnit과 <code>kasan_test</code><a class="anchor" href="#3-1-kunit과-kasan_test" aria-label="link">#</a></h3>
+<p>KUnit은 커널 안에서 도는 단위 테스트 프레임워크다(<code>CONFIG_KUNIT</code>). 테스트 함수 하나가 <code>KUNIT_CASE</code>, 묶음이 suite이고, 결과는 KTAP(TAP 형식) 줄로 dmesg에 찍힌다. <code>mm/kasan/kasan_test_c.c</code>는 KASAN 개발자들이 "KASAN이 이런 버그를 잡는가"를 검증하려고 만든 스위트로, 6.18 기준 75개 케이스가 있다(<code>kmalloc_oob_right</code>, <code>kmalloc_uaf</code>, <code>kasan_stack_oob</code>, <code>kasan_global_oob_right</code>, <code>kmalloc_double_kzfree</code>, <code>vmalloc_oob</code> …). 각 케이스는 <code>KUNIT_EXPECT_KASAN_FAIL(test, 식)</code> 매크로로 "이 식을 실행하면 KASAN 리포트가 <strong>나와야</strong> 한다"를 검사한다. 즉 리포트가 나오면 <strong>ok</strong>다. 매크로는 console tracepoint에 probe를 걸어 리포트 문자열이 찍혔는지 본다.</p>
+<p>버그를 일으키는 코드를 새로 쓰지 않고 이 스위트를 쓰는 이유는 둘이다. (1) 커널 개발자가 이미 검증한, 정확히 한 종류씩만 버그를 내는 코드다. (2) 실무에서 새 보드·새 컴파일러로 KASAN 커널을 만들면 <strong>제일 먼저 이 스위트를 돌려</strong> 탐지기가 제대로 붙었는지 확인한다.</p>
+<h3 id="3-2-예제-4-kasan_test-ko-실행">3.2 예제 4 — <code>kasan_test.ko</code> 실행<a class="anchor" href="#3-2-예제-4-kasan_test-ko-실행" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 랩 <code>Image-kasan</code>에서 75개 케이스가 몇 개 통과하고, 어떤 종류의 리포트가 몇 개 나오는지. 모듈은 랩 빌드가 만든 업스트림 모듈(<code>/var/lab/out/modules-kasan/lib/modules/6.18.55-kasan/kernel/mm/kasan/kasan_test.ko</code>)을 그대로 initramfs에 넣었다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># VM: 업스트림 테스트 모듈을 initramfs에 넣을 디렉터리로
+M=/var/lab/out/modules-kasan/lib/modules/6.18.55-kasan/kernel
+mkdir -p /var/tmp/M8/ko &amp;&amp; cp $M/mm/kasan/kasan_test.ko $M/mm/kfence/kfence_test.ko $M/lib/test_ubsan.ko /var/tmp/M8/ko/
+cat &gt; /var/tmp/M8/t_kasan.sh &lt;&lt;'EOF'
+echo "M8UPTIME $(cut -d' ' -f1 /proc/uptime)"
+cat /proc/cmdline
+insmod /m8/kasan_test.ko
+echo "M8DONE rc=$?"
+EOF
+cd /var/tmp/M8 &amp;&amp; TMO=2400 ./m8_run.sh Image-kasan kasan3 t_kasan.sh log_buf_len=16M
+grep -E "# Subtest|1\.\.75|not ok|# kasan: pass|# Totals" kasan3.log
+grep "BUG: KASAN" kasan3.log | sed 's/.*BUG: KASAN: //; s/ in .*//' | sort | uniq -c</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[   23.282822][   T80]     # Subtest: kasan
+[   23.286336][   T80]     1..75
+[   25.160458][   T80]     not ok 63 kasan_strings
+[   25.665495][   T80] # kasan: pass:62 fail:1 skip:12 total:75
+[   25.665977][   T80] # Totals: pass:62 fail:1 skip:12 total:75
+[   25.666322][   T80] not ok 1 kasan
+      2 alloca-out-of-bounds
+      5 double-free
+      1 global-out-of-bounds
+      4 invalid-free
+      1 out-of-bounds
+    131 slab-out-of-bounds
+     22 slab-use-after-free
+      1 stack-out-of-bounds
+      4 use-after-free
+      2 vmalloc-out-of-bounds</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>62 통과, 12 건너뜀, 1 실패</strong>, 리포트 173개. 건너뛴 것은 대부분 <code># SKIP Test requires CONFIG_KASAN_GENERIC=n</code>(tag 모드 전용 테스트), <code>CONFIG_CC_IS_CLANG=y</code>(<code>kasan_global_oob_left</code>는 clang만 계측), <code>CONFIG_RUST=y</code>다. 즉 <strong>모드·컴파일러마다 잡는 범위가 다르다</strong>는 것을 스위트가 직접 알려 준다.</li><li>실패 1개(<code>kasan_strings</code>)의 내용은 다음과 같다.</li></ul>
+<figure class="code"><span class="lang">text</span><pre><code>[   25.142995][  T206]     # kasan_strings: EXPECTATION FAILED at mm/kasan/kasan_test_c.c:1699
+[   25.142995][  T206]     KASAN failure expected in "strscpy(ptr, src + KASAN_GRANULE_SIZE, KASAN_GRANULE_SIZE)", but none occurred</code></pre></figure>
+<p>이미 해제된 버퍼의 첫 바이트부터 읽는 <code>strscpy()</code>를 KASAN이 놓쳤다는 뜻이다. 같은 테스트의 <code>strchr</code>·<code>strcmp</code> 등 다른 문자열 함수 UAF는 잡혔다(바로 뒤 <code>BUG: KASAN: slab-use-after-free in strchr+0xc4/0xd0</code>). 원인은 확인하지 않았지만, <code>strscpy()</code>가 워드 단위로 읽는 구현(<code>read_word_at_a_time()</code> 계열, KASAN 검사를 일부러 우회하는 접근)을 쓰기 때문일 가능성이 크다. 교훈은 하나다: <strong>탐지기도 사각지대가 있고, 그 사각지대는 테스트 스위트가 드러낸다.</strong> 새 커널·새 컴파일러에서 스위트를 먼저 돌리는 이유다.</p>
+<ul><li>시간: TCG에서 75개 전체가 약 2.4초(23.28 → 25.67초). KASAN 리포트 자체는 비싸지 않다. 비싼 것은 리포트가 아니라 <strong>모든 접근에 붙은 검사</strong>다(§10).</li></ul>
+<h3 id="3-3-예제-5-slab-out-of-bounds-리포트-한-줄씩-읽기">3.3 예제 5 — slab-out-of-bounds 리포트 한 줄씩 읽기<a class="anchor" href="#3-3-예제-5-slab-out-of-bounds-리포트-한-줄씩-읽기" aria-label="link">#</a></h3>
+<p><code>kmalloc_oob_right</code>의 첫 리포트다(타임스탬프 접두어는 지웠다, 주소는 실행마다 다르다). 테스트 코드는 <code>size = 128 - KASAN_GRANULE_SIZE - 5 = 115</code>바이트를 <code>kmalloc</code>하고 <code>ptr[size] = 'x'</code>로 딱 한 바이트 넘겨 쓴다(§0의 "버퍼 끝 넘겨 쓰기" 그대로).</p>
+<figure class="code"><span class="lang">text</span><pre><code>==================================================================
+BUG: KASAN: slab-out-of-bounds in kmalloc_oob_right+0x594/0x620 [kasan_test]
+Write of size 1 at addr ffff00000e106e73 by task kunit_try_catch/81
+
+CPU: 0 UID: 0 PID: 81 Comm: kunit_try_catch Tainted: G                 N  6.18.55-kasan #2 PREEMPT 
+Tainted: [N]=TEST
+Hardware name: linux,dummy-virt (DT)
+Call trace:
+ show_stack+0x30/0x90 (C)
+ dump_stack_lvl+0x70/0x98
+ print_report+0x168/0x4c0
+ kasan_report+0x88/0x180
+ __asan_report_store1_noabort+0x20/0x30
+ kmalloc_oob_right+0x594/0x620 [kasan_test]
+ kunit_try_run_case+0x150/0x3e0
+ kunit_generic_run_threadfn_adapter+0x88/0x108
+ kthread+0x34c/0x6b0
+ ret_from_fork+0x10/0x20
+
+Allocated by task 81:
+ kasan_save_stack+0x40/0x68
+ kasan_save_track+0x20/0x40
+ kasan_save_alloc_info+0x44/0x58
+ __kasan_kmalloc+0xbc/0xd8
+ __kmalloc_cache_noprof+0x29c/0x7e0
+ kmalloc_oob_right+0xb0/0x620 [kasan_test]
+ kunit_try_run_case+0x150/0x3e0
+ kunit_generic_run_threadfn_adapter+0x88/0x108
+ kthread+0x34c/0x6b0
+ ret_from_fork+0x10/0x20
+
+The buggy address belongs to the object at ffff00000e106e00
+ which belongs to the cache kmalloc-128 of size 128
+The buggy address is located 0 bytes to the right of
+ allocated 115-byte region [ffff00000e106e00, ffff00000e106e73)
+
+The buggy address belongs to the physical page:
+page: refcount:0 mapcount:0 mapping:0000000000000000 index:0xffff00000e106f80 pfn:0x4e106
+...  (page flags / raw 줄 8개 생략)
+page dumped because: kasan: bad access detected
+
+Memory state around the buggy address:
+ ffff00000e106d00: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc
+ ffff00000e106d80: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc
+&gt;ffff00000e106e00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 03 fc
+                                                             ^
+ ffff00000e106e80: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc
+ ffff00000e106f00: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc
+==================================================================</code></pre></figure>
+<p>위에서부터 읽는 순서:</p>
+<div class="tw"><table><thead><tr><th>블록</th><th>읽을 것</th><th>이 리포트에서</th></tr></thead><tbody><tr><td>제목</td><td>버그 종류 + 접근한 함수+오프셋</td><td><code>slab-out-of-bounds</code>, <code>kmalloc_oob_right+0x594</code></td></tr><tr><td>접근 줄</td><td>read/write, 크기, 주소, 태스크</td><td>1바이트 <strong>쓰기</strong>, <code>…e73</code></td></tr><tr><td>Call trace</td><td>위쪽 5줄은 리포트 장치(<code>print_report</code> → <code>kasan_report</code> → <code>__asan_report_store1_noabort</code>), 그 아래 첫 줄이 <strong>범인</strong></td><td><code>kmalloc_oob_right+0x594</code></td></tr><tr><td>Allocated by</td><td>이 객체를 누가 할당했나</td><td>같은 함수 <code>+0xb0</code>의 <code>kmalloc</code></td></tr><tr><td>객체 설명</td><td>어느 캐시, 객체 시작, 몇 바이트 밖</td><td>kmalloc-128 칸, 115바이트 영역의 <strong>0 bytes to the right</strong></td></tr><tr><td>Memory state</td><td>shadow 덤프, <code>^</code>가 버그 주소의 shadow</td><td><code>00</code>×14 + <code>03</code> + <code>fc</code></td></tr></tbody></table></div>
+<p>shadow 줄을 그림 2와 맞춰 보자. 115 = 14 × 8 + 3이라 앞 14개 granule은 <code>00</code>, 15번째는 "앞 3바이트만 유효" <code>03</code>, 그 뒤 kmalloc-128 칸의 나머지와 redzone은 <code>fc</code>다. <code>^</code>는 <code>03</code> 칸을 가리킨다 — 주소 <code>…e73</code>은 그 granule의 4번째 바이트(오프셋 3)라 금지 구역이다. 한 줄이 16 shadow 바이트 = 128 메모리 바이트를 덮으므로 <strong>한 줄 = kmalloc-128 객체 하나</strong>인 것도 보인다. 그리고 이 첫 리포트 바로 다음 줄에 <code>Disabling lock debugging due to kernel taint</code>가 찍혔다 — KASAN 리포트가 taint를 남기면서 lockdep을 끈다는 §12의 내용이 실제로 일어난 것이다. 위아래 줄이 전부 <code>fc</code>인 것은 같은 slab 페이지의 <strong>아직 할당되지 않은 객체들</strong>이다 — SLUB이 새 slab 페이지를 만들 때 KASAN이 페이지 전체를 <code>fc</code>로 칠해 두고(<code>__kasan_poison_slab()</code>, <code>mm/kasan/common.c</code>), 할당되는 객체만 그때 푼다.</p>
+<h3 id="3-4-예제-6-범인-줄-번호로-바꾸기">3.4 예제 6 — 범인 줄 번호로 바꾸기<a class="anchor" href="#3-4-예제-6-범인-줄-번호로-바꾸기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 리포트의 <code>함수+오프셋/길이</code>를 소스 줄로 바꾸는 법(M3의 <code>faddr2line</code>·<code>decode_stacktrace.sh</code>와 같다). 모듈은 같은 빌드의 <code>.ko</code>를 쓴다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>/var/lab/src/linux-6.18.55/scripts/faddr2line /var/tmp/M8/ko/kasan_test.ko \
+    kmalloc_oob_right+0x594/0x620 kmalloc_uaf+0x318/0x368</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>kmalloc_oob_right+0x594/0x620:
+kmalloc_oob_right at mm/kasan/kasan_test_c.c:212 (discriminator 15)
+
+kmalloc_uaf+0x318/0x368:
+kmalloc_uaf at mm/kasan/kasan_test_c.c:692 (discriminator 15)</code></pre></figure>
+<p>출력에서 볼 것: 212행은 <code>KUNIT_EXPECT_KASAN_FAIL(test, ptr[size] = 'x');</code> — 정확히 넘겨 쓴 줄이다. 692행은 다음 예제의 해제 후 읽기 줄이다. <code>discriminator</code>는 한 줄이 여러 기본 블록으로 나뉠 때(여기서는 매크로 전개) 붙는 번호라 무시해도 된다.</p>
+<h3 id="3-5-예제-7-use-after-free-할당-해제-스택이-둘-다-나온다">3.5 예제 7 — use-after-free: 할당·해제 스택이 둘 다 나온다<a class="anchor" href="#3-5-예제-7-use-after-free-할당-해제-스택이-둘-다-나온다" aria-label="link">#</a></h3>
+<p><code>kmalloc_uaf</code>는 <code>kmalloc(10)</code> → <code>kfree(ptr)</code> → <code>((volatile char *)ptr)[8]</code> 읽기다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>BUG: KASAN: slab-use-after-free in kmalloc_uaf+0x318/0x368 [kasan_test]
+Read of size 1 at addr ffff000014b31a18 by task kunit_try_catch/129
+
+CPU: 0 UID: 0 PID: 129 Comm: kunit_try_catch Tainted: G    B            N  6.18.55-kasan #2 PREEMPT 
+Tainted: [B]=BAD_PAGE, [N]=TEST
+...  (Call trace: 예제 5와 같은 리포트 장치 5줄 + kmalloc_uaf+0x318 + kunit 4줄)
+
+Allocated by task 129:
+ kasan_save_stack+0x40/0x68
+ kasan_save_track+0x20/0x40
+ kasan_save_alloc_info+0x44/0x58
+ __kasan_kmalloc+0xbc/0xd8
+ __kmalloc_cache_noprof+0x29c/0x7e0
+ kmalloc_uaf+0xb8/0x368 [kasan_test]
+ ...
+
+Freed by task 129:
+ kasan_save_stack+0x40/0x68
+ kasan_save_track+0x20/0x40
+ __kasan_save_free_info+0x4c/0x80
+ __kasan_slab_free+0x78/0xa0
+ kfree+0x144/0x700
+ kmalloc_uaf+0x124/0x368 [kasan_test]
+ ...
+
+The buggy address belongs to the object at ffff000014b31a10
+ which belongs to the cache kmalloc-16 of size 16
+The buggy address is located 8 bytes inside of
+ freed 16-byte region [ffff000014b31a10, ffff000014b31a20)
+...
+Memory state around the buggy address:
+ ffff000014b31900: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fa fb
+ ffff000014b31980: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc
+&gt;ffff000014b31a00: fc fc fa fb fc fc fc fc fc fc fc fc fc fc fc fc
+                            ^
+ ffff000014b31a80: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong>Freed by task</strong> 블록이 새로 생겼다. 실무에서 UAF를 고칠 때 가장 중요한 정보다 — "누가 먼저 해제했나"가 곧 수명 관리 버그의 다른 한쪽이다. 드라이버라면 보통 <code>remove()</code>나 에러 경로의 <code>kfree</code>가 여기 찍힌다.</li><li>"located 8 bytes <strong>inside of freed</strong> 16-byte region" — OOB가 아니라 해제된 객체 내부 접근이다.</li><li>shadow <code>fa fb</code>: 16바이트 객체의 첫 granule은 <code>fa</code>(KASAN_SLAB_FREE_META, 해제 스택 메타데이터가 들어 있는 granule), 둘째는 <code>fb</code>(해제됨). 우리가 읽은 오프셋 8은 <code>fb</code> 칸이다. 이 객체가 quarantine에 있어서 아직 재사용되지 않았기 때문에 잡을 수 있었다(그림 3).</li><li><code>Tainted: [B]=BAD_PAGE</code> — 앞선 KASAN 리포트가 커널을 taint했다(§12). 이 시점부터 lockdep도 꺼진 상태다.</li></ul>
+<h3 id="3-6-예제-8-스택-전역-변수-oob-컴파일러가-redzone을-직접-만든다">3.6 예제 8 — 스택·전역 변수 OOB: 컴파일러가 redzone을 직접 만든다<a class="anchor" href="#3-6-예제-8-스택-전역-변수-oob-컴파일러가-redzone을-직접-만든다" aria-label="link">#</a></h3>
+<p>slab이 아닌 메모리도 KASAN이 지킨다. 스택(<code>CONFIG_KASAN_STACK=y</code>)과 전역 변수는 할당자가 없으므로 <strong>컴파일러가 변수 사이에 redzone을 끼워 넣고</strong> 함수 입구에서 shadow를 칠한다. <code>kasan_stack_oob</code>는 <code>char stack_array[10]</code>의 <code>array[10]</code>(+ tag 오프셋, generic에서는 0)을 읽는다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>BUG: KASAN: stack-out-of-bounds in kasan_stack_oob+0x2d0/0x330 [kasan_test]
+Read of size 1 at addr ffff800080c77c6a by task kunit_try_catch/196
+...
+The buggy address belongs to stack of task kunit_try_catch/196
+ and is located at offset 138 in frame:
+ kasan_stack_oob+0x0/0x330 [kasan_test]
+
+This frame has 4 objects:
+ [48, 49) '__assertion'
+ [64, 72) 'array'
+ [96, 112) '__assertion'
+ [128, 138) 'stack_array'
+
+The buggy address belongs to a 8-page vmalloc region starting at 0xffff800080c70000 allocated at kernel_clone+0x148/0x780
+...
+Memory state around the buggy address:
+ ffff800080c77b80: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+&gt;ffff800080c77c00: f1 f1 01 f2 00 f2 f2 f2 00 00 f2 f2 00 02 f3 f3
+                                                          ^
+ ffff800080c77c80: 00 00 00 00 00 00 00 00 f1 f1 f1 f1 00 00 f2 f2</code></pre></figure>
+<p>출력에서 볼 것: 리포트가 <strong>스택 프레임의 변수 배치</strong>를 보여 준다. <code>stack_array</code>는 프레임 오프셋 [128, 138)이고 버그 주소는 오프셋 138 — 바로 한 칸 밖이다. shadow에서 <code>f1</code>(프레임 왼쪽 redzone), <code>f2</code>(변수 사이), <code>f3</code>(오른쪽 끝)이 변수를 감싸고, <code>00 02</code>가 10바이트 배열(8 + 2)이다. "8-page vmalloc region … allocated at kernel_clone"은 arm64의 <code>VMAP_STACK</code>: 커널 스택이 vmalloc 영역에 있다는 뜻이다(E4 §7의 KASAN 시 스택 32 KiB = 8페이지와 맞는다).</p>
+<p>전역 변수 버전 <code>kasan_global_oob_right</code>(<code>static char global_array[10]</code>의 범위 밖 읽기)는 이렇게 나온다:</p>
+<figure class="code"><span class="lang">text</span><pre><code>BUG: KASAN: global-out-of-bounds in kasan_global_oob_right+0x2d0/0x340 [kasan_test]
+Read of size 1 at addr ffffc425330c486d by task kunit_try_catch/192
+...
+The buggy address belongs to the variable:
+ global_array+0xd/0x40 [kasan_test]
+...
+&gt;ffffc425330c4800: 00 00 00 00 02 f9 f9 f9 f9 f9 f9 f9 00 02 f9 f9
+                                                          ^</code></pre></figure>
+<p><code>global_array+0xd/0x40</code>: 변수 이름과 그 안 오프셋 13(크기 표기 0x40은 redzone을 포함한 슬롯 크기). shadow <code>00 02</code> 다음 <code>f9</code>(KASAN_GLOBAL_REDZONE)가 전역 redzone이다. 컴파일러는 전역 변수마다 뒤에 redzone을 붙이고 <code>__asan_register_globals()</code>로 커널에 목록을 등록한다.</p>
+<h2 id="4-kfence-양산-커널에-넣을-수-있는-샘플링-탐지기">4. KFENCE — 양산 커널에 넣을 수 있는 샘플링 탐지기<a class="anchor" href="#4-kfence-양산-커널에-넣을-수-있는-샘플링-탐지기" aria-label="link">#</a></h2>
+<h3 id="4-1-직관-가끔-한-개만-mpu-가드-페이지-옆에-놓는다">4.1 직관 — "가끔 한 개만 MPU 가드 페이지 옆에 놓는다"<a class="anchor" href="#4-1-직관-가끔-한-개만-mpu-가드-페이지-옆에-놓는다" aria-label="link">#</a></h3>
+<p>KASAN은 정확하지만 비싸서 양산에 못 쓴다. 그런데 필드에서 1주일에 한 번 나는 메모리 버그는 개발 PC에서는 재현이 안 된다. KFENCE(Kernel Electric-Fence)의 답은 <strong>샘플링</strong>이다. 100 ms에 한 번(기본값, <code>CONFIG_KFENCE_SAMPLE_INTERVAL=100</code>) 다음 slab 할당 <strong>하나</strong>를 특별한 풀에 놓는다. 그 풀은 "객체 페이지 하나 + 접근 금지 guard 페이지 하나"가 번갈아 놓인 구조라, 그 객체를 넘어 쓰면 <strong>MMU가 page fault를 낸다</strong>. 검사 코드가 없으니 나머지 99.99% 할당은 비용이 0이다. Don이 MPU 영역 하나를 "버퍼 바로 뒤 접근 금지"로 설정해 두고 범인을 기다리던 것과 똑같다. 차이는 수천 대의 기기가 동시에 기다린다는 것 — 한 대에서는 확률이 낮아도 <strong>함대 전체로는</strong> 버그가 결국 샘플에 걸린다.</p>
+<h3 id="4-2-정의">4.2 정의<a class="anchor" href="#4-2-정의" aria-label="link">#</a></h3>
+<ul><li>풀 크기: <code>CONFIG_KFENCE_NUM_OBJECTS=255</code>개 객체. 객체마다 페이지 하나 + guard 페이지 → <code>(255 + 1) × 2 × 4 KiB = 2 MiB</code>를 부팅 때 예약한다.</li><li>객체 배치: 페이지 안에서 <strong>오른쪽 끝</strong> 또는 <strong>왼쪽 끝</strong>에 무작위로 붙인다. 오른쪽 끝이면 오른쪽 OOB가 guard 페이지 fault로 즉시 잡힌다. 왼쪽 끝이면 왼쪽 OOB가 즉시 잡힌다. 반대쪽 남는 공간은 <strong>canary 바이트</strong>로 채워 두고 <code>kfree()</code> 때 검사한다("memory corruption" 리포트).</li><li>해제된 KFENCE 객체의 페이지는 접근 금지로 바뀐다 → UAF가 page fault로 잡힌다.</li><li>잡는 것: OOB(read/write), UAF, invalid free, double free, 객체 옆 canary 손상. 리포트 제목은 <code>BUG: KFENCE: out-of-bounds read in …</code>, <code>BUG: KFENCE: use-after-free write in …</code>, <code>BUG: KFENCE: memory corruption in …</code>, <code>BUG: KFENCE: invalid free in …</code>.</li><li>제어: 부팅 인자 <code>kfence.sample_interval=&lt;ms&gt;</code>(0이면 끔), 런타임 <code>/sys/module/kfence/parameters/sample_interval</code>, 상태 <code>/sys/kernel/debug/kfence/stats</code>·<code>objects</code>.</li></ul>
+<figure class="chart"><svg viewBox="0 0 660 290" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <text x="20" y="24" font-size="13">KFENCE 풀 (부팅 때 2 MiB 예약, 4 KiB 페이지 단위)</text>
+  <rect x="20" y="40" width="70" height="50" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="55" y="70" font-size="12" text-anchor="middle">guard</text>
+  <rect x="90" y="40" width="130" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <rect x="170" y="40" width="50" height="50" fill="#3f9a6b" fill-opacity="0.2" stroke="#3f9a6b"/>
+  <text x="130" y="70" font-size="12" text-anchor="middle">canary</text>
+  <text x="195" y="70" font-size="12" text-anchor="middle">obj</text>
+  <rect x="220" y="40" width="70" height="50" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="255" y="70" font-size="12" text-anchor="middle">guard</text>
+  <rect x="290" y="40" width="130" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <rect x="290" y="40" width="50" height="50" fill="#3f9a6b" fill-opacity="0.2" stroke="#3f9a6b"/>
+  <text x="315" y="70" font-size="12" text-anchor="middle">obj</text>
+  <text x="380" y="70" font-size="12" text-anchor="middle">canary</text>
+  <rect x="420" y="40" width="70" height="50" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="455" y="70" font-size="12" text-anchor="middle">guard</text>
+  <text x="560" y="70" font-size="13" text-anchor="middle">… × 255</text>
+  <line x1="215" y1="112" x2="232" y2="94" stroke="#d0564a" stroke-width="1.5" marker-end="url(#ah4)"/>
+  <text x="120" y="126" font-size="12">오른쪽 OOB → guard 페이지 fault</text>
+  <line x1="300" y1="112" x2="284" y2="94" stroke="#d0564a" stroke-width="1.5" marker-end="url(#ah4)"/>
+  <text x="310" y="126" font-size="12">왼쪽 OOB → guard 페이지 fault</text>
+  <rect x="20" y="150" width="300" height="120" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="174" font-size="13" text-anchor="middle">샘플링 타이머 (기본 100 ms)</text>
+  <text x="170" y="196" font-size="12" text-anchor="middle">타이머가 "다음 할당 하나"를 무장</text>
+  <text x="170" y="216" font-size="12" text-anchor="middle">→ kmalloc 한 번이 KFENCE 풀로 감</text>
+  <text x="170" y="236" font-size="12" text-anchor="middle">나머지 할당: 일반 SLUB 그대로</text>
+  <text x="170" y="256" font-size="12" text-anchor="middle">(fast path 비용 거의 0)</text>
+  <rect x="340" y="150" width="300" height="120" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="490" y="174" font-size="13" text-anchor="middle">해제 시</text>
+  <text x="490" y="196" font-size="12" text-anchor="middle">canary 검사 → 손상이면 리포트</text>
+  <text x="490" y="216" font-size="12" text-anchor="middle">객체 페이지를 접근 금지로</text>
+  <text x="490" y="236" font-size="12" text-anchor="middle">→ 이후 접근은 UAF fault</text>
+  <text x="490" y="256" font-size="12" text-anchor="middle">잠시 뒤 슬롯 재활용</text>
+</svg></figure>
+<p>그림 4 — KFENCE는 할당 일부만 guard 페이지 사이에 놓는다. 검사는 MMU가 하므로 계측 비용이 없다.</p>
+<h3 id="4-3-kfence-직접-보기">4.3 KFENCE 직접 보기<a class="anchor" href="#4-3-kfence-직접-보기" aria-label="link">#</a></h3>
+<h4 id="예제-9-부팅-직후-kfence-상태">예제 9 — 부팅 직후 KFENCE 상태<a class="anchor" href="#예제-9-부팅-직후-kfence-상태" aria-label="link">#</a></h4>
+<p>무엇을 확인하나: 양산 커널에도 켤 수 있는 KFENCE가 부팅 직후 얼마나 일하고 있는지. <code>t_misc.sh</code> 게스트에서 읽었다(첫 줄 <code>dmesg</code>는 같은 커널의 비용 측정 부팅 로그).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>dmesg | grep "kfence: initialized"
+cat /sys/kernel/debug/kfence/stats
+cat /sys/module/kfence/parameters/sample_interval</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.007408][    T0] kfence: initialized - using 2097152 bytes for 255 objects at 0xffff00003fe00000-0xffff000040000000
+enabled: 1
+currently allocated: 123
+total allocations: 208
+total frees: 85
+zombie allocations: 0
+total bugs: 0
+skipped allocations (incompatible): 0
+skipped allocations (capacity): 0
+skipped allocations (covered): 0
+100</code></pre></figure>
+<p>출력에서 볼 것: 풀은 정확히 2097152바이트(= 2 MiB = (255+1)×2×4 KiB)이고, 물리 메모리 끝 근처(<code>…3fe00000-…40000000</code>)에 한 덩어리로 잡혔다. 부팅 약 22초 동안 208개 할당이 샘플링됐고 그중 123개가 아직 살아 있다 — 부팅 중 할당된 오래 사는 객체가 슬롯을 차지하고 있다. <code>skipped allocations (covered)</code>는 "같은 할당 지점(스택)이 이미 풀에 많이 있어서 건너뜀" 카운터로, 한 핫 경로가 풀을 독점하지 못하게 하는 장치다.</p>
+<h4 id="예제-10-업스트림-kfence_test-kunit-스위트">예제 10 — 업스트림 <code>kfence_test</code> KUnit 스위트<a class="anchor" href="#예제-10-업스트림-kfence_test-kunit-스위트" aria-label="link">#</a></h4>
+<p>무엇을 확인하나: KFENCE가 OOB(좌/우)·UAF·잘못된 해제·canary 손상을 실제로 잡는지. 모듈은 랩 빌드의 <code>kernel/mm/kfence/kfence_test.ko</code> 그대로다. 테스트는 KFENCE 객체가 나올 때까지 할당을 반복한다(<code>test_alloc()</code>, 최대 <code>100 × sample_interval</code> ms). 게스트 스크립트 <code>t_kfence.sh</code>의 내용은 다음 네 줄이다: <code>cat /sys/kernel/debug/kfence/stats</code> → <code>insmod /m8/kfence_test.ko</code> → <code>echo "M8DONE rc=$?"</code> → 다시 <code>cat …/stats</code>.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/M8 &amp;&amp; TMO=900 ./m8_run.sh Image-kasan kfence2 t_kfence.sh log_buf_len=8M
+grep -E "# kfence: pass|M8DONE|^total|^currently" kfence2.log
+grep -oE "BUG: KFENCE: [a-z -]+ (read|write|free|corruption)" kfence2.log | sort | uniq -c</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>currently allocated: 100
+total allocations: 157
+total frees: 57
+total bugs: 0
+[  162.661117][   T80] # kfence: pass:25 fail:0 skip:2 total:27
+M8DONE rc=0
+currently allocated: 105
+total allocations: 1511
+total frees: 1406
+total bugs: 21
+   4 BUG: KFENCE: invalid free
+   1 BUG: KFENCE: invalid read
+   5 BUG: KFENCE: memory corruption
+   5 BUG: KFENCE: out-of-bounds read
+   2 BUG: KFENCE: out-of-bounds write
+   4 BUG: KFENCE: use-after-free read</code></pre></figure>
+<p>27개 중 25개 통과, 2개 건너뜀(<code>CONFIG_INIT_ON_FREE_DEFAULT_ON</code>이 필요한 테스트), 리포트 21개(<code>total bugs: 21</code>과 일치). <code>test_gfpzero</code> 하나가 약 128초를 먹었다(33.9 → 162.2초) — 풀 전체를 돌아 같은 슬롯이 재사용될 때까지 기다리는 테스트라 샘플링 간격에 비례해 느리다.</p>
+<p>대표 리포트 셋(타임스탬프·레지스터 덤프는 생략). 먼저 <strong>오른쪽 OOB</strong> — 객체가 페이지 오른쪽 끝에 붙어 있어 바로 다음 바이트가 guard 페이지다:</p>
+<figure class="code"><span class="lang">text</span><pre><code>BUG: KFENCE: out-of-bounds read in test_out_of_bounds_read+0x268/0x4d0 [kfence_test]
+
+Out-of-bounds read at 0xffff00003ff7f000 (32B right of kfence-#190):
+ test_out_of_bounds_read+0x268/0x4d0 [kfence_test]
+ kunit_try_run_case+0x150/0x3e0
+ ...
+kfence-#190: 0xffff00003ff7efe0-0xffff00003ff7efff, size=32, cache=kmalloc-32
+
+allocated by task 81 on cpu 0 at 19.692296s (0.001262s ago):
+ test_alloc+0x27c/0x710 [kfence_test]
+ test_out_of_bounds_read+0x234/0x4d0 [kfence_test]
+ ...</code></pre></figure>
+<p><strong>왼쪽 OOB 쓰기</strong> — 이번 객체는 페이지 왼쪽 끝(<code>…a000</code>)에 붙어 있다:</p>
+<figure class="code"><span class="lang">text</span><pre><code>BUG: KFENCE: out-of-bounds write in test_out_of_bounds_write+0x114/0x238 [kfence_test]
+
+Out-of-bounds write at 0xffff00003ff89fff (1B left of kfence-#196):
+ test_out_of_bounds_write+0x114/0x238 [kfence_test]
+ ...
+kfence-#196: 0xffff00003ff8a000-0xffff00003ff8a01f, size=32, cache=kmalloc-32</code></pre></figure>
+<p><strong>canary 손상</strong> — 객체 옆 같은 페이지 안을 덮어써서 fault는 안 났고, <code>kfree()</code> 때 검사에 걸렸다:</p>
+<figure class="code"><span class="lang">text</span><pre><code>BUG: KFENCE: memory corruption in test_corruption+0x14c/0x338 [kfence_test]
+
+Corrupted memory at 0xffff00003ffa4020 [ 0x2a . . . . . . . . . . . . . . . ] (in kfence-#209):
+ test_corruption+0x14c/0x338 [kfence_test]
+ ...
+kfence-#209: 0xffff00003ffa4000-0xffff00003ffa401f, size=32, cache=kmalloc-32
+
+allocated by task 105 on cpu 0 at 22.620620s (0.001114s ago):
+ test_alloc+0x27c/0x710 [kfence_test]
+ test_corruption+0xf4/0x338 [kfence_test]
+ ...
+freed by task 105 on cpu 0 at 22.620805s (0.001214s ago):
+ test_corruption+0x14c/0x338 [kfence_test]
+ ...</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>오른쪽 OOB 주소 <code>…7f000</code>은 <strong>페이지 경계</strong>다. 객체(<code>…7efe0-…7efff</code>, 32 B)가 페이지 끝에 딱 붙어 있어서 바로 뒤가 guard 페이지이고, 그 첫 바이트를 읽는 순간 MMU fault → arm64 fault 경로(<code>arch/arm64/mm/fault.c</code>)가 <code>kfence_handle_page_fault()</code>를 불러 리포트를 만들었다. "32B right of"는 객체 <strong>시작</strong>에서 32바이트, 즉 끝 바로 다음이라는 뜻이다.</li><li>왼쪽 OOB는 반대로 객체가 <code>…8a000</code>(페이지 시작)에 붙어 있어 1바이트 앞 <code>…89fff</code>가 guard 페이지다. 그림 4의 두 배치가 그대로 보인다.</li><li>canary 리포트의 <code>[ 0x2a . . . ]</code>는 손상된 바이트만 값으로, 멀쩡한 canary 바이트는 <code>.</code>로 보여 준다. 객체 끝(<code>…401f</code>) 바로 다음 <code>…4020</code>이 0x2a로 덮였다. 여기서는 <strong>해제 스택 = 리포트 스택</strong>이다 — 검사가 <code>kfree</code> 안에서 일어났기 때문이다. 즉 범인은 할당과 해제 사이 어딘가이고, KASAN처럼 범인 명령을 짚지는 못한다. KFENCE의 정밀도 한계다.</li><li>KASAN 리포트와 달리 shadow 덤프가 없고 "kfence-#번호"(풀 슬롯)와 시간 정보(<code>at 19.69s (0.0012s ago)</code>, 할당 후 얼마 뒤 깨졌나)가 나온다.</li><li>이 실험은 KASAN도 켜진 커널에서 했다. KASAN 훅은 KFENCE 주소를 건너뛰므로(<code>mm/kasan/common.c</code>의 <code>is_kfence_address()</code> 검사) 두 탐지기의 리포트가 겹치지 않았다. 양산에서는 KFENCE만 켠다.</li></ul>
+<hr>
+<h2 id="5-kmemleak-커널용-참조-없는-객체-탐지-gc의-mark-단계만">5. kmemleak — 커널용 "참조 없는 객체" 탐지 (GC의 mark 단계만)<a class="anchor" href="#5-kmemleak-커널용-참조-없는-객체-탐지-gc의-mark-단계만" aria-label="link">#</a></h2>
+<h3 id="5-1-직관과-정의">5.1 직관과 정의<a class="anchor" href="#5-1-직관과-정의" aria-label="link">#</a></h3>
+<p>kmemleak은 garbage collector의 <strong>mark 단계만</strong> 하는 도구다. 모든 <code>kmalloc</code>/<code>vmalloc</code>/<code>alloc_percpu</code> 등 할당을 rbtree에 기록해 두고, 스캔할 때 <strong>루트</strong>(데이터·bss 섹션, 각 태스크 커널 스택, per-CPU 영역)와 이미 도달한 객체의 메모리를 8바이트씩 훑으며 "이 값이 어떤 할당 객체의 주소 범위 안을 가리키는가"를 본다. 끝까지 아무도 가리키지 않는 객체(5초 이상 된 것, <code>MSECS_MIN_AGE 5000</code>)를 <strong>unreferenced object</strong>로 보고한다. 즉 "포인터를 잃어버린 메모리"를 찾는다.</p>
+<ul><li>자동 스캔: <code>CONFIG_DEBUG_KMEMLEAK_AUTO_SCAN=y</code>면 부팅 60초 뒤(<code>SECS_FIRST_SCAN 60</code>) 첫 스캔, 이후 10분마다(<code>SECS_SCAN_WAIT 600</code>).</li><li>수동: <code>echo scan &gt; /sys/kernel/debug/kmemleak</code> 후 <code>cat /sys/kernel/debug/kmemleak</code>. <code>echo clear &gt; …</code>는 지금까지의 의심 목록을 "보고 완료"로 지운다(새 누수만 보려고 쓴다).</li><li>한계: 보수적이라 <strong>오탐·미탐</strong>이 있다. 포인터를 XOR하거나 하위 비트를 태그로 쓰거나, 물리 주소로만 들고 있으면(DMA 디스크립터) 누수로 오탐한다 → <code>kmemleak_not_leak()</code>, <code>kmemleak_ignore()</code>로 알려 준다. 반대로 우연히 그 주소 값을 가진 정수가 있으면 미탐한다. 그래서 "의심 목록"으로 읽는다.</li></ul>
+<h3 id="5-2-예제-11-업스트림-samples-kmemleak-kmemleak-test-c">5.2 예제 11 — 업스트림 <code>samples/kmemleak/kmemleak-test.c</code><a class="anchor" href="#5-2-예제-11-업스트림-samples-kmemleak-kmemleak-test-c" aria-label="link">#</a></h3>
+<p>이 샘플 모듈(<strong>업스트림 테스트 모듈</strong>, <code>samples/kmemleak/kmemleak-test.c</code>)은 랩 커널 빌드에 포함되지 않아서, 소스 파일을 <strong>수정 없이</strong> <code>/var/tmp/M8/kmemleak/</code>에 복사하고 한 줄짜리 Kbuild로 <code>linux-build-kasan</code>에 대해 out-of-tree 빌드했다. 모듈이 하는 일은 <code>module_init</code>에서 <code>kmalloc(32)</code>×2, <code>kmalloc(1024/2048/4096)</code>×2씩, <code>vmalloc(64)</code>×5를 받아 <strong>포인터를 버리고</strong>(주소만 출력), <code>kzalloc</code>한 노드 10개를 모듈 전역 리스트에 걸고, per-CPU 변수에 <code>kmalloc(129)</code>를 넣고, <code>__alloc_percpu(64, 4)</code>를 버리는 것이다. <code>module_exit</code>은 리스트에서 노드를 떼기만 하고 해제하지 않는다.</p>
+<figure class="code"><span class="lang">make</span><pre><code>obj-m += kmemleak-test.o</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>make -C /var/lab/out/linux-build-kasan M=/var/tmp/M8/kmemleak modules
+# 게스트 (t_misc.sh 중 kmemleak 부분)
+insmod /m8/kmemleak-test.ko; rmmod kmemleak_test; sleep 8
+echo scan &gt; /sys/kernel/debug/kmemleak; sleep 2; echo scan &gt; /sys/kernel/debug/kmemleak
+cat /sys/kernel/debug/kmemleak &gt; /tmp/k.txt; grep -c "unreferenced object" /tmp/k.txt; head -80 /tmp/k.txt
+dmesg | grep -E "Kmemleak testing|kmalloc\(32\)|vmalloc\(64\)|kmemleak:" | head -12</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>26
+unreferenced object 0xffff000014faeaa0 (size 32):
+  comm "insmod", pid 96, jiffies 4294898390
+  hex dump (first 32 bytes):
+    6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b  kkkkkkkkkkkkkkkk
+    6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b a5  kkkkkkkkkkkkkkk.
+  backtrace (crc 362c6625):
+    kmemleak_alloc+0xb8/0xd0
+    __kmalloc_cache_noprof+0x574/0x7e0
+    0xffffd78d4b5d52a4
+    do_one_initcall+0x12c/0x780
+    do_init_module+0x228/0x740
+    load_module+0x4784/0x6278
+    __do_sys_init_module+0x254/0x348
+    __arm64_sys_init_module+0x70/0xc0
+    invoke_syscall.constprop.0+0x64/0x290
+    el0_svc_common.constprop.0+0xa8/0x250
+    do_el0_svc+0x44/0x68
+    el0_svc+0x50/0x218
+    el0t_64_sync_handler+0xa0/0xe8
+    el0t_64_sync+0x198/0x1a0
+unreferenced object 0xffff000014faeb60 (size 32):
+...  (같은 형식이 25개 더, 생략)
+[   20.056331][    T1] kmemleak: Kernel memory leak detector initialized (mem pool available: 15795)
+[   20.056837][   T65] kmemleak: Automatic memory scanning thread started
+[   24.857444][   T96] kmemleak: Kmemleak testing
+[   24.857661][   T96] kmemleak: kmalloc(32) = 0xffff000014faeaa0
+[   24.857910][   T96] kmemleak: kmalloc(32) = 0xffff000014faeb60
+[   24.858145][   T96] kmemleak: kmalloc(1024) = 0xffff00001211f000
+[   24.858463][   T96] kmemleak: kmalloc(1024) = 0xffff00000e3b0400
+...</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>누수 26개. 소스 기준으로 세면 버린 <code>kmalloc</code> 8 + <code>vmalloc</code> 5 + 리스트 노드 10(모듈이 내려가 리스트 헤드가 사라짐) + per-CPU 포인터가 들고 있던 <code>kmalloc(129)</code> 2(CPU 2개, 모듈의 per-CPU 영역이 해제됨) + <code>__alloc_percpu</code> 1 = 26으로 맞는다(종류별 분해는 출력 전체를 세지 않고 소스로 계산한 값이다).</li><li>첫 객체 주소 <code>…faeaa0</code>이 모듈이 찍은 첫 <code>kmalloc(32)</code> 주소와 같다. "unreferenced"의 근거는 <strong>스캔해 보니 이 주소를 담은 8바이트가 루트에서 도달 가능한 메모리 어디에도 없었다</strong>는 것이다.</li><li>hex dump가 <code>6b 6b … a5</code>다. 이 커널은 <code>SLUB_DEBUG_ON</code>이라 slab 객체를 <code>POISON_FREE</code>(0x6b, 'k')로 채우고 마지막 바이트를 <code>POISON_END</code>(0xa5)로 둔다(F9 §9). <code>kmalloc</code>은 메모리를 0으로 지우지 않으므로 받은 그대로 아무도 쓰지 않았다는 것까지 보인다.</li><li>backtrace 셋째 줄이 심볼 없이 <code>0xffffd78d4b5d52a4</code>다. 할당한 함수(<code>kmemleak_test_init</code>)가 <strong>이미 언로드된 모듈</strong> 안에 있어서 kallsyms가 이름을 못 붙인다. 실무 팁: 모듈 누수를 볼 때는 <code>rmmod</code> 전에 스캔하거나, 모듈을 다시 <code>insmod</code>한 뒤 <code>/proc/modules</code>의 로드 주소로 오프셋을 계산한다(같은 주소에 다시 올라간다는 보장은 없다).</li><li>리스트 노드 10개는 <code>rmmod</code> <strong>전에는</strong> 누수가 아니다 — 모듈 전역 <code>test_list</code>(모듈 .data는 스캔 루트)가 가리키고 있으니까. 소스 주석도 "They should only appear as orphan after the module is removed"라고 적는다(이 노트에서는 rmmod 전 스캔은 따로 하지 않았다). 이게 kmemleak의 "도달 가능성" 정의다.</li></ul>
+<hr>
+<h2 id="6-ubsan-c의-미정의-동작을-런타임에-잡기">6. UBSAN — C의 미정의 동작을 런타임에 잡기<a class="anchor" href="#6-ubsan-c의-미정의-동작을-런타임에-잡기" aria-label="link">#</a></h2>
+<h3 id="6-1-직관과-정의">6.1 직관과 정의<a class="anchor" href="#6-1-직관과-정의" aria-label="link">#</a></h3>
+<p>C 표준은 signed overflow, 배열 범위 밖 인덱스, 폭 이상 shift, 0 나눗셈, 잘못된 <code>bool</code>/<code>enum</code> 값 읽기, 정렬 위반 등을 <strong>미정의 동작(UB)</strong> 으로 둔다. 컴파일러는 "UB는 일어나지 않는다"고 가정하고 최적화하므로, 버그가 있으면 엉뚱한 코드가 생성된다(예: 범위 검사가 통째로 지워짐). UBSAN(<code>-fsanitize=bounds,shift,…</code>)은 해당 연산 앞에 검사를 넣고 위반이면 <code>__ubsan_handle_*()</code>를 불러 리포트를 찍는다. KASAN과 달리 <strong>메모리 상태를 추적하지 않는다</strong> — 그래서 싸다. 특히 <code>UBSAN_BOUNDS</code>는 배열 크기를 컴파일러가 아는 경우(구조체 안 고정 배열, <code>__counted_by</code> 붙은 flexible array)에만 동작하는 매우 싼 검사라, 일부 배포판·Android 커널은 양산에도 켠다(<code>UBSAN_TRAP</code>으로 리포트 대신 trap 명령을 넣으면 코드도 작아진다).</p>
+<div class="tw"><table><thead><tr><th>Kconfig</th><th>잡는 UB</th><th>랩 Image-kasan</th></tr></thead><tbody><tr><td><code>UBSAN_BOUNDS</code> (+<code>_STRICT</code>/<code>_ARRAY_BOUNDS</code>)</td><td>크기를 아는 배열의 범위 밖 인덱스</td><td>켬 (<code>BOUNDS_STRICT</code>)</td></tr><tr><td><code>UBSAN_SHIFT</code></td><td>음수 shift, 폭 이상 shift, signed left shift overflow</td><td>켬</td></tr><tr><td><code>UBSAN_DIV_ZERO</code></td><td>0으로 나누기 (arm64는 HW가 trap하지 않고 0을 돌려준다)</td><td>끔</td></tr><tr><td><code>UBSAN_BOOL</code>, <code>UBSAN_ENUM</code></td><td>잘못된 bool/enum 값 load</td><td>켬 (enum은 리포트 안 나옴, 예제 12)</td></tr><tr><td><code>UBSAN_ALIGNMENT</code></td><td>정렬 위반 (arm64는 HW가 허용해서 기본 꺼짐)</td><td>끔</td></tr><tr><td><code>UBSAN_INTEGER_WRAP</code></td><td>signed/unsigned 산술 wrap (6.15+, clang 전용)</td><td>gcc 빌드라 없음</td></tr><tr><td><code>UBSAN_TRAP</code></td><td>리포트 대신 <code>brk</code> trap (양산용, 작음)</td><td>끔</td></tr></tbody></table></div>
+<h3 id="6-2-예제-12-업스트림-lib-test_ubsan-c">6.2 예제 12 — 업스트림 <code>lib/test_ubsan.c</code><a class="anchor" href="#6-2-예제-12-업스트림-lib-test_ubsan-c" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 이 커널에서 켜진 UBSAN 검사(shift, bounds, bool, enum)가 실제로 무엇을 잡고 무엇을 지나치는지. 업스트림 테스트 모듈 <code>lib/test_ubsan.c</code>(랩 빌드의 <code>kernel/lib/test_ubsan.ko</code>)는 <code>module_init</code>에서 UB 함수 9개를 차례로 부르고, 각 함수 앞에 "해당 Kconfig가 켜졌는지"를 한 줄 찍는다(<code>UBSAN_TEST()</code> 매크로). 0 나누기 테스트는 모듈을 Oops시키므로 업스트림이 일부러 빼 두었다(<code>skip_ubsan_array</code>).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>insmod /m8/test_ubsan.ko
+dmesg | grep -A12 -E "test_ubsan|UBSAN" | head -150</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>test_ubsan_add_overflow (CONFIG_UBSAN_INTEGER_WRAP=n)
+test_ubsan_sub_overflow (CONFIG_UBSAN_INTEGER_WRAP=n)
+test_ubsan_mul_overflow (CONFIG_UBSAN_INTEGER_WRAP=n)
+test_ubsan_negate_overflow (CONFIG_UBSAN_INTEGER_WRAP=n)
+test_ubsan_truncate_signed (CONFIG_UBSAN_INTEGER_WRAP=n)
+test_ubsan_shift_out_of_bounds negative exponent (CONFIG_UBSAN_SHIFT=y)
+------------[ cut here ]------------
+UBSAN: shift-out-of-bounds in /var/lab/src/linux-6.18.55/lib/test_ubsan.c:72:7
+shift exponent -1 is negative
+CPU: 0 UID: 0 PID: 92 Comm: insmod Not tainted 6.18.55-kasan #2 PREEMPT 
+Hardware name: linux,dummy-virt (DT)
+Call trace:
+ show_stack+0x30/0x90 (C)
+ dump_stack_lvl+0x70/0x98
+ dump_stack+0x1c/0x28
+ ubsan_epilogue+0x10/0x48
+ __ubsan_handle_shift_out_of_bounds+0x16c/0x1f0
+ test_ubsan_shift_out_of_bounds+0xd0/0x148 [test_ubsan]
+ test_ubsan_init+0x60/0xfd0 [test_ubsan]
+ do_one_initcall+0x12c/0x780
+ ...  (모듈 로드 syscall 경로 10줄 생략)
+---[ end trace ]---
+test_ubsan_shift_out_of_bounds left overflow (CONFIG_UBSAN_SHIFT=y)
+test_ubsan_out_of_bounds above (CONFIG_UBSAN_BOUNDS=y)
+------------[ cut here ]------------
+UBSAN: array-index-out-of-bounds in /var/lab/src/linux-6.18.55/lib/test_ubsan.c:92:10
+index 4 is out of range for type 'int [4]'
+...
+test_ubsan_out_of_bounds below (CONFIG_UBSAN_BOUNDS=y)
+------------[ cut here ]------------
+UBSAN: array-index-out-of-bounds in /var/lab/src/linux-6.18.55/lib/test_ubsan.c:95:10
+index -1 is out of range for type 'int [4]'
+...
+test_ubsan_load_invalid_value bool (CONFIG_UBSAN_BOOL=y)
+------------[ cut here ]------------
+UBSAN: invalid-load in /var/lab/src/linux-6.18.55/lib/test_ubsan.c:117:7
+load of value 255 is not a valid value for type '_Bool'
+...
+test_ubsan_load_invalid_value enum (CONFIG_UBSAN_ENUM=y)
+test_ubsan_misaligned_access (CONFIG_UBSAN_ALIGNMENT=n)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>리포트 4개: 음수 shift, 배열 <code>int [4]</code>의 인덱스 4와 -1, <code>_Bool</code>에 255 load. 각 리포트 첫 줄이 <strong>파일:줄:열</strong>까지 준다 — KASAN과 달리 <code>faddr2line</code>이 필요 없다(컴파일러가 위치 정보를 데이터로 넣어 둔다). 리포트 형식은 <code>WARN()</code>과 같은 <code>cut here</code> … <code>end trace</code> 블록이다.</li><li><code>INTEGER_WRAP=n</code> 다섯 줄은 검사 자체가 없어서 조용히 지나간다(6.15+의 <code>UBSAN_INTEGER_WRAP</code>은 clang 전용, 이 커널은 gcc 빌드).</li><li><strong><code>left overflow</code>(<code>INT_MAX &lt;&lt; 4</code>)는 <code>UBSAN_SHIFT=y</code>인데도 리포트가 없다.</strong> 커널은 최상위 Makefile에서 <code>-fno-strict-overflow</code>로 빌드되고, gcc에서 이 옵션은 signed overflow를 wrap으로 정의하는 <code>-fwrapv</code>를 포함한다. 그래서 커널 C에서 signed left shift overflow는 UB가 아니게 되어 검사가 빠진 것으로 보인다. 음수 shift 같은 진짜 UB만 남는다.</li><li><strong><code>enum</code>도 <code>UBSAN_ENUM=y</code>인데 리포트가 없다.</strong> 이 gcc 15 빌드에서는 C 코드의 enum load 검사가 나오지 않았다(원인은 확인하지 않았다 — 컴파일러마다 C enum 검사 지원이 다르다). "켰다 = 잡는다"가 아니라는 좋은 예다. 테스트 모듈이 <code>(CONFIG_X=y)</code>를 찍어 주는 이유가 이것이다: 켜졌는데 리포트가 없으면 컴파일러 쪽 한계다.</li><li><code>Not tainted</code>: UBSAN 리포트는 taint를 남기지 않는다(KASAN은 <code>B</code>). 그래서 lockdep도 꺼지지 않는다. 대신 <code>panic_on_warn=1</code>이면 첫 리포트에서 panic한다.</li></ul>
+<hr>
+<h2 id="7-kcsan-데이터-레이스-탐지기-가이드">7. KCSAN — 데이터 레이스 탐지기 (가이드)<a class="anchor" href="#7-kcsan-데이터-레이스-탐지기-가이드" aria-label="link">#</a></h2>
+<h3 id="7-1-직관-watchpoint를-걸고-잠깐-기다린다">7.1 직관 — "watchpoint를 걸고 잠깐 기다린다"<a class="anchor" href="#7-1-직관-watchpoint를-걸고-잠깐-기다린다" aria-label="link">#</a></h3>
+<p>F4에서 본 <code>int++</code> 레이스는 lockdep이 못 잡는다(락을 안 썼으니까). KCSAN(Kernel Concurrency SANitizer)은 컴파일러 계측(<code>-fsanitize=thread</code>)으로 모든 메모리 접근 앞에 훅을 넣고, <strong>가끔</strong>(기본 약 4000번 접근마다 한 번, <code>CONFIG_KCSAN_SKIP_WATCH=4000</code>) 그 접근 주소에 소프트웨어 <strong>watchpoint</strong>를 건 뒤 잠깐(태스크 문맥 기본 80 us, <code>KCSAN_UDELAY_TASK</code>) 지연한다. 그 사이 다른 CPU가 같은 주소를 만지면(둘 중 하나가 write이고, 둘 다 marked atomic 접근이 아니면) <strong>data race</strong>로 보고한다. 지연 전후 값이 바뀌었는지도 본다(watchpoint에 안 걸린 쓰기, "value changed"). Don의 경험으로는 JTAG data watchpoint를 랜덤한 주소에 계속 걸었다 풀었다 하는 것이다.</p>
+<h3 id="7-2-리포트-모양-가이드-이-랩에서-실행-안-함">7.2 리포트 모양 (가이드 — 이 랩에서 실행 안 함)<a class="anchor" href="#7-2-리포트-모양-가이드-이-랩에서-실행-안-함" aria-label="link">#</a></h3>
+<p>KCSAN은 KASAN과 <strong>같이 켤 수 없다</strong>(<code>lib/Kconfig.kcsan</code>: <code>depends on … !KASAN</code>). 랩 <code>Image-kasan</code>에는 없고, 쓰려면 trace 설정에서 KASAN 계열을 빼고 <code>CONFIG_KCSAN=y</code>, <code>CONFIG_KCSAN_KUNIT_TEST=m</code>으로 별도 커널을 빌드해야 한다(<code>-j2</code>에서 TCG VM 기준 1시간 이상이라 이 노트에서는 하지 않았다). 업스트림 <code>kernel/kcsan/kcsan_test.c</code> KUnit 스위트(<code>test_basic</code>, <code>test_concurrent_races</code>, <code>test_novalue_change</code>, <code>test_write_write_assume_atomic</code> 등)가 KCSAN 자체를 검증한다. 리포트 형식은 <code>Documentation/dev-tools/kcsan.rst</code> 예시와 같다:</p>
+<figure class="code"><span class="lang">text</span><pre><code>==================================================================
+BUG: KCSAN: data-race in test_kernel_read / test_kernel_write
+
+write to 0xffffffffc009a628 of 8 bytes by task 487 on cpu 0:
+ test_kernel_write+0x1d/0x30
+ access_thread+0x89/0xd0
+ kthread+0x23e/0x260
+ ret_from_fork+0x22/0x30
+
+read to 0xffffffffc009a628 of 8 bytes by task 488 on cpu 6:
+ test_kernel_read+0x10/0x20
+ access_thread+0x89/0xd0
+ kthread+0x23e/0x260
+ ret_from_fork+0x22/0x30
+
+value changed: 0x00000000000009a6 -&gt; 0x00000000000009b2
+
+Reported by Kernel Concurrency Sanitizer on:
+CPU: 6 PID: 488 Comm: access_thread Not tainted 5.12.0-rc2+ #1
+Hardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS 1.14.0-2 04/01/2014
+==================================================================</code></pre></figure>
+<p>(위 블록은 커널 문서의 예시를 옮긴 것이다 — 이 랩에서 실행한 출력이 아니다. x86 QEMU 주소·5.12 버전이 그 표시다.)</p>
+<p>읽는 법: 첫 줄 <code>data-race in A / B</code>가 경쟁하는 두 함수, 아래 두 블록이 각 접근(누가, 어느 CPU, 몇 바이트, read/write, 스택), <code>value changed</code>가 실제로 값이 바뀌었다는 증거다. 고치는 법은 F4·F5대로 (1) 진짜 공유면 락, (2) 의도된 lockless 접근이면 <code>READ_ONCE()</code>/<code>WRITE_ONCE()</code>/<code>atomic_*</code>로 <strong>marked access</strong> 표시, (3) 통계 카운터처럼 레이스가 무해하면 <code>data_race(x)</code>로 의도를 밝힌다. 커널 메인라인은 syzbot이 KCSAN 커널을 계속 돌려 레이스를 보고한다.</p>
+<hr>
+<h2 id="8-그-밖의-config_debug_-자료구조-api-사용-규칙-검사기">8. 그 밖의 <code>CONFIG_DEBUG_*</code> — 자료구조·API 사용 규칙 검사기<a class="anchor" href="#8-그-밖의-config_debug_-자료구조-api-사용-규칙-검사기" aria-label="link">#</a></h2>
+<p>컴파일러 계측 없이, 커널 자료구조 코드 안에 검사를 넣은 옵션들이다. 각각 "한 가지 규칙"을 지킨다.</p>
+<div class="tw"><table><thead><tr><th>옵션</th><th>지키는 규칙</th><th>위반 시 메시지 (첫 줄)</th><th>비용</th></tr></thead><tbody><tr><td><code>DEBUG_ATOMIC_SLEEP</code></td><td>atomic 문맥에서 잠들지 말 것 (E4 §5, F2 §10)</td><td><code>BUG: sleeping function called from invalid context</code></td><td>작음</td></tr><tr><td><code>PROVE_LOCKING</code> (lockdep)</td><td>락 순서·IRQ 상태 일관성 (F4 §13)</td><td><code>possible circular locking dependency detected</code></td><td>큼 (메모리·락 경로)</td></tr><tr><td><code>DEBUG_OBJECTS</code> (+<code>_TIMERS</code>, <code>_WORK</code>, <code>_RCU_HEAD</code>, <code>_FREE</code>)</td><td>timer·work·rcu_head 같은 객체의 생애주기: init 전 사용, 활성 상태로 해제, 이중 init</td><td><code>ODEBUG: free active (active state 0) object: … object type: timer_list hint: …</code></td><td>작음~중간</td></tr><tr><td><code>DEBUG_LIST</code></td><td><code>list_add</code>/<code>list_del</code> 때 이웃 포인터 일관성 (손상된 리스트, 이중 삭제)</td><td><code>list_add corruption. next-&gt;prev should be prev …</code> 후 BUG</td><td>작음 (양산에도 쓰는 곳 있음, <code>LIST_HARDENED</code>)</td></tr><tr><td><code>DEBUG_SG</code></td><td>scatterlist 마커·체인 검사</td><td><code>BUG</code> at <code>include/linux/scatterlist.h</code></td><td>작음</td></tr><tr><td><code>DEBUG_PAGEALLOC</code></td><td>해제된 페이지를 커널 매핑에서 빼서 접근 시 fault (페이지 단위 UAF)</td><td><code>Unable to handle kernel paging request</code></td><td>크다 (매핑 변경·TLB) — <code>debug_pagealloc=on</code> 부팅 인자로 활성</td></tr><tr><td><code>SLUB_DEBUG_ON</code></td><td><code>slab_debug</code> 기본 켬 (F9 §9.1: redzone·poison·사용자 추적, 사후 검사)</td><td><code>BUG kmalloc-64 (…): Right Redzone overwritten</code></td><td>중간</td></tr><tr><td><code>DMA_API_DEBUG</code></td><td><code>dma_map_*</code>/<code>dma_unmap_*</code> 짝, 방향, 크기, unmap 누락, 매핑한 메모리를 CPU가 건드림</td><td><code>DMA-API: device driver frees DMA memory with different size …</code></td><td>중간</td></tr><tr><td><code>DEBUG_VM</code></td><td>mm 내부 불변식 (<code>VM_BUG_ON</code>)</td><td><code>kernel BUG at mm/…</code></td><td>작음~중간</td></tr></tbody></table></div>
+<p>DMA_API_DEBUG는 Don에게 특히 중요하다. SSD 펌웨어의 DMA는 캐시를 직접 관리했지만, Linux 드라이버에서는 <code>dma_map_single()</code>이 캐시 유지·IOMMU 매핑을 대신 하고, 그 <strong>짝 맞추기 규칙</strong>(map한 크기·방향 그대로 unmap, 매핑 중 CPU 접근 금지, <code>dma_sync_*</code> 없이 읽지 말 것)을 어기면 실기에서만, 그것도 가끔 데이터가 틀린다(H 모듈 DMA 노트). DMA_API_DEBUG는 모든 매핑을 해시 테이블에 기록해 두고 unmap 때 맞춰 본다. <code>/sys/kernel/debug/dma-api/</code>에서 <code>error_count</code>, <code>num_errors</code>, <code>driver_filter</code>(특정 드라이버만 검사)를 본다.</p>
+<h3 id="8-1-예제-13-디버그-옵션들의-런타임-상태-보기">8.1 예제 13 — 디버그 옵션들의 런타임 상태 보기<a class="anchor" href="#8-1-예제-13-디버그-옵션들의-런타임-상태-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: DEBUG_OBJECTS와 DMA_API_DEBUG가 런타임에 무엇을 들고 있고 CI가 무엇을 읽으면 되는지(같은 <code>t_misc.sh</code> 게스트, 위반 없이 부팅만 한 상태). 이 둘을 일부러 위반하는 업스트림 테스트는 별도 모듈이 없어서(<code>DEBUG_OBJECTS_SELFTEST</code>는 부팅 때 도는 built-in 자체 시험) 이 노트에서는 <strong>상태 읽기만</strong> 했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /sys/kernel/debug/debug_objects/stats
+ls /sys/kernel/debug/dma-api/
+for f in error_count num_errors num_free_entries min_free_entries nr_total_entries driver_filter; do
+    echo "$f: $(cat /sys/kernel/debug/dma-api/$f)"; done
+dmesg | grep "DMA-API"     # 이 줄만 같은 커널의 비용 측정 부팅 로그에서</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>max_chain     : 6
+max_checked   : 0
+warnings      : 0
+fixups        : 0
+pool_free     : 315
+pool_pcp_free : 27
+pool_min_free : 272
+pool_used     : 789
+pool_max_used : 816
+on_free_list  : 0
+objs_allocated: 1104
+objs_freed    : 0
+all_errors        dump              nr_total_entries
+disabled          error_count       num_errors
+driver_filter     min_free_entries  num_free_entries
+error_count: 0
+num_errors: 1
+num_free_entries: 65536
+min_free_entries: 65536
+nr_total_entries: 65536
+driver_filter: 
+[    1.308324][    T1] DMA-API: preallocated 65536 debug entries</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>DEBUG_OBJECTS: 지금 789개 객체를 추적 중이고(이 커널에서 켠 종류는 <code>DEBUG_OBJECTS_TIMERS</code>뿐이라 timer·hrtimer다) <code>warnings : 0</code>이다. CI는 이 숫자가 0인지 보면 된다. 위반이 생기면 dmesg에 <code>ODEBUG: &lt;동작&gt; &lt;상태&gt; (active state 0) object: … object type: timer_list hint: &lt;콜백 함수&gt;</code> 형식이 찍히고 <code>warnings</code>가 오른다(형식은 <code>lib/debugobjects.c</code>의 <code>debug_print_object()</code> 기준, 이 노트에서 실행으로 확인하지는 않았다). <code>hint:</code>가 timer 콜백 함수 이름이라 어느 드라이버의 timer인지 바로 안다.</li><li>DMA_API_DEBUG: 매핑 기록용 엔트리 65536개를 미리 잡아 두었고 아직 하나도 안 썼다(<code>num_free_entries = min_free_entries = 65536</code>) — virtio 장치는 DMA API를 쓰지만 이 게스트에서는 블록 장치 없이 initramfs로 부팅해 매핑이 거의 없었다. <code>error_count: 0</code>이 위반 개수다. 헷갈리기 쉬운 것은 <code>num_errors: 1</code>인데, 이건 위반 개수가 아니라 <strong>"앞으로 dmesg에 자세히 찍을 남은 횟수"</strong>다(<code>show_num_errors</code>, 기본 1, 하나 찍을 때마다 1씩 준다, <code>kernel/dma/debug.c</code>). <code>all_errors</code>에 1을 쓰면 전부 찍는다. (<code>ls</code> 출력의 색 코드는 지웠다.) <code>driver_filter</code>에 드라이버 이름을 쓰면 그 드라이버의 매핑만 검사한다 — 큰 시스템에서 내 드라이버만 보고 싶을 때 쓴다.</li><li>부팅 인자로 끄는 법: <code>debug_objects</code>는 <code>no_debug_objects</code>, DMA API 검사는 <code>dma_debug=off</code>, KFENCE는 <code>kfence.sample_interval=0</code>, kmemleak은 <code>kmemleak=off</code>, slab_debug는 <code>slab_debug=-</code>. 같은 디버그 커널로 "어느 탐지기가 비용을 먹나"를 나눠 볼 때 쓴다(§10).</li></ul>
+<h2 id="9-무엇이-무엇을-잡나-탐지기-커버리지-지도">9. 무엇이 무엇을 잡나 — 탐지기 커버리지 지도<a class="anchor" href="#9-무엇이-무엇을-잡나-탐지기-커버리지-지도" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 440" xmlns="http://www.w3.org/2000/svg">
+  <text x="20" y="22" font-size="13">● 잡는다   ◐ 일부·조건부   (빈칸) 못 잡는다</text>
+  <g font-size="12" text-anchor="middle">
+    <text x="205" y="50">범위</text><text x="205" y="66">초과</text>
+    <text x="265" y="58">UAF</text>
+    <text x="325" y="50">이중</text><text x="325" y="66">해제</text>
+    <text x="385" y="58">누수</text>
+    <text x="445" y="50">UB 연산</text><text x="445" y="66">(shift 등)</text>
+    <text x="505" y="50">데이터</text><text x="505" y="66">레이스</text>
+    <text x="565" y="50">데드락</text><text x="565" y="66">순서</text>
+    <text x="630" y="50">문맥·</text><text x="630" y="66">API 규칙</text>
+  </g>
+  <line x1="20" y1="76" x2="665" y2="76" stroke="currentColor"/>
+  <g font-size="12">
+    <text x="20" y="98">KASAN generic</text>
+    <text x="20" y="128">KASAN HW_TAGS (MTE)</text>
+    <text x="20" y="158">KFENCE</text>
+    <text x="20" y="188">slab_debug (F9)</text>
+    <text x="20" y="218">DEBUG_PAGEALLOC</text>
+    <text x="20" y="248">kmemleak</text>
+    <text x="20" y="278">UBSAN</text>
+    <text x="20" y="308">KCSAN</text>
+    <text x="20" y="338">lockdep (F4)</text>
+    <text x="20" y="368">DEBUG_ATOMIC_SLEEP</text>
+    <text x="20" y="398">DEBUG_OBJECTS · LIST</text>
+    <text x="20" y="428">DMA_API_DEBUG</text>
+  </g>
+  <g fill="#4a7bd0">
+    <circle cx="205" cy="94" r="6"/><circle cx="265" cy="94" r="6"/><circle cx="325" cy="94" r="6"/>
+    <circle cx="205" cy="124" r="6"/><circle cx="265" cy="124" r="6"/><circle cx="325" cy="124" r="6"/>
+    <circle cx="325" cy="154" r="6"/>
+    <circle cx="325" cy="184" r="6"/>
+    <circle cx="265" cy="214" r="6"/>
+    <circle cx="385" cy="244" r="6"/>
+    <circle cx="445" cy="274" r="6"/>
+    <circle cx="505" cy="304" r="6"/>
+    <circle cx="565" cy="334" r="6"/><circle cx="630" cy="334" r="6"/>
+    <circle cx="630" cy="364" r="6"/>
+    <circle cx="630" cy="394" r="6"/>
+    <circle cx="630" cy="424" r="6"/>
+  </g>
+  <g fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c">
+    <circle cx="205" cy="154" r="6"/><circle cx="265" cy="154" r="6"/>
+    <circle cx="205" cy="184" r="6"/><circle cx="265" cy="184" r="6"/>
+    <circle cx="205" cy="274" r="6"/>
+    <circle cx="265" cy="394" r="6"/><circle cx="325" cy="394" r="6"/>
+    <circle cx="325" cy="424" r="6"/><circle cx="385" cy="424" r="6"/>
+  </g>
+</svg></figure>
+<p>그림 5 — 탐지기 커버리지. KFENCE의 범위 초과·UAF는 "샘플에 걸린 객체만"(◐), slab_debug는 "다음 검사 시점에, 쓰기만", UBSAN은 "크기를 아는 배열만", DEBUG_OBJECTS는 "timer·work가 활성인 채 해제" 같은 수명 위반, DMA_API_DEBUG는 "map/unmap 짝 불일치·unmap 누락"을 잡는다. 한 도구로 다 되지 않으니 <strong>조합</strong>한다.</p>
+<p>읽는 법: 메모리 손상(왼쪽 세 열)은 KASAN이 가장 정확하고, 양산에서는 KFENCE·MTE가 그 자리를 대신한다. 레이스는 KCSAN뿐이고, 락 순서는 lockdep뿐이다. 누수는 kmemleak뿐이다.</p>
+<hr>
+<h2 id="10-비용-직접-잰-숫자">10. 비용 — 직접 잰 숫자<a class="anchor" href="#10-비용-직접-잰-숫자" aria-label="link">#</a></h2>
+<h3 id="10-1-예제-14-이미지-크기">10.1 예제 14 — 이미지 크기<a class="anchor" href="#10-1-예제-14-이미지-크기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 탐지기를 켜면 커널 이미지와 섹션이 얼마나 커지나.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/lab/out; ls -l Image-trace Image-kasan | awk '{print $5, $9}'; size vmlinux-trace vmlinux-kasan</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>154823168 Image-kasan
+65681920 Image-trace
+   text	   data	    bss	    dec	    hex	filename
+35586492	29895229	 934832	66416553	3f56fa9	vmlinux-trace
+73440713	81148037	19843776	174432526	a65a10e	vmlinux-kasan</code></pre></figure>
+<p>출력에서 볼 것: <code>Image</code>(부트로더가 올리는 압축 안 된 커널)가 65.7 MB → 154.8 MB, <strong>2.4배</strong>. text는 35.6 → 73.4 MB(2.1배) — 모든 load/store 앞의 inline 검사(예제 3의 9개 명령) 때문이다. data는 2.7배, bss는 21배(0.9 → 19.8 MB) — lockdep 해시 테이블·kmemleak 풀·KASAN 전역 redzone 등 정적 테이블이 bss에 있다. 디버그 정보는 <code>Image</code>에 들어가지 않으므로(그건 <code>vmlinux</code> 쪽) 이 차이는 순수하게 코드·데이터다. 임베디드 관점: 부트 파티션이 64 MB인 보드라면 이 커널은 <strong>들어가지도 않는다</strong>. 디버그 커널은 TFTP/NFS 부팅(C 모듈)이나 큰 파티션을 따로 준비해야 한다.</p>
+<h3 id="10-2-예제-15-부팅-시간-메모리-syscall-비용">10.2 예제 15 — 부팅 시간·메모리·syscall 비용<a class="anchor" href="#10-2-예제-15-부팅-시간-메모리-syscall-비용" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 initramfs·같은 QEMU 설정(<code>-smp 2 -m 1G</code>)에서 기준 커널과 디버그 커널의 부팅 → <code>/init</code> 시간, 부팅 직후 메모리, 커널 경로 몇 개의 평균 비용. 세 번째 열은 같은 <code>Image-kasan</code>에 부팅 인자 <code>slab_debug=- kmemleak=off kfence.sample_interval=0</code>을 줘서 slab_debug·kmemleak·KFENCE를 끈 것이다(KASAN·lockdep·UBSAN 등 컴파일 시점 탐지기는 남는다). 각 2회씩 번갈아 돌린 평균이다.</p>
+<p>벤치마크는 버그를 내지 않는 평범한 syscall 루프다(정적 링크, VM 호스트에서 빌드).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* m8_bench: 커널 경로 몇 개의 평균 비용(ns/op)을 잰다 — 디버그 커널 비용 비교용 */
+#define _GNU_SOURCE
+#include &lt;fcntl.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/wait.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+
+static double now_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &amp;ts);
+	return ts.tv_sec * 1e9 + ts.tv_nsec;
+}
+
+#define BENCH(name, n, body) do {                                   \
+	double t0 = now_ns();                                        \
+	for (long i = 0; i &lt; (n); i++) { body; }                     \
+	printf("%-22s %10.0f ns/op\n", name, (now_ns() - t0) / (n)); \
+} while (0)
+
+int main(void)
+{
+	int p[2];
+
+	BENCH("getppid", 20000, getppid());
+	BENCH("open+close /dev/null", 2000, {
+		int fd = open("/dev/null", O_RDONLY);
+		if (fd &lt; 0) { perror("open"); exit(1); }
+		close(fd);
+	});
+	BENCH("pipe+close x2", 2000, {
+		if (pipe(p) &lt; 0) { perror("pipe"); exit(1); }
+		close(p[0]); close(p[1]);
+	});
+	BENCH("mmap+touch+munmap 64K", 500, {
+		char *m = mmap(NULL, 65536, PROT_READ | PROT_WRITE,
+			       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (m == MAP_FAILED) { perror("mmap"); exit(1); }
+		for (int k = 0; k &lt; 65536; k += 4096)
+			m[k] = 1;
+		munmap(m, 65536);
+	});
+	BENCH("fork+wait", 50, {
+		pid_t c = fork();
+		if (c &lt; 0) { perror("fork"); exit(1); }
+		if (c == 0) _exit(0);
+		waitpid(c, NULL, 0);
+	});
+	return 0;
+}</code></pre></figure>
+<p>게스트 스크립트 <code>t_cost.sh</code>와 실행:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat &gt; /var/tmp/M8/t_cost.sh &lt;&lt;'XEOF'
+echo "M8UPTIME $(cut -d' ' -f1 /proc/uptime)"
+uname -r
+dmesg | grep -E "Memory:|kfence|KFENCE|kasan|KASAN|kmemleak|lockdep|Lock dependency" | head -12
+free -k
+grep -E "MemTotal|MemFree|MemAvailable|^Slab|SUnreclaim|KernelStack|Percpu|VmallocUsed" /proc/meminfo
+/m8/m8_bench
+XEOF
+gcc -std=gnu11 -Wall -Wextra -O2 -static m8_bench.c -o /var/tmp/M8/m8_bench
+cd /var/tmp/M8
+for i in 1 2; do for k in trace kasan; do ./m8_run.sh Image-$k cost_${k}_$i t_cost.sh; done; done
+for i in 1 2; do ./m8_run.sh Image-kasan cost_kasanlite_$i t_cost.sh slab_debug=- kmemleak=off kfence.sample_interval=0; done</code></pre></figure>
+<p><code>cost_trace_1.log</code>의 핵심 줄(나머지 다섯 로그도 같은 형식):</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.115093][    T1] Memory: 920444K/1048576K available (23680K kernel code, 7246K rwdata, 28828K rodata, 4224K init, 912K bss, 89408K reserved, 32768K cma-reserved)
+lab initramfs: 6.18.55-trace up 2.44s
+MemTotal:         965288 kB
+MemFree:          896528 kB
+Slab:              11716 kB
+Percpu:              304 kB
+getppid                     24653 ns/op
+open+close /dev/null       113815 ns/op
+pipe+close x2              196724 ns/op
+mmap+touch+munmap 64K     1128060 ns/op
+fork+wait                 2439944 ns/op</code></pre></figure>
+<p><code>cost_kasan_1.log</code>:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.621273][    T1] Memory: 633348K/1048576K available (67520K kernel code, 39962K rwdata, 35724K rodata, 7808K init, 19378K bss, 370004K reserved, 32768K cma-reserved)
+lab initramfs: 6.18.55-kasan up 17.33s
+MemTotal:         688276 kB
+MemFree:          503532 kB
+Slab:              67836 kB
+Percpu:             3936 kB
+getppid                     52544 ns/op
+open+close /dev/null      1395540 ns/op
+pipe+close x2             3129511 ns/op
+mmap+touch+munmap 64K     5299550 ns/op
+fork+wait                20428868 ns/op</code></pre></figure>
+<p>여섯 로그를 모은 표(2회 평균, 반올림):</p>
+<div class="tw"><table><thead><tr><th>항목</th><th>Image-trace</th><th>Image-kasan</th><th>kasan + 런타임 3종 끔</th><th>kasan ÷ trace</th></tr></thead><tbody><tr><td>부팅 → <code>/init</code> (게스트 uptime)</td><td>2.37 s</td><td>17.52 s</td><td>10.15 s</td><td>7.4x</td></tr><tr><td><code>MemTotal</code> (커널이 쓸 수 있게 넘긴 RAM)</td><td>942.7 MiB</td><td>672.1 MiB</td><td>674.4 MiB</td><td>−270 MiB</td></tr><tr><td>부팅 직후 <code>MemFree</code></td><td>877.3 MiB</td><td>493.0 MiB</td><td>533.8 MiB</td><td>−384 MiB</td></tr><tr><td><code>Slab</code></td><td>11.5 MiB</td><td>66.7 MiB</td><td>38.9 MiB</td><td>5.8x</td></tr><tr><td><code>Percpu</code></td><td>0.3 MiB</td><td>3.8 MiB</td><td>3.8 MiB</td><td>12.9x</td></tr><tr><td>getppid</td><td>24.7 us</td><td>53.1 us</td><td>55.0 us</td><td>2.2x</td></tr><tr><td>open+close <code>/dev/null</code></td><td>111 us</td><td>1421 us</td><td>477 us</td><td>12.8x</td></tr><tr><td>pipe+close ×2</td><td>196 us</td><td>3096 us</td><td>939 us</td><td>15.8x</td></tr><tr><td>mmap+touch+munmap 64K</td><td>1.12 ms</td><td>5.22 ms</td><td>4.10 ms</td><td>4.7x</td></tr><tr><td>fork+wait</td><td>2.46 ms</td><td>21.8 ms</td><td>10.8 ms</td><td>8.9x</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 680 422" xmlns="http://www.w3.org/2000/svg">
+  <text x="20" y="22" font-size="13">Image-kasan ÷ Image-trace (배수, 1.0 = 같음) — QEMU TCG, 2회 평균</text>
+  <rect x="160" y="32" width="14" height="10" fill="#d0564a" fill-opacity="0.6"/><text x="180" y="42" font-size="12">Image-kasan 기본 (전부 켬)</text>
+  <rect x="370" y="32" width="14" height="10" fill="#4a7bd0" fill-opacity="0.6"/><text x="390" y="42" font-size="12">slab_debug=- kmemleak=off kfence 끔</text>
+  <text x="20" y="77" font-size="12">부팅 → /init</text>
+  <rect x="160" y="60" width="192" height="16" fill="#d0564a" fill-opacity="0.6"/>
+  <text x="358" y="73" font-size="12">7.4x</text>
+  <rect x="160" y="80" width="111" height="16" fill="#4a7bd0" fill-opacity="0.6"/>
+  <text x="277" y="93" font-size="12">4.3x</text>
+  <text x="20" y="129" font-size="12">getppid</text>
+  <rect x="160" y="112" width="56" height="16" fill="#d0564a" fill-opacity="0.6"/>
+  <text x="222" y="125" font-size="12">2.2x</text>
+  <rect x="160" y="132" width="58" height="16" fill="#4a7bd0" fill-opacity="0.6"/>
+  <text x="224" y="145" font-size="12">2.2x</text>
+  <text x="20" y="181" font-size="12">open+close</text>
+  <rect x="160" y="164" width="332" height="16" fill="#d0564a" fill-opacity="0.6"/>
+  <text x="498" y="177" font-size="12">12.8x</text>
+  <rect x="160" y="184" width="111" height="16" fill="#4a7bd0" fill-opacity="0.6"/>
+  <text x="277" y="197" font-size="12">4.3x</text>
+  <text x="20" y="233" font-size="12">pipe+close ×2</text>
+  <rect x="160" y="216" width="412" height="16" fill="#d0564a" fill-opacity="0.6"/>
+  <text x="578" y="229" font-size="12">15.8x</text>
+  <rect x="160" y="236" width="125" height="16" fill="#4a7bd0" fill-opacity="0.6"/>
+  <text x="291" y="249" font-size="12">4.8x</text>
+  <text x="20" y="285" font-size="12">mmap+touch 64K</text>
+  <rect x="160" y="268" width="121" height="16" fill="#d0564a" fill-opacity="0.6"/>
+  <text x="287" y="281" font-size="12">4.7x</text>
+  <rect x="160" y="288" width="95" height="16" fill="#4a7bd0" fill-opacity="0.6"/>
+  <text x="261" y="301" font-size="12">3.7x</text>
+  <text x="20" y="337" font-size="12">fork+wait</text>
+  <rect x="160" y="320" width="231" height="16" fill="#d0564a" fill-opacity="0.6"/>
+  <text x="397" y="333" font-size="12">8.9x</text>
+  <rect x="160" y="340" width="114" height="16" fill="#4a7bd0" fill-opacity="0.6"/>
+  <text x="280" y="353" font-size="12">4.4x</text>
+  <line x1="160" y1="56" x2="160" y2="372" stroke="currentColor"/>
+  <line x1="186" y1="56" x2="186" y2="372" stroke="#888" stroke-dasharray="3 3"/>
+  <text x="186" y="388" font-size="12" text-anchor="middle">1x</text>
+  <text x="420" y="388" font-size="12" text-anchor="middle">10x</text>
+  <line x1="420" y1="56" x2="420" y2="372" stroke="#888" stroke-dasharray="3 3"/>
+</svg></figure>
+<p>그림 6 — 실측 비용 배수(QEMU TCG, 같은 initramfs, 2회 평균). 빨강은 디버그 커널 기본 상태, 파랑은 같은 커널에서 slab_debug·kmemleak·KFENCE를 부팅 인자로 끈 상태다.</p>
+<p>출력에서 볼 것·해석:</p>
+<ul><li><strong>메모리</strong>: <code>Memory:</code> 줄의 <code>reserved</code>가 89408K → 370004K로 <strong>약 274 MiB</strong> 늘었다. 그 대부분이 KASAN shadow다 — 1 GiB RAM의 1/8 = 128 MiB가 선형 매핑 shadow, 나머지는 커진 커널 이미지(code 23.7 → 67.5 MB, bss 0.9 → 19.4 MB)와 vmalloc·모듈 영역 shadow 등이다(항목별 분해는 하지 않았다). 그래서 <code>MemTotal</code> 자체가 270 MiB 줄었다. 부팅 직후 여유 메모리는 877 → 493 MiB. 1 GiB 보드에서 디버그 커널을 돌리면 <strong>앱이 쓸 메모리가 거의 절반</strong>이 된다는 뜻이다. 512 MiB 보드라면 OOM이 먼저 온다.</li><li><strong>Slab 5.8배</strong>: SLUB_DEBUG_ON의 redzone·추적 메타데이터, KASAN 메타데이터(alloc/free 스택 핸들), kmemleak 객체 기록 때문이다. 세 번째 열(런타임 3종 끔)에서 38.9 MiB로 줄어드는 것으로 보아 약 28 MiB가 slab_debug·kmemleak 몫이다. <strong>Percpu 12.9배</strong>는 lockdep의 CPU별 통계(<code>LOCK_STAT</code>)가 주범이다(런타임 인자로 꺼지지 않으므로 세 번째 열도 같다).</li><li><strong>syscall 비용</strong>: <code>getppid</code>(커널에서 거의 아무것도 안 함)는 2.2배인데, <code>open+close</code>·<code>pipe</code>처럼 <strong>객체를 할당·해제하는 경로는 13~16배</strong>다. 세 번째 열에서 open/pipe가 4.3~4.8배로 내려가는 것을 보면 그 차이의 대부분이 <strong>slab_debug(SLUB_DEBUG_ON)와 kmemleak</strong> — 할당·해제마다 하는 검사·기록 — 이고, KASAN+lockdep+UBSAN 자체는 약 4~5배다. 이 4~5배도 KASAN 혼자의 비용이 아니다 — lockdep(모든 락 획득에서 그래프 검사)·DEBUG_OBJECTS·DMA_API_DEBUG 등이 같이 켜져 있고, TCG는 메모리 접근이 많은 코드를 특히 느리게 에뮬레이션한다. 탐지기 하나씩의 비용을 정확히 나누려면 config를 하나씩 바꾼 커널을 따로 빌드해야 한다(이 노트에서는 하지 않았다).</li><li><strong>부팅 7.4배</strong>(2.4 → 17.5초): 부팅은 할당과 락의 연속이라 최악에 가깝다. 실기 보드에서도 디버그 커널은 부팅이 눈에 띄게 느리다 — watchdog·systemd 타임아웃(L1, M10)을 늘려야 할 때가 많다.</li><li><strong>TCG와 공유 VM 주의</strong>: 이 숫자들은 실기 수치가 아니다. 같은 <code>Image-trace</code>로 VM에 빌드 부하가 걸려 있던 시각(load average 11)에 잰 첫 시도(<code>cost_trace1.log</code>)에서는 <code>getppid</code>가 254101 ns/op, 부팅이 39.9초로 위 표의 약 10~17배였다. 그래서 위 표는 VM 부하가 내려간(load average 약 3) 뒤 <strong>두 커널을 번갈아</strong> 2회씩 잰 값만 썼다. 면접에서는 "QEMU에서 비율로 봤을 때 할당이 많은 경로는 한 자릿수~십수 배, 메모리는 shadow 1/8 + α"처럼 말하고, 실기 측정이 필요하다고 덧붙인다.</li></ul>
+<hr>
+<h2 id="11-어디에-무엇을-켜나-개발-ci-양산-전략">11. 어디에 무엇을 켜나 — 개발 · CI · 양산 전략<a class="anchor" href="#11-어디에-무엇을-켜나-개발-ci-양산-전략" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <rect x="15" y="20" width="205" height="250" rx="8" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="117" y="44" font-size="13" text-anchor="middle">개발자 기기 · QEMU</text>
+  <text x="117" y="64" font-size="12" text-anchor="middle">"느려도 다 켠다"</text>
+  <g font-size="12" text-anchor="middle">
+    <text x="117" y="94">KASAN generic</text>
+    <text x="117" y="116">lockdep + ATOMIC_SLEEP</text>
+    <text x="117" y="138">UBSAN · kmemleak</text>
+    <text x="117" y="160">DEBUG_OBJECTS · LIST</text>
+    <text x="117" y="182">DMA_API_DEBUG</text>
+    <text x="117" y="204">KCSAN (별도 커널)</text>
+    <text x="117" y="236">드라이버 새로 쓸 때</text>
+    <text x="117" y="256">매일 이 커널로</text>
+  </g>
+  <rect x="237" y="20" width="205" height="250" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="339" y="44" font-size="13" text-anchor="middle">CI · nightly</text>
+  <text x="339" y="64" font-size="12" text-anchor="middle">"자동으로, 경고 0개"</text>
+  <g font-size="12" text-anchor="middle">
+    <text x="339" y="94">KASAN 커널로 KUnit</text>
+    <text x="339" y="116">kselftest · 드라이버 테스트</text>
+    <text x="339" y="138">syzkaller 퍼징</text>
+    <text x="339" y="160">dmesg 에 BUG/WARN/</text>
+    <text x="339" y="182">KASAN/UBSAN 있으면 실패</text>
+    <text x="339" y="204">debug_locks 가 0이면 실패</text>
+    <text x="339" y="236">kmemleak scan 결과</text>
+    <text x="339" y="256">신규 항목이면 실패</text>
+  </g>
+  <rect x="459" y="20" width="205" height="250" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="561" y="44" font-size="13" text-anchor="middle">양산 · 필드</text>
+  <text x="561" y="64" font-size="12" text-anchor="middle">"거의 공짜인 것만"</text>
+  <g font-size="12" text-anchor="middle">
+    <text x="561" y="94">KFENCE (샘플링)</text>
+    <text x="561" y="116">MTE async (칩이 지원)</text>
+    <text x="561" y="138">UBSAN_BOUNDS + TRAP</text>
+    <text x="561" y="160">LIST_HARDENED</text>
+    <text x="561" y="182">refcount_t · FORTIFY</text>
+    <text x="561" y="204">pstore/ramoops (L7)</text>
+    <text x="561" y="236">리포트를 텔레메트리로</text>
+    <text x="561" y="256">수집 → 함대 통계</text>
+  </g>
+  <line x1="220" y1="290" x2="459" y2="290" stroke="currentColor" marker-end="url(#ah6)"/>
+  <text x="340" y="312" font-size="12" text-anchor="middle">오른쪽으로 갈수록 비용 예산이 작고, 기기 수가 많다</text>
+</svg></figure>
+<p>그림 7 — 같은 소스, 세 가지 커널. 개발 커널은 정확도, 양산 커널은 비용이 기준이다.</p>
+<h3 id="11-1-ci-판정-스크립트의-핵심">11.1 CI 판정 스크립트의 핵심<a class="anchor" href="#11-1-ci-판정-스크립트의-핵심" aria-label="link">#</a></h3>
+<p>CI에서는 "테스트가 통과했다"만으로 부족하다. 탐지기는 대부분 <strong>리포트만 찍고 계속 진행</strong>하므로(<code>_noabort</code>), 테스트가 PASS여도 dmesg에 KASAN 리포트가 있을 수 있다. 그래서 테스트 후 로그를 판정한다. 아래는 이 노트의 게스트 로그에 그대로 쓴 판정 스크립트다(<code>m8_gate.sh</code>). DMA-API 줄은 부팅 때 정상적으로 찍히는 <code>DMA-API: preallocated …</code>를 빼려고 에러성 단어가 있는 줄만 센다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># m8_gate.sh LOG : 탐지기 리포트가 하나라도 있으면 실패 (CI 게이트)
+LOG=$1
+PAT='BUG: KASAN|BUG: KFENCE|UBSAN:|BUG: KCSAN|possible circular locking|inconsistent .* usage|sleeping function called from invalid context|ODEBUG:|list_(add|del) corruption|DMA-API:.*(error|frees|unmap)|unreferenced object|WARNING: CPU'
+n=$(grep -cE "$PAT" "$LOG")
+if [ "$n" -gt 0 ]; then
+    echo "GATE FAIL: $n detector lines"; grep -oE "$PAT" "$LOG" | sort | uniq -c | sort -rn | head
+    exit 1
+fi
+echo "GATE PASS"</code></pre></figure>
+<p>예제 16 — 이 노트의 로그 세 개에 게이트를 걸어 본 결과(VM 호스트에서 실행):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>for f in cost_kasan_1.log misc2.log kasan3.log; do echo "\$ sh m8_gate.sh $f"; sh m8_gate.sh $f; echo "exit=$?"; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>$ sh m8_gate.sh cost_kasan_1.log
+GATE PASS
+exit=0
+$ sh m8_gate.sh misc2.log
+GATE FAIL: 8 detector lines
+      4 unreferenced object
+      4 UBSAN:
+exit=1
+$ sh m8_gate.sh kasan3.log
+GATE FAIL: 173 detector lines
+    173 BUG: KASAN
+exit=1</code></pre></figure>
+<p>출력에서 볼 것: 디버그 커널을 그냥 부팅하고 벤치마크만 돌린 로그는 <strong>깨끗하다</strong>(<code>GATE PASS</code>) — 이 랩 커널의 built-in 드라이버들은 이 탐지기 묶음에서 경고를 내지 않는다는 뜻이고, 이것이 CI의 출발점이다. 테스트 모듈을 넣은 로그는 실패한다(UBSAN 4개 + 이 로그에 담긴 kmemleak 항목 4개, KASAN 173개). 실제 CI에서는 "테스트 스위트가 의도적으로 낸 리포트"를 제외하는 허용 목록이 필요하다 — KUnit 스위트는 별도 잡으로 돌리고 결과를 KTAP(<code># Totals: pass:62 fail:1</code>)으로 판정하는 게 보통이다.</p>
+<p>실무 팁: 부팅 인자 <code>panic_on_warn=1</code>, <code>kasan.fault=panic</code>(또는 <code>kasan_multi_shot</code> 없이 첫 리포트만), <code>oops=panic</code>을 주면 <strong>첫 리포트에서 멈추고 kdump/pstore로 남긴다</strong>(L7). 반대로 탐지기 버그를 한꺼번에 모으려면 <code>kasan_multi_shot</code>으로 계속 진행시킨다. syzbot도 같은 원리다 — KASAN/KCSAN/UBSAN/lockdep 커널을 퍼징하고 dmesg 패턴으로 버그를 판정한다.</p>
+<h3 id="11-2-양산-질문에-답하기">11.2 양산 질문에 답하기<a class="anchor" href="#11-2-양산-질문에-답하기" aria-label="link">#</a></h3>
+<ul><li><strong>KASAN generic을 양산에?</strong> 아니다. 메모리 1/8(+quarantine 1/32) 상시 사용, 이미지가 커지고, 커널 경로가 수 배 느리다(§10 실측). 개발·CI 전용.</li><li><strong>KFENCE를 양산에?</strong> 그렇다 — 설계 목표가 그것이다. 2 MiB 풀과 타이머 하나, fast path는 static key 분기뿐이다. 커널 문서(<code>Documentation/dev-tools/kfence.rst</code>)도 "양산 커널에 켜도록 설계됐고 오버헤드가 거의 0"이며, 충분한 총 가동 시간을 얻는 빠른 방법이 "large fleet of machines"에 배포하는 것이라고 적는다. 단, 한 대에서는 확률이 낮으므로 <strong>리포트 수집 체계</strong>(pstore·로그 업로드)가 짝이다.</li><li><strong>MTE(KASAN HW_TAGS)를 양산에?</strong> 칩이 MTE를 지원하면(ARMv8.5+, 예: Pixel 8 이후 Tensor) async 또는 asymm 모드로 가능하다. 태그 저장용 메모리(태그 3% 정도, HW가 별도 저장)와 태그 설정 비용이 있다. 임베디드 SoC(i.MX8·AM62·Orin의 Cortex-A53/A72/A78AE)는 MTE가 <strong>없다</strong> — 그런 보드에서는 KFENCE가 현실적인 선택이다.</li><li><strong>UBSAN을 양산에?</strong> <code>UBSAN_BOUNDS</code>+<code>UBSAN_TRAP</code> 정도는 일부 배포판·Android가 켠다. 전체 UBSAN은 개발용.</li></ul>
+<hr>
+<h2 id="12-커널-안에서는-무슨-일이-일어나나">12. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#12-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<p>KASAN generic 리포트가 나오기까지의 경로를 6.18 소스로 따라가 보자. 예제의 리포트 스택에 나온 함수 이름이 전부 이 경로 위에 있다.</p>
+<figure class="chart"><svg viewBox="0 0 660 380" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="ah8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <rect x="20" y="20" width="290" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="165" y="42" font-size="12" text-anchor="middle">빌드: scripts/Makefile.kasan</text>
+  <text x="165" y="60" font-size="12" text-anchor="middle">-fsanitize=kernel-address</text>
+  <rect x="350" y="20" width="290" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="495" y="42" font-size="12" text-anchor="middle">부팅: kasan_init() (arm64)</text>
+  <text x="495" y="60" font-size="12" text-anchor="middle">shadow 영역 매핑, 처음엔 zero page</text>
+  <rect x="20" y="100" width="290" height="70" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="165" y="122" font-size="12" text-anchor="middle">kmalloc → slab_alloc_node</text>
+  <text x="165" y="140" font-size="12" text-anchor="middle">→ kasan_slab_alloc / kasan_kmalloc</text>
+  <text x="165" y="158" font-size="12" text-anchor="middle">shadow 언포이즌 + alloc stack 저장</text>
+  <rect x="350" y="100" width="290" height="70" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="495" y="122" font-size="12" text-anchor="middle">kfree → slab_free</text>
+  <text x="495" y="140" font-size="12" text-anchor="middle">→ kasan_slab_free: 포이즌 fb/fa</text>
+  <text x="495" y="158" font-size="12" text-anchor="middle">free stack 저장 → kasan_quarantine_put</text>
+  <rect x="20" y="200" width="620" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="330" y="222" font-size="12" text-anchor="middle">드라이버의 모든 load/store: 인라인 shadow 검사 (또는 __asan_load4 / __asan_store4)</text>
+  <text x="330" y="240" font-size="12" text-anchor="middle">memcpy/memset 등은 kasan_check_range()로 범위 전체 검사</text>
+  <line x1="330" y1="250" x2="330" y2="278" stroke="currentColor" marker-end="url(#ah8)"/>
+  <rect x="20" y="282" width="620" height="80" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="330" y="304" font-size="12" text-anchor="middle">위반: __asan_report_store4_noabort → kasan_report() (mm/kasan/report.c)</text>
+  <text x="330" y="324" font-size="12" text-anchor="middle">bug type 판정(shadow 값) → 접근 스택 → alloc/free 스택(stack depot)</text>
+  <text x="330" y="344" font-size="12" text-anchor="middle">→ 버그 주소의 slab·page 정보 → shadow 덤프 → 계속 진행 또는 panic</text>
+</svg></figure>
+<p>그림 8 — KASAN generic의 생애주기. 할당자 훅이 shadow를 칠하고, 컴파일러가 심은 검사가 읽고, <code>kasan_report()</code>가 리포트를 조립한다.</p>
+<ul><li>할당자 훅: <code>mm/slub.c</code>의 할당·해제 경로에서 <code>kasan_slab_alloc()</code>·<code>kasan_kmalloc()</code>·<code>kasan_slab_free()</code>(<code>include/linux/kasan.h</code> 래퍼 → <code>mm/kasan/common.c</code>)가 불린다. 페이지 할당자는 <code>kasan_unpoison_pages()</code>/<code>kasan_poison_pages()</code>, vmalloc은 <code>KASAN_VMALLOC</code>일 때 <code>kasan_populate_vmalloc()</code>로 shadow 자체를 그때그때 매핑한다.</li><li>스택 저장: <code>kasan_save_stack()</code> → <code>stack_depot_save()</code>(<code>lib/stackdepot.c</code>). 같은 스택은 한 번만 저장되고 객체에는 4바이트 핸들만 들어간다.</li><li>리포트: <code>kasan_report()</code> → <code>print_report()</code>가 <code>print_error_description()</code>(bug 종류) → 접근 스택 → <code>print_address_description()</code>(alloc/free 스택, 객체 위치 "located 0 bytes to the right of allocated 123-byte region") → <code>print_memory_metadata()</code>(shadow 덤프)를 찍는다. 출력이 끝나면 <code>end_report()</code>가 <code>add_taint(TAINT_BAD_PAGE, LOCKDEP_NOW_UNRELIABLE)</code>를 불러 이후 Oops에 taint 문자 <code>B</code>가 붙는다. 두 번째 인자 때문에 <strong>KASAN 리포트가 한 번 나면 lockdep도 꺼진다</strong> — 한 부팅에서 KASAN 버그를 먼저 고쳐야 lockdep 결과를 믿을 수 있다.</li><li>계측 제외: 부팅 초기 코드·KASAN 자신 등은 Makefile의 <code>KASAN_SANITIZE_foo.o := n</code>으로 빠진다. 드라이버 하나만 계측하고 싶으면 반대로 <code>KASAN_SANITIZE := y</code>를 그 Makefile에 두는 식도 가능하다.</li><li>드라이버 작성과 다시 만나는 곳: <code>kmalloc</code>/<code>kfree</code>(F9), <code>dma_map_*</code>(H 모듈, DMA_API_DEBUG), <code>timer_setup</code>/<code>INIT_WORK</code>(F7·F8, DEBUG_OBJECTS), <code>list_head</code>(E5, DEBUG_LIST), 스핀락·뮤텍스(F4, lockdep). 탐지기가 감시하는 API가 곧 드라이버가 매일 쓰는 API다.</li></ul>
+<hr>
+<h2 id="13-embedded-실무에서-다시-보기">13. Embedded 실무에서 다시 보기<a class="anchor" href="#13-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="13-1-필드에서-1주일에-한-번-패닉-센서-키트-사례">13.1 "필드에서 1주일에 한 번 패닉" — 센서 키트 사례<a class="anchor" href="#13-1-필드에서-1주일에-한-번-패닉-센서-키트-사례" aria-label="link">#</a></h3>
+<p>예를 들어 센서 키트의 IMU SPI 드라이버가 FIFO를 읽을 때 장치가 보고한 샘플 수를 그대로 믿고 <code>memcpy(buf, rx, n * 12)</code>를 한다고 하자. 평소 n ≤ 32지만 SPI 노이즈로 FIFO count 레지스터가 가끔 0x3FF로 읽히면 384바이트 버퍼 뒤를 덮어쓴다. 증상은 몇 시간 뒤 네트워크 스택 Oops다. 접근 순서:</p>
+<ol><li>Oops 콜스택에 범인이 없음 → 메모리 손상 의심(M3).</li><li><strong>같은 소스로 KASAN 커널</strong>을 만들어 같은 보드(또는 QEMU + 장치 모델)에서 스트레스 테스트. KASAN은 <code>memcpy</code> 순간 <code>slab-out-of-bounds in imu_read_fifo</code>를 찍는다(<code>kasan_check_range()</code>).</li><li>재현이 안 되면 <strong>필드 커널에 KFENCE</strong>(이미 켜 두는 게 좋다) + pstore. 수백 대가 돌면 언젠가 그 384바이트 버퍼가 샘플에 걸려 <code>BUG: KFENCE: out-of-bounds write in imu_read_fifo</code>가 수집된다.</li><li>고친 뒤 회귀 방지: FIFO count 범위 검사 + <code>UBSAN_BOUNDS</code>가 볼 수 있게 버퍼를 <code>struct { u8 buf[384]; }</code> 고정 배열로.</li></ol>
+<h3 id="13-2-드라이버-remove-에서의-timer-work-정리">13.2 드라이버 <code>remove()</code>에서의 timer·work 정리<a class="anchor" href="#13-2-드라이버-remove-에서의-timer-work-정리" aria-label="link">#</a></h3>
+<p>DEBUG_OBJECTS는 "timer가 아직 활성인데 그것을 품은 구조체를 <code>kfree</code>"를 <code>ODEBUG: free active … object type: timer_list</code>로 잡는다. 실기에서는 그 timer가 나중에 해제된 메모리 위에서 발화해 <strong>가끔</strong> 패닉이 난다. <code>remove()</code>에서 <code>timer_delete_sync()</code>(예전 이름 <code>del_timer_sync()</code>는 6.18에서 이미 없다)·<code>cancel_work_sync()</code>를 빠뜨린 전형적인 버그다(F7·F8, G3).</p>
+<h3 id="13-3-dma-버퍼-짝">13.3 DMA 버퍼 짝<a class="anchor" href="#13-3-dma-버퍼-짝" aria-label="link">#</a></h3>
+<p>카메라·LiDAR 드라이버(I 모듈)가 에러 경로에서 <code>dma_unmap_single()</code>을 빼먹거나, map은 <code>DMA_FROM_DEVICE</code>로 하고 unmap은 <code>DMA_TO_DEVICE</code>로 하는 버그는 x86 개발 PC(캐시 일관)에서는 증상이 없고 <strong>Cortex-A 보드에서만</strong> 가끔 데이터가 틀린다. DMA_API_DEBUG는 개발 PC에서도 규칙 위반 자체를 찍어 준다.</p>
+<h3 id="13-4-bsp-커널-업그레이드-검증">13.4 BSP 커널 업그레이드 검증<a class="anchor" href="#13-4-bsp-커널-업그레이드-검증" aria-label="link">#</a></h3>
+<p>벤더 BSP를 새 LTS로 올릴 때 첫 일은 <strong>디버그 config로 부팅해 dmesg를 0으로 만드는 것</strong>이다. 벤더 드라이버의 lockdep·DEBUG_OBJECTS·KASAN 경고가 수십 개 나오는 일이 흔하다. 이 노트의 <code>kasan_test</code>처럼 KUnit 스위트를 먼저 돌려 "탐지기 자체가 이 SoC·컴파일러에서 정상 동작"하는지 확인한 뒤, 드라이버 경고를 하나씩 없앤다.</p>
+<hr>
+<h2 id="14-흔한-실수와-증상">14. 흔한 실수와 증상<a class="anchor" href="#14-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>KASAN 리포트가 나왔는데 테스트가 PASS라 무시</td><td>버그가 양산까지 감</td><td>KASAN은 기본 <code>_noabort</code>, 리포트 후 계속 진행</td><td>CI에서 dmesg 게이트(§11.1), 또는 <code>kasan.fault=panic</code>·<code>panic_on_warn=1</code></td></tr><tr><td>lockdep 경고 하나 고친 뒤 "이제 깨끗"</td><td>다음 부팅에 다른 경고</td><td>첫 보고 뒤 <code>debug_locks=0</code>으로 lockdep이 꺼져 나머지를 못 봄</td><td>하나씩 고치고 매번 재부팅, CI가 <code>debug_locks</code> 확인</td></tr><tr><td>KASAN과 KCSAN을 한 커널에</td><td>config에서 KCSAN이 안 켜짐</td><td><code>KCSAN depends on !KASAN</code></td><td>커널을 두 벌 빌드</td></tr><tr><td>디버그 커널용으로 빌드한 <code>.ko</code>를 양산 커널에</td><td><code>disagrees about version of symbol</code>/vermagic 오류, 또는 <code>__asan_*</code> 미정의 심볼</td><td>계측된 모듈은 KASAN 런타임이 필요</td><td>모듈은 항상 같은 빌드 트리로 (E3)</td></tr><tr><td>kmemleak 출력 전부를 누수로 판단</td><td>엉뚱한 곳 수정</td><td>물리 주소·태그 포인터만 보관하는 객체는 오탐</td><td><code>kmemleak_not_leak()</code>/<code>kmemleak_ignore()</code>, 두 번 스캔해 계속 나오는 것만</td></tr><tr><td>KFENCE가 1시간째 아무것도 못 잡음 → 버그 없다고 결론</td><td>필드에서 계속 크래시</td><td>샘플링이라 한 대·짧은 시간에서는 확률이 낮음</td><td>함대 수집, 개발 중엔 <code>kfence.sample_interval=1</code>로 촘촘히, 확정은 KASAN</td></tr><tr><td>4 KiB 버퍼 OOB를 slab_debug로만 찾으려 함</td><td>리포트 안 나옴</td><td><code>kmalloc_large</code>(&gt; 8 KiB)·페이지 할당은 slab redzone 밖</td><td>KASAN(page redzone <code>fe</code>) 또는 <code>debug_pagealloc=on</code></td></tr><tr><td>QEMU TCG에서 잰 KASAN 오버헤드를 실기 수치로 발표</td><td>숫자 신뢰 상실</td><td>TCG는 명령 번역 비용이 섞이고 공유 VM 부하가 큼</td><td>비율만 말하고 실기에서 다시 잼</td></tr><tr><td>KASAN 커널에서 스택 overflow</td><td><code>kernel stack overflow</code>/이상한 Oops</td><td>계측이 스택을 더 씀 (E4 §7: arm64는 KASAN 시 스택 2배)</td><td>큰 지역 배열 제거, <code>FRAME_WARN</code> 경고 확인</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-면접에서-이렇게-말한다">15. 면접에서 이렇게 말한다<a class="anchor" href="#15-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> "We have intermittent memory corruption in a driver — crashes show up in unrelated code once a week. How do you find it?"</p>
+<p><strong>A.</strong> 콜스택이 무관한 코드를 가리키면 원인과 증상이 떨어진 메모리 손상이다. 같은 소스로 KASAN generic 커널을 만들어 스트레스·퍼징을 돌리면 손상을 일으키는 바로 그 명령에서 리포트가 나오고, 할당·해제 스택까지 준다. 재현이 안 되면 필드 커널에 KFENCE와 pstore를 켜서 함대에서 샘플로 잡는다. 범위를 좁히는 보조 도구는 slab_debug, DEBUG_OBJECTS(timer/work 수명), DMA_API_DEBUG(DMA 짝)다.</p>
+<blockquote><p>When the crash stack points at unrelated code, it's corruption with cause and symptom separated in time. First I build the same tree with generic KASAN and stress the driver — KASAN reports at the faulting instruction with the allocation and free stacks, so the culprit line is right there. If it won't reproduce in the lab, I rely on KFENCE plus pstore in the field kernel; it's cheap enough to leave on, and across a fleet the bad object eventually gets sampled. Around that I use DEBUG_OBJECTS for timer and work lifetime bugs and DMA_API_DEBUG for map/unmap mismatches, and I gate CI on a clean dmesg.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "KASAN이 아무것도 못 찾으면?" → DMA가 쓰는 메모리는 CPU 계측 밖이다(장치가 직접 씀) — DMA_API_DEBUG, IOMMU fault 로그, 버퍼 끝 canary를 보고, 레이스면 KCSAN.</p>
+<p><strong>Q.</strong> "Can you ship KASAN in production? What about KFENCE and MTE?"</p>
+<p><strong>A.</strong> generic KASAN은 메모리 1/8 + quarantine, 수 배 느린 커널 경로 때문에 양산 불가다(이 노트의 실측도 그렇다). KFENCE는 양산용으로 설계됐다 — 2 MiB 풀과 샘플링 타이머만 쓰고 fast path 비용이 사실상 0이다. MTE(HW_TAGS)는 ARMv8.5 MTE가 있는 칩에서 async/asymm 모드로 양산 가능한 수준이지만, 대부분의 임베디드 SoC 코어(A53/A72/A78AE)는 MTE가 없다.</p>
+<blockquote><p>Generic KASAN, no — it reserves an eighth of memory for shadow plus a quarantine, and kernel paths run several times slower. KFENCE, yes — that's its design goal: a small guarded pool and a sampling timer, near-zero fast-path cost, and fleet scale makes up for the low per-device probability. MTE-backed KASAN can run in production in async or asymmetric mode, but only on ARMv8.5+ cores with MTE; most embedded SoCs today, like Cortex-A53 or A78AE parts, don't have it, so KFENCE is the realistic choice there.</p></blockquote>
+<p><strong>Q.</strong> "How does KASAN know an access is bad?"</p>
+<p><strong>A.</strong> 컴파일러가 모든 load/store 앞에 shadow 검사를 심는다. 8바이트마다 shadow 1바이트가 있고 0이면 전부 유효, 1~7이면 앞 N바이트만 유효, 음수면 금지이며 값이 이유(redzone, freed 등)다. 할당자가 할당 때 shadow를 풀고, 해제 때 칠하고 객체를 quarantine에 넣어 재사용을 늦춘다.</p>
+<blockquote><p>The compiler instruments every load and store with a shadow check. Each 8-byte granule has one shadow byte: zero means fully addressable, 1 to 7 means only the first N bytes are, and negative values mean poisoned, with the value encoding why — slab redzone, freed object, stack redzone. The allocator unpoisons on allocation, poisons on free and holds freed objects in a quarantine so use-after-free doesn't land on a reused object.</p></blockquote>
+<p><strong>Q.</strong> "What's the difference between lockdep and KCSAN?"</p>
+<p><strong>A.</strong> lockdep은 <strong>락을 쓴 코드</strong>의 순서·문맥 규칙을 검증한다 — 실제 deadlock 없이도 ABBA 가능성을 증명한다. KCSAN은 <strong>락을 안 쓴(또는 잘못 안 쓴) 접근</strong>의 데이터 레이스를 watchpoint 샘플링으로 찾는다. 하나는 정적 그래프, 하나는 동적 관찰이다.</p>
+<blockquote><p>Lockdep validates code that does take locks: it builds a graph of lock-class ordering and IRQ usage and reports a possible deadlock the first time an inconsistent path runs, even if it never actually deadlocks. KCSAN looks for the opposite problem — plain concurrent accesses with no proper synchronization — by setting sampled watchpoints and catching a conflicting access from another CPU. Different bug classes, and you can't build KCSAN together with KASAN.</p></blockquote>
+<p><strong>Q.</strong> "How do you read a KASAN report?"</p>
+<p><strong>A.</strong> 위에서부터: 버그 종류와 함수(<code>slab-out-of-bounds in foo+0x..</code>), 접근 크기·주소·태스크, 접근 콜스택(범인), Allocated by / Freed by 스택, "located N bytes to the right of M-byte region"(얼마나 넘었나), 마지막 shadow 덤프(<code>fc</code>·<code>fb</code> 등으로 무엇을 건드렸나). 함수+오프셋은 <code>faddr2line</code>/<code>decode_stacktrace.sh</code>로 줄 번호로 바꾼다(M3).</p>
+<blockquote><p>Top down: the bug type and function, the access size and address, the access stack — that's where the bad code is — then the allocation and free stacks, then the object description that says how many bytes past which region, and finally the shadow dump where values like fc or fb tell me whether I hit a redzone or freed memory. I run the stack through decode_stacktrace or faddr2line to get source lines.</p></blockquote>
+<p><strong>Q.</strong> "What would you put in a CI pipeline for kernel drivers?"</p>
+<p><strong>A.</strong> 같은 소스로 디버그 커널(KASAN+UBSAN+lockdep+DEBUG_OBJECTS+DMA_API_DEBUG+kmemleak)을 빌드하고 QEMU나 실기에서 KUnit·kselftest·드라이버 테스트를 돌린 뒤, 테스트 결과와 별개로 dmesg에 탐지기 패턴이 있으면 실패시킨다. lockdep이 꺼졌는지(<code>debug_locks</code>)도 본다. 별도 잡으로 KCSAN 커널, 가능하면 syzkaller.</p>
+<blockquote><p>A debug-config build of the same tree — KASAN, UBSAN, lockdep, DEBUG_OBJECTS, DMA_API_DEBUG, kmemleak — booted in QEMU or on a board, running KUnit, kselftests and our driver tests. Pass/fail isn't just the test result: I grep dmesg for any detector report and fail on a single hit, check that debug_locks is still 1, and run a kmemleak scan at the end. A separate job runs a KCSAN kernel, and syzkaller if we expose ioctls.</p></blockquote>
+<p><strong>Q.</strong> "Why didn't slab_debug catch my overflow but KASAN did?"</p>
+<p><strong>A.</strong> slab_debug는 redzone을 <strong>나중에</strong>(해제·검증 시점) 확인하는 사후 검사이고 쓰기만 본다. 읽기 OOB나 UAF 읽기는 못 잡고, 잡아도 "언제"를 모른다. KASAN은 모든 접근에서 즉시 검사한다. 대신 slab_debug는 재컴파일 없이 부팅 인자로 켤 수 있다(F9 §9).</p>
+<blockquote><p>slab_debug checks red zones and poison after the fact, at free or validation time, so it only sees writes and can't tell you when it happened; it also misses out-of-bounds reads. KASAN checks every access as it happens. The upside of slab_debug is that it's a boot parameter on any SLUB_DEBUG kernel, no rebuild needed.</p></blockquote>
+<hr>
+<h2 id="16-직접-해보기">16. 직접 해보기<a class="anchor" href="#16-직접-해보기" aria-label="link">#</a></h2>
+<ol><li>(개념) <code>kmalloc(100)</code>을 받은 뒤 <code>p[100]</code>과 <code>p[104]</code>와 <code>p[128]</code>에 쓰면 generic KASAN의 shadow는 각각 무엇이고, 셋 다 잡히나? — 정답/힌트: 100 = 12×8 + 4라 13번째 granule shadow는 <code>04</code>, <code>p[100]</code>·<code>p[104]</code>는 그 granule 밖이거나 부분값 위반으로 잡히고, <code>p[128]</code>은 kmalloc-128 칸 뒤 redzone(<code>fc</code>)이라 잡힌다(<code>kmalloc_oob_right</code> 테스트와 같은 구조).</li><li>(관찰) <code>kasan_test</code>를 <code>kasan.fault=panic</code>으로 다시 돌려 첫 리포트에서 패닉하는지 확인하라. — 정답/힌트: 부팅 인자 추가, 첫 <code>BUG: KASAN</code> 직후 <code>Kernel panic - not syncing: kasan.fault=panic set ...</code>.</li><li>(관찰) <code>kfence.sample_interval=1</code>로 부팅한 뒤 <code>/sys/kernel/debug/kfence/stats</code>의 <code>total allocations</code>가 기본(100 ms)보다 얼마나 빨리 느는지 비교하라. — 정답/힌트: 약 100배 빠르게 풀이 돈다. 풀이 꽉 차면 <code>skipped allocations (capacity)</code>가 는다.</li><li>(코드) §11.1 게이트 스크립트를 kmemleak "새 항목만" 판정하도록 고쳐라(부팅 직후 <code>clear</code>, 테스트 후 <code>scan</code>). — 정답/힌트: 테스트 전에 <code>echo clear &gt; /sys/kernel/debug/kmemleak</code>, 후에 <code>echo scan</code>을 두 번(오탐 줄이기) 하고 <code>unreferenced object</code> 개수 판정.</li><li>(개념) KFENCE 객체가 페이지 오른쪽 끝에 붙어 있을 때 <strong>왼쪽</strong> 1바이트 OOB 쓰기는 언제 어떻게 발견되나? — 정답/힌트: guard 페이지가 아니라 canary 위라 즉시 fault는 없고, <code>kfree()</code> 때 canary 검사로 <code>BUG: KFENCE: memory corruption</code>이 난다.</li><li>(관찰) <code>Image-kasan</code>에서 <code>/proc/lockdep_stats</code>의 <code>lock-classes</code>를 부팅 직후와 <code>kasan_test</code> 후 비교하라. — 정답/힌트: 새 코드 경로가 돌면 클래스·간선이 는다. 상한(<code>MAX_LOCKDEP_KEYS</code> 8192)에 닿으면 lockdep이 스스로 꺼진다.</li><li>(빌드) trace config에서 KASAN 계열을 빼고 <code>CONFIG_KCSAN=y</code>, <code>CONFIG_KCSAN_KUNIT_TEST=m</code>으로 <code>O=/var/tmp/&lt;ID&gt;/kcsan</code> 커널을 빌드해 <code>kcsan_test</code>를 돌려 보라. — 정답/힌트: <code>scripts/config -d KASAN -e KCSAN -e KCSAN_KUNIT_TEST=m</code> 후 olddefconfig, arm64는 <code>EXPERT=y</code>가 필요(<code>HAVE_ARCH_KCSAN if EXPERT</code>).</li></ol>
+<hr>
+<h2 id="17-용어-사전">17. 용어 사전<a class="anchor" href="#17-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>KASAN</td><td>Kernel Address SANitizer</td><td>컴파일러 계측 + shadow memory로 OOB·UAF를 접근 순간 잡는다</td></tr><tr><td>shadow memory</td><td>그림자 메모리</td><td>커널 메모리 8B마다 1B로 접근 가능 여부·이유를 적은 영역</td></tr><tr><td>granule</td><td>검사 단위</td><td>generic 8B, tag 모드 16B</td></tr><tr><td>redzone</td><td>금지 구역</td><td>객체·스택 변수·전역 뒤에 둔 접근 금지 영역</td></tr><tr><td>quarantine</td><td>격리 구역</td><td>해제 객체를 바로 재사용하지 않고 잠시 두는 FIFO (RAM의 1/32)</td></tr><tr><td>stack depot</td><td>스택 저장소</td><td>할당·해제 콜스택을 중복 없이 저장, 핸들로 참조</td></tr><tr><td>inline / outline</td><td>계측 방식</td><td>검사 코드를 함수 안에 펼치기 / <code>__asan_*</code> 호출로</td></tr><tr><td>KFENCE</td><td>Kernel Electric-Fence</td><td>guard 페이지 사이에 할당 일부만 놓는 샘플링 탐지기</td></tr><tr><td>MTE</td><td>Memory Tagging Extension</td><td>ARMv8.5 HW 메모리 태그, KASAN HW_TAGS의 기반</td></tr><tr><td>TBI</td><td>Top Byte Ignore</td><td>arm64가 포인터 최상위 바이트를 주소 변환에서 무시 → SW_TAGS가 태그를 둠</td></tr><tr><td>kmemleak</td><td>커널 누수 탐지기</td><td>루트에서 도달 못 하는 할당 객체를 보고</td></tr><tr><td>UBSAN</td><td>Undefined Behavior SANitizer</td><td>C 미정의 동작(범위 밖 인덱스, shift 등)을 런타임에 검사</td></tr><tr><td>KCSAN</td><td>Kernel Concurrency SANitizer</td><td>watchpoint 샘플링으로 data race 탐지</td></tr><tr><td>marked access</td><td>표시된 접근</td><td><code>READ_ONCE</code>/<code>WRITE_ONCE</code>/atomic — KCSAN이 의도된 동시 접근으로 본다</td></tr><tr><td>lockdep</td><td>락 검증기</td><td>락 클래스 순서·IRQ 상태 그래프로 deadlock 가능성 증명 (F4)</td></tr><tr><td><code>debug_locks</code></td><td>lockdep 생존 플래그</td><td>첫 보고 후 0이 되어 lockdep이 꺼진다</td></tr><tr><td>DEBUG_OBJECTS</td><td>객체 수명 검사</td><td>timer·work 등이 활성인 채 해제·재초기화되는지</td></tr><tr><td>DMA_API_DEBUG</td><td>DMA API 검사</td><td>map/unmap 짝, 방향·크기 불일치, unmap 누락</td></tr><tr><td>KUnit</td><td>커널 단위 테스트 프레임워크</td><td><code>kasan_test</code>·<code>kfence_test</code>처럼 커널 안에서 도는 테스트 스위트</td></tr><tr><td>syzkaller / syzbot</td><td>커널 퍼저 / 그 자동 서비스</td><td>탐지기 커널에 syscall을 퍼징해 리포트를 판정</td></tr></tbody></table></div>
+<hr>
+<h2 id="18-요약-체크리스트">18. 요약 &amp; 체크리스트<a class="anchor" href="#18-요약-체크리스트" aria-label="link">#</a></h2>
+<p>메모리·동시성 버그는 원인과 증상이 떨어져 있어서 Oops 스택만으로는 범인을 못 찾는다. Linux는 이걸 "원인 시점"으로 당겨 오는 탐지기를 Kconfig로 제공한다. KASAN generic은 컴파일러가 모든 접근 앞에 1:8 shadow 검사를 심고 할당자가 redzone·quarantine·스택 기록을 더해 OOB·UAF를 그 명령에서 잡지만, 메모리·속도 비용이 커서 개발·CI 전용이다. KFENCE는 guard 페이지와 샘플링으로 비용을 거의 0으로 만들어 양산에 켜고, MTE가 있는 칩이면 HW_TAGS KASAN이 그 중간이다. kmemleak은 도달 불가 객체를, UBSAN은 C 미정의 동작을, KCSAN은 data race를(별도 커널), lockdep은 락 순서를(F4), DEBUG_OBJECTS·DEBUG_LIST·DMA_API_DEBUG는 API 사용 규칙을 지킨다. 실무 전략은 "개발 커널은 다 켜고, CI는 dmesg 0개를 게이트로, 양산은 공짜에 가까운 것만 + 리포트 수집"이다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>메모리 손상에서 원인과 증상이 왜 떨어지는지, 탐지기가 무엇을 바꾸는지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>generic KASAN의 shadow 인코딩(00, 01~07, fc/fb/f1…)과 주소 변환식을 그릴 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>inline/outline 계측이 어떤 어셈블리가 되는지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>redzone과 quarantine이 각각 무엇을 막는지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>KASAN 리포트를 위에서부터 읽고 범인 줄·할당/해제 스택·넘은 바이트 수를 찾을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>KFENCE의 guard 페이지·canary·샘플링 원리와 양산에 쓸 수 있는 이유를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>kmemleak을 수동 스캔하고 오탐을 구분할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>UBSAN이 잡는 UB 종류와 <code>UBSAN_BOUNDS</code>의 한계를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>KCSAN 리포트를 읽고 lock·marked access·<code>data_race()</code> 중 무엇으로 고칠지 고를 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>lockdep이 첫 보고 후 꺼지는 것과 CI에서의 의미를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>탐지기별 비용을 실측값(이미지·부팅·메모리·syscall)으로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>개발·CI·양산에 어떤 탐지기를 켤지 근거와 함께 제안할 수 있다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — The Kernel Address Sanitizer (KASAN): https://docs.kernel.org/dev-tools/kasan.html</li><li>docs.kernel.org — Kernel Electric-Fence (KFENCE): https://docs.kernel.org/dev-tools/kfence.html</li><li>docs.kernel.org — Kernel Memory Leak Detector: https://docs.kernel.org/dev-tools/kmemleak.html</li><li>docs.kernel.org — The Undefined Behavior Sanitizer (UBSAN): https://docs.kernel.org/dev-tools/ubsan.html</li><li>docs.kernel.org — The Kernel Concurrency Sanitizer (KCSAN): https://docs.kernel.org/dev-tools/kcsan.html</li><li>docs.kernel.org — Runtime locking correctness validator: https://docs.kernel.org/locking/lockdep-design.html</li><li>docs.kernel.org — Dynamic DMA mapping using the generic device (DMA_API_DEBUG 절): https://docs.kernel.org/core-api/dma-api.html</li><li>docs.kernel.org — The object-lifetime debugging infrastructure: https://docs.kernel.org/core-api/debug-objects.html</li><li>docs.kernel.org — KUnit: https://docs.kernel.org/dev-tools/kunit/index.html</li><li>소스: <code>mm/kasan/</code> (<code>kasan_test_c.c</code>, <code>report.c</code>, <code>generic.c</code>, <code>quarantine.c</code>), <code>mm/kfence/</code>, <code>mm/kmemleak.c</code>, <code>lib/ubsan.c</code>, <code>lib/test_ubsan.c</code>, <code>samples/kmemleak/kmemleak-test.c</code>, <code>kernel/kcsan/</code>, <code>lib/debugobjects.c</code>, <code>kernel/dma/debug.c</code> — https://elixir.bootlin.com/linux/v6.18/source</li><li>syzkaller: https://github.com/google/syzkaller</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-17_M7_ebpf_tools.html"><span class="dir">← 이전</span><span class="nm">M7. eBPF 도구 — bpftrace · bcc · libbpf CO-RE로 "재부팅 없이, printk 없이" 운영 중인 커널과 앱을 들여다보기</span></a><a class="next" href="2026-10-17_M9_userspace_debugging.html"><span class="dir">다음 →</span><span class="nm">M9. 유저스페이스 디버깅 — gdb·gdbserver 원격 디버깅, core dump, strace·ltrace, valgrind·sanitizer</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l3"><a href="#0-1-실행-환경">0.1 실행 환경</a></li><li class="l2"><a href="#1-디버그-커널이라는-물건-kernel-hacking-메뉴와-랩의-image-kasan">1. 디버그 커널이라는 물건 — Kernel hacking 메뉴와 랩의 Image-kasan</a></li><li class="l3"><a href="#1-1-예제-1-두-커널의-탐지기-옵션-비교">1.1 예제 1 — 두 커널의 탐지기 옵션 비교</a></li><li class="l3"><a href="#1-2-lockdep-이미-f4에서-돌려-봤다-요약">1.2 lockdep — 이미 F4에서 돌려 봤다 (요약)</a></li><li class="l2"><a href="#2-kasan의-원리-컴파일러가-모든-load-store-앞에-검사를-심는다">2. KASAN의 원리 — 컴파일러가 모든 load/store 앞에 검사를 심는다</a></li><li class="l3"><a href="#2-1-직관-주소마다-붙은-접근-허가-비트맵">2.1 직관 — "주소마다 붙은 접근 허가 비트맵"</a></li><li class="l3"><a href="#2-2-정의-shadow-memory-1-8-인코딩-generic-kasan">2.2 정의 — shadow memory 1:8 인코딩 (generic KASAN)</a></li><li class="l3"><a href="#2-3-예제-3-컴파일러가-심는-코드를-직접-보기">2.3 예제 3 — 컴파일러가 심는 코드를 직접 보기</a></li><li class="l3"><a href="#2-4-redzone과-quarantine-옆을-막고-해제한-건-바로-돌려주지-않는다">2.4 redzone과 quarantine — "옆을 막고, 해제한 건 바로 돌려주지 않는다"</a></li><li class="l3"><a href="#2-5-kasan의-세-가지-모드">2.5 KASAN의 세 가지 모드</a></li><li class="l2"><a href="#3-kasan-리포트-읽기-업스트림-kasan_test-kunit-스위트로">3. KASAN 리포트 읽기 — 업스트림 kasan_test KUnit 스위트로</a></li><li class="l3"><a href="#3-1-kunit과-kasan_test">3.1 KUnit과 kasan_test</a></li><li class="l3"><a href="#3-2-예제-4-kasan_test-ko-실행">3.2 예제 4 — kasan_test.ko 실행</a></li><li class="l3"><a href="#3-3-예제-5-slab-out-of-bounds-리포트-한-줄씩-읽기">3.3 예제 5 — slab-out-of-bounds 리포트 한 줄씩 읽기</a></li><li class="l3"><a href="#3-4-예제-6-범인-줄-번호로-바꾸기">3.4 예제 6 — 범인 줄 번호로 바꾸기</a></li><li class="l3"><a href="#3-5-예제-7-use-after-free-할당-해제-스택이-둘-다-나온다">3.5 예제 7 — use-after-free: 할당·해제 스택이 둘 다 나온다</a></li><li class="l3"><a href="#3-6-예제-8-스택-전역-변수-oob-컴파일러가-redzone을-직접-만든다">3.6 예제 8 — 스택·전역 변수 OOB: 컴파일러가 redzone을 직접 만든다</a></li><li class="l2"><a href="#4-kfence-양산-커널에-넣을-수-있는-샘플링-탐지기">4. KFENCE — 양산 커널에 넣을 수 있는 샘플링 탐지기</a></li><li class="l3"><a href="#4-1-직관-가끔-한-개만-mpu-가드-페이지-옆에-놓는다">4.1 직관 — "가끔 한 개만 MPU 가드 페이지 옆에 놓는다"</a></li><li class="l3"><a href="#4-2-정의">4.2 정의</a></li><li class="l3"><a href="#4-3-kfence-직접-보기">4.3 KFENCE 직접 보기</a></li><li class="l2"><a href="#5-kmemleak-커널용-참조-없는-객체-탐지-gc의-mark-단계만">5. kmemleak — 커널용 "참조 없는 객체" 탐지 (GC의 mark 단계만)</a></li><li class="l3"><a href="#5-1-직관과-정의">5.1 직관과 정의</a></li><li class="l3"><a href="#5-2-예제-11-업스트림-samples-kmemleak-kmemleak-test-c">5.2 예제 11 — 업스트림 samples/kmemleak/kmemleak-test.c</a></li><li class="l2"><a href="#6-ubsan-c의-미정의-동작을-런타임에-잡기">6. UBSAN — C의 미정의 동작을 런타임에 잡기</a></li><li class="l3"><a href="#6-1-직관과-정의">6.1 직관과 정의</a></li><li class="l3"><a href="#6-2-예제-12-업스트림-lib-test_ubsan-c">6.2 예제 12 — 업스트림 lib/test_ubsan.c</a></li><li class="l2"><a href="#7-kcsan-데이터-레이스-탐지기-가이드">7. KCSAN — 데이터 레이스 탐지기 (가이드)</a></li><li class="l3"><a href="#7-1-직관-watchpoint를-걸고-잠깐-기다린다">7.1 직관 — "watchpoint를 걸고 잠깐 기다린다"</a></li><li class="l3"><a href="#7-2-리포트-모양-가이드-이-랩에서-실행-안-함">7.2 리포트 모양 (가이드 — 이 랩에서 실행 안 함)</a></li><li class="l2"><a href="#8-그-밖의-config_debug_-자료구조-api-사용-규칙-검사기">8. 그 밖의 CONFIG_DEBUG_ — 자료구조·API 사용 규칙 검사기</a></li><li class="l3"><a href="#8-1-예제-13-디버그-옵션들의-런타임-상태-보기">8.1 예제 13 — 디버그 옵션들의 런타임 상태 보기</a></li><li class="l2"><a href="#9-무엇이-무엇을-잡나-탐지기-커버리지-지도">9. 무엇이 무엇을 잡나 — 탐지기 커버리지 지도</a></li><li class="l2"><a href="#10-비용-직접-잰-숫자">10. 비용 — 직접 잰 숫자</a></li><li class="l3"><a href="#10-1-예제-14-이미지-크기">10.1 예제 14 — 이미지 크기</a></li><li class="l3"><a href="#10-2-예제-15-부팅-시간-메모리-syscall-비용">10.2 예제 15 — 부팅 시간·메모리·syscall 비용</a></li><li class="l2"><a href="#11-어디에-무엇을-켜나-개발-ci-양산-전략">11. 어디에 무엇을 켜나 — 개발 · CI · 양산 전략</a></li><li class="l3"><a href="#11-1-ci-판정-스크립트의-핵심">11.1 CI 판정 스크립트의 핵심</a></li><li class="l3"><a href="#11-2-양산-질문에-답하기">11.2 양산 질문에 답하기</a></li><li class="l2"><a href="#12-커널-안에서는-무슨-일이-일어나나">12. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#13-embedded-실무에서-다시-보기">13. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#13-1-필드에서-1주일에-한-번-패닉-센서-키트-사례">13.1 "필드에서 1주일에 한 번 패닉" — 센서 키트 사례</a></li><li class="l3"><a href="#13-2-드라이버-remove-에서의-timer-work-정리">13.2 드라이버 remove()에서의 timer·work 정리</a></li><li class="l3"><a href="#13-3-dma-버퍼-짝">13.3 DMA 버퍼 짝</a></li><li class="l3"><a href="#13-4-bsp-커널-업그레이드-검증">13.4 BSP 커널 업그레이드 검증</a></li><li class="l2"><a href="#14-흔한-실수와-증상">14. 흔한 실수와 증상</a></li><li class="l2"><a href="#15-면접에서-이렇게-말한다">15. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#16-직접-해보기">16. 직접 해보기</a></li><li class="l2"><a href="#17-용어-사전">17. 용어 사전</a></li><li class="l2"><a href="#18-요약-체크리스트">18. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

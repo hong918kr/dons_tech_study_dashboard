@@ -1,0 +1,1331 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M4. 커널 디버거 — kgdb, JTAG + OpenOCD/Lauterbach, Magic SysRq, vmlinux 심볼</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="M/2026-10-17_M4_kernel_debugger">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">M. 디버깅 · 트레이싱 · M4. 커널 디버거 — kgdb, JTAG + OpenOCD/Lauterbach, Magic SysRq, vmlinux 심볼</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">M. 디버깅 · 트레이싱 · Debug &amp; Trace</div>
+      <h1>M4. 커널 디버거 — kgdb, JTAG + OpenOCD/Lauterbach, Magic SysRq, vmlinux 심볼</h1>
+      <div class="meta"><span>150분 읽기</span><span>1658줄</span><span>56개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: MCU JTAG 경험을 Linux 커널로 옮길 때 무엇이 달라지는지(MMU·KASLR·멀티코어·preemption·전원 도메인·시간) 말할 수 있다 · QEMU gdbstub을 JTAG처럼 써서 <code>start_kernel</code>, MMU 켜기 전 물리 주소 코드, KASLR 커널, 모듈 함수·전역 변수에 브레이크포인트/워치포인트를 걸고 <code>lx-*</code> 명령으로 태스크·모듈·per-CPU 변수를 볼 수 있다 · kgdb/kdb를 두 번째 UART와 콘솔 UART에서 띄우고 SysRq-g·serial BREAK로 진입할 수 있다 · "인터럽트 핸들러에서 멈춘 보드"를 디버거로 붙어 찾고, 멈춰 있던 동안 생기는 watchdog·시계 부작용을 설명할 수 있다 <strong>왜 필요한가</strong>: bring-up과 "보드가 그냥 얼었다" 장애에서 로그가 아무것도 안 남을 때 마지막 수단이 디버거다. 면접에서는 "JTAG만 있는 보드에서 인터럽트 핸들러 hang을 어떻게 잡나요?", "kgdb와 JTAG의 차이는?", "Magic SysRq로 뭘 볼 수 있나요?"로 나온다 <strong>Don 기준 난이도</strong>: JTAG halt·브레이크포인트·워치포인트·레지스터/메모리 보기·리셋 직후 디버깅은 SSD 컨트롤러와 RF 칩에서 매일 했다 / 새로 배울 부분은 가상 주소와 KASLR 위의 심볼, 실행 중에 올라오는 모듈의 심볼, 커널 안에 사는 디버거(kgdb), CPU를 세웠을 때 OS가 받는 부작용, Cortex-A CoreSight 쪽 설정 <strong>선행 노트</strong>: C6 §2(gdb로 커널 첫 명령 보기), E3(모듈), M1(printk·콘솔), M3(Oops 해독 — §6 <code>add-symbol-file</code>과 섹션 주소, KASLR) — L5(secure boot의 JTAG 잠금), L7(kdump·pstore), M11(scope·LA 연계)와 함께 읽으면 좋다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>SSD 펌웨어에서 Don이 제일 믿던 도구는 JTAG였다. 코어를 세우고, PC와 스택을 보고, SRAM의 큐 상태를 덤프하고, 워치포인트로 "누가 이 디스크립터를 덮어썼나"를 잡았다. Embedded Linux에서도 그 도구는 그대로 있다. 다만 <strong>세우는 대상이 운영체제</strong>라는 점이 다르다. 코어를 세우면 그 위의 스케줄러, 타이머, RCU, watchdog, 다른 코어가 모두 영향을 받는다. 그리고 커널은 가상 주소에서 돌고, 부팅마다 위치가 바뀌고(KASLR), 드라이버는 부팅 뒤에 모듈로 올라온다.</p>
+<p>그래서 Linux 커널 디버깅 도구는 사다리처럼 생각하면 좋다. 위쪽은 커널이 살아 있어야 쓸 수 있고 싸다. 아래로 갈수록 커널의 협조가 덜 필요하지만 장비와 설정이 더 든다.</p>
+<figure class="chart"><svg viewBox="0 0 660 360" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="20" width="400" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="32" y="40" font-size="13">1. printk · dynamic debug · ftrace (M1, M5)</text>
+  <text x="32" y="60" font-size="12">커널이 살아 있어야 한다 · 고치고 다시 빌드·부팅</text>
+  <rect x="65" y="82" width="400" height="50" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="77" y="102" font-size="13">2. Magic SysRq (t, w, l, m, p)</text>
+  <text x="77" y="122" font-size="12">IRQ·콘솔이 살아 있으면 상태 덤프 · 멈추지는 않는다</text>
+  <rect x="110" y="144" width="400" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="122" y="164" font-size="13">3. kgdb / kdb (kgdboc)</text>
+  <text x="122" y="184" font-size="12">커널 안의 gdb stub · 폴링 UART 필요 · 모든 CPU 정지</text>
+  <rect x="155" y="206" width="400" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="167" y="226" font-size="13">4. QEMU gdbstub (-s -S) — 이 랩의 JTAG</text>
+  <text x="167" y="246" font-size="12">에뮬레이터가 CPU를 세운다 · 커널 협조 불필요</text>
+  <rect x="200" y="268" width="400" height="50" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="212" y="288" font-size="13">5. JTAG/SWD + OpenOCD · TRACE32 · J-Link · ETM</text>
+  <text x="212" y="308" font-size="12">실리콘 debug logic이 코어를 세운다 · 리셋 첫 명령부터</text>
+  <line x1="630" y1="25" x2="630" y2="312" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah1)"/>
+  <text x="20" y="348" font-size="12">아래로 갈수록: 커널 협조가 덜 필요하고, 장비·설정은 더 필요하다</text>
+</svg></figure>
+<p>그림 1 — 커널 디버깅 도구의 사다리. 위에서부터 시도하고, 위 단계가 안 통할 때(로그 없음, 콘솔 먹통, IRQ 마스크 상태로 hang) 아래로 내려간다.</p>
+<p>이 노트의 흐름은 다음과 같다.</p>
+<ul><li>§1: MCU JTAG과 Linux 커널 디버깅이 무엇이 다른가 (표 하나로 정리)</li><li>§2~§3: QEMU gdbstub을 JTAG 대용으로 쓰기 — <code>start_kernel</code>, MMU 켜기 전 물리 주소, KASLR, VA/PA 메모리, <code>lx-*</code> 명령</li><li>§4: 모듈 디버깅 — 심볼 로딩, 워치포인트로 메모리 오염 범인 잡기, 이 랩에서 만난 함정</li><li>§5: kgdb와 kdb — 구조, 두 번째 UART, SysRq-g, serial BREAK</li><li>§6: Magic SysRq</li><li>§7: 실전 — 인터럽트 핸들러에서 hang 난 CPU를 나중에 붙어서 찾기</li><li>§8: 멈추면 생기는 일 — 시계, watchdog, 스텝</li><li>§9: 실제 보드의 JTAG — CoreSight, OpenOCD, TRACE32 (가이드)</li></ul>
+<p>실행 환경: Mac의 Lima VM <code>elinux</code>(호스트 커널 7.0, gdb 17.1, QEMU 10.2.1) 안에서 QEMU <code>virt</code> 게스트를 TCG로 돌린다. 게스트 커널은 랩의 <code>Image-trace</code>(6.18.55-trace, KGDB+KDB+kgdboc, <code>CONFIG_GDB_SCRIPTS=y</code>, <code>vmlinux-trace</code>는 DWARF5 full debug info). VM을 17명이 같이 쓰는 중이라 부하가 높다. <strong>이 노트의 모든 시간 값은 TCG 에뮬레이션 + 공유 부하에서 잰 값이라 실제 하드웨어 숫자가 아니다.</strong></p>
+<hr>
+<h2 id="1-mcu-jtag에서-linux-커널로-무엇이-달라지나">1. MCU JTAG에서 Linux 커널로 — 무엇이 달라지나<a class="anchor" href="#1-mcu-jtag에서-linux-커널로-무엇이-달라지나" aria-label="link">#</a></h2>
+<h3 id="1-1-직관">1.1 직관<a class="anchor" href="#1-1-직관" aria-label="link">#</a></h3>
+<p>Cortex-R/M 펌웨어는 "주소 = 물리 주소, 이미지 = 한 덩어리, 코어 = 내 코드만 돈다"였다. <code>.map</code> 파일의 주소에 그대로 브레이크포인트를 걸면 됐다. Linux 커널은 이 세 가지가 다 깨진다.</p>
+<h3 id="1-2-차이-정리">1.2 차이 정리<a class="anchor" href="#1-2-차이-정리" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>주제</th><th>MCU 펌웨어 (Don이 하던 것)</th><th>Linux 커널 (Cortex-A)</th><th>디버거에서 하는 일</th></tr></thead><tbody><tr><td>주소</td><td>물리 주소 하나. <code>.map</code> 그대로</td><td>커널은 <code>0xffff8000...</code> 가상 주소. MMU 켜기 전 <code>head.S</code>는 물리 주소에서 돈다</td><td>심볼 파일을 오프셋 주고 다시 로드(§3.2). 물리 메모리는 <code>monitor xp</code>, <code>lx-virt_to_phys</code></td></tr><tr><td>이미지 위치</td><td>링크 주소 고정</td><td>KASLR(<code>CONFIG_RANDOMIZE_BASE</code>)로 부팅마다 이동</td><td><code>nokaslr</code> 부팅, 또는 런타임 레지스터로 오프셋 계산(§3.3)</td></tr><tr><td>코드 묶음</td><td>이미지 하나</td><td><code>vmlinux</code> + 부팅 뒤 올라오는 <code>.ko</code> 모듈</td><td>모듈마다 섹션 주소를 알려 줘야 한다(§4)</td></tr><tr><td>코어</td><td>대개 1~2개, 각자 펌웨어</td><td>SMP. 한 코어를 세워도 다른 코어는 돈다(디버거 설정에 따라)</td><td>gdb에서 CPU = thread. <code>info threads</code>, <code>thread N</code></td></tr><tr><td>무엇이 돌고 있나</td><td>내 태스크들</td><td>수백 개 task, kthread, IRQ, softirq</td><td><code>$lx_current()</code>, <code>lx-ps</code>, <code>bt</code>로 "지금 누구 문맥인가"부터</td></tr><tr><td>시간</td><td>타이머 내 맘대로</td><td>스케줄러 틱, hrtimer, RCU, softlockup/hardlockup/workqueue watchdog</td><td>멈춘 시간만큼 경고가 쏟아질 수 있다(§8)</td></tr><tr><td>캐시</td><td>대개 단순</td><td>D-cache, I-cache, 여러 코어 coherency</td><td>디버거가 쓴 소프트웨어 브레이크포인트가 I-cache에 반영되는지 — 디버거가 처리하지만 메모리 직접 수정 때는 유의</td></tr><tr><td>전원</td><td>코어 항상 켜짐</td><td>cpuidle이 코어 전원을 끈다(PSCI)</td><td>꺼진 코어는 debug 레지스터도 꺼진다. <code>cpuidle.off=1</code>로 테스트(§9)</td></tr><tr><td>보안</td><td>대개 열려 있음</td><td>TF-A가 EL3, secure world. 양산품은 JTAG fuse 잠금</td><td>secure debug 권한(SPIDEN), L5</td></tr></tbody></table></div>
+<h3 id="1-3-don-경험과-연결">1.3 Don 경험과 연결<a class="anchor" href="#1-3-don-경험과-연결" aria-label="link">#</a></h3>
+<p>SSD 컨트롤러에서 "코어 하나만 세우고 다른 코어(호스트 인터페이스 쪽)는 계속 돌게" 했다가 호스트 타임아웃이 난 경험이 있다면, Linux에서 생기는 문제도 같은 종류다. 커널에서는 이게 RCU stall, watchdog lockup 경고, 네트워크 타임아웃으로 나타난다. 반대로 "모든 코어를 세운다"는 것은 시계까지 세우지 않으면 깨어났을 때 시간이 점프한다. §8에서 실제로 본다.</p>
+<hr>
+<h2 id="2-랩-준비-vmlinux-scripts-gdb-nokaslr">2. 랩 준비 — <code>vmlinux</code>, <code>scripts/gdb</code>, <code>nokaslr</code><a class="anchor" href="#2-랩-준비-vmlinux-scripts-gdb-nokaslr" aria-label="link">#</a></h2>
+<h3 id="2-1-세-가지-재료">2.1 세 가지 재료<a class="anchor" href="#2-1-세-가지-재료" aria-label="link">#</a></h3>
+<p>커널을 소스 수준에서 디버깅하려면 셋이 필요하다.</p>
+<ol><li><strong><code>vmlinux</code></strong>: 압축 안 된 ELF. <code>Image</code>는 이것을 <code>objcopy -O binary</code>한 것이라 심볼이 없다. 디버거에는 <code>vmlinux</code>를 준다(M3).</li><li><strong>DWARF 디버그 정보</strong>: <code>CONFIG_DEBUG_INFO_DWARF5=y</code> 같은 설정. <code>vmlinux-trace</code>는 full DWARF5로 약 600 MB다.</li><li><strong><code>scripts/gdb</code> 헬퍼</strong> (<code>CONFIG_GDB_SCRIPTS=y</code>): <code>lx-dmesg</code>, <code>lx-ps</code>, <code>lx-lsmod</code>, <code>lx-symbols</code>, <code>$lx_current()</code> 같은 Python 확장. 빌드 트리에 <code>vmlinux-gdb.py</code>와 <code>scripts/gdb/linux/constants.py</code>(커널 헤더에서 뽑은 상수)가 생겨야 쓸 수 있다.</li></ol>
+<h3 id="2-2-예제-1-scripts-gdb-헬퍼를-내-디렉터리에-빌드하기">2.2 예제 1 — <code>scripts/gdb</code> 헬퍼를 내 디렉터리에 빌드하기<a class="anchor" href="#2-2-예제-1-scripts-gdb-헬퍼를-내-디렉터리에-빌드하기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 랩 빌드 트리(<code>linux-build-trace</code>)에는 <code>CONFIG_GDB_SCRIPTS=y</code>인데도 <code>vmlinux-gdb.py</code>가 없었다(<code>Image modules</code> 타깃만 빌드해서 <code>scripts_gdb</code> 타깃이 안 돌았다). 랩은 읽기 전용이니 <code>.config</code>만 복사해서 내 출력 디렉터리에 <code>scripts_gdb</code>만 만든다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>ls /var/lab/out/linux-build-trace/vmlinux-gdb.py
+mkdir -p /var/tmp/M4/kb &amp;&amp; cp /var/lab/build/linux-trace/.config /var/tmp/M4/kb/
+cd /var/lab/src/linux-6.18.55 &amp;&amp; make O=/var/tmp/M4/kb -j2 olddefconfig scripts_gdb 2&gt;&amp;1 | tail -2
+ln -sf /var/lab/out/vmlinux-trace /var/tmp/M4/kb/vmlinux
+ls -la /var/tmp/M4/kb/vmlinux-gdb.py</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>ls: cannot access '/var/lab/out/linux-build-trace/vmlinux-gdb.py': No such file or directory
+  GEN     scripts/gdb/linux/constants.py
+make[1]: Leaving directory '/var/tmp/M4/kb'
+lrwxrwxrwx 1 donh donh 53 Oct 17 23:43 /var/tmp/M4/kb/vmlinux-gdb.py -&gt; /var/lab/src/linux-6.18.55/scripts/gdb/vmlinux-gdb.py</code></pre></figure>
+<p>출력에서 볼 것: 약 47초(부하 상태 TCG가 아닌 VM 호스트 빌드)로 끝났다. <code>vmlinux-gdb.py</code>는 소스 쪽 파일로의 심볼릭 링크이고, 자기 위치 기준 <code>scripts/gdb/linux/</code>에서 모듈을 import하므로 <strong>링크가 있는 디렉터리</strong>(<code>/var/tmp/M4/kb</code>)에 <code>constants.py</code>가 있어야 한다. 이후 gdb에서는 <code>source /var/tmp/M4/kb/vmlinux-gdb.py</code>로 읽는다(자동 로드는 gdb의 <code>auto-load safe-path</code> 설정이 필요해서 명시적으로 <code>source</code> 했다).</p>
+<h3 id="2-3-이-랩의-실행-패턴">2.3 이 랩의 실행 패턴<a class="anchor" href="#2-3-이-랩의-실행-패턴" aria-label="link">#</a></h3>
+<p>모든 gdbstub 예제는 같은 틀을 쓴다. QEMU를 <code>-S</code>(시작하자마자 정지) + <code>-gdb tcp::12404</code>(gdb 서버)로 띄우고, gdb를 batch 모드로 붙인다. <code>-s</code>는 <code>-gdb tcp::1234</code>의 줄임말이다. 다른 작성자와 포트가 겹치지 않게 12404를 썼다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># /Users/donh/.elinux_scratch/M4/run_e.sh &lt;gdb스크립트&gt; &lt;태그&gt; "&lt;커널 인자&gt;"
+cd /var/tmp/M4; L=/var/lab/out; G=$1; T=$2; A=$3; shift 3
+(timeout 400 qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -m 1G -nographic \
+   -kernel $L/Image-trace -initrd i.gz -append "console=ttyAMA0 $A" \
+   -S -gdb tcp::12404 "$@" &gt; q_$T.log 2&gt;&amp;1 &amp;)
+sleep 1; cd kb; gdb -q -batch -x $G ./vmlinux &gt; ../$T.out 2&gt;&amp;1; cat ../$T.out</code></pre></figure>
+<p><code>i.gz</code>는 랩 BusyBox initramfs를 복사해 이 노트의 모듈(<code>m4_bug.ko</code>, <code>m4_hang.ko</code>)과 게스트 스크립트를 넣은 것이다. <code>LAB_CMD=</code>로 게스트 스크립트 하나를 실행한다.</p>
+<p>batch 모드 gdb에서 "달리는 커널을 몇 초 뒤에 세우기"(JTAG의 Halt 버튼)는 <code>shell (sleep 40; kill -INT $PPID) &amp;</code> 다음 <code>continue</code>로 했다. gdb가 SIGINT를 받으면 타깃에 interrupt를 보낸다. (<code>continue &amp;</code> + <code>interrupt</code>는 batch 모드에서 비동기 이벤트가 처리되지 않아 실패했다.)</p>
+<hr>
+<h2 id="3-qemu-gdbstub-이-랩의-jtag">3. QEMU gdbstub = 이 랩의 JTAG<a class="anchor" href="#3-qemu-gdbstub-이-랩의-jtag" aria-label="link">#</a></h2>
+<h3 id="3-1-gdbstub-kgdb-jtag-누가-cpu를-세우나">3.1 gdbstub, kgdb, JTAG — 누가 CPU를 세우나<a class="anchor" href="#3-1-gdbstub-kgdb-jtag-누가-cpu를-세우나" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg">
+  <rect x="15" y="20" width="200" height="36" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="115" y="43" font-size="14" text-anchor="middle">QEMU gdbstub</text>
+  <rect x="230" y="20" width="200" height="36" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="330" y="43" font-size="14" text-anchor="middle">kgdb / kdb</text>
+  <rect x="445" y="20" width="200" height="36" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="545" y="43" font-size="14" text-anchor="middle">JTAG / SWD</text>
+  <rect x="15" y="70" width="200" height="34" fill="none" stroke="#e08a3c"/>
+  <text x="25" y="92" font-size="12">멈추는 주체: QEMU 프로세스</text>
+  <rect x="15" y="114" width="200" height="34" fill="none" stroke="#e08a3c"/>
+  <text x="25" y="136" font-size="12">커널 설정: 필요 없음</text>
+  <rect x="15" y="158" width="200" height="34" fill="none" stroke="#e08a3c"/>
+  <text x="25" y="180" font-size="12">시간: 가상 시계도 멈춤</text>
+  <rect x="15" y="202" width="200" height="34" fill="none" stroke="#e08a3c"/>
+  <text x="25" y="224" font-size="12">실보드: 없음 (랩 전용)</text>
+  <rect x="230" y="70" width="200" height="34" fill="none" stroke="#4a7bd0"/>
+  <text x="240" y="92" font-size="12">멈추는 주체: 커널 자신</text>
+  <rect x="230" y="114" width="200" height="34" fill="none" stroke="#4a7bd0"/>
+  <text x="240" y="136" font-size="12">커널 설정: KGDB + 폴링 UART</text>
+  <rect x="230" y="158" width="200" height="34" fill="none" stroke="#4a7bd0"/>
+  <text x="240" y="180" font-size="12">시간: 카운터는 계속 간다</text>
+  <rect x="230" y="202" width="200" height="34" fill="none" stroke="#4a7bd0"/>
+  <text x="240" y="224" font-size="12">실보드: UART만 있으면 됨</text>
+  <rect x="445" y="70" width="200" height="34" fill="none" stroke="#d0564a"/>
+  <text x="455" y="92" font-size="12">멈추는 주체: 코어 자체</text>
+  <rect x="445" y="114" width="200" height="34" fill="none" stroke="#d0564a"/>
+  <text x="455" y="136" font-size="12">커널 설정: 심볼만 있으면</text>
+  <rect x="445" y="158" width="200" height="34" fill="none" stroke="#d0564a"/>
+  <text x="455" y="180" font-size="12">시간: SoC 설정에 따름</text>
+  <rect x="445" y="202" width="200" height="34" fill="none" stroke="#d0564a"/>
+  <text x="455" y="224" font-size="12">실보드: 프로브와 핀 필요</text>
+  <text x="15" y="272" font-size="13">공통: 호스트의 gdb + vmlinux 심볼 + scripts/gdb(lx-*)는 그대로 쓴다</text>
+</svg></figure>
+<p>그림 2 — 세 가지 "커널 세우기"의 비교. gdbstub과 JTAG는 커널 바깥에서 세우고, kgdb는 커널이 자기 자신을 세운다. 그래서 kgdb는 커널이 망가지면(IRQ 마스크 hang, 콘솔 드라이버 고장) 못 쓴다.</p>
+<p>QEMU의 gdbstub은 gdb의 Remote Serial Protocol(RSP — gdb가 원격 타깃과 주고받는 텍스트 패킷 규약) 서버가 QEMU 안에 들어 있는 것이다. OpenOCD가 JTAG 프로브 앞에서 하던 역할을 QEMU가 직접 한다. 각 vCPU는 gdb에서 thread 하나로 보인다. 그래서 JTAG 연습 대용으로 아주 좋다. 다만 부작용(시간)은 실보드와 다르다(§8).</p>
+<h3 id="3-2-예제-2-start_kernel에서-세우고-부팅-뒤-halt해서-lx-로-둘러보기">3.2 예제 2 — <code>start_kernel</code>에서 세우고, 부팅 뒤 Halt해서 <code>lx-*</code>로 둘러보기<a class="anchor" href="#3-2-예제-2-start_kernel에서-세우고-부팅-뒤-halt해서-lx-로-둘러보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 리셋 상태에서 붙어 <code>start_kernel</code>에 하드웨어 브레이크포인트를 걸고, 그다음 부팅이 끝난 커널을 40초 뒤 세워서 CPU별 상태, 현재 task, per-CPU 변수, 모듈, dmesg, 디바이스 목록을 gdb 안에서 읽는다. 게스트는 <code>m4_bug.ko</code>를 올리고 잔다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># e1.gdb
+set pagination off
+set confirm off
+target remote :12404
+source /var/tmp/M4/kb/vmlinux-gdb.py
+hbreak start_kernel
+continue
+bt
+info registers SCTLR_EL1 TTBR1_EL1
+delete
+shell (sleep 40; kill -INT $PPID) &amp;
+continue
+info threads
+lx-version
+p $lx_current().comm
+p $lx_current().pid
+lx-cpus
+p $lx_per_cpu(runqueues, 0).nr_running
+p $lx_per_cpu(runqueues, 1).nr_running
+p $lx_per_cpu(runqueues, 1).curr-&gt;comm
+info registers TTBR0_EL1 TTBR1_EL1
+lx-lsmod
+pipe lx-ps | head -6
+pipe lx-dmesg | tail -4
+pipe lx-device-list-bus platform | head -6
+monitor quit</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>run_e.sh e1.gdb e1 "nokaslr LAB_CMD=insmod~/m4_bug.ko;sleep~600"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0x0000000040000000 in ?? ()
+Hardware assisted breakpoint 1 at 0xffff8000833709b0: file /var/lab/src/linux-6.18.55/init/main.c, line 871.
+
+Thread 1 hit Breakpoint 1, start_kernel () at /var/lab/src/linux-6.18.55/init/main.c:871
+871	{
+#0  start_kernel () at /var/lab/src/linux-6.18.55/init/main.c:871
+#1  0xffff800083379e30 in __primary_switched () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/head.S:246
+Backtrace stopped: previous frame identical to this frame (corrupt stack?)
+SCTLR_EL1      0x200000034f4d91d   144115188964317469
+TTBR1_EL1      0x43567000          1129738240
+
+Thread 2 received signal SIGINT, Interrupt.
+[Switching to Thread 1.2]
+cpu_do_idle () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/idle.c:32
+32		arm_cpuidle_restore_irq_context(&amp;context);
+  Id   Target Id                    Frame 
+  1    Thread 1.1 (CPU#0 [halted ]) cpu_do_idle () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/idle.c:32
+* 2    Thread 1.2 (CPU#1 [halted ]) cpu_do_idle () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/idle.c:32
+Linux version 6.18.55-trace (donh@lima-elinux) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #1 SMP PREEMPT Sat Oct 17 23:37:47 PDT 2026
+$1 = "swapper/1\000\000\000\000\000\000"
+$2 = 0
+Possible CPUs : [0, 1]
+Present CPUs  : [0, 1]
+Online CPUs   : [0, 1]
+Active CPUs   : [0, 1]
+$3 = 0
+$4 = 0
+$5 = "swapper/1\000\000\000\000\000\000"
+TTBR0_EL1      0x4531a000          1160880128
+TTBR1_EL1      0x34000043567000    14636699918692352
+Address            Module                  Size  Used by
+0xffff80007bfa0000 m4_bug                 12288  0
+      TASK          PID    COMM
+0xffff8000837a8b40   0   swapper/0
+0xffff0000046a8000   1   init
+0xffff0000046aa300   2   kthreadd
+0xffff0000046ac600   3   pool_workqueue_
+0xffff000004730000   4   kworker/R-rcu_g
+[    8.289780]     LAB_CMD=insmod~/m4_bug.ko;sleep~600
+[    8.948702] m4_bug: loading out-of-tree module taints kernel.
+[    8.950250] m4_bug: module verification failed: signature and/or required key missing - tainting kernel
+[    9.007748] m4_bug: loaded, m4_fill=ffff80007bfa0068 guard@ffff80007bfa2030
+dev psci:	0xffff000004417410
+dev platform-bus@c000000:	0xffff000004417810
+dev 9020000.fw-cfg:	0xffff000004417c10
+dev a000000.virtio_mmio:	0xffff000006068010
+dev a000200.virtio_mmio:	0xffff000006068410
+dev a000400.virtio_mmio:	0xffff000006068810</code></pre></figure>
+<p>(마지막 <code>monitor quit</code>이 QEMU를 끝내면서 나오는 "Remote communication error" 한 줄은 생략했다. 포인터 값은 실행마다 다르다.)</p>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong>첫 줄 <code>0x40000000</code></strong>: 리셋 직후 PC. QEMU가 RAM 앞에 써 둔 작은 부트 stub이다(C6 §2.3). JTAG로 리셋 상태에서 붙은 것과 같다.</li><li><strong><code>hbreak</code>를 쓴 이유</strong>: 붙은 시점(PC <code>0x40000000</code>)에는 MMU가 꺼져 있어서 <code>start_kernel</code>의 가상 주소에 BRK를 써 넣을 메모리 매핑이 아직 없다. 하드웨어 브레이크포인트(디버그 레지스터의 주소 비교기)는 메모리를 안 건드리고, 나중에 CPU가 그 가상 주소를 실행하는 순간 맞는다.</li><li><strong><code>start_kernel</code> 시점 TTBR1_EL1 = 0x43567000</strong>(물리 주소의 페이지 테이블), 부팅 후 TTBR1 = 0x34000043567000. 위쪽 비트(bit 48 이상)는 ASID다. 커널 공간 페이지 테이블 base 자체는 같다(같은 <code>swapper_pg_dir</code>).</li><li><strong>CPU = thread</strong>: 두 vCPU 모두 <code>cpu_do_idle</code>(WFI)에 있다. 게스트가 <code>sleep 600</code> 중이니 할 일이 없다. <code>$lx_current()</code>는 <strong>선택된 thread(CPU)의</strong> <code>current</code>다 — CPU1의 idle task <code>swapper/1</code>, PID 0. 런큐 길이 0과 <code>curr-&gt;comm</code>이 같은 이야기를 한다.</li><li><strong><code>lx-dmesg</code></strong>: 콘솔이 죽은 보드에서도 커널 로그 버퍼를 메모리에서 직접 읽는다. M3 §끝에서 "로그가 아예 없다면 JTAG로 <code>__log_buf</code>를 읽는다"고 한 것이 바로 이것이다.</li><li><strong><code>lx-device-list-bus platform</code></strong>: 드라이버 모델(G 모듈)의 <code>struct device</code> 목록을 메모리에서 걷는다. 장치가 probe 됐는지 sysfs 없이 확인할 수 있다.</li></ul>
+<h3 id="3-3-예제-3-mmu-켜기-전-코드-물리-주소로-심볼-다시-로드하기">3.3 예제 3 — MMU 켜기 전 코드: 물리 주소로 심볼 다시 로드하기<a class="anchor" href="#3-3-예제-3-mmu-켜기-전-코드-물리-주소로-심볼-다시-로드하기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>head.S</code>의 앞부분은 MMU가 꺼진 상태에서 <strong>물리 주소</strong>로 돈다. 그런데 <code>vmlinux</code>의 심볼은 전부 가상 주소다. JTAG에서 하던 대로 "같은 ELF를 물리 로드 주소만큼 옮겨서" 다시 로드하면 MMU 전 코드에도 심볼 이름으로 브레이크포인트를 걸 수 있다. 오프셋 = 물리 로드 주소 − 링크 주소 = <code>0x40200000 − 0xffff800080000000</code> = (64비트로 감아서) <code>0x7fffc0200000</code>.</p>
+<figure class="code"><span class="lang">text</span><pre><code># e1b.gdb
+set pagination off
+set confirm off
+target remote :12404
+# 1) virtual-address breakpoint before the MMU is on: would never hit early
+hbreak primary_entry
+info breakpoints
+delete
+# 2) reload the same vmlinux shifted to its *physical* load address
+symbol-file
+symbol-file ./vmlinux -o 0x7fffc0200000
+hbreak primary_entry
+hbreak __primary_switch
+continue
+printf "pc=%#lx  SCTLR_EL1.M=%d\n", $pc, $SCTLR_EL1 &amp; 1
+continue
+printf "pc=%#lx  SCTLR_EL1.M=%d\n", $pc, $SCTLR_EL1 &amp; 1
+x/3i $pc
+# 3) step over __enable_mmu
+nexti 3
+printf "after bl __enable_mmu: pc=%#lx SCTLR_EL1.M=%d TTBR1=%#lx\n", $pc, $SCTLR_EL1 &amp; 1, $TTBR1_EL1
+# 4) back to virtual symbols for the rest of the boot
+delete
+symbol-file ./vmlinux
+hbreak __primary_switched
+continue
+printf "pc=%#lx\n", $pc
+monitor xp /2gx 0x40200000
+x/2gx 0xffff800080000000
+monitor quit</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0x0000000040000000 in ?? ()
+Hardware assisted breakpoint 1 at 0xffff8000833630a0
+Num     Type           Disp Enb Address            What
+1       hw breakpoint  keep y   0xffff8000833630a0 &lt;primary_entry&gt;
+Hardware assisted breakpoint 2 at 0x435630a0
+Hardware assisted breakpoint 3 at 0x435635e4
+
+Thread 1 hit Breakpoint 2, 0x00000000435630a0 in primary_entry ()
+pc=0x435630a0  SCTLR_EL1.M=0
+
+Thread 1 hit Breakpoint 3, 0x00000000435635e4 in __primary_switch ()
+pc=0x435635e4  SCTLR_EL1.M=0
+=&gt; 0x435635e4 &lt;__primary_switch+4&gt;:	adrp	x1, 0x43566000
+   0x435635e8 &lt;__primary_switch+8&gt;:	adrp	x2, 0x43690000
+   0x435635ec &lt;__primary_switch+12&gt;:	bl	0x43563570 &lt;__enable_mmu&gt;
+0x00000000435635f0 in __primary_switch ()
+after bl __enable_mmu: pc=0x435635f0 SCTLR_EL1.M=1 TTBR1=0x43566000
+Hardware assisted breakpoint 4 at 0xffff800083379da8: file /var/lab/src/linux-6.18.55/arch/arm64/kernel/head.S, line 220.
+
+Thread 1 hit Breakpoint 4, __primary_switched () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/head.S:220
+220	SYM_FUNC_START_LOCAL(__primary_switched)
+pc=0xffff800083379da8
+0000000040200000: 0x14cd8c27fa405a4d 0x0000000000000000
+0xffff800080000000 &lt;_text&gt;:	0x14cd8c27fa405a4d	0x0000000000000000</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>1번 브레이크포인트는 가상 주소 <code>0xffff8000833630a0</code>에 걸렸다. MMU가 꺼진 동안 PC는 <code>0x435630a0</code>이므로 <strong>절대 안 맞는다</strong>(지웠으니 출력에는 안 나왔지만, 그대로 두면 그냥 지나간다). Cortex-M에서 하던 대로 <code>.map</code> 주소에 걸면 안 되는 첫 번째 장면이다.</li><li>오프셋을 준 <code>symbol-file</code>로 같은 심볼이 <code>0x435630a0</code>(물리)로 바뀌었고, 거기서 멈췄다. SCTLR_EL1.M = 0 → MMU off 확인.</li><li><code>__primary_switch</code>는 +4에서 멈췄다. 함수 첫 명령은 BTI 랜딩 패드(<code>bti c</code>)라서 gdb가 프롤로그 다음에 걸었다.</li><li><code>bl __enable_mmu</code>를 <code>nexti</code>로 넘기자 SCTLR_EL1.M = 1. 그런데 PC는 여전히 <code>0x435635f0</code>(물리)다. idmap(가상 = 물리인 임시 매핑) 위에서 돌기 때문이다. 그 뒤 <code>__pi_early_map_kernel</code>이 커널을 가상 주소에 매핑하고 <code>br x8</code>로 <code>__primary_switched</code>(가상)로 뛴다. 원래 심볼로 돌아와서 거기서 멈췄다.</li><li>마지막 두 줄: 같은 8바이트(<code>MZ</code> 헤더 <code>0x...5a4d</code>)를 물리 주소 <code>0x40200000</code>(QEMU 모니터 <code>xp</code>)와 가상 주소 <code>_text</code>(gdb <code>x</code>)로 읽었다. JTAG에서 AXI-AP로 물리 메모리를 읽는 것과 코어를 통해 가상 주소로 읽는 것의 차이다(§9).</li></ul>
+<h3 id="3-4-예제-4-kaslr-커널에-붙기-vbar_el1로-오프셋-구하기">3.4 예제 4 — KASLR 커널에 붙기: VBAR_EL1로 오프셋 구하기<a class="anchor" href="#3-4-예제-4-kaslr-커널에-붙기-vbar_el1로-오프셋-구하기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>nokaslr</code> 없이 부팅하면 <code>vmlinux</code>의 주소가 다 틀린다. 6.18의 <code>lx-symbols</code>는 KASLR 오프셋을 s390에서만 자동으로 구한다(<code>scripts/gdb/linux/symbols.py</code>의 <code>get_kerneloffset()</code>이 s390 분기뿐). arm64에서는 직접 구해야 한다. 런타임 예외 벡터 주소 <code>VBAR_EL1</code>에서 <code>vmlinux</code>의 <code>vectors</code> 주소를 빼면 오프셋이다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># e1c.gdb
+set pagination off
+set confirm off
+target remote :12404
+hbreak start_kernel
+shell (sleep 45; kill -INT $PPID) &amp;
+continue
+info symbol $pc
+printf "VBAR_EL1=%#lx  &amp;vectors(vmlinux)=%#lx\n", $VBAR_EL1, &amp;vectors
+python off = int(gdb.parse_and_eval("$VBAR_EL1")) - int(gdb.parse_and_eval("(unsigned long)&amp;vectors")); gdb.execute("set $kaslr = %d" % off)
+printf "KASLR offset = %#lx\n", $kaslr
+delete
+symbol-file
+eval "symbol-file ./vmlinux -o %#lx", $kaslr
+info symbol $pc
+bt 3
+source /var/tmp/M4/kb/vmlinux-gdb.py
+lx-lsmod
+monitor quit</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0x0000000040000000 in ?? ()
+Hardware assisted breakpoint 1 at 0xffff8000833709b0: file /var/lab/src/linux-6.18.55/init/main.c, line 871.
+
+Thread 2 received signal SIGINT, Interrupt.
+[Switching to Thread 1.2]
+0xffffd3a6fa101d48 in ?? ()
+No symbol matches $pc.
+VBAR_EL1=0xffffd3a6f8a11000  &amp;vectors(vmlinux)=0xffff800080011000
+KASLR offset = 0x53a678a00000
+cpu_do_idle + 8 in section .text
+#0  cpu_do_idle () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/idle.c:32
+#1  0xffffd3a6fa101d60 in arch_cpu_idle () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/idle.c:44
+#2  0xffffd3a6fa101f10 in default_idle_call () at /var/lab/src/linux-6.18.55/kernel/sched/idle.c:122
+Address            Module                  Size  Used by
+0xffffd3a6e6c4d000 m4_bug                 12288  0</code></pre></figure>
+<p>게스트 콘솔 로그에서:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.000000][    T0] KASLR enabled
+[    0.000000][    T0] CPU features: kernel page table isolation forced ON by KASLR</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>hbreak start_kernel</code>은 <strong>한 번도 안 걸렸다</strong>. arm64는 <code>start_kernel</code> 전에(<code>__pi_early_map_kernel</code>에서) 커널을 무작위 주소로 옮기기 때문에 링크 주소의 <code>start_kernel</code>은 실행되지 않는다. 45초 뒤 강제로 세웠을 때 PC <code>0xffffd3a6fa101d48</code>은 "모르는 주소"였다.</li><li>오프셋 <code>0x53a678a00000</code>(2 MB 정렬)을 주고 <code>symbol-file</code>을 다시 읽자 같은 PC가 <code>cpu_do_idle + 8</code>이 됐고 소스 줄까지 나온다. 이후 <code>lx-lsmod</code>도 동작한다. 모듈 영역도 KASLR과 함께 옮겨졌다(<code>0xffffd3a6e6c4d000</code>).</li><li>실무 팁: 커널 쪽 협조가 가능하면 <code>/proc/kallsyms</code>의 <code>_text</code>와 <code>System.map</code>의 <code>_text</code> 차이로도 같은 값이 나온다. 디버깅용 부팅이면 그냥 <code>nokaslr</code>를 준다(M3 §7).</li></ul>
+<p>QEMU virt는 <code>-kernel</code> 부팅에서 DT의 <code>/chosen/kaslr-seed</code>를 채워 주므로 이 랩에서도 KASLR이 실제로 켜진다. 실보드는 부트로더가 seed를 넣어야 켜진다.</p>
+<h3 id="3-5-가상-주소와-물리-주소로-같은-메모리-읽기">3.5 가상 주소와 물리 주소로 같은 메모리 읽기<a class="anchor" href="#3-5-가상-주소와-물리-주소로-같은-메모리-읽기" aria-label="link">#</a></h3>
+<p>예제 2의 같은 세션에서 <code>linux_banner</code>를 두 방식으로 읽었다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>p &amp;linux_banner
+lx-virt_to_phys 0xffff80008229c810
+x/s linux_banner
+maint packet Qqemu.PhysMemMode:1
+x/s 0x4249c810</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>$6 = (const char (*)[]) 0xffff80008229c810 &lt;linux_banner&gt;
+virt_to_phys(0xffff80008229c810) = 0x4249c810
+0xffff80008229c810 &lt;linux_banner&gt;:	"Linux version 6.18.55-trace (donh@lima-elinux) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #1 SMP PREEMPT Sat Oct 17 23:37:47 PDT 2026\n"
+sending: Qqemu.PhysMemMode:1
+received: ""
+0x4249c810:	&lt;error: Cannot access memory at address 0x4249c810&gt;</code></pre></figure>
+<p>출력에서 볼 것: <code>lx-virt_to_phys</code>가 커널의 선형 매핑 규칙으로 물리 주소를 계산했다(0x4249c810 = 0x40200000 + (0x...8229c810 − 0x...80000000)). 그런데 QEMU의 "물리 메모리 모드" 패킷은 이 빌드(QEMU 10.2.1, arm)에서 빈 응답(= 지원 안 함)이 왔다. 그래서 물리 주소는 예제 3처럼 <strong><code>monitor xp</code></strong>(QEMU 모니터 명령을 gdb로 보내기)로 읽는 것이 확실하다. JTAG에서도 같은 구분이 있다: 코어를 통해 읽으면 MMU가 번역한 가상 주소, MEM-AP(AXI-AP)로 읽으면 물리 주소(§9).</p>
+<hr>
+<h2 id="4-모듈-디버깅-심볼-로딩과-워치포인트">4. 모듈 디버깅 — 심볼 로딩과 워치포인트<a class="anchor" href="#4-모듈-디버깅-심볼-로딩과-워치포인트" aria-label="link">#</a></h2>
+<h3 id="4-1-직관-링크는-insmod-때-끝난다">4.1 직관 — 링크는 insmod 때 끝난다<a class="anchor" href="#4-1-직관-링크는-insmod-때-끝난다" aria-label="link">#</a></h3>
+<p><code>.ko</code>는 링크가 덜 된 ELF(relocatable object)다. 모든 섹션 주소가 0이고, <code>insmod</code> 때 커널의 모듈 로더가 메모리를 잡아 섹션을 배치하고 재배치를 푼다. 그래서 디버거는 "어느 섹션이 어디에 갔는지"를 알아야 모듈 심볼을 쓸 수 있다. 방법은 둘이다.</p>
+<ul><li>손으로: <code>/sys/module/&lt;이름&gt;/sections/.text</code> 등을 읽어 <code>add-symbol-file m.ko &lt;.text&gt; -s .data &lt;주소&gt; -s .bss &lt;주소&gt; ...</code> (M3 §6.4).</li><li>자동: <code>lx-symbols &lt;모듈 경로&gt;</code>. 이미 올라온 모듈은 <code>modules</code> 리스트를 걸어 다 로드하고, <code>do_init_module</code>에 내부 브레이크포인트를 걸어 <strong>새 모듈이 올라올 때마다</strong> 자동으로 로드한다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 660 320" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="30" width="230" height="120" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="32" y="52" font-size="13">m4_bug.ko (섹션 주소 = 0)</text>
+  <text x="32" y="78" font-size="12">.text        @ 0x0</text>
+  <text x="32" y="98" font-size="12">.data        @ 0x0</text>
+  <text x="32" y="118" font-size="12">.bss         @ 0x0</text>
+  <text x="32" y="138" font-size="12">.init.text   @ 0x0</text>
+  <line x1="255" y1="90" x2="375" y2="90" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah5)"/>
+  <text x="262" y="80" font-size="12">insmod: 로더가 배치</text>
+  <rect x="380" y="30" width="265" height="120" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="392" y="52" font-size="13">커널 메모리 (모듈 영역)</text>
+  <text x="392" y="78" font-size="12">.text   0xffff80007bfa0060</text>
+  <text x="392" y="98" font-size="12">.data   0xffff80007bfa2020</text>
+  <text x="392" y="118" font-size="12">.bss    0xffff80007bfa2038</text>
+  <text x="392" y="138" font-size="12">.rodata 0xffff80007bfa4068</text>
+  <rect x="20" y="200" width="250" height="40" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="30" y="225" font-size="12">/sys/module/m4_bug/sections/*</text>
+  <rect x="300" y="200" width="230" height="40" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="310" y="225" font-size="12">add-symbol-file 또는 lx-symbols</text>
+  <rect x="550" y="200" width="95" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="562" y="225" font-size="12">gdb 심볼</text>
+  <line x1="510" y1="152" x2="150" y2="197" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah5)"/>
+  <line x1="272" y1="220" x2="296" y2="220" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah5)"/>
+  <line x1="532" y1="220" x2="546" y2="220" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah5)"/>
+  <text x="20" y="285" font-size="12">lx-symbols는 do_init_module에 내부 브레이크포인트를 걸어 insmod 때마다 자동으로 한다</text>
+  <text x="20" y="305" font-size="12">gdb의 ELF 심볼(함수·변수 주소)은 정확했지만, 이 랩에서 DWARF 주소는 섹션별로 맞지 않았다 (§4.4)</text>
+</svg></figure>
+<p>그림 3 — 모듈 심볼 로딩. 실행 중 섹션 주소(sysfs 또는 <code>struct module</code>의 <code>sect_attrs</code>)를 gdb에 알려 줘야 <code>.ko</code>의 심볼이 실제 주소를 가리킨다.</p>
+<h3 id="4-2-예제-5-테스트-모듈-언젠가-guard를-덮어쓰는-kthread">4.2 예제 5 — 테스트 모듈: 언젠가 guard를 덮어쓰는 kthread<a class="anchor" href="#4-2-예제-5-테스트-모듈-언젠가-guard를-덮어쓰는-kthread" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: SSD 펌웨어에서 흔했던 "배열 overrun이 옆의 구조체 필드를 덮는다" 버그를 모듈로 만든다. <code>m4_len</code> 파라미터가 5가 되는 순간 <code>buf[4]</code> = <code>guard</code>가 덮인다. 범인을 워치포인트로 잡는 것이 목표다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// m4_bug.c - a kthread that eventually corrupts a "guard" word by overrunning buf[]
+#include &lt;linux/module.h&gt;
+#include &lt;linux/kthread.h&gt;
+#include &lt;linux/delay.h&gt;
+
+struct m4_state {
+	int buf[4];
+	int guard;              /* must stay 0x1234 */
+};
+static struct m4_state m4_s = { .guard = 0x1234 };
+static int m4_len = 4;      /* how many slots m4_fill() writes */
+module_param(m4_len, int, 0644);
+static struct task_struct *m4_task;
+
+static noinline void m4_fill(int n)
+{
+	int i;
+
+	for (i = 0; i &lt; n; i++)
+		((int *)m4_s.buf)[i] = 0xa0 + i;   /* n == 5 -&gt; writes guard */
+}
+
+static noinline int m4_tick(int iter)
+{
+	m4_fill(READ_ONCE(m4_len));
+	return m4_s.guard;
+}
+
+static int m4_thread(void *arg)
+{
+	int iter = 0, g;
+
+	while (!kthread_should_stop()) {
+		g = m4_tick(iter++);
+		if (g != 0x1234)
+			pr_err("m4_bug: guard corrupted: %#x (iter %d)\n", g, iter);
+		msleep(500);
+	}
+	return 0;
+}
+
+static int __init m4_init(void)
+{
+	pr_info("m4_bug: loaded, m4_fill=%px guard@%px\n", m4_fill, &amp;m4_s.guard);
+	m4_task = kthread_run(m4_thread, NULL, "m4_bug");
+	return PTR_ERR_OR_ZERO(m4_task);
+}
+
+static void __exit m4_exit(void)
+{
+	kthread_stop(m4_task);
+}
+module_init(m4_init);
+module_exit(m4_exit);
+MODULE_DESCRIPTION("M4 debugger demo");
+MODULE_LICENSE("GPL");</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/M4/mod &amp;&amp; printf 'obj-m := m4_bug.o m4_hang.o\n' &gt; Kbuild
+make -C /var/lab/out/linux-build-trace M=$PWD modules 2&gt;&amp;1 | grep -iE "warn|error"; modinfo -F vermagic m4_bug.ko</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>6.18.55-trace SMP preempt mod_unload aarch64</code></pre></figure>
+<p>출력에서 볼 것: 경고 0개(처음에는 <code>MODULE_DESCRIPTION()</code> 누락 modpost 경고가 나와서 추가했다). vermagic이 <code>6.18.55-trace</code>라서 <code>Image-trace</code>에만 올린다. <code>((int *)m4_s.buf)[i]</code>로 쓴 이유는 <code>m4_s.buf[4]</code>라고 쓰면 컴파일러가 <code>-Warray-bounds</code>로 잡아 주기 때문이다 — 실무 버그는 대개 이렇게 포인터로 우회돼 있어서 컴파일러가 못 본다.</p>
+<p>게스트 스크립트(<code>/m4_e2.sh</code>)는 모듈을 올리고, 섹션 주소와 kallsyms를 찍고, 60초 뒤 <code>m4_len</code>을 5로 바꾼다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+insmod /m4_bug.ko
+cd /sys/module/m4_bug/sections
+echo "sections: .text=$(cat .text) .data=$(cat .data) .bss=$(cat .bss)"
+grep -w m4_s /proc/kallsyms
+sleep 60
+echo "guest: setting m4_len=5"
+echo 5 &gt; /sys/module/m4_bug/parameters/m4_len
+sleep 600</code></pre></figure>
+<h3 id="4-3-예제-6-lx-symbols-하드웨어-워치포인트로-덮어쓴-놈-잡기">4.3 예제 6 — <code>lx-symbols</code> + 하드웨어 워치포인트로 덮어쓴 놈 잡기<a class="anchor" href="#4-3-예제-6-lx-symbols-하드웨어-워치포인트로-덮어쓴-놈-잡기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 부팅 초기에 <code>lx-symbols</code>를 걸어 두면 insmod 순간 심볼이 자동으로 들어온다. 그다음 <code>m4_fill</code>에 브레이크포인트, <code>guard</code> 주소에 하드웨어 워치포인트(쓰기 감시)를 건다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># e2.gdb
+set pagination off
+set confirm off
+target remote :12404
+source /var/tmp/M4/kb/vmlinux-gdb.py
+hbreak start_kernel
+continue
+delete
+lx-symbols /var/tmp/M4/mod
+shell (sleep 45; kill -INT $PPID) &amp;
+continue
+info line m4_fill
+p &amp;m4_s
+info symbol 0xffff80007bfa2020
+p/x *(struct m4_state *)0xffff80007bfa2020
+break m4_fill
+continue
+bt 4
+info symbol $pc
+delete
+watch -l *(int *)0xffff80007bfa2030
+continue
+bt 3
+info symbol $pc
+x/2i $pc-4
+p/x *(struct m4_state *)0xffff80007bfa2020
+p $lx_current().comm
+p $lx_current().pid
+info threads
+monitor quit</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>loading vmlinux
+scanning for modules in /var/tmp/M4/mod
+scanning for modules in /var/tmp/M4/kb
+loading @0xffff80007bfa0000: /var/tmp/M4/mod/m4_bug.ko
+
+Thread 2 received signal SIGINT, Interrupt.
+[Switching to Thread 1.2]
+cpu_do_idle () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/idle.c:32
+32		arm_cpuidle_restore_irq_context(&amp;context);
+Line 43 of "m4_bug.c" starts at address 0xffff80007bfa0068 &lt;m4_fill&gt; and ends at 0xffff80007bfa0070 &lt;m4_exit+16&gt;.
+$1 = (struct m4_state *) 0x0
+m4_s in section .data of /var/tmp/M4/mod/m4_bug.ko
+$2 = {buf = {0xa0, 0xa1, 0xa2, 0xa3}, guard = 0x1234}
+Breakpoint 2 at 0xffff80007bfa0068: file m4_bug.c, line 43.
+
+Thread 2 hit Breakpoint 2, m4_exit () at m4_bug.c:43
+43	{
+#0  m4_exit () at m4_bug.c:43
+#1  0xffff80007bfa00d0 in m4_init () at m4_bug.c:45
+#2  0xffff80007bfa011c in m4_thread (arg=&lt;optimized out&gt;) at m4_bug.c:34
+#3  0xffff800080115c9c in kthread (_create=&lt;optimized out&gt;) at /var/lab/src/linux-6.18.55/kernel/kthread.c:432
+m4_fill in section .text of /var/tmp/M4/mod/m4_bug.ko
+Hardware watchpoint 3: -location *(int *)0xffff80007bfa2030
+
+Thread 2 hit Hardware watchpoint 3: -location *(int *)0xffff80007bfa2030
+
+Old value = 4660
+New value = 164
+m4_init () at m4_bug.c:19
+19		for (i = 0; i &lt; n; i++)
+#0  m4_init () at m4_bug.c:19
+#1  0xffff80007bfa00d0 in m4_init () at m4_bug.c:45
+#2  0xffff80007bfa011c in m4_thread (arg=&lt;optimized out&gt;) at m4_bug.c:34
+m4_fill + 40 in section .text of /var/tmp/M4/mod/m4_bug.ko
+   0xffff80007bfa008c &lt;m4_init+36&gt;:	str	w2, [x3, x1, lsl #2]
+=&gt; 0xffff80007bfa0090 &lt;m4_init+40&gt;:	add	x1, x1, #0x1
+$3 = {buf = {0xa0, 0xa1, 0xa2, 0xa3}, guard = 0xa4}
+$4 = "m4_bug\000\000\000\000\000\000\000\000\000"
+$5 = 78
+  Id   Target Id                    Frame 
+  1    Thread 1.1 (CPU#0 [halted ]) cpu_do_idle () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/idle.c:32
+* 2    Thread 1.2 (CPU#1 [running]) m4_init () at m4_bug.c:19</code></pre></figure>
+<p>게스트 콘솔:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    6.842808][   T78] m4_bug: loaded, m4_fill=ffff80007bfa0068 guard@ffff80007bfa2030
+sections: .text=0xffff80007bfa0060 .data=0xffff80007bfa2020 .bss=0xffff80007bfa2038
+ffff80007bfa2020 d m4_s	[m4_bug]
+guest: setting m4_len=5
+[   71.553452][   T79] m4_bug: guard corrupted: 0xa4 (iter 127)</code></pre></figure>
+<p>(시작 부분 <code>start_kernel</code> 정지 줄과 마지막 연결 종료 줄은 생략했다. 이 출력은 같은 스크립트의 두 번 실행에서 나온 것이라 gdb 쪽과 콘솔 쪽 PID가 1 다를 수 있다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>워치포인트가 범인을 잡았다</strong>: Old 4660(0x1234) → New 164(0xa4). 멈춘 곳은 <code>m4_fill + 40</code>, 직전 명령 <code>str w2, [x3, x1, lsl #2]</code>(= <code>buf[i] = ...</code>, i = 4). 콜스택은 <code>m4_thread</code>(kthread) → <code>m4_tick</code> → <code>m4_fill</code>, 문맥은 <code>m4_bug</code> kthread(PID 78) on CPU1.</li><li><strong>워치포인트는 쓰기 "후"에 보고된다</strong>: PC가 <code>str</code> 다음 명령에 있다. ARM의 워치포인트 예외는 명령 완료 전에 나지만 gdb가 그 명령을 한 스텝 실행한 뒤 Old/New 값을 보여 준다. 그래서 "범인은 PC 바로 앞 명령"으로 읽는다.</li><li><strong><code>watch -l</code>(location)</strong>: 표현식이 아니라 그 주소를 감시한다. 하드웨어 워치포인트라서 커널이 전속력으로 도는 동안 비용이 0이다. Cortex-A57은 브레이크포인트 6개, 워치포인트 4개다(<code>ID_AA64DFR0_EL1 = 0x10305106</code>: BRPs 필드 5 → 6개, WRPs 필드 3 → 4개, §8.4의 세션에서 읽음). 소프트웨어 워치포인트(매 명령 스텝)는 커널에서 사실상 못 쓴다.</li><li><strong>그런데 이상한 것들이 있다</strong>: <code>p &amp;m4_s</code>가 <code>0x0</code>, <code>info line m4_fill</code>이 "line 43", 콜스택의 함수 이름이 <code>m4_exit</code>/<code>m4_init</code>. 실제로는 <code>m4_fill</code>(<code>info symbol</code>이 맞게 말한다)이다. 다음 절에서 본다.</li></ul>
+<h3 id="4-4-이-랩에서-만난-함정-ko의-dwarf-주소가-섹션별로-안-맞는다">4.4 이 랩에서 만난 함정 — <code>.ko</code>의 DWARF 주소가 섹션별로 안 맞는다<a class="anchor" href="#4-4-이-랩에서-만난-함정-ko의-dwarf-주소가-섹션별로-안-맞는다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 타깃 없이 <code>.ko</code>만 gdb에 넣어도 같은 현상이 나는지, 섹션 주소를 다 줘도 그런지 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/M4/mod
+gdb -q -batch -ex "add-symbol-file m4_bug.ko -s .text 0x10000 -s .data 0x20000 -s .bss 0x30000" \
+  -ex "info address m4_s" -ex "info address m4_len" -ex "info address m4_task" \
+  -ex "info line m4_fill" -ex "info address m4_tick" 2&gt;&amp;1 | grep -v "^add symbol\|_addr"
+nm m4_bug.ko | grep -E " m4_(s|len|fill|init|exit)$"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Symbol "m4_s" is static storage at address 0x0.
+Symbol "m4_len" is static storage at address 0x10014.
+Symbol "m4_task" is static storage at address 0x0.
+Line 43 of "m4_bug.c" starts at address 0x10008 &lt;m4_fill&gt; and ends at 0x10010 &lt;m4_exit+16&gt;.
+Symbol "m4_tick" is a function at address 0x10048.
+0000000000000000 t m4_exit
+0000000000000008 t m4_fill
+0000000000000008 t m4_init
+0000000000000014 d m4_len
+0000000000000000 d m4_s</code></pre></figure>
+<p>출력에서 볼 것: <code>.data</code>를 0x20000에 두라고 했는데 <code>m4_len</code>(<code>.data</code>+0x14)이 <strong><code>.text</code> 쪽 0x10014</strong>로 나왔고, <code>m4_s</code>(<code>.data</code>+0)는 0이다. <code>m4_fill</code>(<code>.text</code>+8)과 <code>m4_init</code>(<code>.init.text</code>+8)은 섹션 안 오프셋이 같아서 줄 번호·함수 이름이 뒤섞였다(43행은 <code>m4_init</code>의 <code>{</code>). 즉 이 환경(gdb 17.1, binutils 2.46, aarch64 <code>.ko</code>, DWARF5와 DWARF4 둘 다)에서는 <strong>DWARF 쪽 주소가 섹션별 오프셋을 못 받았다</strong>. 반면 ELF 심볼표(<code>info symbol</code>, <code>break m4_fill</code>의 주소, <code>nm</code>)는 정확했다. <code>lx-symbols</code>가 넘기는 <code>-s</code> 목록을 21개 섹션 전부로 늘려도(직접 만든 <code>m4-addsym</code> 명령) 결과는 같았다. 원인은 확인하지 못했다(gdb의 relocatable ELF 디버그 정보 재배치 쪽으로 추정). 다른 gdb 버전에서는 정상일 수 있으니 <strong>결론은 "검증하라"</strong>다.</p>
+<p>실무 대처:</p>
+<ul><li>주소는 <strong>ELF 심볼</strong>에서 얻는다: 게스트의 <code>/proc/kallsyms</code>(<code>ffff80007bfa2020 d m4_s [m4_bug]</code>), gdb의 <code>info symbol &lt;주소&gt;</code>, <code>maint print msymbols</code>. kdb의 <code>md m4_s</code>도 kallsyms를 쓰므로 정확했다(예제 9).</li><li>타입은 DWARF에서 그대로 쓴다: <code>p/x *(struct m4_state *)0xffff80007bfa2020</code>처럼 주소에 캐스트하면 구조체 출력은 정확하다.</li><li>함수 이름·줄 번호가 이상하면 <code>info symbol $pc</code>와 <code>x/i $pc</code>로 교차 확인한다. 디버깅 세션 동안만이라면 드라이버를 <strong>built-in(=y)으로 빌드</strong>해 <code>vmlinux</code>에 넣으면 이 문제가 아예 없다.</li></ul>
+<h3 id="4-5-모듈-init-함수-디버깅">4.5 모듈 <code>init</code> 함수 디버깅<a class="anchor" href="#4-5-모듈-init-함수-디버깅" aria-label="link">#</a></h3>
+<p><code>module_init</code> 함수는 <code>do_init_module()</code> → <code>do_one_initcall(mod-&gt;init)</code>에서 한 번 돌고, 끝나면 <code>.init.text</code>가 해제된다. 그래서 순서가 중요하다.</p>
+<ol><li>insmod <strong>전에</strong> <code>lx-symbols &lt;경로&gt;</code>를 실행해 둔다(예제 6처럼). insmod 순간 <code>do_init_module</code>의 내부 브레이크포인트가 심볼을 로드하고 계속 진행한다 — 예제 6 출력의 <code>loading @0xffff80007bfa0000</code> 줄이 그 순간이다.</li><li>그다음에야 <code>break m4_init</code>이 의미가 있다. 손으로 할 때는 <code>break do_one_initcall</code>에서 멈춘 뒤 <code>p fn</code>으로 init 함수 주소를 얻어 <code>hbreak *&lt;주소&gt;</code>를 건다.</li><li>init이 끝난 뒤의 <code>.init.text</code> 주소는 다른 용도로 재사용될 수 있으니 그 주소의 브레이크포인트는 지운다.</li></ol>
+<p>(이 절의 2~3번은 설명이고 따로 실행하지 않았다.)</p>
+<h3 id="4-6-하드웨어-vs-소프트웨어-브레이크포인트">4.6 하드웨어 vs 소프트웨어 브레이크포인트<a class="anchor" href="#4-6-하드웨어-vs-소프트웨어-브레이크포인트" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>종류</th><th>원리</th><th>개수</th><th>커널에서 쓸 때</th></tr></thead><tbody><tr><td>소프트웨어 (<code>break</code>)</td><td>명령을 BRK로 바꿔 쓴다</td><td>무제한</td><td>텍스트가 읽기 전용 매핑이면 디버거가 물리로 쓰거나(gdbstub, JTAG) 커널이 text patching으로 쓴다(kgdb). 아직 메모리에 없는 코드(MMU 전, 모듈 로드 전)에는 못 건다</td></tr><tr><td>하드웨어 (<code>hbreak</code>)</td><td>디버그 레지스터의 주소 비교기</td><td>A57은 6개</td><td>부팅 초기, ROM/플래시, 재배치 중 코드에 쓴다. 가상/물리 중 "지금 CPU가 내는 주소"와 비교한다</td></tr><tr><td>워치포인트 (<code>watch -l</code>)</td><td>데이터 주소 비교기</td><td>A57은 4개</td><td>메모리 오염 범인 잡기. 크기·정렬 제한(최대 8바이트 단위로 묶임)</td></tr></tbody></table></div>
+<hr>
+<h2 id="5-kgdb와-kdb-커널-안에-사는-디버거">5. kgdb와 kdb — 커널 안에 사는 디버거<a class="anchor" href="#5-kgdb와-kdb-커널-안에-사는-디버거" aria-label="link">#</a></h2>
+<h3 id="5-1-구조">5.1 구조<a class="anchor" href="#5-1-구조" aria-label="link">#</a></h3>
+<p>kgdb는 "커널 안에 들어 있는 gdb stub"이다. 커널이 예외(BRK)를 받으면 모든 CPU를 세우고, UART로 gdb와 RSP 패킷을 주고받는다. kdb는 같은 코어 위에서 사람이 직접 치는 셸이다.</p>
+<figure class="chart"><svg viewBox="0 0 660 380" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="40" width="230" height="56" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="32" y="62" font-size="13">호스트: gdb vmlinux</text>
+  <text x="32" y="84" font-size="12">target remote /dev/ttyUSB0</text>
+  <line x1="252" y1="68" x2="283" y2="68" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah2)"/>
+  <text x="20" y="122" font-size="12">UART 케이블 위로 RSP 패킷</text>
+  <rect x="270" y="20" width="375" height="345" rx="8" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+  <text x="560" y="38" font-size="12">타깃 커널</text>
+  <rect x="285" y="45" width="340" height="50" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="297" y="65" font-size="13">kgdboc — I/O 드라이버</text>
+  <text x="297" y="85" font-size="12">tty 드라이버의 poll_get_char / poll_put_char</text>
+  <rect x="285" y="112" width="340" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="297" y="132" font-size="13">debug_core (kernel/debug)</text>
+  <text x="297" y="152" font-size="12">kgdb_handle_exception → kgdb_cpu_enter</text>
+  <rect x="285" y="180" width="185" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="297" y="207" font-size="13">gdbstub.c (gdb용)</text>
+  <rect x="480" y="180" width="145" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="492" y="207" font-size="13">kdb (사람용 셸)</text>
+  <rect x="285" y="242" width="340" height="50" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="297" y="262" font-size="13">arch/arm64/kernel/kgdb.c</text>
+  <text x="297" y="282" font-size="12">BRK 명령 · 단일 스텝 · 레지스터 저장</text>
+  <text x="285" y="322" font-size="12">진입: kgdbwait · SysRq-g · BRK · oops/panic</text>
+  <text x="285" y="345" font-size="12">나갈 때: dbg_touch_watchdogs() (softlockup·RCU만)</text>
+  <rect x="20" y="250" width="235" height="56" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="32" y="272" font-size="13">다른 CPU들</text>
+  <text x="32" y="294" font-size="12">roundup IPI → 대기 루프에서 스핀</text>
+  <line x1="455" y1="98" x2="455" y2="109" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+  <line x1="380" y1="164" x2="380" y2="177" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+  <line x1="550" y1="164" x2="550" y2="177" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+  <line x1="455" y1="240" x2="455" y2="165" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+  <line x1="257" y1="278" x2="283" y2="150" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+</svg></figure>
+<p>그림 4 — kgdb 구조. 예외가 나면 arch 코드가 debug_core로 넘기고, debug_core가 다른 CPU를 IPI로 불러 세운 뒤, gdbstub 또는 kdb가 kgdboc를 통해 UART 한 글자씩 폴링으로 주고받는다.</p>
+<p>핵심 포인트:</p>
+<ul><li><strong>kgdboc</strong>("kgdb over console")는 기존 tty 드라이버의 <strong>폴링 콜백</strong>(<code>CONFIG_CONSOLE_POLL</code>의 <code>poll_get_char</code>/<code>poll_put_char</code>)을 빌려 쓴다. 디버거 안에서는 인터럽트가 꺼져 있으니 IRQ 기반 수신을 못 쓰기 때문이다. 그래서 그 UART 드라이버가 폴링 콜백을 구현해야 한다. PL011(<code>ttyAMA</code>)과 8250(<code>ttyS</code>)은 구현돼 있다.</li><li><strong>진입 경로</strong>: <code>kgdbwait</code>(부팅 중 kgdboc 등록 순간 대기), SysRq-g, 걸어 둔 브레이크포인트(BRK), oops/panic(<code>kgdb_panic</code>, L7 그림의 그 지점).</li><li><strong>다른 CPU 세우기</strong>: <code>kgdb_roundup_cpus()</code>가 IPI를 보내 다른 CPU를 대기 루프에 묶는다. arm64에 pseudo-NMI가 없으면 <strong>IRQ가 마스크된 CPU는 이 IPI를 못 받는다</strong> — §7의 hang 시나리오에서 kgdb가 약한 이유다.</li><li><strong>나갈 때</strong>: <code>dbg_touch_watchdogs()</code>가 <code>touch_softlockup_watchdog_sync()</code>, <code>clocksource_touch_watchdog()</code>, <code>rcu_cpu_stall_reset()</code>을 부른다(<code>kernel/debug/debug_core.c</code>). 멈춘 시간 때문에 softlockup·RCU stall 경고가 나지 않게 하는 것이다. <strong>workqueue watchdog은 여기 없다</strong> — 예제 7에서 실제로 걸린다.</li><li><strong>kgdbts</strong>(<code>CONFIG_KGDB_TESTS</code>)는 kgdb 자체 테스트 모듈인데 <code>Image-trace</code> 설정에서 꺼져 있어(<code># CONFIG_KGDB_TESTS is not set</code>) 돌리지 않았다.</li><li><code>CONFIG_KGDB_HONOUR_BLOCKLIST=y</code>: kprobe 금지 목록(<code>NOKPROBE_SYMBOL</code>)에 있는 함수에는 kgdb 브레이크포인트를 못 건다. 디버거 자기 경로에 BRK를 넣으면 재귀로 죽기 때문이다.</li></ul>
+<h3 id="5-2-예제-7-kgdb를-두-번째-uart-pci-16550-로-kgdbwait-sysrq-g-브레이크포인트">5.2 예제 7 — kgdb를 두 번째 UART(PCI 16550)로: <code>kgdbwait</code>, SysRq-g, 브레이크포인트<a class="anchor" href="#5-2-예제-7-kgdb를-두-번째-uart-pci-16550-로-kgdbwait-sysrq-g-브레이크포인트" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 콘솔(ttyAMA0)은 그대로 두고, QEMU에 PCI 16550 UART(<code>-device pci-serial</code>)를 하나 더 붙여 TCP 소켓으로 내보낸다. 게스트에서는 <code>ttyS0</code>이 되고 <code>kgdboc=ttyS0,115200 kgdbwait</code>로 부팅 중 gdb를 기다리게 한다. 두 번째 포트는 <code>-device pci-serial</code>(PCI 16550, <code>CONFIG_SERIAL_8250_PCI=y</code>)로 만들었다. virt 머신에 PL011을 하나 더 다는 방법은 QEMU 버전마다 달라서 어느 버전에서나 되는 PCI 방식을 골랐다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># run_k.sh: console on ttyAMA0 (log file), kgdb on PCI 16550 ttyS0 exported as TCP 12414
+(timeout 300 qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -m 1G -nographic \
+  -kernel $L/Image-trace -initrd i.gz \
+  -append "console=ttyAMA0 nokaslr kgdboc=ttyS0,115200 kgdbwait LAB_CMD=/m4_e3.sh" \
+  -chardev socket,id=k0,host=127.0.0.1,port=12414,server=on,wait=off \
+  -device pci-serial,chardev=k0 &gt; q_e3.log 2&gt;&amp;1 &amp;)
+for n in $(seq 120); do grep -q "Waiting for connection" q_e3.log &amp;&amp; break; sleep 1; done
+cd kb; timeout 250 gdb -q -batch -x e3.gdb ./vmlinux</code></pre></figure>
+<p>게스트 스크립트 <code>/m4_e3.sh</code>는 <code>m4_bug.ko</code>를 올리고 15초 뒤 <code>echo g &gt; /proc/sysrq-trigger</code>로 kgdb에 들어간다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># e3.gdb
+set pagination off
+set confirm off
+target remote tcp:127.0.0.1:12414
+bt 4
+pipe info threads | head -4
+pipe info threads | wc -l
+continue
+bt 8
+source /var/tmp/M4/kb/vmlinux-gdb.py
+pipe info threads | grep "^\*"
+lx-lsmod
+monitor lsmod
+lx-symbols /var/tmp/M4/mod
+break m4_fill
+continue
+bt 4
+info registers pc sp
+delete
+detach
+quit</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>arch_kgdb_breakpoint () at /var/lab/src/linux-6.18.55/arch/arm64/include/asm/kgdb.h:21
+21		asm ("brk %0" : : "I" (KGDB_COMPILED_DBG_BRK_IMM));
+#0  arch_kgdb_breakpoint () at /var/lab/src/linux-6.18.55/arch/arm64/include/asm/kgdb.h:21
+#1  kgdb_breakpoint () at /var/lab/src/linux-6.18.55/kernel/debug/debug_core.c:1213
+#2  0xffff8000802355a8 in kgdb_initial_breakpoint () at /var/lab/src/linux-6.18.55/kernel/debug/debug_core.c:1015
+#3  kgdb_register_io_module (new_dbg_io_ops=new_dbg_io_ops@entry=0xffff800083c3ac78 &lt;kgdboc_io_ops&gt;) at /var/lab/src/linux-6.18.55/kernel/debug/debug_core.c:1152
+  Id   Target Id                      Frame 
+  1    Thread 4294967294 (shadowCPU0) default_idle_call () at /var/lab/src/linux-6.18.55/kernel/sched/idle.c:130
+  2    Thread 4294967293 (shadowCPU1) arch_kgdb_breakpoint () at /var/lab/src/linux-6.18.55/arch/arm64/include/asm/kgdb.h:21
+* 3    Thread 1 (swapper/0)           arch_kgdb_breakpoint () at /var/lab/src/linux-6.18.55/arch/arm64/include/asm/kgdb.h:21
+61
+[New Thread 76]
+...
+Thread 61 received signal SIGTRAP, Trace/breakpoint trap.
+[Switching to Thread 76]
+kgdb_breakpoint () at /var/lab/src/linux-6.18.55/kernel/debug/debug_core.c:1213
+1213		arch_kgdb_breakpoint();
+#0  kgdb_breakpoint () at /var/lab/src/linux-6.18.55/kernel/debug/debug_core.c:1213
+#1  0xffff800080234054 in sysrq_handle_dbg (key=&lt;optimized out&gt;) at /var/lab/src/linux-6.18.55/kernel/debug/debug_core.c:978
+#2  0xffff800080cbbef4 in __handle_sysrq (key=103 'g', check_mask=check_mask@entry=false) at /var/lab/src/linux-6.18.55/drivers/tty/sysrq.c:611
+#3  0xffff800080cbc680 in write_sysrq_trigger (file=&lt;optimized out&gt;, buf=&lt;optimized out&gt;, count=2, ppos=&lt;optimized out&gt;) at /var/lab/src/linux-6.18.55/drivers/tty/sysrq.c:1221
+...
+* 60   Thread 76 (m4_e3.sh)           kgdb_breakpoint () at /var/lab/src/linux-6.18.55/kernel/debug/debug_core.c:1213
+Address            Module                  Size  Used by
+0xffff80007bfa0000 m4_bug                 12288  0
+Module                  Size  modstruct     Used by
+m4_bug                  4096/    4096/       0/    4096  0xffff80007bfa2080    0  (Live) 0xffff80007bfa0000/0xffff80007bfa4000/0x0000000000000000/0xffff80007bfa2000 [ ]
+loading vmlinux
+scanning for modules in /var/tmp/M4/mod
+scanning for modules in /var/tmp/M4/kb
+loading @0xffff80007bfa0000: /var/tmp/M4/mod/m4_bug.ko
+Breakpoint 1 at 0xffff80007bfa0068: file m4_bug.c, line 43.
+[Switching to Thread 78]
+
+Thread 65 hit Breakpoint 1, m4_exit () at m4_bug.c:43
+43	{
+#0  m4_exit () at m4_bug.c:43
+#1  0xffff80007bfa00d0 in m4_init () at m4_bug.c:45
+#2  0xffff80007bfa011c in m4_thread (arg=&lt;optimized out&gt;) at m4_bug.c:34
+#3  0xffff800080115c9c in kthread (_create=&lt;optimized out&gt;) at /var/lab/src/linux-6.18.55/kernel/kthread.c:432
+pc             0xffff80007bfa0068  0xffff80007bfa0068 &lt;m4_fill&gt;
+sp             0xffff80008447be30  0xffff80008447be30
+[Inferior 1 (Remote target) detached]</code></pre></figure>
+<p>(<code>[New Thread ...]</code> 줄 여러 개와 <code>bt 8</code>의 뒤 4프레임은 <code>...</code>로 생략했다. 두 번의 실행 출력을 합쳤다 — 첫 실행은 <code>$lx_current()</code>에서 멈춰서 둘째 실행에서 바꿨다.)</p>
+<p>게스트 콘솔:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    9.274810][    T1] KGDB: Registered I/O driver kgdboc
+[    9.280183][    T1] KGDB: Waiting for connection from remote gdb...
+[  186.197523][    T1] loop: module loaded
+...
+[  204.570844][   T76] sysrq: DEBUG
+guest: sysrq-g now
+guest: back from kgdb</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong><code>kgdbwait</code>의 첫 정지</strong>: <code>kgdb_register_io_module()</code> → <code>kgdb_initial_breakpoint()</code> → <code>brk</code>. kgdboc가 등록되는 순간(PCI UART probe 직후)이다. 이보다 앞선 부팅 코드는 kgdb로 못 본다 — 더 이르게는 <code>kgdboc_earlycon=</code>(earlycon 드라이버가 폴링을 지원할 때)이나 JTAG/gdbstub이 필요하다.</li><li><strong>thread = task</strong>: gdbstub에서는 thread가 CPU였는데 kgdb에서는 <strong>모든 task가 thread</strong>다(61개). CPU별 문맥은 <code>shadowCPU0/1</code>이라는 가짜 thread로 보인다. 그래서 <code>$lx_current()</code>(선택된 thread 번호를 CPU 번호로 쓰는 헬퍼)는 kgdb에서 "Invalid cast"로 실패했다. kgdb에서는 <code>info threads</code>의 <code>*</code> 줄이 현재 task다(<code>m4_e3.sh</code>, PID 76).</li><li><strong>SysRq-g 경로</strong>: <code>write_sysrq_trigger</code> → <code>__handle_sysrq('g')</code> → <code>sysrq_handle_dbg</code> → <code>kgdb_breakpoint</code>. 셸이 <code>/proc/sysrq-trigger</code>에 쓴 그 task 문맥에서 들어왔다.</li><li><strong><code>monitor lsmod</code></strong>: kgdb의 gdb 모드에서도 <code>monitor &lt;kdb 명령&gt;</code>으로 kdb 명령을 쓸 수 있다(KDB가 켜져 있을 때).</li><li><strong>소프트웨어 브레이크포인트</strong>: <code>break m4_fill</code>은 kgdb가 커널 텍스트에 BRK를 써 넣는다(커널의 text patching 경로). gdbstub과 달리 하드웨어 레지스터를 쓰지 않았다.</li><li><strong>부팅 시간 10초 → 186초</strong>: gdb가 <code>info threads</code>로 60개 task 정보를 패킷 수백 개로 받는 동안 kgdb는 멈춰 있었고, 그 사이에도 <code>arch_sys_counter</code>는 계속 갔다. 커널 시계 기준으로 약 3분이 지나갔다. 폴링 UART + TCG라서 느리다(실보드 115200 bps에서도 <code>info threads</code>는 느리다). §8에서 이 "시간이 계속 간다"의 결과를 본다.</li></ul>
+<h3 id="5-3-예제-8-같은-세션의-대가-workqueue-lockup">5.3 예제 8 — 같은 세션의 대가: workqueue lockup<a class="anchor" href="#5-3-예제-8-같은-세션의-대가-workqueue-lockup" aria-label="link">#</a></h3>
+<p>예제 7의 콘솔 로그를 더 보면, kgdb에서 나온 뒤 47초 만에 경고가 떴다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[  204.570844][   T76] sysrq: DEBUG
+[  251.588241][    C0] BUG: workqueue lockup - pool cpus=0 node=0 flags=0x0 nice=0 stuck for 47s!
+[  251.589911][    C0] Showing busy workqueues and worker pools:
+[  251.590065][    C0] workqueue events: flags=0x100
+[  251.590233][    C0]   pwq 2: cpus=0 node=0 flags=0x0 nice=0 active=2 refcnt=3
+[  251.590479][    C0]     pending: kgdboc_restore_input_helper, vmstat_shepherd
+[  251.591542][    C0] workqueue events_unbound: flags=0x2
+[  251.591576][    C0]   pwq 8: cpus=0-1 flags=0x4 nice=0 active=2 refcnt=3
+[  251.591686][    C0]     in-flight: 48:crng_reseed
+[  251.594925][    C0]     pending: flush_memcg_stats_dwork</code></pre></figure>
+<p>출력에서 볼 것: 두 번째 kgdb 정지(SysRq-g 후 gdb가 lx-symbols·브레이크포인트로 시간을 쓴 동안)에 CPU0의 workqueue가 47초 동안 진행하지 못했다. <code>dbg_touch_watchdogs()</code>는 softlockup과 RCU만 리셋하고 workqueue watchdog(<code>CONFIG_WQ_WATCHDOG</code>)은 리셋하지 않기 때문이다. pending 목록에 kgdb 자신이 예약한 <code>kgdboc_restore_input_helper</code>가 보이는 것이 재미있다. 이것은 버그가 아니라 <strong>디버거가 만든 가짜 경고</strong>다. 디버거로 오래 멈춘 뒤의 lockup 경고는 먼저 "내가 멈춰서 생긴 것인가"를 의심한다.</p>
+<h3 id="5-4-예제-9-kdb-콘솔-uart-하나로-모두-하기-serial-break">5.4 예제 9 — kdb: 콘솔 UART 하나로 모두 하기 + serial BREAK<a class="anchor" href="#5-4-예제-9-kdb-콘솔-uart-하나로-모두-하기-serial-break" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 보드에 UART가 하나뿐이면 <code>kgdboc=ttyAMA0</code>처럼 콘솔과 같은 포트를 쓰고, gdb 대신 kdb 셸을 쓴다. <code>expect</code>로 게스트 셸에서 SysRq-g를 보내 kdb 명령 몇 개를 치고, 두 번째에는 <strong>serial BREAK + g</strong>(UART로 보내는 Magic SysRq)로 들어간다. QEMU <code>-nographic</code>의 <code>mon:stdio</code>에서는 <code>Ctrl-a b</code>가 BREAK를 보낸다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>#!/usr/bin/expect -f
+# kdb on the console UART (kgdboc=ttyAMA0) + sysrq via serial BREAK (QEMU mon:stdio, Ctrl-a b)
+set timeout 300
+log_file -noappend /var/tmp/M4/e6.log
+spawn qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -m 1G -nographic -kernel /var/lab/out/Image-trace -initrd /var/tmp/M4/i.gz -append "console=ttyAMA0 nokaslr kgdboc=ttyAMA0"
+expect "lab initramfs"
+expect "# "
+send "insmod /m4_bug.ko; cat /proc/sys/kernel/sysrq\r"
+expect "loaded"
+expect "# "
+send "echo g &gt; /proc/sysrq-trigger\r"
+expect "kdb&gt;"
+foreach c {"bt" "lsmod" "md4c5 m4_s" "rd" "dmesg 3" "ps" "go"} {
+    send "$c\r"
+    expect {
+        "kdb&gt;" {}
+        "# " {}
+        "more&gt;" { send "q" ; exp_continue }
+    }
+}
+sleep 1
+send "\r"
+expect "# "
+send "\x01b"
+sleep 0.3
+send "g"
+expect "kdb&gt;"
+send "go\r"
+expect "# "
+send "poweroff -f\r"
+expect eof</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>~ # echo g &gt; /proc/sysrq-trigger
+
+Entering kdb (current=0xffff0000046a8000, pid 1) on processor 0 due to Keyboard Entry
+[0]kdb&gt; bt
+Stack traceback for pid 1
+0xffff0000046a8000        1        0  1    0   R  0xffff0000046a9c20 *sh
+CPU: 0 UID: 0 PID: 1 Comm: sh Tainted: G           OE       6.18.55-trace #1 PREEMPT 
+Call trace:
+ show_stack+0x30/0x90 (C)
+ ...
+ kgdb_cpu_enter+0x180/0x718
+ kgdb_handle_exception+0xb8/0xf8
+ kgdb_compiled_brk_handler+0x30/0x48
+ call_el1_break_hook+0xb0/0xd8
+ do_el1_brk64+0x2c/0x60
+ el1_brk64+0x38/0x60
+ el1h_64_sync_handler+0x68/0xb8
+ el1h_64_sync+0x6c/0x70
+ kgdb_breakpoint+0x20/0x88 (P)
+ __handle_sysrq+0x9c/0x1b0
+ write_sysrq_trigger+0xb8/0xe0
+ ...
+[0]kdb&gt; lsmod
+Module                  Size  modstruct     Used by
+m4_bug                  4096/    4096/       0/    4096  0xffff80007bfa2080    0  (Live) 0xffff80007bfa0000/0xffff80007bfa4000/0x0000000000000000/0xffff80007bfa2000 [ ]
+[0]kdb&gt; md4c5 m4_s
+0xffff80007bfa2020 000000a0 000000a1 000000a2 000000a3   ................
+0xffff80007bfa2030 00001234                              4...
+[0]kdb&gt; rd
+x0: ffff800083ee2000  x1: 0000000000000001  x2: 0000000000000000
+...
+x30: ffff800080234054  sp: ffff800083fbbc90  pc: ffff800080233c68
+pstate: 60000005  v0: ??  v1: ??  v2: ??  v3: ??  v4: ??  v5: ??  v6: ??  v7: ??
+[0]kdb&gt; dmesg 3
+&lt;5&gt;[   12.041660][   T73] m4_bug: module verification failed: signature and/or required key missing - tainting kernel
+&lt;6&gt;[   12.119699][   T73] m4_bug: loaded, m4_fill=ffff80007bfa0068 guard@ffff80007bfa2030
+&lt;6&gt;[   12.204318][    T1] sysrq: DEBUG
+[0]kdb&gt; ps
+1 idle process (state -) and 
+60 sleeping system daemon (state [ims]) processes suppressed,
+use 'ps A' to see all.
+Task Addr               Pid   Parent [*] cpu State Thread             Command
+0xffff0000046a8000        1        0  1    0   R  0xffff0000046a9c20 *sh
+0xffff00000441c600       74        2  0    0   D  0xffff00000441e220  m4_bug
+[0]kdb&gt; go
+~ # 
+Entering kdb (current=0xffff8000837a8b40, pid 0) on processor 0 due to Keyboard Entry
+[0]kdb&gt; go
+[   13.619012][    C0] sysrq: DEBUG</code></pre></figure>
+<p>(<code>bt</code>의 가운데 kdb 내부 프레임, <code>rd</code>의 가운데 레지스터 줄, 반복된 <code>ps</code> 헤더 줄은 생략했다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>kdb는 kallsyms를 쓴다</strong>: <code>md4c5 m4_s</code>(4바이트 단위 5개)가 정확히 <code>0xffff80007bfa2020</code>에서 <code>a0 a1 a2 a3 1234</code>를 보여 줬다. gdb의 DWARF 문제(§4.4)와 무관하다. 보드에 심볼 파일도 호스트도 없을 때 kdb가 빛나는 이유다.</li><li><code>bt</code>의 아래쪽은 kgdb 진입 경로 그대로다: <code>el1h_64_sync</code> → <code>el1_brk64</code> → <code>call_el1_break_hook</code> → <code>kgdb_compiled_brk_handler</code>. BRK 예외가 디버그 훅 테이블을 거쳐 kgdb로 간다(M3의 BRK 즉치값 표에서 0x400이 KGDB).</li><li><code>ps</code>는 기본으로 잠든 데몬을 숨긴다. <code>m4_bug</code> kthread는 <code>msleep()</code> 중이라 <code>D</code>(TASK_UNINTERRUPTIBLE).</li><li><strong>serial BREAK로 들어간 두 번째 진입</strong>: <code>current=... pid 0</code>(swapper, idle). 셸 명령이 아니라 UART 드라이버의 수신 경로(BREAK 감지 → <code>uart_handle_break</code> → 다음 글자 'g'를 SysRq로 처리)에서 들어왔기 때문이다. 셸이 먹통이어도 IRQ가 살아 있으면 이 경로는 동작한다.</li><li>같은 포트를 콘솔과 kgdb gdb 모드로 같이 쓰려면 콘솔 글자와 RSP 패킷이 섞이므로 <code>agent-proxy</code>(호스트에서 한 포트를 콘솔용·gdb용 TCP 두 개로 나눠 주는 도구) 같은 분배기가 필요하다. 이 랩은 포트를 하나 더 만들어 그 문제를 피했다(agent-proxy는 실행하지 않았다).</li></ul>
+<h3 id="5-5-kgdb-명령줄-정리">5.5 kgdb 명령줄 정리<a class="anchor" href="#5-5-kgdb-명령줄-정리" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>인자 / 설정</th><th>뜻</th></tr></thead><tbody><tr><td><code>kgdboc=ttyS0,115200</code></td><td>kgdb I/O로 쓸 tty와 속도. 런타임에는 <code>echo ttyS0 &gt; /sys/module/kgdboc/parameters/kgdboc</code></td></tr><tr><td><code>kgdbwait</code></td><td>kgdboc가 등록되자마자 정지하고 gdb를 기다린다</td></tr><tr><td><code>kgdboc_earlycon=</code></td><td>earlycon 드라이버로 더 일찍 kgdb를 쓴다(드라이버가 폴링을 지원해야)</td></tr><tr><td><code>kgdbcon</code></td><td>gdb에 커널 printk를 같이 보낸다(gdb가 붙어 있을 때)</td></tr><tr><td><code>nokaslr</code></td><td>심볼 주소를 vmlinux와 맞춘다</td></tr><tr><td><code>rodata=off</code> (필요할 때)</td><td>텍스트 쓰기 보호 때문에 소프트웨어 브레이크포인트가 안 될 때의 옛 해법. arm64 6.x는 text patching으로 처리해서 이 랩에서는 필요 없었다</td></tr><tr><td><code>CONFIG_KGDB_KDB</code>, <code>CONFIG_KDB_KEYBOARD</code></td><td>kdb 셸, 그리고 로컬 키보드로 kdb 쓰기</td></tr></tbody></table></div>
+<hr>
+<h2 id="6-magic-sysrq-멈추지-않고-상태를-뽑는-키">6. Magic SysRq — 멈추지 않고 상태를 뽑는 키<a class="anchor" href="#6-magic-sysrq-멈추지-않고-상태를-뽑는-키" aria-label="link">#</a></h2>
+<h3 id="6-1-직관">6.1 직관<a class="anchor" href="#6-1-직관" aria-label="link">#</a></h3>
+<p>Magic SysRq는 "커널에 직접 꽂힌 비상 버튼"이다. 유저스페이스가 다 죽어도 IRQ와 콘솔이 살아 있으면 키 하나로 커널이 상태를 덤프하거나 행동한다. 입력 경로는 셋이다.</p>
+<ul><li><code>/proc/sysrq-trigger</code>에 글자 쓰기 (root, 셸이 살아 있을 때)</li><li>시리얼 콘솔에서 BREAK 신호 후 5초 안에 글자 (<code>CONFIG_MAGIC_SYSRQ_SERIAL</code>)</li><li>PC 키보드의 Alt+SysRq+글자</li></ul>
+<h3 id="6-2-자주-쓰는-키-drivers-tty-sysrq-c의-sysrq_key_table-6-18">6.2 자주 쓰는 키 (<code>drivers/tty/sysrq.c</code>의 <code>sysrq_key_table</code>, 6.18)<a class="anchor" href="#6-2-자주-쓰는-키-drivers-tty-sysrq-c의-sysrq_key_table-6-18" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>키</th><th>동작</th><th>언제 쓰나</th></tr></thead><tbody><tr><td><code>t</code></td><td>모든 task의 상태와 스택 (show state)</td><td>"무엇이 어디서 자고 있나" 전체 사진</td></tr><tr><td><code>w</code></td><td><code>D</code> 상태(uninterruptible) task만 (show blocked)</td><td>I/O나 락에서 멈춘 hang</td></tr><tr><td><code>l</code></td><td>활성 CPU 전부의 백트레이스</td><td>어느 CPU가 무엇을 돌고 있나. IRQ가 막힌 CPU는 pseudo-NMI 없으면 못 받음(§7)</td></tr><tr><td><code>p</code></td><td>현재 CPU의 레지스터</td><td>짧은 확인</td></tr><tr><td><code>m</code></td><td>메모리 상태 (show memory)</td><td>OOM 직전</td></tr><tr><td><code>q</code></td><td>hrtimer·clockevent 목록</td><td>타이머가 안 터진다</td></tr><tr><td><code>d</code></td><td>잡고 있는 락 목록 (lockdep 켜져 있을 때)</td><td>데드락</td></tr><tr><td><code>c</code></td><td>일부러 panic (crash)</td><td>kdump/pstore 테스트(L7)</td></tr><tr><td><code>s</code> / <code>u</code> / <code>b</code></td><td>sync / 읽기 전용 재마운트 / 즉시 재부팅</td><td>필드 장비를 그나마 안전하게 재부팅(s → u → b 순서)</td></tr><tr><td><code>g</code></td><td>kgdb/kdb 진입</td><td>§5</td></tr><tr><td><code>0</code>~<code>9</code></td><td>콘솔 로그 레벨</td><td>로그 홍수 줄이기</td></tr></tbody></table></div>
+<h3 id="6-3-예제-10-proc-sysrq-trigger로-투어하기">6.3 예제 10 — <code>/proc/sysrq-trigger</code>로 투어하기<a class="anchor" href="#6-3-예제-10-proc-sysrq-trigger로-투어하기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 키 몇 개를 차례로 눌러 출력 형식을 본다. 마지막에 <code>kernel.sysrq</code>를 0으로 꺼도 <code>/proc/sysrq-trigger</code>는 동작하는지 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# /m4_e7.sh (LAB_CMD)
+insmod /m4_bug.ko
+echo "sysrq mask: $(cat /proc/sys/kernel/sysrq)"
+for k in h w l m q; do
+  echo "=== sysrq $k"
+  echo $k &gt; /proc/sysrq-trigger
+done
+echo 0 &gt; /proc/sys/kernel/sysrq
+echo t &gt; /proc/sysrq-trigger
+dmesg | tail -3</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>sysrq mask: 1
+[    6.845431][   T76] sysrq: HELP : loglevel(0-9) reboot(b) crash(c) terminate-all-tasks(e) memory-full-oom-kill(f) kill-all-tasks(i) thaw-filesystems(j) sak(k
+[    6.847574][   T76] sysrq: Show Blocked State
+[    6.847911][   T76] task:m4_bug          state:D stack:0     pid:78    tgid:78    ppid:2      task_flags:0x208040 flags:0x00000010
+[    6.848194][   T76] Call trace:
+[    6.848328][   T76]  __switch_to+0x100/0x1c8 (T)
+[    6.848657][   T76]  __schedule+0x3b8/0xc28
+[    6.848675][   T76]  schedule+0x34/0xe0
+[    6.848690][   T76]  schedule_timeout+0x88/0x128
+[    6.848707][   T76]  msleep+0x3c/0x70
+[    6.848726][   T76]  m4_thread+0x3c/0x70 [m4_bug]
+[    6.849061][   T76]  kthread+0x134/0x220
+[    6.849083][   T76]  ret_from_fork+0x10/0x20
+[    6.852215][   T76] sysrq: Show backtrace of all active CPUs
+[    6.852405][   T76] NMI backtrace for cpu 0
+[    6.852871][   T76] CPU: 0 UID: 0 PID: 76 Comm: m4_e7.sh Tainted: G           OE       6.18.55-trace #1 PREEMPT 
+...
+[    6.859819][    C1] NMI backtrace for cpu 1
+[    6.859991][    C1] CPU: 1 UID: 0 PID: 32 Comm: pr/ttyAMA-1 Tainted: G           OE       6.18.55-trace #1 PREEMPT 
+...
+[    6.862764][   T76] sysrq: Show Memory
+[    6.862857][   T76] Mem-Info:
+[    6.863077][   T76] active_anon:550 inactive_anon:155 isolated_anon:0
+...
+[    6.867564][   T76] now at 6545973008 nsecs
+...
+[    6.876879][   T76] sysrq: Show State
+[    6.876918][   T76] task:init            state:S stack:0     pid:1     tgid:1     ppid:0      task_flags:0x400100 flags:0x00000008
+[    6.876958][   T76] Call trace:
+[    6.876968][   T76]  __switch_to+0x100/0x1c8 (T)
+[    6.876998][   T76]  __schedule+0x3b8/0xc28
+[    6.877013][   T76]  schedule+0x34/0xe0
+[    6.877028][   T76]  do_wait+0x68/0x148</code></pre></figure>
+<p>(전체 1055줄 중 일부. <code>t</code>는 모든 task를 덤프해서 수백 줄이 나온다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>w</code>가 <code>D</code> 상태의 <code>m4_bug</code> kthread를 콜스택과 함께 보여 줬다: <code>m4_thread</code> → <code>msleep</code> → <code>schedule_timeout</code>. 장비가 "멈췄다"고 할 때 첫 명령으로 쓰기 좋다. 내 드라이버 함수가 <code>wait_event</code> 근처에서 보이면 깨우는 쪽(IRQ 핸들러)이 안 돌고 있다는 뜻이다(F3).</li><li><code>l</code>의 "NMI backtrace"라는 이름과 달리 arm64는 pseudo-NMI가 꺼져 있으면 <strong>보통 IPI</strong>로 다른 CPU에 요청한다. CPU1은 콘솔 출력 kthread(<code>pr/ttyAMA-1</code>)를 돌고 있었다.</li><li><code>kernel.sysrq</code> = 1(모두 허용, <code>CONFIG_MAGIC_SYSRQ_DEFAULT_ENABLE=0x1</code>). 0으로 껐는데도 마지막 <code>t</code>가 실행됐다(<code>Show State</code>). 이 마스크는 <strong>키보드·시리얼 입력에만 적용</strong>되고, root가 쓰는 <code>/proc/sysrq-trigger</code>는 항상 허용된다(<code>__handle_sysrq(key, check_mask=false)</code> — 예제 7 백트레이스의 <code>check_mask=false</code>가 바로 이것).</li><li>양산 장비에서는 시리얼 BREAK 한 번으로 재부팅(<code>b</code>)되는 것이 위험하니 <code>kernel.sysrq</code> 값을 비트마스크로 줄이거나 <code>CONFIG_MAGIC_SYSRQ_SERIAL_SEQUENCE</code>로 BREAK 뒤 특정 문자열을 요구하게 만든다.</li></ul>
+<hr>
+<h2 id="7-실전-인터럽트-핸들러에서-멈춘-cpu를-프로브를-꽂아서-찾기">7. 실전 — 인터럽트 핸들러에서 멈춘 CPU를 "프로브를 꽂아서" 찾기<a class="anchor" href="#7-실전-인터럽트-핸들러에서-멈춘-cpu를-프로브를-꽂아서-찾기" aria-label="link">#</a></h2>
+<h3 id="7-1-시나리오">7.1 시나리오<a class="anchor" href="#7-1-시나리오" aria-label="link">#</a></h3>
+<p>센서 키트 보드가 가끔 "반쯤" 얼어붙는다. 콘솔에 lockup 경고 한 줄이 나오고 끝이다. 유력 용의자는 IMU 드라이버의 IRQ 핸들러가 상태 비트를 무한히 기다리는 것. 이것을 모듈 <code>m4_hang</code>으로 재현한다: CPU1에 고정된 hrtimer 콜백(hardirq 문맥)이 절대 안 오는 "HW ready"를 스핀으로 기다린다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// m4_hang.c - an hrtimer callback (hardirq context) that spins on CPU1
+#include &lt;linux/module.h&gt;
+#include &lt;linux/hrtimer.h&gt;
+#include &lt;linux/smp.h&gt;
+
+static int m4_release;          /* set to 1 from the debugger to unstick */
+static struct hrtimer m4_timer;
+
+static noinline void m4_wait_hw_ready(void)
+{
+	/* pretend: wait for a status bit that never comes */
+	while (!READ_ONCE(m4_release))
+		cpu_relax();
+}
+
+static enum hrtimer_restart m4_timer_fn(struct hrtimer *t)
+{
+	pr_info("m4_hang: timer fired on cpu %d, spinning\n", smp_processor_id());
+	m4_wait_hw_ready();
+	pr_info("m4_hang: released\n");
+	return HRTIMER_NORESTART;
+}
+
+static void m4_arm(void *unused)
+{
+	hrtimer_start(&amp;m4_timer, ms_to_ktime(100), HRTIMER_MODE_REL_PINNED);
+}
+
+static int __init m4_init(void)
+{
+	hrtimer_setup(&amp;m4_timer, m4_timer_fn, CLOCK_MONOTONIC, HRTIMER_MODE_REL_PINNED);
+	return smp_call_function_single(1, m4_arm, NULL, 1);
+}
+
+static void __exit m4_exit(void)
+{
+	hrtimer_cancel(&amp;m4_timer);
+}
+module_init(m4_init);
+module_exit(m4_exit);
+MODULE_DESCRIPTION("M4 debugger demo");
+MODULE_LICENSE("GPL");</code></pre></figure>
+<p>(<code>hrtimer_setup()</code>은 최근 커널에서 <code>hrtimer_init()</code> + <code>.function</code> 대입을 대체한 API다. 6.18 트리에서 경고 없이 빌드됐다.)</p>
+<h3 id="7-2-예제-11-나중에-붙기-no-s-jtag을-hung-보드에-꽂는-것과-같다">7.2 예제 11 — 나중에 붙기 (no <code>-S</code>): JTAG을 hung 보드에 꽂는 것과 같다<a class="anchor" href="#7-2-예제-11-나중에-붙기-no-s-jtag을-hung-보드에-꽂는-것과-같다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: QEMU를 <code>-S</code> 없이 <code>-gdb tcp::12404</code>만 주고 띄운다(gdb 서버는 열려 있지만 아무도 안 붙음). 게스트가 lockup 경고를 낸 뒤에 gdb를 붙여 어느 CPU가 어디서 도는지, IRQ 마스크 상태, 그리고 디버거로 변수를 바꿔 풀어 주기까지 한다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># e5.gdb (attach after "hard LOCKUP" appears on the console)
+set pagination off
+set confirm off
+target remote :12404
+source /var/tmp/M4/kb/vmlinux-gdb.py
+info threads
+thread 2
+bt 6
+p/x $cpsr
+printf "DAIF.I (IRQ masked) = %d\n", ($cpsr &gt;&gt; 7) &amp; 1
+lx-symbols /var/tmp/M4/mod
+info symbol $pc
+bt 8
+python import re; o=gdb.execute("maint print msymbols -objfile /var/tmp/M4/mod/m4_hang.ko", to_string=True); a=re.search(r"([0-9a-f]{16}) m4_release", o).group(1); gdb.execute("set $rel = 0x" + a)
+printf "m4_release @ %#lx = %d\n", $rel, *(int *)$rel
+set var *(int *)$rel = 1
+detach
+quit</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>cpu_do_idle () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/idle.c:32
+32		arm_cpuidle_restore_irq_context(&amp;context);
+  Id   Target Id                    Frame 
+* 1    Thread 1.1 (CPU#0 [halted ]) cpu_do_idle () at /var/lab/src/linux-6.18.55/arch/arm64/kernel/idle.c:32
+  2    Thread 1.2 (CPU#1 [running]) 0xffff80007bfa0080 in ?? ()
+[Switching to thread 2 (Thread 1.2)]
+#0  0xffff80007bfa0080 in ?? ()
+#0  0xffff80007bfa0080 in ?? ()
+#1  0xffff00003fdd7360 in ?? ()
+#2  0x000000022832e9b0 in ?? ()
+Backtrace stopped: previous frame identical to this frame (corrupt stack?)
+$1 = 0x600000c5
+DAIF.I (IRQ masked) = 1
+loading vmlinux
+scanning for modules in /var/tmp/M4/mod
+scanning for modules in /var/tmp/M4/kb
+loading @0xffff80007bfa0000: /var/tmp/M4/mod/m4_hang.ko
+m4_wait_hw_ready + 24 in section .text of /var/tmp/M4/mod/m4_hang.ko
+#0  0xffff80007bfa0080 in m4_exit () at m4_hang.c:30
+#1  0xffff80007bfa0114 in m4_timer_fn (t=&lt;optimized out&gt;) at m4_hang.c:19
+#2  0xffff8000801d2b88 in __run_hrtimer (cpu_base=0xffff00003fdd7300, base=0xffff00003fdd7340, timer=0xffff80007bfa2020 &lt;m4_timer&gt;, now=0xffff800083fb3e80, flags=192) at /var/lab/src/linux-6.18.55/kernel/time/hrtimer.c:1782
+#3  __hrtimer_run_queues (cpu_base=cpu_base@entry=0xffff00003fdd7300, now=now@entry=9264359856, flags=flags@entry=192, active_mask=active_mask@entry=15) at /var/lab/src/linux-6.18.55/kernel/time/hrtimer.c:1846
+#4  0xffff8000801d34b8 in hrtimer_interrupt (dev=&lt;optimized out&gt;) at /var/lab/src/linux-6.18.55/kernel/time/hrtimer.c:1908
+#5  0xffff8000813b68e4 in timer_handler (access=1, evt=&lt;optimized out&gt;) at /var/lab/src/linux-6.18.55/drivers/clocksource/arm_arch_timer.c:573
+#6  arch_timer_handler_virt (irq=&lt;optimized out&gt;, dev_id=&lt;optimized out&gt;) at /var/lab/src/linux-6.18.55/drivers/clocksource/arm_arch_timer.c:584
+#7  0xffff800080190aa8 in handle_percpu_devid_irq (desc=0xffff00000463ac00) at /var/lab/src/linux-6.18.55/kernel/irq/chip.c:915
+m4_release @ 0xffff80007bfa4048 = 0
+[Inferior 1 (process 1) detached]</code></pre></figure>
+<p>게스트 콘솔:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[   10.199451][    C1] m4_hang: timer fired on cpu 1, spinning
+[   37.117225][    C0] watchdog: CPU0: Watchdog detected hard LOCKUP on cpu 1
+[   37.117675][    C0] Modules linked in: m4_hang(OE)
+[   37.118795][    C0] Sending NMI from CPU 0 to CPUs 1:
+[  201.622694][    C1] m4_hang: released
+[  201.633805][    C1] NMI backtrace for cpu 1
+[  201.637914][    C1] CPU: 1 UID: 0 PID: 78 Comm: grep Tainted: G           OE       6.18.55-trace #1 PREEMPT 
+[  201.638332][    C1] pstate: 80000005 (Nzcv daif -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[  201.638393][    C1] pc : kallsyms_expand_symbol.constprop.0+0x48/0xc8
+[  201.638533][    C1] lr : update_iter+0x9c/0x238
+...
+ffff80007bfa4048 r m4_release	[m4_hang]
+guest: CPU0 still alive</code></pre></figure>
+<p>(레지스터 줄과 콜스택 대부분은 생략했다. 같은 실험을 두 번 돌린 것 중 두 번째 출력이다. 첫 번째 실행도 메시지 순서는 같았고, 그때 늦게 찍힌 CPU1 백트레이스는 <code>pc : _raw_spin_unlock_irq+0x20/0x60</code>, 콜스택 <code>run_timer_base</code> ← <code>run_timer_softirq</code> ← ... ← <code>seq_read</code>였다.)</p>
+<p>출력에서 볼 것 — 이것이 면접 답의 뼈대다:</p>
+<ol><li><strong><code>info threads</code> 한 줄로 범인 CPU가 나온다</strong>: CPU0은 idle(<code>halted</code>), CPU1은 <code>running</code> 상태로 모르는 주소 <code>0xffff80007bfa0080</code>(모듈 영역)에서 돈다.</li><li><strong>PSTATE <code>0x600000c5</code></strong>: DAIF의 I 비트(bit 7) = 1 → IRQ 마스크 상태. 하드 IRQ 문맥이라는 강력한 힌트. 모드 비트 <code>0x5</code> = EL1h(커널).</li><li><strong>심볼 로드 후</strong>: <code>m4_wait_hw_ready + 24</code>, 콜스택은 <code>handle_percpu_devid_irq</code> → <code>arch_timer_handler_virt</code> → <code>hrtimer_interrupt</code> → <code>__run_hrtimer(timer=&lt;m4_timer&gt;)</code> → <code>m4_timer_fn</code>. "타이머 IRQ 안에서 우리 콜백이 상태 비트를 기다린다"가 확정된다. (frame #0의 <code>m4_exit</code> 이름은 §4.4의 DWARF 함정이고 <code>info symbol</code>이 맞다.)</li><li><strong>소프트웨어 감시자는 어디까지 했나</strong>: buddy hard lockup 감지기(CPU0이 CPU1의 hrtimer 카운트가 안 늘어남을 봄)가 27초 만에 "hard LOCKUP on cpu 1"을 냈다. 그런데 백트레이스를 받으려고 보낸 "NMI"는 arm64에서 <code>CONFIG_ARM64_PSEUDO_NMI</code>가 꺼져 있어 <strong>일반 IPI</strong>다 — IRQ를 막은 CPU1은 못 받았다. CPU1의 백트레이스는 디버거가 풀어 준 뒤(201초)에야 찍혔고, 그때는 이미 다른 일을 하던 중이라 <strong>엉뚱한 콜스택</strong>이다. 두 실행에서 각각 <code>kallsyms_expand_symbol</code>(게스트의 <code>grep</code>이 <code>/proc/kallsyms</code>를 읽던 중)과 <code>run_timer_base</code>(타이머 softirq)가 찍혔다. 로그만 믿으면 엉뚱한 곳을 의심하게 된다.</li><li><strong>RCU stall은 안 떴다</strong>: CPU0이 idle이라 진행 중인 grace period가 없었던 것으로 보인다(stall은 GP가 진행 중일 때만 보고된다). "경고가 없다 ≠ 문제가 없다".</li><li><strong>디버거로 풀어 주기</strong>: <code>m4_release</code>의 주소를 ELF 심볼에서 찾아 1을 썼고, CPU1이 바로 <code>released</code>를 찍고 정상으로 돌아왔다. kallsyms에서 <code>m4_release</code>가 <code>r</code>(읽기 전용 데이터)로 나온 것에 주목하자. C 코드가 한 번도 안 쓰는 static 변수라 컴파일러가 <code>.rodata</code>에 넣었다. 커널 매핑상 쓰기 금지 페이지인데도 gdbstub은 물리 메모리에 바로 써서 성공했다. 실보드 JTAG에서 코어를 통한 쓰기(MMU 권한 검사 적용)라면 실패할 수 있고, MEM-AP(AXI-AP) 물리 쓰기는 성공한다.</li></ol>
+<p>kgdb로는 이 장면을 못 잡는다. SysRq-g는 CPU0에서 들어갈 수는 있지만 kgdb의 roundup IPI도 CPU1에 안 들어가서 CPU1의 레지스터를 못 얻는다(pseudo-NMI가 켜진 커널이면 상황이 낫다: <code>CONFIG_ARM64_PSEUDO_NMI=y</code> + <code>irqchip.gicv3_pseudo_nmi=1</code>, GICv3 필요). <strong>JTAG(여기서는 gdbstub)는 코어 자체를 세우니 문맥과 무관하게 PC를 본다.</strong> 이것이 "JTAG만 있는 보드에서 IRQ 핸들러 hang"의 정답 방향이다.</p>
+<hr>
+<h2 id="8-멈추면-생기는-일-시계-watchdog-스텝">8. 멈추면 생기는 일 — 시계, watchdog, 스텝<a class="anchor" href="#8-멈추면-생기는-일-시계-watchdog-스텝" aria-label="link">#</a></h2>
+<h3 id="8-1-그림으로-보기">8.1 그림으로 보기<a class="anchor" href="#8-1-그림으로-보기" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg">
+  <rect x="300" y="38" width="160" height="232" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-dasharray="4 3"/>
+  <text x="330" y="30" font-size="13">디버거 정지 60 s</text>
+  <text x="10" y="64" font-size="13">벽시계 (host)</text>
+  <line x1="120" y1="60" x2="640" y2="60" stroke="currentColor" stroke-width="2"/>
+  <text x="10" y="124" font-size="13">QEMU 가상 시계</text>
+  <line x1="120" y1="120" x2="300" y2="120" stroke="#e08a3c" stroke-width="2"/>
+  <line x1="300" y1="120" x2="460" y2="120" stroke="#e08a3c" stroke-width="1" stroke-dasharray="2 4"/>
+  <line x1="460" y1="120" x2="640" y2="120" stroke="#e08a3c" stroke-width="2"/>
+  <text x="330" y="140" font-size="12">시간이 안 흐름</text>
+  <text x="465" y="140" font-size="12">uptime 그대로, rtc만 점프</text>
+  <text x="10" y="184" font-size="13">kgdb: 카운터</text>
+  <line x1="120" y1="180" x2="640" y2="180" stroke="#4a7bd0" stroke-width="2"/>
+  <circle cx="460" cy="180" r="5" fill="#4a7bd0"/>
+  <text x="465" y="200" font-size="12">깨어나면 wq 경고 가능</text>
+  <text x="10" y="244" font-size="13">실보드 WDT</text>
+  <line x1="120" y1="240" x2="640" y2="240" stroke="#3f9a6b" stroke-width="2"/>
+  <line x1="150" y1="232" x2="150" y2="248" stroke="#3f9a6b" stroke-width="2"/>
+  <line x1="190" y1="232" x2="190" y2="248" stroke="#3f9a6b" stroke-width="2"/>
+  <line x1="230" y1="232" x2="230" y2="248" stroke="#3f9a6b" stroke-width="2"/>
+  <line x1="270" y1="232" x2="270" y2="248" stroke="#3f9a6b" stroke-width="2"/>
+  <line x1="390" y1="228" x2="410" y2="252" stroke="#d0564a" stroke-width="3"/>
+  <line x1="410" y1="228" x2="390" y2="252" stroke="#d0564a" stroke-width="3"/>
+  <text x="465" y="262" font-size="12">kick 없음 → 보드 리셋</text>
+  <text x="125" y="226" font-size="12">kick</text>
+</svg></figure>
+<p>그림 5 — 같은 60초 정지가 도구마다 다르게 보인다. QEMU gdbstub은 가상 시계까지 세운다. kgdb는 CPU만 세우고 시스템 카운터는 계속 간다. 실보드의 외부 watchdog은 아무도 kick하지 않으니 리셋을 건다.</p>
+<h3 id="8-2-예제-12-gdbstub으로-60초-세우면-게스트-시간은">8.2 예제 12 — gdbstub으로 60초 세우면 게스트 시간은?<a class="anchor" href="#8-2-예제-12-gdbstub으로-60초-세우면-게스트-시간은" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 게스트가 5초마다 uptime, 시스템 시간(<code>date</code>), PL031 RTC 시간을 찍는다. 35초 뒤 gdb로 세우고 호스트에서 60초 기다린 뒤 재개한다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># e4.gdb
+set pagination off
+set confirm off
+target remote :12404
+shell (sleep 35; kill -INT $PPID) &amp;
+continue
+shell date +%T; echo "host: halted for 60 s"; sleep 60; date +%T
+shell (sleep 60; kill -INT $PPID) &amp;
+continue</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>tick 0 uptime=4.22 date=07:40:31 rtc=07:40:31
+tick 1 uptime=9.28 date=07:40:36 rtc=07:40:36
+tick 2 uptime=14.33 date=07:40:41 rtc=07:40:41
+tick 3 uptime=19.41 date=07:40:46 rtc=07:40:46
+tick 4 uptime=24.50 date=07:40:51 rtc=07:40:51
+tick 5 uptime=29.57 date=07:40:56 rtc=07:40:56
+tick 6 uptime=34.66 date=07:41:02 rtc=07:42:01
+tick 7 uptime=39.75 date=07:41:07 rtc=07:42:07
+tick 8 uptime=44.80 date=07:41:12 rtc=07:42:12
+tick 9 uptime=49.91 date=07:41:17 rtc=07:42:17
+tick 10 uptime=55.01 date=07:41:22 rtc=07:42:22
+tick 11 uptime=60.08 date=07:41:27 rtc=07:42:27
+tick 12 uptime=65.21 date=07:41:32 rtc=07:42:32
+tick 13 uptime=70.29 date=07:41:37 rtc=07:42:37</code></pre></figure>
+<p>출력에서 볼 것: tick 5와 tick 6 사이에 60초를 세웠는데 <strong>uptime과 <code>date</code>는 5초만 늘었다</strong>. QEMU는 VM을 정지하면 가상 시계(<code>QEMU_CLOCK_VIRTUAL</code>, ARM generic timer의 기준)도 세우기 때문이다. 게스트 입장에서는 정지가 "없었던 일"이라 lockup 경고도 없다(이 실행의 dmesg에 lockup·stall 줄이 없었다). 그런데 RTC(PL031)는 호스트 시간을 따라가서 <strong>07:40:56 → 07:42:01로 점프</strong>했다. 그 뒤로 시스템 시간과 RTC가 1분 어긋난 채로 간다. 디버깅 뒤 NTP·로그 타임스탬프가 이상하면 이것이다.</p>
+<h3 id="8-3-실보드와-kgdb에서는">8.3 실보드와 kgdb에서는<a class="anchor" href="#8-3-실보드와-kgdb에서는" aria-label="link">#</a></h3>
+<ul><li><strong>kgdb</strong>: CPU는 멈춰도 ARM 시스템 카운터(<code>CNTVCT</code>)는 계속 간다. 깨어나면 커널이 "60초 동안 아무 일도 안 했다"를 본다. 그래서 kgdb는 나갈 때 softlockup·clocksource·RCU 감시를 리셋하지만, 예제 8처럼 workqueue 감시는 못 막았다. 네트워크 상대(TCP keepalive, CAN 버스의 heartbeat 상대 MCU)는 당연히 타임아웃된다.</li><li><strong>JTAG 실보드</strong>: 코어를 세워도 SoC의 system counter는 기본적으로 계속 간다. ARM 일반 타이머 사양에는 디버그 정지 신호가 오면 카운터를 멈추는 설정(CNTCR의 HDBG 비트, CoreSight CTI로 halt 신호를 연결해야 함)이 있지만 SoC 통합에 따라 쓸 수 있는지가 다르다. 확인하고 쓴다.</li><li><strong>외부 watchdog</strong>: SoC WDT나 PMIC watchdog은 코어가 멈추면 kick을 못 받아 보드를 리셋한다. 디버깅 전에 끄거나(<code>nowayout</code> 아닌 경우 <code>/dev/watchdog</code> 닫기, DT에서 disable, PMIC 설정) 디버그 정지 시 WDT도 정지시키는 SoC 레지스터(많은 SoC에 "debug halt 시 WDT freeze" 비트가 있다)를 쓴다. SSD 컨트롤러 시절의 "JTAG 붙이면 WDT 끄고 시작"과 똑같다.</li></ul>
+<h3 id="8-4-단일-스텝-stepi-이-이상할-때">8.4 단일 스텝(stepi)이 이상할 때<a class="anchor" href="#8-4-단일-스텝-stepi-이-이상할-때" aria-label="link">#</a></h3>
+<p>커널을 <code>stepi</code>로 한 명령씩 가면 그 사이에 타이머 IRQ가 떠서 "다음 명령"이 IRQ 벡터가 되는 일이 생긴다. QEMU gdbstub은 기본값으로 이것을 막는다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>maint packet qqemu.sstepbits
+maint packet qqemu.sstep
+info registers ID_AA64DFR0_EL1</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>sending: qqemu.sstepbits
+received: "ENABLE=1,NOIRQ=2,NOTIMER=4"
+sending: qqemu.sstep
+received: "0x7"
+ID_AA64DFR0_EL1 0x10305106         271601926</code></pre></figure>
+<p>출력에서 볼 것: 현재 단일 스텝 모드 = 0x7 = ENABLE + NOIRQ(스텝 중 IRQ 안 받음) + NOTIMER(스텝 중 타이머 안 감). 실보드 JTAG에는 이런 마법이 없다 — OpenOCD는 Cortex-A에서 스텝 중 인터럽트 마스킹 옵션(<code>&lt;target&gt; aarch64 maskisr on</code>)을 제공하고, 그것도 안 되면 IRQ 진입 뒤 <code>finish</code>로 빠져나온다. 같은 출력의 <code>ID_AA64DFR0_EL1</code>이 §4.6의 브레이크포인트 6개/워치포인트 4개 근거다.</p>
+<p>preemption도 같은 종류의 함정이다. 한 함수 안에서 <code>next</code>를 하다가 그 task가 다른 CPU로 옮겨 가면 gdbstub(thread = CPU)에서는 "다른 thread가 브레이크포인트를 쳤다"처럼 보인다. 브레이크포인트에 조건을 거는 습관(<code>break m4_fill if $lx_current().pid == 78</code>)이 도움이 된다.</p>
+<hr>
+<h2 id="9-실제-보드의-jtag-coresight-openocd-trace32-가이드">9. 실제 보드의 JTAG — CoreSight, OpenOCD, TRACE32 (가이드)<a class="anchor" href="#9-실제-보드의-jtag-coresight-openocd-trace32-가이드" aria-label="link">#</a></h2>
+<h3 id="9-1-cortex-a의-디버그-구조">9.1 Cortex-A의 디버그 구조<a class="anchor" href="#9-1-cortex-a의-디버그-구조" aria-label="link">#</a></h3>
+<p>Cortex-M의 SWD는 "DAP → AHB-AP → 코어 디버그 레지스터와 메모리"가 거의 전부였다. Cortex-A SoC는 CoreSight라는 디버그·트레이스 부품 묶음이다.</p>
+<figure class="chart"><svg viewBox="0 0 660 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="15" width="220" height="40" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="32" y="40" font-size="13">PC: gdb / TRACE32 GUI</text>
+  <rect x="20" y="80" width="340" height="40" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="32" y="105" font-size="13">프로브: J-Link · TRACE32 · FTDI+OpenOCD</text>
+  <line x1="130" y1="57" x2="130" y2="77" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+  <line x1="130" y1="122" x2="130" y2="175" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+  <text x="140" y="150" font-size="12">JTAG (TCK/TMS/TDI/TDO) 또는 SWD</text>
+  <rect x="10" y="160" width="640" height="232" rx="8" fill="none" stroke="currentColor" stroke-dasharray="4 3"/>
+  <text x="560" y="178" font-size="12">SoC</text>
+  <rect x="30" y="180" width="200" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="42" y="205" font-size="13">DAP (Debug Port)</text>
+  <rect x="30" y="250" width="130" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="42" y="275" font-size="13">APB-AP</text>
+  <rect x="30" y="320" width="150" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="42" y="345" font-size="13">AXI-AP (MEM-AP)</text>
+  <line x1="95" y1="222" x2="95" y2="247" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+  <line x1="60" y1="222" x2="60" y2="317" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+  <rect x="200" y="240" width="140" height="60" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="212" y="262" font-size="13">A53 core 0</text>
+  <text x="212" y="284" font-size="12">debug · CTI · ETM</text>
+  <rect x="350" y="240" width="140" height="60" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="362" y="262" font-size="13">A53 core 1</text>
+  <text x="362" y="284" font-size="12">debug · CTI · ETM</text>
+  <line x1="162" y1="270" x2="197" y2="270" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+  <text x="165" y="236" font-size="12">Debug APB</text>
+  <rect x="505" y="240" width="140" height="60" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="515" y="262" font-size="13">Funnel → ETF</text>
+  <text x="515" y="284" font-size="12">ETR · TPIU 핀</text>
+  <line x1="492" y1="270" x2="502" y2="270" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+  <rect x="200" y="320" width="290" height="40" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="212" y="345" font-size="12">시스템 버스 → DRAM·주변장치 (물리 주소)</text>
+  <line x1="182" y1="340" x2="197" y2="340" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+  <rect x="505" y="320" width="140" height="56" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="515" y="342" font-size="12">debug 전원 도메인</text>
+  <text x="515" y="364" font-size="12">DBGEN/SPIDEN 퓨즈</text>
+</svg></figure>
+<p>그림 6 — Cortex-A SoC의 CoreSight 디버그 경로. APB-AP로 코어별 debug 레지스터(정지·재개·레지스터 읽기)와 CTI(코어 간 halt 신호 전달)·ETM(명령 트레이스)에 가고, AXI-AP로 시스템 버스에 직접 붙어 물리 메모리를 읽고 쓴다.</p>
+<p>부품 하나씩:</p>
+<ul><li><strong>DAP / DP</strong>: JTAG 또는 SWD를 받는 입구. Cortex-M과 같다.</li><li><strong>APB-AP → Debug APB</strong>: 코어마다 있는 외부 디버그 레지스터(EDSCR 등)에 접근한다. 디버거는 여기서 코어를 halt하고, <strong>코어에 명령을 주입해서</strong>(ITR) 레지스터와 메모리를 읽는다. 그래서 코어를 통한 메모리 읽기는 MMU 번역(가상 주소)과 캐시를 거친다.</li><li><strong>AXI-AP(MEM-AP)</strong>: 시스템 버스에 직접 붙는다. 물리 주소, 캐시를 안 거침(캐시에만 있는 dirty 데이터는 못 본다 — 정지한 코어의 D-cache를 먼저 clean해야 한다). 코어가 꺼져 있거나 hang이어도 DRAM을 읽을 수 있다.</li><li><strong>CTI/CTM</strong>: 한 코어가 halt되면 다른 코어도 같이 halt하게 신호를 연결한다(SMP halt). OpenOCD의 <code>target smp</code>가 이것을 쓴다.</li><li><strong>ETM + Funnel + ETF/ETR + TPIU</strong>: 명령 실행 흐름을 압축해서 기록한다. "hang 직전 1만 개 명령"을 볼 수 있다. ETR은 DRAM 버퍼, TPIU는 트레이스 핀으로 보낸다. Linux에도 CoreSight 드라이버(<code>perf record -e cs_etm//</code>)가 있다(M6와 연결).</li><li><strong>debug 전원 도메인</strong>: cpuidle이 코어를 끄면(PSCI CPU_SUSPEND의 power-down 상태) 그 코어의 debug 레지스터도 꺼져서 디버거가 "코어를 잃는다". 디버깅 중에는 <code>cpuidle.off=1</code>(또는 <code>nohlt</code>) 커널 인자로 깊은 idle을 막는다. Cortex-A의 OS Lock·OS Double Lock도 전원 관리 중 디버그 접근을 막는 장치다.</li><li><strong>보안</strong>: DBGEN(비보안 invasive debug), SPIDEN(secure invasive debug) 같은 인증 신호가 fuse나 TF-A 설정으로 꺼지면 JTAG로 코어를 못 세우거나 secure world(EL3, BL31)를 못 본다. 양산품에서 JTAG를 잠그는 이야기는 L5 §9.4.</li></ul>
+<h3 id="9-2-openocd-설정-cortex-a53-4코어-soc-예시-가이드-실행-안-함">9.2 OpenOCD 설정 — Cortex-A53 4코어 SoC 예시 (가이드, 실행 안 함)<a class="anchor" href="#9-2-openocd-설정-cortex-a53-4코어-soc-예시-가이드-실행-안-함" aria-label="link">#</a></h3>
+<p>OpenOCD는 VM에 설치돼 있지 않고 실보드도 없어 실행하지 않았다. 구조는 OpenOCD의 <code>tcl/target/*.cfg</code>(예: i.MX8M, RK3399 계열 설정)를 따른 것이다. <strong>디버그 베이스 주소는 SoC 매뉴얼의 CoreSight ROM table에서 확인해야 한다</strong>(아래 값은 형식 예시).</p>
+<figure class="code"><span class="lang">text</span><pre><code># board.cfg - Cortex-A53 x4 over JTAG (guide only, values are examples)
+adapter driver jlink
+transport select jtag
+adapter speed 4000
+reset_config trst_and_srst
+set _CHIPNAME soc
+jtag newtap $_CHIPNAME cpu -irlen 4 -expected-id 0x5ba00477
+dap create $_CHIPNAME.dap -chain-position $_CHIPNAME.cpu
+set _DBGBASE {0x80410000 0x80510000 0x80610000 0x80710000}
+set _CTIBASE {0x80420000 0x80520000 0x80620000 0x80720000}
+set _smp ""
+for { set i 0 } { $i &lt; 4 } { incr i } {
+    cti create $_CHIPNAME.cti$i -dap $_CHIPNAME.dap -ap-num 1 \
+        -baseaddr [lindex $_CTIBASE $i]
+    target create $_CHIPNAME.a53.$i aarch64 -dap $_CHIPNAME.dap -ap-num 1 \
+        -dbgbase [lindex $_DBGBASE $i] -cti $_CHIPNAME.cti$i
+    lappend _smp $_CHIPNAME.a53.$i
+}
+target smp {*}$_smp
+# physical memory through the AXI-AP, independent of the cores
+target create $_CHIPNAME.axi mem_ap -dap $_CHIPNAME.dap -ap-num 0</code></pre></figure>
+<p>쓰는 법(가이드):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>openocd -f board.cfg                       # gdb 서버 :3333 (코어마다 포트 하나씩 또는 smp면 하나)
+gdb-multiarch vmlinux -ex "target extended-remote :3333" \
+  -ex "source vmlinux-gdb.py" -ex "monitor halt" -ex "info threads" -ex "lx-dmesg"</code></pre></figure>
+<ul><li><code>target smp</code>로 묶으면 gdb에서 코어가 thread로 보이고 하나가 멈추면 CTI로 전부 멈춘다 — 이 노트의 gdbstub과 같은 모델이다.</li><li>호스트가 x86이면 <code>gdb-multiarch</code>(또는 <code>aarch64-linux-gnu-gdb</code>)가 필요하다. 이 VM은 arm64라 그냥 <code>gdb</code>를 썼다.</li><li><code>monitor halt</code>/<code>resume</code>, <code>monitor aarch64 maskisr on</code>(스텝 중 IRQ 마스크), <code>monitor &lt;target&gt; mdw phys 0x...</code>(물리 메모리)처럼 OpenOCD 명령은 <code>monitor</code>로 보낸다.</li><li>KASLR, 모듈 심볼, <code>lx-*</code>는 §3~§4와 완전히 같다. 달라지는 것은 시간(§8.3)과 전원(§9.1)이다.</li></ul>
+<h3 id="9-3-lauterbach-trace32-linux-awareness-가이드-실행-안-함">9.3 Lauterbach TRACE32 — Linux awareness (가이드, 실행 안 함)<a class="anchor" href="#9-3-lauterbach-trace32-linux-awareness-가이드-실행-안-함" aria-label="link">#</a></h3>
+<p>TRACE32는 상용 디버거로, 실리콘 벤더 bring-up 팀이 많이 쓴다. 강점은 <strong>OS awareness</strong>(Linux task 목록, 프로세스별 MMU 공간, 모듈 자동 심볼)와 ETM 트레이스 분석이다. 스크립트(PRACTICE, <code>.cmm</code>)의 대략적인 모양은 다음과 같다. 명령 이름은 TRACE32 문서 기준이지만 awareness 파일 경로와 세부 옵션은 TRACE32 버전과 설치 폴더(<code>~~/demo/arm64/kernel/linux/</code>)마다 달라 확인이 필요하다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>; linux_attach.cmm (guide only)
+SYStem.RESet
+SYStem.CPU CortexA53
+SYStem.CONFIG.CoreNumber 4.
+CORE.ASSIGN 1. 2. 3. 4.
+SYStem.Option.MMUSPACES ON          ; separate address spaces per process
+SYStem.Mode Attach                  ; attach to a running board, no reset
+Break
+Data.LOAD.Elf vmlinux /NoCODE       ; symbols only, the code is already in RAM
+TASK.CONFIG ~~/demo/arm64/kernel/linux/awareness/linux.t32
+MENU.ReProgram ~~/demo/arm64/kernel/linux/awareness/linux.men
+TASK.List.tasks                     ; like lx-ps
+sYmbol.AutoLOAD.CHECKLINUX "do ~~/demo/arm64/kernel/linux/awareness/autoload.cmm "</code></pre></figure>
+<ul><li><code>SYStem.Mode Attach</code>가 "hung 보드에 리셋 없이 붙기"(§7)다. <code>SYStem.Up</code>은 리셋하고 붙는다.</li><li><code>/NoCODE</code>: 코드는 이미 RAM에 있으니 심볼만 읽는다.</li><li><code>sYmbol.AutoLOAD</code>가 <code>lx-symbols</code>처럼 모듈 심볼을 주소 맞춰 자동으로 읽는다.</li><li>Segger J-Link는 프로브로서 OpenOCD나 J-Link GDB Server와 같이 쓴다. Cortex-A 지원은 있지만 Linux awareness는 TRACE32만큼 깊지 않다.</li></ul>
+<hr>
+<h2 id="10-커널-안에서는-무슨-일이-일어나나">10. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#10-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<p>디버거들이 커널의 어디와 만나는지 경로로 정리한다.</p>
+<div class="tw"><table><thead><tr><th>사건</th><th>커널 경로</th><th>관련 노트</th></tr></thead><tbody><tr><td>gdbstub/JTAG halt</td><td>커널은 모른다. CPU가 debug state로 들어가고 나온다</td><td>C6 §2</td></tr><tr><td><code>hbreak</code>/<code>watch</code> (JTAG, gdbstub)</td><td>외부에서 debug 레지스터(DBGBVR/DBGWVR)를 직접 프로그램</td><td>—</td></tr><tr><td>커널 자체의 hw breakpoint</td><td><code>arch/arm64/kernel/hw_breakpoint.c</code>, perf의 <code>PERF_TYPE_BREAKPOINT</code></td><td>M6</td></tr><tr><td>kgdb 브레이크포인트</td><td><code>kgdb_arch_set_breakpoint()</code> → text patching으로 BRK 쓰기 → 실행 시 <code>el1h_64_sync</code> → <code>do_el1_brk64</code> → <code>call_el1_break_hook</code> → <code>kgdb_brk_handler</code></td><td>E6(예외 진입), M3(BRK 즉치값)</td></tr><tr><td>kgdb 진입</td><td><code>kgdb_handle_exception()</code> → <code>kgdb_cpu_enter()</code> → <code>kgdb_roundup_cpus()</code>(IPI) → <code>gdb_serial_stub()</code> 또는 <code>kdb_stub()</code></td><td>F7(IRQ·IPI)</td></tr><tr><td>kgdb I/O</td><td><code>kgdboc</code> → <code>tty_driver-&gt;ops-&gt;poll_get_char/poll_put_char</code></td><td>I-모듈(tty/serial)</td></tr><tr><td>SysRq</td><td><code>/proc/sysrq-trigger</code> → <code>write_sysrq_trigger()</code> → <code>__handle_sysrq(key, false)</code> / UART BREAK → <code>uart_handle_break()</code> → <code>uart_handle_sysrq_char()</code> → <code>handle_sysrq()</code></td><td>M1(콘솔), L7(<code>c</code>)</td></tr><tr><td><code>t</code>, <code>w</code></td><td><code>show_state_filter()</code> → task마다 <code>sched_show_task()</code></td><td>F5(스케줄러)</td></tr><tr><td><code>l</code></td><td><code>trigger_all_cpu_backtrace()</code> → <code>nmi_trigger_cpumask_backtrace()</code> → arm64는 IPI(또는 pseudo-NMI)</td><td>F7</td></tr><tr><td>lockup 감시</td><td><code>kernel/watchdog.c</code>(softlockup + buddy hardlockup), <code>kernel/workqueue.c</code>(<code>wq_watchdog_timer_fn</code>), RCU stall(<code>kernel/rcu/tree_stall.h</code>)</td><td>N1, F6</td></tr><tr><td>모듈 섹션</td><td><code>load_module()</code> → <code>mod_sysfs_setup()</code> → <code>/sys/module/&lt;m&gt;/sections/</code> (<code>module_sect_attrs</code>) → <code>do_init_module()</code></td><td>E3, M3</td></tr></tbody></table></div>
+<p>드라이버를 쓸 때 다시 만나는 지점:</p>
+<ul><li><strong>UART 드라이버를 쓴다면</strong>(H/I 모듈) <code>poll_get_char</code>/<code>poll_put_char</code>를 구현해야 그 보드에서 kgdb를 쓸 수 있다. BREAK 처리(<code>uart_handle_break</code>)를 빼먹으면 serial SysRq가 안 된다.</li><li><strong>IRQ 핸들러</strong>(G·H 모듈)에서 폴링 루프를 돌 때는 반드시 타임아웃을 둔다(<code>readl_poll_timeout_atomic()</code>). §7의 hang이 정확히 타임아웃 없는 폴링이다.</li><li><strong>watchdog 드라이버</strong>(I 모듈 watchdog)는 디버그 정지 중 freeze 비트를 지원하면 DT 속성이나 모듈 파라미터로 노출해 두면 bring-up 팀이 고마워한다.</li></ul>
+<hr>
+<h2 id="11-embedded-실무에서-다시-보기">11. Embedded 실무에서 다시 보기<a class="anchor" href="#11-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="11-1-센서-키트-bring-up-커널이-earlycon-이후-침묵">11.1 센서 키트 bring-up: 커널이 earlycon 이후 침묵<a class="anchor" href="#11-1-센서-키트-bring-up-커널이-earlycon-이후-침묵" aria-label="link">#</a></h3>
+<p>U-Boot <code>Starting kernel ...</code> 뒤 아무 출력이 없다(C6 §5, M1). JTAG로 붙어 <code>monitor halt</code> → PC를 본다. PC가 물리 주소면 MMU 전에 죽은 것(§3.3 방식으로 심볼을 옮겨 읽는다). 가상 주소면 <code>lx-dmesg</code>로 로그 버퍼를 읽는다 — 콘솔 드라이버만 안 떴을 뿐 커널은 많이 진행했을 수 있다. KASLR이면 §3.4로 오프셋부터.</p>
+<h3 id="11-2-imu-드라이버의-간헐-hang-7의-실물판">11.2 IMU 드라이버의 간헐 hang (§7의 실물판)<a class="anchor" href="#11-2-imu-드라이버의-간헐-hang-7의-실물판" aria-label="link">#</a></h3>
+<p>현장 로그에 "hard LOCKUP on cpu 2"만 남는다. pseudo-NMI 없는 arm64라면 그 CPU의 백트레이스는 신뢰할 수 없다(§7의 4번). 재현 장비에 JTAG를 꽂고 <code>SYStem.Mode Attach</code>/OpenOCD halt → CPU2의 PC → IRQ 핸들러의 폴링 루프. 수정은 <code>readl_poll_timeout_atomic()</code> + 에러 경로. 재발 감시로는 <code>CONFIG_ARM64_PSEUDO_NMI</code> + <code>irqchip.gicv3_pseudo_nmi=1</code>을 켜서 다음에는 로그에 진짜 백트레이스가 남게 한다(성능 영향 측정 후).</p>
+<h3 id="11-3-필드-장비-jtag-없음-uart-하나">11.3 필드 장비: JTAG 없음, UART 하나<a class="anchor" href="#11-3-필드-장비-jtag-없음-uart-하나" aria-label="link">#</a></h3>
+<p>양산 장비는 JTAG fuse가 잠겨 있다(L5). 남는 것은 콘솔 UART와 Magic SysRq다. BREAK + <code>w</code>(D 상태 task), <code>l</code>, <code>t</code>를 받아 두고, 필요하면 <code>c</code>로 kdump/pstore를 남긴다(L7). 보안 정책상 kgdb·kdb는 양산 커널에서 끄는 것이 보통이다(<code>CONFIG_KGDB=n</code>) — 디버그 커널을 따로 빌드해 RMA 장비에서 쓴다.</p>
+<h3 id="11-4-메모리-오염-누가-dma-디스크립터를-덮었나">11.4 메모리 오염 — "누가 DMA 디스크립터를 덮었나"<a class="anchor" href="#11-4-메모리-오염-누가-dma-디스크립터를-덮었나" aria-label="link">#</a></h3>
+<p>SSD 펌웨어의 단골 버그가 Linux에서도 그대로 온다. 하드웨어 워치포인트는 CPU가 쓴 경우만 잡는다(예제 6). <strong>DMA 엔진이 덮은 경우는 워치포인트에 안 걸린다</strong> — 그때는 IOMMU fault 로그, KASAN(M8), 또는 디스크립터 앞뒤에 guard 패턴을 두고 주기적으로 검사하는 방법을 쓴다.</p>
+<hr>
+<h2 id="12-흔한-실수와-증상">12. 흔한 실수와 증상<a class="anchor" href="#12-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>KASLR 커널에 <code>vmlinux</code> 그대로</td><td>브레이크포인트 안 걸림, <code>?? ()</code> 투성이</td><td>부팅마다 커널이 옮겨짐</td><td><code>nokaslr</code>, 또는 <code>VBAR_EL1 − &amp;vectors</code>로 오프셋 구해 <code>symbol-file -o</code> (§3.4)</td></tr><tr><td>MMU 전 코드에 가상 주소 브레이크포인트</td><td>영원히 안 멈춤</td><td>PC가 물리 주소</td><td><code>symbol-file vmlinux -o &lt;phys−virt&gt;</code> + <code>hbreak</code> (§3.3)</td></tr><tr><td><code>Image</code>를 gdb에 줌</td><td>심볼 없음</td><td><code>Image</code>는 raw binary</td><td>같은 빌드의 <code>vmlinux</code></td></tr><tr><td>모듈 <code>.text</code>만 주고 <code>add-symbol-file</code></td><td>변수·줄 번호 엉뚱</td><td>섹션 주소 누락</td><td>sysfs <code>sections/</code> 전부 또는 <code>lx-symbols</code>. 그래도 이상하면 <code>info symbol</code>로 확인(§4.4)</td></tr><tr><td><code>lx-*</code>가 없음</td><td><code>Undefined command: "lx-dmesg"</code></td><td><code>scripts_gdb</code> 미빌드, <code>source</code> 안 함, auto-load 거부</td><td><code>make scripts_gdb</code>, <code>source vmlinux-gdb.py</code>(§2.2)</td></tr><tr><td>kgdb 접속을 너무 일찍 시도</td><td><code>Bogus trace status reply</code>, 쓰레기 패킷</td><td>kgdboc 등록 전 부팅 로그를 gdb가 읽음</td><td>"Waiting for connection" 확인 후 접속 (이 랩에서 실제로 겪음)</td></tr><tr><td>콘솔 UART로 kgdb gdb 모드</td><td>gdb 패킷과 printk가 섞여 끊김</td><td>한 포트 공유</td><td>별도 UART, kdb 사용, 또는 agent-proxy</td></tr><tr><td>UART 드라이버에 poll 콜백 없음</td><td><code>kgdboc: ... not supported</code> 류로 등록 실패</td><td><code>CONFIG_CONSOLE_POLL</code> 콜백 미구현</td><td>드라이버에 <code>poll_get_char/poll_put_char</code> 구현</td></tr><tr><td>디버거로 오래 멈춘 뒤 경고를 버그로 오인</td><td>workqueue lockup, RCU stall, NTP 점프</td><td>멈춘 동안 시간이 흐름(또는 RTC만 흐름)</td><td>정지 시간과 경고 시각 대조(§5.3, §8.2)</td></tr><tr><td>JTAG 중 보드 리셋</td><td>멈춘 지 몇 초 뒤 리셋</td><td>외부 WDT/PMIC watchdog</td><td>WDT 끄기, debug-halt freeze 비트</td></tr><tr><td>cpuidle 켠 채 JTAG</td><td>코어가 "사라짐", 접근 에러</td><td>코어 전원 도메인 off</td><td><code>cpuidle.off=1</code></td></tr></tbody></table></div>
+<hr>
+<h2 id="13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다<a class="anchor" href="#13-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> How would you debug a hang in an interrupt handler on a board where you only have JTAG?</p>
+<p><strong>A.</strong> 프로브를 리셋 없이 attach하고 모든 코어를 halt한다. 코어별 PC와 PSTATE를 본다. IRQ 마스크(DAIF.I=1)인 채로 한 코어가 같은 루프를 돌고 있으면 그게 범인이다. <code>vmlinux</code>를 KASLR 오프셋에 맞춰 로드하고, 모듈이면 섹션 주소로 심볼을 올려 PC를 함수와 줄로 바꾼 뒤, 콜스택으로 어떤 IRQ에서 들어왔는지 확인한다. 이때 커널 로그는 믿기 어렵다. pseudo-NMI가 없는 arm64에서는 IRQ가 막힌 코어에 백트레이스 IPI가 안 들어가서 엉뚱한 스택이 찍힐 수 있기 때문이다. 고칠 때는 폴링에 타임아웃을 넣는다.</p>
+<blockquote><p>I'd attach the probe without resetting the board and halt all cores. Then I look at each core's PC and PSTATE. If one core has IRQs masked and keeps looping in the same few instructions, that's the culprit. I load vmlinux at the KASLR offset, plus the module symbols at their section addresses, and walk the stack to see which interrupt brought us there. I wouldn't trust the kernel's own lockup backtrace much. On arm64 without pseudo-NMI, the backtrace IPI can't reach a core that has interrupts masked, so you can get a stack from much later. The fix is usually a bounded poll, like readl_poll_timeout_atomic, with a real error path.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "JTAG도 없으면?" → buddy hardlockup 감지 + pseudo-NMI를 켠 커널로 재현하거나, SysRq <code>l</code>로 다른 CPU 상태, 그리고 의심 루프에 GPIO 토글을 넣어 scope로 본다(M11).</p>
+<p><strong>Q.</strong> kgdb vs JTAG — when would you use which?</p>
+<p><strong>A.</strong> kgdb는 커널 안에 있는 gdb stub이라 UART 하나면 되고 프로브도 필요 없다. 그 대신 커널이 예외를 처리할 수 있을 만큼 살아 있어야 하고, 폴링 UART 드라이버가 필요하며, kgdboc가 등록되기 전의 초기 부팅이나 IRQ가 막힌 코어는 못 본다. JTAG는 실리콘이 코어를 세우니 리셋 첫 명령부터, 그리고 어떤 문맥이든 볼 수 있다. ETM 트레이스와 물리 메모리 직접 접근도 된다. 하지만 핀·프로브·SoC 설정(디버그 전원, 보안 fuse)이 필요하다. 필드 장비나 접근이 어려운 보드에는 kgdb/kdb, bring-up과 hang 분석에는 JTAG를 쓴다.</p>
+<blockquote><p>kgdb is a gdb stub inside the kernel, so all you need is a serial port. The catch is that the kernel has to be healthy enough to take the debug exception. You also need a UART driver with polling hooks, and you can't see anything before kgdboc registers, or any core with interrupts masked. JTAG stops the core in silicon. It works from the very first instruction after reset and in any context, and you get physical memory access and ETM trace on top. The price is the probe, the debug header, and the SoC setup: debug power domains, and security fuses that are often blown on production parts. So I'd use JTAG for bring-up and hard hangs, and kgdb or kdb on boards where I only have a console.</p></blockquote>
+<p><strong>Q.</strong> What is Magic SysRq and what would you use it for on an embedded device?</p>
+<p><strong>A.</strong> 커널에 직접 들어가는 비상 키다. <code>/proc/sysrq-trigger</code>나 시리얼 BREAK 뒤 한 글자로 쓴다. 장비가 멈췄을 때 <code>w</code>로 D 상태 task 콜스택, <code>l</code>로 CPU별 백트레이스, <code>t</code>로 전체 task, <code>m</code>으로 메모리를 뽑는다. <code>c</code>는 kdump·pstore 테스트용 강제 panic, <code>s</code>·<code>u</code>·<code>b</code>는 안전한 재부팅 순서, <code>g</code>는 kgdb 진입이다. <code>kernel.sysrq</code> 마스크는 키보드·시리얼에만 적용되고 <code>/proc/sysrq-trigger</code>는 root면 항상 된다. 양산품에서는 BREAK 한 번으로 재부팅되지 않게 마스크나 sequence를 설정한다.</p>
+<blockquote><p>It's an emergency interface straight into the kernel. You trigger it by writing a letter to /proc/sysrq-trigger, or by sending a serial BREAK followed by a key. When a device hangs, I'd grab w first for blocked tasks with their stacks, then l for per-CPU backtraces, t for every task, and m for memory. c forces a panic, which is handy for testing kdump or pstore. s, u, b is the safe reboot order, and g drops into kgdb. One detail: the kernel.sysrq mask only applies to keyboard and serial input. Root can always use /proc/sysrq-trigger. On production units I'd restrict the mask so that a stray BREAK on the console can't reboot the box.</p></blockquote>
+<p><strong>Q.</strong> How do you get symbols for a loadable module in gdb?</p>
+<p><strong>A.</strong> <code>.ko</code>는 섹션 주소가 0인 relocatable ELF이고, 실제 주소는 insmod 때 정해진다. <code>/sys/module/&lt;이름&gt;/sections/</code>의 <code>.text</code>, <code>.data</code>, <code>.bss</code> 등을 <code>add-symbol-file</code>에 넘기거나 <code>lx-symbols</code>를 쓰면 <code>struct module</code>의 섹션 정보를 읽어 자동으로 하고, <code>do_init_module</code>에 브레이크포인트를 걸어 새 모듈도 따라간다. init 함수를 디버깅하려면 insmod 전에 이것을 걸어 둔다. 실제로 해 보니 gdb 버전에 따라 DWARF 주소가 틀리게 나올 수 있어서 <code>info symbol</code>이나 kallsyms로 교차 확인한다.</p>
+<blockquote><p>A .ko is a relocatable ELF with every section at address zero. The real addresses only get decided when insmod loads it. You can pass .text, .data, .bss and so on from /sys/module/name/sections to add-symbol-file. Or you use lx-symbols, which reads the section addresses out of struct module and hooks do_init_module, so modules loaded later get picked up too. To debug a module's init function, set that up before insmod. One lesson from practice: I've seen gdb get DWARF addresses wrong for modules, so I always cross-check with info symbol or /proc/kallsyms.</p></blockquote>
+<p><strong>Q.</strong> What changes when you halt a Linux system in a debugger, compared to halting an MCU?</p>
+<p><strong>A.</strong> OS가 시간을 본다. 멈춘 동안 시스템 카운터가 계속 가면 깨어날 때 softlockup·RCU stall·workqueue lockup 경고, 타임아웃, 네트워크 끊김이 생긴다. kgdb는 일부 감시만 리셋한다. 외부 watchdog은 보드를 리셋한다. QEMU는 가상 시계까지 세워서 경고는 없지만 RTC만 점프한다. 그 밖에 cpuidle로 꺼진 코어는 디버거에서 사라지고, 스텝 중 타이머 IRQ가 끼어들며, preemption 때문에 task가 다른 CPU로 옮겨 간다.</p>
+<blockquote><p>The OS keeps track of time. If the system counter keeps running while you're halted, you resume into softlockup, RCU stall and workqueue lockup warnings, plus timeouts and dropped connections. kgdb resets some of those detectors, but not the workqueue one. An external watchdog will just reset the board. QEMU stops its virtual clock, so you get no warnings, but the RTC jumps. Beyond time, cores that cpuidle has powered down disappear from the debugger, timer interrupts get in the way when you single-step, and with preemption your task can move to another CPU between two steps.</p></blockquote>
+<p><strong>Q.</strong> How do you debug the kernel before the MMU is turned on?</p>
+<p><strong>A.</strong> 그 구간은 물리 주소에서 돈다. 하드웨어 브레이크포인트를 쓰고, <code>vmlinux</code>를 "물리 로드 주소 − 링크 주소" 오프셋으로 다시 로드하면 심볼 이름으로 걸 수 있다. MMU를 켜는 <code>__enable_mmu</code> 뒤에도 잠시 idmap 위에서 물리 주소로 돌다가 가상 주소로 점프하니, 그 지점에서 원래 심볼로 바꾼다. 메모리는 물리로 직접 읽는다(MEM-AP, QEMU <code>xp</code>).</p>
+<blockquote><p>Until the MMU is on, the code runs at physical addresses. I use hardware breakpoints, and I reload vmlinux with an offset of physical load address minus link address, so I can still break by symbol name. Right after __enable_mmu the code keeps running on the identity map for a moment, still at physical addresses. Then it branches to the virtual __primary_switched, and that's where I switch back to the normal symbols. For memory I read physical addresses directly, through the MEM-AP on real hardware or with xp on QEMU.</p></blockquote>
+<p><strong>Q.</strong> Your kernel prints "hard LOCKUP on cpu 1" but the backtrace looks unrelated. Why?</p>
+<p><strong>A.</strong> arm64에서 pseudo-NMI가 꺼져 있으면 "NMI backtrace"는 사실 일반 IPI다. IRQ가 막힌 CPU는 그 IPI를 마스크가 풀린 뒤에야 처리해서, 백트레이스는 hang이 풀린 뒤의 엉뚱한 문맥이 찍힌다. 이 노트의 실험에서도 hang은 hrtimer 콜백에 있었는데 로그 백트레이스는 나중에 돈 <code>run_timer_base</code>나 kallsyms 읽기를 가리켰다. pseudo-NMI를 켜거나 JTAG로 본다.</p>
+<blockquote><p>On arm64 without pseudo-NMI, the "NMI backtrace" is really an ordinary IPI. A CPU with interrupts masked only takes it once the mask is lifted, so the backtrace you get is from whatever it was doing after the hang cleared. I reproduced exactly that: the hang was in an hrtimer callback, but the logged backtrace pointed at code that ran later, like run_timer_base in one run and a kallsyms read in another. You fix the visibility by enabling pseudo-NMI, with CONFIG_ARM64_PSEUDO_NMI and irqchip.gicv3_pseudo_nmi=1, or you look at the core with JTAG.</p></blockquote>
+<hr>
+<h2 id="14-직접-해보기">14. 직접 해보기<a class="anchor" href="#14-직접-해보기" aria-label="link">#</a></h2>
+<ol class="tasks"><li><strong>개념</strong>: 예제 2에서 <code>$lx_current()</code>가 <code>swapper/1</code>이었다. kgdb(예제 7)에서는 같은 헬퍼가 실패했다. 두 환경에서 gdb "thread"가 무엇을 뜻하는지 설명하라. 정답/힌트: gdbstub/JTAG는 thread = CPU, kgdb는 thread = task(+ shadowCPU 가짜 thread). 헬퍼는 thread 번호를 CPU 번호로 쓴다.</li><li><strong>코드 과제</strong>: 예제 6을 응용해 <code>m4_s.buf[0]</code>을 <strong>읽는</strong> 코드를 잡는 read watchpoint(<code>rwatch -l</code>)를 걸어 보라. 몇 번째 명령에서 멈추나? 정답/힌트: <code>m4_tick</code>의 <code>return m4_s.guard</code>는 <code>guard</code>를 읽으니 <code>rwatch -l *(int *)0xffff80007bfa2030</code>이 500 ms마다 멈춘다. 워치포인트 4개 한도 안에서 쓴다.</li><li><strong>관찰</strong>: 예제 12를 <code>-icount shift=auto</code>나 <code>-rtc clock=vm</code> 옵션으로 다시 돌려 RTC 점프가 사라지는지 보라. 정답/힌트: <code>-rtc clock=vm</code>이면 RTC도 가상 시계를 따라가 점프가 없어야 한다(실행해서 확인).</li><li><strong>코드 과제</strong>: <code>m4_hang.c</code>의 루프를 <code>readl_poll_timeout_atomic()</code> 스타일(<code>ktime</code> 기반 타임아웃 10 ms + <code>pr_err</code>)로 고치고, hard lockup 경고가 사라지는지 확인하라. 정답/힌트: <code>#include &lt;linux/iopoll.h&gt;</code>의 <code>read_poll_timeout_atomic(READ_ONCE, v, v, 10, 10000, false, m4_release)</code> 형태를 쓸 수 있다.</li><li><strong>관찰</strong>: kdb에서 <code>ps A</code>, <code>bta</code>(모든 task 백트레이스), <code>summary</code>, <code>md</code> 대신 <code>mdp</code>(물리 주소)를 써 보라. 예제 3의 <code>0x40200000</code>을 <code>mdp</code>로 읽으면 무엇이 나오나? 정답/힌트: <code>MZ</code> 헤더 <code>4d 5a 40 fa ...</code> — <code>monitor xp</code> 결과와 같아야 한다.</li><li><strong>개념</strong>: 실보드 JTAG로 커널을 60초 멈췄다가 재개했더니 "rcu: INFO: rcu_preempt detected stalls"가 떴다. 버그인가? 확인 방법은? 정답/힌트: 정지 시각과 경고 시각을 비교한다. 정지 중 system counter가 흘렀으면 디버거 부작용. CNTCR.HDBG/CTI로 카운터 정지를 설정하거나 <code>rcupdate.rcu_cpu_stall_suppress=1</code>로 디버깅 동안 끈다.</li><li><strong>설계</strong>: 양산 장비에서 디버그 가능성과 보안을 둘 다 잡으려면? (JTAG, kgdb, SysRq 각각) 정답/힌트: JTAG는 fuse 잠금 + 인증 디버그(L5), kgdb는 양산 커널에서 <code>=n</code>·RMA용 디버그 커널, SysRq는 마스크 축소 + serial sequence.</li></ol>
+<hr>
+<h2 id="15-용어-사전">15. 용어 사전<a class="anchor" href="#15-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>gdbstub</td><td>gdb 원격 서버</td><td>gdb의 RSP 패킷을 받아 타깃을 조종하는 코드. QEMU 안(<code>-s -S</code>), 커널 안(kgdb), OpenOCD에 있다</td></tr><tr><td>RSP</td><td>Remote Serial Protocol</td><td><code>$packet#checksum</code> 형태의 gdb 원격 규약</td></tr><tr><td>kgdb</td><td>kernel gdb</td><td>커널 안의 gdb stub. 예외 시 모든 CPU를 세우고 UART로 gdb와 통신</td></tr><tr><td>kgdboc</td><td>kgdb over console</td><td>기존 tty 드라이버의 폴링 콜백을 빌려 쓰는 kgdb I/O 드라이버</td></tr><tr><td>kdb</td><td>kernel debugger shell</td><td>kgdb 코어 위의 사람용 명령 셸(<code>bt</code>, <code>ps</code>, <code>md</code>, <code>go</code>)</td></tr><tr><td><code>kgdbwait</code></td><td>부팅 인자</td><td>kgdboc 등록 즉시 정지하고 gdb를 기다림</td></tr><tr><td>Magic SysRq</td><td>비상 키</td><td>키 하나로 커널 상태 덤프·동작. <code>/proc/sysrq-trigger</code>, serial BREAK</td></tr><tr><td>serial BREAK</td><td>UART 신호</td><td>프레임보다 긴 low 구간. 다음 글자를 SysRq로 해석</td></tr><tr><td>KASLR</td><td>커널 주소 무작위화</td><td>부팅마다 커널 이미지를 무작위 오프셋에 둔다</td></tr><tr><td><code>scripts/gdb</code></td><td>gdb Python 헬퍼</td><td><code>lx-*</code> 명령과 <code>$lx_*</code> 함수. <code>CONFIG_GDB_SCRIPTS</code></td></tr><tr><td><code>lx-symbols</code></td><td>모듈 심볼 로더</td><td><code>struct module</code>에서 섹션 주소를 읽어 <code>add-symbol-file</code></td></tr><tr><td>hw breakpoint</td><td>하드웨어 브레이크포인트</td><td>디버그 레지스터 주소 비교. 메모리를 안 바꿈. A57은 6개</td></tr><tr><td>watchpoint</td><td>데이터 브레이크포인트</td><td>주소 접근(쓰기/읽기) 시 정지. A57은 4개</td></tr><tr><td>CoreSight</td><td>ARM 디버그·트레이스 구조</td><td>DAP, AP, CTI, ETM, Funnel, ETF/ETR, TPIU</td></tr><tr><td>DAP / AP</td><td>Debug Access Port / Access Port</td><td>프로브 입구 / 버스별 접근 창구(APB-AP, AXI-AP)</td></tr><tr><td>CTI</td><td>Cross Trigger Interface</td><td>코어 간 halt·restart 신호 전달</td></tr><tr><td>ETM</td><td>Embedded Trace Macrocell</td><td>명령 실행 흐름 트레이스</td></tr><tr><td>DBGEN / SPIDEN</td><td>디버그 인증 신호</td><td>비보안/보안 invasive debug 허용. fuse·TF-A가 제어</td></tr><tr><td>pseudo-NMI</td><td>arm64 가짜 NMI</td><td>GICv3 우선순위로 IRQ 마스크 중에도 받는 인터럽트. lockup 백트레이스에 필요</td></tr><tr><td>buddy hardlockup</td><td>하드 lockup 감지 방식</td><td>CPU가 이웃 CPU의 hrtimer 카운트 정체를 감시</td></tr><tr><td>idmap</td><td>identity map</td><td>가상 = 물리인 임시 매핑. MMU 켜는 순간 쓰임</td></tr></tbody></table></div>
+<hr>
+<h2 id="16-요약-체크리스트">16. 요약 &amp; 체크리스트<a class="anchor" href="#16-요약-체크리스트" aria-label="link">#</a></h2>
+<p>Linux 커널 디버거는 JTAG 경험 위에 세 가지를 더한 것이다. 첫째, <strong>주소</strong>: 커널은 가상 주소에서 돌고 KASLR로 옮겨지며, 모듈은 insmod 때 배치되니 <code>vmlinux</code>·<code>.ko</code> 심볼을 실제 주소에 맞춰 로드해야 한다(<code>nokaslr</code>, <code>symbol-file -o</code>, <code>lx-symbols</code>, 그리고 <code>info symbol</code>로 검증). 둘째, <strong>도구의 위치</strong>: QEMU gdbstub·JTAG는 커널 밖에서 코어를 세워 어떤 상태든 보지만, kgdb/kdb는 커널 안에 있어 UART 하나로 되는 대신 커널이 살아 있어야 하고 IRQ가 막힌 코어는 못 본다. Magic SysRq는 멈추지 않고 상태를 덤프하는 첫 번째 수단이다. 셋째, <strong>멈춤의 부작용</strong>: OS는 시간을 보므로 정지 후 watchdog·RCU·workqueue 경고, 외부 WDT 리셋, RTC 점프가 생긴다. 이 랩에서는 IRQ 핸들러 hang을 나중에 붙어서 PC·DAIF·콜스택으로 확정하고 변수를 바꿔 풀었다. 그리고 pseudo-NMI 없는 arm64의 lockup 백트레이스가 엉뚱한 문맥을 찍는 것을 직접 봤다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>MCU JTAG과 Linux 커널 디버깅의 차이(MMU·KASLR·SMP·시간·전원·보안)를 표로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>QEMU를 <code>-s -S</code>로 띄우고 <code>hbreak start_kernel</code>, <code>lx-dmesg</code>, <code>lx-ps</code>, <code>lx-lsmod</code>, <code>$lx_current()</code>, <code>$lx_per_cpu()</code>를 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>MMU 켜기 전 코드에 <code>symbol-file vmlinux -o &lt;phys−virt&gt;</code>로 심볼 이름 브레이크포인트를 걸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>KASLR 오프셋을 <code>VBAR_EL1</code>(또는 kallsyms)로 구해 심볼을 맞출 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>모듈 심볼을 <code>/sys/module/*/sections</code>나 <code>lx-symbols</code>로 올리고, 결과를 <code>info symbol</code>로 검증할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>하드웨어 워치포인트로 메모리를 덮어쓴 명령과 문맥을 잡을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>kgdb 구조(kgdboc 폴링, debug_core, roundup IPI, BRK)와 진입 경로 4가지를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>kgdboc=ttyS0 kgdbwait</code>로 gdb를 붙이고, SysRq-g와 serial BREAK로 kdb에 들어가 <code>bt</code>, <code>ps</code>, <code>lsmod</code>, <code>md</code>, <code>dmesg</code>, <code>go</code>를 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Magic SysRq의 <code>t w l p m q c s u b g</code>를 설명하고 <code>kernel.sysrq</code> 마스크와 <code>/proc/sysrq-trigger</code>의 차이를 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>IRQ 핸들러 hang을 디버거로 찾는 순서와, pseudo-NMI 없는 lockup 백트레이스를 왜 믿으면 안 되는지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>디버거 정지가 만드는 부작용(가상 시계·카운터·workqueue 경고·외부 WDT·cpuidle)을 구분할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Cortex-A SoC의 CoreSight 경로(DAP→APB-AP/AXI-AP→코어 debug·CTI·ETM)와 OpenOCD <code>target create ... aarch64</code> 설정의 뼈대를 설명할 수 있다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — "Debugging kernel and modules via gdb" (<code>Documentation/process/debugging/gdb-kernel-debugging.rst</code>): https://docs.kernel.org/process/debugging/gdb-kernel-debugging.html</li><li>docs.kernel.org — "Using kgdb, kdb and the kernel debugger internals" (<code>Documentation/process/debugging/kgdb.rst</code>): https://docs.kernel.org/process/debugging/kgdb.html</li><li>docs.kernel.org — "Linux Magic System Request Key Hacks" (<code>Documentation/admin-guide/sysrq.rst</code>): https://docs.kernel.org/admin-guide/sysrq.html</li><li>docs.kernel.org — "Softlockup detector and hardlockup detector" (<code>Documentation/admin-guide/lockup-watchdogs.rst</code>)</li><li>커널 소스(6.18.55): <code>kernel/debug/debug_core.c</code>(<code>dbg_touch_watchdogs</code>, <code>kgdb_cpu_enter</code>), <code>kernel/debug/gdbstub.c</code>, <code>kernel/debug/kdb/</code>, <code>drivers/tty/serial/kgdboc.c</code>, <code>arch/arm64/kernel/kgdb.c</code>, <code>drivers/tty/sysrq.c</code>(<code>sysrq_key_table</code>), <code>scripts/gdb/linux/symbols.py</code>, <code>arch/arm64/kernel/head.S</code> — https://elixir.bootlin.com/linux/v6.18/source</li><li>QEMU 문서 — "GDB usage": https://www.qemu.org/docs/master/system/gdb.html</li><li>OpenOCD User's Guide — "CPU Configuration", "Architecture and Core Commands"(ARMv8-A <code>aarch64</code>): https://openocd.org/doc/html/index.html</li><li>Arm — "CoreSight Architecture Specification", "Arm Architecture Reference Manual for A-profile"(External debug, Generic Timer 장) — developer.arm.com</li><li>Lauterbach — "Training Linux Debugging"/"RTOS Debugger for Linux" 문서 (TRACE32 설치 폴더 <code>~~/pdf/</code>, lauterbach.com)</li><li>관련 노트: C6 §2, E3, E6, F3, F7, L5 §9.4, L7, M1, M3 §6~7, M6, M8, M11, N1</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-17_M3_oops_decoding.html"><span class="dir">← 이전</span><span class="nm">M3. Oops·panic 해독 — 콜스택, PC/LR, addr2line, decode_stacktrace.sh, System.map, BUG/WARN</span></a><a class="next" href="2026-10-17_M5_ftrace.html"><span class="dir">다음 →</span><span class="nm">M5. ftrace — function/function_graph tracer, tracepoints, trace-cmd, KernelShark, irqsoff/wakeup tracer</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l2"><a href="#1-mcu-jtag에서-linux-커널로-무엇이-달라지나">1. MCU JTAG에서 Linux 커널로 — 무엇이 달라지나</a></li><li class="l3"><a href="#1-1-직관">1.1 직관</a></li><li class="l3"><a href="#1-2-차이-정리">1.2 차이 정리</a></li><li class="l3"><a href="#1-3-don-경험과-연결">1.3 Don 경험과 연결</a></li><li class="l2"><a href="#2-랩-준비-vmlinux-scripts-gdb-nokaslr">2. 랩 준비 — vmlinux, scripts/gdb, nokaslr</a></li><li class="l3"><a href="#2-1-세-가지-재료">2.1 세 가지 재료</a></li><li class="l3"><a href="#2-2-예제-1-scripts-gdb-헬퍼를-내-디렉터리에-빌드하기">2.2 예제 1 — scripts/gdb 헬퍼를 내 디렉터리에 빌드하기</a></li><li class="l3"><a href="#2-3-이-랩의-실행-패턴">2.3 이 랩의 실행 패턴</a></li><li class="l2"><a href="#3-qemu-gdbstub-이-랩의-jtag">3. QEMU gdbstub = 이 랩의 JTAG</a></li><li class="l3"><a href="#3-1-gdbstub-kgdb-jtag-누가-cpu를-세우나">3.1 gdbstub, kgdb, JTAG — 누가 CPU를 세우나</a></li><li class="l3"><a href="#3-2-예제-2-start_kernel에서-세우고-부팅-뒤-halt해서-lx-로-둘러보기">3.2 예제 2 — start_kernel에서 세우고, 부팅 뒤 Halt해서 lx-로 둘러보기</a></li><li class="l3"><a href="#3-3-예제-3-mmu-켜기-전-코드-물리-주소로-심볼-다시-로드하기">3.3 예제 3 — MMU 켜기 전 코드: 물리 주소로 심볼 다시 로드하기</a></li><li class="l3"><a href="#3-4-예제-4-kaslr-커널에-붙기-vbar_el1로-오프셋-구하기">3.4 예제 4 — KASLR 커널에 붙기: VBAR_EL1로 오프셋 구하기</a></li><li class="l3"><a href="#3-5-가상-주소와-물리-주소로-같은-메모리-읽기">3.5 가상 주소와 물리 주소로 같은 메모리 읽기</a></li><li class="l2"><a href="#4-모듈-디버깅-심볼-로딩과-워치포인트">4. 모듈 디버깅 — 심볼 로딩과 워치포인트</a></li><li class="l3"><a href="#4-1-직관-링크는-insmod-때-끝난다">4.1 직관 — 링크는 insmod 때 끝난다</a></li><li class="l3"><a href="#4-2-예제-5-테스트-모듈-언젠가-guard를-덮어쓰는-kthread">4.2 예제 5 — 테스트 모듈: 언젠가 guard를 덮어쓰는 kthread</a></li><li class="l3"><a href="#4-3-예제-6-lx-symbols-하드웨어-워치포인트로-덮어쓴-놈-잡기">4.3 예제 6 — lx-symbols + 하드웨어 워치포인트로 덮어쓴 놈 잡기</a></li><li class="l3"><a href="#4-4-이-랩에서-만난-함정-ko의-dwarf-주소가-섹션별로-안-맞는다">4.4 이 랩에서 만난 함정 — .ko의 DWARF 주소가 섹션별로 안 맞는다</a></li><li class="l3"><a href="#4-5-모듈-init-함수-디버깅">4.5 모듈 init 함수 디버깅</a></li><li class="l3"><a href="#4-6-하드웨어-vs-소프트웨어-브레이크포인트">4.6 하드웨어 vs 소프트웨어 브레이크포인트</a></li><li class="l2"><a href="#5-kgdb와-kdb-커널-안에-사는-디버거">5. kgdb와 kdb — 커널 안에 사는 디버거</a></li><li class="l3"><a href="#5-1-구조">5.1 구조</a></li><li class="l3"><a href="#5-2-예제-7-kgdb를-두-번째-uart-pci-16550-로-kgdbwait-sysrq-g-브레이크포인트">5.2 예제 7 — kgdb를 두 번째 UART(PCI 16550)로: kgdbwait, SysRq-g, 브레이크포인트</a></li><li class="l3"><a href="#5-3-예제-8-같은-세션의-대가-workqueue-lockup">5.3 예제 8 — 같은 세션의 대가: workqueue lockup</a></li><li class="l3"><a href="#5-4-예제-9-kdb-콘솔-uart-하나로-모두-하기-serial-break">5.4 예제 9 — kdb: 콘솔 UART 하나로 모두 하기 + serial BREAK</a></li><li class="l3"><a href="#5-5-kgdb-명령줄-정리">5.5 kgdb 명령줄 정리</a></li><li class="l2"><a href="#6-magic-sysrq-멈추지-않고-상태를-뽑는-키">6. Magic SysRq — 멈추지 않고 상태를 뽑는 키</a></li><li class="l3"><a href="#6-1-직관">6.1 직관</a></li><li class="l3"><a href="#6-2-자주-쓰는-키-drivers-tty-sysrq-c의-sysrq_key_table-6-18">6.2 자주 쓰는 키 (drivers/tty/sysrq.c의 sysrq_key_table, 6.18)</a></li><li class="l3"><a href="#6-3-예제-10-proc-sysrq-trigger로-투어하기">6.3 예제 10 — /proc/sysrq-trigger로 투어하기</a></li><li class="l2"><a href="#7-실전-인터럽트-핸들러에서-멈춘-cpu를-프로브를-꽂아서-찾기">7. 실전 — 인터럽트 핸들러에서 멈춘 CPU를 "프로브를 꽂아서" 찾기</a></li><li class="l3"><a href="#7-1-시나리오">7.1 시나리오</a></li><li class="l3"><a href="#7-2-예제-11-나중에-붙기-no-s-jtag을-hung-보드에-꽂는-것과-같다">7.2 예제 11 — 나중에 붙기 (no -S): JTAG을 hung 보드에 꽂는 것과 같다</a></li><li class="l2"><a href="#8-멈추면-생기는-일-시계-watchdog-스텝">8. 멈추면 생기는 일 — 시계, watchdog, 스텝</a></li><li class="l3"><a href="#8-1-그림으로-보기">8.1 그림으로 보기</a></li><li class="l3"><a href="#8-2-예제-12-gdbstub으로-60초-세우면-게스트-시간은">8.2 예제 12 — gdbstub으로 60초 세우면 게스트 시간은?</a></li><li class="l3"><a href="#8-3-실보드와-kgdb에서는">8.3 실보드와 kgdb에서는</a></li><li class="l3"><a href="#8-4-단일-스텝-stepi-이-이상할-때">8.4 단일 스텝(stepi)이 이상할 때</a></li><li class="l2"><a href="#9-실제-보드의-jtag-coresight-openocd-trace32-가이드">9. 실제 보드의 JTAG — CoreSight, OpenOCD, TRACE32 (가이드)</a></li><li class="l3"><a href="#9-1-cortex-a의-디버그-구조">9.1 Cortex-A의 디버그 구조</a></li><li class="l3"><a href="#9-2-openocd-설정-cortex-a53-4코어-soc-예시-가이드-실행-안-함">9.2 OpenOCD 설정 — Cortex-A53 4코어 SoC 예시 (가이드, 실행 안 함)</a></li><li class="l3"><a href="#9-3-lauterbach-trace32-linux-awareness-가이드-실행-안-함">9.3 Lauterbach TRACE32 — Linux awareness (가이드, 실행 안 함)</a></li><li class="l2"><a href="#10-커널-안에서는-무슨-일이-일어나나">10. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#11-embedded-실무에서-다시-보기">11. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#11-1-센서-키트-bring-up-커널이-earlycon-이후-침묵">11.1 센서 키트 bring-up: 커널이 earlycon 이후 침묵</a></li><li class="l3"><a href="#11-2-imu-드라이버의-간헐-hang-7의-실물판">11.2 IMU 드라이버의 간헐 hang (§7의 실물판)</a></li><li class="l3"><a href="#11-3-필드-장비-jtag-없음-uart-하나">11.3 필드 장비: JTAG 없음, UART 하나</a></li><li class="l3"><a href="#11-4-메모리-오염-누가-dma-디스크립터를-덮었나">11.4 메모리 오염 — "누가 DMA 디스크립터를 덮었나"</a></li><li class="l2"><a href="#12-흔한-실수와-증상">12. 흔한 실수와 증상</a></li><li class="l2"><a href="#13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#14-직접-해보기">14. 직접 해보기</a></li><li class="l2"><a href="#15-용어-사전">15. 용어 사전</a></li><li class="l2"><a href="#16-요약-체크리스트">16. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

@@ -1,0 +1,1620 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>L4. OTA 업데이트 — A/B 파티션 · bootcount 롤백 · RAUC/SWUpdate/Mender</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="L/2026-10-17_L4_ota_update">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">L. 시스템 · OTA · 보안 · L4. OTA 업데이트 — A/B 파티션 · bootcount 롤백 · RAUC/SWUpdate/Mender</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">L. 시스템 · OTA · 보안 · System, OTA, Security</div>
+      <h1>L4. OTA 업데이트 — A/B 파티션 · bootcount 롤백 · RAUC/SWUpdate/Mender</h1>
+      <div class="meta"><span>199분 읽기</span><span>2132줄</span><span>72개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: OTA가 지켜야 할 요구사항(원자성 · 전원 차단 내성 · 롤백 · 진위 · 대역폭 · 다운타임 · 저장 비용)으로 전략(single-copy+recovery, A/B, OSTree, 컨테이너, delta)을 고를 수 있다 · "비활성 슬롯에 쓰기 → 한 번만 시도 → bootcount → health check → commit 아니면 altbootcmd 롤백"이라는 boot-commit 프로토콜을 U-Boot 소스와 실제 콘솔 로그로 설명할 수 있다 · RAUC 번들을 직접 서명·검증·변조해 보고, 게스트 안에서 설치 → 시험 부팅 → <code>mark-good</code> 확정, 깨진 업데이트 → 자동 롤백, 쓰기 도중 전원 차단 → 기존 슬롯 부팅을 재현할 수 있다 · "1만 대 필드 장비 OTA를 설계하라"에 구조를 갖춰 답할 수 있다 <strong>왜 필요한가</strong>: 필드 장비(드론 · 로봇 · 카메라)를 다루는 회사의 Embedded Linux 면접에서 거의 반드시 나오는 설계 질문이다 — "업데이트 중에 전원이 나가면?", "업데이트가 '성공'이라는 건 누가 어떻게 판단하나?", "부트로더는 어떻게 업데이트하나?". 실무에서는 첫 양산 전에 반드시 누군가 이걸 설계해야 하고, 잘못하면 장비 회수(RMA)로 돌아온다 <strong>Don 기준 난이도</strong>: SSD 펌웨어의 A/B 펌웨어 슬롯 · 활성 슬롯 전환(NVMe Firmware Commit) · 메타데이터 이중 기록 · 전원 차단 시험은 Don이 장치 쪽에서 해 본 일이다 / 새로 배울 부분은 같은 생각이 <strong>Linux 시스템 전체(부트로더 env · 커널 · rootfs · 데이터 · 서버 · 수천 대 배포)</strong>로 커질 때 생기는 문제와 그걸 해결하는 도구(RAUC · SWUpdate · Mender) <strong>선행 노트</strong>: C3(U-Boot 사용 — env, <code>fw_setenv</code>), C2 §10(부트 미디어와 부트로더 이중화), J3(read-only root, dm-verity), J5(전원 차단 안전성 — fsync · rename), K3–K6(이미지 빌더). 같이 보면 좋은 노트: L1(systemd — 서비스 · watchdog), L5(secure boot · 서명 체인), L8(컨테이너 업데이트)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-업데이트-가-아니라-되돌릴-수-있는-전환">0. 큰 그림 — "업데이트"가 아니라 "되돌릴 수 있는 전환"<a class="anchor" href="#0-큰-그림-업데이트-가-아니라-되돌릴-수-있는-전환" aria-label="link">#</a></h2>
+<p>Don이 SSD 펌웨어에서 해 본 펌웨어 업데이트를 떠올려 보자. NVMe에는 <code>Firmware Image Download</code>와 <code>Firmware Commit</code>이 따로 있다. 호스트는 새 이미지를 <strong>비활성 슬롯</strong>에 조각조각 내려보내고(download), 다 받은 뒤 commit 명령으로 "다음 리셋부터 이 슬롯을 써라"를 지시한다. 컨트롤러는 새 이미지의 서명과 CRC를 확인하고, 활성 슬롯 포인터를 <strong>한 번의 원자적 메타데이터 기록</strong>으로 바꾼다. 새 펌웨어가 부팅에 실패하면 ROM/부트로더가 이전 슬롯으로 돌아간다. 다운로드 도중 전원이 나가도 활성 슬롯은 손대지 않았으니 장치는 그대로 산다.</p>
+<p>Embedded Linux의 OTA(Over-The-Air update)는 <strong>정확히 같은 생각</strong>이다. 다만 대상이 커진다.</p>
+<ul><li>슬롯 하나가 펌웨어 2 MB가 아니라 <strong>rootfs 수백 MB ~ 수 GB</strong>(커널 · 라이브러리 · 앱 전부)다.</li><li>"활성 슬롯 포인터"는 컨트롤러 메타데이터가 아니라 <strong>U-Boot 환경 변수</strong>(또는 GRUB env, EFI 변수, eMMC boot partition 설정)다.</li><li>"부팅 성공"의 판정이 어렵다. 커널이 떴다고 성공이 아니다. 카메라 드라이버가 올라오고, 앱이 서버에 붙고, 센서 데이터가 흐를 때 성공이다. 그 판정은 <strong>userspace의 health check</strong>가 한다.</li><li>장비 한 대가 아니라 <strong>수천 ~ 수만 대</strong>다. 서버, 단계적 배포, 실패율 모니터링, 서명 키 관리가 따라온다.</li></ul>
+<p>이 노트의 실습 랩 전체를 한 장으로 보면 이렇다. QEMU <code>virt</code> 보드에 U-Boot(직접 빌드, bootcount 활성) → GPT 디스크(rootA · rootB · data) → Ubuntu 24.04 + systemd rootfs 두 벌을 올리고, env는 NOR flash(pflash1)에 둔다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <text x="20" y="24" font-size="14">NOR flash (QEMU pflash1, 64 MiB)</text>
+  <rect x="20" y="34" width="150" height="54" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="95" y="56" text-anchor="middle" font-size="13">U-Boot env</text>
+  <text x="95" y="76" text-anchor="middle" font-size="12">0x4000000, 256 KiB</text>
+  <rect x="170" y="34" width="150" height="54" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="245" y="56" text-anchor="middle" font-size="13">(redund 사본)</text>
+  <text x="245" y="76" text-anchor="middle" font-size="12">0x4040000</text>
+  <text x="360" y="52" font-size="12">boot_slot=A · upgrade_available=0</text>
+  <text x="360" y="70" font-size="12">bootcount=0 · bootlimit=3</text>
+  <text x="360" y="88" font-size="12">l4_state_A=good · l4_state_B=good</text>
+  <text x="20" y="130" font-size="14">virtio 디스크 (GPT, 3000 MiB)</text>
+  <rect x="20" y="140" width="190" height="64" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="115" y="164" text-anchor="middle" font-size="13">p1 rootA (900 MiB)</text>
+  <text x="115" y="186" text-anchor="middle" font-size="12">ext4 · /boot/Image 포함</text>
+  <rect x="210" y="140" width="190" height="64" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="305" y="164" text-anchor="middle" font-size="13">p2 rootB (900 MiB)</text>
+  <text x="305" y="186" text-anchor="middle" font-size="12">ext4 · /boot/Image 포함</text>
+  <rect x="400" y="140" width="260" height="64" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="530" y="164" text-anchor="middle" font-size="13">p3 data (1.2 GiB)</text>
+  <text x="530" y="186" text-anchor="middle" font-size="12">번들 · rauc.status · 앱 데이터</text>
+  <rect x="20" y="248" width="170" height="50" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="105" y="270" text-anchor="middle" font-size="13">U-Boot</text>
+  <text x="105" y="288" text-anchor="middle" font-size="12">bootcount · altbootcmd</text>
+  <rect x="270" y="248" width="150" height="50" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="345" y="270" text-anchor="middle" font-size="13">Linux + systemd</text>
+  <text x="345" y="288" text-anchor="middle" font-size="12">l4-health.service</text>
+  <rect x="520" y="248" width="140" height="50" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="590" y="270" text-anchor="middle" font-size="13">RAUC 서비스</text>
+  <text x="590" y="288" text-anchor="middle" font-size="12">install · mark-good</text>
+  <line x1="190" y1="273" x2="266" y2="273" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="228" y="264" text-anchor="middle" font-size="12">booti</text>
+  <line x1="420" y1="273" x2="516" y2="273" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="468" y="264" text-anchor="middle" font-size="12">D-Bus</text>
+  <line x1="90" y1="248" x2="90" y2="92" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah1)"/>
+  <line x1="590" y1="248" x2="160" y2="92" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah1)"/>
+  <text x="430" y="234" font-size="12">fw_setenv (libubootenv)</text>
+</svg></figure>
+<p>그림 1 — 이 노트의 랩 구성. 슬롯 선택 상태(boot_slot · upgrade_available · bootcount)는 NOR flash의 U-Boot env에 있고(redundant 사본은 U-Boot 단독 실험 §4.6~4.7에서 쓰고, Linux까지 엮은 시나리오는 QEMU 제약 때문에 single-copy로 돌렸다 — §5.5), U-Boot와 Linux(RAUC의 custom backend가 부르는 <code>fw_setenv</code>)가 <strong>같은 블록</strong>을 읽고 쓴다. 커널은 각 rootfs 슬롯의 <code>/boot/Image</code>에 같이 들어 있어서 "커널 + rootfs"가 한 단위로 바뀐다.</p>
+<p>bare-metal로 비유하면 이렇다.</p>
+<div class="tw"><table><thead><tr><th>Don이 아는 것 (SSD FW)</th><th>Embedded Linux OTA</th></tr></thead><tbody><tr><td>FW slot 1 / slot 2</td><td>rootfs 파티션 A / B (커널 포함)</td></tr><tr><td>Firmware Image Download</td><td>RAUC/SWUpdate가 번들을 받아 비활성 슬롯에 기록</td></tr><tr><td>Firmware Commit (activate on next reset)</td><td><code>fw_setenv boot_slot=B upgrade_available=1</code></td></tr><tr><td>부트 ROM이 슬롯 헤더 CRC · 서명 확인</td><td>번들 CMS 서명 + dm-verity / sha256 (L5)</td></tr><tr><td>새 FW 부팅 실패 시 이전 슬롯</td><td>U-Boot <code>bootcount</code> &gt; <code>bootlimit</code> → <code>altbootcmd</code></td></tr><tr><td>메타데이터 이중 기록(A/B copy + seq)</td><td>U-Boot redundant env (두 벌 + flag 바이트)</td></tr><tr><td>전원 차단 시험(PLP 랙)</td><td>QEMU kill -9 / 전원 릴레이로 업데이트 도중 차단</td></tr></tbody></table></div>
+<hr>
+<h2 id="1-ota가-지켜야-할-일곱-가지-요구사항">1. OTA가 지켜야 할 일곱 가지 요구사항<a class="anchor" href="#1-ota가-지켜야-할-일곱-가지-요구사항" aria-label="link">#</a></h2>
+<p>"새 파일을 내려받아 덮어쓴다"는 개발 보드에서는 되지만 필드에서는 안 된다. 면접에서 OTA 설계를 물으면 먼저 <strong>요구사항을 나열</strong>하고 시작하는 것이 좋다. 그래야 뒤의 선택(A/B냐 recovery냐, full이냐 delta냐)이 근거를 가진다.</p>
+<div class="tw"><table><thead><tr><th>요구사항</th><th>뜻</th><th>깨지면 어떻게 되나</th><th>대표 해법</th></tr></thead><tbody><tr><td>원자성 (atomicity)</td><td>장비는 "전부 옛 버전" 또는 "전부 새 버전" 둘 중 하나로만 부팅한다</td><td>라이브러리는 새것, 앱은 옛것 → 이상한 크래시</td><td>이미지 단위 교체 + 마지막 한 번의 포인터 전환</td></tr><tr><td>전원 차단 내성</td><td>업데이트의 어느 순간에 전원이 나가도 부팅 가능</td><td>벽돌 → 현장 출동 · RMA</td><td>활성 슬롯은 절대 안 건드림, env 이중화</td></tr><tr><td>롤백</td><td>새 버전이 부팅 · 동작에 실패하면 자동으로 이전 버전</td><td>원격으로 고칠 방법이 없음</td><td>bootcount + health check + commit</td></tr><tr><td>진위 · 무결성</td><td>서명된 우리 이미지만 설치된다</td><td>공격자가 펌웨어를 바꿈</td><td>CMS/X.509 서명, dm-verity, anti-rollback (L5)</td></tr><tr><td>대역폭</td><td>LTE · 위성 링크 비용</td><td>장비당 수백 MB × 1만 대</td><td>delta, 압축, 청크 dedupe</td></tr><tr><td>다운타임</td><td>업데이트 중 장비가 일을 못 하는 시간</td><td>로봇이 30분 멈춤</td><td>백그라운드로 비활성 슬롯에 쓰고 재부팅 1회만</td></tr><tr><td>저장 비용</td><td>슬롯 두 벌 + 번들 임시 공간</td><td>eMMC 8 GB에 rootfs 3 GB면 A/B 불가</td><td>비대칭(recovery), 스트리밍 설치, 압축 rootfs</td></tr></tbody></table></div>
+<p>한 줄로 요약하면 <strong>"활성 슬롯은 건드리지 않는다, 전환은 마지막에 한 번, 성공 판정은 부팅 후 userspace가, 실패하면 부트로더가 되돌린다"</strong>이다. 이 노트 전체가 이 문장의 각 단어를 실제로 구현해 보는 것이다.</p>
+<h3 id="1-1-흔한-함정">1.1 흔한 함정<a class="anchor" href="#1-1-흔한-함정" aria-label="link">#</a></h3>
+<ul><li><strong>"패키지 매니저(apt)로 업데이트하면 되지 않나?"</strong> — apt는 패키지 수백 개를 하나씩 풀고 maintainer script를 돌린다. 도중에 전원이 나가면 반쯤 설치된 상태가 된다(K6 §7.2에서 본 dpkg 상태 DB). 원자성이 없다. 개발 장비나 Jetson 같은 "서버형" 장비에서는 쓰지만, 필드 장비의 기본 경로로는 피한다.</li><li><strong>"rootfs만 바꾸면 끝"</strong> — 커널, DTB, 부트로더, 펌웨어 blob(Wi-Fi · 모뎀 · MCU), 데이터 스키마가 같이 움직여야 할 때가 많다. 무엇이 슬롯 안에 들어가고(같이 롤백되고) 무엇이 밖에 있는지(롤백 안 됨)를 먼저 정해야 한다(§12).</li></ul>
+<hr>
+<h2 id="2-업데이트-전략-무엇을-얼마나-두-벌로-둘까">2. 업데이트 전략 — 무엇을 얼마나 두 벌로 둘까<a class="anchor" href="#2-업데이트-전략-무엇을-얼마나-두-벌로-둘까" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+  <text x="20" y="22" font-size="14">① single-copy + recovery (비대칭)</text>
+  <rect x="20" y="32" width="90" height="40" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="65" y="57" text-anchor="middle" font-size="12">recovery</text>
+  <rect x="110" y="32" width="380" height="40" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="300" y="57" text-anchor="middle" font-size="12">rootfs (하나)</text>
+  <rect x="490" y="32" width="170" height="40" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="575" y="57" text-anchor="middle" font-size="12">data</text>
+  <text x="20" y="92" font-size="12">작은 recovery(initramfs)로 재부팅해 rootfs를 덮어씀 · 저장 공간 최소 · 업데이트 중 장비 정지</text>
+  <text x="20" y="128" font-size="14">② symmetric A/B</text>
+  <rect x="20" y="138" width="235" height="40" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="137" y="163" text-anchor="middle" font-size="12">rootfs A (활성)</text>
+  <rect x="255" y="138" width="235" height="40" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="372" y="163" text-anchor="middle" font-size="12">rootfs B (여기에 기록)</text>
+  <rect x="490" y="138" width="170" height="40" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="575" y="163" text-anchor="middle" font-size="12">data</text>
+  <text x="20" y="198" font-size="12">동작 중에 비활성 슬롯에 쓰고 재부팅 1회 · 롤백 즉시 · 저장 공간 2배</text>
+  <text x="20" y="234" font-size="14">③ 파일 단위 (OSTree · 이미지 내 하드링크 트리)</text>
+  <rect x="20" y="244" width="470" height="40" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="255" y="269" text-anchor="middle" font-size="12">/ostree/repo — 객체 저장소 (deploy 1 · deploy 2가 객체를 공유)</text>
+  <rect x="490" y="244" width="170" height="40" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="575" y="269" text-anchor="middle" font-size="12">/var (data)</text>
+  <text x="20" y="304" font-size="12">바뀐 파일만 저장 · 전송 · 파일시스템 하나 · 부트로더 항목 전환으로 원자성</text>
+  <text x="20" y="338" font-size="12">④ 컨테이너: 베이스 OS는 ①~③ 중 하나, 앱은 이미지 레이어로 따로 교체 (L8)</text>
+</svg></figure>
+<p>그림 2 — 네 가지 기본 전략. 실제 제품은 이것들을 섞는다. 예: "베이스 OS는 A/B, 앱은 컨테이너", "A/B + 작은 recovery 파티션(둘 다 깨졌을 때 마지막 보루)".</p>
+<div class="tw"><table><thead><tr><th>전략</th><th>원자성 · 롤백</th><th>업데이트 중 다운타임</th><th>저장 비용</th><th>대표 도구 · 사례</th></tr></thead><tbody><tr><td>single-copy + recovery</td><td>recovery가 다시 쓰는 동안 실패하면 recovery로 재진입 (롤백 대상 없음)</td><td>길다 (recovery 부팅 + 전체 기록)</td><td>최소 (recovery 수십 MB)</td><td>SWUpdate "single copy" 모드, Android 옛 recovery</td></tr><tr><td>symmetric A/B</td><td>매우 좋음 (포인터 전환, 이전 슬롯 그대로)</td><td>재부팅 1회</td><td>rootfs × 2</td><td>RAUC, SWUpdate dual copy, Mender, Android A/B</td></tr><tr><td>asymmetric (A/B + recovery)</td><td>좋음 + 둘 다 깨지면 recovery</td><td>재부팅 1회</td><td>rootfs × 2 + recovery</td><td>국방 · 의료 장비, 큰 플릿</td></tr><tr><td>파일 단위 (OSTree)</td><td>좋음 (deploy 전환)</td><td>재부팅 1회</td><td>공유 객체라 작다</td><td>OSTree/libostree, Fedora IoT, Torizon OS</td></tr><tr><td>컨테이너</td><td>앱만 원자적, 베이스 OS는 따로</td><td>앱 재시작</td><td>이미지 레이어 공유</td><td>Podman/Docker, balena, AWS Greengrass (L8)</td></tr><tr><td>delta (어느 방식에든 덧붙임)</td><td>원본 슬롯이 정확해야 적용 가능</td><td>같음</td><td>같음 (전송량만 줄임)</td><td>rdiff, zchunk, casync/desync, RAUC adaptive, Mender delta</td></tr></tbody></table></div>
+<h3 id="2-1-single-copy-recovery">2.1 single-copy + recovery<a class="anchor" href="#2-1-single-copy-recovery" aria-label="link">#</a></h3>
+<p>eMMC 4 GB에 rootfs 3 GB인 장비처럼 두 벌을 둘 공간이 없으면 쓴다. 업데이트를 받으면 "recovery로 부팅하라"는 플래그를 쓰고 재부팅한다. recovery(작은 커널 + initramfs, SWUpdate 내장)가 rootfs 파티션 전체를 새 이미지로 덮어쓰고, 다 쓴 다음에 플래그를 지운다. 도중에 전원이 나가면 플래그가 남아 있으니 다시 recovery로 가서 처음부터 다시 쓴다. <strong>롤백은 없다</strong> — 새 버전이 기능적으로 망가졌으면 옛 이미지를 다시 받아 같은 과정을 밟아야 한다. 그래서 다운로드 자체가 끊기면 장비가 recovery에 머물게 되니, 이미지를 data 파티션에 먼저 다 받아 두고 검증한 뒤에 전환하는 경우가 많다.</p>
+<h3 id="2-2-symmetric-a-b">2.2 symmetric A/B<a class="anchor" href="#2-2-symmetric-a-b" aria-label="link">#</a></h3>
+<p>이 노트의 주인공이다. 장점은 (1) 장비가 동작하는 동안 백그라운드로 비활성 슬롯에 쓴다(다운타임 = 재부팅 한 번), (2) 이전 버전이 손대지 않은 채 남아 있어 롤백이 즉시다, (3) 비활성 슬롯 쓰기가 아무리 오래 걸려도 그 사이 전원 차단은 무해하다. 단점은 저장 공간 2배, 그리고 <strong>두 슬롯이 하나의 data 파티션을 공유</strong>하므로 데이터 스키마 마이그레이션 문제가 생긴다는 것(§12.1).</p>
+<h3 id="2-3-파일-단위-ostree">2.3 파일 단위 — OSTree<a class="anchor" href="#2-3-파일-단위-ostree" aria-label="link">#</a></h3>
+<p>OSTree는 "rootfs를 위한 git"이다. <code>/ostree/repo</code>에 내용 주소(content-addressed, sha256) 객체로 파일을 저장하고, 각 배포(deployment)는 그 객체들을 하드링크로 엮은 디렉터리 트리다. 새 커밋을 받으면 바뀐 객체만 내려받고, 새 deployment 트리를 만들고, 부트로더 설정(BLS 항목)을 원자적으로 바꾼다. 파일시스템 하나 안에서 두 버전이 객체를 공유하니 공간 효율이 좋다. 대신 파일시스템 자체가 깨지면 두 버전이 같이 죽고(블록 수준 A/B보다 고장 격리가 약하다), dm-verity 같은 블록 단위 무결성(J3)과 궁합이 덜 맞는다(composefs + fs-verity로 보완하는 흐름이 있다). 이 노트에서는 개념만 다룬다.</p>
+<h3 id="2-4-컨테이너-업데이트-l8로">2.4 컨테이너 업데이트 — L8로<a class="anchor" href="#2-4-컨테이너-업데이트-l8로" aria-label="link">#</a></h3>
+<p>앱을 컨테이너 이미지로 배포하면 앱 업데이트는 <code>podman pull</code> + 재시작이 된다. 베이스 OS(커널 · 드라이버 · 컨테이너 런타임) 업데이트는 여전히 이 노트의 방법이 필요하다. 자세한 것은 L8.</p>
+<h3 id="2-5-delta-업데이트">2.5 delta 업데이트<a class="anchor" href="#2-5-delta-업데이트" aria-label="link">#</a></h3>
+<p>전송량을 줄이는 기법이고, 위 전략 어느 것과도 섞인다. §13에서 실제로 재 본다.</p>
+<hr>
+<h2 id="3-boot-commit-프로토콜-업데이트의-심장">3. boot-commit 프로토콜 — 업데이트의 심장<a class="anchor" href="#3-boot-commit-프로토콜-업데이트의-심장" aria-label="link">#</a></h2>
+<p>모든 A/B 도구(RAUC, SWUpdate, Mender, Android update_engine)가 같은 프로토콜을 쓴다. 단어만 다르다.</p>
+<ol><li><strong>쓰기</strong>: 현재 A로 동작 중. 업데이트 에이전트가 번들을 검증하고, B 슬롯을 먼저 "bad"로 표시한 뒤(쓰는 도중에 B로 부팅하면 안 되니까) B에 이미지를 쓴다. 다 쓰면 다시 읽어 해시를 확인한다.</li><li><strong>한 번만 시도 표시</strong>: 부트로더 env에 "다음 부팅은 B, 단 시험(trial)이다"를 기록한다. 이 프로젝트의 env로는 <code>boot_slot=B</code>, <code>upgrade_available=1</code>, <code>bootcount=0</code>을 <strong>한 번의 env 쓰기</strong>로.</li><li><strong>재부팅</strong>: U-Boot가 env를 읽는다. <code>upgrade_available=1</code>이므로 <code>bootcount</code>를 1 올려 저장하고 B를 부팅한다.</li><li><strong>판정</strong>: B의 userspace가 올라와 health check를 돌린다. 핵심 서비스가 다 살아 있으면 <strong>commit</strong>: <code>upgrade_available=0</code>, <code>bootcount=0</code>. RAUC에서는 <code>rauc status mark-good</code>, 직접 하면 <code>fw_setenv upgrade_available 0</code>.</li><li><strong>실패 경로</strong>: 커널 panic, init 실패, watchdog 리셋, health check 실패 후 재부팅 — 어떤 이유로든 commit 없이 다시 U-Boot로 오면 <code>bootcount</code>가 또 오른다. <code>bootcount &gt; bootlimit</code>이 되는 순간 U-Boot는 <code>bootcmd</code> 대신 <strong><code>altbootcmd</code></strong>를 실행하고, 그 스크립트가 B를 bad로 표시하고 A로 되돌린다.</li></ol>
+<figure class="chart"><svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="30" width="170" height="60" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="105" y="55" text-anchor="middle" font-size="13">A 확정 (committed)</text>
+  <text x="105" y="75" text-anchor="middle" font-size="12">upgrade_available=0</text>
+  <rect x="255" y="30" width="170" height="60" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="55" text-anchor="middle" font-size="13">B 기록 중</text>
+  <text x="340" y="75" text-anchor="middle" font-size="12">l4_state_B=bad</text>
+  <rect x="490" y="30" width="170" height="60" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="575" y="55" text-anchor="middle" font-size="13">B 시험 대기</text>
+  <text x="575" y="75" text-anchor="middle" font-size="12">boot_slot=B, upg=1</text>
+  <rect x="490" y="170" width="170" height="60" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="575" y="195" text-anchor="middle" font-size="13">B 시험 부팅</text>
+  <text x="575" y="215" text-anchor="middle" font-size="12">bootcount=1..3</text>
+  <rect x="255" y="300" width="170" height="60" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="340" y="325" text-anchor="middle" font-size="13">B 확정 (committed)</text>
+  <text x="340" y="345" text-anchor="middle" font-size="12">mark-good, upg=0</text>
+  <rect x="20" y="170" width="170" height="60" rx="8" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="105" y="195" text-anchor="middle" font-size="13">롤백 → A</text>
+  <text x="105" y="215" text-anchor="middle" font-size="12">altbootcmd, B=bad</text>
+  <line x1="190" y1="60" x2="251" y2="60" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="222" y="50" text-anchor="middle" font-size="12">install</text>
+  <line x1="425" y1="60" x2="486" y2="60" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="456" y="50" text-anchor="middle" font-size="12">검증 OK</text>
+  <line x1="575" y1="90" x2="575" y2="166" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="583" y="134" font-size="12">reboot</text>
+  <path d="M640,230 C680,260 680,150 650,168" fill="none" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="600" y="258" font-size="12">panic · 리셋</text>
+  <line x1="530" y1="230" x2="420" y2="300" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="400" y="262" font-size="12">health OK</text>
+  <line x1="490" y1="200" x2="194" y2="200" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="340" y="190" text-anchor="middle" font-size="12">bootcount &gt; bootlimit</text>
+  <line x1="105" y1="170" x2="105" y2="94" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="113" y="134" font-size="12">A 부팅</text>
+  <path d="M340,90 C330,130 160,120 140,94" fill="none" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah2)"/>
+  <text x="250" y="130" text-anchor="middle" font-size="12">전원 차단 → 여전히 A</text>
+</svg></figure>
+<p>그림 3 — A/B 상태 기계. 상태는 전부 U-Boot env에 있다. 점선: B를 쓰는 도중 전원이 나가도 <code>boot_slot</code>은 아직 A이므로 그냥 A가 부팅된다. "B 확정"에서 다음 업데이트를 하면 역할이 바뀌어(A가 비활성) 같은 그림이 대칭으로 돈다.</p>
+<h3 id="3-1-왜-한-번만-시도-가-중요한가">3.1 왜 "한 번만 시도"가 중요한가<a class="anchor" href="#3-1-왜-한-번만-시도-가-중요한가" aria-label="link">#</a></h3>
+<p>Android 초기 A/B 설계에서 유명한 표현이 "tries remaining"이다. 새 슬롯에 시도 횟수를 주고, 부트로더가 부팅할 때마다 하나씩 깎고, 0이 되면 그 슬롯을 unbootable로 표시한다. RAUC의 U-Boot 스크립트 관례(<code>BOOT_ORDER="A B"</code>, <code>BOOT_A_LEFT=3</code>)도 같은 생각이다. 이 노트에서는 U-Boot 내장 기능인 <strong><code>bootcount</code>/<code>bootlimit</code>/<code>altbootcmd</code></strong>로 구현한다. 둘 다 본질은 같다: <strong>부트로더는 "시도했다"를 부팅 전에 비휘발 저장소에 적고, 성공 판정은 부팅 후 userspace가 그 기록을 지운다.</strong> 둘 중 하나라도 빠지면 무한 재부팅 루프나 영원히 돌아오지 않는 롤백이 된다.</p>
+<h3 id="3-2-부팅-성공-을-누가-판정하나">3.2 "부팅 성공"을 누가 판정하나<a class="anchor" href="#3-2-부팅-성공-을-누가-판정하나" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <text x="80" y="22" text-anchor="middle" font-size="13">RAUC (슬롯 A)</text>
+  <text x="250" y="22" text-anchor="middle" font-size="13">U-Boot env</text>
+  <text x="420" y="22" text-anchor="middle" font-size="13">U-Boot</text>
+  <text x="590" y="22" text-anchor="middle" font-size="13">Linux (슬롯 B)</text>
+  <line x1="80" y1="30" x2="80" y2="390" stroke="#888" stroke-dasharray="3 3"/>
+  <line x1="250" y1="30" x2="250" y2="390" stroke="#888" stroke-dasharray="3 3"/>
+  <line x1="420" y1="30" x2="420" y2="390" stroke="#888" stroke-dasharray="3 3"/>
+  <line x1="590" y1="30" x2="590" y2="390" stroke="#888" stroke-dasharray="3 3"/>
+  <line x1="80" y1="56" x2="246" y2="56" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="165" y="50" text-anchor="middle" font-size="12">set-state B bad</text>
+  <rect x="20" y="70" width="120" height="30" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="80" y="90" text-anchor="middle" font-size="12">B에 이미지 쓰기</text>
+  <line x1="80" y1="124" x2="246" y2="124" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="165" y="118" text-anchor="middle" font-size="12">boot_slot=B upg=1</text>
+  <line x1="80" y1="150" x2="416" y2="150" stroke="currentColor" stroke-dasharray="5 3" marker-end="url(#ah3)"/>
+  <text x="250" y="144" text-anchor="middle" font-size="12">reboot</text>
+  <line x1="420" y1="180" x2="254" y2="180" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="335" y="174" text-anchor="middle" font-size="12">bootcount++ 저장</text>
+  <line x1="420" y1="210" x2="586" y2="210" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="505" y="204" text-anchor="middle" font-size="12">booti (B)</text>
+  <rect x="530" y="226" width="120" height="44" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="590" y="244" text-anchor="middle" font-size="12">health check</text>
+  <text x="590" y="262" text-anchor="middle" font-size="12">서비스 · 센서</text>
+  <line x1="590" y1="296" x2="254" y2="296" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="420" y="290" text-anchor="middle" font-size="12">OK: mark-good → upg=0, bootcount=0</text>
+  <line x1="590" y1="340" x2="424" y2="340" stroke="#d0564a" stroke-dasharray="5 3" marker-end="url(#ah3)"/>
+  <text x="505" y="334" text-anchor="middle" font-size="12">실패: reboot</text>
+  <text x="420" y="370" text-anchor="middle" font-size="12">bootcount &gt; bootlimit → altbootcmd → A</text>
+</svg></figure>
+<p>그림 4 — boot-commit 시퀀스. 실선 화살표는 env 쓰기다. env 쓰기는 정확히 네 번(B=bad · B 시험 예약 · U-Boot의 bootcount++ · commit) 일어나고, 각 쓰기가 원자적이어야 한다(§4.6의 redundant env).</p>
+<p>판정 기준을 정하는 것이 실은 가장 어려운 설계 결정이다. 너무 느슨하면(커널만 뜨면 OK) 앱이 죽어 있는 버전이 확정되고, 너무 엄격하면(서버 연결까지 확인) 네트워크가 없는 현장에서 멀쩡한 업데이트가 롤백된다. 실무 감각으로는 이렇게 나눈다.</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>확인할 것</th><th>실패 시</th></tr></thead><tbody><tr><td>부트로더</td><td>커널 · DTB 로드, 서명 확인 (L5)</td><td>바로 <code>altbootcmd</code> 또는 다음 시도</td></tr><tr><td>커널</td><td>panic 없이 rootfs mount, init 실행</td><td><code>panic=5</code>로 재부팅 → bootcount</td></tr><tr><td>systemd</td><td>필수 유닛이 active, <code>systemctl is-system-running</code>이 degraded가 아님</td><td>재부팅 (commit 안 함)</td></tr><tr><td>앱 · 장치</td><td>카메라 <code>/dev/video0</code> 열림, IMU 데이터 흐름, 앱 자체 진단 OK</td><td>재부팅 또는 mark-bad</td></tr><tr><td>네트워크 · 서버</td><td>보통 <strong>판정에 넣지 않는다</strong> (현장 네트워크는 원래 끊긴다)</td><td>롤백 대신 서버에 보고만</td></tr><tr><td>시간</td><td>판정 전까지 하드웨어 watchdog을 살려 둔다 (L1)</td><td>행(hang)도 리셋 → bootcount</td></tr></tbody></table></div>
+<hr>
+<h2 id="4-u-boot-bootcount-부트로더-쪽-절반">4. U-Boot bootcount — 부트로더 쪽 절반<a class="anchor" href="#4-u-boot-bootcount-부트로더-쪽-절반" aria-label="link">#</a></h2>
+<h3 id="4-1-직관">4.1 직관<a class="anchor" href="#4-1-직관" aria-label="link">#</a></h3>
+<p>bootcount는 Don이 펌웨어에서 짜 봤을 법한 "부팅 시도 카운터"와 똑같다. 부트로더가 실행될 때마다 비휘발 카운터를 1 올리고, 앱이 "나 정상"이라고 할 때 0으로 지운다. 카운터가 한도를 넘으면 앱이 계속 정상 신호를 못 냈다는 뜻이니 대체 경로로 간다. U-Boot에서는 이게 Kconfig 옵션 몇 개와 env 변수 세 개(<code>bootcount</code>, <code>bootlimit</code>, <code>altbootcmd</code>)로 끝난다.</p>
+<h3 id="4-2-정의-kconfig와-env-변수">4.2 정의 — Kconfig와 env 변수<a class="anchor" href="#4-2-정의-kconfig와-env-변수" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>이름</th><th>종류</th><th>뜻</th></tr></thead><tbody><tr><td><code>CONFIG_BOOTCOUNT_LIMIT</code></td><td>Kconfig</td><td>bootcount 기능 전체 스위치</td></tr><tr><td><code>CONFIG_BOOTCOUNT_ENV</code></td><td>Kconfig</td><td>카운터를 <strong>env 변수 <code>bootcount</code></strong>에 저장 (<code>upgrade_available=1</code>일 때만 저장)</td></tr><tr><td><code>CONFIG_BOOTCOUNT_RAM</code> · <code>_GENERIC</code> · <code>_FS</code> · <code>_AM33XX</code> · <code>DM_BOOTCOUNT</code></td><td>Kconfig</td><td>카운터 저장 위치 대안 — 리셋에 살아남는 RAM, SoC 레지스터, RTC, 파일, I2C EEPROM 등</td></tr><tr><td><code>CONFIG_BOOTCOUNT_BOOTLIMIT</code></td><td>Kconfig</td><td><code>bootlimit</code>의 기본값 (이 랩: 3)</td></tr><tr><td><code>bootcount</code></td><td>env</td><td>현재 시도 횟수</td></tr><tr><td><code>bootlimit</code></td><td>env</td><td>허용 횟수. <code>bootcount &gt; bootlimit</code>이면 실패로 본다</td></tr><tr><td><code>upgrade_available</code></td><td>env</td><td><code>BOOTCOUNT_ENV</code> 전용 — 1일 때만 카운터를 저장한다 (§4.3)</td></tr><tr><td><code>altbootcmd</code></td><td>env</td><td>한도를 넘었을 때 <code>bootcmd</code> 대신 실행할 명령</td></tr></tbody></table></div>
+<p>저장 위치 선택이 중요하다. <code>BOOTCOUNT_ENV</code>는 <strong>부팅할 때마다 env 블록 전체를 지우고 다시 쓴다</strong>. NOR/eMMC 수명과 부팅 시간을 생각하면 매 부팅 쓰기는 부담이고, 그 쓰기 도중 전원이 나가면 env가 깨질 위험도 생긴다. 그래서 U-Boot는 <code>upgrade_available=1</code>일 때만 저장하는 꾀를 쓴다. 평소(업데이트 확정 상태)에는 env를 전혀 쓰지 않고, 업데이트 직후 시험 부팅 동안에만 쓴다. SoC에 리셋에도 살아남는 레지스터(i.MX의 SNVS, TI AM33xx RTC scratch 등)가 있으면 그쪽(<code>BOOTCOUNT_AM33XX</code>, <code>DM_BOOTCOUNT</code> 드라이버)이 더 좋다 — 쓰기 비용이 0이니 매 부팅 카운트해도 된다.</p>
+<h3 id="4-3-u-boot-소스로-확인-실제로-무엇을-하나">4.3 U-Boot 소스로 확인 — 실제로 무엇을 하나<a class="anchor" href="#4-3-u-boot-소스로-확인-실제로-무엇을-하나" aria-label="link">#</a></h3>
+<p>랩의 U-Boot 소스(<code>/var/lab/src/u-boot</code>, v2026.10)에서 env 백엔드 전체가 이 28줄이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* drivers/bootcount/bootcount_env.c (U-Boot v2026.10, 발췌 없이 전문) */
+#include &lt;env.h&gt;
+
+void bootcount_store(ulong a)
+{
+	int upgrade_available = env_get_ulong("upgrade_available", 10, 0);
+
+	if (upgrade_available) {
+		env_set_ulong("bootcount", a);
+		env_save();
+	}
+}
+
+ulong bootcount_load(void)
+{
+	int upgrade_available = env_get_ulong("upgrade_available", 10, 0);
+	ulong val = 0;
+
+	if (upgrade_available)
+		val = env_get_ulong("bootcount", 10, 0);
+
+	return val;
+}</code></pre></figure>
+<p>그리고 판정은 <code>include/bootcount.h</code>의 inline 함수, 호출은 <code>common/autoboot.c</code>의 <code>bootdelay_process()</code>다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* include/bootcount.h (발췌) */
+static inline int bootcount_error(void)
+{
+	unsigned long bootcount = bootcount_load();
+	unsigned long bootlimit = env_get_ulong("bootlimit", 10, 0);
+
+	if (bootlimit &amp;&amp; bootcount &gt; bootlimit) {
+		printf("Warning: Bootlimit (%lu) exceeded.", bootlimit);
+		if (!(gd-&gt;flags &amp; GD_FLG_SPL_INIT))
+			printf(" Using altbootcmd.");
+		printf("\n");
+		return 1;
+	}
+	return 0;
+}
+
+static inline void bootcount_inc(void)
+{
+	unsigned long bootcount = bootcount_load();
+	/* ... SPL 분기 생략 ... */
+	bootcount_store(++bootcount);
+	env_set_ulong("bootcount", bootcount);   /* RAM 사본은 항상 갱신 */
+}
+
+/* common/autoboot.c bootdelay_process() (발췌) */
+	bootcount_inc();
+	/* ... */
+	if (bootcount_error())
+		s = env_get("altbootcmd");
+	else
+		s = env_get("bootcmd");</code></pre></figure>
+<p>읽을 점 세 가지.</p>
+<ul><li><strong><code>bootcount &gt; bootlimit</code></strong> — 등호가 아니다. <code>bootlimit=3</code>이면 시험 부팅이 <strong>세 번</strong> 허용되고, 네 번째로 U-Boot에 들어왔을 때(카운터 4) <code>altbootcmd</code>가 돈다. 아래 실측 로그가 정확히 그렇다.</li><li><code>bootcount_inc()</code>는 <code>upgrade_available=0</code>이어도 RAM의 <code>bootcount</code>를 1로 만든다(저장은 안 함). 그래서 확정 상태에서도 U-Boot 콘솔에 <code>bootcount=1</code>이 보인다. 헷갈리지 말 것 — 플래시에는 0이 그대로 있다.</li><li><strong><code>altbootcmd</code>는 "되돌리는 방법"을 스스로 구현해야 한다.</strong> U-Boot는 그냥 다른 명령을 실행할 뿐이다. 슬롯을 바꾸고, <code>upgrade_available</code>과 <code>bootcount</code>를 지우고, <code>saveenv</code>까지 하는 것이 스크립트의 몫이다. 이걸 빠뜨리면 다음 부팅에도 또 <code>altbootcmd</code>가 돈다.</li></ul>
+<h3 id="4-4-예제-1-bootcount를-켠-u-boot-직접-빌드">4.4 예제 1 — bootcount를 켠 U-Boot 직접 빌드<a class="anchor" href="#4-4-예제-1-bootcount를-켠-u-boot-직접-빌드" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 랩 U-Boot 소스로 <code>qemu_arm64_defconfig</code>에 bootcount · redundant env · 필요한 명령을 얹어 별도 출력 디렉터리에 빌드한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat &gt; ~/.elinux_scratch/L4/l4_uboot.frag &lt;&lt;'EOF'
+CONFIG_BOOTCOUNT_LIMIT=y
+CONFIG_BOOTCOUNT_ENV=y
+CONFIG_BOOTCOUNT_BOOTLIMIT=3
+CONFIG_ENV_REDUNDANT=y
+CONFIG_ENV_ADDR_REDUND=0x4040000
+CONFIG_CMD_SETEXPR=y
+CONFIG_CMD_GPT=y
+CONFIG_CMD_PART=y
+CONFIG_CMD_BOOTCOUNT=y
+EOF
+cd /var/lab/src/u-boot
+make O=/var/tmp/L4/build qemu_arm64_defconfig
+cd /var/tmp/L4/build
+/var/lab/src/u-boot/scripts/kconfig/merge_config.sh -m .config ~/.elinux_scratch/L4/l4_uboot.frag
+make -C /var/lab/src/u-boot O=/var/tmp/L4/build olddefconfig
+grep -n "BOOTCOUNT\|ENV_REDUND\|ENV_ADDR\|ENV_IS_IN_FLASH" .config
+time make -C /var/lab/src/u-boot O=/var/tmp/L4/build -j2</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>202:CONFIG_BOOTCOUNT_BOOTLIMIT=3
+232:CONFIG_ENV_ADDR=0x4000000
+926:CONFIG_ENV_IS_IN_FLASH=y
+931:CONFIG_ENV_REDUNDANT=y
+933:CONFIG_ENV_ADDR_REDUND=0x4040000
+1030:CONFIG_BOOTCOUNT_LIMIT=y
+1033:CONFIG_BOOTCOUNT_ENV=y
+1036:CONFIG_BOOTCOUNT_ALTBOOTCMD=""
+...
+real	1m23.362s
+-rw-rw-r-- 1 donh donh 1515776 Oct 17 21:15 u-boot.bin</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: env는 <code>ENV_IS_IN_FLASH</code>로 NOR flash의 <code>0x4000000</code>(QEMU virt의 두 번째 pflash 뱅크 맨 앞, C3 §4)에, 이중화 사본은 바로 다음 256 KiB 섹터 <code>0x4040000</code>에 둔다. 옛 이름 <code>CONFIG_SYS_REDUNDAND_ENVIRONMENT</code>는 최신 U-Boot에서 <strong><code>CONFIG_ENV_REDUNDANT</code></strong>로 바뀌었다(C3 · C4 노트의 옛 이름은 이것과 같은 기능). 빌드 1분 23초는 TCG가 아니라 VM의 실제 컴파일 시간이다.</p>
+<h3 id="4-5-예제-2-u-boot만으로-bootcount-루프-재현">4.5 예제 2 — U-Boot만으로 bootcount 루프 재현<a class="anchor" href="#4-5-예제-2-u-boot만으로-bootcount-루프-재현" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 커널 없이 U-Boot만으로 "부팅 실패(여기서는 <code>reset</code>) → bootcount 증가 → 한도 초과 → altbootcmd"를 본다. env 텍스트를 <code>mkenvimage -r</code>(redundant 형식)로 만들어 pflash 이미지에 넣는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat &gt; ~/.elinux_scratch/L4/l4_env_loop.txt &lt;&lt;'EOF'
+bootdelay=0
+bootlimit=3
+upgrade_available=1
+bootcount=0
+boot_slot=B
+bootcmd=echo "L4: bootcmd slot=${boot_slot} bootcount=${bootcount}"; echo "L4: pretend kernel panics -&gt; reset"; reset
+altbootcmd=echo "L4: ALTBOOTCMD bootcount=${bootcount} -&gt; rollback to A"; setenv boot_slot A; setenv upgrade_available 0; setenv bootcount 0; saveenv; echo "L4: committed rollback, now poweroff"; poweroff
+EOF
+cat &gt; ~/.elinux_scratch/L4/l4_mkpflash.sh &lt;&lt;'EOF'
+#!/bin/bash
+# usage: l4_mkpflash.sh env.txt out.img -&gt; 64MiB pflash1 image, redundant env at 0x0 and 0x40000
+set -e
+mkenvimage -r -s 0x40000 -o "$2.env" "$1"
+truncate -s 64M "$2"
+dd if="$2.env" of="$2" conv=notrunc bs=256k seek=0 status=none
+dd if="$2.env" of="$2" conv=notrunc bs=256k seek=1 status=none
+rm -f "$2.env"
+EOF
+cd /var/tmp/L4 &amp;&amp; ~/.elinux_scratch/L4/l4_mkpflash.sh ~/.elinux_scratch/L4/l4_env_loop.txt l4_pf_loop.img
+timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 1G -nographic -bios build/u-boot.bin \
+  -drive if=pflash,unit=1,format=raw,file=l4_pf_loop.img | tr -d '\r' &gt; l4_loop.log
+grep -n "L4\|Bootlimit\|Saving\|Warning\|resetting" l4_loop.log</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>8:*** Warning - some problems detected reading environment; recovered successfully
+16:Saving Environment to Flash... Un-Protected 2 sectors
+26:L4: bootcmd slot=B bootcount=1
+27:L4: pretend kernel panics -&gt; reset
+28:resetting ...
+41:Saving Environment to Flash... Un-Protected 2 sectors
+51:L4: bootcmd slot=B bootcount=2
+52:L4: pretend kernel panics -&gt; reset
+53:resetting ...
+66:Saving Environment to Flash... Un-Protected 2 sectors
+76:L4: bootcmd slot=B bootcount=3
+77:L4: pretend kernel panics -&gt; reset
+78:resetting ...
+91:Saving Environment to Flash... Un-Protected 2 sectors
+100:Warning: Bootlimit (3) exceeded. Using altbootcmd.
+102:L4: ALTBOOTCMD bootcount=4 -&gt; rollback to A
+103:Saving Environment to Flash... Un-Protected 2 sectors
+112:L4: committed rollback, now poweroff</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: 부팅마다 <code>Saving Environment</code>(bootcount 저장)가 <strong>bootcmd보다 먼저</strong> 일어난다 — "시도했다"를 먼저 적고 시도하는 순서다. 1, 2, 3번째는 <code>bootcmd</code>가, 카운터가 4가 된 네 번째는 <code>altbootcmd</code>가 돈다. QEMU의 <code>reset</code>은 pflash 이미지 파일 내용을 그대로 두므로 실제 NOR처럼 카운터가 리셋을 넘어 살아남는다. 8번째 줄 경고는 다음 절의 주제다.</p>
+<h3 id="4-6-env-이중화-두-벌과-flag-바이트">4.6 env 이중화 — 두 벌과 flag 바이트<a class="anchor" href="#4-6-env-이중화-두-벌과-flag-바이트" aria-label="link">#</a></h3>
+<p><strong>직관</strong>: Don이 SSD 메타데이터를 A/B 두 영역에 번갈아 쓰고 시퀀스 번호로 최신 것을 고르던 것과 같다. env 블록 형식은 이렇다.</p>
+<figure class="code"><pre><code>single:     [CRC32 4B][key=value\0key=value\0...\0\0 ... padding]   (ENV_SIZE)
+redundant:  [CRC32 4B][flags 1B][key=value\0...\0\0 ... padding]    (x2, ENV_SIZE each)
+CRC covers data only (ENV_SIZE - 4 - 1 bytes for redundant)</code></pre></figure>
+<p><code>saveenv</code>는 <strong>현재 쓰지 않는 쪽 사본</strong>을 지우고 새 내용을 쓴 다음 flag를 갱신한다. 그래서 쓰는 도중에 전원이 나가도 다른 쪽 사본은 온전하다. flag의 의미는 저장 매체마다 다르다.</p>
+<div class="tw"><table><thead><tr><th>저장 매체</th><th>flag 방식</th><th>의미</th></tr></thead><tbody><tr><td>NOR (<code>ENV_IS_IN_FLASH</code>)</td><td>boolean: <code>1</code> = ACTIVE, <code>0</code> = OBSOLETE</td><td>NOR는 지우지 않고 1→0만 쓸 수 있으므로, 옛 사본의 flag 바이트를 <strong>제자리에서 0으로 프로그램</strong>해 무효화한다</td></tr><tr><td>eMMC/SPI/FAT/UBI</td><td>증가 카운터</td><td>둘 다 CRC가 맞으면 카운터가 큰(랩어라운드 고려) 쪽이 최신</td></tr></tbody></table></div>
+<p>예제 2에서 내가 두 사본을 <strong>같은 flag(1)</strong>로 만들어 넣었기 때문에 U-Boot가 "둘 다 ACTIVE라니 이상하다"며 <code>some problems detected ... recovered successfully</code>를 띄운 것이다. 저장이 몇 번 돈 뒤 호스트에서 두 사본의 앞 8바이트를 보면 flag가 정리되어 있다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>printf "/var/tmp/L4/l4_pf_loop.img 0x0 0x40000 0x40000\n/var/tmp/L4/l4_pf_loop.img 0x40000 0x40000 0x40000\n" &gt; l4_host_fw_env.config
+fw_printenv -c l4_host_fw_env.config | sort
+for o in 0 262144; do echo "copy@$o:"; xxd -s $o -l 8 l4_pf_loop.img; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>altbootcmd=echo "L4: ALTBOOTCMD bootcount=${bootcount} -&gt; rollback to A"; ...
+boot_slot=A
+bootcmd=echo "L4: bootcmd slot=${boot_slot} bootcount=${bootcount}"; ...
+bootcount=0
+bootdelay=0
+bootlimit=3
+ethaddr=52:54:00:12:34:56
+fdtcontroladdr=7e34bd80
+upgrade_available=0
+copy@0:
+00000000: 24cb 33b7 0061 6c74                      $.3..alt
+copy@262144:
+00040000: 6fda eec2 0161 6c74                      o....alt</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: 5바이트째가 flag다. 사본 0은 <code>00</code>(OBSOLETE), 사본 1은 <code>01</code>(ACTIVE). <code>fw_printenv</code>(호스트의 libubootenv)는 ACTIVE 쪽을 읽어 altbootcmd가 남긴 최종 상태 <code>boot_slot=A</code>, <code>upgrade_available=0</code>을 보여 준다. 그래서 이후 이미지 생성 스크립트는 두 번째 사본의 flag를 처음부터 <code>00</code>으로 만들었다(<code>printf '\x00' | dd ... seek=$((0x40004))</code>).</p>
+<h3 id="4-7-예제-3-사본-하나-둘-다-깨지면-u-boot는-무엇을-읽나">4.7 예제 3 — 사본 하나 · 둘 다 깨지면 U-Boot는 무엇을 읽나<a class="anchor" href="#4-7-예제-3-사본-하나-둘-다-깨지면-u-boot는-무엇을-읽나" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 사본 1(ACTIVE)과 사본 2(OBSOLETE)에 서로 다른 표시값(<code>l4_copy=1/2</code>)을 넣고, 바이트 하나를 바꿔 CRC를 깨뜨린 뒤 U-Boot가 고르는 사본을 본다. 전원 차단으로 <code>saveenv</code>가 반쯤 쓴 상황의 재현이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# l4_envcorrupt.sh: redundant env - what does U-Boot load when one / both copies are corrupt?
+set -e
+cd /var/tmp/L4 &amp;&amp; mkdir -p envt &amp;&amp; cd envt
+for c in 1 2; do
+  printf 'bootdelay=0\nl4_copy=%s\nbootcmd=echo "L4: loaded env copy ${l4_copy}"; poweroff\n' $c &gt; e$c.txt
+  mkenvimage -r -s 0x40000 -o e$c.bin e$c.txt
+done
+mk() { truncate -s 0 pf.img; truncate -s 64M pf.img
+  dd if=e1.bin of=pf.img conv=notrunc bs=256k seek=0 status=none
+  dd if=e2.bin of=pf.img conv=notrunc bs=256k seek=1 status=none
+  printf '\x00' | dd of=pf.img bs=1 seek=$((0x40004)) conv=notrunc status=none; }   # copy2 = obsolete
+flip() { printf '\x58' | dd of=pf.img bs=1 seek=$(($1)) conv=notrunc status=none; }
+boot() { echo "== $1"; timeout 60 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 1G -nographic \
+  -bios ../build/u-boot.bin -drive if=pflash,unit=1,format=raw,file=pf.img 2&gt;&amp;1 | tr -d '\r' |
+  grep -a "Environment\|Warning\|bad CRC\|L4:\|Hit any\|scanning bus" | head -n 6; }
+mk;           boot "both copies valid (copy1 ACTIVE)"
+mk; flip 0x20; boot "copy1 corrupted (byte 0x20 changed)"
+mk; flip 0x20; flip 0x40020; boot "both copies corrupted"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== both copies valid (copy1 ACTIVE)
+Loading Environment from Flash...Loading Environment from Flash... OK
+Hit any key to stop autoboot: 0
+L4: loaded env copy 1
+== copy1 corrupted (byte 0x20 changed)
+Loading Environment from Flash...Loading Environment from Flash... OK
+Hit any key to stop autoboot: 0
+L4: loaded env copy 2
+== both copies corrupted
+Loading Environment from Flash...*** Warning - bad CRC, using default environment
+Hit any key to stop autoboot: 2Hit any key to stop autoboot: 1Hit any key to stop autoboot: 0
+scanning bus for devices...
+*** Warning: no boot file name; using '0A00020F.img'</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: ACTIVE 사본이 깨지면 U-Boot는 <strong>아무 경고 없이</strong> 이전 사본(copy 2)으로 부팅한다 — 즉 "직전 env 쓰기가 없었던 것"이 된다. boot-commit 프로토콜에서는 이게 정확히 원하는 동작이다(예: commit 쓰기 도중 차단 → 아직 시험 중 상태로 남아 다음 부팅에 다시 판정). 둘 다 깨지면 <strong>컴파일된 기본 env</strong>로 떨어져 distro boot가 USB · 네트워크(TFTP <code>0A00020F.img</code>)를 뒤진다. 우리 슬롯 선택 로직이 통째로 사라진 것이다. 양산 장비에서는 그래서 기본 env(<code>CONFIG_BOOTCOMMAND</code>, 보드 <code>.env</code> 파일)에도 <strong>안전한 A/B 부팅 스크립트</strong>를 넣어 둔다.</p>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <rect x="240" y="16" width="200" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="41" text-anchor="middle" font-size="13">두 사본의 CRC 검사</text>
+  <rect x="20" y="110" width="190" height="56" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="115" y="134" text-anchor="middle" font-size="13">둘 다 OK</text>
+  <text x="115" y="154" text-anchor="middle" font-size="12">flag로 최신 선택</text>
+  <rect x="245" y="110" width="190" height="56" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="134" text-anchor="middle" font-size="13">하나만 OK</text>
+  <text x="340" y="154" text-anchor="middle" font-size="12">그 사본 사용 (경고 없음)</text>
+  <rect x="470" y="110" width="190" height="56" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="565" y="134" text-anchor="middle" font-size="13">둘 다 깨짐</text>
+  <text x="565" y="154" text-anchor="middle" font-size="12">bad CRC → 기본 env</text>
+  <line x1="300" y1="56" x2="130" y2="106" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="340" y1="56" x2="340" y2="106" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="380" y1="56" x2="550" y2="106" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="115" y="196" text-anchor="middle" font-size="12">실측: copy 1 (ACTIVE)</text>
+  <text x="340" y="196" text-anchor="middle" font-size="12">실측: copy 2 (직전 상태)</text>
+  <text x="565" y="196" text-anchor="middle" font-size="12">실측: distro boot · TFTP</text>
+  <rect x="20" y="226" width="640" height="56" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="250" text-anchor="middle" font-size="13">설계 규칙: 기본 env에도 안전한 A/B 스크립트를 넣는다</text>
+  <text x="340" y="270" text-anchor="middle" font-size="12">CONFIG_BOOTCOMMAND · board .env · CONFIG_ENV_WRITEABLE_LIST로 쓰기 가능한 변수 제한</text>
+</svg></figure>
+<p>그림 5 — redundant env의 선택 규칙과 예제 3 실측 결과. 가운데 경우가 "env 쓰기 도중 전원 차단"이고, 결과는 "그 쓰기가 일어나지 않은 것"이다.</p>
+<h3 id="4-8-함정-env는-생각보다-약하다">4.8 함정 — env는 생각보다 약하다<a class="anchor" href="#4-8-함정-env는-생각보다-약하다" aria-label="link">#</a></h3>
+<ul><li><strong>Linux와 U-Boot의 위치 · 크기 불일치</strong>: <code>fw_env.config</code>의 오프셋 · 크기 · 섹터 크기가 U-Boot Kconfig와 한 바이트라도 다르면 <code>fw_printenv</code>가 <code>Bad CRC</code>를 내거나, 더 나쁘게 엉뚱한 섹터를 지운다(C3 §4.4).</li><li><strong>libubootenv 스크립트 문법</strong>: <code>fw_setenv -s 파일</code>의 형식은 <strong><code>key=value</code></strong>다. 옛 문서의 <code>key value</code>(공백) 형식을 쓰면 이 버전(0.3.5, 랩 rootfs)은 <strong>아무 에러 없이 rc=0으로 무시</strong>한다. 실제로 그렇게 해서 commit이 안 되는 버그를 만들 뻔했다.</li></ul>
+<figure class="code"><span class="lang">text</span><pre><code>s1 rc=0
+l4_state_B=good      &lt;- "l4_state_B bad" (공백 형식) : 조용히 무시됨
+s2 rc=0
+l4_state_B=bad       &lt;- "l4_state_B=bad" : 적용됨</code></pre></figure>
+<ul><li><strong>env 전체가 공격면이다</strong>: env에 <code>bootcmd</code>가 있으면 Linux에서 root가 된 공격자가 <code>fw_setenv bootcmd ...</code>로 부팅 경로를 바꿀 수 있다. secure boot 장비는 <code>CONFIG_ENV_WRITEABLE_LIST</code> + <code>CONFIG_ENV_FLAGS_LIST_STATIC</code>으로 Linux가 쓸 수 있는 변수를 <code>boot_slot</code>, <code>upgrade_available</code>, <code>bootcount</code> 같은 몇 개로 제한하고, 스크립트는 서명된 FIT 안에 넣는다(L5).</li><li><strong>여러 변수를 한 번에</strong>: <code>boot_slot</code>, <code>upgrade_available</code>, <code>bootcount</code>를 <code>fw_setenv</code>로 세 번 따로 쓰면 env 쓰기가 세 번이고, 그 사이 전원 차단은 "B로 부팅하는데 시험 표시가 없음" 같은 어중간한 상태를 만든다. <code>fw_setenv -s</code>로 <strong>한 번의 쓰기</strong>에 묶는다.</li></ul>
+<hr>
+<h2 id="5-실습-랩-만들기-gpt-디스크-슬롯-이미지-u-boot-스크립트">5. 실습 랩 만들기 — GPT 디스크 · 슬롯 이미지 · U-Boot 스크립트<a class="anchor" href="#5-실습-랩-만들기-gpt-디스크-슬롯-이미지-u-boot-스크립트" aria-label="link">#</a></h2>
+<p>여기부터는 이 노트의 큰 실습이다. VM 커널은 <code>uname -r</code> = <code>7.0.0-38-generic</code>(Ubuntu 26.04.1), QEMU 10.2.1, 게스트 커널은 랩의 <code>Image-sec</code>(6.18.55-sec), rootfs는 랩의 <code>rootfs-sysd.ext4</code>(Ubuntu Base 24.04.5 + systemd 255, RAUC 1.11.3, SWUpdate 2023.12.1, libubootenv 0.3.5)다. <strong>모든 부팅 시간은 TCG 에뮬레이션(그리고 같은 VM에서 다른 작성자 7명의 QEMU가 동시에 도는 상황) 기준이고, 실제 하드웨어 수치가 아니다.</strong></p>
+<h3 id="5-1-슬롯-이미지-다듬기">5.1 슬롯 이미지 다듬기<a class="anchor" href="#5-1-슬롯-이미지-다듬기" aria-label="link">#</a></h3>
+<p>랩 rootfs는 3 GiB(사용 약 1 GB)인데 그중 360 MB가 커널 모듈이다. 슬롯 두 벌 + 번들 세 개를 디스크 하나에 넣으려고, 내 사본에서 모듈을 지우고(이 실습은 virtio · ext4 · MTD가 전부 built-in인 <code>Image-sec</code>만 쓴다) 다음을 넣었다.</p>
+<div class="tw"><table><thead><tr><th>파일</th><th>역할</th></tr></thead><tbody><tr><td><code>/boot/Image</code></td><td>커널(Image-sec). 슬롯 안에 들어 있어서 커널과 rootfs가 같이 바뀌고 같이 롤백된다</td></tr><tr><td><code>/etc/fw_env.config</code></td><td>Linux 쪽 env 위치 (§5.4)</td></tr><tr><td><code>/etc/rauc/system.conf</code>, <code>/etc/rauc/l4_ca.cert.pem</code></td><td>RAUC 설정과 신뢰 루트 (§6)</td></tr><tr><td><code>/usr/local/sbin/l4-rauc-backend</code></td><td>RAUC custom bootloader backend (§6.4)</td></tr><tr><td><code>/usr/local/sbin/l4-health</code>, <code>l4-health.service</code></td><td>health check + commit (§6.5)</td></tr><tr><td><code>/etc/fstab</code> 한 줄</td><td><code>/dev/vda3 /data ext4 defaults,nofail 0 2</code></td></tr><tr><td><code>/etc/l4-version</code></td><td>이미지 버전 표시 (1.0.0, 2.0.0, ...)</td></tr><tr><td><code>system.conf.d/l4-slow-tcg.conf</code></td><td><code>DefaultDeviceTimeoutSec=600s</code> — 첫 시도에서 VM 과부하로 udev coldplug가 90초를 넘겨 <code>dev-ttyAMA0.device</code> · <code>dev-vda3.device</code>가 timeout으로 실패했다. 실제 장비라면 이것도 health check가 잡아야 할 "느린 부팅" 증상이다</td></tr></tbody></table></div>
+<p>podman 타이머 · apt-daily · swupdate 데몬처럼 부팅을 늦추는 유닛은 사본에서 끄고, <code>mkfs.ext4 -d stage/</code>로 800 MiB ext4 이미지를 만들었다. 버전별로 네 가지를 만든다.</p>
+<div class="tw"><table><thead><tr><th>이미지</th><th>내용</th><th>용도</th></tr></thead><tbody><tr><td>v1 1.0.0</td><td>공장 출하</td><td>rootA · rootB 양쪽 초기값</td></tr><tr><td>v2 2.0.0</td><td>정상 업데이트</td><td>시나리오 1, 4</td></tr><tr><td>v3 3.0.0-broken</td><td><code>/usr/sbin/init</code>을 "echo 후 exit 1" 스크립트로 바꿈 → 커널 panic</td><td>시나리오 2</td></tr><tr><td>v4 4.0.0-unhealthy</td><td><code>/etc/l4-break-health</code> 존재 → health check 실패</td><td>시나리오 3</td></tr></tbody></table></div>
+<h3 id="5-2-예제-4-gpt-디스크-만들기">5.2 예제 4 — GPT 디스크 만들기<a class="anchor" href="#5-2-예제-4-gpt-디스크-만들기" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: <code>sfdisk</code> 스크립트로 이름 붙은 GPT 파티션 세 개를 만들고, 각 파티션 시작 섹터에 ext4 이미지를 <code>dd</code>로 넣는다(호스트에 loop 장치를 붙이지 않는 방법).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# l4_mkdisk.sh: GPT disk: p1 rootA, p2 rootB, p3 data (bundles + .swu), both slots get factory v1
+set -e
+cd /var/tmp/L4
+rm -f l4_disk.img &amp;&amp; truncate -s 3000M l4_disk.img
+sfdisk -q l4_disk.img &lt;&lt;'EOT'
+label: gpt
+size=900MiB, type=linux, name=rootA
+size=900MiB, type=linux, name=rootB
+type=linux, name=data
+EOT
+sgdisk -p l4_disk.img | tail -n 5
+# partition offsets in 512-byte sectors
+off() { sfdisk -J l4_disk.img | python3 -c "import json,sys;print(json.load(sys.stdin)['partitiontable']['partitions'][$1]['start'])"; }
+dd if=l4_v1.ext4 of=l4_disk.img bs=512 seek=$(off 0) conv=notrunc,sparse status=none
+dd if=l4_v1.ext4 of=l4_disk.img bs=512 seek=$(off 1) conv=notrunc,sparse status=none
+sudo rm -rf datadir &amp;&amp; sudo mkdir datadir &amp;&amp; sudo cp bundles/*.raucb swu/l4_2.0.0.swu swu/l4_tampered.swu datadir/
+sudo cp rauc/l4_ca.cert.pem datadir/
+rm -f l4_data.ext4 &amp;&amp; truncate -s 1100M l4_data.ext4 &amp;&amp; sudo mkfs.ext4 -q -L data -d datadir l4_data.ext4
+dd if=l4_data.ext4 of=l4_disk.img bs=512 seek=$(off 2) conv=notrunc,sparse status=none
+rm -f l4_data.ext4; sudo rm -rf datadir
+ls -ls l4_disk.img</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Number  Start (sector)    End (sector)  Size       Code  Name
+   1            2048         1845247   900.0 MiB   8300  rootA
+   2         1845248         3688447   900.0 MiB   8300  rootB
+   3         3688448         6141951   1.2 GiB     8300  data
+2283816 -rw-rw-r-- 1 donh donh 3145728000 Oct 17 22:32 l4_disk.img</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: 3000 MiB 이미지가 실제로는 2.2 GB만 차지한다(sparse). data 파티션 파일은 <code>sudo cp</code>로 root 소유로 만든다 — RAUC는 번들 파일이 root 소유가 아니면 "unsafe bundle uid"로 거부한다(§6.3에서 실제로 걸렸다). 실제 제품이라면 슬롯 크기를 이미지 크기보다 넉넉히(이 랩: 이미지 800 MiB, 슬롯 900 MiB) 두는 것이 중요하다. 다음 버전 rootfs가 커질 여지다.</p>
+<h3 id="5-3-u-boot-슬롯-선택-스크립트">5.3 U-Boot 슬롯 선택 스크립트<a class="anchor" href="#5-3-u-boot-슬롯-선택-스크립트" aria-label="link">#</a></h3>
+<p>env 텍스트 그대로다(한 변수 = 한 줄; 여기서는 읽기 쉽게 그대로 보인다).</p>
+<figure class="code"><span class="lang">text</span><pre><code>kernel_addr_r=0x40400000
+bootdelay=1
+bootlimit=3
+upgrade_available=0
+bootcount=0
+boot_slot=A
+l4_state_A=good
+l4_state_B=good
+l4_boot=if test "${boot_slot}" = "B"; then setenv l4_part 2; else setenv l4_part 1; fi; echo "L4: boot_slot=${boot_slot} part=${l4_part} bootcount=${bootcount} upgrade_available=${upgrade_available}"; load virtio 0:${l4_part} ${kernel_addr_r} /boot/Image; setenv bootargs "console=ttyAMA0 root=/dev/vda${l4_part} rw rootwait panic=5 l4.slot=${boot_slot} rauc.slot=${boot_slot}"; booti ${kernel_addr_r} - ${fdtcontroladdr}
+bootcmd=virtio scan; run l4_boot
+altbootcmd=echo "L4: bootlimit exceeded on slot ${boot_slot} -&gt; rollback"; setenv l4_state_${boot_slot} bad; if test "${boot_slot}" = "B"; then setenv boot_slot A; else setenv boot_slot B; fi; setenv upgrade_available 0; setenv bootcount 0; saveenv; virtio scan; run l4_boot</code></pre></figure>
+<p>요점:</p>
+<ul><li><strong><code>panic=5</code></strong>: 커널 panic 후 5초 뒤 자동 재부팅. 이게 없으면 panic한 장비가 그 자리에서 영원히 멈춰 bootcount가 다시 돌 기회가 없다. 하드웨어 watchdog(L1)이 같은 역할의 최후 보루다.</li><li><strong><code>rauc.slot=</code></strong>: RAUC가 "지금 어느 슬롯으로 부팅했나"를 아는 방법. <code>root=</code> 장치로도 판단하지만 명시하는 편이 확실하다.</li><li><strong><code>kernel_addr_r</code></strong>: 처음에 이 줄을 빠뜨렸다. <code>mkenvimage</code>로 만든 env가 저장된 env를 <strong>통째로</strong> 대체하므로 보드 기본 env의 <code>kernel_addr_r</code>이 사라져 <code>load</code> 사용법만 찍히고 <code>Bad Linux ARM64 Image magic!</code>으로 멈췄다. 저장 env는 기본 env와 합쳐지는 게 아니라 <strong>바꿔치기</strong>된다(C4 §3과 같은 이야기).</li><li>커널을 슬롯 안 ext4에서 읽는다. 커널을 별도 boot 파티션에 두면 boot-A/boot-B도 두 벌이어야 한다. 비대칭(boot 하나 + root A/B)으로 두면 커널과 rootfs 모듈 버전이 어긋날 수 있다.</li></ul>
+<h3 id="5-4-linux-쪽-env-접근-fw_env-config와-qemu-pflash의-함정">5.4 Linux 쪽 env 접근 — fw_env.config와 QEMU pflash의 함정<a class="anchor" href="#5-4-linux-쪽-env-접근-fw_env-config와-qemu-pflash의-함정" aria-label="link">#</a></h3>
+<p>게스트 Linux에서 NOR flash는 <code>physmap-of</code> CFI 드라이버로 MTD 장치가 된다. 두 pflash 뱅크(각 64 MiB)가 이어 붙어 <code>mtd0</code> 하나(128 MiB)로 보이므로, env 오프셋은 <code>0x4000000</code>이다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>L4# cat /proc/mtd
+dev:    size   erasesize  name
+mtd0: 08000000 00040000 "0.flash"</code></pre></figure>
+<p>처음 설정은 이중화였다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>/dev/mtd0 0x4000000 0x40000 0x40000
+/dev/mtd0 0x4040000 0x40000 0x40000</code></pre></figure>
+<p>그런데 게스트에서 <code>fw_setenv</code>가 매번 실패했다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>L4# fw_setenv l4_dbg 1; echo rc=$?; fw_printenv l4_dbg; dmesg | tail -n 5
+Error storing the env
+rc=255
+[   19.993317] 0.flash: buffer write error (status timeout)
+l4_dbg=</code></pre></figure>
+<p>원인을 좁히려고 libubootenv가 NOR에서 하는 일(MEMUNLOCK → MEMERASE → write)을 그대로 하는 작은 C 프로그램을 BusyBox initramfs에 넣어 돌렸다.</p>
+<h3 id="5-5-예제-5-mtd에-직접-지우고-쓰기-fw_setenv의-속">5.5 예제 5 — MTD에 직접 지우고 쓰기 (fw_setenv의 속)<a class="anchor" href="#5-5-예제-5-mtd에-직접-지우고-쓰기-fw_setenv의-속" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: <code>/dev/mtd0</code>에 <code>MEMGETINFO</code> · <code>MEMUNLOCK</code> · <code>MEMERASE</code> ioctl과 <code>pwrite</code>로 쓰는 과정. 네 번째 인자를 주면 지우지 않고 제자리에 0을 프로그램한다(NOR redundant env의 flag 바이트 갱신과 같은 동작).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* l4_mtdw.c: what fw_setenv does on NOR: MEMGETINFO -&gt; MEMUNLOCK -&gt; MEMERASE -&gt; write -&gt; read back */
+#include &lt;fcntl.h&gt;
+#include &lt;mtd/mtd-user.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sys/ioctl.h&gt;
+#include &lt;unistd.h&gt;
+
+int main(int argc, char **argv)
+{
+	const char *dev = argc &gt; 1 ? argv[1] : "/dev/mtd0";
+	off_t off = argc &gt; 2 ? strtoul(argv[2], NULL, 0) : 0x4080000;
+	size_t len = argc &gt; 3 ? strtoul(argv[3], NULL, 0) : 4096;
+	struct mtd_info_user mi;
+	int fd = open(dev, O_RDWR);
+	if (fd &lt; 0) { perror("open"); exit(1); }
+	if (ioctl(fd, MEMGETINFO, &amp;mi)) { perror("MEMGETINFO"); exit(1); }
+	printf("%s: type=%u size=0x%x erasesize=0x%x writesize=%u\n",
+	       dev, mi.type, mi.size, mi.erasesize, mi.writesize);
+	struct erase_info_user ei = { .start = off, .length = mi.erasesize };
+	if (ioctl(fd, MEMUNLOCK, &amp;ei)) perror("MEMUNLOCK (ignored)");
+	if (argc &gt; 4) {
+		printf("no erase: program %zu byte(s) in place at 0x%lx\n", len, (long)off);
+	} else {
+		if (ioctl(fd, MEMERASE, &amp;ei)) { perror("MEMERASE"); exit(1); }
+		printf("erased 0x%lx +0x%x\n", (long)off, mi.erasesize);
+	}
+	char *w = malloc(len), *r = malloc(len);
+	if (!w || !r) { perror("malloc"); exit(1); }
+	for (size_t i = 0; i &lt; len; i++) w[i] = argc &gt; 4 ? 0 : (char)(i * 7 + 1);
+	ssize_t n = pwrite(fd, w, len, off);
+	if (n != (ssize_t)len) { perror("pwrite"); exit(1); }
+	if (pread(fd, r, len, off) != (ssize_t)len) { perror("pread"); exit(1); }
+	printf("wrote %zd bytes, read back %s\n", n, memcmp(w, r, len) ? "MISMATCH" : "OK");
+	close(fd);
+	return 0;
+}</code></pre></figure>
+<p><code>gcc -static -O2 -Wall -Wextra</code>(경고 0) → initramfs의 <code>/bin/l4_mtdw</code>로 넣고, U-Boot의 <code>qfw load</code>로 커널 · initramfs를 올려 U-Boot를 거친 실제 경로에서 돌렸다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># env 블록의 bootcmd (U-Boot): qfw load ${kernel_addr_r} ${ramdisk_addr_r}; booti ${kernel_addr_r} ${ramdisk_addr_r}:${filesize} ${fdtcontroladdr}
+qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 1G -nographic -bios build/u-boot.bin \
+  -kernel /var/lab/out/Image-sec -initrd ird/i.gz -drive if=pflash,unit=1,format=raw,file=/tmp/l4_qfw.img
+# bootargs: LAB_CMD=/bin/l4_mtdw~/dev/mtd0~&lt;offset&gt;[~&lt;len&gt;[~noerase]]</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== smp=1 len=0x40000          (offset 0x4000000 = env sector: erase + 256 KiB write)
+/dev/mtd0: type=3 size=0x8000000 erasesize=0x40000 writesize=1
+erased 0x4000000 +0x40000
+wrote 262144 bytes, read back OK
+== 0x4040004~1~noerase        (flag byte of the 2nd copy, programmed in place)
+MEMUNLOCK (ignored): Invalid argument
+no erase: program 1 byte(s) in place at 0x4040004
+pwrite: Timer expired
+[    1.391116] 0.flash: buffer write error (status timeout)
+== 0x4040004~4~noerase
+MEMUNLOCK (ignored): Invalid argument
+no erase: program 4 byte(s) in place at 0x4040004
+pwrite: Timer expired
+[    1.344200] 0.flash: buffer write error (status timeout)
+== 0x4040000~8~noerase
+/dev/mtd0: type=3 size=0x8000000 erasesize=0x40000 writesize=1
+no erase: program 8 byte(s) in place at 0x4040000
+wrote 8 bytes, read back OK</code></pre></figure>
+<p>(괄호 설명은 내가 붙인 것이다. 실패한 두 경우는 출력을 <code>tail -n 4</code>로 잘라서 첫 <code>/dev/mtd0:</code> 줄이 빠졌다.) <strong>출력에서 볼 것</strong>: 섹터를 지우고 통째로 쓰는 것은 된다. 그러나 <strong>섹터 중간(오프셋 4)에 1~4바이트를 제자리 프로그램하는 것은 QEMU의 pflash 에뮬레이션에서 실패</strong>한다(8바이트 정렬 위치는 성공). libubootenv의 NOR redundant 갱신은 정확히 "옛 사본의 flag 바이트(오프셋 4)를 0으로 프로그램"이므로 매번 실패한 것이다. 실제 CFI NOR 칩은 바이트 단위 프로그램을 지원하므로 이것은 <strong>에뮬레이터의 한계</strong>다. 그래서 Linux가 관여하는 시나리오(§6~§9)는 <strong>single-copy env</strong>로 다시 빌드한 U-Boot(<code>CONFIG_ENV_REDUNDANT</code> 끔, 출력 <code>/var/tmp/L4/build1</code>)와 한 줄짜리 <code>fw_env.config</code>를 썼다. 이중화 동작은 §4.6~4.7에서 U-Boot 단독으로 이미 확인했다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># /etc/fw_env.config (게스트, single-copy)
+/dev/mtd0 0x4000000 0x40000 0x40000</code></pre></figure>
+<blockquote><p><strong>실무</strong>: 이 사건 자체가 좋은 교훈이다. "fw_setenv가 rc=255"는 OTA 에이전트의 <strong>commit 실패</strong>로 이어지고, commit이 안 되면 멀쩡한 업데이트가 bootlimit 후 롤백된다. 그래서 (1) 에이전트는 env 쓰기 결과를 반드시 검사하고 실패를 서버에 보고해야 하며, (2) 새 보드 bring-up 때 <code>fw_setenv</code> → 재부팅 → U-Boot <code>printenv</code> 왕복 시험을 꼭 해야 한다. 에뮬레이터 · 새 플래시 칩 · 새 eMMC 펌웨어 어디서든 같은 종류의 문제가 나올 수 있다.</p></blockquote>
+<hr>
+<h2 id="6-rauc로-하는-정상-업데이트-서명부터-commit까지">6. RAUC로 하는 정상 업데이트 — 서명부터 commit까지<a class="anchor" href="#6-rauc로-하는-정상-업데이트-서명부터-commit까지" aria-label="link">#</a></h2>
+<h3 id="6-1-rauc-구성-한눈에">6.1 RAUC 구성 한눈에<a class="anchor" href="#6-1-rauc-구성-한눈에" aria-label="link">#</a></h3>
+<p>RAUC(Robust Auto-Update Controller, Pengutronix, LGPL-2.1)는 <strong>장비 쪽 업데이트 클라이언트</strong>다. 서버는 없다(hawkBit 연동은 <code>rauc-hawkbit-updater</code> 별도). 구성 요소는 네 가지다.</p>
+<div class="tw"><table><thead><tr><th>구성 요소</th><th>어디</th><th>역할</th></tr></thead><tbody><tr><td><code>system.conf</code></td><td>장비 <code>/etc/rauc/</code></td><td>compatible 문자열, 슬롯 목록, 부트로더 backend, keyring</td></tr><tr><td>번들 (<code>.raucb</code>)</td><td>빌드 서버 → 장비</td><td>squashfs(이미지 + manifest) + CMS 서명. 형식 <code>plain</code> · <code>verity</code> · <code>crypt</code></td></tr><tr><td><code>rauc</code> 서비스</td><td>장비 (D-Bus <code>de.pengutronix.rauc</code>)</td><td>install · status · mark-good 수행</td></tr><tr><td>bootloader backend</td><td>장비</td><td><code>uboot</code>, <code>barebox</code>, <code>grub</code>, <code>efi</code>, <code>custom</code> — 슬롯 상태를 부트로더에 기록</td></tr></tbody></table></div>
+<h3 id="6-2-예제-6-서명-키-체계-만들기">6.2 예제 6 — 서명 키 체계 만들기<a class="anchor" href="#6-2-예제-6-서명-키-체계-만들기" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 루트 CA 하나와 그 CA가 서명한 "업데이트 서명용" 인증서를 만든다. 장비에는 <strong>CA 인증서만</strong> 들어가고, 개인 키는 빌드 서버(실무에서는 HSM)에만 있다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/L4/rauc
+openssl req -x509 -newkey rsa:3072 -nodes -keyout l4_ca.key.pem -out l4_ca.cert.pem \
+  -subj "/O=L4 Lab/CN=L4 Dev Root CA" -days 3650 \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
+openssl req -newkey rsa:3072 -nodes -keyout l4_dev.key.pem -out l4_dev.csr -subj "/O=L4 Lab/CN=L4 Dev Update Signer"
+printf "basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=codeSigning\n" &gt; l4_leaf.ext
+openssl x509 -req -in l4_dev.csr -CA l4_ca.cert.pem -CAkey l4_ca.key.pem -CAcreateserial \
+  -out l4_dev.cert.pem -days 730 -extfile l4_leaf.ext
+openssl x509 -in l4_dev.cert.pem -noout -subject -issuer -ext keyUsage,extendedKeyUsage
+openssl verify -CAfile l4_ca.cert.pem l4_dev.cert.pem</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Certificate request self-signature ok
+subject=O=L4 Lab, CN=L4 Dev Update Signer
+subject=O=L4 Lab, CN=L4 Dev Update Signer
+issuer=O=L4 Lab, CN=L4 Dev Root CA
+X509v3 Key Usage: critical
+    Digital Signature
+X509v3 Extended Key Usage: 
+    Code Signing
+l4_dev.cert.pem: OK</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: 서명 인증서에 <code>extendedKeyUsage=codeSigning</code>을 넣었다. 이게 다음 예제의 첫 함정이 된다. 키 관리(오프라인 루트, 개발 키 · 양산 키 분리, 폐기)는 L5에서 다룬다.</p>
+<h3 id="6-3-예제-7-번들-만들기-검증-변조-vm-호스트의-rauc-1-15-1">6.3 예제 7 — 번들 만들기 · 검증 · 변조 (VM 호스트의 RAUC 1.15.1)<a class="anchor" href="#6-3-예제-7-번들-만들기-검증-변조-vm-호스트의-rauc-1-15-1" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: <code>rauc bundle</code>로 verity 형식 번들을 만들고, <code>rauc info</code>로 서명을 검증하고, 바이트 하나를 바꿔 어디서 걸리는지 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/L4/rauc &amp;&amp; mkdir -p t/content
+truncate -s 16M t/content/rootfs.ext4 &amp;&amp; mkfs.ext4 -q -L testroot t/content/rootfs.ext4
+cat &gt; t/content/manifest.raucm &lt;&lt;EOF
+[update]
+compatible=l4-sensorkit
+version=2.0.0-test
+
+[bundle]
+format=verity
+
+[image.rootfs]
+filename=rootfs.ext4
+EOF
+rauc bundle --cert=l4_dev.cert.pem --key=l4_dev.key.pem t/content t/test.raucb
+rauc info --keyring=l4_ca.cert.pem t/test.raucb</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Creating 'verity' format bundle
+Failed to create bundle: squashfs size (4096) must be larger than 4096 bytes</code></pre></figure>
+<p>빈 ext4는 squashfs로 압축하면 4 KiB가 되어 거부된다(1 MiB 난수를 채워 다시 만들었다). 그다음 <code>rauc info</code>:</p>
+<figure class="code"><span class="lang">text</span><pre><code>rauc-Message: 21:16:43.956: Verifying bundle signature... 
+signature verification failed: Verify error: unsuitable certificate purpose</code></pre></figure>
+<p><strong><code>unsuitable certificate purpose</code></strong>: RAUC는 기본으로 서명 인증서의 용도(purpose)를 검사하는데, 기본값은 <code>codeSigning</code>이 아니다. <code>system.conf</code>의 <code>[keyring] check-purpose=codesign</code>으로 맞추면 통과한다. 장비에 들어갈 <code>system.conf</code>가 이것이다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[system]
+compatible=l4-sensorkit
+bootloader=custom
+statusfile=/data/rauc.status
+bundle-formats=-plain
+
+[handlers]
+bootloader-custom-backend=/usr/local/sbin/l4-rauc-backend
+
+[keyring]
+path=/etc/rauc/l4_ca.cert.pem
+check-purpose=codesign
+
+[slot.rootfs.0]
+device=/dev/vda1
+type=ext4
+bootname=A
+
+[slot.rootfs.1]
+device=/dev/vda2
+type=ext4
+bootname=B</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>rauc --conf=l4_host_system.conf info t/test.raucb     # keyring 경로만 호스트용으로 바꾼 사본</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>rauc-Message: 21:16:51.485: Verified inline signature by 'O = L4 Lab, CN = L4 Dev Update Signer'
+Compatible:     'l4-sensorkit'
+Version:        '2.0.0-test'
+Bundle Format:  verity
+  Verity Salt:  'b817bd66e78090c68a03d8e0b3a10a1fadcf5262127884e262e631f15ef57995'
+  Verity Hash:  'e80ac5e2cae93ec207d9908541a864f86aa3ddbfae9a63bcdcdd8cd157349b0d'
+  Verity Size:  16384
+Manifest Hash:  '59b828e81e32185b84219e3be71f47af7c6c35c5d15ef59a782c7b450feebd80'
+
+1 Image:
+  [rootfs]
+    Filename:  rootfs.ext4
+    Type:      ext4 (detected)
+    Checksum:  1264dcc2f6bed049b2929354b3b8a2fcc3e1785b937dd09dca261ba79f3b66d6
+    Size:      16.8 MB (16777216 bytes)
+
+Certificate Chain:
+ 0 Subject: O = L4 Lab, CN = L4 Dev Update Signer
+   Issuer: O = L4 Lab, CN = L4 Dev Root CA
+ 1 Subject: O = L4 Lab, CN = L4 Dev Root CA
+   Issuer: O = L4 Lab, CN = L4 Dev Root CA</code></pre></figure>
+<p>(출력 일부 생략.) 이제 변조 시험이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/L4/rauc/t; C=../l4_host_system.conf
+cp test.raucb tamper_payload.raucb; printf "\xff" | dd of=tamper_payload.raucb bs=1 seek=500000 conv=notrunc status=none
+rauc --conf=$C info tamper_payload.raucb                       # verity, payload 1바이트
+sz=$(stat -c %s test.raucb); cp test.raucb tamper_sig.raucb
+printf "\x00" | dd of=tamper_sig.raucb bs=1 seek=$((sz-200)) conv=notrunc status=none
+rauc --conf=$C info tamper_sig.raucb                           # verity, CMS 서명 1바이트
+sed -i "s/format=verity/format=plain/" content/manifest.raucm
+rauc bundle --cert=../l4_dev.cert.pem --key=../l4_dev.key.pem content plain.raucb
+cp plain.raucb tamper_plain.raucb; printf "\xff" | dd of=tamper_plain.raucb bs=1 seek=500000 conv=notrunc status=none
+rauc --conf=$C info tamper_plain.raucb                         # plain, payload 1바이트
+rauc --keyring=other_ca.pem info test.raucb                    # 남의 CA로 검증</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== verity bundle, 1 byte flipped in payload:
+rauc-Message: 21:17:03.137: Verified inline signature by 'O = L4 Lab, CN = L4 Dev Update Signer'
+Compatible:     'l4-sensorkit'
+== verity bundle, 1 byte zeroed in CMS signature:
+signature verification failed: error:0200008A:rsa routines::invalid padding
+== plain bundle intact:
+rauc-Message: 21:17:03.486: Verified detached signature by 'O = L4 Lab, CN = L4 Dev Update Signer'
+Bundle format 'plain' not allowed
+== plain bundle, 1 byte flipped in payload:
+signature verification failed: error:1700009E:CMS routines::verification failure
+== intact bundle, wrong keyring:
+signature verification failed: Verify error: unable to get local issuer certificate</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: 결과가 형식마다 다르다. 이게 RAUC 번들 형식의 핵심 차이다.</p>
+<div class="tw"><table><thead><tr><th>형식</th><th>서명이 덮는 것</th><th>payload 변조를 언제 잡나</th></tr></thead><tbody><tr><td><code>plain</code></td><td>squashfs <strong>전체</strong> (detached CMS)</td><td><code>rauc info</code> 시점 — 번들 전체를 해시하니 수백 MB를 읽는다</td></tr><tr><td><code>verity</code></td><td>manifest(안에 dm-verity root hash)</td><td><strong>읽는 순간</strong> — 블록 단위로 dm-verity가 검사. <code>info</code>는 서명만 보니 통과한다</td></tr><tr><td><code>crypt</code></td><td>verity + 이미지 암호화 (장비별 키로 암호화된 대칭키)</td><td>verity와 같음 + 기밀성</td></tr></tbody></table></div>
+<p><code>bundle-formats=-plain</code>이라 plain 번들은 서명이 맞아도 거부되었다. plain 형식은 "검증한 파일"과 "설치할 때 다시 읽는 파일"이 같다는 보장이 약해서(TOCTOU) 새 설계에서는 verity를 쓴다. payload를 바꾼 verity 번들이 정말 잡히는지는 추출로 확인한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>sudo mkdir -p rt &amp;&amp; sudo cp test.raucb tamper_payload.raucb rt/ &amp;&amp; cd rt   # root 소유로
+sudo rauc --conf=../../l4_host_system.conf extract test.raucb x_test
+sudo rauc --conf=../../l4_host_system.conf extract tamper_payload.raucb x_tamper_payload</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== extract test
+rauc-Message: 21:17:18.498: Verifying bundle payload... 
+manifest.raucm
+rootfs.ext4
+== extract tamper_payload
+rauc-Message: 21:17:18.582: Verifying bundle payload... 
+rauc-Message: 21:17:18.583: Verification failed at position 499712.
+rauc-Message: 21:17:18.583: Verification of data area failed.
+Failed to extract bundle: bundle payload is corrupted</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: 바꾼 바이트(500000)가 들어 있는 4 KiB 블록의 시작(499712 = 122 × 4096)에서 정확히 실패한다. 처음엔 사용자 소유 파일로 시도했다가 <code>cannot check bundle payload without exclusive access: unsafe bundle uid 501</code>로 거부되었다 — 검증 후 사용자가 파일을 바꿔치기하는 공격을 막는 규칙이다.</p>
+<h3 id="6-4-custom-bootloader-backend-rauc와-우리-u-boot-스크립트를-잇는-다리">6.4 custom bootloader backend — RAUC와 우리 U-Boot 스크립트를 잇는 다리<a class="anchor" href="#6-4-custom-bootloader-backend-rauc와-우리-u-boot-스크립트를-잇는-다리" aria-label="link">#</a></h3>
+<p>RAUC의 <code>bootloader=uboot</code> backend는 RAUC 관례 변수(<code>BOOT_ORDER</code>, <code>BOOT_A_LEFT</code>, <code>BOOT_B_LEFT</code>)를 쓴다. 이 랩은 U-Boot 내장 bootcount를 보여 주려고 변수 체계가 다르므로, <code>bootloader=custom</code>으로 RAUC가 부르는 스크립트를 직접 짰다. RAUC는 이 스크립트를 <code>get-primary</code>, <code>set-primary &lt;slot&gt;</code>, <code>get-state &lt;slot&gt;</code>, <code>set-state &lt;slot&gt; good|bad</code> 형태로 호출한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# /usr/local/sbin/l4-rauc-backend: RAUC custom backend -&gt; L4 U-Boot env
+cmd=$1; slot=$2; val=$3
+get() { fw_printenv -n "$1" 2&gt;/dev/null; }
+commit() { t=$(mktemp); cat &gt; "$t"; fw_setenv -s "$t"; rc=$?; rm -f "$t"; return $rc; }
+logger -t l4-rauc-backend "$cmd $slot $val"
+case "$cmd" in
+  get-primary) get boot_slot ;;
+  set-primary) printf 'boot_slot=%s\nupgrade_available=1\nbootcount=0\n' "$slot" | commit ;;
+  get-state)   s=$(get "l4_state_$slot"); echo "${s:-good}" ;;
+  set-state)
+    if [ "$val" = good ] &amp;&amp; [ "$slot" = "$(get boot_slot)" ]; then
+      printf 'l4_state_%s=good\nupgrade_available=0\nbootcount=0\n' "$slot" | commit
+    else
+      printf 'l4_state_%s=%s\n' "$slot" "$val" | commit
+    fi ;;
+  get-current) sed -n 's/.*l4\.slot=\([AB]\).*/\1/p' /proc/cmdline ;;
+  *) echo "unknown command $cmd" &gt;&amp;2; exit 1 ;;
+esac</code></pre></figure>
+<p><code>set-primary</code>가 boot-commit 프로토콜 2단계("B로, 시험으로")이고, 지금 부팅된 슬롯에 대한 <code>set-state good</code>이 4단계(commit)다. 각 경우 env 변경을 <strong><code>fw_setenv -s</code> 한 번</strong>으로 묶었다.</p>
+<p>Ubuntu의 <code>rauc</code> 패키지에는 서비스용 파일(D-Bus 정책 · systemd 유닛)이 <code>rauc-service</code> 패키지로 분리되어 있고 랩 이미지에는 없었다. 그래서 첫 시도는 <code>The name de.pengutronix.rauc was not provided by any .service files</code>로 실패했고, 패키지를 설치하는 대신 세 파일을 직접 넣었다(D-Bus 정책 <code>de.pengutronix.rauc.conf</code>, 활성화 파일, <code>rauc.service</code>의 <code>ExecStart=/usr/bin/rauc --mount=/run/rauc service</code>). 장비 이미지에 RAUC를 넣을 때 "CLI만 있고 서비스가 없다"는 흔한 누락이다.</p>
+<h3 id="6-5-health-check-서비스">6.5 health check 서비스<a class="anchor" href="#6-5-health-check-서비스" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# /usr/local/sbin/l4-health: commit the slot if healthy, otherwise reboot (bootcount decides)
+slot=$(sed -n 's/.*l4\.slot=\([AB]\).*/\1/p' /proc/cmdline)
+pending=$(fw_printenv -n upgrade_available 2&gt;/dev/null)
+echo "l4-health: version=$(cat /etc/l4-version) slot=$slot upgrade_available=$pending bootcount=$(fw_printenv -n bootcount)"
+ok=1
+systemctl is-active -q systemd-networkd || { echo "l4-health: FAIL networkd"; ok=0; }
+findmnt -n /data &gt;/dev/null           || { echo "l4-health: FAIL /data not mounted"; ok=0; }
+[ -e /etc/l4-break-health ]           &amp;&amp; { echo "l4-health: FAIL injected fault"; ok=0; }
+if [ "$ok" = 1 ]; then
+  if [ "$pending" = 1 ]; then rauc status mark-good &amp;&amp; echo "l4-health: COMMITTED slot $slot"; fi
+  echo "l4-health: healthy"
+elif [ "$pending" = 1 ]; then
+  echo "l4-health: UNHEALTHY trial boot -&gt; reboot without commit"; systemctl reboot
+else
+  echo "l4-health: unhealthy but committed slot -&gt; stay up, raise alarm"
+fi</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code># /etc/systemd/system/l4-health.service
+[Unit]
+Description=L4 post-update health check (commit or reboot)
+After=network.target systemd-networkd.service data.mount
+Wants=systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/local/sbin/l4-health
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target</code></pre></figure>
+<p>설계 포인트: (1) <strong>시험 부팅(<code>upgrade_available=1</code>)일 때만</strong> 실패 → 재부팅을 한다. 확정된 슬롯에서 health가 나쁘다고 재부팅하면 무한 루프다. (2) <code>After=multi-user.target</code>를 쓰면 <code>WantedBy=multi-user.target</code>와 순서 순환이 생기므로 필요한 유닛에만 순서를 건다(L1). (3) 실제 제품이라면 판정 대상은 networkd가 아니라 <strong>카메라 장치 열림, IMU 샘플 수신, 앱의 자체 진단</strong>이고, 판정 전까지 하드웨어 watchdog을 켜 둔다. upstream RAUC에는 같은 일을 하는 <code>rauc-mark-good.service</code> 예제가 있다. systemd 자체도 <code>boot-complete.target</code> + <code>systemd-bless-boot</code>(systemd-boot 전용 boot counting)이라는 같은 패턴을 가지고 있다.</p>
+<h3 id="6-6-예제-8-시나리오-1-a-1-0-0-b-2-0-0-설치-시험-부팅-commit">6.6 예제 8 — 시나리오 1: A(1.0.0) → B(2.0.0) 설치 · 시험 부팅 · commit<a class="anchor" href="#6-6-예제-8-시나리오-1-a-1-0-0-b-2-0-0-설치-시험-부팅-commit" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 공장 상태(A 활성)에서 <code>rauc install</code> → env 변화 → 재부팅 → U-Boot가 B를 시험 부팅 → health check가 <code>mark-good</code> → 다음 부팅부터 env 쓰기 없음. expect 스크립트로 QEMU 시리얼 콘솔을 조작했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># l4lib.tcl: spawn qemu ... -bios /var/tmp/L4/build1/u-boot.bin -drive if=pflash,unit=1,...,file=l4_pf.img
+#            -drive file=l4_disk.img,if=virtio,format=raw -netdev user,id=n0 -device virtio-net-pci,netdev=n0
+# s1_good.exp:
+source /Users/donh/.elinux_scratch/L4/exp/l4lib.tcl
+qemu_start /var/tmp/L4/s1_good.log
+shell
+run {cat /etc/l4-version; cat /proc/mtd; fw_printenv boot_slot upgrade_available bootcount l4_state_A l4_state_B}
+run {rauc status}
+run {time rauc install /data/l4_2.0.0.raucb} 1800
+run {fw_printenv boot_slot upgrade_available bootcount l4_state_A l4_state_B; rauc status}
+send "reboot\r"
+shell
+run {cat /etc/l4-version; cat /proc/cmdline}
+run {journalctl -b -u l4-health --no-pager -o cat}
+run {fw_printenv boot_slot upgrade_available bootcount l4_state_A l4_state_B}
+run {rauc status --detailed | head -n 40}
+send "reboot\r"
+shell
+run {cat /etc/l4-version; fw_printenv boot_slot upgrade_available bootcount}
+send "poweroff\r"
+expect -timeout 300 eof</code></pre></figure>
+<p>설치 전:</p>
+<figure class="code"><span class="lang">text</span><pre><code>L4# cat /etc/l4-version; cat /proc/mtd; fw_printenv boot_slot upgrade_available bootcount l4_state_A l4_state_B
+1.0.0
+dev:    size   erasesize  name
+mtd0: 08000000 00040000 "0.flash"
+boot_slot=A
+upgrade_available=0
+bootcount=0
+l4_state_A=good
+l4_state_B=good
+L4# rauc status
+=== System Info ===
+Compatible:  l4-sensorkit
+Booted from: rootfs.0 (A)
+=== Bootloader ===
+Activated: rootfs.0 (A)
+=== Slot States ===
+○ [rootfs.1] (/dev/vda2, ext4, inactive)
+	bootname: B
+	boot status: good
+⏺ [rootfs.0] (/dev/vda1, ext4, booted)
+	bootname: A
+	mounted: /
+	boot status: good</code></pre></figure>
+<p>설치:</p>
+<figure class="code"><span class="lang">text</span><pre><code>L4# time rauc install /data/l4_2.0.0.raucb
+installing
+  0% Installing
+  0% Determining slot states
+ 10% Checking bundle
+ 10% Verifying signature
+ 20% Verifying signature done.
+ 20% Checking manifest contents
+ 30% Determining target install group
+ 40% Updating slots
+ 40% Checking slot rootfs.1
+ 46% Checking slot rootfs.1 done.
+ 46% Copying image to rootfs.1
+ 47% Copying image to rootfs.1
+...
+ 99% Copying image to rootfs.1 done.
+100% Installing done.
+Installing `/data/l4_2.0.0.raucb` succeeded
+real	0m27.379s
+L4# fw_printenv boot_slot upgrade_available bootcount l4_state_A l4_state_B; rauc status
+boot_slot=B
+upgrade_available=1
+bootcount=0
+l4_state_A=good
+l4_state_B=bad
+=== Bootloader ===
+Activated: rootfs.1 (B)
+=== Slot States ===
+⏺ [rootfs.1] (/dev/vda2, ext4, inactive)
+	bootname: B
+	boot status: bad
+○ [rootfs.0] (/dev/vda1, ext4, booted)
+	bootname: A
+	boot status: good</code></pre></figure>
+<p>(진행률 줄 일부 생략.) RAUC가 자동으로 <strong>비활성 슬롯(rootfs.1 = B)</strong>을 골랐다. 설치 후 env: <code>boot_slot=B</code>, <code>upgrade_available=1</code>(set-primary), 그리고 <code>l4_state_B=bad</code> — 쓰기 전에 B를 bad로 표시한 흔적이다. "Activated: B"인데 boot status가 bad인 것은 "다음 부팅은 B지만 아직 증명되지 않았다"는 뜻이다. 800 MiB 이미지 기록이 TCG에서 27초.</p>
+<p>재부팅 후 U-Boot와 B의 첫 부팅:</p>
+<figure class="code"><span class="lang">text</span><pre><code>Saving Environment to Flash... Un-Protected 2 sectors
+Erasing Flash...
+.. done
+Erased 2 sectors
+Writing to Flash... done
+Protected 2 sectors
+OK
+Hit any key to stop autoboot: 0
+L4: boot_slot=B part=2 bootcount=1 upgrade_available=1
+54151680 bytes read in 515 ms (100.3 MiB/s)
+Starting kernel ...
+...
+L4# cat /etc/l4-version; cat /proc/cmdline
+2.0.0
+console=ttyAMA0 root=/dev/vda2 rw rootwait panic=5 l4.slot=B rauc.slot=B
+L4# journalctl -b -u l4-health --no-pager -o cat
+Starting l4-health.service - L4 post-update health check (commit or reboot)...
+l4-health: version=2.0.0 slot=B upgrade_available=1 bootcount=1
+rauc status: marked slot rootfs.1 as good
+l4-health: COMMITTED slot B
+l4-health: healthy
+L4# fw_printenv boot_slot upgrade_available bootcount l4_state_A l4_state_B
+boot_slot=B
+upgrade_available=0
+bootcount=0
+l4_state_A=good
+l4_state_B=good
+L4# rauc status --detailed | head -n 40
+Booted from: rootfs.1 (B)
+Activated: rootfs.1 (B)
+⏺ [rootfs.1] (/dev/vda2, ext4, booted)
+	boot status: good
+      slot status:
+          bundle:
+              compatible=l4-sensorkit
+              version=2.0.0
+          checksum:
+              sha256=a829ea1beecdbc8e7552319adadd705d040405e0a450561a5dc08180867bc1b2
+              size=838.9 MB (838860800 bytes)
+          installed:
+              timestamp=2026-10-18T05:33:37Z
+              count=1
+          status=ok</code></pre></figure>
+<p>그리고 한 번 더 재부팅:</p>
+<figure class="code"><span class="lang">text</span><pre><code>Loading Environment from Flash...Loading Environment from Flash... OK
+Hit any key to stop autoboot: 0
+L4: boot_slot=B part=2 bootcount=1 upgrade_available=0
+...
+L4# cat /etc/l4-version; fw_printenv boot_slot upgrade_available bootcount
+2.0.0
+boot_slot=B
+upgrade_available=0
+bootcount=0</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: (1) 시험 부팅에서는 U-Boot가 bootcmd보다 먼저 <code>Saving Environment</code>(bootcount=1 저장)를 했다. (2) B의 health check가 <code>rauc status mark-good</code> → custom backend <code>set-state B good</code> → <code>upgrade_available=0 bootcount=0</code>. (3) commit 후 재부팅에서는 <strong><code>Saving Environment</code>가 없다</strong> — 확정 상태에서는 env를 전혀 쓰지 않는다(콘솔의 <code>bootcount=1</code>은 RAM 값, §4.3). (4) RAUC의 슬롯 상태 파일(<code>/data/rauc.status</code>)에 설치된 번들 버전 · sha256 · 시각이 남는다. 서버 보고 · 감사 로그의 근거가 된다. 전체 시나리오(부팅 3회 포함)가 TCG에서 1분 44초 걸렸다.</p>
+<hr>
+<h2 id="7-깨진-업데이트-자동-롤백-커널-panic">7. 깨진 업데이트 → 자동 롤백 (커널 panic)<a class="anchor" href="#7-깨진-업데이트-자동-롤백-커널-panic" aria-label="link">#</a></h2>
+<h3 id="7-1-예제-9-시나리오-2-b-2-0-0-에서-a에-3-0-0-broken-설치">7.1 예제 9 — 시나리오 2: B(2.0.0)에서 A에 3.0.0-broken 설치<a class="anchor" href="#7-1-예제-9-시나리오-2-b-2-0-0-에서-a에-3-0-0-broken-설치" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: init이 즉시 종료하는 이미지를 설치하면 커널이 <code>Attempted to kill init!</code>으로 panic → <code>panic=5</code>로 재부팅 → bootcount 1, 2, 3 → 네 번째에 <code>altbootcmd</code> → B로 롤백. 이번에는 B가 활성이니 RAUC가 <strong>A</strong>에 쓴다(대칭).</p>
+<figure class="code"><span class="lang">text</span><pre><code>L4# cat /etc/l4-version; fw_printenv boot_slot upgrade_available bootcount
+2.0.0
+boot_slot=B
+upgrade_available=0
+bootcount=0
+L4# rauc install /data/l4_3.0.0-broken.raucb 2&gt;&amp;1 | tail -n 3
+100% Installing done.
+Installing `/data/l4_3.0.0-broken.raucb` succeeded
+L4# fw_printenv boot_slot upgrade_available bootcount l4_state_A l4_state_B
+boot_slot=A
+upgrade_available=1
+bootcount=0
+l4_state_A=bad
+l4_state_B=good
+L4# reboot</code></pre></figure>
+<p>재부팅 이후 콘솔에서 핵심 줄만 골랐다(커널 부팅 메시지 생략).</p>
+<figure class="code"><span class="lang">text</span><pre><code>U-Boot 2026.10 (Oct 17 2026 - 22:31:07 -0700)
+Saving Environment to Flash... Un-Protected 2 sectors
+L4: boot_slot=A part=1 bootcount=1 upgrade_available=1
+[    1.316472] Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100
+[    1.321239] Rebooting in 5 seconds..
+U-Boot 2026.10 (Oct 17 2026 - 22:31:07 -0700)
+Saving Environment to Flash... Un-Protected 2 sectors
+L4: boot_slot=A part=1 bootcount=2 upgrade_available=1
+L4 v3-broken: init exits on purpose
+[    1.288394] Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100
+[    1.292812] Rebooting in 5 seconds..
+U-Boot 2026.10 (Oct 17 2026 - 22:31:07 -0700)
+Saving Environment to Flash... Un-Protected 2 sectors
+L4: boot_slot=A part=1 bootcount=3 upgrade_available=1
+L4 v3-broken: init exits on purpose
+[    1.316937] Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100
+[    1.321702] Rebooting in 5 seconds..
+U-Boot 2026.10 (Oct 17 2026 - 22:31:07 -0700)
+Saving Environment to Flash... Un-Protected 2 sectors
+Erasing Flash...
+Writing to Flash... done
+OK
+Warning: Bootlimit (3) exceeded. Using altbootcmd.
+Hit any key to stop autoboot: 1Hit any key to stop autoboot: 0
+L4: bootlimit exceeded on slot A -&gt; rollback
+Saving Environment to Flash... Un-Protected 2 sectors
+Erasing Flash...
+Writing to Flash... done
+OK
+L4: boot_slot=B part=2 bootcount=0 upgrade_available=0
+54151680 bytes read in 250 ms (206.6 MiB/s)
+Starting kernel ...
+...
+L4# cat /etc/l4-version; cat /proc/cmdline; fw_printenv boot_slot upgrade_available bootcount l4_state_A l4_state_B
+2.0.0
+console=ttyAMA0 root=/dev/vda2 rw rootwait panic=5 l4.slot=B rauc.slot=B
+boot_slot=B
+upgrade_available=0
+bootcount=0
+l4_state_A=bad
+l4_state_B=good
+L4# rauc status
+Booted from: rootfs.1 (B)
+Activated: rootfs.1 (B)
+⏺ [rootfs.1] (/dev/vda2, ext4, booted)
+	boot status: good
+○ [rootfs.0] (/dev/vda1, ext4, inactive)
+	boot status: bad</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: 네 번째 U-Boot 진입에서 bootcount 저장(4) → <code>Bootlimit (3) exceeded</code> → altbootcmd가 <strong>두 번째 env 저장</strong>(slot=B, upg=0, count=0, A=bad)을 하고 B를 부팅했다. B로 돌아온 뒤 RAUC도 A를 <code>bad</code>로 본다 — 서버에 "3.0.0은 이 장비에서 부팅 실패"라고 보고할 정보가 남아 있다. 첫 부팅에서 <code>init exits on purpose</code> 줄이 안 보이는 것은 콘솔 출력이 panic 메시지와 섞였기 때문이다(두 번째부터 보인다).</p>
+<h3 id="7-2-예제-10-시나리오-3-부팅은-되지만-health-check가-실패">7.2 예제 10 — 시나리오 3: 부팅은 되지만 health check가 실패<a class="anchor" href="#7-2-예제-10-시나리오-3-부팅은-되지만-health-check가-실패" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 커널도 systemd도 멀쩡하지만 앱 수준 판정이 실패하는 업데이트(4.0.0-unhealthy). 실무에서 더 흔한 경우다 — "카메라 드라이버가 새 커널과 안 맞아 <code>/dev/video0</code>이 없다" 같은 것.</p>
+<figure class="code"><span class="lang">text</span><pre><code>L4# rauc install /data/l4_4.0.0-unhealthy.raucb 2&gt;&amp;1 | tail -n 2
+100% Installing done.
+Installing `/data/l4_4.0.0-unhealthy.raucb` succeeded
+L4# reboot
+[   49.375827] reboot: Restarting system
+U-Boot 2026.10 (Oct 17 2026 - 22:31:07 -0700)
+Saving Environment to Flash... Un-Protected 2 sectors
+L4: boot_slot=A part=1 bootcount=1 upgrade_available=1
+[   21.134926] l4-health[320]: l4-health: version=4.0.0-unhealthy slot=A upgrade_available=1 bootcount=1
+[   21.232987] l4-health[320]: l4-health: FAIL injected fault
+[   21.234237] l4-health[320]: l4-health: UNHEALTHY trial boot -&gt; reboot without commit
+[   23.357114] reboot: Restarting system
+U-Boot 2026.10 (Oct 17 2026 - 22:31:07 -0700)
+Saving Environment to Flash... Un-Protected 2 sectors
+L4: boot_slot=A part=1 bootcount=2 upgrade_available=1
+[   19.091830] l4-health[321]: l4-health: version=4.0.0-unhealthy slot=A upgrade_available=1 bootcount=2
+[   19.195595] l4-health[321]: l4-health: FAIL injected fault
+[   19.196850] l4-health[321]: l4-health: UNHEALTHY trial boot -&gt; reboot without commit
+[   21.177327] reboot: Restarting system
+U-Boot 2026.10 (Oct 17 2026 - 22:31:07 -0700)
+Saving Environment to Flash... Un-Protected 2 sectors
+L4: boot_slot=A part=1 bootcount=3 upgrade_available=1
+[   19.180899] l4-health[323]: l4-health: version=4.0.0-unhealthy slot=A upgrade_available=1 bootcount=3
+[   19.322633] l4-health[323]: l4-health: FAIL injected fault
+[   19.323737] l4-health[323]: l4-health: UNHEALTHY trial boot -&gt; reboot without commit
+[   21.489572] reboot: Restarting system
+U-Boot 2026.10 (Oct 17 2026 - 22:31:07 -0700)
+Saving Environment to Flash... Un-Protected 2 sectors
+Warning: Bootlimit (3) exceeded. Using altbootcmd.
+L4: bootlimit exceeded on slot A -&gt; rollback
+Saving Environment to Flash... Un-Protected 2 sectors
+L4: boot_slot=B part=2 bootcount=0 upgrade_available=0
+[   19.239615] l4-health[322]: l4-health: version=2.0.0 slot=B upgrade_available=0 bootcount=0
+[   19.344703] l4-health[322]: l4-health: healthy
+L4# cat /etc/l4-version; fw_printenv boot_slot upgrade_available bootcount l4_state_A l4_state_B
+2.0.0
+boot_slot=B
+upgrade_available=0
+bootcount=0
+l4_state_A=bad</code></pre></figure>
+<p>(커널 메시지 생략, 줄은 콘솔 출력 그대로.) <strong>출력에서 볼 것</strong>: 이번에는 시험 부팅마다 systemd가 끝까지 올라오고(health 판정이 커널 시각 약 19~21초), health check가 commit 없이 재부팅한다. 결과는 panic 경우와 똑같이 bootcount → altbootcmd → B. <strong>"재부팅 = 실패 신호"로 통일하면</strong> 부트로더는 실패 원인(panic, 행, health 실패)을 구분할 필요가 없다. 원인은 pstore/journal에 남겨 나중에 서버로 올린다(L7).</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <text x="20" y="22" font-size="14">시나리오 2 — 3.0.0-broken (커널 panic)</text>
+  <rect x="20" y="34" width="118" height="62" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="79" y="56" text-anchor="middle" font-size="12">bootcount=1</text>
+  <text x="79" y="76" text-anchor="middle" font-size="12">panic 1.32 s</text>
+  <rect x="148" y="34" width="118" height="62" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="207" y="56" text-anchor="middle" font-size="12">bootcount=2</text>
+  <text x="207" y="76" text-anchor="middle" font-size="12">panic 1.29 s</text>
+  <rect x="276" y="34" width="118" height="62" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="335" y="56" text-anchor="middle" font-size="12">bootcount=3</text>
+  <text x="335" y="76" text-anchor="middle" font-size="12">panic 1.32 s</text>
+  <rect x="404" y="34" width="118" height="62" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="463" y="56" text-anchor="middle" font-size="12">bootcount=4</text>
+  <text x="463" y="76" text-anchor="middle" font-size="12">altbootcmd</text>
+  <rect x="532" y="34" width="128" height="62" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="596" y="56" text-anchor="middle" font-size="12">B 2.0.0 부팅</text>
+  <text x="596" y="76" text-anchor="middle" font-size="12">A=bad 기록</text>
+  <text x="20" y="128" font-size="12">각 칸 = U-Boot 진입 1회. 진입마다 env 저장(bootcount++)이 먼저, 그다음 부팅 시도</text>
+  <text x="20" y="176" font-size="14">시나리오 3 — 4.0.0-unhealthy (systemd OK, health 실패)</text>
+  <rect x="20" y="188" width="118" height="62" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="79" y="210" text-anchor="middle" font-size="12">bootcount=1</text>
+  <text x="79" y="230" text-anchor="middle" font-size="12">FAIL 21.2 s</text>
+  <rect x="148" y="188" width="118" height="62" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="207" y="210" text-anchor="middle" font-size="12">bootcount=2</text>
+  <text x="207" y="230" text-anchor="middle" font-size="12">FAIL 19.2 s</text>
+  <rect x="276" y="188" width="118" height="62" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="335" y="210" text-anchor="middle" font-size="12">bootcount=3</text>
+  <text x="335" y="230" text-anchor="middle" font-size="12">FAIL 19.3 s</text>
+  <rect x="404" y="188" width="118" height="62" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="463" y="210" text-anchor="middle" font-size="12">bootcount=4</text>
+  <text x="463" y="230" text-anchor="middle" font-size="12">altbootcmd</text>
+  <rect x="532" y="188" width="128" height="62" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="596" y="210" text-anchor="middle" font-size="12">B 2.0.0 healthy</text>
+  <text x="596" y="230" text-anchor="middle" font-size="12">19.3 s</text>
+  <text x="20" y="282" font-size="12">시각은 각 부팅의 커널 타임스탬프(panic 또는 l4-health FAIL 줄), TCG 기준</text>
+  <text x="20" y="302" font-size="12">bootlimit=3 → 시험 3회 + 롤백 1회. 실패 판정이 늦을수록(health) 롤백까지 총 시간이 길다</text>
+</svg></figure>
+<p>그림 6 — 예제 9 · 10의 실제 콘솔 로그에서 뽑은 bootcount 타임라인. panic은 부팅 1.3초 만에 실패가 드러나 롤백까지가 짧고, health 실패는 매번 systemd가 끝까지 올라와야 해서 길다. 필드에서 bootlimit을 정할 때 이 "실패 1회의 비용"을 고려한다(배터리 장비면 특히).</p>
+<hr>
+<h2 id="8-업데이트-도중-전원-차단">8. 업데이트 도중 전원 차단<a class="anchor" href="#8-업데이트-도중-전원-차단" aria-label="link">#</a></h2>
+<h3 id="8-1-예제-11-시나리오-4-비활성-슬롯-쓰기-중-kill-9">8.1 예제 11 — 시나리오 4: 비활성 슬롯 쓰기 중 kill -9<a class="anchor" href="#8-1-예제-11-시나리오-4-비활성-슬롯-쓰기-중-kill-9" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: B(2.0.0)가 활성인 상태에서 A에 설치를 시작하고, <code>Copying image to rootfs.0</code>가 뜬 12초 뒤 QEMU 프로세스를 <code>kill -9</code>로 죽인다(전원 차단 — 게스트 커널이 아무것도 flush하지 못한다, J5). 다시 켜면?</p>
+<figure class="code"><span class="lang">text</span><pre><code># s4_powercut.exp (핵심 부분)
+send "rauc install /data/l4_2.0.0.raucb\r"
+expect -timeout 1800 "Copying image to rootfs"
+sleep 12
+send_user "\n### L4: kill -9 QEMU now (power cut during slot write)\n"
+exec kill -9 [exp_pid]
+catch {close}; catch {wait}
+qemu_start /var/tmp/L4/s4_cut2.log
+...</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>L4# rauc install /data/l4_2.0.0.raucb
+installing
+...
+ 40% Checking slot rootfs.0
+ 46% Checking slot rootfs.0 done.
+ 46% Copying image to rootfs.0
+### L4: kill -9 QEMU now (power cut during slot write)
+spawn qemu-system-aarch64 -machine virt ... -bios /var/tmp/L4/build1/u-boot.bin ...
+U-Boot 2026.10 (Oct 17 2026 - 22:31:07 -0700)
+Loading Environment from Flash...Loading Environment from Flash... OK
+Hit any key to stop autoboot: 0
+L4: boot_slot=B part=2 bootcount=1 upgrade_available=0
+...
+L4# cat /etc/l4-version; cat /proc/cmdline; fw_printenv boot_slot upgrade_available bootcount l4_state_A l4_state_B
+2.0.0
+console=ttyAMA0 root=/dev/vda2 rw rootwait panic=5 l4.slot=B rauc.slot=B
+boot_slot=B
+upgrade_available=0
+bootcount=0
+l4_state_A=bad
+l4_state_B=good
+L4# rauc status
+Booted from: rootfs.1 (B)
+Activated: rootfs.1 (B)
+⏺ [rootfs.1] (/dev/vda2, ext4, booted)
+	boot status: good
+○ [rootfs.0] (/dev/vda1, ext4, inactive)
+	boot status: bad
+L4# dumpe2fs -h /dev/vda1 2&gt;&amp;1 | head -n 3; fsck.ext4 -n /dev/vda1 2&gt;&amp;1 | tail -n 3
+dumpe2fs 1.47.0 (5-Feb-2023)
+Filesystem volume name:   root-2.0.0
+Last mounted on:          &lt;not available&gt;
+e2fsck 1.47.0 (5-Feb-2023)
+root-2.0.0: clean, 12023/51296 files, 168264/204800 blocks</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: (1) env는 설치 전과 같다(<code>boot_slot=B</code>, <code>upgrade_available=0</code>) — 전환(set-primary)은 쓰기가 <strong>끝난 뒤</strong>에야 일어나므로 U-Boot는 아무 일 없었다는 듯 B를 부팅했다. (2) A는 설치 시작 시 기록된 <code>bad</code> 그대로다. RAUC든 U-Boot든 A로 갈 이유가 없다. (3) <strong>무서운 부분</strong>: 반쯤 쓰인 A를 <code>fsck -n</code>으로 보면 <code>clean</code>이다. 앞부분(슈퍼블록 · 그룹 디스크립터)은 새 이미지(label <code>root-2.0.0</code>)로 덮였고, 뒷부분은 이전 4.0.0의 블록이 남은 <strong>혼합물</strong>인데 메타데이터만 보면 멀쩡해 보인다. "파일시스템이 clean이니 그 슬롯을 써도 된다"는 판단은 틀렸다는 뜻이다. 슬롯의 진짜 상태는 <strong>기록 완료 후의 해시 확인</strong>(RAUC 상태 파일의 sha256)과 <code>bad</code>/<code>good</code> 표시만이 말해 준다. 다음 업데이트는 A를 처음부터 다시 쓴다.</p>
+<h3 id="8-2-차단-지점별-정리">8.2 차단 지점별 정리<a class="anchor" href="#8-2-차단-지점별-정리" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>차단 지점</th><th>그 순간의 env</th><th>다음 부팅</th><th>위험</th></tr></thead><tbody><tr><td>번들 다운로드 중</td><td>변화 없음</td><td>A 정상</td><td>없음 (data 공간만)</td></tr><tr><td>B를 bad로 표시하는 env 쓰기 중</td><td>redundant면 이전 사본</td><td>A 정상</td><td>single env면 env 전체 손상 → 기본 env (§4.7)</td></tr><tr><td>B 이미지 기록 중 (예제 11)</td><td>B=bad, slot=A</td><td>A 정상</td><td>없음</td></tr><tr><td>set-primary env 쓰기 중</td><td>redundant면 이전(= A 확정) 또는 새(= B 시험)</td><td>둘 중 하나, 둘 다 안전</td><td>single env면 위험</td></tr><tr><td>B 시험 부팅 중</td><td>slot=B, upg=1</td><td>bootcount 진행</td><td>없음 (그게 설계)</td></tr><tr><td>commit env 쓰기 중</td><td>redundant면 이전(= 시험 중)</td><td>다시 시험 → 다시 commit</td><td>없음</td></tr><tr><td><strong>부트로더 자체 업데이트 중</strong></td><td>—</td><td><strong>부트로더가 없을 수 있음</strong></td><td><strong>벽돌</strong> (§12.2)</td></tr></tbody></table></div>
+<p>single-copy env가 위험한 이유가 이 표에 다 있다 — 이 랩의 통합 시나리오가 single env를 쓴 것은 에뮬레이터 제약 때문이지 권장 구성이 아니다. 실제 보드에서는 redundant env가 사실상 필수다.</p>
+<hr>
+<h2 id="9-rauc-더-깊이">9. RAUC 더 깊이<a class="anchor" href="#9-rauc-더-깊이" aria-label="link">#</a></h2>
+<h3 id="9-1-슬롯-슬롯-그룹-슬롯-타입">9.1 슬롯 · 슬롯 그룹 · 슬롯 타입<a class="anchor" href="#9-1-슬롯-슬롯-그룹-슬롯-타입" aria-label="link">#</a></h3>
+<p><code>system.conf</code>의 <code>[slot.&lt;class&gt;.&lt;index&gt;]</code>가 슬롯 하나다. class가 같은 슬롯끼리 A/B를 이루고(<code>rootfs.0</code>/<code>rootfs.1</code>), <code>parent=</code>로 "rootfs.0이 선택되면 appfs.0도 같이"처럼 묶는다(슬롯 그룹 — 예: rootfs + 앱 파티션 + 펌웨어 파티션이 함께 전환). <code>type=</code>은 쓰는 방법을 정한다.</p>
+<div class="tw"><table><thead><tr><th>type</th><th>쓰는 방법</th><th>쓸 때</th></tr></thead><tbody><tr><td><code>raw</code></td><td>이미지를 블록 장치에 그대로</td><td>커널 파티션, 펌웨어 blob</td></tr><tr><td><code>ext4</code> · <code>vfat</code></td><td>이미지가 같은 형식이면 raw 복사, tar면 mkfs 후 풀기</td><td>이 랩</td></tr><tr><td><code>ubivol</code> · <code>ubifs</code> · <code>nand</code> · <code>nor</code></td><td>UBI 볼륨 업데이트(원자적), MTD 직접</td><td>raw NAND 장비 (J4)</td></tr><tr><td><code>boot-emmc</code></td><td>eMMC boot0/boot1 중 비활성 쪽에 쓰고 EXT_CSD로 전환</td><td><strong>부트로더 업데이트</strong> (§12.2)</td></tr><tr><td><code>boot-mbr-switch</code> · <code>boot-gpt-switch</code> · <code>boot-raw-fallback</code></td><td>파티션 테이블 항목 전환, ROM의 fallback 오프셋 이용</td><td>부트로더 영역이 파티션 하나뿐인 SoC</td></tr></tbody></table></div>
+<h3 id="9-2-bootloader-backend">9.2 bootloader backend<a class="anchor" href="#9-2-bootloader-backend" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>backend</th><th>상태 저장</th><th>비고</th></tr></thead><tbody><tr><td><code>uboot</code></td><td><code>BOOT_ORDER</code>, <code>BOOT_x_LEFT</code> env (<code>fw_setenv</code>)</td><td>RAUC 제공 U-Boot 스크립트 예제(<code>contrib/uboot.sh</code>)와 짝</td></tr><tr><td><code>barebox</code></td><td>barebox state 프레임워크 (<code>bootchooser</code>)</td><td>Pengutronix 계열 보드</td></tr><tr><td><code>grub</code></td><td>grubenv 파일</td><td>x86 장비</td></tr><tr><td><code>efi</code></td><td>EFI <code>BootOrder</code>/<code>BootNext</code> 변수</td><td>UEFI 장비 (C8)</td></tr><tr><td><code>custom</code></td><td>직접 짠 스크립트</td><td>이 랩 (U-Boot 내장 bootcount와 연결)</td></tr></tbody></table></div>
+<h3 id="9-3-hooks와-handlers">9.3 hooks와 handlers<a class="anchor" href="#9-3-hooks와-handlers" aria-label="link">#</a></h3>
+<p>번들에 <code>hooks.sh</code>를 넣고 manifest에 <code>[hooks] filename=hooks.sh</code>, 이미지 쪽에 <code>hooks=pre-install;post-install</code> 식으로 선언한다. <code>install-check</code>(번들 수준 — 설치 전에 장비가 이 번들을 받아도 되는지 직접 판단, 예: 버전 하한 확인), 슬롯 <code>pre-install</code>/<code>post-install</code>(예: 새 rootfs를 mount해서 장비별 설정 · 인증서를 옛 슬롯에서 복사), <code>install</code>(기본 쓰기 방법을 대체)이 있다. 장비 쪽 <code>system.conf [handlers]</code>에는 <code>system-info</code>(장비 시리얼 등 변수 제공), <code>pre-install</code>, <code>post-install</code> 같은 시스템 handler를 둔다. <strong>데이터 마이그레이션 · 장비별 설정 이월은 대개 post-install hook에서 한다</strong>.</p>
+<h3 id="9-4-큰-번들을-다루는-기능">9.4 큰 번들을 다루는 기능<a class="anchor" href="#9-4-큰-번들을-다루는-기능" aria-label="link">#</a></h3>
+<ul><li><strong>스트리밍 설치</strong>(verity 번들 + HTTP): 번들을 장비 저장소에 내려받지 않고 HTTP range 요청으로 필요한 블록만 읽으며 dm-verity로 검증한다(nbd 경유). data 파티션에 번들 공간(이 랩에서 번들 하나 186 MiB)이 필요 없어진다.</li><li><strong>adaptive update</strong>(<code>adaptive=block-hash-index</code>): 대상 슬롯 · 다른 슬롯에 이미 같은 해시의 4 KiB 블록이 있으면 그걸 복사하고 없는 블록만 번들(스트리밍이면 네트워크)에서 읽는다. delta를 미리 만들 필요가 없는 "자동 delta"다.</li><li><strong>casync 번들</strong>(<code>rauc convert</code>): 이미지를 content-defined chunk로 쪼개 chunk store에 두고 인덱스만 번들에 넣는다. 장비는 없는 chunk만 받는다(desync를 쓴다).</li><li><strong>crypt 번들</strong>: 번들 payload를 대칭키로 암호화하고 그 키를 장비별 공개키로 암호화한다(<code>rauc encrypt</code>). 펌웨어 기밀성이 필요한 국방 장비에서 나오는 요구다.</li></ul>
+<hr>
+<h2 id="10-swupdate-프레임워크형-업데이터">10. SWUpdate — 프레임워크형 업데이터<a class="anchor" href="#10-swupdate-프레임워크형-업데이터" aria-label="link">#</a></h2>
+<h3 id="10-1-개념">10.1 개념<a class="anchor" href="#10-1-개념" aria-label="link">#</a></h3>
+<p>SWUpdate(Stefano Babic, DENX, GPL-2.0)는 "업데이트 <strong>프레임워크</strong>"다. RAUC가 "슬롯을 정의하고 번들을 그 슬롯에 넣는다"는 고정된 모델이라면, SWUpdate는 <code>sw-description</code>이라는 설명서와 <strong>handler</strong>(무엇을 어떻게 쓸지)의 조합으로 거의 무엇이든 표현한다. 단일 복사(recovery) 모드도, A/B도, 둘 다 쓸 수 있다.</p>
+<div class="tw"><table><thead><tr><th>요소</th><th>내용</th></tr></thead><tbody><tr><td><code>.swu</code></td><td><strong>cpio</strong>(newc + CRC, 매직 <code>070702</code>) 아카이브. 첫 파일이 <code>sw-description</code>, 서명이면 둘째가 <code>sw-description.sig</code>, 그 뒤 이미지들</td></tr><tr><td><code>sw-description</code></td><td>libconfig 또는 JSON. 버전, 하드웨어 호환성, 이미지 목록(파일 · 장치 · handler · sha256), bootenv, 스크립트</td></tr><tr><td>handler</td><td><code>raw</code>, <code>rawfile</code>, <code>flash</code>(MTD), <code>ubivol</code>, <code>archive</code>(tar), <code>remote</code>, <code>shellscript</code>, <code>lua</code>, <code>rdiff_image</code>, <code>delta</code>(zchunk), <code>docker_imageload</code> …</td></tr><tr><td>무결성</td><td>각 이미지의 <code>sha256</code>을 sw-description에 쓰고, <strong>sw-description 하나만 서명</strong>한다 (서명 → 해시 → 이미지 체인)</td></tr><tr><td>서명</td><td>RSA(PKCS#1.5), CMS(PKCS#7), GPG 중 빌드 옵션으로 선택</td></tr><tr><td>선택</td><td><code>software = { 보드 = { stable = { copy1: {...}; copy2: {...}; }; }; }</code> 구조 + <code>-e stable,copy2</code>로 A/B 대상 선택</td></tr><tr><td>서버 연동</td><td><code>suricatta</code> 모드 — Eclipse hawkBit(DDI API), 일반 HTTP 서버, Lua로 짠 커스텀</td></tr><tr><td>스크립팅</td><td>Lua 내장 — 설치 전후 스크립트, 커스텀 handler, 이미지 선택 로직</td></tr></tbody></table></div>
+<h3 id="10-2-예제-12-swu를-손으로-만들고-서명하기">10.2 예제 12 — .swu를 손으로 만들고 서명하기<a class="anchor" href="#10-2-예제-12-swu를-손으로-만들고-서명하기" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 도구 없이 <code>openssl</code> + <code>cpio</code>만으로 서명된 .swu를 만든다. 서명 체계는 §6.2의 CA를 그대로 쓴다(CMS).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# l4_mkswu.sh: build a signed SWUpdate .swu by hand: sw-description + CMS signature + gz rootfs
+set -e
+cd /var/tmp/L4 &amp;&amp; rm -rf swu &amp;&amp; mkdir swu &amp;&amp; cd swu
+echo 2.0.0-swu | sudo tee ../stage/etc/l4-version &gt;/dev/null
+truncate -s 800M rootfs.ext4 &amp;&amp; sudo mkfs.ext4 -q -F -L root-2.0.0-swu -d ../stage rootfs.ext4
+echo 1.0.0 | sudo tee ../stage/etc/l4-version &gt;/dev/null
+gzip -1 -c rootfs.ext4 &gt; rootfs.ext4.gz &amp;&amp; rm rootfs.ext4
+SHA=$(sha256sum rootfs.ext4.gz | cut -d" " -f1)
+cat &gt; sw-description &lt;&lt;EOD
+software =
+{
+    version = "2.0.0";
+    description = "L4 sensor kit rootfs (slot B)";
+    hardware-compatibility: [ "1.0" ];
+    images: (
+        {
+            filename = "rootfs.ext4.gz";
+            device = "/dev/vda2";
+            type = "raw";
+            compressed = "zlib";
+            sha256 = "$SHA";
+        }
+    );
+    bootenv: (
+        { name = "boot_slot"; value = "B"; },
+        { name = "upgrade_available"; value = "1"; },
+        { name = "bootcount"; value = "0"; }
+    );
+};
+EOD
+openssl cms -sign -in sw-description -out sw-description.sig -signer ../rauc/l4_dev.cert.pem \
+  -inkey ../rauc/l4_dev.key.pem -outform DER -nosmimecap -binary
+printf '%s\n' sw-description sw-description.sig rootfs.ext4.gz | cpio -o -H crc --quiet &gt; l4_2.0.0.swu
+# tampered copy: change the target device inside sw-description, keep the old signature
+mkdir tampered &amp;&amp; sed 's#/dev/vda2#/dev/vda1#' sw-description &gt; tampered/sw-description
+cp sw-description.sig rootfs.ext4.gz tampered/
+(cd tampered &amp;&amp; printf '%s\n' sw-description sw-description.sig rootfs.ext4.gz | cpio -o -H crc --quiet &gt; ../l4_tampered.swu)
+rm -rf tampered rootfs.ext4.gz
+cpio -itv &lt; l4_2.0.0.swu</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>-rw-rw-r--   1 donh     donh          560 Oct 17 22:42 sw-description
+-rw-rw-r--   1 donh     donh         1778 Oct 17 22:42 sw-description.sig
+-rw-rw-r--   1 donh     donh     214571645 Oct 17 22:42 rootfs.ext4.gz
+419091 blocks</code></pre></figure>
+<p>SWUpdate가 하는 서명 검증을 호스트의 openssl로 똑같이 해 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/L4/swu; mkdir -p t &amp;&amp; (cd t &amp;&amp; cpio -id --quiet &lt; ../l4_tampered.swu sw-description sw-description.sig)
+for d in . t; do echo "== $d"; openssl cms -verify -inform DER -in $d/sw-description.sig -content $d/sw-description \
+  -CAfile ../rauc/l4_ca.cert.pem -purpose any -binary -out /dev/null 2&gt;&amp;1 | head -n 2; done
+diff sw-description t/sw-description</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== .
+CMS Verification successful
+== t
+CMS Verification failure
+E00CD612ECE00000:error:1700009E:CMS routines:CMS_SignerInfo_verify_content:verification failure:../crypto/cms/cms_sd.c:1083:
+9c9
+&lt;             device = "/dev/vda2";
+---
+&gt;             device = "/dev/vda1";</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: 공격자가 이미지를 그대로 두고 <strong>설치 대상만 <code>/dev/vda1</code>(활성 슬롯)로 바꾼</strong> sw-description은 서명이 깨진다. 이미지 자체를 바꾸면 sha256이 sw-description과 안 맞는다. 그래서 sw-description 하나만 서명해도 전체가 보호된다.</p>
+<h3 id="10-3-예제-13-게스트에서-swupdate-c-check-모드">10.3 예제 13 — 게스트에서 <code>swupdate -c</code> (check 모드)<a class="anchor" href="#10-3-예제-13-게스트에서-swupdate-c-check-모드" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 게스트의 SWUpdate 2023.12.1(Ubuntu 빌드, wolfSSL PKCS#7)로 서명 · 하드웨어 호환성 · 이미지 해시를 설치 없이 검사한다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>L4# TMPDIR=/data/tmp swupdate -c -v -k /data/l4_ca.cert.pem -H l4kit:1.0 --cert-purpose codeSigning -i /data/l4_2.0.0.swu 2&gt;&amp;1 | grep -a -i 'verified\|hardware\|Found compressed\|hash\|success\|fail\|error' | head -n 20
+[TRACE] : SWUPDATE running :  [swupdate_verify_file] : Verified OK
+[TRACE] : SWUPDATE running :  [_parse_images] : Found compressed Image: rootfs.ext4.gz in device : /dev/vda2 for handler raw
+[TRACE] : SWUPDATE running :  [check_hw_compatibility] : Hardware l4kit Revision: 1.0
+[TRACE] : SWUPDATE running :  [check_hw_compatibility] : Hardware compatibility verified
+[INFO ] : SWUPDATE successful ! SWUPDATE successful !
+[INFO ] : SWUPDATE running :  [endupdate] : SWUpdate was successful !
+L4# TMPDIR=/data/tmp swupdate -c -k /data/l4_ca.cert.pem -H l4kit:1.0 --cert-purpose codeSigning -i /data/l4_tampered.swu 2&gt;&amp;1 | grep -a -i 'verif\|error\|fail' | head -n 6
+[ERROR] : SWUPDATE failed [0] ERROR : Signature verification failed
+[ERROR] : SWUPDATE failed [0] ERROR : Compatible SW not found
+swupdate_image_write failed: Connection reset by peer
+[ERROR] : SWUPDATE failed [1] Image invalid or corrupted. Not installing ...
+[ERROR] : SWUPDATE failed [0] ERROR : SWUpdate *failed* !</code></pre></figure>
+<p>여기까지 오는 데 걸린 함정을 순서대로 적는다(전부 실제로 겪었다).</p>
+<div class="tw"><table><thead><tr><th>시도</th><th>결과</th><th>원인 · 해결</th></tr></thead><tbody><tr><td>호스트에서 <code>chroot stage swupdate -c ...</code></td><td><code>Error loading certificate chain</code> · <code>Crypto cannot be initialized</code></td><td>chroot 안에서만 실패(<code>/proc</code>·<code>/dev</code> 없는 chroot에서 wolfSSL 초기화 문제로 추정). 실제 부팅한 게스트에서는 같은 파일로 <code>Verified OK</code></td></tr><tr><td><code>-k</code> 없이</td><td><code>SWUpdate is built for signed images, provide a public key file.</code></td><td>이 빌드는 서명 필수 (<code>CONFIG_SIGNED_IMAGES</code>) — 좋은 기본값</td></tr><tr><td>hardware-compatibility 없이</td><td><code>HW compatibility not found</code> → <code>Found nothing to install</code></td><td>이 빌드는 하드웨어 호환성 검사가 켜져 있다. sw-description에 <code>hardware-compatibility</code> + 장비에 <code>/etc/hwrevision</code> 또는 <code>-H 보드:리비전</code></td></tr><tr><td><code>/data</code> 여유 8.5 MB</td><td><code>Not enough free space to extract rootfs.ext4.gz (needed 214571645 ...)</code></td><td>check 모드는 이미지를 임시 디렉터리에 풀어 해시를 검사한다. 실제 설치는 기본적으로 스트리밍이지만, 이미지를 미리 풀어야 하는 경우를 대비해 공간 계산이 필요하다</td></tr></tbody></table></div>
+<p><strong>출력에서 볼 것</strong>: 서명 검증(<code>Verified OK</code>) → 이미지 목록 해석(handler <code>raw</code>, 대상 <code>/dev/vda2</code>) → 하드웨어 호환성 → (check 모드라 쓰기 생략) → 성공. 변조본은 서명 단계에서 끝난다. <code>--cert-purpose</code> 없이(기본 emailProtection) 돌린 경우에도 오류 줄이 없었다 — 이 wolfSSL 빌드가 purpose를 RAUC처럼 엄격히 보지 않는다는 뜻이니, 서명 인증서 정책은 도구 기본값에 기대지 말고 CA 설계로 지킨다.</p>
+<blockquote><p><strong>주의</strong>: 이 <code>.swu</code>는 <code>/dev/vda2</code>를 고정으로 적었다. 게스트가 마침 B(=vda2)로 부팅해 있었으므로 <strong>실제 설치를 했으면 활성 rootfs를 덮어썼을 것이다</strong>. 그래서 check 모드만 돌렸다. 실제 A/B 구성에서는 <code>copy1</code>/<code>copy2</code> 두 이미지 세트를 만들고 현재 슬롯에 따라 <code>-e stable,copy2</code>처럼 고르거나(<code>swupdate -g</code>로 현재 root 확인), Lua로 고른다. 이 실수가 "A/B를 직접 짜면 생기는 대표 버그"다 — RAUC는 비활성 슬롯 선택을 프레임워크가 해 준다.</p></blockquote>
+<hr>
+<h2 id="11-mender-그리고-셋-비교">11. Mender, 그리고 셋 비교<a class="anchor" href="#11-mender-그리고-셋-비교" aria-label="link">#</a></h2>
+<h3 id="11-1-mender">11.1 Mender<a class="anchor" href="#11-1-mender" aria-label="link">#</a></h3>
+<p>Mender(Northern.tech, 클라이언트 Apache-2.0)는 <strong>클라이언트 + 서버</strong>를 한 제품으로 준다. 서버(오픈소스판 · 호스팅 · Enterprise)에 장비가 붙고, 웹 UI에서 그룹을 만들어 배포한다.</p>
+<div class="tw"><table><thead><tr><th>요소</th><th>내용</th></tr></thead><tbody><tr><td>Artifact (<code>.mender</code>)</td><td>tar 기반 형식(버전 3). 헤더(호환 장비 타입, 의존성 · 제공 값) + payload + 서명</td></tr><tr><td>update module</td><td><code>rootfs-image</code>(A/B 전체 교체), <code>single-file</code>, <code>directory</code>, <code>deb</code>, <code>docker</code> 등. 플러그인 스크립트로 확장</td></tr><tr><td>state script</td><td><code>Download_Enter</code>, <code>ArtifactInstall_Leave</code>, <code>ArtifactReboot_Enter</code>, <code>ArtifactCommit_Enter</code>, <code>ArtifactRollback_Leave</code>, <code>ArtifactFailure_Enter</code> … 각 상태 전후에 장비 쪽 스크립트 실행 (health check, 사용자 동의, 데이터 마이그레이션)</td></tr><tr><td>U-Boot 연동</td><td><code>mender_boot_part</code>, <code>upgrade_available</code>, <strong><code>bootcount</code></strong>, <code>altbootcmd</code> — 이 노트가 직접 만든 것과 같은 U-Boot 내장 bootcount 메커니즘을 쓴다</td></tr><tr><td>통합</td><td>Yocto <code>meta-mender</code>, Debian/Ubuntu 이미지는 <code>mender-convert</code></td></tr><tr><td>유료 기능</td><td>binary delta, 동적 그룹, RBAC, 감사 로그 등 일부는 Professional/Enterprise 플랜 (기능 경계는 버전마다 바뀌니 도입 때 확인)</td></tr></tbody></table></div>
+<h3 id="11-2-비교">11.2 비교<a class="anchor" href="#11-2-비교" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>항목</th><th>RAUC</th><th>SWUpdate</th><th>Mender</th></tr></thead><tbody><tr><td>성격</td><td>장비 쪽 업데이트 클라이언트 (슬롯 모델)</td><td>업데이트 프레임워크 (handler 모델)</td><td>클라이언트 + 서버 + UI</td></tr><tr><td>라이선스</td><td>LGPL-2.1</td><td>GPL-2.0 (일부 LGPL)</td><td>클라이언트 Apache-2.0, 서버 오픈소스 + 상용</td></tr><tr><td>패키지 형식</td><td><code>.raucb</code> = squashfs + CMS (plain/verity/crypt)</td><td><code>.swu</code> = cpio + sw-description(+sig)</td><td><code>.mender</code> = tar + 헤더</td></tr><tr><td>무결성</td><td>CMS 서명 + dm-verity(블록 단위)</td><td>sw-description 서명 + 이미지별 sha256</td><td>서명 + 체크섬</td></tr><tr><td>A/B 대상 선택</td><td>프레임워크가 비활성 슬롯 자동 선택</td><td>직접 (<code>-e</code>, Lua)</td><td>프레임워크</td></tr><tr><td>부트로더</td><td>uboot · barebox · grub · efi · custom</td><td>uboot · grub · EFI Boot Guard · 직접</td><td>uboot · grub (통합 필요)</td></tr><tr><td>서버</td><td>없음 (hawkBit 연동 별도)</td><td>suricatta: hawkBit · HTTP · Lua</td><td>자체 서버</td></tr><tr><td>delta</td><td>adaptive(block-hash-index), casync</td><td>rdiff, zchunk(delta handler)</td><td>binary delta (상용)</td></tr><tr><td>단일 복사 · recovery</td><td>가능하지만 주력 아님</td><td>강함 (initramfs recovery 흔함)</td><td>주로 A/B</td></tr><tr><td>이 랩에서</td><td>설치 · 롤백 · 차단 전부 실행</td><td>서명 · check 모드 실행</td><td>개념만 (실행 안 함)</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <line x1="60" y1="290" x2="650" y2="290" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="60" y1="290" x2="60" y2="24" stroke="currentColor" marker-end="url(#ah5)"/>
+  <text x="560" y="314" text-anchor="middle" font-size="12">서버 · 플릿 관리 포함 정도 →</text>
+  <text x="70" y="20" font-size="12">유연성 (무엇이든 표현) ↑</text>
+  <rect x="90" y="48" width="200" height="66" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="190" y="74" text-anchor="middle" font-size="13">SWUpdate</text>
+  <text x="190" y="96" text-anchor="middle" font-size="12">handler · Lua · 단일 복사</text>
+  <rect x="90" y="170" width="200" height="66" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="190" y="196" text-anchor="middle" font-size="13">RAUC</text>
+  <text x="190" y="218" text-anchor="middle" font-size="12">슬롯 모델 · verity 번들</text>
+  <rect x="420" y="170" width="200" height="66" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="520" y="196" text-anchor="middle" font-size="13">Mender</text>
+  <text x="520" y="218" text-anchor="middle" font-size="12">클라이언트 + 서버 + UI</text>
+  <rect x="420" y="48" width="200" height="66" rx="8" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="520" y="74" text-anchor="middle" font-size="13">hawkBit (서버만)</text>
+  <text x="520" y="96" text-anchor="middle" font-size="12">RAUC · SWUpdate와 짝</text>
+  <line x1="290" y1="203" x2="416" y2="90" stroke="currentColor" stroke-dasharray="4 3"/>
+  <line x1="290" y1="81" x2="416" y2="81" stroke="currentColor" stroke-dasharray="4 3"/>
+  <text x="352" y="70" text-anchor="middle" font-size="12">suricatta</text>
+  <text x="330" y="160" text-anchor="middle" font-size="12">rauc-hawkbit-updater</text>
+</svg></figure>
+<p>그림 7 — 세 도구의 위치. 고르는 질문은 대개 둘이다. "서버를 직접 만들 건가(또는 hawkBit을 쓸 건가), 사 올 건가?" 그리고 "업데이트 형태가 단순한 A/B인가, 이것저것 섞인 복잡한 장비인가?" 단순 A/B + 견고함이면 RAUC, 이상한 하드웨어(MCU 펌웨어 · FPGA 비트스트림 · 여러 저장소)를 한 패키지로 다루려면 SWUpdate, 서버까지 빨리 갖추려면 Mender가 흔한 선택이다.</p>
+<hr>
+<h2 id="12-delta-업데이트-대역폭과-바꾸는-것">12. delta 업데이트 — 대역폭과 바꾸는 것<a class="anchor" href="#12-delta-업데이트-대역폭과-바꾸는-것" aria-label="link">#</a></h2>
+<h3 id="12-1-방식">12.1 방식<a class="anchor" href="#12-1-방식" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>방식</th><th>원리</th><th>장비 쪽 요구</th><th>대표</th></tr></thead><tbody><tr><td>바이너리 diff (bsdiff, xdelta3/VCDIFF)</td><td>옛 이미지 → 새 이미지 패치를 서버에서 미리 계산</td><td>정확히 그 옛 이미지가 있어야 함 · bsdiff는 메모리를 많이 씀</td><td>Android 옛 OTA(bsdiff/imgdiff), Mender binary delta</td></tr><tr><td>rsync 계열 (rdiff/librsync)</td><td>옛 이미지의 서명(블록 해시) 대비 delta</td><td>옛 이미지</td><td>SWUpdate <code>rdiff_image</code> handler</td></tr><tr><td>zstd <code>--patch-from</code></td><td>옛 파일을 사전(dictionary)으로 새 파일을 압축</td><td>옛 이미지 + 메모리 (<code>--long</code>)</td><td>아래 실측</td></tr><tr><td>청크 dedupe (casync/desync, zchunk)</td><td>이미지를 chunk로 쪼개 해시 인덱스만 받고 없는 chunk만 다운로드</td><td>로컬 chunk 출처(옛 슬롯)</td><td>RAUC casync, SWUpdate delta(zchunk)</td></tr><tr><td>블록 해시 재사용</td><td>슬롯에 이미 있는 블록 재사용</td><td>옛 슬롯</td><td>RAUC adaptive</td></tr><tr><td>파일 단위</td><td>바뀐 파일 객체만</td><td>OSTree 저장소</td><td>OSTree static delta</td></tr></tbody></table></div>
+<p>공통 함정: <strong>delta는 "출발점"이 정확할 때만 적용된다</strong>. 장비마다 rootfs가 미세하게 다르면(누가 rw로 mount해서 파일을 바꿨다든가) 패치가 실패한다. 그래서 delta는 read-only rootfs(J3)와 짝이고, 실패하면 full로 떨어지는 경로가 필요하다.</p>
+<h3 id="12-2-예제-14-실측-앱-8-mib-버전-파일만-바뀐-v1-v2">12.2 예제 14 — 실측: 앱 8 MiB + 버전 파일만 바뀐 v1 → v2<a class="anchor" href="#12-2-예제-14-실측-앱-8-mib-버전-파일만-바뀐-v1-v2" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 같은 stage 트리에서 8 MiB 난수 "앱 바이너리"와 <code>/etc/l4-version</code>만 바꿔 ext4 이미지 두 개를 만들고, (1) 실제로 달라진 4 KiB 블록 수, (2) full 압축 vs <code>zstd --patch-from</code> delta 크기를 잰다. mkfs의 UUID · hash seed를 랜덤으로 둘 때와 고정할 때를 비교한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# l4_delta.sh: full vs delta for v1 -&gt; v2 (8 MiB app + /etc/l4-version change)
+set -e
+cd /var/tmp/L4 &amp;&amp; mkdir -p delta &amp;&amp; cd delta
+mk() { echo "$1" | sudo tee ../stage/etc/l4-version &gt;/dev/null
+  rm -f "$2"; truncate -s 800M "$2"; sudo mkfs.ext4 -q -F -L rootfs $3 -d ../stage "$2"; }
+cmpblk() { python3 -I - "$1" "$2" &lt;&lt;'PY'
+import sys
+a, b = open(sys.argv[1], 'rb'), open(sys.argv[2], 'rb'); n = d = 0
+while True:
+    x, y = a.read(4096), b.read(4096)
+    if not x: break
+    n += 1; d += (x != y)
+print(f"4K blocks: {n}, differing: {d} ({d*4/1024:.1f} MiB)")
+PY
+}
+U=3f0c3a52-1b7e-4d1a-9c39-0c0ffee014ab
+head -c 8M /dev/urandom &gt; app_v1.bin; head -c 8M /dev/urandom &gt; app_v2.bin
+sudo cp app_v1.bin ../stage/usr/local/bin/l4_app.bin; mk 1.0.0 v1.ext4
+sudo cp app_v2.bin ../stage/usr/local/bin/l4_app.bin; mk 2.0.0 v2.ext4
+echo "[random UUID]"; cmpblk v1.ext4 v2.ext4
+sudo cp app_v1.bin ../stage/usr/local/bin/l4_app.bin; mk 1.0.0 v1f.ext4 "-U $U -E hash_seed=$U"
+sudo cp app_v2.bin ../stage/usr/local/bin/l4_app.bin; mk 2.0.0 v2f.ext4 "-U $U -E hash_seed=$U"
+echo "[fixed UUID + hash_seed]"; cmpblk v1f.ext4 v2f.ext4
+/usr/bin/time -f "full zstd -19: %es" zstd -q -19 -T2 -f v2f.ext4 -o v2f.full.zst
+/usr/bin/time -f "delta (random UUID): %es" zstd -q -19 -T2 -f --long=31 --patch-from=v1.ext4 v2.ext4 -o v2.delta.zst
+/usr/bin/time -f "delta (fixed UUID): %es" zstd -q -19 -T2 -f --long=31 --patch-from=v1f.ext4 v2f.ext4 -o v2f.delta.zst
+zstd -q -d -f --long=31 --patch-from=v1f.ext4 v2f.delta.zst -o v2f.rebuilt.ext4 &amp;&amp; cmp v2f.rebuilt.ext4 v2f.ext4 &amp;&amp; echo "delta apply: bit-identical"
+ls -l *.zst | awk '{printf "%-18s %10d bytes (%.1f MiB)\n", $9, $5, $5/1048576}'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[random UUID]
+4K blocks: 204800, differing: 4567 (17.8 MiB)
+[fixed UUID + hash_seed]
+4K blocks: 204800, differing: 2805 (11.0 MiB)
+full zstd -19: 127.24s
+delta (random UUID): 21.78s
+delta (fixed UUID): 19.11s
+delta apply: bit-identical
+v2.delta.zst          8812643 bytes (8.4 MiB)
+v2f.delta.zst         8810877 bytes (8.4 MiB)
+v2f.full.zst        154300088 bytes (147.2 MiB)</code></pre></figure>
+<p>(실제 실행본은 UUID 문자열을 셸 치환으로 만들었다. 같은 값이다. 정리용 <code>rm</code> 줄은 생략.)</p>
+<p><strong>출력에서 볼 것</strong>:</p>
+<ul><li>full 전송은 147 MiB(zstd -19), RAUC verity 번들(squashfs 기본 압축)은 186 MiB인데, 실제로 바뀐 내용은 8 MiB 앱 + 수 KiB다. delta는 <strong>8.4 MiB</strong> — 거의 "바뀐 앱 크기"까지 줄었다. 1만 대 × LTE라면 1.47 TB 대 84 GB 차이다.</li><li><strong>mkfs가 UUID와 hash seed를 랜덤으로 고르면</strong> 내용이 같아도 메타데이터 블록(슈퍼블록, 그룹 디스크립터, 디렉터리 해시, <code>metadata_csum</code>이 UUID로 seed된 체크섬)이 달라져 달라진 블록이 17.8 MiB로 늘어난다. 고정하면 11.0 MiB(8 MiB 앱 + 할당 위치가 바뀐 블록). zstd는 내용 매칭이라 둘 다 8.4 MiB였지만, <strong>블록 해시 기반 방식(RAUC adaptive, casync)은 바로 이 "달라진 블록 수"에 비례</strong>한다. 재현 가능한 이미지 빌드(K5의 SOURCE_DATE_EPOCH, 고정 UUID)가 delta 효율과 직결된다.</li><li>full 압축 127초, delta 19~22초는 VM CPU 시간이다(TCG 아님). 장비 쪽 적용 비용(메모리 · CPU)도 따로 재야 한다. zstd <code>--long=31</code>은 패치 적용에도 큰 윈도 메모리가 든다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+  <text x="20" y="22" font-size="13">v1 → v2 전송량 (MiB, 실측) — 바뀐 것: 앱 8 MiB + 버전 파일</text>
+  <line x1="250" y1="34" x2="250" y2="266" stroke="currentColor"/>
+  <text x="240" y="62" text-anchor="end" font-size="12">ext4 이미지 원본</text>
+  <rect x="250" y="46" width="330" height="24" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="588" y="63" font-size="12">800</text>
+  <text x="240" y="102" text-anchor="end" font-size="12">RAUC verity 번들</text>
+  <rect x="250" y="86" width="76.8" height="24" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="334" y="103" font-size="12">186.3</text>
+  <text x="240" y="142" text-anchor="end" font-size="12">zstd -19 전체</text>
+  <rect x="250" y="126" width="60.7" height="24" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="318" y="143" font-size="12">147.2</text>
+  <text x="240" y="182" text-anchor="end" font-size="12">달라진 블록 (랜덤 UUID)</text>
+  <rect x="250" y="166" width="7.3" height="24" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="266" y="183" font-size="12">17.8</text>
+  <text x="240" y="222" text-anchor="end" font-size="12">달라진 블록 (고정 UUID)</text>
+  <rect x="250" y="206" width="4.5" height="24" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="262" y="223" font-size="12">11.0</text>
+  <text x="240" y="262" text-anchor="end" font-size="12">zstd --patch-from</text>
+  <rect x="250" y="246" width="3.5" height="24" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="261" y="263" font-size="12">8.4</text>
+  <text x="250" y="290" font-size="12">선형 축 (330 px = 800 MiB). 번들은 앱 없는 v2 기준</text>
+</svg></figure>
+<p>그림 8 — full과 delta의 전송량 비교(예제 8 · 14 실측). "달라진 블록"은 블록 해시 기반 delta(RAUC adaptive, casync)의 하한에 해당한다.</p>
+<hr>
+<h2 id="13-슬롯-밖에-있는-것들-데이터-부트로더-anti-rollback">13. 슬롯 밖에 있는 것들 — 데이터 · 부트로더 · anti-rollback<a class="anchor" href="#13-슬롯-밖에-있는-것들-데이터-부트로더-anti-rollback" aria-label="link">#</a></h2>
+<h3 id="13-1-data-파티션과-마이그레이션">13.1 data 파티션과 마이그레이션<a class="anchor" href="#13-1-data-파티션과-마이그레이션" aria-label="link">#</a></h3>
+<p>A와 B는 하나의 <code>/data</code>를 공유한다. v2가 첫 부팅에 설정 DB 스키마를 v2 형식으로 바꿨는데 그 부팅이 health check에 실패해 v1으로 롤백되면, <strong>v1은 자기가 모르는 형식의 데이터</strong>를 만난다. 롤백은 슬롯만 되돌리지 데이터는 되돌리지 않는다.</p>
+<p>실무 규칙:</p>
+<ul><li>스키마 변경은 <strong>commit 이후</strong>에 한다(health check가 통과하고 mark-good 한 다음). 시험 부팅 중에는 데이터를 읽기만 하거나 새 위치에 복사본으로 쓴다.</li><li>데이터에 버전 번호를 둔다(<code>/data/config/schema_version</code>). 새 버전은 옛 형식을 읽을 줄 알아야 하고(forward migration), 가능하면 옛 버전도 새 형식을 <strong>무시하고 안전하게 실패</strong>해야 한다.</li><li>버전별 디렉터리(<code>/data/app/v2/</code>)로 나누고 commit 후에 옛것을 지우는 방법도 흔하다(공간 2배).</li><li>장비 고유 데이터(시리얼, 인증서, 캘리브레이션 값 — 예: IMU 바이어스, 카메라 렌즈 보정)는 별도 파티션이나 read-only 영역에 두고 업데이트가 절대 건드리지 않게 한다.</li><li><code>/etc</code>가 rootfs 안에 있으면 장비별 설정이 업데이트로 사라진다. RAUC post-install hook으로 이월하거나, 설정을 <code>/data</code>로 빼고 rootfs는 read-only(J3)로 둔다.</li></ul>
+<h3 id="13-2-부트로더-업데이트-가장-무서운-부분">13.2 부트로더 업데이트 — 가장 무서운 부분<a class="anchor" href="#13-2-부트로더-업데이트-가장-무서운-부분" aria-label="link">#</a></h3>
+<p>rootfs는 부트로더가 되돌려 준다. 그런데 <strong>부트로더를 업데이트하다 실패하면 되돌려 줄 주체가 없다</strong>. 대응은 하드웨어(BootROM)가 무엇을 지원하는지에 달려 있다(C2 §10).</p>
+<div class="tw"><table><thead><tr><th>방법</th><th>원리</th><th>남는 위험</th></tr></thead><tbody><tr><td>eMMC boot0/boot1</td><td>비활성 boot 파티션에 쓰고, 읽어 검증한 뒤 EXT_CSD <code>BOOT_PARTITION_ENABLE</code> 1바이트로 전환 (RAUC <code>boot-emmc</code>)</td><td>전환 바이트 쓰기는 eMMC 내부적으로 원자적. 새 부트로더가 "부팅은 되는데 env를 못 읽는" 식의 기능 버그</td></tr><tr><td>ROM의 이중 이미지 지원</td><td>i.MX 계열 secondary image, 일부 SoC의 fallback 오프셋 · 매직 검사</td><td>ROM의 fallback 조건(서명 실패 · 헤더 손상만인지)을 정확히 알아야 함</td></tr><tr><td>SPI NOR 두 영역 + 고정 1단</td><td>아주 작은 1단 로더(절대 업데이트 안 함)가 2단 A/B를 고름</td><td>1단 버그는 영원히 남음</td></tr><tr><td>업데이트 안 함</td><td>부트로더는 출하 상태 고정, 정말 필요할 때만 서비스 센터</td><td>보안 취약점 패치 불가</td></tr></tbody></table></div>
+<p>설계 원칙: (1) 부트로더 업데이트는 <strong>rootfs 업데이트와 분리</strong>하고 빈도를 최소화한다. (2) 새 부트로더 + 옛 rootfs, 옛 부트로더 + 새 rootfs 조합이 모두 부팅되게 <strong>호환성을 유지</strong>한다(env 형식 · 변수 이름 · 부팅 스크립트). (3) 쓰기 → 다시 읽어 해시 검증 → 그다음에만 전환. (4) 전원 차단 시험을 부트로더 업데이트 경로에 대해 별도로 수백 번 돌린다. (5) 최후의 수단(USB 복구 모드 · JTAG · 제조 지그)을 문서화한다.</p>
+<h3 id="13-3-anti-rollback과-서명-l5와-연결">13.3 anti-rollback과 서명 — L5와 연결<a class="anchor" href="#13-3-anti-rollback과-서명-l5와-연결" aria-label="link">#</a></h3>
+<p>서명은 "우리가 만든 이미지"만 보증하지 "최신 이미지"는 보증하지 않는다. 공격자가 <strong>취약점이 있던 옛 버전의 정상 서명 번들</strong>을 설치하면 서명 검증은 통과한다. 그래서:</p>
+<ul><li>업데이트 에이전트 수준: 버전 하한 검사 — SWUpdate <code>-N/--no-downgrading &lt;version&gt;</code>(게스트 <code>swupdate -h</code>에 있다), RAUC <code>install-check</code> hook, Mender 의존성 · 제공 값.</li><li>부팅 체인 수준: 하드웨어 단조 카운터(eFuse, eMMC RPMB, TPM NV counter)에 "최소 보안 버전"을 두고 부트로더 · 커널 이미지(FIT)의 버전과 비교한다. 이 체인과 키 관리는 L5.</li><li><strong>롤백(이 노트의 자동 복귀)과 anti-rollback은 충돌하지 않게</strong> 설계한다. 보안 카운터는 새 버전이 <strong>commit된 뒤</strong>에만 올린다. 시험 부팅 전에 올리면 롤백할 슬롯이 부팅 불가가 된다.</li></ul>
+<hr>
+<h2 id="14-플릿-롤아웃-1만-대에-배포하기">14. 플릿 롤아웃 — 1만 대에 배포하기<a class="anchor" href="#14-플릿-롤아웃-1만-대에-배포하기" aria-label="link">#</a></h2>
+<p>장비 한 대에서 도는 boot-commit 프로토콜은 "한 대가 벽돌이 되지 않게" 한다. 플릿 롤아웃은 "<strong>나쁜 버전이 1만 대 전부에 가지 않게</strong>" 한다.</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>내용</th></tr></thead><tbody><tr><td>내부 장비 (dogfood)</td><td>사내 · 시험 랙 장비 수십 대에 먼저. 전원 차단 · 롤백 시험 포함</td></tr><tr><td>canary 1%</td><td>하드웨어 리비전 · 지역 · 고객을 섞어 무작위 표본</td></tr><tr><td>단계 확대</td><td>1% → 5% → 25% → 100%, 단계마다 관찰 기간(예: 24~72시간)</td></tr><tr><td>게이트 지표</td><td>설치 성공률, 자동 롤백률, 부팅 시간, 크래시율(L7), 앱 KPI(센서 데이터 수신률, 카메라 프레임 드롭) — <strong>canary 그룹 대 아직 안 바꾼 대조군</strong>을 비교</td></tr><tr><td>자동 중단</td><td>롤백률이 임계값(예: 0.5%)을 넘으면 배포 정지 · 알림</td></tr><tr><td>조건부 설치</td><td>배터리 &gt; 50%, 충전 중, 작업 중 아님(로봇이 비행 · 주행 중이 아님), 유지보수 시간대</td></tr><tr><td>호환 규칙</td><td>"v3는 v2.5 이상에서만" 같은 경로 제약 → 디딤돌(stepping-stone) 업데이트</td></tr><tr><td>보고</td><td>장비는 설치 결과 · 슬롯 상태 · 롤백 원인(pstore, journal 요약)을 서버로</td></tr></tbody></table></div>
+<p>시간 차원도 있다. 필드 장비 상당수는 몇 주씩 오프라인이다. 그래서 서버는 "지금 버전 분포"를 늘 보여 줘야 하고, 아주 오래된 버전에서 최신으로 바로 올라오는 경로를 시험해 둬야 한다.</p>
+<h3 id="14-1-ota-테스트-무엇을-자동화하나">14.1 OTA 테스트 — 무엇을 자동화하나<a class="anchor" href="#14-1-ota-테스트-무엇을-자동화하나" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>시험</th><th>방법 (이 노트 · 관련 노트)</th></tr></thead><tbody><tr><td>업데이트 중 전원 차단</td><td>상태 전이마다 차단: 다운로드 · 기록(예제 11) · env 쓰기 · 시험 부팅 · commit. 실제 보드는 전원 릴레이 · 프로그래머블 전원, QEMU는 kill -9. 수백~수천 회 반복</td></tr><tr><td>저장장치 결함</td><td>dm-flakey · fault injection(J5), eMMC 쓰기 오류</td></tr><tr><td>나쁜 번들</td><td>서명 오류 · 다른 CA(예제 7), compatible 불일치, 잘린 파일, 변조 payload(예제 7 extract)</td></tr><tr><td>나쁜 이미지</td><td>panic(예제 9), health 실패(예제 10), 행(watchdog), 부팅 시간 초과</td></tr><tr><td>다운그레이드 시도</td><td>옛 서명 번들 → 거부되는지</td></tr><tr><td>env 손상</td><td>사본 하나 · 둘(예제 3)</td></tr><tr><td>자원 부족</td><td>data 파티션 가득(예제 13에서 실제로 겪은 것), 메모리 부족 중 설치</td></tr><tr><td>장기 반복</td><td>1000회 연속 업데이트 · 롤백 루프 — flash 마모와 드문 경쟁 조건</td></tr><tr><td>시계</td><td>RTC 없는 장비의 1970년 시각 → 인증서 "not yet valid"</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-커널-안에서는-무슨-일이-일어나나">15. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#15-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<p>OTA는 대부분 userspace 일이지만, 각 단계가 커널의 어느 경로를 지나는지 알아 두면 실패 메시지를 읽을 수 있다.</p>
+<figure class="chart"><svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah6" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker></defs>
+  <text x="110" y="20" text-anchor="middle" font-size="13">env 쓰기</text>
+  <text x="340" y="20" text-anchor="middle" font-size="13">번들 검증 · 슬롯 기록</text>
+  <text x="570" y="20" text-anchor="middle" font-size="13">재부팅 · panic</text>
+  <rect x="20" y="32" width="180" height="36" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="110" y="55" text-anchor="middle" font-size="12">fw_setenv (libubootenv)</text>
+  <rect x="250" y="32" width="180" height="36" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="55" text-anchor="middle" font-size="12">rauc service</text>
+  <rect x="480" y="32" width="180" height="36" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="570" y="55" text-anchor="middle" font-size="12">systemctl reboot</text>
+  <line x1="20" y1="90" x2="660" y2="90" stroke="#888" stroke-dasharray="5 4"/>
+  <text x="664" y="86" text-anchor="end" font-size="12">syscall</text>
+  <rect x="20" y="104" width="180" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="110" y="124" text-anchor="middle" font-size="12">mtdchar: MEMERASE</text>
+  <text x="110" y="142" text-anchor="middle" font-size="12">ioctl · write</text>
+  <rect x="20" y="170" width="180" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="110" y="190" text-anchor="middle" font-size="12">mtd_erase · mtd_write</text>
+  <text x="110" y="208" text-anchor="middle" font-size="12">mtd core</text>
+  <rect x="20" y="236" width="180" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="110" y="256" text-anchor="middle" font-size="12">cfi_cmdset_0001</text>
+  <text x="110" y="274" text-anchor="middle" font-size="12">do_write_buffer</text>
+  <rect x="250" y="104" width="180" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="124" text-anchor="middle" font-size="12">loop (LOOP_CONFIGURE)</text>
+  <text x="340" y="142" text-anchor="middle" font-size="12">번들 파일 → 블록 장치</text>
+  <rect x="250" y="170" width="180" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="190" text-anchor="middle" font-size="12">dm-verity (DM ioctl)</text>
+  <text x="340" y="208" text-anchor="middle" font-size="12">블록 읽을 때 해시 검사</text>
+  <rect x="250" y="236" width="180" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="256" text-anchor="middle" font-size="12">squashfs mount</text>
+  <text x="340" y="274" text-anchor="middle" font-size="12">→ /dev/vda1에 write</text>
+  <rect x="480" y="104" width="180" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="570" y="124" text-anchor="middle" font-size="12">reboot(2) RESTART</text>
+  <text x="570" y="142" text-anchor="middle" font-size="12">kernel_restart()</text>
+  <rect x="480" y="170" width="180" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="570" y="190" text-anchor="middle" font-size="12">panic() → panic=5</text>
+  <text x="570" y="208" text-anchor="middle" font-size="12">emergency_restart()</text>
+  <rect x="480" y="236" width="180" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="570" y="256" text-anchor="middle" font-size="12">PSCI SYSTEM_RESET</text>
+  <text x="570" y="274" text-anchor="middle" font-size="12">SMC/HVC → 펌웨어</text>
+  <line x1="110" y1="154" x2="110" y2="166" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="110" y1="220" x2="110" y2="232" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="340" y1="154" x2="340" y2="166" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="340" y1="220" x2="340" y2="232" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="570" y1="154" x2="570" y2="166" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="570" y1="220" x2="570" y2="232" stroke="currentColor" marker-end="url(#ah6)"/>
+  <rect x="20" y="310" width="640" height="54" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="332" text-anchor="middle" font-size="12">하드웨어: CFI NOR (pflash) · virtio-blk 디스크 · 리셋 — U-Boot가 다시 env를 읽고 bootcount</text>
+  <text x="340" y="352" text-anchor="middle" font-size="12">예제 5의 "buffer write error (status timeout)"는 왼쪽 맨 아래 상자에서 나온 메시지</text>
+</svg></figure>
+<p>그림 9 — OTA 각 단계가 지나는 커널 경로. 세 경로 모두 결국 "하드웨어 상태를 바꾸고 부트로더가 다음에 그것을 읽는다"로 끝난다.</p>
+<ul><li><strong>env 쓰기</strong>: <code>fw_setenv</code>는 <code>/dev/mtd0</code>을 열고 <code>MEMGETINFO</code> → <code>MEMUNLOCK</code> → <code>MEMERASE</code> ioctl → <code>write()</code>를 한다(예제 5가 그대로 재현). 커널에서는 <code>drivers/mtd/mtdchar.c</code>의 <code>mtdchar_ioctl()</code>/<code>mtdchar_write()</code> → <code>mtd_erase()</code>/<code>mtd_write()</code>(<code>drivers/mtd/mtdcore.c</code>) → CFI 칩 드라이버 <code>drivers/mtd/chips/cfi_cmdset_0001.c</code>(Intel/Sharp 명령 세트)의 <code>cfi_intelext_erase_varsize()</code>, <code>cfi_intelext_write_buffers()</code> → <code>do_write_buffer()</code>. 예제 5의 <code>buffer write error (status timeout)</code>는 <code>do_write_buffer()</code>가 칩 상태 레지스터의 ready 비트를 기다리다 포기할 때 찍는 메시지다. Don이 NAND 펌웨어에서 status polling timeout을 디버깅하던 그 구조가 그대로 커널 드라이버에 있다. eMMC env라면 같은 일이 블록 장치 <code>write()</code> + <code>fsync()</code>로 일어나고, 그 내구성 경로는 J5에서 본 FLUSH/FUA다.</li><li><strong>번들 검증 · 설치</strong>: RAUC는 verity 번들을 loop 장치(<code>LOOP_CONFIGURE</code> ioctl)로 블록 장치로 만들고, device-mapper ioctl로 verity 테이블(root hash = 서명된 manifest 안의 값)을 올린 뒤, 그 위에 squashfs를 read-only mount한다(J3의 dm-verity가 rootfs 대신 번들에 쓰이는 것). 이미지를 읽는 순간 <code>drivers/md/dm-verity-target.c</code>가 블록 해시를 확인하고 틀리면 I/O 에러를 낸다 — 예제 7의 <code>Verification failed at position 499712</code>가 그 결과다. 슬롯 기록은 평범한 블록 장치 <code>write()</code>이고 끝에 <code>fsync()</code>로 장치 캐시까지 내린다.</li><li><strong>재부팅</strong>: <code>systemctl reboot</code> → <code>reboot(2)</code>(<code>LINUX_REBOOT_CMD_RESTART</code>) → <code>kernel_restart()</code>(<code>kernel/reboot.c</code>) → arm64 <code>machine_restart()</code> → <code>do_kernel_restart()</code> → PSCI <code>SYSTEM_RESET</code>(<code>drivers/firmware/psci/psci.c</code>) SMC/HVC 호출 → QEMU(실제 보드라면 TF-A BL31)가 시스템을 리셋. 커널 panic이면 <code>panic()</code>(<code>kernel/panic.c</code>)이 <code>panic_timeout</code>(커널 인자 <code>panic=5</code>) 동안 기다린 뒤 <code>emergency_restart()</code>를 부른다. panic 후 리셋이 없으면 bootcount 루프가 돌지 않으므로 <strong><code>panic=</code> 설정과 하드웨어 watchdog</strong>이 OTA 롤백의 전제 조건이다. 예제 8 로그의 <code>watchdog: watchdog0: watchdog did not stop!</code>은 systemd가 종료 직전까지 watchdog을 살려 두어, 종료 과정이 멈춰도 리셋되게 하는 동작이다(L1).</li></ul>
+<p>드라이버를 쓸 때 다시 만나는 지점: MTD 칩 드라이버 · <code>mtd_info</code> 콜백(H · J4), 블록 드라이버의 FLUSH/FUA 처리(I11 · J5), watchdog 드라이버의 <code>watchdog_ops</code>(I 모듈), 그리고 부트로더와 커널이 공유하는 장치(같은 NOR를 U-Boot와 Linux가 다르게 프로그램할 때의 호환성 — 예제 5).</p>
+<hr>
+<h2 id="16-embedded-실무에서-다시-보기">16. Embedded 실무에서 다시 보기<a class="anchor" href="#16-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="16-1-센서-키트-드론-에-ota-넣기-첫-설계-문서의-뼈대">16.1 센서 키트(드론)에 OTA 넣기 — 첫 설계 문서의 뼈대<a class="anchor" href="#16-1-센서-키트-드론-에-ota-넣기-첫-설계-문서의-뼈대" aria-label="link">#</a></h3>
+<p>예를 들어 i.MX8 + eMMC 16 GB 센서 키트라면 이렇게 시작한다.</p>
+<figure class="code"><pre><code>eMMC boot0 / boot1 : SPL + U-Boot (A/B via EXT_CSD, rarely updated)
+eMMC user area:
+  p1 env (redundant, 2 x 16 KiB at fixed offsets)   &lt;- or raw offsets before p1
+  p2 rootA  (2 GiB, erofs/squashfs read-only + dm-verity, kernel+DTB inside FIT)
+  p3 rootB  (2 GiB)
+  p4 factory (1 MiB, read-only: serial, calib, device cert)
+  p5 data   (rest, ext4/f2fs: logs, maps, config, update download area)
+RAUC verity bundles, streaming over HTTPS from hawkBit
+health = camera + IMU + GNSS + app self-test within 120 s, watchdog armed
+bootlimit = 3, rollback reported via pstore + journal upload on next connect</code></pre></figure>
+<p>이 뼈대에서 면접관이 파고드는 지점은 정해져 있다: env 위치와 이중화, rootfs read-only 여부(delta · verity와 연결), 캘리브레이션 데이터 보존, health 판정 기준, 부트로더 업데이트 방법, 서명 키 보관 위치.</p>
+<h3 id="16-2-왜-롤백됐지-현장-디버깅">16.2 "왜 롤백됐지?" 현장 디버깅<a class="anchor" href="#16-2-왜-롤백됐지-현장-디버깅" aria-label="link">#</a></h3>
+<p>서버 대시보드에 롤백률 2%가 떴다. 순서:</p>
+<ol><li>롤백된 장비의 env: <code>fw_printenv l4_state_A l4_state_B bootcount</code> — 어느 슬롯이 bad인가.</li><li><code>rauc status --detailed</code> — 설치 시각 · 번들 버전 · sha256(설치가 온전했나).</li><li>실패한 시험 부팅의 로그: journal이 영구 저장(<code>Storage=persistent</code>, <code>/data</code>나 <code>/var/log</code>가 공유 파티션)이면 <code>journalctl --list-boots</code>로 이전 부팅들을 본다. panic이면 pstore/ramoops(L7).</li><li>공통점: 하드웨어 리비전? 특정 카메라 모듈? 부팅 시간이 health 타임아웃 근처? (이 랩에서 실제로 VM 과부하 때문에 udev coldplug가 90초를 넘어 장치 timeout이 났다 — 느린 eMMC 장비에서 그대로 일어날 수 있는 일이다.)</li></ol>
+<h3 id="16-3-컨테이너-앱과-섞을-때">16.3 컨테이너 앱과 섞을 때<a class="anchor" href="#16-3-컨테이너-앱과-섞을-때" aria-label="link">#</a></h3>
+<p>Jetson 같은 AI 장비는 베이스 OS(L4T, 커널 · CUDA 드라이버)를 A/B로, 추론 앱을 컨테이너로 배포하는 경우가 많다. 이때 <strong>드라이버 · 라이브러리 ABI</strong>(예: CUDA 드라이버 버전)가 베이스 OS와 앱 컨테이너 사이의 계약이 되므로, OS 업데이트의 health check에 "현재 앱 컨테이너가 새 OS에서 뜨는가"를 넣는다(L8).</p>
+<hr>
+<h2 id="17-흔한-실수와-증상">17. 흔한 실수와 증상<a class="anchor" href="#17-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>health check 없이 커널만 뜨면 commit</td><td>앱이 죽은 버전이 필드에 확정됨</td><td>판정 기준이 너무 느슨</td><td>앱 · 장치 수준 판정 + 판정 전까지 watchdog</td></tr><tr><td>확정 슬롯에서도 health 실패 시 재부팅</td><td>무한 재부팅</td><td>시험 부팅 여부(<code>upgrade_available</code>)를 안 봄</td><td>시험 부팅일 때만 reboot, 확정이면 경보만</td></tr><tr><td><code>altbootcmd</code>에서 <code>saveenv</code>를 안 함</td><td>롤백 후에도 매 부팅 altbootcmd · bootcount 증가</td><td>RAM에서만 바꿈</td><td>슬롯 · 플래그 · 카운터를 바꾸고 <code>saveenv</code></td></tr><tr><td><code>panic=</code> 미설정, watchdog 없음</td><td>panic한 장비가 그대로 멈춤, 롤백 안 됨</td><td>리셋이 안 일어남</td><td><code>panic=5</code> + 하드웨어 watchdog</td></tr><tr><td><code>fw_env.config</code>가 U-Boot와 불일치</td><td><code>fw_printenv</code> Bad CRC, commit이 안 먹음</td><td>오프셋 · 크기 · 섹터 다름</td><td>두 설정을 같은 값으로, 보드 bring-up 때 왕복 시험</td></tr><tr><td><code>fw_setenv -s</code>에 <code>key value</code> 형식</td><td>rc=0인데 값이 안 바뀜</td><td>이 버전은 <code>key=value</code>만 해석</td><td>형식 확인 + 쓰고 나서 <code>fw_printenv</code>로 재확인</td></tr><tr><td>여러 env 변수를 따로따로 씀</td><td>전원 차단 시 어중간한 상태</td><td>쓰기가 여러 번</td><td><code>fw_setenv -s</code>로 한 번에</td></tr><tr><td>single-copy env</td><td>저장 중 차단 → 기본 env → distro boot</td><td>이중화 없음</td><td>redundant env (+ 기본 env에도 A/B 스크립트)</td></tr><tr><td>저장 env가 기본 env를 대체한다는 걸 모름</td><td><code>kernel_addr_r</code> 등이 사라져 <code>load</code> 실패</td><td>mkenvimage로 만든 env에 필수 변수 누락</td><td>기본 env를 바탕으로 덮어쓰기 목록을 만든다</td></tr><tr><td>sw-description에 활성 슬롯 장치를 고정</td><td>동작 중인 rootfs를 덮어씀</td><td>A/B 대상 선택 로직 없음</td><td>copy1/copy2 + <code>-e</code>, 또는 RAUC처럼 프레임워크에 맡김</td></tr><tr><td>번들 서명 인증서 purpose 불일치</td><td><code>unsuitable certificate purpose</code></td><td>CA의 EKU와 도구 기본값이 다름</td><td><code>check-purpose=codesign</code> 등으로 명시</td></tr><tr><td>데이터 스키마를 시험 부팅에서 변경</td><td>롤백 후 옛 버전이 데이터를 못 읽음</td><td>슬롯만 롤백됨</td><td>commit 후 마이그레이션, 버전별 디렉터리</td></tr><tr><td>보안 카운터를 시험 부팅 전에 올림</td><td>롤백 슬롯이 anti-rollback에 막혀 벽돌</td><td>순서 오류</td><td>commit 후 카운터 증가</td></tr></tbody></table></div>
+<hr>
+<h2 id="18-면접에서-이렇게-말한다">18. 면접에서 이렇게 말한다<a class="anchor" href="#18-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> Design an OTA update system for a fleet of 10,000 field units.</p>
+<p><strong>A.</strong> 요구사항부터 말한다: 원자성, 전원 차단 내성, 자동 롤백, 서명 검증, 대역폭, 다운타임. 장비 쪽은 A/B rootfs(커널 포함, read-only + dm-verity), redundant U-Boot env에 슬롯 · 시험 플래그 · bootcount, RAUC 같은 검증된 클라이언트로 verity 번들을 비활성 슬롯에 스트리밍 설치, 재부팅 후 health check가 commit, 실패하면 bootlimit 후 altbootcmd 롤백. 데이터는 별도 파티션, 마이그레이션은 commit 후. 서버 쪽은 hawkBit이나 Mender로 단계 배포(1% canary → 단계 확대), 롤백률 · 크래시율로 자동 중단, delta로 전송량 절감, 서명 키는 HSM. 부트로더 업데이트는 별도 경로로 드물게.</p>
+<blockquote><p>I'd start from requirements: atomic, power-fail safe, automatic rollback, signed, bandwidth-aware, minimal downtime. On the device: symmetric A/B root partitions with the kernel inside the slot, read-only and protected by dm-verity, a redundant U-Boot environment holding the active slot, a trial flag and a boot counter. A proven client such as RAUC streams a signed verity bundle into the inactive slot, flips the slot with a single environment write and reboots. After boot a health check — not just "kernel came up" but the camera, IMU and the application's self-test — marks the slot good; if the device keeps rebooting, U-Boot's bootlimit triggers altbootcmd and we fall back. Persistent data lives in a separate partition and schema migrations happen only after commit. On the server side I'd use hawkBit or Mender for staged rollouts: internal units, a one-percent canary, then widening waves, with automatic halt on rollback or crash rate compared to a control group. Deltas cut LTE cost, signing keys stay in an HSM, and the bootloader gets its own rarely used, separately tested update path.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "canary가 1%면 1만 대 중 100대인데, 롤백률 0.5% 임계값을 어떻게 통계적으로 판단하나?" → 100대에서 0.5%는 0.5대다. 표본이 작은 첫 단계에서는 "롤백 1건이라도 나면 정지 후 분석", 단계가 커지면 비율 기준으로 바꾼다.</p>
+<p><strong>Q.</strong> What happens if power dies during the update? And during the bootloader update?</p>
+<p><strong>A.</strong> rootfs 업데이트는 어느 순간이든 안전하다. 활성 슬롯은 건드리지 않고, 슬롯 전환은 쓰기와 검증이 끝난 뒤의 env 쓰기 한 번이며, env는 두 벌이라 그 쓰기 도중 차단돼도 이전 사본이 남는다. 실제로 QEMU에서 슬롯 기록 도중 kill -9를 해 보니 그대로 기존 슬롯이 부팅됐고, 반쯤 쓴 슬롯은 fsck로는 clean으로 보였지만 bad로 표시돼 있었다. 부트로더는 다르다. 되돌려 줄 주체가 없으니 하드웨어가 지원하는 이중화(eMMC boot0/boot1 + EXT_CSD 전환, ROM의 secondary image)를 쓰고, 쓰기 → 읽기 검증 → 원자적 전환 순서를 지키고, 빈도를 최소화하고, 복구 모드를 마련한다.</p>
+<blockquote><p>For the root filesystem, any point is safe by construction: we never touch the active slot, the switch is a single environment write that happens only after the new slot is written and verified, and the environment is redundant so an interrupted write leaves the previous copy valid. I actually tested this in QEMU by killing the VM while RAUC was copying the image — it came back on the old slot, and interestingly the half-written slot looked clean to fsck, which is why we trust the recorded hash and the bad flag, not the filesystem. The bootloader is the scary part because nothing below it can roll back. There I rely on whatever redundancy the boot ROM supports — eMMC boot0/boot1 with the EXT_CSD switch, or a secondary image — write the inactive copy, read it back and verify, then flip atomically, keep bootloader updates rare and backward compatible, and keep a documented recovery path like USB serial download.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "env 쓰기가 원자적이라는 건 정확히 무슨 뜻인가?" → 두 벌 중 안 쓰는 쪽을 지우고 쓰고, 마지막에 flag(NOR는 옛 사본 flag를 0으로, 블록 장치는 카운터 증가)로 유효 사본을 바꾼다. 읽는 쪽은 CRC가 맞는 사본 중 최신을 쓰므로, 어느 순간 끊겨도 "이전 값" 또는 "새 값" 둘 중 하나다.</p>
+<p><strong>Q.</strong> How do you decide that an update is "good"?</p>
+<p><strong>A.</strong> 단계별 기준과 시간 제한을 둔다. 부트로더는 서명된 이미지 로드, 커널은 panic 없는 rootfs mount(panic=N으로 리셋 보장), systemd는 필수 유닛 active, 그리고 핵심은 제품 기능 — 카메라 열림, IMU 데이터 흐름, 앱 자체 진단. 이 판정은 정해진 시간 안에 끝나야 하고, 그동안 하드웨어 watchdog을 켜 둔다. 네트워크 · 서버 연결은 현장에서 원래 끊기니 판정에 넣지 않고 보고에만 쓴다. 통과하면 mark-good으로 commit, 실패하면 commit 없이 재부팅해서 bootcount에 맡긴다.</p>
+<blockquote><p>I define layered criteria with a deadline. The bootloader must load a correctly signed kernel; the kernel must mount root without panicking, and panic= plus a hardware watchdog guarantee that any failure turns into a reset. Then systemd's critical units must be active, and most importantly the product must work: the camera opens, IMU samples arrive, the application's self-test passes. All of that has to finish within, say, two minutes while the watchdog is armed. I deliberately don't require server connectivity, because field networks are flaky and I don't want a good update rolled back for that — connectivity is reported, not gated. Pass means mark-good, which clears the trial flag and boot counter; fail means reboot without committing, and the bootloader's counter decides when to fall back.</p></blockquote>
+<p><strong>Q.</strong> Walk me through U-Boot's bootcount mechanism.</p>
+<p><strong>A.</strong> <code>CONFIG_BOOTCOUNT_LIMIT</code>과 저장 백엔드(예: <code>BOOTCOUNT_ENV</code>)를 켠다. 매 부팅 autoboot 직전에 <code>bootcount_inc()</code>가 카운터를 올려 저장하고, <code>bootcount &gt; bootlimit</code>이면 <code>bootcmd</code> 대신 <code>altbootcmd</code>를 실행한다. env 백엔드는 <code>upgrade_available=1</code>일 때만 저장해서 평소 부팅에는 flash 쓰기가 없다. Linux는 health check 통과 후 <code>upgrade_available=0</code>, <code>bootcount=0</code>으로 지운다. altbootcmd는 슬롯 전환과 saveenv를 직접 해야 한다.</p>
+<blockquote><p>You enable CONFIG_BOOTCOUNT_LIMIT and a storage backend — a reset-surviving register if the SoC has one, otherwise the environment. Before autoboot, bootcount_inc increments and stores the counter; then if bootcount exceeds bootlimit, U-Boot runs altbootcmd instead of bootcmd. Note it's strictly greater-than, so bootlimit=3 allows three trial boots and the fourth entry rolls back — that's exactly what I saw on the console. The environment backend only persists the counter while upgrade_available is 1, so committed devices don't write flash on every boot. Userspace clears upgrade_available and bootcount after a successful health check, and altbootcmd itself must switch the slot, clear the flags and saveenv, otherwise you loop.</p></blockquote>
+<p><strong>Q.</strong> A/B or single-copy with a recovery partition — how do you choose?</p>
+<p><strong>A.</strong> 저장 공간과 다운타임 · 롤백 요구로 고른다. A/B는 rootfs × 2 공간이 들지만 백그라운드 설치 · 재부팅 1회 · 즉시 롤백. recovery는 공간이 적게 들지만 업데이트 중 장비가 멈추고 롤백 대상이 없다. eMMC가 넉넉하고 원격 장비면 A/B, 공간이 빡빡하고 현장 서비스가 가능하면 recovery, 국방 · 의료처럼 실패 비용이 크면 A/B + recovery.</p>
+<blockquote><p>It's mostly storage versus downtime and rollback. A/B costs twice the root filesystem but installs in the background, needs one reboot, and rolls back instantly because the old slot is untouched. Single-copy with a small recovery system saves space, but the unit is down while it rewrites root and there's no previous version to fall back to — only a retry. For remote units with enough eMMC I pick A/B; for very constrained storage I'd use recovery; and where a dead unit is very expensive I'd do both — A/B plus a minimal recovery image as the last line of defense.</p></blockquote>
+<p><strong>Q.</strong> How do you protect against someone installing an old, vulnerable but validly signed image?</p>
+<p><strong>A.</strong> 서명만으로는 못 막는다. 업데이트 에이전트에서 버전 하한 검사(SWUpdate <code>--no-downgrading</code>, RAUC install-check hook), 부팅 체인에서는 eFuse · RPMB · TPM NV의 단조 카운터와 이미지 보안 버전 비교(L5). 카운터는 새 버전이 commit된 뒤에만 올려야 롤백과 충돌하지 않는다.</p>
+<blockquote><p>A signature only proves origin, not freshness. I'd enforce a minimum version in the update agent — SWUpdate has a no-downgrading option, RAUC can do it in an install-check hook — and, more importantly, in the boot chain with a hardware monotonic counter in eFuses, RPMB or a TPM NV index compared against a security version embedded in the signed images. The subtle part is ordering: bump the counter only after the new slot is committed, otherwise your automatic rollback target becomes unbootable.</p></blockquote>
+<p><strong>Q.</strong> Full image or delta?</p>
+<p><strong>A.</strong> full은 단순하고 출발점과 무관하게 적용된다. delta는 전송량을 크게 줄인다 — 실측으로 앱 8 MiB만 바뀐 800 MiB rootfs에서 full 147 MiB 대 delta 8.4 MiB. 대신 정확한 출발 이미지가 필요하므로 read-only rootfs와 재현 가능한 빌드(고정 UUID 등)가 전제이고, 실패하면 full로 떨어지는 경로가 있어야 한다. 그래서 보통 "기본은 delta, 실패나 큰 버전 차이는 full".</p>
+<blockquote><p>Full images are simple and don't depend on the device's current state; deltas save a lot of bandwidth. In a quick experiment, an 800 MiB root image where only an 8 MiB application changed was 147 MiB compressed as a full image versus 8.4 MiB as a zstd patch. But a delta needs an exact base, so it goes together with a read-only, verity-protected root and reproducible builds — even random filesystem UUIDs changed about 7 MiB more blocks in my test. I'd ship deltas by default with an automatic fallback to the full image, or use block- or chunk-reuse schemes like RAUC's adaptive updates or casync that degrade gracefully.</p></blockquote>
+<hr>
+<h2 id="19-직접-해보기">19. 직접 해보기<a class="anchor" href="#19-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong>: <code>bootlimit=2</code>, <code>BOOTCOUNT_ENV</code>일 때 시험 부팅은 몇 번 허용되고, 몇 번째 U-Boot 진입에서 altbootcmd가 도는가? 확정 상태에서 U-Boot 콘솔의 <code>bootcount</code> 값이 1인 이유는? 정답/힌트: 두 번 허용, 세 번째 진입(카운터 3 &gt; 2). 확정 상태에서는 <code>bootcount_inc()</code>가 RAM 값만 1로 만들고 저장하지 않는다(§4.3).</li><li><strong>U-Boot 과제</strong>: 예제 2의 env를 바꿔, altbootcmd가 RAUC 관례(<code>BOOT_ORDER="A B"</code>, <code>BOOT_A_LEFT=3</code>)처럼 동작하도록 bootcmd만으로 구현해 보라(bootcount 기능을 끄고 <code>setexpr</code>로 감소). 정답/힌트: <code>setexpr BOOT_B_LEFT ${BOOT_B_LEFT} - 1; saveenv</code> 후 0이면 순서에서 제외. RAUC의 <code>contrib/uboot.sh</code>와 비교.</li><li><strong>env 과제</strong>: 예제 3을 확장해 "copy 1을 지우기만 하고(0xFF) 쓰지 않은" 상태(= saveenv의 erase 직후 차단)를 만들고 U-Boot가 무엇을 읽는지 확인하라. 정답/힌트: <code>dd if=/dev/zero bs=256k count=1 | tr '\0' '\377'</code>로 섹터를 0xFF로. CRC가 깨지므로 copy 2를 읽는다.</li><li><strong>health 과제</strong>: <code>l4-health</code>에 "부팅 후 120초 안에 판정을 못 하면 reboot" 규칙을 넣어라. systemd 쪽에서는 어떤 설정으로 구현할 수 있나? 정답/힌트: 서비스 <code>TimeoutStartSec=120</code> + <code>FailureAction=reboot</code>(시험 부팅일 때만 유닛을 활성화하려면 <code>ConditionPathExists</code>나 generator), 또는 하드웨어 watchdog을 health 통과 때까지 ping하지 않기(L1).</li><li><strong>RAUC 과제</strong>: 번들에 <code>install-check</code> hook을 넣어 "현재 버전보다 낮은 번들은 거부"를 구현하고, 1.0.0 번들 설치를 시도해 실패 메시지를 확인하라. 정답/힌트: hook은 <code>RAUC_MF_VERSION</code>(번들 버전) 환경 변수를 받는다. 현재 버전은 <code>/etc/l4-version</code>. <code>sort -V</code>로 비교 후 실패면 <code>exit 10</code>과 메시지.</li><li><strong>관찰 과제</strong>: 예제 8 도중 다른 터미널(게스트 두 번째 콘솔이 없으면 백그라운드)로 <code>ls -l /dev/mapper; losetup -a; findmnt -t squashfs</code>를 찍어, RAUC가 만든 loop · dm-verity · squashfs 3단을 직접 확인하라. 정답/힌트: <code>rauc install &amp;</code> 후 즉시 명령 실행. §15 그림 9의 가운데 열.</li><li><strong>설계 문제</strong>: 배터리 드론에서 bootlimit을 1로 둘 때와 3으로 둘 때의 장단점은? 시험 부팅 1회의 비용(그림 6)을 근거로 답하라. 정답/힌트: 1은 일시적 실패(첫 부팅의 긴 마이그레이션, 느린 센서 초기화)에도 롤백, 3은 확실히 깨진 이미지에서 전력 · 시간을 더 씀. 실패가 재현성이 높은 panic형인지, 간헐적 health형인지에 따라.</li></ol>
+<hr>
+<h2 id="20-용어-사전">20. 용어 사전<a class="anchor" href="#20-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>OTA</td><td>Over-The-Air update</td><td>네트워크로 장비 소프트웨어를 원격 교체</td></tr><tr><td>슬롯 (slot)</td><td>교체 단위 저장 영역</td><td>rootfs A/B, 커널 A/B, 부트로더 boot0/boot1</td></tr><tr><td>A/B (symmetric)</td><td>동일 슬롯 두 벌</td><td>비활성 슬롯에 쓰고 전환, 이전 슬롯이 롤백 대상</td></tr><tr><td>recovery (asymmetric)</td><td>작은 복구 시스템</td><td>재부팅해서 메인 rootfs를 덮어씀</td></tr><tr><td>boot-commit</td><td>시험 부팅 후 확정</td><td>"한 번 시도" 표시 → 부팅 → health → commit</td></tr><tr><td>bootcount</td><td>부팅 시도 카운터</td><td>U-Boot가 증가, userspace가 0으로</td></tr><tr><td>bootlimit</td><td>허용 시도 횟수</td><td><code>bootcount &gt; bootlimit</code>이면 altbootcmd</td></tr><tr><td>altbootcmd</td><td>대체 부팅 명령</td><td>롤백 스크립트를 넣는 곳</td></tr><tr><td>upgrade_available</td><td>시험 부팅 플래그</td><td><code>BOOTCOUNT_ENV</code>가 저장 여부 판단에 씀</td></tr><tr><td>redundant env</td><td>env 두 벌</td><td>flag(NOR boolean · 블록 카운터)로 최신 사본 선택</td></tr><tr><td><code>fw_env.config</code></td><td>Linux 쪽 env 위치</td><td>장치 · 오프셋 · 크기 · 섹터 크기</td></tr><tr><td>libubootenv</td><td>env 접근 라이브러리</td><td><code>fw_printenv</code>/<code>fw_setenv</code> 제공</td></tr><tr><td>health check</td><td>부팅 성공 판정</td><td>서비스 · 장치 · 앱 진단, 통과 시 commit</td></tr><tr><td>mark-good / mark-bad</td><td>RAUC 슬롯 상태</td><td>부트로더 backend를 통해 env 등에 기록</td></tr><tr><td>RAUC bundle</td><td><code>.raucb</code></td><td>squashfs + CMS 서명 (plain/verity/crypt)</td></tr><tr><td>verity bundle</td><td>dm-verity 보호 번들</td><td>서명은 manifest(root hash), 데이터는 읽을 때 검증</td></tr><tr><td><code>.swu</code></td><td>SWUpdate 패키지</td><td>cpio(newc+crc) + sw-description(+sig) + 이미지</td></tr><tr><td>sw-description</td><td>SWUpdate 설명서</td><td>이미지 · 장치 · handler · sha256 · bootenv</td></tr><tr><td>handler</td><td>SWUpdate 설치기</td><td>raw · ubivol · archive · rdiff · lua …</td></tr><tr><td>suricatta</td><td>SWUpdate 서버 모드</td><td>hawkBit · HTTP 서버를 폴링</td></tr><tr><td>hawkBit</td><td>Eclipse 롤아웃 서버</td><td>DDI API, 단계 배포</td></tr><tr><td>Mender Artifact</td><td><code>.mender</code></td><td>tar + 헤더 + payload + 서명</td></tr><tr><td>state script</td><td>Mender 상태 훅</td><td>상태 전후 장비 스크립트</td></tr><tr><td>delta</td><td>차분 업데이트</td><td>옛 이미지 기준 바뀐 부분만 전송</td></tr><tr><td>casync / desync</td><td>청크 기반 동기화</td><td>content-defined chunk + 인덱스</td></tr><tr><td>zchunk</td><td>청크 압축 형식</td><td>청크별 해시, HTTP range로 필요한 것만</td></tr><tr><td>adaptive update</td><td>RAUC 블록 재사용</td><td>이미 있는 블록은 복사, 없는 것만 읽기</td></tr><tr><td>anti-rollback</td><td>다운그레이드 방지</td><td>단조 카운터 · 최소 보안 버전</td></tr><tr><td>canary</td><td>소규모 선행 배포</td><td>지표를 대조군과 비교 후 확대</td></tr><tr><td>PSCI SYSTEM_RESET</td><td>ARM 리셋 호출</td><td>커널 → 펌웨어로 시스템 리셋 요청</td></tr></tbody></table></div>
+<hr>
+<h2 id="21-요약-체크리스트">21. 요약 &amp; 체크리스트<a class="anchor" href="#21-요약-체크리스트" aria-label="link">#</a></h2>
+<p>OTA의 본질은 "덮어쓰기"가 아니라 <strong>되돌릴 수 있는 전환</strong>이다. 활성 슬롯은 건드리지 않고, 비활성 슬롯에 서명 · 해시가 확인된 이미지를 쓰고, env 한 번의 쓰기로 "다음 부팅은 B, 시험"을 예약한다. U-Boot는 시험 부팅마다 bootcount를 먼저 저장하고 시도하며, userspace health check가 제품 수준 기능을 확인해 commit하지 않으면 <code>bootcount &gt; bootlimit</code>에서 altbootcmd가 이전 슬롯으로 되돌린다. 이 노트의 QEMU 랩에서 직접 빌드한 U-Boot(bootcount · redundant env)와 GPT A/B 디스크, Ubuntu + systemd 슬롯 이미지, RAUC 1.11 custom backend로 정상 업데이트 commit(27초 기록, 시험 부팅 후 <code>mark-good</code>), panic 이미지 롤백(1.3초 panic × 3 → 4번째 altbootcmd), health 실패 롤백, 슬롯 기록 중 kill -9 후 기존 슬롯 부팅을 모두 실제 로그로 확인했다. 그 과정에서 env 이중화의 선택 규칙(사본 하나가 깨지면 조용히 이전 값, 둘 다 깨지면 기본 env), QEMU pflash가 flag 바이트 제자리 프로그램을 못 하는 에뮬레이터 한계, <code>fw_setenv -s</code> 형식 함정, RAUC 서비스 누락, 인증서 purpose, 반쯤 쓴 슬롯이 fsck로 clean해 보이는 위험을 실제로 만났다. 도구는 슬롯 모델의 RAUC, handler 프레임워크의 SWUpdate, 서버 일체형 Mender로 정리되고, delta는 실측으로 147 MiB → 8.4 MiB였으며 그 효율은 재현 가능한 이미지 빌드에 달려 있다. 슬롯 밖의 것(데이터 마이그레이션, 부트로더, anti-rollback 카운터)과 플릿 단계 배포가 남은 설계 과제다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>OTA 요구사항 일곱 가지를 말하고 각각의 대표 해법을 댈 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>single-copy + recovery, A/B, OSTree, 컨테이너, delta의 장단점을 표로 비교할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>boot-commit 프로토콜을 env 쓰기 네 번(B=bad, 시험 예약, bootcount++, commit)으로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>U-Boot <code>bootcount_inc()</code>/<code>bootcount_error()</code>와 <code>bootcount &gt; bootlimit</code>의 의미를 소스로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>redundant env의 형식과 flag 규칙, 사본이 깨졌을 때 U-Boot가 읽는 사본을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>fw_env.config</code>를 쓰고 <code>fw_setenv -s</code>로 여러 변수를 한 번에 바꿀 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>RAUC <code>system.conf</code>, verity 번들, 서명 검증과 변조 탐지 시점을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>custom backend와 health check 서비스를 짜서 시험 부팅을 commit할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>업데이트 도중 각 지점에서 전원이 나가면 무슨 일이 일어나는지 표로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>sw-description과 .swu 구조를 설명하고 openssl로 서명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>full과 delta의 전송량 · 전제 조건 차이를 실측 숫자로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>부트로더 업데이트 · 데이터 마이그레이션 · anti-rollback의 순서 문제를 설명할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>U-Boot 문서 — Boot Count Limit: https://docs.u-boot.org/en/latest/api/bootcount.html (소스: <code>drivers/bootcount/</code>, <code>include/bootcount.h</code>, <code>common/autoboot.c</code>, <code>env/Kconfig</code> — 랩 <code>/var/lab/src/u-boot</code>)</li><li>U-Boot 문서 — Environment Variables: https://docs.u-boot.org/en/latest/usage/environment.html</li><li>libubootenv (<code>fw_printenv</code>/<code>fw_setenv</code>): https://github.com/sbabic/libubootenv</li><li>RAUC 문서: https://rauc.readthedocs.io/ — 특히 "Integration"(bootloader backends, custom backend), "Reference"(system.conf, manifest), "Advanced Topics"(streaming, adaptive updates, encryption)</li><li>RAUC 소스: https://github.com/rauc/rauc (<code>contrib/uboot.sh</code>, <code>data/de.pengutronix.rauc.conf</code>, <code>data/rauc.service.in</code>)</li><li>SWUpdate 문서: https://sbabic.github.io/swupdate/ — "SWUpdate: syntax and tags"(sw-description), "Update images from verified source"(서명), "Suricatta daemon mode"</li><li>Mender 문서: https://docs.mender.io/ — Artifact, State scripts, U-Boot integration</li><li>Eclipse hawkBit: https://eclipse.dev/hawkbit/</li><li>OSTree: https://ostreedev.github.io/ostree/</li><li>casync: https://github.com/systemd/casync , desync: https://github.com/folbricht/desync , zchunk: https://github.com/zchunk/zchunk</li><li>Linux 커널 소스(elixir): <code>drivers/mtd/mtdchar.c</code>, <code>drivers/mtd/chips/cfi_cmdset_0001.c</code>, <code>drivers/md/dm-verity-target.c</code>, <code>kernel/reboot.c</code>, <code>kernel/panic.c</code>, <code>drivers/firmware/psci/psci.c</code> — https://elixir.bootlin.com/linux/v6.18/source</li><li>Linux 커널 문서 — dm-verity: https://docs.kernel.org/admin-guide/device-mapper/verity.html</li><li>Bootlin, "Embedded Linux system development" 교육 자료(업데이트 · 부트로더 장): https://bootlin.com/training/embedded-linux/</li><li>관련 노트: C2 §10 · C3 §4 · C4 §3(U-Boot env), J3(dm-verity · RO root), J5(전원 차단), K5(재현 가능 빌드), L1(systemd · watchdog), L5(secure boot · 서명 · anti-rollback), L7(크래시 수집), L8(컨테이너)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-17_L3_dbus_network.html"><span class="dir">← 이전</span><span class="nm">L3. D-Bus와 네트워크 구성 — 시스템 버스로 데몬을 제어하고, networkd·NetworkManager로 정적 IP를 박는다</span></a><a class="next" href="2026-10-17_L5_secure_boot.html"><span class="dir">다음 →</span><span class="nm">L5. Secure boot 체인 — ROM 키 → 서명된 부트로더 → 서명된 FIT → 커널, 키 관리</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-업데이트-가-아니라-되돌릴-수-있는-전환">0. 큰 그림 — "업데이트"가 아니라 "되돌릴 수 있는 전환"</a></li><li class="l2"><a href="#1-ota가-지켜야-할-일곱-가지-요구사항">1. OTA가 지켜야 할 일곱 가지 요구사항</a></li><li class="l3"><a href="#1-1-흔한-함정">1.1 흔한 함정</a></li><li class="l2"><a href="#2-업데이트-전략-무엇을-얼마나-두-벌로-둘까">2. 업데이트 전략 — 무엇을 얼마나 두 벌로 둘까</a></li><li class="l3"><a href="#2-1-single-copy-recovery">2.1 single-copy + recovery</a></li><li class="l3"><a href="#2-2-symmetric-a-b">2.2 symmetric A/B</a></li><li class="l3"><a href="#2-3-파일-단위-ostree">2.3 파일 단위 — OSTree</a></li><li class="l3"><a href="#2-4-컨테이너-업데이트-l8로">2.4 컨테이너 업데이트 — L8로</a></li><li class="l3"><a href="#2-5-delta-업데이트">2.5 delta 업데이트</a></li><li class="l2"><a href="#3-boot-commit-프로토콜-업데이트의-심장">3. boot-commit 프로토콜 — 업데이트의 심장</a></li><li class="l3"><a href="#3-1-왜-한-번만-시도-가-중요한가">3.1 왜 "한 번만 시도"가 중요한가</a></li><li class="l3"><a href="#3-2-부팅-성공-을-누가-판정하나">3.2 "부팅 성공"을 누가 판정하나</a></li><li class="l2"><a href="#4-u-boot-bootcount-부트로더-쪽-절반">4. U-Boot bootcount — 부트로더 쪽 절반</a></li><li class="l3"><a href="#4-1-직관">4.1 직관</a></li><li class="l3"><a href="#4-2-정의-kconfig와-env-변수">4.2 정의 — Kconfig와 env 변수</a></li><li class="l3"><a href="#4-3-u-boot-소스로-확인-실제로-무엇을-하나">4.3 U-Boot 소스로 확인 — 실제로 무엇을 하나</a></li><li class="l3"><a href="#4-4-예제-1-bootcount를-켠-u-boot-직접-빌드">4.4 예제 1 — bootcount를 켠 U-Boot 직접 빌드</a></li><li class="l3"><a href="#4-5-예제-2-u-boot만으로-bootcount-루프-재현">4.5 예제 2 — U-Boot만으로 bootcount 루프 재현</a></li><li class="l3"><a href="#4-6-env-이중화-두-벌과-flag-바이트">4.6 env 이중화 — 두 벌과 flag 바이트</a></li><li class="l3"><a href="#4-7-예제-3-사본-하나-둘-다-깨지면-u-boot는-무엇을-읽나">4.7 예제 3 — 사본 하나 · 둘 다 깨지면 U-Boot는 무엇을 읽나</a></li><li class="l3"><a href="#4-8-함정-env는-생각보다-약하다">4.8 함정 — env는 생각보다 약하다</a></li><li class="l2"><a href="#5-실습-랩-만들기-gpt-디스크-슬롯-이미지-u-boot-스크립트">5. 실습 랩 만들기 — GPT 디스크 · 슬롯 이미지 · U-Boot 스크립트</a></li><li class="l3"><a href="#5-1-슬롯-이미지-다듬기">5.1 슬롯 이미지 다듬기</a></li><li class="l3"><a href="#5-2-예제-4-gpt-디스크-만들기">5.2 예제 4 — GPT 디스크 만들기</a></li><li class="l3"><a href="#5-3-u-boot-슬롯-선택-스크립트">5.3 U-Boot 슬롯 선택 스크립트</a></li><li class="l3"><a href="#5-4-linux-쪽-env-접근-fw_env-config와-qemu-pflash의-함정">5.4 Linux 쪽 env 접근 — fw_env.config와 QEMU pflash의 함정</a></li><li class="l3"><a href="#5-5-예제-5-mtd에-직접-지우고-쓰기-fw_setenv의-속">5.5 예제 5 — MTD에 직접 지우고 쓰기 (fw_setenv의 속)</a></li><li class="l2"><a href="#6-rauc로-하는-정상-업데이트-서명부터-commit까지">6. RAUC로 하는 정상 업데이트 — 서명부터 commit까지</a></li><li class="l3"><a href="#6-1-rauc-구성-한눈에">6.1 RAUC 구성 한눈에</a></li><li class="l3"><a href="#6-2-예제-6-서명-키-체계-만들기">6.2 예제 6 — 서명 키 체계 만들기</a></li><li class="l3"><a href="#6-3-예제-7-번들-만들기-검증-변조-vm-호스트의-rauc-1-15-1">6.3 예제 7 — 번들 만들기 · 검증 · 변조 (VM 호스트의 RAUC 1.15.1)</a></li><li class="l3"><a href="#6-4-custom-bootloader-backend-rauc와-우리-u-boot-스크립트를-잇는-다리">6.4 custom bootloader backend — RAUC와 우리 U-Boot 스크립트를 잇는 다리</a></li><li class="l3"><a href="#6-5-health-check-서비스">6.5 health check 서비스</a></li><li class="l3"><a href="#6-6-예제-8-시나리오-1-a-1-0-0-b-2-0-0-설치-시험-부팅-commit">6.6 예제 8 — 시나리오 1: A(1.0.0) → B(2.0.0) 설치 · 시험 부팅 · commit</a></li><li class="l2"><a href="#7-깨진-업데이트-자동-롤백-커널-panic">7. 깨진 업데이트 → 자동 롤백 (커널 panic)</a></li><li class="l3"><a href="#7-1-예제-9-시나리오-2-b-2-0-0-에서-a에-3-0-0-broken-설치">7.1 예제 9 — 시나리오 2: B(2.0.0)에서 A에 3.0.0-broken 설치</a></li><li class="l3"><a href="#7-2-예제-10-시나리오-3-부팅은-되지만-health-check가-실패">7.2 예제 10 — 시나리오 3: 부팅은 되지만 health check가 실패</a></li><li class="l2"><a href="#8-업데이트-도중-전원-차단">8. 업데이트 도중 전원 차단</a></li><li class="l3"><a href="#8-1-예제-11-시나리오-4-비활성-슬롯-쓰기-중-kill-9">8.1 예제 11 — 시나리오 4: 비활성 슬롯 쓰기 중 kill -9</a></li><li class="l3"><a href="#8-2-차단-지점별-정리">8.2 차단 지점별 정리</a></li><li class="l2"><a href="#9-rauc-더-깊이">9. RAUC 더 깊이</a></li><li class="l3"><a href="#9-1-슬롯-슬롯-그룹-슬롯-타입">9.1 슬롯 · 슬롯 그룹 · 슬롯 타입</a></li><li class="l3"><a href="#9-2-bootloader-backend">9.2 bootloader backend</a></li><li class="l3"><a href="#9-3-hooks와-handlers">9.3 hooks와 handlers</a></li><li class="l3"><a href="#9-4-큰-번들을-다루는-기능">9.4 큰 번들을 다루는 기능</a></li><li class="l2"><a href="#10-swupdate-프레임워크형-업데이터">10. SWUpdate — 프레임워크형 업데이터</a></li><li class="l3"><a href="#10-1-개념">10.1 개념</a></li><li class="l3"><a href="#10-2-예제-12-swu를-손으로-만들고-서명하기">10.2 예제 12 — .swu를 손으로 만들고 서명하기</a></li><li class="l3"><a href="#10-3-예제-13-게스트에서-swupdate-c-check-모드">10.3 예제 13 — 게스트에서 swupdate -c (check 모드)</a></li><li class="l2"><a href="#11-mender-그리고-셋-비교">11. Mender, 그리고 셋 비교</a></li><li class="l3"><a href="#11-1-mender">11.1 Mender</a></li><li class="l3"><a href="#11-2-비교">11.2 비교</a></li><li class="l2"><a href="#12-delta-업데이트-대역폭과-바꾸는-것">12. delta 업데이트 — 대역폭과 바꾸는 것</a></li><li class="l3"><a href="#12-1-방식">12.1 방식</a></li><li class="l3"><a href="#12-2-예제-14-실측-앱-8-mib-버전-파일만-바뀐-v1-v2">12.2 예제 14 — 실측: 앱 8 MiB + 버전 파일만 바뀐 v1 → v2</a></li><li class="l2"><a href="#13-슬롯-밖에-있는-것들-데이터-부트로더-anti-rollback">13. 슬롯 밖에 있는 것들 — 데이터 · 부트로더 · anti-rollback</a></li><li class="l3"><a href="#13-1-data-파티션과-마이그레이션">13.1 data 파티션과 마이그레이션</a></li><li class="l3"><a href="#13-2-부트로더-업데이트-가장-무서운-부분">13.2 부트로더 업데이트 — 가장 무서운 부분</a></li><li class="l3"><a href="#13-3-anti-rollback과-서명-l5와-연결">13.3 anti-rollback과 서명 — L5와 연결</a></li><li class="l2"><a href="#14-플릿-롤아웃-1만-대에-배포하기">14. 플릿 롤아웃 — 1만 대에 배포하기</a></li><li class="l3"><a href="#14-1-ota-테스트-무엇을-자동화하나">14.1 OTA 테스트 — 무엇을 자동화하나</a></li><li class="l2"><a href="#15-커널-안에서는-무슨-일이-일어나나">15. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#16-embedded-실무에서-다시-보기">16. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#16-1-센서-키트-드론-에-ota-넣기-첫-설계-문서의-뼈대">16.1 센서 키트(드론)에 OTA 넣기 — 첫 설계 문서의 뼈대</a></li><li class="l3"><a href="#16-2-왜-롤백됐지-현장-디버깅">16.2 "왜 롤백됐지?" 현장 디버깅</a></li><li class="l3"><a href="#16-3-컨테이너-앱과-섞을-때">16.3 컨테이너 앱과 섞을 때</a></li><li class="l2"><a href="#17-흔한-실수와-증상">17. 흔한 실수와 증상</a></li><li class="l2"><a href="#18-면접에서-이렇게-말한다">18. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#19-직접-해보기">19. 직접 해보기</a></li><li class="l2"><a href="#20-용어-사전">20. 용어 사전</a></li><li class="l2"><a href="#21-요약-체크리스트">21. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

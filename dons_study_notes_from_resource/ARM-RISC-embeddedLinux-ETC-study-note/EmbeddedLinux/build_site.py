@@ -49,7 +49,7 @@ COLLECTIONS = [
     _mod("I", "I_subsystems", "I. 커널 서브시스템", "Subsystems", "🧩", "IIO · V4L2 · input · net · CAN · thermal …"),
     _mod("J", "J_storage_fs", "J. 스토리지 · 파일시스템", "Storage & FS", "💾", "eMMC/NAND · ext4 · SquashFS · UBIFS · 전원 차단 안전."),
     _mod("K", "K_rootfs_build", "K. rootfs · 빌드 시스템", "Buildroot & Yocto", "📦", "rootfs · BusyBox · Buildroot · Yocto."),
-    _mod("L", "L_system_ota_security", "L. 시스템 · OTA · 보안", "System, OTA, Security", "🛡", "systemd · udev · OTA · secure boot · 크래시 수집."),
+    _mod("L", "L_system_update_security", "L. 시스템 · OTA · 보안", "System, OTA, Security", "🛡", "systemd · udev · OTA · secure boot · 크래시 수집."),
     _mod("M", "M_debug_trace", "M. 디버깅 · 트레이싱", "Debug & Trace", "🔍", "printk · oops · ftrace · perf · eBPF · KASAN."),
     _mod("N", "N_realtime_power", "N. 실시간 · 전원", "Real-time & PM", "⏱", "PREEMPT_RT · 지연 측정 · 전원 관리."),
     _mod("O", "O_heterogeneous_soc", "O. 이종 코어 · SoC", "Heterogeneous SoC", "🔗", "Cortex-A + M · remoteproc/rpmsg · 가속기."),

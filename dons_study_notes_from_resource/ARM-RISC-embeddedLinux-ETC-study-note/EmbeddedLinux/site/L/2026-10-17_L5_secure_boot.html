@@ -1,0 +1,1221 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>L5. Secure boot 체인 — ROM 키 → 서명된 부트로더 → 서명된 FIT → 커널, 키 관리</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="L/2026-10-17_L5_secure_boot">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">L. 시스템 · OTA · 보안 · L5. Secure boot 체인 — ROM 키 → 서명된 부트로더 → 서명된 FIT → 커널, 키 관리</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">L. 시스템 · OTA · 보안 · System, OTA, Security</div>
+      <h1>L5. Secure boot 체인 — ROM 키 → 서명된 부트로더 → 서명된 FIT → 커널, 키 관리</h1>
+      <div class="meta"><span>154분 읽기</span><span>1512줄</span><span>57개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: secure boot가 막는 공격과 못 막는 공격(물리 접근, JTAG, 다운그레이드, 런타임 침해)을 위협 모델로 말할 수 있다 · RSA 키로 FIT configuration에 서명하고 공개키를 U-Boot control DTB에 넣어, TF-A TBB(BL1→BL2→U-Boot) → U-Boot verified boot(FIT) → 커널까지 이어지는 체인을 QEMU에서 직접 만들고 1바이트 변조·남의 키·서명 없는 FIT·mix-and-match·환경변수 탈취로 깨 볼 수 있다 · 커널 모듈 서명(<code>sign-file</code>, <code>module.sig_enforce</code>, lockdown)과 measured boot(TPM PCR)를 secure boot와 구분해 설명할 수 있다 · 키 계층·HSM·fuse 공정·키 유출 대응·롤백 방지를 설계 질문 수준으로 답할 수 있다 <strong>왜 필요한가</strong>: 국방·로보틱스·보안 장비 회사의 Embedded Linux 면접에서 "Walk me through secure boot on your last product", "Why sign the configuration, not the image?", "Your signing key leaked — what now?"는 거의 반드시 나온다. 실무에서는 양산 직전에 "fuse 태우기 전에 체인이 진짜 닫혔는지" 증명하는 사람이 필요하다 <strong>Don 기준 난이도</strong>: SSD 펌웨어의 서명된 FW 다운로드·부트로더의 이미지 검증·OTP 키 해시는 이미 해 본 일이다 / FIT·U-Boot control DTB에 공개키 넣기, configuration 서명의 의미, 커널 cmdline·환경변수 잠금, 모듈 서명 keyring, TPM PCR, 키 운영(HSM·revocation)이 새로 배울 부분 <strong>선행 노트</strong>: C3(U-Boot·FIT 기초), C5(TF-A·TBBR·NV counter), J3(dm-verity 입문), K7(모듈 taint) — 같이 보면 좋은 노트: L4(OTA 서명·A/B), L6(dm-verity 심화·TPM/TEE·IMA)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>Don이 SSD에서 했던 일을 떠올리자. 호스트가 새 펌웨어를 내려보내면 현재 펌웨어가 서명을 확인하고서야 NAND에 썼다. 부트로더는 매 부팅마다 메인 펌웨어의 헤더·CRC·서명을 확인하고 점프했다. 그 "부트로더가 다음 단계를 확인하고 넘긴다"를 <strong>칩이 켜지는 순간부터 리눅스 모듈 하나까지</strong> 끊김 없이 이어 붙인 것이 secure boot 체인이다.</p>
+<p>Linux SoC에서 단계가 많아질 뿐 원리는 같다. 각 단계는 <strong>다음 단계를 실행하기 전에</strong> 그 단계의 서명을 자기가 믿는 공개키로 검증한다. 맨 앞의 공개키(정확히는 그 해시)는 칩 안의 바꿀 수 없는 곳(OTP fuse)에 있고, 그것을 읽는 코드도 바꿀 수 없는 곳(mask ROM)에 있다. 이것이 <strong>Root of Trust</strong>다.</p>
+<figure class="chart"><svg viewBox="0 0 680 520" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="20" width="320" height="40" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="180" y="45" text-anchor="middle" font-size="13">BootROM + OTP fuse (ROTPK 해시)</text>
+  <rect x="20" y="90" width="320" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="180" y="115" text-anchor="middle" font-size="13">BL1 · BL2 (TF-A, Mbed TLS)</text>
+  <rect x="20" y="160" width="320" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="180" y="185" text-anchor="middle" font-size="13">BL31 EL3 런타임 · BL32 OP-TEE</text>
+  <rect x="20" y="230" width="320" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="180" y="255" text-anchor="middle" font-size="13">BL33 U-Boot (FIT 공개키 내장)</text>
+  <rect x="20" y="300" width="320" height="40" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="180" y="325" text-anchor="middle" font-size="13">FIT: kernel + DTB + initramfs</text>
+  <rect x="20" y="370" width="320" height="40" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="180" y="395" text-anchor="middle" font-size="13">Linux 커널 → dm-verity rootfs</text>
+  <rect x="20" y="440" width="320" height="40" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="180" y="465" text-anchor="middle" font-size="13">서명된 모듈 · IMA/EVM (런타임)</text>
+  <line x1="180" y1="60" x2="180" y2="88" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="180" y1="130" x2="180" y2="158" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="180" y1="200" x2="180" y2="228" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="180" y1="270" x2="180" y2="298" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="180" y1="340" x2="180" y2="368" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="180" y1="410" x2="180" y2="438" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="360" y="55" width="300" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="75" text-anchor="middle" font-size="12">TB FW cert → BL2 해시 (C5 §7)</text>
+  <rect x="360" y="125" width="300" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="145" text-anchor="middle" font-size="12">Trusted Key · SoC FW cert → BL31 해시</text>
+  <rect x="360" y="195" width="300" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="215" text-anchor="middle" font-size="12">NT FW content cert → BL33 해시 (§6)</text>
+  <rect x="360" y="265" width="300" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="285" text-anchor="middle" font-size="12">FIT configuration RSA 서명 (§2~§5)</text>
+  <rect x="360" y="335" width="300" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="355" text-anchor="middle" font-size="12">verity root hash: 서명된 DT 안 (L6)</text>
+  <rect x="360" y="405" width="300" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="425" text-anchor="middle" font-size="12">MODULE_SIG · IMA appraise (§7, L6)</text>
+  <text x="20" y="505" font-size="12">빨강 = 바꿀 수 없는 하드웨어, 파랑 = 펌웨어, 주황 = 부트 이미지, 초록 = OS</text>
+</svg></figure>
+<p>그림 1 — 이 노트의 chain of trust. 회색 상자는 "위 단계가 아래 단계를 무엇으로 검증하나"다. 이 노트는 QEMU에서 BL1부터 커널·모듈까지를 실제로 연결한다. TF-A 내부(TBBR 인증서 트리, NV counter)는 C5 §7에서 이미 깊게 다뤘으므로 여기서는 U-Boot와 이어지는 고리만 본다.</p>
+<p>이 노트의 실습 환경은 Mac(M2) 위 Lima VM <code>elinux</code>(aarch64, Ubuntu 26.04, <code>uname -r</code> = <code>7.0.0-38-generic</code>)이고, 그 안에서 QEMU 10.2.1(TCG, KVM 없음)로 <code>virt</code> 보드를 돌린다. 펌웨어는 TF-A v2.15.0, U-Boot 2026.10, 커널은 랩의 <code>Image-sec</code>(6.18.55-sec)이다. 작업 폴더는 VM의 <code>/var/tmp/L5/</code>. <strong>부팅 시간 숫자는 TCG 에뮬레이션 값이라 실제 하드웨어와 무관하다.</strong></p>
+<div class="tw"><table><thead><tr><th>실습</th><th>무엇을 보이나</th><th>절</th></tr></thead><tbody><tr><td>키 생성 · .its · <code>mkimage -K</code></td><td>공개키가 U-Boot DTB의 <code>/signature</code>로 들어가는 과정</td><td>§2</td></tr><tr><td>control DTB를 U-Boot에 붙이기</td><td>qemu_arm64에서 <code>OF_BOARD</code>를 끄고 <code>EXT_DTB</code>로 빌드한 이유</td><td>§3</td></tr><tr><td>정상 부팅 · 변조 3종</td><td><code>sha256,rsa2048:dev+ OK</code> / Bad hash / 남의 키 / 서명 없음</td><td>§4</td></tr><tr><td>mix-and-match</td><td>이미지 서명은 뚫리고 configuration 서명은 막는다</td><td>§5</td></tr><tr><td>env 탈취 · <code>booti</code> 우회 · 잠근 U-Boot</td><td>체인이 "검증 경로 밖"에서 끊기는 장면과 막는 설정</td><td>§5</td></tr><tr><td>TF-A TBB + 잠근 U-Boot</td><td>BL1→BL2→U-Boot→FIT→커널 전체 체인, 키 바꿔치기 거부</td><td>§6</td></tr><tr><td>모듈 서명</td><td>서명/남의 키/무서명 모듈 × enforce 없음/<code>sig_enforce</code>/lockdown</td><td>§7</td></tr><tr><td>swtpm measured boot</td><td>PCR 읽기·extend 계산 검증</td><td>§8</td></tr></tbody></table></div>
+<hr>
+<h2 id="1-위협-모델-secure-boot는-무엇을-막고-무엇을-못-막나">1. 위협 모델 — secure boot는 무엇을 막고, 무엇을 못 막나<a class="anchor" href="#1-위협-모델-secure-boot는-무엇을-막고-무엇을-못-막나" aria-label="link">#</a></h2>
+<h3 id="1-1-직관-누가-플래시에-무엇을-쓸-수-있다고-가정하나">1.1 직관 — "누가 플래시에 무엇을 쓸 수 있다고 가정하나"<a class="anchor" href="#1-1-직관-누가-플래시에-무엇을-쓸-수-있다고-가정하나" aria-label="link">#</a></h3>
+<p>보안 설계는 항상 "공격자가 무엇을 할 수 있다고 가정하나"에서 출발한다. secure boot의 기본 가정은 이것이다: <strong>공격자가 저장장치(eMMC, SPI NOR, SD)의 내용을 마음대로 바꿀 수 있다.</strong> 장비를 주워서 eMMC를 떼어 다시 쓸 수도 있고, 원격 침해로 root를 얻어 <code>/boot</code>를 덮어쓸 수도 있다. secure boot의 약속은 "그래도 <strong>우리가 서명한 코드만</strong> 실행된다"이다. 그 이상은 약속하지 않는다.</p>
+<h3 id="1-2-막는-것-못-막는-것">1.2 막는 것 / 못 막는 것<a class="anchor" href="#1-2-막는-것-못-막는-것" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>공격</th><th>secure boot로 막히나</th><th>이유 · 추가로 필요한 것</th></tr></thead><tbody><tr><td>플래시의 커널·부트로더를 다른 것으로 교체</td><td>막힌다</td><td>서명 검증 실패 → 부팅 거부 (§4)</td></tr><tr><td>서명된 이미지 일부를 변조 (1바이트)</td><td>막힌다</td><td>해시 불일치 (§4)</td></tr><tr><td>서명된 이미지들을 섞어 새 조합 만들기</td><td>configuration 서명이면 막힌다</td><td>이미지별 서명이면 뚫린다 (§5)</td></tr><tr><td>서명이 진짜인 <strong>옛 버전</strong>(취약점 있음)으로 되돌리기</td><td><strong>못 막는다</strong></td><td>anti-rollback(NV counter, 보안 버전) 별도 필요 (C5 §7.7, §9)</td></tr><tr><td>U-Boot 콘솔·환경변수로 cmdline 바꾸기</td><td><strong>설정에 달렸다</strong></td><td>env 고정·콘솔 차단·bootargs를 서명 안에 (§5.3)</td></tr><tr><td>JTAG로 CPU를 멈추고 메모리 수정</td><td><strong>못 막는다</strong></td><td>JTAG fuse 잠금 / 인증 디버그 (§9.4)</td></tr><tr><td>부팅 후 런타임 침해 (원격 코드 실행)</td><td><strong>못 막는다</strong></td><td>최소 권한, LSM, dm-verity로 재부팅 시 복구 (L6)</td></tr><tr><td>rootfs 파일 변조</td><td>체인을 rootfs까지 잇지 않으면 못 막는다</td><td>dm-verity 또는 IMA appraise (L6)</td></tr><tr><td>비밀(펌웨어 IP, 키) 추출</td><td>못 막는다 — secure boot는 무결성이지 기밀성이 아니다</td><td>이미지 암호화(NXP DEK, Jetson SBK), dm-crypt, TEE (L6)</td></tr><tr><td>전압·클럭 글리치로 검증 분기 건너뛰기</td><td>ROM·하드웨어 대책에 달렸다</td><td>글리치 대책 ROM, 이중 검사, 부트 상태 확인</td></tr><tr><td>서명 키 유출</td><td>못 막는다</td><td>키 관리·폐기(revocation) 설계 (§9)</td></tr></tbody></table></div>
+<blockquote><p>면접 포인트: "secure boot = 장비가 우리 코드만 <strong>부팅</strong>한다"이다. "장비가 안전하다"가 아니다. 이 구분을 먼저 말하면 면접관이 다음 질문(롤백, 런타임, 디버그 포트)으로 자연스럽게 넘어온다.</p></blockquote>
+<h3 id="1-3-don-경험과-연결">1.3 Don 경험과 연결<a class="anchor" href="#1-3-don-경험과-연결" aria-label="link">#</a></h3>
+<p>SSD 펌웨어에서 "서명된 FW만 다운로드 허용"을 했을 때도 같은 질문을 받았을 것이다. 옛 펌웨어로 다운그레이드를 허용하나? 제조 테스트 모드(벤더 명령)는 양산 후 닫히나? JTAG는? Linux SoC에서도 정확히 그 세 가지(롤백·제조 모드·디버그 포트)가 체인을 깨는 단골 구멍이다.</p>
+<hr>
+<h2 id="2-u-boot-verified-boot-키-its-서명-공개키-넣기">2. U-Boot verified boot — 키, .its, 서명, 공개키 넣기<a class="anchor" href="#2-u-boot-verified-boot-키-its-서명-공개키-넣기" aria-label="link">#</a></h2>
+<h3 id="2-1-역할-분담-누가-무엇을-들고-있나">2.1 역할 분담 — 누가 무엇을 들고 있나<a class="anchor" href="#2-1-역할-분담-누가-무엇을-들고-있나" aria-label="link">#</a></h3>
+<ul><li><strong>개인키</strong>: 빌드 서버(실제로는 HSM)에만 있다. <code>mkimage</code>가 FIT에 서명할 때만 쓴다.</li><li><strong>공개키</strong>: U-Boot 바이너리 끝에 붙는 <strong>control DTB</strong>(U-Boot 자신이 하드웨어 설명과 설정에 쓰는 Device Tree)의 <code>/signature/key-&lt;이름&gt;</code> 노드에 들어간다. U-Boot 바이너리 자체는 앞 단계(TF-A BL2)가 검증하므로, 공개키도 덩달아 보호된다 — 이게 §6의 핵심이다.</li><li><strong>FIT</strong>: 커널·DTB·initramfs를 담은 하나의 FDT 형식 파일(C3 §10). 각 이미지에는 <code>hash-1</code>(sha256), 각 configuration에는 <code>signature-1</code>(RSA 서명)이 붙는다.</li></ul>
+<h3 id="2-2-코드로-확인-키-만들기">2.2 코드로 확인 — 키 만들기<a class="anchor" href="#2-2-코드로-확인-키-만들기" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: mkimage가 기대하는 키 파일 형식(<code>&lt;keydir&gt;/&lt;key-name-hint&gt;.key</code>와 <code>.crt</code>). 공격자 역할의 키도 <strong>같은 이름 <code>dev</code></strong>로 하나 더 만든다(이름만 같으면 통과하는지 보려고).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/L5 &amp;&amp; mkdir -p keys evilkeys
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out keys/dev.key
+openssl req -batch -new -x509 -key keys/dev.key -out keys/dev.crt -days 3650 -subj "/CN=L5 dev FIT key"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out evilkeys/dev.key
+openssl req -batch -new -x509 -key evilkeys/dev.key -out evilkeys/dev.crt -days 3650 -subj "/CN=attacker"
+ls -l keys evilkeys</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>evilkeys:
+total 8
+-rw-rw-r-- 1 donh donh 1111 Oct 17 21:15 dev.crt
+-rw------- 1 donh donh 1708 Oct 17 21:15 dev.key
+
+keys:
+total 8
+-rw-rw-r-- 1 donh donh 1127 Oct 17 21:15 dev.crt
+-rw------- 1 donh donh 1704 Oct 17 21:15 dev.key</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: 개인키는 <code>0600</code>이다. 실습이라 디스크에 있지만, 제품 키는 절대 이렇게 두지 않는다(§9). RSA-2048은 U-Boot에서 가장 흔한 선택이고, 같은 방법으로 <code>rsa_keygen_bits:4096</code> + <code>algo = "sha256,rsa4096"</code>도 된다(키가 커지면 검증 시간과 control DTB 크기가 는다).</p>
+<h3 id="2-3-its-이미지-4개-configuration-2개">2.3 .its — 이미지 4개, configuration 2개<a class="anchor" href="#2-3-its-이미지-4개-configuration-2개" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 서명이 configuration 노드 안에 있고, <code>sign-images</code>가 서명 범위에 넣을 이미지 종류를 고른다. configuration이 두 개인 이유: 하나는 TF-A 없이(<code>-bios u-boot.bin</code>, PSCI <code>hvc</code>), 하나는 TF-A 밑에서(<code>secure=on</code>, PSCI <code>smc</code>) 부팅할 DT를 쓴다. 이 둘은 §5의 mix-and-match 실험 재료도 된다.</p>
+<figure class="code"><span class="lang">dts</span><pre><code>/dts-v1/;
+/ {
+    description = "L5 signed FIT: kernel + fdt + initramfs";
+    #address-cells = &lt;1&gt;;
+    images {
+        kernel-1 {
+            description = "Linux @KVER@";
+            data = /incbin/("@KERNEL@");
+            type = "kernel"; arch = "arm64"; os = "linux"; compression = "none";
+            load = &lt;0x40400000&gt;; entry = &lt;0x40400000&gt;;
+            hash-1 { algo = "sha256"; };
+        };
+        fdt-ns {
+            description = "QEMU virt DT (non-secure, PSCI hvc)";
+            data = /incbin/("/var/tmp/L5/l5_fit_ns.dtb");
+            type = "flat_dt"; arch = "arm64"; compression = "none";
+            hash-1 { algo = "sha256"; };
+        };
+        fdt-s {
+            description = "QEMU virt DT (secure=on, PSCI smc via TF-A)";
+            data = /incbin/("/var/tmp/L5/l5_fit_s.dtb");
+            type = "flat_dt"; arch = "arm64"; compression = "none";
+            hash-1 { algo = "sha256"; };
+        };
+        ramdisk-1 {
+            description = "BusyBox initramfs";
+            data = /incbin/("@RAMDISK@");
+            type = "ramdisk"; arch = "arm64"; os = "linux"; compression = "none";
+            hash-1 { algo = "sha256"; };
+        };
+    };
+    configurations {
+        default = "conf-ns";
+        conf-ns {
+            description = "boot without TF-A";
+            kernel = "kernel-1"; fdt = "fdt-ns"; ramdisk = "ramdisk-1";
+            signature-1 {
+                algo = "sha256,rsa2048";
+                key-name-hint = "dev";
+                sign-images = "fdt", "kernel", "ramdisk";
+            };
+        };
+        conf-s {
+            description = "boot under TF-A (BL33)";
+            kernel = "kernel-1"; fdt = "fdt-s"; ramdisk = "ramdisk-1";
+            signature-1 {
+                algo = "sha256,rsa2048";
+                key-name-hint = "dev";
+                sign-images = "fdt", "kernel", "ramdisk";
+            };
+        };
+    };
+};</code></pre></figure>
+<p><code>@KERNEL@</code> 등은 작은 셸 스크립트가 <code>sed</code>로 채운다(<code>/var/lab/out/Image-sec</code>, <code>/var/lab/out/initramfs.cpio.gz</code>). DT 두 개는 QEMU가 만든 DT를 <code>-machine virt,dumpdtb=...</code>로 떠서 썼고, 각 DT의 <code>/chosen/bootargs</code>에 커널 cmdline을 <code>fdtput</code>으로 넣었다 — <strong>cmdline이 서명 범위 안에 들어가게</strong> 하려는 것이다(§5.3).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>qemu-system-aarch64 -machine virt,dumpdtb=l5_qemu_ns.dtb -cpu cortex-a57 -m 1057 -nographic -bios /var/lab/out/u-boot.bin
+qemu-system-aarch64 -machine virt,secure=on,dumpdtb=l5_qemu_s.dtb -cpu cortex-a57 -m 1057 -nographic -bios /var/lab/out/flash.bin
+fdtget l5_qemu_ns.dtb /psci method; fdtget l5_qemu_s.dtb /psci method</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>hvc
+Error at '/psci': FDT_ERR_NOTFOUND</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: <code>secure=on</code>이면 QEMU는 <code>/psci</code> 노드를 만들지 않는다 — 실제 보드에서는 TF-A BL2가 실행 중에 DT를 고쳐 넣는다. 서명된 FIT 안의 DT는 부팅 중에 아무도 고치지 않으므로, <code>fdt-s</code>에는 <code>/psci { compatible = "arm,psci-1.0"; method = "smc"; }</code>를 <code>fdtput</code>으로 직접 넣었다. <strong>"부팅 중 누군가 DT를 고쳐 주던 것"을 서명된 DT로 옮기면 그 수정을 빌드 시점에 해야 한다</strong>는 것이 실무 교훈이다.</p>
+<h3 id="2-4-코드로-확인-서명하면서-공개키를-control-dtb에-넣기">2.4 코드로 확인 — 서명하면서 공개키를 control DTB에 넣기<a class="anchor" href="#2-4-코드로-확인-서명하면서-공개키를-control-dtb에-넣기" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: <code>mkimage -f l5.its -k keys -K l5_ctrl.dtb -r out.itb</code> 한 번에 세 가지가 일어난다: 해시 계산, configuration 서명, 그리고 <code>-K</code>로 공개키를 control DTB에 쓰기. <code>-r</code>은 그 키를 <code>required</code>로 표시한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cp build/dts/dt.dtb l5_ctrl.dtb          # U-Boot이 쓸 control DTB 원본 (QEMU DT, §3)
+./build/tools/mkimage -f l5.its -k keys -K l5_ctrl.dtb -r l5_test.itb | tail -16</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code> Configuration 0 (conf-ns)
+  Description:  boot without TF-A
+  Kernel:       kernel-1
+  Init Ramdisk: ramdisk-1
+  FDT:          fdt-ns
+  Sign algo:    sha256,rsa2048:dev
+  Sign value:   35037b51a1ddbe22e7b8027ef8c97772699afe991a2fa49e464431f20d6f5f1f3efe99c1...
+  Timestamp:    Sat Oct 17 21:18:24 2026
+ Configuration 1 (conf-s)
+  ...
+Signature written to 'l5_test.itb', node '/configurations/conf-s/signature-1'
+Public key written to 'l5_ctrl.dtb', node '/signature/key-dev'</code></pre></figure>
+<p>(서명 값은 길어서 잘랐다. <code>mkimage</code>는 U-Boot 빌드 트리의 2026.10 도구를 썼다 — VM에 깔린 <code>u-boot-tools</code>는 2025.10이라 버전을 맞췄다.)</p>
+<h3 id="2-5-코드로-확인-control-dtb의-signature-노드-열어-보기">2.5 코드로 확인 — control DTB의 <code>/signature</code> 노드 열어 보기<a class="anchor" href="#2-5-코드로-확인-control-dtb의-signature-노드-열어-보기" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: U-Boot이 런타임에 RSA 검증을 빠르게 하려고 미리 계산해 둔 값들(<code>rsa,r-squared</code>, <code>rsa,n0-inverse</code> — Montgomery 곱셈용)과 정책(<code>required</code>)이 DTB 속성으로 들어 있다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>fdtget -p l5_ctrl.dtb /signature/key-dev
+for p in required algo rsa,num-bits key-name-hint; do echo "$p = $(fdtget l5_ctrl.dtb /signature/key-dev $p)"; done
+fdtget -t x l5_ctrl.dtb /signature/key-dev rsa,exponent
+fdtget -t bx l5_ctrl.dtb /signature/key-dev rsa,modulus | cut -d" " -f1-16
+openssl rsa -in keys/dev.key -noout -modulus | cut -c1-40</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>required
+algo
+rsa,r-squared
+rsa,modulus
+rsa,exponent
+rsa,n0-inverse
+rsa,num-bits
+key-name-hint
+required = conf
+algo = sha256,rsa2048
+rsa,num-bits = 2048
+key-name-hint = dev
+0 10001
+c7 50 54 66 5 7a cc 1f 76 6c 2c d8 d0 1a 78 d9
+Modulus=C7505466057ACC1F766C2CD8D01A78D9</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: <code>rsa,modulus</code> 앞 16바이트가 openssl이 보여 준 개인키의 modulus와 같다(<code>fdtget</code>은 앞자리 0을 생략해 <code>05</code>를 <code>5</code>로 찍는다). 지수는 65537(0x10001). <code>required = conf</code>는 "<strong>configuration 서명이 이 키로 검증되지 않으면 부팅하지 마라</strong>"는 정책이다. <code>-r</code> 없이 넣으면 키는 있지만 강제되지 않는다 — 서명 없는 FIT도 그냥 부팅된다. 키가 여러 개면 <code>/signature</code>의 <code>required-mode = "any"</code> 또는 <code>"all"</code>로 정책을 정한다(U-Boot <code>doc/usage/fit/signature.rst</code>).</p>
+<figure class="chart"><svg viewBox="0 0 680 430" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="10" y="10" width="380" height="410" rx="6" fill="#e08a3c" fill-opacity="0.06" stroke="#e08a3c"/>
+  <text x="200" y="32" text-anchor="middle" font-size="13">l5_good.itb (FIT = FDT 형식 파일)</text>
+  <rect x="25" y="45" width="350" height="150" rx="4" fill="#4a7bd0" fill-opacity="0.08" stroke="#4a7bd0"/>
+  <text x="40" y="65" font-size="12">/images</text>
+  <text x="55" y="87" font-size="12">kernel-1: data (54 MB), load, entry</text>
+  <text x="75" y="107" font-size="12">hash-1: algo sha256, value</text>
+  <text x="55" y="129" font-size="12">fdt-ns · fdt-s: data (DT + /chosen/bootargs)</text>
+  <text x="75" y="149" font-size="12">hash-1: value</text>
+  <text x="55" y="171" font-size="12">ramdisk-1: data, hash-1</text>
+  <rect x="25" y="210" width="350" height="200" rx="4" fill="#3f9a6b" fill-opacity="0.08" stroke="#3f9a6b"/>
+  <text x="40" y="230" font-size="12">/configurations (default = conf-ns)</text>
+  <text x="55" y="252" font-size="12">conf-ns: kernel, fdt, ramdisk = 이름</text>
+  <rect x="55" y="262" width="305" height="110" rx="4" fill="#d0564a" fill-opacity="0.10" stroke="#d0564a"/>
+  <text x="70" y="282" font-size="12">signature-1</text>
+  <text x="85" y="302" font-size="12">algo = sha256,rsa2048</text>
+  <text x="85" y="322" font-size="12">key-name-hint = dev</text>
+  <text x="85" y="342" font-size="12">hashed-nodes = 서명한 노드 목록</text>
+  <text x="85" y="362" font-size="12">value = RSA 서명 (256 B)</text>
+  <text x="55" y="395" font-size="12">conf-s: 같은 구조, fdt = fdt-s</text>
+  <rect x="420" y="60" width="250" height="190" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="545" y="82" text-anchor="middle" font-size="13">U-Boot control DTB</text>
+  <text x="545" y="100" text-anchor="middle" font-size="12">(u-boot.bin 끝에 붙음)</text>
+  <text x="435" y="125" font-size="12">/signature/key-dev</text>
+  <text x="450" y="147" font-size="12">required = conf</text>
+  <text x="450" y="167" font-size="12">algo = sha256,rsa2048</text>
+  <text x="450" y="187" font-size="12">rsa,modulus · rsa,exponent</text>
+  <text x="450" y="207" font-size="12">rsa,r-squared · n0-inverse</text>
+  <text x="450" y="227" font-size="12">key-name-hint = dev</text>
+  <rect x="420" y="290" width="250" height="90" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="545" y="312" text-anchor="middle" font-size="12">서명 범위 = hashed-nodes의</text>
+  <text x="545" y="332" text-anchor="middle" font-size="12">속성 전부, 단 data 속성은 제외</text>
+  <text x="545" y="352" text-anchor="middle" font-size="12">→ data는 hash-1 값으로 묶인다</text>
+  <line x1="360" y1="300" x2="418" y2="200" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah2)"/>
+  <text x="392" y="275" font-size="12">검증</text>
+</svg></figure>
+<p>그림 2 — FIT와 control DTB의 관계. configuration 서명은 "어떤 이미지 이름들을 고르는지"와 "그 이미지들의 해시 값"을 함께 서명한다. 이미지 데이터 자체(수십 MB)는 서명 계산에서 빠지고, 대신 각 이미지의 <code>hash-1</code>이 데이터를 대표한다 — 그래서 검증은 "서명 확인 → 해시 확인" 두 단계다(§4.3에서 실제로 이 순서가 보인다).</p>
+<h3 id="2-6-서명-범위-hashed-nodes를-직접-보기">2.6 서명 범위 — <code>hashed-nodes</code>를 직접 보기<a class="anchor" href="#2-6-서명-범위-hashed-nodes를-직접-보기" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: configuration 서명이 실제로 어느 노드를 덮는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>fdtdump l5_good.itb 2&gt;/dev/null | sed -n "/conf-ns {/,/};/p" | head -16</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>        conf-ns {
+            description = "boot without TF-A";
+            kernel = "kernel-1";
+            fdt = "fdt-ns";
+            ramdisk = "ramdisk-1";
+            signature-1 {
+                hashed-strings = &lt;0x00000000 0x0000008e&gt;;
+                hashed-nodes = "/", "/configurations/conf-ns", "/images/fdt-ns", "/images/fdt-ns/hash-1", "/images/kernel-1", "/images/kernel-1/hash-1", "/images/ramdisk-1", "/images/ramdisk-1/hash-1";
+                timestamp = &lt;0x6ad44d38&gt;;
+                signer-version = "2026.10";
+                signer-name = "mkimage";
+                value = &lt;0x18258d52 0xb0fa4fa9 0x4d658810 ... 0x63ff1df7&gt;;
+                algo = "sha256,rsa2048";
+                key-name-hint = "dev";
+                sign-images = "fdt", "kernel", "ramdisk";
+            };</code></pre></figure>
+<p>(<code>value</code> 배열은 64워드라 가운데를 <code>...</code>로 줄였다.)</p>
+<p><strong>출력에서 볼 것</strong>: <code>hashed-nodes</code>에 <code>/configurations/conf-ns</code>와 그 configuration이 고른 이미지 노드 + 각 <code>hash-1</code> 노드가 들어 있다. <code>fdt-s</code>는 없다 — conf-ns가 고르지 않았으니까. 서명은 이 노드들의 FDT 구조 영역(속성 이름·값)과 문자열 테이블 일부(<code>hashed-strings</code>)를 이어 붙인 바이트에 대한 RSA 서명이다. U-Boot 소스 <code>boot/image-fit-sig.c</code>의 <code>fit_config_check_sig()</code>는 이때 <code>data</code>, <code>data-size</code>, <code>data-position</code>, <code>data-offset</code> 속성을 제외 목록(<code>exc_prop[]</code>)으로 빼고 해시한다.</p>
+<hr>
+<h2 id="3-공개키를-u-boot에-진짜로-넣기-qemu_arm64의-함정">3. 공개키를 U-Boot에 "진짜로" 넣기 — qemu_arm64의 함정<a class="anchor" href="#3-공개키를-u-boot에-진짜로-넣기-qemu_arm64의-함정" aria-label="link">#</a></h2>
+<h3 id="3-1-문제-qemu_arm64는-dtb를-앞-단계에서-받는다">3.1 문제 — qemu_arm64는 DTB를 앞 단계에서 받는다<a class="anchor" href="#3-1-문제-qemu_arm64는-dtb를-앞-단계에서-받는다" aria-label="link">#</a></h3>
+<p><code>qemu_arm64_defconfig</code>는 <code>CONFIG_OF_BOARD=y</code>다. U-Boot이 자기 DTB를 바이너리에 갖고 다니지 않고, <strong>QEMU가 RAM 시작(0x40000000)에 놓아 준 DTB</strong>를 control DTB로 쓴다(<code>board/emulation/qemu-arm/qemu-arm.c</code>의 <code>board_fdt_blob_setup()</code>). 실제 보드에서 TF-A가 DTB를 넘겨주는 구조(<code>OF_HAS_PRIOR_STAGE</code>)와 같다.</p>
+<p>U-Boot 문서(<code>doc/develop/devicetree/dt_qemu.rst</code>)는 <code>-dtb merged.dtb</code>로 QEMU에 공개키가 든 DTB를 넘기는 방법을 소개한다. 개발 중 시험에는 편하다. 그러나 <strong>보안상으로는 의미가 없다</strong>: 공개키가 U-Boot 바이너리 밖에서 오므로, 저장장치(또는 앞 단계 입력)를 바꿀 수 있는 공격자는 자기 공개키가 든 DTB를 넘겨 자기가 서명한 FIT를 부팅시킬 수 있다. 공개키는 <strong>검증된 바이너리 안</strong>에 있어야 한다.</p>
+<h3 id="3-2-해결-of_separate-ext_dtb">3.2 해결 — <code>OF_SEPARATE</code> + <code>EXT_DTB</code><a class="anchor" href="#3-2-해결-of_separate-ext_dtb" aria-label="link">#</a></h3>
+<p>그래서 이 노트는 U-Boot을 다시 빌드해 control DTB를 <code>u-boot.bin</code> 끝에 붙였다(<code>u-boot.bin = u-boot-nodtb.bin + dtb</code>). 이러면 TF-A BL2가 <code>u-boot.bin</code> 전체의 해시를 검증할 때 공개키도 함께 검증된다(§6). 처음 시도에서 두 번 막혔다 — 그 기록이 실무 공부가 된다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># dev.frag (merge_config.sh로 qemu_arm64_defconfig 위에 덮어쓴 조각)
+# CONFIG_OF_BOARD is not set
+CONFIG_OF_SEPARATE=y
+# CONFIG_OF_OMIT_DTB is not set</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/lab/src/u-boot
+make O=/var/tmp/L5/build qemu_arm64_defconfig
+./scripts/kconfig/merge_config.sh -m -O /var/tmp/L5/build /var/tmp/L5/build/.config dev.frag
+make O=/var/tmp/L5/build olddefconfig
+make O=/var/tmp/L5/build -j2 EXT_DTB=/var/tmp/L5/l5_ctrl.dtb u-boot.bin
+ls -l /var/tmp/L5/build/u-boot*.bin</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>  RELOC   u-boot-nodtb.bin
+  CAT     u-boot-dtb.bin
+  COPY    u-boot.bin
+-rw-rw-r-- 1 donh donh 1511343 Oct 17 21:17 /var/tmp/L5/build/u-boot-dtb.bin
+-rw-rw-r-- 1 donh donh 1504160 Oct 17 21:17 /var/tmp/L5/build/u-boot-nodtb.bin
+-rw-rw-r-- 1 donh donh 1511343 Oct 17 21:17 /var/tmp/L5/build/u-boot.bin</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: <code>u-boot.bin</code>이 <code>nodtb</code>보다 7,183바이트 크다 = 붙인 DTB 크기(공개키를 넣기 전 QEMU DT; 키를 넣은 최종본은 9,743바이트). 막혔던 두 지점:</p>
+<ul><li><code>OF_BOARD</code>만 끄고 <code>make all</code>을 하면 <code>scripts/check-of.sh</code>가 "This board uses a prior stage to provide the device tree. Please enable CONFIG_OF_BOARD"로 빌드를 실패시킨다. <code>ARCH_QEMU</code>가 <code>imply OF_HAS_PRIOR_STAGE</code>를 하고, 이 심볼은 프롬프트가 없어 끌 수 없다. 이 검사는 <code>all</code> 타깃에만 붙어 있으므로 <strong><code>u-boot.bin</code> 타깃을 직접</strong> 만들면 된다(의도적으로 정책을 벗어난다는 것을 알고 하는 것이다).</li><li><code>OF_HAS_PRIOR_STAGE</code>가 켜져 있으면 <code>OF_OMIT_DTB</code>가 기본 y라서 DTB가 붙지 않는다(첫 빌드에서 <code>u-boot.bin</code> = <code>nodtb</code>와 같은 1,504,160바이트였다). <code># CONFIG_OF_OMIT_DTB is not set</code>으로 끈다.</li><li><code>EXT_DTB=</code>는 <code>dts/Makefile</code>에서 기본 DTB 대신 지정 파일을 <code>dts/dt.dtb</code>로 쓰게 한다. U-Boot 문서의 BeagleBone 예제(<code>doc/usage/fit/beaglebone_vboot.rst</code>)와 같은 방법이다.</li></ul>
+<p>DT를 QEMU가 만든 것으로 고정했으므로 <strong>QEMU 인자(-m, -cpu, secure=on)를 바꾸면 control DTB를 다시 떠야 한다</strong>. 부팅 배너에 <code>devicetree: separate</code>와 함께 "Unexpected devicetree source (not from a prior stage)" 경고가 뜨는데, 이 보드가 원래 앞 단계 DTB를 기대하기 때문이다. 실제 i.MX·TI 보드는 처음부터 <code>OF_SEPARATE</code>라 이런 경고가 없다.</p>
+<blockquote><p>실제 보드에서는: NXP·TI·Rockchip 보드의 U-Boot은 원래 control DTB를 바이너리에 붙인다(<code>u-boot-dtb.bin</code>, <code>u-boot.itb</code>). 그래서 <code>mkimage -K u-boot.dtb</code>로 키를 넣고 U-Boot을 다시 패키징하면 끝이다. SPL이 U-Boot proper를 FIT로 싣는 구조라면 SPL의 DTB에도 키를 넣어 SPL이 U-Boot FIT를 검증하게 한다(<code>CONFIG_SPL_FIT_SIGNATURE</code>).</p></blockquote>
+<hr>
+<h2 id="4-부팅하고-깨-보기-정상-1바이트-변조-남의-키-서명-없음">4. 부팅하고 깨 보기 — 정상, 1바이트 변조, 남의 키, 서명 없음<a class="anchor" href="#4-부팅하고-깨-보기-정상-1바이트-변조-남의-키-서명-없음" aria-label="link">#</a></h2>
+<h3 id="4-1-실험-장치">4.1 실험 장치<a class="anchor" href="#4-1-실험-장치" aria-label="link">#</a></h3>
+<p>FIT는 QEMU의 <code>-device loader</code>로 RAM 0x48000000에 바로 올린다(저장장치 드라이버를 빼고 검증만 보려는 것). U-Boot 프롬프트에서 <code>bootm 0x48000000</code>을 친다. 대화는 <code>expect</code>로 자동화했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 1057 -nographic -bios l5_ub_dev.bin \
+    -device loader,file=l5_good.itb,addr=0x48000000,force-raw=on
+# U-Boot 프롬프트에서:  bootm 0x48000000</code></pre></figure>
+<h3 id="4-2-코드로-확인-정상-부팅">4.2 코드로 확인 — 정상 부팅<a class="anchor" href="#4-2-코드로-확인-정상-부팅" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 서명된 FIT가 <code>required</code> 키로 검증되는 로그.</p>
+<figure class="code"><span class="lang">text</span><pre><code>=&gt; bootm 0x48000000
+## Loading kernel (any) from FIT Image at 48000000 ...
+   Using 'conf-ns' configuration
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ OK
+   Trying 'kernel-1' kernel subimage
+     Description:  Linux Image-sec
+   Verifying Hash Integrity ... sha256+ OK
+## Loading ramdisk (any) from FIT Image at 48000000 ...
+   Using 'conf-ns' configuration
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ OK
+   Trying 'ramdisk-1' ramdisk subimage
+   Verifying Hash Integrity ... sha256+ OK
+## Loading fdt (any) from FIT Image at 48000000 ...
+   Using 'conf-ns' configuration
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ OK
+   Trying 'fdt-ns' fdt subimage
+   Verifying Hash Integrity ... sha256+ OK
+   Booting using the fdt blob at 0x8058c010
+Working FDT set to 8058c010
+   Loading Kernel Image to 40400000
+   Loading Ramdisk to 7f404000, end 7f52b7e2 ... OK
+   Loading Device Tree to 000000007f3ff000, end 000000007f403c4f ... OK
+Starting kernel ...
+[    0.000000] Linux version 6.18.55-sec (donh@lima-elinux) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #1 SMP PREEMPT Sat Oct 17 21:24:20 PDT 2026
+[    0.000000] Kernel command line: console=ttyAMA0 LAB_CMD=cat~/proc/cmdline
+console=ttyAMA0 LAB_CMD=cat~/proc/cmdline
+[    8.374799] reboot: Power down</code></pre></figure>
+<p>(Image-sec로 만든 FIT의 실행 로그다. 이미지마다 찍히는 세부 항목(Created, Data Size, Hash value 등)은 지웠다. 주소는 FIT 크기에 따라 달라진다.)</p>
+<p><strong>출력에서 볼 것</strong>:</p>
+<ul><li><code>sha256,rsa2048:dev+ OK</code> = "configuration 서명을 <code>key-dev</code>로 검증 성공". <code>+</code>가 성공, <code>-</code>가 실패다. 이 줄이 <strong>이미지마다 반복</strong>된다 — <code>bootm</code>이 kernel·ramdisk·fdt를 각각 로드할 때마다 configuration 서명을 다시 확인한다.</li><li>그다음 <code>sha256+ OK</code>는 이미지 데이터의 해시 확인이다. 그림 2의 "서명 → 해시" 2단계가 그대로 보인다.</li><li>커널 cmdline은 U-Boot 환경변수가 아니라 <strong>서명된 <code>fdt-ns</code>의 <code>/chosen/bootargs</code></strong>에서 왔다(이 U-Boot에는 <code>bootargs</code> 환경변수가 없다: 첫 시험 부팅에서 <code>printenv bootargs</code> → <code>## Error: "bootargs" not defined</code>).</li></ul>
+<h3 id="4-3-코드로-확인-변조-3종">4.3 코드로 확인 — 변조 3종<a class="anchor" href="#4-3-코드로-확인-변조-3종" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: (1) 커널 데이터 1바이트 반전, (2) 같은 내용을 같은 이름(<code>dev</code>)의 <strong>다른 키</strong>로 서명, (3) 서명 노드를 아예 지운 FIT. 먼저 호스트에서 <code>fit_check_sign</code>(U-Boot의 검증 코드를 호스트용으로 빌드한 도구)으로 확인하고, 그다음 실제 U-Boot에서 부팅한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>OFF=$(./build/tools/fit_info -f l5_good.itb -n /images/kernel-1 -p data | sed -n 's/^OFF: //p')
+cp l5_good.itb l5_t1_flip.itb
+python3 -I -c 'import sys; p=int(sys.argv[2]); f=open(sys.argv[1],"r+b"); f.seek(p); b=f.read(1); f.seek(p); f.write(bytes([b[0]^0xff])); print("byte@%#x: %#04x -&gt; %#04x" % (p, b[0], b[0]^0xff))' l5_t1_flip.itb $((OFF + 0x100000))
+mkfit.sh /var/lab/out/Image-sec /var/lab/out/initramfs.cpio.gz l5_t2_evil.itb "$ARGS" -k evilkeys   # 남의 키
+sed '/signature-1 {/,/};/d' l5.its &gt; l5_unsigned.its &amp;&amp; ./build/tools/mkimage -q -f l5_unsigned.its l5_t3_unsigned.itb
+for f in l5_good l5_t1_flip l5_t2_evil l5_t3_unsigned; do echo "#### $f"
+  ./build/tools/fit_check_sign -f $f.itb -k l5_ctrl.dtb -c conf-ns 2&gt;&amp;1 | grep -E "Verif|error|fail|Fail|OK$|Sign|Bad" | head -6; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>byte@0x1000d8: 0xf3 -&gt; 0x0c
+#### l5_good
+Signature check OK
+Verifying Hash Integrity for node 'conf-ns'... sha256,rsa2048:dev+ 
+Verified OK, loading images
+#### l5_t1_flip
+Signature check bad (error 1)
+Verifying Hash Integrity for node 'conf-ns'... sha256,rsa2048:dev+ 
+Verified OK, loading images
+...
+sha256 error!
+Bad hash value for 'hash-1' hash node in 'kernel-1' image node
+Bad Data Hash
+#### l5_t2_evil
+Signature check bad (error 1)
+Verifying Hash Integrity for node 'conf-ns'... sha256,rsa2048:dev- 
+ error!
+Verification failed for 'conf-ns' config node
+Failed to verify required signature 'key-dev'
+#### l5_t3_unsigned
+Signature check bad (error 1)
+Verifying Hash Integrity for node 'conf-ns'...  error!
+Failed to verify required signature 'key-dev'</code></pre></figure>
+<p>(<code>l5_t1_flip</code>의 아래 세 줄은 같은 명령을 <code>grep -i "bad\|error"</code>로 다시 뽑은 것이다. <code>mkfit.sh</code>는 §2.3의 <code>sed</code> + <code>mkimage</code> 래퍼다.)</p>
+<p>U-Boot에서 실제로 <code>bootm</code> 했을 때:</p>
+<figure class="code"><span class="lang">text</span><pre><code>######## t1_flip
+=&gt; bootm 0x48000000
+   Using 'conf-ns' configuration
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ OK
+   Trying 'kernel-1' kernel subimage
+   Verifying Hash Integrity ... sha256 error!
+Bad hash value for 'hash-1' hash node in 'kernel-1' image node
+Bad Data Hash
+ERROR -2: can't get kernel image!
+######## t2_evil
+=&gt; bootm 0x48000000
+   Using 'conf-ns' configuration
+   Verifying Hash Integrity ... sha256,rsa2048:dev-  error!
+Verification failed for 'conf-ns' config node
+Failed to verify required signature 'key-dev'
+Bad Data Hash
+ERROR -2: can't get kernel image!
+######## t3_unsigned
+=&gt; bootm 0x48000000
+   Using 'conf-ns' configuration
+   Verifying Hash Integrity ...  error!
+No 'signature' subnode found for 'conf-ns' config node
+Failed to verify required signature 'key-dev'
+Bad Data Hash
+ERROR -2: can't get kernel image!</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>:</p>
+<ul><li><strong>1바이트 변조</strong>: 서명 검증은 <code>dev+ OK</code>로 <strong>통과</strong>하고, 그다음 데이터 해시에서 걸린다. 서명이 덮는 것은 hash 값이지 데이터가 아니기 때문이다(그림 2). 공격자가 hash 값까지 고치면? 그러면 configuration 서명이 깨진다 — 두 단계가 서로를 묶는다.</li><li><strong>남의 키</strong>: 키 이름(<code>key-name-hint = dev</code>)이 같아도 <code>dev-</code>로 실패한다. 이름은 "어느 키로 검증해 볼지"의 힌트일 뿐, 검증은 control DTB 안의 modulus로 한다.</li><li><strong>서명 없음</strong>: <code>required = conf</code> 덕분에 "서명이 없다"가 곧 "부팅 거부"다. <code>required</code>를 빼고 키만 넣었다면 이 FIT는 해시 확인만 하고 부팅된다 — 양산 빌드에서 가장 흔한 실수 중 하나다.</li><li>실패 후 U-Boot은 <code>=&gt;</code> 프롬프트로 돌아간다. 이것이 다음 절의 문제다.</li></ul>
+<hr>
+<h2 id="5-체인이-옆에서-끊기는-곳-mix-and-match-환경변수-서명-없는-부트-명령">5. 체인이 "옆에서" 끊기는 곳 — mix-and-match, 환경변수, 서명 없는 부트 명령<a class="anchor" href="#5-체인이-옆에서-끊기는-곳-mix-and-match-환경변수-서명-없는-부트-명령" aria-label="link">#</a></h2>
+<h3 id="5-1-mix-and-match-공격-왜-configuration에-서명하나">5.1 mix-and-match 공격 — 왜 configuration에 서명하나<a class="anchor" href="#5-1-mix-and-match-공격-왜-configuration에-서명하나" aria-label="link">#</a></h3>
+<p>이미지마다 따로 서명하는 방식(<code>required = "image"</code>, 이미지 노드 안에 <code>signature-1</code>)도 U-Boot이 지원한다. 문제는 <strong>각 이미지는 진짜인데 조합이 가짜</strong>인 경우를 못 막는다는 것이다. 예를 들어:</p>
+<ul><li>하나의 FIT에 여러 보드용 DT를 넣는 경우가 흔하다. 그중에 실험실 보드용 디버그 DT(<code>bootargs</code>에 디버그 셸, <code>init=/bin/sh</code> 같은 것)가 섞여 있으면, 공격자는 configuration의 <code>fdt = "fdt-prod"</code>를 <code>"fdt-dbg"</code>로 문자열 하나만 바꾼다.</li><li>옛 릴리스 FIT의 커널(서명된 진짜, 하지만 취약점 있음)을 새 릴리스의 DT·initramfs와 섞는다.</li></ul>
+<p>이미지별 서명이면 셋 다 "서명이 맞다". configuration 서명이면 configuration 노드 자체(어떤 이름을 고르는지)가 서명 안에 있으므로 조합을 바꾸는 순간 깨진다.</p>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+  <rect x="10" y="10" width="320" height="340" rx="6" fill="#d0564a" fill-opacity="0.06" stroke="#d0564a"/>
+  <text x="170" y="34" text-anchor="middle" font-size="13">이미지별 서명 (required = image)</text>
+  <rect x="25" y="50" width="135" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="92" y="70" text-anchor="middle" font-size="12">kernel-1 + 서명</text>
+  <rect x="175" y="50" width="140" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="245" y="70" text-anchor="middle" font-size="12">ramdisk-1 + 서명</text>
+  <rect x="25" y="90" width="135" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="92" y="110" text-anchor="middle" font-size="12">fdt-prod + 서명</text>
+  <rect x="175" y="90" width="140" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="245" y="110" text-anchor="middle" font-size="12">fdt-dbg + 서명</text>
+  <rect x="25" y="140" width="290" height="60" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="170" y="162" text-anchor="middle" font-size="12">conf-prod (서명 없음)</text>
+  <text x="170" y="184" text-anchor="middle" font-size="12">fdt = "fdt-prod" → "fdt-dbg" 로 수정</text>
+  <rect x="25" y="220" width="290" height="110" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="170" y="245" text-anchor="middle" font-size="12">U-Boot: 이미지 3개 각각 서명 OK</text>
+  <text x="170" y="268" text-anchor="middle" font-size="12">→ 아무도 의도하지 않은 조합이</text>
+  <text x="170" y="291" text-anchor="middle" font-size="12">부팅됨: "MIXED: lab debug fdt"</text>
+  <text x="170" y="314" text-anchor="middle" font-size="12">(§5.2 실측)</text>
+  <rect x="350" y="10" width="320" height="340" rx="6" fill="#3f9a6b" fill-opacity="0.06" stroke="#3f9a6b"/>
+  <text x="510" y="34" text-anchor="middle" font-size="13">configuration 서명 (required = conf)</text>
+  <rect x="365" y="50" width="290" height="70" rx="4" fill="#4a7bd0" fill-opacity="0.08" stroke="#4a7bd0"/>
+  <text x="510" y="75" text-anchor="middle" font-size="12">이미지들: hash-1만 (서명 없음)</text>
+  <text x="510" y="98" text-anchor="middle" font-size="12">kernel · ramdisk · fdt-prod · fdt-dbg</text>
+  <rect x="365" y="140" width="290" height="60" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="510" y="162" text-anchor="middle" font-size="12">conf-prod + 서명: 고른 이름과</text>
+  <text x="510" y="184" text-anchor="middle" font-size="12">그 이미지들의 hash 값을 함께 서명</text>
+  <rect x="365" y="220" width="290" height="110" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="510" y="245" text-anchor="middle" font-size="12">fdt 이름 하나만 바꿔도</text>
+  <text x="510" y="268" text-anchor="middle" font-size="12">conf 서명 영역이 달라짐</text>
+  <text x="510" y="291" text-anchor="middle" font-size="12">→ "Failed to verify required</text>
+  <text x="510" y="314" text-anchor="middle" font-size="12">signature 'key-dev'" 부팅 거부</text>
+</svg></figure>
+<p>그림 3 — mix-and-match. 왼쪽은 "부품 하나하나에 정품 스티커"이고 오른쪽은 "완성품 조립도에 서명"이다. 조립도에 서명해야 부품 바꿔치기가 막힌다.</p>
+<h3 id="5-2-코드로-확인-같은-공격-두-방식">5.2 코드로 확인 — 같은 공격, 두 방식<a class="anchor" href="#5-2-코드로-확인-같은-공격-두-방식" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 같은 FIT 구조(kernel, ramdisk, fdt-prod, fdt-dbg; configuration은 conf-prod 하나)를 (a) 이미지별 서명, (b) configuration 서명으로 만든다. 공격자는 <code>fdtput</code>으로 <code>conf-prod</code>의 <code>fdt</code> 값만 바꾼다. (a)용 U-Boot은 <code>required = image</code>인 control DTB로 따로 빌드했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>./build/tools/mkimage -q -f l5_mix_img.its  -k keys -K l5_ctrl_img.dtb -r l5_mix_img.itb    # 이미지별 서명
+./build/tools/mkimage -q -f l5_mix_conf.its -k keys l5_mix_conf.itb                        # conf 서명
+fdtget l5_ctrl_img.dtb /signature/key-dev required; fdtget l5_ctrl.dtb /signature/key-dev required
+for m in img conf; do cp l5_mix_$m.itb l5_mix_${m}_attack.itb
+  fdtput -t s l5_mix_${m}_attack.itb /configurations/conf-prod fdt fdt-dbg
+  echo "== $m: conf-prod fdt is now: $(fdtget l5_mix_${m}_attack.itb /configurations/conf-prod fdt)"; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>image
+conf
+== img: conf-prod fdt is now: fdt-dbg
+== conf: conf-prod fdt is now: fdt-dbg</code></pre></figure>
+<p>(a) 이미지별 서명 U-Boot(<code>l5_ub_img.bin</code>)에서 공격 FIT 부팅:</p>
+<figure class="code"><span class="lang">text</span><pre><code>=&gt; bootm 0x48000000
+   Using 'conf-prod' configuration
+   Verifying Hash Integrity ... OK
+   Trying 'kernel-1' kernel subimage
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ sha256+ OK
+   Using 'conf-prod' configuration
+   Verifying Hash Integrity ... OK
+   Trying 'ramdisk-1' ramdisk subimage
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ sha256+ OK
+   Using 'conf-prod' configuration
+   Verifying Hash Integrity ... OK
+   Trying 'fdt-dbg' fdt subimage
+     Description:  lab-only DT: debug bootargs
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ sha256+ OK
+Starting kernel ...
+[    0.000000] Kernel command line: console=ttyAMA0 LAB_CMD=echo~MIXED:~lab~debug~fdt~booted
+MIXED: lab debug fdt booted</code></pre></figure>
+<p>(b) configuration 서명 U-Boot(<code>l5_ub_dev.bin</code>)에서 같은 공격:</p>
+<figure class="code"><span class="lang">text</span><pre><code>=&gt; bootm 0x48000000
+   Using 'conf-prod' configuration
+   Verifying Hash Integrity ... sha256,rsa2048:dev-  error!
+Verification failed for 'conf-prod' config node
+Failed to verify required signature 'key-dev'
+Bad Data Hash
+ERROR -2: can't get kernel image!</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: (a)에서 configuration 줄은 <code>Verifying Hash Integrity ... OK</code>뿐이다 — 서명할 게 없으니 "검사할 것 없음 = OK"다. 이미지마다 <code>sha256,rsa2048:dev+</code>로 서명이 맞으니 <strong>디버그 DT가 그대로 부팅됐다</strong>. (b)는 configuration 단계에서 바로 거부한다. U-Boot 문서(<code>doc/usage/fit/signature.rst</code>)가 configuration 서명을 권장하는 이유가 이것이고, 2021년 U-Boot에서 FIT 서명 우회 CVE들(CVE-2021-27097, CVE-2021-27138 — 노드 이름의 unit address와 hashed-nodes 처리를 악용)이 고쳐진 뒤로 <code>CONFIG_FIT_FULL_CHECK</code>(이 빌드에서 <code>=y</code>)가 FIT 구조를 더 엄격히 검사한다(CVE 세부는 기억 기반 — 원문 확인 권장).</p>
+<h3 id="5-3-코드로-확인-환경변수로-cmdline-바꾸기">5.3 코드로 확인 — 환경변수로 cmdline 바꾸기<a class="anchor" href="#5-3-코드로-확인-환경변수로-cmdline-바꾸기" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 서명된 DT의 <code>/chosen/bootargs</code>는 U-Boot 환경변수 <code>bootargs</code>가 있으면 덮어써진다(<code>boot/fdt_support.c</code>의 <code>fdt_chosen()</code> → <code>board_fdt_chosen_bootargs()</code> → <code>env_get("bootargs")</code>). 개발용 U-Boot은 플래시에 쓸 수 있는 환경을 갖고 있다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>=&gt; setenv bootargs console=ttyAMA0 LAB_CMD=echo~HIJACKED~cmdline~from~env
+=&gt; bootm 0x48000000
+   Using 'conf-ns' configuration
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ OK
+   ...
+   Verifying Hash Integrity ... sha256+ OK
+Starting kernel ...
+[    0.000000] Kernel command line: console=ttyAMA0 LAB_CMD=echo~HIJACKED~cmdline~from~env
+HIJACKED cmdline from env</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: <strong>모든 서명 검증이 통과한 상태에서</strong> cmdline이 바뀌었다. 실제 공격이라면 <code>init=/bin/sh</code>, dm-verity root hash 바꾸기, <code>module.sig_enforce=0</code>(기본값이면 효과 없음), <code>lockdown=none</code> 등을 넣는다. 환경은 플래시의 평문 블록(C3)이라 장비를 떼어서도 바꿀 수 있다. <strong>cmdline은 이미지의 일부</strong>로 다뤄야 한다.</p>
+<h3 id="5-4-코드로-확인-서명-없는-부트-명령-booti">5.4 코드로 확인 — 서명 없는 부트 명령 <code>booti</code><a class="anchor" href="#5-4-코드로-확인-서명-없는-부트-명령-booti" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: <code>bootm</code>만 서명을 확인한다. <code>booti</code>(raw arm64 <code>Image</code>), <code>bootz</code>, legacy uImage, <code>bootefi</code>, <code>go</code>는 검증 없이 점프한다. FIT 안의 커널 데이터를 꺼내 <code>booti</code>로 바로 부팅해 본다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>=&gt; setenv bootargs console=ttyAMA0 LAB_CMD=echo~UNVERIFIED~kernel~via~booti
+=&gt; cp.b 0x480000d8 0x40400000 0x33a4000
+=&gt; booti 0x40400000 0x4b3a8a24:0x1277e2 ${fdtcontroladdr}
+## Flattened Device Tree blob at 8054c760
+   Booting using the fdt blob at 0x8054c760
+   Loading Ramdisk to 7f404000, end 7f52b7e2 ... OK
+   Loading Device Tree to 000000007f3fe000, end 000000007f40360e ... OK
+Starting kernel ...
+[    0.000000] Kernel command line: console=ttyAMA0 LAB_CMD=echo~UNVERIFIED~kernel~via~booti
+UNVERIFIED kernel via booti</code></pre></figure>
+<p>(커널 데이터 오프셋 216=0xd8, 길이 54,151,680=0x33a4000, ramdisk 오프셋 54,168,100은 <code>fit_info -p data</code>로 얻었다. <code>0x480000d8</code>에서 바로 <code>booti</code>하면 정렬을 맞추려 옮긴 커널이 ramdisk 자리를 덮을 수 있어 먼저 <code>cp.b</code>로 0x40400000에 복사했다.)</p>
+<p><strong>출력에서 볼 것</strong>: 검증 줄이 하나도 없다. 프롬프트를 얻은 사람은 TFTP·USB·<code>loady</code>로 아무 커널이나 올려서 이렇게 부팅할 수 있다. 즉 <strong>U-Boot 프롬프트 = 체인의 끝</strong>이다.</p>
+<h3 id="5-5-코드로-확인-잠근-production-u-boot">5.5 코드로 확인 — 잠근(production) U-Boot<a class="anchor" href="#5-5-코드로-확인-잠근-production-u-boot" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 위 세 구멍(프롬프트, 쓰기 가능한 환경, 검증 없는 부트 명령)을 닫은 설정. 부팅 실패 시에도 프롬프트로 떨어지지 않게 <code>bootcmd</code> 끝에 <code>poweroff</code>를 둔다(실제 제품은 <code>reset</code>이나 복구 슬롯).</p>
+<figure class="code"><span class="lang">text</span><pre><code># prod.frag
+# CONFIG_OF_BOARD is not set
+CONFIG_OF_SEPARATE=y
+# CONFIG_OF_OMIT_DTB is not set
+CONFIG_BOOTDELAY=-2
+CONFIG_ENV_IS_NOWHERE=y
+# CONFIG_ENV_IS_IN_FLASH is not set
+# CONFIG_LEGACY_IMAGE_FORMAT is not set
+# CONFIG_CMD_BOOTI is not set
+# CONFIG_CMD_BOOTZ is not set
+# CONFIG_CMD_BOOTEFI is not set
+CONFIG_USE_BOOTCOMMAND=y
+CONFIG_BOOTCOMMAND="bootm 0x48000000; poweroff"</code></pre></figure>
+<p><code>expect</code> 스크립트는 U-Boot 배너가 나오자마자 스페이스·Ctrl-C·Enter를 계속 보내 프롬프트를 얻으려 한다. 정상 FIT와 1바이트 변조 FIT:</p>
+<figure class="code"><span class="lang">text</span><pre><code>#### l5_prod_good
+U-Boot 2026.10 (Oct 17 2026 - 21:20:38 -0700)
+Loading Environment from nowhere...Loading Environment from nowhere... OK
+## Loading kernel (any) from FIT Image at 48000000 ...
+   Using 'conf-ns' configuration
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ OK
+   Verifying Hash Integrity ... sha256+ OK
+   ...
+   Loading Kernel Image to 40400000
+[    0.000000] Kernel command line: console=ttyAMA0 LAB_CMD=cat~/proc/cmdline
+#### l5_prod_t1_flip
+U-Boot 2026.10 (Oct 17 2026 - 21:20:38 -0700)
+Loading Environment from nowhere...Loading Environment from nowhere... OK
+## Loading kernel (any) from FIT Image at 48000000 ...
+   Using 'conf-ns' configuration
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ OK
+   Verifying Hash Integrity ... sha256 error!
+Bad hash value for 'hash-1' hash node in 'kernel-1' image node
+Bad Data Hash
+ERROR -2: can't get kernel image!
+poweroff ...</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>:</p>
+<ul><li><code>Hit any key to stop autoboot</code> 줄이 없다(<code>BOOTDELAY=-2</code> = 기다리지도, 키를 확인하지도 않음). 키를 두드려도 <code>=&gt;</code>가 한 번도 나오지 않았다(스크립트가 프롬프트를 봤다면 <code>*** GOT A PROMPT ***</code>를 찍게 했다).</li><li><code>Loading Environment from nowhere</code> = 컴파일된 기본 환경만 쓴다. 기본 환경에 <code>bootargs</code>가 없으므로 cmdline은 서명된 DT에서만 온다.</li><li>실패하면 프롬프트 대신 <code>poweroff</code>. 크기도 줄었다: dev 1,513,903 → prod 1,231,999바이트(EFI 로더 등 제거). 공격 표면이 곧 코드 크기다.</li></ul>
+<p>남는 숙제(실행 안 함, 가이드): 실제 제품은 여기에 더해 <code>CONFIG_SILENT_CONSOLE</code>이나 콘솔 입력 비활성, <code>CONFIG_AUTOBOOT_KEYED</code> + 암호(서비스용 백도어가 필요하면 최소한 서명된 토큰), 네트워크·USB 명령 제거(<code>CMD_NET</code>, <code>CMD_USB</code>, <code>CMD_DFU</code>), <code>CONFIG_CMD_FDT</code> 제거, 그리고 DT·스크립트를 고르는 로직을 전부 컴파일 시점으로 옮긴다. 환경이 꼭 필요하면(A/B 슬롯 번호, bootcount — L4) <code>CONFIG_ENV_WRITEABLE_LIST</code> + <code>CONFIG_ENV_FLAGS_LIST_STATIC</code>로 <strong>쓸 수 있는 변수만 화이트리스트</strong>한다.</p>
+<figure class="chart"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="15" width="380" height="36" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="210" y="38" text-anchor="middle" font-size="13">bootm addr#conf (bootcmd 고정)</text>
+  <rect x="20" y="80" width="380" height="50" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="210" y="101" text-anchor="middle" font-size="12">1. required 키로 configuration 서명 검증</text>
+  <text x="210" y="120" text-anchor="middle" font-size="12">(hashed-nodes 영역, data 속성 제외)</text>
+  <rect x="20" y="160" width="380" height="50" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="210" y="181" text-anchor="middle" font-size="12">2. 이미지 data의 sha256 = hash-1 값?</text>
+  <text x="210" y="200" text-anchor="middle" font-size="12">(kernel · ramdisk · fdt 각각, 1이 매번 반복)</text>
+  <rect x="20" y="240" width="380" height="50" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="210" y="261" text-anchor="middle" font-size="12">3. 로드 → fdt_chosen(): /chosen/bootargs</text>
+  <text x="210" y="280" text-anchor="middle" font-size="12">env bootargs가 있으면 여기서 덮어씀 (§5.3)</text>
+  <rect x="20" y="320" width="380" height="36" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="210" y="343" text-anchor="middle" font-size="13">4. Starting kernel ...</text>
+  <rect x="440" y="80" width="225" height="50" rx="5" fill="#d0564a" fill-opacity="0.06" stroke="#d0564a" stroke-dasharray="5 3"/>
+  <text x="552" y="101" text-anchor="middle" font-size="12">Failed to verify required</text>
+  <text x="552" y="120" text-anchor="middle" font-size="12">signature 'key-dev'</text>
+  <rect x="440" y="160" width="225" height="50" rx="5" fill="#d0564a" fill-opacity="0.06" stroke="#d0564a" stroke-dasharray="5 3"/>
+  <text x="552" y="181" text-anchor="middle" font-size="12">Bad hash value for 'hash-1'</text>
+  <text x="552" y="200" text-anchor="middle" font-size="12">→ Bad Data Hash</text>
+  <rect x="440" y="240" width="225" height="70" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="552" y="262" text-anchor="middle" font-size="12">실패 시 다음 명령:</text>
+  <text x="552" y="282" text-anchor="middle" font-size="12">dev: =&gt; 프롬프트 (구멍)</text>
+  <text x="552" y="302" text-anchor="middle" font-size="12">prod: poweroff / reset</text>
+  <rect x="20" y="375" width="645" height="36" rx="5" fill="#d0564a" fill-opacity="0.06" stroke="#d0564a"/>
+  <text x="342" y="398" text-anchor="middle" font-size="12">옆길: booti · bootz · bootefi · go · legacy uImage = 검증 없음 → prod에서 명령 자체를 뺀다</text>
+  <line x1="210" y1="51" x2="210" y2="78" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="210" y1="130" x2="210" y2="158" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="210" y1="210" x2="210" y2="238" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="210" y1="290" x2="210" y2="318" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="400" y1="105" x2="438" y2="105" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="400" y1="185" x2="438" y2="185" stroke="currentColor" marker-end="url(#ah3)"/>
+  <line x1="552" y1="210" x2="552" y2="238" stroke="currentColor" marker-end="url(#ah3)"/>
+</svg></figure>
+<p>그림 4 — <code>bootm</code>의 검증 흐름과 실패 경로. 검증 자체보다 "실패한 다음 무엇이 실행되나"와 "검증을 안 거치는 옆길"이 실제 구멍이 된다.</p>
+<hr>
+<h2 id="6-전체-체인-tf-a-tbb가-공개키가-든-u-boot-을-검증한다">6. 전체 체인 — TF-A TBB가 "공개키가 든 U-Boot"을 검증한다<a class="anchor" href="#6-전체-체인-tf-a-tbb가-공개키가-든-u-boot-을-검증한다" aria-label="link">#</a></h2>
+<h3 id="6-1-무엇을-연결하나">6.1 무엇을 연결하나<a class="anchor" href="#6-1-무엇을-연결하나" aria-label="link">#</a></h3>
+<p>C5 §7에서 TF-A Trusted Board Boot(TBB)를 만들고 깨 봤다. 그때 BL33은 랩의 일반 U-Boot이었다. 이번에는 BL33 자리에 <strong>§5.5의 잠근 U-Boot</strong>(control DTB에 FIT 공개키, <code>required = conf</code>, TF-A용 DT로 다시 뜬 것)을 넣는다. 그러면:</p>
+<ol><li>BL1이 ROTPK 해시(qemu에서는 BL1에 박힌 값, 실제 칩에서는 fuse)로 BL2 인증서를 검증한다.</li><li>BL2가 NT FW content 인증서 안의 <strong>BL33 해시</strong>로 U-Boot 바이너리 전체 = 코드 + 공개키를 검증한다.</li><li>U-Boot이 그 공개키로 FIT configuration을 검증한다.</li><li>커널은 FIT 안의 서명된 DT에서 cmdline을 받는다.</li></ol>
+<h3 id="6-2-코드로-확인-빌드">6.2 코드로 확인 — 빌드<a class="anchor" href="#6-2-코드로-확인-빌드" aria-label="link">#</a></h3>
+<p>Mbed TLS는 TF-A v2.15 <code>include/drivers/auth/mbedtls/default_mbedtls_config.h</code>가 요구하는 <code>MBEDTLS_CONFIG_VERSION 0x03060600</code>(= 3.6.6)에 맞췄다(TF-A changelog에도 "update mbedTLS to version 3.6.6"). 다운로드 후 GitHub 릴리스 노트의 SHA-256과 대조했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>curl -sfL -o dl/mbedtls-3.6.6.tar.bz2 https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.6/mbedtls-3.6.6.tar.bz2
+sha256sum dl/mbedtls-3.6.6.tar.bz2
+curl -sfL https://api.github.com/repos/Mbed-TLS/mbedtls/releases/tags/mbedtls-3.6.6 | grep -o "[0-9a-f]\{64\}[^\"]\{0,40\}" | grep tar.bz2
+make -j2 CROSS_COMPILE=aarch64-linux-gnu- PLAT=qemu DEBUG=1 LOG_LEVEL=40 \
+  BL33=/var/tmp/L5/l5_ub_prod_s.bin TRUSTED_BOARD_BOOT=1 GENERATE_COT=1 \
+  MBEDTLS_DIR=/var/tmp/L5/mbedtls BUILD_BASE=/var/tmp/L5/tbb all fip</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>8fb65fae8dcae5840f793c0a334860a411f884cc537ea290ce1c52bb64ca007a  dl/mbedtls-3.6.6.tar.bz2
+8fb65fae8dcae5840f793c0a334860a411f884cc537ea290ce1c52bb64ca007a mbedtls-3.6.6.tar.bz2
+...
+NOTICE:  Creating new key for 'Trusted World key'
+NOTICE:  Creating new key for 'Non Trusted World key'
+...
+Non-Trusted Firmware BL33: offset=0x22DE7, size=0x12CA78, cmdline="--nt-fw"
+...
+Non-Trusted Firmware content certificate: offset=0x15113F, size=0x448, cmdline="--nt-fw-cert"
+Built /var/tmp/L5/tbb/qemu/debug/fip.bin successfully</code></pre></figure>
+<p>(빌드 로그는 NOTICE·<code>cmdline=</code> 줄만 남겼다. 전체 키·인증서 목록은 C5 §7.3과 같다.)</p>
+<p><strong>출력에서 볼 것</strong>: BL33 크기 <code>0x12CA78</code> = 1,231,480바이트 = TF-A용 잠근 U-Boot(<code>l5_ub_prod_s.bin</code>) 크기와 정확히 같다. 인증서 안의 해시와 실제 파일 해시를 대조해 보자.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>sha256sum l5_ub_prod_s.bin
+openssl asn1parse -inform DER -in tbb/qemu/debug/nt_fw_content.crt | grep -A2 "2100.1201" | tail -1 | grep -o "HEX DUMP.*"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>98912705886cee59a22d9033364d7dc4dafb795003fcdb63eb9963966a0b7d7e  l5_ub_prod_s.bin
+HEX DUMP]:3031300D06096086480165030402010500042098912705886CEE59A22D9033364D7DC4DAFB795003FCDB63EB9963966A0B7D7E</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: OID <code>...2100.1201</code>(BL33 해시 칸, C5 §7.5)의 DigestInfo 뒤 32바이트가 U-Boot 파일의 SHA-256과 같다. 이 32바이트에 FIT 공개키(<code>rsa,modulus</code>)가 포함돼 있으므로, <strong>공개키를 바꾸면 이 해시가 바뀐다</strong>.</p>
+<h3 id="6-3-코드로-확인-전체-체인-부팅">6.3 코드로 확인 — 전체 체인 부팅<a class="anchor" href="#6-3-코드로-확인-전체-체인-부팅" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>qemu-system-aarch64 -machine virt,secure=on -cpu cortex-a57 -m 1057 -nographic \
+  -bios tbb/qemu/debug/qemu_fw.bios -device loader,file=l5_good.itb,addr=0x48000000,force-raw=on</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>NOTICE:  Booting Trusted Firmware
+NOTICE:  BL1: v2.15.0(debug):
+INFO:    Using crypto library 'mbed TLS'
+INFO:    BL1: Loading BL2
+INFO:    Loading image id=6 at address 0xe05b000
+INFO:    Loading image id=1 at address 0xe05b000
+NOTICE:  BL1: Booting BL2
+NOTICE:  BL2: v2.15.0(debug):
+INFO:    BL2: Loading image id 3
+INFO:    Loading image id=7 at address 0xe090000
+INFO:    Loading image id=9 at address 0xe090000
+INFO:    Loading image id=13 at address 0xe090000
+INFO:    Loading image id=3 at address 0xe090000
+INFO:    BL2: Loading image id 5
+INFO:    Loading image id=11 at address 0x60000000
+INFO:    Loading image id=15 at address 0x60000000
+INFO:    Loading image id=5 at address 0x60000000
+INFO:    Image id=5 loaded: 0x60000000 - 0x6012ca78
+NOTICE:  BL1: Booting BL31
+NOTICE:  BL31: v2.15.0(debug):
+INFO:    BL31: Preparing for EL3 exit to normal world
+INFO:    Entry point address = 0x60000000
+U-Boot 2026.10 (Oct 17 2026 - 21:21:41 -0700)
+Core:  51 devices, 14 uclasses, devicetree: separate
+Loading Environment from nowhere...Loading Environment from nowhere... OK
+## Loading kernel (any) from FIT Image at 48000000 ...
+   Using 'conf-s' configuration
+   Verifying Hash Integrity ... sha256,rsa2048:dev+ OK
+   Verifying Hash Integrity ... sha256+ OK
+   ...
+[    0.000000] Linux version 6.18.55-sec (donh@lima-elinux) ...
+[    0.000000] psci: PSCIv1.1 detected in firmware.
+[    0.000000] Kernel command line: console=ttyAMA0 LAB_CMD=cat~/proc/cmdline
+console=ttyAMA0 LAB_CMD=cat~/proc/cmdline
+[    7.887430] reboot: Power down</code></pre></figure>
+<p>(Image-sec FIT로 돌린 실행이다. BL31 errata 줄, <code>Image id=N loaded</code> 줄 대부분, U-Boot 이미지 세부를 줄였다.)</p>
+<p><strong>출력에서 볼 것</strong>: <code>id=6 → 1</code>(BL2 인증서 → BL2), <code>7 → 9 → 13 → 3</code>(BL31), <code>11 → 15 → 5</code>(BL33 = 우리 U-Boot)가 C5 §7.4와 같은 순서로 지나가고, 그 U-Boot이 <code>conf-s</code>를 <code>dev+</code>로 검증한다. 커널은 <code>psci: PSCIv1.1 detected in firmware</code> — TF-A의 PSCI를 <code>smc</code>로 쓴다(서명된 <code>fdt-s</code>에 넣은 <code>/psci</code> 노드 덕분, §2.3). <strong>ROM 대용 BL1부터 커널 cmdline까지 끊김 없는 체인</strong>이다.</p>
+<h3 id="6-4-코드로-확인-공격자가-자기-공개키를-넣은-u-boot-으로-바꿔치기">6.4 코드로 확인 — 공격자가 "자기 공개키를 넣은 U-Boot"으로 바꿔치기<a class="anchor" href="#6-4-코드로-확인-공격자가-자기-공개키를-넣은-u-boot-으로-바꿔치기" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 공격자가 FIT 검증을 통과하는 가장 쉬운 방법은 U-Boot의 공개키를 자기 것으로 바꾸는 것이다. 같은 U-Boot 코드(<code>u-boot-nodtb.bin</code>)에 공격자 키가 든 control DTB를 붙이고 FIP의 BL33만 바꾼다(인증서는 그대로).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cp l5_s.dtb l5_ctrl_evil.dtb
+./build/tools/fdt_add_pubkey -a sha256,rsa2048 -k evilkeys -n dev -r conf l5_ctrl_evil.dtb
+cat build-prod/u-boot-nodtb.bin l5_ctrl_evil.dtb &gt; l5_ub_evil.bin
+cp tbb/qemu/debug/fip.bin chain_evil/fip.bin
+tbb/qemu/debug/tools/fiptool/fiptool update --nt-fw l5_ub_evil.bin chain_evil/fip.bin
+cp tbb/qemu/debug/bl1.bin chain_evil/bios.bin &amp;&amp; truncate -s 256K chain_evil/bios.bin &amp;&amp; cat chain_evil/fip.bin &gt;&gt; chain_evil/bios.bin
+qemu-system-aarch64 -machine virt,secure=on -cpu cortex-a57 -m 1057 -nographic -bios chain_evil/bios.bin \
+  -device loader,file=l5_t2_evil.itb,addr=0x48000000,force-raw=on</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>INFO:    BL2: Loading image id 5
+INFO:    Loading image id=11 at address 0x60000000
+INFO:    Image id=11 loaded: 0x60000000 - 0x600004f2
+INFO:    Loading image id=15 at address 0x60000000
+INFO:    Image id=15 loaded: 0x60000000 - 0x60000448
+INFO:    Loading image id=5 at address 0x60000000
+INFO:    Image id=5 loaded: 0x60000000 - 0x6012ca78
+ERROR:   BL2: Failed to load image id 5 (-80)</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: <code>fdt_add_pubkey</code>(U-Boot 도구 — 서명 없이 공개키만 DTB에 넣는다)로 만든 가짜 U-Boot은 BL2에서 <code>-80</code>(<code>EAUTH</code>)으로 거부된다. 공격자 키로 서명한 FIT(<code>l5_t2_evil.itb</code>)는 실행될 기회조차 없다. <strong>U-Boot의 FIT 서명 검증이 의미가 있으려면 U-Boot 자체가 앞 단계에서 검증돼야 한다</strong> — 이 한 줄이 "chain"의 뜻이다.</p>
+<blockquote><p>남는 틈(실무): <code>fdtcontroladdr</code>가 가리키는 control DTB는 U-Boot이 relocation 뒤 RAM에 복사한다. 부팅 중 RAM을 바꿀 수 있는 공격자(JTAG, DMA 가능한 외부 장치)는 여기서도 이긴다. 그래서 JTAG 잠금(§9.4)과 IOMMU/외부 DMA 차단이 같이 간다.</p></blockquote>
+<hr>
+<h2 id="7-커널-다음-고리-모듈-서명과-lockdown">7. 커널 다음 고리 — 모듈 서명과 lockdown<a class="anchor" href="#7-커널-다음-고리-모듈-서명과-lockdown" aria-label="link">#</a></h2>
+<h3 id="7-1-직관-커널도-부트로더처럼-다음-코드-ko-를-검증한다">7.1 직관 — "커널도 부트로더처럼 다음 코드(.ko)를 검증한다"<a class="anchor" href="#7-1-직관-커널도-부트로더처럼-다음-코드-ko-를-검증한다" aria-label="link">#</a></h3>
+<p>커널이 서명돼 있어도 <code>insmod</code>로 아무 <code>.ko</code>나 넣을 수 있으면 커널 권한 코드가 체인 밖에서 들어온다. 그래서 커널은 모듈 끝에 붙은 PKCS#7 서명을 <strong>커널 안에 컴파일된 인증서(.builtin_trusted_keys keyring)</strong>로 검증한다. 공개키 위치만 다를 뿐 U-Boot의 control DTB와 같은 구조다.</p>
+<figure class="code"><pre><code> .ko file layout with CONFIG_MODULE_SIG (scripts/sign-file appends):
+ +-------------------------+
+ | ELF module (.text ...)  |
+ +-------------------------+
+ | PKCS#7 signature (DER)  |   signer, key id, sha256 of the ELF part
+ +-------------------------+
+ | struct module_signature |   12 bytes: algo, hash, id_type=PKEY_ID_PKCS7, sig_len (BE)
+ +-------------------------+
+ | "~Module signature appended~\n"   (28-byte magic)
+ +-------------------------+</code></pre></figure>
+<h3 id="7-2-image-sec의-설정">7.2 Image-sec의 설정<a class="anchor" href="#7-2-image-sec의-설정" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>grep -E "MODULE_SIG|LOCK_DOWN|SECURITY_LOCKDOWN" /var/lab/out/linux-build-sec/.config</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>CONFIG_MODULE_SIG_FORMAT=y
+CONFIG_MODULE_SIG=y
+# CONFIG_MODULE_SIG_FORCE is not set
+CONFIG_MODULE_SIG_ALL=y
+# CONFIG_MODULE_SIG_SHA1 is not set
+CONFIG_MODULE_SIG_SHA256=y
+...
+CONFIG_MODULE_SIG_HASH="sha256"
+CONFIG_SECURITY_LOCKDOWN_LSM=y
+# CONFIG_SECURITY_LOCKDOWN_LSM_EARLY is not set
+CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y</code></pre></figure>
+<ul><li><code>MODULE_SIG=y</code>: 서명 검증 코드가 들어가고, 실패하면 <strong>taint만</strong> 한다(허용).</li><li><code>MODULE_SIG_ALL=y</code>: <code>make modules_install</code> 때 트리 안 모듈을 자동 서명한다. 키는 <code>CONFIG_MODULE_SIG_KEY</code>(기본 <code>certs/signing_key.pem</code>) — 설정하지 않으면 빌드가 <strong>임시 키를 자동 생성</strong>한다("Build time autogenerated kernel key").</li><li><code>MODULE_SIG_FORCE=y</code>면 무서명 모듈을 거부한다. 지금은 꺼져 있으니 부팅 인자 <code>module.sig_enforce=1</code>로 같은 효과를 낸다.</li></ul>
+<h3 id="7-3-코드로-확인-모듈-세-개-만들고-서명하기">7.3 코드로 확인 — 모듈 세 개 만들고 서명하기<a class="anchor" href="#7-3-코드로-확인-모듈-세-개-만들고-서명하기" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 같은 소스를 이름만 바꿔 세 번 빌드한다 — 빌드 키로 서명(<code>l5_signed</code>), 공격자 키로 서명(<code>l5_badkey</code>), 서명 없음(<code>l5_unsigned</code>).</p>
+<figure class="code"><span class="lang">c</span><pre><code>// l5 module-signing demo: same code is built three times under three names
+#include &lt;linux/module.h&gt;
+#include &lt;linux/init.h&gt;
+
+static int __init l5_init(void)
+{
+	pr_info("%s: loaded\n", KBUILD_MODNAME);
+	return 0;
+}
+
+static void __exit l5_exit(void)
+{
+	pr_info("%s: unloaded\n", KBUILD_MODNAME);
+}
+
+module_init(l5_init);
+module_exit(l5_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("L5 module signature demo");</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code># Makefile: obj-m := l5_signed.o l5_unsigned.o l5_badkey.o
+B=/var/lab/out/linux-build-sec
+make -C $B M=$PWD modules
+openssl req -batch -new -nodes -utf8 -sha256 -days 365 -x509 -newkey rsa:2048 \
+  -subj "/CN=L5 attacker module key" -keyout evil_mod.pem -out evil_mod.x509 -outform DER
+$B/scripts/sign-file sha256 $B/certs/signing_key.pem $B/certs/signing_key.x509 l5_signed.ko
+$B/scripts/sign-file sha256 evil_mod.pem evil_mod.x509 l5_badkey.ko
+tail -c 28 l5_signed.ko | xxd
+for m in l5_signed l5_badkey l5_unsigned; do echo "== modinfo $m"
+  modinfo $m.ko | grep -E "^(vermagic|sig_id|signer|sig_key|sig_hashalgo)"; done
+openssl x509 -in $B/certs/signing_key.x509 -inform DER -noout -subject -serial</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>  LD [M]  l5_signed.ko
+  LD [M]  l5_unsigned.ko
+  LD [M]  l5_badkey.ko
+00000000: 7e4d 6f64 756c 6520 7369 676e 6174 7572  ~Module signatur
+00000010: 6520 6170 7065 6e64 6564 7e0a            e appended~.
+== modinfo l5_signed
+vermagic:       6.18.55-sec SMP preempt mod_unload aarch64
+sig_id:         PKCS#7
+signer:         Build time autogenerated kernel key
+sig_key:        16:42:28:DD:9B:66:95:89:BD:25:DB:A6:D1:F6:62:DE:3E:DF:D1:8B
+sig_hashalgo:   sha256
+== modinfo l5_badkey
+vermagic:       6.18.55-sec SMP preempt mod_unload aarch64
+sig_id:         PKCS#7
+signer:         L5 attacker module key
+sig_key:        24:8E:25:AA:E8:1D:3D:6B:06:10:EC:19:1A:5A:40:23:42:75:69:46
+sig_hashalgo:   sha256
+== modinfo l5_unsigned
+vermagic:       6.18.55-sec SMP preempt mod_unload aarch64
+subject=CN=Build time autogenerated kernel key
+serial=164228DD9B669589BD25DBA6D1F662DE3EDFD18B</code></pre></figure>
+<p><strong>출력에서 볼 것</strong>: 파일 끝 28바이트가 매직 문자열이다. <code>modinfo</code>의 <code>sig_key</code>는 인증서의 serial(<code>164228DD...</code>)과 같다. <code>modinfo</code>는 서명을 <strong>검증하지 않는다</strong> — 그냥 붙은 정보를 읽을 뿐이라 공격자 키 모듈도 똑같이 보인다. 판단은 커널이 한다.</p>
+<h3 id="7-4-코드로-확인-세-가지-정책에서-insmod">7.4 코드로 확인 — 세 가지 정책에서 insmod<a class="anchor" href="#7-4-코드로-확인-세-가지-정책에서-insmod" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: 같은 initramfs(BusyBox)로 cmdline만 바꿔 세 번 부팅해 세 모듈을 차례로 넣는다. 게스트 안 스크립트는 <code>insmod</code> 결과, <code>/sys/module/&lt;m&gt;/taint</code>, <code>/proc/sys/kernel/tainted</code>, dmesg를 찍는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>for extra in "" "module.sig_enforce=1" "lockdown=integrity"; do
+  timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 1G -nographic -kernel /var/lab/out/Image-sec \
+    -initrd l5_mod_initrd.gz -append "console=ttyAMA0 quiet $extra LAB_CMD=sh~/l5_mod.sh" &lt; /dev/null
+done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>################ (기본: sig_enforce 없음)
+== sig_enforce: N
+[    3.607260] Loaded X.509 cert 'Build time autogenerated kernel key: 85c6473a51c5bcc330718d3beec0caf69ab654e2'
+-- insmod l5_signed.ko
+   ok, /sys/module/l5_signed/taint=[O]
+-- insmod l5_badkey.ko
+   ok, /sys/module/l5_badkey/taint=[OE]
+-- insmod l5_unsigned.ko
+   ok, /sys/module/l5_unsigned/taint=[OE]
+== tainted=12288
+[    4.501781] l5_signed: loading out-of-tree module taints kernel.
+[    4.610123] l5_badkey: module verification failed: signature and/or required key missing - tainting kernel
+################ module.sig_enforce=1
+== sig_enforce: Y
+-- insmod l5_signed.ko
+   ok, /sys/module/l5_signed/taint=[O]
+-- insmod l5_badkey.ko
+insmod: can't insert '/l5_badkey.ko': Key was rejected by service
+-- insmod l5_unsigned.ko
+insmod: can't insert '/l5_unsigned.ko': Key was rejected by service
+== tainted=4096
+################ lockdown=integrity
+== lockdown: none [integrity] confidentiality
+== sig_enforce: N
+-- insmod l5_signed.ko
+   ok, /sys/module/l5_signed/taint=[O]
+-- insmod l5_badkey.ko
+insmod: can't insert '/l5_badkey.ko': Operation not permitted
+-- insmod l5_unsigned.ko
+insmod: can't insert '/l5_unsigned.ko': Operation not permitted
+== tainted=4096
+[    0.010571] LSM: initializing lsm=capability,landlock,lockdown,yama,apparmor,bpf,ima,evm
+[    3.319382] Lockdown: insmod: unsigned module loading is restricted; see man kernel_lockdown.7</code></pre></figure>
+<p>(세 번의 부팅 출력에서 cmdline 줄과 반복되는 <code>loaded</code> 줄을 줄였다. 첫 <code>lockdown</code> 실행은 securityfs를 마운트하지 않아 <code>n/a</code>였고, 마운트를 추가해 다시 돌린 결과를 실었다.)</p>
+<p><strong>출력에서 볼 것</strong>:</p>
+<ul><li><strong>기본</strong>: 셋 다 들어간다. 공격자 키 모듈과 무서명 모듈은 <code>E</code>(TAINT_UNSIGNED_MODULE, bit 13 = 8192) taint를 얻고, out-of-tree라 <code>O</code>(bit 12 = 4096)도 붙는다. 12288 = 8192 + 4096. "module verification failed" 메시지는 <strong>첫 번째로 실패한 모듈에서 한 번만</strong> 찍힌다(<code>l5_unsigned</code> 때는 안 찍혔다) — 로그만 보고 판단하면 놓친다. taint 비트 의미는 K7 참고.</li><li><strong><code>module.sig_enforce=1</code></strong>: 서명이 맞는 것만 들어간다. 무서명도 남의 키도 <code>Key was rejected by service</code>(<code>EKEYREJECTED</code>)다. tainted=4096(O만).</li><li><strong><code>lockdown=integrity</code></strong>: <code>sig_enforce</code>가 N인데도 거부된다. 커널의 모듈 로더가 서명 검증에 실패하면 <code>security_locked_down(LOCKDOWN_MODULE_SIGNATURE)</code>을 묻고, lockdown LSM이 거부한다(<code>EPERM</code>). lockdown은 모듈만이 아니라 <code>/dev/mem</code>, kexec 무서명 커널, hibernation(로그의 "hibernation is restricted"), 일부 debugfs·BPF 기능까지 닫는 "커널 무결성 모드"다.</li><li>실무 결론: 양산 커널은 <code>CONFIG_MODULE_SIG_FORCE=y</code>(cmdline에 의존하지 않음) + 필요하면 <code>CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y</code>. cmdline에 의존하는 보안 설정은 §5.3처럼 cmdline이 서명 안에 있을 때만 의미가 있다.</li></ul>
+<h3 id="7-5-모듈-키-관리-자동-생성-키의-함정">7.5 모듈 키 관리 — 자동 생성 키의 함정<a class="anchor" href="#7-5-모듈-키-관리-자동-생성-키의-함정" aria-label="link">#</a></h3>
+<ul><li>빌드마다 키가 새로 생기면, <strong>같은 커널 버전의 다음 빌드 모듈을 이 커널에 넣을 수 없다</strong>(키가 다르다). out-of-tree 드라이버(벤더 Wi-Fi, GPU)를 따로 빌드하는 팀은 반드시 고정 키(<code>CONFIG_MODULE_SIG_KEY="pkcs11:..."</code> 또는 파일)를 쓰고, 빌드 서버 밖으로 개인키가 나가지 않게 한다.</li><li>반대로 모든 모듈이 커널과 한 번에 빌드되는 제품이라면 <strong>자동 생성 키를 빌드 직후 버리는 것</strong>이 오히려 가장 안전하다(아무도 새 모듈을 서명할 수 없다). 개인키 <code>certs/signing_key.pem</code>이 빌드 산출물 디렉터리에 남는다는 점(이 랩에서도 <code>-rw-------</code>로 남아 있다)을 잊지 말 것 — 산출물을 통째로 보관·공유하면 키도 같이 나간다.</li><li>추가 키는 <code>CONFIG_SYSTEM_TRUSTED_KEYS</code>(PEM 파일)로 빌드 때 넣는다. 런타임에 keyring에 키를 더하는 경로(<code>CONFIG_SECONDARY_TRUSTED_KEYRING</code>)는 그 키도 이미 신뢰된 키로 서명돼 있어야 한다.</li></ul>
+<hr>
+<h2 id="8-secure-boot-vs-measured-boot-tpm-pcr-맛보기">8. Secure boot vs measured boot — TPM PCR 맛보기<a class="anchor" href="#8-secure-boot-vs-measured-boot-tpm-pcr-맛보기" aria-label="link">#</a></h2>
+<h3 id="8-1-직관">8.1 직관<a class="anchor" href="#8-1-직관" aria-label="link">#</a></h3>
+<ul><li><strong>Secure boot(verified boot)</strong>: 각 단계가 다음 단계를 <strong>검증하고, 틀리면 멈춘다</strong>. 판단은 장비 안에서, 부팅 중에 한다.</li><li><strong>Measured boot</strong>: 각 단계가 다음 단계의 해시를 TPM의 PCR(Platform Configuration Register)에 <strong>기록(extend)만 하고 계속 간다</strong>. PCR은 덮어쓸 수 없고 <code>PCR_new = H(PCR_old || H(data))</code>로만 바뀐다 — 해시 체인이라 순서까지 기록된다. 판단은 나중에 한다: 원격 서버가 서명된 PCR 값(quote)을 보고 판단하거나(remote attestation), TPM이 "PCR이 이 값일 때만" 디스크 키를 풀어 준다(sealing).</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="20" y="28" font-size="13">Secure boot: 검증하고 틀리면 멈춘다</text>
+  <rect x="20" y="40" width="130" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="85" y="65" text-anchor="middle" font-size="12">ROM / BL2</text>
+  <rect x="190" y="40" width="130" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="255" y="65" text-anchor="middle" font-size="12">U-Boot</text>
+  <rect x="360" y="40" width="130" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="425" y="65" text-anchor="middle" font-size="12">kernel</text>
+  <rect x="530" y="40" width="130" height="40" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="595" y="65" text-anchor="middle" font-size="12">틀리면 정지</text>
+  <line x1="150" y1="60" x2="188" y2="60" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="320" y1="60" x2="358" y2="60" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="490" y1="60" x2="528" y2="60" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah4)"/>
+  <text x="20" y="128" font-size="13">Measured boot: 기록만 하고 계속 간다 (판단은 나중에)</text>
+  <rect x="20" y="140" width="130" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="85" y="165" text-anchor="middle" font-size="12">ROM / BL2</text>
+  <rect x="190" y="140" width="130" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="255" y="165" text-anchor="middle" font-size="12">U-Boot</text>
+  <rect x="360" y="140" width="130" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="425" y="165" text-anchor="middle" font-size="12">kernel · IMA</text>
+  <line x1="150" y1="160" x2="188" y2="160" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="320" y1="160" x2="358" y2="160" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="20" y="215" width="470" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="255" y="240" text-anchor="middle" font-size="12">TPM PCR: new = H(old || H(다음 단계))  + 이벤트 로그</text>
+  <line x1="85" y1="180" x2="85" y2="213" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="255" y1="180" x2="255" y2="213" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="425" y1="180" x2="425" y2="213" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="530" y="140" width="130" height="50" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="595" y="161" text-anchor="middle" font-size="12">원격 검증자</text>
+  <text x="595" y="179" text-anchor="middle" font-size="12">(quote 확인)</text>
+  <rect x="530" y="215" width="130" height="50" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="595" y="236" text-anchor="middle" font-size="12">sealing: PCR이</text>
+  <text x="595" y="254" text-anchor="middle" font-size="12">맞을 때만 키 해제</text>
+  <line x1="490" y1="235" x2="528" y2="235" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="490" y1="225" x2="528" y2="170" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="20" y="300" font-size="12">둘은 경쟁이 아니라 보완: secure boot = 실행 차단, measured boot = 증거와 비밀 보호</text>
+</svg></figure>
+<p>그림 5 — 두 방식의 차이. 국방·차량 장비는 보통 둘 다 쓴다: 부팅은 secure boot로 막고, 디스크 키는 measured boot의 PCR에 묶어(sealing) "변조된 상태로는 데이터도 못 연다"를 만든다. TPM 깊이(seal/unseal, attestation, IMA 정책)는 L6에서 다룬다.</p>
+<h3 id="8-2-코드로-확인-swtpm-게스트의-tpm2-tools">8.2 코드로 확인 — swtpm + 게스트의 tpm2-tools<a class="anchor" href="#8-2-코드로-확인-swtpm-게스트의-tpm2-tools" aria-label="link">#</a></h3>
+<p><strong>무엇을 확인하나</strong>: QEMU에 소프트웨어 TPM 2.0(swtpm)을 붙여 Image-sec + systemd rootfs(<code>rootfs-sysd.ext4</code> 사본)를 부팅하고, 게스트 안에서 PCR을 읽고, 직접 extend한 값이 공식과 맞는지 계산으로 검증한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>swtpm socket --tpm2 --tpmstate dir=/var/tmp/L5/tpmstate --ctrl type=unixio,path=/var/tmp/L5/l5_swtpm.sock \
+   --daemon --pid file=/var/tmp/L5/l5_swtpm.pid --log file=/var/tmp/L5/l5_swtpm.log
+qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -m 1G -nographic -kernel /var/lab/out/Image-sec \
+  -drive file=l5_root.ext4,if=virtio,format=raw \
+  -chardev socket,id=chrtpm,path=/var/tmp/L5/l5_swtpm.sock -tpmdev emulator,id=tpm0,chardev=chrtpm \
+  -device tpm-tis-device,tpmdev=tpm0 \
+  -append "console=ttyAMA0 root=/dev/vda rw rootwait systemd.unit=multi-user.target"</code></pre></figure>
+<p>게스트(root 자동 로그인) 안에서:</p>
+<figure class="code"><span class="lang">text</span><pre><code># dmesg | grep -i tpm | head -5
+[    5.077185] tpm_tis c000000.tpm_tis: 2.0 TPM (device-id 0x1, rev-id 1)
+[    5.081785] tpm tpm0: A TPM error (256) occurred attempting the self test
+[    5.081988] tpm tpm0: starting up the TPM manually
+# tpm2_pcrread sha256:0,7,10,16
+  sha256:
+    0 : 0x0000000000000000000000000000000000000000000000000000000000000000
+    7 : 0x0000000000000000000000000000000000000000000000000000000000000000
+    10: 0x627A1AF4FDEE36BB9A9D759A3153C0D566DA327DA0EA9FE60C2E1A94219CEA4B
+    16: 0x0000000000000000000000000000000000000000000000000000000000000000
+# head -1 /sys/kernel/security/ima/ascii_runtime_measurements
+10 ddee6004dc3bd4ee300406cd93181c5a2187b59b ima-ng sha1:9797edf8d0eed36b1cf92547816051c8af4e45ee boot_aggregate
+# echo -n l5-app-v1.2.3 | sha256sum
+e503e1b0adbee8c393d050c753b9c231ea889335644774315d523f1e0b2f3a81  -
+# tpm2_pcrextend 16:sha256=$(echo -n l5-app-v1.2.3 | sha256sum | cut -d' ' -f1)
+# tpm2_pcrread sha256:16
+  sha256:
+    16: 0x078D7DAB63AD1473510D5993AC387908B875587B4685DA157474394BEF94C475
+# python3 -c "import hashlib;print(hashlib.sha256(bytes(32)+hashlib.sha256(b'l5-app-v1.2.3').digest()).hexdigest())"
+078d7dab63ad1473510d5993ac387908b875587b4685da157474394bef94c475
+# tpm2_pcrreset 16 &amp;&amp; tpm2_pcrread sha256:16
+  sha256:
+    16: 0x0000000000000000000000000000000000000000000000000000000000000000
+# tpm2_pcrreset 7; echo rc=$?
+...
+ERROR: Esys_PCR_Reset(0x907) - tpm:warn(2.0): bad locality
+ERROR: Could not reset PCR index: 7
+rc=1</code></pre></figure>
+<p>(TCG에서 systemd 이미지 부팅부터 종료까지 약 6분 50초가 걸렸다 — VM에 다른 작업이 동시에 돌던 상황의 에뮬레이션 수치다. <code>tpm2_pcrreset 7</code>의 tss2 WARNING/ERROR 줄 두 개를 줄였다.)</p>
+<p><strong>출력에서 볼 것</strong>:</p>
+<ul><li>커널이 <code>tpm_tis</code>로 TPM을 찾고, 펌웨어가 <code>TPM2_Startup</code>을 안 했으므로 직접 시작했다("starting up the TPM manually"). 실제 measured boot라면 펌웨어가 Startup을 하고 측정을 시작했어야 한다.</li><li><strong>PCR 0~7이 전부 0이다.</strong> <code>-kernel</code>로 바로 부팅해서 펌웨어 단계를 아무도 측정하지 않았기 때문이다. measured boot는 "TPM이 있다"가 아니라 <strong>"각 단계가 다음 단계를 측정했다"</strong>여야 의미가 있다. U-Boot은 <code>CONFIG_MEASURED_BOOT</code>로 <code>bootm</code> 때 커널·initrd·bootargs를 PCR에 측정하고 이벤트 로그를 DT로 넘길 수 있다(<code>doc/usage/measured_boot.rst</code> — 이 노트에서는 실행하지 않았다, 가이드).</li><li><strong>PCR 10</strong>은 IMA가 쓴 값이다. Image-sec는 IMA가 켜져 있어(기본 정책 없음) 첫 항목 <code>boot_aggregate</code>(부트 PCR들의 요약 — 지금은 다 0)만 extend했다(<code>CONFIG_IMA_MEASURE_PCR_IDX=10</code>). IMA 정책과 appraise는 L6.</li><li>PCR 16을 extend한 결과가 <code>sha256(32바이트 0 || sha256("l5-app-v1.2.3"))</code>와 <strong>정확히 같다</strong> — 그림 5의 공식이 실제 TPM 동작이다.</li><li>PCR 16(디버그 PCR)은 리셋되지만 PCR 7은 <code>bad locality</code>로 거부된다. 부트 단계용 PCR은 OS가 지울 수 없어야 증거가 된다(PCR 0~15는 재부팅해야만 0이 된다).</li></ul>
+<hr>
+<h2 id="9-키-관리-진짜-어려운-부분">9. 키 관리 — 진짜 어려운 부분<a class="anchor" href="#9-키-관리-진짜-어려운-부분" aria-label="link">#</a></h2>
+<h3 id="9-1-키-계층-한-키로-다-서명하지-않는다">9.1 키 계층 — 한 키로 다 서명하지 않는다<a class="anchor" href="#9-1-키-계층-한-키로-다-서명하지-않는다" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="170" y="15" width="340" height="50" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="340" y="37" text-anchor="middle" font-size="13">Root key (오프라인 HSM, 금고)</text>
+  <text x="340" y="55" text-anchor="middle" font-size="12">공개키 해시 → 칩 fuse, 수명 동안 고정</text>
+  <rect x="20" y="105" width="200" height="50" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="120" y="127" text-anchor="middle" font-size="12">Trusted World key</text>
+  <text x="120" y="145" text-anchor="middle" font-size="12">BL31 · OP-TEE 서명</text>
+  <rect x="240" y="105" width="200" height="50" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="127" text-anchor="middle" font-size="12">Non-Trusted World key</text>
+  <text x="340" y="145" text-anchor="middle" font-size="12">BL33 (U-Boot) 서명</text>
+  <rect x="460" y="105" width="200" height="50" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="560" y="127" text-anchor="middle" font-size="12">예비 슬롯 (revocation용)</text>
+  <text x="560" y="145" text-anchor="middle" font-size="12">NXP SRK 4개 중 3개 등</text>
+  <rect x="240" y="195" width="200" height="50" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="217" text-anchor="middle" font-size="12">FIT signing key</text>
+  <text x="340" y="235" text-anchor="middle" font-size="12">공개키는 U-Boot DTB 안</text>
+  <rect x="20" y="285" width="200" height="50" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="120" y="307" text-anchor="middle" font-size="12">kernel module key</text>
+  <text x="120" y="325" text-anchor="middle" font-size="12">인증서는 커널 안 (§7)</text>
+  <rect x="240" y="285" width="200" height="50" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="340" y="307" text-anchor="middle" font-size="12">verity root hash</text>
+  <text x="340" y="325" text-anchor="middle" font-size="12">서명된 DT/cmdline 안 (L6)</text>
+  <rect x="460" y="285" width="200" height="50" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="560" y="307" text-anchor="middle" font-size="12">OTA bundle key</text>
+  <text x="560" y="325" text-anchor="middle" font-size="12">RAUC/SWUpdate 검증 (L4)</text>
+  <rect x="20" y="355" width="640" height="36" rx="5" fill="#888" fill-opacity="0.06" stroke="#888" stroke-dasharray="5 3"/>
+  <text x="340" y="378" text-anchor="middle" font-size="12">CI → 서명 서버(PKCS#11) → HSM: 사람과 CI는 서명을 "요청"만 하고 개인키를 꺼낼 수 없다</text>
+  <line x1="280" y1="65" x2="130" y2="103" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="340" y1="65" x2="340" y2="103" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="400" y1="65" x2="550" y2="103" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah5)"/>
+  <line x1="340" y1="155" x2="340" y2="193" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="300" y1="245" x2="130" y2="283" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="340" y1="245" x2="340" y2="283" stroke="currentColor" marker-end="url(#ah5)"/>
+  <line x1="380" y1="245" x2="550" y2="283" stroke="currentColor" marker-end="url(#ah5)"/>
+</svg></figure>
+<p>그림 6 — 키 계층의 예. 화살표는 "이 키(또는 그 키로 서명된 이미지)가 다음 키를 담거나 보증한다". 위로 갈수록 바꾸기 어렵고 드물게 쓰며, 아래로 갈수록 자주 쓰고 바꾸기 쉽다. FIT 키는 U-Boot 안에 있으므로 "U-Boot을 새로 서명해 배포"하면 교체할 수 있다. 모듈 키·OTA 키도 같은 원리로 그 키를 담은 상위 이미지를 갱신하면 바뀐다.</p>
+<p>원칙:</p>
+<ul><li><strong>단계마다 다른 키</strong>: TBBR이 ROT·TW·NTW·content 키를 나누는 이유(C5 §7.2)와 같다. U-Boot 팀의 키가 새도 BL31은 안전하고, FIT 키가 새도 U-Boot 업데이트로 교체할 수 있다.</li><li><strong>개인키는 HSM 안에서만 쓴다</strong>: mkimage는 <code>-N pkcs11</code>로 PKCS#11 엔진을 통해 HSM의 키로 서명할 수 있다(<code>doc/usage/fit/signature.rst</code>의 PKCS#11 절). TF-A <code>cert_create</code>는 <code>--key-alg</code>, 키 파일 인자로 외부 키를 받는다(<code>ROT_KEY=</code>, <code>TRUSTED_WORLD_KEY=</code>, <code>NON_TRUSTED_WORLD_KEY=</code> make 변수). 커널은 <code>CONFIG_MODULE_SIG_KEY</code>에 <code>pkcs11:</code> URI를 받는다.</li><li><strong>서명 서버 + 감사 로그</strong>: 누가 어떤 커밋의 어떤 이미지를 언제 서명했는지 기록. 양산 키 서명은 2인 승인(two-person rule).</li><li><strong>dev 키와 prod 키를 분리</strong>: 개발 보드는 fuse를 안 태우거나 dev 키 해시로 태운다. prod 키로 서명된 이미지는 릴리스 파이프라인에서만 나온다. dev 키로 서명된 이미지가 prod 장비에서 부팅되면 안 된다(그래서 해시가 달라야 한다).</li><li><strong>키 길이·알고리즘은 ROM이 정한다</strong>: 부트 ROM이 지원하는 알고리즘(RSA-2048/3072/4096, ECDSA P-256/P-384)이 바닥이다. 후단(U-Boot, 커널)은 바꿀 수 있지만 ROM은 못 바꾼다.</li></ul>
+<h3 id="9-2-키-유출-무엇을-하나">9.2 키 유출 — 무엇을 하나<a class="anchor" href="#9-2-키-유출-무엇을-하나" aria-label="link">#</a></h3>
+<p>"Signing key leaked — what now?"의 답은 <strong>어느 키가 샜느냐</strong>에 따라 다르다. 그래서 계층이 중요하다.</p>
+<div class="tw"><table><thead><tr><th>샌 키</th><th>공격자가 할 수 있는 것</th><th>대응</th></tr></thead><tbody><tr><td>OTA 번들 키 (L4)</td><td>원격 업데이트로 악성 이미지 배포(단, 그 안의 부트 이미지는 아래 키로 또 검증됨)</td><td>서버 측 차단, 새 키를 담은 업데이트 배포, 옛 키 폐기</td></tr><tr><td>FIT 서명 키</td><td>자기 커널·initramfs를 부팅</td><td>새 FIT 키를 담은 U-Boot을 NTW 키로 서명해 배포 + U-Boot 롤백 방지 카운터 올리기</td></tr><tr><td>NTW/TW 키 (TBBR)</td><td>자기 U-Boot/BL31</td><td>ROT 키로 새 Trusted Key 인증서 발급 + NV counter 올리기</td></tr><tr><td>ROT 키 (fuse 해시)</td><td>모든 것</td><td>revocation 슬롯이 있으면 다음 키로 전환(NXP SRK revoke, Xilinx SPK ID 등), 없으면 <strong>현장 장비는 영구히 신뢰 불가</strong> → 리콜·교체</td></tr></tbody></table></div>
+<p>공통 절차: (1) 범위 확인 — 어느 키, 언제부터, 무엇이 그 키로 서명됐나(감사 로그). (2) 새 키로 서명한 이미지를 <strong>옛 키로도 검증되는 경로</strong>로 먼저 배포(아직 옛 키를 믿는 장비가 새 키를 받아야 하니까). (3) 장비가 새 이미지로 부팅에 성공한 뒤 옛 키를 폐기(fuse revoke, 카운터 증가). 순서를 틀리면 장비가 벽돌이 된다. (4) 유출 원인 제거 — 그래서 처음부터 HSM이다.</p>
+<h3 id="9-3-롤백-방지-서명만으로는-옛-버전을-못-막는다">9.3 롤백 방지 — 서명만으로는 옛 버전을 못 막는다<a class="anchor" href="#9-3-롤백-방지-서명만으로는-옛-버전을-못-막는다" aria-label="link">#</a></h3>
+<ul><li>TF-A: 인증서의 NV counter ≥ OTP 카운터여야 통과(C5 §7.7에서 실측).</li><li>U-Boot FIT: 이 트리(U-Boot 2026.10)의 <code>boot/</code>에서 "rollback"을 grep하면 VBE의 "eventually provide rollback protection" 주석뿐이다 — <strong>mainline FIT에는 커널 이미지용 표준 anti-rollback이 없다</strong>. 그래서 실무 설계는: (a) U-Boot은 TF-A NV counter로 롤백을 막고, (b) 커널 FIT의 "보안 버전"은 FIT 안의 서명된 속성으로 넣고 보드 코드가 RPMB·TPM NV counter·OTP와 비교하는 식으로 만든다(벤더 BSP에 따라 다르다).</li><li>OTA와의 충돌: 새 이미지로 첫 부팅하자마자 카운터를 올리면 B 슬롯(옛 버전)으로 되돌아갈 수 없다. <strong>"새 슬롯이 정상 확인(commit)된 뒤에만 카운터를 올린다"</strong>가 정석이다(L4의 bootcount·commit과 같이 설계).</li></ul>
+<h3 id="9-4-공장-fuse-공정과-디버그-포트">9.4 공장 — fuse 공정과 디버그 포트<a class="anchor" href="#9-4-공장-fuse-공정과-디버그-포트" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="15" width="400" height="44" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="220" y="42" text-anchor="middle" font-size="12">1. 빈 칩: open 상태, 아무 이미지나 부팅</text>
+  <rect x="20" y="80" width="400" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="220" y="107" text-anchor="middle" font-size="12">2. prod 키로 서명한 이미지 flash</text>
+  <rect x="20" y="145" width="400" height="44" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="220" y="172" text-anchor="middle" font-size="12">3. 키 해시 fuse 쓰기 (SRK / PKC / ROTPK 해시)</text>
+  <rect x="20" y="210" width="400" height="44" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="220" y="237" text-anchor="middle" font-size="12">4. open 상태로 재부팅: 검증 이벤트 0개 확인</text>
+  <rect x="20" y="275" width="400" height="44" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="220" y="302" text-anchor="middle" font-size="12">5. lock fuse: secure boot 강제 (closed)</text>
+  <rect x="20" y="340" width="400" height="44" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="220" y="367" text-anchor="middle" font-size="12">6. JTAG 차단 · fuse 쓰기 잠금 → 출하</text>
+  <line x1="220" y1="59" x2="220" y2="78" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="220" y1="124" x2="220" y2="143" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="220" y1="189" x2="220" y2="208" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="220" y1="254" x2="220" y2="273" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="220" y1="319" x2="220" y2="338" stroke="currentColor" marker-end="url(#ah6)"/>
+  <rect x="440" y="145" width="225" height="44" rx="5" fill="#888" fill-opacity="0.06" stroke="#888" stroke-dasharray="5 3"/>
+  <text x="552" y="164" text-anchor="middle" font-size="12">되돌릴 수 없음</text>
+  <text x="552" y="181" text-anchor="middle" font-size="12">(OTP: 0 → 1만 가능)</text>
+  <rect x="440" y="210" width="225" height="44" rx="5" fill="#888" fill-opacity="0.06" stroke="#888" stroke-dasharray="5 3"/>
+  <text x="552" y="229" text-anchor="middle" font-size="12">이벤트가 있으면 여기서</text>
+  <text x="552" y="246" text-anchor="middle" font-size="12">멈추고 원인 분석</text>
+  <rect x="440" y="275" width="225" height="44" rx="5" fill="#d0564a" fill-opacity="0.06" stroke="#d0564a" stroke-dasharray="5 3"/>
+  <text x="552" y="294" text-anchor="middle" font-size="12">이미지가 틀리면</text>
+  <text x="552" y="311" text-anchor="middle" font-size="12">이 순간부터 벽돌</text>
+  <text x="20" y="408" font-size="12">공정 스테이션은 각 단계 결과(fuse 값, 검증 로그)를 장비 시리얼과 함께 기록한다</text>
+</svg></figure>
+<p>그림 7 — 양산 fuse 공정의 일반형. 칩 벤더마다 이름은 다르지만 "키 해시 쓰기 → open 상태에서 검증 확인 → lock"의 3박자는 같다. 4단계를 건너뛰는 것이 가장 비싼 실수다.</p>
+<ul><li>4단계가 핵심이다. NXP HAB은 open 상태에서도 검증을 수행하고 결과를 이벤트로 남긴다(U-Boot <code>hab_status</code>). 이벤트 0개를 확인한 뒤에만 <code>SEC_CONFIG</code>(closed) fuse를 태운다. 다른 벤더도 "검증은 하되 강제하지 않는 모드"가 있다(기억 기반 — 칩별 보안 레퍼런스 매뉴얼 확인).</li><li><strong>JTAG</strong>: secure boot가 닫혀도 JTAG이 열려 있으면 부팅 후 CPU를 멈추고 메모리·레지스터를 바꿀 수 있다. 선택지는 (a) fuse로 완전 비활성, (b) 인증 디버그(challenge-response, 칩별 secure JTAG), (c) 장비별로 다른 키로 잠그고 RMA 때만 서명된 토큰으로 연다. Don이 Apple에서 JTAG으로 bring-up하던 감각 그대로, <strong>양산 칩에서 JTAG이 닫혔는지 실제로 붙여서 확인</strong>하는 단계가 공정에 있어야 한다.</li><li>UART 콘솔도 디버그 포트다: §5.5처럼 U-Boot 입력을 막고, 커널 콘솔·getty도 제품 빌드에서 끄거나 인증을 건다.</li></ul>
+<h3 id="9-5-벤더-구현-비교-기억-기반-각-soc-보안-매뉴얼로-확인할-것">9.5 벤더 구현 비교 (기억 기반 — 각 SoC 보안 매뉴얼로 확인할 것)<a class="anchor" href="#9-5-벤더-구현-비교-기억-기반-각-soc-보안-매뉴얼로-확인할-것" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>SoC 계열</th><th>ROM 검증 이름</th><th>키 · fuse</th><th>서명 도구</th><th>특징</th></tr></thead><tbody><tr><td>NXP i.MX6/7/8M</td><td>HAB (High Assurance Boot)</td><td>SRK 테이블(최대 4개)의 해시를 fuse, SRK_REVOKE로 폐기</td><td>CST (Code Signing Tool), CSF</td><td>open 상태에서 <code>hab_status</code>로 이벤트 확인 후 closed</td></tr><tr><td>NXP i.MX8/8X/8ULP/9</td><td>AHAB (Advanced HAB, SECO/ELE)</td><td>SRK 해시 fuse, container 헤더</td><td>CST (AHAB 모드)</td><td>이미지를 container 형식으로, <code>ahab_status</code></td></tr><tr><td>TI K3 (AM62x, AM64x, J7)</td><td>HS 장치 ROM (HS-FS → HS-SE)</td><td>SMPK/BMPK 해시를 OTP(keywriter)</td><td>이미지 앞 X.509 인증서 (TI 스크립트/binman)</td><td>GP/HS-FS/HS-SE 장치 등급, TIFS 보안 펌웨어</td></tr><tr><td>NVIDIA Jetson (Orin 등)</td><td>BootROM + MB1</td><td>PKC(공개키 해시) + SBK(AES 암호화 키) fuse</td><td><code>odmfuse.sh</code>, <code>flash.sh</code>에 키 전달</td><td>서명과 암호화를 같이, fuse 후 서명 없는 flash 불가</td></tr><tr><td>Rockchip (RK35xx)</td><td>BootROM secure boot</td><td>OTP/eFuse에 RSA 공개키 해시</td><td><code>rk_sign_tool</code>, U-Boot SPL FIT 서명</td><td>SPL이 U-Boot·TF-A FIT를 검증</td></tr><tr><td>Xilinx Zynq US+ / Versal</td><td>CSU/PMC BootROM</td><td>PPK 해시 eFuse, SPK ID로 폐기</td><td><code>bootgen</code> (.bif)</td><td>PPK→SPK 2단 키, AES(eFuse/BBRAM) 암호화 옵션</td></tr></tbody></table></div>
+<p>공통 패턴: <strong>ROM이 공개키 해시(fuse)로 첫 이미지를 검증 → 그 뒤는 TF-A/U-Boot/커널의 표준 메커니즘</strong>. 그래서 이 노트에서 QEMU로 해 본 TBB·FIT·모듈 서명은 어떤 SoC에서도 그대로 쓰이고, 벤더마다 달라지는 것은 맨 앞 한 고리와 fuse 공정이다.</p>
+<hr>
+<h2 id="10-커널-안에서는-무슨-일이-일어나나">10. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#10-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<p>secure boot의 대부분은 커널 <strong>이전</strong>에 일어나지만, 커널은 체인을 이어받아 런타임까지 늘린다.</p>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="15" width="300" height="40" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="170" y="40" text-anchor="middle" font-size="12">insmod → finit_module(fd) syscall</text>
+  <rect x="20" y="80" width="300" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="105" text-anchor="middle" font-size="12">load_module() → module_sig_check()</text>
+  <rect x="20" y="145" width="300" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="170" text-anchor="middle" font-size="12">mod_verify_sig() → PKCS#7 검증</text>
+  <rect x="20" y="210" width="300" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="170" y="235" text-anchor="middle" font-size="12">.builtin_trusted_keys (빌드 시 인증서)</text>
+  <rect x="360" y="80" width="300" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="510" y="105" text-anchor="middle" font-size="12">실패 + sig_enforce → EKEYREJECTED</text>
+  <rect x="360" y="145" width="300" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="510" y="170" text-anchor="middle" font-size="12">실패 + lockdown → EPERM</text>
+  <rect x="360" y="210" width="300" height="40" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="235" text-anchor="middle" font-size="12">실패 + 허용 → TAINT_UNSIGNED_MODULE (E)</text>
+  <rect x="20" y="285" width="640" height="56" rx="5" fill="#d0564a" fill-opacity="0.06" stroke="#d0564a" stroke-dasharray="5 3"/>
+  <text x="340" y="307" text-anchor="middle" font-size="12">같은 keyring을 쓰는 곳: kexec_file_load(서명 커널), IMA appraise, dm-verity 서명 root hash,</text>
+  <text x="340" y="327" text-anchor="middle" font-size="12">PKCS#7 펌웨어 서명 — "커널이 믿는 공개키 목록"은 하나다 (L6)</text>
+  <line x1="170" y1="55" x2="170" y2="78" stroke="currentColor" marker-end="url(#ah7)"/>
+  <line x1="170" y1="120" x2="170" y2="143" stroke="currentColor" marker-end="url(#ah7)"/>
+  <line x1="170" y1="185" x2="170" y2="208" stroke="currentColor" marker-end="url(#ah7)"/>
+  <line x1="320" y1="100" x2="358" y2="100" stroke="currentColor" marker-end="url(#ah7)"/>
+  <line x1="320" y1="165" x2="358" y2="165" stroke="currentColor" marker-end="url(#ah7)"/>
+  <line x1="320" y1="230" x2="358" y2="230" stroke="currentColor" marker-end="url(#ah7)"/>
+</svg></figure>
+<p>그림 8 — 모듈 서명 검증 경로(6.x 커널 기준 함수 이름, <code>kernel/module/signing.c</code>, <code>kernel/module/main.c</code>, <code>certs/system_keyring.c</code>).</p>
+<ul><li><code>module_sig_check()</code>(<code>kernel/module/signing.c</code>)는 모듈 끝의 매직 문자열을 찾고, 있으면 <code>mod_verify_sig()</code>가 <code>struct module_signature</code>를 읽어 PKCS#7 검증(<code>verify_pkcs7_signature()</code>)을 부른다. 결과가 서명 없음(<code>-ENODATA</code>, "unsigned module"), keyring에 없는 키(<code>-ENOKEY</code>, "module with unavailable key" — 공격자 키 모듈이 여기다), 지원 안 되는 암호(<code>-ENOPKG</code>)이면 "봐줄 수 있는 실패"로 분류하고, 그 밖의 에러(파싱 불가 서명, 키는 있는데 서명 불일치 등)는 정책과 무관하게 바로 거부한다. 봐줄 수 있는 실패일 때 <code>is_module_sig_enforced()</code>면 "Loading of %s is rejected"를 찍고 <strong>항상 <code>-EKEYREJECTED</code></strong>를 돌려주고(그래서 §7.4에서 두 모듈 모두 <code>Key was rejected by service</code>), 아니면 <code>security_locked_down(LOCKDOWN_MODULE_SIGNATURE)</code>의 결과(lockdown이면 <code>-EPERM</code>)를 돌려준다. 둘 다 통과하면 <code>kernel/module/main.c</code>가 <code>pr_notice_once()</code>로 "module verification failed"를 <strong>딱 한 번</strong> 찍고 <code>TAINT_UNSIGNED_MODULE</code>을 세운다 — §7.4에서 메시지가 한 번만 나온 이유다.</li><li>빌드 때 <code>certs/signing_key.x509</code>가 <code>certs/system_certificates.S</code>로 커널 이미지 안에 박혀, 부팅 중 <code>Loading compiled-in X.509 certificates</code> 메시지와 함께 <code>.builtin_trusted_keys</code>에 들어간다(§7.4 dmesg). 즉 <strong>모듈 공개키의 무결성은 커널 Image의 무결성(= FIT 서명)에 기대고 있다</strong> — U-Boot DTB 속 FIT 공개키와 같은 구조다.</li><li>드라이버를 쓸 때 다시 만나는 지점: out-of-tree 드라이버(E4, G 모듈)를 양산 장비에 넣으려면 같은 키로 서명돼야 한다. <code>request_firmware()</code>로 올리는 장치 펌웨어(H·I 모듈)는 기본적으로 서명 검증이 없다 — 펌웨어 blob도 체인 안에 넣으려면 rootfs 무결성(dm-verity, L6)이나 펌웨어 서명 검증을 따로 설계해야 한다.</li></ul>
+<hr>
+<h2 id="11-embedded-실무에서-다시-보기">11. Embedded 실무에서 다시 보기<a class="anchor" href="#11-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="11-1-센서-키트-장비의-secure-boot-설계-한-장">11.1 센서 키트 장비의 secure boot 설계 한 장<a class="anchor" href="#11-1-센서-키트-장비의-secure-boot-설계-한-장" aria-label="link">#</a></h3>
+<p>예를 들어 i.MX8M Plus 기반 로봇 센서 키트라면:</p>
+<ol><li>ROM(HAB)이 SRK 해시 fuse로 SPL+TF-A+U-Boot 컨테이너를 검증(CST로 서명).</li><li>U-Boot은 control DTB의 FIT 키(<code>required = conf</code>)로 커널·DT·initramfs FIT 검증. <code>bootcmd</code> 고정, <code>ENV_IS_NOWHERE</code> 또는 A/B 변수만 화이트리스트, 콘솔 입력 차단.</li><li>DT의 <code>/chosen/bootargs</code>에 <code>root=/dev/dm-0</code>, <code>dm-mod.create="..."</code>(verity root hash 포함), <code>module.sig_enforce=1</code>, <code>lockdown=integrity</code>.</li><li>rootfs는 dm-verity(L6), <code>/data</code>는 dm-crypt + TPM 또는 CAAM 블롭으로 키 보호(L6).</li><li>OTA(L4)는 번들 서명 + A/B, 새 슬롯 commit 후에만 rollback 카운터 증가.</li><li>공장: SRK fuse → open 상태 HAB 이벤트 0 확인 → closed → JTAG 비활성 → 결과 기록.</li></ol>
+<h3 id="11-2-보안-켰더니-부팅이-3초-늦어졌어요">11.2 "보안 켰더니 부팅이 3초 늦어졌어요"<a class="anchor" href="#11-2-보안-켰더니-부팅이-3초-늦어졌어요" aria-label="link">#</a></h3>
+<p>검증 시간의 대부분은 RSA가 아니라 <strong>큰 이미지의 해시</strong>다(RSA-2048 검증은 한 번, 해시는 수십 MB). 대책: 커널을 압축하되 해시는 압축본에 걸기(읽을 양도 준다), SoC 해시 가속기 쓰기(U-Boot <code>CONFIG_SHA_HW_ACCEL</code>, 이 빌드의 <code>CONFIG_ARMV8_CRYPTO</code>), initramfs 줄이기. 이 노트의 QEMU 수치(TCG)는 실제와 무관하니 반드시 실보드에서 <code>bootstage</code>로 잰다.</p>
+<h3 id="11-3-필드-장비를-디버그해야-하는데-콘솔이-막혀-있다">11.3 "필드 장비를 디버그해야 하는데 콘솔이 막혀 있다"<a class="anchor" href="#11-3-필드-장비를-디버그해야-하는데-콘솔이-막혀-있다" aria-label="link">#</a></h3>
+<p>인증 디버그 경로를 미리 설계한다: 장비 고유 ID에 묶인 <strong>서명된 디버그 토큰</strong>(우리 서명 서버가 발급, 기한 있음)을 U-Boot·커널이 검증해 그 장비에서만 콘솔을 연다. "공통 비밀번호"는 하나가 새면 전 기종이 열린다.</p>
+<h3 id="11-4-gplv3와-secure-boot">11.4 GPLv3와 secure boot<a class="anchor" href="#11-4-gplv3와-secure-boot" aria-label="link">#</a></h3>
+<p>GPLv3 코드를 "User Product"에 넣으면 수정본 설치 정보(키 또는 잠금 해제 방법)를 줘야 한다(anti-tivoization, K7 참고). 그래서 잠긴 장비는 rootfs에서 GPLv3 패키지를 빼는 정책과 같이 간다. U-Boot·커널은 GPLv2라 해당하지 않는다.</p>
+<hr>
+<h2 id="12-흔한-실수와-증상">12. 흔한 실수와 증상<a class="anchor" href="#12-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td><code>mkimage -K</code>에 <code>-r</code>을 안 줌</td><td>서명 없는 FIT도 부팅됨</td><td>키가 <code>required</code>가 아니라 검증이 선택 사항</td><td><code>-r</code>로 넣고 <code>fdtget ... required</code>로 확인 (§2.5)</td></tr><tr><td>이미지만 서명 (<code>required = image</code>)</td><td>조합을 바꾼 FIT가 부팅됨</td><td>mix-and-match (§5.2)</td><td>configuration 서명 + <code>sign-images</code>에 kernel·fdt·ramdisk 전부</td></tr><tr><td>공개키를 <code>-dtb</code>나 앞 단계 DT로 넘김</td><td>남의 키 FIT도 부팅 가능</td><td>키가 검증된 바이너리 밖에 있음</td><td>control DTB를 U-Boot에 붙이고 그 U-Boot을 앞 단계가 검증 (§3, §6)</td></tr><tr><td>env <code>bootargs</code>를 남겨 둠</td><td>서명 통과 후 cmdline이 바뀜</td><td><code>fdt_chosen()</code>이 env로 덮어씀 (§5.3)</td><td><code>ENV_IS_NOWHERE</code> 또는 화이트리스트, bootargs는 서명된 DT에</td></tr><tr><td><code>bootm</code> 실패 후 프롬프트</td><td>공격자가 <code>booti</code>로 무검증 부팅</td><td>실패 경로가 열림 (§5.4)</td><td><code>bootcmd</code> 끝에 reset/복구, 부트 명령 제거, <code>BOOTDELAY=-2</code></td></tr><tr><td>fuse 전 검증 확인 생략</td><td>lock 후 전 수량 부팅 불가</td><td>이미지 서명·키 해시 불일치</td><td>open 상태 이벤트 0 확인 후 lock (§9.4)</td></tr><tr><td>모듈 서명 키를 매 빌드 자동 생성</td><td>다음 빌드의 out-of-tree 모듈이 <code>Key was rejected</code></td><td>커널마다 키가 다름</td><td>고정 키(HSM) 또는 모든 모듈을 같은 빌드에서</td></tr><tr><td><code>MODULE_SIG=y</code>만 켜고 끝</td><td>무서명 모듈이 E taint만 남기고 들어감</td><td>기본 정책은 허용</td><td><code>MODULE_SIG_FORCE=y</code> 또는 lockdown integrity</td></tr><tr><td>롤백 카운터를 첫 부팅에 올림</td><td>새 버전 문제 시 B 슬롯으로 못 돌아감</td><td>카운터는 되돌릴 수 없음</td><td>commit 후에만 증가 (§9.3, L4)</td></tr><tr><td>JTAG을 양산에서 안 닫음</td><td>부팅 후 메모리 변조로 우회</td><td>secure boot는 실행 전 검증만</td><td>fuse 비활성/인증 디버그, 공정에서 확인</td></tr></tbody></table></div>
+<hr>
+<h2 id="13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다<a class="anchor" href="#13-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> Walk me through secure boot on your last product.</p>
+<p><strong>A.</strong> 뿌리부터 순서대로, 각 고리에서 "누가 무엇으로 검증하나"를 말한다. 마지막에 롤백·디버그 포트·키 관리를 덧붙여 위협 모델까지 생각했다는 것을 보인다. Don은 SSD 펌웨어 서명 경험을 출발점으로 쓰고, Linux SoC는 이 노트의 QEMU 체인으로 설명한다.</p>
+<blockquote><p>On the SSD side, the boot ROM verified the bootloader against a key hash in OTP, and the bootloader verified the main firmware before jumping, with an anti-rollback version check. On Linux SoCs the chain is longer but the same idea: the ROM checks the first-stage image against a fused public-key hash; TF-A's Trusted Board Boot verifies BL31 and U-Boot through an X.509 certificate chain with NV counters; U-Boot has the FIT public key in its own control device tree, marked required, and verifies a signed FIT configuration — kernel, device tree with the command line, and initramfs; the kernel then verifies the root filesystem with dm-verity and only loads signed modules. I've built that whole chain in QEMU and broken each link — a flipped byte, a foreign key, an unsigned FIT, a swapped U-Boot key — to confirm each one fails closed. Around it you need the locked-down U-Boot, rollback counters, a closed JTAG, and HSM-backed keys.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Where exactly does the U-Boot public key live, and who protects it?" → control DTB가 <code>u-boot.bin</code> 끝에 붙어 있고, 그 바이너리의 해시가 TF-A NT FW content 인증서에 있다(§6.2).</p>
+<p><strong>Q.</strong> Why sign the configuration, not the individual images?</p>
+<p><strong>A.</strong> 이미지별 서명은 "각 부품이 정품"만 보장하고 "이 조합이 정품"은 보장하지 않는다. 공격자가 서명된 이미지들을 섞어(옛 취약 커널 + 새 DT, 디버그 DT) 새 조합을 만들 수 있다. configuration 서명은 고른 이미지 이름과 그 해시를 함께 서명하므로 조합이 고정된다. 직접 해 보니 이미지별 서명은 디버그 DT로 바꾼 조합을 부팅했고, configuration 서명은 거부했다.</p>
+<blockquote><p>Image signatures only prove each blob is genuine, not that this particular combination was released. An attacker can recombine signed parts — an old vulnerable kernel with a new device tree, or a lab-only debug DT. A configuration signature covers the configuration node, which names the images, plus each image's hash node, so changing any reference breaks it. Data itself is excluded and bound through the hashes, so verification is signature first, then per-image hash. I demonstrated it: with image-only signing, swapping fdt to the debug DT booted; with configuration signing it failed with "Failed to verify required signature".</p></blockquote>
+<p><strong>Q.</strong> Your signing key leaked — what now?</p>
+<p><strong>A.</strong> 먼저 "어느 키냐"로 답을 나눈다. 계층이 있으면 피해는 그 키가 보증하던 단계로 한정되고, 상위 키로 새 키를 배포해 교체한다. 순서는 "새 키 이미지를 옛 신뢰 경로로 배포 → 부팅 성공 확인 → 옛 키 폐기(revoke fuse, 카운터)". ROT 키면 revocation 슬롯 유무가 생사를 가른다. 그리고 원인(HSM 밖에 키가 있었나)을 고친다.</p>
+<blockquote><p>First, which key. With a proper hierarchy the blast radius is limited to what that key signed. If it's the FIT key, I ship a new U-Boot — signed by the non-trusted-world key — that carries the new FIT key, and bump the firmware rollback counter so the old U-Boot can't come back. If it's a TBBR intermediate key, the root key signs a new key certificate. The order matters: deliver the new key through the still-trusted path, confirm devices boot, then revoke the old key. If it's the root key, it depends on whether the SoC has revocation slots like NXP's SRK revoke fuses; without them, fielded devices can't be trusted anymore. Then fix the root cause — private keys should live only in an HSM behind a signing service with audit logs.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "How do you stop the attacker from installing an old image signed with the old key?" → 롤백 카운터(NV counter)와 키 폐기를 같이 한다.</p>
+<p><strong>Q.</strong> Secure boot vs measured boot?</p>
+<p><strong>A.</strong> secure boot는 검증하고 틀리면 멈춘다(장비 안 판단). measured boot는 각 단계 해시를 TPM PCR에 extend만 하고 진행한다(판단은 나중 — 원격 attestation, 또는 PCR에 묶은 키 unseal). 둘은 보완 관계다.</p>
+<blockquote><p>Secure boot enforces: each stage verifies the next and refuses to run anything unsigned. Measured boot records: each stage extends a hash of the next into a TPM PCR, which can only be extended, never written, and boot continues regardless. The decision happens later — a remote verifier checks a signed quote of the PCRs, or the TPM releases a disk key only if the PCRs match. We typically use both: secure boot to block untrusted code, measured boot to prove state and to seal secrets like the data-partition key.</p></blockquote>
+<p><strong>Q.</strong> What can secure boot NOT protect against?</p>
+<p><strong>A.</strong> 런타임 침해, 롤백(별도 카운터 없으면), JTAG·DMA 공격, rootfs 변조(체인을 rootfs까지 안 이으면), 기밀성, 키 유출. "부팅 시점에 우리 코드만 돈다"까지만 약속한다.</p>
+<blockquote><p>It guarantees only that the code we signed is what boots. It doesn't stop a runtime exploit, a rollback to an older signed image unless you have anti-rollback counters, an open JTAG or DMA attack after boot, or tampering with an unverified root filesystem. It also isn't confidentiality — that's encryption. So I pair it with dm-verity, rollback counters, a closed debug port, least privilege at runtime, and key management.</p></blockquote>
+<p><strong>Q.</strong> How do you lock down U-Boot for production?</p>
+<p><strong>A.</strong> 프롬프트·환경·옆길 부트 명령 세 가지를 닫는다. 이 노트에서 실측: 개발 U-Boot에서 env <code>bootargs</code>로 서명 통과 후 cmdline을 바꿨고, <code>booti</code>로 무검증 커널을 부팅했다. 잠근 빌드(<code>BOOTDELAY=-2</code>, <code>ENV_IS_NOWHERE</code>, <code>booti</code>/<code>bootz</code>/<code>bootefi</code>/legacy 제거, <code>bootcmd</code> 끝에 poweroff)는 키를 두드려도 프롬프트가 안 나오고, 변조 FIT에서 바로 꺼졌다.</p>
+<blockquote><p>Close the prompt, the environment, and the side doors. Bootdelay minus two so there's no interrupt window; environment from nowhere, or a writable whitelist for A/B variables only; the command line inside the signed device tree; remove booti, bootz, bootefi and the legacy image format so bootm with FIT is the only path; and make the failure path reset or fall back to the other slot rather than drop to a shell. In my lab, the dev build let me hijack bootargs after a fully verified FIT and boot an unverified kernel with booti; the locked build never showed a prompt and powered off on a tampered FIT.</p></blockquote>
+<p><strong>Q.</strong> How is kernel module signing enforced, and how did you test it?</p>
+<p><strong>A.</strong> <code>CONFIG_MODULE_SIG</code>는 검증 코드, <code>MODULE_SIG_FORCE</code>(또는 <code>module.sig_enforce=1</code>)가 강제, lockdown integrity도 무서명 모듈을 막는다. 공개키는 커널 Image 안의 builtin keyring에 있으니 커널 서명에 기대고 있다. 실측: 기본은 무서명·남의 키 모듈이 E taint와 함께 로드, enforce면 <code>Key was rejected by service</code>, lockdown이면 <code>Operation not permitted</code>.</p>
+<blockquote><p>The build embeds an X.509 certificate into the kernel's builtin trusted keyring and appends a PKCS#7 signature to each module. With only MODULE_SIG, a bad or missing signature just taints the kernel with E. With MODULE_SIG_FORCE or module.sig_enforce=1 the load fails with EKEYREJECTED, and with lockdown in integrity mode it fails with EPERM. I tested signed, foreign-key, and unsigned builds of the same module under all three policies. The trust anchor is inside the kernel image, so it's only as strong as the FIT signature that protected the kernel.</p></blockquote>
+<hr>
+<h2 id="14-직접-해보기">14. 직접 해보기<a class="anchor" href="#14-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong>: 1바이트 변조 FIT에서 configuration 서명이 <code>dev+ OK</code>로 통과한 이유를 그림 2로 설명하라. 공격자가 <code>hash-1/value</code>까지 새로 계산해 넣으면 어디서 걸리나? 정답/힌트: 서명은 data를 제외한 노드 구조(해시 값 포함)를 덮는다. hash 값을 고치면 hashed-nodes 영역이 바뀌어 configuration 서명이 깨진다.</li><li><strong>코드</strong>: §2.3의 .its에서 <code>algo = "sha256,rsa4096"</code>로 바꾸고 4096비트 키로 다시 서명해, control DTB의 <code>rsa,num-bits</code>와 FIT 크기 변화를 확인하라. 정답/힌트: <code>openssl genpkey ... rsa_keygen_bits:4096</code>, <code>fdtget l5_ctrl.dtb /signature/key-dev rsa,num-bits</code> → 4096. 서명 <code>value</code>가 512바이트가 된다.</li><li><strong>코드</strong>: 키 두 개(<code>dev</code>, <code>dev2</code>)를 control DTB에 넣고 <code>/signature</code>에 <code>required-mode = "all"</code>을 준 뒤, 한 키로만 서명한 FIT가 거부되는지 <code>fit_check_sign</code>으로 확인하라. 정답/힌트: <code>fdtput -t s l5_ctrl.dtb /signature required-mode all</code>, configuration에 <code>signature-1</code>(dev), <code>signature-2</code>(dev2).</li><li><strong>관찰</strong>: 잠근 U-Boot에 <code>CONFIG_ENV_WRITEABLE_LIST</code>를 켜고 <code>bootcount</code>·<code>slot</code> 두 변수만 쓰기 허용하도록 만들어, <code>bootargs</code>를 플래시 환경에 넣어도 무시되는지 확인하라(L4 A/B와 연결). 정답/힌트: <code>CONFIG_ENV_FLAGS_LIST_STATIC="slot:sw,bootcount:dw"</code> 형식. 환경을 플래시에 두려면 <code>ENV_IS_IN_FLASH</code>를 다시 켠다.</li><li><strong>코드</strong>: §7.3의 모듈을 <code>CONFIG_MODULE_SIG_FORCE=y</code>인 커널(직접 빌드)에서 넣어 cmdline 없이도 거부되는지, <code>/proc/sys/kernel/tainted</code> 값이 어떻게 다른지 확인하라. 정답/힌트: <code>Key was rejected by service</code>, E 비트 없음.</li><li><strong>설계</strong>: 사내 OTA(L4)로 커널 FIT를 보낼 때 "보안 버전"을 어디에 넣고, 누가 어디서 비교하고, 카운터를 언제 올릴지 한 장으로 그려라. 정답/힌트: FIT configuration 안 서명된 속성 → U-Boot 보드 코드가 RPMB/TPM NV/OTP와 비교 → 새 슬롯 commit 후 증가.</li><li><strong>관찰</strong>: §8.2의 swtpm 실습에서 <code>tpm2_pcrextend</code>를 같은 값으로 두 번 하면 PCR 16이 어떻게 되는지, 순서를 바꾸면 결과가 같은지 계산으로 예측하고 확인하라. 정답/힌트: extend는 교환법칙이 없다 — <code>H(H(0||a)||b) ≠ H(H(0||b)||a)</code>.</li></ol>
+<hr>
+<h2 id="15-용어-사전">15. 용어 사전<a class="anchor" href="#15-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>Root of Trust</td><td>신뢰의 뿌리</td><td>바꿀 수 없는 ROM 코드 + fuse 키 해시</td></tr><tr><td>ROTPK</td><td>Root Of Trust Public Key</td><td>TF-A 용어. 해시가 fuse에 들어간다</td></tr><tr><td>OTP / eFuse</td><td>한 번만 쓰는 메모리</td><td>0→1만 가능, 키 해시·잠금 비트·카운터</td></tr><tr><td>TBB / TBBR</td><td>Trusted Board Boot (Requirements)</td><td>TF-A의 X.509 인증서 기반 체인 (C5)</td></tr><tr><td>NV counter</td><td>비휘발 카운터</td><td>인증서 버전 ≥ 카운터여야 통과, 롤백 방지</td></tr><tr><td>FIT</td><td>Flattened Image Tree</td><td>FDT 형식에 여러 이미지 + 해시/서명을 담은 U-Boot 이미지</td></tr><tr><td>control DTB</td><td>U-Boot 자신의 DT</td><td><code>/signature/key-*</code>에 FIT 공개키가 들어간다</td></tr><tr><td><code>required</code></td><td>키 정책</td><td><code>conf</code>/<code>image</code> — 이 키 서명이 없으면 부팅 거부</td></tr><tr><td>hashed-nodes</td><td>서명 범위 목록</td><td>configuration 서명이 덮는 노드들 (data 제외)</td></tr><tr><td>mix-and-match</td><td>조합 공격</td><td>서명된 이미지들을 섞어 의도하지 않은 조합 부팅</td></tr><tr><td><code>OF_SEPARATE</code> / <code>OF_BOARD</code></td><td>U-Boot DT 출처</td><td>바이너리에 붙인 DT / 앞 단계가 준 DT</td></tr><tr><td><code>EXT_DTB</code></td><td>U-Boot make 변수</td><td>기본 DTB 대신 지정한 DTB를 붙인다</td></tr><tr><td><code>MODULE_SIG_FORCE</code></td><td>커널 설정</td><td>서명 안 맞는 모듈 거부 (<code>module.sig_enforce=1</code>과 같음)</td></tr><tr><td>lockdown</td><td>커널 LSM</td><td>integrity/confidentiality 모드로 커널 수정 경로 차단</td></tr><tr><td>PCR</td><td>Platform Configuration Register</td><td>TPM 안 레지스터, extend로만 바뀐다</td></tr><tr><td>measured boot</td><td>측정 부팅</td><td>해시를 PCR에 기록, 판단은 나중</td></tr><tr><td>HSM</td><td>Hardware Security Module</td><td>개인키를 안에서만 쓰는 장치, PKCS#11로 접근</td></tr><tr><td>revocation</td><td>키 폐기</td><td>예비 키 슬롯으로 넘어가고 옛 키를 fuse로 무효화</td></tr><tr><td>HAB / AHAB</td><td>NXP 부트 ROM 검증</td><td>SRK 해시 fuse, CST 서명</td></tr></tbody></table></div>
+<hr>
+<h2 id="16-요약-체크리스트">16. 요약 &amp; 체크리스트<a class="anchor" href="#16-요약-체크리스트" aria-label="link">#</a></h2>
+<p>secure boot는 "각 단계가 다음 단계를 실행 전에 검증하고, 맨 앞 키는 바꿀 수 없는 곳에 있다"는 하나의 원리다. Linux SoC에서는 ROM(fuse 키 해시) → TF-A TBB(X.509 인증서, NV counter) → U-Boot(control DTB 속 FIT 공개키, configuration 서명) → 커널(서명된 DT 속 cmdline, 서명 모듈, dm-verity)로 이어진다. 이 노트에서 QEMU로 그 체인을 실제로 만들고, 1바이트 변조·남의 키·서명 없음·mix-and-match·공개키 바꿔치기가 모두 막히는 것과, 환경변수·<code>booti</code>·프롬프트 같은 "검증 옆길"이 체인을 끊는 것을 확인했다. 진짜 어려운 것은 운영이다 — 키 계층과 HSM, 유출 시 교체 순서, 롤백 카운터와 OTA의 순서, fuse 공정의 검증 단계, JTAG 잠금.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>secure boot가 막는 것과 못 막는 것(롤백, 런타임, JTAG, 기밀성)을 위협 모델 표로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>mkimage -k -K -r</code>이 각각 무엇을 하는지, control DTB <code>/signature/key-dev</code>의 속성을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>configuration 서명이 무엇을 덮고(hashed-nodes, hash 값) 무엇을 빼는지(data) 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>mix-and-match 공격을 재현하고 configuration 서명이 막는 이유를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>qemu_arm64에서 공개키를 U-Boot 바이너리에 넣기 위해 <code>OF_BOARD</code>·<code>OF_OMIT_DTB</code>를 끄고 <code>EXT_DTB</code>를 쓴 이유를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>TF-A BL2가 "공개키가 든 U-Boot"의 해시를 검증해 체인이 이어지는 것을 인증서 OID로 보일 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>U-Boot 양산 잠금 설정(BOOTDELAY, ENV, 부트 명령, 실패 경로, env 화이트리스트)을 나열할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>모듈 서명의 세 정책(허용+taint, sig_enforce, lockdown)의 결과와 에러 코드를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>secure boot와 measured boot의 차이, PCR extend 공식을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>키 계층을 그리고, 어느 키가 새느냐에 따른 대응 순서를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>롤백 카운터를 언제 올려야 A/B OTA와 충돌하지 않는지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>fuse 공정에서 lock 전에 무엇을 확인해야 하는지 말할 수 있다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>U-Boot 문서 (소스 트리 <code>doc/usage/fit/</code>): <code>signature.rst</code>(키 노드 속성, <code>required</code>, <code>required-mode</code>, PKCS#11), <code>verified-boot.rst</code>, <code>sign-configs.rst</code>, <code>sign-images.rst</code>, <code>beaglebone_vboot.rst</code>(<code>EXT_DTB</code>로 공개키 DTB 넣기) — 온라인: https://docs.u-boot.org/en/latest/usage/fit/signature.html</li><li>U-Boot 문서 <code>doc/develop/devicetree/dt_qemu.rst</code> (QEMU DT 덤프·병합), <code>doc/usage/measured_boot.rst</code></li><li>U-Boot 소스: <code>boot/image-fit-sig.c</code>(<code>fit_config_check_sig</code>, <code>exc_prop[]</code>, <code>fit_config_verify_required_keys</code>), <code>boot/fdt_support.c</code>(<code>fdt_chosen</code>, <code>board_fdt_chosen_bootargs</code>), <code>scripts/check-of.sh</code></li><li>TF-A 문서: Trusted Board Boot 설계 <code>docs/design/trusted-board-boot.rst</code>, 빌드 <code>docs/design/trusted-board-boot-build.rst</code> — https://trustedfirmware-a.readthedocs.io/</li><li>커널 문서: Kernel module signing facility — https://docs.kernel.org/admin-guide/module-signing.html , <code>man 7 kernel_lockdown</code> (man7.org)</li><li>커널 소스: <code>kernel/module/signing.c</code>, <code>certs/system_keyring.c</code>, <code>scripts/sign-file.c</code> (elixir.bootlin.com)</li><li>Mbed TLS 3.6.6 릴리스: https://github.com/Mbed-TLS/mbedtls/releases/tag/mbedtls-3.6.6</li><li>TPM: tpm2-tools 문서 https://tpm2-tools.readthedocs.io/ , swtpm https://github.com/stefanberger/swtpm</li><li>이 노트와 이어지는 노트: C3(FIT 기초), C5 §7(TBBR·NV counter), J3(dm-verity 입문), K7(taint·GPLv3), L4(OTA 서명·A/B), L6(dm-verity·TPM/TEE·IMA)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-17_L4_ota_update.html"><span class="dir">← 이전</span><span class="nm">L4. OTA 업데이트 — A/B 파티션 · bootcount 롤백 · RAUC/SWUpdate/Mender</span></a><a class="next" href="2026-10-17_L6_runtime_security.html"><span class="dir">다음 →</span><span class="nm">L6. 런타임 보안 — dm-verity · dm-crypt · TPM/TEE · AppArmor/SELinux · capabilities · seccomp · systemd 하드닝으로 "부팅 이후"를 지키기</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l2"><a href="#1-위협-모델-secure-boot는-무엇을-막고-무엇을-못-막나">1. 위협 모델 — secure boot는 무엇을 막고, 무엇을 못 막나</a></li><li class="l3"><a href="#1-1-직관-누가-플래시에-무엇을-쓸-수-있다고-가정하나">1.1 직관 — "누가 플래시에 무엇을 쓸 수 있다고 가정하나"</a></li><li class="l3"><a href="#1-2-막는-것-못-막는-것">1.2 막는 것 / 못 막는 것</a></li><li class="l3"><a href="#1-3-don-경험과-연결">1.3 Don 경험과 연결</a></li><li class="l2"><a href="#2-u-boot-verified-boot-키-its-서명-공개키-넣기">2. U-Boot verified boot — 키, .its, 서명, 공개키 넣기</a></li><li class="l3"><a href="#2-1-역할-분담-누가-무엇을-들고-있나">2.1 역할 분담 — 누가 무엇을 들고 있나</a></li><li class="l3"><a href="#2-2-코드로-확인-키-만들기">2.2 코드로 확인 — 키 만들기</a></li><li class="l3"><a href="#2-3-its-이미지-4개-configuration-2개">2.3 .its — 이미지 4개, configuration 2개</a></li><li class="l3"><a href="#2-4-코드로-확인-서명하면서-공개키를-control-dtb에-넣기">2.4 코드로 확인 — 서명하면서 공개키를 control DTB에 넣기</a></li><li class="l3"><a href="#2-5-코드로-확인-control-dtb의-signature-노드-열어-보기">2.5 코드로 확인 — control DTB의 /signature 노드 열어 보기</a></li><li class="l3"><a href="#2-6-서명-범위-hashed-nodes를-직접-보기">2.6 서명 범위 — hashed-nodes를 직접 보기</a></li><li class="l2"><a href="#3-공개키를-u-boot에-진짜로-넣기-qemu_arm64의-함정">3. 공개키를 U-Boot에 "진짜로" 넣기 — qemu_arm64의 함정</a></li><li class="l3"><a href="#3-1-문제-qemu_arm64는-dtb를-앞-단계에서-받는다">3.1 문제 — qemu_arm64는 DTB를 앞 단계에서 받는다</a></li><li class="l3"><a href="#3-2-해결-of_separate-ext_dtb">3.2 해결 — OF_SEPARATE + EXT_DTB</a></li><li class="l2"><a href="#4-부팅하고-깨-보기-정상-1바이트-변조-남의-키-서명-없음">4. 부팅하고 깨 보기 — 정상, 1바이트 변조, 남의 키, 서명 없음</a></li><li class="l3"><a href="#4-1-실험-장치">4.1 실험 장치</a></li><li class="l3"><a href="#4-2-코드로-확인-정상-부팅">4.2 코드로 확인 — 정상 부팅</a></li><li class="l3"><a href="#4-3-코드로-확인-변조-3종">4.3 코드로 확인 — 변조 3종</a></li><li class="l2"><a href="#5-체인이-옆에서-끊기는-곳-mix-and-match-환경변수-서명-없는-부트-명령">5. 체인이 "옆에서" 끊기는 곳 — mix-and-match, 환경변수, 서명 없는 부트 명령</a></li><li class="l3"><a href="#5-1-mix-and-match-공격-왜-configuration에-서명하나">5.1 mix-and-match 공격 — 왜 configuration에 서명하나</a></li><li class="l3"><a href="#5-2-코드로-확인-같은-공격-두-방식">5.2 코드로 확인 — 같은 공격, 두 방식</a></li><li class="l3"><a href="#5-3-코드로-확인-환경변수로-cmdline-바꾸기">5.3 코드로 확인 — 환경변수로 cmdline 바꾸기</a></li><li class="l3"><a href="#5-4-코드로-확인-서명-없는-부트-명령-booti">5.4 코드로 확인 — 서명 없는 부트 명령 booti</a></li><li class="l3"><a href="#5-5-코드로-확인-잠근-production-u-boot">5.5 코드로 확인 — 잠근(production) U-Boot</a></li><li class="l2"><a href="#6-전체-체인-tf-a-tbb가-공개키가-든-u-boot-을-검증한다">6. 전체 체인 — TF-A TBB가 "공개키가 든 U-Boot"을 검증한다</a></li><li class="l3"><a href="#6-1-무엇을-연결하나">6.1 무엇을 연결하나</a></li><li class="l3"><a href="#6-2-코드로-확인-빌드">6.2 코드로 확인 — 빌드</a></li><li class="l3"><a href="#6-3-코드로-확인-전체-체인-부팅">6.3 코드로 확인 — 전체 체인 부팅</a></li><li class="l3"><a href="#6-4-코드로-확인-공격자가-자기-공개키를-넣은-u-boot-으로-바꿔치기">6.4 코드로 확인 — 공격자가 "자기 공개키를 넣은 U-Boot"으로 바꿔치기</a></li><li class="l2"><a href="#7-커널-다음-고리-모듈-서명과-lockdown">7. 커널 다음 고리 — 모듈 서명과 lockdown</a></li><li class="l3"><a href="#7-1-직관-커널도-부트로더처럼-다음-코드-ko-를-검증한다">7.1 직관 — "커널도 부트로더처럼 다음 코드(.ko)를 검증한다"</a></li><li class="l3"><a href="#7-2-image-sec의-설정">7.2 Image-sec의 설정</a></li><li class="l3"><a href="#7-3-코드로-확인-모듈-세-개-만들고-서명하기">7.3 코드로 확인 — 모듈 세 개 만들고 서명하기</a></li><li class="l3"><a href="#7-4-코드로-확인-세-가지-정책에서-insmod">7.4 코드로 확인 — 세 가지 정책에서 insmod</a></li><li class="l3"><a href="#7-5-모듈-키-관리-자동-생성-키의-함정">7.5 모듈 키 관리 — 자동 생성 키의 함정</a></li><li class="l2"><a href="#8-secure-boot-vs-measured-boot-tpm-pcr-맛보기">8. Secure boot vs measured boot — TPM PCR 맛보기</a></li><li class="l3"><a href="#8-1-직관">8.1 직관</a></li><li class="l3"><a href="#8-2-코드로-확인-swtpm-게스트의-tpm2-tools">8.2 코드로 확인 — swtpm + 게스트의 tpm2-tools</a></li><li class="l2"><a href="#9-키-관리-진짜-어려운-부분">9. 키 관리 — 진짜 어려운 부분</a></li><li class="l3"><a href="#9-1-키-계층-한-키로-다-서명하지-않는다">9.1 키 계층 — 한 키로 다 서명하지 않는다</a></li><li class="l3"><a href="#9-2-키-유출-무엇을-하나">9.2 키 유출 — 무엇을 하나</a></li><li class="l3"><a href="#9-3-롤백-방지-서명만으로는-옛-버전을-못-막는다">9.3 롤백 방지 — 서명만으로는 옛 버전을 못 막는다</a></li><li class="l3"><a href="#9-4-공장-fuse-공정과-디버그-포트">9.4 공장 — fuse 공정과 디버그 포트</a></li><li class="l3"><a href="#9-5-벤더-구현-비교-기억-기반-각-soc-보안-매뉴얼로-확인할-것">9.5 벤더 구현 비교 (기억 기반 — 각 SoC 보안 매뉴얼로 확인할 것)</a></li><li class="l2"><a href="#10-커널-안에서는-무슨-일이-일어나나">10. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#11-embedded-실무에서-다시-보기">11. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#11-1-센서-키트-장비의-secure-boot-설계-한-장">11.1 센서 키트 장비의 secure boot 설계 한 장</a></li><li class="l3"><a href="#11-2-보안-켰더니-부팅이-3초-늦어졌어요">11.2 "보안 켰더니 부팅이 3초 늦어졌어요"</a></li><li class="l3"><a href="#11-3-필드-장비를-디버그해야-하는데-콘솔이-막혀-있다">11.3 "필드 장비를 디버그해야 하는데 콘솔이 막혀 있다"</a></li><li class="l3"><a href="#11-4-gplv3와-secure-boot">11.4 GPLv3와 secure boot</a></li><li class="l2"><a href="#12-흔한-실수와-증상">12. 흔한 실수와 증상</a></li><li class="l2"><a href="#13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#14-직접-해보기">14. 직접 해보기</a></li><li class="l2"><a href="#15-용어-사전">15. 용어 사전</a></li><li class="l2"><a href="#16-요약-체크리스트">16. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

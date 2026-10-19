@@ -1,0 +1,1452 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M2. 커널 상태 들여다보기 — /proc · /sys · debugfs로 하는 bring-up 진단 체크리스트</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="M/2026-10-17_M2_kernel_state">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">M. 디버깅 · 트레이싱 · M2. 커널 상태 들여다보기 — /proc · /sys · debugfs로 하는 bring-up 진단 체크리스트</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">M. 디버깅 · 트레이싱 · Debug &amp; Trace</div>
+      <h1>M2. 커널 상태 들여다보기 — /proc · /sys · debugfs로 하는 bring-up 진단 체크리스트</h1>
+      <div class="meta"><span>169분 읽기</span><span>1823줄</span><span>61개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: "장치가 안 보인다"를 DT 노드 → 장치 객체 → bind → defer → probe 에러 → 자원 → 인터럽트 순서로 좁혀 가는 진단 순서를 외워서 쓸 수 있다 · <code>devices_deferred</code>, driver 링크, <code>of_node</code> 링크, <code>/proc/interrupts</code>, <code>/proc/iomem</code>, <code>clk_summary</code>, <code>regulator_summary</code>, debugfs <code>gpio</code>, regmap <code>registers</code>가 각각 어떤 질문에 답하는지 말할 수 있다 · <code>/proc/meminfo</code>·<code>slabinfo</code>·<code>buddyinfo</code>·<code>vmallocinfo</code>로 드라이버 메모리 사용과 누수를 숫자로 잡아낼 수 있다 · <code>/proc/&lt;pid&gt;/stack</code>·<code>wchan</code>으로 "앱이 멈췄다"를 드라이버의 어느 줄에서 자는지로 바꿔 말할 수 있다 <strong>왜 필요한가</strong>: 새 보드 bring-up 첫 주의 질문은 거의 다 "그 드라이버 probe 됐어?", "IRQ 들어와?", "클럭 켜졌어?", "메모리 새?"다. 면접에서도 "Board boots but /dev/xxx never appears — where do you look?"는 단골이고, 답의 질은 <strong>어느 파일을 어떤 순서로 보느냐</strong>로 갈린다 <strong>Don 기준 난이도</strong>: 레지스터 덤프·인터럽트 카운터·메모리 맵을 보며 HW를 진단하는 감각은 이미 있다 / 새로 배울 부분은 Linux가 그 정보를 <strong>어느 가상 파일에 어떤 형식으로</strong> 내놓는지, 그리고 각 숫자의 정확한 뜻(MemTotal ≠ RAM, managed IRQ의 affinity 거부, <code>-ENODEV</code>는 조용히 실패 등) <strong>선행 노트</strong>: A1·A10(<code>/proc</code> 기본, 셸 도구), D3(드라이버 매칭·<code>devices_deferred</code> 첫 소개), D4(DT 자원), G2(디바이스 모델·sysfs 트리), G3(probe·<code>-EPROBE_DEFER</code>·fw_devlink), G8(sysfs·debugfs를 드라이버가 만드는 법), H2(regmap), H3(clk·regulator), H4(pinctrl·GPIO), H6(IRQ 컨트롤러), F6(인터럽트 처리), F9(커널 메모리 할당자). 이 노트는 그 기초를 다시 설명하지 않고 <strong>"진단할 때 어디를 어떤 순서로 보나"</strong> 관점만 다룬다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>SSD 펌웨어를 bring-up할 때를 떠올려 보자. 새 컨트롤러 샘플이 왔는데 NAND가 안 읽힌다. 그럴 때 하는 일은 정해져 있다. 먼저 <strong>클럭·리셋 레지스터</strong>를 읽어 블록이 켜졌는지 보고, <strong>핀먹스 레지스터</strong>로 패드가 NAND 기능으로 설정됐는지 보고, <strong>인터럽트 pending/count</strong>를 보고, 마지막으로 <strong>펌웨어 상태 변수</strong>를 JTAG로 덤프한다. 측정 지점이 정해져 있고, 순서가 정해져 있다.</p>
+<p>Linux에서도 똑같다. 다만 JTAG로 메모리를 직접 읽는 대신, 커널이 <strong>가상 파일</strong>로 상태를 보여 준다. 그 창구가 세 개다.</p>
+<ul><li><code>/proc</code> — 원래 "프로세스 정보"용 파일시스템이었지만, 역사적으로 커널 전역 통계(<code>interrupts</code>, <code>iomem</code>, <code>meminfo</code>, <code>slabinfo</code>…)도 여기 쌓였다. 형식이 오래 유지된다.</li><li><code>/sys</code> (sysfs) — 디바이스 모델(G2) 그 자체. 버스·장치·드라이버·모듈이 디렉터리와 심볼릭 링크로 보인다. "값 하나 = 파일 하나"의 안정 ABI.</li><li><code>/sys/kernel/debug</code> (debugfs) — 개발자용. 형식 약속이 없다(ABI 아님). 대신 clk 트리, 레귤레이터, 핀먹스, GPIO, regmap 레지스터처럼 <strong>bring-up에 제일 쓸모 있는 정보</strong>가 여기 있다. 양산 이미지에서는 꺼 두거나 마운트하지 않는 경우가 많다.</li></ul>
+<h3 id="0-1-bring-up-진단-순서-한-장">0.1 bring-up 진단 순서 한 장<a class="anchor" href="#0-1-bring-up-진단-순서-한-장" aria-label="link">#</a></h3>
+<p>"부팅은 되는데 <code>/dev/sensor0</code>이 안 생긴다"는 증상을 받으면 아래 순서로 좁힌다. 각 칸의 오른쪽이 <strong>답이 있는 곳</strong>이다. 한 칸이 OK여야 다음 칸이 의미가 있다.</p>
+<figure class="chart"><svg viewBox="0 0 680 610" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="340" y="22" text-anchor="middle" font-size="14">증상: 부팅은 되는데 /dev/sensor0 이 안 생긴다</text>
+  <rect x="20" y="40" width="300" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="70" text-anchor="middle" font-size="13">① DT 노드가 있고 okay인가?</text>
+  <rect x="360" y="40" width="300" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="70" text-anchor="middle" font-size="12">/proc/device-tree/.../status</text>
+  <line x1="320" y1="65" x2="358" y2="65" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="170" y1="90" x2="170" y2="114" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="180" y="107" font-size="12">OK</text>
+  <rect x="20" y="116" width="300" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="146" text-anchor="middle" font-size="13">② 장치 객체가 만들어졌나?</text>
+  <rect x="360" y="116" width="300" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="146" text-anchor="middle" font-size="12">/sys/bus/&lt;bus&gt;/devices/&lt;name&gt;</text>
+  <line x1="320" y1="141" x2="358" y2="141" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="170" y1="166" x2="170" y2="190" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="180" y="183" font-size="12">OK</text>
+  <rect x="20" y="192" width="300" height="50" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="170" y="222" text-anchor="middle" font-size="13">③ 드라이버가 bind 됐나?</text>
+  <rect x="360" y="192" width="300" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="222" text-anchor="middle" font-size="12">&lt;dev&gt;/driver 링크 · drivers/&lt;drv&gt;/</text>
+  <line x1="320" y1="217" x2="358" y2="217" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="170" y1="242" x2="170" y2="266" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="180" y="259" font-size="12">아니오</text>
+  <rect x="20" y="268" width="300" height="50" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="170" y="298" text-anchor="middle" font-size="13">④ defer 중인가?</text>
+  <rect x="360" y="268" width="300" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="298" text-anchor="middle" font-size="12">debugfs devices_deferred (이유 문자열)</text>
+  <line x1="320" y1="293" x2="358" y2="293" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="170" y1="318" x2="170" y2="342" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="180" y="335" font-size="12">아니오</text>
+  <rect x="20" y="344" width="300" height="50" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="170" y="374" text-anchor="middle" font-size="13">⑤ probe가 에러를 냈나?</text>
+  <rect x="360" y="344" width="300" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="374" text-anchor="middle" font-size="12">dmesg: probe ... failed with error -N</text>
+  <line x1="320" y1="369" x2="358" y2="369" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="170" y1="394" x2="170" y2="418" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="180" y="411" font-size="12">bind는 됐는데 동작 안 함</text>
+  <rect x="20" y="420" width="300" height="50" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="170" y="450" text-anchor="middle" font-size="13">⑥ 자원이 살아 있나?</text>
+  <rect x="360" y="420" width="300" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="440" text-anchor="middle" font-size="12">clk_summary · regulator_summary</text>
+  <text x="510" y="459" text-anchor="middle" font-size="12">pinmux-pins · debugfs gpio · regmap</text>
+  <line x1="320" y1="445" x2="358" y2="445" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="170" y1="470" x2="170" y2="494" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="180" y="487" font-size="12">OK</text>
+  <rect x="20" y="496" width="300" height="50" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="170" y="526" text-anchor="middle" font-size="13">⑦ 인터럽트가 들어오나?</text>
+  <rect x="360" y="496" width="300" height="50" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="526" text-anchor="middle" font-size="12">/proc/interrupts 카운트 · smp_affinity</text>
+  <line x1="320" y1="521" x2="358" y2="521" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="340" y="580" text-anchor="middle" font-size="13">전부 OK인데 이상하다 → 드라이버 내부로: M1 dyndbg · M5 ftrace · M7 bpftrace</text>
+</svg></figure>
+<p>그림 1 — bring-up 진단 순서. 왼쪽 질문이 "아니오"면 그 칸의 오른쪽 파일이 원인을 말해 준다. ③에서 bind가 안 됐으면 ④(defer)와 ⑤(실패)를 본다.</p>
+<h3 id="0-2-세-창구-지도">0.2 세 창구 지도<a class="anchor" href="#0-2-세-창구-지도" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 440" xmlns="http://www.w3.org/2000/svg">
+  <rect x="10" y="10" width="210" height="52" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="115" y="32" text-anchor="middle" font-size="14">/proc</text>
+  <text x="115" y="52" text-anchor="middle" font-size="12">프로세스 · 커널 전역 통계</text>
+  <rect x="235" y="10" width="210" height="52" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="340" y="32" text-anchor="middle" font-size="14">/sys (sysfs)</text>
+  <text x="340" y="52" text-anchor="middle" font-size="12">디바이스 모델 그 자체</text>
+  <rect x="460" y="10" width="210" height="52" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="565" y="32" text-anchor="middle" font-size="14">/sys/kernel/debug</text>
+  <text x="565" y="52" text-anchor="middle" font-size="12">debugfs · 개발자용</text>
+  <rect x="10" y="70" width="210" height="320" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="20" y="94" font-size="12">&lt;pid&gt;/stack · wchan</text>
+  <text x="20" y="118" font-size="12">&lt;pid&gt;/status · maps</text>
+  <text x="20" y="142" font-size="12">&lt;pid&gt;/smaps_rollup</text>
+  <text x="20" y="166" font-size="12">interrupts · softirqs</text>
+  <text x="20" y="190" font-size="12">irq/N/smp_affinity</text>
+  <text x="20" y="214" font-size="12">iomem · ioports</text>
+  <text x="20" y="238" font-size="12">meminfo · zoneinfo</text>
+  <text x="20" y="262" font-size="12">slabinfo · buddyinfo</text>
+  <text x="20" y="286" font-size="12">vmallocinfo · modules</text>
+  <text x="20" y="310" font-size="12">device-tree (링크)</text>
+  <text x="20" y="334" font-size="12">sys/ (sysctl 손잡이)</text>
+  <text x="20" y="358" font-size="12">timer_list · locks</text>
+  <rect x="235" y="70" width="210" height="320" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="245" y="94" font-size="12">bus/*/devices · drivers</text>
+  <text x="245" y="118" font-size="12">&lt;dev&gt;/driver 링크</text>
+  <text x="245" y="142" font-size="12">&lt;dev&gt;/of_node 링크</text>
+  <text x="245" y="166" font-size="12">&lt;dev&gt;/power/runtime_*</text>
+  <text x="245" y="190" font-size="12">class/devlink</text>
+  <text x="245" y="214" font-size="12">kernel/irq/N/</text>
+  <text x="245" y="238" font-size="12">module/*/parameters</text>
+  <text x="245" y="262" font-size="12">module/*/taint</text>
+  <text x="245" y="286" font-size="12">kernel/slab/&lt;cache&gt;/</text>
+  <text x="245" y="310" font-size="12">firmware/devicetree/base</text>
+  <text x="245" y="334" font-size="12">drivers/&lt;drv&gt;/bind · unbind</text>
+  <rect x="460" y="70" width="210" height="320" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="470" y="94" font-size="12">devices_deferred</text>
+  <text x="470" y="118" font-size="12">clk/clk_summary</text>
+  <text x="470" y="142" font-size="12">regulator/regulator_summary</text>
+  <text x="470" y="166" font-size="12">pinctrl/*/pins · pinmux-pins</text>
+  <text x="470" y="190" font-size="12">gpio</text>
+  <text x="470" y="214" font-size="12">regmap/&lt;dev&gt;/registers</text>
+  <text x="470" y="238" font-size="12">memblock/memory · reserved</text>
+  <text x="470" y="262" font-size="12">wakeup_sources</text>
+  <text x="470" y="286" font-size="12">dmaengine/summary</text>
+  <text x="470" y="310" font-size="12">dma_buf/bufinfo</text>
+  <text x="470" y="334" font-size="12">dynamic_debug/control</text>
+  <text x="470" y="358" font-size="12">tracing (→ tracefs)</text>
+  <text x="115" y="416" text-anchor="middle" font-size="12">형식이 오래 유지됨</text>
+  <text x="340" y="416" text-anchor="middle" font-size="12">안정 ABI (Documentation/ABI)</text>
+  <text x="565" y="416" text-anchor="middle" font-size="12">ABI 아님 · 언제든 바뀜</text>
+</svg></figure>
+<p>그림 2 — 세 창구에서 bring-up 때 실제로 여는 파일들. debugfs 쪽이 HW 자원(clk·전원·핀·레지스터) 정보를 제일 많이 갖고 있다.</p>
+<h3 id="0-3-이-노트의-실습-환경">0.3 이 노트의 실습 환경<a class="anchor" href="#0-3-이-노트의-실습-환경" aria-label="link">#</a></h3>
+<p>실습은 공용 랩의 <strong>trace 커널</strong>과 systemd 게스트에서 했다.</p>
+<ul><li>커널: <code>/var/lab/out/Image-trace</code> (<code>6.18.55-trace</code>, Image-sec 설정 + ftrace·PM_ADVANCED_DEBUG·gpio-sim 등). 게스트 안 <code>uname -r</code> = <code>6.18.55-trace</code>. VM 호스트 커널은 <code>7.0.0-38-generic</code>(실습 모듈은 호스트에 넣지 않는다).</li><li>rootfs: <code>/var/lab/out/rootfs-trace.ext4</code>의 사본(Ubuntu 24.04 + systemd 255 + libgpiod 1.6.3, slabtop, setpriv 등).</li><li>QEMU: <code>-machine virt -cpu cortex-a57,pmu=on -smp 2 -m 1G</code>, virtio-blk(PCI) 디스크, virtio-net(PCI). DT는 QEMU가 만들어 준다(같은 인자로 <code>dumpdtb</code>해서 비교에 썼다).</li><li>실습 모듈 세 개: <code>m2_defer</code>(없는 GPIO 칩을 기다리며 defer하는 소비자 + GPIO IRQ), <code>m2_regs</code>(RAM 버퍼 위의 regmap-mmio + runtime PM + 실패 주입), <code>m2_slab</code>(전용 slab 캐시·vmalloc·일부러 새는 kmalloc·잠드는 read).</li><li>실행 방식: 실험 스크립트를 이미지에 넣고 systemd oneshot 서비스로 부팅 후 자동 실행 → 결과 파일을 <code>debugfs -R cat</code>으로 꺼냈다.</li></ul>
+<blockquote><p>주의: QEMU가 KVM 없이 TCG로 돌고, VM을 17명이 동시에 쓰는 중이라 부팅에 10분 가까이 걸렸다(dmesg 타임스탬프가 600초대인 이유). 이 노트의 타임스탬프·시간 값은 <strong>실제 HW 수치가 아니다</strong>. 카운트·주소·크기 같은 값만 의미 있게 읽자.</p></blockquote>
+<h4 id="예제-1-실습-모듈-빌드">예제 1 — 실습 모듈 빌드<a class="anchor" href="#예제-1-실습-모듈-빌드" aria-label="link">#</a></h4>
+<p>무엇을 확인하나: 모듈이 trace 커널 빌드 트리에 맞춰 경고 없이 빌드되고 vermagic이 <code>6.18.55-trace</code>인지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/M2/src      # m2_defer.c m2_regs.c m2_slab.c + Kbuild(obj-m := m2_slab.o m2_regs.o m2_defer.o)
+make -C /var/lab/out/linux-build-trace M=$PWD -j2 modules 2&gt;&amp;1 | grep -iE "warn|error|LD"
+modinfo -F vermagic m2_regs.ko</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>make: Entering directory '/var/lab/build/linux-trace'
+  LD [M]  m2_slab.ko
+  LD [M]  m2_defer.ko
+  LD [M]  m2_regs.ko
+make: Leaving directory '/var/lab/build/linux-trace'
+6.18.55-trace SMP preempt mod_unload aarch64</code></pre></figure>
+<p>출력에서 볼 것: 경고 줄이 하나도 없다(처음엔 <code>MODULE_DESCRIPTION()</code> 누락 경고가 나서 추가했다). vermagic이 다른 커널에 넣으면 <code>insmod</code>가 <code>Invalid module format</code>으로 거부한다(E3).</p>
+<hr>
+<h2 id="1-질문-①-⑤-드라이버가-probe-됐나">1. 질문 ①~⑤ — "드라이버가 probe 됐나?"<a class="anchor" href="#1-질문-①-⑤-드라이버가-probe-됐나" aria-label="link">#</a></h2>
+<h3 id="1-1-직관-세-개의-링크만-보면-된다">1.1 직관 — 세 개의 링크만 보면 된다<a class="anchor" href="#1-1-직관-세-개의-링크만-보면-된다" aria-label="link">#</a></h3>
+<p>bare-metal에서 "드라이버 init이 돌았나?"는 init 함수에 브레이크포인트를 걸면 끝이다. Linux에서는 driver core(G2)가 장치와 드라이버를 짝지어 주고, 그 결과를 sysfs <strong>심볼릭 링크</strong>로 남긴다.</p>
+<div class="tw"><table><thead><tr><th>보고 싶은 것</th><th>파일</th><th>읽는 법</th></tr></thead><tbody><tr><td>장치 객체가 있나</td><td><code>/sys/bus/&lt;bus&gt;/devices/&lt;name&gt;</code></td><td>없으면 DT 노드가 disabled이거나 부모 버스 컨트롤러가 probe 실패</td></tr><tr><td>bind 됐나</td><td><code>/sys/bus/&lt;bus&gt;/devices/&lt;name&gt;/driver</code></td><td>링크가 있으면 bind 완료. 가리키는 곳이 드라이버</td></tr><tr><td>이 드라이버가 잡은 장치들</td><td><code>/sys/bus/&lt;bus&gt;/drivers/&lt;drv&gt;/</code></td><td>장치 이름의 링크들 + <code>bind</code>·<code>unbind</code> 파일</td></tr><tr><td>어떤 DT 노드에서 왔나</td><td><code>.../&lt;name&gt;/of_node</code></td><td><code>/sys/firmware/devicetree/base/...</code>를 가리킴 (§2)</td></tr><tr><td>대기 중인가</td><td><code>/sys/kernel/debug/devices_deferred</code></td><td>장치 이름 + <code>dev_err_probe()</code>가 남긴 이유</td></tr><tr><td>왜 실패했나</td><td><code>dmesg</code></td><td><code>probe with driver X failed with error -N</code></td></tr></tbody></table></div>
+<h3 id="1-2-예제-2-소비자-드라이버-m2_defer-c">1.2 예제 2 — 소비자 드라이버 <code>m2_defer.c</code><a class="anchor" href="#1-2-예제-2-소비자-드라이버-m2_defer-c" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인가: 센서 드라이버가 리셋 핀과 data-ready(DRDY) 핀을 GPIO 확장기에서 받는 흔한 구조를 흉내 낸다. 확장기(여기서는 gpio-sim 칩 <code>m2_sim</code>)가 아직 없으면 <code>devm_gpiod_get()</code>이 <code>-EPROBE_DEFER</code>를 돌려주고, <code>dev_err_probe()</code>가 그 이유를 기록한다. DT 대신 <code>gpiod_lookup_table</code>(보드 파일식 매핑)을 써서 오버레이 없이 재현했다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// m2_defer.c — 없는 GPIO 칩(m2_sim)을 기다리며 defer 하는 소비자 + GPIO IRQ
+#include &lt;linux/module.h&gt;
+#include &lt;linux/platform_device.h&gt;
+#include &lt;linux/gpio/consumer.h&gt;
+#include &lt;linux/gpio/machine.h&gt;
+#include &lt;linux/interrupt.h&gt;
+
+static struct platform_device *pdev_m2;
+static struct gpiod_lookup_table m2_lookup = {      /* DT 대신 보드 파일식 매핑 */
+	.dev_id = "m2_cons",
+	.table = {
+		GPIO_LOOKUP("m2_sim", 3, "reset", GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP("m2_sim", 5, "drdy", GPIO_ACTIVE_HIGH),
+		{ }
+	},
+};
+static irqreturn_t m2_drdy(int irq, void *data) { return IRQ_HANDLED; }
+
+static int m2_probe(struct platform_device *pdev)
+{
+	struct device *dev = &amp;pdev-&gt;dev;
+	struct gpio_desc *rst, *drdy;
+	int irq;
+
+	rst = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
+	if (IS_ERR(rst))
+		return dev_err_probe(dev, PTR_ERR(rst), "reset gpio not ready\n");
+	drdy = devm_gpiod_get(dev, "drdy", GPIOD_IN);
+	if (IS_ERR(drdy))
+		return dev_err_probe(dev, PTR_ERR(drdy), "drdy gpio\n");
+	irq = gpiod_to_irq(drdy);
+	if (irq &lt; 0)
+		return dev_err_probe(dev, irq, "drdy irq\n");
+	/* gpio-sim은 can_sleep 칩 → threaded handler + ONESHOT */
+	irq = devm_request_threaded_irq(dev, irq, NULL, m2_drdy,
+			IRQF_TRIGGER_RISING | IRQF_ONESHOT, "m2_drdy", NULL);
+	if (irq)
+		return dev_err_probe(dev, irq, "request irq\n");
+	dev_info(dev, "probed: reset+drdy ready\n");
+	return 0;
+}
+static struct platform_driver m2_drv = { .probe = m2_probe, .driver = { .name = "m2_cons" } };
+
+static int __init m2_init(void)
+{
+	gpiod_add_lookup_table(&amp;m2_lookup);
+	platform_driver_register(&amp;m2_drv);
+	pdev_m2 = platform_device_register_simple("m2_cons", -1, NULL, 0);
+	return PTR_ERR_OR_ZERO(pdev_m2);
+}
+static void __exit m2_exit(void)
+{
+	platform_device_unregister(pdev_m2);
+	platform_driver_unregister(&amp;m2_drv);
+	gpiod_remove_lookup_table(&amp;m2_lookup);
+}
+module_init(m2_init); module_exit(m2_exit);
+MODULE_LICENSE("GPL"); MODULE_DESCRIPTION("M2 m2_defer demo");</code></pre></figure>
+<p>출력에서 볼 것: 코드 자체는 평범한 probe다. 진단에 중요한 줄은 <code>dev_err_probe()</code> 세 개 — 에러가 <code>-EPROBE_DEFER</code>면 로그 대신 <strong>이유 문자열을 저장</strong>하고, 그 밖의 에러면 <code>dev_err</code>로 찍는다(G3 §9).</p>
+<h3 id="1-3-예제-3-defer-전후를-sysfs-debugfs로-보기">1.3 예제 3 — defer 전후를 sysfs·debugfs로 보기<a class="anchor" href="#1-3-예제-3-defer-전후를-sysfs-debugfs로-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 공급자가 없을 때 <code>devices_deferred</code>에 무엇이 보이는지, 공급자(gpio-sim 칩)를 configfs로 만든 뒤 자동 재시도로 bind되는지. dd.c의 dynamic debug를 켜서 driver core의 판단도 같이 본다(M1).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>echo 'file drivers/base/dd.c +p' &gt; /proc/dynamic_debug/control
+cat /sys/kernel/debug/devices_deferred; echo "[end]"          # 로드 전
+insmod /root/m2/m2_defer.ko; sleep 1
+cat /sys/kernel/debug/devices_deferred; echo "[end]"
+ls -l /sys/bus/platform/devices/m2_cons/ ; ls /sys/bus/platform/drivers/m2_cons/
+dmesg | grep -E "m2_cons|m2_sim" | tail -8
+# 공급자 등장: gpio-sim 칩을 configfs로 만든다 (라벨 m2_sim, 8라인)
+C=/sys/kernel/config/gpio-sim/m2_chip
+mkdir $C $C/bank0; echo 8 &gt; $C/bank0/num_lines; echo m2_sim &gt; $C/bank0/label
+mkdir $C/bank0/line0; echo m2_led &gt; $C/bank0/line0/name
+echo 1 &gt; $C/live; sleep 1; cat $C/dev_name $C/bank0/chip_name
+cat /sys/kernel/debug/devices_deferred; echo "[end]"
+ls -l /sys/bus/platform/devices/m2_cons/driver
+dmesg | grep -E "m2_cons|m2_sim|gpio-sim" | tail -10</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[end]
+m2_cons	m2_cons: reset gpio not ready
+[end]
+total 0
+-rw-r--r-- 1 root root 4096 Oct 18 06:53 driver_override
+-r--r--r-- 1 root root 4096 Oct 18 06:53 modalias
+drwxr-xr-x 2 root root    0 Oct 18 06:53 power
+lrwxrwxrwx 1 root root    0 Oct 18 06:53 subsystem -&gt; ../../../bus/platform
+-rw-r--r-- 1 root root 4096 Oct 18 06:53 uevent
+bind
+module
+uevent
+unbind
+[  607.529889] platform m2_cons: bus: 'platform': __driver_probe_device: matched device with driver m2_cons
+[  607.530090] platform m2_cons: bus: 'platform': really_probe: probing driver m2_cons with device
+[  607.551709] m2_cons m2_cons: cannot find GPIO chip m2_sim, deferring
+[  607.552088] m2_cons m2_cons: Driver m2_cons requests probe deferral
+[  607.552350] platform m2_cons: Added to deferred list
+gpio-sim.0
+gpiochip1
+[end]
+lrwxrwxrwx 1 root root 0 Oct 18 06:54 /sys/bus/platform/devices/m2_cons/driver -&gt; ../../../bus/platform/drivers/m2_cons
+[  625.661482] platform gpio-sim.0: bus: 'platform': __driver_probe_device: matched device with driver gpio-sim
+[  625.661654] platform gpio-sim.0: bus: 'platform': really_probe: probing driver gpio-sim with device
+[  625.834774] platform m2_cons: Retrying from deferred list
+[  625.975594] platform m2_cons: bus: 'platform': __driver_probe_device: matched device with driver m2_cons
+[  625.975695] platform m2_cons: bus: 'platform': really_probe: probing driver m2_cons with device
+[  625.981924] gpio-sim gpio-sim.0: driver: 'gpio-sim': driver_bound: bound to device
+[  626.195712] gpio-sim gpio-sim.0: bus: 'platform': really_probe: bound device to driver gpio-sim
+[  627.819644] m2_cons m2_cons: probed: reset+drdy ready
+[  627.819741] m2_cons m2_cons: driver: 'm2_cons': driver_bound: bound to device
+[  627.820058] m2_cons m2_cons: bus: 'platform': really_probe: bound device to driver m2_cons</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>insmod 직후 <code>devices_deferred</code>에 <code>m2_cons	m2_cons: reset gpio not ready</code>가 있다. 형식은 "장치 이름 TAB 이유". 이유 문자열은 우리가 <code>dev_err_probe()</code>에 준 메시지 그대로다 — <strong>드라이버가 <code>dev_err_probe</code>를 안 쓰면 이유 칸이 비어 있다</strong>. 그래서 리뷰에서 <code>return -EPROBE_DEFER;</code> 대신 <code>return dev_err_probe(...)</code>를 요구한다.</li><li>장치 디렉터리에 <code>driver</code> 링크가 <strong>없다</strong>. 드라이버 디렉터리에는 <code>bind</code>·<code>unbind</code>·<code>module</code>만 있고 장치 링크가 없다. 장치도 있고 드라이버도 있는데 짝이 안 된 상태 = defer.</li><li>gpiolib이 <code>cannot find GPIO chip m2_sim, deferring</code>을 dev_warn으로 찍었다. 이건 gpiolib의 lookup 테이블 경로가 남기는 줄이고, driver core 자체는 dyndbg를 켜야만 <code>requests probe deferral</code>·<code>Added to deferred list</code>를 보여 준다. <strong>즉 기본 설정에서는 defer가 거의 조용하다.</strong></li><li>gpio-sim이 bind되자마자(<code>gpio-sim.0 ... probing</code>) <code>Retrying from deferred list</code>가 나온다. 아무 드라이버나 bind에 성공하면 driver core가 deferred 목록 전체를 다시 시도하기 때문이다(<code>driver_deferred_probe_trigger()</code>).</li><li>재시도 후 <code>devices_deferred</code>는 비고, <code>driver -&gt; ../../../bus/platform/drivers/m2_cons</code> 링크가 생겼다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 450" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="10" y="10" width="150" height="34" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="85" y="32" text-anchor="middle" font-size="13">유저 (insmod)</text>
+  <rect x="175" y="10" width="150" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="250" y="32" text-anchor="middle" font-size="13">driver core (dd.c)</text>
+  <rect x="340" y="10" width="150" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="415" y="32" text-anchor="middle" font-size="13">gpiolib</text>
+  <rect x="510" y="10" width="150" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="585" y="32" text-anchor="middle" font-size="13">gpio-sim (configfs)</text>
+  <line x1="85" y1="44" x2="85" y2="440" stroke="#888" stroke-dasharray="4 4"/>
+  <line x1="250" y1="44" x2="250" y2="440" stroke="#888" stroke-dasharray="4 4"/>
+  <line x1="415" y1="44" x2="415" y2="440" stroke="#888" stroke-dasharray="4 4"/>
+  <line x1="585" y1="44" x2="585" y2="440" stroke="#888" stroke-dasharray="4 4"/>
+  <text x="90" y="66" font-size="12">insmod m2_defer.ko</text>
+  <line x1="85" y1="74" x2="248" y2="74" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="258" y="100" font-size="12">really_probe → m2_probe()</text>
+  <line x1="250" y1="108" x2="413" y2="108" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="420" y="104" font-size="12">devm_gpiod_get("reset")</text>
+  <line x1="415" y1="140" x2="252" y2="140" stroke="#d0564a" marker-end="url(#ah3)"/>
+  <text x="420" y="144" font-size="12">-EPROBE_DEFER</text>
+  <rect x="130" y="156" width="240" height="30" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="250" y="176" text-anchor="middle" font-size="12">deferred 목록 + 이유 문자열 저장</text>
+  <text x="10" y="176" font-size="12">607.55 s</text>
+  <text x="90" y="216" font-size="12">echo 1 &gt; live</text>
+  <line x1="85" y1="224" x2="583" y2="224" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="260" y="254" font-size="12">gpio-sim bind 성공 → deferred trigger</text>
+  <line x1="585" y1="262" x2="252" y2="262" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="10" y="262" font-size="12">625.83 s</text>
+  <rect x="130" y="278" width="240" height="30" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="250" y="298" text-anchor="middle" font-size="12">Retrying from deferred list</text>
+  <line x1="250" y1="330" x2="413" y2="330" stroke="currentColor" marker-end="url(#ah3)"/>
+  <text x="420" y="334" font-size="12">gpiod_get 재시도 → 성공</text>
+  <rect x="100" y="352" width="300" height="30" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="250" y="372" text-anchor="middle" font-size="12">driver_bound · driver 링크 생성 · 목록에서 제거</text>
+  <text x="10" y="372" font-size="12">627.82 s</text>
+  <text x="250" y="420" text-anchor="middle" font-size="12">시각은 TCG·과부하 VM의 dmesg 값 (실제 HW 아님)</text>
+</svg></figure>
+<p>그림 3 — 예제 3의 deferred probe 순서. 공급자가 생기면 "누군가 bind 성공" 이벤트가 목록 전체 재시도를 일으킨다.</p>
+<h3 id="1-4-deferred_probe_timeout-영원히-기다리지-않는-장치">1.4 <code>deferred_probe_timeout</code> — 영원히 기다리지 않는 장치<a class="anchor" href="#1-4-deferred_probe_timeout-영원히-기다리지-않는-장치" aria-label="link">#</a></h3>
+<p>defer가 끝나지 않으면 어떻게 될까. 6.18 <code>drivers/base/dd.c</code>를 보면:</p>
+<figure class="code"><span class="lang">c</span><pre><code>#ifdef CONFIG_MODULES
+static int driver_deferred_probe_timeout = 10;
+#else
+static int driver_deferred_probe_timeout;
+#endif
+...
+static void deferred_probe_timeout_work_func(struct work_struct *work)
+{
+	...
+	list_for_each_entry(p, &amp;deferred_probe_pending_list, deferred_probe)
+		dev_warn(p-&gt;device, "deferred probe pending: %s", p-&gt;deferred_probe_reason ?: "(reason unknown)\n");
+	...
+}</code></pre></figure>
+<ul><li>부팅 때 initcall이 다 끝난 뒤 이 타이머(기본 10초, 커널 인자 <code>deferred_probe_timeout=</code>로 변경)가 돈다. 만료되면 아직 대기 중인 장치마다 <strong><code>deferred probe pending: &lt;이유&gt;</code></strong> 경고를 한 번 찍는다. 부팅 로그에서 이 줄을 grep하는 것이 "부팅 후 안 붙은 장치" 목록을 얻는 가장 빠른 방법이다.</li><li>만료 후에는 <code>driver_deferred_probe_check_state()</code>를 쓰는 서브시스템(일부 pinctrl·IOMMU·power domain 경로)이 "선택적 공급자"를 포기하고 <code>-ETIMEDOUT</code>으로 진행한다(<code>deferred probe timeout, ignoring dependency</code>).</li><li>실습에서는 이 메시지를 재현하지 않았다. 타이머가 부팅 직후 한 번만 돌고, 우리 모듈은 그 뒤에 insmod했기 때문이다. 위 코드는 랩 소스 <code>/var/lab/src/linux-6.18.55/drivers/base/dd.c</code> 255–330행에서 확인한 것이다.</li></ul>
+<h3 id="1-5-예제-4-probe-실패는-에러-코드에-따라-다르게-찍힌다">1.5 예제 4 — probe 실패는 에러 코드에 따라 다르게 찍힌다<a class="anchor" href="#1-5-예제-4-probe-실패는-에러-코드에-따라-다르게-찍힌다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>m2_regs</code>의 <code>fail</code> 파라미터로 probe가 <code>-EIO</code>(-5), <code>-ENODEV</code>(-19), <code>-ETIMEDOUT</code>(-110)을 돌려주게 하고, sysfs <code>bind</code>에 쓴 쪽과 dmesg에 무엇이 보이는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>D=/sys/bus/platform/drivers/m2_regs; echo m2_regs &gt; $D/unbind
+for e in -5 -19 -110; do echo $e &gt; /sys/module/m2_regs/parameters/fail; echo m2_regs &gt; $D/bind; echo "bind($e) rc=$?"; done
+dmesg | grep -E "m2_regs.*(failed|rejects)" | tail -3
+echo 0 &gt; /sys/module/m2_regs/parameters/fail; echo m2_regs &gt; $D/bind; ls -l /sys/bus/platform/devices/m2_regs/driver</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>/root/m2/m2_run2.sh: line 8: echo: write error: Input/output error
+bind(-5) rc=1
+/root/m2/m2_run2.sh: line 8: echo: write error: No such device
+bind(-19) rc=1
+/root/m2/m2_run2.sh: line 8: echo: write error: Connection timed out
+bind(-110) rc=1
+[  758.076775] m2_regs m2_regs: probe with driver m2_regs failed with error -5
+[  758.102924] m2_regs m2_regs: probe with driver m2_regs rejects match -19
+[  758.128143] m2_regs m2_regs: probe with driver m2_regs failed with error -110
+lrwxrwxrwx 1 root root 0 Oct 18 06:56 /sys/bus/platform/devices/m2_regs/driver -&gt; ../../../bus/platform/drivers/m2_regs</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>bind</code>에 쓴 <code>echo</code>가 probe의 에러 코드를 그대로 errno로 받는다(<code>Input/output error</code>, <code>No such device</code>, <code>Connection timed out</code>). <strong>수동 bind는 probe를 디버깅하는 가장 빠른 루프</strong>다 — 모듈을 내렸다 올릴 필요가 없다.</li><li><code>-5</code>와 <code>-110</code>은 <code>dev_err</code>로 <code>failed with error</code>가 찍힌다. <strong><code>-19</code>(ENODEV)와 <code>-6</code>(ENXIO)은 "이 장치는 내 것이 아니다"라는 뜻으로 취급돼 <code>dev_dbg</code>(<code>rejects match</code>)로만 찍힌다</strong> — 여기서는 dd.c dyndbg를 켜 뒀기 때문에 보였다. 기본 설정이면 dmesg에 아무것도 없고 장치는 조용히 unbound로 남는다. 칩 ID가 안 맞을 때 <code>-ENODEV</code>를 돌려주는 드라이버가 많으니, "로그 없이 안 붙는다"면 이 경우를 의심한다.</li><li><code>fail=0</code>으로 되돌리고 bind하면 정상 bind된다. 설정 파라미터가 <code>0644</code>라서 런타임에 바꿀 수 있었다(§7).</li></ul>
+<div class="tw"><table><thead><tr><th>probe 반환값</th><th>driver core 동작</th><th>기본 로그</th></tr></thead><tbody><tr><td>0</td><td>bind, <code>driver</code> 링크 생성</td><td>없음 (드라이버가 찍는 것만)</td></tr><tr><td><code>-EPROBE_DEFER</code> (-517)</td><td>deferred 목록, 나중에 재시도</td><td>없음 (<code>devices_deferred</code>에 이유)</td></tr><tr><td><code>-ENODEV</code> (-19) · <code>-ENXIO</code> (-6)</td><td>매치 거부, 다음 드라이버 시도</td><td>없음 (dbg만)</td></tr><tr><td>그 밖의 음수</td><td>실패, unbound로 남음</td><td><code>probe with driver X failed with error -N</code></td></tr></tbody></table></div>
+<blockquote><p>참고: <code>-517</code>이라는 숫자가 dmesg에 직접 보이는 경우는 <code>initcall_debug</code>나 일부 서브시스템이 반환값을 그대로 찍을 때다. 예전 커널(5.x 초반 이전)에서는 <code>dev_err(..., "... %d", ret)</code>로 -517을 찍는 드라이버가 흔했고, 그래서 "error -517"이 검색어로 유명하다. 지금은 <code>dev_err_probe()</code> 덕에 대부분 사라졌다.</p></blockquote>
+<hr>
+<h2 id="2-질문-①-어떤-dt-노드가-쓰였나">2. 질문 ① — "어떤 DT 노드가 쓰였나?"<a class="anchor" href="#2-질문-①-어떤-dt-노드가-쓰였나" aria-label="link">#</a></h2>
+<h3 id="2-1-세-이름은-같은-트리다">2.1 세 이름은 같은 트리다<a class="anchor" href="#2-1-세-이름은-같은-트리다" aria-label="link">#</a></h3>
+<ul><li><code>/proc/device-tree</code> → <code>/sys/firmware/devicetree/base</code>로 가는 심볼릭 링크다. 커널이 <strong>실제로 받아서 해석한</strong> DT(부트로더가 고친 것, 오버레이 적용 후)를 보여 준다. 빌드한 <code>.dts</code>가 아니라 이것이 진실이다(D1, D6).</li><li>각 장치의 <code>of_node</code> 링크가 그 트리의 한 노드를 가리킨다. "이 장치는 어느 노드에서 만들어졌나"의 답.</li><li>속성 파일은 바이너리다. 문자열 목록은 NUL로 구분되고, 숫자는 big-endian 32비트 셀이다. <code>tr '\0' ' '</code>와 <code>od -An -tx1</code>로 읽는다.</li></ul>
+<h3 id="2-2-예제-5-pl011-uart-장치에서-dt-노드까지">2.2 예제 5 — PL011 UART 장치에서 DT 노드까지<a class="anchor" href="#2-2-예제-5-pl011-uart-장치에서-dt-노드까지" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: amba 버스의 <code>9000000.pl011</code> 장치가 어느 노드에서 왔고 어떤 드라이버가 잡았는지, <code>reg</code> 셀이 <code>/proc/iomem</code>(§4)과 맞는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /proc/device-tree/compatible | tr '\0' ' '; echo
+ls -l /sys/bus/amba/devices/9000000.pl011/of_node /sys/bus/amba/devices/9000000.pl011/driver
+ls /sys/bus/amba/devices/9000000.pl011/of_node/
+cat /sys/bus/amba/devices/9000000.pl011/of_node/compatible | tr "\0" " "; echo
+od -An -tx1 /sys/bus/amba/devices/9000000.pl011/of_node/reg
+cat /sys/kernel/debug/devices_deferred; echo "[end]"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>linux,dummy-virt 
+lrwxrwxrwx 1 root root 0 Oct 18 06:56 /sys/bus/amba/devices/9000000.pl011/driver -&gt; ../../../bus/amba/drivers/uart-pl011
+lrwxrwxrwx 1 root root 0 Oct 18 06:56 /sys/bus/amba/devices/9000000.pl011/of_node -&gt; ../../../firmware/devicetree/base/pl011@9000000
+clock-names
+clocks
+compatible
+interrupts
+name
+reg
+arm,pl011 arm,primecell 
+ 00 00 00 00 09 00 00 00 00 00 00 00 00 00 10 00
+[end]</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>루트 <code>compatible</code>이 <code>linux,dummy-virt</code>. <code>of_node</code>는 <code>../../../firmware/devicetree/base/pl011@9000000</code>을, <code>driver</code>는 <code>amba/drivers/uart-pl011</code>을 가리킨다. 처음에 <code>/sys/bus/platform/devices/9000000.pl011</code>을 찾다가 "No such file"을 봤다 — PL011은 <strong>amba 버스</strong> 장치라서다. "장치가 없다"고 결론 내리기 전에 <code>ls /sys/bus/</code>의 다른 버스도 본다.</li><li><code>reg</code>의 16바이트 = <code>&lt;0x0 0x09000000 0x0 0x1000&gt;</code> (address-cells=2, size-cells=2). §4의 <code>/proc/iomem</code> 줄 <code>09000000-09000fff : 9000000.pl011</code>과 정확히 맞는다.</li><li><code>devices_deferred</code>가 비어 있다(<code>[end]</code>만). 부팅 후 안 붙은 장치가 없다는 뜻이다.</li></ul>
+<p>함정: <code>status = "disabled"</code>인 노드는 <code>/proc/device-tree</code>에는 <strong>있지만</strong> 장치 객체가 만들어지지 않는다. 노드가 보인다고 장치가 있는 게 아니다 — 그림 1의 ①과 ②는 다른 질문이다. <code>cat .../status</code>가 없으면 기본값 okay다.</p>
+<hr>
+<h2 id="3-질문-⑦-인터럽트가-들어오나">3. 질문 ⑦ — "인터럽트가 들어오나?"<a class="anchor" href="#3-질문-⑦-인터럽트가-들어오나" aria-label="link">#</a></h2>
+<h3 id="3-1-숫자-세-개가-같은-인터럽트를-가리킨다">3.1 숫자 세 개가 같은 인터럽트를 가리킨다<a class="anchor" href="#3-1-숫자-세-개가-같은-인터럽트를-가리킨다" aria-label="link">#</a></h3>
+<p>SSD 컨트롤러에서는 인터럽트 번호가 하나였다 — 벡터 테이블의 인덱스. Linux에는 번호가 세 겹이다(H6).</p>
+<ul><li><strong>hwirq</strong>: 인터럽트 컨트롤러 안의 번호. GIC라면 SPI 1 = hwirq 33(32 + 1). gpio-sim이라면 라인 번호.</li><li><strong>irq_domain</strong>: 컨트롤러 하나마다 하나. hwirq → Linux 번호 변환표.</li><li><strong>virq (Linux IRQ 번호)</strong>: <code>request_irq()</code>에 넘기는 번호, <code>/proc/interrupts</code> 맨 앞 칸, <code>/proc/irq/N/</code>의 N. 부팅마다 바뀔 수 있다 — <strong>보드 문서에 virq를 적지 말 것.</strong></li></ul>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="105" y="20" text-anchor="middle" font-size="13">HW 신호</text>
+  <text x="340" y="20" text-anchor="middle" font-size="13">irq_domain (hwirq)</text>
+  <text x="590" y="20" text-anchor="middle" font-size="13">Linux virq</text>
+  <rect x="10" y="34" width="190" height="40" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="105" y="59" text-anchor="middle" font-size="12">PL011 UART (DT: SPI 1)</text>
+  <rect x="240" y="34" width="200" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="59" text-anchor="middle" font-size="12">GIC-0 · hwirq 33</text>
+  <rect x="540" y="34" width="100" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="590" y="59" text-anchor="middle" font-size="12">13</text>
+  <line x1="200" y1="54" x2="238" y2="54" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="440" y1="54" x2="538" y2="54" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="10" y="90" width="190" height="40" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="105" y="115" text-anchor="middle" font-size="12">virtio-net MSI-X 벡터 1</text>
+  <rect x="240" y="90" width="200" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="115" text-anchor="middle" font-size="12">GICv2m-PCI-MSIX · hwirq 1</text>
+  <rect x="540" y="90" width="100" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="590" y="115" text-anchor="middle" font-size="12">21</text>
+  <line x1="200" y1="110" x2="238" y2="110" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="440" y1="110" x2="538" y2="110" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="10" y="146" width="190" height="40" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="105" y="171" text-anchor="middle" font-size="12">gpio-sim 라인 5 (DRDY)</text>
+  <rect x="240" y="146" width="200" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="171" text-anchor="middle" font-size="12">irq_sim · hwirq 5</text>
+  <rect x="540" y="146" width="100" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="590" y="171" text-anchor="middle" font-size="12">26</text>
+  <line x1="200" y1="166" x2="238" y2="166" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="440" y1="166" x2="538" y2="166" stroke="currentColor" marker-end="url(#ah4)"/>
+  <rect x="10" y="210" width="660" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="232" text-anchor="middle" font-size="12">/proc/interrupts 한 행: virq · CPU별 카운트 · chip 이름 · hwirq · 트리거 · action 이름</text>
+  <rect x="10" y="252" width="660" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="274" text-anchor="middle" font-size="12">/proc/irq/N/: smp_affinity(_list) · effective_affinity(_list) · spurious · action 이름 디렉터리</text>
+  <rect x="10" y="294" width="660" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="316" text-anchor="middle" font-size="12">/sys/kernel/irq/N/: chip_name · hwirq · type · actions · per_cpu_count · wakeup</text>
+</svg></figure>
+<p>그림 4 — 실습 게스트에서 실제로 본 세 인터럽트의 번호 변환. 오른쪽 virq가 모든 진단 파일의 키다.</p>
+<h3 id="3-2-예제-6-proc-interrupts-한-장-읽기">3.2 예제 6 — <code>/proc/interrupts</code> 한 장 읽기<a class="anchor" href="#3-2-예제-6-proc-interrupts-한-장-읽기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 2 CPU 게스트의 인터럽트 표 전체. 어떤 열이 무엇인지 확인한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /proc/interrupts</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>           CPU0       CPU1       
+ 11:      63874      63903 GIC-0  27 Level     arch_timer
+ 13:          0          0 GIC-0  33 Level     uart-pl011
+ 17:          0          0 GICv2m-PCI-MSIX-0000:00:02.0   0 Edge      virtio1-config
+ 18:       1047          0 GICv2m-PCI-MSIX-0000:00:02.0   1 Edge      virtio1-req.0
+ 19:          0       1097 GICv2m-PCI-MSIX-0000:00:02.0   2 Edge      virtio1-req.1
+ 20:          0          0 GICv2m-PCI-MSIX-0000:00:01.0   0 Edge      virtio0-config
+ 21:          0          0 GICv2m-PCI-MSIX-0000:00:01.0   1 Edge      virtio0-input.0
+ 22:          0          0 GICv2m-PCI-MSIX-0000:00:01.0   2 Edge      virtio0-output.0
+ 23:          0          0 GIC-0  34 Level     rtc-pl031
+ 24:          0          0 GIC-0  23 Level     arm-pmu
+ 25:          0          0 9030000.pl061   3 Edge      GPIO Key Poweroff
+ 26:          3          0  irq_sim   5 Edge      m2_drdy
+IPI0:      4658       4226       Rescheduling interrupts
+IPI1:      2308       2204       Function call interrupts
+IPI2:         0          0       CPU stop interrupts
+IPI3:         0          0       CPU stop NMIs
+IPI4:         0          0       Timer broadcast interrupts
+IPI5:         3          0       IRQ work interrupts
+IPI6:         0          0       CPU backtrace interrupts
+IPI7:         0          0       KGDB roundup interrupts
+Err:          0</code></pre></figure>
+<p>출력에서 볼 것 (열 순서: virq, CPU0 카운트, CPU1 카운트, irq chip/domain 이름, hwirq, 트리거, action 이름):</p>
+<ul><li><code>11: arch_timer</code> (GIC PPI 27) — 양쪽 CPU에서 거의 같이 증가한다. 각 CPU의 로컬 타이머라 per-CPU 인터럽트다. 이 수가 <strong>멈춰 있다면</strong> 그 CPU의 tick이 죽은 것이다(NO_HZ idle이면 느리게 는다 — N 모듈).</li><li><code>13: uart-pl011</code> 카운트 0 — 콘솔이 polling/FIFO로 쓰는 경우가 많고, 이 게스트는 출력을 systemd 서비스 파일로 돌렸다. "UART IRQ가 0이면 고장"이라고 단정하지 말 것.</li><li><code>18/19: virtio1-req.0/1</code> — virtio-blk의 큐 두 개가 CPU0·CPU1에 <strong>하나씩 고정</strong>돼 있다(managed affinity, §3.4).</li><li><code>25: 9030000.pl061 3 Edge GPIO Key Poweroff</code> — <strong>GPIO 컨트롤러가 다시 인터럽트 컨트롤러</strong>가 된 경우. chip 칸에 GIC 대신 GPIO 장치 이름이 나온다.</li><li><code>26: irq_sim 5 Edge m2_drdy</code> — 우리 DRDY 핀.</li><li><code>IPI0..7</code> — CPU 간 인터럽트(Rescheduling, Function call 등). 숫자가 비정상적으로 크면 스케줄러가 CPU 사이에서 일을 계속 옮기고 있다는 신호(F1). <code>Err:</code>는 컨트롤러가 보고한 가짜/잘못된 인터럽트 수.</li></ul>
+<h3 id="3-3-예제-7-내-irq가-실제로-오는지-before-after">3.3 예제 7 — 내 IRQ가 실제로 오는지: before/after<a class="anchor" href="#3-3-예제-7-내-irq가-실제로-오는지-before-after" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: DRDY 라인(gpio-sim 라인 5)의 입력을 상승 에지 3번 만들고, 카운트가 3 증가하는지. <code>/sys/kernel/irq/N/</code>의 상세 정보.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>grep -E "CPU0|m2_drdy" /proc/interrupts
+P=/sys/devices/platform/gpio-sim.0/gpiochip1/sim_gpio5
+for i in 1 2 3; do echo pull-up &gt; $P/pull; echo pull-down &gt; $P/pull; done
+grep m2_drdy /proc/interrupts
+IRQ=26
+for f in chip_name hwirq name type actions per_cpu_count wakeup; do echo "$f: $(cat /sys/kernel/irq/$IRQ/$f)"; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>           CPU0       CPU1       
+ 26:          0          0  irq_sim   5 Edge      m2_drdy
+ 26:          3          0  irq_sim   5 Edge      m2_drdy
+chip_name: irq_sim
+hwirq: 5
+name: 
+type: edge
+actions: m2_drdy
+per_cpu_count: 3,0
+wakeup: disabled</code></pre></figure>
+<p>출력에서 볼 것: 0 → 3. 상승 에지만 세도록(<code>IRQF_TRIGGER_RISING</code>) 요청했으니 pull-up 세 번 = 3회다. <code>per_cpu_count: 3,0</code>은 전부 CPU0에서 처리됐다는 뜻. <code>type: edge</code>는 실제로 컨트롤러에 설정된 트리거다 — DT의 <code>interrupts</code> 플래그와 드라이버의 <code>IRQF_TRIGGER_*</code>가 어긋나면 여기서 드러난다.</p>
+<p>bring-up에서는 이 패턴을 그대로 쓴다: <strong>센서를 한 번 흔들고(혹은 DRDY를 scope로 확인하고) 카운트가 움직이는지 본다.</strong> 안 움직이면 ⑥ 자원(핀먹스·트리거·컨트롤러) 쪽, 미친 듯이 오르면 레벨 인터럽트를 안 지우는 핸들러(인터럽트 폭풍)다.</p>
+<h3 id="3-4-예제-8-affinity-바꾸기와-managed-irq의-거부">3.4 예제 8 — affinity 바꾸기와 "managed" IRQ의 거부<a class="anchor" href="#3-4-예제-8-affinity-바꾸기와-managed-irq의-거부" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: virtio IRQ들의 현재 affinity, 그리고 블록 큐 IRQ(18)와 네트워크 RX IRQ(21)를 CPU1로 옮겨 보기. 네트워크는 ping 20번으로 트래픽을 만든다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>for n in 17 18 19 20 21 22; do echo "irq $n $(grep -E "^ *$n:" /proc/interrupts | awk '{print $NF}') aff=$(cat /proc/irq/$n/smp_affinity) list=$(cat /proc/irq/$n/smp_affinity_list) eff=$(cat /proc/irq/$n/effective_affinity_list)"; done
+ls /proc/irq/26/; cat /proc/irq/default_smp_affinity
+BLK=18; NET=21; echo "BLK=$BLK NET=$NET"     # 실제 스크립트는 grep으로 번호를 뽑았다
+echo 1 &gt; /proc/irq/18/smp_affinity_list; echo "blk set rc=$?"
+grep -E "^ *21:" /proc/interrupts; echo 1 &gt; /proc/irq/21/smp_affinity_list; echo "net set rc=$?"
+cat /proc/irq/21/effective_affinity_list
+ip -br a; ping -c 20 -i 0.2 -q 10.0.2.2 | tail -2; grep -E "^ *21:" /proc/interrupts
+cat /proc/softirqs; cat /proc/irq/21/spurious</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>irq 17 virtio1-config aff=3 list=0-1 eff=0
+irq 18 virtio1-req.0 aff=1 list=0 eff=0
+irq 19 virtio1-req.1 aff=2 list=1 eff=1
+irq 20 virtio0-config aff=3 list=0-1 eff=0
+irq 21 virtio0-input.0 aff=3 list=0-1 eff=0
+irq 22 virtio0-output.0 aff=3 list=0-1 eff=0
+affinity_hint
+effective_affinity
+effective_affinity_list
+m2_drdy
+node
+smp_affinity
+smp_affinity_list
+spurious
+3
+BLK=18 NET=21
+/root/m2/m2_run.sh: line 39: echo: write error: Operation not permitted
+blk set rc=1
+ 21:          0          0 GICv2m-PCI-MSIX-0000:00:01.0   1 Edge      virtio0-input.0
+net set rc=0
+1
+lo               UNKNOWN        127.0.0.1/8 
+enp0s1           UP             10.0.2.15/24 metric 1024 
+20 packets transmitted, 20 received, 0% packet loss, time 3918ms
+rtt min/avg/max/mdev = 0.475/2.208/6.037/1.806 ms
+ 21:          0         27 GICv2m-PCI-MSIX-0000:00:01.0   1 Edge      virtio0-input.0
+                    CPU0       CPU1       
+          HI:          0          0
+       TIMER:      19134      17446
+      NET_TX:          1          2
+      NET_RX:          7         31
+       BLOCK:          0          0
+    IRQ_POLL:          0          0
+     TASKLET:          1          0
+       SCHED:      15800      16096
+     HRTIMER:          0          0
+         RCU:      19112      18833
+count 0
+unhandled 0
+last_unhandled 0 ms</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>smp_affinity</code>는 CPU 비트마스크(16진), <code>_list</code>는 사람이 읽는 목록. <strong><code>effective_affinity</code>가 실제 배달 대상</strong>이다. GIC는 SPI 하나를 한 CPU에만 보내므로 허용 목록이 <code>0-1</code>이어도 effective는 <code>0</code> 하나다. "affinity를 0-1로 줬는데 왜 CPU0만 받냐"의 답.</li><li>IRQ 18(virtio-blk 큐)은 <code>write error: Operation not permitted</code>(앞의 <code>line 39</code>는 스크립트 파일로 실행해서 bash가 붙인 접두어). 블록 multiqueue 드라이버는 큐마다 CPU를 고정하는 <strong>managed IRQ</strong>(<code>IRQD_AFFINITY_MANAGED</code>)를 쓰고, 커널이 유저의 변경을 거부한다. NVMe도 똑같다 — SSD 시절 "큐 하나 = 코어 하나" 설계가 Linux에서는 이렇게 보인다.</li><li>IRQ 21(virtio-net RX)은 변경 성공 → ping 20번 뒤 카운트가 <strong>CPU1 칸에만</strong> 27 늘었다. <code>NET_RX</code> softirq도 CPU1 쪽이 31로 많다 — 하드 IRQ를 받은 CPU에서 softirq(NAPI)가 돌기 때문이다(F7).</li><li><code>spurious</code>의 <code>unhandled 0</code> — 핸들러가 전부 <code>IRQ_NONE</code>을 돌려주면 이 수가 오르고, 10만 번 중 9만 9900번 이상이면 커널이 <code>irq N: nobody cared</code>를 찍고 그 IRQ를 끈다. 공유 IRQ 핸들러에서 자기 장치인지 확인 안 하고 <code>IRQ_HANDLED</code>/<code>IRQ_NONE</code>을 잘못 돌려줄 때 보는 파일이다.</li><li><code>/proc/irq/26/</code> 안의 <code>m2_drdy</code> 디렉터리는 action 이름이다. 실습 커널에는 <code>CONFIG_GENERIC_IRQ_DEBUGFS</code>가 없어서 <code>/sys/kernel/debug/irq/</code>(irq_domain·상태 비트 덤프)는 확인하지 못했다. 그 옵션이 켜진 커널이면 <code>/sys/kernel/debug/irq/irqs/N</code>에서 domain·hwirq·상태 플래그(<code>IRQD_*</code>)까지 보인다.</li></ul>
+<hr>
+<h2 id="4-질문-⑥의-전제-주소-맵이-맞나-proc-iomem-proc-ioports-memblock">4. 질문 ⑥의 전제 — "주소 맵이 맞나?" (<code>/proc/iomem</code>, <code>/proc/ioports</code>, memblock)<a class="anchor" href="#4-질문-⑥의-전제-주소-맵이-맞나-proc-iomem-proc-ioports-memblock" aria-label="link">#</a></h2>
+<h3 id="4-1-직관">4.1 직관<a class="anchor" href="#4-1-직관" aria-label="link">#</a></h3>
+<p><code>/proc/iomem</code>은 커널의 <code>struct resource</code> 트리(<code>iomem_resource</code>)를 그대로 출력한다. 들여쓰기가 트리 깊이다. <strong>바깥 줄 = DT/버스가 선언한 영역, 안쪽 줄 = 드라이버가 <code>request_mem_region()</code>(<code>devm_ioremap_resource</code>가 내부에서 호출)으로 실제 점유한 영역.</strong> 그래서 안쪽 줄이 없으면 "장치는 있는데 드라이버가 레지스터를 잡지 않았다"는 뜻이다. 두 드라이버가 같은 영역을 잡으려 하면 두 번째가 <code>-EBUSY</code>로 probe에 실패하고, 그 충돌도 여기서 보인다.</p>
+<h3 id="4-2-예제-9-root-vs-일반-사용자">4.2 예제 9 — root vs 일반 사용자<a class="anchor" href="#4-2-예제-9-root-vs-일반-사용자" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: root로 본 iomem, <code>nobody</code>(uid 65534)로 본 iomem, ioports.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /proc/iomem
+setpriv --reuid=65534 --regid=65534 --clear-groups cat /proc/iomem | head -12
+cat /proc/ioports</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>00000000-03ffffff : 0.flash flash@0
+04000000-07ffffff : 0.flash flash@0
+09000000-09000fff : pl011@9000000
+  09000000-09000fff : 9000000.pl011 pl011@9000000
+09010000-09010fff : pl031@9010000
+  09010000-09010fff : rtc-pl031
+09030000-09030fff : pl061@9030000
+  09030000-09030fff : 9030000.pl061 pl061@9030000
+10000000-3efeffff : pcie@10000000
+  10000000-1007ffff : 0000:00:01.0
+  10080000-10080fff : 0000:00:01.0
+  10081000-10081fff : 0000:00:02.0
+40000000-7fffffff : System RAM
+  40200000-4356ffff : Kernel code
+  43570000-4398ffff : reserved
+  43990000-4419ffff : Kernel data
+  48000000-480fffff : reserved
+  7cb00000-7fbfffff : reserved
+  7fc29000-7fc2bfff : reserved
+  7fc2c000-7fdacfff : reserved
+  7fdad000-7fdf2fff : reserved
+  7fdf5000-7fdf5fff : reserved
+  7fdf6000-7fdf8fff : reserved
+  7fdf9000-7fe0bfff : reserved
+  7fe0c000-7fe16fff : reserved
+  7fe17000-7fffffff : reserved
+4010000000-401fffffff : PCI ECAM
+8000000000-ffffffffff : pcie@10000000
+  8000000000-8000003fff : 0000:00:01.0
+    8000000000-8000003fff : virtio-pci-modern
+  8000004000-8000007fff : 0000:00:02.0
+    8000004000-8000007fff : virtio-pci-modern
+--- (nobody) ---
+00000000-00000000 : 0.flash flash@0
+00000000-00000000 : 0.flash flash@0
+00000000-00000000 : pl011@9000000
+  00000000-00000000 : 9000000.pl011 pl011@9000000
+00000000-00000000 : pl031@9010000
+  00000000-00000000 : rtc-pl031
+00000000-00000000 : pl061@9030000
+  00000000-00000000 : 9030000.pl061 pl061@9030000
+00000000-00000000 : pcie@10000000
+  00000000-00000000 : 0000:00:01.0
+  00000000-00000000 : 0000:00:01.0
+  00000000-00000000 : 0000:00:02.0
+--- ioports ---
+00000000-0000ffff : pcie@10000000
+  00001000-0000107f : 0000:00:02.0
+  00001080-0000109f : 0000:00:01.0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>09000000-09000fff : pl011@9000000</code> 바깥 줄 아래 <code>9000000.pl011</code> 안쪽 줄 = PL011 드라이버가 4 KiB를 점유했다. 예제 5의 <code>reg</code>와 일치. <code>pl031</code>(RTC), <code>pl061</code>(GPIO)도 같은 모양.</li><li><code>10000000-3efeffff : pcie@10000000</code>, <code>4010000000-401fffffff : PCI ECAM</code>, <code>8000000000-ffffffffff</code>(64비트 prefetch 창) — QEMU가 만든 DT의 PCIe <code>ranges</code>·<code>reg</code>와 같다(<code>ranges = &lt;... 0x2000000 0x00 0x10000000 ...&gt;</code>, <code>reg = &lt;0x40 0x10000000 ...&gt;</code>, <code>dumpdtb</code>로 확인). 그 안에 virtio-pci BAR가 <code>virtio-pci-modern</code>으로 잡혀 있다.</li><li><code>40000000-7fffffff : System RAM</code> 안에 <code>Kernel code</code>, <code>Kernel data</code>, 여러 <code>reserved</code>가 보인다. 이 reserved 합이 §5의 "MemTotal이 RAM보다 작은 이유"다. <code>7cb00000-7fbfffff</code>(48 MiB)는 CMA·DMA 풀·page 구조체 등 부팅 초기 memblock 예약이다.</li><li><strong>일반 사용자에게는 주소가 전부 0</strong>이다. 이름과 트리 모양은 보이지만 숫자는 가린다(<code>kernel/resource.c</code>의 <code>r_show()</code>가 <code>CAP_SYS_ADMIN</code>이 없으면 start/end를 0으로 찍는다). 버그 리포트에 "iomem이 다 0이에요"가 붙어 오면 sudo 없이 본 것이다.</li><li><code>/proc/ioports</code>는 x86의 I/O 포트 공간용이지만 arm64에서는 PCIe의 I/O 창(<code>0x3eff0000</code>에 매핑된 64 KiB)을 포트 번호로 보여 준다. virtio-pci 장치의 레거시 I/O BAR가 여기 있다.</li></ul>
+<h3 id="4-3-예제-10-memblock-커널이-부팅-초기에-알던-메모리">4.3 예제 10 — memblock: 커널이 부팅 초기에 알던 메모리<a class="anchor" href="#4-3-예제-10-memblock-커널이-부팅-초기에-알던-메모리" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>ARCH_KEEP_MEMBLOCK</code>가 켜진 arm64 커널에서 debugfs <code>memblock/memory</code>·<code>reserved</code>. DT에 <code>reserved-memory</code> 노드가 있는지도 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /sys/kernel/debug/memblock/memory; cat /sys/kernel/debug/memblock/reserved | head -20
+ls /proc/device-tree/reserved-memory</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>   0: 0x0000000040000000..0x000000007fffffff    0 NONE
+   0: 0x0000000040200000..0x000000004356ffff    0 NONE
+   1: 0x0000000043990000..0x000000004419ffff    0 NONE
+   2: 0x0000000048000000..0x00000000480fffff    0 NONE
+   3: 0x000000007cb00000..0x000000007fbfffff    0 RSV_KERN
+   4: 0x000000007fc29000..0x000000007fc2bfff    0 RSV_KERN
+   5: 0x000000007fc2cbc0..0x000000007fdacfc7    0 RSV_KERN
+   6: 0x000000007fdad000..0x000000007fdf2fff    0 RSV_KERN
+   7: 0x000000007fdf5200..0x000000007fdf521f    0 RSV_KERN
+   8: 0x000000007fdf5240..0x000000007fdf5807    0 RSV_KERN
+   9: 0x000000007fdf5840..0x000000007fdf589f    0 RSV_KERN
+  10: 0x000000007fdf58c0..0x000000007fdf5a47    0 RSV_KERN
+...
+ls: cannot access '/proc/device-tree/reserved-memory': No such file or directory</code></pre></figure>
+<p>(memory는 첫 한 줄, 나머지는 reserved — 20줄 중 앞 11줄만 남겼다.)</p>
+<p>출력에서 볼 것: <code>memory</code>는 <code>0x40000000..0x7fffffff</code> 한 줄(DT <code>memory@40000000</code>의 <code>reg</code>). <code>reserved</code>의 첫 세 줄이 iomem의 <code>Kernel code</code>·<code>Kernel data</code>·<code>48000000-480fffff</code>(DT blob을 복사해 둔 영역)와 같은 범위다. QEMU virt DT에는 <code>reserved-memory</code> 노드가 없어서 <code>ls</code>가 실패한다. 실제 SoC(i.MX8, AM62, Jetson)에서는 여기에 코프로세서 펌웨어·DSP·카메라용 carve-out 노드가 여럿 있고, 각각 iomem에 <code>reserved</code>로, 드라이버가 <code>memory-region</code>으로 참조하면 <code>of_reserved_mem</code> 로그로 나타난다(F10 참조 — 이 부분은 랩에서 재현 안 함).</p>
+<hr>
+<h2 id="5-메모리가-어디-갔나-meminfo-slabinfo-buddyinfo-vmallocinfo-zoneinfo">5. "메모리가 어디 갔나?" — meminfo · slabinfo · buddyinfo · vmallocinfo · zoneinfo<a class="anchor" href="#5-메모리가-어디-갔나-meminfo-slabinfo-buddyinfo-vmallocinfo-zoneinfo" aria-label="link">#</a></h2>
+<h3 id="5-1-proc-meminfo-필드의-정확한-뜻">5.1 <code>/proc/meminfo</code> 필드의 정확한 뜻<a class="anchor" href="#5-1-proc-meminfo-필드의-정확한-뜻" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>필드</th><th>뜻</th><th>bring-up에서 보는 이유</th></tr></thead><tbody><tr><td><code>MemTotal</code></td><td>버디 할당자가 관리하는 페이지 총합(= zoneinfo <code>managed</code> 합)</td><td><strong>물리 RAM이 아니다.</strong> 커널 이미지·memblock 예약·carve-out을 뺀 값. DT <code>memory</code> 크기가 맞는지 확인할 때 차이를 계산한다</td></tr><tr><td><code>MemFree</code></td><td>아무도 안 쓰는 페이지</td><td>낮다고 문제가 아니다. 캐시가 차지하는 게 정상</td></tr><tr><td><code>MemAvailable</code></td><td>회수 가능한 캐시까지 포함한 "새로 쓸 수 있는 양" 추정</td><td>앱 입장의 여유 메모리. OOM 위험은 이걸로 본다</td></tr><tr><td><code>Buffers</code> · <code>Cached</code></td><td>블록 장치 메타데이터 · 파일 페이지 캐시</td><td>압박 시 회수됨</td></tr><tr><td><code>Slab</code> = <code>SReclaimable</code> + <code>SUnreclaim</code></td><td>slab 할당자(kmalloc·kmem_cache) 사용량</td><td><strong>드라이버 누수는 거의 SUnreclaim으로 나타난다</strong></td></tr><tr><td><code>KernelStack</code></td><td>커널 스레드·태스크 스택 (arm64는 16 KiB씩)</td><td>스레드 폭증 감지</td></tr><tr><td><code>PageTables</code></td><td>페이지 테이블</td><td>큰 mmap·많은 프로세스</td></tr><tr><td><code>VmallocUsed</code></td><td>vmalloc 영역에 매핑된 페이지</td><td>큰 버퍼를 vmalloc하는 드라이버·모듈 코드</td></tr><tr><td><code>Percpu</code></td><td>per-CPU 할당</td><td>CPU 수 × 구조체</td></tr><tr><td><code>CmaTotal</code> · <code>CmaFree</code></td><td>CMA 영역 크기와 그중 비어 있는 양</td><td>카메라·디스플레이 DMA 버퍼 할당 실패 디버깅(F10)</td></tr></tbody></table></div>
+<p><code>alloc_pages()</code>로 직접 페이지를 가져가는 드라이버(DMA 링, 일부 네트워크 드라이버)는 <strong>어느 필드에도 따로 안 잡힌다</strong> — MemFree가 줄어들 뿐이다. 이런 사용은 <code>/proc/pagetypeinfo</code>나 <code>page_owner</code>(M8)로 추적한다.</p>
+<h3 id="5-2-예제-11-실험-모듈-m2_slab-c">5.2 예제 11 — 실험 모듈 <code>m2_slab.c</code><a class="anchor" href="#5-2-예제-11-실험-모듈-m2_slab-c" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인가: 192바이트 객체 2만 개를 <strong>전용 slab 캐시</strong> <code>m2_obj</code>에서 할당하고(SLUB가 다른 캐시와 합치지 않게 <code>SLAB_NO_MERGE</code>), 포인터 배열은 vmalloc으로 잡는다. debugfs <code>m2/leak</code>에 쓰면 해제하지 않는 <code>kmalloc(512)</code>를 1000개 만들고, <code>m2/block</code>을 읽으면 누군가 쓸 때까지 잠든다(§8).</p>
+<figure class="code"><span class="lang">c</span><pre><code>// m2_slab.c — 전용 slab 캐시 + vmalloc + 누수 + 잠드는 read (진단 실험용)
+#include &lt;linux/module.h&gt;
+#include &lt;linux/slab.h&gt;
+#include &lt;linux/vmalloc.h&gt;
+#include &lt;linux/debugfs.h&gt;
+#include &lt;linux/wait.h&gt;
+static int count = 20000;
+module_param(count, int, 0444);
+static struct kmem_cache *cache;
+static void **objs;
+static struct dentry *dir;
+static DECLARE_WAIT_QUEUE_HEAD(m2_wq);
+static bool m2_go;
+static ssize_t blk_read(struct file *f, char __user *u, size_t n, loff_t *p)
+{	/* 누가 write 할 때까지 잠든다 → /proc/&lt;pid&gt;/stack 관찰용 */
+	if (wait_event_interruptible(m2_wq, READ_ONCE(m2_go)))
+		return -ERESTARTSYS;
+	return 0;
+}
+static ssize_t blk_write(struct file *f, const char __user *u, size_t n, loff_t *p)
+{
+	WRITE_ONCE(m2_go, true);
+	wake_up_interruptible(&amp;m2_wq);
+	return n;
+}
+static ssize_t leak_write(struct file *f, const char __user *u, size_t n, loff_t *p)
+{	/* 일부러 해제하지 않는 kmalloc(512) 1000개 — 누수 흉내 */
+	for (int i = 0; i &lt; 1000; i++)
+		if (!kmalloc(512, GFP_KERNEL))
+			return -ENOMEM;
+	return n;
+}
+static const struct file_operations blk_fops = { .read = blk_read, .write = blk_write };
+static const struct file_operations leak_fops = { .write = leak_write };
+static void m2_free_all(void)
+{
+	for (int i = 0; objs &amp;&amp; i &lt; count &amp;&amp; objs[i]; i++)
+		kmem_cache_free(cache, objs[i]);
+	vfree(objs);
+	kmem_cache_destroy(cache);
+}
+static int __init m2_init(void)
+{
+	cache = kmem_cache_create("m2_obj", 192, 0, SLAB_NO_MERGE, NULL);
+	objs = vzalloc(array_size(count, sizeof(void *)));   /* vmallocinfo에 보임 */
+	for (int i = 0; cache &amp;&amp; objs &amp;&amp; i &lt; count; i++)
+		objs[i] = kmem_cache_alloc(cache, GFP_KERNEL);
+	if (!cache || !objs || !objs[count - 1]) {
+		m2_free_all();
+		return -ENOMEM;
+	}
+	dir = debugfs_create_dir("m2", NULL);
+	debugfs_create_file("block", 0600, dir, NULL, &amp;blk_fops);
+	debugfs_create_file("leak", 0200, dir, NULL, &amp;leak_fops);
+	pr_info("m2_slab: %d objs x 192B in m2_obj\n", count);
+	return 0;
+}
+static void __exit m2_exit(void) { debugfs_remove_recursive(dir); m2_free_all(); }
+module_init(m2_init); module_exit(m2_exit);
+MODULE_LICENSE("GPL"); MODULE_DESCRIPTION("M2 m2_slab demo");</code></pre></figure>
+<p>출력에서 볼 것: <code>SLAB_NO_MERGE</code>가 없으면 SLUB가 같은 크기·플래그의 기존 캐시(예: 192바이트 kmalloc 캐시)와 <strong>합쳐 버려서</strong> <code>/proc/slabinfo</code>에 <code>m2_obj</code> 이름이 안 나올 수 있다. 진단용으로 이름 붙은 캐시를 원하면 이 플래그(6.5+)를 쓰거나 부팅 인자 <code>slab_nomerge</code>를 준다.</p>
+<h3 id="5-3-예제-12-로드-전후-메모리-숫자">5.3 예제 12 — 로드 전후 메모리 숫자<a class="anchor" href="#5-3-예제-12-로드-전후-메모리-숫자" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>insmod m2_slab.ko count=20000</code> 전후의 meminfo·slabinfo·buddyinfo, 그리고 <code>/sys/kernel/slab/m2_obj/</code>의 캐시 정보.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>grep -E "^(MemTotal|MemFree|MemAvailable|Buffers|Cached|Slab|SReclaimable|SUnreclaim|KernelStack|PageTables|VmallocUsed|Percpu|CmaTotal|CmaFree)" /proc/meminfo
+head -2 /proc/slabinfo; grep -E "^kmalloc-512 " /proc/slabinfo; cat /proc/buddyinfo
+insmod /root/m2/m2_slab.ko count=20000; sleep 1
+grep -E "^(MemFree|Slab|SUnreclaim|VmallocUsed)" /proc/meminfo; grep -E "^(m2_obj|kmalloc-512) " /proc/slabinfo
+grep m2_slab /proc/vmallocinfo
+ls /sys/kernel/slab/m2_obj/ | tr '\n' ' '
+cat /sys/kernel/slab/m2_obj/objs_per_slab /sys/kernel/slab/m2_obj/order /sys/kernel/slab/m2_obj/slab_size
+cat /proc/buddyinfo</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>--- 로드 전 ---
+MemTotal:         965292 kB
+MemFree:          570592 kB
+MemAvailable:     821664 kB
+Buffers:            7008 kB
+Cached:           300656 kB
+Slab:              35072 kB
+SReclaimable:      12092 kB
+SUnreclaim:        22980 kB
+KernelStack:        1400 kB
+PageTables:         1332 kB
+VmallocUsed:        4692 kB
+Percpu:              568 kB
+CmaTotal:          32768 kB
+CmaFree:           32384 kB
+slabinfo - version: 2.1
+# name            &lt;active_objs&gt; &lt;num_objs&gt; &lt;objsize&gt; &lt;objperslab&gt; &lt;pagesperslab&gt; : tunables &lt;limit&gt; &lt;batchcount&gt; &lt;sharedfactor&gt; : slabdata &lt;active_slabs&gt; &lt;num_slabs&gt; &lt;sharedavail&gt;
+kmalloc-512         1011   1024    512   16    2 : tunables    0    0    0 : slabdata     64     64      0
+Node 0, zone      DMA    215    138     40     20      5      4      2      2      1      7    134 
+--- 로드 후 ---
+MemFree:          565348 kB
+Slab:              38908 kB
+SUnreclaim:        26808 kB
+VmallocUsed:        4864 kB
+m2_obj             20013  20013    192   21    1 : tunables    0    0    0 : slabdata    953    953      0
+kmalloc-512         1011   1024    512   16    2 : tunables    0    0    0 : slabdata     64     64      0
+aliases align cache_dma cpu_partial cpu_slabs ctor destroy_by_rcu hwcache_align min_partial object_size objects objects_partial objs_per_slab order partial poison reclaim_account red_zone remote_node_defrag_ratio sanity_checks sheaf_capacity shrink slab_size slabs slabs_cpu_partial store_user total_objects trace validate 
+21
+0
+192
+Node 0, zone      DMA      1     90     15     15      3      4      2      3      2      7    133 </code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>m2_obj  20013 20013 192 21 1 ... slabdata 953 953</code> — 활성 객체 20013(우리 2만 + 슬랩 끝자투리), 객체 크기 192, 슬랩 하나(1페이지 = order 0)에 21개, 슬랩 953개. 953 × 4 KiB = 3812 KiB.</li><li><code>Slab</code>이 35072 → 38908 kB(+3836), <code>SUnreclaim</code>이 22980 → 26808 kB(+3828). <strong>slabinfo의 3812 KiB와 meminfo의 증가분이 거의 정확히 맞는다.</strong> 드라이버 메모리를 이렇게 "두 군데에서 맞춰 보는" 습관이 누수 판정의 기본이다.</li><li><code>VmallocUsed</code>가 4692 → 4864 kB(+172). 그중 160 KiB(포인터 20000 × 8 B = 40 페이지)가 우리 배열이고, 나머지는 같은 시간에 다른 곳(모듈 코드 매핑 등)이 쓴 것이다.</li><li><code>grep m2_slab /proc/vmallocinfo</code>가 <strong>아무것도 못 찾았다.</strong> 아래 예제 13 참고.</li><li><code>buddyinfo</code>의 열은 order 0, 1, 2 … 10의 <strong>빈 블록 개수</strong>(order n = 2^n 페이지). 로드 후 order 0 블록이 215 → 1로 거의 다 소진됐다 — 953개의 order-0 슬랩을 잡느라 작은 블록부터 썼기 때문. 오른쪽 끝(order 10, 4 MiB 블록)이 134 → 133으로 줄어든 것도 보인다. <strong>오른쪽 열이 0에 가까우면 큰 연속 메모리(DMA 버퍼, 고차 할당)가 실패하기 시작한다</strong> — 단편화 진단의 첫 화면이다.</li><li><code>/sys/kernel/slab/m2_obj/</code>에는 <code>validate</code>, <code>trace</code>, <code>red_zone</code>, <code>poison</code>, <code>store_user</code> 같은 SLUB 디버그 손잡이가 있다(M8에서 <code>slub_debug</code>와 같이 다룬다).</li></ul>
+<h3 id="5-4-예제-13-vmallocinfo에서-모듈-init이-할당한-버퍼-찾기">5.4 예제 13 — vmallocinfo에서 모듈 init이 할당한 버퍼 찾기<a class="anchor" href="#5-4-예제-13-vmallocinfo에서-모듈-init이-할당한-버퍼-찾기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 12에서 <code>grep m2_slab</code>가 실패한 이유. BusyBox initramfs로 trace 커널을 다시 부팅해 같은 모듈을 넣고, 40페이지짜리 vmalloc을 직접 찾았다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># LAB_CMD 로 실행 (initramfs, root, kptr_restrict=0)
+insmod /m2_slab.ko &amp;&amp; grep -E "pages=40 |m2_slab" /proc/vmallocinfo ; grep -c m2_slab /proc/kallsyms</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>lab initramfs: 6.18.55-trace up 50.89s
+0x0000000048748908-0x0000000046261985  167936 0xffffc78d4384710c pages=40 vmalloc N0=40
+37</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>크기 167936 = 41 페이지(40 + guard page 1), <code>pages=40 vmalloc</code>. 우리 배열이 맞다.</li><li>호출자 칸이 심볼이 아니라 <strong><code>0xffffc78d4384710c</code> 같은 맨 주소</strong>다. <code>vzalloc()</code>을 부른 곳이 <code>__init</code> 함수(<code>m2_init</code>)이고, 모듈 로드가 끝나면 init 섹션은 해제되어 심볼 조회가 실패하기 때문이다. 모듈의 다른 심볼 37개는 kallsyms에 있지만 init 심볼은 없다. 실무에서 "vmallocinfo에서 내 드라이버를 못 찾겠다"면 크기·<code>pages=</code>로 찾거나, 할당을 probe(비-init 함수)에서 하게 한다.</li><li>이 initramfs에는 sysctl 설정이 없어 커널 기본값 <code>kptr_restrict=0</code>이고, 그때 <code>%pK</code>는 주소를 <strong>해시값</strong>으로 찍는다(시작 주소가 끝 주소보다 큰 이상한 범위가 그 증거). 진짜 가상 주소를 보려면 <code>kptr_restrict=1</code> + root(CAP_SYSLOG)여야 한다(§9의 sysctl 표).</li></ul>
+<h3 id="5-5-예제-14-누수를-slabinfo로-잡기">5.5 예제 14 — 누수를 slabinfo로 잡기<a class="anchor" href="#5-5-예제-14-누수를-slabinfo로-잡기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>leak</code>에 다섯 번 써서 <code>kmalloc(512)</code> 5000개를 흘리고, rmmod 뒤에도 <code>kmalloc-512</code>가 줄지 않는지. 덤으로 <code>slabtop</code> 한 화면.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>for i in 1 2 3 4 5; do echo x &gt; /sys/kernel/debug/m2/leak; grep -E "^kmalloc-512 " /proc/slabinfo; done
+slabtop -o -s c | head -14
+rmmod m2_slab; sleep 1
+grep -E "^(Slab|SUnreclaim)" /proc/meminfo; grep -E "^(m2_obj|kmalloc-512) " /proc/slabinfo; echo "[m2_obj gone?]"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>kmalloc-512         2000   2000    512   16    2 : tunables    0    0    0 : slabdata    125    125      0
+kmalloc-512         2992   2992    512   16    2 : tunables    0    0    0 : slabdata    187    187      0
+kmalloc-512         4000   4000    512   16    2 : tunables    0    0    0 : slabdata    250    250      0
+kmalloc-512         4992   4992    512   16    2 : tunables    0    0    0 : slabdata    312    312      0
+kmalloc-512         6000   6000    512   16    2 : tunables    0    0    0 : slabdata    375    375      0
+--- slabtop ---
+ Active / Total Objects (% used)    : 140306 / 143922 (97.5%)
+ Active / Total Slabs (% used)      : 5347 / 5347 (100.0%)
+ Active / Total Caches (% used)     : 112 / 166 (67.5%)
+ Active / Total Size (% used)       : 33806.81K / 34603.10K (97.7%)
+ Minimum / Average / Maximum Object : 0.01K / 0.24K / 8.75K
+  OBJS ACTIVE  USE OBJ SIZE  SLABS OBJ/SLAB CACHE SIZE NAME                   
+  6864   6864 100%    0.60K    528       13      4224K inode_cache            
+ 20013  20013 100%    0.19K    953       21      3812K m2_obj                 
+  6000   6000 100%    0.50K    375       16      3000K kmalloc-512            
+ 21450  21450 100%    0.13K    715       30      2860K kernfs_node_cache      
+ 13482  13415  99%    0.19K    642       21      2568K dentry                 
+  1918   1918 100%    1.10K    137       14      2192K ext4_inode_cache       
+   704    686  97%    2.00K     44       16      1408K kmalloc-2k             
+--- rmmod 후 ---
+Slab:              37916 kB
+SUnreclaim:        25532 kB
+kmalloc-512         6000   6000    512   16    2 : tunables    0    0    0 : slabdata    375    375      0
+[m2_obj gone?]</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 290" xmlns="http://www.w3.org/2000/svg">
+  <line x1="70" y1="230" x2="640" y2="230" stroke="currentColor"/>
+  <line x1="70" y1="30" x2="70" y2="230" stroke="currentColor"/>
+  <line x1="66" y1="230.0" x2="70" y2="230.0" stroke="currentColor"/>
+  <text x="62" y="234.0" text-anchor="end" font-size="12">0</text>
+  <line x1="66" y1="201.4" x2="70" y2="201.4" stroke="currentColor"/>
+  <text x="62" y="205.4" text-anchor="end" font-size="12">1000</text>
+  <line x1="66" y1="172.9" x2="70" y2="172.9" stroke="currentColor"/>
+  <text x="62" y="176.9" text-anchor="end" font-size="12">2000</text>
+  <line x1="66" y1="144.3" x2="70" y2="144.3" stroke="currentColor"/>
+  <text x="62" y="148.3" text-anchor="end" font-size="12">3000</text>
+  <line x1="66" y1="115.7" x2="70" y2="115.7" stroke="currentColor"/>
+  <text x="62" y="119.7" text-anchor="end" font-size="12">4000</text>
+  <line x1="66" y1="87.1" x2="70" y2="87.1" stroke="currentColor"/>
+  <text x="62" y="91.1" text-anchor="end" font-size="12">5000</text>
+  <line x1="66" y1="58.6" x2="70" y2="58.6" stroke="currentColor"/>
+  <text x="62" y="62.6" text-anchor="end" font-size="12">6000</text>
+  <line x1="66" y1="30.0" x2="70" y2="30.0" stroke="currentColor"/>
+  <text x="62" y="34.0" text-anchor="end" font-size="12">7000</text>
+  <text x="70.0" y="248" text-anchor="middle" font-size="12">로드 전</text>
+  <text x="165.0" y="248" text-anchor="middle" font-size="12">leak 1</text>
+  <text x="260.0" y="248" text-anchor="middle" font-size="12">leak 2</text>
+  <text x="355.0" y="248" text-anchor="middle" font-size="12">leak 3</text>
+  <text x="450.0" y="248" text-anchor="middle" font-size="12">leak 4</text>
+  <text x="545.0" y="248" text-anchor="middle" font-size="12">leak 5</text>
+  <text x="640.0" y="248" text-anchor="middle" font-size="12">rmmod 후</text>
+  <polyline points="70.0,201.1 165.0,172.9 260.0,144.5 355.0,115.7 450.0,87.4 545.0,58.6 640.0,58.6" fill="none" stroke="#d0564a" stroke-width="2"/>
+  <circle cx="70.0" cy="201.1" r="4" fill="#d0564a"/>
+  <text x="70.0" y="191.1" text-anchor="middle" font-size="12">1011</text>
+  <circle cx="165.0" cy="172.9" r="4" fill="#d0564a"/>
+  <text x="165.0" y="162.9" text-anchor="middle" font-size="12">2000</text>
+  <circle cx="260.0" cy="144.5" r="4" fill="#d0564a"/>
+  <text x="260.0" y="134.5" text-anchor="middle" font-size="12">2992</text>
+  <circle cx="355.0" cy="115.7" r="4" fill="#d0564a"/>
+  <text x="355.0" y="105.7" text-anchor="middle" font-size="12">4000</text>
+  <circle cx="450.0" cy="87.4" r="4" fill="#d0564a"/>
+  <text x="450.0" y="77.4" text-anchor="middle" font-size="12">4992</text>
+  <circle cx="545.0" cy="58.6" r="4" fill="#d0564a"/>
+  <text x="545.0" y="48.6" text-anchor="middle" font-size="12">6000</text>
+  <circle cx="640.0" cy="58.6" r="4" fill="#d0564a"/>
+  <text x="640.0" y="48.6" text-anchor="middle" font-size="12">6000</text>
+  <text x="80" y="34" font-size="13">kmalloc-512 active_objs (/proc/slabinfo)</text>
+  <text x="355" y="274" text-anchor="middle" font-size="12">write 1회 = kmalloc(512) 1000개 · rmmod 해도 줄지 않는다 = 누수 신호</text>
+</svg></figure>
+<p>그림 5 — 예제 14의 실측. 쓸 때마다 정확히 약 1000개씩 늘고, 모듈을 내려도 그대로다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>kmalloc-512</code> 활성 객체가 1011 → 2000 → … → 6000. 한 번에 약 1000개씩 정확히 늘었다.</li><li><code>slabtop -s c</code>(캐시 크기 순)에서 <code>m2_obj</code>(3812K)와 <code>kmalloc-512</code>(3000K)가 2·3위로 올라왔다. 필드에서 "메모리가 점점 줄어요"라는 보고를 받으면 <strong>slabinfo를 주기적으로 찍어 diff</strong>하는 것이 첫 수다.</li><li>rmmod 후 <code>m2_obj</code> 줄은 사라졌다(캐시 파괴 = 전용 캐시는 정리됨). 하지만 <code>kmalloc-512</code>는 6000 그대로, <code>Slab</code>도 로드 전보다 약 2.8 MB 많다(37916 vs 35072 kB). 일반 kmalloc 캐시로 샌 메모리는 <strong>모듈이 사라져도 주인 없이 남는다.</strong> 어느 코드가 샜는지는 slabinfo로는 모른다 — 그다음 단계는 kmemleak(Image-kasan 커널, M8)이나 <code>slub_debug=U</code> + <code>/sys/kernel/slab/kmalloc-512/alloc_calls</code>다.</li></ul>
+<h3 id="5-6-memtotal-한-장으로-정리">5.6 MemTotal 한 장으로 정리<a class="anchor" href="#5-6-memtotal-한-장으로-정리" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+  <text x="20" y="22" font-size="13">① 물리 RAM 1 GiB = 1,048,576 kB (DT memory@40000000, reg 크기 0x40000000)</text>
+  <rect x="20" y="32" width="640" height="30" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="340" y="52" text-anchor="middle" font-size="12">/proc/iomem "System RAM 40000000-7fffffff"</text>
+  <text x="20" y="92" font-size="13">② MemTotal 965,292 kB = RAM − (커널 코드·데이터 + memblock 예약)</text>
+  <rect x="20" y="102" width="589.2" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="609.2" y="102" width="50.8" height="30" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="314.6" y="122" text-anchor="middle" font-size="12">버디 할당자가 관리 (zoneinfo managed)</text>
+  <text x="634.6" y="122" text-anchor="middle" font-size="12">83 MB</text>
+  <text x="20" y="162" font-size="13">③ MemTotal 안을 누가 쓰나 (모듈 로드 전 실측, 같은 축척)</text>
+  <rect x="20.0" y="172" width="348.3" height="30" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="194.1" y="192" text-anchor="middle" font-size="12">MemFree 570,592</text>
+  <rect x="368.3" y="172" width="187.8" height="30" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="462.2" y="192" text-anchor="middle" font-size="12">Cached+Buffers 307,664</text>
+  <rect x="556.0" y="172" width="21.4" height="30" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <rect x="577.5" y="172" width="31.7" height="30" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <line x1="566.7" y1="232" x2="566.7" y2="206" stroke="currentColor" marker-end="url(#ah5)"/>
+  <text x="560.7" y="248" text-anchor="end" font-size="12">Slab 35,072 kB = SReclaimable 12,092 + SUnreclaim 22,980</text>
+  <line x1="593.3" y1="268" x2="593.3" y2="206" stroke="currentColor" marker-end="url(#ah5)"/>
+  <text x="587.3" y="284" text-anchor="end" font-size="12">나머지 ≈ 52 MB: AnonPages · KernelStack 1,400 · PageTables 1,332 · 드라이버 alloc_pages …</text>
+  <text x="20" y="312" font-size="12">VmallocUsed 4,692 kB와 CmaTotal 32,768 kB는 위 칸들과 겹쳐 세어지는 "다른 관점"의 숫자다</text>
+</svg></figure>
+<p>그림 6 — 예제 12의 로드 전 숫자로 그린 메모리 회계. RAM 1 GiB 중 83 MB는 MemTotal에 들어가지도 않는다(iomem의 Kernel code/data + reserved).</p>
+<h3 id="5-7-예제-15-zoneinfo의-watermark">5.7 예제 15 — zoneinfo의 watermark<a class="anchor" href="#5-7-예제-15-zoneinfo의-watermark" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 존별 free 페이지와 min/low/high watermark.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>grep -E "^Node|pages free|  min |  low |  high |managed" /proc/zoneinfo | head -24
+cat /proc/sys/vm/min_free_kbytes</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Node 0, zone      DMA
+  pages free     141889
+        min      5632
+        low      7040
+        high     8448
+        managed  241323
+...
+vm/min_free_kbytes = 22528</code></pre></figure>
+<p>(DMA32·Normal·Movable 존은 managed 0이라 생략했다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>RAM이 전부 <code>0x40000000..0x7fffffff</code>(4 GiB 아래)라서 arm64에서는 <strong>전부 DMA 존</strong>에 들어간다. <code>managed 241323</code> 페이지 × 4 KiB = 965292 kB = <code>MemTotal</code>과 정확히 같다.</li><li><code>min 5632</code> 페이지 × 4 KiB = 22528 kB = <code>vm.min_free_kbytes</code>. free가 <code>low</code> 아래로 내려가면 kswapd가 깨어나고, <code>min</code> 아래면 할당하는 쪽이 직접 회수(direct reclaim)한다 — 인터럽트 문맥의 <code>GFP_ATOMIC</code> 할당이 실패하기 시작하는 지점이다. 네트워크 드라이버가 "page allocation failure: order:2"를 찍는 보드에서는 이 값과 buddyinfo를 같이 본다.</li></ul>
+<hr>
+<h2 id="6-질문-⑥-자원이-살아-있나-clk-regulator-pinctrl-gpio-regmap-devlink-power-dma">6. 질문 ⑥ — "자원이 살아 있나?" (clk · regulator · pinctrl · GPIO · regmap · devlink · power · DMA)<a class="anchor" href="#6-질문-⑥-자원이-살아-있나-clk-regulator-pinctrl-gpio-regmap-devlink-power-dma" aria-label="link">#</a></h2>
+<p>bind는 됐는데 장치가 응답하지 않는다. bare-metal이라면 "클럭 게이트 열렸나, 전원 레일 올라왔나, 핀먹스 맞나, 레지스터 값 맞나"를 JTAG로 본다. Linux에서는 각 프레임워크(H2·H3·H4)가 debugfs에 <strong>요약표</strong>를 내놓는다. 이 표들은 "드라이버가 요청한 상태"를 보여 준다 — 실제 HW 레지스터와 다를 수 있다는 점은 §6.6에서 다시 말한다.</p>
+<h3 id="6-1-예제-16-clk_summary와-regulator_summary">6.1 예제 16 — <code>clk_summary</code>와 <code>regulator_summary</code><a class="anchor" href="#6-1-예제-16-clk_summary와-regulator_summary" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: QEMU virt의 클럭 트리와 레귤레이터 목록.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /sys/kernel/debug/clk/clk_summary
+cat /sys/kernel/debug/regulator/regulator_summary</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>                                 enable  prepare  protect                                duty  hardware                            connection
+   clock                          count    count    count        rate   accuracy phase  cycle    enable   consumer                         id
+---------------------------------------------------------------------------------------------------------------------------------------------
+ clk24mhz                            5       5        0        24000000    0          0     50000      Y   9010000.pl031                   apb_pclk                 
+                                                                                                           9030000.pl061                   apb_pclk                 
+                                                                                                           9000000.pl011                   no_connection_id         
+                                                                                                           9000000.pl011                   apb_pclk                 
+                                                                                                           deviceless                      no_connection_id         
+
+ regulator                      use open bypass  opmode voltage current     min     max
+---------------------------------------------------------------------------------------
+ regulator-dummy                  1    0      0 unknown     0mV     0mA     0mV     0mV </code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>virt에는 클럭이 <code>clk24mhz</code>(DT <code>apb-pclk</code> fixed-clock, 24 MHz) <strong>하나뿐</strong>이고, consumer 칸에 pl031·pl061·pl011이 connection id(<code>apb_pclk</code>, <code>no_connection_id</code>)와 함께 나온다. <code>enable count 5</code> = 소비자 다섯이 <code>clk_prepare_enable()</code>을 했다. <code>hardware enable Y</code>는 클럭 드라이버의 <code>is_enabled</code> 콜백 결과다.</li><li>레귤레이터는 <code>regulator-dummy</code> 하나. DT에 공급자가 없는 <code>*-supply</code>를 요청하면 regulator core가 이 dummy를 준다(부팅 로그 <code>supply vdd not found, using dummy regulator</code>).</li><li>실제 SoC에서는 (실행 안 함, 구조 설명) 이 표가 수백 줄이다: PLL → divider → gate로 들여쓰기된 트리가 나오고, 각 줄의 <code>rate</code>로 "I2C 컨트롤러 입력 클럭이 정말 66 MHz인가", <code>enable count</code>로 "누가 이 게이트를 잡고 있어서 절전이 안 되나"를 본다. <code>regulator_summary</code>도 PMIC의 buck/LDO 아래 소비자 장치가 들여쓰기되고, <code>use</code>·<code>open</code>·<code>voltage</code>·소비자별 요청 전압(min/max)이 나온다. 센서 레일이 <code>0mV</code>나 <code>use 0</code>이면 전원부터 의심한다.</li><li>부팅 로그의 <code>clk: Disabling unused clocks</code>(이 게스트에서도 29.44초에 찍혔다)는 late_initcall에서 <strong>아무도 enable 안 한 클럭을 끄는</strong> 단계다. 부트로더가 켜 둔 클럭에 기대던 장치가 이 줄 직후 죽으면, 드라이버가 클럭을 요청하지 않은 것이다. 임시 확인용 커널 인자는 <code>clk_ignore_unused</code>, 같은 성격의 레귤레이터 쪽은 <code>regulator_ignore_unused</code>.</li></ul>
+<h3 id="6-2-예제-17-pinctrl-devlink-wakeup-source-dma">6.2 예제 17 — pinctrl, devlink, wakeup source, DMA<a class="anchor" href="#6-2-예제-17-pinctrl-devlink-wakeup-source-dma" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: virt 게스트에서 다른 자원 요약 파일이 무엇을 보여 주는지(거의 비어 있다는 사실 자체가 정보다).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>ls /sys/kernel/debug/pinctrl/
+ls /sys/class/devlink/ | wc -l; ls /sys/bus/platform/devices/gpio-keys/ | tr "\n" " "
+head -5 /sys/kernel/debug/wakeup_sources
+cat /sys/kernel/debug/dmaengine/summary; ls /sys/kernel/debug/swiotlb
+cat /sys/kernel/debug/swiotlb/io_tlb_nslabs /sys/kernel/debug/swiotlb/io_tlb_used</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>pinctrl-devices
+pinctrl-handles
+pinctrl-maps
+0
+disabled_keys disabled_switches driver driver_override input keys modalias of_node power subsystem switches uevent 
+name		active_count	event_count	wakeup_count	expire_count	active_since	total_time	max_time	last_change	prevent_suspend_time
+alarmtimer.0.auto	0		0		0		0		0		0		0		0		0
+9010000.pl031	1		1		0		0		0		0		0		738079		0
+deleted     	0		0		0		0		0		0		0		0		0
+summary
+io_tlb_nslabs
+io_tlb_used
+io_tlb_used_hiwater
+512
+0</code></pre></figure>
+<p>(DMA 부분은 <code>ls /sys/kernel/debug</code> 전체 목록을 빼고 결과만 남겼다. <code>dmaengine/</code> 안에는 <code>summary</code> 파일만 있고 내용은 비어 있다.)</p>
+<p>출력에서 볼 것과 실제 SoC와의 차이:</p>
+<ul><li><strong>pinctrl</strong>: <code>pinctrl-devices</code>·<code>pinctrl-handles</code>·<code>pinctrl-maps</code> 세 파일만 있고 컨트롤러 디렉터리가 없다 — virt에는 핀 컨트롤러가 없다. 실제 SoC(실행 안 함)라면 <code>/sys/kernel/debug/pinctrl/&lt;컨트롤러&gt;/</code> 아래 <code>pins</code>(패드 번호·이름·현재 레지스터 값), <code>pinmux-pins</code>(각 핀을 <strong>누가</strong> 어떤 function으로 잡았나 — "pin 42 (UART2_TX): device 30890000.serial function uart2 group uart2grp"), <code>pinconf-pins</code>(pull·drive strength)가 있다. 두 드라이버가 한 핀을 다투면 두 번째 probe가 <code>pin X already requested by Y</code>로 실패하고 <code>pinmux-pins</code>에 첫 주인이 보인다(H4).</li><li><strong>devlink</strong>: <code>/sys/class/devlink/</code>에 링크가 0개. gpio-keys는 pl061의 GPIO를 쓰지만 GPIO가 자식 노드(<code>poweroff { gpios = ... }</code>)에 있어서인지 장치 링크가 만들어지지 않았다(원인은 확인하지 않았다 — 관찰 사실만 적는다). 실제 SoC에서는 fw_devlink(기본 <code>fw_devlink=on</code>)가 DT의 <code>clocks</code>·<code>*-supply</code>·<code>*-gpios</code>·<code>interrupts</code>·<code>pinctrl-0</code> 참조마다 <code>&lt;공급자&gt;--&lt;소비자&gt;</code> 링크를 만들고, 각 링크의 <code>status</code>(<code>available</code>, <code>consumer probing</code>, <code>active</code>, <code>supplier unbinding</code>…)와 <code>sync_state_only</code>가 보인다. 공급자가 bind되기 전에는 소비자의 probe를 아예 시작하지 않으므로 <code>devices_deferred</code>에도 안 나오는 경우가 있다 — 그때는 <code>/sys/kernel/debug/devices_deferred</code> 대신 이 링크들과 부팅 로그의 <code>fw_devlink</code> 경고를 본다(G3 §9, D3).</li><li><strong>wakeup_sources</strong>: RTC(<code>9010000.pl031</code>)와 alarmtimer만. 시스템이 suspend에 안 들어가면(N 모듈) <code>active_count</code>·<code>prevent_suspend_time</code>이 늘어나는 소스가 범인이다.</li><li><strong>DMA</strong>: virt에는 DMA 엔진 컨트롤러가 없어서 <code>dmaengine/summary</code>가 빈 파일이다. 실제 SoC라면 채널별로 "dma0chan3 (uart2-rx): in-use"처럼 누가 어떤 채널을 잡았는지가 나온다. <code>swiotlb</code>는 DMA 주소 제한이 있는 장치용 바운스 버퍼 풀이다. <code>io_tlb_used</code>가 0이 아니면 <strong>어떤 장치가 바운스 복사를 하고 있다는 뜻</strong>이라 성능 문제의 원인이 될 수 있다(H9). 이 게스트는 512 슬랩 중 0개 사용.</li></ul>
+<h3 id="6-3-예제-18-m2_regs-c-regmap-debugfs와-runtime-pm-상태">6.3 예제 18 — <code>m2_regs.c</code>: regmap debugfs와 runtime PM 상태<a class="anchor" href="#6-3-예제-18-m2_regs-c-regmap-debugfs와-runtime-pm-상태" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인가: H2의 regmap을 진단 관점에서 본다. RAM 버퍼 32바이트를 "레지스터 8개짜리 칩"처럼 regmap-mmio로 감싸고, 런타임 PM을 켠다. 실제 SoC라면 <code>base</code>가 <code>devm_platform_ioremap_resource()</code>의 결과다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>// m2_regs.c — RAM 버퍼를 "레지스터"로 쓰는 regmap-mmio + runtime PM 플랫폼 드라이버
+#include &lt;linux/module.h&gt;
+#include &lt;linux/platform_device.h&gt;
+#include &lt;linux/regmap.h&gt;
+#include &lt;linux/pm_runtime.h&gt;
+
+static struct platform_device *pdev_m2;
+static int fail;                          /* 예: fail=-5 → probe 실패 흉내 */
+module_param(fail, int, 0644);
+static const struct regmap_config m2_cfg = {
+	.reg_bits = 32, .val_bits = 32, .reg_stride = 4,
+	.max_register = 0x1c,          /* 레지스터 8개: 0x00..0x1c */
+};
+
+static int m2_probe(struct platform_device *pdev)
+{
+	struct device *dev = &amp;pdev-&gt;dev;
+	void __iomem *base = (void __force __iomem *)devm_kzalloc(dev, 0x20, GFP_KERNEL);
+	struct regmap *map;
+
+	if (fail)
+		return fail;                  /* driver core가 어떻게 찍는지 본다 */
+	if (!base)
+		return -ENOMEM;
+	map = devm_regmap_init_mmio(dev, base, &amp;m2_cfg);   /* 진짜 SoC라면 ioremap 주소 */
+	if (IS_ERR(map))
+		return dev_err_probe(dev, PTR_ERR(map), "regmap\n");
+	regmap_write(map, 0x00, 0x4d320001);   /* CHIP_ID 흉내 */
+	regmap_write(map, 0x08, 0x000000ff);   /* CTRL */
+	regmap_update_bits(map, 0x0c, 0xf0, 0x30);
+	devm_pm_runtime_enable(dev);           /* power/runtime_status 관찰용 */
+	dev_info(dev, "probed, regmap at %px\n", base);
+	return 0;
+}
+static struct platform_driver m2_drv = {
+	.probe = m2_probe,
+	.driver = { .name = "m2_regs" },
+};
+static int __init m2_init(void)
+{
+	int ret = platform_driver_register(&amp;m2_drv);
+	if (ret)
+		return ret;
+	pdev_m2 = platform_device_register_simple("m2_regs", -1, NULL, 0);
+	if (IS_ERR(pdev_m2)) {
+		platform_driver_unregister(&amp;m2_drv);
+		return PTR_ERR(pdev_m2);
+	}
+	return 0;
+}
+static void __exit m2_exit(void)
+{
+	platform_device_unregister(pdev_m2);
+	platform_driver_unregister(&amp;m2_drv);
+}
+module_init(m2_init); module_exit(m2_exit);
+MODULE_LICENSE("GPL"); MODULE_DESCRIPTION("M2 m2_regs demo");</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>insmod /root/m2/m2_regs.ko; sleep 1; ls /sys/kernel/debug/regmap/
+R=/sys/kernel/debug/regmap/m2_regs; ls $R; cat $R/registers; cat $R/range
+ls -l /sys/bus/platform/devices/m2_regs/driver
+cd /sys/bus/platform/devices/m2_regs/power
+for f in control runtime_status runtime_usage runtime_enabled runtime_active_time runtime_suspended_time; do echo "$f: $(cat $f 2&gt;&amp;1)"; done
+echo m2_regs &gt; /sys/bus/platform/drivers/m2_regs/unbind; ls /sys/kernel/debug/regmap/ | grep -c m2_regs
+echo m2_regs &gt; /sys/bus/platform/drivers/m2_regs/bind; ls /sys/kernel/debug/regmap/ | grep m2</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>m2_regs
+access
+name
+range
+registers
+00: 4d320001
+04: 00000000
+08: 000000ff
+0c: 00000030
+10: 00000000
+14: 00000000
+18: 00000000
+1c: 00000000
+0-1c
+lrwxrwxrwx 1 root root 0 Oct 18 06:56 /sys/bus/platform/devices/m2_regs/driver -&gt; ../../../bus/platform/drivers/m2_regs
+control: auto
+runtime_status: suspended
+runtime_usage: 0
+runtime_enabled: enabled
+runtime_active_time: 0
+runtime_suspended_time: 4611
+0
+m2_regs</code></pre></figure>
+<p>(첫 <code>cat runtime_status</code> 한 줄 중복은 뺐다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>/sys/kernel/debug/regmap/m2_regs/registers</code>가 <strong>레지스터 덤프 그 자체</strong>다. 0x00 = <code>4d320001</code>(가짜 CHIP_ID), 0x08 = <code>ff</code>, 0x0c = <code>30</code>(<code>regmap_update_bits</code>로 0xf0 마스크에 0x30). I2C/SPI 센서도 regmap을 쓰면 똑같이 나온다 — bring-up 때 "드라이버가 칩에 무엇을 써 놨나"를 JTAG 없이 본다. <code>range</code>는 유효 레지스터 범위, <code>access</code>는 레지스터별 읽기/쓰기/volatile/precious 속성이다.</li><li>캐시가 있는 regmap(<code>REGCACHE_RBTREE</code>/<code>MAPLE</code>)이면 <code>registers</code>는 <strong>캐시 값</strong>을 보여 줄 수 있다. 칩이 리셋돼서 실제 값이 바뀌었는데 캐시는 그대로인 상황이 흔하다 — volatile 레지스터 지정과 <code>cache_bypass</code> 파일을 기억하자(H2).</li><li>기본적으로 debugfs regmap은 <strong>읽기 전용</strong>이다. 쓰기는 커널 소스의 <code>REGMAP_ALLOW_WRITE_DEBUGFS</code>를 직접 켜고 빌드해야 한다(위험하니까 일부러 막아 둠).</li><li>unbind하면 regmap 디렉터리가 사라지고(<code>grep -c</code> = 0), bind하면 다시 생긴다. devm으로 만든 자원은 bind 단위로 산다(G3).</li><li>runtime PM: <code>control: auto</code>, <code>runtime_status: suspended</code>, <code>runtime_usage: 0</code>. 콜백 없이 <code>pm_runtime_enable()</code>만 한 장치는 처음부터 suspended 상태다. <code>runtime_usage</code>(사용 카운트)는 <code>CONFIG_PM_ADVANCED_DEBUG</code>가 있어야 보이는 파일인데 trace 커널에 켜져 있다(Image-sec로 한 시험 부팅에서는 이 파일이 없었다). <strong>센서가 응답 없음 → <code>runtime_status</code>가 <code>suspended</code>인데 드라이버가 <code>pm_runtime_get_sync()</code> 없이 레지스터를 만진다</strong>는 것이 흔한 버그다. <code>control</code>에 <code>on</code>을 쓰면 런타임 PM을 강제로 끄고 계속 켜 둔다 — 진단용으로 유용하다.</li></ul>
+<h3 id="6-4-예제-19-debugfs-gpio와-libgpiod로-본-gpio">6.4 예제 19 — debugfs <code>gpio</code>와 libgpiod로 본 GPIO<a class="anchor" href="#6-4-예제-19-debugfs-gpio와-libgpiod로-본-gpio" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 3 뒤에 gpio-sim 칩의 라인 상태. 커널 소비자(<code>reset</code>, <code>drdy</code>)가 잡은 라인과 유저스페이스가 잡은 라인이 어떻게 보이는지. 랩 rootfs의 libgpiod는 1.6.3이라 v1 문법을 쓴다(v2는 <code>gpioinfo -c gpiochip1</code> 형식).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /sys/kernel/debug/gpio
+gpioinfo gpiochip1; gpiodetect
+gpioset --mode=signal gpiochip1 0=1 &amp; GS=$!; sleep 2
+grep -A2 "gpiochip1:" /sys/kernel/debug/gpio; gpioinfo gpiochip1 | head -3; kill $GS; wait $GS
+gpioget gpiochip1 5; echo "rc=$?"; gpioget gpiochip1 1; echo "rc=$?"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>gpiochip0: 8 GPIOs, parent: amba/9030000.pl061, 9030000.pl061:
+ gpio-3   (                    |GPIO Key Poweroff   ) in  lo IRQ 
+gpiochip1: 8 GPIOs, parent: platform/gpio-sim.0, m2_sim, can sleep:
+ gpio-0   (&lt;unused&gt;) input,pull-down
+ gpio-1   (&lt;unused&gt;) input,pull-down
+ gpio-2   (&lt;unused&gt;) input,pull-down
+ gpio-3   (reset) output-high,pull-down
+ gpio-4   (&lt;unused&gt;) input,pull-down
+ gpio-5   (drdy) input,pull-down
+ gpio-6   (&lt;unused&gt;) input,pull-down
+ gpio-7   (&lt;unused&gt;) input,pull-down
+gpiochip1 - 8 lines:
+	line   0:     "m2_led"       unused   input  active-high 
+	line   1:      unnamed       unused   input  active-high 
+	line   2:      unnamed       unused   input  active-high 
+	line   3:      unnamed      "reset"  output   active-low [used]
+	line   4:      unnamed       unused   input  active-high 
+	line   5:      unnamed       "drdy"   input  active-high [used]
+	line   6:      unnamed       unused   input  active-high 
+	line   7:      unnamed       unused   input  active-high 
+gpiochip0 [9030000.pl061] (8 lines)
+gpiochip1 [m2_sim] (8 lines)
+--- gpioset 실행 중 ---
+gpiochip1: 8 GPIOs, parent: platform/gpio-sim.0, m2_sim, can sleep:
+ gpio-0   (gpioset) output-high,pull-down
+ gpio-1   (&lt;unused&gt;) input,pull-down
+gpiochip1 - 8 lines:
+	line   0:     "m2_led"    "gpioset"  output  active-high [used]
+	line   1:      unnamed       unused   input  active-high 
+gpioget: error reading GPIO values: Device or resource busy
+rc=1
+0
+rc=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>debugfs <code>gpio</code>는 칩마다 부모 장치(<code>platform/gpio-sim.0</code>), 라벨(<code>m2_sim</code>), <strong><code>can sleep</code></strong>(I2C 확장기처럼 잠들 수 있는 칩 → 하드 IRQ 문맥에서 <code>gpiod_set_value()</code> 금지, H4)을 보여 준다. 라인별로 <strong>소비자 이름</strong>(<code>reset</code>, <code>drdy</code>, <code>GPIO Key Poweroff</code>), 방향, 값, <code>IRQ</code> 표시가 나온다.</li><li><code>reset</code>이 <code>output-high</code>로 보이는 점에 주의. 우리는 <code>GPIOD_OUT_LOW</code>(논리 0)로 요청했지만 lookup에 <code>GPIO_ACTIVE_LOW</code>를 줬다. <strong>debugfs는 물리 레벨</strong>, <code>gpioinfo</code>는 <code>active-low</code> 플래그를 따로 보여 준다. "리셋을 풀었는데 칩이 계속 리셋 상태"인 버그의 절반은 이 극성 혼동이다.</li><li><code>gpioget gpiochip1 5</code>는 <code>Device or resource busy</code> — 커널 드라이버가 잡은 라인은 유저가 못 연다. 빈 라인 1은 읽힌다(<code>0</code>).</li><li><code>gpioset</code>이 도는 동안 라인 0의 소비자가 <code>gpioset</code>으로 바뀐다. 이 표 하나로 "누가 이 핀을 잡고 있나"가 끝난다.</li></ul>
+<h3 id="6-5-진단-파일과-프레임워크-짝-요약">6.5 진단 파일과 프레임워크 짝 (요약)<a class="anchor" href="#6-5-진단-파일과-프레임워크-짝-요약" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>질문</th><th>파일</th><th>프레임워크 노트</th></tr></thead><tbody><tr><td>클럭 rate·enable 카운트·소비자</td><td><code>/sys/kernel/debug/clk/clk_summary</code> (트리별 <code>clk/&lt;이름&gt;/</code>)</td><td>H3</td></tr><tr><td>레일 전압·소비자·사용 카운트</td><td><code>/sys/kernel/debug/regulator/regulator_summary</code></td><td>H3</td></tr><tr><td>핀 소유자·function</td><td><code>/sys/kernel/debug/pinctrl/&lt;ctrl&gt;/pinmux-pins</code> · <code>pins</code> · <code>pinconf-pins</code></td><td>H4</td></tr><tr><td>GPIO 라인 소유자·방향·값</td><td><code>/sys/kernel/debug/gpio</code>, <code>gpioinfo</code></td><td>H4</td></tr><tr><td>칩 레지스터</td><td><code>/sys/kernel/debug/regmap/&lt;dev&gt;/registers</code></td><td>H2</td></tr><tr><td>공급자-소비자 관계</td><td><code>/sys/class/devlink/*/status</code>, <code>&lt;dev&gt;/supplier:*</code>·<code>consumer:*</code> 링크</td><td>G3</td></tr><tr><td>런타임 전원 상태</td><td><code>&lt;dev&gt;/power/runtime_status</code> · <code>runtime_usage</code> · <code>control</code></td><td>N 모듈</td></tr><tr><td>power domain</td><td><code>/sys/kernel/debug/pm_genpd/pm_genpd_summary</code></td><td>N 모듈</td></tr><tr><td>DMA 채널·바운스 버퍼</td><td><code>/sys/kernel/debug/dmaengine/summary</code>, <code>swiotlb/</code></td><td>H9</td></tr></tbody></table></div>
+<h3 id="6-6-함정-요약표는-커널이-믿는-상태-다">6.6 함정 — 요약표는 "커널이 믿는 상태"다<a class="anchor" href="#6-6-함정-요약표는-커널이-믿는-상태-다" aria-label="link">#</a></h3>
+<p><code>clk_summary</code>의 rate는 클럭 드라이버가 <strong>계산한</strong> 값이고, <code>regulator_summary</code>의 voltage는 PMIC 드라이버가 <strong>설정했다고 믿는</strong> 값이다. 클럭 드라이버의 divider 테이블이 틀렸거나 PMIC 레지스터 쓰기가 I2C 오류로 조용히 실패하면 표는 정상인데 HW는 다르다. Don이 잘하는 영역이 여기다 — 표가 정상인데 동작이 이상하면 <strong>scope로 클럭 핀·레일을 직접 재고</strong>(M11), <code>devmem</code>/<code>/dev/mem</code> 또는 regmap 덤프로 실제 레지스터를 읽어 비교한다.</p>
+<hr>
+<h2 id="7-모듈-lsmod-proc-modules-sys-module-taint">7. 모듈 — <code>lsmod</code>, <code>/proc/modules</code>, <code>/sys/module</code>, taint<a class="anchor" href="#7-모듈-lsmod-proc-modules-sys-module-taint" aria-label="link">#</a></h2>
+<h3 id="7-1-예제-20-같은-정보-다른-창구">7.1 예제 20 — 같은 정보, 다른 창구<a class="anchor" href="#7-1-예제-20-같은-정보-다른-창구" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>lsmod</code>와 <code>/proc/modules</code>(root와 nobody), <code>/sys/module/&lt;mod&gt;/</code>, 그리고 out-of-tree·서명 없는 모듈이 남긴 taint.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>lsmod | head -5; grep m2_ /proc/modules
+setpriv --reuid=65534 --regid=65534 --clear-groups grep m2_ /proc/modules
+ls /sys/module/m2_slab/
+cat /sys/module/m2_slab/parameters/count /sys/module/m2_slab/taint /sys/module/m2_slab/refcnt /sys/module/m2_slab/coresize
+cat /proc/sys/kernel/tainted; dmesg | grep -iE "taint|loading out-of-tree" | head -3</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Module                  Size  Used by
+m2_slab                12288  0
+m2_regs                12288  0
+m2_defer               12288  0
+m2_slab 12288 0 - Live 0xffffdab7d499e000 (OE)
+m2_regs 12288 0 - Live 0xffffdab7d4998000 (OE)
+m2_defer 12288 0 - Live 0xffffdab7d4992000 (OE)
+m2_slab 12288 0 - Live 0x0000000000000000 (OE)
+m2_regs 12288 0 - Live 0x0000000000000000 (OE)
+m2_defer 12288 0 - Live 0x0000000000000000 (OE)
+coresize
+holders
+initsize
+initstate
+notes
+parameters
+refcnt
+sections
+taint
+uevent
+20000
+OE
+0
+12288
+12288
+[  605.808345] m2_defer: loading out-of-tree module taints kernel.
+[  605.808624] m2_defer: module verification failed: signature and/or required key missing - tainting kernel</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>lsmod</code>는 <code>/proc/modules</code>를 예쁘게 찍는 도구일 뿐이다. <code>/proc/modules</code>에는 상태(<code>Live</code>/<code>Loading</code>/<code>Unloading</code>), 로드 주소, taint 플래그(<code>(OE)</code>)가 더 있다. <strong>nobody에게는 주소가 0</strong>이다(<code>kptr_restrict=1</code> → CAP_SYSLOG 없으면 가림). oops의 PC를 모듈 오프셋으로 바꿀 때(M3) 이 주소가 필요하니 root로 본다.</li><li><code>/sys/module/m2_slab/</code> 아래 값 다섯 개는 순서대로 <code>parameters/count</code>=20000, <code>taint</code>=<code>OE</code>, <code>refcnt</code>=0, <code>coresize</code>=12288, 그리고 마지막 줄 <code>/proc/sys/kernel/tainted</code>=12288이다(우연히 coresize와 같은 숫자다).</li><li>tainted 12288 = 4096 + 8192 = bit 12(<code>O</code>, out-of-tree 모듈) + bit 13(<code>E</code>, 서명 안 된 모듈). Image-sec 계열은 <code>MODULE_SIG</code>가 켜져 있지만 강제가 아니라서 로드는 되고 <code>E</code>가 붙는다. 이 taint는 <strong>이후 모든 oops 헤더에 <code>Tainted: G OE</code>로 찍힌다</strong> — 커뮤니티에 버그를 보고할 때 "out-of-tree 모듈 없이 재현되나?"를 먼저 묻는 이유다.</li><li><code>refcnt</code>가 0이 아니면 rmmod가 <code>Module is in use</code>로 거부한다. <code>holders/</code>에 누가 이 모듈을 쓰는지 있다.</li></ul>
+<div class="tw"><table><thead><tr><th>taint 글자</th><th>비트</th><th>뜻</th></tr></thead><tbody><tr><td><code>P</code></td><td>0</td><td>독점(non-GPL) 모듈</td></tr><tr><td><code>W</code></td><td>9</td><td>WARN이 한 번이라도 발생</td></tr><tr><td><code>O</code></td><td>12</td><td>out-of-tree 모듈</td></tr><tr><td><code>E</code></td><td>13</td><td>서명 없는 모듈 (서명 검사 켜진 커널)</td></tr><tr><td><code>D</code></td><td>7</td><td>oops/BUG 발생</td></tr><tr><td><code>L</code></td><td>14</td><td>soft lockup 발생</td></tr></tbody></table></div>
+<blockquote><p>참고: 비트 전체 목록은 docs.kernel.org의 "Tainted kernels" 문서와 <code>tools/debugging/kernel-chktaint</code> 스크립트에 있다. bring-up 중 <code>W</code>가 붙어 있다면 dmesg 어딘가에 WARN 스택이 있다는 뜻이니 꼭 찾아본다.</p></blockquote>
+<hr>
+<h2 id="8-앱이-멈췄다-proc-pid-stack-wchan-status-syscall">8. "앱이 멈췄다" — <code>/proc/&lt;pid&gt;/stack</code>, <code>wchan</code>, <code>status</code>, <code>syscall</code><a class="anchor" href="#8-앱이-멈췄다-proc-pid-stack-wchan-status-syscall" aria-label="link">#</a></h2>
+<h3 id="8-1-직관">8.1 직관<a class="anchor" href="#8-1-직관" aria-label="link">#</a></h3>
+<p>RTOS에서 태스크가 멈추면 태스크 리스트에서 상태(Blocked)와 "무엇을 기다리나(semaphore X)"를 본다. Linux에서는 <code>/proc/&lt;pid&gt;/</code> 아래가 그 태스크 리스트다(A2). 특히 <strong>커널 스택</strong>(<code>stack</code>)은 "이 프로세스가 커널 안 어느 함수에서 자고 있나"를 바로 보여 준다. 센서 앱이 <code>read()</code>에서 안 돌아오면 → 드라이버의 wait_event 줄이 보인다.</p>
+<h3 id="8-2-예제-21-드라이버-안에서-잠든-태스크-찾기">8.2 예제 21 — 드라이버 안에서 잠든 태스크 찾기<a class="anchor" href="#8-2-예제-21-드라이버-안에서-잠든-태스크-찾기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>m2_slab</code>의 <code>block</code> 파일을 읽는 <code>cat</code>이 잠든 상태에서 <code>/proc/&lt;pid&gt;/</code>의 여러 파일. 그리고 nobody가 남의 stack을 볼 수 있는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>setpriv --reuid=65534 --regid=65534 --clear-groups cat /proc/1/stack; echo "nobody stack rc=$?"
+cat /sys/kernel/debug/m2/block &amp; BP=$!; sleep 1
+echo "pid=$BP"; grep -E "^(State|voluntary_ctxt_switches|nonvoluntary_ctxt_switches)" /proc/$BP/status
+echo "wchan=$(cat /proc/$BP/wchan)"; cat /proc/$BP/stack
+ps -o pid,stat,wchan:32,comm -p $BP; cat /proc/$BP/syscall
+echo go &gt; /sys/kernel/debug/m2/block; wait $BP; echo "reader exited rc=$?"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>cat: /proc/1/stack: Permission denied
+nobody stack rc=1
+pid=796
+State:	S (sleeping)
+voluntary_ctxt_switches:	1
+nonvoluntary_ctxt_switches:	17
+wchan=blk_read
+[&lt;0&gt;] blk_read+0x94/0xe0 [m2_slab]
+[&lt;0&gt;] full_proxy_read+0x6c/0xb0
+[&lt;0&gt;] vfs_read+0xcc/0x350
+[&lt;0&gt;] ksys_read+0x6c/0x110
+[&lt;0&gt;] __arm64_sys_read+0x20/0x40
+[&lt;0&gt;] invoke_syscall.constprop.0+0x48/0xf0
+[&lt;0&gt;] el0_svc_common.constprop.0+0x40/0xf0
+[&lt;0&gt;] do_el0_svc+0x24/0x40
+[&lt;0&gt;] el0_svc+0x40/0x180
+[&lt;0&gt;] el0t_64_sync_handler+0xa0/0xf0
+[&lt;0&gt;] el0t_64_sync+0x198/0x1a0
+    PID STAT WCHAN                            COMMAND
+    796 S    blk_read                         cat
+63 0x3 0xffffbe906000 0x20000 0x1 0x0 0xffffbeb838f0 0xffffe161ae10 0xffffbea61208
+reader exited rc=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><code>State: S (sleeping)</code> = <code>TASK_INTERRUPTIBLE</code>(시그널로 깨울 수 있다, F3). <code>D (disk sleep)</code>이면 <code>TASK_UNINTERRUPTIBLE</code> — kill도 안 먹고, 120초(<code>hung_task_timeout_secs</code>)가 넘으면 hung task 경고가 뜬다.</li><li><code>wchan=blk_read</code> — 잠든 함수 이름 한 단어. <code>ps -o wchan</code>도 같은 파일을 읽는다.</li><li><code>stack</code>은 위에서부터 <code>blk_read+0x94/0xe0 [m2_slab]</code> ← <code>full_proxy_read</code>(debugfs의 래퍼) ← <code>vfs_read</code> ← <code>ksys_read</code> ← <code>__arm64_sys_read</code> ← … ← <code>el0t_64_sync</code>(유저 모드에서 SVC 예외 진입, E6). <strong>맨 위 줄의 <code>[모듈명]</code>과 오프셋</strong>이 드라이버의 정확한 위치다. <code>+0x94/0xe0</code>은 "함수 시작에서 0x94바이트, 함수 길이 0xe0"이고, <code>scripts/faddr2line m2_slab.ko blk_read+0x94/0xe0</code>으로 소스 줄로 바꿀 수 있다(M3).</li><li><code>syscall</code>의 첫 숫자 63은 arm64의 <code>read</code> syscall 번호, 둘째 0x3은 fd 3이다. 그 뒤는 나머지 인자·스택 포인터·PC.</li><li>nobody는 <code>/proc/1/stack</code>에 <code>Permission denied</code>. <code>stack</code> 파일은 root 전용(0400 + ptrace 권한 검사)이다.</li><li><code>voluntary_ctxt_switches: 1</code> — 스스로 한 번 잠들었다. 이 수가 초당 수천씩 오르는 스레드는 짧게 자고 깨기를 반복하는 것이다(폴링 루프, 지나치게 잦은 IRQ thread).</li></ul>
+<h3 id="8-3-예제-22-메모리-쪽-proc-pid">8.3 예제 22 — 메모리 쪽 <code>/proc/&lt;pid&gt;/</code><a class="anchor" href="#8-3-예제-22-메모리-쪽-proc-pid" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: systemd-journald의 <code>smaps_rollup</code>·<code>status</code>·<code>maps</code> 앞부분.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>J=$(pidof systemd-journald); cat /proc/$J/smaps_rollup
+grep -E "^(Name|State|VmRSS|VmHWM|Threads|Cpus_allowed_list|voluntary)" /proc/$J/status; head -5 /proc/$J/maps</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>aaaac3ce0000-ffffde56d000 ---p 00000000 00:00 0                          [rollup]
+Rss:                9580 kB
+Pss:                4197 kB
+Pss_Dirty:          1708 kB
+Pss_Anon:           1028 kB
+Pss_File:           3161 kB
+Pss_Shmem:             8 kB
+Shared_Clean:       6116 kB
+Shared_Dirty:          8 kB
+Private_Clean:      1752 kB
+Private_Dirty:      1704 kB
+Referenced:         9580 kB
+Anonymous:          1028 kB
+AnonHugePages:         0 kB
+Swap:                  0 kB
+Name:	systemd-journal
+State:	S (sleeping)
+VmHWM:	    9580 kB
+VmRSS:	    9580 kB
+Threads:	1
+Cpus_allowed_list:	0-1
+voluntary_ctxt_switches:	558
+aaaac3ce0000-aaaac3d0b000 r-xp 00000000 fe:00 13653                      /usr/lib/systemd/systemd-journald
+aaaac3d1e000-aaaac3d20000 r--p 0002e000 fe:00 13653                      /usr/lib/systemd/systemd-journald
+aaaac3d20000-aaaac3d21000 rw-p 00030000 fe:00 13653                      /usr/lib/systemd/systemd-journald
+aaaac841d000-aaaac8460000 rw-p 00000000 00:00 0                          [heap]
+ffffbabf0000-ffffbac00000 ---p 00000000 00:00 0 </code></pre></figure>
+<p>(<code>smaps_rollup</code>에서 0인 줄 몇 개는 뺐다.)</p>
+<p>출력에서 볼 것: <code>Rss</code> 9580 kB 중 <code>Pss</code>는 4197 kB. 공유 라이브러리 페이지를 공유자 수로 나눈 값이 PSS라서, <strong>"이 프로세스를 죽이면 실제로 얼마가 돌아오나"는 RSS가 아니라 PSS(그중에서도 Private)</strong> 쪽이 가깝다. 임베디드에서 "어떤 데몬이 RAM을 먹나"는 <code>smaps_rollup</code>의 <code>Pss_Anon</code>과 <code>Private_Dirty</code>로 비교한다. <code>maps</code>는 A5에서 본 주소 공간 레이아웃이다.</p>
+<hr>
+<h2 id="9-그-밖의-손잡이와-표-proc-sys-timer_list-softirqs-locks-workqueue">9. 그 밖의 손잡이와 표 — <code>/proc/sys</code>, <code>timer_list</code>, <code>softirqs</code>, <code>locks</code>, workqueue<a class="anchor" href="#9-그-밖의-손잡이와-표-proc-sys-timer_list-softirqs-locks-workqueue" aria-label="link">#</a></h2>
+<h3 id="9-1-예제-23-진단에-자주-쓰는-sysctl-값-읽기">9.1 예제 23 — 진단에 자주 쓰는 sysctl 값 읽기<a class="anchor" href="#9-1-예제-23-진단에-자주-쓰는-sysctl-값-읽기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 이 게스트의 printk·kptr·panic·hung task·VM 관련 값.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>for k in kernel/printk kernel/kptr_restrict kernel/dmesg_restrict kernel/panic kernel/panic_on_oops \
+         kernel/hung_task_timeout_secs vm/overcommit_memory vm/min_free_kbytes kernel/perf_event_paranoid; do
+  echo "$k = $(cat /proc/sys/$k)"; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>kernel/printk = 4	4	1	7
+kernel/kptr_restrict = 1
+kernel/dmesg_restrict = 0
+kernel/panic = 0
+kernel/panic_on_oops = 0
+kernel/hung_task_timeout_secs = 120
+vm/overcommit_memory = 0
+vm/min_free_kbytes = 22528
+kernel/perf_event_paranoid = 2</code></pre></figure>
+<div class="tw"><table><thead><tr><th>값</th><th>뜻</th><th>bring-up 때</th></tr></thead><tbody><tr><td><code>kernel/printk = 4 4 1 7</code></td><td>콘솔 레벨, 기본 메시지 레벨, 최소, 부팅 기본</td><td>콘솔에 <code>pr_info</code>를 보고 싶으면 첫 값을 8로(M1)</td></tr><tr><td><code>kptr_restrict = 1</code></td><td>커널 주소를 CAP_SYSLOG 있는 사람에게만</td><td><code>/proc/modules</code>·<code>kallsyms</code>가 0으로 보이는 이유</td></tr><tr><td><code>dmesg_restrict = 0</code></td><td>일반 사용자도 dmesg 가능</td><td>양산 이미지는 보통 1</td></tr><tr><td><code>panic = 0</code> · <code>panic_on_oops = 0</code></td><td>panic 후 재부팅 안 함 · oops를 panic으로 안 올림</td><td>필드 장비는 <code>panic=10</code>(10초 후 재부팅) + <code>panic_on_oops=1</code>이 흔하다(L7)</td></tr><tr><td><code>hung_task_timeout_secs = 120</code></td><td>D 상태 120초면 경고</td><td>드라이버 deadlock 탐지(M8). Image-sec 첫 시험 부팅에는 파일이 없었다(옵션 차이)</td></tr><tr><td><code>min_free_kbytes = 22528</code></td><td>예약 여유 메모리</td><td>§5.7 watermark</td></tr><tr><td><code>perf_event_paranoid = 2</code></td><td>일반 사용자 perf 제한</td><td>M6</td></tr></tbody></table></div>
+<h3 id="9-2-timer_list-softirqs-locks-workqueue">9.2 <code>timer_list</code>, <code>softirqs</code>, <code>locks</code>, workqueue<a class="anchor" href="#9-2-timer_list-softirqs-locks-workqueue" aria-label="link">#</a></h3>
+<ul><li><code>/proc/timer_list</code>: CPU별 hrtimer 큐와 <strong>tick device</strong>. 이 게스트에서는 각 CPU가 <code>arch_sys_timer</code>(<code>set_next_event: arch_timer_set_next_event_virt</code>, <code>event_handler: hrtimer_interrupt</code>)를 쓰고, 별도로 broadcast 장치 <code>bc_hrtimer</code>가 있다. CPU idle에서 로컬 타이머가 멈추는 SoC에서는 broadcast 장치가 진짜 HW 타이머여야 한다 — "idle 들어가면 시스템이 멈춰요"의 단서가 여기 있다(F8, N 모듈).</li></ul>
+<figure class="code"><span class="lang">text</span><pre><code>now at 776492779021 nsecs
+cpu: 0
+cpu: 1
+Tick Device: mode:     1
+Clock Event Device: bc_hrtimer
+ max_delta_ns:   9223372036854775807
+ set_next_event: 0x0
+ event_handler:  tick_handle_oneshot_broadcast
+Tick Device: mode:     1
+Clock Event Device: arch_sys_timer
+ max_delta_ns:   2199023255551
+ set_next_event: arch_timer_set_next_event_virt</code></pre></figure>
+<ul><li><code>/proc/softirqs</code>: §3.4에서 본 것처럼 softirq 종류별·CPU별 카운트. <code>NET_RX</code>가 한 CPU에만 몰리면 RPS/IRQ affinity를 본다. <code>TIMER</code>·<code>SCHED</code>·<code>RCU</code>는 늘 움직이는 배경 소음이다.</li><li><code>/proc/locks</code>: 유저스페이스 파일 잠금(flock/fcntl/OFD) 목록. 이 게스트에서는 그 순간 아무도 잠금을 안 잡고 있어서 비어 있었다. "앱 두 개가 같은 설정 파일에서 서로 기다린다"를 볼 때 쓴다. <strong>커널 내부 lock(mutex·spinlock)은 여기 안 나온다</strong> — 그건 lockdep <code>/proc/lockdep*</code>(M8)과 <code>/proc/&lt;pid&gt;/stack</code>이다.</li><li>workqueue: <code>/sys/devices/virtual/workqueue/</code>에는 <code>WQ_SYSFS</code> 플래그로 만든 큐만 보인다(이 게스트: <code>blkcg_punt_bio</code>, <code>writeback</code>, 그리고 unbound 큐 기본 <code>cpumask</code> = 3 → CPU 0,1). 바쁜 워크큐 전체 상태는 SysRq <code>t</code>(<code>echo t &gt; /proc/sysrq-trigger</code>, M4)가 태스크 목록과 함께 "Showing busy workqueues and worker pools"로 찍어 주고, 커널 소스의 <code>tools/workqueue/wq_dump.py</code>(drgn)도 있다. workqueue 지연 측정은 ftrace의 <code>workqueue:*</code> tracepoint(M5)로 한다.</li></ul>
+<figure class="code"><span class="lang">text</span><pre><code>blkcg_punt_bio
+cpumask
+cpumask_isolated
+cpumask_requested
+power
+uevent
+writeback
+3</code></pre></figure>
+<hr>
+<h2 id="10-커널-안에서는-무슨-일이-일어나나">10. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#10-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<h3 id="10-1-모든-진단-파일은-읽을-때-계산되는-show-함수다">10.1 모든 진단 파일은 "읽을 때 계산되는" show 함수다<a class="anchor" href="#10-1-모든-진단-파일은-읽을-때-계산되는-show-함수다" aria-label="link">#</a></h3>
+<p>이 파일들은 디스크에 저장된 게 아니다. <code>cat</code>이 <code>read()</code>를 부르면 VFS가 procfs/sysfs/debugfs의 <code>file_operations</code>로 들어가고, 대부분 <strong>seq_file</strong>(<code>seq_printf</code>로 한 줄씩 만드는 헬퍼)의 <code>show</code> 콜백이 그 순간의 커널 자료구조를 훑어 텍스트를 만든다. 그래서 값은 항상 "읽은 순간"의 스냅샷이고, 큰 표(<code>slabinfo</code>, <code>clk_summary</code>)를 읽는 동안 내부 lock을 잠깐 잡는다.</p>
+<figure class="chart"><svg viewBox="0 0 680 322" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="10" y="20" width="150" height="40" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="85" y="45" text-anchor="middle" font-size="13">cat /proc/xxx</text>
+  <rect x="190" y="20" width="150" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="265" y="45" text-anchor="middle" font-size="13">vfs_read()</text>
+  <rect x="370" y="20" width="300" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="520" y="45" text-anchor="middle" font-size="13">procfs · sysfs(kernfs) · debugfs</text>
+  <line x1="160" y1="40" x2="188" y2="40" stroke="currentColor" marker-end="url(#ah7)"/>
+  <line x1="340" y1="40" x2="368" y2="40" stroke="currentColor" marker-end="url(#ah7)"/>
+  <line x1="520" y1="60" x2="520" y2="88" stroke="currentColor" marker-end="url(#ah7)"/>
+  <rect x="370" y="90" width="300" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="520" y="112" text-anchor="middle" font-size="12">seq_file show 콜백 → seq_printf()</text>
+  <line x1="520" y1="124" x2="520" y2="150" stroke="currentColor" marker-end="url(#ah7)"/>
+  <rect x="10" y="152" width="660" height="160" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="20" y="174" font-size="12">interrupts → show_interrupts() : irq_desc 배열 + desc→kstat_irqs (per-CPU 카운트)</text>
+  <text x="20" y="196" font-size="12">iomem → r_show() : iomem_resource 트리 (CAP_SYS_ADMIN 없으면 0으로)</text>
+  <text x="20" y="218" font-size="12">meminfo → meminfo_proc_show() : vm_stat 카운터 · totalram_pages()</text>
+  <text x="20" y="240" font-size="12">slabinfo → slab_show() : slab_caches 리스트 · devices_deferred → deferred_devs_show()</text>
+  <text x="20" y="262" font-size="12">clk_summary → clk_summary_show() · gpio → gpiolib_seq_show()</text>
+  <text x="20" y="284" font-size="12">regmap/&lt;dev&gt;/registers → regmap_map_read_file()</text>
+  <text x="20" y="306" font-size="12">&lt;pid&gt;/stack → proc_pid_stack() : stack_trace_save_tsk() (root 전용)</text>
+</svg></figure>
+<p>그림 7 — 진단 파일 하나를 읽을 때의 경로와, 이 노트에서 쓴 파일들의 show 함수(6.18 소스에서 확인한 이름).</p>
+<div class="tw"><table><thead><tr><th>파일</th><th>show 함수 (6.18)</th><th>읽는 자료구조</th><th>드라이버가 영향을 주는 지점</th></tr></thead><tbody><tr><td><code>/proc/interrupts</code></td><td><code>show_interrupts()</code> (<code>kernel/irq/proc.c</code>)</td><td><code>irq_desc</code>, <code>irq_desc-&gt;action-&gt;name</code></td><td><code>request_irq()</code>의 이름 인자가 마지막 칸</td></tr><tr><td><code>/proc/iomem</code></td><td><code>r_show()</code> (<code>kernel/resource.c</code>)</td><td><code>iomem_resource</code> 트리</td><td><code>devm_ioremap_resource()</code> → <code>request_mem_region()</code> → 안쪽 줄</td></tr><tr><td><code>/proc/meminfo</code></td><td><code>meminfo_proc_show()</code> (<code>fs/proc/meminfo.c</code>)</td><td>전역 vm 통계 카운터</td><td>slab·vmalloc·page 할당이 각 카운터를 움직임</td></tr><tr><td><code>/proc/slabinfo</code></td><td><code>slab_show()</code> (<code>mm/slab_common.c</code>)</td><td><code>slab_caches</code> 리스트</td><td><code>kmem_cache_create()</code>의 이름이 첫 칸</td></tr><tr><td><code>devices_deferred</code></td><td><code>deferred_devs_show()</code> (<code>drivers/base/dd.c</code>)</td><td><code>deferred_probe_pending_list</code></td><td><code>dev_err_probe()</code>가 <code>deferred_probe_reason</code>을 채움</td></tr><tr><td><code>clk_summary</code></td><td><code>clk_summary_show()</code> (<code>drivers/clk/clk.c</code>)</td><td>clk_core 트리</td><td><code>devm_clk_get()</code>의 con_id가 consumer id</td></tr><tr><td><code>regulator_summary</code></td><td><code>regulator_summary_show()</code> (<code>drivers/regulator/core.c</code>)</td><td>regulator_dev + 소비자</td><td><code>devm_regulator_get()</code></td></tr><tr><td><code>pinmux-pins</code></td><td><code>pinmux_pins_show()</code> (<code>drivers/pinctrl/pinmux.c</code>)</td><td>pin_desc의 mux_owner</td><td>DT <code>pinctrl-0</code> (probe 직전 driver core가 적용)</td></tr><tr><td>debugfs <code>gpio</code></td><td><code>gpiolib_seq_show()</code> (<code>drivers/gpio/gpiolib.c</code>)</td><td>gpio_device · gpio_desc 라벨</td><td><code>gpiod_get()</code>의 con_id가 라벨</td></tr><tr><td>regmap <code>registers</code></td><td><code>regmap_map_read_file()</code> (<code>drivers/base/regmap/regmap-debugfs.c</code>)</td><td>regmap(캐시 또는 버스 읽기)</td><td><code>regmap_config.name</code>·<code>max_register</code></td></tr><tr><td><code>/proc/&lt;pid&gt;/stack</code></td><td><code>proc_pid_stack()</code> (<code>fs/proc/base.c</code>)</td><td>잠든 태스크의 저장된 레지스터로 unwind</td><td>드라이버의 <code>wait_event*</code> 위치</td></tr></tbody></table></div>
+<h3 id="10-2-드라이버를-쓸-때-이-지식이-다시-나오는-곳">10.2 드라이버를 쓸 때 이 지식이 다시 나오는 곳<a class="anchor" href="#10-2-드라이버를-쓸-때-이-지식이-다시-나오는-곳" aria-label="link">#</a></h3>
+<ul class="tasks"><li><strong>이름을 잘 붙여라.</strong> <code>/proc/interrupts</code>의 action 이름(<code>devm_request_irq</code>의 <code>devname</code>), slab 캐시 이름, regmap 이름, GPIO con_id, clk con_id가 모두 진단 화면의 "누가"가 된다. <code>"irq"</code> 같은 이름을 주면 현장에서 아무도 못 찾는다. 장치가 여러 개면 <code>dev_name(dev)</code>를 쓰자.</li><li><strong><code>dev_err_probe()</code>를 써라.</strong> defer 이유가 <code>devices_deferred</code>에 남고, 나머지 에러는 장치 이름과 함께 찍힌다(G3).</li><li><strong><code>-ENODEV</code>는 "내 장치 아님"일 때만.</strong> 칩 ID 불일치처럼 진짜 HW 문제면 <code>-EIO</code>나 <code>-ENXIO</code> 대신 <code>dev_err</code>를 직접 찍고 반환하자 — 안 그러면 §1.5처럼 아무 로그 없이 사라진다. (커뮤니티 관행은 드라이버마다 다르니 리뷰어 의견을 따른다.)</li><li><strong>진단 정보는 debugfs에.</strong> 레지스터 덤프·통계는 <code>debugfs_create_regset32()</code>나 regmap debugfs로(G8). <code>/proc</code>에 새 파일을 만드는 건 금지에 가깝다.</li><li><strong>잠드는 곳은 interruptible로.</strong> 예제 21처럼 <code>S</code> 상태면 앱을 Ctrl-C로 뺄 수 있다. <code>D</code>로 자는 경로는 hung task 경고의 원인이 된다(F3).</li></ul>
+<hr>
+<h2 id="11-embedded-실무에서-다시-보기">11. Embedded 실무에서 다시 보기<a class="anchor" href="#11-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="11-1-장면-1-imu가-dev-iio-device0으로-안-나와요-센서-키트">11.1 장면 1 — "IMU가 <code>/dev/iio:device0</code>으로 안 나와요" (센서 키트)<a class="anchor" href="#11-1-장면-1-imu가-dev-iio-device0으로-안-나와요-센서-키트" aria-label="link">#</a></h3>
+<p>그림 1 순서를 그대로 밟는다. 예를 들어 센서 키트의 BMI088이 I2C2 0x68에 붙어 있다면:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cat /proc/device-tree/soc/i2c@30a30000/imu@68/status 2&gt;/dev/null; echo     # ① 없으면 okay
+ls /sys/bus/i2c/devices/ | grep 0068                                       # ② 2-0068 이 있나
+ls -l /sys/bus/i2c/devices/2-0068/driver                                   # ③ bind?
+cat /sys/kernel/debug/devices_deferred                                     # ④ 이유는?
+dmesg | grep -iE "2-0068|bmi088"                                           # ⑤ probe 에러
+grep -A3 "i2c2" /sys/kernel/debug/clk/clk_summary                          # ⑥ 클럭
+cat /sys/kernel/debug/regulator/regulator_summary | grep -B1 -A2 2-0068    # ⑥ VDD/VDDIO
+grep -E "i2c2|imu" /sys/kernel/debug/pinctrl/*/pinmux-pins                 # ⑥ SCL/SDA 핀
+grep -i bmi /proc/interrupts                                               # ⑦ DRDY IRQ 카운트</code></pre></figure>
+<p>(가이드 — 실행 안 함. 경로·주소는 i.MX8MP 스타일의 예시다.) ②에서 <code>2-0068</code>이 없으면 I2C 컨트롤러(<code>30a30000.i2c</code>) 자체가 bind됐는지로 한 단계 올라간다. ⑤에서 <code>-121</code>(EREMOTEIO) 같은 I2C 에러가 보이면 NACK — 주소·전원·핀먹스 문제다. 컨트롤러 드라이버에 따라 NACK가 <code>-ENXIO</code>(-6)로 올라오기도 하는데, 센서 드라이버가 그 값을 probe에서 그대로 반환하면 §1.5처럼 <strong>로그 없이</strong> 사라진다. 그다음은 Don의 LA로 SCL/SDA를 본다(H5, M11).</p>
+<h3 id="11-2-장면-2-필드에서-며칠-지나면-메모리가-줄어요">11.2 장면 2 — 필드에서 "며칠 지나면 메모리가 줄어요"<a class="anchor" href="#11-2-장면-2-필드에서-며칠-지나면-메모리가-줄어요" aria-label="link">#</a></h3>
+<p>예제 14의 방법을 자동화한다. 장비에 아래 스크립트를 cron/systemd timer로 돌려 1시간마다 저장하고, 두 스냅샷을 diff한다. 증가하는 캐시가 보이면 그 이름(드라이버가 붙인 이름 또는 <code>kmalloc-N</code>)이 첫 단서다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# memsnap.sh — 메모리 스냅샷 (가이드: 랩에서는 개별 명령만 실행했다)
+D=/var/log/memsnap; mkdir -p $D; T=$(date +%Y%m%d-%H%M)
+{ echo "== meminfo"; cat /proc/meminfo
+  echo "== slabinfo"; tail -n +3 /proc/slabinfo | sort -k3 -n -r | head -40
+  echo "== buddyinfo"; cat /proc/buddyinfo
+  echo "== vmalloc"; awk '{s[$3]+=$2} END {for (k in s) print s[k], k}' /proc/vmallocinfo | sort -n -r | head -15
+} &gt; $D/$T.txt</code></pre></figure>
+<p><code>kmalloc-N</code>이 범인이면 주인을 모르니, 디버그 이미지에서 kmemleak나 <code>slub_debug=U,kmalloc-512</code>로 할당 호출 위치(<code>/sys/kernel/slab/kmalloc-512/alloc_calls</code>)를 본다(M8).</p>
+<h3 id="11-3-장면-3-카메라를-켜면-가끔-프레임이-튄다">11.3 장면 3 — "카메라를 켜면 가끔 프레임이 튄다"<a class="anchor" href="#11-3-장면-3-카메라를-켜면-가끔-프레임이-튄다" aria-label="link">#</a></h3>
+<p>V4L2 캡처 IRQ와 네트워크 RX IRQ가 같은 CPU에 몰려 있으면 지연이 생긴다. <code>/proc/interrupts</code>를 1초 간격으로 두 번 찍어 CPU별 증가량을 비교하고, 카메라 IRQ를 다른 코어로 옮긴다(<code>smp_affinity_list</code>). managed IRQ(NVMe·virtio-blk 큐)는 예제 8처럼 거부되니 옮길 대상에서 뺀다. 그 뒤 지연 측정은 ftrace <code>irqsoff</code>/<code>timerlat</code>(M5, N 모듈).</p>
+<h3 id="11-4-장면-4-bring-up-보고서에-붙일-보드-상태-한-장">11.4 장면 4 — bring-up 보고서에 붙일 "보드 상태 한 장"<a class="anchor" href="#11-4-장면-4-bring-up-보고서에-붙일-보드-상태-한-장" aria-label="link">#</a></h3>
+<p>새 보드 첫 부팅에서 아래를 한 파일로 떠 두면, 이후 커널·DT를 바꿀 때마다 diff로 회귀를 잡을 수 있다: <code>uname -a</code>, <code>/proc/cmdline</code>, <code>dtc -I fs /proc/device-tree</code>(dtc가 있으면), <code>/proc/iomem</code>(root), <code>/proc/interrupts</code>, <code>devices_deferred</code>, <code>clk_summary</code>, <code>regulator_summary</code>, <code>pinmux-pins</code>, debugfs <code>gpio</code>, <code>lsmod</code>, <code>/proc/sys/kernel/tainted</code>, <code>dmesg</code>. SSD 시절 "샘플별 레지스터 덤프 기록"과 같은 습관이다.</p>
+<hr>
+<h2 id="12-흔한-실수와-증상">12. 흔한 실수와 증상<a class="anchor" href="#12-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td><code>/proc/iomem</code>을 일반 사용자로 봄</td><td>주소가 전부 <code>00000000-00000000</code></td><td><code>r_show()</code>가 CAP_SYS_ADMIN 없으면 가림</td><td>sudo로 본다</td></tr><tr><td>debugfs가 안 보임</td><td><code>/sys/kernel/debug</code>가 빈 디렉터리</td><td>마운트 안 됨 또는 <code>CONFIG_DEBUG_FS=n</code></td><td><code>mount -t debugfs none /sys/kernel/debug</code>, 양산 이미지면 디버그 빌드 사용</td></tr><tr><td><code>devices_deferred</code>의 이유 칸이 빔</td><td>장치 이름만 있음</td><td>드라이버가 <code>return -EPROBE_DEFER</code>를 그대로 씀</td><td><code>dev_err_probe()</code>로 교체</td></tr><tr><td>probe가 <code>-ENODEV</code>를 반환</td><td>로그 없이 unbound</td><td>driver core가 dbg로만 찍음</td><td>dd.c dyndbg 켜기, 드라이버에 <code>dev_err</code> 추가</td></tr><tr><td>managed IRQ affinity 변경</td><td><code>write error: Operation not permitted</code></td><td>블록 mq·NVMe 큐 IRQ는 커널이 관리</td><td>다른 IRQ를 옮기거나 <code>irqaffinity=</code>·isolcpus 설계</td></tr><tr><td>smp_affinity를 0-1로 주고 분산 기대</td><td>CPU0만 카운트 증가</td><td>GIC는 한 CPU에만 배달(effective_affinity)</td><td><code>effective_affinity_list</code> 확인, 필요하면 irqbalance</td></tr><tr><td>debugfs <code>gpio</code>의 값과 코드의 값이 반대</td><td>리셋이 안 풀림</td><td>debugfs는 물리 레벨, 코드는 논리값(active-low)</td><td>DT/lookup의 <code>GPIO_ACTIVE_LOW</code>와 <code>gpioinfo</code>의 active-low 확인</td></tr><tr><td>전용 slab 캐시가 slabinfo에 없음</td><td>이름으로 grep 실패</td><td>SLUB 캐시 병합</td><td><code>SLAB_NO_MERGE</code> 또는 <code>slab_nomerge</code></td></tr><tr><td>vmallocinfo에서 내 모듈 이름을 못 찾음</td><td>호출자 칸이 맨 주소</td><td><code>__init</code> 함수에서 할당 → init 심볼 해제</td><td>크기·<code>pages=</code>로 찾기, probe에서 할당</td></tr><tr><td>요약표만 믿음</td><td>표는 정상인데 HW 무응답</td><td>표는 "드라이버가 믿는 상태"</td><td>scope·LA·레지스터 직접 읽기로 교차 확인</td></tr></tbody></table></div>
+<hr>
+<h2 id="13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다<a class="anchor" href="#13-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> "The board boots, but /dev/xxx never appears. Where do you look?"</p>
+<p><strong>A.</strong> 체인을 순서대로 끊어 본다. DT 노드가 있고 okay인지(<code>/proc/device-tree</code>), 버스 아래 장치 객체가 생겼는지(<code>/sys/bus/*/devices</code>), <code>driver</code> 링크가 있는지. 없으면 <code>devices_deferred</code>에 이유가 있는지, dmesg에 <code>probe ... failed with error</code>가 있는지. bind는 됐는데 노드가 없으면 클래스 등록이나 udev 쪽이고, 동작이 이상하면 clk·regulator·pinmux 요약과 <code>/proc/interrupts</code>를 본다. <code>-ENODEV</code>는 조용히 실패하니 dd.c dynamic debug도 켠다.</p>
+<blockquote><p>I walk the chain in order. Is the DT node present and okay under /proc/device-tree? Did the bus create a device object under /sys/bus/BUS/devices? Is there a driver symlink? If not, I check debugfs devices_deferred for a recorded reason, and dmesg for "probe with driver X failed with error N". If it's bound but there's no device node, it's the class registration or udev. If it's bound but misbehaving, I go to clk_summary, regulator_summary, pinmux-pins, and the interrupt counts. And since -ENODEV from probe is silent by default, I turn on dynamic debug for drivers/base/dd.c.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "What does the driver symlink tell you that dmesg doesn't?" → 현재 bind 상태 그 자체(로그는 과거 기록, 링크는 지금 상태).</p>
+<p><strong>Q.</strong> "What is -EPROBE_DEFER and how do you debug a device stuck in deferred probe?"</p>
+<p><strong>A.</strong> probe에 필요한 공급자(clk·regulator·GPIO·PHY)가 아직 없다는 뜻이고, driver core가 목록에 넣었다가 다른 드라이버가 bind될 때마다 다시 시도한다. <code>devices_deferred</code>에 <code>dev_err_probe()</code>가 남긴 이유가 나오고, 부팅 후 timeout(기본 10초)이 지나면 <code>deferred probe pending:</code> 경고가 찍힌다. 공급자 드라이버가 빠졌는지, 공급자 자체가 defer 중인지(연쇄)를 따라간다. fw_devlink가 있으면 <code>/sys/class/devlink</code>에서 공급자-소비자 링크 상태도 본다.</p>
+<blockquote><p>It means a supplier the probe needs isn't there yet, so the driver core parks the device and retries every time some other driver binds. debugfs devices_deferred shows the reason recorded by dev_err_probe, and after the deferred probe timeout — ten seconds by default — the kernel prints "deferred probe pending" for whatever is still waiting. Then I follow the chain: is the supplier's driver missing from the build, or is the supplier itself deferred? With fw_devlink I also look at the device links in /sys/class/devlink.</p></blockquote>
+<p><strong>Q.</strong> "How do you confirm that an interrupt is actually arriving?"</p>
+<p><strong>A.</strong> <code>/proc/interrupts</code>에서 그 action 이름의 줄을 찾아, 장치를 한 번 자극하기 전후로 카운트를 비교한다. 0에서 안 움직이면 핀먹스·트리거 타입·컨트롤러 설정, 폭주하면 레벨 인터럽트를 안 지우는 핸들러다. <code>/sys/kernel/irq/N/type</code>으로 실제 트리거를, <code>effective_affinity</code>로 실제 받는 CPU를, <code>spurious</code>로 처리 안 된 수를 본다. 마지막엔 scope로 핀을 직접 본다.</p>
+<blockquote><p>I find the line with the handler's name in /proc/interrupts and compare the counts before and after poking the device. If it stays at zero, it's pinmux, trigger type, or the controller setup; if it explodes, it's usually a level interrupt the handler never clears. /sys/kernel/irq/N/type shows the trigger actually programmed, effective_affinity shows which CPU really receives it, and /proc/irq/N/spurious counts unhandled ones. If the counters disagree with my expectation, I put a scope on the pin.</p></blockquote>
+<p><strong>Q.</strong> "Why is MemTotal smaller than the RAM on the board?"</p>
+<p><strong>A.</strong> MemTotal는 버디 할당자가 관리하는 페이지 합이다. 커널 코드·데이터, memblock 예약, <code>no-map</code> carve-out은 빠진다. 실습에서는 1 GiB 중 83 MB가 빠졌고, <code>zoneinfo</code>의 managed 페이지 × 4 KiB가 MemTotal과 정확히 같았다. 차이는 <code>/proc/iomem</code>의 reserved 줄과 debugfs memblock으로 설명한다.</p>
+<blockquote><p>MemTotal is the number of pages the buddy allocator manages, so the kernel image, memblock reservations and no-map carve-outs are excluded. On my QEMU board, 83 MB of 1 GiB was missing, and zoneinfo's managed pages times four kilobytes matched MemTotal exactly. The reserved entries in /proc/iomem and debugfs memblock account for the difference.</p></blockquote>
+<p><strong>Q.</strong> "How would you detect a memory leak in a kernel driver on a deployed device?"</p>
+<p><strong>A.</strong> 먼저 <code>/proc/meminfo</code>의 SUnreclaim과 <code>/proc/slabinfo</code>를 주기적으로 찍어 diff한다. 늘어나는 캐시 이름이 단서다 — 드라이버 전용 캐시면 바로 범인이고, <code>kmalloc-N</code>이면 디버그 빌드에서 kmemleak나 <code>slub_debug=U</code>의 alloc_calls로 호출 위치를 찾는다. 실습에서 kmalloc-512가 1000개씩 늘고 모듈을 내려도 그대로인 걸 확인했다.</p>
+<blockquote><p>First, periodic snapshots of SUnreclaim in /proc/meminfo and of /proc/slabinfo, then diff them. The growing cache's name is the clue: if it's the driver's own cache, that's the culprit; if it's a generic kmalloc-N cache, I reproduce on a debug build with kmemleak or slub_debug=U and read alloc_calls to get the call site. In my lab, kmalloc-512 grew by exactly a thousand objects per trigger and stayed there after the module was unloaded.</p></blockquote>
+<p><strong>Q.</strong> "An application hangs in read() on your device. How do you find where?"</p>
+<p><strong>A.</strong> <code>/proc/&lt;pid&gt;/status</code>의 State(S냐 D냐), <code>wchan</code>, 그리고 root로 <code>/proc/&lt;pid&gt;/stack</code>을 본다. 맨 위 줄이 <code>[모듈명]</code>이 붙은 드라이버 함수와 오프셋이라 <code>faddr2line</code>으로 소스 줄까지 간다. 그 wait 조건을 깨우는 쪽(IRQ 핸들러가 <code>wake_up</code>을 안 부르는지)을 <code>/proc/interrupts</code>와 ftrace로 확인한다.</p>
+<blockquote><p>I check State in /proc/PID/status — S or D — then wchan, and as root /proc/PID/stack. The top frame is the driver function with the module name and an offset, so faddr2line gets me the source line. Then I check the waker side — does the IRQ handler ever call wake_up? — using /proc/interrupts and ftrace.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "S vs D?" → S는 시그널로 깰 수 있고 D는 못 깬다. D가 120초 넘으면 hung task 경고.</p>
+<p><strong>Q.</strong> "debugfs vs sysfs vs procfs — which do you use for what?"</p>
+<p><strong>A.</strong> sysfs는 디바이스 모델과 안정 ABI(값 하나 = 파일 하나), procfs는 프로세스와 오래된 전역 통계, debugfs는 개발자용으로 형식 약속이 없다. bring-up 때 가장 유용한 clk·regulator·pinctrl·gpio·regmap 정보는 debugfs에 있어서, 양산 이미지에서도 디버그 빌드로 쉽게 바꿀 수 있게 만들어 둔다.</p>
+<blockquote><p>sysfs is the device model and a stable ABI, one value per file. procfs is per-process info plus legacy global statistics. debugfs is for developers with no format guarantees. The most useful bring-up views — clocks, regulators, pinctrl, GPIO, regmap — live in debugfs, so I make sure we can easily boot a debug build on production hardware.</p></blockquote>
+<hr>
+<h2 id="14-직접-해보기">14. 직접 해보기<a class="anchor" href="#14-직접-해보기" aria-label="link">#</a></h2>
+<ol><li>(개념) <code>/proc/iomem</code>에서 어떤 장치의 바깥 줄은 있는데 안쪽 줄이 없다. 무슨 뜻인가? 정답/힌트: DT·버스가 영역을 선언했지만 드라이버가 <code>request_mem_region()</code>(=<code>devm_ioremap_resource</code>)으로 잡지 않았다 — 드라이버가 bind 안 됐거나 <code>ioremap</code>만 직접 썼다.</li><li>(관찰) 예제 3에서 gpio-sim 칩을 만들기 전에 <code>echo m2_cons &gt; /sys/bus/platform/drivers/m2_cons/bind</code>를 하면 어떤 오류 문자열이 나오나? 정답/힌트: 직접 확인할 것(이 노트에서는 실행하지 않았다). <code>-517</code>(EPROBE_DEFER)은 유저 errno 표에 없는 커널 내부 값이라 셸에서 <code>Unknown error 517</code>처럼 보일 수 있다는 점을 생각해 본다.</li><li>(코드) <code>m2_defer</code>의 <code>GPIO_ACTIVE_LOW</code>를 <code>GPIO_ACTIVE_HIGH</code>로 바꾸고 다시 빌드해, debugfs <code>gpio</code>의 <code>reset</code> 줄이 <code>output-low</code>로 바뀌는지 확인하라. 정답/힌트: 논리 0 요청 + active-high = 물리 low. debugfs는 물리 레벨을 보여 준다.</li><li>(관찰) 예제 7의 <code>IRQF_TRIGGER_RISING</code>을 <code>IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING</code>으로 바꾸면 pull-up/pull-down 세 번에 카운트가 몇이 되나? <code>/sys/kernel/irq/N/type</code>은? 정답/힌트: 6, <code>type: edge</code>(양 에지도 edge로 표시).</li><li>(코드) <code>m2_slab</code>의 할당을 <code>module_init</code>이 아닌 debugfs 쓰기 핸들러로 옮기고 <code>/proc/vmallocinfo</code>의 호출자 칸이 심볼로 보이는지 확인하라. 정답/힌트: 비-init 함수면 <code>leak_write+0x.../0x... [m2_slab]</code> 형태로 나온다.</li><li>(관찰) 같은 게스트를 <code>slab_nomerge</code> 없이, <code>SLAB_NO_MERGE</code>도 빼고 빌드해서 <code>m2_obj</code>가 slabinfo에 나오는지, <code>/sys/kernel/slab/m2_obj</code>가 다른 캐시를 가리키는 링크인지 확인하라. 정답/힌트: 병합되면 <code>/sys/kernel/slab/m2_obj</code>는 <code>:0000192</code>나 <code>:a-0000192</code> 같은 이름의 공용 캐시로 가는 심볼릭 링크가 된다(<code>aliases</code> 파일 값도 확인).</li><li>(스크립트) §11.4의 "보드 상태 한 장" 스크립트를 짜서 trace 게스트에서 두 번(모듈 로드 전/후) 찍고 diff하라. 어느 파일이 바뀌었나? 정답/힌트: interrupts(카운트·새 줄), slabinfo, meminfo, debugfs gpio, lsmod, tainted, iomem(변화 없음 — 우리 모듈은 MMIO를 잡지 않음).</li></ol>
+<hr>
+<h2 id="15-용어-사전">15. 용어 사전<a class="anchor" href="#15-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>deferred probe</td><td>지연 probe</td><td>공급자가 없어 <code>-EPROBE_DEFER</code>를 낸 장치를 나중에 다시 시도하는 driver core 기능</td></tr><tr><td><code>devices_deferred</code></td><td>debugfs 파일</td><td>지금 대기 중인 장치와 이유 문자열</td></tr><tr><td><code>dev_err_probe()</code></td><td>probe 에러 헬퍼</td><td>defer면 이유 저장, 아니면 에러 출력 후 같은 값 반환</td></tr><tr><td>fw_devlink</td><td>firmware device link</td><td>DT 참조로 공급자-소비자 device link를 자동 생성</td></tr><tr><td><code>of_node</code></td><td>DT 노드 링크</td><td>장치가 만들어진 DT 노드를 가리키는 sysfs 링크</td></tr><tr><td>hwirq · virq</td><td>하드웨어/리눅스 IRQ 번호</td><td>컨트롤러 내부 번호와 <code>/proc/interrupts</code>의 번호</td></tr><tr><td>effective affinity</td><td>실제 배달 CPU</td><td>허용 마스크 중 컨트롤러가 실제로 보내는 CPU</td></tr><tr><td>managed IRQ</td><td>커널 관리 IRQ</td><td>큐별로 CPU가 고정되어 유저가 affinity를 못 바꾸는 IRQ</td></tr><tr><td>resource tree</td><td>자원 트리</td><td><code>/proc/iomem</code>·<code>ioports</code>의 원본, <code>struct resource</code> 계층</td></tr><tr><td>memblock</td><td>초기 메모리 관리자</td><td>버디 할당자 이전에 쓰는 메모리·예약 영역 목록</td></tr><tr><td>MemTotal</td><td>관리 메모리 총량</td><td>버디 할당자가 관리하는 페이지 합(물리 RAM보다 작음)</td></tr><tr><td>SUnreclaim</td><td>회수 불가 slab</td><td>커널 객체 메모리, 드라이버 누수가 여기 쌓임</td></tr><tr><td>slab cache</td><td>객체 캐시</td><td>같은 크기 객체를 모아 두는 할당자 단위 (<code>kmalloc-512</code>, <code>m2_obj</code>)</td></tr><tr><td>buddyinfo</td><td>버디 빈 블록 표</td><td>order별 빈 연속 블록 수 — 단편화 지표</td></tr><tr><td>watermark</td><td>여유 메모리 기준선</td><td>zone의 min/low/high, kswapd·direct reclaim 동작 기준</td></tr><tr><td>regmap debugfs</td><td>레지스터 덤프</td><td><code>/sys/kernel/debug/regmap/&lt;dev&gt;/registers</code></td></tr><tr><td>runtime PM</td><td>런타임 전원 관리</td><td>장치 단위 suspend/resume, <code>power/runtime_status</code></td></tr><tr><td>taint</td><td>오염 플래그</td><td>커널 신뢰성에 영향을 준 사건 기록 (O·E·W·D…)</td></tr><tr><td>wchan</td><td>wait channel</td><td>태스크가 잠든 커널 함수 이름</td></tr><tr><td>seq_file</td><td>순차 파일 헬퍼</td><td>proc/debugfs 텍스트 파일을 show 콜백으로 만드는 커널 API</td></tr></tbody></table></div>
+<hr>
+<h2 id="16-요약-체크리스트">16. 요약 &amp; 체크리스트<a class="anchor" href="#16-요약-체크리스트" aria-label="link">#</a></h2>
+<p>bring-up 진단은 "어디를 볼지"를 아는 싸움이다. <code>/sys</code>의 장치·드라이버 링크로 bind 상태를, debugfs <code>devices_deferred</code>와 dmesg의 probe 에러로 실패 이유를, <code>of_node</code>와 <code>/proc/device-tree</code>로 DT 출처를 확인한다. 그다음 debugfs의 clk·regulator·pinctrl·gpio·regmap 요약으로 자원을, <code>/proc/interrupts</code>와 <code>/proc/irq</code>·<code>/sys/kernel/irq</code>로 인터럽트를 본다. 메모리는 <code>meminfo</code>의 SUnreclaim과 <code>slabinfo</code>를 맞춰 보고, <code>buddyinfo</code>·<code>zoneinfo</code>로 단편화와 여유를, <code>vmallocinfo</code>로 큰 버퍼를 본다. 멈춘 앱은 <code>/proc/&lt;pid&gt;/stack</code>이 드라이버의 잠든 줄을 알려 준다. 모든 표는 커널이 믿는 상태라서, 이상하면 HW를 직접 재서 교차 확인한다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>"부팅은 되는데 장치 노드가 없다"를 7단계(DT → 장치 → bind → defer → 에러 → 자원 → IRQ)로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>devices_deferred</code>의 형식과, 이유 칸이 비는 경우를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>probe가 <code>-ENODEV</code>를 돌려주면 왜 로그가 없는지 말하고 dd.c dyndbg로 확인할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>sysfs <code>bind</code>/<code>unbind</code>로 probe를 반복 시험할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>of_node</code> 링크와 <code>reg</code> 바이트를 <code>/proc/iomem</code>과 맞춰 볼 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>/proc/interrupts</code>의 각 열과 hwirq·virq·irq_domain 관계를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>smp_affinity·effective_affinity·managed IRQ 차이를 실측 예로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>/proc/iomem</code>이 일반 사용자에게 0으로 보이는 이유를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>MemTotal과 물리 RAM의 차이를 zoneinfo·memblock으로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>slabinfo·meminfo로 드라이버 누수를 숫자로 보여 줄 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>clk_summary·regulator_summary·pinmux-pins·debugfs gpio·regmap registers가 각각 무엇을 답하는지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>/proc/&lt;pid&gt;/stack</code>·<code>wchan</code>·<code>status</code>로 드라이버에서 잠든 태스크의 위치를 찾을 수 있다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — "The /proc Filesystem" (<code>Documentation/filesystems/proc.rst</code>): meminfo·interrupts·iomem·smaps 필드 정의</li><li>docs.kernel.org — "Tainted kernels" (<code>Documentation/admin-guide/tainted-kernels.rst</code>)</li><li>docs.kernel.org — "Driver Basics"·"Device links" (<code>Documentation/driver-api/device_link.rst</code>), <code>fw_devlink</code>·<code>deferred_probe_timeout</code>는 <code>Documentation/admin-guide/kernel-parameters.txt</code></li><li>docs.kernel.org — "SMP IRQ affinity" (<code>Documentation/core-api/irq/irq-affinity.rst</code>)</li><li>docs.kernel.org — "Short users guide for SLUB" (<code>Documentation/mm/slub.rst</code>)</li><li>docs.kernel.org — "GPIO Testing Driver" (gpio-sim, <code>Documentation/admin-guide/gpio/gpio-sim.rst</code>)</li><li>소스 (elixir.bootlin.com, v6.18): <code>drivers/base/dd.c</code>(deferred probe, really_probe), <code>kernel/irq/proc.c</code>, <code>kernel/resource.c</code>, <code>fs/proc/meminfo.c</code>, <code>fs/proc/base.c</code>, <code>mm/slab_common.c</code>, <code>drivers/clk/clk.c</code>, <code>drivers/gpio/gpiolib.c</code>, <code>drivers/base/regmap/regmap-debugfs.c</code>, <code>drivers/pinctrl/pinmux.c</code></li><li>man7.org — <code>proc(5)</code>, <code>slabtop(1)</code>, <code>setpriv(1)</code></li><li>Bootlin — "Linux kernel and driver development" 교육 슬라이드(디버깅·디바이스 모델 장)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-17_M1_log_debugging.html"><span class="dir">← 이전</span><span class="nm">M1. 로그 기반 디버깅 — printk 레벨, pr_/dev_, dynamic debug, dmesg, earlycon, loglevel</span></a><a class="next" href="2026-10-17_M3_oops_decoding.html"><span class="dir">다음 →</span><span class="nm">M3. Oops·panic 해독 — 콜스택, PC/LR, addr2line, decode_stacktrace.sh, System.map, BUG/WARN</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l3"><a href="#0-1-bring-up-진단-순서-한-장">0.1 bring-up 진단 순서 한 장</a></li><li class="l3"><a href="#0-2-세-창구-지도">0.2 세 창구 지도</a></li><li class="l3"><a href="#0-3-이-노트의-실습-환경">0.3 이 노트의 실습 환경</a></li><li class="l2"><a href="#1-질문-①-⑤-드라이버가-probe-됐나">1. 질문 ①~⑤ — "드라이버가 probe 됐나?"</a></li><li class="l3"><a href="#1-1-직관-세-개의-링크만-보면-된다">1.1 직관 — 세 개의 링크만 보면 된다</a></li><li class="l3"><a href="#1-2-예제-2-소비자-드라이버-m2_defer-c">1.2 예제 2 — 소비자 드라이버 m2_defer.c</a></li><li class="l3"><a href="#1-3-예제-3-defer-전후를-sysfs-debugfs로-보기">1.3 예제 3 — defer 전후를 sysfs·debugfs로 보기</a></li><li class="l3"><a href="#1-4-deferred_probe_timeout-영원히-기다리지-않는-장치">1.4 deferred_probe_timeout — 영원히 기다리지 않는 장치</a></li><li class="l3"><a href="#1-5-예제-4-probe-실패는-에러-코드에-따라-다르게-찍힌다">1.5 예제 4 — probe 실패는 에러 코드에 따라 다르게 찍힌다</a></li><li class="l2"><a href="#2-질문-①-어떤-dt-노드가-쓰였나">2. 질문 ① — "어떤 DT 노드가 쓰였나?"</a></li><li class="l3"><a href="#2-1-세-이름은-같은-트리다">2.1 세 이름은 같은 트리다</a></li><li class="l3"><a href="#2-2-예제-5-pl011-uart-장치에서-dt-노드까지">2.2 예제 5 — PL011 UART 장치에서 DT 노드까지</a></li><li class="l2"><a href="#3-질문-⑦-인터럽트가-들어오나">3. 질문 ⑦ — "인터럽트가 들어오나?"</a></li><li class="l3"><a href="#3-1-숫자-세-개가-같은-인터럽트를-가리킨다">3.1 숫자 세 개가 같은 인터럽트를 가리킨다</a></li><li class="l3"><a href="#3-2-예제-6-proc-interrupts-한-장-읽기">3.2 예제 6 — /proc/interrupts 한 장 읽기</a></li><li class="l3"><a href="#3-3-예제-7-내-irq가-실제로-오는지-before-after">3.3 예제 7 — 내 IRQ가 실제로 오는지: before/after</a></li><li class="l3"><a href="#3-4-예제-8-affinity-바꾸기와-managed-irq의-거부">3.4 예제 8 — affinity 바꾸기와 "managed" IRQ의 거부</a></li><li class="l2"><a href="#4-질문-⑥의-전제-주소-맵이-맞나-proc-iomem-proc-ioports-memblock">4. 질문 ⑥의 전제 — "주소 맵이 맞나?" (/proc/iomem, /proc/ioports, memblock)</a></li><li class="l3"><a href="#4-1-직관">4.1 직관</a></li><li class="l3"><a href="#4-2-예제-9-root-vs-일반-사용자">4.2 예제 9 — root vs 일반 사용자</a></li><li class="l3"><a href="#4-3-예제-10-memblock-커널이-부팅-초기에-알던-메모리">4.3 예제 10 — memblock: 커널이 부팅 초기에 알던 메모리</a></li><li class="l2"><a href="#5-메모리가-어디-갔나-meminfo-slabinfo-buddyinfo-vmallocinfo-zoneinfo">5. "메모리가 어디 갔나?" — meminfo · slabinfo · buddyinfo · vmallocinfo · zoneinfo</a></li><li class="l3"><a href="#5-1-proc-meminfo-필드의-정확한-뜻">5.1 /proc/meminfo 필드의 정확한 뜻</a></li><li class="l3"><a href="#5-2-예제-11-실험-모듈-m2_slab-c">5.2 예제 11 — 실험 모듈 m2_slab.c</a></li><li class="l3"><a href="#5-3-예제-12-로드-전후-메모리-숫자">5.3 예제 12 — 로드 전후 메모리 숫자</a></li><li class="l3"><a href="#5-4-예제-13-vmallocinfo에서-모듈-init이-할당한-버퍼-찾기">5.4 예제 13 — vmallocinfo에서 모듈 init이 할당한 버퍼 찾기</a></li><li class="l3"><a href="#5-5-예제-14-누수를-slabinfo로-잡기">5.5 예제 14 — 누수를 slabinfo로 잡기</a></li><li class="l3"><a href="#5-6-memtotal-한-장으로-정리">5.6 MemTotal 한 장으로 정리</a></li><li class="l3"><a href="#5-7-예제-15-zoneinfo의-watermark">5.7 예제 15 — zoneinfo의 watermark</a></li><li class="l2"><a href="#6-질문-⑥-자원이-살아-있나-clk-regulator-pinctrl-gpio-regmap-devlink-power-dma">6. 질문 ⑥ — "자원이 살아 있나?" (clk · regulator · pinctrl · GPIO · regmap · devlink · power · DMA)</a></li><li class="l3"><a href="#6-1-예제-16-clk_summary와-regulator_summary">6.1 예제 16 — clk_summary와 regulator_summary</a></li><li class="l3"><a href="#6-2-예제-17-pinctrl-devlink-wakeup-source-dma">6.2 예제 17 — pinctrl, devlink, wakeup source, DMA</a></li><li class="l3"><a href="#6-3-예제-18-m2_regs-c-regmap-debugfs와-runtime-pm-상태">6.3 예제 18 — m2_regs.c: regmap debugfs와 runtime PM 상태</a></li><li class="l3"><a href="#6-4-예제-19-debugfs-gpio와-libgpiod로-본-gpio">6.4 예제 19 — debugfs gpio와 libgpiod로 본 GPIO</a></li><li class="l3"><a href="#6-5-진단-파일과-프레임워크-짝-요약">6.5 진단 파일과 프레임워크 짝 (요약)</a></li><li class="l3"><a href="#6-6-함정-요약표는-커널이-믿는-상태-다">6.6 함정 — 요약표는 "커널이 믿는 상태"다</a></li><li class="l2"><a href="#7-모듈-lsmod-proc-modules-sys-module-taint">7. 모듈 — lsmod, /proc/modules, /sys/module, taint</a></li><li class="l3"><a href="#7-1-예제-20-같은-정보-다른-창구">7.1 예제 20 — 같은 정보, 다른 창구</a></li><li class="l2"><a href="#8-앱이-멈췄다-proc-pid-stack-wchan-status-syscall">8. "앱이 멈췄다" — /proc/&lt;pid&gt;/stack, wchan, status, syscall</a></li><li class="l3"><a href="#8-1-직관">8.1 직관</a></li><li class="l3"><a href="#8-2-예제-21-드라이버-안에서-잠든-태스크-찾기">8.2 예제 21 — 드라이버 안에서 잠든 태스크 찾기</a></li><li class="l3"><a href="#8-3-예제-22-메모리-쪽-proc-pid">8.3 예제 22 — 메모리 쪽 /proc/&lt;pid&gt;/</a></li><li class="l2"><a href="#9-그-밖의-손잡이와-표-proc-sys-timer_list-softirqs-locks-workqueue">9. 그 밖의 손잡이와 표 — /proc/sys, timer_list, softirqs, locks, workqueue</a></li><li class="l3"><a href="#9-1-예제-23-진단에-자주-쓰는-sysctl-값-읽기">9.1 예제 23 — 진단에 자주 쓰는 sysctl 값 읽기</a></li><li class="l3"><a href="#9-2-timer_list-softirqs-locks-workqueue">9.2 timer_list, softirqs, locks, workqueue</a></li><li class="l2"><a href="#10-커널-안에서는-무슨-일이-일어나나">10. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l3"><a href="#10-1-모든-진단-파일은-읽을-때-계산되는-show-함수다">10.1 모든 진단 파일은 "읽을 때 계산되는" show 함수다</a></li><li class="l3"><a href="#10-2-드라이버를-쓸-때-이-지식이-다시-나오는-곳">10.2 드라이버를 쓸 때 이 지식이 다시 나오는 곳</a></li><li class="l2"><a href="#11-embedded-실무에서-다시-보기">11. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#11-1-장면-1-imu가-dev-iio-device0으로-안-나와요-센서-키트">11.1 장면 1 — "IMU가 /dev/iio:device0으로 안 나와요" (센서 키트)</a></li><li class="l3"><a href="#11-2-장면-2-필드에서-며칠-지나면-메모리가-줄어요">11.2 장면 2 — 필드에서 "며칠 지나면 메모리가 줄어요"</a></li><li class="l3"><a href="#11-3-장면-3-카메라를-켜면-가끔-프레임이-튄다">11.3 장면 3 — "카메라를 켜면 가끔 프레임이 튄다"</a></li><li class="l3"><a href="#11-4-장면-4-bring-up-보고서에-붙일-보드-상태-한-장">11.4 장면 4 — bring-up 보고서에 붙일 "보드 상태 한 장"</a></li><li class="l2"><a href="#12-흔한-실수와-증상">12. 흔한 실수와 증상</a></li><li class="l2"><a href="#13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#14-직접-해보기">14. 직접 해보기</a></li><li class="l2"><a href="#15-용어-사전">15. 용어 사전</a></li><li class="l2"><a href="#16-요약-체크리스트">16. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

@@ -1,0 +1,2095 @@
+# J3. 읽기전용 · 메모리 파일시스템 — SquashFS · EROFS · tmpfs · overlayfs로 견고한 rootfs 만들기
+
+> **이 노트를 다 읽으면**: 같은 rootfs를 SquashFS(gzip·xz·zstd·lz4, 블록 4K~1M)와 EROFS(lz4·lzma·zstd)로 묶고 크기·순차 읽기·첫 접근 지연을 직접 재서 압축기를 고를 수 있다 · tmpfs·ramfs·devtmpfs·zram의 차이(크기 제한, swap, `/proc/meminfo` 회계)를 실측으로 설명할 수 있다 · overlayfs의 copy-up·whiteout·opaque·redirect를 upper 디렉터리에서 눈으로 확인하고 무엇이 깨지는지(inode 번호, hard link, 디렉터리 rename) 말할 수 있다 · initramfs `/init`으로 "squashfs 루트 + overlay 상위층 + switch_root"를 만들고, dm-verity를 ioctl로 직접 올려 바이트 하나 변조가 I/O error·SIGBUS·재부팅으로 이어지는 것을 보여 줄 수 있다
+> **왜 필요한가**: 필드 장비 rootfs 설계 질문("전원이 아무 때나 끊기는 드론의 rootfs를 어떻게 만들겠나?", "OTA 후 이미지가 공장 이미지와 같다는 걸 어떻게 보장하나?")은 Embedded Linux 면접의 단골이고, 입사 후 Yocto·Buildroot 이미지 레시피에서 `IMAGE_FSTYPES = "squashfs-zst"`, `overlayfs-etc` 같은 결정을 바로 하게 된다
+> **Don 기준 난이도**: 압축 블록·FTL·매핑 테이블·전원 차단 내성·펌웨어 이미지 무결성(CRC/서명)은 SSD 펌웨어에서 이미 안다 / Linux에서 그 개념이 "파일시스템 형식 + page cache + VFS 스택(overlay) + device-mapper"로 나뉘어 있다는 점, 각 층의 함정(이중 캐싱, copy-up 비용, whiteout)이 새로 배울 부분
+> **선행 노트**: C7(initramfs·switch_root), J1(저장장치), J2(ext4·파티션) — K1(rootfs 구조)은 있으면 좋지만 C7만으로도 따라올 수 있다
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+SSD 펌웨어에서 "코드 영역"은 절대 런타임에 덮어쓰지 않았다. 펌웨어 이미지는 통째로 서명·검증되고, 업데이트는 다른 슬롯에 새 이미지를 쓴 뒤 포인터만 바꿨다. 런타임에 바뀌는 것(매핑 테이블, 로그, SMART 카운터)은 따로 관리되는 영역에 저널·체크포인트와 함께 썼다.
+
+Embedded Linux 장비의 rootfs도 똑같이 설계한다. 다만 "펌웨어 이미지" 자리에 **파일시스템 이미지**가 들어간다.
+
+- **읽기전용 하층**: `/usr`, `/lib`, `/bin`, 기본 `/etc`가 들어 있는 압축 이미지(SquashFS 또는 EROFS). 빌드 서버에서 만들어 한 번 쓰면 끝. 장비에서는 절대 쓰지 않는다.
+- **쓰기 가능한 상층**: overlayfs가 읽기전용 하층 위에 얇은 쓰기층(upper)을 겹쳐서 "보통의 쓰기 가능한 `/`"처럼 보이게 한다. upper를 RAM(tmpfs)에 두면 재부팅마다 공장 상태로, 데이터 파티션에 두면 설정이 남는다.
+- **무결성**: dm-verity가 하층 이미지의 모든 4 KiB 블록을 읽을 때마다 해시 트리로 검증한다. 루트 해시 하나만 믿으면(서명된 커널 cmdline에 넣으면) 이미지 전체를 믿을 수 있다.
+- **메모리 FS**: `/run`, `/tmp`는 tmpfs, `/dev`는 devtmpfs. 로그·센서 데이터는 데이터 파티션(ext4·F2FS).
+
+```svg
+<svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="170" y="10" width="340" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="340" y="32" text-anchor="middle" font-size="13">앱 · 서비스 — 하나의 / 만 본다</text>
+  <line x1="340" y1="44" x2="340" y2="68" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="120" y="70" width="440" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="95" text-anchor="middle" font-size="13" font-weight="bold">overlayfs — merged / (lower 위에 upper를 겹친다)</text>
+  <line x1="200" y1="110" x2="170" y2="138" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="480" y1="110" x2="510" y2="138" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="20" y="140" width="300" height="62" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="170" y="165" text-anchor="middle" font-size="13" font-weight="bold">lowerdir: SquashFS · EROFS</text>
+  <text x="170" y="188" text-anchor="middle" font-size="12">읽기전용 · 압축 · 이미지 해시 고정</text>
+  <rect x="360" y="140" width="300" height="62" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="510" y="165" text-anchor="middle" font-size="13" font-weight="bold">upperdir + workdir</text>
+  <text x="510" y="188" text-anchor="middle" font-size="12">tmpfs(휘발) 또는 data 파티션(영구)</text>
+  <line x1="170" y1="202" x2="170" y2="228" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="510" y1="202" x2="510" y2="228" stroke="currentColor" marker-end="url(#ah1)"/>
+  <rect x="20" y="230" width="300" height="56" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="170" y="253" text-anchor="middle" font-size="13" font-weight="bold">dm-verity → /dev/dm-0</text>
+  <text x="170" y="274" text-anchor="middle" font-size="12">읽을 때마다 4 KiB 블록 해시 검증</text>
+  <rect x="360" y="230" width="300" height="56" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="510" y="253" text-anchor="middle" font-size="12">/data · /var/log: ext4 · F2FS</text>
+  <text x="510" y="274" text-anchor="middle" font-size="12">/run · /tmp: tmpfs (RAM)</text>
+  <line x1="170" y1="286" x2="225" y2="318" stroke="currentColor" marker-end="url(#ah1)"/>
+  <line x1="510" y1="286" x2="570" y2="318" stroke="currentColor" marker-end="url(#ah1)"/>
+  <text x="20" y="314" font-size="12">eMMC / UFS</text>
+  <rect x="20" y="320" width="120" height="36" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="80" y="343" text-anchor="middle" font-size="12">boot (FIT)</text>
+  <rect x="150" y="320" width="160" height="36" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="230" y="343" text-anchor="middle" font-size="12">rootfs_A + hash</text>
+  <rect x="320" y="320" width="160" height="36" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="400" y="343" text-anchor="middle" font-size="12">rootfs_B (L4 OTA)</text>
+  <rect x="490" y="320" width="170" height="36" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="575" y="343" text-anchor="middle" font-size="12">data (RW)</text>
+  <text x="340" y="384" text-anchor="middle" font-size="12">읽기전용 부분은 이미지 단위로 교체, 쓰기는 upper/data로만</text>
+</svg>
+```
+그림 1 — 필드 장비에서 흔한 "RO 루트 + RW 상층" 구조. 이 노트는 가운데 세 층(SquashFS/EROFS, overlayfs, dm-verity 입문)과 메모리 FS를 다룬다. A/B 슬롯 전환과 롤백은 L4, verity·dm-crypt의 보안 깊이(서명, 키, FEC)는 L6에서 다룬다.
+
+이 노트의 실험은 전부 직접 돌렸다.
+
+- 이미지 생성: Mac(M2) 위 Lima VM `elinux`(aarch64, Ubuntu 26.04, `uname -r` = `7.0.0-38-generic`)에서 `mksquashfs` 4.7.5, `mkfs.erofs` 1.9, `veritysetup` 2.8.4로 만들었다. VM 쪽 작업 폴더는 `/var/tmp/J3/`, 소스는 `~/.elinux_scratch/J3/`.
+- 읽기 측정과 부팅: 공용 랩의 저장장치용 커널 **`/var/lab/out/Image-fs` (Linux 6.18.55-fs)** 를 QEMU `virt`(`-cpu cortex-a57 -m 512M`, KVM 없는 TCG 에뮬레이션)로 부팅하고, 이미지를 virtio-blk 디스크로 붙였다.
+- **주의**: TCG는 CPU를 소프트웨어로 흉내 내므로 압축 해제가 실제 Cortex-A보다 훨씬 느리다. 그래서 절대값(MB/s, µs)은 실제 보드와 다르고, **압축기 사이의 상대 순서와 경향**만 믿어야 한다. 다른 작성자들이 같은 VM을 쓰고 있어 측정값이 10~30% 흔들린다.
+
+---
+
+## 1. 왜 필드 장비는 읽기전용 rootfs를 쓰나
+
+### 1.1 직관 — "코드 영역은 쓰지 않는다"
+
+ext4 rootfs를 rw로 마운트해서 쓰는 장비를 생각해 보자. 센서 키트 드론이 비행 중 배터리가 빠진다. 그 순간 패키지 매니저가 `/usr/lib/libfoo.so`를 교체하고 있었다면? 저널이 메타데이터는 지켜 주지만(J5), "반쯤 바뀐 라이브러리 세트"는 지켜 주지 않는다. 다음 부팅에서 앱이 이상한 심볼 에러로 죽는다. 펌웨어로 치면 **코드 영역을 런타임에 부분 덮어쓰기 하다가 전원이 나간 상태**다.
+
+읽기전용 rootfs는 이 문제를 구조적으로 없앤다. 쓰지 않는 영역은 깨질 수가 없다.
+
+### 1.2 이유 다섯 가지
+
+| 이유 | 설명 | SSD 펌웨어에 빗대면 |
+|---|---|---|
+| 전원 차단 내성 | 루트는 쓰지 않으니 fsck·저널 복구 대상이 아니다. 쓰는 곳(data)만 J5의 규칙으로 지키면 된다 | 코드 영역은 read-only, 메타데이터만 저널링 |
+| 이미지 동일성 | 장비 1만 대의 `/usr`가 비트 단위로 같다. "이 장비만 이상해요"를 재현할 수 있다 | 같은 펌웨어 빌드 = 같은 바이너리 해시 |
+| 무결성 검증 | 이미지가 안 바뀌니 해시 트리(dm-verity)로 블록마다 검증 가능 | 부팅 시 FW 이미지 서명 검증, 그걸 런타임까지 확장 |
+| 원자적 업데이트 | 파일 단위 패치 대신 이미지 통째로 다른 슬롯에 쓰고 전환(A/B, L4) | 듀얼 뱅크 펌웨어 슬롯 |
+| 공장 초기화 | 쓰기층만 지우면 공장 상태 | 사용자 영역 secure erase |
+
+추가로 **압축**이 공짜로 따라온다. 쓸 일이 없으니 "쓰기 가능한 압축 FS"의 복잡함(재압축, 단편화) 없이 고압축을 쓸 수 있다. eMMC 8 GB짜리 보드에서 rootfs 1.2 GB가 450 MB가 되면, A/B 두 슬롯을 넣고도 데이터 파티션이 넉넉해진다.
+
+### 1.3 대가
+
+- **쓰고 싶은 곳이 생긴다**: `/etc/hostname`, 네트워크 설정, SSH 호스트 키, `/var/lib` 상태 파일. 이것을 처리하는 장치가 overlayfs(§7)와 "/var는 데이터 파티션" 같은 설계 규칙(§8)이다.
+- **압축 해제 CPU 비용**: 랜덤 읽기마다 블록을 풀어야 한다. 압축기와 블록 크기 선택이 부팅 시간과 앱 시작 시간을 바꾼다(§5에서 잰다).
+- **개발 편의성 저하**: 장비에서 `vi /usr/bin/script` 한 번으로 고치던 습관이 안 통한다. 개발 빌드는 rw, 양산 빌드는 ro로 나누는 것이 보통이다.
+
+---
+
+## 2. 실험 준비 — 같은 트리를 여러 형식으로
+
+### 2.1 랩 커널에 무엇이 켜져 있나
+
+무엇을 확인하나: `Image-fs` 커널이 이 노트의 FS들을 어떻게(built-in `=y` / 모듈 `=m`) 갖고 있는지.
+
+```sh
+limactl shell elinux -- bash -lc 'grep -E "^CONFIG_(SQUASHFS(_XZ|_ZSTD|_LZ4|_FILE_CACHE|_DECOMP_SINGLE)?|EROFS_FS(_ZIP_LZMA|_ZIP_ZSTD|_BACKED_BY_FILE)?|OVERLAY_FS|TMPFS|DM_VERITY|ZRAM)=|OVERLAY_FS_(REDIRECT_DIR|INDEX|XINO_AUTO|METACOPY) " /var/lab/out/linux-build-fs/.config'
+```
+
+```text
+CONFIG_ZRAM=m
+CONFIG_DM_VERITY=m
+CONFIG_OVERLAY_FS=y
+# CONFIG_OVERLAY_FS_REDIRECT_DIR is not set
+# CONFIG_OVERLAY_FS_INDEX is not set
+# CONFIG_OVERLAY_FS_XINO_AUTO is not set
+# CONFIG_OVERLAY_FS_METACOPY is not set
+CONFIG_TMPFS=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_FILE_CACHE=y
+CONFIG_SQUASHFS_DECOMP_SINGLE=y
+CONFIG_SQUASHFS_LZ4=y
+CONFIG_SQUASHFS_XZ=y
+CONFIG_SQUASHFS_ZSTD=y
+CONFIG_EROFS_FS=m
+CONFIG_EROFS_FS_BACKED_BY_FILE=y
+CONFIG_EROFS_FS_ZIP_LZMA=y
+CONFIG_EROFS_FS_ZIP_ZSTD=y
+```
+
+출력에서 볼 것:
+
+- SquashFS·overlayfs·tmpfs는 built-in이다. 그래서 SquashFS는 `root=/dev/vda rootfstype=squashfs`로 initramfs 없이도 루트가 될 수 있다(그 위에 overlay를 얹으려면 결국 initramfs나 이른 init 스크립트가 필요하다). EROFS·dm-verity·zram은 모듈이라 initramfs에서 `insmod`해야 한다. **루트 FS 드라이버를 모듈로 두면 initramfs가 필수**라는 C7의 규칙 그대로다.
+- `OVERLAY_FS_REDIRECT_DIR`, `INDEX`, `XINO_AUTO`, `METACOPY`가 전부 꺼져 있다 = overlayfs의 "보수적인 기본값". 이 기본값에서 무엇이 깨지는지 §7.5에서 본다.
+- `SQUASHFS_FILE_CACHE`, `SQUASHFS_DECOMP_SINGLE`은 SquashFS의 성능 관련 선택이다(§3.5).
+
+### 2.2 공용 rootfs 트리 만들기
+
+무엇을 확인하나: 모든 이미지에 넣을 "그럴듯한 rootfs" — BusyBox 랩 rootfs + 텍스트 문서(작은 파일 다수) + ELF 바이너리·공유 라이브러리(큰 파일 몇 개).
+
+```sh
+#!/bin/bash
+# ~/.elinux_scratch/J3/build_tree.sh — build the same rootfs tree used for every image
+set -e
+W=/var/tmp/J3; T=$W/tree
+rm -rf $T; mkdir -p $W $T
+cp -a /var/lab/build/rootfs/. $T/
+D=/var/lab/src/linux-6.18.55/Documentation
+mkdir -p $T/usr/share/doc/kernel
+for d in admin-guide networking filesystems translations; do cp -a $D/$d $T/usr/share/doc/kernel/; done
+mkdir -p $T/usr/lib/j3
+cp /usr/bin/gdb /usr/bin/python3.14 /usr/lib/aarch64-linux-gnu/libc.so.6 /usr/lib/aarch64-linux-gnu/libcrypto.so.3 $T/usr/lib/j3/
+mkdir -p $T/ro $T/rw $T/newroot $T/data
+du -sh --apparent-size $T; find $T -type f | wc -l; find $T -type d | wc -l
+```
+
+```text
+42M	/var/tmp/J3/tree
+1366
+200
+```
+
+정규 파일 1,366개, 43,043,123 바이트(41.0 MiB). 그중 `gdb`(11.1 MiB) 하나를 랜덤 읽기 측정 대상으로 쓴다 — 실행 파일의 page fault가 바로 "큰 파일의 랜덤 4 KiB 읽기"이기 때문이다.
+
+### 2.3 16가지 이미지 만들기
+
+무엇을 확인하나: 같은 트리를 압축기·블록 크기만 바꿔 묶었을 때 크기가 어떻게 달라지는지.
+
+```sh
+#!/bin/bash
+# ~/.elinux_scratch/J3/build_imgs.sh — same tree -> squashfs / erofs / ext4 variants
+set -e
+W=/var/tmp/J3; T=$W/tree; I=$W/img; mkdir -p $I; cd $I; rm -f *.img
+sq(){ mksquashfs $T $1.img -noappend -quiet -no-progress -processors 2 -all-root ${@:2} >/dev/null; }
+sq sq_gzip_128k -comp gzip
+sq sq_xz_128k   -comp xz
+sq sq_zstd_128k -comp zstd
+sq sq_lz4_128k  -comp lz4
+sq sq_lz4hc_128k -comp lz4 -Xhc
+sq sq_zstd_4k   -comp zstd -b 4K
+sq sq_zstd_1m   -comp zstd -b 1M
+sq sq_xz_1m     -comp xz -b 1M
+sq sq_zstd_128k_nofrag -comp zstd -no-fragments
+er(){ mkfs.erofs --quiet --all-root ${@:2} $1.img $T >/dev/null; }
+er erofs_none
+er erofs_lz4     -zlz4
+er erofs_lz4hc   -zlz4hc
+er erofs_lzma    -zlzma
+er erofs_zstd    -zzstd
+er erofs_lzma_64k -zlzma -C65536
+mkfs.ext4 -q -d $T -E root_owner=0:0 ext4_raw.img 64M
+for f in *.img; do printf "%-22s %9d\n" ${f%.img} $(stat -c %s $f); done
+```
+
+```sh
+limactl shell elinux -- bash -lc 'time bash /Users/donh/.elinux_scratch/J3/build_imgs.sh'
+```
+
+```text
+erofs_lz4               28782592
+erofs_lz4hc             26599424
+erofs_lzma              19009536
+erofs_lzma_64k          16732160
+erofs_none              43294720
+erofs_zstd              26132480
+ext4_raw                67108864
+sq_gzip_128k            16850944
+sq_lz4_128k             24403968
+sq_lz4hc_128k           20021248
+sq_xz_128k              13991936
+sq_xz_1m                13025280
+sq_zstd_128k            15527936
+sq_zstd_128k_nofrag     16187392
+sq_zstd_1m              15912960
+sq_zstd_4k              19435520
+
+real	0m22.280s
+user	0m49.619s
+sys	0m1.122s
+```
+
+출력에서 볼 것: 16개 이미지 전부 22초. `mksquashfs -all-root`·`mkfs.erofs --all-root`는 소유자를 root로 바꾼다(빌드 서버의 일반 사용자 UID가 이미지에 박히는 흔한 실수 방지). `mksquashfs`·`mkfs.erofs`는 원래 디렉터리를 입력으로 받고, `mkfs.ext4`도 `-d`로 디렉터리에서 바로 이미지를 만들어서 **마운트 없이(root 권한 없이)** 이미지를 만들 수 있다 — Yocto·Buildroot도 이렇게 한다. 숫자의 해석은 §5에서 측정값과 함께 한다.
+
+같은 조건에서 압축기별 생성 시간도 쟀다(VM 6코어 중 2스레드, 다른 작업과 경쟁 중).
+
+```sh
+limactl shell elinux -- bash -lc 'cd /var/tmp/J3; T=tree; for c in gzip xz zstd lz4; do s=$(date +%s.%N); mksquashfs $T /var/tmp/J3/t_$c.img -noappend -quiet -no-progress -processors 2 -comp $c >/dev/null; e=$(date +%s.%N); printf "squashfs %-5s %.2fs\n" $c $(echo "$e - $s" | bc); done; for c in lz4 lz4hc lzma zstd; do s=$(date +%s.%N); mkfs.erofs --quiet -z$c t_e$c.img $T >/dev/null; e=$(date +%s.%N); printf "erofs    %-5s %.2fs\n" $c $(echo "$e - $s" | bc); done; rm -f t_*.img'
+```
+
+```text
+squashfs gzip  1.53s
+squashfs xz    3.20s
+squashfs zstd  1.70s
+squashfs lz4   0.06s
+erofs    lz4   0.06s
+erofs    lz4hc 0.16s
+erofs    lzma  2.21s
+erofs    zstd  0.44s
+```
+
+xz·lzma는 압축이 느리다(빌드 서버 비용). 41 MiB에선 몇 초지만 1.5 GB rootfs면 Yocto 빌드에서 분 단위가 된다. 장비 쪽에서 중요한 건 **압축 해제** 비용이고, 그건 §5에서 따로 잰다.
+
+---
+
+## 3. SquashFS — 가장 오래된 표준 읽기전용 압축 FS
+
+### 3.1 정의
+
+**SquashFS**는 2002년부터 쓰인 읽기전용 압축 파일시스템이다(메인라인 2.6.29). 파일 데이터를 **고정 크기 입력 블록**(block_size, 4 KiB~1 MiB, 기본 128 KiB)으로 잘라 각각 압축하고, 메타데이터(inode, 디렉터리, fragment·id 테이블)도 8 KiB 단위로 압축해서 이미지 끝에 모아 둔다. OpenWrt 라우터, 많은 Yocto·Buildroot 제품 이미지, Ubuntu snap, 라이브 CD가 SquashFS다.
+
+### 3.2 디스크 위 배치
+
+무엇을 확인하나: 슈퍼블록(96 바이트)에 들어 있는 테이블 위치를 직접 파싱해서, 이미지의 99% 이상이 데이터이고 메타데이터가 끝에 모여 있음을 본다.
+
+```python
+# ~/.elinux_scratch/J3/sqsb.py — parse squashfs 4.0 superblock (96 bytes, little endian)
+import struct, sys
+b = open(sys.argv[1], 'rb').read(96)
+(magic, inodes, mtime, bsize, frags, comp, blog, flags, ids, vmaj, vmin, root,
+ bytes_used, id_t, xattr_t, inode_t, dir_t, frag_t, exp_t) = struct.unpack('<IIIIIHHHHHHQQQQQQQQ', b)
+print(f"magic=0x{magic:08x} ('hsqs') block_size={bsize} fragments={frags} comp_id={comp} inodes={inodes}")
+for k, v in [('inode_table', inode_t), ('directory_table', dir_t), ('fragment_table', frag_t),
+             ('export_table', exp_t), ('id_table', id_t), ('xattr_table', xattr_t), ('bytes_used', bytes_used)]:
+    print(f"{k:16s} 0x{v:016x} ({v if v != 2**64-1 else 'none'})")
+```
+
+```sh
+limactl shell elinux -- bash -lc 'python3 -I /Users/donh/.elinux_scratch/J3/sqsb.py /var/tmp/J3/img/sq_xz_128k.img'
+```
+
+```text
+magic=0x73717368 ('hsqs') block_size=131072 fragments=112 comp_id=4 inodes=1968
+inode_table      0x0000000000d4f044 (13955140)
+directory_table  0x0000000000d520a6 (13967526)
+fragment_table   0x0000000000d56f12 (13987602)
+export_table     0x0000000000d57826 (13989926)
+id_table         0x0000000000d5783c (13989948)
+xattr_table      0xffffffffffffffff (none)
+bytes_used       0x0000000000d57844 (13989956)
+```
+
+출력에서 볼 것: magic `hsqs`(리틀엔디언으로 `0x73717368`), comp_id 4 = xz. 데이터 영역이 0 ~ 13,955,140 바이트(99.75%)이고, 메타데이터 테이블 여섯 개를 다 합쳐도 34,816 바이트다. `xattr_table`이 `0xffff…`(없음)인 이유는 트리에 xattr이 없어서다.
+
+```svg
+<svg viewBox="0 0 680 350" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="340" y="20" text-anchor="middle" font-size="13" font-weight="bold">SquashFS 이미지 배치 (sq_xz_128k.img, 크기 비율 아님)</text>
+  <rect x="20" y="34" width="50" height="36" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="45" y="57" text-anchor="middle" font-size="12">SB</text>
+  <rect x="70" y="34" width="310" height="36" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="225" y="57" text-anchor="middle" font-size="12">data 블록 + fragment 블록</text>
+  <rect x="380" y="34" width="70" height="36" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="415" y="57" text-anchor="middle" font-size="12">inode</text>
+  <rect x="450" y="34" width="70" height="36" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="485" y="57" text-anchor="middle" font-size="12">dir</text>
+  <rect x="520" y="34" width="55" height="36" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="547" y="57" text-anchor="middle" font-size="12">frag</text>
+  <rect x="575" y="34" width="45" height="36" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="597" y="57" text-anchor="middle" font-size="12">exp</text>
+  <rect x="620" y="34" width="40" height="36" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="640" y="57" text-anchor="middle" font-size="12">id</text>
+  <text x="340" y="90" text-anchor="middle" font-size="12">데이터 영역 0 ~ 13,955,140 B (99.75%) · 메타데이터 테이블 6개 합계 34,816 B</text>
+  <text x="20" y="122" font-size="13" font-weight="bold">파일 데이터: 고정 크기 입력(block_size) → 가변 크기 출력</text>
+  <rect x="20" y="132" width="64" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="52" y="150" text-anchor="middle" font-size="12">128K</text>
+  <rect x="90" y="132" width="64" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="122" y="150" text-anchor="middle" font-size="12">128K</text>
+  <rect x="160" y="132" width="64" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="192" y="150" text-anchor="middle" font-size="12">128K</text>
+  <rect x="230" y="132" width="64" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="262" y="150" text-anchor="middle" font-size="12">128K</text>
+  <rect x="300" y="132" width="64" height="26" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="332" y="150" text-anchor="middle" font-size="12">128K</text>
+  <text x="380" y="150" font-size="12">… gdb = 128K × 89 + 꼬리 5,632 B</text>
+  <rect x="20" y="192" width="40" height="26" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <rect x="60" y="192" width="52" height="26" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <rect x="112" y="192" width="30" height="26" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <rect x="142" y="192" width="58" height="26" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <rect x="200" y="192" width="46" height="26" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <line x1="52" y1="158" x2="40" y2="190" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="122" y1="158" x2="86" y2="190" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="192" y1="158" x2="127" y2="190" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="262" y1="158" x2="171" y2="190" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="332" y1="158" x2="223" y2="190" stroke="currentColor" marker-end="url(#ah2)"/>
+  <text x="260" y="210" font-size="12">압축 결과 크기는 제각각 → inode의 블록 목록에 크기 기록</text>
+  <text x="20" y="252" font-size="13" font-weight="bold">작은 파일: 꼬리를 fragment 블록 하나에 모아서 압축</text>
+  <rect x="20" y="264" width="90" height="26" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="65" y="282" text-anchor="middle" font-size="12">a.rst 3K</text>
+  <rect x="120" y="264" width="90" height="26" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="165" y="282" text-anchor="middle" font-size="12">b.rst 9K</text>
+  <rect x="220" y="264" width="90" height="26" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="265" y="282" text-anchor="middle" font-size="12">c.rst 1K</text>
+  <rect x="320" y="264" width="90" height="26" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="365" y="282" text-anchor="middle" font-size="12">d.rst 20K</text>
+  <line x1="65" y1="290" x2="150" y2="316" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="165" y1="290" x2="190" y2="316" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="265" y1="290" x2="240" y2="316" stroke="currentColor" marker-end="url(#ah2)"/>
+  <line x1="365" y1="290" x2="280" y2="316" stroke="currentColor" marker-end="url(#ah2)"/>
+  <rect x="100" y="318" width="240" height="26" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c"/>
+  <text x="220" y="336" text-anchor="middle" font-size="12">fragment 블록 (≤128 KiB, 압축)</text>
+  <text x="355" y="336" font-size="12">하나 깨지면 여러 파일이 같이 깨진다</text>
+</svg>
+```
+그림 2 — SquashFS 배치. 파일 데이터는 고정 크기 **입력** 블록마다 따로 압축되어 가변 크기로 저장된다. block_size보다 작은 파일(또는 큰 파일의 꼬리, `-tailends` 옵션일 때)은 fragment 블록에 모아 같이 압축된다. 메타데이터는 이미지 끝의 테이블들에 있다.
+
+### 3.3 `unsquashfs -s` — 이미지 속성 보기
+
+무엇을 확인하나: 장비나 빌드 서버에서 SquashFS 이미지의 압축기·블록 크기·fragment 수를 확인하는 표준 명령.
+
+```sh
+limactl shell elinux -- bash -lc 'cd /var/tmp/J3/img; unsquashfs -s sq_xz_128k.img'
+```
+
+```text
+Found a valid SQUASHFS 4:0 superblock on sq_xz_128k.img.
+Creation or last append time Sat Oct 17 14:42:56 2026
+Filesystem size 13989956 bytes (13662.07 Kbytes / 13.34 Mbytes)
+Compression xz
+Block size 131072
+Filesystem is exportable via NFS
+Inodes are compressed
+Data is compressed
+Uids/Gids (Id table) are compressed
+Fragments are compressed
+Tailends are not packed into fragments
+Xattrs are compressed
+Duplicates are removed
+Number of fragments 112
+Number of inodes 1968
+Number of ids 1
+Number of xattr ids 0
+```
+
+출력에서 볼 것:
+
+- `Filesystem size 13989956` = 슈퍼블록의 `bytes_used`와 같다. 파일 크기(13,991,936)가 조금 더 큰 건 mksquashfs가 끝을 4 KiB 배수로 패딩하기 때문이다 — 이 패딩 덕분에 dm-verity(4 KiB 블록) 밑에 바로 놓을 수 있다.
+- `Duplicates are removed`: 내용이 같은 파일은 한 번만 저장한다(파일 단위 dedupe). §4.4에서 EROFS와 비교한다.
+- `Number of fragments 112`: 작은 파일 1천여 개가 fragment 블록 112개에 모였다.
+- `Tailends are not packed into fragments`: mksquashfs 4.7의 기본값. 큰 파일의 꼬리는 자기 블록으로 남는다.
+
+### 3.4 블록 크기와 fragment — 압축률 vs 랜덤 읽기
+
+블록이 크면 압축기가 더 긴 문맥을 보므로 압축률이 좋아진다. 대신 **4 KiB 한 페이지를 읽으려 해도 그 페이지가 든 블록 전체를 풀어야 한다**. 128 KiB 블록이면 4 KiB를 위해 32배를 푼다. 이것이 SquashFS의 "랜덤 읽기 증폭(read amplification)"이다 — SSD의 "4 KiB 호스트 쓰기가 16 KiB NAND 페이지 프로그램이 되는 것"과 같은 모양이다.
+
+SquashFS는 이 낭비를 page cache로 일부 회수한다. 블록을 풀면 그 블록에 속한 **모든 페이지**를 page cache에 채워 넣는다(`squashfs_readahead`, `squashfs_copy_cache`). 그래서 같은 블록의 다른 페이지를 곧 읽으면 공짜다. 결과적으로:
+
+- 작은 파일을 처음부터 끝까지 읽는 패턴: 큰 블록이 유리(해제 횟수가 적다).
+- 큰 파일을 듬성듬성 한 번씩만 찍는 패턴(실행 파일 page fault, 데이터베이스): 작은 블록이 유리.
+- 메모리 압박으로 page cache가 자주 쫓겨나는 장비: 큰 블록은 같은 블록을 몇 번이고 다시 푼다.
+
+fragment는 작은 파일들을 한 블록에 모아 압축률을 올린다. 대가는 두 가지다. (1) 작은 파일 하나를 읽으려 해도 fragment 블록 전체를 푼다. (2) fragment 블록 하나가 깨지면 그 안의 파일 전부가 깨진다 — §10.4에서 바이트 하나 변조로 파일 11개가 동시에 I/O error가 나는 것을 직접 본다.
+
+### 3.5 압축기 선택지와 커널 쪽 옵션
+
+| 압축기 | mksquashfs | 압축률 | 해제 속도 | 쓰는 곳 |
+|---|---|---|---|---|
+| gzip(zlib) | `-comp gzip` (기본) | 중간 | 중간 | 호환성 최우선, 오래된 커널 |
+| xz(LZMA2) | `-comp xz` | 최고 | 가장 느림 | 플래시가 아주 작은 라우터(OpenWrt) |
+| zstd | `-comp zstd` (기본 레벨 15) | xz에 근접 | gzip보다 빠름 | 요즘 기본값 후보 (커널 4.14+) |
+| lz4 | `-comp lz4`, 고압축 `-Xhc` | 낮음 | 가장 빠름 | 부팅·앱 시작 시간 우선 (커널 3.19+) |
+| lzo | `-comp lzo` | 낮음 | 빠름 | lz4 이전 세대 |
+
+커널 쪽 설정 두 가지가 성능에 직접 영향을 준다.
+
+- **`SQUASHFS_FILE_CACHE` vs `SQUASHFS_FILE_DIRECT`**: FILE_CACHE(랩 커널)는 블록을 내부 캐시 버퍼에 먼저 풀고 page cache 페이지로 복사한다. FILE_DIRECT는 page cache 페이지에 바로 푼다(복사 1회 절약). Kconfig 도움말 기준이며, 이 노트에서 두 설정을 비교 측정하지는 않았다.
+- **`SQUASHFS_DECOMP_SINGLE` / `_MULTI` / `_MULTI_PERCPU`**: SINGLE(랩 커널)은 파일시스템당 해제기 하나를 잠금으로 공유한다 — 여러 스레드가 동시에 읽어도 해제는 한 줄로 선다. 멀티코어 SoC에서 앱 여러 개가 동시에 시작하는 부팅 구간이라면 MULTI_PERCPU가 낫다. 이 실험은 단일 CPU 게스트라 차이가 드러나지 않는다.
+
+---
+
+## 4. EROFS — "고정 크기 출력" 압축과 Android
+
+### 4.1 정의와 핵심 아이디어
+
+**EROFS**(Enhanced Read-Only File System)는 Huawei의 Gao Xiang 등이 Android 스마트폰 시스템 파티션용으로 만든 읽기전용 FS다. 4.19에서 staging으로 들어와 5.4에서 `fs/erofs`로 정식 편입됐다. AOSP 빌드 시스템이 EROFS 시스템 이미지를 지원하고, 여러 Android 기기의 system/vendor 파티션이 EROFS다. 최근에는 컨테이너 이미지(Nydus, composefs)에서도 쓰인다.
+
+SquashFS와의 결정적 차이는 **압축 단위의 방향**이다.
+
+- SquashFS: **입력 고정**(128 KiB씩 잘라서 압축) → 출력 크기 가변 → 디스크 위 압축 블록이 4 KiB 경계에 정렬되지 않는다. 블록 하나를 읽으려면 앞뒤 디스크 블록을 함께 읽고, 일부만 쓰고 버린다.
+- EROFS: **출력 고정**(압축 결과가 정확히 pcluster 크기, 기본 4 KiB가 되도록 입력을 가변 길이로 자른다) → 디스크 블록 하나 = 압축 단위 하나. 읽기 I/O가 정확히 4 KiB 정렬이고 낭비가 없다.
+
+### 4.2 `dump.erofs`로 확인 — 실제 extent
+
+무엇을 확인하나: 슈퍼블록 정보와, `gdb` 파일의 논리 오프셋 → 물리 블록 매핑(extent). "출력 4096 고정, 입력 가변"이 실제로 그런지.
+
+```sh
+limactl shell elinux -- bash -lc 'cd /var/tmp/J3/img; dump.erofs -s erofs_lz4.img; dump.erofs -e --path=/usr/lib/j3/gdb erofs_lz4.img | sed -n 1,20p'
+```
+
+```text
+Filesystem magic number:                      0xE0F5E1E2
+Filesystem blocksize:                         4096
+Filesystem blocks:                            7027
+Filesystem inode metadata start block:        0
+Filesystem shared xattr metadata start block: 0
+Filesystem root nid:                          36
+Filesystem lz4_max_distance:                  65535
+Filesystem sb_size:                           128
+Filesystem inode count:                       1968
+Filesystem created:                           Sat Oct 17 14:43:08 2026
+Filesystem compatible features:               sb_csum mtime 
+Filesystem incompatible features:             lz4_0padding 
+Filesystem UUID:                              22185a60-ddd3-4ced-a67d-8f4526bb0b6a
+Required upstream Linux kernel version:       5.4
+Path : /usr/lib/j3/gdb
+Size: 11671040  On-disk size: 7225344  regular file
+NID: 588288   Links: 1   Layout: 3   Compression ratio: 61.91%
+Inode size: 64   Xattr size: 0
+Uid: 0   Gid: 0  Access: 0755/rwxr-xr-x
+Timestamp: 2026-10-17 14:42:43.178744087
+
+ Ext:   logical offset   |  length :     physical offset    |  length
+   0:        0..   16824 |   16824 :    1826816..   1830912 |    4096
+   1:    16824..   27429 |   10605 :    1830912..   1835008 |    4096
+   2:    27429..   33899 |    6470 :    1835008..   1839104 |    4096
+   3:    33899..   41997 |    8098 :    1839104..   1843200 |    4096
+   4:    41997..   51563 |    9566 :    1843200..   1847296 |    4096
+   5:    51563..   63888 |   12325 :    1847296..   1851392 |    4096
+   6:    63888..   76442 |   12554 :    1851392..   1855488 |    4096
+   7:    76442..   89281 |   12839 :    1855488..   1859584 |    4096
+   8:    89281..  102002 |   12721 :    1859584..   1863680 |    4096
+   9:   102002..  114872 |   12870 :    1863680..   1867776 |    4096
+  10:   114872..  127377 |   12505 :    1867776..   1871872 |    4096
+  11:   127377..  140074 |   12697 :    1871872..   1875968 |    4096
+```
+
+출력에서 볼 것:
+
+- 오른쪽 `length`가 전부 **4096**이다. 왼쪽(압축 전) 길이는 16,824 / 10,605 / 6,470 …으로 제각각. 정확히 "출력 고정, 입력 가변"이다.
+- 물리 오프셋 1826816 = 4096 × 446으로 블록 정렬이다.
+- `Layout: 3`은 압축 레이아웃(`EROFS_INODE_COMPRESSED_COMPACT`), 비압축 이미지에서는 `Layout: 2`(`FLAT_INLINE`)가 나온다(`erofs_none.img`로 같은 명령을 돌리면 `On-disk size: 11671040 … Layout: 2 Compression ratio: 100.00%`).
+- `lz4_0padding`: 압축 데이터를 pcluster의 **끝**에 붙이고 앞을 0으로 채우는 형식. 이 덕분에 해제 결과를 쓰는 버퍼와 압축 입력이 겹쳐도 안전하게 풀 수 있다(§4.3 in-place decompression의 전제).
+
+pcluster를 64 KiB로 키우면(`-C65536`) 같은 파일이 어떻게 되는지도 봤다.
+
+```sh
+limactl shell elinux -- bash -lc 'cd /var/tmp/J3/img; dump.erofs -e --path=/usr/lib/j3/gdb erofs_lzma_64k.img | sed -n 8,14p'
+```
+
+```text
+ Ext:   logical offset   |  length :     physical offset    |  length
+   0:        0..  703168 |  703168 :    1052672..   1118208 |   65536
+   1:   703168.. 1052544 |  349376 :    1118208..   1183744 |   65536
+   2:  1052544.. 1239416 |  186872 :    1183744..   1249280 |   65536
+   3:  1239416.. 1406996 |  167580 :    1249280..   1314816 |   65536
+   4:  1406996.. 1596108 |  186872 :    1314816..   1380352 |   65536
+   5:  1596108.. 1752382 |  156274 :    1380352..   1445888 |   65536
+```
+
+출력 64 KiB 하나에 원본 156~703 KiB가 들어간다. 압축률은 좋아지지만(§5: 18.1 → 16.0 MiB), 4 KiB 하나를 읽으려고 최대 703 KiB를 풀어야 한다 — §5.3의 첫 접근 지연에서 14 ms로 드러난다.
+
+```svg
+<svg viewBox="0 0 680 230" xmlns="http://www.w3.org/2000/svg">
+  <text x="340" y="18" text-anchor="middle" font-size="13" font-weight="bold">EROFS 고정 크기 출력 — erofs_lz4.img의 gdb 첫 6개 extent (실측)</text>
+  <text x="20" y="44" font-size="12">압축 전 (논리, 1px = 100 B)</text>
+  <rect x="20" y="52" width="168" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="104" y="72" text-anchor="middle" font-size="12">16824</text>
+  <rect x="188" y="52" width="106" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="241" y="72" text-anchor="middle" font-size="12">10605</text>
+  <rect x="294" y="52" width="65" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="326" y="72" text-anchor="middle" font-size="12">6470</text>
+  <rect x="359" y="52" width="81" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="399" y="72" text-anchor="middle" font-size="12">8098</text>
+  <rect x="440" y="52" width="96" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="488" y="72" text-anchor="middle" font-size="12">9566</text>
+  <rect x="536" y="52" width="123" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/><text x="597" y="72" text-anchor="middle" font-size="12">12325</text>
+  <line x1="20" y1="82" x2="20" y2="130" stroke="currentColor" stroke-dasharray="3 3"/>
+  <line x1="188" y1="82" x2="120" y2="130" stroke="currentColor" stroke-dasharray="3 3"/>
+  <line x1="294" y1="82" x2="220" y2="130" stroke="currentColor" stroke-dasharray="3 3"/>
+  <line x1="359" y1="82" x2="320" y2="130" stroke="currentColor" stroke-dasharray="3 3"/>
+  <line x1="440" y1="82" x2="420" y2="130" stroke="currentColor" stroke-dasharray="3 3"/>
+  <line x1="536" y1="82" x2="520" y2="130" stroke="currentColor" stroke-dasharray="3 3"/>
+  <line x1="659" y1="82" x2="620" y2="130" stroke="currentColor" stroke-dasharray="3 3"/>
+  <rect x="20" y="130" width="100" height="30" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="70" y="150" text-anchor="middle" font-size="12">4096</text>
+  <rect x="120" y="130" width="100" height="30" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="170" y="150" text-anchor="middle" font-size="12">4096</text>
+  <rect x="220" y="130" width="100" height="30" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="270" y="150" text-anchor="middle" font-size="12">4096</text>
+  <rect x="320" y="130" width="100" height="30" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="370" y="150" text-anchor="middle" font-size="12">4096</text>
+  <rect x="420" y="130" width="100" height="30" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="470" y="150" text-anchor="middle" font-size="12">4096</text>
+  <rect x="520" y="130" width="100" height="30" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/><text x="570" y="150" text-anchor="middle" font-size="12">4096</text>
+  <text x="20" y="180" font-size="12">디스크 (물리, pcluster 4 KiB 고정, 블록 정렬) — 블록 하나만 읽으면 그 extent가 풀린다</text>
+  <text x="20" y="208" font-size="12">SquashFS는 반대: 입력 128 KiB 고정, 출력 가변 → 4 KiB를 읽으려 해도 128 KiB를 풀고,</text>
+  <text x="20" y="224" font-size="12">압축 블록이 디스크 블록 경계를 걸쳐서 앞뒤 블록까지 읽는다</text>
+</svg>
+```
+그림 3 — EROFS의 고정 크기 출력 압축. 위가 파일의 논리 구간(압축 전 길이, `dump.erofs -e` 실측), 아래가 디스크의 4 KiB pcluster. 입력이 가변이라 압축이 잘 되는 구간은 길게, 안 되는 구간은 짧게 잘린다.
+
+### 4.3 in-place decompression과 메모리
+
+EROFS는 해제할 때 page cache 페이지를 최대한 재활용한다.
+
+- 압축 데이터를 읽어 올 버퍼로, 어차피 해제 결과가 들어갈 **page cache 페이지 자체**를 쓸 수 있다(in-place I/O). 압축 데이터가 pcluster 끝에 붙어 있으니(`lz4_0padding`), 앞에서부터 풀어 나가도 아직 안 읽은 입력을 덮어쓰지 않는다.
+- 그래서 메모리가 빠듯한 폰에서 "압축 데이터용 임시 버퍼 + 해제 결과" 두 벌을 잡지 않아도 된다. 기본 캐시 전략 `cache_strategy=readaround`(마운트 옵션에서 보인다)는 pcluster 주변만 캐시한다.
+
+§5.4의 page cache 측정에서 이 차이가 숫자로 나온다: 같은 41 MiB를 다 읽은 뒤 EROFS는 page cache가 47 MiB 늘고, SquashFS는 59 MiB 늘었다.
+
+### 4.4 dedupe와 그 밖의 mkfs 옵션
+
+무엇을 확인하나: 같은 파일 두 벌을 넣었을 때 SquashFS(기본 dedupe)와 EROFS(`-Ededupe` 유무)의 크기.
+
+```sh
+limactl shell elinux -- bash -lc 'cd /var/tmp/J3; mkdir -p dup; cp tree/usr/lib/j3/gdb dup/a; cp tree/usr/lib/j3/gdb dup/b; for e in "" "-Ededupe"; do mkfs.erofs --quiet -zlz4hc $e t.img dup >/dev/null 2>&1; printf "dup-test erofs %-10s %d\n" "[$e]" $(stat -c %s t.img); done; mksquashfs dup t.sq -noappend -quiet -no-progress -comp lz4 -Xhc >/dev/null; printf "dup-test squashfs   %d\n" $(stat -c %s t.sq); rm -rf t.img t.sq dup'
+```
+
+```text
+dup-test erofs []         13377536
+dup-test erofs [-Ededupe] 6729728
+dup-test squashfs   5619712
+```
+
+출력에서 볼 것: EROFS는 기본으로는 두 벌을 다 저장하고(13.4 MB), `-Ededupe`를 주면 압축 데이터 단위로 중복을 지워 한 벌(6.7 MB)이 된다. SquashFS는 아무 옵션 없이 파일 단위 중복 제거를 한다. EROFS의 dedupe는 파일 일부만 같아도(pcluster 단위) 잡을 수 있다는 점이 다르다.
+
+> 관찰 메모: 이 VM의 erofs-utils 1.9에서 전체 트리(`tree/`)에 `-Ededupe`를 주면 오류 메시지 없이 inode 22개짜리 8 KiB 이미지가 나왔다. 원인은 조사하지 않았다. 양산 이미지 레시피에 새 mkfs 옵션을 넣을 때는 `fsck.erofs`나 마운트 후 파일 수 비교 같은 검증 단계를 반드시 둔다.
+
+그 밖에 자주 보는 `mkfs.erofs` 옵션: `-zlz4hc`(압축기 지정, 레벨 문법은 erofs-utils 버전마다 다르니 `man mkfs.erofs` 확인), `-C<bytes>`(최대 pcluster 크기), `-Eztailpacking`(작은 꼬리를 inode 옆에 인라인), `-Efragments`(SquashFS fragment와 비슷하게 꼬리들을 모음), `--all-root`, `-T<epoch>`(재현 가능한 빌드용 고정 타임스탬프).
+
+### 4.5 SquashFS vs EROFS 정리
+
+| 항목 | SquashFS | EROFS |
+|---|---|---|
+| 압축 단위 | 입력 고정(4K~1M), 출력 가변 | 출력 고정(pcluster, 기본 4K), 입력 가변 |
+| 디스크 정렬 | 압축 블록이 디스크 블록 경계를 걸침 | pcluster가 블록 정렬 |
+| 압축기 (6.18) | gzip, xz, lzo, lz4, zstd | lz4(+hc), lzma(xz 계열), deflate, zstd |
+| 비압축 모드 | 사실상 없음(블록별 비압축 저장은 함) | 있음(`erofs_none`) — 빠른 읽기전용 FS로도 쓴다 |
+| 파일에서 직접 마운트 | loop 필요 | `EROFS_FS_BACKED_BY_FILE`(6.12에서 추가)로 loop 없이 |
+| dedupe | 파일 단위, 기본 | pcluster 단위, `-Ededupe` |
+| 주요 사용처 | OpenWrt, snap, 라이브 이미지, 많은 Yocto 제품 | Android 시스템 파티션, 컨테이너 이미지 |
+| 성숙도 | 20년, 도구 어디에나 | 빠르게 발전 중, 도구·커널 버전 요구 확인 필요 |
+
+---
+
+## 5. 측정 — 크기, 순차 읽기, 첫 접근 지연, page cache
+
+### 5.1 측정 도구 — 정적 링크 C 리더
+
+무엇을 확인하나: 게스트(initramfs에 libc 없음) 안에서 (1) 트리 전체를 순차로 읽는 cold read, (2) 큰 파일의 랜덤 4 KiB `pread` N회를 잰다.
+
+```c
+/* j3_read: "all DIR" = read every regular file sequentially (cold read)
+            "rand FILE N" = N random 4 KiB preads (fixed seed) */
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <ftw.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+static char buf[1 << 16];
+static long long nbytes, nfiles, nerr;
+
+static double now_ms(void) {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1e3 + t.tv_nsec / 1e6;
+}
+static int one(const char *p, const struct stat *st, int type, struct FTW *f) {
+    (void)st; (void)f;
+    if (type != FTW_F) return 0;
+    int fd = open(p, O_RDONLY);
+    if (fd < 0) { perror(p); return 0; }
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof buf)) > 0) nbytes += n;
+    if (n < 0) { fprintf(stderr, "read %s: %m\n", p); nerr++; }
+    close(fd); nfiles++;
+    return 0;
+}
+int main(int argc, char **argv) {
+    if (argc >= 3 && !strcmp(argv[1], "all")) {
+        double t0 = now_ms();
+        if (nftw(argv[2], one, 32, FTW_PHYS) < 0) { perror("nftw"); exit(1); }
+        double ms = now_ms() - t0;
+        printf("all  files=%lld bytes=%lld err=%lld ms=%.0f MB/s=%.1f\n",
+               nfiles, nbytes, nerr, ms, nbytes / 1e3 / ms);
+    } else if (argc >= 4 && !strcmp(argv[1], "rand")) {
+        int fd = open(argv[2], O_RDONLY);
+        if (fd < 0) { perror(argv[2]); exit(1); }
+        struct stat st; fstat(fd, &st);
+        long blocks = st.st_size / 4096, n = atol(argv[3]);
+        srand(42);
+        double t0 = now_ms();
+        for (long i = 0; i < n; i++) {
+            off_t off = (off_t)(rand() % blocks) * 4096;
+            if (pread(fd, buf, 4096, off) != 4096) { perror("pread"); exit(1); }
+        }
+        double ms = now_ms() - t0;
+        printf("rand ops=%ld ms=%.0f us/op=%.0f\n", n, ms, ms * 1e3 / n);
+    } else { fprintf(stderr, "usage: %s all DIR | rand FILE N\n", argv[0]); return 2; }
+    return 0;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'mkdir -p /var/tmp/J3/bin && gcc -std=gnu11 -Wall -Wextra -O2 -static /Users/donh/.elinux_scratch/J3/j3_read.c -o /var/tmp/J3/bin/j3_read && /var/tmp/J3/bin/j3_read all /var/tmp/J3/tree && /var/tmp/J3/bin/j3_read rand /var/tmp/J3/tree/usr/lib/j3/gdb 2000'
+```
+
+```text
+all  files=1366 bytes=43043123 err=0 ms=11 MB/s=4032.9
+rand ops=2000 ms=1 us/op=1
+```
+
+VM 호스트에서 돌린 건 컴파일 확인용이다(트리가 이미 page cache에 있어서 4 GB/s). 경고 0개. 진짜 측정은 게스트에서 `drop_caches` 직후에 한다.
+
+### 5.2 게스트 벤치 — 16개 디스크를 한 번에
+
+게스트 스크립트(`bench.sh`)는 붙은 virtio 디스크마다 크기로 이름을 찾고(QEMU `virt`는 `-device` 순서와 `vdX` 순서가 뒤집혀서 이름 대신 크기로 맞췄다), 마운트 → `drop_caches` → 순차 → `drop_caches` → 랜덤 500회를 2번 반복한다.
+
+```sh
+#!/bin/sh
+# guest: cold sequential + random read on every attached image
+insmod /j3/erofs.ko
+for d in /sys/block/vd*; do
+  dev=/dev/${d##*/}; sz=$(( $(cat $d/size) * 512 ))
+  name=$(awk -v s=$sz '$2==s{print $1}' /j3/sizes.txt)
+  case $name in sq_*) t=squashfs;; erofs_*) t=erofs;; ext4*) t=ext4;; esac
+  mkdir -p /m; mount -t $t -o ro $dev /m || { echo "$name mount fail"; continue; }
+  for r in 1 2; do
+    echo 3 > /proc/sys/vm/drop_caches; a=$(/j3/j3_read all /m)
+    echo 3 > /proc/sys/vm/drop_caches; b=$(/j3/j3_read rand /m/usr/lib/j3/gdb 500)
+    echo "RES $name r$r $a $b"
+  done
+  umount /m
+done
+```
+
+```sh
+# run_bench.sh (VM): every image as a read-only virtio-blk disk, lab initramfs + j3 files
+W=/var/tmp/J3; A=""; i=0
+for f in $W/img/*.img; do A="$A -drive if=none,id=d$i,file=$f,format=raw,readonly=on -device virtio-blk-device,drive=d$i"; i=$((i+1)); done
+timeout 1500 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -no-reboot \
+  -kernel /var/lab/out/Image-fs -initrd $W/j3_initrd.gz $A \
+  -append "console=ttyAMA0 quiet LAB_CMD=sh~/j3/bench.sh" > $W/j3_bench1.log 2>&1
+```
+
+initramfs(`j3_initrd.gz`)는 랩 rootfs 복사본에 `j3_read`, `bench.sh`, `sizes.txt`, `erofs.ko` 등을 넣고 `cpio -H newc | gzip`으로 묶은 것이다(C7 §3.3과 같은 방법). 출력(일부 — 32줄 중 대표 줄, 각 이미지 2회 반복):
+
+```text
+lab initramfs: 6.18.55-fs up 1.32s
+RES sq_zstd_4k r1 all  files=1366 bytes=43043123 err=0 ms=2998 MB/s=14.4 rand ops=500 ms=375 us/op=751
+RES sq_zstd_1m r1 all  files=1366 bytes=43043123 err=0 ms=2182 MB/s=19.7 rand ops=500 ms=102 us/op=204
+RES sq_zstd_128k r1 all  files=1366 bytes=43043123 err=0 ms=1072 MB/s=40.1 rand ops=500 ms=192 us/op=384
+RES sq_xz_128k r1 all  files=1366 bytes=43043123 err=0 ms=3659 MB/s=11.8 rand ops=500 ms=849 us/op=1697
+RES sq_lz4_128k r1 all  files=1366 bytes=43043123 err=0 ms=763 MB/s=56.4 rand ops=500 ms=68 us/op=136
+RES sq_gzip_128k r1 all  files=1366 bytes=43043123 err=0 ms=1213 MB/s=35.5 rand ops=500 ms=210 us/op=420
+RES ext4_raw r1 all  files=1366 bytes=43043123 err=0 ms=782 MB/s=55.0 rand ops=500 ms=110 us/op=219
+RES erofs_none r1 all  files=1366 bytes=43043123 err=0 ms=712 MB/s=60.5 rand ops=500 ms=105 us/op=210
+RES erofs_lzma r1 all  files=1366 bytes=43043123 err=0 ms=3479 MB/s=12.4 rand ops=500 ms=485 us/op=970
+RES erofs_lz4 r1 all  files=1366 bytes=43043123 err=0 ms=782 MB/s=55.1 rand ops=500 ms=133 us/op=266
+...
+[   72.765598] reboot: Power down
+```
+
+### 5.3 첫 접근 지연 — "page fault 한 번"의 비용
+
+랜덤 500회는 같은 블록을 여러 번 맞히기 때문에 큰 블록이 page cache 덕을 본다(§3.4). 실행 파일의 page fault처럼 "처음 한 번 찍는" 비용을 보려면 `drop_caches` 직후 `pread` **한 번**을 재야 한다. `bench2.sh`는 각 이미지에서 이것을 5번 반복하고, 이어서 전체 읽기 전후의 page cache 크기를 기록한다.
+
+```sh
+#!/bin/sh
+# guest: first-touch latency (1 pread after drop_caches) + page-cache growth
+insmod /j3/erofs.ko
+mi(){ awk '/^(Buffers|Cached):/{printf "%s%d ", $1, $2/1024}' /proc/meminfo; }
+mkdir -p /m /d
+for d in /sys/block/vd*; do
+  dev=/dev/${d##*/}; sz=$(( $(cat $d/size) * 512 ))
+  name=$(awk -v s=$sz '$2==s{print $1}' /j3/sizes.txt)
+  case $name in sq_*) t=squashfs;; erofs_*) t=erofs;; ext4*) t=ext4;; data) mount -o ro $dev /d; continue;; *) continue;; esac
+  mount -t $t -o ro $dev /m || continue
+  l=""; for i in 1 2 3 4 5; do echo 3 > /proc/sys/vm/drop_caches
+    l="$l $(/j3/j3_read rand /m/usr/lib/j3/gdb 1 | sed 's/.*us\/op=//')"; done
+  echo 3 > /proc/sys/vm/drop_caches; b=$(mi); /j3/j3_read all /m >/dev/null; a=$(mi)
+  echo "LAT $name first_touch_us:$l | before: $b after: $a"
+  umount /m
+done
+for f in sq_zstd_128k erofs_lz4; do
+  case $f in sq_*) t=squashfs;; *) t=erofs;; esac
+  if [ $t = squashfs ]; then losetup /dev/loop0 /d/$f.img; src=/dev/loop0; else src=/d/$f.img; fi
+  mount -t $t -o ro $src /m || { echo "mount $f failed"; continue; }
+  echo 3 > /proc/sys/vm/drop_caches; b=$(mi); /j3/j3_read all /m >/dev/null; a=$(mi)
+  echo "FILEBACKED $f via $src | before: $b after: $a"; grep " /m " /proc/mounts
+  umount /m; [ $t = squashfs ] && losetup -d /dev/loop0
+done
+```
+
+```text
+LAT ext4_raw first_touch_us: 1697 3388 498 341 340 | before: Buffers:0 Cached:4  after: Buffers:1 Cached:48 
+LAT erofs_none first_touch_us: 593 338 371 983 266 | before: Buffers:0 Cached:4  after: Buffers:2 Cached:49 
+LAT erofs_lzma_64k first_touch_us: 29154 19757 14404 14509 13467 | before: Buffers:0 Cached:4  after: Buffers:1 Cached:50 
+LAT erofs_lzma first_touch_us: 2543 1400 1409 1945 1367 | before: Buffers:0 Cached:4  after: Buffers:1 Cached:50 
+LAT erofs_lz4 first_touch_us: 1371 550 593 469 501 | before: Buffers:0 Cached:4  after: Buffers:1 Cached:50 
+LAT sq_lz4_128k first_touch_us: 1494 781 2324 778 1766 | before: Buffers:0 Cached:4  after: Buffers:0 Cached:63 
+LAT sq_zstd_1m first_touch_us: 10251 7477 9117 7667 7266 | before: Buffers:0 Cached:4  after: Buffers:0 Cached:65 
+LAT sq_zstd_128k first_touch_us: 1881 3040 2475 1915 2604 | before: Buffers:0 Cached:4  after: Buffers:0 Cached:63 
+LAT sq_zstd_4k first_touch_us: 1964 864 756 913 881 | before: Buffers:0 Cached:4  after: Buffers:0 Cached:54 
+LAT sq_xz_128k first_touch_us: 11919 11308 10115 11609 10360 | before: Buffers:0 Cached:4  after: Buffers:0 Cached:63 
+FILEBACKED sq_zstd_128k via /dev/loop0 | before: Buffers:0 Cached:4  after: Buffers:0 Cached:78 
+/dev/loop0 /m squashfs ro,relatime,errors=continue 0 0
+FILEBACKED erofs_lz4 via /d/erofs_lz4.img | before: Buffers:0 Cached:4  after: Buffers:1 Cached:77 
+/dev/loop0 /m erofs ro,relatime,user_xattr,acl,cache_strategy=readaround 0 0
+```
+
+마지막 줄에 함정이 하나 있다. EROFS를 "파일에서 직접" 마운트하려 했는데 `/proc/mounts`의 소스가 `/dev/loop0`이다. **BusyBox `mount`는 소스가 일반 파일이면 자동으로 loop 장치를 만든다.** 진짜 file-backed 마운트는 §5.5에서 `mount(2)`를 직접 불러서 한다.
+
+### 5.4 결과 정리와 차트
+
+| 이미지 | 크기 MiB | 원본 대비 | 순차 MB/s (2회 평균) | 랜덤 500회 µs/op | 첫 접근 µs (중앙값) |
+|---|---|---|---|---|---|
+| `ext4_raw` | 64.0 (고정 크기 이미지) | — | 54.4 | 217 | 498 |
+| `erofs_none` | 41.3 | 101% | 62.4 | 208 | 371 |
+| `erofs_lz4` | 27.4 | 67% | 54.2 | 270 | 550 |
+| `erofs_lz4hc` | 25.4 | 62% | 52.6 | 280 | — |
+| `erofs_zstd` | 24.9 | 61% | 42.1 | 356 | — |
+| `erofs_lzma` | 18.1 | 44% | 12.4 | 999 | 1409 |
+| `erofs_lzma_64k` | 16.0 | 39% | 13.4 | 1373 | 14509 |
+| `sq_lz4_128k` | 23.3 | 57% | 55.3 | 148 | 1494 |
+| `sq_lz4hc_128k` | 19.1 | 47% | 54.2 | 145 | — |
+| `sq_gzip_128k` | 16.1 | 39% | 35.8 | 410 | — |
+| `sq_zstd_4k` | 18.5 | 45% | 13.8 | 632 | 881 |
+| `sq_zstd_128k` | 14.8 | 36% | 38.8 | 357 | 2475 |
+| `sq_zstd_128k_nofrag` | 15.4 | 38% | 30.4 | 324 | — |
+| `sq_zstd_1m` | 15.2 | 37% | 19.4 | 232 | 7667 |
+| `sq_xz_128k` | 13.3 | 33% | 11.9 | 1695 | 11308 |
+| `sq_xz_1m` | 12.4 | 30% | 9.1 | 1541 | — |
+
+("—"는 첫 접근 측정에 넣지 않은 이미지. 원본 = 43,043,123 B.)
+
+```svg
+<svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg">
+<text x="290" y="18" text-anchor="middle" font-size="13" font-weight="bold">이미지 크기 (MiB, 원본 41.0 MiB)</text>
+<text x="560" y="18" text-anchor="middle" font-size="13" font-weight="bold">순차 cold read (MB/s)</text>
+<line x1="180" y1="40" x2="180" y2="350" stroke="currentColor"/>
+<line x1="450" y1="40" x2="450" y2="350" stroke="currentColor"/>
+<text x="172" y="59" text-anchor="end" font-size="12">ext4_raw</text>
+<rect x="180" y="48" width="201.1" height="14" fill="#888" fill-opacity="0.55" stroke="#888"/>
+<text x="385.1" y="59" font-size="12">64.0</text>
+<rect x="450" y="48" width="147.5" height="14" fill="#888" fill-opacity="0.55" stroke="#888"/>
+<text x="601.5" y="59" font-size="12">54.4</text>
+<text x="172" y="78" text-anchor="end" font-size="12">erofs_none</text>
+<rect x="180" y="67" width="129.8" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="313.8" y="78" font-size="12">41.3</text>
+<rect x="450" y="67" width="169.2" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="623.2" y="78" font-size="12">62.4</text>
+<text x="172" y="97" text-anchor="end" font-size="12">erofs_lz4</text>
+<rect x="180" y="86" width="86.3" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="270.3" y="97" font-size="12">27.4</text>
+<rect x="450" y="86" width="147.1" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="601.1" y="97" font-size="12">54.2</text>
+<text x="172" y="116" text-anchor="end" font-size="12">erofs_lz4hc</text>
+<rect x="180" y="105" width="79.7" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="263.7" y="116" font-size="12">25.4</text>
+<rect x="450" y="105" width="142.8" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="596.8" y="116" font-size="12">52.6</text>
+<text x="172" y="135" text-anchor="end" font-size="12">erofs_zstd</text>
+<rect x="180" y="124" width="78.3" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="262.3" y="135" font-size="12">24.9</text>
+<rect x="450" y="124" width="114.4" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="568.4" y="135" font-size="12">42.1</text>
+<text x="172" y="154" text-anchor="end" font-size="12">erofs_lzma</text>
+<rect x="180" y="143" width="57.0" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="241.0" y="154" font-size="12">18.1</text>
+<rect x="450" y="143" width="33.5" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="487.5" y="154" font-size="12">12.4</text>
+<text x="172" y="173" text-anchor="end" font-size="12">erofs_lzma_64k</text>
+<rect x="180" y="162" width="50.2" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="234.2" y="173" font-size="12">16.0</text>
+<rect x="450" y="162" width="36.4" height="14" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="490.4" y="173" font-size="12">13.4</text>
+<text x="172" y="192" text-anchor="end" font-size="12">sq_lz4_128k</text>
+<rect x="180" y="181" width="73.1" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="257.1" y="192" font-size="12">23.3</text>
+<rect x="450" y="181" width="150.2" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="604.2" y="192" font-size="12">55.3</text>
+<text x="172" y="211" text-anchor="end" font-size="12">sq_lz4hc_128k</text>
+<rect x="180" y="200" width="60.0" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="244.0" y="211" font-size="12">19.1</text>
+<rect x="450" y="200" width="147.1" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="601.1" y="211" font-size="12">54.2</text>
+<text x="172" y="230" text-anchor="end" font-size="12">sq_gzip_128k</text>
+<rect x="180" y="219" width="50.5" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="234.5" y="230" font-size="12">16.1</text>
+<rect x="450" y="219" width="97.2" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="551.2" y="230" font-size="12">35.8</text>
+<text x="172" y="249" text-anchor="end" font-size="12">sq_zstd_4k</text>
+<rect x="180" y="238" width="58.3" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="242.3" y="249" font-size="12">18.5</text>
+<rect x="450" y="238" width="37.3" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="491.3" y="249" font-size="12">13.8</text>
+<text x="172" y="268" text-anchor="end" font-size="12">sq_zstd_128k</text>
+<rect x="180" y="257" width="46.5" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="230.5" y="268" font-size="12">14.8</text>
+<rect x="450" y="257" width="105.2" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="559.2" y="268" font-size="12">38.8</text>
+<text x="172" y="287" text-anchor="end" font-size="12">sq_zstd_128k_nofrag</text>
+<rect x="180" y="276" width="48.5" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="232.5" y="287" font-size="12">15.4</text>
+<rect x="450" y="276" width="82.4" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="536.4" y="287" font-size="12">30.4</text>
+<text x="172" y="306" text-anchor="end" font-size="12">sq_zstd_1m</text>
+<rect x="180" y="295" width="47.7" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="231.7" y="306" font-size="12">15.2</text>
+<rect x="450" y="295" width="52.7" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="506.7" y="306" font-size="12">19.4</text>
+<text x="172" y="325" text-anchor="end" font-size="12">sq_xz_128k</text>
+<rect x="180" y="314" width="41.9" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="225.9" y="325" font-size="12">13.3</text>
+<rect x="450" y="314" width="32.4" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="486.4" y="325" font-size="12">11.9</text>
+<text x="172" y="344" text-anchor="end" font-size="12">sq_xz_1m</text>
+<rect x="180" y="333" width="39.0" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="223.0" y="344" font-size="12">12.4</text>
+<rect x="450" y="333" width="24.8" height="14" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="478.8" y="344" font-size="12">9.1</text>
+<rect x="180" y="360" width="12" height="10" fill="#888" fill-opacity="0.55" stroke="#888"/><text x="197" y="370" font-size="12">ext4 (비압축 기준)</text>
+<rect x="330" y="360" width="12" height="10" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/><text x="347" y="370" font-size="12">EROFS</text>
+<rect x="420" y="360" width="12" height="10" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/><text x="437" y="370" font-size="12">SquashFS</text>
+</svg>
+```
+그림 4 — 같은 41 MiB 트리를 16가지로 묶은 크기(왼쪽, VM에서 `stat`)와 게스트 안 cold 순차 읽기 속도(오른쪽, TCG 에뮬레이션이라 절대값은 실제 보드와 다름).
+
+```svg
+<svg viewBox="0 0 680 286" xmlns="http://www.w3.org/2000/svg">
+<text x="340" y="18" text-anchor="middle" font-size="13" font-weight="bold">첫 접근 지연: drop_caches 직후 4 KiB pread 1회 (중앙값, µs)</text>
+<line x1="180" y1="38" x2="180" y2="266" stroke="currentColor"/>
+<text x="172" y="60" text-anchor="end" font-size="12">ext4_raw</text>
+<rect x="180" y="49" width="13.3" height="16" fill="#888" fill-opacity="0.55" stroke="#888"/>
+<text x="198.3" y="61" font-size="12">498</text>
+<text x="172" y="82" text-anchor="end" font-size="12">erofs_none</text>
+<rect x="180" y="71" width="9.9" height="16" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="194.9" y="83" font-size="12">371</text>
+<text x="172" y="104" text-anchor="end" font-size="12">erofs_lz4</text>
+<rect x="180" y="93" width="14.7" height="16" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="199.7" y="105" font-size="12">550</text>
+<text x="172" y="126" text-anchor="end" font-size="12">erofs_lzma</text>
+<rect x="180" y="115" width="37.6" height="16" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="222.6" y="127" font-size="12">1409</text>
+<text x="172" y="148" text-anchor="end" font-size="12">erofs_lzma_64k</text>
+<rect x="180" y="137" width="386.9" height="16" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="571.9" y="149" font-size="12">14509</text>
+<text x="172" y="170" text-anchor="end" font-size="12">sq_lz4_128k</text>
+<rect x="180" y="159" width="39.8" height="16" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="224.8" y="171" font-size="12">1494</text>
+<text x="172" y="192" text-anchor="end" font-size="12">sq_zstd_4k</text>
+<rect x="180" y="181" width="23.5" height="16" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="208.5" y="193" font-size="12">881</text>
+<text x="172" y="214" text-anchor="end" font-size="12">sq_zstd_128k</text>
+<rect x="180" y="203" width="66.0" height="16" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="251.0" y="215" font-size="12">2475</text>
+<text x="172" y="236" text-anchor="end" font-size="12">sq_zstd_1m</text>
+<rect x="180" y="225" width="204.5" height="16" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="389.5" y="237" font-size="12">7667</text>
+<text x="172" y="258" text-anchor="end" font-size="12">sq_xz_128k</text>
+<rect x="180" y="247" width="301.5" height="16" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="486.5" y="259" font-size="12">11308</text>
+</svg>
+```
+그림 5 — `drop_caches` 직후 `gdb` 안 4 KiB를 한 번 `pread`하는 데 걸린 시간(5회 중앙값). "page fault 한 번"의 비용에 해당한다.
+
+읽는 법:
+
+1. **크기 1등은 xz, 속도 1등은 lz4·비압축이다.** xz 128K(13.3 MiB)는 lz4 128K(23.3 MiB)보다 43% 작지만 순차 읽기는 4.6배 느리고(11.9 vs 55.3 MB/s), 첫 접근은 7.6배 느리다(11.3 vs 1.5 ms).
+2. **zstd는 xz 크기에 근접(14.8 vs 13.3 MiB)하면서 순차는 3배 이상 빠르다.** 요즘 SquashFS의 기본 후보가 zstd인 이유다.
+3. **블록 크기는 "첫 접근"과 "순차" 사이의 줄다리기다.** zstd 4K는 첫 접근 0.9 ms로 빠르지만 순차는 13.8 MB/s(블록이 작아 해제 호출·I/O 횟수가 32배)이고 이미지도 25% 크다. 1M은 첫 접근 7.7 ms로 느리다. 128K가 대부분의 경우 무난한 이유다.
+4. **랜덤 500회에서 zstd 1M(232 µs)이 128K(357 µs)보다 빠른 역전**은 page cache 효과다. `gdb`는 1 MiB 블록 12개뿐이라, 처음 12번 정도만 해제하고 나머지 488번은 이미 채워진 페이지를 맞혔다. 작업 세트가 page cache보다 큰 장비에서는 이 역전이 사라진다.
+5. **EROFS lz4는 비압축 ext4와 같은 순차 속도(54 MB/s)에 첫 접근도 0.55 ms**로, 같은 lz4의 SquashFS(1.5 ms)보다 약 2.7배 빠르다 — 고정 크기 출력(4 KiB만 읽고 4 KiB만 품)의 효과다. 반대로 pcluster를 64 KiB로 키운 lzma는 첫 접근 14.5 ms로 최악이다.
+6. **fragment를 끄면(nofrag) 이미지는 4% 커지고 작은 파일 순차 읽기는 오히려 느려졌다**(38.8 → 30.4 MB/s). 작은 파일 1천여 개를 디렉터리 순서로 읽을 때는 같은 fragment 블록이 연달아 맞기 때문이다(fragment 캐시 `SQUASHFS_FRAGMENT_CACHE_SIZE=3`).
+
+### 5.5 page cache 이중 캐싱
+
+무엇을 확인하나: 압축 FS를 읽으면 page cache에 무엇이 쌓이나. §5.3 출력의 before/after 차이와, EROFS를 `mount(2)`로 진짜 file-backed 마운트한 경우(일반 / `directio` 옵션)를 비교한다.
+
+BusyBox `mount`의 자동 loop을 피하려고 `mount(2)`를 직접 부르는 작은 도구를 썼다.
+
+```c
+/* j3_mnt: call mount(2) directly (BusyBox mount auto-creates a loop
+   device for regular files; EROFS can mount a file without loop) */
+#include <stdio.h>
+#include <sys/mount.h>
+
+int main(int argc, char **argv) {
+    if (argc < 4) { fprintf(stderr, "usage: %s SRC DIR FSTYPE [OPTS]\n", argv[0]); return 2; }
+    if (mount(argv[1], argv[2], argv[3], MS_RDONLY, argc > 4 ? argv[4] : NULL) < 0) {
+        perror("mount"); return 1;
+    }
+    printf("mounted %s on %s (%s) without loop\n", argv[1], argv[2], argv[3]);
+    return 0;
+}
+```
+
+게스트 스크립트 `memfs.sh`의 해당 부분(데이터 디스크 `data.img`는 ext4이고 그 안에 `erofs_lz4.img` 파일이 있다):
+
+```sh
+echo 3 > /proc/sys/vm/drop_caches; echo -n "before: "; mi
+for o in "" directio; do echo 3 > /proc/sys/vm/drop_caches; echo -n "opts=[$o] before: "; mi
+/j3/j3_mnt /d/erofs_lz4.img /m erofs $o && grep " /m " /proc/mounts
+/j3/j3_read all /m; echo -n "after:  "; mi; umount /m; done
+```
+
+```text
+before: MemFree:417 Cached:15 Shmem:15 
+opts=[] before: MemFree:417 Cached:15 Shmem:15 
+mounted /d/erofs_lz4.img on /m (erofs) without loop
+/d/erofs_lz4.img /m erofs ro,relatime,user_xattr,acl,cache_strategy=readaround 0 0
+all  files=1366 bytes=43043123 err=0 ms=601 MB/s=71.6
+after:  MemFree:345 Cached:88 Shmem:15 
+opts=[directio] before: MemFree:422 Cached:15 Shmem:15 
+mounted /d/erofs_lz4.img on /m (erofs) without loop
+/d/erofs_lz4.img /m erofs ro,relatime,user_xattr,acl,cache_strategy=readaround,directio 0 0
+all  files=1366 bytes=43043123 err=0 ms=885 MB/s=48.6
+after:  MemFree:373 Cached:63 Shmem:15 
+```
+
+(첫 `before:` 줄은 루프 앞에 남겨 둔 확인용 출력이다. 이 실행의 `Cached:15`에는 initramfs 안의 10 MB 테스트 파일이 포함돼 있다. 차이만 본다.)
+
+```svg
+<svg viewBox="0 0 680 282" xmlns="http://www.w3.org/2000/svg">
+<text x="340" y="18" text-anchor="middle" font-size="13" font-weight="bold">전체를 한 번 읽은 뒤 늘어난 page cache (MiB, /proc/meminfo Cached+Buffers)</text>
+<line x1="230" y1="34" x2="230" y2="248" stroke="currentColor"/>
+<text x="222" y="56" text-anchor="end" font-size="12">ext4 (블록 장치)</text>
+<rect x="230" y="44" width="207.0" height="17" fill="#888" fill-opacity="0.55" stroke="#888"/>
+<text x="442.0" y="57" font-size="12">45</text>
+<text x="222" y="82" text-anchor="end" font-size="12">erofs_none (블록 장치)</text>
+<rect x="230" y="70" width="216.2" height="17" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="451.2" y="83" font-size="12">47</text>
+<text x="222" y="108" text-anchor="end" font-size="12">erofs_lz4 (블록 장치)</text>
+<rect x="230" y="96" width="216.2" height="17" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="451.2" y="109" font-size="12">47</text>
+<text x="222" y="134" text-anchor="end" font-size="12">sq_zstd_128k (블록 장치)</text>
+<rect x="230" y="122" width="271.4" height="17" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="506.4" y="135" font-size="12">59</text>
+<text x="222" y="160" text-anchor="end" font-size="12">sq_zstd_128k (loop 파일)</text>
+<rect x="230" y="148" width="340.4" height="17" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<text x="575.4" y="161" font-size="12">74</text>
+<text x="222" y="186" text-anchor="end" font-size="12">erofs_lz4 (loop 파일)</text>
+<rect x="230" y="174" width="340.4" height="17" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="575.4" y="187" font-size="12">74</text>
+<text x="222" y="212" text-anchor="end" font-size="12">erofs_lz4 (파일 직접)</text>
+<rect x="230" y="200" width="335.8" height="17" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="570.8" y="213" font-size="12">73</text>
+<text x="222" y="238" text-anchor="end" font-size="12">erofs_lz4 (파일, directio)</text>
+<rect x="230" y="226" width="220.8" height="17" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="455.8" y="239" font-size="12">48</text>
+<line x1="418.6" y1="34" x2="418.6" y2="252" stroke="#d0564a" stroke-dasharray="4 3"/>
+<text x="418.6" y="268" text-anchor="middle" font-size="12">압축 푼 파일 데이터 41 MiB</text>
+</svg>
+```
+그림 6 — 트리 전체(41 MiB)를 한 번 읽은 뒤 늘어난 page cache. 빨간 점선이 "풀린 파일 데이터"만의 크기다. 그보다 더 늘어난 만큼이 압축 데이터의 캐시(이중 캐싱)다.
+
+해석:
+
+- **EROFS를 블록 장치에서 마운트**: +47 MiB ≈ 풀린 데이터 41 + 메타데이터. 압축 데이터는 거의 남기지 않는다.
+- **SquashFS를 블록 장치에서 마운트**: +59 MiB ≈ 41 + 압축 이미지 14.8. 6.18의 SquashFS는 장치 블록 크기가 페이지 크기와 같으면 압축 블록을 자기 전용 page cache(`msblk->cache_mapping`, `fs/squashfs/super.c`)에 남긴다. 해제된 데이터와 압축 데이터가 **둘 다** 메모리에 있다.
+- **loop 장치 경유**: +74 MiB. loop 장치 아래 **백킹 파일의 page cache**(ext4 쪽)가 한 벌 더 생긴다. ext4 위의 이미지 파일을 loop으로 마운트하는 구성(개발 보드에서 흔하다)은 압축 데이터를 두 번 캐시한다.
+- **EROFS file-backed, 기본**: +73 MiB. loop은 없지만 기본으로는 백킹 파일을 buffered I/O로 읽어서 역시 이중 캐싱이다.
+- **EROFS file-backed + `directio`**: +48 MiB. 백킹 파일을 direct I/O로 읽어 압축 데이터가 page cache에 남지 않는다. 대신 순차 속도가 71.6 → 48.6 MB/s로 떨어졌다(캐시 없는 작은 I/O).
+
+메모리 256 MB짜리 센서 노드라면 "이미지 크기만큼 RAM을 더 먹는" 차이는 크다. 압축 이미지를 eMMC **파티션**에 직접 쓰고 블록 장치로 마운트하는 것이 기본이고, 파일에 두어야 한다면 EROFS의 file-backed + `directio`를 검토한다.
+
+---
+
+## 6. 메모리 파일시스템 — tmpfs · ramfs · devtmpfs · zram
+
+### 6.1 정의
+
+| 항목 | tmpfs | ramfs | devtmpfs |
+|---|---|---|---|
+| 저장 위치 | page cache(shmem) + swap 가능 | page cache, swap 불가 | 커널 내부 tmpfs(또는 ramfs) 인스턴스 |
+| 크기 제한 | `size=`(기본 RAM의 절반), `nr_inodes=` | **없음** | 커널이 관리 |
+| `df` 표시 | 정상 | 항상 0 | 정상 |
+| `/proc/meminfo` | `Shmem`, `Cached` | `Cached`, `Unevictable` | `Shmem` |
+| 쓰는 곳 | `/run`, `/tmp`, overlay upper, `/dev/shm` | initramfs 초기 rootfs(옛날), 거의 안 씀 | `/dev` (커널이 장치 노드 자동 생성) |
+
+bare-metal 비유: tmpfs는 "용량 상한이 있는 RAM 디스크 + 필요하면 swap으로 밀려나는 페이지", ramfs는 "상한 없는 malloc — 쓰는 대로 RAM을 먹고 돌려주지 않는다".
+
+### 6.2 tmpfs 크기 제한과 Shmem 회계
+
+무엇을 확인하나: `size=16m` tmpfs에 32 MiB를 쓰면 ENOSPC가 나는지, 쓴 만큼 `Shmem`이 늘고 지우면 돌아오는지, `remount`로 크기를 바꿀 수 있는지.
+
+```sh
+mi(){ awk '/^(MemFree|Cached|Shmem):/{printf "%s%d ", $1, $2/1024}' /proc/meminfo; echo; }
+echo "== tmpfs size=16m"; mkdir -p /t /r /m /d
+mount -t tmpfs -o size=16m,mode=1777 j3tmp /t; df -k /t | tail -1
+echo -n "before: "; mi
+dd if=/dev/zero of=/t/fill bs=1M count=32; echo "dd exit=$?"
+ls -l /t/fill; echo -n "after:  "; mi
+rm /t/fill; echo -n "rm:     "; mi
+mount -o remount,size=64m /t; df -k /t | tail -1; umount /t
+```
+
+게스트(`Image-fs`, `-m 512M`)에서 실행한 출력(`ls`의 ANSI 색 코드는 지웠다):
+
+```text
+== tmpfs size=16m
+j3tmp                    16384         0     16384   0% /t
+before: MemFree:427 Cached:5 Shmem:5 
+dd: error writing '/t/fill': No space left on device
+17+0 records in
+16+0 records out
+16777216 bytes (16.0MB) copied, 0.036033 seconds, 444.0MB/s
+dd exit=1
+-rw-r--r--    1 0        0         16777216 Oct 17 21:47 /t/fill
+after:  MemFree:416 Cached:21 Shmem:21 
+rm:     MemFree:416 Cached:5 Shmem:5 
+j3tmp                    65536         0     65536   0% /t
+```
+
+출력에서 볼 것:
+
+- 정확히 16 MiB에서 `ENOSPC`. 앱 입장에서는 "디스크가 꽉 찼다"와 같다 — `/tmp`에 로그를 쌓는 데몬이 이걸로 죽는 일이 흔하다.
+- `Shmem`과 `Cached`가 함께 16 MiB 늘었다. **tmpfs 데이터는 `Cached`에 포함되지만 `drop_caches`로 버릴 수 없다.** `free`의 "buff/cache"를 "언제든 회수 가능한 메모리"로 읽으면 틀린다 — 그 안의 Shmem은 회수가 안 된다(swap이 있을 때만 밀려난다).
+- `rm`하면 바로 돌아온다. 열린 채로 지운 파일은 마지막 `close`까지 남는다(일반 FS와 같다).
+- `size=`는 상한일 뿐 미리 예약하지 않는다. 쓰기 전에는 RAM을 먹지 않는다.
+
+### 6.3 ramfs — 상한 없이 자란다
+
+```sh
+echo "== ramfs (no limit)"; mount -t ramfs j3ram /r; df -k /r | tail -1
+dd if=/dev/zero of=/r/fill bs=1M count=200 2>&1 | tail -1
+df -k /r | tail -1; echo -n "ramfs 200M: "; mi
+grep -E "^(Unevictable|Mlocked)" /proc/meminfo
+echo 3 > /proc/sys/vm/drop_caches; echo -n "after drop_caches: "; mi
+rm /r/fill; umount /r
+```
+
+```text
+== ramfs (no limit)
+j3ram                        0         0         0   0% /r
+209715200 bytes (200.0MB) copied, 0.361538 seconds, 553.2MB/s
+j3ram                        0         0         0   0% /r
+ramfs 200M: MemFree:212 Cached:205 Shmem:5 
+Unevictable:      204776 kB
+Mlocked:               0 kB
+after drop_caches: MemFree:212 Cached:205 Shmem:5 
+```
+
+출력에서 볼 것: 200 MB를 썼는데 `df`는 0이다. 메모리는 `Unevictable`로 잡혀 `drop_caches`로도 안 빠지고, `Shmem`에도 안 잡힌다(모니터링이 Shmem만 보면 놓친다). 512 MB 게스트에서 더 쓰면 OOM killer가 엉뚱한 프로세스를 죽인다. **ramfs는 쓰지 않는다** — 크기 제한이 필요 없는 아주 특수한 경우(커널이 쓰는 내부 용도)뿐이다.
+
+### 6.4 devtmpfs
+
+```sh
+echo "== devtmpfs"; grep -E " /dev " /proc/mounts; df -k /dev | tail -1
+```
+
+```text
+== devtmpfs
+devtmpfs /dev devtmpfs rw,relatime,size=215140k,nr_inodes=53785,mode=755 0 0
+devtmpfs                215140         0    215140   0% /dev
+```
+
+devtmpfs는 커널이 장치를 등록할 때(`device_add()` → `devtmpfs_create_node()`) 노드를 **자동으로** 만들어 주는 tmpfs다. 크기 기본값(215,140 KiB)은 게스트 RAM의 절반 정도다. 덕분에 udev 없는 작은 initramfs에서도 `/dev/vda`, `/dev/mapper/control`, `/dev/dm-0`이 저절로 생긴다 — §10의 dm-verity 실습이 udev 없이 되는 이유다. 장치 노드의 권한·심볼릭 링크 규칙은 L2(udev)에서 다룬다.
+
+### 6.5 zram — 압축 RAM 블록 장치 (간단히)
+
+**zram**은 RAM 안에 압축된 블록 장치(`/dev/zram0`)를 만든다. 주 용도는 **압축 swap**이다. swap 파티션을 eMMC에 두면 수명을 갉아먹으니, 메모리가 빠듯한 장비(Android, ChromeOS, 작은 게이트웨이)는 zram swap으로 "RAM을 1.5~3배처럼" 쓴다. tmpfs와 조합하면 "tmpfs 페이지가 zram swap으로 압축되어 밀려나는" 구성이 된다.
+
+```sh
+echo "== zram"; insmod /j3/zram.ko; cat /sys/block/zram0/comp_algorithm
+echo 64M > /sys/block/zram0/disksize
+cat /m/../j3/*.sh /proc/kallsyms 2>/dev/null | head -c 16000000 > /tmp/txt
+dd if=/tmp/txt of=/dev/zram0 bs=1M 2>&1 | tail -1; sync
+echo "mm_stat(orig compr mem_used ...): $(cat /sys/block/zram0/mm_stat)"
+```
+
+```text
+== zram
+[lzo-rle] lzo 
+10328361 bytes (9.8MB) copied, 0.091369 seconds, 107.8MB/s
+mm_stat(orig compr mem_used ...): 10330112  3368061  4030464        0  4030464        0        0        0        0
+```
+
+출력에서 볼 것: 랩 커널은 lzo 계열만 켜져 있다(`[lzo-rle]`가 선택됨). 텍스트(스크립트 + `/proc/kallsyms`) 10.3 MB가 압축 3.4 MB, 실제 메모리 사용 4.0 MB(zsmalloc 오버헤드 포함)가 됐다. `mm_stat` 처음 세 칸이 orig_data_size, compr_data_size, mem_used_total이다. 실제 장비에서는 `mkswap /dev/zram0 && swapon /dev/zram0`(또는 systemd의 zram-generator)로 swap으로 쓴다 — 이 노트에서는 swap 활성화까지는 하지 않았다.
+
+---
+
+## 7. overlayfs — 읽기전용 위에 쓰기층 겹치기
+
+### 7.1 직관
+
+투명 필름 두 장을 겹친 것과 같다. 아래 필름(lower)에는 공장에서 인쇄한 그림이 있고, 위 필름(upper)은 처음엔 비어 있다. 위에서 보면 아래 그림이 그대로 보인다. 어떤 칸을 고치고 싶으면 그 칸을 위 필름에 **통째로 베껴 그린 다음(copy-up)** 고친다. 칸을 지우고 싶으면 위 필름에 "여기 비어 있음" 스티커(whiteout)를 붙인다. 아래 필름은 한 번도 건드리지 않는다.
+
+펌웨어로 치면 **ROM 패치 테이블**과 같다. ROM 코드는 못 바꾸니, 패치할 함수만 RAM에 복사해서 고치고 패치 테이블로 그쪽을 가리키게 한다.
+
+### 7.2 정의
+
+```sh
+mount -t overlay overlay -o lowerdir=/lower,upperdir=/up/upper,workdir=/up/work /merged
+```
+
+- **lowerdir**: 읽기전용 층. 여러 개면 `lowerdir=/l2:/l1`처럼 콜론으로 잇고, **왼쪽이 위**다.
+- **upperdir**: 쓰기가 가는 디렉터리. 쓰기 가능한 FS(tmpfs, ext4, F2FS …)여야 하고 `trusted.*` xattr와 `d_type`을 지원해야 한다.
+- **workdir**: upper와 **같은 FS**의 빈 디렉터리. copy-up을 임시 파일로 준비했다가 `rename()`으로 원자적으로 upper에 넣는 작업 공간이다(전원 차단 중에도 upper에 반쯤 복사된 파일이 보이지 않게).
+- **merged**: 사용자가 보는 결과.
+
+규칙: 이름이 upper에 있으면 upper가 이긴다. 디렉터리는 양쪽 내용이 합쳐진다(merge). 파일은 합쳐지지 않고 위의 것이 아래 것을 가린다.
+
+### 7.3 관찰 도구
+
+무엇을 확인하나: overlay가 만든 upper 쪽 흔적을 보는 세 가지 — `lstat`(dev·ino·nlink·종류·rdev), xattr 목록, 그리고 `mv`가 숨기는 `rename(2)`의 진짜 반환값.
+
+```c
+/* j3_ovl: tiny probe for overlayfs demos
+   stat PATH...   -> dev, ino, nlink, type, rdev
+   xattr PATH     -> every xattr name=value (incl. trusted.overlay.*)
+   rename A B     -> raw rename(2) result (mv hides EXDEV by copying) */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/xattr.h>
+
+static int do_stat(const char *p) {
+    struct stat st;
+    if (lstat(p, &st) < 0) { perror(p); return 1; }
+    char t = S_ISDIR(st.st_mode) ? 'd' : S_ISCHR(st.st_mode) ? 'c' :
+             S_ISLNK(st.st_mode) ? 'l' : S_ISREG(st.st_mode) ? '-' : '?';
+    printf("%-34s dev=%u:%u ino=%-8lu nlink=%lu type=%c", p,
+           major(st.st_dev), minor(st.st_dev), (unsigned long)st.st_ino,
+           (unsigned long)st.st_nlink, t);
+    if (t == 'c') printf(" rdev=%u:%u", major(st.st_rdev), minor(st.st_rdev));
+    printf(" size=%lld\n", (long long)st.st_size);
+    return 0;
+}
+static int do_xattr(const char *p) {
+    char names[1024], val[256];
+    ssize_t n = llistxattr(p, names, sizeof names);
+    if (n < 0) { perror("llistxattr"); return 1; }
+    if (n == 0) printf("%s: (no xattrs)\n", p);
+    for (char *k = names; k < names + n; k += strlen(k) + 1) {
+        ssize_t v = lgetxattr(p, k, val, sizeof val - 1);
+        if (v < 0) { perror(k); continue; }
+        val[v] = 0;
+        printf("%s: %s=\"%s\" (%zd bytes)\n", p, k, val, v);
+    }
+    return 0;
+}
+int main(int argc, char **argv) {
+    if (argc >= 3 && !strcmp(argv[1], "stat")) {
+        int r = 0;
+        for (int i = 2; i < argc; i++) r |= do_stat(argv[i]);
+        return r;
+    }
+    if (argc == 3 && !strcmp(argv[1], "xattr")) return do_xattr(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "rename")) {
+        int r = rename(argv[2], argv[3]);
+        printf("rename(%s, %s) = %d%s%s\n", argv[2], argv[3], r,
+               r ? " errno=" : "", r ? strerrorname_np(errno) : "");
+        return r != 0;
+    }
+    fprintf(stderr, "usage: j3_ovl stat P.. | xattr P | rename A B\n");
+    return 2;
+}
+```
+
+VM 호스트에서 `gcc -std=gnu11 -Wall -Wextra -O2 -static`으로 경고 없이 빌드된다. lower는 작은 실험용 squashfs다: `etc/hostname`, `etc/app.conf`(rate=100), `etc/net/{eth0,wlan0}.conf`, `data/logs/old.log`, hard link 쌍 `usr/bin/tool_a`·`tool_b`, 1 MiB 랜덤 `big/blob`.
+
+```sh
+# build_ovl_lower.sh (VM) — the hard link pair is the interesting part
+ln $L/usr/bin/tool_a $L/usr/bin/tool_b
+head -c 1048576 /dev/urandom > $L/big/blob
+mksquashfs $L /var/tmp/J3/img_ovl_lower.sqfs -noappend -quiet -no-progress -comp zstd -all-root >/dev/null
+```
+
+### 7.4 실습 — copy-up, whiteout, opaque, redirect
+
+게스트 스크립트 `ovl.sh`를 `set -x`로 돌렸다. squashfs lower를 `/lower`, tmpfs를 `/up`에 올리고 overlay를 `/merged`에 만든다. 출력은 실행 그대로이고, 절별로 끊어서 설명한다.
+
+```text
++ mount -t squashfs -o ro /dev/vda /lower
++ mount -t tmpfs -o 'size=32m' j3up /up
++ mkdir -p /up/upper /up/work
++ mount -t overlay overlay -o 'lowerdir=/lower,upperdir=/up/upper,workdir=/up/work' /merged
++ grep overlay /proc/mounts
+overlay /merged overlay rw,relatime,lowerdir=/lower,upperdir=/up/upper,workdir=/up/work,uuid=on 0 0
++ /j3/j3_ovl stat /lower/etc/app.conf /merged/etc/app.conf /merged/etc /merged
+/lower/etc/app.conf                dev=254:0 ino=7        nlink=1 type=- size=9
+/merged/etc/app.conf               dev=0:28 ino=7        nlink=1 type=- size=9
+/merged/etc                        dev=0:26 ino=3        nlink=3 type=d size=58
+/merged                            dev=0:26 ino=2        nlink=1 type=d size=40
+```
+
+**inode 번호와 st_dev**: lower의 `app.conf`는 squashfs 장치 `254:0`의 ino 7이다. merged에서 같은 파일은 ino는 7로 같지만 dev가 `0:28`이다. 디렉터리는 overlay 자신의 dev `0:26`. overlayfs는 레이어들이 서로 다른 FS에 있을 때(여기선 squashfs와 tmpfs) 파일의 ino를 레이어 것 그대로 쓰고, 번호가 겹치지 않도록 레이어마다 다른 익명 st_dev를 붙인다(`xino` 기능이 꺼져 있을 때). 그래서 merged 안에서 **(st_dev, st_ino) 쌍**은 유일하지만, "같은 FS면 st_dev가 같다"는 가정은 깨진다.
+
+```text
++ echo 'rate=200'
++ /j3/j3_ovl stat /merged/etc/app.conf /up/upper/etc/app.conf /up/upper/etc
+/merged/etc/app.conf               dev=0:28 ino=7        nlink=1 type=- size=9
+/up/upper/etc/app.conf             dev=0:25 ino=9        nlink=1 type=- size=9
+/up/upper/etc                      dev=0:25 ino=8        nlink=2 type=d size=60
++ cat /lower/etc/app.conf /merged/etc/app.conf
+rate=100
+rate=200
+```
+
+**copy-up**: 쓰기 위해 여는 순간 `app.conf`가 upper(tmpfs `0:25`)에 생겼고, 부모 디렉터리 `etc`도 함께 만들어졌다. lower는 그대로 `rate=100`. merged의 ino·dev는 copy-up 전과 같은 `0:28`/7로 유지된다 — overlay가 upper 파일에 원본 정보(`trusted.overlay.origin`)를 기록해 두고 원래 번호를 계속 보여 준다.
+
+```text
++ echo x
++ /j3/j3_ovl stat /up/upper/big/blob
+/up/upper/big/blob                 dev=0:25 ino=11       nlink=1 type=- size=1048578
+```
+
+**copy-up은 파일 통째다**: 1 MiB 파일 끝에 2바이트를 붙였을 뿐인데 upper에 1,048,578 바이트 전체가 복사됐다. 300 MB짜리 모델 파일의 메타데이터 하나만 바꿔도(`chmod`도 copy-up을 일으킨다) 300 MB가 upper로 복사된다. upper가 tmpfs면 그만큼 RAM을 먹는다. `metacopy=on`(이 커널 기본 꺼짐)은 메타데이터만 바꾸는 경우 데이터 복사를 미루는 기능이다.
+
+```text
++ rm /merged/etc/hostname
++ /j3/j3_ovl stat /up/upper/etc/hostname
+/up/upper/etc/hostname             dev=0:25 ino=12       nlink=2 type=c rdev=0:0 size=0
++ ls /merged/etc
+app.conf  net
+```
+
+**whiteout**: lower의 파일을 지우면 upper에 **장치 번호 0:0인 문자 장치**가 같은 이름으로 생긴다. 이것이 whiteout이다. merged에서는 `hostname`이 사라졌다. `nlink=2`인 것은 6.x overlayfs가 whiteout마다 inode를 새로 만들지 않고 workdir의 공용 whiteout inode에 hard link로 붙이기 때문이다(inode 절약).
+
+```text
++ rm -rf /merged/etc/net
++ mkdir /merged/etc/net
++ echo static
++ /j3/j3_ovl xattr /up/upper/etc/net
+/up/upper/etc/net: trusted.overlay.opaque="y" (1 bytes)
++ ls /merged/etc/net /lower/etc/net
+/lower/etc/net:
+eth0.conf   wlan0.conf
+
+/merged/etc/net:
+eth0.conf
+```
+
+**opaque 디렉터리**: lower에 있던 디렉터리를 지우고 같은 이름으로 다시 만들면, upper의 새 디렉터리에 `trusted.overlay.opaque="y"`가 붙는다. "이 디렉터리 아래로는 lower를 보지 마라"는 뜻이다. 그래서 lower의 `wlan0.conf`는 merged에서 사라지고 새로 쓴 `eth0.conf`만 보인다. `trusted.*` xattr은 `CAP_SYS_ADMIN`이 있어야 보이므로 일반 사용자의 `getfattr`로는 안 보인다.
+
+```text
++ /j3/j3_ovl stat /merged/usr/bin/tool_a /merged/usr/bin/tool_b
+/merged/usr/bin/tool_a             dev=0:28 ino=14       nlink=2 type=- size=20
+/merged/usr/bin/tool_b             dev=0:28 ino=14       nlink=2 type=- size=20
++ echo '# patched'
++ /j3/j3_ovl stat /merged/usr/bin/tool_a /merged/usr/bin/tool_b
+/merged/usr/bin/tool_a             dev=0:27 ino=19       nlink=1 type=- size=30
+/merged/usr/bin/tool_b             dev=0:28 ino=14       nlink=2 type=- size=20
+```
+
+**hard link가 깨진다**: lower에서 `tool_a`와 `tool_b`는 같은 inode(14, nlink 2)였다. `tool_a`에 쓰자 `tool_a`만 copy-up되어 새 inode(ino 19, nlink 1, dev도 바뀜)가 됐고, `tool_b`는 여전히 옛 내용(size 20)이다. "같은 파일의 두 이름"이었던 것이 "다른 두 파일"이 됐다. `index=on`(이 커널 기본 꺼짐)을 켜면 hard link를 유지하며 copy-up한다.
+
+```text
++ /j3/j3_ovl rename /merged/data /merged/data2
+rename(/merged/data, /merged/data2) = -1 errno=EXDEV
++ mv /merged/data /merged/data2
++ ls /up/upper/data2
+logs
+```
+
+**디렉터리 rename은 EXDEV**: lower에서 온 디렉터리를 `rename(2)`하면 `EXDEV`("다른 FS 사이의 이동")가 나온다. `mv`는 EXDEV를 받으면 복사 + 삭제로 대신하기 때문에 사용자는 모른다 — 그러나 큰 디렉터리라면 통째 복사가 일어나고, `rename()`의 원자성을 믿는 프로그램(설정 디렉터리를 `rename`으로 교체하는 업데이트 스크립트)은 실패한다.
+
+```text
++ df -k /merged /up
++ cat
+Filesystem           1K-blocks      Used Available Use% Mounted on
+overlay                  32768      1044     31724   3% /merged
+j3up                     32768      1044     31724   3% /up
++ stat -f -c '%n type=%T' /merged
+/merged type=UNKNOWN
+```
+
+**statfs**: merged의 `df`는 **upper FS의 숫자**(32 MiB tmpfs)를 보여 준다. lower가 수백 MB여도 "남은 공간"은 upper 기준이다. BusyBox `stat -f`는 overlay의 magic(`0x794c7630`)을 몰라서 `UNKNOWN`으로 찍는다.
+
+```text
++ mount -t overlay overlay -o 'lowerdir=/lower,upperdir=/up/upper,workdir=/up/work,redirect_dir=on' /merged
++ /j3/j3_ovl rename /merged/usr/bin /merged/usr/sbin
+rename(/merged/usr/bin, /merged/usr/sbin) = 0
++ /j3/j3_ovl xattr /up/upper/usr/sbin
+/up/upper/usr/sbin: trusted.overlay.redirect="bin" (3 bytes)
+/up/upper/usr/sbin: trusted.overlay.origin="" (29 bytes)
+/up/upper/usr/sbin: trusted.overlay.impure="y" (1 bytes)
+```
+
+**redirect_dir=on**: 같은 upper/work로 다시 마운트하되 `redirect_dir=on`을 주면 디렉터리 rename이 성공한다. upper의 `usr/sbin`에 `trusted.overlay.redirect="bin"`이 붙어 "내 lower 짝은 `bin`이다"라고 기록한다. `origin`은 바이너리 file handle(29바이트)이라 문자열로 찍으면 비어 보인다. 주의: redirect가 기록된 upper는 **redirect를 이해하지 못하는 옛 커널이나 `redirect_dir=off` 마운트에서 다르게 보인다** — upper를 장비 여러 세대에 걸쳐 들고 가는 설계라면 옵션을 고정해야 한다.
+
+```text
++ mkdir -p /up/l2/etc
++ echo from-l2
++ mount -t overlay overlay -o 'lowerdir=/up/l2:/lower' /m2
+mount: mounting overlay on /m2 failed: No such file or directory
++ mkdir /m2
++ mount -t overlay overlay -o 'lowerdir=/up/l2:/lower' /m2
++ cat /m2/etc/app.conf
+from-l2
++ touch /m2/x
+touch: /m2/x: Read-only file system
++ grep m2 /proc/mounts
+overlay /m2 overlay ro,relatime,lowerdir=/up/l2:/lower,redirect_dir=on 0 0
+```
+
+**여러 lower, upper 없음**: (첫 실패는 마운트 포인트를 안 만든 스크립트 실수다.) `lowerdir=/up/l2:/lower`에서 왼쪽 `l2`의 `app.conf`가 이겼다. upper 없이 lower만 주면 overlay 전체가 **읽기전용**이 된다 — "베이스 이미지 + 제품별 차이 이미지"를 쌓기만 하는 구성(컨테이너 이미지 레이어, 제품 변형 레이어)에 쓴다.
+
+```svg
+<svg viewBox="0 0 680 310" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <rect x="20" y="10" width="200" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.2" stroke="#3f9a6b"/>
+  <text x="120" y="30" text-anchor="middle" font-size="13" font-weight="bold">lowerdir (squashfs, RO)</text>
+  <rect x="240" y="10" width="200" height="30" rx="4" fill="#e08a3c" fill-opacity="0.2" stroke="#e08a3c"/>
+  <text x="340" y="30" text-anchor="middle" font-size="13" font-weight="bold">upperdir (tmpfs)</text>
+  <rect x="460" y="10" width="200" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0"/>
+  <text x="560" y="30" text-anchor="middle" font-size="13" font-weight="bold">merged (사용자가 보는 /)</text>
+  <rect x="20" y="56" width="200" height="46" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="120" y="75" text-anchor="middle" font-size="12">etc/app.conf</text>
+  <text x="120" y="93" text-anchor="middle" font-size="12">rate=100</text>
+  <rect x="240" y="56" width="200" height="46" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="75" text-anchor="middle" font-size="12">etc/app.conf (copy-up)</text>
+  <text x="340" y="93" text-anchor="middle" font-size="12">rate=200, 파일 통째 복사</text>
+  <rect x="460" y="56" width="200" height="46" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="560" y="75" text-anchor="middle" font-size="12">app.conf → rate=200</text>
+  <text x="560" y="93" text-anchor="middle" font-size="12">upper가 lower를 가린다</text>
+  <rect x="20" y="112" width="200" height="46" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="120" y="131" text-anchor="middle" font-size="12">etc/hostname</text>
+  <text x="120" y="149" text-anchor="middle" font-size="12">j3-factory</text>
+  <rect x="240" y="112" width="200" height="46" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="131" text-anchor="middle" font-size="12">etc/hostname</text>
+  <text x="340" y="149" text-anchor="middle" font-size="12">char dev 0:0 = whiteout</text>
+  <rect x="460" y="112" width="200" height="46" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="560" y="131" text-anchor="middle" font-size="12">(안 보인다)</text>
+  <text x="560" y="149" text-anchor="middle" font-size="12">rm 한 것처럼</text>
+  <rect x="20" y="168" width="200" height="46" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="120" y="187" text-anchor="middle" font-size="12">etc/net/</text>
+  <text x="120" y="205" text-anchor="middle" font-size="12">eth0.conf  wlan0.conf</text>
+  <rect x="240" y="168" width="200" height="46" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="187" text-anchor="middle" font-size="12">etc/net/ (새 디렉터리)</text>
+  <text x="340" y="205" text-anchor="middle" font-size="12">trusted.overlay.opaque=y</text>
+  <rect x="460" y="168" width="200" height="46" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="560" y="187" text-anchor="middle" font-size="12">etc/net/</text>
+  <text x="560" y="205" text-anchor="middle" font-size="12">eth0.conf 만 (lower 무시)</text>
+  <rect x="20" y="224" width="200" height="46" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="120" y="243" text-anchor="middle" font-size="12">usr/bin/</text>
+  <text x="120" y="261" text-anchor="middle" font-size="12">tool_a  tool_b</text>
+  <rect x="240" y="224" width="200" height="46" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="243" text-anchor="middle" font-size="12">usr/sbin/</text>
+  <text x="340" y="261" text-anchor="middle" font-size="12">redirect="bin"</text>
+  <rect x="460" y="224" width="200" height="46" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="560" y="243" text-anchor="middle" font-size="12">usr/sbin/ (rename)</text>
+  <text x="560" y="261" text-anchor="middle" font-size="12">redirect_dir=on 일 때만</text>
+  <line x1="220" y1="79" x2="238" y2="79" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="440" y1="79" x2="458" y2="79" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="440" y1="135" x2="458" y2="135" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="440" y1="191" x2="458" y2="191" stroke="currentColor" marker-end="url(#ah4)"/>
+  <line x1="440" y1="247" x2="458" y2="247" stroke="currentColor" marker-end="url(#ah4)"/>
+  <text x="340" y="296" text-anchor="middle" font-size="12">workdir: copy-up을 임시 파일로 만든 뒤 rename으로 원자적으로 upper에 넣는 작업 공간</text>
+</svg>
+```
+그림 7 — 위 실습에서 실제로 upper에 생긴 것들. 위에서부터 copy-up, whiteout(문자 장치 0:0), opaque 디렉터리, redirect(디렉터리 rename).
+
+### 7.5 overlayfs에서 깨지는 것 — 정리
+
+| 항목 | 일반 FS에서의 기대 | overlayfs 기본값에서 실제 | 완화 옵션 |
+|---|---|---|---|
+| st_dev | 같은 마운트 안이면 같다 | 레이어마다 다른 익명 dev (관찰: 0:26, 0:27, 0:28) | `xino=on` |
+| st_ino | 파일이 살아 있는 동안 고정 | copy-up 후에도 대개 유지(origin), hard link는 바뀜 | `index=on`, `xino` |
+| hard link | 한쪽 수정이 다른 이름에 보임 | copy-up 시 끊김 | `index=on` |
+| 디렉터리 rename | 원자적 성공 | `EXDEV` (mv는 복사로 우회) | `redirect_dir=on` |
+| 쓰기 비용 | 바뀐 블록만 | 첫 쓰기(또는 chmod) 때 파일 전체 복사 | `metacopy=on`(메타데이터만) |
+| 남은 공간 | 그 FS 기준 | upper 기준 | upper 크기 설계 |
+| inotify·fanotify | 변경 감지 | lower를 직접 바꾸면 merged 감시자가 모름 | lower를 마운트 중 바꾸지 않는다 |
+| lower 변경 | — | 마운트 중 lower를 바꾸면 결과 미정의 | 금지 (이미지 교체는 재부팅으로) |
+
+그리고 **`volatile`** 마운트 옵션: upper에 대한 `sync`/`fsync`를 전부 건너뛴다. 빠르지만 크래시 후 upper는 믿을 수 없고, overlay가 workdir에 흔적을 남겨 다음 마운트를 거부한다(upper를 지우고 새로 만들어야 한다). CI 빌드 컨테이너처럼 "어차피 버릴 upper"에만 쓴다. upper가 tmpfs면 원래 sync가 의미 없으니 효과도 없다.
+
+---
+
+## 8. RO 루트 + RW 상층 설계 패턴
+
+### 8.1 세 가지 대표 설계
+
+| 설계 | 구성 | 재부팅 후 | 장점 | 단점 · 함정 |
+|---|---|---|---|---|
+| A. 전체 overlay, tmpfs upper | `/` = squashfs + tmpfs | 공장 상태 | 전원 차단 완전 무관, 자동 공장 초기화 | 설정 저장 불가 → 설정은 별도 data 파티션에, upper가 RAM을 먹음 |
+| B. 전체 overlay, data 파티션 upper | `/` = squashfs + ext4·F2FS 위 upper | 변경 유지 | 일반 리눅스처럼 동작 | upper가 쌓이면 이미지 업데이트 후 옛 파일이 새 lower를 가림(아래 함정), 전원 차단 시 upper의 일관성은 J5 규칙대로 |
+| C. 부분 overlay | `/`는 순수 RO, `/etc`만 overlay, `/var`·`/data`는 data 파티션 직접 | `/etc` 변경 유지 | 쓰기 영역이 명확, 감사 쉬움 | 앱이 엉뚱한 경로에 쓰면 EROFS 에러 → 빌드 때 쓰기 경로 정리 필요 |
+
+양산 장비에서는 **C가 가장 흔하다**. Yocto의 `overlayfs-etc` 이미지 기능과 `read-only-rootfs` IMAGE_FEATURES가 바로 이 구성을 만든다(K4·K5). systemd 기반이면 `/var`를 data 파티션에 `x-systemd` 마운트로, `/etc`는 initramfs나 이른 단계 서비스가 overlay로 올린다.
+
+### 8.2 설계 B의 함정 — "upper가 업데이트를 가린다"
+
+OTA로 lower 이미지가 v2로 바뀌었는데, upper에 v1 시절 copy-up된 `/etc/app.conf`가 남아 있으면 merged는 **v1 설정 + v2 바이너리**가 된다. 새 버전이 설정 형식을 바꿨다면 부팅이 깨진다. 대책:
+
+- upper에 들어가도 되는 경로를 화이트리스트로 제한한다(설계 C).
+- 이미지 버전을 upper에 기록하고, 버전이 바뀌면 마이그레이션 스크립트를 돌리거나 upper의 해당 경로를 정리한다.
+- "공장 초기화" = upper 디렉터리 삭제. 버튼 하나로 복구할 수 있게 initramfs에 넣어 둔다.
+
+### 8.3 경로별 권장
+
+| 경로 | 권장 위치 | 이유 |
+|---|---|---|
+| `/usr`, `/lib`, `/bin` | RO lower | 이미지 동일성, verity |
+| `/etc` | lower 기본값 + overlay(영구 upper) 또는 빌드 때 확정 | 장비별 설정(hostname, 네트워크, 키) |
+| `/var/lib`, `/var/log` | data 파티션 직접 (overlay 아님) | 큰 파일, 잦은 쓰기 → copy-up 비용 회피 |
+| `/run`, `/tmp` | tmpfs (`size=` 지정) | 부팅마다 초기화가 맞는 데이터 |
+| `/home`, 녹화 데이터 | data 파티션, 필요하면 dm-crypt(L6) | 사용자 데이터 |
+| `/dev` | devtmpfs | 커널이 자동 생성 |
+
+---
+
+## 9. 직접 만들기 — initramfs가 squashfs 루트 + overlay로 switch_root
+
+C7 §3.3에서는 initramfs가 ext4 루트를 찾아 `switch_root`했다. 이번에는 **squashfs 루트 + overlay 상층**을 만들고, upper를 tmpfs로 둔 경우와 ext4 data 파티션으로 둔 경우를 재부팅까지 비교한다.
+
+### 9.1 구성
+
+- 루트 이미지 `j3_root.sqfs`(2.0 MB, zstd): 랩 BusyBox rootfs + `etc/hostname`(j3-factory) + `sbin/j3_stage2` + 빈 `media/ro`, `media/rw` + 문서 일부.
+- initramfs `j3_boot_initrd.gz`: 랩 rootfs + 아래 `/init` + dm-verity용 모듈과 `j3_dm`(§10).
+- data 파티션 `j3_data.img`: VM에서 `mkfs.ext4 -q -L j3data … 32M`로 만든 빈 ext4.
+
+initramfs의 `/init`(커널 cmdline으로 동작을 고른다):
+
+```sh
+#!/bin/sh
+# initramfs /init: squashfs RO root (+ optional dm-verity) + overlay upper -> switch_root
+mount -t proc proc /proc; mount -t sysfs sysfs /sys; mount -t devtmpfs devtmpfs /dev
+log(){ echo "[j3-init $(cut -d' ' -f1 /proc/uptime)s] $*"; }
+for a in $(cat /proc/cmdline); do case $a in
+  j3root=*) R=${a#j3root=};; j3upper=*) U=${a#j3upper=};; j3hashdev=*) HD=${a#j3hashdev=};;
+  j3roothash=*) H=${a#j3roothash=};; j3salt=*) S=${a#j3salt=};; j3blocks=*) NB=${a#j3blocks=};; j3vopt=*) VO="1 ${a#j3vopt=}";; esac; done
+if [ -n "$H" ]; then
+  for m in dm-mod dm-bufio sha256 dm-verity; do insmod /j3/$m.ko; done
+  /j3/j3_dm j3root 0 $((NB * 8)) verity "1 $R $HD 4096 4096 $NB 1 sha256 $H $S $VO" || exec sh
+  R=/dev/dm-0; log "dm-verity root: $(cat /sys/block/dm-0/dm/name) ro=$(cat /sys/block/dm-0/ro)"
+fi
+mkdir -p /ro /rw /newroot
+mount -t squashfs -o ro "$R" /ro || { log "squashfs mount of $R failed"; exec sh; }
+log "lower: $R (squashfs) on /ro"
+if [ "$U" = tmpfs ]; then mount -t tmpfs -o size=64m,mode=755 j3upper /rw
+else mount -t ext4 -o noatime "$U" /rw || { log "data mount failed"; exec sh; }; fi
+mkdir -p /rw/upper /rw/work
+mount -t overlay overlay -o lowerdir=/ro,upperdir=/rw/upper,workdir=/rw/work /newroot || exec sh
+log "upper: $U -> overlay on /newroot"
+for m in ro rw; do mount --move /$m /newroot/media/$m; done
+for m in proc sys dev; do mount --move /$m /newroot/$m; done
+exec switch_root /newroot /sbin/j3_stage2
+```
+
+포인트:
+
+- `/ro`(lower)와 `/rw`(upper가 든 FS)를 `mount --move`로 새 루트의 `/media/ro`, `/media/rw`로 옮긴다. 옮기지 않으면 `switch_root`가 initramfs를 지울 때 그 마운트들이 보이지 않는 곳에 남아, 나중에 upper를 점검하거나 공장 초기화할 방법이 없어진다.
+- upper와 work는 **같은 FS**(`/rw`) 안의 두 디렉터리다.
+- 실패하면 `exec sh`로 복구 셸 — PID 1이 끝나면 panic이다(C7 §1.3).
+
+switch_root 뒤 PID 1이 되는 `j3_stage2`(루트 이미지 안):
+
+```sh
+#!/bin/sh
+# runs as PID 1 on the overlay root after switch_root
+echo "[stage2] PID $$, / = $(awk '$2=="/"{print $1, $3}' /proc/mounts)"
+awk '$2 ~ /^\/media\// {print "[stage2] " $1, $2, $3, $4}' /proc/mounts
+n=$(( $(cat /var/lib/j3/bootcount 2>/dev/null || echo 0) + 1 ))
+echo "[stage2] /etc/hostname = $(cat /etc/hostname), this is boot #$n"
+mkdir -p /var/lib/j3 && echo $n > /var/lib/j3/bootcount
+echo "j3-changed-on-boot$n" > /etc/hostname
+echo "[stage2] upper now holds: $(cd /media/rw/upper && find . -type f | sort | tr '\n' ' ')"
+[ -n "$(grep j3_test_read /proc/cmdline)" ] && /j3/j3_read all /usr/share
+sync; poweroff -f
+```
+
+부팅 스크립트(`boot.sh`, VM):
+
+```sh
+# boot.sh TAG ROOTIMG "extra cmdline" [extra qemu args]
+W=/var/tmp/J3; tag=$1; img=$2; extra=$3; shift 3
+timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -m 512M -nographic -no-reboot \
+  -kernel /var/lab/out/Image-fs -initrd $W/j3_boot_initrd.gz \
+  -drive if=none,id=r0,file=$img,format=raw,readonly=on -device virtio-blk-device,drive=r0 "$@" \
+  -append "console=ttyAMA0 quiet $extra" > $W/j3_$tag.log 2>&1
+echo "exit=$?"; grep -E "j3-init|stage2|verity|I/O error|rror|panic|reboot|squashfs|SQUASHFS" $W/j3_$tag.log
+```
+
+### 9.2 tmpfs upper — 재부팅하면 공장 상태
+
+무엇을 확인하나: 같은 이미지로 두 번 부팅해서, 첫 부팅의 변경(`/etc/hostname`, bootcount)이 두 번째에 사라지는지.
+
+```sh
+limactl shell elinux -- bash -lc 'B=/Users/donh/.elinux_scratch/J3/boot/boot.sh; bash $B tmp1 /var/tmp/J3/j3_root.sqfs "j3root=/dev/vda j3upper=tmpfs"; bash $B tmp2 /var/tmp/J3/j3_root.sqfs "j3root=/dev/vda j3upper=tmpfs"'
+```
+
+```text
+exit=0
+[j3-init 1.44s] lower: /dev/vda (squashfs) on /ro
+[j3-init 1.48s] upper: tmpfs -> overlay on /newroot
+[stage2] PID 1, / = overlay overlay
+[stage2] /dev/vda /media/ro squashfs ro,relatime,errors=continue
+[stage2] j3upper /media/rw tmpfs rw,relatime,size=65536k,mode=755
+[stage2] /etc/hostname = j3-factory, this is boot #1
+[stage2] upper now holds: ./etc/hostname ./var/lib/j3/bootcount 
+[    1.818941] reboot: Power down
+exit=0
+[j3-init 1.44s] lower: /dev/vda (squashfs) on /ro
+[j3-init 1.48s] upper: tmpfs -> overlay on /newroot
+[stage2] PID 1, / = overlay overlay
+[stage2] /dev/vda /media/ro squashfs ro,relatime,errors=continue
+[stage2] j3upper /media/rw tmpfs rw,relatime,size=65536k,mode=755
+[stage2] /etc/hostname = j3-factory, this is boot #1
+[stage2] upper now holds: ./etc/hostname ./var/lib/j3/bootcount 
+[    1.777911] reboot: Power down
+```
+
+출력에서 볼 것: switch_root 뒤에도 PID 1이고 `/`는 `overlay`. 첫 부팅에서 `/etc/hostname`을 바꾸고 bootcount를 썼지만(upper에 두 파일), 두 번째 부팅도 `j3-factory`, `boot #1`이다. **설계 A — 재부팅 = 공장 초기화**. squashfs 마운트 옵션의 `errors=continue`는 SquashFS가 메타데이터 에러를 만나도 FS를 내리지 않는다는 기본값이다.
+
+### 9.3 ext4 data 파티션 upper — 변경이 남는다
+
+무엇을 확인하나: upper를 ext4 data 파티션으로 바꾸면 두 번째 부팅에서 첫 부팅의 변경이 보이는지.
+
+```sh
+limactl shell elinux -- bash -lc 'B=/Users/donh/.elinux_scratch/J3/boot/boot.sh; D="-drive if=none,id=dt,file=/var/tmp/J3/j3_data.img,format=raw -device virtio-blk-device,drive=dt"; bash $B ext1 /var/tmp/J3/j3_root.sqfs "j3root=/dev/vdb j3upper=/dev/vda" $D; bash $B ext2 /var/tmp/J3/j3_root.sqfs "j3root=/dev/vdb j3upper=/dev/vda" $D'
+```
+
+```text
+exit=0
+[j3-init 2.20s] lower: /dev/vdb (squashfs) on /ro
+[j3-init 2.43s] upper: /dev/vda -> overlay on /newroot
+[stage2] PID 1, / = overlay overlay
+[stage2] /dev/vdb /media/ro squashfs ro,relatime,errors=continue
+[stage2] /dev/vda /media/rw ext4 rw,noatime
+[stage2] /etc/hostname = j3-factory, this is boot #1
+[stage2] upper now holds: ./etc/hostname ./var/lib/j3/bootcount 
+[    2.954618] reboot: Power down
+exit=0
+[j3-init 1.73s] lower: /dev/vdb (squashfs) on /ro
+[j3-init 1.84s] upper: /dev/vda -> overlay on /newroot
+[stage2] PID 1, / = overlay overlay
+[stage2] /dev/vdb /media/ro squashfs ro,relatime,errors=continue
+[stage2] /dev/vda /media/rw ext4 rw,noatime
+[stage2] /etc/hostname = j3-changed-on-boot1, this is boot #2
+[stage2] upper now holds: ./etc/hostname ./var/lib/j3/bootcount 
+[    2.315191] reboot: Power down
+```
+
+출력에서 볼 것: 두 번째 부팅에서 `/etc/hostname = j3-changed-on-boot1`, `boot #2`. 같은 lower 이미지인데 upper가 영구 저장소라 변경이 남았다. **설계 B**. 이 상태에서 "공장 초기화"는 `/media/rw/upper`와 `work`를 지우는 것이다.
+
+> 관찰: 디스크를 두 개 붙이면 QEMU `virt`에서 **명령줄의 마지막 `-device`가 `vda`** 가 됐다(루트를 먼저, data를 나중에 줬더니 data = `vda`, 루트 = `vdb`). 실제 보드에서도 장치 이름(`mmcblk0`/`mmcblk1`, `sda`/`sdb`)은 probe 순서에 따라 바뀔 수 있으므로, 양산 initramfs는 `PARTUUID=`나 파티션 라벨로 루트를 찾는다.
+
+---
+
+## 10. dm-verity 맛보기 — 읽기전용 이미지를 "믿을 수 있게"
+
+이 절은 RO rootfs 설계에 필요한 만큼만 다룬다. 루트 해시 서명(`root_hash_sig_key_desc`), FEC(오류 정정), 키 관리, dm-crypt와의 조합은 L6, 부트 체인에서 루트 해시를 지키는 방법은 L5에서 다룬다.
+
+### 10.1 직관 — 해시 트리
+
+SSD 펌웨어에서 FW 이미지는 부팅 때 한 번 서명 검증한다. 하지만 rootfs는 수백 MB라 부팅 때 전부 해시하면 몇 초가 걸리고, 검증한 뒤에 eMMC가 바뀌면(물리 공격, 플래시 비트 에러) 모른다.
+
+**dm-verity**는 device-mapper 타깃으로, 블록을 **읽을 때마다** 그 블록만 검증한다.
+
+1. 빌드 때: 데이터 4 KiB 블록마다 SHA-256을 구해 해시 블록에 모은다(4 KiB 해시 블록 하나에 32바이트 해시 128개). 해시 블록들을 다시 해시해서 위 층을 만들고, 마지막에 블록 하나가 남으면 그 해시가 **루트 해시**다.
+2. 런타임: 데이터 블록 N을 읽으면, N의 해시 → 그걸 담은 해시 블록 → … → 루트까지 경로를 검증한다. 해시 블록은 한 번 검증되면 캐시(`dm-bufio`)되므로 보통은 데이터 블록 해시 1번만 계산하면 된다.
+3. 신뢰의 뿌리: 루트 해시 **32바이트 하나**만 안전한 곳(서명된 커널 cmdline·FIT·initramfs)에 있으면 이미지 전체를 믿을 수 있다.
+
+### 10.2 VM에서 해시 트리 만들기, 변조 이미지 만들기
+
+```sh
+#!/bin/bash
+# verity_prep.sh (VM): build verity hash tree for the root squashfs, make a corrupted copy
+set -e
+W=/var/tmp/J3; cd $W
+rm -f j3_root.hash; veritysetup format j3_root.sqfs j3_root.hash | tee j3_verity.txt
+ls -l j3_root.sqfs j3_root.hash
+cp j3_root.sqfs j3_root_bad.sqfs
+off=1000000; old=$(xxd -s $off -l 1 -p j3_root_bad.sqfs)
+printf "\\x$(printf %02x $(( 0x$old ^ 0xff )))" | dd of=j3_root_bad.sqfs bs=1 seek=$off conv=notrunc status=none
+echo "flipped byte at $off: $old -> $(xxd -s $off -l 1 -p j3_root_bad.sqfs) (data block $((off/4096)))"
+veritysetup verify j3_root.sqfs j3_root.hash $(awk '/Root hash/{print $3}' j3_verity.txt) && echo "verify good image: OK"
+veritysetup verify j3_root_bad.sqfs j3_root.hash $(awk '/Root hash/{print $3}' j3_verity.txt) || echo "verify bad image: FAILED (exit $?)"
+```
+
+```text
+VERITY header information for j3_root.hash.
+UUID:            	e44565f0-e009-4ba5-b9e6-f147f0c77f49
+Hash type:       	1
+Data blocks:     	503
+Data block size: 	4096 [bytes]
+Hash blocks:     	5
+Hash block size: 	4096 [bytes]
+Hash algorithm:  	sha256
+Salt:            	64e02131633db3196c8caf73f433320928e7a54222cfb91292c3002620cd1c93
+Root hash:      	486c8ad5da3f4d1ae40a84860ee5a12f301f26aa0c2c9dbbff8af7346ad38e92
+Hash device size: 	24576 [bytes]
+-rw------- 1 donh donh   24576 Oct 17 14:48 j3_root.hash
+-rw-r--r-- 1 donh donh 2060288 Oct 17 14:48 j3_root.sqfs
+flipped byte at 1000000: 08 -> f7 (data block 244)
+verify good image: OK
+Verification failed at position 999424.
+Verification of data area failed.
+verify bad image: FAILED (exit 2)
+```
+
+출력에서 볼 것:
+
+- 데이터 503블록(= 2,060,288 / 4096 — mksquashfs의 4 KiB 패딩 덕분에 딱 떨어진다), 해시 블록 5개. 503개 해시 × 32 B = 16,096 B → 0층 해시 블록 4개, 그 4개의 해시 → 1층 블록 1개. 1층 블록의 해시가 루트 해시다.
+- 해시 장치 24,576 B = 6블록 = verity 슈퍼블록 1 + 해시 블록 5. 데이터의 1.2%다.
+- 바이트 하나(오프셋 1,000,000 = 블록 244)를 뒤집자 VM 쪽 `veritysetup verify`가 정확히 그 블록 시작(999,424 = 244 × 4096)에서 실패했다.
+
+```svg
+<svg viewBox="0 0 680 416" xmlns="http://www.w3.org/2000/svg">
+  <text x="340" y="18" text-anchor="middle" font-size="13" font-weight="bold">dm-verity 해시 트리 — j3_root.sqfs (데이터 503블록, 실측)</text>
+  <rect x="200" y="30" width="280" height="44" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="340" y="48" text-anchor="middle" font-size="12">root hash = 486c8ad5…8e92</text>
+  <text x="340" y="66" text-anchor="middle" font-size="12">커널 cmdline으로 전달 (서명 대상)</text>
+  <rect x="260" y="100" width="160" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="340" y="122" text-anchor="middle" font-size="12">L1: 해시 블록 1개</text>
+  <line x1="340" y1="74" x2="340" y2="100" stroke="currentColor"/>
+  <rect x="40" y="170" width="140" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="110" y="192" text-anchor="middle" font-size="12">L0[0]: 0~127</text>
+  <rect x="200" y="170" width="140" height="34" rx="4" fill="#d0564a" fill-opacity="0.2" stroke="#d0564a"/>
+  <text x="270" y="192" text-anchor="middle" font-size="12">L0[1]: 128~255</text>
+  <rect x="360" y="170" width="140" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="430" y="192" text-anchor="middle" font-size="12">L0[2]: 256~383</text>
+  <rect x="520" y="170" width="140" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="590" y="192" text-anchor="middle" font-size="12">L0[3]: 384~502</text>
+  <line x1="340" y1="134" x2="110" y2="170" stroke="currentColor"/>
+  <line x1="340" y1="134" x2="270" y2="170" stroke="currentColor"/>
+  <line x1="340" y1="134" x2="430" y2="170" stroke="currentColor"/>
+  <line x1="340" y1="134" x2="590" y2="170" stroke="currentColor"/>
+  <rect x="20" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="60" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="100" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="140" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="180" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="220" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="260" y="250" width="36" height="30" fill="#d0564a" fill-opacity="0.3" stroke="#d0564a"/>
+  <rect x="300" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="340" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="380" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="420" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="460" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="500" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="540" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="580" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <rect x="620" y="250" width="36" height="30" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <line x1="110" y1="204" x2="98" y2="250" stroke="currentColor"/>
+  <line x1="270" y1="204" x2="258" y2="250" stroke="currentColor"/>
+  <line x1="430" y1="204" x2="418" y2="250" stroke="currentColor"/>
+  <line x1="590" y1="204" x2="578" y2="250" stroke="currentColor"/>
+  <text x="340" y="300" text-anchor="middle" font-size="12">데이터 블록 4 KiB × 503 (squashfs 이미지 그대로, 그림은 일부만)</text>
+  <text x="278" y="322" text-anchor="middle" font-size="12">블록 244: 바이트 1개 변조 → L0[1]의 해시와 불일치 → EIO</text>
+  <text x="20" y="356" font-size="12">hash 장치 배치:</text>
+  <rect x="120" y="342" width="60" height="24" fill="#888" fill-opacity="0.12" stroke="#888"/><text x="150" y="359" text-anchor="middle" font-size="12">SB</text>
+  <rect x="180" y="342" width="60" height="24" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="210" y="359" text-anchor="middle" font-size="12">L1</text>
+  <rect x="240" y="342" width="240" height="24" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/><text x="360" y="359" text-anchor="middle" font-size="12">L0[0] ~ L0[3]</text>
+  <text x="490" y="359" font-size="12">= 6블록 = 24,576 B</text>
+  <text x="20" y="388" font-size="12">L0 블록 하나 = SHA-256 128개 (32 B × 128 = 4 KiB).</text>
+  <text x="20" y="406" font-size="12">위층이 hash 장치 앞쪽에 온다 (블록 0은 verity 슈퍼블록).</text>
+</svg>
+```
+그림 8 — 이 실험의 해시 트리. 데이터 블록 244를 읽으면 SHA-256(salt + 블록)을 L0[1]의 116번 칸(0부터 셈)과 비교하고, L0[1] 블록 자체는 L1의 해당 칸과, L1은 루트 해시와 비교된다.
+
+### 10.3 게스트에서 verity 테이블 올리기 — DM ioctl 직접
+
+랩 커널에는 `CONFIG_DM_INIT`(커널 cmdline의 `dm-mod.create=`로 부팅 중에 dm 장치를 만드는 기능)가 없고, initramfs에는 `dmsetup`이 없다. 그래서 `dmsetup create`가 내부에서 하는 일을 C로 직접 했다. device-mapper는 `/dev/mapper/control`에 대한 ioctl 세 번으로 장치를 만든다.
+
+1. `DM_DEV_CREATE`: 이름만 있는 빈 장치(`/dev/dm-N`)를 만든다.
+2. `DM_TABLE_LOAD`: 테이블(시작 섹터, 길이, 타깃 이름, 파라미터 문자열)을 **비활성 슬롯**에 올린다.
+3. `DM_DEV_SUSPEND`(SUSPEND 플래그 없이 = resume): 비활성 테이블을 활성으로 바꾼다.
+
+```c
+/* j3_dm: minimal device-mapper loader (what dmsetup create does)
+   usage: j3_dm NAME START LEN TARGET "PARAMS"  -> /dev/dm-N, read-only */
+#include <fcntl.h>
+#include <linux/dm-ioctl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/sysmacros.h>
+#include <unistd.h>
+
+static union { struct dm_ioctl io; char raw[16384]; } b;
+
+static void init(const char *name, unsigned flags) {
+    memset(&b, 0, sizeof b);
+    b.io.version[0] = DM_VERSION_MAJOR;           /* 4 */
+    b.io.data_size = sizeof b;
+    b.io.data_start = sizeof(struct dm_ioctl);
+    b.io.flags = flags;
+    snprintf(b.io.name, sizeof b.io.name, "%s", name);
+}
+static void call(int fd, unsigned long req, const char *what) {
+    if (ioctl(fd, req, &b) < 0) { perror(what); exit(1); }
+}
+int main(int argc, char **argv) {
+    if (argc != 6) { fprintf(stderr, "usage: %s NAME START LEN TARGET PARAMS\n", argv[0]); return 2; }
+    int fd = open("/dev/mapper/control", O_RDWR);
+    if (fd < 0) { perror("/dev/mapper/control"); return 1; }
+
+    init(argv[1], 0);
+    call(fd, DM_DEV_CREATE, "DM_DEV_CREATE");      /* empty device */
+
+    init(argv[1], DM_READONLY_FLAG);
+    struct dm_target_spec *t = (void *)(b.raw + sizeof(struct dm_ioctl));
+    t->sector_start = strtoull(argv[2], NULL, 0);
+    t->length = strtoull(argv[3], NULL, 0);
+    snprintf(t->target_type, sizeof t->target_type, "%s", argv[4]);
+    char *params = (char *)(t + 1);
+    strcpy(params, argv[5]);
+    t->next = 0;                                    /* single target */
+    b.io.target_count = 1;
+    call(fd, DM_TABLE_LOAD, "DM_TABLE_LOAD");       /* -> inactive table */
+
+    init(argv[1], 0);                               /* no SUSPEND flag = resume */
+    call(fd, DM_DEV_SUSPEND, "DM_DEV_SUSPEND(resume)"); /* swap in table */
+    printf("j3_dm: %s -> dev %u:%u (/dev/dm-%u)\n", argv[1],
+           major(b.io.dev), minor(b.io.dev), minor(b.io.dev));
+    return 0;
+}
+```
+
+`/init`이 만드는 verity 테이블 한 줄(§9.1의 `/init` 참고):
+
+```text
+0 4024 verity 1 /dev/vdb /dev/vda 4096 4096 503 1 sha256 486c8ad5…8e92 64e02131…1c93
+```
+
+칸의 뜻: 시작 섹터 0, 길이 4024 섹터(503 × 8), 타깃 `verity`, 해시 형식 버전 1, 데이터 장치, 해시 장치, 데이터 블록 크기, 해시 블록 크기, 데이터 블록 수, **해시 시작 블록 1**(블록 0은 veritysetup이 쓴 슈퍼블록), 알고리즘, 루트 해시, salt. 그 뒤에 선택 인자 개수와 인자(`1 restart_on_corruption`)를 붙일 수 있다. 해시·salt는 지면상 줄였다 — 실제로는 64자리 hex 전체다.
+
+부팅 명령(데이터 = squashfs, 해시 = 별도 디스크. 루트 해시를 **커널 cmdline**으로 넘긴다):
+
+```sh
+limactl shell elinux -- bash -lc 'W=/var/tmp/J3; B=/Users/donh/.elinux_scratch/J3/boot/boot.sh; H=$(awk "/Root hash/{print \$3}" $W/j3_verity.txt); S=$(awk "/Salt/{print \$2}" $W/j3_verity.txt); D="-drive if=none,id=hh,file=$W/j3_root.hash,format=raw,readonly=on -device virtio-blk-device,drive=hh"; C="j3root=/dev/vdb j3hashdev=/dev/vda j3roothash=$H j3salt=$S j3blocks=503 j3upper=tmpfs j3_test_read"; echo "== good"; bash $B vgood $W/j3_root.sqfs "$C" $D; echo "== bad"; bash $B vbad $W/j3_root_bad.sqfs "$C" $D; echo "== bad restart"; bash $B vrst $W/j3_root_bad.sqfs "$C j3vopt=restart_on_corruption" $D'
+```
+
+정상 이미지:
+
+```text
+== good
+exit=0
+[j3-init 1.49s] dm-verity root: j3root ro=1
+[j3-init 1.53s] lower: /dev/dm-0 (squashfs) on /ro
+[j3-init 1.56s] upper: tmpfs -> overlay on /newroot
+[stage2] PID 1, / = overlay overlay
+[stage2] /dev/dm-0 /media/ro squashfs ro,relatime,errors=continue
+[stage2] j3upper /media/rw tmpfs rw,relatime,size=65536k,mode=755
+[stage2] /etc/hostname = j3-factory, this is boot #1
+[stage2] upper now holds: ./etc/hostname ./var/lib/j3/bootcount 
+[    2.052251] reboot: Power down
+```
+
+출력에서 볼 것: lower가 `/dev/dm-0`(verity 장치)이고 읽기전용(`ro=1`). 그 위에 overlay가 얹혀 `/etc/hostname`을 바꿀 수 있다 — **verity는 lower만 지키고, upper의 쓰기는 막지 않는다.** 그래서 `/etc`를 upper에 두면 그 부분은 verity 보호 밖이다(L6에서 dm-integrity·서명된 설정으로 보완).
+
+### 10.4 변조 이미지 — 무엇이 깨지나
+
+**블록 244(BusyBox 실행 파일 안쪽)를 변조**한 경우:
+
+```text
+== bad
+exit=124
+[j3-init 1.51s] dm-verity root: j3root ro=1
+[j3-init 1.54s] lower: /dev/dm-0 (squashfs) on /ro
+[j3-init 1.58s] upper: tmpfs -> overlay on /newroot
+[    1.740860] device-mapper: verity: 254:16: data block 244 is corrupted
+[    1.741106] SQUASHFS error: Failed to read block 0xeb985: -5
+[    1.752524] device-mapper: verity: 254:16: data block 244 is corrupted
+[    1.752617] SQUASHFS error: Failed to read block 0xeb985: -5
+[    1.752636] SQUASHFS error: Unable to read data cache entry [eb985]
+[    1.752653] SQUASHFS error: Unable to read page, block eb985, size f1aa
+...
+[    1.754045] Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000007
+[    1.755893] CPU: 0 UID: 0 PID: 1 Comm: j3_stage2 Not tainted 6.18.55-fs #1 PREEMPT 
+[    1.756922]  vpanic+0xf8/0x2dc
+[    1.758347] ---[ end Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000007 ]---
+```
+
+(`boot.sh`의 grep으로 추린 줄이며, 같은 SQUASHFS 에러 반복 일부를 `...`로 줄였다. `exit=124`는 panic 후 멈춘 QEMU를 `timeout`이 끊은 것.)
+
+출력에서 볼 것:
+
+- dm-verity가 블록 244의 해시 불일치를 잡고 `-5`(`EIO`)를 돌려줬다. SquashFS는 그 블록이 포함된 압축 블록(이미지 오프셋 `0xeb985` = 964,997, 압축 크기 `0xf1aa` = 61,866 B)을 읽지 못했다.
+- 그 블록은 BusyBox 바이너리의 일부였다. `switch_root` 뒤 PID 1(`j3_stage2` 셸 = BusyBox)이 그 코드 페이지를 page fault로 읽으려다 실패 → 커널이 **SIGBUS**(arm64에서 7번, `exitcode=0x00000007`)를 보냈고 → PID 1이 죽어 panic.
+- 즉 verity의 기본 동작(EIO 반환)은 "읽기 시스템콜이면 에러, **실행 파일 페이지면 SIGBUS**"로 드러난다.
+
+**블록 415(작은 문서 파일들이 모인 fragment)를 변조**한 경우(`j3_root_bad2.sqfs`, 같은 방식으로 오프셋 1,700,000을 뒤집음):
+
+```text
+[stage2] /etc/hostname = j3-factory, this is boot #1
+[stage2] upper now holds: ./etc/hostname ./var/lib/j3/bootcount 
+[    2.520844] device-mapper: verity: 254:16: data block 415 is corrupted
+[    2.521114] SQUASHFS error: Failed to read block 0x19da66: -5
+[    2.521141] SQUASHFS error: Unable to read fragment cache entry [19da66]
+[    2.521326] SQUASHFS error: Unable to read fragment cache entry [19da66]
+[    2.521342] SQUASHFS error: Unable to read page, block 19da66, size 8524
+read /usr/share/doc/filesystems/netfs_library.rst: Input/output error
+read /usr/share/doc/filesystems/nfs/client-identifier.rst: Input/output error
+read /usr/share/doc/filesystems/nfs/exporting.rst: Input/output error
+...
+read /usr/share/doc/filesystems/nfs/rpc-server-gss.rst: Input/output error
+[    2.595723] reboot: Power down
+all  files=143 bytes=1974752 err=11 ms=122 MB/s=16.2
+```
+
+출력에서 볼 것: 부팅은 정상, 문제 파일만 `read()`가 `EIO`. 그런데 **바이트 하나에 파일 11개가 동시에** 깨졌다 — 그 4 KiB가 작은 파일 여러 개를 모은 fragment 블록(크기 `0x8524` = 34,084 B)의 일부였기 때문이다(§3.4). verity의 오류 범위는 4 KiB지만, 그 위 압축 FS가 오류 범위를 압축 블록 단위로 키운다.
+
+**`restart_on_corruption`** 을 테이블 선택 인자로 준 경우:
+
+```text
+== bad restart
+exit=0
+[j3-init 1.48s] dm-verity root: j3root ro=1
+[j3-init 1.52s] lower: /dev/dm-0 (squashfs) on /ro
+[j3-init 1.55s] upper: tmpfs -> overlay on /newroot
+[    1.734202] device-mapper: verity: 254:16: data block 244 is corrupted
+[    1.737727] reboot: Restarting system with command 'dm-verity device corrupted'
+```
+
+첫 불일치에서 바로 `kernel_restart("dm-verity device corrupted")`. QEMU를 `-no-reboot`로 띄워서 재시작이 곧 종료로 보였다. 실제 장비에서는 이 재시작을 부트로더의 bootcount(L4)가 세어, 몇 번 반복되면 **다른 슬롯(B)으로 롤백**하는 것이 표준 설계다. Android도 verity 오류 시 재시작 → 복구 모드 흐름을 쓴다.
+
+| verity 오류 모드 (테이블 선택 인자) | 동작 | 언제 쓰나 |
+|---|---|---|
+| (기본) | `EIO` 반환 → read 에러, 실행 페이지는 SIGBUS | 개발, 일부 파일 손상을 앱이 다룰 수 있을 때 |
+| `ignore_corruption` | 로그만 남기고 그냥 데이터 반환 | 디버깅 전용 (보안 의미 없음) |
+| `restart_on_corruption` | 즉시 재시작 | A/B + bootcount 롤백이 있는 양산 장비 |
+| `panic_on_corruption` | panic (kdump·pstore로 증거 수집 가능) | 보안 사고를 반드시 기록해야 할 때 |
+
+`restart_on_error`/`panic_on_error`(해시 불일치가 아니라 하위 장치 I/O 에러 때)도 6.18에 있다(`drivers/md/dm-verity-target.c`의 `kernel_restart("dm-verity device has I/O error")`).
+
+### 10.5 A/B 이미지와의 연결 (L4로)
+
+RO rootfs + verity가 있으면 OTA는 "슬롯 B에 새 squashfs와 해시 트리를 통째로 쓰고, 새 루트 해시가 든 서명된 커널/FIT를 B 쪽에 두고, 부트로더 변수만 B로 바꾼다"가 된다. 쓰는 도중 전원이 나가도 A는 멀쩡하다. 새 이미지가 verity 오류로 재시작을 반복하면 bootcount가 롤백한다. 이 흐름(RAUC·SWUpdate·Mender, U-Boot `bootcount`/`altbootcmd`)은 L4에서 만든다.
+
+---
+
+## 11. 커널 안에서는 무슨 일이 일어나나
+
+```svg
+<svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+  <text x="200" y="22" text-anchor="middle" font-size="13" font-weight="bold">읽기 경로 (merged → lower → 장치)</text>
+  <text x="535" y="22" text-anchor="middle" font-size="13" font-weight="bold">쓰기 경로 (copy-up · whiteout)</text>
+  <rect x="20" y="36" width="360" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="200" y="58" text-anchor="middle" font-size="12">read(fd) 또는 실행 파일 page fault</text>
+  <rect x="20" y="84" width="360" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="200" y="106" text-anchor="middle" font-size="12">VFS → ovl_read_iter() → lower의 실제 파일</text>
+  <rect x="20" y="132" width="360" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="200" y="154" text-anchor="middle" font-size="12">squashfs_read_folio() / z_erofs_read_folio()</text>
+  <rect x="20" y="180" width="360" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+  <text x="200" y="202" text-anchor="middle" font-size="12">squashfs_read_data() → 압축 해제(xz·zstd·lz4)</text>
+  <rect x="20" y="228" width="360" height="34" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="200" y="250" text-anchor="middle" font-size="12">submit_bio → dm: verity_map() → 하위 장치</text>
+  <rect x="20" y="276" width="360" height="34" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="200" y="298" text-anchor="middle" font-size="12">virtio-blk / eMMC 호스트 드라이버 → DMA</text>
+  <rect x="20" y="324" width="360" height="34" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+  <text x="200" y="346" text-anchor="middle" font-size="12">verity_end_io() → verity_verify_io() (workqueue)</text>
+  <rect x="20" y="372" width="360" height="34" rx="4" fill="#d0564a" fill-opacity="0.2" stroke="#d0564a"/>
+  <text x="200" y="394" text-anchor="middle" font-size="12">불일치 → verity_handle_err(): EIO·restart·panic</text>
+  <line x1="200" y1="70" x2="200" y2="84" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="200" y1="118" x2="200" y2="132" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="200" y1="166" x2="200" y2="180" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="200" y1="214" x2="200" y2="228" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="200" y1="262" x2="200" y2="276" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="200" y1="310" x2="200" y2="324" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="200" y1="358" x2="200" y2="372" stroke="currentColor" marker-end="url(#ah6)"/>
+  <rect x="400" y="36" width="270" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+  <text x="535" y="58" text-anchor="middle" font-size="12">open(O_WRONLY) · chmod · rm</text>
+  <rect x="400" y="84" width="270" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="535" y="106" text-anchor="middle" font-size="12">ovl_open() → ovl_maybe_copy_up()</text>
+  <rect x="400" y="132" width="270" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="535" y="154" text-anchor="middle" font-size="12">ovl_copy_up_one(): workdir에 임시</text>
+  <rect x="400" y="180" width="270" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="535" y="202" text-anchor="middle" font-size="12">데이터 복사 → rename으로 upper에</text>
+  <rect x="400" y="228" width="270" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+  <text x="535" y="250" text-anchor="middle" font-size="12">rm: ovl_do_whiteout() → c 0:0</text>
+  <rect x="400" y="276" width="270" height="34" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+  <text x="535" y="298" text-anchor="middle" font-size="12">shmem(tmpfs) 또는 ext4가 저장</text>
+  <line x1="535" y1="70" x2="535" y2="84" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="535" y1="118" x2="535" y2="132" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="535" y1="166" x2="535" y2="180" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="535" y1="214" x2="535" y2="228" stroke="currentColor" marker-end="url(#ah6)"/>
+  <line x1="535" y1="262" x2="535" y2="276" stroke="currentColor" marker-end="url(#ah6)"/>
+</svg>
+```
+그림 9 — 이 노트의 스택에서 읽기·쓰기가 지나가는 커널 함수(6.18.55 소스 `fs/overlayfs/`, `fs/squashfs/`, `fs/erofs/`, `drivers/md/dm-verity-target.c`에서 이름 확인).
+
+단계별로:
+
+- **overlayfs는 데이터를 들고 있지 않는 "스태킹 FS"다.** merged의 `struct file`은 열 때 lower 또는 upper의 진짜 파일(`realfile`)을 함께 연다. `ovl_read_iter()`는 `backing_file_read_iter()`로 그 진짜 파일에 읽기를 넘긴다. 그래서 page cache는 **lower FS(squashfs)의 inode에** 쌓인다 — overlay 자체는 페이지를 갖지 않는다.
+- **copy-up**: `ovl_open()`이 쓰기 플래그를 보면 `ovl_maybe_copy_up()` → `ovl_copy_up_flags()` → `ovl_copy_up_one()`. workdir에 임시 파일을 만들고 데이터·xattr·속성을 복사한 뒤 `rename`으로 upper의 제자리에 넣는다. 그래서 copy-up은 원자적이고, 크래시 후 workdir에 쓰레기가 남을 수 있다(다음 마운트 때 정리).
+- **whiteout**: `ovl_do_whiteout()` → `vfs_whiteout()`이 upper FS에 `0:0` 문자 장치를 만든다. opaque는 `ovl_check_setxattr(…, OVL_XATTR_OPAQUE, "y")`(`fs/overlayfs/dir.c`). lookup 때 `ovl_lookup()`이 upper에서 whiteout을 만나면 "없음", opaque를 만나면 lower 탐색을 멈춘다.
+- **SquashFS 읽기**: `squashfs_read_folio()`/`squashfs_readahead()`가 블록 목록에서 압축 블록 위치를 찾고, `squashfs_read_data()`가 bio로 읽어 `msblk->decompressor`로 푼다. fragment·메타데이터는 `squashfs_cache_get()`의 작은 캐시를 거친다. 6.18에서는 장치 블록 크기 = 페이지 크기이면 압축 블록을 `cache_mapping`에 남긴다(§5.5의 이중 캐싱).
+- **EROFS 읽기**: 압축 파일은 `z_erofs_read_folio()`/`z_erofs_readahead()` → pcluster 단위로 모아 `z_erofs_decompress_pcluster()` → `z_erofs_lz4_decompress()` 등. file-backed 마운트의 비압축 경로는 `erofs_fileio_read_folio()`(`fs/erofs/fileio.c`).
+- **dm-verity**: `verity_map()`이 bio의 대상 장치를 데이터 장치로 바꿔 내려보내고, 완료 콜백 `verity_end_io()`가 검증을 workqueue(`verity_work`)나 BH 문맥(`verity_bh_work`, 설정 `try_verify_in_tasklet`)에 넘긴다. `verity_verify_io()`가 블록마다 `verity_hash()`로 SHA-256을 구해 해시 트리(해시 블록은 `dm-bufio` 캐시)와 비교하고, 틀리면 `verity_handle_err()`가 모드에 따라 EIO/`kernel_restart()`/panic.
+- **tmpfs**: `mm/shmem.c`. 쓰기는 `shmem_get_folio()`로 페이지를 할당하면서 `shmem_inode_acct_blocks()`로 `size=` 한도를 검사한다(넘으면 ENOSPC). ramfs(`fs/ramfs/inode.c`)는 이 회계가 아예 없다.
+
+드라이버를 쓸 때 다시 만나는 곳:
+
+- **블록 드라이버**(I·J1): dm-verity가 내려보낸 bio를 eMMC/UFS/virtio 드라이버가 받는다. 드라이버가 에러를 `BLK_STS_IOERR`로 돌려주면 verity의 `restart_on_error` 쪽이 반응한다 — 저장장치 드라이버의 에러 매핑이 장비 전체의 재시작 정책에 직결된다.
+- **device-mapper 타깃 작성**: `struct target_type`의 `.ctr`/`.map`/`.end_io` — §10.3의 테이블 문자열이 `.ctr`의 `argv`로 들어간다. dm-flakey·dm-dust(J5 전원 차단 실험에서 사용)도 같은 구조다.
+- **page cache·folio**(F): FS 드라이버의 `.read_folio`/`.readahead`는 `address_space_operations`다. 압축 FS가 "한 번에 여러 페이지를 채우는" 것은 readahead 경로에서 folio를 추가로 잡는 방식이다.
+
+---
+
+## 12. Embedded 실무에서 다시 보기
+
+### 12.1 센서 키트 드론: "배터리 탈착이 정상 종료"
+
+비행 후 배터리를 그냥 뽑는 게 운용 절차인 장비. 설계: squashfs(zstd) 루트 + verity, `/etc`만 ext4 data 파티션에 overlay, 비행 로그·센서 기록은 data 파티션의 별도 디렉터리에 J5 규칙(fsync, 임시 파일 + rename)으로. `/tmp`·`/run`은 tmpfs `size=32m`. 이렇게 하면 "전원 차단 후 부팅 불가"의 경우의 수가 data 파티션 하나로 줄고, data가 깨져도 initramfs가 "data 마운트 실패 → mkfs 후 기본 설정으로 부팅"하는 복구 경로를 갖는다.
+
+### 12.2 Jetson·i.MX8급 AI 카메라: 압축기 선택 근거
+
+모델 파일(수백 MB)과 라이브러리를 rootfs에 넣는 장비. 부팅 후 카메라 파이프라인이 라이브러리 수십 개를 `mmap`하므로 "첫 접근 지연" 합이 앱 시작 시간을 결정한다. §5의 경향대로 xz를 쓰면 이미지는 작아도 시작이 느리다. 선택지: SquashFS zstd 128K(무난), 시작 시간이 KPI면 EROFS lz4hc. 모델 파일처럼 이미 압축된 데이터는 압축 이득이 없으니 별도 비압축 파티션이나 EROFS 비압축 서브 이미지로 뺀다. 숫자로 말하려면 이 노트의 `j3_read`와 같은 도구로 **대상 보드에서** 다시 잰다(TCG 숫자를 그대로 보고하면 안 된다).
+
+### 12.3 개발 빌드 vs 양산 빌드
+
+- 개발: ext4 rw 루트, `ssh` + `scp`로 바이너리 교체. 또는 squashfs 루트에 개발자용 overlay(data 파티션 upper)를 켜 두고 `rsync`로 덮어쓰기.
+- 양산: squashfs/EROFS + verity, overlay는 `/etc`만, `ignore_corruption` 같은 디버그 옵션 제거.
+- 흔한 사고: 개발 중 overlay upper에 넣어 둔 패치 파일 때문에 "개발 보드에선 되는데 양산 이미지에선 안 된다". **upper가 비어 있는 상태에서 테스트하는 단계**를 CI에 둔다.
+
+### 12.4 "디스크 꽉 참"의 정체 찾기
+
+필드에서 "No space left on device" 로그가 올라왔는데 data 파티션은 여유가 있다? 확인 순서: `df -h /tmp /run /var/volatile`(tmpfs `size=` 한도), `df -i`(tmpfs `nr_inodes` 한도 — 작은 파일 수만 개), overlay upper의 FS(merged의 `df`는 upper 기준), `grep -E "Shmem|Unevictable" /proc/meminfo`(tmpfs/ramfs가 RAM을 먹고 있나).
+
+---
+
+## 13. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| 루트 FS 드라이버(EROFS, dm-verity)를 모듈로 두고 initramfs 없이 부팅 | `VFS: Unable to mount root fs` panic | 모듈을 로드할 유저 공간이 없다 | `=y`로 넣거나 initramfs에서 `insmod` |
+| xz 1M 블록으로 rootfs를 묶음 | 이미지는 작은데 앱 시작·부팅이 수 초 느림 | 첫 접근마다 큰 블록 해제(§5.3) | zstd·lz4 128K 또는 EROFS lz4로 재측정 후 결정 |
+| 압축 이미지를 ext4 위 파일 + loop으로 마운트 | 메모리가 이미지 크기만큼 더 사라짐 | 백킹 파일 page cache 이중 캐싱(§5.5) | 파티션에 직접 쓰기, EROFS file-backed + `directio` |
+| `/tmp` tmpfs에 `size=` 미지정 | RAM 절반까지 자라 OOM, 또는 데몬이 ENOSPC로 죽음 | 기본 한도가 RAM의 50% | `size=`·`nr_inodes=` 명시, 로그는 data 파티션으로 |
+| ramfs를 임시 저장소로 사용 | `df`는 0인데 메모리 고갈, `drop_caches` 무효 | ramfs는 한도·회계 없음(§6.3) | tmpfs로 교체 |
+| overlay upper·work를 다른 FS에 둠 | `mount: … invalid argument`, dmesg `workdir and upperdir must reside under the same mount` | 원자적 rename이 불가능 | 같은 FS 안 두 디렉터리 |
+| 큰 파일을 lower에 두고 앱이 수정 | 첫 쓰기에 수백 MB 복사, tmpfs upper면 RAM 고갈 | copy-up은 파일 통째(§7.4) | 자주 바뀌는 큰 파일은 data 파티션 직접 경로로 |
+| 업데이트 스크립트가 `rename(dir)`로 원자 교체 | overlay 위에서 EXDEV로 실패, `mv`는 느린 복사 | `redirect_dir` 꺼짐 | 데이터 디렉터리는 overlay 밖에, 또는 `redirect_dir=on` 고정 |
+| OTA 후 영구 upper에 옛 `/etc` 파일이 남음 | 새 이미지인데 옛 설정으로 동작, 부팅 실패 | upper가 lower를 가림(§8.2) | upper 경로 화이트리스트, 버전별 마이그레이션 |
+| verity 루트 해시를 서명 안 된 곳(일반 파일)에 둠 | 공격자가 이미지와 해시를 함께 바꿔도 통과 | 신뢰의 뿌리가 없다 | 서명된 FIT/cmdline 또는 `root_hash_sig_key_desc`(L5·L6) |
+
+---
+
+## 14. 면접에서 이렇게 말한다
+
+**Q.** "How would you design the root filesystem for a field-deployed device that can lose power at any time?"
+
+**A.** 루트는 읽기전용 압축 이미지(SquashFS나 EROFS)로 만들어 런타임에 절대 쓰지 않는다. 쓰기가 필요한 `/etc`는 overlayfs로 data 파티션 위에 얹고, `/var`와 로그는 data 파티션에 직접, `/tmp`·`/run`은 크기를 정한 tmpfs. 그러면 전원 차단 영향은 data 파티션 하나로 줄고 거기에는 fsync·rename 규칙을 적용한다. 무결성은 dm-verity, 업데이트는 A/B 슬롯 통째 교체와 bootcount 롤백.
+
+> I'd make the root filesystem a read-only compressed image, SquashFS or EROFS, that is never written at runtime. Only `/etc` gets an overlayfs upper layer on a separate data partition; `/var` and logs live directly on that data partition, and `/tmp` and `/run` are size-limited tmpfs. That shrinks the power-loss exposure to one partition, where I apply the usual fsync-and-rename rules. I'd put dm-verity under the root image for integrity, and update by writing a whole new image to the inactive A/B slot with bootcount-based rollback.
+
+**꼬리 질문**: "What breaks when you put an overlay on top?" → copy-up 비용, hard link, 디렉터리 rename EXDEV, OTA 후 upper가 새 lower를 가리는 문제(§7.5, §8.2).
+
+**Q.** "SquashFS or EROFS — how do you choose, and what's the trade-off with compression algorithms?"
+
+**A.** 둘 다 읽기전용 압축 FS인데 압축 단위가 반대다. SquashFS는 입력을 128 KiB씩 잘라 압축해서 4 KiB를 읽으려 해도 블록 전체를 풀고, EROFS는 출력을 4 KiB로 고정해서 블록 하나 읽고 그것만 푼다. 그래서 랜덤 읽기·첫 접근 지연은 EROFS가 유리하다. 제가 같은 트리로 잰 것에서 lz4 기준 첫 접근이 EROFS 0.55 ms, SquashFS 1.5 ms였다. 압축기는 xz가 가장 작고 가장 느리고, lz4가 가장 빠르고 크고, zstd가 그 사이에서 xz에 가까운 크기를 낸다. 결국 플래시 크기와 앱 시작 시간 중 무엇이 제약인지로 고르고, 대상 보드에서 잰다.
+
+> They're both read-only compressed filesystems but they compress in opposite directions. SquashFS compresses fixed-size input blocks, typically 128 KiB, so reading one 4 KiB page means decompressing the whole block. EROFS produces fixed-size 4 KiB output clusters, so one block read gives you one independent decompression — much better for random reads and page-fault latency. In my own measurement on the same tree, first-touch latency with lz4 was about 0.55 ms on EROFS versus 1.5 ms on SquashFS. For algorithms, xz is the smallest and slowest, lz4 is the fastest and largest, and zstd gets close to xz in size while decompressing several times faster. I'd pick based on whether flash size or startup time is the constraint, and I'd benchmark on the target board.
+
+**꼬리 질문**: "Why not just use a bigger block size?" → 압축률은 좋아지지만 첫 접근 비용이 커지고, 메모리 압박 시 같은 블록을 반복 해제한다(§3.4, §5.3).
+
+**Q.** "Explain how overlayfs handles a write to a file that only exists in the lower layer, and a delete."
+
+**A.** 쓰기용으로 여는 순간 copy-up이 일어난다. workdir에 임시 파일을 만들어 lower 파일의 데이터·속성·xattr를 통째로 복사하고, rename으로 upper의 같은 경로에 넣는다. 이후 쓰기는 upper 파일로 간다. 삭제는 lower를 건드릴 수 없으니 upper에 같은 이름으로 장치 번호 0/0인 문자 장치, 즉 whiteout을 만든다. 디렉터리를 지우고 다시 만들면 upper 디렉터리에 `trusted.overlay.opaque=y` xattr이 붙어서 lower의 내용을 숨긴다.
+
+> On the first open for write, overlayfs copies the file up: it creates a temp file in the workdir, copies the full data, attributes and xattrs from the lower file, then renames it into place in the upper directory, so the copy-up is atomic. All subsequent writes go to the upper file. A delete can't touch the lower layer, so overlayfs creates a whiteout in upper — a character device with device number 0/0 under the same name. If you remove a directory and recreate it, the new upper directory gets the `trusted.overlay.opaque` xattr so the lower contents stay hidden.
+
+**꼬리 질문**: "What's the cost of copy-up?" → 파일 전체 복사. 큰 파일 하나의 `chmod`도 전체 복사(`metacopy=on`이 완화).
+
+**Q.** "What's the difference between tmpfs and ramfs, and why does it matter on an embedded device?"
+
+**A.** 둘 다 page cache에 데이터를 두지만 tmpfs는 `size=` 한도와 inode 한도가 있고 swap으로 밀려날 수 있으며 `Shmem`으로 회계된다. ramfs는 한도가 없고 swap도 안 되고 `df`에 0으로 나온다. 제가 512 MB 게스트에서 해 보니 ramfs에 200 MB를 써도 `df`는 0이고 메모리는 Unevictable로 잡혀 회수가 안 됐다. 임베디드에서는 로그 폭주 하나가 OOM으로 이어지니, `/tmp`·`/run`은 반드시 크기를 정한 tmpfs로 둔다.
+
+> Both keep data in the page cache, but tmpfs has `size=` and inode limits, can be swapped out, and is accounted as Shmem. ramfs has no limit, can't be swapped, and always shows zero in `df`. When I wrote 200 MB into ramfs on a 512 MB guest, `df` still said zero and the memory showed up as unevictable. On an embedded device a runaway log could OOM the whole system, so `/tmp` and `/run` should always be size-limited tmpfs.
+
+**Q.** "How does dm-verity work, and what happens when a block is corrupted?"
+
+**A.** 빌드 때 데이터 4 KiB 블록마다 SHA-256을 구해 해시 트리를 만들고, 루트 해시 하나를 서명된 커널 cmdline 같은 믿을 수 있는 곳에 둔다. 런타임에는 블록을 읽을 때마다 그 블록의 해시를 트리와 비교한다. 해시 블록은 한 번 검증되면 캐시된다. 불일치면 기본은 EIO다. 일반 read는 에러가 나고, 실행 파일 페이지면 SIGBUS로 프로세스가 죽는다. 제가 해 보니 BusyBox 블록을 바꿨을 때 PID 1이 SIGBUS로 죽어 panic이 났다. 양산에서는 `restart_on_corruption`으로 재시작시키고 bootcount로 다른 슬롯에 롤백한다.
+
+> At build time you hash every 4 KiB data block with SHA-256, build a Merkle tree of hash blocks, and keep only the root hash somewhere trusted, like a signed kernel command line. At runtime, every block read is verified against the tree on the fly, and verified hash blocks are cached. On a mismatch the default is to return EIO: a regular read fails, and if it's an executable page the process gets SIGBUS. In my test, corrupting a block inside BusyBox killed PID 1 with SIGBUS and panicked the kernel. In production you'd typically use `restart_on_corruption` and let the bootloader's bootcount roll back to the other slot.
+
+**꼬리 질문**: "Does verity protect the overlay upper?" → 아니다. lower만. `/etc` upper는 보호 밖이라 dm-integrity나 서명된 설정 검증이 필요하다(L6).
+
+**Q.** "Walk me through what an initramfs does to boot a SquashFS root with an overlay."
+
+**A.** `/proc`·`/sys`·`/dev`를 마운트하고 cmdline에서 루트 장치와 옵션을 읽는다. 필요하면 dm-verity 모듈을 올리고 루트 해시로 verity 장치를 만든다. 그 장치를 squashfs로 `/ro`에 마운트하고, upper용으로 tmpfs나 data 파티션을 `/rw`에 마운트해서 upper와 work 디렉터리를 만든다. overlay를 `/newroot`에 만들고, `/ro`·`/rw`와 가상 FS를 `mount --move`로 새 루트 안으로 옮긴 다음 `exec switch_root /newroot /sbin/init`. PID는 1로 유지된다. 실패 경로는 전부 복구 셸로 간다.
+
+> It mounts `/proc`, `/sys` and `/dev`, parses the root device and options from the kernel command line, optionally loads dm-verity and creates the verity device from the root hash, mounts that as SquashFS on `/ro`, mounts a tmpfs or the data partition on `/rw` and creates the upper and work directories, then mounts the overlay on `/newroot`. It moves `/ro`, `/rw` and the virtual filesystems into the new root with `mount --move` and finally does `exec switch_root /newroot /sbin/init`, so PID 1 is preserved. Every failure path drops to a rescue shell instead of exiting, because PID 1 exiting is a panic.
+
+**Q.** "Why might your memory usage be higher than expected with a compressed read-only filesystem?"
+
+**A.** 이중 캐싱 때문이다. 풀린 데이터가 page cache에 있는 것은 당연한데, 압축 데이터도 캐시될 수 있다. 제가 잰 바로는 6.18 SquashFS가 블록 장치에서도 압축 블록을 자체 캐시에 남겨 41 MiB를 읽고 59 MiB가 늘었고, 이미지를 ext4 위 파일로 loop 마운트하면 백킹 파일 캐시가 더해져 74 MiB가 됐다. EROFS 블록 장치는 47 MiB였다. 이미지는 파티션에 직접 두고, 파일이어야 하면 EROFS file-backed에 `directio`를 쓴다.
+
+> Double caching. The decompressed pages are obviously in the page cache, but compressed data can be cached too. When I measured it, reading a 41 MiB tree from SquashFS on a block device grew the page cache by about 59 MiB, because the kernel also keeps the compressed blocks around; loop-mounting the same image from a file on ext4 grew it to about 74 MiB because the backing file is cached as well. EROFS on a block device was about 47 MiB. So I'd write the image straight to a partition, and if it has to be a file, use EROFS's file-backed mount with `directio`.
+
+---
+
+## 15. 직접 해보기
+
+1. **개념**: SquashFS 블록 크기를 4K → 1M로 바꿀 때 "이미지 크기", "순차 읽기", "첫 접근 지연"이 각각 어느 방향으로 움직이는지 표로 쓰고, §5.4의 측정값으로 확인하라. 그리고 랜덤 500회에서 1M이 128K보다 빨랐던 이유를 설명하라.
+정답/힌트: 크기↓·첫 접근↑, 순차는 4K가 최악(호출 횟수). 역전은 `gdb`가 1M 블록 12개뿐이라 page cache가 다 채워졌기 때문.
+
+2. **측정 과제**: `-comp zstd -Xcompression-level 3`과 기본 레벨(15)로 이미지를 만들어 크기와 게스트 순차 읽기를 비교하라. zstd 해제 속도가 레벨에 거의 무관하다는 주장을 검증하라.
+정답/힌트: `mksquashfs … -comp zstd -Xcompression-level 3`(이 VM의 mksquashfs 4.7.5가 지원, 범위 1~22, 기본 15). 해제 속도 차이는 작고 크기만 달라질 것으로 예상되지만, 이 노트에서는 재지 않았으니 직접 확인한다.
+
+3. **overlay 관찰**: §7.4 실습에 `chmod 600 /merged/big/blob`만 하고 데이터는 쓰지 않았을 때 upper에 무엇이 생기는지 확인하라(`j3_ovl stat`으로 크기). `metacopy=on`으로 다시 마운트하면 어떻게 달라지는지도 보라.
+정답/힌트(이 노트에서 실행하지 않은 예상): 기본은 1 MiB 전체 copy-up. `metacopy=on`이면 upper 파일에 데이터가 복사되지 않고 `trusted.overlay.metacopy` xattr이 붙는다 — `du`와 `j3_ovl xattr`로 확인하라.
+
+4. **코드 과제**: `j3_ovl`에 `whiteouts DIR` 하위 명령을 추가해서 upper 트리를 재귀로 돌며 whiteout(문자 장치 0:0)과 opaque 디렉터리를 찾아 출력하게 하라. "공장 초기화 전 무엇이 지워졌는지 감사"하는 도구다.
+정답/힌트: `nftw()` + `S_ISCHR(st_mode) && st_rdev == makedev(0,0)`, 디렉터리는 `lgetxattr(p, "trusted.overlay.opaque", …)`.
+
+5. **tmpfs 관찰**: `mount -t tmpfs -o size=64m,nr_inodes=100 x /t`에서 빈 파일 200개를 만들면 무슨 에러가 나는가? `df -i /t`로 확인하라.
+정답/힌트(예상, 직접 확인): 100개 안팎에서 `ENOSPC`(루트 디렉터리도 inode 하나를 쓴다). 공간이 남아도 inode가 바닥나면 같은 에러다.
+
+6. **verity 과제**: §10의 `/init`을 고쳐 `j3vopt=panic_on_corruption`을 줬을 때의 콘솔 출력을 확인하고, 세 가지 모드(기본 EIO, restart, panic) 중 "A/B 슬롯 + bootcount"가 있는 장비에 맞는 것과 그 이유를 말하라.
+정답/힌트: restart_on_corruption. 재시작 횟수를 bootcount가 세서 롤백할 수 있다. panic은 pstore로 증거를 남길 때(L7).
+
+7. **설계 문제**: 1 GB eMMC, 512 MB RAM 카메라 장비. rootfs 300 MB(압축 전), A/B 필요, 녹화 데이터 저장. 파티션 표와 각 경로(`/usr`, `/etc`, `/var/log`, `/tmp`, 녹화)의 FS·마운트 옵션을 정하고, 압축기 선택 근거를 §5 숫자로 대라.
+정답/힌트: boot ×2 + rootfs_A/B(zstd 128K면 약 110 MB씩 + verity 1.2%) + data(나머지, ext4 또는 F2FS). `/etc` overlay(upper는 data), `/var/log` data 직접, `/tmp` tmpfs `size=32m`.
+
+---
+
+## 16. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| SquashFS | 읽기전용 압축 FS | 고정 크기 입력 블록 압축, 메타데이터는 이미지 끝 |
+| block_size (SquashFS) | 압축 입력 단위 | 4 KiB~1 MiB, 기본 128 KiB |
+| fragment | 작은 파일 모음 블록 | 작은 파일·꼬리를 한 블록에 모아 압축 |
+| EROFS | Enhanced Read-Only FS | 고정 크기 출력(pcluster) 압축, Android 시스템 파티션 |
+| pcluster | 물리 클러스터 | EROFS 압축 출력 단위(기본 4 KiB, `-C`로 변경) |
+| in-place decompression | 제자리 해제 | 압축 입력과 해제 결과가 같은 페이지를 공유 |
+| file-backed mount | 파일 직접 마운트 | loop 없이 이미지 파일을 EROFS로 마운트(6.12+) |
+| 이중 캐싱 | double caching | 압축 데이터와 해제 데이터가 둘 다 page cache에 |
+| tmpfs | 메모리 FS | shmem 기반, 크기 한도, swap 가능, Shmem 회계 |
+| ramfs | 메모리 FS | 한도·swap·df 없음, Unevictable |
+| devtmpfs | 장치 노드 FS | 커널이 장치 등록 시 `/dev` 노드 자동 생성 |
+| zram | 압축 RAM 블록 장치 | 주로 압축 swap |
+| overlayfs | 스태킹 FS | lower(RO) 위에 upper(RW)를 겹친 merged 뷰 |
+| lowerdir / upperdir / workdir | overlay 구성 요소 | 읽기층 / 쓰기층 / 원자적 copy-up 작업 공간 |
+| copy-up | 상층 복사 | lower 파일을 처음 수정할 때 upper로 통째 복사 |
+| whiteout | 삭제 표시 | upper의 0:0 문자 장치 |
+| opaque dir | 불투명 디렉터리 | `trusted.overlay.opaque=y`, lower 내용 숨김 |
+| redirect_dir | 디렉터리 rename 기록 | `trusted.overlay.redirect`로 lower 짝 기록 |
+| xino / index / metacopy | overlay 기능 옵션 | inode 번호 통일 / hard link 유지 / 메타데이터만 copy-up |
+| dm-verity | device-mapper 무결성 타깃 | 읽을 때마다 블록 해시를 해시 트리로 검증 |
+| root hash | 루트 해시 | 해시 트리 꼭대기 32 B, 신뢰의 뿌리 |
+| salt | 솔트 | 해시 입력에 섞는 값, 미리 계산 공격 방지 |
+| DM ioctl | device-mapper 제어 | `/dev/mapper/control`에 CREATE/TABLE_LOAD/SUSPEND |
+| switch_root | 루트 전환 | initramfs 내용 삭제 → chroot → exec, PID 1 유지 |
+
+---
+
+## 17. 요약 & 체크리스트
+
+필드 장비의 rootfs는 "쓰지 않는 영역은 깨지지 않는다"는 원칙으로 설계한다. 루트는 SquashFS나 EROFS 압축 이미지로 만들고, 압축기와 블록 크기는 이미지 크기와 첫 접근 지연 사이의 거래다. 같은 41 MiB 트리에서 xz는 가장 작았고(13.3 MiB) 가장 느렸으며(첫 접근 11 ms), lz4·EROFS는 비압축에 가까운 속도를 냈고, zstd 128K가 무난한 중간이었다. SquashFS는 입력 고정·출력 가변이라 4 KiB 읽기에도 블록 전체를 풀고, EROFS는 출력 고정이라 블록 하나만 푼다. 압축 FS는 page cache 이중 캐싱으로 생각보다 메모리를 더 쓸 수 있다. tmpfs는 한도와 회계가 있는 메모리 FS이고 ramfs는 쓰면 안 된다. overlayfs는 읽기전용 lower 위에 upper를 겹쳐 copy-up·whiteout·opaque로 쓰기를 흉내 내지만, inode 번호·hard link·디렉터리 rename·copy-up 비용이 일반 FS와 다르다. initramfs는 이것들을 조립해 `switch_root`하고, dm-verity는 lower의 모든 블록을 루트 해시 하나에 묶어 바이트 하나의 변조도 EIO·SIGBUS·재시작으로 드러낸다.
+
+- [ ] 읽기전용 rootfs를 쓰는 이유 다섯 가지를 SSD 펌웨어 비유와 함께 설명할 수 있다
+- [ ] SquashFS의 block_size·fragment가 크기·순차 읽기·첫 접근에 주는 영향을 측정값으로 말할 수 있다
+- [ ] SquashFS(입력 고정)와 EROFS(출력 고정)의 차이를 `dump.erofs -e` 출력으로 보여 줄 수 있다
+- [ ] xz·zstd·lz4·gzip 중 하나를 고르는 근거를 제약 조건(플래시 크기 vs 시작 시간)으로 댈 수 있다
+- [ ] 압축 FS의 이중 캐싱이 왜 생기고 어떻게 피하는지(loop, `directio`) 설명할 수 있다
+- [ ] tmpfs·ramfs·devtmpfs·zram의 차이를 `/proc/meminfo`의 Shmem·Unevictable로 보여 줄 수 있다
+- [ ] overlayfs의 copy-up·whiteout·opaque·redirect를 upper 디렉터리에서 찾아 설명할 수 있다
+- [ ] overlayfs에서 깨지는 것(st_dev/st_ino, hard link, 디렉터리 rename, statfs)을 말할 수 있다
+- [ ] tmpfs upper와 영구 upper 설계의 차이와 "upper가 OTA를 가리는" 함정을 설명할 수 있다
+- [ ] squashfs + overlay로 `switch_root`하는 initramfs `/init`을 직접 짤 수 있다
+- [ ] dm-verity 해시 트리와 테이블 인자를 설명하고, DM ioctl 세 번으로 장치를 만들 수 있다
+- [ ] verity 오류 모드(EIO, restart, panic)별 증상과 A/B 롤백과의 연결을 설명할 수 있다
+
+---
+
+## 참고 자료
+
+- docs.kernel.org — SquashFS: https://docs.kernel.org/filesystems/squashfs.html
+- docs.kernel.org — EROFS: https://docs.kernel.org/filesystems/erofs.html
+- docs.kernel.org — Overlay Filesystem: https://docs.kernel.org/filesystems/overlayfs.html
+- docs.kernel.org — Tmpfs: https://docs.kernel.org/filesystems/tmpfs.html
+- docs.kernel.org — Ramfs, rootfs and initramfs: https://docs.kernel.org/filesystems/ramfs-rootfs-initramfs.html
+- docs.kernel.org — dm-verity: https://docs.kernel.org/admin-guide/device-mapper/verity.html
+- docs.kernel.org — zram: https://docs.kernel.org/admin-guide/blockdev/zram.html
+- man7.org — mount(2), rename(2), xattr(7): https://man7.org/linux/man-pages/man2/mount.2.html , https://man7.org/linux/man-pages/man2/rename.2.html , https://man7.org/linux/man-pages/man7/xattr.7.html
+- 커널 소스(6.18.55, elixir.bootlin.com 또는 랩 `/var/lab/src/linux-6.18.55`): `fs/squashfs/{super,block,file,cache}.c`, `fs/erofs/{zdata,decompressor,fileio,super}.c`, `fs/overlayfs/{copy_up,dir,namei,file}.c`, `drivers/md/dm-verity-target.c`, `include/uapi/linux/dm-ioctl.h`, `mm/shmem.c`, `fs/ramfs/inode.c`
+- squashfs-tools(mksquashfs/unsquashfs): https://github.com/plougher/squashfs-tools
+- erofs-utils: https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git
+- cryptsetup/veritysetup: https://gitlab.com/cryptsetup/cryptsetup
+- Michael Kerrisk, "The Linux Programming Interface" — 14장(파일시스템), 18장(디렉터리와 링크)
+- 이 노트 시리즈: C7(initramfs·switch_root), J5(전원 차단 안전성), K4·K5(Yocto 이미지 기능), L4(OTA·A/B), L5(Secure boot), L6(dm-verity·dm-crypt 심화)

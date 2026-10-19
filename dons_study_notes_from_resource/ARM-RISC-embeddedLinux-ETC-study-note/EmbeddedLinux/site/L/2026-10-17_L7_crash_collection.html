@@ -1,0 +1,1428 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>L7. 크래시 데이터 수집 — pstore/ramoops, kdump, coredump 수집, 원격 로그</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="L/2026-10-17_L7_crash_collection">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">L. 시스템 · OTA · 보안 · L7. 크래시 데이터 수집 — pstore/ramoops, kdump, coredump 수집, 원격 로그</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">L. 시스템 · OTA · 보안 · System, OTA, Security</div>
+      <h1>L7. 크래시 데이터 수집 — pstore/ramoops, kdump, coredump 수집, 원격 로그</h1>
+      <div class="meta"><span>195분 읽기</span><span>1898줄</span><span>63개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: 필드 크래시를 종류별(커널 panic·lockup·watchdog 리셋·유저 segfault·OOM·무응답)로 나누고 각각 무엇이 증거로 남는지 말할 수 있다 · DT <code>reserved-memory</code>에 ramoops 노드를 넣어 panic 로그·console·pmsg를 warm reset 너머로 넘기고 systemd-pstore로 디스크에 옮길 수 있다 · <code>crashkernel=</code> + <code>kexec -p</code>로 kdump를 걸어 vmcore를 뜨고 makedumpfile·crash로 분석할 수 있다 · systemd-coredump·core_pattern·netconsole·journal-upload로 유저 크래시와 로그를 장비 밖으로 꺼내는 파이프라인을 설계할 수 있다 <strong>왜 필요한가</strong>: "A device in the field rebooted overnight — how do you find out why?"는 장비 회사 Embedded Linux 면접의 단골 설계 질문이다. 실무에서는 재현 안 되는 필드 리셋 하나가 몇 주를 잡아먹고, 그때 손에 든 증거의 질이 해결 속도를 정한다 <strong>Don 기준 난이도</strong>: SSD 펌웨어의 "예약 DRAM에 마지막 로그 남기기", "NAND 로그 영역에 assert 덤프 쓰기", "다음 부팅 때 vendor log page로 꺼내기"는 이미 몸으로 안다 / 그것이 Linux에서는 pstore·kdump·coredump·journald라는 서로 다른 계층으로 쪼개져 있다는 것, 각 계층의 설정 지점(DT, 커널 인자, sysctl, systemd)이 새로 배울 부분 <strong>선행 노트</strong>: A6 §8(시그널과 core dump), F10(reserved-memory·carveout), I9(watchdog·pretimeout), K1 §1(panic 직전 로그가 사라지는 이유), J3(dm-verity <code>panic_on_corruption</code>). 같은 모듈의 L1(journald·systemd), L4(크래시 루프 → bootcount 롤백)와 맞물린다. 로그 해독 자체는 M3(Oops 해독)·M9(gdb·core)에서 깊게 다룬다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>SSD 펌웨어 시절을 떠올려 보자. 고객사 서버에서 드라이브가 한 번 멈췄다가 살아났다. 그 드라이브를 RMA로 받기 전까지 손에 쥘 수 있는 건 <strong>드라이브가 스스로 남긴 기록</strong>뿐이었다. 그래서 펌웨어는 assert가 터지면 예약 SRAM/DRAM 영역에 레지스터와 최근 이벤트 링버퍼를 쓰고, 다음 부팅 때 그걸 NAND의 로그 블록으로 옮기고, 호스트는 vendor-specific log page로 읽어 갔다. 핵심은 세 단계였다: <strong>죽는 순간 살아남는 곳에 쓴다 → 다음 부팅 때 영구 저장소로 옮긴다 → 밖으로 꺼낸다.</strong></p>
+<p>Linux 장비도 똑같은 세 단계를 밟는다. 다만 "죽는 것"의 종류가 훨씬 다양하고, 단계마다 담당 메커니즘이 따로 있다.</p>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="100" y="20" font-size="13" text-anchor="middle">무엇이 죽었나</text>
+<text x="560" y="20" font-size="13" text-anchor="middle">무엇이 증거를 잡나</text>
+<rect x="10" y="32" width="190" height="40" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="105" y="57" font-size="13" text-anchor="middle">커널 oops / panic</text>
+<rect x="10" y="84" width="190" height="40" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="105" y="109" font-size="13" text-anchor="middle">lockup · hung task</text>
+<rect x="10" y="136" width="190" height="40" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="105" y="161" font-size="13" text-anchor="middle">HW watchdog 리셋</text>
+<rect x="10" y="188" width="190" height="40" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="105" y="213" font-size="13" text-anchor="middle">유저 segfault / abort</text>
+<rect x="10" y="240" width="190" height="40" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="105" y="265" font-size="13" text-anchor="middle">OOM kill</text>
+<rect x="10" y="292" width="190" height="40" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="105" y="317" font-size="13" text-anchor="middle">조용한 정지 · 전원 차단</text>
+<rect x="470" y="32" width="200" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="570" y="57" font-size="13" text-anchor="middle">pstore / ramoops</text>
+<rect x="470" y="96" width="200" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="570" y="121" font-size="13" text-anchor="middle">kdump → vmcore</text>
+<rect x="470" y="160" width="200" height="40" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="570" y="185" font-size="13" text-anchor="middle">reset reason 레지스터</text>
+<rect x="470" y="224" width="200" height="40" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="570" y="249" font-size="13" text-anchor="middle">systemd-coredump</text>
+<rect x="470" y="288" width="200" height="40" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="570" y="313" font-size="13" text-anchor="middle">journald + 원격 로그</text>
+<line x1="200" y1="52" x2="468" y2="52" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="200" y1="56" x2="468" y2="112" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah1)"/>
+<line x1="200" y1="104" x2="468" y2="58" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="200" y1="156" x2="468" y2="180" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="200" y1="152" x2="468" y2="64" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah1)"/>
+<line x1="200" y1="208" x2="468" y2="242" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="200" y1="260" x2="468" y2="304" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="200" y1="312" x2="468" y2="310" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="200" y1="318" x2="468" y2="186" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah1)"/>
+<text x="20" y="360" font-size="13">실선: 기본 경로. 점선: 설정을 해야 열리는 경로 (lockup을 panic으로, pretimeout을 panic으로).</text>
+<text x="20" y="382" font-size="13">조용한 정지는 커널이 아무것도 못 쓴다 → 리셋 원인 + 마지막 원격 로그 + console-ramoops가 전부다.</text>
+</svg></figure>
+<p>그림 1 — 필드 크래시 종류와 증거를 잡는 메커니즘</p>
+<p>세 단계를 Linux 용어로 다시 쓰면 이렇다.</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>SSD 펌웨어에서</th><th>Linux 장비에서</th><th>이 노트</th></tr></thead><tbody><tr><td>죽는 순간 기록</td><td>assert 핸들러가 예약 DRAM에 덤프</td><td>panic → kmsg_dump → <strong>pstore/ramoops</strong>, 또는 <strong>kdump</strong>로 두 번째 커널이 메모리 전체 보존, 유저는 커널이 <strong>core</strong>를 씀</td><td>§3~§7</td></tr><tr><td>다음 부팅 때 영구화</td><td>부팅 시 DRAM 덤프를 NAND 로그 블록으로</td><td><strong>systemd-pstore</strong>가 <code>/sys/fs/pstore</code> → <code>/var/lib/systemd/pstore</code>, kdump 캡처 커널이 vmcore를 디스크로, <strong>systemd-coredump</strong>가 <code>/var/lib/systemd/coredump</code></td><td>§5, §6, §7</td></tr><tr><td>밖으로 꺼냄</td><td>vendor log page, telemetry log</td><td><strong>netconsole</strong>(실시간 UDP), <strong>systemd-journal-upload</strong>, 크래시 파일 업로더(store-and-forward)</td><td>§8, §10</td></tr></tbody></table></div>
+<p>이 노트의 실습은 전부 VM 안의 QEMU <code>virt</code> 게스트에서 했다. 커널은 랩의 <code>Image-sec</code>(6.18.55-sec — PSTORE_RAM/CONSOLE/PMSG/FTRACE·KEXEC·CRASH_DUMP·NETCONSOLE 내장), 유저랜드는 BusyBox initramfs와 Ubuntu 24.04 + systemd 255 rootfs(<code>rootfs-sysd</code>)다. VM 호스트는 Ubuntu 26.04, <code>uname -r</code> = <code>7.0.0-38-generic</code>. QEMU는 TCG(에뮬레이션)라 <strong>모든 시간 수치는 실제 하드웨어 수치가 아니다.</strong></p>
+<hr>
+<h2 id="1-필드-크래시-분류-무엇이-죽었고-무엇이-남나">1. 필드 크래시 분류 — 무엇이 죽었고, 무엇이 남나<a class="anchor" href="#1-필드-크래시-분류-무엇이-죽었고-무엇이-남나" aria-label="link">#</a></h2>
+<h3 id="1-1-직관-누가-마지막-말을-할-수-있나">1.1 직관 — "누가 마지막 말을 할 수 있나"<a class="anchor" href="#1-1-직관-누가-마지막-말을-할-수-있나" aria-label="link">#</a></h3>
+<p>크래시 수집 설계는 결국 <strong>"죽는 순간에 아직 살아서 기록을 남길 수 있는 코드가 누구냐"</strong> 의 문제다.</p>
+<ul><li>유저 프로세스가 죽으면 커널은 멀쩡하다 → 커널이 그 프로세스 메모리를 core 파일로 써 줄 수 있다. 가장 쉬운 경우.</li><li>커널이 oops를 내면 커널은 다쳤지만 아직 돈다 → 자기 로그를 어딘가(ramoops) 쓰고 계속 가거나 panic한다.</li><li>커널이 panic하면 남은 일은 "최소한의 코드로 기록하고 리셋"뿐이다 → kmsg_dump(pstore)나, 미리 올려 둔 두 번째 커널(kdump)에 넘긴다.</li><li>커널이 인터럽트까지 막힌 채 멈추면(hard lockup) 커널은 아무것도 못 한다 → NMI 성격의 감시(arm64는 pseudo-NMI/버디 CPU)나 HW watchdog만 남는다.</li><li>전원이 나가거나 SoC가 통째로 멈추면 소프트웨어는 한 글자도 못 쓴다 → <strong>리셋 원인 레지스터</strong>와 <strong>직전까지 밖으로 보낸 로그</strong>만 남는다.</li></ul>
+<h3 id="1-2-분류표">1.2 분류표<a class="anchor" href="#1-2-분류표" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>종류</th><th>겉으로 보이는 증상</th><th>누가 감지하나</th><th>남길 수 있는 증거</th><th>수집 장치</th></tr></thead><tbody><tr><td>커널 oops</td><td>프로세스 하나 죽고 커널 경고, 이후 이상 동작</td><td>커널 예외 핸들러(<code>die()</code>)</td><td>레지스터·콜스택·모듈 목록</td><td>dmesg, pstore(oops도 기본 기록), journald</td></tr><tr><td>커널 panic</td><td>리부트(<code>panic=N</code>) 또는 정지</td><td><code>panic()</code></td><td>마지막 kmsg, 필요하면 메모리 전체</td><td>pstore dmesg 레코드, kdump vmcore</td></tr><tr><td>soft lockup</td><td>한 CPU가 커널에서 20초+ 스케줄 안 됨</td><td>watchdog hrtimer + <code>watchdog/N</code></td><td>해당 CPU 스택</td><td><code>softlockup_panic=1</code> → panic 경로</td></tr><tr><td>hard lockup</td><td>인터럽트 꺼진 채 멈춤</td><td>perf NMI 또는 버디 CPU 감시</td><td>운 좋으면 스택</td><td><code>hardlockup_panic=1</code>, 없으면 HW WDT</td></tr><tr><td>hung task</td><td>D 상태 태스크 120초+</td><td>khungtaskd</td><td>막힌 태스크 스택</td><td><code>hung_task_panic=1</code></td></tr><tr><td>HW watchdog 리셋</td><td>갑작스런 리부트, 로그 없음</td><td>SoC watchdog</td><td>리셋 원인 비트, pretimeout 시 panic 로그</td><td>부트로더가 읽는 reset cause, I9 pretimeout + pstore</td></tr><tr><td>유저 segfault/abort</td><td>서비스 재시작, 기능 일시 정지</td><td>커널(시그널 전달)</td><td>core 파일(메모리+레지스터)</td><td>systemd-coredump, core_pattern</td></tr><tr><td>OOM kill</td><td>큰 프로세스가 사라짐</td><td>OOM killer</td><td>"Out of memory: Killed process" 커널 로그 + 메모리 상태표</td><td>journald, pstore console</td></tr><tr><td>조용한 정지·전원</td><td>응답 없음, 결국 전원 재투입</td><td>사람, 외부 감시</td><td>거의 없음</td><td>console-ramoops(warm reset일 때만), 원격 로그의 마지막 줄</td></tr></tbody></table></div>
+<p>표에서 중요한 점 두 가지:</p>
+<ol class="tasks"><li><strong>lockup·hung task는 기본이 "경고만 하고 계속"이다.</strong> 제품에서 이걸 panic으로 바꾸지 않으면 장비는 반쯤 죽은 채로 HW watchdog을 기다리고, 리셋 후엔 아무 증거도 없다. 그래서 필드 장비는 보통 <code>softlockup_panic</code>, <code>hung_task_panic</code>, <code>panic_on_oops</code>를 켜고 <code>panic=N</code>으로 자동 리부트시킨다(§2).</li><li><strong>증거의 품질 차이가 크다.</strong> 리셋 원인 비트 → 마지막 kmsg 수십 KiB(pstore) → 메모리 전체(kdump) 순으로 정보량이 늘고 비용도 는다.</li></ol>
+<h3 id="1-3-예산-임베디드에서-무엇을-얼마나-남기나">1.3 예산 — 임베디드에서 무엇을 얼마나 남기나<a class="anchor" href="#1-3-예산-임베디드에서-무엇을-얼마나-남기나" aria-label="link">#</a></h3>
+<p>SSD 펌웨어에서 덤프 영역 크기를 놓고 하드웨어 팀과 싸웠던 것처럼, 여기서도 예산이 설계를 정한다.</p>
+<div class="tw"><table><thead><tr><th>증거</th><th>대략 크기</th><th>드는 비용</th><th>판단</th></tr></thead><tbody><tr><td>reset cause + bootcount</td><td>수 바이트</td><td>부트로더 코드 약간</td><td>무조건</td></tr><tr><td>pstore dmesg (ramoops)</td><td>레코드당 수십~수백 KiB, 전체 1 MiB 안팎</td><td>RAM 1 MiB를 커널이 못 씀</td><td>거의 무조건</td></tr><tr><td>console/pmsg ramoops</td><td>수십~수백 KiB</td><td>같은 예약 영역 안</td><td>권장</td></tr><tr><td>유저 core (압축)</td><td>수백 KiB ~ 수십 MiB</td><td>플래시 공간·쓰기 수명</td><td>크기 제한 걸고 켬</td></tr><tr><td>kdump vmcore (필터 후)</td><td>수십 MiB ~ 수백 MiB</td><td><code>crashkernel=</code> 예약 RAM(수백 MiB) + 저장 공간</td><td>큰 장비(Jetson급)만</td></tr><tr><td>원격 로그</td><td>하루 수 KiB~MiB</td><td>셀룰러 요금·배터리</td><td>레벨·속도 제한 걸고</td></tr></tbody></table></div>
+<hr>
+<h2 id="2-커널-panic-정책-증거를-남기고-반드시-리부트하게">2. 커널 panic 정책 — 증거를 남기고 반드시 리부트하게<a class="anchor" href="#2-커널-panic-정책-증거를-남기고-반드시-리부트하게" aria-label="link">#</a></h2>
+<h3 id="2-1-왜-정책이-먼저인가">2.1 왜 정책이 먼저인가<a class="anchor" href="#2-1-왜-정책이-먼저인가" aria-label="link">#</a></h3>
+<p>크래시 수집 장치를 아무리 잘 붙여도, 커널이 <strong>panic까지 가지 않거나 panic 후 멈춰 있으면</strong> 증거는 디스크에 도착하지 않는다. SSD 펌웨어에서 "assert → 덤프 → 자동 리셋"을 한 묶음으로 설계했던 것처럼, Linux에서도 "이상 감지 → panic → 기록 → 리부트"를 커널 인자와 sysctl로 묶는다.</p>
+<h3 id="2-2-설정-지점">2.2 설정 지점<a class="anchor" href="#2-2-설정-지점" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>커널 인자 (sysctl)</th><th>기본값</th><th>의미</th><th>필드 장비 권장</th></tr></thead><tbody><tr><td><code>panic=N</code> (<code>kernel.panic</code>)</td><td><code>CONFIG_PANIC_TIMEOUT</code>(보통 0)</td><td>panic 후 N초 뒤 리부트. 0이면 영원히 멈춤, 음수면 즉시</td><td>3~10</td></tr><tr><td><code>oops=panic</code> (<code>kernel.panic_on_oops</code>)</td><td>0</td><td>oops를 곧바로 panic으로</td><td>1 (반쯤 죽은 커널로 계속 돌지 않게)</td></tr><tr><td><code>kernel.oops_limit</code></td><td>10000</td><td>oops가 이 횟수를 넘으면 panic</td><td>기본 유지</td></tr><tr><td><code>softlockup_panic=1</code> (<code>kernel.softlockup_panic</code>)</td><td>0</td><td>soft lockup 감지 시 panic</td><td>1</td></tr><tr><td><code>nmi_watchdog=panic</code> (<code>kernel.hardlockup_panic</code>)</td><td>0</td><td>hard lockup 감지 시 panic</td><td>1 (감지기가 있을 때)</td></tr><tr><td><code>sysctl.kernel.hung_task_panic=1</code> (<code>kernel.hung_task_panic</code>)</td><td>0</td><td>D 상태 120초(기본) 초과 시 panic</td><td>제품 성격에 따라</td></tr><tr><td><code>panic_on_warn=1</code></td><td>0</td><td>WARN도 panic으로</td><td>개발·퍼징용, 필드에서는 보통 끔</td></tr><tr><td><code>panic_sys_info=</code> (<code>kernel.panic_sys_info</code>), <code>panic_console_replay</code></td><td>끔</td><td>panic 때 태스크·메모리·락 정보 등을 추가 출력</td><td>필요한 항목만</td></tr><tr><td><code>crash_kexec_post_notifiers</code></td><td>끔</td><td>kdump 전에 panic notifier·kmsg_dump(pstore)를 먼저 돌림</td><td>kdump와 pstore를 같이 쓸 때 고려(§6.5)</td></tr></tbody></table></div>
+<p>커널 인자 전용 이름이 없는 sysctl도 <code>sysctl.&lt;이름&gt;=&lt;값&gt;</code> 형식으로 커널 명령줄에 줄 수 있다(5.8부터). 6.18에서는 예전의 <code>panic_print</code> 비트마스크가 deprecated 되고 <code>panic_sys_info</code>(문자열 목록)와 <code>panic_console_replay</code>로 나뉘었다. 커널 소스 <code>kernel/panic.c</code>에 "The 'panic_print' parameter is now deprecated" 메시지가 들어 있다. 버전마다 이름이 달라지는 영역이라 제품 커널 버전의 <code>Documentation/admin-guide/sysctl/kernel.rst</code>를 확인해야 한다.</p>
+<p>또 하나: lockup·hung task 감지기는 <strong>커널 설정에 들어 있어야</strong> 동작한다. 랩의 <code>Image-sec</code>는 <code>CONFIG_SOFTLOCKUP_DETECTOR</code>·<code>CONFIG_DETECT_HUNG_TASK</code>가 꺼져 있다(디버그 커널 <code>Image-dbg</code>에는 켜져 있다). 제품 커널 config 리뷰 때 체크리스트에 넣어야 하는 항목이다.</p>
+<h3 id="2-3-panic-안에서-일어나는-순서">2.3 panic() 안에서 일어나는 순서<a class="anchor" href="#2-3-panic-안에서-일어나는-순서" aria-label="link">#</a></h3>
+<p><code>kernel/panic.c</code>의 <code>vpanic()</code>이 하는 일을 순서대로 보면, 크래시 수집 장치들이 어디에 끼어드는지 보인다(6.18 소스 기준, 단순화).</p>
+<figure class="code"><span class="lang">text</span><pre><code>vpanic(fmt, ...)
+  pr_emerg("Kernel panic - not syncing: ...")   + 스택 덤프
+  kgdb_panic()                                   (kgdb가 있으면 여기서 디버거 진입, M4)
+  if (!crash_kexec_post_notifiers)
+      __crash_kexec(NULL)                        &lt;-- kdump가 로드돼 있으면 여기서 캡처 커널로 점프, 이후는 실행 안 됨
+  panic_other_cpus_shutdown()                    (다른 CPU 정지)
+  atomic_notifier_call_chain(&amp;panic_notifier_list)
+  sys_info(panic_print)
+  kmsg_dump_desc(KMSG_DUMP_PANIC, buf)           &lt;-- pstore/ramoops가 여기서 dmesg 레코드를 씀
+  if (crash_kexec_post_notifiers)
+      __crash_kexec(NULL)
+  console_unblank(), console_flush_on_panic()
+  if (panic_timeout &gt; 0) -&gt; N초 대기 후 emergency_restart()   (arm64 virt: PSCI SYSTEM_RESET)
+  else 영원히 루프 (panic_blink)</code></pre></figure>
+<p>여기서 면접에 나오는 함정이 하나 나온다. <strong>kdump가 로드돼 있으면 기본 설정에서는 pstore dmesg 레코드가 써지지 않는다.</strong> <code>__crash_kexec()</code>가 <code>kmsg_dump()</code>보다 먼저 불리고 돌아오지 않기 때문이다. 둘 다 원하면 <code>crash_kexec_post_notifiers</code>를 켜야 하는데, 이미 망가진 커널에서 notifier를 더 돌리는 만큼 kdump 실패 위험이 조금 늘어난다(소스 주석이 직접 그렇게 경고한다). §6.5에서 실제로 확인한다.</p>
+<hr>
+<h2 id="3-pstore-죽어도-남는-저장소-를-파일시스템으로-보여-주는-층">3. pstore — "죽어도 남는 저장소"를 파일시스템으로 보여 주는 층<a class="anchor" href="#3-pstore-죽어도-남는-저장소-를-파일시스템으로-보여-주는-층" aria-label="link">#</a></h2>
+<h3 id="3-1-직관">3.1 직관<a class="anchor" href="#3-1-직관" aria-label="link">#</a></h3>
+<p>pstore(persistent store)는 SSD 펌웨어의 "덤프 영역 + 다음 부팅 때 읽는 API"를 일반화한 커널 프레임워크다. 두 반쪽으로 나뉜다.</p>
+<ul><li><strong>frontend</strong> — 무엇을 남길지: panic/oops 때의 커널 로그(<code>dmesg</code>), 콘솔 출력 전체(<code>console</code>), 유저가 직접 쓰는 메시지(<code>pmsg</code>, <code>/dev/pmsg0</code>), 함수 트레이스(<code>ftrace</code>).</li><li><strong>backend</strong> — 어디에 남길지: 예약 RAM(<code>ramoops</code>), UEFI 변수(<code>efi-pstore</code>), 블록 장치(<code>pstore/blk</code>), MTD 플래시(<code>mtdpstore</code>), ACPI ERST(서버).</li></ul>
+<p>다음 부팅 때 backend가 남아 있는 레코드를 읽어 <strong><code>/sys/fs/pstore/</code> 아래 파일</strong>로 보여 준다. 파일을 지우면(<code>rm</code>) backend에서도 지워진다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="90" y="20" font-size="13" text-anchor="middle">frontend (무엇을)</text>
+<rect x="10" y="32" width="160" height="44" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="90" y="52" font-size="13" text-anchor="middle">kmsg_dump</text>
+<text x="90" y="68" font-size="12" text-anchor="middle">panic·oops 로그</text>
+<rect x="10" y="88" width="160" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="90" y="108" font-size="13" text-anchor="middle">console</text>
+<text x="90" y="124" font-size="12" text-anchor="middle">printk 전체 스트림</text>
+<rect x="10" y="144" width="160" height="44" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="90" y="164" font-size="13" text-anchor="middle">pmsg</text>
+<text x="90" y="180" font-size="12" text-anchor="middle">유저 /dev/pmsg0</text>
+<rect x="10" y="200" width="160" height="44" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="90" y="220" font-size="13" text-anchor="middle">ftrace</text>
+<text x="90" y="236" font-size="12" text-anchor="middle">함수 호출 기록</text>
+<rect x="250" y="100" width="170" height="80" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="335" y="128" font-size="14" text-anchor="middle">pstore core</text>
+<text x="335" y="148" font-size="12" text-anchor="middle">fs/pstore/platform.c</text>
+<text x="335" y="166" font-size="12" text-anchor="middle">backend는 한 번에 하나</text>
+<text x="590" y="20" font-size="13" text-anchor="middle">backend (어디에)</text>
+<rect x="500" y="32" width="170" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="585" y="52" font-size="13" text-anchor="middle">ramoops</text>
+<text x="585" y="68" font-size="12" text-anchor="middle">예약 RAM (임베디드 주력)</text>
+<rect x="500" y="88" width="170" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="585" y="108" font-size="13" text-anchor="middle">efi-pstore</text>
+<text x="585" y="124" font-size="12" text-anchor="middle">UEFI 변수 (NVRAM)</text>
+<rect x="500" y="144" width="170" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="585" y="164" font-size="13" text-anchor="middle">pstore/blk</text>
+<text x="585" y="180" font-size="12" text-anchor="middle">블록 장치 panic write</text>
+<rect x="500" y="200" width="170" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="585" y="220" font-size="13" text-anchor="middle">mtdpstore</text>
+<text x="585" y="236" font-size="12" text-anchor="middle">NOR/NAND 파티션</text>
+<line x1="170" y1="54" x2="248" y2="120" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="170" y1="110" x2="248" y2="132" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="170" y1="166" x2="248" y2="148" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="170" y1="222" x2="248" y2="162" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="420" y1="120" x2="498" y2="56" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="420" y1="132" x2="498" y2="110" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah2)"/>
+<line x1="420" y1="148" x2="498" y2="164" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah2)"/>
+<line x1="420" y1="160" x2="498" y2="220" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah2)"/>
+<line x1="335" y1="180" x2="335" y2="268" stroke="currentColor" marker-end="url(#ah2)"/>
+<rect x="140" y="270" width="390" height="48" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="335" y="290" font-size="13" text-anchor="middle">다음 부팅: /sys/fs/pstore/</text>
+<text x="335" y="308" font-size="12" text-anchor="middle">dmesg-ramoops-0, console-ramoops-0, pmsg-ramoops-0</text>
+</svg></figure>
+<p>그림 2 — pstore의 frontend · core · backend 구조</p>
+<h3 id="3-2-backend-비교">3.2 backend 비교<a class="anchor" href="#3-2-backend-비교" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>backend</th><th>저장 매체</th><th>언제 써지나</th><th>콜드 전원 차단 후</th><th>임베디드에서</th></tr></thead><tbody><tr><td>ramoops</td><td>DT/커널 인자로 지정한 예약 DRAM(또는 SRAM)</td><td>즉시(메모리 쓰기)</td><td><strong>사라진다</strong> (DRAM은 전원 없으면 지워짐)</td><td>주력. 가장 단순하고 panic 경로에서 가장 안전</td></tr><tr><td>efi-pstore</td><td>UEFI 변수 저장소(SPI NOR 등)</td><td>panic 때 EFI runtime service 호출</td><td>남는다</td><td>UEFI 부팅 장비(x86, 일부 arm64 서버·Jetson UEFI)</td></tr><tr><td>pstore/blk</td><td>지정한 블록 장치 파티션</td><td>panic 때 드라이버의 panic write 경로</td><td>남는다</td><td>드라이버가 panic-safe write를 지원해야 함(제한적)</td></tr><tr><td>mtdpstore</td><td>MTD 파티션(NOR/NAND)</td><td>panic 때 MTD panic_write</td><td>남는다</td><td>NOR가 있으면 좋은 선택. NAND는 erase 블록 관리가 필요</td></tr><tr><td>ERST</td><td>ACPI 펌웨어 영역</td><td>펌웨어 호출</td><td>남는다</td><td>서버급</td></tr></tbody></table></div>
+<p>Don에게 익숙한 비유로 정리하면: ramoops = "예약 DRAM 덤프", mtdpstore·pstore/blk = "NAND 로그 블록에 직접 쓰는 panic writer", efi-pstore = "펌웨어 NVRAM에 맡기기". 차이는 <strong>panic 순간에 그 쓰기가 얼마나 안전하냐</strong>다. 메모리 쓰기는 락도 인터럽트도 필요 없지만, 블록·MTD 쓰기는 컨트롤러가 살아 있어야 하고 드라이버가 폴링 기반 panic 경로를 따로 가져야 한다. SSD에서도 "assert 핸들러에서 NAND program을 직접 하느냐, 일단 DRAM에 두고 다음 부팅에서 옮기느냐"를 고민했던 것과 같은 축이다.</p>
+<p>pstore core는 <strong>한 번에 backend 하나만</strong> 등록받는다. ramoops와 efi-pstore가 둘 다 있으면 먼저 등록한 쪽만 쓰인다(<code>pstore.backend=ramoops</code>로 고를 수 있다).</p>
+<hr>
+<h2 id="4-ramoops-예약-dram에-남기는-마지막-기록">4. ramoops — 예약 DRAM에 남기는 마지막 기록<a class="anchor" href="#4-ramoops-예약-dram에-남기는-마지막-기록" aria-label="link">#</a></h2>
+<h3 id="4-1-정의와-설정-방법">4.1 정의와 설정 방법<a class="anchor" href="#4-1-정의와-설정-방법" aria-label="link">#</a></h3>
+<p>ramoops(<code>fs/pstore/ram.c</code>, <code>ram_core.c</code>)는 <strong>물리 주소가 고정된 RAM 영역</strong>을 몇 개의 링버퍼(PRZ, persistent RAM zone)로 쪼개 pstore backend로 쓴다. 영역을 알려 주는 방법은 셋이다.</p>
+<div class="tw"><table><thead><tr><th>방법</th><th>예</th><th>언제</th></tr></thead><tbody><tr><td>DT <code>reserved-memory</code> 노드 (<code>compatible = "ramoops"</code>)</td><td>아래 §4.2</td><td>ARM 임베디드 표준. 메모리 예약과 설정이 한 곳에</td></tr><tr><td>커널 인자 / 모듈 파라미터</td><td><code>ramoops.mem_address=0x7fe00000 ramoops.mem_size=0x100000 ramoops.record_size=0x20000</code></td><td>DT를 못 고칠 때. 이때는 <code>memmap=</code>/<code>mem=</code> 등으로 그 영역을 따로 비워야 한다</td></tr><tr><td>플랫폼 데이터 (보드 코드)</td><td><code>struct ramoops_platform_data</code></td><td>옛 보드 파일, x86 Chromebook 등</td></tr></tbody></table></div>
+<p>DT 바인딩(<code>Documentation/devicetree/bindings/reserved-memory/ramoops.yaml</code>)의 주요 속성:</p>
+<div class="tw"><table><thead><tr><th>속성</th><th>뜻</th><th>이 노트 값</th></tr></thead><tbody><tr><td><code>reg</code></td><td>영역의 물리 주소·크기</td><td><code>0x7fe00000</code>, 1 MiB</td></tr><tr><td><code>record-size</code></td><td>panic/oops dmesg 레코드 하나 크기. 남은 공간 ÷ 이 값 = 레코드 개수</td><td>128 KiB</td></tr><tr><td><code>console-size</code></td><td>콘솔 스트림 링버퍼</td><td>256 KiB</td></tr><tr><td><code>pmsg-size</code></td><td>유저 <code>/dev/pmsg0</code> 링버퍼</td><td>128 KiB</td></tr><tr><td><code>ftrace-size</code></td><td>함수 트레이스 (CONFIG_PSTORE_FTRACE 필요)</td><td>128 KiB</td></tr><tr><td><code>ecc-size</code></td><td>블록마다 붙일 Reed-Solomon ECC 바이트 수. 0이면 ECC 없음</td><td>16</td></tr><tr><td><code>max-reason</code></td><td>어느 kmsg_dump 이유까지 기록하나 (1=PANIC, 2=OOPS(기본), 3=EMERG, 4=SHUTDOWN)</td><td>기본</td></tr><tr><td><code>mem-type</code></td><td>매핑 속성 0=write-combine(기본), 1=uncached, 2=cached</td><td>기본</td></tr><tr><td><code>unbuffered</code> (bool)</td><td><code>mem-type = 1</code>의 옛 표기</td><td>—</td></tr></tbody></table></div>
+<p><code>mem-type</code>이 왜 있나? panic 순간에 캐시에 남은 데이터는 리셋과 함께 사라질 수 있다. 기본 write-combine 매핑은 캐시를 거치지 않으므로(쓰기가 버퍼에 모였다가 곧 DRAM으로 나감) 리셋 너머로 살아남을 확률이 높다. SSD 펌웨어에서 덤프 영역을 non-cacheable로 잡거나 덤프 후 D-cache clean을 했던 것과 같은 이유다.</p>
+<h3 id="4-2-메모리-레이아웃">4.2 메모리 레이아웃<a class="anchor" href="#4-2-메모리-레이아웃" aria-label="link">#</a></h3>
+<p><code>ramoops_probe()</code>는 영역을 <strong>dmesg 레코드들 → console → pmsg → ftrace</strong> 순서로 앞에서부터 잘라 쓴다(<code>fs/pstore/ram.c</code>). dmesg 몫은 "전체 − console − ftrace − pmsg"이고 그걸 <code>record-size</code>로 나눈 만큼 레코드가 생긴다. 이 노트 설정이면 1 MiB − 256 − 128 − 128 KiB = 512 KiB → 128 KiB 레코드 <strong>4개</strong>(<code>dmesg-ramoops-0</code> … <code>-3</code>). 각 zone 앞에는 12바이트 헤더(<code>struct persistent_ram_buffer</code>: <code>sig</code>, <code>start</code>, <code>size</code>)가 있고, ECC를 켜면 zone 끝에 패리티가 붙는다.</p>
+<figure class="code"><pre><code>phys addr     zone                     size     header sig
+0x7fe00000    dmesg record 0           128 KiB  0x43474244 ("DBGC")
+0x7fe20000    dmesg record 1           128 KiB
+0x7fe40000    dmesg record 2           128 KiB
+0x7fe60000    dmesg record 3           128 KiB
+0x7fe80000    console ring             256 KiB  0x43474244
+0x7fec0000    pmsg ring                128 KiB  0x43474244
+0x7fee0000    ftrace                   128 KiB  0x43474244 ^ LINUX_VERSION_CODE
+0x7ff00000    (end of ramoops, 1 MiB)
+
+each zone: [sig u32][start u32][size u32][data ... ][ECC parity if ecc-size&gt;0]</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<text x="20" y="22" font-size="13">1 GiB 게스트 RAM의 끝 1 MiB (0x7fe00000 ~ 0x7fefffff)</text>
+<rect x="20" y="40" width="80" height="60" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="60" y="66" font-size="12" text-anchor="middle">dmesg 0</text>
+<text x="60" y="84" font-size="12" text-anchor="middle">128K</text>
+<rect x="100" y="40" width="80" height="60" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="140" y="66" font-size="12" text-anchor="middle">dmesg 1</text>
+<text x="140" y="84" font-size="12" text-anchor="middle">128K</text>
+<rect x="180" y="40" width="80" height="60" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="220" y="66" font-size="12" text-anchor="middle">dmesg 2</text>
+<text x="220" y="84" font-size="12" text-anchor="middle">128K</text>
+<rect x="260" y="40" width="80" height="60" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="300" y="66" font-size="12" text-anchor="middle">dmesg 3</text>
+<text x="300" y="84" font-size="12" text-anchor="middle">128K</text>
+<rect x="340" y="40" width="160" height="60" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="420" y="66" font-size="12" text-anchor="middle">console 링버퍼</text>
+<text x="420" y="84" font-size="12" text-anchor="middle">256K</text>
+<rect x="500" y="40" width="80" height="60" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="540" y="66" font-size="12" text-anchor="middle">pmsg</text>
+<text x="540" y="84" font-size="12" text-anchor="middle">128K</text>
+<rect x="580" y="40" width="80" height="60" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="620" y="66" font-size="12" text-anchor="middle">ftrace</text>
+<text x="620" y="84" font-size="12" text-anchor="middle">128K</text>
+<text x="20" y="118" font-size="12">0x7fe00000</text>
+<text x="340" y="118" font-size="12">0x7fe80000</text>
+<text x="500" y="118" font-size="12">0x7fec0000</text>
+<text x="598" y="118" font-size="12">0x7fee0000</text>
+<text x="20" y="160" font-size="13">zone 하나의 내부 (struct persistent_ram_buffer)</text>
+<rect x="20" y="176" width="80" height="44" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="60" y="203" font-size="12" text-anchor="middle">sig</text>
+<rect x="100" y="176" width="80" height="44" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="140" y="203" font-size="12" text-anchor="middle">start</text>
+<rect x="180" y="176" width="80" height="44" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="220" y="203" font-size="12" text-anchor="middle">size</text>
+<rect x="260" y="176" width="300" height="44" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="410" y="203" font-size="12" text-anchor="middle">data[] — 링버퍼 (start에서 이어 씀)</text>
+<rect x="560" y="176" width="100" height="44" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="610" y="203" font-size="12" text-anchor="middle">ECC 패리티</text>
+<text x="20" y="250" font-size="13">sig가 맞으면 "지난 부팅의 기록"으로 읽고, 틀리면 새 영역으로 보고 지운다.</text>
+<text x="20" y="272" font-size="13">ECC를 켜면 블록마다 RS 패리티로 비트 오류를 고친다 (DRAM 리텐션 중 비트 플립 대비).</text>
+<text x="20" y="292" font-size="13">ftrace zone은 sig에 커널 버전을 XOR해 둔다 — 다른 커널의 트레이스를 잘못 읽지 않게.</text>
+</svg></figure>
+<p>그림 3 — 이 노트의 ramoops 1 MiB 레이아웃과 zone 내부 구조</p>
+<p>SSD 펌웨어의 덤프 헤더와 똑같다: 매직(<code>DBGC</code>) + 쓰기 위치 + 길이. 매직이 없으면 "쓰레기 RAM"으로 보고 초기화한다. 다른 점은 dmesg 레코드는 panic 때 <strong>한 번에 통째로</strong> 쓰이는 고정 슬롯(여러 번 panic하면 0→1→2→3 순환)이고, console·pmsg는 <strong>평소에 계속</strong> 이어 쓰는 링버퍼라는 것이다.</p>
+<h3 id="4-3-ram은-언제-살아남나-warm-reset만">4.3 RAM은 언제 살아남나 — warm reset만<a class="anchor" href="#4-3-ram은-언제-살아남나-warm-reset만" aria-label="link">#</a></h3>
+<p>ramoops의 전제는 <strong>"리셋해도 DRAM 내용이 그대로 있다"</strong> 이다. 이게 성립하는 조건이 생각보다 좁다.</p>
+<div class="tw"><table><thead><tr><th>리셋 종류</th><th>DRAM 내용</th><th>ramoops</th></tr></thead><tbody><tr><td>소프트웨어 리부트 (<code>reboot</code>, panic → <code>emergency_restart</code>)</td><td>대개 유지 (DRAM은 refresh만 계속되면 된다)</td><td>동작</td></tr><tr><td>SoC 내부 watchdog 리셋</td><td>대개 유지 (SoC 리셋 도메인에 따라 다름)</td><td>보통 동작. DDR 컨트롤러까지 리셋되면 self-refresh 처리가 관건</td></tr><tr><td>외부 PMIC 리셋 / 전원 차단 후 재투입</td><td><strong>사라진다</strong> (수십 ms~수 초면 대부분 비트가 날아감, 온도에 따라 다름)</td><td>동작 안 함</td></tr><tr><td>부트로더가 그 영역을 건드림</td><td>덮어써짐</td><td>동작 안 함 (가장 흔한 실패 원인)</td></tr></tbody></table></div>
+<p>실무에서 확인할 것:</p>
+<ol><li><strong>DDR 초기화가 내용을 지우지 않는가.</strong> 일부 SoC의 DDR training은 메모리 패턴 테스트로 DRAM 일부를 덮어쓴다. warm reset 경로에서 training을 건너뛰거나(저장된 training 결과 재사용) DRAM을 self-refresh에 둔 채 컨트롤러만 리셋하는 기능이 있는지 SoC 문서를 본다.</li><li><strong>부트로더·TF-A·OP-TEE가 그 주소를 쓰지 않는가.</strong> U-Boot의 relocation 주소, <code>fdt_addr</code>, <code>kernel_addr_r</code>, 압축 해제 버퍼가 DRAM 끝에 몰려 있는 경우가 많다. ramoops를 DRAM 끝에 두었다면 U-Boot가 자기 자신을 DRAM 끝으로 relocate하는지 확인해야 한다(U-Boot는 DT의 reserved-memory를 보고 피할 수도 있지만 보장되지 않는다).</li><li><strong>커널 자신이 그 영역을 할당자에 주지 않는가.</strong> <code>reserved-memory</code> 노드가 있으면 memblock에서 빠진다(F10). 커널 인자 방식이면 <code>mem=</code>/<code>memmap=</code>으로 직접 빼야 한다.</li><li><strong>콜드 부팅 직후의 쓰레기 값.</strong> 전원 투입 직후 DRAM은 무작위 값이라 sig가 우연히 맞을 확률은 무시할 만하지만, ECC가 없으면 "반쯤 망가진 로그"를 읽을 수 있다. 그래서 <code>ecc-size</code>를 켠다.</li></ol>
+<p>QEMU <code>virt</code>는 어떨까? <code>system_reset</code>(PSCI SYSTEM_RESET 포함)은 <strong>게스트 RAM을 지우지 않고</strong> CPU·장치만 리셋한 뒤 <code>-kernel</code>/<code>-initrd</code>/DTB를 다시 적재한다. 새 QEMU 프로세스를 띄우는 것은 콜드 부팅(RAM 0으로 시작)이다. 아래 예제들로 둘 다 확인한다.</p>
+<h3 id="예제-1-qemu-virt-dtb를-덤프해서-ramoops-노드를-넣는다">예제 1 — QEMU virt DTB를 덤프해서 ramoops 노드를 넣는다<a class="anchor" href="#예제-1-qemu-virt-dtb를-덤프해서-ramoops-노드를-넣는다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 게스트와 <strong>같은 <code>-m</code>/<code>-smp</code>/<code>-cpu</code></strong> 로 QEMU 자신의 DTB를 뽑고, <code>reserved-memory</code> 안에 ramoops 노드를 넣어 다시 컴파일한다(D6·F10에서 한 방식).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/L7
+qemu-system-aarch64 -machine virt,dumpdtb=l7_virt.dtb -cpu cortex-a57 -smp 2 -m 1G -nographic
+dtc -I dtb -O dts -o l7_virt.dts l7_virt.dtb 2&gt;/dev/null
+grep -n -A1 "memory@" l7_virt.dts
+# ramoops_node.dtsi 를 "aliases {" 앞에 끼워 넣는다
+awk -v f=ramoops_node.dtsi '/^\taliases \{/{while((getline l &lt; f)&gt;0) print l} {print}' l7_virt.dts &gt; l7_ramoops.dts
+dtc -q -I dts -O dtb -o l7_ramoops.dtb l7_ramoops.dts
+dtc -I dtb -O dts l7_ramoops.dtb 2&gt;/dev/null | grep -A10 "ramoops@"</code></pre></figure>
+<p>끼워 넣은 노드:</p>
+<figure class="code"><span class="lang">dts</span><pre><code>	reserved-memory {
+		#address-cells = &lt;2&gt;;
+		#size-cells = &lt;2&gt;;
+		ranges;
+
+		l7_ramoops: ramoops@7fe00000 {
+			compatible = "ramoops";
+			reg = &lt;0x0 0x7fe00000 0x0 0x100000&gt;;	/* 1 MiB at top of 1 GiB */
+			record-size = &lt;0x20000&gt;;		/* 128 KiB per dmesg record */
+			console-size = &lt;0x40000&gt;;		/* 256 KiB console log */
+			pmsg-size = &lt;0x20000&gt;;			/* 128 KiB userspace /dev/pmsg0 */
+			ftrace-size = &lt;0x20000&gt;;		/* 128 KiB function trace */
+			ecc-size = &lt;16&gt;;			/* Reed-Solomon ECC bytes per block */
+		};
+	};</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>20:	memory@40000000 {
+21-		reg = &lt;0x00 0x40000000 0x00 0x40000000&gt;;
+		ramoops@7fe00000 {
+			compatible = "ramoops";
+			reg = &lt;0x00 0x7fe00000 0x00 0x100000&gt;;
+			record-size = &lt;0x20000&gt;;
+			console-size = &lt;0x40000&gt;;
+			pmsg-size = &lt;0x20000&gt;;
+			ftrace-size = &lt;0x20000&gt;;
+			ecc-size = &lt;0x10&gt;;
+		};
+	};</code></pre></figure>
+<p>출력에서 볼 것: RAM은 <code>0x40000000</code>부터 1 GiB라서 끝은 <code>0x80000000</code>이다. ramoops를 그 직전 1 MiB에 두었다. <code>-q</code>를 빼면 dtc가 <code>clocks_property</code>·<code>gpios_property</code> 경고를 낸다. 이건 QEMU가 만든 DTB를 역컴파일하면서 phandle이 숫자로 풀려서 생기는 것으로 원래 DTB에서도 똑같이 나오며 무시해도 된다. <strong><code>-smp</code>나 <code>-m</code>을 바꾸면 DTB를 다시 덤프해야 한다</strong>(cpu 노드·memory 노드가 바뀐다 — 랩 README의 주의 사항).</p>
+<h3 id="예제-2-panic-warm-reset-다음-부팅에서-dmesg-pmsg-console-읽기">예제 2 — panic → warm reset → 다음 부팅에서 dmesg·pmsg·console 읽기<a class="anchor" href="#예제-2-panic-warm-reset-다음-부팅에서-dmesg-pmsg-console-읽기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: BusyBox initramfs의 <code>LAB_CMD</code>로 2단계 스크립트를 돌린다. 1차 부팅은 pstore가 비어 있으니 pmsg에 앱 상태를 쓰고 <code>/dev/kmsg</code>에 표시를 남긴 뒤 <code>echo c &gt; /proc/sysrq-trigger</code>로 panic, <code>panic=3</code>이 3초 뒤 리셋한다. 2차 부팅(같은 QEMU 프로세스, warm reset)은 pstore에 레코드가 있으니 내용을 출력하고 끝낸다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# /l7.sh — boot 1 writes + crashes, boot 2 (after warm reset) reads
+mount -t pstore pstore /sys/fs/pstore
+if [ -z "$(ls /sys/fs/pstore)" ]; then
+  echo "=== L7 boot 1: pstore empty"
+  dmesg | grep -i -E "ramoops|pstore"
+  grep -i -B1 -A1 "7fe00000" /proc/iomem
+  echo "L7 pmsg: sensor-daemon state=ARMED seq=42 (written before crash)" &gt; /dev/pmsg0
+  echo "L7 marker: about to crash at uptime $(cut -d' ' -f1 /proc/uptime)" &gt; /dev/kmsg
+  echo c &gt; /proc/sysrq-trigger
+else
+  echo "=== L7 boot 2: pstore has records"
+  ls -l /sys/fs/pstore
+  echo "--- dmesg-ramoops-0 (head)"; head -5 /sys/fs/pstore/dmesg-ramoops-0
+  echo "--- dmesg-ramoops-0 (crash lines)"
+  grep -E "L7 marker|sysrq|Kernel panic" /sys/fs/pstore/dmesg-ramoops-0
+  echo "--- pmsg-ramoops-0"; cat /sys/fs/pstore/pmsg-ramoops-0
+  echo "--- console-ramoops-0 (tail)"; tail -4 /sys/fs/pstore/console-ramoops-0
+fi</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>cp -a /var/lab/build/rootfs l7_rootfs &amp;&amp; cp l7.sh l7_rootfs/ &amp;&amp; chmod +x l7_rootfs/l7.sh
+(cd l7_rootfs &amp;&amp; find . | cpio -o -H newc --quiet | gzip) &gt; l7_initrd.gz
+time timeout 240 qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -m 1G -nographic \
+  -kernel /var/lab/out/Image-sec -initrd l7_initrd.gz -dtb l7_ramoops.dtb \
+  -append "console=ttyAMA0 panic=3 LAB_CMD=sh~/l7.sh" &gt; l7_ex_ramoops.log 2&gt;&amp;1</code></pre></figure>
+<p>1차 부팅 (핵심 줄만, 콜스택 일부 생략):</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.000000] OF: reserved mem: 0x000000007fe00000..0x000000007fefffff (1024 KiB) map non-reusable ramoops@7fe00000
+[    0.168993] pstore: Using crash dump compression: deflate
+[    0.169298] printk: legacy console [ramoops-1] enabled
+[    0.177353] pstore: Registered ramoops as persistent store backend
+[    0.177440] ramoops: using 0x100000@0x7fe00000, ecc: 16
+...
+=== L7 boot 1: pstore empty
+  7fd12000-7fdfffff : reserved
+  7fe00000-7fefffff : reserved
+  7ff00000-7fffffff : reserved
+[    1.425341] L7 marker: about to crash at uptime 1.35
+[    1.426239] sysrq: Trigger a crash
+[    1.426456] Kernel panic - not syncing: sysrq triggered crash
+[    1.427266] CPU: 0 UID: 0 PID: 75 Comm: sh Not tainted 6.18.55-sec #1 PREEMPT
+...
+[    1.428381]  sysrq_handle_crash+0x1c/0x20
+[    1.428442]  __handle_sysrq+0x94/0x1a0
+[    1.428497]  write_sysrq_trigger+0xb0/0xe0
+...
+[    1.429262] SMP: stopping secondary CPUs
+[    1.430384] Kernel Offset: 0x46b569000000 from 0xffff800080000000
+[    1.437592] Rebooting in 3 seconds..
+[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x411fd070]</code></pre></figure>
+<p>2차 부팅 (같은 QEMU 프로세스):</p>
+<figure class="code"><span class="lang">text</span><pre><code>=== L7 boot 2: pstore has records
+total 0
+-r--r--r--    1 0        0            19685 Oct 18 04:27 console-ramoops-0
+-r--r--r--    1 0        0            21100 Oct 18 04:27 dmesg-ramoops-0
+-r--r--r--    1 0        0               90 Oct 18 04:27 pmsg-ramoops-0
+--- dmesg-ramoops-0 (head)
+Panic#1 Part1
+&lt;6&gt;[    0.000000] Booting Linux on physical CPU 0x0000000000 [0x411fd070]
+&lt;5&gt;[    0.000000] Linux version 6.18.55-sec (donh@lima-elinux) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, ...
+&lt;6&gt;[    0.000000] KASLR enabled
+&lt;5&gt;[    0.000000] random: crng init done
+--- dmesg-ramoops-0 (crash lines)
+&lt;12&gt;[    1.425341] L7 marker: about to crash at uptime 1.35
+&lt;6&gt;[    1.426239] sysrq: Trigger a crash
+&lt;0&gt;[    1.426456] Kernel panic - not syncing: sysrq triggered crash
+&lt;4&gt;[    1.428381]  sysrq_handle_crash+0x1c/0x20
+&lt;4&gt;[    1.428442]  __handle_sysrq+0x94/0x1a0
+&lt;4&gt;[    1.428497]  write_sysrq_trigger+0xb0/0xe0
+--- pmsg-ramoops-0
+L7 pmsg: sensor-daemon state=ARMED seq=42 (written before crash)
+
+ECC: No errors detected
+--- console-ramoops-0 (tail)
+[    1.430753] Memory Limit: none
+[    1.437592] Rebooting in 3 seconds..
+
+ECC: No errors detected</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>두 부팅 전체가 <strong>6.7초</strong>(TCG)에 끝났다. QEMU <code>virt</code>의 PSCI 리셋은 RAM을 보존한다는 것이 이것으로 확인된다 — 같은 프로세스 안의 2차 부팅이 1차 부팅의 기록을 읽었다.</li><li><code>dmesg-ramoops-0</code> 첫 줄 <code>Panic#1 Part1</code>: pstore가 붙이는 헤더. 이유(Panic/Oops), 몇 번째 덤프인지, 레코드가 커서 쪼개졌다면 몇 번째 조각인지. <code>&lt;6&gt;</code>·<code>&lt;0&gt;</code>은 printk 레벨(<code>&lt;0&gt;</code>=KERN_EMERG)이고 <code>&lt;12&gt;</code>는 <code>/dev/kmsg</code>로 쓴 유저 메시지(facility user=1 → 1×8+4)다.</li><li>레코드 파일은 21100바이트인데 128 KiB 슬롯에 들어갔다. <code>pstore: Using crash dump compression: deflate</code> — dmesg 레코드는 <strong>압축해서</strong> 쓰고 읽을 때 풀어서 보여 준다. 부팅부터 panic까지 전체 로그가 한 레코드에 들어간 이유다.</li><li><code>pmsg</code>·<code>console</code> 파일 끝의 <code>ECC: No errors detected</code> — ECC를 켰기 때문에 붙는 줄. 리텐션 중 비트가 뒤집혔다면 고친 개수가 찍힌다.</li><li><code>printk: legacy console [ramoops-1] enabled</code> — console frontend는 <strong>진짜 콘솔 드라이버로 등록된다.</strong> 그래서 <code>quiet</code>나 <code>loglevel=</code>로 콘솔 레벨을 낮추면 console-ramoops에도 그만큼 덜 남는다(예제 3에서 실제로 걸렸다).</li></ul>
+<h3 id="예제-3-panic-없는-조용한-정지-console-pmsg만-남는다">예제 3 — panic 없는 "조용한 정지": console·pmsg만 남는다<a class="anchor" href="#예제-3-panic-없는-조용한-정지-console-pmsg만-남는다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 1차 부팅이 로그를 남긴 뒤 <code>sleep</code>으로 멈춘다(커널은 멀쩡, 앱만 멈춘 상황). VM 쪽에서 QEMU monitor로 ramoops 영역의 헤더를 직접 읽고(<code>xp</code>), <code>system_reset</code>을 보내 HW watchdog bite를 흉내 낸다. 2차 부팅에서 무엇이 남았나 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# run_hang.sh — boot 1 logs then hangs; host reads ramoops headers, then warm-resets
+cd /var/tmp/L7; rm -f l7_mon.sock l7_hang.log
+timeout 120 qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -m 1G -nographic \
+  -monitor unix:l7_mon.sock,server,nowait -serial file:l7_hang.log \
+  -kernel /var/lab/out/Image-sec -initrd l7_initrd.gz -dtb l7_ramoops.dtb \
+  -append "console=ttyAMA0 LAB_CMD=sh~/l7h.sh" &lt;/dev/null &gt;/dev/null 2&gt;&amp;1 &amp;
+QP=$!
+until grep -q "hang boot 1" l7_hang.log 2&gt;/dev/null; do sleep 1; done
+sleep 3
+for a in 0x7fe00000 0x7fe80000 0x7fec0000 0x7fee0000; do
+  echo "xp /4xw $a" | socat - UNIX-CONNECT:l7_mon.sock | tr -d "\r" | grep "^0000"
+done
+echo "host: sending system_reset (simulated watchdog bite)"
+echo system_reset | socat - UNIX-CONNECT:l7_mon.sock &gt;/dev/null
+wait $QP; echo "qemu rc=$?"
+tr -d '\r' &lt; l7_hang.log | grep -E "=== L7|L7 |pmsg|console|ramoops|reboot"</code></pre></figure>
+<p>게스트 쪽 <code>l7h.sh</code>는 1차 부팅에서 <code>echo "L7 pmsg: control-loop heartbeat 1017, entering calibration" &gt; /dev/pmsg0</code>, <code>echo "L7 marker: last words before silent hang" &gt; /dev/kmsg</code> 후 <code>sleep 9999</code>, 2차 부팅에서 <code>/sys/fs/pstore</code>를 나열하고 pmsg와 console에서 표시 줄을 찾는다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>000000007fe00000: 0x43474244 0x00000000 0x00000000 0x00000000
+000000007fe80000: 0x43474244 0x0000479d 0x0000479d 0x2020205b
+000000007fec0000: 0x43474244 0x0000003b 0x0000003b 0x7020374c
+000000007fee0000: 0x43415073 0x00000000 0x00000000 0x00000000
+host: sending system_reset (simulated watchdog bite)
+qemu rc=0
+[    0.000000] OF: reserved mem: 0x000000007fe00000..0x000000007fefffff (1024 KiB) map non-reusable ramoops@7fe00000
+[    0.000000] Kernel command line: console=ttyAMA0 LAB_CMD=sh~/l7h.sh
+[    0.347208] pstore: Registered ramoops as persistent store backend
+[    0.347375] ramoops: using 0x100000@0x7fe00000, ecc: 16
+=== L7 hang boot 1
+[    3.112821] L7 marker: last words before silent hang
+[    0.000000] OF: reserved mem: 0x000000007fe00000..0x000000007fefffff (1024 KiB) map non-reusable ramoops@7fe00000
+[    0.000000] Kernel command line: console=ttyAMA0 LAB_CMD=sh~/l7h.sh
+[    0.365942] pstore: Registered ramoops as persistent store backend
+[    0.366125] ramoops: using 0x100000@0x7fe00000, ecc: 16
+=== L7 hang boot 2
+console-ramoops-0
+pmsg-ramoops-0
+--- pmsg
+L7 pmsg: control-loop heartbeat 1017, entering calibration
+--- console tail
+[    3.112821] L7 marker: last words before silent hang
+[    3.035958] reboot: Power down</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>monitor <code>xp</code>로 본 헤더가 그림 3과 그대로 맞는다. 네 zone 모두 sig <code>0x43474244</code>("DBGC")로 시작한다. dmesg 슬롯(<code>0x7fe00000</code>)은 panic이 없었으니 <code>start=size=0</code>. console은 <code>0x479d</code>(18333)바이트가 쌓였고 데이터가 <code>0x2020205b</code> = <code>"[   "</code>(타임스탬프 시작)로 시작한다. pmsg는 <code>0x3b</code>=59바이트 = 쓴 메시지 길이와 같다.</li><li>ftrace zone의 sig <code>0x43415073</code>은 <code>0x43474244 ^ 0x061237</code>이다. <code>0x061237</code>은 <code>LINUX_VERSION_CODE</code>(6.18.55)라서, 그림 3에서 말한 "커널 버전을 XOR한 sig"가 실제 메모리에서 보인다. 이 커널은 <code>CONFIG_PSTORE_FTRACE</code>가 꺼져 있어(FUNCTION_TRACER 없음) zone은 잡혀 있어도 기록은 없다.</li><li>2차 부팅에는 <strong>dmesg 레코드가 없다</strong>(panic·oops가 없었으니 kmsg_dump가 안 불렸다). 대신 console-ramoops에 마지막 콘솔 줄, pmsg에 앱이 남긴 마지막 상태가 있다. <strong>"watchdog으로 리셋됐는데 로그가 없다"는 필드 사례에서 console·pmsg ramoops가 거의 유일한 단서</strong>가 되는 이유다.</li><li>함정 하나: 처음엔 <code>quiet</code>를 붙여 돌렸더니 console-ramoops 파일이 아예 안 생겼다. <code>quiet</code>는 콘솔 레벨을 4로 낮추는데, <code>/dev/kmsg</code>로 쓴 줄은 레벨 4(warning)라 콘솔에 안 나가고, 따라서 console-ramoops에도 안 들어간다. 제품에서 부팅 로그를 줄이려고 <code>quiet</code>를 쓰면 console-ramoops의 가치도 같이 떨어진다 — <code>pmsg</code>나 dmesg 레코드는 이 영향을 받지 않는다.</li></ul>
+<h3 id="예제-4-콜드-재시작-새-qemu-프로세스-에서는-아무것도-없다">예제 4 — 콜드 재시작(새 QEMU 프로세스)에서는 아무것도 없다<a class="anchor" href="#예제-4-콜드-재시작-새-qemu-프로세스-에서는-아무것도-없다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 2 직후 새 QEMU 프로세스로 읽기 전용 스크립트를 돌린다. 새 프로세스 = 새로 0으로 채운 RAM = 전원 재투입. 덤으로 ramoops가 DT에서 읽은 설정을 <code>/sys/module/ramoops/parameters</code>로 확인한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# /l7r.sh — read-only: what does pstore hold right now?
+mount -t pstore pstore /sys/fs/pstore
+echo "=== L7 read-only boot"
+echo "pstore files: $(ls /sys/fs/pstore | wc -l)"; ls /sys/fs/pstore | cat
+cd /sys/module/ramoops/parameters &amp;&amp; for p in mem_address mem_size record_size console_size pmsg_size ftrace_size max_reason ecc mem_type; do echo "$p=$(cat $p)"; done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>=== L7 read-only boot
+pstore files: 0
+mem_address=2145386496
+mem_size=1048576
+record_size=131072
+console_size=262144
+pmsg_size=131072
+ftrace_size=131072
+max_reason=2
+ecc=0
+mem_type=0
+[    2.868441] reboot: Power down</code></pre></figure>
+<p>출력에서 볼 것: 콜드 부팅에서는 레코드 0개. <code>mem_address=2145386496</code>은 <code>0x7fe00000</code>, <code>max_reason=2</code>는 KMSG_DUMP_OOPS(=oops와 panic 둘 다 기록)이다. <code>ecc=0</code>으로 보이지만 커널 로그는 <code>ecc: 16</code>이다. DT로 설정하면 ECC 값은 platform data로만 가고 모듈 파라미터 변수는 갱신되지 않기 때문이다. <strong>sysfs 파라미터만 보고 "ECC 꺼짐"이라고 판단하면 틀린다</strong> — 부팅 로그의 <code>ramoops: using ... ecc:</code> 줄이 기준이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10" y="20" width="200" height="120" rx="8" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="42" font-size="13" text-anchor="middle">부팅 N (평소)</text>
+<text x="110" y="64" font-size="12" text-anchor="middle">console·pmsg 계속 이어 씀</text>
+<text x="110" y="84" font-size="12" text-anchor="middle">panic → kmsg_dump</text>
+<text x="110" y="104" font-size="12" text-anchor="middle">→ dmesg 슬롯에 압축 기록</text>
+<text x="110" y="124" font-size="12" text-anchor="middle">panic=N → 리셋</text>
+<rect x="240" y="20" width="200" height="120" rx="8" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="42" font-size="13" text-anchor="middle">리셋 구간</text>
+<text x="340" y="64" font-size="12" text-anchor="middle">DRAM refresh 유지?</text>
+<text x="340" y="84" font-size="12" text-anchor="middle">DDR init이 안 지우나?</text>
+<text x="340" y="104" font-size="12" text-anchor="middle">부트로더가 안 덮나?</text>
+<text x="340" y="124" font-size="12" text-anchor="middle">→ 셋 다 yes여야 생존</text>
+<rect x="470" y="20" width="200" height="120" rx="8" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="570" y="42" font-size="13" text-anchor="middle">부팅 N+1</text>
+<text x="570" y="64" font-size="12" text-anchor="middle">ramoops probe: sig 확인</text>
+<text x="570" y="84" font-size="12" text-anchor="middle">ECC 검사·교정</text>
+<text x="570" y="104" font-size="12" text-anchor="middle">/sys/fs/pstore/* 로 노출</text>
+<text x="570" y="124" font-size="12" text-anchor="middle">systemd-pstore가 디스크로</text>
+<line x1="210" y1="80" x2="238" y2="80" stroke="currentColor" marker-end="url(#ah3)"/>
+<line x1="440" y1="80" x2="468" y2="80" stroke="currentColor" marker-end="url(#ah3)"/>
+<rect x="10" y="180" width="320" height="64" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="170" y="204" font-size="13" text-anchor="middle">warm reset (QEMU system_reset)</text>
+<text x="170" y="226" font-size="12" text-anchor="middle">예제 2·3: 레코드가 다음 부팅에 보인다</text>
+<rect x="350" y="180" width="320" height="64" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="510" y="204" font-size="13" text-anchor="middle">cold (새 QEMU 프로세스, 전원 차단)</text>
+<text x="510" y="226" font-size="12" text-anchor="middle">예제 4: 레코드 0개</text>
+<text x="20" y="282" font-size="13">그래서 ramoops는 "panic·watchdog 리셋" 진단용이고, 전원 문제(브라운아웃) 진단에는 못 쓴다.</text>
+<text x="20" y="304" font-size="13">전원 차단까지 견뎌야 하면 mtdpstore·pstore/blk·efi-pstore 같은 비휘발 backend가 필요하다.</text>
+</svg></figure>
+<p>그림 4 — pstore 기록이 리셋을 건너가는 흐름과 warm/cold 차이</p>
+<hr>
+<h2 id="5-systemd-pstore-다음-부팅에서-디스크로-옮기기">5. systemd-pstore — 다음 부팅에서 디스크로 옮기기<a class="anchor" href="#5-systemd-pstore-다음-부팅에서-디스크로-옮기기" aria-label="link">#</a></h2>
+<h3 id="5-1-왜-옮겨야-하나">5.1 왜 옮겨야 하나<a class="anchor" href="#5-1-왜-옮겨야-하나" aria-label="link">#</a></h3>
+<p><code>/sys/fs/pstore</code>의 파일은 backend 공간 그 자체다. ramoops 슬롯은 4개뿐이라 그대로 두면 다음 panic이 덮어쓰고, 콜드 리셋 한 번이면 사라진다. 그래서 부팅 초기에 <strong>영구 저장소로 복사하고 backend에서 지우는</strong> 단계가 필요하다. SSD 펌웨어의 "부팅 시 DRAM 덤프를 NAND 로그 블록으로 flush"와 같다.</p>
+<p>systemd에는 이걸 하는 <code>systemd-pstore.service</code>가 있다. <code>/sys/fs/pstore</code>가 비어 있지 않을 때만 돈다(<code>ConditionDirectoryNotEmpty=/sys/fs/pstore</code>). 설정은 <code>/etc/systemd/pstore.conf</code>:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[PStore]
+Storage=external   # external(기본): /var/lib/systemd/pstore 로 복사, journal: 저널에만, none: 안 함
+Unlink=yes         # 복사 후 /sys/fs/pstore 에서 지움 (기본 yes) → backend 공간이 비워진다</code></pre></figure>
+<h3 id="예제-5-systemd-255-rootfs에서-panic-재부팅-자동-보관">예제 5 — systemd 255 rootfs에서 panic → 재부팅 → 자동 보관<a class="anchor" href="#예제-5-systemd-255-rootfs에서-panic-재부팅-자동-보관" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: Ubuntu 24.04 + systemd 255 rootfs(<code>rootfs-sysd</code>의 내 복사본)를 같은 ramoops DTB로 부팅한다. 테스트용 oneshot 서비스(<code>l7-test.service</code>, 커널 인자 <code>l7.mode=pstore</code>일 때만 실행)가 1단계에서 정책 sysctl을 출력하고 pmsg를 쓴 뒤 panic, 2단계에서 systemd-pstore의 결과를 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# /usr/local/sbin/l7-test.sh (pstore part). Stage kept in /var/lib/l7
+S=/var/lib/l7; mkdir -p $S
+say() { echo "L7&gt; $*"; }
+if [ ! -e $S/pstore1 ]; then
+  say "pstore stage 1 (before crash)"
+  sysctl kernel.panic kernel.panic_on_oops kernel.oops_limit kernel.panic_on_warn kernel.core_pattern
+  say "pstore dir: $(ls /sys/fs/pstore | wc -l) files"
+  systemctl show systemd-pstore -p ActiveState -p ConditionResult
+  echo "L7 pmsg: app=sensor-hub ver=1.4.2 state=STREAMING" &gt; /dev/pmsg0
+  touch $S/pstore1; sync
+  say "triggering panic"; echo c &gt; /proc/sysrq-trigger
+else
+  say "pstore stage 2 (after warm reset)"
+  say "pstore dir now: $(ls /sys/fs/pstore | wc -l) files"
+  journalctl -b -u systemd-pstore --no-pager -o short-monotonic
+  find /var/lib/systemd/pstore -type f -exec ls -l {} \;
+  f=$(find /var/lib/systemd/pstore -name 'pmsg-ramoops-0'); say "pmsg: $(head -1 $f)"
+  d=$(find /var/lib/systemd/pstore -name 'dmesg-ramoops-0'); grep -E "Kernel panic|Comm:" $d
+  rm -f $S/pstore1; systemctl poweroff
+fi</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 2 -m 1G -nographic \
+  -kernel /var/lab/out/Image-sec -drive file=l7_root.ext4,if=virtio,format=raw \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 -dtb l7_ramoops.dtb \
+  -append "console=ttyAMA0 root=/dev/vda rw rootwait panic=3 l7.mode=pstore"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[   30.830171] l7-test.sh[313]: L7&gt; pstore stage 1 (before crash)
+[   30.946676] l7-test.sh[321]: kernel.panic = 3
+[   30.958351] l7-test.sh[321]: kernel.panic_on_oops = 0
+[   30.965629] l7-test.sh[321]: kernel.oops_limit = 10000
+[   30.982075] l7-test.sh[321]: kernel.panic_on_warn = 0
+[   30.989198] l7-test.sh[321]: kernel.core_pattern = |/usr/lib/systemd/systemd-coredump %P %u %g %s %t 9223372036854775808 %h %d
+[   31.241128] l7-test.sh[313]: L7&gt; pstore dir: 0 files
+[   31.979844] l7-test.sh[325]: ActiveState=inactive
+[   31.989494] l7-test.sh[325]: ConditionResult=no
+[   32.344461] CPU: 1 UID: 0 PID: 313 Comm: l7-test.sh Not tainted 6.18.55-sec #1 PREEMPT
+[   32.367505] Rebooting in 3 seconds..
+...
+[   22.630159] l7-test.sh[311]: L7&gt; pstore stage 2 (after warm reset)
+[   22.892535] l7-test.sh[311]: L7&gt; pstore dir now: 0 files
+[   23.187466] l7-test.sh[322]: [    8.237412] labsysd systemd-pstore[112]: PStore console-ramoops-0 moved to /var/lib/systemd/pstore/console-ramoops-0
+[   23.198852] l7-test.sh[322]: [    8.330139] labsysd systemd-pstore[112]: PStore dmesg-ramoops-0 moved to /var/lib/systemd/pstore/dmesg-ramoops-0
+[   23.214308] l7-test.sh[322]: [    8.343729] labsysd systemd-pstore[112]: PStore pmsg-ramoops-0 moved to /var/lib/systemd/pstore/pmsg-ramoops-0
+[   23.223700] l7-test.sh[322]: [    8.344888] labsysd systemd[1]: Finished systemd-pstore.service - Platform Persistent Storage Archival.
+[   23.326479] l7-test.sh[328]: -rw------- 1 root root 75 Oct 18 04:30 /var/lib/systemd/pstore/pmsg-ramoops-0
+[   23.347933] l7-test.sh[329]: -rw------- 1 root root 33887 Oct 18 04:30 /var/lib/systemd/pstore/dmesg-ramoops-0
+[   23.393644] l7-test.sh[330]: -rw------- 1 root root 27698 Oct 18 04:30 /var/lib/systemd/pstore/console-ramoops-0
+[   23.569938] l7-test.sh[311]: L7&gt; pmsg: L7 pmsg: app=sensor-hub ver=1.4.2 state=STREAMING
+[   23.773219] l7-test.sh[336]: [   32.342759] Kernel panic - not syncing: sysrq triggered crash
+[   23.783695] l7-test.sh[336]: [   32.344461] CPU: 1 UID: 0 PID: 313 Comm: l7-test.sh Not tainted 6.18.55-sec #1 PREEMPT
+[   26.506626] reboot: Power down</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>1단계: pstore가 비어 있어 <code>systemd-pstore</code>는 <code>ConditionResult=no</code>로 건너뛰었다. 이 이미지는 <code>panic_on_oops=0</code>이 기본이다 — 제품이라면 <code>oops=panic</code>을 넣을 자리.</li><li>2단계: 부팅 8초(monotonic)에 systemd-pstore가 세 레코드를 <code>/var/lib/systemd/pstore/</code>로 <strong>옮겼고</strong>(moved), <code>/sys/fs/pstore</code>는 0개가 됐다(<code>Unlink=yes</code>). 다음 panic을 받을 슬롯이 비었다는 뜻이다.</li><li>파일 권한이 <code>-rw-------</code>(root 전용). 크래시 로그에는 메모리 주소·명령줄·때로는 고객 데이터가 들어 있어서다(§8.2 PII).</li><li>1차 부팅의 <code>Comm: l7-test.sh</code>가 보관본 dmesg에 그대로 있다 → "어느 프로세스 문맥에서 panic했나"까지 다음 부팅에서 안다.</li><li>systemd-pstore는 <strong>옮기기까지만</strong> 한다. 서버로 올리는 것은 별도 업로더의 몫이다(§10).</li></ul>
+<hr>
+<h2 id="6-kdump-두-번째-커널로-메모리-전체를-건진다">6. kdump — 두 번째 커널로 메모리 전체를 건진다<a class="anchor" href="#6-kdump-두-번째-커널로-메모리-전체를-건진다" aria-label="link">#</a></h2>
+<h3 id="6-1-직관">6.1 직관<a class="anchor" href="#6-1-직관" aria-label="link">#</a></h3>
+<p>pstore는 "마지막 로그 수십 KiB"다. 로그만으로는 답이 안 나오는 버그가 있다: 어떤 구조체가 이미 망가져 있었나, 다른 CPU는 무엇을 하고 있었나, 락은 누가 들고 있었나. 이때는 <strong>panic 순간의 메모리 전체</strong>가 필요하다. JTAG로 멈춘 SoC의 메모리를 통째로 떠서 오프라인으로 보는 것과 같은데, 현장 장비에는 JTAG가 없다.</p>
+<p>kdump의 아이디어는 간단하다. 부팅 때 RAM 일부를 <strong>아무도 쓰지 않게 비워 두고</strong>(crashkernel=), 거기에 <strong>두 번째 커널(캡처 커널)을 미리 올려 둔다</strong>(<code>kexec -p</code>). panic이 나면 망가진 첫 번째 커널은 아무것도 정리하지 않고 곧장 캡처 커널로 점프한다(<code>__crash_kexec()</code>). 캡처 커널은 예약 영역 안에서만 살면서 나머지 RAM(죽은 커널의 메모리)을 <code>/proc/vmcore</code>라는 ELF core 파일로 보여 준다. 유저스페이스가 그걸 디스크에 쓰고 리부트한다.</p>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="110" y="20" font-size="13" text-anchor="middle">1차 커널 (제품 커널)</text>
+<text x="340" y="20" font-size="13" text-anchor="middle">RAM</text>
+<text x="570" y="20" font-size="13" text-anchor="middle">캡처 커널</text>
+<rect x="10" y="34" width="200" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="59" font-size="12" text-anchor="middle">① crashkernel=256M 예약</text>
+<rect x="10" y="90" width="200" height="40" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="115" font-size="12" text-anchor="middle">② kexec -p Image + cmdline</text>
+<rect x="10" y="146" width="200" height="40" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="110" y="171" font-size="12" text-anchor="middle">③ panic → __crash_kexec()</text>
+<rect x="10" y="202" width="200" height="40" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="110" y="227" font-size="12" text-anchor="middle">CPU 레지스터 저장 후 점프</text>
+<rect x="260" y="34" width="160" height="150" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340" y="100" font-size="12" text-anchor="middle">1차 커널 메모리</text>
+<text x="340" y="118" font-size="12" text-anchor="middle">(죽은 상태 그대로)</text>
+<rect x="260" y="184" width="160" height="60" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="340" y="210" font-size="12" text-anchor="middle">crashkernel 영역</text>
+<text x="340" y="228" font-size="12" text-anchor="middle">캡처 커널 + elfcorehdr</text>
+<rect x="470" y="146" width="200" height="40" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="570" y="171" font-size="12" text-anchor="middle">④ 예약 영역에서만 부팅</text>
+<rect x="470" y="202" width="200" height="40" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="570" y="227" font-size="12" text-anchor="middle">⑤ /proc/vmcore 노출</text>
+<rect x="470" y="258" width="200" height="40" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="570" y="283" font-size="12" text-anchor="middle">⑥ makedumpfile → 디스크</text>
+<rect x="470" y="314" width="200" height="40" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="570" y="339" font-size="12" text-anchor="middle">⑦ 리부트 → 1차 커널</text>
+<line x1="210" y1="110" x2="258" y2="210" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah4)"/>
+<line x1="210" y1="222" x2="468" y2="170" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="468" y1="222" x2="422" y2="120" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah4)"/>
+<line x1="570" y1="186" x2="570" y2="200" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="570" y1="242" x2="570" y2="256" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="570" y1="298" x2="570" y2="312" stroke="currentColor" marker-end="url(#ah4)"/>
+<text x="20" y="284" font-size="12">점선 ②: 캡처 커널 이미지를</text>
+<text x="20" y="302" font-size="12">미리 예약 영역에 복사해 둔다.</text>
+<text x="20" y="330" font-size="12">점선 ⑤: 캡처 커널은 죽은 메모리를</text>
+<text x="20" y="348" font-size="12">읽기만 한다 (ELF core로 보여 줌).</text>
+<text x="20" y="384" font-size="13">핵심: 망가진 커널은 디스크·네트워크를 만지지 않는다. 깨끗한 새 커널이 그 일을 한다.</text>
+</svg></figure>
+<p>그림 5 — kdump의 두 커널 시퀀스</p>
+<p>SSD 비유로는 "assert가 나면 메인 펌웨어는 손 떼고, ROM에 있는 작은 덤프 전용 펌웨어가 DRAM 전체를 NAND로 쓰게 한다"에 가깝다. 죽은 코드가 복잡한 일(파일시스템, 블록 드라이버)을 하지 않는다는 점이 kdump가 신뢰받는 이유다.</p>
+<h3 id="6-2-구성-요소">6.2 구성 요소<a class="anchor" href="#6-2-구성-요소" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>요소</th><th>어디서</th><th>이 노트에서</th></tr></thead><tbody><tr><td>커널 설정</td><td><code>CONFIG_KEXEC</code>/<code>KEXEC_FILE</code>, <code>CONFIG_CRASH_DUMP</code>, <code>CONFIG_PROC_VMCORE</code> (1차·캡처 둘 다. 같은 Image를 쓰는 게 보통)</td><td>Image-sec에 모두 내장</td></tr><tr><td>메모리 예약</td><td>커널 인자 <code>crashkernel=</code></td><td><code>crashkernel=256M</code></td></tr><tr><td>캡처 커널 적재</td><td><code>kexec -p &lt;Image&gt; --initrd=... --append=...</code> (kexec_load), <code>kexec -s -p ...</code> (kexec_file_load, 커널이 이미지를 검증·파싱)</td><td><code>kexec -p /boot/Image-sec</code></td></tr><tr><td>캡처 쪽 유저랜드</td><td>작은 initramfs 또는 루트 FS에 덤프 스크립트</td><td><code>init=/usr/local/sbin/l7-capture.sh</code></td></tr><tr><td>덤프 필터·압축</td><td><code>makedumpfile -d 31 -c/-l/-z</code></td><td>§6.4</td></tr><tr><td>분석</td><td><code>crash vmlinux vmcore</code>, <code>vmcore-dmesg</code>, <code>makedumpfile --dump-dmesg</code></td><td>§6.5</td></tr></tbody></table></div>
+<p><code>crashkernel=</code> 문법(<code>Documentation/admin-guide/kdump/kdump.rst</code>):</p>
+<div class="tw"><table><thead><tr><th>형식</th><th>뜻</th></tr></thead><tbody><tr><td><code>crashkernel=256M</code></td><td>커널이 알아서 256 MiB 자리를 찾아 예약</td></tr><tr><td><code>crashkernel=256M@0x60000000</code></td><td>주소 고정</td></tr><tr><td><code>crashkernel=512M-2G:128M,2G-:256M</code></td><td>RAM 크기 범위별로 다른 크기 (배포판 기본값 스타일)</td></tr><tr><td><code>crashkernel=1G,high</code> + <code>crashkernel=128M,low</code></td><td>큰 영역은 4 GiB 위, DMA용 작은 영역은 아래 (arm64는 최근 6.x 커널에서 지원 — 제품 커널 버전 문서 확인)</td></tr></tbody></table></div>
+<p>캡처 커널 명령줄에 넣는 관례: <code>nr_cpus=1</code>(CPU 하나만 깨운다 — 메모리·시간 절약, 다른 CPU는 죽은 커널 문맥에 멈춰 있다), <code>reset_devices</code>(드라이버가 장치를 강제 리셋하라는 힌트 — 죽은 커널이 DMA를 걸어 둔 채 멈췄을 수 있다), 필요 없는 서브시스템 끄기(<code>cma=0</code>, <code>cgroup_disable=memory</code> 등).</p>
+<h3 id="예제-6-crashkernel-예약-kexec-p-panic-캡처-커널이-proc-vmcore-저장">예제 6 — crashkernel 예약 → kexec -p → panic → 캡처 커널이 /proc/vmcore 저장<a class="anchor" href="#예제-6-crashkernel-예약-kexec-p-panic-캡처-커널이-proc-vmcore-저장" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: sysd rootfs를 <code>crashkernel=256M</code>으로 부팅해서 테스트 서비스(<code>l7.mode=kdump</code>)가 캡처 커널을 적재하고 panic한다. 캡처 커널은 같은 디스크를 루트로 쓰고 <code>init=</code>으로 덤프 스크립트를 PID 1로 실행한다. 스크립트는 vmcore를 저장하고 <code>echo b &gt; /proc/sysrq-trigger</code>로 리부트, 다시 1차 커널이 떠서 결과를 보여 준다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># l7-test.sh (kdump stage 1, 핵심 부분)
+cat /proc/cmdline
+grep -i "crash kernel" /proc/iomem; free -m
+kexec -p /boot/Image-sec \
+  --append="console=ttyAMA0 root=/dev/vda rw init=/usr/local/sbin/l7-capture.sh nr_cpus=1 reset_devices"
+echo "kexec_crash_loaded=$(cat /sys/kernel/kexec_crash_loaded) crash_size=$(cat /sys/kernel/kexec_crash_size)"
+sync; echo c &gt; /proc/sysrq-trigger</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/sh
+# /usr/local/sbin/l7-capture.sh — PID 1 of the capture kernel: save /proc/vmcore, then reboot
+mount -t proc proc /proc; mount -t sysfs sysfs /sys; mount -o remount,rw /
+mkdir -p /var/crash/l7; L=/var/crash/l7/capture.log
+{
+echo "capture kernel $(uname -r) cmdline: $(cat /proc/cmdline)"
+grep MemTotal /proc/meminfo
+ls -l /proc/vmcore
+s=$(cut -d' ' -f1 /proc/uptime)
+if ! makedumpfile -c -d 31 /proc/vmcore /var/crash/l7/vmcore 2&gt;&amp;1; then
+  echo "fallback: raw sparse copy of /proc/vmcore"
+  cp --sparse=always /proc/vmcore /var/crash/l7/vmcore.raw &amp;&amp; echo "raw copy done"
+fi
+e=$(cut -d' ' -f1 /proc/uptime); echo "makedumpfile uptime $s -&gt; $e"
+makedumpfile --dump-dmesg /proc/vmcore /var/crash/l7/dmesg.txt 2&gt;&amp;1
+ls -l /var/crash/l7
+} &gt; $L 2&gt;&amp;1
+cat $L
+sync; mount -o remount,ro /
+echo b &gt; /proc/sysrq-trigger</code></pre></figure>
+<p>1차 커널 (부팅 → 적재 → panic):</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.000000] crashkernel reserved: 0x000000006cc00000 - 0x000000007cc00000 (256 MB)
+[    0.000000] Kernel command line: console=ttyAMA0 root=/dev/vda rw rootwait panic=3 crashkernel=256M l7.mode=kdump
+[    0.166307] Memory: 674800K/1048576K available (22016K kernel code, 7058K rwdata, 20100K rodata, 3520K init, 800K bss, 338272K reserved, 32768K cma-reserved)
+...
+[   29.234804] l7-test.sh[328]:   6cc00000-7cbfffff : Crash kernel
+[   29.346312] l7-test.sh[335]:                total        used        free      shared  buff/cache   available
+[   29.356595] l7-test.sh[335]: Mem:             697         145         472           0         144         551
+[   35.233178] l7-test.sh[317]: L7&gt; kexec -p took 5.69 s
+[   35.345197] l7-test.sh[317]: L7&gt; kexec_crash_loaded=1 crash_size=268435456
+[   35.582395] CPU: 0 UID: 0 PID: 317 Comm: l7-test.sh Kdump: loaded Not tainted 6.18.55-sec #1 PREEMPT
+...
+[   35.588580] Starting crashdump kernel...
+[   35.589009] Bye!</code></pre></figure>
+<p>캡처 커널:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.000000] OF: fdt: Reserving 4 KiB of memory at 0x7cbf0000 for elfcorehdr
+[    0.000000] Kernel command line: console=ttyAMA0 root=/dev/vda rw init=/usr/local/sbin/l7-capture.sh nr_cpus=1 reset_devices
+[    0.119112] Memory: 165844K/262144K available (22016K kernel code, 7058K rwdata, 20100K rodata, 3520K init, 800K bss, 61276K reserved, 32768K cma-reserved)
+[    2.364394] Run /usr/local/sbin/l7-capture.sh as init process
+capture kernel 6.18.55-sec cmdline: console=ttyAMA0 root=/dev/vda rw init=/usr/local/sbin/l7-capture.sh nr_cpus=1 reset_devices
+MemTotal:         204388 kB
+-r-------- 1 root root 860368896 Oct 18 04:35 /proc/vmcore
+calculate_plat_config: PAGE SIZE 0x1000 and VA Bits 52 not supported
+get_machdep_info_arm64: Can't determine platform config values
+
+makedumpfile Failed.
+fallback: raw sparse copy of /proc/vmcore
+raw copy done
+makedumpfile uptime 2.75 -&gt; 13.42
+calculate_plat_config: PAGE SIZE 0x1000 and VA Bits 52 not supported
+get_machdep_info_arm64: Can't determine platform config values
+
+makedumpfile Failed.
+total 510708
+-rw-r--r-- 1 root root       613 Oct 18 04:35 capture.log
+-r-------- 1 root root 860368896 Oct 18 04:35 vmcore.raw</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>메모리 비용이 그대로 보인다.</strong> crashkernel 없이 부팅하면 <code>Memory: 935304K/1048576K available</code>인데(예제 5 부팅), 256M을 예약하면 <code>674800K</code>로 약 254 MiB 줄었다. <code>free</code>의 total도 697 MiB. 1 GiB 장비에서 RAM 4분의 1을 "평소엔 아무 일도 안 하는 커널"에 바친 셈이다.</li><li>1차 커널 panic 헤더에 <code>Kdump: loaded</code>가 찍힌다. 크래시 로그만 보고도 "이 장비는 kdump가 걸려 있었다"를 알 수 있다.</li><li>캡처 커널은 예약된 256 MiB 안에서만 돈다(<code>262144K</code> 중 <code>165844K</code> available). 그 안에서도 <code>32768K cma-reserved</code>가 보인다 — 1차 커널과 같은 CMA 설정이 캡처 커널에도 먹어서 32 MiB를 낭비한다. 캡처 커널 명령줄에 <code>cma=0</code>을 주는 이유다.</li><li><code>elfcorehdr</code> 4 KiB: kexec-tools가 미리 만들어 둔 "죽은 커널 메모리 지도"(ELF 프로그램 헤더 + CPU 레지스터 note). 캡처 커널은 이걸 보고 <code>/proc/vmcore</code>를 구성한다. 크기 <code>860368896</code>(≈820.5 MiB)는 <code>readelf -l</code>로 보면 LOAD 세그먼트 셋의 합이다: <code>0x40000000</code>부터 crashkernel 시작(<code>0x6cc00000</code>)까지 716 MiB, crashkernel 끝(<code>0x7cc00000</code>)부터 RAM 끝까지 52 MiB, 그리고 커널 이미지 영역 52.5 MiB를 커널 텍스트 가상주소(<code>0xffffcb96...</code>)로 한 번 더. 예약 영역은 정확히 빠져 있다.</li><li><strong>makedumpfile이 실패했다.</strong> 게스트(Ubuntu 24.04)의 makedumpfile 1.7.5도, VM 호스트의 1.7.7도 같은 메시지다. Image-sec는 <code>CONFIG_ARM64_VA_BITS_52=y</code>(4 KiB 페이지)로 빌드됐는데, makedumpfile의 arm64 코드가 "4K 페이지 + 52비트 VA" 조합을 지원하지 않는다. 실제 CPU(cortex-a57)는 LPA2가 없어 런타임엔 48비트로 돌고 있지만(VMCOREINFO의 <code>TCR_EL1_T1SZ=0x10</code>), makedumpfile은 VMCOREINFO의 <code>NUMBER(VA_BITS)=52</code>를 보고 거부한다. 그래서 스크립트가 원본 vmcore를 sparse 복사로 저장했다(820 MiB 중 디스크 실사용 약 500 MiB, TCG에서 약 10.7초).</li><li><code>kexec -p</code> 자체는 이번에 5.7초였지만 다른 실행에서 9.6초, 25.8초도 나왔다. TCG + VM 부하에 따라 크게 흔들리는 값이라 실제 하드웨어 수치로 읽으면 안 된다(실 HW에서는 보통 1초 미만).</li></ul>
+<p>실무 교훈: <strong>kdump 경로는 "켜 놓기"가 아니라 "주기적으로 실제로 떨어뜨려 보기"까지가 설정이다.</strong> 커널 config 하나(VA_BITS) 바꾼 것이 덤프 도구를 깨뜨렸고, panic이 나기 전까지 아무도 모른다. CI에 "kdump 한 번 떨어뜨리고 vmcore를 crash로 열어 보는" 테스트를 넣는 이유다.</p>
+<h3 id="6-3-makedumpfile-덤프-레벨과-압축">6.3 makedumpfile — 덤프 레벨과 압축<a class="anchor" href="#6-3-makedumpfile-덤프-레벨과-압축" aria-label="link">#</a></h3>
+<p>원본 vmcore는 RAM 크기만큼 크다. makedumpfile은 커널 자료구조(<code>struct page</code> 플래그)를 읽어서 <strong>분석에 필요 없는 페이지를 빼고</strong> 압축한다. 이 때문에 VMCOREINFO(1차 커널이 남긴 "구조체 오프셋·심볼 주소 표")가 꼭 필요하고, 커널 메모리 레이아웃(VA_BITS, 페이지 크기)을 정확히 알아야 한다 — 위 실패가 그래서 났다.</p>
+<div class="tw"><table><thead><tr><th><code>-d</code> 비트</th><th>빼는 페이지</th><th>비고</th></tr></thead><tbody><tr><td>1</td><td>0으로 채워진 페이지</td><td></td></tr><tr><td>2</td><td>non-private page cache</td><td>파일 내용 캐시</td></tr><tr><td>4</td><td>private page cache</td><td></td></tr><tr><td>8</td><td>유저 프로세스 페이지</td><td>유저 메모리가 필요하면 이 비트를 빼라</td></tr><tr><td>16</td><td>free 페이지</td><td></td></tr><tr><td>31</td><td>위 전부</td><td>커널 분석용 표준. 보통 수 GiB → 수십~수백 MiB</td></tr></tbody></table></div>
+<p>압축: <code>-c</code>(zlib), <code>-l</code>(lzo), <code>-p</code>(snappy), <code>-z</code>(zstd, 빌드 옵션에 따라). <code>--dump-dmesg</code>는 vmcore에서 커널 로그만 텍스트로 뽑는다.</p>
+<h3 id="예제-7-vm-호스트에서-덤프-꺼내-로그-뽑기">예제 7 — VM 호스트에서 덤프 꺼내 로그 뽑기<a class="anchor" href="#예제-7-vm-호스트에서-덤프-꺼내-로그-뽑기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 내 이미지 복사본을 loop 마운트해서 vmcore를 꺼내고, makedumpfile이 안 되니 kexec-tools에 들어 있는 <code>vmcore-dmesg</code>로 로그를 뽑는다. <code>readelf -n</code>으로 vmcore의 note도 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/L7 &amp;&amp; mkdir -p dump &amp;&amp; sudo mount -o loop l7_root.ext4 mnt
+sudo cp --sparse=always mnt/var/crash/l7/vmcore.raw dump/ &amp;&amp; sudo umount mnt
+cd dump &amp;&amp; ls -ls vmcore.raw
+readelf -n vmcore.raw | head -6
+makedumpfile -c -d 31 vmcore.raw vmcore.d31
+/usr/sbin/vmcore-dmesg vmcore.raw &gt; vmcore-dmesg.txt; wc -l vmcore-dmesg.txt
+grep -n "Kernel panic\|Comm:\|sysrq" vmcore-dmesg.txt</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>510680 -r-------- 1 donh root 860368896 Oct 17 21:37 vmcore.raw
+
+Displaying notes found at file offset 0x00001000 with length 0x0000109c:
+  Owner                Data size 	Description
+  CORE                 0x00000188	NT_PRSTATUS (prstatus structure)
+  CORE                 0x00000188	NT_PRSTATUS (prstatus structure)
+  VMCOREINFO           0x00000d4c	Unknown note type: (0x00000000)
+calculate_plat_config: PAGE SIZE 0x1000 and VA Bits 52 not supported
+get_machdep_info_arm64: Can't determine platform config values
+
+makedumpfile Failed.
+429 vmcore-dmesg.txt
+404:[   35.580663] sysrq: Trigger a crash
+405:[   35.581054] Kernel panic - not syncing: sysrq triggered crash
+406:[   35.582395] CPU: 0 UID: 0 PID: 317 Comm: l7-test.sh Kdump: loaded Not tainted 6.18.55-sec #1 PREEMPT</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>note가 셋: CPU마다 하나씩 <code>NT_PRSTATUS</code>(죽는 순간의 레지스터 — <code>-smp 2</code>라 2개)와 <code>VMCOREINFO</code>. VMCOREINFO 본문은 사람이 읽을 수 있는 텍스트로, 위에서 생략한 hex를 풀면 <code>OSRELEASE=6.18.55-sec</code>, <code>BUILD-ID=94bc14e3...</code>, <code>PAGESIZE=4096</code>, <code>NUMBER(VA_BITS)=52</code>, <code>KERNELOFFSET=...</code>(KASLR 오프셋), <code>CRASHTIME=...</code> 같은 줄이다. <strong>분석 도구는 여기의 BUILD-ID로 맞는 vmlinux를 찾아야 한다.</strong></li><li>VM 호스트의 makedumpfile 1.7.7도 같은 이유로 실패한다(도구 문제이지 캡처 문제가 아니다).</li><li><code>vmcore-dmesg</code>는 VMCOREINFO의 printk 링버퍼 심볼·오프셋만으로 로그를 복원하므로 VA_BITS 문제와 상관없이 동작했다. 429줄 전체 로그 끝에 panic이 있다 — pstore가 없어도 kdump만으로 마지막 로그는 얻는다.</li></ul>
+<h3 id="6-4-crash로-분석하기">6.4 crash로 분석하기<a class="anchor" href="#6-4-crash로-분석하기" aria-label="link">#</a></h3>
+<p><code>crash</code>는 gdb를 품은 커널 덤프 분석기다. <code>crash vmlinux vmcore</code>로 열고 <code>bt</code>(패닉 CPU 콜스택), <code>log</code>(dmesg), <code>ps</code>(태스크 목록), <code>kmem -i</code>(메모리 요약), <code>struct</code>/<code>p</code>(자료구조), <code>foreach bt</code>(모든 태스크 스택), <code>dis</code>(역어셈블)를 쓴다. 필요한 것은 <strong>같은 빌드의 디버그 정보가 든 vmlinux</strong>다.</p>
+<p>랩의 <code>vmlinux-sec</code>로 열어 보면:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd /var/tmp/L7/dump &amp;&amp; printf "sys\nbt\nlog -T | tail -25\nps | head -12\nquit\n" &gt; cmds
+time timeout 300 crash -s /var/lab/out/vmlinux-sec vmcore.raw -i cmds</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>WARNING: CONFIG_DEBUG_INFO_REDUCED=y
+crash: /var/lab/out/vmlinux-sec: no debugging data available
+
+crash: zero-size memory allocation! (called from b5fde40b8e94)
+
+real	0m14.496s</code></pre></figure>
+<p>출력에서 볼 것: <code>CONFIG_DEBUG_INFO_REDUCED=y</code>로 빌드한 vmlinux는 구조체 타입 정보가 빠져 있어 crash가 거부한다. crash에는 <code>task_struct</code>·<code>mm_struct</code> 등의 <strong>완전한 타입 정보</strong>가 필요하다. 제품 빌드에서 "디버그 정보는 용량 때문에 reduced로" 같은 결정이 kdump 분석을 막는 전형적인 경우다. 디버그 정보는 장비에 넣을 필요가 없다 — <strong>빌드 서버에 build-id로 보관</strong>하면 된다(§9).</p>
+<h3 id="예제-7b-커널을-고쳐-다시-va_bits-48-full-debug-info">예제 7b — 커널을 고쳐 다시: VA_BITS=48 + full debug info<a class="anchor" href="#예제-7b-커널을-고쳐-다시-va_bits-48-full-debug-info" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 실패 원인 둘을 실제로 확인하려고 Image-sec 설정에서 <strong>두 항목만</strong> 바꿔 내 디렉터리에 커널을 다시 빌드했다(<code>-j2</code>, VM 부하 속에서 약 32분). 그 커널을 1차·캡처 커널 둘 다로 써서 예제 6을 반복한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cp /var/lab/build/linux-sec/.config /var/tmp/L7/kbuild/.config
+cd /var/lab/src/linux-6.18.55
+./scripts/config --file /var/tmp/L7/kbuild/.config -d ARM64_VA_BITS_52 -e ARM64_VA_BITS_48 \
+  -d DEBUG_INFO_REDUCED -d DEBUG_INFO_COMPRESSED_NONE -e DEBUG_INFO_COMPRESSED_ZLIB \
+  --set-str LOCALVERSION "-l7kd"
+make O=/var/tmp/L7/kbuild olddefconfig &amp;&amp; make O=/var/tmp/L7/kbuild -j2 Image
+# Image -&gt; my rootfs copy as /boot/Image-l7kd, then boot it with crashkernel=256M l7.mode=kdump l7.kimg=Image-l7kd</code></pre></figure>
+<p>캡처 커널 쪽 출력(진행 표시줄은 생략):</p>
+<figure class="code"><span class="lang">text</span><pre><code>capture kernel 6.18.55-l7kd cmdline: console=ttyAMA0 root=/dev/vda rw init=/usr/local/sbin/l7-capture.sh nr_cpus=1 reset_devices
+MemTotal:         204388 kB
+-r-------- 1 root root 860368896 Oct 18 05:15 /proc/vmcore
+...
+The kernel version is not supported.
+The makedumpfile operation may be incomplete.
+
+The dumpfile is saved to /var/crash/l7/vmcore.
+
+makedumpfile Completed.
+makedumpfile uptime 2.91 -&gt; 28.92
+...
+-rw------- 1 root root     41880 Oct 18 05:15 dmesg.txt
+-rw------- 1 root root 113261900 Oct 18 05:15 vmcore</code></pre></figure>
+<p>VM 호스트에서 crash로 연다(<code>sys</code>, <code>log</code>, <code>bt -a</code>, <code>ps</code>, <code>kmem -i</code>; 출력 일부):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>crash -s /var/tmp/L7/kbuild/vmlinux vmcore.d31 -i cmds3</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>      KERNEL: /var/tmp/L7/kbuild/vmlinux
+    DUMPFILE: vmcore.d31  [PARTIAL DUMP]
+        CPUS: 2 [OFFLINE: 1]
+        DATE: Wed Dec 31 16:00:00 PST 1969
+      UPTIME: 00:01:17
+LOAD AVERAGE: 8.01, 2.41, 0.84
+       TASKS: 97
+    NODENAME: labsysd
+     RELEASE: 6.18.55-l7kd
+     VERSION: #1 SMP PREEMPT Sat Oct 17 22:10:25 PDT 2026
+     MACHINE: aarch64  (unknown Mhz)
+      MEMORY: 1 GB
+       PANIC: "Kernel panic - not syncing: sysrq triggered crash"
+...
+PID: 309      TASK: ffff00000597db40  CPU: 1    COMMAND: "l7-test.sh"
+ #0 [ffff800080b3b9f0] machine_kexec at ffffb478e2a5194c
+ #1 [ffff800080b3bb60] __crash_kexec at ffffb478e2bd1ff8
+ #2 [ffff800080b3bb90] vpanic at ffffb478e2a159f0
+ #3 [ffff800080b3bc40] panic at ffffb478e2a15c1c
+ #4 [ffff800080b3bc90] sysrq_handle_crash at ffffb478e35ac398
+ #5 [ffff800080b3bca0] __handle_sysrq at ffffb478e35acb50
+ #6 [ffff800080b3bce0] write_sysrq_trigger at ffffb478e35ad2ac
+ #7 [ffff800080b3bd20] proc_reg_write at ffffb478e2ec2a10
+ #8 [ffff800080b3bdb0] vfs_write at ffffb478e2e13d6c
+...
+#16 [ffff800080b3bfe8] el0t_64_sync at ffffb478e2a11598
+     PC: 0000ffffb1591d08   LR: 0000ffffb152d764   SP: 0000fffff7b78700
+...
+PID: 264      TASK: ffff000004cadb40  CPU: 0    COMMAND: "(udev-worker)"
+ #0 [ffff800080003f30] crash_save_cpu at ffffb478e2bd26dc
+...
+      PID    PPID  CPU       TASK        ST  %MEM      VSZ      RSS  COMM
+        0       0   0  ffffb478e56d7e00  RU   0.0        0        0  [swapper/0]
+        0       0   1  ffff000003a04900  RU   0.0        0        0  [swapper/1]
+        1       0   1  ffff000003968000  IN   0.6    21104    11900  systemd
+        2       0   0  ffff000003969240  IN   0.0        0        0  [kthreadd]
+...
+                 PAGES        TOTAL      PERCENTAGE
+    TOTAL MEM   178456     697.1 MB         ----
+         FREE   104956       410 MB   58% of TOTAL MEM
+         USED    73500     287.1 MB   41% of TOTAL MEM
+       CACHED    47282     184.7 MB   26% of TOTAL MEM
+         SLAB     7778      30.4 MB    4% of TOTAL MEM
+
+real	0m24.853s</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>두 가지만 바꾸자 makedumpfile(게스트 1.7.5)이 동작했다. <code>-d 31 -c</code>로 <strong>820 MiB → 108 MiB</strong>(113261900바이트), TCG에서 26초. "kernel version is not supported" 경고는 1.7.5가 6.18보다 오래돼서 나오는 것으로, 결과는 crash가 정상적으로 열었다. 제품에서는 커널 버전을 지원하는 makedumpfile을 캡처 환경에 넣는 것이 원칙이다.</li><li>crash가 full debug info vmlinux(342 MB)로 열렸다. <code>PANIC:</code> 문자열, 패닉 CPU 1의 <code>bt</code>(panic → <code>__crash_kexec</code> → <code>machine_kexec</code>), 맨 아래 유저 레지스터(PC는 유저 주소 — <code>write()</code>를 부른 셸)까지 나온다.</li><li><code>bt -a</code>의 CPU 0은 <code>(udev-worker)</code>가 돌던 중 <strong><code>crash_save_cpu</code>에서 멈춰 있다</strong>: 패닉 CPU가 IPI로 다른 CPU를 세우면서 각자 레지스터를 저장하게 한 흔적이다. "다른 CPU는 그 순간 무엇을 하고 있었나"는 pstore 로그로는 알 수 없는 정보다(데드락 분석의 핵심).</li><li><code>CPUS: 2 [OFFLINE: 1]</code>은 crash가 정지된 CPU를 offline으로 표시하는 것이고, <code>DATE</code>가 1969년(epoch 0)으로 나온 원인은 확인하지 않았다(분석에는 영향 없다).</li><li><code>kmem -i</code>의 TOTAL MEM 697 MB는 1차 커널이 본 메모리(crashkernel 256M 제외)와 일치한다. 메모리 누수·slab 폭증 크래시라면 여기서 바로 보인다.</li></ul>
+<h3 id="6-5-kdump와-pstore를-같이-쓰면-crash_kexec_post_notifiers">6.5 kdump와 pstore를 같이 쓰면 — <code>crash_kexec_post_notifiers</code><a class="anchor" href="#6-5-kdump와-pstore를-같이-쓰면-crash_kexec_post_notifiers" aria-label="link">#</a></h3>
+<p>§2.3에서 소스로 본 순서를 실제로 확인한다. 예제 6과 같은 kdump 설정에 ramoops DTB를 함께 주고(그래서 캡처 커널도 같은 ramoops 영역을 본다), 캡처 커널이 <code>/sys/fs/pstore</code>를 나열하게 했다. 덤프 복사는 생략(<code>l7.nocopy</code>). 첫 번째는 기본값, 두 번째는 1차 커널 명령줄에 <code>crash_kexec_post_notifiers</code>를 추가했다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># run_kp.sh: same kdump flow as Example 6, plus ramoops DT; "$@" = extra kernel args
+bash run_sysd.sh l7_kp0.log 900 -dtb l7_ramoops.dtb -- panic=3 crashkernel=256M l7.mode=kdump l7.nocopy
+bash run_sysd.sh l7_kp1.log 900 -dtb l7_ramoops.dtb -- panic=3 crashkernel=256M l7.mode=kdump l7.nocopy crash_kexec_post_notifiers</code></pre></figure>
+<p>기본값(kp0) — 캡처 커널과 그다음 부팅:</p>
+<figure class="code"><span class="lang">text</span><pre><code>pstore in capture kernel:
+total 0
+-r--r--r-- 1 root root 26332 Oct 18 04:55 console-ramoops-0
+...
+[  108.725572] l7-test.sh[318]: archived pstore:
+[  109.339515] l7-test.sh[329]: console-ramoops-0</code></pre></figure>
+<p><code>crash_kexec_post_notifiers</code>(kp1):</p>
+<figure class="code"><span class="lang">text</span><pre><code>pstore in capture kernel:
+total 0
+-r--r--r-- 1 root root 27702 Oct 18 05:00 console-ramoops-0
+-r--r--r-- 1 root root 42070 Oct 18 05:00 dmesg-ramoops-0
+...
+[  106.150856] l7-test.sh[322]: archived pstore:
+[  106.773198] l7-test.sh[333]: console-ramoops-0
+[  106.846585] l7-test.sh[333]: dmesg-ramoops-0</code></pre></figure>
+<p>kp0 실행 후 보관된 console 레코드의 명령줄:</p>
+<figure class="code"><span class="lang">text</span><pre><code>[    0.000000] Kernel command line: console=ttyAMA0 root=/dev/vda rw init=/usr/local/sbin/l7-capture.sh nr_cpus=1 reset_devices l7.nocopy</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>기본값에서는 <strong>dmesg 레코드가 없다.</strong> <code>__crash_kexec()</code>가 <code>kmsg_dump()</code>보다 먼저 불려 돌아오지 않았기 때문이다. <code>crash_kexec_post_notifiers</code>를 주면 kmsg_dump가 먼저 돌아 dmesg 레코드가 생기고, 그다음 캡처 커널로 간다.</li><li>함정 하나 더: 다음 부팅에서 보관된 <code>console-ramoops-0</code>의 명령줄이 <strong>캡처 커널의 것</strong>이다. 캡처 커널도 같은 DT를 받아 같은 ramoops 영역의 console 링버퍼에 자기 부팅 로그를 이어 썼기 때문에, 1차 커널의 마지막 콘솔 줄은 밀려났다. kdump + ramoops 조합이라면 캡처 커널 명령줄에서 pstore를 끄거나(예: 캡처 커널용 DTB에서 ramoops 노드 제거, 또는 <code>ramoops.mem_size=0</code> 같은 방법 — 제품 커널에서 동작을 확인하고 쓸 것) console 레코드를 캡처 단계에서 먼저 저장해야 한다.</li></ul>
+<h3 id="6-6-임베디드에서-kdump를-쓰나">6.6 임베디드에서 kdump를 쓰나?<a class="anchor" href="#6-6-임베디드에서-kdump를-쓰나" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>항목</th><th>256 MiB급 소형 보드 (i.MX6ULL, AM335x 등)</th><th>Jetson Orin / i.MX8 고사양 (8~64 GiB)</th></tr></thead><tbody><tr><td>crashkernel 예약</td><td>128 MiB만 잡아도 RAM의 절반</td><td>512 MiB ~ 1 GiB도 부담 적음</td></tr><tr><td>덤프 저장 공간</td><td>eMMC/NAND 몇 백 MiB가 귀함, 쓰기 수명 부담</td><td>NVMe·대용량 eMMC</td></tr><tr><td>덤프 업로드</td><td>셀룰러로 수백 MiB는 비현실적</td><td>필터·압축 후 가능, 또는 현장 회수</td></tr><tr><td>대안</td><td>pstore/ramoops + 좋은 panic 로그 + 재현 환경</td><td>kdump + pstore 둘 다</td></tr><tr><td>결론</td><td><strong>보통 안 쓴다.</strong> 개발 단계나 특정 버그 추적용 빌드에서만</td><td>서버급 운영 방식 그대로 쓸 만하다 (L4로 OTA 배포한 커널마다 vmlinux 보관)</td></tr></tbody></table></div>
+<hr>
+<h2 id="7-유저스페이스-coredump-가장-흔한-필드-크래시">7. 유저스페이스 coredump — 가장 흔한 필드 크래시<a class="anchor" href="#7-유저스페이스-coredump-가장-흔한-필드-크래시" aria-label="link">#</a></h2>
+<h3 id="7-1-커널이-core를-쓰는-경로">7.1 커널이 core를 쓰는 경로<a class="anchor" href="#7-1-커널이-core를-쓰는-경로" aria-label="link">#</a></h3>
+<p>A6 §8에서 본 것처럼, Core 동작 시그널(SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGQUIT …)로 프로세스가 죽으면 커널의 <code>do_coredump()</code>(<code>fs/coredump.c</code>)가 프로세스 메모리와 레지스터를 ELF core 형식으로 내보낸다. <strong>어디로</strong> 보낼지는 <code>kernel.core_pattern</code>이 정한다.</p>
+<div class="tw"><table><thead><tr><th>core_pattern 첫 글자</th><th>종류 (6.18 <code>enum coredump_type_t</code>)</th><th>동작</th></tr></thead><tbody><tr><td>일반 경로 (<code>/var/crash/core.%e.%p</code>)</td><td><code>COREDUMP_FILE</code></td><td>커널이 직접 파일을 만든다. <code>RLIMIT_CORE</code>(ulimit -c)가 크기 한도</td></tr><tr><td>파이프 기호 + 경로 (<code>/path/helper args</code> 앞에 파이프)</td><td><code>COREDUMP_PIPE</code></td><td>커널이 helper를 <strong>root, 초기 네임스페이스</strong>에서 실행하고 core를 stdin으로 흘려 보낸다. <code>RLIMIT_CORE</code>는 무시(단, 값이 1이면 재귀 방지로 중단)</td></tr><tr><td><code>@/path/socket</code></td><td><code>COREDUMP_SOCK</code> (최근 커널에 추가)</td><td>유닉스 소켓으로 coredump 서버에 넘긴다</td></tr></tbody></table></div>
+<p>pattern 지정자: <code>%p</code>(PID), <code>%P</code>(초기 PID 네임스페이스 기준 PID), <code>%u</code>/<code>%g</code>(uid/gid), <code>%s</code>(시그널), <code>%t</code>(epoch 시각), <code>%h</code>(호스트명), <code>%e</code>(실행 파일 이름), <code>%c</code>(RLIMIT_CORE soft 값), <code>%d</code>(dump mode). 전체 목록은 <code>man 5 core</code>.</p>
+<p><code>kernel.core_pipe_limit</code>(이 이미지는 16)은 "동시에 몇 개까지 helper가 끝날 때까지 죽은 프로세스를 수거하지 않고 기다릴지"다. helper가 <code>/proc/&lt;pid&gt;/</code>에서 명령줄·cgroup·환경 같은 메타데이터를 읽을 시간을 준다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10" y="30" width="150" height="56" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="85" y="54" font-size="13" text-anchor="middle">센서 데몬</text>
+<text x="85" y="74" font-size="12" text-anchor="middle">NULL 역참조</text>
+<rect x="190" y="30" width="150" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="265" y="54" font-size="13" text-anchor="middle">커널</text>
+<text x="265" y="74" font-size="12" text-anchor="middle">SIGSEGV → coredump</text>
+<rect x="370" y="30" width="150" height="56" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="445" y="54" font-size="13" text-anchor="middle">systemd-coredump</text>
+<text x="445" y="74" font-size="12" text-anchor="middle">core_pattern 파이프</text>
+<rect x="530" y="30" width="140" height="56" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="600" y="54" font-size="13" text-anchor="middle">@.service</text>
+<text x="600" y="74" font-size="12" text-anchor="middle">소켓으로 넘겨 처리</text>
+<line x1="160" y1="58" x2="188" y2="58" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="340" y1="58" x2="368" y2="58" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="520" y1="58" x2="528" y2="58" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="600" y1="86" x2="600" y2="126" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="370" y="128" width="300" height="60" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="520" y="152" font-size="12" text-anchor="middle">/var/lib/systemd/coredump/core.*.zst</text>
+<text x="520" y="172" font-size="12" text-anchor="middle">ProcessSizeMax · ExternalSizeMax · MaxUse</text>
+<rect x="10" y="128" width="330" height="60" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="175" y="152" font-size="12" text-anchor="middle">journal 항목: PID, 시그널, 명령줄, unit</text>
+<text x="175" y="172" font-size="12" text-anchor="middle">+ elfutils로 만든 스택 트레이스 (심볼 있으면)</text>
+<line x1="530" y1="100" x2="342" y2="150" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah5)"/>
+<rect x="10" y="230" width="330" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="175" y="254" font-size="13" text-anchor="middle">coredumpctl list / info / dump</text>
+<text x="175" y="274" font-size="12" text-anchor="middle">장비 위에서 1차 분류</text>
+<rect x="370" y="230" width="300" height="56" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="520" y="254" font-size="13" text-anchor="middle">업로드 → 서버의 gdb</text>
+<text x="520" y="274" font-size="12" text-anchor="middle">build-id로 심볼 찾아 bt</text>
+<line x1="175" y1="188" x2="175" y2="228" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="520" y1="188" x2="520" y2="228" stroke="currentColor" marker-end="url(#ah5)"/>
+<text x="20" y="316" font-size="13">core 파일과 메타데이터(journal)는 따로 산다 — 파일이 지워져도 "언제 무엇이 죽었나"는 남는다.</text>
+</svg></figure>
+<p>그림 6 — systemd-coredump 파이프라인</p>
+<h3 id="예제-8-일부러-죽는-센서-데몬">예제 8 — 일부러 죽는 "센서 데몬"<a class="anchor" href="#예제-8-일부러-죽는-센서-데몬" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 잘린 프레임에서 <code>payload</code>가 NULL이 되어 <code>strlen()</code>이 폴트하는 프로그램. 인자 1이면 <code>abort()</code>, 2면 64 MiB 힙을 압축 안 되는 값으로 채운 뒤 폴트한다(크기 한도 실험용). VM 호스트(gcc 15, glibc 2.42)에서 빌드한 동적 바이너리는 게스트(Ubuntu 24.04, glibc 2.39)에서 심볼 버전 때문에 안 돌 수 있어서 <code>-static</code>으로 빌드했다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* l7_segv.c — a "sensor daemon" that dereferences a bad pointer on a parse error */
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+
+struct frame { int id; char *payload; };
+
+static int parse_frame(const struct frame *f)
+{
+    /* bug: payload is NULL for a truncated frame, strlen() faults */
+    return (int)strlen(f-&gt;payload);
+}
+
+static void handle_rx(int seq)
+{
+    struct frame f = { .id = seq, .payload = NULL };
+    if (seq &lt; 3) f.payload = "OK";
+    printf("seq %d len %d\n", seq, parse_frame(&amp;f));
+    fflush(stdout);
+}
+
+int main(int argc, char **argv)
+{
+    int mode = argc &gt; 1 ? atoi(argv[1]) : 0;
+    if (mode == 1) abort();                 /* SIGABRT path */
+    if (mode == 2) {                        /* big heap, to test size limits */
+        size_t n = 64u &lt;&lt; 20;
+        char *p = malloc(n);
+        if (!p) { perror("malloc"); exit(1); }
+        for (size_t i = 0; i &lt; n; i++)      /* fill with hard-to-compress bytes */
+            p[i] = (char)((i * 2654435761u) &gt;&gt; 13);
+        __asm__ volatile("" : : "r"(p) : "memory"); /* keep malloc alive */
+        printf("touched %zu MiB\n", n &gt;&gt; 20);
+    }
+    for (int seq = 0; seq &lt; 5; seq++)
+        handle_rx(seq);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>gcc -std=gnu11 -Wall -Wextra -O1 -g -static l7_segv.c -o /var/tmp/L7/bin/l7_segv
+file /var/tmp/L7/bin/l7_segv</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>/var/tmp/L7/bin/l7_segv: ELF 64-bit LSB executable, ARM aarch64, version 1 (GNU/Linux), statically linked, BuildID[sha1]=c62e5b58b09b15548e07f93133b3a48e937b8632, for GNU/Linux 3.7.0, with debug_info, not stripped</code></pre></figure>
+<p>출력에서 볼 것: 경고 0개. <code>BuildID[sha1]=...</code> — 링커가 넣는 이 해시가 나중에 "이 core는 어느 빌드의 바이너리였나"를 정하는 열쇠다(§9). 이 값은 첫 빌드의 것이고, 64 MiB 채우기 부분을 고친 뒤 다시 빌드한 바이너리는 build-id가 달라진다(코드가 바뀌면 바뀐다 — 그게 요점이다).</p>
+<p>처음 버전은 힙을 <code>memset(p, 0x5a, n)</code>으로 채웠는데 core가 전혀 커지지 않았다. <code>-O1</code>에서 GCC가 "쓰고 한 번도 안 읽는 malloc"을 통째로 지웠기 때문이다(malloc elision). 빈 <code>asm volatile</code>에 포인터를 넘겨 컴파일러가 지우지 못하게 했다.</p>
+<h3 id="예제-9-systemd-coredump-coredumpctl">예제 9 — systemd-coredump + coredumpctl<a class="anchor" href="#예제-9-systemd-coredump-coredumpctl" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: sysd 게스트에서 테스트 서비스(<code>l7.mode=core</code>)가 위 프로그램을 SIGSEGV·SIGABRT로 죽이고 <code>coredumpctl</code>로 본다. 그다음 core를 꺼내 VM 호스트의 gdb로 분석한다(게스트 이미지에는 gdb가 없다).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>sysctl kernel.core_pattern kernel.core_pipe_limit
+ulimit -c unlimited
+/usr/local/bin/l7_segv;   echo "exit status $?"
+/usr/local/bin/l7_segv 1; echo "exit status $?"
+sleep 3
+coredumpctl list --no-pager
+coredumpctl info --no-pager COREDUMP_SIGNAL_NAME=SIGSEGV | sed -n '1,40p'
+ls -l /var/lib/systemd/coredump/
+coredumpctl dump --no-pager -o /var/crash/l7/core.segv COREDUMP_SIGNAL_NAME=SIGSEGV</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>kernel.core_pattern = |/usr/lib/systemd/systemd-coredump %P %u %g %s %t 9223372036854775808 %h %d
+kernel.core_pipe_limit = 16
+seq 0 len 2
+seq 1 len 2
+seq 2 len 2
+/usr/local/sbin/l7-core.sh: line 7:   329 Segmentation fault      (core dumped) /usr/local/bin/l7_segv
+L7&gt; exit status 139
+/usr/local/sbin/l7-core.sh: line 8:   379 Aborted                 (core dumped) /usr/local/bin/l7_segv 1
+L7&gt; exit status 134
+TIME                        PID UID GID SIG     COREFILE EXE                    SIZE
+Sun 2026-10-18 04:43:01 UTC 329   0   0 SIGSEGV missing  /usr/local/bin/l7_segv    -
+Sun 2026-10-18 04:43:15 UTC 352   0   0 SIGABRT missing  /usr/local/bin/l7_segv    -
+Sun 2026-10-18 04:43:43 UTC 400   0   0 SIGSEGV missing  /usr/local/bin/l7_segv    -
+Sun 2026-10-18 04:52:20 UTC 329   0   0 SIGSEGV present  /usr/local/bin/l7_segv 8.1K
+Sun 2026-10-18 04:52:27 UTC 379   0   0 SIGABRT present  /usr/local/bin/l7_segv 7.9K
+           PID: 329 (l7_segv)
+           UID: 0 (root)
+           GID: 0 (root)
+        Signal: 11 (SEGV)
+     Timestamp: Sun 2026-10-18 04:42:44 UTC (9min ago)
+  Command Line: /usr/local/bin/l7_segv
+    Executable: /usr/local/bin/l7_segv
+ Control Group: /system.slice/l7-test.service
+          Unit: l7-test.service
+         Slice: system.slice
+       Boot ID: 2e7f7cb05165415dbc84c85c4c957305
+    Machine ID: 1db677694b984127a01b305411b4cd2d
+      Hostname: labsysd
+       Storage: /var/lib/systemd/coredump/core.l7_segv.0.2e7f7cb05165415dbc84c85c4c957305.329.1792298564000000.zst (missing)
+       Message: Process 329 (l7_segv) of user 0 dumped core.
+
+                Stack trace of thread 329:
+                #0  0x0000000000411b10 n/a (n/a + 0x0)
+                #1  0x00000000004007e0 n/a (n/a + 0x0)
+                #2  0x00000000004008d0 n/a (n/a + 0x0)
+                #3  0x0000000000400f4c n/a (n/a + 0x0)
+                #4  0x00000000004005f0 n/a (n/a + 0x0)
+                ELF object binary architecture: AARCH64
+...
+total 28
+-rw-r----- 1 root root 8367 Oct 18 04:52 core.l7_segv.0.102fc2e65196459c9ff2bf3d4ef7e0bf.329.1792299129000000.zst
+-rw-r----- 1 root root 8153 Oct 18 04:52 core.l7_segv.0.102fc2e65196459c9ff2bf3d4ef7e0bf.379.1792299140000000.zst
+-rw-r--r-- 1 root root 1998848 Oct 18 04:52 /var/crash/l7/core.segv</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>이 출력은 같은 이미지를 <strong>두 번째로</strong> 부팅한 실행의 것이다. 첫 실행의 core 파일은 실험 사이에 내가 지웠는데, 목록에는 <code>missing</code>으로 남아 있다. <strong>메타데이터는 journal에, core 본체는 파일로 따로</strong> 저장되기 때문이다. 필드에서 디스크 한도(<code>MaxUse=</code>)로 core 파일이 정리돼도 "언제, 어느 unit의, 어떤 시그널"이었는지는 journal에 남는다. PID 329가 두 번 보이는 것도 실제 상황 — 부팅마다 같은 순서로 서비스가 뜨면 PID가 겹친다. 그래서 식별자는 PID가 아니라 <strong>Boot ID + PID + 시각</strong>이다(파일 이름에 셋 다 들어 있다).</li><li>셸이 <code>(core dumped)</code>, 종료 코드 139 = 128 + 11(SIGSEGV), 134 = 128 + 6(SIGABRT).</li><li><code>Unit: l7-test.service</code>, <code>Control Group</code> — 어느 서비스가 죽었는지 systemd가 붙여 준다. 크래시 대시보드에서 "서비스별 크래시 수"를 집계하는 키.</li><li>core는 <code>.zst</code>(zstd)로 압축돼 8 KiB. <code>coredumpctl dump</code>로 풀어 놓으니 약 2 MB(정적 바이너리라 libc가 다 들어 있다).</li><li><strong>스택 트레이스가 <code>n/a</code>다.</strong> systemd-coredump는 elfutils로 스택을 풀지만, 이 정적 바이너리는 "어느 ELF 모듈인지"를 core 안의 link map으로 찾지 못해 심볼을 못 붙였다. 장비 위 즉석 트레이스는 "있으면 좋은 것"이고, 확실한 분석은 서버에서 한다.</li></ul>
+<p>VM 호스트에서 gdb로:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>gdb -q -batch -ex "bt" -ex "frame 2" -ex "info locals" /var/tmp/L7/bin/l7_segv core.segv</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Core was generated by `/usr/local/bin/l7_segv'.
+Program terminated with signal SIGSEGV, Segmentation fault.
+#0  0x00000000004129d0 in __strlen_asimd ()
+#0  0x00000000004129d0 in __strlen_asimd ()
+#1  0x00000000004009b4 in parse_frame (f=&lt;synthetic pointer&gt;) at /Users/donh/.elinux_scratch/L7/guest/l7_segv.c:12
+#2  handle_rx (seq=3) at /Users/donh/.elinux_scratch/L7/guest/l7_segv.c:19
+#3  main (argc=&lt;optimized out&gt;, argv=&lt;optimized out&gt;) at /Users/donh/.elinux_scratch/L7/guest/l7_segv.c:37
+#2  handle_rx (seq=3) at /Users/donh/.elinux_scratch/L7/guest/l7_segv.c:19
+19	    printf("seq %d len %d\n", seq, parse_frame(&amp;f));
+f = {id = &lt;optimized out&gt;, payload = 0x0}</code></pre></figure>
+<p>출력에서 볼 것: 디버그 정보가 있는 같은 바이너리를 주니 <code>strlen</code> ← <code>parse_frame</code> ← <code>handle_rx(seq=3)</code> ← <code>main</code>, 그리고 <code>payload = 0x0</code>까지 바로 나온다. 장비에는 strip된 바이너리, 서버에는 같은 build-id의 디버그 정보 — 이 분리가 §9의 symbol server 구조다. gdb는 시작할 때 <code>https://debuginfod.ubuntu.com</code>을 쓸지 물었다(배치 모드라 N). 배포판 패키지는 이 방식으로 심볼을 받는다.</p>
+<h3 id="예제-10-크기-한도-coredump-conf-core_pattern-파일-rlimit_core">예제 10 — 크기 한도: coredump.conf, core_pattern 파일, RLIMIT_CORE<a class="anchor" href="#예제-10-크기-한도-coredump-conf-core_pattern-파일-rlimit_core" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: (B) systemd-coredump의 <code>ProcessSizeMax=16M</code>이 64 MiB 힙 프로세스에 어떻게 작동하나, (C) core_pattern을 일반 파일로 바꾸고 <code>ulimit -c</code>를 0 / 무제한 / 4096으로 바꿔 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>mkdir -p /etc/systemd/coredump.conf.d
+printf '[Coredump]\nProcessSizeMax=16M\nExternalSizeMax=16M\n' &gt; /etc/systemd/coredump.conf.d/l7.conf
+/usr/local/bin/l7_segv 2; sleep 3
+coredumpctl info --no-pager -1 | grep -E "PID|Signal|Storage|Size|Message" | head -8
+rm /etc/systemd/coredump.conf.d/l7.conf
+mkdir -p /var/crash; sysctl -w kernel.core_pattern=/var/crash/core.%e.%p.%s
+( ulimit -c 0;         /usr/local/bin/l7_segv &gt;/dev/null ); echo "ulimit 0 -&gt; $(ls /var/crash | grep -c core) core files"
+( ulimit -c unlimited; /usr/local/bin/l7_segv 2 &gt;/dev/null )
+( ulimit -c 4096;      /usr/local/bin/l7_segv 2 &gt;/dev/null )
+ls -ls /var/crash/ | grep core</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>touched 64 MiB
+/usr/local/sbin/l7-core.sh: line 18:   455 Segmentation fault      (core dumped) /usr/local/bin/l7_segv 2
+           PID: 455 (l7_segv)
+        Signal: 11 (SEGV)
+       Storage: /var/lib/systemd/coredump/core.l7_segv.0.102fc2e65196459c9ff2bf3d4ef7e0bf.455.1792299158000000.zst (truncated)
+  Size on Disk: 183.6K
+       Message: Process 455 (l7_segv) of user 0 dumped core.
+kernel.core_pattern = /var/crash/core.%e.%p.%s
+/usr/local/sbin/l7-core.sh: line 24:   510 Segmentation fault      /usr/local/bin/l7_segv &gt; /dev/null
+L7&gt; ulimit 0 -&gt; 0 core files
+/usr/local/sbin/l7-core.sh: line 25:   515 Segmentation fault      (core dumped) /usr/local/bin/l7_segv 2 &gt; /dev/null
+/usr/local/sbin/l7-core.sh: line 26:   526 Segmentation fault      (core dumped) /usr/local/bin/l7_segv 2 &gt; /dev/null
+65612 -rw------- 1 root root 68370432 Oct 18 04:52 core.l7_segv.515.11
+ 4096 -rw------- 1 root root  5500928 Oct 18 04:52 core.l7_segv.526.11</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>(B) 64 MiB 힙 프로세스는 <code>ProcessSizeMax=16M</code>을 넘어서 <code>(truncated)</code> — 앞부분 16 MiB까지만 압축 저장(183.6 KiB). 잘린 core도 레지스터·스택이 앞쪽 note·세그먼트에 있으면 bt는 대개 나온다. 힙 내용을 봐야 하는 버그라면 못 본다.</li><li>(C) 파일 모드에서는 <code>RLIMIT_CORE</code>가 그대로 적용된다. <code>ulimit -c 0</code>이면 셸 메시지에서 <code>(core dumped)</code>가 빠지고 파일이 없다. 무제한이면 68 MB(64 MiB 힙 + 나머지). <code>ulimit -c 4096</code>(bash 단위 1 KiB 블록 = 4 MiB)이면 디스크 실사용이 정확히 4096 KiB에서 멈췄다. 겉보기 크기 5.5 MB가 더 큰 것은 0인 페이지를 커널이 건너뛰어(hole) sparse 파일로 썼기 때문이다.</li><li>파이프 모드(systemd-coredump)에서는 커널이 <code>RLIMIT_CORE</code>를 무시하고(소스 <code>fs/coredump.c</code>: <code>cprm-&gt;limit = RLIM_INFINITY</code>), 대신 helper에 한도 값을 인자로 넘긴다. Ubuntu의 <code>50-coredump.conf</code>는 그 자리에 <code>%c</code> 대신 상수 <code>9223372036854775808</code>(2^63)을 넣어 <strong>서비스의 <code>LimitCORE=</code>와 상관없이 항상 수집</strong>하게 해 두었다. 한도 관리는 <code>coredump.conf</code>(ProcessSizeMax·ExternalSizeMax·MaxUse·KeepFree)로 한다.</li></ul>
+<h3 id="7-2-임베디드-core-정책">7.2 임베디드 core 정책<a class="anchor" href="#7-2-임베디드-core-정책" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>결정</th><th>선택지</th><th>권장</th></tr></thead><tbody><tr><td>수집기</td><td>커널 파일 직접 / systemd-coredump / 자체 helper(파이프 기호 + <code>/usr/bin/crash-catcher</code>)</td><td>systemd 장비면 systemd-coredump. BusyBox 장비면 작은 helper가 압축·회전·메타데이터 기록</td></tr><tr><td>크기</td><td>전체 core / 잘린 core / minidump</td><td>플래시가 작으면 <code>ProcessSizeMax</code> 수 MiB + 압축. 큰 앱(카메라·AI)은 minidump</td></tr><tr><td>무엇을 뺄까</td><td><code>/proc/&lt;pid&gt;/coredump_filter</code> 비트(익명 private, shared, ELF 헤더, hugetlb …)</td><td>큰 DMA 버퍼·카메라 공유 메모리는 빼고 힙·스택만</td></tr><tr><td>보관</td><td><code>MaxUse=</code>·<code>KeepFree=</code></td><td>쓰기 수명 고려해 개수·용량 상한</td></tr><tr><td>재시작</td><td>systemd <code>Restart=on-failure</code> + <code>StartLimitBurst</code></td><td>크래시 루프는 L4의 bootcount·롤백으로 연결</td></tr></tbody></table></div>
+<p><strong>minidump</strong>(Google Breakpad/Crashpad의 형식)는 전체 메모리 대신 스레드별 스택 일부·레지스터·모듈 목록(build-id 포함)만 담은 수십~수백 KiB짜리 덤프다. 앱 안에 시그널 핸들러(또는 별도 handler 프로세스)를 넣어 크래시 순간 직접 쓴다. 서버 쪽에서 build-id로 심볼을 찾아 스택을 복원한다. 크롬·안드로이드 앱·여러 임베디드 제품이 이 방식을 쓴다. 이 노트에서는 개념만 다룬다(실행 안 함).</p>
+<hr>
+<h2 id="8-원격-로그-장비-밖으로-꺼내기">8. 원격 로그 — 장비 밖으로 꺼내기<a class="anchor" href="#8-원격-로그-장비-밖으로-꺼내기" aria-label="link">#</a></h2>
+<h3 id="8-1-왜-따로-설계해야-하나">8.1 왜 따로 설계해야 하나<a class="anchor" href="#8-1-왜-따로-설계해야-하나" aria-label="link">#</a></h3>
+<p>장비 안에 아무리 잘 남겨도, 장비가 회수되지 않으면 소용없다. 그리고 몇몇 크래시(전원·조용한 정지)는 <strong>장비 안에 아무것도 안 남는다</strong> — 그 직전까지 밖으로 보낸 로그가 유일한 증거다. 경로는 둘로 나뉜다.</p>
+<div class="tw"><table><thead><tr><th>경로</th><th>무엇</th><th>장점</th><th>한계</th></tr></thead><tbody><tr><td><strong>netconsole</strong></td><td>커널 printk를 UDP로 즉시 송신 (netpoll — 인터럽트·스케줄러 없이 NIC를 폴링)</td><td>panic 메시지까지 나간다. 유저스페이스 불필요</td><td>UDP라 유실·순서 보장 없음, 같은 L2/라우팅 필요, 암호화 없음. 랩·공장·사내망용</td></tr><tr><td><strong>journal 업로드</strong> (systemd-journal-upload → journal-remote)</td><td>journald 항목을 HTTP(S)로 전송, 커서로 재개</td><td>구조화 필드, TLS 가능, 끊겼다가 이어 보냄</td><td>유저스페이스가 살아 있어야. panic 메시지는 못 보냄</td></tr><tr><td>rsyslog / syslog-ng / fluent-bit / vector</td><td>로그 수집·필터·버퍼링·여러 목적지</td><td>디스크 버퍼, 재시도, 변환</td><td>메모리·CPU 비용, 설정 복잡</td></tr><tr><td>크래시 파일 업로더 (자체 데몬)</td><td>pstore·core·vmcore 파일을 묶어 HTTPS로</td><td>큰 파일, 재시도, 대역폭 제어</td><td>직접 만들어야 함 (§10)</td></tr></tbody></table></div>
+<h3 id="예제-11-netconsole-게스트-커널-로그와-panic을-udp로-vm-호스트에-보낸다">예제 11 — netconsole: 게스트 커널 로그와 panic을 UDP로 VM 호스트에 보낸다<a class="anchor" href="#예제-11-netconsole-게스트-커널-로그와-panic을-udp로-vm-호스트에-보낸다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: Image-sec는 <code>CONFIG_NETCONSOLE=y</code> + <code>NETCONSOLE_DYNAMIC=y</code>라 부팅 후 configfs로 대상을 만들 수 있다. QEMU user-net에서 게스트가 보는 <code>10.0.2.2</code>는 VM 호스트의 루프백으로 NAT되므로, VM 호스트에서 <code>socat</code>으로 UDP 16677을 받는다. 게이트웨이 MAC은 QEMU slirp의 고정값 <code>52:55:0a:00:02:02</code>.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># VM host side (before booting the guest)
+socat -u UDP-RECV:16677 OPEN:l7_netcon.txt,creat,append &amp;</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code># guest side (l7-core.sh, part E)
+ip -br link; ip -br addr
+mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
+N=/sys/kernel/config/netconsole/l7; mkdir $N
+DEV=$(ip -br link | awk '$1 ~ /^en/ {print $1; exit}')
+echo $DEV &gt; $N/dev_name; echo 10.0.2.15 &gt; $N/local_ip; echo 10.0.2.2 &gt; $N/remote_ip
+echo 16677 &gt; $N/remote_port; echo 52:55:0a:00:02:02 &gt; $N/remote_mac; echo 1 &gt; $N/enabled
+for f in enabled dev_name local_ip remote_ip remote_port remote_mac; do echo "$f=$(cat $N/$f)"; done
+echo "&lt;3&gt;L7 netconsole: hello from guest $(hostname)" &gt; /dev/kmsg
+sleep 1; sync; echo c &gt; /proc/sysrq-trigger</code></pre></figure>
+<p>게스트 출력:</p>
+<figure class="code"><span class="lang">text</span><pre><code>lo               UNKNOWN        00:00:00:00:00:00 &lt;LOOPBACK,UP,LOWER_UP&gt;
+enp0s1           UP             52:54:00:12:34:56 &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt;
+lo               UNKNOWN        127.0.0.1/8 ::1/128
+enp0s1           UP             10.0.2.15/24 metric 1024 fec0::5054:ff:fe12:3456/64 fe80::5054:ff:fe12:3456/64
+enabled=1
+dev_name=enp0s1
+local_ip=10.0.2.15
+remote_ip=10.0.2.2
+remote_port=16677
+remote_mac=52:55:0a:00:02:02</code></pre></figure>
+<p>VM 호스트가 받은 것 (<code>l7_netcon.txt</code> 처음 부분, 콜스택 중간 생략):</p>
+<figure class="code"><span class="lang">text</span><pre><code>[  306.861828] L7 netconsole: hello from guest labsysd
+[  308.234051] sysrq: Trigger a crash
+[  308.241264] Kernel panic - not syncing: sysrq triggered crash
+[  308.242316] CPU: 1 UID: 0 PID: 321 Comm: l7-core.sh Not tainted 6.18.55-sec #1 PREEMPT
+[  308.242561] Hardware name: linux,dummy-virt (DT)
+[  308.242821] Call trace:
+[  308.243035]  show_stack+0x28/0x7c (C)
+...
+[  308.249442]  write_sysrq_trigger+0xb0/0xe0
+...
+[  308.250721] SMP: stopping secondary CPUs
+[  308.253822] Kernel Offset: 0x2ef8d9600000 from 0xffff800080000000
+[  308.254033] PHYS_OFFSET: 0xfff1000040000000
+[  308.254185] CPU features: 0x104000,04027800,40004000,0400421b
+[  308.254383] Memory Limit: none
+[  308.254812] ---[ end Kernel panic - not syncing: sysrq triggered crash ]---</code></pre></figure>
+<p>출력에서 볼 것: <strong>panic의 마지막 줄 <code>---[ end Kernel panic ...]---</code>까지 UDP로 나갔다.</strong> 파일시스템·네트워크 스택 상위 계층은 이미 못 쓰는 상태지만 netpoll은 NIC 드라이버의 poll 함수로 직접 패킷을 내보낸다. 장비 랙이나 HIL 테스트 벤치에서 시리얼 콘솔 수십 개를 깔지 않고 로그를 모으는 실전 방법이다. 같은 설정을 부팅 인자로 주려면 <code>netconsole=6665@10.0.2.15/eth0,16677@10.0.2.2/52:55:0a:00:02:02</code> 형식(인자 시점에는 udev 이름 변경 전이라 <code>eth0</code>)을 쓴다 — 이 형식은 이 노트에서 실행하지 않았다. <code>CONFIG_NETCONSOLE_EXTENDED_LOG</code>를 켜고 대상에 <code>extended=1</code>을 주면 시퀀스 번호·레벨이 포함된 형식으로 보내 유실·순서 문제를 수신 쪽에서 판별할 수 있다(Image-sec에서는 꺼져 있다).</p>
+<h3 id="예제-12-systemd-journal-upload-systemd-journal-remote-게스트-안-루프백">예제 12 — systemd-journal-upload → systemd-journal-remote (게스트 안 루프백)<a class="anchor" href="#예제-12-systemd-journal-upload-systemd-journal-remote-게스트-안-루프백" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: VM 호스트에는 <code>systemd-journal-remote</code>가 설치돼 있지 않아서 게스트 안에서 수신기(<code>journal-remote</code>)와 송신기(<code>journal-upload</code>)를 둘 다 돌렸다. 핵심은 <strong>커서 기반 재개</strong>다 — <code>--save-state</code> 파일에 마지막으로 보낸 위치를 저장하고, 다음 업로드는 거기서부터 보낸다. 이것이 "오프라인이 잦은 장비"의 store-and-forward 기본기다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>rm -rf /var/tmp/l7r; mkdir -p /var/tmp/l7r
+/usr/lib/systemd/systemd-journal-remote --listen-http=19532 --output=/var/tmp/l7r/ &amp; JR=$!
+sleep 2
+logger -t l7app "field event #1: imu timeout on /dev/spidev1.0"
+/usr/lib/systemd/systemd-journal-upload --url=http://127.0.0.1:19532 --save-state=/var/tmp/l7r/state --follow=no 2&gt;&amp;1 | tail -2
+echo "state file: $(head -3 /var/tmp/l7r/state)"
+logger -t l7app "field event #2: imu recovered after reset"
+/usr/lib/systemd/systemd-journal-upload --url=http://127.0.0.1:19532 --save-state=/var/tmp/l7r/state --follow=no 2&gt;&amp;1 | tail -2
+kill $JR; wait $JR 2&gt;/dev/null
+ls -l /var/tmp/l7r/
+journalctl --directory=/var/tmp/l7r --no-pager -t l7app -o short-monotonic
+journalctl --directory=/var/tmp/l7r --no-pager -o export -t l7app -n 1 | grep -E "^(MESSAGE|_HOSTNAME|_BOOT_ID|_MACHINE_ID|__CURSOR)=" | cut -c1-90</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>No more entries, closing journal.
+L7&gt; state file: # This is private data. Do not parse.
+LAST_CURSOR=s=98b87f11ab9a42ec821ba5cccc0a8b39;i=1c15;b=102fc2e65196459c9ff2bf3d4ef7e0bf;m=7538fdc;t=65e162cd8922c;x=f245c8a4b2f69a8f
+No more entries, closing journal.
+Finishing after writing 6798 entries
+total 8200
+-rw-r----- 1 root root 8388608 Oct 18 04:53 remote-127.0.0.1.journal
+-rw------- 1 root root     172 Oct 18 04:53 state
+[  237.130711] labsysd l7app[486]: field event #1: imu timeout on /dev/spidev1.0
+[  298.790488] labsysd l7app[604]: field event #2: imu recovered after reset
+-- Boot 102fc2e65196459c9ff2bf3d4ef7e0bf --
+[  106.002351] labsysd l7app[548]: field event #1: imu timeout on /dev/spidev1.0
+[  132.839860] labsysd l7app[635]: field event #2: imu recovered after reset
+__CURSOR=s=24b914dc80104db990b6f67fb566dcae;i=1a8e;b=102fc2e65196459c9ff2bf3d4ef7e0bf;m=7e
+_BOOT_ID=102fc2e65196459c9ff2bf3d4ef7e0bf
+_MACHINE_ID=1db677694b984127a01b305411b4cd2d
+_HOSTNAME=labsysd
+MESSAGE=field event #2: imu recovered after reset</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>첫 업로드는 state 파일이 없으니 <strong>디스크에 있는 저널 전체</strong>(이전 부팅 것 포함)를 보냈다. 수신기가 끝날 때 <code>Finishing after writing 6798 entries</code>. 이 이미지를 두 번 부팅했기 때문에 수신 저널에 부팅 두 개(<code>-- Boot ... --</code>)의 <code>l7app</code> 항목이 다 들어 있다. 실제 장비에서 처음 연결할 때 몇 주치 로그가 한꺼번에 올라가는 장면이 이것이다 — 대역폭 상한이 필요한 이유.</li><li>두 번째 업로드는 <code>LAST_CURSOR</code> 다음부터, 즉 새 항목만 보냈다. 커서에는 <code>b=</code>(boot ID), <code>m=</code>(monotonic), <code>t=</code>(realtime), <code>i=</code>(seqnum)이 들어 있어 "어디까지 보냈나"가 정확하다.</li><li>수신 쪽 항목에 <code>_MACHINE_ID</code>, <code>_BOOT_ID</code>, <code>_HOSTNAME</code>이 붙어 있다. 서버는 이 필드로 장비·부팅을 구분한다. 첫 부팅 때 생성되는 machine-id가 <strong>장비 ID로 쓰기에는 부적절할 수 있다</strong>(이미지 복제·공장 초기화 시 바뀌거나 겹친다) — 제품에서는 보안 칩·eFuse의 시리얼을 따로 붙인다.</li><li>첫 업로드(약 6000~6800 항목)는 두 번의 실행에서 TCG 기준 26초와 61초 걸렸다. VM 부하에 따라 흔들리는 값이고 실 HW 수치가 아니다.</li><li><code>journal-upload</code>는 <code>--url=https://...</code>와 <code>--key=</code>/<code>--cert=</code>/<code>--trust=</code>로 상호 TLS를 지원한다. 실제 배포에서는 HTTP 평문을 쓰지 않는다.</li></ul>
+<h3 id="8-2-store-and-forward-속도-제한-pii">8.2 store-and-forward, 속도 제한, PII<a class="anchor" href="#8-2-store-and-forward-속도-제한-pii" aria-label="link">#</a></h3>
+<p><strong>store-and-forward</strong>: 드론·차량·원격 센서는 대부분의 시간 오프라인이다. 원칙:</p>
+<ol><li><strong>먼저 로컬에 영구 저장</strong>(journald <code>Storage=persistent</code>, pstore·core 보관 디렉터리). 업로드 성공 전에는 지우지 않는다.</li><li><strong>커서·확인응답으로 재개</strong>. 업로드 단위는 멱등(같은 것을 두 번 보내도 서버가 중복 제거 — crash ID·journal cursor로).</li><li><strong>용량 상한과 우선순위</strong>. journald <code>SystemMaxUse=</code>, coredump <code>MaxUse=</code>. 공간이 모자라면 오래된 info 로그부터 버리고 크래시 증거는 최대한 지킨다.</li><li><strong>연결되면 작은 것부터</strong>: 크래시 요약(시그널·스택·build-id, 수 KiB) → pstore 로그 → core/vmcore(큰 것, Wi-Fi·도킹 때만).</li><li><strong>쓰기 수명</strong>: 크래시 루프가 eMMC를 갉아먹지 않게 같은 크래시 시그니처는 횟수만 세고 덤프는 처음 몇 개만.</li></ol>
+<p><strong>속도 제한(rate limiting)</strong>: 커널은 <code>printk_ratelimit()</code>·<code>dev_*_ratelimited()</code>로, journald는 <code>RateLimitIntervalSec=</code>/<code>RateLimitBurst=</code>로, 업로더는 대역폭 상한으로. 고장 난 센서가 초당 수천 줄 에러를 뿜으면 로그가 진짜 원인을 밀어내고 셀룰러 요금을 태운다. SSD 펌웨어에서 같은 에러 이벤트를 카운터로 합쳤던 것과 같은 처리.</p>
+<p><strong>PII·보안</strong>: 크래시 데이터에는 의도치 않은 것이 들어간다 — core에는 메모리 전체(카메라 프레임, 위치, 토큰), 로그에는 SSID·IP·사용자 이름, vmcore에는 키링까지. 국방·카메라 장비라면 특히:</p>
+<ul><li>수집 범위 축소(minidump, <code>coredump_filter</code>, <code>-d 31</code>로 유저 페이지 제외).</li><li>저장 시 암호화(dm-crypt 파티션 — L6), 전송은 상호 TLS, 서버 접근 제어·보존 기간.</li><li>로그 메시지에 비밀을 쓰지 않는 코딩 규칙, 업로드 전 필터(정규식 마스킹).</li><li>고객 동의·계약(무엇을 언제 올리는지)과 오프라인 모드(망 분리 장비는 USB 회수 절차).</li></ul>
+<hr>
+<h2 id="9-크래시-id-build-id-symbol-server">9. 크래시 ID · build-id · symbol server<a class="anchor" href="#9-크래시-id-build-id-symbol-server" aria-label="link">#</a></h2>
+<h3 id="9-1-build-id가-열쇠다">9.1 build-id가 열쇠다<a class="anchor" href="#9-1-build-id가-열쇠다" aria-label="link">#</a></h3>
+<p>필드 크래시를 해석하려면 "이 주소는 어느 빌드의 어느 함수인가"를 알아야 한다. 버전 문자열은 틀릴 수 있다(로컬 빌드, 같은 버전 재빌드). <strong>build-id</strong>(링커가 <code>.note.gnu.build-id</code>에 넣는 해시)는 바이너리 내용이 같으면 같고 다르면 다르다.</p>
+<div class="tw"><table><thead><tr><th>대상</th><th>build-id가 있는 곳</th><th>확인 방법</th></tr></thead><tbody><tr><td>유저 실행 파일·라이브러리</td><td>ELF note</td><td><code>file</code>, <code>readelf -n</code>, core 안의 매핑 첫 페이지</td></tr><tr><td>커널</td><td>vmlinux note + VMCOREINFO <code>BUILD-ID=</code></td><td>예제 7의 vmcore note, <code>/sys/kernel/notes</code></td></tr><tr><td>커널 모듈</td><td><code>.ko</code> note</td><td><code>readelf -n x.ko</code></td></tr></tbody></table></div>
+<h3 id="9-2-symbol-server-구조">9.2 symbol server 구조<a class="anchor" href="#9-2-symbol-server-구조" aria-label="link">#</a></h3>
+<ol><li>CI가 빌드할 때 <strong>strip 전 디버그 정보</strong>(<code>objcopy --only-keep-debug</code>)를 build-id 키로 저장(<code>.build-id/ab/cdef....debug</code> 디렉터리 구조 또는 debuginfod 서버).</li><li>장비에는 strip된 바이너리만 배포(용량·역공학 방지).</li><li>크래시 수신 서버가 core/minidump/vmcore에서 build-id를 읽고 디버그 정보를 가져와 스택을 심볼화.</li><li><strong>debuginfod</strong>(elfutils 프로젝트)는 이 저장소를 HTTP로 제공하는 표준 서버다. gdb·elfutils·systemd-coredump(빌드 옵션에 따라)가 <code>DEBUGINFOD_URLS</code> 환경 변수로 자동 조회한다. 예제 9에서 gdb가 <code>debuginfod.ubuntu.com</code>을 물어본 것이 이것.</li></ol>
+<p>커널은 같은 원리로 <code>vmlinux</code>(전체 DWARF)와 <code>System.map</code>, 모듈 <code>.ko.debug</code>를 릴리스별로 보관한다. §6.4에서 본 것처럼 <code>DEBUG_INFO_REDUCED</code>로 만든 vmlinux로는 crash가 열리지 않으니, <strong>보관용 디버그 정보는 완전하게</strong> 만든다(장비 이미지 크기와 무관하다).</p>
+<h3 id="9-3-크래시-id와-중복-제거">9.3 크래시 ID와 중복 제거<a class="anchor" href="#9-3-크래시-id와-중복-제거" aria-label="link">#</a></h3>
+<p>서버에는 같은 버그의 크래시가 장비 수천 대에서 수백 번씩 올라온다. 대시보드가 쓸모 있으려면 <strong>크래시 시그니처</strong>로 묶어야 한다:</p>
+<ul><li>유저 크래시: (실행 파일 build-id, 시그널, 심볼화된 상위 N 프레임의 함수명) 해시.</li><li>커널 크래시: (커널 build-id, panic 문자열 정규화, 콜스택 상위 함수명 — 오프셋·주소·PID·타임스탬프 제거) 해시.</li><li>개별 발생 ID: 장비 시리얼 + boot ID + 시각.</li></ul>
+<p>그다음 "시그니처별 발생 수, 영향 장비 수, 첫 발생 버전, 마지막 발생 버전"으로 정렬하면 OTA 수정의 우선순위가 나온다. SSD 펌웨어 시절 RMA 분석에서 "같은 assert ID가 몇 개 드라이브에서 났나"로 분류했던 것과 같다.</p>
+<hr>
+<h2 id="10-필드-크래시-파이프라인-설계">10. 필드 크래시 파이프라인 설계<a class="anchor" href="#10-필드-크래시-파이프라인-설계" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="20" font-size="13">장비 위</text>
+<rect x="10" y="30" width="150" height="70" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="85" y="54" font-size="13" text-anchor="middle">① 캡처</text>
+<text x="85" y="74" font-size="12" text-anchor="middle">pstore · core</text>
+<text x="85" y="92" font-size="12" text-anchor="middle">kdump · reset cause</text>
+<rect x="180" y="30" width="150" height="70" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="255" y="54" font-size="13" text-anchor="middle">② 영구화</text>
+<text x="255" y="74" font-size="12" text-anchor="middle">systemd-pstore</text>
+<text x="255" y="92" font-size="12" text-anchor="middle">coredump 디렉터리</text>
+<rect x="350" y="30" width="150" height="70" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="425" y="54" font-size="13" text-anchor="middle">③ 묶기</text>
+<text x="425" y="74" font-size="12" text-anchor="middle">메타데이터 + 요약</text>
+<text x="425" y="92" font-size="12" text-anchor="middle">build-id · 버전</text>
+<rect x="520" y="30" width="150" height="70" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="595" y="54" font-size="13" text-anchor="middle">④ 업로드</text>
+<text x="595" y="74" font-size="12" text-anchor="middle">연결될 때 · 재시도</text>
+<text x="595" y="92" font-size="12" text-anchor="middle">작은 것 먼저 · TLS</text>
+<line x1="160" y1="65" x2="178" y2="65" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="330" y1="65" x2="348" y2="65" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="500" y1="65" x2="518" y2="65" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="595" y1="100" x2="595" y2="158" stroke="currentColor" marker-end="url(#ah6)"/>
+<text x="20" y="150" font-size="13">서버</text>
+<rect x="520" y="160" width="150" height="70" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="595" y="184" font-size="13" text-anchor="middle">⑤ 심볼화</text>
+<text x="595" y="204" font-size="12" text-anchor="middle">debuginfod</text>
+<text x="595" y="222" font-size="12" text-anchor="middle">vmlinux 보관소</text>
+<rect x="350" y="160" width="150" height="70" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="425" y="184" font-size="13" text-anchor="middle">⑥ 분류</text>
+<text x="425" y="204" font-size="12" text-anchor="middle">시그니처로 묶기</text>
+<text x="425" y="222" font-size="12" text-anchor="middle">대시보드 · 알림</text>
+<rect x="180" y="160" width="150" height="70" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="255" y="184" font-size="13" text-anchor="middle">⑦ 수정</text>
+<text x="255" y="204" font-size="12" text-anchor="middle">재현 · 패치</text>
+<text x="255" y="222" font-size="12" text-anchor="middle">회귀 테스트</text>
+<rect x="10" y="160" width="150" height="70" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="85" y="184" font-size="13" text-anchor="middle">⑧ OTA 배포</text>
+<text x="85" y="204" font-size="12" text-anchor="middle">단계적 롤아웃</text>
+<text x="85" y="222" font-size="12" text-anchor="middle">시그니처 감소 확인</text>
+<line x1="520" y1="195" x2="502" y2="195" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="350" y1="195" x2="332" y2="195" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="180" y1="195" x2="162" y2="195" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="85" y1="160" x2="85" y2="102" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah6)"/>
+<text x="20" y="270" font-size="13">크래시 루프 방어: ①이 반복되면 bootcount가 늘어 L4의 A/B 롤백이 먼저 장비를 살린다.</text>
+<text x="20" y="292" font-size="13">롤백된 장비도 ④에서 "어느 버전에서 몇 번 죽었나"를 올려야 ⑥이 회귀를 잡는다.</text>
+<text x="20" y="314" font-size="13">카나리 배포(⑧)는 같은 시그니처가 줄었는지, 새 시그니처가 생겼는지를 보고 확대한다.</text>
+<text x="20" y="336" font-size="13">③에는 리셋 원인 레지스터·uptime·온도·전원 전압처럼 "크래시 밖" 정보도 같이 넣는다.</text>
+</svg></figure>
+<p>그림 7 — 캡처부터 OTA 수정까지의 필드 크래시 파이프라인</p>
+<h3 id="10-1-부팅-때-왜-리셋됐나-판정-순서">10.1 부팅 때 "왜 리셋됐나" 판정 순서<a class="anchor" href="#10-1-부팅-때-왜-리셋됐나-판정-순서" aria-label="link">#</a></h3>
+<p>장비가 다음 부팅에서 자기 리셋 이유를 분류하는 로직(예: 작은 oneshot 서비스 <code>crash-triage.service</code>, <code>After=systemd-pstore.service</code>):</p>
+<ol><li>부트로더가 읽은 <strong>리셋 원인</strong>(SoC reset status 레지스터 → U-Boot 환경 변수나 DT <code>/chosen</code> 속성으로 전달, i.MX의 SRSR, TI의 PRM_RSTST 같은 것), <code>bootcount</code>.</li><li><code>/var/lib/systemd/pstore/</code>에 새 dmesg 레코드가 있나 → <strong>커널 panic/oops</strong>. 첫 줄 <code>Panic#N</code>/<code>Oops#N</code>, panic 문자열.</li><li>dmesg 레코드는 없고 console/pmsg만 있나 + 리셋 원인이 watchdog → <strong>hang 후 watchdog</strong>. pmsg의 마지막 앱 상태가 단서.</li><li><code>/var/crash/</code> 또는 kdump 디렉터리에 vmcore가 있나 → 커널 크래시 상세.</li><li>아무것도 없고 리셋 원인이 POR(전원) → <strong>전원 문제 또는 콜드 리셋</strong>. 원격 로그의 마지막 줄·전원 텔레메트리 확인.</li><li>정상 shutdown 기록(journal의 마지막 부팅이 <code>systemd-shutdown</code>으로 끝났나 — <code>journalctl -b -1 -n 20</code>) → 의도된 리부트.</li></ol>
+<p>결과를 작은 JSON(장비 ID, boot ID, 이전 부팅 버전, 분류, 시그니처, 파일 목록)으로 써서 업로드 큐에 넣는다.</p>
+<h3 id="10-2-설계-체크리스트-면접에서-그대로-말할-수-있게">10.2 설계 체크리스트 (면접에서 그대로 말할 수 있게)<a class="anchor" href="#10-2-설계-체크리스트-면접에서-그대로-말할-수-있게" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>층</th><th>결정</th></tr></thead><tbody><tr><td>정책</td><td><code>panic=N</code>, <code>oops=panic</code>, lockup·hung task panic, HW watchdog + pretimeout(I9)</td></tr><tr><td>캡처</td><td>ramoops(DT 예약, ECC, 부트로더 비침범 검증), 큰 장비면 kdump, systemd-coredump 한도</td></tr><tr><td>영구화</td><td>systemd-pstore, journald persistent + 용량 상한, 쓰기 수명</td></tr><tr><td>식별</td><td>장비 시리얼, boot ID, 펌웨어 버전, build-id, 크래시 시그니처</td></tr><tr><td>전송</td><td>store-and-forward, 커서·멱등, 우선순위, 대역폭 상한, 상호 TLS</td></tr><tr><td>서버</td><td>debuginfod·vmlinux 보관, 심볼화, 시그니처 분류, 대시보드</td></tr><tr><td>피드백</td><td>재현 → 수정 → 회귀 테스트(kdump·pstore 경로 자체도 CI에서 떨어뜨려 검증) → 단계적 OTA(L4)</td></tr><tr><td>개인정보</td><td>수집 최소화, 암호화, 보존 기간, 고객 동의</td></tr></tbody></table></div>
+<hr>
+<h2 id="11-커널-안에서는-무슨-일이-일어나나">11. 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#11-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 350" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10" y="20" width="200" height="44" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="110" y="47" font-size="13" text-anchor="middle">die() / panic() / BUG()</text>
+<rect x="240" y="20" width="200" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="340" y="47" font-size="13" text-anchor="middle">__crash_kexec()</text>
+<rect x="470" y="20" width="200" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="570" y="40" font-size="12" text-anchor="middle">crash_save_cpu()</text>
+<text x="570" y="56" font-size="12" text-anchor="middle">machine_kexec()</text>
+<rect x="240" y="90" width="200" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="117" font-size="13" text-anchor="middle">kmsg_dump(reason)</text>
+<rect x="470" y="90" width="200" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="570" y="110" font-size="12" text-anchor="middle">pstore_dump()</text>
+<text x="570" y="126" font-size="12" text-anchor="middle">압축 → psi->write()</text>
+<rect x="470" y="160" width="200" height="44" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="570" y="180" font-size="12" text-anchor="middle">ramoops_pstore_write()</text>
+<text x="570" y="196" font-size="12" text-anchor="middle">persistent_ram_write()</text>
+<rect x="10" y="160" width="200" height="44" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="110" y="180" font-size="12" text-anchor="middle">printk → console 드라이버</text>
+<text x="110" y="196" font-size="12" text-anchor="middle">ttyAMA0 · ramoops · netcon</text>
+<rect x="240" y="160" width="200" height="44" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340" y="180" font-size="12" text-anchor="middle">netpoll_send_udp()</text>
+<text x="340" y="196" font-size="12" text-anchor="middle">NIC poll (IRQ 없이)</text>
+<rect x="10" y="240" width="200" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="110" y="260" font-size="12" text-anchor="middle">유저 폴트 → get_signal()</text>
+<text x="110" y="276" font-size="12" text-anchor="middle">→ vfs_coredump()</text>
+<rect x="240" y="240" width="200" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="260" font-size="12" text-anchor="middle">format_corename()</text>
+<text x="340" y="276" font-size="12" text-anchor="middle">FILE / PIPE / SOCK</text>
+<rect x="470" y="240" width="200" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="570" y="260" font-size="12" text-anchor="middle">binfmt->core_dump()</text>
+<text x="570" y="276" font-size="12" text-anchor="middle">elf_core_dump()</text>
+<line x1="210" y1="42" x2="238" y2="42" stroke="currentColor" marker-end="url(#ah7)"/>
+<line x1="440" y1="42" x2="468" y2="42" stroke="currentColor" marker-end="url(#ah7)"/>
+<line x1="110" y1="64" x2="238" y2="110" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah7)"/>
+<line x1="440" y1="112" x2="468" y2="112" stroke="currentColor" marker-end="url(#ah7)"/>
+<line x1="570" y1="134" x2="570" y2="158" stroke="currentColor" marker-end="url(#ah7)"/>
+<line x1="110" y1="64" x2="110" y2="158" stroke="currentColor" marker-end="url(#ah7)"/>
+<line x1="210" y1="182" x2="238" y2="182" stroke="currentColor" marker-end="url(#ah7)"/>
+<line x1="210" y1="262" x2="238" y2="262" stroke="currentColor" marker-end="url(#ah7)"/>
+<line x1="440" y1="262" x2="468" y2="262" stroke="currentColor" marker-end="url(#ah7)"/>
+<text x="20" y="318" font-size="12">점선: kdump가 로드돼 있으면 기본으로는 실행 안 됨 (post_notifiers로 순서 변경).</text>
+<text x="20" y="338" font-size="12">panic 경로의 모든 쓰기는 락·인터럽트·스케줄러 없이 동작해야 한다 — 메모리 쓰기와 폴링 I/O뿐.</text>
+</svg></figure>
+<p>그림 8 — 크래시 순간 커널 안의 기록 경로</p>
+<p>경로별 핵심 함수와 구조체(6.18 소스 기준):</p>
+<div class="tw"><table><thead><tr><th>경로</th><th>위치</th><th>핵심</th></tr></thead><tbody><tr><td>panic 순서</td><td><code>kernel/panic.c</code> <code>vpanic()</code></td><td>§2.3. <code>panic_timeout</code>, <code>crash_kexec_post_notifiers</code>, <code>panic_notifier_list</code></td></tr><tr><td>kmsg_dump</td><td><code>kernel/printk/printk.c</code> <code>kmsg_dump_desc()</code></td><td>등록된 <code>struct kmsg_dumper</code>마다 <code>max_reason</code> 검사 후 <code>-&gt;dump()</code> 호출. dumper는 <code>kmsg_dump_get_buffer()</code>로 printk 링버퍼를 읽는다</td></tr><tr><td>pstore core</td><td><code>fs/pstore/platform.c</code> <code>pstore_dump()</code></td><td>압축(<code>pstore: Using crash dump compression: deflate</code>), <code>struct pstore_info</code>의 <code>-&gt;write()</code>로 backend 호출. 레코드는 <code>struct pstore_record</code></td></tr><tr><td>ramoops</td><td><code>fs/pstore/ram.c</code>, <code>ram_core.c</code></td><td><code>struct ramoops_context</code>가 zone(<code>struct persistent_ram_zone</code>)들을 들고 있다. <code>persistent_ram_write()</code>는 링버퍼에 memcpy + ECC 갱신</td></tr><tr><td>pstore fs</td><td><code>fs/pstore/inode.c</code></td><td>부팅 때 backend <code>-&gt;read()</code>로 레코드를 읽어 <code>/sys/fs/pstore</code> 파일로. <code>unlink</code> → backend <code>-&gt;erase()</code></td></tr><tr><td>pmsg</td><td><code>fs/pstore/pmsg.c</code></td><td><code>/dev/pmsg0</code> 문자 장치의 <code>write_pmsg()</code> → <code>psinfo-&gt;write_user()</code>. G4의 char device <code>file_operations.write</code> 그대로</td></tr><tr><td>kexec 적재</td><td><code>kernel/kexec.c</code>(<code>kexec_load</code>), <code>kernel/kexec_file.c</code></td><td>세그먼트를 crashkernel 영역에 복사, <code>kexec_crash_image</code></td></tr><tr><td>crash 진입</td><td><code>kernel/crash_core.c</code> <code>__crash_kexec()</code>, <code>arch/arm64/kernel/machine_kexec.c</code></td><td><code>crash_save_cpu()</code>가 레지스터를 <code>crash_notes</code>(per-CPU)에 저장 → 다른 CPU 정지 → 캡처 커널로 점프</td></tr><tr><td>vmcore</td><td><code>fs/proc/vmcore.c</code></td><td>캡처 커널이 <code>elfcorehdr=</code>(DT <code>linux,elfcorehdr</code>)를 읽어 <code>/proc/vmcore</code> 구성. VMCOREINFO는 <code>kernel/vmcore_info.c</code></td></tr><tr><td>netconsole</td><td><code>drivers/net/netconsole.c</code>, <code>net/core/netpoll.c</code></td><td><code>struct console</code>로 등록, <code>netpoll_send_udp()</code>가 NIC 드라이버의 <code>ndo_poll_controller</code>/NAPI poll로 직접 송신</td></tr><tr><td>coredump</td><td><code>fs/coredump.c</code> <code>vfs_coredump()</code>, <code>fs/binfmt_elf.c</code> <code>elf_core_dump()</code></td><td><code>format_corename()</code>이 pattern을 해석하고 FILE/PIPE/SOCK 분기. PIPE면 <code>call_usermodehelper</code> 계열로 helper 실행, helper 프로세스는 <code>RLIMIT_CORE=1</code>로 재귀 방지</td></tr></tbody></table></div>
+<p>드라이버를 쓸 때 다시 만나는 지점:</p>
+<ul><li><strong>panic 경로에서 안전한 드라이버 코드.</strong> netconsole이 쓰는 NIC 드라이버는 netpoll을 지원해야 하고(I6), mtdpstore·pstore/blk를 쓰려면 MTD/블록 드라이버에 <strong>panic write</strong>(인터럽트·DMA 완료 대기 없이 폴링으로 쓰는 경로)가 있어야 한다. SSD 펌웨어의 "assert 핸들러용 폴링 NAND program"과 똑같은 요구다.</li><li><strong>panic notifier.</strong> 드라이버가 <code>atomic_notifier_chain_register(&amp;panic_notifier_list, ...)</code>로 panic 때 하드웨어를 안전 상태로 둘 수 있다(모터 정지, 레이저 끄기). 로보틱스 장비에서 중요하다. 단 kdump가 로드돼 있으면 기본으로는 안 불린다(§2.3).</li><li><strong>캡처 커널에서의 장치 초기화.</strong> 죽은 커널이 DMA를 걸어 둔 장치를 캡처 커널 드라이버가 probe하면, 진행 중이던 DMA가 캡처 커널 메모리를 덮을 수 있다. 드라이버 probe에서 장치를 먼저 리셋하는 것(<code>reset_devices</code> 힌트 존중)이 kdump 신뢰성에 직결된다(H9 DMA, G3 probe).</li><li><strong>WARN/BUG 사용.</strong> 드라이버의 <code>WARN_ON</code>은 필드에서 <code>panic_on_warn=1</code>이면 panic이 된다. 복구 가능한 조건에 <code>BUG_ON</code>을 쓰면 장비 전체가 죽는다(E5).</li></ul>
+<hr>
+<h2 id="12-embedded-실무에서-다시-보기">12. Embedded 실무에서 다시 보기<a class="anchor" href="#12-embedded-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="12-1-센서-키트-밤사이-한-번-리부트됐다">12.1 센서 키트 — "밤사이 한 번 리부트됐다"<a class="anchor" href="#12-1-센서-키트-밤사이-한-번-리부트됐다" aria-label="link">#</a></h3>
+<p>i.MX8 기반 센서 키트(IMU SPI, 카메라 V4L2, LiDAR UDP)가 야외에서 하룻밤 사이 한 번 리부트됐다. 다음 날 연결되자 업로더가 보낸 묶음:</p>
+<ul><li>리셋 원인 = watchdog, bootcount = 1, 이전 부팅 uptime 14시간.</li><li>pstore: dmesg 레코드 없음, console-ramoops 마지막 줄 <code>imx-sdma ... timeout</code>, pmsg 마지막 앱 상태 <code>lidar: rx stall 3 s</code>.</li><li>coredump 없음.</li></ul>
+<p>→ panic이 아니라 커널이 반쯤 멈춘 상태로 HW watchdog을 맞았다. console-ramoops 직전 로그에 DMA 타임아웃. 다음 조치: <code>softlockup_panic</code>·<code>hung_task_panic</code> 켜기(다음엔 스택이 남는다), watchdog pretimeout을 panic governor로(I9), 원격 로그에서 같은 시간대 다른 장비의 DMA 경고 빈도 조회.</p>
+<h3 id="12-2-jetson-orin-kdump까지-가는-장비">12.2 Jetson Orin — kdump까지 가는 장비<a class="anchor" href="#12-2-jetson-orin-kdump까지-가는-장비" aria-label="link">#</a></h3>
+<p>32 GiB Orin 기반 자율주행 컴퓨트 박스. GPU 드라이버 관련 커널 panic이 드물게 발생. RAM이 넉넉하니 <code>crashkernel=512M</code> + 캡처 initramfs(makedumpfile 포함, NVMe의 전용 파티션에 저장) + 다음 부팅에서 업로더가 Wi-Fi 도킹 시에만 vmcore(수백 MiB)를 올린다. 서버는 OTA 릴리스마다 보관한 <code>vmlinux</code>·모듈 디버그 정보로 crash를 돌려 <code>bt -a</code>·<code>kmem -i</code>·<code>dev -d</code> 결과를 티켓에 자동 첨부한다. 이때 이 노트의 교훈 두 개를 체크리스트에 넣는다: 덤프 도구가 커널 config(VA_BITS, 페이지 크기)를 지원하는지, 보관 vmlinux가 REDUCED가 아닌지.</p>
+<h3 id="12-3-256-mib-소형-게이트웨이-pstore만으로">12.3 256 MiB 소형 게이트웨이 — pstore만으로<a class="anchor" href="#12-3-256-mib-소형-게이트웨이-pstore만으로" aria-label="link">#</a></h3>
+<p>AM335x급, RAM 256 MiB, NAND 256 MiB. kdump는 불가능에 가깝다. 대신:</p>
+<figure class="code"><span class="lang">dts</span><pre><code>	reserved-memory {
+		#address-cells = &lt;1&gt;;
+		#size-cells = &lt;1&gt;;
+		ranges;
+
+		ramoops@8ff00000 {
+			compatible = "ramoops";
+			reg = &lt;0x8ff00000 0x100000&gt;;	/* last 1 MiB of 256 MiB DRAM at 0x80000000 */
+			record-size = &lt;0x10000&gt;;	/* 64 KiB x 8 records */
+			console-size = &lt;0x40000&gt;;
+			pmsg-size = &lt;0x40000&gt;;
+			ecc-size = &lt;16&gt;;
+		};
+	};</code></pre></figure>
+<p>(가이드 — 이 보드 DT는 실행하지 않았다. 주소는 예시이며 실제 보드의 DRAM 맵·U-Boot relocation 위치를 확인해야 한다.) 여기에 앱이 중요한 상태 전이를 <code>/dev/pmsg0</code>에 한 줄씩 남기고, systemd-pstore(또는 BusyBox 장비라면 init 스크립트의 <code>cp /sys/fs/pstore/* /data/crash/ &amp;&amp; rm /sys/fs/pstore/*</code>)가 보관, 업로더가 셀룰러로 수 KiB 요약만 보낸다. 전원 차단 원인까지 잡으려면 NOR가 있는 보드에서 mtdpstore를 고려한다.</p>
+<h3 id="12-4-hil-벤치-netconsole로-시리얼-대신">12.4 HIL 벤치 — netconsole로 시리얼 대신<a class="anchor" href="#12-4-hil-벤치-netconsole로-시리얼-대신" aria-label="link">#</a></h3>
+<p>하드웨어-인-더-루프 테스트 랙에 장비 20대. 시리얼 케이블 대신 부팅 인자 <code>netconsole=...@&lt;bench-server&gt;/...</code>로 모든 커널 로그를 벤치 서버의 UDP 수집기로 보낸다. 테스트 중 panic이 나도 마지막 줄까지 서버에 있다(예제 11). 테스트 프레임워크는 장비별 로그를 시험 케이스 시간 구간과 맞춰 저장한다 — Don이 Apple에서 버스 트레이스와 커널 로그를 맞추던 작업(M11)의 네트워크 버전이다.</p>
+<hr>
+<h2 id="13-흔한-실수와-증상">13. 흔한 실수와 증상<a class="anchor" href="#13-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>ramoops 영역을 부트로더가 덮음</td><td>개발 보드에선 되는데 제품 보드에선 pstore가 늘 비어 있음</td><td>U-Boot relocation·압축 해제 버퍼가 DRAM 끝에</td><td>U-Boot 메모리 맵 확인, ramoops 위치 이동, warm reset 테스트를 제품 부트 체인으로</td></tr><tr><td>콜드 리셋 경로로 테스트</td><td>"pstore가 동작 안 한다"</td><td>외부 PMIC 리셋은 DRAM을 지운다</td><td>SoC 내부 리셋(soft reset·WDT)으로 시험. 전원 차단 대비는 비휘발 backend</td></tr><tr><td><code>quiet</code>·낮은 loglevel</td><td>console-ramoops가 비거나 빈약</td><td>console frontend는 콘솔 레벨을 따른다</td><td>중요한 메시지는 높은 레벨로, 또는 pmsg/dmesg 레코드 사용 (예제 3)</td></tr><tr><td>kdump만 켜고 pstore dmesg 기대</td><td>panic 후 <code>dmesg-ramoops-*</code> 없음</td><td><code>__crash_kexec()</code>가 kmsg_dump보다 먼저</td><td><code>crash_kexec_post_notifiers</code> 또는 vmcore-dmesg로 로그 확보 (§6.5)</td></tr><tr><td>캡처 커널이 같은 ramoops 사용</td><td>보관된 console 로그가 캡처 커널 부팅 로그</td><td>같은 DT를 캡처 커널도 받음</td><td>캡처 커널에서 pstore 끄기, 캡처 단계에서 먼저 저장</td></tr><tr><td>덤프 도구·커널 config 불일치</td><td><code>makedumpfile Failed</code>, crash <code>no debugging data</code></td><td>VA_BITS_52+4K 미지원, <code>DEBUG_INFO_REDUCED</code></td><td>CI에서 kdump 실제 테스트, 보관용 vmlinux는 full debug info (§6.2, §6.4)</td></tr><tr><td>crashkernel 너무 작음</td><td>캡처 커널이 OOM으로 부팅 중 죽고 그냥 멈춤</td><td>드라이버·initramfs·CMA 몫 미계산</td><td>캡처 cmdline에 <code>cma=0</code>·<code>nr_cpus=1</code>, 크기를 실측으로 결정</td></tr><tr><td>lockup/hung task를 panic으로 안 바꿈</td><td>watchdog 리셋 후 증거 없음</td><td>기본은 경고만</td><td><code>softlockup_panic</code>, <code>hung_task_panic</code>, <code>nmi_watchdog=panic</code> + config 확인</td></tr><tr><td>systemd-pstore 없이 운영</td><td>다음 panic이 이전 기록을 덮음, 콜드 리셋에 소실</td><td><code>/sys/fs/pstore</code>는 backend 그 자체</td><td>부팅 초기에 보관·삭제 (예제 5)</td></tr><tr><td>core 한도 없음</td><td>크래시 루프가 eMMC를 채우고 수명을 깎음</td><td>coredump <code>MaxUse</code> 기본은 디스크 비율</td><td><code>ProcessSizeMax</code>, <code>MaxUse</code>, 동일 시그니처 덤프 수 제한</td></tr><tr><td>장비에 debug 심볼 없는데 서버에도 없음</td><td>스택이 주소뿐</td><td>strip 전 디버그 정보 미보관</td><td>build-id 키로 debuginfod 보관 (§9)</td></tr></tbody></table></div>
+<hr>
+<h2 id="14-면접에서-이렇게-말한다">14. 면접에서 이렇게 말한다<a class="anchor" href="#14-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> "A device in the field rebooted overnight — how do you find out why?"</p>
+<p><strong>A.</strong> 먼저 리셋 원인을 분류한다. 부트로더가 읽은 SoC 리셋 원인(watchdog/POR/소프트웨어)과 bootcount, 그다음 pstore — dmesg 레코드가 있으면 커널 panic/oops, 없고 console·pmsg만 있으면 hang 후 watchdog, 아무것도 없고 POR면 전원 문제다. 유저 크래시는 coredump와 journal에서 unit·시그널을 본다. 원격 로그의 마지막 줄과 같은 시간대 다른 장비의 패턴도 본다. 증거가 부족했다면 다음을 위해 lockup·hung task를 panic으로 바꾸고 pretimeout을 켠다.</p>
+<blockquote><p>First I'd classify the reset. The bootloader records the SoC reset cause and a boot counter, so I know if it was a watchdog, a power-on reset or a software reboot. Then pstore: if there's a dmesg record, it was a kernel panic or oops and I have the last log with the call trace. If there's only the console and pmsg rings and the reset cause is watchdog, the system hung, and the last console lines and the app's last pmsg state are my clues. If there's nothing and it was a power-on reset, I look at power. For userspace I check coredumpctl and the journal of the previous boot. I'd also look at the remote logs right before the reset and at other units for the same pattern. And if the evidence was thin, I'd turn soft lockups and hung tasks into panics and enable the watchdog pretimeout so the next occurrence leaves a stack.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "pstore가 늘 비어 있다면?" → 부트로더가 영역을 덮는지, 리셋이 DRAM을 지우는 경로인지, 콘솔 레벨, 그리고 warm reset으로 직접 재현해 확인(예제 2·4).</p>
+<p><strong>Q.</strong> "pstore vs kdump on a 256 MB board?"</p>
+<p><strong>A.</strong> 256 MiB면 pstore/ramoops다. ramoops는 1 MiB 안팎만 예약하면 panic 로그·콘솔·앱 메시지가 warm reset을 넘어 남고, panic 경로가 메모리 쓰기뿐이라 가장 안전하다. kdump는 crashkernel로 보통 수백 MiB를 평소에 놀려야 하고(실측: 1 GiB에서 256M 예약 시 가용 메모리 935 → 675 MiB), 덤프를 저장·업로드할 공간도 없다. kdump는 RAM이 넉넉한 Jetson급이나 개발 빌드에서 특정 버그를 쫓을 때 쓴다.</p>
+<blockquote><p>On 256 MB I'd use pstore with ramoops. It costs about a megabyte of reserved RAM, survives a warm reset, and the panic path is just memory writes, which is about as safe as it gets. kdump needs a crashkernel reservation that sits idle — in my QEMU test, reserving 256 MB on a 1 GB guest dropped available memory from about 935 to 675 MB — plus storage and bandwidth for the dump. That doesn't fit a small board. I'd keep kdump for bigger platforms like a Jetson, or for a debug build when I'm chasing one specific bug that the log alone can't explain.</p></blockquote>
+<p><strong>Q.</strong> "How do you get crash data off devices that are offline most of the time?"</p>
+<p><strong>A.</strong> store-and-forward다. 크래시 순간에는 ramoops·coredump로 로컬에 남기고, 다음 부팅에서 systemd-pstore 등으로 영구 저장소에 옮긴다. 업로더는 연결이 생기면 작은 요약(시그니처·build-id·버전)부터 보내고 큰 덤프는 Wi-Fi·도킹 때만 보낸다. 커서나 crash ID로 재개·중복 제거하고, 확인응답 전에는 지우지 않는다. 용량·쓰기 수명 상한, 대역폭 제한, TLS, PII 최소화가 같이 간다.</p>
+<blockquote><p>Store and forward. At crash time, the evidence goes somewhere that survives — ramoops for the kernel, systemd-coredump for userspace — and on the next boot it's moved to persistent storage. An uploader runs whenever there's connectivity: it sends small summaries first — crash signature, build ID, versions — and the large dumps only on Wi-Fi or at the dock. Uploads are resumable and idempotent, with a cursor or crash ID, and nothing is deleted locally until the server acknowledges it. Around that you need storage caps so a crash loop doesn't wear out the eMMC, bandwidth limits, mutual TLS, and you strip what you don't need, because cores contain customer data.</p></blockquote>
+<p><strong>Q.</strong> "What's the difference between netconsole and shipping journald logs?"</p>
+<p><strong>A.</strong> netconsole은 커널 콘솔 드라이버라 printk를 netpoll로 UDP 송신한다. 인터럽트·유저스페이스 없이 동작하니 panic 메시지까지 나간다. 대신 UDP라 유실되고 암호화도 없어서 랩·벤치용이다. journal 업로드는 유저스페이스 데몬이 구조화된 journald 항목을 HTTPS로 보내고 커서로 재개한다. 필드용이지만 panic 순간의 메시지는 못 보낸다 — 그건 pstore로 다음 부팅에 보낸다.</p>
+<blockquote><p>netconsole is a kernel console that sends printk output as UDP through netpoll, so it works with interrupts off and even prints the whole panic. But it's UDP — no delivery guarantee, no encryption — so I use it on test benches. journal-upload is a userspace service that ships structured journald entries over HTTPS and resumes from a saved cursor. That's what goes to the field, but it can't send anything once the kernel has panicked; for that I rely on pstore and upload the record on the next boot.</p></blockquote>
+<p><strong>Q.</strong> "Your kdump setup produced a vmcore but makedumpfile and crash both fail. What do you check?"</p>
+<p><strong>A.</strong> 도구와 커널의 조합이다. makedumpfile은 VMCOREINFO로 메모리 레이아웃을 해석하니 VA_BITS·페이지 크기 지원 여부(내 실험에서는 arm64 4K + 52비트 VA를 1.7.7도 거부), crash는 같은 build-id의 full debug info vmlinux가 필요하다(<code>DEBUG_INFO_REDUCED</code>면 거부). 그 사이에도 <code>vmcore-dmesg</code>로 로그는 뽑을 수 있다. 근본적으로는 kdump 경로를 CI에서 정기적으로 떨어뜨려 본다.</p>
+<blockquote><p>I'd check the tool against the kernel config. makedumpfile parses the memory layout from VMCOREINFO, so page size and VA bits have to be supported — in my lab, makedumpfile 1.7.7 refused an arm64 kernel built with 52-bit VA and 4K pages. crash needs the matching vmlinux with full debug info; with DEBUG_INFO_REDUCED it says there's no debugging data. Meanwhile vmcore-dmesg can still pull the kernel log out of the raw dump. And the real fix is process: crash the kernel on purpose in CI and open the dump, so a config change can't silently break the path.</p></blockquote>
+<p><strong>Q.</strong> "Where does a userspace core dump go on a systemd system, and how do you keep it from filling the disk?"</p>
+<p><strong>A.</strong> <code>kernel.core_pattern</code>이 <code>|systemd-coredump</code>라 커널이 core를 파이프로 넘긴다. 파이프 모드는 RLIMIT_CORE를 무시하고, systemd-coredump가 메타데이터는 journal에, 압축된 core는 <code>/var/lib/systemd/coredump</code>에 둔다. <code>coredumpctl list/info/dump</code>로 본다. 한도는 <code>coredump.conf</code>의 <code>ProcessSizeMax</code>·<code>ExternalSizeMax</code>·<code>MaxUse</code>·<code>KeepFree</code>로 건다 — 넘으면 truncated로 저장된다.</p>
+<blockquote><p>The kernel's core_pattern starts with a pipe to systemd-coredump, so the kernel streams the core to it and ignores RLIMIT_CORE in pipe mode. systemd-coredump puts the metadata — PID, signal, unit, command line, a stack trace if it can — into the journal, and the compressed core into /var/lib/systemd/coredump. You inspect it with coredumpctl list, info and dump. To bound it, coredump.conf has ProcessSizeMax and ExternalSizeMax per dump and MaxUse and KeepFree for the directory; a dump over the limit gets stored truncated. On flash I'd also cap how many dumps of the same signature we keep.</p></blockquote>
+<p><strong>Q.</strong> "How do you make a kernel panic leave useful evidence on a product?"</p>
+<p><strong>A.</strong> 정책과 수집을 같이 설계한다. <code>panic=N</code>으로 자동 리부트, <code>oops=panic</code>으로 반쯤 죽은 커널로 돌지 않게, lockup·hung task를 panic으로. 수집은 ramoops(DT 예약, ECC)와 큰 장비면 kdump, 그리고 다음 부팅에 systemd-pstore로 보관하고 업로드. 크래시 루프는 bootcount로 A/B 롤백(L4)에 연결한다.</p>
+<blockquote><p>Policy and capture together. Policy: panic=N so it reboots by itself, oops=panic so it doesn't keep running half-broken, and soft lockups and hung tasks promoted to panics. Capture: a ramoops region in the device tree with ECC, kdump if the board has the RAM. On the next boot, systemd-pstore archives the records and an uploader ships them. And if it panics in a loop, the boot counter triggers the A/B rollback, so the device comes back on the previous image and still reports what happened.</p></blockquote>
+<hr>
+<h2 id="15-직접-해보기">15. 직접 해보기<a class="anchor" href="#15-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong>: 1 MiB ramoops에서 <code>record-size=0x10000</code>, <code>console-size=0x40000</code>, <code>pmsg-size=0x20000</code>, <code>ftrace-size=0</code>이면 dmesg 레코드는 몇 개인가? 정답/힌트: (1024 − 256 − 128) KiB ÷ 64 KiB = 10개.</li><li><strong>실험</strong>: 예제 2를 <code>panic=3</code> 대신 <code>panic=0</code>으로 돌리고 QEMU monitor의 <code>system_reset</code>으로 리셋해도 dmesg 레코드가 남는지 확인하라. 남는다면 왜인가? 정답/힌트: kmsg_dump는 panic 직후(리부트 대기 전)에 이미 썼다. 리셋을 누가 일으키든 RAM이 보존되면 남는다.</li><li><strong>실험</strong>: 예제 2를 세 번 연속 panic하게(스크립트에서 레코드 개수를 세어 3개가 될 때까지 crash) 바꾸고 <code>dmesg-ramoops-0..2</code>의 첫 줄 <code>Panic#N</code>을 확인하라. 정답/힌트: 레코드가 순환하므로 4개를 넘기면 가장 오래된 것이 덮인다. systemd-pstore 없이는 이력이 사라진다.</li><li><strong>코드</strong>: pmsg에 "마지막 상태"를 남기는 C 함수 <code>void pmsg_note(const char *fmt, ...)</code>를 작성하라(<code>/dev/pmsg0</code>을 <code>O_WRONLY</code>로 열어 <code>vdprintf</code>). 센서 루프의 상태 전이마다 호출하는 데몬을 만들고 예제 3처럼 정지시켜 보라. 정답/힌트: pmsg는 링버퍼라 오래된 줄이 밀린다. 한 줄에 타임스탬프·시퀀스를 넣고, 매 루프가 아니라 상태가 바뀔 때만 쓴다.</li><li><strong>관찰</strong>: 게스트에서 <code>cat /proc/sys/kernel/core_pattern</code>, <code>cat /proc/self/coredump_filter</code>, <code>systemd-analyze cat-config systemd/coredump.conf</code>를 보고, <code>coredump_filter</code>를 바꿔 예제 10의 64 MiB 힙이 core에서 빠지게 해 보라. 정답/힌트: 비트 0(anonymous private)을 끄면 힙이 빠진다. <code>echo 0x32 &gt; /proc/self/coredump_filter</code> 후 실행(자식이 상속).</li><li><strong>kdump</strong>: 커널을 <code>ARM64_VA_BITS_48</code>로 다시 빌드해 예제 6을 반복하고 <code>makedumpfile -d 31</code> 결과 크기를 원본 vmcore와 비교하라. <code>-d 1</code>, <code>-d 17</code>도 비교하라. 정답/힌트: 0 페이지와 free 페이지만 빼도 대부분 줄어든다. 이 노트 §6.4의 재빌드 결과를 참고.</li><li><strong>설계</strong>: 셀룰러로 하루 1 MiB만 쓸 수 있는 드론 500대의 크래시 업로드 정책을 표로 써라(무엇을, 어떤 순서로, 얼마나). 정답/힌트: 요약(수 KiB, 즉시) → pstore dmesg(압축 수십 KiB, 즉시) → core(도킹 시) → 같은 시그니처 반복은 카운트만.</li></ol>
+<hr>
+<h2 id="16-용어-사전">16. 용어 사전<a class="anchor" href="#16-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>pstore</td><td>persistent store</td><td>크래시 기록을 리셋 너머로 남기는 커널 프레임워크, <code>/sys/fs/pstore</code>로 노출</td></tr><tr><td>ramoops</td><td>RAM backend for pstore</td><td>예약 DRAM을 zone으로 나눠 dmesg·console·pmsg·ftrace 기록</td></tr><tr><td>PRZ</td><td>persistent RAM zone</td><td>ramoops의 링버퍼 하나 (sig·start·size 헤더 + 데이터 + ECC)</td></tr><tr><td>pmsg</td><td>persistent message</td><td>유저가 <code>/dev/pmsg0</code>에 쓰는 메시지를 ramoops에 남기는 frontend</td></tr><tr><td>kmsg_dump</td><td>kernel message dump</td><td>panic/oops 때 printk 링버퍼를 dumper(pstore 등)에 넘기는 훅</td></tr><tr><td>systemd-pstore</td><td>—</td><td>부팅 시 pstore 레코드를 <code>/var/lib/systemd/pstore</code>로 옮기는 서비스</td></tr><tr><td>kdump</td><td>kernel crash dump</td><td>panic 시 미리 올린 캡처 커널로 점프해 메모리 전체를 덤프</td></tr><tr><td>kexec</td><td>kernel execute</td><td>실행 중인 커널에서 펌웨어 없이 다른 커널로 바로 부팅</td></tr><tr><td>crashkernel=</td><td>—</td><td>캡처 커널용 메모리를 부팅 때 예약하는 커널 인자</td></tr><tr><td>vmcore</td><td>—</td><td>캡처 커널이 <code>/proc/vmcore</code>로 보여 주는 죽은 커널 메모리 (ELF core)</td></tr><tr><td>VMCOREINFO</td><td>—</td><td>1차 커널이 남긴 심볼 주소·구조체 오프셋 표, 덤프 도구가 해석에 사용</td></tr><tr><td>elfcorehdr</td><td>—</td><td>죽은 커널 메모리 지도(ELF 헤더 + CPU note), 캡처 커널에 전달</td></tr><tr><td>makedumpfile</td><td>—</td><td>vmcore에서 불필요한 페이지를 빼고 압축하는 도구 (<code>-d 31</code>)</td></tr><tr><td>crash</td><td>—</td><td>gdb 기반 커널 덤프 분석기 (<code>bt</code>, <code>log</code>, <code>ps</code>, <code>kmem</code>)</td></tr><tr><td>core_pattern</td><td>—</td><td>유저 core를 파일/파이프/소켓 중 어디로 보낼지 정하는 sysctl</td></tr><tr><td>systemd-coredump</td><td>—</td><td>core_pattern 파이프 helper, 메타데이터는 journal, core는 압축 파일</td></tr><tr><td>minidump</td><td>—</td><td>스택·레지스터·모듈 목록만 담은 작은 덤프 (Breakpad/Crashpad)</td></tr><tr><td>netconsole</td><td>—</td><td>printk를 netpoll로 UDP 송신하는 콘솔 드라이버</td></tr><tr><td>netpoll</td><td>—</td><td>인터럽트 없이 NIC를 폴링해 패킷을 보내는 커널 기능</td></tr><tr><td>journal-upload / journal-remote</td><td>—</td><td>journald 항목을 HTTP(S)로 보내고 받는 systemd 도구 쌍</td></tr><tr><td>build-id</td><td>—</td><td>ELF note의 바이너리 해시, 디버그 정보 매칭 키</td></tr><tr><td>debuginfod</td><td>—</td><td>build-id로 디버그 정보를 HTTP 제공하는 서버 (elfutils)</td></tr><tr><td>store-and-forward</td><td>—</td><td>로컬에 먼저 저장하고 연결될 때 전송하는 방식</td></tr><tr><td>warm / cold reset</td><td>—</td><td>DRAM 내용이 유지되는 리셋 / 전원 재투입으로 지워지는 리셋</td></tr></tbody></table></div>
+<hr>
+<h2 id="17-요약-체크리스트">17. 요약 &amp; 체크리스트<a class="anchor" href="#17-요약-체크리스트" aria-label="link">#</a></h2>
+<p>필드 크래시 수집은 SSD 펌웨어의 "죽는 순간 살아남는 곳에 쓰고, 다음 부팅에 영구화하고, 밖으로 꺼낸다"를 Linux 계층별로 나눈 것이다. 커널은 먼저 정책(<code>panic=</code>, <code>oops=panic</code>, lockup panic)으로 반드시 panic·리부트하게 만들고, panic 순간 kmsg_dump → pstore/ramoops가 예약 DRAM에 압축 로그를 남긴다. console·pmsg 링버퍼는 panic 없는 정지에서도 마지막 줄을 남긴다. 이 기록은 warm reset에서만 살아남고(QEMU에서 직접 확인), systemd-pstore가 다음 부팅에 디스크로 옮긴다. 메모리 전체가 필요하면 kdump — crashkernel 예약 + 캡처 커널 + vmcore — 인데, RAM·저장 공간 비용 때문에 큰 장비용이고 덤프 도구와 커널 config 궁합까지 검증해야 한다(이 랩에서 VA_BITS·DEBUG_INFO_REDUCED로 실제로 깨졌다). 유저 크래시는 core_pattern 파이프 → systemd-coredump → coredumpctl, 한도는 coredump.conf로. 로그는 netconsole(벤치, panic까지)과 journal-upload(필드, 커서 재개)로 꺼내고, 전체를 store-and-forward·build-id 심볼화·시그니처 분류·OTA 수정의 파이프라인으로 묶는다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>필드 크래시 종류별로 무엇이 증거로 남는지 표로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>panic 경로의 순서(kdump → notifier → kmsg_dump → 리부트)와 <code>crash_kexec_post_notifiers</code>의 의미를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>DT reserved-memory에 ramoops 노드를 넣고 크기 배분으로 레코드 개수를 계산할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>ramoops가 warm reset에서만 살아남는 이유와 부트로더·DDR 초기화 함정을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>/sys/fs/pstore</code>의 dmesg·console·pmsg 레코드를 읽고 systemd-pstore 보관 흐름을 설정할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>crashkernel 예약·<code>kexec -p</code>·캡처 스크립트로 vmcore를 저장하는 kdump 경로를 구성할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>makedumpfile 덤프 레벨과, 도구·커널 config 불일치로 분석이 실패하는 경우를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>core_pattern의 파일/파이프 차이와 RLIMIT_CORE·coredump.conf 한도를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>coredumpctl로 크래시를 찾고 core를 꺼내 gdb로 bt를 볼 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>netconsole을 configfs로 설정해 panic 메시지를 원격으로 받을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>journal-upload의 커서 기반 재개로 store-and-forward를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>build-id·debuginfod·크래시 시그니처로 서버 쪽 분류 파이프라인을 설계할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>docs.kernel.org — Ramoops oops/panic logger: https://docs.kernel.org/admin-guide/ramoops.html</li><li>docs.kernel.org — Documentation for Kdump: https://docs.kernel.org/admin-guide/kdump/kdump.html</li><li>docs.kernel.org — Persistent storage for a kernel's dying breath (pstore-blk): https://docs.kernel.org/admin-guide/pstore-blk.html</li><li>docs.kernel.org — Netconsole: https://docs.kernel.org/networking/netconsole.html</li><li>docs.kernel.org — Documentation for /proc/sys/kernel/ (panic, panic_on_oops, core_pattern …): https://docs.kernel.org/admin-guide/sysctl/kernel.html</li><li>DT 바인딩 <code>Documentation/devicetree/bindings/reserved-memory/ramoops.yaml</code> (커널 소스)</li><li>커널 소스 (6.18): <code>kernel/panic.c</code>, <code>fs/pstore/ram.c</code>, <code>fs/pstore/ram_core.c</code>, <code>fs/pstore/platform.c</code>, <code>fs/coredump.c</code>, <code>kernel/crash_core.c</code>, <code>fs/proc/vmcore.c</code>, <code>drivers/net/netconsole.c</code> — https://elixir.bootlin.com/linux/v6.18/source</li><li>man7.org — core(5): https://man7.org/linux/man-pages/man5/core.5.html</li><li>systemd man pages — systemd-pstore(8), systemd-coredump(8), coredump.conf(5), coredumpctl(1), systemd-journal-upload(8), systemd-journal-remote(8): https://www.freedesktop.org/software/systemd/man/</li><li>crash utility: https://crash-utility.github.io/</li><li>makedumpfile: https://github.com/makedumpfile/makedumpfile</li><li>elfutils debuginfod: https://sourceware.org/elfutils/Debuginfod.html</li><li>Michael Kerrisk, "The Linux Programming Interface" — 22장(시그널 고급, core dump)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-17_L6_runtime_security.html"><span class="dir">← 이전</span><span class="nm">L6. 런타임 보안 — dm-verity · dm-crypt · TPM/TEE · AppArmor/SELinux · capabilities · seccomp · systemd 하드닝으로 "부팅 이후"를 지키기</span></a><a class="next" href="2026-10-17_L8_containers.html"><span class="dir">다음 →</span><span class="nm">L8. 컨테이너 on embedded — namespace · cgroup v2 · overlayfs · Podman을 장비 위에서 직접 뜯어 보기</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l2"><a href="#1-필드-크래시-분류-무엇이-죽었고-무엇이-남나">1. 필드 크래시 분류 — 무엇이 죽었고, 무엇이 남나</a></li><li class="l3"><a href="#1-1-직관-누가-마지막-말을-할-수-있나">1.1 직관 — "누가 마지막 말을 할 수 있나"</a></li><li class="l3"><a href="#1-2-분류표">1.2 분류표</a></li><li class="l3"><a href="#1-3-예산-임베디드에서-무엇을-얼마나-남기나">1.3 예산 — 임베디드에서 무엇을 얼마나 남기나</a></li><li class="l2"><a href="#2-커널-panic-정책-증거를-남기고-반드시-리부트하게">2. 커널 panic 정책 — 증거를 남기고 반드시 리부트하게</a></li><li class="l3"><a href="#2-1-왜-정책이-먼저인가">2.1 왜 정책이 먼저인가</a></li><li class="l3"><a href="#2-2-설정-지점">2.2 설정 지점</a></li><li class="l3"><a href="#2-3-panic-안에서-일어나는-순서">2.3 panic() 안에서 일어나는 순서</a></li><li class="l2"><a href="#3-pstore-죽어도-남는-저장소-를-파일시스템으로-보여-주는-층">3. pstore — "죽어도 남는 저장소"를 파일시스템으로 보여 주는 층</a></li><li class="l3"><a href="#3-1-직관">3.1 직관</a></li><li class="l3"><a href="#3-2-backend-비교">3.2 backend 비교</a></li><li class="l2"><a href="#4-ramoops-예약-dram에-남기는-마지막-기록">4. ramoops — 예약 DRAM에 남기는 마지막 기록</a></li><li class="l3"><a href="#4-1-정의와-설정-방법">4.1 정의와 설정 방법</a></li><li class="l3"><a href="#4-2-메모리-레이아웃">4.2 메모리 레이아웃</a></li><li class="l3"><a href="#4-3-ram은-언제-살아남나-warm-reset만">4.3 RAM은 언제 살아남나 — warm reset만</a></li><li class="l3"><a href="#예제-1-qemu-virt-dtb를-덤프해서-ramoops-노드를-넣는다">예제 1 — QEMU virt DTB를 덤프해서 ramoops 노드를 넣는다</a></li><li class="l3"><a href="#예제-2-panic-warm-reset-다음-부팅에서-dmesg-pmsg-console-읽기">예제 2 — panic → warm reset → 다음 부팅에서 dmesg·pmsg·console 읽기</a></li><li class="l3"><a href="#예제-3-panic-없는-조용한-정지-console-pmsg만-남는다">예제 3 — panic 없는 "조용한 정지": console·pmsg만 남는다</a></li><li class="l3"><a href="#예제-4-콜드-재시작-새-qemu-프로세스-에서는-아무것도-없다">예제 4 — 콜드 재시작(새 QEMU 프로세스)에서는 아무것도 없다</a></li><li class="l2"><a href="#5-systemd-pstore-다음-부팅에서-디스크로-옮기기">5. systemd-pstore — 다음 부팅에서 디스크로 옮기기</a></li><li class="l3"><a href="#5-1-왜-옮겨야-하나">5.1 왜 옮겨야 하나</a></li><li class="l3"><a href="#예제-5-systemd-255-rootfs에서-panic-재부팅-자동-보관">예제 5 — systemd 255 rootfs에서 panic → 재부팅 → 자동 보관</a></li><li class="l2"><a href="#6-kdump-두-번째-커널로-메모리-전체를-건진다">6. kdump — 두 번째 커널로 메모리 전체를 건진다</a></li><li class="l3"><a href="#6-1-직관">6.1 직관</a></li><li class="l3"><a href="#6-2-구성-요소">6.2 구성 요소</a></li><li class="l3"><a href="#예제-6-crashkernel-예약-kexec-p-panic-캡처-커널이-proc-vmcore-저장">예제 6 — crashkernel 예약 → kexec -p → panic → 캡처 커널이 /proc/vmcore 저장</a></li><li class="l3"><a href="#6-3-makedumpfile-덤프-레벨과-압축">6.3 makedumpfile — 덤프 레벨과 압축</a></li><li class="l3"><a href="#예제-7-vm-호스트에서-덤프-꺼내-로그-뽑기">예제 7 — VM 호스트에서 덤프 꺼내 로그 뽑기</a></li><li class="l3"><a href="#6-4-crash로-분석하기">6.4 crash로 분석하기</a></li><li class="l3"><a href="#예제-7b-커널을-고쳐-다시-va_bits-48-full-debug-info">예제 7b — 커널을 고쳐 다시: VA_BITS=48 + full debug info</a></li><li class="l3"><a href="#6-5-kdump와-pstore를-같이-쓰면-crash_kexec_post_notifiers">6.5 kdump와 pstore를 같이 쓰면 — crash_kexec_post_notifiers</a></li><li class="l3"><a href="#6-6-임베디드에서-kdump를-쓰나">6.6 임베디드에서 kdump를 쓰나?</a></li><li class="l2"><a href="#7-유저스페이스-coredump-가장-흔한-필드-크래시">7. 유저스페이스 coredump — 가장 흔한 필드 크래시</a></li><li class="l3"><a href="#7-1-커널이-core를-쓰는-경로">7.1 커널이 core를 쓰는 경로</a></li><li class="l3"><a href="#예제-8-일부러-죽는-센서-데몬">예제 8 — 일부러 죽는 "센서 데몬"</a></li><li class="l3"><a href="#예제-9-systemd-coredump-coredumpctl">예제 9 — systemd-coredump + coredumpctl</a></li><li class="l3"><a href="#예제-10-크기-한도-coredump-conf-core_pattern-파일-rlimit_core">예제 10 — 크기 한도: coredump.conf, core_pattern 파일, RLIMIT_CORE</a></li><li class="l3"><a href="#7-2-임베디드-core-정책">7.2 임베디드 core 정책</a></li><li class="l2"><a href="#8-원격-로그-장비-밖으로-꺼내기">8. 원격 로그 — 장비 밖으로 꺼내기</a></li><li class="l3"><a href="#8-1-왜-따로-설계해야-하나">8.1 왜 따로 설계해야 하나</a></li><li class="l3"><a href="#예제-11-netconsole-게스트-커널-로그와-panic을-udp로-vm-호스트에-보낸다">예제 11 — netconsole: 게스트 커널 로그와 panic을 UDP로 VM 호스트에 보낸다</a></li><li class="l3"><a href="#예제-12-systemd-journal-upload-systemd-journal-remote-게스트-안-루프백">예제 12 — systemd-journal-upload → systemd-journal-remote (게스트 안 루프백)</a></li><li class="l3"><a href="#8-2-store-and-forward-속도-제한-pii">8.2 store-and-forward, 속도 제한, PII</a></li><li class="l2"><a href="#9-크래시-id-build-id-symbol-server">9. 크래시 ID · build-id · symbol server</a></li><li class="l3"><a href="#9-1-build-id가-열쇠다">9.1 build-id가 열쇠다</a></li><li class="l3"><a href="#9-2-symbol-server-구조">9.2 symbol server 구조</a></li><li class="l3"><a href="#9-3-크래시-id와-중복-제거">9.3 크래시 ID와 중복 제거</a></li><li class="l2"><a href="#10-필드-크래시-파이프라인-설계">10. 필드 크래시 파이프라인 설계</a></li><li class="l3"><a href="#10-1-부팅-때-왜-리셋됐나-판정-순서">10.1 부팅 때 "왜 리셋됐나" 판정 순서</a></li><li class="l3"><a href="#10-2-설계-체크리스트-면접에서-그대로-말할-수-있게">10.2 설계 체크리스트 (면접에서 그대로 말할 수 있게)</a></li><li class="l2"><a href="#11-커널-안에서는-무슨-일이-일어나나">11. 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#12-embedded-실무에서-다시-보기">12. Embedded 실무에서 다시 보기</a></li><li class="l3"><a href="#12-1-센서-키트-밤사이-한-번-리부트됐다">12.1 센서 키트 — "밤사이 한 번 리부트됐다"</a></li><li class="l3"><a href="#12-2-jetson-orin-kdump까지-가는-장비">12.2 Jetson Orin — kdump까지 가는 장비</a></li><li class="l3"><a href="#12-3-256-mib-소형-게이트웨이-pstore만으로">12.3 256 MiB 소형 게이트웨이 — pstore만으로</a></li><li class="l3"><a href="#12-4-hil-벤치-netconsole로-시리얼-대신">12.4 HIL 벤치 — netconsole로 시리얼 대신</a></li><li class="l2"><a href="#13-흔한-실수와-증상">13. 흔한 실수와 증상</a></li><li class="l2"><a href="#14-면접에서-이렇게-말한다">14. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#15-직접-해보기">15. 직접 해보기</a></li><li class="l2"><a href="#16-용어-사전">16. 용어 사전</a></li><li class="l2"><a href="#17-요약-체크리스트">17. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>
