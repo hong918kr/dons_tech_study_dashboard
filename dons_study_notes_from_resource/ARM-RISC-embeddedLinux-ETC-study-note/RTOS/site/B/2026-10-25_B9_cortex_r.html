@@ -1,0 +1,1782 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B9. Cortex-R 계열 — "A 코어의 예외 모델 + MCU의 결정성", 하드웨어 스태킹 없는 코어에 RTOS를 올리는 법</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="B/2026-10-25_B9_cortex_r">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">B. MCU 하드웨어 기반 · B9. Cortex-R 계열 — "A 코어의 예외 모델 + MCU의 결정성", 하드웨어 스태킹 없는 코어에 RTOS를 올리는 법</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">B. MCU 하드웨어 기반 · Cortex-M/R · RISC-V</div>
+      <h1>B9. Cortex-R 계열 — "A 코어의 예외 모델 + MCU의 결정성", 하드웨어 스태킹 없는 코어에 RTOS를 올리는 법</h1>
+      <div class="meta"><span>207분 읽기</span><span>2239줄</span><span>68개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: R5 · R52 · R52+ · R82가 어디서 왜 쓰이는지(SSD 컨트롤러 · 자동차 ECU · AI SoC 안전 섬) 설명할 수 있다 · Cortex-R52 bare-metal startup(벡터 테이블, EL2 → EL1, 모드별 스택, GICv3, generic timer)을 처음부터 써서 QEMU에서 돌릴 수 있다 · "하드웨어 스태킹이 없다"는 것이 IRQ 진입 코드와 RTOS 포트에 무슨 일을 시키는지 명령 수로 말할 수 있다 · MPU 2단계(EL1 + EL2), TCM ECC 초기화, lockstep(DCLS)을 펌웨어 쪽 할 일로 정리할 수 있다 <strong>왜 필요한가</strong>: Rivian 같은 차량 SoC, NVIDIA Orin 같은 AI SoC의 안전 섬, SSD 컨트롤러는 Cortex-M이 아니라 Cortex-R을 쓴다. 면접에서 "Cortex-M 포트와 Cortex-R 포트는 뭐가 다른가?", "R52의 EL2는 왜 있나?", "lockstep 코어에서 startup이 특별히 해야 하는 일은?"이 나오면 Don의 SSD 7년 경험을 RTOS 언어로 번역해서 답해야 한다 <strong>Don 기준 난이도</strong>: 멀티코어 Cortex-R bare-metal(실행부 · TCM · ECC · 인터럽트)은 이미 몸으로 안다 / 새로 배울 부분은 Armv8-R의 EL2와 2단계 MPU, GICv3 시스템 레지스터 인터페이스, FreeRTOS · Zephyr의 Cortex-R 포트가 IRQ 진입을 어떻게 소프트웨어로 처리하는지, Cortex-M 포트와의 비용 차이 <strong>선행 노트</strong>: B1(Cortex-M 프로그래머 모델), B2(예외 진입 · 하드웨어 스태킹 — 이 노트의 대조군), B4(RTOS가 쓰는 세 예외), B8(캐시 · TCM이 있는 MCU), EL C5(예외 레벨), EL H6(인터럽트 컨트롤러), EL F8(타이머). 이어지는 노트: C2(컨텍스트 스위치), C7(크리티컬 섹션), E2(인터럽트 우선순위 설계), O6 · P6(분할 · 하이퍼바이저) 🔁 <strong>Bare-Metal 겹침</strong>: BM D9(Cortex-R5 / R52 bare-metal: R 프로파일 startup, TCM ECC 초기화, MPU 설정, lockstep DCLS, R52 EL2) — 이 노트가 주인. Bare-Metal 노트는 이 노트를 링크하고 "RTOS 없이 실행부(executive) 하나로 멀티코어 R을 돌릴 때의 코어 간 통신 · 부트 순서"만 더한다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-cortex-r은-왜-따로-있나">0. 큰 그림 — Cortex-R은 왜 따로 있나<a class="anchor" href="#0-큰-그림-cortex-r은-왜-따로-있나" aria-label="link">#</a></h2>
+<p>Don이 SSD 컨트롤러에서 만졌던 코어를 떠올려 보자. 한 칩 안에 Cortex-R 코어가 셋쯤 있고, 코어마다 TCM이 붙어 있고, 각 코어는 실행부(executive) 루프 하나를 돌린다. 호스트 명령은 하드웨어 큐로 들어오고, NAND 쪽 완료는 인터럽트로 온다. Linux는 없다. 그런데 Cortex-M도 아니었다. 왜일까?</p>
+<p>이유는 세 가지다. 첫째, <strong>클럭과 처리량</strong>이다. SSD 컨트롤러는 수 GB/s의 데이터를 흘려야 하므로 MCU보다 훨씬 높은 클럭과 긴 파이프라인이 필요했다. 둘째, <strong>결정성</strong>이다. 높은 클럭이 필요하다고 Cortex-A를 쓰면 MMU · 큰 캐시 · 투기 실행 때문에 인터럽트 응답이 들쭉날쭉해진다. 셋째, <strong>신뢰성</strong>이다. TCM과 캐시에 ECC가 붙고, 필요하면 코어 두 개를 lockstep으로 묶어 계산 오류까지 잡는다. 이 세 가지를 동시에 만족시키려고 Arm이 만든 것이 <strong>R 프로파일(Real-time profile)</strong> 이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10.0" y="14.0" width="158.0" height="200.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="89.0" y="43.0" font-size="13" text-anchor="middle" font-weight="bold">Cortex-R5</text>
+<text x="89.0" y="73.0" font-size="12" text-anchor="middle">Armv7-R, 32비트</text>
+<text x="89.0" y="103.0" font-size="12" text-anchor="middle">MPU (PMSAv7)</text>
+<text x="89.0" y="133.0" font-size="12" text-anchor="middle">EL2 없음, 모드 7개</text>
+<text x="89.0" y="163.0" font-size="12" text-anchor="middle">VIC 포트 또는 GIC</text>
+<text x="89.0" y="193.0" font-size="12" text-anchor="middle">SSD · Zynq MPSoC</text>
+<rect x="177.0" y="14.0" width="158.0" height="200.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="256.0" y="43.0" font-size="13" text-anchor="middle" font-weight="bold">Cortex-R52</text>
+<text x="256.0" y="73.0" font-size="12" text-anchor="middle">Armv8-R AArch32</text>
+<text x="256.0" y="103.0" font-size="12" text-anchor="middle">MPU 2단계 EL1+EL2</text>
+<text x="256.0" y="133.0" font-size="12" text-anchor="middle">EL2 하이퍼바이저</text>
+<text x="256.0" y="163.0" font-size="12" text-anchor="middle">GICv3 (sysreg)</text>
+<text x="256.0" y="193.0" font-size="12" text-anchor="middle">자동차 · 안전 섬</text>
+<rect x="344.0" y="14.0" width="158.0" height="200.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="423.0" y="43.0" font-size="13" text-anchor="middle" font-weight="bold">Cortex-R52+</text>
+<text x="423.0" y="73.0" font-size="12" text-anchor="middle">Armv8-R AArch32</text>
+<text x="423.0" y="103.0" font-size="12" text-anchor="middle">R52 호환</text>
+<text x="423.0" y="133.0" font-size="12" text-anchor="middle">가상화 · 통합 강화</text>
+<text x="423.0" y="163.0" font-size="12" text-anchor="middle">GICv3</text>
+<text x="423.0" y="193.0" font-size="12" text-anchor="middle">ASIL D · 존 ECU</text>
+<rect x="511.0" y="14.0" width="158.0" height="200.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="590.0" y="43.0" font-size="13" text-anchor="middle" font-weight="bold">Cortex-R82</text>
+<text x="590.0" y="73.0" font-size="12" text-anchor="middle">Armv8-R AArch64</text>
+<text x="590.0" y="103.0" font-size="12" text-anchor="middle">MPU + 선택 MMU</text>
+<text x="590.0" y="133.0" font-size="12" text-anchor="middle">Linux도 가능</text>
+<text x="590.0" y="163.0" font-size="12" text-anchor="middle">최대 8코어</text>
+<text x="590.0" y="193.0" font-size="12" text-anchor="middle">계산형 스토리지</text>
+<line x1="30.0" y1="248.0" x2="650.0" y2="248.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah1)"/>
+<text x="30.0" y="272.0" font-size="12" text-anchor="start">Cortex-M에 가까움: 작은 코어 · 결정성</text>
+<text x="650.0" y="272.0" font-size="12" text-anchor="end">Cortex-A에 가까움: 64비트 · 큰 주소 공간</text>
+<text x="340.0" y="292.0" font-size="12" text-anchor="middle">R 프로파일 = A의 예외 모델 + M 수준의 결정성 (TCM · MPU · lockstep)</text>
+</svg></figure>
+<p>그림 1 — Cortex-R 계열 지도. R5는 Armv7-R(32비트), R52 · R52+는 Armv8-R AArch32(EL2 하이퍼바이저 추가), R82는 Armv8-R AArch64(64비트, 선택 MMU로 Linux도 가능)다. 아래 사용처는 공개 자료로 확인한 예다(참고 자료 참조).</p>
+<p>한 줄로 말하면 <strong>Cortex-R = Cortex-A의 예외 모델(모드 · 뱅크 레지스터 · GIC) + Cortex-M 수준의 결정성(MMU 대신 MPU, TCM, 짧은 인터럽트 경로)</strong> 이다. RTOS 엔지니어 입장에서 이게 중요한 이유는, <strong>포트(port) 계층이 Cortex-M과 완전히 다르기 때문이다.</strong> Cortex-M에서 "ISR을 그냥 C 함수로 쓸 수 있는" 이유(B2의 하드웨어 스태킹)가 Cortex-R에는 없다. 그 빈자리를 포트의 어셈블리가 메운다. 이 노트는 그 빈자리를 직접 코드로 채워 보고, 비용을 명령 수로 잰다.</p>
+<h3 id="어디서-쓰이나-확인한-예">어디서 쓰이나 — 확인한 예<a class="anchor" href="#어디서-쓰이나-확인한-예" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>코어</th><th>아키텍처</th><th>확인한 사용처 (출처)</th><th>Don과의 연결</th></tr></thead><tbody><tr><td>Cortex-R5 / R5F</td><td>Armv7-R</td><td>Phison E18 SSD 컨트롤러: "Triple Arm Cortex R5" (Phison 제품 페이지) · Xilinx Zynq UltraScale+ · Versal · TI K3 AM6x (Zephyr <code>soc/xlnx/zynqmp</code>, <code>soc/xlnx/versal</code>, <code>soc/ti/k3/am6x</code>가 <code>CPU_CORTEX_R5</code> 선택)</td><td>SSD 컨트롤러 = Don의 7년</td></tr><tr><td>Cortex-R52</td><td>Armv8-R AArch32</td><td>NVIDIA Orin 안전 섬에 lockstep R52 (Arm Newsroom) · NXP S32Z/S32E · Renesas RZ/T2 · RZ/N2 · R-Car Gen4 · AMD Versal Net / Versal Gen 2 (Zephyr <code>soc/</code> Kconfig가 <code>CPU_CORTEX_R52</code> 선택)</td><td>차량 SoC · AI SoC 안전 코어 (Rivian 파이프라인)</td></tr><tr><td>Cortex-R52+</td><td>Armv8-R AArch32</td><td>R52와 소프트웨어 호환, 가상화 · 통합 강화, ISO 26262 ASIL D 목표 (Arm 제품 페이지). 발표 연도는 확인 못 함</td><td>존(zonal) 컨트롤러</td></tr><tr><td>Cortex-R82</td><td>Armv8-R AArch64</td><td>2020년 9월 발표, 첫 64비트 R, 선택 MMU로 Linux 가능, 계산형 스토리지 겨냥 (AnandTech · eeNews) · FreeRTOS V11.3.0(2026-03)에 <code>ARM_CR82</code> 포트(SMP · MPU) 추가</td><td>차세대 SSD 컨트롤러</td></tr></tbody></table></div>
+<blockquote><p>주의: 위 표의 칩 이름은 공개 자료와 Zephyr 소스에서 직접 확인한 것만 적었다. "어느 SSD 회사가 R8을 쓴다" 같은 말은 확인하지 못해서 넣지 않았다.</p></blockquote>
+<h3 id="실습-환경-한-줄">실습 환경 한 줄<a class="anchor" href="#실습-환경-한-줄" aria-label="link">#</a></h3>
+<p>QEMU 10.2.1 <code>mps3-an536</code>(Cortex-R52, 이 노트에서는 1코어) 위에서 <strong>직접 쓴 bare-metal startup</strong> + FreeRTOS V11.3.2(<code>ARM_CRx_No_GIC</code> 포트) + Zephyr v4.4.2(<code>fvp_baser_aemv8r/fvp_aemv8r_aarch32</code> 보드를 overlay로 AN536에 옮김). 대조군은 QEMU <code>mps2-an385</code>(Cortex-M3). 툴체인은 Ubuntu <code>arm-none-eabi-gcc</code> 14.2(<code>-mcpu=cortex-r52 -marm</code>)와 Zephyr SDK 1.0.1 <code>arm-zephyr-eabi</code>. 타이밍 수치는 <strong>QEMU icount 기준(명령 1개 = 32 ns, <code>-icount shift=5</code>)</strong> 이다. 캐시 · 버스 · 파이프라인 · 예외 진입 사이클을 모델링하지 않으므로 실제 칩과 절대값은 다르다. 이 노트의 숫자는 "명령을 몇 개 실행했나"로 읽는다.</p>
+<p>빌드 · 실행 스크립트는 두 줄짜리다(소스는 <code>~/.rtos_scratch/B9/</code>, 산출물은 VM <code>/var/tmp/rtos/B9/</code>).</p>
+<figure class="code"><span class="lang">sh</span><pre><code># build.sh &lt;name&gt; &lt;src...&gt; : Cortex-R52, ARM state, freestanding (libc 없음)
+arm-none-eabi-gcc -mcpu=cortex-r52 -marm -mfloat-abi=softfp -mfpu=fpv5-d16 -O2 -g -Wall -Wextra \
+  -ffreestanding -nostdlib -Icommon -T common/r52.ld -o $O/app.elf common/start.S common/lib.c "$@" -lgcc
+# run.sh &lt;elf&gt; : ICOUNT=1이면 -icount shift=5,align=off,sleep=off
+qemu-system-arm -M mps3-an536 -smp 1 -nographic -monitor none -serial stdio \
+  -semihosting-config enable=on,target=native -kernel $E</code></pre></figure>
+<p><code>-kernel</code>에 ELF를 주면 QEMU가 세그먼트를 그 주소에 올리고 ELF entry(<code>_start</code>)에서 CPU 0을 시작한다. 프로그램은 Arm semihosting <code>SYS_EXIT</code>(<code>HLT #0xF000</code>)로 QEMU를 끝낸다.</p>
+<hr>
+<h2 id="1-r-프로파일의-정체-a-r-m-세-프로파일-비교">1. R 프로파일의 정체 — A · R · M 세 프로파일 비교<a class="anchor" href="#1-r-프로파일의-정체-a-r-m-세-프로파일-비교" aria-label="link">#</a></h2>
+<h3 id="1-1-직관-a의-몸에-m의-심장">1.1 직관: "A의 몸에 M의 심장"<a class="anchor" href="#1-1-직관-a의-몸에-m의-심장" aria-label="link">#</a></h3>
+<p>Cortex-M을 공부한 사람이 R을 처음 보면 놀라는 점은 <strong>R이 M보다 A에 훨씬 가깝다</strong>는 것이다. 레지스터 모델(뱅크 레지스터를 가진 7~8개 모드), 예외 벡터(분기 명령 8개), 인터럽트 컨트롤러(GIC), 시스템 레지스터(CP15)가 전부 A 쪽이다. 다른 점은 메모리 시스템이다. <strong>MMU가 없고 MPU만 있다</strong>(R82는 선택 MMU). 주소 변환이 없으니 TLB miss도, page walk도 없다. 대신 TCM과 ECC, lockstep 같은 "결정성 · 신뢰성" 장치가 붙는다.</p>
+<div class="tw"><table><thead><tr><th>항목</th><th>Cortex-A (예: A53)</th><th><strong>Cortex-R (R5 / R52)</strong></th><th>Cortex-M (예: M3 / M33)</th></tr></thead><tbody><tr><td>메모리 보호</td><td>MMU (가상 주소)</td><td><strong>MPU</strong> (물리 주소 그대로, R82는 MMU 선택)</td><td>MPU</td></tr><tr><td>예외 모델</td><td>모드(v7-A) / EL0–EL3</td><td><strong>모드 + 뱅크 레지스터</strong>, R52는 EL0–EL2</td><td>Thread / Handler, MSP / PSP</td></tr><tr><td>예외 진입</td><td>소프트웨어가 저장</td><td><strong>소프트웨어가 저장</strong></td><td><strong>하드웨어가 8워드 자동 스태킹</strong></td></tr><tr><td>벡터 테이블</td><td>분기 명령 테이블 (VBAR)</td><td><strong>분기 명령 8개</strong> (VBAR / HVBAR)</td><td>주소 테이블 (VTOR)</td></tr><tr><td>인터럽트 컨트롤러</td><td>GIC</td><td><strong>GIC</strong> (R5는 GICv1/v2 또는 VIC 포트, R52는 GICv3)</td><td>NVIC (코어에 내장)</td></tr><tr><td>시스템 레지스터</td><td>CP15 / MSR</td><td><strong>CP15</strong> (<code>MRC</code> / <code>MCR</code>)</td><td>메모리 맵 SCB (0xE000E000)</td></tr><tr><td>빠른 메모리</td><td>캐시</td><td><strong>TCM + 캐시, ECC</strong></td><td>TCM은 일부(M7 · M55 · M85)</td></tr><tr><td>신뢰성</td><td>RAS</td><td><strong>lockstep(DCLS)</strong>, ECC</td><td>일부 칩만 lockstep</td></tr></tbody></table></div>
+<blockquote><p>표 읽는 법: Cortex-R 열의 굵은 글씨가 RTOS 포트에 직접 영향을 주는 차이다. 특히 "예외 진입 = 소프트웨어가 저장" 한 줄 때문에 포트 어셈블리가 Cortex-M보다 몇 배 길어진다(§5, §9).</p></blockquote>
+<h3 id="1-2-세-세대의-차이">1.2 세 세대의 차이<a class="anchor" href="#1-2-세-세대의-차이" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>항목</th><th><strong>R5</strong> (Armv7-R)</th><th><strong>R52 / R52+</strong> (Armv8-R AArch32)</th><th><strong>R82</strong> (Armv8-R AArch64)</th></tr></thead><tbody><tr><td>명령어</td><td>A32 + T32</td><td>A32 + T32</td><td>A64</td></tr><tr><td>권한 단계</td><td>PL0 / PL1 (모드 7개)</td><td><strong>EL0 / EL1 / EL2</strong> (Hyp 모드 추가)</td><td>EL0 / EL1 / EL2 (AArch64 레지스터)</td></tr><tr><td>MPU</td><td>PMSAv7: 크기 2의 거듭제곱, 서브리전, 겹치면 번호 큰 영역 우선</td><td><strong>PMSAv8-32</strong>: base / limit, 64바이트 단위, <strong>겹치면 fault</strong>, EL2 MPU로 2단계</td><td>PMSAv8-64 + 선택 VMSA(MMU)</td></tr><tr><td>인터럽트</td><td>GIC(v1/v2 메모리 맵 CPU 인터페이스) 또는 VIC 포트</td><td><strong>GICv3, CPU 인터페이스 = 시스템 레지스터(<code>ICC_*</code>)</strong></td><td>GICv3</td></tr><tr><td>타이머</td><td>코어 밖 (SoC 타이머)</td><td><strong>Generic Timer 내장</strong> (CNTP / CNTV / CNTHP)</td><td>Generic Timer</td></tr><tr><td>TCM</td><td>ATCM / BTCM (B0 / B1)</td><td>ATCM / BTCM / CTCM</td><td>TCM</td></tr><tr><td>이 노트에서</td><td>개념 · FreeRTOS <code>ARM_CR5</code> 포트 비교</td><td><strong>QEMU AN536으로 전부 실행</strong></td><td>FreeRTOS <code>ARM_CR82</code> 포트 소개만</td></tr></tbody></table></div>
+<p>R52는 R5의 단순한 후속이 아니다. <strong>EL2가 생긴 것이 가장 큰 변화</strong>다. 하이퍼바이저 모드가 있으니 한 코어 위에 RTOS 두 개를 올려 격리할 수 있고(§6.3), 리셋하면 코어가 <strong>EL1이 아니라 EL2(Hyp 모드)에서 깨어난다</strong>(§3). Armv8-R에는 EL3(Secure Monitor)가 없다. 그래서 R52의 가장 높은 권한은 EL2다.</p>
+<h3 id="1-3-예제-1-리셋-직후-r52가-스스로-말하는-것-id-레지스터">1.3 예제 1 — 리셋 직후 R52가 스스로 말하는 것 (ID 레지스터)<a class="anchor" href="#1-3-예제-1-리셋-직후-r52가-스스로-말하는-것-id-레지스터" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 코어가 정말 EL2(Hyp)에서 시작하는지, QEMU의 R52에 MPU 영역 몇 개 · FPU 레지스터 몇 개 · 타이머 주파수가 몇인지 CP15 ID 레지스터로 직접 읽는다. <code>el2_hook()</code>은 startup이 EL2에서 부르는 C 함수다(§3).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex1 — reset lands in EL2 (Hyp): read Cortex-R52 ID registers, then drop to EL1 */
+#include "r52.h"
+
+static const char *mode_name(uint32_t m)
+{
+    switch (m &amp; 0x1f) {
+    case 0x10: return "USR"; case 0x11: return "FIQ"; case 0x12: return "IRQ";
+    case 0x13: return "SVC"; case 0x16: return "MON"; case 0x17: return "ABT";
+    case 0x1a: return "HYP"; case 0x1b: return "UND"; case 0x1f: return "SYS";
+    default:   return "???";
+    }
+}
+
+void el2_hook(void)
+{
+    uart_init();
+    uint32_t cpsr = get_cpsr(), midr = RD_CP15(0, c0, c0, 0);
+    uint32_t mpuir = RD_CP15(0, c0, c0, 4), hmpuir = RD_CP15(4, c0, c0, 4);
+    uint32_t mvfr0;
+    __asm volatile("vmrs %0, mvfr0" : "=r"(mvfr0));
+    printf("[EL2] CPSR=0x%08x mode=%s\n", cpsr, mode_name(cpsr));
+    printf("MIDR   =0x%08x  implementer=0x%x part=0x%x r%up%u\n", midr,
+           midr &gt;&gt; 24, (midr &gt;&gt; 4) &amp; 0xfff, (midr &gt;&gt; 20) &amp; 0xf, midr &amp; 0xf);
+    printf("MPIDR  =0x%08x  (Aff0 = core %u)\n", RD_CP15(0, c0, c0, 5), RD_CP15(0, c0, c0, 5) &amp; 0xff);
+    printf("ID_MMFR0=0x%08x (PMSA field bits[7:4]=%u)\n", RD_CP15(0, c0, c1, 4), (RD_CP15(0, c0, c1, 4) &gt;&gt; 4) &amp; 0xf);
+    printf("MPUIR  =0x%08x  EL1 MPU regions=%u\n", mpuir, (mpuir &gt;&gt; 8) &amp; 0xff);
+    printf("HMPUIR =0x%08x  EL2 MPU regions=%u\n", hmpuir, hmpuir &amp; 0xff);
+    printf("MVFR0  =0x%08x  FP D-regs field=%u (1=16 regs, 2=32 regs)\n", mvfr0, mvfr0 &amp; 0xf);
+    printf("CNTFRQ =%u Hz\n", CNTFRQ());
+    printf("SCTLR(EL1)=0x%08x HSCTLR=0x%08x\n", RD_CP15(0, c1, c0, 0), RD_CP15(4, c1, c0, 0));
+}
+
+int main(void)
+{
+    uint32_t cpsr = get_cpsr();
+    printf("[EL1] CPSR=0x%08x mode=%s  (after ERET)\n", cpsr, mode_name(cpsr));
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[EL2] CPSR=0x600001da mode=HYP
+MIDR   =0x411fd133  implementer=0x41 part=0xd13 r1p3
+MPIDR  =0x80000000  (Aff0 = core 0)
+ID_MMFR0=0x00211040 (PMSA field bits[7:4]=4)
+MPUIR  =0x00001000  EL1 MPU regions=16
+HMPUIR =0x00000010  EL2 MPU regions=16
+MVFR0  =0x10110222  FP D-regs field=2 (1=16 regs, 2=32 regs)
+CNTFRQ =62500000 Hz
+SCTLR(EL1)=0x30c50838 HSCTLR=0x00000000
+[EL1] CPSR=0x000001d3 mode=SVC  (after ERET)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>CPSR</code> 하위 5비트 <code>0x1a</code> = <strong>Hyp 모드</strong>. 리셋 직후 R52는 EL2에 있다. <code>ERET</code> 뒤에는 <code>0x13</code>(SVC, EL1)이다. 상위 <code>0x6...</code>은 앞선 비교 명령이 남긴 Z · C 플래그다.</li><li><code>MIDR</code> part <code>0xd13</code> = Cortex-R52, <code>r1p3</code>. implementer <code>0x41</code> = Arm.</li><li><code>ID_MMFR0</code> PMSA 필드 <code>4</code> = <strong>PMSAv8</strong>. MMU(VMSA) 필드는 0이다 — MMU가 없다.</li><li><code>MPUIR</code> · <code>HMPUIR</code> = EL1 MPU 16영역, EL2 MPU 16영역. <strong>MPU가 두 벌</strong>이라는 것이 R52의 특징이다(§6).</li><li><code>MVFR0</code> 하위 필드 2 = D 레지스터 32개(D0–D31). QEMU 모델 기준이다(실제 칩은 구성에 따라 다를 수 있다 — TRM 확인).</li><li><code>CNTFRQ</code> = 62.5 MHz. QEMU AN536의 generic timer 주파수다. 나중에 Zephyr 설정과 맞지 않아 문제가 된다(§9.3).</li></ul>
+<h3 id="1-4-함정">1.4 함정<a class="anchor" href="#1-4-함정" aria-label="link">#</a></h3>
+<ul><li><strong>"R은 M의 큰 버전"이라고 생각하는 것</strong>: 레지스터 모델과 예외 처리는 A 쪽이다. Cortex-M 포트를 그대로 옮길 수 없다. 포트를 고른다면 FreeRTOS <code>ARM_CR5</code> · <code>ARM_CRx_*</code> · <code>ARM_CR82</code> 중에서 고른다(§9.1).</li><li><strong>R52 리셋 = EL1이라고 가정하는 것</strong>: EL2에서 깬다. EL2에서 할 일(HVBAR, 타이머 접근 허용, FPU 트랩 해제)을 하지 않고 EL1로 내려가면 나중에 타이머 레지스터 접근이 UNDEF가 되거나 FPU 명령이 EL2로 트랩된다.</li></ul>
+<hr>
+<h2 id="2-예외-모델-모드-el-뱅크-레지스터">2. 예외 모델 — 모드, EL, 뱅크 레지스터<a class="anchor" href="#2-예외-모델-모드-el-뱅크-레지스터" aria-label="link">#</a></h2>
+<h3 id="2-1-직관-모드마다-자기-책상-이-있다">2.1 직관: 모드마다 "자기 책상"이 있다<a class="anchor" href="#2-1-직관-모드마다-자기-책상-이-있다" aria-label="link">#</a></h3>
+<p>Cortex-M에는 스택 포인터가 두 개(MSP · PSP)뿐이다. Cortex-R(그리고 v7-A)은 <strong>예외 종류마다 모드가 따로 있고, 모드마다 자기 SP · LR · SPSR을 가진다.</strong> 비유하면 직원(코어) 한 명이 일 종류마다 다른 책상을 쓰는 것이다. IRQ가 오면 IRQ 책상으로 옮겨 앉는데, 그 책상에는 자기 스택(SP_irq), 돌아갈 주소 메모(LR_irq), 원래 상태 메모(SPSR_irq)가 미리 놓여 있다. r0–r12는 책상 사이에 공유되는 "들고 다니는 서류"다(FIQ만 r8–r12를 따로 가진다).</p>
+<figure class="chart"><svg viewBox="0 0 680 370" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10.0" y="10.0" width="660.0" height="70.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="24.0" y="34.0" font-size="14" text-anchor="start" font-weight="bold">EL2</text>
+<text x="24.0" y="54.0" font-size="12" text-anchor="start">하이퍼바이저</text>
+<rect x="170.0" y="20.0" width="220.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="280.0" y="40.5" font-size="13" text-anchor="middle" font-weight="bold">Hyp 모드 0x1A</text>
+<text x="280.0" y="57.5" font-size="12" text-anchor="middle">SP_hyp · ELR_hyp · SPSR_hyp</text>
+<text x="410.0" y="42.0" font-size="12" text-anchor="start">HVBAR 벡터, HCR · HSCTLR,</text>
+<text x="410.0" y="60.0" font-size="12" text-anchor="start">EL2 MPU (HPRBAR/HPRLAR)</text>
+<rect x="10.0" y="96.0" width="660.0" height="170.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="24.0" y="120.0" font-size="14" text-anchor="start" font-weight="bold">EL1</text>
+<text x="24.0" y="140.0" font-size="12" text-anchor="start">OS 커널</text>
+<rect x="78.0" y="150.0" width="96.0" height="100.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="126.0" y="180.0" font-size="13" text-anchor="middle" font-weight="bold">SVC 0x13</text>
+<text x="126.0" y="204.0" font-size="12" text-anchor="middle">SP LR SPSR</text>
+<text x="126.0" y="228.0" font-size="12" text-anchor="middle">리셋 직후</text>
+<rect x="176.0" y="150.0" width="96.0" height="100.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="224.0" y="180.0" font-size="13" text-anchor="middle" font-weight="bold">IRQ 0x12</text>
+<text x="224.0" y="204.0" font-size="12" text-anchor="middle">SP LR SPSR</text>
+<text x="224.0" y="228.0" font-size="12" text-anchor="middle">IRQ 진입</text>
+<rect x="274.0" y="150.0" width="96.0" height="100.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="322.0" y="180.0" font-size="13" text-anchor="middle" font-weight="bold">FIQ 0x11</text>
+<text x="322.0" y="204.0" font-size="12" text-anchor="middle">SP LR SPSR</text>
+<text x="322.0" y="228.0" font-size="12" text-anchor="middle">+ r8–r12</text>
+<rect x="372.0" y="150.0" width="96.0" height="100.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="420.0" y="180.0" font-size="13" text-anchor="middle" font-weight="bold">ABT 0x17</text>
+<text x="420.0" y="204.0" font-size="12" text-anchor="middle">SP LR SPSR</text>
+<text x="420.0" y="228.0" font-size="12" text-anchor="middle">abort</text>
+<rect x="470.0" y="150.0" width="96.0" height="100.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="518.0" y="180.0" font-size="13" text-anchor="middle" font-weight="bold">UND 0x1B</text>
+<text x="518.0" y="204.0" font-size="12" text-anchor="middle">SP LR SPSR</text>
+<text x="518.0" y="228.0" font-size="12" text-anchor="middle">undefined</text>
+<rect x="568.0" y="150.0" width="96.0" height="100.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="616.0" y="180.0" font-size="13" text-anchor="middle" font-weight="bold">SYS 0x1F</text>
+<text x="616.0" y="204.0" font-size="12" text-anchor="middle">USR 레지스터</text>
+<text x="616.0" y="228.0" font-size="12" text-anchor="middle">그대로 사용</text>
+<rect x="10.0" y="282.0" width="660.0" height="60.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="24.0" y="306.0" font-size="14" text-anchor="start" font-weight="bold">EL0</text>
+<text x="24.0" y="326.0" font-size="12" text-anchor="start">앱</text>
+<rect x="170.0" y="290.0" width="160.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="250.0" y="307.5" font-size="13" text-anchor="middle" font-weight="bold">USR 0x10</text>
+<text x="250.0" y="324.5" font-size="12" text-anchor="middle">r0–r14 (SP_usr)</text>
+<text x="350.0" y="312.0" font-size="12" text-anchor="start">SYS와 USR는 같은 r13/r14를 공유한다</text>
+<text x="350.0" y="330.0" font-size="12" text-anchor="start">(FreeRTOS · Zephyr 태스크 = SYS 모드)</text>
+<line x1="280.0" y1="70.0" x2="152.0" y2="148.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+<text x="258.0" y="92.0" font-size="12" text-anchor="start" font-weight="bold">ERET</text>
+<text x="340.0" y="362.0" font-size="12" text-anchor="middle">Armv7-R(R5)은 EL2/Hyp가 없고 나머지 모드는 같다. Cortex-M은 Thread/Handler 두 모드뿐이다.</text>
+</svg></figure>
+<p>그림 2 — Armv8-R AArch32의 권한 단계와 모드. EL1 안에 모드 6개가 있고, 각자 SP · LR · SPSR을 뱅크로 가진다. SYS 모드는 USR와 같은 레지스터를 쓰는 특권 모드라서 RTOS 태스크가 여기서 돈다. EL2(Hyp)는 R52에서 새로 생겼다.</p>
+<h3 id="2-2-정의-모드-표">2.2 정의 — 모드 표<a class="anchor" href="#2-2-정의-모드-표" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>모드</th><th>CPSR.M</th><th>EL</th><th>들어가는 때</th><th>뱅크 레지스터</th><th>RTOS에서의 역할</th></tr></thead><tbody><tr><td>USR</td><td>0x10</td><td>EL0</td><td>비특권 코드</td><td>(기본 r13/r14)</td><td>MPU 격리된 태스크 (Zephyr userspace, FreeRTOS MPU 포트)</td></tr><tr><td>FIQ</td><td>0x11</td><td>EL1</td><td>FIQ (GICv3 Group 0)</td><td>SP · LR · SPSR + <strong>r8–r12</strong></td><td>커널 밖 초고속 인터럽트 (Cortex-M의 zero-latency ISR 자리)</td></tr><tr><td>IRQ</td><td>0x12</td><td>EL1</td><td>IRQ (GICv3 Group 1)</td><td>SP · LR · SPSR</td><td>진입만 하고 곧바로 SVC/SYS로 옮기는 경우가 많다 (§5)</td></tr><tr><td>SVC</td><td>0x13</td><td>EL1</td><td><code>SVC</code> 명령, 리셋 뒤 EL1 진입</td><td>SP · LR · SPSR</td><td>FreeRTOS yield(<code>SVC 0</code>), Zephyr 시스템 콜 · ISR 스택</td></tr><tr><td>ABT</td><td>0x17</td><td>EL1</td><td>prefetch / data abort</td><td>SP · LR · SPSR</td><td>MPU 위반 처리 (§6)</td></tr><tr><td>HYP</td><td>0x1A</td><td>EL2</td><td>리셋, <code>HVC</code>, 트랩</td><td>SP_hyp · ELR_hyp · SPSR_hyp</td><td>하이퍼바이저 (§6.3)</td></tr><tr><td>UND</td><td>0x1B</td><td>EL1</td><td>정의 안 된 명령</td><td>SP · LR · SPSR</td><td>lazy FPU 저장 트릭 (Zephyr, §5.6)</td></tr><tr><td>SYS</td><td>0x1F</td><td>EL1</td><td><code>CPS #0x1F</code>로만</td><td>(USR와 공유)</td><td><strong>FreeRTOS · Zephyr 태스크가 도는 모드</strong></td></tr></tbody></table></div>
+<p>Cortex-M과 대응시키면 이렇다. M의 Thread 모드 + PSP ≈ R의 SYS 모드(태스크 스택), M의 Handler 모드 + MSP ≈ R의 SVC 모드(ISR · 커널 스택). R에는 "예외 종류별 모드"가 추가로 있을 뿐이다.</p>
+<h3 id="2-3-예제-2-뱅크-레지스터를-눈으로-보기">2.3 예제 2 — 뱅크 레지스터를 눈으로 보기<a class="anchor" href="#2-3-예제-2-뱅크-레지스터를-눈으로-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 각 모드의 SP가 정말 다른지, FIQ의 r8이 정말 따로인지, <code>SVC</code> 명령이 SVC 모드로 들어가며 LR · SPSR을 어떻게 남기는지 확인한다. <code>MRS Rd, SP_irq</code> 같은 <strong>banked register 접근 명령</strong>(Armv7VE · Armv8-R에 있음)으로 다른 모드의 레지스터를 모드 전환 없이 읽는다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex2 — banked registers: each A/R mode has its own SP/LR/SPSR; FIQ also banks r8-r12 */
+#include "r52.h"
+#define RD_BANKED(reg) ({ uint32_t _v; __asm volatile("mrs %0, " #reg : "=r"(_v)); _v; })
+
+void el2_hook(void) { uart_init(); }
+
+/* SVC handler in asm: save r0-r3,r12,lr on SVC stack, call C with SVC number */
+__attribute__((naked)) void svc_entry(void)
+{
+    __asm volatile(
+        "push {r0-r3, r12, lr}\n"
+        "ldr  r0, [lr, #-4]\n"          /* the SVC instruction itself (ARM state) */
+        "bic  r0, r0, #0xff000000\n"    /* imm24 = SVC number */
+        "mrs  r1, spsr\n"
+        "mov  r2, sp\n"
+        "bl   svc_c\n"
+        "pop  {r0-r3, r12, lr}\n"
+        "movs pc, lr\n");               /* return: PC=LR_svc, CPSR=SPSR_svc */
+}
+
+void svc_c(uint32_t num, uint32_t spsr, uint32_t sp)
+{
+    printf("  in SVC handler: num=%u CPSR=0x%08x SPSR_svc=0x%08x SP_svc=0x%08x\n",
+           num, get_cpsr(), spsr, sp);
+}
+
+int main(void)
+{
+    uint32_t sp_now; __asm volatile("mov %0, sp" : "=r"(sp_now));  /* own mode: plain SP */
+    printf("SP_svc=0x%08x SP_irq=0x%08x SP_fiq=0x%08x\n",
+           sp_now, RD_BANKED(SP_irq), RD_BANKED(SP_fiq));
+    printf("SP_abt=0x%08x SP_und=0x%08x SP_usr(=SYS)=0x%08x\n",
+           RD_BANKED(SP_abt), RD_BANKED(SP_und), RD_BANKED(SP_usr));
+
+    /* r8 is shared by USR/SYS/SVC/IRQ/ABT/UND but FIQ has its own r8_fiq */
+    uint32_t r8_sys, r8_fiq;
+    __asm volatile("mov r8, #0x55\n"
+                   "cps #0x11\n" "mov r8, #0xF1\n" "cps #0x13\n"   /* write r8 in FIQ mode */
+                   "mov %0, r8\n" "mrs %1, r8_fiq\n"
+                   : "=r"(r8_sys), "=r"(r8_fiq) :: "r8");
+    printf("r8 (SVC view)=0x%x  r8_fiq=0x%x  -&gt; FIQ has private r8\n", r8_sys, r8_fiq);
+
+    /* switch to SYS mode: same r0-r14 as USR, but privileged */
+    uint32_t sp_sys, cpsr_sys;
+    __asm volatile("cps #0x1f\n" "mov %0, sp\n" "mrs %1, cpsr\n" "cps #0x13\n"
+                   : "=r"(sp_sys), "=r"(cpsr_sys));
+    printf("in SYS: CPSR=0x%08x SP=0x%08x\n", cpsr_sys, sp_sys);
+
+    printf("calling svc #42 from SVC mode, CPSR=0x%08x\n", get_cpsr());
+    __asm volatile("svc #42" ::: "lr", "memory");
+    printf("back, CPSR=0x%08x\n", get_cpsr());
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>SP_svc=0x20002e20 SP_irq=0x20003e28 SP_fiq=0x20004228
+SP_abt=0x20004628 SP_und=0x20004a28 SP_usr(=SYS)=0x20005a28
+r8 (SVC view)=0x55  r8_fiq=0xf1  -&gt; FIQ has private r8
+in SYS: CPSR=0x600001df SP=0x20005a28
+calling svc #42 from SVC mode, CPSR=0x600001d3
+  in SVC handler: num=42 CPSR=0x600001d3 SPSR_svc=0x600001d3 SP_svc=0x20002e08
+back, CPSR=0x600001d3</code></pre></figure>
+<p>링커가 정한 스택 꼭대기(<code>arm-none-eabi-nm -n</code>)와 비교한다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>20001e28 B __stack_hyp_top
+20002e28 B __stack_svc_top
+20003e28 B __stack_irq_top
+20004228 B __stack_fiq_top
+20004628 B __stack_abt_top
+20004a28 B __stack_und_top
+20005a28 B __stack_sys_top</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>각 모드의 SP가 startup에서 넣어 준 꼭대기 값 그대로다. SVC만 8바이트 작은 이유는 <code>main</code>이 <code>push {r8, lr}</code>을 했기 때문이다.</li><li>SVC 모드에서 r8에 <code>0x55</code>를 넣고, FIQ 모드로 가서 r8에 <code>0xF1</code>을 넣었는데 SVC의 r8은 그대로 <code>0x55</code>다. <strong>FIQ 핸들러는 r8–r12를 저장하지 않고 써도 된다</strong> — 그래서 "Fast" IRQ다.</li><li>SVC 핸들러 안에서 <code>SPSR_svc</code> = 호출 직전 CPSR(<code>0x...1d3</code>), SVC 번호 42는 <code>LR - 4</code> 위치 명령어의 하위 24비트에서 꺼냈다. FreeRTOS <code>FreeRTOS_SVC_Handler</code>도 같은 방법으로 SVC 번호를 꺼낸다(§9).</li><li>핸들러 복귀는 <code>movs pc, lr</code> — <strong>S 접미사가 붙은 PC 쓰기는 SPSR을 CPSR로 복사</strong>한다. Cortex-M의 <code>bx lr</code>(EXC_RETURN 마법 값)과 전혀 다른 방식이다.</li></ul>
+<h3 id="2-4-함정-자기-모드의-뱅크-레지스터를-mrs로-읽으면-undef">2.4 함정 — 자기 모드의 뱅크 레지스터를 MRS로 읽으면 UNDEF<a class="anchor" href="#2-4-함정-자기-모드의-뱅크-레지스터를-mrs로-읽으면-undef" aria-label="link">#</a></h3>
+<p>이 예제의 첫 버전은 SVC 모드에서 <code>mrs r1, SP_svc</code>를 썼다. 결과는 이랬다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>UNEXPECTED exception kind=0x1 lr=0x200007f8 cpsr=0x000001db</code></pre></figure>
+<p><code>kind=1</code>은 Undefined 예외, CPSR <code>0x1b</code>는 UND 모드다. <code>objdump</code>로 <code>lr - 4</code> = <code>0x200007f4</code>를 보면 바로 그 명령이다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>200007f0:	e92d4100 	push	{r8, lr}
+200007f4:	e1031300 	mrs	r1, SP_svc</code></pre></figure>
+<p>Arm 아키텍처는 <strong>현재 모드의 뱅크 레지스터를 banked MRS로 접근하는 것을 UNPREDICTABLE로 정의</strong>하고, QEMU는 이를 UNDEF로 처리한다. 현재 모드의 SP는 그냥 <code>mov rX, sp</code>로 읽는다. 또 EL1에서 <code>SP_hyp</code>처럼 <strong>더 높은 EL의 레지스터</strong>를 읽는 것도 허용되지 않는다. 실칩에서 UNPREDICTABLE은 "가끔 동작하는 것처럼 보이는" 최악의 버그가 되므로, QEMU가 UNDEF로 잡아 준 것이 오히려 고맙다.</p>
+<h3 id="2-5-rtos와-연결-왜-태스크는-sys-모드에서-도나">2.5 RTOS와 연결 — 왜 태스크는 SYS 모드에서 도나<a class="anchor" href="#2-5-rtos와-연결-왜-태스크는-sys-모드에서-도나" aria-label="link">#</a></h3>
+<p>FreeRTOS <code>ARM_CRx_No_GIC/port.c</code>의 첫 태스크 SPSR 값은 <code>portINITIAL_SPSR = 0x01f</code>(System mode, ARM, IRQ · FIQ 허용)다. Zephyr <code>cortex_a_r</code>도 스레드를 SYS 모드에서 돌린다(§9.3의 Zephyr 출력 <code>CPSR mode=0x1f</code>). 이유는 이렇다.</p>
+<ul><li><strong>SYS는 특권 모드</strong>라서 태스크가 CP15 · 주변장치에 접근할 수 있다(MPU 격리가 필요하면 USR).</li><li><strong>SYS는 USR와 r13/r14를 공유</strong>한다. 그래서 "태스크 스택 = SP_usr/SP_sys"가 되고, 커널은 IRQ · SVC 모드의 자기 스택을 따로 가진다. Cortex-M의 PSP(태스크) / MSP(커널) 분리와 같은 효과다.</li><li>IRQ 진입 후 <code>SRSDB SP!, #0x1F</code>(아래 §5)로 <strong>"돌아갈 주소 + 상태"를 곧바로 태스크(SYS) 스택에 저장</strong>할 수 있다. 그러면 컨텍스트 스위치가 "SP_sys만 바꾸면 끝"이 된다.</li></ul>
+<hr>
+<h2 id="3-리셋에서-c까지-cortex-r52-startup-직접-쓰기">3. 리셋에서 C까지 — Cortex-R52 startup 직접 쓰기<a class="anchor" href="#3-리셋에서-c까지-cortex-r52-startup-직접-쓰기" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM D9(R 프로파일 startup · R52 EL2)와 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="3-1-직관-m은-주소표-두-칸-이면-되고-r은-짐을-직접-푼다">3.1 직관: M은 "주소표 두 칸"이면 되고, R은 "짐을 직접 푼다"<a class="anchor" href="#3-1-직관-m은-주소표-두-칸-이면-되고-r은-짐을-직접-푼다" aria-label="link">#</a></h3>
+<p>Cortex-M 리셋은 하드웨어가 거의 다 해 준다. 벡터 테이블 0번 칸에서 MSP를 읽고, 1번 칸(Reset_Handler)으로 점프한다(B5). Cortex-R52 리셋은 아무것도 해 주지 않는다. <strong>SP도 없고, 모드는 EL2(Hyp)이고, 벡터 베이스도 정해야 하고, EL1로 내려가는 것도 소프트웨어가 <code>ERET</code>로 한다.</strong> 그 다음에는 모드 6개의 SP를 하나씩 넣어야 한다. Don이 SSD 컨트롤러 startup에서 봤던 "모드마다 <code>CPS</code> 하고 <code>ldr sp, =...</code>" 줄들이 바로 이것이다.</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>Cortex-M3 (B5)</th><th>Cortex-R52 (이 노트의 <code>start.S</code>)</th></tr></thead><tbody><tr><td>첫 SP</td><td>하드웨어가 vector[0]에서 MSP 로드</td><td>소프트웨어가 <code>ldr sp, =__stack_hyp_top</code></td></tr><tr><td>시작 모드</td><td>Thread, privileged</td><td><strong>EL2 Hyp 모드</strong></td></tr><tr><td>벡터 베이스</td><td>VTOR (기본 0x0)</td><td><strong>HVBAR</strong>(EL2) · <strong>VBAR</strong>(EL1)를 CP15로 쓴다</td></tr><tr><td>벡터 형식</td><td>함수 주소 배열</td><td><strong>분기 명령 8개</strong> (<code>b</code> 또는 <code>ldr pc, [...]</code>)</td></tr><tr><td>권한 낮추기</td><td>CONTROL.nPRIV</td><td><code>SPSR_hyp</code> · <code>ELR_hyp</code> 설정 후 <code>ERET</code></td></tr><tr><td>스택</td><td>MSP / PSP 둘</td><td><strong>모드별 6개 + Hyp 1개</strong></td></tr><tr><td>타이머 접근</td><td>SysTick 그냥 사용</td><td>EL2가 <strong>CNTHCTL</strong>로 EL1 접근 허용</td></tr><tr><td>FPU 켜기</td><td>CPACR</td><td><strong>HCPTR</strong>(EL2 트랩 해제) + <strong>CPACR</strong> + <strong>FPEXC.EN</strong></td></tr></tbody></table></div>
+<h3 id="3-2-an536-메모리-맵-qemu에게-직접-물어보기">3.2 AN536 메모리 맵 — QEMU에게 직접 물어보기<a class="anchor" href="#3-2-an536-메모리-맵-qemu에게-직접-물어보기" aria-label="link">#</a></h3>
+<p>UART 주소를 추측하지 않으려고 QEMU 모니터의 <code>info mtree -f</code>로 CPU 0이 보는 주소 공간을 덤프했다(QEMU 소스 <code>hw/arm/mps3r.c</code>와 같은 값). 핵심 줄만 남긴다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>  0000000000000000-0000000000007fff (prio 0, ram): ATCM
+  0000000008000000-00000000087fffff (prio 0, rom): QSPI
+  0000000010000000-000000001007ffff (prio 0, ram): BRAM
+  0000000020000000-00000000dfffffff (prio 0, ram): DDR
+  00000000e0101000-00000000e0101fff (prio 0, i/o): cmsdk-apb-dualtimer
+  00000000e0202000-00000000e0202fff (prio 0, i/o): mps2-fpgaio
+  00000000e0205000-00000000e0205fff (prio 0, i/o): uart
+  ...
+  00000000e7c00000-00000000e7c00fff (prio 0, i/o): uart
+  00000000ee000000-00000000ee007fff (prio 0, ram): ATCM0
+  00000000ee100000-00000000ee107fff (prio 0, ram): BTCM0
+  00000000ee200000-00000000ee207fff (prio 0, ram): CTCM0
+  00000000f0000000-00000000f000ffff (prio 0, i/o): gicv3_dist
+  00000000f0100000-00000000f011ffff (prio 0, i/o): gicv3_redist_region[0]</code></pre></figure>
+<p>같은 덤프의 <code>info qtree</code>에서 <code>chardev = "serial0"</code>이 붙은 UART는 CMSDK APB UART(<code>pclk-frq = 50000000</code>)였다. QEMU 소스 주석에 따르면 <strong>UART 0 · 1은 CPU마다 따로 있는(per-CPU) UART로 0xE7C00000에 있고, UART 2–5는 시스템 공유로 0xE0205000부터</strong> 있다. <code>-serial stdio</code>가 첫 번째 UART(CPU 0의 0xE7C00000)에 붙는다. 정리하면 이 노트의 메모리 맵은 다음과 같다(영문 전용 그림).</p>
+<figure class="code"><pre><code>0x0000_0000  ATCM (32 KB, CPU0 view)        &lt;- QEMU: separate RAM, not the 0xEE00_0000 alias
+0x2000_0000  DDR  (3 GB)                    &lt;- our ELF: .vectors .text .data .bss .stacks
+0xE020_5000  UART2..5 (shared CMSDK UART)
+0xE7C0_0000  UART0 (per-CPU CMSDK UART)     &lt;- -serial stdio, printf
+0xEE00_0000  ATCM0 / 0xEE10_0000 BTCM0 / 0xEE20_0000 CTCM0 (32 KB each)
+0xF000_0000  GICv3 Distributor
+0xF010_0000  GICv3 Redistributor (RD_base), SGI_base = +0x1_0000</code></pre></figure>
+<h3 id="3-3-벡터-테이블-두-벌">3.3 벡터 테이블 두 벌<a class="anchor" href="#3-3-벡터-테이블-두-벌" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: EL2용(HVBAR)과 EL1용(VBAR) 벡터 테이블을 만든다. EL2 쪽은 <code>b</code> 분기, EL1 쪽은 <code>ldr pc, [pc, #off]</code> + 주소 리터럴 방식을 일부러 섞었다. <code>b</code>는 ±32 MB 안에서만 닿고, <code>ldr pc</code>는 32비트 주소 어디든 닿는다(Zephyr <code>vector_table.S</code>가 <code>ldr pc, =z_arm_reset</code> 방식을 쓴다).</p>
+<figure class="code"><span class="lang">asm</span><pre><code>/* start.S — Cortex-R52 (Armv8-R AArch32) reset: EL2(Hyp) -&gt; EL1(SVC), per-mode stacks */
+    .syntax unified
+    .arm
+    .fpu fpv5-d16
+
+/* ---------- EL2 (Hyp) vector table: HVBAR ---------- */
+    .section .vectors, "ax"
+    .align 5
+    .global hyp_vectors
+hyp_vectors:
+    b   _start          @ 0x00 reset (not used via HVBAR)
+    b   hyp_undef       @ 0x04 undefined instruction (taken to Hyp)
+    b   hyp_hvc         @ 0x08 HVC
+    b   hyp_pabt        @ 0x0C prefetch abort (Hyp)
+    b   hyp_dabt        @ 0x10 data abort (Hyp)
+    b   hyp_trap        @ 0x14 Hyp trap: exceptions from EL1/EL0 routed to EL2
+    b   hyp_irq         @ 0x18 IRQ
+    b   hyp_fiq         @ 0x1C FIQ
+
+/* ---------- EL1 vector table: VBAR (ldr pc table style) ---------- */
+    .align 5
+    .global el1_vectors
+el1_vectors:
+    ldr pc, v_reset     @ 0x00
+    ldr pc, v_undef     @ 0x04
+    ldr pc, v_svc       @ 0x08
+    ldr pc, v_pabt      @ 0x0C
+    ldr pc, v_dabt      @ 0x10
+    nop                 @ 0x14 (reserved at EL1)
+    ldr pc, v_irq       @ 0x18
+    ldr pc, v_fiq       @ 0x1C
+v_reset: .word _start
+v_undef: .word undef_entry
+v_svc:   .word svc_entry
+v_pabt:  .word pabt_entry
+v_dabt:  .word dabt_entry
+v_irq:   .word irq_entry
+v_fiq:   .word fiq_entry
+
+/* weak default handlers: report kind + LR, then exit */
+    .macro DEFAULT name, kind
+    .weak \name
+\name:
+    mov r0, #\kind
+    mov r1, lr
+    b   exc_unexpected
+    .endm
+    DEFAULT undef_entry, 1
+    DEFAULT svc_entry,   2
+    DEFAULT pabt_entry,  3
+    DEFAULT dabt_entry,  4
+    DEFAULT irq_entry,   6
+    DEFAULT fiq_entry,   7
+    DEFAULT hyp_undef,   0x11
+    DEFAULT hyp_hvc,     0x12
+    DEFAULT hyp_pabt,    0x13
+    DEFAULT hyp_dabt,    0x14
+    DEFAULT hyp_trap,    0x15
+    DEFAULT hyp_irq,     0x16
+    DEFAULT hyp_fiq,     0x17
+</code></pre></figure>
+<p>빌드 결과를 <code>objdump -d</code>로 보면 벡터 테이블이 정말 "명령어 8개"다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>20000000 &lt;hyp_vectors&gt;:
+20000000:	b	200000f8 &lt;_start&gt;
+20000004:	b	200000a4 &lt;hyp_undef&gt;
+20000008:	b	200000b0 &lt;hyp_hvc&gt;
+2000000c:	b	200000bc &lt;hyp_pabt&gt;
+20000010:	b	200000c8 &lt;hyp_dabt&gt;
+20000014:	b	200000d4 &lt;hyp_trap&gt;
+20000018:	b	200000e0 &lt;hyp_irq&gt;
+2000001c:	b	200000ec &lt;hyp_fiq&gt;
+
+20000020 &lt;el1_vectors&gt;:
+20000020:	ldr	pc, [pc, #24]	@ 20000040 &lt;v_reset&gt;
+20000024:	ldr	pc, [pc, #24]	@ 20000044 &lt;v_undef&gt;
+20000028:	ldr	pc, [pc, #24]	@ 20000048 &lt;v_svc&gt;
+2000002c:	ldr	pc, [pc, #24]	@ 2000004c &lt;v_pabt&gt;
+20000030:	ldr	pc, [pc, #24]	@ 20000050 &lt;v_dabt&gt;
+20000034:	nop	{0}
+20000038:	ldr	pc, [pc, #20]	@ 20000054 &lt;v_irq&gt;
+2000003c:	ldr	pc, [pc, #20]	@ 20000058 &lt;v_fiq&gt;</code></pre></figure>
+<p>출력에서 볼 것: 오프셋 0x18이 IRQ, 0x1C가 FIQ다. EL1의 0x14는 비어 있다(v7의 옛 자리). EL2의 0x14는 <strong>Hyp Trap</strong> — EL1/EL0에서 EL2로 올라오는 예외(HVC, 2단계 MPU fault 등)가 전부 여기로 온다(§6.3). 테이블은 32바이트 정렬이어야 한다(<code>.align 5</code>). Zephyr <code>reset.S</code>도 같은 이유로 <code>__start</code>를 <code>.align 5</code>로 둔다는 주석이 있다.</p>
+<h3 id="3-4-리셋-경로-el2-el1">3.4 리셋 경로 — EL2 → EL1<a class="anchor" href="#3-4-리셋-경로-el2-el1" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">asm</span><pre><code>    .text
+    .global _start
+_start:
+    ldr  sp, =__stack_hyp_top
+    ldr  r0, =hyp_vectors
+    mcr  p15, 4, r0, c12, c0, 0     @ HVBAR
+    mov  r0, #3
+    mcr  p15, 4, r0, c14, c1, 0     @ CNTHCTL: PL1PCTEN|PL1PCEN (EL1 may use phys counter/timer)
+    mrc  p15, 4, r0, c1, c1, 2      @ HCPTR
+    bic  r0, r0, #(3 &lt;&lt; 10)         @ do not trap cp10/cp11 (FPU) to EL2
+    mcr  p15, 4, r0, c1, c1, 2
+    ldr  r0, =__bss_start           @ zero .bss
+    ldr  r1, =__bss_end
+    mov  r2, #0
+1:  cmp  r0, r1
+    strlo r2, [r0], #4
+    blo  1b
+    bl   el2_hook                   @ C code at EL2 (weak, may be empty)
+    ldr  r0, =el1_vectors
+    mcr  p15, 0, r0, c12, c0, 0     @ VBAR (EL1)
+    ldr  r0, =el1_entry
+    msr  elr_hyp, r0
+    mov  r0, #0x1d3                 @ SPSR: A,I,F masked, mode = SVC (0x13)
+    msr  spsr_hyp, r0
+    eret                            @ EL2 -&gt; EL1
+
+el1_entry:
+    cps  #0x12
+    ldr  sp, =__stack_irq_top
+    cps  #0x11
+    ldr  sp, =__stack_fiq_top
+    cps  #0x17
+    ldr  sp, =__stack_abt_top
+    cps  #0x1b
+    ldr  sp, =__stack_und_top
+    cps  #0x1f
+    ldr  sp, =__stack_sys_top
+    cps  #0x13
+    ldr  sp, =__stack_svc_top
+    mrc  p15, 0, r0, c1, c0, 2      @ CPACR: cp10/cp11 full access
+    orr  r0, r0, #(0xf &lt;&lt; 20)
+    mcr  p15, 0, r0, c1, c0, 2
+    isb
+    mov  r0, #0x40000000            @ FPEXC.EN
+    vmsr fpexc, r0
+    bl   main
+    bl   qemu_exit
+
+    .weak el2_hook
+el2_hook:
+    bx   lr</code></pre></figure>
+<p>한 줄씩 읽으면 이렇다.</p>
+<ol><li><code>ldr sp, =__stack_hyp_top</code> — 하드웨어가 SP를 주지 않으므로 C를 부르기 전에 반드시 넣는다.</li><li><code>HVBAR</code> — EL2 예외 벡터. 이것을 안 넣으면 EL2에서 나는 첫 예외가 0번지 근처로 날아간다.</li><li><code>CNTHCTL = 3</code> — EL1이 물리 카운터(<code>CNTPCT</code>)와 물리 타이머(<code>CNTP_*</code>)를 쓰도록 허용한다. 하이퍼바이저가 게스트에게 "시계를 직접 만져도 된다"고 허락하는 비트다.</li><li><code>HCPTR</code>의 TCP10/TCP11을 지운다 — EL1의 FPU 명령이 EL2로 트랩되지 않게 한다.</li><li><code>.bss</code> 0 채우기 → <code>el2_hook()</code> (EL2에서 할 C 코드, 기본은 빈 함수).</li><li><code>VBAR</code> — EL1 벡터. <code>SPSR_hyp = 0x1D3</code>(A · I · F 마스크, 모드 SVC), <code>ELR_hyp = el1_entry</code>, <code>ERET</code>. <strong>ERET 한 명령이 PC = ELR_hyp, CPSR = SPSR_hyp를 동시에</strong> 한다.</li><li>EL1에서 <code>CPS</code>로 모드를 돌며 SP 6개를 넣는다. 마지막에 SVC로 돌아와 <code>main</code>.</li><li><code>CPACR</code>(cp10/cp11 접근) + <code>FPEXC.EN</code> — 둘 다 해야 VFP 명령이 UNDEF가 안 된다.</li></ol>
+<p>Zephyr v4.4.2 <code>arch/arm/core/cortex_a_r/reset.S</code>도 같은 일을 한다. <code>CONFIG_AARCH32_ARMV8_R</code>이면 CPSR 모드가 HYP인지 보고, <code>HACTLR</code>(EL1에게 IMP DEF 레지스터 접근 허용)을 설정한 뒤 <code>msr elr_hyp, r0</code> · <code>eret</code>로 SVC 모드 <code>EL1_Reset_Handler</code>로 내려간다. (원문 발췌, <code>...</code>는 생략한 줄)</p>
+<figure class="code"><span class="lang">asm</span><pre><code>    /* Check if we are starting in HYP mode */
+    mrs r0, cpsr
+    and r0, r0, #MODE_MASK
+    cmp r0, #MODE_HYP
+    bne EL1_Reset_Handler
+    ...
+    /* Init HACTLR: Enable EL1 access to all IMP DEF registers */
+    ldr r0, =HACTLR_INIT
+    mcr p15, 4, r0, c1, c0, 1
+   /* Go to SVC mode */
+    ...
+    msr elr_hyp, r0
+    dsb
+    isb
+    eret</code></pre></figure>
+<h3 id="3-5-링커-스크립트-스택-일곱-개">3.5 링커 스크립트 — 스택 일곱 개<a class="anchor" href="#3-5-링커-스크립트-스택-일곱-개" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>/* r52.ld — everything in AN536 DDR (0x20000000), as QEMU -kernel loads ELF segments */
+ENTRY(_start)
+MEMORY { DDR (rwx) : ORIGIN = 0x20000000, LENGTH = 16M }
+SECTIONS
+{
+    .text : { KEEP(*(.vectors)) *(.text*) *(.rodata*) } &gt; DDR
+    .data : { *(.data*) } &gt; DDR
+    .bss (NOLOAD) : { __bss_start = .; *(.bss*) *(COMMON) . = ALIGN(4); __bss_end = .; } &gt; DDR
+    .stacks (NOLOAD) : ALIGN(8) {
+        . += 0x1000; __stack_hyp_top = .;
+        . += 0x1000; __stack_svc_top = .;
+        . += 0x1000; __stack_irq_top = .;
+        . += 0x400;  __stack_fiq_top = .;
+        . += 0x400;  __stack_abt_top = .;
+        . += 0x400;  __stack_und_top = .;
+        . += 0x1000; __stack_sys_top = .;
+    } &gt; DDR
+}</code></pre></figure>
+<p>Cortex-M 링커 스크립트(B5)와 다른 점은 <code>.stacks</code> 섹션 하나에 모드별 스택을 나란히 둔 것뿐이다. 실제 제품에서는 IRQ · SVC 스택을 <strong>TCM에</strong> 두는 경우가 많다(§7). 인터럽트 진입이 스택에 저장하는 시간이 TCM 접근 지연으로 정해지기 때문이다.</p>
+<h3 id="3-6-함정">3.6 함정<a class="anchor" href="#3-6-함정" aria-label="link">#</a></h3>
+<ul><li><strong>FIQ · IRQ 스택 크기를 너무 작게</strong>: Cortex-M은 ISR이 MSP 하나를 쓰지만, R은 IRQ 모드 스택이 따로라서 "IRQ 스택은 작아도 되겠지" 하고 256바이트만 주기 쉽다. 그런데 §5의 비재진입 방식(IRQ 모드에 머무는 방식)은 C 핸들러 전체가 IRQ 스택을 쓴다. 재진입 방식(SVC로 옮기는 방식)은 SVC 스택이 커야 한다. <strong>어느 방식인지 먼저 정하고 크기를 정한다.</strong></li><li><strong><code>ERET</code> 전에 <code>SPSR_hyp</code>의 I 비트를 열어 두기</strong>: EL1에 내려가자마자 IRQ가 들어오는데 IRQ 스택은 아직 없다. 이 노트처럼 마스크한 채(<code>0x1D3</code>) 내려가서 스택을 다 넣은 뒤 <code>cpsie i</code>로 연다.</li><li><strong>두 번째 코어</strong>: QEMU AN536은 CPU 1을 <code>start-powered-off</code>로 시작하고, 소스 주석에 "실제 하드웨어에서는 두 코어 사이에 RAM에서 LDREX/STREX를 쓸 수 없어 진짜 SMP가 아니다"라고 적혀 있다. 이 노트는 1코어만 쓴다. 실제 멀티코어 R에서는 MPIDR.Aff0로 코어를 구분해 각자 스택을 고르는 코드가 맨 앞에 온다(P 모듈).</li></ul>
+<hr>
+<h2 id="4-gicv3와-generic-timer-첫-irq-받기">4. GICv3와 generic timer — 첫 IRQ 받기<a class="anchor" href="#4-gicv3와-generic-timer-첫-irq-받기" aria-label="link">#</a></h2>
+<h3 id="4-1-직관-nvic는-코어-안에-gic는-코어-옆에">4.1 직관: NVIC는 코어 안에, GIC는 코어 옆에<a class="anchor" href="#4-1-직관-nvic는-코어-안에-gic는-코어-옆에" aria-label="link">#</a></h3>
+<p>Cortex-M의 NVIC는 코어의 일부라서 "인터럽트 번호 → 벡터 테이블 칸"이 하드웨어로 이어진다. ISR 진입과 동시에 어느 인터럽트인지 이미 정해져 있다. Cortex-R의 GIC는 <strong>별도 블록</strong>이다. 모든 IRQ는 벡터 테이블의 <strong>한 칸(0x18)</strong> 으로 들어오고, 소프트웨어가 GIC에게 "지금 어느 인터럽트야?"를 물어야 한다(<strong>acknowledge = IAR 읽기</strong>). 처리가 끝나면 "끝났다"를 알려야 한다(<strong>EOI = EOIR 쓰기</strong>). 이 두 단계가 Cortex-M에는 없다.</p>
+<p>GICv3는 세 부분으로 나뉜다(자세한 GIC 구조는 EL H6).</p>
+<div class="tw"><table><thead><tr><th>부분</th><th>AN536 주소</th><th>하는 일</th><th>R52에서 접근</th></tr></thead><tbody><tr><td>Distributor (GICD)</td><td>0xF0000000</td><td>SPI(공유 인터럽트, INTID 32+) 라우팅 · 우선순위 · 활성화</td><td>메모리 맵</td></tr><tr><td>Redistributor (GICR)</td><td>0xF0100000</td><td>코어별 SGI(0–15) · PPI(16–31) 설정, 코어 깨우기(<code>GICR_WAKER</code>)</td><td>메모리 맵</td></tr><tr><td>CPU interface (ICC)</td><td>—</td><td>IAR / EOIR / PMR / IGRPEN</td><td><strong>시스템 레지스터</strong> (<code>MRC p15, 0, Rt, c12, c12, 0</code> = ICC_IAR1)</td></tr></tbody></table></div>
+<p>R52의 generic timer는 코어마다 있는 <strong>PPI</strong>로 나온다. EL1 물리 타이머(CNTP)는 INTID 30, 가상 타이머(CNTV)는 27, Hyp 타이머(CNTHP)는 26이다(Zephyr <code>fvp-aemv8r.dtsi</code>의 <code>GIC_PPI 14</code> = 16 + 14 = 30과 같은 값).</p>
+<h3 id="4-2-예제-3-1-khz-타이머-irq-다섯-번">4.2 예제 3 — 1 kHz 타이머 IRQ 다섯 번<a class="anchor" href="#4-2-예제-3-1-khz-타이머-irq-다섯-번" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: GICv3 초기화(<code>lib.c</code>의 <code>gic_init_ppi</code>) → CNTP 타이머 설정 → IRQ 벡터 → 소프트웨어 저장 → C에서 IAR · EOIR까지 한 바퀴를 돈다. 주기는 <code>CVAL += period</code>로 다시 걸어서 드리프트가 없게 한다(C5의 <code>vTaskDelayUntil</code>과 같은 아이디어).</p>
+<p>먼저 GIC 초기화 부분(<code>common/lib.c</code>)이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* Route one PPI (INTID 16..31) of CPU0 to Group 1 and enable it */
+void gic_init_ppi(uint32_t intid, uint8_t prio)
+{
+    uint32_t sgi = GICR_BASE + 0x10000;
+    REG32(GICD_BASE + 0x0) = (1u &lt;&lt; 4) | (1u &lt;&lt; 1) | 1u;       /* GICD_CTLR: ARE, EnableGrp1, EnableGrp0 */
+    REG32(GICR_BASE + 0x14) &amp;= ~(1u &lt;&lt; 1);                     /* GICR_WAKER.ProcessorSleep = 0 */
+    while (REG32(GICR_BASE + 0x14) &amp; (1u &lt;&lt; 2)) { }            /* wait ChildrenAsleep = 0 */
+    REG32(sgi + 0x080) |= 1u &lt;&lt; intid;                         /* GICR_IGROUPR0: Group 1 */
+    ((volatile uint8_t *)(sgi + 0x400))[intid] = prio;         /* GICR_IPRIORITYR */
+    REG32(sgi + 0x100) = 1u &lt;&lt; intid;                          /* GICR_ISENABLER0 */
+    ICC_PMR(0xFF);                                             /* allow all priorities */
+    ICC_IGRPEN1(1);
+    ISB();
+}</code></pre></figure>
+<p>그리고 예제 본문이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex3 — first IRQ on Cortex-R52: generic timer (PPI 30) -&gt; GICv3 -&gt; IRQ vector -&gt; C */
+#include "r52.h"
+
+void el2_hook(void) { uart_init(); }
+
+/* Software context save: NOTHING is stacked by hardware on A/R profile */
+__attribute__((naked)) void irq_entry(void)
+{
+    __asm volatile(
+        "sub   lr, lr, #4\n"          /* LR_irq = interrupted PC + 4 -&gt; fix return addr */
+        "srsdb sp!, #0x13\n"          /* push LR_irq + SPSR_irq onto the SVC stack */
+        "cps   #0x13\n"               /* continue in SVC mode (frees IRQ mode for nesting) */
+        "push  {r0-r3, r12, lr}\n"    /* AAPCS caller-saved regs + LR_svc */
+        "and   r1, sp, #4\n"          /* 8-byte stack alignment for AAPCS */
+        "sub   sp, sp, r1\n"
+        "push  {r1, r2}\n"
+        "bl    irq_c\n"
+        "pop   {r1, r2}\n"
+        "add   sp, sp, r1\n"
+        "pop   {r0-r3, r12, lr}\n"
+        "rfeia sp!\n");               /* pop PC + CPSR in one instruction */
+}
+
+static volatile uint32_t ticks;
+static uint64_t stamp[5];
+static const uint32_t period = 62500;   /* 1 ms at 62.5 MHz */
+
+void irq_c(void)
+{
+    uint32_t iar = ICC_IAR1();          /* acknowledge: returns INTID */
+    uint32_t id = iar &amp; 0xffffff;
+    if (id == INTID_CNTP) {
+        if (ticks &lt; 5) stamp[ticks] = CNTPCT();
+        ticks++;
+        SET_CNTP_CVAL(CNTP_CVAL() + period);   /* next deadline, drift-free */
+    } else {
+        printf("spurious/unknown INTID %u\n", id);
+    }
+    ICC_EOIR1(iar);                     /* end of interrupt (priority drop + deactivate) */
+}
+
+int main(void)
+{
+    gic_init_ppi(INTID_CNTP, 0xA0);
+    uint64_t t0 = CNTPCT();
+    SET_CNTP_CVAL(t0 + period);
+    SET_CNTP_CTL(1);                    /* ENABLE=1, IMASK=0 */
+    ISB();
+    __asm volatile("cpsie i");
+    while (ticks &lt; 5) __asm volatile("wfi");
+    SET_CNTP_CTL(0);
+    for (int i = 0; i &lt; 5; i++)
+        printf("tick %d at +%u ticks (%u ns)\n", i, (uint32_t)(stamp[i] - t0),
+               (uint32_t)(stamp[i] - t0) * 16);
+    printf("GICD_TYPER=0x%08x (ITLinesNumber=%u -&gt; %u INTIDs)\n", REG32(GICD_BASE + 4),
+           REG32(GICD_BASE + 4) &amp; 0x1f, 32 * ((REG32(GICD_BASE + 4) &amp; 0x1f) + 1));
+    printf("GICR_TYPER=0x%08x%08x\n", REG32(GICR_BASE + 0xC), REG32(GICR_BASE + 0x8));
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>tick 0 at +62540 ticks (1000640 ns)
+tick 1 at +125040 ticks (2000640 ns)
+tick 2 at +187540 ticks (3000640 ns)
+tick 3 at +250040 ticks (4000640 ns)
+tick 4 at +312540 ticks (5000640 ns)
+GICD_TYPER=0x03780003 (ITLinesNumber=3 -&gt; 128 INTIDs)
+GICR_TYPER=0x0000000001000010</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>간격이 정확히 62,500 tick(1 ms)이고, 매번 마감보다 <strong>40 tick(640 ns) 늦게</strong> C 본문에 닿는다. 40 tick = 20 명령(icount에서 tick 16 ns, 명령 32 ns). 이 20 명령이 "타이머 만료 → WFI 깨어남 → 벡터 → 소프트웨어 저장 → <code>irq_c</code> → <code>CNTPCT</code> 읽기"까지의 길이다. 다음 절에서 이것을 쪼갠다.</li><li><code>GICD_TYPER.ITLinesNumber = 3</code> → INTID 128개(QEMU 소스의 SPI 96개 + 내부 32개). 실제 SoC는 수백 개가 흔하다.</li><li><code>GICR_TYPER</code> 하위 비트의 <code>Last</code>(bit 4) = 1 — 이 redistributor가 마지막(코어 1개)이다.</li></ul>
+<h3 id="4-3-rtos-커널과-연결">4.3 RTOS 커널과 연결<a class="anchor" href="#4-3-rtos-커널과-연결" aria-label="link">#</a></h3>
+<p>FreeRTOS Cortex-R 포트에서 이 IAR → 처리 → EOIR 순서는 누가 할까? <code>ARM_CR5</code> 포트는 <strong>GICv2 메모리 맵 CPU 인터페이스</strong>를 가정한다. <code>portmacro.h</code>에 <code>portICCIAR_INTERRUPT_ACKNOWLEDGE_OFFSET (0x0C)</code>, <code>portICCEOIR_END_OF_INTERRUPT_OFFSET (0x10)</code>, <code>portICCPMR_PRIORITY_MASK_OFFSET (0x04)</code>이 있고, <code>configINTERRUPT_CONTROLLER_BASE_ADDRESS + configINTERRUPT_CONTROLLER_CPU_INTERFACE_OFFSET</code>으로 주소를 만든다. 즉 <strong>R52의 GICv3(시스템 레지스터 인터페이스)에는 맞지 않는다.</strong> 그래서 이 노트는 인터럽트 컨트롤러를 앱에 맡기는 <code>ARM_CRx_No_GIC</code> 포트를 골랐다(§9.2). Zephyr는 <code>arm_gic_get_active()</code> / <code>arm_gic_eoi()</code>로 추상화해서 GICv2 · v3를 드라이버(<code>drivers/interrupt_controller/intc_gicv3.c</code>)가 맡는다.</p>
+<h3 id="4-4-함정">4.4 함정<a class="anchor" href="#4-4-함정" aria-label="link">#</a></h3>
+<ul><li><strong>EOI를 빼먹으면</strong>: 그 우선순위 이하의 인터럽트가 다시는 안 들어온다(GIC는 그 INTID가 아직 active라고 본다). 증상은 "첫 tick 한 번만 오고 시스템이 멈춤".</li><li><strong>IAR을 읽기 전에 IRQ를 다시 열면</strong>: 같은 인터럽트가 다시 들어와 무한 중첩된다. Zephyr <code>_isr_wrapper</code>도 <code>arm_gic_get_active</code> <strong>뒤에</strong> <code>cpsie i</code>를 한다(주석: "most interrupt controllers require that the nested interrupts are handled after the active interrupt is acknowledged").</li><li><strong>GICR_WAKER를 안 깨우면</strong>: redistributor가 잠든 채라 PPI가 안 온다. GICv2에는 없던 단계라서 R5 코드를 R52로 옮길 때 자주 빠진다.</li></ul>
+<hr>
+<h2 id="5-하드웨어-스태킹이-없다-소프트웨어-컨텍스트-저장">5. 하드웨어 스태킹이 없다 — 소프트웨어 컨텍스트 저장<a class="anchor" href="#5-하드웨어-스태킹이-없다-소프트웨어-컨텍스트-저장" aria-label="link">#</a></h2>
+<h3 id="5-1-직관-이삿짐센터-m-와-직접-이사-r">5.1 직관: 이삿짐센터(M)와 직접 이사(R)<a class="anchor" href="#5-1-직관-이삿짐센터-m-와-직접-이사-r" aria-label="link">#</a></h3>
+<p>B2에서 본 Cortex-M은 인터럽트가 오면 <strong>하드웨어가</strong> r0–r3, r12, lr, pc, xPSR 8워드를 현재 스택에 쌓고, LR에 EXC_RETURN 값을 넣고, 벡터 테이블의 C 함수로 바로 뛴다. ISR은 평범한 AAPCS C 함수다. 이삿짐센터가 짐을 싸 주는 셈이다.</p>
+<p>Cortex-R은 하드웨어가 딱 세 가지만 한다. <strong>CPSR을 SPSR_irq에 복사, 돌아갈 주소(+4)를 LR_irq에 넣기, 모드를 IRQ로 바꾸고 I 비트 세우기.</strong> 그리고 벡터 0x18의 <strong>명령 하나</strong>를 실행한다. 나머지 — 레지스터 저장, 스택 정렬, C 호출, 복원, 복귀 — 는 전부 소프트웨어 몫이다. 직접 이사다.</p>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="30.0" font-size="13" text-anchor="start" font-weight="bold">Cortex-M3</text>
+<text x="10.0" y="48.0" font-size="12" text-anchor="start">하드웨어 스태킹</text>
+<rect x="130.0" y="14.0" width="200.0" height="44.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="230.0" y="31.5" font-size="13" text-anchor="middle" font-weight="bold">하드웨어가 8워드 push</text>
+<text x="230.0" y="48.5" font-size="12" text-anchor="middle">r0–r3 r12 lr pc xPSR</text>
+<rect x="338.0" y="14.0" width="120.0" height="44.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="398.0" y="31.5" font-size="13" text-anchor="middle" font-weight="bold">C 핸들러</text>
+<text x="398.0" y="48.5" font-size="12" text-anchor="middle">그냥 C 함수</text>
+<rect x="466.0" y="14.0" width="196.0" height="44.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="564.0" y="31.5" font-size="13" text-anchor="middle" font-weight="bold">bx lr (EXC_RETURN)</text>
+<text x="564.0" y="48.5" font-size="12" text-anchor="middle">하드웨어가 pop</text>
+<text x="10.0" y="120.0" font-size="13" text-anchor="start" font-weight="bold">Cortex-R52</text>
+<text x="10.0" y="138.0" font-size="12" text-anchor="start">소프트웨어 저장</text>
+<rect x="130.0" y="100.0" width="62.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="161.0" y="126.0" font-size="12" text-anchor="middle" font-weight="bold">ldr pc</text>
+<rect x="193.0" y="100.0" width="62.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="224.0" y="126.0" font-size="12" text-anchor="middle" font-weight="bold">sub lr</text>
+<rect x="256.0" y="100.0" width="62.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="287.0" y="126.0" font-size="12" text-anchor="middle" font-weight="bold">srsdb</text>
+<rect x="319.0" y="100.0" width="62.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="350.0" y="126.0" font-size="12" text-anchor="middle" font-weight="bold">cps</text>
+<rect x="382.0" y="100.0" width="62.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="413.0" y="126.0" font-size="12" text-anchor="middle" font-weight="bold">push</text>
+<rect x="445.0" y="100.0" width="62.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="476.0" y="126.0" font-size="12" text-anchor="middle" font-weight="bold">align</text>
+<rect x="508.0" y="100.0" width="62.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="539.0" y="126.0" font-size="12" text-anchor="middle" font-weight="bold">bl</text>
+<rect x="574.0" y="100.0" width="96.0" height="44.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="622.0" y="117.5" font-size="13" text-anchor="middle" font-weight="bold">C 본문</text>
+<text x="622.0" y="134.5" font-size="12" text-anchor="middle">IAR … EOIR</text>
+<rect x="130.0" y="170.0" width="64.0" height="36.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="162.0" y="192.0" font-size="12" text-anchor="middle" font-weight="bold">pop</text>
+<rect x="200.0" y="170.0" width="64.0" height="36.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="232.0" y="192.0" font-size="12" text-anchor="middle" font-weight="bold">add sp</text>
+<rect x="270.0" y="170.0" width="64.0" height="36.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="302.0" y="192.0" font-size="12" text-anchor="middle" font-weight="bold">pop</text>
+<rect x="340.0" y="170.0" width="64.0" height="36.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="372.0" y="192.0" font-size="12" text-anchor="middle" font-weight="bold">rfeia</text>
+<text x="420.0" y="186.0" font-size="12" text-anchor="start">← 복귀도 소프트웨어 (4개 명령)</text>
+<text x="420.0" y="204.0" font-size="12" text-anchor="start">rfeia = PC와 CPSR을 한 번에 복원</text>
+<text x="340.0" y="236.0" font-size="12" text-anchor="middle">R52 S1 방식(재진입 가능): 진입 9개 + 복귀 4개 명령. M3는 0개 — 같은 일을 하드웨어가 한다.</text>
+</svg></figure>
+<p>그림 3 — 같은 "타이머 IRQ → C 핸들러" 경로. Cortex-M3는 소프트웨어 명령 0개, Cortex-R52(재진입 방식)는 진입 9개 + 복귀 4개를 직접 실행한다.</p>
+<h3 id="5-2-정의-진입-시퀀스의-각-명령이-하는-일">5.2 정의 — 진입 시퀀스의 각 명령이 하는 일<a class="anchor" href="#5-2-정의-진입-시퀀스의-각-명령이-하는-일" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">asm</span><pre><code>irq_entry:                       @ vector 0x18: ldr pc, v_irq  (1)
+    sub   lr, lr, #4             @ (2) LR_irq = 끼어든 명령 주소 + 4 → 돌아갈 주소로 고친다
+    srsdb sp!, #0x13             @ (3) LR_irq와 SPSR_irq를 "SVC 모드 스택"에 바로 push
+    cps   #0x13                  @ (4) SVC 모드로 이동 → IRQ 모드는 다음 IRQ를 위해 비워 둔다
+    push  {r0-r3, r12, lr}       @ (5) AAPCS caller-saved + LR_svc (C가 망가뜨릴 수 있는 것)
+    and   r1, sp, #4             @ (6) AAPCS: C 호출 시 SP는 8바이트 정렬
+    sub   sp, sp, r1             @     정렬 보정값을 r1에 기억
+    push  {r1, r2}               @     (보정값 저장, 8바이트 유지)
+    bl    irq_c                  @ (7) C 본문
+    pop   {r1, r2}
+    add   sp, sp, r1
+    pop   {r0-r3, r12, lr}
+    rfeia sp!                    @ PC와 CPSR을 스택에서 한 번에 복원 (SRS의 짝)</code></pre></figure>
+<ul><li><strong>SRS / RFE</strong>: SRS(Store Return State)는 "현재 모드의 LR과 SPSR을 <strong>지정한 모드의 스택에</strong>" 저장하는 명령이다. RFE(Return From Exception)는 그 두 워드를 꺼내 PC · CPSR에 넣는다. Armv6에서 생겼고, Cortex-M의 하드웨어 스태킹과 가장 가까운 "반자동" 도구다.</li><li><strong>왜 SVC로 옮기나(재진입)</strong>: IRQ 모드에 머문 채 C를 부르고 그 안에서 IRQ를 다시 열면, 새 IRQ가 <strong>LR_irq를 덮어써서</strong> 첫 IRQ의 C 함수 복귀 주소가 사라진다. 그래서 중첩을 허용하는 커널(Zephyr, FreeRTOS)은 IRQ 모드에서 최소한만 저장하고 SVC(또는 SYS)로 옮긴다.</li><li><strong>왜 r4–r11은 안 저장하나</strong>: AAPCS에서 r4–r11은 callee-saved라서 C 함수가 쓰면 스스로 복원한다. B2의 Cortex-M 하드웨어 스태킹이 r0–r3, r12, lr만 저장하는 것과 <strong>같은 이유</strong>다. 컨텍스트 스위치를 할 때만 r4–r11이 필요하다(C2).</li></ul>
+<p><code>SRSDB</code> 뒤 SVC 스택의 모습(영문 그림):</p>
+<figure class="code"><pre><code> high addr
+ +----------------+  &lt;- SP_svc before IRQ
+ | SPSR_irq       |  srsdb (2 words)
+ | LR_irq (ret PC)|
+ +----------------+
+ | LR_svc         |  push {r0-r3, r12, lr}
+ | r12            |
+ | r3 .. r0       |
+ +----------------+
+ | r2 (pad)       |  push {r1, r2}   (alignment fix-up)
+ | r1 = 0 or 4    |
+ +----------------+  &lt;- SP_svc when irq_c() runs (8-byte aligned)
+ low addr</code></pre></figure>
+<h3 id="5-3-예제-4-진입-방식-네-가지를-icount로-재기">5.3 예제 4 — 진입 방식 네 가지를 icount로 재기<a class="anchor" href="#5-3-예제-4-진입-방식-네-가지를-icount로-재기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 타이머 IRQ에 대해 진입 방식 네 가지를 만들고, <strong>타이머 마감(CVAL) → C 본문의 첫 <code>CNTPCT</code> 읽기</strong>까지와 <strong>마감 → main으로 복귀</strong>까지를 잰다. icount에서 타이머 tick 2개 = 명령 1개다.</p>
+<ul><li>S0: 최소 — IRQ 모드에 머물고 caller-saved만 저장(재진입 불가)</li><li>S1: 재진입 — SRS로 SVC 스택, SVC로 이동(Zephyr · FreeRTOS CR5 계열)</li><li>S2: GCC <code>__attribute__((interrupt("IRQ")))</code> — 컴파일러가 저장 코드를 만든다</li><li>S3: RTOS 태스크 전체 — SYS 스택에 r0–r12, lr + VFP d0–d15 + FPSCR (FreeRTOS <code>portSAVE_CONTEXT</code>와 같은 모양)</li></ul>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex4 — IRQ entry cost on R52 for 4 entry styles (QEMU icount: 1 insn = 32 ns, 1 timer tick = 16 ns) */
+#include "r52.h"
+#ifndef STYLE
+#define STYLE 0
+#endif
+void el2_hook(void) { uart_init(); }
+static volatile uint32_t n;
+static uint32_t lat[3], rt[3];
+static uint64_t dl[3];
+static void body(uint64_t now)               /* the "real work": record latency, ack, rearm */
+{
+    uint32_t iar = ICC_IAR1();
+    if (n &lt; 3) { dl[n] = CNTP_CVAL(); lat[n] = (uint32_t)(now - dl[n]); }
+    n++;
+    SET_CNTP_CVAL(CNTP_CVAL() + 62500);
+    ICC_EOIR1(iar);
+}
+#if STYLE == 2   /* GCC generates the save/restore for us */
+__attribute__((interrupt("IRQ"))) void irq_entry(void) { body(CNTPCT()); }
+#else
+void irq_c(void) { body(CNTPCT()); }
+__attribute__((naked)) void irq_entry(void)
+{
+#if STYLE == 0   /* minimal: stay in IRQ mode, save AAPCS caller-saved regs only */
+    __asm volatile("sub lr, lr, #4\n push {r0-r3, r12, lr}\n bl irq_c\n"
+                   "pop {r0-r3, r12, lr}\n movs pc, lr\n");
+#elif STYLE == 1 /* reentrant: SRS to SVC stack, switch to SVC (Zephyr/FreeRTOS CR5 style) */
+    __asm volatile("sub lr, lr, #4\n srsdb sp!, #0x13\n cps #0x13\n push {r0-r3, r12, lr}\n"
+                   "and r1, sp, #4\n sub sp, sp, r1\n push {r1, r2}\n bl irq_c\n"
+                   "pop {r1, r2}\n add sp, sp, r1\n pop {r0-r3, r12, lr}\n rfeia sp!\n");
+#elif STYLE == 3 /* RTOS full task context: SRS to SYS stack, r0-r12+lr, FPU d0-d15+FPSCR */
+    __asm volatile("sub lr, lr, #4\n srsdb sp!, #0x1f\n cps #0x1f\n push {r0-r12, lr}\n"
+                   "vmrs r1, fpscr\n vpush {d0-d15}\n push {r1}\n bl irq_c\n"
+                   "pop {r1}\n vpop {d0-d15}\n vmsr fpscr, r1\n pop {r0-r12, lr}\n rfeia sp!\n");
+#endif
+}
+#endif
+int main(void)
+{
+    gic_init_ppi(INTID_CNTP, 0xA0);
+    SET_CNTP_CVAL(CNTPCT() + 62500);
+    SET_CNTP_CTL(1);
+    ISB();
+    __asm volatile("cpsie i");
+    for (uint32_t seen = 0; seen &lt; 3; ) {
+        __asm volatile("wfi");
+        uint64_t t = CNTPCT();            /* first thing after the IRQ returned */
+        if (n &gt; seen) { rt[seen] = (uint32_t)(t - dl[seen]); seen = n; }
+    }
+    SET_CNTP_CTL(0);
+    printf("STYLE %d: deadline-&gt;C body = %u %u %u ticks (%u insns), deadline-&gt;back in main = %u insns\n",
+           STYLE, lat[0], lat[1], lat[2], lat[2] / 2, rt[2] / 2);
+    return 0;
+}</code></pre></figure>
+<p>S2는 처음에 이렇게 경고가 났다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>ex4.c:18:1: warning: FP registers might be clobbered despite 'interrupt' attribute: compile with '-mgeneral-regs-only' [-Wattributes]
+   18 | __attribute__((interrupt("IRQ"))) void irq_entry(void) { body(CNTPCT()); }
+      | ^~~~~~~~~~~~~</code></pre></figure>
+<p>GCC의 <code>interrupt("IRQ")</code>는 <strong>정수 레지스터만</strong> 저장한다. ISR 안의 C 코드(또는 컴파일러가 고른 <code>memcpy</code> 등)가 VFP 레지스터를 쓰면 끼어든 태스크의 FPU 값이 망가진다. 그래서 그 파일은 <code>-mgeneral-regs-only</code>로 빌드했다(경고 0개). 네 방식의 결과다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>STYLE 0: deadline-&gt;C body = 12 12 12 ticks (6 insns), deadline-&gt;back in main = 39 insns
+STYLE 1: deadline-&gt;C body = 22 22 22 ticks (11 insns), deadline-&gt;back in main = 46 insns
+STYLE 2: deadline-&gt;C body = 8 8 8 ticks (4 insns), deadline-&gt;back in main = 35 insns
+STYLE 3: deadline-&gt;C body = 22 22 22 ticks (11 insns), deadline-&gt;back in main = 47 insns</code></pre></figure>
+<p>GCC가 S2에 만들어 준 코드는 이렇다(<code>objdump</code>, 앞부분과 끝만).</p>
+<figure class="code"><span class="lang">text</span><pre><code>2000079c &lt;irq_entry&gt;:
+2000079c:	sub	lr, lr, #4
+200007a0:	push	{r0, r1, r2, r3, ip, lr}
+200007a4:	mrrc	15, 0, r2, r3, cr14
+200007a8:	mrc	15, 0, r0, cr12, cr12, {0}
+...
+20000814:	mcrr	15, 2, r3, r2, cr14
+20000818:	mcr	15, 0, r0, cr12, cr12, {1}
+2000081c:	ldm	sp!, {r0, r1, r2, r3, ip, pc}^</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>세 번 다 같은 숫자 — icount라 결정적이다.</li><li>S0 → S1: 진입이 5 명령 늘었다(<code>srsdb</code>, <code>cps</code>, 정렬 3개). <strong>재진입을 허용하는 값이 5 명령</strong>이다.</li><li>S1과 S3의 진입 명령 수는 같다(11). <code>vpush {d0-d15}</code>가 명령 <strong>1개</strong>로 세어지기 때문이다. 실제 칩에서 이 명령은 128바이트를 쓰므로 수십 사이클이 걸린다. <strong>QEMU icount는 명령 수만 세고 메모리 트래픽은 세지 않는다.</strong> 그래서 오른쪽 그림의 "스택 워드 수"를 같이 봐야 한다.</li><li>S2는 컴파일러가 본문(<code>body</code>)을 핸들러 안에 인라인해서 <code>bl</code>이 없고, 복귀를 <code>ldm sp!, {..., pc}^</code> 하나로 끝냈다. <code>^</code>가 붙은 PC 포함 <code>ldm</code>은 "레지스터 복원 + SPSR → CPSR"을 한 명령으로 한다. 가장 짧지만 <strong>재진입 불가 · FPU 미저장</strong>이다. 작은 bare-metal ISR에는 좋고, RTOS 커널 진입에는 못 쓴다.</li></ul>
+<h3 id="5-4-예제-5-같은-측정을-cortex-m3에서">5.4 예제 5 — 같은 측정을 Cortex-M3에서<a class="anchor" href="#5-4-예제-5-같은-측정을-cortex-m3에서" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>mps2-an385</code>(Cortex-M3)에서 CMSDK TIMER0 IRQ로 같은 측정을 한다. ISR은 <strong>평범한 C 함수</strong>이고 벡터 테이블에 주소만 들어 있다. 타이머는 25 MHz(40 ns)로 내려 세므로 <code>RELOAD - VALUE</code>가 만료 후 지난 tick이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex5 — the same measurement on Cortex-M3 (mps2-an385): hardware stacking, C function in vector */
+#include "board.h"
+static volatile uint32_t n;
+static uint32_t lat[3], rt[3];
+#define RELOAD 25000u                       /* 1 ms at 25 MHz, 1 tick = 40 ns */
+
+void TIMER0_IRQHandler(void)                /* plain C function: no asm, no attribute */
+{
+    uint32_t v = TIMER_VALUE(TIMER0_BASE);  /* first thing in the C body */
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    if (n &lt; 3) lat[n] = RELOAD - v;
+    n++;
+}
+
+int main(void)
+{
+    TIMER_RELOAD(TIMER0_BASE) = RELOAD;
+    TIMER_VALUE(TIMER0_BASE) = RELOAD;
+    NVIC_IPR(8) = 0x80;
+    NVIC_ISER0 = 1u &lt;&lt; 8;
+    TIMER_CTRL(TIMER0_BASE) = 0x9;          /* EN | IRQ EN */
+    for (uint32_t seen = 0; seen &lt; 3; ) {
+        __asm volatile("wfi");
+        uint32_t v = TIMER_VALUE(TIMER0_BASE);
+        if (n &gt; seen) { rt[seen] = RELOAD - v; seen = n; }
+    }
+    TIMER_CTRL(TIMER0_BASE) = 0;
+    board_printf_raw("M3: deadline-&gt;C body = %u %u %u ticks(40ns) = %u ns, deadline-&gt;back in main = %u ns\n",
+                     lat[0], lat[1], lat[2], lat[2] * 40, rt[2] * 40);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>   text	   data	    bss	    dec	    hex	filename
+   4372	     96	    360	   4828	   12dc	/var/tmp/rtos/B9/ex5/app.elf
+M3: deadline-&gt;C body = 2 2 2 ticks(40ns) = 80 ns, deadline-&gt;back in main = 520 ns
+[board_exit] code=0</code></pre></figure>
+<p>ISR의 생성 코드는 첫 명령부터 본문이다(앞 4줄).</p>
+<figure class="code"><span class="lang">text</span><pre><code>000000c0 &lt;TIMER0_IRQHandler&gt;:
+      c0:	mov.w	r1, #1073741824	@ 0x40000000
+      c4:	movs	r0, #1
+      c6:	ldr	r3, [pc, #32]	@ (e8 &lt;TIMER0_IRQHandler+0x28&gt;)
+      c8:	ldr	r2, [r1, #4]</code></pre></figure>
+<p>출력에서 볼 것: 80 ns = 명령 2.5개 분량 — <code>ldr r2, [r1, #4]</code>(VALUE 읽기)가 네 번째 명령이니, 저장용 소프트웨어 명령은 <strong>0개</strong>다. 복귀도 <code>bx lr</code> 하나(하드웨어가 EXC_RETURN을 보고 8워드를 pop)다. 단, QEMU는 Cortex-M의 하드웨어 스태킹 사이클을 모델링하지 않는다(랩 README). 실제 Cortex-M3는 진입에 12 사이클이 걸린다고 Arm이 밝힌다. 그러니 "M3가 0 ns"가 아니라 <strong>"M3는 그 일을 하드웨어가 고정 사이클로 한다, R은 소프트웨어가 명령으로 한다"</strong> 가 정확한 결론이다.</p>
+<h3 id="5-5-예제-6-objdump로-세는-정적-비용">5.5 예제 6 — objdump로 세는 정적 비용<a class="anchor" href="#5-5-예제-6-objdump로-세는-정적-비용" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 동적 측정과 별도로, 진입 스텁의 명령 수와 바이트 수를 <code>objdump</code>에서 직접 센다. Python 스크립트가 각 ELF의 <code>irq_entry</code>를 디스어셈블한다.</p>
+<figure class="code"><span class="lang">python</span><pre><code># ex11 — static view: how many instructions/bytes does each IRQ entry stub cost? (objdump-based)
+import subprocess, re
+B = "/var/tmp/rtos/B9"
+def func(elf, name, tool="arm-none-eabi-objdump"):
+    out = subprocess.run([tool, "-d", "--no-show-raw-insn", elf], capture_output=True, text=True).stdout
+    m = re.search(r"^[0-9a-f]+ &lt;%s&gt;:\n(.*?)(?:\n\n|\Z)" % re.escape(name), out, re.S | re.M)
+    return [l.split("\t", 1)[1].strip() for l in m.group(1).splitlines() if "\t" in l and ".word" not in l]
+rows = []
+for s, label in [(0, "R52 S0 minimal (IRQ mode)"), (1, "R52 S1 reentrant SRS-&gt;SVC"),
+                 (3, "R52 S3 full task ctx + FPU")]:
+    ins = func(f"{B}/ex4_s{s}/app.elf", "irq_entry")
+    bl = next(i for i, x in enumerate(ins) if x.startswith("bl"))
+    rows.append((label, 1 + bl + 1, len(ins) - bl - 1, 4 * len(ins)))   # +1 = 'ldr pc' in vector
+ins = func(f"{B}/ex4_s2/app.elf", "irq_entry")
+first = next(i for i, x in enumerate(ins) if x.startswith("mrrc"))
+rows.append(("R52 S2 gcc interrupt(\"IRQ\")", 1 + first, 2, None))
+rows.append(("M3 plain C (hw stacking)", 0, 0, 0))
+print(f"{'entry style':32s} {'sw insns before C':&gt;18s} {'sw insns after C':&gt;17s} {'stub bytes':&gt;10s}")
+for r in rows:
+    print(f"{r[0]:32s} {r[1]:18d} {r[2]:17d} {('-' if r[3] is None else r[3]):&gt;10}")
+print("R52 S1 entry sequence:", " ; ".join(x.replace("\t", " ") for x in func(f"{B}/ex4_s1/app.elf", "irq_entry")[:8]))</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>entry style                       sw insns before C  sw insns after C stub bytes
+R52 S0 minimal (IRQ mode)                         4                 2         20
+R52 S1 reentrant SRS-&gt;SVC                         9                 4         48
+R52 S3 full task ctx + FPU                        9                 5         52
+R52 S2 gcc interrupt("IRQ")                       3                 2          -
+M3 plain C (hw stacking)                          0                 0          0
+R52 S1 entry sequence: sub lr, lr, #4 ; srsdb sp!, #19 ; cps #19 ; push {r0, r1, r2, r3, ip, lr} ; and r1, sp, #4 ; sub sp, sp, r1 ; push {r1, r2} ; bl 2000079c &lt;irq_c&gt;</code></pre></figure>
+<p>출력에서 볼 것: "C 전 명령 수"(벡터의 <code>ldr pc</code> 포함)가 동적 측정의 "C 본문까지 명령 수"와 거의 같다(S1: 정적 9 + 본문 앞 명령들 = 동적 11). 스텁 바이트는 20~52바이트, Cortex-M3는 0바이트(대신 벡터 테이블이 48칸 × 4바이트 = 192바이트, <code>g_vectors</code> 크기 <code>0xc0</code>). Cortex-R의 벡터 테이블은 명령 8개 + 리터럴 7개 = 60바이트로 오히려 작다. 인터럽트 번호별 분기는 소프트웨어 표(Zephyr <code>_sw_isr_table</code>)가 한다.</p>
+<h3 id="5-6-측정-차트">5.6 측정 차트<a class="anchor" href="#5-6-측정-차트" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<text x="10.0" y="18.0" font-size="13" text-anchor="start" font-weight="bold">타이머 만료 → C 본문 첫 명령 (ns, QEMU icount: 명령 1개 = 32 ns)</text>
+<text x="222.0" y="49.0" font-size="12" text-anchor="end">M3 C 함수 (하드웨어 스태킹)</text>
+<rect x="230.0" y="34.0" width="60.0" height="20.0" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<text x="296.0" y="49.0" font-size="12" text-anchor="start">80 ns (2 insn)</text>
+<text x="222.0" y="79.0" font-size="12" text-anchor="end">R52 S2 gcc interrupt("IRQ")</text>
+<rect x="230.0" y="64.0" width="96.0" height="20.0" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+<text x="332.0" y="79.0" font-size="12" text-anchor="start">128 ns (4 insn)</text>
+<text x="222.0" y="109.0" font-size="12" text-anchor="end">R52 S0 최소 (IRQ 모드)</text>
+<rect x="230.0" y="94.0" width="144.0" height="20.0" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+<text x="380.0" y="109.0" font-size="12" text-anchor="start">192 ns (6 insn)</text>
+<text x="222.0" y="139.0" font-size="12" text-anchor="end">R52 S1 재진입 (SRS→SVC)</text>
+<rect x="230.0" y="124.0" width="264.0" height="20.0" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<text x="500.0" y="139.0" font-size="12" text-anchor="start">352 ns (11 insn)</text>
+<text x="222.0" y="169.0" font-size="12" text-anchor="end">R52 S3 태스크 전체 + FPU</text>
+<rect x="230.0" y="154.0" width="264.0" height="20.0" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+<text x="500.0" y="169.0" font-size="12" text-anchor="start">352 ns (11 insn)</text>
+<line x1="230.0" y1="30.0" x2="230.0" y2="186.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="10.0" y="210.0" font-size="13" text-anchor="start" font-weight="bold">IRQ 한 번에 스택에 쌓이는 워드 수 (코드에서 센 값)</text>
+<rect x="20.0" y="224.0" width="13.8" height="16.0" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<text x="20.0" y="256.0" font-size="12" text-anchor="start">8워드</text>
+<text x="20.0" y="274.0" font-size="12" text-anchor="start">M3 C</text>
+<rect x="152.0" y="224.0" width="11.3" height="16.0" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+<text x="152.0" y="256.0" font-size="12" text-anchor="start">6워드</text>
+<text x="152.0" y="274.0" font-size="12" text-anchor="start">R52 S2</text>
+<rect x="284.0" y="224.0" width="11.3" height="16.0" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+<text x="284.0" y="256.0" font-size="12" text-anchor="start">6워드</text>
+<text x="284.0" y="274.0" font-size="12" text-anchor="start">R52 S0</text>
+<rect x="416.0" y="224.0" width="16.2" height="16.0" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<text x="416.0" y="256.0" font-size="12" text-anchor="start">10워드</text>
+<text x="416.0" y="274.0" font-size="12" text-anchor="start">R52 S1</text>
+<rect x="548.0" y="224.0" width="64.0" height="16.0" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+<text x="548.0" y="256.0" font-size="12" text-anchor="start">49워드</text>
+<text x="548.0" y="274.0" font-size="12" text-anchor="start">R52 S3</text>
+<text x="10.0" y="294.0" font-size="12" text-anchor="start">M3 8워드는 하드웨어가 push (QEMU는 그 12 cycle을 모델링하지 않는다)</text>
+</svg></figure>
+<p>그림 4 — 타이머 마감 → C 본문 첫 명령까지(위, 측정)와 IRQ 한 번에 스택에 쌓이는 워드 수(아래, 코드에서 셈). QEMU icount(명령 1개 = 32 ns) 기준. M3의 8워드는 하드웨어가 쌓는다.</p>
+<h3 id="5-7-fpu-cortex-m의-lazy-stacking은-없다">5.7 FPU — Cortex-M의 lazy stacking은 없다<a class="anchor" href="#5-7-fpu-cortex-m의-lazy-stacking은-없다" aria-label="link">#</a></h3>
+<p>B6에서 본 Cortex-M4F/M7은 FPU 레지스터 저장을 하드웨어가 <strong>게으르게</strong>(lazy stacking, FPCCR) 해 준다. Cortex-R에는 그런 하드웨어가 없다. 선택지는 셋이다.</p>
+<div class="tw"><table><thead><tr><th>방법</th><th>누가 쓰나</th><th>비용</th></tr></thead><tbody><tr><td>모든 IRQ에서 VFP를 저장 (S3)</td><td>단순한 bare-metal</td><td>IRQ마다 33워드 이상</td></tr><tr><td>태스크가 "나 FPU 쓴다"고 선언, 그 태스크만 저장</td><td>FreeRTOS <code>vPortTaskUsesFPU()</code> · <code>ulPortTaskHasFPUContext</code> (<code>configUSE_TASK_FPU_SUPPORT</code> 1), 또는 모든 태스크(2)</td><td>선언한 태스크만</td></tr><tr><td>FPU를 꺼 두고 첫 VFP 명령의 UNDEF에서 저장 (소프트웨어 lazy)</td><td>Zephyr <code>CONFIG_FPU_SHARING</code> — <code>_isr_wrapper</code>가 <code>FPEXC</code>를 0으로 만들고, 주석대로 "The undefined instruction handler uses this to know that it needs to save the current floating context"</td><td>실제로 FPU를 쓸 때만</td></tr></tbody></table></div>
+<p>FreeRTOS <code>ARM_CRx_No_GIC/portASM.S</code>의 <code>portSAVE_CONTEXT</code>는 이렇게 생겼다(원문 일부, 주석 줄 생략).</p>
+<figure class="code"><span class="lang">asm</span><pre><code>    SRSDB   SP!, #SYS_MODE
+    CPS     #SYS_MODE
+    PUSH    {R0-R12, R14}
+    LDR     R2, =ulCriticalNesting
+    LDR     R1, [R2]
+    PUSH    {R1}
+    LDR     R2, =ulPortTaskHasFPUContext
+    LDR     R3, [R2]
+    CMP     R3, #0
+    VMRSNE  R1,  FPSCR
+    VPUSHNE {D0-D15}
+    PUSHNE  {R1}
+    PUSH    {R3}
+    LDR     R0, =pxCurrentTCB
+    LDR     R1, [R0]
+    STR     SP, [R1]</code></pre></figure>
+<p>Cortex-M3 포트의 <code>xPortPendSVHandler</code>가 <code>stmdb r0!, {r4-r11, r14}</code> 한 줄로 끝나는 것(C2)과 비교하면, R 포트는 <strong>하드웨어가 안 해 준 r0–r3 · r12 · LR · SPSR까지</strong> 직접 저장한다. 크리티컬 섹션 중첩 카운트(<code>ulCriticalNesting</code>)도 태스크마다 저장한다 — Cortex-M 포트는 BASEPRI로 대신하는 부분이다(C7).</p>
+<h3 id="5-8-don-경험과-연결">5.8 Don 경험과 연결<a class="anchor" href="#5-8-don-경험과-연결" aria-label="link">#</a></h3>
+<p>SSD 펌웨어에서 IRQ 진입 어셈블리를 손대 본 적이 있다면 아마 S0 또는 S1 모양이었을 것이다. 실행부(executive) 구조에서는 ISR이 큐에 이벤트만 넣고 끝나니 <strong>재진입이 필요 없어서 S0</strong>(IRQ 모드에서 끝내기)가 흔하다. RTOS를 올리면 ISR 끝에서 "더 높은 우선순위 태스크가 깨어났나?"를 보고 컨텍스트 스위치를 해야 하므로, 출구 경로가 길어지고 진입은 S1/S3 쪽으로 간다. 이 차이가 "RTOS를 올리면 인터럽트 지연이 늘어난다"의 실체다.</p>
+<h3 id="5-9-함정">5.9 함정<a class="anchor" href="#5-9-함정" aria-label="link">#</a></h3>
+<ul><li><strong><code>sub lr, lr, #4</code>를 빼먹기</strong>: 복귀가 끼어든 명령 다음 명령으로 가서 <strong>명령 하나를 건너뛴다.</strong> 증상은 "가끔 변수 하나가 안 바뀜", "가끔 루프 카운터가 하나 덜 셈" — 아주 찾기 어렵다. (data abort는 <code>-8</code>, undefined는 0, SVC는 0이다 — 모드마다 다르다.)</li><li><strong><code>movs pc, lr</code>의 S를 빼먹기</strong>: SPSR이 CPSR로 복원되지 않아 IRQ 모드에 갇힌 채 태스크 코드로 돌아간다.</li><li><strong>8바이트 정렬 무시</strong>: AAPCS는 공개 함수 호출 경계에서 SP 8바이트 정렬을 요구한다. 어긋나면 <code>strd</code> · <code>ldrd</code>나 VFP 64비트 접근이 정렬 fault를 내거나 <code>printf("%lld")</code>가 엉뚱한 값을 찍는다. FreeRTOS <code>FreeRTOS_IRQ_Handler</code>도 "Ensure bit 2 of the stack pointer is clear" 주석과 함께 <code>AND R2, R0, #4</code> · <code>SUB SP, SP, R2</code>를 한다.</li><li><strong>GCC <code>interrupt</code> 속성 + FPU</strong>: 위 경고 그대로다. <code>-mgeneral-regs-only</code> 또는 직접 VFP 저장.</li></ul>
+<hr>
+<h2 id="6-mpu-pmsav8-32와-2단계-el1-mpu-el2-mpu">6. MPU — PMSAv8-32와 2단계(EL1 MPU + EL2 MPU)<a class="anchor" href="#6-mpu-pmsav8-32와-2단계-el1-mpu-el2-mpu" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM D9(MPU 설정 · R52 EL2)와 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="6-1-직관-주소-변환-없는-출입-명부">6.1 직관: 주소 변환 없는 "출입 명부"<a class="anchor" href="#6-1-직관-주소-변환-없는-출입-명부" aria-label="link">#</a></h3>
+<p>MPU는 "이 주소 범위는 누가 · 읽기/쓰기/실행 중 무엇을 · 어떤 메모리 속성으로" 쓸 수 있는지 적은 <strong>출입 명부</strong>다. MMU처럼 주소를 바꾸지 않으므로 page table도 TLB miss도 없다. 그래서 접근 시간이 결정적이다. Cortex-M MPU(F 모듈)와 개념은 같지만, R은 세대마다 형식이 다르고 R52에는 <strong>명부가 두 권</strong>(EL1용, EL2용) 있다.</p>
+<div class="tw"><table><thead><tr><th>항목</th><th>PMSAv7 (R5, Armv7-M도 비슷)</th><th><strong>PMSAv8-32 (R52)</strong></th></tr></thead><tbody><tr><td>영역 지정</td><td>base + size(2의 거듭제곱), base는 size 정렬</td><td><strong>base + limit</strong>, 64바이트 단위</td></tr><tr><td>서브리전</td><td>8개로 쪼개 끄기 가능</td><td>없음</td></tr><tr><td>겹침</td><td>허용, 번호 큰 영역이 이김</td><td><strong>겹치면 fault</strong> (아래 예제에서 확인)</td></tr><tr><td>속성</td><td>TEX/C/B 비트</td><td><strong>MAIR 인덱스</strong> (Normal WB, Device-nGnRE …)</td></tr><tr><td>레지스터</td><td>DRBAR / DRSR / DRACR</td><td><strong>PRSELR → PRBAR / PRLAR</strong>, MAIR0/1</td></tr><tr><td>단계</td><td>1단계</td><td><strong>EL1 MPU + EL2 MPU(HPRBAR / HPRLAR)</strong></td></tr></tbody></table></div>
+<h3 id="6-2-예제-7-el1-mpu-권한-fault-영역-없음-겹침">6.2 예제 7 — EL1 MPU: 권한 fault, 영역 없음, 겹침<a class="anchor" href="#6-2-예제-7-el1-mpu-권한-fault-영역-없음-겹침" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 영역 4개(DDR 코드/데이터, 주변장치, 읽기 전용 guard 페이지, <strong>일부러 겹친 영역</strong>)를 만들고 MPU를 켠 뒤 (1) guard 읽기, (2) guard 쓰기, (3) 영역 밖 읽기, (4) 겹친 곳 읽기, (5) 겹치지 않은 곳 읽기를 한다. Data Abort 핸들러가 DFSR · DFAR를 찍고 그 명령을 건너뛴다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex6 — EL1 MPU (PMSAv8-32) on R52: regions, permission fault, background fault, overlap fault */
+#include "r52.h"
+void el2_hook(void) { uart_init(); }
+
+static void mpu_region(uint32_t idx, uint32_t prbar, uint32_t prlar)
+{
+    WR_CP15(0, c6, c2, 1, idx);      /* PRSELR */
+    ISB();
+    WR_CP15(0, c6, c3, 0, prbar);    /* PRBAR: base | SH&lt;&lt;3 | AP&lt;&lt;1 | XN */
+    WR_CP15(0, c6, c3, 1, prlar);    /* PRLAR: limit | AttrIndx&lt;&lt;1 | EN */
+}
+
+/* data abort: LR_abt = faulting instruction + 8 */
+__attribute__((naked)) void dabt_entry(void)
+{
+    __asm volatile("sub lr, lr, #8\n push {r0-r3, r12, lr}\n mov r0, lr\n bl dabt_c\n"
+                   "pop {r0-r3, r12, lr}\n add lr, lr, #4\n movs pc, lr\n");  /* skip it */
+}
+static volatile int faults;
+void dabt_c(uint32_t pc)
+{
+    uint32_t dfsr = RD_CP15(0, c5, c0, 0), dfar = RD_CP15(0, c6, c0, 0);
+    uint32_t st = dfsr &amp; 0x3f;
+    printf("  DataAbort pc=0x%08x DFAR=0x%08x DFSR=0x%08x STATUS=0x%02x (%s) WnR=%u\n", pc, dfar, dfsr, st,
+           (st &amp; 0x3c) == 0x0c ? "permission" : (st &amp; 0x3c) == 0x04 ? "translation/background" : "other",
+           (dfsr &gt;&gt; 11) &amp; 1);
+    faults++;
+}
+
+int main(void)
+{
+    printf("MPUIR regions=%u\n", (RD_CP15(0, c0, c0, 4) &gt;&gt; 8) &amp; 0xff);
+    WR_CP15(0, c10, c2, 0, 0x04FF);                     /* MAIR0: attr0=Normal WB, attr1=Device-nGnRE */
+    mpu_region(0, 0x20000000 | 0,          0x20EFFFC0 | (0 &lt;&lt; 1) | 1); /* DDR code/data, EL1 RW */
+    mpu_region(1, 0xE0000000 | 1,          0xFFFFFFC0 | (1 &lt;&lt; 1) | 1); /* peripherals, device, XN */
+    mpu_region(2, 0x20F00000 | (2 &lt;&lt; 1) | 1, 0x20F00FC0 | 1);         /* guard page: EL1 read-only */
+    mpu_region(3, 0x20E00000 | 1,          0x20E00FC0 | 1);           /* overlaps region 0! */
+    uint32_t sctlr = RD_CP15(0, c1, c0, 0);
+    sctlr &amp;= ~(1u &lt;&lt; 17);                               /* BR=0: no background region */
+    DSB();
+    WR_CP15(0, c1, c0, 0, sctlr | 1);                   /* SCTLR.M = 1: MPU on */
+    ISB();
+    printf("MPU on, SCTLR=0x%08x\n", RD_CP15(0, c1, c0, 0));
+
+    volatile uint32_t *guard = (uint32_t *)0x20F00000, *hole = (uint32_t *)0x30000000;
+    volatile uint32_t *ovl = (uint32_t *)0x20E00000;
+    printf("1) read guard  -&gt; %u\n", *guard);
+    printf("2) write guard\n");   *guard = 1;
+    printf("3) read 0x30000000 (no region)\n"); (void)*hole;
+    printf("4) read 0x20E00000 (two regions match)\n"); (void)*ovl;
+    printf("5) read 0x20E01000 (region 0 only) -&gt; %u\n", ovl[1024]);
+    printf("faults=%d\n", faults);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>MPUIR regions=16
+MPU on, SCTLR=0x30c50839
+1) read guard  -&gt; 0
+2) write guard
+  DataAbort pc=0x2000092c DFAR=0x20f00000 DFSR=0x00000a0c STATUS=0x0c (permission) WnR=1
+3) read 0x30000000 (no region)
+  DataAbort pc=0x20000944 DFAR=0x30000000 DFSR=0x0000020c STATUS=0x0c (permission) WnR=0
+4) read 0x20E00000 (two regions match)
+  DataAbort pc=0x20000960 DFAR=0x20e00000 DFSR=0x0000020c STATUS=0x0c (permission) WnR=0
+5) read 0x20E01000 (region 0 only) -&gt; 0
+faults=3</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>(2) 쓰기 fault: <code>WnR=1</code>, DFAR가 정확히 guard 주소. 스택 오버플로 guard를 이렇게 만든다(F 모듈, Zephyr <code>CONFIG_MPU_STACK_GUARD</code>).</li><li>(3) <code>SCTLR.BR = 0</code>(background 영역 없음)이라 영역 밖은 전부 fault다. EL1 MPU를 켜면 <strong>주변장치 영역을 빠뜨린 순간 UART printf부터 죽는다</strong> — 그래서 region 1을 먼저 만들었다.</li><li>(4) <strong>겹친 주소는 region 0에도 있는데 fault</strong>가 났다. PMSAv8은 "번호 큰 영역 우선"이 아니다. R5(PMSAv7) 코드를 R52로 옮길 때 가장 흔한 함정이다.</li><li>DFSR bit 9 = 1(<code>0x200</code>) — long-descriptor 형식의 상태 코드라는 뜻이다. QEMU는 세 경우 모두 STATUS <code>0x0C</code>(level 0 permission fault)로 보고했다. 즉 <strong>DFSR만으로는 "권한 위반 · 영역 없음 · 겹침"을 구분할 수 없다</strong> — 핸들러가 DFAR를 MPU 영역표와 대조해야 한다. (실칩도 같은 코드를 쓰는지는 TRM에서 확인 못 함.)</li></ul>
+<h3 id="6-3-예제-8-el2-mpu-하이퍼바이저가-게스트를-가둔다">6.3 예제 8 — EL2 MPU: 하이퍼바이저가 게스트를 가둔다<a class="anchor" href="#6-3-예제-8-el2-mpu-하이퍼바이저가-게스트를-가둔다" aria-label="link">#</a></h3>
+<blockquote><p>🔁 이 절은 Bare-Metal BM D9(R52 EL2)와 겹친다 (주인: 이 노트).</p></blockquote>
+<p>R52의 EL2 MPU는 <code>HCR.VM = 1</code>이면 <strong>EL1 · EL0의 모든 접근을 한 번 더 검사</strong>한다. EL1 OS가 자기 MPU를 어떻게 설정하든, EL2가 주지 않은 메모리는 못 쓴다. 이것이 "한 R52 코어 위에 ASIL D RTOS와 QM 소프트웨어를 같이 올린다"(O6 · P6)의 하드웨어 기반이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10.0" y="90.0" width="120.0" height="60.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="70.0" y="115.5" font-size="13" text-anchor="middle" font-weight="bold">EL1/EL0 접근</text>
+<text x="70.0" y="132.5" font-size="12" text-anchor="middle">load / store</text>
+<rect x="170.0" y="90.0" width="150.0" height="60.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="245.0" y="108.0" font-size="13" text-anchor="middle" font-weight="bold">EL1 MPU (1단계)</text>
+<text x="245.0" y="124.0" font-size="12" text-anchor="middle">PRBAR/PRLAR 16개</text>
+<text x="245.0" y="140.0" font-size="12" text-anchor="middle">SCTLR.M=1일 때</text>
+<rect x="360.0" y="90.0" width="150.0" height="60.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="435.0" y="108.0" font-size="13" text-anchor="middle" font-weight="bold">EL2 MPU (2단계)</text>
+<text x="435.0" y="124.0" font-size="12" text-anchor="middle">HPRBAR/HPRLAR 16개</text>
+<text x="435.0" y="140.0" font-size="12" text-anchor="middle">HCR.VM=1일 때</text>
+<rect x="550.0" y="90.0" width="120.0" height="60.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="610.0" y="115.5" font-size="13" text-anchor="middle" font-weight="bold">메모리 · 장치</text>
+<text x="610.0" y="132.5" font-size="12" text-anchor="middle">TCM DDR IO</text>
+<line x1="130.0" y1="120.0" x2="168.0" y2="120.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah4)"/>
+<line x1="320.0" y1="120.0" x2="358.0" y2="120.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah4)"/>
+<line x1="510.0" y1="120.0" x2="548.0" y2="120.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah4)"/>
+<line x1="245.0" y1="150.0" x2="245.0" y2="186.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah4)"/>
+<rect x="170.0" y="188.0" width="150.0" height="48.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="245.0" y="207.5" font-size="13" text-anchor="middle" font-weight="bold">EL1 Data Abort</text>
+<text x="245.0" y="224.5" font-size="12" text-anchor="middle">VBAR+0x10, DFSR</text>
+<line x1="435.0" y1="150.0" x2="435.0" y2="186.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah4)"/>
+<rect x="360.0" y="188.0" width="150.0" height="48.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="435.0" y="207.5" font-size="13" text-anchor="middle" font-weight="bold">EL2 Hyp Trap</text>
+<text x="435.0" y="224.5" font-size="12" text-anchor="middle">HVBAR+0x14, HSR</text>
+<text x="10.0" y="26.0" font-size="12" text-anchor="start">게스트 OS(EL1)가 자기 MPU를 마음대로 써도, 하이퍼바이저(EL2)의 MPU가 그 위에서 다시 거른다</text>
+<text x="10.0" y="46.0" font-size="12" text-anchor="start">→ 한 R52 코어 위에 ASIL 등급이 다른 RTOS 두 개를 격리해서 올리는 기반</text>
+<text x="10.0" y="66.0" font-size="12" text-anchor="start">(예제 7 = 1단계 fault, 예제 8 = 2단계 fault를 직접 일으킨다)</text>
+</svg></figure>
+<p>그림 5 — R52의 2단계 메모리 보호. 1단계 fault는 EL1의 Data Abort(VBAR+0x10)로, 2단계 fault는 EL2의 Hyp Trap(HVBAR+0x14)으로 간다.</p>
+<p>무엇을 확인하나: <code>el2_hook()</code>(EL2)에서 게스트용 창(DDR 0x20000000–0x20EFFFFF + 주변장치)만 EL2 MPU에 등록하고 <code>HCR.VM = 1</code>로 켠다. EL1 게스트가 창 밖(0x20F00000)에 쓰면 EL2로 트랩되는지, <code>HVC</code>가 EL2로 오는지 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex7 — R52 EL2 MPU as "stage 2": hypervisor confines EL1; guest console via HVC; faults trap to EL2 */
+#include "r52.h"
+
+static void hmpu_region(uint32_t idx, uint32_t hprbar, uint32_t hprlar)
+{
+    WR_CP15(4, c6, c2, 1, idx);      /* HPRSELR */
+    ISB();
+    WR_CP15(4, c6, c3, 0, hprbar);   /* HPRBAR */
+    WR_CP15(4, c6, c3, 1, hprlar);   /* HPRLAR */
+}
+
+void el2_hook(void)                  /* runs in Hyp mode before the ERET to EL1 */
+{
+    uart_init();
+    WR_CP15(4, c10, c2, 0, 0x04FF);                          /* HMAIR0 */
+    hmpu_region(0, 0x20000000 | (1 &lt;&lt; 1),      0x20EFFFC0 | 1);           /* DDR: RW for EL1/EL0 */
+    hmpu_region(1, 0xE0000000 | (1 &lt;&lt; 1) | 1,  0xFFFFFFC0 | (1 &lt;&lt; 1) | 1); /* periph, device, XN */
+    /* 0x20F00000.. is NOT given to the guest */
+    uint32_t hcr = RD_CP15(4, c1, c1, 0);
+    WR_CP15(4, c1, c1, 0, hcr | 1);                          /* HCR.VM = 1: EL2 MPU checks EL1&amp;0 */
+    ISB();
+    printf("[EL2] HCR=0x%08x, guest window = 0x20000000-0x20EFFFFF + periph\n", RD_CP15(4, c1, c1, 0));
+}
+
+/* Hyp Trap vector (HVBAR+0x14): exceptions from EL1/EL0 that are routed to EL2 */
+__attribute__((naked)) void hyp_trap(void)
+{
+    __asm volatile("push {r0-r3, r12, lr}\n mrs r0, elr_hyp\n mov r1, sp\n bl hyp_trap_c\n"
+                   "msr elr_hyp, r0\n pop {r0-r3, r12, lr}\n eret\n");
+}
+
+uint32_t hyp_trap_c(uint32_t elr, uint32_t *frame)
+{
+    uint32_t hsr = RD_CP15(4, c5, c2, 0), ec = hsr &gt;&gt; 26;
+    if (ec == 0x12 &amp;&amp; (hsr &amp; 0xffff) == 1) { printf("%s", (const char *)frame[0]); return elr; } /* guest putc */
+    if (ec == 0x12 &amp;&amp; (hsr &amp; 0xffff) == 2) { printf("0x%08x", frame[0]); return elr; }
+    printf("  [EL2 trap] mode=0x%x HSR=0x%08x EC=0x%02x ", get_cpsr() &amp; 0x1f, hsr, ec);
+    if (ec == 0x24) {                                        /* data abort from lower EL */
+        printf("guest data abort HDFAR=0x%08x at pc=0x%08x -&gt; skip\n", RD_CP15(4, c6, c0, 0), elr);
+        return elr + 4;
+    }
+    if (ec == 0x12) {                                        /* HVC from EL1 */
+        printf("HVC #%u from guest\n", hsr &amp; 0xffff);
+        return elr;                                          /* ELR already points after HVC */
+    }
+    printf("unhandled\n");
+    qemu_exit(1);
+    return elr;
+}
+
+/* guest (EL1) has no UART access: QEMU 10.2.1 crashes on EL1 MMIO when HCR.VM=1 (see note) */
+static void gputs(const char *str) { register const char *r0 __asm("r0") = str; __asm volatile("hvc #1" :: "r"(r0) : "memory"); }
+static void gputx(uint32_t v) { register uint32_t r0 __asm("r0") = v; __asm volatile("hvc #2" :: "r"(r0) : "memory"); }
+
+int main(void)
+{
+    gputs("[EL1] guest running, CPSR="); gputx(get_cpsr()); gputs("\n");
+    volatile uint32_t *inside = (uint32_t *)0x20E00000, *outside = (uint32_t *)0x20F00000;
+    *inside = 7;
+    gputs("[EL1] wrote inside window, read back "); gputx(*inside); gputs("\n");
+    gputs("[EL1] writing outside window...\n");
+    *outside = 7;
+    gputs("[EL1] continued after the hypervisor skipped it\n");
+    __asm volatile("hvc #7" ::: "memory");
+    gputs("[EL1] back from HVC #7\n");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[EL2] HCR=0x00000001, guest window = 0x20000000-0x20EFFFFF + periph
+[EL1] guest running, CPSR=0x000001d3
+[EL1] wrote inside window, read back 0x00000007
+[EL1] writing outside window...
+  [EL2 trap] mode=0x1a HSR=0x9382004c EC=0x24 guest data abort HDFAR=0x20f00000 at pc=0x20000970 -&gt; skip
+[EL1] continued after the hypervisor skipped it
+  [EL2 trap] mode=0x1a HSR=0x4a000007 EC=0x12 HVC #7 from guest
+[EL1] back from HVC #7</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>게스트의 창 밖 쓰기가 <strong>EL1 Data Abort가 아니라 EL2 Hyp Trap</strong>(모드 0x1A)으로 갔다. <code>HSR.EC = 0x24</code>(하위 EL에서 온 data abort), <code>HSR</code> 하위의 <code>0x4c</code> = WnR(bit 6) + DFSC <code>0x0C</code>. <code>HDFAR</code> = 문제 주소, <code>ELR_hyp</code> = 문제 명령 주소다.</li><li><code>HVC #7</code>은 <code>EC = 0x12</code>, <code>HSR</code> 하위 16비트가 HVC 번호다. 하이퍼바이저 콜(hypercall)의 기본 형태다.</li><li>이 예제의 게스트 printf는 <strong>UART가 아니라 HVC 1 · 2로 하이퍼바이저에게 부탁한다</strong>(반가상화 콘솔). 왜 그랬는지가 다음 함정이다.</li></ul>
+<h3 id="6-4-함정-qemu-10-2-1에서-hcr-vm-el1-mmio-qemu-세그폴트">6.4 함정 — QEMU 10.2.1에서 HCR.VM + EL1 MMIO = QEMU 세그폴트<a class="anchor" href="#6-4-함정-qemu-10-2-1에서-hcr-vm-el1-mmio-qemu-세그폴트" aria-label="link">#</a></h3>
+<p>이 예제의 첫 버전은 EL1에서 평소처럼 UART printf를 했다. 결과는 QEMU 프로세스가 죽는 것이었다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>[EL2] HCR=0x00000001, guest window = 0x20000000-0x20EFFFFF + periph
+exit=139
+bash: line 1: 1395109 Segmentation fault         ./run.sh /var/tmp/rtos/B9/ex7/app.elf</code></pre></figure>
+<p><code>-d int,mmu,in_asm</code> 로그의 마지막 줄은 EL1의 UART 상태 레지스터 읽기에 대한 MPU 조회였다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>PMSA MPU lookup for reading at 0xe7c00004 mmu_idx 65 -&gt; Hit (prot rw-)
+PMSA MPU lookup for reading at 0xe7c00004 mmu_idx 49 -&gt; Hit (prot rw-)</code></pre></figure>
+<p>두 단계 모두 Hit인데 그 직후 QEMU가 죽었다. 공유 UART(0xE0205000, <code>-serial null -serial null -serial stdio</code>)로 바꿔도, EL2 영역의 XN · 속성을 바꿔도 똑같이 죽었다. DDR 접근(코드 · 데이터)은 2단계 검사를 정상 통과했다. 즉 <strong>QEMU 10.2.1의 R52 모델에서 "HCR.VM = 1 상태의 EL1 MMIO 접근"이 에뮬레이터 버그를 밟는다.</strong> 실칩 동작과는 무관하다. 그래서 게스트는 MMIO를 건드리지 않고 HVC로 출력하게 바꿨다 — 실제 하이퍼바이저에서도 쓰는 방식(반가상화 콘솔)이라 공부에는 오히려 좋다. (QEMU 업스트림 이슈 등록 여부는 확인 못 함.)</p>
+<hr>
+<h2 id="7-tcm과-ecc-초기화">7. TCM과 ECC 초기화<a class="anchor" href="#7-tcm과-ecc-초기화" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM D9(TCM ECC 초기화)와 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="7-1-직관-코어-바로-옆-책상-서랍">7.1 직관: 코어 바로 옆 책상 서랍<a class="anchor" href="#7-1-직관-코어-바로-옆-책상-서랍" aria-label="link">#</a></h3>
+<p>TCM(Tightly Coupled Memory)은 캐시가 아니라 <strong>코어 전용 SRAM</strong>이다. 캐시처럼 hit/miss가 없으니 접근 시간이 항상 같다. 그래서 인터럽트 벡터 · ISR · 스택 · 제어 루프 데이터처럼 "늦으면 안 되는 것"을 둔다. B8에서 본 Cortex-M7 ITCM/DTCM과 같은 생각이고, Cortex-R에서는 더 오래되고 더 중심적인 기능이다.</p>
+<div class="tw"><table><thead><tr><th>항목</th><th>R5</th><th>R52</th></tr></thead><tbody><tr><td>TCM 개수</td><td>ATCM, BTCM(B0 / B1 두 뱅크)</td><td>ATCM, BTCM, CTCM</td></tr><tr><td>위치 지정 · 켜기</td><td>CP15 TCM region 레지스터(c9, c1) — base · size · enable</td><td><code>IMP_ATCMREGIONR</code> / <code>IMP_BTCMREGIONR</code> / <code>IMP_CTCMREGIONR</code> (<code>MRC p15, 0, Rt, c9, c1, 0/1/2</code>) — base · size · EL1/EL2 enable</td></tr><tr><td>ECC 켜기</td><td>ACTLR의 ATCMPCEN · B0TCMPCEN · B1TCMPCEN (Zephyr <code>tcm.c</code>가 이 비트를 끄는 <code>z_arm_tcm_disable_ecc()</code>를 가짐)</td><td>구현 정의 레지스터 — 정확한 비트는 TRM 확인(이 노트에서는 확인 못 함)</td></tr><tr><td>리셋 시 위치</td><td>구성 핀(예: ATCM을 0번지에)</td><td>구성 핀 + region 레지스터</td></tr></tbody></table></div>
+<h3 id="7-2-ecc-초기화-규칙-왜-부팅-때-tcm을-지우나">7.2 ECC 초기화 규칙 — 왜 부팅 때 TCM을 지우나<a class="anchor" href="#7-2-ecc-초기화-규칙-왜-부팅-때-tcm을-지우나" aria-label="link">#</a></h3>
+<p>ECC TCM은 데이터 64비트(granule)마다 ECC 비트를 함께 저장한다. 전원을 켠 직후 SRAM 내용은 쓰레기이고 <strong>ECC 비트도 쓰레기</strong>다. 이 상태에서</p>
+<ul><li>읽으면: ECC 검사가 실패해 <strong>정정 불가 오류 → abort</strong>가 난다.</li><li>바이트 · 하프워드 · 워드로 쓰면: 하드웨어가 granule의 나머지 바이트를 <strong>읽어서(read-modify-write)</strong> ECC를 다시 계산하는데, 그 읽기가 쓰레기 ECC를 만나 역시 오류가 난다.</li></ul>
+<p>그래서 startup 맨 앞에서 <strong>ECC 검사를 끈 상태로, 또는 아직 아무도 읽지 않은 상태에서, granule 전체를 쓰는 64비트 정렬 쓰기(STRD · STM)로 TCM 전체를 한 번 채운다.</strong> 그 뒤에야 <code>.data</code> 복사, 스택 사용, ECC 검사 켜기를 한다. Don이 SSD 부트 코드에서 봤던 "TCM 전체 zero-fill 루프"가 이것이다.</p>
+<h3 id="7-3-예제-9-qemu의-tcm-그리고-초기화-루프-비용">7.3 예제 9 — QEMU의 TCM, 그리고 초기화 루프 비용<a class="anchor" href="#7-3-예제-9-qemu의-tcm-그리고-초기화-루프-비용" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: (1) QEMU가 <code>IMP_xTCMREGIONR</code>를 구현하는지(UNDEF 핸들러로 잡을 준비를 해 둔다), (2) 0번지 ATCM과 0xEE000000 ATCM0이 같은 메모리인지, (3) 32 KB를 0으로 채우는 루프 세 가지(바이트 · 워드 · STM 8레지스터)의 명령 수.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex8 — TCM on R52 (QEMU AN536): IMP_xTCMREGIONR, aliasing, ECC-style init cost (64-bit stores) */
+#include "r52.h"
+static volatile int undef_hits;
+void el2_hook(void) { uart_init(); }
+
+/* UNDEF: LR_und = faulting instruction + 4 (ARM state) -&gt; just return to skip it */
+__attribute__((naked)) void undef_entry(void)
+{
+    __asm volatile("push {r0-r3, r12, lr}\n bl undef_c\n pop {r0-r3, r12, lr}\n movs pc, lr\n");
+}
+void undef_c(void) { undef_hits++; }
+
+static void tcm_regs(void)
+{
+    uint32_t a = 0xdeadbeef, b = 0xdeadbeef, c = 0xdeadbeef;
+    __asm volatile("mrc p15, 0, %0, c9, c1, 0" : "+r"(a));   /* IMP_ATCMREGIONR */
+    __asm volatile("mrc p15, 0, %0, c9, c1, 1" : "+r"(b));   /* IMP_BTCMREGIONR */
+    __asm volatile("mrc p15, 0, %0, c9, c1, 2" : "+r"(c));   /* IMP_CTCMREGIONR */
+    printf("ATCMREGIONR=0x%08x BTCMREGIONR=0x%08x CTCMREGIONR=0x%08x undef_hits=%d\n", a, b, c, undef_hits);
+}
+
+static uint32_t t_insn(uint64_t t0) { return (uint32_t)((CNTPCT() - t0) / 2); }  /* icount: 2 ticks = 1 insn */
+
+int main(void)
+{
+    tcm_regs();
+    volatile uint32_t *atcm_lo, *atcm_hi = (uint32_t *)0xEE000000;
+    __asm volatile("mov %0, #0" : "=r"(atcm_lo));     /* address 0 without -Warray-bounds noise */
+    atcm_lo[4] = 0x1234;
+    printf("write 0x1234 @0x00000010, read @0xEE000010 = 0x%x  (%s)\n", atcm_hi[4],
+           atcm_hi[4] == 0x1234 ? "same RAM" : "different RAM");
+
+    /* ECC TCM rule: write every 64-bit granule before the first read. Compare loops on 32 KB */
+    uint64_t t0 = CNTPCT();
+    for (volatile uint8_t *p = (uint8_t *)0xEE100000; p &lt; (uint8_t *)0xEE108000; p++) *p = 0;
+    uint32_t n_byte = t_insn(t0);
+
+    t0 = CNTPCT();
+    for (volatile uint32_t *p = (uint32_t *)0xEE100000; p &lt; (uint32_t *)0xEE108000; p++) *p = 0;
+    uint32_t n_word = t_insn(t0);
+
+    t0 = CNTPCT();
+    __asm volatile(
+        "ldr r0, =0xEE100000\n ldr r1, =0xEE108000\n"
+        "mov r2, #0\n mov r3, #0\n mov r4, #0\n mov r5, #0\n"
+        "mov r6, #0\n mov r7, #0\n mov r8, #0\n mov r9, #0\n"
+        "1: stmia r0!, {r2-r9}\n cmp r0, r1\n blo 1b\n"     /* 32 bytes = 4 granules per STM */
+        ::: "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "memory");
+    uint32_t n_stm = t_insn(t0);
+    printf("zero 32KB BTCM: byte loop %u insns, word loop %u insns, STM 8 regs %u insns\n",
+           n_byte, n_word, n_stm);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>ATCMREGIONR=0x00000000 BTCMREGIONR=0x00000000 CTCMREGIONR=0x00000000 undef_hits=0
+write 0x1234 @0x00000010, read @0xEE000010 = 0x0  (different RAM)
+zero 32KB BTCM: byte loop 98310 insns, word loop 24583 insns, STM 8 regs 3084 insns</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>QEMU는 TCM region 레지스터를 <strong>읽으면 0(RAZ)</strong> 으로 구현했다(UNDEF 아님). 실칩이라면 base · size · enable 비트가 보였을 것이다. 즉 QEMU AN536은 TCM을 "주소에 붙은 RAM"으로만 흉내 낸다.</li><li>0번지의 ATCM과 0xEE000000의 ATCM0은 <strong>서로 다른 RAM</strong>이다(<code>info mtree</code>에서도 이름이 <code>ATCM</code>과 <code>ATCM0</code>로 따로였다). 실제 AN536 FPGA 이미지에서는 별칭(alias)일 수 있지만 QEMU에서는 아니다. TCM 별칭에 기대는 코드는 QEMU에서 검증할 수 없다.</li><li><strong>ECC는 QEMU가 모델링하지 않는다.</strong> 초기화하지 않고 읽어도 아무 일이 없다. 그래서 이 노트는 "ECC 오류를 재현"하지 못하고, 대신 초기화 루프의 비용만 잰다.</li><li>32 KB를 지우는 데 바이트 루프 98,310 명령 vs STM 3,084 명령 — <strong>32배 차이</strong>다. TCM이 1 MB라면 바이트 루프는 300만 명령이 넘는다. 부팅 시간 예산이 있는 차량 ECU(예: 수십 ms 안에 CAN 응답)에서는 이 차이가 실제 요구사항을 가른다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 172" xmlns="http://www.w3.org/2000/svg">
+<text x="10.0" y="18.0" font-size="13" text-anchor="start" font-weight="bold">32 KB TCM을 0으로 채우는 명령 수 (QEMU icount, 예제 9)</text>
+<text x="160.0" y="49.0" font-size="12" text-anchor="end">바이트 루프 (strb)</text>
+<rect x="168.0" y="34.0" width="393.2" height="20.0" fill="#d0564a" fill-opacity="0.75" stroke="#d0564a"/>
+<text x="567.2" y="49.0" font-size="12" text-anchor="start">98,310</text>
+<text x="160.0" y="81.0" font-size="12" text-anchor="end">워드 루프 (str)</text>
+<rect x="168.0" y="66.0" width="98.3" height="20.0" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+<text x="272.3" y="81.0" font-size="12" text-anchor="start">24,583</text>
+<text x="160.0" y="113.0" font-size="12" text-anchor="end">STM 8 레지스터</text>
+<rect x="168.0" y="98.0" width="12.3" height="20.0" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<text x="186.3" y="113.0" font-size="12" text-anchor="start">3,084</text>
+<text x="10.0" y="142.0" font-size="12" text-anchor="start">ECC TCM 규칙: 64비트 granule 전체를 쓰기 전에는 읽지 않는다.</text>
+<text x="10.0" y="162.0" font-size="12" text-anchor="start">바이트 · 워드 쓰기는 granule마다 read-modify-write가 되어, 초기화 전 쓰레기 ECC를 읽게 된다.</text>
+</svg></figure>
+<p>그림 6 — 32 KB TCM 초기화 루프의 명령 수(QEMU icount, 측정). 바이트 · 워드 쓰기는 실칩에서 ECC read-modify-write 문제도 일으키므로, 속도뿐 아니라 정확성 때문에 64비트 이상 쓰기를 쓴다.</p>
+<h3 id="7-4-rtos와-연결">7.4 RTOS와 연결<a class="anchor" href="#7-4-rtos와-연결" aria-label="link">#</a></h3>
+<ul class="tasks"><li>Zephyr: <code>arch/arm/core/cortex_a_r/reset.S</code>에 <code>CONFIG_DISABLE_TCM_ECC</code>이면 <code>bl z_arm_tcm_disable_ecc</code>가 있고, <code>tcm.c</code>는 Armv7-R에서 ACTLR의 ATCM/B0TCM/B1TCM ECC 비트를 끈다. <code>fault.c</code>는 "Synchronous Parity/ECC Error @ 0x%08x"를 출력하는 경로를 가진다. 링커 쪽에서는 DT의 <code>zephyr,itcm</code> · <code>zephyr,dtcm</code> chosen 노드와 <code>__itcm_text</code> 같은 섹션 매크로로 코드를 TCM에 둔다(H 모듈).</li><li>FreeRTOS: 커널은 TCM을 모른다. 링커 스크립트에서 <code>.text</code>의 ISR · <code>tasks.c</code>의 핫 함수 · 태스크 스택(<code>xTaskCreateStatic</code>에 TCM 배열을 넘김)을 TCM 섹션에 넣는 것은 BSP의 일이다.</li></ul>
+<hr>
+<h2 id="8-lockstep-dcls-과-안전-qemu로-보여-줄-수-없는-것">8. lockstep(DCLS)과 안전 — QEMU로 보여 줄 수 없는 것<a class="anchor" href="#8-lockstep-dcls-과-안전-qemu로-보여-줄-수-없는-것" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM D9(lockstep DCLS)와 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="8-1-직관-같은-시험을-두-명이-동시에-푼다">8.1 직관: 같은 시험을 두 명이 동시에 푼다<a class="anchor" href="#8-1-직관-같은-시험을-두-명이-동시에-푼다" aria-label="link">#</a></h3>
+<p>DCLS(Dual-Core Lock-Step)는 <strong>같은 코어 두 개가 같은 입력으로 같은 명령을 매 사이클 함께 실행</strong>하고, 비교기가 두 코어의 출력을 비교하는 구성이다. 우주선 · 방사선 · 전압 글리치로 한쪽 플립플롭이 뒤집히면 출력이 달라지고, 비교기가 오류 신호를 낸다. 소프트웨어가 눈치채지 못하는 계산 오류를 하드웨어가 잡는 것이 목적이다(ISO 26262 ASIL D의 단골 수단). 코어 하나 분량의 소프트웨어만 보이므로 프로그래머 입장에서는 <strong>코어 하나</strong>다.</p>
+<figure class="chart"><svg viewBox="0 0 680 262" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10.0" y="90.0" width="120.0" height="60.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="70.0" y="115.5" font-size="13" text-anchor="middle" font-weight="bold">입력</text>
+<text x="70.0" y="132.5" font-size="12" text-anchor="middle">클럭 버스 IRQ</text>
+<rect x="190.0" y="30.0" width="170.0" height="60.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="275.0" y="55.5" font-size="13" text-anchor="middle" font-weight="bold">주 코어 (main)</text>
+<text x="275.0" y="72.5" font-size="12" text-anchor="middle">출력이 버스로 나감</text>
+<rect x="190.0" y="150.0" width="170.0" height="60.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="275.0" y="175.5" font-size="13" text-anchor="middle" font-weight="bold">중복 코어 (redundant)</text>
+<text x="275.0" y="192.5" font-size="12" text-anchor="middle">같은 입력, 출력은 비교만</text>
+<rect x="420.0" y="90.0" width="120.0" height="60.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="480.0" y="115.5" font-size="13" text-anchor="middle" font-weight="bold">비교기</text>
+<text x="480.0" y="132.5" font-size="12" text-anchor="middle">매 cycle 비교</text>
+<rect x="580.0" y="90.0" width="90.0" height="60.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="625.0" y="115.5" font-size="13" text-anchor="middle" font-weight="bold">불일치</text>
+<text x="625.0" y="132.5" font-size="12" text-anchor="middle">→ 오류 핀</text>
+<line x1="130.0" y1="110.0" x2="188.0" y2="62.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah5)"/>
+<line x1="130.0" y1="130.0" x2="188.0" y2="178.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah5)"/>
+<line x1="360.0" y1="60.0" x2="418.0" y2="108.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah5)"/>
+<line x1="360.0" y1="180.0" x2="418.0" y2="132.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah5)"/>
+<line x1="540.0" y1="120.0" x2="578.0" y2="120.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah5)"/>
+<text x="10.0" y="234.0" font-size="12" text-anchor="start">두 코어의 레지스터가 리셋 직후 다르면(초기화 안 된 플립플롭) 첫 push에서 불일치가 난다</text>
+<text x="10.0" y="254.0" font-size="12" text-anchor="start">→ 그래서 DCLS startup은 모든 모드의 레지스터를 0으로 채운다 (Zephyr reset.S CONFIG_DCLS)</text>
+</svg></figure>
+<p>그림 7 — DCLS 구성. 주 코어의 출력만 버스로 나가고, 중복 코어는 비교에만 쓰인다. Cortex-R5 · R52는 구성 옵션으로 DCLS를 지원하고, 일부 칩은 split-lock(필요하면 lockstep을 풀어 코어 두 개로 쓰기)도 제공한다.</p>
+<h3 id="8-2-펌웨어가-해야-하는-일">8.2 펌웨어가 해야 하는 일<a class="anchor" href="#8-2-펌웨어가-해야-하는-일" aria-label="link">#</a></h3>
+<p><strong>1. 레지스터 전부를 리셋 직후 정의된 값으로</strong>: 리셋은 레지스터를 0으로 만들지 않는다. 두 코어의 초기화 안 된 레지스터 값이 다르면, 그 값을 처음 스택에 push하는 순간(값이 버스로 나가는 순간) 비교기가 불일치를 본다. Zephyr v4.4.2 <code>reset.S</code>의 <code>CONFIG_DCLS</code> 블록은 주석 그대로 "Initialise CPU registers to a defined state if the processor is configured as Dual-redundant Core Lock-step (DCLS). This is required for state convergence of the two parallel executing cores." 를 하고, SVC · FIQ(r8–r12 포함) · IRQ · ABT · UND · SYS 모드를 돌며 r13 · r14 · SPSR까지 0으로 채운다. FPU가 있으면 VFP 레지스터도 채운다.</p>
+<p><strong>2. 메모리도 같은 이유로</strong>: 두 코어가 같은 TCM/캐시를 읽으므로 메모리 자체는 하나지만, ECC 초기화(§7)를 하지 않으면 첫 읽기가 ECC 오류를 낸다.</p>
+<p><strong>3. 오류 처리 경로</strong>: 비교 오류는 보통 코어 밖 안전 관리자(예: NVIDIA FSI의 Hardware Safety Manager가 SOC_ERROR를 올린다 — NVIDIA DriveOS 문서)로 가서 리셋 · 안전 상태 전이를 일으킨다. 펌웨어는 부팅 때 "지난번 리셋이 lockstep 오류였나"를 읽어 기록하고(E8 워치독 리셋 원인 기록과 같은 패턴), 자가 진단(비교기 자체를 테스트하는 STL — Software Test Library)을 주기적으로 돌린다.</p>
+<h3 id="8-3-정직하게-qemu에서-안-되는-것">8.3 정직하게 — QEMU에서 안 되는 것<a class="anchor" href="#8-3-정직하게-qemu에서-안-되는-것" aria-label="link">#</a></h3>
+<p>QEMU <code>mps3-an536</code>은 DCLS를 모델링하지 않는다(코어 하나를 에뮬레이션하고 비교기가 없다). 그래서 이 절은 실행 예제가 없다. 위의 Zephyr 코드는 <code>CONFIG_DCLS</code>(<code>depends on CPU_HAS_DCLS</code>, 기본 y)가 켜진 SoC에서만 빌드된다. 실제로 검증하려면 lockstep을 지원하는 개발 보드(예: TI · NXP의 R5F/R52 lockstep 칩)와 벤더의 오류 주입(fault injection) 기능이 필요하다.</p>
+<hr>
+<h2 id="9-rtos를-cortex-r에-올리기-freertos와-zephyr-실습">9. RTOS를 Cortex-R에 올리기 — FreeRTOS와 Zephyr 실습<a class="anchor" href="#9-rtos를-cortex-r에-올리기-freertos와-zephyr-실습" aria-label="link">#</a></h2>
+<h3 id="9-1-freertos-v11-3-2의-cortex-r-포트-지도">9.1 FreeRTOS V11.3.2의 Cortex-R 포트 지도<a class="anchor" href="#9-1-freertos-v11-3-2의-cortex-r-포트-지도" aria-label="link">#</a></h3>
+<p><code>/var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/</code>에서 직접 확인한 목록이다.</p>
+<div class="tw"><table><thead><tr><th>포트 폴더</th><th>대상</th><th>인터럽트 컨트롤러</th><th>특징</th></tr></thead><tbody><tr><td><code>ARM_CR5</code></td><td>Cortex-R4/R5 (Armv7-R)</td><td><strong>GICv2 메모리 맵 CPU 인터페이스</strong> (<code>portICCIAR...OFFSET 0x0C</code> 등)</td><td>우선순위 마스킹으로 크리티컬 섹션(ICCPMR)</td></tr><tr><td><code>ARM_CRx_No_GIC</code></td><td>Armv7-R / v8-R AArch32 일반</td><td><strong>없음 — 앱이 <code>vApplicationIRQHandler</code>에서 직접</strong></td><td>크리티컬 섹션 = <code>CPSID I</code> (전역 마스킹)</td></tr><tr><td><code>ARM_CRx_MPU</code></td><td>Cortex-R + MPU 격리</td><td>—</td><td><code>mpu_wrappers_v2_asm.S</code>, 태스크별 MPU 영역</td></tr><tr><td><code>ARM_CR82</code></td><td>Cortex-R82 (Armv8-R <strong>AArch64</strong>)</td><td>GICv3 (<code>ICC_PMR_EL1</code>)</td><td>V11.3.0(2026-03)에 non-MPU SMP 포트 + MPU 지원 추가(History.txt), <code>configNUMBER_OF_CORES</code></td></tr></tbody></table></div>
+<p>R52(GICv3 + AArch32)에 딱 맞는 GCC 포트는 없다. <code>ARM_CR5</code>는 GICv2 MMIO를 가정하고, <code>ARM_CR82</code>는 AArch64다. 그래서 이 노트는 <strong><code>ARM_CRx_No_GIC</code> + 직접 쓴 GICv3/generic timer glue</strong>를 썼다. 실무에서 R52에 FreeRTOS를 올릴 때도 벤더 SDK(NXP S32 · Renesas · TI)가 이런 glue를 BSP로 제공하는 것이 보통이다.</p>
+<h3 id="9-2-예제-10-freertos-on-cortex-r52-그리고-같은-시험을-m3에서">9.2 예제 10 — FreeRTOS on Cortex-R52 (그리고 같은 시험을 M3에서)<a class="anchor" href="#9-2-예제-10-freertos-on-cortex-r52-그리고-같은-시험을-m3에서" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>ARM_CRx_No_GIC</code> 포트가 요구하는 훅 세 개(<code>configSETUP_TICK_INTERRUPT</code>, <code>configCLEAR_TICK_INTERRUPT</code>, <code>configEOI_ADDRESS</code>)와 <code>vApplicationIRQHandler</code>를 R52용으로 채워 FreeRTOS를 띄운다. 태스크가 어느 모드에서 도는지, <code>vTaskDelay</code>가 tick으로 깨어나는지, task notification ping-pong 1,000회의 스위치 비용이 얼마인지 본다.</p>
+<p>포트 훅 설정(<code>FreeRTOSConfig.h</code>) 중 R52 전용 부분이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* port hooks (ARM_CRx_No_GIC): tick = EL1 physical generic timer via GICv3 PPI 30 */
+#ifndef __ASSEMBLER__
+#include &lt;stdint.h&gt;
+extern volatile uint32_t ulDummyEOI;
+void vSetupTickTimer(void);
+void vClearTickTimer(void);
+#endif
+#define configSETUP_TICK_INTERRUPT()            vSetupTickTimer()
+#define configCLEAR_TICK_INTERRUPT()            vClearTickTimer()
+#define configEOI_ADDRESS                       ( ( uint32_t ) &amp;ulDummyEOI )  /* EOI done via ICC_EOIR1 */
+#define configASSERT( x )                       do { if( !( x ) ) { for( ;; ) { } } } while( 0 )
+#endif</code></pre></figure>
+<p><code>configEOI_ADDRESS</code>는 포트 어셈블리가 IRQ 끝에서 "그 주소에 한 번 쓴다"(GICv2 EOIR을 가정한 설계)라서, GICv3에서는 EOI를 C에서 <code>ICC_EOIR1</code>로 하고 이 주소는 더미 변수로 둔다. 벡터 연결은 링커 옵션 <code>--defsym=irq_entry=FreeRTOS_IRQ_Handler --defsym=svc_entry=FreeRTOS_SVC_Handler</code>로 했다(startup의 weak 핸들러를 덮어쓴다, 추가 분기 명령 0개).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex9 — FreeRTOS V11.3.2 on Cortex-R52 (ARM_CRx_No_GIC port + our GICv3/generic-timer glue) */
+#include "r52.h"
+#include "FreeRTOS.h"
+#include "task.h"
+
+volatile uint32_t ulDummyEOI;
+static const uint32_t period = 62500;           /* 62.5 MHz / 1000 Hz */
+void el2_hook(void) { uart_init(); }
+
+void vSetupTickTimer(void)
+{
+    gic_init_ppi(INTID_CNTP, 0xA0);
+    SET_CNTP_CVAL(CNTPCT() + period);
+    SET_CNTP_CTL(1);
+}
+void vClearTickTimer(void) { SET_CNTP_CVAL(CNTP_CVAL() + period); }
+
+extern void FreeRTOS_Tick_Handler(void);
+void vApplicationIRQHandler(void)               /* called by FreeRTOS_IRQ_Handler in SVC mode */
+{
+    uint32_t iar = ICC_IAR1();
+    if ((iar &amp; 0xffffff) == INTID_CNTP) FreeRTOS_Tick_Handler();
+    ICC_EOIR1(iar);
+}
+
+static TaskHandle_t hPing, hPong;
+#define ROUNDS 1000
+static void pong(void *arg)
+{
+    (void)arg;
+    for (;;) { ulTaskNotifyTake(pdTRUE, portMAX_DELAY); xTaskNotifyGive(hPing); }
+}
+static void ping(void *arg)
+{
+    (void)arg;
+    printf("ping task: CPSR=0x%08x (mode 0x%x = SYS)\n", get_cpsr(), get_cpsr() &amp; 0x1f);
+    vTaskDelay(pdMS_TO_TICKS(3));
+    printf("after vTaskDelay(3): tick=%u\n", (unsigned)xTaskGetTickCount());
+    uint64_t t0 = CNTPCT();
+    for (int i = 0; i &lt; ROUNDS; i++) { xTaskNotifyGive(hPong); ulTaskNotifyTake(pdTRUE, portMAX_DELAY); }
+    uint32_t ticks = (uint32_t)(CNTPCT() - t0);
+    printf("%d ping-pong rounds (2 switches each): %u timer ticks -&gt; %u insns per switch (icount)\n",
+           ROUNDS, ticks, ticks / 2 / (2 * ROUNDS));
+    qemu_exit(0);
+}
+
+int main(void)
+{
+    printf("main in mode 0x%x, starting scheduler\n", get_cpsr() &amp; 0x1f);
+    xTaskCreate(ping, "ping", 512, NULL, 2, &amp;hPing);
+    xTaskCreate(pong, "pong", 512, NULL, 3, &amp;hPong);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>   text	   data	    bss	    dec	    hex	filename
+  15784	      4	  85320	 101108	  18af4	/var/tmp/rtos/B9/ex9/app.elf
+main in mode 0x13, starting scheduler
+ping task: CPSR=0x0000001f (mode 0x1f = SYS)
+after vTaskDelay(3): tick=3
+1000 ping-pong rounds (2 switches each): 1308170 timer ticks -&gt; 327 insns per switch (icount)</code></pre></figure>
+<p>같은 앱 C 파일들을 <code>-mthumb</code>로 빌드하면(포트 어셈블리는 <code>.arm</code>이라 ARM 그대로, 인터워킹은 <code>BLX</code>가 처리) 이렇다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>   text	   data	    bss	    dec	    hex	filename
+  11628	      4	  85320	  96952	  17ab8	/var/tmp/rtos/B9/ex9t/app.elf
+main in mode 0x13, starting scheduler
+ping task: CPSR=0x0000001f (mode 0x1f = SYS)
+after vTaskDelay(3): tick=3
+1000 ping-pong rounds (2 switches each): 1280002 timer ticks -&gt; 320 insns per switch (icount)</code></pre></figure>
+<p>대조군: 같은 커널 옵션(<code>m3/FreeRTOSConfig.h</code> — R52 설정에서 포트 훅만 빼고 <code>configKERNEL_INTERRUPT_PRIORITY</code> 등 Cortex-M 항목을 넣음)으로 <code>ARM_CM3</code> 포트에서 같은 ping-pong을 돌렸다(FPGAIO 25 MHz 카운터로 측정).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex9m3 — same ping-pong on Cortex-M3 FreeRTOS (ARM_CM3 port, PendSV) for comparison */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "board.h"
+#define CYC() REG32(0x40028018u)                 /* FPGAIO counter, 25 MHz = 40 ns */
+static TaskHandle_t hPing, hPong;
+#define ROUNDS 1000
+static void pong(void *arg)
+{
+    (void)arg;
+    for (;;) { ulTaskNotifyTake(pdTRUE, portMAX_DELAY); xTaskNotifyGive(hPing); }
+}
+static void ping(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(3));
+    uint32_t c0 = CYC();
+    for (int i = 0; i &lt; ROUNDS; i++) { xTaskNotifyGive(hPong); ulTaskNotifyTake(pdTRUE, portMAX_DELAY); }
+    uint32_t c = CYC() - c0;
+    board_printf_raw("M3: %d rounds: %u ticks(40ns) -&gt; %u insns per switch (icount)\n",
+                     ROUNDS, c, c * 40 / 32 / (2 * ROUNDS));
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(ping, "ping", 512, NULL, 2, &amp;hPing);
+    xTaskCreate(pong, "pong", 512, NULL, 3, &amp;hPong);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>   text	   data	    bss	    dec	    hex	filename
+   7916	    100	  66188	  74204	  121dc	/var/tmp/rtos/B9/ex9m3/app.elf
+M3: 1000 rounds: 437479 ticks(40ns) -&gt; 273 insns per switch (icount)
+[board_exit] code=0</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<text x="10.0" y="18.0" font-size="13" text-anchor="start" font-weight="bold">FreeRTOS V11.3.2 같은 설정 · 같은 ping-pong (QEMU icount)</text>
+<text x="10.0" y="44.0" font-size="12" text-anchor="start" font-weight="bold">컨텍스트 스위치 1회당 명령 수</text>
+<text x="200.0" y="68.0" font-size="12" text-anchor="end">M3 ARM_CM3 (Thumb-2)</text>
+<rect x="208.0" y="54.0" width="305.1" height="18.0" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<text x="519.1" y="68.0" font-size="12" text-anchor="start">273</text>
+<text x="200.0" y="94.0" font-size="12" text-anchor="end">R52 CRx_No_GIC (ARM)</text>
+<rect x="208.0" y="80.0" width="365.5" height="18.0" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+<text x="579.5" y="94.0" font-size="12" text-anchor="start">327</text>
+<text x="200.0" y="120.0" font-size="12" text-anchor="end">R52 CRx_No_GIC (C는 Thumb)</text>
+<rect x="208.0" y="106.0" width="357.6" height="18.0" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<text x="571.6" y="120.0" font-size="12" text-anchor="start">320</text>
+<text x="10.0" y="150.0" font-size="12" text-anchor="start" font-weight="bold">이미지 .text 바이트 (커널 + 앱 + 우리 lib)</text>
+<text x="200.0" y="174.0" font-size="12" text-anchor="end">M3 ARM_CM3 (Thumb-2)</text>
+<rect x="208.0" y="160.0" width="188.0" height="18.0" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<text x="402.0" y="174.0" font-size="12" text-anchor="start">7916</text>
+<text x="200.0" y="200.0" font-size="12" text-anchor="end">R52 CRx_No_GIC (ARM)</text>
+<rect x="208.0" y="186.0" width="374.9" height="18.0" fill="#4a7bd0" fill-opacity="0.75" stroke="#4a7bd0"/>
+<text x="588.9" y="200.0" font-size="12" text-anchor="start">15784</text>
+<text x="200.0" y="226.0" font-size="12" text-anchor="end">R52 CRx_No_GIC (C는 Thumb)</text>
+<rect x="208.0" y="212.0" width="276.2" height="18.0" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<text x="490.2" y="226.0" font-size="12" text-anchor="start">11628</text>
+</svg></figure>
+<p>그림 8 — 같은 FreeRTOS 설정 · 같은 ping-pong에서 스위치 1회당 명령 수와 <code>.text</code> 크기(측정). R52 이미지에는 우리 printf · GIC glue도 들어 있어 크기 비교는 대략적이다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>main</code>은 SVC(0x13)에서 돌고, <strong>태스크는 SYS(0x1F)</strong> 에서 돈다 — <code>portINITIAL_SPSR = 0x01f</code> 그대로다.</li><li><code>vTaskDelay(3)</code> 뒤 tick = 3 — generic timer → GICv3 PPI 30 → <code>FreeRTOS_IRQ_Handler</code> → <code>vApplicationIRQHandler</code> → <code>FreeRTOS_Tick_Handler</code> 경로가 정상이다.</li><li>스위치 1회: M3 273 명령, R52 320~327 명령. <strong>커널 C 코드(<code>vTaskSwitchContext</code>, notify API)는 같고, 차이 약 50 명령은 포트</strong>에서 온다. M3는 PendSV가 r4–r11만 저장하면 되지만, R52 포트는 SVC 진입에서 r0–r12 · LR · SPSR · 크리티컬 중첩 카운트 · FPU 플래그를 소프트웨어로 저장한다. 다시 말하지만 이것은 <strong>명령 수</strong>다. 실칩 사이클은 R52가 훨씬 높은 클럭과 이중 발행(dual issue)을 가지므로 절대 시간은 R52가 보통 더 빠르다.</li><li>R52 yield는 PendSV가 아니라 <strong><code>SVC 0</code></strong>(<code>vPortYield</code>)이고, ISR 안의 스위치는 <code>FreeRTOS_IRQ_Handler</code>의 출구(<code>switch_before_exit</code>)에서 한다. Cortex-M의 "가장 낮은 우선순위 PendSV로 미루기"(B4)에 해당하는 장치가 없다 — 대신 <strong>중첩 카운트가 0일 때만</strong> 스위치한다(<code>ulPortInterruptNesting</code>).</li></ul>
+<h3 id="9-3-예제-11-zephyr-v4-4-2-on-an536-보드가-없을-때-옮겨-심기">9.3 예제 11 — Zephyr v4.4.2 on AN536: 보드가 없을 때 옮겨 심기<a class="anchor" href="#9-3-예제-11-zephyr-v4-4-2-on-an536-보드가-없을-때-옮겨-심기" aria-label="link">#</a></h3>
+<p>먼저 사실 확인: Zephyr v4.4.2 트리에는 <strong>AN536 보드가 없다</strong>(<code>grep -ril an536 boards soc dts</code> 결과 없음). R52 보드는 <code>fvp_baser_aemv8r</code>(Arm FVP 전용, QEMU 아님)와 실칩 보드들이다. 그래서 순서대로 해 봤다.</p>
+<p>(1) FVP 보드를 그대로 빌드하면 빌드는 된다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>rtos-zbuild fvp_baser_aemv8r/fvp_aemv8r_aarch32 zephyr/samples/hello_world /var/tmp/rtos/B9/z_fvp</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>           FLASH:           0 B        64 MB      0.00%
+             RAM:       28864 B       128 MB      0.02%</code></pre></figure>
+<p>(2) 그 이미지를 QEMU AN536에서 돌리면 <strong>아무것도 안 나온다</strong>(5초 timeout).</p>
+<figure class="code"><span class="lang">text</span><pre><code>qemu-system-arm: terminating on signal 15 from pid 1566193 (timeout)
+exit=124</code></pre></figure>
+<p>이유: FVP 보드의 콘솔은 PL011 UART(0x9C090000), GIC는 0xAF000000, RAM은 0x0이다. AN536에는 셋 다 그 주소에 없다.</p>
+<p>(3) overlay로 GIC와 RAM을 AN536 주소로 옮기고 PL011을 끈다. 콘솔은 Zephyr <code>CONFIG_SEMIHOST_CONSOLE</code>을 쓰려 했더니 빌드가 실패했다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>/var/rtoslab/zephyrproject/zephyr/arch/arm/core/cortex_a_r/semihost.c:12:2: error: #error Unsupported ISA</code></pre></figure>
+<p><code>semihost.c</code>는 <code>CONFIG_ISA_ARM</code> 또는 <code>CONFIG_ISA_THUMB2</code>를 요구하는데, <code>cortex_a_r/Kconfig</code>에서 이 심볼을 select하는 것은 <code>ARMV7_A</code> · <code>ARMV7_R</code>뿐이고 <strong>Armv8-R(<code>AARCH32_ARMV8_R</code>)은 select하지 않는다.</strong> v4.4.2의 빈틈이다. 그래서 앱에 printk 훅(semihosting <code>SYS_WRITEC</code>)을 직접 넣었다.</p>
+<p>(4) 마지막으로, 타이머 주파수: FVP 보드 기본값은 100 MHz인데 QEMU AN536의 <code>CNTFRQ</code>는 62.5 MHz(예제 1)다. 고치지 않으면 Zephyr의 시간이 0.625배로 흐른다. <code>CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC=62500000</code>으로 맞췄다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>/* re-map the FVP BaseR (aarch32) board onto QEMU mps3-an536 addresses */
+&amp;gic {
+	reg = &lt;0xf0000000 0x10000&gt;, &lt;0xf0100000 0x20000&gt;;
+};
+&amp;dram0 {
+	reg = &lt;0x20000000 DT_SIZE_M(16)&gt;;
+};
+&amp;uart0 {
+	status = "disabled";
+};</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code># AN536 has no PL011 and Zephyr's SEMIHOST is not available for Armv8-R -&gt; printk hook in main.c
+CONFIG_SERIAL=n
+CONFIG_UART_CONSOLE=n
+CONFIG_UART_INTERRUPT_DRIVEN=n
+CONFIG_PRINTK=y
+# QEMU AN536 CNTFRQ is 62.5 MHz (FVP board default assumes 100 MHz)
+CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC=62500000
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* Zephyr v4.4.2 on Cortex-R52: threads, k_msleep (arch timer + GICv3) */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/version.h&gt;
+#include &lt;zephyr/init.h&gt;
+#include &lt;zephyr/sys/printk-hooks.h&gt;
+
+/* Zephyr v4.4.2 SEMIHOST does not build for Armv8-R (#error Unsupported ISA) and the
+ * board's PL011 does not exist on AN536 -&gt; our own printk hook: semihosting SYS_WRITEC */
+static int semi_putc(int c)
+{
+    char ch = (char)c;
+    register uint32_t r0 __asm__("r0") = 0x03;      /* SYS_WRITEC */
+    register char *r1 __asm__("r1") = &amp;ch;
+    __asm__ volatile("hlt #0xf000" :: "r"(r0), "r"(r1) : "memory");
+    return c;
+}
+static int semi_console_init(void) { __printk_hook_install(semi_putc); return 0; }
+SYS_INIT(semi_console_init, PRE_KERNEL_1, 0);
+
+static void worker(void *a, void *b, void *c)
+{
+    ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+    for (int i = 0; i &lt; 3; i++) {
+        uint32_t cpsr;
+        __asm__ volatile("mrs %0, cpsr" : "=r"(cpsr));
+        printk("worker %d: uptime=%lld ms CPSR mode=0x%x\n", i, k_uptime_get(), cpsr &amp; 0x1f);
+        k_msleep(10);
+    }
+}
+K_THREAD_DEFINE(w, 1024, worker, NULL, NULL, NULL, 5, 0, 0);
+
+int main(void)
+{
+    uint32_t midr;
+    __asm__ volatile("mrc p15, 0, %0, c0, c0, 0" : "=r"(midr));
+    printk("Zephyr %s on %s, MIDR=0x%08x, sys clock %d Hz\n", KERNEL_VERSION_STRING,
+           CONFIG_BOARD_TARGET, midr, sys_clock_hw_cycles_per_sec());
+    k_msleep(50);
+    printk("main done at %lld ms\n", k_uptime_get());
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>rtos-zbuild fvp_baser_aemv8r/fvp_aemv8r_aarch32 ~/.rtos_scratch/B9/zapp /var/tmp/rtos/B9/z_an536 \
+    -- -DDTC_OVERLAY_FILE=/Users/donh/.rtos_scratch/B9/zapp/an536.overlay
+qemu-system-arm -M mps3-an536 -nographic -monitor none -serial null \
+    -semihosting-config enable=on,target=native -icount shift=5,align=off,sleep=off \
+    -kernel /var/tmp/rtos/B9/z_an536/zephyr/zephyr.elf</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>           FLASH:           0 B        64 MB      0.00%
+             RAM:       28608 B        16 MB      0.17%
+*** Booting Zephyr OS build v4.4.2 ***
+Zephyr 4.4.2 on fvp_baser_aemv8r/fvp_aemv8r_aarch32, MIDR=0x411fd133, sys clock 62500000 Hz
+worker 0: uptime=0 ms CPSR mode=0x1f
+worker 1: uptime=11 ms CPSR mode=0x1f
+worker 2: uptime=22 ms CPSR mode=0x1f
+main done at 51 ms
+qemu-system-arm: terminating on signal 15 from pid 1722427 (timeout)</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>   text	   data	    bss	    dec	    hex	filename
+  21816	     72	   6659	  28547	   6f83	z_an536/zephyr/zephyr.elf</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>Zephyr가 Cortex-R52(<code>MIDR 0x411fd133</code>)에서 부팅해 <code>reset.S</code>의 EL2 → EL1 경로, GICv3 드라이버, arch timer, 스레드 스케줄링이 모두 동작했다. 스레드는 <strong>SYS 모드(0x1F)</strong> 다.</li><li><code>k_msleep(10)</code> 간격이 11 ms — tick 1 kHz에서 "10 ms 이상 자기" + 깨어나는 tick 경계 때문이다(C5).</li><li>마지막 줄 timeout은 Zephyr가 <code>main</code> 뒤에도 idle로 계속 돌기 때문이다(정상).</li><li>이 이미지의 보드 이름은 여전히 FVP다. <strong>"이 보드 = 이 주소들"이라는 사실을 DT가 들고 있으므로, DT만 바꾸면 커널 코드는 그대로 옮겨 간다</strong> — Zephyr의 장점이 그대로 보인다(H 모듈). 반면 콘솔 · 시계 같은 "보드에 숨은 가정"은 Kconfig 기본값에 숨어 있어 직접 찾아야 했다.</li></ul>
+<hr>
+<h2 id="10-rtos-커널-안에서는-무슨-일이-일어나나">10. RTOS 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#10-rtos-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 270" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="20.0" font-size="13" text-anchor="start" font-weight="bold">FreeRTOS ARM_CRx_No_GIC (예제 10)</text>
+<rect x="10.0" y="30.0" width="104.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="62.0" y="50.5" font-size="12" text-anchor="middle" font-weight="bold">VBAR+0x18</text>
+<text x="62.0" y="67.5" font-size="12" text-anchor="middle">ldr pc</text>
+<rect x="122.0" y="30.0" width="104.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="174.0" y="50.5" font-size="12" text-anchor="middle" font-weight="bold">FreeRTOS_IRQ</text>
+<text x="174.0" y="67.5" font-size="12" text-anchor="middle">_Handler</text>
+<line x1="114.0" y1="55.0" x2="121.0" y2="55.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah7)"/>
+<rect x="234.0" y="30.0" width="104.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="286.0" y="50.5" font-size="12" text-anchor="middle" font-weight="bold">vApplication</text>
+<text x="286.0" y="67.5" font-size="12" text-anchor="middle">IRQHandler</text>
+<line x1="226.0" y1="55.0" x2="233.0" y2="55.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah7)"/>
+<rect x="346.0" y="30.0" width="104.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="398.0" y="50.5" font-size="12" text-anchor="middle" font-weight="bold">FreeRTOS_</text>
+<text x="398.0" y="67.5" font-size="12" text-anchor="middle">Tick_Handler</text>
+<line x1="338.0" y1="55.0" x2="345.0" y2="55.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah7)"/>
+<rect x="458.0" y="30.0" width="104.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="510.0" y="50.5" font-size="12" text-anchor="middle" font-weight="bold">switch_</text>
+<text x="510.0" y="67.5" font-size="12" text-anchor="middle">before_exit</text>
+<line x1="450.0" y1="55.0" x2="457.0" y2="55.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah7)"/>
+<rect x="570.0" y="30.0" width="104.0" height="50.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="622.0" y="50.5" font-size="12" text-anchor="middle" font-weight="bold">vTaskSwitch</text>
+<text x="622.0" y="67.5" font-size="12" text-anchor="middle">Context</text>
+<line x1="562.0" y1="55.0" x2="569.0" y2="55.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah7)"/>
+<text x="10.0" y="104.0" font-size="12" text-anchor="start">SRS 없음: LR·SPSR를 IRQ 스택에 push → SVC 모드 → 스위치 필요하면 portSAVE_CONTEXT(SYS 스택) → RFEIA</text>
+<text x="10.0" y="140.0" font-size="13" text-anchor="start" font-weight="bold">Zephyr v4.4.2 cortex_a_r (예제 11)</text>
+<rect x="10.0" y="150.0" width="104.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="62.0" y="170.5" font-size="12" text-anchor="middle" font-weight="bold">vector_</text>
+<text x="62.0" y="187.5" font-size="12" text-anchor="middle">table.S</text>
+<rect x="122.0" y="150.0" width="104.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="174.0" y="170.5" font-size="12" text-anchor="middle" font-weight="bold">_isr_wrapper</text>
+<text x="174.0" y="187.5" font-size="12" text-anchor="middle">srsdb SYS</text>
+<line x1="114.0" y1="175.0" x2="121.0" y2="175.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah7)"/>
+<rect x="234.0" y="150.0" width="104.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="286.0" y="170.5" font-size="12" text-anchor="middle" font-weight="bold">arm_gic_get</text>
+<text x="286.0" y="187.5" font-size="12" text-anchor="middle">_active</text>
+<line x1="226.0" y1="175.0" x2="233.0" y2="175.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah7)"/>
+<rect x="346.0" y="150.0" width="104.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="398.0" y="170.5" font-size="12" text-anchor="middle" font-weight="bold">_sw_isr_</text>
+<text x="398.0" y="187.5" font-size="12" text-anchor="middle">table, blx</text>
+<line x1="338.0" y1="175.0" x2="345.0" y2="175.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah7)"/>
+<rect x="458.0" y="150.0" width="104.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="510.0" y="170.5" font-size="12" text-anchor="middle" font-weight="bold">arm_gic_eoi</text>
+<text x="510.0" y="187.5" font-size="12" text-anchor="middle">EOI</text>
+<line x1="450.0" y1="175.0" x2="457.0" y2="175.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah7)"/>
+<rect x="570.0" y="150.0" width="104.0" height="50.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="622.0" y="170.5" font-size="12" text-anchor="middle" font-weight="bold">z_arm_</text>
+<text x="622.0" y="187.5" font-size="12" text-anchor="middle">int_exit</text>
+<line x1="562.0" y1="175.0" x2="569.0" y2="175.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah7)"/>
+<text x="10.0" y="224.0" font-size="12" text-anchor="start">둘 다 '소프트웨어가 레지스터를 저장 → GIC에서 INTID 읽기 → 처리 → EOI → 필요하면 스위치'.</text>
+<text x="10.0" y="244.0" font-size="12" text-anchor="start">Cortex-M 포트의 PendSV 자리를 Cortex-R에서는 IRQ 출구 경로와 SVC가 맡는다 (B4 · C2 참조).</text>
+</svg></figure>
+<p>그림 9 — Cortex-R에서 tick 인터럽트가 컨텍스트 스위치까지 가는 경로. 위 FreeRTOS <code>ARM_CRx_No_GIC</code>, 아래 Zephyr v4.4.2 <code>arch/arm/core/cortex_a_r</code>.</p>
+<h3 id="10-1-freertos-portable-gcc-arm_crx_no_gic-portasm-s-port-c">10.1 FreeRTOS (<code>portable/GCC/ARM_CRx_No_GIC/portASM.S</code>, <code>port.c</code>)<a class="anchor" href="#10-1-freertos-portable-gcc-arm_crx_no_gic-portasm-s-port-c" aria-label="link">#</a></h3>
+<ol class="tasks"><li>벡터 0x18 → <code>FreeRTOS_IRQ_Handler</code>: <code>SUB LR, LR, #4</code> → <code>PUSH {LR}</code> · <code>MRS LR, SPSR</code> · <code>PUSH {LR}</code>(IRQ 스택) → <code>CPS #SVC_MODE</code> → <code>PUSH {R0-R3, R12}</code> → <code>ulPortInterruptNesting++</code> → 8바이트 정렬 → <code>BLX vApplicationIRQHandler</code>.</li><li>우리 <code>vApplicationIRQHandler</code>(C): <code>ICC_IAR1</code> 읽기 → INTID 30이면 <code>FreeRTOS_Tick_Handler()</code> → <code>ICC_EOIR1</code>.</li><li><code>FreeRTOS_Tick_Handler</code>(<code>port.c</code>): <code>xTaskIncrementTick()</code>이 참이면 <code>ulPortYieldRequired = pdTRUE</code> → <code>configCLEAR_TICK_INTERRUPT()</code>(우리 <code>vClearTickTimer</code>, CVAL 재설정).</li><li>다시 어셈블리: <code>CPSID i</code> → <code>ulICCEOIR</code> 주소에 쓰기 → 중첩 카운트 복원 → 0이 아니면 <code>exit_without_switch</code>, <code>ulPortYieldRequired</code>면 <code>switch_before_exit</code>.</li><li><code>switch_before_exit</code>: IRQ 스택의 LR · SPSR을 되돌려 놓고 <code>portSAVE_CONTEXT</code>(SRSDB → SYS 스택, r0–r12 · r14 · 중첩 카운트 · FPU) → <code>vTaskSwitchContext()</code>(<code>tasks.c</code>, <code>pxCurrentTCB</code> 교체) → <code>portRESTORE_CONTEXT</code>(… <code>RFEIA SP!</code>).</li><li>태스크가 스스로 양보할 때는 <code>vPortYield</code> = <code>SVC 0</code> → <code>FreeRTOS_SVC_Handler</code>가 SVC 번호를 <code>LR - 4</code>(ARM) / <code>LR - 2</code>(Thumb)에서 꺼내 0이면 <code>svcPortYield</code>: <code>portSAVE_CONTEXT</code> → <code>vTaskSwitchContext</code> → <code>portRESTORE_CONTEXT</code>.</li></ol>
+<p>포트 어셈블리 크기(<code>nm -n</code>으로 다음 심볼과의 거리): <code>FreeRTOS_SVC_Handler</code> 304바이트, <code>FreeRTOS_IRQ_Handler</code>(출구 경로 포함) 324바이트. 대조로 M3 포트는 <code>PendSV_Handler</code> 68바이트 · <code>SVC_Handler</code> 36바이트 · <code>SysTick_Handler</code> 44바이트였다(<code>nm -S</code>). 같은 일을 하는 코드가 Cortex-R에서 약 4배 길다 — 하드웨어 스태킹이 없는 값이다.</p>
+<h3 id="10-2-zephyr-arch-arm-core-cortex_a_r">10.2 Zephyr (<code>arch/arm/core/cortex_a_r/</code>)<a class="anchor" href="#10-2-zephyr-arch-arm-core-cortex_a_r" aria-label="link">#</a></h3>
+<ol><li><code>vector_table.S</code>: <code>ldr pc, =_isr_wrapper</code>(IRQ, 오프셋 0x18). FIQ는 <code>CONFIG_USE_SWITCH</code>가 아니면 <code>z_arm_nmi</code>.</li><li><code>isr_wrapper.S</code> <code>_isr_wrapper</code>: <code>sub lr, lr, #4</code> → <code>srsdb #MODE_SYS!</code> → <code>cps #MODE_SYS</code> → <code>push {r0-r3, r12, lr}</code> → (<code>CONFIG_FPU_SHARING</code>이면 FPEXC 저장 후 VFP 끄기) → <code>cps #MODE_SVC</code>(주석: "Use SVC mode stack for predictable interrupt behaviour") → <code>bl arm_gic_get_active</code> → <code>cpsie i</code>(중첩 허용) → <code>_sw_isr_table</code>에서 ISR 찾아 <code>blx r3</code> → <code>bl arm_gic_eoi</code> → <code>bx z_arm_int_exit</code>.</li><li><code>exc_exit.S</code> <code>z_arm_int_exit</code> → 스위치가 필요하면 <code>swap_helper.S</code>의 <code>z_arm_do_swap</code>(스레드 레지스터를 <code>struct k_thread</code>의 callee-saved 영역에 저장 · 복원). 협조적 스위치는 <code>z_arm_svc</code> 경로.</li><li>리셋: <code>reset.S</code>(EL2 → EL1, <code>CONFIG_DCLS</code> 레지스터 초기화, <code>CONFIG_DISABLE_TCM_ECC</code>), <code>prep_c.c</code>, <code>tcm.c</code>.</li></ol>
+<p>두 커널 모두 Cortex-R에서 하는 일은 같다: <strong>소프트웨어가 레지스터를 저장 → GIC에서 INTID 읽기 → 처리 → EOI → 필요하면 스위치.</strong> Cortex-M 포트의 PendSV · 하드웨어 스태킹 · BASEPRI 자리를 Cortex-R에서는 IRQ 출구 경로 · SRS/RFE · CPSID(또는 GIC PMR)가 맡는다. 깊은 한 줄씩 읽기는 C2(컨텍스트 스위치), 크리티컬 섹션 비교는 C7, 인터럽트 우선순위 설계는 E2로 넘긴다.</p>
+<hr>
+<h2 id="11-실무에서-다시-보기">11. 실무에서 다시 보기<a class="anchor" href="#11-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="11-1-ssd-컨트롤러-don의-실행부를-rtos-언어로-번역하기">11.1 SSD 컨트롤러 — Don의 실행부를 RTOS 언어로 번역하기<a class="anchor" href="#11-1-ssd-컨트롤러-don의-실행부를-rtos-언어로-번역하기" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 290" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10.0" y="20.0" width="200.0" height="90.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110.0" y="47.0" font-size="13" text-anchor="middle" font-weight="bold">Core 0: Host IF</text>
+<text x="110.0" y="69.0" font-size="12" text-anchor="middle">NVMe 명령 fetch · 완료</text>
+<text x="110.0" y="91.0" font-size="12" text-anchor="middle">TCM: 명령 파서 · ISR</text>
+<rect x="240.0" y="20.0" width="200.0" height="90.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="340.0" y="47.0" font-size="13" text-anchor="middle" font-weight="bold">Core 1: FTL</text>
+<text x="340.0" y="69.0" font-size="12" text-anchor="middle">주소 변환 · GC</text>
+<text x="340.0" y="91.0" font-size="12" text-anchor="middle">TCM: 핫 매핑 캐시</text>
+<rect x="470.0" y="20.0" width="200.0" height="90.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="570.0" y="47.0" font-size="13" text-anchor="middle" font-weight="bold">Core 2: NAND</text>
+<text x="570.0" y="69.0" font-size="12" text-anchor="middle">채널 스케줄 · ECC 재시도</text>
+<text x="570.0" y="91.0" font-size="12" text-anchor="middle">TCM: 시퀀서 테이블</text>
+<line x1="210.0" y1="65.0" x2="238.0" y2="65.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah6)"/>
+<line x1="440.0" y1="65.0" x2="468.0" y2="65.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah6)"/>
+<rect x="10.0" y="150.0" width="660.0" height="50.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340.0" y="179.0" font-size="13" text-anchor="middle" font-weight="bold">공유 SRAM / DRAM · 하드웨어 큐 · 메일박스 · DMA</text>
+<line x1="110.0" y1="110.0" x2="110.0" y2="148.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah6)"/>
+<line x1="340.0" y1="110.0" x2="340.0" y2="148.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah6)"/>
+<line x1="570.0" y1="110.0" x2="570.0" y2="148.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah6)"/>
+<text x="10.0" y="230.0" font-size="12" text-anchor="start">각 코어 = 실행부(executive) 하나 = "우선순위 1개짜리 RTOS" — 하드웨어 큐가 레디 리스트 역할</text>
+<text x="10.0" y="250.0" font-size="12" text-anchor="start">RTOS로 옮기면: 큐 이벤트 → 태스크 깨움, 메일박스 → 코어 간 메시지 큐, TCM → 태스크 스택 · ISR 배치</text>
+<text x="10.0" y="270.0" font-size="12" text-anchor="start">모든 TCM은 부팅 때 ECC 초기화(64비트 단위 쓰기)를 먼저 끝내야 읽을 수 있다</text>
+</svg></figure>
+<p>그림 10 — 멀티코어 Cortex-R SSD 컨트롤러의 전형적인 역할 분담(일반화한 그림, 특정 회사 설계 아님). 코어마다 실행부 하나가 돌고, 하드웨어 큐와 메일박스가 코어를 잇는다.</p>
+<div class="tw"><table><thead><tr><th>SSD 펌웨어(Don이 쓰던 말)</th><th>RTOS 용어</th><th>이 노트에서 본 곳</th></tr></thead><tbody><tr><td>실행부(executive) 메인 루프</td><td>우선순위 하나짜리 스케줄러 / idle 태스크</td><td>A2, A7</td></tr><tr><td>하드웨어 큐에서 꺼낸 명령 하나</td><td>태스크를 깨우는 이벤트(큐 · notification)</td><td>§9.2 ping-pong</td></tr><tr><td>ISR은 큐에 넣고 끝</td><td>deferred interrupt processing (E4)</td><td>§5.8 S0 방식</td></tr><tr><td>코어 간 메일박스</td><td>코어 간 메시지 큐 · IPI(SGI)</td><td>P 모듈</td></tr><tr><td>TCM에 넣는 핫 코드 · 스택</td><td>링커 섹션 배치, <code>xTaskCreateStatic</code> 스택 위치</td><td>§7.4</td></tr><tr><td>부트 때 TCM zero-fill</td><td>ECC 초기화 (64비트 쓰기)</td><td>§7.2, 예제 9</td></tr><tr><td>abort 핸들러에서 DFSR · DFAR 덤프</td><td>fault 분석 · coredump (M 모듈)</td><td>예제 7, 8</td></tr><tr><td>코어별 스택 · 모드별 스택</td><td>태스크 스택 + IRQ/SVC 스택</td><td>§3.4</td></tr></tbody></table></div>
+<p>면접에서는 "SSD 컨트롤러에서 Cortex-R 코어 셋에 각각 이벤트 구동 실행부를 돌렸다. RTOS로 치면 코어마다 우선순위 하나짜리 스케줄러이고, 하드웨어 큐가 레디 리스트였다. 그래서 Cortex-R 예외 모델 · TCM · ECC 초기화는 이미 몸으로 안다. 내가 새로 붙이는 것은 우선순위 선점과 커널 객체다"라고 말하면 된다.</p>
+<h3 id="11-2-차량-soc-ai-soc의-안전-섬">11.2 차량 SoC · AI SoC의 안전 섬<a class="anchor" href="#11-2-차량-soc-ai-soc의-안전-섬" aria-label="link">#</a></h3>
+<p>NVIDIA Orin은 안전 섬에 lockstep Cortex-R52를 넣었다(Arm Newsroom). NVIDIA 문서에 따르면 FSI는 자체 클럭과 전원 레일, 3 MB 공유 메모리, CAN 컨트롤러 2개, 외부 MCU와 통신할 SPI를 가지고, Hardware Safety Manager가 안전 오류 시 SOC_ERROR를 올린다. 펌웨어 엔지니어가 그 안에서 하는 일은 이 노트의 목록 그대로다: lockstep 레지스터 초기화(§8), TCM ECC 초기화(§7), MPU로 안전 태스크와 비안전 코드 분리(§6), 메인 SoC의 heartbeat 감시(E8), CAN으로 차량에 안전 상태 알리기. Rivian 같은 회사가 자체 SoC에 안전 코어를 둔다면 면접에서 바로 이 그림을 그릴 수 있어야 한다.</p>
+<h3 id="11-3-존-zonal-컨트롤러-r52-el2로-한-코어에-둘을">11.3 존(zonal) 컨트롤러 — R52 EL2로 한 코어에 둘을<a class="anchor" href="#11-3-존-zonal-컨트롤러-r52-el2로-한-코어에-둘을" aria-label="link">#</a></h3>
+<p>자동차 존 컨트롤러는 한 칩에 여러 ECU 기능을 모은다. ASIL D 기능(예: 브레이크 신호 중계)과 QM 기능(예: 실내 조명)을 한 R52 클러스터에서 돌리려면 서로 간섭하지 않는다는 증거(freedom from interference)가 필요하다. EL2 MPU(예제 8)가 공간 분리, 하이퍼바이저의 시간 분할 스케줄링이 시간 분리를 맡는다(O6 · P6). 예제 8의 "게스트가 창 밖에 쓰면 EL2가 잡는다"가 그 축소판이다.</p>
+<hr>
+<h2 id="12-흔한-실수와-증상">12. 흔한 실수와 증상<a class="anchor" href="#12-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>IRQ 진입에서 <code>sub lr, lr, #4</code> 누락</td><td>가끔 명령 하나가 실행 안 된 것 같은 데이터 오류</td><td>LR_irq = 끼어든 명령 + 4</td><td>진입 첫 줄에 <code>sub lr, lr, #4</code> (abort는 −8)</td></tr><tr><td><code>movs pc, lr</code>에서 S 누락 / <code>rfeia</code> 대신 <code>pop {pc}</code></td><td>복귀 후 IRQ 모드에 갇힘, 다음 IRQ에서 스택 붕괴</td><td>SPSR → CPSR 복원 안 됨</td><td><code>movs pc, lr</code>, <code>ldm ..., {..., pc}^</code>, <code>rfeia</code> 중 하나</td></tr><tr><td>IRQ 모드에서 C 호출 중 IRQ 다시 허용</td><td>중첩 IRQ 뒤 엉뚱한 곳으로 복귀</td><td>새 IRQ가 LR_irq를 덮어씀</td><td>SRS로 저장 후 SVC/SYS로 옮기고 <code>cpsie i</code></td></tr><tr><td>EOI 누락</td><td>첫 tick 한 번 뒤 시스템 정지</td><td>GIC가 INTID를 active로 유지</td><td>모든 경로에서 <code>ICC_EOIR1</code> (spurious 1023 제외)</td></tr><tr><td>GICR_WAKER 미설정</td><td>PPI(타이머)가 안 옴</td><td>redistributor가 sleep</td><td><code>ProcessorSleep = 0</code> 후 <code>ChildrenAsleep</code> 대기</td></tr><tr><td>PMSAv7 습관으로 영역 겹치기</td><td>겹친 주소에서 Data Abort</td><td>PMSAv8-32은 겹침 = fault</td><td>영역을 잘라서 겹치지 않게</td></tr><tr><td>EL1 MPU 켤 때 주변장치 영역 빠뜨림</td><td>MPU 켠 직후 printf에서 abort</td><td><code>SCTLR.BR = 0</code></td><td>주변장치 Device 영역 먼저 등록</td></tr><tr><td>EL2에서 CNTHCTL · HCPTR 안 풀고 ERET</td><td>EL1에서 타이머 · FPU 명령이 UNDEF 또는 EL2 트랩</td><td>하이퍼바이저 기본값이 막음</td><td>startup EL2 단계에서 허용 비트 설정</td></tr><tr><td>현재 모드의 뱅크 레지스터를 banked MRS로 읽기</td><td>Undefined 예외 (예제 2)</td><td>UNPREDICTABLE 명령</td><td>현재 모드는 <code>mov rX, sp</code></td></tr><tr><td>GCC <code>interrupt("IRQ")</code> ISR에서 FPU 사용</td><td>태스크의 float 값이 가끔 깨짐</td><td>속성은 정수 레지스터만 저장</td><td><code>-mgeneral-regs-only</code> 또는 VFP 직접 저장</td></tr><tr><td>ECC TCM을 바이트 쓰기로 초기화</td><td>부팅 직후 ECC abort (실칩)</td><td>partial write → read-modify-write</td><td>64비트 정렬 STRD/STM으로 전체 채우기</td></tr></tbody></table></div>
+<hr>
+<h2 id="13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다<a class="anchor" href="#13-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> "How is porting an RTOS to a Cortex-R different from porting it to a Cortex-M?"</p>
+<p><strong>A.</strong> 가장 큰 차이는 예외 진입이다. Cortex-M은 하드웨어가 8워드를 쌓아 주니 ISR이 C 함수이고, 포트는 PendSV에서 r4–r11만 저장한다. Cortex-R은 하드웨어가 LR과 SPSR만 바꾸므로 포트 어셈블리가 IRQ 진입에서 레지스터 저장 · 모드 전환 · 스택 정렬 · GIC acknowledge/EOI · 복귀까지 다 한다. 같은 FreeRTOS ping-pong에서 스위치당 명령이 M3 273개, R52 320~327개였고 포트 어셈블리는 약 4배 길었다.</p>
+<blockquote><p>On Cortex-M the hardware stacks eight registers and an ISR is just a C function; the port only saves r4–r11 in PendSV. On Cortex-R the hardware only banks LR and SPSR and switches mode, so the port's assembly has to do everything: save the caller-saved registers, move from IRQ to SVC or SYS mode for nesting, align the stack, acknowledge the interrupt in the GIC, signal EOI, and return with RFE or MOVS PC. In my QEMU measurement with the same FreeRTOS config, a context switch was about 273 instructions on an M3 and about 320 on an R52, and the R port's assembly was roughly four times larger.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Why do Cortex-R kernels switch from IRQ mode to SVC or SYS mode?" → 중첩 IRQ가 LR_irq를 덮어쓰기 때문, 그리고 SYS 스택에 바로 저장하면 스위치가 SP 교체로 끝나기 때문.</p>
+<p><strong>Q.</strong> "What does the Cortex-R52 add over the R5, and why does it matter for software?"</p>
+<p><strong>A.</strong> Armv8-R로 바뀌면서 EL2 하이퍼바이저와 2단계 MPU, GICv3 시스템 레지스터 인터페이스, 내장 generic timer가 생겼다. 소프트웨어 입장에서는 리셋이 EL2에서 시작하니 startup이 ERET로 EL1에 내려가야 하고, MPU가 base/limit 형식이라 겹침이 fault이며, 한 코어에 서로 다른 ASIL의 OS를 격리해 올릴 수 있다.</p>
+<blockquote><p>The R52 is Armv8-R. It adds EL2 with a hypervisor mode and a second-stage MPU, a GICv3 CPU interface accessed through system registers, and an integrated generic timer. For software that means the core resets into EL2, so the startup code must configure HVBAR, timer access and FPU traps and then ERET into EL1. The MPU uses base and limit registers with 64-byte granularity, and overlapping regions fault instead of using priority. And the EL2 MPU lets a small hypervisor isolate two RTOS partitions with different ASIL levels on one core.</p></blockquote>
+<p><strong>Q.</strong> "What must startup code do on a lockstep (DCLS) core?"</p>
+<p><strong>A.</strong> 리셋은 레지스터를 0으로 만들지 않는다. 두 코어의 초기화 안 된 값이 처음 버스로 나가는 순간 비교기가 불일치를 보므로, 모든 모드의 r0–r14 · SPSR · VFP 레지스터를 정의된 값으로 채운다. 그리고 TCM · 캐시 ECC를 64비트 쓰기로 초기화하고, 지난 리셋 원인이 lockstep 오류였는지 기록한다.</p>
+<blockquote><p>Reset does not clear the register file, and in lockstep the redundant core compares every output. If an uninitialised register is pushed to the stack, the two cores may disagree and raise a compare error. So startup walks through every mode and zeroes r0 to r14, the SPSRs and the FPU registers; Zephyr's reset.S does exactly that under CONFIG_DCLS. Then it initialises the ECC-protected TCMs with full 64-bit writes before anything reads them, and it records whether the last reset came from a lockstep or ECC error.</p></blockquote>
+<p><strong>Q.</strong> "Why do you have to initialise ECC-protected TCM at boot, and how?"</p>
+<p><strong>A.</strong> 전원 직후 데이터와 ECC가 둘 다 쓰레기라서, 읽거나 부분 쓰기(read-modify-write)를 하면 정정 불가 오류가 난다. 그래서 ECC 검사를 켜기 전에 granule 전체를 덮는 64비트 이상 정렬 쓰기로 TCM 전체를 채운다. QEMU에서 32 KB를 STM으로 지우면 3,084 명령, 바이트 루프면 98,310 명령이었다.</p>
+<blockquote><p>At power-up both the data and the ECC bits are random. A read, or a byte write that forces a read-modify-write of the 64-bit granule, will hit an uncorrectable error. So the boot code fills the whole TCM with aligned 64-bit or wider stores, for example STM with eight registers, before enabling ECC checking or touching the memory otherwise. On QEMU, clearing 32 KB took about three thousand instructions with STM versus almost one hundred thousand with a byte loop, which matters for boot-time budgets.</p></blockquote>
+<p><strong>Q.</strong> "In GICv3 on a Cortex-R52, walk me through handling one timer interrupt."</p>
+<p><strong>A.</strong> 타이머가 PPI 30을 올리고, 코어는 벡터 0x18로 간다. 진입 코드가 LR을 고치고 레지스터를 저장한 뒤, C에서 ICC_IAR1을 읽어 INTID를 얻고, 다음 마감을 CVAL에 다시 쓰고, ICC_EOIR1에 IAR 값을 써서 끝낸다. 그 다음 RTOS면 스케줄링 필요 여부를 보고 복귀한다. 초기화로는 GICD_CTLR의 ARE와 그룹 활성화, GICR_WAKER 깨우기, IGROUPR · IPRIORITYR · ISENABLER, ICC_PMR · ICC_IGRPEN1이 필요하다.</p>
+<blockquote><p>The EL1 physical timer asserts PPI 30 in the redistributor. The core takes the IRQ vector at offset 0x18; the entry code fixes LR, saves registers, and calls C. The handler reads ICC_IAR1 to get the INTID, does the work, for a periodic tick it adds the period to CNTP_CVAL so there is no drift, and writes the IAR value back to ICC_EOIR1. Setup beforehand is GICD_CTLR with affinity routing and group enables, clearing ProcessorSleep in GICR_WAKER, then group, priority and enable for INTID 30 in the SGI frame, and finally ICC_PMR and ICC_IGRPEN1.</p></blockquote>
+<p><strong>Q.</strong> "Your SSD firmware ran a bare-metal executive on Cortex-R. Why would you or wouldn't you put an RTOS there?"</p>
+<p><strong>A.</strong> 실행부는 사실상 우선순위 하나짜리 스케줄러이고, 모든 핸들러가 짧으면 가장 빠르고 결정적이다. 핸들러 중 하나가 길어져 지연 요구를 깨기 시작하거나, 우선순위가 다른 일(관리 명령 · 로그 · 열 관리)이 섞이면 선점형 RTOS가 이긴다. 대신 Cortex-R에서는 IRQ 진입 비용이 늘어나니, 가장 빡빡한 경로는 FIQ나 커널 밖 ISR로 남기는 하이브리드를 고르겠다.</p>
+<blockquote><p>The executive is essentially a one-priority, run-to-completion scheduler driven by hardware queues. When every handler is short, it is the fastest and most deterministic design, which is why many SSD controllers use it. I would move to a preemptive RTOS when some work becomes long enough to break the latency of other work, or when different priorities get mixed, like admin commands, logging and thermal management. On Cortex-R the RTOS adds software entry and exit cost to every interrupt, so I would keep the tightest path, for example a NAND completion that feeds DMA, as an FIQ or zero-latency handler outside the kernel, and put the rest in tasks.</p></blockquote>
+<p><strong>Q.</strong> "What is the EL2 MPU used for, concretely?"</p>
+<p><strong>A.</strong> HCR.VM을 켜면 EL1/EL0의 모든 접근이 EL2 MPU를 한 번 더 통과한다. 하이퍼바이저가 파티션마다 메모리 창을 주고, 창 밖 접근은 게스트 OS가 아니라 EL2의 Hyp Trap으로 온다. QEMU에서 게스트가 창 밖에 쓰자 HSR.EC 0x24로 EL2가 받았다.</p>
+<blockquote><p>With HCR.VM set, every EL1 and EL0 access is checked against the EL2 MPU after the guest's own MPU. A small hypervisor gives each partition a memory window. Any access outside it traps to EL2 through the Hyp Trap vector, not to the guest. In my QEMU test, a guest write outside its window arrived at EL2 with HSR.EC equal to 0x24 and the faulting address in HDFAR, and HVC calls arrived with EC 0x12. This is the hardware basis for freedom from interference between mixed-criticality partitions.</p></blockquote>
+<hr>
+<h2 id="14-직접-해보기">14. 직접 해보기<a class="anchor" href="#14-직접-해보기" aria-label="link">#</a></h2>
+<p><strong>1. 개념</strong>: Cortex-M3와 Cortex-R52에서 IRQ가 들어올 때 하드웨어가 하는 일을 각각 세 줄로 써라. 그리고 FreeRTOS 포트가 그 차이를 메우기 위해 추가로 하는 일을 한 줄로 써라.</p>
+<p>정답/힌트: M = 8워드 push · EXC_RETURN을 LR에 · 벡터 주소로 점프. R = CPSR → SPSR_irq · 복귀 주소 → LR_irq · IRQ 모드로 바꾸고 0x18 실행. 포트는 r0–r3 · r12 · LR · SPSR 저장과 모드 전환 · 정렬 · EOI · RFE 복귀를 한다.</p>
+<p><strong>2. 코드</strong>: 예제 4의 S1을 고쳐 <strong>중첩</strong>을 실제로 일으켜라. 우선순위가 높은 두 번째 PPI(예: 가상 타이머 CNTV, INTID 27)를 걸고, <code>irq_c</code> 안에서 <code>cpsie i</code> 후 잠깐 바쁜 루프를 돌게 한다. 두 번째 IRQ가 첫 IRQ 안에서 처리되는지 로그로 보여라. S0로 같은 일을 하면 어떻게 깨지는가?</p>
+<p>정답/힌트: CNTV는 <code>MCR p15, 0, Rt, c14, c3, 0/1</code>(TVAL/CTL), CNTHCTL에서 EL1 접근이 필요할 수 있다. GIC 우선순위는 숫자가 작을수록 높다. S0에서 중첩하면 LR_irq가 덮어써져 첫 IRQ 복귀가 망가진다.</p>
+<p><strong>3. 코드</strong>: 예제 7에 두 번째 게스트 창을 만들고, EL2 Hyp 타이머(CNTHP, INTID 26)로 1 ms마다 "게스트 A ↔ 게스트 B"의 ELR/SPSR/SP를 바꿔 치는 아주 작은 시간 분할 하이퍼바이저를 써라(게스트 출력은 HVC 콘솔).</p>
+<p>정답/힌트: EL2에서 받는 IRQ는 HVBAR+0x18로 온다. 게스트 컨텍스트 = r0–r12, SP_usr/SP_svc 등 뱅크 레지스터, ELR_hyp, SPSR_hyp. HCR.IMO로 IRQ를 EL2로 라우팅하는 비트도 살펴본다.</p>
+<p><strong>4. 측정</strong>: 예제 4의 S3에서 <code>vpush {d0-d15}</code>를 <code>vpush {d0-d7}</code>로 줄이면 icount 숫자가 바뀌는가? 바뀌지 않는다면 왜이고, 실칩에서는 어떻게 다를지 사이클로 추정하라.</p>
+<p>정답/힌트: 명령 수는 같으니 icount는 그대로다. 실칩은 대략 저장 바이트에 비례(64비트 버스면 d 레지스터 하나 ≈ 1 beat)하므로 절반 가까이 줄어든다 — 정확한 수치는 R52 TRM의 명령 타이밍 참조.</p>
+<p><strong>5. 측정</strong>: 예제 9의 STM 루프를 <code>strd</code> 루프와 16레지스터 STM(r0–r12 · lr까지 활용)로 바꿔 32 KB 초기화 명령 수를 비교하고, 1 MB TCM이면 icount 기준 몇 ms인지 계산하라.</p>
+<p>정답/힌트: 명령 수 ≈ (바이트 / 한 번에 쓰는 바이트) × 루프 명령 수. 32 ns/명령으로 환산.</p>
+<p><strong>6. 조사 + 코드</strong>: FreeRTOS <code>ARM_CR5</code> 포트의 크리티컬 섹션(<code>ulPortSetInterruptMask</code>)은 GIC PMR을 쓰고, <code>ARM_CRx_No_GIC</code>는 <code>CPSID I</code>를 쓴다. 두 방식이 "커널 밖(zero-latency) 인터럽트"를 허용하는지 각각 답하고, R52 GICv3에서 PMR 방식을 쓰려면 <code>ICC_PMR</code>을 어떻게 다루면 되는지 써 보라.</p>
+<p>정답/힌트: PMR 방식은 <code>configMAX_API_CALL_INTERRUPT_PRIORITY</code>보다 높은 인터럽트를 열어 둘 수 있다(Cortex-M BASEPRI와 같은 역할, B3 · C7). CPSID는 전부 막는다. GICv3에서는 <code>MCR p15, 0, Rt, c4, c6, 0</code>(ICC_PMR)에 쓰고 ISB.</p>
+<p><strong>7. Zephyr</strong>: 예제 11의 overlay에 AN536 CMSDK UART 노드(<code>arm,cmsdk-uart</code>, 0xE7C00000)를 넣어 semihosting 대신 UART 콘솔로 바꿔 보라. 무엇이 막히는가?</p>
+<p>정답/힌트: <code>UART_CMSDK_APB</code>는 <code>select PINCTRL</code>이고 <code>clocks</code> phandle의 <code>clock-frequency</code>를 읽는다. FVP SoC에 pinctrl 드라이버가 없으면 빌드가 막힌다 — 보드를 제대로 하나 만드는 것이 정답(H 모듈의 out-of-tree 보드).</p>
+<hr>
+<h2 id="15-용어-사전">15. 용어 사전<a class="anchor" href="#15-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>R 프로파일</td><td>Real-time profile</td><td>MMU 대신 MPU, TCM · ECC · lockstep으로 결정성과 신뢰성을 노린 Arm 아키텍처 갈래</td></tr><tr><td>Armv7-R / Armv8-R</td><td>R 프로파일 아키텍처 세대</td><td>R5 = v7-R, R52 · R52+ = v8-R AArch32, R82 = v8-R AArch64</td></tr><tr><td>모드 (mode)</td><td>CPSR.M 5비트</td><td>USR · FIQ · IRQ · SVC · ABT · UND · SYS (+ R52의 HYP)</td></tr><tr><td>뱅크 레지스터</td><td>banked register</td><td>모드마다 따로 있는 SP · LR · SPSR (FIQ는 r8–r12도)</td></tr><tr><td>SPSR</td><td>Saved Program Status Register</td><td>예외 직전 CPSR을 보관, 복귀 때 CPSR로 되돌린다</td></tr><tr><td>EL2 / Hyp 모드</td><td>Exception Level 2</td><td>R52의 하이퍼바이저 권한. 리셋은 여기서 시작</td></tr><tr><td>ERET</td><td>Exception Return</td><td>ELR_hyp → PC, SPSR_hyp → CPSR. EL2 → EL1 내려가기</td></tr><tr><td>HVBAR / VBAR</td><td>벡터 베이스 레지스터</td><td>EL2 / EL1 예외 벡터 테이블 주소 (CP15)</td></tr><tr><td>SRS / RFE</td><td>Store Return State / Return From Exception</td><td>LR + SPSR을 지정 모드 스택에 저장 / 꺼내서 복귀</td></tr><tr><td>CPS</td><td>Change Processor State</td><td>모드 전환, I/F 비트 조작 (<code>cps #0x13</code>, <code>cpsie i</code>)</td></tr><tr><td>CP15</td><td>시스템 제어 코프로세서</td><td><code>MRC</code> / <code>MCR</code>로 접근하는 시스템 레지스터 공간</td></tr><tr><td>GICv3</td><td>Generic Interrupt Controller v3</td><td>Distributor · Redistributor · CPU interface(<code>ICC_*</code> 시스템 레지스터)</td></tr><tr><td>IAR / EOIR</td><td>Interrupt Acknowledge / End Of Interrupt</td><td>INTID 받기 / 처리 끝 알리기</td></tr><tr><td>PPI / SPI / SGI</td><td>인터럽트 종류</td><td>코어 전용(16–31) / 공유(32+) / 소프트웨어 생성(0–15)</td></tr><tr><td>Generic Timer</td><td>Arm 아키텍처 타이머</td><td>CNTPCT 카운터 + CNTP/CNTV/CNTHP 비교 타이머, QEMU AN536은 62.5 MHz</td></tr><tr><td>PMSAv8-32</td><td>Protected Memory System Arch.</td><td>base/limit 형식 MPU, 64바이트 단위, 겹침 = fault</td></tr><tr><td>EL2 MPU</td><td>2단계 MPU</td><td>HCR.VM=1이면 EL1/EL0 접근을 한 번 더 검사</td></tr><tr><td>HSR / HDFAR</td><td>Hyp Syndrome / Hyp Data Fault Address</td><td>EL2 트랩의 원인(EC)과 주소</td></tr><tr><td>TCM</td><td>Tightly Coupled Memory</td><td>코어 전용 SRAM, 접근 시간 고정 (ATCM · BTCM · CTCM)</td></tr><tr><td>ECC granule</td><td>ECC 단위</td><td>보통 64비트. 부분 쓰기는 read-modify-write를 유발</td></tr><tr><td>DCLS / lockstep</td><td>Dual-Core Lock-Step</td><td>두 코어가 같은 일을 하고 비교기가 출력 불일치를 감지</td></tr><tr><td>split-lock</td><td>—</td><td>lockstep을 풀어 두 코어를 독립으로 쓰는 구성</td></tr><tr><td>FIQ</td><td>Fast Interrupt</td><td>r8–r12 뱅크가 있어 저장 없이 빠르게 처리, GICv3 Group 0</td></tr><tr><td>icount</td><td>QEMU 명령 계수 모드</td><td>명령 1개 = 2^shift ns, 결정적 타이밍 (이 노트 shift=5)</td></tr></tbody></table></div>
+<hr>
+<h2 id="16-요약-체크리스트">16. 요약 &amp; 체크리스트<a class="anchor" href="#16-요약-체크리스트" aria-label="link">#</a></h2>
+<p>Cortex-R은 "Cortex-A의 예외 모델 + MCU의 결정성"이다. 모드와 뱅크 레지스터, 분기 명령 벡터 테이블, GIC, CP15는 A 쪽이고, MPU · TCM · ECC · lockstep은 결정성과 신뢰성을 위한 R만의 장치다. RTOS 엔지니어에게 가장 중요한 사실은 <strong>하드웨어 스태킹이 없다</strong>는 것이다. IRQ가 오면 하드웨어는 LR과 SPSR만 바꾸고, 저장 · 모드 전환 · 정렬 · GIC acknowledge/EOI · 복귀는 소프트웨어가 한다. QEMU icount에서 재 보면 IRQ → C 본문이 M3는 소프트웨어 명령 0개(하드웨어가 12 사이클로 처리), R52는 최소 방식 6개 · 재진입 방식 11개였고, 같은 FreeRTOS ping-pong의 스위치 비용은 M3 273 · R52 320~327 명령, 포트 어셈블리는 약 4배 길었다. R52(Armv8-R)는 EL2에서 리셋되어 startup이 ERET로 EL1에 내려가야 하고, EL2 MPU로 게스트를 가두는 2단계 보호가 있다(창 밖 쓰기 → HSR.EC 0x24로 EL2 트랩). PMSAv8은 겹침이 fault라서 R5 MPU 코드를 그대로 옮기면 깨진다. TCM ECC는 부팅 때 64비트 쓰기로 먼저 채워야 하고(32 KB: STM 3,084 vs 바이트 98,310 명령), lockstep 코어는 모든 모드 레지스터를 0으로 채운 뒤 시작한다. FreeRTOS에는 R52 GICv3에 딱 맞는 GCC 포트가 없어 <code>ARM_CRx_No_GIC</code> + GIC glue로 올렸고, Zephyr v4.4.2에는 AN536 보드가 없어 FVP BaseR 보드를 overlay로 옮겼다. QEMU는 ECC · lockstep · 사이클을 모델링하지 않고, HCR.VM + EL1 MMIO에서 QEMU 10.2.1이 세그폴트하는 버그도 만났다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>Cortex-R5 · R52 · R52+ · R82의 아키텍처와 대표 사용처(SSD · 자동차 · 안전 섬 · 스토리지)를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>R52가 EL2(Hyp)에서 리셋되는 것을 보이고, startup의 EL2 할 일(HVBAR · CNTHCTL · HCPTR · ERET)을 순서대로 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>모드별 뱅크 레지스터 표를 그리고, RTOS 태스크가 SYS 모드에서 도는 이유를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>IRQ 진입 시퀀스(<code>sub lr</code> · <code>srsdb</code> · <code>cps</code> · <code>push</code> · 정렬 · <code>rfeia</code>)의 각 줄이 왜 필요한지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Cortex-M 하드웨어 스태킹과 Cortex-R 소프트웨어 저장의 비용 차이를 측정 숫자로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>GICv3 초기화(GICD_CTLR · GICR_WAKER · PPI 설정 · ICC_PMR · IGRPEN1)와 IAR → EOIR 흐름을 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>PMSAv7과 PMSAv8-32의 차이(특히 겹침)와 EL2 MPU 2단계 보호를 설명하고 fault 레지스터(DFSR/DFAR, HSR/HDFAR)를 읽을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>TCM ECC 초기화가 왜 필요하고 어떤 쓰기로 해야 하는지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>lockstep(DCLS) 코어의 startup이 레지스터를 전부 채우는 이유를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>FreeRTOS의 Cortex-R 포트 네 가지(<code>ARM_CR5</code> · <code>ARM_CRx_No_GIC</code> · <code>ARM_CRx_MPU</code> · <code>ARM_CR82</code>)를 구분하고 R52에 무엇을 쓸지 고를 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Zephyr <code>cortex_a_r</code>의 IRQ 경로(<code>_isr_wrapper</code> → <code>arm_gic_get_active</code> → <code>_sw_isr_table</code> → <code>arm_gic_eoi</code> → <code>z_arm_int_exit</code>)를 따라갈 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>SSD 실행부 경험을 RTOS 용어로 번역해 면접에서 말할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="bare-metal-노트와의-관계">Bare-Metal 노트와의 관계<a class="anchor" href="#bare-metal-노트와의-관계" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>BM ID</th><th>BM 주제</th><th>이 노트의 해당 절</th><th>Bare-Metal 쪽에 남길 내용</th></tr></thead><tbody><tr><td>BM D9</td><td>R 프로파일 startup (벡터 · 모드별 스택 · EL2 → EL1)</td><td>§3 (예제 1 · 2), §2</td><td>멀티코어 R에서 MPIDR로 코어별 스택 고르기, secondary 코어 깨우기 · 부트 순서</td></tr><tr><td>BM D9</td><td>TCM ECC 초기화</td><td>§7 (예제 9)</td><td>실제 보드(R5F/R52)에서 ECC 오류 주입 · 확인, 링커 스크립트로 TCM 배치</td></tr><tr><td>BM D9</td><td>MPU 설정</td><td>§6.1–6.2 (예제 7)</td><td>RTOS 없이 고정 영역표 하나로 쓰는 bare-metal MPU 레이아웃</td></tr><tr><td>BM D9</td><td>lockstep (DCLS)</td><td>§8</td><td>벤더 오류 주입 · STL 실행 절차 (QEMU 불가)</td></tr><tr><td>BM D9</td><td>R52 EL2</td><td>§6.3 (예제 8), §3.4</td><td>실행부 두 개를 EL2로 분할하는 최소 하이퍼바이저</td></tr><tr><td>BM D6 · D7 (참고, 겹침 표시 대상 아님)</td><td>GICv3 bare-metal · Generic Timer</td><td>§4 (예제 3)에서 R52용으로 사용만</td><td>GICv3 · Generic Timer의 깊은 설명(그룹 · 보안 상태 · 가상 타이머)은 BM D6 · D7과 EL H6 · EL F8이 주인</td></tr></tbody></table></div>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>FreeRTOS Kernel V11.3.2 소스: <code>portable/GCC/ARM_CRx_No_GIC/port.c</code> · <code>portASM.S</code> · <code>portmacro.h</code>, <code>portable/GCC/ARM_CR5/portmacro.h</code>(GICv2 CPU 인터페이스 오프셋), <code>portable/GCC/ARM_CR82/README.md</code>, <code>portable/GCC/ARM_CRx_MPU/</code>, <code>History.txt</code>(V11.3.0: Cortex-R82 non-MPU SMP 포트 · MPU 지원 추가) — https://github.com/FreeRTOS/FreeRTOS-Kernel</li><li>Zephyr v4.4.2 소스: <code>arch/arm/core/cortex_a_r/vector_table.S</code> · <code>isr_wrapper.S</code> · <code>reset.S</code> · <code>exc_exit.S</code> · <code>swap_helper.S</code> · <code>tcm.c</code> · <code>semihost.c</code> · <code>Kconfig</code>, <code>boards/arm/fvp_baser_aemv8r/</code>, <code>dts/arm64/fvp/fvp-aemv8r.dtsi</code>, <code>soc/arm/fvp_aemv8r/Kconfig</code> — https://github.com/zephyrproject-rtos/zephyr</li><li>QEMU 소스 <code>hw/arm/mps3r.c</code> (MPS3 AN536 머신: 메모리 맵, per-CPU UART, GICv3, 2코어 제약) — https://gitlab.com/qemu-project/qemu/-/blob/master/hw/arm/mps3r.c , 이 노트의 값은 QEMU 10.2.1 모니터 <code>info mtree -f</code> · <code>info qtree</code>로 확인</li><li>Arm, Cortex-R52 제품 페이지와 Technical Reference Manual (developer.arm.com, 문서 번호는 확인 못 함), Arm Architecture Reference Manual Supplement — Armv8, for the Armv8-R AArch32 architecture profile</li><li>Arm, Cortex-R52+ 제품 페이지: https://www.arm.com/products/silicon-ip-cpu/cortex-r/cortex-r52-plus</li><li>Arm Newsroom, Cortex-R 자동차 블로그 (NVIDIA Orin 안전 섬의 lockstep Cortex-R52): https://newsroom.arm.com/blog/automotive-cortex-r</li><li>NVIDIA DriveOS 7.0.3 문서, Functional Safety Island (FSI): https://developer.nvidia.com/docs/drive/drive-os/7.0.3/public/drive-os-linux-sdk/embedded-software-components/Functional_Safety_Island_FSI/Functional_Safety_Island.html</li><li>AnandTech, "Arm Announces Cortex-R82: First 64-bit Real Time Processor" (2020-09-03): https://www.anandtech.com/show/16056/arm-announces-cortexr82-first-64bit-real-time-processor</li><li>eeNews Europe, "ARM Cortex-R82 targets storage computation": https://www.eenewseurope.com/en/arm-cortex-r82-targets-storage-computation</li><li>Phison PS5018-E18 제품 페이지 ("Triple Arm Cortex R5 CPU"): https://www.phison.com/ps5018-e18/</li><li>관련 노트: B2(하드웨어 스태킹), B4(PendSV · SysTick · SVC), B5(MCU 리셋), B6(FPU lazy stacking), B8(TCM · 캐시), C2 · C7, E2 · E8, O6 · P6, EL C5 · EL H6 · EL F8</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-25_B8_cache_tcm_mcu.html"><span class="dir">← 이전</span><span class="nm">B8. 캐시 · TCM이 있는 MCU — Cortex-M7/M85의 L1 캐시, MPU 속성, TCM, 플래시 wait state, 그리고 DMA 일관성 버그</span></a><a class="next" href="2026-10-25_B10_riscv_mcu.html"><span class="dir">다음 →</span><span class="nm">B10. RISC-V MCU 관점 — 하드웨어가 덜 해 주는 CPU 위에 RTOS를 올리면 무엇이 달라지나</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-cortex-r은-왜-따로-있나">0. 큰 그림 — Cortex-R은 왜 따로 있나</a></li><li class="l3"><a href="#어디서-쓰이나-확인한-예">어디서 쓰이나 — 확인한 예</a></li><li class="l3"><a href="#실습-환경-한-줄">실습 환경 한 줄</a></li><li class="l2"><a href="#1-r-프로파일의-정체-a-r-m-세-프로파일-비교">1. R 프로파일의 정체 — A · R · M 세 프로파일 비교</a></li><li class="l3"><a href="#1-1-직관-a의-몸에-m의-심장">1.1 직관: "A의 몸에 M의 심장"</a></li><li class="l3"><a href="#1-2-세-세대의-차이">1.2 세 세대의 차이</a></li><li class="l3"><a href="#1-3-예제-1-리셋-직후-r52가-스스로-말하는-것-id-레지스터">1.3 예제 1 — 리셋 직후 R52가 스스로 말하는 것 (ID 레지스터)</a></li><li class="l3"><a href="#1-4-함정">1.4 함정</a></li><li class="l2"><a href="#2-예외-모델-모드-el-뱅크-레지스터">2. 예외 모델 — 모드, EL, 뱅크 레지스터</a></li><li class="l3"><a href="#2-1-직관-모드마다-자기-책상-이-있다">2.1 직관: 모드마다 "자기 책상"이 있다</a></li><li class="l3"><a href="#2-2-정의-모드-표">2.2 정의 — 모드 표</a></li><li class="l3"><a href="#2-3-예제-2-뱅크-레지스터를-눈으로-보기">2.3 예제 2 — 뱅크 레지스터를 눈으로 보기</a></li><li class="l3"><a href="#2-4-함정-자기-모드의-뱅크-레지스터를-mrs로-읽으면-undef">2.4 함정 — 자기 모드의 뱅크 레지스터를 MRS로 읽으면 UNDEF</a></li><li class="l3"><a href="#2-5-rtos와-연결-왜-태스크는-sys-모드에서-도나">2.5 RTOS와 연결 — 왜 태스크는 SYS 모드에서 도나</a></li><li class="l2"><a href="#3-리셋에서-c까지-cortex-r52-startup-직접-쓰기">3. 리셋에서 C까지 — Cortex-R52 startup 직접 쓰기</a></li><li class="l3"><a href="#3-1-직관-m은-주소표-두-칸-이면-되고-r은-짐을-직접-푼다">3.1 직관: M은 "주소표 두 칸"이면 되고, R은 "짐을 직접 푼다"</a></li><li class="l3"><a href="#3-2-an536-메모리-맵-qemu에게-직접-물어보기">3.2 AN536 메모리 맵 — QEMU에게 직접 물어보기</a></li><li class="l3"><a href="#3-3-벡터-테이블-두-벌">3.3 벡터 테이블 두 벌</a></li><li class="l3"><a href="#3-4-리셋-경로-el2-el1">3.4 리셋 경로 — EL2 → EL1</a></li><li class="l3"><a href="#3-5-링커-스크립트-스택-일곱-개">3.5 링커 스크립트 — 스택 일곱 개</a></li><li class="l3"><a href="#3-6-함정">3.6 함정</a></li><li class="l2"><a href="#4-gicv3와-generic-timer-첫-irq-받기">4. GICv3와 generic timer — 첫 IRQ 받기</a></li><li class="l3"><a href="#4-1-직관-nvic는-코어-안에-gic는-코어-옆에">4.1 직관: NVIC는 코어 안에, GIC는 코어 옆에</a></li><li class="l3"><a href="#4-2-예제-3-1-khz-타이머-irq-다섯-번">4.2 예제 3 — 1 kHz 타이머 IRQ 다섯 번</a></li><li class="l3"><a href="#4-3-rtos-커널과-연결">4.3 RTOS 커널과 연결</a></li><li class="l3"><a href="#4-4-함정">4.4 함정</a></li><li class="l2"><a href="#5-하드웨어-스태킹이-없다-소프트웨어-컨텍스트-저장">5. 하드웨어 스태킹이 없다 — 소프트웨어 컨텍스트 저장</a></li><li class="l3"><a href="#5-1-직관-이삿짐센터-m-와-직접-이사-r">5.1 직관: 이삿짐센터(M)와 직접 이사(R)</a></li><li class="l3"><a href="#5-2-정의-진입-시퀀스의-각-명령이-하는-일">5.2 정의 — 진입 시퀀스의 각 명령이 하는 일</a></li><li class="l3"><a href="#5-3-예제-4-진입-방식-네-가지를-icount로-재기">5.3 예제 4 — 진입 방식 네 가지를 icount로 재기</a></li><li class="l3"><a href="#5-4-예제-5-같은-측정을-cortex-m3에서">5.4 예제 5 — 같은 측정을 Cortex-M3에서</a></li><li class="l3"><a href="#5-5-예제-6-objdump로-세는-정적-비용">5.5 예제 6 — objdump로 세는 정적 비용</a></li><li class="l3"><a href="#5-6-측정-차트">5.6 측정 차트</a></li><li class="l3"><a href="#5-7-fpu-cortex-m의-lazy-stacking은-없다">5.7 FPU — Cortex-M의 lazy stacking은 없다</a></li><li class="l3"><a href="#5-8-don-경험과-연결">5.8 Don 경험과 연결</a></li><li class="l3"><a href="#5-9-함정">5.9 함정</a></li><li class="l2"><a href="#6-mpu-pmsav8-32와-2단계-el1-mpu-el2-mpu">6. MPU — PMSAv8-32와 2단계(EL1 MPU + EL2 MPU)</a></li><li class="l3"><a href="#6-1-직관-주소-변환-없는-출입-명부">6.1 직관: 주소 변환 없는 "출입 명부"</a></li><li class="l3"><a href="#6-2-예제-7-el1-mpu-권한-fault-영역-없음-겹침">6.2 예제 7 — EL1 MPU: 권한 fault, 영역 없음, 겹침</a></li><li class="l3"><a href="#6-3-예제-8-el2-mpu-하이퍼바이저가-게스트를-가둔다">6.3 예제 8 — EL2 MPU: 하이퍼바이저가 게스트를 가둔다</a></li><li class="l3"><a href="#6-4-함정-qemu-10-2-1에서-hcr-vm-el1-mmio-qemu-세그폴트">6.4 함정 — QEMU 10.2.1에서 HCR.VM + EL1 MMIO = QEMU 세그폴트</a></li><li class="l2"><a href="#7-tcm과-ecc-초기화">7. TCM과 ECC 초기화</a></li><li class="l3"><a href="#7-1-직관-코어-바로-옆-책상-서랍">7.1 직관: 코어 바로 옆 책상 서랍</a></li><li class="l3"><a href="#7-2-ecc-초기화-규칙-왜-부팅-때-tcm을-지우나">7.2 ECC 초기화 규칙 — 왜 부팅 때 TCM을 지우나</a></li><li class="l3"><a href="#7-3-예제-9-qemu의-tcm-그리고-초기화-루프-비용">7.3 예제 9 — QEMU의 TCM, 그리고 초기화 루프 비용</a></li><li class="l3"><a href="#7-4-rtos와-연결">7.4 RTOS와 연결</a></li><li class="l2"><a href="#8-lockstep-dcls-과-안전-qemu로-보여-줄-수-없는-것">8. lockstep(DCLS)과 안전 — QEMU로 보여 줄 수 없는 것</a></li><li class="l3"><a href="#8-1-직관-같은-시험을-두-명이-동시에-푼다">8.1 직관: 같은 시험을 두 명이 동시에 푼다</a></li><li class="l3"><a href="#8-2-펌웨어가-해야-하는-일">8.2 펌웨어가 해야 하는 일</a></li><li class="l3"><a href="#8-3-정직하게-qemu에서-안-되는-것">8.3 정직하게 — QEMU에서 안 되는 것</a></li><li class="l2"><a href="#9-rtos를-cortex-r에-올리기-freertos와-zephyr-실습">9. RTOS를 Cortex-R에 올리기 — FreeRTOS와 Zephyr 실습</a></li><li class="l3"><a href="#9-1-freertos-v11-3-2의-cortex-r-포트-지도">9.1 FreeRTOS V11.3.2의 Cortex-R 포트 지도</a></li><li class="l3"><a href="#9-2-예제-10-freertos-on-cortex-r52-그리고-같은-시험을-m3에서">9.2 예제 10 — FreeRTOS on Cortex-R52 (그리고 같은 시험을 M3에서)</a></li><li class="l3"><a href="#9-3-예제-11-zephyr-v4-4-2-on-an536-보드가-없을-때-옮겨-심기">9.3 예제 11 — Zephyr v4.4.2 on AN536: 보드가 없을 때 옮겨 심기</a></li><li class="l2"><a href="#10-rtos-커널-안에서는-무슨-일이-일어나나">10. RTOS 커널 안에서는 무슨 일이 일어나나</a></li><li class="l3"><a href="#10-1-freertos-portable-gcc-arm_crx_no_gic-portasm-s-port-c">10.1 FreeRTOS (portable/GCC/ARM_CRx_No_GIC/portASM.S, port.c)</a></li><li class="l3"><a href="#10-2-zephyr-arch-arm-core-cortex_a_r">10.2 Zephyr (arch/arm/core/cortex_a_r/)</a></li><li class="l2"><a href="#11-실무에서-다시-보기">11. 실무에서 다시 보기</a></li><li class="l3"><a href="#11-1-ssd-컨트롤러-don의-실행부를-rtos-언어로-번역하기">11.1 SSD 컨트롤러 — Don의 실행부를 RTOS 언어로 번역하기</a></li><li class="l3"><a href="#11-2-차량-soc-ai-soc의-안전-섬">11.2 차량 SoC · AI SoC의 안전 섬</a></li><li class="l3"><a href="#11-3-존-zonal-컨트롤러-r52-el2로-한-코어에-둘을">11.3 존(zonal) 컨트롤러 — R52 EL2로 한 코어에 둘을</a></li><li class="l2"><a href="#12-흔한-실수와-증상">12. 흔한 실수와 증상</a></li><li class="l2"><a href="#13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#14-직접-해보기">14. 직접 해보기</a></li><li class="l2"><a href="#15-용어-사전">15. 용어 사전</a></li><li class="l2"><a href="#16-요약-체크리스트">16. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#bare-metal-노트와의-관계">Bare-Metal 노트와의 관계</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

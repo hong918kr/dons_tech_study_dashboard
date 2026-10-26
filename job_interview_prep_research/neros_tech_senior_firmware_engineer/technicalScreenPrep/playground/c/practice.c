@@ -1,73 +1,25 @@
-#include <stdio.h>
-#define CAP 8
-
-// typedef struct {
-//     uint8_t buf[CAP];
-//     int head;
-//     int tail;
-//     int count;
-// } Rb_t;
-
-// void rb_init(Rb_t* rb)
-// {
-//     memset(rb, 0, sizeof(Rb_t));
-//     /*
-//     or
+#define TIMER_BASE_ADDR (0x00040000U)
+#define REG_SECONDS_COUNTER (* (volatile uint32_t *) (TIMER_BASE_ADDR + 0x00U))
+#define REG_MINUTES_COUNTER (* (volatile uint32_t *) (TIMER_BASE_ADDR + 0x04U))
 
 
-//     */
-// }
+4, 씩움직이는거 맞지?
 
-
-typedef struct {
-    uint8_t* buf;
-    int head;
-    int tail;
-    int count;
-    int capacity;
-} Rb_t;
-
-void rb_init(Rb_t* rb, int capacity)
+uint64_t GetMergedTimestampBitwise(void)
 {
-    rb->buf = malloc(capacity * sizeof(uint8_t));
-    if (rb->buf ==NULL) return; 
-    rb->head=0;
-    rb->tail=0;
-    rb->count=0;
-    rb->capacity = capacity;
+    uint32_t min1, sec1, min2, sec2;
+    uint64_t timestamp_64;
+    do {
+        min1 = REG_MINUTES_COUNTER;
+        sec1 = REG_SECONDS_COUNTER;
+
+        min2 = REG_MINUTES_COUNTER;
+        sec2 = REG_SECONDS_COUNTER;
+
+
+    } while ((min1 != min2)  || (sec1 != sec2));
+
+
+    timestamp_64 = ((uint64_t)min1 << 32) | (uint64_t)sec1;
+    return timestamp_64;
 }
-
-bool rb_empty(Rb_t* rb) {
-    return rb->count == 0;
-}
-
-bool rb_full(Rb_t* rb) {
-    return rb->count == rb->capacity;
-}
-
-void rb_push(Rb_t* rb, int item)
-{
-    if (rb_full(rb)) return false;
-    rb->buf[rb->head] = item;
-    rb->count +=1;
-    rb->head = (rb->head + 1) % rb->capacity;
-}
-
-void rb_pop(Rb_t* rb, int* out)
-{
-    if (rb_empty(rb)) return false;
-    *out = rb->buf[rb->tail];
-    rb->tail = (rb->tail + 1) % rb->capacity;
-    rb->count -=1;
-}
-
-int rb_peek(Rb_t* rb, int* out)
-{
-    if (rb_empty(rb)) return false;
-    *out = rb->buf[rb->tail];
-}
-
-
-
-
-

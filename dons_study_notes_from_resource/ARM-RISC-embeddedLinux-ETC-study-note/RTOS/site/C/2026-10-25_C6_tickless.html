@@ -1,0 +1,1407 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C6. tickless 커널 — 할 일이 없으면 tick을 끄고, 다음 마감에 한 번만 깬다</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="C/2026-10-25_C6_tickless">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">C. 커널 내부 · C6. tickless 커널 — 할 일이 없으면 tick을 끄고, 다음 마감에 한 번만 깬다</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">C. 커널 내부 · Scheduler &amp; Context Switch</div>
+      <h1>C6. tickless 커널 — 할 일이 없으면 tick을 끄고, 다음 마감에 한 번만 깬다</h1>
+      <div class="meta"><span>207분 읽기</span><span>1875줄</span><span>64개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: 1 kHz tick이 배터리를 왜 먹는지 숫자로 설명한다 · FreeRTOS <code>vPortSuppressTicksAndSleep()</code>(port.c)를 한 줄씩 따라가며 reload 계산·24비트 한계·멈춘 시간 보정·조기 기상을 설명한다 · SysTick 대신 저전력 타이머(LPTIM/RTC)로 tick을 만드는 <code>configUSE_TICKLESS_IDLE=2</code> 구현을 직접 짠다 · Zephyr의 기본 tickless(<code>sys_clock_set_timeout()</code>)와 FreeRTOS를 같은 보드에서 깨어남 횟수로 비교한다 <strong>왜 필요한가</strong>: "배터리로 6개월 가야 한다", "대기 전류가 데이터시트보다 10배 높다", "tickless를 켰더니 시계가 하루에 몇 초씩 틀린다" — 배터리 장비 펌웨어 면접과 실무에서 바로 나오는 장면이다 <strong>Don 기준 난이도</strong>: 타이머 레지스터·인터럽트·WFI는 이미 안다 / tick을 멈췄다 다시 켤 때 시간을 어떻게 메우는지, 커널이 "잘 수 있다"를 어떻게 판단하는지가 새로 배울 부분 <strong>선행 노트</strong>: A7(tick 비용 측정 — Zephyr tickless + slicing off = 0%), C5(tick과 시간 관리), B3(PRIMASK · BASEPRI), EL N2(Linux의 <code>nohz</code> — 참조만)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<h3 id="0-1-tick은-1초에-1000번-울리는-알람시계-다">0.1 tick은 "1초에 1000번 울리는 알람시계"다<a class="anchor" href="#0-1-tick은-1초에-1000번-울리는-알람시계-다" aria-label="link">#</a></h3>
+<p>C5에서 본 tick 인터럽트는 1 kHz면 1 ms마다 들어온다. 태스크가 모두 막혀(block) 있어도 들어온다. 커널은 tick마다 깨어나서 "지연 리스트 맨 앞의 태스크가 깰 시각인가?"를 확인하고, 아니면 다시 잔다. 대부분의 tick은 <strong>"아직 아니다"를 확인하려고 CPU를 깨우는 일</strong>이다.</p>
+<p>배터리 장비에서 이게 문제가 되는 이유는 두 가지다.</p>
+<ol><li><strong>깨어날 때마다 전력이 든다.</strong> MCU의 깊은 수면(예: STM32의 STOP 모드)은 수 µA, 동작 중은 수 mA다. 1000번 깨면 그때마다 클럭을 다시 켜고(PLL·레귤레이터 안정화), 몇 µs 동안 mA를 쓰고, 다시 잠든다. "깨어 있는 시간"이 짧아도 횟수가 많으면 평균 전류가 수면 전류의 몇 배가 된다.</li><li><strong>깊은 수면에서는 SysTick 자체가 멈춘다.</strong> SysTick은 코어 클럭으로 돈다. 코어 클럭을 끄는 STOP 모드에 들어가면 tick이 안 온다. 즉 "tick을 유지하면서 깊이 자기"는 원래 불가능하다. 1 kHz tick을 유지하려면 얕은 수면(WFI만, 클럭은 살아 있음)만 쓸 수 있다.</li></ol>
+<p><strong>tickless idle</strong>은 이 문제를 이렇게 푼다: "할 일이 없을 때, 다음에 깨어야 할 시각(가장 빠른 타임아웃)을 계산해서, 그때 한 번만 울리는 one-shot 타이머를 걸고 잔다. 깨어나면 그동안 지나간 tick 수를 한꺼번에 더한다."</p>
+<figure class="chart"><svg viewBox="0 0 680 262" xmlns="http://www.w3.org/2000/svg"><text x="10" y="20" font-size="13" text-anchor="start" font-weight="bold">같은 일(0 ms · 10 ms에 1.5 ms씩 작업)을 세 방식으로 — 20 ms 구간</text><text x="10" y="65" font-size="12" text-anchor="start">① 주기 tick</text><line x1="150" y1="76" x2="660" y2="76" stroke="currentColor" stroke-width="0.6"/><text x="10" y="125" font-size="12" text-anchor="start">② tick + WFI</text><line x1="150" y1="136" x2="660" y2="136" stroke="currentColor" stroke-width="0.6"/><text x="10" y="185" font-size="12" text-anchor="start">③ tickless</text><line x1="150" y1="196" x2="660" y2="196" stroke="currentColor" stroke-width="0.6"/><rect x="150.0" y="48" width="510.0" height="24" rx="2" fill="#e08a3c" fill-opacity="0.1" stroke="#e08a3c" stroke-width="1.2"/><rect x="150.0" y="48" width="38.25" height="24" rx="2" fill="#e08a3c" fill-opacity="0.45" stroke="#e08a3c" stroke-width="1.2"/><rect x="405.0" y="48" width="38.25" height="24" rx="2" fill="#e08a3c" fill-opacity="0.45" stroke="#e08a3c" stroke-width="1.2"/><line x1="150.0" y1="42" x2="150.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="175.5" y1="42" x2="175.5" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="201.0" y1="42" x2="201.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="226.5" y1="42" x2="226.5" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="252.0" y1="42" x2="252.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="277.5" y1="42" x2="277.5" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="303.0" y1="42" x2="303.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="328.5" y1="42" x2="328.5" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="354.0" y1="42" x2="354.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="379.5" y1="42" x2="379.5" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="405.0" y1="42" x2="405.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="430.5" y1="42" x2="430.5" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="456.0" y1="42" x2="456.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="481.5" y1="42" x2="481.5" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="507.0" y1="42" x2="507.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="532.5" y1="42" x2="532.5" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="558.0" y1="42" x2="558.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="583.5" y1="42" x2="583.5" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="609.0" y1="42" x2="609.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="634.5" y1="42" x2="634.5" y2="76" stroke="#d0564a" stroke-width="1.2"/><line x1="660.0" y1="42" x2="660.0" y2="76" stroke="#d0564a" stroke-width="1.2"/><rect x="150.0" y="108" width="510.0" height="24" rx="2" fill="#4a7bd0" fill-opacity="0.1" stroke="#4a7bd0" stroke-width="1.2"/><rect x="150.0" y="108" width="38.25" height="24" rx="2" fill="#e08a3c" fill-opacity="0.45" stroke="#e08a3c" stroke-width="1.2"/><rect x="405.0" y="108" width="38.25" height="24" rx="2" fill="#e08a3c" fill-opacity="0.45" stroke="#e08a3c" stroke-width="1.2"/><line x1="150.0" y1="102" x2="150.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="150.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="175.5" y1="102" x2="175.5" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="175.5" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="201.0" y1="102" x2="201.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="201.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="226.5" y1="102" x2="226.5" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="226.5" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="252.0" y1="102" x2="252.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="252.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="277.5" y1="102" x2="277.5" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="277.5" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="303.0" y1="102" x2="303.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="303.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="328.5" y1="102" x2="328.5" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="328.5" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="354.0" y1="102" x2="354.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="354.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="379.5" y1="102" x2="379.5" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="379.5" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="405.0" y1="102" x2="405.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="405.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="430.5" y1="102" x2="430.5" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="430.5" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="456.0" y1="102" x2="456.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="456.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="481.5" y1="102" x2="481.5" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="481.5" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="507.0" y1="102" x2="507.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="507.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="532.5" y1="102" x2="532.5" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="532.5" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="558.0" y1="102" x2="558.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="558.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="583.5" y1="102" x2="583.5" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="583.5" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="609.0" y1="102" x2="609.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="609.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="634.5" y1="102" x2="634.5" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="634.5" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><line x1="660.0" y1="102" x2="660.0" y2="136" stroke="#d0564a" stroke-width="1.2"/><rect x="660.0" y="108" width="3" height="24" fill="#e08a3c" fill-opacity="0.8"/><rect x="150.0" y="168" width="510.0" height="24" rx="2" fill="#4a7bd0" fill-opacity="0.1" stroke="#4a7bd0" stroke-width="1.2"/><rect x="150.0" y="168" width="38.25" height="24" rx="2" fill="#e08a3c" fill-opacity="0.45" stroke="#e08a3c" stroke-width="1.2"/><rect x="405.0" y="168" width="38.25" height="24" rx="2" fill="#e08a3c" fill-opacity="0.45" stroke="#e08a3c" stroke-width="1.2"/><line x1="150.0" y1="162" x2="150.0" y2="196" stroke="#d0564a" stroke-width="1.2"/><line x1="405.0" y1="162" x2="405.0" y2="196" stroke="#d0564a" stroke-width="1.2"/><line x1="660.0" y1="162" x2="660.0" y2="196" stroke="#d0564a" stroke-width="1.2"/><text x="296.625" y="185" font-size="12" text-anchor="middle">WFI로 8.5 ms 내내 잔다</text><text x="551.625" y="185" font-size="12" text-anchor="middle">한 번도 안 깬다</text><text x="150.0" y="214" font-size="12" text-anchor="middle">0 ms</text><text x="277.5" y="214" font-size="12" text-anchor="middle">5 ms</text><text x="405.0" y="214" font-size="12" text-anchor="middle">10 ms</text><text x="532.5" y="214" font-size="12" text-anchor="middle">15 ms</text><text x="660.0" y="214" font-size="12" text-anchor="middle">20 ms</text><rect x="150" y="233" width="14" height="14" rx="2" fill="#e08a3c" fill-opacity="0.45" stroke="#e08a3c" stroke-width="1.2"/><text x="170" y="244" font-size="12" text-anchor="start">작업</text><rect x="220" y="233" width="14" height="14" rx="2" fill="#e08a3c" fill-opacity="0.1" stroke="#e08a3c" stroke-width="1.2"/><text x="240" y="244" font-size="12" text-anchor="start">깨어서 idle 루프</text><rect x="360" y="233" width="14" height="14" rx="2" fill="#4a7bd0" fill-opacity="0.1" stroke="#4a7bd0" stroke-width="1.2"/><text x="380" y="244" font-size="12" text-anchor="start">WFI 수면</text><line x1="460" y1="233" x2="460" y2="247" stroke="#d0564a" stroke-width="1.5"/><text x="468" y="244" font-size="12" text-anchor="start">타이머 인터럽트(깨움)</text></svg></figure>
+<p>그림 1 — 같은 작업을 세 방식으로 돌린 20 ms. ①은 CPU가 쉬지 않는다. ②는 tick 사이에 WFI로 자지만 1 ms마다 빨간 tick이 깨운다. ③ tickless는 작업이 있는 시각에만 깬다. 이 노트 §3의 측정에서 1초 동안 ②는 1000번, ③은 12번 깼다.</p>
+<h3 id="0-2-don의-경험과-연결-ssd의-power-state와-같은-문제">0.2 Don의 경험과 연결 — SSD의 power state와 같은 문제<a class="anchor" href="#0-2-don의-경험과-연결-ssd의-power-state와-같은-문제" aria-label="link">#</a></h3>
+<p>NVMe SSD 펌웨어에는 APST(Autonomous Power State Transition)와 PCIe L1.2 같은 저전력 상태가 있다. "호스트 명령이 일정 시간 안 오면 더 깊은 상태로 내려가고, 깨울 이벤트가 오면 exit latency를 내고 올라온다." 펌웨어는 <strong>언제 내려갈지(진입 조건), 무엇이 깨울지(wake source), 올라왔을 때 무엇을 보정할지(타이머·카운터 복원)</strong>를 정한다.</p>
+<p>tickless는 그 문제의 RTOS판이다.</p>
+<div class="tw"><table><thead><tr><th>SSD 펌웨어</th><th>RTOS tickless</th></tr></thead><tbody><tr><td>idle 타이머가 만료되면 PS3/PS4로</td><td>다음 타임아웃까지 <code>configEXPECTED_IDLE_TIME_BEFORE_SLEEP</code> tick 이상 남으면 잔다</td></tr><tr><td>호스트 doorbell · PERST · 타이머가 wake source</td><td>one-shot 타이머 · 외부 인터럽트가 wake source</td></tr><tr><td>복귀 후 타임스탬프 카운터 보정</td><td>복귀 후 <code>vTaskStepTick()</code>으로 tick 카운트 보정</td></tr><tr><td>exit latency를 SLA에서 뺀다</td><td>wake latency를 마감 계산에서 뺀다 (§9)</td></tr></tbody></table></div>
+<p>SSD 실행부(executive)에도 주기 tick이 없거나 아주 느렸을 것이다. 시간은 자유 실행 하드웨어 카운터를 읽고, 타임아웃은 "다음 마감 시각"과 비교한다. A7에서 말했듯이 <strong>tickless는 실행부 개발자가 원래 하던 방식을 커널이 대신 해 주는 것</strong>이다.</p>
+<h3 id="0-3-세-가지-잠자는-방식-용어-정리">0.3 세 가지 "잠자는 방식" — 용어 정리<a class="anchor" href="#0-3-세-가지-잠자는-방식-용어-정리" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>방식</th><th>tick</th><th>잠은?</th><th>깨는 횟수 (1 kHz, 거의 idle)</th><th>대표</th></tr></thead><tbody><tr><td>주기 tick, idle은 루프만</td><td>항상</td><td>안 잔다</td><td>1000/s, CPU 100% 동작</td><td>FreeRTOS 기본 설정</td></tr><tr><td>주기 tick + idle에서 WFI ("sleep on idle")</td><td>항상</td><td>tick 사이에 얕게</td><td>1000/s</td><td>idle hook에 <code>__WFI()</code></td></tr><tr><td>tickless idle</td><td>idle일 때만 끈다</td><td>다음 타임아웃까지</td><td>실제 이벤트 수만큼</td><td>FreeRTOS <code>configUSE_TICKLESS_IDLE</code></td></tr><tr><td>완전 tickless 커널</td><td>원래 주기 tick이 없다</td><td>다음 타임아웃까지</td><td>실제 이벤트 수만큼</td><td>Zephyr <code>CONFIG_TICKLESS_KERNEL</code> (기본)</td></tr></tbody></table></div>
+<p>FreeRTOS의 tickless는 <strong>idle일 때만</strong> tick을 멈춘다. 태스크가 돌고 있으면 tick은 평소처럼 1 ms마다 온다. Zephyr는 커널 설계 자체가 "다음 타임아웃이 있을 때만 타이머를 건다"라서, 바쁜 스레드 하나만 돌 때도 타이머 인터럽트가 0번일 수 있다(A7 예제 8에서 측정: tickless + slicing off = tick 비용 0%).</p>
+<p>Linux의 같은 개념(<code>CONFIG_NO_HZ_IDLE</code>, <code>nohz_full</code>)은 EL N2에서 다뤘다. 여기서는 <strong>MCU에서 달라지는 점</strong> — 24비트 SysTick 한계, 깊은 수면에서 SysTick이 멈추는 문제, 저전력 타이머로 시간을 이어 붙이는 법 — 만 쓴다.</p>
+<h3 id="실습-환경-한-줄">실습 환경 한 줄<a class="anchor" href="#실습-환경-한-줄" aria-label="link">#</a></h3>
+<p>QEMU <code>mps2-an385</code>(Cortex-M3 @ 25 MHz) + FreeRTOS V11.3.2(ARM_CM3 포트) / 같은 보드의 Zephyr v4.4.2. 모든 타이밍은 <code>ICOUNT=1</code>(명령 1개 = 32 ns 가상 시간, 실행마다 같은 숫자)이다. <strong>QEMU icount 기준이라 실제 칩과 절대값은 다르다</strong>(캐시·플래시 wait state·버스·클럭 기동 시간을 모델링하지 않는다). 특히 QEMU에는 "깊은 수면"과 "전류"가 없다 — WFI는 "다음 타이머 이벤트까지 가상 시계를 건너뛴다"로만 구현된다. 그래서 이 노트는 전력 대신 <strong>깨어난 횟수</strong>와 <strong>깨어 있던 시간 비율</strong>을 잰다. 이 둘이 실제 칩에서 평균 전류를 정하는 두 변수다.</p>
+<hr>
+<h2 id="1-tickless의-원리-다음-마감까지-자고-깨서-시간을-메운다">1. tickless의 원리 — "다음 마감까지 자고, 깨서 시간을 메운다"<a class="anchor" href="#1-tickless의-원리-다음-마감까지-자고-깨서-시간을-메운다" aria-label="link">#</a></h2>
+<h3 id="1-1-직관-알람을-1분마다-맞추지-말고-약속-시각에-한-번만-맞춘다">1.1 직관 — 알람을 1분마다 맞추지 말고, 약속 시각에 한 번만 맞춘다<a class="anchor" href="#1-1-직관-알람을-1분마다-맞추지-말고-약속-시각에-한-번만-맞춘다" aria-label="link">#</a></h3>
+<p>1 kHz tick은 "1 ms마다 울리는 알람을 켜 두고, 울릴 때마다 시계를 보고 약속 시각인지 확인한다"이다. tickless는 "가장 빠른 약속이 37 ms 뒤면 37 ms짜리 알람 하나를 맞추고 잔다"이다. 다만 두 가지가 더 필요하다.</p>
+<ul><li><strong>일찍 깰 수 있다.</strong> 37 ms 알람을 맞췄는데 12 ms에 UART 인터럽트가 와서 깨면, "지금이 몇 tick인가"를 알아내서 12만 더해야 한다(37이 아니라).</li><li><strong>알람을 바꾸는 동안 시계가 흐른다.</strong> 타이머를 멈추고 새 값을 쓰는 몇십 사이클 동안 흐른 시간도 어딘가에 더해야 한다. 이걸 대충 하면 시계가 조금씩 틀어진다(drift, §5).</li></ul>
+<h3 id="1-2-정의-세-단계">1.2 정의 — 세 단계<a class="anchor" href="#1-2-정의-세-단계" aria-label="link">#</a></h3>
+<p>tickless 구현은 어느 RTOS든 세 단계다.</p>
+<ol class="tasks"><li><strong>얼마나 잘 수 있나 계산</strong> — "다음 깨울 시각 − 지금". FreeRTOS는 <code>xNextTaskUnblockTime − xTickCount</code>(<code>prvGetExpectedIdleTime()</code>, tasks.c), Zephyr는 타임아웃 리스트 맨 앞(<code>next_timeout()</code>, kernel/timeout.c).</li><li><strong>그 시각에 one-shot 타이머를 걸고 WFI</strong> — 하드웨어 한계(SysTick 24비트)를 넘으면 잘라서 여러 번 잔다.</li><li><strong>깨어나서 지난 시간을 tick 단위로 되돌려 준다</strong> — FreeRTOS <code>vTaskStepTick(n)</code>, Zephyr <code>sys_clock_announce(n)</code>.</li></ol>
+<h3 id="1-3-ssd-비유로-다시">1.3 SSD 비유로 다시<a class="anchor" href="#1-3-ssd-비유로-다시" aria-label="link">#</a></h3>
+<p>SSD 실행부에서 "GC를 50 ms 뒤에 돌려야 하고, 그 전에 호스트 명령이 오면 먼저 처리한다"를 짤 때, 50 ms 타이머 하나를 걸고 WFI로 잔 뒤 깨면 "타이머가 깨웠나, doorbell이 깨웠나"를 보고 남은 시간을 다시 계산했을 것이다. 1.2의 세 단계가 정확히 그것이다. 다른 점은 RTOS에서는 이걸 <strong>커널의 tick 카운터와 맞물려서</strong> 해야 한다는 것뿐이다 — 태스크들이 <code>vTaskDelay(37)</code>처럼 tick 단위로 시간을 쓰기 때문이다.</p>
+<hr>
+<h2 id="2-freertos의-tickless-설정-손잡이">2. FreeRTOS의 tickless 설정 손잡이<a class="anchor" href="#2-freertos의-tickless-설정-손잡이" aria-label="link">#</a></h2>
+<h3 id="2-1-설정-항목-한눈에-v11-3-2-소스에서-확인">2.1 설정 항목 한눈에 (V11.3.2 소스에서 확인)<a class="anchor" href="#2-1-설정-항목-한눈에-v11-3-2-소스에서-확인" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>항목</th><th>기본값</th><th>뜻</th><th>정의 위치</th></tr></thead><tbody><tr><td><code>configUSE_TICKLESS_IDLE</code></td><td>0</td><td>0 = 끔, 1 = 포트가 주는 SysTick 구현, 2 이상 = 내가 만든 구현</td><td><code>include/FreeRTOS.h</code></td></tr><tr><td><code>configEXPECTED_IDLE_TIME_BEFORE_SLEEP</code></td><td>2</td><td>이만큼(tick) 이상 잘 수 있을 때만 잔다. 2 미만이면 <code>#error</code></td><td><code>include/FreeRTOS.h</code></td></tr><tr><td><code>configPRE_SUPPRESS_TICKS_AND_SLEEP_PROCESSING(x)</code></td><td>빈 매크로</td><td>스케줄러를 멈춘 뒤, 자기 직전. <code>x = 0</code>으로 만들면 이번엔 안 잔다</td><td>tasks.c <code>prvIdleTask</code></td></tr><tr><td><code>configPRE_SLEEP_PROCESSING(x)</code></td><td>빈 매크로</td><td>WFI 직전(인터럽트 마스크 상태). 클럭 낮추기 · 주변장치 끄기. <code>x = 0</code>이면 포트의 WFI를 건너뛴다(직접 WFI/STOP 진입했다는 뜻)</td><td>port.c</td></tr><tr><td><code>configPOST_SLEEP_PROCESSING(x)</code></td><td>빈 매크로</td><td>WFI 직후. 클럭 복구</td><td>port.c</td></tr><tr><td><code>portSUPPRESS_TICKS_AND_SLEEP(x)</code></td><td><code>vPortSuppressTicksAndSleep(x)</code></td><td>실제로 재우는 함수. mode 2면 내가 정의한다</td><td><code>portmacro.h</code></td></tr><tr><td><code>vPortSetupTimerInterrupt()</code></td><td>weak 함수</td><td>tick 타이머 초기화. 덮어쓰면 SysTick 대신 다른 타이머로 tick을 만든다</td><td>port.c</td></tr><tr><td><code>configSYSTICK_CLOCK_HZ</code></td><td><code>configCPU_CLOCK_HZ</code></td><td>SysTick이 코어 클럭이 아닌 외부 클럭(STCLK)으로 돌 때</td><td>port.c</td></tr></tbody></table></div>
+<p><code>configUSE_TICKLESS_IDLE</code>의 값 구분이 재미있다. tasks.c의 idle 태스크는 <code>#if ( configUSE_TICKLESS_IDLE != 0 )</code>으로 tickless 경로를 켜고, port.c는 <code>#if ( configUSE_TICKLESS_IDLE == 1 )</code>일 때만 자기 <code>vPortSuppressTicksAndSleep()</code>을 컴파일한다. 소스 주석 그대로 옮기면: "user defined low power mode implementations require configUSE_TICKLESS_IDLE to be set to a value other than 1". 그래서 <strong>2 = 커널의 tickless 경로는 쓰되 재우는 함수는 내가 준다</strong>는 뜻이 된다(§7).</p>
+<p><code>eSleepModeStatus</code>(task.h)는 세 값이다.</p>
+<div class="tw"><table><thead><tr><th>값</th><th>뜻</th><th>반환 조건 (<code>eTaskConfirmSleepModeStatus()</code>, tasks.c)</th></tr></thead><tbody><tr><td><code>eAbortSleep</code></td><td>자면 안 된다</td><td>스케줄러가 멈춘 사이에 태스크가 ready가 됨(<code>xPendingReadyList</code>), yield가 밀림, tick이 밀림(<code>xPendedTicks != 0</code>)</td></tr><tr><td><code>eStandardSleep</code></td><td>다음 타임아웃까지 자도 된다</td><td>기본값</td></tr><tr><td><code>eNoTasksWaitingTimeout</code></td><td>타임아웃을 기다리는 태스크가 하나도 없다 — 외부 인터럽트만 기다린다</td><td>모든 앱 태스크가 suspended 리스트에 있음(<code>portMAX_DELAY</code>로 막힌 태스크도 여기 들어간다, <code>INCLUDE_vTaskSuspend == 1</code>일 때)</td></tr></tbody></table></div>
+<h3 id="2-2-이-노트의-실험용-설정-파일">2.2 이 노트의 실험용 설정 파일<a class="anchor" href="#2-2-이-노트의-실험용-설정-파일" aria-label="link">#</a></h3>
+<p>랩 템플릿 <code>FreeRTOSConfig.h</code>를 그대로 포함하고 tickless 손잡이만 얹는다. <code>xPortSysTickHandler</code>를 <code>SysTick_Handler</code>로 바꾸는 템플릿의 매크로는 풀어서, SysTick 인터럽트 횟수를 세는 래퍼를 끼운다.</p>
+<p>무엇을 확인하는 코드인지: 측정용 훅(SysTick 횟수, WFI 횟수, 잠든 사이클, 매 수면의 계획/실제/보정 tick)을 FreeRTOS 설정 매크로에 연결한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* C6 FreeRTOSConfig.h — lab template + tickless knobs (override with EXTRA_CFLAGS) */
+#ifndef C6_CONFIG_H
+#define C6_CONFIG_H
+#include "/var/rtoslab/templates/freertos-mps2/FreeRTOSConfig.h"
+#undef  xPortSysTickHandler              /* SysTick_Handler = counting wrapper in c6_common.c */
+#ifndef configUSE_TICKLESS_IDLE
+#define configUSE_TICKLESS_IDLE 0        /* 0 = off, 1 = port.c SysTick version, 2 = user version */
+#endif
+#include &lt;stdint.h&gt;
+void c6_pre_sleep(uint32_t *x);
+void c6_post_sleep(uint32_t x);
+#define configPRE_SLEEP_PROCESSING(x)   c6_pre_sleep(&amp;(x))
+#define configPOST_SLEEP_PROCESSING(x)  c6_post_sleep(x)
+void c6_step(uint32_t n);
+#define traceINCREASE_TICK_COUNT(x)     c6_step(x)      /* called by vTaskStepTick() */
+#if configUSE_TICKLESS_IDLE == 2
+void c6_suppress_ticks_and_sleep(uint32_t xExpectedIdleTime);
+#define portSUPPRESS_TICKS_AND_SLEEP(x) c6_suppress_ticks_and_sleep(x)
+#endif
+#endif</code></pre></figure>
+<p><code>traceINCREASE_TICK_COUNT(x)</code>는 <code>vTaskStepTick()</code> 안에서만 불리는 trace 매크로다(tasks.c). 이걸로 "깨어나서 몇 tick을 한꺼번에 더했나"를 기록한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* c6.h — counters shared by the C6 FreeRTOS experiments */
+#ifndef C6_H
+#define C6_H
+#include &lt;stdint.h&gt;
+#include "board.h"
+#define CYC() REG32(0x40028018u)                 /* FPGAIO COUNTER: 25 MHz free-running */
+extern volatile uint32_t n_systick, n_lpirq, n_wfi, sleep_cyc;   /* n_lpirq: lp_tick.c */
+typedef struct { uint32_t expected, slept_cyc, stepped; } sleep_log_t;
+#define LOG_N 16
+extern sleep_log_t slog[LOG_N];
+extern volatile uint32_t n_log;                  /* sleeps recorded since last reset */
+static inline void spin_us(uint32_t us) { uint32_t t = CYC(); while (CYC() - t &lt; us * 25u) { } }
+#endif</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* c6_common.c — SysTick counter, sleep accounting, plain "WFI in idle hook" */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "c6.h"
+volatile uint32_t n_systick, n_lpirq, n_wfi, sleep_cyc;
+static uint32_t t_sleep;
+sleep_log_t slog[LOG_N];
+volatile uint32_t n_log;
+
+extern void xPortSysTickHandler(void);
+void SysTick_Handler(void) { n_systick++; xPortSysTickHandler(); }
+
+/* called by port.c right before / after its WFI (interrupts masked by cpsid i) */
+void c6_pre_sleep(uint32_t *x)
+{
+    n_wfi++;
+    if (n_log &lt; LOG_N) slog[n_log].expected = *x;
+    t_sleep = CYC();
+}
+void c6_post_sleep(uint32_t x)
+{
+    (void)x;
+    uint32_t d = CYC() - t_sleep;
+    sleep_cyc += d;
+    if (n_log &lt; LOG_N) slog[n_log].slept_cyc = d;
+}
+void c6_step(uint32_t n) { if (n_log &lt; LOG_N) slog[n_log++].stepped = n; }
+
+#if (configUSE_IDLE_HOOK == 1) &amp;&amp; (configUSE_TICKLESS_IDLE == 0)
+void vApplicationIdleHook(void)          /* "sleep on idle" without tickless */
+{
+    __asm volatile("cpsid i" ::: "memory");
+    n_wfi++;
+    uint32_t t = CYC();
+    __asm volatile("dsb\n wfi\n isb" ::: "memory");
+    sleep_cyc += CYC() - t;
+    __asm volatile("cpsie i" ::: "memory");  /* the waking IRQ runs here */
+}
+#endif</code></pre></figure>
+<p>시간은 MPS2의 FPGAIO COUNTER(0x40028018, 리셋부터 25 MHz로 증가)로 잰다. SysTick과 독립이라 SysTick을 멈췄다 켜도 영향을 받지 않는 "벽시계"다. <code>vApplicationIdleHook()</code>의 WFI도 <code>cpsid i</code> 안에서 한다 — 그래야 깨운 인터럽트의 ISR 시간이 "잠든 시간"에 섞이지 않는다(PRIMASK가 1이어도 WFI는 깨어난다, §4.3).</p>
+<p>빌드 스크립트(변형마다 다른 출력 폴더):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# build.sh &lt;name&gt; "&lt;srcs relative to fr/&gt;" "&lt;extra cflags&gt;"  → /var/tmp/rtos/C6/&lt;name&gt;/app.elf
+N=$1; S=""; for f in $2; do S="$S /Users/donh/.rtos_scratch/C6/fr/$f"; done
+rm -f /var/tmp/rtos/C6/$N/app.elf
+make -B -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS="${S# }" OUT=/var/tmp/rtos/C6/$N EXTRA_CFLAGS="$3" 2&gt;&amp;1 | grep -v "^ *text\|app.elf"
+test -f /var/tmp/rtos/C6/$N/app.elf</code></pre></figure>
+<p><code>EXTRA_CFLAGS</code>가 바뀌어도 Makefile은 모르므로 <code>-B</code>로 항상 다시 빌드한다. 모든 변형이 경고 0개로 빌드됐다.</p>
+<hr>
+<h2 id="3-예제-1-1초-동안-몇-번-깨나-tick-켬-vs-tickless">3. 예제 1 — 1초 동안 몇 번 깨나: tick 켬 vs tickless<a class="anchor" href="#3-예제-1-1초-동안-몇-번-깨나-tick-켬-vs-tickless" aria-label="link">#</a></h2>
+<h3 id="3-1-작업-부하-거의-idle-인-센서-노드">3.1 작업 부하 — "거의 idle"인 센서 노드<a class="anchor" href="#3-1-작업-부하-거의-idle-인-센서-노드" aria-label="link">#</a></h3>
+<p>예를 들어 배터리로 도는 드론 원격 텔레메트리 노드나 센서 허브라면, 대부분의 시간은 기다림이다. 10 Hz로 센서를 읽고(500 µs 작업), 4 Hz로 텔레메트리를 보낸다(200 µs 작업). CPU가 일하는 시간은 1초에 5.8 ms, 0.58%다.</p>
+<p>무엇을 확인하는 코드인지: 같은 부하를 ① tick + idle 루프, ② tick + idle hook WFI, ③ tickless(mode 1)로 돌려서, 1초 동안의 tick 인터럽트 수 · WFI 진입 수 · 깨어 있던 시간 비율을 잰다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex1 — mostly-idle workload: SysTick IRQs, WFI entries, awake fraction over 1 s */
+#include &lt;stdio.h&gt;
+#include "FreeRTOS.h"
+#include "task.h"
+#include "c6.h"
+
+static void sensor(void *p)              /* 10 Hz sample: 500 us of work every 100 ms */
+{
+    (void)p;
+    TickType_t last = xTaskGetTickCount();
+    for (;;) { spin_us(500); vTaskDelayUntil(&amp;last, pdMS_TO_TICKS(100)); }
+}
+
+static void telem(void *p)               /* 4 Hz telemetry: 200 us every 250 ms */
+{
+    (void)p;
+    for (;;) { spin_us(200); vTaskDelay(pdMS_TO_TICKS(250)); }
+}
+
+static void report(void *p)
+{
+    (void)p;
+    vTaskDelay(pdMS_TO_TICKS(200));                       /* warm-up */
+    taskENTER_CRITICAL();
+    n_systick = n_lpirq = n_wfi = sleep_cyc = 0;
+    uint32_t c0 = CYC();
+    TickType_t k0 = xTaskGetTickCount();
+    taskEXIT_CRITICAL();
+
+    vTaskDelay(pdMS_TO_TICKS(1000));                      /* measurement window */
+
+    taskENTER_CRITICAL();
+    uint32_t dc = CYC() - c0, st = n_systick + n_lpirq, w = n_wfi, sl = sleep_cyc;
+    TickType_t dk = xTaskGetTickCount() - k0;
+    taskEXIT_CRITICAL();
+    uint32_t awake_bp = (uint32_t)((uint64_t)(dc - sl) * 10000u / dc);
+    printf("tickless=%d idle_hook=%d | tick_irq=%4lu wfi=%4lu | awake=%3lu.%02lu%% "
+           "| kernel_ticks=%lu wall=%lu us\n",
+           configUSE_TICKLESS_IDLE, configUSE_IDLE_HOOK, (unsigned long)st, (unsigned long)w,
+           (unsigned long)(awake_bp / 100), (unsigned long)(awake_bp % 100),
+           (unsigned long)dk, (unsigned long)(dc / 25u));
+    board_exit(0);
+}
+
+int main(void)
+{
+    xTaskCreate(sensor, "sensor", 256, NULL, 3, NULL);
+    xTaskCreate(telem, "telem", 256, NULL, 2, NULL);
+    xTaskCreate(report, "report", 512, NULL, 4, NULL);
+    vTaskStartScheduler();
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'B=/Users/donh/.rtos_scratch/C6/build.sh; R=/var/rtoslab/bin/rtos-run-mps2
+$B ex1_A "ex1.c c6_common.c" "-DconfigUSE_TICKLESS_IDLE=0 -DconfigUSE_IDLE_HOOK=0" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/ex1_A/app.elf
+$B ex1_B "ex1.c c6_common.c" "-DconfigUSE_TICKLESS_IDLE=0 -DconfigUSE_IDLE_HOOK=1" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/ex1_B/app.elf
+$B ex1_C "ex1.c c6_common.c" "-DconfigUSE_TICKLESS_IDLE=1 -DconfigUSE_IDLE_HOOK=0" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/ex1_C/app.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>tickless=0 idle_hook=0 | tick_irq=1000 wfi=   0 | awake=100.00% | kernel_ticks=1000 wall=999999 us
+[board_exit] code=0
+tickless=0 idle_hook=1 | tick_irq=1000 wfi=1000 | awake=  0.84% | kernel_ticks=1000 wall=999999 us
+[board_exit] code=0
+tickless=1 idle_hook=0 | tick_irq=  12 wfi=  12 | awake=  0.61% | kernel_ticks=1000 wall=999974 us
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>깨어나는 횟수: 1000 → 12.</strong> tickless에서는 1초 동안 SysTick 인터럽트가 12번만 들어왔다. 12 = 센서 10번 + 텔레메트리 4번 − 겹친 2번(텔레메트리의 500 ms·1000 ms 기상이 센서와 같은 tick에 걸린다).</li><li><strong>깨어 있는 시간: 100% → 0.84% → 0.61%.</strong> 일 자체가 0.58%다. ②와 ③의 차이 0.23%p(1초에 2.3 ms)는 tick으로 988번 더 깬 비용이다 — 한 번에 약 2.3 µs(약 58사이클: 예외 진입, <code>xTaskIncrementTick()</code>, 복귀, 다시 WFI).</li><li>②와 ③의 "깨어 있는 시간" 차이는 작아 보이지만, <strong>실제 칩의 전류는 횟수에 더 민감하다.</strong> 깨어날 때마다 클럭·레귤레이터가 안정화되는 시간이 있고(QEMU엔 없다), ②는 tick을 지키느라 깊은 수면(STOP)을 쓸 수 없다. ③은 한 번 자면 평균 약 83 ms를 잔다 — STOP 모드로 들어갈 가치가 있는 길이다.</li><li>마지막 숫자 <code>wall=999974 us</code>를 기억해 두자. 커널은 1000 tick(1,000,000 µs)이 지났다고 하는데 벽시계는 999,974 µs다. <strong>tickless가 26 µs만큼 시계를 앞서가게 했다.</strong> 이 drift의 원인을 §5에서 끝까지 추적한다.</li></ul>
+<h3 id="3-2-계산으로-확인-깨는-횟수가-평균-전류를-정한다">3.2 계산으로 확인 — 깨는 횟수가 평균 전류를 정한다<a class="anchor" href="#3-2-계산으로-확인-깨는-횟수가-평균-전류를-정한다" aria-label="link">#</a></h3>
+<p>실제 칩에서의 평균 전류는 대략 <code>I_avg ≈ I_sleep + (깨는 횟수/s × 깨어날 때마다 쓰는 전하) + 동작 전류 × 동작 비율</code>이다. 동작 비율(0.58%)은 일의 양이라 줄일 수 없다. tickless가 줄이는 것은 가운데 항이다 — 1000/s → 12/s. 숫자(µA, µC)는 칩마다 크게 다르므로 이 노트에서는 지어내지 않는다. 데이터시트의 "wakeup time from Stop"과 동작 전류로 직접 넣어 계산하라(§12 연습 3).</p>
+<hr>
+<h2 id="4-port-c-해부-vportsuppressticksandsleep-를-한-줄씩">4. port.c 해부 — <code>vPortSuppressTicksAndSleep()</code>를 한 줄씩<a class="anchor" href="#4-port-c-해부-vportsuppressticksandsleep-를-한-줄씩" aria-label="link">#</a></h2>
+<h3 id="4-1-idle-태스크에서-port-c까지">4.1 idle 태스크에서 port.c까지<a class="anchor" href="#4-1-idle-태스크에서-port-c까지" aria-label="link">#</a></h3>
+<p>먼저 누가 이 함수를 부르는지 보자. tasks.c의 <code>prvIdleTask()</code> 루프 끝부분이다(V11.3.2, 주석 줄임).</p>
+<figure class="code"><span class="lang">c</span><pre><code>#if ( configUSE_TICKLESS_IDLE != 0 )
+{
+    TickType_t xExpectedIdleTime;
+    xExpectedIdleTime = prvGetExpectedIdleTime();          /* 1차: 스케줄러 안 멈추고 대충 */
+
+    if( xExpectedIdleTime &gt;= ( TickType_t ) configEXPECTED_IDLE_TIME_BEFORE_SLEEP )
+    {
+        vTaskSuspendAll();
+        {
+            configASSERT( xNextTaskUnblockTime &gt;= xTickCount );
+            xExpectedIdleTime = prvGetExpectedIdleTime();  /* 2차: 이제 믿을 수 있는 값 */
+            configPRE_SUPPRESS_TICKS_AND_SLEEP_PROCESSING( xExpectedIdleTime );
+
+            if( xExpectedIdleTime &gt;= ( TickType_t ) configEXPECTED_IDLE_TIME_BEFORE_SLEEP )
+            {
+                traceLOW_POWER_IDLE_BEGIN();
+                portSUPPRESS_TICKS_AND_SLEEP( xExpectedIdleTime );
+                traceLOW_POWER_IDLE_END();
+            }
+        }
+        ( void ) xTaskResumeAll();
+    }
+}
+#endif</code></pre></figure>
+<p>두 번 계산하는 이유: 첫 계산은 스케줄러가 돌고 있는 상태라 그 사이에 값이 바뀔 수 있다. 하지만 idle 루프마다 <code>vTaskSuspendAll()</code>/<code>xTaskResumeAll()</code>을 하면 비싸므로, 가망이 있을 때만 스케줄러를 멈추고 다시 잰다.</p>
+<p><code>prvGetExpectedIdleTime()</code>은 다음 세 경우에 0을 돌려준다(= 자지 마라).</p>
+<ul><li>지금 도는 태스크가 idle 우선순위보다 높다(<code>pxCurrentTCB-&gt;uxPriority &gt; tskIDLE_PRIORITY</code>) — idle hook이 아닌 곳에서 불렸을 때.</li><li><strong>idle 우선순위에 ready 태스크가 또 있다</strong> — time slicing으로 다음 tick에 그 태스크로 넘어가야 하기 때문이다(§9.5 함정).</li><li><code>configUSE_PREEMPTION == 0</code>이라 더 높은 ready 태스크가 있는데 idle이 돌고 있다.</li></ul>
+<p>그 밖에는 <code>xNextTaskUnblockTime − xTickCount</code>를 돌려준다. <code>xNextTaskUnblockTime</code>은 지연 리스트 맨 앞 태스크의 깰 시각이다(C5). 아무도 타임아웃을 기다리지 않으면 <code>portMAX_DELAY</code>라 아주 큰 값이 나온다.</p>
+<figure class="chart"><svg viewBox="0 0 680 416" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><text x="90" y="32.0" font-size="12" text-anchor="end">tasks.c</text><rect x="100" y="14" width="480" height="26" rx="5" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.2"/><text x="340.0" y="31.560000000000002" font-size="12" text-anchor="middle">prvIdleTask(): 다른 태스크가 없으면 돈다</text><line x1="340.0" y1="40" x2="340.0" y2="49" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/><text x="90" y="68.0" font-size="12" text-anchor="end">tasks.c</text><rect x="100" y="50" width="480" height="26" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/><text x="340.0" y="67.56" font-size="12" text-anchor="middle">prvGetExpectedIdleTime() = xNextTaskUnblockTime − xTickCount</text><line x1="340.0" y1="76" x2="340.0" y2="85" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/><text x="90" y="104.0" font-size="12" text-anchor="end">tasks.c</text><rect x="100" y="86" width="480" height="26" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/><text x="340.0" y="103.56" font-size="12" text-anchor="middle">N ≥ configEXPECTED_IDLE_TIME_BEFORE_SLEEP (기본 2)?</text><line x1="340.0" y1="112" x2="340.0" y2="121" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/><text x="90" y="140.0" font-size="12" text-anchor="end">tasks.c</text><rect x="100" y="122" width="480" height="26" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/><text x="340.0" y="139.56" font-size="12" text-anchor="middle">vTaskSuspendAll() → N 다시 계산 → PRE_SUPPRESS 훅</text><line x1="340.0" y1="148" x2="340.0" y2="157" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/><text x="90" y="176.0" font-size="12" text-anchor="end">port.c</text><rect x="100" y="158" width="480" height="26" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/><text x="340.0" y="175.56" font-size="12" text-anchor="middle">portSUPPRESS_TICKS_AND_SLEEP(N) — cpsid i</text><line x1="340.0" y1="184" x2="340.0" y2="193" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/><text x="90" y="212.0" font-size="12" text-anchor="end">port.c</text><rect x="100" y="194" width="480" height="26" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/><text x="340.0" y="211.56" font-size="12" text-anchor="middle">eTaskConfirmSleepModeStatus(): eAbortSleep이면 포기</text><line x1="340.0" y1="220" x2="340.0" y2="229" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/><text x="90" y="248.0" font-size="12" text-anchor="end">port.c</text><rect x="100" y="230" width="480" height="26" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/><text x="340.0" y="247.56" font-size="12" text-anchor="middle">SysTick 멈춤 → LOAD = N tick 분량 → 재시작</text><line x1="340.0" y1="256" x2="340.0" y2="265" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/><text x="90" y="284.0" font-size="12" text-anchor="end">port.c</text><rect x="100" y="266" width="480" height="26" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-width="1.2"/><text x="340.0" y="283.56" font-size="12" text-anchor="middle">configPRE_SLEEP_PROCESSING → WFI → POST</text><line x1="340.0" y1="292" x2="340.0" y2="301" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/><text x="90" y="320.0" font-size="12" text-anchor="end">port.c</text><rect x="100" y="302" width="480" height="26" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/><text x="340.0" y="319.56" font-size="12" text-anchor="middle">깬 이유 판별(COUNTFLAG) → 지난 tick 수 계산</text><line x1="340.0" y1="328" x2="340.0" y2="337" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/><text x="90" y="356.0" font-size="12" text-anchor="end">port.c</text><rect x="100" y="338" width="480" height="26" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/><text x="340.0" y="355.56" font-size="12" text-anchor="middle">vTaskStepTick(지난 tick) → cpsie i</text><line x1="340.0" y1="364" x2="340.0" y2="373" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/><text x="90" y="392.0" font-size="12" text-anchor="end">tasks.c</text><rect x="100" y="374" width="480" height="26" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/><text x="340.0" y="391.56" font-size="12" text-anchor="middle">xTaskResumeAll(): 밀린 tick · 깨어난 태스크 처리</text><path d="M580,99.0 L606,99.0 L606,27.0 L582,27.0" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ah2)"/><text x="612" y="68.0" font-size="12" text-anchor="start">아니오:</text><text x="612" y="84.0" font-size="12" text-anchor="start">그냥 돈다</text></svg></figure>
+<p>그림 2 — FreeRTOS tickless idle의 호출 경로. 파랑은 tasks.c(포트와 무관한 커널), 주황은 port.c(ARM_CM3), 빨강이 실제 WFI. mode 2에서는 주황 부분 전체를 내가 짠다(§7).</p>
+<h3 id="4-2-시작할-때-정하는-상수-세-개">4.2 시작할 때 정하는 상수 세 개<a class="anchor" href="#4-2-시작할-때-정하는-상수-세-개" aria-label="link">#</a></h3>
+<p><code>vPortSetupTimerInterrupt()</code>(port.c, weak)가 스케줄러 시작 때 계산한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#if ( configUSE_TICKLESS_IDLE == 1 )
+{
+    ulTimerCountsForOneTick = ( configSYSTICK_CLOCK_HZ / configTICK_RATE_HZ );
+    xMaximumPossibleSuppressedTicks = portMAX_24_BIT_NUMBER / ulTimerCountsForOneTick;
+    ulStoppedTimerCompensation = portMISSED_COUNTS_FACTOR / ( configCPU_CLOCK_HZ / configSYSTICK_CLOCK_HZ );
+}
+#endif</code></pre></figure>
+<div class="tw"><table><thead><tr><th>상수</th><th>이 보드 값</th><th>뜻</th></tr></thead><tbody><tr><td><code>ulTimerCountsForOneTick</code></td><td>25,000,000 / 1000 = <strong>25000</strong></td><td>tick 하나 = SysTick 카운트 몇 개</td></tr><tr><td><code>xMaximumPossibleSuppressedTicks</code></td><td>0xFFFFFF / 25000 = <strong>671</strong></td><td>한 번에 건너뛸 수 있는 최대 tick. <code>portMAX_24_BIT_NUMBER</code> = 0xffffff</td></tr><tr><td><code>ulStoppedTimerCompensation</code></td><td>94 / 1 = <strong>94</strong></td><td>SysTick을 멈춘 동안 흘렀다고 "가정"하는 카운트. <code>portMISSED_COUNTS_FACTOR</code> = 94UL, 소스 주석이 "A fiddle factor"라고 부른다</td></tr></tbody></table></div>
+<p>SysTick의 LOAD 레지스터는 24비트다(Armv7-M 아키텍처의 SysTick 정의). 그래서 25 MHz에서 한 번 잘 수 있는 최대 시간은 2^24 / 25 MHz = 0.671초다. <strong>이 한계는 tick rate와 무관하다</strong> — tick을 100 Hz로 줄여도 67 tick × 10 ms = 670 ms다. 코어가 빠를수록 더 짧아진다(§7.1의 계산: 480 MHz면 34 ms).</p>
+<h3 id="4-3-본문-단계별로">4.3 본문 — 단계별로<a class="anchor" href="#4-3-본문-단계별로" aria-label="link">#</a></h3>
+<p>V11.3.2 port.c의 실제 코드를 순서대로 자르고(주석은 줄이고 한국어 설명을 붙였다), 각 단계가 왜 필요한지 쓴다.</p>
+<p><strong>단계 ① 상한 자르기</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>if( xExpectedIdleTime &gt; xMaximumPossibleSuppressedTicks )
+{
+    xExpectedIdleTime = xMaximumPossibleSuppressedTicks;
+}</code></pre></figure>
+<p>2000 tick을 자고 싶어도 671에서 자른다. 671 tick 뒤에 깨면 idle 루프가 다시 돌아서 남은 1329 tick을 다시 계산한다(예제 2에서 확인).</p>
+<p><strong>단계 ② <code>cpsid i</code> — BASEPRI가 아니라 PRIMASK로 막는다</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>__asm volatile ( "cpsid i" ::: "memory" );
+__asm volatile ( "dsb" );
+__asm volatile ( "isb" );</code></pre></figure>
+<p>소스 주석: "Enter a critical section but don't use the taskENTER_CRITICAL() method as that will mask interrupts that should exit sleep mode." 여기가 Cortex-M의 미묘한 점이다(B3).</p>
+<ul class="tasks"><li><code>taskENTER_CRITICAL()</code>은 BASEPRI를 <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>로 올린다. Armv7-M에서 WFI가 깨어나는 조건은 "PRIMASK를 무시했을 때 선점할 수 있는 우선순위의 인터럽트가 pending"이다. <strong>BASEPRI로 막힌 인터럽트는 WFI를 깨우지 못한다.</strong> 그러면 SysTick(가장 낮은 우선순위)도 못 깨운다 — 영원히 잔다.</li><li>PRIMASK(<code>cpsid i</code>)는 핸들러 <strong>실행</strong>만 막고 WFI 기상은 막지 않는다. 그래서 "깨어나긴 하되, ISR은 아직 돌리지 말고 내 보정 코드부터 실행"하는 상태가 된다. 이게 tickless의 핵심 트릭이다 — 깬 직후 SysTick이 몇을 가리키는지 ISR보다 먼저 읽어야 하기 때문이다.</li></ul>
+<p>Zephyr의 <code>arch_cpu_idle()</code>도 같은 이유로 <code>cpsid i</code> 후 BASEPRI를 0으로 내리고 WFI를 한다(§8.4의 역어셈블).</p>
+<p><strong>단계 ③ 마지막 확인 — <code>eTaskConfirmSleepModeStatus()</code></strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>if( eTaskConfirmSleepModeStatus() == eAbortSleep )
+{
+    __asm volatile ( "cpsie i" ::: "memory" );
+}
+else
+{   /* ... 아래 단계들 ... */</code></pre></figure>
+<p>스케줄러를 멈춘 뒤(<code>vTaskSuspendAll</code>) ~ <code>cpsid i</code> 사이에 ISR이 세마포어를 줘서 태스크가 ready가 됐을 수 있다. 그 태스크는 스케줄러가 멈춰 있어서 <code>xPendingReadyList</code>에 들어가 있다. 이걸 확인하지 않고 자면 "할 일이 생겼는데 671 ms 동안 잔다". 인터럽트를 막은 뒤에 확인하므로 이제는 경쟁 조건이 없다.</p>
+<p><strong>단계 ④ SysTick 멈추고, 이번 tick의 남은 몫 읽기</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>portNVIC_SYSTICK_CTRL_REG = ( portNVIC_SYSTICK_CLK_BIT_CONFIG | portNVIC_SYSTICK_INT_BIT );
+ulSysTickDecrementsLeft = portNVIC_SYSTICK_CURRENT_VALUE_REG;
+if( ulSysTickDecrementsLeft == 0 )
+{
+    ulSysTickDecrementsLeft = ulTimerCountsForOneTick;
+}</code></pre></figure>
+<p>CTRL에 ENABLE 비트를 빼고 쓰면 카운터가 멈춘다(<strong>멈춤 구간 ① 시작</strong>). VAL은 "다음 tick까지 남은 카운트"다. VAL == 0이면 남은 게 0이 아니라 한 tick 전체다 — SysTick은 1→0으로 내려갈 때 인터럽트를 요청하고, 0 다음에는 LOAD를 다시 싣기 때문이다.</p>
+<p><strong>단계 ⑤ 새 reload 계산</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>ulReloadValue = ulSysTickDecrementsLeft + ( ulTimerCountsForOneTick * ( xExpectedIdleTime - 1UL ) );
+
+if( ( portNVIC_INT_CTRL_REG &amp; portNVIC_PEND_SYSTICK_SET_BIT ) != 0 )
+{
+    portNVIC_INT_CTRL_REG = portNVIC_PEND_SYSTICK_CLEAR_BIT;
+    ulReloadValue -= ulTimerCountsForOneTick;
+}
+if( ulReloadValue &gt; ulStoppedTimerCompensation )
+{
+    ulReloadValue -= ulStoppedTimerCompensation;
+}</code></pre></figure>
+<ul><li>지금 tick의 남은 몫 + 나머지 (N−1) tick 전체. <code>−1</code>인 이유는 "지금은 첫 tick의 중간"이기 때문이다. 예: N = 671, 남은 몫 = 24300이면 24300 + 25000 × 670 = 16,774,300 (&lt; 0xFFFFFF = 16,777,215 — 그래서 671이 상한이다).</li><li><code>cpsid i</code> 직전에 SysTick이 이미 0을 지나 인터럽트가 pending이면(ICSR.PENDSTSET), 그 tick은 "이미 시작된 둘째 tick"이므로 pending을 지우고 한 tick을 뺀다. 소스 주석: "The expected idle time is always at least two ticks" — 이 빼기가 있어서 <code>configEXPECTED_IDLE_TIME_BEFORE_SLEEP</code>이 2 미만이면 <code>#error</code>다.</li><li><strong>보정 94를 뺀다.</strong> 멈춤 구간 ①·② 동안 SysTick이 못 센 시간만큼 미리 짧게 잡는 것이다. 이 숫자가 실제 멈춘 시간과 다르면 drift가 생긴다(§5).</li></ul>
+<p><strong>단계 ⑥ 적재하고 재시작</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>portNVIC_SYSTICK_LOAD_REG = ulReloadValue;
+portNVIC_SYSTICK_CURRENT_VALUE_REG = 0UL;
+portNVIC_SYSTICK_CTRL_REG |= portNVIC_SYSTICK_ENABLE_BIT;</code></pre></figure>
+<p>VAL에 아무 값이나 쓰면 VAL이 0이 되고 COUNTFLAG가 지워진다. 다음 클럭에 LOAD를 싣고 세기 시작한다(<strong>멈춤 구간 ① 끝</strong>).</p>
+<p><strong>단계 ⑦ 잔다</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>xModifiableIdleTime = xExpectedIdleTime;
+configPRE_SLEEP_PROCESSING( xModifiableIdleTime );
+if( xModifiableIdleTime &gt; 0 )
+{
+    __asm volatile ( "dsb" ::: "memory" );
+    __asm volatile ( "wfi" );
+    __asm volatile ( "isb" );
+}
+configPOST_SLEEP_PROCESSING( xExpectedIdleTime );</code></pre></figure>
+<p><code>configPRE_SLEEP_PROCESSING</code>이 값을 0으로 바꾸면 포트의 WFI를 건너뛴다 — 훅 안에서 직접 STOP 모드에 들어갔다는 뜻이다(예: STM32 HAL의 <code>HAL_PWR_EnterSTOPMode()</code>가 안에서 WFI를 한다). 원래 값은 복사본으로 보존한다. <code>dsb</code>는 메모리 쓰기를 다 끝내고 자기 위해, <code>isb</code>는 깬 뒤 파이프라인을 새로 채우기 위해서다.</p>
+<p><strong>단계 ⑧ 깨어난 인터럽트를 잠깐 돌린다</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>__asm volatile ( "cpsie i" ::: "memory" );
+__asm volatile ( "dsb" );
+__asm volatile ( "isb" );
+__asm volatile ( "cpsid i" ::: "memory" );
+__asm volatile ( "dsb" );
+__asm volatile ( "isb" );</code></pre></figure>
+<p>여기서 인터럽트를 한 번 열어서 <strong>깨운 ISR(예: UART, TIMER0)을 바로 실행</strong>한다. 그 ISR이 세마포어를 주면 태스크는 <code>xPendingReadyList</code>로 간다(스케줄러는 아직 멈춰 있다). 그다음 다시 닫는다 — 이제 SysTick을 또 멈추고 보정할 차례인데, 그 사이에 ISR이 끼어들면 멈춘 시간이 늘어나 오차가 커지기 때문이다.</p>
+<p>깨운 게 SysTick 자신이었다면? SysTick 핸들러도 여기서 돈다. 그런데 스케줄러가 멈춰 있으므로 <code>xTaskIncrementTick()</code>은 tick을 세지 않고 <code>xPendedTicks++</code>만 한다. 이 밀린 tick은 나중에 <code>xTaskResumeAll()</code>이 처리한다.</p>
+<p><strong>단계 ⑨ 다시 멈추고, 누가 깨웠는지 판별</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>portNVIC_SYSTICK_CTRL_REG = ( portNVIC_SYSTICK_CLK_BIT_CONFIG | portNVIC_SYSTICK_INT_BIT );
+if( ( portNVIC_SYSTICK_CTRL_REG &amp; portNVIC_SYSTICK_COUNT_FLAG_BIT ) != 0 )</code></pre></figure>
+<p>CTRL을 <strong>읽지 않고 쓰기만</strong> 해서 멈춘다(<strong>멈춤 구간 ② 시작</strong>). CTRL의 COUNTFLAG(비트 16)는 <strong>읽으면 지워지는(clear-on-read)</strong> 비트라, 멈추려고 read-modify-write를 하면 판별 근거가 사라진다. 그다음 줄에서 한 번만 읽어 COUNTFLAG를 본다.</p>
+<ul><li>COUNTFLAG = 1 → SysTick이 0까지 내려갔다 = <strong>계획대로 N tick을 다 잤다</strong>(또는 다른 IRQ로 깨어난 뒤 보정하기 전에 마침 다 됐다).</li><li>COUNTFLAG = 0 → <strong>다른 인터럽트가 일찍 깨웠다.</strong></li></ul>
+<p><strong>단계 ⑩-a 계획대로 깬 경우</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>ulCalculatedLoadValue = ( ulTimerCountsForOneTick - 1UL ) - ( ulReloadValue - portNVIC_SYSTICK_CURRENT_VALUE_REG );
+if( ( ulCalculatedLoadValue &lt;= ulStoppedTimerCompensation ) || ( ulCalculatedLoadValue &gt; ulTimerCountsForOneTick ) )
+{
+    ulCalculatedLoadValue = ( ulTimerCountsForOneTick - 1UL );
+}
+portNVIC_SYSTICK_LOAD_REG = ulCalculatedLoadValue;
+ulCompleteTickPeriods = xExpectedIdleTime - 1UL;</code></pre></figure>
+<p>0을 지난 뒤 SysTick은 다시 큰 reload 값부터 세고 있다. <code>ulReloadValue − VAL</code>이 "0을 지나고 흐른 카운트"이므로, 새 tick의 남은 몫은 <code>(25000 − 1) − 그 값</code>이다. 너무 작거나 이상하면(POST 훅이 너무 오래 걸렸을 때) 그냥 한 tick 전체로 둔다. 더할 tick은 <strong>N − 1</strong>이다. 나머지 1은 단계 ⑧에서 pending된 SysTick 인터럽트(또는 <code>xPendedTicks</code>)가 더한다. 예제 2의 <code>stepped=670</code>(expected 671)이 이것이다.</p>
+<p><strong>단계 ⑩-b 다른 인터럽트가 일찍 깨운 경우</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>ulSysTickDecrementsLeft = portNVIC_SYSTICK_CURRENT_VALUE_REG;
+ulCompletedSysTickDecrements = ( xExpectedIdleTime * ulTimerCountsForOneTick ) - ulSysTickDecrementsLeft;
+ulCompleteTickPeriods = ulCompletedSysTickDecrements / ulTimerCountsForOneTick;
+portNVIC_SYSTICK_LOAD_REG = ( ( ulCompleteTickPeriods + 1UL ) * ulTimerCountsForOneTick ) - ulCompletedSysTickDecrements;</code></pre></figure>
+<p>남은 카운트(VAL)로부터 "계획한 N tick 중 몇 카운트가 지났나"를 구하고, 완전한 tick 수만큼만 더한다. 나머지 조각(지금 tick에서 남은 부분)은 LOAD에 넣어서 다음 tick 경계가 원래 격자에 맞게 한다. 여기서 미묘한 점: 계산은 "N × 25000"을 기준으로 하지만 실제로 적재한 값은 "남은 몫 + 25000 × (N−1) − 94"였다. 그 차이는 첫 tick의 부분 몫과 보정 94인데, 이것들이 일찍 깬 경우의 계산에 그대로 섞인다. 측정에서 조기 기상의 drift가 계획대로 깬 경우와 조금 다른 이유다(§5).</p>
+<p><strong>단계 ⑪ 평소 tick으로 복귀</strong></p>
+<figure class="code"><span class="lang">c</span><pre><code>portNVIC_SYSTICK_CURRENT_VALUE_REG = 0UL;
+portNVIC_SYSTICK_CTRL_REG = portNVIC_SYSTICK_CLK_BIT | portNVIC_SYSTICK_INT_BIT | portNVIC_SYSTICK_ENABLE_BIT;
+#if ( portNVIC_SYSTICK_CLK_BIT_CONFIG == portNVIC_SYSTICK_CLK_BIT )
+{
+    portNVIC_SYSTICK_LOAD_REG = ulTimerCountsForOneTick - 1UL;
+}
+#else
+    /* (외부 클럭 SysTick일 때의 처리 — 생략) */
+#endif
+vTaskStepTick( ulCompleteTickPeriods );
+__asm volatile ( "cpsie i" ::: "memory" );</code></pre></figure>
+<p>VAL = 0 + 재시작으로 단계 ⑩에서 넣은 "남은 조각" LOAD가 실리고(<strong>멈춤 구간 ② 끝</strong>), 바로 이어서 LOAD를 평소 값(24999)으로 바꿔 둔다. SysTick은 현재 카운트가 0이 될 때만 LOAD를 다시 읽으므로, 이번 조각이 끝난 뒤부터 평소 주기로 돈다. 마지막으로 <code>vTaskStepTick()</code>으로 tick 카운트를 보정하고 인터럽트를 연다.</p>
+<figure class="chart"><svg viewBox="0 0 680 296" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><line x1="60" y1="230" x2="660" y2="230" stroke="currentColor" stroke-width="1"/><line x1="60" y1="230" x2="60" y2="30" stroke="currentColor" stroke-width="1" marker-end="url(#ah3)"/><text x="54" y="40" font-size="12" text-anchor="end">VAL</text><text x="655" y="248" font-size="12" text-anchor="end">시간</text><polyline points="64.0,190.0 104.0,230.0 104.0,190.0 144.0,230.0 144.0,190.0 160.0,206.0" fill="none" stroke="#4a7bd0" stroke-width="1.8"/><line x1="160" y1="206.0" x2="164" y2="55" stroke="#888" stroke-width="1" stroke-dasharray="3 3"/><polyline points="164.0,55.0 394.0,189.2" fill="none" stroke="#e08a3c" stroke-width="1.8"/><line x1="394" y1="189.2" x2="464" y2="230" stroke="#e08a3c" stroke-width="1.2" stroke-dasharray="5 4"/><polyline points="398,208 420,230 420,190 460,230 460,190 500,230" fill="none" stroke="#3f9a6b" stroke-width="1.8"/><text x="104" y="180" font-size="12" text-anchor="middle">평소: LOAD = 24999</text><text x="170" y="47" font-size="12" text-anchor="start">LOAD = 남은 몫 + 25000 × (N−1) − 94</text><line x1="394" y1="230" x2="394" y2="65" stroke="#d0564a" stroke-width="1.4"/><text x="388" y="70" font-size="12" text-anchor="end">다른 IRQ로</text><text x="388" y="86" font-size="12" text-anchor="end">일찍 깸</text><text x="464" y="264" font-size="12" text-anchor="middle">계획된 끝(N tick)</text><text x="400" y="164" font-size="12" text-anchor="start">남은 조각만</text><text x="400" y="180" font-size="12" text-anchor="start">LOAD 후 평소로</text><text x="156" y="248" font-size="12" text-anchor="middle">멈춤 ①</text><text x="396" y="248" font-size="12" text-anchor="middle">멈춤 ②</text><text x="60" y="284" font-size="12" text-anchor="start">파랑: 평소 tick · 주황: 긴 한 번의 카운트(잠) · 초록: 깬 뒤 남은 조각 → 평소</text></svg></figure>
+<p>그림 3 — tickless 한 번 동안 SysTick VAL(개략도, 비율은 실제와 다름). 파랑: 평소 1 ms 주기. 수면에 들어가며 멈추고(멈춤 ①) 아주 큰 LOAD를 넣는다(주황). 다른 IRQ로 일찍 깨면 다시 멈추고(멈춤 ②) 지난 완전한 tick 수만 더한 뒤, 남은 조각(초록)으로 원래 tick 격자에 다시 맞춘다.</p>
+<h3 id="4-4-vtasksteptick-그냥-더하기가-아니다">4.4 <code>vTaskStepTick()</code> — 그냥 더하기가 아니다<a class="anchor" href="#4-4-vtasksteptick-그냥-더하기가-아니다" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>void vTaskStepTick( TickType_t xTicksToJump )
+{
+    TickType_t xUpdatedTickCount;
+    xUpdatedTickCount = xTickCount + xTicksToJump;
+    configASSERT( xUpdatedTickCount &lt;= xNextTaskUnblockTime );
+
+    if( xUpdatedTickCount == xNextTaskUnblockTime )
+    {
+        configASSERT( uxSchedulerSuspended != ( UBaseType_t ) 0U );
+        configASSERT( xTicksToJump != ( TickType_t ) 0 );
+        taskENTER_CRITICAL();
+        {
+            xPendedTicks++;
+        }
+        taskEXIT_CRITICAL();
+        xTicksToJump--;
+    }
+    xTickCount += xTicksToJump;
+    traceINCREASE_TICK_COUNT( xTicksToJump );
+}</code></pre></figure>
+<ul><li><code>xTickCount</code>를 직접 더하므로 건너뛴 tick마다 tick hook(<code>vApplicationTickHook</code>)은 <strong>불리지 않는다</strong>(소스 주석: "Note this does not call the tick hook function for each stepped tick" — 원문은 not을 강조 표시했다). tick hook으로 시간을 세는 코드는 tickless에서 틀린다(§9).</li><li>더한 결과가 정확히 다음 깰 시각이면, 마지막 1 tick은 직접 더하지 않고 <code>xPendedTicks</code>로 미룬다. 그래야 <code>xTaskResumeAll()</code>이 그 tick을 <strong>진짜 tick처럼</strong> <code>xTaskIncrementTick()</code>으로 처리하면서 지연 리스트에서 태스크를 깨운다. 그냥 더해 버리면 "깰 시각은 지났는데 아무도 리스트를 안 봤다"가 된다.</li><li>넘어서면 <code>configASSERT</code>가 터진다. mode 2를 직접 짤 때 가장 먼저 밟는 지뢰다 — 늦게 깨서 계산이 N+1이 나오면 N으로 잘라야 한다(§7.3).</li></ul>
+<h3 id="4-5-예제-2-한-번에-몇-tick까지-잘-수-있나-24비트-한계-검증">4.5 예제 2 — 한 번에 몇 tick까지 잘 수 있나 (24비트 한계 검증)<a class="anchor" href="#4-5-예제-2-한-번에-몇-tick까지-잘-수-있나-24비트-한계-검증" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 태스크 하나가 <code>vTaskDelay(2 s)</code>로 막혔을 때 커널이 몇 번 나눠 자는지, 매 수면의 계획(expected) · 실제 잔 시간 · 보정 tick(stepped)을 기록한다. tick rate를 1000 / 100 / 10000 Hz로 바꿔 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex2 — how long can one SysTick-based tickless sleep be? (24-bit LOAD limit) */
+#include &lt;stdio.h&gt;
+#include "FreeRTOS.h"
+#include "task.h"
+#include "c6.h"
+
+static void probe(void *p)
+{
+    (void)p;
+    vTaskDelay(2);                                     /* settle */
+    taskENTER_CRITICAL(); n_log = 0; n_systick = n_lpirq = 0; taskEXIT_CRITICAL();
+    uint32_t c0 = CYC();
+    TickType_t k0 = xTaskGetTickCount();
+    vTaskDelay(pdMS_TO_TICKS(2000));                   /* one long block: 2 s */
+    uint32_t wall_us = (CYC() - c0) / 25u, st = n_systick + n_lpirq, nl = n_log;
+    TickType_t dk = xTaskGetTickCount() - k0;
+
+#if configUSE_TICKLESS_IDLE == 1
+    printf("SysTick tickless: tick=%u Hz counts/tick=%u -&gt; max_suppress=0xFFFFFF/%u=%u ticks\n",
+           (unsigned)configTICK_RATE_HZ, (unsigned)(configCPU_CLOCK_HZ / configTICK_RATE_HZ),
+           (unsigned)(configCPU_CLOCK_HZ / configTICK_RATE_HZ),
+           (unsigned)(0xFFFFFFu / (configCPU_CLOCK_HZ / configTICK_RATE_HZ)));
+#else
+    printf("LP-timer tickless (mode 2): 32-bit @ 1.5625 MHz, clamp 0x7FFFFFFF/1562=%u ticks\n",
+           (unsigned)(0x7FFFFFFFu / (configCPU_CLOCK_HZ / 16u / configTICK_RATE_HZ)));
+#endif
+    for (uint32_t i = 0; i &lt; nl &amp;&amp; i &lt; LOG_N; i++)
+        printf("  sleep %lu: expected=%5lu ticks  slept=%7lu us  stepped=%5lu\n",
+               (unsigned long)i, (unsigned long)slog[i].expected,
+               (unsigned long)(slog[i].slept_cyc / 25u), (unsigned long)slog[i].stepped);
+    printf("  sleeps=%lu tick_irq=%lu  kernel=%lu ticks  wall=%lu us\n",
+           (unsigned long)nl, (unsigned long)st, (unsigned long)dk,
+           (unsigned long)wall_us);
+    board_exit(0);
+}
+
+int main(void)
+{
+    xTaskCreate(probe, "probe", 512, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'B=/Users/donh/.rtos_scratch/C6/build.sh; R=/var/rtoslab/bin/rtos-run-mps2
+for hz in 1000 100 10000; do $B ex2_$hz "ex2.c c6_common.c" "-DconfigUSE_TICKLESS_IDLE=1 -DconfigTICK_RATE_HZ=$hz" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/ex2_$hz/app.elf | grep -v board_exit; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>SysTick tickless: tick=1000 Hz counts/tick=25000 -&gt; max_suppress=0xFFFFFF/25000=671 ticks
+  sleep 0: expected=  671 ticks  slept= 670972 us  stepped=  670
+  sleep 1: expected=  671 ticks  slept= 670986 us  stepped=  670
+  sleep 2: expected=  658 ticks  slept= 657986 us  stepped=  657
+  sleeps=3 tick_irq=3  kernel=2000 ticks  wall=1999992 us
+SysTick tickless: tick=100 Hz counts/tick=250000 -&gt; max_suppress=0xFFFFFF/250000=67 ticks
+  sleep 0: expected=   67 ticks  slept= 669972 us  stepped=   66
+  sleep 1: expected=   67 ticks  slept= 669986 us  stepped=   66
+  sleep 2: expected=   66 ticks  slept= 659986 us  stepped=   65
+  sleeps=3 tick_irq=3  kernel=200 ticks  wall=1999992 us
+SysTick tickless: tick=10000 Hz counts/tick=2500 -&gt; max_suppress=0xFFFFFF/2500=6710 ticks
+  sleep 0: expected= 6710 ticks  slept= 670972 us  stepped= 6709
+  sleep 1: expected= 6710 ticks  slept= 670986 us  stepped= 6709
+  sleep 2: expected= 6580 ticks  slept= 657986 us  stepped= 6579
+  sleeps=3 tick_irq=3  kernel=20000 ticks  wall=1999992 us</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>계산(0xFFFFFF / 25000 = 671)대로 <strong>671 tick에서 잘렸다</strong>. 2000 tick = 671 + 671 + 658, 세 번 잤다. 깨어날 때마다 SysTick 인터럽트 1번(tick_irq=3).</li><li><code>stepped</code>가 항상 <code>expected − 1</code>이다. 단계 ⑩-a의 <code>xExpectedIdleTime − 1UL</code> — 마지막 1 tick은 pending SysTick이 더한다.</li><li>tick rate를 10배 바꿔도 <strong>한 번에 자는 시간은 약 670 ms로 같다.</strong> 한계는 tick 수가 아니라 2^24 카운트(= 0.671 s @ 25 MHz)다. 100 Hz는 67 × 10 ms = 670 ms로 반올림 손해가 1 ms 있다.</li><li>첫 수면이 670,972 µs(671 ms보다 28 µs 짧음)인 것은 <code>vTaskDelay()</code>를 부른 시점이 tick 경계에서 28 µs 지난 뒤였기 때문이다 — 단계 ⑤의 "남은 몫".</li></ul>
+<h3 id="4-6-예제-3-gdb로-상수와-멈춤-구간-의-길이-직접-보기">4.6 예제 3 — gdb로 상수와 "멈춤 구간"의 길이 직접 보기<a class="anchor" href="#4-6-예제-3-gdb로-상수와-멈춤-구간-의-길이-직접-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 실행 중인 펌웨어에서 port.c의 <code>static</code> 상수 세 개를 읽고, SysTick이 멈춰 있는 두 구간(단계 ④→⑥, ⑨→⑪)에서 실행되는 명령 수를 <code>stepi</code>로 센다. 먼저 <code>objdump</code>로 SysTick CTRL(0xE000E010 = <code>[r3, #16]</code>)에 쓰는 명령의 주소를 찾는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'arm-none-eabi-objdump -d --no-show-raw-insn /var/tmp/rtos/C6/ex2_1000/app.elf | awk "/&lt;vPortSuppressTicksAndSleep&gt;:/,/^$/" | grep -E "^ +(21a4|21ee|21fe|2224|224e):"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>    21a4:	str	r2, [r3, #16]
+    21ee:	str	r2, [r3, #16]
+    21fe:	wfi
+    2224:	str	r3, [r2, #16]
+    224e:	str	r2, [r3, #16]</code></pre></figure>
+<div class="tw"><table><thead><tr><th>주소</th><th>소스 단계</th><th>하는 일</th></tr></thead><tbody><tr><td><code>0x21a4</code></td><td>④</td><td>CTRL = 6 — SysTick 멈춤 ① 시작</td></tr><tr><td><code>0x21ee</code></td><td>⑥</td><td>CTRL 또는 ENABLE — 재시작</td></tr><tr><td><code>0x21fe</code></td><td>⑦</td><td>WFI</td></tr><tr><td><code>0x2224</code></td><td>⑨</td><td>CTRL = 6 — 멈춤 ② 시작</td></tr><tr><td><code>0x224e</code></td><td>⑪</td><td>CTRL = 7 — 재시작</td></tr></tbody></table></div>
+<figure class="code"><span class="lang">python</span><pre><code># count instructions while SysTick is stopped inside vPortSuppressTicksAndSleep (one sleep)
+import gdb
+gdb.execute("target remote :1234")
+def run_until(a): gdb.execute("tbreak *0x%x" % a); gdb.execute("continue")
+def pc(): return int(gdb.parse_and_eval("$pc")) &amp; ~1
+def count(stop_at):
+    n = 0
+    while pc() != stop_at:
+        gdb.execute("stepi", to_string=True); n += 1
+    return n
+run_until(0x21a4)                  # str: SysTick CTRL = 6 (stop, before sleep)
+gdb.execute("stepi", to_string=True)
+n1 = count(0x21ee) + 1             # ... up to and incl. the enable store
+run_until(0x2224)                  # str: CTRL = 6 (stop, after wake)
+gdb.execute("stepi", to_string=True)
+n2 = count(0x224e) + 1
+for v in ["xMaximumPossibleSuppressedTicks", "ulTimerCountsForOneTick", "ulStoppedTimerCompensation"]:
+    print("%-32s = %s" % (v, gdb.parse_and_eval(v)))
+print("insns with SysTick stopped: before sleep=%d after wake=%d total=%d" % (n1, n2, n1 + n2))
+print("  at icount 32 ns/insn = %.0f SysTick counts (port.c subtracts 94)" % ((n1 + n2) * 0.032 * 25))
+gdb.execute("kill")</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/rtos/C6; (timeout 60 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial null -semihosting-config enable=on,target=native -icount shift=5,align=off,sleep=off -kernel ex2_1000/app.elf -s -S &amp;) ; sleep 1; timeout 60 gdb -q -batch -x /Users/donh/.rtos_scratch/C6/gdb/win.py ex2_1000/app.elf 2&gt;&amp;1 | grep -E " = |insns|counts"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>xMaximumPossibleSuppressedTicks  = 671
+ulTimerCountsForOneTick          = 25000
+ulStoppedTimerCompensation       = 94
+insns with SysTick stopped: before sleep=29 after wake=20 total=49
+  at icount 32 ns/insn = 39 SysTick counts (port.c subtracts 94)</code></pre></figure>
+<p>(gdb가 breakpoint마다 찍는 소스 줄은 <code>grep</code>으로 걸렀다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>실행 중 메모리의 상수가 §4.2의 계산과 같다: 671 / 25000 / 94.</li><li><strong>QEMU에서 SysTick이 실제로 멈춰 있던 시간은 49명령 = 약 39카운트</strong>인데, port.c는 94카운트를 뺀다. 매 수면마다 94 − 39 = <strong>55카운트(2.2 µs)를 너무 많이 뺀다</strong> → 실제보다 짧게 자고 tick은 다 센다 → 커널 시계가 벽시계보다 앞서 간다. 예제 1의 <code>wall=999974 us</code>(12번 자고 26 µs 앞섬 = 한 번에 2.2 µs)가 바로 이것이다. §5에서 정량적으로 확인한다.</li><li>실제 칩에서는 같은 49명령이 플래시 wait state·파이프라인 때문에 더 많은 사이클을 쓴다. 94는 그런 실칩을 기준으로 정한 "fiddle factor"라서, <strong>칩·클럭·컴파일러 최적화가 바뀌면 맞지 않는다.</strong> <code>portMISSED_COUNTS_FACTOR</code>는 port.c 안에 <code>#ifndef</code> 없이 정의돼 있어 설정 파일로 바꿀 수도 없다(바꾸려면 포트를 고치거나 mode 2로 간다).</li></ul>
+<hr>
+<h2 id="5-시간-정확도-tickless는-시계를-틀어지게-한다">5. 시간 정확도 — tickless는 시계를 틀어지게 한다<a class="anchor" href="#5-시간-정확도-tickless는-시계를-틀어지게-한다" aria-label="link">#</a></h2>
+<h3 id="5-1-직관-시계를-멈췄다-다시-켤-때마다-몇-초씩">5.1 직관 — 시계를 멈췄다 다시 켤 때마다 몇 초씩<a class="anchor" href="#5-1-직관-시계를-멈췄다-다시-켤-때마다-몇-초씩" aria-label="link">#</a></h3>
+<p>벽시계의 건전지를 뺐다 끼울 때마다 "대충 3초 걸렸으니 3초 앞으로 돌리자"고 하면, 실제로 2초 걸렸을 때마다 시계는 1초씩 빨라진다. port.c의 94카운트 보정이 바로 그 "대충 3초"다. 하루에 수만 번 자는 장비라면 작은 오차가 쌓인다.</p>
+<p>drift가 생기는 출처는 세 가지다.</p>
+<ol><li><strong>멈춘 시간 보정이 틀림</strong> — mode 1에서 SysTick을 멈춘 두 구간의 실제 길이 ≠ 94카운트(§4.6에서 QEMU는 39카운트).</li><li><strong>타이머를 다시 쓰는 동안 못 센 시간</strong> — 카운터를 읽고 새 값을 쓰기까지의 몇 명령. Zephyr처럼 SysTick을 멈추지 않아도, 읽기와 쓰기 사이를 세지 않으면 생긴다(§8.6).</li><li><strong>두 클럭 사이의 비율 오차</strong> — 저전력 타이머가 32.768 kHz인데 tick이 1 kHz면 32.768카운트/tick이라 정수가 아니다. 반올림하면 매 tick 오차가 쌓인다(§7.1).</li></ol>
+<h3 id="5-2-예제-4-5초-동안-수천-번-자고-깨면-얼마나-틀어지나">5.2 예제 4 — 5초 동안 수천 번 자고 깨면 얼마나 틀어지나<a class="anchor" href="#5-2-예제-4-5초-동안-수천-번-자고-깨면-얼마나-틀어지나" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 태스크가 <code>vTaskDelay(DLY)</code>를 5초 동안 반복한다(= 매번 tickless로 잔다). 또는 긴 지연 중에 TIMER0 인터럽트가 <code>T0_US</code>마다 일찍 깨운다(ISR은 횟수만 센다). 끝에서 커널 시간(tick × 1000 µs)과 FPGAIO 벽시계를 비교한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex3 — does tickless keep time? kernel ticks vs FPGAIO wall clock over 5 s */
+#include &lt;stdio.h&gt;
+#include "FreeRTOS.h"
+#include "task.h"
+#include "c6.h"
+#ifndef DLY
+#define DLY 7            /* ticks per vTaskDelay() */
+#endif
+#ifndef T0_US
+#define T0_US 0          /* &gt;0: TIMER0 IRQ every T0_US us wakes the CPU early */
+#endif
+static volatile uint32_t n_t0;
+
+void TIMER0_IRQHandler(void) { TIMER_INTCLR(TIMER0_BASE) = 1; n_t0++; }
+
+static void probe(void *p)
+{
+    (void)p;
+    if (T0_US) {
+        TIMER_RELOAD(TIMER0_BASE) = T0_US * 25u - 1u;
+        TIMER_VALUE(TIMER0_BASE)  = T0_US * 25u - 1u;
+        TIMER_CTRL(TIMER0_BASE)   = 1u | 8u;          /* enable + IRQ enable */
+        NVIC_IPR(8) = 0x40;                           /* below configMAX_SYSCALL (0x20) */
+        NVIC_ISER0  = 1u &lt;&lt; 8;
+    }
+    vTaskDelay(2);
+    taskENTER_CRITICAL();
+    n_systick = n_lpirq = n_wfi = 0; n_t0 = 0;
+    uint32_t c0 = CYC();
+    TickType_t k0 = xTaskGetTickCount();
+    taskEXIT_CRITICAL();
+
+    uint32_t loops = 0;
+    while (xTaskGetTickCount() - k0 &lt; pdMS_TO_TICKS(5000)) { vTaskDelay(DLY); loops++; }
+
+    taskENTER_CRITICAL();
+    uint32_t wall = (CYC() - c0) / 25u, st = n_systick + n_lpirq, w = n_wfi, t0 = n_t0;
+    uint32_t kern = (xTaskGetTickCount() - k0) * (1000000u / configTICK_RATE_HZ);
+    taskEXIT_CRITICAL();
+    int32_t drift = (int32_t)(kern - wall);
+    printf("tickless=%d DLY=%2d T0=%4u us | loops=%4lu wfi=%4lu tick_irq=%4lu t0_irq=%4lu | "
+           "kernel=%lu wall=%lu drift=%+ld us (%+ld ppm)\n",
+           configUSE_TICKLESS_IDLE, DLY, (unsigned)T0_US, (unsigned long)loops,
+           (unsigned long)w, (unsigned long)st, (unsigned long)t0, (unsigned long)kern,
+           (unsigned long)wall, (long)drift, (long)((int64_t)drift * 1000000 / (int64_t)wall));
+    board_exit(0);
+}
+
+int main(void)
+{
+    xTaskCreate(probe, "probe", 512, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'B=/Users/donh/.rtos_scratch/C6/build.sh; R=/var/rtoslab/bin/rtos-run-mps2
+for v in "0 7 0" "1 2 0" "1 7 0" "1 50 0" "0 1000 1370" "1 1000 1370" "1 1000 9973"; do set -- $v; n=ex3_$1_$2_$3; $B $n "ex3.c c6_common.c" "-DconfigUSE_TICKLESS_IDLE=$1 -DDLY=$2 -DT0_US=$3" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/$n/app.elf | grep -v board_exit; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>tickless=0 DLY= 7 T0=   0 us | loops= 715 wfi=   0 tick_irq=5005 t0_irq=   0 | kernel=5005000 wall=5005000 drift=+0 us (+0 ppm)
+tickless=1 DLY= 2 T0=   0 us | loops=2500 wfi=2500 tick_irq=2500 t0_irq=   0 | kernel=5000000 wall=4994600 drift=+5400 us (+1081 ppm)
+tickless=1 DLY= 7 T0=   0 us | loops= 715 wfi= 715 tick_irq= 715 t0_irq=   0 | kernel=5005000 wall=5003455 drift=+1545 us (+308 ppm)
+tickless=1 DLY=50 T0=   0 us | loops= 100 wfi= 100 tick_irq= 100 t0_irq=   0 | kernel=5000000 wall=4999784 drift=+216 us (+43 ppm)
+tickless=0 DLY=1000 T0=1370 us | loops=   5 wfi=   0 tick_irq=5000 t0_irq=3650 | kernel=5000000 wall=5000000 drift=+0 us (+0 ppm)
+tickless=1 DLY=1000 T0=1370 us | loops=   5 wfi=3645 tick_irq=  27 t0_irq=3643 | kernel=5000000 wall=4991550 drift=+8450 us (+1692 ppm)
+tickless=1 DLY=1000 T0=9973 us | loops=   5 wfi= 506 tick_irq=   7 t0_irq= 501 | kernel=5000000 wall=4998827 drift=+1173 us (+234 ppm)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>tick을 켜 두면(tickless=0) drift가 정확히 0이다.</strong> SysTick이 한 번도 멈추지 않기 때문이다. 같은 조건에서 TIMER0이 3650번 인터럽트를 걸어도 0이다.</li><li><strong>tickless(mode 1)는 sleep 한 번마다 커널 시계가 앞서 간다.</strong> 5400/2500 = 1545/715 = 216/100 = <strong>2.16 µs/회</strong>. 지연 길이와 상관없이 "자고 깬 횟수"에 비례한다. §4.6의 예측(94 − 39 = 55카운트 = 2.2 µs)과 맞는다.</li><li>그래서 <strong>짧게 자주 잘수록 나쁘다.</strong> 2 tick씩 자면 1081 ppm(하루 93초), 50 tick씩 자면 43 ppm(하루 3.7초).</li><li><strong>조기 기상(TIMER0)은 회당 2.32 µs</strong>로 조금 더 크다(8450/3645 = 1173/506). 단계 ⑩-b의 계산 경로가 다르고, 단계 ⑧에서 ISR을 실행하는 동안의 시간 처리도 다르기 때문이다. 1.37 ms마다 깨면 1692 ppm — 하루 146초다.</li><li><code>t0_irq=3643</code>(tick 켬은 3650): 커널 시계가 빨라서 커널 기준 5초가 벽시계로는 4.99초에 끝났다. 그 사이에 TIMER0이 덜 울렸다.</li></ul>
+<blockquote><p>이 숫자는 <strong>QEMU icount의 명령 타이밍</strong> 기준이다. 실제 칩에서는 멈춤 구간의 49명령이 다른 사이클 수를 쓰므로 drift의 크기는 물론 <strong>부호도 바뀔 수 있다</strong>(실제 구간이 94카운트보다 길면 커널이 느려진다). 결론은 숫자가 아니라 구조다: "고정 보정 상수 방식은 칩·클럭·컴파일러마다 오차가 다르고, 수면 횟수에 비례해 쌓인다."</p></blockquote>
+<h3 id="5-3-drift를-그림으로-freertos-zephyr-mode-2">5.3 drift를 그림으로 — FreeRTOS · Zephyr · mode 2<a class="anchor" href="#5-3-drift를-그림으로-freertos-zephyr-mode-2" aria-label="link">#</a></h3>
+<p>아래 차트는 이 절의 측정과 §7(mode 2), §8(Zephyr)의 측정을 한데 모은 것이다(<code>charts.py</code>, §8.8).</p>
+<figure class="chart"><svg viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg"><text x="10.0" y="18.0" font-size="13" text-anchor="start" font-weight="bold">sleep 한 번마다 커널 시계가 벽시계보다 앞선 시간 (µs, +는 커널이 빠름)</text><line x1="246.0" y1="34" x2="246.0" y2="236" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="246.0" y="252.0" font-size="12" text-anchor="middle">-3</text><line x1="316.0" y1="34" x2="316.0" y2="236" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="316.0" y="252.0" font-size="12" text-anchor="middle">-2</text><line x1="386.0" y1="34" x2="386.0" y2="236" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="386.0" y="252.0" font-size="12" text-anchor="middle">-1</text><line x1="456.0" y1="34" x2="456.0" y2="236" stroke="currentColor" stroke-width="1"/><text x="456.0" y="252.0" font-size="12" text-anchor="middle">0</text><line x1="526.0" y1="34" x2="526.0" y2="236" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="526.0" y="252.0" font-size="12" text-anchor="middle">+1</text><line x1="596.0" y1="34" x2="596.0" y2="236" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="596.0" y="252.0" font-size="12" text-anchor="middle">+2</text><line x1="666.0" y1="34" x2="666.0" y2="236" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="666.0" y="252.0" font-size="12" text-anchor="middle">+3</text><text x="236.0" y="55.0" font-size="12" text-anchor="end">FreeRTOS mode 1, 타임아웃 기상</text><rect x="456.0" y="43" width="151.2" height="16" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/><text x="611.2" y="55.0" font-size="12" text-anchor="start">+2.16</text><text x="236.0" y="83.0" font-size="12" text-anchor="end">FreeRTOS mode 1, TIMER0 조기 기상</text><rect x="456.0" y="71" width="162.3" height="16" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/><text x="622.3" y="83.0" font-size="12" text-anchor="start">+2.32</text><text x="236.0" y="111.0" font-size="12" text-anchor="end">FreeRTOS mode 2 (DUALTIMER)</text><rect x="456.0" y="99" width="1.5" height="16" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/><text x="460.0" y="111.0" font-size="12" text-anchor="start">+0.00</text><text x="236.0" y="139.0" font-size="12" text-anchor="end">FreeRTOS tick 켬 (tickless 끔)</text><rect x="456.0" y="127" width="1.5" height="16" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/><text x="460.0" y="139.0" font-size="12" text-anchor="start">+0.00</text><text x="236.0" y="167.0" font-size="12" text-anchor="end">Zephyr tickless 1000 Hz</text><rect x="287.0" y="155" width="169.0" height="16" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a"/><text x="283.0" y="167.0" font-size="12" text-anchor="end">-2.41</text><text x="236.0" y="195.0" font-size="12" text-anchor="end">Zephyr tickless 100 Hz</text><rect x="281.6" y="183" width="174.4" height="16" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a"/><text x="277.6" y="195.0" font-size="12" text-anchor="end">-2.49</text><text x="236.0" y="223.0" font-size="12" text-anchor="end">Zephyr periodic 1000 Hz</text><rect x="455.9" y="211" width="1.5" height="16" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/><text x="451.9" y="223.0" font-size="12" text-anchor="end">-0.00</text><text x="10.0" y="274.0" font-size="12" text-anchor="start">총 drift ÷ sleep 횟수 (5 s 측정, ex3 · z2). QEMU icount 기준 — 실칩에서는 값이 다르다.</text></svg></figure>
+<p>그림 4 — sleep 한 번마다 커널 시계가 벽시계보다 앞선 시간(측정). FreeRTOS mode 1은 +2.2 µs(보정 과다), Zephyr tickless는 −2.4 µs(재설정마다 못 센 시간, §8.6), 멈추지 않는 카운터로 시간을 재는 mode 2와 주기 tick은 0이다.</p>
+<h3 id="5-4-실무에서-drift가-문제가-되는-때와-아닌-때">5.4 실무에서 drift가 문제가 되는 때와 아닌 때<a class="anchor" href="#5-4-실무에서-drift가-문제가-되는-때와-아닌-때" aria-label="link">#</a></h3>
+<ul><li><strong>문제 아님</strong>: "약 100 ms마다 센서 읽기" 같은 상대 시간. 0.1% 틀려도 아무도 모른다.</li><li><strong>문제</strong>: 커널 tick으로 <strong>벽시계(달력 시간)</strong>를 유지할 때. 1000 ppm이면 하루 86초다. 로그 타임스탬프가 GPS·서버 시간과 어긋난다. → 벽시계는 RTC(32.768 kHz 크리스털, 수 ppm~수십 ppm)에서 읽고, 커널 tick은 상대 시간용으로만 쓴다.</li><li><strong>문제</strong>: 여러 노드의 동기(TDMA 무선 슬롯, 센서 융합 타임스탬프). → 동기는 하드웨어 타임스탬프나 RTC 기준으로 하고, 주기적으로 외부 기준(GPS PPS 등)과 맞춘다.</li><li>측정 방법은 이 예제 그대로다: <strong>tick과 독립인 자유 실행 카운터</strong>(MPS2 FPGAIO, 실칩이면 RTC나 자유 실행 32비트 타이머, DWT CYCCNT는 코어 클럭이 멈추는 수면에서 같이 멈출 수 있어 부적합)로 "커널 시간 − 벽시계"를 오래 잰다.</li></ul>
+<hr>
+<h2 id="6-언제-안-자나-언제-더-깊이-자도-되나">6. 언제 안 자나, 언제 더 깊이 자도 되나<a class="anchor" href="#6-언제-안-자나-언제-더-깊이-자도-되나" aria-label="link">#</a></h2>
+<h3 id="6-1-예제-5-configexpected_idle_time_before_sleep-짧은-틈은-안-잔다">6.1 예제 5 — <code>configEXPECTED_IDLE_TIME_BEFORE_SLEEP</code>: 짧은 틈은 안 잔다<a class="anchor" href="#6-1-예제-5-configexpected_idle_time_before_sleep-짧은-틈은-안-잔다" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 태스크가 100 µs 일하고 <code>vTaskDelay(DLY)</code>를 1초 동안 반복할 때, 문턱값(THRESH)과 지연(DLY)에 따라 실제로 tickless 수면에 들어가는지 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex5 — configEXPECTED_IDLE_TIME_BEFORE_SLEEP: which idle gaps are worth a tickless sleep? */
+#include &lt;stdio.h&gt;
+#include "FreeRTOS.h"
+#include "task.h"
+#include "c6.h"
+
+static void worker(void *p)
+{
+    (void)p;
+    vTaskDelay(2);
+    taskENTER_CRITICAL(); n_wfi = n_systick = sleep_cyc = 0; taskEXIT_CRITICAL();
+    uint32_t c0 = CYC();
+    TickType_t k0 = xTaskGetTickCount();
+    while (xTaskGetTickCount() - k0 &lt; 1000) { spin_us(100); vTaskDelay(DLY); }
+    uint32_t dc = CYC() - c0, w = n_wfi, st = n_systick, sl = sleep_cyc;
+    printf("THRESH=%2d DLY=%d | tick_irq=%4lu wfi=%4lu  in WFI=%3lu%%\n",
+           configEXPECTED_IDLE_TIME_BEFORE_SLEEP, DLY, (unsigned long)st,
+           (unsigned long)w, (unsigned long)((uint64_t)sl * 100u / dc));
+    board_exit(0);
+}
+
+int main(void)
+{
+    xTaskCreate(worker, "worker", 512, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'B=/Users/donh/.rtos_scratch/C6/build.sh; R=/var/rtoslab/bin/rtos-run-mps2
+for v in "2 1" "2 2" "2 4" "5 2" "5 4" "5 8"; do set -- $v; n=ex5_$1_$2; $B $n "ex5.c c6_common.c" "-DconfigUSE_TICKLESS_IDLE=1 -DconfigEXPECTED_IDLE_TIME_BEFORE_SLEEP=$1 -DDLY=$2" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/$n/app.elf | grep -v board_exit; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>THRESH= 2 DLY=1 | tick_irq=1000 wfi=   0  in WFI=  0%
+THRESH= 2 DLY=2 | tick_irq= 500 wfi= 500  in WFI= 93%
+THRESH= 2 DLY=4 | tick_irq= 250 wfi= 250  in WFI= 96%
+THRESH= 5 DLY=2 | tick_irq=1000 wfi=   0  in WFI=  0%
+THRESH= 5 DLY=4 | tick_irq=1000 wfi=   0  in WFI=  0%
+THRESH= 5 DLY=8 | tick_irq= 125 wfi= 125  in WFI= 98%</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong><code>vTaskDelay(1)</code>은 tickless로 자지 않는다</strong> — 그리고 이 설정(idle hook 없음)에서는 WFI도 안 해서 <strong>CPU가 0% 잔다</strong>(idle 루프만 돈다). 예상 idle이 1 tick이라 문턱 2를 못 넘는다. tickless를 켰다고 안심하면 안 되는 첫 함정이다. 짧은 틈에서도 자려면 idle hook에 WFI를 같이 넣는다(§9.6).</li><li>문턱 이상이면 지연 1회당 sleep 1회다(DLY=2 → 500회, DLY=4 → 250회).</li><li>문턱을 5로 올리면 DLY=2, 4는 아예 안 잔다. 문턱은 "깊은 수면의 진입+복귀 비용을 회수하려면 최소 몇 tick 자야 하나"로 정한다. 예를 들어 STOP 진입·복귀에 수십 µs와 클럭 재설정이 들면 2 ms 수면은 손해일 수 있다 — 데이터시트의 wakeup time으로 계산해서 정한다.</li></ul>
+<h3 id="6-2-예제-6-모든-태스크가-무한-대기-enotaskswaitingtimeout">6.2 예제 6 — 모든 태스크가 무한 대기: <code>eNoTasksWaitingTimeout</code><a class="anchor" href="#6-2-예제-6-모든-태스크가-무한-대기-enotaskswaitingtimeout" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 유일한 앱 태스크가 <code>xSemaphoreTake(sem, portMAX_DELAY)</code>로 막히고, 1초마다 TIMER0 ISR이 세마포어를 준다("버튼 누름"). 타임아웃을 기다리는 태스크가 하나도 없을 때 커널이 몇 번 깨는지 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex4 — every task blocks forever: eTaskConfirmSleepModeStatus() = eNoTasksWaitingTimeout */
+#include &lt;stdio.h&gt;
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "c6.h"
+static SemaphoreHandle_t sem;
+static volatile uint32_t n_t0;
+
+void TIMER0_IRQHandler(void)                          /* "button press" once per second */
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    n_t0++;
+    BaseType_t hp = pdFALSE;
+    xSemaphoreGiveFromISR(sem, &amp;hp);
+    portYIELD_FROM_ISR(hp);
+}
+
+static void waiter(void *p)
+{
+    (void)p;
+    TIMER_RELOAD(TIMER0_BASE) = 25000000u - 1u;       /* 1 s */
+    TIMER_VALUE(TIMER0_BASE)  = 25000000u - 1u;
+    TIMER_CTRL(TIMER0_BASE)   = 1u | 8u;
+    NVIC_IPR(8) = 0x40;
+    NVIC_ISER0  = 1u &lt;&lt; 8;
+    taskENTER_CRITICAL(); n_log = n_wfi = n_systick = n_lpirq = 0; taskEXIT_CRITICAL();
+    uint32_t c0 = CYC();
+    for (int i = 0; i &lt; 3; i++) xSemaphoreTake(sem, portMAX_DELAY);   /* no timeout at all */
+    uint32_t wall = (CYC() - c0) / 25u, w = n_wfi, st = n_systick + n_lpirq, nl = n_log;
+    printf("tickless=%d | 3 events in %lu us | wfi=%lu tick_irq=%lu t0_irq=%lu\n",
+           configUSE_TICKLESS_IDLE, (unsigned long)wall, (unsigned long)w,
+           (unsigned long)st, (unsigned long)n_t0);
+    for (uint32_t i = 0; i &lt; nl &amp;&amp; i &lt; 6; i++)
+        printf("  sleep %lu: expected=%lu slept=%lu us\n", (unsigned long)i,
+               (unsigned long)slog[i].expected, (unsigned long)(slog[i].slept_cyc / 25u));
+    board_exit(0);
+}
+
+int main(void)
+{
+    sem = xSemaphoreCreateBinary();
+    xTaskCreate(waiter, "waiter", 512, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'B=/Users/donh/.rtos_scratch/C6/build.sh; R=/var/rtoslab/bin/rtos-run-mps2
+$B ex4_1 "ex4.c c6_common.c" "-DconfigUSE_TICKLESS_IDLE=1" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/ex4_1/app.elf | grep -v board_exit'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>tickless=1 | 3 events in 3000015 us | wfi=6 tick_irq=3 t0_irq=3
+  sleep 0: expected=671 slept=670960 us
+  sleep 1: expected=671 slept=329006 us
+  sleep 2: expected=671 slept=670941 us
+  sleep 3: expected=671 slept=329010 us
+  sleep 4: expected=671 slept=670936 us
+  sleep 5: expected=671 slept=329015 us</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>깨울 타임아웃이 하나도 없는데도 <strong>671 ms마다 깬다</strong>(sleep 0, 2, 4). 24비트 한계 때문에 포트가 "671 tick 자기"를 반복한다. 그 사이 TIMER0이 1초 지점에 깨운다(sleep 1, 3, 5 = 329 ms). 이벤트 3개에 깨기 6번.</li><li>포트의 mode 1 구현은 <code>eTaskConfirmSleepModeStatus()</code>의 결과를 <code>eAbortSleep</code>인지만 본다. <code>eNoTasksWaitingTimeout</code>을 받아도 <strong>타이머를 끄지 않는다.</strong> 그 값을 쓰려면 mode 2로 직접 짜야 한다 — §7의 구현은 이 경우 깨우기 타이머를 아예 걸지 않는다(결과: 이벤트 3개에 깨기 3번).</li><li>이 상태가 배터리 장비에서 가장 흔한 상태다: "버튼이나 무선 패킷이 올 때까지 무한 대기". 이때 깨는 횟수가 대기 전류를 정한다.</li></ul>
+<hr>
+<h2 id="7-저전력-타이머로-tick-만들기-configuse_tickless_idle-2">7. 저전력 타이머로 tick 만들기 — <code>configUSE_TICKLESS_IDLE = 2</code><a class="anchor" href="#7-저전력-타이머로-tick-만들기-configuse_tickless_idle-2" aria-label="link">#</a></h2>
+<h3 id="7-1-왜-systick으로는-부족한가-세-가지-이유">7.1 왜 SysTick으로는 부족한가 — 세 가지 이유<a class="anchor" href="#7-1-왜-systick으로는-부족한가-세-가지-이유" aria-label="link">#</a></h3>
+<ol><li><strong>깊은 수면에서 멈춘다.</strong> STM32의 STOP 모드처럼 코어 클럭(HCLK)을 끄는 모드에서는 SysTick도 멈춘다. mode 1 구현은 "WFI 동안 SysTick이 계속 돈다"를 가정하므로, STOP에 들어가면 깨울 수도 없고 시간도 잴 수 없다.</li><li><strong>24비트라 짧다.</strong> 코어가 빠를수록 더 짧다(아래 계산).</li><li><strong>보정 상수에 의존한다</strong>(§5).</li></ol>
+<p>그래서 실제 배터리 장비는 깊은 수면에서도 도는 <strong>저전력 타이머</strong>를 쓴다.</p>
+<ul><li><strong>LPTIM</strong> (예: STM32L4/U5 계열): LSE(32.768 kHz 크리스털)나 LSI로 돌고 STOP 모드에서도 동작한다. 흔히 16비트 카운터 + compare 레지스터, compare match로 깨운다.</li><li><strong>RTC wakeup timer / RTC 카운터</strong>: 역시 32.768 kHz 도메인, 가장 깊은 모드에서도 산다. nRF52의 RTC는 24비트 카운터 + compare 채널을 가진 32.768 kHz 타이머다(Zephyr의 nRF용 system timer가 이것을 쓴다).</li><li>공통 패턴: <strong>멈추지 않는 카운터 = 시간 기준</strong>, <strong>compare(또는 one-shot) = 깨우기</strong>. tick 경계는 카운터 값에서 계산한다.</li></ul>
+<p><strong>예제 7 — 수면 상한과 클럭 비율 계산.</strong> 무엇을 확인하는 코드인지: 24비트 SysTick의 한 번 수면 상한을 코어 클럭별로, 16비트 32.768 kHz LPTIM의 해상도와 상한을, 그리고 32.768 kHz로 tick을 만들 때 정수로 반올림하면 생기는 오차를 계산한다.</p>
+<figure class="code"><span class="lang">python</span><pre><code># limits.py — max tickless sleep per timer, and the tick-ratio error of a 32.768 kHz LPTIM
+SYSTICK_MAX = 0xFFFFFF                      # 24-bit SysTick LOAD
+print("SysTick (24-bit) @ core clock, configTICK_RATE_HZ=1000:")
+for mhz in (25, 64, 168, 480):
+    cpt = mhz * 1_000_000 // 1000           # ulTimerCountsForOneTick
+    n = SYSTICK_MAX // cpt                  # xMaximumPossibleSuppressedTicks
+    print(f"  {mhz:4d} MHz: counts/tick={cpt:7d}  max={n:4d} ticks = {n:4d} ms")
+
+print("16-bit LPTIM @ 32768 Hz (prescaler 1/1, 1/8, 1/32):")
+for div in (1, 8, 32):
+    f = 32768 / div
+    print(f"  /{div:&lt;2d}: resolution={1e6 / f:7.1f} us  max one-shot={65535 / f:8.3f} s")
+
+print("tick rate vs 32768 Hz: counts per tick and the error if you round it")
+for hz in (1000, 1024, 100, 128):
+    exact = 32768 / hz
+    r = round(exact)
+    err_ppm = (r - exact) / exact * 1e6
+    print(f"  {hz:5d} Hz: exact={exact:8.3f}  rounded={r:4d}  period error={err_ppm:+8.1f} ppm"
+          f" -&gt; kernel clock {-err_ppm * 86400 / 1e6 + 0.0:+7.2f} s/day")</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- python3 /Users/donh/.rtos_scratch/C6/py/limits.py</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>SysTick (24-bit) @ core clock, configTICK_RATE_HZ=1000:
+    25 MHz: counts/tick=  25000  max= 671 ticks =  671 ms
+    64 MHz: counts/tick=  64000  max= 262 ticks =  262 ms
+   168 MHz: counts/tick= 168000  max=  99 ticks =   99 ms
+   480 MHz: counts/tick= 480000  max=  34 ticks =   34 ms
+16-bit LPTIM @ 32768 Hz (prescaler 1/1, 1/8, 1/32):
+  /1 : resolution=   30.5 us  max one-shot=   2.000 s
+  /8 : resolution=  244.1 us  max one-shot=  16.000 s
+  /32: resolution=  976.6 us  max one-shot=  63.999 s
+tick rate vs 32768 Hz: counts per tick and the error if you round it
+   1000 Hz: exact=  32.768  rounded=  33  period error= +7080.1 ppm -&gt; kernel clock -611.72 s/day
+   1024 Hz: exact=  32.000  rounded=  32  period error=    +0.0 ppm -&gt; kernel clock   +0.00 s/day
+    100 Hz: exact= 327.680  rounded= 328  period error=  +976.6 ppm -&gt; kernel clock  -84.37 s/day
+    128 Hz: exact= 256.000  rounded= 256  period error=    +0.0 ppm -&gt; kernel clock   +0.00 s/day</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>480 MHz Cortex-M7(STM32H7급 드론 FC)이면 SysTick tickless는 한 번에 34 ms밖에 못 잔다.</strong> 1초 무한 대기에 30번 깬다. 빠른 칩일수록 저전력 타이머가 필요하다.</li><li>32.768 kHz 16비트 LPTIM은 분주 없이 30.5 µs 해상도에 최대 2초, /32면 1 ms 해상도에 64초. 해상도와 최대 수면 길이를 맞바꾼다.</li><li><strong>1 kHz tick + 32.768 kHz 클럭 = 32.768카운트/tick.</strong> 33으로 반올림하면 tick이 0.71% 길어져 커널 시계가 하루 612초 늦는다. 그래서 (a) tick rate를 1024 Hz나 128 Hz처럼 32768의 약수로 하거나, (b) 정수 반올림 대신 <strong>절대 카운트에서 tick 경계를 계산</strong>한다(아래 구현이 (b)).</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs><text x="170" y="20" font-size="13" text-anchor="middle" font-weight="bold">실제 MCU (예: STM32 STOP 모드)</text><text x="510" y="20" font-size="13" text-anchor="middle" font-weight="bold">이 노트의 QEMU 대역</text><rect x="20" y="40" width="300" height="30" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/><text x="170.0" y="59.94" font-size="13" text-anchor="middle">코어 클럭 → SysTick (24비트)</text><text x="170" y="88" font-size="12" text-anchor="middle">STOP에서 클럭이 꺼져 같이 멈춘다</text><rect x="20" y="110" width="300" height="30" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b" stroke-width="1.2"/><text x="170.0" y="129.94" font-size="13" text-anchor="middle">LSE 32.768 kHz → LPTIM / RTC</text><text x="170" y="158" font-size="12" text-anchor="middle">항상 동작: 시간 기준 + 깨우기 IRQ</text><rect x="20" y="180" width="300" height="30" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/><text x="170.0" y="199.94" font-size="13" text-anchor="middle">EXTI · 깨우기 → 코어 재시동</text><line x1="170" y1="140" x2="170" y2="178" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah6)"/><rect x="360" y="40" width="300" height="30" rx="5" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.2"/><text x="510.0" y="59.94" font-size="13" text-anchor="middle">SysTick — 시작하지 않음</text><text x="510" y="88" font-size="12" text-anchor="middle">vPortSetupTimerInterrupt() 대체</text><rect x="360" y="110" width="300" height="30" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b" stroke-width="1.2"/><text x="510.0" y="129.94" font-size="13" text-anchor="middle">DT2: 32비트 자유 실행 (/16)</text><text x="510" y="158" font-size="12" text-anchor="middle">1.5625 MHz — 멈추지 않는 시간 기준</text><rect x="360" y="180" width="300" height="30" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/><text x="510.0" y="199.94" font-size="13" text-anchor="middle">DT1: one-shot → IRQ 10</text><line x1="510" y1="140" x2="510" y2="178" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah6)"/><text x="20" y="242" font-size="12" text-anchor="start">핵심: 잠든 동안의 시간은 멈추지 않는 카운터에서 읽는다 → 보정 상수(94)가 필요 없다.</text><text x="20" y="264" font-size="12" text-anchor="start">tick 경계 k의 카운트 = ceil(k × LP_HZ / TICK_HZ) — 나누어떨어지지 않아도 누적 오차가 없다.</text><text x="20" y="286" font-size="12" text-anchor="start">실칩 LPTIM은 16비트가 흔하다: 32.768 kHz면 한 번에 최대 2초 → 그 이상은 나눠 잔다.</text></svg></figure>
+<p>그림 5 — 저전력 타이머 구조. 왼쪽은 실제 MCU, 오른쪽은 이 노트의 QEMU 대역. QEMU에는 32.768 kHz 도메인이 없어서 CMSDK DUALTIMER(코어 클럭 /16 = 1.5625 MHz, 32비트)를 "멈추지 않는 저전력 타이머"로 가정한다.</p>
+<h3 id="7-2-설계-mode-2에서-내가-해야-할-일">7.2 설계 — mode 2에서 내가 해야 할 일<a class="anchor" href="#7-2-설계-mode-2에서-내가-해야-할-일" aria-label="link">#</a></h3>
+<p><code>configUSE_TICKLESS_IDLE = 2</code>로 두면 tasks.c의 tickless 경로(그림 2의 파랑)는 그대로 쓰고, 주황 부분을 내가 채운다.</p>
+<div class="tw"><table><thead><tr><th>할 일</th><th>FreeRTOS 연결점</th><th>이 구현</th></tr></thead><tbody><tr><td>tick 타이머 시작</td><td><code>vPortSetupTimerInterrupt()</code> 덮어쓰기(port.c에서 weak)</td><td>DT2를 자유 실행으로, DT1을 다음 tick 경계 one-shot으로</td></tr><tr><td>평소 tick</td><td>tick ISR에서 <code>xTaskIncrementTick()</code> + 필요하면 PendSV</td><td><code>DUALTIMER_IRQHandler</code>: 카운터에서 "지금까지 지났어야 할 tick 수"를 계산해 모자란 만큼 증가</td></tr><tr><td>수면</td><td><code>portSUPPRESS_TICKS_AND_SLEEP(x)</code> 정의</td><td><code>c6_suppress_ticks_and_sleep()</code></td></tr><tr><td>수면 확인</td><td><code>eTaskConfirmSleepModeStatus()</code></td><td><code>eNoTasksWaitingTimeout</code>이면 깨우기 타이머를 끈다</td></tr><tr><td>시간 보정</td><td><code>vTaskStepTick(n)</code></td><td>n = (카운터로 계산한 tick) − (이미 알린 tick), N으로 상한</td></tr></tbody></table></div>
+<p>핵심 아이디어는 <strong>"tick 경계 k는 카운트 ceil(k × LP_HZ / TICK_HZ)에 있다"</strong>다. 매번 "몇 카운트 남았나"를 누적하지 않고, 절대 카운트로부터 계산하므로 1562.5카운트/tick처럼 나누어떨어지지 않아도, 몇 번을 자고 깨도 오차가 쌓이지 않는다. Zephyr의 tickless 드라이버들도 같은 생각이다(<code>announced_cycles</code>, §8.3).</p>
+<h3 id="7-3-구현">7.3 구현<a class="anchor" href="#7-3-구현" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: SysTick을 한 번도 켜지 않고, DUALTIMER만으로 FreeRTOS tick과 tickless 수면을 구현한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* lp_tick.c — configUSE_TICKLESS_IDLE=2: tick from a "low-power timer" (CMSDK DUALTIMER as a
+ * stand-in for LPTIM/RTC); SysTick never runs. DT2 = always-on timebase, DT1 = one-shot wake-up */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "c6.h"
+#define DT(o)   REG32(0x40002000u + (o))
+#define LP_HZ   (configCPU_CLOCK_HZ / 16u)            /* prescale /16 = 1.5625 MHz */
+#define CTL_32P16 ((1u &lt;&lt; 1) | (1u &lt;&lt; 2))             /* 32-bit counter, prescale /16 */
+#define CTL_EN  (1u &lt;&lt; 7)
+#define DT1_CTL (1u | CTL_32P16 | (1u &lt;&lt; 5))         /* one-shot + IRQ enable */
+#define LP_MAX_TICKS (0x7FFFFFFFu / (LP_HZ / configTICK_RATE_HZ))   /* ~1.37 M ticks */
+static uint64_t announced;                            /* ticks given to the kernel */
+
+static uint64_t lp_now(void)          /* DT2 extended to 64 bit; call with IRQs masked */
+{
+    static uint32_t last; static uint64_t hi;
+    uint32_t c = 0xFFFFFFFFu - DT(0x24);              /* DT2 counts down */
+    if (c &lt; last) hi += 1ull &lt;&lt; 32;                   /* wraps every 45.8 min */
+    last = c; return hi | c;
+}
+static uint64_t due_ticks(void) { return lp_now() * configTICK_RATE_HZ / LP_HZ; }
+static void arm_at_tick(uint64_t k)                   /* one-shot at tick boundary k */
+{
+    uint64_t at = (k * LP_HZ + configTICK_RATE_HZ - 1) / configTICK_RATE_HZ;
+    int64_t d = (int64_t)(at - lp_now());
+    DT(0x08) = DT1_CTL;                               /* stop, reload, restart */
+    DT(0x00) = d &gt; 1 ? (uint32_t)d : 1u;
+    DT(0x08) = DT1_CTL | CTL_EN;
+}
+void vPortSetupTimerInterrupt(void)                   /* overrides port.c's weak SysTick setup */
+{
+    DT(0x28) = CTL_32P16;                             /* DT2: free-running, no IRQ */
+    DT(0x20) = 0xFFFFFFFFu;
+    DT(0x28) = CTL_32P16 | CTL_EN;
+    NVIC_IPR(10) = configKERNEL_INTERRUPT_PRIORITY;   /* same level as SysTick would be */
+    NVIC_ISER0 = 1u &lt;&lt; 10;
+    arm_at_tick(1);
+}
+void DUALTIMER_IRQHandler(void)
+{
+    DT(0x0C) = 1;                                     /* clear DT1 interrupt */
+    n_lpirq++;
+    UBaseType_t m = portSET_INTERRUPT_MASK_FROM_ISR();
+    BaseType_t sw = pdFALSE;
+    for (uint64_t due = due_ticks(); announced &lt; due; announced++)
+        sw |= xTaskIncrementTick();                   /* catch up if we were late */
+    arm_at_tick(announced + 1);
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(m);
+    portYIELD_FROM_ISR(sw);
+}
+void c6_suppress_ticks_and_sleep(uint32_t xExpectedIdleTime)
+{
+    __asm volatile("cpsid i" ::: "memory");
+    eSleepModeStatus st = eTaskConfirmSleepModeStatus();
+    if (st == eAbortSleep) { __asm volatile("cpsie i" ::: "memory"); return; }
+    if (xExpectedIdleTime &gt; LP_MAX_TICKS) xExpectedIdleTime = LP_MAX_TICKS;
+    if (st == eNoTasksWaitingTimeout) DT(0x08) = DT1_CTL;      /* no timeout: no wake timer */
+    else arm_at_tick(announced + xExpectedIdleTime);
+    uint32_t x = xExpectedIdleTime;
+    configPRE_SLEEP_PROCESSING(x);                    /* real chip: enter STOP here */
+    __asm volatile("dsb\n wfi\n isb" ::: "memory");
+    configPOST_SLEEP_PROCESSING(x);
+    uint64_t step = due_ticks() - announced;          /* time came from the never-stopped DT2 */
+    if (step &gt; xExpectedIdleTime) step = xExpectedIdleTime;
+    vTaskStepTick((TickType_t)step);
+    announced += step;
+    DT(0x0C) = 1; REG32(0xE000E280u) = 1u &lt;&lt; 10;      /* drop a stale DT1 IRQ (NVIC ICPR) */
+    arm_at_tick(announced + 1);
+    __asm volatile("cpsie i" ::: "memory");
+}</code></pre></figure>
+<p>한 줄씩 짚을 곳:</p>
+<ul><li><code>lp_now()</code> — DT2는 아래로 세므로 <code>0xFFFFFFFF − VALUE</code>로 뒤집고, 45.8분(2^32 / 1.5625 MHz)마다 한 바퀴 도는 것을 64비트로 늘린다. 항상 인터럽트가 막힌 상태(ISR 안 또는 <code>cpsid i</code> 안)에서만 불리므로 <code>last</code>/<code>hi</code> 갱신이 경쟁하지 않는다. wrap을 놓치지 않으려면 45.8분 안에 한 번은 불려야 하는데, 수면 상한(<code>LP_MAX_TICKS</code> ≈ 1.37 M tick ≈ 22.9분)이 그걸 보장한다.</li><li><code>arm_at_tick(k)</code> — 목표 카운트까지의 차이를 DT1에 넣는다. 이미 지났으면(차이 ≤ 1) 1을 넣어 바로 인터럽트가 나게 한다. CMSDK DUALTIMER는 one-shot이 끝난 뒤 LOAD만 써서는 다시 돌지 않아서(첫 시도에서 QEMU가 "Timer with delta zero, disabling"을 출력하고 멈췄다) 끄고-쓰고-켜는 순서로 한다. 실칩 LPTIM이면 compare 레지스터 하나만 쓰면 된다(대신 "CMP 쓰기 완료" 플래그를 기다려야 하는 칩이 많다 — 데이터시트 확인).</li><li><code>DUALTIMER_IRQHandler</code> — <code>xTaskIncrementTick()</code>을 <strong>모자란 만큼 반복</strong>한다. ISR이 늦게 돌아도(다른 ISR이 길었다든가) tick을 잃지 않는다. 우선순위는 SysTick이 원래 쓰던 <code>configKERNEL_INTERRUPT_PRIORITY</code>(가장 낮음)로 둔다 — tick ISR이 커널 API를 쓰기 때문이다(B3).</li><li><code>c6_suppress_ticks_and_sleep()</code> — port.c와 같은 뼈대(<code>cpsid i</code> → 확인 → 타이머 → PRE → WFI → POST → step → <code>cpsie i</code>)지만 <strong>카운터를 멈추지 않으므로 보정 상수가 없다.</strong> 깬 뒤 <code>due_ticks() − announced</code>가 정확히 지난 tick 수다. N보다 크면(보정하기 전에 경계를 하나 더 넘었으면) N으로 자른다 — <code>vTaskStepTick()</code>의 <code>configASSERT(xUpdatedTickCount &lt;= xNextTaskUnblockTime)</code>을 지키기 위해서다. 남은 tick은 곧바로 울리는 DT1 ISR이 채운다.</li><li>깬 직후 DT1의 pending 인터럽트를 NVIC ICPR(0xE000E280)로 지운다. 계획대로 깬 경우 그 인터럽트의 몫은 방금 <code>vTaskStepTick()</code>이 처리했으므로, ISR이 또 돌면 다음 경계 재설정만 한 번 더 하게 된다(해롭진 않지만 쓸데없는 기상).</li></ul>
+<h3 id="7-4-실행-같은-실험을-mode-2로">7.4 실행 — 같은 실험을 mode 2로<a class="anchor" href="#7-4-실행-같은-실험을-mode-2로" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'B=/Users/donh/.rtos_scratch/C6/build.sh; R=/var/rtoslab/bin/rtos-run-mps2
+$B ex1_D "ex1.c c6_common.c lp_tick.c" "-DconfigUSE_TICKLESS_IDLE=2" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/ex1_D/app.elf | grep -v board_exit
+$B ex2_lp "ex2.c c6_common.c lp_tick.c" "-DconfigUSE_TICKLESS_IDLE=2" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/ex2_lp/app.elf | grep -v board_exit
+for v in "2 2 0" "2 7 0" "2 50 0" "2 1000 1370" "2 1000 9973"; do set -- $v; n=ex3_$1_$2_$3; $B $n "ex3.c c6_common.c lp_tick.c" "-DconfigUSE_TICKLESS_IDLE=$1 -DDLY=$2 -DT0_US=$3" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/$n/app.elf | grep -v board_exit; done
+$B ex4_2 "ex4.c c6_common.c lp_tick.c" "-DconfigUSE_TICKLESS_IDLE=2" &amp;&amp; ICOUNT=1 $R /var/tmp/rtos/C6/ex4_2/app.elf | grep -v board_exit'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>tickless=2 idle_hook=0 | tick_irq=   0 wfi=  12 | awake=  0.62% | kernel_ticks=1000 wall=999999 us
+LP-timer tickless (mode 2): 32-bit @ 1.5625 MHz, clamp 0x7FFFFFFF/1562=1374829 ticks
+  sleep 0: expected= 2000 ticks  slept=1999966 us  stepped= 1999
+  sleeps=1 tick_irq=0  kernel=2000 ticks  wall=1999999 us
+tickless=2 DLY= 2 T0=   0 us | loops=2500 wfi=2500 tick_irq=   0 t0_irq=   0 | kernel=5000000 wall=5000000 drift=+0 us (+0 ppm)
+tickless=2 DLY= 7 T0=   0 us | loops= 715 wfi= 715 tick_irq=   0 t0_irq=   0 | kernel=5005000 wall=5005000 drift=+0 us (+0 ppm)
+tickless=2 DLY=50 T0=   0 us | loops= 100 wfi= 100 tick_irq=   0 t0_irq=   0 | kernel=5000000 wall=5000000 drift=+0 us (+0 ppm)
+tickless=2 DLY=1000 T0=1370 us | loops=   5 wfi=3650 tick_irq=  41 t0_irq=3650 | kernel=5000000 wall=4999999 drift=+1 us (+0 ppm)
+tickless=2 DLY=1000 T0=9973 us | loops=   5 wfi= 507 tick_irq=  11 t0_irq= 501 | kernel=5000000 wall=4999999 drift=+1 us (+0 ppm)
+tickless=2 | 3 events in 3000020 us | wfi=3 tick_irq=0 t0_irq=3
+  sleep 0: expected=1374829 slept=999978 us
+  sleep 1: expected=1374829 slept=999958 us
+  sleep 2: expected=1374829 slept=999958 us</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>예제 1 부하</strong>: 깨기 12번, 깨어 있는 시간 0.62% — mode 1과 같다. 그런데 <code>wall=999999 us</code>: mode 1의 26 µs drift가 사라졌다. <code>tick_irq=0</code>인 이유는 tick 경계에서 깨어난 몫을 수면 함수가 직접 <code>vTaskStepTick()</code>으로 처리하고 pending을 지우기 때문이다(ISR이 돌 일이 없다). 깨어난 횟수는 <code>wfi</code> 칸으로 본다.</li><li><strong>예제 2(2초 대기)</strong>: 671 tick 한계가 없어져서 <strong>한 번에 2000 tick을 잤다.</strong> <code>stepped=1999</code>는 <code>vTaskStepTick(2000)</code>이 "정확히 깰 시각"이라 마지막 1 tick을 <code>xPendedTicks</code>로 미룬 것이다(§4.4).</li><li><strong>예제 4(drift)</strong>: 2500번 자고 깨도 <strong>0 µs</strong>, TIMER0이 3650번 일찍 깨워도 1 µs(측정 해상도). 시간이 멈추지 않는 카운터에서 오기 때문이다. <code>tick_irq=41</code>은 TIMER0 ISR과 tick 경계가 겹쳐서 DT1 ISR이 돈 경우다.</li><li><strong>예제 6(무한 대기)</strong>: 이벤트 3개에 <strong>깨기 3번</strong>. <code>expected=1374829</code>는 <code>portMAX_DELAY − xTickCount</code>를 <code>LP_MAX_TICKS</code>로 자른 값이지만, <code>eNoTasksWaitingTimeout</code>이라 타이머를 아예 걸지 않았다. 실칩이면 이 경우 RTC까지 끄는 더 깊은 모드(STANDBY 등)도 고려할 수 있다 — 다만 STANDBY는 RAM을 잃는 칩이 많아 RTOS 상태가 날아간다(P1).</li></ul>
+<p>이 구현은 데모다. 실제 제품에서 빠진 것: (1) STOP 진입·복귀 코드(클럭 트리 복구, PLL 재잠금 — <code>configPRE/POST_SLEEP_PROCESSING</code>에 넣는다), (2) LPTIM의 CMP 쓰기 동기화 대기와 "CMP를 현재 카운트 바로 뒤에 쓰면 놓치는" 경쟁(Zephyr의 MIN_DELAY와 같은 문제, §8.3), (3) 32.768 kHz 해상도(30.5 µs)보다 짧은 지연, (4) 저전력 타이머를 쓰는 동안 SysTick을 쓰는 다른 코드(HAL의 <code>HAL_Delay()</code> 등)와의 충돌. 전력 모드 자체와 정책은 P1/P2에서 다룬다.</p>
+<hr>
+<h2 id="8-zephyr-처음부터-tickless인-커널">8. Zephyr — 처음부터 tickless인 커널<a class="anchor" href="#8-zephyr-처음부터-tickless인-커널" aria-label="link">#</a></h2>
+<h3 id="8-1-설정-기본값이-이미-tickless">8.1 설정 — 기본값이 이미 tickless<a class="anchor" href="#8-1-설정-기본값이-이미-tickless" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>Kconfig</th><th>이 보드 값</th><th>뜻 (v4.4.2 <code>kernel/Kconfig</code>, <code>drivers/timer/Kconfig.cortex_m_systick</code>)</th></tr></thead><tbody><tr><td><code>CONFIG_TICKLESS_KERNEL</code></td><td>y</td><td><code>default y if TICKLESS_CAPABLE</code>. Cortex-M SysTick 드라이버는 tickless 가능으로 선언돼 있다</td></tr><tr><td><code>CONFIG_SYS_CLOCK_TICKS_PER_SEC</code></td><td>100</td><td><code>default 100 if QEMU_TARGET</code> / <code>default 10000 if TICKLESS_KERNEL</code> / 그 밖 100. <strong>실칩에서 tickless면 기본 10 kHz</strong>다 — tick은 "시간 해상도"일 뿐 인터럽트 주기가 아니기 때문이다</td></tr><tr><td><code>CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC</code></td><td>25000000</td><td>SysTick 클럭</td></tr><tr><td><code>CONFIG_CORTEX_M_SYSTICK</code></td><td>y</td><td>system timer 드라이버 = <code>drivers/timer/cortex_m_systick.c</code></td></tr><tr><td><code>CONFIG_TIMESLICING</code> / <code>CONFIG_TIMESLICE_SIZE</code></td><td>y / 20</td><td>같은 우선순위 스레드의 슬라이스 타이머(§9.5)</td></tr><tr><td><code>CONFIG_PM</code></td><td>n</td><td>켜면 idle에서 <code>pm_system_suspend()</code>가 SoC 전력 상태를 고른다(P2)</td></tr></tbody></table></div>
+<p>(값은 이 노트 빌드의 <code>build/zephyr/.config</code>에서 확인했다.)</p>
+<p>FreeRTOS와의 결정적 차이: FreeRTOS는 "주기 tick이 기본이고 idle일 때만 멈춘다", Zephyr는 "<strong>타임아웃 리스트의 맨 앞이 바뀔 때마다</strong> 타이머를 그 시각에 다시 건다"이다. 그래서 Zephyr에서는 바쁜 스레드가 돌 때도 tick 인터럽트가 없다(A7 예제 8: slicing off면 0%).</p>
+<h3 id="8-2-커널-드라이버-경로">8.2 커널 → 드라이버 경로<a class="anchor" href="#8-2-커널-드라이버-경로" aria-label="link">#</a></h3>
+<ul><li>스레드가 <code>k_msleep(7)</code> → <code>z_add_timeout()</code>(kernel/timeout.c)가 타임아웃 리스트에 넣고, 맨 앞이 바뀌었으면 <code>sys_clock_set_timeout(next_timeout(...), false)</code>를 부른다.</li><li>타이머 인터럽트 → <code>sys_clock_isr()</code>(cortex_m_systick.c)가 지난 사이클을 tick으로 바꿔 <code>sys_clock_announce(dticks)</code> → 만료된 타임아웃 처리 → 다음 맨 앞으로 <code>sys_clock_set_timeout()</code> 재호출.</li><li>실행할 스레드가 없으면 idle 스레드(<code>kernel/idle.c</code>의 <code>idle()</code>)가 <code>arch_irq_lock()</code> 후 <code>k_cpu_idle()</code> → <code>arch_cpu_idle()</code>(arch/arm/core/cortex_m/cpu_idle.c) = WFI. <code>CONFIG_PM</code>이면 그 전에 <code>pm_system_suspend(z_get_next_timeout_expiry())</code>가 깊은 상태를 시도하고, 그때만 <code>sys_clock_set_timeout(ticks − exit_latency, true)</code>처럼 <strong>idle = true</strong>로 부른다(subsys/pm/pm.c).</li></ul>
+<p>즉 Zephyr의 "tickless idle"은 별도 함수가 아니다. <strong>언제나 다음 타임아웃에 타이머가 걸려 있으므로, idle은 그냥 WFI를 하면 된다.</strong> FreeRTOS의 <code>vPortSuppressTicksAndSleep()</code>이 하던 일 — 남은 시간 계산과 재설정 — 은 타임아웃이 바뀔 때마다 이미 끝나 있다.</p>
+<h3 id="8-3-sys_clock_set_timeout-해부-cortex_m_systick-c-v4-4-2">8.3 <code>sys_clock_set_timeout()</code> 해부 (cortex_m_systick.c, v4.4.2)<a class="anchor" href="#8-3-sys_clock_set_timeout-해부-cortex_m_systick-c-v4-4-2" aria-label="link">#</a></h3>
+<p>먼저 상수.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define COUNTER_MAX 0x00ffffff
+#define TIMER_STOPPED 0xff000000
+#define CYC_PER_TICK (CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC/CONFIG_SYS_CLOCK_TICKS_PER_SEC)
+#define _MAX_TICKS (int)((k_ticks_t)(COUNTER_MAX / CYC_PER_TICK) - 1)
+#define MAX_TICKS ((_MAX_TICKS &gt; 0) ? _MAX_TICKS : 1)
+#define MAX_CYCLES (MAX_TICKS * CYC_PER_TICK)
+#define MIN_DELAY MAX(1024U, ((uint32_t)CYC_PER_TICK/16U))</code></pre></figure>
+<ul><li>같은 24비트 한계: 100 Hz면 <code>MAX_TICKS</code> = 16777215/250000 − 1 = 66, 1000 Hz면 670. 둘 다 약 0.67초.</li><li><code>MIN_DELAY</code>: 너무 가까운 시각을 걸면 LOAD를 쓰는 사이에 지나가 버린다. 최소 1024사이클 또는 tick의 1/16. 소스 주석은 이 값이 "인터럽트가 막혀 있을 수 있는 최대 시간보다 커야 한다"고 말한다 — LOAD 한 바퀴보다 오래 인터럽트를 막으면 wrap을 놓치기 때문이다.</li></ul>
+<p>본문의 tickless 부분(줄임).</p>
+<figure class="code"><span class="lang">c</span><pre><code>	if (IS_ENABLED(CONFIG_TICKLESS_KERNEL) &amp;&amp; idle &amp;&amp; ticks == K_TICKS_FOREVER) {
+		SysTick-&gt;CTRL &amp;= ~SysTick_CTRL_ENABLE_Msk;
+		last_load = TIMER_STOPPED;
+		return;
+	}
+	/* ... (LPM companion 타이머 경로 생략) ... */
+	ticks = (ticks == K_TICKS_FOREVER) ? MAX_TICKS : ticks;
+	ticks = CLAMP(ticks - 1, 0, (int32_t)MAX_TICKS);
+
+	k_spinlock_key_t key = k_spin_lock(&amp;lock);
+	uint32_t pending = elapsed();
+	val1 = SysTick-&gt;VAL;
+	cycle_count += pending;
+	overflow_cyc = 0U;
+	uint32_t unannounced = cycle_count - announced_cycles;
+	/* ... */
+		delay = ticks * CYC_PER_TICK;
+		delay += unannounced;
+		delay = DIV_ROUND_UP(delay, CYC_PER_TICK) * CYC_PER_TICK;
+		delay -= unannounced;
+		delay = MAX(delay, MIN_DELAY);
+		if (delay &gt; MAX_CYCLES) {
+			last_load = MAX_CYCLES;
+		} else {
+			last_load = delay;
+		}
+	val2 = SysTick-&gt;VAL;
+	SysTick-&gt;LOAD = last_load - 1;
+	SysTick-&gt;VAL = 0; /* resets timer to last_load */
+	if (val1 &lt; val2) {
+		cycle_count += (val1 + (last_load_ - val2));
+	} else {
+		cycle_count += (val1 - val2);
+	}
+	k_spin_unlock(&amp;lock, key);</code></pre></figure>
+<p>단계별로:</p>
+<ol><li><strong>idle이고 영원히 기다린다면 SysTick을 끈다.</strong> 단, <code>idle == true</code>는 PM 경로에서만 온다. PM이 없는 이 보드에서는 이 줄이 실행되지 않는다(예제 9에서 "타임아웃 없는 idle"도 0.67초마다 깨는 이유).</li><li>영원(<code>K_TICKS_FOREVER</code>)은 <code>MAX_TICKS</code>로 바꾼다 — 24비트를 넘지 않게, 그리고 <code>cycle_count</code>(32비트 누적 사이클)가 wrap을 놓치지 않게 주기적으로 깨기 위해서다.</li><li><strong>SysTick을 멈추지 않는다.</strong> 대신 <code>elapsed()</code>로 지금까지 센 사이클을 <code>cycle_count</code>에 더하고, LOAD를 새로 쓴 뒤 VAL = 0으로 다시 시작한다. 읽기(val1)와 다시 시작 사이에 흐른 사이클(val1 − val2)도 더한다.</li><li>지연을 <strong>"아직 알리지 않은 사이클(unannounced)"을 포함해서 tick 경계로 올림</strong>한다. 그래서 인터럽트는 늘 tick 격자 위에서 난다. <code>sys_clock_isr()</code>는 <code>dticks = (cycle_count − announced_cycles) / CYC_PER_TICK</code>만큼만 알리고 나머지는 다음으로 넘긴다 — §7의 "절대 카운트 기준" 아이디어와 같다.</li></ol>
+<p>FreeRTOS mode 1과 비교하면: FreeRTOS는 "멈추고, 고정 보정 94를 빼고, 다시 켠다", Zephyr는 "멈추지 않고, 읽은 값의 차이로 직접 더한다". Zephyr 방식이 원리상 더 정확하지만, <strong>"읽은 순간"과 "다시 시작한 순간" 사이의 몇 명령은 여전히 아무도 세지 않는다</strong>(§8.6에서 측정).</p>
+<h3 id="8-4-idle은-정말-wfi-하나인가-역어셈블">8.4 idle은 정말 WFI 하나인가 — 역어셈블<a class="anchor" href="#8-4-idle은-정말-wfi-하나인가-역어셈블" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: Zephyr 빌드의 <code>arch_cpu_idle()</code>이 무엇을 하는지 기계어로 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'arm-none-eabi-objdump -d --no-show-raw-insn /var/tmp/rtos/C6/z1_tl100/zephyr/zephyr.elf | awk "/&lt;arch_cpu_idle&gt;:/,/^$/"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>00002660 &lt;arch_cpu_idle&gt;:
+    2660:	push	{r3, lr}
+    2662:	bl	2604 &lt;sys_trace_idle&gt;
+    2666:	cpsid	i
+    2668:	movs	r3, #0
+    266a:	msr	BASEPRI, r3
+    266e:	isb	sy
+    2672:	dsb	sy
+    2676:	wfi
+    2678:	bl	260c &lt;sys_trace_idle_exit&gt;
+    267c:	cpsie	i
+    267e:	isb	sy
+    2682:	pop	{r3, pc}</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>idle 스레드는 <code>arch_irq_lock()</code>(= BASEPRI 올림) 상태로 들어온다. 그대로 WFI를 하면 <strong>BASEPRI에 막힌 인터럽트는 WFI를 깨우지 못한다</strong>(§4.3 단계 ②와 같은 이유). 그래서 <code>cpsid i</code>로 PRIMASK를 먼저 세우고(실행은 막고) BASEPRI를 0으로 내린다(기상은 허용). 소스 주석: "configuring BASEPRI to the lowest priority to ensure wake-up will cause interrupts to be serviced".</li><li><code>wfi</code> 뒤 <code>cpsie i</code>에서 깨운 ISR이 실행된다. FreeRTOS port.c의 단계 ⑧과 같은 패턴이다.</li><li><code>sys_trace_idle</code> / <code>sys_trace_idle_exit</code>는 <code>CONFIG_TRACING=y</code>라서 들어간 호출이다. 다음 예제가 이 훅으로 idle 진입을 센다.</li></ul>
+<h3 id="8-5-예제-8-같은-부하를-zephyr로-몇-번-깨나">8.5 예제 8 — 같은 부하를 Zephyr로: 몇 번 깨나<a class="anchor" href="#8-5-예제-8-같은-부하를-zephyr로-몇-번-깨나" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 예제 1과 같은 부하(10 Hz × 500 µs, 4 Hz × 200 µs)를 Zephyr 스레드로 돌리고, <code>CONFIG_TRACING_USER</code>의 훅으로 ISR 진입 수와 idle(WFI) 진입 수, 깨어 있던 비율을 잰다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>CONFIG_PRINTK=y
+CONFIG_TRACING=y
+CONFIG_TRACING_USER=y</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* z1 — same mostly-idle workload on Zephyr: timer ISRs, idle (WFI) entries, awake % */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#define CYC() (*(volatile uint32_t *)0x40028018u)          /* FPGAIO 25 MHz counter */
+static volatile uint32_t n_isr, n_idle, sleep_cyc, t_idle, in_idle;
+
+void sys_trace_idle_user(void) { n_idle++; t_idle = CYC(); in_idle = 1; }   /* before WFI */
+void sys_trace_isr_enter_user(void)                                          /* after wake */
+{
+    n_isr++;
+    if (in_idle) { sleep_cyc += CYC() - t_idle; in_idle = 0; }
+}
+static void spin_us(uint32_t us) { uint32_t t = CYC(); while (CYC() - t &lt; us * 25u) { } }
+
+static void sensor(void *a, void *b, void *c)              /* 10 Hz: 500 us work */
+{
+    int64_t next = k_uptime_get();
+    for (;;) { spin_us(500); next += 100; k_sleep(K_TIMEOUT_ABS_MS(next)); }
+}
+static void telem(void *a, void *b, void *c)               /* 4 Hz: 200 us work */
+{
+    for (;;) { spin_us(200); k_msleep(250); }
+}
+K_THREAD_DEFINE(t_s, 1024, sensor, NULL, NULL, NULL, 3, 0, 0);
+K_THREAD_DEFINE(t_t, 1024, telem, NULL, NULL, NULL, 4, 0, 0);
+
+int main(void)                                              /* main = prio 0 */
+{
+    k_msleep(200);
+    unsigned int key = irq_lock();
+    n_isr = n_idle = sleep_cyc = 0;
+    uint32_t c0 = CYC();
+    int64_t k0 = k_uptime_ticks();
+    irq_unlock(key);
+    k_msleep(1000);
+    key = irq_lock();
+    uint32_t dc = CYC() - c0, i = n_isr, w = n_idle, sl = sleep_cyc;
+    int64_t dk = k_uptime_ticks() - k0;
+    irq_unlock(key);
+    uint32_t bp = (uint32_t)((uint64_t)(dc - sl) * 10000u / dc);
+    printk("zephyr %-8s %5d Hz slice=%d | timer_isr=%4u idle(wfi)=%4u | awake=%u.%02u%% "
+           "| ticks=%u wall=%u us\n",
+           IS_ENABLED(CONFIG_TICKLESS_KERNEL) ? "tickless" : "periodic",
+           CONFIG_SYS_CLOCK_TICKS_PER_SEC, IS_ENABLED(CONFIG_TIMESLICING), i, w,
+           bp / 100, bp % 100, (uint32_t)dk, dc / 25u);
+    register uint32_t r0 __asm__("r0") = 0x18, r1 __asm__("r1") = 0x20026;
+    __asm volatile("bkpt 0xab" : : "r"(r0), "r"(r1) : "memory");
+    return 0;
+}</code></pre></figure>
+<p><code>sys_trace_idle_user()</code>는 WFI 직전에, <code>sys_trace_isr_enter_user()</code>는 깬 뒤 ISR 첫머리에 불린다(<code>subsys/tracing/user/tracing_user.c</code>의 weak 함수를 덮어쓴다). 그 사이가 잠든 시간이다. 이 보드에서 printk는 polling UART라 인터럽트가 없으므로 ISR은 전부 SysTick(<code>sys_clock_isr</code>)이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'R=/var/rtoslab/bin; for v in "tl100:" "tl1000:-DCONFIG_SYS_CLOCK_TICKS_PER_SEC=1000" "tl1000_ns:-DCONFIG_SYS_CLOCK_TICKS_PER_SEC=1000 -DCONFIG_TIMESLICING=n" "p1000:-DCONFIG_TICKLESS_KERNEL=n -DCONFIG_SYS_CLOCK_TICKS_PER_SEC=1000"; do n=${v%%:*}; a=${v#*:}; $R/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/C6/z1 /var/tmp/rtos/C6/z1_$n -- $a | grep -i "warn\|error"; ICOUNT=1 $R/rtos-run-mps2 /var/tmp/rtos/C6/z1_$n/zephyr/zephyr.elf | grep zephyr; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>zephyr tickless   100 Hz slice=1 | timer_isr=  15 idle(wfi)=  15 | awake=0.62% | ticks=101 wall=1010027 us
+zephyr tickless  1000 Hz slice=1 | timer_isr=  15 idle(wfi)=  15 | awake=0.62% | ticks=1001 wall=1001026 us
+zephyr tickless  1000 Hz slice=0 | timer_isr=  15 idle(wfi)=  15 | awake=0.61% | ticks=1001 wall=1001016 us
+zephyr periodic  1000 Hz slice=1 | timer_isr=1001 idle(wfi)=1001 | awake=1.14% | ticks=1001 wall=1000999 us</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>tickless는 tick rate와 무관하게 15번</strong> 깼다(100 Hz든 1000 Hz든). tick rate는 해상도일 뿐이다.</li><li>FreeRTOS는 12번이었다. 차이 3번은 Zephyr의 상대 지연 규칙 때문이다: <code>k_msleep(1000)</code>이 <code>ticks=1001</code>로 끝났듯이 <strong>상대 타임아웃은 1 tick을 더한다</strong>(최소한 요청한 시간 이상 자도록 보장). 그래서 텔레메트리 주기가 251 tick(100 Hz면 26 tick = 260 ms)이 되어 센서(절대 시각 100 ms 격자)와 한 번도 겹치지 않는다. 10 + 4 + 측정 끝 1 = 15.</li><li>주기 tick(1000 Hz)은 1001번 깨고 깨어 있는 비율이 1.14%다. tickless와의 차이 0.52%p ÷ 986번 = <strong>tick 한 번에 약 5.3 µs</strong> — FreeRTOS의 2.3 µs보다 두 배 넘게 비싸다(A7에서 잰 4.5~4.8 µs/tick과 같은 경향: 64비트 시간 계산, 범용 타임아웃 리스트 처리).</li><li>slicing on/off는 이 부하에선 차이가 없다. 스레드들의 우선순위가 다 달라서 슬라이스 타이머가 걸리지 않기 때문이다(같은 우선순위 바쁜 스레드가 있으면 다르다 — A7 예제 8, §9.5).</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 296" xmlns="http://www.w3.org/2000/svg"><text x="210.0" y="18.0" font-size="13" text-anchor="start" font-weight="bold">1초 동안 깨어난 횟수 (log)</text><text x="470.0" y="18.0" font-size="13" text-anchor="start" font-weight="bold">깨어 있던 시간 %</text><line x1="210.0" y1="38" x2="210.0" y2="256" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="210.0" y="272.0" font-size="12" text-anchor="middle">1</text><line x1="280.0" y1="38" x2="280.0" y2="256" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="280.0" y="272.0" font-size="12" text-anchor="middle">10</text><line x1="350.0" y1="38" x2="350.0" y2="256" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="350.0" y="272.0" font-size="12" text-anchor="middle">100</text><line x1="420.0" y1="38" x2="420.0" y2="256" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="420.0" y="272.0" font-size="12" text-anchor="middle">1000</text><line x1="470.0" y1="38" x2="470.0" y2="256" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="470.0" y="272.0" font-size="12" text-anchor="middle">0</text><line x1="530.0" y1="38" x2="530.0" y2="256" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="530.0" y="272.0" font-size="12" text-anchor="middle">0.4</text><line x1="590.0" y1="38" x2="590.0" y2="256" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="590.0" y="272.0" font-size="12" text-anchor="middle">0.8</text><line x1="650.0" y1="38" x2="650.0" y2="256" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/><text x="650.0" y="272.0" font-size="12" text-anchor="middle">1.2</text><text x="200.0" y="61.0" font-size="12" text-anchor="end">FreeRTOS tick, idle 루프</text><rect x="210" y="49" width="210.0" height="18" fill="#888" fill-opacity="0.55" stroke="#888"/><text x="424.0" y="62.0" font-size="12" text-anchor="start">1000</text><rect x="470" y="49" width="180.0" height="18" fill="#888" fill-opacity="0.55" stroke="#888" stroke-dasharray="4 2"/><text x="646.0" y="62.0" font-size="12" text-anchor="end">100% (잘림)</text><text x="200.0" y="91.0" font-size="12" text-anchor="end">FreeRTOS tick + idle WFI</text><rect x="210" y="79" width="210.0" height="18" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/><text x="424.0" y="92.0" font-size="12" text-anchor="start">1000</text><rect x="470" y="79" width="126.0" height="18" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/><text x="600.0" y="92.0" font-size="12" text-anchor="start">0.84%</text><text x="200.0" y="121.0" font-size="12" text-anchor="end">FreeRTOS tickless mode 1</text><rect x="210" y="109" width="75.5" height="18" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/><text x="289.5" y="122.0" font-size="12" text-anchor="start">12</text><rect x="470" y="109" width="91.5" height="18" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/><text x="565.5" y="122.0" font-size="12" text-anchor="start">0.61%</text><text x="200.0" y="151.0" font-size="12" text-anchor="end">FreeRTOS mode 2 (DUALTIMER)</text><rect x="210" y="139" width="75.5" height="18" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/><text x="289.5" y="152.0" font-size="12" text-anchor="start">12</text><rect x="470" y="139" width="93.0" height="18" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/><text x="567.0" y="152.0" font-size="12" text-anchor="start">0.62%</text><text x="200.0" y="181.0" font-size="12" text-anchor="end">Zephyr periodic 1000 Hz</text><rect x="210" y="169" width="210.0" height="18" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/><text x="424.0" y="182.0" font-size="12" text-anchor="start">1001</text><rect x="470" y="169" width="171.0" height="18" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/><text x="645.0" y="182.0" font-size="12" text-anchor="start">1.14%</text><text x="200.0" y="211.0" font-size="12" text-anchor="end">Zephyr tickless 1000 Hz</text><rect x="210" y="199" width="82.3" height="18" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/><text x="296.3" y="212.0" font-size="12" text-anchor="start">15</text><rect x="470" y="199" width="93.0" height="18" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/><text x="567.0" y="212.0" font-size="12" text-anchor="start">0.62%</text><text x="200.0" y="241.0" font-size="12" text-anchor="end">Zephyr tickless 100 Hz</text><rect x="210" y="229" width="82.3" height="18" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/><text x="296.3" y="242.0" font-size="12" text-anchor="start">15</text><rect x="470" y="229" width="93.0" height="18" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/><text x="567.0" y="242.0" font-size="12" text-anchor="start">0.62%</text><text x="10.0" y="290.0" font-size="12" text-anchor="start">QEMU mps2-an385 icount · 부하: 10 Hz × 500 µs + 4 Hz × 200 µs (일 자체 = 0.58%)</text></svg></figure>
+<p>그림 6 — 같은 부하에서 1초 동안 깨어난 횟수(왼쪽, log)와 깨어 있던 시간 비율(오른쪽). 측정값. tickless 계열은 12~15번, 주기 tick 계열은 1000번이다. 깨어 있는 비율은 일(0.58%)에 tick 처리 비용이 더해진 값이고, ①은 idle이 WFI를 안 해서 100%다.</p>
+<h3 id="8-6-예제-9-zephyr-tickless의-시간-정확도와-타임아웃-없는-idle">8.6 예제 9 — Zephyr tickless의 시간 정확도와 "타임아웃 없는 idle"<a class="anchor" href="#8-6-예제-9-zephyr-tickless의-시간-정확도와-타임아웃-없는-idle" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: (1) <code>k_msleep(DLY)</code>를 5초 동안 반복한 뒤 커널 시간(<code>k_uptime_ticks()</code>)과 FPGAIO 벽시계의 차이, (2) 아무 스레드도 타임아웃을 기다리지 않을 때(TIMER0 ISR이 3초 뒤 세마포어를 줄 때까지) 몇 번 깨는지.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* z2 — Zephyr tickless: (1) time accuracy over many sleeps, (2) idle with no timeout */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/irq.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#define CYC()  (*(volatile uint32_t *)0x40028018u)
+#define T0(o)  (*(volatile uint32_t *)(0x40000000u + (o)))   /* CMSDK TIMER0, IRQ 8 */
+static volatile uint32_t n_isr, n_idle;
+static K_SEM_DEFINE(sem, 0, 1);
+
+void sys_trace_idle_user(void) { n_idle++; }
+void sys_trace_isr_enter_user(void) { n_isr++; }
+static void t0_isr(const void *arg) { T0(0xC) = 1; T0(0x0) = 0; k_sem_give(&amp;sem); }
+
+static void drift(int dly)
+{
+    k_msleep(1);
+    uint32_t c0 = CYC(), loops = 0;
+    int64_t k0 = k_uptime_ticks();
+    n_isr = n_idle = 0;
+    while (k_uptime_ticks() - k0 &lt; 5 * CONFIG_SYS_CLOCK_TICKS_PER_SEC) { k_msleep(dly); loops++; }
+    int64_t us_k = k_ticks_to_us_floor64(k_uptime_ticks() - k0);
+    uint32_t wall = (CYC() - c0) / 25u;
+    printk("  DLY=%2d ms loops=%4u isr=%4u idle=%4u kernel=%u wall=%u drift=%+d us\n",
+           dly, loops, n_isr, n_idle, (uint32_t)us_k, wall, (int)((uint32_t)us_k - wall));
+}
+
+int main(void)
+{
+    printk("zephyr %s %d Hz\n", IS_ENABLED(CONFIG_TICKLESS_KERNEL) ? "tickless" : "periodic",
+           CONFIG_SYS_CLOCK_TICKS_PER_SEC);
+    drift(2); drift(7); drift(50);
+
+    IRQ_CONNECT(8, 2, t0_isr, NULL, 0);                /* one-shot-ish: 3 s from now */
+    irq_enable(8);
+    n_isr = n_idle = 0;
+    uint32_t c0 = CYC();
+    T0(0x8) = 3u * 25000000u; T0(0x4) = 3u * 25000000u; T0(0x0) = 1u | 8u;
+    k_sem_take(&amp;sem, K_FOREVER);                        /* nothing else has a timeout */
+    printk("  no-timeout idle: %u us, isr=%u (incl. 1 TIMER0) idle=%u\n",
+           (CYC() - c0) / 25u, n_isr, n_idle);
+    register uint32_t r0 __asm__("r0") = 0x18, r1 __asm__("r1") = 0x20026;
+    __asm volatile("bkpt 0xab" : : "r"(r0), "r"(r1) : "memory");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'R=/var/rtoslab/bin; for v in "tl100:" "tl1000:-DCONFIG_SYS_CLOCK_TICKS_PER_SEC=1000" "p1000:-DCONFIG_TICKLESS_KERNEL=n -DCONFIG_SYS_CLOCK_TICKS_PER_SEC=1000"; do n=${v%%:*}; a=${v#*:}; $R/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/C6/z2 /var/tmp/rtos/C6/z2_$n -- $a | grep -i "warn\|error"; ICOUNT=1 $R/rtos-run-mps2 /var/tmp/rtos/C6/z2_$n/zephyr/zephyr.elf 30 | grep -v "Booting\|^$"; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>zephyr tickless 100 Hz
+  DLY= 2 ms loops= 250 isr= 250 idle= 250 kernel=5000000 wall=5000623 drift=-623 us
+  DLY= 7 ms loops= 250 isr= 250 idle= 250 kernel=5000000 wall=5000623 drift=-623 us
+  DLY=50 ms loops=  84 isr=  84 idle=  84 kernel=5040000 wall=5040212 drift=-212 us
+  no-timeout idle: 3000015 us, isr=5 (incl. 1 TIMER0) idle=5
+zephyr tickless 1000 Hz
+  DLY= 2 ms loops=1667 isr=1667 idle=1667 kernel=5001000 wall=5005018 drift=-4018 us
+  DLY= 7 ms loops= 625 isr= 625 idle= 625 kernel=5000000 wall=5001509 drift=-1509 us
+  DLY=50 ms loops=  99 isr=  99 idle=  99 kernel=5049000 wall=5049242 drift=-242 us
+  no-timeout idle: 3000015 us, isr=5 (incl. 1 TIMER0) idle=5
+zephyr periodic 1000 Hz
+  DLY= 2 ms loops=1667 isr=5001 idle=5001 kernel=5001000 wall=5001001 drift=-1 us
+  DLY= 7 ms loops= 625 isr=5000 idle=5000 kernel=5000000 wall=5000001 drift=-1 us
+  DLY=50 ms loops=  99 isr=5049 idle=5049 kernel=5049000 wall=5049001 drift=-1 us
+  no-timeout idle: 3000011 us, isr=3001 (incl. 1 TIMER0) idle=3001</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>Zephyr tickless는 sleep 한 번마다 커널 시계가 약 2.4 µs 늦어진다</strong>: 623/250 = 2.49, 4018/1667 = 2.41, 1509/625 = 2.41, 242/99 = 2.44 µs. FreeRTOS mode 1과 크기는 비슷하고 <strong>부호가 반대</strong>다(FreeRTOS는 보정을 너무 많이 해서 빠르고, Zephyr는 못 센 시간이 있어서 느리다). 주기 tick은 −1 µs(측정 해상도)라 정확하다.</li><li>100 Hz에서는 <code>k_msleep(2)</code>와 <code>k_msleep(7)</code>이 똑같이 250번 돈다. 둘 다 1 tick으로 올림 + 1 tick = 20 ms다. tick rate가 낮으면 짧은 지연이 크게 부풀려진다.</li><li><strong>타임아웃이 하나도 없어도 3초에 SysTick이 4번 깼다</strong>(isr 5 − TIMER0 1). 약 0.67초마다다 — <code>K_TICKS_FOREVER</code> → <code>MAX_TICKS</code>. FreeRTOS mode 1의 671 ms와 같은 24비트 한계다. PM이 켜진 실칩에서는 idle = true 경로로 SysTick을 아예 끄고(§8.3 단계 1) 저전력 타이머(LPM companion, 다음 절)에 맡긴다.</li><li>주기 tick은 같은 3초에 3000번 깼다.</li></ul>
+<p>drift 원인을 좁히려고, 재설정이 한 loop에 몇 번 일어나는지 셌다.</p>
+<p>무엇을 확인하는 코드인지: 링커의 <code>--wrap</code>으로 kernel/timeout.c → <code>sys_clock_set_timeout()</code> 호출을 가로채 횟수를 세고, drift를 호출 1회당으로 나눈다.</p>
+<figure class="code"><span class="lang">cmake</span><pre><code>cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(c6_z3)
+zephyr_ld_options(-Wl,--wrap=sys_clock_set_timeout)   # count calls from kernel/timeout.c
+target_sources(app PRIVATE src/main.c)</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* z3 — how often does the tickless kernel reprogram SysTick, and what does each cost in drift? */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/drivers/timer/system_timer.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#define CYC() (*(volatile uint32_t *)0x40028018u)
+static volatile uint32_t n_set;
+
+void __real_sys_clock_set_timeout(int32_t ticks, bool idle);
+void __wrap_sys_clock_set_timeout(int32_t ticks, bool idle)
+{
+    n_set++;
+    __real_sys_clock_set_timeout(ticks, idle);
+}
+
+int main(void)
+{
+    k_msleep(1);
+    uint32_t c0 = CYC();
+    int64_t k0 = k_uptime_ticks();
+    n_set = 0;
+    for (int i = 0; i &lt; 625; i++) k_msleep(7);
+    uint32_t calls = n_set;
+    int64_t us_k = k_ticks_to_us_floor64(k_uptime_ticks() - k0);
+    uint32_t wall = (CYC() - c0) / 25u;
+    int drift_ns = (int)(((int64_t)us_k - wall) * 1000);
+    printk("625 x k_msleep(7) @ %d Hz: set_timeout calls=%u (%u.%02u per loop)\n",
+           CONFIG_SYS_CLOCK_TICKS_PER_SEC, calls, calls / 625, (calls * 100 / 625) % 100);
+    printk("  kernel=%u us wall=%u us drift=%d us = %d ns per loop = %d ns per call\n",
+           (uint32_t)us_k, wall, drift_ns / 1000, drift_ns / 625, drift_ns / (int)calls);
+    register uint32_t r0 __asm__("r0") = 0x18, r1 __asm__("r1") = 0x20026;
+    __asm volatile("bkpt 0xab" : : "r"(r0), "r"(r1) : "memory");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'R=/var/rtoslab/bin; $R/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/C6/z3 /var/tmp/rtos/C6/z3 -- -DCONFIG_SYS_CLOCK_TICKS_PER_SEC=1000 | grep -i "warn\|error"; ICOUNT=1 $R/rtos-run-mps2 /var/tmp/rtos/C6/z3/zephyr/zephyr.elf 30 | grep -v "Booting\|^$"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>625 x k_msleep(7) @ 1000 Hz: set_timeout calls=1875 (3.00 per loop)
+  kernel=5000000 us wall=5001542 us drift=-1542 us = -2467 ns per loop = -822 ns per call</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>loop 한 번에 <code>sys_clock_set_timeout()</code>이 <strong>정확히 3번</strong> 불린다(kernel/timeout.c의 타임아웃 추가 경로와 <code>sys_clock_announce()</code> 끝의 재설정이 포함된다 — 호출 경로별로 나눠 세지는 않았다). 호출 1회당 약 <strong>0.82 µs ≈ 20 SysTick 카운트 ≈ QEMU 명령 26개</strong>를 잃는다.</li><li>역어셈블로 보면(위 빌드의 <code>sys_clock_set_timeout</code> + <code>elapsed</code>), <code>elapsed()</code> 안에서 VAL을 마지막으로 읽은 뒤 <code>val1 = SysTick-&gt;VAL</code>까지 약 16명령, <code>val2</code> 읽기부터 <code>VAL = 0</code> 쓰기까지 3명령이 어느 쪽 계산에도 들어가지 않는다. 그 합(약 20명령)이 측정된 손실(26명령분)과 같은 크기다. <strong>원인 후보로는 이게 가장 그럴듯하지만, 실칩에서 같은 크기로 나타나는지는 확인 못 함</strong>(실칩은 같은 명령이 더 많은 사이클을 쓰므로 손실이 더 클 수도 있다).</li><li>실무 결론은 FreeRTOS와 같다: <strong>tickless 커널의 uptime으로 달력 시간을 유지하지 말라.</strong> 오차는 "깬 횟수 × 회당 몇 µs"이고, 회당 값은 커널·포트·칩마다 다르다.</li></ul>
+<h3 id="8-7-zephyr에서-저전력-타이머를-쓰는-법-개념">8.7 Zephyr에서 저전력 타이머를 쓰는 법 (개념)<a class="anchor" href="#8-7-zephyr에서-저전력-타이머를-쓰는-법-개념" aria-label="link">#</a></h3>
+<ul><li>많은 SoC는 SysTick 대신 <strong>저전력 타이머 자체를 system timer 드라이버</strong>로 쓴다: nRF는 RTC(<code>drivers/timer/nrf_rtc_timer.c</code>), STM32는 LPTIM(<code>drivers/timer/stm32_lptim_timer.c</code>). 이 경우 <code>sys_clock_set_timeout()</code>이 처음부터 32.768 kHz 카운터의 compare를 건다 — §7과 같은 구조다.</li><li>v4.4.2의 cortex_m_systick.c에는 <strong>"LPM companion"</strong> 옵션(<code>CONFIG_SYSTEM_TIMER_LPM_COMPANION_*</code>)이 있다. 평소에는 SysTick을 쓰다가 idle = true로 깊이 잘 때만 <code>z_sys_clock_lpm_enter(timeout_us)</code>로 보조 저전력 타이머를 걸고, 깬 뒤 그 타이머로 잰 시간만큼 <code>cycle_count</code>를 보정한다(§8.3에서 생략한 부분). SysTick이 수면 중 리셋되는 SoC를 위한 <code>CONFIG_SYSTEM_TIMER_RESET_BY_LPM</code>도 있다.</li><li>어느 쪽이든 "언제 깊이 잘지"는 PM 정책(<code>pm_system_suspend()</code>가 각 상태의 <code>min-residency-us</code>, <code>exit-latency-us</code>를 보고 고름)의 일이다 — P2에서 다룬다.</li></ul>
+<h3 id="8-8-측정-차트-만들기">8.8 측정 차트 만들기<a class="anchor" href="#8-8-측정-차트-만들기" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 이 노트의 측정값(예제 1, 4, 8, 9)으로 그림 4와 그림 6의 SVG 좌표를 계산하고, 글자가 칸을 넘지 않는지 검사한다.</p>
+<figure class="code"><span class="lang">python</span><pre><code># charts.py — measured charts for C6: wakeups/s + awake %, and drift per sleep
+import math
+def tw(s, size=12): return sum(size if ord(c) &gt;= 0x1100 else size * 7.5 / 13 for c in s)
+BL, OR, GR, RD, GY = "#4a7bd0", "#e08a3c", "#3f9a6b", "#d0564a", "#888"; warn = []
+def T(x, y, s, size=12, a="start", b=False, maxw=None):   # text + overflow check
+    if maxw and tw(s, size) &gt; maxw: warn.append(f"overflow: {s}")
+    return f'&lt;text x="{x:.1f}" y="{y:.1f}" font-size="{size}" text-anchor="{a}"{" font-weight=\"bold\"" if b else ""}&gt;{s}&lt;/text&gt;'
+
+# measured (ex1 / z1): label, wakeups in 1 s, awake %, color
+rows = [("FreeRTOS tick, idle 루프", 1000, 100.0, GY),
+        ("FreeRTOS tick + idle WFI", 1000, 0.84, OR),
+        ("FreeRTOS tickless mode 1", 12, 0.61, BL),
+        ("FreeRTOS mode 2 (DUALTIMER)", 12, 0.62, GR),
+        ("Zephyr periodic 1000 Hz", 1001, 1.14, OR),
+        ("Zephyr tickless 1000 Hz", 15, 0.62, BL),
+        ("Zephyr tickless 100 Hz", 15, 0.62, BL)]
+W, top, rh = 680, 46, 30; H = top + rh * len(rows) + 40
+lx, l0, l1 = 200, 210, 420          # left panel: log10(1..1000) -&gt; l0..l1
+r0, r1 = 470, 650                   # right panel: 0..1.2 %
+e = [f'&lt;svg viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg"&gt;']
+e.append(T(l0, 18, "1초 동안 깨어난 횟수 (log)", 13, b=True, maxw=r0 - l0 - 10))
+e.append(T(r0, 18, "깨어 있던 시간 %", 13, b=True, maxw=W - r0))
+for v in (1, 10, 100, 1000):
+    x = l0 + (l1 - l0) * math.log10(v) / 3
+    e.append(f'&lt;line x1="{x:.1f}" y1="{top-8}" x2="{x:.1f}" y2="{top + rh*len(rows)}" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/&gt;')
+    e.append(T(x, top + rh * len(rows) + 16, str(v), 12, "middle"))
+for v in (0, 0.4, 0.8, 1.2):
+    x = r0 + (r1 - r0) * v / 1.2
+    e.append(f'&lt;line x1="{x:.1f}" y1="{top-8}" x2="{x:.1f}" y2="{top + rh*len(rows)}" stroke="currentColor" stroke-width="0.4" stroke-dasharray="2 3"/&gt;')
+    e.append(T(x, top + rh * len(rows) + 16, f"{v:g}", 12, "middle"))
+for i, (lab, n, aw, c) in enumerate(rows):
+    y = top + i * rh; e.append(T(lx, y + 15, lab, 12, "end", maxw=lx - 4))
+    x = l0 + (l1 - l0) * math.log10(max(n, 1)) / 3
+    e.append(f'&lt;rect x="{l0}" y="{y+3}" width="{x - l0:.1f}" height="18" fill="{c}" fill-opacity="0.55" stroke="{c}"/&gt;')
+    e.append(T(x + 4, y + 16, str(n), 12))
+    clip = aw &gt; 1.2; xa = r0 + (r1 - r0) * min(aw, 1.2) / 1.2
+    e.append(f'&lt;rect x="{r0}" y="{y+3}" width="{xa - r0:.1f}" height="18" fill="{c}" fill-opacity="0.55" stroke="{c}"{" stroke-dasharray=\"4 2\"" if clip else ""}/&gt;')
+    lbl = f"{aw:g}%" + (" (잘림)" if clip else "")
+    e.append(T(xa - 4 if clip else xa + 4, y + 16, lbl, 12, "end" if clip else "start"))
+e.append(T(10, H - 6, "QEMU mps2-an385 icount · 부하: 10 Hz × 500 µs + 4 Hz × 200 µs (일 자체 = 0.58%)", 12, maxw=W - 14))
+e.append("&lt;/svg&gt;"); open("/var/tmp/rtos/C6/svg4.svg", "w").write("".join(e))
+
+# drift per sleep cycle (ex3 / z2): label, total drift us, sleeps
+d = [("FreeRTOS mode 1, 타임아웃 기상", 5400, 2500),
+     ("FreeRTOS mode 1, TIMER0 조기 기상", 8450, 3645),
+     ("FreeRTOS mode 2 (DUALTIMER)", 0, 2500),
+     ("FreeRTOS tick 켬 (tickless 끔)", 0, 715),
+     ("Zephyr tickless 1000 Hz", -1509, 625),
+     ("Zephyr tickless 100 Hz", -623, 250),
+     ("Zephyr periodic 1000 Hz", -1, 625)]
+top, rh = 40, 28; H = top + rh * len(d) + 44
+lx, z, sc = 236, 456, 70.0          # zero line at x=456, 70 px per us
+e = [f'&lt;svg viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg"&gt;']
+e.append(T(10, 18, "sleep 한 번마다 커널 시계가 벽시계보다 앞선 시간 (µs, +는 커널이 빠름)", 13, b=True, maxw=W - 14))
+for v in (-3, -2, -1, 0, 1, 2, 3):
+    x = z + v * sc
+    if x &lt; lx + 6 or x &gt; W - 4: continue
+    e.append(f'&lt;line x1="{x:.1f}" y1="{top-6}" x2="{x:.1f}" y2="{top + rh*len(d)}" stroke="currentColor" stroke-width="{1 if v == 0 else 0.4}"{"" if v == 0 else " stroke-dasharray=\"2 3\""}/&gt;')
+    e.append(T(x, top + rh * len(d) + 16, f"{v:+d}" if v else "0", 12, "middle"))
+for i, (lab, tot, n) in enumerate(d):
+    y, v = top + i * rh, tot / n; e.append(T(lx, y + 15, lab, 12, "end", maxw=lx - 4))
+    c = OR if v &gt; 0.05 else (RD if v &lt; -0.05 else GR)
+    x = z + v * sc; a, b = (z, x) if v &gt;= 0 else (x, z)
+    e.append(f'&lt;rect x="{a:.1f}" y="{y+3}" width="{max(b - a, 1.5):.1f}" height="16" fill="{c}" fill-opacity="0.55" stroke="{c}"/&gt;')
+    e.append(T(b + 4 if v &gt;= 0 else a - 4, y + 15, f"{v:+.2f}", 12, "start" if v &gt;= 0 else "end"))
+e.append(T(10, H - 6, "총 drift ÷ sleep 횟수 (5 s 측정, ex3 · z2). QEMU icount 기준 — 실칩에서는 값이 다르다.", 12, maxw=W - 14))
+e.append("&lt;/svg&gt;"); open("/var/tmp/rtos/C6/svg5.svg", "w").write("".join(e))
+for lab, tot, n in d: print(f"{lab:34s} {tot / n:+.3f} us/sleep")
+print("\n".join(warn) if warn else "charts written, all labels fit")</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- python3 /Users/donh/.rtos_scratch/C6/py/charts.py</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>FreeRTOS mode 1, 타임아웃 기상           +2.160 us/sleep
+FreeRTOS mode 1, TIMER0 조기 기상      +2.318 us/sleep
+FreeRTOS mode 2 (DUALTIMER)        +0.000 us/sleep
+FreeRTOS tick 켬 (tickless 끔)       +0.000 us/sleep
+Zephyr tickless 1000 Hz            -2.414 us/sleep
+Zephyr tickless 100 Hz             -2.492 us/sleep
+Zephyr periodic 1000 Hz            -0.002 us/sleep
+charts written, all labels fit</code></pre></figure>
+<p>출력에서 볼 것: 회당 drift는 FreeRTOS mode 1이 +2.16(타임아웃)/+2.32(조기 기상) µs, Zephyr tickless가 −2.41~−2.49 µs, 멈추지 않는 카운터를 쓰는 mode 2와 주기 tick은 0이다. (한글 라벨 정렬이 터미널에서 어긋나 보이는 것은 고정폭 글꼴의 한글 폭 때문이다.)</p>
+<h3 id="8-9-freertos-vs-zephyr-한눈에">8.9 FreeRTOS vs Zephyr 한눈에<a class="anchor" href="#8-9-freertos-vs-zephyr-한눈에" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>항목</th><th>FreeRTOS (V11.3.2, ARM_CM3)</th><th>Zephyr (v4.4.2, cortex_m_systick)</th></tr></thead><tbody><tr><td>기본값</td><td>꺼짐(<code>configUSE_TICKLESS_IDLE 0</code>)</td><td>켜짐(<code>CONFIG_TICKLESS_KERNEL=y</code>)</td></tr><tr><td>tick을 끄는 때</td><td>idle 태스크가 돌 때만</td><td>항상 — 다음 타임아웃에만 타이머</td></tr><tr><td>바쁜 태스크 하나일 때 tick</td><td>1 kHz 그대로</td><td>0 (slicing off일 때, A7)</td></tr><tr><td>결정 지점</td><td><code>prvGetExpectedIdleTime()</code> + 문턱</td><td><code>next_timeout()</code> (timeout.c)</td></tr><tr><td>하드웨어 재설정</td><td><code>vPortSuppressTicksAndSleep()</code></td><td><code>sys_clock_set_timeout()</code></td></tr><tr><td>시간 보정</td><td>SysTick 멈춤 + 고정 94카운트 + <code>vTaskStepTick()</code></td><td>멈추지 않음, <code>cycle_count</code> 누적 + <code>sys_clock_announce()</code></td></tr><tr><td>한 번 최대 수면 (25 MHz)</td><td>671 tick = 671 ms</td><td><code>MAX_TICKS</code> ≈ 0.67 s</td></tr><tr><td>측정 drift (QEMU)</td><td>+2.16~2.32 µs/sleep</td><td>−2.4 µs/sleep (재설정 3회)</td></tr><tr><td>측정 기상 (예제 1 부하)</td><td>12/s</td><td>15/s (상대 지연 +1 tick)</td></tr><tr><td>저전력 타이머</td><td>mode 2로 직접 구현</td><td>SoC system timer 드라이버 또는 LPM companion</td></tr><tr><td>깊은 수면 정책</td><td><code>configPRE_SLEEP_PROCESSING</code>에 직접</td><td><code>CONFIG_PM</code> + DT 전력 상태</td></tr></tbody></table></div>
+<hr>
+<h2 id="9-함정-tickless를-켠-뒤에-생기는-일">9. 함정 — tickless를 켠 뒤에 생기는 일<a class="anchor" href="#9-함정-tickless를-켠-뒤에-생기는-일" aria-label="link">#</a></h2>
+<h3 id="9-1-drift-타이머를-멈추고-다시-켤-때마다">9.1 drift — 타이머를 멈추고 다시 켤 때마다<a class="anchor" href="#9-1-drift-타이머를-멈추고-다시-켤-때마다" aria-label="link">#</a></h3>
+<p>§5·§8.6에서 잰 대로, 회당 µs 단위 오차가 수면 횟수에 비례해 쌓인다. 대처: 달력 시간은 RTC에서 읽는다 · mode 2처럼 멈추지 않는 카운터를 시간 기준으로 쓴다 · tickless를 켜고 끈 두 빌드로 장시간 drift를 재서 문서화한다.</p>
+<h3 id="9-2-wake-latency-깨어나는-데-걸리는-시간">9.2 wake latency — 깨어나는 데 걸리는 시간<a class="anchor" href="#9-2-wake-latency-깨어나는-데-걸리는-시간" aria-label="link">#</a></h3>
+<p>얕은 WFI의 기상은 몇 사이클이지만, STOP 같은 깊은 모드는 레귤레이터·클럭 기동 때문에 µs~수십 µs가 걸리고, PLL을 다시 잠그면 더 걸린다(값은 칩 데이터시트의 "wakeup time from Stop" 표를 본다 — 칩·모드·전압 범위마다 다르다). 결과:</p>
+<ul><li><strong>타임아웃 기상이 늦어진다.</strong> tick 경계에 맞춰 깨도 태스크는 exit latency만큼 늦게 돈다. 해결: 그만큼 일찍 깨운다(Zephyr PM은 <code>ticks − exit_latency_ticks</code>로 건다, pm.c).</li><li><strong>외부 인터럽트 응답이 늦어진다.</strong> 드론 IMU data-ready(1 kHz 이상)에 수십 µs 기상 지연이 붙으면 제어 루프 지터가 된다. 해결: 그런 장치는 깊은 수면을 금지하고(PM 정책의 "constraint", P2) 얕은 WFI만 쓴다.</li></ul>
+<h3 id="9-3-디버거가-끊긴다">9.3 디버거가 끊긴다<a class="anchor" href="#9-3-디버거가-끊긴다" aria-label="link">#</a></h3>
+<p>깊은 수면에서 코어 클럭·디버그 도메인이 꺼지면 SWD/JTAG 연결이 끊기거나 breakpoint가 안 걸린다. STM32라면 DBGMCU_CR의 DBG_SLEEP/DBG_STOP/DBG_STANDBY 비트로 "수면 중에도 디버그 클럭 유지"를 켤 수 있다 — <strong>켜면 전류 측정이 틀어지므로</strong> 전력 측정 빌드에서는 끈다. 증상이 "tickless를 켜면 디버거가 Target not responding"이라면 이것부터 의심한다. (QEMU의 gdb stub은 이 영향이 없다 — 예제 3이 잘 돈 이유.)</p>
+<h3 id="9-4-tick에-기대는-코드와-주변장치">9.4 tick에 기대는 코드와 주변장치<a class="anchor" href="#9-4-tick에-기대는-코드와-주변장치" aria-label="link">#</a></h3>
+<ul><li><strong>tick hook으로 시간을 세는 코드</strong>: <code>vTaskStepTick()</code>은 건너뛴 tick마다 hook을 부르지 않는다(§4.4). tick hook에서 소프트웨어 타이머·LED 깜빡임·watchdog 카운트를 하면 tickless에서 멈춘다.</li><li><strong><code>xTaskGetTickCount()</code> 폴링 루프</strong>: <code>while (xTaskGetTickCount() - t0 &lt; 10) {}</code>는 바쁜 대기라 idle이 안 돌아 tickless와 무관하지만, 반대로 <code>vTaskDelay(1)</code>을 끼운 폴링은 1 tick이라 문턱(2)을 못 넘어 <strong>아예 안 잔다</strong>(예제 5).</li><li><strong>클럭이 꺼지는 주변장치</strong>: 깊은 수면에서 UART 수신(baud 클럭), PWM, ADC가 멈춘다. 저전력 UART(LPUART)나 wake-up 가능한 핀(EXTI)으로 바꾸거나, 그 장치가 동작 중이면 수면 깊이를 제한한다(<code>configPRE_SLEEP_PROCESSING</code>에서 판단, Zephyr는 <code>pm_policy_state_lock_get()</code>).</li><li><strong>HAL의 SysTick 의존</strong>: 벤더 HAL은 <code>HAL_Delay()</code>·타임아웃을 SysTick 1 ms 인터럽트로 세는 경우가 많다(STM32 HAL의 <code>HAL_IncTick()</code>). RTOS tick을 SysTick에서 LPTIM으로 옮기면 HAL용 시간 기준을 따로 정해야 한다.</li></ul>
+<h3 id="9-5-tickless-time-slicing">9.5 tickless + time slicing<a class="anchor" href="#9-5-tickless-time-slicing" aria-label="link">#</a></h3>
+<ul><li><strong>FreeRTOS</strong>: idle 우선순위에 ready 태스크가 하나 더 있으면 <code>prvGetExpectedIdleTime()</code>이 0을 돌려준다(§4.1) — "다음 tick에 그 태스크로 바꿔야 하니까". idle 우선순위에 백그라운드 태스크를 두면 <strong>tickless가 영영 안 걸린다.</strong> 해결: 백그라운드 일은 idle hook으로 옮기거나 우선순위를 1 이상으로 올리고 블로킹하게 짠다.</li><li><strong>Zephyr</strong>: 같은 우선순위의 바쁜 스레드가 있으면 슬라이스 타이머(<code>CONFIG_TIMESLICE_SIZE</code>, 기본 20 ms)가 타임아웃으로 걸린다 — A7 예제 8에서 tickless + slicing on은 200 ms에 10번 깼다. 배터리 장비는 <code>CONFIG_TIMESLICING=n</code> 또는 우선순위를 나눠서 슬라이스가 필요 없게 짠다.</li></ul>
+<h3 id="9-6-tickless를-켰는데-전류가-그대로">9.6 "tickless를 켰는데 전류가 그대로"<a class="anchor" href="#9-6-tickless를-켰는데-전류가-그대로" aria-label="link">#</a></h3>
+<p>체크 순서: (1) 정말 idle이 도나(바쁜 대기·로그 출력 태스크) (2) 예상 idle이 문턱을 넘나(1 tick 지연) (3) idle 우선순위에 다른 태스크가 있나 (4) <code>configPRE_SLEEP_PROCESSING</code>에서 실제로 깊은 모드에 들어가나(기본은 그냥 WFI = 얕은 수면) (5) 깨우는 인터럽트가 너무 자주 오나(예: 디버그 UART RX 노이즈, 1 kHz 센서 IRQ) (6) 주변장치 클럭이 켜져 있나. 측정은 이 노트처럼 <strong>깨는 횟수</strong>부터 센다 — 전류계 없이도 대부분 원인이 보인다.</p>
+<hr>
+<h2 id="10-rtos-커널-안에서는-무슨-일이-일어나나">10. RTOS 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#10-rtos-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>단계</th><th>FreeRTOS (파일 · 함수)</th><th>Zephyr (파일 · 함수)</th></tr></thead><tbody><tr><td>다음 깰 시각</td><td>tasks.c <code>xNextTaskUnblockTime</code> (C5의 지연 리스트 맨 앞)</td><td>kernel/timeout.c <code>next_timeout()</code></td></tr><tr><td>잘 수 있나</td><td>tasks.c <code>prvGetExpectedIdleTime()</code> + <code>configEXPECTED_IDLE_TIME_BEFORE_SLEEP</code></td><td>항상(타이머가 이미 걸려 있음), <code>CONFIG_PM</code>이면 <code>pm_system_suspend()</code></td></tr><tr><td>경쟁 조건 차단</td><td><code>vTaskSuspendAll()</code> + <code>cpsid i</code> + <code>eTaskConfirmSleepModeStatus()</code></td><td><code>arch_irq_lock()</code> 상태로 idle 진입, <code>arch_cpu_idle()</code>에서 PRIMASK/BASEPRI 정리</td></tr><tr><td>타이머 재설정</td><td>port.c <code>vPortSuppressTicksAndSleep()</code> (SysTick LOAD)</td><td>drivers/timer/cortex_m_systick.c <code>sys_clock_set_timeout()</code></td></tr><tr><td>수면</td><td>port.c 안의 <code>wfi</code> (+ <code>configPRE/POST_SLEEP_PROCESSING</code>)</td><td>arch/arm/core/cortex_m/cpu_idle.c <code>arch_cpu_idle()</code></td></tr><tr><td>시간 보정</td><td>tasks.c <code>vTaskStepTick()</code> → <code>xPendedTicks</code> → <code>xTaskResumeAll()</code></td><td><code>sys_clock_isr()</code> → <code>sys_clock_announce(dticks)</code> (kernel/timeout.c)</td></tr><tr><td>저전력 타이머</td><td>mode 2: <code>portSUPPRESS_TICKS_AND_SLEEP</code> + <code>vPortSetupTimerInterrupt()</code> 덮어쓰기</td><td>SoC system timer 드라이버 / LPM companion</td></tr></tbody></table></div>
+<p>관련 모듈: tick 자체와 지연 리스트는 C5, PRIMASK·BASEPRI는 B3, 인터럽트 우선순위와 <code>FromISR</code> 규칙은 E1, MCU 전력 모드(SLEEP/STOP/STANDBY)는 P1, 전력 정책(언제 어느 깊이로)은 P2.</p>
+<hr>
+<h2 id="11-실무에서-다시-보기">11. 실무에서 다시 보기<a class="anchor" href="#11-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="11-1-드론-비행-제어기-비행-중엔-끄고-지상-대기에선-켠다">11.1 드론 비행 제어기 — 비행 중엔 끄고, 지상 대기에선 켠다<a class="anchor" href="#11-1-드론-비행-제어기-비행-중엔-끄고-지상-대기에선-켠다" aria-label="link">#</a></h3>
+<p>예를 들어 STM32H7급 드론 FC라면, 비행 중에는 IMU 1~8 kHz와 rate loop가 쉬지 않으므로 idle이 거의 없고 tickless의 이득도 없다. 오히려 깊은 수면의 기상 지연이 IMU data-ready 응답에 붙으면 위험하다. 반면 <strong>배터리 연결 후 이륙 전 대기, 착륙 후 대기, 원격 조종기·GNSS 트래커 같은 보조 MCU</strong>는 대부분 idle이라 tickless + 저전력 타이머가 대기 전류를 정한다. 설계 문장: "armed 상태에서는 PM constraint로 깊은 수면 금지, disarmed에서는 tickless + STOP 허용". 그리고 480 MHz 코어의 SysTick tickless는 한 번에 34 ms밖에 못 자므로(§7.1), 대기 모드에서는 LPTIM/RTC로 tick을 옮긴다.</p>
+<h3 id="11-2-센서-허브-mcu-타임스탬프는-tick이-아니라-하드웨어-카운터로">11.2 센서 허브 MCU — 타임스탬프는 tick이 아니라 하드웨어 카운터로<a class="anchor" href="#11-2-센서-허브-mcu-타임스탬프는-tick이-아니라-하드웨어-카운터로" aria-label="link">#</a></h3>
+<p>Linux SoC 옆의 센서 허브가 IMU 샘플에 타임스탬프를 찍는다면, tickless의 drift(§5, §8.6: 회당 µs, 짧게 자주 자면 1000 ppm 수준)를 타임스탬프에 쓰면 안 된다. 타임스탬프는 멈추지 않는 하드웨어 카운터(자유 실행 32비트 타이머 또는 RTC 서브초)에서 읽고, Linux 쪽과는 그 카운터로 동기화한다. 커널 tick은 "다음 샘플까지 자기" 같은 상대 시간에만 쓴다.</p>
+<h3 id="11-3-로봇-관절-모터-컨트롤러-tickless가-거의-무의미한-경우">11.3 로봇 관절 모터 컨트롤러 — tickless가 거의 무의미한 경우<a class="anchor" href="#11-3-로봇-관절-모터-컨트롤러-tickless가-거의-무의미한-경우" aria-label="link">#</a></h3>
+<p>FOC 전류 루프 20 kHz는 타이머 ISR로 돌고 CPU가 쉴 틈이 거의 없다. 이런 MCU에서는 tickless를 켜도 깨는 횟수는 20 kHz ISR이 정한다. 이득이 없고, 대신 tick 비용(A7: tick당 1.5~4.5 µs)을 줄이려면 tick rate를 낮추는 쪽이 맞다. "모든 RTOS 제품에 tickless를 켜라"가 아니라 <strong>"idle 비율이 높고 배터리인 제품"</strong>의 기능이다.</p>
+<h3 id="11-4-ssd-펌웨어-같은-문제의-다른-이름">11.4 SSD 펌웨어 — 같은 문제의 다른 이름<a class="anchor" href="#11-4-ssd-펌웨어-같은-문제의-다른-이름" aria-label="link">#</a></h3>
+<p>Don이 했던 APST/L1.2 진입 로직은 tickless + PM 정책과 구조가 같다: idle 시간 예측(호스트 명령 간격) → 진입 문턱(<code>configEXPECTED_IDLE_TIME_BEFORE_SLEEP</code>에 해당) → wake source → 복귀 후 타임스탬프 보정. 면접에서 "tickless를 써 봤나?"라는 질문에 "RTOS의 tickless는 안 써 봤지만, SSD에서 자율 전력 상태 전이를 구현하면서 진입 문턱, exit latency 예산, 복귀 후 시간 보정 문제를 다뤘다"로 연결할 수 있다.</p>
+<hr>
+<h2 id="12-흔한-실수와-증상">12. 흔한 실수와 증상<a class="anchor" href="#12-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>tickless 켜고 커널 tick으로 달력 시간 유지</td><td>하루 수십~수백 초 틀림</td><td>수면마다 µs 단위 보정 오차(§5)</td><td>RTC로 달력 시간, tick은 상대 시간만</td></tr><tr><td>idle 우선순위에 백그라운드 태스크</td><td>tickless가 전혀 안 걸림, 전류 그대로</td><td><code>prvGetExpectedIdleTime()</code>이 0 반환</td><td>idle hook으로 옮기거나 우선순위 1 이상 + 블로킹</td></tr><tr><td><code>vTaskDelay(1)</code> 폴링</td><td>WFI도 안 하고 idle 루프만 돎</td><td>예상 idle 1 tick &lt; 문턱 2 (예제 5)</td><td>이벤트 기반(세마포어·알림)으로, 또는 idle hook에 WFI</td></tr><tr><td>tickless 진입에 <code>taskENTER_CRITICAL()</code> 사용 (mode 2 직접 구현)</td><td>영원히 안 깸</td><td>BASEPRI로 막힌 인터럽트는 WFI를 못 깨움</td><td><code>cpsid i</code>(PRIMASK)로 막고 WFI</td></tr><tr><td>mode 2에서 깬 뒤 tick을 N+1로 step</td><td><code>configASSERT</code> (tasks.c <code>vTaskStepTick</code>)</td><td>다음 깰 시각을 넘겨 더함</td><td>step을 N으로 자르고 남은 tick은 tick ISR이 처리</td></tr><tr><td>깊은 수면인데 SysTick tickless(mode 1) 그대로</td><td>안 깨거나 시간이 크게 틀림</td><td>STOP에서 SysTick 정지</td><td>LPTIM/RTC 기반 mode 2</td></tr><tr><td>32.768 kHz로 1 kHz tick, 33카운트로 반올림</td><td>하루 612초 늦음</td><td>0.71% 주기 오차(예제 7)</td><td>tick 1024 Hz, 또는 절대 카운트로 경계 계산</td></tr><tr><td>tick hook에서 소프트웨어 타이머</td><td>tickless에서 멈춤·느려짐</td><td><code>vTaskStepTick()</code>은 hook을 안 부름</td><td>FreeRTOS software timer·<code>xTaskGetTickCount()</code> 사용</td></tr><tr><td>깊은 수면 + 디버거</td><td>Target not responding</td><td>디버그 도메인 클럭 꺼짐</td><td>디버그 빌드에서만 DBGMCU의 수면 중 디버그 유지</td></tr><tr><td>Zephyr에서 tick rate 100 Hz로 짧은 지연</td><td><code>k_msleep(2)</code>가 20 ms</td><td>1 tick 올림 + 상대 지연 +1 tick (예제 9)</td><td>tickless면 tick rate를 높여도 비용 없음(실칩 기본 10 kHz)</td></tr></tbody></table></div>
+<hr>
+<h2 id="13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다<a class="anchor" href="#13-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> What is tickless idle and why does it matter?</p>
+<p><strong>A.</strong> 할 일이 없을 때 주기 tick을 멈추고, 다음 타임아웃 시각에 one-shot 타이머를 걸고 자는 것이다. 깨어나면 지난 tick 수를 한꺼번에 더한다. 1 kHz tick은 idle에서도 1초에 1000번 깨우고, 깊은 수면에서는 SysTick이 멈춰 tick을 유지할 수도 없다. 내 측정(같은 부하, QEMU)에서 1초 기상 횟수가 1000 → 12로 줄었다.</p>
+<blockquote><p>Tickless idle stops the periodic tick when nothing is runnable, programs a one-shot timer for the next timeout, sleeps, and on wake-up adds the elapsed ticks in one step. A 1 kHz tick wakes the CPU a thousand times a second even when idle, and in deep sleep the SysTick clock stops anyway. In my measurement on the same workload, wake-ups went from 1000 per second to 12.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "그럼 tick rate를 낮추면 되지 않나?" → 해상도를 잃고, 여전히 주기적으로 깬다. tickless는 해상도를 유지하면서 깨는 횟수만 줄인다.</p>
+<p><strong>Q.</strong> Walk me through what FreeRTOS does in vPortSuppressTicksAndSleep on Cortex-M.</p>
+<p><strong>A.</strong> 한 번 최대 tick을 24비트 한계(25 MHz면 671)로 자르고, <code>cpsid i</code>로 인터럽트 실행만 막는다(BASEPRI를 쓰면 WFI가 안 깬다). <code>eTaskConfirmSleepModeStatus()</code>로 그 사이 깨어난 태스크가 없는지 확인하고, SysTick을 멈춰 남은 몫을 읽고, "남은 몫 + (N−1) tick − 보정 상수"를 LOAD에 넣고 재시작해 WFI. 깨면 다시 멈추고 COUNTFLAG로 "타임아웃이었나 다른 IRQ였나"를 가려서 지난 완전한 tick 수를 계산하고, 남은 조각을 LOAD에 넣어 tick 격자를 맞춘 뒤 <code>vTaskStepTick()</code>.</p>
+<blockquote><p>It clamps the idle time to what fits in the 24-bit SysTick, masks interrupts with PRIMASK rather than BASEPRI so that WFI can still wake up, and confirms with eTaskConfirmSleepModeStatus that nothing became ready. Then it stops SysTick, computes a reload of the remaining fraction plus N minus one tick periods minus a fixed compensation, restarts it and executes WFI. After waking it stops SysTick again, uses COUNTFLAG to tell a timeout from an early wake, computes the whole ticks that elapsed, reloads the leftover fraction to stay on the tick grid, and calls vTaskStepTick.</p></blockquote>
+<p><strong>Q.</strong> Why does tickless mode cause clock drift, and how big is it?</p>
+<p><strong>A.</strong> 타이머를 멈췄다 켜는 구간을 고정 상수로 보정하거나(FreeRTOS 94카운트), 읽기와 재시작 사이를 세지 않기 때문이다(Zephyr). 오차는 수면 횟수에 비례한다. QEMU에서 FreeRTOS는 수면당 +2.2 µs, Zephyr는 −2.4 µs였다 — 2 ms마다 자면 약 1000 ppm, 하루 90초 수준이다. 그래서 달력 시간은 RTC에서 읽고, 시간 기준은 멈추지 않는 카운터로 잡는다.</p>
+<blockquote><p>Because the timer is stopped and restarted with a fixed compensation, or because the few cycles between reading and restarting the counter are not counted. The error scales with the number of sleeps. On QEMU I measured plus 2.2 microseconds per sleep for FreeRTOS and minus 2.4 for Zephyr, which is about 1000 ppm if you sleep every two milliseconds. So I keep calendar time in the RTC and use a never-stopped counter as the timebase.</p></blockquote>
+<p><strong>Q.</strong> Your MCU uses STOP mode. Can you still use the built-in FreeRTOS tickless implementation?</p>
+<p><strong>A.</strong> 아니다. STOP에서는 코어 클럭이 꺼져 SysTick이 멈추므로 깨우지도, 시간을 재지도 못한다. <code>configUSE_TICKLESS_IDLE = 2</code>로 두고, LPTIM이나 RTC 같은 저전력 도메인 타이머로 <code>portSUPPRESS_TICKS_AND_SLEEP</code>을 직접 구현한다. 보통 tick 자체도 그 타이머로 만들고(<code>vPortSetupTimerInterrupt()</code> 덮어쓰기), 멈추지 않는 카운터 값에서 tick 경계를 계산해서 보정 상수 없이 drift를 없앤다. 이 방식으로 구현해서 drift 0과, 타임아웃 없는 대기에서 이벤트 수만큼만 깨는 것을 확인했다.</p>
+<blockquote><p>No. In STOP the core clock is gated, so SysTick stops and can neither wake the core nor measure the sleep. I set configUSE_TICKLESS_IDLE to 2 and implement portSUPPRESS_TICKS_AND_SLEEP on a low-power timer such as LPTIM or the RTC, usually generating the tick from it as well by overriding vPortSetupTimerInterrupt. Tick boundaries are computed from the free-running counter, so there is no compensation constant and no drift. I built one like that and measured zero drift and exactly one wake-up per external event when no task had a timeout.</p></blockquote>
+<p><strong>Q.</strong> How is Zephyr's tickless different from FreeRTOS's?</p>
+<p><strong>A.</strong> FreeRTOS는 주기 tick이 기본이고 idle일 때만 멈춘다. Zephyr는 커널이 원래 이벤트 기반이라 타임아웃 리스트 맨 앞이 바뀔 때마다 <code>sys_clock_set_timeout()</code>으로 다음 시각에만 타이머를 건다. 그래서 바쁜 스레드가 돌 때도 tick 인터럽트가 없고, idle은 그냥 WFI다. SysTick은 멈추지 않고 사이클을 누적하며, tick rate는 해상도일 뿐이라 실칩 기본이 10 kHz다.</p>
+<blockquote><p>FreeRTOS keeps a periodic tick and suppresses it only in the idle task. Zephyr is event-driven: whenever the head of the timeout list changes, sys_clock_set_timeout programs the next expiry, so even a busy thread sees no tick interrupts and idle is just WFI. The SysTick keeps running and cycles are accumulated, and the tick rate is only a resolution, which is why the default on real hardware with tickless is 10 kHz.</p></blockquote>
+<p><strong>Q.</strong> We enabled tickless but the standby current did not change. How do you debug it?</p>
+<p><strong>A.</strong> 전류계 전에 깨는 횟수부터 센다 — tick ISR, idle 진입, WFI 횟수를 카운터로. 흔한 원인은 idle 우선순위의 백그라운드 태스크(예상 idle 0), 1 tick 지연 폴링(문턱 미달), 기본 구현이 얕은 WFI만 한다는 점(PRE_SLEEP 훅에서 STOP에 안 들어감), 잦은 외부 인터럽트, 꺼지지 않은 주변장치 클럭이다. 하나씩 고치며 횟수가 이벤트 수에 가까워지는지 본다.</p>
+<blockquote><p>Before the current meter, I count wake-ups: tick interrupts, idle entries and WFI entries. Typical causes are a background task at idle priority, which makes the expected idle time zero, one-tick delay polling that never reaches the sleep threshold, the default implementation only doing a shallow WFI because the pre-sleep hook never enters STOP, a noisy interrupt source, and peripheral clocks left on. I fix them one by one until the wake-up count matches the real event rate.</p></blockquote>
+<p><strong>Q.</strong> What is configEXPECTED_IDLE_TIME_BEFORE_SLEEP for, and how would you choose it?</p>
+<p><strong>A.</strong> 이 tick 수 이상 잘 수 있을 때만 tickless에 들어간다(기본 2, 2 미만은 컴파일 에러 — 포트가 첫 tick을 이미 진행 중인 tick으로 빼는 계산 때문이다). 깊은 수면의 진입·복귀 시간과 에너지를 회수할 수 있는 최소 수면 길이로 정한다. 측정해 보면 문턱 아래의 틈은 아예 WFI도 안 하므로, 짧은 틈이 많은 시스템은 idle hook에 얕은 WFI를 같이 둔다.</p>
+<blockquote><p>It is the minimum number of idle ticks before the kernel enters tickless sleep. The default is two and anything below two is a compile error, because the port treats the first tick as already in progress. I choose it so that the sleep is long enough to pay back the entry and exit time and energy of the low-power mode. Gaps shorter than the threshold do not even execute WFI, so on systems with many short gaps I also put a plain WFI in the idle hook.</p></blockquote>
+<hr>
+<h2 id="14-직접-해보기">14. 직접 해보기<a class="anchor" href="#14-직접-해보기" aria-label="link">#</a></h2>
+<ol class="tasks"><li><strong>개념</strong> — Cortex-M 코어 클럭이 64 MHz이고 <code>configTICK_RATE_HZ = 1000</code>일 때 <code>ulTimerCountsForOneTick</code>, <code>xMaximumPossibleSuppressedTicks</code>를 구하라. 같은 칩에서 <code>configSYSTICK_CLOCK_HZ = 8000000</code>(외부 STCLK)으로 바꾸면? 정답/힌트: 64000, 0xFFFFFF/64000 = 262. 외부 8 MHz면 8000카운트/tick, 2097 tick(2.1초)까지 — 대신 <code>ulStoppedTimerCompensation = 94/(64/8) = 11</code>로 줄어든다(port.c 공식).</li><li><strong>개념</strong> — <code>taskENTER_CRITICAL()</code>로 tickless를 감싸면 왜 영원히 잘 수 있나? 어느 인터럽트도 깨울 수 없는 조건을 Armv7-M의 WFI 기상 규칙으로 설명하라. 정답/힌트: BASEPRI가 <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>면 그보다 낮은(숫자 큰) 인터럽트 — SysTick 포함 — 는 pending이어도 "선점할 수 있는 우선순위"가 아니라 WFI를 깨우지 못한다. PRIMASK는 기상 판정에서 무시된다.</li><li><strong>계산</strong> — 데이터시트에서 칩 하나(예: STM32L4)의 STOP 2 전류, Run 전류, STOP 2 기상 시간을 찾아, 예제 1의 기상 횟수(1000/s vs 12/s)와 깨어 있는 비율로 평균 전류를 비교하라. 정답/힌트: <code>I = I_stop × (1 − d) + I_run × d + n × I_run × t_wake</code>. n을 1000 → 12로 바꿨을 때 어느 항이 지배적인지 본다. 숫자는 반드시 데이터시트 값으로.</li><li><strong>코드</strong> — 예제 4(<code>ex3.c</code>)를 mode 1로, <code>T0_US</code>를 500·1370·5000·20000으로 바꿔 돌리고 "조기 기상 1회당 drift"가 일정한지 확인하라. 일정하지 않다면 단계 ⑩-b의 어느 항 때문인가? 정답/힌트: drift ÷ wfi를 표로. 기상 간격이 1 tick보다 짧으면 sleep에 못 들어가는 경우(문턱)가 섞인다 — wfi 횟수부터 확인.</li><li><strong>코드</strong> — <code>lp_tick.c</code>의 분주를 /256(97656.25 Hz)으로 바꾸고(<code>LP_HZ</code>를 <code>configCPU_CLOCK_HZ / 256u</code>로, 제어 비트 2→3) 예제 4·6을 다시 돌려라. drift가 여전히 0인가? 해상도는 몇 µs가 되나? 정답/힌트: 25 MHz/256는 정수가 아니라 <code>LP_HZ</code> 정수 나눗셈에서 오차가 생긴다 — 정수가 안 되는 클럭은 분자·분모를 따로 두고 계산해야 한다(이게 32.768 kHz 실칩의 상황). 해상도 10.24 µs.</li><li><strong>측정</strong> — Zephyr z1 앱에 같은 우선순위의 바쁜 스레드 두 개를 추가하고 <code>CONFIG_TIMESLICING</code> y/n으로 1초 기상 횟수를 비교하라. 정답/힌트: 슬라이스 20 ms면 1초에 약 50번 더 깬다(A7 예제 8의 200 ms에 10번과 같은 비율). FreeRTOS에서 같은 실험(idle 우선순위가 아닌 같은 우선순위 두 개)과도 비교해 보라 — FreeRTOS는 태스크가 돌 때 원래 tick이 1 kHz다.</li><li><strong>설계</strong> — 드론 FC의 "disarmed 대기"에서만 tickless + STOP을 허용하고 "armed"에서는 금지하려면 FreeRTOS와 Zephyr에서 각각 어디에 무엇을 넣겠나? 정답/힌트: FreeRTOS는 <code>configPRE_SUPPRESS_TICKS_AND_SLEEP_PROCESSING(x)</code>에서 armed면 <code>x = 0</code>(아예 안 잠) 또는 <code>configPRE_SLEEP_PROCESSING</code>에서 STOP 대신 WFI만. Zephyr는 armed 진입 시 <code>pm_policy_state_lock_get()</code>으로 깊은 상태 잠금(P2).</li></ol>
+<hr>
+<h2 id="15-용어-사전">15. 용어 사전<a class="anchor" href="#15-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>tick</td><td>커널 시간 단위</td><td>주기 인터럽트로 세거나(주기 tick), 카운터에서 계산한다(tickless)</td></tr><tr><td>tickless idle</td><td>idle일 때 tick 억제</td><td>FreeRTOS <code>configUSE_TICKLESS_IDLE</code></td></tr><tr><td>tickless kernel</td><td>주기 tick이 없는 커널</td><td>Zephyr <code>CONFIG_TICKLESS_KERNEL</code>, 다음 타임아웃에만 타이머</td></tr><tr><td>one-shot 타이머</td><td>한 번만 울리는 타이머</td><td>다음 깰 시각에 건다</td></tr><tr><td>WFI</td><td>Wait For Interrupt</td><td>인터럽트가 pending될 때까지 코어 정지. PRIMASK는 기상을 막지 않고 BASEPRI는 막는다</td></tr><tr><td>PRIMASK / BASEPRI</td><td>Cortex-M 인터럽트 마스크</td><td>PRIMASK = 전부(실행만), BASEPRI = 우선순위 이하 (B3)</td></tr><tr><td>SysTick</td><td>Cortex-M 내장 24비트 타이머</td><td>코어 클럭으로 돌아 깊은 수면에서 멈춘다</td></tr><tr><td>COUNTFLAG</td><td>SysTick CTRL 비트 16</td><td>0을 지나면 1, 읽으면 지워진다(clear-on-read)</td></tr><tr><td><code>xMaximumPossibleSuppressedTicks</code></td><td>한 번에 건너뛸 최대 tick</td><td>0xFFFFFF / 카운트per tick (25 MHz, 1 kHz → 671)</td></tr><tr><td><code>ulStoppedTimerCompensation</code></td><td>멈춤 보정</td><td><code>portMISSED_COUNTS_FACTOR</code>(94) / 클럭비, 고정 상수</td></tr><tr><td><code>vTaskStepTick()</code></td><td>tick 보정 함수</td><td>건너뛴 tick을 더하고, 정확히 깰 시각이면 1을 <code>xPendedTicks</code>로</td></tr><tr><td><code>eTaskConfirmSleepModeStatus()</code></td><td>잘지 최종 확인</td><td>eAbortSleep / eStandardSleep / eNoTasksWaitingTimeout</td></tr><tr><td><code>configEXPECTED_IDLE_TIME_BEFORE_SLEEP</code></td><td>수면 문턱</td><td>이 tick 이상 잘 수 있을 때만 (기본 2)</td></tr><tr><td><code>sys_clock_set_timeout()</code></td><td>Zephyr 타이머 재설정</td><td>다음 타임아웃을 tick 경계로 올려 SysTick LOAD에</td></tr><tr><td><code>sys_clock_announce()</code></td><td>Zephyr 시간 알림</td><td>지난 tick을 커널에 알리고 만료 처리</td></tr><tr><td>LPTIM</td><td>Low-Power Timer</td><td>32.768 kHz 등 저전력 클럭으로 STOP에서도 동작</td></tr><tr><td>RTC</td><td>Real-Time Clock</td><td>가장 깊은 모드에서도 사는 시계·깨우기 타이머</td></tr><tr><td>LSE</td><td>Low-Speed External</td><td>32.768 kHz 크리스털 클럭</td></tr><tr><td>drift</td><td>시계 어긋남</td><td>커널 시간 − 실제 시간, ppm으로 표시</td></tr><tr><td>ppm</td><td>parts per million</td><td>1000 ppm = 0.1% = 하루 86.4초</td></tr><tr><td>wake latency / exit latency</td><td>기상 지연</td><td>수면 → 코드 실행까지 걸리는 시간</td></tr><tr><td>STOP 모드</td><td>깊은 수면(STM32 용어)</td><td>코어 클럭 정지, RAM 유지, µA급</td></tr></tbody></table></div>
+<hr>
+<h2 id="16-요약-체크리스트">16. 요약 &amp; 체크리스트<a class="anchor" href="#16-요약-체크리스트" aria-label="link">#</a></h2>
+<p>1 kHz tick은 할 일이 없어도 1초에 1000번 CPU를 깨우고, 깊은 수면에서는 SysTick이 멈춰서 유지할 수도 없다. tickless는 "다음 타임아웃까지 one-shot으로 자고, 깨서 지난 tick을 한꺼번에 더한다". FreeRTOS(<code>configUSE_TICKLESS_IDLE=1</code>)는 idle 태스크에서 <code>prvGetExpectedIdleTime()</code> → <code>vTaskSuspendAll()</code> → port.c <code>vPortSuppressTicksAndSleep()</code>으로 SysTick을 멈추고 긴 LOAD를 걸어 WFI한 뒤, COUNTFLAG로 깬 이유를 가려 <code>vTaskStepTick()</code>으로 보정한다. 같은 부하에서 기상은 1000 → 12/s로 줄었지만, 24비트 한계로 한 번에 671 ms까지만 자고(480 MHz면 34 ms), 고정 보정 상수(94) 때문에 수면당 +2.2 µs씩 시계가 앞섰다(QEMU). 저전력 타이머 기반 mode 2(이 노트의 DUALTIMER 구현)는 멈추지 않는 카운터에서 tick 경계를 계산해서 drift 0, 2초 한 번에 수면, 무한 대기에서 이벤트 수만큼만 기상을 보였다. Zephyr는 원래 tickless라 타임아웃이 바뀔 때마다 <code>sys_clock_set_timeout()</code>으로 다음 시각만 걸고 idle은 WFI 하나다 — 기상 15/s, 수면당 −2.4 µs(재설정 3회 × 0.82 µs). 함정은 drift, 기상 지연, 디버거, tick에 기대는 코드·주변장치, time slicing이다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>1 kHz tick이 배터리에 왜 나쁜지 "횟수"와 "깊은 수면에서 SysTick 정지" 두 가지로 설명한다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>configUSE_TICKLESS_IDLE</code> 0 / 1 / 2의 차이와, 2가 왜 "내 구현"인지 소스로 말한다</span></label></li><li class="task"><label><input type="checkbox" ><span>25 MHz · 1 kHz에서 671 tick 한계를 계산하고, 480 MHz에서는 몇 ms인지 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>port.c가 <code>taskENTER_CRITICAL()</code> 대신 <code>cpsid i</code>를 쓰는 이유(WFI 기상 규칙)를 설명한다</span></label></li><li class="task"><label><input type="checkbox" ><span>COUNTFLAG를 읽지 않고 SysTick을 멈추는 이유(clear-on-read)를 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>계획대로 깬 경우 <code>N − 1</code>, 일찍 깬 경우 완전한 tick 수만 더하는 이유를 그림으로 그린다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>vTaskStepTick()</code>이 마지막 tick을 <code>xPendedTicks</code>로 미루는 이유와 tick hook이 안 불리는 것을 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>tickless drift의 출처 세 가지(멈춤 보정, 못 센 재설정 구간, 클럭 비율)를 말하고 측정법을 안다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>eNoTasksWaitingTimeout</code>을 mode 1이 활용하지 않는다는 것과 mode 2에서 어떻게 쓰는지 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>LPTIM/RTC로 tick을 만드는 설계(멈추지 않는 카운터 + compare, 절대 카운트로 경계 계산)를 설명한다</span></label></li><li class="task"><label><input type="checkbox" ><span>Zephyr <code>sys_clock_set_timeout()</code>의 MAX_TICKS · MIN_DELAY · tick 경계 올림을 설명한다</span></label></li><li class="task"><label><input type="checkbox" ><span>"tickless 켰는데 전류 그대로"를 기상 횟수부터 디버깅하는 순서를 말한다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul class="tasks"><li>FreeRTOS-Kernel V11.3.2 소스(<code>/var/rtoslab/src/FreeRTOS-Kernel</code>): <code>portable/GCC/ARM_CM3/port.c</code>(<code>vPortSuppressTicksAndSleep</code>, <code>vPortSetupTimerInterrupt</code>, <code>portMISSED_COUNTS_FACTOR</code>), <code>portable/GCC/ARM_CM3/portmacro.h</code>(<code>portSUPPRESS_TICKS_AND_SLEEP</code>), <code>tasks.c</code>(<code>prvIdleTask</code>, <code>prvGetExpectedIdleTime</code>, <code>eTaskConfirmSleepModeStatus</code>, <code>vTaskStepTick</code>), <code>include/FreeRTOS.h</code>(<code>configEXPECTED_IDLE_TIME_BEFORE_SLEEP</code>, <code>configPRE/POST_SLEEP_PROCESSING</code> 기본값)</li><li>FreeRTOS 문서 — Low Power Support / Tickless Idle Mode: https://www.freertos.org/low-power-tickless-rtos.html (현재 문서 사이트 구조로 옮겨졌을 수 있다)</li><li>Zephyr v4.4.2 소스(<code>/var/rtoslab/zephyrproject/zephyr</code>): <code>drivers/timer/cortex_m_systick.c</code>(<code>sys_clock_set_timeout</code>, <code>sys_clock_isr</code>, <code>elapsed</code>), <code>kernel/timeout.c</code>(<code>next_timeout</code>, <code>sys_clock_announce</code>), <code>kernel/idle.c</code>, <code>arch/arm/core/cortex_m/cpu_idle.c</code>(<code>arch_cpu_idle</code>), <code>subsys/pm/pm.c</code>, <code>kernel/Kconfig</code>(<code>TICKLESS_KERNEL</code>, <code>SYS_CLOCK_TICKS_PER_SEC</code>), <code>subsys/tracing/user/tracing_user.c</code></li><li>Zephyr 문서 — Kernel Timing: https://docs.zephyrproject.org/latest/kernel/services/timing/clocks.html</li><li>Zephyr 문서 — Power Management: https://docs.zephyrproject.org/latest/services/pm/index.html</li><li>Arm, Armv7-M Architecture Reference Manual (DDI 0403) — SysTick(B3.3), WFI와 기상 조건</li><li>이 사이트의 관련 노트: A7(tick 비용 측정), C5(tick과 시간 관리), B3(PRIMASK · BASEPRI), P1(MCU 전력 모드), P2(PM 정책), EL N2(Linux <code>nohz</code> — 참조만)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-25_C5_tick_time.html"><span class="dir">← 이전</span><span class="nm">C5. tick과 시간 관리 — 커널의 시계, 지연, 타임아웃, 그리고 카운터 wrap</span></a><a class="next" href="2026-10-25_C7_critical_section.html"><span class="dir">다음 →</span><span class="nm">C7. 크리티컬 섹션 구현 — PRIMASK · BASEPRI · 스케줄러 잠금을 소스로 읽고, 길이 L이 지연에 얼마를 더하는지 잰다</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l3"><a href="#0-1-tick은-1초에-1000번-울리는-알람시계-다">0.1 tick은 "1초에 1000번 울리는 알람시계"다</a></li><li class="l3"><a href="#0-2-don의-경험과-연결-ssd의-power-state와-같은-문제">0.2 Don의 경험과 연결 — SSD의 power state와 같은 문제</a></li><li class="l3"><a href="#0-3-세-가지-잠자는-방식-용어-정리">0.3 세 가지 "잠자는 방식" — 용어 정리</a></li><li class="l3"><a href="#실습-환경-한-줄">실습 환경 한 줄</a></li><li class="l2"><a href="#1-tickless의-원리-다음-마감까지-자고-깨서-시간을-메운다">1. tickless의 원리 — "다음 마감까지 자고, 깨서 시간을 메운다"</a></li><li class="l3"><a href="#1-1-직관-알람을-1분마다-맞추지-말고-약속-시각에-한-번만-맞춘다">1.1 직관 — 알람을 1분마다 맞추지 말고, 약속 시각에 한 번만 맞춘다</a></li><li class="l3"><a href="#1-2-정의-세-단계">1.2 정의 — 세 단계</a></li><li class="l3"><a href="#1-3-ssd-비유로-다시">1.3 SSD 비유로 다시</a></li><li class="l2"><a href="#2-freertos의-tickless-설정-손잡이">2. FreeRTOS의 tickless 설정 손잡이</a></li><li class="l3"><a href="#2-1-설정-항목-한눈에-v11-3-2-소스에서-확인">2.1 설정 항목 한눈에 (V11.3.2 소스에서 확인)</a></li><li class="l3"><a href="#2-2-이-노트의-실험용-설정-파일">2.2 이 노트의 실험용 설정 파일</a></li><li class="l2"><a href="#3-예제-1-1초-동안-몇-번-깨나-tick-켬-vs-tickless">3. 예제 1 — 1초 동안 몇 번 깨나: tick 켬 vs tickless</a></li><li class="l3"><a href="#3-1-작업-부하-거의-idle-인-센서-노드">3.1 작업 부하 — "거의 idle"인 센서 노드</a></li><li class="l3"><a href="#3-2-계산으로-확인-깨는-횟수가-평균-전류를-정한다">3.2 계산으로 확인 — 깨는 횟수가 평균 전류를 정한다</a></li><li class="l2"><a href="#4-port-c-해부-vportsuppressticksandsleep-를-한-줄씩">4. port.c 해부 — vPortSuppressTicksAndSleep()를 한 줄씩</a></li><li class="l3"><a href="#4-1-idle-태스크에서-port-c까지">4.1 idle 태스크에서 port.c까지</a></li><li class="l3"><a href="#4-2-시작할-때-정하는-상수-세-개">4.2 시작할 때 정하는 상수 세 개</a></li><li class="l3"><a href="#4-3-본문-단계별로">4.3 본문 — 단계별로</a></li><li class="l3"><a href="#4-4-vtasksteptick-그냥-더하기가-아니다">4.4 vTaskStepTick() — 그냥 더하기가 아니다</a></li><li class="l3"><a href="#4-5-예제-2-한-번에-몇-tick까지-잘-수-있나-24비트-한계-검증">4.5 예제 2 — 한 번에 몇 tick까지 잘 수 있나 (24비트 한계 검증)</a></li><li class="l3"><a href="#4-6-예제-3-gdb로-상수와-멈춤-구간-의-길이-직접-보기">4.6 예제 3 — gdb로 상수와 "멈춤 구간"의 길이 직접 보기</a></li><li class="l2"><a href="#5-시간-정확도-tickless는-시계를-틀어지게-한다">5. 시간 정확도 — tickless는 시계를 틀어지게 한다</a></li><li class="l3"><a href="#5-1-직관-시계를-멈췄다-다시-켤-때마다-몇-초씩">5.1 직관 — 시계를 멈췄다 다시 켤 때마다 몇 초씩</a></li><li class="l3"><a href="#5-2-예제-4-5초-동안-수천-번-자고-깨면-얼마나-틀어지나">5.2 예제 4 — 5초 동안 수천 번 자고 깨면 얼마나 틀어지나</a></li><li class="l3"><a href="#5-3-drift를-그림으로-freertos-zephyr-mode-2">5.3 drift를 그림으로 — FreeRTOS · Zephyr · mode 2</a></li><li class="l3"><a href="#5-4-실무에서-drift가-문제가-되는-때와-아닌-때">5.4 실무에서 drift가 문제가 되는 때와 아닌 때</a></li><li class="l2"><a href="#6-언제-안-자나-언제-더-깊이-자도-되나">6. 언제 안 자나, 언제 더 깊이 자도 되나</a></li><li class="l3"><a href="#6-1-예제-5-configexpected_idle_time_before_sleep-짧은-틈은-안-잔다">6.1 예제 5 — configEXPECTED_IDLE_TIME_BEFORE_SLEEP: 짧은 틈은 안 잔다</a></li><li class="l3"><a href="#6-2-예제-6-모든-태스크가-무한-대기-enotaskswaitingtimeout">6.2 예제 6 — 모든 태스크가 무한 대기: eNoTasksWaitingTimeout</a></li><li class="l2"><a href="#7-저전력-타이머로-tick-만들기-configuse_tickless_idle-2">7. 저전력 타이머로 tick 만들기 — configUSE_TICKLESS_IDLE = 2</a></li><li class="l3"><a href="#7-1-왜-systick으로는-부족한가-세-가지-이유">7.1 왜 SysTick으로는 부족한가 — 세 가지 이유</a></li><li class="l3"><a href="#7-2-설계-mode-2에서-내가-해야-할-일">7.2 설계 — mode 2에서 내가 해야 할 일</a></li><li class="l3"><a href="#7-3-구현">7.3 구현</a></li><li class="l3"><a href="#7-4-실행-같은-실험을-mode-2로">7.4 실행 — 같은 실험을 mode 2로</a></li><li class="l2"><a href="#8-zephyr-처음부터-tickless인-커널">8. Zephyr — 처음부터 tickless인 커널</a></li><li class="l3"><a href="#8-1-설정-기본값이-이미-tickless">8.1 설정 — 기본값이 이미 tickless</a></li><li class="l3"><a href="#8-2-커널-드라이버-경로">8.2 커널 → 드라이버 경로</a></li><li class="l3"><a href="#8-3-sys_clock_set_timeout-해부-cortex_m_systick-c-v4-4-2">8.3 sys_clock_set_timeout() 해부 (cortex_m_systick.c, v4.4.2)</a></li><li class="l3"><a href="#8-4-idle은-정말-wfi-하나인가-역어셈블">8.4 idle은 정말 WFI 하나인가 — 역어셈블</a></li><li class="l3"><a href="#8-5-예제-8-같은-부하를-zephyr로-몇-번-깨나">8.5 예제 8 — 같은 부하를 Zephyr로: 몇 번 깨나</a></li><li class="l3"><a href="#8-6-예제-9-zephyr-tickless의-시간-정확도와-타임아웃-없는-idle">8.6 예제 9 — Zephyr tickless의 시간 정확도와 "타임아웃 없는 idle"</a></li><li class="l3"><a href="#8-7-zephyr에서-저전력-타이머를-쓰는-법-개념">8.7 Zephyr에서 저전력 타이머를 쓰는 법 (개념)</a></li><li class="l3"><a href="#8-8-측정-차트-만들기">8.8 측정 차트 만들기</a></li><li class="l3"><a href="#8-9-freertos-vs-zephyr-한눈에">8.9 FreeRTOS vs Zephyr 한눈에</a></li><li class="l2"><a href="#9-함정-tickless를-켠-뒤에-생기는-일">9. 함정 — tickless를 켠 뒤에 생기는 일</a></li><li class="l3"><a href="#9-1-drift-타이머를-멈추고-다시-켤-때마다">9.1 drift — 타이머를 멈추고 다시 켤 때마다</a></li><li class="l3"><a href="#9-2-wake-latency-깨어나는-데-걸리는-시간">9.2 wake latency — 깨어나는 데 걸리는 시간</a></li><li class="l3"><a href="#9-3-디버거가-끊긴다">9.3 디버거가 끊긴다</a></li><li class="l3"><a href="#9-4-tick에-기대는-코드와-주변장치">9.4 tick에 기대는 코드와 주변장치</a></li><li class="l3"><a href="#9-5-tickless-time-slicing">9.5 tickless + time slicing</a></li><li class="l3"><a href="#9-6-tickless를-켰는데-전류가-그대로">9.6 "tickless를 켰는데 전류가 그대로"</a></li><li class="l2"><a href="#10-rtos-커널-안에서는-무슨-일이-일어나나">10. RTOS 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#11-실무에서-다시-보기">11. 실무에서 다시 보기</a></li><li class="l3"><a href="#11-1-드론-비행-제어기-비행-중엔-끄고-지상-대기에선-켠다">11.1 드론 비행 제어기 — 비행 중엔 끄고, 지상 대기에선 켠다</a></li><li class="l3"><a href="#11-2-센서-허브-mcu-타임스탬프는-tick이-아니라-하드웨어-카운터로">11.2 센서 허브 MCU — 타임스탬프는 tick이 아니라 하드웨어 카운터로</a></li><li class="l3"><a href="#11-3-로봇-관절-모터-컨트롤러-tickless가-거의-무의미한-경우">11.3 로봇 관절 모터 컨트롤러 — tickless가 거의 무의미한 경우</a></li><li class="l3"><a href="#11-4-ssd-펌웨어-같은-문제의-다른-이름">11.4 SSD 펌웨어 — 같은 문제의 다른 이름</a></li><li class="l2"><a href="#12-흔한-실수와-증상">12. 흔한 실수와 증상</a></li><li class="l2"><a href="#13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#14-직접-해보기">14. 직접 해보기</a></li><li class="l2"><a href="#15-용어-사전">15. 용어 사전</a></li><li class="l2"><a href="#16-요약-체크리스트">16. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

@@ -2,6 +2,16 @@
 
 > **Firmware Test Engineer 온사이트 · 10-22(목) 10:30~14:30 PDT** · 1100 Knox Street, Torrance. 투어(Michael Honar) → **패널 발표 1시간 (6명)** → 점심(Michael Honar) → 1:1 **Adam 30분 · Michael Honar 45분 · Jon Kotowski 45분**. ⚠️ **발표 PDF 48시간 전 제출 필수 (마감 10-20 11:00 PDT → 10-19 제출)**. 노트북은 현장 지급.
 
+> 📚 **10-24~ 스터디: [드론 FTE 리서치 노트 R00~R10](../fteResearch/site/index.html)** — Gemini 자료 확인 · 정정, 오픈소스별 테스트, HIL 벤치, 스케일 플랫폼. K05의 Betaflight 경로는 R00 6절에서 정정됨
+
+> 🧭 **온사이트 이후 (10-23~): [K05 Neros 오픈소스 지도 + 앞으로 할 것](plan/2026-10-23_K05_open_source_study_map.md)** — Betaflight · ExpressLRS · CRSF · PX4 · ArduPilot
+
+> 🚗 **10-22 출발 전: [K04 마지막 읽기 — Adam · Michael · Jon](plan/2026-10-22_K04_last_read_before_onsite.md)**
+
+> ⌨️ **코딩 따라 치기: [K03 7문제 우선순위 순](plan/2026-10-21_K03_type_along_coding.md)** — T1 → T2 → T3부터.
+
+> ⚡ **10-20 · 10-21 마지막 이틀: [K02 1:1 세 개 압축 정리](plan/2026-10-20_K02_final_cram_three_1on1s.md)** — system design · debugging/test design · Python 코딩을 주제별 15~30분 단위로.
+
 ## 0. 하루 일정 한눈에
 
 | 시간 | 세션 | 준비 |

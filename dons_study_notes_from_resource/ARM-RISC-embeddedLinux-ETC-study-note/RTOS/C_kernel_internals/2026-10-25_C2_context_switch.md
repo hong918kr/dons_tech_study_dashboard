@@ -1,0 +1,2438 @@
+# C2. 컨텍스트 스위치 해부 — PendSV 핸들러 19개 명령을 한 줄씩 읽고, 일부러 고장 내고, 80줄로 직접 만든다
+
+> **이 노트를 다 읽으면**: FreeRTOS V11.3.2 `xPortPendSVHandler`의 명령 19개를 한 줄씩 "무엇을 · 왜 · 빼면 무엇이 깨지나"로 설명할 수 있다 · gdb로 QEMU에서 스위치 한 번을 멈춰 세우고 나가는 태스크와 들어오는 태스크의 16워드 프레임을 주소 단위로 읽을 수 있다 · 레지스터 저장 한 줄, `msr psp` 한 줄, LR 보존 한 줄을 지웠을 때 나오는 HardFault · 조용한 레지스터 오염 · 굶주림을 증상만 보고 원인으로 되짚을 수 있다 · 80줄짜리 선점형 round-robin 스위처를 직접 짜서 돌리고, 같은 보드에서 FreeRTOS · Zephyr와 "스위치 한 번 = 명령 몇 개"를 재서 어디에 비용이 드는지 분해할 수 있다
+> **왜 필요한가**: 펌웨어 면접의 심화 단골 "Walk me through a context switch on Cortex-M, step by step"에 레지스터 이름 · 명령 · 스택 주소로 답하면 바로 시니어로 분류된다. 실무에서는 "태스크 스택이 깨졌다", "HardFault PC가 RAM 주소다", "한 태스크만 영원히 돈다" 같은 버그의 뿌리가 대부분 여기 있다
+> **Don 기준 난이도**: 예외 진입 · 스택 · 레지스터 · JTAG로 레지스터 읽기는 이미 안다 / 새로 배울 부분은 **RTOS가 그 위에 얹는 정확히 19개 명령**, 그 명령마다의 존재 이유, 그리고 FreeRTOS와 Zephyr가 같은 일을 다르게 나누는 방식
+> **선행 노트**: B1(Cortex-M 프로그래머 모델 — 레지스터 · MSP/PSP · CONTROL), B2(예외 진입 · 복귀 — 하드웨어 자동 스태킹, EXC_RETURN), B4(SysTick · PendSV · SVC — PendSV가 왜 최저 우선순위인가), A7(같은 보드에서 잰 전환 비용 1.9~3.3 µs). 이어지는 노트: C1(ready list · 비트맵 자료구조), C5(tick), B6(FPU 컨텍스트), F3(스택 크기 산정), M1(HardFault 해독)
+> 🔁 **Bare-Metal 겹침**: BM C2(Thumb-2 어셈블리 읽기) — 이 노트가 주인(컨텍스트 스위치 어셈블리와 그 디스어셈블리 읽기: LDR/STR/LDM/STM/BL/CMP/B, 리터럴 풀, 16/32비트 인코딩, IT 블록). Bare-Metal 노트는 이 노트를 링크하고 일반 Thumb-2 명령어 집합 전체 훑기(데이터 처리 · 시프트 · 비트필드 명령, 컴파일러 최적화 출력 검증)만 더한다
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+Don의 SSD 펌웨어를 떠올려 보자. 실행부(executive) 루프는 핸들러 A를 **끝까지** 실행하고 나서야 핸들러 B로 넘어갔다. "A를 중간에 멈추고 B를 돌리다가, 나중에 A를 멈춘 바로 그 명령부터 이어서 돌린다"는 건 없었다. 그게 가능하려면 A가 멈춘 순간의 **CPU 상태 전부**(레지스터 16개 + 상태 레지스터 + 스택 위치)를 어딘가 보관했다가 그대로 되돌려 놓아야 한다. 이 "보관 → 바꿔 끼우기 → 되돌려 놓기"가 **컨텍스트 스위치(context switch)**다.
+
+RTOS의 모든 기능 — 블로킹 큐, 세마포어, 우선순위 선점, time slicing — 은 결국 "지금 이 태스크를 멈추고 저 태스크를 이어 돌린다"로 끝난다. 그 마지막 한 걸음이 Cortex-M에서는 **PendSV 예외 핸들러 안의 어셈블리 명령 19개**(FreeRTOS ARM_CM3 포트 기준)다. 이 노트는 그 19개를 원천까지 판다.
+
+```svg
+<svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="110" y="20" width="460" height="24" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340" y="37" font-size="12" text-anchor="middle">Handler 모드 · MSP — PendSV 예외 (최저 우선순위)</text>
+<text x="60" y="37" font-size="12" text-anchor="middle">Thread · PSP</text>
+<text x="620" y="37" font-size="12" text-anchor="middle">Thread · PSP</text>
+<rect x="10" y="60" width="100" height="44" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="60" y="87" font-size="13" text-anchor="middle">태스크 A 실행</text>
+<rect x="110" y="60" width="80" height="44" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="150" y="80" font-size="12" text-anchor="middle">HW 스태킹</text>
+<text x="150" y="96" font-size="12" text-anchor="middle">8워드</text>
+<rect x="190" y="60" width="100" height="44" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="240" y="80" font-size="12" text-anchor="middle">SW 저장</text>
+<text x="240" y="96" font-size="12" text-anchor="middle">r4–r11</text>
+<rect x="290" y="60" width="100" height="44" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="340" y="80" font-size="12" text-anchor="middle">다음 태스크</text>
+<text x="340" y="96" font-size="12" text-anchor="middle">결정</text>
+<rect x="390" y="60" width="100" height="44" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="440" y="80" font-size="12" text-anchor="middle">SW 복원</text>
+<text x="440" y="96" font-size="12" text-anchor="middle">r4–r11</text>
+<rect x="490" y="60" width="80" height="44" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="530" y="80" font-size="12" text-anchor="middle">HW 언스태킹</text>
+<text x="530" y="96" font-size="12" text-anchor="middle">8워드</text>
+<rect x="570" y="60" width="100" height="44" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="620" y="87" font-size="13" text-anchor="middle">태스크 B 실행</text>
+<line x1="110" y1="112" x2="110" y2="128" stroke="currentColor"/>
+<text x="110" y="142" font-size="12" text-anchor="middle">PENDSVSET</text>
+<text x="240" y="126" font-size="12" text-anchor="middle">mrs r0, psp</text>
+<text x="240" y="142" font-size="12" text-anchor="middle">stmdb r0!</text>
+<text x="340" y="126" font-size="12" text-anchor="middle">bl vTaskSwitch</text>
+<text x="340" y="142" font-size="12" text-anchor="middle">Context</text>
+<text x="440" y="126" font-size="12" text-anchor="middle">ldmia r0!</text>
+<text x="440" y="142" font-size="12" text-anchor="middle">msr psp, r0</text>
+<text x="530" y="126" font-size="12" text-anchor="middle">bx lr</text>
+<text x="530" y="142" font-size="12" text-anchor="middle">(EXC_RETURN)</text>
+<line x1="110" y1="170" x2="570" y2="170" stroke="currentColor" marker-end="url(#ah1)"/>
+<text x="20" y="196" font-size="12">하드웨어가 하는 일(회색)은 명령이 아니다 — 실칩 Cortex-M3에서 진입 12사이클, QEMU에서는 0.</text>
+<text x="20" y="216" font-size="12">소프트웨어가 하는 일(주황 · 초록)이 PendSV 핸들러의 명령이다. FreeRTOS: 저장 10 + 결정 32 + 복원 9.</text>
+<text x="20" y="236" font-size="12">태스크 A의 스택에는 16워드(64 B)가 남고, 태스크 B의 스택에서는 16워드가 빠져나간다.</text>
+</svg>
+```
+
+그림 1 — 컨텍스트 스위치 한 번의 시간 순서. 회색 두 칸은 CPU 하드웨어가 예외 진입 · 복귀 때 자동으로 하는 일(B2), 가운데 세 칸이 RTOS 포트가 짜 넣은 소프트웨어다. 아래 숫자는 이 노트 §9에서 QEMU 명령 추적으로 센 FreeRTOS(lean 설정) 값이다.
+
+비유로 정리하면:
+
+- **태스크 = 자기 스택을 가진 main 루프 하나.** 태스크의 "지금 상태"는 레지스터 + 자기 스택에 다 들어 있다.
+- **컨텍스트 저장 = 그 태스크의 스택 꼭대기에 레지스터를 쌓고, 그 꼭대기 주소 하나만 TCB에 적어 두는 것.** 다시 이어 돌릴 때는 그 주소에서 거꾸로 꺼내면 된다. 저장해야 할 "포인터"가 단 하나(`pxTopOfStack`)라는 게 핵심이다.
+- **PendSV = 가장 낮은 우선순위로 미뤄 둔 소프트웨어 인터럽트.** 스위치를 "지금 당장"이 아니라 "다른 모든 인터럽트가 끝난 뒤"에 하게 만든다(B4).
+
+### 실습 환경 한 줄
+
+QEMU `mps2-an385`(Cortex-M3 @ 25 MHz) + FreeRTOS Kernel V11.3.2(ARM_CM3 포트) · Zephyr v4.4.2 · 직접 만든 bare-metal 스위처. gdb 17.1(Ubuntu, ARM 지원)로 QEMU `-s -S`에 붙는다. 타이밍은 `ICOUNT=1`(명령 1개 = 32 ns 가상 시간, 결정적)로 재고, 명령 수는 QEMU `-d exec,nochain` + `one-insn-per-tb=on` 추적으로 하나씩 센다. **QEMU icount 기준이라 실제 칩과 절대값은 다르다**(캐시 · 플래시 wait state · 버스 · 예외 스태킹 사이클 미모델링). 그래서 이 노트는 "µs"보다 **"명령 개수"**를 주 단위로 쓴다 — 명령 개수는 실칩에서도 같다.
+
+---
+
+## 1. 무엇을 저장해야 "멈췄다가 그대로 이어 가기"가 되나
+
+### 1.1 직관 — 스냅샷에 들어가야 하는 것
+
+태스크 A가 `x = y + z;`를 계산하다가 r2에 y, r3에 z를 올려 둔 순간 멈췄다고 하자. 나중에 A를 이어 돌릴 때 r2, r3이 다른 값이면 A는 엉뚱한 답을 낸다. 그러니 **A가 쓸 수 있는 모든 레지스터**를 저장해야 한다. Cortex-M3(Armv7-M, FPU 없음)에서 그 목록은 정확히 이렇다.
+
+| 레지스터 | 개수 | 누가 저장하나 | 이유 |
+|---|---|---|---|
+| r0–r3, r12 | 5 | **하드웨어** (예외 진입 자동 스태킹) | AAPCS의 caller-saved(호출자가 책임지는 임시) 레지스터 |
+| LR(r14), PC(r15), xPSR | 3 | **하드웨어** | 돌아갈 주소 · 플래그 · Thumb 비트 |
+| r4–r11 | 8 | **소프트웨어** (PendSV 핸들러) | AAPCS의 callee-saved 레지스터 |
+| SP(r13) = PSP | 1 | **소프트웨어** (TCB의 `pxTopOfStack`) | 스택 자체의 위치. 위 16워드가 이 스택 위에 쌓인다 |
+| s0–s31, FPSCR | 33 | (FPU 있는 코어만) | B6에서 다룬다. 이 노트의 M3에는 없다 |
+
+**AAPCS**(Arm Architecture Procedure Call Standard)는 "C 함수끼리 레지스터를 어떻게 나눠 쓰나"의 약속이다. 함수는 r0–r3, r12를 마음대로 망가뜨려도 되고(그래서 호출자가 필요하면 미리 저장), r4–r11은 쓰려면 자기가 저장했다 되돌려 놓아야 한다.
+
+Cortex-M 하드웨어는 예외에 들어갈 때 **AAPCS의 caller-saved 절반**(r0–r3, r12, LR, PC, xPSR)을 자동으로 쌓는다. 그 덕분에 ISR을 그냥 C 함수로 쓸 수 있다 — C 함수는 r4–r11을 쓰면 알아서 저장하고 복원하니까(B2). 그런데 **컨텍스트 스위치는 "다른 태스크의 r4–r11을 되돌려 놓는다"**는 점에서 보통 C 함수와 다르다. C 컴파일러는 그런 일을 하는 코드를 만들어 주지 않는다. 그래서 r4–r11의 저장 · 복원은 **어셈블리로 직접** 써야 한다. 이게 PendSV 핸들러가 어셈블리(`naked` 함수)인 근본 이유다.
+
+### 1.2 정의 — 16워드 프레임
+
+한 태스크가 멈춰 있을 때 그 태스크의 스택 꼭대기에는 항상 이 64바이트가 있다(낮은 주소부터).
+
+```
+ pxTopOfStack ->  +0x00  r4     \
+                  +0x04  r5      |
+                  +0x08  r6      |  software-saved (PendSV: stmdb r0!, {r4-r11})
+                  +0x0C  r7      |
+                  +0x10  r8      |
+                  +0x14  r9      |
+                  +0x18  r10     |
+                  +0x1C  r11    /
+ PSP at entry ->  +0x20  r0     \
+                  +0x24  r1      |
+                  +0x28  r2      |
+                  +0x2C  r3      |  hardware-saved (exception entry)
+                  +0x30  r12     |
+                  +0x34  lr      |
+                  +0x38  pc      |  <- the instruction the task resumes at
+                  +0x3C  xPSR   /   <- bit 24 = T (Thumb) must be 1
+                  +0x40  ... the task's own stack data ...
+```
+
+두 가지만 기억하면 된다.
+
+- **TCB에는 주소 하나만 저장한다.** `pxTopOfStack`은 FreeRTOS `TCB_t`의 **첫 번째 멤버**다(`tasks.c`: "THIS MUST BE THE FIRST MEMBER OF THE TCB STRUCT"). 그래야 어셈블리가 `ldr r0, [r1]` 한 번(오프셋 0)으로 꺼낼 수 있다.
+- **새 태스크도 이 모양으로 시작한다.** 아직 한 번도 안 돈 태스크의 스택에도 `pxPortInitialiseStack()`이 "방금 멈춘 것처럼 보이는" 가짜 16워드를 미리 써 둔다(§4.4). 그래서 첫 실행도, 백 번째 실행도 같은 복원 코드로 시작한다.
+
+### 1.3 흔한 함정
+
+- "컨텍스트 = 레지스터 16개"라고만 말하면 반쪽이다. **SP 자체**(어느 스택인가)가 빠지면 나머지 16개를 다시 찾을 방법이 없다. 정확한 답은 "r4–r11 + 하드웨어 프레임 8워드, 그리고 그 전체를 가리키는 PSP 값 하나를 TCB에".
+- Cortex-M4F/M7처럼 FPU가 켜진 태스크는 s16–s31 16개와 EXC_RETURN까지 저장하고, 하드웨어 프레임도 26워드가 된다(B6). 이 노트의 M3 숫자를 M4F에 그대로 쓰면 틀린다.
+
+---
+
+## 2. PendSV를 읽기 위한 Thumb-2 최소 문법
+
+> 🔁 이 절은 Bare-Metal BM C2(Thumb-2 어셈블리 읽기)와 겹친다 (주인: 이 노트).
+
+PendSV 핸들러 19줄을 읽는 데 필요한 문법만 먼저 정리한다. Cortex-M은 **Thumb-2** 명령어 집합만 실행한다. Thumb-2는 16비트 명령과 32비트 명령이 섞인 가변 길이 인코딩이다 — 자주 쓰는 짧은 형태는 16비트, 큰 상수 · 높은 레지스터 · 특수 레지스터 접근은 32비트.
+
+### 2.1 이 노트에 나오는 명령
+
+| 명령 | 뜻 | 예 (이 노트에서) | 인코딩 길이 |
+|---|---|---|---|
+| `ldr rd, [rn, #off]` | 메모리 → 레지스터 (워드) | `ldr r2, [r3]` = r2 ← `*(r3)` | 16 (low reg, 작은 오프셋) |
+| `ldr rd, =sym` | **의사 명령**: 상수/주소를 리터럴 풀에서 읽어 온다 | `ldr r3, =pxCurrentTCB` | 16 (`ldr r3, [pc, #52]`) |
+| `str rd, [rn]` | 레지스터 → 메모리 | `str r0, [r2]` = `*(r2)` ← r0 | 16 |
+| `stmdb rn!, {list}` | Store Multiple, Decrement Before. rn을 먼저 줄이고 낮은 번호 레지스터를 낮은 주소에 | `stmdb r0!, {r4-r11}` | 32 |
+| `ldmia rn!, {list}` | Load Multiple, Increment After. 읽고 나서 rn을 늘린다 | `ldmia r0!, {r4-r11}` | 32 (r8 이상 포함) |
+| `push {list}` / `pop` | `stmdb sp!` / `ldmia sp!`의 별칭 | `stmdb sp!, {r3, r14}` → `push {r3, lr}` | 16 (low reg + LR) |
+| `mrs rd, spec` / `msr spec, rn` | 특수 레지스터 읽기/쓰기 (PSP, MSP, BASEPRI, CONTROL, IPSR) | `mrs r0, psp` | 32 |
+| `bl label` | Branch with Link: LR ← 다음 명령 주소(+1), 점프 | `bl vTaskSwitchContext` | 32 |
+| `bx rm` | rm 주소로 점프. rm이 EXC_RETURN 값이면 **예외 복귀** | `bx r14` | 16 |
+| `cmp rn, #imm` + `bne`/`blo` | 뺄셈해서 플래그(N Z C V)만 세움 → 조건 분기 | regs.S의 레지스터 검사 | 32 + 16 |
+| `isb` / `dsb` | 명령 동기화 / 데이터 동기화 배리어 | `isb` | 32 |
+| `it eq` + `xxxeq` | IT 블록: 다음 1~4개 명령을 조건부로 실행 | `tst lr, #4` / `ite eq` / `mrseq` / `mrsne` | 16 |
+
+- **조건 플래그**: `cmp`, `tst`, 이름 끝에 `s`가 붙은 명령(`adds`, `subs`)이 APSR의 N(음수) · Z(0) · C(자리올림) · V(오버플로)를 세운다. `bne`(Z=0이면 분기), `blo`(C=0, 부호 없는 미만), `beq`, `bhi` 등이 그걸 읽는다. `pop`은 플래그를 건드리지 않는다 — 이 노트의 regs.S가 그 성질을 쓴다.
+- **IT 블록**: Thumb-2에는 ARM 모드처럼 모든 명령에 조건을 붙일 자리가 없어서, `it`(If-Then) 명령이 "다음 명령들은 조건 eq일 때만"이라고 미리 선언한다. 랩의 `HardFault_Handler`가 정확히 이 패턴이다: `tst lr, #4`(EXC_RETURN 비트 2 = 어느 스택?) → `ite eq` → `mrseq r0, msp` / `mrsne r0, psp`. Cortex-M4F 포트의 `tst r14, #0x10` / `it eq` / `vstmdbeq r0!, {s16-s31}`도 같다("FPU를 쓴 태스크일 때만 s16–s31 저장").
+- **레지스터 별명**: 디스어셈블러는 r9 = `sb`, r10 = `sl`, r11 = `fp`, r12 = `ip`, r13 = `sp`, r14 = `lr`, r15 = `pc`로 찍는다. 소스의 `{r4-r11}`이 objdump에서 `{r4, r5, r6, r7, r8, r9, sl, fp}`로 나오는 이유다.
+
+### 2.2 리터럴 풀 — `ldr r3, =pxCurrentTCB`는 실제로 무엇이 되나
+
+32비트 주소 `0x20000e74`를 명령 하나에 즉시값으로 넣을 수 없다. 그래서 어셈블러는 그 값을 함수 끝의 **리터럴 풀**(상수 저장소)에 적고, 명령은 "PC 기준 상대 위치에서 읽어라"(`ldr r3, [pc, #52]`)로 바꾼다. 소스 끝의 `.ltorg`가 "여기에 리터럴 풀을 놓아라"는 지시어다. 반대로 상수가 Thumb-2 **modified immediate**(8비트 값을 회전하거나 `0xXYXYXYXY` 같은 반복 패턴)로 표현되면 어셈블러는 리터럴 풀 대신 `mov.w` 하나로 바꾼다 — 아래 예제 2에서 `ldr r0, =0x10101010`이 `mov.w r0, #0x10101010`으로 바뀐 것을 볼 수 있다.
+
+### 2.3 흔한 함정
+
+- objdump에서 함수 끝에 `.short 0x0000`, `.word 0x20000e74` 같은 줄이 나오면 명령이 아니라 **데이터(패딩 · 리터럴 풀)**다. 디스어셈블러가 그걸 명령으로 해석해 이상한 명령이 보이면 데이터 영역이라는 신호다.
+- 함수 주소의 비트 0은 Thumb 표시다. 벡터 테이블의 PendSV 항목은 `0x1f21`인데 함수는 `0x1f20`에 있다(예제 3). 반대로 **스택 프레임의 PC 칸에는 비트 0을 지워서** 넣어야 한다 — §8.4에서 직접 겪는다.
+
+---
+
+## 3. 원문 — `xPortPendSVHandler` (FreeRTOS V11.3.2, `portable/GCC/ARM_CM3/port.c`)
+
+랩의 FreeRTOS 소스(`/var/rtoslab/src/FreeRTOS-Kernel`, History.txt 기준 V11.3.2, 2026-10-16 릴리스)에서 그대로 옮겼다. 랩의 `FreeRTOSConfig.h`가 `#define xPortPendSVHandler PendSV_Handler`로 이름을 CMSIS 벡터 이름에 연결한다.
+
+```c
+void xPortPendSVHandler( void )
+{
+    /* This is a naked function. */
+
+    __asm volatile
+    (
+        "   mrs r0, psp                         \n"
+        "   isb                                 \n"
+        "                                       \n"
+        "   ldr r3, =pxCurrentTCB               \n" /* Get the location of the current TCB. */
+        "   ldr r2, [r3]                        \n"
+        "                                       \n"
+        "   stmdb r0!, {r4-r11}                 \n" /* Save the remaining registers. */
+        "   str r0, [r2]                        \n" /* Save the new top of stack into the first member of the TCB. */
+        "                                       \n"
+        "   stmdb sp!, {r3, r14}                \n"
+        "   mov r0, %0                          \n"
+        "   msr basepri, r0                     \n"
+        "   bl vTaskSwitchContext               \n"
+        "   mov r0, #0                          \n"
+        "   msr basepri, r0                     \n"
+        "   ldmia sp!, {r3, r14}                \n"
+        "                                       \n" /* Restore the context, including the critical nesting count. */
+        "   ldr r1, [r3]                        \n"
+        "   ldr r0, [r1]                        \n" /* The first item in pxCurrentTCB is the task top of stack. */
+        "   ldmia r0!, {r4-r11}                 \n" /* Pop the registers. */
+        "   msr psp, r0                         \n"
+        "   isb                                 \n"
+        "   bx r14                              \n"
+        "                                       \n"
+        "   .ltorg                              \n"
+        ::"i" ( configMAX_SYSCALL_INTERRUPT_PRIORITY )
+    );
+}
+```
+
+`__attribute__((naked))`(선언부 123행)는 "컴파일러야, 이 함수에 프롤로그(push)와 에필로그(pop)를 붙이지 마라"는 뜻이다. 붙이면 핸들러가 시작하자마자 MSP에 무언가를 push해 버리고, `bx r14` 직전에 pop을 끼워 넣어 손으로 짠 순서가 깨진다.
+
+**버전 주의**: 인터넷에 도는 설명 중에는 `msr basepri, r0` 바로 뒤에 `dsb` / `isb`가 있는 판이 많다. V11.3.2 **ARM_CM3** 포트에는 그 두 줄이 없다. `ARM_CM4F` 포트에는 있고(`msr basepri, r0` → `dsb` → `isb`), `ARM_CM7/r0p1` 포트는 Cortex-M7 r0p1 **Errata 837070** 우회로 `cpsid i` → `msr basepri` → `dsb` → `isb` → `cpsie i`로 감싼다. 같은 FreeRTOS라도 **어느 포트 폴더의 port.c인지**를 먼저 확인하고 읽는다.
+
+### 예제 1 — 레지스터 13개를 전부 쥔 두 태스크: 스위치가 정말 투명한가
+
+무엇을 확인하는 코드인가: 태스크 A는 rN = `0x1N1N1N1N`, 태스크 B는 rN = `0x2N2N2N2N`으로 r0–r12를 전부 채운 뒤 PendSV를 걸어(yield) 상대에게 넘기고, 돌아오면 13개가 그대로인지 검사한다. 2000번 왕복한다. 이 태스크 코드는 이후 고장 실험(§6)과 직접 만든 스위처(§8)에서도 그대로 다시 쓴다.
+
+```asm
+/* regs.S — tasks that fill r0-r12 with a pattern, yield, then verify every register.
+ * Task A uses 0x1N1N1N1N in rN, task B uses 0x2N2N2N2N. Any corruption -> reg_fail(). */
+    .syntax unified
+    .thumb
+    .equ ICSR, 0xE000ED04
+    .equ PENDSVSET, 0x10000000
+
+    .macro REGTASK name, t, cnt
+    .global \name
+    .thumb_func
+\name:
+    .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12
+    ldr r\n, =(0x\t\()0\t\()0\t\()0\t\()0 + 0x01010101 * \n)  /* rN = 0xTNTNTNTN */
+    .endr
+1:  push {r0, r1}               /* --- one "taskYIELD()" --- */
+    ldr r0, =\cnt
+    ldr r1, [r0]
+    adds r1, #1                 /* count iterations */
+    str r1, [r0]
+    ldr r0, =ICSR
+    ldr r1, =PENDSVSET
+    str r1, [r0]                /* pend PendSV: the switch happens right here */
+    dsb
+    isb
+    pop {r0, r1}
+    .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12
+    cmp r\n, #(0x\t\()0\t\()0\t\()0\t\()0 + 0x01010101 * \n)
+    bne 2f
+    .endr
+    push {r0}
+    ldr r0, =\cnt
+    ldr r0, [r0]
+    cmp r0, #2000               /* enough round trips? */
+    pop {r0}                    /* pop does not touch the flags */
+    blo 1b
+    bl reg_done
+2:  push {r0-r12}               /* snapshot r0-r12 as seen after the switch */
+    mov r1, sp
+    movs r0, #\t
+    bl reg_fail                 /* reg_fail(task, regs[13]) never returns */
+    .ltorg
+    .endm
+
+    REGTASK taskA_regs, 1, cntA
+    REGTASK taskB_regs, 2, cntB
+```
+
+```c
+/* ex1_regs.c — two FreeRTOS tasks at the same priority, each owning all of r0-r12.
+ * They yield to each other 2000 times; regs.S checks that no register changed. */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "board.h"
+volatile uint32_t cntA, cntB;
+void taskA_regs(void *arg);            /* in regs.S: never returns */
+void taskB_regs(void *arg);
+
+void reg_done(void)                    /* called by the first task to reach 2000 */
+{
+    board_printf_raw("OK: cntA=%u cntB=%u, r0-r12 survived every switch\n",
+                     (unsigned)cntA, (unsigned)cntB);
+    board_exit(0);
+}
+void reg_fail(uint32_t task, const uint32_t *r)  /* r[0..12] = regs after the switch */
+{
+    board_printf_raw("CORRUPTION in task %c after %u yields:\n", task == 1 ? 'A' : 'B',
+                     (unsigned)(task == 1 ? cntA : cntB));
+    for (int i = 0; i < 13; i++)
+        board_printf_raw("  r%d=0x%x%s", i, (unsigned)r[i], (i % 4 == 3) ? "\n" : "");
+    board_printf_raw("\n  pxCurrentTCB name=%s\n", pcTaskGetName(NULL));
+    board_exit(3);
+}
+int main(void)
+{
+    xTaskCreate(taskA_regs, "A", 256, NULL, 2, NULL);
+    xTaskCreate(taskB_regs, "B", 256, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/C2/regs; make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS="$S/ex1_regs.c $S/regs.S" OUT=/var/tmp/rtos/C2/ex1 && ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/C2/ex1/app.elf'
+```
+
+```text
+   text	   data	    bss	    dec	    hex	filename
+  12316	    100	 135408	 147824	  24170	/var/tmp/rtos/C2/ex1/app.elf
+OK: cntA=2000 cntB=2000, r0-r12 survived every switch
+[board_exit] code=0
+```
+
+출력에서 볼 것: 4000번의 스위치 동안 13개 레지스터 중 하나도 바뀌지 않았다. 태스크 입장에서 스위치는 **"`str r1, [r0]` 다음 명령까지 시간이 좀 흘렀을 뿐"**인 사건이다. 이 "투명함"이 컨텍스트 스위치의 합격 기준이고, §6에서 한 줄씩 지우며 이 검사를 실패시킨다.
+
+### 예제 2 — 빌드된 ELF에서 PendSV 디스어셈블리 읽기
+
+무엇을 확인하는 코드인가: 소스의 어셈블리가 실제 바이트로 어떻게 인코딩됐는지, 의사 명령과 별칭이 무엇으로 바뀌었는지 objdump로 본다.
+
+```sh
+limactl shell elinux -- bash -lc 'E=/var/tmp/rtos/C2/ex1/app.elf; arm-none-eabi-objdump -d $E | awk "/<PendSV_Handler>:/,/^$/"; arm-none-eabi-nm $E | grep -i "pxCurrentTCB\|vTaskSwitchContext\|PendSV\|SVC_Handler"'
+```
+
+```text
+00001f20 <PendSV_Handler>:
+    1f20:	f3ef 8009 	mrs	r0, PSP
+    1f24:	f3bf 8f6f 	isb	sy
+    1f28:	4b0d      	ldr	r3, [pc, #52]	@ (1f60 <PendSV_Handler+0x40>)
+    1f2a:	681a      	ldr	r2, [r3, #0]
+    1f2c:	e920 0ff0 	stmdb	r0!, {r4, r5, r6, r7, r8, r9, sl, fp}
+    1f30:	6010      	str	r0, [r2, #0]
+    1f32:	b508      	push	{r3, lr}
+    1f34:	f04f 0020 	mov.w	r0, #32
+    1f38:	f380 8811 	msr	BASEPRI, r0
+    1f3c:	f7fe ffd4 	bl	ee8 <vTaskSwitchContext>
+    1f40:	f04f 0000 	mov.w	r0, #0
+    1f44:	f380 8811 	msr	BASEPRI, r0
+    1f48:	e8bd 4008 	ldmia.w	sp!, {r3, lr}
+    1f4c:	6819      	ldr	r1, [r3, #0]
+    1f4e:	6808      	ldr	r0, [r1, #0]
+    1f50:	e8b0 0ff0 	ldmia.w	r0!, {r4, r5, r6, r7, r8, r9, sl, fp}
+    1f54:	f380 8809 	msr	PSP, r0
+    1f58:	f3bf 8f6f 	isb	sy
+    1f5c:	4770      	bx	lr
+    1f5e:	0000      	.short	0x0000
+    1f60:	20000e74 	.word	0x20000e74
+
+10000000 a PENDSVSET
+00001f20 T PendSV_Handler
+00001edc T SVC_Handler
+00000ee8 T vTaskSwitchContext
+20000e74 B pxCurrentTCB
+```
+
+(nm 출력은 주소순이 아니라 원래 순서에서 관련 줄만 남겼다.)
+
+출력에서 볼 것:
+
+- **명령 19개, 코드 62바이트** (`0x1f20`~`0x1f5d`). 16비트 명령 7개(`ldr` ×4, `str`, `push`, `bx`) + 32비트 명령 12개. 그 뒤 2바이트 패딩(`.short 0x0000`)은 리터럴을 4바이트 경계에 맞추기 위한 것이고, `0x1f60`의 `.word 0x20000e74`가 `ldr r3, =pxCurrentTCB`의 리터럴 풀 — nm으로 보면 `pxCurrentTCB`의 주소와 같다.
+- `ldr r3, =pxCurrentTCB` → `ldr r3, [pc, #52]`. Thumb의 PC 상대 주소는 "현재 명령 주소 + 4를 4바이트로 내림한 값"이 기준이다: (0x1f28 + 4) = 0x1f2c, + 52 = 0x1f60. 계산이 맞는다.
+- `stmdb sp!, {r3, r14}` → 16비트 `push {r3, lr}`(같은 명령의 별칭). 반면 `ldmia sp!, {r3, r14}`는 `pop`이 아니라 32비트 `ldmia.w`로 남았다. 같은 일을 하는 다른 인코딩이다.
+- `mov r0, %0`의 `%0`은 C의 `configMAX_SYSCALL_INTERRUPT_PRIORITY`가 컴파일 시간에 들어간 자리다 → `mov.w r0, #32`(= 0x20, 랩 설정값).
+- `bl ee8 <vTaskSwitchContext>`: 인코딩 `f7fe ffd4`는 PC 상대 오프셋이다. 이 한 줄이 어셈블리에서 C로 넘어가는 다리다.
+
+---
+
+## 4. 한 줄씩 해부 — 각 명령은 왜 있고, 빼면 무엇이 깨지나
+
+PendSV가 시작되는 순간의 상태부터 고정하자. 태스크 A가 Thread 모드 · PSP로 돌다가 PendSV가 받아들여졌다.
+
+- 하드웨어가 이미 **A의 스택(PSP)**에 8워드(r0–r3, r12, LR, PC, xPSR)를 쌓았고 PSP는 그만큼 줄었다.
+- CPU는 Handler 모드, 스택은 **MSP**(커널 · 인터럽트 공용 스택)를 쓴다.
+- LR에는 **EXC_RETURN** = `0xFFFFFFFD`("Thread 모드로, PSP를 써서, FPU 프레임 없이 돌아가라")가 들어 있다(B2).
+- r4–r11은 **아직 A의 값 그대로**다. 하드웨어는 이 8개를 건드리지 않는다.
+
+### 4.1 저장 단계 (명령 1~6)
+
+| # | 명령 | 하는 일 | 왜 필요한가 | 빼면 |
+|---|---|---|---|---|
+| 1 | `mrs r0, psp` | r0 ← A의 PSP (하드웨어 프레임의 시작 주소) | 핸들러는 MSP 위에서 돌고 있어서 `sp`로는 A의 스택을 못 본다. 특수 레지스터로 직접 읽어야 한다 | A의 스택 위치를 모른다 — 저장 자체가 불가능 |
+| 2 | `isb` | 명령 파이프라인 동기화 | 아키텍처상 꼭 필요한 자리는 아니다. FreeRTOS는 "특수 레지스터 접근 전후는 배리어로 확실히"라는 보수적 습관으로 넣는다(`portYIELD()` 주석도 "Barriers are normally not required but do ensure the code is completely within the specified behaviour for the architecture"라고 쓴다) | Cortex-M3에서는 관찰 가능한 차이 없음(아래 §6.6). QEMU는 파이프라인을 모델링하지 않으므로 QEMU 결과는 증거가 아니다 |
+| 3 | `ldr r3, =pxCurrentTCB` | r3 ← `&pxCurrentTCB` (전역 변수의 **주소**) | 나중에 결정이 끝난 뒤 "새 pxCurrentTCB"를 다시 읽어야 하므로, 변수 자체의 주소를 쥐고 있는다 | — |
+| 4 | `ldr r2, [r3]` | r2 ← `pxCurrentTCB` = A의 TCB 주소 | 저장한 꼭대기 주소를 A의 TCB에 적어야 한다 | — |
+| 5 | `stmdb r0!, {r4-r11}` | A의 스택에 r4–r11 8워드를 쌓고 r0 -= 32 | **하드웨어가 안 쌓는 절반**. 이 줄이 r4–r11을 "A의 것"으로 보관한다. r0을 쓰는 이유: 진짜 PSP 레지스터를 움직이지 않고 계산만 한다 | **HardFault** (§6.1) — 다음 복원 때 프레임이 32바이트 어긋난다 |
+| 6 | `str r0, [r2]` | `A->pxTopOfStack` ← r0 | 다음에 A를 이어 돌릴 때 필요한 **유일한 정보**. TCB 첫 멤버라 오프셋 0 | A의 옛 꼭대기 주소로 복원 → 옛날 레지스터 값 · 옛 PC로 "시간 여행" |
+
+여기까지가 "A를 냉동 보관"하는 부분이다. 이 시점에 A의 스택 꼭대기에는 16워드 프레임이 완성돼 있고(예제 3에서 실제 덤프), TCB에는 그 주소가 있다.
+
+### 4.2 결정 단계 (명령 7~13)
+
+| # | 명령 | 하는 일 | 왜 필요한가 | 빼면 |
+|---|---|---|---|---|
+| 7 | `stmdb sp!, {r3, r14}` | MSP에 r3(`&pxCurrentTCB`)와 r14(EXC_RETURN) 저장 | 곧 `bl`로 C 함수를 부른다. ① `bl`이 LR을 덮어쓴다 → EXC_RETURN이 사라진다. ② r3은 caller-saved라 C 함수가 망가뜨려도 된다. 둘 다 살려야 한다. 2개(8바이트)를 쌓는 것은 **AAPCS의 8바이트 스택 정렬**도 지켜 준다 | **HardFault** (§6.3) 또는 Handler 모드에 갇힌 채 엉뚱한 곳으로 점프 (§6.4) |
+| 8 | `mov r0, #configMAX_SYSCALL_INTERRUPT_PRIORITY` | r0 ← 0x20 | BASEPRI에 넣을 값 | — |
+| 9 | `msr basepri, r0` | 우선순위 값 ≥ 0x20인 인터럽트를 전부 막는다 | PendSV는 **최저 우선순위**라서 어떤 인터럽트든 끼어들 수 있다. 그런데 `...FromISR()` API를 부르는 ISR은 ready list와 `pxCurrentTCB`를 고친다. `vTaskSwitchContext`가 리스트를 걷는 도중에 그런 ISR이 끼면 리스트가 깨진다. 0x20보다 **높은**(숫자가 작은) 인터럽트는 막지 않는다 — RTOS API를 안 부르기로 약속한 "zero-latency" 인터럽트는 스위치 중에도 바로 돈다(B3, E2) | 평소엔 멀쩡하다가 ISR 타이밍이 맞을 때만 리스트가 깨지는 **드문 크래시** (재현 어려움) |
+| 10 | `bl vTaskSwitchContext` | C 함수 호출: 다음 태스크를 골라 `pxCurrentTCB`를 바꾼다 | "누구로 바꿀지"는 C로 쓰는 게 낫다(우선순위 비트맵, 리스트, 통계, 스택 검사). §7 | 스위치가 아니라 "같은 태스크로 복귀"가 된다 |
+| 11 | `mov r0, #0` | r0 ← 0 | | |
+| 12 | `msr basepri, r0` | 마스크 해제 | 결정이 끝났으니 인터럽트를 다시 받는다 | **굶주림** (§6.5): BASEPRI가 0x20에 묶여 SysTick과 PendSV가 영원히 막힌다 → 스위치가 다시는 안 일어난다 |
+| 13 | `ldmia sp!, {r3, r14}` | r3 ← `&pxCurrentTCB`, r14 ← EXC_RETURN | 7번에서 맡겨 둔 두 값을 찾아온다 | 7번과 짝 |
+
+### 4.3 복원 단계 (명령 14~19)
+
+| # | 명령 | 하는 일 | 왜 필요한가 | 빼면 |
+|---|---|---|---|---|
+| 14 | `ldr r1, [r3]` | r1 ← **새** `pxCurrentTCB` = B의 TCB | 3번에서 주소를 쥐고 있던 이유가 이것. 값이 바뀌었으니 다시 읽는다 | — |
+| 15 | `ldr r0, [r1]` | r0 ← `B->pxTopOfStack` | B가 냉동될 때 6번이 적어 둔 주소 | — |
+| 16 | `ldmia r0!, {r4-r11}` | B의 r4–r11 복원, r0 += 32 | 하드웨어가 복원해 주지 않는 절반 | B가 A의 r4–r11로 돈다 |
+| 17 | `msr psp, r0` | PSP ← B의 하드웨어 프레임 시작 | 곧 예외 복귀하면 하드웨어가 **PSP가 가리키는 곳**에서 8워드를 꺼낸다. 여기서 PSP를 B로 바꿔야 B의 PC로 돌아간다 | **조용한 오염** (§6.2): 하드웨어는 A의 프레임을 꺼내 A로 돌아가는데 r4–r11은 B의 것 |
+| 18 | `isb` | 동기화 | 새 PSP가 이후 동작(예외 복귀)에 확실히 반영되게 하는 보수적 배리어 | Cortex-M3 + QEMU에서는 차이 없음 |
+| 19 | `bx r14` | r14 = `0xFFFFFFFD` → **예외 복귀** | `bx`에 EXC_RETURN 값을 주면 CPU는 점프가 아니라 "예외에서 돌아가기"를 한다: Thread 모드로, PSP에서 8워드 언스태킹, 언스태킹한 PC로 계속 | — |
+
+마지막 줄의 마법이 컨텍스트 스위치의 정체다. CPU는 "A에서 들어왔으니 A로 돌아간다"를 기억하지 않는다. **PSP가 가리키는 곳의 프레임으로 돌아갈 뿐**이다. 그래서 소프트웨어가 그 사이에 PSP를 B의 프레임으로 바꿔치기하면, 하드웨어는 아무것도 모른 채 B를 이어 돌린다.
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="110" y="20" font-size="13" text-anchor="middle" font-weight="bold">레지스터</text>
+<text x="340" y="20" font-size="13" text-anchor="middle" font-weight="bold">메모리</text>
+<text x="570" y="20" font-size="13" text-anchor="middle" font-weight="bold">하는 일</text>
+<rect x="20" y="36" width="180" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="56" font-size="12" text-anchor="middle">r0 = PSP(A)</text>
+<rect x="20" y="76" width="180" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="96" font-size="12" text-anchor="middle">r3 = &amp;pxCurrentTCB</text>
+<rect x="20" y="116" width="180" height="30" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="136" font-size="12" text-anchor="middle">r2 = TCB(A)</text>
+<rect x="250" y="36" width="180" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="56" font-size="12" text-anchor="middle">A 스택: r4–r11 쌓기</text>
+<rect x="250" y="116" width="180" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="136" font-size="12" text-anchor="middle">TCB(A).pxTopOfStack</text>
+<line x1="200" y1="51" x2="248" y2="51" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="200" y1="131" x2="248" y2="131" stroke="currentColor" marker-end="url(#ah4)"/>
+<text x="570" y="56" font-size="12" text-anchor="middle">① 저장 (명령 1~6)</text>
+<text x="570" y="136" font-size="12" text-anchor="middle">꼭대기 주소 하나만 TCB에</text>
+<rect x="250" y="166" width="180" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340" y="186" font-size="12" text-anchor="middle">MSP: r3, EXC_RETURN</text>
+<rect x="20" y="166" width="180" height="30" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="110" y="186" font-size="12" text-anchor="middle">BASEPRI = 0x20</text>
+<text x="570" y="178" font-size="12" text-anchor="middle">② 결정 (명령 7~13)</text>
+<text x="570" y="196" font-size="12" text-anchor="middle">bl vTaskSwitchContext</text>
+<rect x="20" y="226" width="180" height="30" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="110" y="246" font-size="12" text-anchor="middle">r1 = TCB(B), r0 = top(B)</text>
+<rect x="250" y="226" width="180" height="30" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="246" font-size="12" text-anchor="middle">B 스택: r4–r11 꺼내기</text>
+<line x1="248" y1="241" x2="200" y2="241" stroke="currentColor" marker-end="url(#ah4)"/>
+<text x="570" y="246" font-size="12" text-anchor="middle">③ 복원 (명령 14~17)</text>
+<rect x="20" y="276" width="180" height="30" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="110" y="296" font-size="12" text-anchor="middle">PSP = B의 HW 프레임</text>
+<line x1="200" y1="291" x2="248" y2="291" stroke="currentColor" marker-end="url(#ah4)"/>
+<rect x="250" y="276" width="180" height="30" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340" y="296" font-size="12" text-anchor="middle">HW가 8워드 언스태킹</text>
+<text x="570" y="296" font-size="12" text-anchor="middle">④ bx lr → B의 PC로</text>
+</svg>
+```
+
+그림 2 — PendSV 핸들러의 네 단계와 각 단계에서 레지스터가 무엇을 쥐고 있는지. 왼쪽 열이 레지스터, 가운데 열이 메모리(태스크 스택 · TCB · MSP), 화살표는 데이터가 움직이는 방향이다.
+
+### 4.4 짝이 되는 코드 세 개 — 첫 태스크는 어떻게 시작하나
+
+PendSV는 "이미 돌고 있던 태스크 A"를 전제로 한다. 맨 처음에는 A가 없다. FreeRTOS는 세 조각으로 이 문제를 푼다.
+
+**① `pxPortInitialiseStack()` — 가짜 프레임 미리 쓰기** (`port.c` 182행):
+
+```c
+    pxTopOfStack--;                                                      /* Offset added to account for the way the MCU uses the stack on entry/exit of interrupts. */
+    *pxTopOfStack = portINITIAL_XPSR;                                    /* xPSR */
+    pxTopOfStack--;
+    *pxTopOfStack = ( ( StackType_t ) pxCode ) & portSTART_ADDRESS_MASK; /* PC */
+    pxTopOfStack--;
+    *pxTopOfStack = ( StackType_t ) portTASK_RETURN_ADDRESS;             /* LR */
+    pxTopOfStack -= 5;                                                   /* R12, R3, R2 and R1. */
+    *pxTopOfStack = ( StackType_t ) pvParameters;                        /* R0 */
+    pxTopOfStack -= 8;                                                   /* R11, R10, R9, R8, R7, R6, R5 and R4. */
+```
+
+- `portINITIAL_XPSR` = `0x01000000` — xPSR의 비트 24(T, Thumb)만 1. 이게 0이면 예외 복귀 직후 INVSTATE UsageFault가 난다(§6.1에서 실제로 본다).
+- PC = 태스크 함수 주소 `& 0xfffffffe`(`portSTART_ADDRESS_MASK`) — 함수 포인터의 Thumb 비트(비트 0)를 **지운다**. 예외 복귀 때 PC 비트 0이 1이면 Armv7-M에서 UNPREDICTABLE이다(§8.4에서 직접 경고를 띄워 본다).
+- LR = `prvTaskExitError` — 태스크 함수가 `return`하면 여기로 떨어져 assert한다. FreeRTOS 태스크는 return하면 안 된다(`vTaskDelete(NULL)`로 끝낸다).
+- R0 = `pvParameters` — 태스크 함수의 첫 인자가 r0으로 들어가는 AAPCS 그대로.
+- r1–r3, r12, r4–r11은 값을 쓰지 않는다(그냥 공간만 비운다). 스택 overflow 검사가 켜져 있으면 스택 전체가 `0xa5`로 채워져 있으므로 그 값이 보인다 — §6.2의 출력에 그대로 나온다.
+
+**② `prvPortStartFirstTask()` — MSP 되돌리기 + SVC 호출**:
+
+```asm
+        " ldr r0, =0xE000ED08   \n" /* Use the NVIC offset register to locate the stack. */
+        " ldr r0, [r0]          \n"
+        " ldr r0, [r0]          \n"
+        " msr msp, r0           \n" /* Set the msp back to the start of the stack. */
+        " cpsie i               \n" /* Globally enable interrupts. */
+        " cpsie f               \n"
+        " dsb                   \n"
+        " isb                   \n"
+        " svc 0                 \n" /* System call to start first task. */
+```
+
+VTOR(0xE000ED08)에서 벡터 테이블 주소 → 그 첫 워드(초기 SP 값)를 읽어 MSP를 **리셋 직후 값으로 되돌린다**. main()이 쓰던 스택은 다시 돌아오지 않으니 그 공간을 인터럽트용으로 회수하는 것이다. 그리고 `svc 0`.
+
+**③ `vPortSVCHandler()` — PendSV의 복원 절반만**:
+
+```asm
+        "   ldr r3, =pxCurrentTCB           \n" /* Restore the context. */
+        "   ldr r1, [r3]                    \n" /* Get the pxCurrentTCB address. */
+        "   ldr r0, [r1]                    \n" /* The first item in pxCurrentTCB is the task top of stack. */
+        "   ldmia r0!, {r4-r11}             \n" /* Pop the registers that are not automatically saved on exception entry and the critical nesting count. */
+        "   msr psp, r0                     \n" /* Restore the task stack pointer. */
+        "   isb                             \n"
+        "   mov r0, #0                      \n"
+        "   msr basepri, r0                 \n"
+        "   orr r14, #0xd                   \n"
+        "   bx r14                          \n"
+```
+
+PendSV의 14~19번과 같다. 차이 두 개: `msr basepri, 0`(스케줄러 시작 전 `vTaskStartScheduler()`가 인터럽트를 BASEPRI로 막아 두었으므로 여기서 푼다)과 `orr r14, #0xd`. SVC는 main()에서 — Thread 모드 · **MSP** — 불렸으므로 LR = `0xFFFFFFF9`다. 여기에 `0xd`를 OR하면 `0xFFFFFFFD`("Thread, **PSP**")가 된다. 이 한 줄이 CPU를 처음으로 PSP 세계로 보낸다. (같은 코드 주석의 "and the critical nesting count"는 옛 포트의 흔적이다. 지금 ARM_CM3 포트는 critical nesting을 전역 `uxCriticalNesting`으로 관리하고 스택에 넣지 않는다.)
+
+**왜 첫 태스크 시작에 SVC를 쓰나?** "예외 복귀"만이 Thread 모드 · PSP · 지정한 PC · xPSR을 **한꺼번에 원자적으로** 세팅하는 방법이기 때문이다. 일반 코드에서 `msr psp` → CONTROL.SPSEL=1 → 레지스터 복원 → 태스크 함수로 점프를 순서대로 하면, 중간에 인터럽트가 끼었을 때 반쯤 바뀐 상태가 보인다.
+
+### 4.5 흔한 함정
+
+- **PendSV 우선순위를 낮추는 것을 잊는다.** 리셋 직후 PendSV · SysTick의 우선순위는 0(최고)이다. FreeRTOS는 `xPortStartScheduler()`에서 SHPR3에 `portNVIC_PENDSV_PRI`(255 << 16) · `portNVIC_SYSTICK_PRI`(255 << 24)를 쓴다. 직접 포팅할 때 빼먹으면 PendSV가 다른 ISR을 선점해서 ISR 도중 태스크로 돌아가는 사고가 난다(B4).
+- **어셈블리를 naked 아닌 함수에 넣는다.** 컴파일러가 `push {r4, lr}` 같은 프롤로그를 붙이면 `mrs r0, psp`보다 먼저 MSP가 움직이고, `bx r14`의 r14가 무엇인지 보장이 없어진다.
+- **`str r0, [r2]`를 `str r0, [r2, #4]`처럼 쓴다.** TCB 첫 멤버라는 전제가 깨지면(구조체 앞에 필드를 추가) 어셈블리도 같이 고쳐야 한다. FreeRTOS가 주석에 대문자로 경고하는 이유다.
+
+---
+
+## 5. 스위치 한 번을 눈으로 본다 — gdb로 QEMU를 세워 놓고 스택 덤프
+
+### 5.1 무엇을 보려는가
+
+§4의 표는 "그럴 것이다"이다. 이제 예제 1의 바이너리를 QEMU에서 멈춰 세우고, PendSV 안의 네 지점에서 레지스터와 스택을 덤프해 **실제로** 그런지 확인한다. 태스크 A의 레지스터는 `0x1N1N1N1N`, B는 `0x2N2N2N2N` 무늬라서 덤프에서 누구의 값인지 한눈에 보인다.
+
+### 예제 3 — gdb 스크립트: PendSV 진입 · 저장 직후 · 결정 직후 · 복귀 직전 · 복귀 직후
+
+무엇을 확인하는 코드인가: 10번째 PendSV(정상 상태, A → B 전환)에서 ① 진입 직후 하드웨어 프레임, ② `stmdb` 직후 16워드 전체, ③ `vTaskSwitchContext` 직후 B의 저장된 프레임, ④ `bx lr` 직전 레지스터, ⑤ 복귀 직후 PC를 찍는다. 브레이크포인트 주소는 예제 2의 디스어셈블리에서 가져왔다(`0x1f20` 진입, `0x1f30` = `stmdb` 다음, `0x1f50` = 복원 `ldmia` 직전, `0x1f5c` = `bx lr`).
+
+```text
+set pagination off
+set confirm off
+target remote :1234
+printf "vector[14] PendSV = 0x%08x\n", ((unsigned*)0)[14]
+break *0x1f20
+ignore 1 9
+continue
+printf "=== [1] PendSV entry (hit 10): outgoing task = %s\n", pxCurrentTCB->pcTaskName
+printf "LR(EXC_RETURN)=0x%08x  PSP=0x%08x  MSP=0x%08x  BASEPRI=0x%x\n", $lr, $psp, $msp, $basepri
+printf "hardware frame at PSP (r0 r1 r2 r3 r12 lr pc xpsr):\n"
+x/8wx $psp
+printf "two words above the frame (task pushed r0,r1 before yielding):\n"
+x/2wx $psp+32
+printf "TCB A @0x%08x: pxTopOfStack=0x%08x pxStack=0x%08x\n", pxCurrentTCB, pxCurrentTCB->pxTopOfStack, pxCurrentTCB->pxStack
+info registers r4 r5 r6 r7 r8 r9 r10 r11
+delete
+break *0x1f30
+continue
+printf "=== [2] after stmdb r0!,{r4-r11}: r0=0x%08x (= PSP-32)\n", $r0
+x/16wx $r0
+break *0x1f50
+continue
+printf "=== [3] after vTaskSwitchContext: incoming task = %s, saved top = 0x%08x\n", pxCurrentTCB->pcTaskName, $r0
+x/16wx $r0
+printf "TCB B @0x%08x: pxStack=0x%08x\n", pxCurrentTCB, pxCurrentTCB->pxStack
+break *0x1f5c
+continue
+printf "=== [4] at bx lr: PSP=0x%08x LR=0x%08x\n", $psp, $lr
+info registers r4 r5 r6 r7 r8 r9 r10 r11
+stepi
+printf "=== [5] back in thread mode: pc=0x%08x sp=0x%08x r0=0x%08x r12=0x%08x\n", $pc, $sp, $r0, $r12
+info symbol $pc
+kill
+quit
+```
+
+```sh
+limactl shell elinux -- bash -lc 'E=/var/tmp/rtos/C2/ex1/app.elf; (timeout 30 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial file:/var/tmp/rtos/C2/ex1/uart.txt -semihosting-config enable=on,target=native -kernel $E -s -S &); sleep 1; gdb -q -batch -x /Users/donh/.rtos_scratch/C2/regs/watch.gdb $E 2>&1 | grep -v "^warning\|Remote debugging\|^$"'
+```
+
+```text
+vector[14] PendSV = 0x00001f21
+Breakpoint 1, PendSV_Handler () at /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:459
+=== [1] PendSV entry (hit 10): outgoing task = A
+LR(EXC_RETURN)=0xfffffffd  PSP=0x200013e0  MSP=0x203fffe0  BASEPRI=0x0
+hardware frame at PSP (r0 r1 r2 r3 r12 lr pc xpsr):
+0x200013e0 <ucHeap+988>:	0xe000ed04	0x10000000	0x12121212	0x13131313
+0x200013f0 <ucHeap+1004>:	0x1c1c1c1c	0x00001f65	0x000001ea	0x01000000
+two words above the frame (task pushed r0,r1 before yielding):
+0x20001400 <ucHeap+1020>:	0x10101010	0x11111111
+TCB A @0x20001418: pxTopOfStack=0x200013c0 pxStack=0x20001010
+r4             0x14141414          336860180
+r5             0x15151515          353703189
+r6             0x16161616          370546198
+r7             0x17171717          387389207
+r8             0x18181818          404232216
+r9             0x19191919          421075225
+r10            0x1a1a1a1a          437918234
+r11            0x1b1b1b1b          454761243
+=== [2] after stmdb r0!,{r4-r11}: r0=0x200013c0 (= PSP-32)
+0x200013c0 <ucHeap+956>:	0x14141414	0x15151515	0x16161616	0x17171717
+0x200013d0 <ucHeap+972>:	0x18181818	0x19191919	0x1a1a1a1a	0x1b1b1b1b
+0x200013e0 <ucHeap+988>:	0xe000ed04	0x10000000	0x12121212	0x13131313
+0x200013f0 <ucHeap+1004>:	0x1c1c1c1c	0x00001f65	0x000001ea	0x01000000
+=== [3] after vTaskSwitchContext: incoming task = B, saved top = 0x20001830
+0x20001830 <ucHeap+2092>:	0x24242424	0x25252525	0x26262626	0x27272727
+0x20001840 <ucHeap+2108>:	0x28282828	0x29292929	0x2a2a2a2a	0x2b2b2b2b
+0x20001850 <ucHeap+2124>:	0xe000ed04	0x10000000	0x22222222	0x23232323
+0x20001860 <ucHeap+2140>:	0x2c2c2c2c	0x00001f65	0x000002ae	0x01000000
+TCB B @0x20001888: pxStack=0x20001480
+=== [4] at bx lr: PSP=0x20001850 LR=0xfffffffd
+r4             0x24242424          606348324
+r5             0x25252525          623191333
+r6             0x26262626          640034342
+r7             0x27272727          656877351
+r8             0x28282828          673720360
+r9             0x29292929          690563369
+r10            0x2a2a2a2a          707406378
+r11            0x2b2b2b2b          724249387
+0x000002ae in taskB_regs () at /Users/donh/.rtos_scratch/C2/regs/regs.S:45
+=== [5] back in thread mode: pc=0x000002ae sp=0x20001870 r0=0xe000ed04 r12=0x2c2c2c2c
+taskB_regs + 70 in section .text
+```
+
+(브레이크포인트 설정 안내 줄과 소스 줄 표시 일부를 생략했다.)
+
+### 5.2 덤프를 한 줄씩 읽기
+
+- **`vector[14] = 0x00001f21`**: 벡터 테이블 14번(PendSV) 칸에는 `PendSV_Handler` 주소 `0x1f20`에 Thumb 비트가 붙은 값이 있다.
+- **[1] `LR = 0xfffffffd`**: Thread 모드 · PSP에서 들어왔다는 EXC_RETURN. `MSP = 0x203fffe0`은 RAM 끝(0x20400000) 근처 — `prvPortStartFirstTask()`가 MSP를 초기값으로 되돌린 뒤 PendSV 진입이 MSP를 거의 안 썼다는 뜻이다. `BASEPRI = 0`: 아직 마스크 전.
+- **[1] 하드웨어 프레임**: r2 = `0x12121212`, r3 = `0x13131313`, r12 = `0x1c1c1c1c`는 A의 무늬 그대로다. 그런데 r0 = `0xe000ed04`, r1 = `0x10000000`이다 — A가 yield하려고 r0/r1을 잠깐 ICSR 주소와 PENDSVSET 값으로 썼기 때문이다(regs.S의 `push {r0, r1}` → … → `str r1, [r0]`). A의 원래 r0/r1(`0x10101010`, `0x11111111`)은 프레임 바로 위 `0x20001400`에 A 자신이 push해 둔 것이 보인다. **프레임에는 "멈춘 순간"의 값이 그대로 찍힌다**는 증거다.
+- **[1] 스택 PC = `0x000001ea`**: A가 멈춘 곳. objdump로 보면 `1e8: str r1, [r0]`(PENDSVSET 쓰기) 바로 다음 명령 `1ea: dsb sy`다. 즉 **PENDSVSET을 쓰는 str이 끝나자마자 PendSV가 받아들여졌고, dsb는 아직 실행되지 않았다.** 복귀하면 A는 dsb부터 이어 간다. (QEMU 동작이다. 실칩에서는 쓰기가 NVIC에 도달하는 몇 사이클 동안 한두 명령이 더 실행될 수 있다 — 그래서 `portYIELD()`가 `dsb`/`isb`를 붙여 "yield 명령 뒤의 코드가 스위치 전에 실행되는 일"을 막는다.)
+- **[1] 스택 LR = `0x00001f65`**: `prvTaskExitError`+1. A는 한 번도 `bl`을 하지 않았으므로 LR에는 `pxPortInitialiseStack()`이 넣어 둔 초기값이 그대로 있다.
+- **[1] `pxTopOfStack = 0x200013c0`**: 아직 갱신 전인데 이미 같은 값이다. A는 매번 같은 깊이에서 yield하니까 지난번 저장 위치와 이번 위치가 같다.
+- **[2] `r0 = 0x200013c0` = PSP − 32**: `stmdb`가 r4–r11을 PSP 바로 아래 32바이트에 쌓았다. 이제 `0x200013c0`부터 64바이트가 §1.2의 16워드 프레임 그대로다.
+- **[3] B의 프레임**: `0x20001830`부터 B 무늬(`0x2424…`)의 r4–r11, 그 위에 B의 하드웨어 프레임(PC = `0x2ae` = taskB의 같은 dsb 자리). B도 같은 코드로 yield했으니 모양이 똑같다.
+- **[4] `PSP = 0x20001850`**: `ldmia` + `msr psp`로 r4–r11이 B의 값이 됐고, PSP는 B의 하드웨어 프레임을 가리킨다. LR은 여전히 `0xfffffffd`(7번 · 13번 명령이 지켰다).
+- **[5] `pc = 0x2ae`, `sp = 0x20001870`**: `bx lr` 한 번에 하드웨어가 8워드를 꺼냈다(0x20001850 + 32 = 0x20001870). r12 = `0x2c2c2c2c` — B의 값. **B는 자기가 멈췄던 dsb에서 깨어났다.**
+
+```svg
+<svg viewBox="0 0 680 490" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="170" y="18" font-size="13" text-anchor="middle" font-weight="bold">나가는 태스크 A (PendSV 진입 후)</text>
+<text x="510" y="18" font-size="13" text-anchor="middle" font-weight="bold">들어오는 태스크 B (복원 직전)</text>
+<text x="170" y="36" font-size="12" text-anchor="middle">pxTopOfStack ← 0x200013c0</text>
+<text x="510" y="36" font-size="12" text-anchor="middle">pxTopOfStack = 0x20001830</text>
+<text x="8" y="78" font-size="12">0x200013c0</text>
+<rect x="90" y="64" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="98" y="77" font-size="12">0x14141414</text>
+<text x="180" y="77" font-size="12">r4</text>
+<text x="8" y="97" font-size="12">0x200013c4</text>
+<rect x="90" y="83" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="98" y="96" font-size="12">0x15151515</text>
+<text x="180" y="96" font-size="12">r5</text>
+<text x="8" y="116" font-size="12">0x200013c8</text>
+<rect x="90" y="102" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="98" y="115" font-size="12">0x16161616</text>
+<text x="180" y="115" font-size="12">r6</text>
+<text x="8" y="135" font-size="12">0x200013cc</text>
+<rect x="90" y="121" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="98" y="134" font-size="12">0x17171717</text>
+<text x="180" y="134" font-size="12">r7</text>
+<text x="8" y="154" font-size="12">0x200013d0</text>
+<rect x="90" y="140" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="98" y="153" font-size="12">0x18181818</text>
+<text x="180" y="153" font-size="12">r8</text>
+<text x="8" y="173" font-size="12">0x200013d4</text>
+<rect x="90" y="159" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="98" y="172" font-size="12">0x19191919</text>
+<text x="180" y="172" font-size="12">r9</text>
+<text x="8" y="192" font-size="12">0x200013d8</text>
+<rect x="90" y="178" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="98" y="191" font-size="12">0x1a1a1a1a</text>
+<text x="180" y="191" font-size="12">r10</text>
+<text x="8" y="211" font-size="12">0x200013dc</text>
+<rect x="90" y="197" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="98" y="210" font-size="12">0x1b1b1b1b</text>
+<text x="180" y="210" font-size="12">r11</text>
+<text x="8" y="230" font-size="12">0x200013e0</text>
+<rect x="90" y="216" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="98" y="229" font-size="12">0xe000ed04</text>
+<text x="180" y="229" font-size="12">r0 (ICSR addr)</text>
+<text x="8" y="249" font-size="12">0x200013e4</text>
+<rect x="90" y="235" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="98" y="248" font-size="12">0x10000000</text>
+<text x="180" y="248" font-size="12">r1 (PENDSVSET)</text>
+<text x="8" y="268" font-size="12">0x200013e8</text>
+<rect x="90" y="254" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="98" y="267" font-size="12">0x12121212</text>
+<text x="180" y="267" font-size="12">r2</text>
+<text x="8" y="287" font-size="12">0x200013ec</text>
+<rect x="90" y="273" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="98" y="286" font-size="12">0x13131313</text>
+<text x="180" y="286" font-size="12">r3</text>
+<text x="8" y="306" font-size="12">0x200013f0</text>
+<rect x="90" y="292" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="98" y="305" font-size="12">0x1c1c1c1c</text>
+<text x="180" y="305" font-size="12">r12</text>
+<text x="8" y="325" font-size="12">0x200013f4</text>
+<rect x="90" y="311" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="98" y="324" font-size="12">0x00001f65</text>
+<text x="180" y="324" font-size="12">lr = ExitError</text>
+<text x="8" y="344" font-size="12">0x200013f8</text>
+<rect x="90" y="330" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="98" y="343" font-size="12">0x000001ea</text>
+<text x="180" y="343" font-size="12">pc = taskA+0x46</text>
+<text x="8" y="363" font-size="12">0x200013fc</text>
+<rect x="90" y="349" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="98" y="362" font-size="12">0x01000000</text>
+<text x="180" y="362" font-size="12">xPSR (T=1)</text>
+<text x="8" y="382" font-size="12">0x20001400</text>
+<rect x="90" y="368" width="230" height="17" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="98" y="381" font-size="12">0x10101010</text>
+<text x="180" y="381" font-size="12">push r0 (task)</text>
+<text x="8" y="401" font-size="12">0x20001404</text>
+<rect x="90" y="387" width="230" height="17" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="98" y="400" font-size="12">0x11111111</text>
+<text x="180" y="400" font-size="12">push r1 (task)</text>
+<text x="348" y="78" font-size="12">0x20001830</text>
+<rect x="430" y="64" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="438" y="77" font-size="12">0x24242424</text>
+<text x="520" y="77" font-size="12">r4</text>
+<text x="348" y="97" font-size="12">0x20001834</text>
+<rect x="430" y="83" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="438" y="96" font-size="12">0x25252525</text>
+<text x="520" y="96" font-size="12">r5</text>
+<text x="348" y="116" font-size="12">0x20001838</text>
+<rect x="430" y="102" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="438" y="115" font-size="12">0x26262626</text>
+<text x="520" y="115" font-size="12">r6</text>
+<text x="348" y="135" font-size="12">0x2000183c</text>
+<rect x="430" y="121" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="438" y="134" font-size="12">0x27272727</text>
+<text x="520" y="134" font-size="12">r7</text>
+<text x="348" y="154" font-size="12">0x20001840</text>
+<rect x="430" y="140" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="438" y="153" font-size="12">0x28282828</text>
+<text x="520" y="153" font-size="12">r8</text>
+<text x="348" y="173" font-size="12">0x20001844</text>
+<rect x="430" y="159" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="438" y="172" font-size="12">0x29292929</text>
+<text x="520" y="172" font-size="12">r9</text>
+<text x="348" y="192" font-size="12">0x20001848</text>
+<rect x="430" y="178" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="438" y="191" font-size="12">0x2a2a2a2a</text>
+<text x="520" y="191" font-size="12">r10</text>
+<text x="348" y="211" font-size="12">0x2000184c</text>
+<rect x="430" y="197" width="230" height="17" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="438" y="210" font-size="12">0x2b2b2b2b</text>
+<text x="520" y="210" font-size="12">r11</text>
+<text x="348" y="230" font-size="12">0x20001850</text>
+<rect x="430" y="216" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="438" y="229" font-size="12">0xe000ed04</text>
+<text x="520" y="229" font-size="12">r0</text>
+<text x="348" y="249" font-size="12">0x20001854</text>
+<rect x="430" y="235" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="438" y="248" font-size="12">0x10000000</text>
+<text x="520" y="248" font-size="12">r1</text>
+<text x="348" y="268" font-size="12">0x20001858</text>
+<rect x="430" y="254" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="438" y="267" font-size="12">0x22222222</text>
+<text x="520" y="267" font-size="12">r2</text>
+<text x="348" y="287" font-size="12">0x2000185c</text>
+<rect x="430" y="273" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="438" y="286" font-size="12">0x23232323</text>
+<text x="520" y="286" font-size="12">r3</text>
+<text x="348" y="306" font-size="12">0x20001860</text>
+<rect x="430" y="292" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="438" y="305" font-size="12">0x2c2c2c2c</text>
+<text x="520" y="305" font-size="12">r12</text>
+<text x="348" y="325" font-size="12">0x20001864</text>
+<rect x="430" y="311" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="438" y="324" font-size="12">0x00001f65</text>
+<text x="520" y="324" font-size="12">lr = ExitError</text>
+<text x="348" y="344" font-size="12">0x20001868</text>
+<rect x="430" y="330" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="438" y="343" font-size="12">0x000002ae</text>
+<text x="520" y="343" font-size="12">pc = taskB+0x46</text>
+<text x="348" y="363" font-size="12">0x2000186c</text>
+<rect x="430" y="349" width="230" height="17" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="438" y="362" font-size="12">0x01000000</text>
+<text x="520" y="362" font-size="12">xPSR</text>
+<rect x="20" y="422" width="14" height="12" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="40" y="433" font-size="12">소프트웨어가 저장 (stmdb r0!, {r4-r11}) — 8워드</text>
+<rect x="20" y="442" width="14" height="12" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="40" y="453" font-size="12">하드웨어가 예외 진입 때 자동 저장 — 8워드</text>
+<rect x="20" y="462" width="14" height="12" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="40" y="473" font-size="12">태스크 자신의 스택 데이터 (프레임 바깥)</text>
+<text x="420" y="433" font-size="12">A: 진입 시 PSP = 0x200013e0 (r0 줄)</text>
+<text x="420" y="453" font-size="12">B: msr psp 후 PSP = 0x20001850</text>
+<text x="420" y="473" font-size="12">B: bx lr 후 SP = 0x20001870</text>
+<line x1="330" y1="224" x2="320" y2="224" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah2)"/>
+<line x1="670" y1="224" x2="660" y2="224" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah2)"/>
+<line x1="330" y1="72" x2="320" y2="72" stroke="#e08a3c" stroke-width="1.5" marker-end="url(#ah2)"/>
+<line x1="670" y1="72" x2="660" y2="72" stroke="#e08a3c" stroke-width="1.5" marker-end="url(#ah2)"/>
+</svg>
+```
+
+그림 3 — 예제 3의 실제 덤프로 그린 두 태스크의 스택. 왼쪽은 A가 `stmdb` 직후(저장 완료), 오른쪽은 B가 복원되기 직전. 주황 8칸은 소프트웨어가, 파랑 8칸은 하드웨어가 쌓았다. 화살표는 TCB의 `pxTopOfStack`(주황)과 하드웨어 프레임 시작(검정)을 가리킨다. 회색 2칸은 프레임 밖, A가 yield 전에 push한 자기 데이터다.
+
+### 5.3 Don 경험과 연결
+
+JTAG로 멈춘 SSD 펌웨어 코어에서 "이 코어가 무엇을 하다 멈췄나"를 볼 때 PC와 SP만 보고 끝냈다면, RTOS에서는 한 단계가 더 있다. **돌고 있지 않은 태스크의 "PC"는 레지스터가 아니라 그 태스크 스택의 `pxTopOfStack + 0x38`에 있다.** RTOS-aware 디버거 플러그인(예: SEGGER Ozone, OpenOCD의 FreeRTOS 지원)이 "태스크별 콜스택"을 보여 줄 수 있는 것도, 정확히 이 오프셋을 읽어서 가짜 레지스터 세트를 만들기 때문이다. 오프셋을 알면 플러그인이 없어도 `x/16wx` 한 번으로 같은 일을 할 수 있다.
+
+### 5.4 흔한 함정
+
+- 브레이크포인트를 `break PendSV_Handler`(심볼)로 걸면 gdb가 프롤로그 뒤로 옮길 수 있다. naked 어셈블리는 프롤로그가 없으니 문제없지만, 습관적으로 `break *주소`를 쓰는 편이 안전하다.
+- gdb가 보여 주는 `sp`는 **현재 모드의** 스택 포인터다. PendSV 안에서 `sp`는 MSP다. 태스크 스택을 보려면 `$psp`를 써야 한다(QEMU gdbstub은 M-profile의 `msp`/`psp`/`basepri`를 따로 내보낸다).
+
+---
+
+## 6. 일부러 고장 내기 — 한 줄을 지우면 정확히 무엇이 깨지나
+
+### 6.1 실험 방법
+
+랩의 `port.c`를 **자기 폴더에 복사**해서(`/var/rtoslab`은 읽기 전용) 한 줄씩 지운 변형을 만들고, 랩 Makefile을 복사해 `PORT=` 변수로 어느 port.c를 링크할지 고르게 했다. 태스크는 예제 1의 레지스터 검사 태스크 그대로다.
+
+```make
+# C2 copy of the lab FreeRTOS Makefile with one change: PORT= selects which port.c to link
+TPL    := /var/rtoslab/templates
+K      := /var/rtoslab/src/FreeRTOS-Kernel
+PORT   ?= $(K)/portable/GCC/ARM_CM3/port.c
+CC     := arm-none-eabi-gcc
+OUT    ?= ./out
+CFLAGS := -mthumb -mcpu=cortex-m3 -O2 -g3 -std=gnu11 -Wall -Wextra -ffunction-sections -fdata-sections \
+          $(addprefix -I,$(sort $(dir $(SRCS)))) -I$(TPL)/freertos-mps2 -I$(TPL)/common \
+          -I$(K)/include -I$(K)/portable/GCC/ARM_CM3 $(EXTRA_CFLAGS)
+LDFLAGS:= -T $(TPL)/common/mps2_m3.ld -nostartfiles --specs=nano.specs -Wl,--gc-sections -Wl,-Map=$(OUT)/app.map
+KSRC   := $(K)/tasks.c $(K)/list.c $(K)/queue.c $(K)/timers.c $(K)/portable/MemMang/heap_4.c $(PORT)
+ALL    := $(SRCS) $(TPL)/freertos-mps2/hooks.c $(TPL)/common/startup.c $(TPL)/common/board.c $(KSRC)
+$(OUT)/app.elf: $(ALL) | $(OUT)
+	$(CC) $(CFLAGS) $(ALL) $(LDFLAGS) -o $@
+$(OUT): ; mkdir -p $@
+```
+
+### 예제 4 — 변형 port.c 만들기와 diff
+
+무엇을 확인하는 코드인가: sed로 한 줄(또는 짝 두 줄)만 지운 변형 다섯 개를 만들고, 원본과의 차이가 정말 그 줄뿐인지 diff로 확인한다.
+
+```sh
+limactl shell elinux -- bash -lc 'P=/var/tmp/rtos/C2/ports; mkdir -p $P; O=/var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c
+sed "/stmdb r0!, {r4-r11}/d" $O > $P/port_nosave.c
+sed "/msr psp, r0                         /d" $O > $P/port_nopsp.c
+sed "/stmdb sp!, {r3, r14}/d; /ldmia sp!, {r3, r14}/d" $O > $P/port_nolr.c
+sed "s/{r3, r14}/{r3, r4}/" $O > $P/port_nolr2.c
+sed "/mov r0, #0                          /d; /msr basepri, r0                     /{x;s/^/x/;/^x\{2\}$/{x;d};x}" $O > $P/port_nobasepri.c
+for v in nosave nopsp nolr nolr2 nobasepri; do echo "--- $v"; diff $O $P/port_$v.c; done'
+```
+
+```text
+--- nosave
+467d466
+<         "   stmdb r0!, {r4-r11}                 \n" /* Save the remaining registers. */
+--- nopsp
+481d480
+<         "   msr psp, r0                         \n"
+--- nolr
+470d469
+<         "   stmdb sp!, {r3, r14}                \n"
+476d474
+<         "   ldmia sp!, {r3, r14}                \n"
+--- nolr2
+470c470
+<         "   stmdb sp!, {r3, r14}                \n"
+---
+>         "   stmdb sp!, {r3, r4}                \n"
+476c476
+<         "   ldmia sp!, {r3, r14}                \n"
+---
+>         "   ldmia sp!, {r3, r4}                \n"
+--- nobasepri
+474,475d473
+<         "   mov r0, #0                          \n"
+<         "   msr basepri, r0                     \n"
+```
+
+출력에서 볼 것: 공백 개수까지 맞춘 패턴이라 `vPortSVCHandler`의 비슷한 줄(`msr psp, r0`, `mov r0, #0`)은 건드리지 않았다. `nobasepri`는 두 번째 `msr basepri, r0`(해제 쪽)만 지운다 — 첫 번째(마스크 쪽)는 남긴다.
+
+### 6.2 고장 1 — r4–r11을 저장하지 않으면: 32바이트 어긋난 프레임 → HardFault
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/C2/regs; for v in nosave nopsp nolr; do echo "=== port_$v.c"; make -s -f /Users/donh/.rtos_scratch/C2/mk/Makefile SRCS="$S/ex1_regs.c $S/regs.S" PORT=/var/tmp/rtos/C2/ports/port_$v.c OUT=/var/tmp/rtos/C2/ex3_$v && ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/C2/ex3_$v/app.elf 5; echo "exit=$?"; done'
+```
+
+```text
+=== port_nosave.c
+
+[HardFault] PC=0x200013e0 LR=0x80000068 xPSR=0x0 CFSR=0x20000 HFSR=0x40000000
+[board_exit] code=255
+exit=1
+=== port_nopsp.c
+
+[HardFault] PC=0x19ec LR=0xe27 xPSR=0x61000000 CFSR=0x8200 HFSR=0x40000000
+[board_exit] code=255
+exit=1
+=== port_nolr.c
+
+[HardFault] PC=0x1f4a LR=0xf01 xPSR=0x2100000e CFSR=0x1000000 HFSR=0x40000000
+[board_exit] code=255
+exit=1
+```
+
+`nosave`부터 읽는다.
+
+- **PC = `0x200013e0`**: RAM 주소, 그것도 태스크 스택 근처다. 코드가 RAM에 있을 리 없다.
+- **xPSR = `0x0`**: T 비트(비트 24)가 0이다. Cortex-M은 Thumb만 실행하므로 T = 0으로 복귀하면 첫 명령에서 즉시 폴트다.
+- **CFSR = `0x20000`**: 비트 17 = UsageFault의 **INVSTATE**("잘못된 상태로 실행하려 했다" — 바로 T = 0). HFSR = `0x40000000`은 FORCED(UsageFault가 HardFault로 승격됨). 해독법 전체는 M1에서 다룬다.
+
+왜 이렇게 되나? 저장 단계에서 `stmdb`가 빠지면 `str r0, [r2]`는 **하드웨어 프레임의 시작 주소**를 `pxTopOfStack`에 적는다. 다음에 이 태스크로 돌아올 때 복원 단계는 "앞 32바이트는 r4–r11"이라고 믿고 `ldmia`로 하드웨어 프레임(r0–xPSR)을 r4–r11에 넣어 버린다. 그러면 PSP는 32바이트 **위**, 즉 프레임 바깥의 태스크 데이터를 가리키고, 하드웨어는 그걸 r0–xPSR로 꺼낸다. PC 칸과 xPSR 칸에 들어 있던 것은 태스크의 스택 쓰레기 — 그래서 RAM 주소 PC와 T = 0 xPSR이 나왔다.
+
+gdb로 `bx lr`마다 멈춰 PSP와 꺼낼 프레임을 찍으면 그 순간이 보인다(같은 nosave 바이너리, `ICOUNT` 동일).
+
+```text
+bx lr -> task A  PSP=0x200013e8  frame: r0=00000000 lr=00001f61 pc=000001a4 xpsr=01000000
+bx lr -> task B  PSP=0x20001858  frame: r0=00000000 lr=00001f61 pc=00000268 xpsr=01000000
+bx lr -> task A  PSP=0x20001408  frame: r0=a5a5a5a5 lr=00000000 pc=2000188c xpsr=20000e04
+```
+
+(첫 세 번의 PendSV 복귀만 남겼다.) 첫 두 번은 정상이다 — A와 B가 **처음** 시작할 때는 `pxPortInitialiseStack()`이 만든 올바른 16워드 프레임에서 복원하니까(PC = 각 태스크 함수 시작 `0x1a4`, `0x268`, xPSR = `0x01000000`). 세 번째, A가 **한 번 저장된 뒤** 돌아오는 순간 PSP = `0x20001408`이다. 정상이라면 `0x200013e8`이어야 할 자리에서 정확히 **32바이트(0x20) 위**다. 거기서 꺼낼 "프레임"의 r0은 스택 채움 무늬 `0xa5a5a5a5`, PC는 `0x2000188c`(RAM — B의 TCB 근처 주소), xPSR은 `0x20000e04`(T = 0)다. 이 복귀가 곧 INVSTATE다.
+
+**하이젠버그 주의**: 이 gdb 실행에서는 그 뒤에도 HardFault가 찍히지 않고 쓰레기 프레임으로 스위치가 계속 이어졌다. `bx lr`에 걸린 소프트웨어 브레이크포인트를 넘어가려고 QEMU가 그 명령을 **단일 스텝**으로 실행하면서 예외 복귀 검사 동작이 달라진 것으로 보인다(QEMU 내부 동작이라 원인까지는 확인 못 함). 폴트 자체는 gdb 없이 돌린 위 출력으로 판단한다. 실칩 JTAG에서도 "디버거를 붙이면 안 죽는다"는 비슷한 일이 생긴다 — 증거는 항상 디버거 없는 실행과 맞춰 본다.
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="165" y="20" font-size="13" text-anchor="middle" font-weight="bold">정상: 16워드 저장</text>
+<text x="505" y="20" font-size="13" text-anchor="middle" font-weight="bold">stmdb 삭제: 8워드만 남음</text>
+<rect x="90" y="40" width="150" height="56" rx="3" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="165" y="72" font-size="12" text-anchor="middle">r4–r11 (SW)</text>
+<rect x="90" y="96" width="150" height="56" rx="3" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="165" y="128" font-size="12" text-anchor="middle">r0 … pc, xPSR (HW)</text>
+<rect x="90" y="152" width="150" height="56" rx="3" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="165" y="184" font-size="12" text-anchor="middle">태스크 데이터</text>
+<text x="80" y="44" font-size="12" text-anchor="end">top →</text>
+<text x="80" y="100" font-size="12" text-anchor="end">PSP →</text>
+<text x="165" y="232" font-size="12" text-anchor="middle">ldmia: r4–r11 ← 주황</text>
+<text x="165" y="250" font-size="12" text-anchor="middle">HW 언스태킹 ← 파랑 (올바른 PC)</text>
+<rect x="430" y="40" width="150" height="56" rx="3" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="505" y="72" font-size="12" text-anchor="middle">r0 … pc, xPSR (HW)</text>
+<rect x="430" y="96" width="150" height="56" rx="3" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="505" y="128" font-size="12" text-anchor="middle">태스크 데이터</text>
+<rect x="430" y="152" width="150" height="56" rx="3" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="505" y="184" font-size="12" text-anchor="middle">더 위의 데이터</text>
+<text x="420" y="44" font-size="12" text-anchor="end">top →</text>
+<text x="420" y="100" font-size="12" text-anchor="end">PSP →</text>
+<line x1="600" y1="68" x2="600" y2="124" stroke="#d0564a" stroke-width="1.5" marker-end="url(#ah5)"/>
+<text x="610" y="100" font-size="12">+32 B</text>
+<text x="505" y="232" font-size="12" text-anchor="middle">ldmia: r4–r11 ← 파랑 (HW 프레임)</text>
+<text x="505" y="250" font-size="12" text-anchor="middle">HW 언스태킹 ← 회색 (쓰레기 PC)</text>
+<text x="340" y="284" font-size="12" text-anchor="middle">결과: PC = RAM 주소, xPSR.T = 0 → INVSTATE UsageFault → HardFault</text>
+</svg>
+```
+
+그림 4 — `stmdb r0!, {r4-r11}` 한 줄이 빠졌을 때. 저장된 꼭대기 주소가 하드웨어 프레임 시작을 가리키므로, 복원 코드가 모든 것을 8워드씩 잘못 읽는다. "PC가 RAM 주소이고 xPSR이 0"은 **스택 프레임 정렬이 어긋났다**는 전형적인 지문이다.
+
+### 6.3 고장 2 — `msr psp, r0`을 지우면: 크래시가 아니라 조용한 오염
+
+위 출력의 `nopsp`는 `prvTimerTask`(FreeRTOS 타이머 서비스 태스크, `timers.c`) 안에서 정밀 버스 폴트(CFSR = `0x8200` = PRECISERR + BFARVALID)로 죽었다. addr2line으로 PC `0x19ec`를 보면 `ldr r0, [r7, #0]` — r7을 포인터로 쓰다가 죽었다. 첫 스위치(타이머 태스크 → 다음 태스크)에서 PSP가 안 바뀌어 **타이머 태스크가 계속 도는데 r4–r11은 다음 태스크의 값**이 됐고, r7에 담긴 엉뚱한 값을 따라갔기 때문이다.
+
+타이머 태스크를 빼면(`configUSE_TIMERS 0`인 config 폴더를 SRCS에 추가) 레지스터 검사가 직접 걸린다.
+
+```text
+/* notimer/FreeRTOSConfig.h — lab config without the timer service task */
+#ifndef C2_NOTIMER_H
+#define C2_NOTIMER_H
+#include "/var/rtoslab/templates/freertos-mps2/FreeRTOSConfig.h"
+#undef configUSE_TIMERS
+#define configUSE_TIMERS 0
+#undef INCLUDE_xTimerPendFunctionCall
+#define INCLUDE_xTimerPendFunctionCall 0
+#endif
+```
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/C2; make -s -f $S/mk/Makefile SRCS="$S/regs/ex1_regs.c $S/regs/regs.S $S/notimer/notimer.c" PORT=/var/tmp/rtos/C2/ports/port_nopsp.c OUT=/var/tmp/rtos/C2/ex3_nopsp_nt && ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/C2/ex3_nopsp_nt/app.elf 5'
+```
+
+```text
+CORRUPTION in task B after 1 yields:
+  r0=0x20202020  r1=0x21212121  r2=0x22222222  r3=0x23232323
+  r4=0xa5a5a5a5  r5=0xa5a5a5a5  r6=0xa5a5a5a5  r7=0xa5a5a5a5
+  r8=0xa5a5a5a5  r9=0xa5a5a5a5  r10=0xa5a5a5a5  r11=0xa5a5a5a5
+  r12=0x2c2c2c2c
+  pxCurrentTCB name=A
+[board_exit] code=3
+```
+
+출력에서 볼 것: **B가 계속 돌고 있는데 커널은 A가 돌고 있다고 믿는다**(`pxCurrentTCB name=A`). r0–r3, r12는 B의 값 — 하드웨어가 B 자신의 프레임(PSP가 안 바뀌었으니까)에서 꺼냈다. r4–r11만 A의 것인데, A는 아직 한 번도 돈 적이 없어서 그 값은 `pxPortInitialiseStack()`이 비워 둔 칸의 스택 채움 무늬 `0xa5a5a5a5`다. 레지스터 검사 태스크가 아니었다면 이 오류는 크래시 없이 "가끔 계산이 틀리는" 버그로 나타났을 것이다. 이것이 컨텍스트 스위치 버그가 무서운 이유다.
+
+### 6.4 고장 3 — LR(EXC_RETURN)과 r3을 보존하지 않으면
+
+`nolr`의 HardFault: PC = `0x1f4a` = PendSV 안의 `ldmia.w r0!, {r4-…}`, CFSR = `0x1000000` = 비트 24 **UNALIGNED**. `bl vTaskSwitchContext`가 r3을 망가뜨렸고(r3은 caller-saved, 컴파일러가 자유롭게 쓴다), `ldr r1, [r3]` → `ldr r0, [r1]`이 쓰레기 주소를 만들었고, LDM은 정렬되지 않은 주소를 절대 허용하지 않으니 즉시 폴트. 스택된 LR = `0xf01`은 `vTaskSwitchContext` 안쪽 주소다 — EXC_RETURN이 이미 사라졌다는 흔적이다.
+
+r3은 살리고 r14만 잃으면(`nolr2`: `{r3, r14}` → `{r3, r4}`) 무슨 일이 일어나는지 gdb로 `bx lr` 순간을 본다.
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/C2; make -s -f $S/mk/Makefile SRCS="$S/regs/ex1_regs.c $S/regs/regs.S" PORT=/var/tmp/rtos/C2/ports/port_nolr2.c OUT=/var/tmp/rtos/C2/ex3_nolr2 && ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/C2/ex3_nolr2/app.elf 5'
+```
+
+```text
+
+[HardFault] PC=0x20000004 LR=0xf01 xPSR=0x2000000e CFSR=0x20000 HFSR=0x40000000
+[board_exit] code=255
+```
+
+```text
+at bx lr: lr=0x00000f01  xPSR=0x2100000e (IPSR=14)  MSP=0x203fffe0
+0x00000f00 in vTaskSwitchContext () at /var/rtoslab/src/FreeRTOS-Kernel/tasks.c:5235
+5235	                    ulTotalRunTime[ 0 ] = portGET_RUN_TIME_COUNTER_VALUE();
+after bx lr: pc=0x00000f00  IPSR=14 (still Handler mode)
+vTaskSwitchContext + 24 in section .text
+```
+
+(두 번째 블록은 gdb에서 `bx lr`(`0x1f5a`)에 브레이크포인트를 걸고 `stepi` 한 결과다.) `bx lr` 순간 LR은 EXC_RETURN이 아니라 `0x00000f01` — `vTaskSwitchContext`가 내부에서 `board_now_us()`를 부를 때 `bl`이 남긴 복귀 주소다. 상위 4비트가 `0xF`가 아니므로 CPU는 이걸 **예외 복귀가 아니라 평범한 점프**로 처리한다. 그래서 IPSR = 14(여전히 PendSV 안, Handler 모드)인 채로 `vTaskSwitchContext` 한가운데(소스 5235행)로 뛰어들었다. 그 뒤로는 MSP가 계속 어긋나다가 결국 RAM 주소(`0x20000004`)를 실행하려다 INVSTATE로 죽었다.
+
+교훈: **EXC_RETURN은 "주소"처럼 생겼지만 주소가 아니다.** `0xFFFFFFxx` 영역은 실행 가능한 메모리가 아니고, `bx`/`pop {pc}`/`ldr pc`가 이 값을 받으면 CPU가 예외 복귀 신호로 해석하는 약속이다(B2). 핸들러 안에서 C 함수를 부르는 순간 그 약속값을 어딘가 맡겨야 한다.
+
+### 6.5 고장 4 — BASEPRI를 풀지 않으면: 크래시 없이 굶주림
+
+`nobasepri`는 크래시를 내지 않는다. 그래서 2000번 왕복이 끝날 때 BASEPRI와 tick 수를 같이 찍는 변형(ex3_wd.c — 예제 1에 `reg_done()`만 바꾸고, BASEPRI로 막히지 않는 우선순위 0의 TIMER0 "워치독" IRQ를 20 ms 뒤로 걸어 둔 것)으로 돌린다.
+
+```c
+/* ex3_wd.c — ex1 plus a TIMER0 "watchdog" IRQ at NVIC priority 0.
+ * Priority 0 is above configMAX_SYSCALL_INTERRUPT_PRIORITY (0x20), so BASEPRI cannot mask it. */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "board.h"
+volatile uint32_t cntA, cntB;
+void taskA_regs(void *arg);
+void taskB_regs(void *arg);
+void reg_done(void)
+{
+    uint32_t bp;
+    __asm volatile("mrs %0, basepri" : "=r"(bp));
+    board_printf_raw("DONE: cntA=%u cntB=%u BASEPRI=0x%x tick=%u\n", (unsigned)cntA,
+                     (unsigned)cntB, (unsigned)bp, (unsigned)xTaskGetTickCount());
+    board_exit(0);
+}
+void reg_fail(uint32_t task, const uint32_t *r)
+{
+    board_printf_raw("CORRUPTION in task %c: r4=0x%x r11=0x%x (running TCB says %s)\n",
+                     task == 1 ? 'A' : 'B', (unsigned)r[4], (unsigned)r[11], pcTaskGetName(NULL));
+    board_exit(3);
+}
+void TIMER0_IRQHandler(void)          /* fires 20 ms after start */
+{
+    uint32_t bp;
+    __asm volatile("mrs %0, basepri" : "=r"(bp));
+    board_printf_raw("WATCHDOG 20ms: cntA=%u cntB=%u BASEPRI(task)=0x%x running=%s\n",
+                     (unsigned)cntA, (unsigned)cntB, (unsigned)bp, pcTaskGetName(NULL));
+    board_exit(4);
+}
+int main(void)
+{
+    TIMER_RELOAD(TIMER0_BASE) = BOARD_CPU_HZ / 50;   /* 20 ms */
+    TIMER_VALUE(TIMER0_BASE)  = BOARD_CPU_HZ / 50;
+    NVIC_IPR(8) = 0x00;                               /* highest priority */
+    NVIC_ISER0  = 1u << 8;
+    TIMER_CTRL(TIMER0_BASE)   = 1u | 8u;              /* enable + IRQ */
+    xTaskCreate(taskA_regs, "A", 256, NULL, 2, NULL);
+    xTaskCreate(taskB_regs, "B", 256, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'P=/var/tmp/rtos/C2/ports; O=/var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c; S=/Users/donh/.rtos_scratch/C2; M="make -s -f $S/mk/Makefile"; for v in orig nobasepri; do echo "=== wd $v"; PP=$P/port_$v.c; [ $v = orig ] && PP=$O; $M SRCS="$S/wd/ex3_wd.c $S/regs/regs.S" PORT=$PP OUT=/var/tmp/rtos/C2/ex3_wd_$v && ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/C2/ex3_wd_$v/app.elf 5; done'
+```
+
+```text
+=== wd orig
+DONE: cntA=2000 cntB=2000 BASEPRI=0x0 tick=17
+[board_exit] code=0
+=== wd nobasepri
+DONE: cntA=2000 cntB=0 BASEPRI=0x20 tick=0
+[board_exit] code=0
+```
+
+출력에서 볼 것: 원본은 A · B가 2000번씩 번갈아 돌았고 tick이 17까지 갔다(4000번 스위치 = 17 ms). `nobasepri`에서는 **B가 한 번도 못 돌았고(cntB = 0), tick이 0에서 멈췄다.** BASEPRI = `0x20`이 그대로 남아 우선순위 값 ≥ 0x20인 모든 것 — SysTick(0xFF), PendSV(0xFF) — 이 영원히 막혔다. 흐름은 이렇다: 처음 도는 타이머 서비스 태스크(우선순위 7)가 블록하며 PendSV → 그 PendSV가 BASEPRI를 안 풀고 A로 복귀 → A의 yield(PENDSVSET)는 pending만 될 뿐 받아들여지지 않음 → A만 영원히 돈다. A는 스위치가 없으니 레지스터도 멀쩡해서 검사는 "통과"다. **실제 제품에서는 "한 태스크만 돌고 나머지가 다 멈췄다, tick도 안 간다, 그런데 HardFault는 없다"**로 보인다. 디버거로 멈추면 BASEPRI 값이 0이 아닌 것이 결정적 단서다.
+
+### 6.6 지워도 차이가 안 보이는 줄 — `isb` 두 개
+
+```sh
+limactl shell elinux -- bash -lc 'O=/var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c; P=/var/tmp/rtos/C2/ports; S=/Users/donh/.rtos_scratch/C2; grep -n "isb  " $O; sed "462d;482d" $O > $P/port_noisb.c; diff $O $P/port_noisb.c; make -s -f $S/mk/Makefile SRCS="$S/regs/ex1_regs.c $S/regs/regs.S" PORT=$P/port_noisb.c OUT=/var/tmp/rtos/C2/ex3_noisb && ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/C2/ex3_noisb/app.elf 5'
+```
+
+```text
+236:        "   isb                             \n"
+257:        " isb                   \n"
+462:        "   isb                                 \n"
+482:        "   isb                                 \n"
+462d461
+<         "   isb                                 \n"
+482d480
+<         "   isb                                 \n"
+OK: cntA=2000 cntB=1999, r0-r12 survived every switch
+[board_exit] code=0
+```
+
+출력에서 볼 것: 236행(`vPortSVCHandler`) · 257행(`prvPortStartFirstTask`)은 두고 PendSV 안의 462 · 482행만 지웠다. 그래도 약 4000번 스위치가 멀쩡하다(cntB가 1999인 것은 명령 2개가 빠져 SysTick 선점 시점이 한 칸 밀린 결과일 뿐이다). **그러나 이건 "필요 없다"의 증거가 아니다.** QEMU는 명령을 하나씩 순서대로 실행하고 파이프라인 · 프리페치를 모델링하지 않으므로, 배리어가 없어서 생기는 문제를 원리적으로 보여 줄 수 없다. Cortex-M3 같은 단순 파이프라인에서는 실제로 문제가 보고되지 않는 자리지만, FreeRTOS는 아키텍처 규칙을 보수적으로 지키는 쪽을 택했다. 실칩에서 배리어 문제를 확인하려면 Cortex-M7 같은 슈퍼스칼라 코어와 그 errata 문서를 봐야 한다(§3의 CM7 r0p1 Errata 837070 우회가 그 예).
+
+### 6.7 정리 — 증상 → 빠진 줄
+
+| 증상 | 빠진 줄 | 왜 |
+|---|---|---|
+| HardFault, PC = RAM 주소, xPSR.T = 0, CFSR.INVSTATE | `stmdb r0!, {r4-r11}` (또는 `ldmia` 개수 불일치) | 프레임이 32바이트 어긋나 쓰레기를 PC로 꺼낸다 |
+| 크래시 없이 레지스터 값만 다른 태스크 것 / `pxCurrentTCB`와 실제 실행 태스크 불일치 | `msr psp, r0` | 하드웨어는 옛 PSP의 프레임으로 복귀 |
+| HardFault, CFSR.UNALIGNED, 스택된 LR이 C 함수 안쪽 | `stmdb sp!, {r3, r14}` 짝 | C 호출이 r3과 EXC_RETURN을 덮어씀 |
+| Handler 모드(IPSR = 14)인 채로 C 코드 한가운데 실행 | r14만 보존 안 함 | EXC_RETURN이 아닌 값으로 `bx` → 평범한 점프 |
+| 한 태스크만 영원히 돔, tick 정지, 폴트 없음, BASEPRI ≠ 0 | 두 번째 `msr basepri, r0` | 마스크가 안 풀려 SysTick · PendSV 차단 |
+| (QEMU에서 차이 없음) | `isb` | 파이프라인 효과는 시뮬레이터로 증명 불가 |
+
+---
+
+## 7. `vTaskSwitchContext()` 안 — 결정은 어디서, 스택 검사는 언제
+
+### 7.1 호출 경로
+
+PendSV의 10번 명령 `bl vTaskSwitchContext`가 C 세계로 들어가는 유일한 문이다. 단일 코어 빌드(`configNUMBER_OF_CORES == 1`)의 `tasks.c` 5215행부터를 줄여 옮긴다.
+
+```c
+    void vTaskSwitchContext( void )
+    {
+        if( uxSchedulerSuspended != ( UBaseType_t ) 0U )
+        {
+            /* The scheduler is currently suspended - do not allow a context switch. */
+            xYieldPendings[ 0 ] = pdTRUE;
+        }
+        else
+        {
+            xYieldPendings[ 0 ] = pdFALSE;
+            traceTASK_SWITCHED_OUT();
+            #if ( configGENERATE_RUN_TIME_STATS == 1 )
+                /* ... ulTotalRunTime = portGET_RUN_TIME_COUNTER_VALUE(); accumulate ... */
+            #endif
+            /* Check for stack overflow, if configured. */
+            taskCHECK_FOR_STACK_OVERFLOW();
+            /* ... errno save ... */
+            taskSELECT_HIGHEST_PRIORITY_TASK();
+            traceTASK_SWITCHED_IN();
+            portTASK_SWITCH_HOOK( pxCurrentTCB );
+            /* ... errno restore, C runtime TLS ... */
+        }
+    }
+```
+
+(생략 표시한 곳은 이 설정에서 비활성이거나 짧은 부분이다.) 순서가 중요하다.
+
+1. **스케줄러가 suspend 중이면 아무것도 바꾸지 않는다.** `xYieldPendings[0] = pdTRUE`로 "나중에 바꿔야 함"만 적고 같은 태스크로 돌아간다. `vTaskSuspendAll()` 구간에서 PendSV가 와도 안전한 이유다.
+2. **나가는 태스크 기준 작업**: 런타임 통계(이 태스크가 얼마나 돌았나 누적), 그리고 **스택 overflow 검사** — `pxCurrentTCB`가 아직 나가는 태스크일 때 한다. 막 16워드를 쌓아 스택이 가장 깊어진 순간이라 검사하기 가장 좋은 때다.
+3. **다음 태스크 선택**: `taskSELECT_HIGHEST_PRIORITY_TASK()`. 이 매크로가 `pxCurrentTCB`를 바꾸는 유일한 줄이다.
+4. **들어오는 태스크 기준 훅**: trace 매크로, `portTASK_SWITCH_HOOK`(MPU 재설정 같은 포트별 작업).
+
+선택 매크로(포트 최적화 버전, 랩 설정 `configUSE_PORT_OPTIMISED_TASK_SELECTION 1`)는 이렇다.
+
+```c
+    #define taskSELECT_HIGHEST_PRIORITY_TASK()                                                  \
+    do {                                                                                        \
+        UBaseType_t uxTopPriority;                                                              \
+                                                                                                \
+        /* Find the highest priority list that contains ready tasks. */                         \
+        portGET_HIGHEST_PRIORITY( uxTopPriority, uxTopReadyPriority );                          \
+        configASSERT( listCURRENT_LIST_LENGTH( &( pxReadyTasksLists[ uxTopPriority ] ) ) > 0 ); \
+        listGET_OWNER_OF_NEXT_ENTRY( pxCurrentTCB, &( pxReadyTasksLists[ uxTopPriority ] ) );   \
+    } while( 0 )
+```
+
+- `portGET_HIGHEST_PRIORITY`(`portmacro.h` 168행) = `31 - __builtin_clz(uxTopReadyPriority)` — ready 우선순위 비트맵에서 가장 높은 1비트를 **CLZ 명령 한 개**로 찾는다. 태스크가 몇 개든 상수 시간.
+- `listGET_OWNER_OF_NEXT_ENTRY`(`list.h` 286행)는 그 우선순위 리스트의 `pxIndex`를 한 칸 전진시키고 그 항목의 주인(TCB)을 꺼낸다. **같은 우선순위 태스크끼리 round-robin이 되는 이유가 이 한 칸 전진**이다. 비트맵 · 리스트 구조 자체는 C1에서 깊게 다룬다.
+
+### 7.2 명령 추적으로 본 비용 분해
+
+§9의 측정 방법(QEMU 명령 추적 + addr2line)으로 `vTaskSwitchContext` 안의 명령을 소스 줄별로 묶었다. 두 태스크가 `taskYIELD()`를 주고받는 정상 상태 한 사이클 기준.
+
+| 부분 | 소스 (tasks.c 행) | 기본 설정 | lean 설정 |
+|---|---|---|---|
+| 진입 · suspend 검사 · `xYieldPendings` | 5216, 5219, 5227 | 6 | 6 |
+| 런타임 통계 (`board_now_us()` 7개 포함) | 5235–5254 | 25 | — |
+| 스택 overflow 검사 (방법 2: 16바이트 무늬 비교) | 5259 | 21 | — |
+| 다음 태스크 선택 (CLZ 2개 + `configASSERT` + 리스트 전진) | 5273 | 22 | 24 |
+| 훅 · 반환 | 5279, 5298 | 2 | 2 |
+| **합계** | | **76** | **32** |
+
+"lean"은 A7과 같은 설정이다: `configCHECK_FOR_STACK_OVERFLOW 0`, `configGENERATE_RUN_TIME_STATS 0`, `configUSE_TRACE_FACILITY 0`. 디버그 옵션 두 개가 `vTaskSwitchContext`를 2.4배로 만든다. **A7에서 잰 1.92 µs(lean) vs 3.33 µs(기본)의 차이 44명령이 정확히 이 두 줄(25 + 21 ≈ 44, 선택 부분이 컴파일 결과로 2개 달라짐)**이다. 선택 자체는 22~24명령으로 거의 고정 — 태스크 수와 무관하다.
+
+### 예제 5 — 스택 overflow 검사는 컨텍스트 스위치 안에서 돈다
+
+무엇을 확인하는 코드인가: 128워드(512 B) 스택에 480 B 지역 배열을 쓰는 태스크가 yield하면, overflow 훅이 **어디서**(어느 모드, 어느 함수 안에서) 불리는지 본다.
+
+```c
+/* ex4_ovf.c — where does the stack-overflow check run? Inside the context switch.
+ * Task "hog" fills almost all of its 128-word stack, then yields. */
+#include <string.h>
+#include "FreeRTOS.h"
+#include "task.h"
+#include "board.h"
+
+void vApplicationStackOverflowHook(TaskHandle_t t, char *name)
+{
+    uint32_t ipsr, psp, msp;
+    __asm volatile("mrs %0, ipsr\n mrs %1, psp\n mrs %2, msp" : "=r"(ipsr), "=r"(psp), "=r"(msp));
+    StackType_t *bottom = *(StackType_t **)((uint8_t *)t + 48);   /* TCB_t.pxStack */
+    board_printf_raw("[hook] task=%s IPSR=%u (14=PendSV) PSP=0x%x MSP=0x%x\n",
+                     name, (unsigned)ipsr, (unsigned)psp, (unsigned)msp);
+    board_printf_raw("[hook] pxStack=0x%x first words: %x %x %x %x\n", (unsigned)bottom,
+                     (unsigned)bottom[0], (unsigned)bottom[1], (unsigned)bottom[2], (unsigned)bottom[3]);
+    board_exit(5);
+}
+static void hog(void *arg)
+{
+    (void)arg;
+    volatile uint8_t buf[480];          /* 480 B of a 512 B stack */
+    memset((void *)buf, 0, sizeof buf);
+    board_printf_raw("hog: buf at 0x%x, yielding\n", (unsigned)buf);
+    taskYIELD();                        /* the check runs in vTaskSwitchContext */
+    board_printf_raw("hog: not reached\n");
+    for (;;) { }
+}
+static void other(void *arg) { (void)arg; for (;;) taskYIELD(); }
+
+int main(void)
+{
+    xTaskCreate(hog, "hog", 128, NULL, 2, NULL);
+    xTaskCreate(other, "other", 256, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+`+ 48`은 이 설정의 `TCB_t.pxStack` 오프셋이다(`TCB_t`는 tasks.c 안의 비공개 구조체라 헤더로 접근할 수 없다). gdb로 확인했다: `p/d (int)&((TCB_t*)0)->pxStack` → `$1 = 48`. 실무 코드에서는 이런 오프셋 해킹 대신 `uxTaskGetStackHighWaterMark()`를 쓴다.
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/C2; make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS="$S/ovf/ex4_ovf.c" OUT=/var/tmp/rtos/C2/ex4 >/dev/null && ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/C2/ex4/app.elf 5'
+```
+
+```text
+hog: buf at 0x20001018, yielding
+[hook] task=hog IPSR=14 (14=PendSV) PSP=0x20000ff8 MSP=0x203fffb8
+[hook] pxStack=0x20001008 first words: 20000fdc f1 fc 61000000
+[board_exit] code=5
+```
+
+출력에서 볼 것:
+
+- **IPSR = 14**: 훅은 PendSV 예외 안(Handler 모드, MSP 위)에서 불렸다. 그래서 훅 안에서는 블로킹 API(`vTaskDelay`, 큐 대기)를 절대 부르면 안 되고, 로그 남기고 리셋하는 정도만 한다.
+- **PSP = `0x20000ff8` < pxStack = `0x20001008`**: 이미 스택 **바닥 아래**로 16바이트 내려갔다. `buf`(0x20001018부터)는 스택 안에 들어갔지만, 그 위에서 `taskYIELD()`가 PendSV를 걸자 **하드웨어 스태킹 8워드 + `stmdb` 8워드 = 64 B**가 그 아래에 쌓이면서 선을 넘었다. 스택 첫 네 워드(원래 `0xa5a5a5a5` 무늬)에 `0x61000000`(xPSR처럼 보이는 값) 같은 프레임 조각이 들어가 있다 — 방법 2의 무늬 검사가 이걸 잡았다.
+- 교훈: **스택 예산에는 항상 컨텍스트 프레임 64 B(FPU 태스크는 더)를 더한다.** "함수 깊이는 448 B인데 512 B 스택이면 충분"은 틀린 계산이다(F3에서 자세히).
+- 그리고 검사는 **스위치할 때만** 돈다. 스위치 전에 넘쳐서 이웃 TCB를 덮어쓰고 바로 그 값을 써 버리면 훅보다 크래시가 먼저 온다. 방법 1 · 2는 "사후 발견" 도구일 뿐, MPU 스택 가드(Cortex-M33의 PSPLIM 등)만이 "즉시 차단"이다.
+
+gdb로 훅에서 멈추고 콜스택을 보면 호출 경로가 그대로 나온다.
+
+```sh
+limactl shell elinux -- bash -lc 'E=/var/tmp/rtos/C2/ex4/app.elf; printf "set pagination off\ntarget remote :1236\nbreak ex4_ovf.c:13\ncontinue\nbt\ninfo symbol \$lr\nkill\n" > /var/tmp/rtos/C2/bt.gdb; (timeout 20 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial null -semihosting-config enable=on,target=native -kernel $E -gdb tcp::1236 -S &); sleep 1; gdb -q -batch -x /var/tmp/rtos/C2/bt.gdb $E 2>&1 | grep -v "^warning\|Remote\|^$\|Kill the"'
+```
+
+```text
+Breakpoint 1, vApplicationStackOverflowHook (t=<optimized out>, name=0x20001244 <ucHeap+584> "hog") at /Users/donh/.rtos_scratch/C2/ovf/ex4_ovf.c:13
+13	    board_printf_raw("[hook] task=%s IPSR=%u (14=PendSV) PSP=0x%x MSP=0x%x\n",
+#0  xTaskGenericNotifyFromISR (xTaskToNotify=0x203fffb8, uxIndexToNotify=536875588, ulValue=14, eAction=248, pulPreviousNotificationValue=0xa5a5a5a5, pxHigherPriorityTaskWoken=0xa5a5a5a5) at /var/rtoslab/src/FreeRTOS-Kernel/tasks.c:8147
+#1  0x00000d5e in vTaskSwitchContext () at /var/rtoslab/src/FreeRTOS-Kernel/tasks.c:5259
+#2  vTaskSwitchContext () at /var/rtoslab/src/FreeRTOS-Kernel/tasks.c:5215
+#3  0x00001d68 in PendSV_Handler () at /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:459
+Backtrace stopped: previous frame identical to this frame (corrupt stack?)
+vTaskSwitchContext + 79 in section .text
+```
+
+(QEMU 시작 메시지와 브레이크포인트 설정 줄은 생략했다.) 출력에서 볼 것:
+
+- **#1 → #3**: `PendSV_Handler` → `vTaskSwitchContext`(5259행 = `taskCHECK_FOR_STACK_OVERFLOW()`) → 훅. 훅이 컨텍스트 스위치 안에서 불린다는 것이 콜스택으로 확인된다.
+- **#0이 엉뚱하다**: 브레이크포인트는 분명 `vApplicationStackOverflowHook` 안에 걸렸는데(첫 줄), `bt`의 #0은 `xTaskGenericNotifyFromISR`이라고 나온다. 이 바이너리는 `-ffunction-sections -Wl,--gc-sections`로 링크돼 쓰이지 않은 함수가 버려졌는데, 버려진 함수의 디버그 정보가 주소 0 근처에 남아 실제 함수(0x114의 훅)와 주소 범위가 겹친 탓이다(첫 시도에서 `break vApplicationStackOverflowHook`이 "2 locations"로 잡힌 것도 같은 이유). **gc-sections 빌드에서 gdb 함수 이름이 이상하면 `info symbol $pc`나 `arm-none-eabi-nm`으로 주소를 직접 확인한다.**
+- **"Backtrace stopped … corrupt stack?"**: 정상이다. PendSV 프레임 너머(예외 경계)는 gdb가 일반 함수처럼 되감지 못한다.
+
+### 7.3 Don 경험과 연결
+
+SSD 펌웨어에서 "스택 카나리"를 ISR 진입이나 주기 작업에서 검사했다면, FreeRTOS는 그 검사를 **스위치마다 하는 세금**으로 붙였다. 개발 중에는 켜 두고(방법 2), 양산에서는 끄거나 MPU/PSPLIM 하드웨어 가드로 바꾸는 판단이 필요하다 — 스위치당 21명령은 1 kHz 제어 루프에선 무시할 만하지만 20 kHz FOC에 가까운 태스크 전환 빈도에서는 무시할 수 없다.
+
+---
+
+## 8. 직접 만든다 — 80줄짜리 선점형 round-robin 스위처
+
+### 8.1 설계
+
+FreeRTOS의 19줄에서 "RTOS라서" 붙은 것을 다 걷어 내면 무엇이 남나? 직접 짜 보면 안다. 목표:
+
+- 태스크 최대 4개, 각자 1 KB 스택. TCB는 `{ sp, next }` 두 워드 — **`sp`가 첫 멤버**(FreeRTOS와 같은 이유).
+- 태스크들은 `next`로 원형 연결 리스트. **스케줄링 결정 = `cur = cur->next` 한 줄.** 우선순위 없음.
+- PendSV가 저장 → 결정 → 복원을 다 한다. **C 함수를 부르지 않으므로** LR · r3 보존이 필요 없다(§6.4의 교훈을 역으로 이용).
+- ISR이 `mini_cur`나 리스트를 건드리지 않으므로 **BASEPRI 마스크도 필요 없다**(§4.2의 9번 명령이 왜 있었는지의 역).
+- SysTick이 매 tick PENDSVSET만 해서 선점(time slicing)을 만든다. 태스크는 `mini_yield()`로 자발적으로 넘길 수도 있다.
+- 첫 태스크 시작은 FreeRTOS처럼 SVC로: `orr lr, lr, #0xd`로 EXC_RETURN을 Thread · PSP로.
+
+```c
+/* mini.h — C2 minimal round-robin kernel for Cortex-M3 (QEMU mps2-an385) */
+#ifndef MINI_H
+#define MINI_H
+#include <stdint.h>
+#define MINI_MAX          4
+#define MINI_STACK_WORDS  256
+#define ICSR       (*(volatile uint32_t *)0xE000ED04u)
+#define PENDSVSET  (1u << 28)
+extern volatile uint32_t mini_ticks;
+void mini_create(void (*fn)(void *), void *arg);
+void mini_start(uint32_t tick_hz) __attribute__((noreturn));   /* tick_hz = 0: no SysTick */
+static inline void mini_yield(void)
+{
+    ICSR = PENDSVSET;                       /* same two lines as FreeRTOS portYIELD() */
+    __asm volatile("dsb\n isb" ::: "memory");
+}
+#endif
+```
+
+```c
+/* mini.c — a complete preemptive round-robin context switcher (Cortex-M3, ~80 lines) */
+#include "board.h"
+#include "mini.h"
+typedef struct tcb { uint32_t *sp; struct tcb *next; } tcb_t;   /* sp MUST be first */
+static tcb_t tcbs[MINI_MAX];
+static uint32_t stacks[MINI_MAX][MINI_STACK_WORDS] __attribute__((aligned(8)));
+static int ntask;
+tcb_t *volatile mini_cur;                   /* read/written by the asm below */
+volatile uint32_t mini_ticks;
+
+static void task_exit(void) { board_printf_raw("a task returned\n"); board_exit(9); }
+
+void mini_create(void (*fn)(void *), void *arg)
+{
+    uint32_t *sp = &stacks[ntask][MINI_STACK_WORDS];
+    *--sp = 0x01000000u;                    /* xPSR: T bit = 1 (Thumb) */
+    *--sp = (uint32_t)fn & ~1u;             /* PC  : entry, Thumb bit cleared (bit0=1 is UNPREDICTABLE) */
+    *--sp = (uint32_t)task_exit;            /* LR  : if the task function returns */
+    *--sp = 0xC; *--sp = 3; *--sp = 2; *--sp = 1;          /* r12 r3 r2 r1 */
+    *--sp = (uint32_t)arg;                  /* r0  : first argument */
+    for (int r = 11; r >= 4; r--) *--sp = r;               /* r11..r4 (any value) */
+    tcbs[ntask].sp = sp;                    /* 16 words below the top */
+    tcbs[ntask].next = &tcbs[0];            /* ring: newest -> first */
+    if (ntask) tcbs[ntask - 1].next = &tcbs[ntask];
+    ntask++;
+}
+
+__attribute__((naked)) void PendSV_Handler(void)
+{
+    __asm volatile(
+        " mrs   r0, psp          \n"   /* outgoing task's SP (hw frame already on it) */
+        " ldr   r1, =mini_cur    \n"
+        " ldr   r2, [r1]         \n"   /* r2 = outgoing TCB */
+        " stmdb r0!, {r4-r11}    \n"   /* push the software half of the frame */
+        " str   r0, [r2]         \n"   /* cur->sp = r0 */
+        " ldr   r2, [r2, #4]     \n"   /* scheduling decision: cur = cur->next */
+        " str   r2, [r1]         \n"
+        " ldr   r0, [r2]         \n"   /* r0 = incoming task's saved SP */
+        " ldmia r0!, {r4-r11}    \n"   /* pop its software half */
+        " msr   psp, r0          \n"   /* PSP -> its hardware frame */
+        " bx    lr               \n"   /* EXC_RETURN 0xFFFFFFFD: hw pops r0-r3,r12,lr,pc,xpsr */
+        " .ltorg                 \n");
+}
+
+__attribute__((naked)) void SVC_Handler(void)    /* start the first task */
+{
+    __asm volatile(
+        " ldr   r1, =mini_cur    \n"
+        " ldr   r2, [r1]         \n"
+        " ldr   r0, [r2]         \n"
+        " ldmia r0!, {r4-r11}    \n"
+        " msr   psp, r0          \n"
+        " orr   lr, lr, #0xd     \n"   /* 0xFFFFFFF9 -> 0xFFFFFFFD: thread mode, use PSP */
+        " bx    lr               \n"
+        " .ltorg                 \n");
+}
+
+void SysTick_Handler(void)                  /* preemption: one slice per tick */
+{
+    mini_ticks++;
+    ICSR = PENDSVSET;
+}
+
+void mini_start(uint32_t tick_hz)
+{
+    REG32(0xE000ED20u) |= 0xFFFF0000u;      /* SHPR3: PendSV, SysTick = lowest (0xFF) */
+    if (tick_hz) {
+        REG32(0xE000E014u) = BOARD_CPU_HZ / tick_hz - 1;   /* SYST_RVR */
+        REG32(0xE000E018u) = 0;                            /* SYST_CVR */
+        REG32(0xE000E010u) = 7;             /* SYST_CSR: CPU clock, TICKINT, ENABLE */
+    }
+    mini_cur = &tcbs[0];
+    __asm volatile("cpsie i\n svc 0");      /* SVC_Handler never returns here */
+    for (;;) { }
+}
+```
+
+`mini.c`는 75줄, `mini.h`까지 90줄이다. 랩 템플릿 `startup.c`의 `PendSV_Handler` · `SVC_Handler` · `SysTick_Handler`가 weak 별칭이라 같은 이름으로 정의하면 그대로 벡터 테이블에 들어간다.
+
+### 예제 6 — 세 태스크: CPU를 놓지 않는 hog 둘 + 보고 태스크
+
+무엇을 확인하는 코드인가: `for (;;) cnt++`만 도는 태스크 둘(A, B)은 스스로 절대 양보하지 않는다. 그래도 SysTick 선점으로 번갈아 도는지, 보고 태스크 C가 출력 후 `mini_yield()`로 남은 slice를 넘기는지 본다.
+
+```c
+/* ex5_rr.c — three tasks on the mini kernel: two CPU hogs + one reporter.
+ * SysTick (1 kHz) preempts the hogs; the reporter prints, then yields its slice. */
+#include "board.h"
+#include "mini.h"
+#define CYC() REG32(0x40028018u)            /* FPGAIO 25 MHz counter: 1 = 40 ns */
+static volatile uint32_t cnt[2];
+
+static void hog(void *arg)                  /* never blocks, never yields */
+{
+    volatile uint32_t *c = arg;
+    for (;;) (*c)++;
+}
+static void reporter(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 6; i++) {
+        uint32_t t0 = CYC();
+        board_printf_raw("[C] t=%u us tick=%u A=%u B=%u", t0 / 25, (unsigned)mini_ticks,
+                         (unsigned)cnt[0], (unsigned)cnt[1]);
+        board_printf_raw("  (print took %u us)\n", (CYC() - t0) / 25);
+        mini_yield();                       /* give the rest of this slice away */
+    }
+    board_exit(0);
+}
+int main(void)
+{
+    mini_create(reporter, 0);
+    mini_create(hog, (void *)&cnt[0]);      /* A */
+    mini_create(hog, (void *)&cnt[1]);      /* B */
+    board_printf_raw("mini kernel: 3 tasks, 1 kHz SysTick\n");
+    mini_start(1000);
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/C2; O=/var/tmp/rtos/C2; make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS="$S/mini/mini.c $S/mini/ex5_rr.c" OUT=$O/ex5 >/dev/null && timeout 5 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial stdio -semihosting-config enable=on,target=native -icount shift=5,align=off,sleep=off -d guest_errors -kernel $O/ex5/app.elf'
+```
+
+```text
+mini kernel: 3 tasks, 1 kHz SysTick
+[C] t=76 us tick=0 A=0 B=0  (print took 14 us)
+[C] t=2076 us tick=2 A=7618 B=7808  (print took 18 us)
+[C] t=4076 us tick=4 A=15203 B=15615  (print took 19 us)
+[C] t=6076 us tick=6 A=22780 B=23423  (print took 19 us)
+[C] t=8076 us tick=8 A=30357 B=31231  (print took 19 us)
+[board_exit] code=0
+```
+
+(이 실행은 `rtos-run-mps2`와 같은 QEMU 옵션에 `-d guest_errors`만 더했다 — 이유는 §8.4. 출력 한 줄(`t=10076`)을 생략했다.)
+
+출력에서 볼 것:
+
+- C가 **정확히 2 ms마다**(2076, 4076, …) 돈다. 순서가 C → A(slice 나머지) → B(1 ms) → C … 이기 때문이다. tick 수도 2씩 오른다.
+- B는 slice당 7808번(1 ms 전체), A는 7618번 — A는 C가 출력하고 남긴 slice만 받으니 약 2.4%(≈ 24 µs 분량) 적다. **선점형 round-robin에서 yield한 태스크의 남은 시간은 다음 태스크가 가져가고, 다음 slice 경계는 그대로**라는 것이 숫자로 보인다(FreeRTOS도 같다: yield는 tick 카운터를 리셋하지 않는다. Zephyr는 다르다 — §9.4).
+- hog 루프 한 바퀴 = 1 ms / 7808 = 128 ns = 4명령(icount 32 ns × 4). 숫자가 맞아떨어진다.
+
+```svg
+<svg viewBox="0 0 680 230" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="55" font-size="13">C 보고</text>
+<rect x="98.5" y="40" width="2.5" height="22" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<rect x="322.5" y="40" width="2.5" height="22" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<rect x="546.5" y="40" width="2.5" height="22" fill="#3f9a6b" fill-opacity="0.35" stroke="#3f9a6b"/>
+<text x="10" y="95" font-size="13">A hog</text>
+<rect x="100.1" y="80" width="110.4" height="22" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<rect x="324.5" y="80" width="110.0" height="22" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<rect x="548.6" y="80" width="101.4" height="22" fill="#4a7bd0" fill-opacity="0.35" stroke="#4a7bd0"/>
+<text x="10" y="135" font-size="13">B hog</text>
+<rect x="210.5" y="120" width="112.0" height="22" fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c"/>
+<rect x="434.5" y="120" width="112.0" height="22" fill="#e08a3c" fill-opacity="0.35" stroke="#e08a3c"/>
+<line x1="90.0" y1="150" x2="90.0" y2="156" stroke="currentColor"/>
+<text x="90.0" y="170" font-size="12" text-anchor="middle">0</text>
+<line x1="202.0" y1="150" x2="202.0" y2="156" stroke="currentColor"/>
+<text x="202.0" y="170" font-size="12" text-anchor="middle">1000</text>
+<line x1="314.0" y1="150" x2="314.0" y2="156" stroke="currentColor"/>
+<text x="314.0" y="170" font-size="12" text-anchor="middle">2000</text>
+<line x1="426.0" y1="150" x2="426.0" y2="156" stroke="currentColor"/>
+<text x="426.0" y="170" font-size="12" text-anchor="middle">3000</text>
+<line x1="538.0" y1="150" x2="538.0" y2="156" stroke="currentColor"/>
+<text x="538.0" y="170" font-size="12" text-anchor="middle">4000</text>
+<line x1="650.0" y1="150" x2="650.0" y2="156" stroke="currentColor"/>
+<text x="650.0" y="170" font-size="12" text-anchor="middle">5000</text>
+<line x1="90" y1="150" x2="650" y2="150" stroke="currentColor"/>
+<text x="650" y="186" font-size="12" text-anchor="end">µs (QEMU icount)</text>
+<line x1="210.5" y1="30" x2="210.5" y2="146" stroke="#d0564a" stroke-dasharray="3 3"/>
+<line x1="322.5" y1="30" x2="322.5" y2="146" stroke="#d0564a" stroke-dasharray="3 3"/>
+<line x1="434.5" y1="30" x2="434.5" y2="146" stroke="#d0564a" stroke-dasharray="3 3"/>
+<line x1="546.5" y1="30" x2="546.5" y2="146" stroke="#d0564a" stroke-dasharray="3 3"/>
+<text x="214.5" y="28" font-size="12">SysTick → PendSV (선점)</text>
+<text x="106.1" y="210" font-size="12">C는 출력 후 mini_yield()로 남은 slice를 A에게 넘긴다 — A의 slice가 B보다 약 15 µs 짧다</text>
+</svg>
+```
+
+그림 5 — 예제 6의 실제 타임스탬프로 그린 타임라인. 빨간 점선이 SysTick → PendSV 선점 시점이다. C(초록)는 15~20 µs만 쓰고 넘기고, A(파랑)는 그 나머지, B(주황)는 꽉 찬 1 ms를 받는다.
+
+### 예제 7 — 직접 만든 스위처도 레지스터 13개를 지키나
+
+무엇을 확인하는 코드인가: 예제 1의 레지스터 검사 태스크(regs.S)를 그대로 mini 커널에 올리고, yield에 더해 10 kHz SysTick 선점이 검사 도중 아무 데서나 끼어들게 한다.
+
+```c
+/* ex5b_regs.c — the register-check tasks of ex1 (regs.S) on the mini kernel,
+ * with SysTick preemption at 10 kHz on top of the explicit yields. */
+#include "board.h"
+#include "mini.h"
+volatile uint32_t cntA, cntB;
+void taskA_regs(void *arg);
+void taskB_regs(void *arg);
+void reg_done(void)
+{
+    board_printf_raw("mini OK: cntA=%u cntB=%u ticks=%u, r0-r12 intact\n",
+                     (unsigned)cntA, (unsigned)cntB, (unsigned)mini_ticks);
+    board_exit(0);
+}
+void reg_fail(uint32_t task, const uint32_t *r)
+{
+    board_printf_raw("mini CORRUPTION task %u: r4=0x%x\n", (unsigned)task, (unsigned)r[4]);
+    board_exit(3);
+}
+int main(void)
+{
+    mini_create(taskA_regs, 0);
+    mini_create(taskB_regs, 0);
+    mini_start(10000);
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/C2; make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS="$S/mini/mini.c $S/mini/ex5b_regs.c $S/regs/regs.S" OUT=/var/tmp/rtos/C2/ex5b >/dev/null && ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/C2/ex5b/app.elf 5'
+```
+
+```text
+mini OK: cntA=2000 cntB=2000 ticks=69, r0-r12 intact
+[board_exit] code=0
+```
+
+출력에서 볼 것: 4000번의 yield 스위치 + 69번의 tick 선점(검사 루프 한가운데에서 일어난 것 포함) 동안 레지스터가 하나도 안 바뀌었다. 11줄짜리 PendSV가 FreeRTOS의 19줄과 **같은 투명성**을 준다.
+
+### 8.2 FreeRTOS 19줄 vs mini 11줄 — 무엇이 빠졌고 왜 괜찮은가
+
+| FreeRTOS 명령 | mini | 빠져도 되는 이유 (이 커널 한정) |
+|---|---|---|
+| `isb` ×2 | 없음 | Cortex-M3에서 관찰 가능한 차이가 없는 보수적 배리어(§6.6). 상용 코드라면 넣는다 |
+| `stmdb sp!, {r3, r14}` / `ldmia` | 없음 | C 함수를 안 부른다 → LR · r3이 안 깨진다 |
+| `mov`/`msr basepri` ×2 | 없음 | 어떤 ISR도 `mini_cur`나 링을 건드리지 않는다. **ISR에서 태스크를 깨우는 API를 넣는 순간 필요해진다** |
+| `bl vTaskSwitchContext` | `ldr r2, [r2, #4]` + `str r2, [r1]` | 결정이 "다음 칸"뿐. 우선순위 · 블록 · 지연이 없다 |
+| `ldr r1, [r3]` (새 TCB 다시 읽기) | 없음 | 결정을 핸들러 안에서 했으니 새 TCB가 이미 r2에 있다 |
+
+빠진 것은 전부 "기능"이고, **남은 7개 — `mrs psp` · `stmdb` · `str`(sp 저장) · `ldr`(새 sp) · `ldmia` · `msr psp` · `bx lr` — 가 컨텍스트 스위치의 본질**이다. 이 7개는 FreeRTOS · Zephyr · 이 mini 커널 모두에 (형태만 조금 달리) 들어 있다.
+
+```sh
+limactl shell elinux -- bash -lc 'arm-none-eabi-objdump -d /var/tmp/rtos/C2/ex6_mini/app.elf | awk "/<PendSV_Handler>:/,/^\$/"; arm-none-eabi-size /var/tmp/rtos/C2/ex6_mini/app.elf'
+```
+
+```text
+00000148 <PendSV_Handler>:
+     148:	f3ef 8009 	mrs	r0, PSP
+     14c:	4906      	ldr	r1, [pc, #24]	@ (168 <PendSV_Handler+0x20>)
+     14e:	680a      	ldr	r2, [r1, #0]
+     150:	e920 0ff0 	stmdb	r0!, {r4, r5, r6, r7, r8, r9, sl, fp}
+     154:	6010      	str	r0, [r2, #0]
+     156:	6852      	ldr	r2, [r2, #4]
+     158:	600a      	str	r2, [r1, #0]
+     15a:	6810      	ldr	r0, [r2, #0]
+     15c:	e8b0 0ff0 	ldmia.w	r0!, {r4, r5, r6, r7, r8, r9, sl, fp}
+     160:	f380 8809 	msr	PSP, r0
+     164:	4770      	bx	lr
+     166:	0000      	.short	0x0000
+     168:	20000064 	.word	0x20000064
+
+   text	   data	    bss	    dec	    hex	filename
+   4604	     96	   4480	   9180	   23dc	/var/tmp/rtos/C2/ex6_mini/app.elf
+```
+
+출력에서 볼 것: 11명령 30바이트. bss 4480 B = 스택 4 KB + TCB 32 B + 기타. 커널 전체가 RAM 4.5 KB, 플래시는 printf 포함 4.6 KB다.
+
+### 8.3 한계 — 이걸 RTOS라고 부를 수 없는 이유
+
+- **블로킹이 없다.** 모든 태스크가 항상 ready. 큐 · 세마포어 · `delay`를 넣으려면 "ready가 아닌 태스크를 링에서 뺐다 넣는" 리스트 조작이 필요하고, 그걸 ISR이 하게 되면 그 순간 BASEPRI 보호가 필요해진다 — FreeRTOS의 9 · 12번 명령이 돌아온다.
+- **우선순위가 없다.** 결정 함수가 커지면 C로 쓰고 싶어진다 → `bl` → LR · r3 보존 — FreeRTOS의 7 · 13번 명령이 돌아온다.
+- **idle 태스크가 없다.** 모든 태스크가 블록할 수 있게 되면 "할 일이 없을 때 돌 태스크"가 필요하다.
+- 결국 기능을 하나씩 더하면 FreeRTOS의 19줄로 수렴한다. **19줄의 각 줄은 기능 하나의 대가**다.
+
+### 8.4 예제 8 — 직접 만들 때 실제로 밟은 함정: PC 칸의 Thumb 비트
+
+처음 짠 `mini_create()`는 `*--sp = (uint32_t)fn;`이었다(함수 포인터 그대로). 돌려 보면 출력은 정상이다. 그런데 QEMU에 `-d guest_errors`를 켜면:
+
+```text
+mini kernel: 3 tasks, 1 kHz SysTick
+M profile return from interrupt with misaligned PC is UNPREDICTABLE on v7M
+[C] t=76 us tick=0 A=0 B=0  (print took 14 us)
+M profile return from interrupt with misaligned PC is UNPREDICTABLE on v7M
+M profile return from interrupt with misaligned PC is UNPREDICTABLE on v7M
+[C] t=2076 us tick=2 A=7618 B=7808  (print took 18 us)
+[C] t=4076 us tick=4 A=15203 B=15615  (print took 19 us)
+[C] t=6076 us tick=6 A=22780 B=23423  (print took 19 us)
+```
+
+(수정 전 바이너리, 앞부분만.) 함수 포인터 값은 Thumb 비트(비트 0) = 1이다. 그걸 예외 프레임의 PC 칸에 그대로 넣으면 Armv7-M 아키텍처상 **UNPREDICTABLE** — QEMU는 경고를 찍고 비트를 지워 준 뒤 계속 가지만, 실칩이 똑같이 봐준다는 보장이 없다. 경고는 각 태스크의 **첫** 복귀(세 태스크 = 세 번)에만 나온다 — 그 뒤로는 하드웨어가 직접 쌓은 프레임이라 비트 0이 항상 0이기 때문이다. FreeRTOS가 `& portSTART_ADDRESS_MASK`(= `0xfffffffe`)를 하는 이유가 이것이다. 수정 후(위 mini.c 17행) 같은 명령으로 돌리면 경고 줄이 사라진다(예제 6의 출력이 수정 후 결과다).
+
+교훈: **QEMU의 `-d guest_errors`는 "실칩에서 터질 수 있는 아키텍처 위반"을 공짜로 알려 준다.** 직접 만든 포트나 부트 코드는 한 번씩 켜서 돌려 본다. 반대로 Zephyr의 `arm-m-switch.c` 주석이 투덜대듯("The arch/cpu/toolchain are horrifyingly inconsistent with how the thumb bit is treated"), `bx`/`blx`의 목표 주소는 비트 0이 **1이어야** 하고 예외 프레임의 PC는 **0이어야** 한다. 같은 함수 주소인데 넣는 곳에 따라 다르다.
+
+---
+
+## 9. 측정 — 스위치 한 번은 명령 몇 개인가, 어디에 드나
+
+### 9.1 측정 방법 두 가지
+
+1. **시간**: 같은 우선순위 태스크 둘이 yield를 2만 번 주고받는다. 루프 한 바퀴 = 스위치 한 번. FPGAIO 카운터(0x40028018, 25 MHz, 1 = 40 ns)로 전체를 재서 나눈다. `ICOUNT=1`이므로 ns ÷ 32 = 실행된 명령 수다.
+2. **명령 추적**: QEMU를 `-accel tcg,one-insn-per-tb=on -d exec,nochain`으로 돌리면 실행되는 명령마다 PC와 심볼 한 줄이 로그에 찍힌다. 그 로그를 "PendSV 진입부터 다음 PendSV 진입까지"(Zephyr는 `z_impl_k_yield` 진입부터 다음 진입까지)로 잘라 가장 흔한 사이클 하나를 심볼별로 센다. 시간 측정과 숫자가 맞는지가 검증이다.
+
+측정 대상은 네 가지 커널, 일곱 설정이다. 태스크 쪽 코드는 모두 같은 모양(`while (n < N) { n++; yield(); }`)이다.
+
+### 예제 9 — 같은 yield 핑퐁을 mini · FreeRTOS · Zephyr에서
+
+```c
+/* bench.h — one yield ping-pong measurement shared by mini / FreeRTOS (C2) */
+#ifndef C2_BENCH_H
+#define C2_BENCH_H
+#include "board.h"
+#define CYC() REG32(0x40028018u)          /* FPGAIO 25 MHz: 1 count = 40 ns */
+#define N_SW  20000u                      /* number of switches measured */
+static volatile uint32_t n_sw, t_start;
+/* Two tasks run this with the same priority: every loop pass = exactly one switch. */
+static inline void bench_body(const char *name, void (*yield)(void))
+{
+    if (t_start == 0) t_start = CYC();
+    while (n_sw < N_SW) { n_sw++; yield(); }
+    uint32_t dt = CYC() - t_start;
+    uint32_t ns = dt * 40u / N_SW;
+    board_printf_raw("%s: %u ns per switch = %u instructions (icount: 32 ns each)\n",
+                     name, (unsigned)ns, (unsigned)(ns / 32u));
+    board_exit(0);
+}
+#endif
+```
+
+```c
+/* ex6_mini.c — yield ping-pong on the mini kernel (no SysTick) */
+#include "mini.h"
+#include "bench.h"
+static void y(void) { mini_yield(); }
+static void task(void *arg) { (void)arg; bench_body("mini", y); }
+int main(void)
+{
+    mini_create(task, 0);
+    mini_create(task, 0);
+    mini_start(0);
+}
+```
+
+```c
+/* ex6_frt.c — the same yield ping-pong on FreeRTOS V11.3.2 (ARM_CM3 port) */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "bench.h"
+static void y(void) { taskYIELD(); }
+static void task(void *arg) { (void)arg; bench_body(configUSE_TIME_SLICING ? "FreeRTOS ts=1" : "FreeRTOS ts=0", y); }
+int main(void)
+{
+    xTaskCreate(task, "y1", 256, NULL, 2, NULL);
+    xTaskCreate(task, "y2", 256, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+Zephyr 쪽(`zy/src/main.c`, CMakeLists.txt · prj.conf는 A7 예제와 같은 형태, prj.conf는 `CONFIG_BOOT_BANNER=n` 한 줄):
+
+```c
+/* ex7 — the same yield ping-pong on Zephyr v4.4.2: two threads at prio 4 call k_yield() */
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+#define CYC() (*(volatile uint32_t *)0x40028018u)   /* FPGAIO 25 MHz */
+#ifndef N_SW
+#define N_SW 20000u                    /* trace builds use -DN_SW=400 */
+#endif
+static volatile uint32_t n_sw, t_start;
+
+static void yielder(void *a, void *b, void *c)
+{
+    ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+    if (t_start == 0) t_start = CYC();
+    while (n_sw < N_SW) { n_sw++; k_yield(); }
+    uint32_t ns = (CYC() - t_start) * 40u / N_SW;
+    printk("Zephyr ts=%d switch=%s: %u ns per switch = %u instructions\n",
+           IS_ENABLED(CONFIG_TIMESLICING), IS_ENABLED(CONFIG_USE_SWITCH) ? "arch_switch" : "pendsv",
+           ns, ns / 32u);
+    register uint32_t r0 __asm__("r0") = 0x18, r1 __asm__("r1") = 0x20026;
+    __asm volatile("bkpt 0xab" : : "r"(r0), "r"(r1) : "memory");   /* semihosting exit */
+}
+K_THREAD_DEFINE(t1, 1024, yielder, NULL, NULL, NULL, 4, 0, 10);
+K_THREAD_DEFINE(t2, 1024, yielder, NULL, NULL, NULL, 4, 0, 10);
+```
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/C2; R=/var/rtoslab/bin/rtos-run-mps2; O=/var/tmp/rtos/C2
+make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS="$S/mini/mini.c $S/bench/ex6_mini.c" EXTRA_CFLAGS=-I$S/mini OUT=$O/ex6_mini >/dev/null && ICOUNT=1 $R $O/ex6_mini/app.elf
+F="make -s -f /var/rtoslab/templates/freertos-mps2/Makefile"
+for ts in 1 0; do $F SRCS="$S/bench/ex6_frt.c" EXTRA_CFLAGS=-DconfigUSE_TIME_SLICING=$ts OUT=$O/ex6_frt_ts$ts >/dev/null && echo -n "[default] " && ICOUNT=1 $R $O/ex6_frt_ts$ts/app.elf; done
+for ts in 1 0; do $F SRCS="$S/bench/ex6_frt.c $S/lean/lean.c" EXTRA_CFLAGS=-DconfigUSE_TIME_SLICING=$ts OUT=$O/ex6_frtlean_ts$ts >/dev/null && echo -n "[lean]    " && ICOUNT=1 $R $O/ex6_frtlean_ts$ts/app.elf; done
+A=$S/zy; for v in "default:" "tsoff:-DCONFIG_TIMESLICING=n" "sw:-DCONFIG_USE_SWITCH=y" "swtsoff:-DCONFIG_USE_SWITCH=y -DCONFIG_TIMESLICING=n"; do n=${v%%:*}; a=${v#*:}; echo "== $n"; /var/rtoslab/bin/rtos-zbuild mps2/an385 $A $O/z_$n -- $a && ICOUNT=1 $R $O/z_$n/zephyr/zephyr.elf 10; done'
+```
+
+```text
+mini: 640 ns per switch = 20 instructions (icount: 32 ns each)
+[board_exit] code=0
+[default] FreeRTOS ts=1: 3343 ns per switch = 104 instructions (icount: 32 ns each)
+[default] FreeRTOS ts=0: 3331 ns per switch = 104 instructions (icount: 32 ns each)
+[lean]    FreeRTOS ts=1: 1926 ns per switch = 60 instructions (icount: 32 ns each)
+[lean]    FreeRTOS ts=0: 1922 ns per switch = 60 instructions (icount: 32 ns each)
+== default
+           FLASH:       12872 B         4 MB      0.31%
+             RAM:        8424 B         4 MB      0.20%
+Zephyr ts=1 switch=pendsv: 16736 ns per switch = 523 instructions
+== tsoff
+           FLASH:       12444 B         4 MB      0.30%
+             RAM:        8384 B         4 MB      0.20%
+Zephyr ts=0 switch=pendsv: 2656 ns per switch = 83 instructions
+== sw
+           FLASH:       13564 B         4 MB      0.32%
+             RAM:        8488 B         4 MB      0.20%
+Zephyr ts=1 switch=arch_switch: 30720 ns per switch = 960 instructions
+== swtsoff
+           FLASH:       13104 B         4 MB      0.31%
+             RAM:        8448 B         4 MB      0.20%
+Zephyr ts=0 switch=arch_switch: 2528 ns per switch = 79 instructions
+```
+
+(FreeRTOS 줄 뒤의 `[board_exit] code=0`은 생략했다.) A7의 숫자(FreeRTOS 1.92 / 3.33 µs, Zephyr 2.66 / 16.7 µs)가 그대로 재현된다. 이 노트가 더하는 것은 **"왜"**다.
+
+### 예제 10 — 명령 추적으로 한 사이클을 분해
+
+무엇을 확인하는 코드인가: 위 바이너리를 명령 추적 모드로 다시 돌리고, 한 사이클을 심볼별로 센다. 분석 스크립트(Python, VM에서 `python3 -I`로 실행)는 이렇다.
+
+```python
+"""cycle.py — split a QEMU one-insn-per-tb exec trace into switch cycles.
+usage: python3 -I cycle.py trace.log PENDSV_SYMBOL [split_pc_hex]"""
+import sys, re, collections, os
+log, pend = sys.argv[1], sys.argv[2]
+split = int(sys.argv[3], 16) if len(sys.argv) > 3 else None
+pat = re.compile(r"\[[0-9a-f]+/([0-9a-f]+)/[0-9a-f]+/[0-9a-f]+\] (\S+)")
+ins = []
+with open(log) as f:
+    for line in f:
+        if line.startswith("Stopped execution"):   # TB logged but interrupted before it ran
+            if ins and ("[%016x]" % ins[-1][0]) in line:
+                ins.pop()
+            continue
+        m = pat.search(line)
+        if m:
+            ins.append((int(m.group(1), 16), m.group(2)))
+entry = min(pc for pc, sym in ins if sym == pend)          # first instruction of the handler
+starts = [i for i in range(1, len(ins)) if ins[i][0] == entry]
+cycles = [(starts[k], starts[k + 1]) for k in range(len(starts) - 1)]
+lens = collections.Counter(b - a for a, b in cycles)
+mode, freq = lens.most_common(1)[0]
+print(f"cycles={len(cycles)} most common length={mode} instructions ({freq} times)")
+a, b = next(c for c in cycles[len(cycles) // 2:] if c[1] - c[0] == mode)
+runs = []
+for pc, sym in ins[a:b]:
+    if sym == pend and split is not None:
+        sym = pend + (" [save]" if pc <= split else " [restore]")
+    if runs and runs[-1][0] == sym:
+        runs[-1][1] += 1
+    else:
+        runs.append([sym, 1])
+if os.environ.get("AGG"):                                   # totals per symbol instead of runs
+    tot = collections.Counter()
+    for sym, n in runs:
+        tot[sym] += n
+    runs = sorted(tot.items(), key=lambda kv: -kv[1])
+for sym, n in runs:
+    print(f"  {n:4d}  {sym}")
+```
+
+(실제 파일에는 소스 줄 분해용 `DUMP` 옵션이 더 있다 — §7.2 표가 그 결과다.) 한 가지 함정: QEMU 로그는 "실행하려고 꺼냈다가 인터럽트 때문에 실행하지 못한 명령"도 한 줄 찍고 바로 뒤에 `Stopped execution of TB chain before …`를 찍는다. 그 줄을 빼지 않으면 사이클마다 명령 하나(PENDSVSET `str` 다음의 `dsb`)가 이중으로 세어진다. 처음엔 mini가 21로 나와 시간 측정(20)과 안 맞았고, 이걸 고치고 나서 일치했다.
+
+```sh
+limactl shell elinux -- bash -lc 'T=/Users/donh/.rtos_scratch/C2/tools; O=/var/tmp/rtos/C2
+qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial null -semihosting-config enable=on,target=native -accel tcg,one-insn-per-tb=on -d exec,nochain -D $O/trace_mini.log -kernel $O/ex6_mini/app.elf
+python3 -I $T/cycle.py $O/trace_mini.log PendSV_Handler
+python3 -I $T/cycle.py $O/trace_lean.log PendSV_Handler 1cc4
+python3 -I $T/cycle.py $O/trace_ex6_frt_ts1.log PendSV_Handler 1d5c'
+```
+
+```text
+cycles=19999 most common length=20 instructions (19998 times)
+    11  PendSV_Handler
+     9  task
+cycles=21815 most common length=60 instructions (19841 times)
+    10  PendSV_Handler [save]
+    32  vTaskSwitchContext
+     9  PendSV_Handler [restore]
+     9  task
+cycles=24185 most common length=104 instructions (19798 times)
+    10  PendSV_Handler [save]
+     7  vTaskSwitchContext
+     7  board_now_us
+    62  vTaskSwitchContext
+     9  PendSV_Handler [restore]
+     9  task
+```
+
+(두 FreeRTOS 로그는 같은 방식으로 미리 떠 둔 것이다. 셋째 인자는 각 ELF에서 `bl vTaskSwitchContext`의 주소.) Zephyr는 `z_impl_k_yield` 진입을 사이클 경계로, `AGG=1`(심볼별 합계)로 본다(`N_SW=400`으로 다시 빌드한 바이너리 — 로그 크기를 줄이려고 반복 수만 바꿨다).
+
+```text
+== tsoff
+cycles=399 most common length=83 instructions (398 times)
+    38  z_impl_k_yield
+    11  z_swap_irqlock
+    22  z_arm_pendsv
+     4  z_swap_irqlock
+     8  yielder
+== swtsoff
+cycles=399 most common length=79 instructions (398 times)
+    38  z_impl_k_yield
+    33  z_swap.isra.0
+     8  yielder
+== default
+cycles=399 most common length=523 instructions (398 times)
+   124  sys_clock_set_timeout
+    92  elapsed
+    54  z_add_timeout
+    44  z_impl_k_yield
+    34  sys_clock_elapsed
+    30  first
+    26  z_abort_timeout
+    22  next_timeout
+    22  z_arm_pendsv
+    20  z_reset_time_slice
+    20  z_time_slice_size
+    15  z_swap_irqlock
+    12  remove_timeout
+     8  yielder
+== sw
+cycles=399 most common length=960 instructions (398 times)
+   248  sys_clock_set_timeout
+   184  elapsed
+   108  z_add_timeout
+    68  sys_clock_elapsed
+    60  first
+    52  z_abort_timeout
+    44  z_impl_k_yield
+    44  next_timeout
+    40  z_reset_time_slice
+    40  z_time_slice_size
+    40  z_swap.isra.0
+    24  remove_timeout
+     8  yielder
+```
+
+(명령: `for n in tsoff swtsoff; do python3 -I $T/cycle.py $O/zt_$n/trace.log z_impl_k_yield; done` 와 `default` · `sw`에 `AGG=1`을 붙인 실행. ts=0 두 설정은 실행 순서대로, ts=1 두 설정은 심볼별 합계다.) 모든 사이클 길이가 시간 측정의 명령 수(20 / 60 / 104 / 83 / 79 / 523 / 960)와 **정확히 일치**한다.
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<line x1="160.0" y1="30" x2="160.0" y2="262" stroke="#888" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="160.0" y="24" font-size="12" text-anchor="middle">0</text>
+<line x1="260.0" y1="30" x2="260.0" y2="262" stroke="#888" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="260.0" y="24" font-size="12" text-anchor="middle">250</text>
+<line x1="360.0" y1="30" x2="360.0" y2="262" stroke="#888" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="360.0" y="24" font-size="12" text-anchor="middle">500</text>
+<line x1="460.0" y1="30" x2="460.0" y2="262" stroke="#888" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="460.0" y="24" font-size="12" text-anchor="middle">750</text>
+<line x1="560.0" y1="30" x2="560.0" y2="262" stroke="#888" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="560.0" y="24" font-size="12" text-anchor="middle">1000</text>
+<text x="152" y="51" font-size="12" text-anchor="end">mini (직접 제작)</text>
+<rect x="160.0" y="38" width="3.6" height="18" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<rect x="163.6" y="38" width="4.4" height="18" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+<text x="174.0" y="51" font-size="12">20 명령 · 0.64 µs</text>
+<text x="152" y="83" font-size="12" text-anchor="end">FreeRTOS lean</text>
+<rect x="160.0" y="70" width="3.6" height="18" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<rect x="163.6" y="70" width="7.6" height="18" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+<rect x="171.2" y="70" width="12.8" height="18" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<text x="190.0" y="83" font-size="12">60 명령 · 1.92 µs</text>
+<text x="152" y="115" font-size="12" text-anchor="end">FreeRTOS 기본</text>
+<rect x="160.0" y="102" width="3.6" height="18" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<rect x="163.6" y="102" width="7.6" height="18" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+<rect x="171.2" y="102" width="30.4" height="18" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<text x="207.6" y="115" font-size="12">104 명령 · 3.33 µs</text>
+<text x="152" y="147" font-size="12" text-anchor="end">Zephyr ts=0 PendSV</text>
+<rect x="160.0" y="134" width="3.2" height="18" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<rect x="163.2" y="134" width="8.8" height="18" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+<rect x="172.0" y="134" width="21.2" height="18" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<text x="199.2" y="147" font-size="12">83 명령 · 2.66 µs</text>
+<text x="152" y="179" font-size="12" text-anchor="end">Zephyr ts=0 switch</text>
+<rect x="160.0" y="166" width="3.2" height="18" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<rect x="163.2" y="166" width="28.4" height="18" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<text x="197.6" y="179" font-size="12">79 명령 · 2.53 µs</text>
+<text x="152" y="211" font-size="12" text-anchor="end">Zephyr ts=1 PendSV</text>
+<rect x="160.0" y="198" width="3.2" height="18" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<rect x="163.2" y="198" width="8.8" height="18" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+<rect x="172.0" y="198" width="23.6" height="18" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<rect x="195.6" y="198" width="173.6" height="18" fill="#d0564a" fill-opacity="0.75" stroke="#d0564a"/>
+<text x="375.2" y="211" font-size="12">523 명령 · 16.74 µs</text>
+<text x="152" y="243" font-size="12" text-anchor="end">Zephyr ts=1 switch</text>
+<rect x="160.0" y="230" width="3.2" height="18" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<rect x="163.2" y="230" width="33.6" height="18" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<rect x="196.8" y="230" width="347.2" height="18" fill="#d0564a" fill-opacity="0.75" stroke="#d0564a"/>
+<text x="550.0" y="243" font-size="12">960 명령 · 30.72 µs</text>
+<rect x="20" y="282" width="14" height="12" fill="#888" fill-opacity="0.75" stroke="#888"/>
+<text x="40" y="293" font-size="12">태스크 루프</text>
+<rect x="170" y="282" width="14" height="12" fill="#e08a3c" fill-opacity="0.75" stroke="#e08a3c"/>
+<text x="190" y="293" font-size="12">PendSV asm</text>
+<rect x="320" y="282" width="14" height="12" fill="#3f9a6b" fill-opacity="0.75" stroke="#3f9a6b"/>
+<text x="340" y="293" font-size="12">커널 C (결정 등)</text>
+<rect x="500" y="282" width="14" height="12" fill="#d0564a" fill-opacity="0.75" stroke="#d0564a"/>
+<text x="520" y="293" font-size="12">time slice 재설정</text>
+<text x="20" y="318" font-size="12">yield 핑퐁 한 사이클(= 스위치 1회) · QEMU mps2-an385 · icount 명령 수, µs는 FPGAIO 측정</text>
+</svg>
+```
+
+그림 6 — 직접 잰 "스위치 1회 = 명령 몇 개"를 범주별로 쌓은 막대. 회색 = 태스크의 yield 루프 자체(8~9개), 주황 = PendSV 어셈블리, 초록 = 커널 C 코드(다음 태스크 결정, 리스트 조작, 디버그 통계), 빨강 = Zephyr time slice 타이머 재설정. 오른쪽 숫자는 명령 수와 FPGAIO로 잰 시간.
+
+### 9.2 읽는 법 — 비용은 "저장 · 복원"이 아니라 "결정과 장부"에 있다
+
+- **레지스터 저장 · 복원 자체는 어디서나 싸다.** mini 11, FreeRTOS 19, Zephyr 22명령. Zephyr의 `z_arm_pendsv`가 FreeRTOS보다 3개 많은 것은 BASEPRI를 스레드별로 저장 · 복원하고(`arch.basepri`) PendSV pending 비트를 직접 지우기 때문이다(§10). 차이는 전부 그 바깥에서 난다.
+- **FreeRTOS lean(60)**: 결정 C 코드 32 = 진입 검사 6 + 선택 24 + 훅 2. 선택은 CLZ 덕분에 태스크 수와 무관하다.
+- **FreeRTOS 기본(104)**: +44가 전부 디버그 장부 — 런타임 통계 25(여기엔 시계 읽기 `board_now_us()` 7개가 들어 있다) + 스택 무늬 검사 21(§7.2).
+- **FreeRTOS ts=1 vs ts=0: 차이 없음(3343 vs 3331, 1926 vs 1922 ns).** `configUSE_TIME_SLICING`은 tick 처리(`xTaskIncrementTick()`)가 "같은 우선순위에 다른 태스크가 있으면 스위치 요청"을 할지만 정한다. yield 경로에는 time slice 장부가 없다.
+- **Zephyr ts=0(83)**: 결정이 PendSV **밖**, 스레드 모드에서 일어난다. `k_yield()` → `runq_yield()` + `update_cache()`(38) → `z_swap_irqlock()` → `arch_swap()`이 PENDSVSET(15) → `z_arm_pendsv`(22)는 이미 정해진 `_kernel.ready_q.cache`를 꺼내 쓰기만 한다.
+- **Zephyr ts=1(523)**: 434명령이 time slice 재설정이다. 다른 스레드로 넘어갈 때마다 `z_reset_time_slice()`(`kernel/timeslicing.c` 75행)가 slice 타임아웃을 지우고(`z_abort_timeout`) 다시 걸고(`z_add_timeout`), 그때마다 tickless 타이머를 다시 프로그램한다(`sys_clock_set_timeout()` — Cortex-M SysTick 드라이버 — 가 두 번, 경과 시간 계산 `elapsed`/`sys_clock_elapsed`가 여러 번). **Zephyr는 yield한 스레드의 다음 스레드에게 새 slice를 통째로 준다** — FreeRTOS · mini처럼 "남은 slice"가 아니다. 공정하지만 비싸다.
+- **Zephyr `CONFIG_USE_SWITCH=y` ts=1(960)**: 재설정이 **두 번** 일어난다. `update_cache()`(`kernel/sched.c` 302행)에서 한 번, `CONFIG_USE_SWITCH` 경로의 `do_swap()`(`kernel/include/kswap.h` 145행)에서 또 한 번. 같은 일을 두 번 해서 434 × 2 = 868. 이 노트의 빌드에서 추적으로 확인한 사실이고, 업스트림에서 의도된 동작인지는 확인 못 함.
+- **Zephyr `USE_SWITCH` ts=0(79)**: 가장 빠른 커널 경로. PendSV 예외 자체가 없다 — §10.3.
+
+### 9.3 tick이 일으키는 스위치 — time slicing을 켜면 1 ms마다 내는 값
+
+yield가 아니라 **선점**으로 일어나는 스위치도 쟀다. 같은 우선순위의 CPU hog 둘을 10 ms 돌리고, "tick ISR 진입 → 다음 태스크 코드의 첫 명령"까지를 센다(FreeRTOS: `SysTick_Handler`, Zephyr: `sys_clock_isr`, 1 kHz tick · 1 ms slice로 맞춤).
+
+```c
+/* ex8_hogs.c — two equal-priority CPU hogs; with time slicing every 1 ms tick switches them */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "board.h"
+static volatile uint32_t cnt[2];
+static void hog(void *arg) { volatile uint32_t *c = arg; for (;;) (*c)++; }
+static void boss(void *arg)              /* higher priority: wakes once after 10 ticks */
+{
+    (void)arg;
+    vTaskDelay(10);
+    board_printf_raw("ts=%d: hogA=%u hogB=%u\n", configUSE_TIME_SLICING,
+                     (unsigned)cnt[0], (unsigned)cnt[1]);
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(hog, "hogA", 256, (void *)&cnt[0], 2, NULL);
+    xTaskCreate(hog, "hogB", 256, (void *)&cnt[1], 2, NULL);
+    xTaskCreate(boss, "boss", 256, NULL, 3, NULL);
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+Zephyr 판(`ztick`)은 같은 hog 두 개를 `K_THREAD_DEFINE`(우선순위 4)으로, main이 `k_msleep(10)` 후 출력하는 구조이고 `-DCONFIG_SYS_CLOCK_TICKS_PER_SEC=1000 -DCONFIG_TIMESLICE_SIZE=1`(또는 `-DCONFIG_TIMESLICING=n`)로 빌드했다. 분석은 `tickcost.py`(tick ISR 진입에서 hog 함수가 다시 실행될 때까지 센다).
+
+```sh
+limactl shell elinux -- bash -lc '/Users/donh/.rtos_scratch/C2/tools/ticktrace.sh'
+```
+
+```text
+== FreeRTOS lean_ts1
+ts=1: hogA=38813 hogB=38937
+-- typical no-switch tick: 100 instructions (hog -> hog)
+     32  xTaskIncrementTick.part.0
+     32  vTaskSwitchContext
+     19  PendSV_Handler
+     13  SysTick_Handler
+      4  xTaskIncrementTick
+== FreeRTOS lean_ts0
+ts=0: hogA=77899 hogB=0
+-- typical no-switch tick: 34 instructions (hog -> hog)
+     20  xTaskIncrementTick.part.0
+     10  SysTick_Handler
+      4  xTaskIncrementTick
+== FreeRTOS def_ts1
+ts=1: hogA=38747 hogB=38882
+-- typical no-switch tick: 144 instructions (hog -> hog)
+     69  vTaskSwitchContext
+     32  xTaskIncrementTick.part.0
+     19  PendSV_Handler
+     13  SysTick_Handler
+      7  board_now_us
+      4  xTaskIncrementTick
+== mini (ex5)
+-- typical switch tick: 19 instructions (hog -> reporter)
+     11  PendSV_Handler
+      8  SysTick_Handler
+== Zephyr ts1
+ts=1: hogA=45160 hogB=37796
+-- typical no-switch tick: 1115 instructions (hog -> hog)
+    246  sys_clock_set_timeout
+    183  elapsed
+    124  z_add_timeout
+     66  first
+     60  sys_clock_announce_locked
+     60  next_timeout
+     60  z_time_slice_size
+     51  sys_clock_elapsed
+     47  z_abort_timeout
+     40  z_reset_time_slice
+     38  remove_timeout
+     38  move_current_to_end_of_prio_q
+     32  z_time_slice
+     29  sys_clock_isr
+     22  z_arm_pendsv
+     10  z_arm_exc_exit
+      9  slice_timeout
+== Zephyr ts0
+ts=0: hogA=85552 hogB=0
+```
+
+(`[board_exit]` 줄과 길이 분포 줄은 생략했다. "no-switch"라는 꼬리표는 스크립트가 함수 **이름**으로 태스크를 구분해서 붙은 것이다 — hogA와 hogB가 같은 `hog` 함수라서. 실제로는 ts=1의 사이클은 전부 hogA ↔ hogB 스위치다.)
+
+| 커널 · 설정 | tick 1회(스위치 포함) | 1 kHz일 때 CPU 점유 | 비고 |
+|---|---|---|---|
+| mini | 19 명령 | 0.06% | SysTick 8 + PendSV 11 |
+| FreeRTOS lean ts=1 | 100 | 0.32% | tick 장부 36 + PendSV 19 + 결정 32 |
+| FreeRTOS lean ts=0 | 34 (스위치 없음) | 0.11% | hogB는 한 번도 못 돈다 (hogB=0) |
+| FreeRTOS 기본 ts=1 | 144 | 0.46% | 결정 쪽에 디버그 장부 +44 |
+| Zephyr ts=1 (1 ms slice) | 1115 | 3.6% | tick 처리 + slice 만료 + 재설정 |
+| Zephyr ts=0 | **tick ISR 0회** | 0% | tickless: 깨울 타임아웃이 없으면 타이머 인터럽트 자체가 없다 |
+
+(CPU 점유 = 명령 수 × 32 ns ÷ 1 ms, QEMU icount 기준.) 두 가지가 눈에 띈다. **① time slicing을 끄면 같은 우선순위의 두 번째 태스크는 영원히 못 돈다**(FreeRTOS · Zephyr 모두 hogB=0) — 같은 우선순위 공유는 slice가 있어야 성립한다. **② Zephyr의 tickless 설계**는 ts=0이면 아무 비용도 안 내지만, 1 ms slice를 켜면 매 ms 타이머 재프로그램 비용(약 1100명령)을 낸다. Zephyr 기본값이 slice 20 ms · tick 100 Hz인 데는 이유가 있다.
+
+### 9.4 실칩으로 옮길 때
+
+- 위 숫자는 **명령 수**다. 실제 Cortex-M3에서 사이클은 명령마다 다르다: `stmdb`/`ldmia` 8레지스터는 1 + 8 사이클, 분기는 파이프라인 재충전, 플래시 wait state가 있으면 더. QEMU는 이걸 모델링하지 않는다.
+- 하드웨어 스태킹은 QEMU에서 0명령이지만, 실칩 Cortex-M3/M4는 예외 진입에 **12사이클**(zero wait state 메모리 기준), 예외에서 예외로 바로 넘어가는 **tail-chaining은 6사이클**이다(Arm 문서 수치, B2). SysTick이 PendSV를 pend하면 SysTick이 끝날 때 PendSV가 tail-chain으로 이어지므로, tick 선점 스위치는 "언스태킹 → 재스태킹"을 하지 않는다.
+- 결국 25 MHz M3에서 FreeRTOS lean 스위치는 "60명령 + 진입 12 + 복귀 + 메모리 대기"로 대략 수 µs, 480 MHz H7이면 수백 ns 규모다. 정확한 숫자는 실칩에서 DWT CYCCNT로 재야 한다(QEMU에는 DWT가 없다).
+
+---
+
+## 10. Zephyr는 같은 일을 어떻게 나누나
+
+### 10.1 `z_arm_pendsv` — 결정 없는 PendSV
+
+Zephyr v4.4.2의 Cortex-M 기본 경로(`CONFIG_USE_SWITCH` 미설정)는 `arch/arm/core/cortex_m/swap_helper.S`의 `z_arm_pendsv`다. 이 빌드(Armv7-M, FPU · MPU 가드 · userspace 없음)에서 실제로 조립된 모습:
+
+### 예제 11 — Zephyr ELF의 `z_arm_pendsv` 디스어셈블리
+
+```sh
+limactl shell elinux -- bash -lc 'arm-none-eabi-objdump -d /var/tmp/rtos/C2/z_tsoff/zephyr/zephyr.elf | awk "/<z_arm_pendsv>:/,/^\$/"'
+```
+
+```text
+00000780 <z_arm_pendsv>:
+     780:	490f      	ldr	r1, [pc, #60]	@ (7c0 <z_arm_pendsv+0x40>)
+     782:	688a      	ldr	r2, [r1, #8]
+     784:	f04f 0030 	mov.w	r0, #48	@ 0x30
+     788:	4410      	add	r0, r2
+     78a:	f3ef 8c09 	mrs	ip, PSP
+     78e:	e880 1ff0 	stmia.w	r0, {r4, r5, r6, r7, r8, r9, sl, fp, ip}
+     792:	2020      	movs	r0, #32
+     794:	f380 8812 	msr	BASEPRI_MAX, r0
+     798:	f3bf 8f6f 	isb	sy
+     79c:	4f09      	ldr	r7, [pc, #36]	@ (7c4 <z_arm_pendsv+0x44>)
+     79e:	f04f 6600 	mov.w	r6, #134217728	@ 0x8000000
+     7a2:	694a      	ldr	r2, [r1, #20]
+     7a4:	608a      	str	r2, [r1, #8]
+     7a6:	603e      	str	r6, [r7, #0]
+     7a8:	6f50      	ldr	r0, [r2, #116]	@ 0x74
+     7aa:	2300      	movs	r3, #0
+     7ac:	6753      	str	r3, [r2, #116]	@ 0x74
+     7ae:	f380 8811 	msr	BASEPRI, r0
+     7b2:	f102 0030 	add.w	r0, r2, #48	@ 0x30
+     7b6:	e890 1ff0 	ldmia.w	r0, {r4, r5, r6, r7, r8, r9, sl, fp, ip}
+     7ba:	f38c 8809 	msr	PSP, ip
+     7be:	4770      	bx	lr
+     7c0:	20000398 	.word	0x20000398
+     7c4:	e000ed04 	.word	0xe000ed04
+```
+
+출력에서 볼 것(소스 `swap_helper.S`와 대조):
+
+- `ldr r1, =_kernel` → `ldr r2, [r1, #8]` = `_kernel.cpus[0].current`(나가는 스레드).
+- `add r0, r2, #48` → **`k_thread` 구조체 안**의 `callee_saved` 위치(`_thread_offset_to_callee_saved` = 0x30). `stmia r0, {r4-r11, ip}`로 r4–r11 **과 PSP(ip에 담아)**를 9워드 그대로 스레드 구조체에 쓴다. **태스크 스택에는 하드웨어 프레임만 남는다.** FreeRTOS(스택에 16워드, TCB에는 포인터 하나)와 정반대 배치다.
+- `msr BASEPRI_MAX, 0x20` + `isb`: 리스트 보호 마스크. 소스 주석 "Make the effect of disabling interrupts be realized immediately".
+- `ldr r2, [r1, #20]` = `_kernel.ready_q.cache` → `str r2, [r1, #8]`로 current 교체. **이게 결정의 전부다.** 누구로 바꿀지는 `k_yield()`의 `update_cache()`가 스레드 모드에서 이미 계산해 캐시에 넣어 두었다.
+- `str r6, [r7]` = ICSR에 `0x08000000`(PENDSVCLR)을 써서 PendSV pending을 지운다. 소스 주석: 결정이 끝난 뒤의 새 상태 기준으로 다시 pend된 것만 살리기 위해서다.
+- `ldr r0, [r2, #0x74]` / `str 0` / `msr BASEPRI, r0`: **들어오는 스레드의 BASEPRI**(그 스레드가 `irq_lock()`을 쥔 채로 스위치됐다면 그 마스크)를 복원한다. Zephyr는 "인터럽트 잠금 상태"도 스레드 컨텍스트의 일부로 본다 — `arch_swap(key)`가 `_current->arch.basepri = key`로 저장해 둔 값이다.
+- `ldmia r0, {r4-r11, ip}` → `msr PSP, ip` → `bx lr`: 복원은 FreeRTOS와 같은 구조.
+
+`arch_swap()`(`arch/arm/include/cortex_m/kernel_arch_func.h` 87행)은 이렇다.
+
+```c
+static ALWAYS_INLINE int arch_swap(unsigned int key)
+{
+	/* store off key and return value */
+	_current->arch.basepri = key;
+	_current->arch.swap_return_value = -EAGAIN;
+
+	/* set pending bit to make sure we will take a PendSV exception */
+	SCB->ICSR |= SCB_ICSR_PENDSVSET_Msk;
+
+	/* clear mask or enable all irqs to take a pendsv */
+	irq_unlock(0);
+
+	/* Context switch is performed here. Returning implies the
+	 * thread has been context-switched-in again.
+	 */
+	return _current->arch.swap_return_value;
+}
+```
+
+`swap_return_value`는 "이 스레드를 깨운 쪽이 넘겨 주는 반환값"(예: 세마포어 대기가 성공했는지 타임아웃인지)이다. 스위치를 "함수 호출 하나가 나중에 반환하는 것"으로 다루는 Zephyr의 설계가 보인다.
+
+```svg
+<svg viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg">
+<text x="170" y="20" font-size="13" text-anchor="middle" font-weight="bold">FreeRTOS: 스택에 16워드</text>
+<text x="510" y="20" font-size="13" text-anchor="middle" font-weight="bold">Zephyr: 스레드 구조체에 9워드</text>
+<rect x="30" y="40" width="130" height="30" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="95" y="60" font-size="12" text-anchor="middle">TCB_t</text>
+<text x="95" y="88" font-size="12" text-anchor="middle">pxTopOfStack 하나</text>
+<rect x="190" y="40" width="130" height="60" rx="3" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="255" y="75" font-size="12" text-anchor="middle">r4–r11</text>
+<rect x="190" y="100" width="130" height="60" rx="3" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="255" y="135" font-size="12" text-anchor="middle">HW 프레임 8워드</text>
+<rect x="190" y="160" width="130" height="40" rx="3" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="255" y="185" font-size="12" text-anchor="middle">태스크 데이터</text>
+<text x="255" y="220" font-size="12" text-anchor="middle">태스크 스택</text>
+<line x1="160" y1="55" x2="188" y2="55" stroke="currentColor"/>
+<rect x="370" y="40" width="150" height="90" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="445" y="60" font-size="12" text-anchor="middle">struct k_thread</text>
+<rect x="380" y="70" width="130" height="50" rx="3" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="445" y="91" font-size="12" text-anchor="middle">callee_saved</text>
+<text x="445" y="109" font-size="12" text-anchor="middle">r4–r11 + psp</text>
+<text x="445" y="150" font-size="12" text-anchor="middle">+ arch.basepri</text>
+<rect x="540" y="100" width="130" height="60" rx="3" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="605" y="135" font-size="12" text-anchor="middle">HW 프레임 8워드</text>
+<rect x="540" y="160" width="130" height="40" rx="3" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="605" y="185" font-size="12" text-anchor="middle">스레드 데이터</text>
+<text x="605" y="220" font-size="12" text-anchor="middle">스레드 스택</text>
+<line x1="510" y1="112" x2="538" y2="112" stroke="currentColor"/>
+<text x="340" y="252" font-size="12" text-anchor="middle">FreeRTOS: 결정은 PendSV 안 (bl vTaskSwitchContext)</text>
+<text x="340" y="272" font-size="12" text-anchor="middle">Zephyr: 결정은 PendSV 전, 스레드 모드 (update_cache → ready_q.cache)</text>
+</svg>
+```
+
+그림 7 — 두 커널의 컨텍스트 보관 위치. 선은 "이 값이 이 주소를 가리킨다". FreeRTOS는 TCB의 한 워드가 스택 위 16워드 프레임을 가리키고, Zephyr는 r4–r11과 PSP를 스레드 구조체에 직접 담고 PSP가 스택 위 8워드 하드웨어 프레임을 가리킨다.
+
+### 10.2 두 설계의 장단
+
+| 관점 | FreeRTOS (스택에 저장) | Zephyr (k_thread에 저장) |
+|---|---|---|
+| 스택 사용 | 태스크마다 프레임 64 B | 32 B (sw 절반은 구조체에) |
+| 결정 위치 | PendSV 안, BASEPRI 마스크 아래 | 스레드 모드, 스핀락/irq_lock 아래 — PendSV는 캐시만 읽음 |
+| PendSV 길이 | 19명령 + C 호출 | 22명령, C 호출 없음 |
+| 디버거가 "멈춘 태스크의 레지스터" 찾기 | `pxTopOfStack` + 오프셋 | `k_thread.callee_saved` + PSP의 프레임 |
+| 인터럽트 잠금 상태 | 스위치 후 0으로 (태스크가 크리티컬 섹션 안에서 yield하지 않는다는 전제) | 스레드별 `arch.basepri`로 저장 · 복원 |
+
+### 10.3 `CONFIG_USE_SWITCH` — PendSV 없는 스위치 (v4.4.2에서 선택 사항)
+
+v4.4.2에는 새 경로가 하나 더 있다: `arch/arm/core/cortex_m/arm-m-switch.c`(2025년 ChromiumOS 저작권) + `include/zephyr/arch/arm/arm-m-switch.h`의 `arm_m_switch()`. 이 빌드의 기본값은 꺼짐(`.config`: `# CONFIG_USE_SWITCH is not set`, `CONFIG_USE_SWITCH_SUPPORTED=y`). 켜면 **자발적 스위치(`k_yield`, 블록)는 예외 없이 스레드 모드에서 인라인 어셈블리로** 한다: 나가는 쪽 레지스터를 자기 스택에 push하고 `str sp, [r5]`(switch handle 저장) → `mov sp, r4`(들어오는 스택) → `pop {r0-r12, lr}` → `pop {pc}`. PendSV 진입 · 복귀 비용이 없어 ts=0에서 79명령으로 가장 빠르다(§9). 인터럽트가 일으키는 스위치는 ISR 꼬리에서 스택된 LR을 `arm_m_exc_exit`로 바꿔치기하는 방식으로 처리한다. 주석에 따르면 LDM/STM · IT 블록이 인터럽트로 중간에 멈춘 상태(ICI/IT 비트)를 다른 스레드에서 이어 가면 안 되는 Cortex-M의 성질 때문에 별도 복구 경로(`arm_m_iciit_stub`)까지 둔다 — 컨텍스트 스위치가 PendSV 하나로 깔끔했던 이유의 반대편을 보여 준다.
+
+---
+
+## 11. Cortex-M0 (Armv6-M)에서는 — 같은 일을 명령 30개로
+
+Armv6-M(Cortex-M0/M0+)의 Thumb는 대부분 16비트 명령뿐이고, **STM/LDM은 r0–r7만** 다룰 수 있다. 그래서 `stmdb r0!, {r4-r11}` 한 줄이 불가능하다.
+
+### 예제 12 — 어셈블러가 거절하는 것과 FreeRTOS ARM_CM0 포트의 해법
+
+```asm
+/* try_m0.S — can Armv6-M encode the Cortex-M3 save sequence? */
+    .syntax unified
+    .thumb
+    mrs   r0, psp
+    stmdb r0!, {r4-r11}      /* M3 port: one instruction */
+    ldmia r0!, {r4-r11}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'K=/var/rtoslab/src/FreeRTOS-Kernel; T=/var/rtoslab/templates; O=/var/tmp/rtos/C2/m0; mkdir -p $O
+echo "== cortex-m0"; arm-none-eabi-gcc -mthumb -mcpu=cortex-m0 -c /Users/donh/.rtos_scratch/C2/m0/try_m0.S -o $O/try.o
+echo "== cortex-m3"; arm-none-eabi-gcc -mthumb -mcpu=cortex-m3 -c /Users/donh/.rtos_scratch/C2/m0/try_m0.S -o $O/try3.o && echo ok
+arm-none-eabi-gcc -mthumb -mcpu=cortex-m0 -O2 -Wall -Wextra -DconfigENABLE_MPU=0 -c -I$T/freertos-mps2 -I$T/common -I$K/include -I$K/portable/GCC/ARM_CM0 $K/portable/GCC/ARM_CM0/portasm.c -o $O/portasm.o && arm-none-eabi-objdump -d $O/portasm.o | awk "/<PendSV_Handler>:/,/^\$/"'
+```
+
+```text
+== cortex-m0
+/Users/donh/.rtos_scratch/C2/m0/try_m0.S:5: Error: selected processor does not support `stmdb r0!,{r4-r11}' in Thumb mode
+/Users/donh/.rtos_scratch/C2/m0/try_m0.S:6: Error: cannot honor width suffix -- `ldmia r0!,{r4-r11}'
+== cortex-m3
+ok
+00000080 <PendSV_Handler>:
+  80:	f3ef 8009 	mrs	r0, PSP
+  84:	4a16      	ldr	r2, [pc, #88]	@ (e0 <stacking_used_msp+0x10>)
+  86:	6811      	ldr	r1, [r2, #0]
+  88:	3824      	subs	r0, #36	@ 0x24
+  8a:	6008      	str	r0, [r1, #0]
+  8c:	4673      	mov	r3, lr
+  8e:	c0f8      	stmia	r0!, {r3, r4, r5, r6, r7}
+  90:	4644      	mov	r4, r8
+  92:	464d      	mov	r5, r9
+  94:	4656      	mov	r6, sl
+  96:	465f      	mov	r7, fp
+  98:	c0f0      	stmia	r0!, {r4, r5, r6, r7}
+  9a:	b672      	cpsid	i
+  9c:	f7ff fffe 	bl	0 <vTaskSwitchContext>
+  a0:	b662      	cpsie	i
+  a2:	4a0f      	ldr	r2, [pc, #60]	@ (e0 <stacking_used_msp+0x10>)
+  a4:	6811      	ldr	r1, [r2, #0]
+  a6:	6808      	ldr	r0, [r1, #0]
+  a8:	3014      	adds	r0, #20
+  aa:	c8f0      	ldmia	r0!, {r4, r5, r6, r7}
+  ac:	46a0      	mov	r8, r4
+  ae:	46a9      	mov	r9, r5
+  b0:	46b2      	mov	sl, r6
+  b2:	46bb      	mov	fp, r7
+  b4:	f380 8809 	msr	PSP, r0
+  b8:	3824      	subs	r0, #36	@ 0x24
+  ba:	c8f8      	ldmia	r0!, {r3, r4, r5, r6, r7}
+  bc:	4718      	bx	r3
+  be:	46c0      	nop			@ (mov r8, r8)
+```
+
+(빌드만 했다 — `.o`의 `bl 0 <vTaskSwitchContext>`는 아직 링크 전이라 0이다. 오류 두 줄과 "ok"의 출력 순서는 stderr/stdout 섞임을 정리했다.) V11.3.2의 ARM_CM0 포트는 `port.c` + `portasm.c`로 나뉘어 있고, `configENABLE_MPU`를 반드시 정의하게 되어 있어(`portmacro.h` 49행의 `#error`) 명령줄에서 0을 줬다.
+
+출력에서 볼 것 — M3 포트(19명령)와의 차이:
+
+- **30명령.** `stmdb` 대신 `subs r0, #36`으로 자리를 먼저 만들고 `stmia`(증가 방향만 있다)로 두 번에 나눠 쓴다. r8–r11은 `mov`로 r4–r7에 옮겨서 저장하고, 복원도 거꾸로 `mov`.
+- **소프트웨어 프레임이 9워드(36 B)**: r4–r11에 더해 **LR(EXC_RETURN)도 태스크 스택에 저장**한다(`mov r3, lr` → `stmia {r3-r7}`). 그래서 MSP에 `{r3, r14}`를 따로 맡기지 않는다. 복귀는 `bx r3`.
+- **BASEPRI가 없다.** Armv6-M에는 BASEPRI 레지스터가 없어서 `cpsid i`/`cpsie i`(PRIMASK — 전부 막기)로 `vTaskSwitchContext`를 감싼다. "RTOS를 안 쓰는 최고 우선순위 인터럽트는 스위치 중에도 돈다"는 M3의 zero-latency 보장이 M0에서는 성립하지 않는다(B3).
+- Zephyr의 `swap_helper.S`에도 똑같은 모양의 `CONFIG_ARMV6_M_ARMV8_M_BASELINE` 분기(`stmea r0!, {r4-r7}` → `mov r3, r8` …)가 있다(§10.1 소스).
+
+---
+
+## 12. RTOS 커널 안에서는 무슨 일이 일어나나
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10" y="20" width="200" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="42" font-size="12" text-anchor="middle">taskYIELD() / 블록 API</text>
+<rect x="10" y="70" width="200" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="92" font-size="12" text-anchor="middle">ISR: portYIELD_FROM_ISR</text>
+<rect x="10" y="120" width="200" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110" y="142" font-size="12" text-anchor="middle">SysTick: xTaskIncrementTick</text>
+<rect x="250" y="70" width="170" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="335" y="92" font-size="12" text-anchor="middle">ICSR.PENDSVSET = 1</text>
+<line x1="210" y1="37" x2="248" y2="80" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="210" y1="87" x2="248" y2="87" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="210" y1="137" x2="248" y2="95" stroke="currentColor" marker-end="url(#ah6)"/>
+<rect x="460" y="20" width="210" height="34" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="565" y="42" font-size="12" text-anchor="middle">다른 ISR 다 끝날 때까지 대기</text>
+<line x1="420" y1="80" x2="458" y2="45" stroke="currentColor" marker-end="url(#ah6)"/>
+<rect x="460" y="70" width="210" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="565" y="92" font-size="12" text-anchor="middle">xPortPendSVHandler (port.c)</text>
+<line x1="565" y1="54" x2="565" y2="68" stroke="currentColor" marker-end="url(#ah6)"/>
+<rect x="460" y="130" width="210" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="565" y="152" font-size="12" text-anchor="middle">vTaskSwitchContext (tasks.c)</text>
+<line x1="565" y1="104" x2="565" y2="128" stroke="currentColor" marker-end="url(#ah6)"/>
+<rect x="460" y="190" width="210" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="565" y="212" font-size="11" text-anchor="middle">taskCHECK_FOR_STACK_OVERFLOW</text>
+<line x1="565" y1="164" x2="565" y2="188" stroke="currentColor" marker-end="url(#ah6)"/>
+<rect x="460" y="250" width="210" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="565" y="272" font-size="12" text-anchor="middle">taskSELECT_HIGHEST_PRIORITY</text>
+<line x1="565" y1="224" x2="565" y2="248" stroke="currentColor" marker-end="url(#ah6)"/>
+<rect x="200" y="190" width="220" height="34" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="310" y="212" font-size="12" text-anchor="middle">pxCurrentTCB = 새 태스크</text>
+<line x1="458" y1="267" x2="422" y2="215" stroke="currentColor" marker-end="url(#ah6)"/>
+<rect x="200" y="250" width="220" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="310" y="272" font-size="12" text-anchor="middle">복원 → bx lr (EXC_RETURN)</text>
+<line x1="310" y1="224" x2="310" y2="248" stroke="currentColor" marker-end="url(#ah6)"/>
+</svg>
+```
+
+그림 8 — FreeRTOS에서 "스위치가 필요하다"는 판단부터 새 태스크가 도는 순간까지의 파일 · 함수 경로. 세 출발점(태스크 API, ISR, tick)이 모두 PENDSVSET 한 비트로 모인다.
+
+| 단계 | FreeRTOS V11.3.2 | Zephyr v4.4.2 | 더 깊이 |
+|---|---|---|---|
+| 스위치 요청 | `portYIELD()`(`portmacro.h` 85행) = PENDSVSET + `dsb`/`isb`, `portYIELD_FROM_ISR(x)`, `xPortSysTickHandler()` | `arch_swap()`(`kernel_arch_func.h`), `z_arm_int_exit()`(`exc_exit.c` — `ready_q.cache != current`이면 PENDSVSET) | B4, E1 |
+| 다음 태스크 결정 | `vTaskSwitchContext()` → `taskSELECT_HIGHEST_PRIORITY_TASK()` (PendSV 안) | `update_cache()` → `next_up()` (스레드 모드, `kernel/sched.c`) | C1 |
+| 컨텍스트 저장 · 복원 | `xPortPendSVHandler()`(`portable/GCC/ARM_CM3/port.c` 455행) | `z_arm_pendsv`(`arch/arm/core/cortex_m/swap_helper.S`) 또는 `arm_m_switch()`(`USE_SWITCH`) | 이 노트 |
+| 저장 위치 | 태스크 스택 16워드, `TCB_t.pxTopOfStack` | `k_thread.callee_saved`(9워드) + 스택의 HW 프레임 | 이 노트 |
+| 첫 태스크 시작 | `prvPortStartFirstTask()` → `svc 0` → `vPortSVCHandler()` | `arch_switch_to_main_thread()` 계열(`ARCH_HAS_CUSTOM_SWAP_TO_MAIN`) | B4 |
+| 초기 프레임 | `pxPortInitialiseStack()` | `arch_new_thread()`(`arch/arm/core/cortex_m/thread.c`) — 진입점 `z_thread_entry` | A4 |
+| 스위치 시 검사 | `taskCHECK_FOR_STACK_OVERFLOW()`(`include/stack_macros.h`) | `CONFIG_STACK_SENTINEL`, MPU 스택 가드(`z_arm_configure_dynamic_mpu_regions`) | F3 |
+| FPU | ARM_CM4F: `tst r14, #0x10` → `vstmdbeq r0!, {s16-s31}` | `CONFIG_FPU_SHARING`: `vstmia r0, {s16-s31}` → `preempt_float` | B6 |
+| time slice | tick에서 같은 우선순위 다른 태스크가 있으면 스위치 (`configUSE_TIME_SLICING`) | `z_reset_time_slice()`가 스위치마다 slice 타이머 재설정 (`kernel/timeslicing.c`) | C5 |
+
+---
+
+## 13. 실무에서 다시 보기
+
+### 13.1 드론 비행 제어기 — "rate loop 태스크가 가끔 1 µs 늦다"
+
+예를 들어 STM32H7 FC에서 IMU DMA 완료 ISR이 `vTaskNotifyGiveFromISR()` + `portYIELD_FROM_ISR()`로 rate loop 태스크를 깨운다. ISR이 끝나면 PendSV가 tail-chain으로 이어지고, PendSV가 `vTaskSwitchContext()`를 돈 뒤 rate 태스크가 시작된다. 이 경로의 고정 비용은 §9의 숫자(lean 60명령 + 진입/tail-chain)이고, **디버그 빌드는 +44명령**이다. "디버그 빌드에서 잰 지터로 양산 마진을 판단"하는 실수를 피하려면 `configCHECK_FOR_STACK_OVERFLOW` · `configGENERATE_RUN_TIME_STATS`를 측정 빌드와 양산 빌드에서 같게 맞춘다. 또 FPU를 쓰는 태스크(자세 제어는 거의 다 float)라면 M4F/M7 포트의 lazy stacking 때문에 스위치 비용이 태스크마다 달라진다(B6).
+
+### 13.2 로봇 관절 모터 컨트롤러 — 20 kHz FOC는 태스크로 만들지 않는다
+
+50 µs마다 전류 루프를 돌려야 하는데 스위치가 왕복 수 µs라면, 전류 루프를 태스크로 두는 순간 예산의 10% 가까이를 스위치에 쓴다. 그래서 FOC는 configMAX_SYSCALL보다 **높은** 우선순위 ISR에서 직접 돌리고(§4.2의 9번 명령이 막지 않는 영역), 속도 · 위치 루프와 CAN 처리만 RTOS 태스크로 둔다. "BASEPRI 마스크 위의 인터럽트는 컨텍스트 스위치 중에도 지연되지 않는다"를 소스 줄로 설명할 수 있으면 이 설계를 면접에서 방어할 수 있다.
+
+### 13.3 센서 허브 MCU — HardFault 덤프가 "PC = 0x2000xxxx"
+
+현장에서 올라온 크래시 로그가 §6.2와 같은 모양(PC가 RAM, xPSR = 0, INVSTATE)이면 가장 먼저 의심할 것은 **스택 프레임 정렬 붕괴**다: 태스크 스택 overflow가 이웃 TCB의 `pxTopOfStack`을 덮었거나, 직접 짠 포트/부트로더 점프 코드가 r4–r11 개수를 잘못 맞췄거나. 확인 순서: ① 덤프된 PSP 주변을 16워드 단위로 보고 xPSR 자리에 `0x01000000` 비슷한 값이 몇 워드 어긋나 있는지 → ② 그 태스크의 `uxTaskGetStackHighWaterMark()` 기록 → ③ 이웃 TCB 값 검증(M1).
+
+### 13.4 Don의 SSD 펌웨어 — 왜 거기엔 컨텍스트 스위치가 없었나
+
+SSD 실행부는 run-to-completion이라 핸들러가 끝날 때 r4–r11이 "아무도 다시 쓸 필요 없는" 상태였다. 스위치가 필요 없으니 스택도 코어당 하나였다. RTOS로 바꾸면 태스크마다 스택(최소 프레임 64 B + 함수 깊이)과 스위치당 수십~수백 명령을 낸다. 대신 얻는 것은 "긴 작업을 중간에 멈추고 급한 일을 먼저"다. A7에서 이 저울질을 숫자로 했고, 이 노트는 그 숫자의 출처를 명령 단위로 보여 줬다.
+
+---
+
+## 14. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| PendSV/SysTick 우선순위를 최저로 안 내림 | ISR 도중 태스크로 돌아감, 간헐적 리스트 손상 | 리셋 기본 우선순위 0(최고) | SHPR3 = 0xFF…(FreeRTOS는 `xPortStartScheduler()`가 함) |
+| 초기 프레임 xPSR에 T 비트 없음 | 첫 스위치에서 INVSTATE HardFault | `0x01000000` 누락 | `portINITIAL_XPSR` 그대로 |
+| 초기 프레임 PC에 Thumb 비트 그대로 | 실칩에서 UNPREDICTABLE, QEMU는 경고만 | 함수 포인터 비트 0 = 1 | `& ~1u` (§8.4) |
+| `stmdb`/`ldmia` 레지스터 개수 불일치 | PC = RAM 주소, xPSR = 0 | 프레임 32 B 어긋남 | 저장 · 복원 목록을 대칭으로 (§6.2) |
+| `msr psp` 누락/잘못된 순서 | 크래시 없이 값 오염, `pxCurrentTCB` ≠ 실제 태스크 | 옛 PSP로 복귀 | §6.3 |
+| 핸들러 안 C 호출 전 LR 미보존 | UNALIGNED/INVSTATE, Handler 모드에 갇힘 | `bl`이 EXC_RETURN 덮어씀 | `push {r3, lr}` 짝 (§6.4) |
+| BASEPRI 마스크 해제 누락 | 한 태스크만 돎, tick 정지, 폴트 없음 | 0x20 마스크 잔존 | §6.5, 디버거로 BASEPRI 확인 |
+| 스택 크기에 프레임 64 B 미포함 | 스위치 순간 overflow 훅/이웃 TCB 손상 | 함수 깊이만 계산 | 예산 = 깊이 + 64 B(+FPU 72 B) (§7) |
+| PendSV를 naked 아닌 함수로 작성 | 진입 즉시 MSP push, 순서 붕괴 | 컴파일러 프롤로그 | `__attribute__((naked))` |
+| 디버그 config로 스위치 지연 측정 | 양산보다 70% 느린 수치 | 스택 검사 + 런타임 통계 | 측정 빌드 설정 명시 (§9) |
+
+---
+
+## 15. 면접에서 이렇게 말한다
+
+**Q.** Walk me through a context switch on a Cortex-M3/M4 running FreeRTOS, step by step.
+
+**A.** 태스크 A가 yield하거나 ISR · tick이 PENDSVSET을 세운다. PendSV는 최저 우선순위라 다른 ISR이 다 끝난 뒤 들어간다. 하드웨어가 A의 PSP에 8워드를 쌓고, 핸들러가 `mrs r0, psp` → `stmdb r0!, {r4-r11}` → 그 주소를 A의 TCB 첫 멤버에 저장. LR(EXC_RETURN)과 r3을 MSP에 맡기고 BASEPRI로 커널 인터럽트를 막은 채 `vTaskSwitchContext()`가 CLZ 비트맵으로 다음 태스크를 고른다. 마스크를 풀고 B의 TCB에서 꼭대기 주소를 꺼내 `ldmia`로 r4–r11 복원, `msr psp`, `bx lr` — EXC_RETURN이므로 하드웨어가 B의 8워드를 꺼내 B의 PC로 돌아간다.
+
+> "A switch starts when something sets PENDSVSET — a yield, an ISR that woke a higher-priority task, or the tick. PendSV is configured as the lowest-priority exception, so it runs only after every other ISR has finished, possibly by tail-chaining. On entry the hardware has already pushed r0–r3, r12, LR, PC and xPSR onto the outgoing task's process stack. The handler reads PSP, pushes the callee-saved r4–r11 below that frame with one STMDB, and stores the resulting stack pointer into the first word of the current TCB — that single pointer is the whole saved context. It then saves LR, which holds EXC_RETURN, raises BASEPRI to configMAX_SYSCALL_INTERRUPT_PRIORITY so ISRs that use the kernel API can't touch the ready lists, and calls vTaskSwitchContext, which runs the stack-overflow check and picks the highest-priority ready task using a CLZ on the priority bitmap and a round-robin step in that list. Back in assembly it clears BASEPRI, loads the new TCB's saved stack pointer, pops r4–r11, writes PSP, and executes BX LR. Because LR is 0xFFFFFFFD the core performs an exception return: it unstacks the incoming task's hardware frame from the new PSP and resumes at that task's PC in thread mode. On the M3 port that's 19 instructions in the handler; I measured about 60 instructions per switch end-to-end in a lean config."
+
+**꼬리 질문**: "Why not do the switch directly inside SysTick?" → 다른 ISR을 선점한 상태에서 태스크로 돌아가게 되므로(중첩 ISR 위에서 스택을 바꾸면 그 ISR의 프레임 위로 복귀). PendSV는 그걸 "모든 ISR이 끝난 뒤"로 미룬다(B4).
+
+**Q.** Why does the hardware save only half the registers, and who saves the other half?
+
+**A.** 하드웨어는 AAPCS의 caller-saved 집합(r0–r3, r12, LR, PC, xPSR)을 쌓는다 — 그래야 ISR을 C 함수로 쓸 수 있다. r4–r11은 C 함수가 쓰면 스스로 보존하므로 평범한 ISR에는 필요 없다. 컨텍스트 스위치만이 "다른 태스크의" r4–r11을 되돌려 놓아야 하므로 RTOS 포트가 어셈블리로 직접 저장한다.
+
+> "The exception entry sequence stacks exactly the AAPCS caller-saved registers, which is what makes it possible to write an ISR as a plain C function — any callee-saved register the C code touches is preserved by the compiler itself. A context switch is the one place where we return into different code with a different set of callee-saved values, so the RTOS port saves and restores r4–r11 in assembly. That's also why the PendSV handler has to be a naked function."
+
+**Q.** What happens if you forget to preserve LR around the call to vTaskSwitchContext?
+
+**A.** LR에는 EXC_RETURN이 있다. `bl`이 덮어쓰면 `bx lr`은 예외 복귀가 아니라 평범한 점프가 된다. 직접 해 보니 Handler 모드(IPSR 14)인 채로 `vTaskSwitchContext` 한가운데로 점프했다가 결국 INVSTATE로 죽었다. r3까지 안 지키면 새 TCB 주소가 망가져 LDM 정렬 폴트로 즉시 죽는다.
+
+> "LR holds the EXC_RETURN magic value. BL overwrites it with a normal return address, so the final BX LR becomes an ordinary branch instead of an exception return. I actually tried it on QEMU: the core stayed in handler mode with IPSR 14, jumped into the middle of vTaskSwitchContext, and eventually took an INVSTATE fault. If you also lose r3 — the address of pxCurrentTCB, which is caller-saved — you fault immediately on an unaligned LDM. That's why the port pushes {r3, lr} as a pair, which also keeps the stack 8-byte aligned for the C call."
+
+**Q.** Why is BASEPRI raised during vTaskSwitchContext, and why not just disable all interrupts?
+
+**A.** PendSV는 최저 우선순위라 아무 ISR이나 끼어들 수 있다. FromISR API를 쓰는 ISR은 ready list를 고치므로, 결정 도중엔 그들만 막는다. BASEPRI는 임계값 이상만 막아서 RTOS를 안 쓰는 고우선순위 ISR(모터 전류 루프 등)은 계속 지연 없이 돈다. PRIMASK(cpsid i)는 전부 막는다 — M0에는 BASEPRI가 없어서 그렇게 한다.
+
+> "Because PendSV runs at the lowest priority, any interrupt can preempt it, and interrupts that call FromISR APIs modify the same ready lists vTaskSwitchContext is walking. BASEPRI masks only priorities at or below configMAX_SYSCALL_INTERRUPT_PRIORITY, so interrupts above that threshold — the ones that never call the kernel, like a 20 kHz FOC current loop — still run with zero added latency. Disabling everything with PRIMASK would add the whole scheduler decision to every interrupt's worst-case latency. The Cortex-M0 port has to do exactly that, since Armv6-M has no BASEPRI."
+
+**Q.** How do FreeRTOS and Zephyr differ in their Cortex-M context switch?
+
+**A.** FreeRTOS는 r4–r11을 태스크 스택에 쌓고 TCB에는 포인터 하나, 결정은 PendSV 안에서 C로. Zephyr는 r4–r11과 PSP를 `k_thread.callee_saved`에 넣고, 결정은 스레드 모드에서 미리 해 `ready_q.cache`에 둔다 — PendSV는 캐시만 읽는다. 인터럽트 잠금 상태(BASEPRI)도 스레드별로 저장 · 복원한다. v4.4는 PendSV 없이 스레드 모드에서 바로 바꾸는 `CONFIG_USE_SWITCH` 경로도 있다.
+
+> "FreeRTOS stores the callee-saved registers on the task's own stack and keeps a single stack pointer in the TCB, and it makes the scheduling decision inside PendSV by calling into C. Zephyr stores r4–r11 plus PSP inside the k_thread structure, so the stack only holds the hardware frame, and it makes the decision before pending PendSV, in thread mode, caching the next thread in the ready queue — its PendSV just swaps in the cached thread. Zephyr also saves each thread's BASEPRI so a thread can be switched out while holding irq_lock. Zephyr 4.4 additionally has an optional CONFIG_USE_SWITCH path that performs voluntary switches entirely in thread mode without taking PendSV. On the same QEMU board I measured roughly 60 instructions per switch for lean FreeRTOS and 83 for Zephyr with time slicing off — but over 500 with Zephyr's time slicing on, because every switch reprograms the slice timer."
+
+**Q.** A HardFault dump shows PC = 0x200013e0 and xPSR = 0. What do you suspect?
+
+**A.** PC가 RAM이고 T 비트가 0 → 예외 복귀가 프레임이 아닌 데이터를 꺼냈다. 스택 프레임 정렬 붕괴 — 스택 overflow로 TCB의 저장 포인터가 깨졌거나, 포트/점프 코드의 저장 · 복원 레지스터 수가 안 맞는다. PSP 주변 메모리에서 `0x01000000` 모양 xPSR이 어디 있는지 보면 몇 워드 어긋났는지 나온다.
+
+> "A RAM address in PC together with a zero xPSR — so the Thumb bit is clear and CFSR will show INVSTATE — means an exception return unstacked something that wasn't a real exception frame. I'd suspect the saved stack pointer for that task: either a stack overflow corrupted the TCB or the frame, or a hand-written switch or bootloader jump pushes and pops a different number of registers. I'd dump memory around PSP in 16-word chunks and look for where a plausible xPSR like 0x01000000 and a code-range PC actually sit; the offset tells you how many words the frame is misaligned by. I reproduced exactly this by deleting the STMDB line from the FreeRTOS port."
+
+**Q.** What does the context switch cost and where does the time go?
+
+**A.** 이 보드에서 직접 잰 값: 레지스터 저장 · 복원 어셈블리는 11~22명령으로 어디서나 작다. 비용은 결정과 장부다 — FreeRTOS lean 60, 디버그 옵션 켜면 104(스택 검사 21 + 런타임 통계 25), Zephyr time slice 켜면 523. 실칩은 여기에 예외 진입 12사이클, tail-chain 6사이클, 메모리 대기가 더해진다.
+
+> "The register save and restore is cheap everywhere — 11 instructions in my 80-line switcher, 19 in FreeRTOS's handler, 22 in Zephyr's. The real cost is the scheduling decision and bookkeeping around it. With an instruction-level trace in QEMU I got 60 instructions per switch for lean FreeRTOS, 104 with stack-overflow checking and run-time stats enabled, and 523 for Zephyr with time slicing on, where 434 of those instructions reprogram the slice timeout. On silicon you add 12 cycles of exception entry, tail-chaining at 6 cycles, and memory wait states, so I always measure on the target with DWT CYCCNT and with the production configuration."
+
+**Q.** Could you write a minimal context switcher yourself?
+
+**A.** 했다: TCB = {sp, next}, 태스크 생성 시 가짜 16워드 프레임(xPSR = 0x01000000, PC는 Thumb 비트 지움), SVC로 첫 태스크(EXC_RETURN을 0xFFFFFFFD로), PendSV 11명령(저장 · `cur = cur->next` · 복원), SysTick이 PENDSVSET. 75줄. C 호출이 없어서 LR 보존이, ISR이 리스트를 안 건드려서 BASEPRI가 필요 없다 — 기능을 더할 때마다 FreeRTOS의 줄이 하나씩 돌아온다.
+
+> "Yes — I wrote one in about 75 lines for the same QEMU board. Each TCB is just a stack pointer and a next pointer forming a ring. Task creation builds a fake 16-word frame with xPSR 0x01000000 and the entry address with the Thumb bit cleared. An SVC handler pops the first frame and returns with EXC_RETURN forced to 0xFFFFFFFD. PendSV is 11 instructions: save r4–r11 under PSP, store SP in the TCB, advance to the next TCB, load its SP, restore, write PSP, BX LR. SysTick only sets PENDSVSET. It needs no LR save because it never calls C and no BASEPRI because no ISR touches the ring — as soon as you add blocking or ISR-driven wakeups, those lines from the FreeRTOS port come back. It switches in 20 instructions including the yield loop, and it survived a register-integrity test under 10 kHz preemption."
+
+---
+
+## 16. 직접 해보기
+
+1. **개념**: 태스크 B가 한 번도 실행되지 않은 상태에서 A → B 스위치가 일어날 때, B의 r4–r11에는 어떤 값이 들어가나? 그 값이 문제가 되지 않는 이유는? 정답/힌트: `pxPortInitialiseStack()`이 비워 둔 칸(overflow 검사가 켜져 있으면 `0xa5a5a5a5`). B의 함수는 아직 아무 callee-saved 레지스터도 쓰지 않았으니 어떤 값이든 상관없다 — §6.3 출력이 그 값을 보여 준다.
+2. **개념**: `stmdb sp!, {r3, r14}` 대신 `push {r14}` 하나만 쓰면 무엇이 문제인가(두 가지)? 정답/힌트: r3이 C 호출로 깨진다(§6.4), 그리고 4바이트만 push하면 MSP가 8바이트 정렬을 잃어 AAPCS를 어긴다.
+3. **코드**: mini 커널에 우선순위 2단계를 넣어라 — 높은 우선순위 태스크가 ready면 항상 그쪽으로. 결정 코드를 C 함수로 빼면 PendSV에 무엇을 추가해야 하나? 정답/힌트: `bl` 전후로 FreeRTOS처럼 `push {r3, lr}` / `pop {r3, lr}` 짝(LR · 주소 레지스터 보존 + 8바이트 정렬)을 넣고, 호출 뒤 새 `mini_cur`를 다시 읽는 `ldr`을 추가한다. ISR이 ready 상태를 바꾸게 되면 BASEPRI 마스크도.
+4. **코드**: mini 커널의 `mini_create()`에서 xPSR을 `0`으로 바꿔 돌리고, HardFault 출력의 CFSR을 해독하라. 정답/힌트: 첫 복귀에서 CFSR = `0x20000`(INVSTATE), PC = 태스크 함수 시작 주소.
+5. **측정**: 예제 9의 FreeRTOS 벤치를 태스크 3개, 8개로 늘려 스위치당 명령 수가 변하는지 재라. 정답/힌트: 같은 우선순위 리스트 안에서 한 칸 전진이므로 거의 안 변한다(CLZ + 리스트 전진은 O(1)). C1에서 이유를 자료구조로 본다.
+6. **측정**: Zephyr 벤치를 `CONFIG_TIMESLICE_SIZE=0`(slice 크기 0)으로 빌드해 ts=1인데도 비용이 줄어드는지 보라. 정답/힌트: `z_reset_time_slice()`는 `slice_size != 0`일 때만 `z_add_timeout()`을 부른다 — abort 쪽 비용은 남는다. 직접 재서 확인할 것(이 노트에서는 재지 않았다).
+7. **추적**: `tools/trace.sh`로 FreeRTOS ARM_CM4F 포트를 mps2-an386(M4F)에 올려(템플릿을 자기 폴더로 복사해 `-mcpu=cortex-m4 -mfloat-abi=hard`) float을 쓰는 태스크와 안 쓰는 태스크의 스위치 명령 수를 비교하라. 정답/힌트: `tst r14, #0x10`의 결과에 따라 `vstmdbeq {s16-s31}`가 실행되느냐가 갈린다(B6).
+
+---
+
+## 17. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| context switch | 컨텍스트 스위치 | 실행 중인 태스크의 CPU 상태를 저장하고 다른 태스크의 상태를 복원해 이어 돌리는 것 |
+| PendSV | Pendable Service Call 예외 | 소프트웨어가 pending 비트로 요청하는 예외. 최저 우선순위로 두어 스위치를 "다른 ISR이 다 끝난 뒤"로 미룬다 |
+| PENDSVSET | ICSR 비트 28 | 1을 쓰면 PendSV가 pending된다. `portYIELD()`의 본체 |
+| EXC_RETURN | 예외 복귀 값 | 예외 진입 시 LR에 들어가는 `0xFFFFFFxx` 값. `bx`로 받으면 CPU가 예외 복귀를 한다 (`0xFFFFFFFD` = Thread · PSP) |
+| PSP / MSP | Process / Main Stack Pointer | 태스크는 PSP, 예외 · 커널은 MSP를 쓴다. PendSV 안에서 `sp`는 MSP다 |
+| callee-saved | 피호출자 보존 레지스터 | AAPCS에서 함수가 쓰면 스스로 복원해야 하는 r4–r11. 스위치에서는 RTOS가 저장 |
+| caller-saved | 호출자 보존 레지스터 | r0–r3, r12 (+LR). 예외 진입 때 하드웨어가 자동 저장 |
+| AAPCS | Arm 프로시저 호출 표준 | 인자 · 반환값 · 레지스터 보존 · 8바이트 스택 정렬 규칙 |
+| pxTopOfStack | TCB 첫 멤버 | 멈춘 태스크의 저장된 스택 꼭대기 주소. 어셈블리가 오프셋 0으로 읽는다 |
+| naked function | 맨 함수 | 컴파일러가 프롤로그 · 에필로그를 붙이지 않는 함수 (`__attribute__((naked))`) |
+| BASEPRI | 우선순위 마스크 레지스터 | 설정값 이상(숫자)인 우선순위의 인터럽트만 막는다. Armv7-M 이상 |
+| PRIMASK | 전역 인터럽트 마스크 | `cpsid i`로 세우면 NMI · HardFault 외 전부 막는다. M0의 유일한 선택지 |
+| literal pool | 리터럴 풀 | 함수 끝의 상수 저장소. `ldr rX, =값`이 PC 상대 로드로 바뀐다 |
+| tail-chaining | 꼬리 물기 | 한 예외가 끝나자마자 pending된 다음 예외로 언스태킹 없이 넘어가는 것(M3/M4 6사이클) |
+| INVSTATE | UsageFault 원인 비트 | xPSR.T = 0으로 실행하려 함. 깨진 프레임 복귀의 전형적 지문 |
+| `_kernel.ready_q.cache` | Zephyr 다음 스레드 캐시 | 스레드 모드에서 미리 계산한 "다음에 돌 스레드". `z_arm_pendsv`가 이것만 읽는다 |
+| `callee_saved` | Zephyr 스레드 컨텍스트 | `struct k_thread` 안의 r4–r11 + PSP 9워드 |
+| USE_SWITCH | Zephyr `arch_switch` 방식 | PendSV 없이 스레드 모드에서 스택을 바꾸는 새 Cortex-M 경로 (v4.4.2에서 선택 사항) |
+| icount | QEMU 명령 카운트 모드 | 명령 1개 = 고정 가상 시간(여기선 32 ns). 결정적 타이밍 측정용 |
+
+---
+
+## 18. 요약 & 체크리스트
+
+컨텍스트 스위치는 "하드웨어가 caller-saved 절반을 쌓고, 소프트웨어가 callee-saved 절반을 쌓고, 그 꼭대기 주소 하나를 TCB에 적은 뒤, 다른 TCB의 주소로 같은 일을 거꾸로 하고, EXC_RETURN으로 하드웨어에게 나머지를 맡기는 것"이다. FreeRTOS ARM_CM3의 19명령 중 본질은 7개(`mrs psp` · `stmdb` · `str` · `ldr` · `ldmia` · `msr psp` · `bx lr`)이고, 나머지는 C 호출(LR · r3 보존), ISR과의 경쟁(BASEPRI), 보수적 배리어(`isb`)의 대가다. 직접 지워 보면 각 줄의 부재가 서로 다른 지문 — INVSTATE HardFault, 조용한 레지스터 오염, UNALIGNED 폴트, Handler 모드 탈주, tick 정지 — 을 남긴다. 75줄로 직접 짠 스위처는 11명령 PendSV로 같은 투명성을 보였고, 같은 보드에서 잰 스위치 1회 비용(mini 20, FreeRTOS lean 60 / 기본 104, Zephyr 83 / time slice 시 523명령)은 비용이 저장 · 복원이 아니라 **결정과 장부**에 있음을 보여 줬다.
+
+- [ ] Cortex-M3 16워드 프레임을 낮은 주소부터 순서대로 쓰고, 어느 절반을 누가 저장하는지 말할 수 있다
+- [ ] `xPortPendSVHandler` 19명령을 보지 않고 쓰고, 각 줄이 왜 있는지 한 문장씩 말할 수 있다
+- [ ] `pxTopOfStack`이 TCB 첫 멤버여야 하는 이유를 어셈블리 한 줄로 설명할 수 있다
+- [ ] EXC_RETURN `0xFFFFFFF9` vs `0xFFFFFFFD`와 SVC 핸들러의 `orr r14, #0xd`를 설명할 수 있다
+- [ ] gdb로 QEMU에서 PendSV를 멈추고 `$psp` · `x/16wx`로 나가는 · 들어오는 태스크 프레임을 읽을 수 있다
+- [ ] "PC = RAM, xPSR = 0"과 "BASEPRI ≠ 0인데 tick 정지"를 보고 빠진 줄을 짚을 수 있다
+- [ ] BASEPRI가 왜 PRIMASK가 아닌지, M0 포트는 왜 `cpsid i`인지 말할 수 있다
+- [ ] 스택 overflow 검사가 스위치 안에서 돌고, 스택 예산에 프레임 64 B를 더해야 하는 이유를 안다
+- [ ] 80줄 이내 round-robin 스위처를 처음부터 짜고 초기 프레임의 xPSR · PC 함정을 피할 수 있다
+- [ ] FreeRTOS와 Zephyr의 저장 위치 · 결정 위치 차이를 그림으로 그릴 수 있다
+- [ ] Zephyr time slicing이 yield 비용을 6배로 만드는 경로(`z_reset_time_slice` → `sys_clock_set_timeout`)를 안다
+- [ ] 면접 질문 "Walk me through a context switch"에 2분 영어 답변을 할 수 있다
+
+---
+
+## Bare-Metal 노트와의 관계
+
+| BM ID | BM 주제 | 이 노트의 해당 절 | Bare-Metal 쪽에 남길 내용 |
+|---|---|---|---|
+| BM C2 | Thumb-2 어셈블리 읽기 — LDR · STR · B · BL · CMP | §2.1 명령 표, §3 예제 2(디스어셈블리 한 줄씩), §4 표 | 데이터 처리 · 시프트 · 비트필드 · 곱셈 명령 전체, 컴파일러 `-O0`/`-O2` 출력 비교로 C 코드 검증 |
+| BM C2 | IT 블록 · 조건 플래그 | §2.1(`tst`/`ite eq`/`mrseq`, `cmp`/`bne`/`blo`, `pop`이 플래그 보존) | IT 블록 규칙(최대 4개, 분기 제약), 조건 코드 전체 표 |
+| BM C2 | 디스어셈블리 · 리터럴 풀 읽기 | §2.2, 예제 2의 PC 상대 주소 계산, 예제 12(M0 인코딩 한계) | 리터럴 풀 배치(`.ltorg`) 실패 오류, `-mslow-flash-data`/`movw`+`movt` 대안 |
+| BM C1 · C4 (참고) | 프로그래머 모델 · 예외 진입 | §1, §4 전제 — 주인은 RTOS B1 · B2 | (RTOS B1 · B2 노트 링크) |
+
+---
+
+## 참고 자료
+
+- FreeRTOS Kernel V11.3.2 소스 (랩 `/var/rtoslab/src/FreeRTOS-Kernel`): `portable/GCC/ARM_CM3/port.c`(`xPortPendSVHandler`, `vPortSVCHandler`, `prvPortStartFirstTask`, `pxPortInitialiseStack`), `portable/GCC/ARM_CM3/portmacro.h`(`portYIELD`, `portGET_HIGHEST_PRIORITY`), `portable/GCC/ARM_CM4F/port.c`, `portable/GCC/ARM_CM7/r0p1/port.c`(Errata 837070 우회), `portable/GCC/ARM_CM0/portasm.c`, `tasks.c`(`vTaskSwitchContext`, `taskSELECT_HIGHEST_PRIORITY_TASK`), `include/list.h`(`listGET_OWNER_OF_NEXT_ENTRY`), `include/stack_macros.h`, `History.txt` — https://github.com/FreeRTOS/FreeRTOS-Kernel
+- FreeRTOS, "Running the RTOS on a ARM Cortex-M Core" (BASEPRI · 우선순위 설정 설명, port.c 주석이 가리키는 페이지) — https://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html
+- Zephyr v4.4.2 소스 (랩 `/var/rtoslab/zephyrproject/zephyr`): `arch/arm/core/cortex_m/swap_helper.S`(`z_arm_pendsv`), `arch/arm/include/cortex_m/kernel_arch_func.h`(`arch_swap`), `arch/arm/core/cortex_m/exc_exit.c`, `arch/arm/core/cortex_m/arm-m-switch.c` · `include/zephyr/arch/arm/arm-m-switch.h`(`CONFIG_USE_SWITCH`), `include/zephyr/arch/arm/thread.h`(`struct _callee_saved`), `kernel/sched.c`(`z_impl_k_yield`, `update_cache`), `kernel/include/kswap.h`(`do_swap`), `kernel/timeslicing.c`(`z_reset_time_slice`) — https://github.com/zephyrproject-rtos/zephyr
+- Arm, “Armv7-M Architecture Reference Manual” (ARM DDI 0403) — 예외 진입 · 복귀, EXC_RETURN, 예외 복귀 시 PC 비트 0 UNPREDICTABLE 규정
+- Arm, “Procedure Call Standard for the Arm Architecture” (AAPCS) — caller/callee-saved 레지스터, 8바이트 스택 정렬
+- Arm, “Cortex-M3 Technical Reference Manual” — 예외 진입 지연 12사이클, tail-chaining 6사이클, LDM/STM 사이클
+- Arm Application Note 321, “ARM Cortex-M Programming Guide to Memory Barrier Instructions” — `dsb`/`isb`가 필요한 자리
+- QEMU 문서, "Emulated CPU / TCG" · `-d` 로그 옵션 (`exec`, `nochain`, `guest_errors`), `-icount` — https://www.qemu.org/docs/master/
+- 이 노트의 선행 · 관련 노트: RTOS A7(같은 보드 비용 측정), B1 · B2 · B4(프로그래머 모델 · 예외 · PendSV), C1(ready list), C5(tick), B6(FPU), F3(스택), M1(HardFault)

@@ -147,17 +147,20 @@ def meta_of(md):
 
 
 def sort_key(p):
-    m = re.match(r"(T1|T2|D)-?(\d*)", p.name)
-    order = {"T1": 0, "T2": 1, "D": 2}
+    m = re.match(r"(T1|T2|E|J|D)-?(\d*)", p.name)
+    order = {"T1": 0, "E": 1, "J": 2, "T2": 3, "D": 4}
     return (order.get(m.group(1), 9) if m else 9, int(m.group(2) or 0) if m else 0, p.name)
 
 
 def render_index():
-    groups = {"T1": [], "T2": [], "D": []}
+    groups = {"T1": [], "E": [], "J": [], "T2": [], "D": []}
     for pdir in sorted((d for d in PROB_DIR.iterdir() if (d / "README.md").exists()), key=sort_key):
         title, meta = meta_of(pdir / "README.md")
-        groups.setdefault(pdir.name.split("-")[0].split("_")[0], []).append((pdir, title, meta))
+        gm = re.match(r"(T1|T2|E|J|D)", pdir.name)
+        groups.setdefault(gm.group(1) if gm else "other", []).append((pdir, title, meta))
     names = {"T1": "Tier 1 — Sensor / Overheat family (most likely)",
+             "E": "Embedded drills — driver · ISR · packet (added 10-23)",
+             "J": "Interviewer-tailored drills — CAN · battery · bootloader · time sync (added 10-25)",
              "T2": "Tier 2 — LeetCode-ish with an embedded wrapper", "D": "Debug drills"}
     secs = []
     for g, items in groups.items():
@@ -176,7 +179,7 @@ def render_index():
         secs.append(f'<section class="sec" id="{g}"><h2 id="{g}-h">{esc(names.get(g, g))}</h2>'
                     '<div class="tbl"><table class="prob-tbl"><thead><tr><th>✓ ID</th><th>Problem</th>'
                     f'<th>Pattern</th><th>Pri</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div></section>')
-    toc = [(2, names[g], f"{g}-h") for g in groups if groups[g]]
+    toc = [(2, names.get(g, g), f"{g}-h") for g in groups if groups[g]]
     hero = ('<header class="hero"><div class="crumb"><a href="../2026-10-12_scout_technical_screen_prep.html">'
             '← Technical screen 준비 문서</a> · <a href="../scout_ai_embedded_context.html">포지션 컨텍스트</a></div>'
             '<h1>Scout AI — Coding Practice Set</h1>'

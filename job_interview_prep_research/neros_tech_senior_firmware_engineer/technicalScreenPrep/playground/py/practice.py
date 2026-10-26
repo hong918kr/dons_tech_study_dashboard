@@ -1,54 +1,42 @@
-class RingBuffer:
-    """고정 용량 FIFO. 가득 차면 overwrite=False → push 가 False (drop-new),
-    overwrite=True → 가장 오래된 것을 버리고 dropped += 1."""
+class DNode:
+	def __init__(self, data):
+		self.data = data
+		self.next = None
+		self.prev = None
 
-    def __init__(self, capacity, overwrite=False):
-        if not isinstance(capacity, int) or capacity <= 0:
-            raise ValueError("capacity must be a positive int")
-        self.capacity = capacity
-        self.overwrite = overwrite
-        self._buf = [None] * capacity   # 미리 한 번만 할당 (C 의 static 배열처럼)
-        self._head = 0                  # 다음에 쓸 칸
-        self._count = 0                 # 들어 있는 개수 → full/empty 구분
-        self.dropped = 0                # 덮어써서 잃은 개수 (손실을 보이게)
+class LinkedList:
+	def __init__(self):
+		self.head = None
 
-    def __len__(self):
-        return self._count
+	def append (self, data):
+		new_node = DNode(data)
 
-    def empty(self):
-        return self._count == 0
+		if self.head is None:
+			self.head = new_node
+			return
+		current = self.head
+		while current.next is not None:
+			current = current.next
+		current.next = new_node
+		new_node.prev = current
 
-    def full(self):
-        return self._count == self.capacity
+	def delete(self, key):
+		current = self.head
 
-    def _tail(self):                    # 가장 오래된 칸 = head 에서 count 만큼 뒤
-        return (self._head - self._count) % self.capacity
+		while current is not None:
+			if current.data == key:
 
-    def push(self, item):
-        if self.full():
-            if not self.overwrite:
-                return False            # drop-new: 호출자가 알 수 있게 False
-            self._count -= 1            # 가장 오래된 것 하나를 버린 셈
-            self.dropped += 1
-        self._buf[self._head] = item
-        self._head = (self._head + 1) % self.capacity
-        self._count += 1
-        return True
+				if current == self.head:
+					self.head = current.next
+					if self.head is not None:
+						self.head.prev = None
 
-    def pop(self):
-        if self.empty():
-            raise IndexError("pop from empty RingBuffer")
-        t = self._tail()
-        item, self._buf[t] = self._buf[t], None   # 참조를 놓아 GC 가능하게
-        self._count -= 1
-        return item
+				else:
+					current.prev.next = current.next
+					if current.next is not None:
+						current.next.prev = current.prev
 
-    def peek(self):
-        if self.empty():
-            raise IndexError("peek from empty RingBuffer")
-        return self._buf[self._tail()]
+				current = None
+				return 
 
-    def __iter__(self):                 # 오래된 → 최신, 소비하지 않음
-        t = self._tail()
-        for i in range(self._count):
-            yield self._buf[(t + i) % self.capacity]
+			current = current.next

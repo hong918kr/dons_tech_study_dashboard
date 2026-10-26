@@ -1,8 +1,9 @@
 <!-- theme: pastel -->
 # Scout AI — Senior Embedded Software Engineer · Context
 
-> **최종 갱신**: 2026-10-13 · **상태**: 💻 Technical screen 일정 선택 중 (리크루터 콜 10-12 통과 · ⚠ Ashby로 10-14 11:19 AM PT 전까지 가능 시간 제출)
-> **⚡ 테크니컬 스크린 준비**: [2026-10-12_scout_technical_screen_prep.html](2026-10-12_scout_technical_screen_prep.html) — 문제 은행 Tier1 8 · Tier2 10 · Debug 8 · D-5 플랜
+> **최종 갱신**: 2026-10-25 · **상태**: 💻 **Technical screen 10-26(월) 10:00 PT** (CoderPad 45분)
+> **🎯 면접관 맞춤 노트 (Jason MacDonald)**: [2026-10-25_scout_interviewer_jason_prep.html](2026-10-25_scout_interviewer_jason_prep.html) — 경력 분석 · 빈도순 예상 질문 · 영어 답 16 · 드릴 J1–J4
+> **⚡ D-3 준비 노트**: [2026-10-23_scout_screen_D-3_prep.html](2026-10-23_scout_screen_D-3_prep.html) — 약점 진단 · 빈도순 예상 문제 · 3일 플랜 · **기본 자료**: [준비 문서](2026-10-12_scout_technical_screen_prep.html) · [연습 사이트](technicalScreenPrep/index.html)
 > **JD**: https://job-boards.greenhouse.io/scoutai/jobs/5387985008 · **위치**: Sunnyvale, CA / onsite [추정] · **연봉 밴드**: $210,000 – $265,000 base + bonus + equity
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
@@ -19,7 +20,7 @@
 - **핵심 어필**: ① Apple에서 신규 칩 통합 시 PCIe/I2C/SPMI/RFFE 인터페이스 루트코즈 ② SK hynix에서 FPGA/SoC bring-up (I2C·SPI·DMA·SRAM/DRAM) ③ DSO·protocol analyzer·JTAG·logic analyzer로 신호/버스 단위 디버그 ④ bring-up → NPI → MP 전 주기, factory test 설계 (= "센서 데이터 품질 검증 툴")
 - **최대 갭/리스크**: ① Embedded Linux 실무(kernel driver, device tree, V4L2, IIO, Yocto/Buildroot) ② CAN 경험 없음 ③ 카메라 파이프라인(MIPI CSI-2 / GMSL) ④ 34명 규모 초기 스타트업 + 국방 미션(TS clearance 가능성) ⑤ 상한 $265K는 Hark 구두 $250K와 비슷하지만 Apple 대비 total comp 비교 필요
 - **인터뷰 포맷** [확인됨 — 리크루터 콜·메일 10-12]: 리크루터 → **Technical screen**(CoderPad, 언어 자유, 45분 = 경험 15 + 코딩 30, 센서·과열 감지류 · 메일상 범위: practical technical exercises + **experience building and scaling hardware systems**) → **Final 4라운드**(CEO 30 · CTO 30 · HW 엔지니어 45 · 임베디드 엔지니어 45)
-- **다음 액션**: ⓪ **Ashby 링크로 스크린 일정 제출 — 10-14(수) 11:19 AM PT 마감**, 추천 10-19~10-20 (Neros 온사이트 10-22/23 주 피하기) ① **Technical screen 준비** — [준비 문서](2026-10-12_scout_technical_screen_prep.html)의 D-5 플랜, T1-1·T1-2·T1-5 최우선 ② 스크린 날짜 확정되면 플랜 역산 ③ 통과 시 Final 4라운드(CEO·CTO·HW·임베디드) 준비
+- **다음 액션**: ⓪ **10-26(월) 10:00 스크린 (면접관 Jason MacDonald — CANopen·부트로더·Embedded Linux 출신, 조지아 임베디드 팀 [추정])** — [면접관 노트](2026-10-25_scout_interviewer_jason_prep.html) J1(CAN) + E2 + 모의 1회, 그리고 [D-3 노트](2026-10-23_scout_screen_D-3_prep.html)의 3일 플랜: 약점 = 패킷 추출 완주(Neros 2회 미완) · 실전 타이핑 횟수 ① **Technical screen 준비** — [준비 문서](2026-10-12_scout_technical_screen_prep.html)의 D-5 플랜, T1-1·T1-2·T1-5 최우선 ② 스크린 날짜 확정되면 플랜 역산 ③ 통과 시 Final 4라운드(CEO·CTO·HW·임베디드) 준비
 
 ---
 
@@ -377,6 +378,8 @@ Fury가 **camera-only**이므로 센서 스택의 중심은 카메라다. 여기
 | 2026-10-12 | Technical screen 준비 문서 작성 | `2026-10-12_scout_technical_screen_prep.md/.html` — Tier1 8 · Tier2 10 · Debug 8 · D-5 플랜. 테스트 기대값은 참조 C 코드로 검증(ASan/UBSan ALL PASS) |
 | 2026-10-12 | 연습 사이트 구축 | `technicalScreenPrep/` — 18문제 + Debug 드릴, 문제 영어·풀이 한국어·SVG 차트, stub/solution 전부 ASan/UBSan 검증 |
 | 2026-10-13 | 메일 반영 업데이트 | 준비 문서에 §2.6 Tips→행동 규칙, §6.0 날짜 추천, §7 scaling 스토리 A·B·C 추가 |
+| 2026-10-23 | 스크린 일정 확정 10-26(월) 10:00 + D-3 노트 | `2026-10-23_scout_screen_D-3_prep.md/.html` — 약점 W1–W8(근거: Neros 패킷 2회 미완, Verkada 유형 빗나감, 연습 stub 수정 흔적 없음), 빈도순 코딩 13 · 개념 16(영어 답) · 경험 7, 3일 플랜, 미공개 모의 2. 연습 사이트에 E1 I2C 드라이버 · E2 extract_packet · E3 ISR→태스크 추가 |
+| 2026-10-25 | 면접관 확인: Jason MacDonald | LinkedIn 경력란만 열람(연결 요청 안 함). Scout 2026-06~ · Latitude AI · Anduril Altius 고객 통합 리드 · SiriusXM · Johnson Outdoors(Embedded Linux Qt, RTOS 배터리 SoC, STM32→Artery 포팅) · Charles Machine Works 10년(TM4C 부트로더·HAL, CANopen 모터 제어, Linux USB 카메라, NTP). 애틀랜타 → 조지아 임베디드 팀원 [추정]. `2026-10-25_scout_interviewer_jason_prep.md/.html` + 연습 사이트 J1 CAN · J2 쿨롱 카운터 · J3 A/B 부트 · J4 시간 동기화 |
 
 ---
 

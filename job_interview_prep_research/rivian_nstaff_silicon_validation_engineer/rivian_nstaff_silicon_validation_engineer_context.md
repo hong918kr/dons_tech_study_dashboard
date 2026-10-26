@@ -1,6 +1,6 @@
 # Rivian — Staff Embedded Software Engineer, Silicon & Sensing Systems (Silicon Validation) · Context
 
-> **최종 갱신**: 2026-10-17 · **상태**: 📞 리크루터
+> **최종 갱신**: 2026-10-25 · **상태**: 💻 HM 스크린 10-28(수) 45분 — Manjiang Zhang (Sr Manager, Silicon Validation) · [준비 deck](2026-10-25_rivian_hm_screen_prep.html) · [코딩 연습](hmScreenPrep/index.html)
 > **JD**: https://careers.rivian.com/careers-home/jobs/34042?lang=en-us · **위치**: Palo Alto, CA (607 Hansen Way) · onsite 추정 · **연봉 밴드**: base $186,000 – $232,000 (Bay Area) + bonus + equity
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
@@ -262,6 +262,7 @@ Rivian Automotive(NASDAQ: RIVN) — 전기 픽업 R1T, SUV R1S, Amazon 등 상�
 |---|---|---|
 | 2026-10-17 | 리크루터 연락 · 통화 | Rivian 쪽에서 먼저 연락. 레쥬메 요청 → 바로 HM에게 전달하겠다고 함. 현재 레벨 질문 → "Apple ICT3, 직전 회사(Solidigm)는 Staff, Apple은 레벨은 낮지만 컴펜이 매우 높다"고 답함. 프로세스 안내: HM 연결 → technical screening → 통과 시 onsite 4개 (technical 2 + behavioral 2) |
 | 2026-10-17 | 컨텍스트 파일 생성 (JD 조사) | JD 원문은 Rivian careers API에서 수집 |
+| 2026-10-25 | HM 스크린 확정: 10-28(수) 45분, Manjiang Zhang | 면접관 = Sr. Engineer/Manager, Silicon Validation (Rivian 2022-12~: FPGA/HAPS 프로토타이핑·bring-up·post-si validation·PVT·SLT · ex-Baidu Apollo HW 아키텍트, Marvell Ethernet PHY, Cisco 패킷 ASIC). LinkedIn 열람만(연결 X). 준비 deck `2026-10-25_rivian_hm_screen_prep` + 코딩 연습 사이트 `hmScreenPrep/` (V1–V12 + D) |
 
 ---
 

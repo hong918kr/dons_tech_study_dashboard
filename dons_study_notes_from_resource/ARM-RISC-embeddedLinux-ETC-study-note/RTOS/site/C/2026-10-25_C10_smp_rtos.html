@@ -1,0 +1,2046 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C10. SMP RTOS — 코어가 둘이 되면 커널의 무엇이 바뀌나: 전역 ready queue, 스핀락 크리티컬 섹션, IPI, affinity</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="C/2026-10-25_C10_smp_rtos">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">C. 커널 내부 · C10. SMP RTOS — 코어가 둘이 되면 커널의 무엇이 바뀌나: 전역 ready queue, 스핀락 크리티컬 섹션, IPI, affinity</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">C. 커널 내부 · Scheduler &amp; Context Switch</div>
+      <h1>C10. SMP RTOS — 코어가 둘이 되면 커널의 무엇이 바뀌나: 전역 ready queue, 스핀락 크리티컬 섹션, IPI, affinity</h1>
+      <div class="meta"><span>232분 읽기</span><span>2495줄</span><span>55개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: AMP · SMP · BMP를 칩 예시와 함께 구분하고 고를 수 있다 · FreeRTOS SMP의 "가장 높은 우선순위 N개가 동시에 돈다" 규칙과 <code>configRUN_MULTIPLE_PRIORITIES</code> · <code>configUSE_CORE_AFFINITY</code> · <code>configUSE_TASK_PREEMPTION_DISABLE</code>이 실제로 무엇을 바꾸는지 직접 돌려서 설명할 수 있다 · SMP에서 크리티컬 섹션이 "인터럽트 마스크 + 스핀락"이 되는 이유와 <code>portGET_TASK_LOCK</code> / <code>portGET_ISR_LOCK</code> 두 락의 역할을 소스로 말할 수 있다 · 단일 코어에서만 안전하던 코드(우선순위로 배제, <code>k_sched_lock</code>)가 2코어에서 깨지는 장면을 재현하고 고칠 수 있다 <strong>왜 필요한가</strong>: RP2040/RP2350 · ESP32 · Cortex-R52/R82 클러스터처럼 MCU급 칩도 코어가 둘 이상이 됐다. 면접에서 "FreeRTOS SMP에서 크리티컬 섹션은 어떻게 구현되나", "높은 우선순위 태스크가 돌고 있으면 낮은 태스크는 못 도는가", "hard real-time 루프를 SMP에 올려도 되나"가 나오고, 실무에서는 "단일 코어에서 몇 년 잘 돌던 코드가 듀얼코어로 옮기자 가끔 값이 틀린다"는 버그로 나타난다 <strong>Don 기준 난이도</strong>: 멀티코어 Cortex-R SSD 펌웨어(코어마다 실행부 하나 = AMP), 스핀락 · 메모리 배리어 개념(EL F4 · F5)은 이미 안다 / 새로 배울 부분은 <strong>커널 하나가 여러 코어를 같이 스케줄</strong>할 때 생기는 일 — 전역 스케줄링 결정, 코어 간 인터럽트(IPI), 우선순위만으로는 배제가 안 된다는 사실, 그리고 FreeRTOS · Zephyr가 이를 구현한 소스 <strong>선행 노트</strong>: C1(ready list), C2(컨텍스트 스위치), C4(스케줄링 정책), C7(크리티컬 섹션), EL F4(스핀락 · atomic), EL F5(메모리 배리어). 이어지는 노트: N8(멀티코어 실시간 이론 — global vs partitioned, 간섭), P4(비대칭 멀티코어 MCU), P5(Linux ↔ RTOS 원격 측), D1–D3(동기화)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-코어가-둘이면-누가-다음-일을-고르나-가-두-번-결정된다">0. 큰 그림 — 코어가 둘이면 "누가 다음 일을 고르나"가 두 번 결정된다<a class="anchor" href="#0-큰-그림-코어가-둘이면-누가-다음-일을-고르나-가-두-번-결정된다" aria-label="link">#</a></h2>
+<p>Don이 SSD 컨트롤러에서 본 구조를 떠올려 보자. 컨트롤러 안에 Cortex-R 코어가 여러 개 있었고, 보통 <strong>코어마다 맡은 일이 정해져</strong> 있었다. 호스트 인터페이스(NVMe) 코어, FTL 코어, NAND 채널 코어 — 각 코어에 실행부(executive) 하나가 돌고, 코어끼리는 공유 메모리의 큐와 doorbell 인터럽트로 일을 넘겼다. 이게 <strong>AMP</strong>(Asymmetric Multiprocessing)다. 코어마다 독립 펌웨어가 돌고, 코어 사이 경계가 곧 소프트웨어 모듈 경계다.</p>
+<p>RTOS가 <strong>SMP</strong>(Symmetric Multiprocessing)로 돌면 그림이 완전히 달라진다. <strong>커널 하나, 이미지 하나, ready queue 하나</strong>가 코어 둘을 같이 관리한다. 태스크는 "어느 코어"에 속하지 않는다. 스케줄러가 매 순간 "지금 ready인 태스크 중 어떤 것들을 어느 코어에 올릴지"를 고른다. 단일 코어 RTOS의 규칙 "가장 높은 우선순위 태스크 <strong>하나</strong>가 돈다"가 "가장 높은 우선순위 태스크 <strong>N개</strong>(N = 코어 수)가 돈다"로 바뀐다.</p>
+<p>그 중간이 <strong>BMP</strong>(Bound Multiprocessing)다. 커널은 SMP 커널 하나인데, 태스크를 전부 특정 코어에 고정(pin)해서 AMP처럼 예측 가능하게 쓴다.</p>
+<figure class="chart"><svg viewBox="0 0 680 320" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10.0" y="10.0" width="210.0" height="300.0" rx="6" fill="#4a7bd0" fill-opacity="0.05" stroke="#4a7bd0"/>
+<text x="115.0" y="32.0" font-size="14" text-anchor="middle" font-weight="bold">AMP (비대칭)</text>
+<rect x="235.0" y="10.0" width="210.0" height="300.0" rx="6" fill="#3f9a6b" fill-opacity="0.05" stroke="#3f9a6b"/>
+<text x="340.0" y="32.0" font-size="14" text-anchor="middle" font-weight="bold">SMP (대칭)</text>
+<rect x="460.0" y="10.0" width="210.0" height="300.0" rx="6" fill="#e08a3c" fill-opacity="0.05" stroke="#e08a3c"/>
+<text x="565.0" y="32.0" font-size="14" text-anchor="middle" font-weight="bold">BMP (고정 SMP)</text>
+<rect x="20.0" y="50.0" width="90.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="65.0" y="70.7" font-size="12" text-anchor="middle">core0</text>
+<text x="65.0" y="87.7" font-size="12" text-anchor="middle">M7</text>
+<rect x="120.0" y="50.0" width="90.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="165.0" y="70.7" font-size="12" text-anchor="middle">core1</text>
+<text x="165.0" y="87.7" font-size="12" text-anchor="middle">M4</text>
+<rect x="20.0" y="110.0" width="90.0" height="60.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="65.0" y="135.7" font-size="12" text-anchor="middle">RTOS A</text>
+<text x="65.0" y="152.7" font-size="12" text-anchor="middle">자기 스케줄러</text>
+<rect x="120.0" y="110.0" width="90.0" height="60.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="165.0" y="135.7" font-size="12" text-anchor="middle">RTOS B 또는</text>
+<text x="165.0" y="152.7" font-size="12" text-anchor="middle">bare-metal</text>
+<rect x="20.0" y="185.0" width="190.0" height="40.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="115.0" y="209.2" font-size="12" text-anchor="middle">메일박스 · HSEM · 공유 RAM</text>
+<text x="115.0" y="250.0" font-size="12" text-anchor="middle">커널 둘, 이미지 둘</text>
+<text x="115.0" y="270.0" font-size="12" text-anchor="middle">예: STM32H745 M7+M4</text>
+<text x="115.0" y="290.0" font-size="12" text-anchor="middle">코어가 달라도 된다</text>
+<rect x="245.0" y="50.0" width="90.0" height="50.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="290.0" y="79.2" font-size="12" text-anchor="middle">core0</text>
+<rect x="345.0" y="50.0" width="90.0" height="50.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="390.0" y="79.2" font-size="12" text-anchor="middle">core1</text>
+<rect x="245.0" y="110.0" width="190.0" height="60.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="340.0" y="135.7" font-size="12" text-anchor="middle">커널 하나 · 이미지 하나</text>
+<text x="340.0" y="152.7" font-size="12" text-anchor="middle">ready queue 하나 (전역)</text>
+<rect x="245.0" y="185.0" width="190.0" height="40.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340.0" y="209.2" font-size="12" text-anchor="middle">스핀락 + IPI로 서로 조율</text>
+<text x="340.0" y="250.0" font-size="12" text-anchor="middle">어느 태스크든 어느 코어든</text>
+<text x="340.0" y="270.0" font-size="12" text-anchor="middle">예: RP2040 · ESP32</text>
+<text x="340.0" y="290.0" font-size="12" text-anchor="middle">같은 코어여야 한다</text>
+<rect x="470.0" y="50.0" width="90.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="515.0" y="79.2" font-size="12" text-anchor="middle">core0</text>
+<rect x="570.0" y="50.0" width="90.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="615.0" y="79.2" font-size="12" text-anchor="middle">core1</text>
+<rect x="470.0" y="110.0" width="190.0" height="60.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="565.0" y="135.7" font-size="12" text-anchor="middle">커널 하나 · 이미지 하나</text>
+<text x="565.0" y="152.7" font-size="12" text-anchor="middle">태스크마다 코어 고정</text>
+<rect x="470.0" y="185.0" width="190.0" height="40.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="565.0" y="209.2" font-size="12" text-anchor="middle">affinity = 코어 하나</text>
+<text x="565.0" y="250.0" font-size="12" text-anchor="middle">SMP 커널 + 전부 pin</text>
+<text x="565.0" y="270.0" font-size="12" text-anchor="middle">AMP처럼 예측 가능</text>
+<text x="565.0" y="290.0" font-size="12" text-anchor="middle">API · 큐는 하나로 공유</text>
+</svg></figure>
+<p>그림 1 — AMP · SMP · BMP. AMP는 코어마다 커널(또는 bare-metal)이 따로, SMP는 커널 하나가 코어 둘을 같이, BMP는 SMP 커널 위에서 태스크를 전부 코어에 고정한다.</p>
+<p>SMP 커널 안에서는 다음 다섯 가지가 단일 코어와 다르다. 이 노트는 이 다섯 가지를 차례로 직접 돌려 본다.</p>
+<ol><li><strong>ready queue가 공유된다</strong> — 두 코어가 같은 자료구조를 동시에 만질 수 있다. 그래서 커널 자료구조를 만지는 구간(크리티컬 섹션)은 <strong>인터럽트 마스크만으로는 부족하고 스핀락이 필요</strong>하다 (§5).</li><li><strong>스케줄링 결정이 전역이다</strong> — "가장 높은 N개"를 고르고, 어느 코어를 선점할지도 골라야 한다 (§2, §4).</li><li><strong>다른 코어에게 "다시 골라"라고 알려야 한다</strong> — 코어 0에서 깨운 태스크가 코어 1의 지금 태스크보다 높으면 코어 1을 인터럽트해야 한다. 이게 <strong>IPI</strong>(Inter-Processor Interrupt)다 (§6).</li><li><strong>우선순위가 배제 수단이 아니다</strong> — 단일 코어에서는 "높은 우선순위가 도는 동안 낮은 것은 못 돈다"가 사실이었다. SMP에서는 둘이 동시에 돈다. <code>k_sched_lock()</code> · <code>vTaskSuspendAll()</code>도 의미가 달라진다 (§3, §4).</li><li><strong>어디서 도는지가 성능과 결정성을 바꾼다</strong> — migration(코어 이동), 캐시 · 버스 공유, false sharing. 그래서 <strong>affinity</strong>(코어 고정) API가 생겼다 (§7, §8, §9).</li></ol>
+<h3 id="실습-환경-한-줄">실습 환경 한 줄<a class="anchor" href="#실습-환경-한-줄" aria-label="link">#</a></h3>
+<ul><li><strong>Zephyr v4.4.2 SMP</strong>: QEMU <code>virt</code> 머신의 Cortex-A53 × 2 (<code>qemu_cortex_a53/qemu_cortex_a53/smp</code>, Zephyr SDK 1.0.1 툴체인, Zephyr SDK의 QEMU 10.0.2). 비교용 단일 코어는 같은 SoC의 <code>qemu_cortex_a53</code> 보드와, SMP 보드에 <code>-DCONFIG_MP_MAX_NUM_CPUS=1</code>을 준 빌드.</li><li><strong>FreeRTOS V11.3.2 SMP</strong>: QEMU <code>mps2-an521</code>(SSE-200, <strong>Cortex-M33 × 2</strong>, Ubuntu QEMU 10.2.1) 위에 <code>ARM_CM33_NTZ</code> 포트를 <code>configNUMBER_OF_CORES = 2</code>로 직접 올렸다. 랩 템플릿은 M3 전용이라 시작 코드 · 링커 스크립트 · 보조 코어 깨우기 · IPI를 직접 썼다 (§4.3). 이 포트의 SMP 지원은 V11.3.1(2026-08)에 들어온 것이다.</li><li><strong>타이밍 주의 — 이 노트의 숫자는 QEMU TCG 기준이다</strong>. SMP 보드는 <code>CONFIG_QEMU_ICOUNT=n</code>(Zephyr 보드 설정 주석: "icount does not work well with SMP")이라 가상 시계 = 호스트 실제 시간이고, 두 가상 CPU는 MTTCG(멀티스레드 TCG)로 호스트 스레드 두 개에서 진짜 병렬로 돈다(§8.1에서 확인). 그래서 <strong>결과가 실행마다 달라지고</strong>, 캐시 · 버스 · 메모리 순서(memory ordering)는 실제 칩과 같지 않다. 이 노트가 보여 주려는 것은 절대값이 아니라 <strong>현상의 존재와 상대 비교</strong>(lost update가 생기나, IPI가 몇 번 가나, 1코어 대비 몇 배인가)다. 측정은 VM 호스트(Lima <code>elinux</code>, aarch64, 6 vCPU, 커널 7.0.0-38-generic)의 부하가 낮을 때(load average 0.1~3) 반복해서 최솟값 또는 백분위를 썼다.</li><li>공통 빌드 · 실행:</li></ul>
+<figure class="code"><span class="lang">sh</span><pre><code># Zephyr SMP (2코어) / 단일 코어 비교
+limactl shell elinux -- bash -lc '/var/rtoslab/bin/rtos-zbuild qemu_cortex_a53/qemu_cortex_a53/smp /Users/donh/.rtos_scratch/C10/ex1 /var/tmp/rtos/C10/ex1_smp &amp;&amp; /var/rtoslab/bin/rtos-zrun /var/tmp/rtos/C10/ex1_smp 15'
+limactl shell elinux -- bash -lc '/var/rtoslab/bin/rtos-zbuild qemu_cortex_a53 /Users/donh/.rtos_scratch/C10/ex1 /var/tmp/rtos/C10/ex1_up &amp;&amp; /var/rtoslab/bin/rtos-zrun /var/tmp/rtos/C10/ex1_up 15'
+# 같은 SMP 보드를 1코어로: west build 추가 인자
+/var/rtoslab/bin/rtos-zbuild qemu_cortex_a53/qemu_cortex_a53/smp &lt;app&gt; &lt;build&gt; -- -DCONFIG_MP_MAX_NUM_CPUS=1</code></pre></figure>
+<p>Zephyr 앱 폴더는 모두 같은 <code>CMakeLists.txt</code>(<code>find_package(Zephyr)</code> + <code>target_sources(app PRIVATE src/main.c)</code>)와 예제별 <code>prj.conf</code>를 쓴다. 빌드 경고는 0개였다(<code>rtos-zbuild</code>가 <code>warning:</code> 줄을 걸러 보여 주는데 하나도 없었다).</p>
+<hr>
+<h2 id="1-amp-smp-bmp-정의와-실제-칩">1. AMP · SMP · BMP — 정의와 실제 칩<a class="anchor" href="#1-amp-smp-bmp-정의와-실제-칩" aria-label="link">#</a></h2>
+<h3 id="1-1-정의">1.1 정의<a class="anchor" href="#1-1-정의" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>방식</th><th>커널 · 이미지</th><th>태스크는 어디서 도나</th><th>코어 종류</th><th>코어 간 통신</th><th>장점</th><th>약점</th></tr></thead><tbody><tr><td>AMP (비대칭)</td><td>코어마다 따로 (RTOS A + RTOS B, 또는 RTOS + bare-metal, 또는 Linux + RTOS)</td><td>빌드할 때 정해진 코어</td><td>달라도 된다 (M7 + M4, A + M)</td><td>메일박스 · HSEM · 공유 RAM · OpenAMP/RPMsg</td><td>코어별 독립 검증, 장애 격리, 결정성</td><td>부하가 한쪽에 몰려도 못 나눔, 코드 · 데이터 이중화</td></tr><tr><td>SMP (대칭)</td><td>커널 하나, 이미지 하나</td><td>스케줄러가 매번 고른다 (어느 코어든)</td><td>같아야 한다 (같은 ISA · 같은 메모리 뷰)</td><td>커널 API 그대로 (큐 · 세마포어가 코어를 넘나든다)</td><td>부하 자동 분산, 프로그래밍 모델 하나</td><td>락 경쟁, migration, 타이밍 예측 어려움</td></tr><tr><td>BMP (고정 SMP)</td><td>커널 하나</td><td>태스크마다 코어 하나로 고정</td><td>같아야 한다</td><td>커널 API 그대로</td><td>AMP처럼 예측 가능 + API 하나</td><td>부하 분산 포기, 고정 설계가 필요</td></tr></tbody></table></div>
+<p>"대칭"의 뜻은 <strong>어느 코어도 특별하지 않다</strong>는 것이다. 모든 코어가 같은 커널 코드를 돌리고, 같은 ready queue를 보고, 어떤 태스크든 실행할 수 있다. 부팅 때 primary 코어가 먼저 초기화를 하는 것 정도만 다르다.</p>
+<h3 id="1-2-왜-mcu가-멀티코어가-됐나-실제-칩">1.2 왜 MCU가 멀티코어가 됐나 — 실제 칩<a class="anchor" href="#1-2-왜-mcu가-멀티코어가-됐나-실제-칩" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>칩 / 코어</th><th>구성</th><th>보통 쓰는 방식</th><th>이 노트와의 관계</th></tr></thead><tbody><tr><td>Raspberry Pi RP2040</td><td>Cortex-M0+ × 2</td><td>FreeRTOS SMP (커널 저장소 <code>portable/ThirdParty/GCC/RP2040</code>)</td><td>IPI = SIO 코어 간 FIFO, 락 = SIO 하드웨어 스핀락 (§4.4)</td></tr><tr><td>Raspberry Pi RP2350</td><td>소켓 2개, 각 소켓이 Cortex-M33 또는 Hazard3(RV32) — 리셋 때 OTP로 선택</td><td>SMP 또는 AMP</td><td>Armv8-M SMP 포트 (§4.3과 같은 계열)</td></tr><tr><td>Espressif ESP32 / ESP32-S3</td><td>Xtensa LX6 / LX7 × 2</td><td>ESP-IDF의 FreeRTOS (IDF가 자체 SMP 변형을 유지)</td><td>가장 흔한 듀얼코어 "SMP RTOS" 사용자</td></tr><tr><td>ST STM32H745/H747/H755</td><td>Cortex-M7 + Cortex-M4</td><td><strong>AMP</strong> (코어가 다르므로 SMP 불가)</td><td>P4에서 자세히 — HSEM · 공유 SRAM</td></tr><tr><td>Arm Cortex-R52 클러스터 (예: NXP S32Z/S32E)</td><td>R52 여러 개, lockstep 쌍 가능</td><td>코어별 RTOS + 하이퍼바이저(AMP 쪽이 많음)</td><td>O5 · O6 · P6</td></tr><tr><td>Arm Cortex-R82</td><td>64-bit Armv8-R, 클러스터 최대 8코어, 클러스터 내 하드웨어 일관성 (2020-09 발표, SSD · 연산 스토리지 겨냥)</td><td>SMP 가능</td><td>FreeRTOS <code>ARM_CR82</code> 포트가 SMP 지원 (V11.3.0) — Don의 SSD 경력과 직접 연결</td></tr><tr><td>AI 가속기 SoC의 제어 클러스터</td><td>Cortex-R / M / RISC-V 제어 코어 몇 개</td><td>칩마다 다름 (공개 자료 적음)</td><td>이름 있는 예는 확인 못 함 — 구조만 §11.4</td></tr></tbody></table></div>
+<p>멀티코어가 된 이유는 셋이다. (1) 클럭을 올리는 것보다 코어를 하나 더 넣는 것이 전력 · 면적당 성능이 좋다. (2) <strong>역할 분리</strong> — 무선 스택 · 보안 · 실시간 제어를 서로 방해 없이 돌리고 싶다(AMP 동기). (3) 연산이 늘었다 — 센서 퓨전, 작은 신경망 추론, 압축 · 암호. 이 중 (3)이 SMP의 동기다.</p>
+<h3 id="1-3-don의-경험으로-번역">1.3 Don의 경험으로 번역<a class="anchor" href="#1-3-don의-경험으로-번역" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>SSD 펌웨어에서</th><th>RTOS 용어</th></tr></thead><tbody><tr><td>코어마다 다른 실행부, 코어 간 메시지 큐 + doorbell</td><td>AMP + 메일박스</td></tr><tr><td>모든 코어가 같은 작업 풀에서 일을 꺼내 처리 (있었다면)</td><td>SMP 전역 ready queue</td></tr><tr><td>공유 자료구조에 하드웨어 세마포어 / 스핀락</td><td>SMP 크리티컬 섹션의 스핀락</td></tr><tr><td>다른 코어에 "일 생겼다" doorbell 인터럽트</td><td>IPI (<code>portYIELD_CORE</code>, <code>arch_sched_directed_ipi</code>)</td></tr><tr><td>특정 처리를 특정 코어에 고정</td><td>affinity / pin (BMP)</td></tr></tbody></table></div>
+<hr>
+<h2 id="2-smp-커널에서-무엇이-바뀌나">2. SMP 커널에서 무엇이 바뀌나<a class="anchor" href="#2-smp-커널에서-무엇이-바뀌나" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="170.0" y="22.0" font-size="13" text-anchor="middle" font-weight="bold">FreeRTOS V11.3.2 (tasks.c)</text>
+<text x="510.0" y="22.0" font-size="13" text-anchor="middle" font-weight="bold">Zephyr v4.4.2 (kernel/sched.c, ipi.c)</text>
+<rect x="20.0" y="35.0" width="300.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="170.0" y="55.7" font-size="12" text-anchor="middle">pxReadyTasksLists[prio]</text>
+<text x="170.0" y="72.7" font-size="12" text-anchor="middle">우선순위별 리스트, 코어 공용 하나</text>
+<rect x="20.0" y="100.0" width="140.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="90.0" y="120.7" font-size="12" text-anchor="middle">pxCurrentTCBs[0]</text>
+<text x="90.0" y="137.7" font-size="12" text-anchor="middle">core0 실행 중</text>
+<rect x="180.0" y="100.0" width="140.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="250.0" y="120.7" font-size="12" text-anchor="middle">pxCurrentTCBs[1]</text>
+<text x="250.0" y="137.7" font-size="12" text-anchor="middle">core1 실행 중</text>
+<rect x="20.0" y="165.0" width="300.0" height="50.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="170.0" y="185.7" font-size="12" text-anchor="middle">task lock + ISR lock (스핀락 2개)</text>
+<text x="170.0" y="202.7" font-size="12" text-anchor="middle">portGET_TASK_LOCK / portGET_ISR_LOCK</text>
+<rect x="20.0" y="230.0" width="300.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="170.0" y="250.7" font-size="12" text-anchor="middle">prvYieldForTask → prvYieldCore(x)</text>
+<text x="170.0" y="267.7" font-size="12" text-anchor="middle">→ portYIELD_CORE(x) = IPI</text>
+<rect x="20.0" y="295.0" width="300.0" height="50.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="170.0" y="315.7" font-size="12" text-anchor="middle">uxCoreAffinityMask (태스크별)</text>
+<text x="170.0" y="332.7" font-size="12" text-anchor="middle">xTaskRunState = 코어 번호</text>
+<rect x="360.0" y="35.0" width="300.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="510.0" y="55.7" font-size="12" text-anchor="middle">_kernel.ready_q</text>
+<text x="510.0" y="72.7" font-size="12" text-anchor="middle">전역 run queue 하나</text>
+<rect x="360.0" y="100.0" width="140.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="430.0" y="120.7" font-size="12" text-anchor="middle">cpus[0].current</text>
+<text x="430.0" y="137.7" font-size="12" text-anchor="middle">core0 실행 중</text>
+<rect x="520.0" y="100.0" width="140.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="590.0" y="120.7" font-size="12" text-anchor="middle">cpus[1].current</text>
+<text x="590.0" y="137.7" font-size="12" text-anchor="middle">core1 실행 중</text>
+<rect x="360.0" y="165.0" width="300.0" height="50.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="510.0" y="185.7" font-size="12" text-anchor="middle">_sched_spinlock (스핀락 1개)</text>
+<text x="510.0" y="202.7" font-size="12" text-anchor="middle">k_spin_lock = IRQ 마스크 + CAS</text>
+<rect x="360.0" y="230.0" width="300.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="510.0" y="250.7" font-size="12" text-anchor="middle">flag_ipi → signal_pending_ipi</text>
+<text x="510.0" y="267.7" font-size="12" text-anchor="middle">→ arch_sched_directed_ipi (SGI 0)</text>
+<rect x="360.0" y="295.0" width="300.0" height="50.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="510.0" y="315.7" font-size="12" text-anchor="middle">base.cpu_mask (CONFIG_SCHED_CPU_MASK)</text>
+<text x="510.0" y="332.7" font-size="12" text-anchor="middle">swap_ok · pending_ipi</text>
+<text x="340.0" y="375.0" font-size="12" text-anchor="middle">공통: 큐는 하나, 실행 중 포인터는 코어 수만큼, 큐를 만질 땐 스핀락, 남의 코어는 IPI로 깨운다</text>
+</svg></figure>
+<p>그림 2 — 두 커널의 SMP 핵심 자료구조. 공통 원리: 큐는 하나, "지금 실행 중" 포인터는 코어 수만큼, 큐를 만질 땐 스핀락, 다른 코어에 결정을 전할 땐 IPI.</p>
+<h3 id="2-1-전역-ready-queue-vs-코어별-ready-queue">2.1 전역 ready queue vs 코어별 ready queue<a class="anchor" href="#2-1-전역-ready-queue-vs-코어별-ready-queue" aria-label="link">#</a></h3>
+<ul><li><strong>전역(global) 스케줄링</strong>: ready queue가 하나다. 어떤 코어든 스케줄링할 때 같은 큐에서 "지금 가장 높은 것"을 꺼낸다. FreeRTOS SMP(<code>pxReadyTasksLists[]</code> 하나)와 Zephyr SMP 기본(<code>_kernel.ready_q</code> 하나)이 이 방식이다. 장점: 부하가 자동으로 고르게 퍼지고, 항상 "가장 높은 N개"가 돈다. 단점: 모든 코어가 큐 하나를 두고 락 경쟁을 한다.</li><li><strong>코어별(partitioned) 스케줄링</strong>: 코어마다 ready queue가 있고 태스크는 한 큐에만 산다. Zephyr의 <code>CONFIG_SCHED_CPU_MASK_PIN_ONLY=y</code>가 이 방식이다 — <code>struct _cpu</code> 안에 <code>ready_q</code>가 생긴다(<code>include/zephyr/kernel_structs.h</code>). 락 경쟁이 적고 예측하기 쉽지만, 한 코어가 바쁘고 다른 코어가 놀아도 일을 옮기지 않는다.</li></ul>
+<p>이론(어느 쪽이 스케줄 가능성 면에서 유리한가, Dhall 효과)은 N8이 다룬다. 이 노트는 구현만 본다.</p>
+<h3 id="2-2-가장-높은-우선순위-n개가-돈다">2.2 "가장 높은 우선순위 N개가 돈다"<a class="anchor" href="#2-2-가장-높은-우선순위-n개가-돈다" aria-label="link">#</a></h3>
+<p>단일 코어 규칙: ready인 태스크 중 <strong>가장 높은 하나</strong>가 돈다. SMP 규칙: ready인 태스크 중 <strong>가장 높은 N개</strong>가 돈다(N = 코어 수, affinity가 허락하는 범위에서).</p>
+<p>이 한 줄이 모든 차이를 만든다. 예를 들어 드론 비행 제어기가 듀얼코어 MCU에서 SMP로 돈다면, 자세 제어 태스크(높음)와 로그 태스크(낮음)는 <strong>동시에</strong> 돈다. 단일 코어였다면 로그 태스크는 자세 제어 태스크가 잠들 때만 돌았다. 코드가 그 사실에 기대고 있었다면(예: "로그 태스크가 도는 동안엔 제어 루프가 공유 버퍼를 안 만진다") SMP에서 깨진다(§3.3).</p>
+<p>FreeRTOS는 이 규칙을 끄는 옵션까지 준다: <code>configRUN_MULTIPLE_PRIORITIES = 0</code>이면 <strong>서로 다른 우선순위 태스크는 동시에 돌지 않는다</strong>. 높은 태스크가 ready면 낮은 태스크를 다른 코어에서도 내린다. 그 대가로 코어가 논다. §4.2에서 실제로 돌려 본다.</p>
+<h3 id="2-3-예제-1-두-cpu가-정말-같이-도는가-zephyr-스레드별-실행-cpu-세기">2.3 예제 1 — 두 CPU가 정말 같이 도는가 (Zephyr, 스레드별 실행 CPU 세기)<a class="anchor" href="#2-3-예제-1-두-cpu가-정말-같이-도는가-zephyr-스레드별-실행-cpu-세기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 우선순위 스레드 4개가 SMP에서는 두 CPU에 퍼지고, 단일 코어에서는 한 CPU에 몰리는지, 그리고 그 결과 벽시계 시간이 줄어드는지.</p>
+<figure class="code"><span class="lang">text</span><pre><code># ex1/prj.conf
+CONFIG_PRINTK=y
+CONFIG_SCHED_CPU_MASK=y</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex1: 두 CPU가 정말 같이 도는가 — 스레드마다 실행된 CPU id를 센다 */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+
+#define NT 4
+#define STK 2048
+K_THREAD_STACK_ARRAY_DEFINE(stk, NT, STK);
+static struct k_thread th[NT];
+static volatile uint32_t on_cpu[NT][2];   /* [thread][cpu] 샘플 수 */
+static volatile int done;
+
+static int my_cpu(void)
+{
+	unsigned int key = arch_irq_lock();   /* 읽는 중 migration 방지 */
+	int id = arch_curr_cpu()-&gt;id;
+	arch_irq_unlock(key);
+	return id;
+}
+
+static void worker(void *p1, void *p2, void *p3)
+{
+	int me = (int)(uintptr_t)p1;
+	for (int i = 0; i &lt; 2000; i++) {
+		on_cpu[me][my_cpu()]++;
+		k_busy_wait(100);                 /* 100 us 계산하는 척 */
+		if ((i % 50) == 0) {
+			k_yield();
+		}
+	}
+	done++;   /* 일부러 atomic이 아님: 아래 ex2에서 다룬다 */
+}
+
+int main(void)
+{
+	printk("CONFIG_SMP=%d MP_MAX_NUM_CPUS=%d arch_num_cpus()=%u main on cpu%d\n",
+	       IS_ENABLED(CONFIG_SMP), CONFIG_MP_MAX_NUM_CPUS, arch_num_cpus(), my_cpu());
+	int64_t t0 = k_uptime_get();
+	for (int i = 0; i &lt; NT; i++) {
+		k_thread_create(&amp;th[i], stk[i], STK, worker, (void *)(uintptr_t)i,
+				NULL, NULL, 5, 0, K_NO_WAIT);
+	}
+	for (int i = 0; i &lt; NT; i++) {
+		k_thread_join(&amp;th[i], K_FOREVER);
+	}
+	int64_t t1 = k_uptime_get();
+	for (int i = 0; i &lt; NT; i++) {
+		printk("T%d: cpu0=%4u cpu1=%4u\n", i, on_cpu[i][0], on_cpu[i][1]);
+	}
+	printk("4 threads x 2000 x 100us = 800 ms of work, wall = %lld ms\n", t1 - t0);
+	return 0;
+}</code></pre></figure>
+<p>SMP 보드(2코어) 출력:</p>
+<figure class="code"><span class="lang">text</span><pre><code>*** Booting Zephyr OS build v4.4.2 ***
+Secondary CPU core 1 (MPID:0x1) is up
+CONFIG_SMP=1 MP_MAX_NUM_CPUS=2 arch_num_cpus()=2 main on cpu0
+T0: cpu0= 650 cpu1=1350
+T1: cpu0=1300 cpu1= 700
+T2: cpu0= 950 cpu1=1050
+T3: cpu0=1150 cpu1= 850
+4 threads x 2000 x 100us = 800 ms of work, wall = 480 ms</code></pre></figure>
+<p>단일 코어 보드(<code>qemu_cortex_a53</code>) 출력:</p>
+<figure class="code"><span class="lang">text</span><pre><code>*** Booting Zephyr OS build v4.4.2 ***
+CONFIG_SMP=0 MP_MAX_NUM_CPUS=1 arch_num_cpus()=1 main on cpu0
+T0: cpu0=2000 cpu1=   0
+T1: cpu0=2000 cpu1=   0
+T2: cpu0=2000 cpu1=   0
+T3: cpu0=2000 cpu1=   0
+4 threads x 2000 x 100us = 800 ms of work, wall = 800 ms</code></pre></figure>
+<p>출력에서 볼 것: SMP에서는 <strong>한 스레드가 두 CPU를 오간다</strong>(T0이 cpu0에서 650번, cpu1에서 1350번 — 50번마다 <code>k_yield()</code>할 때 다른 CPU로 옮겨 갔다). 이게 migration이다. 벽시계는 800 → 480 ms. 이상적인 400 ms보다 긴 이유는 50번마다의 <code>k_yield</code>와 스케줄링 비용, 그리고 <code>k_busy_wait</code>이 시계를 보며 도는 루프라 QEMU 호스트 스케줄링 영향을 받기 때문이다.</p>
+<h3 id="2-4-arch_curr_cpu-id를-읽을-때-왜-인터럽트를-막았나">2.4 <code>arch_curr_cpu()-&gt;id</code>를 읽을 때 왜 인터럽트를 막았나<a class="anchor" href="#2-4-arch_curr_cpu-id를-읽을-때-왜-인터럽트를-막았나" aria-label="link">#</a></h3>
+<p><code>my_cpu()</code>가 <code>arch_irq_lock()</code>으로 감싼 이유: SMP에서 스레드는 <strong>언제든 다른 CPU로 옮겨질 수 있다</strong>. CPU 구조체 포인터를 읽은 직후 선점되어 다른 CPU로 옮겨지면, 이미 "옛 CPU"의 id를 들고 있게 된다. Zephyr는 이 실수를 잡으려고 <code>_current_cpu</code> 매크로에 <code>__ASSERT_NO_MSG(!z_smp_cpu_mobile())</code>를 넣어 뒀다(<code>include/zephyr/kernel_structs.h</code>) — "지금 이 스레드가 옮겨질 수 있는 상태면 CPU 포인터를 쓰지 마라". 인터럽트가 막혀 있으면 이 CPU에서 선점이 안 되니 안전하다.</p>
+<p>이 문제는 단일 코어에 없다. 그리고 FreeRTOS SMP도 똑같다: <code>portGET_CORE_ID()</code> 값은 그 순간에만 맞다. FreeRTOS 커널 코드가 <code>prvCheckForRunStateChange()</code> 안에서 락을 다시 잡은 뒤 <code>xCoreID = portGET_CORE_ID()</code>를 <strong>다시 읽는 것</strong>(§5.2)도 같은 이유다.</p>
+<p>함정: "현재 코어 번호"로 배열(<code>per_cpu_buf[core]</code>)을 고르는 코드는 그 배열을 쓰는 동안 migration이 없어야 한다. 인터럽트를 막거나, 스레드를 그 코어에 pin하거나, 배열 원소 접근 자체를 atomic으로 만든다.</p>
+<hr>
+<h2 id="3-단일-코어에서-안전하던-것이-2코어에서-깨진다">3. 단일 코어에서 안전하던 것이 2코어에서 깨진다<a class="anchor" href="#3-단일-코어에서-안전하던-것이-2코어에서-깨진다" aria-label="link">#</a></h2>
+<blockquote><p>스핀락 · atomic의 정의, <code>_irqsave</code> 변형, 메모리 배리어는 EL F4 · F5에서 다뤘다. 여기서는 <strong>RTOS · MCU에서 달라지는 점</strong>만 본다.</p></blockquote>
+<h3 id="3-1-예제-2-공유-카운터-보호-없음-k_spinlock-atomic_inc-1코어-vs-2코어">3.1 예제 2 — 공유 카운터: 보호 없음 / k_spinlock / atomic_inc, 1코어 vs 2코어<a class="anchor" href="#3-1-예제-2-공유-카운터-보호-없음-k_spinlock-atomic_inc-1코어-vs-2코어" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 우선순위 스레드 둘이 공유 카운터를 20만 번씩 올릴 때 결과가 틀리는지, 그리고 1코어(시분할)와 2코어(진짜 병렬)에서 틀리는 모양이 어떻게 다른지.</p>
+<figure class="code"><span class="lang">text</span><pre><code># ex2/prj.conf
+CONFIG_PRINTK=y
+CONFIG_TIMESLICING=y
+CONFIG_TIMESLICE_SIZE=1</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex2: 공유 카운터 — 보호 없음 / k_spinlock / atomic_inc, 1코어 vs 2코어 */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#include &lt;zephyr/sys/atomic.h&gt;
+
+#define N   200000
+#define STK 2048
+K_THREAD_STACK_ARRAY_DEFINE(stk, 2, STK);
+static struct k_thread th[2];
+static volatile uint32_t plain;
+static uint32_t locked;
+static atomic_t at;
+static struct k_spinlock lock;
+static int mode;
+
+static void worker(void *p1, void *p2, void *p3)
+{
+	for (int i = 0; i &lt; N; i++) {
+		if (mode == 0) {
+			plain++;                    /* LDR → ADD → STR: 끼어들 틈 */
+		} else if (mode == 1) {
+			k_spinlock_key_t k = k_spin_lock(&amp;lock);
+			locked++;
+			k_spin_unlock(&amp;lock, k);
+		} else {
+			atomic_inc(&amp;at);
+		}
+	}
+}
+
+static void run(int m, const char *name)
+{
+	mode = m;
+	uint64_t c0 = k_cycle_get_64();
+	for (int i = 0; i &lt; 2; i++) {
+		k_thread_create(&amp;th[i], stk[i], STK, worker, NULL, NULL, NULL,
+				5, 0, K_NO_WAIT);
+	}
+	k_thread_join(&amp;th[0], K_FOREVER);
+	k_thread_join(&amp;th[1], K_FOREVER);
+	uint64_t ns = k_cyc_to_ns_floor64(k_cycle_get_64() - c0);
+	uint32_t v = (m == 0) ? plain : (m == 1) ? locked : (uint32_t)atomic_get(&amp;at);
+	printk("%-9s result=%7u expected=%u lost=%6u  %4u ns/inc\n", name, v,
+	       2 * N, 2 * N - v, (uint32_t)(ns / (2 * N)));
+}
+
+int main(void)
+{
+	printk("cpus=%u, timer %u Hz\n", arch_num_cpus(),
+	       sys_clock_hw_cycles_per_sec());
+	run(0, "plain++");
+	run(1, "spinlock");
+	run(2, "atomic");
+	return 0;
+}</code></pre></figure>
+<p>SMP(2코어), 세 번 실행:</p>
+<figure class="code"><span class="lang">text</span><pre><code>== smp run 1
+Secondary CPU core 1 (MPID:0x1) is up
+cpus=2, timer 62500000 Hz
+plain++   result= 352033 expected=400000 lost= 47967    11 ns/inc
+spinlock  result= 400000 expected=400000 lost=     0   192 ns/inc
+atomic    result= 400000 expected=400000 lost=     0    56 ns/inc
+== smp run 2
+...
+plain++   result= 319812 expected=400000 lost= 80188     8 ns/inc
+spinlock  result= 400000 expected=400000 lost=     0   161 ns/inc
+atomic    result= 400000 expected=400000 lost=     0    57 ns/inc
+== smp run 3
+...
+plain++   result= 400000 expected=400000 lost=     0    20 ns/inc
+spinlock  result= 400000 expected=400000 lost=     0   365 ns/inc
+atomic    result= 400000 expected=400000 lost=     0    63 ns/inc</code></pre></figure>
+<p>단일 코어 보드, 세 번 실행:</p>
+<figure class="code"><span class="lang">text</span><pre><code>== up run 1
+cpus=1, timer 62500000 Hz
+plain++   result= 321988 expected=400000 lost= 78012   128 ns/inc
+spinlock  result= 400000 expected=400000 lost=     0   224 ns/inc
+atomic    result= 400000 expected=400000 lost=     0   304 ns/inc
+== up run 2
+...
+plain++   result= 321983 expected=400000 lost= 78017   128 ns/inc
+== up run 3
+...
+plain++   result= 321983 expected=400000 lost= 78017   128 ns/inc</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>단일 코어에서도 <code>plain++</code>은 틀린다.</strong> 시분할(<code>CONFIG_TIMESLICE_SIZE=1</code>)로 같은 우선순위 스레드가 tick마다 교대하므로, LDR과 STR 사이에서 선점되면 상대가 한 time slice 동안 올린 값을 통째로 덮어쓴다. 한 번 잘못 끊길 때마다 <strong>수천~수만 개</strong>가 한꺼번에 사라진다. 이 보드는 <code>CONFIG_QEMU_ICOUNT=y</code>(명령 수 기반 가상 시계)라 세 번 모두 거의 같은 숫자가 나왔다(결정적).</li><li><strong>SMP에서는 실행마다 다르다</strong> — 48k, 80k, 0. 0이 나온 3회차는 두 스레드가 거의 겹치지 않고 돈 경우다. "몇 번 돌려 봤는데 괜찮았다"가 SMP 버그 검증으로 쓸모없는 이유다.</li><li>spinlock · atomic은 둘 다 항상 정확하다. 비용은 §8에서 제대로 잰다(여기 ns/inc는 1회 측정이라 참고만).</li><li>교훈: <code>plain++</code> 공유는 단일 코어에서도 원래 버그였다(시분할 또는 ISR이 있으면). SMP는 그 버그를 <strong>더 자주, 더 무작위로</strong> 드러낸다. 진짜 "SMP에서만 나타나는" 버그는 §3.3의 예제 4다.</li></ul>
+<h3 id="3-2-생성-코드로-보기-예제-3-k_spin_lock은-aarch64에서-무엇이-되나">3.2 생성 코드로 보기 — 예제 3: <code>k_spin_lock</code>은 aarch64에서 무엇이 되나<a class="anchor" href="#3-2-생성-코드로-보기-예제-3-k_spin_lock은-aarch64에서-무엇이-되나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: Zephyr의 <code>k_spin_lock()</code>이 실제로 "인터럽트 마스크 + atomic CAS 루프"라는 것.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'OD=$(ls /var/rtoslab/zephyr-sdk-1.0.1/gnu/aarch64-zephyr-elf/bin/*objdump | head -1); $OD -d --no-show-raw-insn /var/tmp/rtos/C10/ex2_smp/zephyr/zephyr.elf | sed -n "/&lt;worker&gt;:/,/^$/p"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>...
+40001380:	ldr	w0, [x21]                         # mode 읽기
+40001384:	cbnz	w0, 400013b4 &lt;worker+0x68&gt;
+40001388:	adrp	x1, 40056000 &lt;k_mem_page_frames+0x3fb10&gt;
+4000138c:	ldr	w0, [x1, #1280]                   # plain++ = LDR
+40001390:	add	w0, w0, #0x1                      #           ADD
+40001394:	str	w0, [x1, #1280]                   #           STR
+...
+400013bc:	mrs	x23, daif                         # k_spin_lock: 이전 인터럽트 상태 저장
+400013c0:	msr	daifset, #0x2                     #   IRQ 마스크 (이 CPU만)
+400013c4:	mov	x2, x19
+400013c8:	mov	x1, #0x1
+400013cc:	mov	x0, #0x0
+400013d0:	bl	40000f90 &lt;__aarch64_cas8_acq_rel&gt; #   atomic_cas(&amp;l-&gt;locked, 0, 1)
+400013d4:	cbnz	x0, 40001400 &lt;worker+0xb4&gt;       #   실패하면 spin
+400013d8:	adrp	x1, 40056000 &lt;k_mem_page_frames+0x3fb10&gt;
+400013dc:	ldr	w0, [x1, #1276]                   # locked++
+400013e0:	and	x23, x23, #0xffffffff
+400013e4:	add	w0, w0, #0x1
+400013e8:	str	w0, [x1, #1276]
+400013ec:	mov	x1, x19
+400013f0:	mov	x0, #0x0
+400013f4:	bl	40000fc0 &lt;__aarch64_swp8_acq_rel&gt; # k_spin_unlock: atomic_clear(release)
+400013f8:	msr	daif, x23                         #   인터럽트 상태 복원
+400013fc:	b	40001398 &lt;worker+0x4c&gt;
+40001400:	bl	40003350 &lt;arch_spin_relax&gt;        # spin: relax 후
+40001404:	ldar	x0, [x19]                         #   acquire 읽기로 풀렸나 확인
+40001408:	cbnz	x0, 40001400 &lt;worker+0xb4&gt;
+4000140c:	b	400013c4 &lt;worker+0x78&gt;            #   다시 CAS 시도
+40001410:	mov	x1, x22
+40001414:	mov	x0, #0x1
+40001418:	bl	40000ff0 &lt;__aarch64_ldadd8_acq_rel&gt; # atomic_inc
+...</code></pre></figure>
+<p>(<code>#</code> 뒤 설명은 덧붙인 것이다. 출력 앞부분 프롤로그는 생략했다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>k_spin_lock</code> = <strong>① 이 CPU의 IRQ 마스크(<code>msr daifset, #2</code>) → ② 락 변수에 CAS</strong> → 임계 구역 → <strong>③ release 저장 → ④ IRQ 상태 복원</strong>. 소스(<code>include/zephyr/spinlock.h</code>)의 <code>k.key = arch_irq_lock();</code> 다음 <code>while (!atomic_cas(&amp;l-&gt;locked, 0, 1)) { do { arch_spin_relax(); } while (atomic_get(&amp;l-&gt;locked) != 0); }</code>가 그대로 보인다. 실패하면 CAS를 반복하지 않고 <strong>읽기만 하며 기다렸다가</strong>(<code>ldar</code> 루프, test-and-test-and-set) 풀린 것 같을 때만 CAS를 다시 한다 — 캐시 라인을 덜 흔든다.</li><li>atomic 연산이 <code>__aarch64_cas8_acq_rel</code> 같은 <strong>함수 호출</strong>이다. GCC의 outline atomics: 실행 시점에 CPU가 LSE(<code>casal</code> 명령)를 지원하면 그것을, 아니면 LDXR/STXR 루프를 쓴다. Cortex-A53은 Armv8.0이라 LSE가 없어서 LL/SC 루프로 간다. (랩 README가 말한 "Ubuntu gcc로 Zephyr를 빌드하면 outline atomics 때문에 링크 안 됨"이 바로 이 함수들이다 — Zephyr SDK 툴체인은 이걸 libgcc에 넣어 준다.)</li><li>왜 IRQ를 먼저 막나: 락을 쥔 채 같은 CPU의 ISR이 같은 락을 잡으려 하면 영원히 돈다(self-deadlock, EL F4 §4). Zephyr의 <code>k_spin_lock</code>은 항상 irqsave 버전이다. 그래서 <strong>Zephyr에서는 같은 <code>k_spinlock</code>을 스레드와 ISR이 함께 써도 된다</strong>.</li><li>단일 코어 빌드에서는 ②③이 사라지고(<code>#ifdef CONFIG_SMP</code>) <code>k_spin_lock</code> = <code>irq_lock</code>이다. 같은 소스가 UP에서는 "인터럽트 끄기", SMP에서는 "인터럽트 끄기 + 스핀락"이 된다. <strong>이게 이 노트 제목의 "SMP에서 크리티컬 섹션 = 스핀락"이다.</strong></li></ul>
+<h3 id="3-3-예제-4-우선순위와-k_sched_lock으로-배제하던-코드-smp에서만-깨진다">3.3 예제 4 — 우선순위와 <code>k_sched_lock</code>으로 배제하던 코드 (SMP에서만 깨진다)<a class="anchor" href="#3-3-예제-4-우선순위와-k_sched_lock으로-배제하던-코드-smp에서만-깨진다" aria-label="link">#</a></h3>
+<p>단일 코어 RTOS에서 흔한 두 관용구가 있다.</p>
+<ul><li><strong>"나보다 높은 건 없다"</strong>: 가장 높은 우선순위 태스크는 다른 태스크에게 선점되지 않으니, 공유 데이터를 락 없이 고친다. 낮은 쪽만 조심하면 된다.</li><li><strong>"스케줄러 잠금 = 가벼운 뮤텍스"</strong>: 낮은 태스크는 <code>k_sched_lock()</code>(FreeRTOS는 <code>vTaskSuspendAll()</code>)으로 스케줄러를 잠그고 고친다. 그동안 어떤 스레드도 끼어들 수 없다(ISR은 예외).</li></ul>
+<p>단일 코어에서는 이 둘을 합치면 정말로 안전하다. SMP에서는?</p>
+<p>무엇을 확인하나: 같은 코드를 단일 코어와 2코어에서 돌렸을 때, 2코어에서만 값이 사라지는지. 그리고 "둘 다 <code>k_sched_lock</code>"과 "둘 다 <code>k_spinlock</code>"은 어떤지.</p>
+<figure class="code"><span class="lang">text</span><pre><code># ex3/prj.conf
+CONFIG_PRINTK=y
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000
+CONFIG_QEMU_ICOUNT=n</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex3: 단일 코어 가정 "높은 우선순위 + k_sched_lock = 상호 배제"가 SMP에서 깨진다 */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#define ROUNDS 200
+#define BURST  5000
+#define STK    2048
+K_THREAD_STACK_DEFINE(stk_h, STK);
+K_THREAD_STACK_DEFINE(stk_l, STK);
+static struct k_thread th_h, th_l;
+static volatile uint32_t shared;
+static struct k_spinlock lock;
+static int mode;               /* 0: H 잠금 없음 + L sched_lock, 1: 둘 다 spinlock, 2: 둘 다 sched_lock */
+static volatile uint32_t h_cpus, l_cpus;
+
+static void bump(void)
+{
+	for (int j = 0; j &lt; BURST; j++) {
+		shared++;
+	}
+}
+static void guarded(bool is_high)
+{
+	if (mode == 1) {
+		k_spinlock_key_t k = k_spin_lock(&amp;lock);
+		bump();
+		k_spin_unlock(&amp;lock, k);
+	} else if (mode == 0 &amp;&amp; is_high) {
+		bump();                         /* "나보다 높은 스레드는 없다": UP에서는 안전 */
+	} else {
+		k_sched_lock();                 /* UP: 다른 스레드가 끼어들 수 없다 */
+		bump();
+		k_sched_unlock();
+	}
+}
+static void high(void *a, void *b, void *c)     /* prio 2 */
+{
+	for (int r = 0; r &lt; ROUNDS; r++) {
+		h_cpus |= BIT(arch_curr_cpu()-&gt;id);
+		guarded(true);
+		k_msleep(1);
+	}
+}
+static void low(void *a, void *b, void *c)      /* prio 8 */
+{
+	for (int r = 0; r &lt; ROUNDS; r++) {
+		l_cpus |= BIT(arch_curr_cpu()-&gt;id);
+		guarded(false);
+		k_busy_wait(300);
+	}
+}
+static void run(int m, const char *name)
+{
+	mode = m; shared = 0; h_cpus = l_cpus = 0;
+	k_thread_create(&amp;th_l, stk_l, STK, low, NULL, NULL, NULL, 8, 0, K_NO_WAIT);
+	k_thread_create(&amp;th_h, stk_h, STK, high, NULL, NULL, NULL, 2, 0, K_NO_WAIT);
+	k_thread_join(&amp;th_h, K_FOREVER);
+	k_thread_join(&amp;th_l, K_FOREVER);
+	printk("%-20s cpus=%u shared=%7u lost=%6u (H cpus 0x%x, L cpus 0x%x)\n", name,
+	       arch_num_cpus(), shared, 2 * ROUNDS * BURST - shared, h_cpus, l_cpus);
+}
+int main(void)
+{
+	run(0, "H nolock+L schedlock");
+	run(2, "both k_sched_lock");
+	run(1, "both k_spinlock");
+	return 0;
+}</code></pre></figure>
+<p>(빈 줄 몇 개를 빼고 실은 것 말고는 실행한 소스 그대로다. <code>h_cpus</code>의 <code>|=</code>는 스레드 하나만 쓰므로 경쟁이 없다.)</p>
+<figure class="code"><span class="lang">text</span><pre><code>== smp run 1
+H nolock+L schedlock cpus=2 shared=1987307 lost= 12693 (H cpus 0x3, L cpus 0x3)
+both k_sched_lock    cpus=2 shared=1973843 lost= 26157 (H cpus 0x1, L cpus 0x2)
+both k_spinlock      cpus=2 shared=2000000 lost=     0 (H cpus 0x1, L cpus 0x2)
+== smp run 2
+H nolock+L schedlock cpus=2 shared=1980004 lost= 19996 (H cpus 0x3, L cpus 0x3)
+both k_sched_lock    cpus=2 shared=1990494 lost=  9506 (H cpus 0x1, L cpus 0x2)
+both k_spinlock      cpus=2 shared=2000000 lost=     0 (H cpus 0x1, L cpus 0x2)
+== smp run 3
+H nolock+L schedlock cpus=2 shared=1984085 lost= 15915 (H cpus 0x2, L cpus 0x1)
+both k_sched_lock    cpus=2 shared=1986641 lost= 13359 (H cpus 0x2, L cpus 0x1)
+both k_spinlock      cpus=2 shared=2000000 lost=     0 (H cpus 0x2, L cpus 0x1)
+== up run 1
+H nolock+L schedlock cpus=1 shared=2000000 lost=     0 (H cpus 0x1, L cpus 0x1)
+both k_sched_lock    cpus=1 shared=2000000 lost=     0 (H cpus 0x1, L cpus 0x1)
+both k_spinlock      cpus=1 shared=2000000 lost=     0 (H cpus 0x1, L cpus 0x1)
+== up run 2, 3: 세 줄 모두 lost=0 (같은 출력이라 생략)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>단일 코어: 세 방식 모두 0</strong> — 우선순위와 스케줄러 잠금만으로 진짜 안전했다. 이 코드는 단일 코어 시절에 몇 년이고 테스트를 통과했을 것이다.</li><li><strong>2코어: 앞의 두 방식은 매번 1만~2만 개를 잃는다.</strong> H(prio 2)와 L(prio 8)이 서로 다른 CPU에서 <strong>동시에</strong> 돈다(H cpus, L cpus 마스크가 서로 다른 비트). <code>k_sched_lock()</code>은 "<strong>이 CPU에서</strong> 지금 스레드를 선점하지 마라"(현재 스레드의 <code>base.sched_locked</code> 카운트)일 뿐, 다른 CPU를 멈추지 않는다. 둘 다 <code>k_sched_lock()</code>을 걸어도 마찬가지다.</li><li><code>k_spinlock</code>만 2코어에서 정확하다. <strong>SMP에서 상호 배제 수단은 스핀락(짧은 구간)과 뮤텍스 · 세마포어(긴 구간) 뿐이다.</strong> 우선순위 · 스케줄러 잠금 · 인터럽트 끄기(<code>irq_lock</code>)는 "이 코어 안에서만" 효과가 있다.</li></ul>
+<p>함정 — Zephyr의 <code>irq_lock()</code>: SMP 빌드에서 <code>irq_lock()</code>은 이 CPU 인터럽트 마스크 + <strong>전역 락</strong>(<code>kernel/smp.c</code>의 <code>z_smp_global_lock()</code>, 스레드별 재진입 카운트)이다. 그래서 <code>irq_lock</code>끼리는 코어를 넘어 배제가 되지만, 무거운 전역 락이라 성능이 나쁘고 Zephyr 문서도 새 코드에서는 <code>k_spinlock</code>을 쓰라고 한다. 반대로 <code>arch_irq_lock()</code>은 이 CPU만 막는다.</p>
+<p>FreeRTOS에서 같은 실험을 하면 결과가 <strong>조금 다르다</strong>(§4.5): <code>vTaskSuspendAll()</code>은 SMP에서 전역 task lock을 쥐기 때문에 "둘 다 SuspendAll"은 안전하다. 하지만 "H는 잠금 없음"인 경우는 똑같이 깨진다.</p>
+<hr>
+<h2 id="4-freertos-smp-n개-를-고르는-규칙과-옵션-그리고-qemu-듀얼-m33에서-실제로-돌리기">4. FreeRTOS SMP — "N개"를 고르는 규칙과 옵션, 그리고 QEMU 듀얼 M33에서 실제로 돌리기<a class="anchor" href="#4-freertos-smp-n개-를-고르는-규칙과-옵션-그리고-qemu-듀얼-m33에서-실제로-돌리기" aria-label="link">#</a></h2>
+<h3 id="4-1-역사와-지원-포트-v11-3-2-소스-기준">4.1 역사와 지원 포트 (V11.3.2 소스 기준)<a class="anchor" href="#4-1-역사와-지원-포트-v11-3-2-소스-기준" aria-label="link">#</a></h3>
+<p>FreeRTOS는 V11.0.0(2023-12)에서 SMP를 메인라인에 합쳤다(그 전에는 별도 <code>smp</code> 브랜치와 ESP-IDF 자체 변형). <code>History.txt</code>의 해당 줄: "FreeRTOS Version 11.0.0 is the first to merge Symmetric Multiprocessing (SMP) support into the mainline release." 커널 하나로 SMP와 단일 코어를 다 빌드한다 — <code>configNUMBER_OF_CORES</code>(기본 1)만 바꾸면 <code>tasks.c</code>가 <code>#if ( configNUMBER_OF_CORES &gt; 1 )</code> 분기로 SMP 코드를 켠다.</p>
+<p>SMP를 쓰려면 <strong>포트가</strong> 다음 매크로를 정의해야 한다(<code>include/FreeRTOS.h</code>가 없으면 <code>#error</code>를 낸다).</p>
+<div class="tw"><table><thead><tr><th>매크로</th><th>뜻</th><th>단일 코어 기본값</th></tr></thead><tbody><tr><td><code>portGET_CORE_ID()</code></td><td>지금 코드가 도는 코어 번호</td><td><code>0</code></td></tr><tr><td><code>portYIELD_CORE( x )</code></td><td>코어 x에게 "다시 스케줄해" 인터럽트(IPI)</td><td><code>portYIELD()</code></td></tr><tr><td><code>portGET_TASK_LOCK( xCoreID )</code> / <code>portRELEASE_TASK_LOCK</code></td><td>태스크 쪽 커널 락 (재진입 스핀락)</td><td>빈 매크로</td></tr><tr><td><code>portGET_ISR_LOCK( xCoreID )</code> / <code>portRELEASE_ISR_LOCK</code></td><td>ISR과도 공유하는 커널 락</td><td>빈 매크로</td></tr><tr><td><code>portGET_CRITICAL_NESTING_COUNT( xCoreID )</code> 등</td><td>코어별 크리티컬 섹션 중첩 수</td><td>TCB 안 <code>uxCriticalNesting</code></td></tr></tbody></table></div>
+<p><code>portable/</code> 아래에서 <code>portGET_CORE_ID</code>를 진짜로 정의한 포트를 grep하면(V11.3.2):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/rtoslab/src/FreeRTOS-Kernel; grep -rln "define portGET_CORE_ID" portable | grep -v template | sed "s#/[^/]*\$##" | sort -u'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>portable/ARMv8M/non_secure
+portable/CCRH/F1Kx
+portable/GCC/ARM_CM23/non_secure
+portable/GCC/ARM_CM23_NTZ/non_secure
+portable/GCC/ARM_CM33/non_secure
+portable/GCC/ARM_CM33_NTZ/non_secure
+...
+portable/GCC/ARM_CR82
+portable/IAR/ARM_CM23/non_secure
+...
+portable/ThirdParty/GCC/RP2040/include
+portable/ThirdParty/xClang/XCOREAI</code></pre></figure>
+<p>(GCC · IAR의 Armv8-M 계열 디렉터리 — CM23 · CM33 · CM35P · CM52 · CM55 · CM85 · STAR_MC3, TZ/NTZ — 은 같은 줄이라 <code>...</code>로 줄였다.)</p>
+<p>정리하면:</p>
+<div class="tw"><table><thead><tr><th>포트</th><th>SMP 들어온 버전</th><th>코어 간 인터럽트(IPI)</th><th>락 구현</th><th>비고</th></tr></thead><tbody><tr><td>ThirdParty RP2040 (M0+ × 2)</td><td>V11.0.0 메인라인 합류 때부터 (그 전엔 smp 브랜치)</td><td>SIO 코어 간 FIFO에 쓰기 (<code>sio_hw-&gt;fifo_wr = 0</code>)</td><td>RP2040 SIO <strong>하드웨어 스핀락</strong> 2개</td><td>M0+는 LDREX/STREX가 없어서 하드웨어 스핀락이 필수</td></tr><tr><td>ThirdParty XCOREAI</td><td>V11.0.0 메인라인 합류 때부터</td><td><code>vPortYieldOtherCore</code></td><td><code>rtos_lock_acquire(0/1)</code></td><td>XMOS</td></tr><tr><td>CCRH F1Kx (Renesas RH850)</td><td>V11.2.0 (포트 추가)</td><td><code>vPortYieldCore</code></td><td><code>vPortRecursiveLockAcquire</code></td><td></td></tr><tr><td>GCC ARM_CR82 (Armv8-R AArch64)</td><td>V11.3.0</td><td>GIC SGI (<code>vInterruptCore(portYIELD_CORE_INT_ID, core)</code>)</td><td><code>vPortRecursiveLock</code></td><td>코드 읽기만 함 — 랩에 R82 QEMU 타깃 없음</td></tr><tr><td>Armv8-M (CM23/33/35P/52/55/85, STAR-MC3)</td><td>V11.3.1 (2026-08)</td><td><strong>애플리케이션이 <code>vInterruptCore()</code> 제공</strong> (포트는 weak stub)</td><td>LDREX/STREX 스핀락 + WFE/SEV</td><td>ReadMe: "only been validated on Arm Cortex-M33 Non-TrustZone Non-MPU port" — MPU · TrustZone이 켜지면 <code>#error</code></td></tr></tbody></table></div>
+<p>이 저장소의 <code>ThirdParty/GCC/Xtensa_ESP32</code> · RISC-V · ARM_CM3/CM4F 포트는 <code>configNUMBER_OF_CORES</code>를 쓰지 않는다 — SMP 미지원이다. ESP32는 ESP-IDF가 자기 FreeRTOS 변형으로 SMP를 돌린다. 이 노트의 Cortex-M3 랩 보드(mps2-an385)는 코어가 하나라 애초에 SMP 대상이 아니다.</p>
+<h3 id="4-2-스케줄링-규칙을-소스로-prvyieldfortask">4.2 스케줄링 규칙을 소스로 — <code>prvYieldForTask()</code><a class="anchor" href="#4-2-스케줄링-규칙을-소스로-prvyieldfortask" aria-label="link">#</a></h3>
+<p>태스크 하나가 ready가 될 때(세마포어 give, 지연 만료, <code>vTaskResume</code> 등) 커널은 "이 태스크를 지금 어느 코어에서 돌려야 하나"를 정한다. 그 함수가 <code>tasks.c</code>의 <code>prvYieldForTask()</code>다. 핵심만 남기면:</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* tasks.c (V11.3.2) prvYieldForTask() 요약 — 크리티컬 섹션 안에서만 불린다 */
+xLowestPriorityToPreempt = pxTCB-&gt;uxPriority - 1;
+for( xCoreID = 0; xCoreID &lt; configNUMBER_OF_CORES; xCoreID++ )
+{
+    xCurrentCoreTaskPriority = pxCurrentTCBs[ xCoreID ]-&gt;uxPriority;
+    if( idle 태스크면 ) xCurrentCoreTaskPriority -= 1;     /* idle은 tskIDLE_PRIORITY - 1로 취급 */
+
+    if( 그 코어가 실행 중이고 xYieldPendings[ xCoreID ] == pdFALSE )
+    {
+        if( xCurrentCoreTaskPriority &lt;= xLowestPriorityToPreempt )
+            if( pxTCB-&gt;uxCoreAffinityMask 에 xCoreID 비트가 있고 )          /* configUSE_CORE_AFFINITY */
+                if( pxCurrentTCBs[ xCoreID ]-&gt;xPreemptionDisable == pdFALSE ) /* configUSE_TASK_PREEMPTION_DISABLE */
+                {   xLowestPriorityToPreempt = xCurrentCoreTaskPriority;
+                    xLowestPriorityCore = xCoreID;  }
+
+        #if ( configRUN_MULTIPLE_PRIORITIES == 0 )
+            /* 새 태스크보다 낮은(idle 아닌) 태스크를 돌리는 코어는 전부 양보시킨다 */
+            if( 낮은 태스크 ) { prvYieldCore( xCoreID ); xYieldCount++; }
+        #endif
+    }
+}
+if( xLowestPriorityCore &gt;= 0 ) prvYieldCore( xLowestPriorityCore );   /* RMP=0이면 xYieldCount == 0 일 때만 */</code></pre></figure>
+<p>읽는 법:</p>
+<ul><li><strong>"가장 낮은 우선순위 태스크를 돌리는 코어"를 선점 대상으로 고른다.</strong> 새 태스크보다 낮아야 하고, 새 태스크의 affinity가 그 코어를 허락해야 하고, 그 코어의 태스크가 선점 금지(<code>vTaskPreemptionDisable</code>) 상태가 아니어야 한다. 이게 "가장 높은 N개가 돈다"를 유지하는 방법이다.</li><li>idle 태스크는 우선순위를 하나 더 낮게 쳐서, 놀고 있는 코어가 가장 먼저 선택된다.</li><li><code>configRUN_MULTIPLE_PRIORITIES == 0</code>이면 <strong>새 태스크보다 낮은 태스크를 돌리는 모든 코어</strong>에 양보를 요청한다. 그래서 한 번에 한 우선순위 레벨만 돈다.</li><li>실제 "양보 요청"은 <code>prvYieldCore( xCoreID )</code> 매크로다:</li></ul>
+<figure class="code"><span class="lang">c</span><pre><code>/* tasks.c (V11.3.2) */
+#define prvYieldCore( xCoreID )                                                          \
+do {                                                                                     \
+    if( ( xCoreID ) == ( BaseType_t ) portGET_CORE_ID() )                                \
+    {   /* 이 코어면: 크리티컬 섹션이 끝날 때 양보하도록 표시만 */                         \
+        xYieldPendings[ ( xCoreID ) ] = pdTRUE;                                          \
+    }                                                                                    \
+    else                                                                                 \
+    {   /* 다른 코어면: 아직 요청 안 했을 때만 IPI */                                     \
+        if( pxCurrentTCBs[ ( xCoreID ) ]-&gt;xTaskRunState != taskTASK_SCHEDULED_TO_YIELD ) \
+        {                                                                                \
+            portYIELD_CORE( xCoreID );                                                   \
+            pxCurrentTCBs[ ( xCoreID ) ]-&gt;xTaskRunState = taskTASK_SCHEDULED_TO_YIELD;   \
+        }                                                                                \
+    }                                                                                    \
+} while( 0 )</code></pre></figure>
+<p>(한국어 주석은 덧붙인 것이다.)</p>
+<p><code>xTaskRunState</code>는 SMP TCB의 새 필드다. 실행 중이면 <strong>그 태스크가 도는 코어 번호</strong>, 아니면 <code>taskTASK_NOT_RUNNING</code>, 양보 요청을 받았으면 <code>taskTASK_SCHEDULED_TO_YIELD</code>. 단일 코어의 <code>pxCurrentTCB</code> 하나가 <code>pxCurrentTCBs[ configNUMBER_OF_CORES ]</code> 배열이 됐다.</p>
+<p>옵션 정리 (전부 <code>include/FreeRTOS.h</code>에서 기본값 · 제약 확인):</p>
+<div class="tw"><table><thead><tr><th>옵션</th><th>기본값</th><th>효과</th><th>제약</th></tr></thead><tbody><tr><td><code>configNUMBER_OF_CORES</code></td><td>1</td><td>코어 수. 1보다 크면 SMP 코드</td><td>포트가 위 매크로를 정의해야 함</td></tr><tr><td><code>configRUN_MULTIPLE_PRIORITIES</code></td><td>0</td><td>1: 다른 우선순위 태스크도 동시에 돈다. 0: 한 번에 한 우선순위 레벨만</td><td><code>configUSE_TASK_PREEMPTION_DISABLE</code>를 쓰려면 1이어야 함 (<code>#error</code>)</td></tr><tr><td><code>configUSE_CORE_AFFINITY</code></td><td>0</td><td><code>vTaskCoreAffinitySet/Get</code>, <code>xTaskCreateAffinitySet</code> 사용 가능</td><td>단일 코어에서 켜면 <code>#error</code></td></tr><tr><td><code>configTASK_DEFAULT_CORE_AFFINITY</code></td><td><code>tskNO_AFFINITY</code></td><td>affinity 안 준 태스크의 기본 마스크</td><td>affinity 켤 때만</td></tr><tr><td><code>configUSE_TASK_PREEMPTION_DISABLE</code></td><td>0</td><td><code>vTaskPreemptionDisable/Enable</code>: 이 태스크는 다른 코어의 결정으로 선점되지 않음</td><td>SMP 전용, RMP=1, 선점 스케줄러 필요</td></tr><tr><td><code>configUSE_PASSIVE_IDLE_HOOK</code></td><td>0</td><td>코어 0이 아닌 코어의 idle(passive idle) 태스크용 훅</td><td>SMP에서는 정의 필수</td></tr><tr><td><code>configIDLE_AFFINITY</code></td><td>0</td><td>idle 태스크를 자기 코어에 고정 (V11.3.1 추가)</td><td>affinity 켤 때</td></tr></tbody></table></div>
+<p>함정: <code>configRUN_MULTIPLE_PRIORITIES</code>의 <strong>기본값이 0</strong>이다. 단일 코어 코드를 "가장 덜 놀라게" 옮기려는 선택이지만, 0이면 코어가 놀 수 있다(아래 실험). 1로 바꾸는 순간 §3.3 같은 우선순위 기반 가정이 다 깨진다.</p>
+<h3 id="4-3-qemu-mps2-an521-cortex-m33-2-위에-freertos-smp를-직접-올리기">4.3 QEMU mps2-an521(Cortex-M33 × 2) 위에 FreeRTOS SMP를 직접 올리기<a class="anchor" href="#4-3-qemu-mps2-an521-cortex-m33-2-위에-freertos-smp를-직접-올리기" aria-label="link">#</a></h3>
+<p>랩에 FreeRTOS SMP 템플릿은 없다. 하지만 QEMU <code>mps2-an521</code>은 SSE-200 서브시스템 — <strong>Cortex-M33 두 개</strong>가 메모리를 공유하는 칩 — 을 모델링하고, V11.3.1부터 <code>ARM_CM33_NTZ</code> 포트가 SMP를 지원한다. 포트 ReadMe(<code>portable/ARMv8M/non_secure/ReadMe.txt</code>)가 요구하는 것을 그대로 구현하면 된다.</p>
+<p>포트 ReadMe가 정한 부팅 순서:</p>
+<ul><li>primary(코어 0): <code>.data</code> · <code>.bss</code> 초기화 → <code>main()</code> → 태스크 생성 · affinity 지정 → <code>vTaskStartScheduler()</code> → <code>xPortStartScheduler()</code>가 tick 타이머 설정 후 <code>ucPrimaryCoreInitDoneFlag = 1</code> → <strong><code>configWAKE_SECONDARY_CORES()</code></strong> 호출 → <code>ucSecondaryCoresReadyFlags[]</code>가 다 설 때까지 대기 → 첫 태스크 시작.</li><li>secondary(코어 1): 코어별 초기화 → IPI 수단 설정 → <code>vPortConfigureInterruptPriorities()</code> → <code>ucSecondaryCoresReadyFlags[0] = pdTRUE</code> → <strong><code>svc 102</code></strong>(<code>portSVC_START_SCHEDULER</code>)로 자기 코어의 첫 태스크 시작.</li><li>애플리케이션이 줄 것: <code>configCORE_ID_REGISTER</code>(코어 번호 레지스터 주소), <code>configWAKE_SECONDARY_CORES</code>(코어 1 깨우는 함수), <code>vInterruptCore(core)</code>(IPI — 포트에는 아무것도 안 하는 weak 함수만 있다).</li></ul>
+<p>AN521에서 각각에 해당하는 하드웨어(주소는 Zephyr <code>soc/arm/mps2/soc.c</code>와 <code>boards/arm/mps2/mps2_an521-common.dtsi</code>에서 확인):</p>
+<div class="tw"><table><thead><tr><th>필요한 것</th><th>AN521 (SSE-200)</th><th>주소 (Secure 별칭)</th></tr></thead><tbody><tr><td>코어 번호</td><td>CPU_IDENTITY.CPUID</td><td><code>0x5001F000</code></td></tr><tr><td>코어 1 깨우기</td><td>시스템 제어 INITSVTOR1(코어 1 벡터 테이블), CPU_WAIT</td><td><code>0x50021114</code>, <code>0x50021118</code></td></tr><tr><td>IPI</td><td>전용 doorbell을 안 쓰고 <strong>CMSDK 타이머를 1카운트로 쏘아</strong> 그 IRQ를 대상 코어의 NVIC에서만 켬 (TIMER0 → 코어 0, IRQ 3 / TIMER1 → 코어 1, IRQ 4)</td><td><code>0x50000000</code>, <code>0x50001000</code></td></tr><tr><td>콘솔</td><td>CMSDK UART0 (폴링)</td><td><code>0x50200000</code></td></tr><tr><td>코드 / RAM</td><td>SSRAM1 / SSRAM2·3</td><td><code>0x10000000</code> / <code>0x38000000</code></td></tr></tbody></table></div>
+<p>IPI를 타이머로 흉내 낸 이유: SSE-200 내부 장치 인터럽트는 두 코어의 NVIC에 같이 들어가지만(QEMU armsse가 IRQ를 두 CPU로 나눈다), NVIC는 코어마다 따로라 <strong>받을 코어의 NVIC에서만 그 IRQ를 enable</strong>하면 "코어 x만 받는 인터럽트"가 된다. 실제 칩이라면 MHU(Message Handling Unit) doorbell을 쓸 자리다. 동작은 같다: 다른 코어에 인터럽트를 걸고, 그 ISR이 PendSV를 걸어 재스케줄한다.</p>
+<h4 id="예제-5-보드-지원-코드-startup-c-board-c">예제 5 — 보드 지원 코드 (startup.c · board.c)<a class="anchor" href="#예제-5-보드-지원-코드-startup-c-board-c" aria-label="link">#</a></h4>
+<p>무엇을 확인하나: 두 코어가 같은 벡터 테이블로 깨어나 CPUID로 갈라지는 시작 코드, 그리고 포트 ReadMe의 secondary 흐름 · IPI 구현.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* startup.c: 두 코어가 같은 벡터 테이블로 깨어난다. CPUID를 읽어 core1이면 스택을 바꾸고 secondary_main으로 */
+#include &lt;stdint.h&gt;
+extern uint32_t __stack0_top, __stack1_top, __etext, __data_start, __data_end, __bss_start, __bss_end;
+extern void SVC_Handler(void), PendSV_Handler(void), SysTick_Handler(void);
+extern void TIMER0_Handler(void), TIMER1_Handler(void), HardFault_Handler(void);
+extern int main(void);
+extern void secondary_main(void);
+void Reset_Handler(void);
+static void Default_Handler(void) { for (;;) { } }
+
+__attribute__((section(".vectors"), used))
+static void (*const vectors[32])(void) = {
+	(void (*)(void))&amp;__stack0_top, Reset_Handler, Default_Handler, HardFault_Handler,
+	Default_Handler, Default_Handler, Default_Handler, Default_Handler,
+	0, 0, 0, SVC_Handler, Default_Handler, 0, PendSV_Handler, SysTick_Handler,
+	Default_Handler, Default_Handler, Default_Handler, TIMER0_Handler,   /* IRQ3 */
+	TIMER1_Handler,                                                       /* IRQ4 */
+};
+
+void primary_reset(void)
+{
+	uint32_t *s = &amp;__etext, *d = &amp;__data_start;
+	while (d &lt; &amp;__data_end) { *d++ = *s++; }
+	for (d = &amp;__bss_start; d &lt; &amp;__bss_end; ) { *d++ = 0; }
+	main();
+	for (;;) { }
+}
+
+__attribute__((naked)) void Reset_Handler(void)
+{
+	__asm volatile(
+		"ldr r0, =0x5001F000 \n"     /* CPU_IDENTITY.CPUID */
+		"ldr r0, [r0]        \n"
+		"cbz r0, 1f          \n"
+		"ldr r1, =__stack1_top \n"
+		"msr msp, r1         \n"
+		"b secondary_main    \n"
+		"1: b primary_reset  \n");
+}</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* board.c (앞부분): AN521 보드 지원 — UART0 출력, core1 깨우기, 타이머로 만든 IPI */
+#include "FreeRTOS.h"
+#include "task.h"
+#define REG(a)      (*(volatile uint32_t *)(a))
+#define UART0       0x50200000u
+#define TIMER(c)    (0x50000000u + 0x1000u * (c))   /* TIMER0→core0 IRQ3, TIMER1→core1 IRQ4 */
+#define SYSCTL      0x50021000u
+extern volatile uint8_t ucSecondaryCoresReadyFlags[];
+extern void vPortConfigureInterruptPriorities(void);
+volatile uint32_t ulIpiCount[2];
+/* ... uart_puts / uart_putu / board_exit(semihosting) / vAssertCalled / HardFault_Handler
+       / memset / memcpy 는 평범한 코드라 생략 ... */
+
+static void enable_ipi_irq(uint32_t core)        /* 자기 NVIC에서 자기 타이머 IRQ만 켠다 */
+{
+	*(volatile uint8_t *)(0xE000E400u + 3 + core) = 0xFF;   /* 가장 낮은 우선순위 */
+	REG(0xE000E100u) = 1u &lt;&lt; (3 + core);
+}
+void vInterruptCore(uint8_t ucCoreID)            /* portYIELD_CORE(x)가 부른다 */
+{
+#ifdef NO_IPI
+	(void)ucCoreID; return;                      /* 실험: 포트의 weak stub처럼 아무것도 안 함 */
+#endif
+	REG(TIMER(ucCoreID) + 0x4) = 1;              /* VALUE=1 → 곧 0 → IRQ */
+	REG(TIMER(ucCoreID) + 0x0) = 0x9;            /* ENABLE | IRQ ENABLE */
+}
+static void ipi_isr(uint32_t core)
+{
+	REG(TIMER(core) + 0x0) = 0;
+	REG(TIMER(core) + 0xC) = 1;                  /* INTCLEAR */
+	ulIpiCount[core]++;
+	portYIELD_FROM_ISR(pdTRUE);                  /* 이 코어에 PendSV → 재스케줄 */
+}
+void TIMER0_Handler(void) { ipi_isr(0); }
+void TIMER1_Handler(void) { ipi_isr(1); }
+
+BaseType_t xWakeSecondaryCores(void)             /* configWAKE_SECONDARY_CORES */
+{
+	REG(SYSCTL + 0x114) = 0x10000000u;           /* INITSVTOR1 = 같은 벡터 테이블 */
+	REG(SYSCTL + 0x118) = 0;                     /* CPUWAIT 해제 → core1 리셋 핸들러 시작 */
+	return pdTRUE;
+}
+void secondary_main(void)                        /* core1: ReadMe의 secondary flow 3~7단계 */
+{
+	enable_ipi_irq(1);
+	vPortConfigureInterruptPriorities();
+	ucSecondaryCoresReadyFlags[0] = pdTRUE;
+	__asm volatile("dsb \n svc 102" ::: "memory"); /* portSVC_START_SCHEDULER */
+	for (;;) { }
+}
+void board_primary_init(void) { enable_ipi_irq(0); }</code></pre></figure>
+<p><code>FreeRTOSConfig.h</code>에서 SMP 관련 줄만:</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define configNUMBER_OF_CORES                   2
+#ifndef configRUN_MULTIPLE_PRIORITIES
+#define configRUN_MULTIPLE_PRIORITIES           1          /* 빌드 때 -D로 0/1 바꿈 */
+#endif
+#define configUSE_CORE_AFFINITY                 1
+#define configUSE_TASK_PREEMPTION_DISABLE       configRUN_MULTIPLE_PRIORITIES  /* RMP=0이면 금지(FreeRTOS.h #error) */
+#define configCORE_ID_REGISTER                  0x5001F000   /* SSE-200 CPU_IDENTITY (S) */
+#define configWAKE_SECONDARY_CORES              xWakeSecondaryCores
+#define configCPU_CLOCK_HZ                      20000000
+#define configUSE_PASSIVE_IDLE_HOOK             0
+#define configENABLE_MPU                        0
+#define configENABLE_TRUSTZONE                  0
+#define configRUN_FREERTOS_SECURE_ONLY          1</code></pre></figure>
+<p>빌드 · 실행(소스 6개 + 커널 · 포트, 경고 0개):</p>
+<figure class="code"><span class="lang">sh</span><pre><code># build.sh &lt;out&gt; [-D...]
+arm-none-eabi-gcc -mcpu=cortex-m33 -mthumb -mfloat-abi=soft -O2 -g -Wall -Wextra -ffreestanding \
+  -I$S -I$K/include -I$P "$@" -nostdlib -nostartfiles -T $S/an521.ld -o $O/app.elf \
+  $S/startup.c $S/board.c $S/main.c $K/tasks.c $K/list.c $K/queue.c $P/port.c $P/portasm.c \
+  $K/portable/MemMang/heap_4.c -lgcc
+# run.sh
+timeout 20 qemu-system-arm -machine mps2-an521 -cpu cortex-m33 -nographic -monitor none \
+  -serial stdio -semihosting-config enable=on,target=native -kernel $O/app.elf</code></pre></figure>
+<p>(<code>$K</code> = <code>/var/rtoslab/src/FreeRTOS-Kernel</code>, <code>$P</code> = <code>$K/portable/GCC/ARM_CM33_NTZ/non_secure</code>, <code>$S</code> = 내 소스 폴더. 링커 스크립트는 FLASH <code>0x10000000</code> 4 MB, RAM <code>0x38000000</code> 4 MB, 코어 0 스택 = RAM 끝, 코어 1 스택 = 그보다 16 KB 아래.)</p>
+<h4 id="예제-6-누가-어느-코어에서-도나-run_multiple_priorities-1-0-affinity">예제 6 — "누가 어느 코어에서 도나": RUN_MULTIPLE_PRIORITIES 1 / 0 / affinity<a class="anchor" href="#예제-6-누가-어느-코어에서-도나-run_multiple_priorities-1-0-affinity" aria-label="link">#</a></h4>
+<p>무엇을 확인하나: 계속 도는(블록하지 않는) 태스크 H(3) · M(2) · L(1)이 코어 둘에서 100 tick 동안 각각 몇 번 돌았는지 — 설정에 따라 누가 굶는지.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* main.c: FreeRTOS SMP 의미 확인 — 우선순위 3·2·1 바쁜 태스크 셋이 코어 둘에서 어떻게 도나 */
+#include "FreeRTOS.h"
+#include "task.h"
+void uart_puts(const char *s); void uart_putu(uint32_t v); void board_exit(void);
+void board_primary_init(void);
+extern uint8_t ucPortGetCoreID(void);
+extern volatile uint32_t ulIpiCount[2];
+static volatile uint32_t cnt[3][2];               /* [task][core] 루프 횟수 */
+static TaskHandle_t h[3];
+static const char *nm[3] = {"H(prio3)", "M(prio2)", "L(prio1)"};
+
+static void busy(void *p)
+{
+	uint32_t me = (uint32_t)p;
+	for (;;) { cnt[me][ucPortGetCoreID()]++; }
+}
+
+static void monitor(void *p)                      /* prio 6, 100 tick 뒤 결과 출력 */
+{
+	(void)p;
+	vTaskDelay(100);
+	for (int i = 0; i &lt; 3; i++) { vTaskSuspend(h[i]); }
+	uart_puts("EXP " EXPNAME " RUN_MULTIPLE_PRIORITIES=");
+	uart_putu(configRUN_MULTIPLE_PRIORITIES); uart_puts("\n");
+	for (int i = 0; i &lt; 3; i++) {
+		uart_puts("  "); uart_puts(nm[i]); uart_puts(" core0=");
+		uart_putu(cnt[i][0] / 1000); uart_puts("k core1="); uart_putu(cnt[i][1] / 1000);
+		uart_puts("k\n");
+	}
+	uart_puts("  IPIs received: core0="); uart_putu(ulIpiCount[0]);
+	uart_puts(" core1="); uart_putu(ulIpiCount[1]); uart_puts("\n");
+	board_exit();
+}
+
+int main(void)
+{
+	board_primary_init();
+	for (uint32_t i = 0; i &lt; 3; i++) {
+		xTaskCreate(busy, nm[i], 256, (void *)i, 3 - i, &amp;h[i]);
+	}
+#ifdef PIN_HM_CORE0                               /* H와 M을 core0에만 허용 */
+	vTaskCoreAffinitySet(h[0], 1 &lt;&lt; 0);
+	vTaskCoreAffinitySet(h[1], 1 &lt;&lt; 0);
+#endif
+	xTaskCreate(monitor, "mon", 512, NULL, 6, NULL);
+	vTaskStartScheduler();
+	for (;;) { }
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>build.sh rmp1 -DEXPNAME=\"free\" -DconfigRUN_MULTIPLE_PRIORITIES=1 &amp;&amp; run.sh .../rmp1/app.elf
+build.sh rmp0 -DEXPNAME=\"free\" -DconfigRUN_MULTIPLE_PRIORITIES=0 &amp;&amp; run.sh .../rmp0/app.elf
+build.sh pin1 -DEXPNAME=\"H,M-pinned-core0\" -DPIN_HM_CORE0 -DconfigRUN_MULTIPLE_PRIORITIES=1 &amp;&amp; run.sh .../pin1/app.elf</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>EXP free RUN_MULTIPLE_PRIORITIES=1
+  H(prio3) core0=472k core1=0k
+  M(prio2) core0=0k core1=464k
+  L(prio1) core0=0k core1=0k
+  IPIs received: core0=1 core1=1
+qemu exit=0
+EXP free RUN_MULTIPLE_PRIORITIES=0
+  H(prio3) core0=0k core1=523k
+  M(prio2) core0=0k core1=0k
+  L(prio1) core0=0k core1=0k
+  IPIs received: core0=1 core1=1
+qemu exit=0
+EXP H,M-pinned-core0 RUN_MULTIPLE_PRIORITIES=1
+  H(prio3) core0=388k core1=0k
+  M(prio2) core0=0k core1=0k
+  L(prio1) core0=0k core1=475k
+  IPIs received: core0=1 core1=1
+qemu exit=0</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 270" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">FreeRTOS SMP on QEMU mps2-an521 — 바쁜 태스크 H(3)·M(2)·L(1), 100 tick 동안</text>
+<text x="260.0" y="48.0" font-size="12" text-anchor="middle" font-weight="bold">core0</text>
+<text x="410.0" y="48.0" font-size="12" text-anchor="middle" font-weight="bold">core1</text>
+<text x="182.0" y="90.0" font-size="12" text-anchor="end">RUN_MULTIPLE_PRIORITIES=1</text>
+<rect x="190.0" y="68.0" width="140.0" height="36.0" rx="6" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/>
+<text x="260.0" y="90.2" font-size="12" text-anchor="middle">H 472k</text>
+<rect x="340.0" y="68.0" width="140.0" height="36.0" rx="6" fill="#e08a3c" fill-opacity="0.25" stroke="#e08a3c"/>
+<text x="410.0" y="90.2" font-size="12" text-anchor="middle">M 464k</text>
+<text x="492.0" y="90.0" font-size="12" text-anchor="start">L 0 (굶음)</text>
+<text x="182.0" y="155.0" font-size="12" text-anchor="end">RUN_MULTIPLE_PRIORITIES=0</text>
+<rect x="190.0" y="133.0" width="140.0" height="36.0" rx="6" fill="#888" fill-opacity="0.1" stroke="#888" stroke-dasharray="4 3"/>
+<text x="260.0" y="155.2" font-size="12" text-anchor="middle">idle (M 대기)</text>
+<rect x="340.0" y="133.0" width="140.0" height="36.0" rx="6" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/>
+<text x="410.0" y="155.2" font-size="12" text-anchor="middle">H 523k</text>
+<text x="492.0" y="155.0" font-size="12" text-anchor="start">M · L 0</text>
+<text x="182.0" y="220.0" font-size="12" text-anchor="end">=1, H·M을 core0에 고정</text>
+<rect x="190.0" y="198.0" width="140.0" height="36.0" rx="6" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/>
+<text x="260.0" y="220.2" font-size="12" text-anchor="middle">H 388k</text>
+<rect x="340.0" y="198.0" width="140.0" height="36.0" rx="6" fill="#3f9a6b" fill-opacity="0.25" stroke="#3f9a6b"/>
+<text x="410.0" y="220.2" font-size="12" text-anchor="middle">L 475k</text>
+<text x="492.0" y="220.0" font-size="12" text-anchor="start">M 0 (core0에서 H에 밀림)</text>
+<text x="340.0" y="262.0" font-size="12" text-anchor="middle">숫자 = busy 루프 횟수(천 회). 코어 id는 0x5001F000 CPU_IDENTITY에서 읽음</text>
+</svg></figure>
+<p>그림 3 — 예제 6의 결과를 코어별로. FreeRTOS SMP는 "affinity가 허락하는 범위에서 가장 높은 N개"를 돌린다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>RMP=1</strong>: H와 M이 각 코어를 하나씩 차지하고 L(가장 낮음)은 0번 — "가장 높은 2개가 돈다". 단일 코어였다면 M도 굶었을 것이다. M이 H와 <strong>동시에</strong> 돈다는 게 SMP의 핵심 변화다.</li><li><strong>RMP=0</strong>: H만 돈다. 코어 하나는 <strong>idle</strong>이다. M은 ready인데도 못 돈다 — "다른 우선순위 태스크는 동시에 돌지 않는다"를 지키려고 코어를 놀린다. 단일 코어 시절의 "높은 게 돌면 낮은 건 안 돈다" 가정을 지켜 주는 대신 처리량을 버린다. FreeRTOS 문서도 이 설정이 코어를 놀릴 수 있다고 적는다.</li><li><strong>RMP=1 + H·M을 core0에 고정</strong>: core0에서는 H가 M을 밀어내고(M 0번), core1은 <strong>L</strong>이 차지한다. 우선순위로는 M &gt; L인데 L이 돈다. "가장 높은 N개"는 <strong>affinity를 만족하는 범위에서</strong> 고르기 때문이다. affinity를 잘못 주면 우선순위 역전처럼 보이는 일이 생긴다.</li><li>루프 횟수의 절대값(약 47만 회 / 100 ms)은 QEMU가 M33을 호스트 속도로 돌린 값이라 의미 없다. IPI가 1번씩인 건 시작 직후 monitor 태스크 배치 때문이다.</li></ul>
+<h3 id="4-4-rp2040-포트는-어떻게-하나-코드-읽기">4.4 RP2040 포트는 어떻게 하나 (코드 읽기)<a class="anchor" href="#4-4-rp2040-포트는-어떻게-하나-코드-읽기" aria-label="link">#</a></h3>
+<p>실제 듀얼코어 MCU 포트는 하드웨어 기능을 그대로 쓴다. <code>portable/ThirdParty/GCC/RP2040</code>:</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* include/portmacro.h (V11.3.2) */
+#define portGET_ISR_LOCK( xCoreID )   vPortRecursiveLock( ( xCoreID ), 0, spin_lock_instance( configSMP_SPINLOCK_0 ), pdTRUE )
+#define portGET_TASK_LOCK( xCoreID )  vPortRecursiveLock( ( xCoreID ), 1, spin_lock_instance( configSMP_SPINLOCK_1 ), pdTRUE )
+#define portYIELD_CORE( a )           vYieldCore( a )
+
+/* port.c */
+void vYieldCore( int xCoreID )
+{
+    ...
+    /* Non blocking, will cause interrupt on other core if the queue isn't already full,
+     * in which case an IRQ must be pending */
+    sio_hw-&gt;fifo_wr = 0;</code></pre></figure>
+<ul><li>락: RP2040 SIO 블록의 <strong>하드웨어 스핀락</strong>(읽으면 획득 시도, 쓰면 해제) 두 개. Cortex-M0+에는 LDREX/STREX가 없어서 소프트웨어만으로는 스핀락을 못 만든다 — 그래서 칩에 하드웨어 스핀락이 들어갔다.</li><li>IPI: 코어 간 FIFO에 아무 값이나 쓰면 상대 코어에 FIFO 인터럽트가 걸린다. 그 핸들러가 재스케줄한다.</li><li>AN521에서 내가 한 "타이머로 IPI"와 구조가 같다. 칩마다 "상대 코어에 인터럽트를 거는 방법"만 다르다.</li></ul>
+<h3 id="4-5-예제-7-freertos-smp에서-vtasksuspendall-관용구">4.5 예제 7 — FreeRTOS SMP에서 <code>vTaskSuspendAll</code> 관용구<a class="anchor" href="#4-5-예제-7-freertos-smp에서-vtasksuspendall-관용구" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: §3.3의 Zephyr 실험을 FreeRTOS SMP로. H(prio 3, core0)는 "나보다 높은 건 없다"로 잠금 없이, L(prio 1, core1)은 <code>vTaskSuspendAll()</code>로 보호할 때 / 둘 다 <code>vTaskSuspendAll()</code> / 둘 다 <code>taskENTER_CRITICAL()</code>.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* main_race.c: FreeRTOS SMP — 단일 코어에서 안전하던 vTaskSuspendAll 관용구가 코어 둘에서는? */
+#include "FreeRTOS.h"
+#include "task.h"
+void uart_puts(const char *s); void uart_putu(uint32_t v); void board_exit(void);
+void board_primary_init(void);
+#define ROUNDS 100
+#define BURST  2000
+static volatile uint32_t shared;
+static volatile int finished;
+
+static void bump(void) { for (int j = 0; j &lt; BURST; j++) { shared++; } }
+
+static void guarded(int is_high)
+{
+#if MODE == 2
+	(void)is_high; taskENTER_CRITICAL(); bump(); taskEXIT_CRITICAL();
+#else
+	if (is_high &amp;&amp; MODE == 0) { bump(); return; }   /* "나보다 높은 건 없다" */
+	vTaskSuspendAll(); bump(); (void)xTaskResumeAll();
+#endif
+}
+static void high(void *p)   /* prio 3, core0 */
+{
+	(void)p;
+	for (int r = 0; r &lt; ROUNDS; r++) { guarded(1); vTaskDelay(1); }
+	finished++;  /* 두 태스크가 동시에 끝나지 않으므로 여기서는 문제없음 */
+	vTaskSuspend(NULL);
+}
+static void low(void *p)    /* prio 1, core1 */
+{
+	(void)p;
+	for (int r = 0; r &lt; ROUNDS; r++) { guarded(0); for (volatile int k = 0; k &lt; 3000; k++) { } }
+	while (finished == 0) { }
+	uart_puts(LABEL); uart_puts(": shared="); uart_putu(shared);
+	uart_puts(" expected="); uart_putu(2 * ROUNDS * BURST);
+	uart_puts(" lost="); uart_putu(2 * ROUNDS * BURST - shared); uart_puts("\n");
+	board_exit();
+}
+int main(void)
+{
+	TaskHandle_t hH, hL;
+	board_primary_init();
+	xTaskCreate(high, "H", 256, NULL, 3, &amp;hH);
+	xTaskCreate(low, "L", 256, NULL, 1, &amp;hL);
+	vTaskCoreAffinitySet(hH, 1 &lt;&lt; 0);
+	vTaskCoreAffinitySet(hL, 1 &lt;&lt; 1);
+	vTaskStartScheduler();
+	for (;;) { }
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>H-nolock+L-SuspendAll: shared=398268 expected=400000 lost=1732
+H-nolock+L-SuspendAll: shared=398484 expected=400000 lost=1516
+both-SuspendAll: shared=400000 expected=400000 lost=0
+both-SuspendAll: shared=400000 expected=400000 lost=0
+both-ENTER_CRITICAL: shared=400000 expected=400000 lost=0
+both-ENTER_CRITICAL: shared=400000 expected=400000 lost=0</code></pre></figure>
+<p>(모드마다 두 번 실행. 각 줄 뒤 <code>qemu exit=0</code>은 생략.)</p>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong>"H 잠금 없음 + L SuspendAll"은 깨진다</strong> — Zephyr와 같다. 우선순위는 배제가 아니다.</li><li><strong>"둘 다 SuspendAll"은 안전하다</strong> — Zephyr의 "둘 다 <code>k_sched_lock</code>"(§3.3, 1만~2만 손실)과 <strong>다르다</strong>. SMP <code>vTaskSuspendAll()</code>은 <code>portGET_TASK_LOCK()</code>(전역 재진입 스핀락)을 잡고 <code>xTaskResumeAll()</code>까지 놓지 않기 때문이다(아래 §5.2 소스). 다른 코어가 <code>vTaskSuspendAll()</code>이나 <code>taskENTER_CRITICAL()</code>을 부르면 그 락에서 돈다. 즉 FreeRTOS SMP의 <code>vTaskSuspendAll</code>은 사실상 <strong>전역 커널 락</strong>이다 — 안전하지만, 오래 쥐면 다른 코어의 모든 커널 호출이 멈춘다.</li><li>결론: 이식할 때 "<code>vTaskSuspendAll</code>로 보호하던 데이터"는 <strong>그 데이터를 만지는 모든 곳이 같은 수단을 쓰는지</strong> 확인한다. 한 곳이라도 "나는 높으니까 괜찮다"면 SMP에서 깨진다.</li></ul>
+<hr>
+<h2 id="5-smp에서-크리티컬-섹션-인터럽트-마스크-스핀락">5. SMP에서 크리티컬 섹션 = 인터럽트 마스크 + 스핀락<a class="anchor" href="#5-smp에서-크리티컬-섹션-인터럽트-마스크-스핀락" aria-label="link">#</a></h2>
+<blockquote><p>단일 코어 크리티컬 섹션(BASEPRI, 중첩 카운트)은 C7이 다룬다. 스핀락 개념은 EL F4. 여기서는 <strong>FreeRTOS SMP가 두 락을 어떻게 쓰는지</strong>만 소스로 읽는다.</p></blockquote>
+<h3 id="5-1-왜-인터럽트-마스크만으로는-부족한가">5.1 왜 인터럽트 마스크만으로는 부족한가<a class="anchor" href="#5-1-왜-인터럽트-마스크만으로는-부족한가" aria-label="link">#</a></h3>
+<p>단일 코어에서 <code>taskENTER_CRITICAL()</code>은 "BASEPRI를 올려 커널 인터럽트를 막는다"였다. 이 코어에서 커널 자료구조를 만질 수 있는 다른 주체는 ISR뿐이니 그걸로 충분했다. 코어가 둘이면 <strong>다른 코어의 태스크와 ISR</strong>이 같은 <code>pxReadyTasksLists</code>를 만질 수 있다. 내 코어의 인터럽트 마스크는 저쪽 코어에 아무 효과가 없다. 그래서 둘 다 해야 한다.</p>
+<ul><li>인터럽트 마스크: <strong>내 코어</strong>의 ISR이 끼어드는 것을 막는다 (그리고 락을 쥔 채 ISR에서 같은 락을 잡는 self-deadlock을 막는다).</li><li>스핀락: <strong>다른 코어</strong>가 같은 자료구조에 들어오는 것을 막는다.</li></ul>
+<h3 id="5-2-freertos-smp의-두-락-task-lock과-isr-lock">5.2 FreeRTOS SMP의 두 락 — task lock과 ISR lock<a class="anchor" href="#5-2-freertos-smp의-두-락-task-lock과-isr-lock" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="170.0" y="22.0" font-size="13" text-anchor="middle" font-weight="bold">taskENTER_CRITICAL() — SMP</text>
+<text x="510.0" y="22.0" font-size="13" text-anchor="middle" font-weight="bold">taskENTER_CRITICAL_FROM_ISR() — SMP</text>
+<rect x="20.0" y="35.0" width="300.0" height="50.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="170.0" y="55.7" font-size="12" text-anchor="middle">portDISABLE_INTERRUPTS()</text>
+<text x="170.0" y="72.7" font-size="12" text-anchor="middle">이 코어의 인터럽트 마스크</text>
+<rect x="20.0" y="97.0" width="300.0" height="50.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="170.0" y="117.7" font-size="12" text-anchor="middle">nesting == 0 이면</text>
+<text x="170.0" y="134.7" font-size="12" text-anchor="middle">portGET_TASK_LOCK(core)</text>
+<line x1="170.0" y1="85.0" x2="170.0" y2="97.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah8)"/>
+<rect x="20.0" y="159.0" width="300.0" height="50.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="170.0" y="179.7" font-size="12" text-anchor="middle">이어서</text>
+<text x="170.0" y="196.7" font-size="12" text-anchor="middle">portGET_ISR_LOCK(core)</text>
+<line x1="170.0" y1="147.0" x2="170.0" y2="159.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah8)"/>
+<rect x="20.0" y="221.0" width="300.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="170.0" y="241.7" font-size="12" text-anchor="middle">nesting++</text>
+<text x="170.0" y="258.7" font-size="12" text-anchor="middle">nesting == 1 이면</text>
+<line x1="170.0" y1="209.0" x2="170.0" y2="221.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah8)"/>
+<rect x="20.0" y="283.0" width="300.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="170.0" y="303.7" font-size="12" text-anchor="middle">prvCheckForRunStateChange()</text>
+<text x="170.0" y="320.7" font-size="12" text-anchor="middle">양보 요청 왔으면 락 풀고 양보</text>
+<line x1="170.0" y1="271.0" x2="170.0" y2="283.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah8)"/>
+<rect x="360.0" y="35.0" width="300.0" height="50.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="510.0" y="55.7" font-size="12" text-anchor="middle">portSET_INTERRUPT_MASK_FROM_ISR()</text>
+<text x="510.0" y="72.7" font-size="12" text-anchor="middle">BASEPRI 올림 (이 코어만)</text>
+<rect x="360.0" y="97.0" width="300.0" height="50.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="510.0" y="117.7" font-size="12" text-anchor="middle">nesting == 0 이면</text>
+<text x="510.0" y="134.7" font-size="12" text-anchor="middle">portGET_ISR_LOCK(core) 만</text>
+<line x1="510.0" y1="85.0" x2="510.0" y2="97.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah8)"/>
+<rect x="360.0" y="159.0" width="300.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="510.0" y="179.7" font-size="12" text-anchor="middle">nesting++</text>
+<text x="510.0" y="196.7" font-size="12" text-anchor="middle">task lock은 잡지 않는다</text>
+<line x1="510.0" y1="147.0" x2="510.0" y2="159.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah8)"/>
+<rect x="360.0" y="230.0" width="300.0" height="105.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="510.0" y="261.2" font-size="12" text-anchor="middle">왜 락이 둘인가</text>
+<text x="510.0" y="278.2" font-size="12" text-anchor="middle">task lock: 스케줄러 상태(태스크 쪽)</text>
+<text x="510.0" y="295.2" font-size="12" text-anchor="middle">ISR lock: ISR과도 공유하는 상태</text>
+<text x="510.0" y="312.2" font-size="12" text-anchor="middle">vTaskSuspendAll = task lock만 오래 쥠</text>
+</svg></figure>
+<p>그림 4 — SMP <code>taskENTER_CRITICAL()</code>과 <code>taskENTER_CRITICAL_FROM_ISR()</code>의 단계. 태스크 쪽은 락 둘, ISR 쪽은 ISR 락 하나.</p>
+<p><code>tasks.c</code>(V11.3.2)의 SMP <code>vTaskEnterCritical()</code>:</p>
+<figure class="code"><span class="lang">c</span><pre><code>void vTaskEnterCritical( void )
+{
+    portDISABLE_INTERRUPTS();
+    {
+        const BaseType_t xCoreID = ( BaseType_t ) portGET_CORE_ID();
+        if( xSchedulerRunning != pdFALSE )
+        {
+            if( portGET_CRITICAL_NESTING_COUNT( xCoreID ) == 0U )
+            {
+                portGET_TASK_LOCK( xCoreID );
+                portGET_ISR_LOCK( xCoreID );
+            }
+            portINCREMENT_CRITICAL_NESTING_COUNT( xCoreID );
+
+            if( portGET_CRITICAL_NESTING_COUNT( xCoreID ) == 1U )
+            {
+                portASSERT_IF_IN_ISR();
+                if( uxSchedulerSuspended == 0U )
+                {
+                    prvCheckForRunStateChange();
+                }
+            }
+        }
+    }
+}</code></pre></figure>
+<p>(trace 매크로와 주석은 뺐다.)</p>
+<p>그리고 ISR용:</p>
+<figure class="code"><span class="lang">c</span><pre><code>UBaseType_t vTaskEnterCriticalFromISR( void )
+{
+    UBaseType_t uxSavedInterruptStatus = 0;
+    const BaseType_t xCoreID = ( BaseType_t ) portGET_CORE_ID();
+    if( xSchedulerRunning != pdFALSE )
+    {
+        uxSavedInterruptStatus = portSET_INTERRUPT_MASK_FROM_ISR();
+        if( portGET_CRITICAL_NESTING_COUNT( xCoreID ) == 0U )
+        {
+            portGET_ISR_LOCK( xCoreID );
+        }
+        portINCREMENT_CRITICAL_NESTING_COUNT( xCoreID );
+    }
+    return uxSavedInterruptStatus;
+}</code></pre></figure>
+<p>읽는 법:</p>
+<ul class="tasks"><li><strong>락이 둘인 이유</strong>: 커널 상태 중에는 태스크만 만지는 것(태스크 생성 · 삭제, 스케줄러 일시 정지 상태)과 ISR도 만지는 것(ready list, 이벤트 리스트)이 섞여 있다. <strong>task lock</strong>은 "태스크 쪽 커널 작업을 한 번에 한 코어만", <strong>ISR lock</strong>은 "ISR까지 포함해서 한 번에 한 코어만"이다. ISR은 ISR lock만 잡으므로, 어떤 코어가 <code>vTaskSuspendAll()</code>로 task lock만 오래 쥐고 있어도 <strong>다른 코어의 ISR은 <code>xxxFromISR</code> API를 계속 쓸 수 있다</strong>. 둘을 하나로 합치면 그 ISR이 오래 막힌다.</li><li><strong>잡는 순서가 항상 task → ISR</strong>이다. 순서가 고정되어야 두 코어가 서로 반대 순서로 잡아 데드락하는 일이 없다(락 순서 규칙, EL F4).</li><li><strong>중첩 카운트가 코어별</strong>이다(<code>portGET_CRITICAL_NESTING_COUNT( xCoreID )</code>). 처음 들어갈 때(0 → 1)만 락을 잡고, 마지막에 나갈 때(1 → 0)만 놓는다. 그래서 락 자체는 같은 코어에서 다시 잡을 필요가 없다 — 그래도 포트의 락 함수는 <strong>재진입(recursive)</strong>으로 만들어져 있다(아래 <code>vPortRecursiveLock</code>). Zephyr <code>k_spinlock</code>은 재진입이 <strong>안 된다</strong>(Zephyr SMP 문서: 같은 스핀락을 중첩해 잡으면 안 된다) — 두 커널의 차이다.</li><li><strong><code>prvCheckForRunStateChange()</code></strong>: 크리티컬 섹션에 막 들어왔는데, 그 사이 다른 코어가 "너 양보해"(<code>xTaskRunState == taskTASK_SCHEDULED_TO_YIELD</code>)를 걸어 뒀으면? 락을 쥔 채로는 양보할 수 없으니, <strong>락을 모두 놓고 → 인터럽트를 잠깐 켜서 대기 중인 IPI를 받아 양보하고 → 다시 돌아와 인터럽트를 끄고 → 코어 번호를 다시 읽고(이제 다른 코어일 수 있다) → 락을 다시 잡는다.</strong> 이 루프가 없으면 양보 요청을 받은 태스크가 크리티컬 섹션 안에서 계속 돌아, 더 높은 태스크가 그 코어를 못 얻는다.</li></ul>
+<figure class="code"><span class="lang">c</span><pre><code>/* tasks.c prvCheckForRunStateChange() 핵심 */
+while( pxThisTCB-&gt;xTaskRunState == taskTASK_SCHEDULED_TO_YIELD )
+{
+    uxPrevCriticalNesting = portGET_CRITICAL_NESTING_COUNT( xCoreID );
+    if( uxPrevCriticalNesting &gt; 0U ) { portSET_CRITICAL_NESTING_COUNT( xCoreID, 0U ); portRELEASE_ISR_LOCK( xCoreID ); }
+    portRELEASE_TASK_LOCK( xCoreID );
+    portMEMORY_BARRIER();
+    portENABLE_INTERRUPTS();       /* 여기서 대기 중이던 IPI → PendSV → 양보 */
+    portDISABLE_INTERRUPTS();
+    xCoreID = ( BaseType_t ) portGET_CORE_ID();   /* 다른 코어에서 깨어났을 수 있다 */
+    portGET_TASK_LOCK( xCoreID );
+    portGET_ISR_LOCK( xCoreID );
+    portSET_CRITICAL_NESTING_COUNT( xCoreID, uxPrevCriticalNesting );
+    if( uxPrevCriticalNesting == 0U ) { portRELEASE_ISR_LOCK( xCoreID ); }
+}</code></pre></figure>
+<ul class="tasks"><li><strong>나갈 때</strong>(<code>vTaskExitCritical</code>): 중첩이 0이 되면 <code>xYieldPendings[ xCoreID ]</code>를 <strong>락을 쥔 상태에서</strong> 읽어 두고, ISR lock → task lock 순으로 놓고, 인터럽트를 켠 뒤, 양보가 미뤄져 있었으면 <code>portYIELD()</code>. <code>prvYieldCore()</code>가 자기 코어에 대해 IPI 대신 <code>xYieldPendings</code>만 세우는 이유가 이것이다 — 크리티컬 섹션 안에서는 양보할 수 없으니 나갈 때 한다.</li><li><strong><code>vTaskSuspendAll()</code>(SMP)</strong>: 인터럽트 마스크 → <code>portGET_TASK_LOCK</code> → (필요하면 <code>prvCheckForRunStateChange</code>) → <code>portGET_ISR_LOCK</code> → <code>++uxSchedulerSuspended</code> → ISR lock만 놓고 인터럽트 복원. <strong>task lock은 쥔 채로 돌아온다.</strong> <code>xTaskResumeAll()</code>에서야 놓는다(<code>tasks.c</code> 4089행 부근). 예제 7에서 "둘 다 SuspendAll"이 안전했던 이유이고, 동시에 "SuspendAll 구간이 길면 다른 코어의 모든 커널 API가 멈춘다"는 비용이다.</li></ul>
+<h3 id="5-3-예제-8-cortex-m33-포트의-스핀락은-무엇이-되나-빌드-역어셈블">5.3 예제 8 — Cortex-M33 포트의 스핀락은 무엇이 되나 (빌드 · 역어셈블)<a class="anchor" href="#5-3-예제-8-cortex-m33-포트의-스핀락은-무엇이-되나-빌드-역어셈블" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: (1) 같은 커널을 <code>configNUMBER_OF_CORES</code> 1과 2로 빌드했을 때 코드 크기 차이, (2) SMP 전용 함수들, (3) <code>vPortRecursiveLock</code>의 실제 명령.</p>
+<figure class="code"><span class="lang">sh</span><pre><code># build.sh &lt;ncores&gt;: tasks.c · list.c · queue.c · port.c · portasm.c · heap_4.c · app.c 를 -mcpu=cortex-m33 -Os로 오브젝트까지
+limactl shell elinux -- bash -lc '/Users/donh/.rtos_scratch/C10/frt/build.sh 1 &amp;&amp; /Users/donh/.rtos_scratch/C10/frt/build.sh 2 &amp;&amp; arm-none-eabi-nm --size-sort -S /var/tmp/rtos/C10/frt2/tasks.o /var/tmp/rtos/C10/frt2/port.o | grep -i "Yield\|RunState\|Recursive\|CoreID\|Critical\|SelectHighest\|pxCurrentTCBs\|Affinity\|Preemption"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[N=1]    text	   data	    bss	    dec	    hex	filename
+[N=1]     97	      0	      0	     97	     61	app.o
+[N=1]    656	      0	  32796	  33452	   82ac	heap_4.o
+[N=1]    126	      0	      0	    126	     7e	list.o
+[N=1]    604	      0	     12	    616	    268	port.o
+[N=1]    248	      0	      0	    248	     f8	portasm.o
+[N=1]   1980	      0	      0	   1980	    7bc	queue.o
+[N=1]   3837	      0	    276	   4113	   1011	tasks.o
+[N=1]   7548	      0	  33084	  40632	   9eb8	(TOTALS)
+[N=2]    text	   data	    bss	    dec	    hex	filename
+[N=2]    121	      0	      0	    121	     79	app.o
+[N=2]    656	      0	  32796	  33452	   82ac	heap_4.o
+[N=2]    126	      0	      0	    126	     7e	list.o
+[N=2]    912	      0	     44	    956	    3bc	port.o
+[N=2]    316	      0	      0	    316	    13c	portasm.o
+[N=2]   1980	      0	      0	   1980	    7bc	queue.o
+[N=2]   5809	      0	    288	   6097	   17d1	tasks.o
+[N=2]   9920	      0	  33128	  43048	   a828	(TOTALS)
+000000a0 00000008 B pxCurrentTCBs
+000000b0 00000008 b xYieldPendings
+000007c4 00000018 T vTaskMissedYield
+00000e9c 0000001e T vTaskCoreAffinityGet
+00000eba 00000020 T vTaskPreemptionDisable
+00000dfc 00000024 T xTaskCreateAffinitySet
+00000b34 00000038 T vTaskYieldWithinAPI
+00000bc4 0000003c T vTaskEnterCriticalFromISR
+000011c8 0000004c T vTaskExitCriticalFromISR
+00000b6c 00000058 T vTaskEnterCritical
+00000c00 00000064 T vTaskExitCritical
+00000eda 0000006e T vTaskPreemptionEnable
+00000e20 0000007c T vTaskCoreAffinitySet
+00000022 0000008e t prvCheckForRunStateChange
+000000d4 000000cc t prvYieldForTask
+00000000 00000008 B ulCriticalNestings
+00000384 0000000c T ucPortGetCoreID
+00000068 00000016 T vPortYield
+00000286 000000fe T vPortRecursiveLock</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><code>tasks.o</code>가 3837 → 5809 바이트(약 1.5배), 전체 커널 텍스트가 7.5 KB → 9.9 KB. SMP가 공짜가 아니라는 숫자다(<code>-Os</code>, 이 설정 기준).</li><li>단일 코어에서는 매크로로 사라지던 <code>vTaskEnterCritical</code> · <code>vTaskExitCritical</code>이 <strong>진짜 함수</strong>가 됐다(SMP 크리티컬 섹션은 락 때문에 인라인 매크로로 못 끝난다). <code>pxCurrentTCBs</code>는 8바이트 = 포인터 2개, <code>xYieldPendings</code>도 코어당 하나, 포트의 <code>ulCriticalNestings</code>도 코어당 하나.</li><li><code>prvSelectHighestPriorityTask</code>가 목록에 없는 이유: <code>-Os</code>에서 <code>vTaskSwitchContext</code>에 인라인됐다.</li></ul>
+<figure class="code"><span class="lang">sh</span><pre><code>arm-none-eabi-objdump -d --no-show-raw-insn /var/tmp/rtos/C10/frt2/port.o | sed -n "/&lt;prvSpinTrylock&gt;:/,/^$/p"
+arm-none-eabi-objdump -d --no-show-raw-insn /var/tmp/rtos/C10/frt2/port.o | sed -n "/&lt;vPortRecursiveLock&gt;:/,/^$/p" | grep -nE "ldrex|strex|wfe|sev|dmb|clrex|bl"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>00000000 &lt;prvSpinTrylock&gt;:
+   0:	mov	r3, r0
+   2:	ldrex	r2, [r0]
+   6:	cbz	r2, 10 &lt;prvSpinTrylock+0x10&gt;
+   8:	clrex
+   c:	movs	r0, #1
+   e:	bx	lr
+  10:	movs	r2, #1
+  12:	strex	r0, r2, [r3]
+  16:	cmp	r0, #0
+  18:	bne.n	c &lt;prvSpinTrylock+0xc&gt;
+  1a:	dmb	sy
+  1e:	bx	lr
+---
+19: 2ac:	bl	0 &lt;prvSpinTrylock&gt;
+21: 2b2:	dmb	sy
+46: 2f4:	bl	0 &lt;prvSpinTrylock&gt;
+49: 2fc:	wfe
+88: 366:	dmb	sy
+91: 370:	sev
+94: 37a:	dmb	sy</code></pre></figure>
+<p>(<code>---</code> 위아래는 두 명령의 출력이다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>trylock = LDREX → 0이면 STREX 1 → 성공하면 DMB</strong>. LDREX/STREX는 Armv7-M/v8-M의 배타적 접근(exclusive monitor)이다. 다른 코어가 그 사이 같은 주소에 쓰면 STREX가 실패한다. 실패하거나 이미 잠겨 있으면 1을 돌려준다(이미 잠겼으면 <code>CLREX</code>로 모니터 정리).</li><li><strong>기다릴 때 <code>WFE</code></strong>, 풀 때 <code>SEV</code>. 바쁘게 돌며 버스를 두드리는 대신 "이벤트가 올 때까지 잠깐 잠들기"를 한다. 락을 놓는 쪽이 <code>SEV</code>로 깨운다. Cortex-M 멀티코어에서 스핀락 전력 · 버스 부하를 줄이는 표준 기법이다.</li><li>재진입: <code>vPortRecursiveLock</code>는 trylock이 실패하면 먼저 <code>ulOwnedByCore[ ucCoreID ]</code>를 보고 <strong>내가 이미 가진 락이면 카운트만 올린다</strong>.</li><li><code>DMB</code>가 획득 뒤 · 해제 앞에 있다 — acquire/release 순서 보장(EL F5). 단일 코어 포트에는 없던 명령들이다. <strong>QEMU는 배리어를 실제 칩처럼 모델링하지 않는다</strong>(TCG가 호스트 메모리 순서로 에뮬레이션) — 그래서 "배리어를 빼도 QEMU에서 잘 돈다"는 것은 아무 증거가 아니다.</li></ul>
+<hr>
+<h2 id="6-ipi-다른-코어에게-다시-골라-라고-알리기">6. IPI — 다른 코어에게 "다시 골라"라고 알리기<a class="anchor" href="#6-ipi-다른-코어에게-다시-골라-라고-알리기" aria-label="link">#</a></h2>
+<h3 id="6-1-왜-필요한가">6.1 왜 필요한가<a class="anchor" href="#6-1-왜-필요한가" aria-label="link">#</a></h3>
+<p>코어 0의 태스크가 세마포어를 give해서, 코어 1에서만 돌 수 있는(또는 코어 1이 가장 낮은 태스크를 돌리고 있는) 높은 태스크가 ready가 됐다고 하자. 커널은 이 사실을 코어 0에서 알았다. 코어 1은 지금 낮은 태스크를 신나게 돌리는 중이고 커널에 들어올 일이 없다. <strong>코어 1을 인터럽트하지 않으면</strong> 코어 1은 다음 tick(그나마 tick이 그 코어에 있다면)까지, 또는 지금 태스크가 스스로 블록할 때까지 모른다. 그래서 커널은 코어 1에 인터럽트를 건다 — <strong>IPI(Inter-Processor Interrupt)</strong>. Arm GIC에서는 SGI(Software Generated Interrupt), Cortex-M 멀티코어 칩에서는 MHU doorbell · 코어 간 FIFO 같은 칩 고유 장치다.</p>
+<h3 id="6-2-예제-9-freertos-smp-ipi가-있을-때와-없을-때">6.2 예제 9 — FreeRTOS SMP: IPI가 있을 때와 없을 때<a class="anchor" href="#6-2-예제-9-freertos-smp-ipi가-있을-때와-없을-때" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: core1에 바쁜 낮은 태스크 L(prio 1)이 있고, 같은 core1에 고정된 W(prio 4)가 알림을 기다린다. core0의 G(prio 2)가 5 tick마다 <code>xTaskNotifyGive(W)</code>. <code>vInterruptCore()</code>를 구현했을 때와 비워 뒀을 때(포트 weak stub과 같음) W가 몇 번 깨어나나, 얼마나 걸리나.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* main_ipi.c: core0의 태스크가 core1의 고우선순위 태스크를 깨운다 — IPI가 있을 때/없을 때 */
+#include "FreeRTOS.h"
+#include "task.h"
+void uart_puts(const char *s); void uart_putu(uint32_t v); void board_exit(void);
+void board_primary_init(void);
+extern volatile uint32_t ulIpiCount[2];
+#define DT_VALUE (*(volatile uint32_t *)0x50002004u)     /* DUALTIMER1, 감소 카운터 */
+static TaskHandle_t hW;
+static volatile uint32_t t_give, wakes, lat_min = 0xFFFFFFFF, lat_max, lat_sum;
+
+static void low_busy(void *p) { (void)p; for (;;) { } }      /* prio1, core1 점유 */
+static void waiter(void *p)                                    /* prio4, core1 */
+{
+	(void)p;
+	for (;;) {
+		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+		uint32_t d = t_give - DT_VALUE;                        /* 감소 카운터라 give - now */
+		wakes++; lat_sum += d;
+		if (d &lt; lat_min) { lat_min = d; }
+		if (d &gt; lat_max) { lat_max = d; }
+	}
+}
+static void giver(void *p)                                     /* prio2, core0 */
+{
+	(void)p;
+	uint32_t t_start = DT_VALUE;
+	for (int i = 0; i &lt; 20; i++) {
+		vTaskDelay(5);
+		t_give = DT_VALUE;
+		xTaskNotifyGive(hW);              /* 내부: prvYieldForTask → portYIELD_CORE(1) */
+	}
+	uart_puts("100 ticks = "); uart_putu((t_start - DT_VALUE) / 20); uart_puts(" us by DUALTIMER\n");
+	vTaskDelay(10);
+	uart_puts(IPI_LABEL); uart_puts(": waiter woke "); uart_putu(wakes);
+	uart_puts("/20, latency(us) min "); uart_putu(wakes ? lat_min / 20 : 0);
+	uart_puts(" avg "); uart_putu(wakes ? lat_sum / wakes / 20 : 0);
+	uart_puts(" max "); uart_putu(lat_max / 20);
+	uart_puts(" | IPIs core0="); uart_putu(ulIpiCount[0]);
+	uart_puts(" core1="); uart_putu(ulIpiCount[1]); uart_puts("\n");
+	board_exit();
+}
+
+int main(void)
+{
+	TaskHandle_t hL, hG;
+	board_primary_init();
+	*(volatile uint32_t *)0x50002000u = 0xFFFFFFFFu;            /* Timer1Load */
+	*(volatile uint32_t *)0x50002008u = (1u &lt;&lt; 7) | (1u &lt;&lt; 1);  /* enable, 32-bit, free-run */
+	xTaskCreate(low_busy, "L", 256, NULL, 1, &amp;hL);
+	xTaskCreate(waiter, "W", 256, NULL, 4, &amp;hW);
+	xTaskCreate(giver, "G", 512, NULL, 2, &amp;hG);
+	vTaskCoreAffinitySet(hL, 1 &lt;&lt; 1);
+	vTaskCoreAffinitySet(hW, 1 &lt;&lt; 1);
+	vTaskCoreAffinitySet(hG, 1 &lt;&lt; 0);
+	vTaskStartScheduler();
+	for (;;) { }
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>MAIN=main_ipi.c build.sh ipi   -DIPI_LABEL=\"with-IPI\"       # 세 번 실행
+MAIN=main_ipi.c build.sh noipi -DNO_IPI -DIPI_LABEL=\"NO-IPI\"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>100 ticks = 99447 us by DUALTIMER
+with-IPI: waiter woke 20/20, latency(us) min 49 avg 73 max 329 | IPIs core0=0 core1=20
+100 ticks = 100108 us by DUALTIMER
+with-IPI: waiter woke 20/20, latency(us) min 47 avg 70 max 361 | IPIs core0=0 core1=20
+100 ticks = 100003 us by DUALTIMER
+with-IPI: waiter woke 20/20, latency(us) min 48 avg 69 max 331 | IPIs core0=0 core1=20
+100 ticks = 99344 us by DUALTIMER
+NO-IPI: waiter woke 0/20, latency(us) min 0 avg 0 max 0 | IPIs core0=0 core1=0</code></pre></figure>
+<p>(각 실행 뒤 <code>qemu exit=0</code>은 생략. 첫 줄은 SysTick 100 tick을 DUALTIMER(20 MHz로 가정)로 잰 값 — 두 시계가 서로 맞는다는 확인이다.)</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20.0" y="22.0" font-size="13" text-anchor="start" font-weight="bold">core0 — 태스크 G(prio2)</text>
+<text x="360.0" y="22.0" font-size="13" text-anchor="start" font-weight="bold">core1 — L(prio1) 실행 중, W(prio4) 대기</text>
+<rect x="20.0" y="35.0" width="280.0" height="48.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="160.0" y="54.7" font-size="12" text-anchor="middle">xTaskNotifyGive(hW)</text>
+<text x="160.0" y="71.7" font-size="12" text-anchor="middle">W를 ready로</text>
+<rect x="20.0" y="95.0" width="280.0" height="48.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="160.0" y="114.7" font-size="12" text-anchor="middle">prvYieldForTask(W)</text>
+<text x="160.0" y="131.7" font-size="12" text-anchor="middle">가장 낮은 우선순위 코어 = core1</text>
+<line x1="160.0" y1="83.0" x2="160.0" y2="95.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah7)"/>
+<rect x="20.0" y="155.0" width="280.0" height="48.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="160.0" y="174.7" font-size="12" text-anchor="middle">prvYieldCore(1)</text>
+<text x="160.0" y="191.7" font-size="12" text-anchor="middle">xTaskRunState = TO_YIELD</text>
+<line x1="160.0" y1="143.0" x2="160.0" y2="155.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah7)"/>
+<rect x="20.0" y="215.0" width="280.0" height="48.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="160.0" y="234.7" font-size="12" text-anchor="middle">portYIELD_CORE(1)</text>
+<text x="160.0" y="251.7" font-size="12" text-anchor="middle">→ vInterruptCore(1)</text>
+<line x1="160.0" y1="203.0" x2="160.0" y2="215.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah7)"/>
+<rect x="380.0" y="35.0" width="280.0" height="48.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="520.0" y="54.7" font-size="12" text-anchor="middle">TIMER1 IRQ (우리 IPI)</text>
+<text x="520.0" y="71.7" font-size="12" text-anchor="middle">ipi_isr(1)</text>
+<rect x="380.0" y="95.0" width="280.0" height="48.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="520.0" y="114.7" font-size="12" text-anchor="middle">portYIELD_FROM_ISR</text>
+<text x="520.0" y="131.7" font-size="12" text-anchor="middle">PendSV 펜딩</text>
+<line x1="520.0" y1="83.0" x2="520.0" y2="95.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah7)"/>
+<rect x="380.0" y="155.0" width="280.0" height="48.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="520.0" y="174.7" font-size="12" text-anchor="middle">PendSV → vTaskSwitchContext(1)</text>
+<text x="520.0" y="191.7" font-size="12" text-anchor="middle">locks 잡고 W 선택</text>
+<line x1="520.0" y1="143.0" x2="520.0" y2="155.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah7)"/>
+<rect x="380.0" y="215.0" width="280.0" height="48.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="520.0" y="234.7" font-size="12" text-anchor="middle">W 실행</text>
+<text x="520.0" y="251.7" font-size="12" text-anchor="middle">측정 지연 p50 ≈ 70 µs</text>
+<line x1="520.0" y1="203.0" x2="520.0" y2="215.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah7)"/>
+<line x1="300.0" y1="239.0" x2="378.0" y2="59.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah7)" stroke-dasharray="4 3"/>
+<text x="340.0" y="140.0" font-size="12" text-anchor="middle" font-weight="bold">IPI</text>
+<rect x="20.0" y="280.0" width="640.0" height="40.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="340.0" y="304.2" font-size="12" text-anchor="middle">vInterruptCore가 비어 있으면(포트 weak stub): core1은 tick도 없어 W가 20번 중 0번 깨어남</text>
+</svg></figure>
+<p>그림 5 — 예제 9에서 core0의 give가 core1의 W를 깨우기까지. 왼쪽은 커널 함수, 오른쪽은 IPI를 받은 코어.</p>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong>IPI 있음: 20번 give → core1이 IPI 20번 → W가 20번 깨어남.</strong> give 한 번에 IPI 한 번. 지연은 QEMU에서 약 50~70 µs(최대 약 0.35 ms). 이 절대값은 QEMU가 타이머 장치와 두 vCPU 스레드 사이 신호를 처리하는 시간이 대부분이라 실제 칩 수치가 아니다.</li><li><strong>IPI 없음: 0/20.</strong> W는 한 번도 못 돈다. 커널은 <code>prvYieldCore(1)</code>에서 core1의 L을 <code>taskTASK_SCHEDULED_TO_YIELD</code>로 표시하고 <code>portYIELD_CORE(1)</code>을 불렀지만 아무 일도 안 일어났다. 게다가 이 포트에서 <strong>SysTick은 primary 코어에만</strong> 설정된다(<code>xPortStartScheduler()</code>가 <code>vPortSetupTimerInterrupt()</code>를 primary에서만 부른다) — core1에는 tick도 없다. 바쁜 L이 스스로 블록하지 않는 한 core1은 영원히 재스케줄하지 않는다. "IPI는 최적화가 아니라 <strong>정확성</strong>의 일부"라는 증거다.</li><li>포트가 <code>vInterruptCore</code>를 <strong>weak stub</strong>으로 둔 것(링크는 되는데 아무 일도 안 한다)은 함정이다. 보드 bring-up 때 이걸 빼먹으면 "가끔 높은 태스크가 늦게 돈다"(tick이 있는 코어로 우연히 옮겨질 때만 돈다)는 증상이 난다.</li></ul>
+<h3 id="6-3-zephyr의-ipi-경로">6.3 Zephyr의 IPI 경로<a class="anchor" href="#6-3-zephyr의-ipi-경로" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">text</span><pre><code>k_sem_give() → z_ready_thread() → ready_thread()
+   └ flag_ipi(ipi_mask_create(thread))     # kernel/ipi.c: _kernel.pending_ipi 비트 OR (atomic)
+... 스케줄 지점에서 (스케줄러 락을 쥔 채)
+   └ signal_pending_ipi()                   # pending_ipi를 atomic_clear로 꺼내
+        ├ CONFIG_ARCH_HAS_DIRECTED_IPIS → arch_sched_directed_ipi(cpu_bitmap)
+        └ 아니면                         → arch_sched_broadcast_ipi()
+arm64: send_ipi(SGI_SCHED_IPI = SGI 0, mask)  # arch/arm64/core/smp.c
+받는 CPU: sched_ipi_handler() → z_sched_ipi() → (ISR 끝에서) 재스케줄</code></pre></figure>
+<p><code>ipi_mask_create()</code>(kernel/ipi.c)가 <strong>누구에게 보낼지</strong>를 정한다. <code>CONFIG_IPI_OPTIMIZE=n</code>(기본)이면 그냥 "나 빼고 전부"(<code>IPI_ALL_CPUS_MASK</code>). <code>=y</code>이면 각 CPU에 대해 "그 CPU의 현재 스레드가 새 스레드보다 낮고 선점 가능하고, 새 스레드의 <code>cpu_mask</code>가 그 CPU를 허락하는가"를 따져 필요한 CPU만 고른다. 관련 Kconfig(<code>kernel/Kconfig.smp</code>에서 확인): <code>SCHED_IPI_SUPPORTED</code>(아키텍처가 선택), <code>IPI_OPTIMIZE</code>, <code>SCHED_IPI_CASCADE</code>(CPU mask 사용 시 연쇄 IPI로 국소적 스케줄 오류 보정), <code>TRACE_SCHED_IPI</code>(테스트용: <code>z_sched_ipi()</code> 안에서 <code>z_trace_sched_ipi()</code> 훅 호출).</p>
+<h3 id="6-4-예제-10-zephyr-ipi-개수와-깨어남-지연-config_ipi_optimize-n-y">6.4 예제 10 — Zephyr: IPI 개수와 깨어남 지연, <code>CONFIG_IPI_OPTIMIZE</code> n/y<a class="anchor" href="#6-4-예제-10-zephyr-ipi-개수와-깨어남-지연-config_ipi_optimize-n-y" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: cpu1을 바쁜 낮은 스레드가 차지한 상태에서 cpu0의 giver가 1 ms마다 세마포어를 줄 때, waiter가 <strong>같은 CPU(cpu0)</strong>에 있을 때와 <strong>다른 CPU(cpu1)</strong>에 있을 때 IPI가 몇 번 가고 지연이 어떻게 다른지.</p>
+<figure class="code"><span class="lang">text</span><pre><code># ex5/prj.conf
+CONFIG_PRINTK=y
+CONFIG_SCHED_CPU_MASK=y
+CONFIG_TRACE_SCHED_IPI=y
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex5: 다른 코어의 스레드를 깨우면 IPI가 간다 — 개수와 깨어남 지연 */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+
+#define ITER 200
+#define STK  2048
+static volatile uint32_t ipi_cnt[2];
+void z_trace_sched_ipi(void) { ipi_cnt[arch_curr_cpu()-&gt;id]++; }  /* IPI 핸들러 안 */
+
+K_THREAD_STACK_DEFINE(s_w, STK); K_THREAD_STACK_DEFINE(s_g, STK); K_THREAD_STACK_DEFINE(s_l, STK);
+static struct k_thread t_w, t_g, t_l;
+static K_SEM_DEFINE(sem, 0, 1);
+static volatile uint64_t t_give;
+static uint32_t lat[ITER];
+static volatile int stop;
+
+static void waiter(void *a, void *b, void *c)          /* prio 2 */
+{
+	for (int i = 0; i &lt; ITER; i++) {
+		k_sem_take(&amp;sem, K_FOREVER);
+		lat[i] = (uint32_t)k_cyc_to_ns_floor64(k_cycle_get_64() - t_give);
+	}
+}
+static void giver(void *a, void *b, void *c)           /* prio 5, cpu0 */
+{
+	for (int i = 0; i &lt; ITER; i++) {
+		k_msleep(1);
+		t_give = k_cycle_get_64();
+		k_sem_give(&amp;sem);
+	}
+}
+static void busy(void *a, void *b, void *c)            /* prio 10, cpu1을 계속 점유 */
+{
+	while (!stop) { }
+}
+
+static void run(int wcpu)
+{
+	uint32_t i0 = ipi_cnt[0], i1 = ipi_cnt[1];
+	stop = 0;
+	k_thread_create(&amp;t_l, s_l, STK, busy, NULL, NULL, NULL, 10, 0, K_FOREVER);
+	k_thread_create(&amp;t_w, s_w, STK, waiter, NULL, NULL, NULL, 2, 0, K_FOREVER);
+	k_thread_create(&amp;t_g, s_g, STK, giver, NULL, NULL, NULL, 5, 0, K_FOREVER);
+	k_thread_cpu_pin(&amp;t_l, 1); k_thread_cpu_pin(&amp;t_w, wcpu); k_thread_cpu_pin(&amp;t_g, 0);
+	k_thread_start(&amp;t_l); k_thread_start(&amp;t_w); k_thread_start(&amp;t_g);
+	k_thread_join(&amp;t_w, K_FOREVER); k_thread_join(&amp;t_g, K_FOREVER);
+	stop = 1; k_thread_join(&amp;t_l, K_FOREVER);
+	uint32_t mn = UINT32_MAX, mx = 0; uint64_t sum = 0;
+	for (int i = 0; i &lt; ITER; i++) {
+		mn = MIN(mn, lat[i]); mx = MAX(mx, lat[i]); sum += lat[i];
+	}
+	printk("waiter on cpu%d: wake latency min %5u avg %5u max %6u ns | IPIs cpu0 %u cpu1 %u\n",
+	       wcpu, mn, (uint32_t)(sum / ITER), mx, ipi_cnt[0] - i0, ipi_cnt[1] - i1);
+	for (int i = 0; i &lt; ITER; i += 1) { printk("L%d %u\n", wcpu, lat[i]); }
+}
+
+int main(void)
+{
+	printk("IPI_OPTIMIZE=%d\n", IS_ENABLED(CONFIG_IPI_OPTIMIZE));
+	run(0);   /* 같은 코어(cpu0)에서 깨움: IPI 불필요 */
+	run(1);   /* 다른 코어(cpu1)의 스레드를 깨움: IPI로 cpu1을 재스케줄 */
+	return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>for o in n y; do
+  /var/rtoslab/bin/rtos-zbuild qemu_cortex_a53/qemu_cortex_a53/smp /Users/donh/.rtos_scratch/C10/ex5 /var/tmp/rtos/C10/ex5_$o -- -DCONFIG_IPI_OPTIMIZE=$o
+  /var/rtoslab/bin/rtos-zrun /var/tmp/rtos/C10/ex5_$o 25
+done</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>IPI_OPTIMIZE=0
+waiter on cpu0: wake latency min  4256 avg 13870 max 170320 ns | IPIs cpu0 29 cpu1 370
+waiter on cpu1: wake latency min  6784 avg 36490 max  81376 ns | IPIs cpu0 14 cpu1 386
+L0 ... (200줄씩 생략)
+IPI_OPTIMIZE=1
+waiter on cpu0: wake latency min  3584 avg  7941 max 169664 ns | IPIs cpu0 4 cpu1 21
+waiter on cpu1: wake latency min  9296 avg 33423 max  69328 ns | IPIs cpu0 8 cpu1 200</code></pre></figure>
+<p><code>L</code> 줄 200개씩을 Python으로 백분위를 냈다:</p>
+<figure class="code"><span class="lang">text</span><pre><code>('IPI_OPTIMIZE=0', '0') 200 p50 6864 p90 29744 p99 61920
+('IPI_OPTIMIZE=0', '1') 200 p50 36832 p90 49408 p99 68592
+('IPI_OPTIMIZE=1', '0') 200 p50 4832 p90 8208 p99 52000
+('IPI_OPTIMIZE=1', '1') 200 p50 32336 p90 49664 p99 67456</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="170.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">cpu1이 받은 IPI 수 (깨움 200회)</text>
+<text x="510.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">깨어남 지연 p50 / p99 (µs)</text>
+<rect x="30.0" y="65.0" width="50.0" height="185.0" fill="#888" fill-opacity="0.7"/>
+<text x="55.0" y="60.0" font-size="12" text-anchor="middle">370</text>
+<rect x="105.0" y="57.0" width="50.0" height="193.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="130.0" y="52.0" font-size="12" text-anchor="middle">386</text>
+<rect x="180.0" y="239.5" width="50.0" height="10.5" fill="#888" fill-opacity="0.7"/>
+<text x="205.0" y="234.5" font-size="12" text-anchor="middle">21</text>
+<rect x="255.0" y="150.0" width="50.0" height="100.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="280.0" y="145.0" font-size="12" text-anchor="middle">200</text>
+<line x1="20.0" y1="250.0" x2="330.0" y2="250.0" stroke="currentColor" stroke-width="1"/>
+<text x="55.0" y="266.0" font-size="12" text-anchor="middle">n·같은</text>
+<text x="130.0" y="266.0" font-size="12" text-anchor="middle">n·다른</text>
+<text x="205.0" y="266.0" font-size="12" text-anchor="middle">y·같은</text>
+<text x="280.0" y="266.0" font-size="12" text-anchor="middle">y·다른</text>
+<text x="170.0" y="284.0" font-size="12" text-anchor="middle">IPI_OPTIMIZE · waiter 위치</text>
+<rect x="400.0" y="238.0" width="40.0" height="12.0" fill="#3f9a6b" fill-opacity="0.75"/>
+<text x="420.0" y="233.0" font-size="12" text-anchor="middle">5</text>
+<rect x="445.0" y="120.0" width="40.0" height="130.0" fill="#3f9a6b" fill-opacity="0.3"/>
+<text x="465.0" y="115.0" font-size="12" text-anchor="middle">52</text>
+<text x="442.0" y="266.0" font-size="12" text-anchor="middle">같은 코어</text>
+<rect x="530.0" y="169.2" width="40.0" height="80.7" fill="#d0564a" fill-opacity="0.75"/>
+<text x="550.0" y="164.2" font-size="12" text-anchor="middle">32</text>
+<rect x="575.0" y="81.2" width="40.0" height="168.8" fill="#d0564a" fill-opacity="0.3"/>
+<text x="595.0" y="76.2" font-size="12" text-anchor="middle">68</text>
+<text x="572.0" y="266.0" font-size="12" text-anchor="middle">다른 코어 (IPI)</text>
+<line x1="390.0" y1="250.0" x2="660.0" y2="250.0" stroke="currentColor" stroke-width="1"/>
+<text x="525.0" y="284.0" font-size="12" text-anchor="middle">진한 막대 p50, 연한 막대 p99 (OPT=y)</text>
+</svg></figure>
+<p>그림 6 — 예제 10 측정. 왼쪽: cpu1이 받은 IPI 수(깨움 200회). 오른쪽: <code>IPI_OPTIMIZE=y</code>에서 같은 코어 / 다른 코어 깨어남 지연(ns를 µs로).</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong><code>IPI_OPTIMIZE=n</code>이면 waiter가 cpu0에 있어도 cpu1이 IPI를 370번 받는다.</strong> 스레드가 ready가 될 때마다(giver의 <code>k_msleep</code> 만료, waiter의 깨어남 등) "나 빼고 전부"에게 broadcast하기 때문이다. cpu1의 바쁜 스레드는 쓸데없이 매번 인터럽트되어 스케줄러를 돌고 같은 스레드로 돌아간다 — 실제 제품이라면 <strong>cpu1에서 도는 hard RT 루프에 지터</strong>를 넣는 원인이다.</li><li><strong><code>IPI_OPTIMIZE=y</code>이면 같은 코어 깨움 때 cpu1 IPI가 21번</strong>으로 줄고, 다른 코어 깨움 때는 <strong>정확히 200번</strong>(깨움 한 번에 하나).</li><li>지연: 같은 코어 p50 약 5 µs, 다른 코어(IPI 경유) p50 약 32 µs. <strong>다른 코어로 깨우는 쪽이 한 단계 더 비싸다.</strong> 다만 이 차이의 대부분은 QEMU가 SGI를 다른 vCPU 스레드로 전달하는 비용이다. 실제 Cortex-A/R + GIC에서 SGI 전달은 보통 이보다 훨씬 짧다 — 이 노트에서 재지 못했으므로 숫자는 쓰지 않는다. 확실한 건 <strong>같은 코어 깨움(IPI 없음) &lt; 다른 코어 깨움(IPI 경유)</strong>이라는 순서다.</li><li>설계 교훈: 지연에 민감한 "깨우는 쪽 · 깨어나는 쪽" 쌍(예: IMU ISR → 자세 제어 태스크)은 <strong>같은 코어에 두는 것</strong>이 지연과 지터 모두에 유리하다. 그리고 hard RT 코어에 쓸데없는 IPI가 가지 않게 한다(<code>IPI_OPTIMIZE</code>, 그 코어에 다른 스레드를 안 둠).</li></ul>
+<hr>
+<h2 id="7-affinity와-migration-어디서-도는지를-정하기">7. affinity와 migration — 어디서 도는지를 정하기<a class="anchor" href="#7-affinity와-migration-어디서-도는지를-정하기" aria-label="link">#</a></h2>
+<h3 id="7-1-api">7.1 API<a class="anchor" href="#7-1-api" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>커널</th><th>API</th><th>Kconfig / config</th><th>규칙</th></tr></thead><tbody><tr><td>Zephyr</td><td><code>k_thread_cpu_mask_clear/enable_all/enable/disable</code>, <code>k_thread_cpu_pin(thread, cpu)</code></td><td><code>CONFIG_SCHED_CPU_MASK</code> (SIMPLE 스케줄러 필요)</td><td>스레드가 <strong>실행 가능하지 않을 때만</strong> 바꿀 수 있다(<code>kernel/cpu_mask.c</code>: 아니면 <code>-EINVAL</code>). 보통 <code>K_FOREVER</code>로 만들고 → 마스크 → <code>k_thread_start</code></td></tr><tr><td>Zephyr</td><td>위 + 코어별 run queue</td><td><code>CONFIG_SCHED_CPU_MASK_PIN_ONLY</code></td><td>스레드마다 CPU 하나만, 시작 전에만</td></tr><tr><td>FreeRTOS</td><td><code>vTaskCoreAffinitySet(task, mask)</code>, <code>vTaskCoreAffinityGet</code>, <code>xTaskCreateAffinitySet</code></td><td><code>configUSE_CORE_AFFINITY = 1</code></td><td>실행 중에도 바꿀 수 있다. 바꾼 결과 지금 코어가 허락되지 않으면 그 코어에 양보를 건다(<code>tasks.c</code> <code>vTaskCoreAffinitySet</code>의 <code>prvYieldCore</code>)</td></tr></tbody></table></div>
+<h3 id="7-2-예제-11-코어별-간트를-trace-훅으로-그리기-migration-세기">7.2 예제 11 — 코어별 간트를 trace 훅으로 그리기 + migration 세기<a class="anchor" href="#7-2-예제-11-코어별-간트를-trace-훅으로-그리기-migration-세기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 우선순위 계산 스레드 A · B · C(각 30 ms)가 2코어에서 time slice(2 ms)로 돌 때 실제로 어느 CPU에서 언제 돌았나, 몇 번 옮겨 다녔나. 그리고 A를 cpu1 전용으로, B · C를 cpu0으로 pin하면 어떻게 바뀌나.</p>
+<p>방법: <code>CONFIG_TRACING_USER=y</code>면 커널이 컨텍스트 스위치 때 <code>sys_trace_thread_switched_in_user()</code>(weak 함수)를 부른다. arm64에서는 <code>arch/arm64/core/switch.S</code>가 새 스레드로 바꾼 직후 <code>z_thread_mark_switched_in()</code>을 부르고, 그게 이 훅까지 온다. 훅 안에서 (시각, CPU, 현재 스레드)를 <strong>CPU별 배열</strong>에 적는다 — CPU별이라 락이 필요 없다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># ex4/prj.conf
+CONFIG_PRINTK=y
+CONFIG_SCHED_CPU_MASK=y
+CONFIG_TRACING=y
+CONFIG_TRACING_USER=y
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000
+CONFIG_TIMESLICING=y
+CONFIG_TIMESLICE_SIZE=2</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex4: switched_in 훅으로 코어별 간트 기록 + migration 수, 고정(pin) 전후 비교 */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#include &lt;string.h&gt;
+#define NEV 400
+#define STK 2048
+struct ev { uint32_t t; struct k_thread *th; };
+static struct ev evs[2][NEV];
+static volatile uint32_t nev[2];
+static volatile int rec;
+static uint64_t t0;
+void sys_trace_thread_switched_in_user(void)      /* 스위치 경로에서 불린다 */
+{
+	int c = arch_curr_cpu()-&gt;id;
+	if (rec &amp;&amp; nev[c] &lt; NEV) {
+		evs[c][nev[c]].t = (uint32_t)(k_cycle_get_64() - t0);
+		evs[c][nev[c]++].th = arch_curr_cpu()-&gt;current;
+	}
+}
+K_THREAD_STACK_ARRAY_DEFINE(stk, 3, STK);
+static struct k_thread th[3];
+static void work(void *a, void *b, void *c)
+{
+	for (int i = 0; i &lt; 60; i++) {
+		k_busy_wait(500);                  /* 총 30 ms 계산 */
+	}
+}
+static void run(bool pin)
+{
+	memset((void *)nev, 0, sizeof(nev));
+	for (int i = 0; i &lt; 3; i++) {
+		k_thread_create(&amp;th[i], stk[i], STK, work, NULL, NULL, NULL, 5, 0, K_FOREVER);
+		if (pin) {                         /* A는 cpu1 전용, B·C는 cpu0 */
+			k_thread_cpu_pin(&amp;th[i], i == 0 ? 1 : 0);
+		}
+	}
+	t0 = k_cycle_get_64(); rec = 1;
+	for (int i = 0; i &lt; 3; i++) {
+		k_thread_start(&amp;th[i]);
+	}
+	for (int i = 0; i &lt; 3; i++) {
+		k_thread_join(&amp;th[i], K_FOREVER);
+	}
+	rec = 0;
+	int last[3] = {-1, -1, -1}, mig[3] = {0};
+	printk("--- pin=%d nev=%u/%u\n", pin, nev[0], nev[1]);
+	for (int c = 0; c &lt; 2; c++) {
+		for (uint32_t k = 0; k &lt; nev[c]; k++) {
+			struct k_thread *t = evs[c][k].th;
+			const char *n = (t == &amp;th[0]) ? "A" : (t == &amp;th[1]) ? "B" :
+					(t == &amp;th[2]) ? "C" : "other";
+			printk("EV %d %u %s\n", c, (uint32_t)(evs[c][k].t / 62U), n);
+		}
+	}
+	/* migration: 시간순으로 합쳐 같은 스레드가 다른 cpu에서 다시 시작된 횟수 */
+	uint32_t i0 = 0, i1 = 0;
+	while (i0 &lt; nev[0] || i1 &lt; nev[1]) {
+		int c = (i1 &gt;= nev[1] || (i0 &lt; nev[0] &amp;&amp; evs[0][i0].t &lt; evs[1][i1].t)) ? 0 : 1;
+		struct k_thread *t = evs[c][c ? i1++ : i0++].th;
+		for (int i = 0; i &lt; 3; i++) {
+			if (t == &amp;th[i]) { if (last[i] &gt;= 0 &amp;&amp; last[i] != c) mig[i]++; last[i] = c; }
+		}
+	}
+	printk("migrations A=%d B=%d C=%d, switches cpu0=%u cpu1=%u\n",
+	       mig[0], mig[1], mig[2], nev[0], nev[1]);
+}
+int main(void)
+{
+	run(false);
+	run(true);
+	return 0;
+}</code></pre></figure>
+<p>(빈 줄만 몇 개 빼고 실은 실행 소스 그대로. <code>/ 62U</code>는 62.5 MHz 타이머 카운트를 대략 µs로 바꾼 것 — 0.8% 오차는 그림에 영향 없다.)</p>
+<figure class="code"><span class="lang">text</span><pre><code>*** Booting Zephyr OS build v4.4.2 ***
+Secondary CPU core 1 (MPID:0x1) is up
+--- pin=0 nev=20/20
+EV 0 368 A
+EV 0 3072 C
+EV 0 4398 B
+EV 0 6440 C
+...
+migrations A=4 B=13 C=5, switches cpu0=20 cpu1=20
+--- pin=1 nev=30/3
+EV 0 41 B
+EV 0 1796 C
+...
+EV 1 46 A
+EV 1 30435 other
+EV 1 30578 other
+migrations A=0 B=0 C=0, switches cpu0=30 cpu1=3</code></pre></figure>
+<p>(EV 줄 80개 중 일부만 남겼다. 전체를 Python으로 그림 7의 간트로 바꿨다.)</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="80.0" y="22.0" font-size="13" text-anchor="start" font-weight="bold">고정 없음 (A·B·C가 두 코어를 오간다)</text>
+<text x="70.0" y="52.0" font-size="12" text-anchor="end">cpu0</text>
+<rect x="83.4" y="35.0" width="25.3" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="96.1" y="53.0" font-size="12" text-anchor="middle">A</text>
+<rect x="108.7" y="35.0" width="12.4" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<rect x="121.1" y="35.0" width="19.1" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="130.7" y="53.0" font-size="12" text-anchor="middle">B</text>
+<rect x="140.2" y="35.0" width="22.7" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="151.6" y="53.0" font-size="12" text-anchor="middle">C</text>
+<rect x="163.0" y="35.0" width="14.8" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="170.4" y="53.0" font-size="12" text-anchor="middle">A</text>
+<rect x="177.8" y="35.0" width="22.9" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="189.2" y="53.0" font-size="12" text-anchor="middle">B</text>
+<rect x="200.6" y="35.0" width="15.1" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="208.2" y="53.0" font-size="12" text-anchor="middle">A</text>
+<rect x="215.7" y="35.0" width="23.0" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="227.2" y="53.0" font-size="12" text-anchor="middle">B</text>
+<rect x="238.7" y="35.0" width="14.5" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="245.9" y="53.0" font-size="12" text-anchor="middle">A</text>
+<rect x="253.1" y="35.0" width="23.5" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="264.9" y="53.0" font-size="12" text-anchor="middle">B</text>
+<rect x="276.6" y="35.0" width="14.5" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="283.9" y="53.0" font-size="12" text-anchor="middle">A</text>
+<rect x="291.2" y="35.0" width="22.8" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="302.6" y="53.0" font-size="12" text-anchor="middle">B</text>
+<rect x="314.0" y="35.0" width="14.7" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="321.3" y="53.0" font-size="12" text-anchor="middle">A</text>
+<rect x="328.7" y="35.0" width="18.8" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="338.1" y="53.0" font-size="12" text-anchor="middle">B</text>
+<rect x="347.5" y="35.0" width="19.1" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="357.1" y="53.0" font-size="12" text-anchor="middle">A</text>
+<rect x="366.6" y="35.0" width="22.8" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="378.0" y="53.0" font-size="12" text-anchor="middle">B</text>
+<rect x="389.4" y="35.0" width="14.3" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="396.6" y="53.0" font-size="12" text-anchor="middle">C</text>
+<rect x="403.7" y="35.0" width="17.1" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="412.3" y="53.0" font-size="12" text-anchor="middle">B</text>
+<rect x="420.8" y="35.0" width="118.7" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="480.2" y="53.0" font-size="12" text-anchor="middle">A</text>
+<text x="70.0" y="92.0" font-size="12" text-anchor="end">cpu1</text>
+<rect x="80.3" y="75.0" width="5.1" height="26.0" fill="#888" fill-opacity="0.25"/>
+<rect x="85.4" y="75.0" width="23.4" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="97.1" y="93.0" font-size="12" text-anchor="middle">B</text>
+<rect x="108.8" y="75.0" width="12.4" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<rect x="121.2" y="75.0" width="18.5" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="130.5" y="93.0" font-size="12" text-anchor="middle">C</text>
+<rect x="139.7" y="75.0" width="23.0" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="151.2" y="93.0" font-size="12" text-anchor="middle">A</text>
+<rect x="162.7" y="75.0" width="15.0" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="170.2" y="93.0" font-size="12" text-anchor="middle">B</text>
+<rect x="177.7" y="75.0" width="23.0" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="189.2" y="93.0" font-size="12" text-anchor="middle">C</text>
+<rect x="200.7" y="75.0" width="14.5" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="208.0" y="93.0" font-size="12" text-anchor="middle">B</text>
+<rect x="215.3" y="75.0" width="23.8" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="227.2" y="93.0" font-size="12" text-anchor="middle">C</text>
+<rect x="239.1" y="75.0" width="13.9" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<rect x="253.1" y="75.0" width="23.5" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="264.8" y="93.0" font-size="12" text-anchor="middle">C</text>
+<rect x="276.6" y="75.0" width="14.4" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="283.8" y="93.0" font-size="12" text-anchor="middle">B</text>
+<rect x="291.0" y="75.0" width="23.1" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="302.5" y="93.0" font-size="12" text-anchor="middle">C</text>
+<rect x="314.0" y="75.0" width="14.5" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="321.3" y="93.0" font-size="12" text-anchor="middle">B</text>
+<rect x="328.5" y="75.0" width="19.2" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="338.1" y="93.0" font-size="12" text-anchor="middle">C</text>
+<rect x="347.7" y="75.0" width="18.6" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="357.0" y="93.0" font-size="12" text-anchor="middle">B</text>
+<rect x="366.3" y="75.0" width="23.0" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="377.8" y="93.0" font-size="12" text-anchor="middle">C</text>
+<rect x="389.3" y="75.0" width="14.6" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="396.6" y="93.0" font-size="12" text-anchor="middle">A</text>
+<rect x="403.9" y="75.0" width="75.7" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="441.8" y="93.0" font-size="12" text-anchor="middle">C</text>
+<line x1="80.0" y1="112.0" x2="660.0" y2="112.0" stroke="currentColor" stroke-width="1"/>
+<line x1="80.0" y1="112.0" x2="80.0" y2="116.0" stroke="currentColor" stroke-width="1"/>
+<text x="80.0" y="130.0" font-size="12" text-anchor="middle">0</text>
+<line x1="173.5" y1="112.0" x2="173.5" y2="116.0" stroke="currentColor" stroke-width="1"/>
+<text x="173.5" y="130.0" font-size="12" text-anchor="middle">10</text>
+<line x1="267.1" y1="112.0" x2="267.1" y2="116.0" stroke="currentColor" stroke-width="1"/>
+<text x="267.1" y="130.0" font-size="12" text-anchor="middle">20</text>
+<line x1="360.6" y1="112.0" x2="360.6" y2="116.0" stroke="currentColor" stroke-width="1"/>
+<text x="360.6" y="130.0" font-size="12" text-anchor="middle">30</text>
+<line x1="454.2" y1="112.0" x2="454.2" y2="116.0" stroke="currentColor" stroke-width="1"/>
+<text x="454.2" y="130.0" font-size="12" text-anchor="middle">40</text>
+<line x1="547.7" y1="112.0" x2="547.7" y2="116.0" stroke="currentColor" stroke-width="1"/>
+<text x="547.7" y="130.0" font-size="12" text-anchor="middle">50</text>
+<line x1="641.3" y1="112.0" x2="641.3" y2="116.0" stroke="currentColor" stroke-width="1"/>
+<text x="641.3" y="130.0" font-size="12" text-anchor="middle">60</text>
+<text x="80.0" y="162.0" font-size="13" text-anchor="start" font-weight="bold">고정: A → cpu1 전용, B·C → cpu0</text>
+<text x="70.0" y="192.0" font-size="12" text-anchor="end">cpu0</text>
+<rect x="80.4" y="175.0" width="16.4" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="88.6" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="96.8" y="175.0" width="21.4" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="107.5" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="118.2" y="175.0" width="14.0" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="125.3" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="132.3" y="175.0" width="18.5" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="141.5" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="150.8" y="175.0" width="19.9" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="160.7" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="170.7" y="175.0" width="21.9" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="181.7" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="192.6" y="175.0" width="14.5" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="199.8" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="207.1" y="175.0" width="19.4" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="216.8" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="226.5" y="175.0" width="18.8" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="235.9" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="245.3" y="175.0" width="24.0" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="257.3" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="269.3" y="175.0" width="14.2" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="276.4" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="283.5" y="175.0" width="23.4" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="295.2" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="306.9" y="175.0" width="13.4" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<rect x="320.3" y="175.0" width="23.3" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="332.0" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="343.6" y="175.0" width="15.1" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="351.2" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="358.7" y="175.0" width="18.5" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="368.0" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="377.2" y="175.0" width="23.7" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="389.1" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="400.9" y="175.0" width="12.7" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<rect x="413.6" y="175.0" width="24.3" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="425.8" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="437.9" y="175.0" width="14.6" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="445.2" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="452.6" y="175.0" width="22.5" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="463.8" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="475.0" y="175.0" width="14.0" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="482.0" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="489.0" y="175.0" width="25.6" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="501.8" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="514.6" y="175.0" width="13.0" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<rect x="527.6" y="175.0" width="19.1" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="537.2" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="546.7" y="175.0" width="24.4" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="558.9" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="571.1" y="175.0" width="14.5" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="578.3" y="193.0" font-size="12" text-anchor="middle">B</text>
+<rect x="585.5" y="175.0" width="14.3" height="26.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="592.7" y="193.0" font-size="12" text-anchor="middle">C</text>
+<rect x="599.8" y="175.0" width="19.1" height="26.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="609.4" y="193.0" font-size="12" text-anchor="middle">B</text>
+<text x="70.0" y="232.0" font-size="12" text-anchor="end">cpu1</text>
+<rect x="80.4" y="215.0" width="284.3" height="26.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="222.6" y="233.0" font-size="12" text-anchor="middle">A</text>
+<rect x="364.7" y="215.0" width="1.3" height="26.0" fill="#888" fill-opacity="0.25"/>
+<line x1="80.0" y1="252.0" x2="660.0" y2="252.0" stroke="currentColor" stroke-width="1"/>
+<line x1="80.0" y1="252.0" x2="80.0" y2="256.0" stroke="currentColor" stroke-width="1"/>
+<text x="80.0" y="270.0" font-size="12" text-anchor="middle">0</text>
+<line x1="173.5" y1="252.0" x2="173.5" y2="256.0" stroke="currentColor" stroke-width="1"/>
+<text x="173.5" y="270.0" font-size="12" text-anchor="middle">10</text>
+<line x1="267.1" y1="252.0" x2="267.1" y2="256.0" stroke="currentColor" stroke-width="1"/>
+<text x="267.1" y="270.0" font-size="12" text-anchor="middle">20</text>
+<line x1="360.6" y1="252.0" x2="360.6" y2="256.0" stroke="currentColor" stroke-width="1"/>
+<text x="360.6" y="270.0" font-size="12" text-anchor="middle">30</text>
+<line x1="454.2" y1="252.0" x2="454.2" y2="256.0" stroke="currentColor" stroke-width="1"/>
+<text x="454.2" y="270.0" font-size="12" text-anchor="middle">40</text>
+<line x1="547.7" y1="252.0" x2="547.7" y2="256.0" stroke="currentColor" stroke-width="1"/>
+<text x="547.7" y="270.0" font-size="12" text-anchor="middle">50</text>
+<line x1="641.3" y1="252.0" x2="641.3" y2="256.0" stroke="currentColor" stroke-width="1"/>
+<text x="641.3" y="270.0" font-size="12" text-anchor="middle">60</text>
+<text x="660.0" y="318.0" font-size="12" text-anchor="end">시간 (ms, switched_in 훅 기록)</text>
+<rect x="90.0" y="306.0" width="14.0" height="12.0" fill="#4a7bd0" fill-opacity="0.7"/>
+<text x="108.0" y="317.0" font-size="12" text-anchor="start">A</text>
+<rect x="130.0" y="306.0" width="14.0" height="12.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="148.0" y="317.0" font-size="12" text-anchor="start">B</text>
+<rect x="170.0" y="306.0" width="14.0" height="12.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="188.0" y="317.0" font-size="12" text-anchor="start">C</text>
+<rect x="210.0" y="306.0" width="14.0" height="12.0" fill="#888" fill-opacity="0.25"/>
+<text x="228.0" y="317.0" font-size="12" text-anchor="start">idle·main</text>
+</svg></figure>
+<p>그림 7 — 예제 11의 실제 스위치 기록으로 그린 코어별 간트. 위: 고정 없음 — A · B · C가 2 ms time slice마다 두 CPU를 번갈아 옮겨 다닌다. 아래: A를 cpu1에 고정 — A는 30 ms 동안 한 번도 끊기지 않고, B · C는 cpu0에서 나눠 쓴다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>고정 없음: 세 스레드가 합쳐서 22번 CPU를 옮겼다</strong>(A 4, B 13, C 5). 스레드 3개를 CPU 2개에 나누니 time slice가 끝날 때마다 "가장 오래 기다린 스레드"가 비는 CPU에 들어간다. 실제 칩이라면 옮길 때마다 L1 캐시 · 분기 예측기가 식는다. QEMU는 캐시를 모델링하지 않으므로 그 비용은 여기서 보이지 않는다.</li><li><strong>고정: migration 0.</strong> A는 cpu1에서 46 µs부터 약 30.4 ms까지 <strong>한 번의 스위치도 없이</strong> 돌았다(cpu1 스위치 3번 = A 시작, 끝난 뒤 idle 둘). 대가로 cpu0의 B · C는 각각 30 ms 일을 60 ms에 걸쳐 끝냈다. 전체 완료 시간이 약 49 ms → 58 ms로 늘었다(마지막 스위치 기록 49.1 ms / 57.6 ms). <strong>결정성과 처리량을 맞바꾼 것</strong>이다.</li><li>함정(직접 겪음): 처음에는 훅에서 <code>k_current_get()</code>을 썼는데, 새로 시작하는 스레드의 첫 switch-in이 "other"로 찍혔다. arm64 Zephyr는 <code>k_current_get()</code>이 TLS(스레드 로컬 저장소) 기반 값을 읽을 수 있어 스위치 경로 한가운데서는 아직 옛 값일 수 있다. CPU 구조체의 <code>arch_curr_cpu()-&gt;current</code>(커널이 이미 바꿔 둔 <code>_current</code>)를 읽자 정확해졌다. <strong>스위치 훅 안에서는 커널 내부 상태를 직접 읽는 게 안전하다.</strong> (정확한 원인 코드 줄은 확인 못 함 — 현상과 해결만 확인.)</li></ul>
+<hr>
+<h2 id="8-성능-코어가-둘이면-두-배인가">8. 성능 — 코어가 둘이면 두 배인가<a class="anchor" href="#8-성능-코어가-둘이면-두-배인가" aria-label="link">#</a></h2>
+<h3 id="8-1-예제-12-같은-일을-1코어-vs-2코어로-공유-방식별">8.1 예제 12 — 같은 일을 1코어 vs 2코어로, 공유 방식별<a class="anchor" href="#8-1-예제-12-같은-일을-1코어-vs-2코어로-공유-방식별" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 스레드 2개가 각각 100만 번 반복하는 일을, 같은 SMP 커널에서 <code>CONFIG_MP_MAX_NUM_CPUS</code> 1과 2로 돌려 시간 비교. 반복마다 (0) 계산만, (1) 공유 <code>atomic_inc</code>, (2) 공유 <code>k_spinlock</code> + <code>++</code>, (3) 스레드별 카운터 <code>++</code>.</p>
+<figure class="code"><span class="lang">text</span><pre><code># ex6/prj.conf
+CONFIG_PRINTK=y
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex6: 같은 일을 스레드 2개로 — 코어 1개 vs 2개, 공유 방식별 시간 */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#include &lt;zephyr/sys/atomic.h&gt;
+#define OPS  1000000            /* 스레드당 반복 */
+#define STK  2048
+K_THREAD_STACK_ARRAY_DEFINE(stk, 2, STK);
+static struct k_thread th[2];
+static atomic_t shared_at;
+static uint32_t shared_sp;
+static struct k_spinlock lock;
+struct padded { volatile uint32_t v; uint8_t pad[60]; };
+static struct padded local[2];  /* 스레드별 카운터, 64B씩 떨어뜨림 */
+static volatile uint32_t sink;
+static int mode;
+static uint64_t c00;
+static volatile uint64_t ts[2][2]; static volatile int tc[2];
+static void worker(void *p1, void *p2, void *p3)
+{
+	int me = (int)(uintptr_t)p1;
+	ts[me][0] = k_cycle_get_64(); tc[me] = arch_curr_cpu()-&gt;id;
+	uint32_t x = 12345 + me;
+	for (int i = 0; i &lt; OPS; i++) {
+		x = x * 1103515245u + 12345u;          /* 계산 몇 명령 */
+		if (mode == 1) {
+			atomic_inc(&amp;shared_at);
+		} else if (mode == 2) {
+			k_spinlock_key_t k = k_spin_lock(&amp;lock);
+			shared_sp++;
+			k_spin_unlock(&amp;lock, k);
+		} else if (mode == 3) {
+			local[me].v++;
+		}
+	}
+	sink = x;
+	ts[me][1] = k_cycle_get_64();
+}
+static uint32_t run_us(int m)
+{
+	mode = m;
+	uint64_t c0 = k_cycle_get_64(); c00 = c0;
+	for (int i = 0; i &lt; 2; i++) {
+		k_thread_create(&amp;th[i], stk[i], STK, worker, (void *)(uintptr_t)i,
+				NULL, NULL, 5, 0, K_NO_WAIT);
+	}
+	k_thread_join(&amp;th[0], K_FOREVER);
+	k_thread_join(&amp;th[1], K_FOREVER);
+	return (uint32_t)(k_cyc_to_ns_floor64(k_cycle_get_64() - c0) / 1000);
+}
+int main(void)
+{
+	static const char *nm[4] = {"compute", "atomic", "spinlock", "per-thread"};
+	for (int m = 0; m &lt; 4; m++) {
+		uint32_t best = UINT32_MAX;
+		printk("cpus=%u %-10s runs(us):", arch_num_cpus(), nm[m]);
+		for (int r = 0; r &lt; 7; r++) {
+			uint32_t us = run_us(m);
+			best = MIN(best, us);
+			printk(" %u", us);
+			if (r == 0) printk("[T0 cpu%d %u-%u T1 cpu%d %u-%u]", tc[0],
+				(uint32_t)((ts[0][0]-c00)/62), (uint32_t)((ts[0][1]-c00)/62), tc[1],
+				(uint32_t)((ts[1][0]-c00)/62), (uint32_t)((ts[1][1]-c00)/62));
+		}
+		printk("  best=%u\n", best);
+	}
+	printk("check atomic=%ld spin=%u local=%u+%u\n", (long)atomic_get(&amp;shared_at),
+	       shared_sp, local[0].v, local[1].v);
+	return 0;
+}</code></pre></figure>
+<p>(빈 줄을 빼고 긴 <code>printk</code> 한 줄을 줄바꿈한 것 말고는 실행 소스 그대로.)</p>
+<figure class="code"><span class="lang">sh</span><pre><code>for n in 1 2; do rtos-zbuild qemu_cortex_a53/qemu_cortex_a53/smp .../ex6 .../ex6_$n -- -DCONFIG_MP_MAX_NUM_CPUS=$n; done
+# 부팅 3번 × (1코어, 2코어) 번갈아 실행</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>cpus=1 compute    runs(us): 11805[T0 cpu0 265-5444 T1 cpu0 6057-11874] 10663 12103 10749 10256 10561 10295  best=10256
+cpus=1 atomic     runs(us): 49482[T0 cpu0 21-24870 T1 cpu0 24899-49865] 49806 49304 49961 50478 49439 49387  best=49304
+cpus=1 spinlock   runs(us): 238596[T0 cpu0 17-219122 T1 cpu0 19535-240500] 231392 231612 229755 230091 231804 236140  best=229755
+cpus=1 per-thread runs(us): 17034[T0 cpu0 30-8574 T1 cpu0 8601-17157] 17276 16613 16527 16349 17153 16850  best=16349
+cpus=2 compute    runs(us): 6730[T0 cpu0 402-6323 T1 cpu1 824-6501] 5747 5719 6131 6272 5993 5694  best=5694
+cpus=2 atomic     runs(us): 107462[T0 cpu0 34-108297 T1 cpu1 41-97297] 111984 101140 102793 96487 115118 107884  best=96487
+cpus=2 spinlock   runs(us): 290667[T0 cpu0 46-283127 T1 cpu1 50-292993] 287078 273602 283849 276220 279575 290990  best=273602
+cpus=2 per-thread runs(us): 15271[T0 cpu1 54-15368 T1 cpu0 55-12003] 15187 14257 14289 14525 15959 16001  best=14257
+... (부팅 2, 3회차 — best 값만: 1코어 compute 9892 / 9970, atomic 49407 / 49015, spinlock 228537 / 230236,
+     per-thread 16448 / 16486; 2코어 compute 5575 / 5632, atomic 94384 / 100335, spinlock 280391 / 280553,
+     per-thread 14180 / 14543)</code></pre></figure>
+<p>QEMU가 정말 병렬로 도는지는 실행 중 QEMU 프로세스의 스레드를 보면 알 수 있다:</p>
+<figure class="code"><span class="lang">text</span><pre><code>$ ps -L -o pid,lwp,pcpu,comm -p &lt;qemu pid&gt;
+    PID     LWP %CPU COMMAND
+2435441 2435441  1.0 qemu-system-aar
+2435441 2435442  0.0 qemu-system-aar
+2435441 2435443 76.5 qemu-system-aar
+2435441 2435444 73.6 qemu-system-aar</code></pre></figure>
+<p>vCPU 스레드 둘이 각각 75% 가까이 — MTTCG로 진짜 병렬이다. 출력의 <code>[T0 cpu0 402-6323 T1 cpu1 824-6501]</code>도 두 스레드가 서로 다른 CPU에서 <strong>같은 시간대에</strong> 돌았음을 보여 준다(1코어에서는 T0이 끝난 뒤 T1이 시작).</p>
+<h3 id="8-2-예제-13-스레드별-카운터-인데-왜-두-배가-안-되나-false-sharing">8.2 예제 13 — "스레드별 카운터"인데 왜 두 배가 안 되나: false sharing<a class="anchor" href="#8-2-예제-13-스레드별-카운터-인데-왜-두-배가-안-되나-false-sharing" aria-label="link">#</a></h3>
+<p>예제 12의 per-thread가 ×1.15밖에 안 나온 것이 이상하다. 공유가 없는데? 심볼 주소를 보자:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>NM=$(ls /var/rtoslab/zephyr-sdk-1.0.1/gnu/aarch64-zephyr-elf/bin/*-nm | head -1)
+$NM -n -S /var/tmp/rtos/C10/ex6_2/zephyr/zephyr.elf | grep -E " (local|mode|sink|shared_sp)$"</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0000000040056528 0000000000000004 b mode
+000000004005652c 0000000000000004 b sink
+0000000040056530 0000000000000080 b local
+00000000400565b0 0000000000000004 b shared_sp</code></pre></figure>
+<p><code>mode</code>(0x...528)와 <code>local[0].v</code>(0x...530)가 <strong>같은 64바이트 줄</strong>(0x...500–0x...53F)에 있다. 두 스레드는 매 반복 <code>mode</code>를 읽고, 스레드 0은 같은 줄의 <code>local[0].v</code>에 쓴다. 쓸 때마다 다른 코어의 그 줄 사본이 무효화된다 — <strong>false sharing</strong>(논리적으로 공유하지 않는 변수가 같은 캐시 라인에 있어 생기는 공유).</p>
+<p>QEMU는 게스트 캐시를 모델링하지 않는데 왜 보이나? 게스트 메모리는 결국 호스트 메모리이고, 두 vCPU 스레드는 <strong>호스트의 진짜 코어 두 개</strong>에서 돈다. 호스트 캐시 일관성 비용이 그대로 드러난다. 깨끗하게 확인하는 실험:</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex7: 스레드별 카운터인데 왜 느린가 — 두 카운터 사이 거리(stride)를 바꿔 본다 */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#define OPS 2000000
+#define STK 2048
+K_THREAD_STACK_ARRAY_DEFINE(stk, 2, STK);
+static struct k_thread th[2];
+static uint8_t area[1024] __aligned(256);
+static int stride;
+static void worker(void *p1, void *p2, void *p3)
+{
+	volatile uint32_t *c = (volatile uint32_t *)&amp;area[(int)(uintptr_t)p1 * stride];
+	for (int i = 0; i &lt; OPS; i++) {
+		(*c)++;                        /* 각자 자기 카운터만 쓴다: 논리적 공유 없음 */
+	}
+}
+static uint32_t run_us(void)
+{
+	uint64_t c0 = k_cycle_get_64();
+	for (int i = 0; i &lt; 2; i++) {
+		k_thread_create(&amp;th[i], stk[i], STK, worker, (void *)(uintptr_t)i,
+				NULL, NULL, 5, 0, K_NO_WAIT);
+	}
+	k_thread_join(&amp;th[0], K_FOREVER);
+	k_thread_join(&amp;th[1], K_FOREVER);
+	return (uint32_t)(k_cyc_to_ns_floor64(k_cycle_get_64() - c0) / 1000);
+}
+int main(void)
+{
+	static const int s[] = {4, 64, 128, 256};
+	for (int k = 0; k &lt; 4; k++) {
+		stride = s[k];
+		uint32_t best = UINT32_MAX;
+		for (int r = 0; r &lt; 7; r++) {
+			best = MIN(best, run_us());
+		}
+		printk("cpus=%u stride=%3d B  best of 7 = %6u us\n", arch_num_cpus(), stride, best);
+	}
+	return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>cpus=1 stride=  4 B  best of 7 =  16992 us
+cpus=1 stride= 64 B  best of 7 =  16454 us
+cpus=1 stride=128 B  best of 7 =  16461 us
+cpus=1 stride=256 B  best of 7 =  16603 us
+cpus=2 stride=  4 B  best of 7 =  21820 us
+cpus=2 stride= 64 B  best of 7 =   8291 us
+cpus=2 stride=128 B  best of 7 =   8244 us
+cpus=2 stride=256 B  best of 7 =   8127 us</code></pre></figure>
+<p>출력에서 볼 것: 카운터가 4바이트 떨어져(같은 줄) 있으면 <strong>2코어가 1코어보다 느리다</strong>(21.8 vs 17.0 ms). 64바이트 이상 떨어뜨리면 정확히 두 배(8.3 ms). 이 호스트에서 경계가 64바이트라는 것도 보인다. 실제 MCU에서도 원리는 같다 — Cortex-M7의 D-cache 라인은 32바이트, Cortex-A53은 64바이트다(다른 코어는 TRM에서 확인). 코어마다 쓰는 데이터는 <strong>캐시 라인 경계로 정렬 · 분리</strong>한다(Zephyr <code>__aligned(CONFIG_DCACHE_LINE_SIZE)</code> 같은 식으로). 단, 캐시 없는 M0+ · M33 듀얼코어(RP2040 · RP2350)에서는 false sharing이 캐시 문제로는 없고 <strong>버스 경쟁</strong>만 남는다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">같은 일(스레드 2개)을 1코어 → 2코어로: 속도 배율 = t(1코어) / t(2코어)</text>
+<text x="222.0" y="57.0" font-size="12" text-anchor="end">계산만 (공유 없음)</text>
+<rect x="230.0" y="44.0" width="217.8" height="20.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="510.0" y="58.0" font-size="12" text-anchor="start">×1.77  (9.9 → 5.6 ms)</text>
+<text x="222.0" y="93.0" font-size="12" text-anchor="end">공유 atomic_inc</text>
+<rect x="230.0" y="80.0" width="63.7" height="20.0" fill="#d0564a" fill-opacity="0.7"/>
+<text x="510.0" y="94.0" font-size="12" text-anchor="start">×0.52  (49.0 → 94.4 ms)</text>
+<text x="222.0" y="129.0" font-size="12" text-anchor="end">공유 k_spinlock</text>
+<rect x="230.0" y="116.0" width="102.5" height="20.0" fill="#d0564a" fill-opacity="0.7"/>
+<text x="510.0" y="130.0" font-size="12" text-anchor="start">×0.84  (228.5 → 273.6 ms)</text>
+<text x="222.0" y="165.0" font-size="12" text-anchor="end">스레드별, mode와 한 줄 (ex6)</text>
+<rect x="230.0" y="152.0" width="141.5" height="20.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="510.0" y="166.0" font-size="12" text-anchor="start">×1.15  (16.3 → 14.2 ms)</text>
+<text x="222.0" y="201.0" font-size="12" text-anchor="end">스레드별, 4 B 간격 (ex7)</text>
+<rect x="230.0" y="188.0" width="95.6" height="20.0" fill="#e08a3c" fill-opacity="0.7"/>
+<text x="510.0" y="202.0" font-size="12" text-anchor="start">×0.78  (17.0 → 21.8 ms)</text>
+<text x="222.0" y="237.0" font-size="12" text-anchor="end">스레드별, 64 B 간격 (ex7)</text>
+<rect x="230.0" y="224.0" width="243.6" height="20.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="510.0" y="238.0" font-size="12" text-anchor="start">×1.98  (16.5 → 8.3 ms)</text>
+<text x="222.0" y="273.0" font-size="12" text-anchor="end">스레드별, 256 B 간격 (ex7)</text>
+<rect x="230.0" y="260.0" width="250.7" height="20.0" fill="#3f9a6b" fill-opacity="0.7"/>
+<text x="510.0" y="274.0" font-size="12" text-anchor="start">×2.04  (16.6 → 8.1 ms)</text>
+<line x1="352.7" y1="36.0" x2="352.7" y2="296.0" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="352.7" y="312.0" font-size="12" text-anchor="middle">×1.0 (이득 없음)</text>
+<line x1="475.5" y1="36.0" x2="475.5" y2="296.0" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+<text x="475.5" y="312.0" font-size="12" text-anchor="middle">×2.0 (이상적)</text>
+<line x1="230.0" y1="296.0" x2="500.0" y2="296.0" stroke="currentColor" stroke-width="1"/>
+<text x="20.0" y="326.0" font-size="12" text-anchor="start">QEMU 10 MTTCG, VM 호스트 부하 낮을 때, 각 7회 × 부팅 3번 중 최솟값</text>
+</svg></figure>
+<p>그림 8 — 예제 12 · 13 측정 요약. 1코어 → 2코어 속도 배율. 공유가 없으면 거의 2배, 공유 atomic · 스핀락은 오히려 느려진다(0.52배, 0.84배), false sharing도 느려진다(0.78배).</p>
+<h3 id="8-3-숫자-읽기">8.3 숫자 읽기<a class="anchor" href="#8-3-숫자-읽기" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>방식</th><th>1코어 best</th><th>2코어 best</th><th>배율</th><th>한 번 연산 비용(2M회 기준, 2코어)</th><th>해석</th></tr></thead><tbody><tr><td>계산만</td><td>9.9 ms</td><td>5.6 ms</td><td>×1.77</td><td>—</td><td>스레드 생성 · join 고정비 때문에 ×2 미만</td></tr><tr><td>공유 <code>atomic_inc</code></td><td>49.0 ms</td><td>94.4 ms</td><td>×0.52</td><td>약 47 ns (1코어 약 25 ns)</td><td>캐시 라인이 두 코어 사이를 매번 오간다 — 경쟁하는 atomic은 1코어보다 느리다</td></tr><tr><td>공유 <code>k_spinlock</code></td><td>228.5 ms</td><td>273.6 ms</td><td>×0.84</td><td>약 137 ns (1코어 약 114 ns)</td><td>IRQ 마스크 + CAS + release + IRQ 복원, outline atomics 함수 호출. 경쟁이 붙으면 더 느려짐</td></tr><tr><td>스레드별, mode와 같은 줄</td><td>16.3 ms</td><td>14.2 ms</td><td>×1.15</td><td>—</td><td>false sharing (예제 13)</td></tr><tr><td>스레드별, 4 B 간격</td><td>17.0 ms</td><td>21.8 ms</td><td>×0.78</td><td>—</td><td>진짜 false sharing — 2코어가 더 느림</td></tr><tr><td>스레드별, 64 B 이상</td><td>16.5 ms</td><td>8.3 ms</td><td>×1.98~2.04</td><td>—</td><td>공유 없음 = 선형 확장</td></tr></tbody></table></div>
+<p><strong>QEMU TCG 주의 (한 번 더)</strong>: 이 숫자는 Cortex-A53의 숫자가 아니다. (1) 명령은 호스트(Apple 계열 arm64) 속도로 번역 실행된다. (2) 게스트 atomic(LDXR/STXR)은 QEMU가 호스트 atomic으로 흉내 내므로 비용 비율이 실제 A53과 다르다. (3) 게스트 캐시 · 버스 · 메모리 순서는 모델링되지 않고, 대신 <strong>호스트</strong>의 캐시 일관성 비용이 보인다(false sharing이 보인 이유). (4) MTTCG에서 vCPU는 호스트 OS 스레드라 호스트 상태에 흔들린다(처음 한 번은 1코어 compute 12.0 ms, 2코어 12.0 ms로 이득이 아예 안 나온 실행도 있었다 — 원인은 확인 못 했고 호스트 스케줄링으로 추정한다. 그래서 부팅 3번 × 7회 반복의 최솟값을 쓴다). 결론으로 가져갈 것은 <strong>모양</strong>이다: 공유하지 않으면 확장되고, 경쟁하는 공유 변수 하나가 확장을 없애며, false sharing은 공유가 없는 것처럼 보이는 코드도 망친다.</p>
+<hr>
+<h2 id="9-설계-지침-hard-real-time-일을-smp에-올려도-되나">9. 설계 지침 — hard real-time 일을 SMP에 올려도 되나<a class="anchor" href="#9-설계-지침-hard-real-time-일을-smp에-올려도-되나" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="220.0" y="10.0" width="240.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="340.0" y="36.2" font-size="12" text-anchor="middle">코어가 2개 이상인 MCU / 클러스터</text>
+<rect x="220.0" y="80.0" width="240.0" height="44.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340.0" y="106.2" font-size="12" text-anchor="middle">코어 종류가 같은가?</text>
+<line x1="340.0" y1="54.0" x2="340.0" y2="80.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah9)"/>
+<rect x="10.0" y="160.0" width="190.0" height="60.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="105.0" y="185.7" font-size="12" text-anchor="middle" font-weight="bold">AMP</text>
+<text x="105.0" y="202.7" font-size="12" text-anchor="middle">코어마다 RTOS 따로</text>
+<line x1="220.0" y1="102.0" x2="105.0" y2="160.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah9)"/>
+<text x="140.0" y="128.0" font-size="12" text-anchor="middle">아니오</text>
+<rect x="240.0" y="160.0" width="200.0" height="60.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340.0" y="185.7" font-size="12" text-anchor="middle">hard RT 루프가 있고</text>
+<text x="340.0" y="202.7" font-size="12" text-anchor="middle">WCET를 증명해야 하나?</text>
+<line x1="340.0" y1="124.0" x2="340.0" y2="160.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah9)"/>
+<text x="356.0" y="145.0" font-size="12" text-anchor="start">예</text>
+<rect x="470.0" y="160.0" width="200.0" height="60.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="570.0" y="185.7" font-size="12" text-anchor="middle" font-weight="bold">SMP (global)</text>
+<text x="570.0" y="202.7" font-size="12" text-anchor="middle">throughput · 부하 분산</text>
+<line x1="440.0" y1="190.0" x2="470.0" y2="190.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah9)"/>
+<text x="455.0" y="182.0" font-size="12" text-anchor="middle">아니오</text>
+<rect x="240.0" y="255.0" width="200.0" height="60.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340.0" y="280.7" font-size="12" text-anchor="middle" font-weight="bold">SMP + hard RT 태스크 pin</text>
+<text x="340.0" y="297.7" font-size="12" text-anchor="middle">(BMP에 가깝게)</text>
+<line x1="340.0" y1="220.0" x2="340.0" y2="255.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah9)"/>
+<text x="356.0" y="242.0" font-size="12" text-anchor="start">예</text>
+<rect x="10.0" y="255.0" width="190.0" height="60.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="105.0" y="280.7" font-size="12" text-anchor="middle">안전 등급 분리 필요</text>
+<text x="105.0" y="297.7" font-size="12" text-anchor="middle">→ AMP 또는 lockstep</text>
+<line x1="240.0" y1="285.0" x2="200.0" y2="285.0" stroke="currentColor" stroke-width="1" marker-end="url(#ah9)"/>
+<text x="340.0" y="345.0" font-size="12" text-anchor="middle">공유 캐시 · 버스 간섭은 pin으로도 안 사라진다 → 측정 + N8 이론</text>
+<text x="340.0" y="368.0" font-size="12" text-anchor="middle">pin한 코어에서는 IRQ affinity도 같이 정리 (그 코어엔 그 루프의 IRQ만)</text>
+</svg></figure>
+<p>그림 9 — 멀티코어에서 실행 방식을 고르는 흐름. 이론적 근거(global vs partitioned 스케줄 가능성, 공유 자원 간섭)는 N8.</p>
+<h3 id="9-1-smp-global-의-실시간-약점">9.1 SMP(global)의 실시간 약점<a class="anchor" href="#9-1-smp-global-의-실시간-약점" aria-label="link">#</a></h3>
+<ul><li><strong>응답 시간 분석이 어렵다.</strong> 단일 코어 RTA(N3)는 "나보다 높은 태스크만 나를 막는다"에서 출발한다. global SMP에서는 태스크가 어느 코어에서 돌지, 언제 옮겨질지가 다른 모든 태스크에 달려 있다. global 고정 우선순위 스케줄링은 이용률이 낮아도 마감을 놓치는 경우가 있다(Dhall 효과, N8).</li><li><strong>migration 비용</strong>이 WCET에 들어간다 — 캐시가 식고, 실제 칩에서는 수 µs~수십 µs가 될 수 있다(칩마다 다름, 이 노트에서 실측 못 함).</li><li><strong>스핀락 대기</strong>가 WCET에 들어간다 — 다른 코어가 커널 락을 쥐고 있으면 내 코어의 커널 호출 · ISR(FromISR API)이 기다린다. FreeRTOS SMP에서 다른 코어의 긴 <code>vTaskSuspendAll</code> 구간이 그렇다(§5.2).</li><li><strong>IPI 지터</strong> — 관계없는 코어 간 깨움이 내 코어에 IPI를 보내 매번 스케줄러를 돌게 한다(예제 10의 <code>IPI_OPTIMIZE=n</code>).</li><li><strong>공유 캐시 · 버스 · 메모리 컨트롤러 간섭</strong> — 다른 코어가 메모리를 세게 쓰면 내 루프의 실행 시간이 늘어난다. 이건 pin을 해도 사라지지 않는다(N8: MemGuard 같은 대역폭 조절, 캐시 파티셔닝).</li></ul>
+<h3 id="9-2-그래서-실무-규칙">9.2 그래서 실무 규칙<a class="anchor" href="#9-2-그래서-실무-규칙" aria-label="link">#</a></h3>
+<ol><li><strong>hard RT 루프는 코어 하나에 pin</strong>한다(BMP). 그 코어에는 그 루프와 그 루프의 ISR만 둔다. 예제 11처럼 pin한 스레드는 한 번도 끊기지 않았다.</li><li>그 루프를 <strong>깨우는 쪽(ISR · 생산자)도 같은 코어</strong>에 둔다 — 깨움에 IPI가 끼지 않게(예제 10: 같은 코어 p50 약 5 µs vs 다른 코어 약 32 µs, QEMU 기준 순서).</li><li><strong>IRQ affinity</strong>도 정리한다 — hard RT 코어에는 그 루프의 IRQ만 라우팅한다(GIC · 칩 인터럽트 라우터 설정).</li><li>나머지(통신, 로깅, 파일 시스템, 추론 같은 throughput 일)는 다른 코어(들)에서 global하게 돌린다.</li><li>공유 데이터는 <strong>짧은 스핀락 또는 lock-free 큐(SPSC 링버퍼)</strong>로 넘긴다. hard RT 쪽이 블로킹 뮤텍스에서 기다리는 일이 없게.</li><li>안전 등급이 다른 일을 섞어야 하면(예: ASIL D 제어 + QM 텔레매트리) <strong>SMP 하나로 묶지 않는다</strong> — 커널 하나의 버그가 둘 다 죽인다. AMP(코어마다 다른 이미지), lockstep 코어, 하이퍼바이저 분할을 검토한다(O5 · O6 · P6).</li><li>코어 종류가 다르면(M7 + M4) 선택지는 AMP뿐이다(P4).</li></ol>
+<h3 id="9-3-freertos-zephyr-설정으로-옮기면">9.3 FreeRTOS · Zephyr 설정으로 옮기면<a class="anchor" href="#9-3-freertos-zephyr-설정으로-옮기면" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>목표</th><th>FreeRTOS SMP</th><th>Zephyr SMP</th></tr></thead><tbody><tr><td>루프 태스크를 코어 1에 고정</td><td><code>configUSE_CORE_AFFINITY=1</code>, <code>vTaskCoreAffinitySet(h, 1 &lt;&lt; 1)</code></td><td><code>CONFIG_SCHED_CPU_MASK=y</code>, <code>K_FOREVER</code>로 생성 → <code>k_thread_cpu_pin(t, 1)</code> → <code>k_thread_start</code></td></tr><tr><td>다른 태스크는 코어 1 금지</td><td><code>configTASK_DEFAULT_CORE_AFFINITY = (1 &lt;&lt; 0)</code></td><td>각 스레드 <code>k_thread_cpu_mask_disable(t, 1)</code> 또는 <code>PIN_ONLY</code> 설계</td></tr><tr><td>쓸데없는 IPI 줄이기</td><td>포트 <code>vInterruptCore</code>가 정확히 대상 코어만 (포트 구현)</td><td><code>CONFIG_IPI_OPTIMIZE=y</code></td></tr><tr><td>루프가 다른 코어 결정으로 선점되지 않게</td><td><code>vTaskPreemptionDisable(h)</code> (RMP=1 필요) — 짧게만</td><td>협력형(음수) 우선순위 스레드 (C4)</td></tr><tr><td>단일 코어 가정 코드 보호 (과도기)</td><td><code>configRUN_MULTIPLE_PRIORITIES=0</code> — 코어가 놀 수 있음 (예제 6)</td><td>해당 옵션 없음 — 코드를 고쳐야 함</td></tr></tbody></table></div>
+<hr>
+<h2 id="10-rtos-커널-안에서는-무슨-일이-일어나나-소스-지도">10. RTOS 커널 안에서는 무슨 일이 일어나나 — 소스 지도<a class="anchor" href="#10-rtos-커널-안에서는-무슨-일이-일어나나-소스-지도" aria-label="link">#</a></h2>
+<p>그림 2의 자료구조가 실제로 어디 있는지, 그리고 "태스크 하나가 ready가 되어 다른 코어에서 돌기까지"의 호출 경로(영문만이라 ASCII로 그린다):</p>
+<figure class="code"><pre><code>FreeRTOS V11.3.2 (configNUMBER_OF_CORES = 2)                Zephyr v4.4.2 (CONFIG_SMP=y)
+-------------------------------------------                 --------------------------------------------
+core0: xTaskNotifyGive / xSemaphoreGive                     cpu0: k_sem_give
+  taskENTER_CRITICAL  -&gt; TASK_LOCK + ISR_LOCK                 K_SPINLOCK(&amp;_sched_spinlock)
+  prvAddTaskToReadyList(pxTCB)                                ready_thread() -&gt; runq_add()
+  prvYieldForTask(pxTCB)          [tasks.c]                   flag_ipi(ipi_mask_create(t))   [ipi.c]
+    prvYieldCore(1)                                           ...
+      portYIELD_CORE(1) -&gt; vInterruptCore(1)  [port]          signal_pending_ipi()
+  taskEXIT_CRITICAL   -&gt; release ISR, TASK                      arch_sched_directed_ipi(mask)  [arm64 smp.c]
+        |                                                          |  SGI 0
+        v  (MHU / SIO FIFO / timer IRQ / GIC SGI)                  v
+core1: IPI ISR -&gt; portYIELD_FROM_ISR -&gt; PendSV              cpu1: sched_ipi_handler -&gt; z_sched_ipi()
+  PendSV_Handler -&gt; vTaskSwitchContext(1)                     ISR exit -&gt; z_get_next_switch_handle()
+    TASK_LOCK + ISR_LOCK                                        next_up(): runq_best() vs _current
+    prvSelectHighestPriorityTask(1)  (affinity aware)           (cpu_mask, swap_ok, metairq)
+    pxCurrentTCBs[1] = new                                      _current_cpu-&gt;current = new
+  restore context of new task                               arch_switch -&gt; z_thread_mark_switched_in</code></pre></figure>
+<div class="tw"><table><thead><tr><th>개념</th><th>FreeRTOS V11.3.2</th><th>Zephyr v4.4.2</th></tr></thead><tbody><tr><td>코어 수 설정</td><td><code>configNUMBER_OF_CORES</code></td><td><code>CONFIG_SMP</code>, <code>CONFIG_MP_MAX_NUM_CPUS</code></td></tr><tr><td>전역 ready queue</td><td><code>pxReadyTasksLists[]</code> (<code>tasks.c</code>)</td><td><code>_kernel.ready_q</code> (<code>include/zephyr/kernel_structs.h</code> <code>struct z_kernel</code>)</td></tr><tr><td>코어별 ready queue</td><td>없음</td><td><code>struct _cpu.ready_q</code> (<code>CONFIG_SCHED_CPU_MASK_PIN_ONLY</code>)</td></tr><tr><td>코어별 "지금 실행 중"</td><td><code>pxCurrentTCBs[ configNUMBER_OF_CORES ]</code></td><td><code>_kernel.cpus[i].current</code></td></tr><tr><td>태스크가 어느 코어에서 도나</td><td><code>TCB_t.xTaskRunState</code> (코어 번호 / NOT_RUNNING / SCHEDULED_TO_YIELD)</td><td><code>_current</code> 비교, <code>z_smp_cpu_mobile()</code></td></tr><tr><td>다음 태스크 선택</td><td><code>prvSelectHighestPriorityTask( xCoreID )</code> (<code>vTaskSwitchContext( xCoreID )</code> 안)</td><td><code>next_up()</code> (<code>kernel/sched.c</code>) — SMP 분기에서 <code>_current</code>와 <code>runq_best()</code> 비교, <code>swap_ok</code></td></tr><tr><td>어느 코어를 선점할지</td><td><code>prvYieldForTask()</code></td><td><code>ipi_mask_create()</code> (<code>kernel/ipi.c</code>)</td></tr><tr><td>커널 락</td><td>task lock + ISR lock, <code>vPortRecursiveLock</code> 등 포트 구현 (재진입)</td><td><code>_sched_spinlock</code> (<code>kernel/sched.c</code>), <code>k_spin_lock</code> (<code>include/zephyr/spinlock.h</code>, 재진입 아님)</td></tr><tr><td>크리티컬 섹션</td><td><code>vTaskEnterCritical</code> / <code>vTaskEnterCriticalFromISR</code> (SMP 버전은 진짜 함수)</td><td><code>K_SPINLOCK(&amp;lock) { }</code> 블록 / <code>k_spin_lock</code></td></tr><tr><td>스케줄러 잠금</td><td><code>vTaskSuspendAll</code> = task lock 보유 (전역)</td><td><code>k_sched_lock</code> = 현재 스레드 <code>base.sched_locked++</code> (이 CPU만)</td></tr><tr><td>레거시 전역 잠금</td><td>—</td><td><code>irq_lock()</code> = <code>z_smp_global_lock()</code> (<code>kernel/smp.c</code>)</td></tr><tr><td>IPI 보내기</td><td><code>portYIELD_CORE( x )</code> → 포트 (<code>vInterruptCore</code>, <code>vYieldCore</code>, SGI)</td><td><code>arch_sched_directed_ipi</code> / <code>arch_sched_broadcast_ipi</code> (arm64: SGI 0)</td></tr><tr><td>IPI 받기</td><td>포트 ISR → <code>portYIELD_FROM_ISR</code></td><td><code>sched_ipi_handler()</code> → <code>z_sched_ipi()</code></td></tr><tr><td>affinity</td><td><code>uxCoreAffinityMask</code>, <code>vTaskCoreAffinitySet</code></td><td><code>base.cpu_mask</code>, <code>k_thread_cpu_mask_*</code> (<code>kernel/cpu_mask.c</code>)</td></tr><tr><td>보조 코어 시작</td><td>포트/앱: <code>configWAKE_SECONDARY_CORES</code>, <code>ucSecondaryCoresReadyFlags</code>, <code>svc 102</code> (Armv8-M)</td><td><code>z_smp_init()</code> / <code>k_smp_cpu_start()</code> (<code>kernel/smp.c</code>), 부팅 로그 "Secondary CPU core 1 ... is up"</td></tr><tr><td>idle</td><td>코어마다 idle 태스크(코어 0 = active idle, 나머지 = passive idle, <code>configUSE_PASSIVE_IDLE_HOOK</code>)</td><td><code>struct _cpu.idle_thread</code> 코어마다</td></tr></tbody></table></div>
+<p>더 깊은 내용으로 이어지는 곳: ready list · 비트맵 구조는 C1, PendSV 컨텍스트 스위치 한 줄씩은 C2, 첫 태스크 시작(<code>svc</code>로 진입)은 C3, 단일 코어 크리티컬 섹션은 C7, 소스 읽기 순서는 C12.</p>
+<hr>
+<h2 id="11-실무에서-다시-보기">11. 실무에서 다시 보기<a class="anchor" href="#11-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="11-1-드론-비행-제어기를-듀얼코어-mcu로-옮길-때">11.1 드론 비행 제어기를 듀얼코어 MCU로 옮길 때<a class="anchor" href="#11-1-드론-비행-제어기를-듀얼코어-mcu로-옮길-때" aria-label="link">#</a></h3>
+<p>예를 들어 단일 코어 STM32F4급에서 FreeRTOS로 돌던 비행 제어기를 RP2350 같은 듀얼 M33으로 옮긴다고 하자. 흔한 계획: "core1은 IMU 읽기 + 자세 rate loop, core0은 나머지(텔레메트리, GNSS, 로그)".</p>
+<ul><li>이건 <strong>BMP</strong>다. FreeRTOS SMP라면 rate loop 태스크와 IMU 처리를 <code>vTaskCoreAffinitySet(h, 1 &lt;&lt; 1)</code>로 core1에 고정하고, 나머지 태스크는 <code>configTASK_DEFAULT_CORE_AFFINITY</code>를 core0으로. IMU 데이터 준비 인터럽트도 core1로 라우팅한다(칩의 인터럽트 라우팅 기능).</li><li>옛 코드에서 "rate loop가 가장 높으니 공유 setpoint 구조체를 락 없이 읽는다"였다면, core0의 텔레메트리 태스크가 <strong>동시에</strong> 그 구조체를 쓸 수 있다. 예제 4 · 7의 버그다. 고치는 법: setpoint는 seqlock(쓰는 쪽이 짝수/홀수 카운터) 또는 더블 버퍼 + atomic 포인터 교체, 또는 아주 짧은 스핀락.</li><li><code>configRUN_MULTIPLE_PRIORITIES=0</code>으로 "일단 옛 가정대로" 돌리면 버그는 숨지만, rate loop가 도는 동안 core0의 낮은 태스크들이 다 멈춘다(예제 6) — 듀얼코어로 옮긴 의미가 없다. 과도기 진단용으로만 쓴다.</li></ul>
+<h3 id="11-2-로봇-관절-모터-컨트롤러-20-khz-foc는-어디에">11.2 로봇 관절 모터 컨트롤러 — 20 kHz FOC는 어디에<a class="anchor" href="#11-2-로봇-관절-모터-컨트롤러-20-khz-foc는-어디에" aria-label="link">#</a></h3>
+<ul><li>FOC 전류 루프(50 µs 주기)는 보통 <strong>ISR 안에서</strong> 돈다(A7, E1). 듀얼코어라면 그 ISR을 한 코어에 고정하고 그 코어에는 RTOS 태스크를 거의 안 둔다 — 사실상 bare-metal 코어 + RTOS 코어의 AMP/BMP다.</li><li>CAN 통신 · 상태 머신 · 진단은 다른 코어에서. 두 코어 사이 setpoint 전달은 SPSC 링버퍼(Anduril C 문제은행의 그것)나 메일박스.</li><li>피할 것: 전류 루프 ISR에서 FreeRTOS <code>FromISR</code> API를 부르는 것 — SMP에서는 ISR lock을 잡아야 하고(§5.2), 다른 코어가 그 락을 쥐고 있으면 50 µs 예산 안에서 기다리게 된다.</li></ul>
+<h3 id="11-3-ssd-컨트롤러-don의-경험과-cortex-r82">11.3 SSD 컨트롤러 — Don의 경험과 Cortex-R82<a class="anchor" href="#11-3-ssd-컨트롤러-don의-경험과-cortex-r82" aria-label="link">#</a></h3>
+<ul><li>Don이 본 SSD 펌웨어는 코어별 역할 분담(AMP)이었다. Cortex-R82는 클러스터 안 하드웨어 일관성을 제공하고 FreeRTOS <code>ARM_CR82</code> 포트가 SMP를 지원한다(V11.3.0). 즉 "FTL 작업을 코어 여러 개가 하나의 작업 풀에서 꺼내 처리"하는 SMP 설계가 RTOS 수준에서 가능해졌다.</li><li>그래도 NAND 채널 타이밍처럼 hard한 부분은 여전히 코어 고정이 맞다. 혼합(BMP + 일부 global 풀)이 현실적이다.</li><li>면접에서 이렇게 연결할 수 있다: "SSD 펌웨어에서 코어마다 실행부를 돌리고 doorbell로 일을 넘겼다 — 그게 AMP이고, SMP RTOS에서는 그 doorbell이 커널 IPI(<code>portYIELD_CORE</code>)가 되고, 공유 큐의 하드웨어 세마포어가 커널 스핀락이 된다."</li></ul>
+<h3 id="11-4-ai-가속기-soc의-제어-클러스터">11.4 AI 가속기 SoC의 제어 클러스터<a class="anchor" href="#11-4-ai-가속기-soc의-제어-클러스터" aria-label="link">#</a></h3>
+<p>AI 가속기 SoC에는 보통 큰 Linux 클러스터(Cortex-A) 옆에 실시간 제어 코어(Cortex-R/M 또는 RISC-V) 몇 개가 있어 가속기 명령 큐, DMA, 전원 · 클럭, 안전 감시를 맡는다. 이름 있는 제품의 내부 구성은 공개 자료로 확인하지 못했다. 구조적으로는:</p>
+<ul><li>Linux ↔ 제어 코어는 AMP(remoteproc/RPMsg, P5).</li><li>제어 코어들끼리는 SMP RTOS 하나로 묶을 수도, 코어마다 기능을 나눌 수도 있다. 가속기 작업 디스패치처럼 throughput이 중요한 일은 SMP, 안전 감시는 별도 코어(가능하면 lockstep).</li><li>Rivian 실리콘 검증 같은 직무에서 "이 제어 코어 펌웨어가 SMP인가 AMP인가, IPI는 무엇으로 하나, 코어 간 큐는 어떻게 보호하나"는 bring-up 체크리스트 질문이다.</li></ul>
+<hr>
+<h2 id="12-흔한-실수와-증상">12. 흔한 실수와 증상<a class="anchor" href="#12-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>"가장 높은 우선순위니까 락 없이"</td><td>듀얼코어로 옮긴 뒤 가끔 값이 틀림, 재현 어려움</td><td>SMP에서는 낮은 태스크가 다른 코어에서 <strong>동시에</strong> 돈다 (예제 4 · 7)</td><td>진짜 락(스핀락 · 뮤텍스) 또는 lock-free 구조. 또는 관련 태스크를 같은 코어에 pin</td></tr><tr><td><code>k_sched_lock()</code>을 뮤텍스처럼 사용 (Zephyr)</td><td>2코어에서만 데이터 손실</td><td><code>k_sched_lock</code>은 이 CPU의 선점만 막는다 (예제 4 "both k_sched_lock")</td><td><code>k_spinlock</code> (짧게) 또는 <code>k_mutex</code></td></tr><tr><td><code>vTaskSuspendAll()</code> 구간을 길게 (FreeRTOS SMP)</td><td>다른 코어의 커널 API 호출이 다 느려짐, 지터</td><td>SMP <code>vTaskSuspendAll</code>은 전역 task lock을 쥔다 (§5.2)</td><td>짧게, 또는 데이터 전용 뮤텍스로 바꿈</td></tr><tr><td>포트의 <code>vInterruptCore</code>를 구현 안 함 (Armv8-M SMP)</td><td>다른 코어에서 깨운 높은 태스크가 안 돌거나 한참 늦게 돎</td><td>포트 기본이 weak stub — IPI가 안 간다 (예제 9: 0/20)</td><td>칩의 doorbell(MHU, 코어 간 FIFO, SGI)로 구현, bring-up 테스트에 "다른 코어 깨움" 포함</td></tr><tr><td>현재 코어 번호를 읽고 그 값으로 per-core 배열 접근</td><td>드물게 다른 코어의 슬롯을 덮어씀</td><td>읽은 직후 migration (§2.4)</td><td>인터럽트 끄고 읽기, pin, 또는 atomic</td></tr><tr><td>per-core 데이터를 한 배열에 촘촘히</td><td>2코어인데 1코어보다 느림</td><td>false sharing (예제 13: ×0.78)</td><td>캐시 라인 정렬 · 패딩 (<code>__aligned(64)</code> 등, 칩 라인 크기 확인)</td></tr><tr><td>경쟁하는 공유 카운터를 atomic으로 "가볍게"</td><td>확장 안 됨, 코어 늘리면 오히려 느림</td><td>캐시 라인 핑퐁 (예제 12: ×0.52)</td><td>코어별 카운터 + 필요할 때 합산</td></tr><tr><td>스핀락을 쥔 채 블로킹 API 호출</td><td>데드락, assert</td><td>스핀락 구간은 IRQ가 꺼져 있고 다른 코어가 돌며 기다림</td><td>스핀락 구간에서는 블록 금지, 짧게</td></tr><tr><td>같은 <code>k_spinlock</code>을 중첩해서 잡음 (Zephyr)</td><td>SMP에서 영원히 spin</td><td>Zephyr 스핀락은 재진입이 아니다 (FreeRTOS 포트 락과 다름)</td><td>락 구조 재설계, <code>CONFIG_SPIN_VALIDATE</code>로 디버그 빌드에서 잡기</td></tr><tr><td>스핀락 해제 쪽 배리어 생략 (직접 만든 락)</td><td>QEMU에선 멀쩡, 실제 칩에서 가끔 오래된 값</td><td>메모리 순서 (EL F5), QEMU는 이를 재현 못 함</td><td>커널 · 컴파일러 제공 atomic(acquire/release) 사용</td></tr><tr><td><code>configRUN_MULTIPLE_PRIORITIES=0</code>인 줄 모르고 성능 측정</td><td>"코어 2개인데 CPU 사용률이 반"</td><td>기본값이 0 — 높은 태스크가 돌면 다른 코어가 놂 (예제 6)</td><td>설정 확인. 코드가 SMP-safe면 1로</td></tr></tbody></table></div>
+<hr>
+<h2 id="13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다<a class="anchor" href="#13-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> "What's the difference between AMP and SMP on a multicore MCU, and when would you pick each?"</p>
+<p><strong>A.</strong> AMP는 코어마다 독립 펌웨어(다른 RTOS나 bare-metal)가 돌고 메일박스 · 공유 메모리로 통신한다. SMP는 커널 하나가 같은 종류의 코어 여러 개를 하나의 ready queue로 스케줄한다. 코어 종류가 다르거나(M7 + M4), 안전 등급이 다르거나, 각 코어를 따로 검증해야 하면 AMP. 같은 코어이고 throughput 일을 자동 분산하고 싶으면 SMP. hard RT 루프는 SMP에서도 코어에 고정(BMP)한다.</p>
+<blockquote><p>AMP runs an independent image per core — different RTOSes or bare-metal — talking through mailboxes and shared memory; SMP runs one kernel image that schedules all identical cores from a shared ready queue. I pick AMP when the cores are heterogeneous, like an M7 plus an M4, or when I need isolation between criticality levels. I pick SMP for throughput work that benefits from load balancing, and even then I pin the hard real-time loop and its interrupt to one core, which is effectively bound multiprocessing.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Why can't you run SMP on an STM32H747?" → 코어가 M7과 M4로 ISA · 캐시 · FPU가 달라 같은 이미지를 둘 다에서 돌릴 수 없다.</p>
+<p><strong>Q.</strong> "In FreeRTOS SMP, how is a critical section implemented?"</p>
+<p><strong>A.</strong> 단일 코어에서는 인터럽트 마스크(BASEPRI)뿐이었지만 SMP에서는 다른 코어도 커널 자료구조를 만지므로 스핀락이 필요하다. <code>vTaskEnterCritical</code>은 이 코어 인터럽트를 끄고, 코어별 중첩 카운트가 0이면 task lock과 ISR lock을 순서대로 잡는다. ISR 버전은 ISR lock만 잡는다. 락 둘로 나눈 이유는 한 코어가 스케줄러를 일시 정지(task lock 보유)해도 다른 코어 ISR이 FromISR API를 쓸 수 있게 하려는 것. 들어올 때 다른 코어가 양보를 요청해 뒀으면 <code>prvCheckForRunStateChange</code>가 락을 풀고 양보한 뒤 다시 잡는다.</p>
+<blockquote><p>On a single core it's just masking interrupts, but with SMP another core can touch the ready lists, so it becomes interrupt masking plus spinlocks. vTaskEnterCritical disables interrupts on this core and, on the first nesting level, takes the task lock and then the ISR lock — always in that order to avoid deadlock. The FromISR variant only takes the ISR lock, so a core that has suspended the scheduler, holding the task lock, doesn't block interrupt handlers on other cores. The port supplies the locks — LDREX/STREX with WFE/SEV on Armv8-M, hardware spinlocks on the RP2040.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Is the lock recursive?" → FreeRTOS 포트 락(<code>vPortRecursiveLock</code>)은 소유 코어를 기록해 재진입을 허용한다. Zephyr <code>k_spinlock</code>은 재진입이 안 된다.</p>
+<p><strong>Q.</strong> "If a high-priority task is running, can a low-priority task run at the same time?"</p>
+<p><strong>A.</strong> 단일 코어에서는 아니다. SMP에서는 기본적으로 그렇다 — 가장 높은 N개가 돈다. 그래서 우선순위를 상호 배제 수단으로 쓰던 코드가 깨진다. 직접 Zephyr로 재현했을 때 단일 코어에서는 0, 2코어에서는 매번 1만 개 넘게 값을 잃었다. FreeRTOS는 <code>configRUN_MULTIPLE_PRIORITIES=0</code>으로 다른 우선순위의 동시 실행을 막을 수 있지만 코어가 논다 — 실험에서 높은 태스크가 도는 동안 다른 코어는 idle이었다.</p>
+<blockquote><p>On a single core, no. On SMP, yes by default — the scheduler runs the N highest-priority ready tasks, so priority is no longer mutual exclusion. I reproduced it in Zephyr: code that relied on priority plus k_sched_lock lost zero updates on one core and over ten thousand per run on two. FreeRTOS has configRUN_MULTIPLE_PRIORITIES set to zero to keep the old guarantee, but in my test that left the second core idle while the high-priority task ran, so it's a migration crutch, not a design.</p></blockquote>
+<p><strong>Q.</strong> "What is an IPI and why does an SMP RTOS need it?"</p>
+<p><strong>A.</strong> 다른 코어에 거는 인터럽트다. 코어 0에서 깨운 태스크가 코어 1의 현재 태스크보다 높으면, 코어 1은 커널에 들어올 일이 없으니 인터럽트로 재스케줄을 시켜야 한다. FreeRTOS에서는 <code>prvYieldForTask</code>가 선점할 코어를 고르고 <code>portYIELD_CORE</code>로 IPI를 보낸다. Cortex-M33 SMP 포트에서 IPI를 비워 둔 채 돌려 보니 다른 코어의 높은 태스크가 20번 중 한 번도 못 깨어났다 — 보조 코어에는 tick도 없었다.</p>
+<blockquote><p>It's an interrupt one core sends to another. When core 0 readies a task that should preempt what core 1 is running, core 1 has no reason to enter the kernel, so the kernel interrupts it — on FreeRTOS, prvYieldForTask picks the lowest-priority eligible core and calls portYIELD_CORE; on Zephyr, flag_ipi plus signal_pending_ipi end in a GIC SGI on arm64. When I brought up FreeRTOS SMP on a dual Cortex-M33 in QEMU and left the IPI hook empty, a high-priority task on the second core woke zero times out of twenty, because that core didn't even have a tick. So IPIs are about correctness, not just latency.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "How do you reduce IPI overhead?" → 필요한 코어에만 보낸다(Zephyr <code>CONFIG_IPI_OPTIMIZE</code>: 실험에서 불필요한 IPI 370 → 21회), 깨우는 쪽과 깨어나는 쪽을 같은 코어에 둔다.</p>
+<p><strong>Q.</strong> "Would you put a hard real-time control loop on an SMP RTOS?"</p>
+<p><strong>A.</strong> 넣을 수는 있지만 global 스케줄링에 맡기지 않는다. 루프 태스크와 그 IRQ를 한 코어에 고정하고, 그 코어에는 관계없는 태스크 · IRQ · IPI가 안 가게 한다. 생산자 ISR도 같은 코어에 둬서 깨움에 IPI가 끼지 않게 한다. 그래도 공유 캐시 · 버스 간섭은 남으므로 최악 실행 시간은 다른 코어에 부하를 건 상태에서 측정한다. 안전 등급이 다르면 AMP나 lockstep을 쓴다.</p>
+<blockquote><p>Yes, but not under global scheduling. I'd pin the loop task and its interrupt to one core, keep unrelated tasks, IRQs and IPIs off that core, and put the producer ISR on the same core so the wake-up never needs an IPI — in my measurements a same-core wake was several times faster than a cross-core one. Pinning doesn't remove shared cache and bus interference, so I'd measure worst-case execution time with the other cores loaded. If the loop has a different safety level from the rest, I'd rather use AMP or a lockstep core than share one SMP kernel.</p></blockquote>
+<p><strong>Q.</strong> "Two threads each increment their own counter on different cores, yet it's slower than one core. Why?"</p>
+<p><strong>A.</strong> false sharing이다. 두 카운터가 같은 캐시 라인에 있으면 쓸 때마다 라인이 두 코어 사이를 오간다. 실험에서 4바이트 간격이면 2코어가 1코어보다 느렸고(×0.78), 64바이트 이상 떨어뜨리자 정확히 두 배가 됐다. 코어별 데이터는 캐시 라인 크기로 정렬 · 패딩한다.</p>
+<blockquote><p>False sharing: the counters are logically private but sit on the same cache line, so every write invalidates the other core's copy and the line ping-pongs. In my test, counters four bytes apart made two cores slower than one — about 0.78x — and spacing them 64 bytes apart gave a clean 2x. Per-core data should be aligned and padded to the cache line size of the actual part, 32 bytes on a Cortex-M7, 64 on an A53.</p></blockquote>
+<p><strong>Q.</strong> "How does vTaskSuspendAll behave differently on FreeRTOS SMP compared to Zephyr's k_sched_lock?"</p>
+<p><strong>A.</strong> FreeRTOS SMP의 <code>vTaskSuspendAll</code>은 전역 task lock을 잡고 <code>xTaskResumeAll</code>까지 쥔다. 그래서 둘 다 SuspendAll을 쓰는 코드는 코어 사이에서도 직렬화된다(실험에서 손실 0). Zephyr <code>k_sched_lock</code>은 현재 스레드의 카운트만 올려 이 CPU에서의 선점만 막는다 — 둘 다 써도 다른 CPU에서 동시에 돈다(손실 발생). 둘 다 "잠금 없이 들어오는 코드" 하나만 있으면 깨진다.</p>
+<blockquote><p>On FreeRTOS SMP, vTaskSuspendAll takes the global task lock and holds it until xTaskResumeAll, so two tasks that both use it are serialized across cores — I measured zero lost updates. Zephyr's k_sched_lock only bumps a per-thread count that stops preemption on the current CPU, so two threads using it on different CPUs still run concurrently and I lost updates every run. In both kernels, a single path that skips the lock breaks it, and on FreeRTOS holding the task lock for long stalls every kernel call on the other cores.</p></blockquote>
+<hr>
+<h2 id="14-직접-해보기">14. 직접 해보기<a class="anchor" href="#14-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong> — 3코어 SMP에서 우선순위 5 · 4 · 3 · 2인 바쁜 태스크 넷이 ready다. <code>configRUN_MULTIPLE_PRIORITIES</code> 1과 0일 때 각각 무엇이 돌고 몇 코어가 노나? 우선순위 5인 태스크만 core0으로 고정하면? 정답/힌트: RMP=1이면 5 · 4 · 3이 돌고 2는 대기, 노는 코어 0개. RMP=0이면 5만 돌고 코어 2개가 idle. 5를 core0에 고정해도 RMP=1이면 5(core0) · 4 · 3(나머지)로 같다.</li></ol>
+<ol><li><strong>코드</strong> — 예제 4(§3.3)의 "H nolock + L schedlock"을 Zephyr에서 <strong>고치지 말고</strong> 같은 코어에 두 스레드를 pin해서 통과시켜 보라. 무엇을 얻고 무엇을 잃나? 정답/힌트: <code>K_FOREVER</code> 생성 → <code>k_thread_cpu_pin(&amp;th_h, 0)</code>, <code>k_thread_cpu_pin(&amp;th_l, 0)</code> → <code>k_thread_start</code>. 손실 0이 되지만 그 두 스레드는 병렬성을 잃는다 — "같은 코어에 묶으면 단일 코어 가정이 살아난다"는 BMP식 이식 전략.</li></ol>
+<ol><li><strong>코드</strong> — FreeRTOS AN521 예제 6에 <code>vTaskPreemptionDisable(h[1])</code>(M)을 시작 직후 걸고 H를 잠시 블록시켰다가 깨워 보라(RMP=1). M이 도는 코어를 H가 선점할 수 있나? 정답/힌트: <code>prvYieldForTask</code>는 <code>xPreemptionDisable == pdFALSE</code>인 코어만 후보로 고른다. M 코어는 빠지고 다른 코어(L 또는 idle)를 선점한다. <code>configUSE_TASK_PREEMPTION_DISABLE</code>는 RMP=1에서만 허용된다.</li></ol>
+<ol><li><strong>측정</strong> — 예제 10을 waiter와 giver를 <strong>둘 다 cpu1</strong>에 두고(busy 스레드는 cpu0으로) 다시 재서, "같은 코어" 지연이 CPU 번호와 무관한지 확인하라. <code>IPI_OPTIMIZE=n/y</code>에서 이번엔 어느 CPU의 IPI 수가 줄어드나? 정답/힌트: 같은 코어 지연은 cpu1에서도 p50 수 µs대여야 한다. 불필요한 IPI는 이번엔 cpu0으로 간다.</li></ol>
+<ol><li><strong>측정</strong> — 예제 13의 <code>area</code>를 <code>__aligned(256)</code> 대신 정렬 없이 두고 stride 64로 돌리면 결과가 흔들리나? 왜? 정답/힌트: 배열 시작이 64바이트 경계가 아니면 stride 64여도 두 카운터가 같은 줄에 걸칠 수 없지만(4바이트 변수), 다른 핫 변수와 같은 줄에 놓일 수 있다 — 예제 12의 <code>mode</code> 사례처럼. 링크 배치에 따라 달라진다. 심볼 주소를 <code>nm</code>으로 확인.</li></ol>
+<ol class="tasks"><li><strong>코드 읽기</strong> — FreeRTOS <code>tasks.c</code>에서 <code>vTaskCoreAffinitySet()</code>을 읽고, 실행 중인 태스크의 affinity에서 지금 코어를 빼면 어떤 함수로 무엇이 일어나는지 순서대로 적어라. 정답/힌트: 크리티컬 섹션 → 마스크 갱신 → 그 태스크가 실행 중이고 새 마스크가 지금 코어를 허락하지 않으면 <code>prvYieldCore( xCoreID )</code> → (다른 코어면 IPI) → 그 코어가 재스케줄하며 <code>prvSelectHighestPriorityTask</code>가 affinity를 보고 다른 태스크를 고름.</li></ol>
+<ol><li><strong>설계</strong> — 드론 FC를 듀얼 M33(공유 SRAM, 캐시 없음)으로 옮긴다. IMU ISR(4 kHz), rate loop, attitude loop(500 Hz), 텔레메트리, 로그, GNSS 파서를 어떤 코어에 어떤 방식으로 두고, 코어 간 데이터는 무엇으로 넘길지 한 쪽으로 써 보라. 정답/힌트: core1 = IMU ISR + rate loop + attitude(pin, 같은 코어 깨움), core0 = 나머지(global 또는 pin). setpoint는 seqlock 또는 더블 버퍼, 로그는 SPSC 링버퍼. 캐시가 없으니 false sharing은 없지만 SRAM 뱅크 경쟁이 있을 수 있다 — 루프 데이터를 다른 뱅크에 두는 것을 검토(칩 데이터시트 확인).</li></ol>
+<hr>
+<h2 id="15-용어-사전">15. 용어 사전<a class="anchor" href="#15-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>AMP</td><td>Asymmetric Multiprocessing</td><td>코어마다 독립된 OS/펌웨어 이미지. 코어 종류가 달라도 된다</td></tr><tr><td>SMP</td><td>Symmetric Multiprocessing</td><td>커널 하나가 같은 종류 코어 여럿을 하나의 ready queue로 스케줄</td></tr><tr><td>BMP</td><td>Bound Multiprocessing</td><td>SMP 커널 위에서 태스크를 전부 코어에 고정해 쓰는 방식</td></tr><tr><td>global scheduling</td><td>전역 스케줄링</td><td>ready queue 하나, 어떤 태스크든 어떤 코어든</td></tr><tr><td>partitioned scheduling</td><td>분할 스케줄링</td><td>코어마다 ready queue, 태스크는 한 코어에 묶임</td></tr><tr><td>core affinity</td><td>코어 친화성</td><td>태스크가 돌 수 있는 코어 집합(비트마스크)</td></tr><tr><td>pin</td><td>고정</td><td>affinity를 코어 하나로 정하는 것</td></tr><tr><td>migration</td><td>코어 이동</td><td>태스크가 다른 코어에서 다시 시작되는 것. 캐시가 식는다</td></tr><tr><td>IPI</td><td>Inter-Processor Interrupt</td><td>다른 코어에 거는 인터럽트. SMP 커널은 재스케줄 요청에 쓴다</td></tr><tr><td>SGI</td><td>Software Generated Interrupt</td><td>Arm GIC의 IPI 수단. Zephyr arm64는 SGI 0을 스케줄 IPI로 쓴다</td></tr><tr><td>doorbell / MHU</td><td>메일박스 인터럽트 장치</td><td>Cortex-M 멀티코어 칩에서 코어 간 인터럽트를 거는 하드웨어</td></tr><tr><td>spinlock</td><td>스핀락</td><td>잠겨 있으면 돌며 기다리는 락. SMP 크리티컬 섹션의 재료</td></tr><tr><td>task lock / ISR lock</td><td>FreeRTOS SMP 커널 락</td><td>태스크 쪽 커널 상태 / ISR과 공유하는 커널 상태를 지키는 두 스핀락</td></tr><tr><td><code>configRUN_MULTIPLE_PRIORITIES</code></td><td>FreeRTOS 설정</td><td>0이면 서로 다른 우선순위 태스크가 동시에 돌지 않는다 (기본 0)</td></tr><tr><td><code>xTaskRunState</code></td><td>FreeRTOS TCB 필드</td><td>실행 중인 코어 번호, 또는 NOT_RUNNING / SCHEDULED_TO_YIELD</td></tr><tr><td>passive idle</td><td>FreeRTOS SMP</td><td>코어 0이 아닌 코어의 idle 태스크</td></tr><tr><td><code>k_sched_lock</code></td><td>Zephyr API</td><td>현재 스레드를 이 CPU에서 선점되지 않게 함. SMP에서 배제 수단이 아니다</td></tr><tr><td>LDREX / STREX</td><td>Arm 배타적 접근 명령</td><td>다른 접근이 끼면 STREX가 실패 — 스핀락 · atomic의 바탕</td></tr><tr><td>WFE / SEV</td><td>Arm 이벤트 대기 / 보내기</td><td>스핀락 대기 중 잠들기 · 해제할 때 깨우기</td></tr><tr><td>outline atomics</td><td>GCC aarch64 기능</td><td>atomic을 함수(<code>__aarch64_cas8_acq_rel</code> 등)로 불러 실행 시점에 LSE/LLSC 선택</td></tr><tr><td>false sharing</td><td>거짓 공유</td><td>서로 다른 변수가 같은 캐시 라인에 있어 생기는 코어 간 경쟁</td></tr><tr><td>MTTCG</td><td>Multi-threaded TCG</td><td>QEMU가 vCPU마다 호스트 스레드를 써서 병렬 에뮬레이션하는 방식</td></tr><tr><td>lockstep</td><td>락스텝</td><td>두 코어가 같은 명령을 동시에 실행해 결과를 비교하는 안전 기능 (SMP와 다름)</td></tr></tbody></table></div>
+<hr>
+<h2 id="16-요약-체크리스트">16. 요약 &amp; 체크리스트<a class="anchor" href="#16-요약-체크리스트" aria-label="link">#</a></h2>
+<p>코어가 둘 이상인 MCU에서 실행 방식은 AMP(코어마다 독립 이미지), SMP(커널 하나 · ready queue 하나), BMP(SMP + 전부 고정) 중 하나다. SMP 커널은 "가장 높은 우선순위 N개"를 돌리기 위해 전역 ready queue를 공유하고, 그 때문에 크리티컬 섹션이 인터럽트 마스크 + 스핀락이 되며(FreeRTOS: task lock + ISR lock, Zephyr: <code>k_spin_lock</code> = IRQ 마스크 + CAS), 다른 코어의 결정을 바꾸려면 IPI를 보낸다. QEMU에서 직접 재현한 핵심 사실: 우선순위 · <code>k_sched_lock</code>으로 배제하던 코드는 단일 코어에서 손실 0, 2코어에서 매번 1만 개 이상을 잃었고, FreeRTOS SMP에서 <code>configRUN_MULTIPLE_PRIORITIES=0</code>은 한 코어를 놀렸으며, IPI를 비워 두자 다른 코어의 높은 태스크가 한 번도 깨어나지 못했다. 성능 면에서는 공유가 없으면 거의 선형으로 확장되지만 경쟁하는 atomic · 스핀락 · false sharing은 2코어를 1코어보다 느리게 만들었다(QEMU TCG 기준, 모양만 믿을 것). hard real-time 루프는 SMP에 올리더라도 그 루프와 그 IRQ, 그 생산자를 한 코어에 고정하고, 공유 자원 간섭은 측정으로 확인한다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>AMP · SMP · BMP를 정의하고, STM32H747이 왜 AMP뿐인지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"가장 높은 N개가 돈다"와 <code>configRUN_MULTIPLE_PRIORITIES</code> 0/1의 차이를 예제 6 결과로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>prvYieldForTask</code> → <code>prvYieldCore</code> → <code>portYIELD_CORE</code> 경로와 <code>xTaskRunState</code>의 역할을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>SMP <code>vTaskEnterCritical</code>이 잡는 두 락과 순서, ISR 버전과의 차이를 그릴 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>prvCheckForRunStateChange</code>가 왜 락을 풀었다 다시 잡는지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Zephyr <code>k_spin_lock</code>의 생성 코드(IRQ 마스크 + CAS + relax 루프)를 읽을 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>우선순위 · <code>k_sched_lock</code> · <code>vTaskSuspendAll</code>이 SMP에서 각각 배제가 되는지/안 되는지 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>IPI가 없으면 무슨 일이 생기는지, Zephyr <code>IPI_OPTIMIZE</code>가 무엇을 줄이는지 숫자로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Zephyr · FreeRTOS에서 태스크를 코어에 고정하는 코드를 쓸 수 있다 (생성 시점 규칙 포함)</span></label></li><li class="task"><label><input type="checkbox" ><span>false sharing을 재현 · 진단(<code>nm</code>으로 주소 확인) · 수정할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>hard RT 루프를 SMP에 올릴 때의 규칙(pin, 같은 코어 깨움, IRQ affinity, 간섭 측정)을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>QEMU TCG 측정에서 믿을 수 있는 것(현상 · 순서 · 모양)과 없는 것(절대 지연, 메모리 순서, 캐시)을 구분할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul class="tasks"><li>FreeRTOS Kernel V11.3.2 소스: <code>tasks.c</code>(<code>prvYieldForTask</code>, <code>prvYieldCore</code>, <code>prvCheckForRunStateChange</code>, <code>vTaskEnterCritical</code>, <code>vTaskSuspendAll</code>, <code>vTaskCoreAffinitySet</code>), <code>include/FreeRTOS.h</code>(SMP 매크로 기본값 · <code>#error</code> 조건), <code>include/task.h</code>, <code>History.txt</code>(V11.0.0 SMP 메인라인, V11.3.0 ARM_CR82 SMP, V11.3.1 Armv8-M SMP · <code>configIDLE_AFFINITY</code>) — <code>/var/rtoslab/src/FreeRTOS-Kernel</code></li><li>FreeRTOS Armv8-M SMP 부팅 순서 · IPI 요구사항: <code>portable/ARMv8M/non_secure/ReadMe.txt</code>, <code>portable/GCC/ARM_CM33_NTZ/non_secure/port.c</code>(<code>vPortRecursiveLock</code>, <code>xPortStartScheduler</code>)</li><li>FreeRTOS RP2040 포트: <code>portable/ThirdParty/GCC/RP2040/port.c</code>, <code>include/portmacro.h</code></li><li>FreeRTOS SMP 소개 문서: https://www.freertos.org/symmetric-multiprocessing-introduction.html</li><li>Zephyr v4.4.2 소스: <code>kernel/sched.c</code>(<code>next_up</code>, <code>_sched_spinlock</code>), <code>kernel/ipi.c</code>(<code>flag_ipi</code>, <code>ipi_mask_create</code>, <code>signal_pending_ipi</code>, <code>z_sched_ipi</code>), <code>kernel/smp.c</code>(<code>z_smp_global_lock</code>, <code>k_smp_cpu_start</code>), <code>kernel/cpu_mask.c</code>, <code>kernel/Kconfig.smp</code>, <code>include/zephyr/spinlock.h</code>, <code>include/zephyr/kernel_structs.h</code>, <code>arch/arm64/core/smp.c</code>, <code>arch/arm64/core/switch.S</code>, <code>subsys/tracing/user/tracing_user.c</code> — <code>/var/rtoslab/zephyrproject/zephyr</code></li><li>Zephyr SMP 문서: https://docs.zephyrproject.org/latest/kernel/services/smp/smp.html (소스 트리 <code>doc/kernel/services/smp/smp.rst</code> — "Legacy irq_lock() emulation" 절)</li><li>Zephyr AN521 보드 정의(SSE-200 주소): <code>soc/arm/mps2/soc.c</code>, <code>boards/arm/mps2/mps2_an521-common.dtsi</code></li><li>Raspberry Pi RP2350 제품 브리프: https://datasheets.raspberrypi.com/rp2350/rp2350-product-brief.pdf</li><li>Arm Cortex-R82 발표(2020-09) 보도: https://www.anandtech.com/show/16056/arm-announces-cortexr82-first-64bit-real-time-processor</li><li>EL F4(스핀락 · atomic · 락 순서), EL F5(메모리 배리어) — <code>../EmbeddedLinux/F_kernel_mechanisms/</code></li><li>이론: N8(멀티코어 실시간 — global vs partitioned, Dhall 효과, 간섭), N3(RTA)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-25_C9_idle_hooks.html"><span class="dir">← 이전</span><span class="nm">C9. idle 태스크와 훅 — 커널이 비워 둔 콘센트로 CPU·스택·heap을 들여다보기</span></a><a class="next" href="2026-10-25_C11_other_schedulers.html"><span class="dir">다음 →</span><span class="nm">C11. 다른 스케줄러 구현 — cyclic executive · Pont TTC · EDF · ARINC 653 파티션을 직접 만들어 돌리고, 같은 task set에서 무엇이 달라지는지 잰다</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-코어가-둘이면-누가-다음-일을-고르나-가-두-번-결정된다">0. 큰 그림 — 코어가 둘이면 "누가 다음 일을 고르나"가 두 번 결정된다</a></li><li class="l3"><a href="#실습-환경-한-줄">실습 환경 한 줄</a></li><li class="l2"><a href="#1-amp-smp-bmp-정의와-실제-칩">1. AMP · SMP · BMP — 정의와 실제 칩</a></li><li class="l3"><a href="#1-1-정의">1.1 정의</a></li><li class="l3"><a href="#1-2-왜-mcu가-멀티코어가-됐나-실제-칩">1.2 왜 MCU가 멀티코어가 됐나 — 실제 칩</a></li><li class="l3"><a href="#1-3-don의-경험으로-번역">1.3 Don의 경험으로 번역</a></li><li class="l2"><a href="#2-smp-커널에서-무엇이-바뀌나">2. SMP 커널에서 무엇이 바뀌나</a></li><li class="l3"><a href="#2-1-전역-ready-queue-vs-코어별-ready-queue">2.1 전역 ready queue vs 코어별 ready queue</a></li><li class="l3"><a href="#2-2-가장-높은-우선순위-n개가-돈다">2.2 "가장 높은 우선순위 N개가 돈다"</a></li><li class="l3"><a href="#2-3-예제-1-두-cpu가-정말-같이-도는가-zephyr-스레드별-실행-cpu-세기">2.3 예제 1 — 두 CPU가 정말 같이 도는가 (Zephyr, 스레드별 실행 CPU 세기)</a></li><li class="l3"><a href="#2-4-arch_curr_cpu-id를-읽을-때-왜-인터럽트를-막았나">2.4 arch_curr_cpu()-&gt;id를 읽을 때 왜 인터럽트를 막았나</a></li><li class="l2"><a href="#3-단일-코어에서-안전하던-것이-2코어에서-깨진다">3. 단일 코어에서 안전하던 것이 2코어에서 깨진다</a></li><li class="l3"><a href="#3-1-예제-2-공유-카운터-보호-없음-k_spinlock-atomic_inc-1코어-vs-2코어">3.1 예제 2 — 공유 카운터: 보호 없음 / k_spinlock / atomic_inc, 1코어 vs 2코어</a></li><li class="l3"><a href="#3-2-생성-코드로-보기-예제-3-k_spin_lock은-aarch64에서-무엇이-되나">3.2 생성 코드로 보기 — 예제 3: k_spin_lock은 aarch64에서 무엇이 되나</a></li><li class="l3"><a href="#3-3-예제-4-우선순위와-k_sched_lock으로-배제하던-코드-smp에서만-깨진다">3.3 예제 4 — 우선순위와 k_sched_lock으로 배제하던 코드 (SMP에서만 깨진다)</a></li><li class="l2"><a href="#4-freertos-smp-n개-를-고르는-규칙과-옵션-그리고-qemu-듀얼-m33에서-실제로-돌리기">4. FreeRTOS SMP — "N개"를 고르는 규칙과 옵션, 그리고 QEMU 듀얼 M33에서 실제로 돌리기</a></li><li class="l3"><a href="#4-1-역사와-지원-포트-v11-3-2-소스-기준">4.1 역사와 지원 포트 (V11.3.2 소스 기준)</a></li><li class="l3"><a href="#4-2-스케줄링-규칙을-소스로-prvyieldfortask">4.2 스케줄링 규칙을 소스로 — prvYieldForTask()</a></li><li class="l3"><a href="#4-3-qemu-mps2-an521-cortex-m33-2-위에-freertos-smp를-직접-올리기">4.3 QEMU mps2-an521(Cortex-M33 × 2) 위에 FreeRTOS SMP를 직접 올리기</a></li><li class="l3"><a href="#4-4-rp2040-포트는-어떻게-하나-코드-읽기">4.4 RP2040 포트는 어떻게 하나 (코드 읽기)</a></li><li class="l3"><a href="#4-5-예제-7-freertos-smp에서-vtasksuspendall-관용구">4.5 예제 7 — FreeRTOS SMP에서 vTaskSuspendAll 관용구</a></li><li class="l2"><a href="#5-smp에서-크리티컬-섹션-인터럽트-마스크-스핀락">5. SMP에서 크리티컬 섹션 = 인터럽트 마스크 + 스핀락</a></li><li class="l3"><a href="#5-1-왜-인터럽트-마스크만으로는-부족한가">5.1 왜 인터럽트 마스크만으로는 부족한가</a></li><li class="l3"><a href="#5-2-freertos-smp의-두-락-task-lock과-isr-lock">5.2 FreeRTOS SMP의 두 락 — task lock과 ISR lock</a></li><li class="l3"><a href="#5-3-예제-8-cortex-m33-포트의-스핀락은-무엇이-되나-빌드-역어셈블">5.3 예제 8 — Cortex-M33 포트의 스핀락은 무엇이 되나 (빌드 · 역어셈블)</a></li><li class="l2"><a href="#6-ipi-다른-코어에게-다시-골라-라고-알리기">6. IPI — 다른 코어에게 "다시 골라"라고 알리기</a></li><li class="l3"><a href="#6-1-왜-필요한가">6.1 왜 필요한가</a></li><li class="l3"><a href="#6-2-예제-9-freertos-smp-ipi가-있을-때와-없을-때">6.2 예제 9 — FreeRTOS SMP: IPI가 있을 때와 없을 때</a></li><li class="l3"><a href="#6-3-zephyr의-ipi-경로">6.3 Zephyr의 IPI 경로</a></li><li class="l3"><a href="#6-4-예제-10-zephyr-ipi-개수와-깨어남-지연-config_ipi_optimize-n-y">6.4 예제 10 — Zephyr: IPI 개수와 깨어남 지연, CONFIG_IPI_OPTIMIZE n/y</a></li><li class="l2"><a href="#7-affinity와-migration-어디서-도는지를-정하기">7. affinity와 migration — 어디서 도는지를 정하기</a></li><li class="l3"><a href="#7-1-api">7.1 API</a></li><li class="l3"><a href="#7-2-예제-11-코어별-간트를-trace-훅으로-그리기-migration-세기">7.2 예제 11 — 코어별 간트를 trace 훅으로 그리기 + migration 세기</a></li><li class="l2"><a href="#8-성능-코어가-둘이면-두-배인가">8. 성능 — 코어가 둘이면 두 배인가</a></li><li class="l3"><a href="#8-1-예제-12-같은-일을-1코어-vs-2코어로-공유-방식별">8.1 예제 12 — 같은 일을 1코어 vs 2코어로, 공유 방식별</a></li><li class="l3"><a href="#8-2-예제-13-스레드별-카운터-인데-왜-두-배가-안-되나-false-sharing">8.2 예제 13 — "스레드별 카운터"인데 왜 두 배가 안 되나: false sharing</a></li><li class="l3"><a href="#8-3-숫자-읽기">8.3 숫자 읽기</a></li><li class="l2"><a href="#9-설계-지침-hard-real-time-일을-smp에-올려도-되나">9. 설계 지침 — hard real-time 일을 SMP에 올려도 되나</a></li><li class="l3"><a href="#9-1-smp-global-의-실시간-약점">9.1 SMP(global)의 실시간 약점</a></li><li class="l3"><a href="#9-2-그래서-실무-규칙">9.2 그래서 실무 규칙</a></li><li class="l3"><a href="#9-3-freertos-zephyr-설정으로-옮기면">9.3 FreeRTOS · Zephyr 설정으로 옮기면</a></li><li class="l2"><a href="#10-rtos-커널-안에서는-무슨-일이-일어나나-소스-지도">10. RTOS 커널 안에서는 무슨 일이 일어나나 — 소스 지도</a></li><li class="l2"><a href="#11-실무에서-다시-보기">11. 실무에서 다시 보기</a></li><li class="l3"><a href="#11-1-드론-비행-제어기를-듀얼코어-mcu로-옮길-때">11.1 드론 비행 제어기를 듀얼코어 MCU로 옮길 때</a></li><li class="l3"><a href="#11-2-로봇-관절-모터-컨트롤러-20-khz-foc는-어디에">11.2 로봇 관절 모터 컨트롤러 — 20 kHz FOC는 어디에</a></li><li class="l3"><a href="#11-3-ssd-컨트롤러-don의-경험과-cortex-r82">11.3 SSD 컨트롤러 — Don의 경험과 Cortex-R82</a></li><li class="l3"><a href="#11-4-ai-가속기-soc의-제어-클러스터">11.4 AI 가속기 SoC의 제어 클러스터</a></li><li class="l2"><a href="#12-흔한-실수와-증상">12. 흔한 실수와 증상</a></li><li class="l2"><a href="#13-면접에서-이렇게-말한다">13. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#14-직접-해보기">14. 직접 해보기</a></li><li class="l2"><a href="#15-용어-사전">15. 용어 사전</a></li><li class="l2"><a href="#16-요약-체크리스트">16. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

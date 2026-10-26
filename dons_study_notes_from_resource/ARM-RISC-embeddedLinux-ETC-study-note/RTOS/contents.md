@@ -13,6 +13,7 @@
 **표기**
 - **ID**: 모듈 알파벳 + 번호 (예: `C2`). 노트 파일 이름으로 쓴다 → `C_kernel_internals/2026-10-xx_C2_context_switch.md`
 - **EL 참조**: `EL F4` = Embedded Linux 나침반의 F4 항목. 그 노트를 먼저 읽었다고 가정한다
+- **BM 겹침**: `BM C1` = [Bare-Metal 나침반](../../../Bare-Metal/site/compass/contents.html)의 C1 항목과 같은 주제. **RTOS 노트가 먼저 쓰여 주인이 된다** (Don 결정 2026-10-25) — 노트 머리에 🔁 표시를 달고, Bare-Metal 노트는 나중에 이 노트를 링크하고 bare-metal 관점만 더한다
 - **우선순위**: `P0` = 1차 기술 면접 전에 반드시 · `P1` = 온사이트·입사 전 · `P2` = 넓게 알아 두기 (실무에서 만나면 깊게)
 - **Don 출발점** (추정 — Don이 고쳐 쓰면 됨):
   - ✅ 이미 강함 (SSD 컨트롤러 FW 7년 · 인터럽트·DMA·JTAG·scope) → RTOS 용어로 **번역**만 하면 됨
@@ -132,39 +133,40 @@
 ### B. MCU 하드웨어 기반 — RTOS가 기대는 CPU 기능
 
 > RTOS의 "마법"은 전부 CPU의 예외 처리 기능 위에 있다. 이 모듈을 건너뛰면 C(커널 내부)가 외우기가 된다.
+> 🔁 **Bare-Metal 겹침**: 이 모듈은 Bare-Metal 나침반 C(Cortex-M) · D9 · E(RISC-V) · F(툴체인)와 거의 같은 주제다. **RTOS 쪽이 주인**으로 먼저 깊게 쓰고, Bare-Metal은 나중에 링크한다 (BM 겹침 칸).
 
-| ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don |
-|---|---|---|---|---|---|
-| B1 | Cortex-M 프로그래머 모델 | R0–R15, xPSR, Thread / Handler 모드, privileged / unprivileged, MSP / PSP, CONTROL 레지스터 | 컨텍스트 스위치를 읽기 위한 전제 | P0 | 🟡 |
-| B2 | 예외 진입 · 복귀 | 벡터 테이블, 하드웨어 자동 스태킹(8워드), EXC_RETURN, tail-chaining, late-arrival, VTOR | "ISR을 그냥 C 함수로 쓸 수 있는 이유" | P0 | ✅ |
-| B3 | NVIC와 우선순위 마스킹 | 구현 우선순위 비트 수, PRIGROUP(선점 / 서브), PRIMASK · BASEPRI · FAULTMASK, "숫자가 작을수록 높다" 함정 | `configMAX_SYSCALL_INTERRUPT_PRIORITY` 이해의 열쇠 | P0 | 🟡 |
-| B4 | RTOS가 쓰는 세 예외 | SysTick(tick), PendSV(미뤄 둔 컨텍스트 스위치), SVC(시스템 콜 · 첫 태스크 시작), PendSV가 최저 우선순위인 이유 | **RTOS 포팅의 핵심** | P0 | 🟡 |
-| B5 | 리셋부터 main까지 (MCU) | Reset_Handler, .data 복사 · .bss 0 채우기, 링커 스크립트(MEMORY / SECTIONS), 스택 · 힙 배치, XIP flash vs RAM 실행 | bring-up · 포팅 (EL B3 ELF 지식 재사용) | P0 | ✅ |
-| B6 | FPU와 컨텍스트 | lazy stacking(FPCCR), 확장 스택 프레임(26워드), 태스크별 FPU 사용 비용 | 제어 · DSP 태스크의 숨은 비용 | P1 | 🟡 |
-| B7 | Cortex-M 세대 지도 | M0+ / M3 / M4 / M7 / M23 / M33 / M55 / M85, Armv6-M · v7-M · v8-M(baseline / mainline) · v8.1-M, Helium(MVE), PACBTI | 칩 고르기 · 포팅 차이 | P1 | 🟡 |
-| B8 | 캐시 · TCM이 있는 MCU | M7 / M85 I-cache · D-cache, TCM, MPU 속성으로 non-cacheable 영역 만들기, DMA 일관성(`SCB_CleanDCache_by_Addr`) | 고성능 MCU 버그 1순위 (EL H9의 MCU판) | P1 | ✅ |
-| B9 | Cortex-R 계열 | R5 / R52 / R52+ / R82, TCM, lockstep(DCLS), GIC 기반 인터럽트, EL2 하이퍼바이저(R52), MPU 2단계 | SSD 컨트롤러 · 자동차 · AI SoC 안전 코어 | P1 | ✅ |
-| B10 | RISC-V MCU 관점 | M / S / U 모드, mtvec · mcause · mepc, CLINT · PLIC · CLIC, PMP, A 확장(원자), ESP32-C 계열 · RP2350 Hazard3 | RISC-V 포팅이 다른 점 (Hark E3 ISA 개요 재사용) | P1 | ❌ |
-| B11 | MCU 툴체인 특화 | arm-none-eabi, newlib / newlib-nano / picolibc, syscall stub(`_sbrk`, `_write`), `-ffunction-sections` + `--gc-sections`, LTO, map 파일 읽기, 코드 크기 줄이기 | 플래시 256 KB에 넣기 (EL B1–B4 기본은 생략) | P1 | 🟡 |
+| ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don | BM 겹침 |
+|---|---|---|---|---|---|---|
+| B1 | Cortex-M 프로그래머 모델 | R0–R15, xPSR, Thread / Handler 모드, privileged / unprivileged, MSP / PSP, CONTROL 레지스터 | 컨텍스트 스위치를 읽기 위한 전제 | P0 | 🟡 | BM C1 |
+| B2 | 예외 진입 · 복귀 | 벡터 테이블, 하드웨어 자동 스태킹(8워드), EXC_RETURN, tail-chaining, late-arrival, VTOR | "ISR을 그냥 C 함수로 쓸 수 있는 이유" | P0 | ✅ | BM C4 |
+| B3 | NVIC와 우선순위 마스킹 | 구현 우선순위 비트 수, PRIGROUP(선점 / 서브), PRIMASK · BASEPRI · FAULTMASK, "숫자가 작을수록 높다" 함정 | `configMAX_SYSCALL_INTERRUPT_PRIORITY` 이해의 열쇠 | P0 | 🟡 | BM C5 |
+| B4 | RTOS가 쓰는 세 예외 | SysTick(tick), PendSV(미뤄 둔 컨텍스트 스위치), SVC(시스템 콜 · 첫 태스크 시작), PendSV가 최저 우선순위인 이유 | **RTOS 포팅의 핵심** | P0 | 🟡 | BM C7 |
+| B5 | 리셋부터 main까지 (MCU) | Reset_Handler, .data 복사 · .bss 0 채우기, 링커 스크립트(MEMORY / SECTIONS), 스택 · 힙 배치, XIP flash vs RAM 실행 | bring-up · 포팅 (EL B3 ELF 지식 재사용) | P0 | ✅ | BM F3, F4 |
+| B6 | FPU와 컨텍스트 | lazy stacking(FPCCR), 확장 스택 프레임(26워드), 태스크별 FPU 사용 비용 | 제어 · DSP 태스크의 숨은 비용 | P1 | 🟡 | BM C10 |
+| B7 | Cortex-M 세대 지도 | M0+ / M3 / M4 / M7 / M23 / M33 / M55 / M85, Armv6-M · v7-M · v8-M(baseline / mainline) · v8.1-M, Helium(MVE), PACBTI | 칩 고르기 · 포팅 차이 | P1 | 🟡 | BM C11 |
+| B8 | 캐시 · TCM이 있는 MCU | M7 / M85 I-cache · D-cache, TCM, MPU 속성으로 non-cacheable 영역 만들기, DMA 일관성(`SCB_CleanDCache_by_Addr`) | 고성능 MCU 버그 1순위 (EL H9의 MCU판) | P1 | ✅ | BM B3, B9 |
+| B9 | Cortex-R 계열 | R5 / R52 / R52+ / R82, TCM, lockstep(DCLS), GIC 기반 인터럽트, EL2 하이퍼바이저(R52), MPU 2단계 | SSD 컨트롤러 · 자동차 · AI SoC 안전 코어 | P1 | ✅ | BM D9 |
+| B10 | RISC-V MCU 관점 | M / S / U 모드, mtvec · mcause · mepc, CLINT · PLIC · CLIC, PMP, A 확장(원자), ESP32-C 계열 · RP2350 Hazard3 | RISC-V 포팅이 다른 점 (Hark E3 ISA 개요 재사용) | P1 | ❌ | BM E1–E4 |
+| B11 | MCU 툴체인 특화 | arm-none-eabi, newlib / newlib-nano / picolibc, syscall stub(`_sbrk`, `_write`), `-ffunction-sections` + `--gc-sections`, LTO, map 파일 읽기, 코드 크기 줄이기 | 플래시 256 KB에 넣기 (EL B1–B4 기본은 생략) | P1 | 🟡 | BM F5, F6 |
 
 ### C. 커널 내부 — 스케줄러 · 컨텍스트 스위치 · tick
 
 > 이 모듈이 "원천 이해"의 중심이다. FreeRTOS와 Zephyr 소스를 실제로 열어 함수 단위로 따라간다.
 
-| ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don |
-|---|---|---|---|---|---|
-| C1 | 커널 자료구조 | ready list(우선순위별 리스트 + 비트맵), delayed / blocked list, CLZ로 O(1) 최고 우선순위 찾기, 이벤트 리스트 | "스케줄러 결정은 O(1)인가" | P0 | ❌ |
-| C2 | 컨텍스트 스위치 해부 | PendSV 핸들러 어셈블리 한 줄씩: PSP 읽기 → R4–R11 저장 → TCB 교체 → 복원 → EXC_RETURN | **원천 이해의 중심**, 면접 심화 | P0 | ❌ |
-| C3 | 첫 태스크 시작 | 초기 스택 프레임 위조(fake frame), SVC로 첫 태스크 진입, MSP 재설정, 스케줄러 시작 뒤 main 스택의 운명 | "태스크 함수가 return하면?" | P0 | ❌ |
-| C4 | 스케줄링 정책 | 고정 우선순위 선점, 같은 우선순위 round-robin time slicing, 협력형, Zephyr 협력형(음수) / 선점형 / meta-IRQ 우선순위, ThreadX preemption-threshold | 정책별 지터 차이 | P0 | 🟡 |
-| C5 | tick과 시간 관리 | tick 인터럽트, tick rate 선택, timeout 리스트, tick 카운터 오버플로 처리, `vTaskDelay` vs `vTaskDelayUntil`(드리프트) | 주기 태스크 구현 단골 질문 | P0 | 🟡 |
-| C6 | tickless 커널 | idle일 때 tick 억제, 다음 깨울 시각 계산, 저전력 타이머(LPTIM · RTC)로 시간 보정, Zephyr의 tickless 기본값 | 배터리 장비 필수 | P1 | ❌ |
-| C7 | 크리티컬 섹션 구현 | 인터럽트 마스킹 vs 스케줄러 잠금, BASEPRI 방식, 중첩 카운트, 길이가 지연에 미치는 영향 | "크리티컬 섹션 안에서 하면 안 되는 일" | P0 | 🟡 |
-| C8 | 커널 진입 경로 | API 호출 → (보호 모드면) SVC → 커널 코드, Zephyr syscall(유저 모드) vs 직접 호출, FreeRTOS-MPU 래퍼 | 보호 모델 이해 | P1 | ❌ |
-| C9 | idle 태스크와 훅 | idle hook, 태스크 삭제와 메모리 회수, malloc-failed · stack-overflow hook, 런타임 통계 훅 | 운영 품질 | P1 | 🟡 |
-| C10 | SMP RTOS | FreeRTOS SMP, Zephyr SMP, core affinity, IPI, SMP에서 크리티컬 섹션 = 스핀락, 전역 스케줄링 결정 | 멀티코어 MCU 시대 (EL F4 스핀락 개념 재사용) | P1 | 🟡 |
-| C11 | 다른 스케줄러 구현 | EDF(Zephyr `CONFIG_SCHED_DEADLINE`), cyclic executive(시간표 기반), ARINC 653 파티션 스케줄링 | 이론(N)과 구현 잇기 | P2 | ❌ |
-| C12 | 커널 소스 읽기 투어 | FreeRTOS `tasks.c` · `queue.c` · `list.c` · `port.c`, Zephyr `kernel/sched.c` · `thread.c`, 읽는 순서와 핵심 함수 | 원천 소스 독해력 | P1 | ❌ |
+| ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don | BM 겹침 |
+|---|---|---|---|---|---|---|
+| C1 | 커널 자료구조 | ready list(우선순위별 리스트 + 비트맵), delayed / blocked list, CLZ로 O(1) 최고 우선순위 찾기, 이벤트 리스트 | "스케줄러 결정은 O(1)인가" | P0 | ❌ | — |
+| C2 | 컨텍스트 스위치 해부 | PendSV 핸들러 어셈블리 한 줄씩: PSP 읽기 → R4–R11 저장 → TCB 교체 → 복원 → EXC_RETURN | **원천 이해의 중심**, 면접 심화 | P0 | ❌ | BM C2 (Thumb-2 읽기) |
+| C3 | 첫 태스크 시작 | 초기 스택 프레임 위조(fake frame), SVC로 첫 태스크 진입, MSP 재설정, 스케줄러 시작 뒤 main 스택의 운명 | "태스크 함수가 return하면?" | P0 | ❌ | — |
+| C4 | 스케줄링 정책 | 고정 우선순위 선점, 같은 우선순위 round-robin time slicing, 협력형, Zephyr 협력형(음수) / 선점형 / meta-IRQ 우선순위, ThreadX preemption-threshold | 정책별 지터 차이 | P0 | 🟡 | — |
+| C5 | tick과 시간 관리 | tick 인터럽트, tick rate 선택, timeout 리스트, tick 카운터 오버플로 처리, `vTaskDelay` vs `vTaskDelayUntil`(드리프트) | 주기 태스크 구현 단골 질문 | P0 | 🟡 | BM C7 (SysTick) |
+| C6 | tickless 커널 | idle일 때 tick 억제, 다음 깨울 시각 계산, 저전력 타이머(LPTIM · RTC)로 시간 보정, Zephyr의 tickless 기본값 | 배터리 장비 필수 | P1 | ❌ | — |
+| C7 | 크리티컬 섹션 구현 | 인터럽트 마스킹 vs 스케줄러 잠금, BASEPRI 방식, 중첩 카운트, 길이가 지연에 미치는 영향 | "크리티컬 섹션 안에서 하면 안 되는 일" | P0 | 🟡 | BM J2–J4 |
+| C8 | 커널 진입 경로 | API 호출 → (보호 모드면) SVC → 커널 코드, Zephyr syscall(유저 모드) vs 직접 호출, FreeRTOS-MPU 래퍼 | 보호 모델 이해 | P1 | ❌ | — |
+| C9 | idle 태스크와 훅 | idle hook, 태스크 삭제와 메모리 회수, malloc-failed · stack-overflow hook, 런타임 통계 훅 | 운영 품질 | P1 | 🟡 | — |
+| C10 | SMP RTOS | FreeRTOS SMP, Zephyr SMP, core affinity, IPI, SMP에서 크리티컬 섹션 = 스핀락, 전역 스케줄링 결정 | 멀티코어 MCU 시대 (EL F4 스핀락 개념 재사용) | P1 | 🟡 | — |
+| C11 | 다른 스케줄러 구현 | EDF(Zephyr `CONFIG_SCHED_DEADLINE`), cyclic executive(시간표 기반), ARINC 653 파티션 스케줄링 | 이론(N)과 구현 잇기 | P2 | ❌ | BM K5 |
+| C12 | 커널 소스 읽기 투어 | FreeRTOS `tasks.c` · `queue.c` · `list.c` · `port.c`, Zephyr `kernel/sched.c` · `thread.c`, 읽는 순서와 핵심 함수 | 원천 소스 독해력 | P1 | ❌ | — |
 
 ### D. 동기화 · 태스크 간 통신
 
@@ -226,7 +228,7 @@
 
 | ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don |
 |---|---|---|---|---|---|
-| H1 | Zephyr 큰 그림 | Linux Foundation 거버넌스, 릴리스 주기(4.4 = 2026-04, 연 2회), LTS 3.7 → LTS4 = 4.6(2027-04 예정), Canonical Zephyr 26.04 LTS 상용 배포판 | 채택이 급증하는 이유 | P0 | ❌ |
+| H1 | Zephyr 큰 그림 | Linux Foundation 거버넌스, 릴리스 주기(4.4 = 2026-04, 연 2회), LTS 3.7 → LTS4 = 4.6(2027-04 예정), Canonical Zephyr 26.04 LTS 상용 배포판(2026-09 발표) | 채택이 급증하는 이유 | P0 | ❌ |
 | H2 | 빌드 시스템 | west(멀티 repo · manifest), CMake, Kconfig, sysbuild(부트로더 + 앱 + 네트워크 코어 동시 빌드), Zephyr SDK 1.0(LLVM 실험 지원, C17 최소) | 첫날부터 막히는 곳 | P0 | ❌ |
 | H3 | Zephyr의 Devicetree | **빌드 시점** DT → C 매크로(`DT_NODELABEL`, `DT_PROP`), overlay, bindings YAML, `DEVICE_DT_GET` — 문법은 EL D2 재사용 | Zephyr 드라이버 핵심 | P0 | ❌ |
 | H4 | 보드 · SoC 포팅 | Hardware Model v2(board / soc / variant), 보드 정의 파일, pinctrl, 새 보드 추가 | bring-up | P1 | ❌ |
@@ -392,9 +394,9 @@
 
 | 트렌드 | 확인한 사실 | 관련 항목 |
 |---|---|---|
-| Zephyr가 사실상 표준으로 | 4.4.0 = 2026-04-14 (연 2회 릴리스로 전환, 930명+ 기여), 4.5 = 2026-10 예정, LTS 3.7(EOL 2029-07) → LTS4 = 4.6(2027-04 예정), Zephyr SDK 1.0(LLVM 실험 지원, C17 최소), Canonical Zephyr 26.04 LTS(2026-09-21, 최대 15년 유지보수 상용 배포판) | H1, H2 |
+| Zephyr가 사실상 표준으로 | 4.4.0 = 2026-04-14 (연 2회 릴리스로 전환, 930명+ 기여), 4.5 = 2026-10 예정(10-22 현재 rc3), LTS 3.7(EOL 2029-07) → LTS4 = 4.6(2027-04 예정), Zephyr SDK 1.0(LLVM 실험 지원, C17 최소), Canonical Zephyr 26.04 LTS 발표(2026-09-21, 최대 15년 유지보수 상용 배포판 — 발표 시점엔 "곧 출시") | H1, H2 |
 | FreeRTOS LTS 갱신 | 202604 LTS = kernel 11.3.0, MPU 개선(커널이 차지하는 리전 감소), coreMQTT MQTT v5, coreSNTP 2038 대응, 2년 지원 · Cortex-R82 SMP 포트(2026-04) | G4–G6 |
-| 오픈소스 RTOS의 안전 인증 경쟁 | Zephyr: IEC 61508 SIL 3 concept approval(2024), 약 15k LOC 범위로 작업 중 — 아직 인증 완료 아님 · ThreadX: v6.4.1 IEC 61508 · ISO 26262 인증을 2026 목표로 진행 | O2, I2 |
+| 오픈소스 RTOS의 안전 인증 경쟁 | Zephyr: IEC 61508 SIL 3 concept approval(2024), 약 15k LOC 범위로 작업 중 — 아직 인증 완료 아님 · ThreadX: MIT 첫 릴리스 v6.4.1의 IEC 61508 · ISO 26262 인증을 2026 목표로 진행 (기존 인증서는 Microsoft 시절 6.1.x 계열) | O2, I2 |
 | 규제가 펌웨어를 바꾼다 | EU CRA 신고 의무 2026-09-11 시행(24h 조기 경보 · 72h 통지 · 최종 보고), 나머지 의무 2027-12-11, MCU 펌웨어도 대상 | L7 |
 | Rust 임베디드 | Embassy(async, 힙 없음 · 단일 스택), RTIC, Hubris, Tock, Ferrocene, Zephyr Rust 바인딩 | I7–I11, S8 |
 | MCU 위의 AI | Ethos-U85(최대 4 TOPS, transformer 연산 지원), Cortex-M55 / M85 Helium, ExecuTorch · LiteRT Micro | Q6, B7, S9 |
@@ -460,9 +462,9 @@
 
 | 모듈 | 항목 수 | 노트 작성 | 읽음 | 메모 |
 |---|---|---|---|---|
-| A 실시간 · RTOS 개념과 지형 | 7 | 0 | 0 | |
-| B MCU 하드웨어 기반 | 11 | 0 | 0 | |
-| C 커널 내부 | 12 | 0 | 0 | |
+| A 실시간 · RTOS 개념과 지형 | 7 | 7 | 0 | 2026-10-25 A1–A7 작성 (QEMU mps2-an385 + FreeRTOS V11.3.2 · Zephyr v4.4.2 · ThreadX 6.5.2: 응답시간 꼬리 히스토그램, 같은 펌웨어 5개 실행 모델, footprint 해부, TCB·태스크 RAM, API 5종 실행 비교, 지형도, RTOS 비용 실측) |
+| B MCU 하드웨어 기반 | 11 | 11 | 0 | 2026-10-25 B1–B11 작성 (QEMU M0/M3/M4F/M7/M33/M55 · R52 · RISC-V: 레지스터·EXC_RETURN 실측, NVIC 비트 수·BASEPRI 경계, PendSV 지연·SVC 테이블, 리셋→main·링커 버그 재현, FPU lazy stacking, 세대별 같은 코드 비교, 캐시는 호스트 측정+시뮬레이터, R52 GIC·EL2, RISC-V 트랩·PMP, libc·-O·LTO 크기) · 🔁 Bare-Metal C·D9·E·F 겹침 주인 |
+| C 커널 내부 | 12 | 12 | 0 | 2026-10-25 C1–C12 작성 (ready list 실물 덤프·CLZ, PendSV 한 줄씩 + 75줄 직접 스위처, 위조 프레임·첫 태스크, 정책별 Gantt, tick·drift, tickless 깨움 1000→12, 크리티컬 섹션 지연 스윕, FreeRTOS-MPU·Zephyr userspace 진입 비용, idle·훅·run-time stats, EDF·cyclic·ARINC 653, 소스 읽기 투어, SMP: FreeRTOS SMP on 듀얼 M33 + Zephyr A53×2 IPI·스핀락 실측) |
 | D 동기화 · 태스크 간 통신 | 10 | 0 | 0 | |
 | E 인터럽트 · 타이밍 · 결정성 | 8 | 0 | 0 | |
 | F 메모리 관리 · 보호 · 격리 | 9 | 0 | 0 | |
@@ -479,4 +481,4 @@
 | Q 도메인 스택 | 9 | 0 | 0 | |
 | R 인터뷰 준비 | 6 | 0 | 0 | |
 | S 실습 프로젝트 | 9 | 0 | 0 | |
-| **합계** | **166** | **0** | **0** | 2026-10-18 목차 작성 — 노트는 Don 승인 후 모듈 단위로 |
+| **합계** | **166** | **30** | **0** | 모듈 A · B · C (10-25) 완료 |

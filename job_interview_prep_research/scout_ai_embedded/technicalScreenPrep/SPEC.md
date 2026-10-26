@@ -51,7 +51,9 @@ solution.c, chart1.svg, chart2.svg). Read all of it before writing anything.
 T1-1_overheat_intervals · T1-2_streaming_hysteresis · T1-3_moving_average · T1-4_multi_sensor ·
 T1-5_raw_register_to_temp · T1-6_sensor_fault_detect · T1-7_time_above_threshold · T1-8_blocking_api_wrapper ·
 T2-1_ring_buffer · T2-2_packet_parser · T2-3_merge_intervals · T2-4_window_max · T2-5_lower_bound ·
-T2-6_bit_ops · T2-7_debounce_edge · T2-8_running_median · T2-9_memory_pool · T2-10_top_k_sensors · D_debug_drills
+T2-6_bit_ops · T2-7_debounce_edge · T2-8_running_median · T2-9_memory_pool · T2-10_top_k_sensors · D_debug_drills ·
+E1_i2c_sensor_driver · E2_extract_packet · E3_isr_to_task_pipeline ·
+J1_can_signal_decode · J2_coulomb_counter · J3_boot_slot_select · J4_time_sync_offset
 
 ## Verify before finishing (from technicalScreenPrep/)
 1. `./run.sh <ID>` → compiles, tests fail, no crash.   2. `./run.sh <ID> sol` → ALL PASS.

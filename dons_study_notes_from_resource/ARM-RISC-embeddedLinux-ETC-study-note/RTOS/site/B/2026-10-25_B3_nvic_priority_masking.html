@@ -1,0 +1,1815 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B3. NVIC와 우선순위 마스킹 — "숫자가 작을수록 급하다"부터 configMAX_SYSCALL_INTERRUPT_PRIORITY까지, 레지스터를 직접 읽고 재서 이해한다</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="B/2026-10-25_B3_nvic_priority_masking">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 노트 목록</a>
+  <span class="t">B. MCU 하드웨어 기반 · B3. NVIC와 우선순위 마스킹 — "숫자가 작을수록 급하다"부터 configMAX_SYSCALL_INTERRUPT_PRIORITY까지, 레지스터를 직접 읽고 재서 이해한다</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">B. MCU 하드웨어 기반 · Cortex-M/R · RISC-V</div>
+      <h1>B3. NVIC와 우선순위 마스킹 — "숫자가 작을수록 급하다"부터 <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>까지, 레지스터를 직접 읽고 재서 이해한다</h1>
+      <div class="meta"><span>241분 읽기</span><span>2261줄</span><span>58개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: NVIC의 enable · pending · active · priority 레지스터를 직접 읽고 써서 인터럽트 하나의 상태를 설명할 수 있다 · 칩에 구현된 우선순위 비트 수를 0xFF 쓰기 · 읽기로 알아내고 "왼쪽 정렬"과 "작을수록 급하다" 함정을 피할 수 있다 · PRIMASK · FAULTMASK · BASEPRI가 각각 무엇을 막는지, PRIGROUP이 선점을 어떻게 바꾸는지 실행 결과로 보여 줄 수 있다 · FreeRTOS <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>와 Zephyr <code>irq_lock()</code> · zero-latency IRQ가 정확히 어떤 우선순위를 막고 통과시키는지 숫자로 말할 수 있다 <strong>왜 필요한가</strong>: 드론 · 로봇 펌웨어 면접의 단골 질문 "FromISR API는 왜 따로 있나? <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>는 뭘 하나? 임계구역에서 모든 인터럽트를 끄나?"와, 입사 첫 달에 만나는 버그 "인터럽트 우선순위를 5로 줬는데 configASSERT가 터진다 / FOC 루프가 가끔 50 µs 늦는다"가 전부 이 노트의 내용이다 <strong>Don 기준 난이도</strong>: 인터럽트 · 우선순위 · 마스킹 · W1C 상태 레지스터는 SSD 펌웨어에서 몸으로 안다 / 새로 배울 부분은 Cortex-M NVIC의 구체적 레지스터와 비트 정렬 규칙, PRIGROUP, BASEPRI로 "일부만" 막는 방식, 그리고 그것을 RTOS 두 개가 어떻게 쓰는지 <strong>선행 노트</strong>: B1(프로그래머 모델 · 특수 레지스터), B2(예외 진입 · 복귀 · tail-chaining), A7 §7(zero-latency 하이브리드의 측정 동기), EL H6(GIC — Linux 쪽 인터럽트 컨트롤러). 이어지는 노트: B4(PendSV · SysTick · SVC), C7(임계구역 설계), E1(ISR 작성 규칙 · FromISR), E2(우선순위 배치 설계) 🔁 <strong>Bare-Metal 겹침</strong>: BM C5(NVIC) — 이 노트가 주인. Bare-Metal 노트는 이 노트를 링크하고 "RTOS 없이 CMSIS <code>NVIC_*</code> 함수와 벡터 테이블만으로 우선순위 계획을 세우는 관점"만 더한다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-인터럽트가-cpu에-들어오기까지-세-관문">0. 큰 그림 — 인터럽트가 CPU에 들어오기까지 세 관문<a class="anchor" href="#0-큰-그림-인터럽트가-cpu에-들어오기까지-세-관문" aria-label="link">#</a></h2>
+<p>Don이 SSD 컨트롤러에서 하던 일을 떠올려 보자. NAND 채널 완료, DMA 완료, PCIe doorbell, 타이머 같은 인터럽트가 동시에 올라온다. 어떤 것은 바로 처리해야 하고(호스트 명령 도착), 어떤 것은 조금 늦어도 된다(온도 센서 폴링 타이머). 그리고 공유 자료구조(명령 큐, FTL 매핑 테이블 캐시)를 만지는 짧은 구간에서는 <strong>인터럽트를 잠깐 막아야</strong> 했다. 그때 "전부 끄기"(<code>cpsid i</code>)를 썼다면, 그 짧은 구간 동안 <strong>가장 급한 인터럽트도 같이 기다렸다</strong>.</p>
+<p>Cortex-M은 이 문제를 하드웨어로 정교하게 푼다. 인터럽트 하나가 CPU로 들어오려면 세 관문을 지나야 한다.</p>
+<figure class="chart"><svg viewBox="0 0 680 320" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="20.0" font-size="13" font-weight="bold">인터럽트 하나가 CPU에 들어오기까지 — 세 관문</text>
+<rect x="10.0" y="45.0" width="150.0" height="38.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="85.0" y="68.3" font-size="12" text-anchor="middle">TIMER0 → IRQ 8</text>
+<line x1="160.0" y1="64.0" x2="196.0" y2="140.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah1)"/>
+<rect x="10.0" y="97.0" width="150.0" height="38.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="85.0" y="120.3" font-size="12" text-anchor="middle">UART0 → IRQ 0</text>
+<line x1="160.0" y1="116.0" x2="196.0" y2="140.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah1)"/>
+<rect x="10.0" y="149.0" width="150.0" height="38.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="85.0" y="172.3" font-size="12" text-anchor="middle">ISPR 비트 쓰기</text>
+<line x1="160.0" y1="168.0" x2="196.0" y2="140.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah1)"/>
+<rect x="10.0" y="201.0" width="150.0" height="38.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="85.0" y="224.3" font-size="12" text-anchor="middle">STIR에 번호 쓰기</text>
+<line x1="160.0" y1="220.0" x2="196.0" y2="140.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah1)"/>
+<rect x="200.0" y="40.0" width="230.0" height="205.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="315.0" y="62.0" font-size="13" text-anchor="middle" font-weight="bold">① NVIC (IRQ마다 상태)</text>
+<rect x="215.0" y="75.0" width="200.0" height="26.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="315.0" y="92.3" font-size="12" text-anchor="middle">enable (ISER / ICER)</text>
+<rect x="215.0" y="109.0" width="200.0" height="26.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="315.0" y="126.3" font-size="12" text-anchor="middle">pending (ISPR / ICPR)</text>
+<rect x="215.0" y="143.0" width="200.0" height="26.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="315.0" y="160.3" font-size="12" text-anchor="middle">active (IABR, 읽기 전용)</text>
+<rect x="215.0" y="177.0" width="200.0" height="26.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="315.0" y="194.3" font-size="12" text-anchor="middle">우선순위 바이트 IPR[n]</text>
+<text x="315.0" y="230.0" font-size="12" text-anchor="middle">② enable·pending 중 가장 급한 것</text>
+<line x1="430.0" y1="140.0" x2="466.0" y2="140.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah1)"/>
+<rect x="470.0" y="40.0" width="200.0" height="205.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="570.0" y="62.0" font-size="13" text-anchor="middle" font-weight="bold">③ CPU 선점 판정</text>
+<text x="570.0" y="88.0" font-size="12" text-anchor="middle">그 IRQ의 그룹 우선순위가</text>
+<text x="570.0" y="107.0" font-size="12" text-anchor="middle">현재 실행 우선순위보다</text>
+<text x="570.0" y="126.0" font-size="12" text-anchor="middle">숫자가 작으면 → 진입</text>
+<text x="570.0" y="164.0" font-size="12" text-anchor="middle">현재 실행 우선순위 =</text>
+<text x="570.0" y="183.0" font-size="12" text-anchor="middle">active 예외 · PRIMASK ·</text>
+<text x="570.0" y="202.0" font-size="12" text-anchor="middle">FAULTMASK · BASEPRI 중</text>
+<text x="570.0" y="221.0" font-size="12" text-anchor="middle">가장 급한 값</text>
+<text x="10.0" y="280.0" font-size="12">우선순위 숫자는 작을수록 급하다: 0x00이 가장 급하고 0xFF가 가장 느긋하다 (설정 가능한 범위).</text>
+<text x="10.0" y="302.0" font-size="12">Reset(-3) · NMI(-2) · HardFault(-1)은 고정된 음수 우선순위라 어떤 IRQ보다도 급하다.</text>
+</svg></figure>
+<p>그림 1 — 인터럽트 하나가 CPU에 들어오기까지. ① NVIC 안에서 그 IRQ가 enable돼 있고 pending이어야 하고, ② pending인 것들 중 가장 급해야 하고, ③ CPU의 "현재 실행 우선순위"보다 급해야 한다. 마스크 레지스터(PRIMASK · FAULTMASK · BASEPRI)는 ③의 기준선을 끌어올리는 장치다.</p>
+<p>이 노트는 세 관문을 하나씩 직접 연다.</p>
+<div class="tw"><table><thead><tr><th>관문</th><th>무엇이 결정하나</th><th>이 노트의 절</th></tr></thead><tbody><tr><td>① IRQ마다의 상태</td><td>ISER/ICER(enable), ISPR/ICPR(pending), IABR(active), STIR(소프트웨어 트리거)</td><td>§1, §2</td></tr><tr><td>② 누가 가장 급한가</td><td>IPR 우선순위 바이트, 구현 비트 수, PRIGROUP(그룹 · 서브), 같은 값이면 번호</td><td>§3, §4, §5</td></tr><tr><td>③ CPU가 받아 주나</td><td>현재 실행 중인 예외의 우선순위, PRIMASK · FAULTMASK · BASEPRI</td><td>§6</td></tr><tr><td>RTOS가 쓰는 방식</td><td>FreeRTOS <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>, Zephyr <code>irq_lock()</code> · zero-latency</td><td>§7, §8, §9</td></tr></tbody></table></div>
+<p>RTOS 엔지니어에게 이 세 관문이 중요한 이유는 하나다. <strong>RTOS 커널도 자기 자료구조(ready list, 큐, 타이머 리스트)를 지키려고 인터럽트를 막는다.</strong> 그런데 FreeRTOS(Cortex-M3/M4/M7 포트)와 Zephyr(ARMv7-M · ARMv8-M Mainline)는 <code>cpsid i</code>로 전부 끄지 않고, <strong>BASEPRI로 "어느 선 아래만"</strong> 막는다. 그 선 위의 인터럽트는 커널이 무엇을 하든 바로 들어온다(zero-latency). 대신 그 인터럽트는 커널 API를 하나도 못 부른다. 이 "선"이 FreeRTOS의 <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>이고, 이 노트의 목표는 그 선을 레지스터 수준에서 완전히 이해하는 것이다.</p>
+<p>Don의 말로 바꾸면 이렇다.</p>
+<ul><li><strong>NVIC</strong> = 인터럽트마다 "켜짐 · 대기 중 · 처리 중 · 급한 정도" 네 칸을 가진 하드웨어 표 + 그중 가장 급한 것을 고르는 비교기.</li><li><strong>PRIMASK</strong> = SSD 펌웨어에서 쓰던 "전부 끄기". 가장 단순하고, 가장 비싸다(급한 것도 기다린다).</li><li><strong>BASEPRI</strong> = "이 급함 이하만 끄기". 커널은 자기 일을 지키면서도 가장 급한 루프(FOC 전류 루프, DShot 타이머)는 건드리지 않는다.</li><li><strong>FromISR API</strong> = "커널이 막을 수 있는 인터럽트에서만 부를 수 있는" 커널 입구. 막을 수 없는 인터럽트에서 부르면 커널 자료구조가 깨진다.</li></ul>
+<h3 id="실습-환경-한-줄">실습 환경 한 줄<a class="anchor" href="#실습-환경-한-줄" aria-label="link">#</a></h3>
+<ul><li>주 실습: QEMU <code>mps2-an385</code> = Cortex-M3 @ 25 MHz 가상 보드. bare-metal(lab 템플릿), <strong>FreeRTOS V11.3.2</strong>(ARM_CM3 포트, lab <code>FreeRTOSConfig.h</code>: <code>configMAX_SYSCALL_INTERRUPT_PRIORITY 0x20</code>, <code>configKERNEL_INTERRUPT_PRIORITY 255</code>), <strong>Zephyr v4.4.2</strong>(<code>mps2/an385</code>).</li><li>다른 칩 비교: QEMU의 STM32 모델(<code>netduino2</code> = STM32F205, <code>stm32vldiscovery</code> = STM32F100, <code>b-l475e-iot01a</code> = STM32L475)과 <code>microbit</code>(nRF51, Cortex-M0)에서 우선순위 비트 수를 직접 읽었다(§3).</li><li>타이밍은 모두 <code>ICOUNT=1</code>(명령 1개 = 32 ns 가상 시간, 결정적)로 쟀고, 시계는 MPS2 FPGAIO COUNTER(0x40028018, reset부터 25 MHz, 1 count = 40 ns)다. <strong>QEMU icount 기준이라 실제 칩과 절대값은 다르다</strong> — QEMU는 캐시, 플래시 wait state, 버스, 예외 진입 스태킹 사이클(Cortex-M3는 최소 12사이클)을 모델링하지 않는다. 이 노트에서 숫자가 말하려는 것은 <strong>"막혔나 / 안 막혔나"와 "임계구역 길이만큼 늦어지나"</strong> 같은 모양이다.</li><li>실습용 IRQ: 템플릿 벡터 테이블에 핸들러 이름이 있는 IRQ 0(<code>UART0RX_IRQHandler</code>), 1(<code>UART0TX_IRQHandler</code>), 8(<code>TIMER0_IRQHandler</code>), 9, 10(<code>DUALTIMER_IRQHandler</code>)을 쓴다. UART는 인터럽트 enable 비트를 켜지 않았으므로 IRQ 0 · 1은 <strong>소프트웨어로만 pend되는 빈 IRQ</strong>로 쓸 수 있다(NVIC는 원천이 무엇이든 pending 비트만 본다).</li><li>빌드 출력의 <code>arm-none-eabi-size</code> 줄은 필요할 때만 남기고 생략했다. 모든 예제는 <code>-Wall -Wextra</code>에서 경고 0개다.</li></ul>
+<h3 id="도우미-헤더-b3-h">도우미 헤더 <code>b3.h</code><a class="anchor" href="#도우미-헤더-b3-h" aria-label="link">#</a></h3>
+<p>모든 bare-metal · FreeRTOS 예제가 함께 쓰는 레지스터 정의와 작은 함수다. 레지스터 주소는 Armv7-M 아키텍처 매뉴얼(ARM DDI 0403)의 System Control Space 표 그대로다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* b3.h — NVIC / SCB registers and small helpers for the B3 note (Cortex-M3, MPS2-AN385) */
+#ifndef B3_H
+#define B3_H
+#include &lt;stdint.h&gt;
+#include "board.h"
+
+#define ICTR        REG32(0xE000E004u)            /* Interrupt Controller Type */
+#define ISER(n)     REG32(0xE000E100u + 4u * (n)) /* set-enable   (write 1) */
+#define ICER(n)     REG32(0xE000E180u + 4u * (n)) /* clear-enable (write 1) */
+#define ISPR(n)     REG32(0xE000E200u + 4u * (n)) /* set-pending  (write 1) */
+#define ICPR(n)     REG32(0xE000E280u + 4u * (n)) /* clear-pending(write 1) */
+#define IABR(n)     REG32(0xE000E300u + 4u * (n)) /* active bits  (read only) */
+#define IPR8(n)     (*(volatile uint8_t *)(0xE000E400u + (n)))   /* one priority byte per IRQ */
+#define STIR        REG32(0xE000EF00u)            /* software trigger: write IRQ number */
+#define ICSR        REG32(0xE000ED04u)
+#define AIRCR       REG32(0xE000ED0Cu)
+#define SHPR8(e)    (*(volatile uint8_t *)(0xE000ED18u + (e) - 4u)) /* system handler e=4..15 */
+#define CYC()       REG32(0x40028018u)            /* FPGAIO COUNTER, 25 MHz from reset */
+
+static inline void set_prigroup(uint32_t g)
+{
+    AIRCR = (0x05FAu &lt;&lt; 16) | (AIRCR &amp; 0x0000F8FFu &amp; ~0x700u) | ((g &amp; 7u) &lt;&lt; 8);
+}
+static inline uint32_t prigroup(void) { return (AIRCR &gt;&gt; 8) &amp; 7u; }
+
+static inline uint32_t get_primask(void)   { uint32_t v; __asm volatile("mrs %0, primask" : "=r"(v)); return v; }
+static inline uint32_t get_faultmask(void) { uint32_t v; __asm volatile("mrs %0, faultmask" : "=r"(v)); return v; }
+static inline uint32_t get_basepri(void)   { uint32_t v; __asm volatile("mrs %0, basepri" : "=r"(v)); return v; }
+static inline uint32_t get_ipsr(void)      { uint32_t v; __asm volatile("mrs %0, ipsr" : "=r"(v)); return v; }
+static inline void set_basepri(uint32_t v)     { __asm volatile("msr basepri, %0\n isb" : : "r"(v) : "memory"); }
+static inline void set_basepri_max(uint32_t v) { __asm volatile("msr basepri_max, %0\n isb" : : "r"(v) : "memory"); }
+static inline void irq_off(void)   { __asm volatile("cpsid i" : : : "memory"); }
+static inline void irq_on(void)    { __asm volatile("cpsie i\n isb" : : : "memory"); }
+static inline void fault_off(void) { __asm volatile("cpsid f" : : : "memory"); }
+static inline void fault_on(void)  { __asm volatile("cpsie f\n isb" : : : "memory"); }
+
+/* event log: handlers append a character so we can print the order afterwards */
+static char g_log[64] __attribute__((unused));
+static volatile unsigned g_nlog __attribute__((unused));
+static inline void logc(char c) { if (g_nlog &lt; sizeof g_log - 1) g_log[g_nlog++] = c; }
+static inline void log_print(const char *title)
+{
+    g_log[g_nlog] = 0;
+    board_printf_raw("%s: %s\n", title, g_log);
+    g_nlog = 0;
+}
+/* "0x0f"-style two-digit hex (board_printf_raw has no width field) */
+static inline const char *hex2(uint32_t v, char *b)
+{
+    b[0] = '0'; b[1] = 'x'; b[2] = "0123456789abcdef"[(v &gt;&gt; 4) &amp; 15u];
+    b[3] = "0123456789abcdef"[v &amp; 15u]; b[4] = 0; return b;
+}
+#endif</code></pre></figure>
+<p>볼 점 몇 가지.</p>
+<ul><li><code>IPR8(n)</code>은 <strong>바이트 접근</strong>이다. Armv7-M은 IPR을 바이트 단위로 읽고 쓸 수 있다. Armv6-M(Cortex-M0/M0+)은 <strong>워드 접근만</strong> 허용한다(§3의 M0 예제는 그래서 워드로 쓴다).</li><li><code>set_prigroup()</code>은 AIRCR에 쓸 때 위 16비트에 <strong>VECTKEY 0x05FA</strong>를 같이 쓴다. 키가 틀리면 쓰기가 무시된다. 읽으면 그 자리에 0xFA05가 보인다(예제 1 출력).</li><li><code>set_basepri()</code> 뒤의 <code>isb</code>는 "다음 명령부터 새 마스크가 확실히 적용"되게 한다. <code>cpsie i</code> 뒤에도 같은 이유로 <code>isb</code>를 둔다(§6.4).</li></ul>
+<hr>
+<h2 id="1-nvic-레지스터-지도-인터럽트마다-네-칸">1. NVIC 레지스터 지도 — 인터럽트마다 네 칸<a class="anchor" href="#1-nvic-레지스터-지도-인터럽트마다-네-칸" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM C5와 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="1-1-직관">1.1 직관<a class="anchor" href="#1-1-직관" aria-label="link">#</a></h3>
+<p>NVIC(Nested Vectored Interrupt Controller)는 Cortex-M 코어 안에 붙어 있는 인터럽트 컨트롤러다. "Nested"는 급한 인터럽트가 덜 급한 ISR을 끊고 들어갈 수 있다는 뜻(중첩), "Vectored"는 인터럽트 번호마다 벡터 테이블에서 핸들러 주소를 하드웨어가 바로 꺼낸다는 뜻이다(B2).</p>
+<p>Linux의 GIC(EL H6)와 비교하면 NVIC는 단순하다. 코어 하나에 붙어 있고(코어마다 자기 NVIC), affinity · 그룹 · ITS 같은 개념이 없다. 대신 <strong>코어와 한 몸</strong>이라서, 예외 진입 · 복귀 · 우선순위 비교가 하드웨어 몇 사이클 안에 끝난다. GIC의 PMR(Priority Mask Register)이 하는 일을 Cortex-M에서는 코어 레지스터 BASEPRI가 한다고 보면 연결이 된다.</p>
+<h3 id="1-2-레지스터-표">1.2 레지스터 표<a class="anchor" href="#1-2-레지스터-표" aria-label="link">#</a></h3>
+<p>외부 IRQ n(0부터)마다 enable · pending · active 비트가 한 개씩, 우선순위 바이트가 한 개 있다. 32개씩 한 워드에 묶이므로 IRQ n은 워드 <code>n / 32</code>의 비트 <code>n % 32</code>다.</p>
+<div class="tw"><table><thead><tr><th>레지스터</th><th>주소 (워드 0)</th><th>접근</th><th>뜻</th><th>쓰는 법</th></tr></thead><tbody><tr><td>ISER0..15</td><td>0xE000E100</td><td>읽기 / 1 쓰기</td><td>Set-Enable: 1을 쓰면 그 IRQ를 켠다. 읽으면 현재 enable 상태</td><td><code>ISER(0) = 1u &lt;&lt; 8</code></td></tr><tr><td>ICER0..15</td><td>0xE000E180</td><td>읽기 / 1 쓰기</td><td>Clear-Enable: 1을 쓰면 끈다. 0 쓰기는 무시</td><td><code>ICER(0) = 1u &lt;&lt; 8</code></td></tr><tr><td>ISPR0..15</td><td>0xE000E200</td><td>읽기 / 1 쓰기</td><td>Set-Pending: 1을 쓰면 소프트웨어로 pend. 읽으면 pending 상태</td><td>테스트 · 소프트웨어 인터럽트</td></tr><tr><td>ICPR0..15</td><td>0xE000E280</td><td>읽기 / 1 쓰기</td><td>Clear-Pending: pending을 지운다(사건을 버린다)</td><td>enable 전에 묵은 pending 지우기</td></tr><tr><td>IABR0..15</td><td>0xE000E300</td><td>읽기 전용</td><td>Active Bit: 지금 그 ISR이 실행 중(또는 선점당해 중첩 중)이면 1</td><td>디버그 · 상태 확인</td></tr><tr><td>IPR0..123</td><td>0xE000E400</td><td>바이트(v7-M)</td><td>Priority: IRQ마다 8비트 칸, 구현된 비트는 <strong>위쪽</strong>만</td><td><code>IPR8(8) = 0x40</code></td></tr><tr><td>STIR</td><td>0xE000EF00</td><td>쓰기 전용</td><td>Software Trigger: IRQ 번호를 쓰면 그 IRQ를 pend</td><td><code>STIR = 10</code></td></tr><tr><td>ICTR</td><td>0xE000E004</td><td>읽기 전용</td><td>Interrupt Controller Type: <code>INTLINESNUM</code>(하위 4비트) → IRQ 줄 수 = 32 × (N+1)</td><td>칩이 지원하는 IRQ 수</td></tr></tbody></table></div>
+<p>"1을 쓰면 세트, 1을 쓰면 클리어"를 레지스터 두 개로 나눈 이유는 Don이 아는 W1C/W1S 패턴과 같다. <strong>read-modify-write가 필요 없다.</strong> <code>ISER(0) |= bit</code>처럼 쓰면 다른 비트에 1이 다시 쓰여도 "이미 켜진 것을 또 켜는" 일이라 무해하지만, 굳이 읽을 필요가 없고 ISR과 경쟁(race)도 없다. 그래서 그냥 <code>ISER(0) = bit</code>로 쓴다. 반대로 <code>ICER(0) = ICER(0)</code>처럼 읽은 값을 그대로 쓰면 <strong>켜져 있던 IRQ가 전부 꺼진다</strong> — 흔한 실수다.</p>
+<p>시스템 예외(번호 1~15)는 NVIC 표가 아니라 SCB(System Control Block)에 있다.</p>
+<div class="tw"><table><thead><tr><th>예외 번호</th><th>이름</th><th>우선순위</th><th>우선순위 칸</th></tr></thead><tbody><tr><td>1</td><td>Reset</td><td>-3 (고정)</td><td>—</td></tr><tr><td>2</td><td>NMI</td><td>-2 (고정)</td><td>—</td></tr><tr><td>3</td><td>HardFault</td><td>-1 (고정)</td><td>—</td></tr><tr><td>4, 5, 6</td><td>MemManage, BusFault, UsageFault</td><td>설정 가능</td><td>SHPR1 (0xE000ED18) 바이트 0~2</td></tr><tr><td>11</td><td>SVCall</td><td>설정 가능</td><td>SHPR2 (0xE000ED1C) 바이트 3 = 0xE000ED1F</td></tr><tr><td>12</td><td>DebugMonitor</td><td>설정 가능</td><td>SHPR3 (0xE000ED20) 바이트 0</td></tr><tr><td>14</td><td>PendSV</td><td>설정 가능</td><td>SHPR3 바이트 2 = 0xE000ED22</td></tr><tr><td>15</td><td>SysTick</td><td>설정 가능</td><td>SHPR3 바이트 3 = 0xE000ED23</td></tr><tr><td>16 + n</td><td>외부 IRQ n</td><td>설정 가능</td><td>IPR 바이트 n</td></tr></tbody></table></div>
+<p>pending을 소프트웨어로 거는 방법도 시스템 예외는 따로다. PendSV는 ICSR(0xE000ED04)의 PENDSVSET 비트(28), SysTick은 PENDSTSET 비트(26)로 건다. FreeRTOS의 <code>portYIELD()</code>가 바로 <code>ICSR = 1 &lt;&lt; 28</code>이다(B4).</p>
+<h3 id="예제-1-nvic-탐색-irq-줄-수-구현-비트-수-리셋-기본값">예제 1 — NVIC 탐색: IRQ 줄 수, 구현 비트 수, 리셋 기본값<a class="anchor" href="#예제-1-nvic-탐색-irq-줄-수-구현-비트-수-리셋-기본값" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: ICTR로 IRQ 줄 수를 읽고, IPR 한 칸에 0xFF를 써서 다시 읽어 <strong>구현된 우선순위 비트 수</strong>를 알아낸다. 여러 값을 써 보고 "4비트 칩이었다면 무엇이 남았을지"도 같이 찍는다. SHPR(PendSV · SysTick) 칸도 같은 방법으로 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex1 — probe NVIC: number of IRQ lines, implemented priority bits, left alignment */
+#include "b3.h"
+
+static unsigned count_bits(uint8_t v)          /* leading 1s of the read-back value */
+{
+    unsigned n = 0;
+    while (v &amp; 0x80u) { n++; v = (uint8_t)(v &lt;&lt; 1); }
+    return n;
+}
+
+int main(void)
+{
+    uint32_t lines = 32u * ((ICTR &amp; 0xFu) + 1u);
+    board_printf_raw("ICTR=0x%x -&gt; up to %u external IRQ lines\n", ICTR, lines);
+
+    uint8_t saved = IPR8(0);
+    IPR8(0) = 0xFF;                            /* write all ones ...           */
+    uint8_t rb = IPR8(0);                      /* ... and see which bits stick */
+    IPR8(0) = saved;
+    unsigned bits = count_bits(rb);
+    board_printf_raw("IPR[0]: wrote 0xff, read 0x%x -&gt; %u implemented bits, %u levels\n",
+                     rb, bits, 1u &lt;&lt; bits);
+
+    const uint8_t tries[] = { 0x01, 0x05, 0x10, 0x5a, 0xa5 };
+    for (unsigned i = 0; i &lt; sizeof tries; i++) {
+        IPR8(8) = tries[i];
+        board_printf_raw("  IPR[8] &lt;- 0x%x  read 0x%x   (4-bit chip would keep 0x%x)\n",
+                         tries[i], IPR8(8), tries[i] &amp; 0xF0u);
+    }
+    /* system handlers: SHPR bytes for MemManage(4)..SysTick(15) */
+    SHPR8(14) = 0xFF; SHPR8(15) = 0xFF;
+    board_printf_raw("SHPR PendSV &lt;- 0xff read 0x%x, SysTick &lt;- 0xff read 0x%x\n",
+                     SHPR8(14), SHPR8(15));
+    board_printf_raw("reset priority of IRQ 10 = 0x%x (0 = the HIGHEST configurable)\n", IPR8(10));
+    board_printf_raw("AIRCR=0x%x PRIGROUP=%u\n", AIRCR, prigroup());
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/B3/ex1_probe.c OUT=/var/tmp/rtos/B3/ex1 &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/B3/ex1/app.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>ICTR=0x0 -&gt; up to 32 external IRQ lines
+IPR[0]: wrote 0xff, read 0xff -&gt; 8 implemented bits, 256 levels
+  IPR[8] &lt;- 0x1  read 0x1   (4-bit chip would keep 0x0)
+  IPR[8] &lt;- 0x5  read 0x5   (4-bit chip would keep 0x0)
+  IPR[8] &lt;- 0x10  read 0x10   (4-bit chip would keep 0x10)
+  IPR[8] &lt;- 0x5a  read 0x5a   (4-bit chip would keep 0x50)
+  IPR[8] &lt;- 0xa5  read 0xa5   (4-bit chip would keep 0xa0)
+SHPR PendSV &lt;- 0xff read 0xff, SysTick &lt;- 0xff read 0xff
+reset priority of IRQ 10 = 0x0 (0 = the HIGHEST configurable)
+AIRCR=0xfa050000 PRIGROUP=0
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>ICTR=0</code> → IRQ 줄 32개. mps2-an385의 QEMU 모델이 32개를 만든다(실제 칩은 수십~240개. Cortex-M3/M4는 최대 240개).</li><li><strong>QEMU는 우선순위 8비트를 전부 구현</strong>한다(0xFF가 그대로 읽힘). 실제 칩은 거의 항상 3~4비트다. 그래서 오른쪽 괄호의 값이 중요하다: 4비트 칩에서 <code>IPR = 0x01</code>이나 <code>0x05</code>를 쓰면 <strong>0x00, 즉 가장 급한 우선순위</strong>가 된다. "5는 중간쯤"이라고 생각하고 쓴 값이 실제로는 최상위가 된다. 이 함정은 §3에서 그림과 함께 다시 본다.</li><li><strong>리셋 직후 모든 IRQ의 우선순위는 0 = 설정 가능한 범위에서 가장 급함</strong>이다. 우선순위를 안 정한 IRQ는 전부 최상위다. RTOS에서는 이게 곧 "FromISR API 금지 영역"이라서 configASSERT가 터진다(예제 11 MODE=2).</li><li>AIRCR을 읽으면 위 16비트가 0xFA05(VECTKEYSTAT)로 보인다. 쓸 때는 0x05FA를 써야 한다.</li></ul>
+<p><strong>Don 경험과 연결</strong>: SSD 컨트롤러(Cortex-R)의 GIC 계열 인터럽트 컨트롤러도 "구현된 우선순위 비트 수"가 칩마다 달랐을 것이다. GIC는 PMR에 0xFF를 써서 읽어 보는 똑같은 방법으로 비트 수를 알아낸다. 이 방법은 Cortex-M 고유가 아니라 Arm 인터럽트 컨트롤러의 공통 관례다.</p>
+<hr>
+<h2 id="2-pending과-active-인터럽트-하나의-상태-기계">2. pending과 active — 인터럽트 하나의 상태 기계<a class="anchor" href="#2-pending과-active-인터럽트-하나의-상태-기계" aria-label="link">#</a></h2>
+<h3 id="2-1-직관">2.1 직관<a class="anchor" href="#2-1-직관" aria-label="link">#</a></h3>
+<p>IRQ마다 "pending"과 "active" 두 비트가 있으므로 상태는 네 개다.</p>
+<figure class="chart"><svg viewBox="0 0 680 320" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="20.0" y="60.0" width="170.0" height="50.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="105.0" y="80.8" font-size="13" text-anchor="middle" font-weight="bold">Inactive</text>
+<text x="105.0" y="97.8" font-size="12" text-anchor="middle">pend=0 act=0</text>
+<rect x="255.0" y="60.0" width="170.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340.0" y="80.8" font-size="13" text-anchor="middle" font-weight="bold">Pending</text>
+<text x="340.0" y="97.8" font-size="12" text-anchor="middle">pend=1 act=0</text>
+<rect x="490.0" y="60.0" width="170.0" height="50.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="575.0" y="80.8" font-size="13" text-anchor="middle" font-weight="bold">Active</text>
+<text x="575.0" y="97.8" font-size="12" text-anchor="middle">pend=0 act=1</text>
+<rect x="490.0" y="220.0" width="170.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="575.0" y="240.8" font-size="13" text-anchor="middle" font-weight="bold">Active + Pending</text>
+<text x="575.0" y="257.8" font-size="12" text-anchor="middle">pend=1 act=1</text>
+<line x1="190.0" y1="76.0" x2="253.0" y2="76.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+<text x="222.0" y="40.0" font-size="12" text-anchor="middle">신호 · ISPR · STIR</text>
+<line x1="255.0" y1="96.0" x2="192.0" y2="96.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+<text x="222.0" y="128.0" font-size="12" text-anchor="middle">ICPR (사건 버림)</text>
+<line x1="425.0" y1="76.0" x2="488.0" y2="76.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+<text x="457.0" y="40.0" font-size="12" text-anchor="middle">예외 진입</text>
+<text x="457.0" y="54.0" font-size="11" text-anchor="middle">(우선순위가 이길 때)</text>
+<path d="M 540,110 C 540,185 105,185 105,112" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+<text x="200.0" y="176.0" font-size="12" text-anchor="middle">예외 복귀 (그사이 신호 없음)</text>
+<line x1="620.0" y1="110.0" x2="620.0" y2="218.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+<text x="612.0" y="160.0" font-size="12" text-anchor="end">핸들러 중</text>
+<text x="612.0" y="176.0" font-size="12" text-anchor="end">다시 신호</text>
+<path d="M 490,245 L 390,245 L 390,112" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+<text x="480.0" y="268.0" font-size="12" text-anchor="end">예외 복귀 → 곧바로 재진입 (tail-chain)</text>
+<text x="20.0" y="300.0" font-size="12">disable(ICER)된 IRQ도 pending은 된다 — enable하는 순간 들어온다. 예제 2에서 네 상태를 모두 읽었다.</text>
+</svg></figure>
+<p>그림 2 — IRQ 하나의 상태 기계. 하드웨어 신호, ISPR 쓰기, STIR 쓰기는 모두 같은 일(pending 비트 세우기)을 한다. 예외 진입 순간 하드웨어가 pending을 지우고 active를 세운다. ISR 안에서 다시 신호가 오면 "Active + Pending"이 되고, ISR이 끝나면 그 자리에서 곧바로 다시 들어간다(tail-chaining, B2).</p>
+<p>정의를 정리하면 이렇다.</p>
+<ul><li><strong>Inactive</strong>: 아무 일도 없다.</li><li><strong>Pending</strong>: "들어오고 싶다"고 줄을 섰다. 조건(enable, 우선순위)이 맞으면 들어간다. disable된 IRQ도 pending은 될 수 있다.</li><li><strong>Active</strong>: ISR이 실행 중이거나, 더 급한 ISR에 선점당해 멈춰 있다(중첩). IABR 비트가 1이다.</li><li><strong>Active + Pending</strong>: ISR 실행 중에 같은 IRQ가 또 왔다. 한 번 더 실행될 예정이다. 단 <strong>pending은 비트 하나라서 두 번 이상 와도 한 번으로 합쳐진다</strong> — 카운터가 아니다. 이벤트 개수가 중요하면 하드웨어 FIFO나 카운터를 따로 봐야 한다.</li></ul>
+<h3 id="예제-2-네-상태를-레지스터로-직접-보기">예제 2 — 네 상태를 레지스터로 직접 보기<a class="anchor" href="#예제-2-네-상태를-레지스터로-직접-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: IRQ 10을 disable한 채 pend → ICPR로 지움 → enable → STIR로 트리거 → ISR 안에서 자기 자신을 다시 pend하는 순서로, 각 시점의 ISPR · IABR · ICSR 값을 찍는다. ICSR의 VECTACTIVE(현재 실행 중인 예외 번호), VECTPENDING(가장 급한 pending 예외 번호), ISRPENDING(외부 IRQ pending 여부)도 같이 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex2 — pending / active state machine of one IRQ (IRQ 10), seen through ISPR / IABR / ICSR */
+#include "b3.h"
+#define IRQ 10u
+#define BIT (1u &lt;&lt; IRQ)
+static volatile unsigned runs, repend_once;
+
+static void show(const char *where)
+{
+    board_printf_raw("%s pend=%u act=%u ICSR.VECTACTIVE=%u VECTPENDING=%u ISRPENDING=%u\n",
+                     where, !!(ISPR(0) &amp; BIT), !!(IABR(0) &amp; BIT),
+                     ICSR &amp; 0x1FFu, (ICSR &gt;&gt; 12) &amp; 0x1FFu, (ICSR &gt;&gt; 22) &amp; 1u);
+}
+
+void DUALTIMER_IRQHandler(void)                  /* IRQ 10 */
+{
+    runs++;
+    show("  [in ISR]      ");
+    if (repend_once) {                           /* pend ourselves while active */
+        repend_once = 0;
+        ISPR(0) = BIT;
+        show("  [ISR re-pend] ");
+    }
+}
+
+int main(void)
+{
+    IPR8(IRQ) = 0x80;
+    ICER(0) = BIT;                               /* disabled */
+    show("1 idle          ");
+    ISPR(0) = BIT;                               /* pend while disabled */
+    show("2 pend,disabled ");
+    board_printf_raw("  runs=%u (disabled IRQ never runs, but stays pending)\n", runs);
+    ICPR(0) = BIT;                               /* clear-pending: event is lost */
+    show("3 after ICPR    ");
+    ISER(0) = BIT;                               /* enable: nothing pending -&gt; no run */
+    board_printf_raw("  runs=%u after enable (pending was cleared)\n", runs);
+
+    repend_once = 1;
+    STIR = IRQ;                                  /* software trigger = write IRQ number */
+    __asm volatile("dsb\n isb");
+    board_printf_raw("4 after STIR: runs=%u (ran twice: re-pend inside ISR -&gt; tail-chain)\n", runs);
+    show("5 back in main  ");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/B3/ex2_states.c OUT=/var/tmp/rtos/B3/ex2 &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/B3/ex2/app.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>1 idle           pend=0 act=0 ICSR.VECTACTIVE=0 VECTPENDING=0 ISRPENDING=0
+2 pend,disabled  pend=1 act=0 ICSR.VECTACTIVE=0 VECTPENDING=0 ISRPENDING=1
+  runs=0 (disabled IRQ never runs, but stays pending)
+3 after ICPR     pend=0 act=0 ICSR.VECTACTIVE=0 VECTPENDING=0 ISRPENDING=0
+  runs=0 after enable (pending was cleared)
+  [in ISR]       pend=0 act=1 ICSR.VECTACTIVE=26 VECTPENDING=0 ISRPENDING=0
+  [ISR re-pend]  pend=1 act=1 ICSR.VECTACTIVE=26 VECTPENDING=26 ISRPENDING=1
+  [in ISR]       pend=0 act=1 ICSR.VECTACTIVE=26 VECTPENDING=0 ISRPENDING=0
+4 after STIR: runs=2 (ran twice: re-pend inside ISR -&gt; tail-chain)
+5 back in main   pend=0 act=0 ICSR.VECTACTIVE=0 VECTPENDING=0 ISRPENDING=0
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>줄 2: disable된 IRQ도 <strong>pending은 된다</strong>(pend=1). 실행은 안 된다(runs=0). VECTPENDING은 0인데, 이 칸은 "enable돼 있어서 실제로 들어갈 수 있는 것" 중 가장 급한 것만 보여 준다. ISRPENDING은 enable과 무관하게 1이다.</li><li>줄 3: ICPR로 지우면 사건이 사라진다. 그 뒤 enable해도 ISR은 돌지 않는다. <strong>enable 직전에 ICPR로 묵은 pending을 지우는 것</strong>은 드라이버 초기화의 정석이다(부팅 중에 들어온 쓰레기 인터럽트가 enable하자마자 튀어나오는 것을 막는다).</li><li><code>[in ISR]</code>: 진입 순간 pending은 0, active는 1. VECTACTIVE=26 = 16 + 10(예외 번호 = IRQ 번호 + 16).</li><li><code>[ISR re-pend]</code>: ISR 안에서 다시 pend하면 pend=1 act=1. 같은 우선순위라 자기 자신을 선점하지는 않는다. ISR이 끝나면 <strong>main으로 돌아가지 않고</strong> 바로 다시 들어간다(runs=2). 이게 tail-chaining이다(B2에서 스태킹을 생략하는 이유를 다룬다).</li></ul>
+<h3 id="2-2-레벨-인터럽트와-isr이-안-끝나는-버그">2.2 레벨 인터럽트와 "ISR이 안 끝나는" 버그<a class="anchor" href="#2-2-레벨-인터럽트와-isr이-안-끝나는-버그" aria-label="link">#</a></h3>
+<p>주변장치의 인터럽트 줄은 보통 <strong>레벨(level)</strong> 신호다. 주변장치 상태 비트(예: 타이머의 INT 플래그)가 1인 동안 줄이 계속 올라가 있다. NVIC는 예외 진입 때 pending을 지우지만, ISR이 끝날 때 줄이 아직 올라가 있으면 <strong>다시 pending이 된다</strong>. 그래서 ISR에서 주변장치 플래그를 지우는 것(예: CMSDK 타이머의 <code>INTCLR = 1</code>, STM32의 <code>TIMx-&gt;SR = ~TIM_SR_UIF</code>)을 잊으면 ISR이 끝없이 다시 들어온다 — 증상은 "main이 멈췄다, CPU 100%"다.</p>
+<p>또 하나 미묘한 함정: 플래그를 <strong>ISR 맨 끝에서</strong> 지우면, 그 쓰기가 버스를 건너 주변장치에 닿기 전에 예외 복귀가 일어나 줄이 아직 1로 보일 수 있다. 그러면 ISR이 한 번 더 들어온다(가짜 두 번째 인터럽트). 처방은 두 가지다. 플래그를 <strong>ISR 앞쪽에서</strong> 지우거나, 지운 뒤 같은 주변장치 레지스터를 한 번 읽어(또는 <code>dsb</code>) 쓰기가 끝난 것을 확인한다. QEMU는 버스 지연을 모델링하지 않아서 이 현상은 재현되지 않는다 — 실제 칩(특히 주변장치 버스가 느린 STM32H7 같은 칩)에서 scope로 확인할 주제다.</p>
+<p><strong>Don 경험과 연결</strong>: SSD 컨트롤러의 인터럽트 상태 레지스터를 W1C로 지운 뒤 다시 읽어 확인하던 습관이 정확히 이 문제를 막는다. Cortex-M에서도 그 습관은 그대로 유효하다.</p>
+<h3 id="2-3-소프트웨어-트리거-세-가지">2.3 소프트웨어 트리거 세 가지<a class="anchor" href="#2-3-소프트웨어-트리거-세-가지" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>방법</th><th>대상</th><th>특징</th></tr></thead><tbody><tr><td><code>STIR = n</code></td><td>외부 IRQ n</td><td>워드 하나 쓰기. 비트 위치 계산이 필요 없다. 기본은 특권 모드만 쓸 수 있다(SCB CCR의 USERSETMPEND = 1이면 비특권도 가능)</td></tr><tr><td><code>ISPR(n / 32) = 1u &lt;&lt; (n % 32)</code></td><td>외부 IRQ n</td><td>STIR과 결과는 같다. 여러 IRQ를 한 번에 pend할 수 있다</td></tr><tr><td><code>ICSR = 1u &lt;&lt; 28</code> (PENDSVSET)</td><td>PendSV</td><td>시스템 예외는 ICSR로 건다. RTOS의 컨텍스트 스위치 요청(B4)</td></tr></tbody></table></div>
+<p>실무에서 소프트웨어 트리거가 쓰이는 대표 장면은 두 가지다. 첫째, <strong>zero-latency ISR이 태스크를 깨우고 싶을 때</strong> 커널이 막을 수 있는 우선순위의 "다리(bridge)" IRQ를 STIR로 pend하고, 그 다리 ISR이 FromISR API를 부른다(예제 11 MODE=0). 둘째, <strong>빈 IRQ를 "미뤄 둔 일" 처리용</strong>으로 쓴다(Linux의 softirq, 또는 PendSV를 일반화한 것).</p>
+<hr>
+<h2 id="3-우선순위-숫자-구현-비트-수-왼쪽-정렬-작을수록-급하다">3. 우선순위 숫자 — 구현 비트 수, 왼쪽 정렬, "작을수록 급하다"<a class="anchor" href="#3-우선순위-숫자-구현-비트-수-왼쪽-정렬-작을수록-급하다" aria-label="link">#</a></h2>
+<h3 id="3-1-직관">3.1 직관<a class="anchor" href="#3-1-직관" aria-label="link">#</a></h3>
+<p>우선순위 칸은 8비트지만, 칩 설계자는 실리콘 면적과 비교기 속도를 아끼려고 <strong>위쪽 몇 비트만</strong> 만든다. 만들지 않은 아래 비트는 항상 0으로 읽히고, 써도 버려진다(RAZ/WI, Read-As-Zero / Write-Ignored).</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="20.0" font-size="13" font-weight="bold">우선순위 바이트 IPR[n] — 구현된 비트는 위(MSB)쪽에 붙는다</text>
+<text x="595.0" y="45.0" font-size="11" text-anchor="middle">bit0</text>
+<text x="549.0" y="45.0" font-size="11" text-anchor="middle">bit1</text>
+<text x="503.0" y="45.0" font-size="11" text-anchor="middle">bit2</text>
+<text x="457.0" y="45.0" font-size="11" text-anchor="middle">bit3</text>
+<text x="411.0" y="45.0" font-size="11" text-anchor="middle">bit4</text>
+<text x="365.0" y="45.0" font-size="11" text-anchor="middle">bit5</text>
+<text x="319.0" y="45.0" font-size="11" text-anchor="middle">bit6</text>
+<text x="273.0" y="45.0" font-size="11" text-anchor="middle">bit7</text>
+<text x="10.0" y="68.0" font-size="12" font-weight="bold">QEMU mps2-an385</text>
+<text x="10.0" y="83.0" font-size="11">8비트 전부 구현 (256단계)</text>
+<rect x="250.0" y="55.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="273.0" y="74.3" font-size="12" text-anchor="middle">P</text>
+<rect x="296.0" y="55.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="319.0" y="74.3" font-size="12" text-anchor="middle">P</text>
+<rect x="342.0" y="55.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="365.0" y="74.3" font-size="12" text-anchor="middle">P</text>
+<rect x="388.0" y="55.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="411.0" y="74.3" font-size="12" text-anchor="middle">P</text>
+<rect x="434.0" y="55.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="457.0" y="74.3" font-size="12" text-anchor="middle">P</text>
+<rect x="480.0" y="55.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="503.0" y="74.3" font-size="12" text-anchor="middle">P</text>
+<rect x="526.0" y="55.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="549.0" y="74.3" font-size="12" text-anchor="middle">P</text>
+<rect x="572.0" y="55.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="595.0" y="74.3" font-size="12" text-anchor="middle">P</text>
+<text x="10.0" y="113.0" font-size="12" font-weight="bold">STM32F4/H7급 (4비트)</text>
+<text x="10.0" y="128.0" font-size="11">[3:0]은 항상 0으로 읽힘</text>
+<rect x="250.0" y="100.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="273.0" y="119.3" font-size="12" text-anchor="middle">P</text>
+<rect x="296.0" y="100.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="319.0" y="119.3" font-size="12" text-anchor="middle">P</text>
+<rect x="342.0" y="100.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="365.0" y="119.3" font-size="12" text-anchor="middle">P</text>
+<rect x="388.0" y="100.0" width="46.0" height="30.0" rx="2" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="411.0" y="119.3" font-size="12" text-anchor="middle">P</text>
+<rect x="434.0" y="100.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="457.0" y="119.3" font-size="12" text-anchor="middle">0</text>
+<rect x="480.0" y="100.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="503.0" y="119.3" font-size="12" text-anchor="middle">0</text>
+<rect x="526.0" y="100.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="549.0" y="119.3" font-size="12" text-anchor="middle">0</text>
+<rect x="572.0" y="100.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="595.0" y="119.3" font-size="12" text-anchor="middle">0</text>
+<text x="10.0" y="158.0" font-size="12" font-weight="bold">4비트 + PRIGROUP=5</text>
+<text x="10.0" y="173.0" font-size="11">그룹 2비트 · 서브 2비트</text>
+<rect x="250.0" y="145.0" width="46.0" height="30.0" rx="2" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="273.0" y="164.3" font-size="12" text-anchor="middle">G</text>
+<rect x="296.0" y="145.0" width="46.0" height="30.0" rx="2" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="319.0" y="164.3" font-size="12" text-anchor="middle">G</text>
+<rect x="342.0" y="145.0" width="46.0" height="30.0" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="365.0" y="164.3" font-size="12" text-anchor="middle">S</text>
+<rect x="388.0" y="145.0" width="46.0" height="30.0" rx="2" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="411.0" y="164.3" font-size="12" text-anchor="middle">S</text>
+<rect x="434.0" y="145.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="457.0" y="164.3" font-size="12" text-anchor="middle">0</text>
+<rect x="480.0" y="145.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="503.0" y="164.3" font-size="12" text-anchor="middle">0</text>
+<rect x="526.0" y="145.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="549.0" y="164.3" font-size="12" text-anchor="middle">0</text>
+<rect x="572.0" y="145.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="595.0" y="164.3" font-size="12" text-anchor="middle">0</text>
+<text x="10.0" y="203.0" font-size="12" font-weight="bold">SetPriority(irq, 5)</text>
+<text x="10.0" y="218.0" font-size="11">4비트 칩: 5 &lt;&lt; 4 = 0x50</text>
+<rect x="250.0" y="190.0" width="46.0" height="30.0" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="273.0" y="209.3" font-size="12" text-anchor="middle">0</text>
+<rect x="296.0" y="190.0" width="46.0" height="30.0" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="319.0" y="209.3" font-size="12" text-anchor="middle">1</text>
+<rect x="342.0" y="190.0" width="46.0" height="30.0" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="365.0" y="209.3" font-size="12" text-anchor="middle">0</text>
+<rect x="388.0" y="190.0" width="46.0" height="30.0" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="411.0" y="209.3" font-size="12" text-anchor="middle">1</text>
+<rect x="434.0" y="190.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="457.0" y="209.3" font-size="12" text-anchor="middle">0</text>
+<rect x="480.0" y="190.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="503.0" y="209.3" font-size="12" text-anchor="middle">0</text>
+<rect x="526.0" y="190.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="549.0" y="209.3" font-size="12" text-anchor="middle">0</text>
+<rect x="572.0" y="190.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="595.0" y="209.3" font-size="12" text-anchor="middle">0</text>
+<text x="10.0" y="248.0" font-size="12" font-weight="bold">IPR = 0x05 직접 쓰기</text>
+<text x="10.0" y="263.0" font-size="11">4비트 칩: 0x00 = 가장 급함!</text>
+<rect x="250.0" y="235.0" width="46.0" height="30.0" rx="2" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="273.0" y="254.3" font-size="12" text-anchor="middle">0</text>
+<rect x="296.0" y="235.0" width="46.0" height="30.0" rx="2" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="319.0" y="254.3" font-size="12" text-anchor="middle">0</text>
+<rect x="342.0" y="235.0" width="46.0" height="30.0" rx="2" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="365.0" y="254.3" font-size="12" text-anchor="middle">0</text>
+<rect x="388.0" y="235.0" width="46.0" height="30.0" rx="2" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="411.0" y="254.3" font-size="12" text-anchor="middle">0</text>
+<rect x="434.0" y="235.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="457.0" y="254.3" font-size="12" text-anchor="middle">0</text>
+<rect x="480.0" y="235.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="503.0" y="254.3" font-size="12" text-anchor="middle">1</text>
+<rect x="526.0" y="235.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="549.0" y="254.3" font-size="12" text-anchor="middle">0</text>
+<rect x="572.0" y="235.0" width="46.0" height="30.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="595.0" y="254.3" font-size="12" text-anchor="middle">1</text>
+<text x="10.0" y="295.0" font-size="12">P = 구현된 우선순위 비트, G = 그룹(선점) 비트, S = 서브 비트, 회색 = 구현 안 됨(쓰면 버려짐).</text>
+<text x="10.0" y="315.0" font-size="12">그래서 같은 코드라도 '값 &lt;&lt; (8 - 구현 비트 수)'로 써야 한다 (CMSIS NVIC_SetPriority가 이 일을 한다).</text>
+</svg></figure>
+<p>그림 3 — 우선순위 바이트. 구현된 비트는 MSB 쪽에 붙어 있다(왼쪽 정렬). 그래서 "논리 우선순위 5"를 4비트 칩에 쓰려면 <code>5 &lt;&lt; 4 = 0x50</code>을 써야 하고, 0x05를 그대로 쓰면 0x00(가장 급함)이 된다.</p>
+<p>왜 아래가 아니라 위에 붙였을까? <strong>같은 소프트웨어가 비트 수가 다른 칩에서도 순서를 유지</strong>하게 하려는 것이다. 0x40과 0x80은 8비트 칩에서도, 4비트 칩에서도, 2비트 칩에서도 "0x40이 더 급하다"는 관계가 같다. 아래쪽에 붙였다면 0x05와 0x15의 관계가 칩마다 달라졌을 것이다. 대가는 "논리 번호(0, 1, 2 …)"로 생각하는 사람이 매번 시프트를 해야 한다는 것이다. CMSIS의 <code>NVIC_SetPriority(IRQn, prio)</code>가 내부에서 <code>prio &lt;&lt; (8U - __NVIC_PRIO_BITS)</code>를 해 주는 이유다(<code>__NVIC_PRIO_BITS</code>는 칩 벤더의 디바이스 헤더가 정의한다. STM32F4 · H7은 4).</p>
+<p>아키텍처가 보장하는 최소값도 알아 두자.</p>
+<div class="tw"><table><thead><tr><th>아키텍처</th><th>대표 코어</th><th>구현 비트 수</th><th>마스크 레지스터</th></tr></thead><tbody><tr><td>Armv6-M</td><td>Cortex-M0, M0+, M1</td><td>2비트 고정 (4단계: 0x00, 0x40, 0x80, 0xC0)</td><td>PRIMASK만</td></tr><tr><td>Armv7-M / v7E-M</td><td>Cortex-M3, M4, M7</td><td>3~8비트 (칩마다), 흔히 3 또는 4</td><td>PRIMASK, FAULTMASK, BASEPRI</td></tr><tr><td>Armv8-M Baseline</td><td>Cortex-M23</td><td>2비트</td><td>PRIMASK만</td></tr><tr><td>Armv8-M Mainline / v8.1-M</td><td>Cortex-M33, M55, M85</td><td>3~8비트</td><td>PRIMASK, FAULTMASK, BASEPRI</td></tr></tbody></table></div>
+<p>칩 예: STM32F4 · H7은 4비트, nRF52840은 3비트다(Zephyr DTS의 <code>arm,num-irq-priority-bits</code> 값으로 확인: <code>st/f4/stm32f4.dtsi</code>와 <code>st/h7/stm32h7.dtsi</code>는 4, <code>nordic/nrf52840.dtsi</code>는 3).</p>
+<h3 id="3-2-작을수록-급하다-왜-이게-함정인가">3.2 "작을수록 급하다" — 왜 이게 함정인가<a class="anchor" href="#3-2-작을수록-급하다-왜-이게-함정인가" aria-label="link">#</a></h3>
+<p>Cortex-M에서 <strong>우선순위 숫자가 작을수록 더 급하다</strong>(logically higher priority). 0이 가장 급하다. 그런데 FreeRTOS <strong>태스크</strong> 우선순위는 반대로 <strong>클수록 급하다</strong>(<code>configMAX_PRIORITIES - 1</code>이 최상위). Zephyr 스레드는 <strong>작을수록 급하다</strong>(음수는 협력형 스레드). 한 시스템 안에서 세 가지 규칙이 섞인다.</p>
+<div class="tw"><table><thead><tr><th>대상</th><th>가장 급한 값</th><th>방향</th></tr></thead><tbody><tr><td>Cortex-M 인터럽트 (NVIC IPR, SHPR, BASEPRI)</td><td>0x00</td><td>작을수록 급함</td></tr><tr><td>FreeRTOS 태스크 (<code>uxPriority</code>)</td><td><code>configMAX_PRIORITIES - 1</code></td><td>클수록 급함</td></tr><tr><td>Zephyr 스레드</td><td>가장 작은 음수 (협력형)</td><td>작을수록 급함</td></tr><tr><td>Zephyr <code>IRQ_CONNECT()</code> 인자</td><td>0</td><td>작을수록 급함 (커널이 오프셋을 더함, §8)</td></tr></tbody></table></div>
+<p>그래서 문서나 코드 리뷰에서는 <strong>"높다 / 낮다"라는 말을 쓰지 말고</strong> "더 급하다(more urgent) / 숫자가 작다(numerically lower)"처럼 쓰는 게 안전하다. FreeRTOS 소스의 주석도 "Numerically low interrupt priority numbers represent logically high interrupt priorities"라고 굳이 풀어 쓴다(<code>port.c</code>의 <code>vPortValidateInterruptPriority</code>).</p>
+<h3 id="예제-3-실제-칩-모델에서-같은-0xff-프로브">예제 3 — 실제 칩 모델에서 같은 0xFF 프로브<a class="anchor" href="#예제-3-실제-칩-모델에서-같은-0xff-프로브" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 1의 "0xFF 쓰고 읽기"를 QEMU가 제공하는 <strong>실제 칩 모델</strong>(STM32 세 종류, nRF51)에서 돌린다. 템플릿 없이 벡터 두 칸짜리 최소 이미지를 만들고, 출력은 semihosting(<code>bkpt 0xab</code>)으로 한다. Armv7-M에서는 BASEPRI도 같은 방법으로 읽어 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex1b — the same "write 0xFF, read back" probe on QEMU models of real chips (semihosting output) */
+#include &lt;stdint.h&gt;
+#define REG32(a) (*(volatile uint32_t *)(a))
+static void sh(int op, const void *arg)          /* Arm semihosting call */
+{
+    register int r0 __asm__("r0") = op;
+    register const void *r1 __asm__("r1") = arg;
+    __asm volatile("bkpt 0xab" : "+r"(r0) : "r"(r1) : "memory");
+}
+static void puts_(const char *s) { sh(0x04, s); }                 /* SYS_WRITE0 */
+static void hex(uint32_t v)
+{
+    char b[11] = "0x00000000"; int i = 9;
+    for (; i &gt;= 2; i--, v &gt;&gt;= 4) b[i] = "0123456789abcdef"[v &amp; 15u];
+    puts_(b);
+}
+static unsigned ones(uint32_t v) { unsigned n = 0; while (v &amp; 0x80u) { n++; v &lt;&lt;= 1; } return n; }
+
+void reset(void)
+{
+    REG32(0xE000E400u) = 0xFFu;                  /* IPR word 0: byte for IRQ0 (word access: v6-M safe) */
+    uint32_t rb = REG32(0xE000E400u) &amp; 0xFFu;
+    puts_(BOARD ": IPR[0] &lt;- 0xff, read "); hex(rb);
+    puts_("  -&gt; implemented bits = "); char d[3] = { (char)('0' + ones(rb)), '\n', 0 }; puts_(d);
+#if defined(__ARM_ARCH_7M__) || defined(__ARM_ARCH_7EM__)
+    uint32_t bp;
+    __asm volatile("msr basepri, %1\n mrs %0, basepri" : "=r"(bp) : "r"(0xFFu));
+    puts_("   BASEPRI &lt;- 0xff, read "); hex(bp); puts_("\n");
+    __asm volatile("msr basepri, %0" : : "r"(0u));
+#else
+    puts_("   (ARMv6-M: no BASEPRI / FAULTMASK, only PRIMASK)\n");
+#endif
+    sh(0x18, (const void *)0x20026u);            /* SYS_EXIT, ADP_Stopped_ApplicationExit */
+    for (;;) { }
+}
+__attribute__((section(".vectors"), used))
+static const uintptr_t vectors[2] = { 0x20001000u, (uintptr_t)reset };</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code># run.sh: 머신마다 링크 주소만 바꿔 빌드하고 실행 (STM32는 플래시 0x08000000, 나머지는 0x0)
+#   arm-none-eabi-gcc -mthumb -mcpu=$CPU -O2 -Wall -Wextra -nostdlib -ffreestanding -DBOARD=... -T $M.ld probe.c
+#   qemu-system-arm -machine $M -nographic -monitor none -serial null -semihosting-config enable=on,target=native -kernel $M.elf
+limactl shell elinux -- bash -lc '/Users/donh/.rtos_scratch/B3/probe/run.sh'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>mps2-an385 (cortex-m3): IPR[0] &lt;- 0xff, read 0x000000ff  -&gt; implemented bits = 8
+   BASEPRI &lt;- 0xff, read 0x000000ff
+netduino2 (cortex-m3): IPR[0] &lt;- 0xff, read 0x000000f0  -&gt; implemented bits = 4
+   BASEPRI &lt;- 0xff, read 0x000000ff
+stm32vldiscovery (cortex-m3): IPR[0] &lt;- 0xff, read 0x000000f0  -&gt; implemented bits = 4
+   BASEPRI &lt;- 0xff, read 0x000000ff
+b-l475e-iot01a (cortex-m4): IPR[0] &lt;- 0xff, read 0x000000f0  -&gt; implemented bits = 4
+   BASEPRI &lt;- 0xff, read 0x000000ff
+microbit (cortex-m0): IPR[0] &lt;- 0xff, read 0x000000c0  -&gt; implemented bits = 2
+   (ARMv6-M: no BASEPRI / FAULTMASK, only PRIMASK)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>QEMU의 STM32 모델 세 개는 <strong>4비트</strong>(0xF0), micro:bit의 Cortex-M0는 <strong>2비트</strong>(0xC0)다. 실제 STM32 · nRF51과 같은 값이다. mps2-an385만 8비트다 — 이 lab에서 "값이 그대로 읽힌다"고 해서 실제 칩에서도 그렇다고 믿으면 안 된다.</li><li><strong>QEMU의 한계 하나</strong>: 4비트 모델에서도 BASEPRI는 0xFF가 그대로 읽힌다. 아키텍처 규칙상 BASEPRI도 IPR과 같은 비트만 구현되어야 하므로 <strong>실제 STM32라면 0xF0으로 읽혀야 한다</strong>(Armv7-M ARM의 BASEPRI 정의: 구현되지 않은 우선순위 비트는 RAZ/WI). QEMU 10.2가 BASEPRI를 비트 수에 맞춰 자르지 않는 것으로 보인다. 실칩에서 BASEPRI를 디버거로 읽어 확인할 일이다.</li></ul>
+<h3 id="3-3-실제-칩에서-비트-수를-알아내는-법">3.3 실제 칩에서 비트 수를 알아내는 법<a class="anchor" href="#3-3-실제-칩에서-비트-수를-알아내는-법" aria-label="link">#</a></h3>
+<ol><li><strong>데이터시트 / 레퍼런스 매뉴얼</strong>: "NVIC … 16 programmable priority levels (4 bits of interrupt priority are used)" 같은 문장. STM32는 PM0214(Cortex-M4 programming manual)의 NVIC 절에 있다.</li><li><strong>벤더 디바이스 헤더</strong>: <code>#define __NVIC_PRIO_BITS 4U</code>. CMSIS가 이 값으로 시프트한다.</li><li><strong>실행 중 프로브</strong>(가장 확실): 사용하지 않는 IRQ의 IPR에 0xFF를 쓰고 읽어서, 위에서부터 연속된 1의 개수를 센다. <strong>FreeRTOS가 스케줄러를 시작할 때 정확히 이 일을 한다</strong>(<code>xPortStartScheduler()</code> — 첫 외부 IRQ의 IPR에 <code>portMAX_8_BIT_VALUE</code>를 쓰고 읽고, 원래 값을 복원한다, §7.3). 디버거에서 <code>x/1xb 0xE000E400</code>로 읽어도 된다(이 값을 바꾸기 전 원래 값을 기억해 둘 것).</li><li><strong>CMSIS 값과 프로브 값을 비교하는 assert</strong>를 부팅 코드에 넣어 두면, 헤더를 잘못 고른 빌드(예: F4 헤더로 다른 칩용 이미지를 빌드)를 바로 잡는다.</li></ol>
+<h3 id="3-4-흔한-함정-다섯">3.4 흔한 함정 다섯<a class="anchor" href="#3-4-흔한-함정-다섯" aria-label="link">#</a></h3>
+<ul><li><code>NVIC-&gt;IP[n] = 5</code>처럼 <strong>시프트 없이</strong> 직접 쓰기 → 4비트 칩에서 0x00(최상위). CMSIS <code>NVIC_SetPriority()</code>를 쓰거나 <code>5 &lt;&lt; (8 - __NVIC_PRIO_BITS)</code>로 쓴다.</li><li>반대로 <code>NVIC_SetPriority(irq, 0x50)</code>처럼 <strong>이미 시프트한 값을 CMSIS에 넘기기</strong> → <code>0x50 &lt;&lt; 4 = 0x500</code>이 바이트로 잘려 0x00. 같은 결과, 반대 원인. CMSIS 함수에는 <strong>논리 번호</strong>(0~15)를, 레지스터 직접 쓰기에는 <strong>바이트 값</strong>(0x00~0xF0)을 넘긴다.</li><li>우선순위를 <strong>안 정한</strong> IRQ = 0 = 최상위. "나중에 정하지" 하고 enable만 하면 그 IRQ가 FOC 전류 루프보다 급해진다.</li><li>"15가 제일 높다"고 생각하고 가장 중요한 IRQ에 15를 주기 → 4비트 칩에서 가장 <strong>느긋한</strong> 값이다. 그리고 PendSV · SysTick과 같은 단계라서 컨텍스트 스위치와 경쟁한다.</li><li>QEMU · 시뮬레이터에서만 테스트 → 8비트라서 위 실수가 <strong>전부 숨겨진다</strong>(예제 1의 괄호 값). 실칩 bring-up 첫날 터진다.</li></ul>
+<hr>
+<h2 id="4-선점-규칙-누가-누구를-끊나">4. 선점 규칙 — 누가 누구를 끊나<a class="anchor" href="#4-선점-규칙-누가-누구를-끊나" aria-label="link">#</a></h2>
+<h3 id="4-1-규칙">4.1 규칙<a class="anchor" href="#4-1-규칙" aria-label="link">#</a></h3>
+<p>pending인 예외 X가 들어갈 수 있는지는 이렇게 정해진다.</p>
+<ol><li>X가 enable돼 있고 pending이다.</li><li>X의 <strong>그룹 우선순위</strong>(§5)가 CPU의 <strong>현재 실행 우선순위</strong>보다 <strong>숫자로 작다</strong>(엄격히 작다 — 같으면 안 된다).</li><li>현재 실행 우선순위 = (지금 active인 예외들 중 가장 급한 그룹 우선순위)와 (PRIMASK · FAULTMASK · BASEPRI가 만드는 상한) 중 더 급한 값. 아무 예외도 active가 아니고 마스크도 없으면 "가장 느긋한 값보다도 느긋한" 상태(Thread 모드)다.</li><li>여러 개가 동시에 pending이면 <strong>그룹 우선순위 → 서브 우선순위 → 예외 번호가 작은 것</strong> 순서로 하나를 고른다.</li></ol>
+<p>규칙 2의 "엄격히 작다"가 중요하다. <strong>같은 그룹 우선순위끼리는 절대 서로 선점하지 않는다.</strong> 그래서 같은 우선순위의 ISR 여러 개는 "하나씩 끝까지" 실행된다. 이 성질을 이용하면 같은 우선순위 ISR끼리는 공유 변수를 락 없이 만질 수 있다(서로 끼어들지 못하니까).</p>
+<h3 id="예제-4-끼어드는-경우와-기다리는-경우">예제 4 — 끼어드는 경우와 기다리는 경우<a class="anchor" href="#예제-4-끼어드는-경우와-기다리는-경우" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: ISR A(IRQ 8) 안에서 STIR로 B(IRQ 10)를 pend한다. B가 더 급하면 A 중간에 끼어들고(<code>ABba</code>: A 시작 → B 시작 → B 끝 → A 끝), 덜 급하거나 같으면 A가 끝난 뒤 들어간다(<code>AaBb</code>). 마지막 두 줄은 PRIMASK로 잠깐 막아 둔 상태에서 세 개를 동시에 pend한 뒤 풀어서, <strong>동시 pending의 순서</strong>를 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex3 — who preempts whom: smaller number = more urgent; equal priority never preempts */
+#include "b3.h"
+static volatile int pend_from_8 = -1, pend_from_10 = -1;
+
+void TIMER0_IRQHandler(void)          /* IRQ 8  */
+{
+    logc('A'); if (pend_from_8 &gt;= 0) STIR = (uint32_t)pend_from_8;
+    __asm volatile("dsb\n isb"); logc('a');
+}
+void DUALTIMER_IRQHandler(void)       /* IRQ 10 */
+{
+    logc('B'); if (pend_from_10 &gt;= 0) STIR = (uint32_t)pend_from_10;
+    __asm volatile("dsb\n isb"); logc('b');
+}
+void UART0RX_IRQHandler(void) { logc('U'); logc('u'); }   /* IRQ 0 */
+
+static void run(const char *title, uint8_t p8, uint8_t p10, int from8)
+{
+    IPR8(8) = p8; IPR8(10) = p10; pend_from_8 = from8; pend_from_10 = -1;
+    STIR = 8; __asm volatile("dsb\n isb");
+    board_printf_raw("prio(A=IRQ8)=0x%x prio(B=IRQ10)=0x%x  ", p8, p10);
+    log_print(title);
+}
+
+int main(void)
+{
+    ISER(0) = (1u &lt;&lt; 0) | (1u &lt;&lt; 8) | (1u &lt;&lt; 10);
+    run("A pends B, B more urgent ", 0x80, 0x40, 10);   /* expect A B b a : nested   */
+    run("A pends B, B less urgent ", 0x40, 0x80, 10);   /* expect A a B b : waits    */
+    run("A pends B, equal priority", 0x80, 0x80, 10);   /* expect A a B b : no preempt */
+    run("trap: 'B=1 is low'?      ", 0x80, 0x01, 10);   /* 1 is the 2nd most urgent */
+
+    /* several pending at once (PRIMASK held), released together */
+    IPR8(0) = 0x80; IPR8(8) = 0x80; IPR8(10) = 0x80; pend_from_8 = -1;
+    irq_off(); STIR = 10; STIR = 8; STIR = 0; irq_on();
+    log_print("same prio, pended 10,8,0 -&gt; order");
+    IPR8(10) = 0x20;
+    irq_off(); STIR = 0; STIR = 8; STIR = 10; irq_on();
+    log_print("IRQ10 prio 0x20, others 0x80 -&gt; order");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/B3/ex3_preempt.c OUT=/var/tmp/rtos/B3/ex3 &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/B3/ex3/app.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>prio(A=IRQ8)=0x80 prio(B=IRQ10)=0x40  A pends B, B more urgent : ABba
+prio(A=IRQ8)=0x40 prio(B=IRQ10)=0x80  A pends B, B less urgent : AaBb
+prio(A=IRQ8)=0x80 prio(B=IRQ10)=0x80  A pends B, equal priority: AaBb
+prio(A=IRQ8)=0x80 prio(B=IRQ10)=0x1  trap: 'B=1 is low'?      : ABba
+same prio, pended 10,8,0 -&gt; order: UuAaBb
+IRQ10 prio 0x20, others 0x80 -&gt; order: BbUuAa
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>줄 1과 2: 숫자가 작은 쪽이 이긴다. 0x40 &lt; 0x80이라 B가 A를 끊는다(<code>ABba</code>). 반대면 B는 기다린다(<code>AaBb</code>).</li><li>줄 3: <strong>같은 우선순위는 선점하지 않는다</strong>(<code>AaBb</code>).</li><li>줄 4: "1은 작은 숫자니까 낮은 우선순위"라고 착각하면 안 된다. 0x01은 두 번째로 급한 값이다.</li><li>줄 5: 같은 우선순위 세 개를 10, 8, 0 순서로 pend해도 실행은 <strong>0 → 8 → 10</strong>(번호가 작은 것부터). pend한 순서는 상관없다.</li><li>줄 6: 우선순위가 다르면 우선순위가 먼저다(IRQ 10이 0x20이라 가장 먼저).</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="20.0" font-size="13" font-weight="bold">예제 3의 두 결과를 시간축으로 — A(IRQ 8)가 실행 중에 B(IRQ 10)를 pend</text>
+<text x="10.0" y="50.0" font-size="12" font-weight="bold">① B가 더 급함 (A=0x80, B=0x40) → 출력 ABba</text>
+<text x="10.0" y="76.0" font-size="12">main</text>
+<text x="10.0" y="102.0" font-size="12">A (0x80)</text>
+<text x="10.0" y="128.0" font-size="12">B (0x40)</text>
+<rect x="110.0" y="60.0" width="60.0" height="22.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="140.0" y="75.3" font-size="12" text-anchor="middle">main</text>
+<rect x="170.0" y="86.0" width="80.0" height="22.0" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="210.0" y="101.3" font-size="12" text-anchor="middle">A 앞부분</text>
+<line x1="250.0" y1="97.0" x2="250.0" y2="110.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah8)"/>
+<text x="256.0" y="82.0" font-size="11">STIR=10</text>
+<rect x="250.0" y="112.0" width="120.0" height="22.0" rx="2" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="310.0" y="127.3" font-size="12" text-anchor="middle">B 전체 (선점)</text>
+<rect x="370.0" y="86.0" width="80.0" height="22.0" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="410.0" y="101.3" font-size="12" text-anchor="middle">A 뒷부분</text>
+<rect x="450.0" y="60.0" width="60.0" height="22.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="480.0" y="75.3" font-size="12" text-anchor="middle">main</text>
+<text x="10.0" y="170.0" font-size="12" font-weight="bold">② B가 덜 급함 (A=0x40, B=0x80) → 출력 AaBb</text>
+<text x="10.0" y="196.0" font-size="12">main</text>
+<text x="10.0" y="222.0" font-size="12">A (0x40)</text>
+<text x="10.0" y="248.0" font-size="12">B (0x80)</text>
+<rect x="110.0" y="180.0" width="60.0" height="22.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="140.0" y="195.3" font-size="12" text-anchor="middle">main</text>
+<rect x="170.0" y="206.0" width="160.0" height="22.0" rx="2" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="250.0" y="221.3" font-size="12" text-anchor="middle">A 전체 (B는 pending)</text>
+<line x1="250.0" y1="217.0" x2="250.0" y2="230.0" stroke="#888" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ah8)"/>
+<text x="256.0" y="202.0" font-size="11">STIR=10</text>
+<rect x="330.0" y="232.0" width="120.0" height="22.0" rx="2" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="390.0" y="247.3" font-size="12" text-anchor="middle">B (tail-chain)</text>
+<rect x="450.0" y="180.0" width="60.0" height="22.0" rx="2" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="480.0" y="195.3" font-size="12" text-anchor="middle">main</text>
+<text x="10.0" y="285.0" font-size="12">같은 우선순위(0x80/0x80)도 ②와 같다: 같은 그룹 우선순위끼리는 절대 선점하지 않는다.</text>
+</svg></figure>
+<p>그림 4 — 예제 4의 첫 두 줄을 시간축으로. ①에서 B는 A의 한가운데를 끊고 들어가고(중첩, IABR에 A와 B가 동시에 1), ②에서 B는 A가 끝날 때까지 pending으로 기다린 뒤 tail-chain으로 들어간다.</p>
+<p><strong>RTOS와 연결</strong>: 커널의 PendSV는 <strong>가장 느긋한 우선순위</strong>(0xFF)다. 그래서 어떤 ISR 안에서 "컨텍스트 스위치 필요"(<code>portYIELD_FROM_ISR</code>)를 요청해도 PendSV는 그 ISR과 그 위에 중첩된 모든 ISR이 끝난 <strong>뒤에</strong> 들어간다 — 규칙 2가 그대로 "모든 ISR이 끝난 뒤 한 번만 스위치"를 보장한다. 자세한 것은 B4.</p>
+<hr>
+<h2 id="5-prigroup-그룹-선점-우선순위와-서브-우선순위">5. PRIGROUP — 그룹(선점) 우선순위와 서브 우선순위<a class="anchor" href="#5-prigroup-그룹-선점-우선순위와-서브-우선순위" aria-label="link">#</a></h2>
+<h3 id="5-1-정의">5.1 정의<a class="anchor" href="#5-1-정의" aria-label="link">#</a></h3>
+<p>AIRCR(0xE000ED0C)의 PRIGROUP 필드(비트 10:8, 값 0~7)는 우선순위 바이트를 둘로 쪼갠다.</p>
+<ul><li><strong>그룹 우선순위(group priority, preempt priority)</strong>: 비트 [7 : PRIGROUP+1]. <strong>선점을 결정</strong>한다.</li><li><strong>서브 우선순위(subpriority)</strong>: 비트 [PRIGROUP : 0]. 선점에는 쓰이지 않고, <strong>같은 그룹 안에서 동시에 pending일 때 순서</strong>만 정한다.</li></ul>
+<div class="tw"><table><thead><tr><th>PRIGROUP</th><th>그룹 비트</th><th>서브 비트</th><th>8비트 칩에서 선점 단계 수</th></tr></thead><tbody><tr><td>0</td><td>[7:1]</td><td>[0]</td><td>128</td></tr><tr><td>1</td><td>[7:2]</td><td>[1:0]</td><td>64</td></tr><tr><td>2</td><td>[7:3]</td><td>[2:0]</td><td>32</td></tr><tr><td>3</td><td>[7:4]</td><td>[3:0]</td><td>16</td></tr><tr><td>4</td><td>[7:5]</td><td>[4:0]</td><td>8</td></tr><tr><td>5</td><td>[7:6]</td><td>[5:0]</td><td>4</td></tr><tr><td>6</td><td>[7]</td><td>[6:0]</td><td>2</td></tr><tr><td>7</td><td>없음</td><td>[7:0]</td><td>1 (선점 없음)</td></tr></tbody></table></div>
+<p>주의: <strong>PRIGROUP=0이어도 서브 비트가 1개(비트 0) 있다.</strong> 8비트를 전부 그룹으로 쓰는 설정은 없다. 그래서 8비트 칩(QEMU)에서는 0x20과 0x21이 같은 그룹이다. 4비트 칩에서는 비트 [3:0]이 원래 없으므로 PRIGROUP 0~3이 모두 "4비트 전부 그룹"으로 같은 결과다.</p>
+<h3 id="예제-5-prigroup을-바꾸면-선점이-사라진다">예제 5 — PRIGROUP을 바꾸면 선점이 사라진다<a class="anchor" href="#예제-5-prigroup을-바꾸면-선점이-사라진다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: A=0x60, B=0x40으로 고정하고 PRIGROUP을 0~7로 바꾸며 "A 안에서 B를 pend"한다. B의 그룹이 A보다 작을 때만 끼어든다. 이어서 PRIGROUP=6에서 세 개를 동시에 pend해 서브 우선순위가 순서를 정하는 것을 보고, 마지막으로 <strong>BASEPRI도 그룹 우선순위로 비교된다</strong>는 것을 보인다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex4 — PRIGROUP: only the GROUP (preempt) part preempts; the sub part only orders pending IRQs */
+#include "b3.h"
+static volatile int chain;
+
+void TIMER0_IRQHandler(void)          /* IRQ 8 = A */
+{
+    logc('A'); if (chain) STIR = 10; __asm volatile("dsb\n isb"); logc('a');
+}
+void DUALTIMER_IRQHandler(void) { logc('B'); logc('b'); }   /* IRQ 10 = B */
+void UART0RX_IRQHandler(void)   { logc('U'); logc('u'); }   /* IRQ 0  = U */
+
+static void nest_test(unsigned g)
+{
+    set_prigroup(g); IPR8(8) = 0x60; IPR8(10) = 0x40; chain = 1;
+    STIR = 8; __asm volatile("dsb\n isb");
+    uint32_t gm = (0xFFu &lt;&lt; (g + 1)) &amp; 0xFFu;            /* group mask */
+    board_printf_raw("PRIGROUP=%u group(A=0x60)=0x%x group(B=0x40)=0x%x  ",
+                     g, 0x60u &amp; gm, 0x40u &amp; gm);
+    log_print("A pends B");
+    chain = 0;
+}
+
+static void basepri_test(unsigned g)
+{
+    set_prigroup(g); IPR8(10) = 0x40;
+    set_basepri(0x50);                                   /* "block 0x50 and below" ? */
+    STIR = 10; __asm volatile("dsb\n isb");
+    board_printf_raw("PRIGROUP=%u BASEPRI=0x50, B(0x40) pended -&gt; %s", g,
+                     g_nlog ? "ran immediately" : "BLOCKED");
+    set_basepri(0); __asm volatile("dsb\n isb");
+    log_print(" / after BASEPRI=0");
+}
+
+int main(void)
+{
+    ISER(0) = (1u &lt;&lt; 0) | (1u &lt;&lt; 8) | (1u &lt;&lt; 10);
+    for (unsigned g = 0; g &lt;= 7; g++) nest_test(g);
+
+    set_prigroup(6); IPR8(8) = 0x60; IPR8(10) = 0x40; IPR8(0) = 0x50;
+    irq_off(); STIR = 8; STIR = 0; STIR = 10; irq_on();
+    log_print("PRIGROUP=6, U=0x50 A=0x60 B=0x40 pended together -&gt; order");
+
+    basepri_test(0);
+    basepri_test(6);
+    set_prigroup(0);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/B3/ex4_prigroup.c OUT=/var/tmp/rtos/B3/ex4 &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/B3/ex4/app.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>PRIGROUP=0 group(A=0x60)=0x60 group(B=0x40)=0x40  A pends B: ABba
+PRIGROUP=1 group(A=0x60)=0x60 group(B=0x40)=0x40  A pends B: ABba
+PRIGROUP=2 group(A=0x60)=0x60 group(B=0x40)=0x40  A pends B: ABba
+PRIGROUP=3 group(A=0x60)=0x60 group(B=0x40)=0x40  A pends B: ABba
+PRIGROUP=4 group(A=0x60)=0x60 group(B=0x40)=0x40  A pends B: ABba
+PRIGROUP=5 group(A=0x60)=0x40 group(B=0x40)=0x40  A pends B: AaBb
+PRIGROUP=6 group(A=0x60)=0x0 group(B=0x40)=0x0  A pends B: AaBb
+PRIGROUP=7 group(A=0x60)=0x0 group(B=0x40)=0x0  A pends B: AaBb
+PRIGROUP=6, U=0x50 A=0x60 B=0x40 pended together -&gt; order: BbUuAa
+PRIGROUP=0 BASEPRI=0x50, B(0x40) pended -&gt; ran immediately / after BASEPRI=0: Bb
+PRIGROUP=6 BASEPRI=0x50, B(0x40) pended -&gt; BLOCKED / after BASEPRI=0: Bb
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>PRIGROUP 0~4: 0x60과 0x40의 그룹이 다르다 → B가 끼어든다(<code>ABba</code>).</li><li>PRIGROUP 5: 그룹 비트가 [7:6]뿐이라 0x60 → 0x40, 0x40 → 0x40. <strong>같은 그룹이 되어 선점이 사라진다</strong>(<code>AaBb</code>). 숫자로는 B가 여전히 "더 급한" 값인데도.</li><li>PRIGROUP=6에서 동시 pending: 그룹은 셋 다 0, 서브가 0x40 &lt; 0x50 &lt; 0x60이라 <strong>B → U → A</strong>. 번호 순서(U=0이 가장 작음)보다 서브 우선순위가 먼저다.</li><li>마지막 두 줄: BASEPRI=0x50도 <strong>그룹으로 잘린 값으로</strong> 비교된다. PRIGROUP=0이면 0x40 &lt; 0x50이라 통과, PRIGROUP=6이면 둘 다 그룹 0이라 <strong>막힌다</strong>. "BASEPRI를 0x50으로 두면 0x40은 통과한다"는 기대가 PRIGROUP 하나로 깨진다.</li></ul>
+<h3 id="5-2-rtos가-prigroup을-싫어하는-이유">5.2 RTOS가 PRIGROUP을 싫어하는 이유<a class="anchor" href="#5-2-rtos가-prigroup을-싫어하는-이유" aria-label="link">#</a></h3>
+<p>FreeRTOS는 "우선순위 비트를 <strong>전부 그룹(선점) 비트로</strong>" 쓰라고 요구한다(<code>vPortValidateInterruptPriority()</code>의 두 번째 assert, §7.6). 이유는 위 마지막 두 줄이다. <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>로 BASEPRI를 올렸을 때 "어디까지 막히는지"가 PRIGROUP에 따라 바뀌면, zero-latency 경계가 설계와 달라진다. 서브 우선순위는 RTOS에서 쓸모가 거의 없다(같은 그룹 안의 순서는 실시간 보장과 무관하다).</p>
+<ul><li>4비트 칩: PRIGROUP ≤ 3이어야 한다(4비트 모두 그룹). STM32Cube HAL의 <code>HAL_Init()</code>은 <code>NVIC_PRIORITYGROUP_4</code>(= PRIGROUP 3, "4 bits for pre-emption priority")를 설정하므로 FreeRTOS와 맞는다.</li><li>8비트 칩(QEMU): PRIGROUP = 0만 허용된다. 그래서 같은 HAL 코드를 QEMU에서 돌리면 assert가 터진다(예제 11 MODE=3).</li></ul>
+<hr>
+<h2 id="6-마스크-세-가지-primask-faultmask-basepri">6. 마스크 세 가지 — PRIMASK · FAULTMASK · BASEPRI<a class="anchor" href="#6-마스크-세-가지-primask-faultmask-basepri" aria-label="link">#</a></h2>
+<h3 id="6-1-직관">6.1 직관<a class="anchor" href="#6-1-직관" aria-label="link">#</a></h3>
+<p>마스크 레지스터는 IRQ마다가 아니라 <strong>CPU에 하나씩</strong> 있는 특수 레지스터다(B1의 프로그래머 모델). NVIC 표를 건드리지 않고 §4 규칙 3의 "현재 실행 우선순위"를 인위적으로 끌어올린다. 그래서 막혀 있던 IRQ는 <strong>pending으로 남아 있다가</strong> 마스크를 푸는 순간 들어간다(사건이 사라지지 않는다 — ICER로 disable하는 것과의 차이는 거의 없지만, ICER은 IRQ마다, 마스크는 전체 또는 "선 아래 전부"다).</p>
+<figure class="chart"><svg viewBox="0 0 680 345" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="20.0" font-size="13" font-weight="bold">어떤 마스크가 어떤 우선순위를 막나 (빨강 = 막힘, 초록 = 들어옴)</text>
+<text x="10.0" y="44.0" font-size="12" font-weight="bold">우선순위</text>
+<text x="237.0" y="44.0" font-size="12" text-anchor="middle" font-weight="bold">PRIMASK=1</text>
+<text x="359.0" y="44.0" font-size="12" text-anchor="middle" font-weight="bold">FAULTMASK=1</text>
+<text x="481.0" y="44.0" font-size="12" text-anchor="middle" font-weight="bold">BASEPRI=0x20</text>
+<text x="603.0" y="44.0" font-size="12" text-anchor="middle" font-weight="bold">BASEPRI=0x40</text>
+<text x="10.0" y="69.0" font-size="12">-3  Reset</text>
+<rect x="180.0" y="52.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="237.0" y="67.8" font-size="12" text-anchor="middle">들어옴</text>
+<rect x="302.0" y="52.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="359.0" y="67.8" font-size="12" text-anchor="middle">들어옴</text>
+<rect x="424.0" y="52.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="481.0" y="67.8" font-size="12" text-anchor="middle">들어옴</text>
+<rect x="546.0" y="52.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="603.0" y="67.8" font-size="12" text-anchor="middle">들어옴</text>
+<text x="10.0" y="96.0" font-size="12">-2  NMI</text>
+<rect x="180.0" y="79.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="237.0" y="94.8" font-size="12" text-anchor="middle">들어옴</text>
+<rect x="302.0" y="79.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="359.0" y="94.8" font-size="12" text-anchor="middle">들어옴</text>
+<rect x="424.0" y="79.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="481.0" y="94.8" font-size="12" text-anchor="middle">들어옴</text>
+<rect x="546.0" y="79.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="603.0" y="94.8" font-size="12" text-anchor="middle">들어옴</text>
+<text x="10.0" y="123.0" font-size="12">-1  HardFault</text>
+<rect x="180.0" y="106.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="237.0" y="121.8" font-size="12" text-anchor="middle">들어옴</text>
+<rect x="302.0" y="106.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="359.0" y="121.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="424.0" y="106.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="481.0" y="121.8" font-size="12" text-anchor="middle">들어옴</text>
+<rect x="546.0" y="106.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="603.0" y="121.8" font-size="12" text-anchor="middle">들어옴</text>
+<text x="10.0" y="150.0" font-size="12">0x00</text>
+<rect x="180.0" y="133.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="237.0" y="148.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="302.0" y="133.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="359.0" y="148.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="424.0" y="133.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="481.0" y="148.8" font-size="12" text-anchor="middle">들어옴</text>
+<rect x="546.0" y="133.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="603.0" y="148.8" font-size="12" text-anchor="middle">들어옴</text>
+<text x="10.0" y="177.0" font-size="12">0x10</text>
+<rect x="180.0" y="160.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="237.0" y="175.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="302.0" y="160.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="359.0" y="175.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="424.0" y="160.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="481.0" y="175.8" font-size="12" text-anchor="middle">들어옴</text>
+<rect x="546.0" y="160.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="603.0" y="175.8" font-size="12" text-anchor="middle">들어옴</text>
+<text x="10.0" y="204.0" font-size="12">0x20</text>
+<rect x="180.0" y="187.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="237.0" y="202.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="302.0" y="187.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="359.0" y="202.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="424.0" y="187.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="481.0" y="202.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="546.0" y="187.0" width="114.0" height="23.0" rx="3" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="603.0" y="202.8" font-size="12" text-anchor="middle">들어옴</text>
+<text x="10.0" y="231.0" font-size="12">0x40</text>
+<rect x="180.0" y="214.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="237.0" y="229.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="302.0" y="214.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="359.0" y="229.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="424.0" y="214.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="481.0" y="229.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="546.0" y="214.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="603.0" y="229.8" font-size="12" text-anchor="middle">막힘</text>
+<text x="10.0" y="258.0" font-size="12">0x80</text>
+<rect x="180.0" y="241.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="237.0" y="256.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="302.0" y="241.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="359.0" y="256.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="424.0" y="241.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="481.0" y="256.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="546.0" y="241.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="603.0" y="256.8" font-size="12" text-anchor="middle">막힘</text>
+<text x="10.0" y="285.0" font-size="12">0xFF  PendSV/SysTick</text>
+<rect x="180.0" y="268.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="237.0" y="283.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="302.0" y="268.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="359.0" y="283.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="424.0" y="268.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="481.0" y="283.8" font-size="12" text-anchor="middle">막힘</text>
+<rect x="546.0" y="268.0" width="114.0" height="23.0" rx="3" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="603.0" y="283.8" font-size="12" text-anchor="middle">막힘</text>
+<text x="10.0" y="318.0" font-size="12">PRIMASK = cpsid i, FAULTMASK = cpsid f (HardFault까지 막음, 예외 복귀 때 자동 해제),</text>
+<text x="10.0" y="337.0" font-size="12">BASEPRI = msr basepri (그 값 이상 = 그만큼 느긋한 것만 막음, 0이면 마스크 끔).</text>
+</svg></figure>
+<p>그림 5 — 마스크 세 가지가 막는 범위(8비트 우선순위, PRIGROUP 0 기준). PRIMASK는 설정 가능한 모든 예외를, FAULTMASK는 HardFault까지, BASEPRI는 "그 값 이상"만 막는다. NMI는 어떤 마스크로도 막을 수 없다.</p>
+<div class="tw"><table><thead><tr><th>레지스터</th><th>크기</th><th>켜는 명령</th><th>막는 범위</th><th>특징</th></tr></thead><tbody><tr><td>PRIMASK</td><td>1비트</td><td><code>cpsid i</code> / <code>msr primask, rX</code></td><td>우선순위 0 이상(설정 가능한 모든 예외): 모든 IRQ, SysTick, PendSV, SVCall(→ SVC를 실행하면 HardFault)</td><td>Armv6-M부터 모든 Cortex-M에 있음. 가장 단순</td></tr><tr><td>FAULTMASK</td><td>1비트</td><td><code>cpsid f</code> / <code>msr faultmask, rX</code></td><td>-1 이상: 위 + HardFault (NMI만 남음)</td><td>Armv7-M 이상. <strong>예외 복귀 때 자동으로 0</strong>(NMI 복귀 제외). 특권 모드에서만. 원래 용도는 fault 핸들러가 "fault 중 fault"를 잠시 막는 것</td></tr><tr><td>BASEPRI</td><td>8비트(구현 비트만)</td><td><code>msr basepri, rX</code></td><td>그룹 우선순위가 BASEPRI 값 <strong>이상</strong>(= 같거나 더 느긋한 것)</td><td>Armv7-M 이상. <strong>0이면 마스크 꺼짐</strong>(0x00 우선순위는 BASEPRI로 막을 수 없다)</td></tr><tr><td>BASEPRI_MAX</td><td>(BASEPRI의 다른 이름)</td><td><code>msr basepri_max, rX</code></td><td>BASEPRI와 같음</td><td>쓰기가 <strong>더 급한 쪽으로만</strong> 적용된다(조건부 쓰기). 0 쓰기는 무시</td></tr></tbody></table></div>
+<p>BASEPRI가 "0이면 꺼짐"이라는 규칙 때문에 생기는 결과 하나: <strong>우선순위 0x00인 IRQ는 BASEPRI로 절대 막을 수 없다.</strong> 그래서 FreeRTOS는 <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>가 0이 아니어야 한다고 assert한다(구현 비트로 자른 뒤에도 0이 아니어야 한다 — 4비트 칩에 0x05를 주면 잘려서 0이 되어 assert에 걸린다).</p>
+<h3 id="예제-6-마스크마다-어떤-우선순위가-통과하나">예제 6 — 마스크마다 어떤 우선순위가 통과하나<a class="anchor" href="#예제-6-마스크마다-어떤-우선순위가-통과하나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 우선순위 0x00, 0x20, 0x40, 0x80인 IRQ 네 개를 마스크를 건 상태에서 동시에 pend하고, 마스크가 걸린 동안 실행된 것(<code>[...]</code>)과 푼 뒤 실행된 것을 찍는다. BASEPRI_MAX의 조건부 쓰기, ISR이 FAULTMASK · PRIMASK를 켠 채 돌아오면 어떻게 되는지도 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex5 — PRIMASK / FAULTMASK / BASEPRI / BASEPRI_MAX: which priorities get through */
+#include "b3.h"
+static volatile int isr_leaves;    /* 1 = ISR sets PRIMASK, 2 = ISR sets FAULTMASK */
+
+void UART0RX_IRQHandler(void)   { logc('0'); }                 /* IRQ 0,  prio 0x00 */
+void UART0TX_IRQHandler(void)   { logc('2'); }                 /* IRQ 1,  prio 0x20 */
+void TIMER0_IRQHandler(void)    { logc('4'); }                 /* IRQ 8,  prio 0x40 */
+void DUALTIMER_IRQHandler(void)                                /* IRQ 10, prio 0x80 */
+{
+    logc('8');
+    if (isr_leaves == 1) irq_off();      /* forget to restore PRIMASK ...      */
+    if (isr_leaves == 2) fault_off();    /* FAULTMASK: cleared by exception return */
+}
+
+static void pend_all(void) { STIR = 0; STIR = 1; STIR = 8; STIR = 10; __asm volatile("dsb\n isb"); }
+
+static void row(const char *name, int mode, uint32_t bp)
+{
+    if (mode == 1) irq_off();
+    if (mode == 2) fault_off();
+    if (mode == 3) set_basepri(bp);
+    pend_all();
+    unsigned n = g_nlog; g_log[n] = 0;
+    board_printf_raw("%s ran while masked: [%s]", name, g_log);
+    g_nlog = 0;
+    irq_on(); fault_on(); set_basepri(0); __asm volatile("dsb\n isb");
+    log_print("  after unmask");
+}
+
+int main(void)
+{
+    IPR8(0) = 0x00; IPR8(1) = 0x20; IPR8(8) = 0x40; IPR8(10) = 0x80;
+    ISER(0) = (1u &lt;&lt; 0) | (1u &lt;&lt; 1) | (1u &lt;&lt; 8) | (1u &lt;&lt; 10);
+    row("none          ", 0, 0);
+    row("PRIMASK=1     ", 1, 0);
+    row("FAULTMASK=1   ", 2, 0);
+    row("BASEPRI=0x20  ", 3, 0x20);
+    row("BASEPRI=0x40  ", 3, 0x40);
+    row("BASEPRI=0x41  ", 3, 0x41);
+    row("BASEPRI=0x80  ", 3, 0x80);
+
+    set_basepri(0x40);
+    set_basepri_max(0x80); uint32_t a = get_basepri();   /* lowering: ignored */
+    set_basepri_max(0x20); uint32_t b = get_basepri();   /* raising: accepted */
+    set_basepri_max(0x00); uint32_t c = get_basepri();   /* 0 = "off": ignored */
+    board_printf_raw("BASEPRI=0x40; MAX&lt;-0x80 -&gt; 0x%x; MAX&lt;-0x20 -&gt; 0x%x; MAX&lt;-0 -&gt; 0x%x\n", a, b, c);
+    set_basepri(0);
+
+    isr_leaves = 2; STIR = 10; __asm volatile("dsb\n isb");
+    board_printf_raw("ISR did cpsid f -&gt; FAULTMASK in main = %u (auto-cleared)\n", get_faultmask());
+    isr_leaves = 1; STIR = 10; __asm volatile("dsb\n isb");
+    board_printf_raw("ISR did cpsid i -&gt; PRIMASK in main = %u (NOT restored!)\n", get_primask());
+    irq_on(); g_nlog = 0;
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/B3/ex5_masks.c OUT=/var/tmp/rtos/B3/ex5 &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/B3/ex5/app.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>none           ran while masked: [0248]  after unmask: 
+PRIMASK=1      ran while masked: []  after unmask: 0248
+FAULTMASK=1    ran while masked: []  after unmask: 0248
+BASEPRI=0x20   ran while masked: [0]  after unmask: 248
+BASEPRI=0x40   ran while masked: [02]  after unmask: 48
+BASEPRI=0x41   ran while masked: [02]  after unmask: 48
+BASEPRI=0x80   ran while masked: [024]  after unmask: 8
+BASEPRI=0x40; MAX&lt;-0x80 -&gt; 0x40; MAX&lt;-0x20 -&gt; 0x20; MAX&lt;-0 -&gt; 0x20
+ISR did cpsid f -&gt; FAULTMASK in main = 0 (auto-cleared)
+ISR did cpsid i -&gt; PRIMASK in main = 1 (NOT restored!)
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>PRIMASK · FAULTMASK: 넷 다 막혔다가 풀리는 순간 <strong>급한 순서대로</strong>(0 → 2 → 4 → 8) 들어간다. 사건은 사라지지 않는다.</li><li>BASEPRI=0x20: 0x00만 통과. <strong>0x20 자신은 막힌다</strong>("BASEPRI 값 이상을 막는다" — 같은 값도 막힌다).</li><li>BASEPRI=0x41: 0x40도 막힌다. PRIGROUP 0에서 0x41의 그룹은 0x40이기 때문이다(예제 5와 같은 원리). 그래서 FreeRTOS는 8비트 칩에서 <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>의 비트 0이 0이어야 한다고 assert한다(<code>port.c</code> — "configMAX_SYSCALL_INTERRUPT_PRIORITY &amp; 0x1U == 0").</li><li>BASEPRI_MAX: 0x40에서 0x80(더 느긋)은 무시, 0x20(더 급함)은 적용, 0은 무시. <strong>"이미 더 높게 막혀 있으면 낮추지 않는다"</strong>는 성질 덕분에, 중첩된 락에서 바깥 락보다 약한 안쪽 락이 바깥 마스크를 풀어 버리는 사고를 하드웨어가 막는다. Zephyr의 <code>arch_irq_lock()</code>이 BASEPRI_MAX를 쓰는 이유다(§8).</li><li>ISR이 <code>cpsid f</code>를 하고 돌아오면 FAULTMASK는 <strong>자동으로 0</strong>. 하지만 <code>cpsid i</code>(PRIMASK)는 <strong>그대로 남는다</strong> — 이후 모든 인터럽트가 죽는다. "ISR에서 <code>__disable_irq()</code> 후 복원을 잊은" 버그의 증상이 "SysTick이 멈추고 RTOS가 정지"다.</li></ul>
+<h3 id="6-2-명령어와-cmsis-함수">6.2 명령어와 CMSIS 함수<a class="anchor" href="#6-2-명령어와-cmsis-함수" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>하고 싶은 일</th><th>명령</th><th>CMSIS 함수</th></tr></thead><tbody><tr><td>모든 IRQ 끄기 / 켜기</td><td><code>cpsid i</code> / <code>cpsie i</code></td><td><code>__disable_irq()</code> / <code>__enable_irq()</code></td></tr><tr><td>PRIMASK 읽기 · 쓰기 (중첩 안전)</td><td><code>mrs r0, primask</code> / <code>msr primask, r0</code></td><td><code>__get_PRIMASK()</code> / <code>__set_PRIMASK(x)</code></td></tr><tr><td>HardFault까지 끄기 / 켜기</td><td><code>cpsid f</code> / <code>cpsie f</code></td><td><code>__disable_fault_irq()</code> / <code>__enable_fault_irq()</code></td></tr><tr><td>BASEPRI 쓰기</td><td><code>msr basepri, r0</code></td><td><code>__set_BASEPRI(x)</code></td></tr><tr><td>BASEPRI 조건부 올리기</td><td><code>msr basepri_max, r0</code></td><td><code>__set_BASEPRI_MAX(x)</code></td></tr></tbody></table></div>
+<p>중첩 안전한 "전부 끄기"의 정석은 <code>cpsid i</code> / <code>cpsie i</code> 쌍이 아니라 <strong>"이전 값 저장 → 끄기 → 이전 값 복원"</strong>이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>uint32_t key = __get_PRIMASK();   /* 바깥에서 이미 꺼져 있었을 수도 있다 */
+__disable_irq();
+/* ... 짧은 임계구역 ... */
+__set_PRIMASK(key);               /* 바깥이 꺼 두었다면 계속 꺼진 채로 */</code></pre></figure>
+<p><code>cpsie i</code>로 무조건 켜면, 바깥 함수가 꺼 둔 상태를 안쪽 함수가 풀어 버린다. Zephyr의 <code>irq_lock()</code> / <code>irq_unlock(key)</code>, FreeRTOS의 <code>taskENTER_CRITICAL_FROM_ISR()</code> / <code>taskEXIT_CRITICAL_FROM_ISR(saved)</code>가 모두 이 "키 저장" 방식이다. 태스크용 <code>taskENTER_CRITICAL()</code>은 키 대신 <strong>중첩 카운터</strong>(<code>uxCriticalNesting</code>)를 쓴다(예제 7).</p>
+<h3 id="6-3-마스크-vs-icer-irq-끄기-vs-주변장치-인터럽트-끄기">6.3 마스크 vs ICER(IRQ 끄기) vs 주변장치 인터럽트 끄기<a class="anchor" href="#6-3-마스크-vs-icer-irq-끄기-vs-주변장치-인터럽트-끄기" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>방법</th><th>범위</th><th>비용</th><th>언제</th></tr></thead><tbody><tr><td>PRIMASK</td><td>모든 IRQ</td><td>명령 1개</td><td>아주 짧은 구간, 또는 Armv6-M</td></tr><tr><td>BASEPRI</td><td>선 아래 전부</td><td>명령 1~2개 + <code>isb</code></td><td>RTOS 임계구역 (FreeRTOS · Zephyr)</td></tr><tr><td>ICER / ISER</td><td>IRQ 하나</td><td>레지스터 쓰기 1개</td><td>특정 드라이버의 ISR과만 경쟁하는 자료 보호</td></tr><tr><td>주변장치 인터럽트 enable 비트</td><td>원천 하나</td><td>주변장치 버스 쓰기(느릴 수 있음)</td><td>기능 단위로 끄기 (예: UART RX 인터럽트만)</td></tr></tbody></table></div>
+<p>"전부 끄지 말고 필요한 만큼만 끈다"가 원칙이다. 드라이버의 ISR과 태스크 하나만 공유하는 버퍼라면 그 IRQ만 ICER로 잠깐 끄는 것이 다른 모든 IRQ의 지연을 지킨다. 다만 ICER은 <strong>효과가 즉시가 아닐 수 있다</strong>(쓰기가 NVIC에 닿기 전에 그 IRQ가 들어올 수 있음) — 쓰고 나서 <code>dsb; isb</code>를 두면 그 뒤로는 확실하다.</p>
+<h3 id="6-4-배리어-isb는-언제-필요한가">6.4 배리어: <code>isb</code>는 언제 필요한가<a class="anchor" href="#6-4-배리어-isb는-언제-필요한가" aria-label="link">#</a></h3>
+<ul><li><code>cpsid i</code>: Arm은 "CPSID는 다음 명령부터 효과가 보장된다"고 정의한다(자기 동기화). Zephyr <code>arch_zli_lock()</code> 주석도 "self synchronizing … no need for an explicit __ISB()"라고 적는다.</li><li><code>msr basepri</code>, <code>msr primask</code>, <code>cpsie i</code>: 새 값이 <strong>이미 pending인 인터럽트를 바로 받아들이게</strong> 하려면 <code>isb</code>를 둔다. FreeRTOS <code>vPortRaiseBASEPRI()</code>가 <code>msr basepri</code> 뒤에 <code>isb; dsb</code>를 두고, Zephyr <code>arch_irq_lock()</code>이 <code>__set_BASEPRI_MAX()</code> 뒤에 <code>__ISB()</code>를 두는 이유다.</li><li>Cortex-M7 r0p1 erratum 837070: BASEPRI를 올리는 <code>msr</code>이 바로 효과를 내지 않을 수 있다. FreeRTOS는 이 리비전용으로 <code>portable/GCC/ARM_CM7/r0p1</code> 포트를 따로 두고, <code>msr basepri</code> 앞뒤를 <code>cpsid i</code> / <code>cpsie i</code>로 감싼다(소스의 "ARM Cortex-M7 r0p1 Errata 837070 workaround" 주석).</li></ul>
+<hr>
+<h2 id="7-freertos-configmax_syscall_interrupt_priority와-configkernel_interrupt_priority">7. FreeRTOS — <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>와 <code>configKERNEL_INTERRUPT_PRIORITY</code><a class="anchor" href="#7-freertos-configmax_syscall_interrupt_priority와-configkernel_interrupt_priority" aria-label="link">#</a></h2>
+<h3 id="7-1-두-설정의-뜻-cortex-m3-m4-m7-포트-기준">7.1 두 설정의 뜻 (Cortex-M3/M4/M7 포트 기준)<a class="anchor" href="#7-1-두-설정의-뜻-cortex-m3-m4-m7-포트-기준" aria-label="link">#</a></h3>
+<p>FreeRTOS는 커널 자료구조를 지키려고 임계구역(<code>taskENTER_CRITICAL()</code>)에서 인터럽트를 막는다. Cortex-M0(Armv6-M) 포트는 PRIMASK(<code>cpsid i</code>)로 <strong>전부</strong> 막는다. Cortex-M3/M4/M7(Armv7-M) 포트와 Armv8-M 포트는 <strong>BASEPRI로 일부만</strong> 막는다. 이때 두 숫자가 쓰인다.</p>
+<ul><li><strong><code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code></strong> (다른 이름 <code>configMAX_API_CALL_INTERRUPT_PRIORITY</code>): 임계구역에서 BASEPRI에 쓰는 값. 즉 <strong>"이 우선순위와 그보다 느긋한 인터럽트는 커널이 막을 수 있다"</strong>는 선이다. 그 결과로 두 가지가 정해진다.</li><li>이 값과 같거나 <strong>숫자가 큰</strong>(느긋한) 우선순위의 ISR: 커널이 막을 수 있으므로 <strong><code>...FromISR()</code> API를 불러도 된다</strong>(kernel-aware ISR). 대신 임계구역 동안 지연된다.</li><li>이 값보다 <strong>숫자가 작은</strong>(급한) 우선순위의 ISR: 커널이 절대 막지 않으므로 <strong>지연 0</strong>(zero-latency ISR). 대신 <strong>어떤 FreeRTOS API도 부르면 안 된다</strong> — FromISR 포함. 커널이 큐를 고치는 도중에 끼어들어 같은 큐를 고칠 수 있기 때문이다.</li><li><strong><code>configKERNEL_INTERRUPT_PRIORITY</code></strong>: 원래는 커널 자신의 인터럽트(SysTick, PendSV)의 우선순위였다. 반드시 가장 느긋한 값이어야 했다(255 또는 <code>(15 &lt;&lt; 4)</code>). <strong>그런데 FreeRTOS V10.6.0(2023-07)부터 ARMv7-M 포트에서는 이 설정을 쓰지 않는다.</strong> History.txt: "Update ARMv7-M ports to ensure that kernel interrupts run at the lowest priority. configKERNEL_INTERRUPT_PRIORITY is now obsolete for ARMv7-M ports and brings these ports inline with the newer ARMv8-M ports." V11.3.2의 <code>portable/GCC/ARM_CM3/port.c</code>는 대신 <code>portMIN_INTERRUPT_PRIORITY</code>(255)를 PendSV · SysTick에 고정으로 쓴다(grep으로 확인: ARM_CM3 · ARM_CM4F · ARM_CM7/r0p1의 <code>port.c</code>, <code>portmacro.h</code>에 <code>configKERNEL_INTERRUPT_PRIORITY</code>가 0회 등장).</li></ul>
+<p>lab의 <code>FreeRTOSConfig.h</code> 값은 이렇다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* Cortex-M 인터럽트 우선순위 (QEMU NVIC는 8비트 우선순위를 모두 구현).
+ * 숫자가 작을수록 높다. 0x20보다 높은(숫자 작은) 인터럽트는 FreeRTOS API 금지. */
+#define configKERNEL_INTERRUPT_PRIORITY         255
+#define configMAX_SYSCALL_INTERRUPT_PRIORITY    0x20</code></pre></figure>
+<p>이 값으로 그린 지도가 아래 표다(8비트, PRIGROUP 0).</p>
+<div class="tw"><table><thead><tr><th>NVIC 우선순위 바이트</th><th>무엇이 사나</th><th>FreeRTOS API</th><th><code>taskENTER_CRITICAL()</code> 중</th></tr></thead><tbody><tr><td>0x00</td><td>SVCall(V11 비MPU 포트는 SHPR2 = 0), 그리고 여기 둔 IRQ</td><td>금지</td><td>바로 들어옴</td></tr><tr><td>0x01 ~ 0x1F</td><td>zero-latency ISR (FOC 전류 루프, DShot 타이밍)</td><td>금지</td><td>바로 들어옴</td></tr><tr><td>0x20 ~ 0xFE</td><td>kernel-aware ISR (UART, DMA 완료, IMU DRDY 다리 IRQ)</td><td>FromISR만</td><td>끝날 때까지 지연</td></tr><tr><td>0xFF</td><td>PendSV, SysTick (커널 자신)</td><td>—</td><td>지연</td></tr></tbody></table></div>
+<p>실제 칩(4비트 STM32)에서는 같은 생각을 이렇게 쓴다. ST · FreeRTOS 데모의 관례적인 <code>FreeRTOSConfig.h</code> 모양이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define configPRIO_BITS                                 __NVIC_PRIO_BITS   /* 4 */
+#define configLIBRARY_LOWEST_INTERRUPT_PRIORITY         15
+#define configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY    5   /* CMSIS 논리 번호 */
+#define configKERNEL_INTERRUPT_PRIORITY      ( configLIBRARY_LOWEST_INTERRUPT_PRIORITY &lt;&lt; ( 8 - configPRIO_BITS ) )
+#define configMAX_SYSCALL_INTERRUPT_PRIORITY ( configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY &lt;&lt; ( 8 - configPRIO_BITS ) )</code></pre></figure>
+<p><strong><code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>는 바이트 값</strong>(0x50)이고, <code>NVIC_SetPriority()</code>에 넘기는 값은 <strong>논리 번호</strong>(5 이상)다. 두 단위가 섞이는 것이 혼란의 원인이므로 <code>LIBRARY_</code> 이름을 따로 두는 관례가 생겼다. (이 블록은 형태를 보여 주는 설정 예이며, 이 lab에서는 빌드하지 않았다. <code>configKERNEL_INTERRUPT_PRIORITY</code> 줄은 V10.6.0 이후 ARMv7-M 포트에서는 남아 있어도 무시된다.)</p>
+<h3 id="예제-7-포트가-실제로-프로그래밍한-값-읽기">예제 7 — 포트가 실제로 프로그래밍한 값 읽기<a class="anchor" href="#예제-7-포트가-실제로-프로그래밍한-값-읽기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 스케줄러 시작 전 · 후의 SHPR(SVCall · PendSV · SysTick), PRIGROUP, 태스크와 임계구역 안의 BASEPRI · PRIMASK, 중첩 임계구역, <code>vTaskSuspendAll()</code>, ISR 안의 <code>taskENTER_CRITICAL_FROM_ISR()</code>를 하나씩 찍는다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex6 — what the FreeRTOS ARM_CM3 port programs: SHPR, PRIGROUP, BASEPRI in tasks/ISRs */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "b3.h"
+static volatile uint32_t isr_bp_before, isr_bp_inside, isr_saved;
+
+void TIMER0_IRQHandler(void)                       /* IRQ 8, prio 0x40 (kernel-aware) */
+{
+    isr_bp_before = get_basepri();
+    UBaseType_t s = taskENTER_CRITICAL_FROM_ISR(); /* = ulPortRaiseBASEPRI() */
+    isr_bp_inside = get_basepri();
+    isr_saved = (uint32_t)s;
+    taskEXIT_CRITICAL_FROM_ISR(s);
+}
+
+static void task(void *arg)
+{
+    (void)arg;
+    board_printf_raw("SHPR: SVCall=0x%x PendSV=0x%x SysTick=0x%x\n", SHPR8(11), SHPR8(14), SHPR8(15));
+    board_printf_raw("AIRCR.PRIGROUP=%u  IPR[0] restored to 0x%x after probe\n", prigroup(), IPR8(0));
+    board_printf_raw("task: BASEPRI=0x%x PRIMASK=%u\n", get_basepri(), get_primask());
+    taskENTER_CRITICAL();
+    board_printf_raw("  in taskENTER_CRITICAL: BASEPRI=0x%x PRIMASK=%u\n", get_basepri(), get_primask());
+    taskENTER_CRITICAL();
+    board_printf_raw("  nested (2 deep):       BASEPRI=0x%x\n", get_basepri());
+    taskEXIT_CRITICAL();
+    board_printf_raw("  after 1 exit:          BASEPRI=0x%x (still masked)\n", get_basepri());
+    taskEXIT_CRITICAL();
+    board_printf_raw("  after 2 exits:         BASEPRI=0x%x\n", get_basepri());
+    vTaskSuspendAll();
+    board_printf_raw("  vTaskSuspendAll:       BASEPRI=0x%x (scheduler lock, IRQs open)\n", get_basepri());
+    xTaskResumeAll();
+
+    IPR8(8) = 0x40; ISER(0) = 1u &lt;&lt; 8; STIR = 8; __asm volatile("dsb\n isb");
+    board_printf_raw("ISR(0x40): BASEPRI before=0x%x inside FROM_ISR=0x%x saved=0x%x\n",
+                     isr_bp_before, isr_bp_inside, isr_saved);
+    board_printf_raw("configMAX_SYSCALL_INTERRUPT_PRIORITY=0x%x configKERNEL_INTERRUPT_PRIORITY=%u\n",
+                     configMAX_SYSCALL_INTERRUPT_PRIORITY, configKERNEL_INTERRUPT_PRIORITY);
+    board_exit(0);
+}
+
+int main(void)
+{
+    board_printf_raw("before scheduler: SHPR PendSV=0x%x SysTick=0x%x BASEPRI=0x%x\n",
+                     SHPR8(14), SHPR8(15), get_basepri());
+    xTaskCreate(task, "t", 512, NULL, 1, NULL);
+    board_printf_raw("after xTaskCreate: BASEPRI=0x%x (masked until the first task runs)\n", get_basepri());
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/B3/ex6_frtos_regs.c OUT=/var/tmp/rtos/B3/ex6 &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/B3/ex6/app.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>before scheduler: SHPR PendSV=0x0 SysTick=0x0 BASEPRI=0x0
+after xTaskCreate: BASEPRI=0x20 (masked until the first task runs)
+SHPR: SVCall=0x0 PendSV=0xff SysTick=0xff
+AIRCR.PRIGROUP=0  IPR[0] restored to 0x0 after probe
+task: BASEPRI=0x0 PRIMASK=0
+  in taskENTER_CRITICAL: BASEPRI=0x20 PRIMASK=0
+  nested (2 deep):       BASEPRI=0x20
+  after 1 exit:          BASEPRI=0x20 (still masked)
+  after 2 exits:         BASEPRI=0x0
+  vTaskSuspendAll:       BASEPRI=0x0 (scheduler lock, IRQs open)
+ISR(0x40): BASEPRI before=0x0 inside FROM_ISR=0x20 saved=0x0
+configMAX_SYSCALL_INTERRUPT_PRIORITY=0x20 configKERNEL_INTERRUPT_PRIORITY=255
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong><code>xTaskCreate()</code> 뒤 BASEPRI가 0x20으로 남아 있다.</strong> 스케줄러 시작 전에 커널 API가 임계구역에 들어가면, <code>uxCriticalNesting</code>의 초기값이 <code>0xaaaaaaaa</code>라서(<code>port.c</code> 141행) 나갈 때 0이 되지 않고, BASEPRI가 풀리지 않는다. 의도된 동작이다: <strong>스케줄러 시작 전에는 kernel-aware 인터럽트가 커널을 부르지 못하게</strong> 막아 둔다. <code>vTaskStartScheduler()</code> → <code>xPortStartScheduler()</code>가 <code>uxCriticalNesting = 0</code>으로 만들고, SVC 핸들러(<code>vPortSVCHandler</code>)가 첫 태스크로 들어가며 <code>msr basepri, 0</code>을 한다. "main에서 xTaskCreate 후 타이머 인터럽트를 기다렸는데 안 온다"는 질문의 답이 이것이다.</li><li>SHPR: PendSV = SysTick = 0xFF(가장 느긋), SVCall = 0x00. <code>configKERNEL_INTERRUPT_PRIORITY</code>(255)를 읽은 결과가 아니라 포트가 고정으로 쓴 값이다.</li><li>임계구역은 <strong>BASEPRI만</strong> 바꾸고 PRIMASK는 0 그대로다. 중첩되면 카운터만 올라가고, 마지막 exit에서만 BASEPRI = 0.</li><li><code>vTaskSuspendAll()</code>은 인터럽트를 막지 않는다(BASEPRI=0). 스케줄러만 잠근다 — 둘의 차이는 C7.</li><li>ISR 버전은 이전 값을 반환하고(<code>saved=0x0</code>), 나갈 때 그 값으로 <strong>복원</strong>한다. ISR은 이미 BASEPRI가 올라간 문맥(다른 ISR이 임계구역 중)에서도 불릴 수 있으므로 무조건 0으로 풀면 안 되기 때문이다.</li></ul>
+<h3 id="예제-8-포트-내부의-정적-변수를-gdb로-읽기">예제 8 — 포트 내부의 정적 변수를 gdb로 읽기<a class="anchor" href="#예제-8-포트-내부의-정적-변수를-gdb로-읽기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 포트가 시작할 때 프로브로 계산해 저장한 <code>ucMaxSysCallPriority</code>, <code>ulMaxPRIGROUPValue</code>(둘 다 <code>port.c</code>의 <code>static</code>)를 gdb로 읽는다. 첫 컨텍스트 스위치(<code>vTaskSwitchContext</code>)에 breakpoint를 걸어, 그 순간의 BASEPRI와 실행 중인 예외 번호도 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/rtos/B3; E=ex6/app.elf; (timeout 20 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial file:/var/tmp/rtos/B3/gdb_uart.txt -semihosting-config enable=on,target=native -kernel $E -S -gdb tcp::12343 &gt;/var/tmp/rtos/B3/q.log 2&gt;&amp;1 &amp;) ; sleep 1; gdb -q -batch -ex "target remote :12343" -ex "break vTaskSwitchContext" -ex "continue" -ex "bt 3" -ex "printf \"ucMaxSysCallPriority = 0x%02x\n\", ucMaxSysCallPriority" -ex "printf \"ulMaxPRIGROUPValue   = 0x%x\n\", ulMaxPRIGROUPValue" -ex "p/x \$basepri" -ex "p/x \$xpsr &amp; 0x1ff" -ex "x/4xb 0xE000ED20" -ex "kill" $E 2&gt;&amp;1 | tail -14'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>Breakpoint 1 at 0xde0: vTaskSwitchContext. (2 locations)
+
+Breakpoint 1.1, vTaskSwitchContext () at /var/rtoslab/src/FreeRTOS-Kernel/tasks.c:5219
+5219	        if( uxSchedulerSuspended != ( UBaseType_t ) 0U )
+#0  vTaskSwitchContext () at /var/rtoslab/src/FreeRTOS-Kernel/tasks.c:5219
+#1  0x00001e38 in PendSV_Handler () at /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:459
+Backtrace stopped: previous frame identical to this frame (corrupt stack?)
+ucMaxSysCallPriority = 0x20
+ulMaxPRIGROUPValue   = 0x0
+$1 = 0x20
+$2 = 0xe
+0xe000ed20:	0x00	0x00	0xff	0xff
+Kill the program being debugged? (y or n) [answered Y; input not from terminal]
+[Inferior 1 (process 1) killed]</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>ucMaxSysCallPriority = 0x20</code> = <code>configMAX_SYSCALL_INTERRUPT_PRIORITY &amp; (프로브로 읽은 0xFF)</code>. 4비트 칩에서 0x20을 줬다면 <code>0x20 &amp; 0xF0 = 0x20</code>, 0x05를 줬다면 0이 되어 <code>configASSERT( ucMaxSysCallPriority )</code>에 걸린다.</li><li><code>ulMaxPRIGROUPValue = 0</code>: 8비트가 구현됐으므로 허용되는 PRIGROUP은 0뿐이다(4비트 칩이면 <code>7 - 4 = 3</code>을 AIRCR 위치로 시프트한 값).</li><li><code>vTaskSwitchContext()</code>는 <strong>PendSV 핸들러 안에서</strong>(xPSR의 예외 번호 0xE = 14 = PendSV), <strong>BASEPRI = 0x20 상태로</strong> 불린다(<code>xPortPendSVHandler</code>의 <code>msr basepri, r0</code> → <code>bl vTaskSwitchContext</code> → <code>msr basepri, 0</code>). 즉 컨텍스트 스위치 도중에도 zero-latency IRQ는 들어온다.</li><li><code>x/4xb 0xE000ED20</code>: SHPR3의 네 바이트 = DebugMon, (예약), PendSV, SysTick. 마지막 둘이 0xFF.</li><li>"Backtrace stopped"는 예외 프레임 경계라서 gdb가 더 올라가지 못한 것이다(정상).</li></ul>
+<h3 id="예제-9-0x20-선을-자로-잰다-우선순위별로-임계구역-안에서-pend">예제 9 — 0x20 선을 자로 잰다: 우선순위별로 임계구역 안에서 pend<a class="anchor" href="#예제-9-0x20-선을-자로-잰다-우선순위별로-임계구역-안에서-pend" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 태스크가 100 µs짜리 <code>taskENTER_CRITICAL()</code> 구간 맨 앞에서 IRQ 8을 STIR로 pend한다. IRQ 8의 우선순위를 0x00부터 0xFE까지 바꿔 가며, ISR이 임계구역 <strong>안에서</strong> 실행됐는지와 pend부터 ISR 첫 줄까지의 지연을 FPGAIO 카운터로 잰다. 0x1F와 0x21처럼 경계 바로 옆 값도 넣었다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex7 — the configMAX_SYSCALL_INTERRUPT_PRIORITY (0x20) line, measured inside a 100 us
+ * taskENTER_CRITICAL(): which priorities still get in, and how late the others are */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "b3.h"
+#define CS_US 100u
+static volatile uint32_t t_isr, hit;
+
+void TIMER0_IRQHandler(void) { t_isr = CYC(); hit = 1; }    /* IRQ 8, pended by STIR */
+
+static void spin_us(uint32_t us) { uint32_t t = CYC(); while (CYC() - t &lt; us * 25u) { } }
+
+static void task(void *arg)
+{
+    (void)arg;
+    const uint8_t prio[] = { 0x00, 0x10, 0x1e, 0x1f, 0x20, 0x21, 0x40, 0x80, 0xfe };
+    ISER(0) = 1u &lt;&lt; 8;
+    board_printf_raw("prio  group  inside-CS?  latency (CS = %u us)\n", CS_US);
+    for (unsigned i = 0; i &lt; sizeof prio; i++) {
+        IPR8(8) = prio[i];
+        hit = 0;
+        taskENTER_CRITICAL();                    /* BASEPRI = 0x20 */
+        uint32_t t0 = CYC();
+        STIR = 8;                                /* the IRQ fires 'now' */
+        __asm volatile("dsb\n isb");
+        uint32_t in_cs = hit;
+        spin_us(CS_US);
+        taskEXIT_CRITICAL();                     /* BASEPRI = 0 */
+        while (!hit) { }
+        char a[5], b[5];
+        board_printf_raw("%s  %s   %s  %u ns\n", hex2(prio[i], a), hex2(prio[i] &amp; 0xFEu, b),
+                         in_cs ? "yes (ran) " : "no (held) ", (t_isr - t0) * 40u);
+    }
+    board_exit(0);
+}
+
+int main(void)
+{
+    xTaskCreate(task, "t", 512, NULL, 1, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/B3/ex7_threshold.c OUT=/var/tmp/rtos/B3/ex7 &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/B3/ex7/app.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>prio  group  inside-CS?  latency (CS = 100 us)
+0x00  0x00   yes (ran)   160 ns
+0x10  0x10   yes (ran)   160 ns
+0x1e  0x1e   yes (ran)   160 ns
+0x1f  0x1e   yes (ran)   160 ns
+0x20  0x20   no (held)   100720 ns
+0x21  0x20   no (held)   100680 ns
+0x40  0x40   no (held)   100720 ns
+0x80  0x80   no (held)   100680 ns
+0xfe  0xfe   no (held)   100720 ns
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것: 경계가 <strong>정확히 0x20</strong>이다. 0x1F까지는 160 ns(QEMU에서 STIR → ISR 첫 줄), 0x20부터는 임계구역 100 µs + 빠져나오는 시간만큼 늦다. <strong>0x20 자신도 막힌다</strong> — 이름이 "MAX_SYSCALL"인 이유다: "FromISR을 부를 수 있는 가장 급한 우선순위 = 0x20"이고, 그 우선순위까지는 커널이 막을 수 있어야 하니까. 0x21은 그룹이 0x20이라 0x20과 똑같이 행동한다.</p>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="20.0" font-size="13" font-weight="bold">IRQ 우선순위별 진입 지연 — 100 µs 임계구역 안에서 pend (예제 7 실측)</text>
+<line x1="70.0" y1="240.0" x2="660.0" y2="240.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="70.0" y1="240.0" x2="70.0" y2="40.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="244.0" font-size="12" text-anchor="end">0</text>
+<line x1="65.0" y1="240.0" x2="70.0" y2="240.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="157.6" font-size="12" text-anchor="end">50</text>
+<line x1="65.0" y1="153.6" x2="70.0" y2="153.6" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="71.3" font-size="12" text-anchor="end">100</text>
+<line x1="65.0" y1="67.3" x2="70.0" y2="67.3" stroke="currentColor" stroke-width="1.2"/>
+<text x="10.0" y="40.0" font-size="12">지연 (µs)</text>
+<rect x="82.0" y="238.0" width="56.0" height="2.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="110.0" y="232.0" font-size="12" text-anchor="middle">0.16</text>
+<text x="110.0" y="258.0" font-size="12" text-anchor="middle">0x00</text>
+<rect x="146.0" y="238.0" width="56.0" height="2.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="174.0" y="232.0" font-size="12" text-anchor="middle">0.16</text>
+<text x="174.0" y="258.0" font-size="12" text-anchor="middle">0x10</text>
+<rect x="210.0" y="238.0" width="56.0" height="2.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="238.0" y="232.0" font-size="12" text-anchor="middle">0.16</text>
+<text x="238.0" y="258.0" font-size="12" text-anchor="middle">0x1e</text>
+<rect x="274.0" y="238.0" width="56.0" height="2.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="302.0" y="232.0" font-size="12" text-anchor="middle">0.16</text>
+<text x="302.0" y="258.0" font-size="12" text-anchor="middle">0x1f</text>
+<rect x="338.0" y="66.0" width="56.0" height="174.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="366.0" y="60.0" font-size="12" text-anchor="middle">100.7</text>
+<text x="366.0" y="258.0" font-size="12" text-anchor="middle">0x20</text>
+<rect x="402.0" y="66.1" width="56.0" height="173.9" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="430.0" y="60.1" font-size="12" text-anchor="middle">100.7</text>
+<text x="430.0" y="258.0" font-size="12" text-anchor="middle">0x21</text>
+<rect x="466.0" y="66.0" width="56.0" height="174.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="494.0" y="60.0" font-size="12" text-anchor="middle">100.7</text>
+<text x="494.0" y="258.0" font-size="12" text-anchor="middle">0x40</text>
+<rect x="530.0" y="66.1" width="56.0" height="173.9" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="558.0" y="60.1" font-size="12" text-anchor="middle">100.7</text>
+<text x="558.0" y="258.0" font-size="12" text-anchor="middle">0x80</text>
+<rect x="594.0" y="66.0" width="56.0" height="174.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="622.0" y="60.0" font-size="12" text-anchor="middle">100.7</text>
+<text x="622.0" y="258.0" font-size="12" text-anchor="middle">0xfe</text>
+<line x1="334.0" y1="40.0" x2="334.0" y2="268.0" stroke="#d0564a" stroke-width="2" stroke-dasharray="4 3"/>
+<text x="328.0" y="120.0" font-size="12" text-anchor="end">BASEPRI 0x20 위:</text>
+<text x="328.0" y="138.0" font-size="12" text-anchor="end">바로 들어옴</text>
+<text x="365.0" y="285.0" font-size="12" text-anchor="middle">IRQ 우선순위 바이트 (PRIGROUP 0: 0x1f의 그룹 = 0x1e, 0x21의 그룹 = 0x20)</text>
+</svg></figure>
+<p>그림 6 — 예제 9 실측. 빨간 점선(BASEPRI 0x20) 왼쪽은 임계구역과 무관하게 0.16 µs, 오른쪽은 모두 약 100.7 µs. "얼마나 덜 급한가"(0x20이든 0xFE든)는 상관없다 — 선 아래면 전부 똑같이 임계구역이 끝나기를 기다린다.</p>
+<h3 id="예제-10-임계구역-길이를-늘리면-basepri-vs-primask-측정-차트">예제 10 — 임계구역 길이를 늘리면: BASEPRI vs PRIMASK (측정 차트)<a class="anchor" href="#예제-10-임계구역-길이를-늘리면-basepri-vs-primask-측정-차트" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 두 하드웨어 타이머로 주기 인터럽트를 만든다. DUALTIMER(IRQ 10)는 <strong>0x10</strong>(선 위), TIMER0(IRQ 8)은 <strong>0x40</strong>(선 아래). 주기를 1 ms + 101 사이클, 1 ms + 37 사이클로 어긋나게 해서 위상이 임계구역과 골고루 겹치게 했다. 태스크는 "임계구역 L µs → 5 µs 쉼"을 반복하며 L을 0, 10, 25, 50, 100, 200 µs로 바꾼다. 같은 실험을 <code>taskENTER_CRITICAL()</code>(BASEPRI)과 <code>cpsid i</code>(PRIMASK)로 두 번 한다. 지연은 타이머 자신의 <code>RELOAD - VALUE</code>(0이 된 뒤 지난 사이클)로 잰다 — 타이머가 스톱워치 역할을 한다(A7 §2와 같은 방법).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex8 — IRQ entry latency vs critical-section length: BASEPRI (taskENTER_CRITICAL) vs PRIMASK */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "b3.h"
+#define DT_LOAD   REG32(0x40002000u)            /* dual timer 1, IRQ 10 */
+#define DT_VALUE  REG32(0x40002004u)
+#define DT_CTRL   REG32(0x40002008u)
+#define DT_INTCLR REG32(0x4000200Cu)
+#define N 60
+typedef struct { uint32_t n, max; uint64_t sum; } st_t;
+static st_t s_hi, s_lo;                          /* hi = prio 0x10, lo = prio 0x40 */
+static volatile int collecting;
+
+static void add(st_t *s, uint32_t v) { if (s-&gt;n &lt; N) { s-&gt;n++; s-&gt;sum += v; if (v &gt; s-&gt;max) s-&gt;max = v; } }
+void DUALTIMER_IRQHandler(void)                  /* prio 0x10: above the 0x20 line */
+{
+    uint32_t lat = DT_LOAD - DT_VALUE; DT_INTCLR = 1;
+    if (collecting) add(&amp;s_hi, lat);             /* no FreeRTOS API here! */
+}
+void TIMER0_IRQHandler(void)                     /* prio 0x40: below the line */
+{
+    uint32_t lat = TIMER_RELOAD(TIMER0_BASE) - TIMER_VALUE(TIMER0_BASE);
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    if (collecting) add(&amp;s_lo, lat);
+}
+static void spin_us(uint32_t us) { uint32_t t = CYC(); while (CYC() - t &lt; us * 25u) { } }
+
+static void task(void *arg)
+{
+    (void)arg;
+    const uint32_t len[] = { 0, 10, 25, 50, 100, 200 };
+    board_printf_raw("mask     CS_us  hi(0x10) avg/max ns    lo(0x40) avg/max ns\n");
+    for (int m = 0; m &lt; 2; m++)
+        for (unsigned i = 0; i &lt; sizeof len / sizeof len[0]; i++) {
+            s_hi = (st_t){0}; s_lo = (st_t){0}; collecting = 1;
+            while (s_hi.n &lt; N || s_lo.n &lt; N) {
+                if (m == 0) taskENTER_CRITICAL(); else irq_off();
+                spin_us(len[i]);
+                if (m == 0) taskEXIT_CRITICAL(); else irq_on();
+                spin_us(5);
+            }
+            collecting = 0;
+            board_printf_raw("%s  %u  %u / %u    %u / %u\n", m ? "PRIMASK" : "BASEPRI", len[i],
+                             (uint32_t)(s_hi.sum / N) * 40, s_hi.max * 40,
+                             (uint32_t)(s_lo.sum / N) * 40, s_lo.max * 40);
+        }
+    board_exit(0);
+}
+
+int main(void)
+{
+    TIMER_RELOAD(TIMER0_BASE) = 25000 + 37 - 1; TIMER_VALUE(TIMER0_BASE) = 25000 + 37 - 1;
+    IPR8(8) = 0x40; ISER(0) = 1u &lt;&lt; 8; TIMER_CTRL(TIMER0_BASE) = 1u | 8u;
+    DT_LOAD = 25000 + 101 - 1;
+    IPR8(10) = 0x10; ISER(0) = 1u &lt;&lt; 10; DT_CTRL = 0x80u | 0x40u | 0x20u | 0x02u;
+    xTaskCreate(task, "t", 512, NULL, 1, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/B3/ex8_cs_sweep.c OUT=/var/tmp/rtos/B3/ex8 &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/B3/ex8/app.elf 60'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>mask     CS_us  hi(0x10) avg/max ns    lo(0x40) avg/max ns
+BASEPRI  0  120 / 160    200 / 1200
+BASEPRI  10  120 / 160    3920 / 10960
+BASEPRI  25  120 / 160    13280 / 25920
+BASEPRI  50  120 / 160    23880 / 51040
+BASEPRI  100  120 / 160    48520 / 100560
+BASEPRI  200  120 / 160    99360 / 196200
+PRIMASK  0  160 / 480    160 / 760
+PRIMASK  10  3600 / 10480    3560 / 10400
+PRIMASK  25  10440 / 25440    10160 / 25320
+PRIMASK  50  24840 / 50240    22480 / 49880
+PRIMASK  100  46960 / 97600    47800 / 95800
+PRIMASK  200  101200 / 199520    100880 / 199040
+[board_exit] code=0</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="20.0" font-size="13" font-weight="bold">임계구역 길이 vs IRQ 진입 지연 최댓값 (예제 8 실측, QEMU icount)</text>
+<line x1="70.0" y1="270.0" x2="650.0" y2="270.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="70.0" y1="270.0" x2="70.0" y2="40.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="70.0" y1="270.0" x2="70.0" y2="275.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="70.0" y="289.0" font-size="12" text-anchor="middle">0</text>
+<line x1="65.0" y1="270.0" x2="70.0" y2="270.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="274.0" font-size="12" text-anchor="end">0</text>
+<line x1="212.5" y1="270.0" x2="212.5" y2="275.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="212.5" y="289.0" font-size="12" text-anchor="middle">50</text>
+<line x1="65.0" y1="215.0" x2="70.0" y2="215.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="219.0" font-size="12" text-anchor="end">50</text>
+<line x1="70.0" y1="215.0" x2="640.0" y2="215.0" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/>
+<line x1="355.0" y1="270.0" x2="355.0" y2="275.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="355.0" y="289.0" font-size="12" text-anchor="middle">100</text>
+<line x1="65.0" y1="160.0" x2="70.0" y2="160.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="164.0" font-size="12" text-anchor="end">100</text>
+<line x1="70.0" y1="160.0" x2="640.0" y2="160.0" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/>
+<line x1="497.5" y1="270.0" x2="497.5" y2="275.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="497.5" y="289.0" font-size="12" text-anchor="middle">150</text>
+<line x1="65.0" y1="105.0" x2="70.0" y2="105.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="109.0" font-size="12" text-anchor="end">150</text>
+<line x1="70.0" y1="105.0" x2="640.0" y2="105.0" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/>
+<line x1="640.0" y1="270.0" x2="640.0" y2="275.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="640.0" y="289.0" font-size="12" text-anchor="middle">200</text>
+<line x1="65.0" y1="50.0" x2="70.0" y2="50.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="54.0" font-size="12" text-anchor="end">200</text>
+<line x1="70.0" y1="50.0" x2="640.0" y2="50.0" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/>
+<text x="355.0" y="308.0" font-size="12" text-anchor="middle">임계구역 길이 (µs)</text>
+<text x="10.0" y="40.0" font-size="12">최대 지연 (µs)</text>
+<polyline points="70.0,269.5 98.5,258.5 141.2,242.0 212.5,214.7 355.0,162.6 640.0,50.5" fill="none" stroke="#d0564a" stroke-width="2"/>
+<circle cx="70.0" cy="269.5" r="3" fill="#d0564a"/>
+<circle cx="98.5" cy="258.5" r="3" fill="#d0564a"/>
+<circle cx="141.2" cy="242.0" r="3" fill="#d0564a"/>
+<circle cx="212.5" cy="214.7" r="3" fill="#d0564a"/>
+<circle cx="355.0" cy="162.6" r="3" fill="#d0564a"/>
+<circle cx="640.0" cy="50.5" r="3" fill="#d0564a"/>
+<polyline points="70.0,268.7 98.5,257.9 141.2,241.5 212.5,213.9 355.0,159.4 640.0,54.2" fill="none" stroke="#e08a3c" stroke-width="2"/>
+<circle cx="70.0" cy="268.7" r="3" fill="#e08a3c"/>
+<circle cx="98.5" cy="257.9" r="3" fill="#e08a3c"/>
+<circle cx="141.2" cy="241.5" r="3" fill="#e08a3c"/>
+<circle cx="212.5" cy="213.9" r="3" fill="#e08a3c"/>
+<circle cx="355.0" cy="159.4" r="3" fill="#e08a3c"/>
+<circle cx="640.0" cy="54.2" r="3" fill="#e08a3c"/>
+<polyline points="70.0,269.8 98.5,269.8 141.2,269.8 212.5,269.8 355.0,269.8 640.0,269.8" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<circle cx="70.0" cy="269.8" r="3" fill="#4a7bd0"/>
+<circle cx="98.5" cy="269.8" r="3" fill="#4a7bd0"/>
+<circle cx="141.2" cy="269.8" r="3" fill="#4a7bd0"/>
+<circle cx="212.5" cy="269.8" r="3" fill="#4a7bd0"/>
+<circle cx="355.0" cy="269.8" r="3" fill="#4a7bd0"/>
+<circle cx="640.0" cy="269.8" r="3" fill="#4a7bd0"/>
+<line x1="90.0" y1="58.0" x2="112.0" y2="58.0" stroke="#e08a3c" stroke-width="2.5"/>
+<text x="118.0" y="62.0" font-size="12">0x40 IRQ, taskENTER_CRITICAL (BASEPRI 0x20)</text>
+<line x1="90.0" y1="76.0" x2="112.0" y2="76.0" stroke="#d0564a" stroke-width="2.5"/>
+<text x="118.0" y="80.0" font-size="12">0x10 IRQ, cpsid i (PRIMASK)</text>
+<line x1="90.0" y1="94.0" x2="112.0" y2="94.0" stroke="#4a7bd0" stroke-width="2.5"/>
+<text x="118.0" y="98.0" font-size="12">0x10 IRQ, taskENTER_CRITICAL — 늘 0.16 µs</text>
+<text x="636.0" y="261.8" font-size="12" text-anchor="end">0.16</text>
+</svg></figure>
+<p>그림 7 — 예제 10 실측(최댓값). 주황(0x40, BASEPRI)과 빨강(0x10, PRIMASK)은 임계구역 길이를 그대로 따라 올라간다(기울기 1). 파랑(0x10, BASEPRI)은 200 µs 임계구역에서도 0.16 µs로 평평하다. PRIMASK 아래의 0x40 IRQ도 빨강과 거의 같은 값이라 생략했다.</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>BASEPRI 아래의 0x10 IRQ는 임계구역 길이와 무관</strong>: 평균 120 ns, 최대 160 ns. 이것이 zero-latency의 정의다.</li><li>0x40 IRQ와, PRIMASK를 쓴 경우의 0x10 IRQ는 <strong>최대 지연 ≈ 임계구역 길이</strong>. 평균은 그 절반쯤이다(위상이 임계구역 안 어디에 떨어지느냐에 따라 균일하게 분포).</li><li>즉 "<strong>인터럽트 지연의 최악값 = 그 인터럽트를 막을 수 있는 가장 긴 임계구역</strong>"이다. PRIMASK를 쓰면 이 최악값이 <strong>모든 인터럽트</strong>에 들어가고, BASEPRI를 쓰면 <strong>선 아래 인터럽트</strong>에만 들어간다.</li><li>CS=0일 때 0x40의 최대 1.2 µs는 임계구역 진입 · 탈출 자체와 SysTick 핸들러(커널도 tick 처리 동안 BASEPRI를 올린다 — <code>xPortSysTickHandler()</code>의 <code>portDISABLE_INTERRUPTS()</code>) 같은 커널 내부 구간에서 온다.</li></ul>
+<p>설계 결론: <strong>FOC 전류 루프처럼 µs 단위 지터가 중요한 ISR은 선 위에 두고 커널 API를 안 부른다. 선 아래 ISR의 최악 지연 예산에는 "커널 + 모든 드라이버 + 앱의 가장 긴 임계구역"을 넣는다.</strong> 임계구역 길이를 재는 방법과 줄이는 설계는 C7, 우선순위 배치표는 E2에서 다룬다.</p>
+<h3 id="예제-11-configassert가-잡아-주는-세-가지-실수">예제 11 — configASSERT가 잡아 주는 세 가지 실수<a class="anchor" href="#예제-11-configassert가-잡아-주는-세-가지-실수" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: "빠른" ISR(IRQ 10, 0x10 = 선 위)이 태스크를 깨우고 싶은 상황이다. 컴파일 옵션 <code>MODE</code>로 네 경우를 만든다.</p>
+<ul><li>MODE=0 (정답): 빠른 ISR은 커널을 부르지 않고 <strong>다리 IRQ</strong>(IRQ 8, 0x40 = 선 아래)를 STIR로 pend한다. 다리 ISR이 <code>vTaskNotifyGiveFromISR()</code>로 태스크를 깨운다.</li><li>MODE=1: 빠른 ISR이 <strong>직접</strong> <code>vTaskNotifyGiveFromISR()</code>를 부른다.</li><li>MODE=2: 다리 IRQ의 우선순위를 <strong>안 정했다</strong>(리셋값 0).</li><li>MODE=3: STM32 HAL처럼 PRIGROUP=3을 설정했다(8비트 QEMU에서는 허용값 0을 넘는다).</li></ul>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex9 — configASSERT guards: FromISR API from a too-urgent IRQ, default prio 0, PRIGROUP != 0
+ *   build with -DMODE=0 (correct deferral), 1 (zero-latency ISR calls FromISR),
+ *              2 (bridge IRQ priority never set -&gt; 0), 3 (vendor HAL style PRIGROUP=3) */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "b3.h"
+static TaskHandle_t h;
+static volatile uint32_t t_fast, t_task;
+
+void DUALTIMER_IRQHandler(void)          /* "fast" ISR, IRQ 10, prio 0x10 (above the line) */
+{
+    t_fast = CYC();
+#if MODE == 1
+    vTaskNotifyGiveFromISR(h, NULL);     /* WRONG: kernel cannot mask this ISR */
+#else
+    STIR = 8;                            /* RIGHT: defer to a kernel-aware IRQ */
+#endif
+}
+void TIMER0_IRQHandler(void)             /* "bridge" ISR, IRQ 8, prio 0x40 (below the line) */
+{
+    BaseType_t woken = pdFALSE;
+    vTaskNotifyGiveFromISR(h, &amp;woken);
+    portYIELD_FROM_ISR(woken);
+}
+
+static void worker(void *arg)
+{
+    (void)arg;
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    t_task = CYC();
+    board_printf_raw("worker woke: fast-ISR -&gt; task = %u ns\n", (t_task - t_fast) * 40u);
+    board_exit(0);
+}
+static void kick(void *arg)
+{
+    (void)arg;
+    vTaskDelay(1);
+    board_printf_raw("MODE=%d: fast IRQ10 prio 0x%x, bridge IRQ8 prio 0x%x, PRIGROUP=%u\n",
+                     MODE, IPR8(10), IPR8(8), prigroup());
+    STIR = 10;
+    for (;;) { }
+}
+
+int main(void)
+{
+#if MODE == 3
+    set_prigroup(3);                     /* e.g. HAL_NVIC_SetPriorityGrouping(GROUP_4) */
+#endif
+    IPR8(10) = 0x10;
+#if MODE != 2
+    IPR8(8) = 0x40;                      /* MODE 2 forgets this: reset value 0 = most urgent */
+#endif
+    ISER(0) = (1u &lt;&lt; 8) | (1u &lt;&lt; 10);
+    xTaskCreate(worker, "worker", 256, NULL, 3, &amp;h);
+    xTaskCreate(kick, "kick", 256, NULL, 1, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'for m in 0 1 2 3; do make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/B3/ex9_assert.c OUT=/var/tmp/rtos/B3/ex9_$m EXTRA_CFLAGS=-DMODE=$m &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/B3/ex9_$m/app.elf; echo "exit=$?"; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>MODE=0: fast IRQ10 prio 0x10, bridge IRQ8 prio 0x40, PRIGROUP=0
+worker woke: fast-ISR -&gt; task = 8160 ns
+[board_exit] code=0
+exit=0
+MODE=1: fast IRQ10 prio 0x10, bridge IRQ8 prio 0x40, PRIGROUP=0
+
+[configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:803
+[board_exit] code=253
+exit=1
+MODE=2: fast IRQ10 prio 0x10, bridge IRQ8 prio 0x0, PRIGROUP=0
+
+[configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:803
+[board_exit] code=253
+exit=1
+MODE=3: fast IRQ10 prio 0x10, bridge IRQ8 prio 0x40, PRIGROUP=3
+
+[configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:819
+[board_exit] code=253
+exit=1</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>MODE=0: 빠른 ISR → 다리 ISR → 태스크까지 8.16 µs(QEMU icount). 빠른 ISR 자체는 커널과 무관하게 즉시 돌고, 태스크를 깨우는 일만 다리를 거친다.</li><li>MODE=1 · 2: <code>port.c:803</code> = <code>configASSERT( ucCurrentPriority &gt;= ucMaxSysCallPriority )</code>. FromISR API의 입구(<code>portASSERT_IF_INTERRUPT_PRIORITY_INVALID()</code>)가 <strong>IPSR로 지금 실행 중인 IRQ 번호를 읽고, 그 IRQ의 IPR 바이트를 읽어</strong> 0x20보다 급하면 멈춘다. MODE=2는 "우선순위를 안 정한 IRQ = 0 = 금지 영역"이라는 §1의 사실이 그대로 assert로 나타난 것이다. FreeRTOS FAQ 1순위 질문이 이것이다.</li><li>MODE=3: <code>port.c:819</code> = <code>configASSERT( ( portAIRCR_REG &amp; portPRIORITY_GROUP_MASK ) &lt;= ulMaxPRIGROUPValue )</code>. 서브 우선순위 비트가 생기는 PRIGROUP을 거부한다(§5.2). 실제 4비트 STM32에서 PRIGROUP=3은 통과한다(허용값 = 7 - 4 = 3).</li><li><strong>configASSERT를 끄면 이 검사도 사라진다</strong>(<code>portASSERT_IF_INTERRUPT_PRIORITY_INVALID()</code>는 <code>configASSERT_DEFINED</code>일 때만 정의된다). MODE=1이 그대로 돌아가고, 커널이 그 큐 · TCB를 고치는 순간과 겹칠 때만 가끔 리스트가 깨진다 — 재현이 어렵고 한참 뒤 엉뚱한 곳에서 HardFault가 난다. <strong>개발 빌드에서는 configASSERT를 반드시 켠다.</strong></li></ul>
+<p>어느 API가 이 검사를 하나? V11.3.2에서 <code>portASSERT_IF_INTERRUPT_PRIORITY_INVALID()</code>를 부르는 곳을 grep하면 <code>queue.c</code> 4곳(<code>xQueueGenericSendFromISR</code>, <code>xQueueGiveFromISR</code>, <code>xQueueReceiveFromISR</code>, <code>xQueuePeekFromISR</code>)과 <code>tasks.c</code> 6곳(<code>uxTaskPriorityGetFromISR</code>, <code>uxTaskBasePriorityGetFromISR</code>, <code>xTaskResumeFromISR</code>, <code>xTaskGetTickCountFromISR</code>, <code>xTaskGenericNotifyFromISR</code>, <code>vTaskGenericNotifyGiveFromISR</code>)이 나온다. 이벤트 그룹의 FromISR은 <code>xTimerPendFunctionCallFromISR()</code>(→ 타이머 명령 큐의 <code>xQueueGenericSendFromISR()</code>)을, 스트림 버퍼의 FromISR은 <code>xTaskNotifyIndexedFromISR()</code>(→ <code>xTaskGenericNotifyFromISR()</code>)을 거쳐 같은 검사에 닿는다.</p>
+<h3 id="예제-12-4비트-칩에서의-숫자-표-python">예제 12 — 4비트 칩에서의 숫자 표 (Python)<a class="anchor" href="#예제-12-4비트-칩에서의-숫자-표-python" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 실제 칩(4비트)에서 "논리 번호 ↔ 바이트 ↔ zero-latency 여부", PRIGROUP 분할, 비트 수별 프로브 값을 표로 계산한다. 설계 문서에 붙일 표를 손으로 만들다 틀리는 일을 막는다.</p>
+<figure class="code"><span class="lang">python</span><pre><code># ex12 — logical priority &lt;-&gt; NVIC byte, PRIGROUP split, and what BASEPRI masks, for N implemented bits
+def byte(logical, bits):            # CMSIS NVIC_SetPriority(): value &lt;&lt; (8 - __NVIC_PRIO_BITS)
+    return (logical &lt;&lt; (8 - bits)) &amp; 0xFF
+
+def split(prigroup, bits):          # (group bits, sub bits) that actually exist in hardware
+    g = max(0, min(bits, 7 - prigroup))
+    return g, bits - g
+
+print("== 4-bit chip (STM32F4/H7 class), configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY = 5")
+maxsys = byte(5, 4)
+print(f"configMAX_SYSCALL_INTERRUPT_PRIORITY = 5 &lt;&lt; 4 = 0x{maxsys:02x}")
+for lp in range(16):
+    b = byte(lp, 4)
+    tag = "zero-latency (no FreeRTOS API)" if b &lt; maxsys else "kernel-aware (FromISR OK)"
+    if lp in (0, 1, 4, 5, 6, 15):
+        print(f"  NVIC_SetPriority(irq, {lp:2d}) -&gt; byte 0x{b:02x}  {tag}")
+
+print("== PRIGROUP split on a 4-bit chip (AIRCR[10:8])")
+for pg in range(3, 8):
+    g, s = split(pg, 4)
+    print(f"  PRIGROUP={pg}: {g} group bits ({1 &lt;&lt; g:2d} preempt levels), {s} sub bits")
+print("  PRIGROUP 0..2 on 4 bits behave like 3 (the missing low bits are sub bits that read 0)")
+
+print("== the same 0xFF probe, four widths")
+for bits in (2, 3, 4, 8):
+    rb = (0xFF &lt;&lt; (8 - bits)) &amp; 0xFF
+    print(f"  {bits} bits: read back 0x{rb:02x}, levels={1 &lt;&lt; bits:3d}, step=0x{1 &lt;&lt; (8 - bits):02x}")</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'python3 /Users/donh/.rtos_scratch/B3/py/prio_table.py'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== 4-bit chip (STM32F4/H7 class), configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY = 5
+configMAX_SYSCALL_INTERRUPT_PRIORITY = 5 &lt;&lt; 4 = 0x50
+  NVIC_SetPriority(irq,  0) -&gt; byte 0x00  zero-latency (no FreeRTOS API)
+  NVIC_SetPriority(irq,  1) -&gt; byte 0x10  zero-latency (no FreeRTOS API)
+  NVIC_SetPriority(irq,  4) -&gt; byte 0x40  zero-latency (no FreeRTOS API)
+  NVIC_SetPriority(irq,  5) -&gt; byte 0x50  kernel-aware (FromISR OK)
+  NVIC_SetPriority(irq,  6) -&gt; byte 0x60  kernel-aware (FromISR OK)
+  NVIC_SetPriority(irq, 15) -&gt; byte 0xf0  kernel-aware (FromISR OK)
+== PRIGROUP split on a 4-bit chip (AIRCR[10:8])
+  PRIGROUP=3: 4 group bits (16 preempt levels), 0 sub bits
+  PRIGROUP=4: 3 group bits ( 8 preempt levels), 1 sub bits
+  PRIGROUP=5: 2 group bits ( 4 preempt levels), 2 sub bits
+  PRIGROUP=6: 1 group bits ( 2 preempt levels), 3 sub bits
+  PRIGROUP=7: 0 group bits ( 1 preempt levels), 4 sub bits
+  PRIGROUP 0..2 on 4 bits behave like 3 (the missing low bits are sub bits that read 0)
+== the same 0xFF probe, four widths
+  2 bits: read back 0xc0, levels=  4, step=0x40
+  3 bits: read back 0xe0, levels=  8, step=0x20
+  4 bits: read back 0xf0, levels= 16, step=0x10
+  8 bits: read back 0xff, levels=256, step=0x01</code></pre></figure>
+<p>출력에서 볼 것: 4비트 칩에 <code>configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY = 5</code>를 쓰면 <strong>논리 0~4(5단계)가 zero-latency, 5~15(11단계)가 kernel-aware</strong>다. PendSV · SysTick은 15(0xF0). 그래서 실무 배치는 대개 "가장 빡빡한 1~2개만 0~4, 나머지는 5~14"가 된다(E2).</p>
+<hr>
+<h2 id="8-zephyr-irq_connect-우선순위-irq_lock-basepri-zero-latency-irq">8. Zephyr — <code>IRQ_CONNECT</code> 우선순위, <code>irq_lock()</code> = BASEPRI, zero-latency IRQ<a class="anchor" href="#8-zephyr-irq_connect-우선순위-irq_lock-basepri-zero-latency-irq" aria-label="link">#</a></h2>
+<h3 id="8-1-소스에서-확인한-규칙-v4-4-2">8.1 소스에서 확인한 규칙 (v4.4.2)<a class="anchor" href="#8-1-소스에서-확인한-규칙-v4-4-2" aria-label="link">#</a></h3>
+<p>Zephyr는 앱이 주는 우선순위 숫자에 <strong>커널이 예약한 단계 수만큼 오프셋을 더해서</strong> NVIC에 쓴다. 관련 정의는 <code>include/zephyr/arch/arm/cortex_m/exception.h</code>에 모여 있다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define Z_EXC_PRIO(pri) (((pri) &lt;&lt; (8 - NUM_IRQ_PRIO_BITS)) &amp; 0xff)
+#if defined(CONFIG_CPU_CORTEX_M_HAS_PROGRAMMABLE_FAULT_PRIOS)
+#define _EXCEPTION_RESERVED_PRIO 1
+#else
+#define _EXCEPTION_RESERVED_PRIO 0
+#endif
+#define _EXC_FAULT_PRIO             0
+#define _EXC_ZERO_LATENCY_IRQS_PRIO 0
+#define _EXC_SVC_PRIO               COND_CODE_1(CONFIG_ZERO_LATENCY_IRQS,		\
+				  (CONFIG_ZERO_LATENCY_LEVELS), (0))
+#define _IRQ_PRIO_OFFSET            (_EXCEPTION_RESERVED_PRIO + _EXC_SVC_PRIO)
+#define IRQ_PRIO_LOWEST             (BIT(NUM_IRQ_PRIO_BITS) - (_IRQ_PRIO_OFFSET) - 1)
+#define _EXC_IRQ_DEFAULT_PRIO Z_EXC_PRIO(_IRQ_PRIO_OFFSET)</code></pre></figure>
+<p>읽는 법:</p>
+<ul><li><code>NUM_IRQ_PRIO_BITS</code>는 DTS의 <code>arm,num-irq-priority-bits</code>다. mps2/an385 보드 DTS(<code>boards/arm/mps2/mps2_base.dtsi</code>)는 <strong>3</strong>이다(QEMU가 8비트를 구현해도 Zephyr는 3비트 칩처럼 쓴다 — 값은 위 3비트에만 들어간다).</li><li>Cortex-M3/M4/M7(fault 우선순위를 바꿀 수 있는 코어)은 <strong>단계 0을 fault(MemManage · BusFault · UsageFault)에 예약</strong>한다(<code>_EXCEPTION_RESERVED_PRIO = 1</code>).</li><li><code>IRQ_CONNECT(irq, prio, …)</code>는 <code>arm_irq_priority_set()</code>(<code>arch/arm/core/cortex_m/irq_manage.c</code>)에서 <code>prio += _IRQ_PRIO_OFFSET</code> 후 <code>NVIC_SetPriority()</code>를 부른다. 그래서 앱의 "우선순위 0"은 실제로 단계 1(= 0x20)이다.</li><li><code>irq_lock()</code>은 단일 코어에서 <code>arch_irq_lock()</code>이고(<code>include/zephyr/irq.h</code>), Armv7-M · Armv8-M Mainline에서는 <strong><code>key = __get_BASEPRI(); __set_BASEPRI_MAX(_EXC_IRQ_DEFAULT_PRIO); __ISB();</code></strong>다(<code>include/zephyr/arch/arm/asm_inline_gcc.h</code>). 즉 <strong>앱이 쓸 수 있는 가장 급한 IRQ 단계까지 전부 막는다</strong>. Armv6-M · Armv8-M Baseline(M0/M0+/M23)에서는 PRIMASK(<code>__disable_irq()</code>)다.</li><li><code>CONFIG_ZERO_LATENCY_IRQS=y</code>(Kconfig <code>arch/arm/core/cortex_m/Kconfig</code>, <code>depends on CPU_CORTEX_M_HAS_BASEPRI</code>)를 켜면 <code>_EXC_SVC_PRIO</code>가 <code>CONFIG_ZERO_LATENCY_LEVELS</code>(기본 1)만큼 밀려 <strong>ZLI용 단계가 생기고</strong>, 일반 IRQ와 BASEPRI가 그만큼 한 단계씩 내려간다. ZLI는 <code>IRQ_DIRECT_CONNECT(irq, prio, isr, IRQ_ZERO_LATENCY)</code>로만 등록할 수 있다(v4.4.2의 <code>ARCH_IRQ_CONNECT</code>는 <code>BUILD_ASSERT(!(flags_p &amp; IRQ_ZERO_LATENCY), "ZLI interrupts must be registered using IRQ_DIRECT_CONNECT()")</code>). ZLI는 커널 API를 하나도 쓰면 안 된다(공식 문서 <code>doc/kernel/services/interrupts.rst</code>: "treat all kernel APIs as undefined behavior").</li><li>커널 자신: PendSV = <code>_EXC_PENDSV_PRIO</code> 0xFF → <code>Z_EXC_PRIO</code> 후 0xE0(3비트의 가장 느긋한 단계, <code>z_arm_exc_setup()</code>), SysTick = <code>_IRQ_PRIO_OFFSET</code>(가장 급한 일반 IRQ 단계, <code>drivers/timer/cortex_m_systick.c</code>). <strong>FreeRTOS와 반대로 Zephyr는 SysTick을 일반 IRQ 중 가장 급한 단계에 둔다</strong> — 타임아웃 처리가 ISR 지연에 밀리지 않게 하려는 선택이다.</li></ul>
+<h3 id="예제-13-zephyr-우선순위-바이트-irq_lock-의-basepri-zli">예제 13 — Zephyr: 우선순위 바이트, irq_lock()의 BASEPRI, ZLI<a class="anchor" href="#예제-13-zephyr-우선순위-바이트-irq_lock-의-basepri-zli" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: <code>IRQ_CONNECT(8, 0, …)</code>과 (<code>CONFIG_ZERO_LATENCY_IRQS</code> 여부에 따라) IRQ 10을 등록하고, NVIC에 실제로 써진 바이트와 SVC · PendSV · SysTick 우선순위를 읽는다. 그다음 <code>irq_lock()</code> 안에서 두 IRQ를 STIR로 pend하고 100 µs 기다린 뒤, 어느 것이 lock 안에서 실행됐는지와 지연을 잰다. 같은 소스를 ZLI 끔 / 켬으로 두 번 빌드한다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># zirq/CMakeLists.txt
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(b3_zirq)
+target_sources(app PRIVATE src/main.c)
+# zirq/prj.conf
+CONFIG_BOOT_BANNER=n</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex11 — Zephyr v4.4.2 on mps2/an385: IRQ_CONNECT priority -&gt; NVIC byte, irq_lock() = BASEPRI,
+ * and (with CONFIG_ZERO_LATENCY_IRQS=y) a zero-latency IRQ that irq_lock() cannot hold */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/irq.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#define REG(a)   (*(volatile uint32_t *)(a))
+#define CYC()    REG(0x40028018u)                   /* FPGAIO 25 MHz counter */
+#define IPR(n)   (*(volatile uint8_t *)(0xE000E400u + (n)))
+#define SHPR(e)  (*(volatile uint8_t *)(0xE000ED18u + (e) - 4u))
+#define STIR     REG(0xE000EF00u)
+static volatile uint32_t t_norm, t_zli;
+
+static void norm_isr(const void *arg) { ARG_UNUSED(arg); t_norm = CYC(); }   /* IRQ 8 */
+#ifdef CONFIG_ZERO_LATENCY_IRQS
+ISR_DIRECT_DECLARE(zli_isr) { t_zli = CYC(); return 0; }  /* IRQ 10: no kernel calls */
+#else
+static void zli_isr(const void *arg) { ARG_UNUSED(arg); t_zli = CYC(); }
+#endif
+
+int main(void)
+{
+    IRQ_CONNECT(8, 0, norm_isr, NULL, 0);           /* "priority 0" as the app sees it */
+#ifdef CONFIG_ZERO_LATENCY_IRQS
+    IRQ_DIRECT_CONNECT(10, 0, zli_isr, IRQ_ZERO_LATENCY);
+#else
+    IRQ_CONNECT(10, 1, zli_isr, NULL, 0);
+#endif
+    irq_enable(8); irq_enable(10);
+    printk("ZLI=%d NUM_IRQ_PRIO_BITS=%d IRQ_PRIO_LOWEST=%d\n",
+           IS_ENABLED(CONFIG_ZERO_LATENCY_IRQS), NUM_IRQ_PRIO_BITS, (int)IRQ_PRIO_LOWEST);
+    printk("NVIC byte: IRQ8=0x%02x IRQ10=0x%02x  SVC=0x%02x PendSV=0x%02x SysTick=0x%02x\n",
+           IPR(8), IPR(10), SHPR(11), SHPR(14), SHPR(15));
+    printk("thread BASEPRI=0x%02x\n", __get_BASEPRI());
+
+    t_norm = t_zli = 0;
+    unsigned int key = irq_lock();
+    uint32_t bp = __get_BASEPRI(), t0 = CYC();
+    STIR = 8; STIR = 10; __DSB(); __ISB();
+    uint32_t in_n = t_norm, in_z = t_zli;
+    while (CYC() - t0 &lt; 100u * 25u) { }             /* 100 us locked section */
+    irq_unlock(key);
+    printk("irq_lock: key=0x%x BASEPRI=0x%02x | inside: IRQ8 %s, IRQ10 %s\n", key, bp,
+           in_n ? "ran" : "held", in_z ? "ran" : "held");
+    printk("latency: IRQ8 %u ns, IRQ10 %u ns\n", (t_norm - t0) * 40u, (t_zli - t0) * 40u);
+    register uint32_t r0 __asm__("r0") = 0x18, r1 __asm__("r1") = 0x20026;
+    __asm volatile("bkpt 0xab" : : "r"(r0), "r"(r1) : "memory");      /* semihosting exit */
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'B=/var/tmp/rtos/B3; /var/rtoslab/bin/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/B3/zirq $B/zirq &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $B/zirq/zephyr/zephyr.elf; /var/rtoslab/bin/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/B3/zirq $B/zirq_zli -- -DCONFIG_ZERO_LATENCY_IRQS=y &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $B/zirq_zli/zephyr/zephyr.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>           FLASH:       13024 B         4 MB      0.31%
+             RAM:        6120 B         4 MB      0.15%
+ZLI=0 NUM_IRQ_PRIO_BITS=3 IRQ_PRIO_LOWEST=6
+NVIC byte: IRQ8=0x20 IRQ10=0x40  SVC=0x00 PendSV=0xe0 SysTick=0x20
+thread BASEPRI=0x00
+irq_lock: key=0x0 BASEPRI=0x20 | inside: IRQ8 held, IRQ10 held
+latency: IRQ8 100440 ns, IRQ10 101240 ns
+           FLASH:       13048 B         4 MB      0.31%
+             RAM:        6120 B         4 MB      0.15%
+ZLI=1 NUM_IRQ_PRIO_BITS=3 IRQ_PRIO_LOWEST=5
+NVIC byte: IRQ8=0x40 IRQ10=0x00  SVC=0x20 PendSV=0xe0 SysTick=0x40
+thread BASEPRI=0x00
+irq_lock: key=0x0 BASEPRI=0x40 | inside: IRQ8 held, IRQ10 ran
+latency: IRQ8 100560 ns, IRQ10 280 ns</code></pre></figure>
+<p>(두 빌드 모두 경고 0개. 빌드 로그는 메모리 요약 두 줄만 남기고 생략했다. ZLI 빌드의 <code>.config</code>에는 <code>CONFIG_ZERO_LATENCY_IRQS=y</code>, <code>CONFIG_ZERO_LATENCY_LEVELS=1</code>, <code>CONFIG_CPU_CORTEX_M_HAS_BASEPRI=y</code>, <code>CONFIG_CPU_CORTEX_M_HAS_PROGRAMMABLE_FAULT_PRIOS=y</code>, <code>CONFIG_ARMV7_M_ARMV8_M_MAINLINE=y</code>가 있다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>ZLI=0: 앱 우선순위 0 → 0x20, 1 → 0x40. 즉 <code>(prio + 1) &lt;&lt; 5</code>. 앱이 쓸 수 있는 범위는 0~6(<code>IRQ_PRIO_LOWEST=6</code>)이고 6 → 0xE0은 PendSV와 같은 단계다. <code>irq_lock()</code>의 BASEPRI = 0x20 = <strong>앱의 모든 IRQ를 막는 값</strong>. 두 IRQ 모두 held. 풀린 뒤 급한 IRQ 8이 먼저(100.44 µs), IRQ 10이 그다음(101.24 µs).</li><li>ZLI=1: 일반 IRQ의 "0"이 0x40으로 한 단계 내려가고(<code>(prio + 2) &lt;&lt; 5</code>), <code>irq_lock()</code>의 BASEPRI도 0x40. ZLI로 등록한 IRQ 10은 0x00(fault와 같은 단계)이라 <strong>lock 안에서 바로 실행</strong>(280 ns — <code>IRQ_DIRECT_CONNECT</code>라 공용 래퍼를 거치지 않는다).</li><li>SVC가 0x00 → 0x20으로 내려갔다. ZLI가 켜지면 SVC(시스템 콜 · 커널 oops)도 ZLI를 막지 못하게 된다.</li><li><strong>FreeRTOS와의 차이</strong>: FreeRTOS는 "선"을 앱이 <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>로 아무 데나 긋고, 그 위에 IRQ를 몇 개 두든 자유다(검사는 런타임 configASSERT). Zephyr는 선을 커널이 정하고(<code>irq_lock()</code> = 일반 IRQ 전부), ZLI를 쓰려면 <strong>Kconfig로 단계를 예약 + 플래그로 명시 + direct ISR</strong>이라는 세 가지를 해야 한다(검사는 빌드 타임 <code>BUILD_ASSERT</code>).</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 350" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="20.0" font-size="13" font-weight="bold">두 커널의 우선순위 지도 (위 = 급함, 숫자 작음) — 이 노트에서 실제로 읽은 값</text>
+<text x="170.0" y="45.0" font-size="12" text-anchor="middle" font-weight="bold">FreeRTOS V11.3.2 · lab config (8비트)</text>
+<text x="510.0" y="45.0" font-size="12" text-anchor="middle" font-weight="bold">Zephyr v4.4.2 · mps2/an385 · ZLI=y (3비트)</text>
+<rect x="10.0" y="55.0" width="320.0" height="52.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="170.0" y="76.8" font-size="12" text-anchor="middle">0x00–0x1F: zero-latency ISR</text>
+<text x="170.0" y="93.8" font-size="12" text-anchor="middle">(SVCall 0x00도 여기) — API 금지</text>
+<line x1="10.0" y1="117.0" x2="330.0" y2="117.0" stroke="#d0564a" stroke-width="2" stroke-dasharray="4 3"/>
+<text x="14.0" y="132.0" font-size="12">configMAX_SYSCALL = 0x20 = 임계구역 BASEPRI</text>
+<rect x="10.0" y="140.0" width="320.0" height="110.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="170.0" y="182.3" font-size="12" text-anchor="middle">0x20–0xFE: kernel-aware ISR</text>
+<text x="170.0" y="199.3" font-size="12" text-anchor="middle">FromISR API 허용</text>
+<text x="170.0" y="216.3" font-size="12" text-anchor="middle">taskENTER_CRITICAL()이 막음</text>
+<rect x="10.0" y="260.0" width="320.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="170.0" y="286.3" font-size="12" text-anchor="middle">0xFF: PendSV · SysTick (커널 자신)</text>
+<rect x="350.0" y="55.0" width="320.0" height="52.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="510.0" y="76.8" font-size="12" text-anchor="middle">0x00: Fault · ZLI (IRQ_ZERO_LATENCY)</text>
+<text x="510.0" y="93.8" font-size="12" text-anchor="middle">0x20: SVC — irq_lock()이 못 막음</text>
+<line x1="350.0" y1="117.0" x2="670.0" y2="117.0" stroke="#d0564a" stroke-width="2" stroke-dasharray="4 3"/>
+<text x="354.0" y="132.0" font-size="12">irq_lock() → BASEPRI = 0x40</text>
+<rect x="350.0" y="140.0" width="320.0" height="110.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="510.0" y="182.3" font-size="12" text-anchor="middle">0x40–0xE0: IRQ_CONNECT 우선순위 0–5</text>
+<text x="510.0" y="199.3" font-size="12" text-anchor="middle">(앱 숫자 + 2) &lt;&lt; 5</text>
+<text x="510.0" y="216.3" font-size="12" text-anchor="middle">SysTick도 0x40 (가장 급한 일반 IRQ)</text>
+<rect x="350.0" y="260.0" width="320.0" height="44.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="510.0" y="286.3" font-size="12" text-anchor="middle">0xE0: PendSV (가장 느긋한 단계)</text>
+<text x="10.0" y="328.0" font-size="12">Zephyr 기본(ZLI=n): SVC 0x00, irq_lock() BASEPRI 0x20, IRQ_CONNECT 0–6 → 0x20–0xE0 (예제 11).</text>
+</svg></figure>
+<p>그림 8 — 두 커널의 우선순위 지도. 예제 7 · 9(FreeRTOS)와 예제 13(Zephyr)에서 읽은 값 그대로다. 빨간 점선이 각 커널의 임계구역 BASEPRI이고, 그 위만 zero-latency다.</p>
+<div class="tw"><table><thead><tr><th>항목</th><th>FreeRTOS V11.3.2 (ARM_CM3)</th><th>Zephyr v4.4.2 (Cortex-M Mainline)</th></tr></thead><tbody><tr><td>임계구역 마스크</td><td>BASEPRI = <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code></td><td>BASEPRI_MAX = <code>_EXC_IRQ_DEFAULT_PRIO</code></td></tr><tr><td>중첩 처리</td><td>태스크: 카운터 <code>uxCriticalNesting</code>, ISR: 이전 값 반환 · 복원</td><td>항상 키(이전 BASEPRI) 반환 · 복원</td></tr><tr><td>zero-latency 정의</td><td>선보다 숫자가 작은 모든 IRQ (앱이 선을 그음)</td><td><code>CONFIG_ZERO_LATENCY_IRQS</code> + <code>IRQ_ZERO_LATENCY</code> + <code>IRQ_DIRECT_CONNECT</code></td></tr><tr><td>잘못 썼을 때</td><td>런타임 configASSERT (<code>port.c:803</code>, <code>819</code>)</td><td>빌드 타임 <code>BUILD_ASSERT</code> (우선순위 범위, ZLI 등록 방식)</td></tr><tr><td>앱 숫자 → NVIC 바이트</td><td>앱이 직접 바이트를 씀 (CMSIS면 논리 번호 &lt;&lt; 시프트)</td><td><code>(prio + _IRQ_PRIO_OFFSET) &lt;&lt; (8 - NUM_IRQ_PRIO_BITS)</code></td></tr><tr><td>PendSV / SysTick</td><td>0xFF / 0xFF</td><td>가장 느긋한 단계 / 가장 급한 일반 IRQ 단계</td></tr><tr><td>Armv6-M (M0/M0+)</td><td>PRIMASK (<code>cpsid i</code>) — 선 없음</td><td>PRIMASK — ZLI 없음 (<code>depends on CPU_CORTEX_M_HAS_BASEPRI</code>)</td></tr></tbody></table></div>
+<hr>
+<h2 id="9-rtos-커널-안에서는-무슨-일이-일어나나">9. RTOS 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#9-rtos-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 395" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="20.0" font-size="13" font-weight="bold">커널 소스 안의 경로 — 이 노트의 개념이 어디서 코드가 되나</text>
+<rect x="10.0" y="40.0" width="200.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="110.0" y="61.0" font-size="11" text-anchor="middle">xPortStartScheduler()</text>
+<text x="110.0" y="77.0" font-size="11" text-anchor="middle">port.c</text>
+<line x1="210.0" y1="65.0" x2="233.0" y2="65.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah9)"/>
+<rect x="235.0" y="40.0" width="215.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="342.5" y="61.0" font-size="11" text-anchor="middle">IPR[16]에 0xFF 쓰고 읽기</text>
+<text x="342.5" y="77.0" font-size="11" text-anchor="middle">→ 구현 비트 수 계산</text>
+<line x1="450.0" y1="65.0" x2="473.0" y2="65.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah9)"/>
+<rect x="475.0" y="40.0" width="195.0" height="50.0" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="572.5" y="61.0" font-size="11" text-anchor="middle">ucMaxSysCallPriority = 0x20</text>
+<text x="572.5" y="77.0" font-size="11" text-anchor="middle">SHPR3 PendSV·SysTick = 0xFF</text>
+<rect x="10.0" y="106.0" width="200.0" height="50.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="110.0" y="127.0" font-size="11" text-anchor="middle">taskENTER_CRITICAL()</text>
+<text x="110.0" y="143.0" font-size="11" text-anchor="middle">→ vPortEnterCritical()</text>
+<line x1="210.0" y1="131.0" x2="233.0" y2="131.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah9)"/>
+<rect x="235.0" y="106.0" width="215.0" height="50.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="342.5" y="127.0" font-size="11" text-anchor="middle">vPortRaiseBASEPRI()</text>
+<text x="342.5" y="143.0" font-size="11" text-anchor="middle">msr basepri 0x20 · isb · dsb</text>
+<line x1="450.0" y1="131.0" x2="473.0" y2="131.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah9)"/>
+<rect x="475.0" y="106.0" width="195.0" height="50.0" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="572.5" y="127.0" font-size="11" text-anchor="middle">uxCriticalNesting++</text>
+<text x="572.5" y="143.0" font-size="11" text-anchor="middle">0이 될 때 BASEPRI = 0</text>
+<rect x="10.0" y="172.0" width="200.0" height="50.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="110.0" y="193.0" font-size="11" text-anchor="middle">xQueueGiveFromISR() 등</text>
+<text x="110.0" y="209.0" font-size="11" text-anchor="middle">FromISR API 입구</text>
+<line x1="210.0" y1="197.0" x2="233.0" y2="197.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah9)"/>
+<rect x="235.0" y="172.0" width="215.0" height="50.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="342.5" y="193.0" font-size="11" text-anchor="middle">portASSERT_IF_INTERRUPT_</text>
+<text x="342.5" y="209.0" font-size="11" text-anchor="middle">PRIORITY_INVALID()</text>
+<line x1="450.0" y1="197.0" x2="473.0" y2="197.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah9)"/>
+<rect x="475.0" y="172.0" width="195.0" height="50.0" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="572.5" y="193.0" font-size="11" text-anchor="middle">IPSR → IPR[n] ≥ 0x20 ?</text>
+<text x="572.5" y="209.0" font-size="11" text-anchor="middle">PRIGROUP ≤ 허용값 ?</text>
+<rect x="10.0" y="238.0" width="200.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="110.0" y="259.0" font-size="11" text-anchor="middle">Zephyr irq_lock()</text>
+<text x="110.0" y="275.0" font-size="11" text-anchor="middle">→ arch_irq_lock()</text>
+<line x1="210.0" y1="263.0" x2="233.0" y2="263.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah9)"/>
+<rect x="235.0" y="238.0" width="215.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="342.5" y="259.0" font-size="11" text-anchor="middle">__set_BASEPRI_MAX(</text>
+<text x="342.5" y="275.0" font-size="11" text-anchor="middle">_EXC_IRQ_DEFAULT_PRIO) · isb</text>
+<line x1="450.0" y1="263.0" x2="473.0" y2="263.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah9)"/>
+<rect x="475.0" y="238.0" width="195.0" height="50.0" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="572.5" y="259.0" font-size="11" text-anchor="middle">key = 이전 BASEPRI</text>
+<text x="572.5" y="275.0" font-size="11" text-anchor="middle">irq_unlock(key)로 복원</text>
+<rect x="10.0" y="304.0" width="200.0" height="50.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="110.0" y="325.0" font-size="11" text-anchor="middle">Zephyr IRQ_CONNECT()</text>
+<text x="110.0" y="341.0" font-size="11" text-anchor="middle">→ arm_irq_priority_set()</text>
+<line x1="210.0" y1="329.0" x2="233.0" y2="329.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah9)"/>
+<rect x="235.0" y="304.0" width="215.0" height="50.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="342.5" y="325.0" font-size="11" text-anchor="middle">prio + _IRQ_PRIO_OFFSET</text>
+<text x="342.5" y="341.0" font-size="11" text-anchor="middle">(ZLI면 0으로 고정)</text>
+<line x1="450.0" y1="329.0" x2="473.0" y2="329.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah9)"/>
+<rect x="475.0" y="304.0" width="195.0" height="50.0" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="572.5" y="325.0" font-size="11" text-anchor="middle">NVIC_SetPriority()</text>
+<text x="572.5" y="341.0" font-size="11" text-anchor="middle">값 &lt;&lt; (8 - 3비트)</text>
+<text x="10.0" y="368.0" font-size="11">FreeRTOS: portable/GCC/ARM_CM3/port.c · portmacro.h</text>
+<text x="10.0" y="386.0" font-size="11">Zephyr: arch/arm/core/cortex_m/irq_manage.c · include/zephyr/arch/arm/asm_inline_gcc.h</text>
+</svg></figure>
+<p>그림 9 — 이 노트의 개념이 커널 소스의 어느 함수가 되는가. 위 셋은 FreeRTOS, 아래 둘은 Zephyr.</p>
+<h3 id="freertos-v11-3-2-portable-gcc-arm_cm3-port-c-portmacro-h">FreeRTOS V11.3.2 (<code>portable/GCC/ARM_CM3/port.c</code>, <code>portmacro.h</code>)<a class="anchor" href="#freertos-v11-3-2-portable-gcc-arm_cm3-port-c-portmacro-h" aria-label="link">#</a></h3>
+<ul><li><strong>시작 시 프로브</strong>: <code>xPortStartScheduler()</code>가 <code>configASSERT_DEFINED</code>일 때 첫 외부 IRQ의 IPR(<code>portNVIC_IP_REGISTERS_OFFSET_16 + portFIRST_USER_INTERRUPT_NUMBER</code>)에 0xFF를 쓰고 읽어 <code>ucMaxSysCallPriority = configMAX_SYSCALL_INTERRUPT_PRIORITY &amp; 읽은 값</code>, 구현 비트 수 → <code>ulMaxPRIGROUPValue</code>를 계산하고 원래 값을 복원한다. 이어서 <code>portNVIC_SHPR3_REG |= portNVIC_PENDSV_PRI</code> · <code>portNVIC_SYSTICK_PRI</code>(둘 다 <code>portMIN_INTERRUPT_PRIORITY</code> = 255), <code>portNVIC_SHPR2_REG = 0</code>(SVCall 최상위).</li><li><strong>8비트 특례</strong>: 구현 비트가 8이면 <code>configASSERT( ( configMAX_SYSCALL_INTERRUPT_PRIORITY &amp; 0x1U ) == 0U )</code> — 서브 비트(비트 0)에 걸친 값을 거부한다(§6 예제 6의 0x41 현상). V10.6.0 History의 "Update interrupt priority asserts for Cortex-M ports so that these do not fire on QEMU which does not implement PRIO bits"가 이 lab 같은 8비트 QEMU 환경을 위한 수정이다.</li><li><strong>임계구역</strong>: <code>portDISABLE_INTERRUPTS()</code> = <code>vPortRaiseBASEPRI()</code>(<code>mov r, #MAX_SYSCALL; msr basepri, r; isb; dsb</code>), <code>portENABLE_INTERRUPTS()</code> = <code>vPortSetBASEPRI(0)</code>. <code>vPortEnterCritical()</code>은 거기에 <code>uxCriticalNesting++</code>과 "ISR에서 부르면 assert"(<code>portVECTACTIVE_MASK</code>)를 더한다.</li><li><strong>ISR 임계구역</strong>: <code>portSET_INTERRUPT_MASK_FROM_ISR()</code> = <code>ulPortRaiseBASEPRI()</code>(이전 값 반환), <code>portCLEAR_INTERRUPT_MASK_FROM_ISR(x)</code> = <code>vPortSetBASEPRI(x)</code>.</li><li><strong>FromISR 검사</strong>: <code>portASSERT_IF_INTERRUPT_PRIORITY_INVALID()</code> = <code>vPortValidateInterruptPriority()</code> — <code>mrs ipsr</code>로 예외 번호를 읽고 16 이상이면 <code>pcInterruptPriorityRegisters[번호]</code>(IPR 바이트)를 <code>ucMaxSysCallPriority</code>와 비교, 그리고 AIRCR의 PRIGROUP을 <code>ulMaxPRIGROUPValue</code>와 비교.</li><li><strong>PendSV · SysTick</strong>: <code>xPortPendSVHandler()</code>는 <code>vTaskSwitchContext()</code>를 부르는 동안 BASEPRI를 올리고(예제 8에서 확인), <code>xPortSysTickHandler()</code>는 <code>xTaskIncrementTick()</code> 동안 <code>portDISABLE_INTERRUPTS()</code>를 한다. 둘 다 0xFF 우선순위라 "들어왔다는 것 = 다른 ISR이 하나도 없다"는 뜻이므로 이전 BASEPRI를 저장하지 않고 0으로 되돌린다(소스 주석: "when this interrupt executes all interrupts must be unmasked").</li><li>다른 포트: <code>ARM_CM0</code>은 <code>portDISABLE_INTERRUPTS()</code> = <code>cpsid i</code>. <code>ARM_CM7/r0p1</code>은 BASEPRI 앞뒤에 <code>cpsid i</code> / <code>cpsie i</code>(erratum 837070). Armv8-M 포트(<code>ARM_CM33_NTZ</code> 등)는 BASEPRI 방식으로 같다.</li></ul>
+<h3 id="zephyr-v4-4-2">Zephyr v4.4.2<a class="anchor" href="#zephyr-v4-4-2" aria-label="link">#</a></h3>
+<ul><li><code>arch_irq_lock()</code> / <code>arch_irq_unlock()</code> / <code>arch_zli_lock()</code>: <code>include/zephyr/arch/arm/asm_inline_gcc.h</code> (BASEPRI_MAX / BASEPRI 복원 / PRIMASK).</li><li><code>arm_irq_priority_set()</code>: <code>arch/arm/core/cortex_m/irq_manage.c</code> — ZLI면 <code>_EXC_ZERO_LATENCY_IRQS_PRIO</code>(레벨 1개일 때), 아니면 <code>prio + _IRQ_PRIO_OFFSET</code>, <code>__ASSERT</code>로 범위 검사 후 <code>NVIC_SetPriority()</code>.</li><li><code>z_arm_exc_setup()</code>: <code>arch/arm/include/cortex_m/exception.h</code> — PendSV 최저, SVC <code>_EXC_SVC_PRIO</code>, fault들 <code>_EXC_FAULT_PRIO</code>.</li><li><code>ARCH_IRQ_CONNECT</code> · <code>ARCH_IRQ_DIRECT_CONNECT</code>와 <code>_CHECK_PRIO</code>: <code>include/zephyr/arch/arm/irq.h</code>.</li></ul>
+<h3 id="예제-14-컴파일된-임계구역-코드-보기">예제 14 — 컴파일된 임계구역 코드 보기<a class="anchor" href="#예제-14-컴파일된-임계구역-코드-보기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 7 ELF에서 <code>vPortEnterCritical()</code>, <code>vPortExitCritical()</code>, 그리고 ISR 안에 인라인된 <code>taskENTER_CRITICAL_FROM_ISR()</code>가 실제로 어떤 명령이 됐는지 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/tmp/rtos/B3; for f in vPortEnterCritical vPortExitCritical TIMER0_IRQHandler; do arm-none-eabi-objdump -d --no-show-raw-insn ex6/app.elf | awk "/&lt;$f&gt;:/,/^$/"; done'</code></pre></figure>
+<figure class="code"><span class="lang">asm</span><pre><code>00001ec8 &lt;vPortEnterCritical&gt;:
+    1ec8:	push	{r3, lr}
+    1eca:	mov.w	r3, #32
+    1ece:	msr	BASEPRI, r3
+    1ed2:	isb	sy
+    1ed6:	dsb	sy
+    1eda:	ldr	r2, [pc, #44]	@ (1f08 &lt;vPortEnterCritical+0x40&gt;)
+    1edc:	ldr	r3, [r2, #0]
+    1ede:	adds	r3, #1
+    1ee0:	cmp	r3, #1
+    1ee2:	str	r3, [r2, #0]
+    1ee4:	beq.n	1ee8 &lt;vPortEnterCritical+0x20&gt;
+    1ee6:	pop	{r3, pc}
+    1ee8:	mov.w	r3, #3758153728	@ 0xe000e000
+    1eec:	ldr.w	r3, [r3, #3332]	@ 0xd04
+    1ef0:	uxtb	r3, r3
+    1ef2:	cmp	r3, #0
+    1ef4:	beq.n	1ee6 &lt;vPortEnterCritical+0x1e&gt;
+    ...
+00001f14 &lt;vPortExitCritical&gt;:
+    1f14:	ldr	r2, [pc, #36]	@ (1f3c &lt;vPortExitCritical+0x28&gt;)
+    1f16:	push	{r3, lr}
+    1f18:	ldr	r3, [r2, #0]
+    1f1a:	cbz	r3, 1f28 &lt;vPortExitCritical+0x14&gt;
+    1f1c:	subs	r3, #1
+    1f1e:	str	r3, [r2, #0]
+    1f20:	cbnz	r3, 1f26 &lt;vPortExitCritical+0x12&gt;
+    1f22:	msr	BASEPRI, r3
+    1f26:	pop	{r3, pc}
+    ...
+000001c0 &lt;TIMER0_IRQHandler&gt;:
+     1c0:	mrs	r2, BASEPRI
+     1c4:	ldr	r3, [pc, #40]	@ (1f0 &lt;TIMER0_IRQHandler+0x30&gt;)
+     1c6:	str	r2, [r3, #0]
+     1c8:	mrs	r3, BASEPRI
+     1cc:	mov.w	r2, #32
+     1d0:	msr	BASEPRI, r2
+     1d4:	isb	sy
+     1d8:	dsb	sy
+     1dc:	mrs	r0, BASEPRI
+     1e0:	ldr	r1, [pc, #16]	@ (1f4 &lt;TIMER0_IRQHandler+0x34&gt;)
+     1e2:	ldr	r2, [pc, #20]	@ (1f8 &lt;TIMER0_IRQHandler+0x38&gt;)
+     1e4:	str	r0, [r1, #0]
+     1e6:	str	r3, [r2, #0]
+     1e8:	msr	BASEPRI, r3
+     1ec:	bx	lr</code></pre></figure>
+<p>(configASSERT 출력 경로와 리터럴 풀 부분은 <code>...</code>로 생략했다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>임계구역 진입의 핵심은 <strong><code>mov r3, #32; msr BASEPRI, r3; isb; dsb</code></strong> 네 명령이다(#32 = 0x20). 나머지는 중첩 카운터와 "ISR에서 부르지 마라" 검사(ICSR 0xE000ED04의 VECTACTIVE 읽기)다.</li><li>탈출은 카운터가 0이 될 때만 <code>msr BASEPRI, r3</code>(r3 = 0).</li><li>ISR 버전(인라인)은 <code>mrs r3, BASEPRI</code>로 <strong>이전 값을 저장</strong>하고, 끝에서 <code>msr BASEPRI, r3</code>로 복원한다. 함수 호출 없이 명령 몇 개로 끝난다.</li><li>비교: PRIMASK 방식은 <code>cpsid i</code> 한 명령이다. BASEPRI 방식이 비싼 것은 아니다 — 비용은 거의 같고, 얻는 것은 "선 위 IRQ의 지연 0"이다.</li></ul>
+<p>다음 모듈과의 연결: 이 BASEPRI 위에서 PendSV · SysTick · SVC가 어떻게 커널을 돌리는지는 <strong>B4</strong>, 임계구역 vs 스케줄러 잠금 vs 뮤텍스를 고르는 법과 임계구역 길이 측정은 <strong>C7</strong>, ISR 작성 규칙(FromISR, <code>portYIELD_FROM_ISR</code>, deferred processing)은 <strong>E1</strong>, 시스템 전체 우선순위 배치표(어느 IRQ를 선 위에 둘지, 태스크 우선순위와 어떻게 맞출지)는 <strong>E2</strong>다.</p>
+<hr>
+<h2 id="10-실무에서-다시-보기">10. 실무에서 다시 보기<a class="anchor" href="#10-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="10-1-드론-비행-제어기-stm32h7급-4비트-freertos-또는-nuttx">10.1 드론 비행 제어기 (STM32H7급, 4비트, FreeRTOS 또는 NuttX)<a class="anchor" href="#10-1-드론-비행-제어기-stm32h7급-4비트-freertos-또는-nuttx" aria-label="link">#</a></h3>
+<p>전형적인 배치를 4비트 · <code>configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY = 5</code> 기준으로 쓰면 이렇다. (설계 예시다. 실제 값은 각 루프의 deadline과 WCET로 E2에서 정한다.)</p>
+<div class="tw"><table><thead><tr><th>논리 우선순위 (바이트)</th><th>IRQ</th><th>왜 여기</th><th>커널 API</th></tr></thead><tbody><tr><td>1 (0x10)</td><td>DShot · PWM 출력 타이머 / DMA 완료</td><td>모터 명령 비트 타이밍이 µs 단위. 커널 임계구역에 밀리면 ESC가 프레임을 버린다</td><td>없음</td></tr><tr><td>2 (0x20)</td><td>IMU SPI DMA 완료 (자이로 8 kHz)</td><td>샘플 타임스탬프 지터 최소화. 버퍼에 쓰고 다리 IRQ를 pend</td><td>없음 (STIR로 다리 호출)</td></tr><tr><td>5 (0x50)</td><td>다리 IRQ (빈 IRQ 하나)</td><td>자이로 데이터 준비 → rate 루프 태스크 깨우기</td><td><code>vTaskNotifyGiveFromISR</code></td></tr><tr><td>6 (0x60)</td><td>GNSS · 텔레메트리 UART DMA</td><td>바이트 손실만 없으면 된다</td><td><code>xStreamBufferSendFromISR</code></td></tr><tr><td>8 (0x80)</td><td>CAN · USB</td><td>프로토콜 스택은 태스크에서</td><td>FromISR</td></tr><tr><td>15 (0xF0)</td><td>PendSV, SysTick</td><td>커널</td><td>—</td></tr></tbody></table></div>
+<p>이 표에서 rate 루프(자세 제어 내부 루프)의 지연 예산 = 다리 IRQ의 최악 지연(<strong>가장 긴 BASEPRI 임계구역</strong>) + 컨텍스트 스위치 + 태스크 실행. 그래서 리뷰에서 "이 드라이버 임계구역 길이가 얼마냐"를 묻는다(예제 10의 기울기 1 그래프).</p>
+<h3 id="10-2-로봇-관절-모터-컨트롤러-foc-20-khz">10.2 로봇 관절 모터 컨트롤러 (FOC 20 kHz)<a class="anchor" href="#10-2-로봇-관절-모터-컨트롤러-foc-20-khz" aria-label="link">#</a></h3>
+<p>FOC 전류 루프는 PWM 주기마다 ADC 변환 완료 인터럽트에서 끝까지 계산해 PWM 듀티를 갱신한다. 주기 50 µs 안에 끝나야 하고 지터가 토크 리플로 나타난다. 이 ISR은 <strong>선 위(zero-latency)</strong>에 두고 커널 API를 하나도 부르지 않는다. 속도 · 위치 루프, CAN 통신, 진단은 태스크다. 전류 루프가 태스크에 값을 넘길 때는 락 없는 단일 생산자 · 단일 소비자 버퍼나 "더블 버퍼 + 시퀀스 번호"를 쓰고(D8), 필요하면 다리 IRQ를 pend한다. 이것이 A7 §7의 하이브리드를 우선순위 레지스터 수준에서 구현하는 방법이다.</p>
+<p>함정: 전류 루프 ISR 안에서 디버그용 <code>printf</code>나 로그 큐 쓰기(FromISR)를 "잠깐" 넣으면 — configASSERT가 켜져 있으면 바로 멈추고, 꺼져 있으면 <strong>가끔</strong> 큐가 깨진다(예제 11 MODE=1).</p>
+<h3 id="10-3-linux-soc-옆-센서-허브-zephyr">10.3 Linux SoC 옆 센서 허브 (Zephyr)<a class="anchor" href="#10-3-linux-soc-옆-센서-허브-zephyr" aria-label="link">#</a></h3>
+<p>센서 허브는 IMU의 DRDY 핀 엣지에서 <strong>타임스탬프 카운터를 캡처</strong>하는 것이 가장 중요한 일이다. 하드웨어 타이머 입력 캡처를 쓸 수 있으면 우선순위가 무관해진다(캡처는 하드웨어가 한다 — 가장 좋은 답). 소프트웨어로 찍어야 한다면 GPIO 인터럽트를 ZLI로 두고 ISR 첫 줄에서 카운터를 읽는다. Zephyr에서는 <code>CONFIG_ZERO_LATENCY_IRQS=y</code> + <code>IRQ_DIRECT_CONNECT(…, IRQ_ZERO_LATENCY)</code>, ISR은 링버퍼에 (타임스탬프, 센서 번호)만 넣는다. 나머지(SPI 읽기, 패킷화, Linux로 전송)는 스레드다. 예제 13에서 본 것처럼 ZLI를 켜면 다른 모든 IRQ와 <code>irq_lock()</code>이 한 단계씩 밀리므로, 3비트 칩(nRF52)이면 일반 IRQ에 남는 단계가 줄어든다는 점도 설계에 넣는다.</p>
+<h3 id="10-4-ssd-컨트롤러-펌웨어-don의-경험">10.4 SSD 컨트롤러 펌웨어 (Don의 경험)<a class="anchor" href="#10-4-ssd-컨트롤러-펌웨어-don의-경험" aria-label="link">#</a></h3>
+<p>SSD 실행부는 RTOS 없이 "인터럽트에서 하드웨어 큐 포인터만 갱신 → 실행부 루프가 처리"였다. 공유 큐 갱신 구간을 전부-끄기로 보호했다면, 그 구간 길이가 모든 인터럽트의 지연에 더해졌다(예제 10의 PRIMASK 그래프). 만약 같은 컨트롤러를 Cortex-M33 관리 코어 + FreeRTOS로 다시 짠다면: 호스트 doorbell과 NAND 완료처럼 "늦으면 성능이 떨어지는" 인터럽트는 kernel-aware(태스크를 깨워야 하므로), "늦으면 데이터를 잃는" 하드웨어 FIFO 비우기는 zero-latency로 나눈다. Don이 인터뷰에서 쓸 수 있는 연결 문장: "I used to protect shared queues by masking all interrupts; on Cortex-M with an RTOS I would use BASEPRI so the critical section only blocks the interrupts that actually touch kernel objects."</p>
+<hr>
+<h2 id="11-흔한-실수와-증상">11. 흔한 실수와 증상<a class="anchor" href="#11-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>IRQ 우선순위를 안 정하고 enable</td><td>FromISR 호출 시 <code>port.c:803</code> configASSERT, 또는 그 IRQ가 모든 것보다 급해짐</td><td>리셋값 0 = 최상위</td><td>모든 IRQ에 우선순위를 명시. enable 전에 <code>NVIC_SetPriority()</code></td></tr><tr><td><code>NVIC-&gt;IP[n] = 5</code> (시프트 없이)</td><td>4비트 칩에서 0x00 = 최상위. QEMU에서는 정상</td><td>왼쪽 정렬 무시</td><td>CMSIS <code>NVIC_SetPriority(irq, 5)</code> 또는 <code>5 &lt;&lt; (8 - __NVIC_PRIO_BITS)</code></td></tr><tr><td><code>NVIC_SetPriority(irq, 0x50)</code> (이미 시프트한 값)</td><td>바이트가 잘려 0x00</td><td>CMSIS가 한 번 더 시프트</td><td>CMSIS에는 논리 번호를 넘긴다</td></tr><tr><td>zero-latency ISR에서 FromISR API 호출</td><td>assert, 또는 assert를 끈 빌드에서 가끔 리스트 깨짐 → 엉뚱한 HardFault</td><td>커널이 막을 수 없는 문맥에서 커널 자료 수정</td><td>다리 IRQ를 STIR로 pend, 또는 락 없는 버퍼</td></tr><tr><td><code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>에 논리 번호(5)를 씀</td><td>4비트 칩: <code>5 &amp; 0xF0 = 0</code> → 시작 시 assert. 8비트: 비트 0 assert</td><td>바이트 값 자리에 번호</td><td><code>5 &lt;&lt; (8 - configPRIO_BITS)</code></td></tr><tr><td>HAL이 PRIGROUP을 4 이상으로 설정</td><td><code>port.c:819</code> assert, 또는 BASEPRI 경계가 설계와 다름</td><td>서브 우선순위 비트가 생김</td><td><code>NVIC_SetPriorityGrouping(0)</code> 또는 4비트 칩에서 PRIGROUP 3 (HAL <code>NVIC_PRIORITYGROUP_4</code>)</td></tr><tr><td>ISR에서 <code>__disable_irq()</code> 후 복원 누락</td><td>SysTick 정지, 시스템 전체 멈춤</td><td>PRIMASK는 예외 복귀로 자동 해제되지 않음(FAULTMASK만 됨)</td><td>키 저장 · 복원 패턴, ISR에서는 FROM_ISR 매크로</td></tr><tr><td>중첩 함수에서 <code>cpsie i</code>로 무조건 켬</td><td>바깥 임계구역이 조기에 풀려 간헐적 경쟁</td><td>이전 상태를 저장하지 않음</td><td><code>__get_PRIMASK()</code> 저장 → <code>__set_PRIMASK(key)</code></td></tr><tr><td>주변장치 플래그 클리어를 잊거나 ISR 끝에서 함</td><td>ISR 무한 반복, 또는 가끔 두 번 실행</td><td>레벨 인터럽트가 다시 pending</td><td>ISR 앞에서 클리어 + 읽어서 확인(<code>dsb</code>)</td></tr><tr><td>main에서 <code>xTaskCreate()</code> 후 인터럽트를 기다림</td><td>kernel-aware IRQ가 안 들어옴</td><td>스케줄러 시작 전 BASEPRI 0x20 유지(예제 7)</td><td>인터럽트 대기는 스케줄러 시작 후 태스크에서</td></tr></tbody></table></div>
+<hr>
+<h2 id="12-면접에서-이렇게-말한다">12. 면접에서 이렇게 말한다<a class="anchor" href="#12-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> Why does FreeRTOS have separate <code>...FromISR()</code> APIs, and what does <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code> do?</p>
+<p><strong>A.</strong> FromISR API는 블로킹하지 않고, 컨텍스트 스위치를 바로 하지 않고 "깨워야 할 태스크가 있다"는 플래그만 돌려주며, 임계구역을 ISR용(이전 BASEPRI 저장 · 복원)으로 쓴다. <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>는 커널 임계구역이 BASEPRI에 쓰는 값이다. 이 값과 같거나 느긋한 IRQ는 커널이 막을 수 있으니 FromISR을 불러도 되고, 더 급한 IRQ는 커널이 절대 막지 않아 지연이 0이지만 API를 하나도 못 부른다.</p>
+<blockquote><p>FromISR functions never block, they return a "higher priority task woken" flag instead of switching context immediately, and they use the ISR form of the critical section that saves and restores BASEPRI. <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code> is the value the kernel writes into BASEPRI when it enters a critical section on Cortex-M3/M4/M7. Interrupts at that priority or numerically higher can be masked by the kernel, so they may call FromISR APIs, but they are delayed by the longest kernel critical section. Interrupts numerically below it are never masked, so they have zero kernel-induced latency, but they must not call any FreeRTOS API.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "그 값을 0으로 주면?" → BASEPRI 0은 마스크 꺼짐이라 임계구역이 아무것도 막지 못한다. 그래서 포트가 시작 시 <code>configASSERT( ucMaxSysCallPriority )</code>로 거부한다.</p>
+<p><strong>Q.</strong> On Cortex-M, is priority 0 the highest or the lowest? How many priority levels does a typical chip have?</p>
+<p><strong>A.</strong> 0이 설정 가능한 범위에서 가장 급하다(Reset · NMI · HardFault는 음수로 고정). 칩은 8비트 중 위쪽 몇 비트만 구현한다 — STM32는 4비트(16단계), nRF52는 3비트, Cortex-M0는 2비트. 그래서 값은 왼쪽 정렬로 써야 하고, IPR에 0xFF를 써서 읽으면 비트 수를 알 수 있다.</p>
+<blockquote><p>Numerically lower means more urgent; 0 is the most urgent configurable priority, and Reset, NMI and HardFault have fixed negative priorities above it. Chips implement only the top bits of the 8-bit field: four bits on STM32, three on nRF52, two on any Cortex-M0. So the value is left-aligned — logical priority 5 on a four-bit part is 0x50 — and you can probe the number of bits by writing 0xFF to an unused priority register and counting the ones that stick. FreeRTOS does exactly that in <code>xPortStartScheduler</code>.</p></blockquote>
+<p><strong>Q.</strong> What is the difference between PRIMASK, FAULTMASK and BASEPRI?</p>
+<p><strong>A.</strong> PRIMASK는 설정 가능한 모든 예외를 막는다(NMI · HardFault만 남음). FAULTMASK는 HardFault까지 막고 예외 복귀 때 자동으로 풀린다. BASEPRI는 "이 값 이상"의 그룹 우선순위만 막고, 0이면 꺼진다. RTOS는 BASEPRI를 써서 급한 IRQ를 살려 둔다. Armv6-M에는 PRIMASK만 있다.</p>
+<blockquote><p>PRIMASK masks every exception with configurable priority, leaving only NMI and HardFault. FAULTMASK also masks HardFault, is privileged-only and is cleared automatically on exception return. BASEPRI masks only exceptions whose group priority is equal to or numerically greater than its value, and zero disables it; BASEPRI_MAX is a conditional write that can only make the mask stricter. RTOS ports on v7-M and v8-M Mainline use BASEPRI so the most urgent interrupts keep running; v6-M parts only have PRIMASK, so the kernel has to mask everything.</p></blockquote>
+<p><strong>Q.</strong> What is PRIGROUP and why do RTOSes want it set so that all bits are preemption bits?</p>
+<p><strong>A.</strong> PRIGROUP은 우선순위 바이트를 그룹(선점) 비트와 서브 비트로 나눈다. 선점은 그룹만으로 결정되고, 서브는 동시 pending 순서만 정한다. BASEPRI 비교도 그룹 기준이라서, 서브 비트가 생기면 임계구역이 막는 범위가 설계와 달라진다. 그래서 FreeRTOS는 PRIGROUP이 허용값을 넘으면 assert한다.</p>
+<blockquote><p>PRIGROUP splits each priority byte into a group, or preempt, field and a subpriority field. Only the group field decides preemption; the subpriority only orders interrupts that are pending at the same time. BASEPRI is also compared against the group priority, so if you introduce subpriority bits, the boundary the kernel masks moves — I measured that 0x40 stops passing a BASEPRI of 0x50 once PRIGROUP is 6. FreeRTOS therefore asserts that all implemented bits are preemption bits, which on an STM32 is the HAL's NVIC_PRIORITYGROUP_4.</p></blockquote>
+<p><strong>Q.</strong> Describe the pending and active states of an interrupt.</p>
+<p><strong>A.</strong> pending은 "들어가려고 줄 섰다", active는 "ISR이 실행 중이거나 더 급한 ISR에 선점당해 중첩 중"이다. 진입 때 하드웨어가 pending을 지우고 active를 세운다. 실행 중에 또 오면 active + pending이 되어 복귀 직후 tail-chain으로 다시 들어간다. pending은 비트 하나라서 여러 번 와도 한 번이다. disable된 IRQ도 pending은 된다.</p>
+<blockquote><p>Pending means the interrupt has been requested and is waiting for its turn; active means its handler is running or has been preempted by a more urgent one. On entry the hardware clears pending and sets active. If the source fires again during the handler, the interrupt becomes active and pending and is tail-chained right after the handler returns. Pending is a single bit, not a counter, so multiple events collapse into one. A disabled interrupt can still become pending, which is why drivers clear stale pending bits with ICPR before enabling.</p></blockquote>
+<p><strong>Q.</strong> How does Zephyr implement <code>irq_lock()</code> on Cortex-M, and what is a zero-latency interrupt there?</p>
+<p><strong>A.</strong> Mainline 코어에서 <code>irq_lock()</code>은 이전 BASEPRI를 키로 반환하고 <code>BASEPRI_MAX</code>로 "앱이 쓸 수 있는 가장 급한 IRQ 단계"까지 막는다. 그래서 기본 상태에서는 앱 IRQ가 전부 막힌다. <code>CONFIG_ZERO_LATENCY_IRQS</code>를 켜면 그 위에 단계가 예약되고, <code>IRQ_DIRECT_CONNECT</code>에 <code>IRQ_ZERO_LATENCY</code>를 준 IRQ만 그 단계에 들어가 lock을 무시한다. 커널 API는 못 쓴다.</p>
+<blockquote><p>On v7-M and v8-M Mainline, <code>irq_lock()</code> returns the previous BASEPRI as the key and raises the mask with BASEPRI_MAX to the most urgent priority available to application IRQs, so by default every application interrupt is masked. With CONFIG_ZERO_LATENCY_IRQS the kernel reserves a level above that, shifts normal IRQs and the lock level down by one, and only interrupts registered with IRQ_DIRECT_CONNECT and the IRQ_ZERO_LATENCY flag go there. They ignore irq_lock but must treat every kernel API as undefined behaviour. On M0-class parts it falls back to PRIMASK and there is no zero-latency option.</p></blockquote>
+<p><strong>Q.</strong> A 20 kHz FOC current loop sometimes runs 50 µs late. How would you investigate?</p>
+<p><strong>A.</strong> 먼저 그 ISR의 우선순위 바이트와 커널 선을 실제 레지스터로 읽어 선 위에 있는지 확인한다(4비트 칩의 시프트 실수가 흔하다). 선 아래라면 지연 최악값이 가장 긴 임계구역이니, GPIO 토글이나 사이클 카운터로 임계구역과 ISR 진입 시각을 잰다. PRIMASK를 쓰는 코드(벤더 HAL, 라이브러리)도 찾는다. 그다음 같은 우선순위 그룹의 다른 ISR이 막고 있지 않은지 본다.</p>
+<blockquote><p>First I read back the actual priority byte of the ADC or PWM interrupt and BASEPRI inside a critical section, because a missing shift on a four-bit part silently changes the level. If the loop sits below the kernel threshold, its worst-case latency is the longest masked section in the system, so I instrument critical sections and ISR entry with a cycle counter or GPIO toggles and look for anything near 50 µs, including vendor code that uses <code>__disable_irq</code>. I also check for another ISR in the same or a more urgent group. The fix is usually to move the loop above <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>, remove kernel calls from it, and pass results through a lock-free buffer or a bridge interrupt.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "선 위로 옮기면 무엇을 포기하나?" → 그 ISR에서 커널 API 전부. 태스크를 깨우려면 STIR로 다리 IRQ를 pend한다(예제 11 MODE=0, 8.16 µs).</p>
+<p><strong>Q.</strong> Why does PendSV run at the lowest priority?</p>
+<p><strong>A.</strong> 컨텍스트 스위치를 모든 ISR이 끝난 뒤 한 번만 하려고 한다. 가장 느긋하면 어떤 ISR 안에서 pend해도 중첩된 ISR이 모두 끝나야 들어간다. 자세한 것은 B4.</p>
+<blockquote><p>Because the context switch should happen exactly once, after every nested handler has finished. At the lowest priority PendSV can only be taken when no other exception is active, so any number of ISRs can request a switch and the scheduler runs once, on the way back to thread mode, without ever switching tasks underneath a half-finished handler.</p></blockquote>
+<hr>
+<h2 id="13-직접-해보기">13. 직접 해보기<a class="anchor" href="#13-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong>: 4비트 칩, PRIGROUP 3, BASEPRI = 0x60일 때 우선순위 바이트 0x40, 0x50, 0x60, 0x70인 IRQ 중 어느 것이 막히나? PRIGROUP 5라면? 정답/힌트: PRIGROUP 3에서는 0x60 · 0x70이 막힌다. PRIGROUP 5(그룹 [7:6])에서는 BASEPRI 0x60의 그룹 = 0x40이므로 0x40 · 0x50 · 0x60 · 0x70 <strong>모두</strong> 막힌다(예제 5의 마지막 두 줄과 같은 원리).</li></ol>
+<ol><li><strong>코드</strong>: 예제 2를 고쳐, IRQ 8의 ISR 안에서 <strong>자기보다 급한</strong> IRQ 10을 pend하고 IRQ 10의 ISR 안에서 IABR을 읽어 두 비트가 동시에 1인 것을 출력하라. 정답/힌트: <code>IABR(0) &amp; ((1u &lt;&lt; 8) | (1u &lt;&lt; 10))</code>가 0x500이어야 한다. ICSR.VECTACTIVE는 26(IRQ 10).</li></ol>
+<ol><li><strong>코드</strong>: <code>cpsid i</code> 대신 키 저장 패턴(<code>__get_PRIMASK</code> / <code>__set_PRIMASK</code>)으로 중첩 가능한 <code>lock()</code> / <code>unlock(key)</code>를 만들고, 두 겹으로 중첩했을 때 안쪽 unlock 뒤에도 PRIMASK가 1인지 확인하라. 정답/힌트: 바깥 key = 0, 안쪽 key = 1. 안쪽 unlock은 1을 복원하므로 계속 막혀 있어야 한다.</li></ol>
+<ol><li><strong>측정</strong>: 예제 10에 세 번째 모드 "임계구역 대신 IRQ 8만 ICER로 끄기"를 추가해, 0x10 · 0x40 두 IRQ의 최대 지연이 어떻게 되는지 그래프를 다시 그려라. 정답/힌트: 0x40(IRQ 8)만 임계구역 길이를 따라가고, 0x10은 평평하다. 다만 이 방식은 "커널 자료"를 보호하지 못한다 — 그 IRQ와만 공유하는 자료용이다.</li></ol>
+<ol><li><strong>설정</strong>: Zephyr 예제 13에서 <code>CONFIG_ZERO_LATENCY_LEVELS=2</code>로 빌드하고 <code>IRQ_DIRECT_CONNECT(10, 1, …, IRQ_ZERO_LATENCY)</code>로 바꾼 뒤 NVIC 바이트, SVC, <code>irq_lock()</code>의 BASEPRI를 예측하고 확인하라. 정답/힌트: <code>_EXC_SVC_PRIO = 2</code>, <code>_IRQ_PRIO_OFFSET = 3</code> → 일반 IRQ 0은 0x60, BASEPRI 0x60, SVC 0x40. 레벨이 2 이상이면 ZLI 우선순위는 인자 그대로(1 → 0x20). 실행해서 확인할 것(이 노트에서는 실행하지 않았다).</li></ol>
+<ol><li><strong>실칩 대비</strong>: QEMU <code>netduino2</code>(4비트)용으로 예제 9를 포팅하면(벡터 · 메모리 맵 · 타이머를 STM32F2로 바꿔야 한다) <code>configMAX_SYSCALL_INTERRUPT_PRIORITY = 0x20</code>과 <code>0x05</code>는 각각 어떻게 되나? 먼저 예측하고, 시간이 있으면 포팅해서 확인하라. 정답/힌트: 0x20은 <code>0x20 &amp; 0xF0 = 0x20</code>으로 동작한다. 0x05는 <code>0x05 &amp; 0xF0 = 0</code>이라 <code>configASSERT( ucMaxSysCallPriority )</code>에서 멈춘다. 또 0x20의 비트 0 검사는 8비트일 때만 하므로 4비트에서는 무관하다.</li></ol>
+<ol><li><strong>설계</strong>: 10.1의 드론 표를 3비트 칩(nRF52급, 8단계) + Zephyr(ZLI 1레벨)로 다시 짜라. 일반 IRQ에 남는 단계는 몇 개인가? 정답/힌트: 단계 0 = fault · ZLI, 1 = SVC, 2~7 = 일반 IRQ 6단계(<code>IRQ_PRIO_LOWEST = 8 - 2 - 1 = 5</code> → 앱 번호 0~5), 그중 7(0xE0)은 PendSV와 공유. 예제 13의 ZLI=1 출력과 같다.</li></ol>
+<hr>
+<h2 id="14-용어-사전">14. 용어 사전<a class="anchor" href="#14-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>NVIC</td><td>Nested Vectored Interrupt Controller</td><td>Cortex-M 코어에 붙은 인터럽트 컨트롤러. IRQ마다 enable · pending · active · priority</td></tr><tr><td>IRQ 번호 / 예외 번호</td><td>IRQn / exception number</td><td>외부 IRQ n의 예외 번호는 16 + n. IPSR · VECTACTIVE는 예외 번호를 보여 준다</td></tr><tr><td>ISER / ICER</td><td>Interrupt Set / Clear-Enable Register</td><td>1을 쓰면 켜고 / 끈다. read-modify-write 불필요</td></tr><tr><td>ISPR / ICPR</td><td>Interrupt Set / Clear-Pending Register</td><td>소프트웨어로 pend / 묵은 pending 지우기</td></tr><tr><td>IABR</td><td>Interrupt Active Bit Register</td><td>ISR 실행 중(또는 선점당해 중첩 중)이면 1. 읽기 전용</td></tr><tr><td>IPR</td><td>Interrupt Priority Register</td><td>IRQ마다 8비트 칸. 구현 비트는 위쪽</td></tr><tr><td>STIR</td><td>Software Trigger Interrupt Register</td><td>IRQ 번호를 쓰면 그 IRQ를 pend</td></tr><tr><td>SHPR1~3</td><td>System Handler Priority Register</td><td>MemManage ~ SysTick의 우선순위 칸</td></tr><tr><td>ICSR</td><td>Interrupt Control and State Register</td><td>VECTACTIVE · VECTPENDING · PENDSVSET 등</td></tr><tr><td>AIRCR · PRIGROUP</td><td>Application Interrupt and Reset Control Register</td><td>비트 10:8 = 그룹 / 서브 분할. 쓸 때 VECTKEY 0x05FA</td></tr><tr><td><code>__NVIC_PRIO_BITS</code></td><td>구현 우선순위 비트 수</td><td>벤더 헤더 정의. CMSIS가 시프트에 쓴다</td></tr><tr><td>그룹 우선순위</td><td>group / preempt priority</td><td>선점을 결정하는 위쪽 비트</td></tr><tr><td>서브 우선순위</td><td>subpriority</td><td>동시 pending 순서만 정하는 아래쪽 비트</td></tr><tr><td>실행 우선순위</td><td>execution priority</td><td>active 예외들과 마스크가 만드는 CPU의 현재 기준선</td></tr><tr><td>PRIMASK</td><td>Priority Mask</td><td>1비트. 설정 가능한 모든 예외를 막음 (<code>cpsid i</code>)</td></tr><tr><td>FAULTMASK</td><td>Fault Mask</td><td>1비트. HardFault까지 막음. 예외 복귀 때 자동 해제</td></tr><tr><td>BASEPRI</td><td>Base Priority</td><td>이 값 이상(느긋한 쪽) 그룹 우선순위를 막음. 0 = 꺼짐</td></tr><tr><td>BASEPRI_MAX</td><td>BASEPRI 조건부 쓰기</td><td>더 엄격해지는 쓰기만 적용</td></tr><tr><td>tail-chaining</td><td>꼬리 물기</td><td>ISR 복귀 직후 pending 예외로 바로 진입(스태킹 생략, B2)</td></tr><tr><td>zero-latency ISR</td><td>커널이 막지 않는 ISR</td><td>임계구역 BASEPRI보다 급한 ISR. 커널 API 금지</td></tr><tr><td>kernel-aware ISR</td><td>커널이 막을 수 있는 ISR</td><td>FromISR API 허용. 임계구역만큼 지연</td></tr><tr><td><code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code></td><td>FreeRTOS 임계구역 BASEPRI 값</td><td>FromISR이 허용되는 가장 급한 우선순위 바이트</td></tr><tr><td><code>configKERNEL_INTERRUPT_PRIORITY</code></td><td>커널 IRQ 우선순위 (옛 설정)</td><td>V10.6.0부터 ARMv7-M 포트에서 사용 안 함, 255 고정</td></tr><tr><td>다리 IRQ</td><td>bridge interrupt</td><td>zero-latency ISR이 STIR로 pend하는 kernel-aware IRQ. 대신 FromISR을 부른다</td></tr><tr><td>ZLI</td><td>Zero-Latency Interrupt (Zephyr)</td><td><code>CONFIG_ZERO_LATENCY_IRQS</code> + <code>IRQ_ZERO_LATENCY</code>로 만드는 lock 무시 IRQ</td></tr><tr><td><code>_IRQ_PRIO_OFFSET</code></td><td>Zephyr 예약 단계 수</td><td>앱 우선순위에 더해지는 오프셋 (fault 1 + ZLI 레벨)</td></tr><tr><td>RAZ/WI</td><td>Read-As-Zero / Write-Ignored</td><td>구현 안 된 비트의 동작</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-요약-체크리스트">15. 요약 &amp; 체크리스트<a class="anchor" href="#15-요약-체크리스트" aria-label="link">#</a></h2>
+<p>NVIC는 IRQ마다 enable · pending · active · priority 네 칸을 가진 표이고, 인터럽트는 ① enable + pending, ② pending 중 가장 급함(그룹 → 서브 → 번호), ③ CPU 실행 우선순위보다 엄격히 급함이라는 세 관문을 지나야 들어온다. 우선순위는 <strong>숫자가 작을수록 급하고</strong>, 칩은 8비트 중 위쪽 3~4비트만 구현하므로 값은 왼쪽 정렬로 쓴다(QEMU mps2만 8비트 — 실칩 모델은 4비트, M0는 2비트였다). PRIGROUP은 선점에 쓰는 그룹 비트를 줄이고, BASEPRI 비교도 그룹 기준이라 RTOS는 서브 비트를 허용하지 않는다. 마스크는 PRIMASK(전부), FAULTMASK(HardFault까지, 자동 해제), BASEPRI(선 아래만, 0이면 꺼짐) 세 가지다. FreeRTOS Cortex-M3/M4/M7 포트는 임계구역에서 BASEPRI = <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>(lab 0x20)로 올린다 — 그 선보다 급한 IRQ는 임계구역 200 µs 동안에도 0.16 µs에 들어왔고, 선 아래는 임계구역 길이만큼 늦었다. 선 위 ISR이 FromISR을 부르면 <code>port.c:803</code> assert, PRIGROUP이 잘못되면 <code>port.c:819</code> assert다. <code>configKERNEL_INTERRUPT_PRIORITY</code>는 V10.6.0부터 ARMv7-M 포트에서 쓰이지 않는다. Zephyr는 <code>irq_lock()</code>이 BASEPRI_MAX로 앱 IRQ 전부를 막고, <code>CONFIG_ZERO_LATENCY_IRQS</code> + <code>IRQ_DIRECT_CONNECT(…, IRQ_ZERO_LATENCY)</code>로만 lock을 무시하는 IRQ를 만든다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>NVIC 레지스터 7종(ISER · ICER · ISPR · ICPR · IABR · IPR · STIR)의 역할과 "1 쓰기" 규칙을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>pending · active 네 상태와, disable된 IRQ도 pending이 된다는 것을 예제로 보일 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>0xFF 쓰기 · 읽기로 구현 비트 수를 알아내고, 4비트 칩에서 0x05가 왜 최상위가 되는지 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"작을수록 급하다"와 FreeRTOS 태스크 우선순위(클수록 급함)의 차이를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>같은 그룹 우선순위는 선점하지 않고, 동시 pending은 그룹 → 서브 → 번호 순서임을 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>PRIGROUP이 선점과 BASEPRI 경계를 바꾸는 것을 보였고, FreeRTOS가 왜 거부하는지 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>PRIMASK · FAULTMASK · BASEPRI · BASEPRI_MAX가 막는 범위와 자동 해제 여부를 표로 그릴 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>의 뜻, 0이면 안 되는 이유, 4비트 칩에서의 값(5 &lt;&lt; 4)을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>configKERNEL_INTERRUPT_PRIORITY</code>가 V10.6.0 이후 ARMv7-M 포트에서 무시된다는 것을 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>zero-latency ISR에서 태스크를 깨우는 다리 IRQ 패턴을 코드로 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Zephyr <code>irq_lock()</code>이 BASEPRI_MAX를 쓰는 것과 ZLI를 켜는 세 조건을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"인터럽트 최악 지연 = 그것을 막을 수 있는 가장 긴 임계구역"을 측정 그래프로 설명할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="bare-metal-노트와의-관계">Bare-Metal 노트와의 관계<a class="anchor" href="#bare-metal-노트와의-관계" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>BM ID</th><th>BM 주제</th><th>이 노트의 해당 절</th><th>Bare-Metal 쪽에 남길 내용</th></tr></thead><tbody><tr><td>BM C5</td><td>NVIC — 우선순위 비트 수, PRIGROUP</td><td>§1 레지스터 지도, §3 구현 비트 · 왼쪽 정렬 · 실칩 프로브, §5 PRIGROUP</td><td>링크만. RTOS 없이 CMSIS <code>NVIC_SetPriority</code> · <code>NVIC_SetPriorityGrouping</code>으로 제품 전체 우선순위 표를 짜는 절차와 벤더 HAL 기본값 점검 목록</td></tr><tr><td>BM C5</td><td>NVIC — PRIMASK · BASEPRI · FAULTMASK</td><td>§6 마스크 세 가지, 예제 6 · 10</td><td>링크만. RTOS 없는 슈퍼 루프에서 BASEPRI로 "부분 임계구역"을 직접 만드는 작은 라이브러리(키 저장 · 복원)</td></tr><tr><td>BM C5</td><td>NVIC — pending · active 비트, 소프트웨어 트리거</td><td>§2 상태 기계, 예제 2 · 4, §2.3</td><td>링크만. 빈 IRQ를 STIR로 pend하는 "bare-metal 소프트웨어 인터럽트 = 미뤄 둔 일 큐" 설계</td></tr><tr><td>BM C4</td><td>예외 진입 · 복귀 (참고)</td><td>§2 tail-chaining 언급만 — 주인은 RTOS B2</td><td>B2를 링크</td></tr></tbody></table></div>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul><li>Arm, "Armv7-M Architecture Reference Manual" (ARM DDI 0403) — 예외 모델(우선순위, 그룹 · 서브, 실행 우선순위), NVIC 레지스터, 특수 레지스터(PRIMASK · FAULTMASK · BASEPRI · BASEPRI_MAX) 정의. https://developer.arm.com/documentation/ddi0403/latest/</li><li>Arm, "Armv6-M Architecture Reference Manual" (ARM DDI 0419) — 2비트 우선순위, PRIMASK만. https://developer.arm.com/documentation/ddi0419/latest/</li><li>Arm, "Cortex-M3 Devices Generic User Guide" (DUI 0552) — NVIC 절, System Control Block 절(AIRCR · SHPR · ICSR). https://developer.arm.com/documentation/dui0552/latest/</li><li>ST, "PM0214 STM32 Cortex-M4 MCUs and MPUs programming manual" — STM32의 4비트 NVIC 구현.</li><li>FreeRTOS, "Running the RTOS on a ARM Cortex-M Core" — <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>, 우선순위 비트, PRIGROUP 설명. https://www.freertos.org/RTOS-Cortex-M3-M4.html</li><li>FreeRTOS Kernel V11.3.2 소스(lab <code>/var/rtoslab/src/FreeRTOS-Kernel</code>): <code>portable/GCC/ARM_CM3/port.c</code>(<code>xPortStartScheduler</code>, <code>vPortValidateInterruptPriority</code>, <code>xPortPendSVHandler</code>, <code>xPortSysTickHandler</code>, <code>vPortEnterCritical</code>), <code>portable/GCC/ARM_CM3/portmacro.h</code>(<code>vPortRaiseBASEPRI</code>, <code>ulPortRaiseBASEPRI</code>), <code>portable/GCC/ARM_CM7/r0p1/port.c</code>(erratum 837070), <code>portable/GCC/ARM_CM0/portmacro.h</code>, <code>History.txt</code>(V10.6.0 항목: <code>configKERNEL_INTERRUPT_PRIORITY</code> obsolete), <code>examples/template_configuration/FreeRTOSConfig.h</code>.</li><li>Zephyr v4.4.2 소스(lab <code>/var/rtoslab/zephyrproject/zephyr</code>): <code>include/zephyr/arch/arm/asm_inline_gcc.h</code>(<code>arch_irq_lock</code>, <code>arch_zli_lock</code>), <code>include/zephyr/arch/arm/cortex_m/exception.h</code>(<code>_IRQ_PRIO_OFFSET</code> 등), <code>include/zephyr/arch/arm/irq.h</code>(<code>ARCH_IRQ_CONNECT</code>, <code>IRQ_ZERO_LATENCY</code>), <code>arch/arm/core/cortex_m/irq_manage.c</code>(<code>arm_irq_priority_set</code>), <code>arch/arm/core/cortex_m/Kconfig</code>(<code>ZERO_LATENCY_IRQS</code>), <code>arch/arm/include/cortex_m/exception.h</code>(<code>z_arm_exc_setup</code>), <code>boards/arm/mps2/mps2_base.dtsi</code>.</li><li>Zephyr 문서, "Interrupts" — zero-latency interrupts, direct ISRs. https://docs.zephyrproject.org/latest/kernel/services/interrupts.html</li><li>Joseph Yiu, "The Definitive Guide to Arm Cortex-M3 and Cortex-M4 Processors", 3rd ed. (Newnes, 2014) — 예외 · 인터럽트 장(NVIC, 우선순위 그룹, 마스크 레지스터).</li><li>이 노트의 연결: RTOS A7 §7(하이브리드 측정), B1, B2, B4, C7, E1, E2, EL H6(GIC).</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-25_B2_exception_entry_return.html"><span class="dir">← 이전</span><span class="nm">B2. 예외 진입 · 복귀 — 하드웨어가 8워드를 대신 저장해 주기 때문에 ISR이 그냥 C 함수가 된다</span></a><a class="next" href="2026-10-25_B4_systick_pendsv_svc.html"><span class="dir">다음 →</span><span class="nm">B4. RTOS가 쓰는 세 예외 (SysTick · PendSV · SVC) — SysTick이 시간을 알리고, PendSV가 미뤄 둔 전환을 실행하고, SVC가 커널의 문을 연다</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-인터럽트가-cpu에-들어오기까지-세-관문">0. 큰 그림 — 인터럽트가 CPU에 들어오기까지 세 관문</a></li><li class="l3"><a href="#실습-환경-한-줄">실습 환경 한 줄</a></li><li class="l3"><a href="#도우미-헤더-b3-h">도우미 헤더 b3.h</a></li><li class="l2"><a href="#1-nvic-레지스터-지도-인터럽트마다-네-칸">1. NVIC 레지스터 지도 — 인터럽트마다 네 칸</a></li><li class="l3"><a href="#1-1-직관">1.1 직관</a></li><li class="l3"><a href="#1-2-레지스터-표">1.2 레지스터 표</a></li><li class="l3"><a href="#예제-1-nvic-탐색-irq-줄-수-구현-비트-수-리셋-기본값">예제 1 — NVIC 탐색: IRQ 줄 수, 구현 비트 수, 리셋 기본값</a></li><li class="l2"><a href="#2-pending과-active-인터럽트-하나의-상태-기계">2. pending과 active — 인터럽트 하나의 상태 기계</a></li><li class="l3"><a href="#2-1-직관">2.1 직관</a></li><li class="l3"><a href="#예제-2-네-상태를-레지스터로-직접-보기">예제 2 — 네 상태를 레지스터로 직접 보기</a></li><li class="l3"><a href="#2-2-레벨-인터럽트와-isr이-안-끝나는-버그">2.2 레벨 인터럽트와 "ISR이 안 끝나는" 버그</a></li><li class="l3"><a href="#2-3-소프트웨어-트리거-세-가지">2.3 소프트웨어 트리거 세 가지</a></li><li class="l2"><a href="#3-우선순위-숫자-구현-비트-수-왼쪽-정렬-작을수록-급하다">3. 우선순위 숫자 — 구현 비트 수, 왼쪽 정렬, "작을수록 급하다"</a></li><li class="l3"><a href="#3-1-직관">3.1 직관</a></li><li class="l3"><a href="#3-2-작을수록-급하다-왜-이게-함정인가">3.2 "작을수록 급하다" — 왜 이게 함정인가</a></li><li class="l3"><a href="#예제-3-실제-칩-모델에서-같은-0xff-프로브">예제 3 — 실제 칩 모델에서 같은 0xFF 프로브</a></li><li class="l3"><a href="#3-3-실제-칩에서-비트-수를-알아내는-법">3.3 실제 칩에서 비트 수를 알아내는 법</a></li><li class="l3"><a href="#3-4-흔한-함정-다섯">3.4 흔한 함정 다섯</a></li><li class="l2"><a href="#4-선점-규칙-누가-누구를-끊나">4. 선점 규칙 — 누가 누구를 끊나</a></li><li class="l3"><a href="#4-1-규칙">4.1 규칙</a></li><li class="l3"><a href="#예제-4-끼어드는-경우와-기다리는-경우">예제 4 — 끼어드는 경우와 기다리는 경우</a></li><li class="l2"><a href="#5-prigroup-그룹-선점-우선순위와-서브-우선순위">5. PRIGROUP — 그룹(선점) 우선순위와 서브 우선순위</a></li><li class="l3"><a href="#5-1-정의">5.1 정의</a></li><li class="l3"><a href="#예제-5-prigroup을-바꾸면-선점이-사라진다">예제 5 — PRIGROUP을 바꾸면 선점이 사라진다</a></li><li class="l3"><a href="#5-2-rtos가-prigroup을-싫어하는-이유">5.2 RTOS가 PRIGROUP을 싫어하는 이유</a></li><li class="l2"><a href="#6-마스크-세-가지-primask-faultmask-basepri">6. 마스크 세 가지 — PRIMASK · FAULTMASK · BASEPRI</a></li><li class="l3"><a href="#6-1-직관">6.1 직관</a></li><li class="l3"><a href="#예제-6-마스크마다-어떤-우선순위가-통과하나">예제 6 — 마스크마다 어떤 우선순위가 통과하나</a></li><li class="l3"><a href="#6-2-명령어와-cmsis-함수">6.2 명령어와 CMSIS 함수</a></li><li class="l3"><a href="#6-3-마스크-vs-icer-irq-끄기-vs-주변장치-인터럽트-끄기">6.3 마스크 vs ICER(IRQ 끄기) vs 주변장치 인터럽트 끄기</a></li><li class="l3"><a href="#6-4-배리어-isb는-언제-필요한가">6.4 배리어: isb는 언제 필요한가</a></li><li class="l2"><a href="#7-freertos-configmax_syscall_interrupt_priority와-configkernel_interrupt_priority">7. FreeRTOS — configMAX_SYSCALL_INTERRUPT_PRIORITY와 configKERNEL_INTERRUPT_PRIORITY</a></li><li class="l3"><a href="#7-1-두-설정의-뜻-cortex-m3-m4-m7-포트-기준">7.1 두 설정의 뜻 (Cortex-M3/M4/M7 포트 기준)</a></li><li class="l3"><a href="#예제-7-포트가-실제로-프로그래밍한-값-읽기">예제 7 — 포트가 실제로 프로그래밍한 값 읽기</a></li><li class="l3"><a href="#예제-8-포트-내부의-정적-변수를-gdb로-읽기">예제 8 — 포트 내부의 정적 변수를 gdb로 읽기</a></li><li class="l3"><a href="#예제-9-0x20-선을-자로-잰다-우선순위별로-임계구역-안에서-pend">예제 9 — 0x20 선을 자로 잰다: 우선순위별로 임계구역 안에서 pend</a></li><li class="l3"><a href="#예제-10-임계구역-길이를-늘리면-basepri-vs-primask-측정-차트">예제 10 — 임계구역 길이를 늘리면: BASEPRI vs PRIMASK (측정 차트)</a></li><li class="l3"><a href="#예제-11-configassert가-잡아-주는-세-가지-실수">예제 11 — configASSERT가 잡아 주는 세 가지 실수</a></li><li class="l3"><a href="#예제-12-4비트-칩에서의-숫자-표-python">예제 12 — 4비트 칩에서의 숫자 표 (Python)</a></li><li class="l2"><a href="#8-zephyr-irq_connect-우선순위-irq_lock-basepri-zero-latency-irq">8. Zephyr — IRQ_CONNECT 우선순위, irq_lock() = BASEPRI, zero-latency IRQ</a></li><li class="l3"><a href="#8-1-소스에서-확인한-규칙-v4-4-2">8.1 소스에서 확인한 규칙 (v4.4.2)</a></li><li class="l3"><a href="#예제-13-zephyr-우선순위-바이트-irq_lock-의-basepri-zli">예제 13 — Zephyr: 우선순위 바이트, irq_lock()의 BASEPRI, ZLI</a></li><li class="l2"><a href="#9-rtos-커널-안에서는-무슨-일이-일어나나">9. RTOS 커널 안에서는 무슨 일이 일어나나</a></li><li class="l3"><a href="#freertos-v11-3-2-portable-gcc-arm_cm3-port-c-portmacro-h">FreeRTOS V11.3.2 (portable/GCC/ARM_CM3/port.c, portmacro.h)</a></li><li class="l3"><a href="#zephyr-v4-4-2">Zephyr v4.4.2</a></li><li class="l3"><a href="#예제-14-컴파일된-임계구역-코드-보기">예제 14 — 컴파일된 임계구역 코드 보기</a></li><li class="l2"><a href="#10-실무에서-다시-보기">10. 실무에서 다시 보기</a></li><li class="l3"><a href="#10-1-드론-비행-제어기-stm32h7급-4비트-freertos-또는-nuttx">10.1 드론 비행 제어기 (STM32H7급, 4비트, FreeRTOS 또는 NuttX)</a></li><li class="l3"><a href="#10-2-로봇-관절-모터-컨트롤러-foc-20-khz">10.2 로봇 관절 모터 컨트롤러 (FOC 20 kHz)</a></li><li class="l3"><a href="#10-3-linux-soc-옆-센서-허브-zephyr">10.3 Linux SoC 옆 센서 허브 (Zephyr)</a></li><li class="l3"><a href="#10-4-ssd-컨트롤러-펌웨어-don의-경험">10.4 SSD 컨트롤러 펌웨어 (Don의 경험)</a></li><li class="l2"><a href="#11-흔한-실수와-증상">11. 흔한 실수와 증상</a></li><li class="l2"><a href="#12-면접에서-이렇게-말한다">12. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#13-직접-해보기">13. 직접 해보기</a></li><li class="l2"><a href="#14-용어-사전">14. 용어 사전</a></li><li class="l2"><a href="#15-요약-체크리스트">15. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#bare-metal-노트와의-관계">Bare-Metal 노트와의 관계</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>
