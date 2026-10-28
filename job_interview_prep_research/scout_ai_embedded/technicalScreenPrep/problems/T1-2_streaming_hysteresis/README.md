@@ -3,6 +3,24 @@
 > **ID**: T1-2 · **Priority**: P0 · **Pattern**: state machine + hysteresis + consecutive-N counter · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T1-2` / `./run.sh T1-2 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 샘플이 하나씩 들어올 때마다 호출되는 과열 감지기를 만들고, 상태가 바뀌는 바로 그 샘플에서만 이벤트(`EV_OVERHEAT` / `EV_RECOVERED`)를 돌려준다.
+- **상황**: 타이머 인터럽트(예: 100 ms마다)에서 센서 온도가 한 개씩 도착한다. 온도는 0.1 °C 단위 정수(`850` = 85.0 °C). 상태는 O(1)만 쓴다.
+- **입력**: `det_init(d, high, low, n_confirm)` — 과열 기준 `high`, 복귀 기준 `low`(둘 다 0.1 °C), 연속 확인 횟수 `n_confirm`(1~255). `det_update(d, temp_c10)` — 새 샘플 하나. `Detector` 구조체 내용은 직접 설계한다.
+- **출력**: `det_init`은 설정이 유효하면 `true`, 아니면 `false`. `det_update`는 그 샘플에서 생긴 이벤트 `EV_NONE` / `EV_OVERHEAT` / `EV_RECOVERED` 중 하나(레벨이 아니라 엣지).
+- **규칙**
+  - NORMAL에서 `temp >= high`가 `n_confirm`번 **연속**되면 OVERHEATED로 바꾸고 그 샘플에서 `EV_OVERHEAT`.
+  - OVERHEATED에서 `temp <= low`가 `n_confirm`번 연속되면 NORMAL로 바꾸고 그 샘플에서 `EV_RECOVERED`.
+  - 연속을 깨는 샘플은 카운터를 리셋. 나머지는 전부 `EV_NONE`이고, 과열 중에 `EV_OVERHEAT`를 또 내지 않는다.
+  - `TEMP_INVALID`(`INT16_MIN`)는 센서 에러: `EV_NONE` 반환 + 카운터 리셋.
+  - `det_init`은 `low >= high` 또는 `n_confirm == 0`이면 `false`. 초기화가 거부된 감지기는 절대 이벤트를 내지 않는다. `malloc` 금지.
+- **예제 풀어 읽기**: `high = 850`, `low = 800`, `n_confirm = 3`. index 1·2·3의 860·870·880이 세 번 연속 `>= 850` → index 3에서 `EV_OVERHEAT`. index 6·7·8의 790·780·770이 세 번 연속 `<= 800` → index 8에서 `EV_RECOVERED`. `900 700 900 700`처럼 튀는 값은 연속 3을 못 채워 이벤트 없음.
+- **놓치기 쉬운 것**: 계속 뜨거워도 `EV_OVERHEAT`는 딱 한 번, 과열 중 `low`와 `high` 사이 값(820)이 복귀 연속을 리셋, `TEMP_INVALID`가 과열 연속을 끊음, 경계값 850 / 800 포함(`>=`, `<=`), `n_confirm == 1`, 거부된 `det_init` 뒤 `det_update(900)`도 `EV_NONE`.
+- **구현할 함수**: `Detector` 구조체 설계, `det_init`(설정 검증 + 상태 초기화), `det_update`(샘플 하나 처리 + 이벤트 반환).
+
 ## 1. Problem
 
 Temperature samples from one sensor arrive **one at a time** (for example, from a timer interrupt every 100 ms). Temperatures are in tenths of a degree Celsius (`850` means 85.0 °C).

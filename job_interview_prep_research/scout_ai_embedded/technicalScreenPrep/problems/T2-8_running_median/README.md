@@ -3,6 +3,28 @@
 > **ID**: T2-8 · **Priority**: P2 · **Pattern**: ring buffer + sorted window (insertion sort) · two heaps · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T2-8` / `./run.sh T2-8 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 최근 `W`개 샘플의 median을 샘플이 들어올 때마다 돌려주는 running median filter를 만든다.
+- **상황**: 로봇 팔의 thermistor 채널이 모터 PWM 노이즈로 가끔 엉뚱한 값(ADC spike)을 하나씩 낸다. moving average는 spike를 window 전체에 퍼뜨리므로 median으로 걸러낸다. 값은 `int16_t`, 0.1 °C 단위.
+- **입력**
+  - `med_init(m, w)`: window 크기 `w`.
+  - `med_push(m, x)`: 새 샘플 `x`.
+  - struct `MedianFilter`: `ring[MED_MAX_W]`(도착 순서, 가장 오래된 샘플을 알기 위함), `sorted[MED_MAX_W]`(같은 샘플을 오름차순으로), `w`, `head`(ring의 다음 쓰기 위치 = 꽉 찼을 때 가장 오래된 샘플), `count`(현재 window 안 샘플 수).
+- **출력**: `med_init`은 `1 <= w <= MED_MAX_W`(15)이면 `true`, 아니면 `false`. `med_push`는 현재 window의 median(`int16_t`).
+- **규칙**
+  - window가 이미 `w`개면 가장 오래된 샘플을 빼고 새 샘플을 넣는다.
+  - warm-up(샘플이 `w`개 미만): 있는 샘플만으로 median.
+  - 개수가 짝수면 **lower median** `sorted[(count - 1) / 2]`(평균 내지 않음, 항상 실제 샘플, overflow 없음).
+  - `malloc` 금지. W가 작으니 push당 O(W)면 충분.
+- **예제 풀어 읽기**: `W = 5`, 입력 `250 252 251 900 253 254 250 249 251` → 출력 `250 250 251 251 252 253 253 253 251`. 예: 4번째 push 후 window {250, 251, 252, 900}은 짝수라 lower median 251. 마지막 push에서 900이 window에서 빠진다. 900 spike는 출력에 한 번도 안 나온다(5-sample 평균이면 i = 3..7에서 413.25, 381.2, 382, 381.6, 381.2로 spike에 오염됨).
+- **놓치기 쉬운 것**: `w = 0`, `w = 16`은 `false`, `W = 1`은 그대로 통과(pass-through), **중복 값**이 있을 때 가장 오래된 샘플 제거 시 한 개만 지우기(window {5,5,9} → push 9 → 9, push 1 → 9, push 1 → 1), 음수와 `INT16_MIN`/`INT16_MAX`, 꽉 찬 window로 64개 샘플을 brute-force median과 비교.
+- **구현할 함수**
+  - `med_init(m, w)`: window 크기 검사와 초기화.
+  - `med_push(m, x)`: 샘플 추가(+ 가장 오래된 것 제거) 후 median 반환.
+
 ## 1. Problem
 
 A thermistor channel on a robot arm occasionally returns a single bogus reading — an ADC spike caused by motor PWM noise. A moving average smears the spike over the whole window, so filter the channel with the **median of the last `W` samples** instead (LeetCode 295 / 480 flavor).

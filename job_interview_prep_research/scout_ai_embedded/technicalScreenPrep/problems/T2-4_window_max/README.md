@@ -3,6 +3,22 @@
 > **ID**: T2-4 · **Priority**: P1 · **Pattern**: monotonic deque in a fixed array (LeetCode 239) · **Time**: 25 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T2-4` / `./run.sh T2-4 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 샘플이 하나 들어올 때마다 "최근 `w`개 샘플의 최댓값"을 amortized O(1)로 돌려주는 sliding window max(monotonic deque)를 고정 배열로 만든다.
+- **상황**: 모터 드라이버 열 감시기가 tick마다 온도 샘플 하나를 받는다. 팬 제어기는 평균이 아니라 최근 `w`개의 **최고 온도**에 반응한다. 매번 `w`개를 다시 훑는 것은 너무 느리다.
+- **입력**: `wm_init(m, w)`의 창 길이 `w`(샘플 개수, `1 <= w <= 16`), `wm_push(m, temp)`의 온도 `temp`(`int16_t`, 0.1 °C, 음수 가능). 구조체 `WinMax`(`w`, 다음 샘플 번호 `seq`, free-running `front`/`back`, `dq[16]`).
+- **출력**: `wm_push`는 최근 `w`개 샘플의 최댓값을 반환한다. 아직 `w`개가 안 모였으면 지금까지 들어온 전체의 최댓값.
+- **규칙**
+  - deque는 구조체 안의 `W_MAX`(16)칸 배열에 둔다. `malloc` 없음.
+  - push 한 번은 amortized O(1).
+  - `W_MAX`는 2의 거듭제곱이라 deque 칸 번호는 `DQ_MASK`로 마스킹.
+- **예제 풀어 읽기**: `w = 3`, 입력 810 790 830 820 800 780 850. 처음 두 번은 지금까지의 최대 810, 810. 830이 오면 830. 이후 창(830,820,800)까지 830 유지. 780이 들어오면 830이 창 밖으로 나가 창(820,800,780)의 최대 820. 850이 오면 850. 결과 810 810 830 830 830 820 850.
+- **놓치기 쉬운 것**: `w = 1`(현재 샘플이 곧 최대), 계속 감소하는 입력에서 `w = 16`이면 deque가 정확히 `w`개까지 차는 경우, 음수 온도와 같은 값(동점), 무작위 2000개 입력을 brute force와 비교, `seq`를 `UINT32_MAX - 1`에서 시작해 번호가 wrap하는 경우.
+- **구현할 함수**: `wm_init`(창 길이 설정, 상태 초기화), `wm_push`(샘플 추가 후 창 최댓값 반환).
+
 ## 1. Problem
 
 The motor-driver thermal monitor gets one temperature sample per tick and must report the **peak of the last `w` samples** after every sample (the fan controller reacts to the peak, not the average). Rescanning `w` samples on every tick is too slow at high rates; make each push **amortized O(1)**.

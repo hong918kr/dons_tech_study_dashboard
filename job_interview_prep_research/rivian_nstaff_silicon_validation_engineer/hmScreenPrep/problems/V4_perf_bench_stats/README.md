@@ -3,6 +3,51 @@
 > **ID**: V4 · **Priority**: P0 · **Pattern**: wrap-safe delta + overhead calibration + nearest-rank percentile + overflow-safe integer math · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V4` / `./run.sh V4 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: 32-bit cycle counter 하나만으로 블록 성능을 재는 **micro-benchmark 라이브러리**(측정 overhead 보정, 반복 측정, 통계, MB/s 환산)를 짭니다.
+
+**상황**
+- validation 팀이 새 SoC의 블록(CPU memcpy, DMA copy, NPU kernel)을 **characterize**(성능 특성 측정)할 때 쓰는 라이브러리입니다.
+- 쓸 수 있는 타이머는 `read_cycles()` 하나뿐입니다. **free-running 32-bit cycle counter**라서 2^32에서 **wrap**(0으로 되돌아감)됩니다.
+- counter를 읽는 것 자체에도 몇 cycle이 듭니다 (**measurement overhead**).
+- HAL은 `stub.c` 아래쪽의 **fake**입니다. 테스트는 counter를 `0xFFFFFFFF` 근처에서 시작시키거나, 특정 read에 추가 비용을 넣거나(인터럽트 흉내), 측정 대상 op의 호출마다 걸리는 시간을 지정할 수 있습니다.
+- 상수: `CPU_HZ` = 1.5 GHz, `CPU_MHZ` = 1500, `BENCH_CAL_K` = 8.
+- **nearest-rank percentile**: 정렬한 뒤 `rank = ceil(p * n / 100)`번째 값(`sorted[rank - 1]`)을 그 percentile로 씀.
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `bench_calibrate(k)` | **빈 측정**의 비용 | `t0 = read; t1 = read; t1 - t0`을 `k`번 해서 **최솟값**. `k == 0` → `0` |
+| `bench_run(op, ctx, iters, warmup, samples, overhead_out)` | op를 반복 측정 | 아래 3단계. `0` 반환. `op == NULL` 또는 `samples == NULL && iters > 0`이면 `-EINVAL` |
+| `bench_stats(samples, n, outlier_x, st)` | 샘플 통계 → `BenchStats` | `min`, `max`, `mean`(64-bit 누적, 내림), `p50`·`p99`(nearest rank), `outliers` = `p50 * outlier_x`보다 **엄격히 큰** 샘플 수. `samples`는 호출자 버퍼라 제자리 정렬 허용. `malloc` 금지. `n == 0` 또는 NULL 포인터 → `-EINVAL`, `*st`는 **건드리지 않음** |
+| `bench_mbps(bytes_per_op, cycles_per_op, cpu_mhz)` | 처리량(MB/s) 계산 | 1 MB = 10^6 bytes. `bytes * cpu_mhz / cycles`를 **내림**. 어떤 입력에서도 **64-bit overflow 없이**. `UINT64_MAX`에서 saturate. `cycles_per_op == 0` → `0` |
+
+**`bench_run`의 3단계**
+1. `overhead = bench_calibrate(BENCH_CAL_K)`. `overhead_out`이 NULL이 아니면 거기에 저장.
+2. `op(ctx)`를 `warmup`번 호출 (측정 안 함).
+3. `iters`번 반복: `t0 = read; op(ctx); t1 = read;` → `samples[i] = (t1 - t0) - overhead`. **wrap-safe**하게, 0 아래로는 **clamp**.
+
+**예시를 말로 풀면**
+- **read 비용 20 cycle, op는 정확히 1000 cycle**: `bench_run(op, ctx, 16, 4, ...)` → `ovh = 20`, op 호출은 warmup 4 + 측정 16 = **20번**, 샘플은 전부 1000 (측정값 1020에서 overhead 20을 뺌). 통계도 min = max = mean = p50 = p99 = 1000, 1000 > 2000인 샘플이 없으니 outliers = 0.
+- **counter가 0 - 1100에서 시작 (wrap 발생)**: iteration 2에서 `t0 = 0xFFFFFF9C`(wrap 100 cycle 전), `t1 = 0x000000DC`(wrap 후 220). 실제 경과는 100 + 220 = `0x140` = 320, overhead를 빼면 **300**.
+- **샘플 100개** (1000 × 95, 1500 × 3, 5000 × 2, `outlier_x = 2`):
+  - mean = (95000 + 4500 + 10000) / 100 = **1095**
+  - p50: rank = 50 → 정렬 후 50번째 = 1000. p99: rank = 99 → 99번째 = 5000
+  - outlier 기준은 1000 × 2 = 2000 초과 → 5000 두 개 → **outliers 2**
+- **`bench_mbps`**
+  - `(4096, 2048, 1500)` → 4096 × 1500 / 2048 = **3000** (4 KiB 복사에 2048 cycle, 1.5 GHz)
+  - `(1000, 3, 1000)` → 333333.33을 내림해서 **333333**
+  - `(1ull << 54, 1000000, 1500)` → 결과는 **27021597764222**지만, `bytes * mhz`를 그대로 곱하면 64-bit를 넘어감
+
+**지켜야 할 조건**
+- C11, single thread. 인터럽트가 측정을 방해할 수 있음 (fake는 read 추가 비용으로 흉내 냄).
+- `bench_stats`의 `n`은 `1 <= n <= 4096`. O(n²) insertion sort 허용 (더 큰 n이면 뭘 쓸지 말할 것).
+- 실제 측정 구간은 항상 counter 한 주기(2^32 cycle ≈ 1.5 GHz에서 2.86 s)보다 짧음.
+
 ## 1. Problem
 
 You are writing the micro-benchmark library the validation team uses to characterize blocks on a new SoC (CPU memcpy, DMA copies, NPU kernels). The only timer is a **free-running 32-bit cycle counter** `read_cycles()` that wraps at 2^32. Reading the counter costs a few cycles itself. The HAL is a fake at the bottom of `stub.c`: the test can start the counter near `0xFFFFFFFF`, inject extra cost on individual reads, and script the duration of each call to the operation under test.

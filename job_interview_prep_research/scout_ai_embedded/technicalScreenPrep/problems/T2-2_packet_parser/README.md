@@ -3,6 +3,26 @@
 > **ID**: T2-2 · **Priority**: P0 · **Pattern**: byte-wise state machine + resync · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T2-2` / `./run.sh T2-2 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: UART로 한 바이트씩 들어오는 스트림에서 정상 패킷만 골라내고, 노이즈나 깨진 패킷 뒤에는 스스로 다시 동기(resync)를 잡는 상태 기계 parser를 만든다.
+- **상황**: 온도 보드가 메인 MCU로 UART 패킷을 보낸다. UART RX 인터럽트가 **한 번에 1바이트**씩 넘겨준다.
+- **입력**: parser 상태 `Parser`(`st`, `len`, `idx`, `chk`, `data[16]`, `bad_frames`), 이번에 들어온 바이트 `b`, 완성된 패킷을 받을 `out`.
+- **출력**: `parser_feed`는 이 바이트로 정상 패킷이 완성된 순간에만 `true`를 돌려주고, 그때만 `*out`(`len`, `data`)을 쓴다. 잘못된 프레임 개수는 `p->bad_frames`에 쌓인다.
+- **규칙**
+  - 프레임 = `[0xAA SYNC] [LEN] [PAYLOAD: LEN바이트] [CHK]`.
+  - `1 <= LEN <= 16`(`MAX_PAYLOAD`). 그 밖의 `LEN`은 잘못된 프레임.
+  - `CHK` = `LEN`과 payload 전체 바이트의 XOR (SYNC는 포함 안 함).
+  - payload는 해석하지 않고 그대로 내보낸다(내용은 `sensor_id` + little-endian `int16` 온도들).
+  - `LEN`이나 `CHK`가 틀리면 `bad_frames`를 1 올리고 SYNC 찾기로 돌아간다. 틀린 `LEN` 바이트가 `0xAA`면 그것을 새 SYNC로 본다.
+  - payload 안이나 `CHK` 자리의 `0xAA`는 그냥 데이터(길이 기반 framing).
+  - `malloc` 없음, 바이트당 O(1).
+- **예제 풀어 읽기**: `00 13`은 노이즈라 무시. `AA 03 01 2C 03 2D`는 정상(id 1, 온도 `0x032C` = 812). 다음 `AA 03 01 2C 03 00`은 CHK가 00인데 기대값은 2D라 버림(`bad_frames = 1`). 마지막 `AA 05 02 2C 03 38 03 13`은 정상(id 2, 812, 824). 결과: 패킷 2개, `bad_frames = 1`.
+- **놓치기 쉬운 것**: 패킷이 여러 번의 호출로 쪼개져 와도 상태가 유지되어야 함, `LEN = 0`과 `LEN = 17`은 잘못된 프레임, `AA AA 03 ...`처럼 SYNC가 두 번 오면 두 번째 `AA`(틀린 LEN)를 새 SYNC로 잡아야 함, payload와 CHK 안의 `0xAA`, 최대 길이 16 허용, 순수 노이즈만 오면 출력 없고 `bad_frames` 0, 상태 `ST_SYNC` 유지.
+- **구현할 함수**: `parser_init`(상태 초기화), `parser_feed`(바이트 하나 처리, 패킷 완성 시 `true`).
+
 ## 1. Problem
 
 A temperature board streams packets to the robot's main MCU over UART. The UART RX interrupt hands you **one byte at a time**. Write a parser that emits every complete, valid packet and silently **resynchronizes** after line noise or a corrupted packet.

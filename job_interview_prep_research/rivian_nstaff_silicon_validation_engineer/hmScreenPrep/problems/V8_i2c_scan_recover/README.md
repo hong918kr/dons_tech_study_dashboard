@@ -3,6 +3,61 @@
 > **ID**: V8 · **Priority**: P1 · **Pattern**: open-drain bit-bang + protocol state + timeout · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V8` / `./run.sh V8 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: GPIO 두 개로 I2C 버스를 직접 흔들어서(**bit-bang**) 버스에 어떤 디바이스가 있는지 **scan**하고, 슬레이브가 SDA를 잡고 있어 막힌 버스를 **recover**하는 코드를 짭니다.
+
+**상황**
+- 새 보드에서 SoC의 I2C 핀이 GPIO로 mux되어 있습니다. I2C 컨트롤러 없이 SW가 SCL/SDA를 손으로 움직여 버스를 확인합니다.
+- 두 선 모두 **open-drain + pull-up**입니다.
+  - 내가 할 수 있는 건 선을 **low로 당기기**(drive low) 또는 **놓기**(release) 둘뿐
+  - 놓은 선은 누군가 low로 잡고 있지 않는 한 high가 됨
+  - 그래서 "놓았다"와 "실제로 high다"는 다를 수 있음 → `gpio_*_get()`으로 실제 선 레벨을 읽음
+- 파일 안의 bus model이 이런 슬레이브들을 흉내 냅니다.
+  - 자기 주소에 **ACK**하는 슬레이브
+  - **clock stretching** 하는 슬레이브: ACK 클럭 동안 SCL을 low로 잡고 늦게 놓음
+  - **stuck slave**: 바이트 중간에 리셋을 당해 SDA를 low로 잡은 채 멈춤. SCL falling edge를 충분히 받아 자기 바이트를 끝내야 SDA를 놓음
+- 용어
+  - **START**: SCL이 high인 동안 SDA가 떨어짐 / **STOP**: SCL이 high인 동안 SDA가 올라감
+  - **ACK**: 9번째 클럭에서 슬레이브가 SDA를 low로 당김(=있음). high면 **NACK**(=없음)
+  - **reserved address**: `0x00–0x07`, `0x78–0x7F` (그리고 7-bit 범위 밖인 `> 0x7F`)
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `i2c_bus_recover()` | 막힌 버스(SDA low) 풀기 | SDA가 이미 high면 클럭 없이 `0` 반환<br>아니면 SCL을 low→release로 **최대 9번** 펄스, 매 펄스 후 SDA 확인<br>SDA가 high가 되면 STOP 만들고 **사용한 펄스 수** 반환<br>9번 후에도 low → `-EIO` (STOP 안 함)<br>SCL이 high로 안 올라감 → `-ETIMEDOUT` |
+| `i2c_probe(addr)` | 주소 하나에 디바이스가 있는지 확인 | reserved 주소 → 버스 건드리지 않고 `-EINVAL`<br>START 전에 SCL 또는 SDA가 low → `-EBUSY`<br>그 외: START → `(addr << 1) \| 0`(write 비트)을 MSB부터 전송 → ACK 비트 읽기 → STOP<br>ACK면 `0`, NACK면 `-ENXIO` |
+| `i2c_scan(found, max)` | `0x08..0x77`을 순서대로 probe | ACK한 주소를 `found`에 **최대 `max`개** 기록, 반환값은 찾은 **총 개수**<br>`-ENXIO` 아닌 에러가 나오면 scan 중단하고 그 에러 반환 |
+
+**모든 SCL release에 공통으로 걸리는 규칙 (clock stretching)**
+1. SCL을 놓은 뒤에는 **실제로 high가 될 때까지** 기다림
+2. `I2C_STRETCH_TIMEOUT_US`(200 µs) 동안 계속 low면 → 두 선을 모두 놓고 `-ETIMEDOUT`
+- 선 상태를 바꿀 때마다 그 사이에 `I2C_HALF_US`(5 µs, 100 kHz) 대기
+
+**제공되는 GPIO 함수**
+- `gpio_scl_set(release)` / `gpio_sda_set(release)`: `0` = low로 당김, `1` = 놓음
+- `gpio_scl_get()` / `gpio_sda_get()`: 실제 선 레벨 (`1` = high)
+- `delay_us(us)`: 대기
+
+**예시를 말로 풀면**
+- 디바이스가 `0x1D`, `0x48`, `0x50`에 있을 때 `i2c_scan(found, 8)` → `3`, `found = {0x1D, 0x48, 0x50}`.
+  - `0x08..0x77`은 112개 주소이므로 probe 112번, START 112번 + STOP 112번. probe 하나에 110 µs씩 총 12320 µs.
+- 슬레이브가 SDA를 잡고 있고 SCL falling edge 5개를 더 받아야 놓는 상황
+  - `i2c_probe(0x48)` → `-EBUSY`: SDA가 low라 START 자체를 만들 수 없음
+  - `i2c_bus_recover()` → `5`: 펄스 5번에 SDA가 풀려 STOP까지 65 µs
+  - 다시 `i2c_probe(0x48)` → `0`: 이제 정상 ACK
+- SDA가 GND에 short: 몇 번을 흔들어도 안 풀리므로 **정확히 9번** 펄스 후 `-EIO`.
+- 슬레이브가 SCL을 40 µs 늘림: `i2c_probe(0x50)` → `0`, 평소 110 µs에 40 µs가 더해져 150 µs.
+- 슬레이브가 SCL을 영원히 안 놓음: 200 µs timeout에 걸려 290 µs 뒤 `-ETIMEDOUT`.
+
+**지켜야 할 조건**
+- `malloc` 금지, 인터럽트 금지: `delay_us`로 단순 polling.
+- SDA는 **SCL이 low일 때만** 바꿈. 예외는 START(SCL high에서 SDA 하강)와 STOP(SCL high에서 SDA 상승)뿐.
+- reserved 주소는 절대 버스에 올리지 않음.
+
 ## 1. Problem
 
 On a new board, the SoC's I2C pins are muxed as GPIOs and you drive the bus by hand to see what is on it. Both lines are **open-drain with pull-ups**: you can only pull a line low or release it; a released line is high unless some device holds it low.

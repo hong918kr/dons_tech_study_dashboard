@@ -1,6 +1,6 @@
 # Rivian — Staff Embedded Software Engineer, Silicon & Sensing Systems (Silicon Validation) · Context
 
-> **최종 갱신**: 2026-10-25 · **상태**: 💻 HM 스크린 10-28(수) 45분 — Manjiang Zhang (Sr Manager, Silicon Validation) · [준비 deck](2026-10-25_rivian_hm_screen_prep.html) · [코딩 연습](hmScreenPrep/index.html)
+> **최종 갱신**: 2026-10-28 · **상태**: 💻 기술 스크린 ~~10-28(수)~~ → **10-30(금)** 45분 (Don 일정으로 연기) — 면접관 **Iris Lee** (Principal System Engineer, ex Sr Mgr System Validation)로 변경 예상 · ~~Manjiang Zhang~~ · [준비 deck](2026-10-25_rivian_hm_screen_prep.html) · [코딩 연습](hmScreenPrep/index.html)
 > **JD**: https://careers.rivian.com/careers-home/jobs/34042?lang=en-us · **위치**: Palo Alto, CA (607 Hansen Way) · onsite 추정 · **연봉 밴드**: base $186,000 – $232,000 (Bay Area) + bonus + equity
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
@@ -101,6 +101,8 @@ Rivian Automotive(NASDAQ: RIVN) — 전기 픽업 R1T, SUV R1S, Amazon 등 상�
 - **Automation**: Python 회귀 테스트 프레임워크, 커버리지 리포트, Jira류 트래킹 [추정]
 - **Sensing**: 카메라 파이프라인(MIPI CSI-2 → ISP → encoder) 검증 [추정, JD 우대사항 근거]
 - 즉, **Don이 Solidigm(SSD controller)에서 한 pre-silicon/FPGA SoC verification을 AI accelerator SoC로 옮기는 자리**
+- **(10-27 분석) silicon validation을 하는 자리인가?** → 예. Role Summary 직함이 "Staff Silicon Validation Software Engineer" [확인됨 — JD]. "Work w/ SoC validation team"은 HW 쪽 SoC validation 팀(Manjiang 팀: FPGA/HAPS·bring-up·PVT·SLT)과 계획을 같이 다듬고 SW 부분을 직접 실행한다는 뜻 [추정]
+- **(10-27 분석) RTL을 읽어야 하나?** → 필수 아님. JD에 RTL·Verilog·SystemVerilog·UVM 0회, 필수 기술은 Embedded C 하나. 같은 조직의 RTL Design Engineer(req 33461)·Sr. Staff ASIC DV(req 30325) 공고는 Verilog/SystemVerilog/UVM을 따로 요구 → RTL은 그 사람들 몫 [확인됨 — Rivian careers API 비교][16]. 단 레지스터 블록·간단한 FSM 정도 **읽기**는 디자이너와 디버깅할 때 플러스 [추정]. 정리는 [준비 deck §0.5](2026-10-25_rivian_hm_screen_prep.html)
 
 ### 2.8 리스크
 - **레벨 다운**: ICT3라고 밝힌 상태 → HM이 Senior로 보고 Staff 밴드 미적용 가능. (Solidigm Staff 2022–2025 + 총 8년 경력 강조)
@@ -147,6 +149,7 @@ Rivian Automotive(NASDAQ: RIVN) — 전기 픽업 R1T, SUV R1S, Amazon 등 상�
 | Camera MIPI CSI-2 / ISP | CSI-2 D-PHY 레인·packet(short/long, VC/DT), ISP 파이프(BLC→demosaic→AWB→CCM→gamma), 테스트 패턴 제너레이터로 검증하는 법 정리 | "RFFE/SPMI도 MIPI Alliance 스펙 — 스펙 읽고 프로토콜 애널라이저로 디버깅하는 방식은 동일" |
 | Ethernet | MAC/PHY(MII/RGMII), MDIO, loopback(PHY/MAC) 테스트, throughput 측정(iperf), automotive Ethernet(100/1000BASE-T1) 개념 | 짧게 인정 + 학습 계획 |
 | EE/CE 학위 아님 | — | 8년 HW-근접 경력, 신호·버스 레벨 디버깅 실적으로 대체. 수학 배경 = 성능 모델링/통계적 검증에 강점 |
+| RTL 읽기 (Verilog) — 필수 아님, 플러스 | deck §0.5.5 30분 크래시 코스: 레지스터 블록 RTL에서 reset 값·RW/RO/W1C·같은 cycle 경합 읽기 | "I'm not an RTL designer — my side is the software that exercises the RTL. At Solidigm I narrowed FPGA failures to a minimal repro for the design engineer; I can read a register block or a simple FSM" |
 | 레벨 (ICT3) | 리크루터에게 레벨 앵커 다시 전달 (4.5 참고) | "Apple에선 RF 도메인 전환이라 ICT3로 들어갔지만 TC는 Staff 수준, 직전 Solidigm Staff" |
 
 ### 3.4 종합 평가 · 커리어 방향 정합성
@@ -263,6 +266,8 @@ Rivian Automotive(NASDAQ: RIVN) — 전기 픽업 R1T, SUV R1S, Amazon 등 상�
 | 2026-10-17 | 리크루터 연락 · 통화 | Rivian 쪽에서 먼저 연락. 레쥬메 요청 → 바로 HM에게 전달하겠다고 함. 현재 레벨 질문 → "Apple ICT3, 직전 회사(Solidigm)는 Staff, Apple은 레벨은 낮지만 컴펜이 매우 높다"고 답함. 프로세스 안내: HM 연결 → technical screening → 통과 시 onsite 4개 (technical 2 + behavioral 2) |
 | 2026-10-17 | 컨텍스트 파일 생성 (JD 조사) | JD 원문은 Rivian careers API에서 수집 |
 | 2026-10-25 | HM 스크린 확정: 10-28(수) 45분, Manjiang Zhang | 면접관 = Sr. Engineer/Manager, Silicon Validation (Rivian 2022-12~: FPGA/HAPS 프로토타이핑·bring-up·post-si validation·PVT·SLT · ex-Baidu Apollo HW 아키텍트, Marvell Ethernet PHY, Cisco 패킷 ASIC). LinkedIn 열람만(연결 X). 준비 deck `2026-10-25_rivian_hm_screen_prep` + 코딩 연습 사이트 `hmScreenPrep/` (V1–V12 + D) |
+| 2026-10-27 | HM 스크린 **10-30(금)으로 연기** (Don 일정) · 역할 재분석 | 연습 사이트 13문제에 한국어 문제 소개(§0) 추가. JD 재확인(변경 없음) → silicon validation SW 담당 맞음, RTL 필수 아님(같은 조직 RTL/DV 공고와 비교). deck §0.5 추가 + D-3 플랜 금요일 기준 재조정 |
+| 2026-10-28 | 면접관 **Iris Lee**로 변경 예상 (Don 전달, 확정 확인 필요) | LinkedIn 열람만(연결 X, profile search limit 배너 → 중단). Rivian Principal System Engineer(2026-08~), Sr Mgr System Validation(2022-12~2026-08). ex-Tensor/AutoX 컴퓨트 플랫폼 리드, BYTON(차량 bring-up·센서 통합·**Zynq MPSoC PetaLinux**), Baidu(MPSoC 센서 박스·**PCIe switch fabric**), Huawei(**PCIe fabric·SR-IOV·failover**), Sunrise Telecom(Ethernet 테스트 장비: **BER·RFC 2544**). SW·시스템 출신 → 코딩·Linux·PCIe·벤치마크 비중↑. deck §1 Iris 분석·§3 TMAY·§5.5 Q25–Q38·§6.5–6.6·§7 11–16·§9 갱신, 코딩 L1–L5 추가 |
 
 ---
 
@@ -300,6 +305,8 @@ Rivian Automotive(NASDAQ: RIVN) — 전기 픽업 R1T, SUV R1S, Amazon 등 상�
 13. https://prachub.com/interview-experiences/rivian-software-engineer-interview-project-discussion-and-high-voltage-experience-739d75280c — 2026 Rivian SWE 후기 (확인일 2026-10-17)
 14. https://www.interviewquery.com/guides/rivian-software-engineer — Rivian SWE 인터뷰 가이드 (aggregator) (확인일 2026-10-17)
 15. https://www.techprep.app/blog/rivian-interview-process — Rivian 인터뷰 프로세스 (aggregator) (확인일 2026-10-17)
+16. https://careers.rivian.com/api/jobs?keywords=RTL%20Design — 같은 조직 비교 공고: RTL Design Engineer (req 33461), Sr. Staff ASIC Design Verification Engineer (req 30325) (확인일 2026-10-27)
+17. https://www.linkedin.com/in/iris-lee-8720368/ — 면접관 Iris Lee 경력 (로그인 열람만) (확인일 2026-10-28)
 
 ---
 

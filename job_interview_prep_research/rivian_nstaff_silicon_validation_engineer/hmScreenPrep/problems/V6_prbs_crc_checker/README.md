@@ -3,6 +3,56 @@
 > **ID**: V6 · **Priority**: P1 · **Pattern**: LFSR bit-stream + self-sync checker (popcount of XOR) + bitwise CRC · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V6` / `./run.sh V6 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: 고속 링크 검증용 **BERT**(bit error rate tester)의 소프트웨어 쪽, 즉 **PRBS 패턴 생성기 / 수신 패턴 체커 / CRC-32 / BER 계산**을 짭니다.
+
+**상황**
+- 새 실리콘의 고속 링크(SerDes lane, PCIe, Ethernet, MIPI)를 검증합니다. bring-up 순서는 이렇습니다.
+  - 링크를 **loopback**(보낸 걸 그대로 되받는 모드)으로 둠
+  - **PRBS** 패턴을 보냄
+  - 받은 패턴을 비트 단위로 검사해서 에러 개수를 셈
+  - 에러 수 / 검사한 비트 수 = **BER**(bit-error rate)
+- 프레임 단위 트래픽은 **CRC-32**로 보호됩니다.
+- 용어
+  - **PRBS**(pseudo-random bit sequence): **LFSR**(linear feedback shift register)로 만드는 의사 난수 비트열. 같은 seed면 항상 같은 비트열
+  - **PRBS7** = x⁷ + x⁶ + 1 (`order 7, tap 6`), **PRBS31** = x³¹ + x²⁸ + 1 (`order 31, tap 28`)
+  - **Fibonacci LFSR** 한 스텝: `new = state[order-1] ^ state[tap-1]`, `state = ((state << 1) | new) & mask`, 출력은 `new`
+  - `Prbs` 구조체: `state`(최근 `order`개 비트, bit 0이 가장 최근), `mask` = `(1 << order) - 1`, `order`, `tap`
+  - **MSB-first**: 바이트 안에서 bit 7이 먼저 나가는 비트
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `prbs_init(p, order, seed)` | 생성기 초기화 | seed는 `order` 비트로 마스크<br>state가 0이거나 order가 7/31이 아니면 `-EINVAL`, 성공하면 0 |
+| `prbs_next_bit(p)` | LFSR 한 스텝, 새 비트 반환 | 위 Fibonacci LFSR 식 그대로 |
+| `prbs_fill(p, buf, n)` | `n`바이트를 PRBS로 채움 | **MSB-first**: 처음 만든 비트가 `buf[0]`의 bit 7 |
+| `prbs_check(order, rx, n, bits_checked)` | 받은 버퍼의 에러 비트 수 반환 | **self-synchronizing**: 받은 처음 `order`개 비트를 state로 로드(에러 없다고 가정) → 로컬 생성기를 free-run → `popcount(rx ^ expected)`로 에러 셈<br>`*bits_checked = 8n - order`, 버퍼가 `order` 비트보다 길지 않으면 0 |
+| `crc32_ieee(data, n)` | IEEE 802.3 CRC-32 | reflected polynomial `0xEDB88320`, init `0xFFFFFFFF`, final XOR `0xFFFFFFFF`. table 없이 해도 됨 |
+| `ber(errors, bits)` | `errors / bits` | `bits == 0` → `-1.0` |
+
+**예시를 말로 풀면**
+- seed `0x7F`(7비트 모두 1)로 PRBS7을 만들어 4바이트 채우면 `02 0C 28 F2`가 나옵니다. MSB-first라서 처음 비트들이 `0x02`의 bit 7부터 들어갑니다.
+- PRBS7은 seed `0x7F`에서 **127비트마다 반복**되고, 한 주기 안에 1이 64개입니다.
+- `ref` = PRBS7 256바이트(= 2048비트)
+  - 에러 없이 검사하면 에러 0개, `chk` = 2048 − 7(동기용 seed 비트) = **2041**
+  - bit 100 하나를 뒤집고 byte 40의 8비트를 다 뒤집으면 1 + 8 = **9개** 에러
+  - 처음 7개 seed 비트 안의 bit 3을 뒤집으면 체커가 **틀린 위치(phase)에 lock** 되어 이후 비트가 거의 다 어긋나서 **1027개** 에러가 됩니다. "처음 `order` 비트는 에러 없다고 가정"하는 규칙 때문입니다.
+- CRC
+  - `"123456789"` 9바이트 → `0xCBF43926` (CRC-32 표준 check 값)
+  - `NULL, 0` → `0x00000000`
+  - 메시지 뒤에 CRC를 4바이트 little-endian으로 붙여서 13바이트 전체의 CRC를 다시 내면 항상 `0x2144DF1C` (CRC-32 **residue**, 프레임이 깨지지 않았다는 뜻)
+- `ber(9, 2041)` = 9 / 2041 ≈ **4.41e-3**
+
+**지켜야 할 조건**
+- 한 번 호출에 `n`은 수 MB까지. 카운터는 `uint64_t`.
+- 스트림 안의 비트 순서는 MSB-first, CRC는 Ethernet wire처럼 reflected(LSB-first) 방식.
+- C11, FPU는 `ber()`에서만 써도 됨.
+- `malloc` 금지. `n == 0`이면 `data`가 `NULL`일 수 있음.
+
 ## 1. Problem
 
 You are validating a high-speed link (SerDes lane, PCIe, Ethernet, MIPI) on new silicon. The bring-up plan is: put the link in loopback, transmit a PRBS pattern, check the received pattern bit by bit, and count errors to get a bit-error rate (BER). Frame-level traffic is protected by CRC-32. Write the software side of this BERT.

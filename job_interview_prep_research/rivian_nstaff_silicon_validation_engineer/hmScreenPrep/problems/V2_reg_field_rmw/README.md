@@ -3,6 +3,50 @@
 > **ID**: V2 · **Priority**: P0 · **Pattern**: bitfield mask + RMW + table-driven HW test · **Time**: 25 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V2` / `./run.sh V2 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: FPGA에 새로 올라온 IP 블록의 레지스터를 안전하게 다루는 **헬퍼 함수**와, 레지스터가 스펙대로 동작하는지 확인하는 **레지스터 sanity 테스트**를 짭니다.
+
+**상황**
+- `SIF`라는 센서 인터페이스 블록이 FPGA 프로토타입에 막 올라왔습니다. 드라이버를 쓰기 전에 RTL이 레지스터 스펙과 맞는지부터 확인해야 합니다.
+- 블록에는 32-bit MMIO 함수 `reg_read(off)` / `reg_write(off, val)`로만 접근합니다. 파일 아래쪽 HW model이 실제 블록을 흉내 냅니다.
+- 비트마다 성질이 다릅니다.
+  - **RW**: 쓰고 읽을 수 있음
+  - **RO**: 써도 안 바뀜. reserved 비트도 여기에 포함되며 항상 0으로 읽힘
+  - **W1C**(write-1-to-clear): HW가 1로 세우고, SW가 **1을 쓰면 0으로 지워짐**
+  - **SC**(self-clearing) `SOFT_RST`: 1을 쓰면 블록 전체가 리셋됨
+  - `FIFO` 레지스터는 **읽기만 해도 데이터가 빠져나감**
+- HW model은 버그(stuck bit, 틀린 reset 값, 쓰기가 되는 RO 비트)를 일부러 넣을 수 있습니다.
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `field_mask(msb, lsb)` | `msb..lsb` 비트만 1인 마스크 | `field_mask(31,0)` = `0xFFFFFFFF`, **UB shift 금지** |
+| `field_get(reg, msb, lsb)` | 레지스터 값에서 필드 값 꺼내기 | |
+| `field_prep(val, msb, lsb)` | 필드 값을 제자리로 shift | |
+| `field_write(rd, msb, lsb, val)` | 필드 하나만 read-modify-write | `msb>31` 또는 `lsb>msb` → `-EINVAL`, `val`이 필드에 안 들어가면 → `-ERANGE`. 에러면 **버스 접근 0회**. 필드 밖 비트는 읽은 값 그대로 쓰되 **W1C·SC 비트는 0으로** 씀 |
+| `reg_sanity_test(tbl, n, log, log_cap)` | 표에 있는 레지스터를 하나씩 검사 | `REG_F_SKIP` 항목은 건너뜀. 불일치 **총 개수 반환**, 앞의 `log_cap`개만 `log`에 기록 |
+
+**`reg_sanity_test`가 레지스터마다 하는 4단계**
+1. **RESET 확인**: 읽은 값이 표의 `reset`과 같아야 함. 이 값을 `orig`라고 부름.
+2. **RO 확인**: RW 비트에는 `orig`, RO 비트에는 `~orig`(뒤집은 값), W1C/SC 비트에는 0을 써서 → 다시 읽었을 때 `orig` 그대로여야 함 (RO가 진짜 안 바뀌는지).
+3. **RW 확인** (`rw_mask`가 0이 아닐 때만): 패턴 `0x55555555`, `0xAAAAAAAA`, 그리고 RW 비트마다 bit 0부터 walking-1. 쓴 RW 비트가 그대로 읽혀야 함.
+4. **원상 복구**: `orig`를 다시 씀 (W1C/SC 비트는 0으로).
+- 불일치 종류: 1단계 실패는 `MM_RESET`. 그 밖에는 틀린 비트에 RW 비트가 끼어 있으면 `MM_RW`, 아니면 `MM_RO`.
+
+**예시를 말로 풀면**
+- IRQ 레지스터에 pending 비트 3개(`0x7`, W1C)가 서 있는 상태에서 `IRQ_EN` 필드에 5를 씁니다.
+  - 순진하게 RMW하면 읽은 `0x7`을 그대로 다시 써서 **pending 인터럽트 3개가 지워집니다** (틀림).
+  - 올바른 `field_write`는 W1C 비트를 0으로 써서 pending을 살려 둡니다.
+- 버그 2개(SCRATCH bit 13 stuck-at-0, THRESH reset 값 틀림)를 넣고 `log_cap=2`로 돌리면 불일치는 3개입니다. 반환값은 3이고 log에는 앞의 2개만 남습니다.
+
+**지켜야 할 조건**
+- `malloc` 금지. `-fsanitize=undefined`에서 깨끗해야 함.
+- 테스트가 `SOFT_RST`에 1을 쓰면 안 되고, `FIFO`를 읽으면 안 되고, 끝나면 **모든 레지스터를 처음 상태로** 돌려놔야 함.
+
 ## 1. Problem
 
 A new IP block (`SIF`, a sensor-interface block) has just come up on the FPGA prototype. Before anyone writes a driver, you write the **register access layer** and a **register-sanity test** that checks the RTL against the register spec.

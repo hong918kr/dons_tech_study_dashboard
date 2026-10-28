@@ -3,6 +3,24 @@
 > **ID**: T1-6 · **Priority**: P1 · **Pattern**: single pass + previous-sample state + bitmask flags · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T1-6` / `./run.sh T1-6 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 온도 스트림의 샘플마다 고장 종류를 bitmask로 표시하고, 깨끗한 샘플만으로 첫 과열 샘플의 index를 찾는다.
+- **상황**: 센서가 (ms 시각, 0.1 °C 온도) 샘플을 보낸다. "과열" 판정 전에 고장 난 센서에서 온 값을 걸러내야 한다. 한 샘플에 고장이 여러 개 동시에 붙을 수 있다.
+- **입력**: 샘플 배열 `s[n]`(`t_ms`, `temp_c10`), 설정 `cfg`(정상 주기 `period_ms`, stuck 판정 횟수 `stuck_n`(2 이상), 샘플당 최대 변화 `max_step`, 유효 범위 `lo` / `hi`(포함)), 결과를 쓸 `flags[n]`, 과열 기준 `thresh`.
+- **출력**: `classify_faults`는 `flags[0..n-1]`을 채우고 **고장 샘플 수**(`flags != 0`)를 반환. `first_valid_overheat`는 `flags == 0`이면서 `temp >= thresh`인 첫 index, 없으면 `-1`.
+- **규칙** (샘플 `i` 기준)
+  - `F_RANGE`: `temp < lo` 또는 `temp > hi`.
+  - `F_DROPOUT`: `i > 0`이고 `t[i] - t[i-1] > 2 * period_ms`. 공백 **뒤** 첫 샘플에 표시, wrap-safe `uint32_t` 뺄셈.
+  - `F_SPIKE`: `temp - ref`의 절댓값이 `max_step`보다 큼. `ref`는 `F_RANGE`도 `F_SPIKE`도 아니었던 마지막 샘플. 이 샘플이 `F_RANGE`나 `F_DROPOUT`이거나 `ref`가 아직 없으면 검사 생략.
+  - `F_STUCK`: 같은 raw 값이 `stuck_n`번 연속 나오면 `stuck_n`번째 샘플과 그 run의 이후 샘플 전부에 표시.
+  - `malloc` 금지, O(n) 시간, O(1) 추가 메모리.
+- **예제 풀어 읽기**: `period 100, stuck_n 3, max_step 50, lo -400, hi 1500`, `thresh = 800`. i=2의 900은 ref 255와 비교해 `F_SPIKE`. i=5는 t=400 → 700으로 300 ms 공백(> 200) → `F_DROPOUT`. 265가 i=5부터 이어져 세 번째인 i=7과 i=8이 `F_STUCK`. i=9의 1600은 `hi` 1500 초과 → `F_RANGE`. 고장 5개, 뜨거운 샘플(900, 1600)은 모두 고장이라 결과 `-1`.
+- **놓치기 쉬운 것**: 빈 입력(0과 `-1`), 고장 동시 발생(범위 밖 2000이 3번 → 세 번째는 `F_RANGE`와 `F_STUCK` 둘 다), 공백이 정확히 `2 * period`(200)면 dropout 아님, 타임스탬프 wrap(`0xFFFFFF9C` → 100), spike `ref`는 고장 샘플(-500, `F_RANGE`)을 건너뛰어 760 기준 → 790은 정상, 고장 뒤의 진짜 과열 찾기(index 3), 샘플 하나는 delta·gap·stuck 모두 없음.
+- **구현할 함수**: `classify_faults(s, n, cfg, flags)`(샘플별 고장 bitmask 기록 + 고장 수 반환), `first_valid_overheat(s, n, flags, thresh)`(깨끗한 첫 과열 index).
+
 ## 1. Problem
 
 A temperature sensor streams samples (timestamp in ms, temperature in 0.1 °C). Before deciding "overheat", you must reject readings that come from a **faulty sensor**. Classify every sample with a **bitmask** of faults — several faults can apply to the same sample:

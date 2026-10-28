@@ -3,6 +3,34 @@
 > **ID**: J2 · **Priority**: P1 · **Pattern**: streaming integration + exact accumulator + wrap-safe dt + clamp + hysteresis + table interpolation · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh J2` / `./run.sh J2 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 배터리 전류 ADC 값을 시간에 대해 적분해서 남은 충전량(SoC)을 추적하고, 저전압 경보(히스테리시스)와 휴지 전압 기반 재보정까지 만든다.
+- **상황**: 배터리로 움직이는 로봇이 shunt 저항 + 전류 증폭기 + 12비트 ADC로 팩 전류를 잰다. 타이머가 ADC 값과 ms 타임스탬프를 가지고 주기적으로 `soc_update`를 부른다.
+- **배경 개념**
+  - **Coulomb counting**: 흐른 전하량 = 전류 × 시간. 매 샘플마다 "전류 × 경과 시간"을 더하거나 빼서 배터리에 남은 양을 추적하는 방법.
+  - **단위**: 용량은 mAh(1 mA로 1시간). 이 문제는 내부 누적을 mA·ms로 한다. 예제 기준 1 mAh = 1000 mA × 3600 ms = 3,600,000 mA·ms.
+  - **SoC permille**: 남은 양을 0..1000(= 0..100.0 %)으로 나타낸 값.
+  - **OCV(open-circuit voltage)**: 전류가 안 흐르고 쉬고 있을 때의 셀 전압. 이 전압으로 SoC를 표에서 찾을 수 있어서, 적분 오차를 리셋하는 데 쓴다.
+- **입력**: `soc_init(s, capacity_mAh, soc_permille, now_ms)` — 용량(mAh, 1..1,000,000), 시작 SoC(permille, 1000 초과면 1000으로), 시작 시각. `soc_update(s, adc_raw, now_ms)` — ADC 코드(0..4095), 시각(ms, `uint32_t`, wrap). `current_mA(raw)` — ADC 코드. `ocv_to_permille(mv)`, `soc_rest_calibrate(s, cell_mv)` — 셀 전압(mV).
+- **출력**: `current_mA`는 mA(`int32_t`, 양수 = 방전). `soc_permille`은 0..1000. `soc_low_alert`는 경보 상태 `bool`. `ocv_to_permille`은 permille. 상태는 `Soc` 구조체에: `cap_mAms`, `rem_mAms`(0..cap), `last_ms`, `gaps`, `faults`, `fault`, `low_alert`.
+- **규칙**
+  - Part A — 전류: `current_mA = (raw - 2048) * 10`(코드 2048이 0 mA, 1카운트당 10 mA). 양수 = 방전(잔량 감소), 음수 = 충전.
+  - Part A — 포화: 코드 `0`, `4095`는 적분하지 않고 `fault` = true, `faults` +1. 다음 정상 샘플이 `fault`를 지움.
+  - Part A — 시간: `dt = (uint32_t)(now_ms - last_ms)`로 wrap-safe. 매 호출마다 `last_ms` 갱신. `now_ms`에서 잰 전류를 구간 `(last, now]` 전체에 적용. `dt > 1000 ms`(`MAX_GAP_MS`)면 그 구간은 적분 안 하고 `gaps` +1.
+  - Part A — 누적: `int64_t` mA·ms로 더해서 작은 전류도 반올림으로 사라지지 않게. 잔량은 `[0, capacity]`로 clamp. `soc_permille` = `remaining * 1000 / capacity`(버림).
+  - Part B — 경보: `<= 150`에서 ON, `>= 200`에서 OFF, 그 사이는 이전 상태 유지. `soc_init`과 `soc_rest_calibrate`에서도 평가.
+  - Part C — OCV 표 `3300:0 3500:50 3600:150 3700:400 3800:600 4000:850 4200:1000`에서 정수 선형 보간(버림), 첫 점 아래·마지막 점 위는 clamp. `soc_rest_calibrate`는 그 값으로 잔량을 덮어씀.
+  - malloc, 부동소수점 금지.
+- **예제 풀어 읽기**: 10 mAh 팩, 1000 permille에서 시작, t = 0. raw 2148 = (2148 − 2048) × 10 = +1000 mA(방전)를 100 ms마다 t = 3600까지 → 1000 mA × 3600 ms = 3,600,000 mA·ms = 1 mAh 소모 → 900 permille. 1 mAh 팩에 raw 2049 = +10 mA를 10 ms마다 18000번(180 s) → 한 번에 100 mA·ms뿐이지만 18000 × 100 = 0.5 mAh → 500 permille. `ocv_to_permille(3650)`은 3600:150과 3700:400 사이 → 150 + (50 × 250) / 100 = 275. 3000 → 0, 4300 → 1000.
+- **놓치기 쉬운 것**: 매 단계 mAh로 나누면 작은 전류가 0이 됨(누적은 mA·ms로), 충전 시 저장값 자체가 capacity에서 clamp(`rem_mAms == cap_mAms`), 과방전 시 0에서 clamp 후 충전은 0부터, 시작부터 50 permille이면 init에서 경보 ON, timer wrap(`last` = `0xFFFFFE0C`, now = 500 → dt = 1000은 gap 아님), dt = 1001이면 gap이지만 `last_ms`는 갱신해서 다음 dt = 1000은 적분, 4095와 0 둘 다 fault(카운트 누적), 정상 샘플이 flag 해제, 경보 경계(150에서 ON, 190에선 계속 ON, 200에서 OFF, 다시 170으로 내려가도 재트리거 없음, ON·OFF 각각 정확히 1번), OCV 정확한 점(3300 → 0, 3700 → 400, 4200 → 1000), 3900 → 725, 3333 → 8(8.25 버림), 재보정 후 경보 재평가(3500 → 50 → ON).
+- **구현할 함수**
+  - Part A — `current_mA(raw)`: 코드 → mA. `soc_init(s, capacity_mAh, soc_pm, now_ms)`: 용량·잔량·시각 설정(+ 경보 평가). `soc_update(s, adc_raw, now_ms)`: dt, fault/gap 검사, 적분, clamp, 경보. `soc_permille(s)`: 잔량 → permille.
+  - Part B — `soc_low_alert(s)`: 히스테리시스 경보 상태 반환.
+  - Part C — `ocv_to_permille(mv)`: 표 보간. `soc_rest_calibrate(s, cell_mv)`: OCV로 잔량 덮어쓰기(+ 경보 평가).
+
 ## 1. Problem
 
 A battery-powered robot measures pack current with a shunt resistor, a current-sense amplifier and a **12-bit ADC**. A timer calls you with each ADC reading and a millisecond timestamp. Track the **state of charge (SoC)** by integrating current over time ("coulomb counting").

@@ -3,6 +3,34 @@
 > **ID**: J3 · **Priority**: P1 · **Pattern**: header validation + CRC + state machine with persisted counters · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh J3` / `./run.sh J3 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: flash의 A/B 두 슬롯 중 어느 펌웨어로 부팅할지 고르는 bootloader 로직. 이미지 검사(A) + 슬롯 선택과 rollback(B) + 정상 확인(C).
+- **상황**: 로봇이 OTA로 MCU 펌웨어를 받는다. 새 이미지는 항상 지금 안 돌고 있는 슬롯에 써지고 "시험 부팅"된다. 새 이미지가 끝내 "나 정상이야"를 알리지 않으면 옛 이미지로 되돌아가야 한다.
+- **배경 개념**
+  - **A/B 슬롯**: flash에 펌웨어 자리가 두 개(A = `0x08004000`, B = `0x08024000`). 하나가 망가져도 다른 하나로 부팅할 수 있게 하는 구조.
+  - **vector table**: Cortex-M 이미지 맨 앞 두 word. word0 = 처음 쓸 스택 포인터(SP, RAM 안이어야 함), word1 = reset handler 주소(전원 켜면 처음 뛰는 코드). Thumb 모드라 주소의 bit 0이 1이어야 한다.
+  - **CRC-32**: 이미지 바이트 전체로 계산한 32-bit 체크값. 한 비트만 바뀌어도 값이 달라져서 깨진 이미지를 잡는다. `crc32()`는 주어진다.
+  - **trial boot / rollback**: 새 이미지(`pending`)로 시험 부팅할 때마다 `attempts`를 올리고, 앱이 `boot_confirm()`을 부르면 확정. 3번 시도해도 확정이 없으면 그 슬롯을 bad로 찍고 옛 슬롯으로 돌아간다.
+- **입력**: 슬롯 바이트 배열(각 4096 bytes, 앞 16 bytes가 little-endian header: magic, version, image_size, crc32), 슬롯 base 주소, EEPROM에 저장되는 4-byte `BootState`(`active`, `pending`, `attempts`, `bad_mask`).
+- **출력**: `image_check()`는 `IMG_OK` 또는 실패 이유 enum, 성공 시 `*out`에 version/size/SP/reset. `boot_select()`는 부팅할 슬롯 번호(0/1) 또는 `-1`(DFU 모드), 그리고 `*st`를 갱신.
+- **규칙**
+  - Part A: 검사 순서 고정 — magic → size → CRC → vector. header는 바이트를 직접 조립해서 읽는다(struct cast 금지).
+    - size: `slot_size < 16`, `image_size < 8`, `image_size > slot_size - 16`이면 `IMG_BAD_SIZE`.
+    - vector: SP가 `[0x20000000, 0x20020000]` 밖이거나 4-byte 정렬 아님, reset의 bit 0이 0, 또는 `reset & ~1`이 `[image_base, image_base + image_size)` 밖이면 `IMG_BAD_VECTOR`. `image_base = slot_base + 16`.
+  - Part B: 먼저 깨진 record 정리(`active > 1` → 0, `pending`이 0/1/`NO_PENDING`이 아니면 `NO_PENDING`). 슬롯은 `bad_mask`에 없고 `image_check() == IMG_OK`이면 usable.
+    - `pending`이 있으면: 그 슬롯이 usable이 아니거나 `attempts >= 3` → bad 표시, `pending = NO_PENDING`, `attempts = 0` 하고 일반 규칙으로. 아니면 `attempts++` 하고 pending 슬롯 반환.
+    - 일반 규칙: usable 중 version 가장 높은 슬롯(같으면 `active` 유지), `active`를 그 슬롯으로. usable이 없으면 `-1`.
+  - Part C: `boot_confirm()` → `active = pending`, `pending = NO_PENDING`, `attempts = 0`. pending이 없으면 아무것도 안 함.
+- **예제 풀어 읽기**: A = v1, B = v2 둘 다 정상 → `boot_select = 1`(B가 더 새것), `active = 1`. B image[300]의 한 비트를 뒤집으면 CRC가 `0xEBD66D8D`로 바뀌어 header의 `0xB5EDD439`와 달라짐 → `IMG_BAD_CRC` → A로 부팅(0). A = v2, B = v3가 pending이고 B가 확정을 안 하면: 부팅 1·2·3번째는 B(attempts 1→2→3), 4번째에 A로 rollback, `bad_mask = 0x02`, 이후 B는 다시 안 시도.
+- **놓치기 쉬운 것**: erased flash(`FF FF FF FF`)와 big-endian으로 잘못 쓴 magic은 `IMG_BAD_MAGIC`; `image_size`가 0, 7, `slot_size - 15`, `0xFFFFFFFF`면 거부하고 정확히 `slot_size - 16`(4080)은 통과; `slot_size = 8`도 거부; header 값과 무관하게 슬롯 밖은 절대 읽지 않기; SP가 RAM_END와 같으면 허용, `0x20020004`나 정렬 안 된 `0x2001FFFE`는 거부; reset이 다른 슬롯(A로 링크된 이미지)이나 이미지 끝을 가리키면 거부; tie일 때 `active` 유지; `boot_confirm()` 두 번 불러도 안전; 쓰레기 record(`{7, 9, ...}`) 정리.
+- **구현할 함수**
+  - Part A: `rd32le(p)`, `image_check(slot, slot_size, slot_base, out)`
+  - Part B: `boot_select(st, slots, slot_size)`
+  - Part C: `boot_confirm(st)`
+
 ## 1. Problem
 
 A fielded robot updates its MCU firmware over the air. The bootloader keeps **two slots** (A and B) in flash. A new image is always written into the slot that is *not* running, then booted on trial. If it never confirms that it is healthy, the bootloader must **roll back** to the old image.

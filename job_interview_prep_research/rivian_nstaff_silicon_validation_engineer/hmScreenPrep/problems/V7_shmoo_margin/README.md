@@ -3,6 +3,58 @@
 > **ID**: V7 · **Priority**: P0 · **Pattern**: 2-D grid sweep + repeat voting + monotonic-edge scan · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V7` / `./run.sh V7 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: 첫 실리콘의 전압(V) × 주파수(F) 격자를 다 돌려서 pass/fail 지도(**shmoo**)를 만들고, 거기서 **fmax / Vmin / margin / hole**을 뽑고 ASCII로 그리는 **characterization 툴**을 짭니다.
+
+**상황**
+- DUT(테스트 대상 칩)는 함수 하나만 줍니다: `run_test(v_mv, f_mhz)`. core 전원 전압과 clock을 설정하고 functional pattern을 돌려서 pass/fail(`true`/`false`)을 돌려줍니다.
+- `stub.c` 아래쪽 숨은 모델(fake)이 이걸 흉내 냅니다. **fake는 수정 금지**.
+  - 기본은 전압/주파수 **wall**: 전압이 높을수록 더 높은 F까지 pass
+  - 선택적으로 **hole**(항상 fail하는 특정 점) 1개
+  - 선택적으로 **flaky** 점 1개(그 점에 대한 호출이 2번째마다 fail)
+- 용어
+  - **shmoo**: V × F 격자의 각 점에 pass/fail을 찍은 지도
+  - 셀 값: `CELL_PASS`(돌린 횟수 전부 pass), `CELL_FAIL`(전부 fail), `CELL_MARGINAL`(섞임)
+  - **fmax**: 어떤 전압에서 안정적으로 도는 최고 주파수
+  - **Vmin**: 목표 주파수를 만족하는 최저 전압
+  - **margin**: nominal 전압에서 fmax가 target보다 얼마나 여유 있는지
+  - **hole**: 주변은 pass인데 그 점만 fail인 구멍
+- 격자 인덱스: `map[vi * nf + fi]`, `vi = 0`이 `v_lo`, `fi = 0`이 `f_lo`.
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `shmoo_sweep(c, map, cap)` | 격자 전 점(V `v_lo..v_hi`, F `f_lo..f_hi`)에서 테스트를 `repeats`번씩 돌려 셀 하나씩 기록 | 전부 pass → `CELL_PASS`, 전부 fail → `CELL_FAIL`, 섞이면 `CELL_MARGINAL`<br>잘못된 격자(step 0, `hi < lo`, `repeats == 0`) → `-EINVAL`<br>`cap < nv * nf` → `-ENOSPC` |
+| `shmoo_fmax(c, map, vi)` | 행 `vi`의 fmax | F **그리고 그 아래 모든 격자 주파수**가 `CELL_PASS`인 가장 높은 F ("아래부터 끊김 없이 pass")<br>`f_lo`가 pass가 아니면 0 |
+| `shmoo_vmin(c, map, target_mhz)` | fmax ≥ `target_mhz`인 가장 낮은 격자 전압 | 그런 행이 없으면 0 |
+| `shmoo_margin(c, map, nominal_mv, target_mhz, margin_mhz, margin_pct10)` | nominal 전압에서의 여유 | `nominal_mv`가 격자 전압이 아니면 `-EINVAL`<br>`margin_mhz = fmax − target` (음수 가능)<br>`margin_pct10 = margin_mhz * 1000 / target` (퍼센트 × 10, 0 쪽으로 버림) |
+| `shmoo_holes(c, map, out, cap)` | hole 목록 | hole = `CELL_FAIL`이면서 **같은 행**의 양쪽(낮은 F, 높은 F) **또는** **같은 열**의 양쪽(낮은 V, 높은 V)에 `CELL_PASS`가 있는 점<br>map 순서로 보고, 최대 `cap`개 쓰고 **전체 개수** 반환 |
+| `shmoo_render(c, map, buf, cap)` | ASCII 그림 | **가장 높은 전압부터** 한 행에 한 줄: `"%4u |"` + F마다 한 글자(`*` pass, `.` fail, `?` marginal) + `'\n'`<br>`snprintf` 규칙: `cap` 넘어 쓰지 않음, `cap > 0`이면 NUL 종료, 필요한 전체 길이 반환 |
+
+**예시를 말로 풀면**
+- 격자: V 700..1000 step 50 (7행), F 200..1000 step 100 (9열), `repeats = 3`.
+- DUT는 `f <= 2 * (v - 500)`이면 pass (예: 900 mV → 800 MHz까지 pass). 여기에 (950 mV, 400 MHz) hole, (800 mV, 600 MHz) flaky가 있습니다.
+- 행별 fmax
+  - 1000 mV: 전 칸 pass → 1000
+  - 950 mV: 원래 900까지 pass지만 400에 hole이 있어 **아래부터 끊김 없는 구간**이 300에서 끊김 → **300**
+  - 900 / 850 mV: 800 / 700
+  - 800 mV: 600이 flaky라 3번 중 섞여서 `?`(marginal). **marginal은 pass가 아니므로** fmax = **500**
+  - 750 / 700 mV: 500 / 400
+- `shmoo_vmin(700)`: fmax ≥ 700인 가장 낮은 행 → **850 mV**
+- `shmoo_margin(900, 700)`: 900 mV의 fmax 800 − 700 = **+100 MHz**, pct10 = 100 × 1000 / 700 = 142 (**14.2 %**)
+- `shmoo_holes`: (950, 400) 하나뿐. 800/600의 `?`는 `CELL_FAIL`이 아니라서 hole이 아님.
+- `run_test` 호출 수: 63점 × 3번 = **189** (정확히 이만큼이어야 함)
+
+**지켜야 할 조건**
+- 격자는 수천 점까지. `map`은 호출자가 주며 점당 1바이트.
+- fake가 `run_test` 호출 수(`F.calls`)를 세므로 **돌린 횟수가 정확히 검사됨**.
+- flaky 점은 그 점에 대한 호출이 2번째마다 fail: 1번만 돌리면 멀쩡해 보이고, 3번 돌리면 드러남.
+- `malloc` 금지, **정수 연산만**.
+
 ## 1. Problem
 
 You are writing the characterization tool for first silicon. The DUT exposes one call, `run_test(v_mv, f_mhz)`, which sets the core supply and clock, runs a functional pattern and returns pass/fail. It is implemented at the bottom of `stub.c` by a hidden model (a voltage/frequency wall, plus an optional deterministic **hole** and an optional **flaky** point). Do not edit the fake.

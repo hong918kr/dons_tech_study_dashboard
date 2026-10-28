@@ -3,6 +3,47 @@
 > **ID**: V1 · **Priority**: P0 · **Pattern**: fake memory + fault injection: walking-1s, power-of-two address test, March C- · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V1` / `./run.sh V1 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: 새 SoC의 on-chip SRAM(나중엔 DDR)을 bring-up할 때 가장 먼저 돌리는 **bare-metal 메모리 테스트 엔진** 3종(data bus, address bus, March C-)을 짭니다.
+
+**상황**
+- 메모리를 아직 믿을 수 없는 bring-up 초기 단계입니다. 다른 무엇보다 먼저 이 테스트가 돌아갑니다.
+- 메모리는 **word 단위 주소**(`addr` = word index)이고, `mem_wr(addr, val)` / `mem_rd(addr)` 두 함수로만 접근합니다.
+- `stub.c` 아래쪽의 **fake memory**(256 × `uint32_t`)가 실제 메모리를 흉내 내며, 고장을 일부러 넣을 수 있습니다. fake는 수정 금지입니다.
+  - **stuck-at-0/1**: 한 word의 어떤 비트가 항상 0(또는 1)으로 고정됨
+  - **inversion coupling fault**: word A에 0→1 쓰기를 하면 word B의 한 비트가 뒤집힘 (A = aggressor, B = victim)
+  - **address-line fault**: 주소 비트 k가 0 또는 1로 고정되어 서로 다른 두 주소가 같은 칸을 가리킴 (**alias**)
+- 실패 정보는 `MemFail { addr, expected, actual, element }`에 담습니다. `addr`는 실패한 read의 word 주소, `element`는 테스트마다 뜻이 다릅니다 (March element 0..5 / data bus는 bit index / address bus는 address bit).
+- **March C-** 표기: `⇑` 오름차순, `⇓` 내림차순, `⇕` 아무 방향(여기선 오름차순 사용). `w0` = 0 쓰기, `r1` = 1을 기대하며 읽기. "0"/"1"은 background `0x00000000` / `0xFFFFFFFF`를 뜻함.
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `memtest_databus(addr, f)` | word 하나에 **walking ones** | `bit = 0..31`마다 `1u << bit`를 쓰고 다시 읽음. 불일치 시 `element = bit` |
+| `memtest_addrbus(base, nwords, bad_bit, f)` | **power-of-two 주소 테스트** | `(1u << k) < nwords`인 모든 k에 대해 `base + (1u << k)` 위치를 검사 (아래 3단계). 실패 시 `*bad_bit = k`, `f = { 읽은 addr, PATTERN, actual, k }`. 통과 시 `*bad_bit = -1`. `base`는 `nwords` 이상인 가장 가까운 2의 거듭제곱에 정렬돼 있다고 가정 |
+| `memtest_march_cminus(base, nwords, f)` | `[base, base + nwords)` 구간에 **March C-** | `M0 ⇕(w0); M1 ⇑(r0,w1); M2 ⇑(r1,w0); M3 ⇓(r0,w1); M4 ⇓(r1,w0); M5 ⇕(r0)`. **첫 불일치에서 멈춤**. 깨끗하면 정확히 **10N 접근**. 구간 밖은 건드리지 않음 |
+| 공통 반환값 | | `0` = 통과, `-EIO` = 고장 발견(`*f`에 **첫 번째** 실패), `-EINVAL` = 잘못된 인자 (`f == NULL`, `nwords == 0`, 범위가 `MEM_WORDS`를 넘음) |
+
+**`memtest_addrbus`의 3단계** (`PATTERN = 0xAAAAAAAA`, `ANTI = 0x55555555`)
+1. `base`와 모든 offset에 `PATTERN`을 씀.
+2. `base`에만 `ANTI`를 씀 → 모든 offset은 여전히 `PATTERN`이어야 함 (아니면 bit k가 `base`와 alias).
+3. `base`를 원래대로 돌려놓고, k마다 offset k에 `ANTI`를 쓴 뒤 → `base`와 **다른 모든 offset**이 여전히 `PATTERN`이어야 함 (아니면 주소 비트끼리 short). 확인 후 복구.
+
+**예시를 말로 풀면**
+- **word 10 bit 7 stuck-at-1**: M0이 전부 0을 쓴 뒤 M1(r0)에서 word 10을 읽으면 `0x00000080`이 나옵니다. 기대값 0과 다르므로 `-EIO`, `element 1`.
+- **coupling** (aggressor word 20이 victim word 7보다 위): word 20의 비트를 0→1로 올리는 쓰기가 word 7의 bit 3을 뒤집습니다. 오름차순 M1에서 word 7이 먼저 1로 채워진 뒤 word 20이 1로 쓰이며 word 7의 bit 3이 0이 됩니다. 그래서 M2(r1)에서 word 7을 읽으면 `0xFFFFFFF7` → `element 2`.
+- **address bit 3 stuck-at-0** (word 8 = word 0): 2단계에서 `base`(0)에 `ANTI`를 쓰면 offset 8에서도 `0x55555555`가 읽힙니다. 기대는 `PATTERN`이므로 `bb = 3`, `f = { addr 8, exp 0xAAAAAAAA, act 0x55555555, element 3 }`.
+- **깨끗한 메모리, N = 64**: word마다 read 5번 + write 5번 = 10번 접근이므로 총 640회 = **320 reads + 320 writes**, 반환 0.
+
+**지켜야 할 조건**
+- `MEM_WORDS = 256`. 메모리는 실제 전원 투입 직후 SRAM처럼 쓰레기 값(`0xA5A5A5A5`)으로 시작함.
+- fake가 모든 접근 횟수(`F.rd`, `F.wr`)와 범위 밖 접근(`F.oob`)을 세므로, 10N 규칙과 "범위 안에서만 접근"이 정확히 채점됨.
+- `malloc` 금지. C11, single thread. cache/MMU는 모델링 안 됨 (accessor가 곧 "volatile" 경로).
+
 ## 1. Problem
 
 You are bringing up the on-chip SRAM (and later the DDR controller) of a new SoC. Write the bare-metal memory test engine that the bring-up script runs before anything else is trusted.

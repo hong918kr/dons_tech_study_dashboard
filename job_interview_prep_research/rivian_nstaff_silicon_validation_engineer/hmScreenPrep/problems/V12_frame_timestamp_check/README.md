@@ -3,6 +3,67 @@
 > **ID**: V12 · **Priority**: P1 · **Pattern**: wrap-safe counter delta + two-pointer nearest match · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V12` / `./run.sh V12 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: 여러 카메라의 frame 기록(16-bit frame counter + ns timestamp)을 보고, 카메라 하나하나의 **stream 상태**(drop/중복/순서 뒤바뀜/주기 jitter)와 카메라끼리의 **sync(skew)** 를 판정하는 checker를 짭니다.
+
+**상황**
+- autonomy SoC가 MIPI CSI-2로 여러 카메라의 frame을 받습니다. capture path는 frame마다 record 하나를 남깁니다.
+  - 카메라의 **16-bit HW frame counter**: 65535 다음 0으로 **wrap**
+  - PTP로 맞춘 clock의 **64-bit timestamp(ns)**: start-of-frame 시점에 찍음
+- 기준 속도는 30 fps, 주기 `P = 33,333,333 ns`.
+- 핵심 용어
+  - **dropped**: counter가 건너뛴 만큼 빠진 frame 수
+  - **duplicate**: 같은 counter가 또 들어온 frame
+  - **out-of-order**: counter가 거꾸로 갔거나 timestamp가 앞 frame보다 늦지 않은 frame
+  - **timing pair**: counter가 정확히 +1인 연속 두 frame. 이 쌍에서만 `dt`(timestamp 차이)를 잼
+  - **jitter**: `|dt - P|`
+  - **skew**: 같은 순간의 frame들 사이 timestamp 차이 (max − min)
+- 테스트의 `make_cam()`이 30 fps timestamp(`1e9 × k / 30`, 정수)를 만들어 줍니다.
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `stream_stats(f, n, period_ns, st)` | 카메라 한 대의 stream 통계를 `StreamStats`에 채움 | one pass, 정수 연산. `frames`, `dropped`, `duplicates`, `out_of_order`, `pairs`, `dt_min_ns`, `dt_max_ns`, `dt_mean_ns`(floor), `max_jitter_ns`. 성공 시 0 (stub 테스트 기준), `period_ns == 0` 같은 잘못된 인자 → `-EINVAL` (stub 주석) |
+| `sync_check(cam, n, ncam, period_ns, limit_ns, ss, flagged, flagged_cap)` | camera 0 기준으로 frame마다 skew 계산, `SyncStats` 채움 | skew가 `limit_ns`를 넘은 reference frame index를 `flagged`에 최대 `flagged_cap`개 쓰고, **flag된 총 개수**를 반환. 잘못된 인자(`NULL`, `ncam == 0` 또는 `> MAX_CAM`, `period == 0`) → `-EINVAL` |
+
+**`stream_stats`가 frame마다 하는 판정** (`d = (uint16_t)(cur.counter − prev.counter)`, prev = 현재 baseline)
+1. `d == 0` → duplicate. baseline 그대로.
+2. `d >= 0x8000` → counter가 거꾸로 감 → out-of-order. baseline 그대로.
+3. 그 밖 → `dropped += d − 1`. 그다음
+   - `cur.ts <= prev.ts`면 out-of-order
+   - 아니고 `d == 1`이면 timing pair, `dt = cur.ts − prev.ts`
+   - 그리고 baseline = `cur`.
+- timing pair들에 대해 `dt_min`, `dt_max`, `dt_mean`(floor), `max_jitter = max |dt − P|`. pair가 하나도 없으면 모두 0.
+
+**`sync_check`가 하는 일**
+1. camera 0이 reference. reference frame `i`마다 다른 카메라 각각에서 **timestamp가 가장 가까운** frame을 찾음.
+2. 그 차이가 `|diff| <= P / 2`일 때만 match로 인정.
+3. `skew(i)` = reference frame과 match된 frame들의 timestamp 중 max − min.
+4. 모든 카메라가 match되면 `complete`, 하나라도 빠지면 `incomplete`.
+5. 최대 skew와 그 index 기록 (같은 값이면 **먼저 나온 index**).
+6. `skew(i) > limit_ns`이면 `i`를 flag.
+
+**예시를 말로 풀면**
+- `P = 33,333,333 ns`, `limit = 1,000,000 ns`, frame 6개, timestamp는 5 s 기준 상대값.
+  - cam0(reference): 정확한 30 fps.
+  - cam1: cam0보다 항상 50,000 ns 늦고, frame 4가 빠짐 (counter `7 8 9 10 _ 12`).
+  - cam2: frame index마다 400,000 ns씩 더 밀림 (PTP lock이 안 된 free-running 카메라).
+- frame별 skew는 50,000 / 400,000 / 800,000 / 1,200,000 / 1,600,000 / 2,000,000.
+  - 1,000,000을 넘는 frame 3, 4, 5가 flag → 반환 **3**, `flagged = {3, 4, 5}`.
+  - frame 4는 cam1에 짝이 없으니 `incomplete`. 그래서 `ref_frames 6, complete 5, incomplete 1`, `max_skew 2,000,000`(frame 5).
+- `stream_stats(cam1)`: frame 5개, counter 10 → 12에서 1개 drop, timing pair는 7→8, 8→9, 9→10의 3개.
+- `stream_stats(cam2)`: 주기가 400,000 ns씩 길어져 `dt_min 33,733,333`, `dt_max 33,733,334`, `max_jitter 400,001`.
+
+**지켜야 할 조건**
+- 각 stream은 도착 순서대로 정렬돼 있음. `sync_check`에 들어오는 stream의 timestamp는 non-decreasing.
+- 카메라는 최대 `MAX_CAM = 8`대.
+- `malloc` 금지, floating point 금지. `sync_check`는 전체 frame 수에 대해 O(total frames).
+- stream이 비어 있을 수 있음 (`n == 0`, 포인터가 `NULL`일 수도 있음).
+
 ## 1. Problem
 
 An autonomy SoC receives frames from several cameras over MIPI CSI-2. For every frame the capture path logs a record: the camera's **16-bit hardware frame counter** (wraps 65535 → 0) and a **64-bit timestamp in ns** from a PTP-synced clock, taken at start-of-frame. Nominal rate is 30 fps (period `P = 33,333,333 ns`). Write the checker a validation run uses to decide whether the capture path and the camera sync are healthy.

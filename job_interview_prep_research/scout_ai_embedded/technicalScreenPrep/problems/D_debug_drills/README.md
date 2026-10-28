@@ -3,6 +3,27 @@
 > **ID**: D1–D8 · **Priority**: P0 · **Pattern**: find the bug in 1 minute · **Time**: 15 min
 > 파일: `buggy.c`(버그 8개 + 테스트) · `fixed.c`(정답) · 실행: `./run.sh D buggy` / `./run.sh D fixed` / 내 수정본 `./run.sh D my`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 짧은 펌웨어 함수 8개(D1–D8)에 숨은 버그를 하나씩 찾아 고쳐서 `buggy.c`의 테스트가 `ALL PASS`가 되게 한다.
+- **상황**: 면접관이 짧은 함수를 붙여 넣고 "이 코드 뭐가 문제죠?"라고 묻는다. 스니펫 하나에 약 1분. 8개 함수와 모든 버그를 드러내는 테스트 `main()`이 `buggy.c`에 들어 있고, 정답은 `fixed.c`.
+- **진행 방법**
+  - 드릴마다: ① 의도된 동작(Intended behavior) 읽기 → ② 버그를 한 문장으로, **어떤 입력**에서 터지는지 말하기 → ③ 고친 줄 쓰기 → ④ 어떻게 잡았을지(컴파일러 경고, sanitizer, unit test, scope trace) 말하기.
+  - `buggy.c`를 `my.c`로 복사해서 고친 뒤 `./run.sh D my`. 드릴마다 `ok` / `<-- BUG` 한 줄이 찍힌다.
+- **규칙**: 함수 본문만 고친다(D6은 공유 변수 선언도 가능). `TEST GUARD` 줄과 시뮬레이션 helper(`irq_window`, `irq_disable`, `irq_enable`)는 그대로 둔다. 고친 파일은 `-Wall -Wextra -Werror -fsanitize=address,undefined`로 통과해야 한다.
+- **드릴별 의도된 동작** (버그 내용은 §4 펼치기에)
+  - D1 `avg()`: `int16_t` 샘플 `x[0..n-1]`의 정수 평균. 값이 클 수 있음(8500 = 85.00 °C). `n == 0`이면 나누지 말고 `AVG_INVALID`.
+  - D2 `timed_out()`: `start` 이후 `timeout` tick 이상 지났으면 `true`. 32-bit tick 카운터는 `0xFFFFFFFF` → `0`으로 wrap되고, 그래도 맞아야 함.
+  - D3 `push()`: ring buffer의 `head` 자리에 `v`를 넣고 `head` 전진(`RB_N - 1` 다음은 0). 꽉 차면 아무것도 안 넣고 `false`. 한 칸은 비워 두므로 용량은 `RB_N - 1`.
+  - D4 `process_reverse()`: `i = n-1, n-2, …, 0` 순서로 `process(x[i])`를 각각 정확히 한 번. `n == 0`이면 아무것도 안 함.
+  - D5 `decode_temp12()`: TMP102식 12-bit two's-complement 온도 레지스터. `msb`가 bit 11..4, `lsb` 위 nibble이 bit 3..0. 부호 있는 raw count 반환(1 count = 0.0625 °C). `0x190` → +400, `0xE70` → −400.
+  - D6 `task()` + `TEMP_IRQHandler()`: ISR이 과열 이벤트를 세고, main loop의 `task()`가 이벤트마다 정확히 한 번 보고. `task()` 안 어느 명령에서 IRQ가 와도 이벤트를 잃으면 안 됨.
+  - D7 `clear()`: `*s`의 모든 필드를 0으로.
+  - D8 `deb_update()`: `HIGH`(800) 이상인 읽기가 **3번 연속**일 때만 `OVERHEAT`로. `HIGH` 미만이 하나라도 오면 카운트 다시 시작.
+- **놓치기 쉬운 것** (일반 범주): 정수 폭과 부호(overflow, unsigned, sign extension), 경계(0개, 꽉 참, 마지막 index, wraparound), 동시성(ISR과 공유하는 변수), C 문법 함정. 컴파일 경고 자체가 힌트인 드릴도 있다.
+
 ## 1. Problem
 
 The interviewer pastes a short firmware function and asks: **"What is wrong with this code?"** You get about one minute per snippet.

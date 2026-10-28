@@ -3,6 +3,25 @@
 > **ID**: T2-1 · **Priority**: P0 · **Pattern**: ring buffer + free-running indices · **Time**: 25 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T2-1` / `./run.sh T2-1 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: ISR(생산자)이 넣고 task(소비자)가 꺼내는, lock 없는 SPSC 온도 샘플 ring buffer를 만든다.
+- **상황**: 온도 센서가 10 ms마다 인터럽트를 건다. ISR이 샘플 하나(`int16_t`, 0.1 °C 단위)를 읽어 push하고, control task는 자기 속도로 나중에 pop한다.
+- **입력**: `TempRing` 구조체(`buf[RB_SIZE]`, `volatile uint32_t head`, `tail`), push할 값 `v`, pop/peek 결과를 받을 포인터 `out`. 여기서 `RB_SIZE = 8`.
+- **출력**: `rb_push`/`rb_pop`/`rb_peek`는 성공 여부 `bool`, `rb_count`는 들어 있는 개수 `uint32_t`. pop/peek 성공 시에만 `*out`에 값을 쓴다.
+- **규칙**
+  - `RB_SIZE`는 2의 거듭제곱이고, **`RB_SIZE`칸을 전부** 쓴다("한 칸 비워두기" 트릭 금지).
+  - `head`, `tail`은 계속 증가만 하는 free-running 카운터(2³²에서 wrap). 칸 번호 = `counter & RB_MASK`, 개수 = `head - tail`.
+  - 비었음 = `count == 0`, 가득 참 = `count == RB_SIZE`.
+  - 생산자(ISR)는 `head`만, 소비자(task)는 `tail`만 쓴다. lock 없음, `malloc` 없음.
+  - 가득 찬 상태의 push는 `false`를 돌려주고 **새 샘플을 버린다**(오래된 것을 덮어쓰지 않음).
+  - 빈 상태의 pop/peek는 `false`, `*out`은 건드리지 않는다.
+- **예제 풀어 읽기**: 801~808을 8번 push → 모두 성공, 개수 8(가득 참). 809 push → `false`(버림). pop → 801(가장 오래된 값). 한 칸 비었으니 809 push 성공. 이때 `head = 9`, `tail = 1`, 개수 8.
+- **놓치기 쉬운 것**: 빈 버퍼에서 pop/peek가 `*out`을 바꾸지 않기, peek는 꺼내지 않음(개수 유지), push 5/pop 5를 100번 반복해 칸 번호가 여러 바퀴 도는 경우, `head`/`tail`을 `UINT32_MAX - 2`에서 시작해 카운터 자체가 0을 넘어 wrap하는 경우(`head == 3`이 되어도 개수 6).
+- **구현할 함수**: `rb_init`(초기화), `rb_count`(개수), `rb_push`(생산자 쪽 넣기), `rb_peek`(맨 앞 보기만), `rb_pop`(소비자 쪽 꺼내기).
+
 ## 1. Problem
 
 A temperature sensor on the robot raises an interrupt every 10 ms. The **ISR** reads one sample (`int16_t`, tenths of a degree C) and pushes it into a ring buffer. The **control task** pops samples later, at its own pace. Implement the ring buffer.

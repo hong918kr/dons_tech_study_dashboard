@@ -3,6 +3,24 @@
 > **ID**: T2-10 · **Priority**: P2 · **Pattern**: size-K min-heap in a fixed array + in-place heap sort · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T2-10` / `./run.sh T2-10 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: `N`개 센서 온도 중 가장 뜨거운 `K`개를 골라 뜨거운 순으로 `out`에 정렬해 돌려준다.
+- **상황**: 로봇 thermal manager가 온도 센서 `N`개(motor driver, battery cell, SoC 등)를 polling하고 operator 화면에 가장 뜨거운 `K`개를 보여줘야 한다. 온도는 0.1 °C 단위 정수.
+- **입력**: 센서 읽기 배열 `r[n]`(각각 `id`, `temp_c10`), 개수 `n`, 뽑을 개수 `k`, 결과를 담을 배열 `out`(자리 `k`개).
+- **출력**: `min(n, k)`개를 **가장 뜨거운 것부터** `out`에 쓰고, 그 개수를 반환한다.
+- **규칙**
+  - "더 뜨겁다" 순서: `temp_c10`이 높은 것이 먼저, 온도가 같으면 **`id`가 작은 것**이 먼저.
+  - `k == 0`이면 `out`이 `NULL`일 수 있다.
+  - `out[]` 자체 안에 **size-K min-heap**을 만들어 쓴다 — `malloc` 금지, 추가 배열 금지.
+  - O(n log k) 시간, O(1) 추가 메모리. 입력 배열은 수정하면 안 된다.
+  - `0 <= n <= 4096`, `0 <= k <= 64`, id는 모두 다르고, `temp_c10`은 음수도 가능.
+- **예제 풀어 읽기**: `k = 3`, readings (id, temp) = (0,612) (1,745) (2,598) (3,801) (4,745) (5,690) (6,812) (7,701). 가장 뜨거운 건 812(id 6), 다음 801(id 3), 그다음 745가 id 1과 4 두 개인데 id가 작은 1이 이긴다 → 출력 (6,812) (3,801) (1,745).
+- **놓치기 쉬운 것**: `k == 0`(`out = NULL`)과 `n == 0`은 0 반환, `k > n`이면 전부를 정렬해서 반환, 모든 온도가 같으면 작은 id부터 오름차순, 음수 온도(cold start)와 `k == 1`, 오름차순 입력(교체가 가장 많은 경우), 입력 배열이 바뀌지 않았는지 `memcmp`로 확인.
+- **구현할 함수**: `top_k_hottest(r, n, k, out)` 하나(heap 구성 + 마지막 in-place 정렬).
+
 ## 1. Problem
 
 The robot's thermal manager polls `N` temperature sensors (motor drivers, battery cells, SoC, …) and must show the **K hottest** on the operator display (LeetCode 215 / 347 style).

@@ -3,6 +3,67 @@
 > **ID**: V5 · **Priority**: P1 · **Pattern**: table-driven registry + filter + wrap-safe timing + bounded snprintf report · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V5` / `./run.sh V5 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: SoC 검증 펌웨어의 테스트 표를 돌리는 **test runner**(`tf_run`)와, 결과를 UART 로그용 텍스트로 찍는 **결과/coverage 리포트**(`tf_report`)를 짭니다.
+
+**상황**
+- 검증 펌웨어 안에 **테스트 케이스 표**(`TestCase` 배열)가 고정으로 들어 있습니다. 테스트마다 검사하는 **block**(예: `PCIE`, `DDR`)과 검증하는 **requirement**(`req_id`, 예: `REQ-PCIE-001`)가 붙어 있습니다.
+- 같은 이미지가 **FPGA 프로토타입**과 **실리콘** 양쪽에서 돕니다(`Platform`: `PLAT_FPGA` / `PLAT_SILICON`).
+- 호스트 쪽 Python 스크립트가 UART 로그를 파싱해서 결과 DB와 coverage 리포트를 만듭니다. 그래서 출력 형식이 정해져 있습니다.
+- 시간은 HAL 함수 `tf_now_ms()`로 잽니다. `uint32_t` ms 카운터라 **wrap**(0xFFFFFFFF 다음 0) 됩니다. stub 아래쪽 harness가 가짜 clock과 가짜 테스트 함수를 제공합니다.
+- 용어
+  - 테스트 함수 `fn(ctx)`: 0이면 pass, 음수 errno면 fail
+  - `timeout_ms`: 0이면 제한 없음
+  - `TF_SKIP_ON_FPGA`: FPGA에서는 돌리지 않는 테스트
+  - `TF_DESTRUCTIVE`: 되돌릴 수 없는 테스트(예: OTP burn). `allow_destructive`가 켜져야만 돌림
+  - **coverage**: requirement 중 몇 개가 PASS한 테스트로 검증됐는지의 비율
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `tf_run(tests, n, cfg, res, res_cap)` | 표의 테스트를 골라서 돌리고 결과를 `res`에 기록 | *selected* = `block_filter == NULL`이거나 `block`이 filter와 같음. 선택 안 된 테스트는 **기록도 안 함**<br>선택된 개수 > `res_cap` → **아무것도 안 돌리고** `-ENOSPC`<br>결과는 표 순서대로, **결과 개수 반환** |
+| `tf_report(res, nres, reqs, nreq, buf, cap)` | 결과를 정해진 텍스트 형식으로 `buf`에 씀 | 최대 `cap` 바이트, `cap > 0`이면 항상 NUL 종료<br>`snprintf`처럼 **필요했던 전체 길이**(NUL 제외) 반환<br>`cap == 0`이면 `buf`가 NULL일 수 있음. 모든 줄은 `\n`으로 끝남 |
+| `tf_status_name(s)` | 상태 이름 문자열 (`"PASS"` 등) | 이미 제공됨 |
+
+**`tf_run`이 선택된 테스트마다 정하는 상태**
+1. **SKIP**: `plat == PLAT_FPGA`이고 `TF_SKIP_ON_FPGA`가 붙었거나, `TF_DESTRUCTIVE`인데 `allow_destructive`가 false. 이때 `fn`은 **호출 안 함**, `rc = 0`, `ms = 0`.
+2. 그 밖에는 실행: `start = tf_now_ms()` → `rc = fn(cfg->ctx)` → `ms = tf_now_ms() - start` (wrap 돼도 맞아야 함).
+3. `timeout_ms != 0`이고 `ms > timeout_ms` → **TIMEOUT** (`rc`는 그대로 둠).
+4. 아니면 `rc == 0` → **PASS**, 그 외 → **FAIL**.
+
+**`tf_report` 출력 순서**
+- `RESULT,<id>,<status>,<rc>,<ms>`: 결과마다 한 줄, 순서대로
+- `SUMMARY,total=..,pass=..,fail=..,skip=..,timeout=..`: 한 줄
+- `COVERAGE,<block>,<covered>/<total>,<pct>%`: block마다 한 줄, **`reqs`에 처음 나온 순서**
+- `COVERAGE,ALL,<covered>/<total>,<pct>%`: 한 줄
+- `UNCOVERED,<req_id>`: covered 안 된 requirement마다 한 줄, `reqs` 순서
+- requirement가 **covered** = 같은 `req_id`를 가진 결과 중 **PASS가 하나라도** 있음
+- `pct = covered * 100 / total` 내림, `total == 0`이면 0
+
+**예시를 말로 풀면**
+- FPGA, filter 없음, destructive 금지로 6개 테스트를 돌립니다. clock은 `0xFFFFFFF8`에서 시작해서 **도는 중에 wrap** 됩니다. 그래도 `ms`는 12, 3, 40, 600처럼 정확해야 합니다.
+  - `PCIE-LINK-001`: 12 ms, rc 0 → PASS
+  - `PCIE-LINK-002`: rc -5 → FAIL
+  - `PCIE-GEN4-003`: `SKIP_ON_FPGA`인데 FPGA → SKIP (`0,0`)
+  - `DDR-TRAIN-001`: 40 ms, timeout 40 → `40 > 40`이 아니라서 PASS
+  - `DDR-STRESS-002`: 600 ms > 500 → TIMEOUT, rc 0은 그대로 찍힘
+  - `OTP-BURN-001`: DESTRUCTIVE인데 금지 → SKIP
+- 그래서 `tf_run`은 6을 반환하고 SUMMARY는 pass 2, fail 1, skip 2, timeout 1입니다.
+- Coverage: requirement 7개 중 PASS로 덮인 건 `REQ-PCIE-001`, `REQ-DDR-001` 2개뿐입니다.
+  - PCIE 1/3 = 33%, DDR 1/2 = 50%, OTP 0/1, ISP 0/1 (ISP는 테스트가 아예 없음)
+  - ALL 2/7 = 200/7 = 28.57… → 내림해서 **28%**
+- 나머지 5개 requirement가 `UNCOVERED` 줄로 나옵니다. 전체 텍스트 길이는 451바이트라서 `tf_report`가 451을 반환합니다.
+
+**지켜야 할 조건**
+- C11, single core, OS 없음. `tf_now_ms()`는 `uint32_t`이고 wrap 됨.
+- 표의 문자열은 static, NUL 종료. 테스트와 requirement는 수백 개 정도 (O(n·m) 매칭이면 충분).
+- 이 버전에서는 테스트 함수가 **스스로 리턴함**(진짜 hang 없음). timeout은 리턴한 **뒤에** 판정.
+- `malloc` 금지.
+
 ## 1. Problem
 
 The SoC validation firmware has a static table of test cases. Each test is tagged with the **block** it exercises and the **requirement** it verifies. The same image runs on the FPGA prototype and on silicon. A host-side Python script parses the UART log and feeds a results database and a coverage report.

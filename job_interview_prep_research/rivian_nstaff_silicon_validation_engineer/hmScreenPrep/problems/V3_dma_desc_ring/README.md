@@ -3,6 +3,46 @@
 > **ID**: V3 · **Priority**: P0 · **Pattern**: descriptor ring + OWN-bit handoff + guard-byte self-test · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V3` / `./run.sh V3 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: 새 SoC의 **memcpy / AXI-DMA 엔진**용 **descriptor ring 드라이버**(init, submit, reap)와, validation에서 믿고 쓸 수 있는 **self-test**를 짭니다.
+
+**상황**
+- DMA 엔진은 DDR에 있는 32-byte **descriptor**들이 원형으로 이어진 **ring**을 차례로 처리합니다.
+- **OWN 비트로 소유권을 주고받음**: SW가 descriptor를 채우고 OWN = 1로 HW에 넘김 → HW가 `src`에서 `dst`로 `len` 바이트를 복사하고 `status`를 쓴 뒤 OWN = 0으로 돌려주고 다음 slot으로 이동.
+- descriptor 필드
+  - `src`, `dst`: bus 주소, `len`: 1 .. `DMA_MAX_LEN`(256)
+  - `ctrl`: b31 **OWN**(1 = HW 소유) | b30 **IRQ** | b29 **EOP**(end of packet, 한 transfer의 마지막 descriptor)
+  - `status`: b0 **DONE** | b3:1 **ERR**(0 OK, 1 **SLVERR**, 2 **DECERR**) — HW가 씀
+- 엔진은 `stub.c` 아래쪽의 **fake**입니다. 실제 칩에선 혼자 돌지만, harness에선 테스트가 `dma_hw_step(budget)`를 불러야 최대 `budget`개 descriptor를 처리합니다.
+- fake는 지정한 descriptor에 **AXI error**, **1-byte overrun**(한 바이트 더 씀), **short copy**(덜 복사함)를 넣을 수 있습니다.
+- `DmaRing`의 `head`/`tail`은 **free-running** 카운터이고 slot 번호는 `idx & mask`입니다. **cookie**는 transfer 하나를 식별하는 번호입니다.
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `ring_init(r, mem, n)` | ring 초기화 | `n`은 `[2, 64]` 범위의 2의 거듭제곱, 아니면 `-EINVAL`. 모든 descriptor를 지우고(OWN = 0) 인덱스 리셋 후 `dma_hw_set_ring()`으로 엔진 설정 |
+| `dma_submit(r, src, dst, len)` | transfer 하나를 ring에 넣기 | `len`을 최대 256바이트 조각으로 나눠 조각마다 descriptor 1개. **EOP \| IRQ는 마지막 것에만**. `src/dst/len/status`를 먼저 채우고 `dma_wmb()` 후 **OWN을 맨 마지막에** 설정. 빈 slot이 전체 transfer만큼 없으면 `-EBUSY`이고 **아무것도 안 씀**. `len == 0` 또는 ring 전체보다 많은 descriptor가 필요하면 `-EINVAL`. 성공 시 cookie `0, 1, 2, …` 반환 |
+| `dma_reap(r, cb, ctx)` | 끝난 descriptor 회수 | `tail`부터, 제출된 slot(`tail != head`)이고 **OWN == 0**인 동안 진행. `status` 읽기 전에 `dma_rmb()`. EOP마다 transfer당 한 번 `cb(ctx, cookie, err, bytes)` 호출. `err`: descriptor 중 하나라도 `ERR != 0`이거나 DONE이 없으면 `-EIO`, 아니면 0. `bytes`: 정상 descriptor들의 `len` 합. 반환값 = callback 횟수 |
+| `dma_selftest(r, rep)` | 드라이버 + 엔진 self-test | 크기 `{1, 3, 4, 63, 64, 255, 256, 257, 700, 1024}` × 목적지 offset `0..3` = **40 case**, 한 번에 transfer 하나. 목적지 데이터와 **앞뒤 16바이트 guard 영역**까지 확인. case마다 `pass`, `guard_err`, `data_err`, `dma_err`, `timeout` 중 **하나에만** 셈. 전부 pass면 `0`, 아니면 `-EIO` |
+
+**예시를 말로 풀면**
+- **n = 8, 700바이트 submit**: 256 + 256 + 188로 나뉘어 descriptor 3개(slot 0..2), `head = 3`. 마지막 slot 2에만 `IRQ | EOP`가 붙고 cookie 0 반환.
+  - `dma_hw_step(2)` 후 reap: slot 0, 1은 끝나서 회수되지만 EOP(slot 2)가 아직이라 transfer가 안 끝남 → callback 0개.
+  - `dma_hw_step(8)` 후 reap: slot 2까지 끝남 → callback 1개 (cookie 0, err 0, bytes 700).
+- **16바이트 submit 8번**: 각각 descriptor 1개라 ring 8칸이 꽉 차서 cookie 0..7. 9번째는 빈 칸이 없어 `-EBUSY`.
+- **700바이트 transfer의 가운데 descriptor에 SLVERR**: transfer 전체는 `err = -EIO`, `bytes`는 정상인 두 descriptor 합 256 + 188 = **444**.
+- **self-test**: 깨끗한 엔진이면 40/40 pass. HW가 첫 descriptor에서 `len + 1`바이트를 복사하면(overrun) 그 한 case가 guard를 침범 → `guard_err = 1`.
+
+**지켜야 할 조건**
+- C11, single core, `malloc` 금지. descriptor 메모리는 호출자가 줌.
+- `head`/`tail`은 `uint32_t`라서 2^32를 넘어 **wrap**될 수 있음.
+- fake HW는 descriptor를 **ring 순서대로만** 처리하고, 에러가 나도 **멈추지 않음**.
+- `dma_wmb()` / `dma_rmb()`는 제공됨 (release / acquire fence).
+
 ## 1. Problem
 
 You are bringing up a **memcpy / AXI-DMA engine** on a new SoC. The engine walks a ring of 32-byte descriptors in DDR. Software fills a descriptor and gives it to hardware by setting the **OWN** bit; hardware copies `len` bytes from `src` to `dst`, writes `status`, clears OWN and moves to the next slot. Write the driver and a self-test that a validation run can trust.

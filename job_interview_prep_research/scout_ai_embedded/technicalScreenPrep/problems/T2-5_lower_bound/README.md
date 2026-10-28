@@ -3,6 +3,24 @@
 > **ID**: T2-5 · **Priority**: P1 · **Pattern**: half-open binary search (lower_bound / upper_bound, LeetCode 35 / 34) · **Time**: 20 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T2-5` / `./run.sh T2-5 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 시간순 정렬된 샘플 배열에서 binary search로 "t 이상인 첫 샘플"과 "t 이하인 마지막 샘플"의 인덱스를 찾는다.
+- **상황**: 로봇의 flight recorder가 시간순 온도 샘플 배열을 갖고 있다. 사고 후 엔지니어가 "`t = 300` ms일 때 온도가 몇이었나?"를 묻는다.
+- **입력**: 샘플 배열 `s[n]`(각각 `t_ms` 단위 ms, `temp_c10` 단위 0.1 °C), 개수 `n`, 찾을 시각 `t`(`uint32_t`, 0과 `UINT32_MAX` 포함).
+- **출력**
+  - `first_at_or_after`: `t_ms >= t`인 **첫** 샘플의 인덱스, 없으면 `n` (`lower_bound`).
+  - `last_at_or_before`: `t_ms <= t`인 **마지막** 샘플의 인덱스, 없으면 `NOT_FOUND`(`SIZE_MAX`) (`upper_bound - 1`).
+- **규칙**
+  - timestamp는 **감소하지 않음**(non-decreasing). 같은 `t_ms`가 여러 개일 수 있다.
+  - O(log n). `n == 0`이면 `s`는 `NULL`일 수 있다.
+  - 중간값(mid) 계산에서 overflow가 나면 안 된다.
+- **예제 풀어 읽기**: `t_ms = [100, 200, 200, 200, 350, 500, 800]`(n = 7). t=300 → 이상인 첫 샘플은 350(인덱스 4), 이하인 마지막은 세 번째 200(인덱스 3). t=200 → 중복 묶음의 처음 1, 마지막 3. t=50 → 모든 샘플이 더 늦으니 0과 `NOT_FOUND`. t=900 → 7(=n)과 6.
+- **놓치기 쉬운 것**: 중복 시각의 처음/마지막 구분, 배열 앞(50)과 뒤(900) 바깥, 첫/마지막 시각과 정확히 같은 t(100, 800), `NULL`/0개와 1개 배열, `t = 0`, `t = UINT32_MAX`와 `t_ms = UINT32_MAX`인 극단값, 0~900 전체 t를 선형 탐색과 비교.
+- **구현할 함수**: `first_at_or_after`(lower_bound), `last_at_or_before`(upper_bound - 1).
+
 ## 1. Problem
 
 The robot's flight recorder keeps a time-sorted array of temperature samples. After an incident an engineer asks: "what was the temperature at `t = 300` ms?" Implement the two lookups below with **binary search**.

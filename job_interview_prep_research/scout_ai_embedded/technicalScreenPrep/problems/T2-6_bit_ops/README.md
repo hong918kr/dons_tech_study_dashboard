@@ -3,6 +3,28 @@
 > **ID**: T2-6 · **Priority**: P0 · **Pattern**: mask & shift · Kernighan popcount · swap stages · **Time**: 25 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T2-6` / `./run.sh T2-6 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 32-bit 센서 `STATUS` 레지스터를 다루는 비트 연산 helper 5개(필드 읽기/쓰기, popcount, 비트 뒤집기, 2의 거듭제곱 판별)를 만든다.
+- **상황**: 온도 센서 IC가 SPI로 32-bit `STATUS`를 준다. bit 0 `OT_FAULT`, bit 1 `UV_FAULT`, bit 2 `CRC_ERR`, bit 3 `DATA_RDY`, bits 4..6 `MODE`(3-bit), bits 8..15 `FIFO_LVL`(8-bit), 나머지는 reserved(쓸 때 보존).
+- **입력**: 레지스터 값 `reg`, 필드 시작 bit `pos`, 필드 폭 `width`(bit 수), 쓸 값 `val`, 그리고 popcount/reverse/pow2용 `x`(모두 `uint32_t`).
+- **출력**: `get_field`는 bits `[pos, pos+width)`를 bit 0으로 내린 값, `set_field`는 그 필드만 바꾼 새 `reg`, `popcount32`는 1인 bit 개수, `reverse_bits32`는 bit 31..0을 거울처럼 뒤집은 값, `is_pow2`는 bit가 정확히 하나만 켜져 있으면 `true`.
+- **규칙**
+  - 전제: `1 <= width <= 32`, `pos + width <= 32`. `width = 32`, `pos = 31`도 들어온다.
+  - `set_field`는 `val`을 `width` bit로 잘라서(mask) 넣고, 다른 bit는 하나도 바꾸지 않는다.
+  - 모든 shift에 undefined behavior가 없어야 한다(32만큼 shift 금지, signed overflow 금지).
+  - 핵심 답에는 compiler builtin(`__builtin_popcount` 등) 사용 금지.
+- **예제 풀어 읽기**: `STATUS = 0x00002A35`. bits 4..6 = 3(`MODE`), bits 8..15 = 0x2A = 42(`FIFO_LVL`), 하위 3 bit(fault) 중 켜진 것은 `OT_FAULT`와 `CRC_ERR` 2개. `MODE`에 6을 쓰면 `0x00002A65`, 9(0b1001)를 쓰면 하위 3 bit 0b001만 들어가 `0x00002A15`. `reverse_bits32(0x02941E9C) = 0x39782940`, `is_pow2`는 0 → false, 1 → true, 6 → false.
+- **놓치기 쉬운 것**: `width = 32`일 때 `1u << 32` 함정(`get_field(0xDEADBEEF, 0, 32)`, `set_field(..., 0, 32, ...)`), `pos = 31`·`width = 1` 최상위 bit, `set_field(0xFFFFFFFF, 4, 3, 0)` → `0xFFFFFF8F`(다른 bit 보존), `popcount32(0)`·`popcount32(0xFFFFFFFF) = 32`, `reverse_bits32(1) = 0x80000000`, `is_pow2(0)`·`is_pow2(0x80000000)`·`is_pow2(0xFFFFFFFF)`.
+- **구현할 함수**
+  - `get_field(reg, pos, width)`: 필드 읽기.
+  - `set_field(reg, pos, width, val)`: 필드만 바꿔 쓰기.
+  - `popcount32(x)`: 1 bit 개수 세기(active fault 수).
+  - `reverse_bits32(x)`: LSB-first/MSB-first 변환용 비트 뒤집기.
+  - `is_pow2(x)`: FIFO depth가 2의 거듭제곱인지 확인.
+
 ## 1. Problem
 
 A temperature-sensor IC exposes a 32-bit `STATUS` register that the firmware reads over SPI:

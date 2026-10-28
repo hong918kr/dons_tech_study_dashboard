@@ -3,6 +3,24 @@
 > **ID**: T1-7 · **Priority**: P1 · **Pattern**: segment walk + interval overlap + integer interpolation · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T1-7` / `./run.sh T1-7 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 시간순 온도 샘플에서 창 `[t0_ms, t1_ms]` 안에 온도가 `>= thresh`였던 총 시간을 마이크로초로 구한다(step / 선형 보간 두 방식).
+- **상황**: 샘플 사이 값을 보는 두 모델이 있다. `MODE_STEP`(sample-and-hold)은 샘플 `i`의 값이 `[t_i, t_{i+1})` 동안 유지되고, `MODE_LERP`는 연속 샘플 사이를 직선으로 잇고 그 선이 `thresh`를 지나는 시각을 계산한다.
+- **입력**: 샘플 배열 `s[n]`(`t_ms`, `temp`), 기준 `thresh`, 창 시작·끝 `t0_ms`, `t1_ms`(ms), 모드 `mode`.
+- **출력**: 창 안 hot 시간의 합, **마이크로초** 단위 `uint64_t`.
+- **규칙**
+  - 신호는 첫 샘플~마지막 샘플 사이에서만 안다. 그 밖의 창 시간은 hot이 아니다.
+  - 각 crossing 시각은 가장 가까운 마이크로초로 반올림.
+  - 정수 연산만(float 금지), 나누기 전에 곱하기, 64비트 중간값.
+  - `n < 2` 또는 `t1_ms <= t0_ms`면 0.
+  - 타임스탬프는 strictly increasing, wrap 없음.
+- **예제 풀어 읽기**: 샘플 (0,70) (10,90) (20,95) (30,60), `thresh = 80`, 창 [0, 30]. STEP: 10 ms의 90부터 30 ms까지 hot → [10, 30) = 20000 us. LERP: 70→90이 t = 5에서 80을 넘고, 95→60이 `t = 20 + 15*10/35 = 24.2857`에서 내려감 → [5, 24.286] = 19286 us. 창 [15, 25]면 STEP 10000 us, LERP 9286 us.
+- **놓치기 쉬운 것**: 창 [0, 7]은 STEP 0 / LERP 2000, 창이 마지막 샘플을 넘는 [25, 100]은 STEP 5000 / LERP 0(30 ms 이후는 데이터 없음), NULL·`n == 1`·`t0 == t1`·`t1 < t0` → 0, 정확히 `thresh`인 평평한 구간은 두 모드 모두 hot, 큰 값(-30000 → 30000, 4000000000 ms)에서 64비트 overflow 방지 → 2000000000000 us.
+- **구현할 함수**: `time_above_us(s, n, thresh, t0_ms, t1_ms, mode)` 하나(내부에서 STEP / LERP 분기).
+
 ## 1. Problem
 
 You are given temperature samples sorted by time (timestamp in ms). Return the **total time inside the window `[t0_ms, t1_ms]`** during which the temperature was **`>= thresh`**. Support two models of what happens between samples:

@@ -3,6 +3,71 @@
 > **ID**: V11 · **Priority**: P0 · **Pattern**: golden model + comparator + failure signature · **Time**: 35 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V11` / `./run.sh V11 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: NPU가 계산한 int8 GEMM 결과를 검증하기 위해 **C golden model**, 결과를 비교하는 **comparator**, 차이를 버그 종류로 분류하는 **diagnose**, 그리고 **seeded stimulus generator**를 짭니다.
+
+**상황**
+- 사내 AI accelerator SoC의 NPU를 검증합니다. quantized fully-connected(또는 1×1 conv) layer가 NPU에서 **int8 GEMM**으로 돌아갑니다.
+- golden model은 compiler 팀이 sign-off 하는 기준이고, TFLite/gemmlowp와 **같은 수식**이어야 합니다.
+- 행렬 `A[M][K]`, `B[K][N]`, `C[M][N]`은 모두 row-major int8입니다. weight(`B`)는 **symmetric**(zero point 0)입니다.
+- 핵심 용어
+  - **zero point**(`a_zp`, `out_zp`): int8 값에서 "실제 0"에 해당하는 정수. 입력은 `A - a_zp`로 빼서 쓰고, 출력은 결과에 `out_zp`를 더함
+  - **accumulator**(`acc`): `bias[n] + Σ_k (A[m][k] - a_zp) * B[k][n]`, **int32**로 누적
+  - **requant**: int32 `acc`를 실수 scale(`mult / 2^31 / 2^shift`)로 줄여 int8로 되돌리는 단계. `SRDHM`(곱한 뒤 상위 32 bit를 반올림) → `RDBPOT`(2^e로 나누며 반올림) 순서이고, 정확한 수식은 §1 코드 블록에 있음
+  - **per-channel / per-tensor**: `mult`/`shift`를 출력 column `n`마다 따로 쓰면 per-channel(`c = n`), 하나만 쓰면 per-tensor(`c = 0`)
+  - **relu**: 켜면 하한 `act_min = out_zp`, 끄면 `-128`. 상한은 항상 127
+  - **bit-exact**: golden과 HW 출력이 한 비트도 다르지 않아야 pass
+- 테스트에는 **NPU behavioural model** `npu_gemm(..., bug)`이 들어 있습니다. 한 tile에 출력 column 8개(`NPU_TILE = 8`)를 계산하고, 버그 4개를 넣을 수 있습니다.
+  - `BUG_TRUNC_ROUND`: 반올림 대신 floor
+  - `BUG_ACC16`: accumulator가 16 bit에서 wrap
+  - `BUG_NO_BIAS_CH`: channel 5의 bias 누락
+  - `BUG_TILE_EDGE`: 마지막 partial tile에서 `k = K-1` 항이 빠짐
+- 내 comparator와 diagnose가 이 4개를 모두 잡아내고 맞는 종류로 분류해야 합니다.
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `srdhm(a, b)` | SaturatingRoundingDoublingHighMul | `a == b == INT32_MIN`이면 `INT32_MAX`. 나머지는 §1 수식 그대로 (nudge 더한 뒤 `2^31`로 C division, 0 방향 truncate) |
+| `rdbpot(x, e)` | RoundingDivideByPowerOfTwo | `0 <= e <= 31`, §1의 `mask`/`rem`/`thr` 수식 그대로 (arithmetic shift) |
+| `requant_i8(acc, mult, shift, out_zp, act_min, act_max)` | int32 → int8 requant | `rdbpot(srdhm(acc, mult), shift) + out_zp`를 `[act_min, act_max]`로 clamp |
+| `gemm_ref(A, B, bias, M, K, N, q, C, acc_out)` | golden GEMM | int32 누적 → per-channel/per-tensor requant → relu clamp. `acc_out`이 `NULL`이 아니면 int32 `acc`도 기록 |
+| `cmp_tensors(gold, hw, M, N, mode, r)` | golden vs HW 비교 리포트 | `CMP_BITEXACT`(기본)는 차이가 하나라도 있으면 mismatch, `CMP_TOL1`은 차이 절댓값 1 이하 허용. `mismatches`(허용 범위 밖 개수), `max_abs`, `hist`(차이 절댓값 0 / 1 / 1 초과)는 **전체 원소** 기준. 첫 mismatch 위치(row-major, 없으면 `-1, -1`)와 column별 개수 `col_bad[n]` |
+| `diagnose(r, N, tile)` | 리포트 → 의심 버그 종류 | 아래 순서대로 판정 |
+| `gen_tensor(t, n, seed, zp)` | seed로 재현 가능한 입력 생성 | LCG, corner 값 포함 (아래 참고) |
+
+**`diagnose` 판정 순서** (위에서부터 처음 맞는 것)
+1. mismatch 없음 → `DIAG_PASS`
+2. `N % tile != 0`이고, 틀린 column이 **전부** `>= tile * floor(N / tile)`(= 마지막 partial tile 안) → `DIAG_TILE_EDGE`
+3. mismatch가 전부 **한 column**에 있음 → `DIAG_ONE_CHANNEL`
+4. `max_abs == 1` → `DIAG_ROUNDING`
+5. 그 밖 → `DIAG_CORRUPTION`
+
+**`gen_tensor` 규칙**
+- LCG: `s = s * 1664525 + 1013904223` (mod 2^32), 원소마다 한 step.
+- `(s >> 8) % 8 == 0`이면 원소 = `CORNER[(s >> 4) & 3]`, `CORNER = { -128, 127, 0, zp }`.
+- 아니면 원소 = `(int8_t)(s >> 24)`.
+
+**예시를 말로 풀면**
+- 2×3 `A`와 3×2 `B`, `bias = [10, -20]`, `a_zp = 1`, `out_zp = -1`, per-tensor `mult = 0x40000000`(0.5), `shift = 1` → scale은 0.5 × 2^-1 = **0.25**입니다.
+  - 예: `acc[0][0] = 10 + (11-1)*1 + (21-1)*2 + (31-1)*3 = 150`. 전체 `acc = [[150, 90], [378, 494]]`.
+  - `150 * 0.25 = 37.5` → 반올림해서 38, 여기에 `out_zp = -1`을 더해 **37**. 전체 `C = [[37, 22], [94, 123]]`.
+  - relu를 켜고 `out_zp = -100`으로 바꾸면 하한이 -100이 되고 `C = [[-62, -77], [-5, 24]]`.
+- M=6, K=32, N=12 layer를 NPU model과 bit-exact로 비교하면 (N=12, tile=8이라 column 8–11이 마지막 partial tile):
+  - `BUG_NONE`: mismatch 0 → `PASS`
+  - `BUG_TRUNC_ROUND`: 37개, 최대 차이 1 → `ROUNDING` (`CMP_TOL1`로 보면 0개)
+  - `BUG_ACC16`: 27개, 최대 차이 86 → `CORRUPTION` (정확히 `|acc| > 32767`인 27개)
+  - `BUG_NO_BIAS_CH`: 6개, 전부 column 5 → `ONE_CHANNEL`
+  - `BUG_TILE_EDGE`: 16개, 첫 mismatch `(0, 8)` → `TILE_EDGE`
+
+**지켜야 할 조건**
+- `M, N <= 32`(`CMP_MAX_N`), `K <= 64`, `0 <= shift <= 31`. 음수 `int32_t`의 right shift는 arithmetic이라고 가정 (gcc/clang).
+- golden model은 위 수식과 **bit-exact**여야 함. tie(딱 .5)를 어느 쪽으로 반올림하는지까지 똑같아야 함.
+- `malloc` 금지.
+
 ## 1. Problem
 
 You validate the NPU of an in-house AI accelerator SoC. A quantized fully-connected (or 1×1 conv) layer runs on the NPU as an int8 GEMM. Write:

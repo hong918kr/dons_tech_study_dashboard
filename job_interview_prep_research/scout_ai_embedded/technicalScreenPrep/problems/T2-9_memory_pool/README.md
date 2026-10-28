@@ -3,6 +3,32 @@
 > **ID**: T2-9 · **Priority**: P2 · **Pattern**: intrusive free list (stack) + used bitmap · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T2-9` / `./run.sh T2-9 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: `malloc` 없이 고정 크기 block 8개를 O(1)로 빌려주고 돌려받는 memory pool을 만들고, 잘못된 free(foreign pointer, double free)를 잡아낸다.
+- **상황**: telemetry task가 센서 메시지마다 block 하나를 할당해 채우고 radio task에 넘기면, radio task가 전송 후 free한다. `malloc()`은 fragmentation과 예측 불가능한 시간 때문에 금지.
+- **입력**
+  - `Pool *p`: 내부에 `blocks[NUM_BLOCKS]`(8개 × `BLOCK_SIZE` 32 bytes), `free_head`(free list 머리), `used`(bit i = block i 할당됨), `n_free`(free block 수).
+  - `Block`: union — free일 때는 `next` pointer, 사용 중일 때는 `bytes[BLOCK_SIZE]` payload, `align_`(`uint64_t`)으로 8-byte 정렬.
+  - `pool_free(p, ptr)`: 돌려줄 pointer `ptr`.
+- **출력**: `pool_alloc`은 free block pointer 또는 다 쓰면 `NULL`. `pool_free`는 `POOL_OK`(0), `POOL_ERR_FOREIGN`(-1), `POOL_ERR_DOUBLE`(-2). `pool_free_count`는 free block 수. `pool_init`은 반환값 없음.
+- **규칙**
+  - storage는 static, `Pool` 객체 안에 있다. `pool_init`은 모든 block을 free list에 넣는다(block 0이 먼저).
+  - `pool_alloc`, `pool_free` 모두 **O(1)**.
+  - `POOL_ERR_FOREIGN`: pointer가 이 pool의 block **시작 주소**가 아님. `POOL_ERR_DOUBLE`: 이미 free인 block.
+  - `pool_free(p, NULL)`은 아무것도 안 하고 `POOL_OK`(`free(NULL)`처럼).
+  - free list는 **intrusive**: `next` pointer가 free block 안에 들어있다. double-free 검사용 used bitmap은 허용.
+  - `NUM_BLOCKS <= 32`(bitmap 하나), single-threaded 기본 버전.
+- **예제 풀어 읽기**: init 후 free list B0..B7, free = 8. 3번 alloc → B0, B1, B2, free = 5, `used = 0x07`. `free(B1)` → `POOL_OK`, free = 6, `used = 0x05`. 다시 alloc → B1(마지막에 free된 것, LIFO). `free(B1)`을 두 번 하면 `POOL_ERR_DOUBLE`, `free(B0 + 1)`은 block 시작이 아니라 `POOL_ERR_FOREIGN`.
+- **놓치기 쉬운 것**: 8개 다 쓰면 9번째는 `NULL`이고 8개가 모두 서로 달라야 함, block 32 bytes 전체에 `0xA5`를 써도 free 후 pool이 깨지지 않아야 함, double free가 free list를 망가뜨리지 않음(count 유지), stack 변수 주소·`block + 1`·마지막 block 바로 뒤 주소는 FOREIGN, NULL은 no-op, **한 번도 할당 안 된** block을 free하면 DOUBLE.
+- **구현할 함수**
+  - `pool_init(p)`: free list 구성.
+  - `pool_alloc(p)`: free list에서 하나 꺼내기.
+  - `pool_free(p, ptr)`: 검증 후 free list에 되돌리기.
+  - `pool_free_count(p)`: free block 수 반환.
+
 ## 1. Problem
 
 On the robot, the telemetry task allocates one block per sensor message, fills it, and hands it to the radio task, which frees it after transmission. `malloc()` is banned (fragmentation, non-deterministic timing), so implement a **fixed-block memory pool**:

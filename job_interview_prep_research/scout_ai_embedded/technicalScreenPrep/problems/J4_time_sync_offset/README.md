@@ -3,6 +3,31 @@
 > **ID**: J4 · **Priority**: P1 · **Pattern**: 4-timestamp math + min-delay filter + slew-limited correction · **Time**: 20 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh J4` / `./run.sh J4 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: MCU와 host가 주고받은 timestamp 4개로 두 시계의 차이(offset)를 구하고(A), 여러 샘플 중 가장 믿을 만한 걸 고르고(B), 그 offset을 천천히 적용한다(C).
+- **상황**: MCU는 자기 시계(µs, `int64_t`)로 센서 샘플에 시각을 찍는다. host의 fusion 코드는 그 시각을 host 시계 기준으로 필요로 한다. 그래서 MCU가 host에 ping을 보내고 timestamp 4개를 기록한다.
+- **배경 개념**
+  - **timestamp 4개**: t1 = MCU가 요청 보낸 시각(MCU 시계), t2 = host가 받은 시각(host 시계), t3 = host가 답장 보낸 시각(host 시계), t4 = MCU가 답장 받은 시각(MCU 시계).
+  - **offset**: host 시계 − MCU 시계. `host_time = mcu_time + offset`. 가는 길과 오는 길 시간이 같다고 가정하고 `((t2 - t1) + (t3 - t4)) / 2`로 구한다.
+  - **delay**: 왕복 시간에서 host가 붙잡고 있던 시간을 뺀 순수 네트워크 왕복 시간. `(t4 - t1) - (t3 - t2)`. delay가 작을수록 가는/오는 길 비대칭에 의한 오차가 작아서(오차 ≤ delay/2) 더 믿을 만하다.
+  - **step vs slew**: step = 시계를 한 번에 새 값으로 점프. slew = 시간 흐름이 튀지 않게 조금씩 따라가기(여기선 local 1초당 최대 500 µs, 즉 500 ppm).
+- **입력**: Part A/B는 `t[4]` 배열(또는 그 배열 `n`개). Part C는 `ClockSync`(`offset_us`, `synced`), 새로 잰 offset, 지난번 호출 이후 흐른 local 시간 `elapsed_local_us`.
+- **출력**: A/B는 `*offset_us`, `*delay_us`를 채우고 성공 여부 `bool` 반환. C는 적용된 offset 반환, `to_host_time()`은 `local_us + offset`.
+- **규칙**
+  - 공통: `/ 2`는 **floor**(음의 무한대 쪽으로 내림). C의 `/`는 0 쪽으로 잘라서 다르다. `malloc` 금지, 정수 연산만.
+  - Part A: `t4 < t1`, `t3 < t2`, `delay < 0` 중 하나면 `false`이고 출력은 건드리지 않는다.
+  - Part B: 유효한 샘플 중 **delay가 가장 작은** 것 사용. 같으면 앞 index. 유효한 게 없으면 `false`.
+  - Part C: 아직 sync 안 됐거나, measured와 applied의 차이 절댓값이 `128000`보다 **크면**(`>`) step. 아니면 slew: 최대 `500 × elapsed_local_us / 1e6` µs(정수 floor)만큼 measured 쪽으로 이동, `elapsed_local_us <= 0`이면 안 움직임.
+- **예제 풀어 읽기**: `t = {10000, 15200, 15300, 10500}` → offset = (5200 + 4800) / 2 = 5000, delay = 500 − 100 = 400. 비대칭(가는 길 300, 오는 길 100)인 `{20000, 25300, 25400, 20500}` → offset 5100, delay 400, 오차 100 ≤ delay/2. `ClockSync {0, false}`에서 `apply(5000, 0)` → 5000(첫 sync는 step), 이후 `apply(7000, 1000000)`을 반복하면 5500 → 6000 → 6500 → 7000 → 7000.
+- **놓치기 쉬운 것**: 음수 offset(MCU가 host보다 앞선 경우, -2000); 홀수 합의 반올림(1999 → 999, -2001 → -1001); 실패 시 출력값 유지; delay tie는 앞쪽 index; 유효 샘플 0개나 `samples == NULL, n == 0`; slew가 목표를 넘어가지 않기(overshoot 금지); `elapsed = 0`이면 그대로; 음수 방향 slew도 clamp(-1000 → -200); 차이가 정확히 128000이면 slew, 128001이면 step.
+- **구현할 함수**
+  - Part A: `sync_sample(t, offset_us, delay_us)`
+  - Part B: `sync_best(samples, n, offset_us, delay_us)`
+  - Part C: `clock_apply(cs, measured_offset_us, elapsed_local_us)`, `to_host_time(cs, local_us)`
+
 ## 1. Problem
 
 A robot MCU stamps its sensor samples with its own free-running clock (microseconds, `int64_t`). The fusion code on the host needs those stamps on the **host clock**. To learn the mapping, the MCU pings the host and records four timestamps:

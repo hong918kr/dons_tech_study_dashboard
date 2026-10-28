@@ -20,6 +20,6 @@ uint64_t GetMergedTimestampBitwise(void)
     } while ((min1 != min2)  || (sec1 != sec2));
 
 
-    timestamp_64 = ((uint64_t)min1 << 32) | (uint64_t)sec1;
-    return timestamp_64;
+    timestamp_64 = ((uint64_t)min1 << 32) | (uint64_t)sec1
+
 }

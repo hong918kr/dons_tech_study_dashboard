@@ -33,6 +33,9 @@ solution.c, chart1.svg, chart2.svg). Read all of it before writing anything.
 - `README.md` — same sections as the exemplar:
   `# <ID> · <English title>` then the `> **ID**: … · **Priority**: P0|P1|P2 · **Pattern**: … · **Time**: N min`
   quote line (keep these exact keys — build.py parses them) + the 파일/실행 line;
+  ## 0. 문제 한국어 소개 (먼저 읽기) → Korean summary right after the 파일 line (added 10-27, Don: English problems took too long
+     to understand). Copy T1-1's section: 한 줄 요약 · 상황 · (배경 개념 for domain-heavy problems) · 입력 · 출력 · 규칙 ·
+     예제 풀어 읽기 · 놓치기 쉬운 것 · 구현할 함수. Facts/numbers only from §1 and the code. English §1 stays unchanged.
   ## 1. Problem (English; code block with signature; ### Example; ### Constraints; ### Clarifying questions)
   ## 2. Your workspace  → `<div class="code" data-src="stub.c"></div>`
   ## 3. 힌트 → 2–3 `<details><summary>Hint N — …</summary>` blocks (blank line after <summary> line and before </details>)
@@ -53,7 +56,8 @@ T1-5_raw_register_to_temp · T1-6_sensor_fault_detect · T1-7_time_above_thresho
 T2-1_ring_buffer · T2-2_packet_parser · T2-3_merge_intervals · T2-4_window_max · T2-5_lower_bound ·
 T2-6_bit_ops · T2-7_debounce_edge · T2-8_running_median · T2-9_memory_pool · T2-10_top_k_sensors · D_debug_drills ·
 E1_i2c_sensor_driver · E2_extract_packet · E3_isr_to_task_pipeline ·
-J1_can_signal_decode · J2_coulomb_counter · J3_boot_slot_select · J4_time_sync_offset
+J1_can_signal_decode · J2_coulomb_counter · J3_boot_slot_select · J4_time_sync_offset ·
+R1_circular_car_collision · R2_diff_drive_odometry · R3_pid_speed_control · R4_geofence_polygon
 
 ## Verify before finishing (from technicalScreenPrep/)
 1. `./run.sh <ID>` → compiles, tests fail, no crash.   2. `./run.sh <ID> sol` → ALL PASS.

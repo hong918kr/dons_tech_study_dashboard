@@ -3,6 +3,79 @@
 > **ID**: V9 · **Priority**: P1 · **Pattern**: packet parser + Hamming ECC + per-VC state machine · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V9` / `./run.sh V9 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: 카메라 SoC의 CSI-2 receiver가 캡처한 바이트 스트림을 받아서 패킷 헤더 **ECC**와 payload **CRC**를 검사하고, VC별로 frame/line 구조가 맞는지 세는 **스트림 checker**를 짭니다.
+
+**상황**
+- 카메라 SoC의 **CSI-2 receiver**(CSI-2 v1.x, D-PHY 위)를 validation 중입니다. 자동 테스트가 캡처할 때마다 이 checker를 호출합니다.
+- receiver의 debug capture가 캡처 한 번 분량의 **merged byte stream**을 줍니다.
+  - lane merging은 이미 끝났고 LP/SoT/EoT도 제거됨 → 버퍼에 패킷이 **빈틈없이 연달아** 들어 있음
+- 용어
+  - **VC**(virtual channel, 0–3): 한 링크에 여러 스트림을 섞어 보내는 채널 번호
+  - **DT**(data type): 패킷 종류. **WC**(word count): long packet의 payload 바이트 수
+  - **short packet**: 헤더 4바이트만 있음. **long packet**: 헤더 + payload + CRC
+  - **ECC**: 헤더 24비트에 대한 6-bit Hamming 코드. 1비트 오류는 고칠 수 있고, 그보다 많으면 고칠 수 없음
+- 테스트 파일에 **TPG**(test pattern generator: `tpg_short`, `tpg_long`, `tpg_frame`)가 들어 있습니다. ECC/CRC가 올바른 스트림을 만드는 독립적인 CSI-2 TX model이며, **수정하지 말고 사용**합니다.
+
+**패킷 구조**
+
+| Byte | 내용 |
+|---|---|
+| 0 | DI = `VC[7:6] \| DT[5:0]` |
+| 1 | WC[7:0] — 16-bit WC, **little endian**. short packet이면 이 16비트가 data 필드 |
+| 2 | WC[15:8] |
+| 3 | ECC — `D[23:0] = byte0 \| byte1<<8 \| byte2<<16`에 대한 `P5..P0`, bit 7:6은 0 |
+
+- `DT 0x00–0x0F` = short packet: `0x00` FS(frame start), `0x01` FE(frame end, data = frame 번호), `0x02` LS(line start), `0x03` LE(line end, data = line 번호)
+- `DT >= 0x10` = long packet: 헤더 + `WC`바이트 payload + 16-bit CRC(LSB 먼저). 여기서 쓰는 DT: `0x1E` YUV422 8-bit(16 bpp), `0x2A` RAW8, `0x2B` RAW10, `0x2C` RAW12
+- ECC 각 패리티 비트 `P0..P5`는 §1 표에 나열된 data 비트들의 XOR
+- CRC-16은 **payload에만** 계산: 다항식 `x^16 + x^12 + x^5 + 1`, init `0xFFFF`, LSB 먼저 처리(reflected `0x8408`), final XOR 없음
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `csi2_ecc(d24)` | 24-bit 헤더 데이터 → 6-bit ECC | §1의 패리티 식 그대로 |
+| `csi2_header_decode(raw, h)` | 4바이트 헤더 → `Csi2Hdr{vc, dt, wc}` | 반환: `HDR_OK`(0), `HDR_CORRECTED`(1, 고침), `HDR_UNCORRECTABLE`(-1)<br>short packet이면 `wc`에 data 필드가 들어감<br>ECC bit 7:6은 무시 |
+| `csi2_crc16(p, n)` | payload CRC-16 | 위 CRC 정의 그대로 |
+| `csi2_expected_wc(dt, width)` | 해당 DT로 한 줄(`width` 픽셀)의 바이트 수 | 모르는 DT이거나 바이트로 나누어 떨어지지 않으면 `0` |
+| `csi2_check_stream(buf, len, cfg, r)` | 스트림 전체 검사, `Csi2Report` 채우기 | 아래 규칙. 정상 종료 `0`, sync 잃으면 `-1` |
+
+- `cfg[vc]`(`Csi2VcCfg`)는 VC마다 기대하는 `dt`, `width`, `height`. `dt == 0`이면 그 VC는 안 쓰는 VC.
+- `Csi2Report`에는 VC별 통계(`Csi2VcStats`: `frames_ok`, `frames_bad`, `lines_ok`, `crc_err`, `wc_err`, `dt_err`, `no_fs_pkts`, `missing_fe`, `line_count_err`, `frame_num_err`)와 전체 통계(`packets`, `ecc_corrected`, `ecc_uncorrectable`, `unexpected_vc`, `stop_off`)가 들어감.
+
+**`csi2_check_stream` 규칙 (VC마다 따로, 다른 VC와 독립)**
+1. **frame 구조**: `FS` → long packet `height`개 → `FE`
+2. **good line**: DT가 `cfg.dt`, WC가 `csi2_expected_wc(cfg.dt, cfg.width)`, CRC 일치 — 셋 다 맞아야 함
+3. **frame ok**: FE가 왔을 때 good line이 정확히 `height`개, FE 번호 = FS 번호, frame 안에서 실패한 게 없음
+4. **FS가 또 옴**(frame이 열린 상태): `missing_fe`, 이전 frame은 bad로 닫고 새 frame 시작
+5. **frame 없이 long packet이나 FE가 옴**: `no_fs_pkts`
+6. **frame 번호**: 새 FS 번호와 이전 FS 번호가 둘 다 0이 아니면 새 번호는 `prev + 1`이어야 함(`0xFFFF` 다음은 1). 아니면 `frame_num_err` (frame이 빠졌다는 뜻이고, 현재 frame 자체는 bad로 안 침)
+7. **payload 건너뛰기**: WC가 틀렸어도 **항상 헤더의 WC**로 건너뜀
+8. **sync 잃음**: 고칠 수 없는 헤더, 또는 패킷이 `len`을 넘어감 → 멈추고 `-1`, `stop_off` = 그 패킷 시작 위치. 아니면 `0`, `stop_off = len`. 멈춘 시점에 열려 있는 frame은 모두 `missing_fe` + `frames_bad`
+9. LS/LE와 기타 short packet은 받아들이되 이번 버전에선 무시
+10. `cfg.dt == 0`인 VC로 온 패킷 → `unexpected_vc`
+
+**예시를 말로 풀면**
+- VC0 설정: RAW10, width 8, height 3. RAW10은 픽셀당 10비트라 한 줄 WC = 8×10/8 = **10바이트**.
+- 스트림: `FS(1) L L L FE(1)  FS(2) L L L FE(2)` — 패킷 10개.
+  - frame 하나 = FS 4 + 줄 3개 × (헤더 4 + payload 10 + CRC 2) + FE 4 = 56바이트, 두 frame이면 112바이트
+- 바이트로 보면
+  - FS(1) 헤더 `00 01 00 1A`: VC0, DT `0x00`(FS), data = 1, ECC `0x1A`
+  - line 헤더 `2B 0A 00 2E`: VC0, DT `0x2B`(RAW10), WC = 10, ECC `0x2E`
+  - line payload 10바이트의 CRC = `0x23DC` → LSB 먼저라 `DC 23`으로 붙음
+- 그대로 검사하면 → 반환 `0`, `stop_off 112`, `frames_ok 2`, `lines_ok 6`, `ecc_corrected 0`.
+- 두 번째 line 헤더의 WC bit 3을 뒤집음(`2B 0A` → `2B 02`): byte1의 bit 3은 `D11`. syndrome `0x25`가 D11 열과 같으므로 1비트 오류 → 고쳐짐. `ecc_corrected 1`, `frames_ok`는 여전히 2.
+- offset 60의 헤더(두 번째 frame의 첫 line 헤더)에서 `D0`와 `D20`을 같이 뒤집음: syndrome `0x18`(짝수 weight) → 2비트 오류라 고칠 수 없음. 그 자리에서 멈춰 반환 `-1`, `stop_off 60`. 첫 frame만 ok(`frames_ok 1`), 열려 있던 두 번째 frame은 `missing_fe 1`.
+
+**지켜야 할 조건**
+- 테스트에서 `len <= 64 KiB`, VC 최대 4개. 헤더 ECC bit 7:6은 무시.
+- `malloc` 금지. `buf[len-1]` 너머는 절대 읽지 않음.
+- 정답 확인용 값: `csi2_crc16("123456789") = 0x6F91`, `csi2_expected_wc(RAW10, 1920) = 2400`.
+
 ## 1. Problem
 
 You are validating the CSI-2 receiver (CSI-2 v1.x over D-PHY) of a camera SoC. The receiver's debug capture gives you the **merged byte stream** of one capture window: lane merging is done and LP/SoT/EoT are stripped, so packets sit back to back in a buffer. Write the checker that the automated test calls after every capture.

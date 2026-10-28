@@ -3,6 +3,24 @@
 > **ID**: T2-3 · **Priority**: P1 · **Pattern**: sort + sweep merge (LeetCode 56) · **Time**: 20 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T2-3` / `./run.sh T2-3 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 여러 센서가 보고한 과열 구간들을 하나로 합쳐(겹치거나 맞닿으면 병합) 제자리(in place)에 정렬된 결과를 쓰고 개수를 돌려준다.
+- **상황**: 로봇 팔의 온도 센서 3개가 각자 과열 구간 목록을 냈다. fault log에는 "팔의 **어느 부분이든** 과열이던 때"를 하나의 목록으로 남기고 싶다.
+- **입력**: 구간 배열 `iv[n]`(각각 `start_ms`, `end_ms`, 단위 ms), 개수 `n`.
+- **출력**: 병합된 구간들을 `start_ms` 순으로 `iv[0 .. 반환값-1]`에 덮어쓰고, 병합 후 구간 개수를 반환한다.
+- **규칙**
+  - 구간은 **닫힌 구간**: 양 끝 포함, `start_ms <= end_ms`.
+  - 입력 순서는 아무렇게나(A 목록, B 목록, C 목록 순으로 이어붙인 것).
+  - `next.start_ms <= cur.end_ms`이면 병합(겹침 또는 맞닿음). `[100,200]`+`[200,300]` → `[100,300]`, `[100,200]`+`[201,300]`은 그대로 두 개.
+  - `n == 0`이면 `iv`는 `NULL`일 수 있다.
+  - `malloc` 금지. `qsort`는 써도 되지만 비교 함수가 overflow하면 안 된다.
+- **예제 풀어 읽기**: 6개 입력 `[1000,1500] [4000,4200] [1400,2000] [5000,5000] [2000,2600] [4100,4150]`. 시작 시각으로 정렬하면 1000~1500, 1400~2000(겹침), 2000~2600(맞닿음)이 이어져 `[1000,2600]`. `[4100,4150]`은 `[4000,4200]` 안에 들어가 `[4000,4200]`. `[5000,5000]`은 따로. 결과 3개.
+- **놓치기 쉬운 것**: `NULL`/0개와 1개, 맞닿음(200=200)은 병합하지만 1 ms 차이는 병합 안 함, 긴 구간이 뒤의 짧은 구간들을 삼키는 경우(끝은 `max`로 늘려야 함), 40억대 큰 timestamp에서 `a - b` 식 비교 함수가 틀리게 정렬하는 경우, 완전히 같은 구간 3개.
+- **구현할 함수**: `merge_intervals(iv, n)` 하나(필요하면 `qsort` 비교 함수 추가).
+
 ## 1. Problem
 
 Three temperature sensors on a robot arm each reported their own overheat intervals (for example from [T1-1](../T1-1_overheat_intervals/index.html)). The fault log wants **one** list that answers "when was *any* part of the arm overheating?" Merge all intervals **in place** and return the new count.

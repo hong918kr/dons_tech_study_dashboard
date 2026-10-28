@@ -3,6 +3,23 @@
 > **ID**: T1-4 · **Priority**: P1 · **Pattern**: array of per-item state machines + input validation · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T1-4` / `./run.sh T1-4 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 최대 16개 센서의 측정값이 한 배열에 섞여 들어올 때, 센서마다 독립된 T1-2식 과열 감지기를 돌려 과열 **시작** 알림을 입력 순서대로 돌려준다.
+- **상황**: 로봇에 온도 센서가 최대 `MAX_SENSORS = 16`개. 측정값(센서 id, ms 시각, 0.1 °C 온도)이 도착 순서대로 섞여 한 배열에 있다. 시각은 `uint32_t`라 2^32에서 wrap될 수 있다.
+- **입력**: `r[n]`(각각 `id`, `t_ms`, `temp_c10`), 알림을 담을 `out`과 크기 `out_cap`, 버린 개수를 받을 `dropped`(NULL 가능). 상수 `HIGH_C10 = 850`, `LOW_C10 = 800`, `N_CONFIRM = 3`.
+- **출력**: `Alert {id, t_ms}`를 최대 `out_cap`개 `out`에 쓰고, **알림 전체 개수**를 반환한다. `*dropped`에는 버린 측정값 수. `out_cap == 0`이면 `out`은 NULL 가능.
+- **규칙**
+  - 센서별 NORMAL → 그 센서에서 `>= 850`이 3번 연속이면 OVERHEATED + 그 측정값에서 알림. OVERHEATED → `<= 800`이 3번 연속이면 NORMAL(알림 없음). 연속을 깨면 그 센서 카운터만 리셋.
+  - `id >= MAX_SENSORS`이면 무시하고 `*dropped`에 센다.
+  - 같은 센서의 직전 **수락된** 측정값보다 `t_ms`가 뒤가 아니면(같거나 이전, wrap-safe 비교) 무시하고 `*dropped`에 센다. 연속 카운터도 건드리지 않는다.
+  - 알림은 입력 순서. `malloc` 금지, O(n) 시간, 상태는 O(MAX_SENSORS).
+- **예제 풀어 읽기**: 센서 0은 t=0·100·200에 860·870·880 → {0, 200}. 센서 1은 t=100·200·300에 900·910·920 → {1, 300}. 센서 2는 t=100의 700으로 리셋된 뒤 t=200·300·400의 900 세 번 → {2, 400}. id 20 측정값과, 센서 1의 마지막(300)보다 오래된 t=250 측정값은 버림 → 반환 3, dropped = 2.
+- **놓치기 쉬운 것**: 빈 입력에서도 `*dropped = 0`으로 써야 함, 같은 시각 측정값도 버림(streak에 안 셈), 복귀 후 다시 과열되면 같은 센서 두 번째 알림, `out_cap`보다 많으면 cap 너머는 안 쓰고 개수는 정확히, `out == NULL` + `out_cap == 0`, `0xFFFFFF00` → `0xFFFFFFF0` → `0x10` wrap도 "더 새로운" 시각, id 경계(15 유효, 16 버림), `dropped == NULL`.
+- **구현할 함수**: `process(r, n, out, out_cap, dropped)` 하나(센서별 상태 구조체는 직접 설계).
+
 ## 1. Problem
 
 A robot has up to `MAX_SENSORS = 16` temperature sensors. Their readings arrive **interleaved** in one array, in arrival order. Each reading has a sensor id, a timestamp in ms, and a temperature in tenths of a degree Celsius.

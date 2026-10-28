@@ -3,6 +3,34 @@
 > **ID**: E3 · **Priority**: P1 · **Pattern**: ISR → SPSC ring → task + hysteresis + critical section · **Time**: 35 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh E3` / `./run.sh E3 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 온도 ADC 인터럽트(ISR)에서 샘플을 링 버퍼에 넣고, 메인 루프 태스크가 꺼내서 온도로 바꾸고 히스테리시스 판정으로 팬을 켜고 끄는 파이프라인을 만든다.
+- **상황**: 온도 ADC가 10 ms마다 DATA-READY 인터럽트를 낸다. ISR은 아주 짧게 `{ millis(), ADC_DATA }`만 저장하고, 무거운 처리는 메인 루프의 `temp_task_poll()`이 CPU가 날 때 한다. 잃어버린 샘플은 반드시 **개수를 세야** 한다.
+- **배경 개념**
+  - **ISR vs 태스크**: ISR은 하드웨어 신호로 언제든 끼어드는 함수(태스크의 어느 명령 사이에도 끼어들 수 있음). 태스크는 ISR을 끊지 못한다. 단일 코어.
+  - **SPSC 링 버퍼**: 생산자 하나(ISR), 소비자 하나(태스크)인 고정 크기 원형 큐. ISR은 `head`만, 태스크는 `tail`만 쓰므로 락 없이 동작한다. `head`/`tail`은 계속 증가하는 `uint32_t` 원자 변수.
+  - **인터럽트 마스킹과 경쟁 조건**: 공유 카운터 `g_overrun_count`를 "읽고 → 0으로 지우는" 사이에 ISR이 끼어들어 +1 하면 그 1이 사라진다. 그래서 `irq_disable()` / `irq_enable()`로 그 구간을 막는다. 막는 동안 들어온 IRQ는 사라지지 않고 pending 됐다가 enable 직후 실행된다(같은 라인의 두 번째 edge는 하나로 합쳐짐).
+  - **TMP36식 변환**: 12비트 ADC, 3.3 V 기준. 0 °C에서 500 mV, 10 mV/°C라서 mV에서 500을 빼면 0.1 °C 단위 값이 된다.
+- **입력**: ISR은 인자 없음 — `millis()`(ms, wrap)와 `ADC_DATA`(하위 12비트만 유효)를 읽는다. 태스크는 `g_ring`과 `g_overrun_count`를 읽는다. 판정 기준은 `temp_task_init(high, low, n_confirm)`로 미리 설정(예제: 850, 800, 3). `RawSample` = `{t_ms, code}`, `RB_SIZE` = 8, `STALE_MS` = 50, `LOG_CAP` = 8.
+- **출력**: `adc_to_c10`은 0.1 °C 값. `ring_push` / `ring_pop`은 성공 여부 `bool`(`pop`은 `*out`). ISR은 꽉 차면 `g_overrun_count++`. 태스크는 `fan_set(true/false)` 호출, `g_task.overruns_total`, `g_task.log[]`(`{t_ms, c10, ev}`), `g_task.n_log`, 그리고 `TempTask`의 `processed`, `has_last`, `last_t_ms`를 갱신(테스트가 확인).
+- **규칙**
+  - ISR: 캡처해서 push. 링이 가득이면 **새 샘플을 버리고** `g_overrun_count`를 1 올림. 그 외 일은 안 함.
+  - 태스크 1단계: 마스킹한 채로 `g_overrun_count`를 읽고 지워서 `overruns_total`에 더함. 읽기와 지우기 사이에 `SIM_PREEMPT()` 호출(테스트가 여기서 IRQ를 주입).
+  - 태스크 2단계: 링을 다 비움. 이전 샘플이 있고 `t - last_t > 50 ms`(wrap-safe)면 판정 streak 초기화 → `adc_to_c10()` → `det_update()`. `EV_OVERHEAT`면 팬 ON, `EV_RECOVERED`면 팬 OFF, 이벤트를 로그에 추가(최대 `LOG_CAP`개만 쓰고 `n_log`는 항상 셈).
+  - 변환: 하위 12비트만 사용, `mV = code * 3300 / 4096`(버림), `c10 = mV - 500`.
+  - 판정기(제공됨): `>= 850`이 3번 연속이면 과열, `<= 800`이 3번 연속이면 회복.
+- **예제 풀어 읽기**: t = 1000부터 10 ms마다 IRQ, 태스크는 IRQ 2번마다 poll. 온도 820, 840, 852, 860, 870, 880 → 852·860·870이 세 번째 연속 `>= 850`이 되는 870(t = 1040)에서 `EV_OVERHEAT`, 팬 ON. 이어서 830(범위 안), 790, 780, 770 → 770(t = 1090)에서 세 번째 `<= 800` → `EV_RECOVERED`, 팬 OFF. 이벤트 시각은 poll 시각이 아니라 **캡처 시각**. 태스크가 막힌 동안 IRQ 20번 → 링에 8개, `g_overrun_count` = 12. 다음 poll에서 8개 처리, `overruns_total` = 12, `g_overrun_count` = 0.
+- **놓치기 쉬운 것**: 변환 끝값(`adc_to_c10(0)` = -500, 4095 → 2799), 0 °C 아래 버림(620 → -1), 상위 4비트 status 쓰레기 무시(1676 → 850), 가득 찼을 때 **오래된 것 유지**(0..70 ms 샘플이 남음), 읽기-지우기 사이 IRQ 주입 시 overrun을 안 잃어야 함(총 3), 3번 연속이 아닌 스파이크는 팬 안 건드림, 판정 도중 `millis()` wrap(이벤트 t = 5), 60 ms 공백(> 50) 뒤에는 streak 재시작(이벤트 t = 90), 로그 개수 상한.
+- **구현할 함수**
+  - `adc_to_c10(code)`: 12비트 코드 → 0.1 °C.
+  - `ring_push(r, s)`: ISR 쪽 SPSC push, 가득이면 실패.
+  - `ring_pop(r, out)`: 태스크 쪽 SPSC pop.
+  - `TEMP_DRDY_IRQHandler()`: 캡처 + push + overrun 카운트.
+  - `temp_task_poll()`: overrun 안전하게 수거 → 링 비우기(stale 검사, 변환, 판정, 팬, 로그).
+
 ## 1. Problem
 
 A temperature ADC raises a **DATA-READY interrupt** every 10 ms. Build the firmware pipeline from that interrupt to the cooling fan:

@@ -3,6 +3,31 @@
 > **ID**: J1 · **Priority**: P0 · **Pattern**: bit extraction + sign extension + scale/offset + per-node timeout · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh J1` / `./run.sh J1 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: CAN 프레임 8바이트에서 비트 필드를 꺼내는 함수(Part A), 모터 드라이브 상태 메시지 디코더(Part B), 노드 생존 감시(heartbeat monitor, Part C)를 만든다.
+- **상황**: 로봇의 모터 드라이브들이 CAN 버스로 CANopen 메시지를 보낸다. 메인 컨트롤러의 수신 쪽 코드를 작성한다.
+- **배경 개념**
+  - **CAN 프레임**: 버스에 흘러가는 메시지 한 개. 11비트 id(누가 보낸 무슨 메시지인지)와 최대 8바이트 데이터, 그리고 데이터 길이 `dlc`를 가진다. 29비트 id는 extended 프레임이라 이 문제에선 무효.
+  - **COB-ID**: CANopen에서 id = 기능 코드 + `node_id`. `0x180 + node_id`는 TPDO1(드라이브가 주기적으로 보내는 상태값), `0x700 + node_id`는 heartbeat. 예: `0x183`은 노드 3의 TPDO1.
+  - **heartbeat / NMT 상태**: 각 노드가 "살아 있음 + 내 상태"를 1바이트로 주기적으로 보내는 것. `0x00` boot-up(방금 재부팅), `0x04` stopped, `0x05` operational(정상 동작), `0x7F` pre-operational.
+  - **Intel(little-endian) 비트 배치**: 프레임의 비트 `k`는 `data[k / 8]`의 `k % 8`번 비트. 신호는 `start_bit`가 LSB이고 위로 `len`비트를 차지한다.
+- **입력**: Part A — `data[8]`, `start_bit`, `len`. Part B — `can_id`, `dlc`, `data[8]`, 결과 포인터 `out`. Part C — `HbMon *m`(`timeout_ms`, `last_ms[8]`, `state[8]`, `seen`), `can_id`, `dlc`, `data`, `now_ms`(ms, `uint32_t`, wrap).
+- **출력**: `can_get_bits`는 부호 없는 원값(`uint32_t`), `can_get_signed`는 2의 보수 부호 값(`int32_t`). `decode_motor_status`는 `bool` + `*out`(`MotorStatus`: `node_id`, `speed_rpm`, `current_ma`, `temp_c`, `fault`, `enabled`, `bus_mv`, `counter`). `hb_check`는 문제 있는 노드 비트마스크(`uint8_t`, bit `n-1` = node `n`).
+- **규칙**
+  - Part A: `1 <= len <= 32`, `start_bit + len <= 64`, 아니면 0 반환. `len == 32`나 32비트 시프트에서 undefined behaviour가 없어야 함.
+  - Part B: id가 `0x180 + node_id`이고 `node_id`가 1..127, 11비트 id, `dlc >= 8`일 때만 true. 아니면 false이고 `*out`은 건드리지 않음. 정수 연산만.
+  - Part B 신호표: 비트 0..15 speed(signed 16, 1 rpm), 16..31 current(signed 16, 0.1 A → mA), 32..39 온도(unsigned 8, 1 °C, offset −40), 40..47 status(bit 0 = `fault`, bit 1 = `enabled`), 48..59 버스 전압(unsigned 12, 0.1 V → mV), 60..63 rolling counter(unsigned 4).
+  - Part C: id `0x700 + node_id`, 1바이트 상태. 노드 1..8만 추적, 다른 노드와 `dlc == 0`은 무시. `hb_check`는 **한 번이라도 본** 노드 중 `now - last > timeout`(wrap-safe, 엄격한 `>`)이거나 마지막 상태가 operational이 아닌 노드를 보고. 중간에 boot-up이 오면 재부팅이므로 보고.
+- **예제 풀어 읽기**: id `0x183`(노드 3), 데이터 `DC 05 83 FF 69 02 E0 51`. 비트 0..15 = `0x05DC` = 1500 rpm. 비트 16..31 = `0xFF83` = -125 → ×0.1 A → -12500 mA. 비트 32..39 = `0x69`(105) − 40 = 65 °C. status `0x02` → fault 0, enabled 1. 비트 48..59 = 480 → ×0.1 V → 48000 mV. 비트 60..63 = 5. Heartbeat(timeout 1000 ms): t=0에 노드 1·2가 `05` → t=900 검사 `0x00` → t=1000 노드 1만 `05` → t=1500 검사 `0x02`(노드 2가 1500 ms 동안 조용) → t=1600 노드 2가 `00`(boot-up, 재부팅) → t=1700 검사 `0x02`(새로 왔지만 operational이 아님).
+- **놓치기 쉬운 것**: 바이트 경계를 걸친 필드(`00 AB CD`의 비트 12..19 → `0xDA`, signed로 -38), `len == 32`(`0xFFFFFFFF`, -1, `INT32_MIN`), 비트 63의 1비트 신호(signed면 -1), 4비트 `0x8` → -8, 잘못된 인자(`len` 0, 33, `40 + 25 > 64`) → 0. 거부 케이스 `0x283`, `0x703`, `0x180`(노드 0), `dlc` 7, `0x18FF0183`(extended) — 이때 `*out` 그대로. 노드 127(`0x1FF`), 온도 원값 0 → -40, 12비트 최대 전압 → 409500 mV, counter 15. Heartbeat는 한 번도 안 본 노드는 보고 안 함, 정확히 timeout이면 아직 살아 있음(1000 ms면 OK, 1001이면 보고), pre-op 노드 보고, 노드 9·노드 0·`dlc` 0·다른 기능 코드는 무시, `0xFFFFFFFF`를 넘는 시간 wrap.
+- **구현할 함수**
+  - Part A — `can_get_bits(data, start_bit, len)`: 비트 필드 원값 추출. `can_get_signed(data, start_bit, len)`: 같은 비트를 부호 확장.
+  - Part B — `decode_motor_status(can_id, dlc, data, out)`: id·dlc 검증 후 신호표대로 스케일링.
+  - Part C — `hb_init(m, timeout_ms)`: 초기화. `hb_on_frame(m, can_id, dlc, data, now_ms)`: heartbeat 기록. `hb_check(m, now_ms)`: 문제 노드 마스크 계산.
+
 ## 1. Problem
 
 A robot's motor drives talk **CANopen** over a classic CAN bus (11-bit ids, up to 8 data bytes). Write the receive side on the main controller.

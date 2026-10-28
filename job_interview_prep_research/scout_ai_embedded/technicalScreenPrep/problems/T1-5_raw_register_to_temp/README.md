@@ -3,6 +3,23 @@
 > **ID**: T1-5 · **Priority**: P0 · **Pattern**: bit assembly + sign extension + fixed-point rounding · **Time**: 20 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T1-5` / `./run.sh T1-5 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: TMP102식 I2C 온도 센서가 준 2바이트 레지스터 값을 0.01 °C 단위 정수 온도로 바꾸고, 과열 여부를 판단한다.
+- **상황**: 센서가 온도 레지스터를 **MSB 먼저** 2바이트로 준다. 온도는 16비트 레지스터의 bit 15..4에 왼쪽 정렬(left-justified)된 **12비트 2의 보수** 값이고, bit 3..0은 쓰레기일 수 있다. 12비트 값 1 LSB = 0.0625 °C.
+- **입력**: `msb`, `lsb`(둘 다 `uint8_t`, 어떤 조합이든 유효한 입력), `is_overheat`에는 기준 `thresh_c100`(0.01 °C 단위)이 추가.
+- **출력**: `raw_to_c100`은 0.01 °C 단위 `int16_t`(`2500` = 25.00 °C, 범위 −12800 … 12794). `is_overheat`는 변환값이 `>= thresh_c100`이면 `true`.
+- **규칙**
+  - `lsb`의 bit 3..0은 마스크해서 버린다.
+  - 가장 가까운 정수로 반올림, 정확히 `.5`면 0에서 먼 쪽: −6.25 → −6, 12.5 → 13, −12.5 → −13.
+  - 정수 연산만 사용(FPU 없음 가정).
+  - 음수 right shift 같은 implementation-defined 동작에 기대지 않는다.
+- **예제 풀어 읽기**: `0x19 0x00` → 레지스터 `0x1900` → 12비트 값 400 → 25.0 °C → 2500. `0x7F 0xF0` → 2047 → 127.9375 °C → 12794. `0xFF 0xF0` → −1 → −0.0625 °C → −6. `0xE7 0x00` → −400 → −25.0 °C → −2500.
+- **놓치기 쉬운 것**: 음수의 부호 확장, 최솟값 `0x80 0x00` → −12800, 0, 정확한 .5 tie(`0x00 0x20` → 13, `0xFF 0xE0` → −13), 하위 4비트 쓰레기(`0x19 0x0F` → 2500, `0xFF 0xFF` → −6), 임계값 경계(`0x18 0xF0` = 2494는 2500 미만), 음수 임계값(−2500 `>=` −3000).
+- **구현할 함수**: `raw_to_c100(msb, lsb)`(2바이트 → 0.01 °C), `is_overheat(msb, lsb, thresh_c100)`(변환 후 임계값 비교).
+
 ## 1. Problem
 
 A TMP102-style I2C temperature sensor returns its temperature register as **two bytes, MSB first**. The temperature is a **12-bit two's complement** number stored **left-justified** in the 16-bit register (bits 15..4). Bits 3..0 are not part of the reading and may contain garbage. One LSB of the 12-bit value is **0.0625 °C**.

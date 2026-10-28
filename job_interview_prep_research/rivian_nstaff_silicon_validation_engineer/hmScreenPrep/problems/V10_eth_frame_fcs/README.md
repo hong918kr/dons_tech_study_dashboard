@@ -3,6 +3,62 @@
 > **ID**: V10 · **Priority**: P1 · **Pattern**: byte-level frame packing + CRC-32 + loopback scoreboard · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh V10` / `./run.sh V10 sol`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: 새 SoC의 Ethernet MAC bring-up용 **MAC loopback test**를 짭니다. frame을 만들고(**FCS** 포함), 받은 frame을 MAC 수신 로직처럼 검사해 **RMON 카운터**를 올리고, sequence 번호를 붙여 보낸 frame이 잘 돌아왔는지 채점합니다.
+
+**상황**
+- 새 SoC의 Ethernet MAC을 살리는 중이고, 그 테스트의 SW 쪽을 만듭니다.
+- 가짜 MAC/PHY loopback `lb_xmit` / `lb_recv`가 제공됩니다. 보낸 frame을 돌려주되 **fault를 주입**할 수 있습니다(drop, 비트 뒤집기, 잘라내기, 순서 바꾸기).
+- 여기서 frame은 **DA부터 FCS까지**입니다. preamble/SFD는 MAC/PHY가 붙이고 떼므로 신경 쓰지 않습니다.
+- 용어
+  - **DA/SA**: 목적지/출발지 MAC 주소(6바이트씩). **EtherType**: payload 종류(2바이트)
+  - **VLAN tag**: SA 뒤에 끼는 4바이트 = TPID `0x8100` + **TCI** `PCP(3) | DEI(1) | VID(12)`
+  - **FCS**: frame 끝 4바이트 CRC-32
+  - **runt**: 너무 짧은 frame, **oversize**: 너무 긴 frame
+  - **RMON**: 크기 구간별 frame 수 같은 표준 통계 카운터
+
+**구현할 것**
+
+| 함수 | 하는 일 | 규칙 |
+|---|---|---|
+| `eth_crc32(p, n)` | CRC-32 IEEE 802.3 | reflected 다항식 `0xEDB88320`, init `0xFFFFFFFF`, final XOR `0xFFFFFFFF`<br>확인값: `eth_crc32("123456789", 9) == 0xCBF43926` |
+| `eth_build_frame(dst, src, vlan, ethertype, payload, len, out, cap)` | frame 조립, **frame 길이 반환** | 순서: `DA(6) SA(6) [vlan != NULL이면 TPID 0x8100 + TCI(2)] EtherType(2) payload`<br>FCS 앞까지 **최소 60바이트**가 되도록 0으로 pad (FCS 포함 64, tag 유무 상관없이)<br>DA..pad에 대해 FCS 계산해 뒤에 붙임. **FCS는 LSB 먼저**: `out[n] = fcs & 0xFF`, `out[n+1] = fcs >> 8`, …<br>TCI 포함 헤더 필드는 모두 big-endian<br>payload > 1500 → `-EMSGSIZE`, `cap` 부족 → `-ENOSPC`, NULL / `vid > 4095` / `pcp > 7` → `-EINVAL` |
+| `eth_check_frame(f, len, c)` | 받은 frame 판정 + 카운터 갱신 | **길이 검사 먼저**: `len < 64` → `ETH_RUNT`, `len > 1518`(bytes 12..13이 `0x8100`이면 `> 1522`) → `ETH_OVERSIZE`<br>그다음 FCS 불일치 → `ETH_FCS_ERR`, 아니면 `ETH_OK`<br>결과에 해당하는 카운터를 올림. `ETH_OK`면 octets, VLAN-tagged, broadcast, 크기 구간 `hist[]`도 올림 |
+| `eth_loopback_test(n, payload_len, r)` | loopback 돌리고 `LbReport` 채우기 | 아래 절차. 모든 `n`개가 good + 순서대로 + 내용 그대로 돌아와야 `0`, 아니면 `-EIO` |
+
+- `hist[]` 7개 구간: 64, 65–127, 128–255, 256–511, 512–1023, 1024–1518, 1519–1522
+- 제공 함수: `lb_xmit` → `0` 또는 `-ENOBUFS`, `lb_recv` → 받은 frame 길이 (`0` = 받을 게 없음)
+
+**`eth_loopback_test` 절차**
+1. frame `k = 0..n-1`을 보냄: DA = `LB_DA`, SA = `LB_SA`, type `0x88B5`, tag 없음
+2. payload 내용: byte 0..3 = `k`(big-endian), byte `i ≥ 4` = `(uint8_t)(k * 7 + i)`
+3. `lb_xmit` 할 때마다 `lb_recv`가 `0`을 줄 때까지 다 받아냄. 마지막에 한 번 더 받아냄
+4. 받은 frame마다 `eth_check_frame` 실행
+   - OK frame이면 sequence 번호를 꺼내 payload 전체를 기대값과 비교. 다르거나 `seq >= n`이면 `data_mismatch`
+   - OK frame의 seq가 지금까지 본 가장 큰 seq보다 작으면 `out_of_order`
+5. 보고 항목: `sent`, `received`, `good`(FCS OK), `corrupted = received − good`, `lost = sent − received`, `out_of_order`, `data_mismatch`, 카운터 `c`
+
+**예시를 말로 풀면**
+- 브로드캐스트 DA, tag 없이 type `0x0800`, payload `"hello"`(5바이트)로 build → `64`.
+  - 헤더 14 + payload 5 = 19바이트라 60을 채우려고 0을 41바이트 pad, 그 뒤 FCS 4바이트
+  - 앞 60바이트의 CRC32 = `0x32DD79F1` → LSB 먼저라 bytes 60..63 = `F1 79 DD 32`
+  - FCS까지 64바이트 전체의 CRC32를 구하면 항상 `0x2144DF1C`("magic residue")로 고정
+- 같은 frame에 VLAN `{pcp 5, vid 100}`: 길이는 그대로 64(tag 4바이트만큼 pad가 줄어듦), bytes 12..15 = `81 00 A0 64` (TPID `0x8100`, TCI = 5<<13 | 100 = `0xA064`).
+- payload 1500: tag 없으면 1518로 OK, tag 있으면 1522로 OK. payload 1501 → `-EMSGSIZE`.
+- loopback `n=10`, payload 50, fault: #2 drop, #4 비트 뒤집기, #6을 30바이트로 자르기, #7/#8 순서 바꾸기
+  - #2가 사라져 received 9, lost 1
+  - #4는 FCS_ERR, #6은 64보다 짧아 RUNT → corrupted 2, good 7
+  - #7/#8이 바뀌어 #7이 #8 뒤에 오므로 out_of_order 1
+  - 전부 good으로 돌아온 게 아니므로 `-EIO`
+
+**지켜야 할 조건**
+- frame 최대 1522바이트, `n ≤ 256`, `4 ≤ payload_len ≤ 1500`, single thread.
+- `malloc` 금지.
+- 가짜 loopback은 **자기 CRC 루틴**을 따로 씀 → `eth_crc32`가 틀리면 loopback 테스트에서 "자기끼리 맞아떨어지는" 일이 없음.
+
 ## 1. Problem
 
 You are bringing up the Ethernet MAC on a new SoC. Write the software side of a **MAC loopback test**: build frames, check received frames like the MAC's receive logic does, keep RMON-style counters, and run a sequence-numbered loopback through a provided fake MAC/PHY loopback (`lb_xmit` / `lb_recv`) that can inject faults. Frames here run from DA to FCS; the preamble/SFD are added and stripped by the MAC/PHY.

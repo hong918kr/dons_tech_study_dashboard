@@ -1,7 +1,8 @@
 <!-- theme: pastel -->
 # Scout AI — Senior Embedded Software Engineer · Context
 
-> **최종 갱신**: 2026-10-25 · **상태**: 💻 **Technical screen 10-26(월) 10:00 PT** (CoderPad 45분)
+> **최종 갱신**: 2026-10-26 · **상태**: 💻 **Technical screen 완료 10-26 (Jason MacDonald) → 결과 대기**
+> **🏢 온사이트 대비 노트**: [2026-10-26_scout_onsite_prep.html](2026-10-26_scout_onsite_prep.html) — 스크린 실제 문제(원 운동 두 차 충돌 시각) 복기 · 4라운드별 준비 · 드릴 R1–R4
 > **🎯 면접관 맞춤 노트 (Jason MacDonald)**: [2026-10-25_scout_interviewer_jason_prep.html](2026-10-25_scout_interviewer_jason_prep.html) — 경력 분석 · 빈도순 예상 질문 · 영어 답 16 · 드릴 J1–J4
 > **⚡ D-3 준비 노트**: [2026-10-23_scout_screen_D-3_prep.html](2026-10-23_scout_screen_D-3_prep.html) — 약점 진단 · 빈도순 예상 문제 · 3일 플랜 · **기본 자료**: [준비 문서](2026-10-12_scout_technical_screen_prep.html) · [연습 사이트](technicalScreenPrep/index.html)
 > **JD**: https://job-boards.greenhouse.io/scoutai/jobs/5387985008 · **위치**: Sunnyvale, CA / onsite [추정] · **연봉 밴드**: $210,000 – $265,000 base + bonus + equity
@@ -20,7 +21,7 @@
 - **핵심 어필**: ① Apple에서 신규 칩 통합 시 PCIe/I2C/SPMI/RFFE 인터페이스 루트코즈 ② SK hynix에서 FPGA/SoC bring-up (I2C·SPI·DMA·SRAM/DRAM) ③ DSO·protocol analyzer·JTAG·logic analyzer로 신호/버스 단위 디버그 ④ bring-up → NPI → MP 전 주기, factory test 설계 (= "센서 데이터 품질 검증 툴")
 - **최대 갭/리스크**: ① Embedded Linux 실무(kernel driver, device tree, V4L2, IIO, Yocto/Buildroot) ② CAN 경험 없음 ③ 카메라 파이프라인(MIPI CSI-2 / GMSL) ④ 34명 규모 초기 스타트업 + 국방 미션(TS clearance 가능성) ⑤ 상한 $265K는 Hark 구두 $250K와 비슷하지만 Apple 대비 total comp 비교 필요
 - **인터뷰 포맷** [확인됨 — 리크루터 콜·메일 10-12]: 리크루터 → **Technical screen**(CoderPad, 언어 자유, 45분 = 경험 15 + 코딩 30, 센서·과열 감지류 · 메일상 범위: practical technical exercises + **experience building and scaling hardware systems**) → **Final 4라운드**(CEO 30 · CTO 30 · HW 엔지니어 45 · 임베디드 엔지니어 45)
-- **다음 액션**: ⓪ **10-26(월) 10:00 스크린 (면접관 Jason MacDonald — CANopen·부트로더·Embedded Linux 출신, 조지아 임베디드 팀 [추정])** — [면접관 노트](2026-10-25_scout_interviewer_jason_prep.html) J1(CAN) + E2 + 모의 1회, 그리고 [D-3 노트](2026-10-23_scout_screen_D-3_prep.html)의 3일 플랜: 약점 = 패킷 추출 완주(Neros 2회 미완) · 실전 타이핑 횟수 ① **Technical screen 준비** — [준비 문서](2026-10-12_scout_technical_screen_prep.html)의 D-5 플랜, T1-1·T1-2·T1-5 최우선 ② 스크린 날짜 확정되면 플랜 역산 ③ 통과 시 Final 4라운드(CEO·CTO·HW·임베디드) 준비
+- **다음 액션**: ⓐ **스크린 완료 10-26 → 결과 대기**. 실제 문제 = 로보틱스 시뮬레이션(원 운동 두 차 충돌 timestamp, C++ 뼈대 제시 → C로 풀이). [온사이트 대비 노트](2026-10-26_scout_onsite_prep.html): R1 복기 → R2–R4 → 라운드별 준비 · (이전) ⓪ 10-26(월) 10:00 스크린 (면접관 Jason MacDonald — CANopen·부트로더·Embedded Linux 출신, 조지아 임베디드 팀 [추정])** — [면접관 노트](2026-10-25_scout_interviewer_jason_prep.html) J1(CAN) + E2 + 모의 1회, 그리고 [D-3 노트](2026-10-23_scout_screen_D-3_prep.html)의 3일 플랜: 약점 = 패킷 추출 완주(Neros 2회 미완) · 실전 타이핑 횟수 ① **Technical screen 준비** — [준비 문서](2026-10-12_scout_technical_screen_prep.html)의 D-5 플랜, T1-1·T1-2·T1-5 최우선 ② 스크린 날짜 확정되면 플랜 역산 ③ 통과 시 Final 4라운드(CEO·CTO·HW·임베디드) 준비
 
 ---
 
@@ -380,10 +381,19 @@ Fury가 **camera-only**이므로 센서 스택의 중심은 카메라다. 여기
 | 2026-10-13 | 메일 반영 업데이트 | 준비 문서에 §2.6 Tips→행동 규칙, §6.0 날짜 추천, §7 scaling 스토리 A·B·C 추가 |
 | 2026-10-23 | 스크린 일정 확정 10-26(월) 10:00 + D-3 노트 | `2026-10-23_scout_screen_D-3_prep.md/.html` — 약점 W1–W8(근거: Neros 패킷 2회 미완, Verkada 유형 빗나감, 연습 stub 수정 흔적 없음), 빈도순 코딩 13 · 개념 16(영어 답) · 경험 7, 3일 플랜, 미공개 모의 2. 연습 사이트에 E1 I2C 드라이버 · E2 extract_packet · E3 ISR→태스크 추가 |
 | 2026-10-25 | 면접관 확인: Jason MacDonald | LinkedIn 경력란만 열람(연결 요청 안 함). Scout 2026-06~ · Latitude AI · Anduril Altius 고객 통합 리드 · SiriusXM · Johnson Outdoors(Embedded Linux Qt, RTOS 배터리 SoC, STM32→Artery 포팅) · Charles Machine Works 10년(TM4C 부트로더·HAL, CANopen 모터 제어, Linux USB 카메라, NTP). 애틀랜타 → 조지아 임베디드 팀원 [추정]. `2026-10-25_scout_interviewer_jason_prep.md/.html` + 연습 사이트 J1 CAN · J2 쿨롱 카운터 · J3 A/B 부트 · J4 시간 동기화 |
+| 2026-10-26 | **Technical screen 완료** (Jason MacDonald) | 실제 문제: 원 운동하는 두 차의 첫 충돌 timestamp(C++ 뼈대 제시 → C로 풀이). 센서·과열 예측 빗나감. `2026-10-26_scout_onsite_prep.md/.html` + 연습 사이트 R 그룹(R1 실제 기출 풀이 · R2 오도메트리 · R3 PID · R4 지오펜스). 결과 대기 |
 
 ---
 
 ## 6. 인터뷰 노트 & 회고
+
+### 2026-10-26 · Technical screen (CoderPad 45분) · 면접관 Jason MacDonald (Senior SWE, 임베디드)
+- **받은 질문**: 경험 이야기 도중 바로 CoderPad. 좌표 평면에 자동차 A·B를 그리고, 두 차가 **원을 그리며 움직일 때 언제 collide하는지** 맞히기. 출력 = timestamp. 상태 = Location (x,y) · Next point · Velocity · Rotational velocity. 언어 자유 — 면접관은 **C++로 제시**, Don은 C [확인됨]
+- **내 답**: `struct`로 위치를 추적, `init_car(x,y)` · `update_car(Car,x,y)` · `did_collide(carA,carB)` + `while(1)` 루프에서 update → 충돌 검사 → `printf`. 함수 시그니처를 확신 없이 "대충" 잡음 [확인됨]
+- **접근 차이** [확인됨]: Don은 처음에 원의 **반지름(radius)** 을 파라미터로 하겠다고 했고, 면접관은 **x, y, heading, rotational speed, speed**로 다음 위치를 계산하는 솔루션을 준비해 왔다고 함 → 연습 사이트 R1 Solution 1(면접관 방식) / Solution 2(반지름 방식)
+- **잘한 점 / 아쉬운 점**: 구조(상태 struct + 시간 루프 + 판정)는 맞음. 아쉬움: `update_car`가 `(Car *, dt)`가 아니라 다음 위치를 밖에서 받는 모양, 종료 조건(`t_max`)과 시간 변수 `t` 없음, 원 운동 공식(`r = v/ω`, 정확한 호 공식) 미정리
+- **다음 라운드에 반영할 것**: 예측(센서·과열)이 빗나감 — 문제 유형은 **로보틱스 시뮬레이션 + 2D 기하**. 처음 보는 시뮬레이션 문제를 상태 → step(dt) → 판정 → 루프로 30초 안에 구조화하는 연습. C++ 뼈대 읽기. → [온사이트 대비 노트](2026-10-26_scout_onsite_prep.html), 연습 사이트 R1–R4
+- **결과**: 대기 중
 
 <!-- 라운드마다 추가:
 ### YYYY-MM-DD · <라운드명> · 면접관 <역할>

@@ -3,6 +3,25 @@
 > **ID**: T1-8 · **Priority**: P2 · **Pattern**: dedicated sampler thread + mutex-protected cache + ring buffer window · **Time**: 40 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T1-8` / `./run.sh T1-8 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 최대 1초 블로킹되고 thread-safe하지 않은 `read_temp()` 위에, 여러 스레드가 기다리지 않고 최신 온도와 최근 5초 과열 여부를 읽을 수 있는 백그라운드 샘플러 서비스를 만든다.
+- **상황**: 벤더 드라이버 `read_temp()`는 I2C 변환 한 번에 최대 1초 걸리고, 두 스레드가 동시에 들어가면 버스가 망가진다. 많은 애플리케이션 스레드가 온도를 원한다. 테스트용으로 가짜 센서(값을 안 주면 200 ms 뒤 `TEMP_ERR`)와 테스트가 직접 움직이는 가짜 시계 `now_ms()`가 주어진다.
+- **입력**: `read_temp()`(0.1 °C 값, 버스 에러면 `TEMP_ERR` = `INT16_MIN`), 시계 `now_ms()`, `is_overheating`의 기준 `thresh`. 상수 `WINDOW_MS = 5000`, `HIST_CAP = 16`, 기록 타입 `Rec {t_ms, temp}`.
+- **출력**: `sampler_start`는 성공 0, 이미 실행 중이면 -1. `get_latest_temp`는 정상값이 있으면 `*out`에 최신값 + `true`, 없으면 `false`. `is_overheating`은 `now - t <= 5000 ms`인 기록들의 최댓값이 `> thresh`이면 `true`.
+- **규칙**
+  - `read_temp()`는 샘플러 스레드만 호출. `read_temp()` 동안 lock을 잡고 있으면 안 된다.
+  - `get_latest_temp`는 절대 센서를 기다리지 않는다.
+  - `TEMP_ERR`는 버리고 마지막 정상값을 유지.
+  - 기록은 고정 크기 링 버퍼 `(t_ms, temp)`, `malloc` 금지, 시간은 `now_ms()`.
+  - 창 안에 기록이 없으면 `is_overheating`은 `false`.
+  - `sampler_stop`은 멈추고 join, 두 번 불러도 안전. start / stop은 제어 스레드 하나에서만 호출. pthreads 사용.
+- **예제 풀어 읽기**: now=1000에 250 → 최신 250, `is_overheating(800)` false. now=2000에 900 → true. now=3000에 300 → 최신은 300이지만 1초 전 900이 창 안에 있어 true. now=7000은 7000 − 2000 = 5000이라 아직 포함 → true. now=7001이면 900이 만료 → false.
+- **놓치기 쉬운 것**: 시작 전엔 데이터 없음, 두 번째 `sampler_start`는 -1, 샘플러가 `read_temp()` 안에 있어도 `get_latest_temp`는 50 ms 안에 반환, `900 > 900`은 false(엄격한 `>`), 창 경계 5000 ms 포함, 타임아웃(`TEMP_ERR`) 뒤에도 마지막 값 300 유지, 기록 20개로 링 버퍼(16)가 wrap된 뒤에도 창 최댓값 419 정확, `sampler_stop`은 read 한 번 안에 끝나고 두 번 불러도 됨, `read_temp()` 동시 진입 없음.
+- **구현할 함수**: 상태(mutex, 최신값, 링 버퍼, 스레드 핸들, run 플래그) 설계, `sampler_start`(샘플러 스레드 하나 시작), `sampler_stop`(멈추고 join), `get_latest_temp`(대기 없이 최신값), `is_overheating`(최근 5초 최댓값과 비교).
+
 ## 1. Problem
 
 The vendor driver gives you a single function:

@@ -3,6 +3,31 @@
 > **ID**: E1 · **Priority**: P0 · **Pattern**: register driver: RMW + poll with timeout + retry policy · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh E1` / `./run.sh E1 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 주어진 I2C HAL 함수만 써서 TMP102 비슷한 온도 센서 드라이버(초기화, 1회 측정 읽기, 경보 임계값 설정)를 재시도·타임아웃 규칙까지 맞춰 만든다.
+- **상황**: MCU가 I2C 버스로 온도 센서 칩(주소 `0x48`)과 대화한다. 실제 하드웨어 대신 `stub.c` 아래쪽의 가짜 버스(레지스터 배열 + 오류 주입)가 HAL 뒤에 붙어 있다.
+- **배경 개념**
+  - **레지스터**: 칩 안의 작은 번호 붙은 저장칸(`0x00` TEMP, `0x01` CONFIG 등). 쓰기의 첫 바이트가 "몇 번 레지스터"인지(register pointer)이고, 읽기는 `write {reg}` 후 repeated START로 이어서 N바이트를 읽는다(`i2c_write_read`). 2바이트 레지스터는 MSB 먼저.
+  - **NACK**: 칩이 바이트를 받았다는 응답(ACK)을 안 준 것. HAL이 `-EIO`로 알려주며, 일시적일 수 있어 재시도 대상이다. `-ETIMEDOUT`은 버스가 계속 busy로 묶인 상태.
+  - **WHO_AM_I**: 항상 고정값(`0xA1`)을 돌려주는 ID 레지스터. 버스에 붙은 칩이 맞는 칩인지 확인용.
+  - **read-modify-write / one-shot**: CONFIG를 읽어서 필요한 비트만 바꿔 다시 쓴다(나머지·reserved 비트 보존). OS 비트에 1을 쓰면 변환 1회 시작, 끝나면 STATUS의 DATA_READY가 켜진다(최대 30 ms).
+- **입력**: `TmpDev *d`(`addr`, `cfg` = CONFIG 사본, `ready`), `addr`, `rate`(0..3), 출력 포인터 `out`(0.01 °C), 경보값 `high_c100`, `low_c100`(0.01 °C). 시간은 `millis()`(ms, `uint32_t`, wrap), 대기는 `delay_ms()`.
+- **출력**: 세 함수 모두 `0` 또는 음수 errno(`-EIO`, `-ETIMEDOUT`, `-ENODEV`, `-EINVAL`, `-ERANGE`). `tmp_read_c100`은 `*out`에 0.01 °C 단위 온도, `tmp_init`은 `d->cfg`에 실제로 쓴 CONFIG 값을 저장.
+- **규칙**
+  - `tmp_init`: `rate > 3`이면 `-EINVAL`. WHO_AM_I가 `0xA1`이 아니면 `-ENODEV`(재시도 없음). CONFIG를 RMW해서 RATE = `rate`, SD = 1, 나머지 비트 유지, 쓴 값을 `d->cfg`에 캐시.
+  - `tmp_read_c100`: 초기화 안 됐으면 `-ENODEV`. CONFIG에 `cfg` + OS 비트(OR)를 쓰기 → `TMP_POLL_MS`(5 ms)마다 STATUS 확인 → `TMP_TIMEOUT_MS`(100 ms) 지나면 `-ETIMEDOUT`(`millis()` wrap에도 정확해야 함) → TEMP 2바이트를 한 트랜잭션으로 읽고 `tmp_raw_to_c100()`(이미 제공)으로 변환.
+  - `tmp_set_alert`: `low < high` 아니면 `-EINVAL`. 각 값을 TEMP 형식(12비트, 0.0625 °C/LSB, 왼쪽 정렬)으로 인코딩, 반올림은 0에서 먼 쪽(half away from zero). 12비트에 안 들어가면 `-ERANGE`. **둘 다 검사한 뒤에** 쓰기 시작.
+  - 재시도: 모든 버스 전송은 `-EIO`일 때만 최대 `TMP_MAX_RETRIES`(3)번 재시도(총 4회). 버스의 `-ETIMEDOUT`은 즉시 반환. malloc 없음.
+- **예제 풀어 읽기**: 가짜 버스는 now = 1000 ms, CONFIG = `0x00`, TEMP = `0x1900`, 변환 30 ms. `tmp_init(&d, 0x48, 2)` → 0, CONFIG = `0x05`(RATE=2, SD=1), 전송 3번(WHO_AM_I 읽기, CONFIG 읽기, CONFIG 쓰기). `tmp_read_c100` → 0, t = 2500(25.00 °C), 전송 9번 = 쓰기 1 + STATUS 폴링 7 + TEMP 읽기 1, 끝난 시각 1030. 처음 CONFIG가 `0x7A`였다면 init 후 `0x7D`(POL, TM, reserved 비트 유지). `tmp_set_alert(&d, 8000, 7500)` → T_HIGH = `0x5000`, T_LOW = `0x4B00`.
+- **놓치기 쉬운 것**: 음수 온도(`0xE700` → -2500, `0xFFF0` → -6), `rate = 4` → `-EINVAL`, NACK 1번이면 재시도 후 성공(전송 10번), NACK 3번까지는 성공·계속 NACK면 4번 시도 후 `-EIO`, bus busy면 전송 1번만 하고 `-ETIMEDOUT`, WHO_AM_I 틀리면 전송 1번·CONFIG 안 건드림·이후 read도 `-ENODEV`, DATA_READY가 안 오면 정확히 100 ms 후 타임아웃(5000 → 5100, 쓰기 1 + 폴링 21), 폴링 중 `millis()` wrap(`0xFFFFFFF0`에서 시작), 반올림(8010 → `0x5020`, -1005 → `0xF5F0`), `low == high` → `-EINVAL`, 13000(130 °C) → `-ERANGE`, 잘못된 입력이면 전송 0번. 테스트가 전송 횟수(`F.xfers`)를 정확히 센다.
+- **구현할 함수**
+  - `tmp_init(d, addr, rate)`: 칩 확인 + CONFIG RMW + 사본 저장.
+  - `tmp_read_c100(d, out)`: one-shot 시작 → 폴링(타임아웃) → TEMP 읽고 변환.
+  - `tmp_set_alert(d, high_c100, low_c100)`: 검증 후 T_HIGH / T_LOW 인코딩해서 쓰기.
+
 ## 1. Problem
 
 Write a small driver for a TMP102-like I2C temperature sensor. You only get the HAL below; it is implemented at the bottom of `stub.c` as a **fake bus** (a register array with fault injection), so do not touch hardware details, just call the HAL.

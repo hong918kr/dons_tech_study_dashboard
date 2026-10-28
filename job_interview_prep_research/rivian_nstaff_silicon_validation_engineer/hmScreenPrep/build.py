@@ -147,6 +147,8 @@ def meta_of(md):
 
 
 def group_of(name):
+    if re.match(r"L\d+_", name):
+        return "L"
     m = re.match(r"V(\d+)", name)
     if m:
         return "VC" if int(m.group(1)) <= 6 else "VD"
@@ -154,18 +156,19 @@ def group_of(name):
 
 
 def sort_key(p):
-    m = re.match(r"V(\d+)", p.name)
-    order = {"VC": 0, "VD": 1, "D": 2}
+    m = re.match(r"[VL](\d+)", p.name)
+    order = {"L": 0, "VC": 1, "VD": 2, "D": 3}
     return (order.get(group_of(p.name), 9), int(m.group(1)) if m else 0, p.name)
 
 
 def render_index():
-    groups = {"VC": [], "VD": [], "D": []}
+    groups = {"L": [], "VC": [], "VD": [], "D": []}
     for pdir in sorted((d for d in PROB_DIR.iterdir() if (d / "README.md").exists()), key=sort_key):
         title, meta = meta_of(pdir / "README.md")
         groups.setdefault(group_of(pdir.name), []).append((pdir, title, meta))
-    names = {"VC": "Core — silicon validation C (register · memory · DMA · benchmark · test infra)",
-             "VD": "Domain — interviewer-tailored (shmoo/PVT · I2C · MIPI CSI-2 · Ethernet · NPU · sensor sync)",
+    names = {"L": "Iris Lee 맞춤 — Linux·system (Zynq UIO · PCIe config · RFC 2544 · PPS time sync · SPSC ring)",
+             "VC": "Core — silicon validation C (register · memory · DMA · benchmark · test infra)",
+             "VD": "Domain — HW-tailored, 원래 면접관 Manjiang 기준 (shmoo/PVT · I2C · MIPI CSI-2 · Ethernet · NPU · sensor sync)",
              "D": "Debug drills — find the bug"}
     secs = []
     for g, items in groups.items():
@@ -191,9 +194,9 @@ def render_index():
             '<p>문제는 <strong>영어</strong>(면접과 같은 조건), 풀이·설명은 <strong>한국어</strong>. '
             '각 문제: ① 문제 읽기 → ② 오른쪽 아래 <strong>30분 타이머</strong> 켜고 <code>stub.c</code>로 풀기 → '
             '③ <code>./run.sh V1</code>로 테스트 → ④ 힌트·풀이·차트로 복기 → ⑤ 체크.</p>'
-            '<pre class="code"><code>cd technicalScreenPrep\n./run.sh V1        # compile + run your stub.c (ASan/UBSan)\n'
+            '<pre class="code"><code>cd hmScreenPrep\n./run.sh V1        # compile + run your stub.c (ASan/UBSan)\n'
             './run.sh V1 sol    # reference solution\n./check_all.sh       # every solution must print ALL PASS</code></pre>'
-            '<p class="note">체크 상태는 이 브라우저에만 저장됩니다. 권장 순서: V2 → V1 → V3 → V4 → D → V5 → V7 → V10 → V11</p></header>')
+            '<p class="note">체크 상태는 이 브라우저에만 저장됩니다. 권장 순서 (면접관 Iris 기준, 10-28): L2 → L1 → V2 → L3 → V3 → L5 → L4 → D → V4. 시간 남으면 V6 · V10 · V12</p></header>')
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     out = HERE / "index.html"
     out.write_text(rh.page("Rivian Coding Practice", hero, "".join(secs), toc,

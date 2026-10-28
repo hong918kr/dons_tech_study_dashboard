@@ -3,6 +3,29 @@
 > **ID**: T2-7 · **Priority**: P1 · **Pattern**: streaming state machine · consecutive-sample counter · **Time**: 20 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T2-7` / `./run.sh T2-7 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 노이즈가 섞인 ALERT 핀 샘플을 하나씩 받아 debounce하고, 안정된 레벨이 바뀌는 순간에만 rising/falling edge를 한 번 알려주는 상태 머신을 만든다.
+- **상황**: 온도 센서가 과열 시 active-high **ALERT** 핀을 올린다. 1 kHz timer ISR이 핀을 샘플링해 샘플마다 `deb_update()`를 한 번 호출한다. 모터 EMI 때문에 짧은 glitch가 생겨 샘플 하나는 믿을 수 없다.
+- **입력**
+  - `deb_init(d, n_required, initial)`: 새 레벨로 인정하는 데 필요한 연속 샘플 수 `n_required`, 시작 안정 레벨 `initial`.
+  - `deb_update(d, raw)`: 이번 샘플 `raw`(0 = low, 0이 아니면 high).
+  - 상태 struct `Debouncer`: `stable`(debounce된 레벨 0/1), `count`(stable과 다른 연속 샘플 수), `n_required`.
+- **출력**: `deb_update`는 `EDGE_RISING`(0 → 1), `EDGE_FALLING`(1 → 0), 또는 `EDGE_NONE`을 반환. `deb_init`은 반환값 없음.
+- **규칙**
+  - raw가 stable과 **다른 샘플이 `n_required`번 연속**되어야 stable이 바뀐다.
+  - stable과 같은 샘플이 하나라도 오면 count는 0으로 리셋.
+  - stable이 바뀌는 그 샘플에서만 edge를 **정확히 한 번** 반환, 나머지는 `EDGE_NONE`.
+  - `n_required == 0`은 1로 취급. `deb_init`의 초기 레벨에 대해선 edge를 보고하지 않는다.
+  - 샘플당 O(1) 시간·메모리, `malloc` 금지, ISR에서 호출되므로 blocking·printing 금지.
+- **예제 풀어 읽기**: `n_required = 3`, `initial = 0`, raw = `0 1 0 1 1 1 1 0 1 1 0 0 0 1 0 0`(i = 0..15). i = 3·4·5에서 1이 3번 연속 → i = 5에서 RISING. 이후 i = 10·11·12에서 0이 3번 연속 → i = 12에서 FALLING. i = 1, 7, 13의 한 샘플짜리 glitch는 무시된다.
+- **놓치기 쉬운 것**: 1/0이 번갈아 나오는 순수 노이즈는 edge 0개, 계속 high인 입력은 RISING 한 번만(i = 2), `initial = 1`이면 계속 high여도 edge 없음, 중간 glitch가 count를 리셋(`1 1 0 1 1 1` → RISING은 i = 5), `n_required`가 0 또는 1이면 모든 변화가 edge, raw `7`처럼 0이 아닌 값도 high.
+- **구현할 함수**
+  - `deb_init(d, n_required, initial)`: 상태 초기화.
+  - `deb_update(d, raw)`: 샘플 하나 처리 후 edge 반환.
+
 ## 1. Problem
 
 A temperature sensor drives an active-high **ALERT** pin when it overheats. A 1 kHz timer ISR samples the pin and calls `deb_update()` once per sample. Motor EMI puts short glitches on the line, so a single sample cannot be trusted.

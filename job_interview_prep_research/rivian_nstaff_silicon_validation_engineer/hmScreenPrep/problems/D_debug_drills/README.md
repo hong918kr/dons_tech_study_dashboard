@@ -3,6 +3,44 @@
 > **ID**: D1–D10 · **Priority**: P0 · **Pattern**: find the bug in 1 minute · **Time**: 20 min
 > 파일: `buggy.c`(버그 10개 + mock HW + 테스트) · `fixed.c`(정답) · 실행: `./run.sh D buggy` / `./run.sh D fixed` / 내 수정본 `./run.sh D my`
 
+## 0. 문제 한국어로 먼저 보기
+
+> 영어 원문(§1)을 읽기 전에 **무슨 상황이고 뭘 만들어야 하는지**만 빠르게 잡는 요약입니다. 풀이 힌트는 없습니다.
+
+**한 줄 요약**: first silicon bring-up/validation 코드 조각 10개(D1–D10)에 **각각 버그가 정확히 하나**씩 있습니다. 1–2분 안에 찾아 말하고 고칩니다.
+
+**상황**
+- 면접관이 짧은 bring-up/validation 코드를 보여 주고 묻습니다: **"FPGA에서는 되는데 first silicon에서는 안 돼요(또는 가끔만 안 돼요). 뭐가 문제죠?"** 조각 하나에 1–2분.
+- 함수 10개가 전부 `buggy.c`에 있고, 각각 옆에 작은 **mock HW model**이 붙어 있습니다.
+  - MMIO read 횟수 counter, **W1C** 레지스터(1을 쓰면 그 비트가 지워짐), separate copy array로 흉내 낸 **D-cache**, descriptor를 snoop하는 **DMA engine**, fake timer, **canary word**(영역 바깥을 건드렸는지 보는 표식 값)가 들어 있는 fake RAM
+- 테스트 `main()`은 crash나 hang 없이 버그 10개를 모두 드러냅니다. 목표는 `ALL PASS` 출력.
+
+**드릴마다 내가 내놓을 것**
+1. **의도한 동작**과 **실제 HW에서의 증상**을 읽음 (`buggy.c`의 `Intended` 주석).
+2. 버그를 한 문장으로 말하고, **어떤 입력이나 타이밍**에서 터지는지 말함.
+3. 고친 줄을 씀.
+4. 어떻게 미리 잡을 수 있었는지 말함 (compiler warning, sanitizer, static analysis, review checklist, directed test 중).
+
+**드릴 목록**
+
+| 드릴 | 코드가 하려는 일 | 증상/주어진 단서 |
+|---|---|---|
+| D1 `wait_dma_done()` | `DMA_STATUS`의 DONE 비트가 1이 될 때까지 poll. DONE == 0을 본 poll 횟수 반환 (처음부터 done이면 0), `max_polls`번 안에 안 되면 -1. **poll마다 진짜 bus read**여야 함 | DONE이 4번째 read에 서는 경우 3을, bus read 4회를 기대. 10번 안에 안 서면 -1과 bus read 10회를 기대 |
+| D2 `irq_ack()` | W1C인 `INT_STATUS`에서 **그 비트 하나만** 지우고 나머지 pending은 유지 | source 하나만 pending이면 정상. TX/RX/ERR 3개가 pending일 때 TX만 ack하면 RX와 ERR이 남아 있어야 함 |
+| D3 `dma_loopback_test()` | write-back D-cache가 있는 환경에서 CPU가 src에 패턴 쓰기 → DMA가 src → dst 복사 → CPU가 dst 확인. mismatch word 수 반환. DMA는 coherent하지 않음 | **매번** pass해야 함. 1회차(dst가 아직 cache에 없음)는 통과하고, 2회차(1회차 때문에 dst line이 cache에 있음)에 문제. DMA 자체는 DRAM에 제대로 씀 |
+| D4 `desc_submit()` | TX descriptor에 `buf_addr`와 length를 채우고 OWN을 세워 HW에 넘김. OWN = 1이 되는 순간부터 engine이 **언제든** descriptor를 가져갈 수 있음 | descriptor에는 지난번에 쓰던 `buf_addr` `0xDEAD0000`이 남아 있음. engine은 **새 buffer** `0x80001000`과 length 256을 봐야 함 |
+| D5 `wait_pll_lock()` | free-running 32-bit timer로 timeout을 재며 `PLL_STATUS.LOCK` poll. LOCK == 0을 본 poll 횟수 반환, `timeout` tick 이상 지나면 -1. timer가 `0xFFFFFFFF` → 0으로 wrap해도 상관없어야 함 | wrap 없는 경우는 정상. timer가 wrap 4096 tick 전에서 시작하면 **너무 일찍 포기**하면 안 됨 (`d5_elapsed`가 50000–51000이어야 함) |
+| D6 `reg_from_dump()` | debug UART dump의 4 byte로 32-bit 레지스터 값 복원. wire 위 순서는 **little-endian** (`b[0]` = bits 7..0, …, `b[3]` = bits 31..24) | `{0x78, 0x56, 0x34, 0x12}` → `0x12345678`, `{0x01,0,0,0}` → 1, `{0,0,0,0x80}` → `0x80000000`이어야 함 |
+| D7 `UartRegs` + `uart_enable_rx_irq()` | datasheet 레지스터 맵(0x00 CTRL, 0x04 STATUS, 0x08–0x0F reserved, 0x10 INT_EN, 0x14 DATA, 모두 32-bit, block 크기 0x18)을 struct로 표현하고 offset 0x10의 `INT_EN.RX`(bit 0)를 세움 | 테스트는 0x10 word의 RX 비트, reserved word 0x0C가 0으로 남는지, `offsetof(INT_EN) == 0x10`, `offsetof(DATA) == 0x14`, `sizeof == 0x18`을 확인 |
+| D8 `field_get()` | `reg`의 bits `[lsb + width - 1 : lsb]`를 오른쪽 정렬해서 반환. `1 <= width <= 32`, `lsb + width <= 32` (width 32 = 레지스터 전체) | 일반 필드는 정상. `field_get(0xABCD1234, 0, 32)`는 `0xABCD1234`여야 함. §2에 따르면 이 드릴은 UBSan runtime error가 먼저 찍힘 |
+| D9 `bw_mbps()` | `clk_mhz` MHz cycle counter로 잰 `cycles` 동안 `bytes`를 옮겼을 때 MB/s(10^6 B/s, truncate) = `bytes * clk_mhz / cycles`. `bytes` 4 GiB − 1, `clk_mhz` 2000까지 **정확**해야 함 | `(4096, 1000, 1000)` → 4096은 정상. `(16777216, 4194304, 1000)` → 4000, `(0xFFFFFFFF, 0xFFFFFFFF, 2000)` → 2000이어야 함 |
+| D10 `mem_test()` | **byte 단위로 주어진** 영역 `[base, base + len_bytes)`의 32-bit word마다 패턴 쓰고 다시 읽어 mismatch word 수 반환. 영역 밖은 **1 byte도** 건드리면 안 됨 | 영역은 64 byte(word 16개). 그 뒤 canary word가 망가지면 안 되고, 마지막 word(index 15)도 테스트돼야 함 |
+
+**지켜야 할 조건**
+- 함수 body만 바꿈 (D7은 struct 선언도 바꿔도 됨).
+- mock HW helper(`dma_status_read`, `intc_read/intc_write`, `cpu_rd/cpu_wr/dcache_*`, `dma_copy`, `hw_snoop`, `DESC_WR`, `timer_now`, `pll_status_read`)와 `TEST GUARD` 표시 줄은 그대로 둠. 실제 HW 대신 bus/cache/DMA engine이 본 것을 테스트가 확인하려고 있는 코드임.
+- 고친 파일은 `-Wall -Wextra -Werror -fsanitize=address,undefined`로 통과해야 함.
+
 ## 1. Problem
 
 The interviewer shares a short piece of bring-up / validation code and asks: **"This works on the FPGA but fails on first silicon (or only sometimes). What is wrong?"** You get one to two minutes per snippet.

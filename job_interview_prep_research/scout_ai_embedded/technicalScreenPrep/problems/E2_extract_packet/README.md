@@ -3,6 +3,31 @@
 > **ID**: E2 · **Priority**: P0 · **Pattern**: buffer scan + resync + caller-kept tail · **Time**: 35 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh E2` / `./run.sh E2 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: UART로 쌓이는 바이트 버퍼에서 첫 번째 완전하고 올바른 프레임을 찾아내고, 앞에서 몇 바이트를 버려도 되는지 알려주는 파서(+ 온도 디코드, + 수신 루프)를 만든다.
+- **상황**: 온도 보드가 메인 MCU로 UART 프레임을 보낸다. UART 드라이버는 받은 바이트를 누적 버퍼 뒤에 계속 붙인다. 호출자는 처리 안 된 꼬리를 남겨두고, 바이트가 더 오면 다시 부른다.
+- **배경 개념**
+  - **UART 바이트 스트림**: 바이트가 아무 크기 덩어리로 끊겨 도착한다. 한 번 읽었을 때 프레임이 반만 와 있을 수도, 앞에 쓰레기 바이트가 있을 수도 있다.
+  - **sync 바이트**: 프레임 시작 표시 `0xAA 0x55`. 하지만 payload 안에도 같은 값이 나올 수 있어서, 프레임 경계는 LEN으로 정한다.
+  - **CRC**: 바이트가 깨졌는지 검사하는 16비트 체크값. `crc16()`은 주어진 라이브러리(CRC-16/CCITT-FALSE)로 TYPE, LEN, PAYLOAD에 대해 계산하고, 프레임에는 little-endian(LO 먼저)으로 실린다.
+- **입력**: `extract_packet(buf, len, out, consumed)` — 현재 버퍼 바이트 `buf[len]`. `decode_temp(p, r)` — 찾은 `Packet`. `rx_feed(rx, data, n, out, out_cap)` — 누적 상태 `RxAcc`(64바이트 `buf`, `len`, `bad_crc`, `bad_len`)와 새로 받은 `n`바이트.
+- **출력**: `extract_packet`은 `PktStatus` 반환 + `*consumed`(앞에서 버려도 되는 바이트 수), FOUND면 `*out` 채움. `decode_temp`은 `bool` + `r->temp_c100`(0.01 °C), `r->t_ms`(ms). `rx_feed`는 찾은 패킷 **전체 개수** 반환, `out`에는 최대 `out_cap`개만 씀.
+- **규칙**
+  - 프레임: `[0xAA] [0x55] [TYPE] [LEN] [PAYLOAD LEN바이트] [CRC_LO] [CRC_HI]`, `0 <= LEN <= 32`.
+  - Part A 반환: `PKT_FOUND` → consumed = 앞 쓰레기 + 프레임 전체. `PKT_NEED_MORE` → consumed = 쓰레기만(미완성 프레임이나 끝의 외로운 `0xAA`는 **남김**). `PKT_BAD_LEN`(LEN > 32), `PKT_BAD_CRC` → consumed = 쓰레기 + **1**(`0xAA` 하나만 건너뛰고 다시 스캔).
+  - `buf`는 수정 금지, 호출당 O(len), malloc 금지.
+  - Part B: TYPE `0x01`이고 LEN == 6일 때만 true. 앞 2바이트 `int16` 온도(0.01 °C, LE), 뒤 4바이트 `uint32` 타임스탬프(ms, LE).
+  - Part C: 64바이트 버퍼에 들어가는 만큼 붙이고 → `PKT_NEED_MORE`까지 `extract_packet` 반복 → bad 프레임 개수 세기 → 남은 꼬리를 `memmove`로 앞으로. `n`이 남은 공간보다 크면 들어가는 만큼 붙이고 처리하고 반복.
+- **예제 풀어 읽기**: 24바이트 버퍼. 앞 `00 AA 13`은 쓰레기, `AA 55 09 04`는 가짜 sync(TYPE 09, LEN 4로 읽히지만 CRC가 안 맞음) → 1차 호출 `PKT_BAD_CRC`, consumed = 4(쓰레기 3 + `0xAA` 1). 2차 호출(buf + 4, 20바이트) → 남은 쓰레기 3바이트 + 프레임 A 12바이트 = consumed 15, 온도 `0x09E6` = 2534(25.34 °C), t = 1000 ms. 3차 호출(buf + 19, 5바이트 `AA 55 01 06 F0`) → 미완성이라 `PKT_NEED_MORE`, consumed = 0(5바이트 유지). 호출자가 5바이트를 앞으로 옮기고 7바이트를 더 붙이면 12바이트 → 4차 호출 `PKT_FOUND`, consumed = 12, 28.00 °C @ 2000 ms.
+- **놓치기 쉬운 것**: NEED_MORE에서 버리는 양 — `AA 55 01` → 0, `00 01 AA 55 01` → 2, `01 02 AA` → 2(끝의 `AA`는 sync일 수 있어 유지), `01 02 03` → 3, `NULL, 0` → 0. LEN 33 → `PKT_BAD_LEN`, consumed 1. LEN 32(프레임 38바이트)와 LEN 0(heartbeat, 6바이트)은 정상. 프레임 두 개 연속. payload 안의 `AA 55`는 데이터. 음수 온도(-150), LEN 5나 TYPE `0x02`면 `decode_temp` false. `rx_feed`는 한 번에 통째로 넣든 1..20바이트씩 랜덤으로 쪼개 넣든 똑같이 패킷 6개, `bad_crc` 2, `bad_len` 1, 끝에 `rx.len` 0이어야 한다.
+- **구현할 함수**
+  - Part A — `extract_packet(buf, len, out, consumed)`: 스캔 → 헤더 → LEN 검사 → 길이 확인 → CRC → 복사.
+  - Part B — `decode_temp(p, r)`: 온도 패킷 payload를 LE로 풀기.
+  - Part C — `rx_feed(rx, data, n, out, out_cap)`: 붙이기 + 반복 추출 + 꼬리 당기기.
+
 ## 1. Problem
 
 A temperature board sends frames to the main MCU over UART. The UART driver **appends** received bytes to an accumulation buffer. Implement `extract_packet()`: look at the bytes currently in the buffer and find the **first complete, valid frame**. It reports how many bytes at the front of `buf` the caller may drop (`*consumed`). The caller keeps the unprocessed tail and calls again after more UART bytes are appended.

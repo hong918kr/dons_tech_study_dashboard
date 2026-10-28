@@ -43,6 +43,7 @@ fake bus / fault injection), not abstract LeetCode.
 - `README.md` — same sections as the exemplar:
   `# <ID> · <English title>` then the `> **ID**: … · **Priority**: P0|P1|P2 · **Pattern**: … · **Time**: N min`
   quote line (keep these exact keys — build.py parses them) + the 파일/실행 line;
+  ## 0. 문제 한국어로 먼저 보기 (Korean problem intro — added 2026-10-27; 한 줄 요약 · 상황 · 구현할 것 표 · 예시를 말로 · 지켜야 할 조건; no solution hints)
   ## 1. Problem (English; code block with signature; ### Example; ### Constraints; ### Clarifying questions)
   ## 2. Your workspace  → `<div class="code" data-src="stub.c"></div>`
   ## 3. 힌트 → 2–3 `<details><summary>Hint N — …</summary>` blocks (blank line after <summary> line and before </details>)

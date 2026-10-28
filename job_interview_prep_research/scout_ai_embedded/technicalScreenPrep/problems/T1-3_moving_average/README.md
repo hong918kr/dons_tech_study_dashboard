@@ -3,6 +3,24 @@
 > **ID**: T1-3 · **Priority**: P0 · **Pattern**: ring buffer + running sum + integer rounding · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T1-3` / `./run.sh T1-3 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 최근 `WIN`개 샘플의 이동 평균을 샘플당 O(1)로 유지하고, 평균 또는 윈도 안 상승폭(rise)으로 과열을 판정한다.
+- **상황**: 노이즈가 많은 온도 센서라 판단 전에 이동 평균으로 부드럽게 만든다. 온도는 `int16_t`, 0.1 °C 단위. `WIN = 4`(실제 제품은 8).
+- **입력**: `MovAvg` 구조체(링 버퍼 `buf[WIN]`, 다음에 쓸 칸 `idx`, 들어 있는 개수 `count`, 합 `sum`(`int32_t`)), `ma_push`의 새 샘플 `x`, `ma_overheat`의 평균 기준 `avg_thresh`와 상승폭 기준 `rise_thresh`.
+- **출력**: `ma_avg`는 현재 평균(`int16_t`, 비었으면 0), `ma_push`는 넣은 뒤의 새 평균, `ma_overheat`는 과열이면 `true`.
+- **규칙**
+  - 윈도를 다시 더하지 말고 running sum으로 O(1) 갱신(꽉 차면 가장 오래된 값을 빼고 새 값을 넣음).
+  - 채우는 중에는 `WIN`이 아니라 `count`로 나눈다.
+  - 반올림은 half away from zero: `7.5 → 8`, `-7.5 → -8`.
+  - 과열 = 평균 `>= avg_thresh` **또는** rise(윈도 안 최신 − 가장 오래된 샘플) `>= rise_thresh`. 빈 윈도는 과열 아님, 샘플 하나면 rise 0.
+  - `malloc`, 부동소수점 금지.
+- **예제 풀어 읽기**: `WIN = 4`에 10, 20, 30, 40, 50을 넣으면 반환값은 10, 15, 20, 25, 35. 5번째 push 뒤 윈도는 20·30·40·50이라 평균 35, rise = 50 − 20 = 30 → `ma_overheat(m, 36, 30)`은 rise 때문에 `true`, `ma_overheat(m, 36, 31)`은 `false`. 음수: -10, -5 → -15/2 = -7.5 → -8 (C 나눗셈은 -7).
+- **놓치기 쉬운 것**: 5번째 push 뒤 `sum == 140`, `idx == 1`까지 검사, 음수 반올림(-5/3 → -2), `INT16_MAX` / `INT16_MIN` 극값에서 합 overflow 없음(결과 16383), 채우는 중 rise는 실제 가장 오래된 샘플 기준, 내려가는 윈도는 rise가 음수, `INT16_MIN` → `INT16_MAX`의 rise 65535는 `int32` 필요.
+- **구현할 함수**: `ma_init`(초기화), `ma_avg`(현재 평균, 반올림), `ma_push`(새 값 넣고 평균 반환), `ma_overheat`(평균 / 상승폭 과열 판정).
+
 ## 1. Problem
 
 A temperature sensor is noisy, so the firmware smooths it with a **moving average of the last `WIN` samples** before deciding anything. Temperatures are `int16_t` in tenths of a degree Celsius.

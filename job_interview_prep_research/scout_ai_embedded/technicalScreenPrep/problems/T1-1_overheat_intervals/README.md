@@ -3,6 +3,23 @@
 > **ID**: T1-1 · **Priority**: P0 · **Pattern**: single pass + open/close interval · **Time**: 30 min
 > 파일: `stub.c`(여기서 풀기) · `solution.c`(정답) · 실행: `./run.sh T1-1` / `./run.sh T1-1 sol`
 
+## 0. 문제 한국어 소개 (먼저 읽기)
+
+> 영어 문제(§1)를 읽기 전에 **무엇을 만들라는 건지** 먼저 잡기 위한 요약입니다. 실제 풀이와 테스트는 §1 영어 문제 기준입니다.
+
+- **한 줄 요약**: 시간순 온도 샘플 배열에서 "임계값 이상이 일정 시간 이상 계속된 구간"을 모두 찾아 돌려준다.
+- **상황**: 센서 하나가 시간 순서대로 온도를 보낸다. 온도는 0.1 °C 단위 정수(`815` = 81.5 °C), 시각은 ms.
+- **입력**: 샘플 배열 `s[n]`(각각 `t_ms`, `temp_c10`), 임계값 `thresh`, 최소 지속 시간 `min_ms`, 결과를 담을 배열 `out`과 그 크기 `out_cap`.
+- **출력**: 찾은 과열 구간들 `{start_ms, end_ms}`를 `out`에 쓰고, **찾은 전체 개수**를 반환한다(`out`이 작아도 개수는 전부 셈).
+- **규칙**
+  - 온도 `>= thresh`인 샘플이 "과열" 샘플.
+  - 과열 샘플이 연속된 묶음 하나가 후보 구간. 시작 = 묶음의 첫 샘플 시각, 끝 = 묶음의 **마지막 과열 샘플** 시각.
+  - `end - start >= min_ms`인 구간만 결과에 넣는다.
+  - `malloc` 금지, 한 번 훑기(O(n)).
+- **예제 풀어 읽기**: `thresh = 800`, `min_ms = 1000`. 500·1000·1500 ms가 과열(810·820·830) → 구간 {500, 1500}, 길이 1000이라 통과. 2500 ms 하나만 과열(850) → 길이 0이라 탈락. 결과 1개.
+- **놓치기 쉬운 것**: 배열이 과열 상태로 끝나는 경우(마지막 구간 닫기), `>=` vs `>`, `out_cap`보다 많이 찾은 경우.
+- **구현할 함수**: `find_overheat(s, n, thresh, min_ms, out, out_cap)` 하나.
+
 ## 1. Problem
 
 You are given temperature samples from one sensor, sorted by time. Each sample has a timestamp in milliseconds and a temperature in tenths of a degree Celsius (`815` means 81.5 °C).
