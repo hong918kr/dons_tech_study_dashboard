@@ -1110,6 +1110,8 @@ Armv8-M은 TEX/C/B 대신 **MAIR**(Memory Attribute Indirection Register) 방식
 - **Device 영역에 `memcpy`**: Device 메모리에 정렬 안 된 접근을 하면 fault가 날 수 있다. DMA 버퍼를 Device로 만들지 말고 Normal non-cacheable로.
 - **S = 1을 줬는데 캐시가 안 된다**: M7의 shareable = 캐시 안 됨 규칙(3.1절).
 - **v7-M 영역 정렬**: 1 KB 영역의 시작 주소가 1 KB 정렬이 아니면 하위 비트가 잘려 엉뚱한 주소를 덮는다. 링커 스크립트에서 `ALIGN`으로 보장한다.
+
+> 🔄 2026-11-01 정정: F4 §2.3 실측에서 QEMU(mps2-an385)는 정렬 안 된 v7-M 리전을 "하위 비트를 잘라 덮는" 대신 **리전 전체를 무시**했다(`-d guest_errors`: `DRBAR[7]: 0x20030300 misaligned to DRSR region size`). Arm 문서는 정렬을 소프트웨어 책임으로만 적고 있고 실칩 동작은 확인하지 못했다. 결론은 같다 — 보호가 엉뚱한 곳에 걸리거나 아예 안 걸리는 조용한 버그이므로 `ALIGN(크기)`로 보장하고 부팅 때 `(base & (size - 1)) == 0`을 assert한다.
 - **v8-M에서 영역 겹침**: v7-M 습관대로 "큰 영역 위에 작은 영역"을 겹치면 v8-M에서는 fault. Zephyr가 SRAM 영역을 `__nocache` 앞뒤로 쪼개는 이유다(예제 Z1 출력).
 
 ---

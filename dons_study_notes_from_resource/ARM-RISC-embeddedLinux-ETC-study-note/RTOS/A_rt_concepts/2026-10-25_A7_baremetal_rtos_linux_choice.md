@@ -540,6 +540,8 @@ IRQ->thread (busy prio-5 job) n=200 min=19200 avg=19200 max=19240 ns
 
 출력에서 볼 것: 모양은 FreeRTOS와 같다 — 하위 스레드가 바빠도 값이 그대로. 그런데 **IRQ → 스레드 19.2 µs**로 FreeRTOS의 두 배가 넘는다. IRQ → ISR도 280 ns로 더 길다(`IRQ_CONNECT`는 공용 `_isr_wrapper`가 소프트웨어 ISR 표를 찾아 내 함수를 부르는 구조라 한 단계가 더 있다. 그걸 건너뛰는 `IRQ_DIRECT_CONNECT`도 있다 — E1).
 
+> 🔄 **2026-11-01 정정 (E3)**: 이 예제의 "idle CPU" 줄도 실제로는 prio-5 `busy_fn` 스레드가 계속 돌고 있어 CPU가 유휴가 아니었다. 진짜 유휴 CPU에서 다시 재면 14.08 µs, CPU를 쓰는 스레드가 있으면 19.48 µs다 — 차이의 이유는 E3 노트에서 분해한다.
+
 19.2 µs는 어디서 왔나? 빌드된 `.config`를 보면 `CONFIG_TIMESLICING=y`, `CONFIG_TIMESLICE_SIZE=20`, `CONFIG_ARM_MPU=y`다. 두 가지를 하나씩 꺼 봤다.
 
 ```sh

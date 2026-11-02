@@ -1,0 +1,2047 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D8. 락 없는 통신 (MCU) — LDREX/STREX, C11 atomics, M0의 한계, ISR ↔ 태스크 SPSC 링버퍼, DMB/DSB/ISB가 정말 필요한 곳</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="D/2026-10-31_D8_lockfree_mcu">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 대시보드</a>
+  <span class="t">D. 동기화 · 태스크 간 통신 · D8. 락 없는 통신 (MCU) — LDREX/STREX, C11 atomics, M0의 한계, ISR ↔ 태스크 SPSC 링버퍼, DMB/DSB/ISB가 정말 필요한 곳</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">D. 동기화 · 태스크 간 통신 · Sync &amp; IPC</div>
+      <h1>D8. 락 없는 통신 (MCU) — LDREX/STREX, C11 atomics, M0의 한계, ISR ↔ 태스크 SPSC 링버퍼, DMB/DSB/ISB가 정말 필요한 곳</h1>
+      <div class="meta"><span>234분 읽기</span><span>2544줄</span><span>58개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: 단일 코어 Cortex-M에서 ISR ↔ 태스크 레이스(RMW · 찢어진 읽기 · 컴파일러 재배치)를 "어떤 도구로 막나"로 분류할 수 있다 · LDREX/STREX 재시도 루프와 exclusive monitor(로컬 · 글로벌), 예외 진입/복귀가 모니터를 지운다는 규칙을 QEMU 실측(<code>strex_fail</code> 8888 = 8888)으로 설명할 수 있다 · C11 <code>&lt;stdatomic.h&gt;</code>가 M3/M33/M0에서 각각 무엇으로 컴파일되는지(<code>ldrex</code>/<code>ldaex</code>/<code>__atomic_*</code> 라이브러리 호출) 보이고 M0용 대체 구현을 직접 써서 <code>microbit</code>(M0) QEMU에서 돌릴 수 있다 · 2의 거듭제곱 · free-running 인덱스 SPSC 링버퍼를 화이트보드에 쓰고, 어디에 컴파일러 배리어가, 어디에 DMB가 필요한지 arm64 실측(틀린 값 13만~18만 개 vs 0개)으로 말할 수 있다 · DMB/DSB/ISB가 Cortex-M에서 실제로 필요한 7가지 장면을 소스(FreeRTOS · Zephyr · CMSIS)로 짚을 수 있다 <strong>왜 필요한가</strong>: 드론 · 모터 컨트롤러의 고속 ISR 경로(IMU 8 kHz, FOC 20 kHz, UART 1 Mbaud)는 커널 객체를 부를 시간이 없다. 면접에서는 "ISR과 태스크 사이에 락 없는 링버퍼를 짜 보라", "<code>volatile</code>이면 충분한가?", "LDREX/STREX는 어떻게 동작하나, M0에서는?", "DMB와 DSB 차이, 언제 필요한가?"가 화이트보드 단골이다 <strong>Don 기준 난이도</strong>: 링버퍼 · DMA 디스크립터 · doorbell · 멀티코어 메시지 링(SSD 펌웨어)은 이미 안다. 일반 메모리 모델 · acquire/release · MP litmus는 EL F5에서 공부했다 / 새로 배울 부분은 <strong>Cortex-M에서 달라지는 점</strong> — 단일 코어에서는 무엇이 필요 없고 무엇이 여전히 필요한지, exclusive monitor가 예외와 어떻게 얽히는지, Armv6-M(M0)에서 C11 atomics가 링크조차 안 되는 이유, 그리고 FreeRTOS · Zephyr 프리미티브 중 무엇이 정말 락 없이 도는지 <strong>선행 노트</strong>: C7(크리티컬 섹션 — 레이스 재현과 PRIMASK · BASEPRI 구현), B3(NVIC · BASEPRI), B7(Cortex-M 세대 — Armv6-M에 LDREX가 없다), C10(SMP 스핀락), EL F4(락 · seqlock), EL F5(메모리 배리어 · litmus). 이어지는 노트: D5(stream/message buffer — SPSC 규칙), E1 · E2(FromISR · 우선순위 배치), E6(DMA 완료 통지), P4(비대칭 멀티코어 메일박스) 🔁 <strong>Bare-Metal 겹침</strong>: BM J2(레이스 일부 — 찢어진 읽기 · RMW의 락 없는 해법), J3(락 없는 링버퍼), J4(원자 연산), J5(배리어가 필요한 순간), B6(순서 일부 — 쓰기 버퍼 · write posting) — 이 노트가 주인. Bare-Metal 노트는 이 노트를 링크하고 "RTOS 없는 슈퍼 루프에서 같은 링버퍼 · 배리어를 쓰는 최소 코드와 Normal/Device 메모리 타입 설명"만 더한다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-커널-객체를-부를-시간이-없을-때">0. 큰 그림 — 커널 객체를 부를 시간이 없을 때<a class="anchor" href="#0-큰-그림-커널-객체를-부를-시간이-없을-때" aria-label="link">#</a></h2>
+<p>예를 들어 드론 비행 제어기라면 UART RX ISR이 GNSS 바이트를 1 Mbaud로 받고, IMU DMA 완료 ISR이 8 kHz로 자이로 샘플을 넘기고, 모터 ISR이 20 kHz로 setpoint를 읽는다. 이 경로에서 FreeRTOS 큐(이 노트 §6.3에서 바이트 하나 넣고 빼기에 7 µs)나 뮤텍스(12.8 µs)를 부르면 ISR 예산이 그대로 사라진다. 그렇다고 매번 인터럽트를 끄면(C7) 다른 ISR의 지연에 그만큼이 더해진다. 그래서 "끼어들어도 깨지지 않게 <strong>설계</strong>한 자료 구조"를 쓴다. 이것이 <strong>락 없는 통신(lock-free communication)</strong>이다 — 누구도 누구를 기다리게 만들지 않고, 한쪽이 언제 끼어들어도 상대가 일관된 값을 보는 통신.</p>
+<p>Don에게 익숙한 말로 바꾸면: SSD 컨트롤러에서 코어 A가 명령 디스크립터를 공유 SRAM 링에 쓰고 tail 레지스터(doorbell)를 올리면 코어 B나 하드웨어 엔진이 가져간다. 그 링에는 락이 없다. <strong>"생산자는 tail만, 소비자는 head만 쓴다"는 소유권 규칙</strong>과 <strong>"데이터를 먼저 쓰고 인덱스를 나중에 쓴다"는 순서 규칙</strong> 두 개로 안전하다. 이 노트는 그 두 규칙을 단일 코어 Cortex-M의 ISR ↔ 태스크에 옮기고, 순서 규칙을 지키는 데 <strong>실제로 무엇이 필요한지</strong>(컴파일러 배리어? DMB? 아무것도?)를 측정으로 가른다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="20" font-size="13" font-weight="bold">ISR ↔ 태스크 사이에 무엇을 넘기나 → 어떤 도구를 쓰나</text>
+<text x="115" y="44" font-size="12" text-anchor="middle">넘기는 것</text>
+<text x="370" y="44" font-size="12" text-anchor="middle">도구 (이 노트의 절)</text>
+<text x="595" y="44" font-size="12" text-anchor="middle">주의</text>
+<rect x="10" y="56" width="210" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="115" y="80.2" font-size="12" text-anchor="middle">32비트 값 · 플래그 하나</text>
+<rect x="260" y="56" width="220" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="370" y="80.2" font-size="12" text-anchor="middle">volatile + 정렬된 LDR/STR</text>
+<rect x="520" y="56" width="150" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="595" y="80.2" font-size="12" text-anchor="middle">원자성 = 워드 단위</text>
+<line x1="222" y1="76" x2="257" y2="76" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="482" y1="76" x2="517" y2="76" stroke="currentColor" marker-end="url(#ah1)"/>
+<rect x="10" y="108" width="210" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="115" y="132.2" font-size="12" text-anchor="middle">카운터 · 비트 (RMW)</text>
+<rect x="260" y="108" width="220" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="370" y="132.2" font-size="12" text-anchor="middle">LDREX/STREX · C11 (§2, §3)</text>
+<rect x="520" y="108" width="150" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="595" y="132.2" font-size="12" text-anchor="middle">M0: IRQ 마스크로</text>
+<line x1="222" y1="128" x2="257" y2="128" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="482" y1="128" x2="517" y2="128" stroke="currentColor" marker-end="url(#ah1)"/>
+<rect x="10" y="160" width="210" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="115" y="184.2" font-size="12" text-anchor="middle">여러 워드 최신값 (setpoint)</text>
+<rect x="260" y="160" width="220" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="370" y="184.2" font-size="12" text-anchor="middle">seqlock · 더블 버퍼 (§4)</text>
+<rect x="520" y="160" width="150" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="595" y="184.2" font-size="12" text-anchor="middle">읽는 쪽이 재시도</text>
+<line x1="222" y1="180" x2="257" y2="180" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="482" y1="180" x2="517" y2="180" stroke="currentColor" marker-end="url(#ah1)"/>
+<rect x="10" y="212" width="210" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="115" y="236.2" font-size="12" text-anchor="middle">바이트 · 샘플 스트림 (FIFO)</text>
+<rect x="260" y="212" width="220" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="370" y="236.2" font-size="12" text-anchor="middle">SPSC 링버퍼 (§5, §6)</text>
+<rect x="520" y="212" width="150" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="595" y="236.2" font-size="12" text-anchor="middle">생산자 1 · 소비자 1</text>
+<line x1="222" y1="232" x2="257" y2="232" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="482" y1="232" x2="517" y2="232" stroke="currentColor" marker-end="url(#ah1)"/>
+<rect x="10" y="264" width="210" height="40" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="115" y="288.2" font-size="12" text-anchor="middle">DMA · 주변장치 · 다른 코어</text>
+<rect x="260" y="264" width="220" height="40" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="370" y="288.2" font-size="12" text-anchor="middle">DMB / DSB / ISB (§7)</text>
+<rect x="520" y="264" width="150" height="40" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="595" y="288.2" font-size="12" text-anchor="middle">순서를 밖에 보이게</text>
+<line x1="222" y1="284" x2="257" y2="284" stroke="currentColor" marker-end="url(#ah1)"/>
+<line x1="482" y1="284" x2="517" y2="284" stroke="currentColor" marker-end="url(#ah1)"/>
+<text x="10" y="322" font-size="12">위에서 아래로 갈수록 "한 명령으로 끝나지 않는 것"이 커진다. 크리티컬 섹션(C7)은 언제나 되는 대안이다.</text>
+</svg></figure>
+<p>그림 1 — 넘기는 데이터의 모양에 따라 도구가 달라진다. 초록은 하드웨어가 공짜로 주는 것, 파랑은 하드웨어 명령 하나 또는 재시도, 주황은 자료 구조 설계, 빨강은 순서를 코어 밖에 보이게 하는 명령이다.</p>
+<h3 id="bare-metal-linux-다른-rtos-노트와의-경계">Bare-Metal · Linux · 다른 RTOS 노트와의 경계<a class="anchor" href="#bare-metal-linux-다른-rtos-노트와의-경계" aria-label="link">#</a></h3>
+<ul><li><strong>레이스 자체의 재현과 크리티컬 섹션 구현</strong>(PRIMASK 저장/복원, BASEPRI, 중첩 카운터, <code>vTaskSuspendAll</code>)은 <strong>C7</strong>이 주인이다. C7 §1이 이미 QEMU에서 잃어버린 갱신(lost 5491/9153)과 찢어진 64비트 타임스탬프(인터럽트를 꺼도 20번 거꾸로 감)를 셌다. 이 노트는 그 레이스를 <strong>락 없이</strong> 고치는 방법(LDREX/STREX, seqlock, SPSC)만 쓴다.</li><li><strong>일반 메모리 모델</strong>(compiler vs CPU 재배치, acquire/release의 정의, MP · SB · LB litmus, LKMM, <code>smp_mb</code>/<code>READ_ONCE</code>)은 <strong>EL F5</strong>, 스핀락 · seqlock의 Linux 구현은 <strong>EL F4</strong>(§12 seqlock)가 주인이다. 여기서는 정의를 반복하지 않고 <strong>Cortex-M에서 달라지는 점</strong>만 쓴다.</li><li><strong>SMP RTOS의 스핀락</strong>(FreeRTOS SMP <code>portGET_TASK_LOCK</code>, Zephyr <code>k_spin_lock</code>이 aarch64에서 <code>msr daifset</code> + CAS가 되는 것)은 <strong>C10</strong>이 주인이다.</li><li><strong>메모리 타입</strong>(Normal / Device / Strongly-ordered 속성 자체)은 Bare-Metal BM B6에 남긴다. 이 노트는 그중 "쓰기 버퍼 · write posting 때문에 레지스터 쓰기가 늦게 반영되는 현상"과 그래서 배리어가 필요한 곳만 쓴다(§7).</li><li><strong>FreeRTOS stream/message buffer API</strong>는 D5가 주인이다. 여기서는 "쓰는 쪽 하나 · 읽는 쪽 하나" 규칙이 왜 락 없는 설계에서 나오는지만 본다(§8).</li></ul>
+<h3 id="실습-환경-한-줄">실습 환경 한 줄<a class="anchor" href="#실습-환경-한-줄" aria-label="link">#</a></h3>
+<p>QEMU <code>mps2-an385</code>(Cortex-M3 @ 25 MHz) 위에서 bare-metal과 FreeRTOS V11.3.2(ARM_CM3 포트), Zephyr v4.4.2를 돌리고, Armv6-M은 QEMU <code>microbit</code>(nRF51, Cortex-M0)에서 bare-metal로 돌린다. 진짜 메모리 재배치가 필요한 실험은 <strong>VM 호스트 arm64</strong>(Lima VM <code>elinux</code>, Apple M2 위 vCPU 6개, gcc 15, 실제 arm64 코어)에서 pthread 두 개로 한다. 타이밍은 모두 <code>ICOUNT=1</code>(명령 1개 = 32 ns, 결정적)이고 <strong>QEMU icount 기준이라 실제 칩과 절대값은 다르다</strong>(캐시 · 플래시 wait state · 버스 · DMB 비용을 모델링하지 않음). 시계는 FPGAIO COUNTER(0x40028018, 25 MHz, 1 카운트 = 40 ns). 이 세션에서는 VM 루트 파일 시스템이 읽기 전용으로 바뀌어 있어서(<code>emergency_ro</code>) 빌드 산출물을 <code>/var/tmp/rtos/D8</code> 대신 VM의 tmpfs <code>/tmp/rtosD8</code>에 두었다 — 명령의 <code>O=/tmp/rtosD8</code>이 그 때문이다. Zephyr 빌드도 같은 이유로 캐시를 <code>-DUSER_CACHE_DIR=/tmp/rtosD8/zcache</code>로 옮겼다. 모든 빌드는 <code>-Wall -Wextra</code> 경고 0개다.</p>
+<p>모든 bare-metal · FreeRTOS 예제가 쓰는 작은 헤더 <code>d8.h</code>다(C7의 <code>c7.h</code>에서 필요한 것만 남겼다).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* d8.h — D8 helpers for QEMU mps2-an385 (Cortex-M3, bare-metal + FreeRTOS) */
+#ifndef D8_H
+#define D8_H
+#include "board.h"
+#define CYC()  REG32(0x40028018u)              /* FPGAIO counter, 25 MHz: 1 count = 40 ns */
+static inline void timer0_start(uint32_t period, uint8_t prio)
+{
+    TIMER_CTRL(TIMER0_BASE) = 0;
+    TIMER_RELOAD(TIMER0_BASE) = period - 1;
+    TIMER_VALUE(TIMER0_BASE) = period - 1;
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    NVIC_IPR(8) = prio;
+    NVIC_ISER0 = 1u &lt;&lt; 8;
+    TIMER_CTRL(TIMER0_BASE) = 1u | 8u;          /* enable + IRQ enable */
+}
+static inline void timer0_stop(void) { TIMER_CTRL(TIMER0_BASE) = 0; }
+static inline uint32_t irq_save(void)
+{
+    uint32_t r;
+    __asm volatile("mrs %0, primask\n cpsid i" : "=r"(r) : : "memory");
+    return r;
+}
+static inline void irq_restore(uint32_t r) { __asm volatile("msr primask, %0" : : "r"(r) : "memory"); }
+#define CBAR() __asm volatile("" ::: "memory")  /* compiler barrier: 0 instructions */
+#endif</code></pre></figure>
+<p><code>CBAR()</code>는 이 노트의 주인공 중 하나다. 명령을 하나도 만들지 않고 컴파일러에게 "이 줄을 넘어 메모리 접근을 옮기지 마라"고만 말한다(EL F5 §1.4의 <code>barrier()</code>와 같다).</p>
+<hr>
+<h2 id="1-문제-다시-보기-단일-코어에서-isr-태스크가-깨지는-세-가지-방식">1. 문제 다시 보기 — 단일 코어에서 ISR ↔ 태스크가 깨지는 세 가지 방식<a class="anchor" href="#1-문제-다시-보기-단일-코어에서-isr-태스크가-깨지는-세-가지-방식" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM J2(메인 ↔ ISR 데이터 레이스 — 찢어진 읽기 · RMW)와 겹친다 (주인: 이 노트 — 락 없는 해법 부분. 레이스 재현과 크리티컬 섹션 해법은 C7 §1 · §2).</p></blockquote>
+<p>C7 §1에서 본 레이스를 "무엇이 쪼개지나"로 다시 나누면 세 종류다. 이 분류가 도구 선택의 출발점이다.</p>
+<div class="tw"><table><thead><tr><th>깨지는 방식</th><th>예</th><th>왜 생기나</th><th>락 없는 해법 (이 노트)</th><th>락 해법 (C7)</th></tr></thead><tbody><tr><td>RMW가 쪼개진다</td><td>공유 카운터 <code>n++</code>, 플래그 비트 OR 대입</td><td>LDR → ADD → STR 사이에 ISR</td><td>LDREX/STREX, C11 <code>atomic_fetch_add</code> (§2 · §3)</td><td>PRIMASK/BASEPRI로 세 명령 감싸기</td></tr><tr><td>여러 워드 읽기가 쪼개진다 (tearing)</td><td>64비트 타임스탬프 hi/lo, setpoint 구조체</td><td>읽는 명령이 2개 이상</td><td>재시도(hi-lo-hi), seqlock, 더블 버퍼 (§4)</td><td>읽는 동안 IRQ 마스크</td></tr><tr><td>순서가 바뀐다</td><td>"데이터 쓰고 → 플래그 세우기"가 "플래그 → 데이터"로</td><td>컴파일러 재배치(1코어), CPU 재배치(다코어)</td><td>컴파일러 배리어, acquire/release, DMB (§5 · §7)</td><td>크리티컬 섹션은 컴파일러 배리어를 품고 있다</td></tr></tbody></table></div>
+<p>세 번째가 가장 잘 숨는다. 앞의 둘은 "ISR이 사이에 끼면"이라는 타이밍 조건이 있지만, 세 번째는 <strong>컴파일러가 코드를 다르게 낸 순간 언제든</strong> 생긴다. 그리고 <code>-O0</code>에서는 안 생기고 <code>-O2</code>에서만 생긴다(§7.4 예제 11). BM J5의 "-O2에서만 깨짐의 다른 원인"이 바로 이것이다.</p>
+<p>단일 코어 Cortex-M3/M4에서 꼭 기억할 하드웨어 사실 세 가지:</p>
+<ol><li><strong>정렬된 32비트(그리고 8 · 16비트) 단일 LDR/STR은 원자적이다</strong> — single-copy atomicity. 그래서 "값 하나 · 플래그 하나"는 <code>volatile</code>(컴파일러가 레지스터에 캐시하지 못하게)만으로 된다.</li><li><strong>CPU는 자기 코어가 보는 순서로는 프로그램 순서를 지킨다.</strong> 단일 코어에서 ISR은 같은 코어에서 돌기 때문에, ISR이 보는 메모리 순서 = 명령 순서다. 그래서 1코어 ISR ↔ 태스크에서는 <strong>CPU 쪽 배리어(DMB)가 필요 없고 컴파일러 배리어만 있으면 된다</strong>(§5.4, §7.1에서 근거와 예외).</li><li><strong>예외 진입/복귀는 exclusive monitor를 지운다</strong>(Armv7-M) — 그래서 LDREX/STREX가 ISR에 대해 정확히 동작한다(§2).</li></ol>
+<hr>
+<h2 id="2-ldrex-strex-끼어들었으면-다시-해-를-하드웨어가-알려-준다">2. LDREX / STREX — "끼어들었으면 다시 해" 를 하드웨어가 알려 준다<a class="anchor" href="#2-ldrex-strex-끼어들었으면-다시-해-를-하드웨어가-알려-준다" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM J4(원자 연산 — LDREX/STREX · CLREX)와 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="2-1-직관-은행-창구의-번호표">2.1 직관 — 은행 창구의 번호표<a class="anchor" href="#2-1-직관-은행-창구의-번호표" aria-label="link">#</a></h3>
+<p>LDREX는 "이 주소를 내가 읽었다"고 <strong>번호표를 뽑는</strong> 명령이고, STREX는 "번호표가 아직 유효하면 쓰고, 아니면 쓰지 말고 실패라고 알려 달라"는 명령이다. 그 사이에 누가 끼어들었으면(예외가 났거나, 다른 코어가 썼거나) 번호표는 무효가 되고 STREX는 메모리를 건드리지 않은 채 1을 돌려준다. 프로그램은 처음부터 다시 한다. 인터럽트를 끄지 않으니 다른 ISR의 지연에 아무것도 더하지 않는다 — 대신 실패하면 몇 명령을 다시 한다.</p>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="20" font-size="13" font-weight="bold">STREX가 실패하는 이유 — 사이에 예외가 끼면 로컬 모니터가 지워진다</text>
+<text x="10" y="65" font-size="12">태스크</text>
+<text x="10" y="125" font-size="12">ISR</text>
+<text x="10" y="189" font-size="12">모니터</text>
+<rect x="70" y="40" width="70" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="105" y="64.2" font-size="12" text-anchor="middle">LDREX</text>
+<rect x="145" y="40" width="58" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="174" y="64.2" font-size="12" text-anchor="middle">ADDS</text>
+<rect x="400" y="40" width="100" height="40" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="450" y="56.2" font-size="12" text-anchor="middle">STREX</text>
+<text x="450" y="72.2" font-size="12" text-anchor="middle">→ 1 실패</text>
+<rect x="505" y="40" width="78" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="544" y="56.2" font-size="12" text-anchor="middle">LDREX</text>
+<text x="544" y="72.2" font-size="12" text-anchor="middle">ADDS</text>
+<rect x="588" y="40" width="86" height="40" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="631" y="56.2" font-size="12" text-anchor="middle">STREX</text>
+<text x="631" y="72.2" font-size="12" text-anchor="middle">→ 0 성공</text>
+<rect x="215" y="100" width="180" height="40" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="305" y="116.2" font-size="12" text-anchor="middle">예외 진입 → ISR 본문</text>
+<text x="305" y="132.2" font-size="12" text-anchor="middle">→ 예외 복귀</text>
+<line x1="203" y1="70" x2="220" y2="98" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="395" y1="110" x2="405" y2="82" stroke="currentColor" marker-end="url(#ah2)"/>
+<rect x="70" y="170" width="145" height="28" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0"/>
+<text x="142.5" y="188.2" font-size="12" text-anchor="middle">Exclusive</text>
+<rect x="215" y="170" width="290" height="28" rx="5" fill="#888" fill-opacity="0.2" stroke="#888"/>
+<text x="360" y="188.2" font-size="12" text-anchor="middle">Open — 예외 진입이 지웠다</text>
+<rect x="505" y="170" width="83" height="28" rx="5" fill="#4a7bd0" fill-opacity="0.2" stroke="#4a7bd0"/>
+<text x="546.5" y="188.2" font-size="12" text-anchor="middle">Excl</text>
+<rect x="588" y="170" width="86" height="28" rx="5" fill="#888" fill-opacity="0.2" stroke="#888"/>
+<text x="631" y="188.2" font-size="12" text-anchor="middle">Open</text>
+<text x="10" y="230" font-size="12">ISR이 같은 변수를 안 건드려도 STREX는 실패하고 다시 돈다 (예제 1: 8888회 = 8888회)</text>
+</svg></figure>
+<p>그림 2 — 태스크가 LDREX와 STREX 사이에서 선점당하면 예외 진입이 로컬 모니터를 Open으로 되돌리고, 복귀한 태스크의 STREX는 실패(1)를 받아 다시 돈다. ISR이 그 변수를 건드렸는지와 무관하다.</p>
+<h3 id="2-2-정의-명령-세-개와-모니터-두-종류">2.2 정의 — 명령 세 개와 모니터 두 종류<a class="anchor" href="#2-2-정의-명령-세-개와-모니터-두-종류" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>명령</th><th>하는 일</th><th>결과</th></tr></thead><tbody><tr><td><code>LDREX Rt, [Rn]</code></td><td>워드를 읽고, 로컬 모니터를 Exclusive로 (주소 표시)</td><td>Rt = 메모리 값</td></tr><tr><td><code>STREX Rd, Rt, [Rn]</code></td><td>모니터가 Exclusive면 쓰고 Open으로, 아니면 <strong>쓰지 않음</strong></td><td>Rd = 0 성공, 1 실패</td></tr><tr><td><code>CLREX</code></td><td>모니터를 Open으로 (표시 지우기)</td><td>없음</td></tr><tr><td><code>LDREXB/H</code>, <code>STREXB/H</code></td><td>8 · 16비트 버전</td><td>같음</td></tr></tbody></table></div>
+<ul><li><strong>로컬 모니터(local monitor)</strong>: 코어 안에 있는 상태 기계 하나. "LDREX를 했고 아직 STREX/CLREX/예외가 없었다"를 기억한다. 주소까지 비교하는지는 구현에 맡겨져 있다 — 그래서 "LDREX A → STREX B"가 실패한다는 보장이 없다(성공할 수도 있다). <strong>짝을 맞추는 것은 소프트웨어 책임</strong>이다.</li><li><strong>글로벌 모니터(global monitor)</strong>: 코어 밖(버스 · 메모리 컨트롤러 쪽)에서 <strong>다른 마스터</strong>(다른 코어, 때로는 DMA)의 쓰기를 감시한다. 멀티코어 MCU(듀얼 M33, M7+M4)의 공유 메모리에서 LDREX/STREX가 코어 간에 동작하려면 이것이 있어야 하고, 있는지 · 어느 메모리 영역에 있는지는 <strong>칩마다 다르다</strong>(데이터시트 확인 사항).</li><li><strong>Armv7-M 규칙</strong>: 예외 진입과 예외 복귀 시퀀스가 로컬 모니터를 Open으로 만든다(Armv7-M ARM의 synchronization primitives 장, "context switch support" 항목). 이 규칙 덕분에 "LDREX → (ISR) → STREX"는 반드시 실패하고, 그래서 <strong>RTOS 컨텍스트 스위치 코드(PendSV)가 CLREX를 따로 할 필요가 없다</strong>(§2.4에서 소스로 확인).</li><li><strong>64비트는 없다</strong>: Armv7-M/Armv8-M에는 <code>LDREXD</code>/<code>STREXD</code>가 없다. 64비트 원자 RMW는 하드웨어로 못 한다(§3.2에서 컴파일러가 라이브러리 호출을 내는 것을 본다).</li><li><strong>Armv6-M(M0/M0+/M1)에는 셋 다 없다</strong>(B7). Armv8-M Baseline(M23)에는 있다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 620 280" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="20" font-size="13" font-weight="bold">로컬 exclusive 모니터 — 상태 두 개짜리 기계</text>
+<rect x="40" y="70" width="170" height="54" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="125" y="93.2" font-size="12" text-anchor="middle">Open Access</text>
+<text x="125" y="109.2" font-size="12" text-anchor="middle">(표시된 주소 없음)</text>
+<rect x="410" y="70" width="170" height="54" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="495" y="93.2" font-size="12" text-anchor="middle">Exclusive Access</text>
+<text x="495" y="109.2" font-size="12" text-anchor="middle">(LDREX 주소 표시)</text>
+<line x1="210" y1="84" x2="408" y2="84" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="310" y="76" font-size="12" text-anchor="middle">LDREX</text>
+<line x1="410" y1="112" x2="212" y2="112" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="310" y="134" font-size="12" text-anchor="middle">STREX 성공 · CLREX · 예외 진입/복귀</text>
+<path d="M 95 124 C 95 175, 160 175, 160 127" fill="none" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="127" y="188" font-size="12" text-anchor="middle">STREX → 1 (메모리에 안 씀)</text>
+<rect x="40" y="212" width="560" height="54" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="320" y="235.2" font-size="12" text-anchor="middle">글로벌 모니터는 코어 밖(버스 · 메모리 쪽)에 있고 칩마다 다르다:</text>
+<text x="320" y="251.2" font-size="12" text-anchor="middle">다른 마스터(코어 · DMA)의 쓰기를 보는 것은 이쪽이다 — 단일 코어 로컬 모니터는 못 본다</text>
+</svg></figure>
+<p>그림 3 — 로컬 모니터는 상태가 두 개뿐이다. LDREX가 Exclusive로 만들고, STREX 성공 · CLREX · 예외 진입/복귀가 Open으로 되돌린다. Open에서 STREX를 하면 메모리에 쓰지 않고 1을 돌려준다.</p>
+<h3 id="2-3-예제-1-c7의-레이스를-ldrex-strex로-고치고-strex-실패를-센다">2.3 예제 1 — C7의 레이스를 LDREX/STREX로 고치고, STREX 실패를 센다<a class="anchor" href="#2-3-예제-1-c7의-레이스를-ldrex-strex로-고치고-strex-실패를-센다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: C7 예제 1과 같은 조건(메인 루프 20만 번 <code>++</code>, TIMER0 ISR 97사이클마다)에서 ① 그냥 <code>++</code>, ② C11 <code>atomic_fetch_add</code>(relaxed), ③ 손으로 쓴 LDREX/STREX 루프(실패 횟수를 센다)를 비교하고, ④ ISR이 <strong>다른 변수</strong>를 건드릴 때도 STREX가 실패하는지 본다. ④가 "예외 진입/복귀가 모니터를 지운다"의 실험적 확인이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex1 — main &lt;-&gt; ISR RMW race: plain ++ vs C11 atomic vs hand LDREX/STREX (count STREX fails) */
+#include &lt;stdatomic.h&gt;
+#include "d8.h"
+#define N 200000u
+volatile uint32_t g_plain, g_other, g_isr_n;
+_Atomic uint32_t g_atom;
+volatile uint32_t g_ll;
+static volatile int g_mode;                 /* what the ISR touches */
+
+void TIMER0_IRQHandler(void)
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    g_isr_n++;
+    switch (g_mode) {
+    case 0: g_plain++; break;
+    case 1: atomic_fetch_add_explicit(&amp;g_atom, 1, memory_order_relaxed); break;
+    case 2: g_ll++; break;                  /* ISR writes the SAME word (plain str) */
+    case 3: g_other++; break;               /* ISR writes a DIFFERENT word */
+    }
+}
+static inline void ll_inc(volatile uint32_t *p, uint32_t *fails)
+{
+    uint32_t v, st;
+    for (;;) {
+        __asm volatile("ldrex %0, [%1]" : "=r"(v) : "r"(p) : "memory");
+        v++;
+        __asm volatile("strex %0, %2, [%1]" : "=&amp;r"(st) : "r"(p), "r"(v) : "memory");
+        if (st == 0) return;
+        (*fails)++;
+    }
+}
+static void run(int mode, const char *name)
+{
+    uint32_t fails = 0, t0;
+    g_plain = g_ll = g_isr_n = 0; atomic_store(&amp;g_atom, 0); g_mode = mode;
+    timer0_start(97, 0x40);                 /* IRQ every 97 cycles = 3.88 us */
+    t0 = CYC();
+    for (uint32_t i = 0; i &lt; N; i++) {
+        if (mode == 0) g_plain++;
+        else if (mode == 1) atomic_fetch_add_explicit(&amp;g_atom, 1, memory_order_relaxed);
+        else ll_inc(&amp;g_ll, &amp;fails);
+    }
+    t0 = CYC() - t0;
+    timer0_stop();
+    uint32_t got = mode == 0 ? g_plain : mode == 1 ? atomic_load(&amp;g_atom) : g_ll;
+    uint32_t expect = N + (mode &lt;= 2 ? g_isr_n : 0);
+    board_printf_raw("%s: isr=%u expect=%u got=%u lost=%u strex_fail=%u  %u ns/iter\n",
+                     name, g_isr_n, expect, got, expect - got, fails, t0 * 40u / N);
+}
+int main(void)
+{
+    run(0, "plain ++");
+    run(1, "atomic_fetch_add");
+    run(2, "ldrex/strex, ISR same");
+    run(3, "ldrex/strex, ISR other");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8; make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=$S/ex1_ldrex.c OUT=$O/ex1 &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $O/ex1/app.elf 60'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>   text	   data	    bss	    dec	    hex	filename
+   4756	     96	    352	   5204	   1454	/tmp/rtosD8/ex1/app.elf
+plain ++: isr=9592 expect=209592 got=203838 lost=5754 strex_fail=0  186 ns/iter
+atomic_fetch_add: isr=14034 expect=214034 got=214034 lost=0 strex_fail=0  272 ns/iter
+ldrex/strex, ISR same: isr=17777 expect=217777 got=217777 lost=0 strex_fail=8888  344 ns/iter
+ldrex/strex, ISR other: isr=17777 expect=200000 got=200000 lost=0 strex_fail=8888  344 ns/iter
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>그냥 <code>++</code>는 ISR 9592번 중 <strong>5754번(60%)을 잃었다</strong> — C7 예제 1과 같은 3/5 비율이다(루프 5명령 중 3곳이 "읽고 아직 안 쓴" 창).</li><li><code>atomic_fetch_add</code>와 손 LDREX/STREX는 <strong>lost=0</strong>. 인터럽트를 한 번도 끄지 않았다.</li><li><strong>같은 변수(③)든 다른 변수(④)든 STREX 실패가 정확히 8888번</strong>이다. 실패의 원인이 "ISR이 값을 바꿔서"가 아니라 "예외가 사이에 끼어서"라는 뜻이다. QEMU가 Armv7-M 규칙대로 예외 진입/복귀에서 모니터를 지운다(QEMU에서 본 것이고, 실칩도 같은 규칙을 따라야 한다 — 아키텍처 요구 사항이기 때문이다).</li><li>실패율 8888/17777 = 50%는 icount의 결정적 위상 때문에 나온 숫자다(ISR 주기와 루프 길이의 관계). 아래처럼 <code>one-insn-per-tb</code>로 돌려도 같은 숫자가 나왔고, ICOUNT 없이 호스트 속도로 돌리면 루프가 순식간에 끝나 ISR이 165번만 와서 실패 0이었다. 실칩에서 ISR이 1 kHz라면 실패는 수천 번에 한 번이다 — <strong>재시도 비용은 평균적으로 거의 0이고, 최악은 "한 번 더"</strong>다.</li><li>비용: 순수 루프가 아니라 ISR 부하를 포함한 숫자라 절대값보다 순서를 본다. 일반 <code>++</code> 186 ns &lt; atomic 272 ns &lt; 손 루프 344 ns(실패 카운터 갱신 때문).</li></ul>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/rtosD8/ex1; timeout 60 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial stdio -semihosting-config enable=on,target=native -icount shift=5,align=off,sleep=off -accel tcg,one-insn-per-tb=on -kernel app.elf; timeout 60 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial stdio -semihosting-config enable=on,target=native -kernel app.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>plain ++: isr=9592 expect=209592 got=203838 lost=5754 strex_fail=0  186 ns/iter
+atomic_fetch_add: isr=14034 expect=214034 got=214034 lost=0 strex_fail=0  272 ns/iter
+ldrex/strex, ISR same: isr=17777 expect=217777 got=217777 lost=0 strex_fail=8888  344 ns/iter
+ldrex/strex, ISR other: isr=17777 expect=200000 got=200000 lost=0 strex_fail=8888  344 ns/iter
+[board_exit] code=0
+plain ++: isr=0 expect=200000 got=200000 lost=0 strex_fail=0  3 ns/iter
+atomic_fetch_add: isr=1 expect=200001 got=200001 lost=0 strex_fail=0  17 ns/iter
+ldrex/strex, ISR same: isr=165 expect=200165 got=200165 lost=0 strex_fail=0  15 ns/iter
+ldrex/strex, ISR other: isr=1 expect=200000 got=200000 lost=0 strex_fail=0  7 ns/iter
+[board_exit] code=0</code></pre></figure>
+<p>손으로 쓴 루프가 무엇으로 컴파일됐나 — 루프 본문이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'arm-none-eabi-objdump -d --no-show-raw-insn /tmp/rtosD8/ex1/app.elf | sed -n "/&lt;run&gt;:/,/^$/p" | grep -n -B3 -A4 "strex" | head -40'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>...
+90-     1b2:	ldrex	r3, [lr]
+91-     1b6:	adds	r3, #1
+92:     1b8:	strex	r2, r3, [lr]
+93-     1bc:	cmp	r2, #0
+94-     1be:	bne.n	1b2 &lt;run+0xf2&gt;
+95-     1c0:	subs	r7, #1
+96-     1c2:	bne.n	1b2 &lt;run+0xf2&gt;</code></pre></figure>
+<p>(앞쪽의 mode 2 루프는 생략했다.) LDREX와 STREX 사이에는 <code>adds</code> 하나만 있다. <strong>이 사이를 짧게</strong> 두는 것이 규칙이다 — 길게 두면 실패 확률이 올라가고, 사이에 다른 LDREX/STREX나 함수 호출이 들어가면 모니터 상태가 엉킨다.</p>
+<h3 id="2-4-clrex는-언제-필요한가-포트-소스를-grep한다">2.4 CLREX는 언제 필요한가 — 포트 소스를 grep한다<a class="anchor" href="#2-4-clrex는-언제-필요한가-포트-소스를-grep한다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: Armv7-M 규칙이 맞다면 Cortex-M 컨텍스트 스위치는 CLREX가 필요 없다. 실제 RTOS 포트가 어떻게 하는지 본다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/rtoslab/src/FreeRTOS-Kernel; grep -rli clrex portable/GCC | sed "s#/[^/]*\$##" | sort -u | tr "\n" " "; echo; cd /var/rtoslab/zephyrproject/zephyr; grep -rli "clrex" . 2&gt;/dev/null | head'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>portable/GCC/ARM_CM23/non_secure portable/GCC/ARM_CM23_NTZ/non_secure portable/GCC/ARM_CM33/non_secure portable/GCC/ARM_CM33_NTZ/non_secure portable/GCC/ARM_CM35P/non_secure portable/GCC/ARM_CM35P_NTZ/non_secure portable/GCC/ARM_CM52/non_secure portable/GCC/ARM_CM52_NTZ/non_secure portable/GCC/ARM_CM55/non_secure portable/GCC/ARM_CM55_NTZ/non_secure portable/GCC/ARM_CM85/non_secure portable/GCC/ARM_CM85_NTZ/non_secure portable/GCC/ARM_CR82 portable/GCC/ARM_STAR_MC3/non_secure portable/GCC/ARM_STAR_MC3_NTZ/non_secure 
+./samples/modules/tflite-micro/hello_world/train/train_hello_world_model.ipynb
+./boards/native/nrf_bsim/common/cmsis/cmsis_instr.h
+./boards/native/nrf_bsim/common/cmsis/cmsis.c</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>FreeRTOS ARM_CM3 · ARM_CM4F · ARM_CM7 포트에는 CLREX가 없다.</strong> Zephyr의 <code>arch/</code>(Cortex-M <code>swap_helper.S</code> 포함)에도 없다(Zephyr에서 나온 것은 시뮬레이터용 CMSIS 흉내와 노트북 파일뿐). 둘 다 "예외 진입/복귀가 지운다"는 Armv7-M/Armv8-M 규칙에 기댄다.</li><li>FreeRTOS에서 CLREX가 나오는 곳은 Armv8-M 포트(CM23 · CM33 · CM55 · CM85 …)의 <code>port.c</code> 한 곳이다. V11.3.2의 이 포트들에 있는 <strong>SMP용 스핀락 trylock</strong> <code>prvSpinTrylock()</code>이다.</li></ul>
+<figure class="code"><span class="lang">c</span><pre><code>/* portable/GCC/ARM_CM33/non_secure/port.c (V11.3.2), prvSpinTrylock — 발췌 */
+        __asm volatile (
+            " ldrex %0, [%1]   \n"
+            : "=r" ( ulVal )
+            : "r" ( ulLock )
+            : "memory"
+        );
+
+        if( ulVal != 0U )
+        {
+            __asm volatile ("clrex" ::: "memory");
+            return 1U;
+        }
+        ...
+        if( ulStatus != 0U )
+        {
+            return 1U;
+        }
+        __asm volatile ( "dmb" ::: "memory" );
+        return 0U;</code></pre></figure>
+<p><strong>CLREX가 필요한 진짜 장면이 이것이다</strong>: LDREX를 했는데 <strong>STREX를 하지 않고 빠져나갈 때</strong>(락이 이미 잡혀 있음). 모니터를 Exclusive로 남겨 두면, 나중에 엉뚱한 STREX(다른 주소!)가 성공해 버릴 수 있다 — 로컬 모니터는 주소를 비교하지 않아도 되기 때문이다. 성공 경로 끝의 <code>dmb</code>는 락 획득을 acquire로 만든다(코어 간 순서, §7). 이 스핀락의 구조는 C10의 주제다.</p>
+<h3 id="2-5-예제-1b-m3-m4의-다른-원자-수단-비트-밴딩">2.5 예제 1b — M3/M4의 다른 원자 수단: 비트 밴딩<a class="anchor" href="#2-5-예제-1b-m3-m4의-다른-원자-수단-비트-밴딩" aria-label="link">#</a></h3>
+<p>Cortex-M3/M4(옵션 기능, M7 · M33에는 없음)는 SRAM과 주변장치 영역의 <strong>비트 하나를 워드 하나로 비춘 별칭 영역(bit-band alias)</strong>을 가진다. 별칭 주소에 쓰기 하나를 하면 버스가 그 비트만 원자적으로 RMW한다 — LDREX도, 인터럽트 마스크도 없이.</p>
+<p>무엇을 확인하나: QEMU AN385에서 비트 밴딩으로 비트를 세우고 지운다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex2 — M3/M4 bit-band: set/clear one bit of SRAM with a single store (no LDREX, no IRQ mask) */
+#include "d8.h"
+#define BB_SRAM(addr, bit) REG32(0x22000000u + (((uint32_t)(addr) - 0x20000000u) * 32u) + (bit) * 4u)
+volatile uint32_t g_flags = 0x10;
+int main(void)
+{
+    BB_SRAM(&amp;g_flags, 3) = 1;                  /* set bit 3   */
+    BB_SRAM(&amp;g_flags, 4) = 0;                  /* clear bit 4 */
+    board_printf_raw("g_flags=0x%x  bit3 via alias reads %u\n", g_flags, BB_SRAM(&amp;g_flags, 3));
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8; make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=$S/ex2_bitband.c OUT=$O/ex2 &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $O/ex2/app.elf 10; arm-none-eabi-objdump -d --no-show-raw-insn $O/ex2/app.elf | sed -n "/&lt;main&gt;:/,/^$/p" | head -12'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>g_flags=0x8  bit3 via alias reads 1
+[board_exit] code=0
+000000c0 &lt;main&gt;:
+      c0:	push	{r4, lr}
+      c2:	movs	r1, #1
+      c4:	movs	r4, #0
+      c6:	ldr	r2, [pc, #24]	@ (e0 &lt;main+0x20&gt;)
+      c8:	ldr	r0, [pc, #24]	@ (e4 &lt;main+0x24&gt;)
+      ca:	lsls	r3, r2, #5
+      cc:	add.w	r3, r3, #570425344	@ 0x22000000
+      d0:	str	r1, [r3, #12]
+      d2:	str	r4, [r3, #16]
+      ...</code></pre></figure>
+<p>출력에서 볼 것: 0x10에서 시작해 bit 3을 세우고 bit 4를 지우니 0x8이다. 생성 코드는 <code>str</code> 두 개뿐이다. 이식성이 없어서(M7 · M33 · M55에 없음) 새 코드에는 권하지 않지만, 오래된 STM32F1/F4 코드에서 <code>BITBAND_PERI(...) = 1</code> 같은 매크로를 보면 "원자적 비트 세트"라고 읽으면 된다.</p>
+<h3 id="2-6-ldrex-strex의-함정">2.6 LDREX/STREX의 함정<a class="anchor" href="#2-6-ldrex-strex의-함정" aria-label="link">#</a></h3>
+<ul><li><strong>주변장치 레지스터(Device 메모리)에 LDREX를 쓰지 않는다.</strong> 아키텍처는 exclusive 접근이 어느 메모리 타입에서 동작하는지를 구현에 맡기고, 주변장치 버스에는 글로벌 모니터가 보통 없다. 레지스터 비트 원자 조작은 그 주변장치가 주는 SET/CLR 레지스터(예: GPIO BSRR)나 비트 밴딩, 또는 IRQ 마스크로 한다.</li><li><strong>DMA는 로컬 모니터를 지우지 못한다.</strong> 단일 코어 MCU에서 "DMA가 쓰는 변수"를 LDREX/STREX로 보호한다는 생각은 틀렸다. DMA와의 공유는 소유권(owner 비트 · 더블 버퍼)으로 설계한다(§9.1).</li><li><strong>LDREX와 STREX 사이에 메모리 접근 · 함수 호출 · 다른 LDREX를 넣지 않는다.</strong> C 컴파일러가 만드는 <code>atomic_*</code>를 쓰면 이 규칙이 자동으로 지켜진다. 손으로 쓸 이유는 거의 없다(예제 1의 손 루프는 실패를 세기 위한 것이다).</li><li><strong>재시도 루프의 최악은 이론상 무한</strong>이다. 실제로는 "ISR이 STREX 직전마다 정확히 온다"는 병적인 경우뿐이고, LDREX ~ STREX가 2~3명령이면 ISR 주기가 그보다 길기만 해도 다음 시도는 성공한다. 하드 실시간 분석(N 모듈)에서는 "재시도 1회"를 WCET에 넣는다.</li></ul>
+<hr>
+<h2 id="3-c11-stdatomic-h-m3-m4-m33에서는-명령-m0에서는-라이브러리-호출">3. C11 <code>&lt;stdatomic.h&gt;</code> — M3/M4/M33에서는 명령, M0에서는 라이브러리 호출<a class="anchor" href="#3-c11-stdatomic-h-m3-m4-m33에서는-명령-m0에서는-라이브러리-호출" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM J4(C11 atomics(M3 이상), M0에서의 대체)와 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="3-1-memory_order를-cortex-m-말로-번역하기">3.1 memory_order를 Cortex-M 말로 번역하기<a class="anchor" href="#3-1-memory_order를-cortex-m-말로-번역하기" aria-label="link">#</a></h3>
+<p><code>memory_order_relaxed</code> · <code>acquire</code> · <code>release</code> · <code>seq_cst</code>의 정의는 EL F5 §2와 A8에서 공부했다. Cortex-M에서 달라지는 점은 <strong>"무엇으로 컴파일되나"</strong>와 <strong>"단일 코어에서 그게 필요한가"</strong> 두 가지다.</p>
+<div class="tw"><table><thead><tr><th>C11 연산</th><th>Armv7-M (M3/M4/M7)</th><th>Armv8-M Mainline (M33/M55)</th><th>Armv6-M (M0/M0+)</th><th>단일 코어 ISR ↔ 태스크에 필요한 것</th></tr></thead><tbody><tr><td><code>atomic_load</code> relaxed</td><td><code>ldr</code></td><td><code>ldr</code></td><td><code>ldr</code></td><td>그대로 충분</td></tr><tr><td><code>atomic_load</code> acquire</td><td><code>ldr</code> + <code>dmb ish</code></td><td><code>lda</code></td><td><code>ldr</code> + <code>dmb ish</code></td><td>컴파일러 배리어면 충분 (DMB는 남는다)</td></tr><tr><td><code>atomic_store</code> release</td><td><code>dmb ish</code> + <code>str</code></td><td><code>stl</code></td><td><code>dmb ish</code> + <code>str</code></td><td>컴파일러 배리어면 충분</td></tr><tr><td><code>atomic_store</code> seq_cst</td><td><code>dmb</code> + <code>str</code> + <code>dmb</code></td><td><code>stl</code></td><td><code>dmb</code> + <code>str</code> + <code>dmb</code></td><td>컴파일러 배리어면 충분</td></tr><tr><td><code>atomic_fetch_add</code> relaxed</td><td><code>ldrex</code>/<code>strex</code> 루프</td><td><code>ldrex</code>/<code>strex</code> 루프</td><td><code>__atomic_fetch_add_4</code> 호출</td><td>RMW의 원자성은 <strong>필요</strong></td></tr><tr><td><code>atomic_fetch_add</code> seq_cst</td><td><code>dmb</code> + 루프 + <code>dmb</code></td><td><code>ldaex</code>/<code>stlex</code> 루프</td><td><code>__atomic_fetch_add_4</code> 호출</td><td>원자성 필요, 순서는 컴파일러 배리어로 충분</td></tr><tr><td>64비트 아무거나</td><td><code>__atomic_load_8</code> 등 호출</td><td>호출</td><td>호출</td><td>하드웨어로 불가 → 락</td></tr></tbody></table></div>
+<p>마지막 열이 이 노트의 요점이다. <strong>단일 코어에서 C11 atomics가 주는 것 중 정말 필요한 것은 RMW의 원자성(LDREX/STREX)과 컴파일러 순서</strong>이고, <code>dmb</code>는 1코어 ISR ↔ 태스크에서는 일을 하지 않는다(§7.1). 그래도 C11을 쓰는 것이 맞다. 같은 코드가 듀얼코어로 옮겨 가도 맞고, 컴파일러가 순서를 정확히 지키기 때문이다. DMB 몇 개의 비용은 §6.3에서 잰다(바이트당 약 95 ns 차이, QEMU icount 기준).</p>
+<h3 id="3-2-예제-2-같은-c-함수-7개를-m3-m33-m0으로-컴파일해서-본다">3.2 예제 2 — 같은 C 함수 7개를 M3 · M33 · M0으로 컴파일해서 본다<a class="anchor" href="#3-2-예제-2-같은-c-함수-7개를-m3-m33-m0으로-컴파일해서-본다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 위 표의 각 칸이 실제 생성 코드와 맞는지.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* atom_gen.c — what C11 atomics compile to on each Cortex-M (look at objdump) */
+#include &lt;stdatomic.h&gt;
+#include &lt;stdint.h&gt;
+_Atomic uint32_t a32;
+_Atomic uint64_t a64;
+uint32_t fetch_add_sc(void)   { return atomic_fetch_add(&amp;a32, 1); }
+uint32_t fetch_add_rlx(void)  { return atomic_fetch_add_explicit(&amp;a32, 1, memory_order_relaxed); }
+_Bool    cas(uint32_t o, uint32_t n) { return atomic_compare_exchange_strong(&amp;a32, &amp;o, n); }
+uint32_t load_acq(void)       { return atomic_load_explicit(&amp;a32, memory_order_acquire); }
+void     store_rel(uint32_t v){ atomic_store_explicit(&amp;a32, v, memory_order_release); }
+void     store_sc(uint32_t v) { atomic_store(&amp;a32, v); }
+uint64_t load64(void)         { return atomic_load(&amp;a64); }</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8/gen; mkdir -p $O; for c in cortex-m3 cortex-m33 cortex-m0; do arm-none-eabi-gcc -mthumb -mcpu=$c -O2 -Wall -Wextra -c $S/atom_gen.c -o $O/$c.o || exit 1; echo "===== $c"; arm-none-eabi-objdump -d --no-show-raw-insn $O/$c.o | grep -v "^$\|file format\|Disassembly\|\.word"; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>===== cortex-m3
+00000000 &lt;fetch_add_sc&gt;:
+   0:	dmb	ish
+   4:	ldr	r3, [pc, #20]	@ (1c &lt;fetch_add_sc+0x1c&gt;)
+   6:	ldrex	r0, [r3]
+   a:	adds	r2, r0, #1
+   c:	strex	r1, r2, [r3]
+  10:	cmp	r1, #0
+  12:	bne.n	6 &lt;fetch_add_sc+0x6&gt;
+  14:	dmb	ish
+  18:	bx	lr
+...
+00000038 &lt;cas&gt;:
+  38:	dmb	ish
+  3c:	ldr	r3, [pc, #28]	@ (5c &lt;cas+0x24&gt;)
+  3e:	ldrex	r2, [r3]
+  42:	cmp	r2, r0
+  44:	bne.n	50 &lt;cas+0x18&gt;
+  46:	strex	ip, r1, [r3]
+  4a:	cmp.w	ip, #0
+  4e:	bne.n	3e &lt;cas+0x6&gt;
+  50:	dmb	ish
+...
+00000060 &lt;load_acq&gt;:
+  60:	ldr	r3, [pc, #8]	@ (6c &lt;load_acq+0xc&gt;)
+  62:	ldr	r0, [r3, #0]
+  64:	dmb	ish
+  68:	bx	lr
+00000070 &lt;store_rel&gt;:
+  70:	ldr	r3, [pc, #8]	@ (7c &lt;store_rel+0xc&gt;)
+  72:	dmb	ish
+  76:	str	r0, [r3, #0]
+  78:	bx	lr
+...
+00000094 &lt;load64&gt;:
+  94:	movs	r1, #5
+  96:	ldr	r0, [pc, #4]	@ (9c &lt;load64+0x8&gt;)
+  98:	b.w	0 &lt;__atomic_load_8&gt;
+===== cortex-m33
+00000000 &lt;fetch_add_sc&gt;:
+   0:	ldr	r3, [pc, #16]	@ (14 &lt;fetch_add_sc+0x14&gt;)
+   2:	ldaex	r0, [r3]
+   6:	adds	r2, r0, #1
+   8:	stlex	r1, r2, [r3]
+   c:	cmp	r1, #0
+   e:	bne.n	2 &lt;fetch_add_sc+0x2&gt;
+  10:	bx	lr
+...
+00000050 &lt;load_acq&gt;:
+  50:	ldr	r3, [pc, #4]	@ (58 &lt;load_acq+0x8&gt;)
+  52:	lda	r0, [r3]
+  56:	bx	lr
+0000005c &lt;store_rel&gt;:
+  5c:	ldr	r3, [pc, #4]	@ (64 &lt;store_rel+0x8&gt;)
+  5e:	stl	r0, [r3]
+  62:	bx	lr
+...
+===== cortex-m0
+00000000 &lt;fetch_add_sc&gt;:
+   0:	push	{r4, lr}
+   2:	movs	r2, #5
+   4:	movs	r1, #1
+   6:	ldr	r0, [pc, #8]	@ (10 &lt;fetch_add_sc+0x10&gt;)
+   8:	bl	0 &lt;__atomic_fetch_add_4&gt;
+   c:	pop	{r4, pc}
+...
+00000028 &lt;cas&gt;:
+...
+  38:	bl	0 &lt;__atomic_compare_exchange_4&gt;
+...
+00000044 &lt;load_acq&gt;:
+  44:	ldr	r3, [pc, #8]	@ (50 &lt;load_acq+0xc&gt;)
+  46:	ldr	r0, [r3, #0]
+  48:	dmb	ish
+  4c:	bx	lr
+...</code></pre></figure>
+<p>(<code>fetch_add_rlx</code> · <code>store_sc</code>와 반복되는 부분은 <code>...</code>로 줄였다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>M3</strong>: seq_cst RMW = <code>dmb</code> + <code>ldrex</code>/<code>strex</code> 루프 + <code>dmb</code>. acquire load = <code>ldr</code> 뒤에 <code>dmb</code>, release store = <code>str</code> 앞에 <code>dmb</code> — 배리어 위치가 정의 그대로다("뒤의 접근이 앞으로 못 온다", "앞의 접근이 뒤로 못 간다").</li><li><strong>M33</strong>(Armv8-M Mainline): <strong><code>lda</code>/<code>stl</code>/<code>ldaex</code>/<code>stlex</code></strong> — acquire/release가 명령에 들어 있어서 <code>dmb</code>가 사라진다. Armv8-A의 <code>ldar</code>/<code>stlr</code>(EL F5)과 같은 아이디어가 MCU에 들어온 것이다.</li><li><strong>M0</strong>(Armv6-M): RMW와 CAS가 <strong><code>__atomic_fetch_add_4</code>, <code>__atomic_compare_exchange_4</code> 함수 호출</strong>이 된다. 마지막 인자 <code>r2 = 5</code>는 <code>__ATOMIC_SEQ_CST</code>의 값이다. 반면 load/store는 <code>ldr</code>/<code>str</code> + <code>dmb</code>로 직접 나온다 — Armv6-M에도 <code>dmb</code>는 있고, 정렬된 32비트 load/store는 원래 원자적이기 때문이다.</li><li><strong>64비트</strong>는 M3 · M33에서도 <code>__atomic_load_8</code> 호출이다. <code>LDREXD</code>가 없으니까(§2.2). C7 §1.4에서 본 <code>ldrd</code>는 "우연히 한 명령"일 뿐 아키텍처가 원자성을 약속하지 않는다.</li><li>Cortex-M에서 <code>dmb ish</code>의 <code>ish</code>는 의미가 없다. Armv7-M은 옵션으로 <code>SY</code>만 정의하고, 다른 값은 예약 인코딩이다(Armv7-M ARM은 이것들이 SY처럼 실행되지만 소프트웨어가 기대면 안 된다고 적는다). 손으로 쓸 때는 그냥 <code>dmb</code>(= <code>dmb sy</code>, CMSIS <code>__DMB()</code>)를 쓴다.</li></ul>
+<h3 id="3-3-예제-3-lock-free인가-를-묻는-세-가지-방법-그리고-링크-에러">3.3 예제 3 — "lock-free인가?"를 묻는 세 가지 방법, 그리고 링크 에러<a class="anchor" href="#3-3-예제-3-lock-free인가-를-묻는-세-가지-방법-그리고-링크-에러" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 컴파일 시점 매크로 <code>ATOMIC_INT_LOCK_FREE</code>, GCC 내장 <code>__atomic_always_lock_free()</code>, 실행 시점 <code>atomic_is_lock_free()</code>가 M3 · M0에서 무엇을 말하는지. 그리고 libatomic이 없는 <code>arm-none-eabi</code>에서 링크가 되는지.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* lf.c — is it lock-free? compile-time macros and atomic_is_lock_free() */
+#include &lt;stdatomic.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;stdio.h&gt;
+_Atomic uint8_t a8; _Atomic uint32_t a32; _Atomic uint64_t a64;
+int main(void)
+{
+    printf("ATOMIC_INT_LOCK_FREE=%d ATOMIC_LLONG_LOCK_FREE=%d\n", ATOMIC_INT_LOCK_FREE, ATOMIC_LLONG_LOCK_FREE);
+    printf("always_lock_free 1/4/8 = %d %d %d\n", __atomic_always_lock_free(1, 0),
+           __atomic_always_lock_free(4, 0), __atomic_always_lock_free(8, 0));
+    printf("is_lock_free u8/u32/u64 = %d %d %d\n", atomic_is_lock_free(&amp;a8),
+           atomic_is_lock_free(&amp;a32), atomic_is_lock_free(&amp;a64));
+    return atomic_fetch_add(&amp;a32, 1);
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8/lf; mkdir -p $O; for c in cortex-m3 cortex-m0; do echo "===== $c"; arm-none-eabi-gcc -mthumb -mcpu=$c -O2 -Wall -Wextra --specs=nano.specs --specs=nosys.specs $S/lf.c -o $O/$c.elf 2&gt;&amp;1 | grep -v "warning: .*is not implemented and will always fail\|_close\|_lseek\|_read\|_write\|_fstat\|_isatty\|_getpid\|_kill" | sed "s#.*/ld: ##" ; ls $O/$c.elf 2&gt;/dev/null; done; find / -name "libatomic*" -path "*arm-none-eabi*" 2&gt;/dev/null | head'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>===== cortex-m3
+/tmp/ccLHMC6I.o: in function `main':
+lf.c:(.text.startup+0x1c): undefined reference to `__atomic_is_lock_free'
+(__atomic_is_lock_free): Unknown destination type (ARM/Thumb) in /tmp/ccLHMC6I.o
+lf.c:(.text.startup+0x1c): dangerous relocation: unsupported relocation
+collect2: error: ld returned 1 exit status
+===== cortex-m0
+/tmp/ccu2jgz3.o: in function `main':
+lf.c:(.text.startup+0x1e): undefined reference to `__atomic_is_lock_free'
+...
+lf.c:(.text.startup+0x2a): undefined reference to `__atomic_is_lock_free'
+...
+lf.c:(.text.startup+0x36): undefined reference to `__atomic_is_lock_free'
+...
+lf.c:(.text.startup+0x4e): undefined reference to `__atomic_fetch_add_4'
+(__atomic_fetch_add_4): Unknown destination type (ARM/Thumb) in /tmp/ccu2jgz3.o
+lf.c:(.text.startup+0x4e): dangerous relocation: unsupported relocation
+collect2: error: ld returned 1 exit status</code></pre></figure>
+<p>(M0의 반복 줄 일부를 <code>...</code>로 줄였다. <code>find</code>는 아무것도 찾지 못했다 — 툴체인에 libatomic이 없다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>둘 다 링크가 안 된다.</strong> M3에서는 <code>atomic_is_lock_free(&amp;a64)</code> 하나(64비트는 항상 lock-free가 아니라서 실행 시점에 물어봐야 함)가, M0에서는 <strong>세 개 전부와 <code>atomic_fetch_add</code></strong>가 라이브러리 함수를 부른다. Linux라면 libatomic이 받아 주지만 <code>arm-none-eabi</code>에는 <strong>libatomic이 없다</strong>. 그래서 M0 프로젝트에서 C11 atomics를 쓰면 처음 만나는 것이 이 링크 에러다.</li><li>M0에서는 8비트(<code>a8</code>)조차 <code>atomic_is_lock_free</code>가 라이브러리 호출이다. load/store는 원자적이지만 RMW가 아니므로 "항상 lock-free"라고 컴파일러가 약속하지 못한다.</li><li>정리: <strong>M3 이상에서 32비트 이하는 lock-free, 64비트는 아님. M0에서는 아무것도 컴파일러가 보장하지 않는다.</strong></li></ul>
+<h3 id="3-4-예제-4-m0에서-__atomic_를-직접-공급하고-microbit-m0-qemu에서-돌린다">3.4 예제 4 — M0에서 <code>__atomic_*</code>를 직접 공급하고 <code>microbit</code>(M0) QEMU에서 돌린다<a class="anchor" href="#3-4-예제-4-m0에서-__atomic_를-직접-공급하고-microbit-m0-qemu에서-돌린다" aria-label="link">#</a></h3>
+<blockquote><p>🔁 이 소절은 Bare-Metal BM J4의 "M0에서의 대체"와 겹친다 (주인: 이 노트). C7 §3.6이 FreeRTOS ARM_CM0 포트의 PRIMASK 크리티컬 섹션을 다뤘다.</p></blockquote>
+<p>M0에는 LDREX가 없으니 선택지는 하나다. <strong>인터럽트를 잠깐 끄고 그냥 RMW를 한다.</strong> 단일 코어라서 이것으로 원자성이 생긴다(다른 코어나 DMA에 대해서는 아니다). 컴파일러가 부르는 이름으로 함수를 만들면 C11 코드는 그대로 둔 채 링크된다.</p>
+<p>먼저 nRF51(QEMU <code>microbit</code>)용 최소 시작 코드다. 랩 템플릿은 M3 전용이라 직접 만들었다(벡터 테이블 · .data 복사 · .bss 0 · semihosting 출력).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* m0io.h — semihosting puts/putu/exit (works on any Cortex-M under QEMU) */
+#ifndef M0IO_H
+#define M0IO_H
+#include &lt;stdint.h&gt;
+static inline int sh_call(int op, const void *arg)
+{
+    register int r0 __asm("r0") = op;
+    register const void *r1 __asm("r1") = arg;
+    __asm volatile("bkpt 0xab" : "+r"(r0) : "r"(r1) : "memory");
+    return r0;
+}
+static inline void sh_puts(const char *s) { sh_call(0x04, s); }      /* SYS_WRITE0 */
+static inline void sh_putu(uint32_t v)
+{
+    char b[12]; int i = 11; b[i] = 0;
+    do { b[--i] = (char)('0' + v % 10u); v /= 10u; } while (v);
+    sh_puts(&amp;b[i]);
+}
+static inline void __attribute__((noreturn)) sh_exit(int code)
+{
+    sh_call(0x18, (const void *)(code ? 0x20024 : 0x20026));      /* SYS_EXIT */
+    for (;;) { }
+}
+#endif</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* m0_start.c — minimal Cortex-M0 startup + semihosting output for QEMU microbit */
+#include &lt;stdint.h&gt;
+#include "m0io.h"
+extern uint32_t _etext, _sdata, _edata, _sbss, _ebss, _estack;
+int main(void);
+void TIMER0_IRQHandler(void) __attribute__((weak, alias("Default_Handler")));
+void Default_Handler(void) { sh_puts("unexpected exception\n"); sh_exit(1); }
+void Reset_Handler(void)
+{
+    uint32_t *s = &amp;_etext, *d = &amp;_sdata;
+    while (d &lt; &amp;_edata) *d++ = *s++;
+    for (d = &amp;_sbss; d &lt; &amp;_ebss; ) *d++ = 0;
+    sh_exit(main());
+}
+__attribute__((section(".vectors"), used)) static void (*const vectors[16 + 32])(void) = {
+    (void (*)(void))&amp;_estack, Reset_Handler, Default_Handler, Default_Handler,
+    [16 + 8] = TIMER0_IRQHandler,                  /* nRF51 TIMER0 = IRQ 8 */
+};</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>/* nRF51822 (QEMU microbit): 256 KB flash @0, 16 KB RAM @0x20000000 */
+MEMORY { FLASH (rx) : ORIGIN = 0x0, LENGTH = 256K  RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 16K }
+SECTIONS {
+  .text : { KEEP(*(.vectors)) *(.text*) *(.rodata*) . = ALIGN(4); _etext = .; } &gt; FLASH
+  .data : AT(_etext) { _sdata = .; *(.data*) . = ALIGN(4); _edata = .; } &gt; RAM
+  .bss  : { _sbss = .; *(.bss*) *(COMMON) . = ALIGN(4); _ebss = .; } &gt; RAM
+  _estack = ORIGIN(RAM) + LENGTH(RAM);
+}</code></pre></figure>
+<p>이제 본체. <code>__atomic_fetch_add_4</code>, <code>__atomic_compare_exchange_4</code>, <code>__atomic_is_lock_free</code>를 PRIMASK로 구현하고, nRF51 TIMER0(IRQ 8, 3.9 µs마다) ISR과 메인이 같은 카운터를 올린다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex3 — Cortex-M0 (Armv6-M, no LDREX/STREX): supply the __atomic_* libcalls with PRIMASK */
+#include &lt;stdatomic.h&gt;
+#include &lt;stdbool.h&gt;
+#include &lt;stddef.h&gt;
+#include "m0io.h"
+#define REG(a)  (*(volatile uint32_t *)(a))
+#define T0      0x40008000u                    /* nRF51 TIMER0, IRQ 8 */
+#define N       100000u
+
+/* ---- the "libatomic" for a single-core M0: mask IRQs around a plain RMW ---- */
+static inline uint32_t pm_save(void)
+{ uint32_t k; __asm volatile("mrs %0, primask\n cpsid i" : "=r"(k) : : "memory"); return k; }
+static inline void pm_restore(uint32_t k) { __asm volatile("msr primask, %0" : : "r"(k) : "memory"); }
+unsigned int __atomic_fetch_add_4(volatile void *p, unsigned int v, int mo)
+{
+    (void)mo;
+    uint32_t k = pm_save();
+    unsigned int old = *(volatile unsigned int *)p;
+    *(volatile unsigned int *)p = old + v;
+    pm_restore(k);
+    return old;
+}
+bool __atomic_compare_exchange_4(volatile void *p, void *exp, unsigned int des, bool weak, int s, int f)
+{
+    (void)weak; (void)s; (void)f;
+    uint32_t k = pm_save();
+    unsigned int cur = *(volatile unsigned int *)p;
+    bool ok = (cur == *(unsigned int *)exp);
+    if (ok) *(volatile unsigned int *)p = des; else *(unsigned int *)exp = cur;
+    pm_restore(k);
+    return ok;
+}
+bool __atomic_is_lock_free(size_t size, const volatile void *p) { (void)size; (void)p; return false; }
+
+volatile uint32_t g_plain, g_isr;
+_Atomic uint32_t g_atom;
+static volatile int g_mode;
+void TIMER0_IRQHandler(void)
+{
+    REG(T0 + 0x140) = 0;                       /* EVENTS_COMPARE[0] = 0 */
+    g_isr++;
+    if (g_mode == 0) g_plain++; else atomic_fetch_add(&amp;g_atom, 1);
+}
+static void run(int mode)
+{
+    g_plain = g_isr = 0; atomic_store(&amp;g_atom, 0); g_mode = mode;
+    REG(T0 + 0x00C) = 1;                       /* TASKS_CLEAR */
+    REG(T0 + 0x000) = 1;                       /* TASKS_START */
+    for (uint32_t i = 0; i &lt; N; i++) { if (mode == 0) g_plain++; else atomic_fetch_add(&amp;g_atom, 1); }
+    REG(T0 + 0x004) = 1;                       /* TASKS_STOP */
+    uint32_t got = mode == 0 ? g_plain : atomic_load(&amp;g_atom);
+    sh_puts(mode == 0 ? "plain ++        : isr=" : "atomic_fetch_add: isr="); sh_putu(g_isr);
+    sh_puts(" lost="); sh_putu(N + g_isr - got); sh_puts("\n");
+}
+int main(void)
+{
+    _Atomic uint32_t x = 5; uint32_t e = 5;
+    sh_puts("is_lock_free(u32) = "); sh_putu(atomic_is_lock_free(&amp;g_atom));
+    sh_puts(", cas(5-&gt;9) = "); sh_putu(atomic_compare_exchange_strong(&amp;x, &amp;e, 9)); sh_puts(" x="); sh_putu(x); sh_puts("\n");
+    REG(T0 + 0x504) = 0; REG(T0 + 0x508) = 3; REG(T0 + 0x510) = 0;   /* timer, 32-bit, 16 MHz */
+    REG(T0 + 0x540) = 61;                      /* CC[0]: compare every 62 ticks = 3.9 us */
+    REG(T0 + 0x200) = 1;                       /* SHORTS: COMPARE0 -&gt; CLEAR */
+    REG(T0 + 0x304) = 1u &lt;&lt; 16;                /* INTENSET COMPARE0 */
+    REG(0xE000E100u) = 1u &lt;&lt; 8;                /* NVIC ISER: IRQ 8 */
+    run(0); run(1);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8/m0; O=/tmp/rtosD8/m0; mkdir -p $O; arm-none-eabi-gcc -mthumb -mcpu=cortex-m0 -O2 -g -std=gnu11 -Wall -Wextra -ffreestanding -nostdlib -T $S/m0.ld $S/m0_start.c $S/ex3_m0.c -lgcc -o $O/ex3.elf &amp;&amp; arm-none-eabi-size $O/ex3.elf &amp;&amp; timeout 20 qemu-system-arm -machine microbit -nographic -monitor none -serial null -semihosting-config enable=on,target=native -icount shift=5,align=off,sleep=off -kernel $O/ex3.elf; echo exit=$?'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>   text	   data	    bss	    dec	    hex	filename
+   1296	      0	     16	   1312	    520	/tmp/rtosD8/m0/ex3.elf
+is_lock_free(u32) = 0, cas(5-&gt;9) = 1 x=9
+plain ++        : isr=5607 lost=2805
+atomic_fetch_add: isr=8771 lost=0
+exit=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>경고 0개로 링크됐고 M0에서 실제로 돈다. 그냥 <code>++</code>는 ISR 5607번 중 2805번을 잃었고, 우리가 공급한 <code>atomic_fetch_add</code>는 0이다.</li><li><code>atomic_is_lock_free</code>는 0을 돌려주게 만들었다. <strong>인터럽트 마스크 구현은 "lock-free"가 아니다</strong> — 멀티코어나 DMA에 대해 아무것도 보장하지 않고, IRQ 지연에 RMW 길이만큼을 더한다. 이름에 정직하게 0을 돌려주는 것이 맞다.</li><li>이 구현은 <strong>단일 코어 전용</strong>이다. RP2040(듀얼 M0+)처럼 M0 코어가 둘인 칩에서는 두 코어가 동시에 PRIMASK를 끄고 같은 RMW를 할 수 있다. 그래서 RP2040은 하드웨어 스핀락 블록(SIO spinlock 레지스터)을 따로 둔다(B7 · C10).</li><li>함정: <code>__atomic_fetch_add_4</code> 시그니처는 GCC 내장 선언(<code>unsigned int</code>)과 맞아야 한다. <code>uint32_t</code>(= <code>unsigned long</code>)로 쓰면 "conflicting types for built-in function" 경고가 난다.</li></ul>
+<h3 id="3-5-rtos들은-어떻게-고르나-zephyr-kconfig와-freertos-atomic-h">3.5 RTOS들은 어떻게 고르나 — Zephyr Kconfig와 FreeRTOS <code>atomic.h</code><a class="anchor" href="#3-5-rtos들은-어떻게-고르나-zephyr-kconfig와-freertos-atomic-h" aria-label="link">#</a></h3>
+<p>Zephyr는 같은 <code>atomic_t</code> API를 아키텍처에 따라 세 가지로 구현한다(<code>kernel/Kconfig</code>, v4.4.2).</p>
+<figure class="code"><span class="lang">text</span><pre><code>config ATOMIC_OPERATIONS_BUILTIN
+	bool
+	help
+	  Use the compiler builtin functions for atomic operations. This is
+	  the preferred method. However, support for all arches in GCC is
+	  incomplete.
+...
+config ATOMIC_OPERATIONS_C
+	bool
+	help
+	  Use atomic operations routines that are implemented entirely
+	  in C by locking interrupts. Selected by architectures which either
+	  do not have support for atomic operations in their instruction
+	  set, ...</code></pre></figure>
+<p>그리고 Cortex-M은 이렇게 고른다(<code>arch/arm/core/cortex_m/Kconfig</code>).</p>
+<figure class="code"><span class="lang">text</span><pre><code>config ARMV6_M_ARMV8_M_BASELINE
+	bool
+	select ATOMIC_OPERATIONS_BUILTIN if ARMV8_M_BASELINE
+	select ATOMIC_OPERATIONS_C if !ARMV8_M_BASELINE
+...
+config ARMV7_M_ARMV8_M_MAINLINE
+	bool
+	select ATOMIC_OPERATIONS_BUILTIN</code></pre></figure>
+<ul><li><strong>M3/M4/M7/M33/M55</strong>: <code>BUILTIN</code> → <code>include/zephyr/sys/atomic_builtin.h</code>의 <code>__atomic_fetch_add(target, value, __ATOMIC_SEQ_CST)</code> 등. 인라인 LDREX/STREX가 된다(§8 예제 14에서 확인).</li><li><strong>M0/M0+</strong>: <code>C</code> → <code>kernel/atomic_c.c</code>. 파일 안의 전역 <code>static struct k_spinlock lock;</code> 하나로 모든 atomic 연산을 감싼다. 단일 코어에서 <code>k_spin_lock</code> = <code>irq_lock</code>이므로(C7 §8.2) 예제 4의 PRIMASK 구현과 같은 일을 한다.</li><li><strong>M23</strong>(Armv8-M Baseline): LDREX/STREX가 있으므로 <code>BUILTIN</code>.</li></ul>
+<p>Zephyr의 <code>qemu_cortex_m0</code> 보드로 같은 앱을 빌드해 보려 했지만 이 랩의 Zephyr 워크스페이스에는 nRF51 보드가 요구하는 <code>hal_nordic</code> 모듈이 없어 Kconfig 단계에서 실패했다(<code>NRFX_CLOCK ... has direct dependencies HAS_NRFX &amp;&amp; 0</code>). 그래서 <strong>Zephyr M0 경로는 소스로만 확인했고 실행하지 못했다.</strong> M0 동작 자체는 예제 4의 bare-metal 실행으로 대신 보였다.</p>
+<p>FreeRTOS에는 <code>include/atomic.h</code>(<code>Atomic_CompareAndSwap_u32</code>, <code>Atomic_Add_u32</code> …)가 있다. 이름이 "atomic"이지만 머리 주석이 정직하게 말한다.</p>
+<figure class="code"><span class="lang">text</span><pre><code> * This file implements atomic functions by disabling interrupts globally.
+ * Implementations with architecture specific atomic instructions can be
+ * provided under each compiler directory.</code></pre></figure>
+<p>V11.3.2의 구현은 <code>ATOMIC_ENTER_CRITICAL()</code> = <code>portSET_INTERRUPT_MASK_FROM_ISR()</code>(ARM_CM3에서는 BASEPRI 올리기) 안에서 평범한 RMW를 하는 것이다. <strong>M3에서도 LDREX를 쓰지 않는다.</strong> 그래서 <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>보다 높은(숫자가 작은) zero-latency ISR과 공유하는 변수에는 FreeRTOS <code>Atomic_*</code>가 <strong>보호가 되지 않는다</strong> — BASEPRI가 그 ISR을 막지 못하기 때문이다. 그런 변수는 C11 atomics(LDREX)로 다룬다.</p>
+<hr>
+<h2 id="4-여러-워드를-찢어지지-않게-seqlock-재시도-더블-버퍼">4. 여러 워드를 찢어지지 않게 — seqlock · 재시도 · 더블 버퍼<a class="anchor" href="#4-여러-워드를-찢어지지-않게-seqlock-재시도-더블-버퍼" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM J2(찢어진 읽기 — tearing)와 겹친다 (주인: 이 노트 — 락 없는 해법 부분. 64비트 타임스탬프 레이스 재현과 IRQ 마스크 해법은 C7 §1.3).</p></blockquote>
+<h3 id="4-1-직관-게시판의-작성-중-표시">4.1 직관 — 게시판의 "작성 중" 표시<a class="anchor" href="#4-1-직관-게시판의-작성-중-표시" aria-label="link">#</a></h3>
+<p>모터 컨트롤러의 20 kHz ISR이 전류 setpoint <code>{id, iq, theta}</code> 세 워드를 계속 갱신하고, 느린 태스크가 가끔 그것을 읽어 텔레메트리로 보낸다고 하자. 세 워드를 읽는 도중에 ISR이 끼면 "id는 새 값, iq는 옛 값"을 읽는다. 해법 하나는 C7처럼 읽는 동안 인터럽트를 끄는 것이다. 다른 해법은 쓰는 쪽이 <strong>시퀀스 번호(sequence counter)</strong>를 "쓰기 전에 하나, 쓰고 나서 하나" 올리고, 읽는 쪽이 <strong>읽기 전후의 번호가 같고 짝수일 때만</strong> 그 값을 믿는 것이다 — <strong>seqlock</strong>. 쓰는 쪽은 절대 기다리지 않고, 읽는 쪽만 가끔 다시 읽는다. Linux 커널의 seqlock(EL F4 §12)과 같은 구조이고, C7 §1.3 ④의 hi-lo-hi 재시도는 "hi 워드 자체를 시퀀스 번호로 쓴" 특수한 경우다.</p>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="20" font-size="13" font-weight="bold">seqlock — 쓰는 쪽(ISR)은 seq를 홀수로 올렸다 짝수로 내리고, 읽는 쪽은 앞뒤 seq를 비교한다</text>
+<text x="10" y="62" font-size="12">ISR (쓰기)</text>
+<text x="10" y="122" font-size="12">1차 읽기</text>
+<text x="10" y="202" font-size="12">2차 읽기</text>
+<rect x="250" y="42" width="76" height="32" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="288" y="62.2" font-size="12" text-anchor="middle">seq → 5</text>
+<rect x="330" y="42" width="100" height="32" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="380" y="62.2" font-size="12" text-anchor="middle">a·b·c 쓰기</text>
+<rect x="434" y="42" width="76" height="32" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="472" y="62.2" font-size="12" text-anchor="middle">seq → 6</text>
+<rect x="85" y="102" width="80" height="32" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="125" y="122.2" font-size="12" text-anchor="middle">s1 = 4</text>
+<rect x="170" y="102" width="80" height="32" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="210" y="122.2" font-size="12" text-anchor="middle">a 읽기</text>
+<rect x="515" y="102" width="78" height="32" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="554" y="122.2" font-size="12" text-anchor="middle">b·c 읽기</text>
+<rect x="596" y="102" width="78" height="32" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="635" y="122.2" font-size="12" text-anchor="middle">s2 = 6</text>
+<line x1="252" y1="118" x2="512" y2="118" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="380" y="148" font-size="12" text-anchor="middle">선점당함 (ISR 실행 중)</text>
+<text x="672" y="158" font-size="12" text-anchor="end">s1(4) ≠ s2(6) → 버리고 다시</text>
+<rect x="85" y="182" width="80" height="32" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="125" y="202.2" font-size="12" text-anchor="middle">s1 = 6</text>
+<rect x="170" y="182" width="100" height="32" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="220" y="202.2" font-size="12" text-anchor="middle">a·b·c 읽기</text>
+<rect x="275" y="182" width="80" height="32" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="315" y="202.2" font-size="12" text-anchor="middle">s2 = 6</text>
+<text x="365" y="203" font-size="12">같고 짝수 → 이 값을 쓴다</text>
+<text x="10" y="240" font-size="12">단일 코어 + 쓰는 쪽이 ISR이면 읽는 쪽이 홀수 seq를 볼 일은 없다 (ISR은 끝까지 돈다). 반대 방향은 §4.3.</text>
+</svg></figure>
+<p>그림 4 — 태스크가 a를 읽은 뒤 선점당하고 ISR이 seq를 4 → 5 → 6으로 바꾸며 세 워드를 고친다. 태스크는 나머지를 읽고 seq가 6인 것을 보고 버린 뒤, 2차 시도에서 일관된 값을 얻는다.</p>
+<p>단일 코어에서 이 구조가 Linux seqlock과 다른 점:</p>
+<ul><li><strong>쓰는 쪽 락이 없다.</strong> Linux seqlock은 쓰는 쪽끼리 spinlock을 잡는다. ISR이 유일한 쓰는 쪽이면 필요 없다.</li><li><strong>CPU 배리어가 없다.</strong> 같은 코어라서 컴파일러 배리어(<code>CBAR()</code>)만으로 "seq → 데이터 → seq" 순서가 지켜진다. 듀얼코어(M7+M4 공유 RAM)라면 쓰는 쪽에 <code>dmb</code>(seq 홀수 뒤 · 짝수 앞), 읽는 쪽에 <code>dmb</code>(s1 읽은 뒤 · s2 읽기 전)가 들어간다 — EL F4 §12의 <code>smp_wmb</code>/<code>smp_rmb</code> 자리와 같다.</li><li><strong>읽는 쪽이 홀수 seq를 볼 일이 없다.</strong> ISR은 시작하면 끝까지 돈다. 그래도 홀수 검사는 넣는다 — 쓰는 쪽이 태스크로 바뀌거나 코어가 둘이 되는 순간 필요해진다.</li></ul>
+<h3 id="4-2-예제-5-3워드-setpoint-그냥-읽기-vs-seqlock-vs-irq-마스크">4.2 예제 5 — 3워드 setpoint: 그냥 읽기 vs seqlock vs IRQ 마스크<a class="anchor" href="#4-2-예제-5-3워드-setpoint-그냥-읽기-vs-seqlock-vs-irq-마스크" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 쓰는 ISR이 4.04 µs마다(실제 20 kHz보다 12배 빠르게 — 충돌을 자주 만들려고) 세 워드를 고칠 때, 읽기 20만 번 중 찢어진 값이 몇 번인지와 읽기 비용.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex4 — ISR publishes a 3-word setpoint; main reads it: naive vs seqlock vs IRQ mask */
+#include "d8.h"
+#define READS 200000u
+struct sp { uint32_t id, iq, theta; };          /* consistent iff iq == ~id &amp;&amp; theta == 3*id */
+static struct sp g_sp;                           /* plain (non-volatile) payload */
+static volatile uint32_t g_seq;                  /* even = stable, odd = writer inside */
+static volatile uint32_t g_isr_n;
+
+void TIMER0_IRQHandler(void)                     /* "20 kHz motor ISR", run much faster here */
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    uint32_t n = ++g_isr_n;
+    g_seq++;              CBAR();                /* odd: write in progress */
+    g_sp.id = n; g_sp.iq = ~n; g_sp.theta = 3u * n;
+    CBAR();               g_seq++;               /* even: stable again */
+}
+static int bad(const struct sp *s) { return s-&gt;iq != ~s-&gt;id || s-&gt;theta != 3u * s-&gt;id; }
+
+static void rd_naive(struct sp *o) { o-&gt;id = g_sp.id; CBAR(); o-&gt;iq = g_sp.iq; CBAR(); o-&gt;theta = g_sp.theta; }
+static uint32_t rd_seq(struct sp *o)             /* returns number of retries */
+{
+    uint32_t s1, s2, r = 0;
+    for (;;) {
+        s1 = g_seq;       CBAR();
+        o-&gt;id = g_sp.id; o-&gt;iq = g_sp.iq; o-&gt;theta = g_sp.theta;
+        CBAR();           s2 = g_seq;
+        if (s1 == s2 &amp;&amp; !(s1 &amp; 1u)) return r;
+        r++;
+    }
+}
+static void rd_mask(struct sp *o) { uint32_t k = irq_save(); *o = g_sp; irq_restore(k); }
+
+static void run(int m, const char *name)
+{
+    struct sp v; uint32_t torn = 0, retry = 0, t0, i0 = g_isr_n;
+    t0 = CYC();
+    for (uint32_t i = 0; i &lt; READS; i++) {
+        if (m == 0) rd_naive(&amp;v); else if (m == 1) retry += rd_seq(&amp;v); else rd_mask(&amp;v);
+        torn += bad(&amp;v);
+    }
+    t0 = CYC() - t0;
+    board_printf_raw("%s: isr=%u torn=%u retries=%u  %u ns/read\n",
+                     name, g_isr_n - i0, torn, retry, t0 * 40u / READS);
+}
+int main(void)
+{
+    timer0_start(101, 0x40);                     /* writer every 101 cycles = 4.04 us */
+    run(0, "naive   "); run(1, "seqlock "); run(2, "irq mask");
+    timer0_stop();                               /* same loops, no writer: pure read cost */
+    run(0, "naive    (no ISR)"); run(1, "seqlock  (no ISR)"); run(2, "irq mask (no ISR)");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8; make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=$S/ex4_seqlock.c OUT=$O/ex4 &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $O/ex4/app.elf 60'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>naive   : isr=28570 torn=23472 retries=0  577 ns/read
+seqlock : isr=75000 torn=0 retries=2679  1515 ns/read
+irq mask: isr=36451 torn=0 retries=0  736 ns/read
+naive    (no ISR): isr=0 torn=0 retries=0  480 ns/read
+seqlock  (no ISR): isr=0 torn=0 retries=0  1248 ns/read
+irq mask (no ISR): isr=0 torn=0 retries=0  608 ns/read
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>그냥 읽으면 20만 번 중 <strong>23,472번(12%)이 찢어진 값</strong>이다. seqlock과 IRQ 마스크는 0이다.</li><li>seqlock은 2679번 다시 읽었다 — 충돌이 일어났을 때만 비용을 낸다. ISR은 단 한 번도 늦춰지지 않았다(마스크가 없으니까).</li><li>순수 읽기 비용(아래 세 줄, ISR 없음)은 seqlock 1248 ns &gt; 마스크 608 ns &gt; 그냥 480 ns다. 이 QEMU 숫자에서는 <strong>seqlock이 마스크보다 비싸다</strong>. seq를 두 번 읽고 비교하는 명령이 <code>cpsid</code>/<code>msr</code> 두 개보다 많기 때문이다(icount는 모든 명령을 같은 32 ns로 센다). 즉 <strong>단일 코어에서 seqlock을 고르는 이유는 읽는 쪽의 속도가 아니라, 쓰는 ISR의 지연에 아무것도 더하지 않는다는 것</strong>이다. 쓰는 ISR이 BASEPRI 위의 zero-latency ISR이라 마스크로는 막을 수조차 없을 때는 seqlock(또는 더블 버퍼)만 답이다.</li><li>ISR 수가 줄마다 다른 것은 각 실행의 길이가 달라서다(같은 4.04 µs 주기).</li></ul>
+<h3 id="4-3-방향이-반대면-태스크가-쓰고-isr이-읽을-때는-seqlock을-쓰지-않는다">4.3 방향이 반대면 — 태스크가 쓰고 ISR이 읽을 때는 seqlock을 쓰지 않는다<a class="anchor" href="#4-3-방향이-반대면-태스크가-쓰고-isr이-읽을-때는-seqlock을-쓰지-않는다" aria-label="link">#</a></h3>
+<p>드론 FC에서 자세 제어 태스크가 PID 이득이나 모터 믹서 테이블을 바꾸고, 20 kHz 모터 ISR이 그것을 읽는 경우가 반대 방향이다. 여기서 seqlock을 쓰면 <strong>ISR이 태스크의 쓰기 도중(seq 홀수)에 들어온다</strong> — 그런데 ISR은 태스크가 쓰기를 끝낼 때까지 기다릴 수 없다(ISR이 끝나야 태스크가 돈다). 재시도 루프를 돌면 영원히 돈다. 이때는 <strong>더블 버퍼(double buffer)</strong>로 바꾼다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* task writes, ISR reads: two copies + an index the ISR samples once (pattern) */
+#include &lt;stdint.h&gt;
+struct gains { float kp, ki, kd; };
+static struct gains g_buf[2];
+static volatile uint32_t g_live;                 /* index the ISR uses: 0 or 1 */
+
+void task_update_gains(const struct gains *n);
+void MOTOR_IRQHandler(void);
+void task_update_gains(const struct gains *n)    /* only one writer task */
+{
+    uint32_t spare = g_live ^ 1u;
+    g_buf[spare] = *n;                           /* fill the copy the ISR is NOT using */
+    __asm volatile("" ::: "memory");             /* (dual-core: dmb) data before index */
+    g_live = spare;                              /* one aligned 32-bit store = atomic switch */
+}
+void MOTOR_IRQHandler(void)
+{
+    const struct gains *g = &amp;g_buf[g_live];      /* read the index once */
+    /* ... use g-&gt;kp, g-&gt;ki, g-&gt;kd ... */
+    (void)g;
+}</code></pre></figure>
+<p>(패턴 코드 — <code>arm-none-eabi-gcc -mcpu=cortex-m3 -O2 -Wall -Wextra -c</code>로 빌드만 확인했다, 경고 0개.) 조건이 하나 있다. 태스크가 <strong>연속으로 두 번</strong> 바꾸면 두 번째 쓰기가 ISR이 지금 읽고 있는 복사본을 덮을 수 있다(ISR이 첫 번째 교체 직후 들어와 그 복사본을 쓰는 중). 단일 코어에서는 ISR이 끝나야 태스크가 다시 돌기 때문에 이 일이 생기지 않는다. 코어가 둘이면 "ISR이 다 읽었다"는 확인(세 번째 버퍼, 또는 ISR이 올리는 ack 카운터)이 필요하다 — 이것이 Linux RCU가 grace period로 푸는 문제다(EL F4 §11).</p>
+<h3 id="4-4-64비트-타임스탬프는-무엇으로">4.4 64비트 타임스탬프는 무엇으로?<a class="anchor" href="#4-4-64비트-타임스탬프는-무엇으로" aria-label="link">#</a></h3>
+<blockquote><p>🔄 <strong>2026-11-01 보충 (E5)</strong>: hi-lo-hi 재시도는 크리티컬 섹션 안이나 더 높은 우선순위 ISR 안에서 실패한다(E5 실측). 어느 문맥에서든 맞는 읽기는 E5 참고.</p></blockquote>
+<p>C7 §1.3이 세 가지 해법(IRQ 마스크 + pending 보정, hi-lo-hi 재시도)을 이미 쟀다. 정리만 한다.</p>
+<div class="tw"><table><thead><tr><th>상황</th><th>추천</th><th>이유</th></tr></thead><tbody><tr><td>하드웨어 카운터 + ISR이 올리는 상위 워드</td><td>hi-lo-hi 재시도 (C7 예제 2 ④)</td><td>하드웨어가 계속 변하므로 seq가 따로 필요 없다</td></tr><tr><td>ISR이 64비트 값을 통째로 갱신 (예: 마지막 샘플 시각)</td><td>seqlock (예제 5와 같은 구조)</td><td>쓰는 쪽이 기다리지 않는다</td></tr><tr><td>태스크가 갱신, ISR이 읽음</td><td>더블 버퍼 (§4.3)</td><td>ISR은 재시도할 수 없다</td></tr><tr><td>짧고 드문 읽기, zero-latency ISR 없음</td><td>IRQ 마스크 (C7 §2)</td><td>가장 단순하다</td></tr><tr><td><code>_Atomic uint64_t</code></td><td>쓰지 않는다</td><td>M3에서도 <code>__atomic_load_8</code> 호출 → 링크 에러 또는 락</td></tr></tbody></table></div>
+<hr>
+<h2 id="5-spsc-링버퍼-설계-소유권-둘-순서-둘">5. SPSC 링버퍼 — 설계: 소유권 둘, 순서 둘<a class="anchor" href="#5-spsc-링버퍼-설계-소유권-둘-순서-둘" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM J3(락 없는 링버퍼 — SPSC 인덱스 설계, 2의 거듭제곱 크기, 가득 참/빔 판정, 배리어)와 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="5-1-직관-컨베이어-벨트와-두-사람">5.1 직관 — 컨베이어 벨트와 두 사람<a class="anchor" href="#5-1-직관-컨베이어-벨트와-두-사람" aria-label="link">#</a></h3>
+<p>UART RX ISR(생산자)은 벨트 끝에 상자를 올리고 "올린 개수" 카운터 <code>head</code>를 올린다. 태스크(소비자)는 앞에서 상자를 내리고 "내린 개수" 카운터 <code>tail</code>을 올린다. <strong>각 카운터는 한 사람만 쓴다.</strong> 다른 사람의 카운터는 읽기만 한다. 그래서 둘이 동시에 일해도 같은 변수를 동시에 고치는 일(RMW 레이스)이 원천적으로 없다 — <strong>LDREX도, 인터럽트 마스크도 필요 없는 이유</strong>가 이것이다. SPSC(single-producer single-consumer)는 "쓰는 사람 하나, 읽는 사람 하나"라는 <strong>사용 규칙</strong>이지 자료 구조의 마법이 아니다. 생산자가 둘이 되는 순간(UART ISR과 태스크가 같은 TX 링에 넣는다) <code>head</code>를 두 명이 고치게 되어 깨진다.</p>
+<figure class="chart"><svg viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="20" font-size="13" font-weight="bold">SPSC 링 (N = 16) — 인덱스는 계속 증가하고, 슬롯은 &amp; (N − 1)로 고른다</text>
+<rect x="52" y="82" width="36" height="36" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="70" y="134" font-size="12" text-anchor="middle">0</text>
+<rect x="88" y="82" width="36" height="36" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="106" y="134" font-size="12" text-anchor="middle">1</text>
+<rect x="124" y="82" width="36" height="36" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="142" y="134" font-size="12" text-anchor="middle">2</text>
+<rect x="160" y="82" width="36" height="36" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/>
+<text x="178" y="134" font-size="12" text-anchor="middle">3</text>
+<rect x="196" y="82" width="36" height="36" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/>
+<text x="214" y="134" font-size="12" text-anchor="middle">4</text>
+<rect x="232" y="82" width="36" height="36" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/>
+<text x="250" y="134" font-size="12" text-anchor="middle">5</text>
+<rect x="268" y="82" width="36" height="36" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/>
+<text x="286" y="134" font-size="12" text-anchor="middle">6</text>
+<rect x="304" y="82" width="36" height="36" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/>
+<text x="322" y="134" font-size="12" text-anchor="middle">7</text>
+<rect x="340" y="82" width="36" height="36" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/>
+<text x="358" y="134" font-size="12" text-anchor="middle">8</text>
+<rect x="376" y="82" width="36" height="36" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="394" y="134" font-size="12" text-anchor="middle">9</text>
+<rect x="412" y="82" width="36" height="36" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="430" y="134" font-size="12" text-anchor="middle">10</text>
+<rect x="448" y="82" width="36" height="36" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="466" y="134" font-size="12" text-anchor="middle">11</text>
+<rect x="484" y="82" width="36" height="36" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="502" y="134" font-size="12" text-anchor="middle">12</text>
+<rect x="520" y="82" width="36" height="36" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="538" y="134" font-size="12" text-anchor="middle">13</text>
+<rect x="556" y="82" width="36" height="36" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="574" y="134" font-size="12" text-anchor="middle">14</text>
+<rect x="592" y="82" width="36" height="36" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="610" y="134" font-size="12" text-anchor="middle">15</text>
+<line x1="178" y1="172" x2="178" y2="140" stroke="currentColor" marker-end="url(#ah5)"/>
+<text x="126" y="188" font-size="12" text-anchor="middle">tail = 19 (19 &amp; 15 = 3)</text>
+<text x="126" y="204" font-size="12" text-anchor="middle">소비자만 쓴다</text>
+<line x1="394" y1="52" x2="394" y2="79" stroke="currentColor" marker-end="url(#ah5)"/>
+<text x="394" y="44" font-size="12" text-anchor="middle">head = 25 (25 &amp; 15 = 9) — 생산자만 쓴다</text>
+<text x="268" y="74" font-size="12" text-anchor="middle">데이터 6개</text>
+<rect x="40" y="214" width="620" height="58" rx="5" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="350" y="239.2" font-size="12" text-anchor="middle">개수 = head − tail = 6 (unsigned 뺄셈이라 2^32에서 넘어가도 맞다)</text>
+<text x="350" y="255.2" font-size="12" text-anchor="middle">빔: head == tail · 가득: head − tail == N · N개 슬롯을 전부 쓴다</text>
+</svg></figure>
+<p>그림 5 — 크기 16짜리 링. <code>head</code>와 <code>tail</code>은 슬롯 번호가 아니라 <strong>지금까지의 누적 개수</strong>다. 슬롯은 <code>인덱스 &amp; 15</code>로 고른다. 개수는 뺄셈 한 번이다.</p>
+<h3 id="5-2-설계-결정-네-가지">5.2 설계 결정 네 가지<a class="anchor" href="#5-2-설계-결정-네-가지" aria-label="link">#</a></h3>
+<p><strong>① 크기는 2의 거듭제곱.</strong> <code>idx % N</code> 대신 <code>idx &amp; (N − 1)</code>을 쓸 수 있다. Cortex-M3에서 <code>%</code>는 <code>udiv</code> + <code>mls</code>(2~12사이클대 나눗셈)지만 <code>&amp;</code>는 1사이클이다. M0에는 나눗셈 명령 자체가 없어서 <code>%</code>가 라이브러리 호출(<code>__aeabi_uidivmod</code>)이 된다. 더 중요한 이유는 ②다.</p>
+<p><strong>② 인덱스는 free-running(감싸지 않고 계속 증가).</strong> <code>head</code>, <code>tail</code>을 0..N−1로 감싸지 않고 <code>uint32_t</code>로 그냥 올린다. 그러면</p>
+<ul><li>개수 = <code>head − tail</code> (unsigned 뺄셈은 2^32에서 넘어가도 맞다 — 2^32가 N의 배수이기 때문이고, 이것이 N이 2의 거듭제곱이어야 하는 진짜 이유다)</li><li>빔 = <code>head == tail</code>, 가득 = <code>head − tail == N</code></li><li><strong>N개 슬롯을 전부 쓴다.</strong></li></ul>
+<p>감싸는 인덱스(0..N−1)를 쓰면 "가득"과 "빔"이 둘 다 <code>head == tail</code>이 되어 구분할 수 없다. 그래서 고전 구현은 <strong>한 칸을 비워 두고</strong>(가득 = <code>(head + 1) % N == tail</code>) N−1개만 쓴다. 둘 다 맞는 설계다. 화이트보드에서는 둘 중 하나를 골라 <strong>왜 그렇게 판정하는지</strong>를 말하면 된다.</p>
+<p><strong>③ 누가 무엇을 쓰나 — 소유권 표.</strong></p>
+<div class="tw"><table><thead><tr><th>필드</th><th>생산자 (RX ISR)</th><th>소비자 (태스크)</th></tr></thead><tbody><tr><td><code>head</code></td><td>읽고 <strong>쓴다</strong> (자기 것 — relaxed로 읽어도 된다)</td><td>읽기만 (acquire)</td></tr><tr><td><code>tail</code></td><td>읽기만 (acquire)</td><td>읽고 <strong>쓴다</strong> (자기 것)</td></tr><tr><td><code>buf[head &amp; M]</code></td><td>쓴다 (head를 올리기 <strong>전</strong>)</td><td>손대지 않는다</td></tr><tr><td><code>buf[tail &amp; M]</code></td><td>손대지 않는다</td><td>읽는다 (tail을 올리기 <strong>전</strong>)</td></tr></tbody></table></div>
+<p><strong>④ 순서 — 데이터 다음에 인덱스.</strong> 생산자는 "슬롯에 쓰기 → head 올리기", 소비자는 "head 읽기 → 슬롯 읽기 → tail 올리기". 이 순서가 바뀌면 소비자가 아직 안 쓴 슬롯을 읽거나(head가 먼저 보임), 생산자가 아직 안 읽은 슬롯을 덮어쓴다(tail이 먼저 보임). 이 순서를 지키는 데 무엇이 필요한지가 §5.4다.</p>
+<h3 id="5-3-코드-spsc-h">5.3 코드 — <code>spsc.h</code><a class="anchor" href="#5-3-코드-spsc-h" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 위 네 결정을 그대로 옮긴 50줄짜리 헤더. 순서를 지키는 방법을 <code>ORDER</code> 매크로로 바꿔 끼울 수 있게 했다 — 0은 C11 acquire/release(정답), 1은 <code>volatile</code>만(오답), 2는 <code>volatile</code> + 컴파일러 배리어(1코어에서만 정답), 3은 <code>volatile</code> + DMB(정답). 같은 헤더를 VM 호스트(arm64)와 QEMU M3에서 쓴다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* spsc.h — lock-free single-producer/single-consumer ring (power-of-two, free-running indices) */
+#ifndef SPSC_H
+#define SPSC_H
+#include &lt;stdbool.h&gt;
+#include &lt;stdint.h&gt;
+#ifndef SPSC_N
+#define SPSC_N 256u                          /* capacity: must be a power of two */
+#endif
+#ifndef SPSC_T
+#define SPSC_T uint8_t
+#endif
+#ifndef SPSC_ALIGN
+#define SPSC_ALIGN 4                         /* host stress test uses 64 (own cache line) */
+#endif
+_Static_assert((SPSC_N &amp; (SPSC_N - 1u)) == 0, "SPSC_N must be a power of two");
+#ifndef ORDER
+#define ORDER 0
+#endif
+/* ORDER 0: C11 acquire/release   1: volatile only   2: volatile + compiler barrier   3: volatile + DMB */
+#if ORDER == 0
+#define LD_OTHER(p)     __atomic_load_n((p), __ATOMIC_ACQUIRE)
+#define ST_MINE(p, v)   __atomic_store_n((p), (v), __ATOMIC_RELEASE)
+#else
+#if ORDER == 1
+#define BAR()           do { } while (0)
+#elif ORDER == 2
+#define BAR()           __asm volatile("" ::: "memory")
+#else
+#define BAR()           __atomic_thread_fence(__ATOMIC_SEQ_CST)     /* dmb ish */
+#endif
+#define LD_OTHER(p)     ({ uint32_t v_ = *(volatile uint32_t *)(p); BAR(); v_; })
+#define ST_MINE(p, v)   do { BAR(); *(volatile uint32_t *)(p) = (v); } while (0)
+#endif
+typedef struct {
+    _Alignas(SPSC_ALIGN) uint32_t head;      /* next slot to write — ONLY the producer stores it */
+    _Alignas(SPSC_ALIGN) uint32_t tail;      /* next slot to read  — ONLY the consumer stores it */
+    _Alignas(SPSC_ALIGN) SPSC_T buf[SPSC_N];
+} spsc_t;
+
+static inline bool spsc_put(spsc_t *r, SPSC_T v)        /* producer side (e.g. UART RX ISR) */
+{
+    uint32_t h = __atomic_load_n(&amp;r-&gt;head, __ATOMIC_RELAXED);   /* my own index */
+    uint32_t t = LD_OTHER(&amp;r-&gt;tail);                             /* consumer's index */
+    if (h - t == SPSC_N) return false;                           /* full */
+    r-&gt;buf[h &amp; (SPSC_N - 1u)] = v;                               /* 1. write the data ... */
+    ST_MINE(&amp;r-&gt;head, h + 1u);                                   /* 2. ... then publish it */
+    return true;
+}
+static inline bool spsc_get(spsc_t *r, SPSC_T *v)       /* consumer side (e.g. task) */
+{
+    uint32_t t = __atomic_load_n(&amp;r-&gt;tail, __ATOMIC_RELAXED);
+    uint32_t h = LD_OTHER(&amp;r-&gt;head);
+    if (h == t) return false;                                    /* empty */
+    *v = r-&gt;buf[t &amp; (SPSC_N - 1u)];                              /* 1. read the data ... */
+    ST_MINE(&amp;r-&gt;tail, t + 1u);                                   /* 2. ... then free the slot */
+    return true;
+}
+static inline uint32_t spsc_count(const spsc_t *r)
+{
+    return __atomic_load_n(&amp;r-&gt;head, __ATOMIC_ACQUIRE) - __atomic_load_n(&amp;r-&gt;tail, __ATOMIC_ACQUIRE);
+}
+#endif</code></pre></figure>
+<p>읽을 때 볼 곳:</p>
+<ul><li><code>spsc_put()</code>의 <code>h - t == SPSC_N</code>: 가득 판정. <code>spsc_get()</code>의 <code>h == t</code>: 빔 판정. 둘 다 free-running 인덱스라서 이렇게 단순하다.</li><li>자기 인덱스는 <code>__ATOMIC_RELAXED</code>로 읽는다. 자기만 쓰는 값이니 순서가 필요 없다(C11 규칙상 "atomic으로 쓰는 변수를 일반 접근으로 읽으면" 데이터 레이스가 되므로 relaxed atomic load로 적었다 — 생성 코드는 그냥 <code>ldr</code>이다).</li><li>상대 인덱스 읽기는 acquire, 자기 인덱스 쓰기는 release — 그림 6의 짝이다.</li><li><code>_Static_assert</code>로 2의 거듭제곱을 컴파일 시점에 강제한다. 크기를 100으로 바꾸면 빌드가 실패한다.</li><li><code>SPSC_ALIGN</code>: 호스트 실험에서는 <code>head</code> · <code>tail</code> · <code>buf</code>를 각각 64바이트 캐시 라인에 둔다(두 코어가 한 라인을 핑퐁하지 않게 — false sharing). MCU에서는 4로 둔다(RAM 낭비 방지). Cortex-M7 + DMA처럼 캐시 유지 단위가 32바이트인 칩에서 링을 DMA와 공유한다면 32로 맞춘다(B8).</li></ul>
+<h3 id="5-4-어디에-무엇이-필요한가-volatile이-모자라는-곳-컴파일러-배리어로-충분한-곳-dmb가-필요한-곳">5.4 어디에 무엇이 필요한가 — <code>volatile</code>이 모자라는 곳, 컴파일러 배리어로 충분한 곳, DMB가 필요한 곳<a class="anchor" href="#5-4-어디에-무엇이-필요한가-volatile이-모자라는-곳-컴파일러-배리어로-충분한-곳-dmb가-필요한-곳" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 290" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="20" font-size="13" font-weight="bold">순서의 짝 — "데이터 다음에 head"를 쓰고, "head 다음에 데이터"를 읽는다</text>
+<text x="160" y="44" font-size="12" text-anchor="middle">생산자 (RX ISR)</text>
+<text x="520" y="44" font-size="12" text-anchor="middle">소비자 (태스크)</text>
+<rect x="20" y="54" width="280" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="160" y="78.2" font-size="12" text-anchor="middle">① buf[head &amp; M] = 데이터</text>
+<rect x="20" y="114" width="280" height="46" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="160" y="133.2" font-size="12" text-anchor="middle">release 배리어</text>
+<text x="160" y="149.2" font-size="12" text-anchor="middle">M3: dmb ish · 1코어: 컴파일러 배리어</text>
+<rect x="20" y="180" width="280" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="160" y="204.2" font-size="12" text-anchor="middle">② head = head + 1 (게시)</text>
+<rect x="380" y="54" width="280" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="520" y="78.2" font-size="12" text-anchor="middle">① h = head (읽기)</text>
+<rect x="380" y="114" width="280" height="46" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="520" y="133.2" font-size="12" text-anchor="middle">acquire 배리어</text>
+<text x="520" y="149.2" font-size="12" text-anchor="middle">M3: dmb ish · 1코어: 컴파일러 배리어</text>
+<rect x="380" y="180" width="280" height="40" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="520" y="204.2" font-size="12" text-anchor="middle">② 데이터 = buf[tail &amp; M]</text>
+<line x1="160" y1="94" x2="160" y2="112" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="160" y1="160" x2="160" y2="178" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="520" y1="94" x2="520" y2="112" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="520" y1="160" x2="520" y2="178" stroke="currentColor" marker-end="url(#ah6)"/>
+<line x1="300" y1="200" x2="378" y2="80" stroke="currentColor" marker-end="url(#ah6)"/>
+<text x="340" y="246" font-size="12" text-anchor="middle">head의 새 값이 보이면 그 앞에 쓴 데이터도 보인다 — 한쪽만 있으면 소용없다</text>
+<text x="340" y="272" font-size="12" text-anchor="middle">tail은 방향만 반대인 같은 짝: 소비자 (읽기 → release → tail++) / 생산자 (acquire tail → 쓰기)</text>
+</svg></figure>
+<p>그림 6 — 생산자의 "데이터 → release → head"와 소비자의 "head → acquire → 데이터"가 짝을 이뤄야 한다. 1코어에서는 두 배리어 자리가 컴파일러 배리어면 되고, 코어가 둘이면 DMB(또는 <code>lda</code>/<code>stl</code>)가 필요하다.</p>
+<p><code>ORDER</code>별로 무엇이 보장되나:</p>
+<div class="tw"><table><thead><tr><th>ORDER</th><th>인덱스 접근</th><th>배리어</th><th>1코어 ISR ↔ 태스크 (M3/M4)</th><th>듀얼코어 / arm64 SMP</th></tr></thead><tbody><tr><td>1</td><td><code>volatile</code></td><td>없음</td><td><strong>틀림</strong> — 컴파일러가 <code>buf</code> 쓰기를 head 쓰기 뒤로 옮길 수 있다</td><td><strong>틀림</strong></td></tr><tr><td>2</td><td><code>volatile</code></td><td>컴파일러 배리어</td><td><strong>맞음</strong></td><td><strong>틀림</strong> — CPU가 store/load를 재배치</td></tr><tr><td>3</td><td><code>volatile</code></td><td>DMB (<code>__atomic_thread_fence</code>)</td><td>맞음 (DMB는 남는 비용)</td><td>맞음</td></tr><tr><td>0</td><td>C11 acquire/release</td><td>컴파일러가 고름 (M3: DMB, M33: <code>lda</code>/<code>stl</code>)</td><td>맞음</td><td>맞음</td></tr></tbody></table></div>
+<p>왜 <code>volatile</code>만으로는 모자라나 — <code>volatile</code>은 "<strong>volatile 접근끼리</strong>의 순서와 횟수"만 지킨다. <code>buf</code>는 volatile이 아니므로(<code>buf</code> 전체를 volatile로 만들면 memcpy · 루프 최적화가 다 꺼진다) 컴파일러는 <code>buf[...] = v</code>를 <code>head</code> 쓰기 뒤로 옮겨도 된다. 그런 일이 실제로 일어나는 것을 §7.4 예제 11에서 QEMU로 잡는다. <strong>컴파일러 배리어</strong>(<code>asm volatile("" ::: "memory")</code>)는 "모든 메모리 접근이 이 줄을 넘지 못한다"고 말하므로 그 이동을 막는다. 명령은 0개다.</p>
+<p>왜 1코어에서는 DMB가 필요 없나 — ISR과 태스크는 <strong>같은 코어</strong>에서 돈다. 코어는 자기 명령 순서대로 메모리를 보고(아니면 단일 스레드 프로그램도 깨진다), ISR은 그 코어가 "앞의 명령을 다 끝낸 시점"에 들어온다. Cortex-M3/M4는 쓰기 버퍼가 있어도 <strong>같은 코어의 뒤따르는 읽기는 버퍼 안의 값을 본다.</strong> 그래서 순서는 "명령 순서 = 컴파일러가 낸 순서"로 정해지고, 컴파일러만 잡으면 된다. 코어가 둘이거나 상대가 DMA · 다른 버스 마스터면 이야기가 달라진다(§7).</p>
+<h3 id="5-5-예제-6-order-0과-2가-m3와-arm64에서-무엇이-되나">5.5 예제 6 — <code>ORDER</code> 0과 2가 M3와 arm64에서 무엇이 되나<a class="anchor" href="#5-5-예제-6-order-0과-2가-m3와-arm64에서-무엇이-되나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 <code>spsc_put</code>/<code>spsc_get</code>을 밖으로 꺼낸 함수로 만들어 생성 코드를 비교한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* spsc_gen.c — out-of-line wrappers so objdump shows what each ORDER becomes */
+#include "spsc.h"
+bool put(spsc_t *r, uint8_t v) { return spsc_put(r, v); }
+bool get(spsc_t *r, uint8_t *v) { return spsc_get(r, v); }</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8/gen; for m in 0 2; do echo "===== M3 ORDER=$m"; arm-none-eabi-gcc -mthumb -mcpu=cortex-m3 -O2 -Wall -Wextra -DORDER=$m -c $S/spsc_gen.c -o $O/sg$m.o &amp;&amp; arm-none-eabi-objdump -d --no-show-raw-insn $O/sg$m.o | sed -n "/&lt;put&gt;:/,/^$/p"; done; for m in 0 2; do echo "===== arm64 ORDER=$m"; gcc -O2 -Wall -Wextra -DORDER=$m -c $S/spsc_gen.c -o $O/hg$m.o &amp;&amp; objdump -d --no-show-raw-insn $O/hg$m.o | sed -n "/&lt;get&gt;:/,/^$/p"; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>===== M3 ORDER=0
+00000000 &lt;put&gt;:
+   0:	ldr	r3, [r0, #0]
+   2:	ldr	r2, [r0, #4]
+   4:	dmb	ish
+   8:	subs	r2, r3, r2
+   a:	cmp.w	r2, #256	@ 0x100
+   e:	beq.n	22 &lt;put+0x22&gt;
+  10:	uxtb	r2, r3
+  12:	add	r2, r0
+  14:	strb	r1, [r2, #8]
+  16:	adds	r3, #1
+  18:	dmb	ish
+  1c:	str	r3, [r0, #0]
+  1e:	movs	r0, #1
+  20:	bx	lr
+  22:	movs	r0, #0
+  24:	bx	lr
+  26:	nop
+
+===== M3 ORDER=2
+00000000 &lt;put&gt;:
+   0:	mov	r3, r0
+   2:	ldr	r2, [r0, #0]
+   4:	ldr	r0, [r0, #4]
+   6:	subs	r0, r2, r0
+   8:	cmp.w	r0, #256	@ 0x100
+   c:	beq.n	1c &lt;put+0x1c&gt;
+   e:	uxtb	r0, r2
+  10:	add	r0, r3
+  12:	strb	r1, [r0, #8]
+  14:	adds	r2, #1
+  16:	movs	r0, #1
+  18:	str	r2, [r3, #0]
+  1a:	bx	lr
+  1c:	movs	r0, #0
+  1e:	bx	lr
+
+===== arm64 ORDER=0
+0000000000000040 &lt;get&gt;:
+  40:	add	x3, x0, #0x4
+  44:	ldr	w2, [x3]
+  48:	ldar	w4, [x0]
+  4c:	cmp	w2, w4
+  50:	b.eq	70 &lt;get+0x30&gt;  // b.none
+  54:	add	x0, x0, w2, uxtb
+  58:	add	w2, w2, #0x1
+  5c:	ldrb	w0, [x0, #8]
+  60:	strb	w0, [x1]
+  64:	stlr	w2, [x3]
+  68:	mov	w0, #0x1                   	// #1
+  6c:	ret
+  70:	mov	w0, #0x0                   	// #0
+  74:	ret
+===== arm64 ORDER=2
+0000000000000040 &lt;get&gt;:
+  40:	add	x2, x0, #0x4
+  44:	ldr	w2, [x2]
+  48:	ldr	w3, [x0]
+  4c:	cmp	w2, w3
+  50:	b.eq	70 &lt;get+0x30&gt;  // b.none
+  54:	add	x3, x0, w2, uxtb
+  58:	ldrb	w3, [x3, #8]
+  5c:	strb	w3, [x1]
+  60:	add	w2, w2, #0x1
+  64:	str	w2, [x0, #4]
+  68:	mov	w0, #0x1                   	// #1
+  6c:	ret
+  70:	mov	w0, #0x0                   	// #0
+  74:	ret</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>M3 ORDER=0</strong>: <code>ldr tail</code> 뒤 <code>dmb</code>(acquire), <code>strb 데이터</code> 뒤 · <code>str head</code> 앞 <code>dmb</code>(release). 크기 256 · <code>uint8_t</code>라서 <code>&amp; 255</code>가 <code>uxtb</code> 한 명령이 됐다 — 2의 거듭제곱의 덤이다.</li><li><strong>M3 ORDER=2</strong>: <code>dmb</code>가 없고, <code>strb</code>(데이터) → <code>str</code>(head) 순서가 소스 그대로다. 단일 코어 M3에서 이 코드는 맞다. 명령 2개(그리고 DMB의 실제 사이클)를 아낀다.</li><li><strong>arm64 ORDER=0</strong>: <code>ldar</code>(acquire load)로 head를 읽고 <code>stlr</code>(release store)로 tail을 쓴다.</li><li><strong>arm64 ORDER=2</strong>: 평범한 <code>ldr</code> → <code>ldrb</code> → <code>str</code>. 컴파일러는 순서를 지켰지만, <strong>CPU가</strong> head 읽기와 슬롯 읽기를 바꿀 수 있다. 그 결과가 다음 절의 13만 개다.</li></ul>
+<hr>
+<h2 id="6-spsc-링버퍼-검증하고-실제-isr로-돌리고-잰다">6. SPSC 링버퍼 — 검증하고, 실제 ISR로 돌리고, 잰다<a class="anchor" href="#6-spsc-링버퍼-검증하고-실제-isr로-돌리고-잰다" aria-label="link">#</a></h2>
+<h3 id="6-1-예제-7-단위-테스트-두-스레드-스트레스-vm-호스트-arm64">6.1 예제 7 — 단위 테스트 + 두 스레드 스트레스 (VM 호스트 arm64)<a class="anchor" href="#6-1-예제-7-단위-테스트-두-스레드-스트레스-vm-호스트-arm64" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: ① 빔 · 가득(N개 전부 사용) · FIFO 순서 · <strong>2^32에서 인덱스가 넘어갈 때</strong>를 단위 테스트로, ② 생산자 · 소비자 스레드를 서로 다른 코어(vCPU 1, 2)에 묶어 2천만 개를 흘려 <code>ORDER</code>별로 틀린 값을 센다. 링을 16칸으로 작게 해서 소비자가 방금 쓴 슬롯을 자주 읽게 했다. arm64는 실제로 load/load · store/store 재배치를 하는 코어다(EL F5 §3.5에서 MP litmus로 확인).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex5 — SPSC ring: unit tests + 2-thread stress on the arm64 VM host (real reordering possible) */
+#define _GNU_SOURCE
+#include &lt;assert.h&gt;
+#include &lt;pthread.h&gt;
+#include &lt;sched.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#define SPSC_N 16u
+#define SPSC_T uint32_t
+#define SPSC_ALIGN 64
+#include "spsc.h"
+static spsc_t q;
+static uint32_t n_items;
+
+static void pin(int cpu) { cpu_set_t s; CPU_ZERO(&amp;s); CPU_SET(cpu, &amp;s); pthread_setaffinity_np(pthread_self(), sizeof s, &amp;s); }
+static void *producer(void *a)
+{
+    (void)a; pin(1);
+    for (uint32_t i = 0; i &lt; n_items; ) if (spsc_put(&amp;q, i)) i++;
+    return NULL;
+}
+static void unit_tests(void)
+{
+    uint32_t v;
+    for (uint32_t start = 0; start &lt; 2; start++) {
+        q.head = q.tail = start ? 0xFFFFFFF8u : 0;   /* second pass: indices wrap past 2^32 */
+        assert(!spsc_get(&amp;q, &amp;v));                   /* empty */
+        for (uint32_t i = 0; i &lt; SPSC_N; i++) assert(spsc_put(&amp;q, i));
+        assert(!spsc_put(&amp;q, 99) &amp;&amp; spsc_count(&amp;q) == SPSC_N);   /* full: all N slots usable */
+        for (uint32_t i = 0; i &lt; SPSC_N; i++) assert(spsc_get(&amp;q, &amp;v) &amp;&amp; v == i);
+        assert(!spsc_get(&amp;q, &amp;v) &amp;&amp; spsc_count(&amp;q) == 0);
+    }
+    q.head = q.tail = 0;
+    printf("unit tests passed (empty, full = %u items, FIFO order, index wrap at 2^32)\n", SPSC_N);
+}
+int main(int argc, char **argv)
+{
+    n_items = argc &gt; 1 ? (uint32_t)strtoul(argv[1], NULL, 0) : 20000000u;
+    unit_tests();
+    pthread_t p; uint32_t expect = 0, bad = 0, v;
+    pin(2);
+    pthread_create(&amp;p, NULL, producer, NULL);
+    while (expect &lt; n_items) {
+        if (!spsc_get(&amp;q, &amp;v)) continue;
+        if (v != expect) { bad++; expect = v; }      /* resync on the value we got */
+        expect++;
+    }
+    pthread_join(p, NULL);
+    printf("ORDER=%d items=%u wrong_values=%u\n", ORDER, n_items, bad);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8/host; mkdir -p $O; for m in 0 1 2 3; do gcc -O2 -std=gnu11 -Wall -Wextra -pthread -DORDER=$m $S/ex5_host.c -o $O/ex5_$m || exit 1; done; $O/ex5_0 1 | head -1; for m in 0 1 2 3; do for t in 1 2 3; do /usr/bin/time -f "%e s" $O/ex5_$m 20000000 2&gt;&amp;1 | tail -2 | tr "\n" " "; echo; done; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>unit tests passed (empty, full = 16 items, FIFO order, index wrap at 2^32)
+ORDER=0 items=20000000 wrong_values=0 5.19 s 
+ORDER=0 items=20000000 wrong_values=0 3.31 s 
+ORDER=0 items=20000000 wrong_values=0 3.21 s 
+ORDER=1 items=20000000 wrong_values=151272 0.44 s 
+ORDER=1 items=20000000 wrong_values=201771 0.49 s 
+ORDER=1 items=20000000 wrong_values=181126 0.37 s 
+ORDER=2 items=20000000 wrong_values=152258 0.53 s 
+ORDER=2 items=20000000 wrong_values=135678 0.48 s 
+ORDER=2 items=20000000 wrong_values=110270 0.44 s 
+ORDER=3 items=20000000 wrong_values=0 2.47 s 
+ORDER=3 items=20000000 wrong_values=0 1.85 s 
+ORDER=3 items=20000000 wrong_values=0 2.10 s </code></pre></figure>
+<p>(단위 테스트 줄은 한 번만 보였다 — 모든 실행이 같은 줄을 먼저 찍는다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li>단위 테스트가 통과했다. 두 번째 패스는 인덱스를 <code>0xFFFFFFF8</code>에서 시작해 16개를 넣고 빼는 동안 2^32를 넘어간다 — 개수 계산(<code>head − tail</code>)이 넘어감에 상관없이 맞다.</li><li><strong>ORDER 1(<code>volatile</code>만)과 2(+ 컴파일러 배리어)는 2천만 개 중 11만~20만 개(약 0.6~1%)를 틀렸다.</strong> 소비자가 head가 올라간 것은 봤는데 슬롯에서는 <strong>한 바퀴 전의 옛 값</strong>을 읽은 것이다. 컴파일러는 순서를 지켰는데(ORDER 2) CPU가 바꿨다. 단일 코어 Cortex-M에서 정답이던 코드가 <strong>코어가 둘이 되는 순간 틀린다</strong>는 것이 이 숫자다.</li><li><strong>ORDER 0(acquire/release)과 3(DMB)은 0개.</strong></li><li>시간: 틀린 쪽이 빠른 것은 당연하다(배리어 비용이 없다). 이 VM에서는 <code>ldar</code>/<code>stlr</code>(ORDER 0, 3.2~5.2 s)이 <code>dmb ish</code>(ORDER 3, 1.9~2.5 s)보다 느렸는데, 다른 작성자의 빌드가 같이 돌던 시간이라(load average 13.8) 이 차이를 일반화하지 않는다. 값이 0인지 아닌지가 이 실험의 결론이다.</li></ul>
+<h3 id="6-2-예제-8-freertos에서-uart-rx-isr-태스크-태스크-uart-tx-isr">6.2 예제 8 — FreeRTOS에서 "UART RX ISR → 태스크", "태스크 → UART TX ISR"<a class="anchor" href="#6-2-예제-8-freertos에서-uart-rx-isr-태스크-태스크-uart-tx-isr" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 <code>spsc.h</code>(ORDER 0, 크기 256, <code>uint8_t</code>)를 실제 ISR 두 개와 태스크 하나로 돌린다. TIMER0 ISR이 10 µs마다 바이트 하나가 "도착"한 것처럼 RX 링에 넣고(약 1 Mbaud), DUALTIMER ISR이 13.3 µs마다 "송신 레지스터가 비었다"며 TX 링에서 하나를 꺼낸다. 태스크는 RX를 비우며 순서를 검사하고 TX를 채운다. 깨우기는 <strong>링이 비어 있다가 처음 찼을 때만</strong> task notification으로 한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex6 — FreeRTOS: "UART RX" ISR -&gt; task and task -&gt; "UART TX" ISR through lock-free SPSC rings */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "d8.h"
+#include "spsc.h"                                  /* SPSC_N 256, uint8_t, ORDER from -D */
+#define DT_LOAD   REG32(0x40002000u)
+#define DT_CTRL   REG32(0x40002008u)
+#define DT_INTCLR REG32(0x4000200Cu)
+static spsc_t rx, tx;
+static TaskHandle_t s_task;
+static volatile uint32_t rx_n, rx_drop, tx_n, tx_bad, tx_idle;
+
+void TIMER0_IRQHandler(void)                       /* RX: one byte "arrives" per IRQ */
+{
+    static uint8_t next;
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    BaseType_t woke = pdFALSE;
+    bool was_empty = (spsc_count(&amp;rx) == 0);
+    if (spsc_put(&amp;rx, next)) { next++; rx_n++; } else rx_drop++;
+    if (was_empty) vTaskNotifyGiveFromISR(s_task, &amp;woke);   /* wake only on empty -&gt; non-empty */
+    portYIELD_FROM_ISR(woke);
+}
+void DUALTIMER_IRQHandler(void)                    /* TX: "shift register empty", take one byte */
+{
+    static uint8_t want;
+    uint8_t b;
+    DT_INTCLR = 1;
+    if (!spsc_get(&amp;tx, &amp;b)) { tx_idle++; return; }
+    if (b != want) tx_bad++;
+    want = (uint8_t)(b + 1u); tx_n++;
+}
+static void worker(void *arg)
+{
+    (void)arg;
+    uint8_t want = 0, b, out = 0; uint32_t rx_bad = 0, got = 0;
+    TickType_t end = xTaskGetTickCount() + pdMS_TO_TICKS(200);
+    while (xTaskGetTickCount() &lt; end) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2));
+        while (spsc_get(&amp;rx, &amp;b)) { if (b != want) rx_bad++; want = (uint8_t)(b + 1u); got++; }
+        while (spsc_put(&amp;tx, out)) out++;              /* refill TX ring */
+    }
+    TIMER_CTRL(TIMER0_BASE) = 0; DT_CTRL = 0;
+    board_printf_raw("RX: isr put %u, task got %u, out-of-order %u, dropped %u\n", rx_n, got, rx_bad, rx_drop);
+    board_printf_raw("TX: isr sent %u, out-of-order %u, isr found ring empty %u\n", tx_n, tx_bad, tx_idle);
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(worker, "worker", 512, NULL, 3, &amp;s_task);
+    timer0_start(250, 0x40);                       /* RX byte every 10 us (~1 Mbaud) */
+    DT_LOAD = 333 - 1; NVIC_IPR(10) = 0x40; NVIC_ISER0 = 1u &lt;&lt; 10;
+    DT_CTRL = 0x80u | 0x40u | 0x20u | 0x02u;       /* TX IRQ every 13.3 us */
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8; make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=$S/ex6_uart.c OUT=$O/ex6 &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $O/ex6/app.elf 30'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>   text	   data	    bss	    dec	    hex	filename
+  12900	    100	 135960	 148960	  245e0	/tmp/rtosD8/ex6/app.elf
+RX: isr put 20003, task got 20003, out-of-order 0, dropped 0
+TX: isr sent 15015, out-of-order 0, isr found ring empty 2
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>RX 200 ms 동안 20,003바이트(100 kB/s) — 하나도 잃지 않고(dropped 0) 순서도 맞다(out-of-order 0). TX 15,015바이트도 순서가 맞다. <strong>두 방향 모두 인터럽트를 한 번도 끄지 않았다.</strong></li><li>TX ISR이 링을 빈 채로 본 것은 2번(시작 직후 태스크가 아직 채우기 전)뿐이다.</li><li>깨우기 정책: ISR은 "넣기 전에 비어 있었으면" 알린다. 태스크는 알림을 받으면 <strong>빌 때까지</strong> 비운다. 태스크가 비우고 잠들기 직전에 ISR이 넣는 경쟁이 있어도 알림이 래치되므로(<code>ulTaskNotifyTake</code>가 바로 돌아온다) 잃지 않는다. 바이트마다 알리면 ISR마다 커널 호출(크리티컬 섹션 포함 — §8)을 하게 되어 락 없는 링의 장점이 사라진다. 실무에서는 "비었다가 찼을 때" 또는 "절반 찼을 때 · 줄바꿈이 왔을 때"처럼 <strong>알리는 횟수를 줄이는 정책</strong>을 함께 설계한다.</li><li>이 실험은 ORDER 2(컴파일러 배리어만)로 바꿔도 같은 결과가 나와야 한다 — 단일 코어이기 때문이다. 직접 해보기 2번 문제다.</li></ul>
+<h3 id="6-3-예제-9-비용-락-없는-링-vs-크리티컬-섹션-링-vs-뮤텍스-vs-freertos-큐-stream-buffer">6.3 예제 9 — 비용: 락 없는 링 vs 크리티컬 섹션 링 vs 뮤텍스 vs FreeRTOS 큐 · stream buffer<a class="anchor" href="#6-3-예제-9-비용-락-없는-링-vs-크리티컬-섹션-링-vs-뮤텍스-vs-freertos-큐-stream-buffer" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 경쟁 없는 상태(태스크 하나가 64바이트 넣고 64바이트 빼기를 64번)에서 바이트 하나를 넣고 빼는 경로 길이. <code>ORDER=0</code>과 <code>ORDER=2</code>로 두 번 빌드했다(크리티컬 섹션 · 커널 객체 행은 ORDER=2 빌드에서만 찍는다 — 잠금 안에서는 링 자체의 배리어가 필요 없기 때문이다).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex8 — cost per byte (put + get) of 8 ways to pass bytes; FreeRTOS on QEMU M3, ICOUNT */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include "semphr.h"
+#include "stream_buffer.h"
+#include "d8.h"
+#include "spsc.h"
+#define R 64u                                       /* rounds of 64 puts then 64 gets */
+static spsc_t q;
+static volatile uint32_t sink;
+#define BENCH(name, PUT, GET) do {                                                   \
+        uint32_t t0 = CYC(), sum = 0; uint8_t b = 0, c[64];                          \
+        for (uint32_t r = 0; r &lt; R; r++) {                                           \
+            for (uint32_t i = 0; i &lt; 64; i++) { b = (uint8_t)i; PUT; }               \
+            for (uint32_t i = 0; i &lt; 64; i++) { GET; sum += b; }                     \
+        }                                                                            \
+        t0 = CYC() - t0; sink = sum; (void)c;                                        \
+        t0 = t0 * 400u / (R * 64u);                  /* 0.1 ns units */                \
+        board_printf_raw("%s: %u.%u ns/byte (check %u)\n", name, t0 / 10u, t0 % 10u, sum); \
+    } while (0)
+static void bench(void *arg)
+{
+    (void)arg;
+    BENCH("loop only (baseline)", sink = b, (void)0);
+    BENCH("spsc lock-free", spsc_put(&amp;q, b), spsc_get(&amp;q, &amp;b));
+#if ORDER == 2
+    SemaphoreHandle_t m = xSemaphoreCreateMutex();
+    QueueHandle_t qu = xQueueCreate(64, 1);
+    StreamBufferHandle_t sb = xStreamBufferCreate(128, 1);
+    BENCH("PRIMASK ring", { uint32_t k = irq_save(); spsc_put(&amp;q, b); irq_restore(k); },
+                          { uint32_t k = irq_save(); spsc_get(&amp;q, &amp;b); irq_restore(k); });
+    BENCH("taskENTER_CRITICAL ring", { taskENTER_CRITICAL(); spsc_put(&amp;q, b); taskEXIT_CRITICAL(); },
+                                     { taskENTER_CRITICAL(); spsc_get(&amp;q, &amp;b); taskEXIT_CRITICAL(); });
+    BENCH("mutex ring", { xSemaphoreTake(m, portMAX_DELAY); spsc_put(&amp;q, b); xSemaphoreGive(m); },
+                        { xSemaphoreTake(m, portMAX_DELAY); spsc_get(&amp;q, &amp;b); xSemaphoreGive(m); });
+    BENCH("xQueueSend/Receive", xQueueSend(qu, &amp;b, 0), xQueueReceive(qu, &amp;b, 0));
+    BENCH("stream buffer 1 B", xStreamBufferSend(sb, &amp;b, 1, 0), xStreamBufferReceive(sb, &amp;b, 1, 0));
+    BENCH("stream buffer 64 B", { c[i] = b; if (i == 63) xStreamBufferSend(sb, c, 64, 0); },
+                                { if (i == 0) xStreamBufferReceive(sb, c, 64, 0); b = c[i]; });
+#endif
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(bench, "bench", 512, NULL, 3, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8; for m in 0 2; do make -s -B -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=$S/ex8_bench.c OUT=$O/ex8_$m EXTRA_CFLAGS=-DORDER=$m &gt;/dev/null &amp;&amp; echo "== ORDER=$m" &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $O/ex8_$m/app.elf 30; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== ORDER=0
+loop only (baseline): 129.5 ns/byte (check 258048)
+spsc lock-free: 931.4 ns/byte (check 129024)
+[board_exit] code=0
+== ORDER=2
+loop only (baseline): 161.5 ns/byte (check 258048)
+spsc lock-free: 835.9 ns/byte (check 129024)
+PRIMASK ring: 1027.9 ns/byte (check 129024)
+taskENTER_CRITICAL ring: 2630.4 ns/byte (check 129024)
+mutex ring: 12821.2 ns/byte (check 129024)
+xQueueSend/Receive: 7020.9 ns/byte (check 129024)
+stream buffer 1 B: 12533.1 ns/byte (check 129024)
+stream buffer 64 B: 540.4 ns/byte (check 129024)
+[board_exit] code=0</code></pre></figure>
+<p>(<code>check</code>는 꺼낸 바이트의 합으로, 모든 방법이 같은 데이터를 돌려줬는지 확인한다. 기준선은 GET이 없어서 값이 다르다.)</p>
+<p>Python으로 막대 좌표를 계산해 그렸다(<code>mk_svgs.py</code>의 SVG8 — 값은 위 출력 그대로).</p>
+<figure class="chart"><svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="20" font-size="13" font-weight="bold">바이트 하나를 넣고 빼는 비용 (ns/byte, put + get, 루프 포함) — QEMU M3 icount</text>
+<text x="207" y="59" font-size="12" text-anchor="end">stream buffer 64 B 덩어리</text>
+<rect x="215" y="47" width="15.7963" height="18" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="236.796" y="60" font-size="12">540.4</text>
+<text x="207" y="89" font-size="12" text-anchor="end">SPSC (컴파일러 배리어)</text>
+<rect x="215" y="77" width="24.434" height="18" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="245.434" y="90" font-size="12">835.9</text>
+<text x="207" y="119" font-size="12" text-anchor="end">SPSC (C11 acq/rel = DMB)</text>
+<rect x="215" y="107" width="27.2255" height="18" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="248.226" y="120" font-size="12">931.4</text>
+<text x="207" y="149" font-size="12" text-anchor="end">PRIMASK 링</text>
+<rect x="215" y="137" width="30.0463" height="18" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="251.046" y="150" font-size="12">1,027.9</text>
+<text x="207" y="179" font-size="12" text-anchor="end">taskENTER_CRITICAL 링</text>
+<rect x="215" y="167" width="76.8886" height="18" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="297.889" y="180" font-size="12">2,630.4</text>
+<text x="207" y="209" font-size="12" text-anchor="end">xQueueSend / Receive</text>
+<rect x="215" y="197" width="205.226" height="18" fill="#888" fill-opacity="0.6" stroke="#888"/>
+<text x="426.226" y="210" font-size="12">7,020.9</text>
+<text x="207" y="239" font-size="12" text-anchor="end">stream buffer 1 B씩</text>
+<rect x="215" y="227" width="366.352" height="18" fill="#888" fill-opacity="0.6" stroke="#888"/>
+<text x="587.352" y="240" font-size="12">12,533.1</text>
+<text x="207" y="269" font-size="12" text-anchor="end">mutex 링</text>
+<rect x="215" y="257" width="374.774" height="18" fill="#d0564a" fill-opacity="0.6" stroke="#d0564a"/>
+<text x="595.774" y="270" font-size="12">12,821.2</text>
+<line x1="215" y1="44" x2="215" y2="290" stroke="currentColor"/>
+<line x1="215" y1="290" x2="615" y2="290" stroke="currentColor"/>
+<line x1="215" y1="290" x2="215" y2="295" stroke="currentColor"/>
+<text x="215" y="309" font-size="12" text-anchor="middle">0</text>
+<line x1="331.923" y1="290" x2="331.923" y2="295" stroke="currentColor"/>
+<text x="331.923" y="309" font-size="12" text-anchor="middle">4,000</text>
+<line x1="448.846" y1="290" x2="448.846" y2="295" stroke="currentColor"/>
+<text x="448.846" y="309" font-size="12" text-anchor="middle">8,000</text>
+<line x1="565.769" y1="290" x2="565.769" y2="295" stroke="currentColor"/>
+<text x="565.769" y="309" font-size="12" text-anchor="middle">12,000</text>
+<text x="415" y="328" font-size="12" text-anchor="middle">ns per byte (작을수록 좋다). 기준선(빈 루프) 130~160 ns 포함</text>
+</svg></figure>
+<p>그림 7 — 바이트당 put + get 비용(QEMU M3 icount, 빈 루프 130~160 ns 포함). 초록 = 락 없음, 주황 = 인터럽트 마스크, 회색 = FreeRTOS 커널 객체, 빨강 = 뮤텍스.</p>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong>락 없는 SPSC 836 ns ≈ PRIMASK 링 1028 ns.</strong> 단일 코어에서 "락 없음"의 장점은 <strong>평균 속도가 아니다.</strong> PRIMASK 링도 거의 같은 속도다. 장점은 ① 다른 ISR의 지연에 아무것도 더하지 않는다(PRIMASK는 매 바이트마다 모든 IRQ를 수십 ns 막는다 — C7 §6에서 L이 그대로 지연에 더해지는 것을 쟀다), ② BASEPRI 위의 zero-latency ISR에서도 쓸 수 있다(FreeRTOS API는 못 쓴다), ③ 듀얼코어로 그대로 옮겨 간다(ORDER 0일 때).</li><li><strong>C11 acquire/release(ORDER 0)는 컴파일러 배리어(ORDER 2)보다 바이트당 95.5 ns 비싸다.</strong> 두 빌드의 빈 루프 기준선(129.5 vs 161.5 ns)을 각각 빼면 801.9 − 674.4 = 127.5 ns = 정확히 명령 4개(32 ns × 4) — put과 get의 <code>dmb</code> 네 개다. 실칩에서 DMB는 쓰기 버퍼가 빌 때까지 기다리므로 명령 1개보다 비쌀 수 있다(QEMU는 1명령으로 센다 — 실칩 사이클은 확인 못 함).</li><li><code>taskENTER_CRITICAL</code> 링(2630 ns)은 PRIMASK 링의 2.6배다. 중첩 카운터 · <code>configASSERT</code> 검사 · BASEPRI <code>msr</code> + <code>isb</code>/<code>dsb</code> 때문이다(C7 §3.3).</li><li><strong>커널 객체는 한 자릿수 µs다</strong>: <code>xQueueSend/Receive</code> 7.0 µs, 뮤텍스 12.8 µs, stream buffer를 1바이트씩 쓰면 12.5 µs. 1 Mbaud UART(바이트당 10 µs)를 바이트마다 큐로 넘기면 CPU의 70%가 큐에 들어간다(QEMU 숫자로 계산한 대략치).</li><li><strong>stream buffer를 64바이트 덩어리로 쓰면 540 ns/byte로 가장 빠르다.</strong> 함수 호출 · 크리티컬 섹션 비용이 64바이트에 나뉘고 복사는 memcpy이기 때문이다. 교훈: <strong>바이트마다 넘기지 말고 묶어서 넘긴다.</strong> ISR에서 SPSC 링에 바이트로 쌓고, 태스크는 한 번 깨어나서 덩어리로 처리하는 것이 같은 이치다.</li></ul>
+<h3 id="6-4-화이트보드에서-isr과-태스크-사이의-링버퍼를-짜-보라">6.4 화이트보드에서 — "ISR과 태스크 사이의 링버퍼를 짜 보라"<a class="anchor" href="#6-4-화이트보드에서-isr과-태스크-사이의-링버퍼를-짜-보라" aria-label="link">#</a></h3>
+<p>Anduril C 문제은행의 SPSC 링버퍼 문제가 이 형태다. 면접관이 보는 체크리스트:</p>
+<ol><li><strong>크기와 인덱스</strong>: 2의 거듭제곱 + free-running(N개 사용) 또는 감싸는 인덱스 + 한 칸 비우기(N−1개). 고른 이유를 말한다.</li><li><strong>가득/빔 판정식</strong>을 정확히 쓴다. <code>count</code> 변수를 따로 두면 그 변수를 양쪽이 고치게 되어(RMW) <strong>SPSC의 장점이 사라진다</strong> — 가장 흔한 감점이다.</li><li><strong>소유권</strong>: "head는 생산자만, tail은 소비자만 쓴다"를 말로 한다.</li><li><strong>순서</strong>: "데이터를 쓰고 나서 head를 올린다"와 "그 사이에 무엇이 필요하냐 — 1코어 Cortex-M이면 컴파일러 배리어, 코어가 둘이면 release/acquire 또는 DMB". <code>volatile</code>만이면 왜 모자라는지(§5.4).</li><li><strong>가득 찼을 때의 정책</strong>: 새 바이트를 버린다(RX의 보통 선택 — 드롭 카운터를 올린다) vs 가장 오래된 것을 덮는다(그러면 생산자가 tail을 고치게 되어 SPSC가 깨진다 — 덮어쓰기 링은 다른 설계다).</li><li><strong>알림</strong>: 소비자를 언제 깨우나(§6.2).</li><li>꼬리 질문 대비: "생산자가 둘이면?"(LDREX 기반 MPSC 또는 크리티컬 섹션), "DMA가 생산자면?"(인덱스 대신 DMA의 NDTR/카운터 레지스터를 head로 읽는다 — §9.1), "캐시가 있으면?"(M7: 링을 non-cacheable로 두거나 clean/invalidate — B8).</li></ol>
+<hr>
+<h2 id="7-dmb-dsb-isb-cortex-m에서-정말-필요한-곳">7. DMB / DSB / ISB — Cortex-M에서 정말 필요한 곳<a class="anchor" href="#7-dmb-dsb-isb-cortex-m에서-정말-필요한-곳" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM J5(배리어가 필요한 순간)와 BM B6(메모리 순서 — 쓰기 버퍼 · write posting, "레지스터 쓰기가 늦게 반영")과 겹친다 (주인: 이 노트. Normal / Device 메모리 타입의 정의는 Bare-Metal B6에 남긴다).</p></blockquote>
+<h3 id="7-1-세-명령의-차이-그리고-단일-코어-m3-m4에서-보통은-필요-없다-는-말의-정확한-뜻">7.1 세 명령의 차이 — 그리고 단일 코어 M3/M4에서 "보통은 필요 없다"는 말의 정확한 뜻<a class="anchor" href="#7-1-세-명령의-차이-그리고-단일-코어-m3-m4에서-보통은-필요-없다-는-말의-정확한-뜻" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>명령</th><th>이름</th><th>기다리는 것</th><th>한 줄</th></tr></thead><tbody><tr><td><code>DMB</code></td><td>Data Memory Barrier</td><td>앞의 메모리 접근이 <strong>다른 관찰자에게 보이는 순서</strong></td><td>"앞의 것이 뒤의 것보다 먼저 보이게" — 완료는 기다리지 않는다</td></tr><tr><td><code>DSB</code></td><td>Data Synchronization Barrier</td><td>앞의 메모리 접근 <strong>완료</strong> (쓰기 버퍼 비우기 포함)</td><td>"다 끝날 때까지 다음 명령을 실행하지 않는다"</td></tr><tr><td><code>ISB</code></td><td>Instruction Synchronization Barrier</td><td>파이프라인 비우기</td><td>"이미 가져온 다음 명령을 버리고 새 상태(CONTROL · MPU · 벡터 · 코드)로 다시 가져온다"</td></tr></tbody></table></div>
+<p>Linux의 <code>smp_mb()</code>/<code>mb()</code>/<code>dma_wmb()</code>가 arm64에서 각각 무엇이 되는지는 EL F5 §2.3에서 봤다. Cortex-M에서 달라지는 점은 이렇다.</p>
+<ul><li><strong>범위 옵션이 없다.</strong> Armv7-M은 <code>SY</code>만 정의한다(<code>ish</code> · <code>osh</code>는 예약 — §3.2). "공유 도메인"을 고를 일이 없다.</li><li><strong>M0/M3/M4는 파이프라인이 짧고 순서대로(in-order) 실행한다.</strong> 자기 코어 관점의 일반 메모리 순서는 프로그램 순서와 같고(§5.4), 같은 주변장치에 대한 Device 접근끼리는 아키텍처가 순서를 지킨다. Arm의 Application Note 321("ARM Cortex-M Programming Guide to Memory Barrier Instructions")이 이 주제를 정리한 문서인데, 요지를 이 노트의 말로 옮기면 이렇다: 현재 M0/M3/M4 구현에서는 많은 경우 배리어를 빼도 동작하지만, <strong>아키텍처가 요구하는 곳에는 넣어라</strong> — 다른 구현(M7처럼 버스 · 쓰기 버퍼가 복잡한 코어)으로 옮겨도 맞도록.</li><li><strong>"보통 필요 없다"의 예외 = 코어 밖의 관찰자가 있을 때와, 코어 자신의 상태가 바뀔 때.</strong> 코어 밖의 관찰자: DMA, 다른 코어, 주변장치(쓰기가 버스 너머 도착해야 하는 것). 코어 자신의 상태: VTOR, CONTROL, MPU, 코드 메모리, 저전력 진입. 아래 그림의 7가지가 그 목록이다.</li></ul>
+<p><strong>쓰기 버퍼와 write posting — "레지스터 쓰기가 늦게 반영"되는 이유.</strong> Cortex-M3/M4는 STR을 실행하면 데이터를 <strong>쓰기 버퍼(write buffer)</strong>에 넣고 곧바로 다음 명령으로 간다. 버스가 그 쓰기를 실제 주변장치까지 나르는 동안 CPU는 이미 몇 명령을 더 실행했다. 주변장치가 느린 APB 버스 너머에 있으면 그 사이에 AHB-APB 브리지가 쓰기를 한 번 더 붙잡아 두기도 한다(<strong>posted write</strong> — "받았다"고 먼저 응답하고 나중에 전달). Don이 PCIe에서 본 posted write(EL F5 §5.4)와 같은 현상이 칩 안의 버스에서도 일어난다. 그래서 "인터럽트 플래그를 지웠는데 ISR이 한 번 더 들어온다", "클록을 켰는데 바로 다음 레지스터 접근이 무시된다"가 생긴다.</p>
+<figure class="chart"><svg viewBox="0 0 680 386" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="20" font-size="13" font-weight="bold">Cortex-M에서 배리어가 실제로 필요한 곳 (단일 코어 M3/M4 기준)</text>
+<text x="175" y="42" font-size="12" text-anchor="middle">상황</text>
+<text x="430" y="42" font-size="12" text-anchor="middle">넣을 것</text>
+<text x="590" y="42" font-size="12" text-anchor="middle">이유 · 덧붙임</text>
+<rect x="10" y="52" width="330" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="175" y="73.2" font-size="12" text-anchor="middle">DMA 디스크립터 쓰기 → DMA 시작 레지스터</text>
+<rect x="355" y="52" width="150" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="430" y="73.2" font-size="12" text-anchor="middle">DMB</text>
+<rect x="515" y="52" width="155" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="592.5" y="73.2" font-size="12" text-anchor="middle">M7 캐시: clean + DSB</text>
+<rect x="10" y="93" width="330" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="175" y="114.2" font-size="12" text-anchor="middle">ISR 끝에서 주변장치 IRQ 플래그 클리어</text>
+<rect x="355" y="93" width="150" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="430" y="114.2" font-size="12" text-anchor="middle">DSB 또는 다시 읽기</text>
+<rect x="515" y="93" width="155" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="592.5" y="114.2" font-size="12" text-anchor="middle">이중 진입 막기</text>
+<rect x="10" y="134" width="330" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="175" y="155.2" font-size="12" text-anchor="middle">VTOR · CONTROL · MPU 설정을 바꾼 뒤</text>
+<rect x="355" y="134" width="150" height="34" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="430" y="155.2" font-size="12" text-anchor="middle">DSB + ISB</text>
+<rect x="515" y="134" width="155" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="592.5" y="155.2" font-size="12" text-anchor="middle">다음 명령부터 새 설정</text>
+<rect x="10" y="175" width="330" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="175" y="196.2" font-size="12" text-anchor="middle">WFI / WFE 직전</text>
+<rect x="355" y="175" width="150" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="430" y="196.2" font-size="12" text-anchor="middle">DSB</text>
+<rect x="515" y="175" width="155" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="592.5" y="196.2" font-size="12" text-anchor="middle">쓰기를 끝내고 잔다</text>
+<rect x="10" y="216" width="330" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="175" y="237.2" font-size="12" text-anchor="middle">다른 코어와 공유 메모리 (AMP 메일박스)</text>
+<rect x="355" y="216" width="150" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="430" y="237.2" font-size="12" text-anchor="middle">DMB</text>
+<rect x="515" y="216" width="155" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="592.5" y="237.2" font-size="12" text-anchor="middle">+ 캐시 유지 (M7)</text>
+<rect x="10" y="257" width="330" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="175" y="278.2" font-size="12" text-anchor="middle">코드를 RAM에 복사 · 자기 수정 코드</text>
+<rect x="355" y="257" width="150" height="34" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="430" y="278.2" font-size="12" text-anchor="middle">DSB + ISB</text>
+<rect x="515" y="257" width="155" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="592.5" y="278.2" font-size="12" text-anchor="middle">+ I-cache 무효화</text>
+<rect x="10" y="298" width="330" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="175" y="319.2" font-size="12" text-anchor="middle">NVIC_DisableIRQ 직후 "이제 안 온다"</text>
+<rect x="355" y="298" width="150" height="34" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="430" y="319.2" font-size="12" text-anchor="middle">DSB + ISB</text>
+<rect x="515" y="298" width="155" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="592.5" y="319.2" font-size="12" text-anchor="middle">CMSIS가 넣어 준다</text>
+<rect x="10" y="339" width="330" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="175" y="360.2" font-size="12" text-anchor="middle">단일 코어 ISR ↔ 태스크 (일반 RAM)</text>
+<rect x="355" y="339" width="150" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="430" y="360.2" font-size="12" text-anchor="middle">컴파일러 배리어</text>
+<rect x="515" y="339" width="155" height="34" rx="5" fill="#888" fill-opacity="0.06" stroke="#888"/>
+<text x="592.5" y="360.2" font-size="12" text-anchor="middle">DMB는 이식성 보험</text>
+</svg></figure>
+<p>그림 8 — 단일 코어 M3/M4에서 배리어가 실제로 필요한 곳. 맨 아래 행(1코어 ISR ↔ 태스크, 일반 RAM)만 컴파일러 배리어로 충분하다.</p>
+<h3 id="7-2-예제-10-장면별-코드-빌드만-함-qemu는-쓰기-버퍼-버스-지연을-모델링하지-않는다">7.2 예제 10 — 장면별 코드, 빌드만 함 (QEMU는 쓰기 버퍼 · 버스 지연을 모델링하지 않는다)<a class="anchor" href="#7-2-예제-10-장면별-코드-빌드만-함-qemu는-쓰기-버퍼-버스-지연을-모델링하지-않는다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 그림 8의 장면들을 함수 하나씩으로 쓰고, M4 · M7로 빌드해서 배리어가 어디에 들어가는지 본다. <strong>QEMU는 쓰기가 즉시 도착하는 것으로 모델링하므로 배리어를 빼도 QEMU에서는 깨지지 않는다</strong> — 이 예제는 실행하지 않고 빌드 · 디스어셈블만 했다. 레지스터 주소는 설명용으로 지어낸 것이다(SCB 주소만 실제).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* bar_pat.c — where Cortex-M needs DMB/DSB/ISB (build-only patterns; QEMU can't show the failures) */
+#include &lt;stdint.h&gt;
+#define REG32(a) (*(volatile uint32_t *)(a))
+#define DMB() __asm volatile("dmb" ::: "memory")
+#define DSB() __asm volatile("dsb" ::: "memory")
+#define ISB() __asm volatile("isb" ::: "memory")
+struct desc { uint32_t src, dst, len, ctrl; };          /* DMA descriptor in normal RAM */
+#define DMA_DESC_ADDR REG32(0x40020000u)                /* made-up DMA controller registers */
+#define DMA_START     REG32(0x40020004u)
+#define TIM_SR        REG32(0x40000010u)                /* made-up timer status, write 0 to clear */
+#define SCB_VTOR      REG32(0xE000ED08u)
+#define SCB_SCR       REG32(0xE000ED10u)
+
+void dma_kick(struct desc *d, uint32_t src, uint32_t dst, uint32_t n)
+{
+    d-&gt;src = src; d-&gt;dst = dst; d-&gt;len = n; d-&gt;ctrl = 1u; /* normal-memory stores */
+    DMB();                    /* descriptor visible before the device is told about it */
+    DMA_DESC_ADDR = (uint32_t)d;
+    DMA_START = 1u;           /* Device -&gt; Device: kept in order by the architecture */
+}
+void TIM_IRQHandler(void)
+{
+    TIM_SR = 0;               /* clear the source ...                                  */
+    (void)TIM_SR;             /* ... and read it back so the write has reached the timer */
+    DSB();                    /* (DSB alone: write left the core; read-back: arrived)   */
+}
+void relocate_vectors(const uint32_t *table)
+{
+    SCB_VTOR = (uint32_t)table;
+    DSB();                    /* the write is done ...                    */
+    ISB();                    /* ... and the next instruction sees it     */
+}
+void set_unprivileged_thread(void)
+{
+    uint32_t c;
+    __asm volatile("mrs %0, control" : "=r"(c));
+    __asm volatile("msr control, %0" : : "r"(c | 1u) : "memory");
+    ISB();                    /* instructions after MSR CONTROL run with the new mode */
+}
+void deep_sleep(void)
+{
+    SCB_SCR |= 1u &lt;&lt; 2;       /* SLEEPDEEP */
+    DSB();                    /* all stores done before the core stops */
+    __asm volatile("wfi");
+    ISB();
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8/gen; for c in cortex-m4 cortex-m7; do arm-none-eabi-gcc -mthumb -mcpu=$c -O2 -Wall -Wextra -c $S/bar_pat.c -o $O/bp_$c.o &amp;&amp; echo "$c: build ok, warnings 0"; done; arm-none-eabi-objdump -d --no-show-raw-insn $O/bp_cortex-m7.o | sed -n "/&lt;dma_kick&gt;:/,/^$/p;/&lt;TIM_IRQHandler&gt;:/,/^$/p"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>cortex-m4: build ok, warnings 0
+cortex-m7: build ok, warnings 0
+00000000 &lt;dma_kick&gt;:
+   0:	push	{r4}
+   2:	movs	r4, #1
+   4:	strd	r1, r2, [r0]
+   8:	strd	r3, r4, [r0, #8]
+   c:	dmb	sy
+  10:	ldr	r3, [pc, #8]	@ (1c &lt;dma_kick+0x1c&gt;)
+  12:	str	r0, [r3, #0]
+  14:	str	r4, [r3, #4]
+  16:	pop	{r4}
+  18:	bx	lr
+  1a:	nop
+  1c:	.word	0x40020000
+
+00000020 &lt;TIM_IRQHandler&gt;:
+  20:	mov.w	r3, #1073741824	@ 0x40000000
+  24:	movs	r2, #0
+  26:	str	r2, [r3, #16]
+  28:	ldr	r3, [r3, #16]
+  2a:	dsb	sy
+  2e:	bx	lr</code></pre></figure>
+<p>장면별 해설:</p>
+<ol><li><strong>DMA 디스크립터 → 시작 레지스터 (DMB)</strong>: 디스크립터는 일반 RAM(Normal), 시작 레지스터는 주변장치(Device)다. 아키텍처는 <strong>Normal 접근과 Device 접근 사이의 순서를 보장하지 않는다.</strong> <code>dmb</code>가 없으면 DMA 엔진이 "시작"을 받고 아직 버퍼에 있는 디스크립터를 읽을 수 있다. 출력에서 <code>strd</code> 두 개(디스크립터) 뒤, <code>str</code>(DMA 레지스터) 앞에 <code>dmb sy</code>가 있다. 시작 레지스터 두 개(Device → Device)끼리는 순서가 지켜지므로 그 사이에는 필요 없다. <strong>M7처럼 D-cache가 있으면</strong> 배리어로는 모자라고 디스크립터 영역을 clean(<code>SCB_CleanDCache_by_Addr</code>)한 뒤 <code>dsb</code>가 필요하다(B8, EL H9). Don의 SSD 펌웨어에서 "디스크립터 쓰고 → DMB → doorbell"과 같은 패턴이다.</li><li><strong>ISR 끝에서 주변장치 IRQ 플래그 클리어 (DSB 또는 다시 읽기)</strong>: 플래그를 지우는 쓰기가 쓰기 버퍼 · 브리지에 머문 채로 ISR이 복귀하면, NVIC는 아직 서 있는 IRQ 선을 보고 <strong>같은 ISR에 다시 들어간다</strong>(tail-chaining으로 바로). 증상은 "ISR이 두 번씩 불린다, 두 번째는 할 일이 없다". 처방은 ① 플래그를 ISR <strong>앞부분</strong>에서 지운다, ② 지운 뒤 같은 레지스터를 <strong>다시 읽는다</strong>(그 주변장치까지 도착해야 읽기가 돌아오므로 가장 확실하다), ③ <code>dsb</code>(코어 쪽 쓰기 버퍼를 비운다 — 브리지가 posted write를 붙잡으면 이것만으로는 모자랄 수 있다). 출력의 <code>str</code> → <code>ldr</code>(같은 주소) → <code>dsb</code>가 ②+③이다.</li><li><strong>VTOR · CONTROL · MPU를 바꾼 뒤 (DSB + ISB)</strong>: 다음 명령이 새 설정으로 실행되어야 한다. VTOR 쓰기 직후 인터럽트가 오면 옛 벡터 테이블을 쓸 수 있고, <code>MSR CONTROL</code>로 스택(PSP)이나 특권 수준을 바꾼 직후의 명령은 이미 파이프라인에 들어와 있을 수 있다. Zephyr <code>arch/arm/core/cortex_m/prep_c.c</code>가 <code>SCB-&gt;VTOR = ...; barrier_dsync_fence_full(); barrier_isync_fence_full();</code>, <code>arch/arm/core/mpu/arm_mpu.c</code>가 MPU 활성화 뒤 같은 두 줄을 넣는다(§7.6 예제 13).</li><li><strong>WFI 직전 (DSB)</strong>: 잠들기 전에 진행 중인 쓰기(예: 주변장치를 끄는 쓰기, 웨이크업 소스 설정)를 끝낸다. FreeRTOS ARM_CM3 tickless 코드가 <code>dsb</code> → <code>wfi</code> → <code>isb</code> 순서다(§7.6).</li><li><strong>다른 코어와 공유 메모리 (DMB)</strong>: 듀얼코어 MCU(STM32H7의 M7+M4, i.MX RT1170, 듀얼 M33)의 공유 SRAM 메일박스는 §6.1의 arm64 실험과 같은 상황이다. SPSC 링은 ORDER 0(acquire/release)으로 쓰고, 상대 코어에 알리는 하드웨어 세마포어 · 메일박스 인터럽트 레지스터에 쓰기 전에는 <code>dmb</code>(또는 <code>dsb</code>)를 둔다. M7 쪽에 D-cache가 있으면 공유 영역은 MPU로 non-cacheable로 두는 것이 보통이다(P4).</li><li><strong>코드를 RAM에 복사 · 자기 수정 코드 (DSB + ISB, 캐시가 있으면 I-cache 무효화)</strong>: 플래시 프로그래밍 루틴을 RAM으로 복사해 실행하거나, 부트로더가 앱을 내려받아 점프할 때다. 복사가 끝났음(DSB)과 파이프라인이 옛 명령을 버렸음(ISB)을 보장한다.</li><li><strong>NVIC_DisableIRQ 직후 (DSB + ISB)</strong>: "이 줄 뒤로는 그 IRQ가 안 들어온다"를 원하면 필요하다. CMSIS가 이미 넣어 준다 — <code>core_cm3.h</code>의 <code>__NVIC_DisableIRQ()</code>는 <code>NVIC-&gt;ICER[...] = ...; __DSB(); __ISB();</code>다.</li></ol>
+<h3 id="7-3-1코어-isr-태스크에-dmb를-넣어야-하나">7.3 1코어 ISR ↔ 태스크에 DMB를 넣어야 하나?<a class="anchor" href="#7-3-1코어-isr-태스크에-dmb를-넣어야-하나" aria-label="link">#</a></h3>
+<p>규칙으로 정리한다.</p>
+<ul class="tasks"><li><strong>필요한 것은 컴파일러 배리어다</strong>(또는 <code>volatile</code> 접근끼리의 순서, 또는 C11 atomic). §5.4의 근거.</li><li><strong>C11 acquire/release를 쓰면 DMB가 따라온다.</strong> 비용은 바이트당 수십~100 ns(§6.3). 고속 경로에서 그것이 아까우면 ORDER 2(컴파일러 배리어)를 쓰고, <strong>"이 링은 단일 코어 전용"이라는 주석과 <code>_Static_assert</code>나 빌드 옵션 검사</strong>를 함께 남긴다. 듀얼코어로 옮겨 갈 가능성이 있으면 처음부터 C11로 쓴다.</li><li><strong>RTOS API 안에서는 이미 처리되어 있다.</strong> <code>taskENTER_CRITICAL</code>은 BASEPRI 쓰기 뒤에 <code>isb</code>/<code>dsb</code>를 넣고, 커널 객체 호출은 함수 호출 경계 자체가 컴파일러 배리어 역할을 한다.</li></ul>
+<h3 id="7-4-예제-11-컴파일러-재배치를-1코어-qemu에서-잡는다-o2에서만-깨짐">7.4 예제 11 — 컴파일러 재배치를 1코어 QEMU에서 잡는다 ("-O2에서만 깨짐")<a class="anchor" href="#7-4-예제-11-컴파일러-재배치를-1코어-qemu에서-잡는다-o2에서만-깨짐" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: CPU 재배치가 없는 단일 코어에서도 <strong>컴파일러가 "데이터 → 플래그"를 "플래그 → 데이터"로 바꾸는지</strong>, 그리고 그것이 실제로 ISR에 틀린 값을 보이게 하는지.</p>
+<p>먼저 생성 코드. <code>g_slot</code>은 일반 변수, <code>g_ready</code>는 <code>volatile</code>이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* reorder.c — can the compiler move plain accesses across a volatile one? (look at objdump) */
+#include &lt;stdint.h&gt;
+struct msg { uint32_t a, b; };
+struct msg g_slot;                       /* plain payload */
+volatile uint32_t g_ready;               /* volatile flag */
+#ifdef CBAR_ON
+#define CBAR() __asm volatile("" ::: "memory")
+#else
+#define CBAR() do { } while (0)
+#endif
+uint32_t consume(void)                   /* reader: flag first, then payload */
+{
+    uint32_t r = g_ready;
+    CBAR();
+    return r ? g_slot.a + g_slot.b : 0;
+}
+void publish(uint32_t x)                 /* writer: payload first, then flag */
+{
+    g_slot.a = x;
+    g_slot.b = x * 2u;
+    CBAR();
+    g_ready = 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8/ro; mkdir -p $O; for d in "" -DCBAR_ON; do echo "== -O2 $d"; arm-none-eabi-gcc -mthumb -mcpu=cortex-m3 -O2 $d -Wall -Wextra -c $S/reorder.c -o $O/r.o &amp;&amp; arm-none-eabi-objdump -d --no-show-raw-insn $O/r.o | sed -n "/&lt;publish&gt;:/,/^$/p" | grep -v "^$\|word"; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== -O2 
+00000014 &lt;publish&gt;:
+  14:	movs	r2, #1
+  16:	ldr	r3, [pc, #12]	@ (24 &lt;publish+0x10&gt;)
+  18:	str	r2, [r3, #0]
+  1a:	lsl.w	r2, r0, r2
+  1e:	strd	r0, r2, [r3, #8]
+  22:	bx	lr
+== -O2 -DCBAR_ON
+00000014 &lt;publish&gt;:
+  14:	ldr	r3, [pc, #12]	@ (24 &lt;publish+0x10&gt;)
+  16:	lsls	r2, r0, #1
+  18:	strd	r0, r2, [r3, #8]
+  1c:	movs	r2, #1
+  1e:	str	r2, [r3, #0]
+  20:	bx	lr
+  22:	nop</code></pre></figure>
+<p>출력에서 볼 것: 배리어가 없으면 GCC 14.2가 <strong><code>g_ready = 1</code>(<code>str r2, [r3, #0]</code>)을 페이로드 <code>strd</code>보다 먼저</strong> 낸다. 상수 1을 레지스터에 만든 김에 <code>x * 2</code>의 시프트 양으로도 재사용하면서 store 순서를 바꿨다 — <code>volatile</code> 쓰기와 일반 쓰기 사이의 순서는 C 표준이 보장하지 않으므로 합법이다. <code>CBAR()</code>를 넣으면 순서가 소스대로 돌아온다.</p>
+<p>이제 이것이 실제로 틀린 값을 보이는지 돌려 본다. 메인이 <code>publish()</code>하고, TIMER0 ISR이 <code>g_ready</code>를 보고 페이로드를 가져간 뒤 <code>g_ready = 0</code>으로 돌려준다. ISR은 "플래그는 새것이라는데 페이로드가 옛것"인 경우를 센다. 메인은 ISR 주기와 위상이 고정되지 않도록 지연을 섞는다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex7 — compiler reordering on ONE core: main publishes {a,b} then ready=1; timer ISR consumes */
+#include "d8.h"
+#define N 200000u
+struct msg { uint32_t a, b; };
+struct msg g_slot;                        /* plain payload */
+volatile uint32_t g_ready;                /* 1 = slot full (main sets, ISR clears) */
+volatile uint32_t g_stale, g_got;
+static uint32_t s_last;                   /* ISR-private: last a it consumed */
+#ifdef CBAR_ON
+#define PUB_BAR() CBAR()
+#else
+#define PUB_BAR() do { } while (0)
+#endif
+__attribute__((noinline)) void publish(uint32_t x)
+{
+    g_slot.a = x;
+    g_slot.b = x * 2u;
+    PUB_BAR();                            /* without it GCC -O2 may store g_ready first */
+    g_ready = 1;
+}
+void TIMER0_IRQHandler(void)              /* consumer */
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    if (!g_ready) return;
+    CBAR();
+    uint32_t a = g_slot.a;
+    if (a &lt;= s_last) g_stale++;           /* flag said "new" but payload is old */
+    s_last = a; g_got++;
+    CBAR();
+    g_ready = 0;
+}
+int main(void)
+{
+    timer0_start(97, 0x40);
+    for (uint32_t i = 1; i &lt;= N; i++) {
+        while (g_ready) { }               /* wait until the ISR took the previous one */
+        for (volatile uint32_t d = i % 31u; d; d--) { }   /* vary the phase vs. the timer: */
+        switch ((i / 31u) % 4u) {                       /* coarse loop + 0..3 single nops */
+        case 3: __asm volatile("nop"); /* fall through */
+        case 2: __asm volatile("nop"); /* fall through */
+        case 1: __asm volatile("nop"); /* fall through */
+        default: break;
+        }
+        publish(i);
+    }
+    while (g_ready) { }
+    timer0_stop();
+    board_printf_raw("published=%u consumed=%u stale=%u\n", N, g_got, g_stale);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8; for v in nobar cbar; do X=; [ $v = cbar ] &amp;&amp; X=-DCBAR_ON; echo "== $v"; make -s -B -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=$S/ex7_cro.c OUT=$O/ex7_$v EXTRA_CFLAGS="$X" &gt;/dev/null &amp;&amp; arm-none-eabi-objdump -d --no-show-raw-insn $O/ex7_$v/app.elf | sed -n "/&lt;publish&gt;:/,/^$/p" | grep -v "^$\|word\|\.\.\."; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $O/ex7_$v/app.elf 60; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== nobar
+000000c0 &lt;publish&gt;:
+      c0:	movs	r1, #1
+      c2:	ldr	r2, [pc, #16]	@ (d4 &lt;publish+0x14&gt;)
+      c4:	ldr	r3, [pc, #16]	@ (d8 &lt;publish+0x18&gt;)
+      c6:	str	r1, [r2, #0]
+      c8:	lsl.w	r2, r0, r1
+      cc:	strd	r0, r2, [r3]
+      d0:	bx	lr
+      d2:	nop
+published=200000 consumed=200000 stale=4
+[board_exit] code=0
+== cbar
+000000c0 &lt;publish&gt;:
+      c0:	ldr	r3, [pc, #12]	@ (d0 &lt;publish+0x10&gt;)
+      c2:	lsls	r2, r0, #1
+      c4:	strd	r0, r2, [r3]
+      c8:	movs	r2, #1
+      ca:	ldr	r3, [pc, #8]	@ (d4 &lt;publish+0x14&gt;)
+      cc:	str	r2, [r3, #0]
+      ce:	bx	lr
+published=200000 consumed=200000 stale=0
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>재배치된 빌드(nobar)에서 ISR이 <code>str r1, [r2]</code>(플래그)와 <code>strd</code>(페이로드) 사이 <strong>2명령 창</strong>에 들어온 경우가 20만 번 중 4번 있었다 — 플래그가 "새것"이라는데 페이로드는 직전 값이었다. 컴파일러 배리어를 넣은 빌드(cbar)는 0번이다.</li><li>4/200,000은 작은 숫자다. 바로 그래서 위험하다 — 실칩에서 ISR 주기가 길면 며칠에 한 번이 되고, <code>-O0</code> 디버그 빌드에서는 재배치 자체가 일어나지 않는다. <strong>"디버그 빌드에서는 멀쩡한데 릴리스에서 가끔 틀린다"의 대표 원인</strong>이다.</li><li>처음 시도에서는 ISR이 매번 같은 위상에 들어와서 0번이었다(메인이 ISR 직후 바로 publish하므로). 지연 루프 + nop 0~3개로 위상을 섞자 창에 들어왔다. 레이스 재현은 "타이밍을 흔드는 것"이 절반이다.</li></ul>
+<h3 id="7-5-예제-12-메시지-패싱-litmus를-arm64에서-cortex-m-스타일-코드가-smp에서-버티나">7.5 예제 12 — 메시지 패싱 litmus를 arm64에서: "Cortex-M 스타일" 코드가 SMP에서 버티나<a class="anchor" href="#7-5-예제-12-메시지-패싱-litmus를-arm64에서-cortex-m-스타일-코드가-smp에서-버티나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: EL F5 §3.5의 MP litmus를 이 노트의 질문으로 다시 묻는다. 단일 코어 Cortex-M에서 정답인 "volatile + 컴파일러 배리어"(ORDER 2와 같은 코드)가 두 코어에서는 어떻게 되나. 슬롯 1000개를 쓰는 쪽은 앞에서부터, 읽는 쪽은 뒤에서부터 훑어 중간에서 만나게 하고, 라운드마다 세 번 만나서(시작 · 둘 다 끝 · 리셋 끝) 출발을 맞춘다. 정의와 LKMM 해석은 EL F5가 주인이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex9 — message-passing (MP) litmus on the arm64 VM host: does "Cortex-M style" code survive SMP? */
+#define _GNU_SOURCE
+#include &lt;pthread.h&gt;
+#include &lt;sched.h&gt;
+#include &lt;stdatomic.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+struct slot { int data; char p1[60]; int flag; char p2[60]; } __attribute__((aligned(64)));
+#define K 1000
+static struct slot s[K];
+static int rf[K], rd[K];
+static atomic_int arrive;
+static int V, ROUNDS;
+#define VOL(x) (*(volatile int *)&amp;(x))
+#define CB()   __asm volatile("" ::: "memory")
+static void pin(int c) { cpu_set_t m; CPU_ZERO(&amp;m); CPU_SET(c, &amp;m); pthread_setaffinity_np(pthread_self(), sizeof m, &amp;m); }
+static void meet(int n) { atomic_fetch_add(&amp;arrive, 1); while (atomic_load(&amp;arrive) &lt; 2 * n) { } }  /* 2 threads */
+static void *writer(void *a)
+{
+    (void)a; pin(1);
+    for (int r = 1; r &lt;= ROUNDS; r++) {
+        meet(3 * r - 2);                                   /* start together */
+        for (int i = 0; i &lt; K; i++) {
+            VOL(s[i].data) = 1;
+            if (V == 1) CB();
+            if (V == 2) __asm volatile("dmb ishst" ::: "memory");
+            if (V == 3) __atomic_store_n(&amp;s[i].flag, 1, __ATOMIC_RELEASE); else VOL(s[i].flag) = 1;
+        }
+        meet(3 * r - 1);                                   /* both done */
+        meet(3 * r);                                       /* reader has reset the slots */
+    }
+    return NULL;
+}
+int main(int argc, char **argv)
+{
+    static const char *nm[] = { "volatile only", "volatile + compiler barrier", "dmb ishst / dmb ishld", "release / acquire" };
+    if (argc &lt; 3) return 2;
+    V = atoi(argv[1]); ROUNDS = atoi(argv[2]);
+    pthread_t w; long bad = 0;
+    pin(2); pthread_create(&amp;w, NULL, writer, NULL);
+    for (int r = 1; r &lt;= ROUNDS; r++) {
+        meet(3 * r - 2);
+        for (int i = K - 1; i &gt;= 0; i--) {                 /* walk backwards: meet the writer mid-way */
+            rf[i] = V == 3 ? __atomic_load_n(&amp;s[i].flag, __ATOMIC_ACQUIRE) : VOL(s[i].flag);
+            if (V == 1) CB();
+            if (V == 2) __asm volatile("dmb ishld" ::: "memory");
+            rd[i] = VOL(s[i].data);
+        }
+        meet(3 * r - 1);
+        for (int i = 0; i &lt; K; i++) { bad += (rf[i] == 1 &amp;&amp; rd[i] == 0); s[i].data = 0; s[i].flag = 0; }
+        meet(3 * r);
+    }
+    pthread_join(w, NULL);
+    printf("%-28s %d x %d slots: flag=1 but data=0 seen %ld times\n", nm[V], ROUNDS, K, bad);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8; O=/tmp/rtosD8/host; gcc -O2 -std=gnu11 -Wall -Wextra -pthread $S/ex9_mp.c -o $O/ex9 &amp;&amp; for t in 1 2 3; do for v in 0 1 2 3; do $O/ex9 $v 10000; done; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>volatile only                10000 x 1000 slots: flag=1 but data=0 seen 576 times
+volatile + compiler barrier  10000 x 1000 slots: flag=1 but data=0 seen 390 times
+dmb ishst / dmb ishld        10000 x 1000 slots: flag=1 but data=0 seen 0 times
+release / acquire            10000 x 1000 slots: flag=1 but data=0 seen 0 times
+volatile only                10000 x 1000 slots: flag=1 but data=0 seen 495 times
+volatile + compiler barrier  10000 x 1000 slots: flag=1 but data=0 seen 414 times
+dmb ishst / dmb ishld        10000 x 1000 slots: flag=1 but data=0 seen 0 times
+release / acquire            10000 x 1000 slots: flag=1 but data=0 seen 0 times
+volatile only                10000 x 1000 slots: flag=1 but data=0 seen 521 times
+volatile + compiler barrier  10000 x 1000 slots: flag=1 but data=0 seen 324 times
+dmb ishst / dmb ishld        10000 x 1000 slots: flag=1 but data=0 seen 0 times
+release / acquire            10000 x 1000 slots: flag=1 but data=0 seen 0 times</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>1천만 번 중 <strong>컴파일러 배리어만 있는 쪽이 324~414번</strong> "flag는 1인데 data는 0"을 봤다. 컴파일러는 순서를 지켰다 — CPU가 바꿨다. <code>dmb ishst</code>/<code>dmb ishld</code> 짝과 release/acquire는 0이다.</li><li>이 실험의 첫 버전은 dmb · release/acquire에서도 위반이 나왔다. 원인은 litmus가 아니라 <strong>실험 코드의 레이스</strong>였다 — 읽는 쪽이 다 읽고 슬롯을 리셋하는 동안 쓰는 쪽이 아직 그 라운드의 쓰기를 끝내지 않아서, "data는 리셋됐는데 flag는 1"인 슬롯이 다음 라운드로 넘어갔다. 만나는 지점을 하나 더 넣어(둘 다 끝난 뒤에 리셋) 고쳤다. <strong>락 없는 코드를 검증하는 테스트도 락 없는 코드라서 같은 실수를 한다</strong>는 교훈이다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="20" font-size="13" font-weight="bold">VM 호스트 arm64(실제 코어 2개)에서 관찰된 순서 위반 — 3회 중앙값</text>
+<text x="10" y="48" font-size="12" font-weight="bold">SPSC 링 (N = 16) 2천만 개 전달 — 틀린 값을 받은 횟수</text>
+<text x="222" y="73" font-size="12" text-anchor="end">volatile만</text>
+<rect x="230" y="61" width="360" height="18" fill="#d0564a" fill-opacity="0.6" stroke="#d0564a"/>
+<text x="596" y="74" font-size="12">181,126</text>
+<text x="222" y="101" font-size="12" text-anchor="end">volatile + 컴파일러 배리어</text>
+<rect x="230" y="89" width="269.669" height="18" fill="#d0564a" fill-opacity="0.6" stroke="#d0564a"/>
+<text x="505.669" y="102" font-size="12">135,678</text>
+<text x="222" y="129" font-size="12" text-anchor="end">volatile + DMB</text>
+<text x="236" y="130" font-size="12">0</text>
+<text x="222" y="157" font-size="12" text-anchor="end">C11 acquire/release</text>
+<text x="236" y="158" font-size="12">0</text>
+<line x1="230" y1="56" x2="230" y2="170" stroke="currentColor"/>
+<text x="10" y="190" font-size="12" font-weight="bold">MP litmus 1천만 번 — flag = 1인데 data = 0을 본 횟수</text>
+<text x="222" y="215" font-size="12" text-anchor="end">volatile만</text>
+<rect x="230" y="203" width="360" height="18" fill="#d0564a" fill-opacity="0.6" stroke="#d0564a"/>
+<text x="596" y="216" font-size="12">521</text>
+<text x="222" y="243" font-size="12" text-anchor="end">volatile + 컴파일러 배리어</text>
+<rect x="230" y="231" width="269.482" height="18" fill="#d0564a" fill-opacity="0.6" stroke="#d0564a"/>
+<text x="505.482" y="244" font-size="12">390</text>
+<text x="222" y="271" font-size="12" text-anchor="end">dmb ishst / ishld</text>
+<text x="236" y="272" font-size="12">0</text>
+<text x="222" y="299" font-size="12" text-anchor="end">release / acquire</text>
+<text x="236" y="300" font-size="12">0</text>
+<line x1="230" y1="198" x2="230" y2="312" stroke="currentColor"/>
+</svg></figure>
+<p>그림 9 — VM 호스트 arm64(실제 코어 두 개)에서 관찰한 순서 위반(3회 중앙값, 그룹마다 따로 정한 선형 축). 위: 예제 7의 SPSC 링, 아래: 예제 12의 MP litmus. 빨강 = 1코어 Cortex-M에서는 정답이던 코드(아래쪽 둘째 줄)와 <code>volatile</code>만, 초록 = 코어 간 배리어가 있는 코드.</p>
+<h3 id="7-6-예제-13-커널-소스는-어디에-배리어를-넣었나">7.6 예제 13 — 커널 소스는 어디에 배리어를 넣었나<a class="anchor" href="#7-6-예제-13-커널-소스는-어디에-배리어를-넣었나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: §7.2의 장면들이 실제 RTOS 소스에 그대로 있는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/rtoslab/zephyrproject/zephyr/arch/arm/core; grep -rn "barrier_dsync_fence_full\|barrier_isync_fence_full\|barrier_dmem_fence_full\|__DSB\|__ISB\|__DMB" cortex_m/*.c mpu/arm_mpu.c | head -24; cd /var/rtoslab/src/FreeRTOS-Kernel; grep -n "dsb\|isb" portable/GCC/ARM_CM3/port.c portable/GCC/ARM_CM3/portmacro.h'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>cortex_m/cpu_idle.c:45:			__DSB();                                                                   \
+cortex_m/cpu_idle.c:54:		__DSB();                                                                           \
+...
+cortex_m/irq_manage.c:230:	barrier_dsync_fence_full();
+cortex_m/irq_manage.c:231:	barrier_isync_fence_full();
+cortex_m/prep_c.c:67:	barrier_dsync_fence_full();
+cortex_m/prep_c.c:68:	barrier_isync_fence_full();
+...
+cortex_m/thread.c:571:	barrier_isync_fence_full();
+mpu/arm_mpu.c:265:	barrier_dsync_fence_full();
+mpu/arm_mpu.c:266:	barrier_isync_fence_full();
+...
+portable/GCC/ARM_CM3/port.c:604:                __asm volatile ( "dsb" ::: "memory" );
+portable/GCC/ARM_CM3/port.c:606:                __asm volatile ( "isb" );
+...
+portable/GCC/ARM_CM3/portmacro.h:92:        __asm volatile ( "dsb" ::: "memory" );
+portable/GCC/ARM_CM3/portmacro.h:93:        __asm volatile ( "isb" );
+portable/GCC/ARM_CM3/portmacro.h:220:        "   isb                                                     \n"
+portable/GCC/ARM_CM3/portmacro.h:221:        "   dsb                                                     \n"
+...</code></pre></figure>
+<p>(장면과 관련된 줄만 남기고 나머지는 <code>...</code>로 줄였다. Zephyr 쪽은 <code>head -24</code>로 자른 24줄, FreeRTOS 쪽은 18줄이다.)</p>
+<p>장면과 짝지으면:</p>
+<div class="tw"><table><thead><tr><th>소스 위치</th><th>무엇 뒤에</th><th>그림 8의 장면</th></tr></thead><tbody><tr><td>Zephyr <code>cortex_m/prep_c.c:66~68</code></td><td><code>SCB-&gt;VTOR = VECTOR_ADDRESS &amp; VTOR_MASK;</code></td><td>VTOR 변경 → DSB + ISB</td></tr><tr><td>Zephyr <code>mpu/arm_mpu.c:265~266</code> 근처</td><td>MPU 활성화</td><td>MPU 변경 → DSB + ISB</td></tr><tr><td>Zephyr <code>cortex_m/thread.c:571</code></td><td>FPU 공유 모드에서 <code>__set_CONTROL(...)</code></td><td>CONTROL 변경 → ISB</td></tr><tr><td>Zephyr <code>cortex_m/cpu_idle.c:45 · 54</code></td><td><code>wfi</code>/<code>wfe</code> 직전 (주석: "Wait for all memory transaction to complete before entering low power state")</td><td>WFI 직전 → DSB</td></tr><tr><td>Zephyr <code>cortex_m/irq_manage.c:230~231</code></td><td>모든 IRQ의 NVIC <code>ICER</code> 쓰기</td><td>NVIC 비활성화 → DSB + ISB</td></tr><tr><td>FreeRTOS <code>ARM_CM3/port.c:604~606</code></td><td>tickless 진입 <code>dsb</code> → <code>wfi</code> → <code>isb</code></td><td>WFI 직전 → DSB</td></tr><tr><td>FreeRTOS <code>ARM_CM3/portmacro.h:92~93</code> (<code>portYIELD</code>)</td><td>PendSV 세팅 (주석: "Barriers are normally not required but do ensure the code is completely within the specified behaviour for the architecture")</td><td>AN321의 "아키텍처 규칙대로"</td></tr><tr><td>FreeRTOS <code>ARM_CM3/portmacro.h:220 · 237</code></td><td><code>msr basepri</code> (크리티컬 섹션 진입)</td><td>시스템 레지스터 변경 → ISB/DSB</td></tr></tbody></table></div>
+<p>FreeRTOS <code>portYIELD</code>의 주석이 이 절의 요지를 한 줄로 말한다 — "보통은 필요 없지만 아키텍처 명세 안에 있도록". Zephyr의 <code>barrier_dsync_fence_full()</code> 등은 <code>include/zephyr/arch/arm/barrier.h</code>에서 CMSIS <code>__DSB()</code>/<code>__ISB()</code>/<code>__DMB()</code>로, <code>barrier_sync_synchronize()</code>는 <code>__sync_synchronize()</code>(= <code>dmb</code>)로 정의된다.</p>
+<h3 id="7-7-qemu가-보여-주지-못하는-것-정직하게">7.7 QEMU가 보여 주지 못하는 것 — 정직하게<a class="anchor" href="#7-7-qemu가-보여-주지-못하는-것-정직하게" aria-label="link">#</a></h3>
+<ul><li><strong>쓰기 버퍼 · posted write · ISR 이중 진입</strong>: QEMU의 주변장치 쓰기는 즉시 반영된다. §7.2의 DSB/읽어 되돌리기를 빼도 QEMU에서는 아무 일도 없다. 실칩(특히 APB 브리지 너머의 타이머 · UART를 쓰는 STM32 계열)에서만 재현된다.</li><li><strong>CPU 재배치</strong>: TCG는 게스트 명령을 순서대로 실행한다(단일 vCPU). 그래서 CPU 재배치 실험은 VM 호스트 arm64에서 했다(§6.1, §7.5).</li><li><strong>DMB/DSB 비용</strong>: icount는 모든 명령을 32 ns로 센다. 실칩의 DMB/DSB는 쓰기 버퍼가 빌 때까지 기다리므로 그보다 비쌀 수 있다(실측은 하지 못했다 — 확인 못 함).</li><li><strong>캐시</strong>: QEMU M7(<code>mps2-an500</code>)에는 D-cache 효과가 없다(B8). M7 DMA의 clean/invalidate 실험은 이 랩에서 불가능하다.</li><li>QEMU에서 <strong>보여 줄 수 있었던 것</strong>: 컴파일러 재배치(예제 11), 예외가 exclusive monitor를 지우는 것(예제 1), 생성 코드의 배리어 위치(예제 2 · 6 · 10), 그리고 RTOS 소스의 배리어 위치(예제 13).</li></ul>
+<hr>
+<h2 id="8-rtos-커널-안에서는-무슨-일이-일어나나-무엇이-정말-락-없이-도나">8. RTOS 커널 안에서는 무슨 일이 일어나나 — 무엇이 정말 락 없이 도나<a class="anchor" href="#8-rtos-커널-안에서는-무슨-일이-일어나나-무엇이-정말-락-없이-도나" aria-label="link">#</a></h2>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="20" font-size="13" font-weight="bold">FreeRTOS V11.3.2 · Zephyr v4.4.2 — 무엇이 정말 락 없이 도나 (소스 확인)</text>
+<text x="223" y="44" font-size="12" text-anchor="middle">락 없음 (LDREX 또는 한쪽만 쓰는 인덱스)</text>
+<text x="560" y="44" font-size="12" text-anchor="middle">IRQ 마스크 · 크리티컬 섹션 기반</text>
+<text x="10" y="92" font-size="12" font-weight="bold">FreeRTOS</text>
+<text x="10" y="197" font-size="12" font-weight="bold">Zephyr</text>
+<rect x="92" y="56" width="262" height="66" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="223" y="77.2" font-size="12" text-anchor="middle">stream / message buffer의</text>
+<text x="223" y="93.2" font-size="12" text-anchor="middle">데이터 경로 (쓰는 쪽 1 · 읽는 쪽 1)</text>
+<text x="223" y="109.2" font-size="12" text-anchor="middle">배리어는 없다 (단일 코어 전제)</text>
+<rect x="370" y="56" width="300" height="66" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="520" y="77.2" font-size="12" text-anchor="middle">queue · semaphore · task notification</text>
+<text x="520" y="93.2" font-size="12" text-anchor="middle">atomic.h의 Atomic_* (이름과 달리</text>
+<text x="520" y="109.2" font-size="12" text-anchor="middle">인터럽트 마스크로 구현)</text>
+<rect x="92" y="140" width="262" height="120" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="223" y="164.2" font-size="12" text-anchor="middle">atomic_t (M3 이상 = BUILTIN</text>
+<text x="223" y="180.2" font-size="12" text-anchor="middle">→ LDREX/STREX + dmb)</text>
+<text x="223" y="196.2" font-size="12" text-anchor="middle">spsc_lockfree.h (atomic_t 인덱스)</text>
+<text x="223" y="212.2" font-size="12" text-anchor="middle">ring_buf (1:1이면 락 불필요,</text>
+<text x="223" y="228.2" font-size="12" text-anchor="middle">배리어 없음)</text>
+<text x="223" y="244.2" font-size="12" text-anchor="middle">spsc_pbuf (배리어 + 캐시 유지)</text>
+<rect x="370" y="140" width="300" height="120" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="520" y="172.2" font-size="12" text-anchor="middle">atomic_t on M0 = ATOMIC_OPERATIONS_C</text>
+<text x="520" y="188.2" font-size="12" text-anchor="middle">(atomic_c.c, 전역 k_spinlock)</text>
+<text x="520" y="204.2" font-size="12" text-anchor="middle">mpsc_pbuf (k_spinlock)</text>
+<text x="520" y="220.2" font-size="12" text-anchor="middle">k_msgq · k_fifo · k_sem</text>
+<text x="520" y="236.2" font-size="12" text-anchor="middle">(커널 객체 = irq lock)</text>
+<text x="10" y="288" font-size="12">"락 없음"도 생산자 · 소비자 수 규칙을 지킬 때만이다. 규칙을 어기면 둘 다 깨진다.</text>
+</svg></figure>
+<p>그림 10 — FreeRTOS V11.3.2와 Zephyr v4.4.2 소스에서 확인한 분류. 왼쪽만 인터럽트를 끄지 않는다.</p>
+<h3 id="8-1-freertos">8.1 FreeRTOS<a class="anchor" href="#8-1-freertos" aria-label="link">#</a></h3>
+<ul class="tasks"><li><strong>stream buffer · message buffer의 데이터 경로</strong>(<code>stream_buffer.c</code>)는 SPSC 설계다. <code>StreamBuffer_t</code>의 <code>volatile size_t xTail;</code>(다음에 읽을 곳) · <code>volatile size_t xHead;</code>(다음에 쓸 곳)를 각각 한쪽만 쓰고, 쓰는 쪽은 <code>prvWriteBytesToBuffer()</code>로 바이트를 복사한 <strong>다음</strong> <code>pxStreamBuffer-&gt;xHead = ...</code>를 대입한다(line 1058). 그래서 헤더(<code>include/stream_buffer.h</code>)가 이렇게 경고한다: "unlike other FreeRTOS objects, it is not safe to have multiple different writers or multiple different readers … One way to achieve such serialization … is to place each API call inside a critical section and use a block time of 0." 인덱스 갱신에 DMB가 없다 — 단일 코어(또는 커널이 크리티컬 섹션으로 감싸는 SMP 경로)를 전제한다. 블로킹 · 깨우기 경로(<code>xTaskNotifyWait</code>, <code>sbSEND_COMPLETED</code>)는 크리티컬 섹션을 쓴다. API 사용법은 D5.</li><li><strong>queue · semaphore · mutex · task notification</strong>은 모두 <code>taskENTER_CRITICAL()</code> / <code>taskENTER_CRITICAL_FROM_ISR()</code>(BASEPRI) 안에서 돈다. 예: <code>queue.c</code> line 1205(<code>xQueueGenericSendFromISR</code>) · line 1381(<code>xQueueGiveFromISR</code>), <code>tasks.c</code>의 <code>vTaskGenericNotifyGiveFromISR()</code>. §6.3의 7 µs가 여기서 나온다.</li><li><strong><code>include/atomic.h</code></strong>(<code>Atomic_Add_u32</code> 등)는 §3.5에서 본 대로 인터럽트 마스크 구현이다.</li><li><strong><code>portMEMORY_BARRIER()</code></strong>: ARM_CM3 <code>portmacro.h</code>에서 <code>__asm volatile ( "" ::: "memory" )</code>, 즉 <strong>컴파일러 배리어</strong>다. <code>tasks.c</code>의 <code>vTaskSuspendAll()</code>(line 3890에서 시작, 배리어는 line 3932)이 <code>uxSchedulerSuspended</code> 증가 직후에 쓴다 — 주석: "Enforces ordering for ports and optimised compilers that may otherwise place the above increment elsewhere." 커널 자신도 1코어에서 <strong>CPU 배리어가 아니라 컴파일러 배리어</strong>로 순서를 잡는다는 증거다.</li><li><strong>SMP 포트</strong>(Armv8-M의 <code>prvSpinTrylock</code>)만 LDREX/STREX · CLREX · DMB를 쓴다(§2.4, C10).</li></ul>
+<h3 id="8-2-zephyr">8.2 Zephyr<a class="anchor" href="#8-2-zephyr" aria-label="link">#</a></h3>
+<ul><li><strong><code>atomic_t</code> API</strong>(<code>include/zephyr/sys/atomic.h</code>): <code>atomic_inc</code>, <code>atomic_add</code>, <code>atomic_cas</code>, <code>atomic_set_bit</code>, <code>atomic_test_and_set_bit</code>, <code>atomic_get</code>/<code>atomic_set</code> …. Cortex-M3 이상은 <code>atomic_builtin.h</code>(모두 <code>__ATOMIC_SEQ_CST</code>), M0는 <code>kernel/atomic_c.c</code>(전역 <code>k_spinlock</code> = 1코어에서 irq lock) — §3.5. <code>atomic_set_bit()</code>은 <code>atomic_or()</code> 위에 만든 인라인 함수다.</li><li><strong><code>include/zephyr/sys/spsc_lockfree.h</code></strong>: <code>SPSC_DEFINE(name, type, sz)</code>(크기는 2의 거듭제곱), 생산자 <code>spsc_acquire()</code> → <code>spsc_produce()</code>, 소비자 <code>spsc_consume()</code> → <code>spsc_release()</code>. 인덱스 <code>in</code> · <code>out</code>이 <code>atomic_t</code>이고 free-running(<code>z_spsc_mask()</code>로 <code>&amp; mask</code>) — 이 노트의 <code>spsc.h</code>와 같은 설계다. 짝 헤더 <code>mpsc_lockfree.h</code>도 있다 — 머리 주석이 "A wait-free intrusive multi producer single consumer (MPSC) queue using a singly linked list"라고 설명한다.</li><li><strong><code>ring_buf</code></strong>(<code>include/zephyr/sys/ring_buffer.h</code>, <code>lib/utils/ring_buffer.c</code>, <code>CONFIG_RING_BUFFER</code>): 문서(<code>doc/kernel/data_structures/ring_buffers.rst</code>)가 "For the trivial case of one producer and one consumer, concurrency control shouldn't be needed"라고 한다. 소스에는 배리어도 atomic도 없다 — 인덱스(<code>struct ring_buf_index { head, tail, base }</code>)는 일반 변수다. <strong>단일 코어에서 동작하는 이유는 API가 함수 호출이라(컴파일러가 호출 경계를 넘어 메모리 접근을 옮기지 못한다) 컴파일러 배리어가 저절로 생기기 때문</strong>이고, 코어 간 공유에는 보장이 없다(소스에서 확인한 사실과 그로부터의 추론이다).</li><li><strong><code>spsc_pbuf</code></strong>(<code>lib/os/spsc_pbuf.c</code>): 가변 길이 패킷 SPSC. <code>barrier_sync_synchronize()</code>(= <code>dmb</code>)를 인덱스 갱신마다 넣고 <code>SPSC_PBUF_CACHE</code> 플래그면 <code>sys_cache_data_flush_range()</code>/<code>invd_range()</code>까지 한다 — <strong>코어 간(IPC) 공유를 위해 설계된</strong> 버전이다.</li><li><strong><code>mpsc_pbuf</code></strong>(<code>include/zephyr/sys/mpsc_pbuf.h</code>): 생산자가 여럿이라 <code>struct k_spinlock lock;</code>을 쓴다. 로깅 서브시스템의 버퍼가 이것이다.</li></ul>
+<h3 id="8-3-예제-14-같은-zephyr-앱-atomic_t-spsc_lockfree-ring_buf를-isr-스레드로">8.3 예제 14 — 같은 Zephyr 앱: <code>atomic_t</code>, <code>spsc_lockfree</code>, <code>ring_buf</code>를 ISR ↔ 스레드로<a class="anchor" href="#8-3-예제-14-같은-zephyr-앱-atomic_t-spsc_lockfree-ring_buf를-isr-스레드로" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: Zephyr에서 어떤 atomic 구현이 골라졌는지, <code>atomic_inc</code>의 비용, 그리고 <code>k_timer</code> 콜백(시스템 클록 ISR 문맥) → <code>main</code> 스레드로 SPSC · <code>ring_buf</code>가 순서대로 전달되는지. 같은 앱을 M0 보드로도 빌드하려 했지만 §3.5대로 모듈이 없어 실패했다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># CMakeLists.txt
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(d8_zat)
+target_sources(app PRIVATE src/main.c)
+# prj.conf
+CONFIG_RING_BUFFER=y
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=10000
+CONFIG_QEMU_ICOUNT_SHIFT=5</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* zat — Zephyr atomic_t + spsc_lockfree + ring_buf: same source on Cortex-M3 and Cortex-M0 */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/sys/atomic.h&gt;
+#include &lt;zephyr/sys/spsc_lockfree.h&gt;
+#include &lt;zephyr/sys/ring_buffer.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#define N 20000
+static atomic_t a_cnt = ATOMIC_INIT(0), flags = ATOMIC_INIT(0);
+static volatile uint32_t p_cnt;
+SPSC_DEFINE(rxq, uint8_t, 64);                 /* lock-free, power-of-two */
+RING_BUF_DECLARE(rb, 64);                      /* "no locking needed for 1 producer + 1 consumer" */
+static uint32_t isr_n;
+
+static void tick(struct k_timer *t)            /* runs in ISR context (sys clock IRQ) */
+{
+    ARG_UNUSED(t);
+    atomic_inc(&amp;a_cnt); p_cnt++;
+    uint8_t *slot = spsc_acquire(&amp;rxq);
+    if (slot) { *slot = (uint8_t)isr_n; spsc_produce(&amp;rxq); }
+    uint8_t b = (uint8_t)isr_n; ring_buf_put(&amp;rb, &amp;b, 1);
+    isr_n++;
+}
+K_TIMER_DEFINE(tmr, tick, NULL);
+
+int main(void)
+{
+    printk("ATOMIC_OPERATIONS: %s\n", IS_ENABLED(CONFIG_ATOMIC_OPERATIONS_BUILTIN) ? "BUILTIN" :
+           IS_ENABLED(CONFIG_ATOMIC_OPERATIONS_C) ? "C (irq lock)" : "ARCH");
+    atomic_set_bit(&amp;flags, 3);
+    bool swapped = atomic_cas(&amp;flags, 0x8, 0x9);
+    printk("set_bit(3) -&gt; cas(0x8 -&gt; 0x9) = %d, flags = 0x%lx\n", swapped, (long)atomic_get(&amp;flags));
+
+    uint32_t c0 = k_cycle_get_32();
+    for (int i = 0; i &lt; N; i++) atomic_inc(&amp;a_cnt);
+    uint32_t c1 = k_cycle_get_32();
+    for (int i = 0; i &lt; N; i++) p_cnt++;
+    uint32_t c2 = k_cycle_get_32();
+    printk("cycles/op (hw %u Hz): atomic_inc %u.%02u  plain ++ %u.%02u\n", sys_clock_hw_cycles_per_sec(),
+           (c1 - c0) / N, (c1 - c0) % N * 100 / N, (c2 - c1) / N, (c2 - c1) % N * 100 / N);
+
+    atomic_set(&amp;a_cnt, 0); p_cnt = 0;
+    k_timer_start(&amp;tmr, K_USEC(100), K_USEC(100));
+    uint32_t got = 0, bad = 0, rgot = 0, rbad = 0; uint8_t want = 0, rwant = 0, b;
+    for (int i = 0; i &lt; N * 20; i++) {
+        atomic_inc(&amp;a_cnt); p_cnt++;
+        uint8_t *v = spsc_consume(&amp;rxq);
+        if (v) { bad += (*v != want); want = (uint8_t)(*v + 1); spsc_release(&amp;rxq); got++; }
+        if (ring_buf_get(&amp;rb, &amp;b, 1)) { rbad += (b != rwant); rwant = (uint8_t)(b + 1); rgot++; }
+    }
+    k_timer_stop(&amp;tmr);
+    printk("ISR ran %u times: atomic lost %d, plain ++ lost %d\n", isr_n,
+           (int)(N * 20 + isr_n - atomic_get(&amp;a_cnt)), (int)(N * 20 + isr_n - p_cnt));
+    printk("spsc got %u (order errors %u), ring_buf got %u (order errors %u)\n", got, bad, rgot, rbad);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D8/zat; mkdir -p /tmp/rtosD8/zcache; XDG_CACHE_HOME=/tmp/rtosD8/zcache /var/rtoslab/bin/rtos-zbuild mps2/an385 $S /tmp/rtosD8/zat_m3 -- -DUSER_CACHE_DIR=/tmp/rtosD8/zcache &amp;&amp; /var/rtoslab/bin/rtos-zrun /tmp/rtosD8/zat_m3 20'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>           FLASH:       14564 B         4 MB      0.35%
+             RAM:        6352 B         4 MB      0.15%
+qemu-system-arm: warning: nic lan9118.0 has no peer
+*** Booting Zephyr OS build v4.4.2 ***
+ATOMIC_OPERATIONS: BUILTIN
+set_bit(3) -&gt; cas(0x8 -&gt; 0x9) = 1, flags = 0x9
+cycles/op (hw 25000000 Hz): atomic_inc 7.20  plain ++ 4.00
+ISR ran 16740 times: atomic lost 0, plain ++ lost 5
+spsc got 16740 (order errors 0), ring_buf got 16740 (order errors 0)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>M3 보드는 <code>ATOMIC_OPERATIONS_BUILTIN</code>. <code>atomic_inc</code>는 7.2사이클, 그냥 <code>++</code>는 4사이클(25 MHz 하드웨어 사이클, icount shift 5 — <code>CONFIG_QEMU_ICOUNT_SHIFT=5</code>).</li><li>100 µs <code>k_timer</code>가 16,740번 돌면서 같은 카운터를 올렸다. <code>atomic_inc</code>는 0개를 잃었고 <strong>그냥 <code>++</code>는 5개를 잃었다</strong> — 주기가 길어서(100 µs) 창에 들어갈 확률이 예제 1보다 훨씬 낮을 뿐 같은 레이스다.</li><li><code>spsc_lockfree</code>와 <code>ring_buf</code> 둘 다 16,740개를 순서 오류 없이 넘겼다.</li></ul>
+<p><code>k_timer</code> 콜백이 무엇으로 컴파일됐나 — <code>spsc_acquire()</code>/<code>spsc_produce()</code> 부분이다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'E=/tmp/rtosD8/zat_m3/zephyr/zephyr.elf; arm-none-eabi-objdump -d --no-show-raw-insn $E | sed -n "/&lt;tick&gt;:/,/^$/p" | head -60'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>000000c0 &lt;tick&gt;:
+      c0:	push	{r0, r1, r4, r5, r6, lr}
+      c2:	dmb	ish
+      c6:	ldr	r3, [pc, #156]	@ (164 &lt;CONFIG_IDLE_STACK_SIZE+0x64&gt;)
+      c8:	ldrex	r1, [r3]
+      cc:	adds	r1, #1
+      ce:	strex	r2, r1, [r3]
+      d2:	cmp	r2, #0
+      d4:	bne.n	c8 &lt;tick+0x8&gt;
+      d6:	dmb	ish
+      da:	ldr	r2, [pc, #140]	@ (168 &lt;CONFIG_IDLE_STACK_SIZE+0x68&gt;)
+      dc:	ldr	r3, [r2, #0]
+      de:	adds	r3, #1
+      e0:	str	r3, [r2, #0]
+      e2:	ldr	r3, [pc, #136]	@ (16c &lt;CONFIG_IDLE_STACK_SIZE+0x6c&gt;)
+      e4:	mov	r1, r3
+      e6:	dmb	ish
+      ea:	ldr.w	r0, [r1], #-8
+      ee:	dmb	ish
+      f2:	ldr.w	r2, [r3, #-8]
+      f6:	add	r0, r2
+      f8:	dmb	ish
+      fc:	ldr	r4, [r1, #12]
+      fe:	dmb	ish
+...
+     130:	dmb	ish
+     134:	ldrex	r1, [r3]
+     138:	adds	r1, #1
+     13a:	strex	r2, r1, [r3]
+     13e:	cmp	r2, #0
+     140:	bne.n	134 &lt;CONFIG_IDLE_STACK_SIZE+0x34&gt;
+     142:	dmb	ish
+     146:	ldr	r3, [r4, #0]
+...
+     154:	bl	2404 &lt;ring_buf_put&gt;
+...</code></pre></figure>
+<p>(가운데 슬롯 계산 부분을 <code>...</code>로 줄였다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>atomic_inc(&amp;a_cnt)</code> = <code>dmb</code> + <code>ldrex</code>/<code>strex</code> 루프 + <code>dmb</code> — §3.2의 M3 seq_cst RMW 그대로다.</li><li><code>spsc_acquire()</code> 한 번에 <code>atomic_get()</code>이 두 번(in · out) 불리고, <code>atomic_get</code>이 seq_cst load라서 <strong><code>dmb</code> · <code>ldr</code> · <code>dmb</code>가 두 번</strong> 나온다. 이어 <code>spsc_produce()</code>의 <code>atomic_add</code>가 또 <code>dmb</code> 두 개. <strong>바이트 하나에 DMB 6개</strong>다. 1코어에서는 전부 필요 없는 명령이고, Zephyr가 이식성(SMP · 다른 아키텍처)을 위해 치르는 비용이다. 20 kHz ISR이라면 상관없고, 1 MB/s 바이트 스트림이라면 이 노트의 <code>spsc.h</code>(ORDER 2) 쪽이 낫다.</li><li><code>ring_buf_put</code>은 함수 호출(<code>bl</code>)이다. 그 안에는 <code>dmb</code>가 없다 — 아래 명령으로 <code>ring_buf_area_finish</code>와 <code>ring_buf_put</code>의 <code>dmb</code>를 세면 둘 다 0이다.</li></ul>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'E=/tmp/rtosD8/zat_m3/zephyr/zephyr.elf; for f in ring_buf_area_finish ring_buf_put; do arm-none-eabi-objdump -d --no-show-raw-insn $E | sed -n "/&lt;$f&gt;:/,/^$/p" | grep -c dmb; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>0
+0</code></pre></figure>
+<h3 id="8-4-연결">8.4 연결<a class="anchor" href="#8-4-연결" aria-label="link">#</a></h3>
+<ul class="tasks"><li><code>xStreamBufferSendFromISR</code> · Zephyr <code>k_pipe</code>로 바이트 스트림을 넘기는 API 수준의 사용법은 D5 · D10.</li><li>ISR → 태스크 알림(언제 깨울지)은 D1(세마포어) · D5(task notification) · E1(FromISR 규칙).</li><li>DMA 완료 → 태스크(버퍼 소유권 넘기기)는 E6, 듀얼코어 메일박스는 P4 · P5.</li></ul>
+<hr>
+<h2 id="9-실무에서-다시-보기">9. 실무에서 다시 보기<a class="anchor" href="#9-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="9-1-드론-비행-제어기-자이로-dma-더블-버퍼-추정기로-가는-spsc">9.1 드론 비행 제어기 — 자이로 DMA 더블 버퍼 + 추정기로 가는 SPSC<a class="anchor" href="#9-1-드론-비행-제어기-자이로-dma-더블-버퍼-추정기로-가는-spsc" aria-label="link">#</a></h3>
+<p>IMU(예: 8 kHz 자이로)를 SPI DMA로 읽는 FC에서 흔한 구조다.</p>
+<ol><li><strong>DMA 더블 버퍼(ping-pong)</strong>: DMA가 버퍼 A를 채우는 동안 CPU는 버퍼 B를 처리한다. DMA half-transfer / transfer-complete 인터럽트가 "어느 쪽이 다 찼는지"를 알려 준다. 여기서 <strong>소유권은 하드웨어 이벤트가 넘긴다</strong> — LDREX는 DMA를 보지 못하므로(§2.6) 아무 소용이 없다. M7(STM32H7)이면 CPU가 버퍼를 읽기 전에 그 영역을 <code>SCB_InvalidateDCache_by_Addr</code>(B8), DMA를 다시 시작하기 전에 <code>dmb</code>(그림 8 첫 행).</li><li><strong>DMA 완료 ISR → 추정기 태스크로 SPSC</strong>: ISR은 샘플(타임스탬프 + 3축)을 SPSC 링에 넣는다. 원소가 16바이트 구조체여도 SPSC 규칙은 같다(슬롯을 다 쓴 <strong>다음</strong> head). 추정기 태스크는 깨어나서 쌓인 샘플을 한 번에 처리한다(§6.3의 "묶어서" 교훈).</li><li><strong>타임스탬프</strong>: 샘플마다 찍는 64비트 µs 시각은 hi-lo-hi(C7 §1.3).</li><li><strong>가득 찼을 때</strong>: 추정기가 늦으면 링이 찬다. 새 샘플을 버리고 드롭 카운터를 올린다 — 그 카운터는 ISR만 올리므로 <code>volatile uint32_t</code>로 충분하고, 태스크는 읽기만 한다(값 하나 · 쓰는 사람 하나).</li></ol>
+<h3 id="9-2-로봇-관절-모터-컨트롤러-20-khz-foc-isr이-setpoint를-seqlock으로-내보낸다">9.2 로봇 관절 모터 컨트롤러 — 20 kHz FOC ISR이 setpoint를 seqlock으로 내보낸다<a class="anchor" href="#9-2-로봇-관절-모터-컨트롤러-20-khz-foc-isr이-setpoint를-seqlock으로-내보낸다" aria-label="link">#</a></h3>
+<p>FOC 전류 루프 ISR(20 kHz, 50 µs 예산)은 BASEPRI 위 zero-latency 우선순위로 두는 경우가 많다(A7, C7 — FreeRTOS API를 못 쓴다). 이 ISR이 계산한 <code>{id, iq, theta, vbus}</code>를 CAN 텔레메트리 태스크가 1 kHz로 읽는다 → <strong>seqlock</strong>(예제 5). 반대로 CAN 명령 태스크가 새 토크 setpoint와 이득을 내려보내면 → <strong>더블 버퍼 + 인덱스 하나</strong>(§4.3). 이 ISR 안에서는 <code>taskENTER_CRITICAL</code>도 FreeRTOS <code>Atomic_*</code>도 보호가 되지 않는다는 점을 다시 강조한다(§3.5).</p>
+<h3 id="9-3-linux-soc-옆의-센서-허브-zephyr">9.3 Linux SoC 옆의 센서 허브 (Zephyr)<a class="anchor" href="#9-3-linux-soc-옆의-센서-허브-zephyr" aria-label="link">#</a></h3>
+<p>센서 허브 MCU가 샘플을 모아 SPI/UART로 Linux에 넘기는 경우, ISR → 전송 스레드 경로는 <code>spsc_lockfree.h</code> 또는 <code>ring_buf</code>(1:1이면 락 불필요)로 충분하다. 허브가 Linux SoC와 <strong>공유 메모리</strong>(OpenAMP/rpmsg)로 통신하면 상대가 다른 코어이므로 <code>spsc_pbuf</code>처럼 배리어와 캐시 유지가 들어간 버전을 쓴다(P5, EL O1–O3).</p>
+<h3 id="9-4-don의-ssd-펌웨어와-이어서">9.4 Don의 SSD 펌웨어와 이어서<a class="anchor" href="#9-4-don의-ssd-펌웨어와-이어서" aria-label="link">#</a></h3>
+<ul><li>SSD 컨트롤러의 <strong>코어 간 메시지 링</strong>(예: 호스트 인터페이스 코어 → FTL 코어)은 이 노트의 SPSC 링과 같은 구조다. 다른 점은 상대가 다른 코어라는 것 — 그래서 SSD 펌웨어에서는 "디스크립터 쓰기 → DMB → 인덱스(또는 doorbell) 쓰기"가 기본이었고, 그것이 §6.1의 ORDER 0/3이다. 1코어 RTOS로 오면 같은 링에서 DMB를 컴파일러 배리어로 줄일 수 있다(ORDER 2).</li><li><strong>Doorbell 레지스터</strong>(NVMe SQ tail doorbell처럼 하드웨어가 읽는 인덱스)는 Device 메모리 쓰기다. 디스크립터(Normal) → doorbell(Device) 사이의 <code>dmb</code>는 코어 수와 상관없이 필요하다(그림 8 첫 행). Don이 PCIe 쪽에서 본 posted write 문제는 칩 안의 APB 브리지에서도 "플래그 클리어 후 ISR 재진입"으로 나타난다(§7.2 장면 2).</li><li>통계 카운터를 여러 코어가 올리던 경우 SSD에서는 코어별 카운터(per-core counter)를 두고 읽을 때 합쳤을 것이다. 1코어 MCU에서도 같은 아이디어가 통한다 — <strong>ISR 전용 카운터 + 태스크 전용 카운터</strong>로 나누면 둘 다 "쓰는 사람 하나"가 되어 atomic이 필요 없다.</li></ul>
+<hr>
+<h2 id="10-흔한-실수와-증상">10. 흔한 실수와 증상<a class="anchor" href="#10-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>공유 카운터를 <code>volatile</code>로만 선언하고 <code>++</code></td><td>통계가 조금씩 모자란다</td><td>RMW가 쪼개진다 (예제 1: 60% 손실)</td><td><code>atomic_fetch_add</code> (M3+), M0는 IRQ 마스크 · 쓰는 사람을 하나로</td></tr><tr><td>링버퍼에 <code>count</code> 변수를 따로 둔다</td><td>가끔 데이터가 하나 사라지거나 두 번 나온다</td><td><code>count</code>를 양쪽이 고친다 (SPSC가 아님)</td><td>free-running head/tail, 개수 = head − tail</td></tr><tr><td><code>buf</code>는 일반 변수, <code>head</code>만 <code>volatile</code></td><td>릴리스(-O2) 빌드에서만 가끔 옛 데이터</td><td>컴파일러가 데이터 쓰기를 head 뒤로 옮김 (예제 11)</td><td>컴파일러 배리어 또는 C11 release/acquire</td></tr><tr><td>1코어용 링(컴파일러 배리어)을 듀얼코어 공유 RAM에 그대로</td><td>0.5~1%의 옛 값 (예제 7: 13만/2천만)</td><td>CPU 재배치</td><td>C11 acquire/release 또는 DMB, M7이면 캐시 유지</td></tr><tr><td>M0 프로젝트에서 <code>&lt;stdatomic.h&gt;</code>의 <code>atomic_fetch_add</code></td><td>링크 에러 <code>undefined reference to __atomic_fetch_add_4</code></td><td>Armv6-M에 LDREX 없음 + libatomic 없음</td><td><code>__atomic_*_4</code>를 PRIMASK로 공급 (예제 4) 또는 Zephyr <code>atomic_t</code>(atomic_c.c)</td></tr><tr><td>zero-latency ISR과 FreeRTOS <code>Atomic_*</code>로 공유</td><td>가끔 값이 틀린다</td><td><code>Atomic_*</code>가 BASEPRI 마스크라 그 ISR을 못 막음</td><td>C11 atomics (LDREX) 또는 SPSC/seqlock</td></tr><tr><td>태스크가 쓰고 ISR이 읽는 데이터에 seqlock</td><td>시스템이 ISR 안에서 멈춘다</td><td>ISR이 홀수 seq에서 영원히 재시도</td><td>더블 버퍼 + 인덱스 (§4.3)</td></tr><tr><td>ISR 맨 끝에서 주변장치 플래그 클리어</td><td>ISR이 두 번씩 불린다 (두 번째는 빈손)</td><td>쓰기 버퍼 · posted write로 클리어가 늦게 도착</td><td>앞에서 클리어, 다시 읽기, <code>dsb</code></td></tr><tr><td>VTOR · CONTROL 변경 뒤 배리어 없음</td><td>드물게 엉뚱한 핸들러 · 스택</td><td>다음 명령이 옛 설정으로 실행</td><td><code>dsb</code> + <code>isb</code></td></tr><tr><td>DMA 디스크립터 쓰기 직후 시작 비트</td><td>M7에서만 DMA가 옛 디스크립터로 동작</td><td>Normal → Device 순서 미보장 + D-cache</td><td><code>dmb</code>(M3/M4), clean + <code>dsb</code>(M7)</td></tr></tbody></table></div>
+<hr>
+<h2 id="11-면접에서-이렇게-말한다">11. 면접에서 이렇게 말한다<a class="anchor" href="#11-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> "Write a lock-free ring buffer between a UART RX ISR and a task. What makes it safe?"</p>
+<p><strong>A.</strong> 크기를 2의 거듭제곱으로 하고 head · tail을 free-running 32비트 카운터로 둔다. 개수는 head − tail, 빔은 같을 때, 가득은 차이가 N일 때다. 안전한 이유는 두 가지다. 소유권 — head는 ISR만, tail은 태스크만 쓴다, 그래서 RMW 레이스가 없다. 순서 — 슬롯에 쓴 다음 head를 올리고, head를 읽은 다음 슬롯을 읽는다. 단일 코어 Cortex-M에서는 그 순서를 컴파일러 배리어로, 코어가 둘이면 release/acquire로 지킨다.</p>
+<blockquote><p>Power-of-two size, free-running 32-bit head and tail; count is head minus tail, empty when equal, full when the difference is N. It's safe for two reasons. Ownership: only the ISR writes head and only the task writes tail, so there's no read-modify-write race. Ordering: the producer writes the slot before publishing head, and the consumer reads head before reading the slot. On a single Cortex-M core a compiler barrier is enough to keep that order; across cores I use release/acquire, which is a DMB on M4 or STL/LDA on M33. I measured it: with only a compiler barrier, a two-core arm64 stress test got about 135 thousand wrong values out of 20 million; with acquire/release, zero.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Why not keep a <code>count</code> field?" → 양쪽이 고치는 변수가 되어 SPSC가 깨진다. "Two producers?" → LDREX 기반 MPSC나 크리티컬 섹션.</p>
+<p><strong>Q.</strong> "Is <code>volatile</code> enough for sharing data with an ISR?"</p>
+<p><strong>A.</strong> 정렬된 32비트 값 하나를 한쪽만 쓸 때는 충분하다. RMW(<code>++</code>)는 원자적이지 않고, <code>volatile</code>은 volatile끼리의 순서만 지키므로 일반 변수(버퍼)와의 순서를 지키지 못한다. GCC -O2가 실제로 플래그 쓰기를 데이터 쓰기 앞으로 옮기는 것을 봤다.</p>
+<blockquote><p>Only for a single aligned word with one writer. <code>volatile</code> doesn't make <code>count++</code> atomic, and it only orders volatile accesses among themselves, so the compiler may move a plain buffer write past the volatile flag. I've seen GCC 14 at -O2 emit the flag store before the payload store on a Cortex-M3; a compiler barrier fixed it, and on QEMU the ISR saw stale payloads only in the unfixed build.</p></blockquote>
+<p><strong>Q.</strong> "How do LDREX and STREX work, and what happens if an interrupt comes in between?"</p>
+<p><strong>A.</strong> LDREX는 읽으면서 로컬 exclusive monitor를 Exclusive로 만들고, STREX는 모니터가 아직 Exclusive일 때만 쓰고 0을 돌려준다. Armv7-M에서는 예외 진입과 복귀가 모니터를 지우므로, 사이에 인터럽트가 끼면 STREX가 1을 받고 루프가 다시 돈다 — ISR이 그 변수를 건드렸든 아니든. 그래서 Cortex-M 컨텍스트 스위치에는 CLREX가 필요 없다. CLREX는 LDREX 뒤에 STREX 없이 빠져나갈 때 쓴다.</p>
+<blockquote><p>LDREX loads and marks the local exclusive monitor; STREX stores only if the monitor is still exclusive and returns 0, otherwise it doesn't store and returns 1, and you retry. On Armv7-M, exception entry and return clear the local monitor, so an interrupt between them always forces a retry — I measured exactly the same 8,888 STREX failures whether the ISR touched the same variable or a different one. That's why FreeRTOS and Zephyr Cortex-M context switches don't issue CLREX; you need CLREX when you bail out after an LDREX without doing the STREX, like a trylock that finds the lock busy.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Does it protect against DMA?" → 아니다. 로컬 모니터는 다른 마스터의 쓰기를 보지 못한다. 글로벌 모니터는 칩마다 다르다.</p>
+<p><strong>Q.</strong> "What do you do on a Cortex-M0, which has no LDREX/STREX?"</p>
+<p><strong>A.</strong> 단일 코어라서 PRIMASK를 저장하고 끄고 RMW하고 복원한다. C11 atomics를 쓰면 GCC가 <code>__atomic_fetch_add_4</code> 같은 호출을 내는데 arm-none-eabi에는 libatomic이 없어서 링크가 안 된다 — 그 함수들을 PRIMASK로 직접 공급한다. Zephyr는 M0에서 <code>ATOMIC_OPERATIONS_C</code>로 같은 일을 한다. 더 좋은 것은 설계로 RMW를 없애는 것(쓰는 사람 하나, SPSC).</p>
+<blockquote><p>Mask interrupts around the read-modify-write, since it's a single core. With C11 atomics, GCC emits calls like <code>__atomic_fetch_add_4</code>, and there's no libatomic in arm-none-eabi, so you get a link error; I provide those functions myself using PRIMASK save and restore, and I report <code>atomic_is_lock_free</code> as false. Zephyr does the same through <code>CONFIG_ATOMIC_OPERATIONS_C</code>. Better still is designing the RMW away — single-writer counters and SPSC rings don't need atomics at all. On a dual-M0+ part like RP2040 that isn't enough, which is why it has hardware spinlocks.</p></blockquote>
+<p><strong>Q.</strong> "When do you actually need DMB, DSB or ISB on a Cortex-M4?"</p>
+<p><strong>A.</strong> 1코어 ISR ↔ 태스크의 일반 RAM 공유에는 필요 없다(컴파일러 배리어면 된다). 필요한 것은 코어 밖의 관찰자와 코어 자신의 상태가 바뀔 때다: DMA 디스크립터를 쓰고 DMA를 시작하기 전 DMB, ISR에서 주변장치 플래그를 지운 뒤 DSB 또는 다시 읽기, VTOR · CONTROL · MPU를 바꾼 뒤 DSB + ISB, WFI 전 DSB, 다른 코어와의 공유 메모리에 DMB, 코드를 복사한 뒤 DSB + ISB.</p>
+<blockquote><p>Not for ISR-to-task sharing in normal RAM on one core — the core sees its own accesses in program order, so a compiler barrier suffices. I need them when something outside the core observes memory or when the core's own configuration changes: DMB between writing a DMA descriptor and kicking the DMA; DSB or a read-back after clearing a peripheral interrupt flag so the ISR isn't re-entered; DSB plus ISB after writing VTOR, CONTROL or the MPU; DSB before WFI; DMB for shared memory with another core; DSB plus ISB after copying code. Arm's AN321 covers these, and the FreeRTOS and Zephyr ports put barriers in exactly those places.</p></blockquote>
+<p><strong>Q.</strong> "An ISR publishes a multi-word value that a task reads. How do you avoid torn reads without disabling interrupts?"</p>
+<p><strong>A.</strong> seqlock. ISR이 seq를 올리고(홀수) 값을 쓰고 seq를 올린다(짝수). 태스크는 seq → 값 → seq를 읽고 둘이 같고 짝수일 때만 쓴다. 1코어에서는 컴파일러 배리어면 된다. 실측에서 그냥 읽기는 20만 번 중 2만 3천 번 찢어졌고 seqlock은 0번, 재시도 2679번이었다. 방향이 반대(태스크가 쓰고 ISR이 읽음)면 ISR은 재시도할 수 없으니 더블 버퍼로 한다.</p>
+<blockquote><p>A sequence counter. The ISR increments it to odd, writes the fields, increments it to even; the task reads the counter, the fields, the counter again, and keeps the copy only if both reads match and are even. On one core, compiler barriers are enough. In my QEMU test the naive reader got 23 thousand torn values out of 200 thousand, the seqlock got zero with about 2.7 thousand retries, and the ISR was never delayed. If the task writes and the ISR reads, I use a double buffer with a single index switch instead, because an ISR can't spin waiting for a task.</p></blockquote>
+<p><strong>Q.</strong> "Is a lock-free queue faster than a critical-section queue on a single-core MCU?"</p>
+<p><strong>A.</strong> 평균 경로는 거의 같다(실측 836 ns vs 1028 ns/byte, QEMU 기준). 차이는 지연이다. 크리티컬 섹션은 매 연산마다 다른 인터럽트를 막고, BASEPRI 위의 zero-latency ISR에서는 커널 API를 쓸 수 없다. 그리고 진짜 속도는 묶음에서 나온다 — stream buffer를 64바이트씩 쓰면 바이트당 540 ns, 바이트마다 큐로 넘기면 7 µs.</p>
+<blockquote><p>Per operation it's roughly a wash — about 0.84 versus 1.03 microseconds per byte in my QEMU measurement. The win is latency and reach: the lock-free ring never masks other interrupts, and it works from a zero-latency ISR above BASEPRI where RTOS calls are forbidden. The bigger performance lever is batching: a FreeRTOS stream buffer moving 64-byte chunks cost 0.54 microseconds per byte, while a queue item per byte cost 7.</p></blockquote>
+<hr>
+<h2 id="12-직접-해보기">12. 직접 해보기<a class="anchor" href="#12-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong> — 감싸는 인덱스(0..N−1) 링에서 N개를 모두 쓰고 싶다면 무엇을 더해야 하나? 그 추가가 SPSC를 깨는 이유는? 정답/힌트: "가득" 플래그나 <code>count</code>가 필요해지는데, 그 변수는 생산자(가득으로)와 소비자(가득 해제로)가 모두 고친다 → RMW 레이스. 그래서 감싸는 인덱스는 한 칸을 비우고, N개를 다 쓰려면 free-running으로 간다.</li><li><strong>코드</strong> — 예제 8(<code>ex6_uart.c</code>)을 <code>EXTRA_CFLAGS=-DORDER=2</code>와 <code>-DORDER=1</code>로 다시 빌드해 돌려 보라. 결과가 같은가? ORDER 1이 통과했다고 안전하다고 할 수 있나? 정답/힌트: 둘 다 RX 20,002~20,003, 순서 오류 0으로 통과했다(직접 확인). ORDER 1은 이번 빌드에서 컴파일러가 우연히 순서를 지켰을 뿐이다 — 예제 11처럼 주변 코드가 바뀌면 깨질 수 있다. 생성 코드(<code>objdump</code>)에서 <code>strb</code> → <code>str head</code> 순서를 확인해야 "이 빌드는 맞다"까지만 말할 수 있다.</li><li><strong>코드</strong> — <code>spsc.h</code>에 <code>spsc_write(r, src, n)</code> / <code>spsc_read(r, dst, n)</code>(여러 바이트를 한 번에, head/tail은 마지막에 한 번만 갱신)을 추가하고 예제 9에 행을 더해 바이트당 비용을 재 보라. 정답/힌트: 슬롯이 끝에서 감기는 경우 memcpy를 두 번으로 나눈다. 배리어(ORDER 0이면 DMB)는 n바이트에 한 번이라 바이트당 비용이 stream buffer 64 B 덩어리(540 ns)보다 낮아져야 한다.</li><li><strong>측정</strong> — 예제 1의 TIMER0 주기를 97에서 997, 9997로 늘려 STREX 실패 횟수가 어떻게 변하는지 재 보라. 실패율(실패 ÷ ISR 수)은? 정답/힌트: ISR 수가 줄어드는 만큼 실패도 준다. 실패율은 "ISR이 LDREX~STREX 창에 들어올 확률"이라 위상에 따라 0~50% 사이에서 결정적으로 정해진다 — 주기마다 다르게 나오는 것이 정상이다.</li><li><strong>개념</strong> — 듀얼코어 M7+M4 칩에서 M4의 ISR이 생산자, M7의 태스크가 소비자인 링을 공유 SRAM에 둔다. <code>spsc.h</code>의 어떤 ORDER를 써야 하고, 그 밖에 무엇이 더 필요한가? 정답/힌트: ORDER 0(또는 3). M7에 D-cache가 있으면 링 영역을 MPU로 non-cacheable(또는 shareable)로 두거나 소비자가 읽기 전 invalidate, 생산자가 쓴 뒤 clean. 상대 코어를 깨우는 것은 하드웨어 세마포어/메일박스 인터럽트 — 그 레지스터 쓰기 전에 <code>dmb</code>.</li><li><strong>코드</strong> — 예제 5의 seqlock을 "태스크가 쓰고 ISR이 읽는" 방향으로 바꿔 돌려 보라. 무슨 일이 일어나나? 그다음 §4.3의 더블 버퍼로 고쳐라. 정답/힌트: ISR이 태스크의 쓰기 도중(홀수 seq)에 들어오면 재시도 루프에서 빠져나오지 못한다(태스크가 다시 돌 수 없으니까). QEMU가 멈추고 timeout으로 끝난다. 더블 버퍼로 바꾸면 ISR은 인덱스를 한 번 읽고 끝난다.</li><li><strong>조사</strong> — 쓰는 칩(예: STM32F4 · H7, nRF52, RP2040)의 레퍼런스 매뉴얼에서 ① 글로벌 exclusive monitor가 있는 메모리 영역, ② 하드웨어 세마포어 · 스핀락 블록의 유무를 찾아 표로 만들어라. 정답/힌트: 단일 코어 칩은 보통 ①에 대한 언급이 없고(로컬 모니터만), 멀티코어 칩은 HSEM(STM32H7) · SIO spinlock(RP2040) 같은 블록을 둔다.</li></ol>
+<hr>
+<h2 id="13-용어-사전">13. 용어 사전<a class="anchor" href="#13-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>lock-free</td><td>락 없는</td><td>누구도 다른 쪽을 기다리게 만들지 않고, 끼어들어도 일관된 값을 보는 설계</td></tr><tr><td>SPSC</td><td>single-producer single-consumer</td><td>쓰는 쪽 하나 · 읽는 쪽 하나라는 사용 규칙. 인덱스마다 쓰는 사람이 하나</td></tr><tr><td>free-running index</td><td>감싸지 않는 인덱스</td><td>누적 개수로 계속 증가, 슬롯은 <code>&amp; (N − 1)</code></td></tr><tr><td>RMW</td><td>read-modify-write</td><td>읽고 고치고 쓰기. 명령 세 개라 사이에 끼어들 수 있다</td></tr><tr><td>tearing</td><td>찢어진 읽기</td><td>여러 명령으로 읽는 값의 앞뒤가 다른 시점의 것</td></tr><tr><td>LDREX / STREX</td><td>load/store exclusive</td><td>표시하고 읽기 / 표시가 살아 있으면 쓰기(0), 아니면 실패(1)</td></tr><tr><td>CLREX</td><td>clear exclusive</td><td>로컬 모니터 표시 지우기. LDREX 뒤 STREX 없이 빠질 때</td></tr><tr><td>local monitor</td><td>로컬 exclusive 모니터</td><td>코어 안의 상태 기계. 예외 진입/복귀에 지워진다(v7-M)</td></tr><tr><td>global monitor</td><td>글로벌 exclusive 모니터</td><td>코어 밖에서 다른 마스터의 쓰기를 본다. 칩마다 다름</td></tr><tr><td>single-copy atomicity</td><td>단일 복사 원자성</td><td>정렬된 워드 이하 단일 접근은 쪼개지지 않는다</td></tr><tr><td>compiler barrier</td><td>컴파일러 배리어</td><td><code>asm volatile("" ::: "memory")</code>. 명령 0개, 컴파일러 재배치만 막음</td></tr><tr><td>DMB</td><td>data memory barrier</td><td>앞 접근이 뒤 접근보다 먼저 보이게</td></tr><tr><td>DSB</td><td>data synchronization barrier</td><td>앞 접근이 끝날 때까지 다음 명령 실행 안 함</td></tr><tr><td>ISB</td><td>instruction synchronization barrier</td><td>파이프라인을 비우고 새 상태로 명령을 다시 가져옴</td></tr><tr><td>acquire / release</td><td>획득 / 해제 순서</td><td>뒤 접근이 앞으로 못 옴 / 앞 접근이 뒤로 못 감 (EL F5)</td></tr><tr><td><code>lda</code> / <code>stl</code></td><td>load-acquire / store-release</td><td>Armv8-M Mainline의 acquire/release 명령</td></tr><tr><td>seqlock</td><td>시퀀스 락</td><td>쓰는 쪽은 seq 홀짝으로 표시, 읽는 쪽은 앞뒤 seq 비교 후 재시도</td></tr><tr><td>double buffer</td><td>더블 버퍼</td><td>복사본 둘 + 인덱스 하나를 원자적으로 바꾸기</td></tr><tr><td>write buffer</td><td>쓰기 버퍼</td><td>STR을 받아 두고 CPU는 다음 명령으로 가는 코어 쪽 버퍼</td></tr><tr><td>posted write</td><td>게시된 쓰기</td><td>버스 · 브리지가 먼저 "받았다"고 답하고 나중에 전달하는 쓰기</td></tr><tr><td>bit-banding</td><td>비트 밴딩</td><td>M3/M4 옵션. 별칭 주소 쓰기 하나로 비트 하나를 원자적으로 RMW</td></tr><tr><td>libatomic</td><td>원자 연산 라이브러리</td><td>컴파일러가 하드웨어로 못 하는 atomic을 부르는 대상. arm-none-eabi에는 없음</td></tr><tr><td><code>ATOMIC_OPERATIONS_C</code></td><td>Zephyr Kconfig</td><td>atomic_t를 C + irq lock으로 구현 (Armv6-M)</td></tr></tbody></table></div>
+<hr>
+<h2 id="14-요약-체크리스트">14. 요약 &amp; 체크리스트<a class="anchor" href="#14-요약-체크리스트" aria-label="link">#</a></h2>
+<p>단일 코어 Cortex-M에서 ISR ↔ 태스크가 깨지는 방식은 셋이다 — RMW가 쪼개지고, 여러 워드 읽기가 찢어지고, 순서가 바뀐다. 락 없이 고치는 도구는 각각 LDREX/STREX(C11 atomics), seqlock · 더블 버퍼, 그리고 소유권 + 순서 규칙을 지키는 SPSC 링버퍼다. LDREX/STREX는 예외 진입/복귀가 로컬 모니터를 지우는 Armv7-M 규칙 덕분에 ISR에 대해 정확히 동작하고(예제 1: 같은 변수든 다른 변수든 실패 8888회), M0에는 없어서 C11 atomics가 라이브러리 호출이 되고 arm-none-eabi에서는 링크조차 안 된다(예제 3) — PRIMASK로 직접 공급한다(예제 4). SPSC 링의 순서 규칙은 1코어에서는 컴파일러 배리어로 충분하지만(CPU는 자기 순서를 지킨다), 컴파일러 배리어가 없으면 GCC -O2가 실제로 순서를 바꾸고(예제 11), 코어가 둘이면 컴파일러 배리어만으로는 2천만 개 중 13만 개가 틀린다(예제 7). DMB/DSB/ISB는 1코어 ISR ↔ 태스크가 아니라 DMA · 주변장치 · 다른 코어 · VTOR/CONTROL/MPU · WFI · 코드 복사에 필요하다. 단일 코어에서 락 없는 링의 평균 비용은 PRIMASK 링과 비슷하고(836 vs 1028 ns/byte), 진짜 이득은 다른 인터럽트의 지연을 늘리지 않는 것과 zero-latency ISR에서 쓸 수 있다는 것, 그리고 묶어서 넘기는 설계다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>SPSC 링을 화이트보드에 쓰고 가득/빔 판정과 소유권 표를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"데이터 → head" 순서에 1코어는 컴파일러 배리어, 다코어는 release/acquire가 필요한 이유를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>volatile</code>이 모자라는 두 가지(RMW 원자성, 일반 변수와의 순서)를 예로 들 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>LDREX/STREX/CLREX와 로컬 · 글로벌 모니터, 예외가 모니터를 지우는 규칙을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>CLREX가 필요한 장면(STREX 없이 빠지는 trylock)과 필요 없는 장면(Cortex-M 컨텍스트 스위치)을 구분할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>C11 atomics가 M3 · M33 · M0에서 무엇으로 컴파일되는지 objdump로 보일 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>M0에서 <code>__atomic_*_4</code>를 PRIMASK로 공급하고 그 한계(멀티코어 · DMA)를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>seqlock과 더블 버퍼를 언제 쓰는지(쓰는 쪽이 ISR인가 태스크인가) 고를 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>DMB/DSB/ISB가 필요한 7가지 장면을 소스 위치와 함께 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>"ISR 끝에서 플래그를 지우면 두 번 들어온다"의 원인(쓰기 버퍼 · posted write)과 처방을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>FreeRTOS · Zephyr 프리미티브 중 락 없이 도는 것과 IRQ 마스크 기반인 것을 구분할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>QEMU가 보여 줄 수 없는 것(쓰기 버퍼, CPU 재배치, DMB 비용, 캐시)과 대신 무엇으로 검증하는지 말할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="bare-metal-노트와의-관계">Bare-Metal 노트와의 관계<a class="anchor" href="#bare-metal-노트와의-관계" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>BM ID</th><th>BM 주제</th><th>이 노트의 해당 절</th><th>Bare-Metal 쪽에 남길 내용</th></tr></thead><tbody><tr><td>BM J2</td><td>메인 ↔ ISR 데이터 레이스 (찢어진 읽기, RMW)</td><td>§1 분류표, §2.3 예제 1(LDREX로 고친 RMW), §4 seqlock · 더블 버퍼 · 64비트 타임스탬프 표 — 레이스 재현과 PRIMASK · BASEPRI는 RTOS C7</td><td>C7 · D8을 링크하고, 슈퍼 루프에서 "메인 = 유일한 쓰는 쪽"으로 나눠 atomic 없이 끝내는 예 하나</td></tr><tr><td>BM J3</td><td>락 없는 링버퍼 (SPSC, 2의 거듭제곱, 가득/빔, 배리어)</td><td>§5 설계 · <code>spsc.h</code>, §6 검증 · 측정, §6.4 화이트보드 체크리스트</td><td>D8을 링크하고 RTOS 알림 없이 슈퍼 루프가 링을 폴링하는 최소 코드</td></tr><tr><td>BM J4</td><td>원자 연산 (LDREX/STREX · CLREX, C11 atomics, M0 대체)</td><td>§2 전체, §3 전체(예제 2~4), §3.5 Zephyr · FreeRTOS 구현</td><td>D8을 링크하고 CMSIS <code>__LDREXW</code>/<code>__STREXW</code> 이름 대응표 한 줄</td></tr><tr><td>BM J5</td><td>배리어가 필요한 순간 (플래그 클리어 후 DSB, VTOR · CONTROL 후 ISB, DMA 전 DMB, -O2에서만 깨짐)</td><td>§7 전체(그림 8, §7.2 장면별 코드, §7.4 예제 11, §7.6 소스 위치)</td><td>D8을 링크하고 해당 칩 레퍼런스 매뉴얼의 errata · 버스 구조(APB 브리지) 확인 방법</td></tr><tr><td>BM B6</td><td>메모리 타입 · 순서 (쓰기 버퍼 · write posting, "레지스터 쓰기가 늦게 반영")</td><td>§7.1 쓰기 버퍼 · posted write 문단, §7.2 장면 1 · 2</td><td><strong>Normal / Device / Strongly-ordered 메모리 타입의 정의와 MPU 속성</strong>은 Bare-Metal이 주인 — 순서 부분은 D8 링크</td></tr></tbody></table></div>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul class="tasks"><li>FreeRTOS Kernel V11.3.2 소스 (<code>/var/rtoslab/src/FreeRTOS-Kernel</code>): <code>include/stream_buffer.h</code>(단일 writer · reader 경고, line 40~48), <code>stream_buffer.c</code>(<code>xTail</code>/<code>xHead</code> line 234~235, <code>xHead</code> 갱신 line 1058), <code>include/atomic.h</code>(인터럽트 마스크 구현, <code>ATOMIC_ENTER_CRITICAL</code>), <code>portable/GCC/ARM_CM3/portmacro.h</code>(<code>portMEMORY_BARRIER</code> = 컴파일러 배리어 line 257, <code>portYIELD</code>의 dsb/isb와 주석 line 85~94), <code>portable/GCC/ARM_CM3/port.c</code>(tickless <code>dsb</code>/<code>wfi</code>/<code>isb</code> line 596~626), <code>portable/GCC/ARM_CM33/non_secure/port.c</code>(<code>prvSpinTrylock</code>의 ldrex/clrex/strex/dmb line 2443~2482), <code>tasks.c</code>(<code>vTaskSuspendAll</code>의 <code>portMEMORY_BARRIER</code> line 3932, <code>vTaskGenericNotifyGiveFromISR</code>), <code>queue.c</code>(FromISR 크리티컬 섹션), <code>History.txt</code>(V11.3.2 = 2026-10-16)</li><li>Zephyr v4.4.2 소스 (<code>/var/rtoslab/zephyrproject/zephyr</code>): <code>kernel/Kconfig</code>(<code>ATOMIC_OPERATIONS_BUILTIN</code>/<code>_ARCH</code>/<code>_C</code>), <code>arch/arm/core/cortex_m/Kconfig</code>(<code>ARMV6_M_ARMV8_M_BASELINE</code>, <code>ARMV7_M_ARMV8_M_MAINLINE</code>의 select), <code>kernel/atomic_c.c</code>, <code>include/zephyr/sys/atomic.h</code> · <code>atomic_builtin.h</code>, <code>include/zephyr/sys/spsc_lockfree.h</code> · <code>mpsc_lockfree.h</code>, <code>include/zephyr/sys/ring_buffer.h</code> · <code>lib/utils/ring_buffer.c</code> · <code>doc/kernel/data_structures/ring_buffers.rst</code>(Concurrency 절), <code>include/zephyr/sys/spsc_pbuf.h</code> · <code>lib/os/spsc_pbuf.c</code>, <code>include/zephyr/sys/mpsc_pbuf.h</code>, <code>include/zephyr/arch/arm/barrier.h</code>, <code>arch/arm/core/cortex_m/prep_c.c</code> · <code>cpu_idle.c</code> · <code>irq_manage.c</code> · <code>thread.c</code>, <code>arch/arm/core/mpu/arm_mpu.c</code></li><li>CMSIS 6 (<code>modules/hal/cmsis_6/CMSIS/Core/Include/core_cm3.h</code>): <code>__NVIC_DisableIRQ</code>의 <code>__DSB(); __ISB();</code>, <code>__NVIC_SystemReset</code></li><li>Arm, "ARMv7-M Architecture Reference Manual" (DDI 0403) — synchronization primitives(LDREX/STREX/CLREX, local · global monitor, context switch 시 모니터 동작), single-copy atomicity, DMB/DSB/ISB(옵션 SY)</li><li>Arm, "ARMv6-M Architecture Reference Manual" (DDI 0419) — exclusive 명령 없음</li><li>Arm, "Armv8-M Architecture Reference Manual" (DDI 0553) — LDA/STL/LDAEX/STLEX</li><li>Arm, "Application Note 321 — ARM Cortex-M Programming Guide to Memory Barrier Instructions" (DAI 0321)</li><li>GCC 문서 "Built-in Functions for Memory Model Aware Atomic Operations" (<code>__atomic_*</code>, <code>__atomic_always_lock_free</code>) — https://gcc.gnu.org/onlinedocs/gcc/_005f_005fatomic-Builtins.html</li><li>이 노트의 선행 · 연결 노트: RTOS C7(크리티컬 섹션 — 레이스 재현), B3, B7, B8, C10, D5, E1, E6, P4, P5, EL F4(§11 RCU, §12 seqlock), EL F5(§1 컴파일러 배리어, §2 arm64 배리어, §3.5 MP litmus, §5.4 posted write, §6 DMA 순서)</li><li>Anduril C 문제은행 — SPSC 링버퍼 문제 (Don의 인터뷰 준비 자료)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-31_D7_work_deferral.html"><span class="dir">← 이전</span><span class="nm">D7. 작업 위임 — ISR은 짧게 깨우기만, 일은 스레드로: 전용 태스크 · 타이머 daemon · Zephyr workqueue · 게이트키퍼</span></a><a class="next" href="2026-10-31_D9_deadlock_starvation.html"><span class="dir">다음 →</span><span class="nm">D9. 데드락 · 기아 · 라이브락 — "가끔 멈춤"을 재현하고, 대기 그래프와 순위표로 잡는다</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-커널-객체를-부를-시간이-없을-때">0. 큰 그림 — 커널 객체를 부를 시간이 없을 때</a></li><li class="l3"><a href="#bare-metal-linux-다른-rtos-노트와의-경계">Bare-Metal · Linux · 다른 RTOS 노트와의 경계</a></li><li class="l3"><a href="#실습-환경-한-줄">실습 환경 한 줄</a></li><li class="l2"><a href="#1-문제-다시-보기-단일-코어에서-isr-태스크가-깨지는-세-가지-방식">1. 문제 다시 보기 — 단일 코어에서 ISR ↔ 태스크가 깨지는 세 가지 방식</a></li><li class="l2"><a href="#2-ldrex-strex-끼어들었으면-다시-해-를-하드웨어가-알려-준다">2. LDREX / STREX — "끼어들었으면 다시 해" 를 하드웨어가 알려 준다</a></li><li class="l3"><a href="#2-1-직관-은행-창구의-번호표">2.1 직관 — 은행 창구의 번호표</a></li><li class="l3"><a href="#2-2-정의-명령-세-개와-모니터-두-종류">2.2 정의 — 명령 세 개와 모니터 두 종류</a></li><li class="l3"><a href="#2-3-예제-1-c7의-레이스를-ldrex-strex로-고치고-strex-실패를-센다">2.3 예제 1 — C7의 레이스를 LDREX/STREX로 고치고, STREX 실패를 센다</a></li><li class="l3"><a href="#2-4-clrex는-언제-필요한가-포트-소스를-grep한다">2.4 CLREX는 언제 필요한가 — 포트 소스를 grep한다</a></li><li class="l3"><a href="#2-5-예제-1b-m3-m4의-다른-원자-수단-비트-밴딩">2.5 예제 1b — M3/M4의 다른 원자 수단: 비트 밴딩</a></li><li class="l3"><a href="#2-6-ldrex-strex의-함정">2.6 LDREX/STREX의 함정</a></li><li class="l2"><a href="#3-c11-stdatomic-h-m3-m4-m33에서는-명령-m0에서는-라이브러리-호출">3. C11 &lt;stdatomic.h&gt; — M3/M4/M33에서는 명령, M0에서는 라이브러리 호출</a></li><li class="l3"><a href="#3-1-memory_order를-cortex-m-말로-번역하기">3.1 memory_order를 Cortex-M 말로 번역하기</a></li><li class="l3"><a href="#3-2-예제-2-같은-c-함수-7개를-m3-m33-m0으로-컴파일해서-본다">3.2 예제 2 — 같은 C 함수 7개를 M3 · M33 · M0으로 컴파일해서 본다</a></li><li class="l3"><a href="#3-3-예제-3-lock-free인가-를-묻는-세-가지-방법-그리고-링크-에러">3.3 예제 3 — "lock-free인가?"를 묻는 세 가지 방법, 그리고 링크 에러</a></li><li class="l3"><a href="#3-4-예제-4-m0에서-__atomic_를-직접-공급하고-microbit-m0-qemu에서-돌린다">3.4 예제 4 — M0에서 __atomic_를 직접 공급하고 microbit(M0) QEMU에서 돌린다</a></li><li class="l3"><a href="#3-5-rtos들은-어떻게-고르나-zephyr-kconfig와-freertos-atomic-h">3.5 RTOS들은 어떻게 고르나 — Zephyr Kconfig와 FreeRTOS atomic.h</a></li><li class="l2"><a href="#4-여러-워드를-찢어지지-않게-seqlock-재시도-더블-버퍼">4. 여러 워드를 찢어지지 않게 — seqlock · 재시도 · 더블 버퍼</a></li><li class="l3"><a href="#4-1-직관-게시판의-작성-중-표시">4.1 직관 — 게시판의 "작성 중" 표시</a></li><li class="l3"><a href="#4-2-예제-5-3워드-setpoint-그냥-읽기-vs-seqlock-vs-irq-마스크">4.2 예제 5 — 3워드 setpoint: 그냥 읽기 vs seqlock vs IRQ 마스크</a></li><li class="l3"><a href="#4-3-방향이-반대면-태스크가-쓰고-isr이-읽을-때는-seqlock을-쓰지-않는다">4.3 방향이 반대면 — 태스크가 쓰고 ISR이 읽을 때는 seqlock을 쓰지 않는다</a></li><li class="l3"><a href="#4-4-64비트-타임스탬프는-무엇으로">4.4 64비트 타임스탬프는 무엇으로?</a></li><li class="l2"><a href="#5-spsc-링버퍼-설계-소유권-둘-순서-둘">5. SPSC 링버퍼 — 설계: 소유권 둘, 순서 둘</a></li><li class="l3"><a href="#5-1-직관-컨베이어-벨트와-두-사람">5.1 직관 — 컨베이어 벨트와 두 사람</a></li><li class="l3"><a href="#5-2-설계-결정-네-가지">5.2 설계 결정 네 가지</a></li><li class="l3"><a href="#5-3-코드-spsc-h">5.3 코드 — spsc.h</a></li><li class="l3"><a href="#5-4-어디에-무엇이-필요한가-volatile이-모자라는-곳-컴파일러-배리어로-충분한-곳-dmb가-필요한-곳">5.4 어디에 무엇이 필요한가 — volatile이 모자라는 곳, 컴파일러 배리어로 충분한 곳, DMB가 필요한 곳</a></li><li class="l3"><a href="#5-5-예제-6-order-0과-2가-m3와-arm64에서-무엇이-되나">5.5 예제 6 — ORDER 0과 2가 M3와 arm64에서 무엇이 되나</a></li><li class="l2"><a href="#6-spsc-링버퍼-검증하고-실제-isr로-돌리고-잰다">6. SPSC 링버퍼 — 검증하고, 실제 ISR로 돌리고, 잰다</a></li><li class="l3"><a href="#6-1-예제-7-단위-테스트-두-스레드-스트레스-vm-호스트-arm64">6.1 예제 7 — 단위 테스트 + 두 스레드 스트레스 (VM 호스트 arm64)</a></li><li class="l3"><a href="#6-2-예제-8-freertos에서-uart-rx-isr-태스크-태스크-uart-tx-isr">6.2 예제 8 — FreeRTOS에서 "UART RX ISR → 태스크", "태스크 → UART TX ISR"</a></li><li class="l3"><a href="#6-3-예제-9-비용-락-없는-링-vs-크리티컬-섹션-링-vs-뮤텍스-vs-freertos-큐-stream-buffer">6.3 예제 9 — 비용: 락 없는 링 vs 크리티컬 섹션 링 vs 뮤텍스 vs FreeRTOS 큐 · stream buffer</a></li><li class="l3"><a href="#6-4-화이트보드에서-isr과-태스크-사이의-링버퍼를-짜-보라">6.4 화이트보드에서 — "ISR과 태스크 사이의 링버퍼를 짜 보라"</a></li><li class="l2"><a href="#7-dmb-dsb-isb-cortex-m에서-정말-필요한-곳">7. DMB / DSB / ISB — Cortex-M에서 정말 필요한 곳</a></li><li class="l3"><a href="#7-1-세-명령의-차이-그리고-단일-코어-m3-m4에서-보통은-필요-없다-는-말의-정확한-뜻">7.1 세 명령의 차이 — 그리고 단일 코어 M3/M4에서 "보통은 필요 없다"는 말의 정확한 뜻</a></li><li class="l3"><a href="#7-2-예제-10-장면별-코드-빌드만-함-qemu는-쓰기-버퍼-버스-지연을-모델링하지-않는다">7.2 예제 10 — 장면별 코드, 빌드만 함 (QEMU는 쓰기 버퍼 · 버스 지연을 모델링하지 않는다)</a></li><li class="l3"><a href="#7-3-1코어-isr-태스크에-dmb를-넣어야-하나">7.3 1코어 ISR ↔ 태스크에 DMB를 넣어야 하나?</a></li><li class="l3"><a href="#7-4-예제-11-컴파일러-재배치를-1코어-qemu에서-잡는다-o2에서만-깨짐">7.4 예제 11 — 컴파일러 재배치를 1코어 QEMU에서 잡는다 ("-O2에서만 깨짐")</a></li><li class="l3"><a href="#7-5-예제-12-메시지-패싱-litmus를-arm64에서-cortex-m-스타일-코드가-smp에서-버티나">7.5 예제 12 — 메시지 패싱 litmus를 arm64에서: "Cortex-M 스타일" 코드가 SMP에서 버티나</a></li><li class="l3"><a href="#7-6-예제-13-커널-소스는-어디에-배리어를-넣었나">7.6 예제 13 — 커널 소스는 어디에 배리어를 넣었나</a></li><li class="l3"><a href="#7-7-qemu가-보여-주지-못하는-것-정직하게">7.7 QEMU가 보여 주지 못하는 것 — 정직하게</a></li><li class="l2"><a href="#8-rtos-커널-안에서는-무슨-일이-일어나나-무엇이-정말-락-없이-도나">8. RTOS 커널 안에서는 무슨 일이 일어나나 — 무엇이 정말 락 없이 도나</a></li><li class="l3"><a href="#8-1-freertos">8.1 FreeRTOS</a></li><li class="l3"><a href="#8-2-zephyr">8.2 Zephyr</a></li><li class="l3"><a href="#8-3-예제-14-같은-zephyr-앱-atomic_t-spsc_lockfree-ring_buf를-isr-스레드로">8.3 예제 14 — 같은 Zephyr 앱: atomic_t, spsc_lockfree, ring_buf를 ISR ↔ 스레드로</a></li><li class="l3"><a href="#8-4-연결">8.4 연결</a></li><li class="l2"><a href="#9-실무에서-다시-보기">9. 실무에서 다시 보기</a></li><li class="l3"><a href="#9-1-드론-비행-제어기-자이로-dma-더블-버퍼-추정기로-가는-spsc">9.1 드론 비행 제어기 — 자이로 DMA 더블 버퍼 + 추정기로 가는 SPSC</a></li><li class="l3"><a href="#9-2-로봇-관절-모터-컨트롤러-20-khz-foc-isr이-setpoint를-seqlock으로-내보낸다">9.2 로봇 관절 모터 컨트롤러 — 20 kHz FOC ISR이 setpoint를 seqlock으로 내보낸다</a></li><li class="l3"><a href="#9-3-linux-soc-옆의-센서-허브-zephyr">9.3 Linux SoC 옆의 센서 허브 (Zephyr)</a></li><li class="l3"><a href="#9-4-don의-ssd-펌웨어와-이어서">9.4 Don의 SSD 펌웨어와 이어서</a></li><li class="l2"><a href="#10-흔한-실수와-증상">10. 흔한 실수와 증상</a></li><li class="l2"><a href="#11-면접에서-이렇게-말한다">11. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#12-직접-해보기">12. 직접 해보기</a></li><li class="l2"><a href="#13-용어-사전">13. 용어 사전</a></li><li class="l2"><a href="#14-요약-체크리스트">14. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#bare-metal-노트와의-관계">Bare-Metal 노트와의 관계</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

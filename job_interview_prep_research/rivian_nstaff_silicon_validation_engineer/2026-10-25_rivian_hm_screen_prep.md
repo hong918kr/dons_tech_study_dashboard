@@ -1,27 +1,23 @@
 <!-- theme: pastel -->
-# Rivian — Technical Screen 준비 Deck (Iris Lee · 45분)
+# Rivian — Technical Screen 준비 Deck (Manjiang Zhang · 45분)
 
-> **작성일**: 2026-10-25(일) · **갱신**: 2026-10-27(화) · **인터뷰**: ~~2026-10-28(수)~~ → **2026-10-30(금)** 45분 (Don 일정으로 연기 · 시간 확인 필요) · **면접관**: **Iris Lee**, Principal System Engineer @ Rivian (10-28 변경 예상 — 확정 확인 필요) · ~~Manjiang Zhang~~ (이전 예정, §1B에 보관)
-> **같이 볼 것**: [코딩 연습 사이트 (V1–V12 + D)](hmScreenPrep/index.html) · [포지션 컨텍스트](rivian_nstaff_silicon_validation_engineer_context.html)
+> **작성일**: 2026-10-25(일) · **갱신**: 2026-10-28(수) · **인터뷰**: ~~2026-10-28(수)~~ → **2026-10-30(금)** 45분 (Don 일정으로 연기 · 시간 확인 필요) · **면접관**: **Manjiang Zhang**, Sr. Engineer/Manager (Silicon Validation) @ Rivian — 10-28 **다시 Manjiang으로 확정** · ~~Iris Lee~~ (잠시 변경 예정이었음, §1B에 보관)
+> **같이 볼 것**: [코딩 연습 사이트 (V1–V12 + L1–L5 + D)](hmScreenPrep/index.html) · [포지션 컨텍스트](rivian_nstaff_silicon_validation_engineer_context.html)
 > 신뢰도: `[확인됨]` = LinkedIn 경력란·공개 특허·JD · `[추정]` = 그것을 바탕으로 한 판단. LinkedIn은 열람만 했고 연결 요청·팔로우·메시지는 하지 않았다.
 
 ---
 
 ## 0. TL;DR
 
-- **(10-28 변경) 새 면접관 Iris Lee는 25년차 "SW·시스템 사람"이다** [확인됨 — LinkedIn 경력란]: Sunrise Telecom(2002–13, **Ethernet/Fibre Channel 테스트 장비 임베디드 SW**: BER, **RFC 2544 벤치마크**, 트래픽 대역폭 제어, SW+FPGA 팀 매니저) → Huawei(**PCIe fabric, SR-IOV 멀티호스트, PCIe failover**) → Baidu Apollo(**MPSoC 센서 박스**: bootloader·kernel·rootfs, **PCIe switch fabric** 컴퓨트 클러스터, HW 플랫폼 bring-up·양산 지원) → BYTON(차량 플랫폼 bring-up, 카메라·LiDAR·radar·GPS/IMU 통합, **Zynq UltraScale+ MPSoC bootloader·PetaLinux**) → Tensor/AutoX(자율주행 컴퓨트 플랫폼 아키텍처 리드) → **Rivian**(2022-12 **Sr. Manager, System Validation** → 2026-08 **Principal System Engineer**)
-- **함의**: Manjiang(HW)보다 **실제 C 코딩 + Linux/PetaLinux + PCIe 깊이 + 벤치마크 방법론 + 시스템 레벨 검증**을 볼 확률이 높다 [추정]. JD 우대사항 "Zynq Petalinux"·"benchmark tools"·"Ethernet·PCIe"가 이 사람 이력과 거의 겹친다.
-- **Don의 최고 카드 (Iris용)**: ① **PCIe** (Gen3–Gen6 SSD controller FW + Apple PCIe 루트코즈 — 그녀의 Huawei/Baidu PCIe fabric과 같은 언어) ② **테스트 플랫폼·자동화 SDK** (SK hynix — 그녀의 테스트 장비 SW 경력과 같은 결) ③ **성능 측정·튜닝** (Solidigm — RFC 2544식 벤치마크 사고) ④ Solidigm FPGA bring-up
-- **최대 갭**: Zynq PetaLinux 실무 (그녀가 직접 한 것) → §5.5 Q25–Q27 + 코딩 [L1](hmScreenPrep/problems/L1_uio_mmio_poll/index.html)로 개념은 정확히, 실무 없음은 정직하게
-- **새 코딩 문제 L1–L5** (Iris 맞춤): Zynq UIO/`/dev/mem` 레지스터 접근 · PCIe config space 검사 · RFC 2544 throughput · GPS PPS 시간 동기 · lock-free SPSC 링 → §8
-- **Manjiang 분석은 §1B에 그대로 보관**합니다 (그가 HM이고 Iris가 기술 스크리너일 수도 있음 [추정] — 둘 다 2022-12 Rivian 합류, 둘 다 Baidu USA 출신)
+- **(10-29 추가) 전날 2–3시간만 있으면 → [C 기본기 벼락치기](2026-10-29_c_basics_cram.html)**: strcpy·memmove · revstr · atoi · 64-bit timer(hi-lo-hi) · ring buffer · GENMASK/FIELD_PREP·W1C · bit tricks · endian · 개념 퀵파이어. 코드는 `cBasicsCram/cram_all.c` (ALL PASS).
 
-- **(이전 면접관 기준) Manjiang은 20년차 "하드웨어 사람"이다** [확인됨]: Cisco 패킷 프로세서 ASIC(2006–10) → Marvell **Ethernet PHY ASIC**(2010–12) → Brocade FPGA 패킷·암호화(2012–15) → **Baidu USA 자율주행 컴퓨트 HW 아키텍트·팀 리드**(2015–22, FPGA 센서 데이터 처리·알고리즘 가속, L4 차량에 배포) → **Rivian**(2022-12~, 자율주행 실리콘: 아키텍처 리뷰, **FPGA/HAPS 프로토타이핑, silicon bring-up, post-silicon validation, PVT characterization, production SLT**, bring-up용 FPGA 플랫폼 개발)
+- **(10-28 재확정) 면접관 Manjiang은 20년차 "하드웨어 사람"이다** [확인됨]: Cisco 패킷 프로세서 ASIC(2006–10) → Marvell **Ethernet PHY ASIC**(2010–12) → Brocade FPGA 패킷·암호화(2012–15) → **Baidu USA 자율주행 컴퓨트 HW 아키텍트·팀 리드**(2015–22, FPGA 센서 데이터 처리·알고리즘 가속, L4 차량에 배포) → **Rivian**(2022-12~, 자율주행 실리콘: 아키텍처 리뷰, **FPGA/HAPS 프로토타이핑, silicon bring-up, post-silicon validation, PVT characterization, production SLT**, bring-up용 FPGA 플랫폼 개발)
 - **함의**: 이 사람은 SW 알고리즘 퀴즈보다 **"실리콘이 처음 나왔을 때 네가 뭘 어떤 순서로 하느냐"**를 볼 확률이 높다. 질문은 bring-up 순서, FPGA vs silicon 차이, PVT/shmoo, 테스트 자동화, 인터페이스(PCIe·DDR·Ethernet·카메라) 디버깅으로 올 것 [추정]
 - **Don의 최고 카드 3장**: ① Solidigm **RTL freeze 전 FPGA SoC 검증 + Cortex-R bring-up** ② SK hynix **shmoo / 고속 인터페이스 reliability 시스템** (= 그의 PVT characterization 언어) ③ Apple **새 칩 시스템 통합 루트코즈 + factory test-node** (= 그의 SLT 언어)
 - **45분 예상**: 소개 5 → 경험 딥다이브 15 → 기술 질문/디버깅 시나리오 15 → (짧은 코딩 or 설계 5–10) → 역질문 5 [추정]
+- **Iris Lee 건 (10-28 잠깐 변경됐다가 취소)**: 분석은 §1B에 보관. 그때 만든 **§5.5 Q25–Q38**과 **코딩 L1–L5**는 버리지 않음 — PCIe·Zynq Petalinux·Ethernet·벤치마크는 **JD 우대사항**이라 Manjiang도 물을 수 있음. 특히 [L2 PCIe](hmScreenPrep/problems/L2_pcie_cap_walk/index.html)(§5.3 Q16과 연결)와 [L1 Zynq](hmScreenPrep/problems/L1_uio_mmio_poll/index.html)(Q23)는 P1로 유지
 - **역할 해석 (10-27)**: 이 자리는 **silicon validation의 SW 담당**이 맞고, **RTL은 필수가 아님** (JD에 RTL/Verilog 0회, 같은 조직 RTL·DV 공고는 따로 Verilog/UVM 요구). 필요한 건 HW를 SW 쪽에서 정확히 다루는 능력 + RTL은 "읽을 줄 아는 정도"면 플러스 (§0.5)
-- **이번 주 플랜 (10-28 Iris 기준 재조정)**: 수(오늘, 일정 있음) §1 Iris 분석 + §3 TMAY(Iris판) + L2 1개 · 목 L1 → V2 → L3 → L5 + §5.5 Q25–Q38 + 모의 면접 · 금 아침 치트시트만 (§10)
+- **이번 주 플랜 (10-28 Manjiang 재확정 기준)**: 수(오늘, 일정 있음) §1 + §3 TMAY + S1/S2 숫자 · 목 V2 → V1 → V3 → V7 + D + §5.1·§5.3 + 모의 면접 · 금 아침 치트시트만 (§10)
 
 ---
 
@@ -178,11 +174,51 @@ Then I file it with the minimal repro, the build ID and the expected-versus-actu
 
 ---
 
-## 1. 면접관 분석 — Iris Lee (10-28 변경 예상)
+## 1. 면접관 분석 — Manjiang Zhang (10-28 재확정)
+
+### 1.1 경력 [확인됨 — LinkedIn 경력란]
+| 기간 | 회사 · 직함 | 한 일 (원문 요약) |
+|---|---|---|
+| 2022-12 – 현재 (3년 11개월) | **Rivian** · Sr. Engineer/Manager · Palo Alto on-site | 자율주행 실리콘 개발: architecture reviews, **FPGA/HAPS prototyping**, **silicon bring-up**, **post-silicon validation**, **PVT characterization**, **production-level SLT**. bring-up·검증용 FPGA 기반 플랫폼 개발 |
+| 2015-09 – 2022-12 (7년 4개월) | **Baidu USA** · Sr. Hardware Architect and Team Lead | 자율주행 차량용 compute HW 팀 구축·리드: **FPGA sensor data processing**, SW 알고리즘 가속. Baidu·Apollo 파트너 L4 차량에 HW/SW 플랫폼 배포, **road test 이슈 해결** |
+| 2012-12 – 2015-09 | Brocade · Sr. Hardware Engineer | FPGA 기반 패킷 처리·데이터 암호화·보안 프로토콜 HW |
+| 2010-12 – 2012-12 | Marvell · Sr. Hardware Design Engineer | **Ethernet PHY ASIC** 설계 |
+| 2006-12 – 2010-12 | Cisco · Hardware Engineer | 하이엔드 스위치용 **packet processor 칩** 여러 개 설계 |
+| 학력 | Shandong University | — |
+
+- 위치: Sunnyvale 거주, 근무는 Palo Alto on-site [확인됨]. Don과 2nd 연결(공통 지인 7명) [확인됨]
+
+### 1.2 공개 특허 (Baidu USA, 공동 발명자) [확인됨 — Justia 특허 목록 [2]]
+- **센서 데이터 timestamping** (2018 출원, 2021 등록) · **센서 동기화의 온라인 검증**
+- **Sensor processing unit 진단**: 센서 처리 앱을 로드·테스트, **UART 또는 Ethernet** 링크 사용
+- 차량 호스트 시스템의 compute node 간 **clock synchronization**(외부 시간원 대비 캘리브레이션) (2022)
+- **Secure boot**: 부팅 중 스토리지 파티션의 marker 기반 검증 (2022)
+- **다중 카메라 스트림**을 체인 연결된 data-gathering node로 결합 (2025, Apollo/Baidu)
+
+### 1.3 이 사람이 뭘 중요하게 볼까 [추정]
+| 신호 | 근거 | Don이 할 것 |
+|---|---|---|
+| **Bring-up 순서·방법론** | 현재 업무 = bring-up · post-si validation | "첫 실리콘이 오면 첫 주에 뭘 하나"를 순서대로 말할 수 있게 (§5.1 Q1) |
+| **FPGA/HAPS ↔ silicon 갭** | FPGA/HAPS 프로토타이핑 + bring-up 플랫폼 직접 개발 | Solidigm FPGA 경험을 "무엇이 FPGA에선 안 보이고 실리콘에서만 보였나"로 말하기 |
+| **PVT · shmoo · margin** | PVT characterization | SK hynix shmoo 이야기 = 같은 언어. Vmin/Fmax, corner, temperature inversion |
+| **SLT vs ATE** | production SLT | Apple factory test-node, SK hynix chamber 시스템 → SLT 관점으로 재포장 |
+| **Ethernet·패킷·카메라·시간동기** | Marvell PHY, Cisco, Baidu 센서·특허 | 우대사항 갭이지만 개념은 정확히 (§5.3, V9/V10/V12) |
+| **현장 문제 해결** | "resolved road test issues" | 필드/고객 이슈 루트코즈 스토리 (SK hynix 고객 telemetry, Apple) |
+| **SW를 HW 팀의 도구로** | 매니저로서 SW 엔지니어에게 기대하는 것 | 자동화·커버리지·벤치마크 툴을 "검증팀 속도를 올리는 도구"로 말하기 |
+
+- HW 출신이라 **C 코드는 실무형**(레지스터·메모리 테스트·DMA)으로 짧게 물을 가능성 > LeetCode [추정]. 그래도 짧은 코딩 대비는 연습 사이트로.
+- **Iris 때 만든 자료 중 Manjiang에게도 쓸 것**: PCIe 링크 디버깅(Q16) ↔ [L2](hmScreenPrep/problems/L2_pcie_cap_walk/index.html) · Zynq(Q23) ↔ §5.5 Q25–Q27 · [L1](hmScreenPrep/problems/L1_uio_mmio_poll/index.html) · 벤치마크(Q9) ↔ Q31 RFC 2544 · 센서 sync(Q24, 그의 특허) ↔ [L4](hmScreenPrep/problems/L4_pps_time_discipline/index.html)
+- 영어: 비원어민 매니저일 가능성 → **천천히, 구조적으로(First/Second/Third), 숫자로** 말하기가 가장 잘 먹힘 [추정]
+
+---
+
+## 1B. (변경 취소) Iris Lee — 참고용 보관
+
+> 10-28 오전에 면접관이 Iris Lee로 바뀐다고 했다가 같은 날 다시 Manjiang으로 확정됨. 온사이트 4라운드에서 만날 수 있으니 분석은 남겨 둔다.
 
 > LinkedIn은 프로필·경력 페이지 두 장만 **열람**했다 (연결 요청·팔로우·메시지·클릭 없음). LinkedIn이 profile search limit 안내를 띄워 학력 등 나머지는 보지 않았다.
 
-### 1.1 경력 [확인됨 — LinkedIn 경력란, 2026-10-28 열람]
+### 1B.1 경력 [확인됨 — LinkedIn 경력란, 2026-10-28 열람]
 | 기간 | 회사 · 직함 | 한 일 (원문 요약) |
 |---|---|---|
 | 2026-08 – 현재 | **Rivian** · **Principal System Engineer** · Palo Alto | (설명 없음) — 매니저에서 시니어 IC로 전환 |
@@ -196,7 +232,7 @@ Then I file it with the minimal repro, the build ID and the expected-versus-actu
 - 위치: San Jose 거주 [확인됨]. Don과 2nd 연결(공통 지인 4명) [확인됨]. 최근 게시물 없음.
 - Manjiang과 **같은 시기(2022-12) Rivian 합류**, 둘 다 **Baidu USA 자율주행** 출신 [확인됨] → 같은 팀을 함께 꾸린 사이일 가능성 [추정]
 
-### 1.2 이 사람이 뭘 중요하게 볼까 [추정]
+### 1B.2 이 사람이 뭘 중요하게 볼까 [추정]
 | 신호 | 근거 | Don이 할 것 |
 |---|---|---|
 | **실제로 돌아가는 C 코드** | Staff/Sr Staff SW 엔지니어·SW 매니저 20년 | 30분짜리 코딩을 깔끔하게: API → 에러 처리 → 테스트 순 (§8, L1–L5) |
@@ -211,7 +247,7 @@ Then I file it with the minimal repro, the build ID and the expected-versus-actu
 - **코딩 확률이 Manjiang보다 높다** [추정]. 공유 에디터에서 C로 30분 정도를 가정하고 연습. 언어를 고를 수 있으면 C (JD 필수 = Embedded C).
 - Principal(IC)이라 **기술 디테일을 끝까지 파고들 수 있다**. 모르는 건 "I don't know, here's how I'd find out"이 제일 낫다.
 
-### 1.3 Don ↔ Iris 접점 (스몰토크·연결 고리)
+### 1B.3 Don ↔ Iris 접점 (스몰토크·연결 고리)
 - **PCIe**: 그녀의 Huawei SR-IOV/fabric ↔ Don의 PCIe Gen6 controller + NVMe. "multi-host"나 "failover"가 나오면 NVMe의 multi-path, SR-IOV VF 개념과 연결
 - **테스트 장비 SW** ↔ SK hynix 테스트 플랫폼 SDK (S5): "I've built the test platform side too"
 - **벤치마크** ↔ Solidigm perf 튜닝 (S7): 측정 → 병목 → 개선 숫자
@@ -219,46 +255,20 @@ Then I file it with the minimal repro, the build ID and the expected-versus-actu
 
 ---
 
-## 1B. (이전 면접관) Manjiang Zhang — 참고용 보관
-
-### 1B.1 경력 [확인됨 — LinkedIn 경력란]
-| 기간 | 회사 · 직함 | 한 일 (원문 요약) |
-|---|---|---|
-| 2022-12 – 현재 (3년 11개월) | **Rivian** · Sr. Engineer/Manager · Palo Alto on-site | 자율주행 실리콘 개발: architecture reviews, **FPGA/HAPS prototyping**, **silicon bring-up**, **post-silicon validation**, **PVT characterization**, **production-level SLT**. bring-up·검증용 FPGA 기반 플랫폼 개발 |
-| 2015-09 – 2022-12 (7년 4개월) | **Baidu USA** · Sr. Hardware Architect and Team Lead | 자율주행 차량용 compute HW 팀 구축·리드: **FPGA sensor data processing**, SW 알고리즘 가속. Baidu·Apollo 파트너 L4 차량에 HW/SW 플랫폼 배포, **road test 이슈 해결** |
-| 2012-12 – 2015-09 | Brocade · Sr. Hardware Engineer | FPGA 기반 패킷 처리·데이터 암호화·보안 프로토콜 HW |
-| 2010-12 – 2012-12 | Marvell · Sr. Hardware Design Engineer | **Ethernet PHY ASIC** 설계 |
-| 2006-12 – 2010-12 | Cisco · Hardware Engineer | 하이엔드 스위치용 **packet processor 칩** 여러 개 설계 |
-| 학력 | Shandong University | — |
-
-- 위치: Sunnyvale 거주, 근무는 Palo Alto on-site [확인됨]. Don과 2nd 연결(공통 지인 7명) [확인됨]
-
-### 1B.2 공개 특허 (Baidu USA, 공동 발명자) [확인됨 — Justia 특허 목록 [2]]
-- **센서 데이터 timestamping** (2018 출원, 2021 등록) · **센서 동기화의 온라인 검증**
-- **Sensor processing unit 진단**: 센서 처리 앱을 로드·테스트, **UART 또는 Ethernet** 링크 사용
-- 차량 호스트 시스템의 compute node 간 **clock synchronization**(외부 시간원 대비 캘리브레이션) (2022)
-- **Secure boot**: 부팅 중 스토리지 파티션의 marker 기반 검증 (2022)
-- **다중 카메라 스트림**을 체인 연결된 data-gathering node로 결합 (2025, Apollo/Baidu)
-
-### 1B.3 이 사람이 뭘 중요하게 볼까 [추정]
-| 신호 | 근거 | Don이 할 것 |
-|---|---|---|
-| **Bring-up 순서·방법론** | 현재 업무 = bring-up · post-si validation | "첫 실리콘이 오면 첫 주에 뭘 하나"를 순서대로 말할 수 있게 (§5.1 Q1) |
-| **FPGA/HAPS ↔ silicon 갭** | FPGA/HAPS 프로토타이핑 + bring-up 플랫폼 직접 개발 | Solidigm FPGA 경험을 "무엇이 FPGA에선 안 보이고 실리콘에서만 보였나"로 말하기 |
-| **PVT · shmoo · margin** | PVT characterization | SK hynix shmoo 이야기 = 같은 언어. Vmin/Fmax, corner, temperature inversion |
-| **SLT vs ATE** | production SLT | Apple factory test-node, SK hynix chamber 시스템 → SLT 관점으로 재포장 |
-| **Ethernet·패킷·카메라·시간동기** | Marvell PHY, Cisco, Baidu 센서·특허 | 우대사항 갭이지만 개념은 정확히 (§5.3, V9/V10/V12) |
-| **현장 문제 해결** | "resolved road test issues" | 필드/고객 이슈 루트코즈 스토리 (SK hynix 고객 telemetry, Apple) |
-| **SW를 HW 팀의 도구로** | 매니저로서 SW 엔지니어에게 기대하는 것 | 자동화·커버리지·벤치마크 툴을 "검증팀 속도를 올리는 도구"로 말하기 |
-
-- HW 출신이라 **C 코드는 실무형**(레지스터·메모리 테스트·DMA)으로 짧게 물을 가능성 > LeetCode [추정]. 그래도 짧은 코딩 대비는 연습 사이트로.
-- 영어: 비원어민 매니저일 가능성 → **천천히, 구조적으로(First/Second/Third), 숫자로** 말하기가 가장 잘 먹힘 [추정]
-
----
-
 ## 2. 45분 예상 구성 & 전략
 
-**Iris 기준 (10-28)** [추정]
+**Manjiang 기준 (10-28 재확정)** [추정]
+```
+0–5   인사 · 팀 소개 · "Tell me about yourself"          → §3 (90초, 마지막 문장으로 관심 유도)
+5–20  레쥬메 딥다이브: Solidigm FPGA/bring-up, shmoo, Apple → §4 스토리 S1–S4
+20–35 기술 질문: bring-up 순서, PVT, PCIe/DDR, 디버깅 시나리오 → §5 · §7
+35–40 (가능) 짧은 C 문제 or 검증 설계 화이트보드        → §6 · §8
+40–45 역질문                                              → §9
+```
+
+<details>
+<summary>(취소) Iris 기준 구성</summary>
+
 ```
 0–5   인사 · 팀 소개 · "Tell me about yourself"                → §3 Iris판 (90초)
 5–15  레쥬메 딥다이브: PCIe · 테스트 플랫폼 자동화 · 성능 튜닝    → §4 S8 · S5 · S7 · S1
@@ -269,17 +279,6 @@ Then I file it with the minimal repro, the build ID and the expected-versus-actu
 - **코딩 원칙**: 질문 먼저 (입력 크기·에러 처리·스레드 여부) → 시그니처 → 정상 케이스 → 엣지 → 코드 → 테스트 하나를 손으로 돌리기 → "실제 HW/Linux에서 달라지는 것" 한 마디
 - **Linux 질문 원칙**: 실무 범위를 정확히. "I've built kernels and device trees in QEMU labs; I haven't shipped a PetaLinux product" 식으로 경계를 먼저 말하고 개념은 자신 있게
 
-<details>
-<summary>(이전) Manjiang 기준 구성</summary>
-
-```
-0–5   인사 · 팀 소개 · "Tell me about yourself"          → §3 (90초, 마지막 문장으로 관심 유도)
-5–20  레쥬메 딥다이브: Solidigm FPGA/bring-up, shmoo, Apple → §4 스토리 S1–S4
-20–35 기술 질문: bring-up 순서, PVT, PCIe/DDR, 디버깅 시나리오 → §5 · §7
-35–40 (가능) 짧은 C 문제 or 검증 설계 화이트보드        → §6 · §8
-40–45 역질문                                              → §9
-```
-
 </details>
 
 - **원칙 1 — 그림을 그리며 말하라**: "Let me walk through it in the order I'd actually do it on first silicon." 순서·단계로 답하면 따라오기 쉽다
@@ -289,7 +288,18 @@ Then I file it with the minimal repro, the build ID and the expected-versus-actu
 
 ---
 
-## 3. Tell me about yourself — Iris 버전 (영어, 90초)
+## 3. Tell me about yourself — Manjiang 버전 (영어, 90초)
+
+> I'm Don. I've spent about eight years at the boundary between silicon and software, mostly on the validation side.
+> At SK hynix and Solidigm, I started by building the test platform that ran chip-reliability tests across large thermal-chamber systems, and I built shmoo and margin-testing features for the high-speed interfaces between the controller, DRAM and NAND — PCIe Gen3 to Gen5.
+> Then, as a Staff firmware engineer on the PCIe Gen6 SSD controller, I did pre-silicon work on FPGA prototypes before RTL freeze: bringing up Cortex-R8, R82 and M0+ cores, the PCIe and NVMe subsystem, DMA, I2C, SPI, and SRAM and DRAM, writing bare-metal C tests, and working with the design engineers on root cause. When silicon came back, I tuned performance together with the silicon validation team.
+> Since late 2025 I've been at Apple in wireless chipset integration, where I own root cause when a new chip meets the full system — PCIe, I2C, SPMI and RFFE failures, from the scope and protocol analyzer up — and I designed factory test nodes that catch latent defects before mass production.
+> So the path from FPGA prototype to bring-up, to characterization, to production test is the work I know. What excites me here is applying it to an AI accelerator that ends up in a vehicle.
+
+- 마지막 문장 다음 침묵 → 그가 "FPGA" 또는 "shmoo" 중 하나를 집어 물어볼 것. 둘 다 S1·S2로 준비됨
+
+<details>
+<summary>(취소) Iris 버전 TMAY</summary>
 
 > ⚠ 사실과 다른 표현이 있으면 고쳐서 쓰세요 (특히 "end to end from the host" 부분).
 
@@ -301,25 +311,13 @@ Then I file it with the minimal repro, the build ID and the expected-versus-actu
 
 - 마지막 문장 다음 → 그녀가 **PCIe**나 **테스트 플랫폼**, **perf**를 집어 물을 확률이 높음 → S8 · S5 · S7
 
-<details>
-<summary>(이전) Manjiang 버전 TMAY</summary>
-
-
-> I'm Don. I've spent about eight years at the boundary between silicon and software, mostly on the validation side.
-> At SK hynix and Solidigm, I started by building the test platform that ran chip-reliability tests across large thermal-chamber systems, and I built shmoo and margin-testing features for the high-speed interfaces between the controller, DRAM and NAND — PCIe Gen3 to Gen5.
-> Then, as a Staff firmware engineer on the PCIe Gen6 SSD controller, I did pre-silicon work on FPGA prototypes before RTL freeze: bringing up Cortex-R8, R82 and M0+ cores, the PCIe and NVMe subsystem, DMA, I2C, SPI, and SRAM and DRAM, writing bare-metal C tests, and working with the design engineers on root cause. When silicon came back, I tuned performance together with the silicon validation team.
-> Since late 2025 I've been at Apple in wireless chipset integration, where I own root cause when a new chip meets the full system — PCIe, I2C, SPMI and RFFE failures, from the scope and protocol analyzer up — and I designed factory test nodes that catch latent defects before mass production.
-> So the path from FPGA prototype to bring-up, to characterization, to production test is the work I know. What excites me here is applying it to an AI accelerator that ends up in a vehicle.
-
-- 마지막 문장 다음 침묵 → 그가 "FPGA" 또는 "shmoo" 중 하나를 집어 물어볼 것. 둘 다 S1·S2로 준비됨
-
 </details>
 
 ---
 
 ## 4. 경험 딥다이브 — 스토리 뱅크 (STAR, 영어 핵심 문장)
 
-**Iris 기준 우선순위 (10-28)**: **S8 PCIe** → **S5 테스트 플랫폼 SDK** → **S7 perf 튜닝** → S1 FPGA bring-up → S3 Apple 루트코즈 → S4 factory test-node. (S2 shmoo는 물어보면)
+**Manjiang 기준 우선순위 (10-28 재확정)**: **S1 FPGA bring-up** → **S2 shmoo** → **S3 Apple 루트코즈** → **S4 factory test-node** → S7 perf → S8 PCIe(Q16 PCIe 질문이 나오면) → S5 자동화
 
 > ⚠ `[ ]` 칸은 Don이 실제 숫자로 채울 것. 숫자 없는 스토리는 약하다. 기밀은 "a PCIe controller block", "a wireless chipset"처럼 일반화.
 
@@ -361,7 +359,7 @@ Then I file it with the minimal repro, the build ID and the expected-versus-actu
 - **영어 핵심**: "We measured throughput and latency at each stage of the data path, found the bottleneck was [ ], and got [ ]% back."
 - **Iris 꼬리질문 대비**: 어떻게 측정했나(어느 지점에 timestamp? 측정 오버헤드?) · 반복성(몇 번, p50/p99) · "throughput"의 정의(손실 없는 최대 rate? QD는?) → RFC 2544 사고방식으로 답 (Q31)
 
-### S8 · PCIe 이슈 루트코즈 (Solidigm Gen6 controller 또는 Apple) — Iris 1순위 (10-28 추가)
+### S8 · PCIe 이슈 루트코즈 (Solidigm Gen6 controller 또는 Apple) — Q16 대비 (10-28 추가)
 - **S**: [ ] (예: Gen[ ] x[ ] 링크가 특정 호스트/조건에서 downtrain · enumeration 실패 · AER 에러 증가 · warm reset 후 디바이스 사라짐)
 - **T**: 내 역할 [ ] — controller FW 쪽 / 시스템 통합 쪽 루트코즈 owner
 - **A**: LTSSM 상태·링크 상태 레지스터 확인 → 프로토콜 애널라이저로 TS1/TS2·equalization 단계 확인 → AER/에러 카운터 → [원인 좁히기: 보드 SI / refclk / PERST# 타이밍 / FW 초기화 순서 / 호스트 BIOS 설정]
@@ -578,7 +576,9 @@ Zynq = Arm processing system (PS: Cortex-A9/A53 + R5 on MPSoC) + FPGA fabric (PL
 Timestamp at the hardware frame-start event (SOF at the CSI-2 receiver), all on one PTP-disciplined clock (gPTP / IEEE 802.1AS on automotive Ethernet). Check per-stream frame-counter gaps, period jitter, and inter-camera skew per frame against a limit; validate end-to-end with a physical reference (LED strobe visible to all cameras, scope on trigger lines). Read 64-bit timestamps carefully (latched hi/lo) to avoid tearing. → [V12](hmScreenPrep/problems/V12_frame_timestamp_check/index.html)
 </details>
 
-### 5.5 Iris 맞춤 — Linux · Zynq · PCIe · 벤치마크 · 센서 · 시스템 검증 (10-28 추가)
+### 5.5 Linux · Zynq · PCIe · 벤치마크 · 센서 · 시스템 검증 (10-28 Iris용으로 추가)
+
+> Manjiang 재확정 후: 우선순위는 낮지만 JD 우대사항과 겹친다. **Q25(Zynq 부트) · Q28–Q30(PCIe) · Q31(RFC 2544) · Q32(BER)**만 훑어 두기.
 
 <details>
 <summary>Q25. Walk me through the boot flow of a Zynq UltraScale+ MPSoC running PetaLinux.</summary>
@@ -791,28 +791,35 @@ Teardown is automatic with `devm_*`. For quick register poking during validation
 
 👉 **[hmScreenPrep/index.html](hmScreenPrep/index.html)** — 각 문제: 영어 문제 + `stub.c` + 테스트 + 한국어 풀이 + 차트 + 면접관 포인트. 실행: `cd hmScreenPrep && ./run.sh V2` / `./run.sh V2 sol` / `./check_all.sh`
 
-**Iris 기준 우선순위 (10-28 재정렬)** — L은 새로 만든 Iris 맞춤 문제
+**Manjiang 기준 우선순위 (10-28 재확정)** — L1–L5는 Iris용으로 만들었지만 JD 우대사항(PCIe·Zynq·벤치마크)이라 P1/P2로 유지
 
 | 우선 | ID | 주제 | 왜 (면접관·JD 근거) |
 |---|---|---|---|
-| P0 | [L2](hmScreenPrep/problems/L2_pcie_cap_walk/index.html) | PCIe config space 검사: capability walk · link 상태 · SR-IOV · AER · BAR sizing | 그녀의 PCIe fabric/SR-IOV · Don의 최강 분야 |
-| P0 | [L1](hmScreenPrep/problems/L1_uio_mmio_poll/index.html) | Zynq PetaLinux userspace 레지스터 접근 (`/dev/mem` mmap · UIO 인터럽트 · poll timeout) | 그녀의 Zynq MPSoC · JD 우대 Zynq Petalinux |
 | P0 | [V2](hmScreenPrep/problems/V2_reg_field_rmw/index.html) | 레지스터 RMW · W1C · register sanity test | 모든 블록 enable의 첫 단계 |
-| P0 | [L3](hmScreenPrep/problems/L3_rfc2544_throughput/index.html) | RFC 2544 throughput 이진 탐색 · line rate · frame loss 곡선 | 그녀의 테스트 장비 10년 · JD benchmark tools |
-| P0 | [V3](hmScreenPrep/problems/V3_dma_desc_ring/index.html) | DMA descriptor ring + self-test | DMA는 모든 데이터 경로의 기반 |
-| P0 | [L5](hmScreenPrep/problems/L5_spsc_sensor_ring/index.html) | lock-free SPSC 링 (센서 캡처 → 로거, C11 atomics, pthread 테스트) | SW 출신 면접관의 단골 시스템 C 문제 |
-| P1 | [L4](hmScreenPrep/problems/L4_pps_time_discipline/index.html) | GPS PPS 시간 동기 + LiDAR/카메라 매칭 | 그녀의 BYTON 센서 통합 |
-| P1 | [D](hmScreenPrep/problems/D_debug_drills/index.html) | 디버그 드릴 10개 | "what's wrong with this code" |
-| P1 | [V4](hmScreenPrep/problems/V4_perf_bench_stats/index.html) | 벤치마크 통계 (cycle counter wrap, p99, MB/s) | JD: benchmark tools |
-| P1 | [V1](hmScreenPrep/problems/V1_march_memtest/index.html) | 메모리 테스트 (walking-1s, address bus, March C-) | DDR 우대 · bring-up |
+| P0 | [V1](hmScreenPrep/problems/V1_march_memtest/index.html) | 메모리 테스트 (walking-1s, address bus, March C-) | DDR 우대 · bring-up |
+| P0 | [V3](hmScreenPrep/problems/V3_dma_desc_ring/index.html) | DMA descriptor ring + self-test | DMA는 NPU·카메라 검증의 기반 |
+| P0 | [V4](hmScreenPrep/problems/V4_perf_bench_stats/index.html) | 벤치마크 통계 (cycle counter wrap, p99, MB/s) | JD: benchmark tools |
+| P0 | [V7](hmScreenPrep/problems/V7_shmoo_margin/index.html) | Shmoo sweep · Vmin · margin | 그의 PVT characterization |
+| P0 | [V11](hmScreenPrep/problems/V11_npu_int8_golden/index.html) | INT8 GEMM golden model + bit-exact compare | in-house AI accelerator |
+| P0 | [D](hmScreenPrep/problems/D_debug_drills/index.html) | 디버그 드릴 10개 | "what's wrong with this code" |
+| P1 | [L2](hmScreenPrep/problems/L2_pcie_cap_walk/index.html) | PCIe config space: capability walk · link 상태 · SR-IOV · AER · BAR sizing | Q16 PCIe 링크 디버깅 · Don의 최강 분야 |
+| P1 | [L1](hmScreenPrep/problems/L1_uio_mmio_poll/index.html) | Zynq PetaLinux userspace 레지스터 접근 (`/dev/mem` · UIO) | JD 우대 Zynq Petalinux · 그의 FPGA 플랫폼 |
 | P1 | [V5](hmScreenPrep/problems/V5_test_runner_coverage/index.html) | 테스트 러너 + 커버리지 리포트 | JD: automatic testing tools, coverage |
-| P1 | [V6](hmScreenPrep/problems/V6_prbs_crc_checker/index.html) | PRBS7/31 + CRC32 | 그녀의 BER 테스트 |
-| P1 | [V10](hmScreenPrep/problems/V10_eth_frame_fcs/index.html) | Ethernet frame/FCS + loopback | 그녀의 Ethernet 테스트 장비 |
-| P1 | [V12](hmScreenPrep/problems/V12_frame_timestamp_check/index.html) | 멀티 카메라 timestamp·sync 체커 | 센서 통합 |
-| P2 | [V7](hmScreenPrep/problems/V7_shmoo_margin/index.html) | Shmoo sweep · Vmin · margin | (Manjiang 기준 P0) PVT |
-| P2 | [V8](hmScreenPrep/problems/V8_i2c_scan_recover/index.html) | I2C scan + 9-clock recovery | 페리페럴 우대 |
-| P2 | [V9](hmScreenPrep/problems/V9_csi2_packet_parse/index.html) | MIPI CSI-2 패킷/ECC/CRC 스트림 체커 | camera 우대 |
-| P2 | [V11](hmScreenPrep/problems/V11_npu_int8_golden/index.html) | INT8 GEMM golden model + bit-exact compare | in-house AI accelerator |
+| P1 | [V6](hmScreenPrep/problems/V6_prbs_crc_checker/index.html) | PRBS7/31 + CRC32 | 링크 loopback 검증 |
+| P1 | [V8](hmScreenPrep/problems/V8_i2c_scan_recover/index.html) | I2C scan + 9-clock recovery | 페리페럴 우대 |
+| P1 | [V9](hmScreenPrep/problems/V9_csi2_packet_parse/index.html) | MIPI CSI-2 패킷/ECC/CRC 스트림 체커 | camera 우대 · 그의 Baidu 센서 처리 |
+| P1 | [V10](hmScreenPrep/problems/V10_eth_frame_fcs/index.html) | Ethernet frame/FCS + loopback | 그의 Marvell PHY · Cisco |
+| P1 | [V12](hmScreenPrep/problems/V12_frame_timestamp_check/index.html) | 멀티 카메라 timestamp·sync 체커 | 그의 Baidu 특허 (sensor sync) |
+| P2 | [L4](hmScreenPrep/problems/L4_pps_time_discipline/index.html) | GPS PPS 시간 동기 + LiDAR/카메라 매칭 | 그의 clock sync 특허와 연결 |
+| P2 | [L3](hmScreenPrep/problems/L3_rfc2544_throughput/index.html) | RFC 2544 throughput 이진 탐색 | benchmark 방법론 |
+| P2 | [L5](hmScreenPrep/problems/L5_spsc_sensor_ring/index.html) | lock-free SPSC 링 (C11 atomics) | 일반 시스템 C |
+
+<details>
+<summary>(취소) Iris 기준 우선순위</summary>
+
+L2 → L1 → V2 → L3 → V3 → L5 → L4 → D → V4 (P0: L2 · L1 · V2 · L3 · V3 · L5)
+
+</details>
 
 - 코딩이 나오면 말하는 순서: **clarify (width? endianness? volatile? error codes?) → API signature → normal case → edge cases → code → walk a test → complexity & what changes on real HW**
 
@@ -820,15 +827,7 @@ Teardown is automatic with `devm_*`. For quick register poking during validation
 
 ## 9. 역질문
 
-**Iris판 (10-28)** — 3개만 고르면: 1 · 3 · 6
-1. "You moved from leading system validation to a principal system engineer role. How does silicon validation feed into system-level validation of the compute platform today?"
-2. "On the sensor side — cameras, LiDAR, radar — where do most integration issues show up between the SoC inputs and the full sensor box?"
-3. "Do the validation tests run bare-metal, on Linux on the Zynq-based platforms, or both? Is the framework shared between the FPGA platforms and silicon?"
-4. "How do you benchmark the platform end to end — for example, sensor-to-inference latency — and who owns that number?"
-5. "How big is the software validation group, and how does it split work with the silicon validation and DV teams?"
-6. "What does success look like for a Staff engineer on this team after one year?" (레벨 기대치 확인)
-
-**(이전) Manjiang판**
+**Manjiang판 (10-28 재확정)** — 3개만 고르면: 1 · 3 · 6
 
 1. "Where is the next-generation SoC today — still on HAPS/FPGA, or approaching first silicon? What would this role own in the first six months?"
 2. "How do the software validation engineers split work with the DV team and with your post-silicon / PVT team — who owns the validation plan for a block?"
@@ -837,15 +836,38 @@ Teardown is automatic with `devm_*`. For quick register poking during validation
 5. "What's the hardest bug your team found on RAP1 that you wish had been caught earlier?" (경험 많은 HW 매니저가 좋아하는 질문)
 6. "What does success look like for a Staff engineer on your team after one year?" (레벨 기대치 확인)
 
+<details>
+<summary>(취소) Iris판</summary>
+
+1. "You moved from leading system validation to a principal system engineer role. How does silicon validation feed into system-level validation of the compute platform today?"
+2. "On the sensor side — cameras, LiDAR, radar — where do most integration issues show up between the SoC inputs and the full sensor box?"
+3. "Do the validation tests run bare-metal, on Linux on the Zynq-based platforms, or both? Is the framework shared between the FPGA platforms and silicon?"
+4. "How do you benchmark the platform end to end — for example, sensor-to-inference latency — and who owns that number?"
+5. "How big is the software validation group, and how does it split work with the silicon validation and DV teams?"
+6. "What does success look like for a Staff engineer on this team after one year?" (레벨 기대치 확인)
+
+</details>
+
 ---
 
-## 10. D-2 플랜 (10-28 수 → 10-30 금) — 면접관 Iris 기준 재조정
+## 10. D-2 플랜 (10-28 수 → 10-30 금) — Manjiang 재확정 기준
+
+| 날짜 | 할 일 | 시간 |
+|---|---|---|
+| 10-28 (수) 오늘 · 일정 있음 | §1 Manjiang 다시 읽기 (10m) · §3 TMAY Manjiang판 소리 내어 2회 · §4 **S1·S2** `[ ]` 숫자 채우기 · 시간 되면 [V2](hmScreenPrep/problems/V2_reg_field_rmw/index.html) 1개 (30m) | 1–1.5h |
+| 10-29 (목) | 코딩: [V2](hmScreenPrep/problems/V2_reg_field_rmw/index.html)(어제 못 했으면) → [V1](hmScreenPrep/problems/V1_march_memtest/index.html) → [V3](hmScreenPrep/problems/V3_dma_desc_ring/index.html) → [V7](hmScreenPrep/problems/V7_shmoo_margin/index.html) 타이머 30분씩 · [D](hmScreenPrep/problems/D_debug_drills/index.html) 말로 · 개념: §5.1 Q1–Q8 · §5.3 Q16–Q19 · §0.5.6 RTL 질문 · §7 시나리오 1–10 · **45분 모의 면접** (TMAY → S1 → Q1 → Q2 → "Can you read RTL?" → Q16 → 시나리오 1개 → 역질문) | 4h |
+| 10-30 (금) 당일 | 아침: §0 · §0.5 결론 · §1.3 · §3 · §9만 훑기 · 종이와 펜(그림용) · 물 · 연결 10분 전 | 30m |
+
+<details>
+<summary>(취소) Iris 기준 플랜 (10-28)</summary>
 
 | 날짜 | 할 일 | 시간 |
 |---|---|---|
 | 10-28 (수) 오늘 · 일정 있음 | §1 Iris 분석 (10m) · §3 TMAY Iris판 소리 내어 2회 · §4 **S8 PCIe** `[ ]` 채우기 · 시간 되면 [L2](hmScreenPrep/problems/L2_pcie_cap_walk/index.html) 1개 (30m) | 1–1.5h |
 | 10-29 (목) | 코딩: [L1](hmScreenPrep/problems/L1_uio_mmio_poll/index.html) → [V2](hmScreenPrep/problems/V2_reg_field_rmw/index.html) → [L3](hmScreenPrep/problems/L3_rfc2544_throughput/index.html) → [L5](hmScreenPrep/problems/L5_spsc_sensor_ring/index.html) 타이머 30분씩 (§0 한국어 소개 먼저) · 개념: §5.5 Q25–Q38 소리 내어 · §7 시나리오 11–16 · **45분 모의 면접** (TMAY → S8 → L2 or L5 코딩 20분 → Q25 → Q31 → 역질문) | 4h |
 | 10-30 (금) 당일 | 아침: §0 · §1.2 · §3 Iris판 · §5.5 Q25/Q28/Q31 요점 · §9 Iris판만 · 종이와 펜 · 연결 10분 전 | 30m |
+
+</details>
 
 <details>
 <summary>이전 플랜 (10-27 기준, Manjiang 면접관 가정)</summary>
@@ -873,7 +895,7 @@ Teardown is automatic with `devm_*`. For quick register poking during validation
 
 ### 당일 체크리스트
 - [ ] 금요일 10-30 **변경된 시간**·형식(Zoom/전화, 코딩 툴 여부) 리크루터 확인 메일/캘린더 초대 받았는지 확인
-- [ ] **면접관이 Iris Lee로 확정인지** 캘린더 초대의 참석자로 확인 (Manjiang도 같이 들어오는지)
+- [ ] 캘린더 초대 참석자가 **Manjiang Zhang**인지 최종 확인 (또 바뀌면 §1B Iris 자료로 전환)
 - [ ] 레쥬메 PDF 한 장 옆에 띄워 두기
 - [ ] 스토리 S1–S4 숫자 메모 (한 줄씩)
 - [ ] 역질문 3개 선택

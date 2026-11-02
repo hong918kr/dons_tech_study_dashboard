@@ -1,0 +1,1644 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>E1. RTOS-aware ISR 규칙 — FromISR, woken 플래그, 그리고 ISR에서 하면 안 되는 일</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="E/2026-11-01_E1_isr_rules">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 대시보드</a>
+  <span class="t">E. 인터럽트 · 타이밍 · E1. RTOS-aware ISR 규칙 — FromISR, woken 플래그, 그리고 ISR에서 하면 안 되는 일</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">E. 인터럽트 · 타이밍 · Interrupts &amp; Timing</div>
+      <h1>E1. RTOS-aware ISR 규칙 — FromISR, woken 플래그, 그리고 ISR에서 하면 안 되는 일</h1>
+      <div class="meta"><span>214분 읽기</span><span>2060줄</span><span>46개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: FreeRTOS <code>...FromISR</code> API가 왜 따로 있는지(블록 금지, 저장/복원식 크리티컬 섹션, "스위치는 나중에")를 소스로 설명할 수 있다 · <code>pxHigherPriorityTaskWoken</code>을 NULL로 넘기거나 덮어쓰면 지연이 정확히 "최대 1 tick"이 된다는 것을 tick 주파수 3가지로 재서 보여 줄 수 있다 · ISR 안의 블로킹 호출, 뮤텍스, <code>vTaskDelay</code>, <code>malloc</code>, <code>printf</code>, 긴 루프, FPU가 각각 무엇을 망가뜨리는지 assert 켜고/끄고 실험한 결과로 말할 수 있다 · Zephyr의 <code>k_is_in_isr()</code>, <code>K_NO_WAIT</code> 규칙, <code>IRQ_DIRECT_CONNECT</code> + <code>ISR_DIRECT_DECLARE</code>의 반환값이 재스케줄을 어떻게 바꾸는지 측정 숫자로 설명할 수 있다 <strong>왜 필요한가</strong>: "ISR에서 <code>xSemaphoreGive</code> 대신 왜 <code>xSemaphoreGiveFromISR</code>을 쓰나?", "<code>xHigherPriorityTaskWoken</code>은 뭐고 안 쓰면 어떻게 되나?", "ISR에서 하면 안 되는 일을 말해 보라"는 RTOS 펌웨어 면접 최빈출 3종 세트다. 실무에서는 "가끔 1 ms 늦게 도는 태스크", "현장에서만 나는 리스트 손상 HardFault", "ISR 안 로그 한 줄 때문에 놓친 IMU 샘플"이 전부 이 규칙에서 나온다 <strong>Don 기준 난이도</strong>: ISR을 짧게 쓰고 플래그만 세운다는 bare-metal 감각, NVIC 우선순위·BASEPRI(B3), 크리티컬 섹션(C7)은 이미 안다 / 새로 배울 부분은 RTOS가 ISR에 요구하는 <strong>계약</strong>(어떤 API를, 어떤 우선순위에서, 어떤 인자로)과, 그 계약을 어겼을 때 커널 안에서 실제로 무엇이 깨지는지 <strong>선행 노트</strong>: B2(예외 진입·복귀), B3(NVIC·BASEPRI·<code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>), B4(PendSV), C7(크리티컬 섹션 — <code>taskENTER_CRITICAL_FROM_ISR</code>), C8(커널 진입), D1 §4(세마포어 give의 FromISR 규약과 yield 누락 히스토그램), D7(ISR 밖으로 일 미루기), EL F6(Linux 인터럽트 처리)·EL F2(실행 문맥). 이어지는 노트: E2(우선순위 배치 · zero-latency IRQ), E3(지연 분해 · 측정), E4(ISR → 태스크 경로 · 인터럽트 폭주)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>bare-metal 펌웨어에서 ISR 규칙은 단순했다. "짧게 쓰고, 공유 변수는 <code>volatile</code>로, 메인 루프가 플래그를 보게 하라." Don이 SSD 컨트롤러에서 NVMe doorbell ISR이 커맨드 큐 인덱스만 갱신하고 실제 처리를 executive 루프에 넘긴 것이 정확히 그 모양이다.</p>
+<p>RTOS를 올리면 ISR과 메인 루프 사이에 <strong>스케줄러</strong>라는 제3자가 끼어든다. 이제 ISR은 플래그만 세우는 게 아니라 "자고 있는 태스크를 깨워 달라"고 커널에 부탁해야 한다. 그런데 커널은 자기 자료구조(ready 리스트, 이벤트 리스트, 큐)를 태스크 문맥에서 쓰려고 만들었다. ISR이 그 자료구조를 건드리려면 <strong>세 가지가 달라야</strong> 한다.</p>
+<ul><li><strong>기다릴 수 없다.</strong> ISR은 태스크가 아니라서 블록할 "자기 자신"이 없다. 블로킹 API를 부르면 커널은 "지금 돌던 태스크"(= ISR에게 끊긴 태스크)를 재운다. 엉뚱한 태스크가 잔다(§4.3에서 실측).</li><li><strong>잠금 방식이 다르다.</strong> 태스크용 크리티컬 섹션은 중첩 카운터 하나로 BASEPRI를 0까지 내린다. ISR은 들어올 때의 BASEPRI를 저장했다가 그대로 돌려놓아야 한다(C7 §3).</li><li><strong>그 자리에서 컨텍스트 스위치를 할 수 없다.</strong> 스위치는 모든 ISR이 끝난 뒤 PendSV가 한다. 그래서 ISR은 "높은 태스크를 깨웠으니 나가면 바꿔 달라"는 <strong>요청만</strong> 남긴다. 그게 <code>pxHigherPriorityTaskWoken</code> + <code>portYIELD_FROM_ISR</code>이다.</li></ul>
+<p>그리고 이 계약은 <strong>어느 우선순위의 ISR이 지키는가</strong>에 따라 갈린다. 아래 그림이 이 노트 전체의 지도다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">Cortex-M + RTOS에서 코드가 도는 네 층 (숫자 작을수록 급함)</text>
+<rect x="20.0" y="36.0" width="360.0" height="54.0" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-width="1.3"/>
+<text x="200.0" y="59.1" font-size="12" text-anchor="middle" font-weight="bold">zero-latency ISR — NVIC 0x00~0x1F</text>
+<text x="200.0" y="76.1" font-size="12" text-anchor="middle">커널 API 호출 금지, 레지스터만</text>
+<rect x="20.0" y="124.0" width="360.0" height="54.0" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="200.0" y="147.1" font-size="12" text-anchor="middle" font-weight="bold">kernel-aware ISR — NVIC 0x20~0xFE</text>
+<text x="200.0" y="164.1" font-size="12" text-anchor="middle">FromISR / K_NO_WAIT API만, 블록 금지</text>
+<rect x="20.0" y="196.0" width="360.0" height="54.0" rx="5" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.3"/>
+<text x="200.0" y="219.1" font-size="12" text-anchor="middle" font-weight="bold">PendSV · SysTick — NVIC 0xFF</text>
+<text x="200.0" y="236.1" font-size="12" text-anchor="middle">컨텍스트 스위치는 여기서 한다</text>
+<rect x="20.0" y="262.0" width="360.0" height="54.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="200.0" y="285.1" font-size="12" text-anchor="middle" font-weight="bold">태스크 / 스레드 — thread mode</text>
+<text x="200.0" y="302.1" font-size="12" text-anchor="middle">블로킹 API 전부 허용</text>
+<line x1="10.0" y1="107.0" x2="390.0" y2="107.0" stroke="#d0564a" stroke-width="1.6" stroke-dasharray="4 3"/>
+<text x="20.0" y="102.0" font-size="12" text-anchor="start">BASEPRI 문턱 = configMAX_SYSCALL_INTERRUPT_PRIORITY (0x20)</text>
+<rect x="420.0" y="36.0" width="240.0" height="150.0" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b" stroke-width="1.3"/>
+<text x="540.0" y="81.6" font-size="12" text-anchor="middle" font-weight="bold">ISR 안에서 하는 일은 넷뿐</text>
+<text x="540.0" y="98.6" font-size="12" text-anchor="middle">1. 원인 지우기 (INTCLR)</text>
+<text x="540.0" y="115.6" font-size="12" text-anchor="middle">2. 데이터 건지기 · 타임스탬프</text>
+<text x="540.0" y="132.6" font-size="12" text-anchor="middle">3. 깨우기: FromISR / K_NO_WAIT</text>
+<text x="540.0" y="149.6" font-size="12" text-anchor="middle">4. yield 요청 (woken → PendSV)</text>
+<rect x="420.0" y="210.0" width="240.0" height="106.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="540.0" y="242.1" font-size="12" text-anchor="middle" font-weight="bold">나머지는 전부 태스크로</text>
+<text x="540.0" y="259.1" font-size="12" text-anchor="middle">파싱 · printf · malloc</text>
+<text x="540.0" y="276.1" font-size="12" text-anchor="middle">뮤텍스 · 대기 · 긴 루프</text>
+<text x="540.0" y="293.1" font-size="12" text-anchor="middle">(D7 · E4 위임 패턴)</text>
+<line x1="418.0" y1="150.0" x2="384.0" y2="150.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah1)"/>
+<line x1="418.0" y1="262.0" x2="384.0" y2="288.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah1)"/>
+</svg></figure>
+<p>그림 1 — Cortex-M + RTOS에서 코드가 도는 네 층. 문턱(<code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>, lab 템플릿은 0x20)보다 급한 ISR은 커널이 BASEPRI로 막을 수 없으므로 커널 API를 아예 못 부른다(배치는 E2). 문턱 아래 ISR은 커널 API를 부를 수 있지만 <strong>ISR용 변형</strong>만, <strong>기다리지 않고</strong>, <strong>짧게</strong>. 나머지 일은 태스크로 넘긴다(D7, E4).</p>
+<p>Linux와 비교하면: Linux에서도 hard IRQ 핸들러는 sleep 금지이고 <code>spin_lock_irqsave</code>, <code>wake_up</code> 같은 "원자 문맥에서 되는" 함수만 쓴다(EL F6, EL F2 §실행 문맥). 차이는 Linux에는 <code>might_sleep()</code> 경고와 lockdep이 런타임에 실수를 잡아 주고, threaded IRQ로 핸들러를 스레드로 바꿀 수 있다는 점이다. MCU RTOS에는 그런 안전망이 <strong><code>configASSERT</code> / <code>CONFIG_ASSERT</code> 하나</strong>뿐이고, 그것도 개발 빌드에서만 켜진다. 그래서 규칙을 사람이 외워야 한다.</p>
+<h3 id="실습-환경-한-줄">실습 환경 한 줄<a class="anchor" href="#실습-환경-한-줄" aria-label="link">#</a></h3>
+<p>QEMU <code>mps2-an385</code>(Cortex-M3 @ 25 MHz) 위의 FreeRTOS V11.3.2(lab 템플릿, 1 kHz tick, <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code> = 0x20)와 Zephyr v4.4.2(같은 보드, 100 Hz tick, tickless). 타이밍은 FreeRTOS는 <code>ICOUNT=1</code>, Zephyr는 <code>-icount shift=5</code>(명령 1개 = 32 ns)로 재고, 시계는 FPGAIO 25 MHz 카운터(0x40028018)다. <strong>QEMU icount 기준이라 실제 칩과 절대값은 다르다</strong>(캐시, 플래시 wait state, 예외 스태킹 사이클, UART baud 지연이 모델링되지 않는다). 예제 소스는 <code>~/.rtos_scratch/E1/</code>, 빌드 산출물은 VM의 <code>/var/tmp/rtos/E1/</code>. 공용 헤더 <code>e1.h</code>는 D1의 <code>d1.h</code>와 같은 도우미(TIMER0 시작·정지, 경과 사이클, <code>stat_t</code>)에 IPSR·BASEPRI 읽기와 <code>STIR</code>(소프트웨어 IRQ 트리거)를 더한 것이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* e1.h — E1 helpers for QEMU mps2-an385 (FreeRTOS), 핵심 부분 */
+#define CYC()      REG32(0x40028018u)              /* FPGAIO counter, 25 MHz: 1 cyc = 40 ns */
+#define ICSR       REG32(0xE000ED04u)
+#define STIR       REG32(0xE000EF00u)
+static inline uint32_t ipsr(void) { uint32_t v; __asm volatile("mrs %0, ipsr" : "=r"(v)); return v; }
+static inline uint32_t basepri(void) { uint32_t v; __asm volatile("mrs %0, basepri" : "=r"(v)); return v; }
+/* timer0_start(period, prio), timer0_stop(), timer0_elapsed(), spin_cyc(),
+   stat_t + stat_add() + stat_print() — D1의 d1.h와 같다 */</code></pre></figure>
+<hr>
+<h2 id="1-규칙-한-장-먼저-결론">1. 규칙 한 장 — 먼저 결론<a class="anchor" href="#1-규칙-한-장-먼저-결론" aria-label="link">#</a></h2>
+<p>이 노트에서 하나씩 실험으로 확인할 규칙을 먼저 나열한다. 각 줄 끝의 절 번호가 근거다.</p>
+<ol><li><strong>문턱 아래 우선순위의 ISR만 커널 API를 부른다.</strong> 우선순위를 안 정한 IRQ는 리셋값 0 = 가장 급함 = 금지 영역이다 (§5, B3).</li><li><strong>ISR에서는 이름이 <code>FromISR</code>로 끝나는 API만 부른다</strong> (FreeRTOS). Zephyr는 같은 이름이지만 <strong>timeout은 <code>K_NO_WAIT</code>만</strong> (§2, §6).</li><li><strong><code>BaseType_t woken = pdFALSE;</code>로 시작해서, 모든 FromISR 호출에 같은 <code>&amp;woken</code>을 넘기고, ISR 맨 끝에서 <code>portYIELD_FROM_ISR(woken)</code> 한 번</strong> (§3).</li><li><strong>기다리는 것은 전부 금지</strong>: 블로킹 take/receive, <code>vTaskDelay</code>/<code>k_sleep</code>, 뮤텍스, 이벤트 그룹 대기 (§4).</li><li><strong>뮤텍스는 ISR에서 절대 쓰지 않는다</strong> — 소유자가 태스크여야 우선순위 상속이 성립한다 (§4.5).</li><li><strong><code>printf</code>, 동적 할당, 상한 없는 루프, (FPU 코어가 아니면) 부동소수점은 ISR 밖으로</strong> (§4.4, §4.6).</li><li><strong>개발 빌드는 <code>configASSERT</code> / <code>CONFIG_ASSERT=y</code>로</strong> — 위 실수 대부분을 첫 실행에서 잡아 준다. 끄면 같은 실수가 "가끔 나는 이상한 버그"로 바뀐다 (§4.3, §5).</li></ol>
+<hr>
+<h2 id="2-freertos의-fromisr-api-가족">2. FreeRTOS의 <code>...FromISR</code> API 가족<a class="anchor" href="#2-freertos의-fromisr-api-가족" aria-label="link">#</a></h2>
+<h3 id="2-1-왜-이름이-다른-함수를-따로-두나">2.1 왜 이름이 다른 함수를 따로 두나<a class="anchor" href="#2-1-왜-이름이-다른-함수를-따로-두나" aria-label="link">#</a></h3>
+<p>직관: 태스크용 <code>xQueueSend()</code>와 ISR용 <code>xQueueSendFromISR()</code>는 같은 큐에 같은 데이터를 넣는다. 그런데 태스크용은 "자리가 없으면 기다린다"는 경로를 품고 있고, ISR용은 그 경로가 아예 없다. 비유하면 태스크용은 "줄이 길면 줄 서서 기다리는 손님", ISR용은 "줄이 길면 그냥 돌아가는 배달원"이다. 배달원은 다음 집이 기다리고 있으니 줄을 설 수 없다.</p>
+<p>정의: FreeRTOS V11.3.2 <code>queue.c</code>의 <code>xQueueGenericSendFromISR()</code> 주석이 이유를 그대로 적어 두었다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>    /* Similar to xQueueGenericSend, except without blocking if there is no room
+     * in the queue.  Also don't directly wake a task that was blocked on a queue
+     * read, instead return a flag to say whether a context switch is required or
+     * not (i.e. has a task with a higher priority than us been woken by this
+     * post). */</code></pre></figure>
+<p>그리고 <code>port.c</code>의 <code>vPortValidateInterruptPriority()</code> 주석에는 "FreeRTOS maintains separate thread and ISR API functions to ensure interrupt entry is as fast and simple as possible."라고 되어 있다. 정리하면 FromISR 변형은 태스크용과 <strong>네 가지가 다르다</strong>.</p>
+<div class="tw"><table><thead><tr><th>차이</th><th>태스크용 (<code>xQueueGenericSend</code>)</th><th>ISR용 (<code>xQueueGenericSendFromISR</code>)</th></tr></thead><tbody><tr><td>기다림</td><td><code>xTicksToWait</code>만큼 블록 가능 (<code>vTaskPlaceOnEventList</code>)</td><td>인자 자체가 없다. 꽉 차 있으면 즉시 <code>errQUEUE_FULL</code></td></tr><tr><td>크리티컬 섹션</td><td><code>taskENTER_CRITICAL()</code> → <code>vPortEnterCritical()</code>: BASEPRI = 0x20, 중첩 카운터 <code>uxCriticalNesting++</code>, 나갈 때 0이 되면 BASEPRI = 0</td><td><code>taskENTER_CRITICAL_FROM_ISR()</code> → <code>portSET_INTERRUPT_MASK_FROM_ISR()</code> = <code>ulPortRaiseBASEPRI()</code>: 이전 BASEPRI를 <strong>반환값으로 저장</strong>, 나갈 때 <code>vPortSetBASEPRI(저장값)</code>로 복원</td></tr><tr><td>높은 태스크를 깨웠을 때</td><td>그 자리에서 <code>queueYIELD_IF_USING_PREEMPTION()</code> → PendSV</td><td>스위치 안 함. <code>*pxHigherPriorityTaskWoken = pdTRUE</code>만</td></tr><tr><td>진입 검사</td><td>VECTACTIVE ≠ 0이면 assert (<code>port.c:438</code>)</td><td><code>portASSERT_IF_INTERRUPT_PRIORITY_INVALID()</code> — 지금 ISR의 우선순위가 문턱 아래인지 (<code>port.c:803</code>)</td></tr></tbody></table></div>
+<p>크리티컬 섹션 차이가 왜 중요한지는 C7 §3.5에서 자세히 봤다. 한 줄로: ISR 진입은 BASEPRI를 바꾸지 않으므로, ISR이 "나갈 때 무조건 0"으로 내리면 다른 문맥이 올려 둔 마스크를 풀어 버릴 수 있다. 그래서 ISR은 저장/복원식만 쓴다.</p>
+<p><code>portmacro.h</code>(ARM_CM3)에서 두 매크로가 어떻게 정의되는지 보자.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define portSET_INTERRUPT_MASK_FROM_ISR()         ulPortRaiseBASEPRI()
+#define portCLEAR_INTERRUPT_MASK_FROM_ISR( x )    vPortSetBASEPRI( x )
+#define portDISABLE_INTERRUPTS()                  vPortRaiseBASEPRI()
+#define portENABLE_INTERRUPTS()                   vPortSetBASEPRI( 0 )
+#define portENTER_CRITICAL()                      vPortEnterCritical()
+#define portEXIT_CRITICAL()                       vPortExitCritical()</code></pre></figure>
+<p><code>ulPortRaiseBASEPRI()</code>는 <code>mrs %0, basepri</code> → <code>msr basepri, 0x20</code> → <code>isb</code> → <code>dsb</code>이고 이전 값을 돌려준다. 앱이 직접 ISR 안에서 짧은 보호 구간이 필요하면 이 쌍을 쓴다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>void UART_RX_IRQHandler(void)
+{
+    UBaseType_t saved = taskENTER_CRITICAL_FROM_ISR();   /* = portSET_INTERRUPT_MASK_FROM_ISR() */
+    ring_push(&amp;rx_ring, UART_DATA);                      /* 다른 kernel-aware ISR과 공유하는 링 */
+    taskEXIT_CRITICAL_FROM_ISR(saved);                   /* 저장한 값으로 복원 — 0으로 내리지 않는다 */
+}</code></pre></figure>
+<p>(위 코드는 모양을 보여 주는 조각이라 실행하지 않았다. 실제 동작은 예제 3의 디스어셈블에서 확인한다.)</p>
+<h3 id="2-2-예제-1-v11-3-2-헤더에-있는-fromisr-api-전부-세기">2.2 예제 1 — V11.3.2 헤더에 있는 FromISR API 전부 세기<a class="anchor" href="#2-2-예제-1-v11-3-2-헤더에-있는-fromisr-api-전부-세기" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 공개 헤더에서 이름이 <code>FromISR</code>로 끝나는 식별자를 헤더별로 센다. "무엇이 있고 무엇이 없나"를 외우지 말고 소스에서 뽑는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/rtoslab/src/FreeRTOS-Kernel/include &amp;&amp; \
+  for f in task.h queue.h semphr.h event_groups.h timers.h stream_buffer.h message_buffer.h; do \
+    printf "%-17s %2d  " $f $(grep -ohE "\b[a-zA-Z]+FromISR\b" $f | sort -u | wc -l); \
+    grep -ohE "\b[a-zA-Z]+FromISR\b" $f | sort -u | head -4 | tr "\n" " "; echo; done; \
+  echo "unique total: $(grep -ohE "\b[a-zA-Z]+FromISR\b" *.h | sort -u | wc -l)"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>task.h            19  uxTaskBasePriorityGetFromISR uxTaskPriorityGetFromISR vTaskEnterCriticalFromISR vTaskExitCriticalFromISR 
+queue.h           15  uxQueueMessagesWaitingFromISR xQueueCRReceiveFromISR xQueueCRSendFromISR xQueueGenericSendFromISR 
+semphr.h           8  uxQueueMessagesWaitingFromISR uxSemaphoreGetCountFromISR xQueueGetMutexHolderFromISR xQueueGiveFromISR 
+event_groups.h     3  xEventGroupClearBitsFromISR xEventGroupGetBitsFromISR xEventGroupSetBitsFromISR 
+timers.h           7  xTaskGetTickCountFromISR xTimerChangePeriodFromISR xTimerGenericCommandFromISR xTimerPendFunctionCallFromISR 
+stream_buffer.h    5  xStreamBufferReceiveCompletedFromISR xStreamBufferReceiveFromISR xStreamBufferResetFromISR xStreamBufferSendCompletedFromISR 
+message_buffer.h  10  xMessageBufferReceiveCompletedFromISR xMessageBufferReceiveFromISR xMessageBufferResetFromISR xMessageBufferSendCompletedFromISR 
+unique total: 56</code></pre></figure>
+<p>출력에서 볼 것: 고유 이름 56개(헤더 사이 중복 포함 집계는 더 많다 — <code>semphr.h</code>는 <code>queue.h</code> 함수를 매크로로 감싼다). 이 중 <code>vTaskEnterCriticalFromISR</code>/<code>vTaskExitCriticalFromISR</code>는 SMP 빌드(<code>configNUMBER_OF_CORES &gt; 1</code>)용이고, <code>xQueueCR...</code>는 코루틴용이라 실무에서 볼 일이 거의 없다. 헤더 전체 목록에서 실무 쓰임새로 다시 묶으면 아래와 같다.</p>
+<div class="tw"><table><thead><tr><th>쓰임</th><th>ISR에서 부르는 API (V11.3.2)</th><th>태스크용 짝</th></tr></thead><tbody><tr><td>깨우기 (가장 가벼움, D5)</td><td><code>vTaskNotifyGiveFromISR</code>, <code>xTaskNotifyFromISR</code>, <code>xTaskNotifyAndQueryFromISR</code>, <code>...IndexedFromISR</code> 변형</td><td><code>xTaskNotifyGive</code>, <code>xTaskNotify</code></td></tr><tr><td>세마포어 (D1)</td><td><code>xSemaphoreGiveFromISR</code>, <code>xSemaphoreTakeFromISR</code>, <code>uxSemaphoreGetCountFromISR</code></td><td><code>xSemaphoreGive</code>, <code>xSemaphoreTake</code></td></tr><tr><td>큐 (D4)</td><td><code>xQueueSendFromISR</code>, <code>xQueueSendToFrontFromISR</code>, <code>xQueueSendToBackFromISR</code>, <code>xQueueOverwriteFromISR</code>, <code>xQueueReceiveFromISR</code>, <code>xQueuePeekFromISR</code>, <code>xQueueIsQueueEmptyFromISR</code>, <code>xQueueIsQueueFullFromISR</code>, <code>uxQueueMessagesWaitingFromISR</code></td><td><code>xQueueSend</code> 등</td></tr><tr><td>스트림 · 메시지 버퍼 (D4)</td><td><code>xStreamBufferSendFromISR</code>, <code>xStreamBufferReceiveFromISR</code>, <code>xMessageBufferSendFromISR</code> 등, <code>...CompletedFromISR</code></td><td>같은 이름에서 <code>FromISR</code> 뺀 것</td></tr><tr><td>이벤트 그룹 (D5)</td><td><code>xEventGroupSetBitsFromISR</code>, <code>xEventGroupClearBitsFromISR</code>, <code>xEventGroupGetBitsFromISR</code></td><td><code>xEventGroupSetBits</code></td></tr><tr><td>소프트웨어 타이머 · 위임 (D6, D7)</td><td><code>xTimerStartFromISR</code>, <code>xTimerStopFromISR</code>, <code>xTimerResetFromISR</code>, <code>xTimerChangePeriodFromISR</code>, <code>xTimerPendFunctionCallFromISR</code></td><td><code>xTimerStart</code> 등</td></tr><tr><td>태스크 제어 · 조회</td><td><code>xTaskResumeFromISR</code>, <code>xTaskGetTickCountFromISR</code>, <code>uxTaskPriorityGetFromISR</code>, <code>xTaskGetApplicationTaskTagFromISR</code></td><td><code>vTaskResume</code> 등</td></tr></tbody></table></div>
+<p><strong>FromISR 짝이 없는 것</strong> — 즉 ISR에서는 대안이 없는 것:</p>
+<ul><li><code>vTaskDelay</code>, <code>xTaskDelayUntil</code> — ISR은 잘 수 없다.</li><li>뮤텍스 take (<code>xSemaphoreTake(mutex, …)</code>) — §4.5. (<code>xSemaphoreTakeFromISR</code>은 존재하지만 뮤텍스에는 쓰면 안 된다.)</li><li><code>xEventGroupWaitBits</code>, <code>xEventGroupSync</code> — 기다리는 API.</li><li><code>xTaskCreate</code>, <code>vTaskDelete</code>, <code>vTaskSuspend</code>, <code>vTaskPrioritySet</code> — 리스트 대수술이라 태스크 문맥 전용.</li><li><code>pvPortMalloc</code>, <code>vPortFree</code> — 스케줄러 잠금을 쓴다(§4.2 예제 6의 MODE=5).</li></ul>
+<p><code>xTaskResumeFromISR</code>은 문서에서도 "ISR → 태스크 동기화에 쓰지 말라"고 한다. 태스크가 아직 suspend되기 전에 resume이 오면 사건을 잃기 때문이다. 깨우기는 task notification이나 세마포어로 한다.</p>
+<h3 id="2-3-예제-2-두-변형의-비용-fromisr을-태스크에서-부르면-그리고-양쪽에서-쓸-수-있는-도우미">2.3 예제 2 — 두 변형의 비용, FromISR을 태스크에서 부르면, 그리고 양쪽에서 쓸 수 있는 도우미<a class="anchor" href="#2-3-예제-2-두-변형의-비용-fromisr을-태스크에서-부르면-그리고-양쪽에서-쓸-수-있는-도우미" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: ① 같은 세마포어에 태스크용 give/take와 FromISR give/take를 1000번씩 해서 한 번 비용을 잰다. ② FromISR을 태스크에서 부르면 어떻게 되나. ③ <code>xPortIsInsideInterrupt()</code>로 문맥을 보고 알맞은 API를 고르는 도우미 <code>sig_give()</code>를 ISR과 태스크 양쪽에서 부른다. ISR은 TIMER0 줄(IRQ 8, 우선순위 0x40)을 <code>STIR</code>로 소프트웨어 트리거한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1 ex2 — task API vs FromISR API: cost, and one helper that works in both contexts */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "e1.h"
+#define N 1000
+static SemaphoreHandle_t sem;
+static volatile uint32_t isr_give, isr_take, isr_ipsr, isr_path;
+
+static int sig_give(SemaphoreHandle_t s)        /* safe from task or ISR */
+{
+    if (xPortIsInsideInterrupt()) {
+        BaseType_t woken = pdFALSE;
+        xSemaphoreGiveFromISR(s, &amp;woken);
+        portYIELD_FROM_ISR(woken);
+        return 1;                               /* took the ISR path */
+    }
+    xSemaphoreGive(s);
+    return 0;                                   /* took the task path */
+}
+void TIMER0_IRQHandler(void)                    /* pended by software (STIR), prio 0x40 */
+{
+    BaseType_t woken = pdFALSE;
+    isr_ipsr = ipsr();
+    uint32_t t = CYC();
+    for (int i = 0; i &lt; N; i++) xSemaphoreGiveFromISR(sem, &amp;woken);  /* count 1, then full */
+    isr_give = CYC() - t;
+    t = CYC();
+    for (int i = 0; i &lt; N; i++) xSemaphoreTakeFromISR(sem, &amp;woken);  /* 1 hit, then empty */
+    isr_take = CYC() - t;
+    isr_path = sig_give(sem);
+    portYIELD_FROM_ISR(woken);
+}
+static void task(void *arg)
+{
+    (void)arg;
+    BaseType_t w;
+    uint32_t t = CYC();
+    for (int i = 0; i &lt; N; i++) xSemaphoreGive(sem);
+    uint32_t tg = CYC() - t;
+    t = CYC();
+    for (int i = 0; i &lt; N; i++) xSemaphoreTake(sem, 0);
+    uint32_t tt = CYC() - t;
+    t = CYC();
+    for (int i = 0; i &lt; N; i++) xSemaphoreGiveFromISR(sem, &amp;w);       /* FromISR from a task */
+    uint32_t tf = CYC() - t;
+    xSemaphoreTake(sem, 0);
+    board_printf_raw("task: IPSR=%u  xSemaphoreGive        %u ns/op\n", (unsigned)ipsr(), tg * 40 / N);
+    board_printf_raw("task: IPSR=%u  xSemaphoreTake(,0)    %u ns/op\n", (unsigned)ipsr(), tt * 40 / N);
+    board_printf_raw("task: IPSR=%u  xSemaphoreGiveFromISR %u ns/op (no assert!)\n", (unsigned)ipsr(), tf * 40 / N);
+    NVIC_IPR(8) = 0x40; NVIC_ISER0 = 1u &lt;&lt; 8;
+    STIR = 8;                                   /* run the ISR now */
+    __asm volatile("dsb; isb");
+    board_printf_raw("ISR : IPSR=%u xSemaphoreGiveFromISR %u ns/op\n", (unsigned)isr_ipsr, isr_give * 40 / N);
+    board_printf_raw("ISR : IPSR=%u xSemaphoreTakeFromISR %u ns/op\n", (unsigned)isr_ipsr, isr_take * 40 / N);
+    xSemaphoreTake(sem, 0);
+    board_printf_raw("sig_give(): from ISR took %s path, from task took %s path\n",
+                     isr_path ? "FromISR" : "task", sig_give(sem) ? "FromISR" : "task");
+    board_exit(0);
+}
+int main(void)
+{
+    sem = xSemaphoreCreateBinary();
+    xTaskCreate(task, "t", 512, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/freertos-mps2/Makefile \
+  SRCS=/Users/donh/.rtos_scratch/E1/ex2_variants.c OUT=/var/tmp/rtos/E1/ex2 &gt;/dev/null &amp;&amp; \
+  ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E1/ex2/app.elf 10'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>task: IPSR=0  xSemaphoreGive        2499 ns/op
+task: IPSR=0  xSemaphoreTake(,0)    2083 ns/op
+task: IPSR=0  xSemaphoreGiveFromISR 1281 ns/op (no assert!)
+ISR : IPSR=24 xSemaphoreGiveFromISR 1536 ns/op
+ISR : IPSR=24 xSemaphoreTakeFromISR 1504 ns/op
+sig_give(): from ISR took FromISR path, from task took task path
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>FromISR give가 태스크용 give보다 싸다</strong>: ISR 안에서 1.54 µs, 태스크용 2.50 µs(QEMU icount 기준). 태스크용은 <code>xQueueGenericSend()</code>의 <code>for(;;)</code> 루프 · 타임아웃 구조체 · 중첩 카운터를 거치고, FromISR은 저장/복원 BASEPRI 한 쌍과 리스트 조작뿐이다. "ISR 진입을 가능한 한 빠르고 단순하게"라는 소스 주석의 숫자 버전이다.</li><li><strong>FromISR을 태스크에서 부르면 assert가 안 터진다</strong>(1.28 µs). <code>vPortValidateInterruptPriority()</code>는 IPSR이 16 이상(= 외부 IRQ)일 때만 우선순위를 검사하고, IPSR = 0(thread mode)이면 그냥 지나간다. 태스크 문맥에서는 BASEPRI 저장/복원도 올바르게 동작하므로 이 포트에서는 실제로 문제가 없다. 그래서 ISR 안(1.54 µs)보다 오히려 빠르다 — 검사 함수 본문을 건너뛰기 때문이다. 다만 FreeRTOS 문서는 FromISR을 태스크에서 쓰는 것을 보장하지 않고, 깨운 태스크로의 전환을 <code>woken</code>으로 직접 처리해야 하므로 습관으로 삼지 않는다.</li><li><code>xPortIsInsideInterrupt()</code>는 IPSR이 0이 아닌지만 본다(<code>portmacro.h</code> 190행). <code>sig_give()</code>처럼 드라이버 공용 함수가 양쪽 문맥에서 불릴 때 쓰는 표준 방법이다. Zephyr의 <code>k_is_in_isr()</code>도 같은 일을 한다(§6).</li></ul>
+<p><strong>Don 경험과 연결</strong>: SSD 펌웨어에서 "ISR에서도 불리고 executive 루프에서도 불리는 로그 함수"를 만들 때, 인터럽트를 끌지 말지를 호출자 문맥에 따라 바꿨던 것과 같은 문제다. RTOS에서는 그 분기가 "어느 API를 부르나"로 바뀐다.</p>
+<p><strong>함정</strong>: <code>xPortIsInsideInterrupt()</code>는 PendSV · SysTick · SVC 안에서도 참이다(IPSR 11, 14, 15). 그리고 문턱 위(zero-latency) ISR에서도 참이므로, "ISR이면 FromISR을 부른다"는 분기만으로는 §5의 우선순위 규칙까지 지켜 주지 않는다.</p>
+<h3 id="2-4-예제-3-코드-크기와-생성-코드-fromisr에는-무엇이-빠져-있나">2.4 예제 3 — 코드 크기와 생성 코드: FromISR에는 무엇이 빠져 있나<a class="anchor" href="#2-4-예제-3-코드-크기와-생성-코드-fromisr에는-무엇이-빠져-있나" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 태스크용과 FromISR 짝을 한 이미지에 모두 링크해(<code>keep[]</code> 표로 참조) <code>nm -S</code>로 크기를 비교하고, <code>xQueueGiveFromISR</code>의 크리티컬 섹션이 어떤 명령으로 컴파일됐는지 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1 ex7 — keep task and FromISR variants in one image so nm can compare them */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include "semphr.h"
+#include "event_groups.h"
+void * volatile keep[] = {
+    (void *)xQueueGenericSend, (void *)xQueueGenericSendFromISR,
+    (void *)xQueueSemaphoreTake, (void *)xQueueGiveFromISR,
+    (void *)xQueueReceive, (void *)xQueueReceiveFromISR,
+    (void *)xTaskGenericNotify, (void *)xTaskGenericNotifyFromISR,
+    (void *)xEventGroupSetBits, (void *)xEventGroupSetBitsFromISR,
+};
+int main(void) { vTaskStartScheduler(); return (int)(uintptr_t)keep[0]; }</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/freertos-mps2/Makefile \
+  SRCS=/Users/donh/.rtos_scratch/E1/ex7_sizes.c OUT=/var/tmp/rtos/E1/ex7 &gt;/dev/null; E=/var/tmp/rtos/E1/ex7/app.elf; \
+  for n in xQueueGenericSend xQueueGenericSendFromISR xQueueSemaphoreTake xQueueGiveFromISR xQueueReceive \
+           xQueueReceiveFromISR xTaskGenericNotify xTaskGenericNotifyFromISR xEventGroupSetBits xEventGroupSetBitsFromISR; do \
+    s=$(arm-none-eabi-nm -S $E | awk -v n=$n "\$4==n{print \$2}"); printf "%-28s %4d bytes\n" $n $((16#$s)); done; \
+  arm-none-eabi-objdump -d --no-show-raw-insn $E | awk "/&lt;xQueueGiveFromISR&gt;:/,/^$/" | sed -n 10,20p; \
+  arm-none-eabi-objdump -d --no-show-raw-insn $E | awk "/&lt;xEventGroupSetBitsFromISR&gt;:/,/^$/"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>xQueueGenericSend             404 bytes
+xQueueGenericSendFromISR      232 bytes
+xQueueSemaphoreTake           396 bytes
+xQueueGiveFromISR             188 bytes
+xQueueReceive                 352 bytes
+xQueueReceiveFromISR          208 bytes
+xTaskGenericNotify            292 bytes
+xTaskGenericNotifyFromISR     360 bytes
+xEventGroupSetBits            136 bytes
+xEventGroupSetBitsFromISR      28 bytes
+
+    1b1c:	mov	r5, r1
+    1b1e:	cbz	r3, 1b70 &lt;xQueueGiveFromISR+0x64&gt;
+    1b20:	bl	28b0 &lt;vPortValidateInterruptPriority&gt;
+    1b24:	mrs	r6, BASEPRI
+    1b28:	mov.w	r3, #32
+    1b2c:	msr	BASEPRI, r3
+    1b30:	isb	sy
+    1b34:	dsb	sy
+    1b38:	ldr	r3, [r4, #56]	@ 0x38
+    1b3a:	ldr	r2, [r4, #60]	@ 0x3c
+    1b3c:	cmp	r2, r3
+
+000024b0 &lt;xEventGroupSetBitsFromISR&gt;:
+    24b0:	mov	ip, r1
+    24b2:	push	{lr}
+    24b4:	mov	lr, r0
+    24b6:	mov	r3, r2
+    24b8:	mov	r1, lr
+    24ba:	mov	r2, ip
+    24bc:	ldr	r0, [pc, #8]	@ (24c8 &lt;xEventGroupSetBitsFromISR+0x18&gt;)
+    24be:	ldr.w	lr, [sp], #4
+    24c2:	b.w	23f4 &lt;xTimerPendFunctionCallFromISR&gt;
+    24c6:	nop
+    24c8:	.word	0x000024ad</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>큐 계열 FromISR은 태스크용의 <strong>절반 남짓</strong>(404 → 232, 396 → 188, 352 → 208 B). 빠진 것이 블로킹 경로(이벤트 리스트 등록, 타임아웃 검사, 스케줄러 잠금, 재시도 루프)다.</li><li><code>xQueueGiveFromISR</code> 입구: <code>bl vPortValidateInterruptPriority</code> → <code>mrs r6, BASEPRI</code>(<strong>이전 값을 r6에 저장</strong>) → <code>msr BASEPRI, #32</code>(0x20) → <code>isb</code> · <code>dsb</code>. 함수 뒤쪽 두 곳에서 <code>msr BASEPRI, r6</code>으로 복원한다(같은 objdump를 <code>grep -i basepri</code>하면 1b62, 1b6a에서 보인다). 태스크용 <code>vPortEnterCritical</code>과 달리 0으로 내리는 명령이 없다.</li><li>예외 둘. <code>xTaskGenericNotifyFromISR</code>은 오히려 <strong>더 크다</strong>(292 → 360 B). 스케줄러가 잠겨 있을 때 깨운 태스크를 <code>xPendingReadyList</code>에 넣는 경로와 <code>xYieldPendings</code>를 세우는 경로를 함수 안에 직접 가지고 있기 때문이다. 크기가 아니라 "블록하지 않는다"가 FromISR의 정의다.</li><li><strong><code>xEventGroupSetBitsFromISR</code>은 28바이트 — 비트를 세우지 않는다.</strong> <code>xTimerPendFunctionCallFromISR()</code>로 "타이머 daemon 태스크가 나중에 <code>vEventGroupSetBitsCallback</code>을 실행하라"는 명령을 보낼 뿐이다(<code>0x24ad</code>가 그 콜백 주소). 이벤트 그룹은 비트를 세울 때 기다리는 태스크를 <strong>몇 개든</strong> 깨울 수 있어서, 그 상한 없는 작업을 ISR에서 하지 않으려고 daemon에 미룬다. 그래서 이 API는 타이머 명령 큐가 차면 실패하고(<code>pdFAIL</code>), 실제 비트 설정은 daemon 우선순위(템플릿은 <code>configMAX_PRIORITIES - 1</code> = 7)에서 일어난다. 위임 경로의 자세한 동작은 D7 §3.</li></ul>
+<hr>
+<h2 id="3-pxhigherprioritytaskwoken과-portyield_from_isr-스위치는-나가면서">3. <code>pxHigherPriorityTaskWoken</code>과 <code>portYIELD_FROM_ISR</code> — "스위치는 나가면서"<a class="anchor" href="#3-pxhigherprioritytaskwoken과-portyield_from_isr-스위치는-나가면서" aria-label="link">#</a></h2>
+<blockquote><p>D1 §4는 세마포어 하나로 이 규약을 소개하고, yield를 빼먹었을 때 지연이 0~1 ms에 고르게 퍼지는 히스토그램(n = 200, 1 kHz tick)을 이미 측정했다. 이 절은 그 결과를 반복하지 않고 <strong>다른 각도</strong>에서 본다: NULL을 넘기는 경우, tick 주파수를 바꾸는 경우, 한 ISR 안에서 여러 API를 부를 때 생기는 플래그 버그.</p></blockquote>
+<h3 id="3-1-직관과-순서">3.1 직관과 순서<a class="anchor" href="#3-1-직관과-순서" aria-label="link">#</a></h3>
+<p>ISR 안에서는 컨텍스트 스위치를 할 수 없다. 스위치는 "지금 돌던 태스크의 레지스터를 그 태스크 스택에 저장하고 다른 태스크 스택에서 꺼내는" 일인데, ISR이 돌고 있는 동안 CPU는 handler mode에 있고 태스크 스택(PSP) 위에는 하드웨어가 쌓은 예외 프레임이 있다. 그래서 Cortex-M RTOS는 스위치를 <strong>가장 낮은 우선순위의 PendSV 예외</strong>에 맡긴다(B4, C2). ISR은 PendSV를 pending으로 만들어 두기만 하고, 모든 ISR이 끝나면 하드웨어가 tail-chaining으로 PendSV에 들어간다.</p>
+<figure class="chart"><svg viewBox="0 0 680 310" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">FreeRTOS: give → woken → portYIELD_FROM_ISR → PendSV → 태스크</text>
+<text x="10.0" y="64.0" font-size="12" text-anchor="start">ISR (0x40)</text>
+<line x1="110.0" y1="72.0" x2="670.0" y2="72.0" stroke="#888" stroke-width="0.6"/>
+<text x="10.0" y="114.0" font-size="12" text-anchor="start">PendSV (0xFF)</text>
+<line x1="110.0" y1="122.0" x2="670.0" y2="122.0" stroke="#888" stroke-width="0.6"/>
+<text x="10.0" y="164.0" font-size="12" text-anchor="start">hi task (3)</text>
+<line x1="110.0" y1="172.0" x2="670.0" y2="172.0" stroke="#888" stroke-width="0.6"/>
+<text x="10.0" y="214.0" font-size="12" text-anchor="start">busy task (1)</text>
+<line x1="110.0" y1="222.0" x2="670.0" y2="222.0" stroke="#888" stroke-width="0.6"/>
+<rect x="110.0" y="202.0" width="100.0" height="16.0" rx="2" fill="#4a7bd0" fill-opacity="0.3" stroke="#4a7bd0" stroke-width="1.3"/>
+<rect x="210.0" y="52.0" width="34.0" height="16.0" rx="2" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c" stroke-width="1.3"/>
+<rect x="244.0" y="52.0" width="110.0" height="16.0" rx="2" fill="#e08a3c" fill-opacity="0.8" stroke="#e08a3c" stroke-width="1.3"/>
+<rect x="354.0" y="52.0" width="50.0" height="16.0" rx="2" fill="#e08a3c" fill-opacity="0.5" stroke="#e08a3c" stroke-width="1.3"/>
+<rect x="404.0" y="52.0" width="40.0" height="16.0" rx="2" fill="#e08a3c" fill-opacity="0.3" stroke="#e08a3c" stroke-width="1.3"/>
+<rect x="444.0" y="102.0" width="44.0" height="16.0" rx="2" fill="#888" fill-opacity="0.6" stroke="#888" stroke-width="1.3"/>
+<rect x="488.0" y="152.0" width="182.0" height="16.0" rx="2" fill="#3f9a6b" fill-opacity="0.5" stroke="#3f9a6b" stroke-width="1.3"/>
+<text x="227.0" y="44.0" font-size="12" text-anchor="middle">①</text>
+<text x="299.0" y="44.0" font-size="12" text-anchor="middle">②</text>
+<text x="379.0" y="44.0" font-size="12" text-anchor="middle">③</text>
+<text x="424.0" y="44.0" font-size="12" text-anchor="middle">④</text>
+<text x="466.0" y="96.0" font-size="12" text-anchor="middle">⑤</text>
+<text x="579.0" y="146.0" font-size="12" text-anchor="middle">⑥ ISR 끝난 직후 실행</text>
+<line x1="210.0" y1="236.0" x2="210.0" y2="222.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah2)"/>
+<text x="210.0" y="252.0" font-size="12" text-anchor="middle">IRQ</text>
+<text x="10.0" y="272.0" font-size="12" text-anchor="start">① 원인 지우기  ② xSemaphoreGiveFromISR: hi를 ready로, woken = pdTRUE (스위치는 안 함)</text>
+<text x="10.0" y="288.0" font-size="12" text-anchor="start">③ portYIELD_FROM_ISR(woken): ICSR.PENDSVSET = 1 만 쓴다  ④ ISR 나머지는 계속 돈다</text>
+<text x="10.0" y="304.0" font-size="12" text-anchor="start">⑤ PendSV(가장 낮은 우선순위)가 tail-chain으로 들어와 vTaskSwitchContext</text>
+</svg></figure>
+<p>그림 2 — FreeRTOS ISR이 높은 우선순위 태스크를 깨우는 순서. ③의 <code>portYIELD_FROM_ISR</code>은 그 자리에서 스위치하지 않고 ICSR의 PENDSVSET 비트만 쓴다. 그래서 ④처럼 yield 뒤의 ISR 코드도 끝까지 돈다. 스위치는 ⑤ PendSV에서, ISR이 끝난 직후에 일어난다.</p>
+<p>V11.3.2 <code>portable/GCC/ARM_CM3/portmacro.h</code> 98~111행이 정의다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define portEND_SWITCHING_ISR( xSwitchRequired ) \
+    do                                           \
+    {                                            \
+        if( xSwitchRequired != pdFALSE )         \
+        {                                        \
+            traceISR_EXIT_TO_SCHEDULER();        \
+            portYIELD();                         \
+        }                                        \
+        else                                     \
+        {                                        \
+            traceISR_EXIT();                     \
+        }                                        \
+    } while( 0 )
+#define portYIELD_FROM_ISR( x )    portEND_SWITCHING_ISR( x )</code></pre></figure>
+<p><code>portYIELD()</code>는 <code>portNVIC_INT_CTRL_REG = portNVIC_PENDSVSET_BIT;</code> 뒤에 <code>dsb</code> · <code>isb</code>다. 두 이름(<code>portYIELD_FROM_ISR</code>, <code>portEND_SWITCHING_ISR</code>)은 이 포트에서 <strong>완전히 같다</strong>. 오래된 포트 중에는 한쪽 이름만 정의한 것이 있어서 둘 다 남아 있다. 새 코드는 <code>portYIELD_FROM_ISR</code>을 쓴다.</p>
+<p>규약을 정리하면 네 줄이다.</p>
+<ol><li><code>BaseType_t woken = pdFALSE;</code> — <strong>반드시 pdFALSE로 초기화</strong>. FromISR API는 깨운 태스크가 지금 돌던 태스크보다 높을 때 <code>pdTRUE</code>로 <strong>올리기만</strong> 하고 내리지 않는다.</li><li>ISR 안의 <strong>모든</strong> FromISR 호출에 <strong>같은</strong> <code>&amp;woken</code>을 넘긴다. 하나라도 높은 태스크를 깨웠으면 <code>pdTRUE</code>로 남는다.</li><li>ISR <strong>맨 끝</strong>에서 <code>portYIELD_FROM_ISR(woken);</code> 한 번. 중간에 불러도 동작은 같지만(PENDSVSET은 ISR이 끝나야 효과가 있다), 읽는 사람이 "여기서 전환된다"고 오해하고 그 뒤에 코드를 덧붙이기 쉽다.</li><li><code>woken</code>은 <strong>반환값이 아니다</strong>. FromISR API의 반환값은 성공/실패(<code>pdPASS</code>, <code>errQUEUE_FULL</code>)다.</li></ol>
+<p>"woken이 참"의 정확한 뜻은 "깨운 태스크의 우선순위 &gt; <code>pxCurrentTCB</code>의 우선순위"다(<code>tasks.c</code> <code>xTaskRemoveFromEventList()</code>, 5500행). 같은 우선순위면 거짓이다 — 같은 우선순위 태스크끼리는 tick의 time slicing이 순서를 정한다.</p>
+<h3 id="3-2-빼먹어도-언젠가는-전환되는-이유-xyieldpendings">3.2 빼먹어도 "언젠가는" 전환되는 이유 — <code>xYieldPendings</code><a class="anchor" href="#3-2-빼먹어도-언젠가는-전환되는-이유-xyieldpendings" aria-label="link">#</a></h3>
+<p>D1 §4.2에서 소스로 본 안전망을 짧게 다시 짚는다. <code>xTaskRemoveFromEventList()</code>는 깨운 태스크가 더 높으면 <code>xReturn = pdTRUE</code>와 함께 <code>xYieldPendings[ 0 ] = pdTRUE</code>도 세운다(주석: "in case the user is not using the xHigherPriorityTaskWoken parameter"). 그리고 <code>xTaskIncrementTick()</code>(4831행에서 시작) 끝부분, 5020행에서</p>
+<figure class="code"><span class="lang">c</span><pre><code>                if( xYieldPendings[ 0 ] != pdFALSE )
+                {
+                    xSwitchRequired = pdTRUE;
+                }</code></pre></figure>
+<p>로 바꿔 SysTick 핸들러가 PendSV를 걸게 한다(<code>port.c</code> 501~507행, <code>configUSE_PREEMPTION == 1</code>일 때). 그러니 yield를 빼먹은 대가는 <strong>"다음 tick까지"</strong>, 또는 그 전에 다른 이유(다른 ISR의 yield, 태스크의 블로킹 호출)로 스위치가 일어나면 그때까지다.</p>
+<p>그렇다면 예측: <strong>최악 지연 ≈ tick 주기 1개, 평균 ≈ tick 주기의 절반</strong>. tick 주파수를 바꿔서 확인한다.</p>
+<h3 id="3-3-예제-4-null을-넘기면-tick-주파수-1000-250-100-hz">3.3 예제 4 — NULL을 넘기면: tick 주파수 1000 · 250 · 100 Hz<a class="anchor" href="#3-3-예제-4-null을-넘기면-tick-주파수-1000-250-100-hz" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: <code>xSemaphoreGiveFromISR(sem, NULL)</code>은 API가 허용하는 호출이다. V11.3.2 <code>queue.c</code>(7곳)와 <code>tasks.c</code>(4곳)는 <code>if( pxHigherPriorityTaskWoken != NULL )</code>을 확인한 뒤에만 플래그를 쓴다. NULL을 넘기면 woken을 받을 길이 없으니 yield도 할 수 없다. TIMER0을 tick 주기의 1.37배로 돌려 IRQ 위상이 tick에 대해 고르게 흩어지게 하고, prio 1 busy 태스크가 CPU를 쥔 상태에서 prio 3 waiter가 깨어나는 지연을 100번 잰다. 같은 소스를 <code>configTICK_RATE_HZ</code>만 바꿔 세 번 빌드한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1 ex5 — pxHigherPriorityTaskWoken = NULL: the wake waits for the next tick.
+ *   Build with -DconfigTICK_RATE_HZ=1000/250/100; the worst case scales with the tick period */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "e1.h"
+#define N 100
+#define TICK_CYC (25000000u / configTICK_RATE_HZ)
+static SemaphoreHandle_t sem;
+static volatile int pass_null;
+void TIMER0_IRQHandler(void)
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    if (pass_null) {
+        xSemaphoreGiveFromISR(sem, NULL);           /* allowed by the API: "optional" */
+    } else {
+        BaseType_t woken = pdFALSE;
+        xSemaphoreGiveFromISR(sem, &amp;woken);
+        portYIELD_FROM_ISR(woken);
+    }
+}
+static void busy(void *arg) { (void)arg; for (;;) { } }   /* prio 1 keeps the CPU busy */
+static void run(int null)
+{
+    stat_t s = { 0 };
+    pass_null = null;
+    timer0_start(TICK_CYC + TICK_CYC * 37u / 100u, 0x40);  /* 1.37 tick: phase drifts */
+    for (int i = 0; i &lt; N; i++) {
+        xSemaphoreTake(sem, portMAX_DELAY);
+        stat_add(&amp;s, timer0_elapsed());
+    }
+    timer0_stop();
+    board_printf_raw("tick=%u Hz %s ", (unsigned)configTICK_RATE_HZ, null ? "NULL " : "woken");
+    stat_print("", &amp;s);
+}
+static void waiter(void *arg)                       /* prio 3 */
+{
+    (void)arg;
+    run(0);
+    run(1);
+    board_exit(0);
+}
+int main(void)
+{
+    sem = xSemaphoreCreateBinary();
+    xTaskCreate(waiter, "wait", 512, NULL, 3, NULL);
+    xTaskCreate(busy, "busy", 128, NULL, 1, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'for hz in 1000 250 100; do \
+  make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/E1/ex5_null_tick.c \
+    OUT=/var/tmp/rtos/E1/ex5_$hz EXTRA_CFLAGS=-DconfigTICK_RATE_HZ=$hz &gt;/dev/null || break; \
+  ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E1/ex5_$hz/app.elf 40 | grep -av board_exit; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>tick=1000 Hz woken  n=100 min=9160 avg=9160 max=10640 ns
+tick=1000 Hz NULL   n=100 min=10280 avg=504360 max=999360 ns
+tick=250 Hz woken  n=100 min=9160 avg=9160 max=9160 ns
+tick=250 Hz NULL   n=100 min=30360 avg=2010360 max=3990360 ns
+tick=100 Hz woken  n=100 min=9160 avg=9160 max=9160 ns
+tick=100 Hz NULL   n=100 min=50360 avg=5000360 max=9950360 ns</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>woken + yield는 tick과 <strong>무관하게 9.16 µs</strong>. 스케줄러의 반응이 tick이 아니라 PendSV로 결정되기 때문이다(1 kHz 한 번만 10.64 µs — IRQ가 SysTick과 겹친 경우).</li><li>NULL은 <strong>평균 ≈ tick/2, 최대 ≈ 1 tick</strong>: 1 kHz에서 0.50/1.00 ms, 250 Hz에서 2.01/3.99 ms, 100 Hz에서 5.00/9.95 ms. 정확히 §3.2의 예측이다. 지연이 tick에 비례하므로 "tick을 느리게(100 Hz) 해서 전력을 아끼는" 설계에서는 이 실수가 10 ms 버그가 된다.</li><li>D1 예제 6은 woken을 받고 yield만 빼먹은 경우였다. NULL을 넘긴 경우도 결과가 같다 — 둘 다 "아무도 PENDSVSET을 쓰지 않는다"는 같은 상태이기 때문이다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">실측: pxHigherPriorityTaskWoken = NULL 이면 깨어나는 데 최대 1 tick (n=100)</text>
+<line x1="80.0" y1="280.0" x2="660.0" y2="280.0" stroke="currentColor" stroke-width="1.3"/>
+<line x1="80.0" y1="280.0" x2="80.0" y2="50.0" stroke="currentColor" stroke-width="1.3"/>
+<line x1="76.0" y1="280.0" x2="660.0" y2="280.0" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="72.0" y="284.0" font-size="12" text-anchor="end">1 µs</text>
+<line x1="76.0" y1="226.5" x2="660.0" y2="226.5" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="72.0" y="230.5" font-size="12" text-anchor="end">10 µs</text>
+<line x1="76.0" y1="173.0" x2="660.0" y2="173.0" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="72.0" y="177.0" font-size="12" text-anchor="end">100 µs</text>
+<line x1="76.0" y1="119.6" x2="660.0" y2="119.6" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="72.0" y="123.6" font-size="12" text-anchor="end">1 ms</text>
+<line x1="76.0" y1="66.1" x2="660.0" y2="66.1" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="72.0" y="70.1" font-size="12" text-anchor="end">10 ms</text>
+<rect x="110.0" y="228.6" width="38.0" height="51.4" rx="1" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b" stroke-width="1.3"/>
+<text x="129.0" y="223.6" font-size="12" text-anchor="middle">9.2</text>
+<rect x="156.0" y="135.5" width="38.0" height="144.5" rx="1" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="175.0" y="130.5" font-size="12" text-anchor="middle">0.50m</text>
+<rect x="202.0" y="119.6" width="38.0" height="160.4" rx="1" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a" stroke-width="1.3"/>
+<text x="221.0" y="114.6" font-size="12" text-anchor="middle">1.00m</text>
+<text x="175.0" y="298.0" font-size="12" text-anchor="middle">1000 Hz tick</text>
+<rect x="303.3" y="228.6" width="38.0" height="51.4" rx="1" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b" stroke-width="1.3"/>
+<text x="322.3" y="223.6" font-size="12" text-anchor="middle">9.2</text>
+<rect x="349.3" y="103.4" width="38.0" height="176.6" rx="1" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="368.3" y="98.4" font-size="12" text-anchor="middle">2.01m</text>
+<rect x="395.3" y="87.4" width="38.0" height="192.6" rx="1" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a" stroke-width="1.3"/>
+<text x="414.3" y="82.4" font-size="12" text-anchor="middle">3.99m</text>
+<text x="368.3" y="298.0" font-size="12" text-anchor="middle">250 Hz tick</text>
+<rect x="496.7" y="228.6" width="38.0" height="51.4" rx="1" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b" stroke-width="1.3"/>
+<text x="515.7" y="223.6" font-size="12" text-anchor="middle">9.2</text>
+<rect x="542.7" y="82.2" width="38.0" height="197.8" rx="1" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="561.7" y="77.2" font-size="12" text-anchor="middle">5.00m</text>
+<rect x="588.7" y="66.2" width="38.0" height="213.8" rx="1" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a" stroke-width="1.3"/>
+<text x="607.7" y="61.2" font-size="12" text-anchor="middle">9.95m</text>
+<text x="561.7" y="298.0" font-size="12" text-anchor="middle">100 Hz tick</text>
+<rect x="90.0" y="312.0" width="12.0" height="12.0" rx="1" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b" stroke-width="1.3"/>
+<text x="108.0" y="322.0" font-size="12" text-anchor="start">woken + yield (9.16 µs 고정)</text>
+<rect x="323.1" y="312.0" width="12.0" height="12.0" rx="1" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="341.1" y="322.0" font-size="12" text-anchor="start">NULL 평균 ≈ tick/2</text>
+<rect x="486.6" y="312.0" width="12.0" height="12.0" rx="1" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a" stroke-width="1.3"/>
+<text x="504.6" y="322.0" font-size="12" text-anchor="start">NULL 최대 ≈ 1 tick</text>
+</svg></figure>
+<p>그림 3 — 실측: NULL을 넘겼을 때 ISR → 태스크 지연(로그 축). 초록은 woken + yield(모든 tick 주파수에서 9.16 µs), 주황은 NULL 평균, 빨강은 NULL 최대. 평균은 tick 주기의 절반, 최대는 tick 주기 1개에 붙는다.</p>
+<p><strong>그럼 NULL은 언제 넘겨도 되나?</strong> 깨울 태스크가 ISR이 끊은 태스크보다 <strong>절대 높을 수 없다</strong>는 것이 설계상 확실할 때(예: 깨우는 대상이 가장 낮은 우선순위 로깅 태스크)뿐이다. 그때도 같은 woken을 받아 yield를 부르는 비용은 거의 0이므로(거짓이면 분기 하나), 규칙은 "항상 받고 항상 yield"가 낫다.</p>
+<h3 id="3-4-예제-5-한-isr에-fromisr이-둘-이상일-때의-플래그-버그">3.4 예제 5 — 한 ISR에 FromISR이 둘 이상일 때의 플래그 버그<a class="anchor" href="#3-4-예제-5-한-isr에-fromisr이-둘-이상일-때의-플래그-버그" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: UART 같은 주변장치 ISR은 흔히 "RX 완료"와 "TX 비었음"을 한 번에 처리하며 FromISR을 두 번 부른다. rx 세마포어에는 prio 3 hi 태스크가 기다리고, tx 세마포어에는 아무도 기다리지 않는다. 네 가지 ISR을 비교한다.</p>
+<ul><li>A (정답): 한 플래그를 두 호출에 공유하고 마지막에 yield 한 번.</li><li>B (버그): 호출마다 다른 플래그 <code>w1</code>, <code>w2</code>를 쓰고 마지막 것만 yield에 넘긴다. hi를 깨운 <code>w1</code>이 버려진다.</li><li>C (버그): API의 <strong>반환값</strong>(<code>pdPASS</code>)을 woken인 줄 알고 yield에 넘긴다. 아무도 안 깨웠는데 매번 PendSV가 걸린다.</li><li>D (정답): C와 같은 ISR에서 woken을 제대로 넘긴다.</li></ul>
+<p>PendSV가 실제로 몇 번 스위치 판단을 했는지 세려고, 앱 폴더(<code>trace/</code>)에 템플릿 설정을 include하고 trace 매크로 하나만 더한 <code>FreeRTOSConfig.h</code>를 두었다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1: template config + a counter of context-switch decisions (one per PendSV run) */
+#include "/var/rtoslab/templates/freertos-mps2/FreeRTOSConfig.h"
+extern volatile unsigned long e1_switch_calls;
+#define traceTASK_SWITCHED_IN() ( e1_switch_calls++ )</code></pre></figure>
+<p><code>traceTASK_SWITCHED_IN()</code>은 <code>vTaskSwitchContext()</code>가 다음 태스크를 고를 때마다 불린다. PendSV 핸들러는 매번 <code>vTaskSwitchContext()</code>를 부르므로(같은 태스크로 "전환"하더라도) PendSV 실행 횟수를 세는 셈이다. busy 태스크는 2 µs(50 사이클) 넘게 CPU를 못 받은 구간을 모두 더해 "빼앗긴 시간"을 잰다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1 ex6 — woken-flag bugs inside one ISR: overwritten flag, "return value as woken" */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "../e1.h"
+#define N 100
+volatile unsigned long e1_switch_calls;
+static SemaphoreHandle_t rx, tx;                  /* rx: hi task waits; tx: nobody waits */
+static volatile int mode;
+static volatile uint32_t nstall, sumstall;
+void TIMER0_IRQHandler(void)
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    if (mode == 0) {                              /* A: one flag for all calls, yield once */
+        BaseType_t woken = pdFALSE;
+        xSemaphoreGiveFromISR(rx, &amp;woken);
+        xSemaphoreGiveFromISR(tx, &amp;woken);
+        portYIELD_FROM_ISR(woken);
+    } else if (mode == 1) {                       /* B: separate flags, yield on the last */
+        BaseType_t w1 = pdFALSE, w2 = pdFALSE;
+        xSemaphoreGiveFromISR(rx, &amp;w1);           /* w1 = pdTRUE ... and then forgotten */
+        xSemaphoreGiveFromISR(tx, &amp;w2);
+        portYIELD_FROM_ISR(w2);
+    } else {                                      /* C: return value used as the flag */
+        BaseType_t woken = pdFALSE;               /* D: same ISR, correct flag */
+        BaseType_t r = xSemaphoreGiveFromISR(tx, &amp;woken);  /* pdPASS = 1 when tx was empty */
+        xSemaphoreTakeFromISR(tx, &amp;woken);        /* empty it again for the next IRQ */
+        portYIELD_FROM_ISR(mode == 2 ? r : woken);
+    }
+}
+static void busy(void *arg)                       /* prio 1: sums the time it lost */
+{
+    (void)arg;
+    uint32_t prev = CYC();
+    for (;;) { uint32_t now = CYC(), g = now - prev; if (g &gt; 50) { nstall++; sumstall += g; } prev = now; }
+}
+static void hi(void *arg)                         /* prio 3 */
+{
+    (void)arg;
+    static const char *name[] = { "A one flag     ", "B overwritten  ", "C ret-as-woken ", "D correct flag " };
+    for (mode = 0; mode &lt; 4; mode++) {
+        stat_t s = { 0 };
+        vTaskDelay(2);
+        nstall = sumstall = 0; e1_switch_calls = 0;
+        timer0_start(25000u + 925u, 0x40);        /* 1.037 ms */
+        if (mode &lt; 2) {
+            for (int i = 0; i &lt; N; i++) { xSemaphoreTake(rx, portMAX_DELAY); stat_add(&amp;s, timer0_elapsed()); }
+        } else {
+            vTaskDelay(100);                      /* ~96 IRQs that wake nobody */
+        }
+        timer0_stop();
+        unsigned long sw = e1_switch_calls;
+        if (mode &lt; 2) { board_printf_raw("%s switches=%u ", name[mode], (unsigned)sw); stat_print("wake", &amp;s); }
+        else {
+            board_printf_raw("%s switches=%u busy stalls=%u, stolen=%u us (avg %u ns)\n", name[mode],
+                             (unsigned)sw, (unsigned)nstall, (unsigned)(sumstall / 25u), (unsigned)(sumstall * 40u / nstall));
+        }
+    }
+    board_exit(0);
+}
+int main(void)
+{
+    rx = xSemaphoreCreateBinary();
+    tx = xSemaphoreCreateBinary();
+    xTaskCreate(hi, "hi", 512, NULL, 3, NULL);
+    xTaskCreate(busy, "busy", 256, NULL, 1, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/freertos-mps2/Makefile \
+  SRCS=/Users/donh/.rtos_scratch/E1/trace/ex6_woken.c OUT=/var/tmp/rtos/E1/ex6 &gt;/dev/null &amp;&amp; \
+  ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E1/ex6/app.elf 40'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>A one flag      switches=200 wake n=100 min=10960 avg=10960 max=11280 ns
+B overwritten   switches=200 wake n=100 min=36520 avg=540000 max=1001520 ns
+C ret-as-woken  switches=97 busy stalls=97, stolen=774 us (avg 7983 ns)
+D correct flag  switches=2 busy stalls=97, stolen=452 us (avg 4665 ns)
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>A</strong>: 10.96 µs로 일정. 스위치 200번 = 깨어날 때 1번 + hi가 다시 블록할 때 1번 × 100.</li><li><strong>B</strong>: 평균 540 µs, 최대 1.0 ms — §3.3의 NULL과 똑같은 "다음 tick까지" 분포다. 두 번째 호출의 <code>w2</code>는 정직하게 <code>pdFALSE</code>(tx에는 대기자가 없다)라서 yield가 안 걸렸다. 코드 리뷰에서 "각 호출의 결과를 따로 받는 게 더 명확하다"며 이렇게 고치는 일이 실제로 있다. 고치려면 <code>portYIELD_FROM_ISR(w1 | w2)</code>로 합치거나 처음부터 하나를 공유한다.</li><li><strong>C</strong>: 100 ms 동안 PendSV가 97번 돌았다(D는 2번 — hi가 잠들 때와 깨어날 때). 아무도 깨우지 않은 IRQ마다 쓸데없는 PendSV가 돌아 busy가 빼앗긴 시간이 452 → 774 µs로 늘었다. 차이 322 µs ÷ 95번 ≈ <strong>헛 PendSV 한 번에 3.4 µs</strong>(예제 12에서 계산). 기능은 멀쩡하고 CPU만 조금 더 쓰는 버그라 찾기 어렵다. <code>woken</code>을 초기화하지 않은 경우(스택 쓰레기 값이 0이 아닐 때)도 같은 증상이다.</li><li>C와 D의 stall 횟수가 97로 같다는 것은 IRQ 수가 같다는 뜻이다. 차이는 IRQ당 길이(평균 7.98 대 4.67 µs)뿐이다.</li></ul>
+<h3 id="3-5-don-경험과-연결-그리고-함정">3.5 Don 경험과 연결, 그리고 함정<a class="anchor" href="#3-5-don-경험과-연결-그리고-함정" aria-label="link">#</a></h3>
+<p>SSD 펌웨어의 "ISR이 이벤트 비트를 세우고, executive 루프가 다음 바퀴에 본다"는 구조에서 executive 루프의 한 바퀴 주기가 곧 최악 반응 시간이었다. FreeRTOS에서 yield를 빼먹으면 <strong>tick 주기가 그 바퀴 주기 역할을 한다</strong>. 우선순위 선점이라는 RTOS의 핵심 장점을 한 줄 누락으로 잃는 셈이다.</p>
+<p>함정 세 가지:</p>
+<ul><li><strong>"테스트는 다 통과했다"</strong>: 값은 맞고 지연만 늘어난다. 지연 히스토그램(E3)을 재지 않으면 안 보인다.</li><li><strong>"다음 tick"이 멀수록 나빠진다</strong>: 예제 4처럼 지연은 tick 주기에 비례한다. 안전망이 tick이 아니라 "다음에 우연히 일어나는 스위치 지점"인 커널에서는 더 길어질 수 있다 — Zephyr의 direct ISR에서 같은 종류의 실수가 tickless 때문에 최대 660 ms(이론 상한 671 ms)까지 늘어나는 것을 §6.5에서 본다.</li><li><strong>SMP FreeRTOS</strong>에서는 <code>portYIELD_FROM_ISR</code>이 "이 코어"만 스위치한다. 다른 코어의 태스크를 깨운 경우는 커널이 코어 간 인터럽트로 처리한다(C10).</li></ul>
+<hr>
+<h2 id="4-isr에서-금지된-것-규칙-이유-깨지는-것">4. ISR에서 금지된 것 — 규칙 → 이유 → 깨지는 것<a class="anchor" href="#4-isr에서-금지된-것-규칙-이유-깨지는-것" aria-label="link">#</a></h2>
+<h3 id="4-1-카탈로그">4.1 카탈로그<a class="anchor" href="#4-1-카탈로그" aria-label="link">#</a></h3>
+<p>먼저 표 하나로 정리하고, 아래 예제들에서 "깨지는 것" 칸을 직접 재현한다.</p>
+<div class="tw"><table><thead><tr><th>규칙 (ISR에서 하지 마라)</th><th>이유</th><th>실제로 깨지는 것 (이 노트의 근거)</th></tr></thead><tbody><tr><td>블로킹 take/receive/send (timeout ≠ 0)</td><td>ISR에는 블록할 "자기"가 없다. 커널은 <code>pxCurrentTCB</code> = <strong>끊긴 태스크</strong>를 대기 리스트에 넣는다</td><td>assert on: <code>port.c:438</code>. assert off: ISR이 영영 못 나감, <code>vListInsert</code> 무한 루프 (예제 7)</td></tr><tr><td><code>vTaskDelay</code> / <code>k_sleep</code></td><td>위와 같다. 재워지는 것은 끊긴 태스크</td><td>assert off: 끊긴 태스크가 5 ms 잠듦 (예제 7), Zephyr는 19 ms (예제 10)</td></tr><tr><td>태스크용 API (timeout 0이어도)</td><td>크리티컬 섹션이 중첩 카운터식이라 ISR에서 BASEPRI를 0으로 내린다. 스위치를 그 자리에서 요청한다</td><td>assert on: <code>port.c:438</code>. assert off: CM3에서는 "우연히" 동작 (예제 7) — 포트·버전이 바뀌면 보장 없음</td></tr><tr><td>뮤텍스 take/give</td><td>소유자 = 태스크라는 전제(우선순위 상속)가 깨진다</td><td>태스크가 쥔 뮤텍스를 ISR이 give: <code>queue.c:1360</code> assert. ISR이 take: 소유자 없는 잠긴 뮤텍스 → 태스크 영원히 대기 (예제 6)</td></tr><tr><td><code>pvPortMalloc</code> / <code>malloc</code></td><td>heap_4는 스케줄러 잠금을 쓴다. newlib <code>malloc</code>은 재진입 보호가 없다(락 훅을 안 채운 경우)</td><td><code>pvPortMalloc</code>: <code>port.c:438</code> assert (예제 6). <code>malloc</code>: 태스크가 malloc 중일 때 겹치면 힙 손상</td></tr><tr><td><code>printf</code> / UART 출력</td><td>출력 장치를 기다린다(블로킹 putc). 길이 상한이 없다</td><td>23자 = QEMU 12.6 µs, 실칩 115200 baud ≈ 2.0 ms 동안 같거나 낮은 IRQ 전부 지연 (예제 8)</td></tr><tr><td>상한 없는 루프 · 폴링</td><td>ISR 길이 = 같거나 낮은 우선순위 IRQ와 모든 태스크의 지연</td><td>200회 빈 루프 = 40.8 µs (예제 8). 하드웨어 상태 폴링은 상한조차 없다</td></tr><tr><td>FPU (FPU 있는 코어) / 부동소수점 (없는 코어)</td><td>M4F/M7: 예외 프레임이 26워드로 커지고 lazy stacking 비용 (B6). M3: 소프트웨어 float 라이브러리 호출</td><td>M3에서 곱셈·덧셈 16회 = 46.9 µs (예제 8)</td></tr><tr><td>문턱보다 급한 ISR에서 커널 API</td><td>커널이 그 ISR을 BASEPRI로 막을 수 없어 리스트를 동시에 고친다</td><td><code>port.c:803</code> assert (예제 6 MODE=8, B3 예제 11). assert off: 가끔 리스트 손상 → 한참 뒤 HardFault</td></tr><tr><td>woken을 버림 / NULL / 덮어씀</td><td>아무도 PENDSVSET을 쓰지 않는다</td><td>최대 1 tick 지연 (예제 4, 5)</td></tr></tbody></table></div>
+<h3 id="4-2-예제-6-assert를-켜고-여덟-가지-실수를-한-번씩">4.2 예제 6 — assert를 켜고 여덟 가지 실수를 한 번씩<a class="anchor" href="#4-2-예제-6-assert를-켜고-여덟-가지-실수를-한-번씩" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: TIMER0 ISR(우선순위 0x40, MODE 8만 0x10)이 한 번 뜨면서 MODE에 따라 한 가지 실수를 한다. lab 템플릿의 <code>configASSERT</code>는 파일:줄을 찍고 종료코드 253으로 끝난다. assert가 안 터지면 태스크가 살아서 상태를 찍는다.</p>
+<blockquote><p>B3 예제 11(문턱 위 ISR의 FromISR, 우선순위 미설정, PRIGROUP)과 C7 예제 5(ISR에서 <code>taskENTER_CRITICAL</code>)가 이미 assert 두 개를 보여 줬다. 이 예제는 "블로킹 · 지연 · 할당 · 뮤텍스"까지 넓혀서 <strong>어느 assert가 무엇을 잡는지</strong> 지도를 만든다.</p></blockquote>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1 ex3 — what each ISR rule violation actually does (FreeRTOS V11.3.2, configASSERT on)
+ *   -DMODE=1..8, see the switch in the ISR */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "queue.h"
+#include "e1.h"
+static SemaphoreHandle_t sem, mtx;
+static QueueHandle_t q;
+static volatile int isr_done;
+void TIMER0_IRQHandler(void)
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    timer0_stop();
+    BaseType_t woken = pdFALSE;
+    uint32_t v = 7;
+    switch (MODE) {
+    case 1: xSemaphoreGive(sem); break;                     /* task API, no timeout   */
+    case 2: (void)xQueueSend(q, &amp;v, 0); break;              /* task API, "0 = no block" */
+    case 3: (void)xSemaphoreTake(sem, 10); break;           /* blocking take, 10 ticks */
+    case 4: vTaskDelay(1); break;                           /* sleep inside an ISR     */
+    case 5: { void *p = pvPortMalloc(32); vPortFree(p); } break;
+    case 6: xSemaphoreGiveFromISR(mtx, &amp;woken); break;      /* mutex held by a task    */
+    case 7: (void)xSemaphoreTakeFromISR(mtx, &amp;woken); break;/* free mutex, taken by ISR */
+    case 8: xSemaphoreGiveFromISR(sem, &amp;woken); break;      /* ISR prio 0x10, see main */
+    }
+    isr_done = 1;
+    portYIELD_FROM_ISR(woken);
+}
+static void task(void *arg)
+{
+    (void)arg;
+    if (MODE == 6) xSemaphoreTake(mtx, 0);                  /* task owns the mutex */
+    timer0_start(2500, MODE == 8 ? 0x10 : 0x40);            /* one IRQ after 100 us */
+    vTaskDelay(2);
+    board_printf_raw("MODE=%d: ISR returned (isr_done=%d), task alive\n", MODE, isr_done);
+    if (MODE == 7) {
+        board_printf_raw("  mutex holder after ISR take = %s\n",
+                         xSemaphoreGetMutexHolder(mtx) == NULL ? "NULL (nobody)" : "task");
+        board_printf_raw("  task take(mutex, 5) = %s\n",
+                         xSemaphoreTake(mtx, 5) == pdTRUE ? "pdTRUE" : "pdFALSE (timeout)");
+    }
+    board_exit(0);
+}
+int main(void)
+{
+    sem = xSemaphoreCreateBinary();
+    mtx = xSemaphoreCreateMutex();
+    q = xQueueCreate(1, sizeof(uint32_t));
+    xTaskCreate(task, "t", 512, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'for m in 1 2 3 4 5 6 7 8; do \
+  make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/E1/ex3_violations.c \
+    OUT=/var/tmp/rtos/E1/ex3_$m EXTRA_CFLAGS="-DMODE=$m -DINCLUDE_xSemaphoreGetMutexHolder=1" &gt;/dev/null || break; \
+  printf "MODE=$m "; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E1/ex3_$m/app.elf 10 \
+    | grep -a -v "^$" | grep -av board_exit | tr "\n" " "; echo; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>MODE=1 [configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:438 
+MODE=2 [configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:438 
+MODE=3 [configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:438 
+MODE=4 [configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:438 
+MODE=5 [configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:438 
+MODE=6 [configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/queue.c:1360 
+MODE=7 MODE=7: ISR returned (isr_done=1), task alive   mutex holder after ISR take = NULL (nobody)   task take(mutex, 5) = pdFALSE (timeout) 
+MODE=8 [configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:803 </code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong>MODE 1~5가 전부 같은 줄 <code>port.c:438</code>에서 잡힌다.</strong> <code>vPortEnterCritical()</code>의 <code>configASSERT( ( portNVIC_INT_CTRL_REG &amp; portVECTACTIVE_MASK ) == 0 )</code> 하나다. 태스크용 give, timeout 0인 send, 블로킹 take, <code>vTaskDelay</code>, <code>pvPortMalloc</code> — 다섯 가지 실수가 결국 모두 <code>taskENTER_CRITICAL()</code>을 지나기 때문이다. <code>vTaskDelay</code>와 <code>pvPortMalloc</code>은 <code>vTaskSuspendAll()</code>로 스케줄러를 잠근 뒤 <code>xTaskResumeAll()</code> 안에서 <code>taskENTER_CRITICAL()</code>을 부르다 걸린다. 즉 <strong>"FromISR이 아닌 커널 함수는 거의 전부 VECTACTIVE 검사 하나에 걸린다"</strong>. 이 assert가 FreeRTOS ISR 규칙의 문지기다.</li><li>이 assert는 <code>uxCriticalNesting == 1</code>일 때만 검사한다(재귀 assert 방지). 그리고 메시지가 파일:줄뿐이라 <strong>누가</strong> 불렀는지는 안 알려 준다. 실무에서는 <code>configASSERT</code>를 <code>__builtin_return_address(0)</code>이나 LR까지 기록하도록 정의하거나, 디버거에서 콜 스택을 본다(M1).</li><li><strong>MODE 6</strong> — 태스크가 쥔 뮤텍스를 ISR이 give: <code>queue.c:1360</code>의 <code>configASSERT( ... !( ( pxQueue-&gt;uxQueueType == queueQUEUE_IS_MUTEX ) &amp;&amp; ( pxQueue-&gt;u.xSemaphore.xMutexHolder != NULL ) ) )</code>. 소스 주석: "priority inheritance makes no sense for an interrupt, only tasks."</li><li><strong>MODE 7이 가장 무섭다 — assert가 없다.</strong> 비어 있는 뮤텍스를 ISR이 <code>xSemaphoreTakeFromISR</code>로 가져가면 성공한다. 그런데 소유자 기록(<code>xMutexHolder</code>)은 태스크용 take 경로(<code>xQueueSemaphoreTake</code>)에서만 채워지므로 <strong>소유자 NULL인 잠긴 뮤텍스</strong>가 된다. 이후 태스크의 take는 timeout까지 기다리다 실패하고, 이 뮤텍스를 돌려줄 "소유자"가 세상에 없다. 우선순위 상속도 상속해 줄 대상이 없다. 증상은 "가끔 영원히 멈추는 태스크"다.</li><li><strong>MODE 8</strong> — 우선순위 0x10(문턱 0x20보다 급함) ISR의 FromISR: <code>port.c:803</code>. §5에서 이 검사를 자세히 본다.</li></ul>
+<h3 id="4-3-예제-7-assert를-끄면-같은-실수가-무엇이-되나">4.3 예제 7 — assert를 끄면 같은 실수가 무엇이 되나<a class="anchor" href="#4-3-예제-7-assert를-끄면-같은-실수가-무엇이-되나" aria-label="link">#</a></h3>
+<p>assert가 있으면 첫 실행에서 멈춘다. 양산 빌드처럼 <code>configASSERT</code>를 끄면 같은 실수가 <strong>무엇으로 바뀌는지</strong>가 현장 디버깅에서 중요하다. 그것을 직접 본다.</p>
+<p>무엇을 확인하는 코드인지: 앱 폴더(<code>noassert/</code>)에 템플릿 설정을 include하고 <code>configASSERT</code>만 <code>#undef</code>한 <code>FreeRTOSConfig.h</code>를 둔다. prio 1 victim 태스크가 CPU를 쥐고 돌며 "자기가 CPU를 못 받은 가장 긴 구간"을 기록한다. ISR은 victim이 도는 중에 한 번 떠서 MODE에 따라 태스크용 API를 부른다. MODE 3(블로킹 take)은 시스템이 멈출 것으로 예상해, C7 예제 11과 같은 방식의 <strong>문턱 위(0x00) 감시 ISR</strong>(DUALTIMER, IRQ 10)을 20 ms 뒤에 띄운다. 감시 ISR은 커널을 부르지 않고 MSP 위의 예외 프레임에서 끊긴 문맥의 IPSR과 PC만 읽는다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1: template config with configASSERT removed (to see what the asserts were hiding) */
+#include "/var/rtoslab/templates/freertos-mps2/FreeRTOSConfig.h"
+#undef configASSERT</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1 ex4 — the same violations with configASSERT OFF: what really happens
+ *   victim (prio 1) spins and records its longest gap; the ISR fires once while victim runs */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "queue.h"
+#include "../e1.h"
+static SemaphoreHandle_t sem, mtx;
+static QueueHandle_t q;
+static volatile uint32_t gap_max, isr_bp_after, isr_ret = 99;
+void TIMER0_IRQHandler(void)
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    timer0_stop();
+    uint32_t v = 7;
+    switch (MODE) {
+    case 1: isr_ret = xSemaphoreGive(sem); break;           /* task API, never blocks here */
+    case 2: isr_ret = xQueueSend(q, &amp;v, 0); break;
+    case 3: isr_ret = xSemaphoreTake(sem, 10); break;       /* count = 0 -&gt; "blocks"       */
+    case 4: vTaskDelay(5); isr_ret = 0; break;
+    }
+    isr_bp_after = basepri();
+}
+/* zero-latency "watchdog" (IRQ10, prio 0x00, no kernel calls): who is running after 20 ms? */
+#define DT1(o) REG32(0x40002000u + (o))
+void wd_c(uint32_t *f)
+{
+    board_printf_raw("  [wd 20ms] interrupted ctx: IPSR=%u PC=0x%x (still inside an ISR)\n",
+                     (unsigned)(f[7] &amp; 0x1FFu), (unsigned)f[6]);
+    board_exit(2);
+}
+__attribute__((naked)) void DUALTIMER_IRQHandler(void) { __asm volatile("mrs r0, msp\n b wd_c"); }
+static void victim(void *arg)                               /* prio 1: the interrupted task */
+{
+    (void)arg;
+    uint32_t prev = CYC();
+    for (;;) {
+        uint32_t now = CYC();
+        if (now - prev &gt; gap_max) gap_max = now - prev;
+        prev = now;
+    }
+}
+static void observer(void *arg)                             /* prio 3 */
+{
+    (void)arg;
+    vTaskDelay(2);
+    gap_max = 0;
+    if (MODE == 3) {                                        /* arm the 20 ms watchdog */
+        DT1(0x00) = 20u * 25000u; DT1(0x08) = 0x80u | 0x20u | 0x02u | 0x01u;
+        NVIC_IPR(10) = 0x00; NVIC_ISER0 = 1u &lt;&lt; 10;
+    }
+    timer0_start(25000, 0x40);                              /* one IRQ after 1 ms */
+    vTaskDelay(30);
+    board_printf_raw("MODE=%d: api ret=%u, BASEPRI after=0x%x, victim longest gap=%u us\n",
+                     MODE, (unsigned)isr_ret, (unsigned)isr_bp_after, (unsigned)(gap_max / 25u));
+    if (MODE == 1) board_printf_raw("  sem count now=%u (give worked)\n",
+                                    (unsigned)uxSemaphoreGetCount(sem));
+    board_exit(0);
+}
+int main(void)
+{
+    sem = xSemaphoreCreateBinary();
+    mtx = xSemaphoreCreateMutex();
+    q = xQueueCreate(1, sizeof(uint32_t));
+    (void)mtx;
+    xTaskCreate(victim, "victim", 256, NULL, 1, NULL);
+    xTaskCreate(observer, "obs", 512, NULL, 3, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'for m in 1 2 3 4; do \
+  make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/E1/noassert/ex4_noassert.c \
+    OUT=/var/tmp/rtos/E1/ex4_$m EXTRA_CFLAGS="-DMODE=$m -Wno-unused-variable -Wno-unused-but-set-variable" &gt;/dev/null || break; \
+  ICOUNT=1 timeout 30 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E1/ex4_$m/app.elf 10; echo "exit=$?"; done; \
+  arm-none-eabi-addr2line -f -e /var/tmp/rtos/E1/ex4_3/app.elf 0x1288 &lt;/dev/null'</code></pre></figure>
+<p>(<code>-Wno-unused-...</code> 두 개는 <code>configASSERT</code>가 사라지면서 <strong>커널 소스</strong>(<code>tasks.c</code> 8564행, <code>port.c</code> 284행)에 생기는 "쓰이지 않는 변수" 경고를 끄려고 붙였다. 예제 코드 자체는 경고 0개다.)</p>
+<figure class="code"><span class="lang">text</span><pre><code>MODE=1: api ret=1, BASEPRI after=0x0, victim longest gap=14 us
+  sem count now=1 (give worked)
+[board_exit] code=0
+exit=0
+MODE=2: api ret=1, BASEPRI after=0x0, victim longest gap=14 us
+[board_exit] code=0
+exit=0
+  [wd 20ms] interrupted ctx: IPSR=24 PC=0x1288 (still inside an ISR)
+[board_exit] code=2
+exit=1
+MODE=4: api ret=0, BASEPRI after=0x0, victim longest gap=4999 us
+[board_exit] code=0
+exit=0
+vListInsert
+/var/rtoslab/src/FreeRTOS-Kernel/list.c:192 (discriminator 1)</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>MODE 1 · 2 (태스크용 give, timeout 0 send)</strong>: 겉보기에 정상이다. give는 성공했고(count 1), ISR이 끝난 뒤 BASEPRI도 0이다. 단일 코어 Cortex-M3에서 문턱 아래 ISR이 돌 수 있는 순간에는 BASEPRI가 이미 0이고 <code>uxCriticalNesting</code>도 0이므로(태스크가 크리티컬 섹션 안이면 이 ISR은 막혀 있다), "0으로 내린다"가 우연히 맞는 값이 된다. <strong>우연히 동작하는 코드</strong>다. 포트가 바뀌거나, 깨운 태스크가 높아서 <code>queueYIELD_IF_USING_PREEMPTION()</code>이 불리거나, 언젠가 이 함수에 블로킹 경로가 생기면 깨진다. 그래서 FreeRTOS는 이것을 assert로 막는다.</li><li><strong>MODE 3 (블로킹 take, count 0, timeout 10 tick)</strong>: 20 ms 뒤 감시 ISR이 본 것은 <strong>IPSR = 24(= IRQ 8, TIMER0 ISR) 안의 PC 0x1288 = <code>vListInsert()</code>의 <code>list.c:192</code></strong> — 1 ms에 들어간 ISR이 19 ms 동안 못 나왔다. <code>list.c:192</code>는 FreeRTOS에서 유명한 줄이다. 바로 위 주석이 "If you find your application is crashing here then likely causes are ... 3) Calling an API function from within a critical section or when the scheduler is suspended, or calling an API function that does not end in "FromISR" from an interrupt."이고, 루프 안 주석은 "IF YOU FIND YOUR CODE STUCK HERE, SEE THE NOTE JUST ABOVE."다. 소스를 따라가면 이렇게 해석된다: <code>xQueueSemaphoreTake()</code>는 끊긴 victim을 대기 리스트에 넣고 <code>portYIELD_WITHIN_API()</code>를 부르지만, ISR 안이라 스위치가 일어나지 않고 함수의 <code>for(;;)</code>가 다시 돈다. tick은 이 ISR보다 낮은 SysTick(0xFF)이 세므로 <strong>timeout은 영원히 지나지 않는다</strong>. 그 상태로 같은 리스트 항목을 다시 넣으면서 리스트가 고리로 꼬여 <code>vListInsert</code>의 정렬 삽입 루프가 끝나지 않는다. 결과: 0x40 이하 모든 IRQ와 모든 태스크가 영원히 멈춘다.</li><li><strong>MODE 4 (<code>vTaskDelay(5)</code>)</strong>: ISR은 바로 나왔는데 <strong>victim이 5 ms 동안 CPU를 못 받았다</strong>(4999 µs). 커널이 <code>pxCurrentTCB</code>(= ISR이 끊은 victim)를 delayed 리스트에 넣었기 때문이다. victim 코드에는 <code>vTaskDelay</code>가 한 줄도 없는데 victim이 잔다. 현장에서 이 증상은 "어떤 태스크가 가끔 이유 없이 몇 ms씩 멈춘다"로 보이고, 멈추는 태스크가 매번 다르다(그때 끊긴 태스크가 다르니까).</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">assert를 끄고 같은 실수를 하면 (실측, 예제 4 · 10)</text>
+<rect x="20.0" y="40.0" width="280.0" height="34.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="160.0" y="61.6" font-size="12" text-anchor="middle">FreeRTOS  xSemaphoreGive (ISR)</text>
+<line x1="302.0" y1="57.0" x2="356.0" y2="57.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah5)"/>
+<rect x="360.0" y="40.0" width="300.0" height="34.0" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="510.0" y="61.6" font-size="12" text-anchor="middle">겉보기 정상 (CM3에서 우연히)</text>
+<rect x="20.0" y="86.0" width="280.0" height="34.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="160.0" y="107.6" font-size="12" text-anchor="middle">FreeRTOS  xQueueSend(q, &amp;v, 0)</text>
+<line x1="302.0" y1="103.0" x2="356.0" y2="103.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah5)"/>
+<rect x="360.0" y="86.0" width="300.0" height="34.0" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="510.0" y="107.6" font-size="12" text-anchor="middle">겉보기 정상 (우연히)</text>
+<rect x="20.0" y="132.0" width="280.0" height="34.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="160.0" y="153.6" font-size="12" text-anchor="middle">FreeRTOS  xSemaphoreTake(s, 10)</text>
+<line x1="302.0" y1="149.0" x2="356.0" y2="149.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah5)"/>
+<rect x="360.0" y="132.0" width="300.0" height="34.0" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-width="1.3"/>
+<text x="510.0" y="153.6" font-size="12" text-anchor="middle">ISR이 못 나감: vListInsert 무한 루프</text>
+<rect x="20.0" y="178.0" width="280.0" height="34.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="160.0" y="199.6" font-size="12" text-anchor="middle">FreeRTOS  vTaskDelay(5)</text>
+<line x1="302.0" y1="195.0" x2="356.0" y2="195.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah5)"/>
+<rect x="360.0" y="178.0" width="300.0" height="34.0" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-width="1.3"/>
+<text x="510.0" y="199.6" font-size="12" text-anchor="middle">끼어든 태스크가 5 ms 잠듦</text>
+<rect x="20.0" y="224.0" width="280.0" height="34.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="160.0" y="245.6" font-size="12" text-anchor="middle">Zephyr  k_sem_take(K_MSEC(10))</text>
+<line x1="302.0" y1="241.0" x2="356.0" y2="241.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah5)"/>
+<rect x="360.0" y="224.0" width="300.0" height="34.0" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-width="1.3"/>
+<text x="510.0" y="245.6" font-size="12" text-anchor="middle">-EAGAIN, 끼어든 스레드 19 ms 정지</text>
+<rect x="20.0" y="270.0" width="280.0" height="34.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="160.0" y="291.6" font-size="12" text-anchor="middle">Zephyr  k_sleep(K_MSEC(10))</text>
+<line x1="302.0" y1="287.0" x2="356.0" y2="287.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah5)"/>
+<rect x="360.0" y="270.0" width="300.0" height="34.0" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-width="1.3"/>
+<text x="510.0" y="291.6" font-size="12" text-anchor="middle">0 반환, 끼어든 스레드 19 ms 정지</text>
+</svg></figure>
+<p>그림 4 — assert를 끄고 같은 실수를 했을 때 실제로 일어난 일(예제 7, 예제 10). 주황은 "지금은 동작하지만 보장 없음", 빨강은 실제 고장. 블로킹 계열 실수의 공통점은 <strong>엉뚱한 태스크(끊긴 태스크)가 대가를 치른다</strong>는 것이다.</p>
+<p><strong>Don 경험과 연결</strong>: SSD 펌웨어에서 "커맨드 처리 루프가 가끔 수 ms 멈추는데 그 루프 코드에는 아무 문제가 없던" 버그를 떠올리면 된다. 원인이 다른 곳(ISR)에 있고, 피해자가 매번 바뀌는 버그는 가장 찾기 어렵다. 그래서 RTOS에서는 <strong>assert를 끈 양산 빌드라도 <code>configASSERT</code>를 "로그 남기고 리셋"으로 정의해 남겨 두는</strong> 팀이 많다(코드 크기와 몇 사이클을 대가로).</p>
+<h3 id="4-4-예제-8-짧게-를-숫자로-금지된-일-하나가-isr을-얼마나-늘리나">4.4 예제 8 — "짧게"를 숫자로: 금지된 일 하나가 ISR을 얼마나 늘리나<a class="anchor" href="#4-4-예제-8-짧게-를-숫자로-금지된-일-하나가-isr을-얼마나-늘리나" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 같은 ISR(give 하나)에 금지된 일을 하나씩 더해 ISR 본문 시간을 FPGAIO 카운터로 잰다. 각 모드를 3번 돌려 첫 실행과 최솟값(정상 상태)을 함께 본다. 끝에서 <code>objdump</code>로 ISR이 실제로 부르는 함수를 확인한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1 ex8 — how long the ISR body takes when it does "forbidden" things (Cortex-M3, no FPU) */
+#include &lt;stdlib.h&gt;
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "e1.h"
+static SemaphoreHandle_t sem;
+static volatile int mode;
+static volatile float fin = 1.25f, fout;
+static volatile uint32_t dur;
+static volatile uint32_t sink;
+void TIMER0_IRQHandler(void)                       /* pended by STIR, prio 0x40 */
+{
+    uint32_t t = CYC();
+    BaseType_t woken = pdFALSE;
+    switch (mode) {
+    case 0: break;                                 /* just the give below */
+    case 1: board_printf_raw("[isr] imu sample %u\n", (unsigned)t); break;  /* ~24 chars */
+    case 2: { float x = fin;                       /* 16 multiply-adds: soft-float calls on M3 */
+              for (int i = 0; i &lt; 16; i++) x = x * 1.0001f + 0.5f;
+              fout = x; } break;
+    case 3: { void *p = malloc(64); sink = (uint32_t)(uintptr_t)p; free(p); } break; /* newlib */
+    case 4: for (volatile int i = 0; i &lt; 200; i++) { } break;  /* "short" polling loop */
+    }
+    xSemaphoreGiveFromISR(sem, &amp;woken);
+    dur = CYC() - t;
+    portYIELD_FROM_ISR(woken);
+}
+static void task(void *arg)
+{
+    (void)arg;
+    static const char *name[] = { "give only        ", "+ printf 24 chars", "+ 16 float madd  ",
+                                  "+ malloc/free 64B", "+ 200-iter loop  " };
+    static uint32_t res[5];
+    NVIC_IPR(8) = 0x40; NVIC_ISER0 = 1u &lt;&lt; 8;
+    for (mode = 0; mode &lt; 5; mode++) {
+        uint32_t best = 0xFFFFFFFFu;
+        for (int r = 0; r &lt; 3; r++) {               /* 1st run includes first-use costs */
+            STIR = 8;
+            xSemaphoreTake(sem, portMAX_DELAY);
+            if (dur &lt; best) best = dur;
+            if (r == 0) res[mode] = dur;
+        }
+        board_printf_raw("\n%s first=%u ns  steady=%u ns\n", name[mode], res[mode] * 40, best * 40);
+    }
+    board_exit(0);
+}
+int main(void)
+{
+    sem = xSemaphoreCreateBinary();
+    xTaskCreate(task, "t", 512, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/freertos-mps2/Makefile \
+  SRCS=/Users/donh/.rtos_scratch/E1/ex8_isr_cost.c OUT=/var/tmp/rtos/E1/ex8 &gt;/dev/null &amp;&amp; \
+  ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E1/ex8/app.elf 20; \
+  arm-none-eabi-objdump -d /var/tmp/rtos/E1/ex8/app.elf | awk "/&lt;TIMER0_IRQHandler&gt;:/,/^$/" \
+    | grep -oE "bl\s+[0-9a-f]+ &lt;[^&gt;]+&gt;" | sort | uniq -c'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>give only         first=2160 ns  steady=2160 ns
+[isr] imu sample 38232
+[isr] imu sample 38617
+[isr] imu sample 39002
+
++ printf 24 chars first=12600 ns  steady=12600 ns
+
++ 16 float madd   first=46960 ns  steady=46920 ns
+
++ malloc/free 64B first=6360 ns  steady=4480 ns
+
++ 200-iter loop   first=40760 ns  steady=40760 ns
+[board_exit] code=0
+      1 bl	17c0 &lt;xQueueGiveFromISR&gt;
+      1 bl	2598 &lt;__aeabi_fmul&gt;
+      1 bl	270c &lt;__addsf3&gt;
+      1 bl	2c10 &lt;malloc&gt;
+      1 bl	2c20 &lt;free&gt;
+      1 bl	3fc &lt;board_printf_raw&gt;</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>give만 하는 ISR 본문은 <strong>2.16 µs</strong>. 이것이 기준선이다.</li><li>printf 한 줄(실제로 찍힌 문자열은 줄바꿈 포함 23자 — 소스 주석의 "~24"는 어림이었다)은 <strong>12.6 µs = 기준선의 6배</strong>. 그런데 이것은 QEMU의 UART가 baud 시간을 모델링하지 않아서 나온 숫자다. 실칩 115200 baud, TX FIFO 1바이트에서 블로킹 putc라면 23자 × 86.8 µs ≈ <strong>2.0 ms</strong>(예제 12에서 계산)이고, 그동안 같거나 낮은 우선순위 IRQ와 모든 태스크가 기다린다. 1 kHz rate loop 두 주기다.</li><li>Cortex-M3에는 FPU가 없어서 <code>x * 1.0001f + 0.5f</code>가 <code>__aeabi_fmul</code>, <code>__addsf3</code> <strong>라이브러리 호출</strong>로 컴파일됐다. 16회에 <strong>46.9 µs</strong>. 드론 FC에서 "ISR에서 자이로 값을 보정까지 해서 넘기자"는 유혹이 이 숫자다. FPU가 있는 M4F/M7에서는 연산 자체는 몇 사이클이지만, ISR이 FPU를 쓰는 순간 예외 프레임이 8워드에서 26워드로 커지고(lazy stacking이 켜져 있으면 실제 저장은 첫 FPU 명령 때) 그 비용이 붙는다. B2 예제 12와 B6 예제 4에서 프레임 크기 변화를 봤다. QEMU는 스태킹 사이클을 모델링하지 않으므로 그 비용은 여기서 재지 못한다.</li><li>newlib <code>malloc</code>/<code>free</code>는 4.5 µs(첫 호출 6.4 µs — 처음에는 <code>sbrk</code>로 힙을 키운다). 시간보다 <strong>재진입</strong>이 문제다. newlib은 <code>__malloc_lock</code>/<code>__malloc_unlock</code> 훅으로 보호하는데, 기본 구현은 아무것도 하지 않는다. 태스크가 <code>malloc</code> 안에 있을 때 ISR이 <code>malloc</code>을 부르면 같은 자유 리스트를 동시에 고친다. FreeRTOS <code>pvPortMalloc</code>은 예제 6 MODE=5처럼 assert로 막힌다.</li><li>200회 빈 루프(<code>volatile</code> 카운터)는 <strong>40.8 µs</strong>. "잠깐 기다리는 루프"가 ISR 안에 있으면 이만큼이 그대로 다른 모든 것의 지연이 된다. 하드웨어 레지스터 상태를 폴링하는 루프는 상한조차 없다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">실측: ISR 본문이 '금지된 일'을 하면 길어지는 시간 (Cortex-M3, QEMU icount)</text>
+<text x="192.0" y="60.0" font-size="12" text-anchor="end">give only</text>
+<rect x="200.0" y="48.0" width="17.3" height="18.0" rx="1" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b" stroke-width="1.3"/>
+<text x="223.3" y="61.0" font-size="12" text-anchor="start">2.16 µs</text>
+<text x="192.0" y="96.0" font-size="12" text-anchor="end">+ malloc/free 64 B</text>
+<rect x="200.0" y="84.0" width="35.8" height="18.0" rx="1" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="241.8" y="97.0" font-size="12" text-anchor="start">4.48 µs</text>
+<text x="192.0" y="132.0" font-size="12" text-anchor="end">+ printf 23자 (QEMU UART)</text>
+<rect x="200.0" y="120.0" width="100.8" height="18.0" rx="1" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="306.8" y="133.0" font-size="12" text-anchor="start">12.60 µs</text>
+<text x="192.0" y="168.0" font-size="12" text-anchor="end">+ 200회 빈 루프</text>
+<rect x="200.0" y="156.0" width="326.1" height="18.0" rx="1" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a" stroke-width="1.3"/>
+<text x="532.1" y="169.0" font-size="12" text-anchor="start">40.76 µs</text>
+<text x="192.0" y="204.0" font-size="12" text-anchor="end">+ float 곱셈·덧셈 16회</text>
+<rect x="200.0" y="192.0" width="375.4" height="18.0" rx="1" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a" stroke-width="1.3"/>
+<text x="581.4" y="205.0" font-size="12" text-anchor="start">46.92 µs</text>
+<line x1="200.0" y1="230.0" x2="600.0" y2="230.0" stroke="currentColor" stroke-width="1.3"/>
+<line x1="200.0" y1="230.0" x2="200.0" y2="234.0" stroke="currentColor" stroke-width="1.3"/>
+<text x="200.0" y="248.0" font-size="12" text-anchor="middle">0</text>
+<line x1="280.0" y1="230.0" x2="280.0" y2="234.0" stroke="currentColor" stroke-width="1.3"/>
+<text x="280.0" y="248.0" font-size="12" text-anchor="middle">10</text>
+<line x1="360.0" y1="230.0" x2="360.0" y2="234.0" stroke="currentColor" stroke-width="1.3"/>
+<text x="360.0" y="248.0" font-size="12" text-anchor="middle">20</text>
+<line x1="440.0" y1="230.0" x2="440.0" y2="234.0" stroke="currentColor" stroke-width="1.3"/>
+<text x="440.0" y="248.0" font-size="12" text-anchor="middle">30</text>
+<line x1="520.0" y1="230.0" x2="520.0" y2="234.0" stroke="currentColor" stroke-width="1.3"/>
+<text x="520.0" y="248.0" font-size="12" text-anchor="middle">40</text>
+<line x1="600.0" y1="230.0" x2="600.0" y2="234.0" stroke="currentColor" stroke-width="1.3"/>
+<text x="600.0" y="248.0" font-size="12" text-anchor="middle">50</text>
+<text x="608.0" y="248.0" font-size="12" text-anchor="start">µs</text>
+<rect x="20.0" y="258.0" width="640.0" height="34.0" rx="5" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-width="1.3" stroke-dasharray="4 3"/>
+<text x="340.0" y="279.6" font-size="12" text-anchor="middle">실칩 115200 baud UART에서 printf 23자 ≈ 2.0 ms (계산: 23 × 86.8 µs) — 막대 축의 40배</text>
+</svg></figure>
+<p>그림 5 — 실측: 금지된 일 하나를 더했을 때 ISR 본문 시간(QEMU icount 기준, 정상 상태). 아래 점선 상자는 실칩 UART에서의 계산값으로, 막대 축의 40배라 막대로 그리지 않았다.</p>
+<p>"ISR을 짧게"의 기준은 절대값이 아니라 <strong>예산</strong>이다. 가장 짧은 마감(예: 20 kHz FOC 전류 루프 = 50 µs 주기)에서 그 ISR보다 낮거나 같은 우선순위의 모든 ISR 최악 길이를 합한 것이 남은 예산을 넘으면 안 된다. 이 계산과 측정 방법은 E3, 배치는 E2에서 한다.</p>
+<h3 id="4-5-뮤텍스는-왜-isr에서-절대-안-되나">4.5 뮤텍스는 왜 ISR에서 절대 안 되나<a class="anchor" href="#4-5-뮤텍스는-왜-isr에서-절대-안-되나" aria-label="link">#</a></h3>
+<p>직관: 뮤텍스는 "열쇠"다. 열쇠를 빌려 간 사람(소유자)이 반드시 돌려준다는 약속 위에서 두 가지 기능이 동작한다. ① 소유자만 풀 수 있다. ② 높은 우선순위 태스크가 기다리면 소유자의 우선순위를 잠시 올려 준다(우선순위 상속, D3).</p>
+<p>ISR은 둘 다 할 수 없다.</p>
+<ul><li>ISR은 "소유자"가 될 수 없다. 커널의 소유자 필드는 <code>TaskHandle_t</code>(TCB 포인터)이고, ISR은 TCB가 없다. ISR 안에서 <code>pxCurrentTCB</code>는 <strong>끊긴 태스크</strong>를 가리킨다.</li><li>ISR은 우선순위를 상속받을 수 없다. ISR의 우선순위는 NVIC가 정하고 태스크 우선순위와 다른 축이다.</li><li>ISR은 기다릴 수 없으니, 뮤텍스가 잠겨 있을 때 할 수 있는 일이 없다. 바쁘게 기다리면 뮤텍스를 쥔 태스크가 못 돌아서 영원히 풀리지 않는다(단일 코어 교착).</li></ul>
+<p>예제 6에서 본 대로 FreeRTOS는 "소유자가 있는 뮤텍스를 ISR이 give"만 assert로 잡고(<code>queue.c:1360</code>), "ISR이 take"는 막지 않는다(MODE 7: 소유자 없는 잠긴 뮤텍스). Zephyr는 <code>k_mutex_lock()</code>과 <code>k_mutex_unlock()</code> 입구에서 <code>__ASSERT(!arch_is_in_isr(), "mutexes cannot be used inside ISRs")</code>로 둘 다 막는다(<code>kernel/mutex.c</code> 115, 234행, 예제 9).</p>
+<p>ISR과 태스크가 같은 자원을 써야 하면 대안은 셋이다.</p>
+<ol class="tasks"><li><strong>짧은 크리티컬 섹션</strong>: 태스크 쪽은 <code>taskENTER_CRITICAL()</code>, ISR 쪽은 <code>taskENTER_CRITICAL_FROM_ISR()</code>. 수 µs 이하일 때 (C7).</li><li><strong>소유권을 태스크 하나에</strong>: ISR은 큐/스트림 버퍼로 요청만 넣고, 게이트키퍼 태스크가 자원을 독점한다 (D7 §5).</li><li><strong>lock-free 구조</strong>: SPSC 링버퍼처럼 한쪽만 쓰고 한쪽만 읽는 구조 (D8).</li></ol>
+<h3 id="4-6-fpu-코어마다-규칙이-다르다">4.6 FPU — 코어마다 규칙이 다르다<a class="anchor" href="#4-6-fpu-코어마다-규칙이-다르다" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>코어</th><th>ISR에서 float을 쓰면</th><th>규칙</th></tr></thead><tbody><tr><td>Cortex-M0/M0+/M3 (FPU 없음)</td><td>소프트웨어 라이브러리 호출. 예제 8: 16회 46.9 µs</td><td>ISR에서는 정수 · 고정소수점만. 변환은 태스크에서</td></tr><tr><td>Cortex-M4F/M7/M33/M55 (FPU 있음, lazy stacking 기본)</td><td>첫 FPU 명령에서 S0~S15 · FPSCR이 스택에 저장되어 프레임 26워드 (B6). 중첩 깊이만큼 MSP 사용량 증가</td><td>써도 되지만 MSP 크기를 FPU 프레임 기준으로 잡는다. 최악 지연에 스태킹 시간을 넣는다</td></tr><tr><td>Zephyr + <code>CONFIG_FPU_SHARING</code></td><td>스레드 간 FP 문맥을 커널이 관리한다</td><td>ISR에서의 FP 사용 규칙은 아키텍처마다 다르므로 Zephyr 문서 "Floating Point Services"(<code>doc/kernel/services/other/float.rst</code>)에서 확인</td></tr></tbody></table></div>
+<p>FreeRTOS의 ARM_CM4F 포트는 태스크 전환 때 EXC_RETURN 비트 4를 보고 "이 태스크가 FPU를 썼을 때만" S16~S31을 저장한다(B6, C2). ISR은 이 메커니즘 밖이므로 하드웨어 lazy stacking이 전부다.</p>
+<hr>
+<h2 id="5-문지기-configassert-vportvalidateinterruptpriority-xportisinsideinterrupt">5. 문지기 — <code>configASSERT</code>, <code>vPortValidateInterruptPriority</code>, <code>xPortIsInsideInterrupt</code><a class="anchor" href="#5-문지기-configassert-vportvalidateinterruptpriority-xportisinsideinterrupt" aria-label="link">#</a></h2>
+<h3 id="5-1-vportvalidateinterruptpriority-가-하는-일">5.1 <code>vPortValidateInterruptPriority()</code>가 하는 일<a class="anchor" href="#5-1-vportvalidateinterruptpriority-가-하는-일" aria-label="link">#</a></h3>
+<p>큐의 핵심 FromISR 4개(<code>xQueueGenericSendFromISR</code>, <code>xQueueGiveFromISR</code>, <code>xQueueReceiveFromISR</code>, <code>xQueuePeekFromISR</code>)와 <code>tasks.c</code>의 FromISR 6개(notify, resume, tick count, 우선순위 조회 — 목록은 B3 예제 11)는 입구에서 <code>portASSERT_IF_INTERRUPT_PRIORITY_INVALID()</code>를 부른다. 이벤트 그룹 · 타이머 · 스트림 버퍼의 FromISR은 내부에서 이 함수들을 거쳐 같은 검사에 닿는다. ARM_CM3 <code>portmacro.h</code>에서 이것은 <code>configASSERT_DEFINED == 1</code>일 때만 <code>vPortValidateInterruptPriority()</code>로 정의된다. 함수 본문(<code>port.c</code> 766~820행)의 핵심은 세 줄이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>        __asm volatile ( "mrs %0, ipsr" : "=r" ( ulCurrentInterrupt )::"memory" );
+        if( ulCurrentInterrupt &gt;= portFIRST_USER_INTERRUPT_NUMBER )
+        {
+            ucCurrentPriority = pcInterruptPriorityRegisters[ ulCurrentInterrupt ];
+            configASSERT( ucCurrentPriority &gt;= ucMaxSysCallPriority );      /* port.c:803 */
+        }
+        configASSERT( ( portAIRCR_REG &amp; portPRIORITY_GROUP_MASK ) &lt;= ulMaxPRIGROUPValue );  /* :819 */</code></pre></figure>
+<ul><li>IPSR로 <strong>지금 돌고 있는 예외 번호</strong>를 읽고, 그것이 외부 IRQ(16 이상)이면 NVIC IPR 바이트를 직접 읽어 문턱과 비교한다. <code>ucMaxSysCallPriority</code>는 <code>xPortStartScheduler()</code>가 실제 칩의 구현 비트 수에 맞춰 계산해 둔 값이다(B3 예제 8).</li><li>두 번째 assert는 PRIGROUP(서브 우선순위 비트)이 0이 아니면 막는다(B3 §5.2).</li><li><strong>검사하지 않는 경우</strong>: IPSR이 16 미만 — thread mode(0)와 시스템 예외(SVC 11, PendSV 14, SysTick 15). 예제 2에서 태스크가 FromISR을 불러도 assert가 안 터진 이유다.</li></ul>
+<p>예제 6 MODE=8 출력(<code>port.c:803</code>)이 이 검사가 잡은 것이다. "우선순위를 안 정한 IRQ = 0 = 무조건 걸림"은 B3 예제 11 MODE=2에서 봤다.</p>
+<h3 id="5-2-zephyr에는-이-검사가-없다-대신-빌드-시점에">5.2 Zephyr에는 이 검사가 없다 — 대신 빌드 시점에<a class="anchor" href="#5-2-zephyr에는-이-검사가-없다-대신-빌드-시점에" aria-label="link">#</a></h3>
+<p>Zephyr Cortex-M에는 "지금 ISR의 우선순위가 커널이 막을 수 있는 범위인가"를 <strong>런타임에</strong> 보는 검사가 없다. 대신 구조가 실수를 어렵게 만든다.</p>
+<ul><li><code>IRQ_CONNECT(irq, prio, ...)</code>의 <code>prio</code>는 논리 번호이고, 아키텍처 코드가 커널이 쓰는 영역(<code>_IRQ_PRIO_OFFSET</code>) 아래로만 매핑한다(B3 §8.1). 보통 IRQ는 구조적으로 <code>irq_lock()</code>의 BASEPRI 아래에 놓인다.</li><li>커널 밖(zero-latency) IRQ는 <code>IRQ_ZERO_LATENCY</code> 플래그로 <strong>명시해야만</strong> 만들 수 있다. <code>include/zephyr/arch/arm/irq.h</code>의 <code>ARCH_IRQ_CONNECT</code>는 이 플래그를 보면 <code>BUILD_ASSERT(!(flags_p &amp; IRQ_ZERO_LATENCY), "ZLI interrupts must be registered using IRQ_DIRECT_CONNECT()")</code>로 빌드를 실패시키고, <code>ARCH_IRQ_DIRECT_CONNECT</code>는 <code>CONFIG_ZERO_LATENCY_IRQS</code>가 꺼져 있으면 <code>"ZLI interrupt registered but feature is disabled"</code>로 실패시킨다. 우선순위 범위도 <code>_CHECK_PRIO</code>의 <code>BUILD_ASSERT</code>가 본다.</li><li>그래서 Zephyr에서 남는 실수는 "ZLI ISR 안에서 커널 API를 부르는 것"인데, 이것은 런타임 검사가 없다. <code>ISR_DIRECT_DECLARE</code> 주석이 "Any ISRs that serve IRQs configured with the IRQ_ZERO_LATENCY flag must always return 0"이라고 경고하는 것이 전부다. 이 영역 설계는 E2.</li></ul>
+<h3 id="5-3-configassert를-양산에서-어떻게-하나">5.3 <code>configASSERT</code>를 양산에서 어떻게 하나<a class="anchor" href="#5-3-configassert를-양산에서-어떻게-하나" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>선택</th><th>장점</th><th>단점</th></tr></thead><tbody><tr><td>개발: 무한 루프 + 브레이크포인트 (<code>taskDISABLE_INTERRUPTS(); for(;;);</code>)</td><td>디버거로 콜 스택을 바로 본다</td><td>현장에서는 멈춤 = 워치독 리셋</td></tr><tr><td>양산: 끔</td><td>코드 크기 · 사이클 절약</td><td>예제 7처럼 실수가 "가끔 나는 이상한 버그"가 된다</td></tr><tr><td>양산: 파일 · 줄 · LR을 noinit RAM에 기록하고 리셋</td><td>현장 로그에서 원인 추적 (M1, E8)</td><td>수 KB 코드, 문자열 테이블</td></tr></tbody></table></div>
+<p>lab 템플릿의 정의(<code>board_printf_raw</code> + <code>board_exit(253)</code>)는 세 번째의 축소판이다. FreeRTOS는 <code>configASSERT</code>가 정의되어 있으면 <code>configASSERT_DEFINED</code>를 1로 만들고(<code>FreeRTOS.h</code> 99~101행), 포트는 그 값으로 <code>vPortValidateInterruptPriority()</code> 자체를 넣거나 뺀다. <strong>assert를 끄면 우선순위 검사 함수도 이미지에서 사라진다</strong>는 뜻이다.</p>
+<hr>
+<h2 id="6-zephyr-쪽-규칙-같은-이름-k_no_wait-그리고-direct-isr">6. Zephyr 쪽 규칙 — 같은 이름, <code>K_NO_WAIT</code>, 그리고 direct ISR<a class="anchor" href="#6-zephyr-쪽-규칙-같은-이름-k_no_wait-그리고-direct-isr" aria-label="link">#</a></h2>
+<h3 id="6-1-직관-이름을-나누는-대신-인자로-나눈다">6.1 직관: 이름을 나누는 대신 인자로 나눈다<a class="anchor" href="#6-1-직관-이름을-나누는-대신-인자로-나눈다" aria-label="link">#</a></h3>
+<p>Zephyr는 FreeRTOS처럼 <code>...FromISR</code>을 따로 두지 않는다. ISR에서도 <code>k_sem_give()</code>, <code>k_msgq_put()</code>를 그대로 부른다. 대신 규칙이 <strong>인자</strong>에 있다.</p>
+<ul><li>timeout을 받는 API는 ISR에서 <strong><code>K_NO_WAIT</code>만</strong> 허용한다. 기다릴 수 없으니 "지금 되면 하고 안 되면 에러 코드"다.</li><li>재스케줄은 앱이 요청하지 않는다. 보통 ISR은 공용 <code>_isr_wrapper</code>를 거쳐 불리고, wrapper 끝의 <code>z_arm_int_exit()</code>(별칭 <code>z_arm_exc_exit</code>, <code>arch/arm/core/cortex_m/exc_exit.c</code>)가 <code>_kernel.ready_q.cache != _kernel.cpus-&gt;current</code>이면 PendSV를 건다. FreeRTOS의 woken + yield를 커널이 자동으로 한다(D1 §4.4).</li><li>문맥 판별은 <code>k_is_in_isr()</code> = <code>arch_is_in_isr()</code> = <code>__get_IPSR() != 0</code>(<code>arch/arm/include/cortex_m/exception.h</code> 93행). FreeRTOS <code>xPortIsInsideInterrupt()</code>와 같은 방법이다.</li></ul>
+<p>어떤 API가 ISR에서 되는지는 Doxygen 주석의 <code>@isr_ok</code> 표시로 알 수 있다. v4.4.2 <code>include/zephyr/kernel.h</code>에 72개가 있다. 주석 다음에 오는 함수 이름을 뽑으면 이렇다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /var/rtoslab/zephyrproject/zephyr; python3 - &lt;&lt;EOF
+import re
+L=open("include/zephyr/kernel.h").read().split("\n")
+out=[]
+for i,l in enumerate(L):
+    if "@isr_ok" in l:
+        for j in range(i,i+80):
+            if "*/" in L[j]:
+                for k in range(j+1,j+6):
+                    m=re.search(r"\b(k_[a-z0-9_]+)\s*\(",L[k])
+                    if m: out.append(m.group(1)); break
+                break
+print(len(out)); print(" ".join(out))
+EOF'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>72
+k_is_pre_kernel k_is_in_isr k_is_preempt_thread k_timer_stop k_queue_cancel_wait k_queue_append k_queue_alloc_append k_queue_prepend k_queue_alloc_prepend k_queue_insert k_queue_append_list k_queue_merge_slist k_queue_get k_queue_remove k_queue_unique_append k_queue_is_empty k_event_post k_event_set k_event_set_masked k_event_clear k_event_test k_fifo_cancel_wait k_fifo_put k_fifo_alloc_put k_fifo_put_list k_fifo_put_slist k_fifo_get k_fifo_is_empty k_lifo_put k_lifo_alloc_put k_lifo_get k_stack_push k_stack_pop k_sem_take k_sem_give k_work_init k_work_busy_get k_work_is_pending k_work_submit_to_queue k_work_submit k_work_cancel k_work_queue_init k_work_queue_unplug k_work_init_delayable k_work_delayable_busy_get k_work_delayable_is_pending k_work_delayable_expires_get k_work_delayable_remaining_get k_work_schedule_for_queue k_work_reschedule_for_queue k_work_cancel_delayable k_work_user_is_pending k_work_user_submit_to_queue k_work_poll_submit_to_queue k_work_poll_submit k_work_poll_cancel k_msgq_put k_msgq_put_front k_msgq_get k_msgq_peek k_msgq_peek_at k_mem_slab_alloc k_mem_slab_free k_mem_slab_num_used_get k_mem_slab_max_used_get k_mem_slab_num_free_get k_mem_slab_runtime_stats_get k_mem_slab_runtime_stats_reset_max k_heap_aligned_alloc k_heap_alloc k_heap_calloc k_heap_realloc</code></pre></figure>
+<p>출력에서 볼 것: <code>k_sem_take</code>, <code>k_msgq_get</code>, <code>k_queue_get</code>, <code>k_mem_slab_alloc</code>, <code>k_heap_alloc</code> 처럼 timeout을 받는 함수도 목록에 있다 — 문서 본문에 "K_NO_WAIT일 때만"이라는 조건이 붙는다. <strong>목록에 없는 것</strong>: <code>k_mutex_lock/unlock</code>, <code>k_sleep</code>, <code>k_msleep</code>, <code>k_yield</code>, <code>k_thread_create</code>, <code>k_condvar_wait</code>, <code>k_work_flush</code>·<code>k_work_cancel_sync</code>(기다리는 함수). 이 표시가 모든 ISR-안전 함수에 빠짐없이 붙어 있지는 않다(예: <code>k_timer_start</code>에는 표시가 없다). 표시는 "확실히 된다"는 뜻이고, 표시가 없을 때는 소스의 <code>arch_is_in_isr()</code> assert를 확인한다.</p>
+<p>v4.4.2 커널 소스에서 ISR 관련 assert는 이렇게 생겼다(<code>grep -n arch_is_in_isr kernel/*.c</code>에서 고름).</p>
+<div class="tw"><table><thead><tr><th>파일:행</th><th>assert</th><th>뜻</th></tr></thead><tbody><tr><td><code>kernel/sem.c:136</code></td><td><code>__ASSERT(((arch_is_in_isr() == false) ‖ K_TIMEOUT_EQ(timeout, K_NO_WAIT)), "")</code></td><td>ISR에서 take는 K_NO_WAIT만</td></tr><tr><td><code>kernel/msg_q.c:153, 302</code></td><td><code>__ASSERT(!arch_is_in_isr() ‖ K_TIMEOUT_EQ(timeout, K_NO_WAIT), "")</code></td><td>put/get 같은 규칙</td></tr><tr><td><code>kernel/mutex.c:115, 234</code></td><td><code>__ASSERT(!arch_is_in_isr(), "mutexes cannot be used inside ISRs")</code></td><td>lock · unlock 모두 금지</td></tr><tr><td><code>kernel/sched.c:1222</code></td><td><code>__ASSERT(!arch_is_in_isr(), "")</code> (<code>z_impl_k_sleep</code>)</td><td>ISR에서 sleep 금지</td></tr><tr><td><code>kernel/sched.c:1152</code></td><td>같음 (<code>z_impl_k_yield</code>)</td><td>ISR에서 yield 금지</td></tr><tr><td><code>kernel/thread.c:791</code></td><td><code>"Threads may not be created in ISRs"</code></td><td>스레드 생성 금지</td></tr><tr><td><code>kernel/kheap.c:88, 185</code></td><td><code>!arch_is_in_isr() ‖ K_NO_WAIT</code></td><td>힙 할당은 K_NO_WAIT만</td></tr></tbody></table></div>
+<p>(표 안의 <code>‖</code>는 C의 논리합 연산자를 표 문법과 겹치지 않게 바꿔 적은 것이다.)</p>
+<p><strong>중요</strong>: <code>__ASSERT</code>는 <code>CONFIG_ASSERT=y</code>일 때만 코드가 생긴다. v4.4.2 <code>subsys/debug/Kconfig</code>에서 <code>config ASSERT</code>의 기본값은 <code>default y if TEST</code> — 즉 <strong>보통 앱 빌드에서는 꺼져 있다</strong>. FreeRTOS lab 템플릿이 <code>configASSERT</code>를 켜 둔 것과 반대다. 개발 중에는 <code>prj.conf</code>에 <code>CONFIG_ASSERT=y</code>를 직접 넣는다.</p>
+<h3 id="6-2-예제-9-k_is_in_isr-세-문맥-k_no_wait의-반환값-그리고-assert-세-개">6.2 예제 9 — <code>k_is_in_isr()</code> 세 문맥, <code>K_NO_WAIT</code>의 반환값, 그리고 assert 세 개<a class="anchor" href="#6-2-예제-9-k_is_in_isr-세-문맥-k_no_wait의-반환값-그리고-assert-세-개" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 같은 함수 <code>in_isr()</code>을 ① <code>irq_offload()</code>(테스트용으로 함수를 ISR 문맥에서 동기 실행해 주는 API)와 ② 진짜 하드웨어 IRQ(CMSDK TIMER0, IRQ 8)에서 부르고, 메인 스레드에서 <code>k_is_in_isr()</code>와 IPSR을 비교한다. ISR 안에서 <code>K_NO_WAIT</code>로 빈 세마포어를 take하고 길이 1 메시지 큐에 두 번 put해 반환값을 본다. <code>-DMODE=1..3</code>이면 ISR에서 timeout 있는 take, 뮤텍스 lock, sleep을 시도한다. <code>irq_offload()</code>는 <code>CONFIG_IRQ_OFFLOAD</code>가 필요하고 그것은 <code>depends on TEST</code>라서 <code>CONFIG_TEST=y</code>를 켰다(그 결과 <code>CONFIG_ASSERT</code>도 기본 y가 되지만 명시해 두었다).</p>
+<figure class="code"><span class="lang">text</span><pre><code># prj.conf
+CONFIG_BOOT_BANNER=n
+CONFIG_TEST=y
+CONFIG_IRQ_OFFLOAD=y
+CONFIG_ASSERT=y</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1 ex9 — Zephyr v4.4.2: k_is_in_isr() in three contexts, ISR-safe calls with K_NO_WAIT,
+ *   and (-DMODE=1..3) what CONFIG_ASSERT says when an ISR passes a timeout or locks a mutex */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/irq.h&gt;
+#include &lt;zephyr/irq_offload.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#include &lt;cmsis_core.h&gt;
+#include "zexit.h"
+#ifndef MODE
+#define MODE 0
+#endif
+K_SEM_DEFINE(sem, 0, 1);
+K_MUTEX_DEFINE(mtx);
+K_MSGQ_DEFINE(mq, 4, 1, 4);
+
+static void report(const char *who)
+{
+	printk("%-14s k_is_in_isr=%d IPSR=%u\n", who, k_is_in_isr(), (unsigned)__get_IPSR());
+}
+static void in_isr(const void *arg)
+{
+	report((const char *)arg);
+	uint32_t v = 1;
+	printk("  k_sem_take(K_NO_WAIT)      = %d\n", k_sem_take(&amp;sem, K_NO_WAIT));
+	printk("  k_msgq_put(K_NO_WAIT) x2   = %d, %d\n",
+	       k_msgq_put(&amp;mq, &amp;v, K_NO_WAIT), k_msgq_put(&amp;mq, &amp;v, K_NO_WAIT));
+#if MODE == 1
+	printk("  k_sem_take(K_MSEC(10)) ...\n");
+	(void)k_sem_take(&amp;sem, K_MSEC(10));
+#elif MODE == 2
+	printk("  k_mutex_lock(K_NO_WAIT) ...\n");
+	(void)k_mutex_lock(&amp;mtx, K_NO_WAIT);
+#elif MODE == 3
+	printk("  k_sleep(K_MSEC(1)) ...\n");
+	(void)k_sleep(K_MSEC(1));
+#endif
+}
+static void t0_isr(const void *arg)               /* real hardware IRQ: CMSDK TIMER0, IRQ 8 */
+{
+	*(volatile uint32_t *)0x40000000u = 0;        /* stop */
+	*(volatile uint32_t *)0x4000000Cu = 1;        /* INTCLR */
+	in_isr(arg);
+	k_sem_give(&amp;sem);
+}
+int main(void)
+{
+	report("main thread");
+	irq_offload(in_isr, "irq_offload");           /* runs in_isr() via SVC */
+	k_msgq_purge(&amp;mq);
+	IRQ_CONNECT(8, 2, t0_isr, "TIMER0 IRQ", 0);
+	irq_enable(8);
+	*(volatile uint32_t *)0x40000008u = 2500;     /* RELOAD: 100 us */
+	*(volatile uint32_t *)0x40000004u = 2500;
+	*(volatile uint32_t *)0x40000000u = 1 | 8;    /* EN + IRQ EN */
+	printk("main: woke by TIMER0 ISR, k_sem_take = %d\n", k_sem_take(&amp;sem, K_MSEC(100)));
+	z_exit();
+	return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'export HOME=/var/tmp/rtos/E1/home; \
+  /var/rtoslab/bin/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/E1/z_ctx /var/tmp/rtos/E1/z_ctx0 &amp;&amp; \
+  timeout 20 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial stdio \
+    -semihosting-config enable=on,target=native -kernel /var/tmp/rtos/E1/z_ctx0/zephyr/zephyr.elf'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>           FLASH:       24444 B         4 MB      0.58%
+             RAM:        6532 B         4 MB      0.16%
+main thread    k_is_in_isr=0 IPSR=0
+irq_offload    k_is_in_isr=1 IPSR=11
+  k_sem_take(K_NO_WAIT)      = -16
+  k_msgq_put(K_NO_WAIT) x2   = 0, -35
+TIMER0 IRQ     k_is_in_isr=1 IPSR=24
+  k_sem_take(K_NO_WAIT)      = -16
+  k_msgq_put(K_NO_WAIT) x2   = 0, -35
+main: woke by TIMER0 ISR, k_sem_take = 0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>irq_offload()</code> 안의 IPSR은 <strong>11 = SVCall</strong>이다. Cortex-M 구현(<code>arch/arm/core/irq_offload.c</code>)이 <code>k_sched_lock()</code> 후 <code>svc #1</code>(<code>_SVC_CALL_IRQ_OFFLOAD</code>)을 실행하고 SVC 핸들러가 루틴을 부르기 때문이다. 진짜 IRQ에서는 IPSR = 24(= 16 + IRQ 8). 둘 다 <code>k_is_in_isr()</code> = 1이다. 그래서 <code>irq_offload()</code>는 "이 코드를 ISR 문맥에서 테스트"하는 용도로 충분하지만, NVIC 우선순위·중첩·BASEPRI 같은 <strong>그 IRQ 고유의 성질</strong>은 재현하지 않는다(SVC 우선순위에서 돈다).</li><li>ISR 안의 <code>K_NO_WAIT</code> take는 기다리지 않고 <strong>-16 = <code>-EBUSY</code></strong>, 꽉 찬 메시지 큐 put은 <strong>-35 = <code>-ENOMSG</code></strong>. FreeRTOS의 <code>pdFALSE</code>/<code>errQUEUE_FULL</code>에 해당한다. ISR 코드는 이 반환값을 <strong>반드시</strong> 처리해야 한다(버린 샘플 카운터 증가 등 — E4).</li><li>마지막 줄: ISR의 <code>k_sem_give()</code> 하나로 메인 스레드가 깨어났다. yield 코드는 없다.</li></ul>
+<p>같은 앱을 MODE 1~3으로 빌드해 실행하면:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'export HOME=/var/tmp/rtos/E1/home; for m in 1 2 3; do \
+  /var/rtoslab/bin/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/E1/z_ctx /var/tmp/rtos/E1/z_ctx$m \
+    -- -DCMAKE_C_FLAGS=-DMODE=$m &gt;/dev/null &amp;&amp; \
+  timeout 10 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial stdio \
+    -semihosting-config enable=on,target=native -kernel /var/tmp/rtos/E1/z_ctx$m/zephyr/zephyr.elf | head -20; \
+  echo ======; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>main thread    k_is_in_isr=0 IPSR=0
+irq_offload    k_is_in_isr=1 IPSR=11
+  k_sem_take(K_NO_WAIT)      = -16
+  k_msgq_put(K_NO_WAIT) x2   = 0, -35
+  k_sem_take(K_MSEC(10)) ...
+ASSERTION FAIL [((arch_is_in_isr() == 0) || ((timeout).ticks == (((k_timeout_t){0})).ticks))] @ WEST_TOPDIR/zephyr/kernel/sem.c:136
+	
+E: ***** HARD FAULT *****
+E:   Fault escalation (see below)
+E: ARCH_EXCEPT with reason 4
+
+E: r0/a1:  0x00000004  r1/a2:  0x00000088  r2/a3:  0x00000000
+E: r3/a4:  0x00000004 r12/ip:  0x00000000 r14/lr:  0x000021af
+E:  xpsr:  0x2100000b
+E: Faulting instruction address (r15/pc): 0x00003bd0
+E: &gt;&gt;&gt; ZEPHYR FATAL ERROR 4: Kernel panic on CPU 0
+E: Fault during interrupt handling
+
+E: Current thread: 0x20000190 (main)
+E: Halting system
+qemu-system-arm: terminating on signal 15 from pid 170652 (timeout)
+======
+main thread    k_is_in_isr=0 IPSR=0
+irq_offload    k_is_in_isr=1 IPSR=11
+  k_sem_take(K_NO_WAIT)      = -16
+  k_msgq_put(K_NO_WAIT) x2   = 0, -35
+  k_mutex_lock(K_NO_WAIT) ...
+ASSERTION FAIL [!arch_is_in_isr()] @ WEST_TOPDIR/zephyr/kernel/mutex.c:115
+	mutexes cannot be used inside ISRs
+E: ***** HARD FAULT *****
+...
+E: &gt;&gt;&gt; ZEPHYR FATAL ERROR 4: Kernel panic on CPU 0
+E: Fault during interrupt handling
+...
+======
+main thread    k_is_in_isr=0 IPSR=0
+irq_offload    k_is_in_isr=1 IPSR=11
+  k_sem_take(K_NO_WAIT)      = -16
+  k_msgq_put(K_NO_WAIT) x2   = 0, -35
+  k_sleep(K_MSEC(1)) ...
+ASSERTION FAIL [!arch_is_in_isr()] @ WEST_TOPDIR/zephyr/kernel/sched.c:1222
+	
+E: ***** HARD FAULT *****
+...
+E: &gt;&gt;&gt; ZEPHYR FATAL ERROR 4: Kernel panic on CPU 0
+E: Fault during interrupt handling
+...
+======</code></pre></figure>
+<p>(MODE 2 · 3의 레지스터 덤프 줄은 MODE 1과 같은 형식이라 <code>...</code>로 생략했다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><code>sem.c:136</code>, <code>mutex.c:115</code>, <code>sched.c:1222</code> — §6.1 표의 assert가 그대로 터졌다. 메시지에 조건식이 매크로 전개된 모양으로 찍힌다(<code>K_NO_WAIT</code>가 <code>((k_timeout_t){0})</code>로 보인다). <code>ASSERT_VERBOSE</code>(기본 y, <code>depends on PRINTK</code>)가 이 문자열을 남긴다.</li><li>assert 실패는 <code>ARCH_EXCEPT(K_ERR_KERNEL_PANIC)</code> = reason 4로 이어지고, Cortex-M에서는 SVC를 통해 fault 처리로 들어가므로 "HARD FAULT ... Fault escalation"으로 보인다. "Fault during interrupt handling"은 이 assert가 ISR(여기서는 irq_offload의 SVC) 안에서 났다는 표시다. <code>xpsr: 0x2100000b</code>의 아래 9비트 0x0b = 11 = SVCall.</li><li>세 경우 모두 <strong><code>irq_offload</code> 단계에서</strong> 걸렸다. 진짜 IRQ까지 갈 필요 없이 단위 테스트에서 잡힌다는 뜻이다. Zephyr의 커널 테스트(<code>tests/kernel/</code>)가 이 방식으로 "ISR에서 이 API가 되는가"를 검증한다.</li></ul>
+<h3 id="6-3-예제-10-config_assert-n에서-isr이-timeout을-넘기면">6.3 예제 10 — <code>CONFIG_ASSERT=n</code>에서 ISR이 timeout을 넘기면<a class="anchor" href="#6-3-예제-10-config_assert-n에서-isr이-timeout을-넘기면" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: 보통 앱 빌드처럼 assert를 끄고, 진짜 TIMER0 IRQ가 prio 7 victim 스레드를 끊은 상태에서 ISR이 <code>k_sem_take(&amp;sem, K_MSEC(10))</code>(MODE 1) 또는 <code>k_sleep(K_MSEC(10))</code>(MODE 2)을 부른다. victim은 FreeRTOS 예제 7처럼 자기 최장 공백을 기록한다. FreeRTOS와 같은 조건으로 재려고 QEMU를 <code>-icount shift=5</code>로 직접 실행했다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1 ex10 — CONFIG_ASSERT=n: an ISR that passes a timeout. Who actually sleeps? */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/irq.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#include "zexit.h"
+#define REG(a)  (*(volatile uint32_t *)(a))
+#define CYC()   REG(0x40028018u)                       /* FPGAIO 25 MHz counter */
+K_SEM_DEFINE(sem, 0, 1);
+static volatile uint32_t gap_max, isr_ret = 99, isr_us;
+static volatile int stop;
+static void t0_isr(const void *arg)
+{
+	ARG_UNUSED(arg);
+	REG(0x40000000u) = 0; REG(0x4000000Cu) = 1;         /* stop TIMER0, INTCLR */
+	uint32_t t = CYC();
+#if MODE == 1
+	isr_ret = (uint32_t)k_sem_take(&amp;sem, K_MSEC(10));   /* count 0: "wait 10 ms" */
+#else
+	isr_ret = (uint32_t)k_sleep(K_MSEC(10));
+#endif
+	isr_us = (CYC() - t) / 25u;
+}
+static void victim_fn(void *a, void *b, void *c)       /* prio 7: the thread we interrupt */
+{
+	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+	uint32_t prev = CYC();
+	while (!stop) { uint32_t now = CYC(); if (now - prev &gt; gap_max) gap_max = now - prev; prev = now; }
+}
+K_THREAD_DEFINE(victim, 1024, victim_fn, NULL, NULL, NULL, 7, 0, 0);
+int main(void)                                          /* prio 0 (default main) */
+{
+	k_msleep(5);
+	gap_max = 0;
+	IRQ_CONNECT(8, 2, t0_isr, NULL, 0);
+	irq_enable(8);
+	REG(0x40000008u) = 25000; REG(0x40000004u) = 25000; REG(0x40000000u) = 1 | 8;  /* 1 ms */
+	k_msleep(40);
+	stop = 1;
+	printk("MODE=%d ISR: call returned %d after %u us (ISR did not wait)\n",
+	       MODE, (int)isr_ret, (unsigned)isr_us);
+	printk("victim thread (was running) longest gap = %u us\n", (unsigned)(gap_max / 25u));
+	z_exit();
+	return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'export HOME=/var/tmp/rtos/E1/home; for m in 1 2; do \
+  /var/rtoslab/bin/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/E1/z_noassert /var/tmp/rtos/E1/z_na$m \
+    -- -DCMAKE_C_FLAGS=-DMODE=$m &gt;/dev/null &amp;&amp; \
+  timeout 10 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial stdio \
+    -semihosting-config enable=on,target=native -icount shift=5,align=off,sleep=off \
+    -kernel /var/tmp/rtos/E1/z_na$m/zephyr/zephyr.elf | head; done; \
+  grep -E "CONFIG_USE_SWITCH|CONFIG_SYS_CLOCK_TICKS_PER_SEC|CONFIG_ASSERT=" /var/tmp/rtos/E1/z_na1/zephyr/.config'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>MODE=1 ISR: call returned -11 after 17 us (ISR did not wait)
+victim thread (was running) longest gap = 18997 us
+MODE=2 ISR: call returned 0 after 17 us (ISR did not wait)
+victim thread (was running) longest gap = 18996 us
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=100
+# CONFIG_USE_SWITCH is not set
+CONFIG_USE_SWITCH_SUPPORTED=y</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>ISR은 <strong>기다리지 않고 17 µs 만에 돌아왔다</strong>. 그런데 <strong>victim이 19 ms 동안 CPU를 못 받았다</strong>. FreeRTOS 예제 7 MODE 4와 같은 현상 — 끊긴 스레드가 대신 잠들었다.</li><li><code>.config</code>: 이 빌드는 <code>CONFIG_USE_SWITCH</code>가 꺼져 있다 → <code>z_swap()</code>이 아래의 <code>arch_swap()</code>(PendSV 방식)을 쓴다.</li><li>이유를 소스로: <code>z_impl_k_sem_take()</code>는 count가 0이면 <code>z_pend_curr(&amp;lock, key, &amp;sem-&gt;wait_q, timeout)</code>을 부른다. <code>_current</code>(= ISR이 끊은 victim)를 대기 큐에 넣고 <code>z_swap()</code> → <code>arch_swap()</code>(<code>arch/arm/include/cortex_m/kernel_arch_func.h</code> 87행)으로 간다. Cortex-M의 <code>arch_swap()</code>은 <code>_current-&gt;arch.swap_return_value = -EAGAIN;</code>을 써 두고 PENDSVSET을 세운 뒤 <code>irq_unlock(0)</code>을 하고 바로 반환한다. ISR 안이라 PendSV는 ISR이 끝나야 돌므로, ISR은 <strong>-EAGAIN(-11)</strong> 을 받고 계속 진행한다. 반환값은 "timeout"처럼 보이지만 실제로 기다린 것은 victim이다. 게다가 <code>irq_unlock(0)</code>은 ISR 한가운데서 BASEPRI를 0으로 내린다.</li><li>19 ms인 이유: 100 Hz tick에서 <code>K_MSEC(10)</code> = 1 tick이고, 상대 timeout은 <code>kernel/timeout.c</code> 111행 <code>to-&gt;dticks = timeout.ticks + 1 + ticks_elapsed;</code>로 "최소 그만큼 지난 뒤"를 보장하려고 1 tick을 더한다. 그래서 1~2 tick(10~20 ms) 사이에서 깬다.</li><li><code>k_sleep()</code>도 마찬가지다(<code>z_tick_sleep()</code>이 <code>unready_thread(_current)</code> 후 <code>z_swap()</code>). 반환값 0은 "다 잤다"는 뜻인데 잔 것은 victim이다.</li></ul>
+<h3 id="6-4-irq_connect-vs-irq_direct_connect-커널의-도움을-끄는-스위치">6.4 <code>IRQ_CONNECT</code> vs <code>IRQ_DIRECT_CONNECT</code> — 커널의 도움을 끄는 스위치<a class="anchor" href="#6-4-irq_connect-vs-irq_direct_connect-커널의-도움을-끄는-스위치" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">Zephyr Cortex-M: 보통 ISR과 direct ISR의 경로</text>
+<text x="20.0" y="52.0" font-size="12" text-anchor="start" font-weight="bold">IRQ_CONNECT</text>
+<rect x="14.0" y="62.0" width="124.0" height="44.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="76.0" y="88.6" font-size="12" text-anchor="middle">벡터 테이블</text>
+<rect x="147.0" y="62.0" width="124.0" height="44.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="209.0" y="88.6" font-size="12" text-anchor="middle">_isr_wrapper</text>
+<line x1="139.0" y1="84.0" x2="145.0" y2="84.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah7)"/>
+<rect x="280.0" y="62.0" width="124.0" height="44.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="342.0" y="80.1" font-size="12" text-anchor="middle">_sw_isr_table</text>
+<text x="342.0" y="97.1" font-size="12" text-anchor="middle">[n] → isr, arg</text>
+<line x1="272.0" y1="84.0" x2="278.0" y2="84.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah7)"/>
+<rect x="413.0" y="62.0" width="124.0" height="44.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="475.0" y="88.6" font-size="12" text-anchor="middle">내 ISR(arg)</text>
+<line x1="405.0" y1="84.0" x2="411.0" y2="84.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah7)"/>
+<rect x="546.0" y="62.0" width="124.0" height="44.0" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="608.0" y="80.1" font-size="12" text-anchor="middle">z_arm_int_exit</text>
+<text x="608.0" y="97.1" font-size="12" text-anchor="middle">cache≠current?</text>
+<line x1="538.0" y1="84.0" x2="544.0" y2="84.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah7)"/>
+<text x="20.0" y="142.0" font-size="12" text-anchor="start" font-weight="bold">IRQ_DIRECT_CONNECT + ISR_DIRECT_DECLARE</text>
+<rect x="14.0" y="152.0" width="124.0" height="44.0" rx="5" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.3"/>
+<text x="76.0" y="178.6" font-size="12" text-anchor="middle">벡터 테이블</text>
+<rect x="147.0" y="152.0" width="124.0" height="44.0" rx="5" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.3"/>
+<text x="209.0" y="178.6" font-size="12" text-anchor="middle">name(): HEADER</text>
+<line x1="139.0" y1="174.0" x2="145.0" y2="174.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah7)"/>
+<rect x="280.0" y="152.0" width="124.0" height="44.0" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="342.0" y="170.1" font-size="12" text-anchor="middle">name_body()</text>
+<text x="342.0" y="187.1" font-size="12" text-anchor="middle">return 0 / 1</text>
+<line x1="272.0" y1="174.0" x2="278.0" y2="174.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah7)"/>
+<rect x="413.0" y="152.0" width="124.0" height="44.0" rx="5" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.3"/>
+<text x="475.0" y="178.6" font-size="12" text-anchor="middle">FOOTER(ret)</text>
+<line x1="405.0" y1="174.0" x2="411.0" y2="174.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah7)"/>
+<rect x="546.0" y="152.0" width="124.0" height="44.0" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="608.0" y="170.1" font-size="12" text-anchor="middle">ret ≠ 0 일 때만</text>
+<text x="608.0" y="187.1" font-size="12" text-anchor="middle">z_arm_int_exit</text>
+<line x1="538.0" y1="174.0" x2="544.0" y2="174.0" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah7)"/>
+<text x="20.0" y="222.0" font-size="12" text-anchor="start">보통 경로: 인자 전달 · PM 탈출 · 재스케줄 판단을 커널이 매번 한다</text>
+<text x="20.0" y="240.0" font-size="12" text-anchor="start">direct 경로: 셋 다 선택 — 반환값 0이면 PendSV를 걸지 않는다 (예제 11)</text>
+</svg></figure>
+<p>그림 6 — Zephyr Cortex-M의 두 ISR 경로(v4.4.2). 보통 ISR은 벡터 테이블의 모든 칸이 <code>_isr_wrapper</code>를 가리키고, wrapper가 IPSR로 번호를 구해 <code>_sw_isr_table</code>에서 (함수, 인자)를 꺼내 부른 뒤 <code>z_arm_int_exit()</code>로 재스케줄을 판단한다(B2 예제 15). direct ISR은 벡터 테이블에 함수가 직접 들어가고, 재스케줄 판단은 <strong>반환값이 0이 아닐 때만</strong> 한다.</p>
+<p><code>arch/arm/core/cortex_m/isr_wrapper.c</code>의 <code>_isr_wrapper()</code>가 매번 하는 일 셋:</p>
+<ol><li><code>CONFIG_PM</code>이면 저전력 idle에서 깨어난 처리(<code>pm_system_resume()</code>).</li><li><code>__get_IPSR() - 16</code>으로 <code>_sw_isr_table</code>을 인덱싱해 <code>entry-&gt;isr(entry-&gt;arg)</code> 호출 — <strong>인자 전달</strong>.</li><li>끝에서 <code>z_arm_exc_exit()</code> — <strong>재스케줄 판단</strong>.</li></ol>
+<p>direct ISR은 이 셋을 앱이 고른다. <code>include/zephyr/irq.h</code>와 <code>include/zephyr/arch/arm/irq.h</code>(v4.4.2)의 정의:</p>
+<figure class="code"><span class="lang">c</span><pre><code>#define ARCH_ISR_DIRECT_DECLARE(name) \
+	static inline int name##_body(void); \
+	ARCH_ISR_DIAG_OFF \
+	__attribute__ ((interrupt ("IRQ"))) void name(void) \
+	{ \
+		int check_reschedule; \
+		ISR_DIRECT_HEADER(); \
+		check_reschedule = name##_body(); \
+		ISR_DIRECT_FOOTER(check_reschedule); \
+	} \
+	ARCH_ISR_DIAG_ON \
+	static inline int name##_body(void)
+
+static inline void arch_isr_direct_footer(int maybe_swap)
+{
+#ifdef CONFIG_TRACING_ISR
+	sys_trace_isr_exit();
+#endif
+	if (maybe_swap != 0) {
+		z_arm_int_exit();
+	}
+}</code></pre></figure>
+<ul><li><code>ISR_DIRECT_DECLARE(name) { ... return 0 또는 1; }</code> — 본문을 <code>name_body()</code>로 만들고, 바깥 <code>name()</code>이 HEADER → body → FOOTER(반환값)를 부른다. 반환값이 0이면 <code>z_arm_int_exit()</code>를 <strong>건너뛴다</strong>.</li><li><code>ISR_DIRECT_PM()</code> — <code>CONFIG_PM</code>이면 <code>_arch_isr_direct_pm()</code>, 아니면 빈 매크로. 저전력 idle 중에 이 IRQ로 깰 수 있다면 넣어야 한다. <code>irq.h</code> 주석: "It may be omitted, but be careful!", 그리고 ZLI에서는 쓰면 안 된다.</li><li><code>IRQ_DIRECT_CONNECT(irq, prio, isr, flags)</code> — 인자 없음(<code>void name(void)</code>), 스택 전환 없음, 그리고 <code>IRQ_ZERO_LATENCY</code> 플래그와 함께 쓰면 커널 밖 IRQ가 된다(E2).</li></ul>
+<p><code>irq.h</code>의 <code>ISR_DIRECT_DECLARE</code> 주석 예시가 이 계약을 잘 보여 준다: 일이 없으면 <code>return 0; // don't bother checking if we have to z_swap()</code>, <code>k_sem_give()</code>를 했으면 <code>return 1;</code>. 즉 <strong>direct ISR의 반환값이 FreeRTOS의 woken 역할</strong>이다. 그리고 FreeRTOS와 똑같은 실수를 할 수 있다.</p>
+<h3 id="6-5-예제-11-direct-isr이-k_sem_give-후-0을-반환하면">6.5 예제 11 — direct ISR이 <code>k_sem_give()</code> 후 0을 반환하면<a class="anchor" href="#6-5-예제-11-direct-isr이-k_sem_give-후-0을-반환하면" aria-label="link">#</a></h3>
+<p>무엇을 확인하는 코드인지: TIMER0(1.037 ms 주기)이 세마포어를 give하고, prio 0 메인 스레드가 그것을 <code>K_FOREVER</code>로 기다린다. prio 8 busy 스레드는 커널을 전혀 부르지 않고 돈다. ISR 연결을 세 가지로 바꾼다: MODE 0 = <code>IRQ_CONNECT</code>, 1 = direct + <code>return 1</code>, 2 = direct + <code>return 0</code>. ISR은 메인이 기다리기 시작한 뒤 첫 IRQ의 시각을 기록하고, 메인은 깨어난 시각과의 차이를 잰다. 메인은 <code>K_FOREVER</code>로 기다리므로 <strong>커널 timeout이 하나도 걸려 있지 않다</strong>는 점이 중요하다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* E1 ex11 — Zephyr: IRQ_CONNECT vs IRQ_DIRECT_CONNECT, and a direct ISR that returns 0 */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/irq.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#include "zexit.h"
+#define REG(a)  (*(volatile uint32_t *)(a))
+#define CYC()   REG(0x40028018u)                     /* FPGAIO 25 MHz counter */
+#ifndef MODE
+#define MODE 0              /* 0: IRQ_CONNECT, 1: direct + return 1, 2: direct + return 0 */
+#endif
+#define N 10
+K_SEM_DEFINE(sem, 0, 1);
+static volatile uint32_t t_irq, armed;
+static inline void body(void)
+{
+	REG(0x4000000Cu) = 1;                             /* TIMER0 INTCLR */
+	if (armed) { t_irq = CYC(); armed = 0; }
+	k_sem_give(&amp;sem);
+}
+#if MODE == 0
+static void t0_isr(const void *arg) { ARG_UNUSED(arg); body(); }
+#else
+ISR_DIRECT_DECLARE(t0_direct)
+{
+	body();
+	ISR_DIRECT_PM();                                  /* no-op unless CONFIG_PM */
+	return MODE == 1 ? 1 : 0;                         /* 0 = "skip the reschedule check" */
+}
+#endif
+static void busy_fn(void *a, void *b, void *c)        /* prio 8: never calls the kernel */
+{
+	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+	for (;;) { }
+}
+K_THREAD_DEFINE(busy, 512, busy_fn, NULL, NULL, NULL, 8, 0, 0);
+int main(void)                                        /* prio 0: the woken thread */
+{
+	uint32_t mn = ~0u, mx = 0; uint64_t sum = 0;
+#if MODE == 0
+	IRQ_CONNECT(8, 2, t0_isr, NULL, 0);
+#else
+	IRQ_DIRECT_CONNECT(8, 2, t0_direct, 0);
+#endif
+	irq_enable(8);
+	REG(0x40000008u) = 25925; REG(0x40000004u) = 25925; REG(0x40000000u) = 1 | 8;  /* 1.037 ms */
+	for (int i = 0; i &lt; N; i++) {
+		k_sem_reset(&amp;sem);
+		armed = 1;
+		(void)k_sem_take(&amp;sem, K_FOREVER);              /* no kernel timeout is pending */
+		uint32_t lat = (CYC() - t_irq) * 40u;           /* ns */
+		if (lat &lt; mn) mn = lat;
+		if (lat &gt; mx) mx = lat;
+		sum += lat;
+	}
+	printk("MODE=%d n=%d wake latency min=%u avg=%u max=%u ns\n", MODE, N, mn,
+	       (uint32_t)(sum / N), mx);
+	z_exit();
+	return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'export HOME=/var/tmp/rtos/E1/home; for m in 0 1 2; do \
+  /var/rtoslab/bin/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/E1/z_direct /var/tmp/rtos/E1/z_dir$m \
+    -- -DCMAKE_C_FLAGS=-DMODE=$m &gt;/dev/null &amp;&amp; \
+  timeout 60 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial stdio \
+    -semihosting-config enable=on,target=native -icount shift=5,align=off,sleep=off \
+    -kernel /var/tmp/rtos/E1/z_dir$m/zephyr/zephyr.elf | head -5; done; \
+  grep -E "CONFIG_TICKLESS_KERNEL|CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC|CONFIG_CORTEX_M_SYSTICK=|TIMESLIC" \
+    /var/tmp/rtos/E1/z_dir2/zephyr/.config'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>MODE=0 n=10 wake latency min=18840 avg=18860 max=18880 ns
+MODE=1 n=10 wake latency min=18880 avg=18900 max=18920 ns
+MODE=2 n=10 wake latency min=18956320 avg=19386008 max=19865000 ns
+CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC=25000000
+CONFIG_TICKLESS_KERNEL=y
+CONFIG_CORTEX_M_SYSTICK=y
+CONFIG_TIMESLICE_SIZE=20
+CONFIG_TIMESLICING=y
+CONFIG_TIMESLICE_PRIORITY=0
+# CONFIG_TIMESLICE_PER_THREAD is not set</code></pre></figure>
+<p>MODE 2를 시간 슬라이스를 끄고 다시 빌드하면:</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'export HOME=/var/tmp/rtos/E1/home; \
+  /var/rtoslab/bin/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/E1/z_direct /var/tmp/rtos/E1/z_dir2ns \
+    -- -DCMAKE_C_FLAGS=-DMODE=2 -DCONFIG_TIMESLICING=n &gt;/dev/null &amp;&amp; \
+  grep TIMESLICING /var/tmp/rtos/E1/z_dir2ns/zephyr/.config; \
+  timeout 120 qemu-system-arm -machine mps2-an385 -cpu cortex-m3 -nographic -monitor none -serial stdio \
+    -semihosting-config enable=on,target=native -icount shift=5,align=off,sleep=off \
+    -kernel /var/tmp/rtos/E1/z_dir2ns/zephyr/zephyr.elf | head -5'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code># CONFIG_TIMESLICING is not set
+MODE=2 n=10 wake latency min=8933200 avg=594386736 max=659911200 ns</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><code>IRQ_CONNECT</code>와 direct + <code>return 1</code>은 <strong>18.9 µs로 같다</strong>. 이 예제에서는 wrapper를 건너뛴 이득이 측정 해상도 안에 묻혔다(QEMU는 예외 진입·스태킹 사이클을 모델링하지 않고, 지연의 대부분은 PendSV와 스레드 전환이다). direct ISR의 이득은 실칩의 진입 경로 몇십 사이클과 결정성에서 나온다 — 그 측정은 E3.</li><li>direct + <strong><code>return 0</code></strong>: 평균 <strong>19.4 ms</strong>. ISR이 <code>k_sem_give()</code>로 메인을 ready로 만들고 <code>_kernel.ready_q.cache</code>도 메인으로 바꿨지만, 아무도 PendSV를 걸지 않았다. busy 스레드는 커널을 부르지 않으니 스스로 양보하지도 않는다. 메인이 실제로 돈 것은 <strong>다음에 wrapper를 거치는 "보통" 인터럽트가 끝날 때</strong>였다. 이 설정에서 그것은 busy 스레드의 <strong>시간 슬라이스 만료</strong>(<code>CONFIG_TIMESLICE_SIZE=20</code> ms → 100 Hz에서 2 tick, <code>kernel/timeslicing.c</code>)를 알리는 SysTick 인터럽트다.</li><li>슬라이스를 끄면 <strong>평균 594 ms, 최대 660 ms</strong>. tickless 커널에서 걸린 timeout이 하나도 없으면 SysTick은 24비트 카운터가 넘치지 않게 하는 최대 주기로만 뜬다: 2^24 / 25 MHz ≈ <strong>671 ms</strong>(예제 12에서 계산). 최솟값 8.9 ms는 첫 측정이 우연히 다른 SysTick 직전에 걸린 경우다.</li><li>FreeRTOS에서 woken을 빼먹으면 "최대 1 tick"이었다. Zephyr tickless에서 direct ISR의 반환값을 틀리면 <strong>최대 SysTick 한 바퀴</strong>다. tick이 없는 시스템에서는 "다음 tick"이라는 안전망 자체가 없다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 320" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340.0" y="20.0" font-size="13" text-anchor="middle" font-weight="bold">실측: Zephyr direct ISR이 0을 반환하면 깨운 스레드는 다음 '보통' 인터럽트까지 기다린다</text>
+<line x1="90.0" y1="250.0" x2="660.0" y2="250.0" stroke="currentColor" stroke-width="1.3"/>
+<line x1="90.0" y1="250.0" x2="90.0" y2="50.0" stroke="currentColor" stroke-width="1.3"/>
+<line x1="86.0" y1="250.0" x2="660.0" y2="250.0" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="82.0" y="254.0" font-size="12" text-anchor="end">10 µs</text>
+<line x1="86.0" y1="212.3" x2="660.0" y2="212.3" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="82.0" y="216.3" font-size="12" text-anchor="end">100 µs</text>
+<line x1="86.0" y1="174.5" x2="660.0" y2="174.5" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="82.0" y="178.5" font-size="12" text-anchor="end">1 ms</text>
+<line x1="86.0" y1="136.8" x2="660.0" y2="136.8" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="82.0" y="140.8" font-size="12" text-anchor="end">10 ms</text>
+<line x1="86.0" y1="99.1" x2="660.0" y2="99.1" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="82.0" y="103.1" font-size="12" text-anchor="end">100 ms</text>
+<line x1="86.0" y1="61.4" x2="660.0" y2="61.4" stroke="#888" stroke-width="0.4" stroke-dasharray="4 3"/>
+<text x="82.0" y="65.4" font-size="12" text-anchor="end">1 s</text>
+<rect x="120.0" y="239.6" width="82.5" height="10.4" rx="1" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b" stroke-width="1.3"/>
+<line x1="161.2" y1="239.6" x2="161.2" y2="239.6" stroke="#3f9a6b" stroke-width="2"/>
+<text x="161.2" y="233.6" font-size="12" text-anchor="middle">18.9 µs</text>
+<text x="161.2" y="268.0" font-size="12" text-anchor="middle">IRQ_CONNECT</text>
+<rect x="262.5" y="239.6" width="82.5" height="10.4" rx="1" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b" stroke-width="1.3"/>
+<line x1="303.8" y1="239.6" x2="303.8" y2="239.6" stroke="#3f9a6b" stroke-width="2"/>
+<text x="303.8" y="233.6" font-size="12" text-anchor="middle">18.9 µs</text>
+<text x="303.8" y="268.0" font-size="12" text-anchor="middle">DIRECT, return 1</text>
+<rect x="405.0" y="126.0" width="82.5" height="124.0" rx="1" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c" stroke-width="1.3"/>
+<line x1="446.2" y1="125.6" x2="446.2" y2="126.0" stroke="#e08a3c" stroke-width="2"/>
+<text x="446.2" y="119.6" font-size="12" text-anchor="middle">19.4 ms</text>
+<text x="446.2" y="268.0" font-size="12" text-anchor="middle">DIRECT, return 0</text>
+<rect x="547.5" y="69.9" width="82.5" height="180.1" rx="1" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a" stroke-width="1.3"/>
+<line x1="588.8" y1="68.2" x2="588.8" y2="69.9" stroke="#d0564a" stroke-width="2"/>
+<text x="588.8" y="62.2" font-size="12" text-anchor="middle">594 ms</text>
+<text x="588.8" y="268.0" font-size="12" text-anchor="middle">return 0, 슬라이스 끔</text>
+<text x="20.0" y="296.0" font-size="12" text-anchor="start">막대 = 평균, 세로선 끝 = 최대 (n=10). 100 Hz tick, tickless, TIMESLICE_SIZE = 20 ms</text>
+<text x="20.0" y="312.0" font-size="12" text-anchor="start">슬라이스를 끄면 남는 것은 SysTick 최대 주기 (2^24 / 25 MHz ≈ 671 ms)</text>
+</svg></figure>
+<p>그림 7 — 실측: Zephyr ISR 연결 방식별 ISR → 스레드 지연(로그 축, n = 10, QEMU icount). direct ISR이 0을 반환하면 깨운 스레드는 다음 보통 인터럽트(여기서는 시간 슬라이스 만료 20 ms, 슬라이스를 끄면 SysTick 최대 주기)까지 기다린다.</p>
+<p><strong>그럼 direct ISR은 언제 0을 반환하나?</strong> 스레드를 깨우지 않은 경우(FIFO만 비웠다), 그리고 <strong>ZLI</strong>(커널 API를 부르면 안 되므로 깨울 일 자체가 없다). 커널 객체를 건드렸으면 1을 반환한다 — FreeRTOS 규칙 "항상 woken을 받아 yield"와 같은 원리다.</p>
+<h3 id="6-6-irq_offload-테스트에서-isr-문맥-만들기">6.6 <code>irq_offload()</code> — 테스트에서 ISR 문맥 만들기<a class="anchor" href="#6-6-irq_offload-테스트에서-isr-문맥-만들기" aria-label="link">#</a></h3>
+<p>예제 9에서 봤듯이 <code>irq_offload(routine, param)</code>은 routine을 SVC 예외 안에서 <strong>동기적으로</strong> 실행하고 돌아온다(<code>kernel/irq_offload.c</code>가 <code>offload_sem</code>으로 직렬화, <code>CONFIG_IRQ_OFFLOAD_NESTED</code>면 생략). 용도:</p>
+<ul><li>드라이버 함수가 ISR에서 불려도 안전한지(<code>k_is_in_isr()</code> 분기, <code>K_NO_WAIT</code> 처리)를 하드웨어 없이 Ztest로 검증한다(M8).</li><li><code>CONFIG_ASSERT=y</code>와 함께 쓰면 "ISR에서 금지된 호출"이 테스트에서 바로 터진다.</li></ul>
+<p>한계: SVC 우선순위에서 돌기 때문에 진짜 IRQ의 NVIC 우선순위, 중첩, BASEPRI 상호작용은 재현하지 않는다. <code>CONFIG_IRQ_OFFLOAD</code>는 <code>depends on TEST</code>라 양산 이미지에는 들어가지 않는다. FreeRTOS에는 같은 이름의 API가 없다 — 이 노트처럼 <code>STIR</code>로 남는 IRQ를 소프트웨어 트리거하는 것이 가장 가까운 방법이다(예제 2, 8).</p>
+<hr>
+<h2 id="7-freertos-vs-zephyr-isr-체크리스트-한-장">7. FreeRTOS vs Zephyr — ISR 체크리스트 한 장<a class="anchor" href="#7-freertos-vs-zephyr-isr-체크리스트-한-장" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>항목</th><th>FreeRTOS V11.3.2</th><th>Zephyr v4.4.2</th></tr></thead><tbody><tr><td>ISR용 API</td><td>이름이 다른 함수 <code>...FromISR</code></td><td>같은 함수, timeout은 <code>K_NO_WAIT</code>만 (<code>@isr_ok</code> 표시)</td></tr><tr><td>ISR에서 안 되는 호출</td><td>FromISR이 아닌 전부, 특히 블로킹 · <code>vTaskDelay</code> · 뮤텍스 · <code>pvPortMalloc</code></td><td><code>k_mutex_*</code>, <code>k_sleep</code>, <code>k_yield</code>, <code>k_thread_create</code>, timeout ≠ <code>K_NO_WAIT</code></td></tr><tr><td>깨운 뒤 재스케줄</td><td>앱: <code>woken = pdFALSE</code> → <code>&amp;woken</code> 공유 → <code>portYIELD_FROM_ISR(woken)</code></td><td>자동: <code>_isr_wrapper</code> → <code>z_arm_int_exit()</code>. direct ISR은 반환값 1</td></tr><tr><td>빼먹었을 때</td><td>다음 tick까지 (예제 4, 5: 최대 1 tick)</td><td>direct ISR <code>return 0</code>: 다음 보통 인터럽트까지 (예제 11: 19 ms ~ 660 ms)</td></tr><tr><td>문맥 판별</td><td><code>xPortIsInsideInterrupt()</code> (IPSR ≠ 0)</td><td><code>k_is_in_isr()</code> (IPSR ≠ 0)</td></tr><tr><td>ISR 안 짧은 보호 구간</td><td><code>taskENTER_CRITICAL_FROM_ISR()</code> / <code>taskEXIT_CRITICAL_FROM_ISR(x)</code> (BASEPRI 저장/복원)</td><td><code>irq_lock()</code> / <code>irq_unlock(key)</code> 또는 <code>k_spin_lock()</code> (C7 §8)</td></tr><tr><td>우선순위 규칙</td><td>NVIC 값 ≥ <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code> (숫자로)</td><td><code>IRQ_CONNECT</code> 우선순위는 자동으로 커널 영역 아래. 커널 밖은 <code>IRQ_ZERO_LATENCY</code> 명시</td></tr><tr><td>우선순위 실수 검출</td><td>런타임 <code>vPortValidateInterruptPriority()</code> → <code>port.c:803</code></td><td>빌드 시점 <code>BUILD_ASSERT</code> (ZLI 플래그 · 범위). ZLI 안의 API 호출은 검출 없음</td></tr><tr><td>잘못된 API 검출</td><td><code>configASSERT</code> — VECTACTIVE 검사 <code>port.c:438</code></td><td><code>CONFIG_ASSERT</code> — <code>arch_is_in_isr()</code> 검사 (sem.c:136, mutex.c:115, sched.c:1222 …)</td></tr><tr><td>assert 기본값</td><td>사용자가 <code>FreeRTOSConfig.h</code>에 정의 (lab 템플릿은 켬)</td><td><code>default y if TEST</code> — 보통 앱은 꺼짐</td></tr><tr><td>assert 끄고 블로킹 호출</td><td>끊긴 태스크가 잠듦 / ISR 무한 루프 (예제 7)</td><td>끊긴 스레드가 잠듦, -EAGAIN (예제 10)</td></tr><tr><td>ISR 문맥 테스트 도구</td><td>없음 (STIR로 IRQ 트리거)</td><td><code>irq_offload()</code> (<code>CONFIG_TEST</code>)</td></tr><tr><td>최소 지연 경로</td><td>커널 밖 ISR (문턱 위) — 커널 API 금지</td><td><code>IRQ_DIRECT_CONNECT</code> + <code>ISR_DIRECT_DECLARE</code>, ZLI</td></tr></tbody></table></div>
+<hr>
+<h2 id="8-예제-12-측정-숫자를-간단한-모델과-맞춰-보기-python">8. 예제 12 — 측정 숫자를 간단한 모델과 맞춰 보기 (Python)<a class="anchor" href="#8-예제-12-측정-숫자를-간단한-모델과-맞춰-보기-python" aria-label="link">#</a></h2>
+<p>무엇을 확인하는 코드인지: 이 노트에서 잰 숫자가 "왜 그 값인지"를 한 줄짜리 모델로 확인한다. ① NULL woken 지연 = U(0, tick) → 평균 tick/2, 최대 tick. ② SysTick 24비트 최대 주기. ③ 실칩 UART printf 시간. ④ 헛 PendSV 한 번의 비용.</p>
+<figure class="code"><span class="lang">python</span><pre><code># E1 ex12 — check the measured numbers against simple models
+base_us = 9.16                                   # woken + yield, measured (ex5)
+meas = {1000: (504.36, 999.36), 250: (2010.36, 3990.36), 100: (5000.36, 9950.36)}
+print("tick_Hz  tick_us  model_avg  meas_avg  model_max  meas_max")
+for hz, (avg, mx) in meas.items():
+    t = 1e6 / hz
+    print(f"{hz:7d} {t:8.0f} {t/2:10.0f} {avg:9.1f} {t:10.0f} {mx:9.1f}")
+print(f"\nSysTick 24-bit max period @25 MHz = {2**24/25e6*1e3:.1f} ms  (ex11 max 659.9 ms)")
+print(f"Zephyr slice 20 ms @100 Hz = {20} ms -&gt; 2 ticks (ex11 avg 19.4 ms)")
+chars, baud = len("[isr] imu sample 38232\n"), 115200
+print(f"\nprintf in ISR: {chars} chars x {10/baud*1e6:.1f} us = {chars*10/baud*1e3:.2f} ms at {baud} baud 8N1")
+spur_us = (774 - 452) / (97 - 2)
+print(f"spurious PendSV (ex6 C vs D): ({774}-{452}) us / {97-2} = {spur_us:.2f} us each")</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>python3 ~/.rtos_scratch/E1/ex12_model.py</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>tick_Hz  tick_us  model_avg  meas_avg  model_max  meas_max
+   1000     1000        500     504.4       1000     999.4
+    250     4000       2000    2010.4       4000    3990.4
+    100    10000       5000    5000.4      10000    9950.4
+
+SysTick 24-bit max period @25 MHz = 671.1 ms  (ex11 max 659.9 ms)
+Zephyr slice 20 ms @100 Hz = 20 ms -&gt; 2 ticks (ex11 avg 19.4 ms)
+
+printf in ISR: 23 chars x 86.8 us = 2.00 ms at 115200 baud 8N1
+spurious PendSV (ex6 C vs D): (774-452) us / 95 = 3.39 us each</code></pre></figure>
+<p>출력에서 볼 것: 모델과 측정이 몇 % 안에서 맞는다. 측정 평균이 모델보다 약간 큰 것(504 대 500)은 깨어난 뒤 스위치 비용(약 9 µs, woken 경로와 같은 값)이 더해졌기 때문이다. 최대가 tick보다 약간 작은 것은 n = 100 표본이 위상의 끝까지 다 덮지 못했기 때문이다. 그림 3 ~ 7의 좌표는 같은 폴더의 <code>gen.py</code>가 이 숫자들로 계산해 만들었고, 실행하면 SVG 7개를 XML 파싱 검사까지 하고 <code>ok</code>를 찍는다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>cd ~/.rtos_scratch/E1 &amp;&amp; python3 gen.py</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>ok ['f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7']</code></pre></figure>
+<hr>
+<h2 id="9-rtos-커널-안에서는-무슨-일이-일어나나">9. RTOS 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#9-rtos-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<p>이 노트에서 만진 코드 경로를 소스 위치로 한 번에 정리한다. 깊은 설명은 괄호 안의 노트에 있다.</p>
+<p><strong>FreeRTOS V11.3.2</strong></p>
+<div class="tw"><table><thead><tr><th>단계</th><th>함수 · 매크로 (파일)</th><th>하는 일</th></tr></thead><tbody><tr><td>ISR 입구 검사</td><td><code>portASSERT_IF_INTERRUPT_PRIORITY_INVALID()</code> → <code>vPortValidateInterruptPriority()</code> (<code>portable/GCC/ARM_CM3/port.c</code> 766행)</td><td>IPSR → IPR 바이트 → 문턱 비교 (<code>:803</code>), PRIGROUP 검사 (<code>:819</code>) (B3)</td></tr><tr><td>ISR 크리티컬 섹션</td><td><code>taskENTER_CRITICAL_FROM_ISR()</code> = <code>portSET_INTERRUPT_MASK_FROM_ISR()</code> = <code>ulPortRaiseBASEPRI()</code> (<code>portmacro.h</code>)</td><td>이전 BASEPRI 반환, 0x20으로 올림 (C7)</td></tr><tr><td>깨우기</td><td><code>xTaskRemoveFromEventList()</code> (<code>tasks.c</code> 5500행)</td><td>이벤트 리스트 → ready 리스트(스케줄러 잠김이면 <code>xPendingReadyList</code>), 더 높으면 <code>pdTRUE</code> + <code>xYieldPendings[0]</code> (C1, D1)</td></tr><tr><td>woken 기록</td><td>각 FromISR: <code>if( pxHigherPriorityTaskWoken != NULL ) *pxHigherPriorityTaskWoken = pdTRUE;</code> (<code>queue.c</code> 7곳, <code>tasks.c</code> 4곳)</td><td>올리기만 한다</td></tr><tr><td>yield 요청</td><td><code>portYIELD_FROM_ISR(x)</code> = <code>portEND_SWITCHING_ISR(x)</code> → <code>portYIELD()</code> (<code>portmacro.h</code> 85~111행)</td><td>ICSR PENDSVSET (B4)</td></tr><tr><td>안전망</td><td><code>xTaskIncrementTick()</code> (<code>tasks.c</code> 4831행, 5020행 부근)</td><td><code>xYieldPendings[0]</code>이면 <code>xSwitchRequired</code> → SysTick이 PendSV</td></tr><tr><td>스위치</td><td><code>xPortPendSVHandler</code> → <code>vTaskSwitchContext()</code> → <code>traceTASK_SWITCHED_IN()</code></td><td>(C2)</td></tr><tr><td>잘못된 API 검출</td><td><code>vPortEnterCritical()</code> (<code>port.c</code> 426행~)</td><td><code>uxCriticalNesting == 1</code>이고 VECTACTIVE ≠ 0이면 <code>:438</code> assert</td></tr><tr><td>고장 지점</td><td><code>vListInsert()</code> (<code>list.c</code> 192행)</td><td>리스트가 꼬이면 여기서 끝나지 않는다 — 주석에 원인 5가지</td></tr></tbody></table></div>
+<p><strong>Zephyr v4.4.2</strong></p>
+<div class="tw"><table><thead><tr><th>단계</th><th>함수 · 매크로 (파일)</th><th>하는 일</th></tr></thead><tbody><tr><td>보통 ISR 입구</td><td><code>_isr_wrapper()</code> (<code>arch/arm/core/cortex_m/isr_wrapper.c</code>)</td><td>PM 복귀, <code>_sw_isr_table[IPSR-16]</code> 호출 (B2)</td></tr><tr><td>ISR 출구</td><td><code>z_arm_exc_exit()</code> = <code>z_arm_int_exit()</code> (<code>exc_exit.c</code> 55행)</td><td><code>ready_q.cache != current</code>이면 PENDSVSET</td></tr><tr><td>direct ISR</td><td><code>ARCH_ISR_DIRECT_DECLARE</code> / <code>arch_isr_direct_footer()</code> (<code>include/zephyr/arch/arm/irq.h</code>)</td><td>반환값 ≠ 0일 때만 <code>z_arm_int_exit()</code></td></tr><tr><td>문맥 판별</td><td><code>k_is_in_isr()</code> (<code>kernel/thread.c</code> 76행) → <code>arch_is_in_isr()</code> (<code>exception.h</code> 93행)</td><td>IPSR ≠ 0</td></tr><tr><td>ISR 검사</td><td><code>__ASSERT(... arch_is_in_isr() ...)</code> (<code>sem.c:136</code>, <code>msg_q.c:153</code>, <code>mutex.c:115</code>, <code>sched.c:1222</code> …)</td><td><code>CONFIG_ASSERT=y</code>에서만</td></tr><tr><td>잘못 블록하면</td><td><code>z_pend_curr()</code> → <code>z_swap()</code> → <code>arch_swap()</code> (<code>kernel_arch_func.h</code> 87행)</td><td><code>_current</code>(끊긴 스레드)를 재우고 PENDSVSET, <code>-EAGAIN</code> 반환</td></tr><tr><td>테스트</td><td><code>irq_offload()</code> (<code>kernel/irq_offload.c</code>) → <code>arch_irq_offload()</code> (<code>arch/arm/core/irq_offload.c</code>, <code>svc #1</code>)</td><td>SVC 안에서 routine 실행</td></tr></tbody></table></div>
+<figure class="chart"><svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340" y="20" font-size="13" text-anchor="middle" font-weight="bold">ISR이 태스크를 깨울 때 커널 안의 길 — FreeRTOS와 Zephyr</text>
+<text x="172.5" y="46" font-size="12" text-anchor="middle" font-weight="bold">FreeRTOS</text>
+<text x="507.5" y="46" font-size="12" text-anchor="middle" font-weight="bold">Zephyr</text>
+<rect x="10" y="56" width="325" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="172.5" y="77" font-size="12" text-anchor="middle">xSemaphoreGiveFromISR(s, &amp;woken)</text>
+<rect x="10" y="104" width="325" height="34" rx="5" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.3"/>
+<text x="172.5" y="125" font-size="12" text-anchor="middle">vPortValidateInterruptPriority + BASEPRI 저장</text>
+<rect x="10" y="152" width="325" height="34" rx="5" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.3"/>
+<text x="172.5" y="173" font-size="12" text-anchor="middle">xTaskRemoveFromEventList → woken = pdTRUE</text>
+<rect x="10" y="200" width="325" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="172.5" y="221" font-size="12" text-anchor="middle">앱: portYIELD_FROM_ISR(woken) → PENDSVSET</text>
+<rect x="345" y="56" width="325" height="34" rx="5" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.3"/>
+<text x="507.5" y="77" font-size="12" text-anchor="middle">k_sem_give(&amp;s)</text>
+<rect x="345" y="104" width="325" height="34" rx="5" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.3"/>
+<text x="507.5" y="125" font-size="12" text-anchor="middle">k_spin_lock (= irq_lock, BASEPRI)</text>
+<rect x="345" y="152" width="325" height="34" rx="5" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.3"/>
+<text x="507.5" y="173" font-size="12" text-anchor="middle">z_ready_thread → ready_q.cache 갱신</text>
+<rect x="345" y="200" width="325" height="34" rx="5" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.3"/>
+<text x="507.5" y="221" font-size="12" text-anchor="middle">커널: z_arm_int_exit → PENDSVSET</text>
+<line x1="172.5" y1="91" x2="172.5" y2="102" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah8)"/>
+<line x1="172.5" y1="139" x2="172.5" y2="150" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah8)"/>
+<line x1="172.5" y1="187" x2="172.5" y2="198" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah8)"/>
+<line x1="507.5" y1="91" x2="507.5" y2="102" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah8)"/>
+<line x1="507.5" y1="139" x2="507.5" y2="150" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah8)"/>
+<line x1="507.5" y1="187" x2="507.5" y2="198" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah8)"/>
+<rect x="140" y="250" width="400" height="34" rx="5" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b" stroke-width="1.3"/>
+<text x="340" y="271" font-size="12" text-anchor="middle">ISR 종료 → PendSV(가장 낮음) → 깨운 태스크 실행</text>
+<line x1="172.5" y1="235" x2="240" y2="248" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah8)"/>
+<line x1="507.5" y1="235" x2="440" y2="248" stroke="currentColor" stroke-width="1.3" marker-end="url(#ah8)"/>
+</svg></figure>
+<p>그림 8 — 같은 "ISR이 태스크 깨우기"의 커널 내부 경로. 주황은 앱이 쓰는 줄, 회색은 커널, 파랑은 Zephyr가 앱 대신 하는 일. 마지막 단계(PENDSVSET → PendSV)는 둘이 같다. 차이는 "누가 PENDSVSET을 쓰나"뿐이고, 그 한 줄을 빼먹을 수 있는 쪽이 FreeRTOS(그리고 Zephyr의 direct ISR)다.</p>
+<hr>
+<h2 id="10-실무에서-다시-보기">10. 실무에서 다시 보기<a class="anchor" href="#10-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="10-1-드론-비행-제어기-imu-data-ready-isr">10.1 드론 비행 제어기 — IMU data-ready ISR<a class="anchor" href="#10-1-드론-비행-제어기-imu-data-ready-isr" aria-label="link">#</a></h3>
+<p>STM32H7급 FC에서 IMU(SPI, 8 kHz data-ready)는 보통 이렇게 쓴다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>void EXTI4_IRQHandler(void)                    /* IMU DRDY, NVIC prio = 문턱 바로 아래 */
+{
+    EXTI-&gt;PR1 = EXTI_PR1_PIF4;                  /* 1. 원인 지우기 */
+    imu_ts[imu_wr &amp; 7] = TIM2-&gt;CNT;             /* 2. 타임스탬프만 찍는다 (E5) */
+    imu_wr++;
+    BaseType_t woken = pdFALSE;
+    vTaskNotifyGiveFromISR(imu_task, &amp;woken);   /* 3. 가장 가벼운 깨우기 (D5) */
+    portYIELD_FROM_ISR(woken);                  /* 4. 자세 추정 태스크로 바로 */
+}</code></pre></figure>
+<p>(실칩 레지스터 이름을 쓴 모양 예시라 이 랩에서는 실행하지 않았다.)</p>
+<p>SPI 읽기 자체는 ISR에서 하지 않는다. DMA를 시작하는 일은 ISR에서 해도 되지만(레지스터 몇 개), 완료 대기는 태스크가 한다(E6). 자이로 보정 계산(float)도 태스크로 — H7은 FPU가 있어 연산은 빠르지만, ISR 프레임이 26워드로 커지고 그 ISR의 최악 길이가 같은 우선순위 그룹 전체에 더해진다(예제 8, B6). ESC용 DShot 타이머 ISR처럼 µs 단위 마감이 있는 것은 문턱 위(zero-latency)에 두고 커널을 부르지 않는다(E2).</p>
+<h3 id="10-2-로봇-관절-모터-컨트롤러-20-khz-foc-can">10.2 로봇 관절 모터 컨트롤러 — 20 kHz FOC + CAN<a class="anchor" href="#10-2-로봇-관절-모터-컨트롤러-20-khz-foc-can" aria-label="link">#</a></h3>
+<p>FOC 전류 루프 ISR(ADC 변환 완료, 20 kHz = 50 µs 주기)은 커널 API를 부르지 않는 문턱 위 ISR로 두는 경우가 많다. 그 ISR이 태스크에 알릴 일(과전류 fault, 1 kHz 속도 루프용 데이터 준비)이 생기면 <strong>직접 FromISR을 부르지 않고</strong> 문턱 아래의 "다리" IRQ를 <code>NVIC_SetPendingIRQ</code>(STIR)로 pend한다(B3 예제 11 MODE 0). CAN RX ISR은 문턱 아래에서 <code>xQueueSendFromISR</code>로 프레임을 넘기고, 큐가 차서 <code>errQUEUE_FULL</code>이 오면 버린 프레임 카운터를 올린다 — ISR은 기다릴 수 없으니 실패 처리 경로가 반드시 있어야 한다(예제 9의 <code>-ENOMSG</code>와 같은 얘기).</p>
+<h3 id="10-3-linux-soc-옆-센서-허브-zephyr">10.3 Linux SoC 옆 센서 허브 (Zephyr)<a class="anchor" href="#10-3-linux-soc-옆-센서-허브-zephyr" aria-label="link">#</a></h3>
+<p>Zephyr 드라이버 API의 콜백(예: UART <code>uart_irq_callback_set</code>, GPIO <code>gpio_init_callback</code>)은 <strong>ISR 문맥에서 불린다</strong>. 콜백 안에서 <code>k_msleep()</code>이나 <code>k_mutex_lock()</code>을 쓰면 예제 9처럼 assert(켜져 있으면) 또는 예제 10처럼 엉뚱한 스레드 정지(꺼져 있으면)가 된다. 드라이버 공용 함수를 쓸 때 <code>k_is_in_isr()</code>로 분기하거나, 콜백에서는 <code>k_work_submit()</code>/<code>k_msgq_put(..., K_NO_WAIT)</code>만 한다(D7 §4). 개발 보드 빌드의 <code>prj.conf</code>에 <code>CONFIG_ASSERT=y</code>를 넣는 것을 팀 규칙으로 둔다 — 기본값이 꺼짐이라는 것을 모르는 사람이 많다.</p>
+<h3 id="10-4-don의-ssd-펌웨어와-연결">10.4 Don의 SSD 펌웨어와 연결<a class="anchor" href="#10-4-don의-ssd-펌웨어와-연결" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>SSD 펌웨어 (bare-metal executive)</th><th>RTOS ISR 규칙</th></tr></thead><tbody><tr><td>ISR이 이벤트 비트 세우고 executive 루프가 다음 바퀴에 처리</td><td>ISR이 FromISR로 깨우고 PendSV가 즉시 전환. yield를 빼먹으면 "다음 바퀴" = 다음 tick</td></tr><tr><td>ISR에서 NAND 상태 폴링 금지 (다른 채널 ISR 지연)</td><td>ISR에서 블로킹 · 긴 루프 금지 — 같은 이유, 숫자는 예제 8</td></tr><tr><td>ISR과 공유하는 큐는 인터럽트 끄고 인덱스 갱신</td><td><code>taskENTER_CRITICAL_FROM_ISR()</code> 저장/복원 (0으로 내리지 않는다)</td></tr><tr><td>디버그 UART 로그는 링버퍼에 넣고 idle 루프가 출력</td><td>ISR에서 printf 금지 → 로그 태스크로 위임 (D7)</td></tr><tr><td>"가끔 수 ms 멈추는 커맨드 루프" 버그</td><td>assert 없는 RTOS에서 ISR의 블로킹 호출 → 끊긴 태스크가 잠듦 (예제 7)</td></tr></tbody></table></div>
+<hr>
+<h2 id="11-흔한-실수와-증상">11. 흔한 실수와 증상<a class="anchor" href="#11-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>ISR에서 <code>xSemaphoreGive()</code> 등 태스크용 API</td><td>assert 켬: <code>port.c:438</code>. 끔: 대개 동작 — 언젠가 깨짐</td><td>태스크용 크리티컬 섹션 + 즉시 yield 경로</td><td><code>...FromISR</code> + woken + yield</td></tr><tr><td><code>pxHigherPriorityTaskWoken</code>에 NULL, 또는 <code>portYIELD_FROM_ISR</code> 누락</td><td>태스크가 0~1 tick 늦게 돈다. 기능 테스트는 통과</td><td>아무도 PENDSVSET을 안 씀, <code>xYieldPendings</code> 안전망은 tick에서만</td><td>항상 woken을 받고 ISR 끝에서 yield</td></tr><tr><td>호출마다 다른 woken 변수, 마지막 것만 yield</td><td>위와 같음 (예제 5 B)</td><td>앞 호출의 <code>pdTRUE</code>가 버려짐</td><td>하나를 공유하거나 OR로 합침</td></tr><tr><td>반환값을 woken으로 사용 / woken 미초기화</td><td>아무도 안 깨웠는데 매 IRQ마다 PendSV, CPU 조금 더 씀 (예제 5 C: 헛 PendSV당 3.4 µs)</td><td>반환값은 성공 여부</td><td><code>BaseType_t woken = pdFALSE;</code></td></tr><tr><td>우선순위를 안 정한 IRQ에서 FromISR</td><td><code>port.c:803</code> assert. 끄면 가끔 리스트 손상 → 엉뚱한 곳 HardFault</td><td>리셋 우선순위 0 = 문턱 위</td><td><code>NVIC_SetPriority</code>로 문턱 아래 값 설정 (E2)</td></tr><tr><td>ISR에서 블로킹 take / <code>vTaskDelay</code> / <code>k_sleep</code></td><td>끊긴 태스크가 잠듦, 또는 ISR이 못 나감 (<code>list.c:192</code>)</td><td><code>pxCurrentTCB</code> = 끊긴 태스크, ISR 안에서 tick이 안 흐름</td><td>timeout 0 / <code>K_NO_WAIT</code>, 기다리는 일은 태스크로</td></tr><tr><td>ISR에서 뮤텍스 take</td><td>소유자 NULL인 잠긴 뮤텍스 → 태스크 영원히 대기 (FreeRTOS, assert 없음)</td><td>소유자 · 상속 개념이 ISR에 없음</td><td>크리티컬 섹션, 게이트키퍼, lock-free (§4.5)</td></tr><tr><td>ISR에서 printf · malloc · float(M3)</td><td>IRQ 지연 수십 µs ~ ms, 힙 손상(malloc 재진입)</td><td>블로킹 출력, 재진입 보호 없음, 소프트 float</td><td>링버퍼 로그 + 태스크 출력, 정적 풀, 정수 연산</td></tr><tr><td>Zephyr direct ISR이 <code>k_sem_give</code> 후 <code>return 0</code></td><td>스레드가 수십 ms ~ 수백 ms 늦게 깸 (예제 11)</td><td><code>z_arm_int_exit()</code> 생략 → PendSV 없음</td><td>커널 객체를 건드렸으면 <code>return 1</code></td></tr><tr><td>Zephyr 앱에서 <code>CONFIG_ASSERT</code> 기본값을 믿음</td><td>ISR의 timeout 실수가 조용히 "끊긴 스레드 정지"가 됨 (예제 10)</td><td><code>default y if TEST</code></td><td>개발 빌드에 <code>CONFIG_ASSERT=y</code></td></tr></tbody></table></div>
+<hr>
+<h2 id="12-면접에서-이렇게-말한다">12. 면접에서 이렇게 말한다<a class="anchor" href="#12-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> Why does FreeRTOS have separate <code>FromISR</code> versions of its API? (FreeRTOS는 왜 FromISR API를 따로 두나?)</p>
+<p><strong>A.</strong> 세 가지가 다르기 때문이다. ISR은 블록할 수 없으니 timeout 인자와 대기 경로가 없다. 크리티컬 섹션이 중첩 카운터식이 아니라 BASEPRI 저장/복원식이다. 그리고 높은 태스크를 깨워도 그 자리에서 스위치하지 않고 플래그만 돌려준다. 그 덕에 ISR 경로가 짧다 — 큐 send 기준 코드가 404 B에서 232 B로, give가 2.5 µs에서 1.5 µs로 줄었다(QEMU).</p>
+<blockquote><p>FreeRTOS keeps separate ISR APIs because three things differ in interrupt context. An ISR cannot block, so the FromISR variants have no timeout and no wait path. The critical section must save and restore BASEPRI instead of using the task-level nesting counter, which would drop BASEPRI to zero. And the ISR cannot context-switch on the spot, so the API only reports through pxHigherPriorityTaskWoken that a higher-priority task was woken, and the ISR requests the switch with portYIELD_FROM_ISR at the end. The result is a shorter, simpler path: on my QEMU Cortex-M3 measurements xQueueGenericSendFromISR is about half the code size of xQueueGenericSend.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "Zephyr는?" → 같은 함수에 <code>K_NO_WAIT</code>만 허용하고, 재스케줄은 ISR wrapper 출구가 자동으로 한다.</p>
+<p><strong>Q.</strong> What is <code>xHigherPriorityTaskWoken</code> for, and what happens if you pass NULL or forget <code>portYIELD_FROM_ISR</code>? (그 플래그는 무엇이고 빼먹으면?)</p>
+<p><strong>A.</strong> FromISR API가 "지금 돌던 태스크보다 높은 태스크를 깨웠다"는 사실을 알려 주는 플래그다. ISR 끝에서 그것을 <code>portYIELD_FROM_ISR</code>에 넘기면 PendSV가 걸려서 ISR이 끝나자마자 그 태스크로 간다. 빼먹어도 커널이 <code>xYieldPendings</code>로 기억해 두었다가 다음 tick에서 전환하므로 기능은 맞지만, 지연이 최대 1 tick이 된다. 실제로 재 보니 1 kHz에서 평균 0.5 ms, 100 Hz에서 평균 5 ms, 최대 10 ms였고 yield가 있으면 tick과 무관하게 9 µs였다.</p>
+<blockquote><p>It tells the ISR whether the API call unblocked a task with higher priority than the one that was interrupted. You initialise it to pdFALSE, pass the same variable to every FromISR call in the handler, and call portYIELD_FROM_ISR with it at the end, which just pends PendSV so the switch happens right after the ISR returns. If you pass NULL or skip the yield, the kernel still records a pending yield and switches on the next tick, so it works functionally but the wake-up latency becomes uniformly distributed up to one tick period. I measured nine microseconds with the yield, versus an average of half a tick and a worst case of a full tick without it, at 1000, 250 and 100 Hz.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "한 ISR에서 FromISR을 두 번 부르면?" → 같은 변수를 넘긴다. 따로 받아서 마지막 것만 넘기면 앞의 <code>pdTRUE</code>가 사라진다.</p>
+<p><strong>Q.</strong> List the things you must not do in an ISR under an RTOS, and why. (ISR에서 하면 안 되는 것은?)</p>
+<p><strong>A.</strong> 기다리는 모든 것 — 블로킹 take, delay, sleep, 뮤텍스. ISR에는 블록할 주체가 없어서 커널이 끊긴 태스크를 재운다. 태스크용 API(크리티컬 섹션 방식이 다름), 문턱보다 급한 ISR에서의 커널 API(커널이 막을 수 없음), printf와 malloc(블로킹 · 재진입), 상한 없는 루프, FPU 없는 코어에서의 float. 공통 원리는 "ISR의 길이는 같거나 낮은 우선순위의 모든 것의 지연"이라는 것이다.</p>
+<blockquote><p>Anything that can wait: blocking receives with a timeout, delays, sleeps and mutexes. An ISR has no task identity, so the kernel would put the interrupted task to sleep instead. I demonstrated that with asserts disabled: vTaskDelay in an ISR stalled an unrelated task for five milliseconds, and a blocking take spun forever inside vListInsert. Also non-ISR API variants, any kernel call from an interrupt above the max syscall priority, printf and malloc because they block or are not reentrant, unbounded loops, and floating point on cores without an FPU. The underlying rule is that every microsecond in an ISR is added to the latency of everything at the same or lower priority.</p></blockquote>
+<p><strong>Q.</strong> Why can't you use a mutex from an ISR? (ISR에서 뮤텍스를 못 쓰는 이유는?)</p>
+<p><strong>A.</strong> 뮤텍스는 소유자가 태스크라는 전제 위에 있다. 소유자만 풀 수 있고, 우선순위 상속은 소유자 태스크의 우선순위를 올린다. ISR은 TCB가 없고 우선순위 축도 다르며 기다릴 수도 없다. FreeRTOS에서는 ISR이 빈 뮤텍스를 take하면 assert 없이 성공해서 "소유자 없는 잠긴 뮤텍스"가 되고 태스크가 영원히 못 얻는 것을 실험으로 봤다. Zephyr는 <code>k_mutex_lock</code>에서 assert로 막는다.</p>
+<blockquote><p>A mutex assumes its owner is a task: only the owner may release it, and priority inheritance boosts the owner's priority. An ISR has no task control block, its priority lives in the NVIC rather than the scheduler, and it cannot wait if the mutex is held. In FreeRTOS, taking a free mutex from an ISR actually succeeds with no assert and leaves a locked mutex with a NULL holder, so tasks then time out forever. Zephyr asserts in k_mutex_lock. For data shared between an ISR and a task I use a short ISR-safe critical section, a lock-free single-producer single-consumer buffer, or a gatekeeper task.</p></blockquote>
+<p><strong>Q.</strong> How does FreeRTOS catch an ISR that calls the API from the wrong priority? (잘못된 우선순위를 어떻게 잡나?)</p>
+<p><strong>A.</strong> <code>configASSERT</code>가 정의되어 있으면 FromISR 입구에서 <code>vPortValidateInterruptPriority</code>가 IPSR로 현재 IRQ 번호를 읽고, NVIC의 그 IRQ 우선순위 바이트가 <code>configMAX_SYSCALL_INTERRUPT_PRIORITY</code>보다 급하면 assert한다. 리셋값 0인 IRQ는 무조건 걸린다. thread mode와 시스템 예외는 검사하지 않는다. assert를 끄면 이 함수 자체가 빠진다.</p>
+<blockquote><p>When configASSERT is defined, every core FromISR function calls vPortValidateInterruptPriority on entry. It reads IPSR to get the active exception number, looks up that interrupt's priority byte in the NVIC, and asserts if it is logically higher than configMAX_SYSCALL_INTERRUPT_PRIORITY, because the kernel's BASEPRI critical sections cannot mask it. An interrupt left at its reset priority of zero always fails that check. It also asserts if priority grouping leaves sub-priority bits. With configASSERT undefined the check is compiled out, which is why I keep asserts on in development builds and log-and-reset in production.</p></blockquote>
+<p><strong>Q.</strong> In Zephyr, what's the difference between <code>IRQ_CONNECT</code> and <code>IRQ_DIRECT_CONNECT</code>? (Zephyr의 두 연결 방식 차이는?)</p>
+<p><strong>A.</strong> 보통 ISR은 공용 wrapper가 PM 복귀, 인자 전달, 출구의 재스케줄 판단을 해 준다. direct ISR은 벡터에 바로 들어가서 셋 다 선택이 된다. <code>ISR_DIRECT_PM()</code>을 넣을지, 반환값을 1로 해서 재스케줄을 검사할지 앱이 정한다. 스레드를 깨우고 0을 반환하면 FreeRTOS에서 yield를 빼먹은 것과 같고, tickless에서는 더 나빠서 실측 19 ms(시간 슬라이스), 슬라이스를 끄면 최대 660 ms까지 늦어졌다.</p>
+<blockquote><p>IRQ_CONNECT goes through the common _isr_wrapper, which handles power-management exit, passes the argument from the software ISR table, and on exit checks whether a higher-priority thread became ready and pends PendSV. IRQ_DIRECT_CONNECT puts the handler straight into the vector table and makes those steps optional: you call ISR_DIRECT_PM yourself and the return value of the ISR_DIRECT_DECLARE body decides whether the reschedule check runs. If you give a semaphore and return zero, the woken thread waits for the next ordinary interrupt. On a tickless 100 Hz build I measured about 19 milliseconds, set by the time-slice timer, and up to 660 milliseconds with time slicing disabled.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "그럼 direct ISR은 왜 쓰나?" → wrapper 몇십 사이클과 간접 호출을 줄이고, ZLI는 direct여야만 한다(<code>ARCH_IRQ_CONNECT</code>가 <code>BUILD_ASSERT</code>로 거부).</p>
+<p><strong>Q.</strong> How do you write a function that may be called from both a task and an ISR? (양쪽에서 불리는 함수는?)</p>
+<p><strong>A.</strong> FreeRTOS는 <code>xPortIsInsideInterrupt()</code>, Zephyr는 <code>k_is_in_isr()</code>로 IPSR을 보고 분기한다. FreeRTOS에서는 ISR 쪽에서 FromISR + woken + yield, 태스크 쪽에서 보통 API. Zephyr에서는 timeout을 <code>k_is_in_isr() ? K_NO_WAIT : K_MSEC(n)</code>으로 고른다. 다만 둘 다 PendSV · SVC 안에서도 참이고, zero-latency ISR인지는 알려 주지 않는다.</p>
+<blockquote><p>Check the execution context at run time: xPortIsInsideInterrupt in FreeRTOS or k_is_in_isr in Zephyr, both of which just test IPSR. In FreeRTOS the ISR branch uses the FromISR call with a woken flag and portYIELD_FROM_ISR, and the task branch uses the normal call. In Zephyr the same call works in both, but the timeout must be K_NO_WAIT in the ISR branch. Note that these helpers return true for any exception, including SVC and PendSV, and they cannot tell you whether you are in a zero-latency interrupt where no kernel call is allowed, so priority discipline is still needed.</p></blockquote>
+<hr>
+<h2 id="13-직접-해보기">13. 직접 해보기<a class="anchor" href="#13-직접-해보기" aria-label="link">#</a></h2>
+<ol class="tasks"><li><strong>개념</strong>: 예제 6에서 MODE 1~5가 모두 <code>port.c:438</code> 한 줄에 걸렸다. <code>pvPortMalloc()</code>(heap_4)이 그 줄까지 가는 호출 경로를 소스에서 따라 적어 보라. 정답/힌트: <code>pvPortMalloc</code> → <code>vTaskSuspendAll()</code> → … → <code>xTaskResumeAll()</code> → <code>taskENTER_CRITICAL()</code> → <code>vPortEnterCritical()</code>의 VECTACTIVE 검사.</li><li><strong>코드</strong>: 예제 5에 E 경우를 추가하라 — <code>BaseType_t woken;</code>(초기화 안 함)을 두 FromISR에 넘기고 yield한다. <code>-O2</code>에서 결과가 C와 같아지는지, D와 같아지는지 확인하고 이유를 생성 코드(<code>objdump</code>)로 설명하라. 정답/힌트: 스택 슬롯의 이전 값에 따라 달라진다. 컴파일러가 경고(<code>-Wmaybe-uninitialized</code>)를 내는지도 본다.</li><li><strong>측정</strong>: 예제 4를 <code>configUSE_PREEMPTION=0</code>으로 빌드해 woken + yield 경우의 지연을 재라. yield가 여전히 9 µs인가? 정답/힌트: <code>portYIELD_FROM_ISR</code>은 선점 설정과 무관하게 PENDSVSET을 쓴다. 협력형에서도 ISR이 요청한 스위치는 일어나는지, 그리고 NULL 경우의 안전망(<code>xTaskIncrementTick</code>의 <code>configUSE_PREEMPTION == 1</code> 블록)은 어떻게 되는지 소스와 함께 확인한다.</li><li><strong>측정</strong>: 예제 11의 MODE 2에 <code>CONFIG_TIMESLICE_SIZE=5</code>를 주면 평균 지연이 어떻게 바뀌나? 예측을 먼저 적고 재라. 정답/힌트: 슬라이스 만료가 다음 보통 인터럽트이므로 5 ms를 tick(10 ms)으로 올림한 값 근처를 예측한다.</li><li><strong>코드</strong>: 예제 9에 <code>k_heap_alloc(&amp;heap, 32, K_MSEC(1))</code>을 ISR에서 부르는 MODE 4를 추가하고, assert가 <code>kernel/kheap.c</code>의 몇 행에서 터지는지 확인하라. 정답/힌트: 88행(<code>k_heap_aligned_alloc</code>) 또는 185행(<code>k_heap_realloc</code>) 중 어느 경로인지 본다.</li><li><strong>설계</strong>: 드론 FC에서 IMU DRDY ISR이 ① 타임스탬프, ② SPI DMA 시작, ③ 자세 태스크 깨우기를 한다. 각 줄이 E1의 어떤 규칙과 관계있는지, 그리고 이 ISR의 우선순위를 문턱 위/아래 중 어디에 둘지 근거와 함께 써 보라. 정답/힌트: ③ 때문에 문턱 아래여야 한다. 타임스탬프 지터가 문제면 ①만 문턱 위 ISR로 분리하고 다리 IRQ로 ③을 한다(B3 예제 11, E2).</li><li><strong>측정</strong>: 예제 8에 <code>snprintf(buf, …)</code>(출력 없이 포맷만) 모드를 추가해 "UART를 안 써도 printf 계열이 비싼가"를 재라. 정답/힌트: newlib-nano <code>snprintf</code>는 정수만 포맷해도 수 µs 이상 걸리고 스택을 많이 쓴다. MSP 사용량도 함께 본다.</li></ol>
+<hr>
+<h2 id="14-용어-사전">14. 용어 사전<a class="anchor" href="#14-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>FromISR API</td><td>ISR용 FreeRTOS 변형</td><td>블록하지 않고, BASEPRI 저장/복원, 스위치는 플래그로만</td></tr><tr><td><code>pxHigherPriorityTaskWoken</code></td><td>woken 플래그</td><td>깨운 태스크가 끊긴 태스크보다 높으면 <code>pdTRUE</code>로 올라간다</td></tr><tr><td><code>portYIELD_FROM_ISR</code></td><td>ISR 끝의 yield 요청</td><td>ARM_CM3에서 <code>portEND_SWITCHING_ISR</code>과 같다. ICSR PENDSVSET</td></tr><tr><td><code>xYieldPendings</code></td><td>미뤄 둔 yield 표시</td><td>yield를 빼먹어도 다음 tick에서 전환되게 하는 안전망</td></tr><tr><td><code>portSET_INTERRUPT_MASK_FROM_ISR</code></td><td>ISR용 마스크 올리기</td><td>이전 BASEPRI를 반환, <code>portCLEAR_INTERRUPT_MASK_FROM_ISR(x)</code>로 복원</td></tr><tr><td><code>vPortValidateInterruptPriority</code></td><td>FromISR 입구 검사</td><td>현재 IRQ 우선순위가 문턱 아래인지, PRIGROUP이 맞는지</td></tr><tr><td><code>xPortIsInsideInterrupt</code></td><td>문맥 판별 (FreeRTOS)</td><td>IPSR ≠ 0이면 참</td></tr><tr><td><code>configASSERT</code></td><td>FreeRTOS assert 훅</td><td>정의하면 <code>configASSERT_DEFINED = 1</code>, 포트 검사 함수도 포함됨</td></tr><tr><td>VECTACTIVE</td><td>ICSR의 현재 예외 번호 필드</td><td><code>vPortEnterCritical</code>이 ISR에서 불렸는지 보는 데 쓴다</td></tr><tr><td><code>k_is_in_isr</code></td><td>문맥 판별 (Zephyr)</td><td><code>arch_is_in_isr()</code> = IPSR ≠ 0</td></tr><tr><td><code>K_NO_WAIT</code></td><td>Zephyr의 "기다리지 않음" timeout</td><td>ISR에서 허용되는 유일한 timeout</td></tr><tr><td><code>@isr_ok</code></td><td>Zephyr Doxygen 표시</td><td>ISR에서 불러도 되는 API (v4.4.2 <code>kernel.h</code>에 72개)</td></tr><tr><td><code>IRQ_DIRECT_CONNECT</code></td><td>Zephyr direct ISR 등록</td><td>wrapper 없이 벡터 테이블에 직접</td></tr><tr><td><code>ISR_DIRECT_DECLARE</code></td><td>direct ISR 정의 매크로</td><td>본문 반환값 ≠ 0이면 출구에서 재스케줄 검사</td></tr><tr><td><code>ISR_DIRECT_PM</code></td><td>direct ISR의 PM 복귀</td><td><code>CONFIG_PM</code>일 때만 의미, ZLI에서는 금지</td></tr><tr><td><code>irq_offload</code></td><td>테스트용 ISR 문맥 실행</td><td>Cortex-M에서는 <code>svc #1</code>, <code>CONFIG_TEST</code> 필요</td></tr><tr><td><code>CONFIG_ASSERT</code></td><td>Zephyr <code>__ASSERT</code> 스위치</td><td>v4.4.2 기본값 <code>default y if TEST</code></td></tr><tr><td>PendSV</td><td>가장 낮은 우선순위 소프트웨어 예외</td><td>Cortex-M RTOS의 컨텍스트 스위치 장소 (B4)</td></tr><tr><td>다리 IRQ (bridge IRQ)</td><td>문턱 위 ISR이 pend하는 문턱 아래 IRQ</td><td>zero-latency ISR이 커널에 알릴 때 쓰는 우회로 (B3, E2)</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-요약-체크리스트">15. 요약 &amp; 체크리스트<a class="anchor" href="#15-요약-체크리스트" aria-label="link">#</a></h2>
+<p>RTOS에서 ISR은 "플래그만 세우는 짧은 함수"에 더해 <strong>커널과의 계약</strong>을 지켜야 한다. FreeRTOS는 그 계약을 이름(<code>FromISR</code>)과 woken 플래그로, Zephyr는 인자(<code>K_NO_WAIT</code>)와 ISR 출구의 자동 재스케줄로 표현한다. 계약의 핵심은 셋이다: ISR은 기다리지 않는다, ISR은 자기 방식(저장/복원)으로만 마스크한다, ISR은 스위치를 요청만 하고 실행은 PendSV에 맡긴다. 이 노트의 측정에서 yield 한 줄을 빼먹으면 지연이 tick 주기만큼(1 kHz에서 최대 1 ms, 100 Hz에서 10 ms), Zephyr direct ISR이 0을 반환하면 최대 SysTick 한 바퀴(660 ms)까지 늘었다. 블로킹 호출은 assert가 있으면 첫 실행에서 <code>port.c:438</code> / <code>sem.c:136</code>으로 잡히지만, 없으면 <strong>끊긴 태스크가 잠들거나</strong> ISR이 <code>vListInsert</code>에서 영원히 돈다. 그래서 개발 빌드는 assert를 켜고, 양산은 "기록하고 리셋"으로 남긴다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>FromISR이 태스크용 API와 다른 네 가지(기다림, 크리티컬 섹션, 스위치, 진입 검사)를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>woken = pdFALSE</code> → 같은 <code>&amp;woken</code> 공유 → 끝에서 <code>portYIELD_FROM_ISR(woken)</code>을 습관으로 쓴다</span></label></li><li class="task"><label><input type="checkbox" ><span>yield 누락 · NULL의 대가가 "최대 1 tick, 평균 tick/2"인 이유를 <code>xYieldPendings</code>로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>한 ISR 안의 여러 FromISR에서 플래그를 덮어쓰거나 반환값을 넘기는 버그를 알아본다</span></label></li><li class="task"><label><input type="checkbox" ><span>ISR에서 블로킹 호출을 하면 "끊긴 태스크가 잠든다"는 것을 예로 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>list.c:192</code>에서 멈춘 시스템을 보면 ISR 규칙 위반 · 우선순위 · 스택 오버플로를 먼저 의심한다</span></label></li><li class="task"><label><input type="checkbox" ><span>ISR에서 뮤텍스가 안 되는 이유(소유자 · 상속 · 대기)와 대안 세 가지를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>printf · malloc · 긴 루프 · float의 ISR 비용을 숫자로 말할 수 있다 (예제 8)</span></label></li><li class="task"><label><input type="checkbox" ><span><code>vPortValidateInterruptPriority</code>가 무엇을 읽고 무엇을 검사하지 않는지 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>Zephyr에서 <code>K_NO_WAIT</code> 규칙과 <code>@isr_ok</code> 표시, <code>CONFIG_ASSERT</code> 기본값(꺼짐)을 안다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>ISR_DIRECT_DECLARE</code>의 반환값과 <code>ISR_DIRECT_PM</code>의 역할을 설명하고, 0을 반환하면 생기는 지연을 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>irq_offload()</code>로 ISR 문맥 테스트를 만들 수 있고 그 한계(SVC 우선순위)를 안다</span></label></li></ul>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul class="tasks"><li>FreeRTOS Kernel V11.3.2 소스 — <code>queue.c</code>(<code>xQueueGenericSendFromISR</code>, <code>xQueueGiveFromISR</code> 1338행 · 1360행 assert), <code>tasks.c</code>(<code>xTaskRemoveFromEventList</code> 5500행, <code>xTaskIncrementTick</code> 4831행, <code>xTaskGenericNotifyFromISR</code>), <code>list.c</code>(<code>vListInsert</code> 192행과 그 위 주석), <code>portable/GCC/ARM_CM3/port.c</code>(<code>vPortEnterCritical</code> 438행, <code>vPortValidateInterruptPriority</code> 766~820행), <code>portable/GCC/ARM_CM3/portmacro.h</code>(<code>portEND_SWITCHING_ISR</code>, <code>xPortIsInsideInterrupt</code>, <code>ulPortRaiseBASEPRI</code>), <code>event_groups.c</code>(<code>xEventGroupSetBitsFromISR</code>). lab: <code>/var/rtoslab/src/FreeRTOS-Kernel</code></li><li>FreeRTOS 문서: "Running the RTOS on a ARM Cortex-M Core" — https://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html (소스 주석이 가리키는 페이지), configASSERT 설명 https://www.FreeRTOS.org/a00110.html#configASSERT, FAQ https://www.freertos.org/Why-FreeRTOS/FAQs</li><li>Zephyr v4.4.2 소스 — <code>include/zephyr/irq.h</code>(<code>IRQ_DIRECT_CONNECT</code>, <code>ISR_DIRECT_DECLARE</code>, <code>ISR_DIRECT_PM</code>), <code>include/zephyr/arch/arm/irq.h</code>(<code>ARCH_IRQ_CONNECT</code>, <code>ARCH_ISR_DIRECT_DECLARE</code>, <code>IRQ_ZERO_LATENCY</code>), <code>arch/arm/core/cortex_m/isr_wrapper.c</code>, <code>exc_exit.c</code>, <code>arch/arm/include/cortex_m/exception.h</code>(<code>arch_is_in_isr</code>), <code>arch/arm/include/cortex_m/kernel_arch_func.h</code>(<code>arch_swap</code>), <code>arch/arm/core/irq_offload.c</code>, <code>kernel/sem.c</code>, <code>kernel/mutex.c</code>, <code>kernel/msg_q.c</code>, <code>kernel/sched.c</code>, <code>kernel/timeout.c</code>, <code>kernel/timeslicing.c</code>, <code>kernel/irq_offload.c</code>, <code>subsys/debug/Kconfig</code>(<code>config ASSERT</code>), <code>arch/Kconfig</code>(<code>config IRQ_OFFLOAD</code>). lab: <code>/var/rtoslab/zephyrproject/zephyr</code></li><li>Zephyr 문서: Interrupts — https://docs.zephyrproject.org/latest/kernel/services/interrupts.html (소스 트리 <code>doc/kernel/services/interrupts.rst</code>), Floating Point Services (<code>doc/kernel/services/other/float.rst</code>)</li><li>Arm, Cortex-M3 Technical Reference Manual / ARMv7-M Architecture Reference Manual — IPSR, ICSR(PENDSVSET, VECTACTIVE), BASEPRI 정의</li><li>관련 노트: B2(예외 진입 · 26워드 FPU 프레임 · Zephyr 벡터), B3(NVIC · 문턱 · 예제 11 assert), B4(PendSV), B6(FPU 문맥), C2(컨텍스트 스위치), C7(크리티컬 섹션 · FROM_ISR), C8(커널 진입), D1 §4(yield 누락 히스토그램), D3(우선순위 상속), D5(task notification), D7(위임 패턴), D8(lock-free), EL F6 · F2(Linux 인터럽트와 실행 문맥), 다음: E2 · E3 · E4</li></ul>
+    <div class="nav"><a class="next" href="2026-11-01_E2_interrupt_priority_design.html"><span class="dir">다음 →</span><span class="nm">E2. 인터럽트 우선순위 설계 — kernel-aware와 zero-latency 사이에 선을 긋고, 배치표를 숫자로 만들고, 검증까지 한다</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l3"><a href="#실습-환경-한-줄">실습 환경 한 줄</a></li><li class="l2"><a href="#1-규칙-한-장-먼저-결론">1. 규칙 한 장 — 먼저 결론</a></li><li class="l2"><a href="#2-freertos의-fromisr-api-가족">2. FreeRTOS의 ...FromISR API 가족</a></li><li class="l3"><a href="#2-1-왜-이름이-다른-함수를-따로-두나">2.1 왜 이름이 다른 함수를 따로 두나</a></li><li class="l3"><a href="#2-2-예제-1-v11-3-2-헤더에-있는-fromisr-api-전부-세기">2.2 예제 1 — V11.3.2 헤더에 있는 FromISR API 전부 세기</a></li><li class="l3"><a href="#2-3-예제-2-두-변형의-비용-fromisr을-태스크에서-부르면-그리고-양쪽에서-쓸-수-있는-도우미">2.3 예제 2 — 두 변형의 비용, FromISR을 태스크에서 부르면, 그리고 양쪽에서 쓸 수 있는 도우미</a></li><li class="l3"><a href="#2-4-예제-3-코드-크기와-생성-코드-fromisr에는-무엇이-빠져-있나">2.4 예제 3 — 코드 크기와 생성 코드: FromISR에는 무엇이 빠져 있나</a></li><li class="l2"><a href="#3-pxhigherprioritytaskwoken과-portyield_from_isr-스위치는-나가면서">3. pxHigherPriorityTaskWoken과 portYIELD_FROM_ISR — "스위치는 나가면서"</a></li><li class="l3"><a href="#3-1-직관과-순서">3.1 직관과 순서</a></li><li class="l3"><a href="#3-2-빼먹어도-언젠가는-전환되는-이유-xyieldpendings">3.2 빼먹어도 "언젠가는" 전환되는 이유 — xYieldPendings</a></li><li class="l3"><a href="#3-3-예제-4-null을-넘기면-tick-주파수-1000-250-100-hz">3.3 예제 4 — NULL을 넘기면: tick 주파수 1000 · 250 · 100 Hz</a></li><li class="l3"><a href="#3-4-예제-5-한-isr에-fromisr이-둘-이상일-때의-플래그-버그">3.4 예제 5 — 한 ISR에 FromISR이 둘 이상일 때의 플래그 버그</a></li><li class="l3"><a href="#3-5-don-경험과-연결-그리고-함정">3.5 Don 경험과 연결, 그리고 함정</a></li><li class="l2"><a href="#4-isr에서-금지된-것-규칙-이유-깨지는-것">4. ISR에서 금지된 것 — 규칙 → 이유 → 깨지는 것</a></li><li class="l3"><a href="#4-1-카탈로그">4.1 카탈로그</a></li><li class="l3"><a href="#4-2-예제-6-assert를-켜고-여덟-가지-실수를-한-번씩">4.2 예제 6 — assert를 켜고 여덟 가지 실수를 한 번씩</a></li><li class="l3"><a href="#4-3-예제-7-assert를-끄면-같은-실수가-무엇이-되나">4.3 예제 7 — assert를 끄면 같은 실수가 무엇이 되나</a></li><li class="l3"><a href="#4-4-예제-8-짧게-를-숫자로-금지된-일-하나가-isr을-얼마나-늘리나">4.4 예제 8 — "짧게"를 숫자로: 금지된 일 하나가 ISR을 얼마나 늘리나</a></li><li class="l3"><a href="#4-5-뮤텍스는-왜-isr에서-절대-안-되나">4.5 뮤텍스는 왜 ISR에서 절대 안 되나</a></li><li class="l3"><a href="#4-6-fpu-코어마다-규칙이-다르다">4.6 FPU — 코어마다 규칙이 다르다</a></li><li class="l2"><a href="#5-문지기-configassert-vportvalidateinterruptpriority-xportisinsideinterrupt">5. 문지기 — configASSERT, vPortValidateInterruptPriority, xPortIsInsideInterrupt</a></li><li class="l3"><a href="#5-1-vportvalidateinterruptpriority-가-하는-일">5.1 vPortValidateInterruptPriority()가 하는 일</a></li><li class="l3"><a href="#5-2-zephyr에는-이-검사가-없다-대신-빌드-시점에">5.2 Zephyr에는 이 검사가 없다 — 대신 빌드 시점에</a></li><li class="l3"><a href="#5-3-configassert를-양산에서-어떻게-하나">5.3 configASSERT를 양산에서 어떻게 하나</a></li><li class="l2"><a href="#6-zephyr-쪽-규칙-같은-이름-k_no_wait-그리고-direct-isr">6. Zephyr 쪽 규칙 — 같은 이름, K_NO_WAIT, 그리고 direct ISR</a></li><li class="l3"><a href="#6-1-직관-이름을-나누는-대신-인자로-나눈다">6.1 직관: 이름을 나누는 대신 인자로 나눈다</a></li><li class="l3"><a href="#6-2-예제-9-k_is_in_isr-세-문맥-k_no_wait의-반환값-그리고-assert-세-개">6.2 예제 9 — k_is_in_isr() 세 문맥, K_NO_WAIT의 반환값, 그리고 assert 세 개</a></li><li class="l3"><a href="#6-3-예제-10-config_assert-n에서-isr이-timeout을-넘기면">6.3 예제 10 — CONFIG_ASSERT=n에서 ISR이 timeout을 넘기면</a></li><li class="l3"><a href="#6-4-irq_connect-vs-irq_direct_connect-커널의-도움을-끄는-스위치">6.4 IRQ_CONNECT vs IRQ_DIRECT_CONNECT — 커널의 도움을 끄는 스위치</a></li><li class="l3"><a href="#6-5-예제-11-direct-isr이-k_sem_give-후-0을-반환하면">6.5 예제 11 — direct ISR이 k_sem_give() 후 0을 반환하면</a></li><li class="l3"><a href="#6-6-irq_offload-테스트에서-isr-문맥-만들기">6.6 irq_offload() — 테스트에서 ISR 문맥 만들기</a></li><li class="l2"><a href="#7-freertos-vs-zephyr-isr-체크리스트-한-장">7. FreeRTOS vs Zephyr — ISR 체크리스트 한 장</a></li><li class="l2"><a href="#8-예제-12-측정-숫자를-간단한-모델과-맞춰-보기-python">8. 예제 12 — 측정 숫자를 간단한 모델과 맞춰 보기 (Python)</a></li><li class="l2"><a href="#9-rtos-커널-안에서는-무슨-일이-일어나나">9. RTOS 커널 안에서는 무슨 일이 일어나나</a></li><li class="l2"><a href="#10-실무에서-다시-보기">10. 실무에서 다시 보기</a></li><li class="l3"><a href="#10-1-드론-비행-제어기-imu-data-ready-isr">10.1 드론 비행 제어기 — IMU data-ready ISR</a></li><li class="l3"><a href="#10-2-로봇-관절-모터-컨트롤러-20-khz-foc-can">10.2 로봇 관절 모터 컨트롤러 — 20 kHz FOC + CAN</a></li><li class="l3"><a href="#10-3-linux-soc-옆-센서-허브-zephyr">10.3 Linux SoC 옆 센서 허브 (Zephyr)</a></li><li class="l3"><a href="#10-4-don의-ssd-펌웨어와-연결">10.4 Don의 SSD 펌웨어와 연결</a></li><li class="l2"><a href="#11-흔한-실수와-증상">11. 흔한 실수와 증상</a></li><li class="l2"><a href="#12-면접에서-이렇게-말한다">12. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#13-직접-해보기">13. 직접 해보기</a></li><li class="l2"><a href="#14-용어-사전">14. 용어 사전</a></li><li class="l2"><a href="#15-요약-체크리스트">15. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

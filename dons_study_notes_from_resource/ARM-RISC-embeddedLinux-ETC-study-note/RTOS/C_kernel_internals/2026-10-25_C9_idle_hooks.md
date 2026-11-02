@@ -930,6 +930,8 @@ if( ( pxCurrentTCB->pxTopOfStack <= pxCurrentTCB->pxStack + portSTACK_LIMIT_PADD
 - 두 방식 모두 MPU 포트(`portUSING_MPU_WRAPPERS == 1`)에서는 비활성이다(소스 주석: MPU 영역이 스택을 보호하니까).
 - 값 3(`configCHECK_FOR_STACK_OVERFLOW 3`)은 일부 포트(예: RISC-V `port.c`의 `configISR_STACK_SIZE_WORDS`와 함께)에서 **ISR 스택**도 검사하는 확장이다. ARM_CM3 포트에는 없다.
 
+> 🔄 2026-11-01 보충 (F3): V11.3.2에서 값 3 경로는 RISC-V(GCC·IAR)와 PIC32 포트에만 있고, RISC-V 쪽은 그 경로에 `#warning "This path not tested, or even compiled yet."`가 붙어 있다(`portable/GCC/RISC-V/port.c` 108행). ISR 스택 문제는 hook이 아니라 assert로 알린다. Cortex-M에서 ISR 스택(MSP)을 지키는 방법은 F3 §8(v8-M MSPLIM — FreeRTOS는 MSPLIM을 설정하지 않으므로 직접 건다)을 본다.
+
 ### 5.2 예제 7 — 세 장면 × 두 방식
 
 **무엇을 확인하나**: 512 B(128 words) 스택의 `victim`이 600 B 지역 배열을 쓰는 세 장면을 방식 1·2로 각각 빌드한다. ① 배열 전체를 쓰고 **돌아온 뒤** 블록, ② 배열을 쓴 채 **그 함수 안에서** 블록, ③ 배열의 가장 낮은 주소 64 B만 써서 **카나리를 건너뛴다**. 넘친 바이트가 떨어질 곳으로 victim 스택 바로 아래에 0x11로 채운 512 B 이웃 블록을 먼저 잡아 둔다(heap_4는 낮은 주소부터 주고, 스택이 아래로 자라는 포트에서 `xTaskCreate`는 스택을 먼저, TCB를 나중에 할당하므로 이웃 블록 → victim 스택 → victim TCB 순서가 된다). `pxStack`은 A4에서 확인한 TCB word[12]에서 읽는다.

@@ -512,7 +512,7 @@ def note_page(note, prev_note, next_note, coll):
     return shell(note["title"], f"""
 <div id="bar"></div>
 <div class="top"><div class="top-in">
-  <a class="home" href="../index.html">← 노트 목록</a>
+  <a class="home" href="../index.html">← 대시보드</a>
   <span class="t">{esc(coll["title_ko"])} · {esc(note["title"])}</span>
   <button class="btn" id="readbtn">읽음 표시</button>
   <button class="btn" id="theme">◐</button>
@@ -661,7 +661,10 @@ def main():
             totals["minutes"] += nt["minutes"]
             totals["sections"] += nt["sections"]
         print(f"  {c['key']:<8} {len(c['notes'])}개 → site/{c['key']}/")
-    (OUT / "index.html").write_text(hub_page(colls, totals), encoding="utf-8")
+    # 대시보드 · 커리큘럼 지도 · 내용 둘러보기 (dash_ui.py) — 예전 허브는 site/list.html 로 보존
+    import dash_ui
+    dash_ui.build(OUT, (ROOT / "contents.md").read_text(encoding="utf-8"), COLLECTIONS, colls,
+                  inline, strip_md, hub_page(colls, totals))
     (ROOT / "index.html").write_text(
         '<!doctype html><html lang="ko"><head><meta charset="utf-8">'
         '<meta http-equiv="refresh" content="0; url=site/index.html">'

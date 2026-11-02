@@ -1,0 +1,79 @@
+===== e_numbers.py =====
+== 1. RFC 2544 line rate (frames/s), frame size incl. FCS ==
+ size B   100M fps     1G fps  1G ns/frame  1G payload Mb/s
+     64     148809    1488095          672            547.6
+    128      84459     844594         1184            743.2
+    256      45289     452898         2208            862.3
+    512      23496     234962         4256            928.6
+   1024      11973     119731         8352            963.6
+   1280       9615      96153        10400            970.8
+   1518       8127      81274        12304            975.3
+   9018       1383      13830        72304            995.8  (jumbo, not in RFC 2544)
+PASS 1G@64B = 1,488,095 fps ; 100M@1518B = 8,127 fps
+
+== 2. zero-error run length to claim BER < target at 95% (N = -ln(0.05)/BER bits) ==
+BER 1e-10  100BASE-T1             bits 2.996e+10  time      300 s
+BER 1e-10  1000BASE-T1            bits 2.996e+10  time       30 s
+BER 1e-10  CSI-2 1 lane 2.5G      bits 2.996e+10  time       12 s
+BER 1e-10  CSI-2 4 lanes x 2.5G   bits 2.996e+10  time        3 s
+BER 1e-12  100BASE-T1             bits 2.996e+12  time     8.32 h
+BER 1e-12  1000BASE-T1            bits 2.996e+12  time     2996 s
+BER 1e-12  CSI-2 1 lane 2.5G      bits 2.996e+12  time     1198 s
+BER 1e-12  CSI-2 4 lanes x 2.5G   bits 2.996e+12  time      300 s
+PASS 1e-12 @ 1 Gb/s ~= 2996 s (50 min)
+
+== 3. CSI-2 link and DDR budget [example configs; 20% blanking+protocol overhead is an assumption] ==
+1x 8MP 3840x2160 RAW12 30fps
+   payload 2.99 Gb/s, with overhead 3.58 Gb/s, DDR write (16b/px) 0.50 GB/s
+   4 lanes x 1.5 Gb/s =  6.0 Gb/s  util  59.7%  OK
+   4 lanes x 2.5 Gb/s = 10.0 Gb/s  util  35.8%  OK
+   4 lanes x 4.5 Gb/s = 18.0 Gb/s  util  19.9%  OK
+4x 3MP 1920x1536 RAW12 30fps (VC0-3 on one port)
+   payload 4.25 Gb/s, with overhead 5.10 Gb/s, DDR write (16b/px) 0.71 GB/s
+   4 lanes x 1.5 Gb/s =  6.0 Gb/s  util  84.9%  TIGHT
+   4 lanes x 2.5 Gb/s = 10.0 Gb/s  util  51.0%  OK
+   4 lanes x 4.5 Gb/s = 18.0 Gb/s  util  28.3%  OK
+4x 2MP 1920x1080 RAW10 60fps (VC0-3)
+   payload 4.98 Gb/s, with overhead 5.97 Gb/s, DDR write (16b/px) 1.00 GB/s
+   4 lanes x 1.5 Gb/s =  6.0 Gb/s  util  99.5%  TIGHT
+   4 lanes x 2.5 Gb/s = 10.0 Gb/s  util  59.7%  OK
+   4 lanes x 4.5 Gb/s = 18.0 Gb/s  util  33.2%  OK
+PASS Linux pixel_rate(750 MHz, 4 lanes, 12 bpp) = 500 Mpix/s
+   WC RAW10 width 1920 = 2400 B
+   WC RAW12 width 1920 = 2880 B
+   WC RAW12 width 3840 = 5760 B
+
+== 4. PTP / gPTP timing math ==
+asymmetry 200 ns -> measured offset 1100 ns, mean path delay 500 ns, error 100 ns (= asym/2)
+freq error   100 ppm over sync interval    125 ms -> drift   12500.0 ns between corrections
+freq error   100 ppm over sync interval   1000 ms -> drift  100000.0 ns between corrections
+freq error   0.1 ppm over sync interval    125 ms -> drift      12.5 ns between corrections
+timestamp clock 125 MHz -> 8 ns resolution; 250 MHz -> 4 ns
+rolling shutter 2160 rows @ 30 fps (+90 blank lines): line time 14.81 us, top-to-bottom 32.0 ms
+   at 15 m/s the car moves 0.48 m between first and last row
+   at 30 m/s the car moves 0.96 m between first and last row
+PASS asymmetry error = asym/2
+
+===== csi2_err_inject.py =====
+== CSI-2 header ECC sanity ==
+ecc(0x000A2B) = 0x2E  expect 0x2E  PASS
+ecc(0x000100) = 0x1A  expect 0x1A  PASS
+ecc(0x09602B) = 0x1D  expect 0x1D  PASS
+
+== header error injection on DI/WC 0x0B402C (all patterns over 30 bits) ==
+1-bit errors:    30 patterns  corrected_right=30  detected=0  MISCORRECTED=0  undetected=0
+2-bit errors:   435 patterns  corrected_right=0  detected=435  MISCORRECTED=0  undetected=0
+3-bit errors:  4060 patterns  corrected_right=0  detected=280  MISCORRECTED=3780  undetected=0
+PASS all 1-bit corrected: True   PASS all 2-bit detected: True
+3-bit: 3780/4060 = 93.1% silently MISCORRECTED -> header looks valid but VC/DT/WC is wrong
+
+== payload CRC-16 injection, 2880-byte RAW12 line, 200000 trials per class, seed 2026 ==
+1-bit         undetected     0/200000
+2-bit         undetected     0/200000
+3-bit         undetected     0/200000
+burst<=16     undetected     0/200000
+burst 17-32   undetected     5/200000
+4-bit random  undetected     2/200000
+PASS guaranteed classes (1/2/3-bit, burst<=16) all detected: True
+model cross-check vs real CRC on 200 random 3-bit errors: PASS
+note: random 4-bit / long-burst misses are possible at ~2^-16 = 1.5e-5 per bad line

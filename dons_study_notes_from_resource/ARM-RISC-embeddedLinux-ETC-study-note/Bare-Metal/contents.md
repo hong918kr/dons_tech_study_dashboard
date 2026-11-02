@@ -89,15 +89,15 @@
 | Cortex-M 프로그래머 모델 · 예외 · NVIC | C1, C4, C5 | B1, B2, B3 | — | 🔁 **주인 = RTOS B1–B3** (2026-10-25, RTOS 먼저 작성) — Bare-Metal은 링크 + bare-metal 관점만 |
 | Cortex-M 세대 · FPU · Helium | C10, C11 | B6, B7 | — | 🔁 **주인 = RTOS B6, B7** (10-25) |
 | Fault 예외 · HardFault 해독 | C8, M3 | M1 | M3 (oops는 Linux판) | |
-| MPU · TrustZone-M | C9, C12 | F4, F6 | — | RTOS는 태스크 격리 관점 |
+| MPU · TrustZone-M | C9, C12 | F4, F6 | — | 🔁 MPU 리전 · 정렬 · 속성 · v8-M base/limit(C9) **주인 = RTOS F4**, 스택 가드 리전 · 카나리(C9 · Q6 일부) **주인 = RTOS F3**, TrustZone-M 개념 · SAU/IDAU · NSC · 상태 전환(C12) **주인 = RTOS F6** (11-01); Bare-Metal은 OS 없는 1회 설정 · TF-M 없는 최소 Secure 이미지 관점만 |
 | Cortex-R | D9 | B9 | — | 🔁 **주인 = RTOS B9** (10-25) |
 | Cortex-A 예외 레벨 · 부트 체인 | D1, D2, L6 | — | C5, C6 (TF-A · 커널 시작) | Bare-Metal은 "부트 코드를 직접 쓰는" 관점 |
 | MMU · 캐시 · TLB | B3, D4, D5 | B8 | F11, H9 | 🔁 MCU 캐시 · TCM(B3, B9 일부) **주인 = RTOS B8** (10-25); MMU · TLB(D4, D5)는 Bare-Metal |
 | GIC | D6 | — | H6 | |
-| 배리어 · 메모리 순서 | B6, J5 | D8 | F5 | |
-| 원자 연산 · 링버퍼 · 크리티컬 섹션 | J2, J3, J4 | C7, D8 | F4 | Anduril SPSC 링버퍼 · 🔁 크리티컬 섹션 구현 **주인 = RTOS C7** (10-25) |
+| 배리어 · 메모리 순서 | B6, J5 | D8 | F5 | 🔁 MCU에서 배리어가 필요한 곳(J5, B6 순서 부분) **주인 = RTOS D8** (10-31); B6 메모리 타입(Normal / Device)은 Bare-Metal |
+| 원자 연산 · 링버퍼 · 크리티컬 섹션 | J2, J3, J4 | C7, D8 | F4 | Anduril SPSC 링버퍼 · 🔁 크리티컬 섹션 구현 **주인 = RTOS C7** (10-25) · 🔁 LDREX/STREX · C11 atomics · SPSC 링버퍼(J3, J4, J2 레이스 일부) **주인 = RTOS D8** (10-31) |
 | RISC-V | E1–E5 | B10 | — | Hark E3 ISA 개요 · 🔁 E1–E4 개요 **주인 = RTOS B10** (10-25); E5 startup은 Bare-Metal |
-| 툴체인 · ELF · libc | F1, F2, F5 | B11 | B1–B3 | 🔁 F5 · F6(MCU libc · 크기 최적화) **주인 = RTOS B11** (10-25) |
+| 툴체인 · ELF · libc | F1, F2, F5 | B11, F7 | B1–B3 | 🔁 F5 · F6(MCU libc · 크기 최적화) **주인 = RTOS B11** (10-25) · 재진입 · `_reent` · malloc 락 · errno(F5 일부) **주인 = RTOS F7** (11-01) |
 | 링커 스크립트 · startup | F3, F4 | B5 | — | 🔁 **주인 = RTOS B5** (10-25) |
 | 빌드 시스템 | F7 | — | B4 | |
 | volatile · 비트 연산 · FSM | G1, G4, K2 | — | — | Anduril C 문제은행 |
@@ -105,12 +105,12 @@
 | 클럭 · 리셋 · 레귤레이터 | H1–H4 | — | H3 | Linux는 clk 프레임워크 관점 |
 | 저전력 모드 | H5, P8, P9 | P1–P3 | N5, N6 | |
 | GPIO · pinctrl | I1 | — | H4 | |
-| 타이머 · ADC · PWM | I2, I6 | E5, J5 | I9 (PWM) | |
+| 타이머 · ADC · PWM | I2, I6 | E5, J5 | I9 (PWM) | 🔁 입력 캡처 · 출력 비교 · 32→64비트 시간 확장 · 타이머 트리거 ADC(I2 일부) **주인 = RTOS E5** (11-01); 프리스케일러 · ARR · PWM 모드 · 엔코더 · 데드타임 레지스터 설정은 Bare-Metal |
 | UART · SPI · I2C | I3, I4, I5 | J3, J4 | H5, H7, H8 | Bare-Metal은 레지스터 수준, RTOS는 스레드 안전 패턴 |
-| DMA | I8 | E6 | H9 | |
-| 내부 플래시 · 워치독 | I9, I10 | J8, E8 | I9 (watchdog) | |
+| DMA | I8 | E6 | H9 | 🔁 원형 · 더블 버퍼 사용법, half / full 완료 → 태스크 통지, 캐시 정리(I8 일부) **주인 = RTOS E6** (11-01); DMAMUX 요청 매핑 · linked-list 디스크립터 · M2M · 우선순위 · 에러 레지스터는 Bare-Metal |
+| 내부 플래시 · 워치독 | I9, I10 | J8, E8 | I9 (watchdog) | 🔁 워치독 전략(IWDG / WWDG 개념 · 윈도 · heartbeat 감시 · 리프레시 위치 · 디버그 정지)과 리셋 원인 기록(H3 일부) **주인 = RTOS E8** (11-01); IWDG / WWDG 레지스터 순서 · 리셋 소스 · 도메인은 Bare-Metal |
 | CAN · USB · 이더넷 | I11, I12, I13 | J6, K4, K1 | I10, H12, I6 | |
-| 인터럽트 지연 · 우선순위 | J7, J8 | E2, E3 | N3 | |
+| 인터럽트 지연 · 우선순위 | J1, J7, J8, M7 | E2, E3, E4 | N3 | 🔁 J8 우선순위 · 중첩 **주인 = RTOS E2**, J7 지연 · 지터 측정 + M7 측정 기법 **주인 = RTOS E3**, J1 ISR 설계 원칙 **주인 = RTOS E4** (11-01) |
 | 실행 모델 (super-loop → 협력형) | A2, K1, K4, K5 | A2, C11 | — | 🔁 A2 · K1 · K4는 RTOS A2(10-25 작성)가 주인, K5 협력형 스케줄러는 RTOS C11(10-25) |
 | bare-metal vs RTOS vs Linux | A4 | A7 | N4 | 🔁 **주인 = RTOS A7** (10-25 작성) |
 | 부트로더 · OTA · secure boot | L1–L7 | L1–L4, L6 | C2–C5, L4, L5 | |
@@ -118,7 +118,7 @@
 | 버그 패턴 사례집 | M10 | M7 | — | |
 | 데이터시트 · 회로도 · bring-up | N1, N2, N8, O3 | — | P1, P3, P4 | |
 | 가속기 제어 | O8 | — | O4 | Linux 드라이버 쪽은 EL |
-| 메모리 배치 · TCM | P2 | F8 | — | |
+| 메모리 배치 · TCM | P2, G6, Q7 | F8 | — | 🔁 TCM/SRAM 배치 · ramfunc · section attribute · noinit · ECC RAM 초기화(P2, G6 섹션 부분, Q7 초기화 부분) **주인 = RTOS F8** (11-01); 스크러빙 · SEU 처리(Q7)와 const · 초기화 순서(G6)는 Bare-Metal |
 | 제어 루프 · FOC | P7 | Q3, Q4 | — | |
 | 단위 테스트 · 시뮬레이션 · HIL | Q1, Q3, Q4 | M8, M9 | P6 | |
 | MISRA · 안전 메커니즘 | Q5, Q6 | O3, O5 | — | |

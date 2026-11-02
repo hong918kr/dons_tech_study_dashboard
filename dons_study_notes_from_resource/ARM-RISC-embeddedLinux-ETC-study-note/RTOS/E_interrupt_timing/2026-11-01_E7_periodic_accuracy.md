@@ -1,0 +1,1923 @@
+# E7. 주기 실행의 정확도 — 제어 루프는 정말 1 ms마다 도는가
+
+> **이 노트를 다 읽으면**: 주기 태스크의 정확도를 시작 지터 · 출력 지터 · 위상 오차 · 샘플 나이 · 입력→출력 지연으로 나눠 수치로 말할 수 있다 · tick 구동, 소프트웨어 타이머, HW 타이머 ISR → 태스크, HW 타이머 ISR 직접 계산, 센서 DRDY 구동 다섯 방식을 같은 부하에서 잰 분포로 비교하고 고를 수 있다 · 여러 루프(1 kHz / 250 Hz / 50 Hz)의 위상을 배치하고, 루프를 센서 샘플 시각에 맞추고, overrun을 감지해 skip / catch-up 정책을 정할 수 있다 · 지터가 왜 제어 품질을 깎는지 시뮬레이션 숫자로 설명할 수 있다
+> **왜 필요한가**: "드론 rate loop가 가끔 늦게 돈다", "1 kHz라더니 실제로는 999.x Hz", "센서는 1 kHz인데 같은 샘플을 두 번 쓴다" 같은 현장 버그와, "How do you guarantee your control loop timing?", "Tick-driven or timer-driven?" 같은 면접 질문이 전부 이 주제다.
+> **Don 기준 난이도**: 타이머 인터럽트로 주기 작업을 돌리고 scope로 지터를 재는 일은 SSD·RF bring-up에서 해 봤다 / RTOS 위에서 지터가 어디서 오는지(BASEPRI 크리티컬 섹션, 스케줄러 잠금, Zephyr +1 tick), 구동 방식별 실측 차이, 센서 시계와의 위상(beat), overrun 처리 API의 정확한 의미, 지터 → 제어 성능 연결은 새로 배운다
+> **선행 노트**: A1(§3 latency · jitter 정의, §6 방해꾼 실험), C5(§1 tick 해상도, §5 `vTaskDelay` / `xTaskDelayUntil` / `xTaskPeriodicDelay`와 drift — 이 노트는 drift 실험을 다시 하지 않는다), C6(tickless 시간 손실), C7(크리티컬 섹션 두 종류), D6(소프트웨어 타이머 정확도), EL N2 · N3(Linux 주기 스레드 지터). 함께 읽을 노트: E2(우선순위 배치), E3(인터럽트 지연 분해), E5(HW 타이머 캡처 · 비교 · 64비트 시간), N1 · N3(주기 태스크 수학 · RTA), Q3(비행 제어 루프)
+
+---
+
+## 0. 큰 그림 — 이게 왜 필요한가
+
+Don이 SSD 펌웨어에서 주기 작업을 만들 때를 떠올려 보자. 1 ms 타이머 ISR이 플래그를 세우고, 메인 루프가 그 플래그를 보고 온도 감시나 GC 스케줄링을 한다. 이 일은 1 ms에서 100 µs쯤 늦어도 아무도 모른다. 하지만 **드론의 rate loop**는 다르다. 자이로를 읽고, PID를 계산하고, 모터 4개의 PWM을 바꾸는 이 루프는 "1 kHz로 돈다"는 가정 위에 이득(gain)이 설계되어 있다. 루프가 들쭉날쭉하면 제어기가 믿는 시간과 실제 시간이 어긋나고, 그 어긋남은 위상 지연과 잡음이 되어 기체를 떨게 만든다.
+
+"주기 실행이 정확하다"는 말은 사실 여러 숫자의 묶음이다. 한 주기를 시간축 위에 펼쳐 보면 이렇다.
+
+```svg
+<svg viewBox="0 0 680 270" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<line x1="30.0" y1="160.0" x2="660.0" y2="160.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah1)"/>
+<text x="660.0" y="178.0" font-size="12" text-anchor="end">시간</text>
+<rect x="205.0" y="126.0" width="140.0" height="30.0" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/>
+<text x="275.0" y="145.6" font-size="13" text-anchor="middle">계산 (제어 법칙)</text>
+<line x1="70.0" y1="110.0" x2="70.0" y2="166.0" stroke="#3f9a6b" stroke-width="1.6"/>
+<line x1="150.0" y1="110.0" x2="150.0" y2="166.0" stroke="#e08a3c" stroke-width="1.6"/>
+<line x1="610.0" y1="110.0" x2="610.0" y2="166.0" stroke="#e08a3c" stroke-width="1.6"/>
+<text x="70.0" y="104.0" font-size="12" text-anchor="middle">센서 샘플</text>
+<text x="158.0" y="104.0" font-size="12" text-anchor="middle">사건 k (릴리스)</text>
+<text x="610.0" y="104.0" font-size="12" text-anchor="middle">사건 k+1</text>
+<line x1="345.0" y1="120.0" x2="345.0" y2="166.0" stroke="#d0564a" stroke-width="2"/>
+<text x="353.0" y="116.0" font-size="12" text-anchor="start">출력 (PWM 갱신)</text>
+<line x1="70.0" y1="40.0" x2="345.0" y2="40.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah1)" marker-start="url(#ah1)"/>
+<text x="207.5" y="32.0" font-size="13" text-anchor="middle">입력→출력 지연 (sample-to-actuate)</text>
+<line x1="70.0" y1="186.0" x2="150.0" y2="186.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah1)" marker-start="url(#ah1)"/>
+<text x="110.0" y="204.0" font-size="12" text-anchor="middle">샘플 나이</text>
+<line x1="150.0" y1="214.0" x2="205.0" y2="214.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah1)" marker-start="url(#ah1)"/>
+<text x="197.5" y="232.0" font-size="12" text-anchor="middle">시작 지연</text>
+<line x1="150.0" y1="252.0" x2="610.0" y2="252.0" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5,3" marker-end="url(#ah1)" marker-start="url(#ah1)"/>
+<text x="380.0" y="247.0" font-size="12" text-anchor="middle">주기 T (격자)</text>
+<text x="400.0" y="44.0" font-size="13" text-anchor="start">시작 지터 = 시작 지연의 흔들림</text>
+<text x="400.0" y="64.0" font-size="13" text-anchor="start">출력 지터 = 시작 지연 + 계산의 흔들림</text>
+<text x="400.0" y="84.0" font-size="13" text-anchor="start">샘플 나이는 센서 시계와의 위상</text>
+</svg>
+```
+그림 1 — 제어 루프 한 주기의 해부. 센서가 샘플을 찍고, 타이머 사건(릴리스)이 오고, 조금 늦게 계산이 시작되고, 계산이 끝나면 출력(PWM)이 갱신된다. 이 노트는 각 구간의 길이와 그 흔들림을 잰다.
+
+- **시작 지연(release → start)**: 사건이 왔는데 제어 코드가 실제로 시작하기까지. 그 흔들림이 **시작 지터**(release jitter라고도 부른다).
+- **출력 지연**: 사건부터 출력 레지스터에 값이 써질 때까지. 시작 지연 + 계산 시간이므로 흔들림이 더 크다(**출력 지터**, completion jitter).
+- **샘플 나이(sample age)**: 제어 코드가 쓰는 센서 값이 몇 µs 전에 찍힌 것인가. 센서 시계와 MCU 시계가 다르면 이 값이 천천히 미끄러진다(§4).
+- **입력→출력 지연(sample-to-actuate)**: 센서가 본 순간부터 모터가 반응하기 시작하는 순간까지. 제어 이론에서 "루프 안의 지연"이 바로 이것이다(§8).
+- **위상 오차(drift)**: 주기 격자(0, T, 2T, …)에서 얼마나 밀렸나. C5 §5의 주제다(`vTaskDelay`는 밀리고, `xTaskDelayUntil`은 안 밀린다).
+
+이 노트의 질문과 직접 돌려 보는 것:
+
+| 절 | 질문 | 직접 돌려 보는 것 |
+|---|---|---|
+| §1 | 무엇을 재야 "정확하다"고 말할 수 있나 | 정의 표 |
+| §2 | 지터는 어디서 오나 — 시간 격자 쪽 | 예제 1(400 Hz를 1 kHz tick 위에), 예제 2(Zephyr `k_timer` 주기의 tick 반올림), 예제 3(Zephyr 주기 루프 다섯 가지 작성법) |
+| §3 | 다섯 구동 방식을 같은 부하에서 재면 | 예제 4(3000주기 × 5방식 + 부하 성분 분해), 예제 5(꼬리 확률 표) |
+| §4 | 루프를 센서 샘플에 맞추려면 | 예제 6(샘플 나이: 타이머 구동 / DRDY 구동 / 위상 추종), 예제 7(QEMU 타이머 RELOAD 동작 확인) |
+| §5 | 시작 지터와 출력 지터는 어떻게 다른가 | 예제 8(계산이 들쭉날쭉할 때 출력 래치) |
+| §6 | 루프 여러 개의 위상은 | 예제 9(1 kHz / 250 Hz / 50 Hz 위상 배치), 예제 10(조화 vs 비조화 주기 충돌 계산) |
+| §7 | 주기를 놓치면 | 예제 11(overrun 감지, skip vs catch-up, pending 비트 하나의 함정) |
+| §8 | 지터가 제어에 왜 나쁜가 | 예제 12(PD 제어 시뮬레이션) |
+| §0 | 측정 도구 자체는 믿을 만한가 | 예제 0(바쁜 루프 보정과 objdump) |
+
+### 실습 환경 한 줄
+
+QEMU `mps2-an385`(Cortex-M3 @ 25 MHz) + FreeRTOS V11.3.2(ARM_CM3 포트, 랩 템플릿 `FreeRTOSConfig.h` 그대로: 1 kHz tick, `configMAX_SYSCALL_INTERRUPT_PRIORITY` = 0x20, 타이머 데몬 prio 7) / Zephyr v4.4.2(같은 보드, tickless). 모든 타이밍은 `ICOUNT=1`(명령 1개 = 32 ns 가상 시간, 실행할 때마다 같은 숫자). **QEMU icount 기준 수치이고 실제 칩과 절대값은 다르다** — 캐시, 플래시 wait state, 예외 스태킹 12사이클, 버스 경합을 QEMU가 모델링하지 않는다. 그래서 이 노트는 절대값보다 **방식 사이의 차이와 원인별 기여**를 읽는다. icount는 결정적이므로, 지터가 생기도록 배경 부하를 **의사난수 길이의 ISR · 크리티컬 섹션 · 스케줄러 잠금**으로 직접 만들었다(§3.2). 시각은 FPGAIO COUNTER(0x40028018, 25 MHz = 40 ns)로 찍고, "사건 이후 경과"는 그 사건을 만든 하드웨어 카운터(SysTick `LOAD - VAL`, CMSDK TIMER0 `RELOAD - VALUE`)를 읽어 사이클 단위로 잰다.
+
+### 예제 0 — 측정 도구 먼저: CPU 시간을 쓰는 바쁜 루프
+
+무엇을 확인하나: 이 노트의 "계산 50 µs" 같은 일은 두 종류의 바쁜 대기로 만든다. `spin_cyc(c)`는 **벽시계** 기준(카운터가 c만큼 갈 때까지)이라 중간에 선점당해도 늘어나지 않는다. 제어 법칙처럼 "CPU를 이만큼 써야 끝나는 일"은 선점당하면 늘어나야 하므로 명령 수로 시간을 만드는 `burn_us()`를 따로 만들고 objdump로 루프 한 바퀴의 명령 수를 확인했다(처음 짠 위상 실험이 `spin_cyc`를 써서 선점 효과가 사라지는 바람에 찾은 함정이다).
+
+```c
+/* E7 예제 0: burn_us() 보정 확인 — 1000 us를 요청하면 FPGA 카운터로 몇 us인가 */
+#include "board.h"
+#include "e7.h"
+int main(void)
+{
+    uint32_t t0 = CYC(); burn_us(1000); uint32_t t1 = CYC();
+    board_printf_raw("burn_us(1000) = %u us\n", (t1 - t0) / 25u);
+    board_exit(0);
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/E7/t_burn.c OUT=/var/tmp/rtos/E7/t_burn && ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E7/t_burn/app.elf && arm-none-eabi-objdump -d /var/tmp/rtos/E7/t_burn/app.elf | grep -A16 "<main>:"'
+```
+
+```text
+burn_us(1000) = 1000 us
+[board_exit] code=0
+000000c0 <main>:
+      c0:	2300      	movs	r3, #0
+      c2:	f241 4257 	movw	r2, #5207	@ 0x1457
+      c6:	b510      	push	{r4, lr}
+      c8:	490c      	ldr	r1, [pc, #48]	@ (fc <main+0x3c>)
+      ca:	b082      	sub	sp, #8
+      cc:	698c      	ldr	r4, [r1, #24]
+      ce:	9301      	str	r3, [sp, #4]
+      d0:	9b01      	ldr	r3, [sp, #4]
+      d2:	4293      	cmp	r3, r2
+      d4:	d805      	bhi.n	e2 <main+0x22>
+      d6:	9b01      	ldr	r3, [sp, #4]
+      d8:	3301      	adds	r3, #1
+      da:	9301      	str	r3, [sp, #4]
+      dc:	9b01      	ldr	r3, [sp, #4]
+      de:	4293      	cmp	r3, r2
+      e0:	d9f9      	bls.n	d6 <main+0x16>
+```
+
+출력에서 볼 것: `d6`~`e0`의 6명령(ldr, adds, str, ldr, cmp, bls)이 한 바퀴다. icount에서 6 × 32 ns = 192 ns이므로 1 µs = 125/24 바퀴, 1000 µs 요청이 정확히 1000 µs로 나온다. `volatile` 카운터라서 GCC가 루프를 지우지 못한다. 실칩에서는 같은 루프가 flash wait state와 파이프라인 때문에 다른 시간이 걸리므로 이 보정값은 QEMU 전용이다.
+
+소스 파일 이름의 번호(ex7_latch.c 등)는 작업 순서이고, 각 파일 첫 줄의 "예제 N"이 이 노트의 예제 번호다. 공통 도우미 헤더(모든 FreeRTOS 예제가 include):
+
+```c
+/* e7.h — E7 측정 도우미 (QEMU mps2-an385, FPGAIO COUNTER 25 MHz = 40 ns) */
+#ifndef E7_H
+#define E7_H
+#include "board.h"
+#define CYC()       REG32(0x40028018u)                 /* 리셋부터 25 MHz로 증가 */
+#define SYST_LOAD   REG32(0xE000E014u)                 /* SysTick: tick 이후 경과 = LOAD - VAL */
+#define SYST_VAL    REG32(0xE000E018u)
+#define DT1(off)    REG32(0x40002000u + (off))         /* CMSDK dual timer, timer 1 (IRQ 10) */
+static uint32_t e7_seed = 12345u;
+static inline uint32_t rnd(uint32_t n) { e7_seed = e7_seed * 1103515245u + 12345u; return (e7_seed >> 8) % n; }
+static inline void spin_cyc(uint32_t c) { uint32_t t0 = CYC(); while (CYC() - t0 < c) { } }
+/* CPU 시간 기준 일: 선점당하면 그만큼 늘어난다 (spin_cyc은 벽시계 기준이라 안 늘어난다).
+ * 한 바퀴 = 6명령 = 192 ns (ICOUNT=1, objdump로 확인) → 1 us = 125/24 바퀴 */
+static inline void burn_us(uint32_t us) { for (volatile uint32_t i = 0; i < us * 125u / 24u; i++) { } }
+static inline void nvic_on(int irq, uint8_t prio) { NVIC_IPR(irq) = prio; NVIC_ISER0 = 1u << irq; }
+/* 히스토그램: 1 us 칸 0..NB-2, 마지막 칸 = 넘침. off는 음수 값을 담기 위한 오프셋 */
+#define NB 600
+typedef struct { uint32_t n, mn, mx; uint64_t sum; int32_t off; uint16_t h[NB]; } hist_t;
+static inline void hrec(hist_t *s, int32_t v)
+{
+    int32_t b = v + s->off; if (b < 0) b = 0; if (b > NB - 1) b = NB - 1;
+    s->h[b]++; s->n++; s->sum += (uint32_t)(v + 100000);
+    if (s->n == 1 || v < (int32_t)s->mn) s->mn = (uint32_t)v;
+    if (s->n == 1 || v > (int32_t)s->mx) s->mx = (uint32_t)v;
+}
+static inline int32_t hpct(const hist_t *s, uint32_t permil)    /* 백분위 (permil/1000) */
+{
+    uint32_t want = (s->n * permil + 999u) / 1000u, acc = 0;
+    for (int b = 0; b < NB; b++) { acc += s->h[b]; if (acc >= want) return b - s->off; }
+    return NB - 1 - s->off;
+}
+static inline void hprint(const char *tag, const hist_t *s, int bins)
+{
+    board_printf_raw("%s n=%u min=%d p50=%d p99=%d p99.9=%d max=%d avg=%d\n", tag, s->n, (int32_t)s->mn,
+                     hpct(s, 500), hpct(s, 990), hpct(s, 999), (int32_t)s->mx,
+                     (int32_t)(s->sum / s->n) - 100000);
+    if (!bins) return;
+    board_printf_raw("  bins");
+    for (int b = 0; b < NB; b++) if (s->h[b]) board_printf_raw(" %d:%u", b - s->off, s->h[b]);
+    board_printf_raw("\n");
+}
+#endif
+```
+
+FreeRTOS 빌드·실행 스크립트(ICOUNT=1, warning/error 줄만 걸러 보여 준다 — 이 노트의 모든 C 예제는 `-Wall -Wextra` 경고 0개):
+
+```sh
+#!/bin/bash
+# run.sh <src> <outname> [extra cflags...]  — E7 FreeRTOS 빌드+실행 (ICOUNT=1)
+S=/Users/donh/.rtos_scratch/E7; src=$1; out=$2; shift 2
+mkdir -p /var/tmp/rtos/E7
+make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS="$S/$src" OUT=/var/tmp/rtos/E7/$out EXTRA_CFLAGS="$*" 2>&1 | grep -iE "warn|error" 
+ICOUNT=1 timeout ${TMO:-90} /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E7/$out/app.elf ${TMO:-90}
+```
+
+---
+
+## 1. 무엇을 재야 "정확하다"고 말할 수 있나
+
+### 1.1 직관 — 기차 시간표
+
+주기 루프는 기차 시간표와 같다. 시간표(격자)는 매시 정각인데, 기차가 실제로 출발하는 시각은 매번 조금씩 다르다(시작 지터). 도착 시각은 출발 지연 + 운행 시간이라 더 흔들린다(출력 지터). 기차가 하루에 몇 분씩 늦게 출발하는 게 쌓이면 시간표 자체가 밀린다(drift). 승객(센서 샘플)이 역에 도착하는 시각이 시간표와 무관하면, 어떤 승객은 오래 기다리고 어떤 승객은 바로 탄다(샘플 나이).
+
+### 1.2 정의 표
+
+| 숫자 | 정의 | 이 노트에서 재는 법 | 제어에 주는 영향 |
+|---|---|---|---|
+| 시작 지연 · 시작 지터 | 사건 k → 제어 코드 시작. 지터 = 그 분포의 폭(최대 − 최소, 또는 p99.9 − 최소) | 시작 시점에 사건 카운터의 경과값을 읽음 (예제 4) | 샘플 시각이 흔들림 → 미분항 잡음, 잘못된 dt |
+| 주기 지터 | 연속한 두 시작의 간격 − T | 시작 시각 차이 (예제 4 `per_dev_us`) | 시작 지터의 두 배까지 커질 수 있다 (늦게 시작 → 다음 간격 짧음) |
+| 위상 오차 (drift) | k번째 시작 − (시작점 + kT) | C5 §5 예제 10 | 누적되면 주파수 자체가 틀림 |
+| 출력 지연 · 출력 지터 | 사건 k → 출력 레지스터 쓰기 | 예제 8 | 실제 루프 지연 = 위상 여유를 깎음 |
+| 샘플 나이 | 제어가 쓰는 센서 값의 나이 | DRDY ISR이 찍은 시각과의 차 (예제 6) | 센서 시계와 어긋나면 0~T 사이를 톱니처럼 오감 |
+| 입력→출력 지연 | 샘플 시각 → 출력 시각 = 샘플 나이 + 출력 지연 | 예제 6 + 예제 8 | 제어 루프 안의 순수 지연 (§8) |
+
+A1 §3이 정의한 latency / jitter를 주기 루프에 맞게 나눈 것이다. 인터럽트 하나의 지연을 HW 진입 · 마스킹 · 핸들러 · 스케줄링으로 쪼개는 일은 E3의 주제이고, 이 노트는 그 결과가 **주기 루프의 품질**로 어떻게 나타나는지에 집중한다.
+
+### 1.3 함정 — 평균 주기만 보면 안 된다
+
+"1000주기에 1.000초 걸렸으니 정확하다"는 말은 drift가 없다는 뜻일 뿐이다. 예제 1의 (c)처럼 평균은 정확히 2500 µs인데 간격이 2000과 3000 사이를 오가는 루프도 있다. 반대로 예제 3의 B처럼 간격은 거의 일정한데 주파수가 0.1% 틀린 루프도 있다. 둘은 다른 병이고 처방도 다르다. 항상 **평균 주기, 간격의 최소·최대, 지연의 꼬리(p99.9, 최대)**를 함께 본다.
+
+---
+
+## 2. 지터는 어디서 오나 — 원인 지도와 시간 격자 쪽 원인
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="10.0" y="14.0" width="210.0" height="36.0" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/>
+<text x="115.0" y="36.5" font-size="13" text-anchor="middle">시간 격자에서</text>
+<rect x="10.0" y="62.0" width="210.0" height="36.0" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/>
+<text x="115.0" y="84.2" font-size="12" text-anchor="middle">tick 양자화 (T ≠ tick 배수)</text>
+<rect x="10.0" y="106.0" width="210.0" height="36.0" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/>
+<text x="115.0" y="128.2" font-size="12" text-anchor="middle">상대 지연 (vTaskDelay 등)</text>
+<rect x="10.0" y="150.0" width="210.0" height="36.0" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/>
+<text x="115.0" y="172.2" font-size="12" text-anchor="middle">Zephyr +1 tick (상대 타임아웃)</text>
+<rect x="10.0" y="194.0" width="210.0" height="36.0" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/>
+<text x="115.0" y="216.2" font-size="12" text-anchor="middle">tickless 재설정 손실</text>
+<line x1="115.0" y1="230.0" x2="340.0" y2="262.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+<rect x="235.0" y="14.0" width="210.0" height="36.0" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/>
+<text x="340.0" y="36.5" font-size="13" text-anchor="middle">다른 실행 주체에서</text>
+<rect x="235.0" y="62.0" width="210.0" height="36.0" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/>
+<text x="340.0" y="84.2" font-size="12" text-anchor="middle">높은 우선순위 태스크의 선점</text>
+<rect x="235.0" y="106.0" width="210.0" height="36.0" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/>
+<text x="340.0" y="128.2" font-size="12" text-anchor="middle">ISR (kernel-aware 우선순위)</text>
+<rect x="235.0" y="150.0" width="210.0" height="36.0" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/>
+<text x="340.0" y="172.2" font-size="12" text-anchor="middle">크리티컬 섹션 (BASEPRI)</text>
+<rect x="235.0" y="194.0" width="210.0" height="36.0" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/>
+<text x="340.0" y="216.2" font-size="12" text-anchor="middle">스케줄러 잠금 (SuspendAll)</text>
+<line x1="340.0" y1="230.0" x2="340.0" y2="262.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+<rect x="460.0" y="14.0" width="210.0" height="36.0" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b" stroke-width="1.2"/>
+<text x="565.0" y="36.5" font-size="13" text-anchor="middle">루프 자신에서</text>
+<rect x="460.0" y="62.0" width="210.0" height="36.0" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b" stroke-width="1.2"/>
+<text x="565.0" y="84.2" font-size="12" text-anchor="middle">계산 시간 변동 (분기, 데이터)</text>
+<rect x="460.0" y="106.0" width="210.0" height="36.0" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b" stroke-width="1.2"/>
+<text x="565.0" y="128.2" font-size="12" text-anchor="middle">캐시 miss, flash wait (실칩)</text>
+<rect x="460.0" y="150.0" width="210.0" height="36.0" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b" stroke-width="1.2"/>
+<text x="565.0" y="172.2" font-size="12" text-anchor="middle">버스 경합, DMA (실칩)</text>
+<rect x="460.0" y="194.0" width="210.0" height="36.0" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b" stroke-width="1.2"/>
+<text x="565.0" y="216.2" font-size="12" text-anchor="middle">overrun 뒤 catch-up</text>
+<line x1="565.0" y1="230.0" x2="340.0" y2="262.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah2)"/>
+<rect x="130.0" y="264.0" width="420.0" height="54.0" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-width="1.2"/>
+<text x="340.0" y="287.1" font-size="13" text-anchor="middle">결과: 시작 지터 · 출력 지터 · 샘플 나이 변동</text>
+<text x="340.0" y="304.1" font-size="13" text-anchor="middle">→ 제어기의 위상 지연과 잡음 (§7)</text>
+</svg>
+```
+그림 2 — 주기 루프 지터의 원인 지도. 시간 격자(tick)에서 오는 것(파랑), 다른 실행 주체(태스크 · ISR · 잠금)에서 오는 것(주황), 루프 자신에서 오는 것(초록)으로 나눈다. 캐시 · flash wait · 버스 경합은 실칩에서만 보이고 QEMU에서는 재현되지 않는다.
+
+| 원인 | 이 노트에서 잰 크기 (QEMU icount) | 어디서 | 고치는 법 |
+|---|---|---|---|
+| tick 양자화 | 2.5 ms 요청 → 2 ms 또는 3 ms, 번갈아 쓰면 ±500 µs | 예제 1, 2 | tick rate를 주기의 약수로, 또는 HW 타이머 |
+| 상대 지연 + Zephyr +1 tick | 2 ms 루프가 3 ms(333 Hz)로 | 예제 3 | 절대 시각(`K_TIMEOUT_ABS_TICKS`, `xTaskDelayUntil`) 또는 `k_timer` |
+| tickless 재설정 손실 | 주기당 약 2 µs 느려짐 | 예제 3 B | 장기 시각은 HW 카운터로 (C6 §5) |
+| 높은 우선순위 태스크 | 그 태스크의 실행 시간 전부 | A1 §6 | 제어 태스크를 최고 우선순위로 (E2) |
+| ISR (kernel-aware) | 최대 68 µs (60 µs ISR) | 예제 4 분해 | ISR을 짧게, 제어 ISR을 더 높게 |
+| 크리티컬 섹션 (BASEPRI) | 최대 46 µs (40 µs 구간) | 예제 4 분해 | 구간을 짧게, 또는 제어를 BASEPRI 밖으로 |
+| 스케줄러 잠금 | 최대 105 µs (100 µs 구간) | 예제 4 분해 | `vTaskSuspendAll` 구간 줄이기 (heap_4 malloc도 잠근다) |
+| 계산 시간 변동 | 출력 지연 30~503 µs | 예제 8 | 출력 래치 (하드웨어 preload) |
+| 캐시 · flash wait · 버스 | QEMU는 못 보여 준다 | — | TCM에 코드 · 데이터, 캐시 잠금 (B8) |
+
+### 2.1 tick 양자화 — 주기가 tick의 정수배가 아닐 때
+
+tick 위에서 도는 주기 태스크의 주기는 **tick의 정수배만** 가능하다. 1 kHz tick에서 400 Hz(2.5 ms)는 만들 수 없다. 고를 수 있는 것은 셋이다: 2 tick(500 Hz, 주파수가 틀림), 3 tick(333 Hz, 주파수가 틀림), 2와 3을 번갈아(평균은 맞지만 간격이 ±500 µs 흔들림). 아니면 tick rate를 바꾼다.
+
+### 2.2 예제 1 — 400 Hz 루프를 1 kHz tick 위에 (FreeRTOS)
+
+무엇을 확인하나: `xTaskDelayUntil`로 400주기를 돌려 (a) 2 tick, (b) 3 tick, (c) Bresenham식으로 2와 3을 번갈아, (d) tick을 2 kHz로 올리고 5 tick일 때의 간격 최소·최대와 평균 주파수를 잰다. 매 주기 0.4~0.9 ms 일을 한다.
+
+```c
+/* E7 예제 1: 400 Hz(2.5 ms) 루프를 tick 위에 만들면 — 주기가 tick의 정수배가 아닐 때 고를 수 있는 것들.
+ * (a) T=2 tick  (b) T=3 tick  (c) 2,3,2,3 번갈아(누적 2.5 tick)  — 각 400주기, 시작 간격(us)과 평균 주파수 */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "e7.h"
+#define N 400
+static void run(const char *name, int mode)
+{
+    TickType_t last = xTaskGetTickCount();
+    uint32_t prev = 0, mn = ~0u, mx = 0, t0 = 0, acc2 = 0;       /* acc2 = 반 tick 단위 누적 */
+    for (int k = 0; k <= N; k++) {
+        TickType_t inc;
+        if (mode == 0) inc = 2;
+        else if (mode == 1) inc = 3;
+        else if (mode == 2) { acc2 += 5; inc = acc2 / 2; acc2 %= 2; }   /* 2.5 tick = 5 반-tick */
+        else inc = 5;                                                /* 2 kHz tick 빌드: 5 tick = 2.5 ms */
+        xTaskDelayUntil(&last, inc);
+        uint32_t now = CYC();
+        if (k == 0) t0 = now;
+        else { uint32_t d = (now - prev) / 25u; if (d < mn) mn = d; if (d > mx) mx = d; }
+        prev = now;
+        spin_cyc(10000u + rnd(12500u));                              /* 0.4~0.9 ms 일 */
+    }
+    uint32_t span_us = (prev - t0) / 25u;
+    board_printf_raw("%s: interval min=%u max=%u us  mean=%u.%u us  rate=%u.%u Hz\n", name, mn, mx,
+                     span_us / N, (span_us % N) * 10u / N, 400000000u / span_us,
+                     (uint32_t)((4000000000ull / span_us) % 10u));
+}
+static void task(void *p)
+{
+    (void)p;
+    board_printf_raw("configTICK_RATE_HZ=%u, want 400 Hz = 2500 us\n", (unsigned)configTICK_RATE_HZ);
+    if (configTICK_RATE_HZ == 1000) {
+        run("(a) T=2 tick", 0);
+        run("(b) T=3 tick", 1);
+        run("(c) 2,3,2,3.. (Bresenham)", 2);
+    } else run("(d) 2 kHz tick, T=5 tick", 3);
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(task, "t", 512, NULL, 3, NULL);
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E7; $S/run.sh ex1_quant.c ex1a; $S/run.sh ex1_quant.c ex1b -DconfigTICK_RATE_HZ=2000'
+```
+
+```text
+configTICK_RATE_HZ=1000, want 400 Hz = 2500 us
+(a) T=2 tick: interval min=1999 max=2000 us  mean=1999.9 us  rate=500.0 Hz
+(b) T=3 tick: interval min=2999 max=3000 us  mean=2999.9 us  rate=333.3 Hz
+(c) 2,3,2,3.. (Bresenham): interval min=2000 max=3000 us  mean=2500.0 us  rate=400.0 Hz
+[board_exit] code=0
+configTICK_RATE_HZ=2000, want 400 Hz = 2500 us
+(d) 2 kHz tick, T=5 tick: interval min=2500 max=2500 us  mean=2500.0 us  rate=400.0 Hz
+[board_exit] code=0
+```
+
+출력에서 볼 것:
+
+- (a)·(b)는 간격이 일정하지만 **주파수가 틀렸다**(500 Hz, 333.3 Hz). 이득을 400 Hz 기준으로 설계했다면 제어기가 믿는 dt가 20% 또는 33% 틀린 것이다.
+- (c)는 평균이 정확히 2500.0 µs(400.0 Hz)지만 간격이 **2000과 3000을 오간다** — 주기 지터 ±500 µs를 일부러 만든 셈이다. 평균만 보는 테스트는 이걸 통과시킨다(§1.3).
+- (d) tick을 2 kHz로 올리면 정확히 2500 µs. 대가는 tick 인터럽트가 두 배로 잦아지는 것이다(tick 한 번의 비용은 C5 §2: 이 랩에서 약 1.5 µs + 깨우는 태스크 수에 비례).
+- 일(0.4~0.9 ms)의 길이가 간격에 전혀 나타나지 않는다. `xTaskDelayUntil`은 절대 격자라서 일의 길이가 다음 시작에 더해지지 않는다(C5 §5).
+
+### 2.3 예제 2 — Zephyr `k_timer` 주기는 tick으로 **올림**된다
+
+Zephyr는 시간 매크로를 tick으로 바꿀 때 **올림**한다. `K_USEC(t)`는 `Z_TIMEOUT_US(t)` = `k_us_to_ticks_ceil64(t)`(`include/zephyr/sys/clock.h` 130행), `K_MSEC`도 `ceil`이다. FreeRTOS `pdMS_TO_TICKS`가 **내림**인 것(C5 §1.4)과 반대 방향이다. 그리고 QEMU 보드의 기본 tick은 **100 Hz**다(`kernel/Kconfig` 828행: `default 100 if QEMU_TARGET || SOC_POSIX`, 실제 칩은 tickless면 `default 10000`).
+
+무엇을 확인하나: 주기 `K_USEC(2500)`, `K_MSEC(1)`, `K_USEC(125)`인 `k_timer`를 `CONFIG_SYS_CLOCK_TICKS_PER_SEC` = 100 / 1000 / 10000으로 빌드해 200주기의 실제 간격을 잰다. 앱 폴더는 `prj.conf`에 `CONFIG_BOOT_BANNER=n` 한 줄, `CMakeLists.txt`는 표준 4줄이다.
+
+```c
+/* E7 예제 2: k_timer 주기 K_USEC(2500) · K_MSEC(1) 이 tick rate에 따라 실제로 몇 us가 되나 (200주기 평균) */
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+#define CYC() (*(volatile uint32_t *)0x40028018u)
+K_TIMER_DEFINE(tm, NULL, NULL);
+static void measure(const char *name, k_timeout_t per)
+{
+	k_timer_start(&tm, per, per);
+	k_timer_status_sync(&tm);
+	uint32_t t0 = CYC(), prev = t0, mn = ~0u, mx = 0;
+	for (int i = 0; i < 200; i++) {
+		k_timer_status_sync(&tm);
+		uint32_t now = CYC(), d = (now - prev) / 25u;
+		mn = MIN(mn, d); mx = MAX(mx, d); prev = now;
+	}
+	k_timer_stop(&tm);
+	printk("  %-12s = %3lld ticks -> interval min=%u max=%u mean=%u us\n", name, (long long)per.ticks,
+	       mn, mx, (prev - t0) / 25u / 200u);
+}
+int main(void)
+{
+	printk("CONFIG_SYS_CLOCK_TICKS_PER_SEC=%d\n", CONFIG_SYS_CLOCK_TICKS_PER_SEC);
+	measure("K_USEC(2500)", K_USEC(2500));
+	measure("K_MSEC(1)", K_MSEC(1));
+	measure("K_USEC(125)", K_USEC(125));
+	register uint32_t r0 __asm__("r0") = 0x18, r1 __asm__("r1") = 0x20026;
+	__asm volatile("bkpt 0xab" : : "r"(r0), "r"(r1) : "memory");
+	return 0;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'R=/var/rtoslab/bin; for hz in 100 1000 10000; do $R/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/E7/z_quant /var/tmp/rtos/E7/z_quant$hz -- -DCONFIG_SYS_CLOCK_TICKS_PER_SEC=$hz && ICOUNT=1 $R/rtos-run-mps2 /var/tmp/rtos/E7/z_quant$hz/zephyr/zephyr.elf 120; done'
+```
+
+```text
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=100
+  K_USEC(2500) =   1 ticks -> interval min=10000 max=10000 mean=10000 us
+  K_MSEC(1)    =   1 ticks -> interval min=10000 max=10000 mean=10000 us
+  K_USEC(125)  =   1 ticks -> interval min=10000 max=10000 mean=10000 us
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000
+  K_USEC(2500) =   3 ticks -> interval min=3000 max=3000 mean=3000 us
+  K_MSEC(1)    =   1 ticks -> interval min=1000 max=1000 mean=1000 us
+  K_USEC(125)  =   1 ticks -> interval min=1000 max=1000 mean=1000 us
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=10000
+  K_USEC(2500) =  25 ticks -> interval min=2400 max=2500 mean=2500 us
+  K_MSEC(1)    =  10 ticks -> interval min=1000 max=1000 mean=1000 us
+  K_USEC(125)  =   2 ticks -> interval min=200 max=200 mean=200 us
+```
+
+출력에서 볼 것:
+
+- **100 Hz(QEMU 기본값)에서는 2.5 ms, 1 ms, 125 µs가 모두 10 ms가 된다.** 컴파일 에러도 경고도 없다. "Zephyr로 1 kHz 루프를 만들었는데 100 Hz로 돈다"는 버그의 정체다. 보드 기본 tick rate부터 확인한다(D6 §7.2도 같은 경고).
+- 1 kHz에서 `K_USEC(2500)`은 3 tick = **3000 µs**(333 Hz). FreeRTOS였다면 `pdMS_TO_TICKS`가 내림이라 2 ms가 됐을 것이다. 둘 다 틀리지만 방향이 반대다. `K_USEC(125)`는 1 ms가 된다.
+- 10 kHz에서는 2.5 ms, 1 ms가 정확하고 125 µs는 200 µs(2 tick, 올림)다. 8 kHz rate loop는 tick 격자로는 어떤 rate에서도 깔끔하지 않으면 HW 타이머가 답이다(§3).
+- 10 kHz에서 간격 최소 2400 µs가 한 번 찍혔다(평균은 2500). 1 tick 이른 간격이 섞인 것인데, 그 원인(tickless SysTick 재설정 경계로 추정)은 이 노트에서 **확인 못 함**.
+
+### 2.4 상대 지연 vs 절대 지연 — Zephyr 쪽 다섯 가지 작성법
+
+FreeRTOS의 세 API(`vTaskDelay` 상대, `xTaskDelayUntil` 절대 + catch-up, `xTaskPeriodicDelay` 절대 + skip)는 C5 §5에서 500주기 drift 실험으로 이미 비교했다. 여기서는 그 실험을 반복하지 않고 **Zephyr에서 같은 일을 쓰는 다섯 가지 방법**을 잰다. Zephyr의 함정은 두 겹이다.
+
+1. 상대 타임아웃에는 **+1 tick**이 붙는다(`kernel/timeout.c` 111행 `to->dticks = timeout.ticks + 1 + ticks_elapsed`, C5 §8). 절대 타임아웃(`K_TIMEOUT_ABS_TICKS`)에는 안 붙는다(114~116행 `dticks = Z_TICK_ABS(timeout.ticks) - curr_tick; to->dticks = max(1, dticks)`).
+2. `sys_timepoint_timeout(tp)`는 남은 시간을 **상대** 타임아웃 `K_TICKS(remaining)`으로 돌려준다(`kernel/timeout.c` 338~351행). 그래서 그걸 `k_sleep`에 넘기면 다시 +1 tick이 붙는다. timepoint는 원래 "여러 단계에 걸친 하나의 마감"(C5 §7의 `xTaskCheckForTimeOut`과 같은 용도)을 위한 도구이지 주기 루프 도구가 아니다.
+
+### 2.5 예제 3 — Zephyr 2 ms 루프 다섯 가지
+
+무엇을 확인하나: 1 kHz tick, 2 ms 주기, 매 주기 0~900 µs 임의 일, 400주기. A `k_msleep(2)`, B `k_sleep(K_TIMEOUT_ABS_TICKS(next))`, C `k_timer` + `k_timer_status_sync`, D 절대 시각을 손으로 상대로 바꾼 `k_sleep(K_TICKS(next - now))`, E 주기 시작에 `sys_timepoint_calc(K_TICKS(2))`로 마감을 잡고 끝에 `k_sleep(sys_timepoint_timeout(tp))`. 평균 주기, 간격 최소·최대, 그리고 "원래 격자 tick(`next`)보다 몇 tick 늦게 깼나"의 분포를 잰다.
+
+```c
+/* E7 예제 3: Zephyr로 2 ms 주기 루프를 다섯 가지로 — 일은 0~900 us 임의, 400주기.
+ * 평균 주기, 시작 간격 min/max, "원래 격자 tick보다 몇 tick 늦게 깼나" 분포 */
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+#define CYC() (*(volatile uint32_t *)0x40028018u)
+#define N 400
+#define T 2                                              /* tick (1 kHz) */
+static uint32_t seed = 7u;
+static uint32_t rnd(uint32_t n) { seed = seed * 1103515245u + 12345u; return (seed >> 8) % n; }
+static void spin_us(uint32_t us) { uint32_t t = CYC(); while (CYC() - t < us * 25u) { } }
+K_TIMER_DEFINE(tm, NULL, NULL);
+static const char *nm[] = { "A k_msleep(2)", "B k_sleep(K_TIMEOUT_ABS_TICKS(next))",
+	"C k_timer + k_timer_status_sync", "D k_sleep(K_TICKS(next - now))",
+	"E k_sleep(sys_timepoint_timeout(tp))" };
+static void run(int m)
+{
+	uint32_t late[4] = { 0 }, prev = 0, t0 = 0, mn = ~0u, mx = 0;
+	k_sleep(K_TICKS(1));
+	int64_t next = k_uptime_ticks();
+	if (m == 2) { k_timer_start(&tm, K_TICKS(T), K_TICKS(T)); k_timer_status_sync(&tm); next = k_uptime_ticks(); }
+	for (int k = 0; k <= N; k++) {
+		k_timepoint_t tp = sys_timepoint_calc(K_TICKS(T));        /* E: "지금부터 T" */
+		uint32_t now = CYC();
+		if (k == 0) t0 = now;
+		else { uint32_t d = (now - prev) / 25u; mn = MIN(mn, d); mx = MAX(mx, d); }
+		prev = now;
+		int64_t lt = k_uptime_ticks() - next;                    /* 격자 대비 늦은 tick 수 */
+		if (k > 0) late[CLAMP(lt, 0, 3)]++;
+		spin_us(rnd(900));                                       /* 들쭉날쭉한 일 */
+		next += T;
+		switch (m) {
+		case 0: k_msleep(2); break;
+		case 1: k_sleep(K_TIMEOUT_ABS_TICKS(next)); break;
+		case 2: k_timer_status_sync(&tm); break;
+		case 3: k_sleep(K_TICKS(next - k_uptime_ticks())); break;
+		default: k_sleep(sys_timepoint_timeout(tp)); break;
+		}
+	}
+	k_timer_stop(&tm);
+	printk("%s\n   mean=%u us  interval min=%u max=%u  late(ticks) 0:%u 1:%u 2:%u 3+:%u\n", nm[m],
+	       (prev - t0) / 25u / N, mn, mx, late[0], late[1], late[2], late[3]);
+}
+int main(void)
+{
+	for (int m = 0; m < 5; m++) run(m);
+	register uint32_t r0 __asm__("r0") = 0x18, r1 __asm__("r1") = 0x20026;
+	__asm volatile("bkpt 0xab" : : "r"(r0), "r"(r1) : "memory");
+	return 0;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'R=/var/rtoslab/bin; $R/rtos-zbuild mps2/an385 /Users/donh/.rtos_scratch/E7/z_methods /var/tmp/rtos/E7/z_methods -- -DCONFIG_SYS_CLOCK_TICKS_PER_SEC=1000 && ICOUNT=1 $R/rtos-run-mps2 /var/tmp/rtos/E7/z_methods/zephyr/zephyr.elf 120'
+```
+
+```text
+A k_msleep(2)
+   mean=3002 us  interval min=3000 max=3002  late(ticks) 0:0 1:1 2:1 3+:398
+B k_sleep(K_TIMEOUT_ABS_TICKS(next))
+   mean=2002 us  interval min=2000 max=2002  late(ticks) 0:400 1:0 2:0 3+:0
+C k_timer + k_timer_status_sync
+   mean=2000 us  interval min=1998 max=2000  late(ticks) 0:400 1:0 2:0 3+:0
+D k_sleep(K_TICKS(next - now))
+   mean=2004 us  interval min=2000 max=3000  late(ticks) 0:0 1:400 2:0 3+:0
+E k_sleep(sys_timepoint_timeout(tp))
+   mean=3002 us  interval min=3000 max=3002  late(ticks) 0:0 1:1 2:1 3+:398
+```
+
+출력에서 볼 것:
+
+- **A `k_msleep(2)`는 2 ms 루프가 아니라 3 ms 루프다**(333 Hz). 일이 1 tick보다 짧으니 깨는 tick = 지금 tick + 2 + 1(+1 규칙). 일 0~900 µs의 들쭉날쭉함은 tick 반올림에 먹혀 간격은 오히려 일정(3000~3002)하다. FreeRTOS `vTaskDelay`의 drift가 "조금씩 밀림"이었다면 Zephyr 상대 sleep은 "**한 tick씩 통째로 밀림**"이다. late 칸이 거의 다 3+인 것은 격자에서 계속 멀어지기 때문이다.
+- **E `sys_timepoint_timeout`도 3 ms**다. timepoint를 썼어도 `k_sleep`에 넘기는 순간 상대 타임아웃이 되어 +1 tick이 붙는다. "타임포인트니까 절대겠지"라는 착각을 정확히 잡아낸 결과다.
+- **D `K_TICKS(next - now)`**는 격자를 지키지만(drift 없음, 평균 2004 µs는 첫 간격 3000이 섞인 값) **항상 정확히 1 tick 늦다**(late 1이 400번). 위상이 1 ms 밀린 채로 고정된다. 센서나 다른 루프와 위상을 맞춰야 한다면 이 1 tick이 문제다.
+- **B 절대 타임아웃과 C `k_timer`만 격자 위(late 0)**에서 돈다. 주기 루프는 이 둘 중 하나로 쓴다. C는 커널이 다음 만료를 "원래 만료 tick + 주기"로 다시 걸어 준다(`kernel/timer.c` 105행, `CONFIG_TIMEOUT_64BIT`가 기본 y일 때 절대 타임아웃으로 재무장).
+- B의 평균이 2002 µs인 것은 tick 격자 자체가 벽시계(FPGA 카운터)보다 주기당 약 2 µs 느리기 때문이다. C6 §8.6이 잰 tickless 손실(`sys_clock_set_timeout` 호출 1회당 약 0.8 µs)과 같은 크기다. C는 주기당 재설정 횟수가 적어 2000 µs로 찍혔다(정수 µs 반올림). 이 손실은 QEMU에서 잰 값이고 실칩 크기는 확인 못 함.
+
+### 2.6 함정 정리 — 시간 격자 쪽
+
+- 주기는 **tick의 정수배**만 된다. FreeRTOS는 내림, Zephyr는 올림. 둘 다 조용하다.
+- Zephyr QEMU 보드의 기본 tick은 100 Hz다. 실칩 보드는 tickless 기본 10 kHz. 보드마다 다르다.
+- Zephyr에서 주기 루프는 `k_timer` + `k_timer_status_sync` 또는 `K_TIMEOUT_ABS_TICKS`. `k_msleep`, `sys_timepoint_timeout`을 `k_sleep`에 넘기기, `K_TICKS(next - now)`는 모두 1 tick씩 틀린다.
+- FreeRTOS에서는 `xTaskDelayUntil` / `xTaskPeriodicDelay`(C5 §5.6의 선택 표).
+
+---
+
+## 3. 구동 방식 다섯 가지 — 같은 부하에서 재 보기
+
+### 3.1 다섯 방식
+
+| # | 방식 | 박자를 만드는 것 | 제어 코드가 도는 곳 | 해상도 |
+|---|---|---|---|---|
+| 1 | tick 구동 | SysTick (tick) | 태스크, `xTaskDelayUntil` | 1 tick |
+| 2 | 소프트웨어 타이머 | SysTick | 타이머 데몬의 콜백 (D6) | 1 tick |
+| 3 | HW 타이머 → 태스크 | TIMER0 | ISR이 `vTaskNotifyGiveFromISR` → 태스크 | 타이머 클럭 (40 ns) |
+| 4 | HW 타이머 ISR 직접 | TIMER0 (NVIC 0x00) | ISR 안, 커널 API 금지 | 타이머 클럭 |
+| 5 | 센서 DRDY 구동 | IMU의 data-ready 핀 | ISR → 태스크 | 센서가 정함 |
+
+방식 4의 ISR은 NVIC 우선순위 0x00으로, FreeRTOS가 크리티컬 섹션에서 올리는 BASEPRI(0x20)보다 **높다**. 그래서 크리티컬 섹션이 이 인터럽트를 막지 못한다. 대가는 이 ISR에서 FreeRTOS API를 하나도 부를 수 없다는 것이다(E1, E2의 zero-latency 인터럽트). 방식 5의 "센서"는 TIMER0을 1.0016 ms(998.4 Hz)로 돌려 흉내 냈다 — 실제 IMU의 ODR(출력 데이터 속도)은 자기 발진기로 돌아 MCU 시계와 몇 % 이내로 다르다.
+
+### 3.2 공통 배경 부하
+
+모든 방식에 똑같은 부하를 건다. QEMU icount에서는 부하가 일정하면 지터가 0이 되므로 길이를 의사난수로 바꾼다.
+
+- **L1 — 다른 인터럽트**: CMSDK 듀얼타이머 ISR, 100~700 µs 간격, 매번 5~60 µs 일. NVIC 0x40(kernel-aware, 제어 타이머 0x20보다 낮음). 예를 들어 드론 FC라면 UART 텔레메트리나 GNSS 수신 ISR이다.
+- **L2 — 크리티컬 섹션**: prio 1 태스크가 0~40 µs `taskENTER_CRITICAL()`(BASEPRI = 0x20). 큐 · 세마포어 API 내부, 드라이버의 레지스터 보호 구간이 이것이다.
+- **L3 — 스케줄러 잠금**: 같은 태스크가 0~100 µs `vTaskSuspendAll()`. 인터럽트는 열려 있지만 태스크 전환이 막힌다. heap_4의 `pvPortMalloc`, 이벤트 그룹, 긴 리스트를 도는 코드가 이것을 쓴다.
+- 그 사이 prio 1 태스크는 CPU를 계속 쓴다(idle이 돌 틈이 없다).
+
+```c
+/* load.h — 모든 구동 방식에 똑같이 거는 배경 부하 (QEMU icount에서도 지터가 생기게 의사난수 길이)
+ * L1 듀얼타이머 ISR: 100~700 us 간격, 5~60 us 일 (NVIC 0x40, kernel-aware — 제어 타이머 0x20보다 낮음)
+ * L2 prio 1 태스크: 크리티컬 섹션 0~40 us(BASEPRI), 스케줄러 잠금 0~100 us, 그 사이 CPU 계속 사용 */
+#ifndef LOAD_H
+#define LOAD_H
+#include "FreeRTOS.h"
+#include "task.h"
+#include "e7.h"
+#ifndef LOADMASK
+#define LOADMASK 7                                    /* bit0 L1 ISR, bit1 크리티컬 섹션, bit2 스케줄러 잠금 */
+#endif
+static uint32_t li_seed = 777u, lt_seed = 4242u;
+static inline uint32_t lrnd(uint32_t *s, uint32_t n) { *s = *s * 1103515245u + 12345u; return (*s >> 8) % n; }
+void DUALTIMER_IRQHandler(void)
+{
+    DT1(0x0C) = 1u;                                   /* IntClr */
+    DT1(0x18) = 2500u + lrnd(&li_seed, 15000u);       /* BGLoad: 다음 간격 100..700 us */
+    spin_cyc(125u + lrnd(&li_seed, 1375u));           /* 5..60 us 일 */
+}
+static void load_task(void *p)
+{
+    (void)p;
+    for (;;) {
+        spin_cyc(lrnd(&lt_seed, 5000u));
+        uint32_t c = lrnd(&lt_seed, 1000u), s = lrnd(&lt_seed, 2500u);
+        if (LOADMASK & 2) { taskENTER_CRITICAL(); spin_cyc(c); taskEXIT_CRITICAL(); } else spin_cyc(c);
+        spin_cyc(lrnd(&lt_seed, 5000u));
+        if (LOADMASK & 4) { vTaskSuspendAll(); spin_cyc(s); (void)xTaskResumeAll(); } else spin_cyc(s);
+    }
+}
+static inline void load_start(void)
+{
+    DT1(0x00) = 10000u;                               /* Load: 첫 간격 400 us */
+    DT1(0x08) = 0xE2u;                                /* EN | periodic | IE | 32-bit */
+    if (LOADMASK & 1) nvic_on(10, 0x40);
+    xTaskCreate(load_task, "load", 256, NULL, 1, NULL);
+}
+#endif
+```
+
+### 3.3 예제 4 — 1 kHz 제어 루프, 다섯 방식, 3000주기
+
+무엇을 확인하나: 같은 50 µs 제어 법칙을 다섯 방식으로 구동하고, 매 주기 "기준 사건(tick 또는 TIMER0 만료) → 제어 시작" 지연(1 µs 칸 히스토그램)과 시작 간격 − 공칭 주기를 3000주기(처음 10주기 제외) 잰다. 제어 태스크는 prio 6(앱 최고), 데몬은 prio 7. `LOADMASK`로 부하 성분을 하나씩 켤 수 있다.
+
+```c
+/* E7 예제 4: 1 kHz 제어 루프를 다섯 방식으로 구동 — 같은 배경 부하(load.h)에서
+ * "기준 사건(tick 또는 타이머 만료) → 제어 시작" 지연과 주기(시작 간격) 지터를 3000주기 잰다.
+ * SCHEME 1 tick + xTaskDelayUntil   2 SW 타이머(auto-reload, 데몬 prio 7)
+ *        3 TIMER0 ISR → notify      4 TIMER0 ISR이 직접 계산(NVIC 0x00 = BASEPRI 밖)
+ *        5 IMU DRDY(TIMER0를 998.4 Hz 센서로) → notify */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "timers.h"
+#include "load.h"
+#define NCYC 3000
+#define PCYC (SCHEME == 5 ? 25040u : 25000u)        /* 5: 센서 ODR 1.0016 ms, MCU 시계와 무관 */
+static hist_t lat = { .off = 0 }, per = { .off = 200 };
+static volatile uint32_t k, prev, cmin = ~0u, cmax; static TaskHandle_t ctl_h;
+static inline uint32_t since_event(void)            /* 기준 사건(tick 또는 TIMER0 만료) 이후 경과 사이클 */
+{ return SCHEME <= 2 ? SYST_LOAD - SYST_VAL : TIMER_RELOAD(TIMER0_BASE) - TIMER_VALUE(TIMER0_BASE); }
+static void control_law(void)
+{
+    uint32_t now = CYC(), e = since_event();
+    if (k >= 10) {
+        hrec(&lat, (int32_t)(e / 25u)); hrec(&per, ((int32_t)(now - prev) - (int32_t)PCYC) / 25);
+        cmin = e < cmin ? e : cmin; cmax = e > cmax ? e : cmax;
+    }
+    prev = now; k++;
+    burn_us(50);                                    /* 제어 법칙 50 us (CPU 시간, 일정) */
+}
+void TIMER0_IRQHandler(void)
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1u;
+#if SCHEME == 4
+    if (k < NCYC) control_law();                    /* 커널 API를 부르지 않는다 */
+#else
+    BaseType_t w = pdFALSE; vTaskNotifyGiveFromISR(ctl_h, &w); portYIELD_FROM_ISR(w);
+#endif
+}
+static void tmr_cb(TimerHandle_t t) { (void)t; if (k < NCYC) control_law(); }
+static void ctl_task(void *p)
+{
+    (void)p;
+    TickType_t last = xTaskGetTickCount();
+    for (;;) {
+        if (SCHEME == 1) xTaskDelayUntil(&last, 1); else ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (k < NCYC) control_law();
+    }
+}
+static void report(void *p)
+{
+    (void)p;
+    load_start();
+    if (SCHEME == 2) xTimerStart(xTimerCreate("ctl", 1, pdTRUE, NULL, tmr_cb), 0);
+    else if (SCHEME != 4) xTaskCreate(ctl_task, "ctl", 256, NULL, 6, &ctl_h);
+    if (SCHEME >= 3) {
+        TIMER_RELOAD(TIMER0_BASE) = PCYC - 1u; TIMER_VALUE(TIMER0_BASE) = PCYC - 1u;
+        TIMER_CTRL(TIMER0_BASE) = 9u;               /* EN | IRQ EN */
+        nvic_on(8, SCHEME == 4 ? 0x00 : 0x20);
+    }
+    while (k < NCYC) vTaskDelay(10);
+    TIMER_CTRL(TIMER0_BASE) = 0u;
+    board_printf_raw("SCHEME %d LOADMASK %d  lat_cyc min=%u max=%u\n", SCHEME, LOADMASK, cmin, cmax);
+    hprint("lat_us", &lat, 1); hprint("per_dev_us", &per, 1);
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(report, "rep", 512, NULL, 5, NULL);
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'cd /var/tmp/rtos/E7; S=/Users/donh/.rtos_scratch/E7; for s in 1 2 3 4 5; do $S/run.sh ex4_schemes.c ex4_s$s -DSCHEME=$s > ex4_s$s.txt 2>&1; grep -v bins ex4_s$s.txt | grep -v board_exit; done'
+```
+
+```text
+SCHEME 1 LOADMASK 7  lat_cyc min=178 max=3310
+lat_us n=2990 min=7 p50=7 p99=90 p99.9=119 max=132 avg=17
+per_dev_us n=2990 min=-125 p50=0 p99=81 p99.9=101 max=125 avg=-1
+SCHEME 2 LOADMASK 7  lat_cyc min=370 max=3488
+lat_us n=2990 min=14 p50=14 p99=96 p99.9=127 max=139 avg=24
+per_dev_us n=2990 min=-124 p50=0 p99=78 p99.9=103 max=123 avg=-1
+SCHEME 3 LOADMASK 7  lat_cyc min=207 max=3486
+lat_us n=2990 min=8 p50=8 p99=91 p99.9=134 max=139 avg=17
+per_dev_us n=2990 min=-130 p50=0 p99=79 p99.9=119 max=130 avg=0
+SCHEME 4 LOADMASK 7  lat_cyc min=10 max=10
+lat_us n=2990 min=0 p50=0 p99=0 p99.9=0 max=0 avg=0
+per_dev_us n=2990 min=0 p50=0 p99=0 p99.9=0 max=0 avg=0
+SCHEME 5 LOADMASK 7  lat_cyc min=207 max=3453
+lat_us n=2990 min=8 p50=8 p99=94 p99.9=116 max=138 avg=18
+per_dev_us n=2990 min=-106 p50=0 p99=79 p99.9=104 max=129 avg=-1
+```
+
+(각 파일에는 `bins` 줄 — 0이 아닌 히스토그램 칸 `값:개수` — 이 더 있다. 예제 5와 그림 4가 그 줄을 읽는다.)
+
+출력에서 볼 것:
+
+- **방식 4(ISR 직접)만 지터 0**: 3000주기 모두 사건 후 10사이클(0.4 µs)에 시작했다. 주기 편차도 0. L1 ISR(0x40)보다 높고, BASEPRI(0x20)로 막히지 않고, 스케줄러 잠금과는 아예 무관하다. QEMU는 예외 스태킹을 모델링하지 않으므로 실칩에서는 12사이클 + flash wait만큼 더 걸리지만, **흔들리지 않는다는 성질**은 같다.
+- **방식 1·3·5는 거의 같은 분포**: 최소 7~8 µs, p99 90~94 µs, 최대 132~139 µs. 직관과 다르게 **HW 타이머 → 태스크(방식 3)가 tick 구동(방식 1)보다 지터가 작지 않다.** 둘 다 마지막에 "태스크로 전환"을 거치는데, 지터의 주인은 그 전환을 막는 것들(크리티컬 섹션 · 스케줄러 잠금 · 다른 ISR)이지 박자를 누가 만드느냐가 아니다. HW 타이머의 장점은 지터가 아니라 **해상도**(tick의 배수가 아닌 주기, 예제 1·2)와 **박자를 센서에 맞출 수 있다는 것**(§4)이다.
+- **방식 2(소프트웨어 타이머)는 최소 지연이 14 µs**로 가장 크다. tick ISR → 데몬 태스크 전환 → 만료 리스트 처리 → 콜백 순서라 한 단계가 더 있다(D6 §2의 "tick + 11 µs"와 같은 경로). 꼬리도 비슷하게 길다.
+- 주기 편차(`per_dev_us`)는 ±125 µs 정도로 시작 지연 최대값과 비슷하다. 늦게 시작한 주기의 **다음 간격은 그만큼 짧다**(격자는 유지, 평균 −1~0). 시작 지터는 drift가 아니다.
+
+### 3.4 예제 5 — 꼬리 확률 표 (Python)
+
+무엇을 확인하나: 예제 4의 히스토그램 칸에서 P(지연 > x)를 계산한다. 그림 4가 같은 계산으로 그렸다(VM의 Python 3, 표준 라이브러리만).
+
+```python
+# E7 예제 5: ex4 히스토그램(bins) → 꼬리 확률 P(지연 > x) 표. 같은 숫자로 그림 4를 그린다.
+import re, sys
+D = "/var/tmp/rtos/E7"
+NAME = {1: "tick+DelayUntil", 2: "SW timer", 3: "TIMER0 ISR->notify", 4: "TIMER0 ISR direct", 5: "DRDY ISR->notify"}
+XS = (10, 25, 50, 75, 100, 125)
+def bins(path, tag):
+    txt = open(path).read().split("\n")
+    i = next(j for j, l in enumerate(txt) if l.startswith(tag))
+    return {int(a): int(b) for a, b in re.findall(r"(-?\d+):(\d+)", txt[i + 1])}
+print(f"{'scheme':<20}" + "".join(f"{'P>' + str(x) + 'us':>10}" for x in XS) + f"{'jitter p99.9-min':>18}")
+for s in range(1, 6):
+    h = bins(f"{D}/ex4_s{s}.txt", "lat_us"); n = sum(h.values())
+    tail = [sum(c for v, c in h.items() if v > x) / n for x in XS]
+    vs = sorted(v for v, c in h.items() for _ in range(c))
+    j = vs[int(0.999 * n) - 1] - vs[0]
+    print(f"{NAME[s]:<20}" + "".join(f"{t:>10.4f}" for t in tail) + f"{j:>15} us")
+```
+
+```sh
+limactl shell elinux -- bash -lc 'python3 /Users/donh/.rtos_scratch/E7/ex5_ccdf.py'
+```
+
+```text
+scheme                  P>10us    P>25us    P>50us    P>75us   P>100us   P>125us  jitter p99.9-min
+tick+DelayUntil         0.3151    0.2067    0.0819    0.0261    0.0033    0.0003            103 us
+SW timer                1.0000    0.2619    0.1077    0.0351    0.0070    0.0010            104 us
+TIMER0 ISR->notify      0.3261    0.1977    0.0776    0.0264    0.0054    0.0017            121 us
+TIMER0 ISR direct       0.0000    0.0000    0.0000    0.0000    0.0000    0.0000              0 us
+DRDY ISR->notify        0.3398    0.2094    0.0833    0.0274    0.0033    0.0003            104 us
+```
+
+```svg
+<svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<line x1="70.0" y1="300.0" x2="640.0" y2="300.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="70.0" y1="30.0" x2="70.0" y2="300.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="70.0" y1="300.0" x2="70.0" y2="304.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="70.0" y="318.0" font-size="12" text-anchor="middle">0</text>
+<line x1="165.0" y1="300.0" x2="165.0" y2="304.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="165.0" y="318.0" font-size="12" text-anchor="middle">25</text>
+<line x1="260.0" y1="300.0" x2="260.0" y2="304.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="260.0" y="318.0" font-size="12" text-anchor="middle">50</text>
+<line x1="355.0" y1="300.0" x2="355.0" y2="304.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="355.0" y="318.0" font-size="12" text-anchor="middle">75</text>
+<line x1="450.0" y1="300.0" x2="450.0" y2="304.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="450.0" y="318.0" font-size="12" text-anchor="middle">100</text>
+<line x1="545.0" y1="300.0" x2="545.0" y2="304.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="545.0" y="318.0" font-size="12" text-anchor="middle">125</text>
+<line x1="640.0" y1="300.0" x2="640.0" y2="304.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="640.0" y="318.0" font-size="12" text-anchor="middle">150</text>
+<line x1="66.0" y1="30.0" x2="70.0" y2="30.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="70.0" y1="30.0" x2="640.0" y2="30.0" stroke="#888" stroke-width="0.5" stroke-dasharray="3,3"/>
+<text x="62.0" y="34.0" font-size="12" text-anchor="end">1</text>
+<line x1="66.0" y1="105.0" x2="70.0" y2="105.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="70.0" y1="105.0" x2="640.0" y2="105.0" stroke="#888" stroke-width="0.5" stroke-dasharray="3,3"/>
+<text x="62.0" y="109.0" font-size="12" text-anchor="end">0.1</text>
+<line x1="66.0" y1="180.0" x2="70.0" y2="180.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="70.0" y1="180.0" x2="640.0" y2="180.0" stroke="#888" stroke-width="0.5" stroke-dasharray="3,3"/>
+<text x="62.0" y="184.0" font-size="12" text-anchor="end">0.01</text>
+<line x1="66.0" y1="255.0" x2="70.0" y2="255.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="70.0" y1="255.0" x2="640.0" y2="255.0" stroke="#888" stroke-width="0.5" stroke-dasharray="3,3"/>
+<text x="62.0" y="259.0" font-size="12" text-anchor="end">0.001</text>
+<text x="355.0" y="338.0" font-size="13" text-anchor="middle">기준 사건 → 제어 시작 지연 x (us)</text>
+<text x="76.0" y="18.0" font-size="12" text-anchor="start">P(지연 &gt; x), 로그 축</text>
+<polyline points="70.0,30.0 73.8,30.0 73.8,30.0 77.6,30.0 77.6,30.0 81.4,30.0 81.4,30.0 85.2,30.0 85.2,30.0 89.0,30.0 89.0,30.0 92.8,30.0 92.8,30.0 96.6,30.0 96.6,59.7 100.4,59.7 100.4,65.9 104.2,65.9 104.2,66.8 108.0,66.8 108.0,67.6 111.8,67.6 111.8,68.4 115.6,68.4 115.6,69.1 119.4,69.1 119.4,69.8 123.2,69.8 123.2,71.0 127.0,71.0 127.0,71.8 130.8,71.8 130.8,73.0 134.6,73.0 134.6,73.9 138.4,73.9 138.4,74.8 142.2,74.8 142.2,75.6 146.0,75.6 146.0,76.6 149.8,76.6 149.8,77.1 153.6,77.1 153.6,78.4 157.4,78.4 157.4,79.4 161.2,79.4 161.2,80.5 165.0,80.5 165.0,81.4 168.8,81.4 168.8,82.9 172.6,82.9 172.6,84.4 176.4,84.4 176.4,85.1 180.2,85.1 180.2,86.8 184.0,86.8 184.0,87.9 187.8,87.9 187.8,89.4 191.6,89.4 191.6,90.8 195.4,90.8 195.4,91.8 199.2,91.8 199.2,93.5 203.0,93.5 203.0,94.7 206.8,94.7 206.8,95.7 210.6,95.7 210.6,97.0 214.4,97.0 214.4,98.1 218.2,98.1 218.2,98.7 222.0,98.7 222.0,99.7 225.8,99.7 225.8,102.1 229.6,102.1 229.6,103.2 233.4,103.2 233.4,104.1 237.2,104.1 237.2,105.3 241.0,105.3 241.0,106.6 244.8,106.6 244.8,107.8 248.6,107.8 248.6,108.6 252.4,108.6 252.4,109.6 256.2,109.6 256.2,110.6 260.0,110.6 260.0,111.5 263.8,111.5 263.8,112.2 267.6,112.2 267.6,114.1 271.4,114.1 271.4,114.7 275.2,114.7 275.2,116.8 279.0,116.8 279.0,117.8 282.8,117.8 282.8,118.8 286.6,118.8 286.6,121.2 290.4,121.2 290.4,122.4 294.2,122.4 294.2,123.6 298.0,123.6 298.0,125.8 301.8,125.8 301.8,126.4 305.6,126.4 305.6,128.1 309.4,128.1 309.4,128.8 313.2,128.8 313.2,130.7 317.0,130.7 317.0,131.4 320.8,131.4 320.8,133.4 324.6,133.4 324.6,135.8 328.4,135.8 328.4,136.7 332.2,136.7 332.2,137.6 336.0,137.6 336.0,138.8 339.8,138.8 339.8,140.4 343.6,140.4 343.6,143.0 347.4,143.0 347.4,145.6 351.2,145.6 351.2,146.4 355.0,146.4 355.0,148.8 358.8,148.8 358.8,152.3 362.6,152.3 362.6,152.3 366.4,152.3 366.4,153.2 370.2,153.2 370.2,155.7 374.0,155.7 374.0,156.2 377.8,156.2 377.8,157.3 381.6,157.3 381.6,159.0 385.4,159.0 385.4,159.6 389.2,159.6 389.2,161.4 393.0,161.4 393.0,162.6 396.8,162.6 396.8,165.3 400.6,165.3 400.6,168.2 404.4,168.2 404.4,171.3 408.2,171.3 408.2,176.8 412.0,176.8 412.0,182.1 415.8,182.1 415.8,184.6 419.6,184.6 419.6,187.2 423.4,187.2 423.4,190.0 427.2,190.0 427.2,194.8 431.0,194.8 431.0,198.4 434.8,198.4 434.8,202.5 438.6,202.5 438.6,202.5 442.4,202.5 442.4,212.6 446.2,212.6 446.2,212.6 450.0,212.6 450.0,215.7 453.8,215.7 453.8,219.1 457.6,219.1 457.6,219.1 461.4,219.1 461.4,227.3 465.2,227.3 465.2,232.3 469.0,232.3 469.0,232.3 472.8,232.3 472.8,232.3 476.6,232.3 476.6,238.3 480.4,238.3 480.4,245.5 484.2,245.5 484.2,245.5 488.0,245.5 488.0,254.9 491.8,254.9 491.8,254.9 495.6,254.9 495.6,254.9 499.4,254.9 499.4,254.9 503.2,254.9 503.2,254.9 507.0,254.9 507.0,254.9 510.8,254.9 510.8,254.9 514.6,254.9 514.6,254.9 518.4,254.9 518.4,254.9 522.2,254.9 522.2,268.1 526.0,268.1 526.0,268.1 529.8,268.1 529.8,268.1 533.6,268.1 533.6,268.1 537.4,268.1 537.4,290.7 541.2,290.7 541.2,290.7 545.0,290.7 545.0,290.7 548.8,290.7 548.8,290.7 552.6,290.7 552.6,290.7 556.4,290.7 556.4,290.7 560.2,290.7 560.2,290.7 564.0,290.7 564.0,290.7 567.8,290.7 567.8,290.7 571.6,290.7" fill="none" stroke="#4a7bd0" stroke-width="1.8"/>
+<polyline points="70.0,30.0 73.8,30.0 73.8,30.0 77.6,30.0 77.6,30.0 81.4,30.0 81.4,30.0 85.2,30.0 85.2,30.0 89.0,30.0 89.0,30.0 92.8,30.0 92.8,30.0 96.6,30.0 96.6,30.0 100.4,30.0 100.4,30.0 104.2,30.0 104.2,30.0 108.0,30.0 108.0,30.0 111.8,30.0 111.8,30.0 115.6,30.0 115.6,30.0 119.4,30.0 119.4,30.0 123.2,30.0 123.2,58.6 127.0,58.6 127.0,59.3 130.8,59.3 130.8,65.4 134.6,65.4 134.6,66.5 138.4,66.5 138.4,67.4 142.2,67.4 142.2,67.9 146.0,67.9 146.0,68.7 149.8,68.7 149.8,69.4 153.6,69.4 153.6,70.2 157.4,70.2 157.4,71.5 161.2,71.5 161.2,72.4 165.0,72.4 165.0,73.6 168.8,73.6 168.8,74.6 172.6,74.6 172.6,75.7 176.4,75.7 176.4,76.7 180.2,76.7 180.2,77.7 184.0,77.7 184.0,78.4 187.8,78.4 187.8,79.8 191.6,79.8 191.6,80.9 195.4,80.9 195.4,82.1 199.2,82.1 199.2,83.1 203.0,83.1 203.0,84.2 206.8,84.2 206.8,85.1 210.6,85.1 210.6,86.2 214.4,86.2 214.4,87.4 218.2,87.4 218.2,89.0 222.0,89.0 222.0,90.2 225.8,90.2 225.8,90.8 229.6,90.8 229.6,92.3 233.4,92.3 233.4,93.5 237.2,93.5 237.2,94.8 241.0,94.8 241.0,96.0 244.8,96.0 244.8,97.6 248.6,97.6 248.6,99.1 252.4,99.1 252.4,100.3 256.2,100.3 256.2,101.3 260.0,101.3 260.0,102.6 263.8,102.6 263.8,103.8 267.6,103.8 267.6,104.7 271.4,104.7 271.4,105.8 275.2,105.8 275.2,107.0 279.0,107.0 279.0,108.0 282.8,108.0 282.8,108.8 286.6,108.8 286.6,110.6 290.4,110.6 290.4,111.5 294.2,111.5 294.2,112.0 298.0,112.0 298.0,113.1 301.8,113.1 301.8,114.4 305.6,114.4 305.6,116.0 309.4,116.0 309.4,117.6 313.2,117.6 313.2,118.9 317.0,118.9 317.0,121.3 320.8,121.3 320.8,122.8 324.6,122.8 324.6,125.0 328.4,125.0 328.4,126.0 332.2,126.0 332.2,127.5 336.0,127.5 336.0,128.3 339.8,128.3 339.8,130.4 343.6,130.4 343.6,133.9 347.4,133.9 347.4,135.0 351.2,135.0 351.2,137.0 355.0,137.0 355.0,139.1 358.8,139.1 358.8,141.0 362.6,141.0 362.6,142.3 366.4,142.3 366.4,144.5 370.2,144.5 370.2,145.2 374.0,145.2 374.0,146.7 377.8,146.7 377.8,148.4 381.6,148.4 381.6,150.5 385.4,150.5 385.4,150.5 389.2,150.5 389.2,152.3 393.0,152.3 393.0,154.2 396.8,154.2 396.8,155.7 400.6,155.7 400.6,156.2 404.4,156.2 404.4,159.6 408.2,159.6 408.2,163.3 412.0,163.3 412.0,166.0 415.8,166.0 415.8,167.4 419.6,167.4 419.6,169.7 423.4,169.7 423.4,172.2 427.2,172.2 427.2,175.8 431.0,175.8 431.0,179.9 434.8,179.9 434.8,182.1 438.6,182.1 438.6,187.2 442.4,187.2 442.4,187.2 446.2,187.2 446.2,190.0 450.0,190.0 450.0,191.5 453.8,191.5 453.8,191.5 457.6,191.5 457.6,194.8 461.4,194.8 461.4,194.8 465.2,194.8 465.2,196.5 469.0,196.5 469.0,196.5 472.8,196.5 472.8,200.4 476.6,200.4 476.6,202.5 480.4,202.5 480.4,204.7 484.2,204.7 484.2,209.7 488.0,209.7 488.0,212.6 491.8,212.6 491.8,222.9 495.6,222.9 495.6,232.3 499.4,232.3 499.4,232.3 503.2,232.3 503.2,232.3 507.0,232.3 507.0,238.3 510.8,238.3 510.8,238.3 514.6,238.3 514.6,245.5 518.4,245.5 518.4,254.9 522.2,254.9 522.2,254.9 526.0,254.9 526.0,254.9 529.8,254.9 529.8,254.9 533.6,254.9 533.6,254.9 537.4,254.9 537.4,254.9 541.2,254.9 541.2,254.9 545.0,254.9 545.0,254.9 548.8,254.9 548.8,254.9 552.6,254.9 552.6,268.1 556.4,268.1 556.4,268.1 560.2,268.1 560.2,268.1 564.0,268.1 564.0,268.1 567.8,268.1 567.8,268.1 571.6,268.1 571.6,268.1 575.4,268.1 575.4,268.1 579.2,268.1 579.2,290.7 583.0,290.7 583.0,290.7 586.8,290.7 586.8,290.7 590.6,290.7 590.6,290.7 594.4,290.7 594.4,290.7 598.2,290.7" fill="none" stroke="#e08a3c" stroke-width="1.8"/>
+<polyline points="70.0,30.0 73.8,30.0 73.8,30.0 77.6,30.0 77.6,30.0 81.4,30.0 81.4,30.0 85.2,30.0 85.2,30.0 89.0,30.0 89.0,30.0 92.8,30.0 92.8,30.0 96.6,30.0 96.6,30.0 100.4,30.0 100.4,65.0 104.2,65.0 104.2,65.9 108.0,65.9 108.0,66.5 111.8,66.5 111.8,67.0 115.6,67.0 115.6,68.6 119.4,68.6 119.4,69.5 123.2,69.5 123.2,70.7 127.0,70.7 127.0,71.7 130.8,71.7 130.8,72.7 134.6,72.7 134.6,73.7 138.4,73.7 138.4,74.6 142.2,74.6 142.2,75.7 146.0,75.7 146.0,76.7 149.8,76.7 149.8,77.8 153.6,77.8 153.6,79.0 157.4,79.0 157.4,80.2 161.2,80.2 161.2,81.5 165.0,81.5 165.0,82.8 168.8,82.8 168.8,83.9 172.6,83.9 172.6,84.9 176.4,84.9 176.4,85.9 180.2,85.9 180.2,87.0 184.0,87.0 184.0,88.1 187.8,88.1 187.8,89.4 191.6,89.4 191.6,90.1 195.4,90.1 195.4,91.9 199.2,91.9 199.2,92.9 203.0,92.9 203.0,93.3 206.8,93.3 206.8,94.4 210.6,94.4 210.6,96.2 214.4,96.2 214.4,97.5 218.2,97.5 218.2,99.0 222.0,99.0 222.0,100.5 225.8,100.5 225.8,101.2 229.6,101.2 229.6,102.5 233.4,102.5 233.4,103.7 237.2,103.7 237.2,104.8 241.0,104.8 241.0,106.1 244.8,106.1 244.8,107.4 248.6,107.4 248.6,109.1 252.4,109.1 252.4,110.2 256.2,110.2 256.2,111.5 260.0,111.5 260.0,113.3 263.8,113.3 263.8,114.6 267.6,114.6 267.6,115.6 271.4,115.6 271.4,117.1 275.2,117.1 275.2,117.6 279.0,117.6 279.0,118.8 282.8,118.8 282.8,119.8 286.6,119.8 286.6,121.5 290.4,121.5 290.4,123.6 294.2,123.6 294.2,125.0 298.0,125.0 298.0,126.8 301.8,126.8 301.8,128.6 305.6,128.6 305.6,130.4 309.4,130.4 309.4,131.4 313.2,131.4 313.2,132.6 317.0,132.6 317.0,134.7 320.8,134.7 320.8,135.6 324.6,135.6 324.6,137.0 328.4,137.0 328.4,140.0 332.2,140.0 332.2,141.0 336.0,141.0 336.0,142.0 339.8,142.0 339.8,143.0 343.6,143.0 343.6,145.2 347.4,145.2 347.4,146.7 351.2,146.7 351.2,147.5 355.0,147.5 355.0,148.4 358.8,148.4 358.8,149.2 362.6,149.2 362.6,149.6 366.4,149.6 366.4,150.5 370.2,150.5 370.2,152.8 374.0,152.8 374.0,153.7 377.8,153.7 377.8,155.7 381.6,155.7 381.6,157.9 385.4,157.9 385.4,159.6 389.2,159.6 389.2,162.6 393.0,162.6 393.0,163.9 396.8,163.9 396.8,168.9 400.6,168.9 400.6,173.1 404.4,173.1 404.4,174.9 408.2,174.9 408.2,177.8 412.0,177.8 412.0,178.8 415.8,178.8 415.8,184.6 419.6,184.6 419.6,187.2 423.4,187.2 423.4,188.5 427.2,188.5 427.2,188.5 431.0,188.5 431.0,190.0 434.8,190.0 434.8,193.1 438.6,193.1 438.6,194.8 442.4,194.8 442.4,198.4 446.2,198.4 446.2,200.4 450.0,200.4 450.0,200.4 453.8,200.4 453.8,204.7 457.6,204.7 457.6,209.7 461.4,209.7 461.4,212.6 465.2,212.6 465.2,215.7 469.0,215.7 469.0,215.7 472.8,215.7 472.8,219.1 476.6,219.1 476.6,219.1 480.4,219.1 480.4,222.9 484.2,222.9 484.2,222.9 488.0,222.9 488.0,232.3 491.8,232.3 491.8,232.3 495.6,232.3 495.6,232.3 499.4,232.3 499.4,238.3 503.2,238.3 503.2,238.3 507.0,238.3 507.0,238.3 510.8,238.3 510.8,238.3 514.6,238.3 514.6,238.3 518.4,238.3 518.4,238.3 522.2,238.3 522.2,238.3 526.0,238.3 526.0,238.3 529.8,238.3 529.8,238.3 533.6,238.3 533.6,238.3 537.4,238.3 537.4,238.3 541.2,238.3 541.2,238.3 545.0,238.3 545.0,238.3 548.8,238.3 548.8,238.3 552.6,238.3 552.6,238.3 556.4,238.3 556.4,245.5 560.2,245.5 560.2,254.9 564.0,254.9 564.0,254.9 567.8,254.9 567.8,254.9 571.6,254.9 571.6,254.9 575.4,254.9 575.4,254.9 579.2,254.9 579.2,268.1 583.0,268.1 583.0,268.1 586.8,268.1 586.8,268.1 590.6,268.1 590.6,268.1 594.4,268.1 594.4,290.7 598.2,290.7" fill="none" stroke="#3f9a6b" stroke-width="1.8"/>
+<polyline points="70.0,30.0 73.8,30.0 73.8,30.0 77.6,30.0 77.6,30.0 81.4,30.0 81.4,30.0 85.2,30.0 85.2,30.0 89.0,30.0 89.0,30.0 92.8,30.0 92.8,30.0 96.6,30.0 96.6,30.0 100.4,30.0 100.4,63.6 104.2,63.6 104.2,64.8 108.0,64.8 108.0,65.2 111.8,65.2 111.8,65.7 115.6,65.7 115.6,67.9 119.4,67.9 119.4,68.9 123.2,68.9 123.2,70.1 127.0,70.1 127.0,71.0 130.8,71.0 130.8,72.5 134.6,72.5 134.6,73.1 138.4,73.1 138.4,74.1 142.2,74.1 142.2,75.0 146.0,75.0 146.0,75.9 149.8,75.9 149.8,76.7 153.6,76.7 153.6,77.7 157.4,77.7 157.4,78.9 161.2,78.9 161.2,80.4 165.0,80.4 165.0,80.9 168.8,80.9 168.8,82.0 172.6,82.0 172.6,83.5 176.4,83.5 176.4,84.2 180.2,84.2 180.2,85.0 184.0,85.0 184.0,85.7 187.8,85.7 187.8,86.5 191.6,86.5 191.6,87.9 195.4,87.9 195.4,89.4 199.2,89.4 199.2,90.0 203.0,90.0 203.0,91.3 206.8,91.3 206.8,93.2 210.6,93.2 210.6,94.3 214.4,94.3 214.4,95.3 218.2,95.3 218.2,96.9 222.0,96.9 222.0,98.1 225.8,98.1 225.8,99.0 229.6,99.0 229.6,100.3 233.4,100.3 233.4,101.7 237.2,101.7 237.2,102.8 241.0,102.8 241.0,104.5 244.8,104.5 244.8,105.5 248.6,105.5 248.6,107.3 252.4,107.3 252.4,108.8 256.2,108.8 256.2,110.2 260.0,110.2 260.0,111.0 263.8,111.0 263.8,111.9 267.6,111.9 267.6,113.1 271.4,113.1 271.4,114.3 275.2,114.3 275.2,115.6 279.0,115.6 279.0,117.1 282.8,117.1 282.8,118.3 286.6,118.3 286.6,119.1 290.4,119.1 290.4,120.5 294.2,120.5 294.2,121.5 298.0,121.5 298.0,122.8 301.8,122.8 301.8,124.4 305.6,124.4 305.6,126.0 309.4,126.0 309.4,127.3 313.2,127.3 313.2,128.3 317.0,128.3 317.0,130.4 320.8,130.4 320.8,132.6 324.6,132.6 324.6,134.5 328.4,134.5 328.4,136.1 332.2,136.1 332.2,137.3 336.0,137.3 336.0,138.8 339.8,138.8 339.8,140.0 343.6,140.0 343.6,141.0 347.4,141.0 347.4,144.1 351.2,144.1 351.2,146.0 355.0,146.0 355.0,147.1 358.8,147.1 358.8,149.2 362.6,149.2 362.6,150.5 366.4,150.5 366.4,151.8 370.2,151.8 370.2,153.2 374.0,153.2 374.0,155.2 377.8,155.2 377.8,157.3 381.6,157.3 381.6,157.9 385.4,157.9 385.4,164.6 389.2,164.6 389.2,166.0 393.0,166.0 393.0,166.0 396.8,166.0 396.8,166.7 400.6,166.7 400.6,168.9 404.4,168.9 404.4,171.3 408.2,171.3 408.2,172.2 412.0,172.2 412.0,173.1 415.8,173.1 415.8,176.8 419.6,176.8 419.6,177.8 423.4,177.8 423.4,179.9 427.2,179.9 427.2,187.2 431.0,187.2 431.0,194.8 434.8,194.8 434.8,198.4 438.6,198.4 438.6,198.4 442.4,198.4 442.4,198.4 446.2,198.4 446.2,207.1 450.0,207.1 450.0,215.7 453.8,215.7 453.8,219.1 457.6,219.1 457.6,232.3 461.4,232.3 461.4,238.3 465.2,238.3 465.2,238.3 469.0,238.3 469.0,245.5 472.8,245.5 472.8,245.5 476.6,245.5 476.6,245.5 480.4,245.5 480.4,245.5 484.2,245.5 484.2,245.5 488.0,245.5 488.0,245.5 491.8,245.5 491.8,245.5 495.6,245.5 495.6,254.9 499.4,254.9 499.4,254.9 503.2,254.9 503.2,254.9 507.0,254.9 507.0,254.9 510.8,254.9 510.8,268.1 514.6,268.1 514.6,268.1 518.4,268.1 518.4,268.1 522.2,268.1 522.2,290.7 526.0,290.7 526.0,290.7 529.8,290.7 529.8,290.7 533.6,290.7 533.6,290.7 537.4,290.7 537.4,290.7 541.2,290.7 541.2,290.7 545.0,290.7 545.0,290.7 548.8,290.7 548.8,290.7 552.6,290.7 552.6,290.7 556.4,290.7 556.4,290.7 560.2,290.7 560.2,290.7 564.0,290.7 564.0,290.7 567.8,290.7 567.8,290.7 571.6,290.7 571.6,290.7 575.4,290.7 575.4,290.7 579.2,290.7 579.2,290.7 583.0,290.7 583.0,290.7 586.8,290.7 586.8,290.7 590.6,290.7 590.6,290.7 594.4,290.7" fill="none" stroke="#888" stroke-width="1.8" stroke-dasharray="5,3"/>
+<line x1="71.5" y1="30.0" x2="71.5" y2="300.0" stroke="#d0564a" stroke-width="2.2"/>
+<polyline points="420.0,48.0 448.0,48.0" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<text x="454.0" y="52.0" font-size="12" text-anchor="start">1 tick + xTaskDelayUntil</text>
+<polyline points="420.0,68.0 448.0,68.0" fill="none" stroke="#e08a3c" stroke-width="2"/>
+<text x="454.0" y="72.0" font-size="12" text-anchor="start">2 SW 타이머 (데몬 prio 7)</text>
+<polyline points="420.0,88.0 448.0,88.0" fill="none" stroke="#3f9a6b" stroke-width="2"/>
+<text x="454.0" y="92.0" font-size="12" text-anchor="start">3 TIMER0 ISR → notify</text>
+<polyline points="420.0,108.0 448.0,108.0" fill="none" stroke="#888" stroke-width="2" stroke-dasharray="5,3"/>
+<text x="454.0" y="112.0" font-size="12" text-anchor="start">5 DRDY ISR → notify</text>
+<polyline points="420.0,128.0 448.0,128.0" fill="none" stroke="#d0564a" stroke-width="2"/>
+<text x="454.0" y="132.0" font-size="12" text-anchor="start">4 TIMER0 ISR 직접: 항상 0.4 us</text>
+</svg>
+```
+그림 4 — 예제 4 측정(QEMU icount, 3000주기 × 방식). 세로축은 P(시작 지연 > x)의 로그 축. 방식 1·3·5(파랑 · 초록 · 회색 점선)는 거의 겹치고 약 30%가 10 µs를 넘고 1%가 약 80 µs를 넘는다. 방식 2(주황)는 최소부터 14 µs라 처음 칸이 1이다. 방식 4(빨강)는 0.4 µs에 수직선 하나 — 지터가 없다.
+
+출력에서 볼 것: 70%의 주기는 방해 없이 7~8 µs에 시작하고, 나머지 30%가 부하와 겹쳐 꼬리를 만든다. **평균(16~24 µs)은 이 꼬리를 숨긴다.** 제어 설계에는 p99.9나 최대값을 쓴다. 3000주기에서 p99.9는 3개짜리 통계이므로, 실제 비행 펌웨어 검증은 수백만 주기(몇 시간)를 돌려 최대값을 본다.
+
+### 3.5 부하 성분별 분해 — 누가 꼬리를 만드나
+
+무엇을 확인하나: 같은 예제 4를 방식 1과 3에서 `LOADMASK` = 0(부하 없음), 1(L1 ISR만), 2(크리티컬 섹션만), 4(스케줄러 잠금만)로 빌드해 첫 두 줄만 본다.
+
+```sh
+limactl shell elinux -- bash -lc 'cd /var/tmp/rtos/E7; S=/Users/donh/.rtos_scratch/E7; for s in 1 3; do for m in 0 1 2 4; do $S/run.sh ex4_schemes.c ex4_s${s}m$m -DSCHEME=$s -DLOADMASK=$m > ex4_s${s}m$m.txt 2>&1; head -2 ex4_s${s}m$m.txt; done; done'
+```
+
+```text
+SCHEME 1 LOADMASK 0  lat_cyc min=178 max=214
+lat_us n=2990 min=7 p50=7 p99=8 p99.9=8 max=8 avg=7
+SCHEME 1 LOADMASK 1  lat_cyc min=178 max=1707
+lat_us n=2990 min=7 p50=7 p99=52 p99.9=66 max=68 avg=9
+SCHEME 1 LOADMASK 2  lat_cyc min=178 max=1150
+lat_us n=2990 min=7 p50=7 p99=31 p99.9=42 max=46 avg=8
+SCHEME 1 LOADMASK 4  lat_cyc min=178 max=2626
+lat_us n=2990 min=7 p50=7 p99=86 p99.9=102 max=105 avg=12
+SCHEME 3 LOADMASK 0  lat_cyc min=207 max=207
+lat_us n=2990 min=8 p50=8 p99=8 p99.9=8 max=8 avg=8
+SCHEME 3 LOADMASK 1  lat_cyc min=207 max=1735
+lat_us n=2990 min=8 p50=8 p99=52 p99.9=67 max=69 avg=10
+SCHEME 3 LOADMASK 2  lat_cyc min=207 max=1170
+lat_us n=2990 min=8 p50=8 p99=31 p99.9=43 max=46 avg=8
+SCHEME 3 LOADMASK 4  lat_cyc min=207 max=2554
+lat_us n=2990 min=8 p50=8 p99=81 p99.9=99 max=102 avg=14
+```
+
+```svg
+<svg viewBox="0 0 680 290" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<line x1="150.0" y1="20.0" x2="150.0" y2="250.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="150.0" y1="250.0" x2="620.0" y2="250.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="150.0" y1="250.0" x2="150.0" y2="254.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="150.0" y="268.0" font-size="12" text-anchor="middle">0</text>
+<line x1="228.3" y1="250.0" x2="228.3" y2="254.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="228.3" y="268.0" font-size="12" text-anchor="middle">25</text>
+<line x1="306.7" y1="250.0" x2="306.7" y2="254.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="306.7" y="268.0" font-size="12" text-anchor="middle">50</text>
+<line x1="385.0" y1="250.0" x2="385.0" y2="254.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="385.0" y="268.0" font-size="12" text-anchor="middle">75</text>
+<line x1="463.3" y1="250.0" x2="463.3" y2="254.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="463.3" y="268.0" font-size="12" text-anchor="middle">100</text>
+<line x1="541.7" y1="250.0" x2="541.7" y2="254.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="541.7" y="268.0" font-size="12" text-anchor="middle">125</text>
+<line x1="620.0" y1="250.0" x2="620.0" y2="254.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="620.0" y="268.0" font-size="12" text-anchor="middle">150</text>
+<text x="385.0" y="286.0" font-size="12" text-anchor="middle">최대 시작 지연 (us), 2990주기</text>
+<text x="142.0" y="46.0" font-size="12" text-anchor="end">부하 없음</text>
+<rect x="150.0" y="28.0" width="25.1" height="14.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="179.1" y="39.0" font-size="12" text-anchor="start">8</text>
+<rect x="150.0" y="44.0" width="25.1" height="14.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="179.1" y="55.0" font-size="12" text-anchor="start">8</text>
+<text x="142.0" y="90.0" font-size="12" text-anchor="end">L1 ISR만</text>
+<rect x="150.0" y="72.0" width="213.1" height="14.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="367.1" y="83.0" font-size="12" text-anchor="start">68</text>
+<rect x="150.0" y="88.0" width="216.2" height="14.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="370.2" y="99.0" font-size="12" text-anchor="start">69</text>
+<text x="142.0" y="134.0" font-size="12" text-anchor="end">크리티컬 섹션만</text>
+<rect x="150.0" y="116.0" width="144.1" height="14.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="298.1" y="127.0" font-size="12" text-anchor="start">46</text>
+<rect x="150.0" y="132.0" width="144.1" height="14.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="298.1" y="143.0" font-size="12" text-anchor="start">46</text>
+<text x="142.0" y="178.0" font-size="12" text-anchor="end">스케줄러 잠금만</text>
+<rect x="150.0" y="160.0" width="329.0" height="14.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="483.0" y="171.0" font-size="12" text-anchor="start">105</text>
+<rect x="150.0" y="176.0" width="319.6" height="14.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="473.6" y="187.0" font-size="12" text-anchor="start">102</text>
+<text x="142.0" y="222.0" font-size="12" text-anchor="end">셋 다</text>
+<rect x="150.0" y="204.0" width="413.6" height="14.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="567.6" y="215.0" font-size="12" text-anchor="start">132</text>
+<rect x="150.0" y="220.0" width="435.5" height="14.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="589.5" y="231.0" font-size="12" text-anchor="start">139</text>
+<rect x="470.0" y="30.0" width="14.0" height="12.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="490.0" y="41.0" font-size="12" text-anchor="start">1 tick 구동</text>
+<rect x="470.0" y="50.0" width="14.0" height="12.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="490.0" y="61.0" font-size="12" text-anchor="start">3 TIMER0 → notify</text>
+</svg>
+```
+그림 5 — 예제 4 분해 측정. 부하 성분 하나씩 켰을 때의 최대 시작 지연. 각 성분의 최대값은 "그 성분 구간의 최대 길이 + 기본 지연 7~8 µs"와 거의 같다(ISR 60 → 68, 크리티컬 40 → 46, 잠금 100 → 105). 셋을 다 켜면 겹쳐서 130 µs대가 된다.
+
+출력에서 볼 것:
+
+- 부하가 없으면 방식 3은 **207사이클(8.3 µs)로 완전히 일정**하다. 방식 1은 178~214사이클로 약간 흔들린다(1.4 µs) — SysTick 핸들러 안의 `xTaskIncrementTick()` 경로 길이가 tick마다 조금씩 다르다(C5 §2).
+- 각 성분이 만드는 최대 지연 ≈ **그 성분의 가장 긴 구간**. 지터 예산을 세울 때 "가장 긴 크리티컬 섹션", "가장 긴 스케줄러 잠금", "제어보다 높거나 같은 ISR이 막을 수 있는 최대 시간"을 각각 알아야 하는 이유다. RTA(N3)에서 블로킹 항 B가 이것이다.
+- 스케줄러 잠금은 인터럽트를 막지 않는데도 방식 3의 지연을 102 µs까지 만든다. ISR은 제때 돌아 통지를 보냈지만, **태스크 전환이 `xTaskResumeAll()`까지 미뤄졌기** 때문이다. 방식 4만 이것과 무관하다.
+
+### 3.6 그래서 무엇을 고르나
+
+| 상황 | 고를 방식 | 이유 (이 노트의 측정) |
+|---|---|---|
+| 루프 ≤ tick rate의 약수, 지터 100 µs급 허용 (텔레메트리, 배터리, nav 50 Hz) | 1 tick 구동 | 가장 단순. 지터는 방식 3과 같다 |
+| 짧고 블록 안 하는 주기 일 여러 개 (LED, 타임아웃 감시) | 2 SW 타이머 | 개수 비용이 작다. 정확도는 가장 낮다 (D6) |
+| tick과 무관한 주기, 블록하는 일 포함, 지터 100 µs급 허용 | 3 HW 타이머 → 태스크 | 해상도. 지터는 잠금 구간이 정한다 |
+| 수 µs 이하 지터, 20 kHz FOC 전류 루프 | 4 ISR 직접 (BASEPRI 밖) | 지터 0. 단 커널 API 금지, 짧아야 함 |
+| 센서가 박자를 정하는 루프 (IMU rate loop) | 5 DRDY → 태스크 또는 ISR | 샘플 나이가 최소 · 일정 (§4) |
+
+예를 들어 드론 FC라면 4와 5를 섞는다: IMU DRDY 인터럽트가 SPI DMA를 시작하고, DMA 완료 ISR이 rate loop를 깨운다(E6). 그 rate loop 태스크의 지터를 줄이려면 다른 코드의 크리티컬 섹션 · 스케줄러 잠금을 짧게 유지하는 것이 핵심이다 — 이 노트의 분해 결과가 그 근거다.
+
+---
+
+## 4. 센서에 맞추기 — 샘플 나이와 위상 정렬
+
+### 4.1 직관 — 두 개의 시계
+
+IMU는 자기 발진기로 샘플을 찍는다. 데이터시트의 ODR이 1 kHz여도 실제로는 0.1~몇 % 다르다. MCU 타이머가 정확히 1 kHz로 제어 루프를 돌리면, 두 시계의 차이만큼 **매 주기 위상이 미끄러진다**. 1000 Hz와 998.4 Hz라면 차이 1.6 Hz → **1/1.6 = 0.625초마다 한 바퀴**(beat). 그 동안 샘플 나이는 0에서 1 ms까지 톱니처럼 오가고, 한 바퀴에 한 번은 **같은 샘플을 두 번 쓰거나**(루프가 빠를 때) **샘플 하나를 건너뛴다**(루프가 느릴 때). 고치는 법은 둘이다: 센서의 DRDY로 루프를 직접 구동하거나, 타이머의 주기를 센서에 맞춰 계속 조정하는 것(위상 추종, 소프트웨어 PLL).
+
+### 4.2 예제 6 — 샘플 나이: 타이머 구동 / DRDY 구동 / 위상 추종
+
+무엇을 확인하나: 듀얼타이머(IRQ 10)를 IMU로 쓴다 — 1001.6 µs마다 DRDY ISR이 샘플 시각과 번호를 기록한다. MODE 0은 TIMER0 1 kHz가 제어 태스크를 깨우고(센서와 무관), MODE 1은 DRDY ISR이 직접 깨우고, MODE 2는 TIMER0을 쓰되 ISR에서 "지금 샘플 나이 − 목표 100 µs"를 위상 오차로 보고 PI로 다음 주기(RELOAD)를 조정한다. 제어 태스크는 자기가 쓰는 샘플의 나이를 25주기마다 찍고, k ≥ 600에서 재사용 · 건너뛴 샘플 수를 센다. 배경 부하는 없다.
+
+```c
+/* E7 예제 6: 센서 샘플 나이 — IMU(듀얼타이머, ODR 998.4 Hz)와 제어 루프의 시계가 다를 때.
+ * MODE 0: TIMER0 1 kHz → notify (센서와 무관)   1: IMU DRDY ISR → notify
+ *      2: TIMER0 + 위상 추종(PI로 RELOAD 조정, 목표 나이 100 us) */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "e7.h"
+#define N 1300
+#define TS 25040u                                        /* IMU 샘플 간격 1001.6 us */
+static volatile uint32_t t_samp, seq; static TaskHandle_t h;
+static int32_t integ;
+static void wake(void) { BaseType_t w = pdFALSE; vTaskNotifyGiveFromISR(h, &w); portYIELD_FROM_ISR(w); }
+void DUALTIMER_IRQHandler(void)                         /* IMU data-ready */
+{
+    DT1(0x0C) = 1u; t_samp = CYC(); seq++;
+    if (MODE == 1) wake();
+}
+void TIMER0_IRQHandler(void)
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1u;
+    if (MODE == 2) {                                     /* 위상 오차 = 나이 - 목표 (사이클) */
+        int32_t err = (int32_t)(CYC() - t_samp) - 2500;
+        if (err > 12520) err -= (int32_t)TS;             /* 반 주기 넘으면 다음 샘플 기준 */
+        integ += err / 16;
+        TIMER_RELOAD(TIMER0_BASE) = (uint32_t)(25000 - 1 - integ / 64 - err / 8);   /* 늦으면 주기 단축 */
+    }
+    wake();
+}
+static void ctl(void *p)
+{
+    (void)p;
+    uint32_t last_seq = 0, dup = 0, skip = 0, mn = ~0u, mx = 0;
+    for (uint32_t k = 0; k < N; k++) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t age = (CYC() - t_samp) / 25u, s = seq;  /* 쓰는 샘플의 나이 (us) */
+        if (k >= 600) {
+            if (s == last_seq) dup++; else if (s > last_seq + 1) skip += s - last_seq - 1;
+            if (age < mn) mn = age;
+            if (age > mx) mx = age;
+        }
+        last_seq = s;
+        if (k % 25 == 0) board_printf_raw("%u ", age);
+        burn_us(50);
+    }
+    board_printf_raw("\nMODE %d (k>=600): age min=%u max=%u us, reused=%u, skipped=%u, reload=%u\n", MODE,
+                     mn, mx, dup, skip, MODE == 1 ? 0u : TIMER_RELOAD(TIMER0_BASE) + 1u);
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(ctl, "ctl", 512, NULL, 6, &h);
+    DT1(0x00) = TS - 1u; DT1(0x08) = 0xE2u; nvic_on(10, 0x30);
+    if (MODE != 1) {
+        TIMER_RELOAD(TIMER0_BASE) = 24999u; TIMER_VALUE(TIMER0_BASE) = 24999u;
+        TIMER_CTRL(TIMER0_BASE) = 9u; nvic_on(8, 0x20);
+    }
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E7; for m in 0 1 2; do $S/run.sh ex6_age.c ex6_m$m -DMODE=$m; done'
+```
+
+```text
+4 968 928 888 848 808 768 728 688 648 608 568 528 488 448 408 368 328 288 248 208 168 128 88 48 8 969 929 889 849 809 769 729 689 649 609 569 529 489 449 409 369 329 289 249 209 169 129 89 49 9 971 
+MODE 0 (k>=600): age min=0 max=1000 us, reused=2, skipped=0, reload=25000
+[board_exit] code=0
+8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 
+MODE 1 (k>=600): age min=8 max=9 us, reused=0, skipped=0, reload=0
+[board_exit] code=0
+4 98 111 111 111 110 110 110 110 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 110 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 109 110 109 109 
+MODE 2 (k>=600): age min=108 max=110 us, reused=0, skipped=0, reload=25011
+[board_exit] code=0
+```
+
+```svg
+<svg viewBox="0 0 680 350" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<line x1="70.0" y1="20.0" x2="70.0" y2="240.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="70.0" y1="240.0" x2="640.0" y2="240.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="66.0" y1="240.0" x2="70.0" y2="240.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="244.0" font-size="12" text-anchor="end">0</text>
+<line x1="66.0" y1="185.0" x2="70.0" y2="185.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="189.0" font-size="12" text-anchor="end">250</text>
+<line x1="66.0" y1="130.0" x2="70.0" y2="130.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="134.0" font-size="12" text-anchor="end">500</text>
+<line x1="66.0" y1="75.0" x2="70.0" y2="75.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="79.0" font-size="12" text-anchor="end">750</text>
+<line x1="66.0" y1="20.0" x2="70.0" y2="20.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="62.0" y="24.0" font-size="12" text-anchor="end">1000</text>
+<line x1="70.0" y1="240.0" x2="70.0" y2="244.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="70.0" y="258.0" font-size="12" text-anchor="middle">0</text>
+<line x1="179.6" y1="240.0" x2="179.6" y2="244.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="179.6" y="258.0" font-size="12" text-anchor="middle">250</text>
+<line x1="289.2" y1="240.0" x2="289.2" y2="244.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="289.2" y="258.0" font-size="12" text-anchor="middle">500</text>
+<line x1="398.8" y1="240.0" x2="398.8" y2="244.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="398.8" y="258.0" font-size="12" text-anchor="middle">750</text>
+<line x1="508.5" y1="240.0" x2="508.5" y2="244.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="508.5" y="258.0" font-size="12" text-anchor="middle">1000</text>
+<line x1="618.1" y1="240.0" x2="618.1" y2="244.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="618.1" y="258.0" font-size="12" text-anchor="middle">1250</text>
+<text x="355.0" y="278.0" font-size="12" text-anchor="middle">제어 주기 번호 k  (세로: 쓰는 샘플의 나이, us)</text>
+<polyline points="70.0,239.1" fill="none" stroke="#d0564a" stroke-width="1.8"/>
+<polyline points="81.0,27.0 91.9,35.8 102.9,44.6 113.8,53.4 124.8,62.2 135.8,71.0 146.7,79.8 157.7,88.6 168.7,97.4 179.6,106.2 190.6,115.0 201.5,123.8 212.5,132.6 223.5,141.4 234.4,150.2 245.4,159.0 256.3,167.8 267.3,176.6 278.3,185.4 289.2,194.2 300.2,203.0 311.2,211.8 322.1,220.6 333.1,229.4 344.0,238.2" fill="none" stroke="#d0564a" stroke-width="1.8"/>
+<polyline points="355.0,26.8 366.0,35.6 376.9,44.4 387.9,53.2 398.8,62.0 409.8,70.8 420.8,79.6 431.7,88.4 442.7,97.2 453.7,106.0 464.6,114.8 475.6,123.6 486.5,132.4 497.5,141.2 508.5,150.0 519.4,158.8 530.4,167.6 541.3,176.4 552.3,185.2 563.3,194.0 574.2,202.8 585.2,211.6 596.2,220.4 607.1,229.2 618.1,238.0" fill="none" stroke="#d0564a" stroke-width="1.8"/>
+<polyline points="629.0,26.4" fill="none" stroke="#d0564a" stroke-width="1.8"/>
+<polyline points="70.0,238.2 81.0,238.2 91.9,238.2 102.9,238.2 113.8,238.2 124.8,238.2 135.8,238.2 146.7,238.2 157.7,238.2 168.7,238.2 179.6,238.2 190.6,238.2 201.5,238.2 212.5,238.2 223.5,238.2 234.4,238.2 245.4,238.2 256.3,238.2 267.3,238.2 278.3,238.2 289.2,238.2 300.2,238.2 311.2,238.2 322.1,238.2 333.1,238.2 344.0,238.2 355.0,238.2 366.0,238.2 376.9,238.2 387.9,238.2 398.8,238.2 409.8,238.2 420.8,238.2 431.7,238.2 442.7,238.2 453.7,238.2 464.6,238.2 475.6,238.2 486.5,238.2 497.5,238.2 508.5,238.2 519.4,238.2 530.4,238.2 541.3,238.2 552.3,238.2 563.3,238.2 574.2,238.2 585.2,238.2 596.2,238.2 607.1,238.2 618.1,238.2 629.0,238.2" fill="none" stroke="#3f9a6b" stroke-width="1.8"/>
+<polyline points="70.0,239.1 81.0,218.4 91.9,215.6 102.9,215.6 113.8,215.6 124.8,215.8 135.8,215.8 146.7,215.8 157.7,215.8 168.7,216.0 179.6,216.0 190.6,216.0 201.5,216.0 212.5,216.0 223.5,216.0 234.4,216.0 245.4,216.0 256.3,216.0 267.3,216.0 278.3,216.0 289.2,216.0 300.2,216.0 311.2,216.0 322.1,216.0 333.1,215.8 344.0,216.0 355.0,216.0 366.0,216.0 376.9,216.0 387.9,216.0 398.8,216.0 409.8,216.0 420.8,216.0 431.7,216.0 442.7,216.0 453.7,216.0 464.6,216.0 475.6,216.0 486.5,216.0 497.5,216.0 508.5,216.0 519.4,216.0 530.4,216.0 541.3,216.0 552.3,216.0 563.3,216.0 574.2,216.0 585.2,216.0 596.2,216.0 607.1,215.8 618.1,216.0 629.0,216.0" fill="none" stroke="#4a7bd0" stroke-width="1.8" stroke-dasharray="5,3"/>
+<text x="108.0" y="300.0" font-size="12" text-anchor="start">MODE 0: TIMER0 1 kHz, 센서와 무관 → 0~1000 us 톱니</text>
+<polyline points="80.0,296.0 102.0,296.0" fill="none" stroke="#d0564a" stroke-width="2"/>
+<text x="108.0" y="320.0" font-size="12" text-anchor="start">MODE 2: TIMER0 + 위상 추종 → 108~110 us</text>
+<polyline points="80.0,316.0 102.0,316.0" fill="none" stroke="#4a7bd0" stroke-width="2" stroke-dasharray="5,3"/>
+<text x="108.0" y="340.0" font-size="12" text-anchor="start">MODE 1: DRDY 구동 → 8~9 us</text>
+<polyline points="80.0,336.0 102.0,336.0" fill="none" stroke="#3f9a6b" stroke-width="2"/>
+</svg>
+```
+그림 6 — 예제 6 측정. 타이머 구동(빨강)은 샘플 나이가 1.6 µs/주기씩 줄어드는 톱니(625주기마다 한 바퀴)다. DRDY 구동(초록)은 8~9 µs로 바닥에 붙어 있고, 위상 추종(파랑 점선)은 50주기 안에 108~110 µs로 수렴한다.
+
+출력에서 볼 것:
+
+- **MODE 0**: 샘플 나이가 968 → 928 → … → 8 → 969로 25주기마다 40 µs씩 줄어든다(주기당 1.6 µs = 1001.6 − 1000). 0~1000 µs 전 범위를 돌고, 700주기 중 **같은 샘플을 2번 재사용**했다(k = 1250 근처의 감김 지점). 제어기는 그 주기에 "새 데이터"라고 믿고 미분항을 계산하므로 D항이 0이 됐다가 다음 주기에 두 배가 된다 — 잡음 스파이크다. 지터 측정(§3)만 보면 이 루프는 완벽해 보인다는 것이 무섭다.
+- **MODE 1**: 나이 8~9 µs로 일정(DRDY ISR → 통지 → 전환). 재사용 · 건너뜀 0. 루프 주파수는 센서를 따라 998.4 Hz가 된다 — **제어기의 dt도 센서 주기를 써야 한다**(1 ms라고 하드코딩하면 0.16% 틀린다. 작지만 적분기에는 쌓인다).
+- **MODE 2**: 50주기 안에 108~110 µs에 고정(목표 100 µs + ISR → 태스크 8 µs). 최종 RELOAD 25011 = 공칭 25000 + 적분항이 찾은 주파수 보정. MCU 타이머가 박자를 쥐면서도 센서와 위상이 맞는다. 여러 센서가 있거나 DRDY 핀이 없을 때(FIFO 읽기), 또는 "샘플 후 정확히 100 µs에 계산 시작" 같은 오프셋이 필요할 때 쓰는 방법이다.
+
+### 4.3 예제 7 — 함정 확인: QEMU CMSDK 타이머의 RELOAD 쓰기
+
+무엇을 확인하나: 예제 6의 MODE 2를 처음 짤 때 위상 추종이 엉뚱한 곳(나이 600 µs)에 붙었다. 원인은 둘이었다 — 하나는 피드백 부호(늦으면 주기를 **줄여야** 한다), 다른 하나는 RELOAD 레지스터 쓰기의 동작이다. 카운트 도중 RELOAD를 쓰면 VALUE가 어떻게 되는지 bare-metal로 확인한다.
+
+```c
+/* E7 예제 7: QEMU CMSDK TIMER0 — 카운트 도중 RELOAD를 쓰면 VALUE는? */
+#include "board.h"
+int main(void)
+{
+    TIMER_RELOAD(TIMER0_BASE) = 24999u; TIMER_VALUE(TIMER0_BASE) = 24999u; TIMER_CTRL(TIMER0_BASE) = 1u;
+    for (volatile int i = 0; i < 2000; i++) { }
+    uint32_t v1 = TIMER_VALUE(TIMER0_BASE);
+    TIMER_RELOAD(TIMER0_BASE) = 49999u;
+    uint32_t v2 = TIMER_VALUE(TIMER0_BASE);
+    board_printf_raw("before=%u after_reload_write=%u\n", v1, v2);
+    board_exit(0);
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=/Users/donh/.rtos_scratch/E7/t_reload.c OUT=/var/tmp/rtos/E7/t_reload && ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E7/t_reload/app.elf'
+```
+
+```text
+before=15394 after_reload_write=49998
+[board_exit] code=0
+```
+
+출력에서 볼 것: QEMU에서는 RELOAD를 쓰는 즉시 VALUE가 새 값(49998)부터 다시 센다. 그래서 MODE 2에서 ISR 안의 RELOAD 쓰기는 "다음 주기 길이 = 새 RELOAD + 1 + ISR 진입까지의 사이클"이 되고, 그 ISR 지연(약 29사이클)이 RELOAD 25011과 실제 센서 주기 25040의 차이로 나타났다. 실제 칩의 타이머는 다를 수 있다(예: STM32 TIMx는 ARR preload 비트 ARPE가 1이면 다음 update 이벤트에 반영). **주기를 바꾸는 레지스터가 언제 효력을 갖는지는 칩마다 데이터시트로 확인한다.** 실칩 CMSDK 타이머의 동작은 확인 못 함.
+
+### 4.4 실무 정리 — 센서 정렬의 세 패턴
+
+| 패턴 | 샘플 나이 | 루프 주파수 | 언제 |
+|---|---|---|---|
+| 타이머 구동, 센서 무관 | 0~T 톱니, 가끔 재사용 · 건너뜀 | MCU 기준 정확 | 센서가 느리고(예: 50 Hz 기압계) 제어가 빠를 때만 |
+| DRDY 구동 | 최소 · 일정 | 센서를 따름 | IMU rate loop의 기본 |
+| 타이머 + 위상 추종 | 원하는 오프셋에 일정 | 센서를 따름 (평균) | 여러 센서 · FIFO · 계산 시작 오프셋이 필요할 때 |
+
+센서 시각 자체를 정확히 찍는 법(입력 캡처, 32 → 64비트 확장)은 E5, 호스트 시계와의 매핑은 Q7이다.
+
+---
+
+## 5. 시작 지터 vs 출력 지터 — 출력을 래치하면
+
+### 5.1 직관
+
+시작이 정확해도 계산 시간이 20~300 µs로 흔들리면 **출력 시각**이 흔들린다. 플랜트(모터)가 보는 것은 출력이다. 해결책은 오래된 아날로그 · DSP 설계에서 온 것으로, **계산 결과를 바로 내보내지 않고 다음 사건 시각에 한꺼번에 내보내는 것**이다. 지연은 정확히 한 주기(T)로 늘지만 흔들리지 않는다. 일정한 지연은 이득을 설계할 때 보상할 수 있고, 흔들리는 지연은 보상할 수 없다. 하드웨어는 이것을 이미 제공한다 — 타이머 PWM의 compare 레지스터 preload(STM32의 OCxPE · ARPE)는 새 값을 다음 update 이벤트에 반영한다.
+
+### 5.2 예제 8 — 계산이 들쭉날쭉할 때: 즉시 출력 vs 다음 사건에 래치
+
+무엇을 확인하나: 방식 3(TIMER0 → 태스크) + §3.2의 부하에서 계산을 20~300 µs(CPU 시간)로 흔든다. MODE 0은 계산이 끝나자마자 출력 변수에 쓰고, MODE 1은 다음 TIMER0 ISR의 첫 줄에서 쓴다(하드웨어 preload를 소프트웨어로 흉내). "샘플 사건 k → 출력"을 잰다.
+
+```c
+/* E7 예제 8: 시작(release) 지터 vs 완료(출력) 지터 — 계산이 20~300 us로 들쭉날쭉할 때
+ * MODE 0: 계산 끝나자마자 출력 레지스터에 쓴다   MODE 1: 다음 타이머 사건에 출력(ISR 첫 줄, PWM preload 흉내)
+ * 둘 다 TIMER0 1 kHz → notify, load.h 배경 부하. 잰 것: 샘플 사건 k → 출력까지 (us) */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "load.h"
+#define NCYC 2000
+static hist_t rel = { .off = 0 }, io = { .off = MODE ? -900 : 0 };   /* MODE 1은 900 us부터 */
+static volatile uint32_t k, pending_out, out_reg; static TaskHandle_t h;
+static uint32_t since(void) { return (TIMER_RELOAD(TIMER0_BASE) - TIMER_VALUE(TIMER0_BASE)) / 25u; }
+void TIMER0_IRQHandler(void)
+{
+    if (MODE == 1 && pending_out) {                         /* 출력 래치: 사건 직후 고정 시점 */
+        out_reg = pending_out; pending_out = 0;
+        if (k > 10 && k <= NCYC) hrec(&io, (int32_t)(1000u + since()));
+    }
+    TIMER_INTCLR(TIMER0_BASE) = 1u;
+    BaseType_t w = pdFALSE; vTaskNotifyGiveFromISR(h, &w); portYIELD_FROM_ISR(w);
+}
+static void ctl(void *p)
+{
+    (void)p;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t s = since();
+        if (k >= 10 && k < NCYC) hrec(&rel, (int32_t)s);
+        burn_us(20u + rnd(280u));                            /* 계산 20..300 us (CPU 시간) */
+        if (MODE == 0) { out_reg = k | 1u; if (k >= 10 && k < NCYC) hrec(&io, (int32_t)since()); }
+        else pending_out = k | 1u;
+        k++;
+    }
+}
+static void rep(void *p)
+{
+    (void)p;
+    load_start();
+    xTaskCreate(ctl, "ctl", 256, NULL, 6, &h);
+    TIMER_RELOAD(TIMER0_BASE) = 24999u; TIMER_VALUE(TIMER0_BASE) = 24999u;
+    TIMER_CTRL(TIMER0_BASE) = 9u; nvic_on(8, 0x20);
+    while (k < NCYC + 2) vTaskDelay(10);
+    board_printf_raw("MODE %d\n", MODE);
+    hprint("release_us", &rel, 0);
+    hprint("sample_to_output_us", &io, 0);
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(rep, "rep", 512, NULL, 5, NULL);
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E7; for m in 0 1; do $S/run.sh ex7_latch.c ex7_m$m -DMODE=$m; done'
+```
+
+```text
+MODE 0
+release_us n=1990 min=8 p50=8 p99=88 p99.9=116 max=128 avg=17
+sample_to_output_us n=1990 min=30 p50=191 p99=387 p99.9=451 max=503 avg=193
+[board_exit] code=0
+MODE 1
+release_us n=1990 min=9 p50=9 p99=88 p99.9=112 max=128 avg=18
+sample_to_output_us n=1990 min=1000 p50=1000 p99=1026 p99.9=1036 max=1037 avg=1000
+[board_exit] code=0
+```
+
+출력에서 볼 것:
+
+- 두 MODE의 시작 지터는 같다(8~128 µs). 같은 부하, 같은 경로다.
+- **MODE 0의 출력 지연은 30~503 µs**(폭 473 µs). 시작 지터(120 µs)와 계산 변동(280 µs)에 계산 중 선점까지 더해졌다. 시작 지터만 보고 "100 µs급 지터"라고 말하면 틀린다.
+- **MODE 1은 1000~1037 µs**(p99 1026). 지연은 1 ms로 늘었지만 폭이 37 µs로 줄었다. 남은 37 µs는 TIMER0 ISR(0x20)이 **크리티컬 섹션(최대 40 µs)에 막혀서** 생긴 것이다 — 소프트웨어 래치의 한계다. 진짜 하드웨어 preload는 CPU와 무관하게 이벤트 순간에 바뀌므로 이 흔들림도 0이다.
+- 어느 쪽이 나은지는 §8의 시뮬레이션이 답한다: 지연 1 ms가 허용되는 대역폭이면 래치가 낫고, 아니면 계산을 짧고 일정하게 만들어야 한다.
+
+### 5.3 함정 — 캐시와 flash는 실칩에서만
+
+계산 시간 변동의 큰 원인 하나는 캐시 miss와 flash wait state다. Cortex-M7(STM32H7)에서 rate loop 코드가 캐시에 있을 때와 없을 때 실행 시간이 몇 배 차이 날 수 있다. **QEMU는 캐시와 wait state를 모델링하지 않으므로 이 노트에서는 실행해서 보여 줄 수 없다.** 대책은 B8: 제어 코드 · 데이터를 ITCM/DTCM에 두기, 캐시 잠금, 그리고 실칩에서 DWT CYCCNT로 계산 시간의 최대값을 재기(E3, N7의 측정 기반 WCET).
+
+---
+
+## 6. 여러 루프의 위상 — 조화 주기와 오프셋
+
+### 6.1 직관
+
+드론 FC에는 루프가 여럿이다: rate 1 kHz, attitude 250 Hz, nav 50 Hz. 모두 같은 tick에 릴리스되면 낮은 우선순위 루프는 위의 루프들이 다 끝날 때까지 기다린다. 두 가지 손잡이가 있다.
+
+- **조화(harmonic) 주기**: 각 주기가 더 짧은 주기의 정수배(1 · 4 · 20 ms). 그러면 충돌 패턴이 하이퍼피리어드(최소공배수 = 20 ms)마다 똑같이 반복되어 **지연이 일정**해진다. 일정한 지연은 지터가 아니다. RM 스케줄 가능성도 조화 주기에서 이용률 100%까지 올라간다(N2).
+- **위상 오프셋**: 같은 tick에 몰리지 않게 시작 tick을 엇갈린다. 조화 주기에서만 "절대 안 겹치는" 오프셋이 존재한다.
+
+### 6.2 예제 9 — 1 kHz / 250 Hz / 50 Hz, 위상과 주기를 바꿔 가며
+
+무엇을 확인하나: rate(150 µs, prio 6), attitude(300 µs, prio 5), nav(1200 µs, prio 4)를 `xTaskDelayUntil`로 2000 tick 돌린다. MODE 0은 조화 주기 + 모두 같은 위상, MODE 1은 nav만 2 tick 늦게 시작(attitude가 없는 tick), MODE 2는 attitude를 3 tick(333 Hz, 비조화)으로. 각 루프의 "릴리스 tick → 시작"과 "릴리스 → 끝(응답 시간)"의 최소 · 최대를 잰다. 일은 CPU 시간(`burn_us`)이라 선점당하면 늘어난다.
+
+```c
+/* E7 예제 9: 세 루프의 위상 — rate 1 kHz(150 us, prio 6) · attitude(300 us, prio 5) · nav 50 Hz(1200 us, prio 4)
+ * MODE 0: 조화 주기(att 4 tick), 위상 모두 0   MODE 1: 조화 주기, nav를 2 tick 늦게 시작
+ * MODE 2: 비조화(att 3 tick = 333 Hz), 위상 모두 0.  각 루프의 "릴리스 tick → 시작"과 "릴리스 → 끝" (us) */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "e7.h"
+#define S 10                                             /* 공통 시작 tick */
+#define RUN_TICKS 2000
+typedef struct { const char *nm; TickType_t T, off; uint32_t work, smin, smax, rmin, rmax, n; } loop_t;
+static loop_t L[3] = {                                   /* work = CPU 시간 (us) */
+    { .nm = "rate 1kHz", .T = 1, .off = 0, .work = 150 },
+    { .nm = "attitude ", .T = MODE == 2 ? 3 : 4, .off = 0, .work = 300 },
+    { .nm = "nav 50Hz ", .T = 20, .off = MODE == 1 ? 2 : 0, .work = 1200 },
+};
+static void loop_task(void *p)
+{
+    loop_t *l = p;
+    vTaskDelay(S + l->off - xTaskGetTickCount());
+    TickType_t last = S + l->off;
+    l->smin = l->rmin = ~0u;
+    while (last < S + RUN_TICKS) {
+        uint32_t since = SYST_LOAD - SYST_VAL, now = CYC();  /* 릴리스 tick 이후 경과 */
+        uint32_t rel = now - since;                          /* 릴리스 시각 (사이클) */
+        burn_us(l->work);
+        uint32_t s = since / 25u, r = (CYC() - rel) / 25u;
+        if (s < l->smin) l->smin = s;
+        if (s > l->smax) l->smax = s;
+        if (r < l->rmin) l->rmin = r;
+        if (r > l->rmax) l->rmax = r;
+        l->n++;
+        xTaskDelayUntil(&last, l->T);
+    }
+    vTaskSuspend(NULL);
+}
+static void rep(void *p)
+{
+    (void)p;
+    vTaskDelay(S + RUN_TICKS + 30);
+    board_printf_raw("MODE %d\n", MODE);
+    for (int i = 0; i < 3; i++)
+        board_printf_raw("  %s T=%u off=%u n=%u  start %u..%u us  response %u..%u us\n", L[i].nm,
+                         (unsigned)L[i].T, (unsigned)L[i].off, L[i].n, L[i].smin, L[i].smax, L[i].rmin, L[i].rmax);
+    board_exit(0);
+}
+int main(void)
+{
+    for (int i = 0; i < 3; i++) xTaskCreate(loop_task, L[i].nm, 256, &L[i], 6 - i, NULL);
+    xTaskCreate(rep, "rep", 512, NULL, 1, NULL);
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E7; for m in 0 1 2; do $S/run.sh ex8_phase.c ex8_m$m -DMODE=$m; done'
+```
+
+```text
+MODE 0
+  rate 1kHz T=1 off=0 n=2000  start 7..10 us  response 157..160 us
+  attitude  T=4 off=0 n=500  start 169..171 us  response 469..471 us
+  nav 50Hz  T=20 off=0 n=100  start 481..481 us  response 1848..1849 us
+[board_exit] code=0
+MODE 1
+  rate 1kHz T=1 off=0 n=2000  start 7..9 us  response 157..159 us
+  attitude  T=4 off=0 n=500  start 169..169 us  response 469..469 us
+  nav 50Hz  T=20 off=2 n=100  start 169..169 us  response 1536..1536 us
+[board_exit] code=0
+MODE 2
+  rate 1kHz T=1 off=0 n=2000  start 7..10 us  response 157..160 us
+  attitude  T=3 off=0 n=667  start 169..171 us  response 469..471 us
+  nav 50Hz  T=20 off=0 n=100  start 169..481 us  response 1536..1849 us
+[board_exit] code=0
+```
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="110.0" y="22.0" font-size="13" text-anchor="start">MODE 0: nav가 attitude와 같은 tick</text>
+<text x="102.0" y="46.0" font-size="12" text-anchor="end">rate 1 kHz</text>
+<rect x="111.9" y="34.0" width="40.5" height="16.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<rect x="381.9" y="34.0" width="40.5" height="16.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="102.0" y="70.0" font-size="12" text-anchor="end">attitude</text>
+<rect x="155.6" y="58.0" width="81.0" height="16.0" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c" stroke-width="0.8"/>
+<text x="102.0" y="94.0" font-size="12" text-anchor="end">nav 50 Hz</text>
+<rect x="239.9" y="82.0" width="140.1" height="16.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<rect x="422.4" y="82.0" width="186.6" height="16.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="613.0" y="94.0" font-size="12" text-anchor="start">끝 1848 us</text>
+<line x1="110.0" y1="28.0" x2="110.0" y2="104.0" stroke="#888" stroke-width="0.8" stroke-dasharray="4,3"/>
+<line x1="380.0" y1="28.0" x2="380.0" y2="104.0" stroke="#888" stroke-width="0.8" stroke-dasharray="4,3"/>
+<line x1="650.0" y1="28.0" x2="650.0" y2="104.0" stroke="#888" stroke-width="0.8" stroke-dasharray="4,3"/>
+<text x="110.0" y="152.0" font-size="13" text-anchor="start">MODE 1: nav를 2 tick 늦게 (attitude 없는 tick)</text>
+<text x="102.0" y="176.0" font-size="12" text-anchor="end">rate 1 kHz</text>
+<rect x="111.9" y="164.0" width="40.5" height="16.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<rect x="381.9" y="164.0" width="40.5" height="16.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="102.0" y="200.0" font-size="12" text-anchor="end">attitude</text>
+<text x="102.0" y="224.0" font-size="12" text-anchor="end">nav 50 Hz</text>
+<rect x="155.6" y="212.0" width="224.4" height="16.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<rect x="422.4" y="212.0" width="102.3" height="16.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="528.7" y="224.0" font-size="12" text-anchor="start">끝 1536 us</text>
+<line x1="110.0" y1="158.0" x2="110.0" y2="234.0" stroke="#888" stroke-width="0.8" stroke-dasharray="4,3"/>
+<line x1="380.0" y1="158.0" x2="380.0" y2="234.0" stroke="#888" stroke-width="0.8" stroke-dasharray="4,3"/>
+<line x1="650.0" y1="158.0" x2="650.0" y2="234.0" stroke="#888" stroke-width="0.8" stroke-dasharray="4,3"/>
+<text x="110.0" y="290.0" font-size="12" text-anchor="middle">0 us</text>
+<text x="380.0" y="290.0" font-size="12" text-anchor="middle">1000 us</text>
+<text x="650.0" y="290.0" font-size="12" text-anchor="middle">2000 us</text>
+</svg>
+```
+그림 7 — 예제 9 측정값으로 그린 nav 릴리스 직후 2 ms. MODE 0은 nav가 rate와 attitude를 기다려 481 µs에 시작하고, 1000 µs에 rate에게 선점당한 뒤 1848 µs에 끝난다. MODE 1은 attitude가 없는 tick이라 169 µs에 시작해 1536 µs에 끝난다.
+
+출력에서 볼 것:
+
+- **MODE 0 → 1**: 오프셋 하나로 nav의 시작이 481 → 169 µs, 응답 시간이 1848 → 1536 µs로 줄었다. rate와 attitude는 그대로다. 비용 0의 최적화다.
+- **MODE 0과 1은 모든 값이 min = max**(1 µs 이내)다. 조화 주기라 nav는 매번 같은 상황에서 출발한다 — 지연은 있지만 **지터가 없다**.
+- **MODE 2(비조화)는 nav의 시작이 169~481 µs, 응답이 1536~1849 µs로 흔들린다.** attitude(3 tick)와 nav(20 tick)가 60 tick마다 한 번만 겹치므로 nav 릴리스 3번 중 1번만 늦다. 같은 CPU 부하인데 주기 선택만으로 313 µs의 지터가 생겼다.
+- rate loop(최고 우선순위)는 세 MODE 모두 7~10 µs에 시작한다. 낮은 루프의 위상은 높은 루프에 영향을 주지 않는다(같은 tick에 몰릴 때 tick ISR이 깨우는 태스크 수만큼 몇 µs 길어지는 것 — C5 §2 — 정도).
+
+### 6.3 예제 10 — 조화 vs 비조화: 충돌 없는 오프셋이 있나 (Python)
+
+무엇을 확인하나: attitude 주기 Ta와 nav 주기 20 tick의 하이퍼피리어드 안에서, nav 오프셋 0~19 각각에 대해 attitude와 같은 tick에 릴리스되는 횟수를 센다.
+
+```python
+# E7 예제 10: 조화 주기 vs 비조화 주기 — 하이퍼피리어드 안에서 attitude와 nav가 같은 tick에 릴리스되는 횟수
+from math import lcm
+def collide(Ta, Tn, off_n, ticks):
+    return sum(1 for t in range(ticks) if t % Ta == 0 and t >= off_n and (t - off_n) % Tn == 0)
+for Ta, Tn in ((4, 20), (3, 20), (5, 20), (7, 20)):
+    H = lcm(1, Ta, Tn)
+    row = [collide(Ta, Tn, o, H) for o in range(Tn)]
+    free = [o for o, c in enumerate(row) if c == 0]
+    kind = "harmonic" if Tn % Ta == 0 else "non-harmonic"
+    print(f"att T={Ta} nav T={Tn} ({kind:<12}) hyperperiod={H:>3} ticks  nav releases={H // Tn:>2}"
+          f"  collisions per offset 0..{Tn - 1}: {row}  collision-free offsets: {free if free else 'none'}")
+```
+
+```sh
+limactl shell elinux -- bash -lc 'python3 /Users/donh/.rtos_scratch/E7/ex9_harmonic.py'
+```
+
+```text
+att T=4 nav T=20 (harmonic    ) hyperperiod= 20 ticks  nav releases= 1  collisions per offset 0..19: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]  collision-free offsets: [1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, 17, 18, 19]
+att T=3 nav T=20 (non-harmonic) hyperperiod= 60 ticks  nav releases= 3  collisions per offset 0..19: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]  collision-free offsets: none
+att T=5 nav T=20 (harmonic    ) hyperperiod= 20 ticks  nav releases= 1  collisions per offset 0..19: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0]  collision-free offsets: [1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19]
+att T=7 nav T=20 (non-harmonic) hyperperiod=140 ticks  nav releases= 7  collisions per offset 0..19: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]  collision-free offsets: none
+```
+
+출력에서 볼 것: Ta가 20의 약수(4, 5)면 충돌 없는 오프셋이 15~16개 있다. Ta가 20과 서로소(3, 7)면 **어떤 오프셋을 골라도 하이퍼피리어드마다 정확히 한 번 충돌한다**(중국인의 나머지 정리: 두 주기가 서로소면 모든 위상 조합이 언젠가 나온다). 비조화 주기에서는 오프셋으로 지터를 없앨 수 없고, 최악의 충돌을 견디게 설계(RTA, N3)하는 수밖에 없다. 그래서 여러 루프의 주파수는 한 박자의 정수 분주(예: 8 kHz → 4 → 2 → 1 kHz)로 고르는 것이 설계의 기본이다.
+
+### 6.4 다른 방법 — rate group (분주)
+
+태스크마다 따로 `xTaskDelayUntil`을 거는 대신, 가장 빠른 루프가 카운터를 세다가 4번에 한 번 attitude 태스크에, 20번에 한 번 nav 태스크에 통지하는 방법도 있다(rate group, 분주). 모든 루프가 **같은 박자의 정수 분주**가 되므로 조화가 자동으로 보장되고, 박자 원천(DRDY든 HW 타이머든)을 하나로 통일할 수 있다. 오프셋은 "카운터 % 4 == 1에서 통지"처럼 준다. PX4는 work queue, ArduPilot은 메인 루프 스케줄러로 비슷한 일을 하는데, 그 구조는 Q1 · Q2에서 다룬다.
+
+```c
+/* 패턴 (실행 예제 아님): rate loop가 박자를 나눠 준다. 오프셋으로 att와 nav가 같은 주기에 안 몰리게 */
+static void rate_task(void *p)
+{
+    uint32_t n = 0;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);      /* DRDY 또는 TIMER0이 깨움 */
+        rate_control();
+        n++;
+        if (n % 4 == 1)  xTaskNotifyGive(att_h);       /* 250 Hz, 위상 1 */
+        if (n % 20 == 2) xTaskNotifyGive(nav_h);       /* 50 Hz, 위상 2 */
+    }
+}
+```
+
+---
+
+## 7. 주기를 놓치면 — overrun 감지와 skip / catch-up
+
+### 7.1 직관
+
+계산이 한 번 주기를 넘기면(센서 재시도, 플래시 쓰기, 디버그 출력) 다음 사건들이 이미 지나가 있다. 정책은 둘이다.
+
+- **catch-up(따라잡기)**: 놓친 주기를 연달아 즉시 실행한다. 모든 샘플이 필요한 일(적분, 로깅, 오디오 블록)에 맞다. 제어 루프에서는 **같은 낡은 센서 값으로 여러 번 계산**하게 되고 그동안 CPU를 독점한다.
+- **skip(건너뛰기)**: 놓친 주기를 버리고 다음 격자에서 계속한다. 최신 값만 의미 있는 제어 루프의 기본.
+
+어느 쪽이든 **놓쳤다는 사실을 세어 둔다**(A1 §10의 miss 카운터, E8의 워치독과 연결). tick 기반 API의 두 정책 — `xTaskDelayUntil`(catch-up, 반환값 `pdFALSE` = 안 잤다)과 `xTaskPeriodicDelay`(skip, 반환값 − 1 = 버린 주기 수) — 은 C5 §5.4 예제 10에서 실측했다. 이 절은 **HW 타이머 구동**에서 같은 일을 하는 법과, ISR 직접 구동의 함정을 본다.
+
+| 구동 | catch-up | skip | 감지 |
+|---|---|---|---|
+| tick, FreeRTOS | `xTaskDelayUntil` | `xTaskPeriodicDelay` (V11.3.1부터) | 반환값 (C5 §5) |
+| SW 타이머, FreeRTOS | auto-reload의 기본 동작 (`prvReloadTimer`가 밀린 만큼 콜백 연속 호출) | 콜백에서 직접 판단 | 콜백 안에서 tick 비교 (D6 §6.3) |
+| HW 타이머 → 태스크, FreeRTOS | `ulTaskNotifyTake(pdFALSE, …)` | `ulTaskNotifyTake(pdTRUE, …)` | 반환값 = 쌓인 통지 수 |
+| `k_timer`, Zephyr | 반환값만큼 반복 | 반환값 무시하고 1번 | `k_timer_status_sync()` 반환값 = 지난 호출 이후 만료 수 |
+| ISR 직접 | 없음 (pending 비트가 1개) | 자동 | 끝에서 자기 인터럽트 상태 비트 확인, 시간은 HW 카운터로 |
+
+### 7.2 예제 11 — 한 번의 3.4 ms 초과 실행
+
+무엇을 확인하나: TIMER0 1 kHz 구동에서 k = 100의 계산만 3.4 ms(CPU 시간)로 늘린다. MODE 0은 `ulTaskNotifyTake(pdTRUE)`(쌓인 통지를 한 번에 비움 → skip, 반환값 − 1 = 놓친 수), MODE 1은 `ulTaskNotifyTake(pdFALSE)`(하나씩 뺌 → catch-up), MODE 2는 NVIC 0x00 ISR이 직접 계산하고 끝에서 TIMER0 인터럽트 상태 비트로 overrun을 감지한다. 사건 번호 `ev`는 ISR이 들어올 때마다 1씩 센다. k = 98~109의 시작 시각, 그때의 사건 번호, 그 사건보다 얼마나 늦었나(late = 시작 − (사건 번호 − 1) × 1000 µs)를 찍는다.
+
+```c
+/* E7 예제 11: 한 번의 초과 실행(k=100에서 3.4 ms) — TIMER0 1 kHz 구동에서 놓친 주기를 어떻게 알고 어떻게 처리하나
+ * MODE 0: 태스크, ulTaskNotifyTake(pdTRUE)  = 쌓인 통지를 한 번에 비움 → skip, 반환값 = 사건 수
+ * MODE 1: 태스크, ulTaskNotifyTake(pdFALSE) = 하나씩 뺌 → catch-up(연달아 실행)
+ * MODE 2: ISR이 직접 계산(NVIC 0x00), 끝에서 자기 인터럽트 상태 비트를 보고 overrun 감지 */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "e7.h"
+#define TMR_INTSTATUS REG32(TIMER0_BASE + 0xC)            /* 읽기 = 인터럽트 상태, 쓰기 = clear */
+static volatile uint32_t ev, k, t0, log_t[12], log_ev[12], log_r[12], overruns; static TaskHandle_t h;
+static void step(uint32_t r)                              /* 제어 한 번: 시작 시각과 그때의 사건 번호 기록 */
+{
+    uint32_t now = CYC();
+    if (k == 0) t0 = now;
+    if (k >= 98 && k < 110) { log_t[k - 98] = (now - t0) / 25u; log_ev[k - 98] = ev; log_r[k - 98] = r; }
+    burn_us(k == 100 ? 3400u : 50u);
+    k++;
+}
+void TIMER0_IRQHandler(void)
+{
+    TMR_INTSTATUS = 1u; ev++;
+#if MODE == 2
+    step(0);
+    if (TMR_INTSTATUS & 1u) overruns++;                   /* 계산 중에 다음 사건이 이미 왔다 */
+#else
+    BaseType_t w = pdFALSE; vTaskNotifyGiveFromISR(h, &w); portYIELD_FROM_ISR(w);
+#endif
+}
+static void ctl(void *p)
+{
+    (void)p;
+    for (;;) {
+        uint32_t r = ulTaskNotifyTake(MODE == 0 ? pdTRUE : pdFALSE, portMAX_DELAY);
+        if (MODE == 0 && r > 1) overruns += r - 1;        /* 놓친 사건 수 */
+        step(r);
+    }
+}
+static void rep(void *p)
+{
+    (void)p;
+    if (MODE != 2) xTaskCreate(ctl, "ctl", 256, NULL, 6, &h);
+    TIMER_RELOAD(TIMER0_BASE) = 24999u; TIMER_VALUE(TIMER0_BASE) = 24999u;
+    TIMER_CTRL(TIMER0_BASE) = 9u; nvic_on(8, MODE == 2 ? 0x00 : 0x20);
+    while (k < 120) vTaskDelay(5);
+    TIMER_CTRL(TIMER0_BASE) = 0u;
+    board_printf_raw("MODE %d  events=%u runs=%u overruns_detected=%u\n", MODE, ev, k, overruns);
+    for (int i = 0; i < 12; i++)
+        board_printf_raw("  k=%u start=%u us  event#=%u  late=%d us  take()=%u\n", 98 + i, log_t[i],
+                         log_ev[i], (int32_t)log_t[i] - (int32_t)((log_ev[i] - 1u) * 1000u), log_r[i]);
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(rep, "rep", 512, NULL, 5, NULL);
+    vTaskStartScheduler();
+    return 1;
+}
+```
+
+```sh
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E7; for m in 0 1 2; do $S/run.sh ex10_overrun.c ex10_m$m -DMODE=$m; done'
+```
+
+```text
+MODE 0  events=124 runs=122 overruns_detected=2
+  k=98 start=98000 us  event#=99  late=0 us  take()=1
+  k=99 start=99000 us  event#=100  late=0 us  take()=1
+  k=100 start=100000 us  event#=101  late=0 us  take()=1
+  k=101 start=103413 us  event#=104  late=413 us  take()=3
+  k=102 start=104000 us  event#=105  late=0 us  take()=1
+  k=103 start=105000 us  event#=106  late=0 us  take()=1
+  k=104 start=106000 us  event#=107  late=0 us  take()=1
+  k=105 start=107000 us  event#=108  late=0 us  take()=1
+  k=106 start=108000 us  event#=109  late=0 us  take()=1
+  k=107 start=109000 us  event#=110  late=0 us  take()=1
+  k=108 start=110000 us  event#=111  late=0 us  take()=1
+  k=109 start=111000 us  event#=112  late=0 us  take()=1
+[board_exit] code=0
+MODE 1  events=124 runs=124 overruns_detected=0
+  k=98 start=98000 us  event#=99  late=0 us  take()=1
+  k=99 start=99000 us  event#=100  late=0 us  take()=1
+  k=100 start=100000 us  event#=101  late=0 us  take()=1
+  k=101 start=103413 us  event#=104  late=413 us  take()=3
+  k=102 start=103465 us  event#=104  late=465 us  take()=2
+  k=103 start=103518 us  event#=104  late=518 us  take()=1
+  k=104 start=104000 us  event#=105  late=0 us  take()=1
+  k=105 start=105000 us  event#=106  late=0 us  take()=1
+  k=106 start=106000 us  event#=107  late=0 us  take()=1
+  k=107 start=107000 us  event#=108  late=0 us  take()=1
+  k=108 start=108000 us  event#=109  late=0 us  take()=1
+  k=109 start=109000 us  event#=110  late=0 us  take()=1
+[board_exit] code=0
+MODE 2  events=124 runs=124 overruns_detected=1
+  k=98 start=98000 us  event#=99  late=0 us  take()=0
+  k=99 start=99000 us  event#=100  late=0 us  take()=0
+  k=100 start=100000 us  event#=101  late=0 us  take()=0
+  k=101 start=103402 us  event#=102  late=2402 us  take()=0
+  k=102 start=104000 us  event#=103  late=2000 us  take()=0
+  k=103 start=105000 us  event#=104  late=2000 us  take()=0
+  k=104 start=106000 us  event#=105  late=2000 us  take()=0
+  k=105 start=107000 us  event#=106  late=2000 us  take()=0
+  k=106 start=108000 us  event#=107  late=2000 us  take()=0
+  k=107 start=109000 us  event#=108  late=2000 us  take()=0
+  k=108 start=110000 us  event#=109  late=2000 us  take()=0
+  k=109 start=111000 us  event#=110  late=2000 us  take()=0
+[board_exit] code=0
+```
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<line x1="204.3" y1="20.0" x2="204.3" y2="236.0" stroke="#e08a3c" stroke-width="0.8" stroke-dasharray="4,3"/>
+<text x="204.3" y="254.0" font-size="12" text-anchor="middle">100</text>
+<line x1="272.9" y1="20.0" x2="272.9" y2="236.0" stroke="#e08a3c" stroke-width="0.8" stroke-dasharray="4,3"/>
+<text x="272.9" y="254.0" font-size="12" text-anchor="middle">101</text>
+<line x1="341.4" y1="20.0" x2="341.4" y2="236.0" stroke="#e08a3c" stroke-width="0.8" stroke-dasharray="4,3"/>
+<text x="341.4" y="254.0" font-size="12" text-anchor="middle">102</text>
+<line x1="410.0" y1="20.0" x2="410.0" y2="236.0" stroke="#e08a3c" stroke-width="0.8" stroke-dasharray="4,3"/>
+<text x="410.0" y="254.0" font-size="12" text-anchor="middle">103</text>
+<line x1="478.6" y1="20.0" x2="478.6" y2="236.0" stroke="#e08a3c" stroke-width="0.8" stroke-dasharray="4,3"/>
+<text x="478.6" y="254.0" font-size="12" text-anchor="middle">104</text>
+<line x1="547.1" y1="20.0" x2="547.1" y2="236.0" stroke="#e08a3c" stroke-width="0.8" stroke-dasharray="4,3"/>
+<text x="547.1" y="254.0" font-size="12" text-anchor="middle">105</text>
+<line x1="615.7" y1="20.0" x2="615.7" y2="236.0" stroke="#e08a3c" stroke-width="0.8" stroke-dasharray="4,3"/>
+<text x="615.7" y="254.0" font-size="12" text-anchor="middle">106</text>
+<text x="410.0" y="274.0" font-size="12" text-anchor="middle">타이머 사건 시각 (ms) — 주황 점선</text>
+<text x="162.0" y="38.0" font-size="12" text-anchor="end">MODE 0 skip</text>
+<text x="162.0" y="54.0" font-size="12" text-anchor="end">NotifyTake(pdTRUE)</text>
+<rect x="204.3" y="30.0" width="233.1" height="22.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<rect x="438.3" y="30.0" width="3.4" height="22.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<rect x="478.6" y="30.0" width="3.4" height="22.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<rect x="547.1" y="30.0" width="3.4" height="22.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<rect x="615.7" y="30.0" width="3.4" height="22.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="458.0" y="74.0" font-size="12" text-anchor="start">101·102 건너뜀</text>
+<text x="162.0" y="110.0" font-size="12" text-anchor="end">MODE 1 catch-up</text>
+<text x="162.0" y="126.0" font-size="12" text-anchor="end">NotifyTake(pdFALSE)</text>
+<rect x="204.3" y="102.0" width="233.1" height="22.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<rect x="438.3" y="102.0" width="3.4" height="22.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<rect x="441.9" y="102.0" width="3.4" height="22.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<rect x="445.5" y="102.0" width="3.4" height="22.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<rect x="478.6" y="102.0" width="3.4" height="22.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<rect x="547.1" y="102.0" width="3.4" height="22.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<rect x="615.7" y="102.0" width="3.4" height="22.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="458.0" y="146.0" font-size="12" text-anchor="start">103.413 / .465 / .518 연달아</text>
+<text x="162.0" y="182.0" font-size="12" text-anchor="end">MODE 2 ISR 직접</text>
+<text x="162.0" y="198.0" font-size="12" text-anchor="end">pending 비트 1개</text>
+<rect x="204.3" y="174.0" width="233.1" height="22.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a" stroke-width="0.8"/>
+<rect x="437.6" y="174.0" width="3.4" height="22.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a" stroke-width="0.8"/>
+<rect x="478.6" y="174.0" width="3.4" height="22.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a" stroke-width="0.8"/>
+<rect x="547.1" y="174.0" width="3.4" height="22.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a" stroke-width="0.8"/>
+<rect x="615.7" y="174.0" width="3.4" height="22.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a" stroke-width="0.8"/>
+<text x="458.0" y="218.0" font-size="12" text-anchor="start">사건 2개를 영영 잃음</text>
+</svg>
+```
+그림 8 — 예제 11 측정. 100 ms에 시작한 계산이 103.4 ms까지 간다. skip(파랑)은 103.413 ms에 한 번 돌고 104부터 격자로 돌아온다. catch-up(초록)은 103.413 / 103.465 / 103.518 ms에 세 번을 연달아 돈다. ISR 직접(빨강)은 한 번만 돌고, 그 사이의 사건 2개는 기록조차 남지 않는다.
+
+출력에서 볼 것:
+
+- **MODE 0 (skip)**: k = 101에서 `take()=3` — 사건 101(정상분) + 놓친 102 · 103이 쌓여 있었다. 놓친 2개를 세고(`overruns_detected=2`) 한 번만 실행, 104부터 late 0. 124사건 중 122번 실행.
+- **MODE 1 (catch-up)**: `take()` 반환값이 3 → 2 → 1로 줄며 **52 µs 간격으로 세 번 연달아** 실행했다(103.413, .465, .518). 세 번 모두 사건 번호 104일 때 돌았으니 같은 센서 데이터를 세 번 쓴 셈이다. 124사건 모두 실행됐지만 그중 둘은 제어로서 의미가 없고, 그 150 µs 동안 낮은 우선순위 태스크는 굶었다. 이 모드는 overrun을 **감지하지 못한다**(반환값을 보면 알 수 있지만 따로 세지 않으면 안 보인다).
+- **MODE 2 (ISR 직접)**: overrun은 1번으로 감지됐지만, 사건 카운터 `ev`는 3.4 ms 동안 **1만 늘었다**. 인터럽트 pending 비트는 하나뿐이라 그 동안 온 사건 3개가 한 번의 진입으로 합쳐졌다. 그 뒤로 late가 계속 2000 µs — 소프트웨어 시간이 영구히 2 ms 늦어졌다. C5 §6.2의 "마스킹 동안 잃어버린 SysTick"과 같은 현상이다. ISR 구동 루프에서 시간이나 적분 dt는 **인터럽트 횟수를 세지 말고 하드웨어 카운터(E5의 64비트 확장 시간)로 읽는다.**
+
+### 7.3 Zephyr `k_timer_status_sync`의 반환값
+
+`z_timer_expiration_handler()`(`kernel/timer.c` 71행)는 만료 때마다 `timer->status += 1U`(112행)를 하고, `k_timer_status_sync()`(315행)는 그 값을 돌려주고 0으로 만든다. 그래서 반환값 2 이상 = 그 사이에 주기를 놓쳤다는 뜻이고, 이것이 Zephyr 주기 루프의 표준 overrun 감지다.
+
+```c
+/* 패턴 (실행 예제 아님): Zephyr 주기 루프 + overrun 카운트 + skip */
+k_timer_start(&ctl_timer, K_USEC(1000), K_USEC(1000));    /* tick rate가 1 kHz의 배수인지 먼저 확인 (예제 2) */
+for (;;) {
+    uint32_t n = k_timer_status_sync(&ctl_timer);
+    if (n > 1) stats.missed += n - 1;                      /* skip: 놓친 만큼 세고 한 번만 돈다 */
+    control_step();
+}
+```
+
+---
+
+## 8. 지터가 제어에 왜 나쁜가
+
+### 8.1 직관 — 지연은 위상을 깎는다
+
+제어 루프 안의 순수 지연 D는 주파수 ω에서 위상을 ω × D 라디안 깎는다. 교차 주파수 30 Hz(약 190 rad/s)에서 1 ms 지연은 0.19 rad ≈ 11°의 위상 여유를 먹는다. 위상 여유가 줄면 오버슈트가 커지고, 0이 되면 발진한다. 지터는 두 가지로 더 나쁘다. (1) 평균 지연만큼 위상을 깎고, (2) 제어기가 "샘플이 kT에 찍혔다"고 믿는데 실제로는 kT + δ에 찍혔으므로, 신호가 빠르게 변할수록 (기울기 × δ)만큼의 **가짜 오차**가 생긴다 — 잡음이다. 미분항은 이 잡음을 1/T배로 키운다.
+
+### 8.2 예제 12 — PD 제어 시뮬레이션 (Python)
+
+무엇을 확인하나(케이스 이름의 ex7은 예제 8의 파일 이름이다): 한 축 자세(관성 1, θ'' = u)를 1 kHz PD로 제어한다(ωn = 200 rad/s, ζ = 0.7 — 지연 0 기준으로 설계). 10 µs 격자로 플랜트를 정확히 적분하고, 샘플 시각과 출력 시각을 시나리오별로 흔든다. 컨트롤러는 타임스탬프를 쓰지 않는 흔한 코드처럼 r(kT)와 비교하고 D항을 T로 나눈다. 두 지표: 1 rad 계단 응답의 오버슈트, 20 Hz 사인 기동을 따라갈 때 **이상적인 타이밍 궤적과의 차이** RMS(진폭 대비 %).
+
+```python
+# E7 예제 12: 지터·지연이 제어 품질에 주는 영향 — 한 축 자세(θ'' = u, 관성 1) + PD 1 kHz.
+# 10 us 격자로 플랜트를 정확히 적분(ZOH). 샘플 k의 실제 시각 = kT + 릴리스 지연, 출력 시각 = 샘플 + 출력 지연.
+# 컨트롤러는 "샘플이 kT에 찍혔다"고 믿고 r(kT)와 비교한다 (타임스탬프를 안 쓰는 흔한 코드).
+import math, random
+T, KP, KD = 1e-3, 4.0e4, 280.0            # ωn = 200 rad/s (32 Hz), ζ = 0.7 (지연 0 기준으로 설계)
+DT = 1e-5
+def run(rel_us, io_us, ref, tend=0.5, seed=1):
+    rnd = random.Random(seed)
+    th = om = u = 0.0; e_prev = None; outs = {}; peak = 0.0; traj = []; k = 0
+    ts = round(rel_us(rnd) / 10)
+    for n in range(int(tend / DT)):
+        if n == ts:                                       # 샘플 + 계산
+            e = ref(k * T) - th
+            cmd = KP * e + KD * (e - (e if e_prev is None else e_prev)) / T; e_prev = e
+            m = n + round(io_us(rnd) / 10)
+            while m in outs: m += 1
+            outs[m] = cmd
+            k += 1; ts = round((k * T * 1e6 + rel_us(rnd)) / 10)
+        if n in outs: u = outs.pop(n)                     # 출력(PWM) 갱신
+        th, om = th + om * DT + 0.5 * u * DT * DT, om + u * DT
+        peak = max(peak, th)
+        if n % 10 == 0 and n * DT > 0.1: traj.append(th)    # 0.1 s 이후 궤적 (100 us 간격)
+        if abs(th) > 100: return float("inf"), None
+    return 100 * (peak - 1), traj
+STEP = lambda t: 1.0
+SINE = lambda t: math.sin(2 * math.pi * 20 * t)          # 20 Hz 기동, 진폭 1
+C = lambda v: (lambda r: v)
+U = lambda a, b: (lambda r: r.uniform(a, b))
+cases = [("ideal: 0 delay, 0 jitter", C(0), C(0)),
+         ("const 150 us", C(0), C(150)),
+         ("release jitter U(0,130) + 50 us", U(0, 130), C(50)),
+         ("release jitter U(0,500)", U(0, 500), C(0)),
+         ("output jitter U(20,500) (ex7 MODE 0)", C(8), U(20, 500)),
+         ("const 260 us", C(0), C(260)),
+         ("const 1000 us (ex7 MODE 1 latch)", C(8), C(1000)),
+         ("const 2000 us", C(0), C(2000)),
+         ("const 3000 us", C(0), C(3000))]
+_, ideal = run(C(0), C(0), SINE)                        # 기준: 지연·지터 0일 때의 궤적
+print(f"{'case':<40}{'step overshoot %':>17}{'extra err vs ideal, RMS %':>27}")
+for name, r, o in cases:
+    ov, _ = run(r, o, STEP); _, tr = run(r, o, SINE)
+    d = "unstable" if tr is None else f"{100 * math.sqrt(sum((a - b) ** 2 for a, b in zip(tr, ideal)) / len(ideal)):.2f}"
+    print(f"{name:<40}{ov:>17.1f}{d:>27}")
+```
+
+```sh
+limactl shell elinux -- bash -lc 'python3 /Users/donh/.rtos_scratch/E7/ex11_ctrl.py'
+```
+
+```text
+case                                     step overshoot %  extra err vs ideal, RMS %
+ideal: 0 delay, 0 jitter                              2.4                       0.00
+const 150 us                                          2.3                       0.63
+release jitter U(0,130) + 50 us                       2.4                       0.60
+release jitter U(0,500)                               3.3                       2.52
+output jitter U(20,500) (ex7 MODE 0)                  2.2                       1.00
+const 260 us                                          2.2                       1.09
+const 1000 us (ex7 MODE 1 latch)                      2.9                       4.19
+const 2000 us                                        24.5                       8.77
+const 3000 us                                         inf                   unstable
+```
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<line x1="200.0" y1="14.0" x2="200.0" y2="254.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="200.0" y1="254.0" x2="620.0" y2="254.0" stroke="currentColor" stroke-width="1.2"/>
+<line x1="200.0" y1="254.0" x2="200.0" y2="258.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="200.0" y="272.0" font-size="12" text-anchor="middle">0</text>
+<line x1="284.0" y1="254.0" x2="284.0" y2="258.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="284.0" y="272.0" font-size="12" text-anchor="middle">2</text>
+<line x1="368.0" y1="254.0" x2="368.0" y2="258.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="368.0" y="272.0" font-size="12" text-anchor="middle">4</text>
+<line x1="452.0" y1="254.0" x2="452.0" y2="258.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="452.0" y="272.0" font-size="12" text-anchor="middle">6</text>
+<line x1="536.0" y1="254.0" x2="536.0" y2="258.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="536.0" y="272.0" font-size="12" text-anchor="middle">8</text>
+<line x1="620.0" y1="254.0" x2="620.0" y2="258.0" stroke="currentColor" stroke-width="1.2"/>
+<text x="620.0" y="272.0" font-size="12" text-anchor="middle">10</text>
+<text x="410.0" y="292.0" font-size="12" text-anchor="middle">이상 궤적 대비 추가 오차 RMS (진폭의 %), 20 Hz 기동</text>
+<text x="192.0" y="34.0" font-size="12" text-anchor="end">이상: 지연·지터 0</text>
+<rect x="200.0" y="20.0" width="0.5" height="18.0" fill="#888" fill-opacity="0.55" stroke="#888" stroke-width="0.8"/>
+<text x="204.0" y="34.0" font-size="12" text-anchor="start">0.00</text>
+<text x="192.0" y="63.0" font-size="12" text-anchor="end">일정 150 us</text>
+<rect x="200.0" y="49.0" width="26.5" height="18.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="230.5" y="63.0" font-size="12" text-anchor="start">0.63</text>
+<text x="192.0" y="92.0" font-size="12" text-anchor="end">시작 지터 U(0,130)+50</text>
+<rect x="200.0" y="78.0" width="25.2" height="18.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="229.2" y="92.0" font-size="12" text-anchor="start">0.60</text>
+<text x="192.0" y="121.0" font-size="12" text-anchor="end">일정 260 us</text>
+<rect x="200.0" y="107.0" width="45.8" height="18.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="249.8" y="121.0" font-size="12" text-anchor="start">1.09</text>
+<text x="192.0" y="150.0" font-size="12" text-anchor="end">출력 지터 U(20,500)</text>
+<rect x="200.0" y="136.0" width="42.0" height="18.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b" stroke-width="0.8"/>
+<text x="246.0" y="150.0" font-size="12" text-anchor="start">1.00</text>
+<text x="192.0" y="179.0" font-size="12" text-anchor="end">시작 지터 U(0,500)</text>
+<rect x="200.0" y="165.0" width="105.8" height="18.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a" stroke-width="0.8"/>
+<text x="309.8" y="179.0" font-size="12" text-anchor="start">2.52</text>
+<text x="192.0" y="208.0" font-size="12" text-anchor="end">일정 1000 us (래치)</text>
+<rect x="200.0" y="194.0" width="176.0" height="18.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="380.0" y="208.0" font-size="12" text-anchor="start">4.19</text>
+<text x="192.0" y="237.0" font-size="12" text-anchor="end">일정 2000 us</text>
+<rect x="200.0" y="223.0" width="368.3" height="18.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0" stroke-width="0.8"/>
+<text x="572.3" y="237.0" font-size="12" text-anchor="start">8.77</text>
+</svg>
+```
+그림 9 — 예제 12 계산. 20 Hz 기동에서 이상적인 타이밍 대비 추가 오차. 같은 평균 지연(약 260 µs)이라도 출력 지터(초록)는 일정 지연(파랑)과 비슷하지만, 시작(샘플) 지터 U(0,500)(빨강)는 두 배 이상 나쁘다. 일정 지연은 1 ms부터 급격히 커지고 3 ms에서 불안정해진다.
+
+출력에서 볼 것:
+
+- **출력 지터 ≈ 평균 지연**: U(20,500) 출력 지터(1.00%)는 같은 평균의 일정 260 µs(1.09%)와 거의 같다. 출력 시각이 흔들리는 것은 대체로 "평균만큼 늦는 것"처럼 작동한다.
+- **시작(샘플) 지터는 평균보다 나쁘다**: U(0,500)(평균 250 µs)은 2.52%로 일정 260 µs의 2.3배다. 샘플이 언제 찍혔는지 모르는 채로 계산하기 때문에 생기는 가짜 오차가 더해졌다. 작은 시작 지터 U(0,130)(예제 4의 방식 1 · 3 수준)는 0.60%로 일정 150 µs와 같은 수준이다 — 이 정도면 대역폭 32 Hz 루프에는 문제가 아니다.
+- **일정 지연의 한계**: 1 ms(예제 8의 래치)는 오차 4.19%, 오버슈트 2.4 → 2.9%. 2 ms는 오버슈트 24.5%, 3 ms는 **발산**한다. 지연 1 ms를 받아들이는 래치는 이 대역폭에서는 감당 가능하지만, 대역폭을 두 배로 올리면 그렇지 않다. 그래서 고대역 루프는 "짧고 일정한 계산 + 즉시 출력"을, 그렇지 못하면 "래치 + 지연을 반영한 이득 설계"를 택한다.
+- 실무 처방 두 가지: (1) 샘플 시각을 **하드웨어 타임스탬프**로 찍고(E5) 그 실제 dt로 미분 · 적분하면 샘플 지터의 가짜 오차 대부분이 사라진다. (2) 샘플 → 출력 지연을 측정해 **고정**시키면(래치, DRDY 구동) 설계에서 보상할 수 있다. 제어 이론 쪽 깊은 이야기(지연 보상, Smith predictor, 필터 지연 체인)는 Q3이다.
+
+---
+
+## 9. RTOS 커널 안에서는 무슨 일이 일어나나
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10.0" y="41.0" font-size="12" text-anchor="start">1 tick 구동</text>
+<rect x="140.0" y="12.0" width="165.0" height="44.0" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/>
+<text x="222.5" y="30.2" font-size="12" text-anchor="middle">SysTick ISR</text>
+<text x="222.5" y="46.2" font-size="12" text-anchor="middle">xTaskIncrementTick</text>
+<line x1="305.0" y1="34.0" x2="323.0" y2="34.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+<rect x="323.0" y="12.0" width="165.0" height="44.0" rx="4" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.2"/>
+<text x="405.5" y="30.2" font-size="12" text-anchor="middle">PendSV</text>
+<text x="405.5" y="46.2" font-size="12" text-anchor="middle">컨텍스트 스위치</text>
+<line x1="488.0" y1="34.0" x2="506.0" y2="34.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+<rect x="506.0" y="12.0" width="165.0" height="44.0" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/>
+<text x="588.5" y="30.2" font-size="12" text-anchor="middle">제어 태스크</text>
+<text x="588.5" y="46.2" font-size="12" text-anchor="middle">xTaskDelayUntil 복귀</text>
+<text x="10.0" y="99.0" font-size="12" text-anchor="start">2 SW 타이머</text>
+<rect x="140.0" y="70.0" width="165.0" height="44.0" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/>
+<text x="222.5" y="88.2" font-size="12" text-anchor="middle">SysTick ISR</text>
+<text x="222.5" y="104.2" font-size="12" text-anchor="middle">xTaskIncrementTick</text>
+<line x1="305.0" y1="92.0" x2="323.0" y2="92.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+<rect x="323.0" y="70.0" width="165.0" height="44.0" rx="4" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.2"/>
+<text x="405.5" y="88.2" font-size="12" text-anchor="middle">PendSV</text>
+<text x="405.5" y="104.2" font-size="12" text-anchor="middle">→ Tmr Svc 태스크</text>
+<line x1="488.0" y1="92.0" x2="506.0" y2="92.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+<rect x="506.0" y="70.0" width="165.0" height="44.0" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/>
+<text x="588.5" y="88.2" font-size="12" text-anchor="middle">prvProcessExpired</text>
+<text x="588.5" y="104.2" font-size="12" text-anchor="middle">Timer → 콜백</text>
+<text x="10.0" y="157.0" font-size="12" text-anchor="start">3 TIMER0 → 태스크</text>
+<rect x="140.0" y="128.0" width="165.0" height="44.0" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-width="1.2"/>
+<text x="222.5" y="146.2" font-size="12" text-anchor="middle">TIMER0 ISR (0x20)</text>
+<text x="222.5" y="162.2" font-size="12" text-anchor="middle">NotifyGiveFromISR</text>
+<line x1="305.0" y1="150.0" x2="323.0" y2="150.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+<rect x="323.0" y="128.0" width="165.0" height="44.0" rx="4" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.2"/>
+<text x="405.5" y="146.2" font-size="12" text-anchor="middle">PendSV</text>
+<text x="405.5" y="162.2" font-size="12" text-anchor="middle">컨텍스트 스위치</text>
+<line x1="488.0" y1="150.0" x2="506.0" y2="150.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+<rect x="506.0" y="128.0" width="165.0" height="44.0" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/>
+<text x="588.5" y="146.2" font-size="12" text-anchor="middle">제어 태스크</text>
+<text x="588.5" y="162.2" font-size="12" text-anchor="middle">ulTaskNotifyTake 복귀</text>
+<text x="10.0" y="215.0" font-size="12" text-anchor="start">4 TIMER0 ISR 직접</text>
+<rect x="140.0" y="186.0" width="165.0" height="44.0" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-width="1.2"/>
+<text x="222.5" y="204.2" font-size="12" text-anchor="middle">TIMER0 ISR (0x00)</text>
+<text x="222.5" y="220.2" font-size="12" text-anchor="middle">제어 법칙 그 자리에서</text>
+<text x="10.0" y="273.0" font-size="12" text-anchor="start">5 DRDY → 태스크</text>
+<rect x="140.0" y="244.0" width="165.0" height="44.0" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b" stroke-width="1.2"/>
+<text x="222.5" y="262.2" font-size="12" text-anchor="middle">IMU DRDY ISR</text>
+<text x="222.5" y="278.2" font-size="12" text-anchor="middle">NotifyGiveFromISR</text>
+<line x1="305.0" y1="266.0" x2="323.0" y2="266.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+<rect x="323.0" y="244.0" width="165.0" height="44.0" rx="4" fill="#888" fill-opacity="0.12" stroke="#888" stroke-width="1.2"/>
+<text x="405.5" y="262.2" font-size="12" text-anchor="middle">PendSV</text>
+<text x="405.5" y="278.2" font-size="12" text-anchor="middle">컨텍스트 스위치</text>
+<line x1="488.0" y1="266.0" x2="506.0" y2="266.0" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah3)"/>
+<rect x="506.0" y="244.0" width="165.0" height="44.0" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0" stroke-width="1.2"/>
+<text x="588.5" y="262.2" font-size="12" text-anchor="middle">제어 태스크</text>
+<text x="588.5" y="278.2" font-size="12" text-anchor="middle">ulTaskNotifyTake 복귀</text>
+<text x="10.0" y="318.0" font-size="12" text-anchor="start">1·2·3·5는 BASEPRI(0x20)와 스케줄러 잠금에 막힌다. 4는 둘 다 무시한다</text>
+</svg>
+```
+그림 3 — 다섯 구동 방식이 커널 안에서 지나는 경로. 1 · 2 · 3 · 5는 모두 "인터럽트 → PendSV → 태스크(또는 데몬)"를 거치므로 BASEPRI 크리티컬 섹션과 스케줄러 잠금에 막힌다. 4만 커널을 전혀 거치지 않는다.
+
+### 9.1 FreeRTOS — 지터가 끼어드는 곳
+
+- **SysTick은 가장 낮은 우선순위다.** `port.c` 57행 `#define portNVIC_SYSTICK_PRI ( ( ( uint32_t ) portMIN_INTERRUPT_PRIORITY ) << 24UL )`, 391행에서 SHPR3에 쓴다(PendSV도 56행에서 최저). 그래서 tick 구동 루프는 **모든** 다른 ISR 뒤에 선다. 예제 4에서 방식 1이 방식 3보다 나쁘지 않았던 것은 방식 3도 결국 최저 우선순위 PendSV를 거치기 때문이다.
+- **크리티컬 섹션 = BASEPRI 올리기.** `vPortEnterCritical()`(`port.c` 426행)과 `portSET_INTERRUPT_MASK_FROM_ISR()` = `ulPortRaiseBASEPRI()`(`portmacro.h` 117행). `configMAX_SYSCALL_INTERRUPT_PRIORITY`(랩 0x20)와 같거나 낮은 인터럽트만 막는다 → 방식 4(0x00)는 통과.
+- **ISR → 태스크 통지.** `vTaskNotifyGiveFromISR()`는 `task.h` 3196행의 매크로로 `vTaskGenericNotifyGiveFromISR()`(`tasks.c` 8315행)를 부르고, 8358행에서 `ulNotifiedValue`를 1 올린다. 받는 쪽 `ulTaskNotifyTake()`(`task.h` 3302행 → `ulTaskGenericNotifyTake()`, `tasks.c` 7797행)는 7871~7877행에서 `xClearCountOnExit`가 참이면 0으로, 거짓이면 1을 뺀다 — 예제 11의 skip / catch-up 차이가 이 두 줄이다.
+
+```c
+/* tasks.c 7867~7878 (V11.3.2) — ulTaskGenericNotifyTake 안, 요약(중괄호 · 커버리지 마커 생략) */
+ulReturn = pxCurrentTCB->ulNotifiedValue[ uxIndexToWaitOn ];
+if( ulReturn != 0U )
+{
+    if( xClearCountOnExit != pdFALSE )
+        pxCurrentTCB->ulNotifiedValue[ uxIndexToWaitOn ] = ( uint32_t ) 0U;           /* skip */
+    else
+        pxCurrentTCB->ulNotifiedValue[ uxIndexToWaitOn ] = ulReturn - ( uint32_t ) 1; /* catch-up */
+}
+```
+
+- **tick 구동 주기.** `xTaskDelayUntil()`(`tasks.c` 2414행)과 `xTaskPeriodicDelay()`(2365행, V11.3.1 History: "Add new xTaskPeriodicDelay API for periodic tasks. It supersedes xTaskDelayUntil by preventing run away of pxPreviousWakeTime …")의 한 줄씩 해부는 C5 §5.2.
+- **소프트웨어 타이머의 catch-up.** `prvReloadTimer()`(`timers.c` 697행)는 다음 만료 `xExpiredTime + xTimerPeriodInTicks`가 이미 지났으면 704행 `while` 루프에서 콜백을 **연달아** 부른다. 방식 2가 overrun 뒤 몰아치는 이유다(D6 §6.3).
+
+```c
+/* timers.c 704~712 (V11.3.2) — 밀렸으면 그 자리에서 콜백을 반복 호출 (주석 생략) */
+while( prvInsertTimerInActiveList( pxTimer, ( xExpiredTime + pxTimer->xTimerPeriodInTicks ), xTimeNow, xExpiredTime ) != pdFALSE )
+{
+    xExpiredTime += pxTimer->xTimerPeriodInTicks;
+    traceTIMER_EXPIRED( pxTimer );
+    pxTimer->pxCallbackFunction( ( TimerHandle_t ) pxTimer );
+}
+```
+
+### 9.2 Zephyr — +1 tick, 절대 타임아웃, `k_timer` 재무장
+
+```c
+/* kernel/timeout.c 108~117 (v4.4.2) — z_add_timeout 안: 상대는 +1, 절대는 그대로 */
+if (Z_IS_TIMEOUT_RELATIVE(timeout)) {
+	ticks_elapsed = elapsed();
+	has_elapsed = true;
+	to->dticks = timeout.ticks + 1 + ticks_elapsed;
+	ticks = curr_tick + to->dticks;
+} else {
+	k_ticks_t dticks = Z_TICK_ABS(timeout.ticks) - curr_tick;
+	to->dticks = max(1, dticks);
+	ticks = timeout.ticks;
+}
+```
+
+- `k_timer`의 주기 재무장은 `z_timer_expiration_handler()`(`kernel/timer.c` 71행) 안에서 한다. 91행에서 주기를 1 줄이고(위의 +1 상쇄), `CONFIG_TIMEOUT_64BIT`(기본 y)이면 105행 `next = K_TIMEOUT_ABS_TICKS(k_uptime_ticks() + 1 + next.ticks)`로 **절대** 타임아웃으로 다시 건다. 소스 주석 그대로: "If we're delayed for any reason, we still end up calculating the next expiration as a regular stride from where we 'should' have run." 그래서 예제 3의 C가 격자 위에 있었다. 이 함수는 tick 인터럽트(ISR) 문맥에서 돈다(D6 §7).
+- `sys_timepoint_calc()`(`kernel/timeout.c` 317행)는 상대 타임아웃이면 `sys_clock_tick_get() + max(1, dt)`(+1 없음)로 timepoint를 만들고, `sys_timepoint_timeout()`(338행)은 `K_TICKS(remaining)` — **상대** — 을 돌려준다. 예제 3의 E가 3 ms였던 이유다.
+- 시간 매크로의 올림: `Z_TIMEOUT_US(t)` = `k_us_to_ticks_ceil64` (`include/zephyr/sys/clock.h` 130행), `K_TIMEOUT_ABS_US`도 `ceil`(`kernel.h` 1736행).
+
+### 9.3 다른 노트와의 연결
+
+인터럽트 진입부터 핸들러 첫 줄까지의 지연 분해는 E3, 우선순위 배치표(어느 ISR을 BASEPRI 밖에 둘지)는 E2, ISR → 태스크 경로 설계는 E4, PendSV 전환 자체는 C2, 크리티컬 섹션 두 종류는 C7, 이 지터를 응답 시간 분석에 넣는 법(릴리스 지터 J 항, 블로킹 B 항)은 N3 · N4다.
+
+---
+
+## 10. 실무에서 다시 보기
+
+### 10.1 드론 비행 제어기 — rate loop 타이밍 체크리스트
+
+예를 들어 STM32H7급 FC라면: IMU를 8 kHz ODR로 돌리고 DRDY(EXTI) → SPI DMA → 완료 ISR → rate loop 태스크(최고 우선순위) 체인으로 구동한다(방식 5). 체크할 것:
+
+- rate loop 태스크의 시작 지연 최대값 = 가장 긴 (크리티컬 섹션, 스케줄러 잠금, 같거나 높은 ISR) — 예제 4 분해의 방법으로 각각을 재고 표로 관리한다. 로깅 태스크가 `pvPortMalloc`(heap_4는 스케줄러를 잠근다)을 부르지 않는지, 플래시 쓰기 드라이버가 수 ms 크리티컬 섹션을 잡지 않는지.
+- 제어기의 dt는 상수 125 µs가 아니라 **DRDY 타임스탬프 차이**로 쓴다(예제 6 MODE 1: 루프가 센서 주기를 따른다).
+- 모터 출력(DShot · PWM)은 타이머 + DMA로 하드웨어가 내보낸다(출력 지터 0).
+- overrun은 `ulTaskNotifyTake(pdTRUE)` 반환값으로 세어 텔레메트리에 올린다. 0이 아니면 비행 로그에서 바로 보이게.
+- attitude · nav 루프는 rate loop의 분주로(§6.4), 조화 주기와 오프셋으로.
+
+### 10.2 로봇 관절 모터 컨트롤러 — FOC 20 kHz는 BASEPRI 밖
+
+PWM 타이머가 center-aligned로 돌고, 그 중앙에서 ADC를 하드웨어 트리거하고, ADC 완료 ISR에서 전류 루프(Clarke · Park · PI · 역변환)를 계산해 compare 레지스터(preload)에 쓴다. 이 ISR은 NVIC 최고 우선순위로 **BASEPRI 밖**(방식 4)에 두어 RTOS 크리티컬 섹션과 무관하게 50 µs마다 정확히 돈다. 커널 API를 못 부르므로, 속도 · 위치 루프(1 kHz 태스크)와는 lock-free 이중 버퍼(D8)로 값을 주고받는다. 예제 11 MODE 2의 교훈대로 시간은 인터럽트 횟수가 아니라 타이머 카운터로 센다. 자세한 설계는 Q4.
+
+### 10.3 센서 허브 MCU — 루프보다 타임스탬프
+
+Linux SoC 옆의 센서 허브는 제어보다 "언제 찍혔나"가 중요하다. 여러 센서가 각자 ODR로 돌면 예제 6의 톱니가 센서마다 생긴다. 해법은 루프를 맞추는 게 아니라 **각 샘플에 HW 타임스탬프**(DRDY 입력 캡처, E5)를 붙여 보내고 호스트가 시간축으로 정렬하는 것이다(Q7).
+
+### 10.4 SSD 컨트롤러 펌웨어 — 같은 문제, 느슨한 마감
+
+SSD의 주기 작업(온도 감시, 백그라운드 GC 슬라이스, SMART 갱신)은 ms 단위 지터를 견딘다. 그러나 **명령 처리 경로의 크리티컬 섹션 길이가 주기 작업의 지터를 정한다**는 구조는 같다. Don이 예전에 "인터럽트를 오래 막는 코드 구간"을 찾아 줄였던 일이, RTOS에서는 BASEPRI 구간과 스케줄러 잠금 구간을 재는 일(예제 4 분해)이 된다.
+
+---
+
+## 11. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| Zephyr에서 tick rate 확인 없이 `K_USEC(125)` 주기 | 8 kHz 루프가 100 Hz 또는 1 kHz로 돈다 | QEMU 기본 100 Hz, `K_USEC`는 tick 올림 | `CONFIG_SYS_CLOCK_TICKS_PER_SEC` 확인, 빠른 루프는 HW 타이머 |
+| Zephyr 주기 루프를 `k_msleep(T)`로 | 2 ms 루프가 3 ms | 상대 타임아웃 +1 tick | `k_timer` + `k_timer_status_sync` 또는 `K_TIMEOUT_ABS_TICKS` |
+| `k_sleep(sys_timepoint_timeout(tp))`로 주기 | 1 tick 늦거나 주기 +1 tick | timepoint 남은 시간이 상대 타임아웃으로 바뀜 | 절대 타임아웃 사용 |
+| 평균 주기만 보고 "정확하다" | 간헐적 떨림, 미분항 잡음 | 주기 지터 · 샘플 재사용은 평균에 안 보임 | 간격 최소 · 최대, 지연 p99.9, 샘플 재사용 수를 함께 |
+| 제어 루프는 최고 우선순위인데 지터 100 µs | 부하가 늘면 루프가 흔들림 | 다른 코드의 크리티컬 섹션 · 스케줄러 잠금 (malloc 포함) | 잠금 구간 측정 · 단축, 필요하면 BASEPRI 밖 ISR |
+| 타이머 1 kHz로 IMU를 폴링 | 0.6초마다 같은 샘플 재사용, D항 스파이크 | 센서 ODR과 MCU 시계 차이 (beat) | DRDY 구동 또는 위상 추종, dt는 타임스탬프로 |
+| overrun 뒤 `ulTaskNotifyTake(pdFALSE)` | 낡은 샘플로 연달아 계산, 낮은 태스크 굶음 | catch-up 의미를 모름 | 제어 루프는 `pdTRUE` + 반환값으로 miss 카운트 |
+| BASEPRI 밖 ISR에서 인터럽트 횟수로 시간 계산 | 한 번의 overrun 뒤 시간이 영구히 틀어짐 | pending 비트 1개 → 사건 합쳐짐 | HW 카운터(64비트 확장)로 시간 읽기 |
+| 비조화 주기(1 kHz와 333 Hz) | 낮은 루프의 지연이 주기적으로 튐 | 서로소 주기는 모든 위상에서 언젠가 충돌 | 정수 분주, 오프셋, rate group |
+| 계산 끝나자마자 PWM 갱신 | 출력 시각이 계산 시간만큼 흔들림 | 출력 지터 = 시작 지터 + 계산 변동 | compare preload로 다음 update에 반영 (지연 1주기는 설계에 반영) |
+
+---
+
+## 12. 면접에서 이렇게 말한다
+
+**Q.** "How do you make a 1 kHz control loop run with minimal jitter on an RTOS?"
+
+**A.** 먼저 박자를 tick이 아니라 하드웨어(센서 DRDY나 전용 타이머)에서 받는다. 그다음 지터의 주인은 경로가 아니라 "제어 태스크를 막는 것들"이라는 점을 짚는다 — 다른 ISR, BASEPRI 크리티컬 섹션, 스케줄러 잠금. 실측에서 HW 타이머 → 태스크 방식도 tick 구동과 지터가 같았고(최대 130 µs대), 각 성분의 최대 지연이 그 성분의 가장 긴 구간과 같았다. 그래서 잠금 구간을 재서 줄이고, 수 µs가 필요하면 제어 자체를 BASEPRI 밖 ISR에서 돌린다.
+
+> I take the timing from hardware — the IMU data-ready or a dedicated timer — not from the tick. Then I attack what blocks the loop: other ISRs, critical sections that raise BASEPRI, and scheduler locks. When I measured five driving schemes under the same load, a timer-ISR-plus-notify loop had the same jitter as a tick-driven one, about 130 µs worst case, and each source's worst case equalled its longest masked section. So I measure and shrink those sections, and if I need single-digit microseconds I run the control law in a zero-latency ISR above BASEPRI, with no kernel calls.
+
+**꼬리 질문**: "What can't you do in that zero-latency ISR?" → FreeRTOS API 호출 전부 금지. 태스크와는 lock-free 버퍼나, 더 낮은 kernel-aware 인터럽트를 소프트웨어로 pend해서 넘긴다(E2).
+
+**Q.** "Tick-driven vs timer-driven periodic task — which is more accurate?"
+
+**A.** 해상도는 타이머가 낫고, 지터는 둘 다 마지막에 태스크로 전환하므로 비슷하다. tick 위의 주기는 tick의 정수배만 가능해서 1 kHz tick에서 400 Hz는 500 Hz나 333 Hz가 되거나 2/3 tick을 번갈아 ±500 µs 흔들린다. Zephyr는 tick으로 올림하고 상대 타임아웃에 1 tick을 더해서 `k_msleep(2)` 루프가 실제로 3 ms로 돈다.
+
+> Resolution is better with a hardware timer; jitter is similar, because both end in a context switch that the same locks can delay. A tick-based period must be a whole number of ticks — 400 Hz on a 1 kHz tick becomes 500 or 333 Hz, or alternates 2 and 3 ticks with ±500 µs jitter. On Zephyr, a k_msleep(2) loop actually runs at 3 ms because relative timeouts get an extra tick; I use k_timer with k_timer_status_sync or absolute timeouts instead.
+
+**Q.** "Your IMU runs at 1 kHz and your loop runs at 1 kHz from a timer. What's wrong?"
+
+**A.** 두 시계가 달라서 샘플 나이가 0~1 ms 톱니로 미끄러지고, beat 주기마다 같은 샘플을 두 번 쓰거나 하나를 버린다. 1.6 Hz 차이면 0.625초마다다. 지터 측정으로는 안 보인다. DRDY로 루프를 구동하거나, 타이머를 센서에 위상 고정시키고, dt는 타임스탬프로 계산한다.
+
+> The two clocks differ, so sample age drifts in a sawtooth between zero and one period, and once per beat period you reuse a sample or drop one — every 0.625 s for a 1.6 Hz mismatch. Loop-jitter measurements won't show it. I drive the loop from data-ready, or phase-lock the timer to the sensor, and compute dt from hardware timestamps.
+
+**Q.** "What happens when your control task overruns its period?"
+
+**A.** 정책을 정해야 한다. 제어 루프는 skip: 놓친 주기를 세고 최신 샘플로 한 번만 돈다. FreeRTOS에선 `xTaskPeriodicDelay`나 `ulTaskNotifyTake(pdTRUE)`의 반환값, Zephyr에선 `k_timer_status_sync()` 반환값이 놓친 수를 알려 준다. catch-up(`xTaskDelayUntil`, `pdFALSE`)은 같은 낡은 데이터로 연달아 계산하고 CPU를 독점한다. ISR 구동이면 pending 비트가 하나라 사건이 합쳐지므로 시간은 하드웨어 카운터로 읽는다.
+
+> For a control loop I skip and count: run once with the freshest sample and record how many periods were missed — xTaskPeriodicDelay or ulTaskNotifyTake with clear-on-exit on FreeRTOS, k_timer_status_sync's return value on Zephyr. Catch-up re-runs on stale data back to back and starves lower tasks. In an ISR-driven loop the single pending bit merges missed events, so I take time from a hardware counter, never from an interrupt count.
+
+**Q.** "Release jitter vs output jitter — which matters more?"
+
+**A.** 시뮬레이션에서 출력 지터는 대체로 평균 지연처럼 작동했고, 샘플(시작) 지터는 같은 평균 지연의 두 배 넘게 나빴다 — 제어기가 샘플 시각을 모르고 계산하기 때문이다. 그래서 샘플은 타임스탬프를 찍고, 출력은 compare preload로 래치해 지연을 일정하게 만든 뒤 그 지연을 이득 설계에 넣는다.
+
+> In my simulation, output jitter behaved roughly like its mean delay, while sampling jitter with the same mean was more than twice as bad, because the controller computes as if the sample were taken on the grid. So I timestamp samples, latch outputs through the timer's preload so the delay is constant, and design the gains for that delay.
+
+**Q.** "How do you schedule a 1 kHz, a 250 Hz and a 50 Hz loop together?"
+
+**A.** 조화 주기로 고르고(1 · 4 · 20 ms) 오프셋을 줘서 낮은 루프들이 같은 tick에 몰리지 않게 한다. 실측에서 nav를 attitude 없는 tick으로 옮기자 응답 시간이 1848 → 1536 µs, 지터는 0. attitude를 333 Hz로 바꾸면 같은 부하인데 nav 시작이 169~481 µs로 흔들렸다 — 서로소 주기는 어떤 오프셋에서도 언젠가 충돌한다. 실제로는 가장 빠른 루프의 분주(rate group)로 만든다.
+
+> Harmonic periods plus phase offsets. Moving the 50 Hz loop to a tick without the 250 Hz loop cut its response from 1848 to 1536 µs with zero jitter in my measurement; making attitude 333 Hz instead made the nav start wander between 169 and 481 µs under the same load, because coprime periods collide at every offset eventually. In practice I derive the slower loops by dividing the fast loop's tick — a rate group.
+
+**Q.** "How does the timing compare with a Linux periodic thread?"
+
+**A.** Linux 쪽은 EL N2 · N3에서 다뤘다(그 노트의 측정은 에뮬레이션이라 절대값 대신 방법을 배웠다). 실제 보드의 PREEMPT_RT + `SCHED_FIFO`도 꼬리가 수~수십 µs이고 원인이 커널 전체에 퍼져 있다. MCU RTOS는 지터의 원인을 **내 코드의 잠금 구간 목록**으로 닫을 수 있고, 필요하면 커널 밖 ISR로 0까지 내린다. 그래서 µs급 루프는 MCU에, 계획 · 인식은 Linux에 둔다.
+
+> On Linux, even with PREEMPT_RT and SCHED_FIFO on real hardware, the tail is several to tens of microseconds and the causes are spread across the whole kernel. On an MCU RTOS I can bound jitter by an explicit list of my own masked sections, and push it to zero with an ISR outside the kernel. So microsecond loops live on the MCU, and planning and perception on Linux.
+
+---
+
+## 13. 직접 해보기
+
+1. **개념**: 1 kHz tick의 FreeRTOS에서 300 Hz 루프를 만들어야 한다. 선택지 셋과 각각의 평균 주파수 · 주기 지터를 써라. Zephyr(1 kHz)에서 `k_timer` 주기를 `K_USEC(3333)`으로 주면?
+   정답/힌트: 3 tick(333 Hz), 4 tick(250 Hz), 3 · 3 · 4 번갈아(평균 300 Hz, ±0.67 ms 흔들림). Zephyr는 올림이라 4 tick = 250 Hz.
+2. **코드 과제**: 예제 4에 방식 6 "TIMER0 ISR(0x20)이 직접 계산"을 추가하라. 방식 4(0x00)와 무엇이 다른가?
+   정답/힌트: L1 ISR(0x40)은 선점하지만 크리티컬 섹션(BASEPRI 0x20)에 막힌다. 최대 지연 ≈ 40 µs 근처로 예상 — 재서 확인하라.
+3. **측정 과제**: `load.h`의 스케줄러 잠금을 `pvPortMalloc(64)` / `vPortFree` 반복으로 바꿔(heap_4) 방식 3의 지연 꼬리가 어떻게 변하는지 재라.
+   정답/힌트: heap_4의 `pvPortMalloc`은 `vTaskSuspendAll()`로 보호한다(`portable/MemMang/heap_4.c`). 잠금 구간이 짧아 꼬리가 줄어들 것 — 숫자로 확인.
+4. **측정 과제**: 예제 6에서 센서 주기를 999.0 µs(루프보다 빠름)로 바꾸면 재사용 대신 무엇이 생기나? beat 주기는?
+   정답/힌트: 샘플 건너뜀(skipped)이 생기고, 1/(1001 − 1000 Hz) ≈ 1초마다 한 번.
+5. **계산 과제**: 예제 12에서 KP · KD를 ωn = 400 rad/s로 올리고 일정 지연 500 µs와 1000 µs를 비교하라.
+   정답/힌트: ωn × D가 커질수록 위상 여유가 빨리 줄어든다. ωn = 400에서는 1 ms 래치가 불안정해질 수 있다 — 래치 여부는 대역폭이 결정한다.
+6. **코드 과제**: 예제 11 MODE 2를 고쳐, 사건 카운터 대신 TIMER0 + FPGA 카운터로 "지금까지 지난 주기 수"를 계산해 놓친 사건을 정확히 세라.
+   정답/힌트: `(CYC() - t0 + 12500) / 25000`처럼 하드웨어 시간에서 주기 번호를 계산하고 직전 번호와의 차 − 1을 miss로 센다.
+7. **Zephyr 과제**: 예제 3을 `CONFIG_TICKLESS_KERNEL=n`으로 빌드해 B의 평균 2002 µs가 2000으로 바뀌는지 확인하라.
+   정답/힌트: tickless 재설정 손실(C6 §8.6)이 원인이라는 추정을 검증하는 실험이다. 결과를 노트에 덧붙여라.
+
+---
+
+## 14. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| release (릴리스) | 주기 job이 실행 가능해지는 시각 | 타이머 사건, tick, DRDY |
+| release jitter / 시작 지터 | 릴리스 → 시작 지연의 흔들림 | 예제 4의 `lat_us` 분포 폭 |
+| period jitter / 주기 지터 | 연속 시작 간격 − T | 늦은 시작 뒤 다음 간격은 짧다 |
+| completion jitter / 출력 지터 | 릴리스 → 출력의 흔들림 | 시작 지터 + 계산 변동 |
+| drift / 위상 오차 | 격자 대비 누적 밀림 | C5 §5 |
+| sample age / 샘플 나이 | 쓰는 센서 값이 찍힌 뒤 지난 시간 | 시계가 다르면 톱니 |
+| sample-to-actuate latency | 샘플 → 출력 | 제어 루프 안의 순수 지연 |
+| beat (맥놀이) | 두 주기의 차이로 생기는 느린 반복 | 1/Δf 마다 샘플 재사용 · 건너뜀 |
+| DRDY (data-ready) | 센서가 새 샘플이 준비됐다고 알리는 핀 | 루프의 박자 원천 |
+| zero-latency ISR | BASEPRI보다 높은 우선순위의 ISR | 크리티컬 섹션에 안 막힘, 커널 API 금지 |
+| BASEPRI | 이 값 이하 우선순위의 인터럽트를 막는 레지스터 | FreeRTOS 크리티컬 섹션의 실체 (B3) |
+| scheduler lock / 스케줄러 잠금 | `vTaskSuspendAll()` | 인터럽트는 열림, 태스크 전환만 막힘 |
+| harmonic periods / 조화 주기 | 각 주기가 짧은 주기의 정수배 | 충돌 패턴이 고정, 오프셋이 효과 |
+| hyperperiod | 모든 주기의 최소공배수 | 스케줄이 반복되는 길이 |
+| rate group | 빠른 루프의 분주로 느린 루프를 만드는 구조 | 박자 원천 하나 |
+| overrun | 계산이 주기를 넘김 | skip 또는 catch-up |
+| catch-up | 놓친 주기를 연달아 실행 | `xTaskDelayUntil`, `pdFALSE` |
+| skip | 놓친 주기를 버림 | `xTaskPeriodicDelay`, `pdTRUE` |
+| preload (shadow) register | 새 값을 다음 update 이벤트에 반영하는 레지스터 | 출력 지터 0 |
+| phase locking / 위상 추종 | 타이머 주기를 센서에 맞춰 계속 조정 | 소프트웨어 PLL |
+| CCDF | P(값 > x) | 꼬리를 로그 축으로 보기 |
+
+---
+
+## 15. 요약 & 체크리스트
+
+주기 루프의 정확도는 하나의 숫자가 아니다 — 시작 지터, 주기 지터, 출력 지터, 샘플 나이, 입력→출력 지연, drift를 따로 잰다. 시간 격자 쪽에서는 tick 양자화(FreeRTOS 내림, Zephyr 올림)와 Zephyr의 상대 타임아웃 +1 tick이 주기를 통째로 바꾼다(`k_msleep(2)`는 3 ms 루프). 같은 부하에서 다섯 방식을 재 보면 tick 구동, SW 타이머, HW 타이머 → 태스크, DRDY → 태스크는 모두 최대 130 µs대로 비슷했고 — 지터의 주인은 경로가 아니라 다른 ISR, BASEPRI 크리티컬 섹션, 스케줄러 잠금이며 각 성분의 최대 지연은 그 성분의 가장 긴 구간과 같다 — BASEPRI 밖 ISR에서 직접 계산할 때만 0이었다. HW 타이머의 진짜 장점은 해상도와 센서 정렬이다. 타이머와 센서 시계가 다르면 샘플 나이가 톱니로 미끄러지며 샘플을 재사용하므로 DRDY 구동이나 위상 추종으로 맞춘다. 계산 변동은 출력을 래치해 "일정한 1주기 지연"으로 바꾸고, 여러 루프는 조화 주기 + 오프셋(또는 rate group)으로 배치한다. overrun은 반드시 세고, 제어 루프는 skip, ISR 구동이면 시간은 하드웨어 카운터로. 시뮬레이션에서 샘플 지터는 같은 평균 지연보다 두 배 이상 나빴고, 일정 지연은 대역폭에 따라 어느 순간 발산으로 바뀌었다.
+
+- [ ] 주기 루프의 평균 주기, 간격 최소 · 최대, 시작 지연 p99.9 · 최대를 한 번에 잴 수 있다
+- [ ] 1 kHz tick 위 400 Hz 루프의 세 선택지와 각각의 결과를 말할 수 있다
+- [ ] Zephyr 주기 루프에서 `k_msleep`, `sys_timepoint_timeout`이 왜 1 tick 늦는지 소스 줄로 설명할 수 있다
+- [ ] Zephyr 보드의 기본 tick rate를 확인하고 `K_USEC` 주기의 실제 tick 수를 계산할 수 있다
+- [ ] 다섯 구동 방식의 측정 결과와 "지터의 주인은 잠금 구간"이라는 결론을 수치로 말할 수 있다
+- [ ] BASEPRI 밖 ISR의 장점과 제약(커널 API 금지)을 설명할 수 있다
+- [ ] 센서 ODR과 루프 주기가 다를 때의 beat, 샘플 재사용을 계산하고 DRDY / 위상 추종으로 고칠 수 있다
+- [ ] 출력 래치(compare preload)가 출력 지터를 어떻게 지연으로 바꾸는지 설명할 수 있다
+- [ ] 조화 주기와 오프셋으로 여러 루프를 배치하고, 비조화 주기에서 충돌 없는 오프셋이 없는 이유를 말할 수 있다
+- [ ] `ulTaskNotifyTake(pdTRUE / pdFALSE)`, `xTaskPeriodicDelay`, `k_timer_status_sync`로 overrun을 감지하고 정책을 고를 수 있다
+- [ ] ISR 구동 루프에서 인터럽트 횟수로 시간을 세면 안 되는 이유를 말할 수 있다
+- [ ] 샘플 지터 · 출력 지터 · 일정 지연이 제어 품질에 주는 차이를 설명할 수 있다
+
+---
+
+## 참고 자료
+
+- FreeRTOS Kernel V11.3.2 소스: `tasks.c`(`xTaskDelayUntil` 2414행, `xTaskPeriodicDelay` 2365행, `ulTaskGenericNotifyTake` 7797행, `vTaskGenericNotifyGiveFromISR` 8315행), `timers.c`(`prvReloadTimer` 697행), `portable/GCC/ARM_CM3/port.c`(SysTick · PendSV 우선순위 56~57행, `vPortEnterCritical` 426행), `portmacro.h`, `History.txt`(V11.3.1의 `xTaskPeriodicDelay` 항목) — https://github.com/FreeRTOS/FreeRTOS-Kernel
+- FreeRTOS 문서: Direct to task notifications(`ulTaskNotifyTake`), `vTaskDelayUntil` / `xTaskDelayUntil` API 페이지 — https://www.freertos.org/
+- FreeRTOS 문서: Running the RTOS on an ARM Cortex-M Core(`configMAX_SYSCALL_INTERRUPT_PRIORITY`와 BASEPRI) — https://www.freertos.org/Documentation/02-Kernel/03-Supported-devices/04-Demos/ARM-Cortex/RTOS-Cortex-M3-M4
+- Zephyr v4.4.2 소스: `kernel/timeout.c`(`z_add_timeout`, `sys_timepoint_calc` / `sys_timepoint_timeout`), `kernel/timer.c`(`z_timer_expiration_handler`, `z_impl_k_timer_status_sync`), `include/zephyr/sys/clock.h`(`Z_TIMEOUT_US` 올림), `include/zephyr/kernel.h`(`K_TIMEOUT_ABS_*`), `kernel/Kconfig`(`SYS_CLOCK_TICKS_PER_SEC` 기본값) — https://github.com/zephyrproject-rtos/zephyr
+- Zephyr 문서: Kernel Timing — Timers, Kernel Timing — Kernel Timing(타임아웃 · 절대 타임아웃 · timepoint) — https://docs.zephyrproject.org/latest/kernel/services/timing/timers.html , https://docs.zephyrproject.org/latest/kernel/services/timing/clocks.html
+- Arm, Cortex-M3 Technical Reference Manual / Armv7-M Architecture Reference Manual — 예외 진입 지연, NVIC 우선순위, BASEPRI
+- QEMU `mps2-an385` 머신 · CMSDK APB timer / dual timer 모델 — https://www.qemu.org/docs/master/system/arm/mps2.html
+- 제어 루프 지연 · 지터의 영향 이론: K. J. Åström, B. Wittenmark, "Computer-Controlled Systems" (샘플링 지연과 지터를 다루는 교재), A. Cervin 외, "How does control timing affect performance?"(IEEE Control Systems Magazine, 2003, Jitterbug · TrueTime 도구)
+- 이 노트의 선행 · 관련 노트: A1, C5, C6, C7, D6, D8, E2, E3, E5, E6, N2, N3, Q1~Q4, Q7, EL N2 · N3

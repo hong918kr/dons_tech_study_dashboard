@@ -1,0 +1,750 @@
+# BV16 · 모의 면접 Q 뱅크 — 30문항 + 꼬리 3단 + 영어 30–60초 답
+<!-- theme: pastel -->
+
+> **묶음**: F 디버그·계획·실전 (BV01–BV15 종합) · **우선**: P1 (D-3 모의 면접용 — 막힌 문항만 원본 노트로) · **선행 노트**: [BV 트랙 전체](2026-11-01_BV00_board_validation_track.html), 이전 노트 [BV15 자동차 보드](2026-11-01_BV15_automotive_board_considerations.html) · **다음 노트**: 없음 (BV 트랙 마지막) → [온사이트 플랜](2026-10-31_rivian_onsite_plan.html) · **목록**: [BV 트랙 목록](2026-11-01_BV00_board_validation_track.html), [LP 트랙](2026-10-31_LP00_linux_pcie_track.html), [LP15 PCIe 디버그 시나리오](2026-10-31_LP15_debug_scenarios.html), [LP14 검증 방법론](2026-10-31_LP14_validation_methodology.html) · **코드**: 없음 (질문 뱅크)
+
+## 0. TL;DR · 사용법
+
+- 이 노트 = BV01–BV15 노트의 §4 꼬리 질문 체인에서 뽑은 **30문항 모의 면접 세트**. 묶음별로 A 6 · B 5 · C 6 · D 4 · E 3 · F 6. **P0 노트(BV01·02·03·05·06·07·09·13·14)에서 23문항**, P1/P2 노트(BV04·08·10·11·12·15)에서 7문항.
+- 기호: **★ = must-nail top 8** · **✏️ = 화이트보드/설계 문항** (Q19 메모리 테스트 스케치 · Q23 chamber shmoo 설계 · Q27 검증 계획 · Q28 보드 팜) · **🔗 = PCIe와 섞인 문항** (Q11 꼬리3 · Q24 · Q26) → LP 노트로 이어짐.
+- 모든 모범 답은 원본 BV 노트의 영어 답을 **30–60초 분량으로 압축**한 것 — 숫자·순서는 원본과 같다. 더 길게 말해야 하면 각 문항 끝의 "원본" 링크로.
+- Don 경험 훅(Solidigm FPGA pre-si bring-up · Trace32 · SK hynix chamber/shmoo · Apple DSO/protocol analyzer)은 **숫자를 지어내지 않고 `[숫자 채우기]`** 로 남겼다 — 면접 전에 BV00 §4 체크리스트로 채울 것.
+
+**자가 퀴즈 4단계 (문항마다)**
+
+1. `###` 제목 아래의 **영어 질문 + 꼬리 3개만** 본다 (`<details>`는 닫힌 채로).
+2. **소리 내서 60초** 답한다 — 휴대폰 녹음 권장. 꼬리도 각각 15–20초.
+3. `모범 답 펼치기` 를 열어 비교 — "한국어 핵심" 줄의 키워드가 내 답에 몇 개 있었나.
+4. 채점 ○ / △ / × → **×는 "원본" 링크로 BV 노트 해당 섹션을 읽고 다음 날 다시**. △는 꼬리만 다시.
+
+**채점 기준 5개 (모든 답에 공통 — 면접관이 듣는 것)**
+
+- ⓐ **아래 계층부터** (전원 → 클럭 → 리셋/strap → JTAG → SRAM·UART → 부트 → DDR → IO → 마진)
+- ⓑ 층마다 **"OK라는 증거 1개"** 를 이름으로 말함 (PGOOD 파형, PLL lock 비트, IDCODE, PC 위치, training 로그 …)
+- ⓒ **한 번에 하나만 바꾸기** — swap · A-B-A · bisect · 조건 스윕
+- ⓓ **숫자 1개 이상** — 8.68 µs (115200 bit), 9 clocks, 3/N (rule of three), 3×10¹² bit (BER 1e-12), −40~125 °C …
+- ⓔ **닫기** — 원인을 회귀 테스트 또는 체크리스트 항목으로 고정
+
+**30분 드릴 (면접 당일 아침 / 이동 중)**
+
+| 순서 | 내용 | 시간 |
+|---|---|---|
+| 1 | top 8 ★ 문항을 아래 표 순서대로: 질문만 보고 60초 답 → 펼쳐서 비교 | 8 × 3분 = 24분 |
+| 2 | 어제 × 였던 문항 2개 다시 | 6분 |
+
+**90분 드릴 (D-3 ~ D-1 저녁)**
+
+| 라운드 | 내용 | 시간 |
+|---|---|---|
+| R1 | 묶음 A → F 순서로 30문항 전부, **본 질문만** 45초씩 답 (꼬리는 생략), ○/△/× 표시 | 30분 |
+| R2 | ✏️ 4문항을 **종이에 그리면서** 설명 (Q19 · Q23 · Q27 · Q28), 각 7분 | 28분 |
+| R3 | 🔗 PCIe 문항 3개 (Q11 꼬리3 · Q24 · Q26) + [LP15](2026-10-31_LP15_debug_scenarios.html) S1/S7 영어 2분 답과 대조 | 12분 |
+| R4 | R1에서 × 였던 문항의 **꼬리 3단까지** 다시, 그래도 막히면 원본 노트 해당 섹션 읽기 | 20분 |
+
+**Must-nail top 8 ★**
+
+| # | 문항 | 왜 반드시 |
+|---|---|---|
+| 1 | [Q12 · Day 1](#q12-day-1) | "보드가 도착했다" = BV 트랙 면접 1순위 질문. 2분 답 준비 |
+| 2 | [Q25 · It doesn't boot](#q25-it-doesn-t-boot) | 디버그 라운드 헤드라인 — 모든 시나리오의 틀 |
+| 3 | [Q14 · JTAG no IDCODE](#q14-jtag-can-t-read-idcode) | Don의 Trace32 강점 카드가 가장 자연스럽게 나오는 곳 |
+| 4 | [Q09 · Reboot loop](#q09-reboot-loop) | reset reason → scope, "who is resetting the chip" 한 줄이 핵심 |
+| 5 | [Q18 · DDR training fails](#q18-ddr-training-fails) | bring-up에서 가장 자주 막히는 단계, 꼬리가 깊다 |
+| 6 | [Q19 · Write a memory test ✏️](#q19-write-a-memory-test) | 코딩·화이트보드 라운드 겸용 (data bus → address bus → March C-) |
+| 7 | [Q27 · Validation plan ✏️](#q27-write-a-validation-plan) | Staff 시그널 최다 — 9칸 구조 + 종료 기준 |
+| 8 | [Q02 · Pre-silicon readiness](#q02-pre-silicon-readiness-and-fpga-reuse) | Don의 Solidigm FPGA pre-si 경험이 정확히 맞는 질문 |
+
+## 1. 질문 목록 한눈에
+
+| # | 질문 (English) | 묶음 | 출처 노트 | 우선 |
+|---|---|---|---|---|
+| [Q01](#q01-new-soc-bring-up-walkthrough) | Walk me through how you'd bring up a brand-new SoC on a new board. | A | [BV01](2026-11-01_BV01_si_board_validation_big_picture.html) | P0 |
+| [Q02](#q02-pre-silicon-readiness-and-fpga-reuse) | What would you have ready before the silicon arrives, and how do you reuse the FPGA work? | A | [BV01](2026-11-01_BV01_si_board_validation_big_picture.html), [BV08](2026-11-01_BV08_boot_flow_bringup_firmware.html) | P0 ★ |
+| [Q03](#q03-silicon-validation-vs-design-verification) | What's the difference between silicon validation and design verification? | A | [BV01](2026-11-01_BV01_si_board_validation_big_picture.html) | P0 |
+| [Q04](#q04-ate-vs-slt) | What's SLT and how is it different from ATE testing? | A | [BV01](2026-11-01_BV01_si_board_validation_big_picture.html) | P0 |
+| [Q05](#q05-schematic-a-week-before-boards-arrive) | You get the schematic a week before the boards arrive. What do you do with it? | A | [BV02](2026-11-01_BV02_schematic_layout_reading.html) | P0 |
+| [Q06](#q06-i2c-device-doesn-t-respond-schematic-then-bench) | An I2C device doesn't respond. What do you look at in the schematic, then on the bench? | A | [BV02](2026-11-01_BV02_schematic_layout_reading.html), [BV10](2026-11-01_BV10_board_interface_tests.html) | P0 |
+| [Q07](#q07-first-power-on) | Walk me through powering on a new board for the first time. | B | [BV03](2026-11-01_BV03_power_tree_sequencing_pmic.html), [BV06](2026-11-01_BV06_first_power_on_checklist.html) | P0 |
+| [Q08](#q08-power-sequencing) | Why does power sequencing matter? | B | [BV03](2026-11-01_BV03_power_tree_sequencing_pmic.html), [BV05](2026-11-01_BV05_reset_strap_boot_mode.html) | P0 |
+| [Q09](#q09-reboot-loop) | The board keeps rebooting every few seconds. How do you debug it? | B | [BV05](2026-11-01_BV05_reset_strap_boot_mode.html) | P0 ★ |
+| [Q10](#q10-strap-pins) | What's a strap pin and what can go wrong with it? | B | [BV05](2026-11-01_BV05_reset_strap_boot_mode.html) | P0 |
+| [Q11](#q11-uart-garbage-clock) | UART prints garbage on a new board. What do you suspect? 🔗 | B | [BV04](2026-11-01_BV04_clocks_osc_pll_refclk.html), [LP03](2026-10-31_LP03_link_training_ltssm.html) | P1 |
+| [Q12](#q12-day-1) | The board just arrived. Walk me through your first day. | C | [BV06](2026-11-01_BV06_first_power_on_checklist.html) | P0 ★ |
+| [Q13](#q13-two-of-five-boards-behave-differently) | You have 5 boards and 2 of them behave differently. What do you do? | C | [BV06](2026-11-01_BV06_first_power_on_checklist.html), [BV02](2026-11-01_BV02_schematic_layout_reading.html) | P0 |
+| [Q14](#q14-jtag-can-t-read-idcode) | JTAG can't read IDCODE on a new board. What could be wrong? | C | [BV07](2026-11-01_BV07_jtag_swd_boundary_scan.html) | P0 ★ |
+| [Q15](#q15-boundary-scan) | What's boundary scan and why would a board team use it? | C | [BV07](2026-11-01_BV07_jtag_swd_boundary_scan.html) | P0 |
+| [Q16](#q16-multicore-halt-and-the-debugger-s-memory-path) | How do you halt all cores at the same time on a multicore SoC? | C | [BV07](2026-11-01_BV07_jtag_swd_boundary_scan.html) | P0 |
+| [Q17](#q17-bring-up-test-firmware-structure) | How would you structure a bring-up test firmware? | C | [BV08](2026-11-01_BV08_boot_flow_bringup_firmware.html) | P1 |
+| [Q18](#q18-ddr-training-fails) | DDR training fails on a new board. How do you debug? | D | [BV09](2026-11-01_BV09_ddr_bringup_training_memtest.html) | P0 ★ |
+| [Q19](#q19-write-a-memory-test) | Write a memory test. ✏️ | D | [BV09](2026-11-01_BV09_ddr_bringup_training_memtest.html) | P0 ★ |
+| [Q20](#q20-validate-ecc) | How would you validate ECC? | D | [BV09](2026-11-01_BV09_ddr_bringup_training_memtest.html), [BV15](2026-11-01_BV15_automotive_board_considerations.html) | P0 |
+| [Q21](#q21-validate-every-interface) | How would you validate every interface on a new board? | D | [BV10](2026-11-01_BV10_board_interface_tests.html) | P1 |
+| [Q22](#q22-six-rails-four-channels) | How would you measure the power-up sequence of 6 rails with a 4-channel scope? | E | [BV11](2026-11-01_BV11_lab_instruments_measurement.html), [BV03](2026-11-01_BV03_power_tree_sequencing_pmic.html) | P1 |
+| [Q23](#q23-shmoo-in-a-chamber) | What's a shmoo plot, and how would you run one on 20 boards in a chamber? ✏️ | E | [BV12](2026-11-01_BV12_si_pi_margining_shmoo_pvt.html) | P1 |
+| [Q24](#q24-pcie-correctable-errors-at-hot) | A PCIe link passes at nominal but shows correctable errors at hot. What next? 🔗 | E | [BV12](2026-11-01_BV12_si_pi_margining_shmoo_pvt.html), [LP15](2026-10-31_LP15_debug_scenarios.html), [LP14](2026-10-31_LP14_validation_methodology.html) | P1 |
+| [Q25](#q25-it-doesn-t-boot) | The board doesn't boot. Debug it. | F | [BV13](2026-11-01_BV13_board_debug_scenarios.html) | P0 ★ |
+| [Q26](#q26-pcie-endpoint-missing-on-the-new-board) | The PCIe endpoint on the new board doesn't show up in lspci. Where do you start? 🔗 | F | [BV13](2026-11-01_BV13_board_debug_scenarios.html), [LP15](2026-10-31_LP15_debug_scenarios.html), [BV04](2026-11-01_BV04_clocks_osc_pll_refclk.html) | P0 |
+| [Q27](#q27-write-a-validation-plan) | Write a validation plan for this new board. ✏️ | F | [BV14](2026-11-01_BV14_board_validation_plan_automation.html) | P0 ★ |
+| [Q28](#q28-board-farm-for-50-boards-nightly) | Design the automation for 50 boards running nightly. ✏️ | F | [BV14](2026-11-01_BV14_board_validation_plan_automation.html), [BV11](2026-11-01_BV11_lab_instruments_measurement.html) | P0 |
+| [Q29](#q29-hardware-or-software) | How do you decide whether a failure is hardware or software? | F | [BV14](2026-11-01_BV14_board_validation_plan_automation.html), [BV13](2026-11-01_BV13_board_debug_scenarios.html) | P0 |
+| [Q30](#q30-automotive-board-validation) | What's different about validating an automotive board vs a consumer one? | F | [BV15](2026-11-01_BV15_automotive_board_considerations.html) | P1 |
+
+## 2. 묶음 A — 큰 그림 · 회로도 (BV01 · BV02)
+
+### Q01 · New SoC bring-up walkthrough
+
+- **Q.** "Walk me through how you'd bring up a brand-new SoC on a new board."
+- **꼬리1.** "Something fails on day one — how do you tell chip from board from software?"
+- **꼬리2.** "Why bring up A0 on a validation board instead of the product board?"
+- **꼬리3.** "What are EVT, DVT and PVT, and how do they relate to A0 and B0?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈45 s)**: "I go bottom-up and I don't trust a symptom at one layer until the layer below is proven. Before power: a visual check and rail-to-ground resistance. Then power from a current-limited supply — every rail at the right voltage, in the right order, with sane current. Then clocks — oscillator running, PLLs locked. Then reset release and the strap values. Then JTAG: read the IDCODE, halt a core, read and write SRAM. Then a small test from SRAM with UART output. Only then the boot flow, DDR training and memory test, and each interface from simple connectivity up to full speed. Every step has a written pass criterion, and every measurement and rework goes into a log against the board serial number. After bring-up it's functional and performance validation, PVT characterization, and turning every failure into a silicon erratum, a board fix or a software fix."
+- **꼬리1** — "By experiment, not opinion: swap the chip — easy on a socketed board — and see whether the failure follows the chip or stays with the board; run the same firmware on another board and bisect firmware builds; sweep voltage and temperature, because a failure that moves with conditions is margin, not logic."
+- **꼬리2** — "Because on day one I want to measure everything: test points on every rail, current-sense resistors, zero-ohm options to isolate blocks, debug headers and often a socket. A product board is optimized for size and cost, so when something fails I can't tell the chip from the board."
+- **꼬리3** — "They're board build phases: EVT proves the design works, DVT is design-frozen for certification and reliability, PVT proves the factory builds it at volume. Silicon steppings run on their own track — early silicon goes on validation boards and EVT, the fixed stepping lines up with DVT or PVT — and I'm careful because PVT also means process-voltage-temperature."
+- **한국어 핵심**: 아래 계층부터 + 단계마다 통과 기준 + 보드 SN별 기록 · 칩/보드/SW는 swap·bisect·조건 스윕으로 · 검증 보드 = 측정·격리 가능 · EVT/DVT/PVT는 보드 단계(칩 stepping과 별도 트랙).
+- **원본**: [BV01 §4 체인 A](2026-11-01_BV01_si_board_validation_big_picture.html#체인-a-walk-me-through-how-you-d-bring-up-a-brand-new-soc-on-a-new-board-bv00-원본) · [BV01 §4 체인 D](2026-11-01_BV01_si_board_validation_big_picture.html#체인-d-what-are-evt-dvt-and-pvt-how-do-board-revisions-interact-with-silicon-steppings-추가)
+
+</details>
+
+### Q02 · Pre-silicon readiness and FPGA reuse
+
+- **Q.** "What would you have ready before the silicon arrives, and how do you reuse the FPGA work?"
+- **꼬리1.** "What's different between FPGA and silicon that bites you?"
+- **꼬리2.** "A test passes on FPGA but fails on A0. How do you triage?"
+- **꼬리3.** "What exactly did you own on that handoff in your last role?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈50 s)**: "Most of the work happens before the silicon arrives. I want bring-up firmware that runs from on-chip SRAM with a minimal UART driver and a test registry, already green on the FPGA; a HAL where every platform difference — clock rates, timeouts, which PHYs exist — lives in one config; JTAG scripts for connect, halt, load and reading reset reason; silicon-only tests the FPGA couldn't exercise, like PLL lock, PHY calibration, DDR training log parsing and temperature sensors; a bring-up checklist from the schematic; and the automation already running nightly on FPGA boards. The goal is the same source, ideally the same binary, on both — only the platform config changes. Then the FPGA results are my baseline, and on silicon I only debug the delta."
+- **꼬리1** — "Speed — silicon runs ten to a hundred times faster, so delay loops and timeouts written in iterations break and hidden races appear; everything analog the FPGA didn't have — SerDes PHYs, the DDR PHY and training, real PLLs, fuses; power domains that were always-on; reset timing; and FPGA partitioning bugs that don't exist in silicon."
+- **꼬리2** — "Same source, so first I rule out the platform layer — timeout scaling, the real clock configuration, whether the block exists in the same form. Then I loop the failing test alone, dump the block's registers and diff against the FPGA dump; deterministic with matching config means a candidate silicon or integration issue, which I reduce to a minimal register sequence for the design team."
+- **꼬리3 (Don 훅)** — "At Solidigm I brought up Cortex-R8, R82 and M0+ subsystems and the PCIe/NVMe subsystem IP on FPGA before RTL freeze, and wrote SoC verification for I2C, SPI, DMA, SRAM and DRAM — then worked with the silicon validation team on performance tuning. I owned the pre-silicon side and the handoff; on silicon day one my role was [숫자 채우기: 직접 한 일 vs 옆에서 본 일 — 과장 없이]. Platform: [숫자 채우기: FPGA 플랫폼 이름, 기간]."
+- **한국어 핵심**: SRAM FW + HAL config + JTAG 스크립트 + 실리콘 전용 테스트 + 회로도 체크리스트 + FPGA에서 이미 도는 자동화 → 같은 소스/바이너리, FPGA green = 기준선, 실리콘에선 delta만.
+- **원본**: [BV01 §4 체인 A](2026-11-01_BV01_si_board_validation_big_picture.html#체인-a-walk-me-through-how-you-d-bring-up-a-brand-new-soc-on-a-new-board-bv00-원본) · [BV01 §2.12 readiness](2026-11-01_BV01_si_board_validation_big_picture.html#2-12-실리콘-오기-전에-준비해-둘-것-readiness-checklist) · [BV08 §4.4](2026-11-01_BV08_boot_flow_bringup_firmware.html#4-4-추가-체인-it-passes-on-the-fpga-but-fails-on-silicon-how-do-you-use-the-test-firmware-to-triage) · [BV01 §5 Don](2026-11-01_BV01_si_board_validation_big_picture.html#5-don-경험-연결)
+
+</details>
+
+### Q03 · Silicon validation vs design verification
+
+- **Q.** "What's the difference between silicon validation and design verification?"
+- **꼬리1.** "Why do we still find bugs post-silicon if DV had 100% coverage?"
+- **꼬리2.** "How do you get a silicon bug fixed — what goes into an erratum?"
+- **꼬리3.** "What's the difference between A1 and B0?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈35 s)**: "Design verification asks whether the RTL matches the spec — in simulation, emulation or formal — with full visibility but very slow execution. Silicon validation asks whether the real chip, on a real board, with real software, works across real conditions — voltage, temperature, process — with very limited visibility but full speed. DV finds most logic bugs; validation finds what DV can't model or can't reach in time: analog and timing effects, long software sequences, system interactions, and margins."
+- **꼬리1** — "Coverage only measures what the coverage model defines, simulation never reaches hour-long OS sequences, and parasitics, droop and analog PHY behavior aren't in the RTL at all; I try to reproduce in RTL sim — if it reproduces it's a logic bug and a coverage hole, if not it's a silicon effect like a corner timing path."
+- **꼬리2** — "A solid report — exact conditions, reproduction rate, minimal test, debug-register evidence, ideally an RTL reproduction; design decides fix, workaround or accept; the erratum lists the problem, conditions, system impact, workaround and its cost, and affected steppings. My part is proving the workaround with enough runs and locking the test into regression."
+- **꼬리3** — "By the usual convention the number changes for a metal-only revision — rewiring existing or spare cells, a few masks, faster and cheaper — and the letter changes for a base-layer revision with new transistors and a full mask set."
+- **한국어 핵심**: DV = RTL vs spec (가시성↑ 속도↓) · validation = 실물·실 SW·실 조건 (속도↑ 가시성↓) · 커버리지는 "생각한 것"만 · errata = 문제·조건·영향·workaround·stepping · 숫자 = metal, 글자 = base.
+- **원본**: [BV01 §4 체인 B](2026-11-01_BV01_si_board_validation_big_picture.html#체인-b-what-s-the-difference-between-silicon-validation-and-design-verification-bv00-원본)
+
+</details>
+
+### Q04 · ATE vs SLT
+
+- **Q.** "What's SLT and how is it different from ATE testing?"
+- **꼬리1.** "What would you put in an SLT program for an AI SoC?"
+- **꼬리2.** "How do validation tests turn into SLT content?"
+- **꼬리3.** "SLT fails a chip that passed ATE. Now what?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈40 s)**: "ATE testing is structural: the tester drives scan and BIST patterns generated against fault models — stuck-at, bridging, delay — so you get measurable fault coverage in seconds. System-level test puts the chip in a board-like socket and runs real workloads — boot an OS or test executive, run applications and stress — for minutes. It catches what structural tests miss: interactions across clock and power domains, analog and asynchronous interfaces, marginal timing at low voltage or during DVFS, temperature-dependent defects. It has no formal coverage metric and it's harder to diagnose, so it complements ATE rather than replacing it."
+- **꼬리1** — "A short boot, then every major block at realistic intensity together: the NPU running an inference with a known-answer check, CPUs under stress, LPDDR at full bandwidth with data checking, camera input through the ISP with a test pattern, PCIe and Ethernet in loopback — at a voltage guard-band below nominal and at temperature, self-judging with a failure code, deterministic, minutes long."
+- **꼬리2** — "Take the validation tests that actually caught marginal or interaction failures, strip them to a fixed duration, make them deterministic and self-checking, remove lab-equipment dependencies, add a failure code — then prove they separate known-bad from known-good parts."
+- **꼬리3** — "First make sure it's the chip — re-test in another socket and on a validation board. If it follows the chip, capture the signature and shmoo it to see marginal versus hard defect, hand it to failure analysis and the test team for an earlier ATE pattern; many parts with the same signature means a design marginality."
+- **한국어 핵심**: ATE = 결함 모델·커버리지·초 단위 · SLT = 실 워크로드·분 단위·상호작용·마진 결함 → 보완 · AI SoC SLT = NPU known-answer + LPDDR 데이터 체크 + ISP 패턴 + loopback, guard-band·고온.
+- **원본**: [BV01 §4 체인 C](2026-11-01_BV01_si_board_validation_big_picture.html#체인-c-what-s-slt-and-how-is-it-different-from-ate-testing-bv00-원본)
+
+</details>
+
+### Q05 · Schematic a week before boards arrive
+
+- **Q.** "You get the schematic a week before the boards arrive. What do you do with it?"
+- **꼬리1.** "How do you know which rails must come up first?"
+- **꼬리2.** "What would you ask the HW engineer to add for debuggability?"
+- **꼬리3.** "The layout is already frozen. Now what?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈45 s)**: "I turn it into a bring-up checklist and a question list. I read it in bring-up order: the power tree — every rail, its regulator, what enables it and what it waits for, expected voltage and current, and where I can probe it; then clock sources, the reset circuit, every strap and boot-mode resistor and what value the chip will sample; the debug path — JTAG and UART headers and their voltage reference; test points and current-sense resistors; pull-ups, IO voltage banks and level shifters; and finally every DNP and zero-ohm option. I sanity-check numbers like feedback dividers and pull-up values, and anything I can't measure, isolate or control remotely becomes a design-for-debug request while there's still time to change the layout."
+- **꼬리1** — "Two sources that must agree: the SoC and memory datasheets give the required order, delays and ramp limits, and the schematic shows what the board implements — each regulator's input, enable and power-good. I draw that as a dependency graph and check it against the datasheet; I even scripted it from a power-tree CSV."
+- **꼬리2** — "A test point on every rail, current-sense resistors or zero-ohm footprints on the big rails, zero-ohm links to isolate blocks, a JTAG header with VTref and system reset plus UARTs, pull-up and pull-down footprints on every strap, a header to reach the PMIC over I2C when the SoC is dead, LEDs on power-good and reset, and remote power, reset and boot-mode control for the farm."
+- **꼬리3** — "Use what's there — vias, pads, decoupling-cap pads as probe points; lift a series zero-ohm or ferrite to isolate or insert a current measurement — agree the needed reworks with the HW team before boards arrive, and put the requests on the next revision's list."
+- **한국어 핵심**: bring-up 순서로 읽기 9단계 → 체크리스트(어디·기대값·합격) + 질문 목록 · 숫자 검산(FB 분압 Vout = Vref×(1+Rtop/Rbot), 풀업) · 측정 불가 = DFD 요청.
+- **원본**: [BV02 §4 체인 A](2026-11-01_BV02_schematic_layout_reading.html#체인-a-you-get-the-schematic-a-week-before-boards-arrive-what-do-you-do-with-it-bv00-원본)
+
+</details>
+
+### Q06 · I2C device doesn't respond — schematic then bench
+
+- **Q.** "An I2C device doesn't respond. What do you look at in the schematic, and then on the bench?"
+- **꼬리1.** "The pull-ups look right. What next?"
+- **꼬리2.** "How do you pick the pull-up value?"
+- **꼬리3.** "The scan shows a device at every address."
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈45 s)**: "In the schematic, first the pull-ups — are there any, what value, and on which rail, because a pull-up on a rail that's off kills the bus. Then the device's own supply and enable chain. Then its address strap pins, because the 7-bit address in the driver has to match how they're tied. Then voltage levels — same IO voltage as the SoC bank, or a level shifter that has to be powered and enabled. Then the device's reset pin, and whether a jumper or zero-ohm breaks the bus. On the bench I scope SCL and SDA at the device, trigger on the start condition, and check levels, rise time and whether the ninth bit is an ACK."
+- **꼬리1** — "Scope it: levels, rise time against the speed mode, ACK on the ninth bit; if no ACK, check the address on the wire, including 7-bit versus 8-bit confusion; if there's no traffic at all, it's the controller side — pin mux or controller clock."
+- **꼬리2** — "It's bounded both ways: minimum is (VDD − VOL) / IOL — about 1 kΩ at 3.3 V and 3 mA — and maximum is tr / (0.8473 × Cb) — about 3.5 kΩ at 400 kHz with 100 pF; and watch out for duplicated pull-ups on several modules in parallel."
+- **꼬리3** — "That's SDA stuck low — every address looks like an ACK. Usually a slave interrupted mid-byte; clock SCL up to nine times until SDA releases, then STOP. If it won't release, something is driving the line — a partly powered device or a short."
+- **Don 훅** — "At Apple, every root-cause started from the schematic — tracing I2C, SPMI and RFFE from the SoC to the RF module, pull-ups and voltage domains — and then confirming with a DSO and protocol analyzer. [숫자 채우기: 사례 1개]"
+- **한국어 핵심**: 풀업(유무·값·rail) → 장치 전원·EN → 주소 strap → IO 전압·level shifter → 장치 리셋 → 점퍼/0 Ω · bench는 레벨·rise time·9번째 비트 ACK · 전 주소 응답 = SDA stuck low.
+- **원본**: [BV02 §4 체인 B](2026-11-01_BV02_schematic_layout_reading.html#체인-b-an-i2c-device-doesn-t-respond-what-do-you-look-at-in-the-schematic-bv00-원본) · [BV13 S11](2026-11-01_BV13_board_debug_scenarios.html#s11-i2c-장치가-nack)
+
+</details>
+
+## 3. 묶음 B — 전원 · 클럭 · 리셋 (BV03 · BV04 · BV05)
+
+### Q07 · First power-on
+
+- **Q.** "Walk me through powering on a new board for the first time."
+- **꼬리1.** "Why current-limited — and how else do you protect the only A0 silicon you have?"
+- **꼬리2.** "Current is 3× higher than expected. What next?"
+- **꼬리3.** "One rail is 10% low only under load — what is it?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈45 s)**: "Before applying power I already have a power-tree table from the schematic: every rail, nominal voltage, tolerance, sequence position, where to probe, and expected current. First a visual inspection, then each rail's resistance to ground with power off, compared with a known-good board — that catches most shorts and wrong-orientation parts. Then I power the input from a bench supply with a conservative current limit and check it stays in constant-voltage mode, measure each rail with a DMM, capture the power-up sequence on a scope — order, ramps, overshoot, power-good, reset released after the last rail — read the PMIC status registers, and take a quick thermal image. Only after power is clean do I look at clocks and reset."
+- **꼬리1** — "A short can draw amps and kill the only A0 chip; with the limit just above the expected current, a fault drops the supply into constant-current mode instead of melting something. But not too low, or a healthy board sags into undervoltage and I misdiagnose it — so I raise the limit in steps, start with the best-looking board, use soldered wires instead of slipping probe tips, and keep test firmware away from fuses and OTP."
+- **꼬리2** — "Stop and localize: a thermal camera with the limited current flowing usually points straight at the part; otherwise split the tree — disable regulators by enable or lift zero-ohms or inductors — and bring rails up one at a time while watching current, and compare with a second board."
+- **꼬리3** — "Measure at the regulator and at the SoC side at the same time: both low means the regulator — current limit, a dead phase, wrong feedback divider, sagging input; only the SoC side means IR drop or missing remote sense. Then a scope on a load-step marker separates a steady drop from a transient droop."
+- **한국어 핵심**: 표 준비 → 육안 → rail-GND 저항(golden 비교) → 전류 제한 단계적 인가 → DMM → scope 시퀀스 → PMIC 레지스터 → 열화상 · 3× 전류 = 열화상 + rail 하나씩 분리 · 부하 시만 낮음 = 두 지점 동시 측정.
+- **원본**: [BV03 §4 체인 1](2026-11-01_BV03_power_tree_sequencing_pmic.html#체인-1-walk-me-through-powering-on-a-new-board-for-the-first-time) · [BV06 §4.3 A0 보호](2026-11-01_BV06_first_power_on_checklist.html#4-3-how-do-you-avoid-destroying-the-only-a0-silicon-you-have)
+
+</details>
+
+### Q08 · Power sequencing
+
+- **Q.** "Why does power sequencing matter?"
+- **꼬리1.** "What can happen if IO comes up before core?"
+- **꼬리2.** "Who guarantees the order on the board?"
+- **꼬리3.** "How would you verify sequencing on every board automatically?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈35 s)**: "Because the chip's internal circuits assume certain supplies exist before others. With the wrong order you get current through ESD diodes into an unpowered rail, IO pins in undefined states driving other chips, strap pins sampled wrong, latch-up in the worst case, and inrush stacking up so the input sags. The datasheet specifies the order, the delays and the ramp limits — ramps must also be monotonic — and reset must be held until the last rail is good. Power-down matters too: usually the reverse order, and it's easy to forget to test."
+- **꼬리1** — "The IO ring is powered but the core logic controlling it isn't, so outputs can glitch — a flash write-enable or a PHY reset; external chips can back-power the core rail through protection diodes so it sits half-on and power-on reset misbehaves; and pin voltage above the supply is exactly the latch-up condition."
+- **꼬리2** — "The PMIC sequencer or a chain of regulators with enable and power-good, plus a reset supervisor or the PMIC's reset output holding the SoC in reset until the monitored rails are good plus a delay that covers oscillator start-up; a plain RC delay is cheap but doesn't catch brown-outs."
+- **꼬리3** — "Capture the rails, PGOOD and reset on a multi-channel scope or DAQ triggered on the first rail, and a script finds the 10 and 90 percent crossings and checks order, gaps, ramp time, monotonicity, overshoot and reset delay against a spec table — storing the numbers, not just pass/fail. I wrote that checker for this prep; it flags an IO rail coming up second, a 13% overshoot and an early reset."
+- **한국어 핵심**: ESD 다이오드 back-power · IO glitch · strap 오독 · latch-up · inrush → 데이터시트가 순서, 보드(PGOOD 체인·PMIC·supervisor)가 보장, 리셋은 마지막 PGOOD + 지연 · 자동 검증 = 10/90% 교차 스크립트.
+- **원본**: [BV03 §4 체인 2](2026-11-01_BV03_power_tree_sequencing_pmic.html#체인-2-why-does-power-sequencing-matter) · [BV05 §4.3](2026-11-01_BV05_reset_strap_boot_mode.html#4-3-bv00-체인-what-s-the-right-order-of-power-clock-and-reset-who-guarantees-it)
+
+</details>
+
+### Q09 · Reboot loop ★
+
+- **Q.** "The board keeps rebooting every few seconds. How do you debug it?"
+- **꼬리1.** "Reset reason says watchdog, but the code kicks it."
+- **꼬리2.** "Reset reason says brown-out."
+- **꼬리3.** "It only happens on 2 boards out of 10."
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈45 s)**: "First I find out who is resetting the chip, before I form any theory. On the next boot I read the reset-reason register first thing — before anything clears it, and as the raw value, because the bits are usually sticky and write-one-to-clear, so old causes can accumulate. I capture the UART log right up to the reset, and in parallel I put a scope on the reset pin and the main rails, triggered on reset assertion. A very regular period smells like a watchdog; an irregular one like power or noise. Watchdog means software is stuck or not servicing it; brown-out or power-on means a power problem; external pin means something on the board — a supervisor, a CPLD or the debugger — is pulling reset. Reason register first, then scope; never guess."
+- **꼬리1** — "Halt with JTAG near the timeout and see where the PC is — often an exception handler or a poll with no timeout; check whether the kick is in a masked interrupt, whether the watchdog clock on this board makes the timeout shorter, whether the boot ROM or FSBL already started a watchdog, and whether it's a window watchdog that also resets on an early kick."
+- **꼬리2** — "That's power until proven otherwise: scope the core and IO rails triggered on reset and look backwards for a droop at a load step like DDR training, then the regulator limit, the PMIC fault registers and the supervisor threshold; quick experiment — raise the setpoint slightly or limit the load and see if resets stop."
+- **꼬리3** — "Compare those two against a good one — ripple and droop, supervisor part and threshold, glitches on the reset line, strap voltages, rework history — then swap the SoC or the supervisor between good and bad boards; whatever the failure follows is the cause."
+- **Don 훅** — "In SSD firmware we logged reset cause and a boot counter in retained memory so a reboot loop could be diagnosed from the field log. [숫자 채우기: 실제 쓴 메커니즘 이름]"
+- **한국어 핵심**: "누가 리셋했나" 먼저 — reason 레지스터 raw 값(sticky·W1C, 읽고·기록하고·지움) + UART 마지막 줄 + reset 트리거 scope(주기) · WDT = JTAG PC·kick 위치·WDT 클럭·앞단 WDT·window · brown-out = droop → BV03.
+- **원본**: [BV05 §4.1](2026-11-01_BV05_reset_strap_boot_mode.html#4-1-bv00-체인-the-board-keeps-rebooting-every-few-seconds-how-do-you-debug-it) · [BV13 S4](2026-11-01_BV13_board_debug_scenarios.html#s4-계속-재부팅-몇-초마다-처음부터)
+
+</details>
+
+### Q10 · Strap pins
+
+- **Q.** "What's a strap pin and what can go wrong with it?"
+- **꼬리1.** "The strap is right on the schematic but the chip boots in the wrong mode."
+- **꼬리2.** "How would you choose the pull resistor value?"
+- **꼬리3.** "How do you make strap problems visible in an automated board test?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈35 s)**: "A strap is a pin whose level is sampled once, when reset is released, to configure the chip — boot device, PHY address, PLL bypass, debug options. After that the pin is often reused as a GPIO or an LED. Everything that goes wrong is about the voltage at that exact instant: a pull resistor too weak against leakage or another driver, another chip actively driving the net during reset, or the IO rail for that pin not up yet when reset releases. So I never trust the schematic — I read what the chip actually latched."
+- **꼬리1** — "Read the latched value first — on Zynq UltraScale+ the boot-mode register in CRL_APB — so I know it's sampling, not the image. Then hold the chip in reset and measure the pin with a DMM; if it's between VIL and VIH, look for who else is on that net — a CPLD output, an LED or PHY input leaking against a 100k pull, a wrong BOM value, or a late IO bank."
+- **꼬리2** — "Strong enough that worst-case leakage times R keeps me well past VIH or VIL and wins against internal pulls, with the RC settling before the sample point; weak enough not to load the pin when it later drives an LED — 4.7k to 10k is typical, but I do the worst-case math from the datasheet."
+- **꼬리3** — "Every boot the test firmware prints the latched strap and boot-mode registers and the automation compares them to the expected values for that board revision — plus power-cycle loops across temperature, because a marginal strap shows up as an occasional wrong mode."
+- **한국어 핵심**: strap = 리셋 해제 순간 한 번 찍는 사진 · 실패 3종 = 약한 풀+누설/다른 드라이버 · 리셋 중 다른 칩이 driving · IO rail 미안정 · 확인은 회로도가 아니라 **샘플된 값 레지스터**.
+- **원본**: [BV05 §4.2](2026-11-01_BV05_reset_strap_boot_mode.html#4-2-bv00-체인-what-s-a-strap-pin-and-what-can-go-wrong-with-it) · [BV13 S5](2026-11-01_BV13_board_debug_scenarios.html#s5-엉뚱한-boot-mode로-부팅)
+
+</details>
+
+### Q11 · UART garbage → clock 🔗
+
+- **Q.** "UART prints garbage on a new board. What do you suspect?"
+- **꼬리1.** "How do you prove it's the clock?"
+- **꼬리2.** "The crystal is fine but the PLL doesn't lock. Next?"
+- **꼬리3.** 🔗 "Why does PCIe need its own 100 MHz refclk, and what's SSC?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈40 s)**: "Garbage that's consistent, not random, usually means a baud-rate mismatch, and on a new board that's almost always a clock problem: the UART's input clock isn't what the firmware assumes. The usual causes are a different crystal or oscillator than expected, the PLL not locked so the chip is still on the bypass clock, the wrong clock mux or divider for the UART, or an integer divisor that's too coarse. I'd also rule out the non-clock causes — terminal settings, TX and RX swapped, the wrong voltage level. Then I measure rather than guess."
+- **꼬리1** — "Trigger on TX and measure the start-bit width: at 115200 it should be 8.68 µs. The ratio tells the story — 10.85 µs is 20% slow, matching a 19.2 MHz clock where firmware assumed 24; exactly double means a bypassed PLL. Then confirm at the source through the debug clock-out pin with a counter, not by loading the crystal pin with a probe."
+- **꼬리2** — "Check the configuration against the datasheet limits — phase-detector input frequency and VCO range — then the PLL's separate analog supply, and that it was actually released from reset or power-down; then try a VCO setting mid-range and compare with another board."
+- **꼬리3 🔗** — "The serial link has no clock wire, so each side's PHY PLL multiplies a reference up to the bit rate, and the 100 MHz HCSL refclk gives both a known low-jitter base; with a common clock both ends share the same drift. SSC deliberately sweeps the reference down by up to 0.5% at about 30–33 kHz to spread EMI — and with SRIS, separate clocks with independent spread, it's limited to −0.3% and needs more SKP ordered sets."
+- **한국어 핵심**: 일관된 깨짐 = baud 불일치 = 클럭 오차 · start bit 폭 8.68 µs 기준 비율로 원인 분류(20% = 19.2 vs 24 MHz, 2× = bypass) · clock-out 핀 · PFD/VCO 범위·PLL 아날로그 전원 · PCIe refclk 100 MHz, SSC 30–33 kHz 0~−0.5%, SRIS −0.3%.
+- **원본**: [BV04 §4 체인 1](2026-11-01_BV04_clocks_osc_pll_refclk.html#체인-1-uart-prints-garbage-on-a-new-board-what-do-you-suspect) · [BV04 §4 체인 2](2026-11-01_BV04_clocks_osc_pll_refclk.html#체인-2-why-does-pcie-need-a-100-mhz-refclk-and-what-s-ssc) · 🔗 [LP03 링크 학습](2026-10-31_LP03_link_training_ltssm.html)
+
+</details>
+
+## 4. 묶음 C — 첫 전원 인가 · JTAG · 부트 (BV06 · BV07 · BV08)
+
+### Q12 · Day 1 ★
+
+- **Q.** "The board just arrived. Walk me through your first day."
+- **꼬리1.** "What do you measure before applying power?"
+- **꼬리2.** "Power is fine but JTAG sees nothing."
+- **꼬리3.** "JTAG works, but the code you load into SRAM doesn't print anything."
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈60 s)**: "Before the board arrives I turn the schematic into a checklist — every rail with its expected voltage, sequence position, resistance to ground and current — and I have test firmware and debugger scripts that already ran on the FPGA prototype. On Day 1 I start with the best-looking board and go bottom-up, not moving on until each layer is proven: visual and microscope inspection; rail-to-ground resistance with power off; first power from a current-limited supply with a low limit that I raise in steps while watching current and a thermal camera. Then every rail voltage, the sequence and power-good on a scope, the oscillator, and reset released after the rails are stable, with straps set to a safe JTAG or download boot mode. Then JTAG at a slow TCK: IDCODE matches the part and stepping, halt the core, write-read SRAM. Then a tiny SRAM program that toggles a GPIO and prints hello on the UART. That's usually Day 1 — boot device, DDR and interfaces come after. Every measurement goes into a log per board serial, compared with the expected value and the golden board."
+- **꼬리1** — "Resistance from every rail to ground, same meter range and polarity each time, compared with expectation and across boards — near zero is a short and it doesn't get powered; big core rails can legitimately read a few ohms, so the cross-board comparison matters more than the absolute value. Also jumpers, straps and supply polarity."
+- **꼬리2** — "Debug path from the bottom: VTref present? Is the SoC out of reset, or is the debugger holding SRST? Drop TCK to 100 kHz and scope TCK, TMS and TDO — TDO stuck high means open chain or unpowered TAP, stuck low means a short or level shifter; then chain configuration."
+- **꼬리3** — "Halt and look at the PC — my loop, a fault handler, or back in ROM? If it's my loop, check the GPIO toggle, then scope UART TX: a waveform means the terminal side — swapped TX/RX, level, baud — a wrong bit width means my clock assumption is wrong, and no waveform means pin mux, the UART clock gate or its reset."
+- **Don 훅** — "At Solidigm I brought up our PCIe Gen6 SSD controller's Cortex-R8, R82 and M0+ cores on the pre-silicon FPGA platform with the same bottom-up ladder — power and clocks, reset, Trace32 attach and halt, SRAM tests, then UART and subsystems. [숫자 채우기: 플랫폼 이름, 첫 부팅까지 기간, 처음 막혔던 것 1개]"
+- **한국어 핵심**: Day 0 체크리스트·FPGA 검증된 FW → 육안 → 저항 → 전류 제한 단계 → rail·순서·클럭·리셋(안전 boot mode) → JTAG(IDCODE·halt·SRAM) → SRAM 코드(GPIO·UART) → 이후 boot·DDR·IO · 원칙 = bottom-up gate · 하나씩 · 기록 · golden 비교.
+- **원본**: [BV06 §4.0 2분 답](2026-11-01_BV06_first_power_on_checklist.html#4-0-2분-영어-답-the-board-just-arrived-walk-me-through-day-1) · [BV06 §4.1](2026-11-01_BV06_first_power_on_checklist.html#4-1-bv00-체인-walk-me-through-your-first-day-전원-전-측정-jtag-안-보임-sram-코드-무출력)
+
+</details>
+
+### Q13 · Two of five boards behave differently
+
+- **Q.** "You have 5 boards and 2 of them behave differently. What do you do?"
+- **꼬리1.** "Everything in your difference table is identical. Now what?"
+- **꼬리2.** "How do you decide whether it's a silicon or a board problem?"
+- **꼬리3.** "What in the BOM or schematic would you check between them?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈40 s)**: "First I make sure it's the board and not the setup: move the failing board to the good setup and vice versa — same supply, cables, debugger and firmware. If the symptom follows the board, I build a difference table: rework history, BOM alternates, silicon sample and lot, fuses or stepping, PMIC OTP version, and the measurements we logged — rail resistances, voltages, currents. Usually something lines up. Then I prove it with a swap — on a socketed board I swap the SoC, otherwise the suspect part — and confirm with A-B-A: the symptom must move and come back."
+- **꼬리1** — "Then it's probably margin, not a defect — the two boards may be the weak tail of a distribution; I sweep voltage and temperature on good and bad boards, and if the bad ones fail slightly earlier it becomes a characterization question with more samples."
+- **꼬리2** — "Swap tests and correlation: follows the chip across boards — silicon; follows the board or one component — board; all boards fail the same way — design or silicon, decided by register behavior against the spec and the FPGA."
+- **꼬리3** — "That they're really the same — PCB rev, BOM variant, rework log, chip ID and lot; then the fitted assembly options checked physically, not from paperwork; then second-source parts on the same reference designator, like a crystal with different load capacitance or a PMIC with different OTP."
+- **한국어 핵심**: 셋업 vs 보드 분리 → 차이 표(rework·BOM 대체·칩 lot·OTP·측정값) → swap + A-B-A · 다 같으면 마진(분포 끝) → 전압·온도 스윕 · 따라가는 쪽이 원인.
+- **원본**: [BV06 §4.2](2026-11-01_BV06_first_power_on_checklist.html#4-2-you-have-5-boards-and-2-of-them-behave-differently-what-do-you-do) · [BV02 §4 체인 E](2026-11-01_BV02_schematic_layout_reading.html#체인-e-two-boards-from-the-same-build-behave-differently-what-in-the-bom-schematic-do-you-check-추가) · [BV13 S8](2026-11-01_BV13_board_debug_scenarios.html#s8-10장-중-2장만-실패)
+
+</details>
+
+### Q14 · JTAG can't read IDCODE ★
+
+- **Q.** "JTAG can't read IDCODE on a new board. What could be wrong?"
+- **꼬리1.** "How do you narrow it down?"
+- **꼬리2.** "IDCODE reads but you can't halt the core."
+- **꼬리3.** "How would you debug the very first instruction after reset?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈50 s)**: "I work up from the physical layer. First, is the target really powered and is VTref present at the header — without it the probe won't drive the right levels. Second, is the chip out of reset, and is the debugger itself holding reset or TRST? Third, slow TCK right down, to 100 kHz or less, and put a scope on TCK, TMS and TDO at the SoC. If TDO never moves and sits high, the chain is open, the TAP isn't powered, or JTAG is disabled by a strap or fuse; if it sits low, something's shorting it or a level shifter isn't powered. If TDO toggles but the IDCODE is garbage, it's chain configuration — another TAP in the chain, wrong IR lengths, a JTAG router that has to be enabled — or signal integrity on TCK. A low-speed autoprobe tells me how many TAPs answer and what their IDCODEs are; all-ones means TDO high, all-zeros means TDO low."
+- **꼬리1** — "The TDO waveform splits the tree: stuck high — open trace, missing resistor, unpowered or disabled TAP; stuck low — short or unpowered level shifter; toggling but wrong — autoprobe, compare TAP count and IDCODEs with the schematic, measure total IR length by flushing ones, and isolate the SoC from any FPGA in the chain."
+- **꼬리2** — "Then the wiring is fine and the problem is behind the debug port: are the debug and system power-up requests in CTRL/STAT acknowledged? Do AP accesses return WAIT forever or FAULT? Is the core powered, clocked and out of reset — secondary cores are often held in reset — is DBGEN enabled on a secured part, and if it halts then resets, it's the watchdog."
+- **꼬리3** — "Connect under reset with a vector catch: the debugger holds system reset, connects to the debug port, sets the reset vector catch — on Cortex-M that's VC_CORERESET in DEMCR — and releases reset, so the core halts before the first instruction. That also rescues boards whose firmware disables the JTAG pins right after boot."
+- **Don 훅** — "I used Trace32 daily at Solidigm to bring up Cortex-R8, R82 and M0+ cores on the FPGA prototype, and when JTAG didn't connect my order was always physical first — VTref, reset, slow clock, scope on TDO — then chain configuration and debug-port power-up. [숫자 채우기: 실제 막혔던 사례 1개]"
+- **한국어 핵심**: 전원·VTref → 리셋(TRST·디버거 SRST) → TCK ≤ 100 kHz → TDO 파형(high = 열림/전원 없음, low = 쇼트) → 체인 설정(IR 길이·다른 TAP·router) · halt 불가 = DP 뒤(전원 ACK·AP WAIT/FAULT·코어 전원/리셋/클럭·DBGEN·WDT) · 첫 명령 = connect under reset + vector catch.
+- **원본**: [BV07 §4.1](2026-11-01_BV07_jtag_swd_boundary_scan.html#4-1-bv00-체인-jtag-can-t-read-idcode-좁히기-halt-불가-리셋-직후-첫-명령) · [BV13 S2](2026-11-01_BV13_board_debug_scenarios.html#s2-rail은-정상인데-jtag가-idcode를-못-읽음)
+
+</details>
+
+### Q15 · Boundary scan
+
+- **Q.** "What's boundary scan and why would a board team use it?"
+- **꼬리1.** "How would you test DDR connectivity without DDR training?"
+- **꼬리2.** "What can't boundary scan test?"
+- **꼬리3.** "Why PRELOAD before EXTEST?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈40 s)**: "Boundary scan, IEEE 1149.1, puts a cell between every pin and the core logic, chained into a boundary-scan register you shift through JTAG. With EXTEST the pins are driven from that register and inputs are captured, so you can drive a pattern out of one chip and read it at another without any firmware or the chip's functional logic. A board team uses it on first prototypes and in production to find opens and shorts net by net — especially under BGAs, where you can't probe and X-ray isn't conclusive — and to program flash. The tools generate the tests from the BSDL files and the netlist."
+- **꼬리1** — "If the DRAM supports it — DDR4, or DDR5 with the TEN pin reachable — put it in connectivity test mode, where its pins form an XOR network the SoC's boundary cells can test quickly; LPDDR5 has no TEN pin, so drive slow write-then-read patterns through the SoC's cells. Either way it proves connectivity, not timing."
+- **꼬리2** — "At-speed timing and signal integrity, pins without boundary cells, analog, and AC-coupled high-speed differential links like PCIe — that needs IEEE 1149.6 — and nets that don't touch any boundary-scan device."
+- **꼬리3** — "Because the moment EXTEST takes effect, outputs are driven from the update latches; PRELOAD puts known safe values there first so you don't drive two outputs against each other or enable something on the board."
+- **Don 훅 (정직하게)** — "I haven't owned a boundary-scan test program, but I understand how EXTEST and BSDL-driven interconnect tests work, and I simulated a TAP state machine and scan chain for this prep."
+- **한국어 핵심**: 핀마다 셀 → EXTEST로 FW 없이 net 단위 open/short (BGA 밑), BSDL + 넷리스트로 자동 생성 · DDR = TEN/CT 모드(XOR), LPDDR5는 저속 write/read · 타이밍·SI·AC 결합 차동은 불가(1149.6).
+- **원본**: [BV07 §4.2](2026-11-01_BV07_jtag_swd_boundary_scan.html#4-2-what-s-boundary-scan-and-why-would-a-board-team-use-it-ddr-without-training)
+
+</details>
+
+### Q16 · Multicore halt and the debugger's memory path
+
+- **Q.** "How do you halt all cores at the same time on a multicore SoC?"
+- **꼬리1.** "Why does that matter for debugging?"
+- **꼬리2.** "How does a debugger actually read memory on an Arm SoC?"
+- **꼬리3.** "The debugger shows a stale value compared with what the core sees. Why?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈35 s)**: "With the cross-trigger network. Each core has a CTI, and the CTIs connect through a cross-trigger matrix with a few channels. I configure each core's CTI so its 'halted' event goes out on a channel and every core takes a debug request from that channel. When one core hits a breakpoint, the others halt within a few cycles instead of milliseconds later through the debugger, and restart works the same way so they resume together. Heterogeneous cores — say a Cortex-A cluster and an R or M0+ safety core — work the same if they share the cross-trigger network; in Trace32 that's an AMP session with a sync setting."
+- **꼬리1** — "In a multicore race, if the other core runs for the milliseconds the debugger needs to stop it, the shared state you want to inspect has already changed; synchronous halt freezes the system at the moment of interest."
+- **꼬리2** — "Through the debug access port: request debug and system power-up in CTRL/STAT and wait for the acknowledges, select a MEM-AP, write CSW for the access size, write the address to TAR, read DRW — which makes the AP do a real bus transaction; reads are posted, so data comes back on the next access or from RDBUFF, WAIT means busy, a sticky error means the transaction faulted."
+- **꼬리3** — "The AP reads memory over the bus, while the latest value may still be in the core's data cache — read through the halted core, clean the cache first, or make that region non-cacheable during debug."
+- **Don 훅** — "At Solidigm I attached Trace32 to multiple Cortex-R cores at once, halted them together and used hardware breakpoints and watchpoints in ROM and early boot code. [숫자 채우기: 코어 개수·SMP/AMP 세션 구성·스크립트 자동화 여부]"
+- **한국어 핵심**: 코어별 CTI + CTM 채널로 halt 이벤트 브로드캐스트, restart 동기 · DP 전원 요청 → AP → CSW → TAR → DRW → RDBUFF · 버스 접근은 캐시를 안 거침.
+- **원본**: [BV07 §4.3](2026-11-01_BV07_jtag_swd_boundary_scan.html#4-3-how-do-you-halt-all-cores-at-the-same-time-on-a-multicore-soc) · [BV07 §4.4](2026-11-01_BV07_jtag_swd_boundary_scan.html#4-4-추가-how-does-a-debugger-actually-read-memory-on-an-arm-soc)
+
+</details>
+
+### Q17 · Bring-up test firmware structure
+
+- **Q.** "How would you structure a bring-up test firmware?"
+- **꼬리1.** "How does the automation know a test passed?"
+- **꼬리2.** "What do you do when a test hangs the system?"
+- **꼬리3.** "Walk me through the boot flow — where does DDR get initialized, and why there?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈45 s)**: "It's layered so the same tests run on the FPGA prototype and on silicon. At the bottom, minimal startup code and a platform HAL — clocks, a timer, a polled UART, MMIO accessors, and a slowdown factor so every timeout scales with the platform. On top, a test registry where each test is a name, a function, a timeout and flags like 'needs DDR' or 'silicon only', and a runner that prints one machine-parseable line per test, a summary and an explicit end marker. A small UART shell lets me run a single test or peek and poke registers by hand. It runs from on-chip SRAM, so it doesn't depend on DDR."
+- **꼬리1** — "From a strict line format — a fixed prefix, key-value fields, a summary whose counts must match the lines seen, and an end marker; if the end marker never arrives, the run is 'incomplete', not 'fail', and the last test line plus the reset reason tell me where it died."
+- **꼬리2** — "It shouldn't: every poll has a deadline, so a stuck block gives TIMEOUT and the runner soft-resets it and moves on. If the CPU itself hangs, the watchdog resets the chip; I wrote the test ID into no-init memory before the test, so the next boot reports that test as HANG and continues — and for root cause I attach JTAG and read the PC and exception syndrome."
+- **꼬리3** — "Boot ROM reads the boot mode, checks the first image and loads it into on-chip SRAM; the first-stage loader — FSBL or SPL — sets up clocks, pins, UART and DDR including training; then TF-A BL31 and U-Boot in DDR, then Linux. DDR init lives in the first stage because the ROM can't know board-specific DDR parameters and can't be patched, and U-Boot already needs DDR — so it's the last stage that still fits in SRAM."
+- **한국어 핵심**: startup + HAL(slowdown) → registry{name, fn, timeout, flags} → 러너(한 줄 결과 + SUMMARY + END) → UART 셸, SRAM 실행 · END 없음 = INCOMPLETE · hang = deadline/TIMEOUT, CPU hang = WDT + noinit 테스트 ID · DDR init = FSBL/SPL.
+- **원본**: [BV08 §4.1](2026-11-01_BV08_boot_flow_bringup_firmware.html#4-1-bv00-체인-how-would-you-structure-a-bring-up-test-firmware) · [BV08 §4.2](2026-11-01_BV08_boot_flow_bringup_firmware.html#4-2-bv00-체인-walk-me-through-the-boot-flow-of-an-arm-soc) · [LP16 bare-metal vs Linux (Zynq)](2026-10-31_LP16_baremetal_vs_linux_zynq.html)
+
+</details>
+
+## 5. 묶음 D — 메모리 · 인터페이스 (BV09 · BV10)
+
+### Q18 · DDR training fails ★
+
+- **Q.** "DDR training fails on a new board. How do you debug?"
+- **꼬리1.** "Which training step fails tells you what?"
+- **꼬리2.** "It passes at room temperature but fails at hot."
+- **꼬리3.** "Write leveling fails on one byte lane only — and why is write leveling needed at all?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈50 s)**: "First I make sure it's really a DDR problem: the DDR rails are in spec, sequenced and quiet at the DRAM, the PHY PLL is locked at the right frequency, and RESET_n and CKE timing match the datasheet. Then I confirm the configuration matches the hardware: DRAM part, density, ranks, speed, and the board's byte and bit swizzle. Only then the training log — which step failed, on which channel and byte lane — because that localizes it: CA training points at the clock and command bus, write leveling at the CK-to-DQS relationship on one lane, read gate at latency config or DQS, and a narrow eye on a few bits at those traces or balls. I retry at a lower frequency to tell a hard fault from a marginal one, compare lanes and boards, and only after training passes do I run the bus tests and March C- with caches off."
+- **꼬리1** — "Each step exercises a different signal group: ZQ or init failing — power, reset sequencing, the ZQ resistor or wrong memory type; CA — CK and command bus; write leveling on one lane — that lane's DQS, feedback bit mapping or solder; read gate — read latency or DQS reception; if everything trains but memtest fails — address mapping, timing parameters, refresh."
+- **꼬리2** — "Margin is thin, so measure it: compare eye width and VREF window per lane at 25 and hot — uniform shrink or one lane collapsing; then refresh, because above 85 °C the interval typically has to halve and the controller must track the LPDDR temperature register; ZQ and VREF drift, which is why periodic recalibration matters; and power integrity under load."
+- **꼬리3** — "Clock and command are routed fly-by past each DRAM, so CK arrives at different times while each lane's DQS is point-to-point; in write leveling the DRAM samples CK with DQS and returns it on a DQ pin while the controller sweeps the delay. One lane failing — check that DQS pair, the feedback DQ bit in the swizzle, BGA solder by X-ray, whether the delay exceeds the tap range, and whether the same lane fails on other boards."
+- **Don 훅** — "At SK hynix I automated chamber reliability tests with shmoo across voltage and temperature, so reading margin per lane across boards and corners is familiar. [숫자 채우기: 온도 범위, 샘플 수] — and honestly, I haven't written PHY training firmware myself; I've consumed training results and debugged on top of them."
+- **한국어 핵심**: 전원·클럭·리셋/CKE → 설정 = 실물(부품·swizzle) → 실패 단계·lane → 저속 재시도 · 단계 = 신호 그룹 · 고온 = lane별 eye 비교 + refresh 2×(>85 °C) + ZQ/VREF drift + PI · fly-by → write leveling.
+- **원본**: [BV09 §4 Chain 1](2026-11-01_BV09_ddr_bringup_training_memtest.html#chain-1-ddr-training-fails-on-a-new-board-how-do-you-debug) · [BV09 §4 Chain 3](2026-11-01_BV09_ddr_bringup_training_memtest.html#chain-3-what-s-write-leveling-and-why-is-it-needed) · [BV13 S6](2026-11-01_BV13_board_debug_scenarios.html#s6-ddr-training-실패) · [BV13 S7](2026-11-01_BV13_board_debug_scenarios.html#s7-상온-ok-고온에서만-실패)
+
+</details>
+
+### Q19 · Write a memory test ✏️ ★
+
+- **Q.** "Write a memory test." (화이트보드: data bus → address bus → March C- 를 그리며 설명)
+- **꼬리1.** "Why does walking-1s on the data bus not find address-line shorts?"
+- **꼬리2.** "What does March C- detect that a simple write/read doesn't — and what does it miss?"
+- **꼬리3.** "Why disable the cache — or why not?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈45 s)**: "I'd write three tests and run them in order, because the order is also the diagnosis order. A data bus test walks a one across all 32 bits at a single address, which proves each data line independently in 32 writes. An address bus test writes a pattern at power-of-two offsets and checks that writing the base or any one offset doesn't show up anywhere else, which finds stuck and shorted address lines in log N accesses. Then March C- covers every cell with ten operations per word. Each failure reports address, expected, actual and the XOR, so the hardware team can map it to a pin. Code and stack run from SRAM, the region under test is mapped non-cacheable, and if I ran the address test first, a data-line short would be misreported as an address fault."
+- **✏️ 화이트보드 스케치 (말하면서 그릴 것)**:
+
+```text
+1) data bus  (one address, n = 32 writes)
+   for b in 0..31:  m[0] = 1<<b ; if m[0] != 1<<b -> FAIL{addr 0, exp, act, exp^act}
+
+2) address bus  (power-of-two offsets, O(log N))     PAT = 0xAAAAAAAA, ANTI = 0x55555555
+   for off = 1,2,4,...<N:  m[off] = PAT
+   m[0] = ANTI ; every m[off] must still be PAT          -> stuck-high style alias
+   m[0] = PAT
+   for t in offsets:  m[t] = ANTI ; m[0] and every other m[off] must be PAT ; m[t] = PAT
+                                                          -> stuck-low / shorted lines
+
+3) March C-   10N   {any(w0); up(r0,w1); up(r1,w0); down(r0,w1); down(r1,w0); any(r0)}
+   element table (dir, read?, write?, rv, wv) -> one loop ; down loop uses n-1-i
+   stop at first fail -> {idx, exp, act, element}
+   repeat with data backgrounds (0x5555..., 0x3333..., ...) for bit shorts inside a word
+```
+
+- **꼬리1** — "It only ever touches one address; an address fault makes two addresses alias, and you only see aliasing by writing one location and reading a different one — in my fault-injection simulation, stuck and shorted address lines passed the data bus test every time."
+- **꼬리2** — "March C- reads every cell before rewriting it, after full sweeps in both directions, so coupling faults are caught whether the aggressor is above or below, plus transition and address-decoder faults, still linear at 10N — in my simulation the naive test missed both coupling faults and all address faults. It misses retention faults (no delay — that's bit fade), pattern-sensitive and some linked faults, and bit shorts inside a word unless I repeat with several data backgrounds."
+- **꼬리3** — "Cell tests run uncached, or I'm testing the cache and writes may never reach DRAM; but separately I run cached over a range much bigger than the cache, with DMA in parallel, because bursts, line fills and evictions are where signal-integrity problems under back-to-back traffic show up."
+- **Don 훅** — "At Solidigm I wrote exactly this kind of data-bus, address-bus and pattern test for SRAM and DRAM paths on the FPGA prototype as part of SoC verification. [숫자 채우기: 컨트롤러 IP 설정 수준 vs training까지, 테스트 개수]"
+- **한국어 핵심**: 순서 = 진단 순서 (data bus → address bus → March C-) · 실패 = {addr, exp, act, xor} · walking-1s는 한 주소라 aliasing 못 봄 · March C- = 읽기-먼저 + 양방향 → CF·TF·AF, 10N · 놓치는 것 = retention·NPSF·word 안 bridging(→ data background) · 셀 테스트는 non-cacheable.
+- **원본**: [BV09 §4 Chain 2](2026-11-01_BV09_ddr_bringup_training_memtest.html#chain-2-write-a-memory-test) · [BV09 §2.6 알고리즘](2026-11-01_BV09_ddr_bringup_training_memtest.html#2-6-메모리-테스트-알고리즘-정밀) · 코드는 [march_cminus_whiteboard.c](onsitePrep/bv09/march_cminus_whiteboard.c) (BV09에서 실행 검증됨)
+
+</details>
+
+### Q20 · Validate ECC
+
+- **Q.** "How would you validate ECC?"
+- **꼬리1.** "How do you inject errors?"
+- **꼬리2.** "Correctable counts are slowly climbing in the chamber. What do you do?"
+- **꼬리3.** "On-die ECC, link ECC, system ECC — which one matters for functional safety?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈40 s)**: "With error injection on every path. I inject single-bit errors and expect correction, the correctable counter to increment, the error address and syndrome registers to point at the injected location, and the interrupt to fire. I inject double-bit errors and expect detection without correction and the uncorrectable path — interrupt, bus error or abort — with correct logging. Injecting at different addresses also validates the address decoding in the error logs. And I verify ECC initialization: memory must be scrubbed before the first read or you get false uncorrectable errors. For functional safety it's the whole chain — detected, reported, and the safe reaction within its time budget."
+- **꼬리1** — "Most controllers have poison or inject registers — on the Synopsys controller in Zynq MPSoC, Linux EDAC exposes them when EDAC debug is enabled; otherwise disable ECC, write data with one or two bits flipped so the stored check bits don't match, re-enable ECC and read back."
+- **꼬리2** — "A correctable rate is a margin signal: log addresses — same address or row means a weak cell, same bit position across addresses means a lane, tracking temperature means refresh or margin; correlate with temperature and voltage logs, make sure patrol scrub is on, and reproduce on the bench with margining."
+- **꼬리3** — "DDR5 on-die ECC corrects inside the DRAM and is invisible to the controller; LPDDR5 link ECC protects only the transfer; system or inline ECC in the controller protects end to end with counters and addresses — that's what safety needs, and LPDDR-based automotive SoCs use inline ECC, trading some capacity and bandwidth."
+- **한국어 핵심**: 1비트 주입 → 정정·CE 카운터·주소·인터럽트 / 2비트 → 검출·UE 경로 / 주소 일치 / init scrub · CE 증가 = 마진 경고(같은 주소 = 셀, 같은 비트 = lane, 온도 추종 = refresh) · on-die ≠ link ≠ inline(end-to-end, 기능 안전).
+- **원본**: [BV09 §4 Chain 4](2026-11-01_BV09_ddr_bringup_training_memtest.html#chain-4-how-would-you-validate-ecc) · [BV15 §4.2 safety mechanism](2026-11-01_BV15_automotive_board_considerations.html#4-2-how-do-you-validate-a-safety-mechanism-like-ecc-or-a-watchdog)
+
+</details>
+
+### Q21 · Validate every interface
+
+- **Q.** "How would you validate every interface on a new board?"
+- **꼬리1.** "What's the minimum test that proves connectivity?"
+- **꼬리2.** "The I2C bus is stuck low. Why nine clocks?"
+- **꼬리3.** "The Ethernet link doesn't come up. Which loopbacks isolate MAC vs PHY vs cable?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈40 s)**: "Bottom-up and in three steps per interface. Before touching an interface I confirm its prerequisites — the rail, the reset or enable GPIO, the reference clock and pinmux. Step one is connectivity with the cheapest possible transaction, step two is function with data compare — read/write/erase, loopback, sensor test patterns against golden frames — and step three is performance, error rates and long-run stability: max speed, CRC and BER counters over hours, temperature and voltage corners, thousands of reset or link cycles. Expected values per board revision — I2C address map, PHY IDs, PCIe speed and width — are written up front, so the suite diffs and prints a PASS/FAIL table per board, with blocked tests reported as blocked, not failed."
+- **꼬리1** — "One transaction that only succeeds if the device is powered, out of reset, clocked and wired: I2C address ACK plus a fixed ID register, SPI NOR JEDEC ID with opcode 0x9F, MDIO read of PHY ID registers 2 and 3, PCIe link status speed and width, a camera's sensor chip ID over I2C."
+- **꼬리2** — "The longest a slave can hold SDA is one byte plus ACK — eight data bits and one ACK — so nine clocks walk it to the end of the byte; and SDA going high early may just be a '1' data bit, so I make every pulse a STOP attempt and check for an idle bus, like Linux's generic SCL recovery. If nine clocks don't help, it's hardware — a short or a back-powered device."
+- **꼬리3** — "Walk the loop outward: MAC internal loopback (MAC, DMA, descriptors), then PHY loopback — BMCR bit 14 — which adds the MAC-to-PHY interface where RGMII delay mistakes show, then PHY analog loopback, then an external plug or traffic generator for connector, magnetics and cable; the first stage that fails names the segment. For automotive 1000BASE-T1 there's no autoneg — two masters means no link."
+- **한국어 핵심**: 전제(전원·리셋·클럭·pinmux) → 연결 → 기능 → 성능·에러율·장시간 · 최소 증거 = ACK+ID, 0x9F, PHYID 2·3, LnkSta, 센서 chip ID · I2C 9클럭 = 8 data + 1 ACK, 매 펄스 STOP 시도 · loopback 사다리 MAC → PHY(BMCR bit14) → 아날로그 → 외부.
+- **원본**: [BV10 §4 체인 A](2026-11-01_BV10_board_interface_tests.html#체인-a-how-would-you-validate-every-interface-on-a-new-board) · [BV10 체인 B](2026-11-01_BV10_board_interface_tests.html#체인-b-i2c-bus-is-stuck-low-what-do-you-do) · [BV10 체인 C](2026-11-01_BV10_board_interface_tests.html#체인-c-ethernet-link-doesn-t-come-up) · [LP00A primer](2026-10-31_LP00A_io_primer_pcie_ethernet_mipi.html)
+
+</details>
+
+## 6. 묶음 E — 측정 · 마진 (BV11 · BV12)
+
+### Q22 · Six rails, four channels
+
+- **Q.** "How would you measure the power-up sequence of 6 rails — and your scope has 4 channels?"
+- **꼬리1.** "How do you know the two captures line up?"
+- **꼬리2.** "You see 200 mV of ripple; the HW engineer sees 20 mV. Why?"
+- **꼬리3.** "How would you automate this across 50 boards?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈40 s)**: "Single-shot capture triggered on the first rail or the enable, timebase so the whole sequence fits with pre-trigger, short grounds at each rail's output capacitor, channels deskewed. On each rail I measure the 10, 50 and 90 percent times, monotonic ramp, overshoot and final value, then check order and gaps against the datasheet sequence, and power-good and reset relative to the last rail. With four channels I keep one reference rail on channel 1 as the trigger in every capture and rotate the other five through channels 2 to 4 — two captures, because the sequence is repeatable. PGOOD and enables can go on an MSO's digital channels."
+- **꼬리1** — "Both captures are referenced to the same physical event — the reference rail crossing 50 percent — and I repeat each capture several times to show the spread is small compared with the required gaps; a sequence that isn't repeatable is itself a finding."
+- **꼬리2** — "Almost always my measurement: a long ground clip forms a loop that picks up switching noise, and full bandwidth shows energy that isn't on the rail. Redo it with a spring tip right at the output capacitor, AC coupling and the 20 MHz bandwidth limit, and state the bandwidth in the result — my mock demo showed about 78 mV versus about 9 mV."
+- **꼬리3** — "SCPI drivers through PyVISA with a mock backend, the same flow per board — configure, check the error queue, power on with a current limit, capture, pull raw waveforms, measure in code, judge against a spec file — one row per board and rail with serial, firmware and temperature, so the dashboard shows distributions, not screenshots."
+- **Don 훅** — "At Apple I root-caused PCIe, I2C, SPMI and RFFE issues with a DSO and protocol analyzer, and the lesson that transfers is to distrust a noisy-looking measurement until the probing is right. [숫자 채우기: 써 본 scope/LA 모델, 기억나는 측정 1건]"
+- **한국어 핵심**: single + 첫 rail/EN 트리거 + pre-trigger · rail별 10/50/90%·단조·overshoot·최종값 · 4채널 = CH1 기준 고정 + 같은 트리거로 2회 · 200 vs 20 mV = 긴 ground lead + full BW → spring tip + 20 MHz BWL · SCPI/PyVISA + 원시 파형 + DB.
+- **원본**: [BV11 §4 체인 A](2026-11-01_BV11_lab_instruments_measurement.html#체인-a-how-would-you-measure-the-power-up-sequence-of-6-rails) · [BV11 체인 E](2026-11-01_BV11_lab_instruments_measurement.html#체인-e-추가-why-do-you-see-200-mv-of-ripple-when-the-hw-engineer-sees-20-mv) · [BV11 체인 D](2026-11-01_BV11_lab_instruments_measurement.html#체인-d-how-would-you-automate-measurements-across-50-boards) · [BV03 체인 3](2026-11-01_BV03_power_tree_sequencing_pmic.html#체인-3-how-do-you-measure-ripple-correctly)
+
+</details>
+
+### Q23 · Shmoo in a chamber ✏️
+
+- **Q.** "What's a shmoo plot, and how would you run one on 20 boards in a chamber?"
+- **꼬리1.** "There's a hole in the middle of the passing region — what does it mean?"
+- **꼬리2.** "A full grid takes too long. How do you speed it up, and what's the risk?"
+- **꼬리3.** "Which PVT corner is the worst?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈50 s)**: "A shmoo is a two-dimensional pass/fail map — typically core voltage against frequency — where each point runs the same test several times. A healthy part shows a diagonal boundary: more voltage buys more frequency. I read the margin as the distance from the nominal point to the boundary in both directions, then look for anything that isn't monotonic — a wall at a fixed voltage often points to an SRAM Vmin, a hole inside the passing region is either a conditional bug or noise. To run it on 20 boards, temperature is the outer loop because it's slowest: set, soak, verify junction temperature from on-die sensors. Inside, boards run in parallel through the farm controller. For each point: set the rail, read it back, set the PLL, check lock, run the test N times with a timeout; on a hang, power-cycle and run a health check at nominal. Setting failures are recorded as invalid, not fail, and everything goes into a database keyed by board, chip corner, temperature and firmware."
+- **✏️ 화이트보드 스케치**:
+
+```text
+for T in [-40, 25, 125]:            # outer loop: slowest knob -> set, soak, check Tj
+  for board in 20 boards (parallel via farm: PDU, UART, JTAG):
+    for F in freqs:
+      for V in volts:
+        set V -> read back telemetry  (mismatch -> INVALID, not FAIL)
+        set F -> PLL lock?            (no lock  -> INVALID)
+        run test N times, timeout     -> PASS / FAIL / HANG
+        HANG -> power-cycle + nominal health check before next point
+  -> DB row {board, chip corner, T, V, F, fw, result, count}
+report: margin from nominal, walls / holes flagged -> auto re-run holes
+```
+
+- **꼬리1** — "First check it's real — rerun the points twenty-plus times and confirm the setting took effect, because a missed PMIC write looks exactly like a hole. Fails every time — a conditional bug, like a clock-ratio crossing or a PDN resonance; fails occasionally — an intermittent issue that landed there, treated with a measured failure rate."
+- **꼬리2** — "Edge search — step or binary-search to where the result flips. It assumes the map is monotonic, so it can report a hole as the boundary or never visit it; I run full grids on early silicon and a few boards per corner, then edge search with a couple of full columns as a sanity check."
+- **꼬리3** — "Depends on the metric: speed at nominal voltage is usually slow silicon at hot, but at low voltage temperature inversion can make slow silicon at cold set Vmin, and leakage is fast silicon at hot — so I measure every temperature on every corner, at least on the first lots."
+- **Don 훅** — "At SK hynix I automated a chamber-based reliability platform and added shmoo and margin features for NAND and PCIe Gen3–5 interfaces, repeating points to separate a hard wall from a marginal region. [숫자 채우기: 챔버 온도 범위, 동시 DUT 수, 단축한 시간]"
+- **한국어 핵심**: 2축 PASS/FAIL 지도, 대각선 경계, nominal → 경계 거리 = margin · 벽 = SRAM Vmin 등, 구멍 = 재실행 + 설정 readback 먼저 · 온도 = 바깥 루프·soak·Tj · INVALID ≠ FAIL · edge search는 단조성 가정 · 최악 코너는 측정 대상 따라(temperature inversion).
+- **원본**: [BV12 §4.1](2026-11-01_BV12_si_pi_margining_shmoo_pvt.html#4-1-what-s-a-shmoo-plot-and-how-do-you-read-it) · [BV12 §4.4](2026-11-01_BV12_si_pi_margining_shmoo_pvt.html#4-4-what-are-process-corners-and-how-do-you-get-them-in-post-silicon)
+
+</details>
+
+### Q24 · PCIe correctable errors at hot 🔗
+
+- **Q.** "A PCIe link passes at nominal but shows correctable errors at hot. What next?"
+- **꼬리1.** "The AER counters show RxErr reported by the endpoint. What does that tell you?"
+- **꼬리2.** "Why a thermostream instead of the chamber?"
+- **꼬리3.** "What's your pass criterion — zero correctable errors?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈45 s)**: "Correctable errors are a margin warning, not a pass. Hardware fixed them — typically a receiver error causes a NAK and a replay — so data is fine, but replays cost bandwidth and the margin is shrinking. I read the sysfs AER counters rather than the rate-limited log, note which error and which device is the receiver, and correlate with temperature, traffic and ASPM transitions. Then lane margining at hot and at room to see which lanes lost margin, comparison with a golden board to separate silicon from board, and a check whether equalization was trained cold and kept hot. If it disappears at a lower speed and grows with temperature, it's signal integrity; if it disappears with ASPM off, it's L1 entry or exit."
+- **꼬리1** — "The endpoint is the receiver, so it's the downstream direction — root-port transmitter, channel, endpoint receiver: margin the endpoint's receiver per lane, check the temperature correlation and sweep the root port's TX preset."
+- **꼬리2** — "A chamber heats everything — PMIC, crystal, DRAM, retimer — so you can't tell who lost margin; a thermostream heats one device, so errors only when the SoC is hot point at the SoC side."
+- **꼬리3** — "No — a handful per day may be normal; the criterion is a rate threshold derived from known-good boards, checked in a soak test across temperature, and reported per lane with margin at each temperature and a recommendation like an EQ preset change or a layout fix."
+- **한국어 핵심**: correctable = 마진 경고(NAK → replay) · 로그 말고 sysfs 카운터 · Receiver 방향으로 링크 방향 판단 · 고온/상온 lane margining + golden 비교 + EQ 재학습 여부 · 저속에서 사라지고 온도 따라 증가 = SI, ASPM off에서 사라짐 = L1 · 판정은 양품 분포 기반 rate 임계값.
+- **원본**: [BV12 §4.6](2026-11-01_BV12_si_pi_margining_shmoo_pvt.html#4-6-추가-a-link-passes-at-nominal-but-shows-correctable-errors-at-hot-what-next) · 🔗 [LP15 S7 AER correctable](2026-10-31_LP15_debug_scenarios.html#s7-aer-correctable-에러-폭증) · 🔗 [LP14 §2.6 margining](2026-10-31_LP14_validation_methodology.html#2-6-margining-lane-margining-at-receiver-eye-ber-shmoo) · [LP09 AER](2026-10-31_LP09_aer_dpc_error_handling.html)
+
+</details>
+
+## 7. 묶음 F — 디버그 · 계획 · 실전 (BV13 · BV14 · BV15)
+
+### Q25 · It doesn't boot ★
+
+- **Q.** "The board doesn't boot. Debug it."
+- **꼬리1.** "Nothing on UART, current looks normal."
+- **꼬리2.** "JTAG shows the PC stuck in the BootROM."
+- **꼬리3.** "You found it. How do you make sure it never comes back?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈50 s)**: "First I ask back what 'doesn't boot' means — no current, no UART, a reboot loop, or a hang at a specific log line — because each starts me at a different layer. Then I don't start at the symptom; I start at the bottom and collect one piece of evidence per layer: current draw and rail voltages against the expected table, sequencing and power-good on the scope, the oscillator running, reset released after the last rail is good, and the strap levels at the moment reset is released. Then JTAG: can I read IDCODE and halt the core, and where is the PC — still in BootROM, in an exception handler, or in my code? That tells me which layer broke. Then I split hardware from software by changing one thing at a time: the same binary on a golden board, a known-good older build on this board, and a swap of the suspect part."
+- **꼬리1** — "Then JTAG — IDCODE, halt, PC; the PC tells me whether the BootROM ran, whether it loaded my image, or where it crashed."
+- **꼬리2** — "The BootROM didn't find a valid image or is waiting in a download mode: read the latched boot mode and any BootROM error code, verify the flash contents and header over JTAG, check the boot device's power, clock and pins — or bypass it by loading test firmware into SRAM over JTAG."
+- **꼬리3** — "Root cause becomes either an automated regression on the farm, if a test can catch it, or a measured item on the bring-up checklist for every new board revision, if it's a board property — and the bug report records what I ruled out, so nobody repeats it."
+- **Don 훅** — "At Apple my core skill on new wireless-chipset boards was exactly this: find what the failure follows — board, chip or software build — and hand over evidence, not opinions. [숫자 채우기: BV13 §4.5 STAR 틀 — 증상·빈도·측정·원인·수정·재발 방지]"
+- **한국어 핵심**: "안 된다"를 먼저 쪼갬 → 층마다 증거 1개(전류·rail → 시퀀스·PGOOD → osc → 리셋·strap → IDCODE·halt·PC) → 한 번에 하나(golden 보드·이전 빌드·부품 swap) → 회귀 테스트 또는 체크리스트로 고정.
+- **원본**: [BV13 §4.2](2026-11-01_BV13_board_debug_scenarios.html#4-2-헤드라인-it-doesn-t-boot-debug-it) · [BV13 §4.1 패턴](2026-11-01_BV13_board_debug_scenarios.html#4-1-bv00-패턴-what-s-first-that-s-fine-board-or-silicon-or-software-never-again) · [BV06 §4.5 PC in BootROM](2026-11-01_BV06_first_power_on_checklist.html#4-5-추가-nothing-on-uart-and-jtag-shows-the-pc-stuck-in-bootrom-what-s-happening)
+
+</details>
+
+### Q26 · PCIe endpoint missing on the new board 🔗
+
+- **Q.** "The PCIe endpoint on the new board doesn't show up in lspci. Where do you start?"
+- **꼬리1.** "The root port shows Width x0, DLActive−, and the LTSSM is stuck in Detect."
+- **꼬리2.** "It keeps bouncing between Polling and Detect."
+- **꼬리3.** "The link is up, DLActive+, but the vendor ID reads all ones."
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈55 s)**: "Enumeration is just config reads, and config reads only flow after the link reaches L0 and the data link layer is active — so a missing endpoint almost always means the link never came up, or software looked too early. On a new board I keep the board-level order: the endpoint's power rail, the 100 MHz refclk at the connector, and PERST# released at least 100 ms after power is stable — all on the scope. Then the root port, which is always visible because it's inside the SoC: lspci -vvv on the root port, Link Status width and DLActive, plus the controller's LTSSM state and the kernel's link-up line. To split hardware from software I swap in a known-good card and put the suspect card in an x86 host, and if nothing trains even with a bare-metal loop that just releases PERST# and polls link-up, it's hardware. The fix becomes a boot-and-reset loop that checks DLActive, speed and width every cycle and dumps the LTSSM state on failure."
+- **꼬리1** — "Detect means the other side's receivers aren't seen — the endpoint's power, PERST# polarity or GPIO in the device tree, a missing card, or an open lane or connector; scope PERST# and the card's rail first."
+- **꼬리2** — "Bouncing between Polling and Detect points at refclk — missing, wrong mode, common clock versus SRIS mismatch, a clock-buffer output not enabled for that slot — or signal integrity; I check the refclk at the receiver end and force Gen1 to see if it trains."
+- **꼬리3** — "Then the link is fine and it's the config layer: the device firmware isn't ready, so check the 100 ms wait after training and CRS handling, then a remove and rescan."
+- **한국어 핵심**: 열거 = config read = L0 + DL_Active 이후 · 보드 순서(장치 전원 → refclk 100 MHz → PERST# ≥ 100 ms) → root port LnkSta(x0·DLActive) + LTSSM 상태 · Detect 고정 = 전원/PERST#/레인 · Polling↔Detect = refclk/SI → Gen1 강제 · 링크 업인데 0xFFFF = CRS/대기 → rescan · 교차 교환 + bare-metal 최소 루프.
+- **원본**: 🔗 [LP15 S1 장치가 lspci에 없음](2026-10-31_LP15_debug_scenarios.html#s1-장치가-lspci에-없음) · [BV04 체인 2 refclk](2026-11-01_BV04_clocks_osc_pll_refclk.html#체인-2-why-does-pcie-need-a-100-mhz-refclk-and-what-s-ssc) · [BV13 §4.1 패턴](2026-11-01_BV13_board_debug_scenarios.html#4-1-bv00-패턴-what-s-first-that-s-fine-board-or-silicon-or-software-never-again) · [LP03 LTSSM](2026-10-31_LP03_link_training_ltssm.html) · [N01 lspci·LTSSM](2026-10-31_N01_pcie_lspci_ltssm.html) · [LP13 Linux 도구](2026-10-31_LP13_linux_pcie_tools.html)
+
+</details>
+
+### Q27 · Write a validation plan ✏️ ★
+
+- **Q.** "Write a validation plan for this new board."
+- **꼬리1.** "How do you prioritize with only 3 weeks?"
+- **꼬리2.** "How many boards do you need, and why?"
+- **꼬리3.** "How do you know you're done?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈55 s)**: "I'd structure it in nine parts. Scope — including what's explicitly out, like EMC owned by another team. Requirements with IDs traced to the spec, so coverage is measurable. A test matrix — functional, interface, power, clock, reset, performance, PVT, stress and soak. The conditions — voltage, temperature, boards and chip corners. Sample sizes with the reasoning. Numeric pass criteria. Schedule and priority. Risks with mitigations. And exit criteria agreed up front. For an automotive AI SoC board, the P0 core is power and reset paths, LPDDR at temperature, the camera inputs and the high-speed links, because those are new, margin-sensitive and block the software teams. Execution runs on a board farm with results tagged by board, chip and conditions."
+- **✏️ 화이트보드 스케치**:
+
+```text
+ 1 Scope / out-of-scope        6 Pass criteria  (numbers, not "works")
+ 2 Requirements  REQ-ID <-> TEST-ID <-> result   (traceability)
+ 3 Test matrix   func · IF · power · clock · reset · perf · PVT · stress · soak
+ 4 Conditions    V (nom ±x%) · T (-40/25/125) · N boards · chip corners (SS/TT/FF)
+ 5 Sample size + why   (rule of three: 0 fails in N -> rate < 3/N)
+ 7 Schedule / priority (risk = likelihood x impact x cost-if-late)
+ 8 Risks + mitigation
+ 9 Exit criteria  (agreed day 0)
+ P0 for automotive AI SoC [추정]: power/reset · LPDDR @ hot · camera in · PCIe/ETH links
+```
+
+- **꼬리1** — "By risk — likelihood times impact (safety, customers, blocking another team) times the cost of finding it late. New IP and new board circuits first, mature reused blocks get a smoke test, the first week goes into automating the farm so weeks two and three run overnight, and I write down what we're not doing and get the lead to accept that risk."
+- **꼬리2** — "Depends on the conclusion: three to five for bring-up, eight to twenty for validation including fast and slow corner chips; statistically, zero failures in N bounds the rate below about 3/N, so a 1-in-1,000 claim needs about 3,000 clean cycles. AEC-Q100's three lots of 77 is a different question — part reliability, not board validation."
+- **꼬리3** — "Exit criteria agreed at the start: all P0 requirements executed and passing or waived with a workaround, no open P0 bugs, PVT corners complete with margin at or above target, soak hours met, nightly regression stable with flaky rates under a threshold. If time runs out first, I report exactly which criteria aren't met and the residual risk."
+- **Don 훅** — "At Solidigm, as a Staff engineer on a PCIe Gen6 SSD controller, the plan, the test firmware and the automation were designed together on FPGA before RTL freeze, so on silicon we only debugged what FPGA couldn't show."
+- **한국어 핵심**: 9칸(범위 → 요구사항 추적 → 매트릭스 → 조건 → 샘플 수·이유 → 숫자 기준 → 일정 → 리스크 → 종료 기준) · 3주 = risk-based + 1주차 자동화 + 안 하는 것 명시 · rule of three · 종료 기준은 시작 전에 합의.
+- **원본**: [BV14 §4 체인 A](2026-11-01_BV14_board_validation_plan_automation.html#체인-a-write-a-validation-plan-for-this-new-board-bv00-원본) · [BV14 §2.9 worked example](2026-11-01_BV14_board_validation_plan_automation.html#2-9-worked-example-새-자동차-ai-soc-검증-보드-계획-전부-추정-rivian-실제-구성-미확인) · 🔗 PCIe판: [LP14 §2.3 12영역 플랜](2026-10-31_LP14_validation_methodology.html#2-3-테스트-플랜-12개-영역-lp00-표-확장)
+
+</details>
+
+### Q28 · Board farm for 50 boards nightly ✏️
+
+- **Q.** "Design the automation for 50 boards running nightly."
+- **꼬리1.** "A test fails 1 in 200 runs. What do you do?"
+- **꼬리2.** "How do you keep the farm healthy?"
+- **꼬리3.** "A board ECO is coming. What do you re-run?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈50 s)**: "Each slot gets four handles: a switched PDU outlet or relay for hard power, a console port on a console server, a dedicated JTAG probe, and relay control of boot mode for recovery — plus Ethernet and a temperature sensor. An orchestrator reserves boards, deploys the build, runs a health check, then the suite: it sends a command, parses one machine-readable verdict line per test with an idle timeout and a test timeout, power-cycles and retries on failure, and records every attempt — a retry that passes is flaky, not a pass. Results go to a database joined with the board inventory — revision, rework, chip lot and corner — so failures correlate automatically, and every non-pass produces a repro package. I'd build on labgrid- or LAVA-style abstractions rather than invent them."
+- **✏️ 화이트보드 스케치**:
+
+```text
+ [CI build] -> [orchestrator] -> reserve slot -> deploy -> health check -> suite
+                     |                                   (boot marker, IDCODE, rails)
+   per slot:  PDU/relay power · UART console server · JTAG probe · boot-mode relay
+              + ETH + temp sensor
+   per test:  cmd -> parse "@@TEST name=.. result=.." -> idle/test timeout
+              FAIL/HANG -> power-cycle, retry (attempts recorded; flaky != pass)
+                        -> repro package {console log, JTAG snapshot, telemetry, conditions}
+   results -> DB  JOIN inventory {SN, rev, rework, chip lot/corner}
+           -> morning report: first-pass rate, flaky rate, failures by board/slot/temp/build
+   board fails health check twice -> QUARANTINE (excluded from pass rates)
+```
+
+- **꼬리1** — "Make every occurrence self-documenting, then measure the rate with a dedicated loop instead of nightly samples — in my mock farm a board with a true 20% failure rate on one test was fully green in four of six nightly runs — slice by board, slot, temperature and build, stress the suspected axis to raise the rate, and after a fix require about 600 clean runs to claim it's below 1 in 200."
+- **꼬리2** — "A health check before every run, automatic quarantine after two failures, infrastructure failures reported separately from DUT failures, farm availability and time-to-repair tracked, a golden board as a canary, and negative controls in the parser so a harness bug can't produce fake passes."
+- **꼬리3** — "From traceability backwards — each ECO's nets or parts map to interfaces, requirements and tests — plus power, reset and boot always, and the full nightly suite on several new-revision boards, tagged by revision so rev A history stays valid."
+- **Don 훅** — "At SK hynix I built the chamber reliability test platform — scheduling, temperature control, UART sequencing, result collection and the SDK other engineers used — which is this exact architecture. [숫자 채우기: 챔버 수 / 동시 DUT / 사용 엔지니어 수 / 단축한 시간]"
+- **한국어 핵심**: 슬롯당 4손잡이(전원·콘솔·JTAG·boot-mode) + 인벤토리 → 헬스 체크 → 한 줄 판정 파싱·타임아웃·retry 기록(flaky ≠ PASS) → DB 조인 → 재현 패키지 → 격리 · 1/200 = 전용 loop + 분해 + 3/p ≈ 600회 무실패 · ECO = 추적성 역방향.
+- **원본**: [BV14 §4 체인 B](2026-11-01_BV14_board_validation_plan_automation.html#체인-b-how-would-you-build-automation-for-50-boards-running-nightly) · [BV14 §2.10 보드 팜](2026-11-01_BV14_board_validation_plan_automation.html#2-10-보드-팜-설계) · [BV14 체인 D](2026-11-01_BV14_board_validation_plan_automation.html#체인-d-추가-a-board-eco-is-coming-what-do-you-re-run) · [BV13 §4.3 간헐 실패](2026-11-01_BV13_board_debug_scenarios.html#4-3-1-in-200-failure-on-the-farm-간헐-실패) · 코드 [farm_orchestrator.py](onsitePrep/bv14/farm_orchestrator.py)
+
+</details>
+
+### Q29 · Hardware or software?
+
+- **Q.** "How do you decide whether a failure is hardware or software?"
+- **꼬리1.** "The HW team says it's software. How do you convince them?"
+- **꼬리2.** "They still disagree."
+- **꼬리3.** "It turned out to be your firmware."
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈40 s)**: "By what the failure follows, tested one variable at a time. Reproduce and measure the rate; swap boards and chips with an A-B-A swap; run older builds and bisect; sweep voltage and temperature; and reduce the software to a minimal bare-metal sequence. A failure that stays with one board is assembly or BOM; one that follows the chip is silicon or corner margin; one that starts at a build is software; one that survives with the smallest software on every board is a design or silicon issue. The measurements — waveforms and register dumps — are the evidence for whichever team owns it."
+- **꼬리1** — "I don't argue conclusions; I agree the decision rule before the experiment — 'if it reproduces with a ten-line bare-metal sequence, or moves with the board in a swap using identical firmware, it's hardware' — then share the raw data in their terms, like rise time versus spec and which pull-up value would fix it."
+- **꼬리2** — "I ask what evidence would change their mind and go get that — often a measurement on their side of the interface — and if it's blocking, escalate with what's known and the cost of the delay, not as blame."
+- **꼬리3** — "Good — the experiment did its job: I fix it, add the regression that would have caught it, and say so in the same channel where I raised the issue; that track record makes the next conversation easy."
+- **Don 훅** — "At Apple, integrating wireless chipsets, the core skill was deciding with evidence whether it was our silicon, the board or software — scope and protocol-analyzer captures, not opinions. [숫자 채우기: 대표 사례 1개 — 처음 가설 1개와 그걸 버린 측정 포함]"
+- **한국어 핵심**: 따라가는 것(보드 = 실장/BOM, 칩 = 실리콘/코너, 빌드 = SW, 최소 SW + 모든 보드 = 설계/실리콘) + 측정 증거 · 판정 규칙 선합의 → 원본 데이터 → 그들 언어 · 우리 것이면 같은 채널에서 인정 + 회귀 추가 (behavioral과 겹침).
+- **원본**: [BV14 §4 체인 C](2026-11-01_BV14_board_validation_plan_automation.html#체인-c-how-do-you-decide-whether-a-failure-is-hardware-or-software) · [BV13 §4.4](2026-11-01_BV13_board_debug_scenarios.html#4-4-the-hw-team-says-it-s-software-behavioral-브릿지) · [BV13 §4.5 STAR 틀](2026-11-01_BV13_board_debug_scenarios.html#4-5-tell-me-about-a-hard-board-bug-you-debugged-don-star-틀)
+
+</details>
+
+### Q30 · Automotive board validation
+
+- **Q.** "What's different about validating an automotive board versus a consumer one?"
+- **꼬리1.** "How would the temperature grade change your test plan?"
+- **꼬리2.** "How do you validate a safety mechanism like a watchdog?"
+- **꼬리3.** "What happens to your board during cold crank, and how would you test it?"
+
+<details><summary>모범 답 펼치기</summary>
+
+- **🎤 EN (≈45 s)**: "Three things change. The environment: parts are graded by ambient temperature — AEC-Q100 grade 1 is minus 40 to 125 — so characterization and stress run across that whole range, plus power transients like cold crank and load dump, EMC and vibration. Lifetime: the board has to stay within margin for well over a decade, so we keep more guardband and full traceability — chip ID, lot, board serial, firmware version — for every test. And functional safety: every safety mechanism — ECC, lockstep, BIST, watchdogs, voltage and clock monitors — has to be proven by fault injection: detected, reported, and reaching a safe state within the fault-tolerant time interval."
+- **꼬리1** — "It sets the characterization range — for grade 1, −40 to 125 °C ambient — and since that's ambient I also log junction temperature from on-die sensors; every margin item runs at cold, room and hot at minimum, plus cold and hot boot and temperature cycling while running, because the worst case isn't always at an extreme."
+- **꼬리2** — "Inject the fault and check the whole chain: stop kicking it, and for a window watchdog also kick too early; measure from a GPIO marker at the injection point to the reset or safety pin on a scope against the FTTI, confirm the reset reason — and run the full PVT matrix with no injection to prove zero false trips."
+- **꼬리3** — "The 12-volt input can drop to a few volts for tens of milliseconds and stay low for up to seconds; the front end should ride through shallow dips and the PMIC should reset the SoC cleanly on deep ones. I replay the standard and OEM crank profiles with a programmable supply, probe input, an intermediate rail, the core rail and reset together, and log reset reasons and error counters over hundreds of repetitions — and inject dips during writes to check data integrity, the same mindset as SSD power-loss protection."
+- **Don 훅** — "At Solidigm, power-loss protection was a core validation area — cutting power at controlled points and checking the hold-up energy was enough to flush data — which maps directly to cold-crank and brown-out testing. [숫자 채우기: 측정한 hold-up 시간 / 사이클 수]"
+- **한국어 핵심**: 환경(AEC-Q100 Grade 1 = −40~125 °C Ta, 크랭크·load dump·EMC·진동) · 수명(guardband·추적성) · 기능 안전(fault injection: 감지 → 보고 → FTTI 안 안전 상태, 오탐 0도 검증) · 크랭크 = 프로그래머블 PSU 재생 + 4채널 + 수백 회 + 쓰기 중 dip.
+- **원본**: [BV15 §4.1](2026-11-01_BV15_automotive_board_considerations.html#4-1-what-s-different-about-validating-an-automotive-board-vs-a-consumer-one) · [BV15 §4.2](2026-11-01_BV15_automotive_board_considerations.html#4-2-how-do-you-validate-a-safety-mechanism-like-ecc-or-a-watchdog) · [BV15 §4.3](2026-11-01_BV15_automotive_board_considerations.html#4-3-추가-what-happens-to-your-board-during-cold-crank-and-how-would-you-test-it) · [BV05 §4.4 watchdog](2026-11-01_BV05_reset_strap_boot_mode.html#4-4-추가-체인-how-would-you-handle-the-watchdog-in-bring-up-test-firmware) · [LP17 자동차 PCIe](2026-10-31_LP17_gen5_gen6_retimer_automotive.html)
+
+</details>
+
+## 8. 출처
+
+이 Q 뱅크는 새 외부 자료 없이 아래 노트의 §0 TL;DR · §4 꼬리 질문 체인 · §5 Don 경험 연결을 압축·재배열한 것이다. 숫자·레지스터·스펙 수치의 1차 출처는 각 노트의 `## 8. 출처` 참조.
+
+1. [BV00 · Board validation 트랙 목록](2026-11-01_BV00_board_validation_track.html) — 묶음 구조·P0 목록·꼬리 체인 원본
+2. [BV01 · Silicon vs board validation 큰 그림](2026-11-01_BV01_si_board_validation_big_picture.html) — Q01–Q04
+3. [BV02 · 회로도 · 레이아웃 · BOM 읽기](2026-11-01_BV02_schematic_layout_reading.html) — Q05, Q06, Q13
+4. [BV03 · 전원 트리 · sequencing · PMIC](2026-11-01_BV03_power_tree_sequencing_pmic.html) — Q07, Q08, Q22
+5. [BV04 · 클럭 · PLL · refclk](2026-11-01_BV04_clocks_osc_pll_refclk.html) — Q11, Q26
+6. [BV05 · 리셋 · strap · boot mode · watchdog](2026-11-01_BV05_reset_strap_boot_mode.html) — Q08, Q09, Q10, Q30
+7. [BV06 · 첫 전원 인가 체크리스트](2026-11-01_BV06_first_power_on_checklist.html) — Q07, Q12, Q13, Q25
+8. [BV07 · JTAG · SWD · CoreSight · boundary scan](2026-11-01_BV07_jtag_swd_boundary_scan.html) — Q14, Q15, Q16
+9. [BV08 · 부트 흐름 · bring-up 테스트 FW](2026-11-01_BV08_boot_flow_bringup_firmware.html) — Q02, Q17
+10. [BV09 · DDR bring-up · training · memtest](2026-11-01_BV09_ddr_bringup_training_memtest.html) — Q18, Q19, Q20
+11. [BV10 · 보드 인터페이스 테스트](2026-11-01_BV10_board_interface_tests.html) — Q06, Q21
+12. [BV11 · 랩 장비와 측정](2026-11-01_BV11_lab_instruments_measurement.html) — Q22, Q28
+13. [BV12 · SI/PI · margining · shmoo · PVT](2026-11-01_BV12_si_pi_margining_shmoo_pvt.html) — Q23, Q24
+14. [BV13 · 보드 디버그 시나리오 12선](2026-11-01_BV13_board_debug_scenarios.html) — Q09, Q13, Q14, Q18, Q25, Q26, Q29
+15. [BV14 · 검증 계획 · 보드 팜 · 자동화](2026-11-01_BV14_board_validation_plan_automation.html) — Q27, Q28, Q29
+16. [BV15 · 자동차 보드 고려사항](2026-11-01_BV15_automotive_board_considerations.html) — Q20, Q30
+17. [LP15 · PCIe 디버그 시나리오](2026-10-31_LP15_debug_scenarios.html) — Q24 (S7), Q26 (S1)
+18. [LP14 · PCIe 검증 방법론](2026-10-31_LP14_validation_methodology.html) — Q24 (margining), Q27 (12영역 플랜)
+19. [LP03 · 링크 학습 · LTSSM](2026-10-31_LP03_link_training_ltssm.html) — Q11, Q26
+20. [LP09 · AER · DPC](2026-10-31_LP09_aer_dpc_error_handling.html) — Q24
+21. [LP13 · Linux PCIe 도구](2026-10-31_LP13_linux_pcie_tools.html) — Q26
+22. [LP16 · bare-metal vs Linux (Zynq)](2026-10-31_LP16_baremetal_vs_linux_zynq.html) — Q17
+23. [LP17 · Gen5/Gen6 · retimer · 자동차](2026-10-31_LP17_gen5_gen6_retimer_automotive.html) — Q30
+24. [N01 · PCIe lspci · LTSSM (스크린 문제)](2026-10-31_N01_pcie_lspci_ltssm.html) — Q26
+25. [LP00A · I/O primer (PCIe · Ethernet · MIPI)](2026-10-31_LP00A_io_primer_pcie_ethernet_mipi.html) — Q21

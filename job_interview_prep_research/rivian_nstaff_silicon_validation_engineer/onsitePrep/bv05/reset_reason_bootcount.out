@@ -1,0 +1,97 @@
+=== Part A: Zynq UltraScale+ RESET_REASON decode ===
+  RESET_REASON=0x0001 -> EXTERNAL
+      EXTERNAL : PS_POR_B: real power-on / power cycle
+  RESET_REASON=0x0010 -> SRST
+      SRST     : PS_SRST_B pin: button / supervisor / BMC
+  RESET_REASON=0x0021 -> SOFT EXTERNAL
+      SOFT     : software wrote RESET_CTRL (reboot cmd)
+      EXTERNAL : PS_POR_B: real power-on / power cycle
+      note     : >1 bit set = sticky bits accumulated since last POR (nobody cleared them)
+  RESET_REASON=0x0004 -> PMU
+      PMU      : PMU escalated a system error (e.g. WDT)
+
+=== Part B: boot counter in noinit SRAM across resets ===
+
+[B] good FW (rec @SRAM+128, clear_w1c=1, wdt_limit=3)
+     (bench PSU on)
+  #1  raw=0x01 POR            naive=POR  rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+     (FW update -> reboot; new FW hangs)
+  #2  raw=0x04 SW             naive=SW   rec=warm              boot_count=2 wdt_streak=0 -> normal
+     (watchdog fires)
+  #3  raw=0x08 WDT            naive=WDT  rec=warm              boot_count=3 wdt_streak=1 -> normal
+     (watchdog fires)
+  #4  raw=0x08 WDT            naive=WDT  rec=warm              boot_count=4 wdt_streak=2 -> normal
+     (watchdog fires)
+  #5  raw=0x08 WDT            naive=WDT  rec=warm              boot_count=5 wdt_streak=3 -> SAFE MODE (golden image, no app)
+     (engineer presses reset button)
+  #6  raw=0x02 PIN            naive=PIN  rec=warm              boot_count=6 wdt_streak=0 -> normal
+     (load step -> rail droop -> brown-out)
+  #7  raw=0x10 BOR            naive=BOR  rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+     (power cycle)
+  #8  raw=0x01 POR            naive=POR  rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+
+[B] FW forgets to clear W1C cause bits (rec @SRAM+128, clear_w1c=0, wdt_limit=3)
+     (bench PSU on)
+  #1  raw=0x01 POR            naive=POR  rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+     (FW update -> reboot; new FW hangs)
+  #2  raw=0x05 POR|SW         naive=POR  rec=cold(POR)         boot_count=1 wdt_streak=0 -> normal
+     (watchdog fires)
+  #3  raw=0x0d POR|SW|WDT     naive=POR  rec=cold(POR)         boot_count=1 wdt_streak=1 -> normal
+     (watchdog fires)
+  #4  raw=0x0d POR|SW|WDT     naive=POR  rec=cold(POR)         boot_count=1 wdt_streak=1 -> normal
+     (watchdog fires)
+  #5  raw=0x0d POR|SW|WDT     naive=POR  rec=cold(POR)         boot_count=1 wdt_streak=1 -> normal
+     (engineer presses reset button)
+  #6  raw=0x0f POR|PIN|SW|WDT naive=POR  rec=cold(POR)         boot_count=1 wdt_streak=1 -> normal
+     (load step -> rail droop -> brown-out)
+  #7  raw=0x10 BOR            naive=BOR  rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+     (power cycle)
+  #8  raw=0x01 POR            naive=POR  rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+
+[B] noinit record inside BootROM scratch (rec @SRAM+16, clear_w1c=1, wdt_limit=3)
+     (bench PSU on)
+  #1  raw=0x01 POR            naive=POR  rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+     (FW update -> reboot; new FW hangs)
+  #2  raw=0x04 SW             naive=SW   rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+     (watchdog fires)
+  #3  raw=0x08 WDT            naive=WDT  rec=cold(invalid rec) boot_count=1 wdt_streak=1 -> normal
+     (watchdog fires)
+  #4  raw=0x08 WDT            naive=WDT  rec=cold(invalid rec) boot_count=1 wdt_streak=1 -> normal
+     (watchdog fires)
+  #5  raw=0x08 WDT            naive=WDT  rec=cold(invalid rec) boot_count=1 wdt_streak=1 -> normal
+     (engineer presses reset button)
+  #6  raw=0x02 PIN            naive=PIN  rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+     (load step -> rail droop -> brown-out)
+  #7  raw=0x10 BOR            naive=BOR  rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+     (power cycle)
+  #8  raw=0x01 POR            naive=POR  rec=cold(invalid rec) boot_count=1 wdt_streak=0 -> normal
+
+=== Part C: strap sampling -> ZynqMP boot mode ===
+
+[C] 4.7k straps, nothing else on the nets (VCCIO at sample = 1.80 V)
+    MODE0   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE1   PU   4.7k  leak=  0.0uA  other=none     V=1.800 V -> 1
+    MODE2   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE3   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE[3:0]=0x2 (QSPI32)  expected 0x2 (QSPI32)  => OK
+
+[C] MODE1 pull-up 100k + 10uA leakage (VCCIO at sample = 1.80 V)
+    MODE0   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE1   PU 100.0k  leak= 10.0uA  other=none     V=0.800 V -> UNDEFINED (between VIL/VIH)
+    MODE2   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE3   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE[3:0]=0x0 (JTAG)  expected 0x2 (QSPI32)  => UNRELIABLE (board-dependent!)
+
+[C] MODE1 shared with a CPLD output driving low (VCCIO at sample = 1.80 V)
+    MODE0   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE1   PU   4.7k  leak=  0.0uA  other=DRIVING  V=0.537 V -> 0
+    MODE2   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE3   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE[3:0]=0x0 (JTAG)  expected 0x2 (QSPI32)  => WRONG BOOT MODE
+
+[C] IO rail still ramping when reset released (VCCIO at sample = 0.90 V)
+    MODE0   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE1   PU   4.7k  leak=  0.0uA  other=none     V=0.900 V -> 0
+    MODE2   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE3   PD   4.7k  leak=  0.0uA  other=none     V=0.000 V -> 0
+    MODE[3:0]=0x0 (JTAG)  expected 0x2 (QSPI32)  => WRONG BOOT MODE

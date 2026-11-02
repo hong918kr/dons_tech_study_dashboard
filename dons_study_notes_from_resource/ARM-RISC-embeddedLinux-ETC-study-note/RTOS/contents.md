@@ -170,45 +170,45 @@
 
 ### D. 동기화 · 태스크 간 통신
 
-| ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don |
-|---|---|---|---|---|---|
-| D1 | 세마포어 | binary vs counting, 신호용 vs 자원 계수용, ISR → 태스크 신호, "세마포어로 상호배제하면 안 되는 이유" | 면접 최빈출 "mutex vs semaphore" | P0 | 🟡 |
-| D2 | 뮤텍스 | 소유권, 재귀 뮤텍스, 타임아웃, ISR에서 금지인 이유, 뮤텍스 vs 크리티컬 섹션 고르기 | 공유 주변장치 보호 | P0 | 🟡 |
-| D3 | 우선순위 역전 | Mars Pathfinder(1997), 무한 역전, priority inheritance(PIP), priority ceiling(OCPP / ICPP), 전이적 상속, FreeRTOS · Zephyr 구현의 한계 | **RTOS 면접 1순위 질문** | P0 | 🟡 |
-| D4 | 메시지 큐 | 복사 vs 포인터 전달, 깊이 설계, 블로킹 send / receive, 큐 셋 · poll, 큐로 버퍼 소유권 넘기기 | 태스크 설계의 기본 | P0 | 🟡 |
-| D5 | 가벼운 신호 수단 | task notification(FreeRTOS), event group · event flags, `k_poll`, stream / message buffer(단일 생산자 · 소비자) | 성능 · RAM 절약 | P1 | ❌ |
-| D6 | 소프트웨어 타이머 | 타이머 서비스 태스크(daemon), 콜백 컨텍스트 제약, one-shot / auto-reload, Zephyr `k_timer`(ISR 컨텍스트에서 실행) | "타이머 콜백에서 블록하면?" | P1 | 🟡 |
-| D7 | 작업 위임 | Zephyr workqueue(`k_work`, delayable), FreeRTOS `xTimerPendFunctionCallFromISR`, 게이트키퍼 태스크 | ISR → 스레드 이관 패턴 | P1 | ❌ |
-| D8 | 락 없는 통신 (MCU) | LDREX / STREX · CLREX, Cortex-M의 C11 atomics, M0에서의 한계(인터럽트 잠금으로 대체), ISR ↔ 태스크 SPSC 링버퍼, DMB / DSB / ISB가 필요한 곳 | 고속 ISR 경로 (EL F5 개념 재사용) | P0 | ✅ |
-| D9 | 데드락 · 기아 · 라이브락 | 락 순서 규칙, 타임아웃 기반 탐지, 우선순위 기아, 대기 그래프 | 현장 "가끔 멈춤" 분석 | P1 | 🟡 |
-| D10 | Zephyr 고유 IPC | `k_fifo` / `k_lifo` / `k_msgq` / `k_pipe` / `k_mbox`, zbus(publish-subscribe 버스) | Zephyr 실무 | P1 | ❌ |
+| ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don | BM 겹침 |
+|---|---|---|---|---|---|---|
+| D1 | 세마포어 | binary vs counting, 신호용 vs 자원 계수용, ISR → 태스크 신호, "세마포어로 상호배제하면 안 되는 이유" | 면접 최빈출 "mutex vs semaphore" | P0 | 🟡 | — |
+| D2 | 뮤텍스 | 소유권, 재귀 뮤텍스, 타임아웃, ISR에서 금지인 이유, 뮤텍스 vs 크리티컬 섹션 고르기 | 공유 주변장치 보호 | P0 | 🟡 | — |
+| D3 | 우선순위 역전 | Mars Pathfinder(1997), 무한 역전, priority inheritance(PIP), priority ceiling(OCPP / ICPP), 전이적 상속, FreeRTOS · Zephyr 구현의 한계 | **RTOS 면접 1순위 질문** | P0 | 🟡 | — |
+| D4 | 메시지 큐 | 복사 vs 포인터 전달, 깊이 설계, 블로킹 send / receive, 큐 셋 · poll, 큐로 버퍼 소유권 넘기기 | 태스크 설계의 기본 | P0 | 🟡 | — |
+| D5 | 가벼운 신호 수단 | task notification(FreeRTOS), event group · event flags, `k_poll`, stream / message buffer(단일 생산자 · 소비자) | 성능 · RAM 절약 | P1 | ❌ | — |
+| D6 | 소프트웨어 타이머 | 타이머 서비스 태스크(daemon), 콜백 컨텍스트 제약, one-shot / auto-reload, Zephyr `k_timer`(ISR 컨텍스트에서 실행) | "타이머 콜백에서 블록하면?" | P1 | 🟡 | — |
+| D7 | 작업 위임 | Zephyr workqueue(`k_work`, delayable), FreeRTOS `xTimerPendFunctionCallFromISR`, 게이트키퍼 태스크 | ISR → 스레드 이관 패턴 | P1 | ❌ | — |
+| D8 | 락 없는 통신 (MCU) | LDREX / STREX · CLREX, Cortex-M의 C11 atomics, M0에서의 한계(인터럽트 잠금으로 대체), ISR ↔ 태스크 SPSC 링버퍼, DMB / DSB / ISB가 필요한 곳 | 고속 ISR 경로 (EL F5 개념 재사용) | P0 | ✅ | BM J2(레이스 일부), J3, J4, J5, B6(순서 일부) |
+| D9 | 데드락 · 기아 · 라이브락 | 락 순서 규칙, 타임아웃 기반 탐지, 우선순위 기아, 대기 그래프 | 현장 "가끔 멈춤" 분석 | P1 | 🟡 | — |
+| D10 | Zephyr 고유 IPC | `k_fifo` / `k_lifo` / `k_msgq` / `k_pipe` / `k_mbox`, zbus(publish-subscribe 버스) | Zephyr 실무 | P1 | ❌ | — |
 
 ### E. 인터럽트 · 타이밍 · 결정성
 
-| ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don |
-|---|---|---|---|---|---|
-| E1 | RTOS-aware ISR 규칙 | `...FromISR` API, `xHigherPriorityTaskWoken` + `portYIELD_FROM_ISR`, ISR에서 금지된 것, Zephyr `k_is_in_isr()` | **매일 쓰는 규칙**, 면접 단골 | P0 | 🟡 |
-| E2 | 인터럽트 우선순위 설계 | kernel-aware vs zero-latency(커널 밖) 인터럽트, 우선순위 배치표 작성법, 중첩 | 모터 제어 · 고속 ISR | P0 | 🟡 |
-| E3 | 지연과 지터 분해 | 인터럽트 지연 = HW 진입 + 마스킹 구간 + 핸들러 + 스케줄링 지연, 측정(GPIO + scope, DWT CYCCNT) | 수치로 말하기 | P0 | ✅ |
-| E4 | ISR → 태스크 처리 경로 | deferred interrupt processing, 바로 깨우기 vs 이벤트 모아 처리, 인터럽트 폭주(storm) 대비 | 설계 질문 | P0 | 🟡 |
-| E5 | HW 타이머 활용 | 입력 캡처 · 출력 비교, 32비트 카운터를 64비트 시간으로 확장, 고해상도 타임스탬프, 타이머 트리거 ADC | 센서 타임스탬프 | P1 | ✅ |
-| E6 | DMA + RTOS I/O | double / ping-pong 버퍼, half / full 완료 콜백 → 태스크 통지, UART idle-line + DMA, 캐시 처리 | 고속 데이터 경로 | P0 | ✅ |
-| E7 | 주기 실행의 정확도 | 지터 원인(tick 해상도, 선점, 캐시), HW 타이머 구동 vs tick 구동, 위상 정렬 | 제어 루프 품질 | P1 | 🟡 |
-| E8 | 워치독 전략 | IWDG / WWDG, 태스크 heartbeat 감시 태스크, 윈도 워치독, 리셋 원인 기록 | 필드 안정성 (EL I9은 Linux watchdog) | P0 | ✅ |
+| ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don | BM 겹침 |
+|---|---|---|---|---|---|---|
+| E1 | RTOS-aware ISR 규칙 | `...FromISR` API, `xHigherPriorityTaskWoken` + `portYIELD_FROM_ISR`, ISR에서 금지된 것, Zephyr `k_is_in_isr()` | **매일 쓰는 규칙**, 면접 단골 | P0 | 🟡 | — |
+| E2 | 인터럽트 우선순위 설계 | kernel-aware vs zero-latency(커널 밖) 인터럽트, 우선순위 배치표 작성법, 중첩 | 모터 제어 · 고속 ISR | P0 | 🟡 | BM J8 |
+| E3 | 지연과 지터 분해 | 인터럽트 지연 = HW 진입 + 마스킹 구간 + 핸들러 + 스케줄링 지연, 측정(GPIO + scope, DWT CYCCNT) | 수치로 말하기 | P0 | ✅ | BM J7, M7 |
+| E4 | ISR → 태스크 처리 경로 | deferred interrupt processing, 바로 깨우기 vs 이벤트 모아 처리, 인터럽트 폭주(storm) 대비 | 설계 질문 | P0 | 🟡 | BM J1 |
+| E5 | HW 타이머 활용 | 입력 캡처 · 출력 비교, 32비트 카운터를 64비트 시간으로 확장, 고해상도 타임스탬프, 타이머 트리거 ADC | 센서 타임스탬프 | P1 | ✅ | BM I2(캡처 · 비교 · 시간 확장 부분) |
+| E6 | DMA + RTOS I/O | double / ping-pong 버퍼, half / full 완료 콜백 → 태스크 통지, UART idle-line + DMA, 캐시 처리 | 고속 데이터 경로 | P0 | ✅ | BM I8(버퍼 · 완료 통지 · 캐시 부분) |
+| E7 | 주기 실행의 정확도 | 지터 원인(tick 해상도, 선점, 캐시), HW 타이머 구동 vs tick 구동, 위상 정렬 | 제어 루프 품질 | P1 | 🟡 | — |
+| E8 | 워치독 전략 | IWDG / WWDG, 태스크 heartbeat 감시 태스크, 윈도 워치독, 리셋 원인 기록 | 필드 안정성 (EL I9은 Linux watchdog) | P0 | ✅ | BM I10, H3(리셋 원인 기록 부분) |
 
 ### F. 메모리 관리 · 보호 · 격리
 
-| ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don |
-|---|---|---|---|---|---|
-| F1 | 정적 vs 동적 할당 | 정적 할당 정책(인증 프로젝트), FreeRTOS heap_1 ~ heap_5, 단편화, 할당 시간의 결정성 | "RTOS에서 malloc 써도 되나" | P0 | 🟡 |
-| F2 | 메모리 풀 · 슬랩 | 고정 크기 블록 풀, Zephyr `k_mem_slab` / `k_heap`, ThreadX byte / block pool, O(1) 할당 | 결정적 메모리 | P1 | 🟡 |
-| F3 | 스택 크기 산정과 오버플로 | high water mark, 카나리, MPU 가드, PSPLIM / MSPLIM(v8-M), `-fstack-usage` · 정적 분석, ISR 스택 분리 | **현장 버그 1순위** | P0 | 🟡 |
-| F4 | MPU | 리전 · 정렬 · subregion(v7-M), v8-M MPU(base / limit), 속성(XN, RO, 캐시), 컨텍스트 스위치 때 리전 교체 | 격리의 하드웨어 기반 | P1 | 🟡 |
-| F5 | 유저 모드 격리 | Zephyr userspace(memory domain / partition, syscall 인자 검증), FreeRTOS-MPU(restricted task), 결함 격리 vs 성능 | 보안 · 안전 설계 | P1 | ❌ |
-| F6 | TrustZone-M | Secure / Non-secure, SAU / IDAU, NSC veneer, 보안 상태 간 호출, TF-M 파티션, RTOS가 NS 쪽에서 도는 구조 | Armv8-M 보안 질문 | P1 | ❌ |
-| F7 | 재진입성과 C 라이브러리 | 재진입 함수, newlib `_reent` · malloc 락, 태스크별 errno, ISR에서 printf 금지 이유, picolibc TLS | 숨은 레이스 | P1 | 🟡 |
-| F8 | 메모리 배치 실무 | TCM / SRAM 뱅크에 객체 배치(section attribute), noinit RAM(리셋 후 보존되는 로그), 링커 스크립트로 영역 분리, ECC RAM 초기화 | 성능 · 크래시 수집 | P1 | ✅ |
-| F9 | MMU를 쓰는 RTOS | QNX · NuttX kernel build · VxWorks RTP의 프로세스 모델, Cortex-R82 / Cortex-A 위 RTOS | 넓은 시야 | P2 | ❌ |
+| ID | 주제 | 핵심 개념 | 왜 필요 | 우선 | Don | BM 겹침 |
+|---|---|---|---|---|---|---|
+| F1 | 정적 vs 동적 할당 | 정적 할당 정책(인증 프로젝트), FreeRTOS heap_1 ~ heap_5, 단편화, 할당 시간의 결정성 | "RTOS에서 malloc 써도 되나" | P0 | 🟡 | — |
+| F2 | 메모리 풀 · 슬랩 | 고정 크기 블록 풀, Zephyr `k_mem_slab` / `k_heap`, ThreadX byte / block pool, O(1) 할당 | 결정적 메모리 | P1 | 🟡 | — |
+| F3 | 스택 크기 산정과 오버플로 | high water mark, 카나리, MPU 가드, PSPLIM / MSPLIM(v8-M), `-fstack-usage` · 정적 분석, ISR 스택 분리 | **현장 버그 1순위** | P0 | 🟡 | BM C9(스택 가드 부분), Q6(스택 카나리 부분), M10(스택 오버플로 행) |
+| F4 | MPU | 리전 · 정렬 · subregion(v7-M), v8-M MPU(base / limit), 속성(XN, RO, 캐시), 컨텍스트 스위치 때 리전 교체 | 격리의 하드웨어 기반 | P1 | 🟡 | BM C9 |
+| F5 | 유저 모드 격리 | Zephyr userspace(memory domain / partition, syscall 인자 검증), FreeRTOS-MPU(restricted task), 결함 격리 vs 성능 | 보안 · 안전 설계 | P1 | ❌ | — |
+| F6 | TrustZone-M | Secure / Non-secure, SAU / IDAU, NSC veneer, 보안 상태 간 호출, TF-M 파티션, RTOS가 NS 쪽에서 도는 구조 | Armv8-M 보안 질문 | P1 | ❌ | BM C12 |
+| F7 | 재진입성과 C 라이브러리 | 재진입 함수, newlib `_reent` · malloc 락, 태스크별 errno, ISR에서 printf 금지 이유, picolibc TLS | 숨은 레이스 | P1 | 🟡 | BM F5(재진입 · malloc 락 부분 — libc 선택 · 크기는 B11이 주인) |
+| F8 | 메모리 배치 실무 | TCM / SRAM 뱅크에 객체 배치(section attribute), noinit RAM(리셋 후 보존되는 로그), 링커 스크립트로 영역 분리, ECC RAM 초기화 | 성능 · 크래시 수집 | P1 | ✅ | BM P2, G6(섹션 지정 부분), Q7(ECC RAM 초기화 부분) |
+| F9 | MMU를 쓰는 RTOS | QNX · NuttX kernel build · VxWorks RTP의 프로세스 모델, Cortex-R82 / Cortex-A 위 RTOS | 넓은 시야 | P2 | ❌ | — |
 
 ### G. FreeRTOS 실무
 
@@ -465,9 +465,9 @@
 | A 실시간 · RTOS 개념과 지형 | 7 | 7 | 0 | 2026-10-25 A1–A7 작성 (QEMU mps2-an385 + FreeRTOS V11.3.2 · Zephyr v4.4.2 · ThreadX 6.5.2: 응답시간 꼬리 히스토그램, 같은 펌웨어 5개 실행 모델, footprint 해부, TCB·태스크 RAM, API 5종 실행 비교, 지형도, RTOS 비용 실측) |
 | B MCU 하드웨어 기반 | 11 | 11 | 0 | 2026-10-25 B1–B11 작성 (QEMU M0/M3/M4F/M7/M33/M55 · R52 · RISC-V: 레지스터·EXC_RETURN 실측, NVIC 비트 수·BASEPRI 경계, PendSV 지연·SVC 테이블, 리셋→main·링커 버그 재현, FPU lazy stacking, 세대별 같은 코드 비교, 캐시는 호스트 측정+시뮬레이터, R52 GIC·EL2, RISC-V 트랩·PMP, libc·-O·LTO 크기) · 🔁 Bare-Metal C·D9·E·F 겹침 주인 |
 | C 커널 내부 | 12 | 12 | 0 | 2026-10-25 C1–C12 작성 (ready list 실물 덤프·CLZ, PendSV 한 줄씩 + 75줄 직접 스위처, 위조 프레임·첫 태스크, 정책별 Gantt, tick·drift, tickless 깨움 1000→12, 크리티컬 섹션 지연 스윕, FreeRTOS-MPU·Zephyr userspace 진입 비용, idle·훅·run-time stats, EDF·cyclic·ARINC 653, 소스 읽기 투어, SMP: FreeRTOS SMP on 듀얼 M33 + Zephyr A53×2 IPI·스핀락 실측) |
-| D 동기화 · 태스크 간 통신 | 10 | 0 | 0 | |
-| E 인터럽트 · 타이밍 · 결정성 | 8 | 0 | 0 | |
-| F 메모리 관리 · 보호 · 격리 | 9 | 0 | 0 | |
+| D 동기화 · 태스크 간 통신 | 10 | 10 | 0 | 2026-10-31 D1–D10 작성 (QEMU mps2-an385 FreeRTOS V11.3.2 · Zephyr v4.4.2 + arm64 호스트: 이벤트 유실·yield 누락 히스토그램, 뮤텍스 vs 크리티컬 섹션 vs 스케줄러 잠금 실측, 무한 역전 Gantt·PIP/ICPP·전이 상속 없음 확인, 큐 깊이 모델 21−D, notification 11–22% 이득, 타이머 데몬 우선순위·catch-up, 위임 4패턴·workqueue 함정, LDREX/seqlock/SPSC·arm64 재정렬 실측, 데드락 검사기·대기 그래프·watchdog, Zephyr k_fifo~zbus 비교) · 🔁 D8 = BM J2–J5 · B6 주인 |
+| E 인터럽트 · 타이밍 · 결정성 | 8 | 8 | 0 | 2026-11-01 E1–E8 작성 (QEMU mps2-an385 · an505 PL081 DMA · native_sim, FreeRTOS V11.3.2 · Zephyr v4.4.2: woken 플래그 누락 = 평균 반 tick 지연 · assert 켜고/끄고 실수 결과, zero-latency 경계 · 배치표 · 중첩 스택 · ISR 간 역전, 지연 5~7단 분해 · 원인 태그 히스토그램 · DWT 대체, 플래그 클리어 위치 · 배치 처리 44→11% · 폭주 가드 · NAPI식 폴링, 캡처 vs ISR 읽기 · 어느 문맥에서든 맞는 64비트 시간 · 드리프트 맞춤, ping-pong 오버런 · idle-line · DMA vs 바이트 IRQ CPU 부하, 5가지 주기 구동 지터 비교 · Zephyr +1 tick · 위상 정렬, CMSDK 워치독 실제 리셋 · heartbeat 감시 · .noinit 리셋 원인 · 감지 시간 D+T) · 🔁 E2 = BM J8, E3 = J7 · M7, E4 = J1, E5 = I2 일부, E6 = I8 일부, E8 = I10 · H3 일부 주인 |
+| F 메모리 관리 · 보호 · 격리 | 9 | 9 | 0 | 2026-11-01 F1–F9 작성 (QEMU mps2-an385 · an505 · an521 · an547 · rv-virt · qemu_cortex_a53, FreeRTOS V11.3.2 · Zephyr v4.4.2 · ThreadX · NuttX: heap_1–5 시간 분포 · 단편화 실패 시점 · 정적 빌드 링크 에러, 풀 vs 힙 지연 · k_heap 전원 깨움 · -Os 2배, 오버플로 1개 증상 4개 · HWM vs 정적 분석 · PSPLIM · FreeRTOS MSPLIM 미설정, v7-M/v8-M 리전 실측 · 정렬 안 된 리전 무시 · 스위치 비용, Zephyr userspace · FreeRTOS-MPU 결함 격리 · 재시작 · RAM 정렬 낭비, an505 S/NS 두 이미지 · NSC veneer · FreeRTOS TZ 태스크별 secure 스택, strtok · errno · malloc 락 레이스 · ISR printf · Ubuntu newlib 락 없음, 다중 RAM 배치 · DT 영역 NOLOAD · noinit 드리프트 · ECC 초기화, NuttX kernel build 프로세스 격리 · A53 ASID · demand paging) · 🔁 F3 = BM C9 · Q6 · M10 일부, F4 = C9, F6 = C12, F7 = F5 일부, F8 = P2 · G6 · Q7 일부 주인 |
 | G FreeRTOS 실무 | 7 | 0 | 0 | |
 | H Zephyr 실무 | 10 | 0 | 0 | |
 | I 다른 RTOS · 신세대 실행 모델 (Rust) | 11 | 0 | 0 | |
@@ -481,4 +481,4 @@
 | Q 도메인 스택 | 9 | 0 | 0 | |
 | R 인터뷰 준비 | 6 | 0 | 0 | |
 | S 실습 프로젝트 | 9 | 0 | 0 | |
-| **합계** | **166** | **30** | **0** | 모듈 A · B · C (10-25) 완료 |
+| **합계** | **166** | **57** | **0** | 모듈 A · B · C (10-25) · D (10-31) · E · F (11-01) 완료 |

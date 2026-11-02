@@ -1,0 +1,1784 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>E3. 지연과 지터 분해 — "IRQ에서 태스크까지 몇 µs"를 구간으로 쪼개 재고, 히스토그램 봉우리마다 범인을 찾는다</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="E/2026-11-01_E3_latency_jitter_breakdown">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 대시보드</a>
+  <span class="t">E. 인터럽트 · 타이밍 · E3. 지연과 지터 분해 — "IRQ에서 태스크까지 몇 µs"를 구간으로 쪼개 재고, 히스토그램 봉우리마다 범인을 찾는다</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">E. 인터럽트 · 타이밍 · Interrupts &amp; Timing</div>
+      <h1>E3. 지연과 지터 분해 — "IRQ에서 태스크까지 몇 µs"를 구간으로 쪼개 재고, 히스토그램 봉우리마다 범인을 찾는다</h1>
+      <div class="meta"><span>229분 읽기</span><span>2122줄</span><span>54개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: 인터럽트 지연과 태스크 응답 지연을 하드웨어 진입 · 마스킹 구간 · 상위 ISR · 핸들러 · 커널 경로 · 전환 · 상위 태스크 간섭으로 나누고 각 구간을 따로 잴 수 있다 · GPIO 토글 + scope, DWT CYCCNT, 타이머 스냅샷, 트레이스 중 무엇이 어느 구간을 재는지 고르고, 측정 자체의 비용(observer effect)을 숫자로 뺄 수 있다 · 지연 히스토그램의 봉우리 · 선반 · 꼬리를 보고 원인을 지목한 뒤 원인별 태깅과 하나씩 끄기(ablation)로 증명할 수 있다 · 가장 긴 크리티컬 섹션을 스택에 쌓인 LR로 찾아내고, max-plus 합성으로 최악값 상한을 세우고, 측정을 얼마나 오래 해야 하는지 계산할 수 있다 <strong>왜 필요한가</strong>: 면접의 "인터럽트 지연이 얼마인가? 어떻게 쟀나? 가끔 튀면 어떻게 찾나?"와 현장의 "드론 rate loop가 가끔 30 µs 늦게 시작한다"는 같은 질문이다. "빠르다"가 아니라 <strong>"기본 8.3 µs, 그중 커널 경로 3.4 µs, 최악 73.9 µs는 네 원인이 겹친 0.35%의 경우"</strong>처럼 수치와 구성으로 답해야 통과한다 <strong>Don 기준 난이도</strong>: scope · 로직 분석기로 버스 타이밍을 재는 일, 히스토그램으로 꼬리를 보는 습관, SSD 펌웨어의 레이턴시 튜닝은 이미 안다 / 새로 배울 부분은 RTOS 경로(ISR → ready → PendSV → 전환 → API 복귀)를 구간별로 재는 계측점, Cortex-M DWT를 켜는 순서와 함정, 봉우리-원인 매핑과 원인 태깅, 최악값 합성과 측정 시간 계산 <strong>선행 노트</strong>: A1(지연 · 지터 용어, 평균 vs 꼬리), A7(IRQ → 태스크 8.28 µs 첫 측정), B2(예외 진입 12사이클 · tail-chain 6사이클), B3(NVIC · BASEPRI), C2(컨텍스트 스위치 명령 수), C7(크리티컬 섹션 길이 L 스윕 — 여기서 다시 재지 않는다), C8(커널 진입 비용), EL N3(Linux cyclictest — Linux 쪽은 참조만). 이어지는 노트: E2(우선순위 배치), E4(ISR → 태스크 설계), E7(주기 실행 지터), M3(이벤트 트레이싱), M6(DWT · ETM 하드웨어), N3(응답 시간 분석 이론) 🔁 <strong>Bare-Metal 겹침</strong>: BM J7(인터럽트 지연 · 지터 측정: GPIO 토글 + scope, DWT, 최악 경로 찾기) · BM M7(타이밍 측정 기법: GPIO 토글, DWT CYCCNT, 타이머 스냅샷, 측정이 측정을 바꾸는 문제) — 이 노트가 주인. Bare-Metal 노트는 이 노트를 링크하고 "RTOS 없는 super-loop에서의 측정(ISR → 메인 루프 플래그 폴링 지연, 루프 한 바퀴 길이가 곧 최악 지연)"만 더한다</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-지연이-얼마냐-는-질문을-구간으로-바꾼다">0. 큰 그림 — "지연이 얼마냐"는 질문을 구간으로 바꾼다<a class="anchor" href="#0-큰-그림-지연이-얼마냐-는-질문을-구간으로-바꾼다" aria-label="link">#</a></h2>
+<p>Don이 SSD 펌웨어에서 QoS 레이턴시를 잡던 장면을 떠올려 보자. "4K 랜덤 읽기 99.99% 지연이 가끔 2 ms를 넘는다"는 말은 그 자체로는 고칠 수 없다. 명령 수신 → FTL 조회 → NAND 읽기 → ECC → DMA → 완료 통지로 <strong>구간을 나누고</strong>, 각 구간에 타임스탬프를 찍고, 2 ms짜리 표본만 모아서 <strong>어느 구간이 늘었는지</strong> 봐야 GC나 read retry 같은 범인이 나온다.</p>
+<p>RTOS의 인터럽트 지연도 똑같다. "IRQ에서 태스크까지 8 µs"는 결과이고, 그 안에는 성격이 전혀 다른 일곱 조각이 들어 있다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="18" font-size="13" font-weight="bold">IRQ 한 번이 태스크의 첫 줄이 되기까지 — 시간은 왼쪽에서 오른쪽</text>
+<line x1="200" y1="34" x2="200" y2="270" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="200" y="46" font-size="12" text-anchor="middle">IRQ 발생</text>
+<line x1="335" y1="52" x2="335" y2="270" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="335" y="46" font-size="12" text-anchor="middle">ISR 첫 줄</text>
+<line x1="610" y1="52" x2="610" y2="270" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="610" y="46" font-size="12" text-anchor="middle">태스크 첫 줄</text>
+<text x="190" y="72" font-size="12" text-anchor="end">① 마스킹 · 상위 ISR 대기</text>
+<rect x="200" y="58" width="80" height="20" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="190" y="98" font-size="12" text-anchor="end">② HW 진입 (스태킹 · 벡터)</text>
+<rect x="280" y="84" width="30" height="20" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="190" y="124" font-size="12" text-anchor="end">③ 프롤로그 · 디스패치</text>
+<rect x="310" y="110" width="25" height="20" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="190" y="150" font-size="12" text-anchor="end">④ ISR 본문 + 커널 호출</text>
+<rect x="335" y="136" width="85" height="20" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="190" y="176" font-size="12" text-anchor="end">⑤ ISR 퇴장 · PendSV 요청</text>
+<rect x="420" y="162" width="20" height="20" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="190" y="202" font-size="12" text-anchor="end">⑥ PendSV · 전환 결정</text>
+<rect x="440" y="188" width="60" height="20" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="190" y="228" font-size="12" text-anchor="end">⑦ 상위 태스크 간섭</text>
+<rect x="500" y="214" width="75" height="20" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a" stroke-dasharray="4 3"/>
+<text x="190" y="254" font-size="12" text-anchor="end">⑧ 복원 · API 복귀</text>
+<rect x="575" y="240" width="35" height="20" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<line x1="200" y1="284" x2="335" y2="284" stroke="currentColor" marker-start="url(#ah1)" marker-end="url(#ah1)"/>
+<text x="268" y="300" font-size="12" text-anchor="middle">인터럽트 지연 ①②③</text>
+<line x1="200" y1="310" x2="610" y2="310" stroke="currentColor" marker-start="url(#ah1)" marker-end="url(#ah1)"/>
+<text x="470" y="326" font-size="12" text-anchor="middle">태스크 응답 지연 ①~⑧</text>
+</svg></figure>
+<p>그림 1 — 지연의 여덟 조각. 빨강(①, ⑦)은 <strong>다른 코드 때문에 기다리는</strong> 시간이라 매번 달라진다(지터의 주범). 회색 · 파랑 · 주황 · 초록은 <strong>경로 자체의 길이</strong>라 거의 일정하다(기본 지연). 이 노트의 모든 측정은 이 그림의 어느 구간을 재는지로 설명된다.</p>
+<p>이 노트가 하는 일은 세 가지다.</p>
+<ol><li><strong>측정 도구를 고르고 그 비용을 안다</strong> (§1~§3) — 타이머 스냅샷, GPIO 토글 + scope, DWT CYCCNT, 트레이스. 각각 그림 1의 어디부터 어디까지를 재는지, 측정 자체가 몇 ns를 더하는지.</li><li><strong>기본 지연을 구간으로 쪼갠다</strong> (§4) — FreeRTOS와 Zephyr에서 같은 IRQ → 태스크 경로를 5~7개 구간으로 재서 누적 막대로 비교한다.</li><li><strong>지터를 원인으로 쪼갠다</strong> (§5~§7) — 배경 부하 아래 히스토그램을 만들고, 봉우리 · 선반 · 꼬리를 원인에 매핑하고, 표본마다 원인을 태깅하고, 원인을 하나씩 꺼서 증명한다. 마지막으로 가장 긴 경로를 찾고(스택의 LR), 최악값 상한을 합성하고, 측정 시간을 계산한다.</li></ol>
+<h3 id="범위-다른-노트와의-경계">범위 — 다른 노트와의 경계<a class="anchor" href="#범위-다른-노트와의-경계" aria-label="link">#</a></h3>
+<ul><li><strong>크리티컬 섹션 길이 L 스윕</strong>(PRIMASK · BASEPRI · 스케줄러 잠금 × L = 0 ~ 100 µs)은 <strong>C7 §6</strong>이 이미 쟀다. 결론만 쓴다: 최대 IRQ 지연 ≈ 기본 + L(BASEPRI면 kernel-aware IRQ만), 태스크 지연은 세 잠금 모두 ≈ L + 10 µs. 여기서는 그 L이 <strong>히스토그램에서 어떤 모양으로 보이는지</strong>만 다룬다.</li><li><strong>컨텍스트 스위치 명령 수</strong>(lean 60 명령, 스택 검사 · 런타임 통계 켜면 104)는 C2, <strong>NVIC 우선순위 · BASEPRI 하드웨어</strong>는 B3, <strong>우선순위 배치 설계</strong>는 E2, <strong>주기 태스크의 주기 지터</strong>는 E7, <strong>RTA 이론</strong>은 N3의 몫이다.</li><li><strong>Linux 쪽 지연 측정</strong>(cyclictest, osnoise, timerlat, 히스토그램 로그 축, "오래 재야 한다")은 EL N3에서 했다. 이 노트는 <strong>MCU에서 달라지는 점</strong>만 쓴다: 커널/사용자 경계와 cpuidle이 없고, 측정점을 ISR 첫 명령과 PendSV 안까지 직접 넣을 수 있으며, 사이클 단위 하드웨어 시계(DWT, 타이머)를 코드에서 바로 읽는다.</li></ul>
+<h3 id="실습-환경-한-줄">실습 환경 한 줄<a class="anchor" href="#실습-환경-한-줄" aria-label="link">#</a></h3>
+<p>QEMU <code>mps2-an385</code>(Cortex-M3 @ 25 MHz) 위에서 bare-metal, FreeRTOS V11.3.2(ARM_CM3 포트), Zephyr v4.4.2를 같은 가상 보드로 돌리고, Python 분석은 VM 호스트에서 돌린다. 타이밍은 모두 <code>ICOUNT=1</code>(명령 1개 = 32 ns 가상 시간, 결정적)이다. <strong>숫자는 QEMU icount 기준이며 실제 칩과 절대값은 다르다</strong> — QEMU는 예외 스태킹 사이클, 플래시 wait state, 캐시, 버스 대기, DWT를 모델링하지 않는다. 그래서 이 노트의 숫자는 <strong>구간의 상대 크기 · 히스토그램 모양 · 원인 구성</strong>을 보여 주는 데 쓰고, 실칩 사이클은 Arm 문서 값을 따로 표로 붙인다. 시계는 FPGAIO COUNTER(0x40028018, 25 MHz, 1 카운트 = 40 ns)와 CMSDK TIMER0의 <code>RELOAD - VALUE</code>다.</p>
+<p>모든 bare-metal · FreeRTOS 예제가 쓰는 작은 헤더 <code>e3.h</code>다(C7의 <code>c7.h</code>를 이 노트용으로 고쳤다 — DUALTIMER의 첫 만료 시점을 따로 정할 수 있게 BGLOAD를 쓰고, 1 µs 칸 히스토그램을 더했다). Zephyr 예제는 같은 내용을 <code>board.h</code> 없이 레지스터 매크로로 다시 쓴 <code>z3.h</code>를 쓴다(내용이 같아서 싣지 않는다).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* e3.h — E3 latency/jitter measurement helpers, QEMU mps2-an385 (bare-metal + FreeRTOS) */
+#ifndef E3_H
+#define E3_H
+#include "board.h"
+#define CYC()       REG32(0x40028018u)          /* FPGAIO COUNTER: 25 MHz from reset, 1 = 40 ns */
+#define LED         REG32(0x40028000u)          /* FPGAIO LED register: our stand-in "GPIO pin" */
+#define NS(c)       ((unsigned)((c) * 40u))
+/* TIMER0 (IRQ 8): the event source. elapsed = cycles since it raised the IRQ */
+static inline void t0_start(uint32_t period, uint8_t prio)
+{
+    TIMER_CTRL(TIMER0_BASE) = 0;
+    TIMER_RELOAD(TIMER0_BASE) = period - 1;
+    TIMER_VALUE(TIMER0_BASE) = period - 1;
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    NVIC_IPR(8) = prio;
+    NVIC_ISER0 = 1u &lt;&lt; 8;
+    TIMER_CTRL(TIMER0_BASE) = 1u | 8u;          /* enable + IRQ enable */
+}
+static inline void t0_stop(void) { TIMER_CTRL(TIMER0_BASE) = 0; }
+static inline uint32_t t0_elapsed(void) { return TIMER_RELOAD(TIMER0_BASE) - TIMER_VALUE(TIMER0_BASE); }
+/* DUALTIMER timer1 (IRQ 10): an interfering periodic ISR */
+#define DT_LOAD     REG32(0x40002000u)
+#define DT_VALUE    REG32(0x40002004u)
+#define DT_CTRL     REG32(0x40002008u)
+#define DT_INTCLR   REG32(0x4000200Cu)
+static inline void dt_start(uint32_t period, uint32_t first, uint8_t prio)
+{
+    DT_CTRL = 0;
+    DT_LOAD = first - 1;                        /* first expiry after 'first' cycles ... */
+    REG32(0x40002018u) = period - 1;            /* ... then BGLOAD period (no restart) */
+    NVIC_IPR(10) = prio;
+    NVIC_ISER0 = 1u &lt;&lt; 10;
+    DT_CTRL = 0x80u | 0x40u | 0x20u | 0x02u;    /* enable, periodic, IRQ, 32-bit */
+}
+static inline void spin_cyc(uint32_t c) { uint32_t t = CYC(); while (CYC() - t &lt; c) { } }
+static uint32_t e3_seed = 12345u;
+static inline uint32_t rnd(uint32_t n) { e3_seed = e3_seed * 1103515245u + 12345u; return (e3_seed &gt;&gt; 16) % n; }
+/* fixed-bin histogram, 1 bin = BINW cycles */
+#define NBIN 64
+typedef struct { uint32_t n, min, max, over; uint64_t sum; uint16_t bin[NBIN]; } hist_t;
+#define HN(h) (*(volatile uint32_t *)&amp;(h).n)     /* poll the count from thread code */
+static inline void h_add(hist_t *h, uint32_t v, uint32_t binw)
+{
+    if (!h-&gt;n || v &lt; h-&gt;min) h-&gt;min = v;
+    if (v &gt; h-&gt;max) h-&gt;max = v;
+    h-&gt;n++; h-&gt;sum += v;
+    uint32_t b = v / binw;
+    if (b &lt; NBIN) h-&gt;bin[b]++; else h-&gt;over++;
+}
+#endif</code></pre></figure>
+<p><code>t0_elapsed()</code>가 이 노트 전체의 기준 시계다. TIMER0은 0을 치는 순간 IRQ를 올리고 RELOAD로 다시 장전되므로, <strong>어디서 읽든 "IRQ가 올라간 뒤 몇 사이클"</strong>이 나온다. ISR 첫 줄에서 읽으면 인터럽트 지연, PendSV 안에서 읽으면 전환까지의 지연, 깨어난 태스크에서 읽으면 태스크 응답 지연이다. 이것이 §2에서 다룰 <strong>타이머 스냅샷</strong> 방법이다. <code>HN()</code>은 처음 짠 예제 2가 멈춰서 넣은 매크로다 — <code>while (h.n &lt; N)</code>에서 <code>h</code>가 <code>volatile</code>이 아니니 컴파일러가 루프 밖으로 읽기를 빼서 무한 루프가 됐다(ISR이 바꾸는 값을 스레드가 폴링할 때의 고전적 실수, C7 §1).</p>
+<hr>
+<h2 id="1-정의-인터럽트-지연-태스크-응답-지연-지터">1. 정의 — 인터럽트 지연, 태스크 응답 지연, 지터<a class="anchor" href="#1-정의-인터럽트-지연-태스크-응답-지연-지터" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM J7과 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="1-1-직관-택배가-문-앞에-온-순간부터-내가-상자를-여는-순간까지">1.1 직관 — 택배가 문 앞에 온 순간부터 내가 상자를 여는 순간까지<a class="anchor" href="#1-1-직관-택배가-문-앞에-온-순간부터-내가-상자를-여는-순간까지" aria-label="link">#</a></h3>
+<p>초인종(IRQ)이 울렸다. 내가 문을 여는 데 걸리는 시간은 (1) 하던 일을 바로 놓을 수 있는가(통화 중이면 끝날 때까지 — 마스킹), (2) 더 급한 사람이 먼저 나갔는가(상위 ISR), (3) 문까지 걸어가는 시간(하드웨어 진입)이다. 여기까지가 <strong>인터럽트 지연</strong>이다. 그런데 택배를 받는 것과 <strong>상자를 열어 쓰는 것</strong>은 다르다. 문에서 받은 상자를 방에 있는 사람(태스크)에게 전달하고(커널 호출), 그 사람이 하던 일을 정리하고(컨텍스트 전환), 그보다 바쁜 형(상위 태스크)이 먼저 쓰고 나서야 연다. 이것까지가 <strong>태스크 응답 지연</strong>이다.</p>
+<h3 id="1-2-정의">1.2 정의<a class="anchor" href="#1-2-정의" aria-label="link">#</a></h3>
+<ul class="tasks"><li><strong>인터럽트 지연(interrupt latency)</strong>: 주변장치가 IRQ 신호를 올린 순간부터 그 ISR의 <strong>첫 명령</strong>(또는 첫 "쓸모 있는" 명령)이 실행되는 순간까지. Arm 문서의 "12 cycles"는 이 중 <strong>하드웨어 진입</strong>(②)만, 그것도 최선 조건에서의 값이다.</li><li><strong>태스크 응답 지연(task response latency, IRQ → task latency)</strong>: 같은 IRQ 순간부터 그 이벤트를 처리할 <strong>태스크의 첫 명령</strong>까지. RTOS에서 설계에 쓰는 숫자는 대개 이쪽이다(A7: "PendSV 핸들러가 수십 사이클"은 이 숫자가 아니다).</li><li><strong>지터(jitter)</strong>: 같은 지연을 여러 번 쟀을 때의 흔들림. 보통 <strong>peak-to-peak</strong>(최댓값 − 최솟값)로 말하고, 분포 전체는 히스토그램으로 본다. 표준편차는 꼬리를 숨기므로 실시간 계약에는 거의 쓰지 않는다(§7). 주기 태스크의 "시작 시각 흔들림"(release jitter)은 E7, 응답 시간 분석에서 지터를 입력으로 쓰는 법은 N3의 몫이다.</li></ul>
+<h3 id="1-3-구성-요소-표-각-조각은-무엇이-결정하나">1.3 구성 요소 표 — 각 조각은 무엇이 결정하나<a class="anchor" href="#1-3-구성-요소-표-각-조각은-무엇이-결정하나" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>조각</th><th>무엇이 결정하나</th><th>일정한가</th><th>이 노트에서 재는 곳</th></tr></thead><tbody><tr><td>① 마스킹 구간</td><td>PRIMASK/BASEPRI가 올라가 있던 남은 시간(앱 · 커널 크리티컬 섹션), 같은/높은 우선순위 ISR의 남은 실행</td><td>아니다 — IRQ가 어느 위상에 떨어지느냐에 따라 0 ~ L</td><td>§5 ex7, C7 §6</td></tr><tr><td>② HW 진입</td><td>스태킹 8워드, 벡터 읽기, 파이프라인 재충전, 플래시 wait state, 진행 중인 버스 트랜잭션, tail-chain/late-arrival 여부</td><td>거의 — 메모리 대기가 흔들 수 있다</td><td>§3.1 표(실칩 값), ex2</td></tr><tr><td>③ 프롤로그 · 디스패치</td><td>컴파일러가 만든 <code>push</code>, Zephyr <code>_isr_wrapper</code>의 표 조회</td><td>일정</td><td>ex2, ex3, ex6</td></tr><tr><td>④ ISR 본문 + 커널 호출</td><td>주변장치 클리어, <code>vTaskNotifyGiveFromISR</code>/<code>k_sem_give</code>(ready 리스트 · 타임 슬라이스)</td><td>거의 — 커널 상태에 따라 경로가 바뀐다</td><td>ex5, ex6</td></tr><tr><td>⑤ ISR 퇴장</td><td><code>portYIELD_FROM_ISR</code> = ICSR.PENDSVSET 쓰기, Zephyr <code>z_arm_int_exit</code></td><td>일정</td><td>ex5, ex6</td></tr><tr><td>⑥ PendSV · 전환</td><td>tail-chain으로 PendSV 진입, 레지스터 저장, 다음 태스크 선택, 스택 검사 · 런타임 통계</td><td>설정에 따라 다르다</td><td>ex5 lean vs 기본</td></tr><tr><td>⑦ 상위 태스크 간섭</td><td>더 높은 태스크의 남은 실행 + 그 태스크의 커널 경로</td><td>아니다</td><td>ex7 med 태스크</td></tr><tr><td>⑧ 복원 · API 복귀</td><td>레지스터 복원, 예외 복귀, 블로킹 API의 나머지(<code>ulTaskNotifyTake</code>의 크리티컬 섹션 탈출)</td><td>일정</td><td>ex5, ex6</td></tr></tbody></table></div>
+<p><strong>흔한 함정</strong>: ①은 "인터럽트 지연"에 들어가는데도 데이터시트의 지연 숫자에는 <strong>절대 들어 있지 않다</strong>. "M4는 인터럽트 지연이 12사이클"이라고 말한 사람의 시스템에서도 64 µs짜리 <code>__disable_irq()</code> 구간 하나가 있으면 최악 인터럽트 지연은 64 µs다. 면접에서 숫자를 말할 때는 <strong>어느 조각들의 합인지</strong>를 같이 말한다.</p>
+<hr>
+<h2 id="2-측정-방법-네-가지-무엇부터-무엇까지-재는가">2. 측정 방법 네 가지 — 무엇부터 무엇까지 재는가<a class="anchor" href="#2-측정-방법-네-가지-무엇부터-무엇까지-재는가" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM M7과 겹친다 (주인: 이 노트).</p></blockquote>
+<figure class="chart"><svg viewBox="0 0 680 260" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="18" font-size="13" font-weight="bold">네 가지 방법이 재는 구간</text>
+<line x1="190" y1="30" x2="190" y2="235" stroke="#d0564a" stroke-dasharray="4 3"/>
+<text x="190" y="44" font-size="12" text-anchor="middle">IRQ 발생</text>
+<line x1="340" y1="50" x2="340" y2="235" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="340" y="44" font-size="12" text-anchor="middle">ISR 첫 줄</text>
+<line x1="590" y1="50" x2="590" y2="235" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="590" y="44" font-size="12" text-anchor="middle">태스크 첫 줄</text>
+<text x="10" y="76" font-size="12">타이머 스냅샷</text>
+<line x1="190" y1="72" x2="340" y2="72" stroke="#4a7bd0" stroke-width="3" marker-end="url(#ah2)"/>
+<line x1="190" y1="84" x2="590" y2="84" stroke="#4a7bd0" stroke-width="1.5" marker-end="url(#ah2)"/>
+<text x="360" y="99" font-size="11">두 화살표 모두 RELOAD − VALUE로 읽는다</text>
+<text x="10" y="120" font-size="12">GPIO + scope</text>
+<line x1="190" y1="116" x2="355" y2="116" stroke="#e08a3c" stroke-width="3" marker-end="url(#ah2)"/>
+<rect x="340" y="104" width="15" height="24" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="365" y="132" font-size="11">+ 쓰기 → 핀 지연</text>
+<text x="10" y="164" font-size="12">DWT CYCCNT</text>
+<line x1="340" y1="160" x2="590" y2="160" stroke="#3f9a6b" stroke-width="3" marker-end="url(#ah2)"/>
+<text x="200" y="164" font-size="11">IRQ 순간은 모름</text>
+<text x="10" y="208" font-size="12">트레이스</text>
+<circle cx="340" cy="204" r="5" fill="#888"/>
+<circle cx="420" cy="204" r="5" fill="#888"/>
+<circle cx="480" cy="204" r="5" fill="#888"/>
+<circle cx="590" cy="204" r="5" fill="#888"/>
+<text x="200" y="208" font-size="11">이벤트마다 기록</text>
+<text x="370" y="228" font-size="11">ISR 진입 · 퇴장 · 전환 · 태스크 시작</text>
+<text x="10" y="252" font-size="11">빨간 점선 = 하드웨어가 IRQ를 올린 순간. 이것을 직접 보는 것은 타이머 스냅샷과 scope뿐이다.</text>
+</svg></figure>
+<p>그림 2 — 방법마다 시작점이 다르다. <strong>IRQ가 올라간 순간</strong>(빨간 점선)을 보려면 그 순간을 하드웨어가 기록해 두거나(타이머 스냅샷, 입력 캡처), 핀으로 밖에서 봐야 한다(scope). DWT CYCCNT와 소프트웨어 트레이스는 <strong>코드가 실행된 두 지점 사이</strong>만 잴 수 있다 — 첫 지점이 ISR 첫 줄이니 ①②③은 보이지 않는다.</p>
+<h3 id="2-1-타이머-스냅샷-irq를-올린-장치에게-언제-올렸는지-묻는다">2.1 타이머 스냅샷 — "IRQ를 올린 장치에게 언제 올렸는지 묻는다"<a class="anchor" href="#2-1-타이머-스냅샷-irq를-올린-장치에게-언제-올렸는지-묻는다" aria-label="link">#</a></h3>
+<p><strong>정의</strong>: IRQ를 일으키는 타이머(또는 IRQ 시각을 하드웨어로 캡처하는 입력 캡처 채널)의 카운터를 ISR · 태스크에서 읽어 "이벤트 이후 경과"를 계산한다. 이 노트의 TIMER0처럼 <strong>IRQ 원인 자체가 타이머</strong>면 공짜다. 원인이 외부 핀(IMU data-ready)이면, 그 핀을 <strong>입력 캡처(input capture)</strong> 채널에도 연결해 하드웨어가 에지 순간의 카운터 값을 래치하게 한다 — ISR에서 <code>now - CCR</code>이 인터럽트 지연이다(입력 캡처 자체는 E5).</p>
+<p><strong>장점</strong>: 장비가 필요 없고, 펌웨어 안에서 수백만 표본을 히스토그램으로 모을 수 있고, ①부터 볼 수 있다. <strong>단점</strong>: 타이머 클럭 해상도(이 보드 40 ns, STM32H7 TIM2를 240 MHz로 돌리면 4.2 ns), 읽기 자체의 비용(아래 ex1), 카운터 랩어라운드(32비트 · 16비트, E5).</p>
+<h3 id="2-2-gpio-토글-scope-로직-분석기-밖에서-본다">2.2 GPIO 토글 + scope / 로직 분석기 — "밖에서 본다"<a class="anchor" href="#2-2-gpio-토글-scope-로직-분석기-밖에서-본다" aria-label="link">#</a></h3>
+<p><strong>정의</strong>: 측정하고 싶은 지점에서 남는 GPIO를 올리고(내리고), 오실로스코프나 로직 분석기로 <strong>원인 신호</strong>(IRQ를 만든 핀, 예: IMU INT)와 <strong>디버그 핀</strong>의 에지 간격을 잰다. Don이 매일 버스 장애를 볼 때 쓰는 그 장비다.</p>
+<p>읽는 법(그림 3):</p>
+<ul><li><strong>트리거는 원인 신호의 에지</strong>에 건다(CH1). 디버그 핀(CH2)의 에지까지가 지연이다.</li><li><strong>무한 잔상(infinite persistence)</strong> 모드로 수 분을 띄워 두면 CH2 에지가 퍼진 <strong>띠</strong>가 된다. 띠의 왼쪽 끝이 최솟값, 오른쪽 끝이 지금까지의 최댓값이다. 띠 안의 진하기가 곧 히스토그램이다. 요즘 scope는 측정값 히스토그램 · 통계(min/max/표준편차, 표본 수)를 직접 준다.</li><li><strong>set-to-pin 지연을 뺀다</strong>: GPIO 레지스터 쓰기 명령 → 버스(AHB/APB 브리지) → 출력 레지스터 → 출력 드라이버 → 패드의 상승 시간. 버스 경로와 출력 속도 설정(STM32 <code>OSPEEDR</code>), 부하 커패시턴스에 달려 있어 칩마다 다르다. <strong>잰다</strong>: ISR 첫 줄에서 핀을 올리고 바로 다음 줄에서 내리면 그 펄스 폭이 "쓰기 한 번 + 명령 한 줄"이고, 같은 핀을 두 번 연속 토글한 에지 간격으로 쓰기 한 번의 비용을 잡을 수 있다.</li><li><strong>하나 이상 핀을 쓴다</strong>: ISR 진입(CH2), 태스크 시작(CH3)을 따로 두면 그림 1의 ①~③과 ④~⑧을 한 화면에서 나눌 수 있다. 로직 분석기는 채널이 많고 기록이 길어서 "가끔 튀는" 표본을 잡는 데 유리하다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="18" font-size="13" font-weight="bold">scope 화면 읽기 — 무한 잔상 모드</text>
+<text x="10" y="70" font-size="12">CH1 IMU INT</text>
+<polyline points="110,80 200,80 204,45 640,45" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<text x="210" y="38" font-size="11">트리거 (에지 = 0 ns)</text>
+<text x="10" y="150" font-size="12">CH2 디버그 GPIO</text>
+<rect x="290" y="115" width="150" height="45" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c" stroke-dasharray="3 3"/>
+<polyline points="110,160 290,160 294,115 640,115" fill="none" stroke="#e08a3c" stroke-width="2"/>
+<polyline points="110,160 440,160 444,115" fill="none" stroke="#e08a3c" stroke-width="1" stroke-opacity="0.6"/>
+<text x="365" y="108" font-size="11" text-anchor="middle">잔상의 띠 = 지터</text>
+<line x1="204" y1="185" x2="292" y2="185" stroke="currentColor" marker-start="url(#ah3)" marker-end="url(#ah3)"/>
+<text x="248" y="200" font-size="11" text-anchor="middle">최소 지연</text>
+<line x1="204" y1="215" x2="442" y2="215" stroke="currentColor" marker-start="url(#ah3)" marker-end="url(#ah3)"/>
+<text x="323" y="230" font-size="11" text-anchor="middle">지금까지 본 최대 지연</text>
+<text x="470" y="150" font-size="11">각 에지 = 실제 지연</text>
+<text x="470" y="165" font-size="11">+ GPIO 쓰기 → 핀 지연</text>
+<text x="470" y="180" font-size="11">(set-to-pin, 미리 재서 뺀다)</text>
+</svg></figure>
+<p>그림 3 — scope로 보는 인터럽트 지연. 오른쪽 끝은 "지금까지" 본 최댓값일 뿐이다(§7.4 — 오래 띄워 둘수록 넓어진다).</p>
+<h3 id="2-3-dwt-cyccnt-코어-클럭-사이클을-코드에서-직접-센다">2.3 DWT CYCCNT — "코어 클럭 사이클을 코드에서 직접 센다"<a class="anchor" href="#2-3-dwt-cyccnt-코어-클럭-사이클을-코드에서-직접-센다" aria-label="link">#</a></h3>
+<p><strong>정의</strong>: Cortex-M3/M4/M7/M33/M55/M85(Armv7-M · Armv8-M Mainline)의 DWT(Data Watchpoint and Trace) 블록에 있는 32비트 사이클 카운터다. 코어 클럭마다 1씩 오르므로 480 MHz H7이면 해상도 2.08 ns, 약 8.9초에 한 바퀴 돈다(2^32 / 480 MHz). <strong>Cortex-M0/M0+(Armv6-M)에는 없다.</strong> 켜는 순서(레지스터 주소는 CMSIS <code>core_cm3.h</code>/<code>core_cm7.h</code>, Zephyr <code>arch/arm/include/cortex_m/dwt.h</code>에서 확인):</p>
+<ol><li><code>DEMCR</code>(0xE000EDFC)의 bit 24 <strong>TRCENA</strong> = 1 — DWT · ITM 블록에 전원을 넣는다. 디버거가 붙어 있으면 이미 켜져 있을 때가 많아서, "디버거로는 되는데 단독 부팅에서는 0"인 버그가 여기서 나온다.</li><li>(일부 Cortex-M7) <strong>잠금 해제</strong>: <code>DWT_LSR</code>(0xE0001FB4) bit 0이 "잠금 있음", bit 1이 "잠김"이면 <code>DWT_LAR</code>(0xE0001FB0)에 0xC5ACCE55를 쓴다. Zephyr <code>dwt_access()</code>가 <code>CONFIG_CPU_CORTEX_M7</code>에서만 LSR을 보고 이 일을 한다. STM32F7/H7에서 이걸 빼먹으면 CYCCNT가 0에 머문다는 보고가 흔하다.</li><li><code>DWT_CYCCNT</code>(0xE0001004) = 0, <code>DWT_CTRL</code>(0xE0001000) bit 0 <strong>CYCCNTENA</strong> = 1.</li><li><strong>확인</strong>: <code>DWT_CTRL</code> bit 25 <strong>NOCYCCNT</strong>가 1이면 카운터가 없는 구현이다. 하지만 아래 ex4가 보이듯 <strong>이 비트만 믿으면 안 되고, 실제로 오르는지 자가 시험</strong>을 한다.</li></ol>
+<p>같은 DWT에는 <strong>EXCCNT</strong>(0xE000100C, 8비트, <code>DWT_CTRL</code> bit 18 EXCEVTENA) — "예외 진입 · 퇴장 오버헤드 사이클"을 세는 카운터 — 도 있다. ②를 직접 재는 하드웨어 카운터다(8비트라 256마다 한 바퀴, 오버플로 이벤트를 ITM으로 내보내는 용도라 단독으로는 짧은 구간에만 쓴다). DWT의 나머지(워치포인트 · PC 샘플링 · ITM/SWO)는 M6의 몫이다.</p>
+<p><strong>주의</strong>: CYCCNT는 코어 클럭을 센다 — 클럭이 멈추는 저전력 상태에서는 멈출 수 있고(칩마다 확인), 디버거가 코어를 halt하면 증가하지 않는다. 그리고 <strong>IRQ가 올라간 순간은 모른다</strong>(그림 2). 그래서 실무 조합은 "IRQ 시각은 타이머 입력 캡처, 그 뒤 구간은 CYCCNT"다.</p>
+<h3 id="2-4-트레이스-모든-이벤트에-타임스탬프">2.4 트레이스 — "모든 이벤트에 타임스탬프"<a class="anchor" href="#2-4-트레이스-모든-이벤트에-타임스탬프" aria-label="link">#</a></h3>
+<ul><li><strong>소프트웨어 이벤트 트레이스</strong>: SEGGER SystemView, Percepio Tracealyzer가 대표다. 커널의 trace 훅(FreeRTOS <code>traceTASK_SWITCHED_IN</code> 등, Zephyr tracing 서브시스템)과 ISR 진입 · 퇴장 훅에서 이벤트와 타임스탬프(Cortex-M에서는 흔히 CYCCNT)를 RAM 버퍼에 쓰고, 디버그 프로브(J-Link RTT 등)나 UART로 뽑아 타임라인으로 보여 준다. ISR 진입부터 태스크 전환까지를 <strong>모든 표본에 대해</strong> 볼 수 있는 대신 이벤트마다 기록 비용이 든다(아래 ex1, §4의 계측 비용).</li><li><strong>하드웨어 명령 트레이스</strong>: ETM(Embedded Trace Macrocell)은 실행한 명령 흐름을 트레이스 포트나 ETB로 내보낸다 — 계측 코드 없이 사이클 정확도에 가깝다. 대신 트레이스 포트 핀과 비싼 프로브가 필요하다. MTB(M0+/M33)는 RAM에 분기 기록만 남긴다.</li><li>타임라인 읽는 법과 도구 설정은 <strong>M3</strong>, ETM · ITM 하드웨어는 <strong>M6</strong>에서 다룬다. 이 노트에서는 trace 훅을 "내가 직접 찍는 타임스탬프 자리"로만 쓴다(§4).</li></ul>
+<h3 id="2-5-무엇을-언제-쓰나-선택표">2.5 무엇을 언제 쓰나 — 선택표<a class="anchor" href="#2-5-무엇을-언제-쓰나-선택표" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>상황</th><th>첫 선택</th><th>이유</th></tr></thead><tbody><tr><td>데이터시트 숫자를 의심, 보드 bring-up</td><td>GPIO + scope</td><td>펌웨어 시계를 믿기 전에 밖에서 본다. 원인 신호까지 보인다</td></tr><tr><td>운전 중 지연 분포 · 최악값 수집(수 시간)</td><td>타이머 스냅샷 + 펌웨어 히스토그램</td><td>장비 없이 수백만 표본, 필드에서도 돈다</td></tr><tr><td>ISR · 커널 경로 구간 분해</td><td>CYCCNT(또는 타이머) 여러 지점</td><td>명령 단위 해상도</td></tr><tr><td>"가끔 튐"의 원인 찾기</td><td>트레이스(SystemView · Tracealyzer) 또는 원인 태깅(§6)</td><td>그 순간 무엇이 돌았는지가 필요</td></tr><tr><td>계측이 타이밍을 너무 바꿀 때</td><td>ETM, 또는 scope + 핀 1개</td><td>비침투</td></tr></tbody></table></div>
+<hr>
+<h2 id="3-측정의-비용-측정이-측정을-바꾼다">3. 측정의 비용 — 측정이 측정을 바꾼다<a class="anchor" href="#3-측정의-비용-측정이-측정을-바꾼다" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM M7과 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="3-1-실칩의-하드웨어-진입-값-qemu로-재지-못하는-것">3.1 실칩의 하드웨어 진입 값 — QEMU로 재지 못하는 것<a class="anchor" href="#3-1-실칩의-하드웨어-진입-값-qemu로-재지-못하는-것" aria-label="link">#</a></h3>
+<p>QEMU는 예외 스태킹 사이클을 0으로 친다(B2 §8.2). 그래서 ② 구간은 Arm 문서 값으로 적는다. <strong>아래 표는 측정이 아니다.</strong></p>
+<div class="tw"><table><thead><tr><th>항목</th><th>값</th><th>출처 · 조건</th></tr></thead><tbody><tr><td>IRQ → ISR 첫 명령 (M3 · M4)</td><td>12 사이클</td><td>Cortex-M3 TRM r2p0 §5.5, Yiu(Arm blog 2016). zero wait state 메모리, 더 높은 예외에 막히지 않을 때</td></tr><tr><td>IRQ → ISR 첫 명령 (M0 / M0+)</td><td>16 / 15 사이클</td><td>같은 블로그</td></tr><tr><td>tail-chain (ISR 끝 → 다음 ISR)</td><td>6 사이클</td><td>Cortex-M3 TRM §5.6 — 대기 중인 IRQ는 앞 ISR이 끝날 때까지 <strong>전부</strong> 기다린 뒤 6사이클</td></tr><tr><td>late-arrival</td><td>스태킹을 다시 하지 않음</td><td>낮은 IRQ 스태킹 도중 높은 IRQ가 오면 벡터만 바꾼다(B2 §8)</td></tr><tr><td>플래시 wait state</td><td>칩 · 클럭 · 전압마다</td><td>예: STM32F405/407은 2.7 ~ 3.6 V에서 150 ~ 168 MHz면 5 WS(RM0090의 Flash 접근 시간 표). 벡터 · 핸들러가 플래시에 있으면 ART · I-cache가 놓칠 때 진입이 늘어난다</td></tr><tr><td><code>push</code> N개 레지스터</td><td>약 1 + N 사이클</td><td>Cortex-M3 TRM 명령 타이밍(LDM/STM 계열). QEMU icount는 명령 1개로 센다(ex3)</td></tr></tbody></table></div>
+<p>실칩에서는 여기에 진행 중인 느린 버스 접근(APB 주변장치 읽기가 끝나야 한다), 다른 버스 마스터(DMA)와의 경합이 더해진다. 그래서 "12사이클"은 <strong>하한</strong>이지 예산이 아니고, 실칩에서는 반드시 GPIO + scope나 입력 캡처 + CYCCNT로 다시 잰다.</p>
+<h3 id="3-2-예제-1-측정-도구-하나하나의-값">3.2 예제 1 — 측정 도구 하나하나의 값<a class="anchor" href="#3-2-예제-1-측정-도구-하나하나의-값" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 이 노트가 쓰는 계측 동작(카운터 읽기, 타이머 스냅샷, us 시계, "GPIO" 토글, RAM 트레이스 한 건, printf 한 줄)이 각각 몇 ns를 먹는지 1000번 평균으로 잰다. bare-metal, ICOUNT=1. GPIO 대신 FPGAIO LED 레지스터(0x40028000)에 쓴다 — 실제 핀으로 나가지는 않지만 "주변장치 레지스터에 쓰기 두 번"의 비용은 같다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex1 — what does each measurement probe cost? (bare-metal, QEMU icount) */
+#include "e3.h"
+#define N 1000
+typedef struct { uint32_t cyc, id; } ev_t;
+static ev_t ring[256];
+static volatile uint32_t widx, sink;
+static void trace_ev(uint32_t id)                   /* RAM trace buffer entry */
+{
+    uint32_t i = widx++ &amp; 255u;
+    ring[i].cyc = CYC();
+    ring[i].id = id;
+}
+#define MEASURE(name, body) do {                                   \
+        uint32_t t0 = CYC();                                       \
+        for (int k = 0; k &lt; N; k++) { body; }                      \
+        uint32_t dt = CYC() - t0;                                  \
+        board_printf_raw("%s %u ns/op\n", name, NS(dt) / N);       \
+    } while (0)
+int main(void)
+{
+    TIMER_RELOAD(TIMER0_BASE) = 0xFFFFFFFFu;        /* free-running for the snapshot test */
+    TIMER_CTRL(TIMER0_BASE) = 1u;
+    MEASURE("empty loop            ", __asm volatile("" ::: "memory"));
+    MEASURE("CYC() read            ", sink = CYC());
+    MEASURE("timer snapshot        ", sink = t0_elapsed());
+    MEASURE("board_now_us()        ", sink = board_now_us());
+    MEASURE("LED (GPIO) set+clear  ", LED = 1; LED = 0);
+    MEASURE("trace_ev() to RAM     ", trace_ev(7));
+    uint32_t t0 = CYC();
+    board_printf_raw("[%u] isr lat=%u\n", 123u, 456u);   /* the classic printf probe */
+    uint32_t dt = CYC() - t0;
+    board_printf_raw("printf one line       %u ns (QEMU UART has no baud delay)\n", NS(dt));
+    board_printf_raw("same 18 chars @115200 %u ns if blocking on a real UART\n", 18u * 86806u);
+    board_exit(0);
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=$S/bm/ex1_probe_cost.c OUT=/var/tmp/rtos/E3/ex1 EXTRA_CFLAGS=-I$S/inc &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/ex1/app.elf 30'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>   text	   data	    bss	    dec	    hex	filename
+   4836	     96	    336	   5268	   1494	/var/tmp/rtos/E3/ex1/app.elf
+empty loop             64 ns/op
+CYC() read             128 ns/op
+timer snapshot         192 ns/op
+board_now_us()         352 ns/op
+LED (GPIO) set+clear   128 ns/op
+trace_ev() to RAM      192 ns/op
+[123] isr lat=456
+printf one line       9760 ns (QEMU UART has no baud delay)
+same 18 chars @115200 1562508 ns if blocking on a real UART
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것(빈 루프 64 ns = 명령 2개를 빼서 읽는다):</p>
+<ul><li><strong>카운터 읽기 64 ns(명령 2개), 타이머 스냅샷 128 ns(4개), GPIO 올렸다 내리기 64 ns, RAM 트레이스 한 건 128 ns</strong> — 수 명령짜리 계측은 µs 단위 지연을 재는 데 충분히 싸다. 그래도 0은 아니다. 한 경로에 계측점을 5개 넣으면 그만큼 경로가 길어진다(§4에서 실제로 1.0 µs가 늘어난 것을 본다).</li><li><code>board_now_us()</code>는 나눗셈 때문에 288 ns — "µs 시계"로 µs 이하를 재는 건 해상도와 비용 둘 다 손해다. 사이클 단위 시계를 쓰고 계산은 나중에(호스트에서) 한다.</li><li><strong>printf 한 줄은 9.76 µs</strong>, 그것도 QEMU UART에 baud 지연이 없어서다. 실제 115200 baud UART에 막아 쓰면 18글자에 <strong>1.56 ms</strong> — 재려던 지연(µs)보다 세 자릿수 크다. ISR 안의 printf 계측은 측정이 아니라 <strong>새 지연원</strong>이다. 값은 RAM에 모으고 측정이 끝난 뒤 출력한다(이 노트의 모든 예제가 그렇게 한다).</li></ul>
+<h3 id="3-3-예제-2-isr-첫-줄-은-어디인가-asm-스텁-vs-c-vs-레지스터를-많이-쓰는-c">3.3 예제 2 — "ISR 첫 줄"은 어디인가: asm 스텁 vs C vs 레지스터를 많이 쓰는 C<a class="anchor" href="#3-3-예제-2-isr-첫-줄-은-어디인가-asm-스텁-vs-c-vs-레지스터를-많이-쓰는-c" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 TIMER0 IRQ를 세 가지 핸들러로 받는다. V1은 naked asm 스텁(두 번째 명령에서 VALUE를 읽음), V2는 평범한 C 핸들러(첫 줄에서 스냅샷), V3는 레지스터를 많이 쓰는 C 핸들러. CPU가 바쁜 루프 중일 때와 <code>wfi</code>로 자는 중일 때도 나눈다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex2 — IRQ assertion -&gt; handler: asm stub vs plain C vs register-heavy C, busy vs WFI */
+#include "e3.h"
+#define N 200
+static hist_t h;
+volatile uint32_t sink;
+void isr_c(uint32_t lat)
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    h_add(&amp;h, lat, 1);
+}
+#if V == 1          /* 1: naked asm stub, VALUE read in the 2nd instruction */
+__attribute__((naked)) void TIMER0_IRQHandler(void)
+{
+    __asm volatile("ldr r3, =0x40000004 \n ldr r0, [r3] \n ldr r1, [r3, #4] \n"
+                   "subs r0, r1, r0 \n b isr_c \n .ltorg");   /* lat = RELOAD - VALUE */
+}
+#elif V == 2        /* 2: plain C, snapshot on the first line */
+void TIMER0_IRQHandler(void) { isr_c(t0_elapsed()); }
+#else               /* 3: C handler that needs many callee-saved registers */
+__attribute__((noinline)) static uint32_t mix(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{ return a * b + c * d; }
+void TIMER0_IRQHandler(void)
+{
+    uint32_t lat = t0_elapsed();
+    uint32_t a = sink, b = a + 3, c = b * 7, d = c ^ a, e = d + b, f = e * c, g = f - d;
+    sink = mix(a, b, c, d) + mix(e, f, g, a) + mix(b, d, f, g);
+    isr_c(lat);
+}
+#endif
+static void report(const char *m)
+{
+    board_printf_raw("V%d %s n=%u min=%u avg=%u max=%u ns\n", V, m, h.n, NS(h.min),
+                     NS((uint32_t)(h.sum / h.n)), NS(h.max));
+    h = (hist_t){0};
+}
+int main(void)
+{
+    t0_start(2500 + 13, 0x40);                      /* ~100 us */
+    while (HN(h) &lt; N) { }
+    report("busy");
+    while (HN(h) &lt; N) __asm volatile("wfi");
+    report("wfi ");
+    t0_stop();
+    board_exit(0);
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; for v in 1 2 3; do make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=$S/bm/ex2_entry.c OUT=/var/tmp/rtos/E3/ex2_v$v EXTRA_CFLAGS="-I$S/inc -DV=$v" &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/ex2_v$v/app.elf 30 | grep -v board_exit; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>V1 busy n=200 min=0 avg=0 max=40 ns
+V1 wfi  n=200 min=0 avg=0 max=0 ns
+V2 busy n=200 min=120 avg=120 max=160 ns
+V2 wfi  n=200 min=120 avg=120 max=120 ns
+V3 busy n=200 min=80 avg=80 max=120 ns
+V3 wfi  n=200 min=80 avg=80 max=80 ns</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>V1은 0 ns</strong>다. QEMU에서는 IRQ가 올라간 순간과 핸들러 두 번째 명령 사이에 가상 시간이 거의 흐르지 않는다 — 스태킹 · 벡터 읽기가 공짜이기 때문이다. 실칩이면 여기에 최소 12사이클이 붙는다(§3.1). <strong>QEMU 숫자로 ②를 말하면 안 된다</strong>는 것을 숫자 0이 보여 준다.</li><li>V2(120 ns)가 레지스터를 훨씬 많이 쓰는 V3(80 ns)보다 <strong>느리다</strong>. 이유는 예제 3의 디스어셈블에 있다.</li><li><code>wfi</code> 중이든 바쁜 루프 중이든 같다 — QEMU는 저전력 상태에서의 깨어남 지연(클럭 재시작, 플래시 깨우기)을 모델링하지 않는다. 실칩에서 깊은 sleep 모드의 깨어남은 수 µs ~ 수십 µs가 될 수 있다(칩 데이터시트의 wake-up time 항목, P1). <strong>지연 사양을 말할 때는 "CPU가 깨어 있을 때"인지 같이 말한다.</strong></li></ul>
+<h3 id="3-4-예제-3-컴파일러가-계측점을-옮긴다-objdump">3.4 예제 3 — 컴파일러가 계측점을 옮긴다 (<code>objdump</code>)<a class="anchor" href="#3-4-예제-3-컴파일러가-계측점을-옮긴다-objdump" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 2의 세 핸들러가 실제로 몇 번째 명령에서 TIMER0 VALUE(오프셋 4)를 읽는지.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'for v in 1 2 3; do echo "== V$v"; arm-none-eabi-objdump -d --no-show-raw-insn /var/tmp/rtos/E3/ex2_v$v/app.elf | awk "/&lt;TIMER0_IRQHandler&gt;:/,/^\$/" | head -16; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== V1
+00000170 &lt;TIMER0_IRQHandler&gt;:
+     170:	ldr	r3, [pc, #8]	@ (17c &lt;TIMER0_IRQHandler+0xc&gt;)
+     172:	ldr	r0, [r3, #0]
+     174:	ldr	r1, [r3, #4]
+     176:	subs	r0, r1, r0
+     178:	b.w	118 &lt;isr_c&gt;
+     17c:	.word	0x40000004
+
+== V2
+00000118 &lt;TIMER0_IRQHandler&gt;:
+     118:	mov.w	r1, #1073741824	@ 0x40000000
+     11c:	movs	r0, #1
+     11e:	ldr	r3, [pc, #80]	@ (170 &lt;TIMER0_IRQHandler+0x58&gt;)
+     120:	ldr	r2, [r1, #8]
+     122:	push	{r4}
+     124:	ldr	r4, [r1, #4]
+     126:	str	r0, [r1, #12]
+     128:	ldr	r0, [r3, #0]
+...
+== V3
+00000124 &lt;TIMER0_IRQHandler&gt;:
+     124:	stmdb	sp!, {r3, r4, r5, r6, r7, r8, r9, sl, fp, lr}
+     128:	mov.w	r8, #1073741824	@ 0x40000000
+     12c:	ldr.w	r9, [pc, #160]	@ 1d0 &lt;TIMER0_IRQHandler+0xac&gt;
+     130:	ldr.w	r4, [r8, #8]
+     134:	ldr.w	r3, [r8, #4]
+...</code></pre></figure>
+<p>(V2 · V3의 나머지 줄은 생략했다.) 출력에서 볼 것:</p>
+<ul><li>V1은 두 번째 명령(<code>ldr r0, [r3, #0]</code>)에서 VALUE를 읽는다(이 스텁에서 r3 = 0x40000004이므로 <code>[r3]</code>가 VALUE, <code>[r3, #4]</code>가 RELOAD).</li><li><strong>V2는 <code>isr_c()</code>를 인라인하면서 명령 순서를 섞었다</strong> — INTCLR에 쓸 값 준비(<code>movs r0, #1</code>), 리터럴 로드, <code>push {r4}</code>가 VALUE 읽기(0x124, 여섯 번째 명령) 앞에 왔다. C 소스의 "첫 줄"은 기계어의 첫 명령이 아니다. volatile 접근끼리의 순서만 지켜질 뿐, 그 사이에 다른 명령이 얼마든지 끼어든다.</li><li><strong>V3의 첫 명령은 레지스터 10개를 쌓는 <code>stmdb</code></strong> 하나이고 VALUE는 다섯 번째 명령에서 읽는다. QEMU icount는 이 <code>stmdb</code>를 명령 1개(32 ns)로 치지만, 실제 M3에서는 약 1 + 10 = 11사이클이다(§3.1). <strong>QEMU에서는 V3가 더 빨라 보이지만 실칩에서는 V3가 더 느리다.</strong> 프롤로그 비용은 "명령 수"가 아니라 "쌓는 레지스터 수"로 읽는다.</li><li>실무 규칙: 정밀하게 재야 하면 계측 읽기를 asm 스텁이나 핸들러 맨 앞의 인라인 asm으로 고정하고, 재는 사람이 <strong>디스어셈블로 계측점 위치를 확인</strong>한다. 그리고 계측점 앞에 있는 명령 수(여기서는 1 ~ 5개)를 결과에서 뺀다.</li></ul>
+<h3 id="3-5-예제-4-dwt-cyccnt를-교과서대로-켜고-믿기-전에-시험한다">3.5 예제 4 — DWT CYCCNT를 교과서대로 켜고, 믿기 전에 시험한다<a class="anchor" href="#3-5-예제-4-dwt-cyccnt를-교과서대로-켜고-믿기-전에-시험한다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: §2.3의 순서(TRCENA → 필요하면 LAR 해제 → 0으로 초기화 → CYCCNTENA)를 그대로 하고, 레지스터를 읽어 보고, FPGAIO 시계로 100 µs를 바쁘게 기다리는 동안 CYCCNT가 정말 오르는지 확인한다. 오르지 않으면 대체 시계로 넘어간다. 실칩에서도 그대로 쓸 수 있는 "자가 시험 후 선택" 패턴이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex4 — enable DWT CYCCNT the textbook way, then SELF-TEST it before trusting it */
+#include "e3.h"
+#define DEMCR      REG32(0xE000EDFCu)      /* bit24 TRCENA: power the DWT/ITM blocks */
+#define DWT_CTRL   REG32(0xE0001000u)      /* bit0 CYCCNTENA, bit25 NOCYCCNT, [31:28] NUMCOMP */
+#define DWT_CYCCNT REG32(0xE0001004u)
+#define DWT_EXCCNT REG32(0xE000100Cu)      /* 8-bit exception-overhead counter (EXCEVTENA bit18) */
+#define DWT_LAR    REG32(0xE0001FB0u)      /* lock access: write 0xC5ACCE55 (needed on some M7) */
+#define DWT_LSR    REG32(0xE0001FB4u)      /* bit0 lock present, bit1 locked */
+typedef uint32_t (*clk_fn)(void);
+static uint32_t clk_dwt(void)  { return DWT_CYCCNT; }
+static uint32_t clk_fpga(void) { return CYC(); }      /* 25 MHz FPGAIO fallback */
+static clk_fn pick_clock(void)
+{
+    DEMCR |= 1u &lt;&lt; 24;                     /* 1) TRCENA */
+    board_printf_raw("LSR=0x%x (lock present=%u)\n", DWT_LSR, DWT_LSR &amp; 1u);
+    if (DWT_LSR &amp; 2u) DWT_LAR = 0xC5ACCE55u; /* 2) unlock only if a lock exists and is set */
+    DWT_CYCCNT = 0;                        /* 3) reset, 4) enable */
+    DWT_CTRL |= 1u | (1u &lt;&lt; 18);
+    board_printf_raw("DEMCR=0x%x DWT_CTRL=0x%x NUMCOMP=%u NOCYCCNT=%u\n", DEMCR, DWT_CTRL,
+                     DWT_CTRL &gt;&gt; 28, (DWT_CTRL &gt;&gt; 25) &amp; 1u);
+    uint32_t a = DWT_CYCCNT, f0 = CYC();
+    spin_cyc(2500);                        /* 100 us by the FPGAIO clock */
+    uint32_t b = DWT_CYCCNT, f1 = CYC();
+    board_printf_raw("100 us busy: CYCCNT %u -&gt; %u, FPGAIO %u -&gt; %u, EXCCNT=%u\n",
+                     a, b, f0, f1, DWT_EXCCNT);
+    if (b - a &gt; 1000u) { board_printf_raw("clock = DWT CYCCNT\n"); return clk_dwt; }
+    board_printf_raw("CYCCNT is not counting -&gt; fall back to FPGAIO COUNTER\n");
+    return clk_fpga;
+}
+int main(void)
+{
+    clk_fn now = pick_clock();
+    uint32_t t = now(); spin_cyc(250); uint32_t d = now() - t;
+    board_printf_raw("10 us busy measured with chosen clock = %u ticks\n", d);
+    board_exit(0);
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; make -s -f /var/rtoslab/templates/baremetal-mps2/Makefile SRCS=$S/bm/ex4_dwt.c OUT=/var/tmp/rtos/E3/ex4 EXTRA_CFLAGS=-I$S/inc &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/ex4/app.elf 30'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>   text	   data	    bss	    dec	    hex	filename
+   4664	     96	    328	   5088	   13e0	/var/tmp/rtos/E3/ex4/app.elf
+LSR=0x0 (lock present=0)
+DEMCR=0x0 DWT_CTRL=0x0 NUMCOMP=0 NOCYCCNT=0
+100 us busy: CYCCNT 0 -&gt; 0, FPGAIO 1202 -&gt; 3708, EXCCNT=0
+CYCCNT is not counting -&gt; fall back to FPGAIO COUNTER
+10 us busy measured with chosen clock = 258 ticks
+[board_exit] code=0</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>QEMU는 <code>DEMCR</code>, <code>DWT_CTRL</code>, <code>CYCCNT</code>, <code>EXCCNT</code> 모두 <strong>읽으면 0, 쓰기는 무시</strong>한다(DWT 미구현). 그런데 <strong>NOCYCCNT도 0</strong>이다 — "카운터 있음"이라고 말하는 셈이다. NOCYCCNT 비트만 검사하는 코드(Zephyr <code>z_arm_dwt_init_cycle_counter()</code>의 <code>__ASSERT</code>가 이것만 본다)는 이 환경에서 통과하고, 그 뒤 모든 측정이 0 사이클이 된다.</li><li>자가 시험(100 µs 동안 1000 이상 올랐나)이 이 함정을 잡아 대체 시계로 넘어갔다. 10 µs 대기를 258틱(= 10.3 µs)으로 쟀다 — <code>spin_cyc</code> 자체의 마지막 한 바퀴만큼 길다.</li><li>같은 함정이 실칩에서도 생긴다: TRCENA를 빼먹은 단독 부팅, 잠긴 M7 DWT, CYCCNT가 없는 M0+로 포팅한 코드. <strong>시계는 쓰기 전에 다른 시계로 한 번 검산한다.</strong> Zephyr의 <code>timing_counter_get()</code>(<code>arch/arm/core/cortex_m/timing.c</code>)도 Cortex-M에서 <code>CONFIG_CORTEX_M_DWT</code>이면 CYCCNT를 그대로 돌려준다 — Zephyr 벤치마크(<code>tests/benchmarks/latency_measure</code>)를 QEMU에서 돌려 0이 나오면 이 이유다.</li></ul>
+<h3 id="3-6-observer-effect를-다루는-네-가지-규칙">3.6 observer effect를 다루는 네 가지 규칙<a class="anchor" href="#3-6-observer-effect를-다루는-네-가지-규칙" aria-label="link">#</a></h3>
+<ol><li><strong>비용을 잰다</strong>: 예제 1처럼 계측 동작 하나의 비용을 재 두고, 계측점이 몇 개인지 센다.</li><li><strong>계측을 넣은 빌드와 뺀 빌드의 총합을 비교한다</strong>: 차이가 계측 비용이다. §4에서 FreeRTOS는 1.0 µs(12%), Zephyr tracing은 2.48 µs가 나온다.</li><li><strong>출력은 나중에</strong>: ISR에서는 RAM에 숫자만, 형식화와 출력은 측정이 끝난 뒤 낮은 우선순위에서.</li><li><strong>계측이 위상을 바꾼다는 것도 잊지 않는다</strong>: 경로가 1 µs 길어지면 다른 주기 이벤트와 만나는 위상이 바뀌어 <strong>히스토그램 모양</strong>이 달라질 수 있다. §5의 예제 7은 원인 태깅 코드 네 줄을 넣자 기본 IRQ → 태스크가 11.08 µs에서 12.28 µs로 옮겨 갔다. 결론을 내기 전에 계측을 줄인 빌드로 한 번 더 확인한다.</li></ol>
+<hr>
+<h2 id="4-기본-지연을-구간으로-쪼갠다-freertos-vs-zephyr">4. 기본 지연을 구간으로 쪼갠다 — FreeRTOS vs Zephyr<a class="anchor" href="#4-기본-지연을-구간으로-쪼갠다-freertos-vs-zephyr" aria-label="link">#</a></h2>
+<h3 id="4-1-예제-5-freertos-계측점-5개">4.1 예제 5 — FreeRTOS: 계측점 5개<a class="anchor" href="#4-1-예제-5-freertos-계측점-5개" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: TIMER0(우선순위 0x40, kernel-aware) ISR이 <code>vTaskNotifyGiveFromISR</code>로 우선순위 3 태스크를 깨우는 가장 흔한 경로를 다섯 구간으로 나눈다. 계측점: s1 = ISR 첫 줄, s2 = 클리어 + Give 직후, s3 = <code>portYIELD_FROM_ISR</code> 직후, s4 = <strong>PendSV 안에서 스케줄러가 그 태스크를 고른 순간</strong>(<code>traceTASK_SWITCHED_IN</code> 훅), s5 = 태스크가 <code>ulTaskNotifyTake</code>에서 돌아온 첫 줄. 모두 <code>t0_elapsed()</code>(IRQ 이후 경과)다. <code>INSTR=0</code>이면 s5만 남긴다(계측 비용 측정). <code>LEAN</code>이면 스택 오버플로 검사와 런타임 통계를 끈다.</p>
+<p>s4를 찍으려면 커널 소스(tasks.c) 안에 계측점이 필요하다. FreeRTOS의 trace 매크로가 바로 그 자리다 — <code>vTaskSwitchContext()</code>가 <code>taskSELECT_HIGHEST_PRIORITY_TASK()</code> 바로 다음에 <code>traceTASK_SWITCHED_IN()</code>을 부른다(V11.3.2 tasks.c 5274행). 앱 폴더의 <code>FreeRTOSConfig.h</code>에 정의하면 tasks.c 안에서 펼쳐지므로 <code>pxCurrentTCB</code>도 쓸 수 있다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* E3 FreeRTOSConfig.h — lab template + switches for this note */
+#ifndef E3_FRTCFG_H
+#define E3_FRTCFG_H
+#include "/var/rtoslab/templates/freertos-mps2/FreeRTOSConfig.h"
+#ifdef LEAN                                   /* production-like: no stack check, no run-time stats */
+#undef  configCHECK_FOR_STACK_OVERFLOW
+#define configCHECK_FOR_STACK_OVERFLOW 0
+#undef  configGENERATE_RUN_TIME_STATS
+#define configGENERATE_RUN_TIME_STATS  0
+#endif
+#ifdef WRAP_TICK                              /* app provides SysTick_Handler -&gt; xPortSysTickHandler */
+#undef  xPortSysTickHandler
+#endif
+/* stamp the moment the scheduler picks the task we are measuring (inside PendSV) */
+extern volatile uint32_t e3_armed, e3_s4;
+extern void *volatile e3_hi;
+#define traceTASK_SWITCHED_IN() do { if (e3_armed &amp;&amp; (void *)pxCurrentTCB == e3_hi) {  \
+        e3_s4 = TIMER_RELOAD(TIMER0_BASE) - TIMER_VALUE(TIMER0_BASE); e3_armed = 0; } } while (0)
+#endif</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex5 — FreeRTOS: split "TIMER0 IRQ -&gt; task running" into stamps (cycles since IRQ raised) */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "e3.h"
+#define N 200
+volatile uint32_t e3_armed, e3_s4;
+void *volatile e3_hi;
+static volatile uint32_t s1, s2, s3;
+static hist_t h[6];
+static const char *name[6] = { "IRQ -&gt; ISR first line      ", "ISR: clear + GiveFromISR   ",
+    "ISR: portYIELD_FROM_ISR    ", "ISR exit -&gt; PendSV -&gt; pick ", "restore -&gt; task resumes    ",
+    "TOTAL IRQ -&gt; task          " };
+void TIMER0_IRQHandler(void)
+{
+    if (INSTR) s1 = t0_elapsed();
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    BaseType_t w = pdFALSE;
+    vTaskNotifyGiveFromISR((TaskHandle_t)e3_hi, &amp;w);
+    if (INSTR) { s2 = t0_elapsed(); e3_armed = 1; }
+    portYIELD_FROM_ISR(w);
+    if (INSTR) s3 = t0_elapsed();
+}
+static void hi_task(void *a)
+{
+    (void)a;
+    for (int i = 0; i &lt; N; i++) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t s5 = t0_elapsed();
+        if (INSTR) {
+            h_add(&amp;h[0], s1, 1); h_add(&amp;h[1], s2 - s1, 1); h_add(&amp;h[2], s3 - s2, 1);
+            h_add(&amp;h[3], e3_s4 - s3, 1); h_add(&amp;h[4], s5 - e3_s4, 1);
+        }
+        h_add(&amp;h[5], s5, 1);
+    }
+    t0_stop();
+    for (int k = INSTR ? 0 : 5; k &lt; 6; k++)
+        board_printf_raw("%s min=%u avg=%u max=%u ns\n", name[k], NS(h[k].min),
+                         NS((uint32_t)(h[k].sum / h[k].n)), NS(h[k].max));
+    board_exit(0);
+}
+int main(void)
+{
+    TaskHandle_t t;
+    xTaskCreate(hi_task, "hi", 512, NULL, 3, &amp;t);
+    e3_hi = t;
+    t0_start(12500 + 37, 0x40);                 /* ~500 us, kernel-aware priority */
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; for cfg in "default:-DINSTR=1" "default_noinstr:-DINSTR=0" "lean:-DINSTR=1 -DLEAN" "lean_noinstr:-DINSTR=0 -DLEAN"; do n=${cfg%%:*}; f=${cfg#*:}; echo "== $n"; make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=$S/frt/ex5_split.c OUT=/var/tmp/rtos/E3/ex5_$n EXTRA_CFLAGS="-I$S/inc $f" &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/ex5_$n/app.elf 30 | grep -v board_exit; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== default
+IRQ -&gt; ISR first line       min=120 avg=120 max=160 ns
+ISR: clear + GiveFromISR    min=3360 avg=3360 max=3400 ns
+ISR: portYIELD_FROM_ISR     min=480 avg=480 max=480 ns
+ISR exit -&gt; PendSV -&gt; pick  min=3320 avg=3320 max=3360 ns
+restore -&gt; task resumes     min=1960 avg=2000 max=3480 ns
+TOTAL IRQ -&gt; task           min=9320 avg=9320 max=10800 ns
+== default_noinstr
+TOTAL IRQ -&gt; task           min=8320 avg=8320 max=9800 ns
+== lean
+IRQ -&gt; ISR first line       min=120 avg=120 max=600 ns
+ISR: clear + GiveFromISR    min=3360 avg=3360 max=3400 ns
+ISR: portYIELD_FROM_ISR     min=480 avg=480 max=480 ns
+ISR exit -&gt; PendSV -&gt; pick  min=1800 avg=1800 max=1880 ns
+restore -&gt; task resumes     min=2000 avg=2000 max=3480 ns
+TOTAL IRQ -&gt; task           min=7840 avg=7840 max=9320 ns
+== lean_noinstr
+TOTAL IRQ -&gt; task           min=6800 avg=6840 max=8320 ns</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong>계측 없는 총합 8.32 µs(기본) / 6.84 µs(lean)</strong> — A7이 잰 8.28 / 6.88 µs와 같은 값이 다른 프로그램에서 재현된다(앱 코드가 조금 달라 ±40 ns).</li><li><strong>계측을 넣으면 정확히 1.0 µs 늘어난다</strong>(9.32 vs 8.32). 계측점 4개 × 약 6명령 + <code>e3_armed</code> 저장 + 훅 안의 비교다. 이 1.0 µs를 모르고 "IRQ → 태스크 9.3 µs"라고 보고하면 12% 틀린다.</li><li>가장 큰 두 조각은 <strong>ISR 안의 커널 호출(3.36 µs = 84사이클)</strong>과 <strong>PendSV에서 태스크를 고르기까지(3.32 µs)</strong>다. 레지스터 저장 · 복원 자체는 작다(C2 결론과 같다).</li><li><strong>LEAN이 줄인 것은 정확히 한 구간</strong>이다: "ISR exit → PendSV → pick"이 3.32 → 1.80 µs. 스택 오버플로 검사(<code>taskCHECK_FOR_STACK_OVERFLOW</code>)와 런타임 통계는 <code>vTaskSwitchContext()</code> 안, 즉 이 구간에서 돈다. 구간으로 쪼개 두면 "설정 하나가 어디에 얼마를 더하는지"가 바로 보인다.</li><li>최댓값이 가끔 1.48 µs 더 크다(10.80 vs 9.32, "restore" 구간과 lean의 "first line"). 아무 부하가 없어도 생기는 지터다 — 1 kHz SysTick이 이 경로와 겹친 표본이다. 이 정체는 §5에서 원인 태깅으로 확인한다.</li></ul>
+<h3 id="4-2-예제-6-zephyr-tracing-훅으로-계측점-7개">4.2 예제 6 — Zephyr: tracing 훅으로 계측점 7개<a class="anchor" href="#4-2-예제-6-zephyr-tracing-훅으로-계측점-7개" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: Zephyr v4.4.2에서 같은 경로(TIMER0 → <code>k_sem_give</code> → main 스레드)를 쪼갠다. Zephyr는 <code>CONFIG_TRACING_USER=y</code>로 사용자 훅을 준다 — <code>subsys/tracing/user/tracing_user.c</code>의 weak 함수들(<code>sys_trace_isr_enter_user</code>, <code>sys_trace_isr_exit_user</code>, <code>sys_trace_thread_switched_out_user</code>, <code>sys_trace_thread_switched_in_user</code>)을 앱에서 다시 정의하면 된다. 훅 위치는 소스로 확인했다: ISR 훅은 <code>arch/arm/core/cortex_m/isr_wrapper.c</code>의 <code>_isr_wrapper()</code> 처음과 끝, 전환 훅은 <code>swap_helper.S</code>의 <code>z_arm_pendsv</code> 첫머리(<code>z_thread_mark_switched_out</code>)와 새 스레드 복원 뒤(<code>z_thread_mark_switched_in</code>)다.</p>
+<figure class="code"><span class="lang">text</span><pre><code># z_dec/prj.conf
+CONFIG_BOOT_BANNER=n
+CONFIG_TRACING=y
+CONFIG_TRACING_USER=y</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex6 — Zephyr v4.4.2: split "TIMER0 IRQ -&gt; thread running" with tracing user hooks */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/irq.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#define REG(a)  (*(volatile uint32_t *)(a))
+#define T0      0x40000000u
+#define EL()    (REG(T0 + 8) - REG(T0 + 4))         /* cycles since TIMER0 raised IRQ 8 */
+#define N 200
+static volatile uint32_t z[8], arm_out, arm_in;     /* z[1..7] = stamps */
+static uint32_t mn[8], mx[8], sum[8];
+static K_SEM_DEFINE(sem, 0, 1);
+static const char *nm[8] = { "", "IRQ -&gt; _isr_wrapper (hook)", "wrapper -&gt; my ISR line 1  ",
+    "my ISR: clear + k_sem_give", "ISR return -&gt; wrapper exit", "exit -&gt; PendSV entry      ",
+    "PendSV: swap -&gt; switched_in", "-&gt; k_sem_take returns     " };
+#if defined(CONFIG_TRACING_USER)
+void sys_trace_isr_enter_user(void) { if (__get_IPSR() == 16 + 8) z[1] = EL(); }
+void sys_trace_isr_exit_user(void)  { if (__get_IPSR() == 16 + 8) z[4] = EL(); }
+void sys_trace_thread_switched_out_user(void) { if (arm_out) { z[5] = EL(); arm_out = 0; arm_in = 1; } }
+void sys_trace_thread_switched_in_user(void)  { if (arm_in) { z[6] = EL(); arm_in = 0; } }
+#endif
+#ifdef BUSY                                         /* a CPU-bound prio-5 thread instead of idle */
+static void busy_fn(void *a, void *b, void *c) { for (;;) { } }
+K_THREAD_DEFINE(busy, 512, busy_fn, NULL, NULL, NULL, 5, 0, 0);
+#endif
+static void t0_isr(const void *arg)
+{
+    ARG_UNUSED(arg);
+    z[2] = EL();
+    REG(T0 + 0xC) = 1;                              /* INTCLR */
+    k_sem_give(&amp;sem);
+    z[3] = EL();
+    arm_out = 1;
+}
+static void add(int k, uint32_t v)
+{
+    if (!mn[k] || v &lt; mn[k]) mn[k] = v;
+    if (v &gt; mx[k]) mx[k] = v;
+    sum[k] += v;
+}
+int main(void)
+{
+    IRQ_CONNECT(8, 2, t0_isr, NULL, 0);
+    REG(T0) = 0; REG(T0 + 8) = 12500 + 37 - 1; REG(T0 + 4) = 12500 + 37 - 1;
+    irq_enable(8);
+    REG(T0) = 1 | 8;
+    for (int i = 0; i &lt; N; i++) {
+        k_sem_take(&amp;sem, K_FOREVER);
+        uint32_t t = EL();
+        for (int k = 2; k &lt;= 6; k++) add(k, z[k] - z[k - 1]);
+        add(1, z[1]); add(7, t - z[6]); add(0, t);
+    }
+    REG(T0) = 0;
+    for (int k = IS_ENABLED(CONFIG_TRACING_USER) ? 1 : 8; k &lt; 8; k++)
+        printk("%s min=%u avg=%u max=%u ns\n", nm[k], mn[k] * 40, sum[k] / N * 40, mx[k] * 40);
+    printk("TOTAL IRQ -&gt; thread        min=%u avg=%u max=%u ns\n", mn[0] * 40, sum[0] / N * 40, mx[0] * 40);
+    register uint32_t r0 __asm__("r0") = 0x18, r1 __asm__("r1") = 0x20026;
+    __asm volatile("bkpt 0xab" : : "r"(r0), "r"(r1) : "memory");   /* semihosting exit */
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; /var/rtoslab/bin/rtos-zbuild mps2/an385 $S/z_dec /var/tmp/rtos/E3/z_dec &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/z_dec/zephyr/zephyr.elf 30
+for v in "notrace:-DCONFIG_TRACING=n -DCONFIG_TRACING_USER=n" "ts_off:-DCONFIG_TIMESLICING=n" "ts_off_notrace:-DCONFIG_TIMESLICING=n -DCONFIG_TRACING=n -DCONFIG_TRACING_USER=n"; do n=${v%%:*}; a=${v#*:}; echo "== $n"; /var/rtoslab/bin/rtos-zbuild mps2/an385 $S/z_dec /var/tmp/rtos/E3/z_dec_$n -- $a &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/z_dec_$n/zephyr/zephyr.elf 30; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>           FLASH:       14168 B         4 MB      0.34%
+             RAM:        6416 B         4 MB      0.15%
+IRQ -&gt; _isr_wrapper (hook) min=360 avg=360 max=360 ns
+wrapper -&gt; my ISR line 1   min=520 avg=520 max=520 ns
+my ISR: clear + k_sem_give min=12320 avg=12320 max=12320 ns
+ISR return -&gt; wrapper exit min=480 avg=480 max=480 ns
+exit -&gt; PendSV entry       min=880 avg=880 max=880 ns
+PendSV: swap -&gt; switched_in min=1360 avg=1360 max=1360 ns
+-&gt; k_sem_take returns      min=640 avg=640 max=640 ns
+TOTAL IRQ -&gt; thread        min=16560 avg=16560 max=16560 ns
+== notrace
+TOTAL IRQ -&gt; thread        min=14080 avg=14080 max=14080 ns
+== ts_off
+IRQ -&gt; _isr_wrapper (hook) min=360 avg=360 max=360 ns
+wrapper -&gt; my ISR line 1   min=520 avg=520 max=520 ns
+my ISR: clear + k_sem_give min=3560 avg=3560 max=3560 ns
+ISR return -&gt; wrapper exit min=440 avg=440 max=440 ns
+exit -&gt; PendSV entry       min=920 avg=920 max=920 ns
+PendSV: swap -&gt; switched_in min=1360 avg=1360 max=1360 ns
+-&gt; k_sem_take returns      min=640 avg=640 max=640 ns
+TOTAL IRQ -&gt; thread        min=7800 avg=7800 max=7800 ns
+== ts_off_notrace
+TOTAL IRQ -&gt; thread        min=5320 avg=5320 max=5320 ns</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>Zephyr 기본 설정의 비용은 거의 전부 한 구간에 있다</strong>: <code>k_sem_give</code> 12.32 µs. <code>CONFIG_TIMESLICING=n</code>이면 3.56 µs로 떨어진다(8.76 µs 차이). 소스를 따라가면 <code>k_sem_give()</code> → <code>z_ready_thread()</code> → <code>ready_thread()</code> → <code>update_cache()</code>(kernel/sched.c)가 선점할 스레드를 고르면서 <code>z_reset_time_slice()</code>(kernel/timeslicing.c)를 부르고, 그것이 슬라이스 타임아웃을 <code>z_abort_timeout</code> → <code>z_add_timeout</code>으로 다시 걸면서 SysTick 타이머를 재프로그램한다. A7 · C2에서 "time slice가 비싸다"고 한 그 비용이 <strong>ISR 안에서, 스케줄러 스핀락(=IRQ 잠금)을 잡은 채</strong> 쓰인다는 것이 구간 분해로 보인다(§5의 Zephyr 히스토그램에서 이것이 다른 IRQ의 지연으로 번진다).</li><li><strong>Zephyr는 결정을 ISR 안에서, FreeRTOS는 PendSV 안에서</strong> 한다. FreeRTOS의 "PendSV → pick"(3.32 µs)에 대응하는 Zephyr 구간은 "PendSV: swap"(1.36 µs)뿐이다 — <code>z_arm_pendsv</code>는 이미 정해진 <code>_kernel.ready_q.cache</code>로 바꿔 끼우기만 한다(C2 §10).</li><li>Zephyr의 ②③ 쪽은 FreeRTOS보다 길다(0.36 + 0.52 µs vs 0.12 µs). 공용 <code>_isr_wrapper</code>가 IPSR로 소프트웨어 ISR 표를 찾아 내 함수를 부르기 때문이다. 이 단계를 없애는 <code>IRQ_DIRECT_CONNECT</code>는 E1의 몫이다.</li><li><strong>tracing 자체가 2.48 µs를 더한다</strong>(16.56 vs 14.08, 7.80 vs 5.32). 훅이 함수 호출이고 <code>CONFIG_TRACING</code>이 여러 지점에 훅을 심기 때문이다. Zephyr 쪽 계측 비용이 FreeRTOS(1.0 µs)보다 크다.</li></ul>
+<p>같은 측정을 <strong>idle 대신 CPU를 쓰는 prio 5 스레드가 돌 때</strong>도 해 봤다(<code>-DEXTRA_CFLAGS=-DBUSY</code>):</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; for v in "busy:-DCONFIG_TRACING=n -DCONFIG_TRACING_USER=n -DEXTRA_CFLAGS=-DBUSY" "busy_trace:-DEXTRA_CFLAGS=-DBUSY" "busy_ts_off:-DCONFIG_TIMESLICING=n -DCONFIG_TRACING=n -DCONFIG_TRACING_USER=n -DEXTRA_CFLAGS=-DBUSY"; do n=${v%%:*}; a=${v#*:}; echo "== $n"; /var/rtoslab/bin/rtos-zbuild mps2/an385 $S/z_dec /var/tmp/rtos/E3/z_dec_$n -- $a &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/z_dec_$n/zephyr/zephyr.elf 30; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== busy
+TOTAL IRQ -&gt; thread        min=19480 avg=19480 max=19520 ns
+== busy_trace
+IRQ -&gt; _isr_wrapper (hook) min=240 avg=240 max=280 ns
+wrapper -&gt; my ISR line 1   min=520 avg=520 max=560 ns
+my ISR: clear + k_sem_give min=17760 avg=17760 max=17760 ns
+ISR return -&gt; wrapper exit min=440 avg=440 max=480 ns
+exit -&gt; PendSV entry       min=880 avg=880 max=920 ns
+PendSV: swap -&gt; switched_in min=1360 avg=1360 max=1400 ns
+-&gt; k_sem_take returns      min=640 avg=640 max=640 ns
+TOTAL IRQ -&gt; thread        min=21920 avg=21920 max=21960 ns
+== busy_ts_off
+TOTAL IRQ -&gt; thread        min=5480 avg=5480 max=5480 ns</code></pre></figure>
+<p><strong>무엇이 돌고 있었느냐에 따라 같은 <code>k_sem_give</code>가 12.32 µs(idle에서 깨어남) 또는 17.76 µs(prio 5 스레드를 선점)</strong>다. A7의 Zephyr 19.2 µs는 바쁜 스레드가 있던 측정이라 이쪽과 맞는다. 슬라이스를 끄면 두 경우 모두 5.3 ~ 5.5 µs로 모인다. 즉 time slicing은 비용만이 아니라 <strong>"선점당한 쪽이 누구냐"에 따라 달라지는 두 모드(이봉 분포)</strong>를 만든다. 이 정도 세부(정확히 어느 분기가 5.4 µs를 더하는지)는 이 노트에서 명령 추적으로 확인하지 않았다 — C2 §9의 <code>-d exec</code> 방법으로 볼 수 있다.</p>
+<h3 id="4-3-한-장으로-누적-막대">4.3 한 장으로 — 누적 막대<a class="anchor" href="#4-3-한-장으로-누적-막대" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 270" xmlns="http://www.w3.org/2000/svg">
+<text x="10.0" y="18.0" font-size="13" text-anchor="start">IRQ → 태스크 지연 분해 (µs, 평균, QEMU icount)</text>
+<text x="122.0" y="53.0" font-size="12" text-anchor="end">FreeRTOS 기본</text>
+<rect x="130.0" y="34.0" width="2.9" height="26.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<rect x="132.9" y="34.0" width="80.6" height="26.0" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/>
+<text x="173.2" y="51.0" font-size="11" text-anchor="middle">3.36</text>
+<rect x="213.5" y="34.0" width="11.5" height="26.0" fill="#888" fill-opacity="0.55" stroke="#888"/>
+<rect x="225.0" y="34.0" width="79.7" height="26.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="264.9" y="51.0" font-size="11" text-anchor="middle">3.32</text>
+<rect x="304.7" y="34.0" width="48.0" height="26.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a"/>
+<text x="328.7" y="51.0" font-size="11" text-anchor="middle">2.00</text>
+<text x="358.7" y="46.0" font-size="11" text-anchor="start">계: 9.28</text>
+<text x="358.7" y="59.0" font-size="11" text-anchor="start">계측 없이: 8.32</text>
+<text x="122.0" y="97.0" font-size="12" text-anchor="end">FreeRTOS lean</text>
+<rect x="130.0" y="78.0" width="2.9" height="26.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<rect x="132.9" y="78.0" width="80.6" height="26.0" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/>
+<text x="173.2" y="95.0" font-size="11" text-anchor="middle">3.36</text>
+<rect x="213.5" y="78.0" width="11.5" height="26.0" fill="#888" fill-opacity="0.55" stroke="#888"/>
+<rect x="225.0" y="78.0" width="43.2" height="26.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="246.6" y="95.0" font-size="11" text-anchor="middle">1.80</text>
+<rect x="268.2" y="78.0" width="48.0" height="26.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a"/>
+<text x="292.2" y="95.0" font-size="11" text-anchor="middle">2.00</text>
+<text x="322.2" y="90.0" font-size="11" text-anchor="start">계: 7.76</text>
+<text x="322.2" y="103.0" font-size="11" text-anchor="start">계측 없이: 6.84</text>
+<text x="122.0" y="141.0" font-size="12" text-anchor="end">Zephyr 기본</text>
+<rect x="130.0" y="122.0" width="21.1" height="26.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<rect x="151.1" y="122.0" width="295.7" height="26.0" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/>
+<text x="299.0" y="139.0" font-size="11" text-anchor="middle">12.32</text>
+<rect x="446.8" y="122.0" width="11.5" height="26.0" fill="#888" fill-opacity="0.55" stroke="#888"/>
+<rect x="458.3" y="122.0" width="53.8" height="26.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="485.2" y="139.0" font-size="11" text-anchor="middle">2.24</text>
+<rect x="512.1" y="122.0" width="15.4" height="26.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a"/>
+<text x="533.4" y="134.0" font-size="11" text-anchor="start">계: 16.56</text>
+<text x="533.4" y="147.0" font-size="11" text-anchor="start">계측 없이: 14.08</text>
+<text x="122.0" y="185.0" font-size="12" text-anchor="end">Zephyr slice 끔</text>
+<rect x="130.0" y="166.0" width="21.1" height="26.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/>
+<rect x="151.1" y="166.0" width="85.4" height="26.0" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/>
+<text x="193.8" y="183.0" font-size="11" text-anchor="middle">3.56</text>
+<rect x="236.6" y="166.0" width="10.6" height="26.0" fill="#888" fill-opacity="0.55" stroke="#888"/>
+<rect x="247.1" y="166.0" width="54.7" height="26.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/>
+<text x="274.5" y="183.0" font-size="11" text-anchor="middle">2.28</text>
+<rect x="301.8" y="166.0" width="15.4" height="26.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a"/>
+<text x="323.2" y="178.0" font-size="11" text-anchor="start">계: 7.80</text>
+<text x="323.2" y="191.0" font-size="11" text-anchor="start">계측 없이: 5.32</text>
+<line x1="130.0" y1="210" x2="130.0" y2="214" stroke="currentColor"/><text x="130.0" y="226.0" font-size="11" text-anchor="middle">0</text>
+<line x1="178.0" y1="210" x2="178.0" y2="214" stroke="currentColor"/><text x="178.0" y="226.0" font-size="11" text-anchor="middle">2</text>
+<line x1="226.0" y1="210" x2="226.0" y2="214" stroke="currentColor"/><text x="226.0" y="226.0" font-size="11" text-anchor="middle">4</text>
+<line x1="274.0" y1="210" x2="274.0" y2="214" stroke="currentColor"/><text x="274.0" y="226.0" font-size="11" text-anchor="middle">6</text>
+<line x1="322.0" y1="210" x2="322.0" y2="214" stroke="currentColor"/><text x="322.0" y="226.0" font-size="11" text-anchor="middle">8</text>
+<line x1="370.0" y1="210" x2="370.0" y2="214" stroke="currentColor"/><text x="370.0" y="226.0" font-size="11" text-anchor="middle">10</text>
+<line x1="418.0" y1="210" x2="418.0" y2="214" stroke="currentColor"/><text x="418.0" y="226.0" font-size="11" text-anchor="middle">12</text>
+<line x1="466.0" y1="210" x2="466.0" y2="214" stroke="currentColor"/><text x="466.0" y="226.0" font-size="11" text-anchor="middle">14</text>
+<line x1="514.0" y1="210" x2="514.0" y2="214" stroke="currentColor"/><text x="514.0" y="226.0" font-size="11" text-anchor="middle">16</text>
+<line x1="562.0" y1="210" x2="562.0" y2="214" stroke="currentColor"/><text x="562.0" y="226.0" font-size="11" text-anchor="middle">18</text>
+<line x1="130" y1="210" x2="562.0" y2="210" stroke="currentColor"/>
+<rect x="20.0" y="242.0" width="12.0" height="12.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/><text x="37.0" y="253.0" font-size="12" text-anchor="start">진입·디스패치</text>
+<rect x="120.1" y="242.0" width="12.0" height="12.0" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/><text x="137.1" y="253.0" font-size="12" text-anchor="start">ISR 안 커널 호출</text>
+<rect x="281.9" y="242.0" width="12.0" height="12.0" fill="#888" fill-opacity="0.55" stroke="#888"/><text x="298.9" y="253.0" font-size="12" text-anchor="start">ISR 퇴장</text>
+<rect x="382.0" y="242.0" width="12.0" height="12.0" fill="#3f9a6b" fill-opacity="0.55" stroke="#3f9a6b"/><text x="399.0" y="253.0" font-size="12" text-anchor="start">PendSV·전환</text>
+<rect x="506.8" y="242.0" width="12.0" height="12.0" fill="#d0564a" fill-opacity="0.55" stroke="#d0564a"/><text x="523.8" y="253.0" font-size="12" text-anchor="start">복원→태스크</text>
+</svg></figure>
+<p>그림 4 — <strong>측정 차트</strong>: 예제 5 · 6의 구간 평균(계측을 넣은 빌드). 오른쪽 "계측 없이"는 계측점을 뺀 빌드의 총합이다. 색이 같은 조각끼리 비교하면 된다 — 파랑(진입 · 디스패치)은 Zephyr가 길고, 주황(ISR 안 커널 호출)은 Zephyr 기본이 압도적이며, 초록(PendSV · 전환)은 FreeRTOS 기본이 길다.</p>
+<p>이 그림을 25 MHz에서 480 MHz 칩으로 옮기면? 명령 수가 같다고 치면 모든 조각이 약 1/19로 줄어든다(A7의 클럭 환산 표와 같은 계산). 하지만 ②(HW 진입 12사이클 + wait state)는 QEMU에 없던 조각이 새로 붙고, 캐시 미스가 조각마다 흔들림을 더한다. <strong>비율과 구성은 옮겨지고, 절대값은 실칩에서 다시 잰다.</strong></p>
+<hr>
+<h2 id="5-지터를-만든다-배경-부하-아래의-히스토그램">5. 지터를 만든다 — 배경 부하 아래의 히스토그램<a class="anchor" href="#5-지터를-만든다-배경-부하-아래의-히스토그램" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM J7과 겹친다 (주인: 이 노트).</p></blockquote>
+<p>§4는 "아무도 방해하지 않을 때"의 경로 길이였다. 실제 펌웨어에서는 그림 1의 빨간 조각(①, ⑦)이 매번 다른 길이로 끼어든다. 이번에는 <strong>원인을 알고 있는 방해꾼 넷</strong>을 일부러 넣고, 그것들이 히스토그램에 어떤 모양으로 찍히는지 본다. 원인을 알고 만든 모양을 한 번 보고 나면, 원인을 모르는 실제 히스토그램을 읽을 수 있다.</p>
+<h3 id="5-1-실험-설계-방해꾼-네-개-원인마다-다른-모양을-예상한다">5.1 실험 설계 — 방해꾼 네 개, 원인마다 다른 모양을 예상한다<a class="anchor" href="#5-1-실험-설계-방해꾼-네-개-원인마다-다른-모양을-예상한다" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>방해꾼</th><th>구현</th><th>그림 1의 조각</th><th>예상 모양</th></tr></thead><tbody><tr><td>CS15</td><td>우선순위 1 태스크(lo)가 <code>taskENTER_CRITICAL</code> 안에서 15 µs, 그 밖에서 20 ~ 120 µs(난수)</td><td>① 마스킹</td><td>기본값에서 +15 µs까지 <strong>평평한 선반</strong>. 면적 ≈ 듀티(15 / 85 ≈ 18%)</td></tr><tr><td>DT6</td><td>DUALTIMER ISR(0x20, TIMER0보다 높음) 6 µs, 주기 = TIMER0의 정확히 2배, TIMER0보다 2 µs 먼저</td><td>① 상위 ISR</td><td>표본 절반이 <strong>같은 양만큼</strong> 밀린 <strong>두 번째 날카로운 봉우리</strong>(6 − 2 = 약 4 µs 오른쪽)</td></tr><tr><td>tick</td><td>1 kHz SysTick(0xFF). 안에서 <code>xTaskIncrementTick</code>을 BASEPRI 올리고 돈다</td><td>① 커널 마스킹</td><td>드문 짧은 선반(수 µs, 0.3% 안팎)</td></tr><tr><td>med25</td><td>우선순위 4 태스크(측정 대상 3보다 높음)가 tick마다 깨어 25 µs 일함</td><td>⑦ 상위 태스크</td><td><strong>태스크 쪽 히스토그램에만</strong> 생기는 +25 µs 이상의 꼬리(약 2.5%)</td></tr></tbody></table></div>
+<p>설계 포인트 세 가지:</p>
+<ul><li><strong>DT6의 주기를 TIMER0의 정수배로</strong> 맞춘 것은 일부러다. 실무에서 "IMU data-ready와 DShot 타이머가 같은 1 kHz 기준에서 나온다"처럼 <strong>두 이벤트가 같은 클럭에서 나오면 위상이 고정</strong>되어, 간섭이 매번 같은 양으로 들어온다. 이것이 날카로운 봉우리를 만든다.</li><li><strong>CS15의 쉬는 시간을 난수로</strong> 둔 것도 일부러다. C7 §6에서 고정 간격으로 했더니 IRQ가 늘 같은 위상(잠금 밖)에만 떨어져 최댓값을 못 봤다. 위상이 무작위면 0 ~ 15 µs가 고르게 찍힌다.</li><li>각 방해꾼은 <strong>자기가 돈 마지막 구간 [t0, t1]</strong>을 FPGAIO 시계로 남긴다. 측정 ISR은 "IRQ가 올라간 시각 a = 지금 − 경과"를 계산해, a부터 지금까지와 겹친 방해꾼을 비트마스크로 기록한다(§6.2의 원인 태깅). SysTick은 앱이 <code>SysTick_Handler</code>를 정의해 포트의 <code>xPortSysTickHandler</code>를 감싸게 했다(<code>WRAP_TICK</code>, 앞의 FreeRTOSConfig.h에서 포트 쪽 이름 바꿈 매크로를 지운다).</li></ul>
+<h3 id="5-2-예제-7-freertos-두-단계-히스토그램-원인-태깅">5.2 예제 7 — FreeRTOS: 두 단계 히스토그램 + 원인 태깅<a class="anchor" href="#5-2-예제-7-freertos-두-단계-히스토그램-원인-태깅" aria-label="link">#</a></h3>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex7 — FreeRTOS: IRQ-&gt;ISR and IRQ-&gt;task histograms under load, each sample tagged by cause */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "e3.h"
+#ifndef OFF
+#define OFF 0                                         /* ablation: 1 no CS, 2 no DT, 4 med idle, 8 no med */
+#endif
+#define N 4000
+#define BIN 25u                                       /* 1 us bins */
+volatile uint32_t e3_armed, e3_s4;
+void *volatile e3_hi;
+typedef struct { volatile uint32_t t0, t1; } span_t; /* last run interval of each blocker */
+static span_t cs, dt, tk, md;
+static hist_t h_isr, h_tsk;
+static uint32_t cnt[2][16], cmax[2][16];             /* [stage][cause bitmask] */
+static const char *cn[4] = { "CS15 ", "DT6 ", "tick ", "med25 " };
+static volatile uint32_t a_cyc;                      /* when TIMER0 raised the IRQ (FPGAIO time) */
+static int hit(span_t *s, uint32_t from, uint32_t to)  /* did [t0,t1] overlap [from,to]? */
+{
+    uint32_t end = (int32_t)(s-&gt;t1 - s-&gt;t0) &lt; 0 ? to : s-&gt;t1 + 12;  /* t1 &lt; t0: still running */
+    return (int32_t)(s-&gt;t0 - to) &lt; 0 &amp;&amp; (int32_t)(end - from) &gt; 0;
+}
+static void tag(int st, uint32_t to, uint32_t lat)
+{
+    int m = hit(&amp;cs, a_cyc, to) | hit(&amp;dt, a_cyc, to) &lt;&lt; 1 | hit(&amp;tk, a_cyc, to) &lt;&lt; 2
+          | (st &amp;&amp; hit(&amp;md, a_cyc, to)) &lt;&lt; 3;
+    cnt[st][m]++; if (lat &gt; cmax[st][m]) cmax[st][m] = lat;
+}
+void TIMER0_IRQHandler(void)                          /* prio 0x40 */
+{
+    uint32_t lat = t0_elapsed(), e = CYC(); a_cyc = e - lat;
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    if (h_isr.n &lt; N) { h_add(&amp;h_isr, lat, BIN); tag(0, e, lat); }
+    BaseType_t w = pdFALSE;
+    vTaskNotifyGiveFromISR((TaskHandle_t)e3_hi, &amp;w);
+    portYIELD_FROM_ISR(w);
+}
+void DUALTIMER_IRQHandler(void) { dt.t0 = CYC(); DT_INTCLR = 1; spin_cyc(150); dt.t1 = CYC(); } /* 0x20 */
+extern void xPortSysTickHandler(void);
+void SysTick_Handler(void) { tk.t0 = CYC(); xPortSysTickHandler(); tk.t1 = CYC(); }
+static void lo_task(void *a) { (void)a; for (;;) {    /* prio 1: 15 us critical sections */
+    if (!(OFF &amp; 1)) { taskENTER_CRITICAL(); cs.t0 = CYC(); spin_cyc(375); cs.t1 = CYC(); taskEXIT_CRITICAL(); }
+    spin_cyc(500 + rnd(2500)); } }
+static void med_task(void *a) { (void)a; for (;;) {   /* prio 4: 25 us of work every tick */
+    vTaskDelay(1); md.t0 = CYC(); if (!(OFF &amp; 4)) spin_cyc(625); md.t1 = CYC(); } }
+static void hi_task(void *a)                          /* prio 3: the task we measure */
+{
+    (void)a;
+    while (HN(h_tsk) &lt; N) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t lat = t0_elapsed();
+        h_add(&amp;h_tsk, lat, BIN); tag(1, CYC(), lat);
+    }
+    t0_stop();
+    for (int b = 0; b &lt; NBIN; b++)
+        if (h_isr.bin[b] + h_tsk.bin[b]) board_printf_raw("bin %u us: isr=%u task=%u\n", b, h_isr.bin[b], h_tsk.bin[b]);
+    for (int s = 0; s &lt; 2; s++) {
+        hist_t *h = s ? &amp;h_tsk : &amp;h_isr;
+        board_printf_raw("%s n=%u min=%u avg=%u max=%u ns\n", s ? "IRQ-&gt;task" : "IRQ-&gt;ISR ", h-&gt;n,
+                         NS(h-&gt;min), NS((uint32_t)(h-&gt;sum / h-&gt;n)), NS(h-&gt;max));
+        for (int m = 0; m &lt; 16; m++) if (cnt[s][m]) {
+            board_printf_raw("  n=%u max=%u ns : ", cnt[s][m], NS(cmax[s][m]));
+            for (int b = 0; b &lt; 4; b++) if (m &gt;&gt; b &amp; 1) board_puts(cn[b]);
+            board_puts(m ? "\n" : "(no tagged cause)\n");
+        }
+    }
+    board_exit(0);
+}
+int main(void)
+{
+    TaskHandle_t t;
+    xTaskCreate(hi_task, "hi", 512, NULL, 3, &amp;t); e3_hi = t;
+    if (!(OFF &amp; 8)) xTaskCreate(med_task, "med", 256, NULL, 4, NULL);   /* 8 = no med task at all */
+    xTaskCreate(lo_task, "lo", 256, NULL, 1, NULL);
+    t0_start(12500 + 37, 0x40);
+    if (!(OFF &amp; 2)) dt_start(2 * (12500 + 37), 12500 + 37 - 50, 0x20);  /* 2 us before every 2nd T0 */
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<p>(76줄 — 출력 부분까지 한 파일에 넣느라 70줄을 조금 넘었다.) <code>hit()</code>의 "<code>t1 &lt; t0</code>이면 아직 도는 중" 처리는 첫 시도에 없었다. 그때는 tick 태그가 ISR 쪽에 <strong>한 번도</strong> 안 나왔다 — TIMER0(0x40)이 SysTick(0xFF)을 선점하면 SysTick의 <code>t1</code>은 아직 <strong>지난번</strong> 값이라 겹침 검사에서 빠졌기 때문이다. 원인 태깅 코드는 "선점당해 아직 안 끝난 방해꾼"을 다뤄야 한다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=$S/frt/ex7_load.c OUT=/var/tmp/rtos/E3/ex7 EXTRA_CFLAGS="-I$S/inc -DWRAP_TICK" &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/ex7/app.elf 120 | tee /var/tmp/rtos/E3/ex7.out'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>bin 0 us: isr=1640 task=0
+bin 1 us: isr=36 task=0
+bin 2 us: isr=24 task=0
+bin 3 us: isr=23 task=0
+bin 4 us: isr=1652 task=0
+bin 5 us: isr=47 task=0
+...
+bin 11 us: isr=47 task=0
+bin 12 us: isr=45 task=1550
+bin 13 us: isr=43 task=26
+...
+bin 16 us: isr=22 task=23
+bin 17 us: isr=27 task=1604
+bin 18 us: isr=23 task=41
+...
+bin 32 us: isr=0 task=29
+bin 33 us: isr=0 task=3
+...
+bin 53 us: isr=0 task=24
+...
+bin 57 us: isr=0 task=29
+...
+IRQ-&gt;ISR  n=4000 min=120 avg=4000 max=20920 ns
+  n=1629 max=2760 ns : (no tagged cause)
+  n=361 max=16080 ns : CS15 
+  n=1674 max=7600 ns : DT6 
+  n=318 max=20920 ns : CS15 DT6 
+  n=10 max=3640 ns : tick 
+  n=8 max=8480 ns : DT6 tick 
+IRQ-&gt;task n=4000 min=12280 avg=17400 max=73920 ns
+  n=1547 max=17680 ns : (no tagged cause)
+  n=352 max=29080 ns : CS15 
+  n=1585 max=22520 ns : DT6 
+  n=304 max=34720 ns : CS15 DT6 
+  n=59 max=44240 ns : med25 
+  n=56 max=50040 ns : DT6 med25 
+  n=33 max=53240 ns : tick med25 
+  n=9 max=68240 ns : CS15 tick med25 
+  n=41 max=59360 ns : DT6 tick med25 
+  n=14 max=73920 ns : CS15 DT6 tick med25 
+[board_exit] code=0</code></pre></figure>
+<p>(54개 칸 중 일부만 남기고 <code>...</code>로 줄였다. 전체는 그림 5가 그린다. 64 µs를 넘는 표본은 칸 밖이라 그림에 없다 — 최댓값 73.92 µs가 그중 하나다.)</p>
+<p>출력에서 볼 것 — 예상한 모양이 그대로 나왔다:</p>
+<ul><li><strong>IRQ → ISR</strong>: 0 µs 칸(1640)과 <strong>4 µs 칸(1652)</strong>에 거의 같은 높이의 두 봉우리. 두 번째 봉우리는 DT6 태그 1674개와 맞는다 — TIMER0 두 번에 한 번, 2 µs 먼저 시작한 6 µs짜리 상위 ISR이 끝나기를 기다린 표본이다. 그 사이와 오른쪽(1 ~ 20 µs)에 칸마다 20 ~ 50개씩 깔린 <strong>평평한 선반</strong>이 CS15다(태그 361 + 318). 최댓값 20.92 µs는 CS15와 DT6가 <strong>겹친</strong> 표본에서 나왔다.</li><li><strong>IRQ → 태스크</strong>: 같은 두 봉우리가 12 µs · 17 µs로 <strong>통째로 오른쪽으로 12 µs 옮겨</strong> 나타난다 — ISR 이후의 경로(④~⑧)가 거의 일정하다는 뜻이다. 그리고 ISR 쪽에는 없던 <strong>긴 꼬리(33 ~ 64 µs 이상)</strong>가 생긴다. 태그는 전부 med25가 들어간 조합이다 — ⑦ 상위 태스크 간섭은 <strong>태스크 쪽에만</strong> 나타난다. 같은 표본을 두 단계에서 재면 원인의 종류(①인지 ⑦인지)가 갈린다.</li><li>꼬리 끝의 작은 무리(53, 57 µs 칸의 24, 29개)는 "tick이 med를 깨우는 순간"에 IRQ가 떨어진 표본이다(tick + med25, 거기에 DT6가 더해지면 +4 µs). <strong>꼬리의 작은 봉우리 = 원인 조합 하나</strong>다.</li><li><strong>평균 17.40 µs는 아무것도 말하지 않는다</strong>: 최댓값(73.92)의 1/4이고, 실제로 표본이 몰린 두 봉우리(12, 17) 어느 쪽과도 같지 않다.</li><li>"no tagged cause"가 ISR 쪽에서도 최대 2.76 µs까지 있다. 태깅하지 않은 원인이 있다는 신호다 — §6.3에서 찾는다.</li></ul>
+<h3 id="5-3-예제-8-zephyr-같은-부하-같은-태깅">5.3 예제 8 — Zephyr: 같은 부하, 같은 태깅<a class="anchor" href="#5-3-예제-8-zephyr-같은-부하-같은-태깅" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 7과 같은 네 방해꾼을 Zephyr v4.4.2로 옮긴다. CS15는 <code>irq_lock()</code>, DT6는 <code>IRQ_CONNECT(10, 1, ...)</code>(TIMER0의 2보다 높음), med는 prio 1 스레드가 <code>k_sleep(K_TICKS(1))</code>, 측정 대상은 prio 2 스레드다. tick은 1 kHz(<code>CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000</code>)로 맞췄다(이 보드 기본은 100 Hz, tickless). SysTick 핸들러 <code>sys_clock_isr</code>는 벡터 테이블(<code>vector_table.S</code>)이 직접 가리키므로, 링커의 <code>--wrap</code>으로 감쌌다(<code>zephyr_ld_options(-Wl,--wrap=sys_clock_isr)</code> — 벡터 테이블 쪽 참조가 <code>__wrap_sys_clock_isr</code>로 간다).</p>
+<figure class="code"><span class="lang">text</span><pre><code># z_load/CMakeLists.txt (마지막 줄만 추가)
+zephyr_ld_options(-Wl,--wrap=sys_clock_isr)
+# z_load/prj.conf
+CONFIG_BOOT_BANNER=n
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex8 — Zephyr v4.4.2: the same load as ex7 (irq_lock CS, higher ISR, higher thread), tagged */
+#include &lt;zephyr/kernel.h&gt;
+#include &lt;zephyr/irq.h&gt;
+#include &lt;zephyr/sys/printk.h&gt;
+#include "z3.h"
+#define N 4000
+#define BIN 25u
+static span_t cs, dt, md, tk;
+static hist_t h_isr, h_tsk;
+static uint32_t cnt[2][16], cmax[2][16];
+static const char *cn[4] = { "CS15 ", "DT6 ", "med25 ", "tick " };
+static volatile uint32_t a_cyc;
+static K_SEM_DEFINE(sem, 0, 1);
+static void tag(int st, uint32_t to, uint32_t lat)
+{
+    int m = hit(&amp;cs, a_cyc, to) | hit(&amp;dt, a_cyc, to) &lt;&lt; 1 | (st &amp;&amp; hit(&amp;md, a_cyc, to)) &lt;&lt; 2
+          | hit(&amp;tk, a_cyc, to) &lt;&lt; 3;
+    cnt[st][m]++; if (lat &gt; cmax[st][m]) cmax[st][m] = lat;
+}
+static void t0_isr(const void *p)                      /* IRQ_CONNECT prio 2 */
+{
+    uint32_t lat = t0_elapsed(), e = CYC(); a_cyc = e - lat;
+    REG32(T0 + 0xC) = 1;
+    if (h_isr.n &lt; N) { h_add(&amp;h_isr, lat, BIN); tag(0, e, lat); }
+    k_sem_give(&amp;sem);
+}
+static void dt_isr(const void *p) { dt.t0 = CYC(); REG32(DT + 0xC) = 1; spin_cyc(150); dt.t1 = CYC(); } /* prio 1 */
+void __real_sys_clock_isr(void);                             /* -Wl,--wrap=sys_clock_isr */
+void __wrap_sys_clock_isr(void) { tk.t0 = CYC(); __real_sys_clock_isr(); tk.t1 = CYC(); }
+static void lo_fn(void *a, void *b, void *c) { for (;;) {     /* prio 5: 15 us irq_lock sections */
+    unsigned int key = irq_lock(); cs.t0 = CYC(); spin_cyc(375); cs.t1 = CYC(); irq_unlock(key);
+    spin_cyc(500 + rnd(2500)); } }
+static void med_fn(void *a, void *b, void *c) { for (;;) {    /* prio 1: 25 us every tick */
+    k_sleep(K_TICKS(1)); md.t0 = CYC(); spin_cyc(625); md.t1 = CYC(); } }
+static void hi_fn(void *a, void *b, void *c)                  /* prio 2: measured thread */
+{
+    k_sem_reset(&amp;sem);                                        /* drop the stale give from before we started */
+    while (HN(h_tsk) &lt; N) {
+        k_sem_take(&amp;sem, K_FOREVER);
+        uint32_t lat = t0_elapsed();
+        h_add(&amp;h_tsk, lat, BIN); tag(1, CYC(), lat);
+    }
+    REG32(T0) = 0;
+    for (int b = 0; b &lt; NBIN; b++)
+        if (h_isr.bin[b] + h_tsk.bin[b]) printk("bin %u us: isr=%u task=%u\n", b, h_isr.bin[b], h_tsk.bin[b]);
+    for (int s = 0; s &lt; 2; s++) {
+        hist_t *h = s ? &amp;h_tsk : &amp;h_isr;
+        printk("%s n=%u min=%u avg=%u max=%u ns (over=%u)\n", s ? "IRQ-&gt;thread" : "IRQ-&gt;ISR   ", h-&gt;n,
+               NS(h-&gt;min), NS((uint32_t)(h-&gt;sum / h-&gt;n)), NS(h-&gt;max), h-&gt;over);
+        for (int m = 0; m &lt; 16; m++) if (cnt[s][m]) {
+            printk("  n=%u max=%u ns : ", cnt[s][m], NS(cmax[s][m]));
+            for (int b = 0; b &lt; 4; b++) if (m &gt;&gt; b &amp; 1) printk("%s", cn[b]);
+            printk(m ? "\n" : "(no tagged cause)\n");
+        }
+    }
+    register uint32_t r0 __asm__("r0") = 0x18, r1 __asm__("r1") = 0x20026;
+    __asm volatile("bkpt 0xab" : : "r"(r0), "r"(r1) : "memory");
+}
+K_THREAD_DEFINE(hi, 1024, hi_fn, NULL, NULL, NULL, 2, 0, 10);
+K_THREAD_DEFINE(med, 512, med_fn, NULL, NULL, NULL, 1, 0, 10);
+K_THREAD_DEFINE(lo, 512, lo_fn, NULL, NULL, NULL, 5, 0, 10);
+int main(void)
+{
+    IRQ_CONNECT(8, 2, t0_isr, NULL, 0);  irq_enable(8);
+    IRQ_CONNECT(10, 1, dt_isr, NULL, 0); irq_enable(10);
+    REG32(T0) = 0; REG32(T0 + 8) = 12500 + 37 - 1; REG32(T0 + 4) = 12500 + 37 - 1; REG32(T0) = 1 | 8;
+    REG32(DT + 8) = 0; REG32(DT) = 12500 + 37 - 50 - 1; REG32(DT + 0x18) = 2 * (12500 + 37) - 1;
+    REG32(DT + 8) = 0x80u | 0x40u | 0x20u | 0x02u;
+    return 0;
+}</code></pre></figure>
+<p><code>k_sem_reset()</code> 줄도 첫 시도에는 없었다. 그때 IRQ → 스레드 최댓값이 <strong>476.4 µs</strong>(주기 500 µs에 가까운 값)로 나왔다. 스레드들이 10 ms 늦게 시작하도록(<code>K_THREAD_DEFINE</code>의 마지막 인자) 해 둔 사이 TIMER0 ISR이 이미 세마포어를 줘 버려서, 첫 <code>k_sem_take</code>가 <strong>오래된 give</strong>로 즉시 돌아와 "마지막 IRQ로부터 경과"를 아무 값이나 읽은 것이다. <strong>혼자 멀리 떨어진 점 하나는 시스템이 아니라 측정의 버그일 때가 많다.</strong></p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; /var/rtoslab/bin/rtos-zbuild mps2/an385 $S/z_load /var/tmp/rtos/E3/z_load &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/z_load/zephyr/zephyr.elf 120 | tee /var/tmp/rtos/E3/ex8.out | grep -v "^bin"
+/var/rtoslab/bin/rtos-zbuild mps2/an385 $S/z_load /var/tmp/rtos/E3/z_load_tsoff -- -DCONFIG_TIMESLICING=n &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/z_load_tsoff/zephyr/zephyr.elf 120 | tee /var/tmp/rtos/E3/ex8_tsoff.out | grep -v "^bin"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>           FLASH:       15492 B         4 MB      0.37%
+             RAM:        9160 B         4 MB      0.22%
+IRQ-&gt;ISR    n=4000 min=360 avg=5480 max=40680 ns (over=0)
+  n=1532 max=21960 ns : (no tagged cause)
+  n=330 max=15840 ns : CS15 
+  n=1518 max=25600 ns : DT6 
+  n=293 max=21320 ns : CS15 DT6 
+  n=122 max=19720 ns : tick 
+  n=16 max=32560 ns : CS15 tick 
+  n=173 max=25840 ns : DT6 tick 
+  n=16 max=40680 ns : CS15 DT6 tick 
+IRQ-&gt;thread n=4000 min=11600 avg=27360 max=114440 ns (over=409)
+  n=1481 max=37240 ns : (no tagged cause)
+  n=328 max=31200 ns : CS15 
+  n=1455 max=40880 ns : DT6 
+  n=293 max=36680 ns : CS15 DT6 
+  n=17 max=59920 ns : med25 
+  n=26 max=81000 ns : DT6 med25 
+  n=155 max=99760 ns : med25 tick 
+  n=19 max=106320 ns : CS15 med25 tick 
+  n=207 max=105440 ns : DT6 med25 tick 
+  n=19 max=114440 ns : CS15 DT6 med25 tick 
+IRQ-&gt;ISR    n=4000 min=360 avg=4640 max=29880 ns (over=0)
+  n=1622 max=8600 ns : (no tagged cause)
+  n=367 max=15800 ns : CS15 
+  n=1650 max=14240 ns : DT6 
+  n=332 max=21280 ns : CS15 DT6 
+  n=8 max=7760 ns : tick 
+  n=3 max=23720 ns : CS15 tick 
+  n=16 max=15720 ns : DT6 tick 
+  n=2 max=29880 ns : CS15 DT6 tick 
+IRQ-&gt;thread n=4000 min=5480 avg=14480 max=75240 ns (over=4)
+  n=1588 max=17760 ns : (no tagged cause)
+  n=365 max=25040 ns : CS15 
+  n=1614 max=23400 ns : DT6 
+  n=334 max=30520 ns : CS15 DT6 
+  n=25 max=44640 ns : med25 
+  n=25 max=52360 ns : DT6 med25 
+  n=17 max=55440 ns : med25 tick 
+  n=5 max=68960 ns : CS15 med25 tick 
+  n=25 max=61000 ns : DT6 med25 tick 
+  n=2 max=75240 ns : CS15 DT6 med25 tick </code></pre></figure>
+<p>(앞 블록이 기본 설정, 뒤 블록이 <code>CONFIG_TIMESLICING=n</code>. 두 번째 빌드의 FLASH/RAM 줄은 출력을 버려서 없다.)</p>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>슬라이스를 끈 Zephyr는 FreeRTOS와 같은 모양이다</strong>: CS15 선반(태그 367 + 332), DT6 봉우리(1650, 칸으로는 5 µs — <code>_isr_wrapper</code> 때문에 FreeRTOS보다 1 µs 오른쪽), med 조합의 꼬리, 최댓값은 네 원인이 겹친 2개 표본(75.24 µs). 같은 방해꾼은 같은 RTOS-독립적 모양을 만든다.</li><li><strong>슬라이스를 켠 기본 설정은 다르다</strong>. 태깅하지 않은 ISR 지연이 최대 <strong>21.96 µs</strong>(끈 쪽 8.6 µs), tick 태그가 122개(끈 쪽 8개), 스레드 쪽 64 µs를 넘는 표본이 409개(10%), 최댓값 114.44 µs. §4.2에서 본 "<code>k_sem_give</code> 안의 슬라이스 재설정"은 스케줄러 스핀락(= <code>irq_lock</code>)을 잡은 채 SysTick을 다시 프로그램하는 일이다. 이것이 med · lo · hi 사이의 <strong>모든 전환</strong>에서 일어나고, 그동안 TIMER0도 막힌다. 슬라이스 비용은 자기 경로만이 아니라 <strong>다른 IRQ의 ①(마스킹)</strong>로 번진다 — 구간 분해(§4)와 히스토그램(§5)이 같은 범인을 두 방향에서 가리킨다.</li><li>스레드 쪽 최솟값이 11.60(기본) → <strong>5.48 µs</strong>(끔)로, 슬라이스가 기본 경로에서 6 µs를 먹는다는 §4.2 결론과 같다.</li><li>실무 판단: 같은 우선순위 스레드끼리 시간을 나눌 필요가 없는 제어 펌웨어라면 <code>CONFIG_TIMESLICING=n</code>을 검토한다. 필요하면 <code>CONFIG_TIMESLICE_PRIORITY</code>로 슬라이스를 받는 우선순위 범위를 좁힌다(H 모듈).</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg">
+<text x="60.0" y="22.0" font-size="13" text-anchor="start">FreeRTOS V11.3.2 (ex7)</text>
+<line x1="60" y1="170" x2="660" y2="170" stroke="currentColor"/><line x1="60" y1="30" x2="60" y2="170" stroke="currentColor"/>
+<line x1="56" y1="170.0" x2="60" y2="170.0" stroke="currentColor"/><text x="53.0" y="174.0" font-size="11" text-anchor="end">1</text>
+<line x1="56" y1="132.2" x2="60" y2="132.2" stroke="currentColor"/><text x="53.0" y="136.2" font-size="11" text-anchor="end">10</text>
+<line x1="56" y1="94.3" x2="60" y2="94.3" stroke="currentColor"/><text x="53.0" y="98.3" font-size="11" text-anchor="end">100</text>
+<line x1="56" y1="56.5" x2="60" y2="56.5" stroke="currentColor"/><text x="53.0" y="60.5" font-size="11" text-anchor="end">1000</text>
+<rect x="60.0" y="46.9" width="4.2" height="123.1" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="69.4" y="105.0" width="4.2" height="65.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="78.8" y="111.2" width="4.2" height="58.8" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="88.1" y="111.8" width="4.2" height="58.2" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="97.5" y="46.8" width="4.2" height="123.2" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="106.9" y="101.0" width="4.2" height="69.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="116.2" y="102.7" width="4.2" height="67.3" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="125.6" y="99.7" width="4.2" height="70.3" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="135.0" y="99.1" width="4.2" height="70.9" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="144.4" y="101.3" width="4.2" height="68.7" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="153.8" y="99.4" width="4.2" height="70.6" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="163.1" y="101.0" width="4.2" height="69.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="172.5" y="101.6" width="4.2" height="68.4" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="177.2" y="47.8" width="4.2" height="122.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="181.9" y="102.3" width="4.2" height="67.7" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="186.6" y="110.0" width="4.2" height="60.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="191.2" y="104.6" width="4.2" height="65.4" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="195.9" y="111.2" width="4.2" height="58.8" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="200.6" y="101.0" width="4.2" height="69.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="205.3" y="111.8" width="4.2" height="58.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="210.0" y="112.5" width="4.2" height="57.5" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="214.7" y="111.8" width="4.2" height="58.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="219.4" y="109.4" width="4.2" height="60.6" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="224.1" y="47.3" width="4.2" height="122.7" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="228.8" y="111.8" width="4.2" height="58.2" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="233.4" y="103.0" width="4.2" height="67.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="238.1" y="116.4" width="4.2" height="53.6" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="242.8" y="99.7" width="4.2" height="70.3" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="247.5" y="110.0" width="4.2" height="60.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="252.2" y="99.4" width="4.2" height="70.6" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="261.6" y="99.4" width="4.2" height="70.6" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="270.9" y="92.9" width="4.2" height="77.1" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="280.3" y="101.6" width="4.2" height="68.4" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="289.7" y="99.4" width="4.2" height="70.6" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="299.1" y="102.0" width="4.2" height="68.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="308.4" y="103.4" width="4.2" height="66.6" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="317.8" y="102.7" width="4.2" height="67.3" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="327.2" y="106.8" width="4.2" height="63.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="336.6" y="108.8" width="4.2" height="61.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="345.9" y="110.0" width="4.2" height="60.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="355.3" y="113.2" width="4.2" height="56.8" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="364.7" y="108.3" width="4.2" height="61.7" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="374.1" y="142.8" width="4.2" height="27.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="383.4" y="138.4" width="4.2" height="31.6" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="458.4" y="142.8" width="4.2" height="27.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="467.8" y="159.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="477.2" y="159.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="495.9" y="159.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="505.3" y="129.9" width="4.2" height="40.1" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="514.7" y="135.0" width="4.2" height="35.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="524.1" y="138.4" width="4.2" height="31.6" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="533.4" y="142.8" width="4.2" height="27.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="542.8" y="149.0" width="4.2" height="21.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="552.2" y="149.0" width="4.2" height="21.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="561.6" y="111.2" width="4.2" height="58.8" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="570.9" y="142.8" width="4.2" height="27.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="589.7" y="159.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="599.1" y="108.3" width="4.2" height="61.7" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="608.4" y="159.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="617.8" y="159.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="636.6" y="149.0" width="4.2" height="21.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="645.9" y="142.8" width="4.2" height="27.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="655.3" y="149.0" width="4.2" height="21.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="60.0" y="184.0" font-size="11" text-anchor="middle">0</text>
+<text x="135.0" y="184.0" font-size="11" text-anchor="middle">8</text>
+<text x="210.0" y="184.0" font-size="11" text-anchor="middle">16</text>
+<text x="285.0" y="184.0" font-size="11" text-anchor="middle">24</text>
+<text x="360.0" y="184.0" font-size="11" text-anchor="middle">32</text>
+<text x="435.0" y="184.0" font-size="11" text-anchor="middle">40</text>
+<text x="510.0" y="184.0" font-size="11" text-anchor="middle">48</text>
+<text x="585.0" y="184.0" font-size="11" text-anchor="middle">56</text>
+<text x="660.0" y="184.0" font-size="11" text-anchor="middle">64</text>
+<text x="60.0" y="217.0" font-size="13" text-anchor="start">Zephyr v4.4.2, slice 끔 (ex8)</text>
+<line x1="60" y1="365" x2="660" y2="365" stroke="currentColor"/><line x1="60" y1="225" x2="60" y2="365" stroke="currentColor"/>
+<line x1="56" y1="365.0" x2="60" y2="365.0" stroke="currentColor"/><text x="53.0" y="369.0" font-size="11" text-anchor="end">1</text>
+<line x1="56" y1="327.2" x2="60" y2="327.2" stroke="currentColor"/><text x="53.0" y="331.2" font-size="11" text-anchor="end">10</text>
+<line x1="56" y1="289.3" x2="60" y2="289.3" stroke="currentColor"/><text x="53.0" y="293.3" font-size="11" text-anchor="end">100</text>
+<line x1="56" y1="251.5" x2="60" y2="251.5" stroke="currentColor"/><text x="53.0" y="255.5" font-size="11" text-anchor="end">1000</text>
+<rect x="60.0" y="242.0" width="4.2" height="123.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="69.4" y="301.8" width="4.2" height="63.2" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="78.8" y="309.7" width="4.2" height="55.3" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="88.1" y="304.4" width="4.2" height="60.6" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="97.5" y="302.8" width="4.2" height="62.2" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="106.9" y="242.0" width="4.2" height="123.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="111.6" y="319.5" width="4.2" height="45.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="116.2" y="296.0" width="4.2" height="69.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="125.6" y="297.3" width="4.2" height="67.7" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="135.0" y="292.8" width="4.2" height="72.2" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="144.4" y="298.4" width="4.2" height="66.6" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="149.1" y="242.5" width="4.2" height="122.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="153.8" y="297.7" width="4.2" height="67.3" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="158.4" y="303.3" width="4.2" height="61.7" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="163.1" y="295.0" width="4.2" height="70.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="167.8" y="303.8" width="4.2" height="61.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="172.5" y="296.0" width="4.2" height="69.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="177.2" y="305.0" width="4.2" height="60.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="181.9" y="296.6" width="4.2" height="68.4" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="186.6" y="305.0" width="4.2" height="60.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="191.2" y="297.3" width="4.2" height="67.7" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="195.9" y="305.6" width="4.2" height="59.4" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="200.6" y="294.1" width="4.2" height="70.9" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="205.3" y="242.2" width="4.2" height="122.8" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="210.0" y="306.8" width="4.2" height="58.2" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="214.7" y="299.2" width="4.2" height="65.8" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="219.4" y="305.6" width="4.2" height="59.4" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="224.1" y="294.1" width="4.2" height="70.9" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="228.8" y="303.3" width="4.2" height="61.7" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="233.4" y="296.0" width="4.2" height="69.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="238.1" y="300.4" width="4.2" height="64.6" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="242.8" y="295.3" width="4.2" height="69.7" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="247.5" y="305.6" width="4.2" height="59.4" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="252.2" y="298.0" width="4.2" height="67.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="256.9" y="315.5" width="4.2" height="49.5" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="261.6" y="294.4" width="4.2" height="70.6" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="266.2" y="344.0" width="4.2" height="21.0" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="270.9" y="295.3" width="4.2" height="69.7" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="275.6" y="354.5" width="4.2" height="10.5" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="280.3" y="300.4" width="4.2" height="64.6" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="289.7" y="289.3" width="4.2" height="75.7" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="299.1" y="304.4" width="4.2" height="60.6" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="308.4" y="305.0" width="4.2" height="60.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="317.8" y="305.0" width="4.2" height="60.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="327.2" y="301.3" width="4.2" height="63.7" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="331.9" y="354.5" width="4.2" height="10.5" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<rect x="336.6" y="301.3" width="4.2" height="63.7" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="345.9" y="307.5" width="4.2" height="57.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="355.3" y="354.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="364.7" y="337.8" width="4.2" height="27.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="383.4" y="354.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="392.8" y="354.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="477.2" y="354.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="505.3" y="344.0" width="4.2" height="21.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="514.7" y="344.0" width="4.2" height="21.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="542.8" y="344.0" width="4.2" height="21.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="552.2" y="333.4" width="4.2" height="31.6" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="561.6" y="337.8" width="4.2" height="27.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="570.9" y="354.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="580.3" y="319.5" width="4.2" height="45.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="589.7" y="354.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="599.1" y="344.0" width="4.2" height="21.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="608.4" y="337.8" width="4.2" height="27.2" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="617.8" y="344.0" width="4.2" height="21.0" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="627.2" y="324.9" width="4.2" height="40.1" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="636.6" y="354.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<rect x="645.9" y="354.5" width="4.2" height="10.5" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="60.0" y="379.0" font-size="11" text-anchor="middle">0</text>
+<text x="135.0" y="379.0" font-size="11" text-anchor="middle">8</text>
+<text x="210.0" y="379.0" font-size="11" text-anchor="middle">16</text>
+<text x="285.0" y="379.0" font-size="11" text-anchor="middle">24</text>
+<text x="360.0" y="379.0" font-size="11" text-anchor="middle">32</text>
+<text x="435.0" y="379.0" font-size="11" text-anchor="middle">40</text>
+<text x="510.0" y="379.0" font-size="11" text-anchor="middle">48</text>
+<text x="585.0" y="379.0" font-size="11" text-anchor="middle">56</text>
+<text x="660.0" y="379.0" font-size="11" text-anchor="middle">64</text>
+<text x="370.0" y="410.0" font-size="12" text-anchor="middle">지연 (µs, 1 µs 칸) — 세로축 로그(표본 수)</text>
+<rect x="470.0" y="6.0" width="12.0" height="12.0" fill="#4a7bd0" fill-opacity="0.55" stroke="#4a7bd0"/><text x="487.0" y="16.0" font-size="12" text-anchor="start">IRQ→ISR</text><rect x="560.0" y="6.0" width="12.0" height="12.0" fill="#e08a3c" fill-opacity="0.55" stroke="#e08a3c"/><text x="577.0" y="16.0" font-size="12" text-anchor="start">IRQ→태스크</text>
+</svg></figure>
+<p>그림 5 — <strong>측정 차트</strong>: 예제 7(FreeRTOS)과 예제 8(Zephyr, 슬라이스 끔)의 1 µs 칸 히스토그램(세로 로그 축). 파랑 = IRQ → ISR, 주황 = IRQ → 태스크. 두 RTOS 모두 ISR 쪽에 <strong>봉우리 둘 + 선반</strong>, 태스크 쪽에 <strong>같은 모양이 오른쪽으로 옮겨 간 것 + 긴 꼬리</strong>가 보인다.</p>
+<hr>
+<h2 id="6-히스토그램을-읽는다-모양-원인-증명">6. 히스토그램을 읽는다 — 모양 → 원인 → 증명<a class="anchor" href="#6-히스토그램을-읽는다-모양-원인-증명" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM J7과 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="6-1-여섯-가지-모양">6.1 여섯 가지 모양<a class="anchor" href="#6-1-여섯-가지-모양" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="18" font-size="13" font-weight="bold">히스토그램 모양 → 먼저 의심할 원인</text>
+<g>
+<line x1="20" y1="110" x2="210" y2="110" stroke="currentColor"/>
+<rect x="40" y="40" width="10" height="70" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="20" y="128" font-size="12">① 좁은 봉우리 하나</text>
+<text x="20" y="144" font-size="11">결정적 경로, 방해 없음</text>
+</g>
+<g>
+<line x1="245" y1="110" x2="435" y2="110" stroke="currentColor"/>
+<rect x="265" y="50" width="10" height="60" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<rect x="325" y="52" width="10" height="58" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="245" y="128" font-size="12">② 같은 꼴 봉우리가 일정 간격</text>
+<text x="245" y="144" font-size="11">위상 고정 간섭 (주기 배수, 같은 클럭)</text>
+</g>
+<g>
+<line x1="470" y1="110" x2="660" y2="110" stroke="currentColor"/>
+<rect x="490" y="40" width="10" height="70" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<rect x="500" y="92" width="100" height="18" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="470" y="128" font-size="12">③ 평평한 선반</text>
+<text x="470" y="144" font-size="11">무작위 위상의 차단 구간</text>
+<text x="470" y="160" font-size="11">폭 = L, 면적 = 듀티</text>
+</g>
+<g>
+<line x1="20" y1="270" x2="210" y2="270" stroke="currentColor"/>
+<rect x="40" y="200" width="10" height="70" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<rect x="140" y="258" width="6" height="12" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<rect x="170" y="262" width="6" height="8" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="20" y="288" font-size="12">④ 멀리 작은 무리</text>
+<text x="20" y="304" font-size="11">원인이 겹친 조합 (드물다)</text>
+</g>
+<g>
+<line x1="245" y1="270" x2="435" y2="270" stroke="currentColor"/>
+<polyline points="255,270 275,215 300,270" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<polyline points="330,270 360,225 395,270" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="245" y="288" font-size="12">⑤ 넓은 언덕 둘</text>
+<text x="245" y="304" font-size="11">두 동작 모드 (캐시 적중/미스, 경로 분기)</text>
+</g>
+<g>
+<line x1="470" y1="270" x2="660" y2="270" stroke="currentColor"/>
+<rect x="490" y="200" width="10" height="70" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<rect x="640" y="262" width="6" height="8" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="470" y="288" font-size="12">⑥ 홀로 먼 점 하나</text>
+<text x="470" y="304" font-size="11">측정 버그 먼저 의심, 그다음 드문 경로</text>
+</g>
+<text x="10" y="324" font-size="11">가로 = 지연, 세로 = 표본 수. 실제 히스토그램은 이 모양들의 합이다.</text>
+</svg></figure>
+<p>그림 6 — 모양별 첫 번째 의심. 이 노트의 측정에서 ①은 예제 5, ②는 DT6(4 µs 봉우리), ③은 CS15, ④는 tick + med 조합(53 · 57 µs), ⑤는 Zephyr의 idle vs busy <code>k_sem_give</code>(12.3 vs 17.8 µs), ⑥은 Zephyr 첫 시도의 476 µs(오래된 세마포어)로 실제로 보았다.</p>
+<p>모양마다 숫자를 읽는 법:</p>
+<ul><li><strong>선반의 폭 = 차단 구간의 길이 L</strong>, <strong>선반의 높이 × 폭(면적) = 그 구간이 켜져 있던 시간 비율</strong>(무작위 위상일 때). 예제 7의 CS15는 폭 약 16 µs, 면적 약 17%(679 / 4000)로 설계값 15 µs · 18%와 맞는다. 거꾸로, 모르는 시스템에서 선반이 보이면 "어떤 L짜리 구간이 듀티 몇 %로 돈다"를 바로 추정할 수 있다.</li><li><strong>봉우리 사이 간격 = 간섭의 양</strong>, <strong>두 번째 봉우리 높이 ÷ 전체 = 겹치는 비율</strong>. DT6는 간격 4 µs(6 µs − 2 µs 앞섬), 비율 정확히 1/2(두 주기에 한 번).</li><li><strong>두 단계 비교</strong>: ISR 단계에 없고 태스크 단계에만 있는 모양은 ⑦(상위 태스크)이나 ISR 이후 경로(PendSV를 막는 것) 쪽이다. 두 단계에 같은 양으로 있는 모양은 ①(ISR 진입 전) 쪽이다.</li></ul>
+<h3 id="6-2-원인-태깅-표본마다-그때-누가-있었나-를-기록한다">6.2 원인 태깅 — 표본마다 "그때 누가 있었나"를 기록한다<a class="anchor" href="#6-2-원인-태깅-표본마다-그때-누가-있었나-를-기록한다" aria-label="link">#</a></h3>
+<p>모양만으로는 추측이다. 증명은 <strong>표본 하나하나에 원인을 붙이는 것</strong>이다. 예제 7이 쓴 방법은 일반적이다:</p>
+<ol><li>의심 가는 방해꾼(크리티컬 섹션, ISR, 태스크)마다 <strong>마지막 실행 구간 [t0, t1]</strong>을 같은 사이클 시계로 남긴다(저장 두 번 — 예제 1 기준 수십 ns).</li><li>측정 지점에서 <strong>IRQ가 올라간 시각</strong> a = 지금 − (타이머 경과)를 계산한다. 이 계산이 되는 것이 타이머 스냅샷 방법의 큰 장점이다.</li><li>[a, 지금]과 겹친 방해꾼을 비트마스크로 만들어, 마스크별 개수와 최댓값을 모은다.</li><li>태그별 최댓값이 "그 원인이 만들 수 있는 최악"의 측정값이다. 태그 조합별 최댓값이 §7.2의 합성 재료다.</li></ol>
+<p>주의점: 겹쳤다고 원인인 것은 아니다. 예제 7의 ISR 쪽 "tick" 10개는 최대 3.64 µs로 거의 무해하다 — TIMER0이 SysTick을 선점하므로 BASEPRI가 올라간 짧은 구간에 떨어진 경우만 늦는다. <strong>태그 = 상관, 원인 증명 = 다음 절의 끄기</strong>다.</p>
+<h3 id="6-3-예제-9-하나씩-끄기-ablation-그-원인을-없애면-그-모양이-사라지나">6.3 예제 9 — 하나씩 끄기(ablation): 그 원인을 없애면 그 모양이 사라지나<a class="anchor" href="#6-3-예제-9-하나씩-끄기-ablation-그-원인을-없애면-그-모양이-사라지나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 7을 그대로 두고 컴파일 플래그 <code>OFF</code>로 방해꾼을 하나씩 끈다. 1 = CS 끔, 2 = DT 끔, 4 = med가 깨어나되 일은 안 함, 7 = 셋 다, 15 = med 태스크 자체를 만들지 않음.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; for off in 1 2 4 7 15; do echo "== OFF=$off"; make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=$S/frt/ex7_load.c OUT=/var/tmp/rtos/E3/ex9_off$off EXTRA_CFLAGS="-I$S/inc -DWRAP_TICK -DOFF=$off" &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /var/tmp/rtos/E3/ex9_off$off/app.elf 120 | tee /var/tmp/rtos/E3/ex9_off$off.out | grep -v "^bin\|board_exit"; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== OFF=1
+IRQ-&gt;ISR  n=4000 min=120 avg=2560 max=8480 ns
+  n=1992 max=2760 ns : (no tagged cause)
+  n=1992 max=7600 ns : DT6 
+  n=8 max=3640 ns : tick 
+  n=8 max=8480 ns : DT6 tick 
+IRQ-&gt;task n=4000 min=11680 avg=15800 max=57920 ns
+  n=1907 max=18040 ns : (no tagged cause)
+  n=1894 max=22880 ns : DT6 
+  n=58 max=45320 ns : med25 
+  n=58 max=50160 ns : DT6 med25 
+  n=35 max=53120 ns : tick med25 
+  n=48 max=57920 ns : DT6 tick med25 
+== OFF=2
+IRQ-&gt;ISR  n=4000 min=120 avg=1760 max=16120 ns
+  n=3190 max=2800 ns : (no tagged cause)
+  n=796 max=16120 ns : CS15 
+  n=14 max=3400 ns : tick 
+IRQ-&gt;task n=4000 min=11720 avg=15040 max=68240 ns
+  n=3029 max=17960 ns : (no tagged cause)
+  n=778 max=28240 ns : CS15 
+  n=117 max=45240 ns : med25 
+  n=58 max=53240 ns : tick med25 
+  n=18 max=68240 ns : CS15 tick med25 
+== OFF=4
+IRQ-&gt;ISR  n=4000 min=120 avg=4000 max=20920 ns
+  n=1610 max=2760 ns : (no tagged cause)
+  n=382 max=16080 ns : CS15 
+  n=1695 max=7600 ns : DT6 
+  n=295 max=20920 ns : CS15 DT6 
+  n=8 max=3640 ns : tick 
+  n=10 max=8480 ns : DT6 tick 
+IRQ-&gt;task n=4000 min=11760 avg=16480 max=46880 ns
+  n=1578 max=18040 ns : (no tagged cause)
+  n=371 max=28200 ns : CS15 
+  n=1651 max=22880 ns : DT6 
+  n=288 max=33040 ns : CS15 DT6 
+  n=9 max=20080 ns : med25 
+  n=7 max=24920 ns : DT6 med25 
+  n=31 max=28000 ns : tick med25 
+  n=11 max=43920 ns : CS15 tick med25 
+  n=47 max=32800 ns : DT6 tick med25 
+  n=7 max=46880 ns : CS15 DT6 tick med25 
+== OFF=7
+IRQ-&gt;ISR  n=4000 min=120 avg=120 max=3600 ns
+  n=3984 max=2800 ns : (no tagged cause)
+  n=16 max=3600 ns : tick 
+IRQ-&gt;task n=4000 min=11720 avg=12520 max=28000 ns
+  n=3916 max=18040 ns : (no tagged cause)
+  n=14 max=20120 ns : med25 
+  n=70 max=28000 ns : tick med25 
+== OFF=15
+IRQ-&gt;ISR  n=4000 min=120 avg=120 max=1400 ns
+  n=3993 max=160 ns : (no tagged cause)
+  n=7 max=1400 ns : tick 
+IRQ-&gt;task n=4000 min=12200 avg=12280 max=14040 ns
+  n=3939 max=12280 ns : (no tagged cause)
+  n=61 max=14040 ns : tick </code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li><strong>CS를 끄면(OFF=1) ISR 최댓값이 20.92 → 8.48 µs</strong>, CS15 태그가 사라지고 표본이 "없음"과 DT6로 정확히 반반(1992 / 1992)이 된다. 선반이 CS 때문이었다는 증명이다.</li><li><strong>DT를 끄면(OFF=2) 4 µs 봉우리가 사라지고</strong>(DT6 태그 0), "없음" 3190 + CS15 796. CS15 표본이 두 배 가까이 된 것은 DT와 겹치던 표본이 CS 단독으로 옮겨 왔기 때문이다.</li><li><strong>med에게 일을 안 시켜도(OFF=4) med 태그는 남는다</strong>. med는 여전히 매 tick 깨어나 <code>vTaskDelay</code>로 다시 잠드는 커널 경로를 돈다. 25 µs 일이 사라진 만큼 꼬리가 73.92 → 46.88 µs로 줄었을 뿐이다.</li><li><strong>셋 다 꺼도(OFF=7) 태그 없는 꼬리가 18 µs까지 남는다</strong>(기본 11.72 µs). 이것이 §5.2에서 남겨 둔 "태깅하지 않은 원인"이다. 가설: med의 <strong>깨어남 · 잠듦 커널 경로</strong>(md 구간 밖, <code>vTaskDelay</code> 호출 안)와 그 안의 크리티컬 섹션. <strong>med 태스크 자체를 없애면(OFF=15) 태그 없는 표본의 최댓값이 12.28 µs(= 기본값)로 붙고 ISR 쪽도 160 ns가 된다</strong> — 가설이 맞았다. "태깅 안 된 꼬리"는 <strong>계측하지 않은 원인이 있다는 신호</strong>이고, 끄기로 범인을 좁힌다.</li><li>남은 tick 61개(최대 14.04 µs)는 커널 자신의 tick 처리다 — FreeRTOS에서 1 kHz tick의 비용은 이 시스템에서 최악 +1.8 µs다.</li></ul>
+<figure class="chart"><svg viewBox="0 0 680 250" xmlns="http://www.w3.org/2000/svg">
+<text x="10.0" y="18.0" font-size="13" text-anchor="start">원인을 하나씩 끄면 — IRQ→태스크 최댓값과 평균 (µs)</text>
+<text x="150.0" y="51.0" font-size="12" text-anchor="end">모두 켬</text><rect x="160.0" y="34.0" width="332.6" height="22.0" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/><rect x="160.0" y="40.0" width="78.3" height="10.0" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="498.6" y="49.0" font-size="11" text-anchor="start">max 73.92 / avg 17.40</text>
+<text x="150.0" y="85.0" font-size="12" text-anchor="end">CS 끔</text><rect x="160.0" y="68.0" width="260.6" height="22.0" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/><rect x="160.0" y="74.0" width="71.1" height="10.0" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="426.6" y="83.0" font-size="11" text-anchor="start">max 57.92 / avg 15.80</text>
+<text x="150.0" y="119.0" font-size="12" text-anchor="end">DT 끔</text><rect x="160.0" y="102.0" width="307.1" height="22.0" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/><rect x="160.0" y="108.0" width="67.7" height="10.0" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="473.1" y="117.0" font-size="11" text-anchor="start">max 68.24 / avg 15.04</text>
+<text x="150.0" y="153.0" font-size="12" text-anchor="end">med 일 없음</text><rect x="160.0" y="136.0" width="211.0" height="22.0" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/><rect x="160.0" y="142.0" width="74.2" height="10.0" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="377.0" y="151.0" font-size="11" text-anchor="start">max 46.88 / avg 16.48</text>
+<text x="150.0" y="187.0" font-size="12" text-anchor="end">셋 다 끔</text><rect x="160.0" y="170.0" width="126.0" height="22.0" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/><rect x="160.0" y="176.0" width="56.3" height="10.0" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="292.0" y="185.0" font-size="11" text-anchor="start">max 28.00 / avg 12.52</text>
+<text x="150.0" y="221.0" font-size="12" text-anchor="end">med 태스크 없음</text><rect x="160.0" y="204.0" width="63.2" height="22.0" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/><rect x="160.0" y="210.0" width="55.3" height="10.0" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="229.2" y="219.0" font-size="11" text-anchor="start">max 14.04 / avg 12.28</text>
+<rect x="160.0" y="236.0" width="12.0" height="10.0" fill="#d0564a" fill-opacity="0.35" stroke="#d0564a"/><text x="177.0" y="245.0" font-size="11" text-anchor="start">최댓값</text><rect x="240.0" y="236.0" width="12.0" height="10.0" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/><text x="257.0" y="245.0" font-size="11" text-anchor="start">평균</text>
+</svg></figure>
+<p>그림 7 — <strong>측정 차트</strong>: 예제 7 · 9의 IRQ → 태스크 최댓값(빨강 막대)과 평균(파랑 막대). 원인을 하나씩 끌 때 <strong>평균은 12 ~ 17 µs 사이에서 거의 안 움직이지만 최댓값은 74 → 14 µs로 다섯 배 움직인다.</strong> 최악값 문제는 평균으로 보이지 않는다.</p>
+<h3 id="6-4-don의-경험과-연결">6.4 Don의 경험과 연결<a class="anchor" href="#6-4-don의-경험과-연결" aria-label="link">#</a></h3>
+<p>SSD 펌웨어의 QoS 디버깅에서 Don이 했던 일이 정확히 이 순서다: (1) 지연 분포를 본다(봉우리 · 꼬리), (2) 명령마다 "그때 GC가 돌았나, read retry였나, 다른 다이와 채널 충돌이었나"를 태깅한다, (3) GC를 끄거나 스로틀해서 꼬리가 사라지는지 본다. MCU에서는 GC 대신 크리티컬 섹션 · 상위 ISR · 상위 태스크 · tick이 원인 후보이고, 태깅에 쓰는 시계가 µs가 아니라 40 ns(실칩이면 2 ns)일 뿐이다.</p>
+<hr>
+<h2 id="7-최악-경로-찾기-가장-긴-구간-상한-합성-얼마나-오래-재나">7. 최악 경로 찾기 — 가장 긴 구간, 상한 합성, 얼마나 오래 재나<a class="anchor" href="#7-최악-경로-찾기-가장-긴-구간-상한-합성-얼마나-오래-재나" aria-label="link">#</a></h2>
+<blockquote><p>🔁 이 절은 Bare-Metal BM J7과 겹친다 (주인: 이 노트).</p></blockquote>
+<h3 id="7-1-왜-평균은-쓸모가-없나">7.1 왜 평균은 쓸모가 없나<a class="anchor" href="#7-1-왜-평균은-쓸모가-없나" aria-label="link">#</a></h3>
+<p>마감(deadline)은 <strong>모든</strong> job에 걸린다. 1 kHz 제어 루프에서 1000번에 한 번 늦으면 1초에 한 번 늦는 것이다. 평균은 "얼마나 자주 겹치나"(듀티)에 좌우되고, 마감을 결정하는 것은 꼬리다. 예제 7의 IRQ → 태스크로 다시 보자(아래 예제 11 출력): 평균 약 17 µs, p50 17 µs, p90 24 µs, <strong>p99 54 µs</strong>, p99.9 62 µs, 최댓값 73.92 µs. "평균 17 µs라 125 µs(8 kHz) 예산에 넉넉하다"는 말은 맞지만 이유가 틀렸다 — 넉넉한 이유는 <strong>최댓값 74 µs가 125 µs보다 작아서</strong>여야 하고, 그 최댓값도 "지금까지 본 것"일 뿐이다(§7.4). 표준편차도 같은 문제다: 이 분포처럼 봉우리 둘 + 드문 꼬리이면 표준편차는 어느 것도 대표하지 않는다. 실시간 지연은 <strong>min · p50 · p99 · p99.9 · max(+ 표본 수 · 측정 시간)</strong>로 보고한다(EL N3와 같은 형식).</p>
+<h3 id="7-2-max-plus-합성-최악값-상한을-조각으로-세운다">7.2 max-plus 합성 — 최악값 상한을 조각으로 세운다<a class="anchor" href="#7-2-max-plus-합성-최악값-상한을-조각으로-세운다" aria-label="link">#</a></h3>
+<p>측정으로 얻은 최댓값은 <strong>하한</strong>이다(그 이상이 있을 수 있다). 설계에는 <strong>상한</strong>이 필요하다. 그림 1의 조각들로 상한을 세우는 규칙은 두 가지다.</p>
+<ul><li><strong>차단(blocking)은 max</strong>: 낮은 우선순위 코드가 마스크를 잡고 있는 구간(크리티컬 섹션, 커널 마스킹, 스케줄러 잠금)은 IRQ가 올라간 순간에 <strong>하나만</strong> 진행 중일 수 있다. 그래서 그중 가장 긴 것 하나만 더한다. 이것이 "가장 긴 크리티컬 섹션"이 핵심 숫자인 이유다(C7).</li><li><strong>간섭(interference)은 Σ</strong>: 더 높은 우선순위의 ISR · 태스크는 기다리는 동안 <strong>몇 번이고 다시</strong> 들어올 수 있으므로 모두 더한다(기다리는 창이 길면 같은 ISR이 여러 번 — 이 반복 계산이 N3의 응답 시간 분석 RTA다).</li></ul>
+<p>그래서 <strong>상한 = 기본 경로 + max(차단 후보들) + Σ(간섭 후보들)</strong>이다. 덧셈과 max만 쓰는 대수라서 max-plus 합성이라고 부른다.</p>
+<figure class="chart"><svg viewBox="0 0 680 230" xmlns="http://www.w3.org/2000/svg">
+<text x="10" y="18" font-size="13" font-weight="bold">예제 7의 IRQ → 태스크 상한을 조각으로 (µs)</text>
+<text x="140" y="62" font-size="12" text-anchor="end">상한 합성</text>
+<rect x="150" y="44" width="73.7" height="28" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="186" y="63" font-size="11" text-anchor="middle">기본 12.28</text>
+<rect x="223.7" y="44" width="100.8" height="28" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="274" y="63" font-size="11" text-anchor="middle">CS 16.80</text>
+<rect x="324.5" y="44" width="61.4" height="28" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="355" y="63" font-size="11" text-anchor="middle">DT 10.24</text>
+<rect x="385.9" y="44" width="245.8" height="28" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="509" y="63" font-size="11" text-anchor="middle">tick + med 40.96</text>
+<text x="631" y="92" font-size="11" text-anchor="end">= 80.28</text>
+<line x1="593.5" y1="36" x2="593.5" y2="110" stroke="currentColor" stroke-dasharray="4 3"/>
+<text x="589" y="124" font-size="11" text-anchor="end">측정 최댓값 73.92 (4000개 중 14개)</text>
+<text x="20" y="156" font-size="12">빨강 = 차단 → 후보 중 가장 긴 하나 (max). CS15, 커널 마스킹, tick의 BASEPRI 구간 중 CS15가 가장 길다</text>
+<text x="20" y="178" font-size="12">파랑 · 주황 = 간섭 → 모두 더한다 (Σ). 상위 ISR, 상위 태스크 + 그것을 깨운 tick</text>
+<text x="20" y="200" font-size="12">각 조각 = 예제 7에서 그 원인만 태그된 표본의 최댓값 − 기본값 (예제 11이 계산)</text>
+<text x="20" y="222" font-size="12">상한 ≥ 측정 최댓값이어야 정상이다. 거꾸로면 빠진 원인이 있다</text>
+</svg></figure>
+<p>그림 8 — max-plus 합성. 원인별 "초과분"을 측정에서 따로 얻고(원인 태깅 덕분), 차단은 max · 간섭은 Σ로 묶는다. 상한 80.28 µs가 측정 최댓값 73.92 µs보다 크다 — 앞뒤가 맞는다.</p>
+<p>이 합성의 약점도 알아야 한다. (1) 각 초과분 자체가 측정 최댓값이라 그 조각의 진짜 최악보다 작을 수 있다 — 조각마다 코드 경로를 보고 최악 입력을 따로 만든다(WCET, N 모듈). (2) 간섭이 기다리는 창 안에 <strong>여러 번</strong> 올 수 있다(창이 DT 주기 1 ms보다 짧아서 여기선 한 번). (3) 태깅하지 않은 원인은 빠진다(§6.3에서 med의 커널 경로를 끄기로 찾은 것처럼).</p>
+<h3 id="7-3-예제-10-가장-긴-크리티컬-섹션을-찾는다-스택에-쌓인-lr">7.3 예제 10 — 가장 긴 크리티컬 섹션을 찾는다: 스택에 쌓인 LR<a class="anchor" href="#7-3-예제-10-가장-긴-크리티컬-섹션을-찾는다-스택에-쌓인-lr" aria-label="link">#</a></h3>
+<p>"우리 펌웨어에서 가장 긴 크리티컬 섹션은 어디인가?" — 수만 줄 코드에서 <code>taskENTER_CRITICAL</code>을 grep해서 하나씩 재는 것은 끝이 없다. 하드웨어가 답을 준다: <strong>IRQ가 오래 막혔다가 마침내 들어온 순간, 하드웨어가 쌓은 예외 프레임의 PC는 "마스크를 푼 바로 다음 명령"</strong>이다(B2 §3). 그러니 지연이 큰 표본에서 쌓인 PC(와 LR)를 기록하면, 막고 있던 범인이 그 자리에 있다.</p>
+<p>무엇을 확인하나: 우선순위 1 태스크가 세 함수를 부른다 — <code>ring_put</code>(2 µs, 매번), <code>cfg_update</code>(12 µs, 8번에 한 번), <code>log_flush</code>(60 µs, 400번에 한 번, 무작위). TIMER0(약 100 µs 주기) ISR을 naked 스텁으로 받아 예외 프레임 주소를 C 함수에 넘기고, 지연 3 µs 이상인 표본만 <strong>쌓인 LR별</strong>로 개수 · 최댓값 · 그때의 PC를 모은다. 500 · 2000 · 8000 · 20000 표본 시점의 "지금까지 최댓값"도 찍는다(§7.4).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex10 — find the longest critical section: the ISR reads its own stacked PC/LR, keeps the worst */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "e3.h"
+volatile uint32_t e3_armed, e3_s4;
+void *volatile e3_hi;
+typedef struct { uint32_t pc, lr, lat, n; } site_t;
+static site_t site[8];                              /* worst latency per stacked LR (caller) */
+static volatile uint32_t nsamp, worst;
+__attribute__((noinline)) static void ring_put(void)     /* 2 us, very often */
+{ taskENTER_CRITICAL(); spin_cyc(50); taskEXIT_CRITICAL(); }
+__attribute__((noinline)) static void cfg_update(void)   /* 12 us, sometimes */
+{ taskENTER_CRITICAL(); spin_cyc(300); taskEXIT_CRITICAL(); }
+__attribute__((noinline)) static void log_flush(void)    /* 60 us, 1 call in 400 */
+{ taskENTER_CRITICAL(); spin_cyc(1500); taskEXIT_CRITICAL(); }
+void t0_c(uint32_t *frame)                          /* frame[5] = stacked LR, frame[6] = PC */
+{
+    uint32_t lat = t0_elapsed();
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    nsamp++;
+    if (lat &gt; worst) worst = lat;
+    if (lat &lt; 75) return;                           /* only record &gt; 3 us */
+    int i = 0;
+    while (i &lt; 7 &amp;&amp; site[i].n &amp;&amp; site[i].lr != frame[5]) i++;
+    site[i].n++; site[i].lr = frame[5];
+    if (lat &gt; site[i].lat) { site[i].lat = lat; site[i].pc = frame[6]; }
+}
+__attribute__((naked)) void TIMER0_IRQHandler(void)
+{
+    __asm volatile("tst lr, #4 \n ite eq \n mrseq r0, msp \n mrsne r0, psp \n b t0_c");
+}
+static void lo_task(void *a)
+{
+    (void)a;
+    for (uint32_t k = 0;; k++) {
+        ring_put();
+        if (k % 8 == 0) cfg_update();
+        if (rnd(400) == 0) log_flush();
+        spin_cyc(250 + rnd(1250));
+    }
+}
+static void report_task(void *a)
+{
+    (void)a;
+    static const uint32_t at[] = { 500, 2000, 8000, 20000 };
+    for (int j = 0; j &lt; 4; j++) {
+        while (nsamp &lt; at[j]) vTaskDelay(1);
+        board_printf_raw("after %u samples: worst = %u ns\n", at[j], NS(worst));
+    }
+    t0_stop();
+    for (int i = 0; i &lt; 8 &amp;&amp; site[i].n; i++)
+        board_printf_raw("site lr=0x%x pc=0x%x n=%u worst=%u ns\n", site[i].lr, site[i].pc, site[i].n, NS(site[i].lat));
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(lo_task, "lo", 256, NULL, 1, NULL);
+    xTaskCreate(report_task, "rep", 256, NULL, 2, NULL);
+    t0_start(2500 + 13, 0x40);                      /* ~100 us */
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<p>(<code>e3_armed</code> · <code>e3_hi</code>는 공용 FreeRTOSConfig.h의 trace 훅이 참조하므로 정의만 해 둔다.) 첫 빌드(빌드 A)는 기본 옵션이다. 기록된 주소는 호스트에서 <code>addr2line</code>으로 함수 · 줄로 바꿨다.</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; O=/var/tmp/rtos/E3/ex10; make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=$S/frt/ex10_culprit.c OUT=$O EXTRA_CFLAGS="-I$S/inc" &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $O/app.elf 120 | tee $O.out; grep site $O.out | while read s lr pc n w; do printf "%s %s %s %s -&gt; LR: " "$lr" "$pc" "$n" "$w"; arm-none-eabi-addr2line -f -s -e $O/app.elf ${lr#lr=} | paste -sd" "; printf "      PC: "; arm-none-eabi-addr2line -f -s -e $O/app.elf ${pc#pc=} | paste -sd" "; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>after 500 samples: worst = 52960 ns
+after 2000 samples: worst = 52960 ns
+after 8000 samples: worst = 60760 ns
+after 20000 samples: worst = 60760 ns
+site lr=0x223 pc=0x210e n=647 worst=13320 ns
+site lr=0x21b pc=0x210e n=172 worst=3320 ns
+site lr=0x229 pc=0x210e n=80 worst=60760 ns
+site lr=0x0 pc=0x215a n=13 worst=3840 ns
+[board_exit] code=0
+lr=0x223 pc=0x210e n=647 worst=13320 ns -&gt; LR: lo_task ex10_culprit.c:37 (discriminator 1)
+      PC: vPortExitCritical port.c:452
+lr=0x21b pc=0x210e n=172 worst=3320 ns -&gt; LR: lo_task ex10_culprit.c:37
+      PC: vPortExitCritical port.c:452
+lr=0x229 pc=0x210e n=80 worst=60760 ns -&gt; LR: rnd e3.h:37
+      PC: vPortExitCritical port.c:452
+lr=0x0 pc=0x215a n=13 worst=3840 ns -&gt; LR: ?? startup.c:33
+      PC: SysTick_Handler port.c:515</code></pre></figure>
+<p>읽는 법과 함정:</p>
+<ul class="tasks"><li><strong>PC는 모두 <code>vPortExitCritical</code>(port.c 452행, 함수 끝)</strong>이다. 당연하다 — BASEPRI를 0으로 내리는 명령이 거기 있고, 막혀 있던 IRQ는 바로 그다음 명령에서 들어온다. <strong>PC는 "어디서 풀었나"만 말하고 "누가 잡았나"는 말하지 않는다.</strong> 그래서 LR을 같이 기록했다(<code>vPortExitCritical</code>은 LR을 건드리지 않는 말단 함수라 쌓인 LR = 그것을 부른 쪽의 복귀 주소).</li><li>그런데 LR이 <code>lo_task</code>를 가리킨다. 세 함수가 <code>taskEXIT_CRITICAL()</code>을 <strong>꼬리 호출(tail call)</strong>로 컴파일되어 <code>bl</code> 대신 <code>b.w vPortExitCritical</code>로 뛰었기 때문이다 — 그 함수의 프레임이 사라지고 LR은 <code>lo_task</code> 안의 복귀 지점이 된다. 줄 번호도 인라인된 <code>rnd()</code>(e3.h:37)처럼 엉뚱하게 나온다. 그래도 <strong>LR 값 세 개(0x21b, 0x223, 0x229)는 서로 다른 호출 지점</strong>이고, 그 주소를 디스어셈블에서 찾으면 각각 <code>ring_put</code>, <code>cfg_update</code>, <code>log_flush</code> 호출 바로 뒤다.</li><li>줄 번호까지 바로 보려고 꼬리 호출을 끈 빌드 B(<code>-fno-optimize-sibling-calls</code>)를 다시 돌렸다.</li></ul>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/E3; O=/var/tmp/rtos/E3/ex10b; make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS=$S/frt/ex10_culprit.c OUT=$O EXTRA_CFLAGS="-I$S/inc -fno-optimize-sibling-calls" &gt;/dev/null &amp;&amp; ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $O/app.elf 120 | tee $O.out; grep site $O.out | while read s lr pc n w; do printf "%s %s %s -&gt; " "$lr" "$n" "$w"; arm-none-eabi-addr2line -f -s -e $O/app.elf ${lr#lr=} | paste -sd" "; done; arm-none-eabi-objdump -d --no-show-raw-insn /var/tmp/rtos/E3/ex10/app.elf | awk "/&lt;ring_put&gt;:/,/^\$/"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>after 500 samples: worst = 53120 ns
+after 2000 samples: worst = 53120 ns
+after 8000 samples: worst = 55760 ns
+after 20000 samples: worst = 58840 ns
+site lr=0x17d pc=0x20fa n=647 worst=13280 ns
+site lr=0x15f pc=0x20fa n=159 worst=3280 ns
+site lr=0x19f pc=0x20fa n=73 worst=58840 ns
+site lr=0x871 pc=0x2014 n=2 worst=3080 ns
+site lr=0x0 pc=0x2146 n=18 worst=3880 ns
+[board_exit] code=0
+lr=0x17d n=647 worst=13280 ns -&gt; cfg_update ex10_culprit.c:13
+lr=0x15f n=159 worst=3280 ns -&gt; ring_put ex10_culprit.c:11
+lr=0x19f n=73 worst=58840 ns -&gt; log_flush ex10_culprit.c:15
+lr=0x871 n=2 worst=3080 ns -&gt; vTaskSwitchContext tasks.c:5235 (discriminator 1)
+lr=0x0 n=18 worst=3880 ns -&gt; ?? startup.c:33
+00000148 &lt;ring_put&gt;:
+     148:	push	{r3, lr}
+     14a:	bl	20b0 &lt;vPortEnterCritical&gt;
+     14e:	ldr	r2, [pc, #20]	@ (164 &lt;ring_put+0x1c&gt;)
+     150:	ldr	r1, [r2, #24]
+     152:	ldr	r3, [r2, #24]
+     154:	subs	r3, r3, r1
+     156:	cmp	r3, #49	@ 0x31
+     158:	bls.n	152 &lt;ring_put+0xa&gt;
+     15a:	ldmia.w	sp!, {r3, lr}
+     15e:	b.w	20fc &lt;vPortExitCritical&gt;
+     162:	nop
+     164:	.word	0x40028000</code></pre></figure>
+<p>(디스어셈블은 빌드 A의 <code>ring_put</code> — 마지막 <code>b.w vPortExitCritical</code>이 꼬리 호출이다.) 출력에서 볼 것:</p>
+<ul><li>이제 LR이 <strong><code>log_flush</code> 15행(최악 58.84 µs, 73번), <code>cfg_update</code> 13행(13.28 µs, 647번), <code>ring_put</code> 11행(3.28 µs, 159번)</strong>을 바로 가리킨다. 가장 긴 크리티컬 섹션이 이름과 줄 번호로 나왔다. 소스를 하나도 읽지 않았다.</li><li>덤으로 커널 자신의 마스킹 구간 두 곳이 잡혔다: <code>vTaskSwitchContext</code>(PendSV 안, 3.08 µs)와 SysTick 핸들러(PC가 port.c 515행 <code>xPortSysTickHandler</code>, 3.84 ~ 3.88 µs). LR 0x0은 SysTick이 예외 핸들러라 쌓인 LR이 의미 없는 경우다 — PC로 본다.</li><li><strong>많이 걸린 것 ≠ 긴 것</strong>: <code>cfg_update</code>가 647번으로 제일 자주 걸렸지만 범인은 73번뿐인 <code>log_flush</code>다. 개수가 아니라 <strong>최댓값으로 정렬</strong>한다.</li><li>실무 확장: 이 기록 구조체를 <code>.noinit</code> RAM에 두면 리셋 뒤에도 남는다(M5). 필드에서 몇 주 돌린 "최악 지연 + 그때의 PC/LR + 타임스탬프"는 어떤 벤치마크보다 값지다. PC 하나만 남기는 대신 쌓인 프레임 몇 워드와 PSP를 같이 남기면 스택을 거슬러 올라갈 수도 있다.</li><li>같은 아이디어를 하드웨어로 하면 DWT의 PC 샘플링이나 ETM이 된다(M6). 이 방법은 계측 코드가 ISR 하나뿐이라 observer effect가 작다.</li></ul>
+<h3 id="7-4-오래-재야-하는-이유-최댓값은-측정-시간의-함수다">7.4 오래 재야 하는 이유 — 최댓값은 측정 시간의 함수다<a class="anchor" href="#7-4-오래-재야-하는-이유-최댓값은-측정-시간의-함수다" aria-label="link">#</a></h3>
+<p>예제 10 출력의 첫 네 줄이 핵심이다. 빌드 A의 최댓값은 500 표본에서 52.96 µs, 8000에서 60.76 µs. 빌드 B는 같은 코드인데(옵션만 다름) 53.12 → 55.76 → 58.84 µs로 <strong>20000 표본이 지나도 계속 올라간다</strong>. 진짜 최악은 <code>log_flush</code> 60 µs + 진입 · 퇴장 ≈ 61.5 µs다.</p>
+<figure class="chart"><svg viewBox="0 0 680 260" xmlns="http://www.w3.org/2000/svg">
+<text x="10.0" y="18.0" font-size="13" text-anchor="start">오래 잴수록 최댓값은 올라간다 — ex10 (µs)</text>
+<line x1="70" y1="220" x2="590" y2="220" stroke="currentColor"/><line x1="70" y1="220" x2="70" y2="50" stroke="currentColor"/>
+<text x="64.0" y="224.0" font-size="11" text-anchor="end">50</text>
+<text x="64.0" y="175.4" font-size="11" text-anchor="end">54</text>
+<text x="64.0" y="126.9" font-size="11" text-anchor="end">58</text>
+<text x="64.0" y="78.3" font-size="11" text-anchor="end">62</text>
+<text x="127.7" y="235.0" font-size="11" text-anchor="middle">500</text>
+<text x="284.2" y="235.0" font-size="11" text-anchor="middle">2000</text>
+<text x="440.8" y="235.0" font-size="11" text-anchor="middle">8000</text>
+<text x="544.2" y="235.0" font-size="11" text-anchor="middle">20000</text>
+<line x1="70" y1="80.4" x2="590" y2="80.4" stroke="#d0564a" stroke-dasharray="5 4"/><text x="590.0" y="74.4" font-size="11" text-anchor="end">상한 ≈ 61.5 (60 + 진입·퇴장)</text>
+<polyline fill="none" stroke="#4a7bd0" stroke-width="2" points="127.7,184.1 284.2,184.1 440.8,89.3 544.2,89.3"/>
+<circle cx="127.7" cy="184.1" r="3.5" fill="#4a7bd0"/>
+<circle cx="284.2" cy="184.1" r="3.5" fill="#4a7bd0"/>
+<circle cx="440.8" cy="89.3" r="3.5" fill="#4a7bd0"/>
+<circle cx="544.2" cy="89.3" r="3.5" fill="#4a7bd0"/>
+<text x="552.2" y="93.3" font-size="11" text-anchor="start">빌드 A 60.76</text>
+<polyline fill="none" stroke="#e08a3c" stroke-width="2" points="127.7,182.1 284.2,182.1 440.8,150.1 544.2,112.7"/>
+<circle cx="127.7" cy="182.1" r="3.5" fill="#e08a3c"/>
+<circle cx="284.2" cy="182.1" r="3.5" fill="#e08a3c"/>
+<circle cx="440.8" cy="150.1" r="3.5" fill="#e08a3c"/>
+<circle cx="544.2" cy="112.7" r="3.5" fill="#e08a3c"/>
+<text x="552.2" y="116.7" font-size="11" text-anchor="start">빌드 B 58.84</text>
+<text x="330.0" y="252.0" font-size="11" text-anchor="middle">표본 수 (로그 축)</text>
+</svg></figure>
+<p>그림 9 — <strong>측정 차트</strong>: 예제 10 두 빌드의 "지금까지 최댓값". 빨간 점선은 코드에서 구한 상한이다. 최댓값은 표본 수의 로그를 따라 계단식으로 오르고, 빌드마다 다른 계단을 밟는다(코드 배치가 바뀌면 위상이 바뀐다).</p>
+<p>왜 이렇게 느린가? 60 µs <code>log_flush</code>가 400번에 한 번 불리므로 CPU 시간의 약 0.39%가 그 안이다. 지연이 59 µs 이상이 되려면 IRQ가 그 60 µs 창의 <strong>처음 1 µs</strong> 안에 떨어져야 한다(그래야 남은 59 µs를 기다린다). 확률은 0.39% × 1/60 ≈ 0.0065%. 이것을 계산하는 것이 예제 11이다.</p>
+<h3 id="7-5-예제-11-평균-vs-꼬리-상한-합성-필요한-측정-시간-python">7.5 예제 11 — 평균 vs 꼬리, 상한 합성, 필요한 측정 시간 (Python)<a class="anchor" href="#7-5-예제-11-평균-vs-꼬리-상한-합성-필요한-측정-시간-python" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 7의 히스토그램에서 백분위를 구하고, §7.2의 상한을 숫자로 합성하고, 예제 10의 "드문 긴 구간"을 99% 확률로 한 번이라도 보려면 몇 표본이 필요한지 계산한다. 확률 p인 사건을 n번 시도에서 한 번 이상 볼 확률이 1 − (1 − p)^n이므로 n = ln(0.01) / ln(1 − p)다.</p>
+<figure class="code"><span class="lang">python</span><pre><code># ex11 — average vs tail, max-plus composition, and "how long must I run?" from ex7/ex10 numbers
+import math, re
+def hist(path, col):                       # col 0 = isr, 1 = task; 1 us bins from ex7/ex8 output
+    h = {}
+    for m in re.finditer(r"bin (\d+) us: isr=(\d+) task=(\d+)", open(path).read()):
+        h[int(m[1])] = int(m[2 + col])
+    return h
+def pct(h, q):
+    n, acc = sum(h.values()), 0
+    for b in sorted(h):
+        acc += h[b]
+        if acc &gt;= q * n: return b
+h = hist("/var/tmp/rtos/E3/ex7.out", 1)
+avg = sum(b * c for b, c in h.items()) / sum(h.values())
+print(f"FreeRTOS IRQ-&gt;task (1 us bins): avg~{avg:.1f}  p50={pct(h,.5)}  p90={pct(h,.9)}  "
+      f"p99={pct(h,.99)}  p99.9={pct(h,.999)}  highest bin={max(h)} us (bins stop at 64)")
+# max-plus: one blocking term (max over lower-priority sections) + sum of interference terms
+base = 12.28                              # ex7 no-cause minimum
+excess = {"CS15": 29.08, "DT6": 22.52, "tick+med25": 53.24}   # single-cause maxima from ex7
+ex = {k: v - base for k, v in excess.items()}
+bound = base + ex["CS15"] + ex["DT6"] + ex["tick+med25"]
+print("excess over base:", {k: round(v, 2) for k, v in ex.items()})
+print(f"composed bound = {base} + {ex['CS15']:.2f} + {ex['DT6']:.2f} + {ex['tick+med25']:.2f}"
+      f" = {bound:.2f} us   (observed max 73.92 us in 14 of 4000 samples)")
+# ex10: log_flush = 60 us once per 400 loop iterations; loop ~ 2 + 12/8 + 60/400 + 35 us
+loop = 2 + 12 / 8 + 60 / 400 + 35
+p_in = (60 / 400) / loop
+print(f"P(sample lands in log_flush) = {p_in:.4f}  -&gt; expected {20000 * p_in:.0f} of 20000 (ex10 saw 73-80)")
+for tail in (10, 5, 1):                   # land in the LAST `tail` us of the 60 us window
+    p = p_in * tail / 60
+    n99 = math.log(0.01) / math.log(1 - p)
+    print(f"to see latency &gt;= {60 - tail} us with 99% confidence: {n99:8.0f} samples"
+          f" = {n99 * 100e-6:6.1f} s at 10 kHz")</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'python3 /Users/donh/.rtos_scratch/E3/py/ex11_bound.py'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>FreeRTOS IRQ-&gt;task (1 us bins): avg~17.0  p50=17  p90=24  p99=54  p99.9=62  highest bin=63 us (bins stop at 64)
+excess over base: {'CS15': 16.8, 'DT6': 10.24, 'tick+med25': 40.96}
+composed bound = 12.28 + 16.80 + 10.24 + 40.96 = 80.28 us   (observed max 73.92 us in 14 of 4000 samples)
+P(sample lands in log_flush) = 0.0039  -&gt; expected 78 of 20000 (ex10 saw 73-80)
+to see latency &gt;= 50 us with 99% confidence:     7117 samples =    0.7 s at 10 kHz
+to see latency &gt;= 55 us with 99% confidence:    14237 samples =    1.4 s at 10 kHz
+to see latency &gt;= 59 us with 99% confidence:    71194 samples =    7.1 s at 10 kHz</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul><li>백분위는 64 µs를 넘는 표본(칸 밖)을 빼고 셌으므로 p99.9 이상은 실제보다 조금 작다 — 칸 범위를 최댓값보다 넓게 잡는 것도 측정 설계다.</li><li><strong>확률 모델이 측정과 맞는다</strong>: <code>log_flush</code>에 떨어질 확률 0.39%로 20000개 중 78개를 예상했고, 예제 10은 80개(빌드 A) · 73개(빌드 B)를 봤다.</li><li><strong>59 µs 이상을 99% 확률로 한 번 보려면 71194 표본 = 10 kHz로 7.1초</strong>가 필요하다. 예제 10은 20000 표본(2초)이라 빌드 B가 58.84 µs에서 멈췄다. 실제 시스템의 드문 경로는 0.39%보다 훨씬 드물다(에러 처리, 플래시 쓰기, 부팅 직후 한 번) — 그래서 <strong>측정은 시간 단위가 아니라 "그 경로가 몇 번 지나갔나"로 설계</strong>하고, 측정으로 못 덮는 부분은 §7.2의 상한(코드 리뷰 + 구간별 최악 입력)으로 덮는다. Linux에서 cyclictest를 몇 시간씩 돌리는 이유(EL N3 §5)와 같은 수학이다.</li></ul>
+<h3 id="7-6-최악-경로-찾기-체크리스트">7.6 최악 경로 찾기 체크리스트<a class="anchor" href="#7-6-최악-경로-찾기-체크리스트" aria-label="link">#</a></h3>
+<ol><li><strong>모든 마스킹 구간의 목록과 길이</strong>: <code>--wrap=vPortEnterCritical</code>로 호출 위치별 최댓값(C7 §6.4), 또는 예제 10처럼 지연이 큰 표본의 쌓인 PC/LR. PRIMASK를 직접 쓰는 코드(<code>__disable_irq</code>, 벤더 HAL)도 grep으로 따로 찾는다 — <code>--wrap</code>에 안 걸린다.</li><li><strong>상위 ISR 목록과 각각의 최악 실행 시간 · 최소 도착 간격</strong> — E2의 우선순위 배치표에 열로 넣는다.</li><li><strong>커널의 마스킹 구간</strong>: tick 처리(깨우는 태스크 수에 비례), 전환(<code>vTaskSwitchContext</code>), Zephyr 타임 슬라이스 재설정 — 설정(LEAN, TIMESLICING)이 이 값을 바꾼다(§4).</li><li><strong>상위 태스크의 실행 + 그 커널 경로</strong>(깨어남 · 잠듦, §6.3의 med).</li><li><strong>합성</strong>: 기본 + max(1, 3의 마스킹) + Σ(2, 4) → 상한. 측정 최댓값과 비교해 상한 &lt; 측정이면 빠진 원인을 찾는다.</li><li><strong>장기 포착</strong>: 필드 빌드에 "최댓값 + 그때의 PC/LR + 시각" 기록기를 남긴다(예제 10 구조, M5의 noinit).</li></ol>
+<hr>
+<h2 id="8-예제-12-측정-숫자를-차트로-python">8. 예제 12 — 측정 숫자를 차트로 (Python)<a class="anchor" href="#8-예제-12-측정-숫자를-차트로-python" aria-label="link">#</a></h2>
+<p>그림 4 · 5 · 7 · 9는 예제 5 ~ 10의 출력 숫자를 Python으로 좌표 변환해 만든 SVG다. 아래는 그림 4(누적 막대) 부분이다. 히스토그램(로그 축), 끄기 비교 막대, 최댓값 곡선도 같은 파일에서 같은 방식으로 출력 파일(<code>ex7.out</code> 등)을 정규식으로 읽어 만든다(그 부분 약 50줄은 생략). VM에서 실행했다.</p>
+<figure class="code"><span class="lang">python</span><pre><code># ex12 — measured numbers (ex5, ex6, ex7, ex8, ex9, ex10) -&gt; SVG charts for the note
+import re
+OUT = "/var/tmp/rtos/E3/"
+C = ["#4a7bd0", "#e08a3c", "#888", "#3f9a6b", "#d0564a"]
+def T(x, y, s, a="start", sz=12): return f'&lt;text x="{x:.1f}" y="{y:.1f}" font-size="{sz}" text-anchor="{a}"&gt;{s}&lt;/text&gt;'
+def R(x, y, w, h, c, op=0.55): return f'&lt;rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" fill="{c}" fill-opacity="{op}" stroke="{c}"/&gt;'
+# (A) stacked breakdown, avg ns per segment (ex5 default/lean, ex6 default/ts_off)
+rows = [("FreeRTOS 기본", [120, 3360, 480, 3320, 2000], 8320),
+        ("FreeRTOS lean", [120, 3360, 480, 1800, 2000], 6840),
+        ("Zephyr 기본", [880, 12320, 480, 2240, 640], 14080),
+        ("Zephyr slice 끔", [880, 3560, 440, 2280, 640], 5320)]
+seg = ["진입·디스패치", "ISR 안 커널 호출", "ISR 퇴장", "PendSV·전환", "복원→태스크"]
+sx, x0 = 24.0, 130                                   # px per us
+s = ['&lt;svg viewBox="0 0 680 270" xmlns="http://www.w3.org/2000/svg"&gt;',
+     T(10, 18, "IRQ → 태스크 지연 분해 (µs, 평균, QEMU icount)", sz=13)]
+for i, (name, v, raw) in enumerate(rows):
+    y, x = 34 + i * 44, x0
+    s.append(T(x0 - 8, y + 19, name, "end"))
+    for k, ns in enumerate(v):
+        w = ns / 1000 * sx
+        s.append(R(x, y, w, 26, C[k]))
+        if w &gt; 30: s.append(T(x + w / 2, y + 17, f"{ns/1000:.2f}", "middle", 11))
+        x += w
+    s.append(T(x + 6, y + 12, f"계: {sum(v)/1000:.2f}", sz=11))
+    s.append(T(x + 6, y + 25, f"계측 없이: {raw/1000:.2f}", sz=11))
+for j in range(0, 19, 2):
+    gx = x0 + j * sx
+    s.append(f'&lt;line x1="{gx:.1f}" y1="210" x2="{gx:.1f}" y2="214" stroke="currentColor"/&gt;' + T(gx, 226, j, "middle", 11))
+s.append(f'&lt;line x1="{x0}" y1="210" x2="{x0 + 18 * sx:.1f}" y2="210" stroke="currentColor"/&gt;')
+lx = 20
+for k, n in enumerate(seg):
+    s.append(R(lx, 242, 12, 12, C[k]) + T(lx + 17, 253, n, sz=12)); lx += 26 + 13 * len(n.replace("·", "").replace("→", "")) * 0.95
+s.append("&lt;/svg&gt;"); open(OUT + "figA.svg", "w").write("\n".join(s))
+# ... (B) histograms, (C) ablation, (D) worst-so-far: same pattern, omitted</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'python3 /Users/donh/.rtos_scratch/E3/py/ex12_charts.py &amp;&amp; cd /var/tmp/rtos/E3 &amp;&amp; for f in figA figB figC figD; do python3 -c "import xml.dom.minidom,sys; xml.dom.minidom.parse(sys.argv[1]); print(sys.argv[1], \"ok\")" $f.svg; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>wrote figA..figD: [6328, 16970, 2762, 1934] bytes
+figA.svg ok
+figB.svg ok
+figC.svg ok
+figD.svg ok</code></pre></figure>
+<p>구간 값은 손으로 옮겨 적었다(예제 5 · 6 출력의 avg). 숫자가 바뀌면 차트도 다시 만든다 — <strong>차트를 손으로 그리지 않는 것</strong>이 숫자와 그림이 어긋나지 않게 하는 가장 쉬운 방법이다.</p>
+<hr>
+<h2 id="9-rtos-커널-안에서는-무슨-일이-일어나나-각-구간의-소스-위치">9. RTOS 커널 안에서는 무슨 일이 일어나나 — 각 구간의 소스 위치<a class="anchor" href="#9-rtos-커널-안에서는-무슨-일이-일어나나-각-구간의-소스-위치" aria-label="link">#</a></h2>
+<p>§4의 구간을 소스 함수에 대응시킨다. 한 줄씩 따라가는 것은 C2(PendSV), C1(ready 리스트), E1(FromISR 규칙)의 몫이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="170" y="18" font-size="13" font-weight="bold" text-anchor="middle">FreeRTOS V11.3.2 (ARM_CM3)</text>
+<text x="510" y="18" font-size="13" font-weight="bold" text-anchor="middle">Zephyr v4.4.2 (Cortex-M)</text>
+<rect x="10" y="30" width="320" height="34" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="20" y="51" font-size="12">TIMER0_IRQHandler — 벡터에서 바로 (0.12)</text>
+<rect x="10" y="78" width="320" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="20" y="99" font-size="12">vTaskNotifyGiveFromISR — ready 리스트 (3.36)</text>
+<rect x="10" y="126" width="320" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="20" y="147" font-size="12">portYIELD_FROM_ISR — PENDSVSET (0.48)</text>
+<rect x="10" y="174" width="320" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="20" y="195" font-size="12">xPortPendSVHandler → vTaskSwitchContext</text>
+<rect x="10" y="222" width="320" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="20" y="243" font-size="12">결정 · 스택 검사 · 통계 → 훅 (3.32 / 1.80)</text>
+<rect x="10" y="270" width="320" height="34" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="20" y="291" font-size="12">복원 → ulTaskNotifyTake 나머지 (2.00)</text>
+<rect x="350" y="30" width="320" height="34" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="360" y="51" font-size="12">_isr_wrapper → 표 조회 → t0_isr (0.88)</text>
+<rect x="350" y="78" width="320" height="34" rx="4" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="360" y="99" font-size="12">k_sem_give → z_ready_thread (3.56)</text>
+<rect x="350" y="126" width="320" height="34" rx="4" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="360" y="147" font-size="12">update_cache: 결정 + 슬라이스 재설정 (+8.76)</text>
+<rect x="350" y="174" width="320" height="34" rx="4" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="360" y="195" font-size="12">z_arm_int_exit — PendSV 요청 (0.48)</text>
+<rect x="350" y="222" width="320" height="34" rx="4" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="360" y="243" font-size="12">z_arm_pendsv — 정해진 cache로 교체 (2.24)</text>
+<rect x="350" y="270" width="320" height="34" rx="4" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="360" y="291" font-size="12">복원 → k_sem_take 나머지 (0.64)</text>
+<line x1="170" y1="64" x2="170" y2="76" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="170" y1="112" x2="170" y2="124" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="170" y1="160" x2="170" y2="172" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="170" y1="208" x2="170" y2="220" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="170" y1="256" x2="170" y2="268" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="510" y1="64" x2="510" y2="76" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="510" y1="112" x2="510" y2="124" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="510" y1="160" x2="510" y2="172" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="510" y1="208" x2="510" y2="220" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="510" y1="256" x2="510" y2="268" stroke="currentColor" marker-end="url(#ah4)"/>
+<text x="340" y="322" font-size="11" text-anchor="middle">괄호 = 이 노트에서 잰 µs (QEMU icount). 빨강 = Zephyr 기본에서만 있는 조각</text>
+</svg></figure>
+<p>그림 10 — 같은 "ISR이 태스크 하나를 깨운다"가 두 커널에서 어느 함수로 흘러가는지. FreeRTOS는 <strong>PendSV 안에서 결정</strong>하고(초록 둘), Zephyr는 <strong>ISR 안의 <code>update_cache</code>에서 결정</strong>하고 PendSV는 교체만 한다.</p>
+<p>소스에서 확인한 위치(V11.3.2 / v4.4.2):</p>
+<ul class="tasks"><li>FreeRTOS: <code>vTaskGenericNotifyGiveFromISR()</code>(tasks.c 8315행 부근, <code>vTaskNotifyGiveFromISR</code> 매크로가 부른다) — 태스크를 ready 리스트에 넣고 우선순위가 높으면 <code>*pxHigherPriorityTaskWoken = pdTRUE</code>. <code>portYIELD_FROM_ISR(x)</code> = <code>portEND_SWITCHING_ISR(x)</code>(portmacro.h 98 · 111행) — 참이면 <code>portNVIC_INT_CTRL_REG</code>에 PENDSVSET. <code>xPortPendSVHandler</code>(port.c) → <code>vTaskSwitchContext()</code>(tasks.c) 안에서 런타임 통계 → <code>taskCHECK_FOR_STACK_OVERFLOW()</code> → <code>taskSELECT_HIGHEST_PRIORITY_TASK()</code> → <code>traceTASK_SWITCHED_IN()</code>(이 노트의 s4). LEAN이 줄인 것이 앞의 둘이다.</li><li>FreeRTOS trace 훅 <code>traceISR_ENTER()</code> · <code>traceISR_EXIT()</code> · <code>traceISR_EXIT_TO_SCHEDULER()</code>는 include/FreeRTOS.h에 기본값(빈 매크로)이 있다. GCC/ARM_CM3 포트에서는 <code>xPortSysTickHandler()</code>(port.c 491행 부근)가 셋을 모두 부르고, <code>portYIELD_FROM_ISR</code> = <code>portEND_SWITCHING_ISR</code>가 퇴장 쪽 둘(전환 요청이면 <code>traceISR_EXIT_TO_SCHEDULER</code>, 아니면 <code>traceISR_EXIT</code>)을 부른다. 하지만 <strong>앱 ISR의 진입(<code>traceISR_ENTER</code>)은 커널이 대신 불러 줄 수 없다</strong> — 벡터가 앱 함수로 바로 가기 때문이다. 앱 ISR 첫 줄에 직접 넣어야 하고, SystemView · Tracealyzer의 FreeRTOS 연동도 같은 이유로 ISR 진입 기록 호출을 앱 ISR에 넣으라고 안내한다(M3).</li><li>Zephyr: <code>_isr_wrapper()</code>(arch/arm/core/cortex_m/isr_wrapper.c)가 <code>CONFIG_TRACING_ISR</code>이면 <code>sys_trace_isr_enter()</code>, IPSR − 16으로 <code>_sw_isr_table</code> 조회, 내 ISR 호출, <code>sys_trace_isr_exit()</code>, <code>z_arm_exc_exit()</code>. <code>k_sem_give()</code>(kernel/sem.c) → <code>z_unpend_first_thread()</code> → <code>z_ready_thread()</code> → <code>ready_thread()</code> → <code>update_cache()</code>(kernel/sched.c, <code>CONFIG_TIMESLICING</code>이면 <code>z_reset_time_slice()</code>). PendSV 핸들러 <code>z_arm_pendsv</code>(swap_helper.S)의 첫머리와 복원 뒤에 <code>z_thread_mark_switched_out/in</code>(kernel/thread.c, <code>CONFIG_INSTRUMENT_THREAD_SWITCHING</code>) — 이것이 tracing 전환 훅이 불리는 자리다.</li><li>Zephyr의 사용자 tracing 훅은 <code>subsys/tracing/user/tracing_user.c</code>에 <code>__weak</code> 빈 함수로 있다. 사이클 시계는 <code>timing_counter_get()</code>(Cortex-M은 <code>arch/arm/core/cortex_m/timing.c</code>, DWT 사용), DWT 켜기는 <code>arch/arm/include/cortex_m/dwt.h</code>의 <code>z_arm_dwt_init()</code>(TRCENA + M7이면 LSR을 보고 LAR 해제) · <code>z_arm_dwt_init_cycle_counter()</code>. Zephyr 공식 지연 벤치마크는 <code>tests/benchmarks/latency_measure</code>(ISR → 스레드 등, <code>timing_counter_get</code> 사용)다.</li></ul>
+<hr>
+<h2 id="10-실무에서-다시-보기">10. 실무에서 다시 보기<a class="anchor" href="#10-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="10-1-드론-비행-제어기-rate-loop가-가끔-늦게-시작한다">10.1 드론 비행 제어기 — "rate loop가 가끔 늦게 시작한다"<a class="anchor" href="#10-1-드론-비행-제어기-rate-loop가-가끔-늦게-시작한다" aria-label="link">#</a></h3>
+<p>STM32H7급 FC에서 IMU(8 kHz, 125 µs) data-ready EXTI → DMA로 샘플 읽기 → 완료 ISR → rate loop 태스크 통지, 라는 흔한 구조를 생각하자. 증상: 블랙박스 로그에서 루프 시작 시각이 가끔 20 ~ 40 µs 늦다. 이 노트의 순서대로 하면:</p>
+<ol><li><strong>계측점</strong>: IMU INT 핀을 타이머 입력 캡처 채널에도 물린다(IRQ 순간을 하드웨어가 기록). DMA 완료 ISR 첫 줄, rate 태스크의 통지 대기 직후에서 CYCCNT를 찍는다. 각 구간을 1 µs 칸 히스토그램 두 개(ISR 단계, 태스크 단계)로 RAM에 모으고, 착륙 후 MAVLink/USB로 내린다.</li><li><strong>모양 읽기</strong>: ISR 단계에 날카로운 두 번째 봉우리가 있으면 같은 클럭에서 나온 상위 ISR(예: DShot 출력 타이머 DMA)이 위상 고정으로 겹친다. 선반이 있으면 어떤 크리티컬 섹션(블랙박스 로거의 플래시 버퍼 교체가 단골)이다. 태스크 단계에만 꼬리가 있으면 상위 태스크(혹은 같은 우선순위 태스크의 time slice)다.</li><li><strong>태깅 · 끄기 · LR</strong>: 원인 후보마다 [t0, t1]을 남기고, 의심 가는 것을 끈다. 선반이면 예제 10처럼 지연 큰 표본의 쌓인 LR로 크리티컬 섹션 위치를 바로 찾는다.</li><li><strong>판단</strong>: 상한 합성이 125 µs 예산 안인지, 측정 최댓값이 몇 시간 · 몇 번의 "드문 경로"를 덮었는지(로거 플러시가 몇 번 지나갔나)를 같이 보고한다.</li></ol>
+<h3 id="10-2-로봇-관절-모터-컨트롤러-20-khz-foc는-어디서-재나">10.2 로봇 관절 모터 컨트롤러 — 20 kHz FOC는 어디서 재나<a class="anchor" href="#10-2-로봇-관절-모터-컨트롤러-20-khz-foc는-어디서-재나" aria-label="link">#</a></h3>
+<p>FOC 전류 루프(50 µs 주기)는 보통 PWM 타이머의 업데이트 이벤트로 ADC를 트리거하고, ADC 완료 ISR에서 계산한다(E2: zero-latency 우선순위). 여기서 재야 할 것은 <strong>PWM 중심 → ADC 완료 ISR 첫 줄 → PWM 비교값 갱신</strong>이다. 타이머 스냅샷이 가장 자연스럽다 — 같은 PWM 타이머의 카운터를 ISR 첫 줄과 갱신 직후에 읽으면 "PWM 주기 안에서 몇 카운트에 끝났나"가 바로 나오고, 그 히스토그램의 최댓값이 "다음 주기 시작 전에 비교값을 썼나"(마감)를 직접 말해 준다. BASEPRI 문턱 위 ISR이라 ①은 PRIMASK를 쓰는 코드(벤더 HAL의 <code>__disable_irq</code>)만 들어온다 — 그 코드를 grep으로 찾아 없애는 것이 최악값 관리의 첫 일이다(C7 §6).</p>
+<h3 id="10-3-linux-soc-옆의-센서-허브-zephyr">10.3 Linux SoC 옆의 센서 허브 (Zephyr)<a class="anchor" href="#10-3-linux-soc-옆의-센서-허브-zephyr" aria-label="link">#</a></h3>
+<p>센서 허브가 IMU 타임스탬프를 찍어 SoC로 보낸다면, 타임스탬프의 정확도가 곧 <strong>인터럽트 지연의 지터</strong>다. ISR에서 <code>k_cycle_get_32()</code>를 읽어 타임스탬프로 쓰면 ①②③의 지터가 그대로 측정 오차가 된다. 입력 캡처(하드웨어 타임스탬프)로 바꾸면 지터가 0이 되고, 소프트웨어 지연은 "언제 처리했나"의 문제로만 남는다(E5). 예제 8이 보인 대로 Zephyr 기본 설정의 time slicing은 모든 전환에서 IRQ 잠금 구간을 길게 만든다 — 센서 허브처럼 스레드 몇 개의 결정적 응답이 중요한 시스템에서는 <code>CONFIG_TIMESLICING=n</code>을 검토하고, 바꾼 뒤 히스토그램으로 확인한다.</p>
+<h3 id="10-4-don의-ssd-펌웨어와-연결">10.4 Don의 SSD 펌웨어와 연결<a class="anchor" href="#10-4-don의-ssd-펌웨어와-연결" aria-label="link">#</a></h3>
+<p>SSD 컨트롤러의 NVMe doorbell → 명령 fetch → 처리 시작 경로에서 Don이 했던 "구간별 타임스탬프 + 분포 + 원인 태깅"이 이 노트와 같은 일이다. 차이는 두 가지다. (1) MCU에서는 측정 시계가 사이클 단위라 <strong>계측 자체의 비용</strong>(예제 1)이 결과와 같은 자릿수가 되기 쉽다 — 그래서 observer effect를 숫자로 빼는 습관이 더 중요하다. (2) RTOS에서는 경로 중간에 <strong>스케줄러의 결정</strong>(PendSV, <code>update_cache</code>)이 끼고, 그 결정의 비용이 설정(스택 검사, 런타임 통계, time slicing)에 따라 몇 배 달라진다 — "어떤 설정에서 잰 숫자인가"를 항상 같이 적는다.</p>
+<hr>
+<h2 id="11-흔한-실수와-증상">11. 흔한 실수와 증상<a class="anchor" href="#11-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>데이터시트 12사이클을 "우리 인터럽트 지연"이라고 말한다</td><td>현장에서 수십 µs가 나와 설명을 못 한다</td><td>①(마스킹 · 상위 ISR)과 wait state가 빠졌다</td><td>그림 1의 조각별로 말하고, 최악 마스킹 구간을 더한다</td></tr><tr><td>ISR 안에서 printf로 지연을 찍는다</td><td>지연이 ms 단위로 늘고 IRQ가 사라진다</td><td>출력 자체가 새 지연원(예제 1: 18글자 1.56 ms)</td><td>RAM 히스토그램 · 버퍼에 모으고 나중에 출력</td></tr><tr><td>DWT를 켰는데 0만 읽힌다</td><td>모든 측정값 0 또는 디버거 붙였을 때만 동작</td><td>TRCENA 누락, M7 LAR 잠금, M0+는 CYCCNT 없음, QEMU 미구현</td><td>켜는 순서 + 다른 시계로 자가 시험(예제 4)</td></tr><tr><td>C 소스 "첫 줄"을 ISR 진입 시점으로 믿는다</td><td>같은 코드에서 빌드마다 값이 다르다</td><td>컴파일러가 프롤로그 · 다른 명령을 앞에 둔다(예제 3)</td><td>디스어셈블로 계측 명령 위치 확인, 필요하면 asm 스텁</td></tr><tr><td>평균 · 표준편차로 보고한다</td><td>"평균 17 µs인데 왜 마감을 놓치나"</td><td>마감은 꼬리가 결정한다(평균은 최댓값의 1/4)</td><td>min · p50 · p99 · p99.9 · max + 표본 수 · 시간</td></tr><tr><td>짧게 재고 최댓값을 사양으로 쓴다</td><td>필드에서 더 큰 값이 나온다</td><td>드문 경로를 못 만났다(예제 10: 2초로는 59 µs를 못 봄)</td><td>경로가 몇 번 지나갔는지로 측정 길이 설계 + 상한 합성</td></tr><tr><td>고정 간격 부하로 시험한다</td><td>최악값이 이상하게 작다</td><td>위상이 고정되어 IRQ가 늘 같은 자리에만 떨어짐(C7)</td><td>부하 간격을 난수로, 측정 주기를 홀수로</td></tr><tr><td>계측을 넣은 숫자를 그대로 보고한다</td><td>실제보다 10 ~ 20% 크다</td><td>계측점 비용(예제 5: 1.0 µs, Zephyr tracing 2.48 µs)</td><td>계측 없는 빌드의 총합을 따로 재서 같이 적는다</td></tr><tr><td>첫 표본을 버리지 않는다</td><td>혼자 동떨어진 큰 값 하나</td><td>측정 시작 전에 쌓인 이벤트(예제 8 첫 시도 476 µs)</td><td>시작 전에 이벤트 상태 초기화(<code>k_sem_reset</code> 등), 첫 표본 버림</td></tr><tr><td>원인 태깅이 진행 중인 방해꾼을 놓친다</td><td>선점당한 방해꾼이 태그에 안 나온다</td><td>끝 시각이 지난번 값으로 남아 있음(예제 7 첫 시도)</td><td>t1 &lt; t0이면 "아직 도는 중"으로 처리</td></tr></tbody></table></div>
+<hr>
+<h2 id="12-면접에서-이렇게-말한다">12. 면접에서 이렇게 말한다<a class="anchor" href="#12-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> How do you measure interrupt latency on a microcontroller?</p>
+<p><strong>A.</strong> IRQ가 올라간 순간을 하드웨어가 기록하게 하는 것이 핵심이다. 원인이 타이머면 그 타이머 카운터를 ISR 첫 명령에서 읽고(타이머 스냅샷), 외부 핀이면 입력 캡처 채널로 에지 시각을 래치한다. 장비로는 원인 핀과 디버그 GPIO를 scope에 걸고 무한 잔상으로 최소 · 최대를 본다. 그다음 구간은 DWT CYCCNT로 찍는다. 측정 자체의 비용은 따로 잰다.</p>
+<blockquote><p>"I make the hardware record the moment the interrupt was raised. If the source is a timer I read that timer's counter in the first instruction of the ISR; if it's an external pin I route it to an input-capture channel too, so the edge time is latched in hardware. On the bench I put the source pin and a debug GPIO on a scope with infinite persistence to see min and max, after subtracting the GPIO set-to-pin delay. For the later stages — kernel call, PendSV, task resume — I take DWT CYCCNT stamps. And I always measure the probe cost itself: on my QEMU setup the stamps added one microsecond to an eight-microsecond path."</p></blockquote>
+<p><strong>Q.</strong> What contributes to interrupt latency on a Cortex-M?</p>
+<p><strong>A.</strong> 하드웨어 진입(M3/M4 최소 12사이클: 스태킹 · 벡터 · 파이프라인, 플래시 wait state와 진행 중인 버스 접근이 더함), 그 IRQ를 막고 있던 마스킹 구간(PRIMASK/BASEPRI 크리티컬 섹션, 커널 내부 포함 — 가장 긴 것 하나), 같거나 높은 우선순위 ISR의 실행(전부), 그리고 핸들러 프롤로그다. 데이터시트 숫자는 첫 항목의 최선값일 뿐이다.</p>
+<blockquote><p>"Four things. The hardware entry — twelve cycles minimum on an M3 or M4 for stacking, vector fetch and pipeline refill, plus flash wait states or a slow bus access in flight. Then any masking window: if code is inside a PRIMASK or BASEPRI critical section, the interrupt waits for the rest of it, and only the longest one matters because only one can be active. Then all equal or higher-priority ISRs that are running or pending. Then the handler prologue — a ten-register push is one instruction but about eleven cycles. The twelve-cycle number is only the best case of the first term."</p></blockquote>
+<p><strong>꼬리 질문</strong>: "tail-chaining은 지연을 줄이나?" → 연속 ISR 사이의 6사이클로 스태킹을 아끼지만, 뒤에서 기다리는 IRQ는 앞 ISR이 <strong>끝날 때까지 전부</strong> 기다린다. 줄어드는 것은 오버헤드지 대기가 아니다.</p>
+<p><strong>Q.</strong> What's the difference between interrupt latency and task response latency in an RTOS?</p>
+<p><strong>A.</strong> 태스크 응답 지연 = 인터럽트 지연 + ISR 안의 커널 호출(ready 리스트) + PendSV 요청과 tail-chain + 스케줄링 결정과 컨텍스트 전환 + 블로킹 API 복귀 + 더 높은 태스크들의 간섭이다. QEMU에서 FreeRTOS는 0.12 µs 대 8.32 µs, Zephyr는 0.88 대 14.08 µs였다. 설계에 쓰는 숫자는 뒤쪽이다.</p>
+<blockquote><p>"Task response adds the kernel path on top: the FromISR call that moves the task to the ready list, pending PendSV, the tail-chain into PendSV, the scheduling decision and context switch, the rest of the blocking API, and any higher-priority task that runs first. On a QEMU Cortex-M3 at 25 MHz I measured 0.12 µs to the ISR but 8.3 µs to the task with FreeRTOS, and 0.9 versus 14 µs with Zephyr's default config. Splitting it showed where the cost lives — FreeRTOS decides in PendSV, so stack checking and run-time stats land there; Zephyr decides inside k_sem_give, and with time slicing on that call alone was 12 µs."</p></blockquote>
+<p><strong>Q.</strong> Your latency histogram has two peaks and a long tail. How do you find the causes?</p>
+<p><strong>A.</strong> 모양으로 가설을 세운다 — 같은 꼴의 날카로운 두 번째 봉우리는 위상 고정된 주기 간섭, 평평한 선반은 무작위 위상의 차단 구간(폭이 길이, 면적이 듀티), 드문 작은 무리는 원인 조합. 그다음 방해꾼마다 실행 구간을 남겨 표본마다 겹친 원인을 태깅하고, 원인을 하나씩 꺼서 그 모양이 사라지는지로 증명한다. 태그가 안 붙은 꼬리는 계측하지 않은 원인이다.</p>
+<blockquote><p>"First I read the shape. A second sharp peak with the same width is periodic interference that's phase-locked — something derived from the same clock. A flat shelf is a blocking section hit at random phase: its width is the section length, its area is the duty. Small clusters far out are combinations of causes. Then I prove it: each suspect records its last start and end time, the measuring code computes when the IRQ was raised and tags every sample with the suspects that overlapped. Finally I switch suspects off one at a time. In my experiment the 4 µs peak vanished with the higher-priority timer off, the shelf vanished with the critical section off, and an untagged tail turned out to be a higher-priority task's own sleep/wake path — it only disappeared when I removed that task."</p></blockquote>
+<p><strong>Q.</strong> Why is average latency not useful, and how long do you need to measure?</p>
+<p><strong>A.</strong> 마감은 모든 job에 걸리므로 꼬리가 결정한다. 내 측정에서 평균 17 µs, p99 54 µs, 최댓값 74 µs였다. 드문 경로는 확률로 계산한다 — 0.39% 시간을 차지하는 60 µs 구간의 마지막 1 µs를 99% 확률로 보려면 7만 표본이 필요했다. 그래서 측정 길이는 "그 경로가 몇 번 지나갔나"로 설계하고, 못 덮는 부분은 조각별 최악값을 max-plus로 합성한 상한으로 덮는다.</p>
+<blockquote><p>"Deadlines apply to every job, so the tail decides. In one run the mean was 17 µs, p99 54, max 74 — the mean was a quarter of the max. Rare paths are a probability problem: a 60-microsecond section that occupies 0.39 percent of the time needs about seventy thousand samples before you see its worst case with 99 percent confidence, and my two-second run stopped at 58.8 instead of 61.5. So I size the measurement by how many times the rare path executed, keep a worst-case recorder in the field build, and back it up with a composed bound: base path, plus the longest blocking section, plus the sum of all higher-priority interference."</p></blockquote>
+<p><strong>Q.</strong> How do you enable the DWT cycle counter, and what can go wrong?</p>
+<p><strong>A.</strong> DEMCR.TRCENA를 켜고, M7에서 LSR이 잠금을 보이면 LAR에 0xC5ACCE55를 쓰고, CYCCNT를 0으로 하고 DWT_CTRL.CYCCNTENA를 켠다. 함정은 TRCENA를 디버거가 대신 켜 둬서 단독 부팅에서만 0이 되는 경우, M7 잠금, M0/M0+에는 카운터가 없음, 32비트 랩, 저전력 · halt 중 정지. 그래서 켠 뒤 다른 시계로 자가 시험을 한다 — QEMU는 NOCYCCNT=0인데도 CYCCNT가 0에 머문다.</p>
+<blockquote><p>"Set TRCENA in DEMCR, unlock through the lock access register with 0xC5ACCE55 if the M7's lock status says it's locked, zero CYCCNT and set CYCCNTENA in DWT_CTRL. The classic failures are a debugger having set TRCENA so it only breaks on a standalone boot, the M7 lock, M0 and M0+ simply not having the counter, the 32-bit wrap — under nine seconds at 480 MHz — and the counter stopping in sleep or when halted. So I self-test it against another clock before trusting it. QEMU is a nice example: it reports NOCYCCNT as zero but the counter never moves."</p></blockquote>
+<p><strong>Q.</strong> How would you find the longest critical section in a large codebase?</p>
+<p><strong>A.</strong> 두 가지를 쓴다. 링커 <code>--wrap</code>으로 <code>vPortEnterCritical/ExitCritical</code>을 감싸 호출 위치별 최댓값을 모으는 방법, 그리고 지연이 큰 표본에서 ISR이 하드웨어가 쌓은 PC와 LR을 기록하는 방법이다. PC는 마스크를 푼 함수(<code>vPortExitCritical</code>)를 가리키고 LR이 호출자를 가리킨다 — 꼬리 호출이면 한 단계 위를 가리키니 디스어셈블로 확인한다. PRIMASK를 직접 쓰는 코드는 grep으로 따로 찾는다.</p>
+<blockquote><p>"Two complementary ways. Wrap the kernel's enter and exit critical functions with the linker's --wrap option and keep the maximum per call site. Or let the hardware tell me: when the latency of a sample is large, the ISR records the PC and LR from its own exception frame. The PC is the instruction right after the unmask, so it lands in vPortExitCritical; the LR names the caller. With tail calls the LR points one level higher, so I check the disassembly or build that test with sibling-call optimization off. In my test that pointed straight at a 60 µs log flush that ran once in four hundred calls, while the most frequent site was a harmless 12 µs one. Direct PRIMASK users like vendor HAL code I grep for separately."</p></blockquote>
+<p><strong>Q.</strong> How do you make sure your instrumentation doesn't distort the measurement?</p>
+<p><strong>A.</strong> 계측 동작 하나의 비용을 재고, 계측을 넣은 빌드와 뺀 빌드의 총합을 비교해 차이를 보고한다. ISR에서는 RAM에 숫자만 쓰고 출력은 나중에 한다. 계측이 경로 길이를 바꾸면 다른 주기 이벤트와의 위상도 바뀌므로, 히스토그램 모양 결론은 계측을 줄인 빌드로 한 번 더 확인한다. 정말 비침투가 필요하면 핀 하나 + scope나 ETM을 쓴다.</p>
+<blockquote><p>"I measure the probe cost itself and report the instrumented and uninstrumented totals side by side — in my FreeRTOS case one microsecond on eight. Inside ISRs I only store numbers to RAM; formatting and printing happen afterwards at low priority, because one printf on a real 115200 UART is over a millisecond. I also remember that a longer path shifts the phase against other periodic events, so I confirm histogram shapes with a lighter build. When it truly must be non-intrusive I use a single GPIO and a scope, or ETM trace."</p></blockquote>
+<hr>
+<h2 id="13-직접-해보기">13. 직접 해보기<a class="anchor" href="#13-직접-해보기" aria-label="link">#</a></h2>
+<ol><li><strong>개념</strong>: 1 kHz 제어 루프의 IRQ → 태스크 지연을 4시간 측정했더니 최댓값 40 µs였다. 이 숫자를 사양서에 "최악 40 µs"로 쓰면 안 되는 이유 세 가지를 쓰라. 정답/힌트: 측정 최댓값은 하한(드문 경로 미포착, §7.4), 측정 설정(계측 비용 · 설정 옵션)이 제품과 다를 수 있음, 위상 고정 부하라면 최악 위상을 못 만났을 수 있음 — 상한 합성(§7.2)과 경로 통과 횟수로 보완.</li><li><strong>모양 읽기</strong>: 어떤 히스토그램이 기본값 3 µs에 70%, 3 ~ 11 µs 사이에 평평하게 25%, 23 µs에 5%의 날카로운 봉우리를 갖는다. 원인 후보 두 개와 각각의 길이 · 듀티를 추정하라. 정답/힌트: 폭 8 µs · 듀티 약 25%의 차단 구간(선반), 20 µs만큼 밀어내는 위상 고정 간섭이 20번에 1번(봉우리).</li><li><strong>코드</strong>: 예제 2에 V4를 더하라 — 핸들러 첫 명령에서 <code>LED = 1</code>, <code>isr_c</code> 끝에서 <code>LED = 0</code>. 예제 1의 비용표로 "scope에 보일 펄스 폭"을 예측하고, <code>objdump</code>로 명령 수를 세어 확인하라. 정답/힌트: 펄스 폭 = 두 쓰기 사이 명령 수 × 32 ns(QEMU). 실칩에서는 여기에 set-to-pin 지연이 양쪽 에지에 붙는다.</li><li><strong>코드</strong>: 예제 7에 다섯 번째 방해꾼을 넣어라 — TIMER0과 <strong>같은</strong> 우선순위(0x40)의 다른 ISR(예: UART0 TX IRQ를 NVIC STIR로 무작위 pend, 본문 8 µs). 히스토그램에서 어떤 모양이 생기고, 태그로 어떻게 확인하나? 정답/힌트: 같은 우선순위는 선점하지 못하므로 무작위 위상의 선반(폭 약 8 µs)이 하나 더 생긴다. 같이 pend되면 tail-chain 순서(낮은 IRQ 번호 먼저)도 영향을 준다(B2).</li><li><strong>측정</strong>: 예제 8을 <code>CONFIG_TIMESLICING=y</code>에 <code>CONFIG_TIMESLICE_PRIORITY</code>를 바꿔(측정 대상 스레드 우선순위보다 낮은 스레드만 슬라이스) 다시 돌려라. 태그 없는 ISR 꼬리(21.96 µs)가 어떻게 바뀌나? 정답/힌트: <code>z_time_slice_size()</code>가 0이 되는 스레드로의 전환에서는 <code>z_add_timeout</code>이 빠진다(kernel/timeslicing.c) — 해당 전환의 IRQ 잠금 구간이 짧아지는지 히스토그램으로 확인한다.</li><li><strong>분석</strong>: 예제 11의 확률 모델로, 예제 10에서 <code>log_flush</code> 호출 빈도를 1/4000로 줄이면 "59 µs 이상을 99% 확률로 한 번 보기"에 10 kHz로 몇 초가 필요한지 계산하라. 정답/힌트: p가 약 1/10이 되므로 약 10배, 70초 남짓. 측정 대신 코드 리뷰로 60 µs 구간을 찾는 편이 싸다는 결론.</li><li><strong>실칩 과제</strong>(보드가 있으면): STM32 보드에서 예제 4를 돌려 CYCCNT가 오르는지 보고, EXTI 핀을 타이머 입력 캡처에도 연결해 "IRQ 순간 → ISR 첫 명령"을 CYCCNT와 캡처 값으로 잰 뒤, 같은 구간을 GPIO + scope로 재서 두 값의 차이(= set-to-pin 지연 + 클럭 동기화)를 구하라. 정답/힌트: 캡처 타이머 클럭과 CYCCNT 클럭(코어)이 다르면 단위를 맞춘다. 차이가 수 ns ~ 수십 ns 규모인지 확인.</li></ol>
+<hr>
+<h2 id="14-용어-사전">14. 용어 사전<a class="anchor" href="#14-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>interrupt latency</td><td>인터럽트 지연</td><td>IRQ가 올라간 순간 → ISR 첫 (쓸모 있는) 명령</td></tr><tr><td>task response latency</td><td>태스크 응답 지연</td><td>IRQ 순간 → 그 이벤트를 처리하는 태스크의 첫 명령</td></tr><tr><td>jitter</td><td>지터</td><td>같은 지연의 흔들림. 보통 peak-to-peak와 히스토그램으로 본다</td></tr><tr><td>masking window</td><td>마스킹 구간</td><td>PRIMASK/BASEPRI가 올라가 IRQ가 들어오지 못하는 시간</td></tr><tr><td>blocking term</td><td>차단 항</td><td>낮은 우선순위 코드가 잡은 비선점 구간. 하나만 더한다(max)</td></tr><tr><td>interference term</td><td>간섭 항</td><td>높은 우선순위 ISR · 태스크의 실행. 모두 더한다(Σ)</td></tr><tr><td>max-plus composition</td><td>max-plus 합성</td><td>기본 + max(차단) + Σ(간섭)으로 최악값 상한을 세우기</td></tr><tr><td>timer snapshot</td><td>타이머 스냅샷</td><td>IRQ를 낸 타이머의 카운터를 읽어 "IRQ 이후 경과"를 구하는 방법</td></tr><tr><td>input capture</td><td>입력 캡처</td><td>핀 에지 순간의 타이머 값을 하드웨어가 래치하는 기능(E5)</td></tr><tr><td>set-to-pin delay</td><td>쓰기 → 핀 지연</td><td>GPIO 레지스터 쓰기부터 패드 전압이 바뀔 때까지</td></tr><tr><td>infinite persistence</td><td>무한 잔상</td><td>scope가 모든 트리거의 파형을 겹쳐 남기는 모드. 지터가 띠로 보인다</td></tr><tr><td>DWT CYCCNT</td><td>사이클 카운터</td><td>DWT 블록의 32비트 코어 클럭 카운터(Armv7-M · v8-M Mainline)</td></tr><tr><td>TRCENA</td><td>트레이스 활성</td><td>DEMCR bit 24. DWT · ITM에 전원을 넣는다</td></tr><tr><td>LAR / LSR</td><td>잠금 접근 / 상태</td><td>일부 M7의 DWT 잠금. LAR에 0xC5ACCE55를 써서 푼다</td></tr><tr><td>EXCCNT</td><td>예외 오버헤드 카운터</td><td>예외 진입 · 퇴장 사이클을 세는 8비트 DWT 카운터</td></tr><tr><td>observer effect</td><td>관측 효과</td><td>계측이 재려는 타이밍 자체를 바꾸는 것</td></tr><tr><td>cause tagging</td><td>원인 태깅</td><td>표본마다 그 시간에 겹친 방해꾼을 비트로 기록</td></tr><tr><td>ablation</td><td>하나씩 끄기</td><td>원인 후보를 꺼서 그 모양이 사라지는지로 인과를 증명</td></tr><tr><td>phase lock</td><td>위상 고정</td><td>두 주기 이벤트가 같은 클럭에서 나와 늘 같은 간격으로 만나는 것</td></tr><tr><td>tail call</td><td>꼬리 호출</td><td>함수 끝 호출을 <code>b</code>로 바꿔 프레임을 없애는 최적화. LR 추적을 흐린다</td></tr></tbody></table></div>
+<hr>
+<h2 id="15-요약-체크리스트">15. 요약 &amp; 체크리스트<a class="anchor" href="#15-요약-체크리스트" aria-label="link">#</a></h2>
+<p>인터럽트 지연은 하드웨어 진입 · 마스킹 구간 · 상위 ISR · 프롤로그의 합이고, 태스크 응답 지연은 여기에 ISR 안 커널 호출 · PendSV · 전환 결정 · API 복귀 · 상위 태스크 간섭을 더한 것이다. 데이터시트의 12사이클은 그중 한 조각의 최선값일 뿐이다. 측정은 IRQ 순간을 하드웨어가 기록하는 방법(타이머 스냅샷 · 입력 캡처 · scope)으로 시작하고, 뒤 구간은 CYCCNT나 trace 훅으로 찍으며, 계측 비용을 따로 재서 뺀다. QEMU Cortex-M3에서 FreeRTOS의 IRQ → 태스크는 8.32 µs(lean 6.84), Zephyr는 14.08 µs(슬라이스 끔 5.32)였고, 구간 분해는 FreeRTOS의 비용이 PendSV 안의 결정에, Zephyr 기본의 비용이 ISR 안의 <code>k_sem_give</code>(슬라이스 재설정)에 있음을 보였다. 지터는 히스토그램으로 읽는다 — 날카로운 두 번째 봉우리는 위상 고정 간섭, 평평한 선반은 무작위 위상의 차단 구간, 먼 작은 무리는 원인 조합, 홀로 먼 점은 먼저 측정 버그. 모양으로 가설을 세우고, 원인 태깅으로 상관을 보이고, 하나씩 끄기로 증명한다. 최악값은 측정 최댓값(하한)과 max-plus 합성(상한)을 같이 보고하고, 측정 길이는 드문 경로가 몇 번 지나갔는지로 정한다. 가장 긴 크리티컬 섹션은 지연이 큰 표본의 쌓인 LR이 이름과 줄 번호로 알려 준다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>인터럽트 지연과 태스크 응답 지연을 그림 1의 조각으로 나눠 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>Cortex-M3/M4 진입 12사이클이 하한인 이유(wait state, 버스, 마스킹, 상위 ISR)를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>타이머 스냅샷 · GPIO + scope · DWT CYCCNT · 트레이스가 각각 어디서부터 재는지 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>scope 무한 잔상 화면에서 최소 · 최대 지연을 읽고 set-to-pin 지연을 뺄 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>DWT CYCCNT를 켜는 순서(TRCENA, M7 LAR, CYCCNTENA)와 자가 시험을 코드로 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>계측 비용을 재고, 계측 있는 · 없는 총합을 같이 보고할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>trace 훅(<code>traceTASK_SWITCHED_IN</code>, Zephyr <code>sys_trace_*_user</code>)으로 커널 안 구간을 잴 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>히스토그램의 봉우리 · 선반 · 꼬리 · 홀로 먼 점을 원인 후보에 매핑할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>원인 태깅과 하나씩 끄기로 지터 원인을 증명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>쌓인 PC/LR로 가장 긴 크리티컬 섹션을 찾고, 꼬리 호출 함정을 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>max-plus 합성으로 상한을 세우고 측정 최댓값과 비교할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>드문 경로를 99% 확률로 보기 위한 표본 수를 계산할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="bare-metal-노트와의-관계">Bare-Metal 노트와의 관계<a class="anchor" href="#bare-metal-노트와의-관계" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>BM ID</th><th>BM 주제</th><th>이 노트의 해당 절</th><th>Bare-Metal 쪽에 남길 내용</th></tr></thead><tbody><tr><td>BM J7</td><td>인터럽트 지연 · 지터 측정 (GPIO 토글 + scope, DWT, 최악 경로 찾기)</td><td>§1 정의, §2 측정 방법, §5 히스토그램, §6 모양 → 원인 · 태깅 · 끄기, §7 최악 경로 · 상한 합성 · 측정 시간</td><td>super-loop에서 ISR → 메인 루프 플래그 폴링 지연(루프 한 바퀴 길이가 곧 최악 지연), RTOS 없이 같은 히스토그램 · 태깅을 하는 법 — 이 노트 링크</td></tr><tr><td>BM M7</td><td>타이밍 측정 기법 (GPIO 토글, DWT CYCCNT, 타이머 스냅샷, 측정이 측정을 바꾸는 문제)</td><td>§2 네 방법과 선택표, §3 비용 · DWT 켜기 · 자가 시험 · observer effect 규칙</td><td>레지스터 수준 GPIO 토글 매크로(BSRR 등 칩별), 벤더 HAL 없이 쓰는 최소 측정 헤더 — 이 노트 링크</td></tr></tbody></table></div>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul class="tasks"><li>Arm, <strong>Cortex-M3 Technical Reference Manual r2p0 (ARM DDI 0337G)</strong> — §5.5 예외 진입 · "12-cycle latency", §5.6 tail-chaining("six cycles"), §5.7 late-arriving, 명령 타이밍(LDM/STM). 사본: https://www.keil.com/dd/docs/datashts/arm/cortex_m3/r2p0/ddi0337g_cortex_m3_r2p0_trm.pdf</li><li>Joseph Yiu, "A Beginner's Guide on Interrupt Latency — and Interrupt Latency of the Arm Cortex-M processors", Arm Community blog, 2016 (M0 16 · M0+ 15 · M3 12 · M4 12사이클, zero wait state 조건): https://developer.arm.com/community/arm-community-blogs/b/architectures-and-processors-blog/posts/beginner-guide-on-interrupt-latency-and-interrupt-latency-of-the-arm-cortex-m-processors</li><li>Arm, <strong>Armv7-M Architecture Reference Manual</strong> (ARM DDI 0403) — DWT(CYCCNT, EXCCNT, DWT_CTRL 비트), DEMCR.TRCENA</li><li>CMSIS-Core 헤더(VM의 Zephyr 모듈 <code>modules/hal/cmsis/CMSIS/Core/Include/core_cm3.h</code>, <code>core_cm7.h</code>) — <code>DWT_Type</code>(CYCCNT 0x004, EXCCNT 0x00C, M7의 LAR 0xFB0 · LSR 0xFB4), <code>DWT_CTRL_NOCYCCNT_Pos</code> 25, <code>DWT_CTRL_EXCEVTENA_Pos</code> 18, <code>CoreDebug_DEMCR_TRCENA_Pos</code> 24</li><li>STMicroelectronics, <strong>RM0090</strong> (STM32F405/415, F407/417, F427/437, F429/439 Reference Manual) — Flash 접근 시간과 CPU 클럭의 관계 표(wait state 수)</li><li>FreeRTOS Kernel V11.3.2 소스(<code>/var/rtoslab/src/FreeRTOS-Kernel</code>): <code>tasks.c</code>(<code>vTaskSwitchContext</code>의 <code>traceTASK_SWITCHED_IN</code>, <code>vTaskGenericNotifyGiveFromISR</code>), <code>include/FreeRTOS.h</code>(trace 매크로 기본값), <code>portable/GCC/ARM_CM3/port.c</code>(<code>xPortSysTickHandler</code>의 <code>traceISR_ENTER</code>, <code>vPortExitCritical</code>), <code>portable/GCC/ARM_CM3/portmacro.h</code>(<code>portEND_SWITCHING_ISR</code>, <code>portYIELD_FROM_ISR</code>) — https://github.com/FreeRTOS/FreeRTOS-Kernel</li><li>Zephyr v4.4.2 소스(<code>/var/rtoslab/zephyrproject/zephyr</code>): <code>arch/arm/core/cortex_m/isr_wrapper.c</code>, <code>swap_helper.S</code>(<code>z_arm_pendsv</code>), <code>vector_table.S</code>(<code>sys_clock_isr</code>), <code>arch/arm/include/cortex_m/dwt.h</code>(<code>dwt_access</code>, <code>z_arm_dwt_init</code>), <code>arch/arm/core/cortex_m/timing.c</code>, <code>kernel/sched.c</code>(<code>update_cache</code>, <code>ready_thread</code>), <code>kernel/timeslicing.c</code>(<code>z_reset_time_slice</code>), <code>kernel/sem.c</code>, <code>kernel/thread.c</code>(<code>z_thread_mark_switched_in/out</code>), <code>subsys/tracing/user/tracing_user.c</code>, <code>tests/benchmarks/latency_measure</code></li><li>Zephyr 문서 — Tracing: https://docs.zephyrproject.org/latest/services/tracing/index.html</li><li>SEGGER SystemView: https://www.segger.com/products/development-tools/systemview/ · Percepio Tracealyzer: https://percepio.com/tracealyzer/</li><li>QEMU 문서 — Arm MPS2 and MPS3 boards: https://www.qemu.org/docs/master/system/arm/mps2.html</li><li>Don의 Embedded Linux 노트: EL N3(지연 측정 — cyclictest, 히스토그램, 측정 시간; Linux 쪽은 거기서)</li><li>같은 RTOS 노트 세트: A1(지연 · 지터 용어), A7(첫 IRQ → 태스크 측정), B2(예외 진입 · tail-chain), B3(NVIC · BASEPRI), C2(컨텍스트 스위치), C7(크리티컬 섹션 L 스윕, <code>--wrap</code> 계측), C8(커널 진입), E1 · E2 · E4 · E5 · E7, M3 · M5 · M6, N3</li></ul>
+    <div class="nav"><a class="prev" href="2026-11-01_E2_interrupt_priority_design.html"><span class="dir">← 이전</span><span class="nm">E2. 인터럽트 우선순위 설계 — kernel-aware와 zero-latency 사이에 선을 긋고, 배치표를 숫자로 만들고, 검증까지 한다</span></a><a class="next" href="2026-11-01_E4_isr_to_task_path.html"><span class="dir">다음 →</span><span class="nm">E4. ISR → 태스크 처리 경로 — ISR에 무엇을 남기고, 어떤 단위로 넘기고, 폭주 · 과부하에서 어떻게 살아남나</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-지연이-얼마냐-는-질문을-구간으로-바꾼다">0. 큰 그림 — "지연이 얼마냐"는 질문을 구간으로 바꾼다</a></li><li class="l3"><a href="#범위-다른-노트와의-경계">범위 — 다른 노트와의 경계</a></li><li class="l3"><a href="#실습-환경-한-줄">실습 환경 한 줄</a></li><li class="l2"><a href="#1-정의-인터럽트-지연-태스크-응답-지연-지터">1. 정의 — 인터럽트 지연, 태스크 응답 지연, 지터</a></li><li class="l3"><a href="#1-1-직관-택배가-문-앞에-온-순간부터-내가-상자를-여는-순간까지">1.1 직관 — 택배가 문 앞에 온 순간부터 내가 상자를 여는 순간까지</a></li><li class="l3"><a href="#1-2-정의">1.2 정의</a></li><li class="l3"><a href="#1-3-구성-요소-표-각-조각은-무엇이-결정하나">1.3 구성 요소 표 — 각 조각은 무엇이 결정하나</a></li><li class="l2"><a href="#2-측정-방법-네-가지-무엇부터-무엇까지-재는가">2. 측정 방법 네 가지 — 무엇부터 무엇까지 재는가</a></li><li class="l3"><a href="#2-1-타이머-스냅샷-irq를-올린-장치에게-언제-올렸는지-묻는다">2.1 타이머 스냅샷 — "IRQ를 올린 장치에게 언제 올렸는지 묻는다"</a></li><li class="l3"><a href="#2-2-gpio-토글-scope-로직-분석기-밖에서-본다">2.2 GPIO 토글 + scope / 로직 분석기 — "밖에서 본다"</a></li><li class="l3"><a href="#2-3-dwt-cyccnt-코어-클럭-사이클을-코드에서-직접-센다">2.3 DWT CYCCNT — "코어 클럭 사이클을 코드에서 직접 센다"</a></li><li class="l3"><a href="#2-4-트레이스-모든-이벤트에-타임스탬프">2.4 트레이스 — "모든 이벤트에 타임스탬프"</a></li><li class="l3"><a href="#2-5-무엇을-언제-쓰나-선택표">2.5 무엇을 언제 쓰나 — 선택표</a></li><li class="l2"><a href="#3-측정의-비용-측정이-측정을-바꾼다">3. 측정의 비용 — 측정이 측정을 바꾼다</a></li><li class="l3"><a href="#3-1-실칩의-하드웨어-진입-값-qemu로-재지-못하는-것">3.1 실칩의 하드웨어 진입 값 — QEMU로 재지 못하는 것</a></li><li class="l3"><a href="#3-2-예제-1-측정-도구-하나하나의-값">3.2 예제 1 — 측정 도구 하나하나의 값</a></li><li class="l3"><a href="#3-3-예제-2-isr-첫-줄-은-어디인가-asm-스텁-vs-c-vs-레지스터를-많이-쓰는-c">3.3 예제 2 — "ISR 첫 줄"은 어디인가: asm 스텁 vs C vs 레지스터를 많이 쓰는 C</a></li><li class="l3"><a href="#3-4-예제-3-컴파일러가-계측점을-옮긴다-objdump">3.4 예제 3 — 컴파일러가 계측점을 옮긴다 (objdump)</a></li><li class="l3"><a href="#3-5-예제-4-dwt-cyccnt를-교과서대로-켜고-믿기-전에-시험한다">3.5 예제 4 — DWT CYCCNT를 교과서대로 켜고, 믿기 전에 시험한다</a></li><li class="l3"><a href="#3-6-observer-effect를-다루는-네-가지-규칙">3.6 observer effect를 다루는 네 가지 규칙</a></li><li class="l2"><a href="#4-기본-지연을-구간으로-쪼갠다-freertos-vs-zephyr">4. 기본 지연을 구간으로 쪼갠다 — FreeRTOS vs Zephyr</a></li><li class="l3"><a href="#4-1-예제-5-freertos-계측점-5개">4.1 예제 5 — FreeRTOS: 계측점 5개</a></li><li class="l3"><a href="#4-2-예제-6-zephyr-tracing-훅으로-계측점-7개">4.2 예제 6 — Zephyr: tracing 훅으로 계측점 7개</a></li><li class="l3"><a href="#4-3-한-장으로-누적-막대">4.3 한 장으로 — 누적 막대</a></li><li class="l2"><a href="#5-지터를-만든다-배경-부하-아래의-히스토그램">5. 지터를 만든다 — 배경 부하 아래의 히스토그램</a></li><li class="l3"><a href="#5-1-실험-설계-방해꾼-네-개-원인마다-다른-모양을-예상한다">5.1 실험 설계 — 방해꾼 네 개, 원인마다 다른 모양을 예상한다</a></li><li class="l3"><a href="#5-2-예제-7-freertos-두-단계-히스토그램-원인-태깅">5.2 예제 7 — FreeRTOS: 두 단계 히스토그램 + 원인 태깅</a></li><li class="l3"><a href="#5-3-예제-8-zephyr-같은-부하-같은-태깅">5.3 예제 8 — Zephyr: 같은 부하, 같은 태깅</a></li><li class="l2"><a href="#6-히스토그램을-읽는다-모양-원인-증명">6. 히스토그램을 읽는다 — 모양 → 원인 → 증명</a></li><li class="l3"><a href="#6-1-여섯-가지-모양">6.1 여섯 가지 모양</a></li><li class="l3"><a href="#6-2-원인-태깅-표본마다-그때-누가-있었나-를-기록한다">6.2 원인 태깅 — 표본마다 "그때 누가 있었나"를 기록한다</a></li><li class="l3"><a href="#6-3-예제-9-하나씩-끄기-ablation-그-원인을-없애면-그-모양이-사라지나">6.3 예제 9 — 하나씩 끄기(ablation): 그 원인을 없애면 그 모양이 사라지나</a></li><li class="l3"><a href="#6-4-don의-경험과-연결">6.4 Don의 경험과 연결</a></li><li class="l2"><a href="#7-최악-경로-찾기-가장-긴-구간-상한-합성-얼마나-오래-재나">7. 최악 경로 찾기 — 가장 긴 구간, 상한 합성, 얼마나 오래 재나</a></li><li class="l3"><a href="#7-1-왜-평균은-쓸모가-없나">7.1 왜 평균은 쓸모가 없나</a></li><li class="l3"><a href="#7-2-max-plus-합성-최악값-상한을-조각으로-세운다">7.2 max-plus 합성 — 최악값 상한을 조각으로 세운다</a></li><li class="l3"><a href="#7-3-예제-10-가장-긴-크리티컬-섹션을-찾는다-스택에-쌓인-lr">7.3 예제 10 — 가장 긴 크리티컬 섹션을 찾는다: 스택에 쌓인 LR</a></li><li class="l3"><a href="#7-4-오래-재야-하는-이유-최댓값은-측정-시간의-함수다">7.4 오래 재야 하는 이유 — 최댓값은 측정 시간의 함수다</a></li><li class="l3"><a href="#7-5-예제-11-평균-vs-꼬리-상한-합성-필요한-측정-시간-python">7.5 예제 11 — 평균 vs 꼬리, 상한 합성, 필요한 측정 시간 (Python)</a></li><li class="l3"><a href="#7-6-최악-경로-찾기-체크리스트">7.6 최악 경로 찾기 체크리스트</a></li><li class="l2"><a href="#8-예제-12-측정-숫자를-차트로-python">8. 예제 12 — 측정 숫자를 차트로 (Python)</a></li><li class="l2"><a href="#9-rtos-커널-안에서는-무슨-일이-일어나나-각-구간의-소스-위치">9. RTOS 커널 안에서는 무슨 일이 일어나나 — 각 구간의 소스 위치</a></li><li class="l2"><a href="#10-실무에서-다시-보기">10. 실무에서 다시 보기</a></li><li class="l3"><a href="#10-1-드론-비행-제어기-rate-loop가-가끔-늦게-시작한다">10.1 드론 비행 제어기 — "rate loop가 가끔 늦게 시작한다"</a></li><li class="l3"><a href="#10-2-로봇-관절-모터-컨트롤러-20-khz-foc는-어디서-재나">10.2 로봇 관절 모터 컨트롤러 — 20 kHz FOC는 어디서 재나</a></li><li class="l3"><a href="#10-3-linux-soc-옆의-센서-허브-zephyr">10.3 Linux SoC 옆의 센서 허브 (Zephyr)</a></li><li class="l3"><a href="#10-4-don의-ssd-펌웨어와-연결">10.4 Don의 SSD 펌웨어와 연결</a></li><li class="l2"><a href="#11-흔한-실수와-증상">11. 흔한 실수와 증상</a></li><li class="l2"><a href="#12-면접에서-이렇게-말한다">12. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#13-직접-해보기">13. 직접 해보기</a></li><li class="l2"><a href="#14-용어-사전">14. 용어 사전</a></li><li class="l2"><a href="#15-요약-체크리스트">15. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#bare-metal-노트와의-관계">Bare-Metal 노트와의 관계</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

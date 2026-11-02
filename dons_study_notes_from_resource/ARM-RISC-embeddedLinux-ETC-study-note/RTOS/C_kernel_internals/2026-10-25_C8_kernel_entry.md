@@ -1799,12 +1799,14 @@ SSD 컨트롤러에서 호스트 인터페이스 코어가 받은 NVMe 명령을
 | 스택 배열 정렬 안 함 | 첫 push에서 MemManage 또는 다른 태스크 메모리 침범 | v7-M 리전은 크기 정렬 필수 | `aligned(스택 바이트)`, 크기도 2의 거듭제곱 |
 | `privileged_functions` 리전이 작음 | 링크 실패 `cannot move location counter backwards` | 커널 코드가 리전보다 큼 | 다음 2의 거듭제곱, 또는 커널 기능 축소 |
 | v2에서 ACL 부여를 잊음 | API가 예외 없이 `pdFAIL`/0 반환, 태스크가 이상 동작 | `xPortIsAuthorizedToAccessKernelObject` 실패 | 초기화 때 `vGrantAccessTo*` |
-| 비특권 태스크에서 `xQueueCreate` 호출 | 생성 실패(NULL) | v2에서 생성 API는 비특권 금지 | 특권 초기화 코드에서 만들고 넘김 |
+| 비특권 태스크에서 `xQueueCreate` 호출 | MemManage (IACCVIOL) — NULL 반환이 아니다 (🔄 F5 정정) | v2에서 생성 API 래퍼는 특권 전용 섹션(`PRIVILEGED_FUNCTION`)에 있다 | 특권 초기화 코드에서 만들고 넘김 |
 | 폴트 핸들러에서 FreeRTOS API 호출 | MemManage가 HardFault로 번짐 | 앱 코드 API = `MPU_` 래퍼, nPRIV=1이면 Handler 모드에서 `svc` | 핸들러는 레지스터만 읽고 특권 태스크에 알림 |
 | Zephyr user 스레드에 객체 권한 안 줌 | `ZEPHYR FATAL ERROR 3: Kernel oops`, 기본 fatal 핸들러면 시스템 정지 | `z_vrfy_*`의 `K_SYSCALL_OBJ` 실패 | `k_object_access_grant` 또는 `k_thread_access_grant()` 매크로 |
 | Zephyr user 스레드가 주변장치 레지스터 직접 접근 | MPU FAULT, Data Access Violation | 주변장치가 memory domain에 없음 | 드라이버를 syscall로 감싸거나 MMIO 파티션 추가 |
 | `CONFIG_USERSPACE` 빌드에 gperf 없음 | 빌드 실패 `GPERF-NOTFOUND` | 커널 객체 perfect hash 생성에 gperf 필요 | 호스트에 gperf 설치 (이 노트는 직접 빌드) |
 | 고주파 루프를 비특권으로 만듦 | 주기 초과·지터 증가 | API마다 SVC 2번 + 검사 | 고주파 경로는 특권에 두고 경계는 큐 하나로 |
+
+> 🔄 2026-11-01 정정 (F5 예제 8): 처음 이 표에는 "생성 실패(NULL)"라고 썼으나, 실측해 보니 restricted 태스크의 `xQueueCreate`는 NULL을 돌려주지 않고 PC = `MPU_xQueueGenericCreate`에서 MemManage IACCVIOL로 죽는다. V11.3.2 `portable/Common/mpu_wrappers_v2.c`의 생성 API 래퍼가 SVC 래퍼가 아니라 `privileged_functions` 섹션에 있기 때문이다. `vTaskSuspendAll`도 v2에서 래핑되지 않아 같은 방식으로 죽는다.
 
 ---
 

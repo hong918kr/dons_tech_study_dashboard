@@ -1,6 +1,7 @@
 # Verkada — Senior Embedded Linux Engineer, Connectivity · Context
 
-> **최종 갱신**: 2026-09-24 · **상태**: 💻 1차 기술 인터뷰 **2026-09-25 예정**
+> **최종 갱신**: 2026-10-28 · **상태**: ❌ **불합격 — 파이프라인 종료** (1차 기술 스크린 후, 2026-09월 말 통보 `[추정]`)
+> **남은 자산**: [연습 문제 10개 + 스터디 노트 23편](../concurrency_prac/fromVerkadaSrEmbdLinuxEng/index.html) — 이 탈락에서 나온 "블로킹 벤더 API 감싸기" 유형 대비. 다음 임베디드 스크린에 그대로 재사용
 > **⚡ 준비 문서**: [verkada_concurrency_top10.md](verkada_concurrency_top10.md) — 빈출 10문제 + 시스템 설계 + 영어 스크립트
 > **🧩 문제 은행**: [verkada_prep/](verkada_prep/README.md) — 8세트 · 78문제 · 592체크 (대시보드 `verkada_prep/index.html`, `make prob N=02_condvar_queues`)
 > **📚 노트 사이트**: [notes_site/index.html](notes_site/index.html) — 기초 노트 11 + 복습 노트 8 (읽기 전용 HTML, 진행률 저장)
@@ -25,7 +26,7 @@
 - **핵심 어필**: ① Apple Wireless 칩셋 통합에서 PCIe/I2C/SPMI/RFFE 인터페이스 장애의 root cause를 맡아 bring-up → NPI → MP까지 진행 ② SSD 양산 FW에서 NVMe telemetry 디버그 기능과 에러 처리 체계를 설계하고 출시(= 수백만 대 fleet의 observability) ③ DSO, 프로토콜 분석기, JTAG로 HW/FW 경계 디버깅, SI 팀과 협업
 - **최대 갭/리스크**: Embedded Linux(커널/userspace, Yocto, device tree), Linux networking(routing, failover, NAT), cellular modem 스택(ModemManager/QMI/AT), Go. 추가로 San Mateo 주 5일 출근과 pre-IPO RSU 유동성.
 - **예상 인터뷰 포맷**: `[확인됨 2026-09-15]` 다음 라운드는 **2파트 세션 — problem solving(동시성 자료구조 구현) + system design**. 준비 주제를 메일에서 명시함(thread safety, mutex/condvar/atomic, double buffering, 모듈화·테스트 가능한 설계). 이후 온사이트는 `[추정]`
-- **다음 액션**: ① **[verkada_concurrency_top10.md](verkada_concurrency_top10.md)로 드릴** — 문제 01(bounded queue)·03(double buffering)이 최우선 ② 리크루터에게 날짜/코딩 언어/환경 확인 ③ 시간이 남으면 Linux networking·모뎀 치트시트
+- **다음 액션**: 없음 — **종료**. 교훈과 재사용 자산은 6장 회고 참조. (여기서 나온 연습 세트는 다른 임베디드 스크린 대비에 계속 쓴다)
 
 ---
 
@@ -329,18 +330,56 @@
 | 2026-09-19 | 학습 가이드 제작 | `2026-09-19_verkada_concurrency_study_guide.md/.html` — 메일 4주제 + 시스템 설계 + JD 보강을 개념부터 12장, 자가 점검 51문항. 노트 허브 맨 위 카드로 연결 |
 | 2026-09-24 | **1차 기술 인터뷰 D-1 준비 문서 제작** | 인터뷰 2026-09-25. 예상 문제 Tier1 3 / Tier2 4 / Tier3 4, 시스템 설계 3제, 속사포 25문항, 치트시트, 당일 체크리스트. 랜딩 페이지(index.html)와 코드 브라우저(36개 .c) 추가 |
 | 2026-09-24 | 스터디 로드맵 + 실행 진입점 추가 | `2026-09-24_study_roadmap.md/.html` (단계별 링크·체크박스), `START_HERE.command`(더블클릭 실행), 랜딩 페이지에 파일 위치 안내 |
+| 2026-09-25 | **1차 기술 스크린 진행** (CoderPad, C, 2파트) | 실제 출제: **ALS 블로킹 벤더 API를 non-blocking·thread-safe로 감싸기**. Part 1 = 최신 lux 스냅샷(동시성), Part 2 = 최근 10분 임의 시각 조회(자료구조). 준비했던 예상 문제(bounded queue·double buffer·testable driver)와 **형태가 달라** 잘 풀지 못함 |
+| 2026-09-25 | 문제 복원 + 풀이 노트 | `verkada_sep_25_2026_1st_screening_questions/` — 지문·하네스·모범답안 복원, `solutions_with_opus.md`(640줄) |
+| 2026-09-26 | 같은 유형 연습 세트 제작 | `concurrency_prac/fromVerkadaSrEmbdLinuxEng/` — 10문제(Part1 동시성/Part2 자료구조), 모범답안·스텁·하네스 전부 검증, TSan 클린 |
+| 2026-09-27 | 스터디 노트 23편 + 데모 44개 | 동시성·자료구조·Linux 기초부터. SVG 88개, 자가 점검 163문항 |
+| 2026-09월 말 `[추정]` | ❌ **불합격 통보** | 1차 기술 스크린 후 종료. 정확한 통보일은 미기록 (2026-10-28에 "한 달 전"으로 확인) |
+| 2026-10-28 | 파이프라인 종료 기록 | 상태 ❌ 로 마감. 회고는 6장 |
 
 ---
 
 ## 6. 인터뷰 노트 & 회고
 
-<!-- 라운드마다 추가:
-### YYYY-MM-DD · <라운드명> · 면접관 <역할>
-- 받은 질문:
-- 내 답 / 결과:
-- 잘한 점 / 아쉬운 점:
-- 다음 라운드에 반영할 것:
--->
+### 2026-09-25 · 1차 기술 스크린 (CoderPad, C, 약 60분) · ❌ 불합격
+
+**실제 출제된 문제** — 전문은 [question_note](verkada_sep_25_2026_1st_screening_questions/question_note), 쉬운 해설은 [ALS 문제 쉽게 보기](verkada_sep_25_2026_1st_screening_questions/2026-09-25_als_easy_explainer.html)
+
+> 카메라의 주변광 센서(ALS)를 읽는 벤더 함수 `read_next_sample()`이 **최대 1초 블로킹**한다.
+> 빛이 안 바뀌면 `NO_CHANGE`, 바뀌면 `VALID` + lux + timestamp. 첫 호출만 안 막힌다.
+> **Part 1**: 가장 최근 lux를 non-blocking·thread-safe로 읽는 API
+> **Part 2**: 최근 10분 중 **임의 시각 t의 lux**를 돌려주는 API
+
+**결과**: 잘 풀지 못했다. 구조(전담 샘플러 스레드 + 공유 상태)를 떠올리는 데 시간을 많이 썼고, Part 2까지 제대로 가지 못했다.
+
+### 무엇이 빗나갔나
+
+리크루터가 준 4개 주제(thread safety / mutex·condvar·atomic / double buffering / 모듈화·테스트 설계)는 **맞았다**. 틀린 건 **출제 형태**였다.
+
+| 내가 준비한 것 | 실제로 나온 것 |
+|---|---|
+| "bounded queue를 구현하라" — 자료구조 자체를 요구 | "이 벤더 API를 감싸라" — **설계부터 시작** |
+| double buffering을 독립 문제로 | 동시성은 Part 1의 수단일 뿐, Part 2는 **자료구조 문제** |
+| 도구(mutex/condvar/atomic)별로 정리 | 도구는 고르는 것이고, 문제는 **블로킹을 어디에 가둘지** |
+
+즉 **주제는 맞히고 형태를 놓쳤다.** "~를 구현하라"가 아니라 "주어진 불편한 API를 쓸 만하게 만들라"가 임베디드 스크린의 주류 형태라는 걸 몰랐다.
+
+### 교훈 (다음 임베디드 스크린에 적용)
+
+1. **주제가 아니라 형태를 예측한다.** 리크루터가 주제를 알려주면, 그 주제가 **어떤 문제 모양으로 포장될지**를 먼저 생각한다. 임베디드에서는 대개 "제품의 실제 API/제약을 주고 래퍼를 설계하라"다.
+2. **Part 2가 따로 있다고 가정한다.** 동시성 문제는 대개 "그다음 질의를 어떻게 지원하나"로 이어진다 — 히스토리·범위·집계. 자료구조 준비를 동시성과 **같은 비중**으로.
+3. **읽기보다 손으로.** 이때 읽기 자료(가이드 12장, 문제 은행 78문제)는 충분했지만 **45분 타이머를 켜고 백지에서 짜 본 횟수**가 적었다. 다음엔 자료를 줄이고 구현 횟수를 늘린다.
+4. **첫 5분을 설계에 쓴다.** 요구사항 질문 → 스레드 모델 선언 → API 선언. 이게 있었으면 Part 1을 훨씬 빨리 넘겼을 것이다.
+5. **벤더 함수의 특례를 읽는다.** "첫 호출은 안 막힌다", "`NO_CHANGE`는 이전 값이 유효하다" 같은 한 줄이 설계를 통째로 결정한다.
+
+### 남은 자산 (재사용)
+
+| 자산 | 무엇 |
+|---|---|
+| [연습 문제 10개](../concurrency_prac/fromVerkadaSrEmbdLinuxEng/index.html) | 같은 유형(Part1 동시성 / Part2 자료구조). 모범답안·하네스·TSan 검증 완료 |
+| [스터디 노트 23편](../concurrency_prac/fromVerkadaSrEmbdLinuxEng/notes/index.html) | 동시성·자료구조·Linux 기초부터. SVG 88개, 자가 점검 163문항, 데모 44개 |
+| [만능 레시피 D1](../concurrency_prac/fromVerkadaSrEmbdLinuxEng/notes/D1_wrapper_recipe.html) | 블로킹 API 감싸기 7단계 + 빈 코드 템플릿 |
+| 이 폴더의 가이드·문제 은행 | 동시성 개념 복습용으로 계속 유효 |
 
 ---
 

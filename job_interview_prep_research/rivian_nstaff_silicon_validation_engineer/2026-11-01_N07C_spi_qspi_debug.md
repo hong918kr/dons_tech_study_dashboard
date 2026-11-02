@@ -1,0 +1,936 @@
+# N07C · SPI / QSPI flash 디버그 — "1비트 밀림 · 50 MHz 넘으면 깨짐 · quad만 실패"를 증거로 자르기
+<!-- theme: pastel -->
+
+> **묶음**: N07 인터페이스 디버그 · **우선**: P1 · **목록**: [N07 인덱스](2026-11-01_N07_interface_debug_scenarios.html) · **이전/다음**: [N07B I2C, SMBus 디버그](2026-11-01_N07B_i2c_smbus_debug.html) / [N07D UART, GPIO, IRQ 디버그](2026-11-01_N07D_uart_gpio_irq_debug.html) · **관련**: [BV10 §2.2 SPI, §3.3, 체인 E](2026-11-01_BV10_board_interface_tests.html), [N06C C2 SPI 테스트 플랜](2026-11-01_N06C_plans_peripherals_soc_infra.html), [최종 훑어보기 §5](2026-10-30_final_skim.html), [BV12 shmoo, PVT](2026-11-01_BV12_si_pi_margining_shmoo_pvt.html), [BV11 계측 장비](2026-11-01_BV11_lab_instruments_measurement.html), [N06H 디버그 방법론](2026-11-01_N06H_debug_methodology_triage.html), [N07A 공통 틀](2026-11-01_N07A_debug_framework_instruments.html) · **코드**: [onsitePrep/n07/c/](onsitePrep/n07/c/spi_mode_sim.c) (모드 16조합 · flash JEDEC 모델 · 샘플 지연 shmoo, 실행 검증됨)
+
+## 0. TL;DR
+
+- **이 페이지로 답할 수 있는 것**: "SPI reads are shifted by one bit", "JEDEC ID reads FF FF FF", "flash fails above 50 MHz", "reads above 16 MB return the start of the flash", "DMA reads corrupt but PIO is fine", "quad read fails, single works", "flash sometimes isn't found at boot" — 7개 시나리오 C1–C7을 **계층(전기 → 타이밍 → 프로토콜 → 설정/드라이버 → 시스템)** 순서로 자르는 법.
+- 기초(4선 · mode 표 · JEDEC ID 기본 · 기능 테스트 순서)는 [BV10 §2.2](2026-11-01_BV10_board_interface_tests.html), 테스트 플랜은 [N06C C2](2026-11-01_N06C_plans_peripherals_soc_infra.html). 여기선 **증상 → 원인 → 확인 방법**과 **파형/바이트 패턴 읽기**만.
+- **외울 것 ① "1비트 밀림"의 원인은 두 개다**: **mode(CPOL/CPHA) 불일치** 또는 **샘플 타이밍이 너무 이름(고속 왕복 지연)**. 둘 다 `EF 40 18 → F7 A0 0C` 같은 **똑같은 바이트 패턴**을 만든다(내 시뮬레이터로 재현). **구분법 = 클럭을 1 MHz로 낮춰 본다** — 그래도 밀리면 mode, 사라지면 타이밍.
+- **외울 것 ② 고속 타이밍 예산**: 샘플 지연 0일 때 `T/2 ≥ 2·t_flight + tCLQV + t_setup` 이어야 함. W25Q128JV tCLQV 최대 **6 ns** [1] → 보드 왕복 2 ns, setup 1 ns 가정 시 **약 55 MHz가 한계**. 그 위는 **RX sample delay / read-capture delay 탭**을 스윕해 **PVT 코너 교집합 창의 중앙**을 고른다. 그리고 `03h` Read Data는 원래 **50 MHz까지만** — 그 위는 `0Bh` Fast Read(dummy 8 clock) [1].
+- **외울 것 ③ flash "상태(state)"가 남는다**: QE 비트(quad), 4-byte 주소 모드(ADS), deep power-down, 진행 중인 erase — SoC만 리셋되고 flash는 안 리셋되면 **다음 부팅이 다른 언어로 말하는 flash를 만난다**. 웜 리셋에서만 실패 = flash 상태 의심, cold boot에서만 간헐 = 전원 시퀀스(tVSL 20 µs) 의심 [1].
+- **바이트 패턴 사전**: `FF FF FF` = MISO 아무도 안 구동(CS·전원·명령 인식 실패·power-down) · `00 00 00` = MISO low 고착/핀mux · `F7 A0 0C` = 1비트 늦게 샘플(>>1) · `DE 80 31` = 1비트 일찍(<<1) · 바이트마다 `0x44`/`0x88` 비트가 항상 1 = quad의 IO2/IO3가 떠 있음 · 16 MB 위가 아래와 같음 = 3-byte 주소에서 A24 탈락.
+- **30초 영어 답 (headline: "SPI reads are shifted by one bit / fail above 50 MHz")**: "A one-bit shift has two classic causes that look identical in the data: a clock mode mismatch, or sampling too early because the round trip — clock out, flash output delay, data back — exceeds half a clock period. So my first move is to drop the clock to 1 MHz. If the shift stays, it's mode: I scope CS, SCLK and MISO, check the idle clock level and which edge MISO changes on, and fix CPOL/CPHA in the device tree. If it disappears, it's timing: I compute the budget from the flash's clock-to-output time, then sweep the controller's RX sample delay at each frequency and corner and pick the center of the window that passes everywhere. I also make sure the read opcode and dummy cycles are valid at that frequency."
+
+## 1. 🔰 1분 설명
+
+- **비유**: SPI는 **줄넘기 박자에 맞춰 공을 주고받는 두 사람**. 박자를 세는 사람(master)이 줄(SCLK)을 돌리고, "줄이 올라갈 때 받고 내려갈 때 던진다"는 약속(mode)을 지켜야 한다. 약속이 어긋나면 **공 하나씩 늦게 받는다**(1비트 밀림). 줄을 너무 빨리 돌리면 상대가 던진 공이 **아직 날아오는 중**인데 받으려 한다(고속 샘플 타이밍). QSPI는 공을 **4개씩 동시에** 던지는 것 — 손(IO2/IO3)을 쓰려면 먼저 "네 손 다 써도 돼"라는 스위치(QE 비트)를 켜야 한다.
+- **정확한 정의**: SPI = master가 SCLK와 CS#를 구동하고, MOSI로 보내면서 동시에 MISO로 받는 동기식 직렬 버스. 주소선이 없고 CS#로 장치 선택. **mode = (CPOL, CPHA)**: CPOL = SCLK가 쉴 때 레벨, CPHA = 첫 엣지(0)에서 샘플하나 두 번째 엣지(1)에서 샘플하나. **SPI NOR flash**는 명령(opcode) 1 B → 주소 3 B(또는 4 B) → dummy clock → 데이터 순서로 말하는 장치이고, **QSPI** 는 같은 명령 체계를 1/2/4 라인으로 보내는 확장(표기 `명령-주소-데이터` 라인 수, 예: 1-1-4, 1-4-4, 4-4-4).
+
+```text
+   SoC                                         보드                          SPI NOR flash (예: W25Q128JV, 3.3 V)
+ ┌──────────────────────────────┐
+ │ QSPI/SPI controller          │   pad (pinmux, drive strength, slew)
+ │  ├ SCLK gen (div, CPOL)  ────┼──► SCLK ──[22–33 Ω 직렬 R, 선택]──────────────► CLK
+ │  ├ CS ctrl (setup/hold/gap) ─┼──► CS#  ───────────────┬──────────────────────► /CS   (풀업 → flash VCC: 전원 켜질 때 CS가 VCC를 따라가야 함)
+ │  ├ TX shift ─────────────────┼──► IO0 (MOSI) ─────────┼──────────────────────► DI  / IO0
+ │  ├ RX shift ◄─[sample delay]─┼─── IO1 (MISO) ◄────────┼─────────────────────── DO  / IO1
+ │  │                           │◄─► IO2 ───────────────[풀업]──────────────────► /WP   / IO2  (QE=1이면 IO2)
+ │  │                           │◄─► IO3 ───────────────[풀업]──────────────────► /HOLD / IO3  (QE=1이면 IO3; 일부 패키지는 /RESET)
+ │  ├ FIFO + DMA req ───► DMA   │                        │
+ │  └ XIP / memory-map window   │      (2nd slave CS1#) ─┘  ← 다른 slave가 CS high에서 MISO를 놓지 않으면 경합
+ └──────────────────────────────┘
+   RX 경로 왕복: SCLK가 SoC pad → 보드 → flash CLK → flash 출력 지연(tCLQV) → 보드 → SoC pad → 샘플 플립플롭
+```
+
+| 용어 | 풀네임 | 쉬운 설명 | 디버그에서 왜 중요 |
+|---|---|---|---|
+| CPOL / CPHA | Clock polarity / phase | 쉬는 SCLK 레벨 / 첫·둘째 엣지 중 어디서 샘플 | 틀리면 1비트 밀림 또는 FF — §5 C1 |
+| launch / sample edge | — | 데이터를 바꾸는 엣지 / 읽는 엣지 (항상 반대) | 수신 측이 송신 측의 launch 엣지에서 읽으면 hold 경쟁(race) |
+| tCLQV / tCLQX | Clock Low to Output Valid / Output Hold | flash가 falling 엣지 뒤 데이터를 내놓기까지 최대 시간 / 이전 데이터를 유지하는 최소 시간 | 고속 read 타이밍 예산의 핵심 (6 ns / 1.5 ns [1]) |
+| RX sample delay | read-capture delay | 컨트롤러가 MISO를 기본 엣지보다 얼마나 늦게 샘플할지 | 50 MHz 이상에서 필수 튜닝 — §5 C3 |
+| dummy cycles | — | 주소 뒤 flash가 데이터를 준비하는 빈 클럭 | 개수 틀리면 데이터가 몇 비트/니블 밀림 |
+| mode bits (M7–M0) | continuous read mode bits | 1-4-4 read에서 주소 뒤 2 clock | 지원 파트에서 값에 따라 "다음엔 opcode 생략" 상태로 들어감 [추정: 파트마다 다름] |
+| QE | Quad Enable | status register 비트, 1이면 /WP·/HOLD 핀이 IO2·IO3 | 0이면 quad read 실패 — §5 C6 |
+| BUSY / WEL | Erase/Write In Progress / Write Enable Latch | SR1 bit0 / bit1 | program·erase 완료 대기, `06h` 없이 쓰기 무시 |
+| BP / SRP | Block Protect / Status Register Protect | 영역 쓰기 보호 비트 / status 쓰기 보호 | "쓰기가 조용히 안 됨" |
+| ADS / ADP | Current / Power-Up Address Mode | 지금 4-byte 모드인가 / 전원 켤 때 4-byte로 시작하나 (W25Q256JV SR3) | 16 MB 넘는 flash의 주소 문제 — §5 C4 [2] |
+| SFDP | Serial Flash Discoverable Parameters (JESD216) | flash 안에 든 "내 사양서" 표 (`5Ah`로 읽음) | Linux가 read 모드·dummy·QE 방법을 여기서 결정 [4][7] |
+| XIP | eXecute In Place | CPU가 flash를 메모리처럼 바로 읽기 | 부트 코드·캐시와 얽혀 "erase했는데 옛 데이터" |
+| MTD | Memory Technology Device | Linux의 raw flash 계층 (`/dev/mtdN`) | `mtd_debug`·`flashcp`·파티션 |
+
+## 2. 정상 기준선
+
+### 2.1 4가지 mode의 정상 파형 (MSB first)
+
+```text
+ CS#   ‾‾‾\_______________________________________________________/‾‾‾
+
+ mode 0 (CPOL=0, CPHA=0): SCLK 쉴 때 low · rising에서 샘플 · falling에서 다음 비트 · CS# 내리자마자 b7을 미리 올림
+ SCLK  ________/‾‾‾\___/‾‾‾\___/‾‾‾\___ ... ___/‾‾‾\_____________
+ DATA  ====X b7      X b6      X b5    ...  b0      X=============
+               ↑샘플      ↑샘플                ↑샘플
+
+ mode 1 (CPOL=0, CPHA=1): 쉴 때 low · rising에서 내보내고 falling에서 샘플 (b7은 첫 rising에서 나옴)
+ SCLK  ________/‾‾‾\___/‾‾‾\___ ...
+ DATA  ========X b7    X b6    X ...
+                   ↑샘플   ↑샘플
+
+ mode 2 (CPOL=1, CPHA=0): 쉴 때 high · falling에서 샘플 · rising에서 다음 비트 · b7 미리
+ SCLK  ‾‾‾‾‾‾‾‾\___/‾‾‾\___/‾‾‾\___ ...
+ DATA  ====X b7    X b6    X b5  ...
+               ↑샘플   ↑샘플
+
+ mode 3 (CPOL=1, CPHA=1): 쉴 때 high · falling에서 내보내고 rising에서 샘플
+ SCLK  ‾‾‾‾‾‾‾‾\___/‾‾‾\___/‾‾‾\___ ...
+ DATA  ========X b7    X b6    X ...
+                   ↑샘플   ↑샘플
+```
+
+- **같은 엣지 그룹**: mode 0과 3은 **rising 샘플 / falling 출력**, mode 1과 2는 **falling 샘플 / rising 출력**. 그래서 SPI NOR는 "mode 0과 3 지원" — 둘의 차이는 CS# 엣지 때 CLK가 low냐 high냐 뿐이다 [1].
+- **scope에서 mode 읽는 법**: ① CS#가 내려가는 순간 SCLK 레벨 = CPOL ② MISO(또는 MOSI)가 **바뀌는** 엣지 = launch 엣지, 그 반대 엣지 = 샘플 엣지 ③ 첫 비트가 CS# 직후에 이미 있으면 CPHA=0.
+
+### 2.2 정상 JEDEC ID 읽기 (`9Fh`)
+
+```text
+ CS#   ‾\_____________________________________________________________________/‾
+ SCLK  __/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_/‾\_ /‾\_ ... 24 clock ... _/‾\_____________
+ MOSI  ==[1  0   0   1   1   1   1   1 ]=========== don't care (보통 00) ========
+            └──────── 0x9F ─────────┘
+ MISO  ~~~~~~~~~~~~ hi-Z (풀업이면 1) ~~~[ 0xEF ][ 0x40 ][ 0x18 ][0xEF][0x40]...~~
+                                         제조사   type    capacity  ← CS# 계속 low면 반복
+```
+
+- Winbond W25Q128JV-IQ/JQ: **`EF 40 18`** (EF = Winbond, 0x18 → 2^24 B = 16 MB), W25Q128JV-IM/JM은 `EF 70 18` [1]. W25Q256JV: **`EF 40 19`** (32 MB) [2].
+- CS#를 계속 low로 두면 **ID가 반복**된다 [1] — Linux debugfs `params`의 `id` 줄이 6바이트로 `bf 26 43 bf 26 43`처럼 보이는 이유(커널은 6 B를 읽음, `SPI_NOR_MAX_ID_LEN = 6`) [4][6]. 6바이트 중 뒤 3바이트가 앞과 다르면 그 자체가 신호 품질 의심 근거.
+
+### 2.3 명령 표 — 공개 데이터시트 + Linux 정의로 확인 [1][2][3]
+
+| opcode | 이름 | 라인(명령-주소-데이터) | 주소 | dummy/mode | 비고 |
+|---|---|---|---|---|---|
+| `9Fh` | Read JEDEC ID | 1-0-1 | 없음 | 0 | 연결 증명 표준 질문 |
+| `05h` / `35h` / `15h` | Read Status Register-1 / -2 / -3 | 1-0-1 | 없음 | 0 | SR1: BUSY bit0, WEL bit1, BP bits, SRP bit7 · SR2: QE (S9 = SR2 bit1, Winbond) |
+| `06h` | Write Enable | 1-0-0 | 없음 | — | program·erase·write status 전에 매번 필요 (완료 후 WEL 자동 클리어) |
+| `01h` / `31h` / `11h` | Write Status Register-1 / -2 / -3 | 1-0-1 | 없음 | — | non-volatile이면 `06h` 먼저, volatile이면 `50h` 먼저 |
+| `03h` | Read Data | 1-1-1 | 3 B | 0 | **최대 50 MHz (fR)** |
+| `0Bh` | Fast Read | 1-1-1 | 3 B | 8 clock | 최대 133 MHz (3.0–3.6 V), 104 MHz (2.7–3.0 V) |
+| `6Bh` | Fast Read Quad Output | 1-1-4 | 3 B (1 line) | 8 clock | 데이터만 4 라인, QE=1 필요 |
+| `EBh` | Fast Read Quad I/O | 1-4-4 | 3 B (4 line, 6 clock) | mode 2 clock + dummy 4 clock | W25Q128JV는 M7–M0 = Fxh여야 함 [1] |
+| `02h` / `32h` | Page Program / Quad Input Page Program | 1-1-1 / 1-1-4 | 3 B | — | 최대 256 B, **넘으면 페이지 시작으로 wrap해 덮어씀** |
+| `20h` / `D8h` / `C7h` | Sector Erase 4 KB / Block Erase 64 KB / Chip Erase | 1-1-0 | 3 B / 3 B / 없음 | — | erase 후 `FFh` |
+| `5Ah` | Read SFDP | 1-1-1 | 3 B | 8 clock | 첫 4 B = "SFDP" 서명 |
+| `66h` → `99h` | Enable Reset → Reset Device | 1-0-0 | — | — | 리셋에 약 30 µs (tRST) |
+| `B9h` / `ABh` | Power-down / Release Power-down | 1-0-0 | — | — | power-down 중엔 `ABh`만 받음, 복귀 3 µs (tRES1) |
+| `B7h` / `E9h` | Enter / Exit 4-Byte Address Mode | 1-0-0 | — | — | W25Q256JV 등 16 MB 초과 파트 [2] |
+| `13h` / `0Ch` / `6Ch` / `ECh` | 4-byte 주소 전용 Read / Fast Read / 1-1-4 / 1-4-4 | 1-1-1 ... | 4 B | 같은 규칙 | **모드 상태와 무관(stateless)** — Linux가 선호 [3][6] |
+
+- **QSPI 단계별 클럭 수 (W25Q128JV, 3-byte 주소)**: `0Bh` = 명령 8 + 주소 24 + dummy 8 = **첫 데이터까지 40 clock**, 이후 8 clock/B · `6Bh`(1-1-4) = 8 + 24 + 8 = 40, 이후 **2 clock/B** · `EBh`(1-4-4) = 8 + 주소 6 + mode 2 + dummy 4 = **20 clock**, 이후 2 clock/B [1] · 4-4-4(QPI)는 명령까지 4 라인 — QPI 지원 파트(예: W25Q128JV-DTR)에서만 [1].
+- **4 라인일 때 비트 배치**: 1-4-4/1-1-4 데이터에서 한 바이트는 2 clock — IO0이 bit 4·0, IO1이 bit 5·1, IO2가 bit 6·2, IO3가 bit 7·3을 나른다 [1](Figure의 IO0 "4 0 4 0"). → **IO2가 high로 떠 있으면 모든 바이트에 `0x44`가 OR**, IO3면 `0x88` — §5 C6의 지문.
+
+### 2.4 정상 타이밍 숫자 (W25Q128JV, 3.0–3.6 V) [1]
+
+| 파라미터 | 기호 | 값 | 디버그 의미 |
+|---|---|---|---|
+| 클럭 (`03h` 제외) | FR (fC1) | 최대 133 MHz | 2.7–3.0 V면 104 MHz (fC2) |
+| 클럭 (`03h` Read Data) | fR | 최대 50 MHz | "50 MHz 넘으면 깨짐"의 **사양상** 이유 하나 |
+| Clock high/low time | tCLH, tCLL | ≥ 45% of period | duty 왜곡도 위반 |
+| Clock slew (p-p) | tCLCH, tCHCL | ≥ 0.1 V/ns | 직렬 R·부하 커서 엣지가 느리면 위반 |
+| CS# active setup | tSLCH | ≥ 3 ns | CS# 내리고 첫 엣지까지 |
+| CS# active hold | tCHSH | ≥ 3 ns | 마지막 엣지 후 CS# 올리기까지 |
+| Data in setup / hold | tDVCH / tCHDX | ≥ 1 ns / ≥ 2 ns | flash가 MOSI를 읽는 조건 |
+| CS# deselect (read) | tSHSL1 | ≥ 10 ns | 명령 사이 CS# high 최소 |
+| CS# deselect (erase/program/write) | tSHSL2 | ≥ 50 ns | 쓰기 계열 뒤엔 더 길게 |
+| Clock low → output valid | tCLQV | ≤ 6 ns | 고속 read 예산의 최대 지연 |
+| Output hold | tCLQX | ≥ 1.5 ns | 창의 반대쪽 경계 |
+| Output disable | tSHQZ | ≤ 7 ns | CS# high 후 MISO 놓기까지 — 다중 slave 경합 |
+| VCC(min) → CS# low | tVSL | ≥ 20 µs | 전원 켜고 너무 빨리 접근 금지 |
+| 전원 후 쓰기 금지 | tPUW | ≥ 5 ms | 이 동안 program/erase 무시 |
+| Write inhibit 임계 | VWI | 1.0–2.0 V | 이 아래에선 리셋 상태 |
+| Software reset | tRST | 약 30 µs | `66h`+`99h` 후 대기 |
+| Release power-down | tRES1 | ≤ 3 µs | `ABh` 후 대기 |
+| Page program | tPP | 0.4 ms typ, 3 ms max | BUSY 폴링 timeout 기준 |
+| Sector erase 4 KB | tSE | 45 ms typ, 400 ms max | erase timeout을 typ로 잡으면 저온에서 실패 |
+
+- **고속 read 예산 (샘플 지연 0, mode 0)**: flash는 falling 엣지에서 내보내고 master는 반 주기 뒤 rising에서 읽는다. 그래서 `T/2 ≥ t_flight(SCLK 가는 길) + tCLQV + t_flight(MISO 오는 길) + t_setup(컨트롤러)`. 예: 편도 1 ns, setup 1 ns [추정: 보드·컨트롤러 값은 가정] → `T/2 ≥ 9 ns` → **f ≤ 약 55 MHz**. 이것이 §8 시뮬레이터 Part 3의 경계.
+- **창의 폭**: 샘플 지연 d를 움직일 때 통과 범위는 `[−T/2 + 2·t_flight + tCLQV + t_su, T/2 + 2·t_flight + tCLQX − t_h]` → 폭 = `T − (tCLQV − tCLQX) − t_su − t_h`. 133 MHz(T = 7.5 ns)면 7.5 − 4.5 − 2 = **1 ns** — 탭이 0.5 ns면 2개만 통과.
+
+### 2.5 정상 Linux 출력
+
+```bash
+cat /sys/bus/spi/devices/spi0.0/spi-nor/jedec_id      # sysfs ABI [5]
+cat /sys/bus/spi/devices/spi0.0/spi-nor/partname
+cat /sys/bus/spi/devices/spi0.0/spi-nor/manufacturer
+xxd -p /sys/bus/spi/devices/spi0.0/spi-nor/sfdp | head -2
+cat /sys/kernel/debug/spi-nor/spi0.0/params            # debugfs (CONFIG_DEBUG_FS) [4]
+cat /proc/mtd ; mtd_debug info /dev/mtd0
+```
+
+```text
+[예시 출력] (형식은 커널 spi-nor 문서의 예 [4]를 W25Q128JV 값으로 바꿔 씀 — 실제 보드에서 실행 안 함)
+ef4018
+w25q128
+winbond
+53464450...                          ← "SFDP" 서명 (0x50444653 little-endian) [7]
+name            w25q128
+id              ef 40 18 ef 40 18     ← 6 B 읽어서 반복 확인
+size            16.0 MiB
+page size       256
+address nbytes  3
+opcodes
+ read           0xeb
+  dummy cycles  6                     ← 1-4-4: mode 2 + dummy 4
+ erase          0x20
+ program        0x02
+protocols
+ read           1S-4S-4S
+ write          1S-1S-1S
+ register       1S-1S-1S
+dev:    size   erasesize  name
+mtd0: 01000000 00001000 "spi0.0"
+```
+
+- **읽는 법**: `jedec_id`가 기대값 → 전기·mode·CS OK. `protocols read 1S-4S-4S` → 커널이 quad I/O로 읽는 중(DT `spi-rx-bus-width = <4>` + flash SFDP가 허용) [4][9]. `address nbytes 3` → 16 MB 이하라 3-byte. 32 MB 파트인데 3이면 §5 C4 의심.
+- 정상 기능 기준선(커널 spi-nor 문서의 "minimum testing requirements"): 2 MB 랜덤 파일 → `mtd_debug erase` → `mtd_debug read` 결과가 전부 `ff` → `mtd_debug write` → 다시 read → sha256 일치 [4]. 이 절차가 그대로 회귀 테스트 뼈대.
+
+## 3. 관찰 지점 지도
+
+| 무엇 | 어디서 | 도구 | 정상값 | 이상하면 의미 |
+|---|---|---|---|---|
+| SCLK·CS#·MOSI·MISO 아날로그 | **flash 핀**(SOIC-8 클립 / 테스트 포인트) — SoC 쪽과 둘 다 | scope 4ch, 대역폭 ≥ SCLK의 5배 + 짧은 접지 | 깨끗한 엣지, 링잉 작음, CS# 쉴 때 high | 링잉으로 엣지가 두 번 → 1비트 밀림, 느린 slew → tCLCH 위반 |
+| 비트 디코드 | 같은 4선 (quad면 IO0–IO3 6선) | LA + SPI/QSPI 디코더 (CPOL/CPHA 설정 필수), 샘플링 ≥ SCLK의 4–10배 | `9F` → `EF 40 18` | 디코더 설정이 틀리면 디코드도 밀림 — 아날로그 먼저 |
+| MISO 출력 지연 | SoC 패드에서 SCLK falling → MISO 변화 | scope 측정(delta time), 무한 지속 표시 | tCLQV + 왕복 < T/2 − setup | 예산 초과 → §5 C3 |
+| 컨트롤러 상태 | "RX FIFO overflow", "TX FIFO underflow", "busy", "transfer done" 비트 (개념명) | 레지스터 덤프 (devmem/JTAG) | 전송 후 overflow 0 | DMA·IRQ 지연으로 FIFO 넘침 → §5 C5 |
+| 샘플 지연 설정 | 컨트롤러 read-capture/sample delay 레지스터, DT `rx-sample-delay-ns` [9], Cadence QSPI `cdns,read-delay`(ref clock cycle 단위) [10] | 레지스터 덤프, DT | 특성화한 창의 중앙 | 기본값 0 그대로면 고속 실패 |
+| CS# 타이밍 | DT `spi-cs-setup-delay-ns`, `spi-cs-hold-delay-ns`, `spi-cs-inactive-delay-ns` [9], Cadence `cdns,tslch-ns`·`cdns,tchsh-ns`·`cdns,tshsl-ns` [10] | DT + scope | tSLCH·tCHSH ≥ 3 ns, tSHSL ≥ 10/50 ns | 너무 짧으면 첫 비트 누락·쓰기 실패 |
+| flash SR1 (`05h`) | BUSY bit0, WEL bit1, BP bits, SRP bit7 [3] | `flashrom`, 부트로더 명령, 펌웨어 | 쉴 때 BUSY=0 | BUSY=1 고착 = erase 중 리셋/전원 문제, BP≠0 = 쓰기 보호 |
+| flash SR2 (`35h`) | QE (Winbond S9) [1] | 같음 | quad 쓰면 1 | 0이면 quad 실패 |
+| flash SR3 (`15h`) | ADS(S16)·ADP(S17), W25Q256JV [2] | 같음 | 설계 의도와 일치 | ADS=1 남아 있으면 웜 리셋 후 부트 실패 |
+| Linux 식별 | `/sys/bus/spi/devices/spiX.Y/spi-nor/{jedec_id,partname,manufacturer,sfdp}` [5] | cat, xxd | 기대 ID | 없으면 probe 실패 → dmesg |
+| Linux 동작 파라미터 | `/sys/kernel/debug/spi-nor/spiX.Y/params`, `capabilities` [4] | cat | read opcode·dummy·address nbytes 기대값 | 3-byte인데 32 MB, 1S-1S-1S로 떨어짐 |
+| 커널 로그 | `dmesg` | grep spi | 에러 없음 | `unrecognized JEDEC id bytes: ff ff ff ff ff ff` [6], `enabling reset hack; may not recover from unexpected reboots` (broken-flash-reset) [6] |
+| DT 설정 | `spi-max-frequency`, `spi-cpol`, `spi-cpha`, `spi-rx-bus-width`, `spi-tx-bus-width`, `m25p,fast-read`, `broken-flash-reset`, `reset-gpios` [9][11] | `/proc/device-tree`, dtc -I fs | 데이터시트와 일치 | 모드·라인 수·속도 오설정 |
+| raw 접근 | `/dev/spidevX.Y` | `spidev_test -D ... -s <Hz> -v`, `-l` loopback, `-H` CPHA, `-O` CPOL, `-F` RX-only CPHA flip [8]; `flashrom -p linux_spi:dev=/dev/spidevX.Y,spispeed=<kHz> -r out.bin` [13] | TX = RX (loopback) | loopback은 mode 오류를 못 잡음 (§9) |
+| 전원·리셋 | flash VCC, CS#, SoC reset 해제, 첫 SCLK | scope single-shot, 리셋 해제 트리거 | VCC(min) 후 ≥ 20 µs 뒤 첫 CS# low [1] | 너무 빠른 첫 접근 → §5 C7 |
+
+**첫 5분 증거 스냅샷 (순서대로)**
+
+1. `dmesg | grep -i -E 'spi|nor|mtd'` — probe 성공/실패, unrecognized ID 바이트 값 기록.
+2. `cat /sys/bus/spi/devices/spi*/spi-nor/jedec_id` 와 `partname` — 기대 ID와 비교 [5].
+3. `cat /sys/kernel/debug/spi-nor/spi*/params` — read opcode, dummy, protocols, address nbytes [4].
+4. DT 확인: `spi-max-frequency`, `spi-cpol`/`spi-cpha`, `spi-rx-bus-width`, `rx-sample-delay-ns`/벤더 delay 속성 (`dtc -I fs /proc/device-tree` 에서 해당 노드).
+5. 컨트롤러 레지스터 덤프 — 클럭 분주, mode, 라인 수, sample delay, FIFO 상태 비트 (이름은 해당 SoC TRM 기준).
+6. flash SR1/SR2/SR3 읽기 — BUSY, WEL, BP, QE, ADS.
+7. 같은 read를 **1 MHz에서 한 번**, **목표 속도에서 한 번** — 결과가 갈리면 타이밍 계층, 같으면 mode/설정 계층.
+8. 그래도 모르면 scope/LA를 flash 핀에: CS# falling 트리거, 4선 + quad면 6선.
+
+## 4. 증상 → 원인 한 장 표
+
+| 증상 | 계층 | 의심 원인 (순위) | 첫 확인 | 확정 방법 |
+|---|---|---|---|---|
+| 데이터가 1비트씩 밀림 (`EF 40 18` → `F7 A0 0C`) | 설정 / 타이밍 | ① CPHA/CPOL 불일치 ② 고속 샘플이 너무 이름 ③ SCLK 링잉으로 이중 엣지 ④ CS# 늦게 내려 첫 엣지 놓침 | 1 MHz로 낮춰 재현 | scope로 MISO 변화 엣지 vs 샘플 엣지, CS#–첫 엣지 간격 |
+| JEDEC ID `FF FF FF` | 전기 / 설정 | ① CS#가 flash에 안 감(핀mux, 다른 CS 번호, GPIO CS 극성) ② flash 전원·리셋 ③ deep power-down / QPI 상태로 남음 ④ 명령 자체가 밀려 인식 안 됨(mode 1/2) | flash 핀에서 CS#·VCC 측정 | `ABh`, `66h`+`99h` 후 재시도, MOSI 디코드가 `9F`인지 |
+| JEDEC ID `00 00 00` | 전기 | ① MISO low 고착(단락, 핀mux가 다른 기능) ② MISO 핀을 다른 장치가 low로 구동 | MISO 핀 DC 레벨 (CS# high일 때) | 핀mux 덤프, 다른 slave 분리 |
+| 첫 바이트만 `FF`/`00`, 나머지 정상 | 프로토콜 / 설정 | ① 명령 바이트 동안 받은 더미를 데이터로 착각 (full duplex) ② CPHA=1 장치에서 첫 비트 미구동 ③ CS# setup 부족 | 버퍼 오프셋 확인 | LA로 몇 번째 클럭부터 유효한지 |
+| 25 MHz OK / 50–100 MHz 실패 | 타이밍 | ① 왕복 지연 > 반 주기 (sample delay 미설정) ② `03h`를 50 MHz 초과로 사용 ③ dummy cycle 부족 ④ 신호 무결성(링잉·slew) | read opcode와 클럭 확인 | sample delay × 주파수 × 온도 shmoo (§8) |
+| 바이트 사이 CS#가 잠깐 올라감 → 장치가 명령 리셋 | 설정 / 드라이버 | ① transfer마다 CS 해제 (`cs_change`) ② auto-CS가 TX FIFO 비면 해제 (DMA 늦음) ③ GPIO CS를 SW가 토글 | scope로 CS# 트리거 (pulse width 트리거로 짧은 high 찾기) | 메시지 구조·FIFO underflow 비트 |
+| 다중 slave 중 하나만 꽂으면 OK | 전기 | ① 다른 slave가 CS# high에서도 MISO를 안 놓음 ② CS 디코드 겹침 ③ tSHQZ(출력 해제) 느림 + gap 짧음 | slave 하나씩 제거 | MISO 레벨이 중간값(경합) → scope |
+| 쓰기(program) 후 읽으면 그대로 `FF` | 프로토콜 / 설정 | ① `06h`(WREN) 누락 ② BP 비트 보호 ③ /WP low + SRP ④ 전원 후 tPUW 5 ms 이내 ⑤ BUSY 안 기다리고 다음 명령 | SR1 읽기 (WEL·BP·BUSY) | WREN 직후 WEL=1 확인, BP 해제 후 재시도 |
+| erase 후 `FF`가 아님 | 프로토콜 / 시스템 | ① erase 안 먹힘(WREN·보호) ② 완료 전 읽음(tSE 최대 400 ms) ③ 주소 정렬 틀림 ④ XIP/CPU 캐시에 옛 데이터 | BUSY 폴링 후 재읽기 | 캐시 우회(raw MTD read) vs XIP 읽기 비교 |
+| page program 결과 일부가 페이지 앞을 덮어씀 | 프로토콜 / 드라이버 | 256 B 페이지 경계를 넘는 program → wrap [1] | 실패 주소가 페이지 시작 근처인지 | 페이지 정렬 분할 후 재시도 |
+| quad read만 실패 | 설정 / 전기 | ① QE=0 ② IO2/IO3 핀mux·풀업·보드 미연결 ③ dummy/mode cycle 불일치 ④ IO2/IO3 skew | SR2 QE, 바이트 패턴(`0x44`/`0x88`) | 1-1-4 vs 1-4-4 분리, LA 6선 |
+| DMA는 깨지고 PIO는 OK | 시스템 / 드라이버 | ① 캐시 유지보수 누락 ② 버퍼 정렬(캐시 라인 공유) ③ stack/static 버퍼 사용 ④ FIFO threshold·burst 불일치 → overflow ⑤ DMA 완료 vs SPI 완료 순서 | 오염 단위 (64 B? 4 B? 꼬리?) | non-cacheable 버퍼로 재현, overflow 비트 |
+| 4바이트 단위로 바이트 순서 뒤바뀜 | 설정 / 드라이버 | ① bits-per-word 32 + little-endian CPU에서 FIFO 패킹 ② DMA width와 FIFO 폭 불일치 | `01 02 03 04` 패턴 read | bits-per-word 8로 비교 |
+| 16 MB 넘는 주소가 앞 데이터와 같음 | 설정 / 드라이버 | ① 3-byte 주소에서 A24 탈락 ② 컨트롤러 주소 폭 3 B / flash 4 B 모드 불일치 ③ 부트로더 드라이버 16 MB 제한 ④ 실제로 16 MB 파트(BOM) | ID capacity 바이트(0x18 vs 0x19) | 주소 태그 테스트 (§5 C4) |
+| 웜 리셋 후에만 부팅 실패 | 시스템 | flash 상태 잔존: 4-byte 모드, QPI, power-down, erase 진행 중 | SR3 ADS, SR1 BUSY (실패 직후 JTAG로) | watchdog 리셋 루프 1000회 |
+| cold boot에서 가끔 flash 못 찾음 | 전기 / 시스템 | ① VCC(min) 후 20 µs 전에 접근 ② CS#가 VCC를 안 따라감 ③ flash 레일이 SoC IO 레일보다 늦음 | scope: flash VCC vs 첫 CS# | 전원 relay 사이클 1000회 통계 |
+| 고온/저전압에서만 read 에러 | 타이밍 | tCLQV 증가로 창이 이동, 기본 탭이 창 가장자리 | 실패 온도·전압 기록 | chamber에서 탭 shmoo, 코너 교집합 창 |
+| program/erase가 저온에서 timeout | 드라이버 | timeout을 typ 시간으로 설정 (tSE 최대 400 ms, tPP 최대 3 ms) [1] | 드라이버 timeout 값 | BUSY 실제 시간 측정 분포 |
+
+## 5. 시나리오 드릴
+
+### C1 · 데이터가 1비트씩 밀려 읽힘 ★
+
+#### 증상
+
+- 새 보드에서 flash `9Fh` 결과가 `F7 A0 0C` (기대 `EF 40 18`). 또는 SPI ADC 값이 **정확히 2배/절반**, IMU WHO_AM_I가 기대값의 시프트. `spidev_test -l` loopback은 **통과**한다.
+- dmesg: `spi-nor spi0.0: unrecognized JEDEC id bytes: f7 a0 0c 77 a0 0c` 같은 형태 [6] (뒤 3바이트도 같은 규칙으로 밀린 반복).
+
+#### 먼저 물어볼 것
+
+- "Is it shifted at every clock rate, or only above some frequency?"
+- "Which direction is wrong — does the device receive commands correctly (can I write a register and read it back), or only the data coming back?"
+- "What mode does the device datasheet specify, and what do the device tree / controller registers say?"
+- "Did this ever work — new board, or a regression after a kernel, clock or pinmux change?"
+
+#### 가설 순위
+
+| 가설 | 왜 의심 | 확인 방법 | 맞으면 보이는 것 |
+|---|---|---|---|
+| CPOL/CPHA 불일치 | 가장 흔하고, 1비트 밀림의 교과서 원인 | 1 MHz로 낮춰 재현, scope에서 CS# 때 SCLK 레벨 + MISO 변화 엣지 | 저속에서도 그대로 밀림, MISO가 master 샘플 엣지에서 바뀜 |
+| 고속 샘플이 너무 이름 | 바이트 패턴이 mode 불일치와 **똑같음** (§8 Part 3) | 클럭 낮추기 | 저속에서 사라짐, 온도에 따라 "깨끗한 밀림 ↔ 랜덤" 바뀜 |
+| SCLK 링잉 → 이중 엣지 | 장치가 클럭을 하나 더 셈 → 장치 쪽 비트 카운트가 1 앞섬 | scope로 flash 핀 SCLK, 짧은 접지 스프링 | 엣지 근처 문턱 재교차 (glitch) |
+| CS# 늦게 내려 첫 엣지 놓침 | tSLCH 3 ns 위반 → 장치가 첫 엣지를 못 봄 | CS# falling → 첫 SCLK 엣지 간격 | 간격 < 3 ns 또는 CS#가 첫 엣지 뒤 |
+| LSB-first / bits-per-word 오설정 | 바이트가 이상해짐 | `01 80` 패턴 | 밀림이 아니라 **비트 역순** — 구분 가능 |
+
+#### 측정 · 계측
+
+- **장비**: 4ch scope를 flash 핀에(가능하면 SoC 쪽도), 트리거 = CS# falling, 수평 = 첫 3바이트. LA는 디코더 mode를 **양쪽 가능한 값으로 두 번** 돌려 비교.
+- **mode 판독 3단계** (§2.1): CS# 엣지 때 SCLK 레벨 → MISO가 바뀌는 엣지 → master의 샘플 엣지(컨트롤러 설정)와 같은 엣지인지.
+- **방향 분리**: MOSI 쪽(장치가 받는 쪽)이 맞는지 = 장치 레지스터 write 후 read back, 또는 flash면 "명령이 인식됐나"(MISO가 9F 뒤에 움직이나). §8 Part 1 표처럼 **한 방향만 밀리는 조합**이 흔하다.
+
+```text
+ bad case: master mode 0 (rising 샘플), slave가 mode 1처럼 동작 (rising에서 내보냄)
+ SCLK  ____/‾‾\__/‾‾\__/‾‾\__/‾‾\__
+ MISO  ====1===X=b7==X=b6==X=b5==X     ← slave가 rising 엣지에서 바꿈
+ 샘플       ↑      ↑      ↑      ↑      ← master도 rising에서 읽음 → "바뀌기 직전" 값
+ 결과      1      b7     b6     b5     → 첫 비트 = idle(1), 나머지 한 칸씩 늦음 = >>1
+```
+
+#### root cause · fix
+
+- 전형: DT에 `spi-cpha`만 있고 장치는 mode 0 (또는 반대), 혹은 드라이버가 `spi_setup()`에서 mode를 덮어씀. Fix = DT/드라이버 mode를 데이터시트와 일치. **같은 엣지 경쟁(race)** 으로 "가끔 맞는" 조합이 있으니(§8 Part 1 `MISO+MOSI` 열), 수정 후에도 **고속·고온에서 재확인**.
+- 타이밍 원인으로 판명되면 → C3.
+
+#### 회귀로 굳히기
+
+- 장치별 **ID/고정 레지스터 read를 최저·최고 두 클럭에서** 보드 테스트에 추가 (ID 기대값 표 기반). loopback은 mode 오류를 못 잡으므로 실장치 또는 다른 SPI 인스턴스를 target 모드로 써서 4 mode 매트릭스 ([N06C C2](2026-11-01_N06C_plans_peripherals_soc_infra.html) Q2).
+
+#### 30초 영어 답
+
+"A one-bit shift means one side samples a half or full clock away from where the other side launches. There are two causes that produce the same bytes: a CPOL/CPHA mismatch, or sampling too early at high frequency. I separate them by dropping the clock to 1 MHz — if the shift stays, it's mode. Then I scope CS, SCLK and MISO at the device pin, read the idle clock level at CS assertion and which edge MISO changes on, and compare with the controller's sample edge. I also check direction — whether the device receives commands correctly — because often only one direction is shifted. The fix is the mode in the device tree, and the regression is an ID read at both the lowest and highest clock."
+
+#### 꼬리 질문
+
+<details><summary>Q1. Why did the MOSI–MISO loopback test pass if the mode is wrong?</summary>
+
+- **EN**: "In loopback the controller samples its own transmitted data with its own edge convention, so any mode is self-consistent — the bits line up no matter what CPOL/CPHA is. Loopback proves the shift registers, pinmux and FIFOs, not the mode agreement with a real device. For mode I need a real partner or an analyzer that shows which edge the data changes on."
+- 한국어 핵심: loopback은 자기 자신과만 맞춰 보므로 mode 오류를 못 잡는다.
+
+</details>
+
+<details><summary>Q2. How can ringing on SCLK produce a one-bit shift?</summary>
+
+- **EN**: "If an edge rings back across the input threshold, the device sees two edges instead of one, so its bit counter advances an extra position. From then on it's one bit ahead of the master — a clean shift, often only on some boards or probes. I'd look at SCLK at the device pin with a short ground spring and, if it's the cause, add or increase the series termination resistor or reduce the drive strength."
+- 한국어 핵심: 링잉 = 엣지 2번 = 장치 비트 카운터 +1. 직렬 R/drive strength로 해결.
+
+</details>
+
+<details><summary>Q3. The shift is only in data coming back, commands are fine. What does that tell you?</summary>
+
+- **EN**: "The device samples MOSI correctly, so its sample edge matches the master's launch edge. The problem is the return path — either the device launches on a different edge than the master samples, or the round-trip delay pushes MISO past the sample point. A frequency sweep tells me which: mode doesn't care about frequency, timing does."
+- 한국어 핵심: 한 방향만 밀림 = 그 방향의 launch/sample 관계 문제. 주파수 의존성으로 mode vs 타이밍 구분.
+
+</details>
+
+### C2 · JEDEC ID가 0xFFFFFF (또는 0x000000)
+
+#### 증상
+
+- `spi-nor spi0.0: unrecognized JEDEC id bytes: ff ff ff ff ff ff` [6], `/dev/mtd0` 없음. BootROM이 flash에서 못 읽고 fallback(USB/SD) 모드로 감.
+- 변형: `00 00 00 00 00 00`, 또는 ID가 매번 달라짐.
+
+#### 먼저 물어볼 것
+
+- "Is this every board or one board, and every boot or some boots?"
+- "Does the BootROM boot from this flash — that is, did the same flash work before Linux started?"
+- "Which chip select and pinmux does the device tree use, and is CS a native controller line or a GPIO?"
+- "Has any software put the flash in power-down, QPI or 4-byte mode before this?"
+
+#### 가설 순위
+
+| 가설 | 왜 의심 | 확인 방법 | 맞으면 보이는 것 |
+|---|---|---|---|
+| CS#가 flash에 안 감 | `FF` = MISO 풀업 그대로 = 아무도 안 말함 | flash 핀에서 CS# 파형 | flash 핀 CS# 계속 high (SoC 쪽은 움직임 → 보드/핀mux/CS 번호) |
+| flash 전원·리셋 | 장치가 아예 꺼짐 | VCC at flash, /RESET(있는 패키지) | VCC 없음 또는 VWI 아래 |
+| deep power-down (`B9h`) 상태 | 전력 관리 코드가 재운 채 리셋 | `ABh` 보내고 3 µs 뒤 `9Fh` [1] | 그 뒤 ID 정상 |
+| QPI/4-4-4 모드로 남음 | 장치가 1-1-1 `9F`를 이해 못 함 | 컨트롤러를 quad로 놓고 `9F` 시도, 또는 리셋 `66h`+`99h` | 리셋 후 정상 |
+| 명령이 밀려 인식 안 됨 | master mode 1 → flash가 `9F` 대신 `4F`를 받음 (§8 Part 2) | MOSI 디코드 (flash 샘플 엣지 기준) | flash 쪽에서 `4F` |
+| MISO 핀mux 미설정 / 다른 핀 | SoC가 엉뚱한 패드를 읽음 | 핀mux 덤프, MISO 패드에 프로브 | flash는 MISO를 움직이는데 SoC 값은 FF |
+| `00 00 00`: MISO low 고착 | 단락, 다른 장치가 low 구동 | CS# high에서 MISO DC 레벨 | 0 V 근처 |
+
+#### 측정 · 계측
+
+- scope 3ch: **flash 핀** CS#, SCLK, MISO + DMM으로 VCC. CS# falling 트리거. "flash 핀에서 CS#가 내려가나 → 9F가 맞게 들어가나 → 8번째 클럭 뒤 MISO가 움직이나" 3단계로 자른다.
+- MISO가 움직이는데 SoC가 FF를 읽으면 → SoC 쪽 (핀mux, 입력 버퍼, 샘플 타이밍). MISO가 안 움직이면 → flash가 명령을 못 받았거나 꺼짐.
+- 복구 명령 순서 실험: `ABh` → `66h` → `99h` → 30 µs 대기 → `9Fh`. 어느 단계 뒤에 살아나는지가 **flash가 어떤 상태였는지** 알려 준다.
+
+#### root cause · fix
+
+- 흔한 것: DT의 chip-select 번호(`reg`) 오류, GPIO CS의 극성(`spi-cs-high` 또는 GPIO flag), 핀mux가 다른 기능(예: 같은 패드의 UART), 전력 관리 코드가 `B9h`로 재우고 웜 리셋. Fix = DT/핀mux, 그리고 부트 초기에 **복구 시퀀스(`66h`+`99h`, 필요 시 `ABh`)를 먼저 보내는** 펌웨어.
+
+#### 회귀로 굳히기
+
+- 보드 bring-up 스위트 첫 항목 "SPI NOR ID == 기대값" (ID 표), 그리고 **power-down 상태로 만든 뒤 웜 리셋 → ID 확인** 음성 테스트.
+
+#### 30초 영어 답
+
+"FF FF FF means nobody drove MISO — it's the pull-up. So it's almost never a bad flash; it's chip select, power, or the flash not understanding the command. I scope at the flash pins: does CS go low there, does 9F arrive correctly on the flash's sampling edge, and does MISO move after the eighth clock. If MISO moves but the SoC still reads FF, it's SoC pinmux or sampling. If MISO never moves, I check VCC and then try a recovery sequence — release from power-down, then reset enable and reset — because a warm reset can leave the flash in power-down or QPI mode. Whichever step revives it tells me the state it was stuck in."
+
+#### 꼬리 질문
+
+<details><summary>Q1. What would 00 00 00 tell you that FF FF FF doesn't?</summary>
+
+- **EN**: "All zeros means MISO is actively low — shorted, driven by another device, or the SoC is reading a pad that sits low. FF is passive — the line floats to its pull-up. So zeros point me to the electrical layer and contention; FFs point me to 'the flash isn't talking'."
+- 한국어 핵심: 00 = 능동적으로 low(단락·경합), FF = 아무도 안 구동.
+
+</details>
+
+<details><summary>Q2. Why does a mode-1 master get FF but a mode-2 master gets a shifted ID from the same flash?</summary>
+
+- **EN**: "The flash samples on rising edges. In mode 1 the master changes MOSI on the rising edge, so the flash catches each bit one edge late and receives 4F instead of 9F — it doesn't recognize the command and never drives MISO. In mode 2 the master pre-drives the first bit and changes on rising too, but the flash's first rising edge sees the pre-driven bit, so it gets 9F correctly; the master then samples MISO on the same falling edge the flash launches, so the ID comes back one bit late. My simulator reproduces both."
+- 한국어 핵심: 같은 오류라도 **명령이 깨지면 FF**, 응답만 깨지면 **밀린 ID**.
+
+</details>
+
+### C3 · 25/50 MHz는 OK, 100 MHz에서만 깨짐 — 샘플 지연 sweep ★
+
+> 기본 답(왕복 지연 > 샘플 창 → 탭 스윕, dummy 확인)은 [BV10 체인 E](2026-11-01_BV10_board_interface_tests.html), 플랜 관점은 [N06C C2 Q1](2026-11-01_N06C_plans_peripherals_soc_infra.html). 여기선 **예산 계산 · PVT 탈출 · 실패 지문**을 더한다.
+
+#### 증상
+
+- 50 MHz에서 `mtd_debug read` sha256 일치, 100 MHz로 올리면 불일치. 실패 패턴이 **실온에선 매번 다른 랜덤**, **고온 chamber에선 깨끗한 1비트 밀림**(§8 Part 3: `0C F2 86`, `E9 92 C3` ↔ `F7 A0 0C`).
+- 66 MHz는 벤치에서 통과했는데 **고온 시험에서만 실패**.
+
+#### 먼저 물어볼 것
+
+- "Which read opcode and how many dummy cycles at each frequency — is it still 03h above 50 MHz?"
+- "Does the controller have an RX sample delay or read-capture delay, and what is it set to?"
+- "Is the failure pattern stable or different every run, and does it change with temperature?"
+- "How long is the trace, are there series resistors, and does the flash vendor allow more dummy cycles?"
+
+#### 가설 순위
+
+| 가설 | 왜 의심 | 확인 방법 | 맞으면 보이는 것 |
+|---|---|---|---|
+| 왕복 지연 > 반 주기 (sample delay 0) | 예산상 ≈ 55 MHz가 한계 (§2.4) | 탭 스윕 | 늦은 탭에서 통과 |
+| `03h`를 50 MHz 초과로 사용 | fR = 50 MHz [1] | params의 read opcode | `0x03`; `0Bh`로 바꾸면 해결 |
+| dummy cycle 부족 / 불일치 | 고속에서 flash가 더 많은 dummy를 요구하는 파트가 있음 [추정: 파트마다, W25Q128JV `0Bh`는 8 고정] | SFDP/데이터시트 dummy 표 | 데이터가 **바이트 단위로** 밀림 |
+| 신호 무결성 (링잉, slew < 0.1 V/ns) | 고속에서 엣지 품질이 문제 | flash 핀 scope | 문턱 근처 비단조 엣지 |
+| 탭이 창 가장자리 (PVT) | 코너마다 tCLQV가 다름 | 온도·전압별 스윕 | 창이 코너마다 이동 |
+
+#### 측정 · 계측
+
+- **예산 먼저 (화이트보드)**: `T/2 ≥ 2·t_flight + tCLQV + t_su` → 100 MHz면 T/2 = 5 ns < 2 + 6 + 1 = 9 ns → **기본 샘플 지점으론 불가능**. 필요한 지연 범위 = `[−5 + 9, 5 + 2 + 1.5 − 1]` = **[4.0, 7.5] ns** (§8 출력과 일치).
+- **scope**: SoC 패드에서 SCLK falling → MISO 변화 시간을 실측해 `2·t_flight + tCLQV(실제)`를 얻는다. 무한 지속(persistence)으로 MISO 변화 구간의 폭(지터 + 코너)을 본다.
+- **탭 스윕 = 미니 shmoo**: (주파수 × 탭 × 온도 × 전압) → 셀마다 N회 read + CRC. 셀 결과를 `#`/`.`로 그리면 §8 Part 3 그림. **선택 = 모든 코너 교집합 창의 중앙**, 그리고 창 폭 ≥ 2 탭을 합격 기준으로 ([BV12](2026-11-01_BV12_si_pi_margining_shmoo_pvt.html)).
+- **half-clock 옵션**: 많은 컨트롤러가 "반대 엣지에서 샘플"(= d = T/2)을 지원 [추정: IP마다]. 100 MHz에선 이것만으로 통과(5 ns ∈ [4, 7.5]), 133 MHz에선 실패(3.75 < 5.25) → 미세 탭 필요. `spidev_test -F`(RX-only CPHA flip)도 같은 생각 [8].
+
+```text
+ 100 MHz, 샘플 지연 0, slow 코너 (tCLQV 6 ns, 왕복 2 ns)
+ SCLK(SoC) __/‾‾‾‾\____/‾‾‾‾\____/‾‾‾‾\____
+                  ↓falling: flash가 bit k 출력 시작
+ MISO(SoC) ====bit k-1=======X=bit k=====X==   ← falling + 8 ns에 바뀜 = 다음 rising(+5 ns)보다 늦음
+ 샘플(rising)          ↑ 여기서 읽으면 아직 bit k-1 → 깨끗한 1비트 밀림 (F7 A0 0C)
+ typ 코너(tCLQV 3.5 ns)면 변화가 rising 근처 → setup/hold 위반 → 매번 다른 값
+```
+
+#### root cause · fix
+
+- 원인: sample delay 기본값 0으로 100 MHz 사용 + `03h`. Fix: ① 50 MHz 초과는 `0Bh`/quad read (dummy 포함) ② 특성화한 탭을 DT/부트로더에 고정 (`rx-sample-delay-ns`, `cdns,read-delay` 등 [9][10]) ③ 창이 너무 좁으면(133 MHz에서 1 ns) 주파수를 낮추거나, DQS(data strobe)를 지원하는 octal flash/컨트롤러, 짧은 trace, drive strength 조정.
+- 일부 컨트롤러/드라이버는 부팅 때 **자동 캘리브레이션**(알려진 패턴을 탭마다 읽고 창 중앙 선택)을 한다 [추정: IP·드라이버마다]. 그때는 "캘리브레이션 패턴이 flash에 있다"는 가정 자체가 새 실패 모드.
+
+#### 회귀로 굳히기
+
+- 특성화 단계: 주파수 × 탭 × (−40/25/105 °C) × (VCC min/max) shmoo, 결과를 보드 리비전별로 저장 → 탭 변경 시 비교.
+- 양산/보드 팜: 선택한 탭 ±1 탭에서도 통과하는지 **guard-band read**를 매 부팅 또는 야간 회귀에 (마진이 줄면 먼저 경보).
+
+#### 30초 영어 답
+
+"That's a timing budget problem until proven otherwise. The flash outputs data a clock-to-output time after the falling edge — up to 6 ns on a W25Q128JV — and the data has to come back across the board before the controller samples. With zero sample delay that only fits up to about 55 MHz, so at 100 MHz it can't work. First I check the opcode — plain 03h reads are only rated to 50 MHz. Then I sweep the RX sample delay at each frequency, at hot, cold, high and low voltage, and pick the center of the window that passes at every corner. At room temperature the failure looks random; at hot it becomes a clean one-bit shift, which is a nice confirmation it's timing, not mode."
+
+#### 꼬리 질문
+
+<details><summary>Q1. Why did 66 MHz pass on the bench but fail in the chamber?</summary>
+
+- **EN**: "Clock-to-output delay grows at hot and low voltage, so the passing window moves later. At room temperature the default sample point was just inside the window; at the slow corner it's outside. That's why I characterize the window at all corners and choose the center of the intersection, not of the room-temperature window."
+- 한국어 핵심: 창이 코너마다 이동 → 교집합 중앙을 고른다.
+
+</details>
+
+<details><summary>Q2. At 133 MHz the passing window is one tap wide. Ship it?</summary>
+
+- **EN**: "No — one tap means any variation in board, part or temperature takes you out. Options are to run at a lower frequency with a real margin, use a mode with less overhead per byte like quad I/O at a lower clock, shorten the trace or tune drive strength, or move to a DQS-capable octal flash where the strobe travels with the data. I'd present the throughput versus margin trade-off with data."
+- 한국어 핵심: 창 1 탭 = 마진 없음. 주파수 낮추기·quad·DQS 중 데이터로 선택.
+
+</details>
+
+<details><summary>Q3. How would the failure differ if it were dummy cycles instead of sample delay?</summary>
+
+- **EN**: "Too few dummy cycles shift the data by whole clocks — a full bit in single mode, a whole nibble in quad — and the error is the same at every temperature and stable run to run. A sample-delay problem is sub-cycle: random near the boundary and corner-dependent. So stable whole-bit shifts point to dummy count; flaky, temperature-dependent errors point to sampling."
+- 한국어 핵심: dummy = 정수 클럭 밀림·재현 안정, 샘플 = 경계 랜덤·코너 의존.
+
+</details>
+
+### C4 · 16 MB 넘으면 앞 데이터가 보임
+
+#### 증상
+
+- 32 MB flash(W25Q256JV, ID `EF 40 19` [2])에서 `0x0100_0000`에 쓴 패턴을 읽으면 `0x0000_0000`의 내용이 나옴. 더 나쁜 버전: 상위 영역 erase가 **부트 섹터를 지움**.
+- 또는 반대: Linux에선 정상, 리부트 후 BootROM 읽기가 **1바이트 밀린 데이터**.
+
+#### 먼저 물어볼 것
+
+- "What's the flash capacity from the JEDEC ID, and what does the driver report as address bytes?"
+- "Does the stack use 4-byte opcodes, or enter 4-byte mode with B7h?"
+- "Who else reads this flash — BootROM, first-stage loader, U-Boot — and do they all agree on address mode?"
+- "Does it fail only after a warm reset?"
+
+#### 가설 순위
+
+| 가설 | 왜 의심 | 확인 방법 | 맞으면 보이는 것 |
+|---|---|---|---|
+| 3-byte 주소, A24 탈락 | 3 B 주소는 16 MB까지만 | params `address nbytes`, read opcode | `3`, opcode `0x03`/`0x0b`/`0xeb` |
+| 3-byte 모드 + Extended Address Register 0 | W25Q256JV는 3-byte 모드에서 EAR이 4번째 주소 바이트, 리셋 후 0 [2] | EAR 읽기(`C8h`) [2] | 0 → 하위 16 MB만 |
+| flash는 4-byte 모드, 호스트는 3 B 전송 | 이전 소프트웨어가 `B7h` 후 리셋 | SR3 ADS (S16) [2] | ADS=1, flash가 4번째 주소 바이트로 데이터 첫 바이트를 먹음 → 1 B 밀림 |
+| 부트로더 드라이버 16 MB 제한 | 오래된 드라이버 | 부트로더 로그 | 특정 단계에서만 |
+| BOM: 실제로 16 MB 파트 | 진짜 alias | ID capacity 바이트 | `0x18` (16 MB) |
+
+#### 측정 · 계측
+
+- **주소 태그 테스트**: 1 MB(또는 64 KB)마다 첫 16 B에 **그 주소 자체**를 쓰고 전부 읽기 → 읽힌 태그가 `addr & 0x00FF_FFFF`면 **A24 탈락** 확정. DDR 주소선 테스트와 같은 원리([N07E](2026-11-01_N07E_ddr_memory_debug.html)).
+- LA: 명령 뒤 주소 바이트 수 세기 (3 vs 4) — 디코더는 주소 길이를 설정해야 하니 raw 바이트로 본다.
+- SR3 `15h`의 ADS·ADP, EAR `C8h` [2].
+
+#### root cause · fix
+
+- Linux spi-nor는 가능하면 **4-byte 전용 opcode**(`13h`/`0Ch`/`6Ch`/`ECh`)를 써서 모드 상태를 안 남긴다 [3]. 부트로더/자체 펌웨어가 `B7h`로 4-byte 모드에 들어가면 **리셋 후 BootROM이 3-byte로 말함** → 실패. Fix = 모든 단계에서 4B opcode 사용, 또는 종료 전 `E9h`, flash RESET#을 SoC 리셋에 연결. RESET#이 없는 보드는 DT `broken-flash-reset` — 커널은 "enabling reset hack; may not recover from unexpected reboots" 경고를 띄우고 정상 종료 때 3-byte로 복귀시키지만 **crash/watchdog 리셋은 못 막는다** [6][11].
+- ADP=1(전원 켤 때 4-byte)로 바꾸는 것은 BootROM이 4-byte를 지원할 때만 [2].
+
+#### 회귀로 굳히기
+
+- 전체 용량 주소 태그 테스트 + **4-byte 상태에서 watchdog 리셋 → 부팅 성공** 루프 (C7과 공유).
+
+#### 30초 영어 답
+
+"Seeing the start of the flash above 16 MB is address aliasing: three address bytes only reach 16 MB, so bit 24 is being dropped. I confirm with an address-tag test — write each block's own address into it and read everything back; if tags wrap at 16 MB, that's it. Then I check how the stack addresses the upper half: 4-byte opcodes, which are stateless, or entering 4-byte mode, which leaves state in the flash. The dangerous variant is a warm reset that leaves the flash in 4-byte mode while the BootROM speaks 3-byte, so I'd standardize on 4-byte opcodes and wire the flash reset, and add a watchdog-reset test."
+
+#### 꼬리 질문
+
+<details><summary>Q1. Why are 4-byte opcodes safer than entering 4-byte mode?</summary>
+
+- **EN**: "Dedicated 4-byte opcodes carry the address width in the command itself, so the flash has no mode state to get out of sync. Entering 4-byte mode changes how the flash interprets every following command until exit or reset, and if the SoC resets without resetting the flash, the next reader speaks the wrong dialect."
+- 한국어 핵심: 4B opcode는 상태가 없다 — 리셋 불일치 위험 제거.
+
+</details>
+
+<details><summary>Q2. The erase of the upper half wiped the bootloader. How do you prevent that class of bug?</summary>
+
+- **EN**: "Two layers: block protection bits set over the boot region so the flash itself refuses, and a test that checks the boot region's checksum after every erase and program test. The address-tag test should run before any destructive test on a new board or driver."
+- 한국어 핵심: BP로 부트 영역 보호 + 파괴 테스트 전 주소 태그 테스트.
+
+</details>
+
+### C5 · DMA 경로만 깨짐 (PIO OK)
+
+#### 증상
+
+- 작은 read(PIO 경로)는 정상, 큰 read(DMA 경로)는 sha256 불일치. 깨진 위치가 **64 B 덩어리**로 옛 데이터, 또는 버퍼 **마지막 몇 바이트**만, 또는 카메라·NPU 부하가 있을 때만.
+
+#### 먼저 물어볼 것
+
+- "Where's the threshold between PIO and DMA in this driver, and is the buffer cacheable?"
+- "What does the corruption look like — whole cache lines, groups of four bytes, the tail, or random?"
+- "Does the controller's RX overflow flag ever set?"
+- "Does it depend on system load?"
+
+#### 가설 순위
+
+| 가설 | 왜 의심 | 확인 방법 | 맞으면 보이는 것 |
+|---|---|---|---|
+| 캐시 유지보수 누락 (RX 후 invalidate, TX 전 clean) | 64 B 단위 옛 데이터 = 캐시 라인 | 버퍼를 non-cacheable로 | 증상 사라짐 |
+| 버퍼가 캐시 라인 정렬 안 됨 | 같은 라인의 다른 변수가 덮어씀 | 버퍼 오프셋 1..63 스윕 | 오프셋에 따라 경계 바이트만 |
+| stack/static 버퍼를 DMA | Linux 규칙: I/O 버퍼는 DMA-safe, stack·static 금지 [12] | 드라이버 코드 | `spi_sync`에 stack 버퍼 |
+| FIFO threshold/burst 불일치 → RX overflow | 부하 시 DMA가 늦게 비움 | overflow 비트, DDR 부하 | 부하에서만, 연속 바이트 누락 |
+| DMA 완료 ≠ SPI 완료 | DMA 완료 IRQ 시점에 마지막 FIFO가 아직 안 비워짐 | 꼬리 바이트 | 마지막 N B만 깨짐 |
+| DMA 폭/엔디안 | 32-bit 전송 + 바이트 패킹 | `00 01 02 03 ...` 패턴 | 4바이트마다 역순 |
+
+#### 측정 · 계측
+
+- **패턴이 증거**: 주소 증가 패턴(`i & 0xFF`)을 flash에 써 두고 DMA read → diff 오프셋 히스토그램. 64 B 정렬 덩어리 = 캐시, 4 B 역순 = 폭, 꼬리 = 완료 순서, 랜덤 연속 누락 = overflow.
+- 같은 read를 PIO 강제(작은 청크) vs DMA 강제로 비교 → 계층을 "SPI 전기"에서 "SoC 메모리 시스템"으로 옮긴다. 전기 문제면 PIO도 깨져야 한다.
+- 부하 조건: memtester/카메라 스트림 동시 → overflow 비트와 함께 기록.
+
+#### root cause · fix
+
+- 전형: bare-metal 테스트에서 RX DMA 후 `invalidate` 누락, 또는 invalidate를 DMA **시작 전**에만 해서 CPU 투기적 프리페치가 라인을 다시 채움(→ 완료 후에도 invalidate). Linux에선 `dma_map_single` 계열이 처리하지만 stack 버퍼·잘못된 방향 지정이 원인 [12].
+- Fix + 정렬된 버퍼(캐시 라인 배수), FIFO threshold를 DMA burst와 맞춤, 완료 판정은 SPI "idle/transfer done"까지.
+
+#### 회귀로 굳히기
+
+- DMA 테스트 매트릭스: 버퍼 오프셋 0..63 × 길이(1, FIFO depth, depth+1, DMA 임계 ±1, 4 KB, 64 KB) × 부하 on/off, CRC 비교 + overflow 비트 0 확인 ([N06D](2026-11-01_N06D_plans_dma_memory.html)).
+
+#### 30초 영어 답
+
+"If PIO is fine and DMA isn't, the SPI wires are fine — the problem moved into the memory system. I write an incrementing pattern and look at the shape of the corruption: stale 64-byte chunks mean cache maintenance, groups of four reversed mean DMA width or packing, only the tail means I'm reading before the controller finished draining, and random gaps under load mean RX overflow. Making the buffer non-cacheable is a quick confirm for coherency. The regression sweeps buffer alignment and length around the FIFO and DMA thresholds, with memory load running."
+
+#### 꼬리 질문
+
+<details><summary>Q1. You invalidated the buffer before starting the DMA. Why can it still be stale?</summary>
+
+- **EN**: "Because the CPU can speculatively prefetch or touch nearby data and pull the line back into the cache while the DMA is writing memory. For receive buffers you need an invalidate after the transfer completes too, and the buffer must own its cache lines entirely — aligned and padded — so nothing else drags them in."
+- 한국어 핵심: RX는 완료 후에도 invalidate, 버퍼는 캐시 라인 단독 소유.
+
+</details>
+
+<details><summary>Q2. Corruption appears only when the camera is streaming. Next step?</summary>
+
+- **EN**: "That suggests the DMA can't drain the RX FIFO fast enough under memory contention, so I read the overflow flag and measure DMA latency under load. Fixes are a lower FIFO threshold, higher DMA priority or QoS, or a lower SPI clock; and the test plan should always include concurrent load."
+- 한국어 핵심: 부하 의존 = overflow·QoS. FIFO threshold/우선순위/클럭.
+
+</details>
+
+### C6 · quad read만 실패
+
+#### 증상
+
+- `0Bh`(1-1-1)과 `3Bh`(1-1-2)는 정상, `6Bh`(1-1-4) 또는 `EBh`(1-4-4)는 깨짐. 바이트마다 `0x44` 또는 `0x88` 비트가 항상 1(예: `EF 40 18` → `EF 44 5C`), 또는 전부 `FF`, 또는 quad read 다음 명령부터 이상.
+- DT `spi-rx-bus-width = <4>`를 빼면 정상(대신 느림).
+
+#### 먼저 물어볼 것
+
+- "Is the QE bit set, and is it volatile or non-volatile on this part?"
+- "Are /WP and /HOLD routed to the SoC as IO2/IO3, or tied to pull-ups on the board?"
+- "Does 1-1-4 fail as well as 1-4-4?"
+- "What mode bits and dummy cycles does the controller send for EBh?"
+
+#### 가설 순위
+
+| 가설 | 왜 의심 | 확인 방법 | 맞으면 보이는 것 |
+|---|---|---|---|
+| QE = 0 | QE=0이면 /WP·/HOLD가 원래 기능 → IO2/IO3 데이터 없음, HOLD low면 일시정지 [1] | SR2 `35h` bit1 (Winbond) | 0. (W25Q128JV-IQ/JQ는 공장 고정 1, IM/JM은 기본 0 [1]) |
+| IO2/IO3 핀mux·보드 연결 | 보드가 /WP·/HOLD를 풀업에만 연결 | 핀mux, 회로도, LA로 IO2/IO3 | 해당 IO 계속 high → `0x44`/`0x88` 지문 |
+| dummy / mode cycle 불일치 | EBh = mode 2 + dummy 4 clock [1] | debugfs `capabilities`/`params` [4] | 데이터가 니블 단위로 밀림 (1-1-4는 OK, 1-4-4만 실패 가능) |
+| mode bits로 continuous read 진입 | 지원 파트에서 특정 M 값이면 다음 CS에 opcode 생략 [추정: 파트마다; W25Q128JV는 Fxh 요구 [1]] | 다음 명령 실패 여부 | quad read 뒤 첫 명령이 주소로 해석됨 |
+| QE 설정 방법 오류 | 벤더마다 QE 위치 다름 (SR2 bit1, SR1 bit6, SR2 bit7 …) — Linux는 SFDP BFPT DWORD15의 QER 필드로 결정 [7] | SFDP 덤프 | 다른 비트를 씀 |
+| IO 간 skew (고속) | 4선 길이 차 | 저속에서 OK인지 | 고속에서만 |
+
+#### 측정 · 계측
+
+- **1-1-4 vs 1-4-4로 자르기**: 1-1-4(주소는 1선, 데이터만 4선)가 OK이고 1-4-4만 실패 → 주소/mode/dummy 단계 문제. 둘 다 실패 → IO2/IO3 전기 또는 QE.
+- **비트 지문 읽기** (§2.3): `got XOR expected` 를 모든 바이트에 대해 OR → `0x44`만 → IO2, `0x88` → IO3, `0x22`/`0x11` → IO1/IO0.
+- LA 6선 + QSPI 디코더, 트리거 CS# falling; IO2/IO3가 데이터 구간에 움직이는지 먼저.
+
+#### root cause · fix
+
+- 흔한 것: IM/JM 파트(QE 기본 0)로 BOM 변경 후 펌웨어는 "QE는 원래 1"이라 가정 → quad 실패. Fix = 부팅 시 QE 확인·설정(non-volatile write는 횟수와 전원 차단 위험 고려, volatile `50h` 옵션 [1]), 또는 SFDP 기반 설정. 보드에서 IO2/IO3 미연결이면 DT bus width를 1/2로.
+
+#### 회귀로 굳히기
+
+- 프로토콜별 read 매트릭스(1-1-1, 1-1-2, 1-2-2, 1-1-4, 1-4-4) × 최대 클럭, CRC 비교 + **quad read 직후 다른 명령(SR read) 성공** 확인 + 전원 사이클 후 QE 상태 확인.
+
+#### 30초 영어 답
+
+"If single and dual work but quad doesn't, the common part — clock, CS, IO0, IO1 — is fine, so it's IO2 and IO3 or the quad configuration. First I read the QE bit, because with QE clear those pins are still write-protect and hold. Then I look at the bit pattern: if bits 6 and 2 are always set, IO2 is floating high. Splitting 1-1-4 from 1-4-4 tells me whether it's data lines or the address, mode-bit and dummy phase. The usual root cause is a part change where QE defaults to zero, so the firmware should check and set QE explicitly, and the regression runs every read protocol."
+
+#### 꼬리 질문
+
+<details><summary>Q1. Why can a wrong mode-bit value break the next command, not the quad read itself?</summary>
+
+- **EN**: "On parts that support continuous read, certain mode-bit values tell the flash that the next transaction will skip the opcode and start directly with the address. The quad read completes normally, but the next command's opcode byte is taken as address bits, so everything after it is wrong. The fix is sending the non-continuous mode value, or a mode-reset sequence before other commands."
+- 한국어 핵심: mode bits로 "opcode 생략" 상태 진입 → 다음 명령이 망가짐 [추정: 파트마다].
+
+</details>
+
+<details><summary>Q2. Why does Linux read SFDP to enable quad?</summary>
+
+- **EN**: "Because the QE bit location and write procedure differ by vendor and even by part. JESD216 SFDP has a Quad Enable Requirements field in the basic parameter table, and the kernel picks the matching procedure from it — status register 2 bit 1, status register 1 bit 6, and so on — instead of hard-coding per part."
+- 한국어 핵심: QE 위치가 벤더마다 다름 → SFDP QER 필드로 결정.
+
+</details>
+
+### C7 · 부팅 시 가끔 flash를 못 찾음 (전원 시퀀스 / 리셋 후 대기)
+
+#### 증상
+
+- cold boot 50회 중 1회 BootROM이 fallback 또는 `unrecognized JEDEC id`. 웜 리부트는 항상 OK. **또는 반대**: watchdog 리셋 후에만 가끔 실패.
+
+#### 먼저 물어볼 것
+
+- "Cold power-up only, or also warm and watchdog resets — and how often?"
+- "Is the flash on the same rail as the SoC IO, and is its reset pin connected to anything?"
+- "What was the flash doing when the reset happened — erasing, in 4-byte mode, powered down?"
+- "How soon after reset release does the BootROM issue the first command?"
+
+#### 가설 순위
+
+| 가설 | 왜 의심 | 확인 방법 | 맞으면 보이는 것 |
+|---|---|---|---|
+| 너무 빠른 첫 접근 | VCC(min) 후 tVSL 20 µs 필요 [1] | scope: flash VCC vs 첫 CS# | 간격 < 20 µs인 실패 사례 |
+| CS#가 VCC를 안 따라감 | 데이터시트: 전원 켜질 때 /CS는 VCC를 따라가야 함 [1] | 전원 상승 중 CS# 파형 | CS#가 low로 떠 있거나 SoC 패드가 low 구동 |
+| flash 레일이 늦음 / 글리치 | 다른 레귤레이터, VWI 근처에서 오래 머묾 | 레일 상승 파형, 리셋 해제와 비교 | 리셋 해제 시점에 flash VCC 미달 |
+| 웜 리셋 시 flash 상태 잔존 | flash는 리셋 안 됨 → 4-byte/QPI/power-down/erase 중 | 실패 직후 JTAG로 SR1 BUSY, SR3 ADS | BUSY=1(erase 최대 400 ms) 또는 ADS=1 |
+| 리셋 명령 후 대기 부족 | `66h`+`99h` 후 tRST 약 30 µs [1] | 펌웨어 코드 | 대기 없이 바로 `9F` |
+
+#### 측정 · 계측
+
+- scope 4ch single-shot: **SoC reset 해제** 트리거 + flash VCC + CS# + SCLK. 실패를 잡으려면 **segmented memory**로 수백 번 부팅을 캡처하고 "VCC(min) → 첫 CS#" 간격 분포를 본다 ([N07A](2026-11-01_N07A_debug_framework_instruments.html)).
+- 자동화: 전원 relay로 1000회 cold boot, 콘솔 로그에서 성공/실패 카운트 → 실패율과 95% 신뢰구간 ([N06H](2026-11-01_N06H_debug_methodology_triage.html)). 웜 경로는 erase 중간·4-byte 모드 중간에 watchdog을 일부러 터뜨리는 루프.
+
+#### root cause · fix
+
+- cold: 레일 시퀀스 수정 또는 첫 접근 지연, CS# 풀업을 flash VCC에. warm: flash RESET#을 SoC 리셋에 연결하거나 flash 전원을 리셋과 함께 사이클, BootROM/1단 로더가 첫 명령 전에 `66h`+`99h`(+30 µs) — BootROM은 못 바꿔도 1단 로더 이후는 바꿀 수 있다. 4-byte opcode 사용(C4). 커널의 `spi_nor_restore()`는 정상 종료 때만 4-byte 해제/soft reset을 하므로 crash 경로는 하드웨어 리셋으로 [6].
+
+#### 회귀로 굳히기
+
+- 보드 팜 야간 회귀: cold boot 1000회 + "erase 중 watchdog" 1000회 + "4-byte 모드 중 watchdog" 1000회, ID 확인 100% 합격 기준. 새 보드 리비전마다 VCC→CS# 간격 측정 기록.
+
+#### 30초 영어 답
+
+"Intermittent detection at boot is usually power-up timing or state left in the flash. I first split cold from warm resets. For cold boots I capture flash VCC, chip select and the first clock relative to reset release over hundreds of boots — the flash needs VCC stable for about 20 microseconds before CS goes low, and CS has to track VCC during ramp. For warm resets the question is what the flash was doing: an erase can take up to 400 ms, and 4-byte or power-down modes survive an SoC reset. The fixes are sequencing or a delay for cold, and wiring the flash reset or issuing a software reset first for warm — then a thousand-cycle loop for each path."
+
+#### 꼬리 질문
+
+<details><summary>Q1. You can't change the board this spin. How do you make warm resets safe?</summary>
+
+- **EN**: "Make every software stage leave the flash in its default state and avoid stateful modes: use 4-byte opcodes, never leave it powered down, and have the first-stage loader send reset-enable and reset, wait the reset time, and re-read the ID before anything else. For a crash during erase, the loader polls BUSY with a timeout longer than the max erase time. And I'd file the reset wiring for the next spin with the data."
+- 한국어 핵심: 상태 남기지 않기 + 1단 로더에서 soft reset·BUSY 대기 + 다음 리비전에 RESET# 배선 요청.
+
+</details>
+
+<details><summary>Q2. 1 in 50 cold boots fail. How many boots to prove the fix?</summary>
+
+- **EN**: "With zero failures in n trials, the 95 percent upper bound on the failure rate is about 3 over n. To show we're well below 1 in 50 — say below 1 in 1000 — I need about 3000 clean boots. That's why it goes on the board farm overnight rather than a manual check."
+- 한국어 핵심: 0 실패 n회 → 95% 상한 ≈ 3/n. 1/1000 보장엔 약 3000회.
+
+</details>
+
+## 6. 꼬리 질문 체인
+
+### 체인 1 — "SPI reads are shifted by one bit."
+
+<details><summary>Q. SPI reads are shifted by one bit. What do you do?</summary>
+
+- **EN**: "Drop the clock to 1 MHz. If it's still shifted, it's mode; if it's gone, it's timing. Then scope at the device pins to see the edge relationship."
+- 한국어 핵심: 1 MHz로 mode vs 타이밍 분리.
+
+</details>
+
+<details><summary>꼬리 1. It disappears at 1 MHz but at 100 MHz it's random at room temperature and a clean shift at hot. Explain.</summary>
+
+- **EN**: "At room temperature the data transition lands right on the sample point, so setup or hold is violated and the flop resolves randomly. At hot the clock-to-output delay is longer, the transition moves fully past the sample point, and the controller cleanly reads the previous bit. Both say the sample point is too early for the round trip."
+- 한국어 핵심: 실온 = 경계(랜덤), 고온 = 경계를 완전히 지나 깨끗한 밀림.
+
+</details>
+
+<details><summary>꼬리 2. How do you choose the production sample delay?</summary>
+
+- **EN**: "Characterize the passing window over frequency, temperature and voltage on several boards, intersect the windows, and pick the center. Require the intersection to be at least two taps wide, and add a guard-band check at plus and minus one tap to the regression so shrinking margin shows up before failures."
+- 한국어 핵심: 코너 교집합 중앙 + 폭 ≥ 2 탭 + ±1 탭 guard-band 회귀.
+
+</details>
+
+<details><summary>꼬리 3. The window is different on every board. Now what?</summary>
+
+- **EN**: "Then a fixed tap isn't robust; I'd use per-board calibration at boot — read a known pattern at each tap and pick the center — with sanity limits so a bad calibration fails loudly, and log the chosen tap so the fleet data shows drift."
+- 한국어 핵심: 보드별 편차 크면 부팅 시 캘리브레이션 + 결과 로그.
+
+</details>
+
+### 체인 2 — "Flash isn't detected on some boots."
+
+<details><summary>Q. The flash isn't detected on some boots. Where do you start?</summary>
+
+- **EN**: "Split cold boots from warm and watchdog resets and get a failure rate for each with an automated loop. They have different causes: power-up timing versus state left in the flash."
+- 한국어 핵심: cold vs warm 분리, 각각 실패율.
+
+</details>
+
+<details><summary>꼬리 1. Only after watchdog resets. What state could the flash be in?</summary>
+
+- **EN**: "Mid-erase with BUSY set, 4-byte address mode, QPI mode, deep power-down, or continuous-read mode. Each makes the flash ignore or misread a plain 3-byte 03h or 9Fh. Reading status registers over JTAG right after a failure tells me which."
+- 한국어 핵심: erase 중·4-byte·QPI·power-down·continuous read.
+
+</details>
+
+<details><summary>꼬리 2. It's 4-byte mode. Who put it there and how do you stop it?</summary>
+
+- **EN**: "Whichever stage issued B7h — often a bootloader driver. I'd switch every stage to 4-byte opcodes, which don't change flash state, and on the hardware side wire the flash reset to the SoC reset for the next spin. Linux's broken-flash-reset property only helps on clean shutdowns."
+- 한국어 핵심: B7h 쓰는 단계 찾기 → 4B opcode로 통일 + RESET# 배선.
+
+</details>
+
+### 체인 3 — "Quad read fails, single works."
+
+<details><summary>Q. Quad read fails, single works. First check?</summary>
+
+- **EN**: "The QE bit, and the byte pattern of the failures — a constant 0x44 or 0x88 mask points to IO2 or IO3."
+- 한국어 핵심: QE + 비트 마스크 지문.
+
+</details>
+
+<details><summary>꼬리 1. QE is set and IO2/IO3 toggle. 1-1-4 works, 1-4-4 fails.</summary>
+
+- **EN**: "Then the data lines are fine and the problem is the address, mode-bit or dummy phase that only 1-4-4 has. I compare the controller's configured mode and dummy clocks against the datasheet — two mode clocks plus four dummy for this part's EBh — using the analyzer to count clocks between address and data."
+- 한국어 핵심: 1-4-4만 실패 = 주소/mode/dummy 단계 클럭 수.
+
+</details>
+
+<details><summary>꼬리 2. Quad reads now pass, but the next status read fails.</summary>
+
+- **EN**: "That's the signature of continuous-read mode: the mode bits told the flash to expect another read without an opcode. I'd send the non-continuous mode value, or a mode-reset sequence before other commands, and add a test that runs every command type right after a quad read."
+- 한국어 핵심: quad 뒤 다음 명령 실패 = continuous read 진입 [추정: 파트마다].
+
+</details>
+
+### 체인 4 — "DMA reads are corrupted, PIO reads are fine."
+
+<details><summary>Q. DMA reads are corrupted, PIO is fine. What layer is this?</summary>
+
+- **EN**: "Not the SPI wires — PIO proves the electrical and protocol path. It's the SoC side: cache coherency, buffer alignment, FIFO thresholds or DMA completion ordering."
+- 한국어 핵심: PIO OK = 전기·프로토콜 OK → 메모리 시스템.
+
+</details>
+
+<details><summary>꼬리 1. The corruption comes in 64-byte chunks with old data.</summary>
+
+- **EN**: "That's cache-line granularity, so stale cache lines over the DMA buffer — missing invalidate after receive, or the buffer sharing a line with something the CPU writes. Non-cacheable buffer as a quick confirm, then aligned, padded buffers and invalidate after completion."
+- 한국어 핵심: 64 B 옛 데이터 = 캐시 라인.
+
+</details>
+
+<details><summary>꼬리 2. After the fix, it still fails only under camera load.</summary>
+
+- **EN**: "Different bug: the DMA can't keep up and the RX FIFO overflows. I check the overflow flag and DMA latency under load, then tune the FIFO threshold, DMA priority or QoS. That's why the regression always runs with memory load."
+- 한국어 핵심: 부하에서만 = overflow. 회귀는 항상 부하 포함.
+
+</details>
+
+## 7. Don 경험 연결
+
+- "At Solidigm I verified our SoC's SPI, I2C and DMA blocks on the FPGA prototype before RTL freeze, so I know the controller side well — FIFO thresholds, chip-select timing, DMA completion; on silicon I'd add what FPGA can't show, the sample-delay window across PVT. [숫자 채우기: SPI 관련 버그 수, 예시 1개]"
+- "The sample-delay sweep is the same idea as the shmoo work I did at SK hynix on NAND and PCIe interface reliability: sweep a timing knob against voltage and temperature, find the passing window, and choose the center with margin. [숫자 채우기: shmoo 축·코너 수]"
+- "At Apple I root-cause bus issues with a scope and protocol analyzer on PCIe, I2C, SPMI and RFFE, so I start at the pins, not the driver — for SPI that means mode and timing at the device pins before I touch software. [숫자 채우기: 사례 1개 — 증상 · 측정 · 결론]"
+
+## 8. 실습 / 코드
+
+### 8.1 무엇을 하나
+
+- 코드: [spi_mode_sim.c](onsitePrep/n07/c/spi_mode_sim.c) · 실행: [run.sh](onsitePrep/n07/c/run.sh) · 결과: [run_output.txt](onsitePrep/n07/c/run_output.txt)
+- **Part 1 — master mode × slave mode 16조합**: 범용 shift-register slave. master는 MOSI로 `9F A5 3C`, slave는 MISO로 `EF 40 18`을 CS# 유지한 채 3바이트 연속 송신. 양방향 받은 바이트와 분류(OK / SHIFT>>1 / SHIFT<<1), 그리고 "같은 엣지(race)" 열. **두 구현**(엣지 하나씩 도는 이벤트 루프 vs "샘플 전에 몇 번 launch 됐나"를 세는 닫힌 식)이 32개 결과 전부 일치해야 PASS, 손으로 유도한 5개 골든과도 비교.
+- **Part 2 — master mode × SPI NOR flash 모델**: flash는 rising 샘플 / falling 출력(mode 0/3 장치), `9F`를 정확히 받았을 때만 응답. JEDEC ID 결과 4줄.
+- **Part 3 — 타이밍 모델**: flash가 falling + tCLQV(코너별 실제값)에 MISO를 바꾸고, 왕복 2 ns, master는 rising + d에서 샘플(setup/hold 1 ns). 주파수 6개 × d 21개 × 코너 3개 shmoo + half-clock 열 + 교집합 창. 시뮬레이션 결과가 닫힌 식 창과 **모든 셀에서** 일치해야 PASS, 이름 붙인 9개 셀 기대값, 실패 셀의 바이트 지문.
+- **가정 (모델 한계)**: 이상적 엣지, 같은 엣지에선 "샘플 먼저, launch 나중"(= hold 만족), MOSI는 구동 전 low, MISO는 구동 전 high(풀업). tCLQV 6 ns·tCLQX 1.5 ns는 W25Q128JV 데이터시트 값 [1], **typ 3.5 ns·편도 1 ns·setup/hold 1 ns는 가정** [추정]. 실제 slave는 CPHA=1에서 첫 비트를 언제 내놓는지 구현이 다를 수 있다 [추정].
+
+### 8.2 실행
+
+```bash
+cd onsitePrep/n07/c && ./run.sh      # ASan/UBSan 빌드 → 실행 → run_output.txt, exit 0이면 전부 PASS
+```
+
+### 8.3 실제 출력 (run_output.txt 그대로)
+
+```text
+=== Part 1: master mode x slave mode (generic shift-register slave) ===
+master sends 9F A5 3C on MOSI, slave sends EF 40 18 on MISO, CS held for 3 bytes
+same-edge = receiver samples on the edge where the sender launches (hold-margin race on real HW)
+
+M S | master got (MISO)  | slave got (MOSI)   | same-edge (race on real HW)
+0 0 | EF 40 18 OK        | 9F A5 3C OK        | -
+0 1 | F7 A0 0C SHIFT>>1  | 9F A5 3C OK        | MISO+MOSI
+0 2 | EF 40 18 OK        | 9F A5 3C OK        | MISO+MOSI
+0 3 | F7 A0 0C SHIFT>>1  | 9F A5 3C OK        | -
+1 0 | EF 40 18 OK        | 4F D2 9E SHIFT>>1  | MISO+MOSI
+1 1 | EF 40 18 OK        | 9F A5 3C OK        | -
+1 2 | DE 80 31 SHIFT<<1  | 9F A5 3C OK        | -
+1 3 | F7 A0 0C SHIFT>>1  | 4F D2 9E SHIFT>>1  | MISO+MOSI
+2 0 | EF 40 18 OK        | 9F A5 3C OK        | MISO+MOSI
+2 1 | F7 A0 0C SHIFT>>1  | 9F A5 3C OK        | -
+2 2 | EF 40 18 OK        | 9F A5 3C OK        | -
+2 3 | F7 A0 0C SHIFT>>1  | 9F A5 3C OK        | MISO+MOSI
+3 0 | DE 80 31 SHIFT<<1  | 9F A5 3C OK        | -
+3 1 | F7 A0 0C SHIFT>>1  | 4F D2 9E SHIFT>>1  | MISO+MOSI
+3 2 | EF 40 18 OK        | 4F D2 9E SHIFT>>1  | MISO+MOSI
+3 3 | EF 40 18 OK        | 9F A5 3C OK        | -
+
+PASS  part1: event-loop sim == closed-form count for all 16 combos x 2 directions
+PASS  part1 golden m0/s0 matched -> exact
+PASS  part1 golden m3/s3 matched -> exact
+PASS  part1 golden m0/s3: slave (CPHA=1) never pre-drives bit7 -> MISO >>1, MOSI ok
+PASS  part1 golden m0/s1: MOSI ok only because of same-edge old value; MISO >>1
+PASS  part1 golden m1/s0: MISO ok (same-edge), MOSI >>1 with idle-low MSB
+PASS  part1: every matched mode (diagonal) is exact in both directions
+
+=== Part 2: master mode x SPI-NOR flash (mode 0/3 device) - JEDEC ID read 9Fh ===
+flash: samples MOSI on rising, drives MISO on falling, answers only if it received 9F
+
+master mode | flash saw cmd | JEDEC ID read | reading
+     0      |      9F       |   EF 40 18    | OK (Winbond W25Q128JV)
+PASS  part2 mode 0: cmd=9F id=EF 40 18
+     1      |      4F       |   FF FF FF    | MISO never driven: command not recognised
+PASS  part2 mode 1: cmd=4F id=FF FF FF
+     2      |      9F       |   F7 A0 0C    | ID shifted right by 1 bit
+PASS  part2 mode 2: cmd=9F id=F7 A0 0C
+     3      |      9F       |   EF 40 18    | OK (Winbond W25Q128JV)
+PASS  part2 mode 3: cmd=9F id=EF 40 18
+
+=== Part 3: JEDEC ID read timing - SCLK x RX sample delay x PVT corner ===
+model: flash drives MISO at falling edge + tCLQV(actual); round trip adds 2 x 1000 ps;
+master samples at rising edge + delay d; needs 1000 ps setup / 1000 ps hold
+corners: fast tact=1500 ps, typ 3500 ps, slow 6000 ps (W25Q128JV tCLQX min 1.5 ns, tCLQV max 6 ns)
+cell: '#' = all 3 corners pass, 't' = typ only, 'f' = fast only, 'T' = typ+fast, '.' = fail
+column 'h' = half-clock (sample on the opposite edge, d = T/2)
+
+ MHz  | d(ns) 0.0 .. 10.0 step 0.5               | h | intersect window
+ 25.0 | # # # # # # # # # # # # # # # # # # # # # | # | [-11.00, 22.50] ns width 33.50
+ 50.0 | # # # # # # # # # # # # # # # # # # # # # | # | [-1.00, 12.50] ns width 13.50
+ 66.7 | T T T # # # # # # # # # # # # # # # # # # | # | [ 1.50, 10.00] ns width 8.50
+ 80.0 | f T T T T T # # # # # # # # # # # # t t t | # | [ 2.75,  8.75] ns width 6.00
+100.0 | f f f T T T T T # # # # # # # # t t t t . | # | [ 4.00,  7.50] ns width 3.50
+133.3 | . . f f f f T T T T T # # t t t t . . . . | . | [ 5.25,  6.25] ns width 1.00
+
+PASS  part3: simulated pass/fail == closed-form window for every cell (6 freq x 21 delays x 3 corners)
+PASS  part3 25 MHz, d=0, slow corner passes (lots of margin)
+PASS  part3 50 MHz, d=0, slow corner passes (edge of window: lo=-1.0 ns)
+PASS  part3 66.7 MHz, d=0, typ corner passes (bench at room temp)
+PASS  part3 66.7 MHz, d=0, slow corner FAILS (hot / low V) -> PVT escape
+PASS  part3 100 MHz, half-clock d=5 ns, slow corner passes
+PASS  part3 100 MHz, half-clock d=5 ns, fast corner passes
+PASS  part3 133 MHz, half-clock d=3.75 ns, slow corner FAILS -> need fine taps
+PASS  part3 133 MHz, d=5.5 ns tap, slow corner passes
+PASS  part3 133 MHz, d=5.5 ns tap, fast corner passes
+
+failing-cell signatures (what the engineer sees):
+  100 MHz d=0 slow : F7 A0 0C  violations= 0  -> SHIFT>>1
+  100 MHz d=0 typ  : 0C F2 86  violations=24  (seed 7) -> GARBLED
+  100 MHz d=0 typ  : E9 92 C3  violations=24  (seed 108) -> GARBLED
+  100 MHz d=0 typ  : 20 7F 75  violations=24  (seed 209) -> GARBLED
+  100 MHz d=10 fast: DE 80 30  violations= 0  -> SHIFT<<1
+
+PASS  part3: sampling too EARLY at slow corner = clean 1-bit right shift F7 A0 0C (looks like a mode bug)
+PASS  part3: sampling too LATE at fast corner = clean 1-bit left shift
+
+SUMMARY: ALL PASS (0 failures)
+```
+
+### 8.4 출력 읽는 법
+
+- **Part 1 대각선(0 0, 1 1, 2 2, 3 3)**: 양방향 OK — mode가 같으면 당연.
+- **0 3 / 3 0 (같은 엣지 그룹, CPHA만 다름)**: mode 0과 3은 둘 다 rising 샘플인데도 범용 slave에선 깨진다. 0 3은 slave(CPHA=1)가 첫 비트를 미리 안 올려서 master의 첫 샘플이 idle 1 → `F7 A0 0C`. 3 0은 slave(CPHA=0)가 첫 비트를 미리 올리고 첫 falling에서 바로 다음 비트로 넘어가서 MSB 손실 → `DE 80 31`. **flash가 mode 0/3 둘 다 되는 건 "명령 뒤에 출력이 시작"되기 때문** (Part 2의 0과 3이 둘 다 OK).
+- **`MISO+MOSI` 열이 있는 OK 셀 (0 2, 2 0, 0 1의 MOSI 등)**: 이상적 모델에선 "같은 엣지에서 이전 값을 읽음"이라 우연히 맞는다. 실제 하드웨어에선 그 엣지의 hold 마진에 따라 **됐다 안 됐다** — "가끔 맞는 SPI 버그"의 정체. 디버그 때 이 조합은 "OK"로 믿지 말 것.
+- **1 0 / 1 3 / 3 1 / 3 2의 slave 쪽 `4F D2 9E`**: 장치가 받는 명령이 1비트 밀림(MSB에 idle 0) → 레지스터 주소·명령이 틀어짐. 응답만 보면 안 보이는 방향 오류.
+- **Part 2**: 같은 "mode 오류"라도 **명령이 깨지면(mode 1) `FF FF FF`**, **응답만 깨지면(mode 2) `F7 A0 0C`**. C2와 C1이 같은 근본 원인에서 나올 수 있다는 증거.
+- **Part 3 표**: 한 행 = 한 주파수, 열 = 샘플 지연 0–10 ns. `#`만 안전. 66.7 MHz의 d=0 칸이 `T`(typ+fast만) → **벤치 통과, 고온 실패**(C3 Q1). 100 MHz는 d=0에서 실패하지만 half-clock `h`는 `#`. 133 MHz는 교집합 창 1 ns, half-clock 실패 → 0.5 ns 탭 5.5/6.0 ns 두 개만 통과(C3 Q2).
+- **실패 지문**: 100 MHz d=0을 slow 코너에서 보면 `F7 A0 0C`(violations 0) — **mode 버그와 똑같은 바이트**. typ 코너에선 24비트 전부 setup/hold 위반 → seed마다 다른 쓰레기(`0C F2 86`, `E9 92 C3`, `20 7F 75`) = "실온에선 랜덤". 탭을 너무 늦게(d = T) 잡으면 `DE 80 30` 왼쪽 밀림 — 창의 반대쪽 경계.
+- **회귀 아이디어로 연결**: 실제 보드에서 Part 3 표를 만드는 게 C3의 특성화 테스트. "1 MHz에서 같은 read" 한 번이 Part 1(mode)과 Part 3(타이밍)을 가르는 손잡이.
+- 실제 하드웨어로 측정한 값은 없음 — 보드에서의 shmoo 결과는 `[미검증]`.
+
+## 9. 자주 틀리는 것
+
+1. **"1비트 밀림 = mode"로 단정** — 고속 샘플 타이밍도 똑같은 바이트를 만든다. 1 MHz 재현이 먼저 (§8 Part 3).
+2. **loopback 통과로 mode가 맞다고 결론** — loopback은 자기 자신과만 비교한다. 실장치·target 모드 인스턴스·analyzer 엣지 확인 필요 ([N06C C2 Q2](2026-11-01_N06C_plans_peripherals_soc_infra.html)).
+3. **`FF FF FF`를 "flash 불량"으로** — 거의 항상 CS#·전원·명령 미인식·power-down. MISO가 움직이는지 flash 핀에서 먼저.
+4. **50 MHz 넘어서 `03h` Read Data 사용** — W25Q128JV fR = 50 MHz, 그 위는 `0Bh`(dummy 8) [1].
+5. **샘플 지연을 실온 창의 중앙으로** — 고온·저전압에서 창이 이동한다. 코너 교집합의 중앙.
+6. **scope를 SoC 쪽에서만 측정** — 장치가 보는 신호는 장치 핀의 신호. 링잉·느린 slew(≥ 0.1 V/ns 요구 [1])는 끝단에서 보인다.
+7. **LA 디코더를 그대로 믿기** — 디코더 CPOL/CPHA·주소 길이·dummy 설정이 틀리면 디코드도 밀린다. 아날로그 확인 후 디코드.
+8. **QE는 원래 1이라 가정** — 같은 W25Q128JV라도 IQ/JQ는 공장 고정 1, IM/JM은 기본 0 [1]. BOM 변경 한 번에 quad가 죽는다.
+9. **page program을 페이지 경계 무시하고** — 256 B를 넘거나 경계를 넘으면 같은 페이지 앞을 덮어쓴다 [1].
+10. **flash도 SoC와 함께 리셋된다고 가정** — RESET# 미배선이면 4-byte·QPI·power-down·erase 진행 상태가 웜 리셋을 넘어 살아남는다. Linux `broken-flash-reset`은 정상 종료만 구한다 [6][11].
+
+## 10. 출처
+
+1. Winbond W25Q128JV datasheet (명령 표 §8.1, JEDEC ID EF 4018h/7018h, QE·BUSY·WEL·SRP, mode 0/3, Fast Read dummy 8, EBh mode+dummy, page wrap, tRST 30 µs, tRES1 3 µs, tVSL 20 µs, tPUW 5 ms, AC 표 FR 133/104 MHz·fR 50 MHz·tCLQV 6 ns·tCLQX 1.5 ns·tSLCH·tSHSL1/2, tPP·tSE) — PDF 텍스트에서 확인 · https://cdn.sparkfun.com/assets/7/2/4/9/e/w25q128jv.pdf
+2. Winbond W25Q256JV datasheet (§6.1.4 3-/4-Byte Address Modes, ADS S16·ADP S17, Extended Address Register C8h/C5h, B7h/E9h, 13h/0Ch, ID 4019h) · https://cdn.sparkfun.com/assets/c/2/9/2/6/W25Q256JV.pdf
+3. Linux `include/linux/mtd/spi-nor.h` (SPINOR_OP_* opcode 정의: RDID 0x9f, READ 0x03, READ_FAST 0x0b, READ_1_1_4 0x6b, READ_1_4_4 0xeb, 4B 변형 0x13/0x0c/0x6c/0xec, EN4B 0xb7, EX4B 0xe9, SRSTEN 0x66, SRST 0x99, SR_WIP/SR_WEL/SR_BP/SR_SRWD) · https://github.com/torvalds/linux/blob/master/include/linux/mtd/spi-nor.h
+4. Linux kernel docs, "SPI NOR framework" (SFDP 기반 generic flash, sysfs·debugfs params/capabilities 예, mtd_debug erase/read/write 최소 테스트) · https://docs.kernel.org/driver-api/mtd/spi-nor.html
+5. Linux sysfs ABI `sysfs-bus-spi-devices-spi-nor` (jedec_id, manufacturer, partname, sfdp) · https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-bus-spi-devices-spi-nor
+6. Linux `drivers/mtd/spi-nor/core.c` ("unrecognized JEDEC id bytes: %*ph", SPI_NOR_MAX_ID_LEN 6은 core.h, "enabling reset hack; may not recover from unexpected reboots", spi_nor_restore()) · https://github.com/torvalds/linux/blob/master/drivers/mtd/spi-nor/core.c
+7. Linux `drivers/mtd/spi-nor/sfdp.c` (SFDP 서명 0x50444653, BFPT DWORD15 QER: SR2 bit1, SR1 bit6, SR2 bit7 …) · https://github.com/torvalds/linux/blob/master/drivers/mtd/spi-nor/sfdp.c
+8. Linux `tools/spi/spidev_test.c` (옵션 -D -s -l -H -O -F -L -b -v -2/-4 등) · https://github.com/torvalds/linux/blob/master/tools/spi/spidev_test.c
+9. DT binding `spi/spi-peripheral-props.yaml` (spi-max-frequency, spi-rx/tx-bus-width, rx-sample-delay-ns, spi-cs-setup/hold/inactive-delay-ns) · https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/spi/spi-peripheral-props.yaml
+10. DT binding `spi/cdns,qspi-nor-peripheral-props.yaml` (cdns,read-delay = read capture delay in clock cycles, cdns,tshsl-ns, cdns,tsd2d-ns, cdns,tchsh-ns, cdns,tslch-ns) · https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/spi/cdns,qspi-nor-peripheral-props.yaml
+11. DT binding `mtd/jedec,spi-nor.yaml` (m25p,fast-read, broken-flash-reset, reset-gpios, spi-cpol/spi-cpha) · https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/mtd/jedec,spi-nor.yaml
+12. Linux kernel docs, "Overview of Linux kernel SPI support" (I/O 버퍼는 DMA-safe, stack·static 금지, cs_change) · https://docs.kernel.org/spi/spi-summary.html
+13. flashrom manual (linux_spi: dev=/dev/spidevX.Y, spispeed는 kHz, -r/-v) · https://www.flashrom.org/classic_cli_manpage.html
+14. mtd-utils `misc-utils/mtd_debug.c` (info/read/write/erase 사용법) · https://github.com/sigma-star/mtd-utils/blob/master/misc-utils/mtd_debug.c

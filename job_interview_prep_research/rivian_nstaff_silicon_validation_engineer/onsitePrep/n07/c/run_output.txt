@@ -1,0 +1,80 @@
+=== Part 1: master mode x slave mode (generic shift-register slave) ===
+master sends 9F A5 3C on MOSI, slave sends EF 40 18 on MISO, CS held for 3 bytes
+same-edge = receiver samples on the edge where the sender launches (hold-margin race on real HW)
+
+M S | master got (MISO)  | slave got (MOSI)   | same-edge (race on real HW)
+0 0 | EF 40 18 OK        | 9F A5 3C OK        | -
+0 1 | F7 A0 0C SHIFT>>1  | 9F A5 3C OK        | MISO+MOSI
+0 2 | EF 40 18 OK        | 9F A5 3C OK        | MISO+MOSI
+0 3 | F7 A0 0C SHIFT>>1  | 9F A5 3C OK        | -
+1 0 | EF 40 18 OK        | 4F D2 9E SHIFT>>1  | MISO+MOSI
+1 1 | EF 40 18 OK        | 9F A5 3C OK        | -
+1 2 | DE 80 31 SHIFT<<1  | 9F A5 3C OK        | -
+1 3 | F7 A0 0C SHIFT>>1  | 4F D2 9E SHIFT>>1  | MISO+MOSI
+2 0 | EF 40 18 OK        | 9F A5 3C OK        | MISO+MOSI
+2 1 | F7 A0 0C SHIFT>>1  | 9F A5 3C OK        | -
+2 2 | EF 40 18 OK        | 9F A5 3C OK        | -
+2 3 | F7 A0 0C SHIFT>>1  | 9F A5 3C OK        | MISO+MOSI
+3 0 | DE 80 31 SHIFT<<1  | 9F A5 3C OK        | -
+3 1 | F7 A0 0C SHIFT>>1  | 4F D2 9E SHIFT>>1  | MISO+MOSI
+3 2 | EF 40 18 OK        | 4F D2 9E SHIFT>>1  | MISO+MOSI
+3 3 | EF 40 18 OK        | 9F A5 3C OK        | -
+
+PASS  part1: event-loop sim == closed-form count for all 16 combos x 2 directions
+PASS  part1 golden m0/s0 matched -> exact
+PASS  part1 golden m3/s3 matched -> exact
+PASS  part1 golden m0/s3: slave (CPHA=1) never pre-drives bit7 -> MISO >>1, MOSI ok
+PASS  part1 golden m0/s1: MOSI ok only because of same-edge old value; MISO >>1
+PASS  part1 golden m1/s0: MISO ok (same-edge), MOSI >>1 with idle-low MSB
+PASS  part1: every matched mode (diagonal) is exact in both directions
+
+=== Part 2: master mode x SPI-NOR flash (mode 0/3 device) - JEDEC ID read 9Fh ===
+flash: samples MOSI on rising, drives MISO on falling, answers only if it received 9F
+
+master mode | flash saw cmd | JEDEC ID read | reading
+     0      |      9F       |   EF 40 18    | OK (Winbond W25Q128JV)
+PASS  part2 mode 0: cmd=9F id=EF 40 18
+     1      |      4F       |   FF FF FF    | MISO never driven: command not recognised
+PASS  part2 mode 1: cmd=4F id=FF FF FF
+     2      |      9F       |   F7 A0 0C    | ID shifted right by 1 bit
+PASS  part2 mode 2: cmd=9F id=F7 A0 0C
+     3      |      9F       |   EF 40 18    | OK (Winbond W25Q128JV)
+PASS  part2 mode 3: cmd=9F id=EF 40 18
+
+=== Part 3: JEDEC ID read timing - SCLK x RX sample delay x PVT corner ===
+model: flash drives MISO at falling edge + tCLQV(actual); round trip adds 2 x 1000 ps;
+master samples at rising edge + delay d; needs 1000 ps setup / 1000 ps hold
+corners: fast tact=1500 ps, typ 3500 ps, slow 6000 ps (W25Q128JV tCLQX min 1.5 ns, tCLQV max 6 ns)
+cell: '#' = all 3 corners pass, 't' = typ only, 'f' = fast only, 'T' = typ+fast, '.' = fail
+column 'h' = half-clock (sample on the opposite edge, d = T/2)
+
+ MHz  | d(ns) 0.0 .. 10.0 step 0.5               | h | intersect window
+ 25.0 | # # # # # # # # # # # # # # # # # # # # # | # | [-11.00, 22.50] ns width 33.50
+ 50.0 | # # # # # # # # # # # # # # # # # # # # # | # | [-1.00, 12.50] ns width 13.50
+ 66.7 | T T T # # # # # # # # # # # # # # # # # # | # | [ 1.50, 10.00] ns width 8.50
+ 80.0 | f T T T T T # # # # # # # # # # # # t t t | # | [ 2.75,  8.75] ns width 6.00
+100.0 | f f f T T T T T # # # # # # # # t t t t . | # | [ 4.00,  7.50] ns width 3.50
+133.3 | . . f f f f T T T T T # # t t t t . . . . | . | [ 5.25,  6.25] ns width 1.00
+
+PASS  part3: simulated pass/fail == closed-form window for every cell (6 freq x 21 delays x 3 corners)
+PASS  part3 25 MHz, d=0, slow corner passes (lots of margin)
+PASS  part3 50 MHz, d=0, slow corner passes (edge of window: lo=-1.0 ns)
+PASS  part3 66.7 MHz, d=0, typ corner passes (bench at room temp)
+PASS  part3 66.7 MHz, d=0, slow corner FAILS (hot / low V) -> PVT escape
+PASS  part3 100 MHz, half-clock d=5 ns, slow corner passes
+PASS  part3 100 MHz, half-clock d=5 ns, fast corner passes
+PASS  part3 133 MHz, half-clock d=3.75 ns, slow corner FAILS -> need fine taps
+PASS  part3 133 MHz, d=5.5 ns tap, slow corner passes
+PASS  part3 133 MHz, d=5.5 ns tap, fast corner passes
+
+failing-cell signatures (what the engineer sees):
+  100 MHz d=0 slow : F7 A0 0C  violations= 0  -> SHIFT>>1
+  100 MHz d=0 typ  : 0C F2 86  violations=24  (seed 7) -> GARBLED
+  100 MHz d=0 typ  : E9 92 C3  violations=24  (seed 108) -> GARBLED
+  100 MHz d=0 typ  : 20 7F 75  violations=24  (seed 209) -> GARBLED
+  100 MHz d=10 fast: DE 80 30  violations= 0  -> SHIFT<<1
+
+PASS  part3: sampling too EARLY at slow corner = clean 1-bit right shift F7 A0 0C (looks like a mode bug)
+PASS  part3: sampling too LATE at fast corner = clean 1-bit left shift
+
+SUMMARY: ALL PASS (0 failures)

@@ -1,0 +1,99 @@
+######## fp_tolerance.py
+== F1 FP tolerance study: fp16 inputs, fp32 accumulate (spec) ==
+worst_err_ulpS = max |hw-ref| / (u32 * sum|a*b|);  err/tol = vs gamma_K bound (>1 fails)
+fail counts over N vectors: exact = bit-exact vs fp32(ref), bound = gamma_K*S, stat = 2*sqrt(K)*u*S, rtol = 1e-3*|ref|, atol = 1e-2
+
+K=   64  N=50 vectors (48 random + 1 cancel + 1 onehot)  gamma_K/u32=64.0
+  model       worst_err_ulpS    err/tol  exact  bound  stat  rtol  atol
+  spec_seq              1.04      0.016     41      0     0     1     0
+  spec_tile             1.07      0.017     38      0     0     0     0
+  bug_f16acc         9762.06    152.532     49     48    49    30     0
+  bug_drop       16777216.00 262143.000     50     50    50    50    50
+
+K=  256  N=50 vectors (48 random + 1 cancel + 1 onehot)  gamma_K/u32=256.0
+  model       worst_err_ulpS    err/tol  exact  bound  stat  rtol  atol
+  spec_seq              1.17      0.005     44      0     0     1     0
+  spec_tile             0.40      0.002     38      0     0     0     0
+  bug_f16acc        11348.88     44.331     49     39    47    33    10
+  bug_drop       16777216.00  65535.000     50     47    49    44    42
+
+K= 1024  N=50 vectors (48 random + 1 cancel + 1 onehot)  gamma_K/u32=1024.1
+  model       worst_err_ulpS    err/tol  exact  bound  stat  rtol  atol
+  spec_seq              1.12      0.001     47      0     0     1     0
+  spec_tile             0.21      0.000     41      0     0     0     0
+  bug_f16acc        14977.86     14.626     49     37    48    45    41
+  bug_drop       16777216.00  16383.000     50     44    50    47    46
+
+K= 4096  N=50 vectors (48 random + 1 cancel + 1 onehot)  gamma_K/u32=4097.0
+  model       worst_err_ulpS    err/tol  exact  bound  stat  rtol  atol
+  spec_seq              1.19      0.000     49      0     0     1     0
+  spec_tile             0.33      0.000     41      0     0     1     0
+  bug_f16acc        16528.20      4.034     49     10    47    45    47
+  bug_drop       16777216.00   4095.000     50     18    48    43    48
+
+== two CORRECT implementations, different summation order ==
+K=  256: spec_seq vs spec_tile differ bit-wise in 40/50 outputs
+K= 4096: spec_seq vs spec_tile differ bit-wise in 46/50 outputs
+
+== bf16 inputs, fp32 accumulate, K=1024 ==
+  spec_seq    worst_err_ulpS=    0.35 fails: exact=39 bound=0 stat=0 rtol=1 atol=0
+  spec_tile   worst_err_ulpS=    0.11 fails: exact=39 bound=0 stat=0 rtol=1 atol=0
+  bug_f16acc  worst_err_ulpS=11892.22 fails: exact=49 bound=34 stat=49 rtol=42 atol=37
+  bug_drop    worst_err_ulpS=16777216.00 fails: exact=50 bound=44 stat=49 rtol=48 atol=47
+
+== trap: reference computed from UNROUNDED fp64 inputs (K=1024, spec_seq HW) ==
+  fp16: worst err/bound =    0.4 (pass), err/stat =     6.6 (FALSE FAIL)  <- input quantization, not HW error
+  bf16: worst err/bound =    2.9 (FALSE FAIL), err/stat =    47.1 (FALSE FAIL)  <- input quantization, not HW error
+
+######## roofline.py
+== hypothetical NPU ==
+  peak = 2 x 4096 MAC x 1.0 GHz = 8.192 TOPS ; DDR BW = 51.2 GB/s ; ridge point = 160 ops/B
+
+== 1. per-layer roofline (batch 1, INT8, ideal reuse: every tensor touches DDR once) ==
+  layer                                 MMACs      MB      AI   map   TOPS  %peak    bound     t_us
+  conv3x3 56x56 64->64 (ResNet st1)     115.6    0.44   527.2  1.00   8.19 100.0%  compute     28.2
+  conv1x1 28x28 512->128                 51.4    0.57   181.0  1.00   8.19 100.0%  compute     12.5
+  conv3x3 480x272 64->64 (camera)      4813.0   16.75   574.7  1.00   8.19 100.0%  compute   1175.0
+  dwconv3x3 112x112 C=32                  3.6    0.80     9.0  0.01   0.06   0.8%  MAPPING    112.9
+  conv3x3 56x56 3->64 (stem-like)         5.4    0.21    51.1  0.05   0.38   4.7%  MAPPING     28.2
+  FC 2048->1000 batch 1                   2.0    2.06     2.0  0.98   0.10   1.2%   MEMORY     40.1
+  FC 2048->1000 batch 16                 32.8    2.10    31.2  0.98   1.60  19.5%   MEMORY     41.0
+
+== 2. same camera layer, SRAM too small -> output-channel tiling re-reads the input ==
+  layer                                 MMACs      MB      AI   map   TOPS  %peak    bound     t_us
+  camera layer, Cout tile=64 (x1 input)   4813.0   16.75   574.7  1.00   8.19 100.0%  compute   1175.0
+  camera layer, Cout tile=32 (x2 input)   4813.0   25.10   383.4  1.00   8.19 100.0%  compute   1175.0
+  camera layer, Cout tile=16 (x4 input)   4813.0   41.82   230.2  1.00   8.19 100.0%  compute   1175.0
+  camera layer, Cout tile= 8 (x8 input)   4813.0   75.24   127.9  1.00   6.55  80.0%   MEMORY   1469.5
+  camera layer, Cout tile= 4 (x16 input)   4813.0  142.09    67.7  1.00   3.47  42.3%   MEMORY   2775.1
+
+== 3. measured vs model  [example numbers, not real silicon] ==
+  ops = 9.63 GOP ; roofline time = 1175 us ; measured = 1650 us
+  achieved = 5.83 TOPS = 71.2% of peak, 71.2% of this layer's roof
+  TOPS/W  = 5.83 / 6.0 W = 0.97 TOPS/W
+  cross-check: MAC-busy counter 1174000 / 1650000 cycles = 0.712 vs timer-based 0.712 -> consistent
+  sparse marketing: 2:4 structured sparsity doubles nominal ops -> 'sparse TOPS' = 2 x dense TOPS
+
+######## ecc_fault_inject.py
+exhaustive 1-bit sweep on one word: 72/72 positions corrected
+
+== reference decoder : 20000 random injections per fault model ==
+  fault  corrected  detected     SDC  no_eff       DC
+  1-bit      20000         0       0       0  100.00%
+  2-bit          0     20000       0       0  100.00%
+  3-bit          0      4882   15118       0   24.41%
+
+== BUG: syndrome bit2 stuck-at-0 : 20000 random injections per fault model ==
+  fault  corrected  detected     SDC  no_eff       DC
+  1-bit      10251         0    9749       0   51.25%
+  2-bit          0     19719     275       6   98.59%
+  3-bit         15      4797   15188       0   24.06%
+
+== BUG: dead checker (always OK) : 20000 random injections per fault model ==
+  fault  corrected  detected     SDC  no_eff       DC
+  1-bit          0         0   17787    2213    0.00%
+  2-bit          0         0   19772     228    0.00%
+  3-bit          0         0   19987      13    0.00%
+
+note: DC here is per fault model of this one mechanism; ISO 26262 SPFM/LFM weight each mechanism's DC by the FIT rate of the logic it protects (FMEDA).
+

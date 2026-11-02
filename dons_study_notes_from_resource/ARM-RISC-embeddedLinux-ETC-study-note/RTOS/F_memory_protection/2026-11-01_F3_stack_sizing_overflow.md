@@ -1,0 +1,2213 @@
+# F3. 스택 크기 산정과 오버플로 — 현장 버그 1순위를 숫자로 막기
+
+> **이 노트를 다 읽으면**: 태스크 스택과 ISR 스택(MSP)을 "정적 경로 합 + libc 실측 + 예외·문맥 프레임 + 여유"로 근거 있게 정하고 표로 내밀 수 있다 · 스택이 넘쳤을 때 넘친 태스크가 아니라 **이웃**이 이상해지는 이유를 실제 깨진 TCB 바이트로 설명할 수 있다 · FreeRTOS 방식 1·2, Zephyr 센티널, `-fstack-protector` 카나리, MPU 가드, PSPLIM·MSPLIM이 각각 **언제, 무엇을** 잡고 무엇을 놓치는지 실측 표로 말할 수 있다 · v8-M에서 FreeRTOS가 PSPLIM은 태스크마다 바꾸지만 MSPLIM은 건드리지 않는다는 것처럼 소스에서 확인한 차이를 짚을 수 있다
+> **왜 필요한가**: "필드에서 랜덤 HardFault", "가끔 제어 루프가 멈춘다", "로그 한 줄 넣었더니 죽는다" — 펌웨어 현장 버그 1순위가 스택 넘침이다. 면접 단골 질문 "How do you size a task stack?"에 "넉넉하게 줬어요"라고 답하면 거기서 끝난다
+> **Don 기준 난이도**: SSD 펌웨어에서 스택에 패턴을 칠하고 덤프로 최고 수위를 찾는 일, 넘침으로 엉뚱한 데이터가 깨지는 일은 이미 겪었다 / 새로 배울 부분은 RTOS의 "태스크 스택 여러 개 + 공용 ISR 스택" 구조에서의 산정법, 커널별 탐지 장치의 정확한 검사 시점, 정적 분석 도구(`-fcallgraph-info`, puncover)의 구멍, Armv8-M 스택 한계 레지스터를 RTOS 포트가 쓰는 방식
+> **선행 노트**: A4 §5(태스크 스택 기본 — words vs bytes, 0xa5 HWM, 방식 2 데모), B1 §5(MSP·PSP, ISR 중첩과 스택), B2(예외 프레임), B6(FPU 프레임), B7 §4.4(PSPLIM bare-metal 데모), B11 §9(`-fstack-usage`, puncover), C2(컨텍스트 스위치), C9 §5·§11.4(방식 1·2 매트릭스, Zephyr 센티널 vs MPU 가드). 이어지는 노트: F4(MPU), F7(printf 재진입), F8(noinit 기록), M1(fault 해독)
+> 🔁 **Bare-Metal 겹침**: BM C9(MPU bare-metal 용도 — 스택 가드 부분) · BM Q6(방어적 펌웨어 — 스택 카나리 부분) · BM M10(버그 패턴 사례집 — 스택 오버플로 행) — 이 노트가 주인. Bare-Metal 노트는 이 노트를 링크하고 RTOS 없는 단일 스택(MSP 하나)에서 가드를 어디에 두나, 부팅 자가 테스트와 묶은 카나리 점검, 증상 → 원인 표의 한 줄만 더한다
+
+---
+
+## 0. 큰 그림 — 스택은 "미리 정한 크기의 상자"이고, 넘치면 옆 상자를 덮는다
+
+### 0.1 직관
+
+bare-metal super loop에는 스택이 하나다. 링커 스크립트가 RAM 꼭대기에 4 KB쯤 잡아 주고, 넘치면 그 아래 `.bss`나 힙을 덮는다. SSD 펌웨어에서 Don이 봤던 "어느 날 갑자기 NVMe 명령 하나가 이상한 상태로 끝난다"의 상당수가 이 모양이다.
+
+RTOS에서는 상자가 **태스크 개수 + 1개**로 늘어난다. 태스크마다 자기 스택이 있고(A4), 인터럽트는 공용 스택(Cortex-M의 MSP) 위에서 돈다(B1). 그리고 이 상자들은 **RAM 안에 다닥다닥 붙어 있다**. FreeRTOS `xTaskCreate()`는 heap에서 스택과 TCB를 연달아 꺼내고, 스택은 아래(낮은 주소)로 자라기 때문에, 한 태스크가 넘치면 **바로 아래에 있는 이웃** — 대개 먼저 만든 태스크의 TCB — 를 덮는다.
+
+그래서 스택 넘침의 증상은 넘친 태스크에서 나오지 않는다. 이웃 태스크가 멈추거나, 커널 리스트가 깨져 tick 인터럽트 안에서 HardFault가 나거나, 시스템 전체가 조용히 멈춘다. §2의 예제 2가 이것을 정확히 보여 준다.
+
+```svg
+<svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="181" y="20" font-size="14" text-anchor="middle">RAM 배치 (ex1, mps2-an385 + FreeRTOS)</text>
+<text x="500" y="20" font-size="14" text-anchor="middle">태스크 스택을 먹는 것</text>
+<rect x="86" y="34" width="190" height="40" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="181" y="52" font-size="12" text-anchor="middle">MSP 영역 4 KB (꼭대기)</text>
+<text x="181" y="67" font-size="12" text-anchor="middle">main → 시작 후 ISR 스택</text>
+<text x="80" y="40" font-size="12" text-anchor="end">0x20400000</text>
+<rect x="86" y="80" width="190" height="22" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="181" y="96" font-size="12" text-anchor="middle">... 빈 공간 ...</text>
+<rect x="86" y="108" width="190" height="32" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="181" y="129" font-size="12" text-anchor="middle">monitor 스택 + TCB</text>
+<rect x="86" y="146" width="190" height="26" fill="#4a7bd0" fill-opacity="0.25" stroke="#4a7bd0"/>
+<text x="181" y="164" font-size="12" text-anchor="middle">telem TCB</text>
+<rect x="86" y="172" width="190" height="70" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="181" y="200" font-size="12" text-anchor="middle">telem 스택 512 B</text>
+<text x="181" y="218" font-size="12" text-anchor="middle">↓ 아래로 자란다</text>
+<text x="80" y="246" font-size="12" text-anchor="end">pxStack</text>
+<rect x="86" y="242" width="190" height="34" fill="#d0564a" fill-opacity="0.18" stroke="#d0564a"/>
+<text x="181" y="263" font-size="12" text-anchor="middle">rate TCB (바로 아래 이웃)</text>
+<rect x="86" y="276" width="190" height="60" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="181" y="310" font-size="12" text-anchor="middle">rate 스택 1 KB</text>
+<rect x="86" y="342" width="190" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="181" y="360" font-size="12" text-anchor="middle">.data · .bss · idle · timer</text>
+<text x="80" y="372" font-size="12" text-anchor="end">0x20000000</text>
+<path d="M 280 222 C 304 236, 304 252, 280 260" fill="none" stroke="#d0564a" stroke-width="1.5" marker-end="url(#ah1)"/>
+<text x="296" y="244" font-size="12">넘치면</text>
+<rect x="350" y="40" width="320" height="34" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="360" y="62" font-size="12">① 지역 변수 · 지역 배열 (sub sp, #N)</text>
+<rect x="350" y="80" width="320" height="34" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="360" y="102" font-size="12">② 호출 깊이 × 프레임 (LR · callee-saved)</text>
+<rect x="350" y="120" width="320" height="34" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="360" y="142" font-size="12">③ libc 내부 — snprintf 한 번 192~704 B</text>
+<rect x="350" y="160" width="320" height="34" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="360" y="182" font-size="12">④ 첫 예외 프레임 32 B (FPU 104 B)</text>
+<rect x="350" y="200" width="320" height="34" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="360" y="222" font-size="12">⑤ 문맥 저장 64 B (CM4F + FPU 204 B)</text>
+<rect x="350" y="250" width="320" height="50" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="360" y="270" font-size="12">ISR 본문 · 중첩 · 커널 tick 처리는</text>
+<text x="360" y="288" font-size="12">MSP(공용 ISR 스택)가 진다 — 태스크 몫 아님</text>
+<text x="350" y="326" font-size="12">태스크 스택 = max(경로) + ④ + ⑤ + 여유</text>
+<text x="350" y="346" font-size="12">MSP = 기본선 + Σ(중첩 ISR 프레임 + 본문)</text>
+</svg>
+```
+그림 1 — 이 노트의 큰 그림. 왼쪽은 예제 2의 실제 RAM 배치(위가 높은 주소)다. telem 스택이 넘치면 바로 아래의 rate TCB가 덮인다. 오른쪽은 태스크 스택을 먹는 다섯 가지와 MSP가 따로 지는 몫이다.
+
+### 0.2 이 노트가 답하는 세 질문
+
+1. **얼마나 줘야 하나** (산정) — §1 무엇이 먹나, §3 정적 분석, §4 동적 측정과 여유, §5 ISR 스택.
+2. **넘치면 어떻게 되나** (증상) — §2.
+3. **넘친 것을 어떻게 아나** (탐지) — §6 소프트웨어 흔적 검사, §7 컴파일러 카나리, §8 하드웨어(MPU 가드, PSPLIM·MSPLIM).
+
+| 절 | 내용 | 실행한 예제 |
+|---|---|---|
+| §1 | 스택을 먹는 것, printf 한 번의 값 | 예제 1 (libc 3종 × 포맷 5종) |
+| §2 | 넘치면 이웃의 TCB가 깨진다 | 예제 2 (버그 하나, 증상 넷) |
+| §3 | 정적 분석 — `.su`, `.ci`, 경로 합, 간접 호출 | 예제 3 (정적 vs 실측) |
+| §4 | 동적 측정 — HWM, thread analyzer, 여유 정책 | 예제 4 (Zephyr analyzer, HWM의 거짓말), 예제 5 (예산표) |
+| §5 | ISR 스택 분리 — MSP, `CONFIG_ISR_STACK_SIZE` | 예제 6 (MSP vs 중첩, main 지역 변수의 운명) |
+| §6 | FreeRTOS 방식 1·2 — 검사 시점과 지연 | 예제 7 (ISR 프레임, 30 ms 지연) |
+| §7 | `-fstack-protector` 카나리는 다른 것을 잡는다 | 예제 8 (버퍼 넘침 vs 깊은 재귀, 비용) |
+| §8 | 하드웨어 — MPU 가드, PSPLIM · MSPLIM | 예제 9 (M33 FreeRTOS), 예제 10 (Zephyr M3 vs M33) |
+| §9 | 커널 소스에서 확인 | 예제 11 (grep) |
+
+A4·C9에서 이미 한 것은 다시 하지 않는다. A4 §5는 "0xa5를 칠하고 HWM을 읽는다", "단위는 FreeRTOS words, Zephyr bytes"까지, C9 §5는 방식 1·2가 놓치는 세 장면(깊이 갔다 돌아옴, 깊은 곳에서 블록, 카나리 건너뛰기), C9 §11.4는 Zephyr 센티널 vs MPU 가드 매트릭스를 실측했다. 여기서는 그 결과를 **산정 방법과 보호 설계**로 묶고, 거기서 빠진 장면(ISR 프레임, 탐지 지연, 하드웨어 한계 레지스터, 카나리, 정적 분석의 구멍)을 채운다.
+
+### 실습 환경 한 줄
+
+QEMU `mps2-an385`(Cortex-M3 25 MHz) + FreeRTOS V11.3.2(ARM_CM3, heap_4) / QEMU `mps2-an505`(Cortex-M33) + FreeRTOS ARM_CM33_NTZ 포트 / Zephyr v4.4.2(`mps2/an385`, `mps2/an521/cpu0`) / 툴체인 arm-none-eabi-gcc 14.2.1, newlib · newlib-nano · picolibc. 시각이 나오는 출력은 `ICOUNT=1`(명령 1개 = 32 ns) **QEMU icount 기준이며 실제 칩과 절대값은 다르다**(캐시·플래시 wait state·버스 미모델링). 이 노트의 주인공인 바이트 수(스택 사용량)는 명령 수와 무관하게 실칩과 같은 코드면 같은 값이 나온다 — 단, 컴파일러 버전·최적화 옵션이 바뀌면 달라진다.
+
+FreeRTOS 예제는 템플릿 설정을 그대로 쓰고 스택 검사 방식만 `-D`로 바꾼다. 앱 폴더의 `FreeRTOSConfig.h`가 템플릿보다 먼저 잡힌다.
+
+```c
+/* F3: 템플릿 설정 + 스택 검사 방식만 -D로 바꾼다 */
+#ifndef F3_CONFIG_H
+#define F3_CONFIG_H
+#include "/var/rtoslab/templates/freertos-mps2/FreeRTOSConfig.h"
+#ifndef F3_STACK_METHOD
+#define F3_STACK_METHOD 2
+#endif
+#undef  configCHECK_FOR_STACK_OVERFLOW
+#define configCHECK_FOR_STACK_OVERFLOW F3_STACK_METHOD
+#endif
+```
+
+여러 예제가 같이 쓰는 헤더다. fault가 나면 CFSR·BFAR·MMFAR와 스택된 PC, 그 순간의 태스크 이름을 찍는다(CFSR 비트 해독은 M1로 미룬다). 스택 칠하기 도우미는 `volatile` 포인터로 써서 `memset`으로 바뀌지 않게 했다 — B1 §5.3에서 `-O2`가 칠하기 루프를 `memset` 호출로 바꿔 자기 스택을 덮은 일화가 있다.
+
+```c
+/* F3 공용: fault 레지스터 출력(CFSR 해독은 M1로 미룸) + 스택 칠하기 도우미 */
+#ifndef F3_H
+#define F3_H
+#include <stdint.h>
+#include "board.h"
+#define SCB_CFSR  REG32(0xE000ED28u)
+#define SCB_HFSR  REG32(0xE000ED2Cu)
+#define SCB_MMFAR REG32(0xE000ED34u)
+#define SCB_BFAR  REG32(0xE000ED38u)
+#define PAINT 0xA5A5A5A5u
+
+#ifdef F3_FAULT_HANDLER
+const char *f3_task_name(void);                   /* 앱이 정의 (RTOS면 현재 태스크 이름) */
+__attribute__((used)) void f3_fault(uint32_t *fr, uint32_t exc_lr)
+{
+    uint32_t ipsr; __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+    board_printf_raw("\n[fault] exc=%u CFSR=%x HFSR=%x BFAR=%x MMFAR=%x\n", ipsr, SCB_CFSR, SCB_HFSR,
+                     SCB_BFAR, SCB_MMFAR);
+    board_printf_raw("  stacked PC=%x LR=%x xPSR=%x (IPSR of interrupted=%u) task=%s EXC_RETURN=%x\n",
+                     fr[6], fr[5], fr[7], fr[7] & 0x1FFu, f3_task_name(), exc_lr);
+    board_exit(255);
+}
+__attribute__((naked)) void HardFault_Handler(void)
+{
+    __asm volatile("tst lr, #4\n ite eq\n mrseq r0, msp\n mrsne r0, psp\n mov r1, lr\n b f3_fault");
+}
+#endif
+
+/* [lo, hi) 구간을 PAINT로 칠한다 — volatile이라 memset으로 바뀌지 않는다 (B1 일화) */
+static inline void f3_paint(volatile uint32_t *lo, volatile uint32_t *hi) { while (lo < hi) *lo++ = PAINT; }
+/* 아래(lo)에서 위로 올라가며 칠이 남아 있는 마지막 워드 → 사용 바이트 */
+static inline uint32_t f3_used(const volatile uint32_t *lo, const volatile uint32_t *hi)
+{
+    const volatile uint32_t *p = lo;
+    while (p < hi && *p == PAINT) p++;
+    return (uint32_t)((const volatile uint8_t *)hi - (const volatile uint8_t *)p);
+}
+#endif
+```
+
+빌드·실행 스크립트다. 템플릿 Makefile을 부르고 `ICOUNT=1`로 돌린다. `TAG`로 같은 소스의 여러 빌드를 다른 폴더에 둔다.
+
+```sh
+#!/bin/bash
+# run.sh <tpl: bm|fr> <name> [make args...] — build ~/.rtos_scratch/F3/<name>.c → /var/tmp/rtos/F3/<TAG or name>, run ICOUNT=1
+T=$1; N=$2; shift 2; TAG=${TAG:-$N}
+S=/Users/donh/.rtos_scratch/F3; O=/var/tmp/rtos/F3/$TAG
+case $T in bm) MK=/var/rtoslab/templates/baremetal-mps2/Makefile;; fr) MK=/var/rtoslab/templates/freertos-mps2/Makefile;; esac
+mkdir -p $O
+make -s -B -f $MK SRCS="$S/$N.c $EXTRA_SRCS" OUT=$O "$@" >$O.build 2>&1 || { cat $O.build; exit 9; }
+grep -i warn $O.build
+ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 $O/app.elf ${TO:-20}; echo "[rc=$?]"
+```
+
+모든 빌드는 `-Wall -Wextra` 경고 0개로 맞췄다(경고가 나면 스크립트가 그 줄을 찍는다 — 아래 출력에 경고 줄이 없다).
+
+---
+
+## 1. 무엇이 스택을 먹나 — 다섯 가지와 그 크기
+
+### 1.1 다섯 가지 (A4 §5.1의 확장)
+
+A4 §5.1은 "지역 변수, 호출 경로, 문맥 저장 프레임, ISR 몫"을 나열했다. 크기를 **숫자로** 정하려면 다섯 칸으로 나눠 각각의 값을 알아야 한다.
+
+| 칸 | 무엇 | 크기를 아는 법 | 이 랩의 값 |
+|---|---|---|---|
+| ① 지역 변수 · 배열 | 함수 진입 때 `sub sp, #N` 한 번 | `-fstack-usage`(§3) | `char line[160]` → 함수 프레임 192 B (예제 3) |
+| ② 호출 깊이 | 함수마다 LR + callee-saved 레지스터 + 정렬 | 호출 그래프 경로 합(§3) | 파서 태스크 → 디스패치 → 핸들러: 56 + 8 + 0 + 192 B |
+| ③ 라이브러리 내부 | `snprintf` → `_svfprintf_r` → … | 정적 분석이 **못 본다** → 칠해서 잰다 | newlib-nano `snprintf` 4개 인자 380 B (예제 1) |
+| ④ 첫 예외 프레임 | 태스크가 도는 중 인터럽트가 오면 하드웨어가 **PSP에** 쌓는 프레임 | 아키텍처 상수 (B2, B6) | 8워드 32 B, FPU 문맥이 살아 있으면 26워드 104 B |
+| ⑤ 문맥 저장 | 선점·블록될 때 PendSV가 더 쌓는 레지스터 | 포트 소스 | ARM_CM3: 32 + r4–r11 32 = 64 B. ARM_CM4F: 32 + {r4–r11, lr} 36 = 68 B, FPU 사용 태스크면 104 + s16–s31 64 + 36 = 204 B |
+
+⑤는 포트 소스에서 그대로 보인다. ARM_CM3 `port.c`의 PendSV는 `stmdb r0!, {r4-r11}`(8워드), ARM_CM4F는 `vstmdbeq r0!, {s16-s31}` 뒤에 `stmdb r0!, {r4-r11, r14}`(9워드)다. FPU 문맥이 있는 태스크(EXC_RETURN bit 4 = 0)만 s16–s31을 더 쌓는다(B6).
+
+중요한 비대칭 하나: **ISR 본문, ISR 중첩, tick 처리, PendSV의 C 코드는 태스크 스택을 먹지 않는다.** Cortex-M에서 그것들은 MSP 위에서 돈다(B1 §5.3 실측: 태스크 PSP는 중첩 깊이와 무관하게 232 B 고정). 태스크 스택에 들어가는 ISR 몫은 ④의 **첫 프레임 하나뿐**이다. 대신 MSP 하나가 모든 ISR의 최악 중첩을 진다(§5).
+
+### 1.2 예제 1 — printf 한 번이 스택을 얼마나 먹나 (libc 3종 × 포맷 5종)
+
+**무엇을 확인하나**: 현장에서 "로그 한 줄 넣었더니 HardFault"가 가장 흔한 스택 넘침 경로다. 같은 호출을 newlib(full), newlib-nano, picolibc로 각각 링크해서, 포맷마다 스택을 몇 바이트 쓰는지 칠하기로 잰다. A4 예제 6은 newlib-nano 한 가지·짧은 포맷만 쟀고, B11 §3은 libc별 **코드 크기**를 쟀다. 여기서는 **스택 바이트**를 libc × 포맷으로 잰다.
+
+```c
+/* ex4: printf 계열 한 번 부를 때 스택을 얼마나 먹나 — libc(newlib / nano / picolibc) × 포맷 */
+#include <stdio.h>
+#include <stdint.h>
+#include "board.h"
+#define PAINTW 0xA5A5A5A5u
+static char gbuf[128];                                  /* 출력 버퍼는 스택 밖(전역) — 측정에서 뺀다 */
+static volatile int ival = -12345; static volatile long long llval = -1234567890123LL;
+static volatile double dval = 3.14159; static volatile unsigned u1 = 7, u2 = 8, u3 = 9;
+
+static __attribute__((noinline)) int do_fmt(int k)
+{
+    switch (k) {
+    case 0: return 0;                                                   /* 기준선: 호출만 */
+    case 1: return snprintf(gbuf, sizeof gbuf, "hello");
+    case 2: return snprintf(gbuf, sizeof gbuf, "%d", ival);
+    case 3: return snprintf(gbuf, sizeof gbuf, "LOG id=%u from=%u to=%u crc=%08x", u1, u2, u3, u1 ^ u2);
+    case 4: return snprintf(gbuf, sizeof gbuf, "%lld", llval);
+    case 5: return snprintf(gbuf, sizeof gbuf, "%.3f", dval);
+    case 6: return printf("%d\n", ival);                                /* stdout → UART */
+    }
+    return -1;
+}
+static const char *nm[7] = { "baseline", "snprintf \"hello\"", "snprintf %d", "snprintf 4x %u/%x",
+                             "snprintf %lld", "snprintf %.3f", "printf %d (stdout)" };
+
+int main(void)
+{
+    uint32_t sp; __asm volatile("mov %0, sp" : "=r"(sp));
+    volatile uint32_t *hi = (volatile uint32_t *)(sp - 64), *lo = hi - 1024;   /* SP 아래 4 KB */
+    for (int k = 0; k < 7; k++) {
+        for (volatile uint32_t *p = lo; p < hi; p++) *p = PAINTW;
+        int r = do_fmt(k);
+        volatile uint32_t *p = lo;
+        while (p < hi && *p == PAINTW) p++;
+        board_printf_raw("%s\t%u\t(ret=%d)\n", nm[k], (unsigned)((uint32_t)hi - (uint32_t)p) + 64u, r);
+    }
+    return 0;
+}
+```
+
+libc마다 링크 옵션만 바꾼다. 최소 보드 코드(`mb.c`)와 syscall stub, picolibc용 `stdout` 정의는 B11의 것을 복사해 왔다.
+
+```sh
+#!/bin/bash
+# build4.sh <libc: newlib|nano|nanof|pico> — ex4를 libc별로 빌드·실행
+L=$1; S=/Users/donh/.rtos_scratch/F3/libc; T=/var/rtoslab/templates/common; O=/var/tmp/rtos/F3/ex4_$L
+mkdir -p $O
+CF="-mthumb -mcpu=cortex-m3 -O2 -g -std=gnu11 -Wall -Wextra -ffunction-sections -fdata-sections -I$S -I$T"
+LD="-T $T/mps2_m3.ld -nostartfiles -Wl,--gc-sections"
+SRC="$S/ex4.c $S/mb.c $T/startup.c"
+case $L in
+  newlib) arm-none-eabi-gcc $CF $SRC $S/stubs_newlib.c $LD -o $O/app.elf ;;
+  nano)   arm-none-eabi-gcc $CF $SRC $S/stubs_newlib.c $LD --specs=nano.specs -o $O/app.elf ;;
+  nanof)  arm-none-eabi-gcc $CF $SRC $S/stubs_newlib.c $LD --specs=nano.specs -u _printf_float -o $O/app.elf ;;
+  pico)   arm-none-eabi-gcc --specs=picolibc.specs $CF $SRC $S/pico_io.c $LD -o $O/app.elf ;;
+esac || exit 9
+echo "--- $L"; /var/rtoslab/bin/rtos-run-mps2 $O/app.elf 10 | grep -v "^\[exit\|exit="
+```
+
+```text
+--- newlib
+baseline	64	(ret=0)
+snprintf "hello"	64	(ret=5)
+snprintf %d	508	(ret=6)
+snprintf 4x %u/%x	540	(ret=33)
+snprintf %lld	540	(ret=14)
+snprintf %.3f	752	(ret=5)
+-12345
+printf %d (stdout)	492	(ret=7)
+--- nano
+baseline	64	(ret=0)
+snprintf "hello"	64	(ret=5)
+snprintf %d	412	(ret=6)
+snprintf 4x %u/%x	444	(ret=33)
+snprintf %lld	444	(ret=2)
+snprintf %.3f	316	(ret=0)
+-12345
+printf %d (stdout)	376	(ret=7)
+--- nanof
+baseline	64	(ret=0)
+snprintf "hello"	64	(ret=5)
+snprintf %d	412	(ret=6)
+snprintf 4x %u/%x	444	(ret=33)
+snprintf %lld	444	(ret=2)
+snprintf %.3f	768	(ret=5)
+-12345
+printf %d (stdout)	376	(ret=7)
+--- pico
+baseline	64	(ret=0)
+snprintf "hello"	64	(ret=5)
+snprintf %d	256	(ret=6)
+snprintf 4x %u/%x	288	(ret=33)
+snprintf %lld	288	(ret=14)
+snprintf %.3f	444	(ret=5)
+-12345
+printf %d (stdout)	224	(ret=7)
+```
+
+(`-12345` 줄은 `printf`가 실제로 UART에 낸 출력이다.) 기준선 64 B는 측정 오프셋(SP − 64부터 칠함)과 `do_fmt` 프레임이다. 아래 그림은 각 값에서 64를 뺀 **순수 libc 몫**이다.
+
+```svg
+<svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+<text x="340" y="20" font-size="14" text-anchor="middle">printf 계열 한 번 호출의 스택 사용량 (B, ex4 실측, Cortex-M3 -O2)</text>
+<text x="142" y="65.0" font-size="12" text-anchor="end">snprintf %d</text>
+<rect x="150" y="40.0" width="260.9" height="12" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="414.9" y="50.0" font-size="12">444</text>
+<rect x="150" y="54.0" width="204.4" height="12" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="358.4" y="64.0" font-size="12">348</text>
+<rect x="150" y="68.0" width="112.8" height="12" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="266.8" y="78.0" font-size="12">192</text>
+<text x="142" y="117.0" font-size="12" text-anchor="end">snprintf 4개 %u/%x</text>
+<rect x="150" y="92.0" width="279.6" height="12" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="433.6" y="102.0" font-size="12">476</text>
+<rect x="150" y="106.0" width="223.2" height="12" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="377.2" y="116.0" font-size="12">380</text>
+<rect x="150" y="120.0" width="131.6" height="12" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="285.6" y="130.0" font-size="12">224</text>
+<text x="142" y="169.0" font-size="12" text-anchor="end">snprintf %lld</text>
+<rect x="150" y="144.0" width="279.6" height="12" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="433.6" y="154.0" font-size="12">476</text>
+<rect x="150" y="158.0" width="223.2" height="12" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="377.2" y="168.0" font-size="12">380</text>
+<rect x="150" y="172.0" width="131.6" height="12" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="285.6" y="182.0" font-size="12">224</text>
+<text x="142" y="221.0" font-size="12" text-anchor="end">snprintf %.3f</text>
+<rect x="150" y="196.0" width="404.2" height="12" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="558.2" y="206.0" font-size="12">688</text>
+<rect x="150" y="210.0" width="413.6" height="12" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="567.6" y="220.0" font-size="12">704</text>
+<rect x="150" y="224.0" width="223.2" height="12" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="377.2" y="234.0" font-size="12">380</text>
+<text x="142" y="273.0" font-size="12" text-anchor="end">printf %d → UART</text>
+<rect x="150" y="248.0" width="251.4" height="12" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="405.4" y="258.0" font-size="12">428</text>
+<rect x="150" y="262.0" width="183.3" height="12" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="337.3" y="272.0" font-size="12">312</text>
+<rect x="150" y="276.0" width="94.0" height="12" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="248.0" y="286.0" font-size="12">160</text>
+<line x1="150" y1="300" x2="620" y2="300" stroke="currentColor"/>
+<line x1="150" y1="34" x2="150" y2="300" stroke="currentColor"/>
+<line x1="150.0" y1="300" x2="150.0" y2="305" stroke="currentColor"/>
+<text x="150.0" y="318" font-size="12" text-anchor="middle">0</text>
+<line x1="208.8" y1="300" x2="208.8" y2="305" stroke="currentColor"/>
+<text x="208.8" y="318" font-size="12" text-anchor="middle">100</text>
+<line x1="267.5" y1="300" x2="267.5" y2="305" stroke="currentColor"/>
+<text x="267.5" y="318" font-size="12" text-anchor="middle">200</text>
+<line x1="326.2" y1="300" x2="326.2" y2="305" stroke="currentColor"/>
+<text x="326.2" y="318" font-size="12" text-anchor="middle">300</text>
+<line x1="385.0" y1="300" x2="385.0" y2="305" stroke="currentColor"/>
+<text x="385.0" y="318" font-size="12" text-anchor="middle">400</text>
+<line x1="443.8" y1="300" x2="443.8" y2="305" stroke="currentColor"/>
+<text x="443.8" y="318" font-size="12" text-anchor="middle">500</text>
+<line x1="502.5" y1="300" x2="502.5" y2="305" stroke="currentColor"/>
+<text x="502.5" y="318" font-size="12" text-anchor="middle">600</text>
+<line x1="561.2" y1="300" x2="561.2" y2="305" stroke="currentColor"/>
+<text x="561.2" y="318" font-size="12" text-anchor="middle">700</text>
+<line x1="620.0" y1="300" x2="620.0" y2="305" stroke="currentColor"/>
+<text x="620.0" y="318" font-size="12" text-anchor="middle">800</text>
+<rect x="150" y="330" width="12" height="12" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="168" y="341" font-size="12">newlib (full)</text>
+<rect x="285" y="330" width="12" height="12" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="303" y="341" font-size="12">newlib-nano (+_printf_float)</text>
+<rect x="528" y="330" width="12" height="12" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="546" y="341" font-size="12">picolibc</text>
+</svg>
+```
+그림 2 — 예제 1의 실측. 같은 `snprintf`라도 libc에 따라 2배 넘게 차이 나고, float 포맷은 정수 포맷의 1.5~2배를 먹는다. 주황 막대는 `-u _printf_float`로 링크한 newlib-nano다(정수 포맷 값은 그냥 nano와 같았다).
+
+**출력에서 볼 것**:
+
+- **`snprintf("hello")` = 기준선**: 변환 지정자가 없는 `snprintf`는 GCC가 컴파일 시점에 문자열 복사로 바꿔 버렸다(내장 함수 최적화). 즉 "printf 계열은 무겁다"는 **변환이 있을 때**의 이야기다.
+- **정수 하나 찍는 데 192~444 B**: picolibc 192, nano 348, newlib 444. 태스크 스택 512 B짜리에서 `%d` 하나가 70%를 가져간다.
+- **float는 두 배**: nano + `_printf_float` 704 B, newlib 688 B. 드론 텔레메트리 태스크에서 `"%.2f"`로 자세 각도를 찍는 순간 1 KB 스택도 빠듯해진다.
+- **nano의 조용한 함정 두 개**: `_printf_float` 없이 `%.3f`는 **아무것도 안 찍고(ret=0)** 252 B를 쓴다. `%lld`는 지원하지 않아 엉뚱한 2글자(ret=2)를 냈다. 스택 문제는 아니지만 "nano로 바꿨더니 로그 숫자가 사라졌다"의 원인이다.
+- **`printf`(stdout)가 `snprintf`보다 작다**: nano 312 vs 348. `snprintf`는 내부에서 문자열용 가짜 `FILE` 구조체를 **스택에** 만들기 때문이다. 대신 `printf`는 재진입·락 문제가 있다(F7).
+- 이 숫자는 **이 포맷, 이 인자**에서의 값이다. 폭 지정(`%20s`), 긴 정수, 에러 경로에서 더 깊어질 수 있다. 그래서 산정 때는 실제 쓰는 가장 무거운 포맷을 넣어서 잰다.
+
+Don 경험과 연결: SSD 펌웨어는 대개 printf 대신 "로그 ID + 인자 몇 개"를 링버퍼에 넣고 호스트가 포맷하는 **바이너리 로그**를 쓴다. 이 표가 그 이유의 절반이다(나머지 절반은 시간). RTOS 제품에서도 고주파 태스크는 바이너리 로그를, 문자열 포맷은 낮은 우선순위 로거 태스크 하나에 몰아서 그 태스크의 스택만 크게 주는 것이 정석이다(§10).
+
+---
+
+## 2. 넘치면 무슨 일이 — 넘친 태스크가 아니라 이웃이 이상해진다
+
+> 🔁 이 절은 Bare-Metal BM M10(버그 패턴 사례집 — 스택 오버플로 행)과 겹친다 (주인: 이 노트).
+
+### 2.1 직관
+
+스택이 넘친다는 것은 SP가 자기 상자의 바닥(`pxStack`)보다 아래로 내려가서, 그 아래 주소에 쓰는 것이다. 무엇이 망가지느냐는 **그 아래에 무엇이 있느냐**가 정한다. FreeRTOS heap_4는 낮은 주소부터 블록을 잘라 주고, 스택이 아래로 자라는 포트에서 `xTaskCreate()`는 스택을 먼저, TCB를 나중에 할당한다(C9 §5.2에서 확인). 그러면 태스크를 A, B 순서로 만들면 메모리는 `[A 스택][A TCB][B 스택][B TCB]`이 되고, **B가 넘치면 A의 TCB**가 덮인다.
+
+TCB의 첫 워드는 `pxTopOfStack`(PendSV가 복원할 SP), 그 다음은 `xStateListItem`(ready·delayed 리스트에 꽂히는 링크)이다(A4 §2). 여기가 깨지면 커널 자체가 이상해진다.
+
+### 2.2 예제 2 — 드문 경로의 상태 보고 한 줄이 제어 태스크를 죽인다
+
+**무엇을 확인하나**: 1 ms마다 도는 `rate` 태스크(먼저 생성)와, 512 B 스택의 `telem` 태스크(나중 생성)가 있다. `telem`은 평소엔 거의 스택을 안 쓰다가, 20번째 루프에서만 드문 경로 `send_status()`를 탄다 — 400 B 지역 버퍼 + `snprintf`. 그 전후로 `rate` TCB를 워드 단위로 찍는다. 검사는 끄고(`F3_STACK_METHOD=0`) 무슨 증상이 나는지 본다. `PAD`는 버퍼 크기를 8 B씩 바꿔 보는 스위치다.
+
+```c
+/* ex1: 스택 넘침이 "이웃 태스크의 TCB"를 조용히 덮는다 — 넘친 태스크가 아니라 이웃이 이상해진다 */
+#include <stdio.h>
+#include "FreeRTOS.h"
+#include "task.h"
+#define F3_FAULT_HANDLER
+#include "f3.h"
+#ifndef PAD
+#define PAD 0          /* 버퍼 크기를 조금 바꿔 증상이 어떻게 달라지나 본다 */
+#endif
+
+static TaskHandle_t hRate, hTelem;
+const char *f3_task_name(void) { return pcTaskGetName(NULL); }
+static volatile uint32_t rate_cnt, telem_cnt;
+
+static void dump_tcb(const char *tag, TaskHandle_t h)
+{
+    const uint32_t *w = (const uint32_t *)h;          /* TCB_t는 비공개 → 워드로 본다 */
+    board_printf_raw("%s TCB(rate)@%x\n   w[0] pxTopOfStack=%x  w[1] xStateListItem.xItemValue=%x  w[2] pxNext=%x\n"
+                     "   w[5] pvContainer=%x  w[11] uxPriority=%x  w[12] pxStack=%x  name=\"%s\"\n",
+                     tag, (unsigned)w, (unsigned)w[0], (unsigned)w[1], (unsigned)w[2], (unsigned)w[5],
+                     (unsigned)w[11], (unsigned)w[12], (const char *)&w[13]);
+}
+
+static __attribute__((noinline)) void send_status(int alt, int err)
+{
+    char line[400 + PAD];                                   /* 드문 경로: 상태 보고 한 줄 (스택 512 B 태스크) */
+    int n = snprintf(line, sizeof line, "STATUS ALT=%d ERR=%d MODE=AUTO BAT=15.8V GPS=3D SATS=14 "
+                     "EKF=OK RC=OK TEMP=41C LOG=ON", alt, err);
+    board_printf_raw("  [telem] status len=%d, line@%x..%x\n", n, (unsigned)line, (unsigned)&line[n]);
+}
+
+static void telem(void *pv)
+{
+    (void)pv;
+    for (;;) {
+        telem_cnt++;
+        if (telem_cnt == 20) {
+            board_printf_raw("[%u us] telem: rare status path, pxStack(telem)=%x\n",
+                             board_now_us(), (unsigned)((uint32_t *)hTelem)[12]);
+            dump_tcb("  before:", hRate);
+            send_status(1234, 7);
+            dump_tcb("  after: ", hRate);
+        }
+        vTaskDelay(1);
+    }
+}
+
+static void rate(void *pv) { (void)pv; for (;;) { rate_cnt++; vTaskDelay(1); } }
+
+static void monitor(void *pv)
+{
+    (void)pv;
+    for (int i = 0; i < 6; i++) {
+        vTaskDelay(10);
+        board_printf_raw("[%u us] monitor: rate_cnt=%u telem_cnt=%u\n", board_now_us(),
+                         (unsigned)rate_cnt, (unsigned)telem_cnt);
+    }
+    board_exit(0);
+}
+
+int main(void)
+{
+    xTaskCreate(rate, "rate", 256, NULL, 3, &hRate);       /* 먼저 생성 → 낮은 주소 */
+    xTaskCreate(telem, "telem", 128, NULL, 2, &hTelem);    /* 스택이 rate의 TCB 바로 위 */
+    xTaskCreate(monitor, "monitor", 256, NULL, 4, NULL);
+    board_printf_raw("rate TCB=%x  telem stack=%x..%x  telem TCB=%x\n", (unsigned)hRate,
+                     (unsigned)((uint32_t *)hTelem)[12], (unsigned)((uint32_t *)hTelem)[12] + 512, (unsigned)hTelem);
+    vTaskStartScheduler();
+}
+```
+
+```sh
+TO=3 TAG=ex1_m0 ./run.sh fr ex1 EXTRA_CFLAGS="-DF3_STACK_METHOD=0"
+TO=3 TAG=ex1_m2 ./run.sh fr ex1 EXTRA_CFLAGS="-DF3_STACK_METHOD=2"
+arm-none-eabi-addr2line -f -e /var/tmp/rtos/F3/ex1_m0/app.elf 0xa0a
+```
+
+```text
+### method 0
+rate TCB=20001420  telem stack=20001488..20001688  telem TCB=20001690
+[10198 us] monitor: rate_cnt=10 telem_cnt=10
+[19205 us] telem: rare status path, pxStack(telem)=20001488
+  before: TCB(rate)@20001420
+   w[0] pxTopOfStack=200013c0  w[1] xStateListItem.xItemValue=14  w[2] pxNext=20000dd0
+   w[5] pvContainer=20000dc8  w[11] uxPriority=3  w[12] pxStack=20001018  name="rate"
+  [telem] status len=85, line@200014c8..2000151d
+  after:  TCB(rate)@20001420
+   w[0] pxTopOfStack=2000000c  w[1] xStateListItem.xItemValue=20000074  w[2] pxNext=20000070
+   w[5] pvContainer=a5a5a5a5  w[11] uxPriority=3  w[12] pxStack=13a  name="???"
+
+[fault] exc=3 CFSR=8200 HFSR=40000000 BFAR=a5a5a5a9 MMFAR=0
+  stacked PC=a0a LR=0 xPSR=2100000f (IPSR of interrupted=15) task=IDLE EXC_RETURN=fffffff1
+[board_exit] code=255
+[rc=1]
+### method 2
+... (before/after 줄은 위와 같다)
+[StackOverflowHook] task=telem
+[board_exit] code=251
+[rc=1]
+xTaskIncrementTick
+/var/rtoslab/src/FreeRTOS-Kernel/tasks.c:4895
+```
+
+(`### method …` 줄은 루프가 찍은 구분선이다. `name=` 칸은 깨진 바이트가 찍혀서 `???`로 바꿨고, method 2 실행의 앞부분은 method 0과 한 글자도 다르지 않아 생략했다.)
+
+**출력에서 볼 것**:
+
+- **배치가 그림 1 그대로다**: rate TCB는 0x20001420, telem 스택 바닥은 0x20001488. 그 사이는 rate TCB(약 96 B)와 heap_4 블록 헤더 8 B뿐이다.
+- **넘친 것은 버퍼가 아니라 `snprintf` 내부다**: `line`은 0x200014c8부터 — 스택 바닥보다 **위**에 있다. 400 B 버퍼 자체는 스택 안에 들어갔지만, 그 아래로 `snprintf` → `_svfprintf_r`의 프레임(예제 1에서 본 350 B 안팎)이 내려가면서 바닥을 뚫었다. "내 버퍼는 400 B니까 512 B면 된다"가 틀린 이유다.
+- **rate TCB가 통째로 깨졌다**: `pxTopOfStack`, delayed 리스트 링크(`xItemValue`, `pxNext`, `pvContainer`), `pxStack`, 이름까지. `pvContainer=a5a5a5a5`는 **telem 스택의 채움값**(0xa5)이 그대로 옮겨 온 것이다.
+- **증상은 엉뚱한 곳에서**: fault는 exception 3(HardFault), 끊긴 문맥은 IPSR 15 = **SysTick**, 태스크는 **IDLE**, PC는 `xTaskIncrementTick()`(tasks.c:4895, delayed 리스트 머리의 TCB를 읽는 줄). BFAR = **0xa5a5a5a9** = 0xa5a5a5a5 + 4. 커널이 깨진 리스트를 따라가다 채움값을 포인터로 썼다. 범인 telem은 어디에도 이름이 없다.
+- **방식 2로 빌드하면** 같은 손상이 telem의 다음 스위치(`vTaskDelay`)에서 훅으로 잡혔다. 다음 tick보다 스위치가 먼저 왔기 때문이다. 하지만 그 시점에 rate TCB는 **이미** 깨져 있다 — 훅은 "범인 이름"을 줄 뿐 피해를 막지 못한다(§6).
+
+> **현장 단서**: BFAR이나 레지스터 덤프에 `0xa5a5a5a5`(FreeRTOS), `0xaaaaaaaa`(Zephyr `CONFIG_INIT_STACKS`) 같은 **스택 채움값**이 보이면, 그것은 누군가 스택의 안 쓴 부분을 데이터로 읽었다는 뜻이다. 스택 넘침을 1순위로 의심한다.
+
+### 2.3 버그 하나, 증상 넷 — `PAD`를 8 B씩 바꿔 보기
+
+같은 코드에서 `line` 크기만 바꿔 9번 돌렸다(검사 끔). 각 실행의 핵심 줄만 남겼다.
+
+```sh
+for p in 0 8 16 24 32 40 48 64 96; do echo "== PAD=$p"
+  TO=3 TAG=ex1_t ./run.sh fr ex1 EXTRA_CFLAGS="-DF3_STACK_METHOD=0 -DPAD=$p" | grep -v "^ \|^rate\|monitor: rate_cnt=10\|rare status\|board_exit"
+done
+```
+
+```text
+== PAD=0
+[fault] exc=3 CFSR=8200 HFSR=40000000 BFAR=a5a5a5a9 MMFAR=0
+[rc=1]
+== PAD=8
+[fault] exc=3 CFSR=8200 HFSR=40000000 BFAR=a5a5a5a5 MMFAR=0
+[rc=1]
+== PAD=16
+[20197 us] monitor: rate_cnt=20 telem_cnt=20
+[30197 us] monitor: rate_cnt=20 telem_cnt=30
+[40197 us] monitor: rate_cnt=20 telem_cnt=40
+[50197 us] monitor: rate_cnt=20 telem_cnt=50
+[60197 us] monitor: rate_cnt=20 telem_cnt=60
+[rc=0]
+== PAD=24
+... (PAD=16과 같다: rate_cnt=20에서 멈춤, 나머지 정상)
+== PAD=32
+... (PAD=16과 같다)
+== PAD=40
+[20195 us] monitor: rate_cnt=20 telem_cnt=20
+qemu-system-arm: terminating on signal 15 from pid 559416 (timeout)
+[rc=124]
+== PAD=48
+... (PAD=16과 같다)
+== PAD=64
+[fault] exc=3 CFSR=8200 HFSR=40000000 BFAR=3134646c MMFAR=0
+[rc=1]
+== PAD=96
+[20195 us] monitor: rate_cnt=20 telem_cnt=20
+qemu-system-arm: terminating on signal 15 from pid 560244 (timeout)
+[rc=124]
+```
+
+PAD=16 실행의 TCB 덤프는 이렇다.
+
+```text
+  [telem] status len=85, line@200014b8..2000150d
+  after:  TCB(rate)@20001420
+   w[0] pxTopOfStack=a5a5a5a5  w[1] xStateListItem.xItemValue=a5a5a5a5  w[2] pxNext=a5a5a5a5
+   w[5] pvContainer=200014ac  w[11] uxPriority=19f  w[12] pxStack=20001018  name="rate"
+```
+
+```svg
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340" y="20" font-size="14" text-anchor="middle">버그 하나, 증상 넷 — 버퍼 크기만 8 B씩 바꿨다 (ex1, 검사 끔)</text>
+<rect x="20" y="40" width="190" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="115" y="62" font-size="12" text-anchor="middle">telem 스택 512 B</text>
+<rect x="20" y="74" width="190" height="24" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="115" y="91" font-size="12" text-anchor="middle">heap 블록 헤더 8 B</text>
+<rect x="20" y="98" width="190" height="150" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="115" y="116" font-size="12" text-anchor="middle">rate TCB</text>
+<text x="30" y="140" font-size="12">w[0] pxTopOfStack</text>
+<text x="30" y="160" font-size="12">w[1..5] xStateListItem</text>
+<text x="30" y="178" font-size="12">  (delayed list 링크)</text>
+<text x="30" y="200" font-size="12">w[11] uxPriority</text>
+<text x="30" y="220" font-size="12">w[12] pxStack</text>
+<text x="30" y="240" font-size="12">w[13..] 이름</text>
+<path d="M 214 56 C 240 80, 240 150, 214 180" fill="none" stroke="#d0564a" stroke-width="1.5" marker-end="url(#ah2)"/>
+<text x="228" y="110" font-size="12">snprintf</text>
+<text x="228" y="126" font-size="12">내부 프레임</text>
+<rect x="320" y="40" width="350" height="50" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="330" y="60" font-size="12">PAD 0, 8 → SysTick 안에서 HardFault</text>
+<text x="330" y="78" font-size="12">BFAR=0xa5a5a5a9 (0xa5 채움값을 포인터로 씀)</text>
+<rect x="320" y="100" width="350" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="330" y="120" font-size="12">PAD 16, 24, 32, 48 → rate만 조용히 멈춤</text>
+<text x="330" y="138" font-size="12">fault 없음, 나머지 태스크는 정상</text>
+<rect x="320" y="160" width="350" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="330" y="180" font-size="12">PAD 40, 96 → 시스템 전체 정지</text>
+<text x="330" y="198" font-size="12">idle만 돈다, fault 없음 (delayed list 파손)</text>
+<rect x="320" y="220" width="350" height="50" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="330" y="240" font-size="12">PAD 64 → SysTick 안에서 HardFault</text>
+<text x="330" y="258" font-size="12">BFAR=0x3134646c (ASCII "ld41"처럼 보이는 값)</text>
+<line x1="270" y1="140" x2="316" y2="65" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="270" y1="146" x2="316" y2="125" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="270" y1="152" x2="316" y2="185" stroke="currentColor" marker-end="url(#ah2)"/>
+<line x1="270" y1="158" x2="316" y2="245" stroke="currentColor" marker-end="url(#ah2)"/>
+<text x="20" y="290" font-size="12">공통점: 넘친 telem은 멀쩡하고, 이웃 rate의 TCB가 깨졌다. 범인은 증상 어디에도 이름이 없다.</text>
+<text x="20" y="312" font-size="12">방식 2(F3_STACK_METHOD=2)로 빌드하면 같은 코드가 telem의 다음 스위치에서 훅으로 잡힌다.</text>
+</svg>
+```
+그림 3 — 예제 2의 9번 실행을 증상으로 묶었다. 같은 버그가 버퍼 크기 8 B 차이로 네 가지 다른 증상을 낸다.
+
+| PAD | 증상 | 무엇이 깨졌나 (덤프·추론) |
+|---|---|---|
+| 0, 8 | SysTick 안에서 HardFault, BFAR = 0xa5a5a5a9 / 0xa5a5a5a5 | delayed 리스트 링크에 채움값 → 커널이 그 주소를 읽음 |
+| 16, 24, 32, 48 | **rate만 조용히 멈춤**, fault 없음, 다른 태스크 정상 | rate의 리스트 항목이 깨져 다시는 ready로 못 돌아옴. `uxPriority=0x19f`(415) |
+| 40, 96 | **시스템 전체 정지**, fault 없음 | gdb로 붙여 보니 idle 태스크만 돈다(`prvIdleTask`). delayed 리스트가 깨져 tick이 아무도 못 깨움 |
+| 64 | SysTick 안에서 HardFault, BFAR = 0x3134646c | ASCII("ld41")처럼 보이는 값 — 문자열 조각이 포인터 자리로 감 |
+
+PAD=40의 "idle만 돈다"는 처음 실행에서 QEMU에 gdb를 붙여 확인했다(`-gdb tcp::34713` 후 `gdb -batch -ex "target remote :34713" -ex "bt"` → `#0 prvIdleTask … tasks.c:5934`).
+
+**이 표가 말하는 것**:
+
+- **가장 위험한 증상은 fault가 없는 것**이다. PAD 16~48에서 드론의 rate loop가 멈췄는데 시스템은 아무 말이 없다. 워치독(E8)이 채널별로 rate를 감시하고 있지 않다면 그대로 추락이다.
+- **재현이 안 되는 이유**: 코드 한 줄 추가, 컴파일러 버전, 로그 문자열 길이만 바뀌어도 증상이 바뀐다. "디버그 빌드에서는 안 나는데 양산 빌드에서만 난다", "printf를 넣었더니 버그가 사라졌다"는 보고의 정체다.
+- **범인 이름은 어디에도 없다**: 모든 증상이 rate, SysTick, idle에서 나온다. 넘친 telem은 자기 일을 계속한다.
+- 그래서 "넘친 순간 그 명령에서" 잡는 장치(§8)와, 애초에 넘치지 않게 산정하는 법(§3·§4)이 필요하다.
+
+> Don 경험과 연결: SSD 펌웨어의 "가끔 특정 NVMe 명령이 이상한 상태로 끝난다", "DMA 디스크립터 하나가 엉뚱한 주소를 가리킨다" 류의 버그를 쫓아 보면 원인이 전혀 다른 모듈의 스택일 때가 있다. RTOS에서는 그 "다른 모듈"이 정확히 **바로 앞에 생성된 태스크**다. 그래서 크래시 덤프를 볼 때 "fault 난 태스크의 TCB가 정상인가? 그 TCB 바로 위 메모리의 주인은 누구인가?"를 먼저 본다.
+
+---
+
+## 3. 크기 산정 ① — 정적 분석: 컴파일러가 아는 것과 모르는 것
+
+### 3.1 도구 (B11 §9 재사용)
+
+B11 §9에서 툴체인 도구는 이미 봤다. 핵심만 다시 적는다.
+
+| 도구 | 주는 것 | 못 주는 것 |
+|---|---|---|
+| `-fstack-usage` → `.su` | 함수 하나의 프레임 바이트, `static` / `dynamic` / `bounded` | 호출 경로의 합 |
+| `-fcallgraph-info=su` → `.ci` | 호출 그래프(VCG 형식) + 노드마다 프레임 크기 (GCC 10에서 들어왔다. 이 랩의 14.2에서 확인) | 간접 호출의 대상, 라이브러리 내부 |
+| `-Wstack-usage=N` | N 바이트 넘는 함수·상한 없는(VLA·`alloca`) 함수 경고 | 경로 |
+| puncover (Python) | ELF 디스어셈블리 + `.su`로 경로 합, JSON 보고서 | 간접 호출(아래에서 확인) |
+| 상용 정적 분석기 (예: AbsInt StackAnalyzer) | 바이너리 수준 최악 경로, 간접 호출은 주석(annotation)으로 | 이 노트에서는 쓰지 않았다 |
+
+정적 분석이 깨지는 세 경우가 있다. **재귀**(깊이를 모름 — MISRA C:2012 Rule 17.2가 재귀를 금지하는 이유), **함수 포인터**(누구를 부를지 모름 — 콜백 테이블, 상태 기계, C++ 가상 함수), **VLA·`alloca`**(크기가 런타임에 정해짐 — `.su`에 `dynamic`). 그리고 그 셋보다 흔한 네 번째: **소스 없이 링크된 라이브러리**(libc, 벤더 HAL의 `.a`)는 `.su`가 없다.
+
+### 3.2 경로 합산기 — `.ci` 파일 50줄 파이썬
+
+puncover가 있어도 "도구가 무엇을 모르는지"를 보려면 직접 짜 보는 것이 빠르다. `.ci`의 노드(함수 + 크기)와 간선(호출)을 읽고, 루트 함수부터 가장 깊은 경로를 찾는다. 재귀와 크기를 모르는 함수, 간접 호출은 따로 보고한다. 간접 호출은 사람이 주석 파일로 "이 함수의 함수 포인터는 이 셋 중 하나"라고 풀어 준다 — 상용 도구의 annotation과 같은 발상이다.
+
+```python
+#!/usr/bin/env python3
+"""stk.py <dir> <root> [annot.txt] — .ci(=-fcallgraph-info=su) 파일들로 root부터 최악 스택 경로를 합산.
+annot.txt 줄 형식:  caller -> callee1,callee2   (간접 호출 풀이)   또는   =name bytes  (모르는 함수 크기)"""
+import re, sys, glob, os
+d, root = sys.argv[1], sys.argv[2]
+size, kind, edges = {}, {}, {}
+for f in glob.glob(os.path.join(d, '*.ci')):
+    for line in open(f, errors='replace'):
+        m = re.match(r'node: \{ title: "([^"]+)" label: "([^"]*)"', line)
+        if m:
+            t, lab = m.groups(); s = re.search(r'(\d+) bytes \((\w+)', lab)
+            if s: size[t], kind[t] = int(s.group(1)), s.group(2)
+            continue
+        m = re.match(r'edge: \{ sourcename: "([^"]+)" targetname: "([^"]+)"', line)
+        if m: edges.setdefault(m.group(1), set()).add(m.group(2))
+short = {}                                          # "file.c:name" 와 "name"을 같은 함수로
+for t in list(size): short.setdefault(t.split(':')[-1], t)
+def resolve(n): return n if n in size else short.get(n.split(':')[-1], n)
+if len(sys.argv) > 3:
+    for l in open(sys.argv[3]):
+        l = l.split('#')[0].strip()
+        if '->' in l:
+            a, b = [x.strip() for x in l.split('->')]
+            edges.setdefault(resolve(a), set()).update(x.strip() for x in b.split(','))
+        elif l.startswith('='):
+            n, b = l[1:].split(); size[n] = int(b); kind[n] = 'annot'
+unknown, memo = set(), {}
+def worst(n, stack=()):
+    n = resolve(n)
+    if n in stack: unknown.add('RECURSION ' + n); return 0, [n + '(recursion!)']
+    if n in memo: return memo[n]
+    if n not in size: unknown.add(n); return 0, [n + '(?)']
+    best = (0, [])
+    for c in edges.get(n, ()):
+        if c == '__indirect_call' and len(sys.argv) <= 3: unknown.add('indirect call in ' + n)
+        if c == '__indirect_call': continue
+        w = worst(c, stack + (n,))
+        if w[0] > best[0] or not best[1]: best = w
+    r = (size[n] + best[0], [f"{n.split(':')[-1]}({size[n]}{'' if kind[n] == 'static' else ' ' + kind[n]})"] + best[1])
+    memo[n] = r; return r
+total, path = worst(root)
+print(f"root={root}  static worst = {total} B")
+print("  path: " + " -> ".join(path))
+for u in sorted(unknown): print("  UNKNOWN:", u)
+```
+
+### 3.3 예제 3 — MAVLink 비슷한 파서 태스크: 정적 vs 실측
+
+**무엇을 확인하나**: 바이트를 받아 메시지를 조립하고, 완성되면 **함수 포인터 테이블**로 핸들러를 부르는 파서(드론 FC의 MAVLink 수신 태스크 모양)다. 핸들러 셋 중 `h_log_request`만 드물게 오는 메시지이고 160 B 버퍼 + `snprintf`를 쓴다. 같은 코드를 두 태스크로 띄워 하나는 평상 입력(heartbeat·param), 하나는 최악 입력(log request 포함)을 먹인 뒤 HWM을 읽는다. 그리고 같은 빌드의 `.ci`로 정적 분석을 돌린다.
+
+```c
+/* ex3: 같은 파서 태스크의 스택 — 정적 최악 경로 vs 실측 HWM(평상 입력 / 최악 입력) */
+#include <stdio.h>
+#include <string.h>
+#include "FreeRTOS.h"
+#include "task.h"
+#include "board.h"
+#define NI __attribute__((noinline))
+typedef struct { uint8_t id, len; uint8_t p[32]; } msg_t;
+static volatile uint32_t sink;
+
+static NI void h_heartbeat(const msg_t *m) { sink += m->p[0]; }
+static NI int  parse_name(char *dst, const uint8_t *src) { int i = 0; for (; i < 16 && src[i]; i++) dst[i] = (char)src[i]; dst[i] = 0; return i; }
+static NI void h_param_set(const msg_t *m)
+{
+    char name[17]; float v;
+    parse_name(name, m->p); memcpy(&v, &m->p[16], 4);
+    sink += (uint32_t)v + (uint32_t)name[0];
+}
+static NI void h_log_request(const msg_t *m)                 /* 드문 메시지: 로그 한 줄을 포맷 */
+{
+    char line[160];
+    int n = snprintf(line, sizeof line, "LOG id=%u from=%u to=%u crc=%08x", m->p[0], m->p[1], m->p[2], (unsigned)sink);
+    sink += (uint32_t)n;
+}
+static void (*const handlers[3])(const msg_t *) = { h_heartbeat, h_param_set, h_log_request };
+
+static NI void dispatch(const msg_t *m) { if (m->id < 3) handlers[m->id](m); }     /* 함수 포인터 */
+static NI void parse_byte(uint8_t b, msg_t *m, int *st)
+{
+    if (*st == 0) { m->id = b; *st = 1; }
+    else if (*st == 1) { m->len = b; *st = (b ? 2 : 0); if (!b) dispatch(m); }
+    else { m->p[*st - 2] = b; if (++*st - 2 == m->len) { dispatch(m); *st = 0; } }
+}
+static const uint8_t typ[]   = { 0, 1, 7,  0, 1, 8,  1, 20, 'R','O','L','L','_','P',0,0,0,0,0,0,0,0,0,0, 0,0,0x80,0x3f };
+static const uint8_t worst[] = { 0, 1, 7,  2, 3, 1, 2, 3,  1, 20, 'R','O','L','L','_','P',0,0,0,0,0,0,0,0,0,0, 0,0,0x80,0x3f };
+
+static void parser_task(void *pv)                             /* 같은 코드, 입력만 다르다 */
+{
+    const uint8_t *in = pv == worst ? worst : typ;
+    unsigned n = pv == worst ? sizeof worst : sizeof typ;
+    msg_t m; int st = 0;
+    for (;;) { for (unsigned i = 0; i < n; i++) parse_byte(in[i], &m, &st); vTaskDelay(1); }
+}
+static TaskHandle_t ht, hw;
+static void report(void *pv)
+{
+    (void)pv; vTaskDelay(20);
+    board_printf_raw("parser(typical) used=%u B   parser(worst) used=%u B   (stack 1024 B each)\n",
+                     (unsigned)(1024 - 4 * uxTaskGetStackHighWaterMark(ht)), (unsigned)(1024 - 4 * uxTaskGetStackHighWaterMark(hw)));
+    board_exit(0);
+}
+int main(void)
+{
+    xTaskCreate(parser_task, "p_typ", 256, (void *)typ, 2, &ht);
+    xTaskCreate(parser_task, "p_worst", 256, (void *)worst, 2, &hw);
+    xTaskCreate(report, "report", 256, NULL, 3, NULL);
+    vTaskStartScheduler();
+}
+```
+
+```sh
+./run.sh fr ex3 EXTRA_CFLAGS="-fstack-usage -fcallgraph-info=su"
+cat /var/tmp/rtos/F3/ex3/app.elf-ex3.su
+```
+
+```text
+parser(typical) used=136 B   parser(worst) used=676 B   (stack 1024 B each)
+[board_exit] code=0
+[rc=0]
+/Users/donh/.rtos_scratch/F3/ex3.c:11:16:h_heartbeat	0	static
+/Users/donh/.rtos_scratch/F3/ex3.c:27:16:dispatch	0	static
+/Users/donh/.rtos_scratch/F3/ex3.c:28:16:parse_byte	8	static
+/Users/donh/.rtos_scratch/F3/ex3.c:37:13:parser_task	56	static
+/Users/donh/.rtos_scratch/F3/ex3.c:45:13:report	8	static
+/Users/donh/.rtos_scratch/F3/ex3.c:19:16:h_log_request	192	static
+/Users/donh/.rtos_scratch/F3/ex3.c:12:16:parse_name.isra	0	static
+/Users/donh/.rtos_scratch/F3/ex3.c:13:16:h_param_set	40	static
+/Users/donh/.rtos_scratch/F3/ex3.c:52:5:main	24	static
+```
+
+`.ci`에서 `dispatch` 부분은 이렇게 보인다. 간접 호출은 `__indirect_call`이라는 **자리표시 노드**로만 남는다.
+
+```text
+node: { title: "ex3.c:dispatch" label: "dispatch\nex3.c:27:16\n0 bytes (static)" }
+node: { title: "__indirect_call" label: "Indirect Call Placeholder" shape : ellipse }
+edge: { sourcename: "ex3.c:dispatch" targetname: "__indirect_call" label: "ex3.c:27:58" }
+node: { title: "snprintf" label: "snprintf\n/usr/include/newlib/stdio.h:272:5" shape : ellipse }
+```
+
+(경로 앞부분 `/Users/donh/.rtos_scratch/F3/`는 줄였다.) 이제 정적 분석을 세 가지로 돌린다: 주석 없이 내 스크립트, 간접 호출을 풀어 준 내 스크립트, 그리고 puncover(B11에서 만든 venv의 0.8.0).
+
+```sh
+cd /var/tmp/rtos/F3/ex3
+python3 -I ~/.rtos_scratch/F3/stk.py . parser_task
+cat ~/.rtos_scratch/F3/ex3_annot.txt
+python3 -I ~/.rtos_scratch/F3/stk.py . parser_task ~/.rtos_scratch/F3/ex3_annot.txt
+/var/tmp/rtos/B11/venv/bin/puncover --elf_file app.elf --build_dir . --src_root / --non-interactive \
+  --generate-report --report-max-static-stack-usage parser_task:::1024
+python3 -I -c "import json; r=json.load(open('report.json'))['no_tag']['stack_report']
+for k,v in r.items(): print(k, v['max_static_stack_size'], [(c['name'], c.get('stack_size')) for c in v['call_stack']])"
+```
+
+```text
+root=parser_task  static worst = 224 B
+  path: parser_task(56) -> vTaskDelay(8) -> xTaskResumeAll(48) -> xTaskIncrementTick.part.0(48) -> board_exit(8) -> board_printf_raw(24) -> put_u(32)
+  UNKNOWN: indirect call in /Users/donh/.rtos_scratch/F3/ex3.c:dispatch
+# ex3 간접 호출 풀이: handlers[] 테이블의 세 함수
+dispatch -> h_heartbeat, h_param_set, h_log_request
+root=parser_task  static worst = 256 B
+  path: parser_task(56) -> parse_byte(8) -> dispatch(0) -> h_log_request(192) -> snprintf(?)
+  UNKNOWN: __aeabi_f2uiz
+  UNKNOWN: snprintf
+parser_task 184 [('parser_task', 56), ('vTaskDelay', 8), ('xTaskResumeAll', 48), ('vPortEnterCritical', 8), ('board_exit', 8), ('board_printf_raw', 24), ('put_u', 32)]
+```
+
+```svg
+<svg viewBox="0 0 680 294" xmlns="http://www.w3.org/2000/svg">
+<text x="340" y="20" font-size="14" text-anchor="middle">같은 파서 태스크 — 정적 분석 vs 실측 (B, ex3)</text>
+<text x="192" y="53" font-size="12" text-anchor="end">.su: parser_task 프레임만</text>
+<rect x="200" y="42" width="29.4" height="16" fill="#888" fill-opacity="0.6" stroke="#888"/>
+<text x="233.4" y="55" font-size="12">56</text>
+<text x="192" y="77" font-size="12" text-anchor="end">puncover (간접 호출 놓침)</text>
+<rect x="200" y="66" width="96.6" height="16" fill="#888" fill-opacity="0.6" stroke="#888"/>
+<text x="300.6" y="79" font-size="12">184</text>
+<text x="192" y="101" font-size="12" text-anchor="end">stk.py (간접 호출 놓침)</text>
+<rect x="200" y="90" width="117.6" height="16" fill="#888" fill-opacity="0.6" stroke="#888"/>
+<text x="321.6" y="103" font-size="12">224</text>
+<text x="192" y="125" font-size="12" text-anchor="end">stk.py + 간접 호출 풀이</text>
+<rect x="200" y="114" width="134.4" height="16" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="338.4" y="127" font-size="12">256</text>
+<text x="192" y="149" font-size="12" text-anchor="end">+ libc snprintf 실측 380</text>
+<rect x="200" y="138" width="333.9" height="16" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="537.9" y="151" font-size="12">636</text>
+<text x="192" y="173" font-size="12" text-anchor="end">+ ISR 프레임 32</text>
+<rect x="200" y="162" width="350.7" height="16" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="554.7" y="175" font-size="12">668</text>
+<text x="192" y="197" font-size="12" text-anchor="end">실측 HWM — 최악 입력</text>
+<rect x="200" y="186" width="354.9" height="16" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="558.9" y="199" font-size="12">676</text>
+<text x="192" y="221" font-size="12" text-anchor="end">실측 HWM — 평상 입력</text>
+<rect x="200" y="210" width="71.4" height="16" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="275.4" y="223" font-size="12">136</text>
+<line x1="200" y1="232" x2="620" y2="232" stroke="currentColor"/>
+<line x1="200" y1="36" x2="200" y2="232" stroke="currentColor"/>
+<line x1="200.0" y1="232" x2="200.0" y2="237" stroke="currentColor"/>
+<text x="200.0" y="250" font-size="12" text-anchor="middle">0</text>
+<line x1="252.5" y1="232" x2="252.5" y2="237" stroke="currentColor"/>
+<text x="252.5" y="250" font-size="12" text-anchor="middle">100</text>
+<line x1="305.0" y1="232" x2="305.0" y2="237" stroke="currentColor"/>
+<text x="305.0" y="250" font-size="12" text-anchor="middle">200</text>
+<line x1="357.5" y1="232" x2="357.5" y2="237" stroke="currentColor"/>
+<text x="357.5" y="250" font-size="12" text-anchor="middle">300</text>
+<line x1="410.0" y1="232" x2="410.0" y2="237" stroke="currentColor"/>
+<text x="410.0" y="250" font-size="12" text-anchor="middle">400</text>
+<line x1="462.5" y1="232" x2="462.5" y2="237" stroke="currentColor"/>
+<text x="462.5" y="250" font-size="12" text-anchor="middle">500</text>
+<line x1="515.0" y1="232" x2="515.0" y2="237" stroke="currentColor"/>
+<text x="515.0" y="250" font-size="12" text-anchor="middle">600</text>
+<line x1="567.5" y1="232" x2="567.5" y2="237" stroke="currentColor"/>
+<text x="567.5" y="250" font-size="12" text-anchor="middle">700</text>
+<line x1="620.0" y1="232" x2="620.0" y2="237" stroke="currentColor"/>
+<text x="620.0" y="250" font-size="12" text-anchor="middle">800</text>
+<line x1="468.8" y1="36" x2="468.8" y2="232" stroke="#d0564a" stroke-dasharray="5 3"/>
+<text x="472.8" y="32" font-size="12">512 B 스택이었다면</text>
+<rect x="20" y="262" width="12" height="12" fill="#888" fill-opacity="0.6" stroke="#888"/>
+<text x="38" y="273" font-size="12">정적, 간접 호출 놓침</text>
+<rect x="194" y="262" width="12" height="12" fill="#e08a3c" fill-opacity="0.6" stroke="#e08a3c"/>
+<text x="212" y="273" font-size="12">정적 + 사람이 채운 값</text>
+<rect x="376" y="262" width="12" height="12" fill="#4a7bd0" fill-opacity="0.6" stroke="#4a7bd0"/>
+<text x="394" y="273" font-size="12">실측 (0xa5 칠하기)</text>
+</svg>
+```
+그림 4 — 예제 3의 숫자를 한 장에. 회색(도구가 낸 값)은 모두 실측 최악의 1/3 이하다. 사람이 간접 호출을 풀고(256), 정적 분석이 모르는 libc 몫을 예제 1의 실측(nano, 이 포맷 380 B)으로 채우고(636), 가장 깊은 순간에 들어올 수 있는 인터럽트 첫 프레임 32 B를 더하면(668) 실측 676 B와 8 B 안으로 맞는다.
+
+**출력에서 볼 것**:
+
+- **두 도구 모두 진짜 최악 경로를 못 봤다**: 내 스크립트(주석 없음)는 224 B, puncover는 184 B. 둘 다 `dispatch`의 함수 포인터 호출을 따라가지 못해서 `vTaskDelay` → … → `configASSERT` 실패 경로(`board_exit`)를 최악으로 골랐다. 실측 최악은 **676 B** — 도구 값의 3~4배다. 이 값을 믿고 256 words가 아니라 64 words(256 B)를 줬다면, 드문 log request 메시지 하나에 이웃을 덮었다(예제 2의 그림).
+- 내 스크립트는 **모른다는 것을 말해 준다**(`UNKNOWN: indirect call`). puncover는 조용히 184를 낸다. 도구를 고를 때 "모르는 것을 보고하나"가 중요한 기준이다.
+- **간접 호출을 풀어 주면** 경로가 `parser_task → parse_byte → dispatch → h_log_request → snprintf(?)`로 바뀐다. 남은 구멍은 libc(`snprintf`)와 컴파일러 런타임(`__aeabi_f2uiz`) — 정적 분석은 **소스가 없는 코드**를 모른다.
+- **평상 입력의 HWM은 136 B**: 같은 코드도 입력이 최악 경로를 안 타면 HWM은 1/5로 나온다. "벤치에서 HWM 재고 20% 여유 줬다"가 필드에서 깨지는 이유다. 동적 측정은 **최악 입력을 넣을 수 있을 때만** 의미가 있다(§4).
+- 676 − 668 = 8 B는 이 노트에서 더 쪼개지 않았다. 정렬 패딩이나 ISR 프레임 정렬(Cortex-M은 예외 진입 때 SP를 8 B로 맞춘다)일 수 있다. 산정에서는 여유 비율이 흡수한다.
+
+### 3.4 정적 분석을 실무에 넣는 법
+
+1. **CI에 `-fstack-usage -fcallgraph-info=su`를 켜고** 태스크 entry 함수마다 경로 합을 낸다. 간접 호출·재귀·`dynamic`이 하나라도 있으면 빌드를 **경고로 실패**시킨다(모르는 것을 숨기지 않게).
+2. 함수 포인터 테이블은 **주석 파일**로 대상 목록을 관리한다. 테이블에 핸들러를 추가하는 PR은 주석 파일도 고치게 리뷰 체크리스트에 넣는다.
+3. libc·벤더 라이브러리 몫은 예제 1처럼 **실측 표**를 만들어 주석의 `=snprintf 380` 줄로 넣는다.
+4. 재귀는 금지하거나, 최대 깊이를 코드로 강제하고(`if (depth > MAX) return ERR;`) 그 깊이 × 프레임을 주석으로 준다.
+5. 이 숫자는 **컴파일러·옵션이 바뀌면 다시** 낸다. `-O2`와 `-Os`, LTO 여부로 인라인이 바뀌면 경로 합이 달라진다.
+
+---
+
+## 4. 크기 산정 ② — 동적 측정과 여유 정책
+
+### 4.1 HWM은 "최소 여유"다 (A4 §5.3 요약 + 더할 것)
+
+A4 §5.3: FreeRTOS는 태스크 생성 때 스택 전체를 0xa5로 칠하고, `uxTaskGetStackHighWaterMark()`가 바닥부터 위로 0xa5가 연속으로 남은 양을 **words**로 센다(tasks.c `prvTaskCheckFreeStackSpace()`). Zephyr는 `CONFIG_INIT_STACKS`로 0xaa를 칠하고 `k_thread_stack_space_get()`이 **bytes**로 준다(`CONFIG_THREAD_STACK_INFO` 필요). 여기에 더할 것 세 가지.
+
+- **칠하는 조건**: FreeRTOS는 `configCHECK_FOR_STACK_OVERFLOW > 1` 또는 `configUSE_TRACE_FACILITY == 1` 또는 `INCLUDE_uxTaskGetStackHighWaterMark(2) == 1`일 때만 칠한다(tasks.c `tskSET_NEW_STACKS_TO_KNOWN_VALUE`). 셋 다 끈 양산 빌드에서 HWM API를 살려 두면 칠하지 않은 스택을 세서 **엉터리 값**이 나온다 — 그래서 HWM을 쓰려면 위 조건 하나가 켜져 있어야 한다.
+- **반환형**: `uxTaskGetStackHighWaterMark()`는 `UBaseType_t`, `uxTaskGetStackHighWaterMark2()`는 `configSTACK_DEPTH_TYPE`를 돌려준다. 8·16비트 포트에서 스택 깊이가 `UBaseType_t`를 넘을 때 쓰는 변종이다(task.h 주석).
+- **비용**: HWM 계산은 스택을 바닥부터 훑는다. 스택이 크고 태스크가 많으면 `uxTaskGetSystemState()`로 전부 도는 데 시간이 든다(C9 §9). 그래서 HWM은 빠른 주기(예: 1 s) 텔레메트리 하나에 몰아서 읽는다.
+
+### 4.2 HWM이 거짓말하는 두 경우
+
+1. **최악 경로를 안 탔다** — 예제 3의 평상 입력 136 B vs 최악 676 B.
+2. **이미 넘쳤다** — 넘친 바이트는 스택 **밖**에 써지므로, 스택 안쪽 칠은 남아 있을 수 있다. 큰 배열의 낮은 주소만 쓰는 코드(C9 장면 ③)는 스택 안을 거의 안 건드리고 밖을 덮는다. 아래 예제 4가 이 경우를 Zephyr thread analyzer로 보여 준다.
+
+### 4.3 예제 4 — Zephyr thread analyzer, 그리고 "23% 사용"이라고 말하는 넘친 스레드
+
+**무엇을 확인하나**: Zephyr의 측정 도구 묶음 — `CONFIG_INIT_STACKS`, `CONFIG_THREAD_STACK_INFO`, `k_thread_stack_space_get()`, `CONFIG_THREAD_ANALYZER`(ISR 스택 포함) — 을 켜고 512 B 스택의 `worker`를 돌린다. SCEN 0은 160 B 버퍼 + `printk`(정상), SCEN 4는 600 B 배열 중 **스택 객체 바로 아래만** 쓰는 넘침(C9 장면 ④와 같은 모양)이다. `mps2/an385`(M3)에서 돌린다. 같은 앱의 SCEN 1·4를 M33에서 돌린 결과는 §8.4에서 본다.
+
+```text
+# prj.conf
+CONFIG_PRINTK=y
+CONFIG_LOG=n
+CONFIG_THREAD_NAME=y
+CONFIG_HW_STACK_PROTECTION=y
+CONFIG_INIT_STACKS=y
+CONFIG_THREAD_STACK_INFO=y
+CONFIG_THREAD_ANALYZER=y
+CONFIG_THREAD_ANALYZER_USE_PRINTK=y
+```
+
+```c
+/* zstk: Zephyr 스택 — thread analyzer · k_thread_stack_space_get, 그리고 "가드를 건너뛴 넘침" (SCEN 4) */
+#include <zephyr/kernel.h>
+#include <zephyr/fatal.h>
+#include <zephyr/debug/thread_analyzer.h>
+#include <string.h>
+
+K_THREAD_STACK_ARRAY_DEFINE(stk, 2, 512);           /* stk[0] = 이웃, stk[1] = worker 스택 */
+static struct k_thread wth;
+
+void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
+{
+	ARG_UNUSED(esf);
+	printk("[fatal handler] reason=%u (K_ERR_STACK_CHK_FAIL=%u) thread=%s\n", reason,
+	       K_ERR_STACK_CHK_FAIL, k_thread_name_get(k_current_get()));
+}
+static __noinline void work(void)
+{
+	volatile uint8_t b[SCEN == 4 ? 600 : SCEN == 1 ? 300 : 160];   /* SCEN 1: 300 B + printk */
+#if SCEN == 4
+	for (int i = 0; &b[i] < (uint8_t *)stk[1]; i++) b[i] = 0;   /* 스택 객체(가드 포함) 아래만 쓴다 */
+#else
+	for (int i = 0; i < (int)sizeof(b); i++) b[i] = (uint8_t)i;
+#endif
+	printk("work: b=%p stack_info.start=%p size=%u\n", (void *)b, (void *)wth.stack_info.start,
+	       (unsigned)wth.stack_info.size);
+}
+static void worker(void *a, void *b, void *c) { work(); k_sleep(K_FOREVER); }
+
+int main(void)
+{
+	printk("board=%s scen=%d MPU_GUARD=%d BUILTIN_GUARD(PSPLIM)=%d\n", CONFIG_BOARD_TARGET, SCEN,
+	       IS_ENABLED(CONFIG_MPU_STACK_GUARD), IS_ENABLED(CONFIG_BUILTIN_STACK_GUARD));
+	memset(stk[0], 0x11, K_THREAD_STACK_SIZEOF(stk[0]));
+	k_thread_create(&wth, stk[1], K_THREAD_STACK_SIZEOF(stk[1]), worker, NULL, NULL, NULL, 5, 0, K_NO_WAIT);
+	k_thread_name_set(&wth, "worker");
+	k_msleep(20);
+	size_t unused = 0;
+	int bad = 0;
+	for (size_t i = 0; i < K_THREAD_STACK_SIZEOF(stk[0]); i++) bad += ((uint8_t *)stk[0])[i] != 0x11;
+	k_thread_stack_space_get(&wth, &unused);
+	printk("main: worker unused=%u B, neighbor stk[0] corrupted bytes=%d\n", (unsigned)unused, bad);
+	thread_analyzer_print(0);
+	return 0;
+}
+```
+
+CMakeLists.txt는 `target_compile_definitions(app PRIVATE SCEN=${SCEN})` 한 줄을 더한 기본형이다. 보드 두 개 × 시나리오를 한 번에 돌린다.
+
+```sh
+for b in mps2/an385 mps2/an521/cpu0; do for s in 0 1 4; do
+  d=/var/tmp/rtos/F3/z_$(echo $b | tr / _)_s$s; echo "=== $b scen $s"
+  /var/rtoslab/bin/rtos-zbuild $b ~/.rtos_scratch/F3/zstk $d -- -DSCEN=$s | grep -E "warning|error"
+  /var/rtoslab/bin/rtos-zrun $d 6 | grep -v "^$\|lan9118\|char device"
+done; done
+```
+
+an385의 SCEN 0과 4 출력이다.
+
+```text
+=== mps2/an385 scen 0
+*** Booting Zephyr OS build v4.4.2 ***
+board=mps2/an385 scen=0 MPU_GUARD=1 BUILTIN_GUARD(PSPLIM)=0
+work: b=0x20000888 stack_info.start=0x20000740 size=512
+main: worker unused=108 B, neighbor stk[0] corrupted bytes=0
+Thread analyze:
+ worker              : STACK: unused 108 usage 404 / 512 (78 %); CPU: 1 %
+                     : Total CPU cycles used: 13776
+ idle                : STACK: unused 208 usage 48 / 256 (18 %); CPU: 87 %
+                     : Total CPU cycles used: 683498
+ main                : STACK: unused 476 usage 548 / 1024 (53 %); CPU: 14 %
+                     : Total CPU cycles used: 120453
+ ISR0                : STACK: unused 3944 usage 152 / 4096 (3 %); CPU: 0 %
+                     : Total CPU cycles used: 0
+=== mps2/an385 scen 4
+*** Booting Zephyr OS build v4.4.2 ***
+board=mps2/an385 scen=4 MPU_GUARD=1 BUILTIN_GUARD(PSPLIM)=0
+work: b=0x200006d0 stack_info.start=0x20000740 size=512
+main: worker unused=392 B, neighbor stk[0] corrupted bytes=132
+Thread analyze:
+ worker              : STACK: unused 392 usage 120 / 512 (23 %); CPU: 1 %
+                     : Total CPU cycles used: 11129
+ idle                : STACK: unused 208 usage 48 / 256 (18 %); CPU: 85 %
+                     : Total CPU cycles used: 686152
+ main                : STACK: unused 476 usage 548 / 1024 (53 %); CPU: 16 %
+                     : Total CPU cycles used: 133655
+ ISR0                : STACK: unused 3944 usage 152 / 4096 (3 %); CPU: 0 %
+                     : Total CPU cycles used: 0
+```
+
+(QEMU의 `nic lan9118.0 has no peer` 경고 줄과 빈 줄은 grep으로 뺐다. 빌드 경고는 없었다.)
+
+**출력에서 볼 것**:
+
+- **thread analyzer 한 번에 모든 스레드 + ISR 스택**: 스레드마다 사용/전체와 비율, 그리고 `ISR0` 줄이 **인터럽트 스택**(`z_interrupt_stacks[0]`)이다. FreeRTOS에는 MSP 사용량을 재는 API가 없어서 예제 6처럼 직접 칠해야 한다.
+- **`printk` 하나가 꽤 먹는다**: SCEN 0은 160 B 버퍼인데 worker가 404 B를 썼다. 차이 약 240 B의 대부분이 `printk` 경로다(이 Zephyr 빌드의 `printk`는 picolibc `vfprintf`로 간다 — §8.4의 fault PC가 그 함수다). 기본 메인 스택 1 KB 중 548 B를 `main`이 쓴 것도 `thread_analyzer_print`와 `printk` 때문이다.
+- **SCEN 4는 넘쳤는데 "23% 사용"**: 이웃 `stk[0]`의 132 B가 깨졌는데(넘침 확실), worker의 사용량은 120 B / 512 B로 나온다. 600 B 배열의 낮은 주소(스택 밖)만 쓰고 스택 안쪽은 거의 안 건드렸기 때문이다. **HWM은 넘침 탐지기가 아니다.** 그리고 M3의 MPU 가드(64 B)는 이 넘침을 통째로 건너뛰어서 놓쳤다 — C9 §11.4 장면 ④와 같은 결과다.
+- `mps2` 보드의 ISR 스택은 4096 B다. 커널 Kconfig 기본값은 2048 B인데 `boards/arm/mps2/Kconfig.defconfig`가 `config ISR_STACK_SIZE default 4096`으로 덮는다. 보드마다 다르니 `.config`에서 확인한다(`CONFIG_ISR_STACK_SIZE=4096`, `CONFIG_MAIN_STACK_SIZE=1024`, `CONFIG_IDLE_STACK_SIZE=256`).
+
+Zephyr에는 측정 값을 **런타임 감시**로 바꾸는 옵션도 있다. `CONFIG_THREAD_ANALYZER_STACK_SAFETY`(v4.4.2 `subsys/debug/thread_analyzer/Kconfig`, 기본 n)는 스레드의 미사용 스택이 정한 문턱 아래로 떨어지면 사용자가 등록한 핸들러(`thread_analyzer_stack_safety_handler_set()`)를 부른다. 이 노트에서는 켜 보지 않았다.
+
+### 4.4 여유(margin)는 얼마나
+
+정답 숫자는 없다. 팀·인증 등급마다 다르다. 판단 기준은 이렇다.
+
+| 근거의 질 | 흔한 여유 | 이유 |
+|---|---|---|
+| 정적 경로 합(간접 호출·libc 모두 채움) + 최악 입력 HWM이 서로 맞음 | 20~25% | 두 독립 근거가 맞으면 남은 위험은 컴파일러 변화 정도 |
+| HWM만 (스트레스 테스트로 최악 경로를 탔다고 믿음) | 30~50% | 안 탄 경로가 있을 수 있다 (예제 3의 평상 136 B) |
+| 아무것도 안 잼 | — | 산정이 아니다 |
+
+그리고 여유와 별개로 **더할 상수**가 있다: ④ 첫 예외 프레임(32 / 104 B)과 ⑤ 문맥 저장(64 / 68 / 204 B). 이것은 "여유"가 아니라 **항상 오는 몫**이다. HWM으로 쟀다면 이미 들어 있을 수도 있지만(측정 중 그 순간에 인터럽트가 왔다면), 정적 합에는 반드시 직접 더한다.
+
+지금까지의 산정 방법을 한 장으로 묶으면 이렇다.
+
+```svg
+<svg viewBox="0 0 680 300" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340" y="20" font-size="14" text-anchor="middle">스택 크기 산정 — 정적 + 동적 + 여유, 그리고 보호</text>
+<rect x="20" y="40" width="200" height="74" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="120" y="60" font-size="12" text-anchor="middle">정적: .su + .ci 경로 합</text>
+<text x="120" y="78" font-size="12" text-anchor="middle">간접 호출은 사람이 풀이</text>
+<text x="120" y="96" font-size="12" text-anchor="middle">재귀 · VLA는 상한 표시</text>
+<rect x="20" y="124" width="200" height="56" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="120" y="146" font-size="12" text-anchor="middle">libc · 바이너리 라이브러리</text>
+<text x="120" y="166" font-size="12" text-anchor="middle">칠해서 재기 (ex4)</text>
+<rect x="20" y="190" width="200" height="56" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="120" y="212" font-size="12" text-anchor="middle">동적: 최악 입력 스트레스</text>
+<text x="120" y="232" font-size="12" text-anchor="middle">→ HWM (ex3, ex7)</text>
+<rect x="260" y="100" width="170" height="90" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="345" y="122" font-size="12" text-anchor="middle">필요량 = max(</text>
+<text x="345" y="140" font-size="12" text-anchor="middle">정적 + libc, HWM)</text>
+<text x="345" y="158" font-size="12" text-anchor="middle">+ 예외·문맥 프레임</text>
+<text x="345" y="176" font-size="12" text-anchor="middle">× (1 + 여유 25~50%)</text>
+<line x1="222" y1="77" x2="258" y2="120" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="222" y1="152" x2="258" y2="148" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="222" y1="218" x2="258" y2="176" stroke="currentColor" marker-end="url(#ah4)"/>
+<rect x="470" y="40" width="190" height="56" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="565" y="62" font-size="12" text-anchor="middle">보호: PSPLIM 또는</text>
+<text x="565" y="82" font-size="12" text-anchor="middle">MPU 가드 + 방식 2</text>
+<rect x="470" y="117" width="190" height="56" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="565" y="139" font-size="12" text-anchor="middle">양산: HWM 텔레메트리</text>
+<text x="565" y="159" font-size="12" text-anchor="middle">여유 &lt; 기준이면 경보</text>
+<rect x="470" y="194" width="190" height="56" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="565" y="216" font-size="12" text-anchor="middle">걸리면: noinit 기록</text>
+<text x="565" y="236" font-size="12" text-anchor="middle">→ 리셋 (E8, F8)</text>
+<line x1="432" y1="130" x2="468" y2="70" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="432" y1="145" x2="468" y2="145" stroke="currentColor" marker-end="url(#ah4)"/>
+<line x1="432" y1="160" x2="468" y2="220" stroke="currentColor" marker-end="url(#ah4)"/>
+<text x="20" y="276" font-size="12">세 입력 중 하나만 믿으면 틀린다: ex3에서 정적 도구 둘은 184 · 224 B, 실측 최악은 676 B였다.</text>
+</svg>
+```
+그림 5 — 스택 크기 산정의 흐름. 정적 분석(간접 호출 풀이), libc 실측, 최악 입력 HWM 세 입력 중 큰 쪽에 프레임 상수와 여유를 더하고, 그 위에 하드웨어 보호와 양산 텔레메트리를 얹는다.
+
+### 4.5 예제 5 — 드론 FC 태스크 스택 예산표 (Python)
+
+**무엇을 확인하나**: 위 규칙을 표로 돌린다. 정적 경로 값은 예시로 정한 가정값이고, libc 몫은 예제 1의 실측(nano), 문맥 프레임은 ARM_CM4F 포트 값(FPU 태스크 204 B, 아닌 태스크 68 B)이다. MSP는 예제 6의 기본선 88 B에 ISR 3단 중첩(단마다 FPU 프레임 104 B + ISR 본문)을 더한다.
+
+```python
+# ex9: 드론 FC 태스크 스택 예산표 — 정적 경로 + libc 실측 + 예외/문맥 프레임 + 여유, 8 B 정렬
+import math
+CTX_INT, CTX_FPU = 32 + 36, 104 + 64 + 36       # ARM_CM4F: HW 프레임 + {r4-r11,lr} (+ s16-s31)
+LIBC = {'none': 0, 'snprintf_int': 380, 'snprintf_float': 704, 'printf_int': 312}   # ex4 nano 실측 - 64
+# 이름, 정적 최악 경로(B, 간접 호출 풀이 후), libc 경로, FPU 사용?, 여유 비율
+tasks = [
+    ('rate_loop',   240, 'none',           True,  0.25),
+    ('attitude',    360, 'none',           True,  0.25),
+    ('mavlink_rx',  256, 'snprintf_int',   False, 0.30),
+    ('telemetry',   180, 'snprintf_float', True,  0.30),
+    ('gnss',        420, 'none',           False, 0.25),
+    ('logger',      520, 'printf_int',     False, 0.30),
+]
+def size(path, libc, fpu, margin):
+    need = path + LIBC[libc] + (CTX_FPU if fpu else CTX_INT)
+    return need, int(math.ceil(need * (1 + margin) / 8) * 8)
+tot = 0
+print(f"{'task':12s} {'path':>5s} {'libc':>5s} {'ctx':>4s} {'need':>5s} {'margin':>6s} {'stack':>6s}")
+for n, p, l, f, m in tasks:
+    need, s = size(p, l, f, m); tot += s
+    print(f"{n:12s} {p:5d} {LIBC[l]:5d} {(CTX_FPU if f else CTX_INT):4d} {need:5d} {int(m*100):5d}% {s:6d}")
+print(f"sum of task stacks = {tot} B   vs   'everyone gets 4 KB' = {4096 * len(tasks)} B")
+# MSP(ISR 스택): ISR 3단 중첩, 단계마다 FPU 프레임 104 + ISR 본문 실측(ex5: 단계당 약 112 B - 32 프레임)
+isr = [('IMU DMA done', 80), ('ESC DShot timer', 48), ('UART telemetry', 64)]
+msp = 88 + sum(104 + b for _, b in isr)            # 88 B = SysTick·PendSV 기본선 (ex5 실측)
+print(f"MSP worst = 88 + " + " + ".join(f"(104+{b})" for _, b in isr) + f" = {msp} B -> with 50% margin {int(math.ceil(msp*1.5/8)*8)} B")
+```
+
+```sh
+python3 -I ~/.rtos_scratch/F3/ex9.py
+```
+
+```text
+task          path  libc  ctx  need margin  stack
+rate_loop      240     0  204   444    25%    560
+attitude       360     0  204   564    25%    712
+mavlink_rx     256   380   68   704    30%    920
+telemetry      180   704  204  1088    30%   1416
+gnss           420     0   68   488    25%    616
+logger         520   312   68   900    30%   1176
+sum of task stacks = 5400 B   vs   'everyone gets 4 KB' = 24576 B
+MSP worst = 88 + (104+80) + (104+48) + (104+64) = 592 B -> with 50% margin 888 B
+```
+
+**출력에서 볼 것**:
+
+- **telemetry가 가장 크다** — 정적 경로는 180 B로 가장 작은데 float `snprintf`(704 B)와 FPU 문맥(204 B) 때문이다. 스택 크기는 "코드가 복잡한 태스크"가 아니라 **"무거운 라이브러리와 FPU를 쓰는 태스크"**가 크다.
+- 근거 있게 정하면 합계 5.4 KB, "모두 4 KB"는 24 KB. STM32H7의 DTCM 128 KB에서도 이 차이는 크다. RAM이 192 KB인 STM32F4급이라면 이것이 "기능이 RAM에 들어가느냐"를 가른다.
+- 이 표 자체가 **설계 문서**다. 면접에서 "How did you choose 1416 bytes?"에 이 표의 한 줄로 답할 수 있다.
+- FreeRTOS에서는 이 바이트를 4로 나눈 words를 `xTaskCreate()`에, Zephyr에서는 바이트 그대로 `K_THREAD_STACK_DEFINE()`에 넣는다(A4 §5.2의 단위 함정).
+
+---
+
+## 5. ISR 스택 분리 — MSP는 "모든 인터럽트의 최악 중첩"을 혼자 진다
+
+### 5.1 FreeRTOS와 Zephyr의 차이
+
+| | FreeRTOS (Cortex-M 포트) | Zephyr (Cortex-M) |
+|---|---|---|
+| ISR 스택이 어디인가 | **시작 코드의 main 스택 그대로** — `prvPortStartFirstTask()`가 벡터 테이블 0번 값으로 MSP를 되돌린다 | 커널이 따로 잡는 `z_interrupt_stacks[0]` — `z_arm_interrupt_stack_setup()`이 MSP를 거기로 |
+| 크기를 정하는 곳 | 링커 스크립트(이 랩: `_Main_Stack_Size = 0x1000`) | `CONFIG_ISR_STACK_SIZE`(커널 기본 2048, mps2 보드 4096) |
+| 사용량 측정 | API 없음 → 직접 칠하기 | thread analyzer의 `ISR0` 줄 |
+| v8-M 한계 레지스터 | MSPLIM 안 씀 (§9에서 grep으로 확인) | `CONFIG_BUILTIN_STACK_GUARD`면 MSPLIM = ISR 스택 바닥 |
+| main()의 지역 변수 | 스케줄러 시작 뒤 **ISR이 덮어쓴다** | main은 정식 스레드라 자기 스택에서 계속 산다 |
+
+RISC-V FreeRTOS 포트는 다르다: `configISR_STACK_SIZE_WORDS`를 정의하면 별도 ISR 스택(`xISRStack`)을 쓰고, 정의하지 않으면 링커 스크립트의 스택을 쓴다. 그 포트에는 ISR 스택 검사(`configCHECK_FOR_STACK_OVERFLOW 3`)도 있다 — §6.4에서 소스를 본다.
+
+### 5.2 예제 6 — main 지역 변수의 운명, ISR 중첩별 MSP 사용량
+
+**무엇을 확인하나**: (1) `main()`이 자기 지역 배열의 주소를 전역에 남겨 두면(태스크 파라미터로 넘기는 흔한 버그와 같은 모양), 스케줄러 시작 뒤 그 자리에 무엇이 있나. (2) MSP 영역 4 KB를 칠하고, 우선순위가 다른 IRQ 셋(8·9·10번)이 0~3단 중첩될 때 MSP를 몇 바이트 쓰나. 각 ISR은 64 B 지역 버퍼를 쓰고 `vTaskNotifyGiveFromISR()`를 부른다(실제 드라이버 ISR 모양). B1 예제 9는 RTOS 없이 쟀고, 여기서는 FreeRTOS의 SysTick·PendSV·FromISR API가 같이 MSP를 쓰는 상태에서 잰다.
+
+```c
+/* ex5: FreeRTOS의 MSP = 시작 코드의 main 스택 재활용 — main 지역 변수의 운명, ISR 중첩별 MSP 사용량 */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "f3.h"
+#define NVIC_ISPR0 REG32(0xE000E200u)
+extern uint32_t _estack, _Main_Stack_Size;
+static volatile uint32_t *lo, *main_local;
+static volatile int depth;
+static TaskHandle_t hT;
+
+static void isr_body(int level, int irq_next)
+{
+    volatile uint32_t buf[16];                              /* ISR 지역 버퍼 64 B */
+    for (int i = 0; i < 16; i++) buf[i] = (uint32_t)level;
+    if (level < depth) { NVIC_ISPR0 = 1u << irq_next; __asm volatile("dsb\n isb"); }  /* 더 높은 IRQ 중첩 */
+    BaseType_t w = pdFALSE;
+    vTaskNotifyGiveFromISR(hT, &w);                         /* FromISR API도 MSP 위에서 돈다 */
+    portYIELD_FROM_ISR(w);
+    (void)buf[0];
+}
+void TIMER0_IRQHandler(void)    { isr_body(1, 9); }         /* 우선순위 0xC0 (가장 낮음) */
+void TIMER1_IRQHandler(void)    { isr_body(2, 10); }        /* 0x80 */
+void DUALTIMER_IRQHandler(void) { isr_body(3, 0); }         /* 0x40 (가장 높음) */
+
+static void task(void *pv)
+{
+    (void)pv;
+    board_printf_raw("task: main()'s local[0..3] now = %x %x %x %x\n", main_local[0], main_local[1],
+                     main_local[2], main_local[3]);
+    for (int d = 0; d <= 3; d++) {
+        taskENTER_CRITICAL();                               /* ISR가 MSP를 쓰지 못하게 막고 다시 칠한다 */
+        f3_paint(lo, &_estack);                             /* 태스크 문맥에서는 MSP에 살아 있는 값이 없다 */
+        taskEXIT_CRITICAL();
+        vTaskDelay(2);                                      /* 그 사이 SysTick·PendSV만 MSP를 쓴다 */
+        depth = d;
+        if (d) { NVIC_ISPR0 = 1u << 8; __asm volatile("dsb\n isb"); ulTaskNotifyTake(pdTRUE, 10); }
+        board_printf_raw("ISR nesting %d: MSP used = %u B\n", d, f3_used(lo, &_estack));
+    }
+    board_exit(0);
+}
+int main(void)
+{
+    volatile uint32_t local[4] = { 0x11111111, 0x22222222, 0x33333333, 0x44444444 };
+    main_local = local;                                     /* 흔한 버그: main 지역 변수 주소를 태스크에 넘김 */
+    uint32_t sp; __asm volatile("mov %0, sp" : "=r"(sp));
+    lo = (uint32_t *)((uint32_t)&_estack - (uint32_t)&_Main_Stack_Size);
+    board_printf_raw("MSP region %x..%x (%u B), main SP=%x, &local=%x\n", (unsigned)lo, (unsigned)&_estack,
+                     (unsigned)&_Main_Stack_Size, sp, (unsigned)local);
+    NVIC_IPR(8) = 0xC0; NVIC_IPR(9) = 0x80; NVIC_IPR(10) = 0x40;
+    NVIC_ISER0 = (1u << 8) | (1u << 9) | (1u << 10);
+    xTaskCreate(task, "t", 256, NULL, 2, &hT);
+    vTaskStartScheduler();
+}
+```
+
+```sh
+./run.sh fr ex5
+```
+
+```text
+MSP region 203ff000..20400000 (4096 B), main SP=203fffc8, &local=203fffd0
+task: main()'s local[0..3] now = 20000fc4 20e5 20000e7c fffffffd
+ISR nesting 0: MSP used = 88 B
+ISR nesting 1: MSP used = 152 B
+ISR nesting 2: MSP used = 264 B
+ISR nesting 3: MSP used = 376 B
+[board_exit] code=0
+[rc=0]
+```
+
+```svg
+<svg viewBox="0 0 640 318" xmlns="http://www.w3.org/2000/svg">
+<text x="320" y="20" font-size="14" text-anchor="middle">FreeRTOS MSP(ISR 스택) 사용량 vs ISR 중첩 깊이 (ex5 실측)</text>
+<line x1="66" y1="240.0" x2="70" y2="240.0" stroke="currentColor"/>
+<text x="62" y="244.0" font-size="12" text-anchor="end">0</text>
+<line x1="66" y1="190.0" x2="70" y2="190.0" stroke="currentColor"/>
+<text x="62" y="194.0" font-size="12" text-anchor="end">100</text>
+<line x1="70" y1="190.0" x2="590" y2="190.0" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/>
+<line x1="66" y1="140.0" x2="70" y2="140.0" stroke="currentColor"/>
+<text x="62" y="144.0" font-size="12" text-anchor="end">200</text>
+<line x1="70" y1="140.0" x2="590" y2="140.0" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/>
+<line x1="66" y1="90.0" x2="70" y2="90.0" stroke="currentColor"/>
+<text x="62" y="94.0" font-size="12" text-anchor="end">300</text>
+<line x1="70" y1="90.0" x2="590" y2="90.0" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/>
+<line x1="66" y1="40.0" x2="70" y2="40.0" stroke="currentColor"/>
+<text x="62" y="44.0" font-size="12" text-anchor="end">400</text>
+<line x1="70" y1="40.0" x2="590" y2="40.0" stroke="#888" stroke-width="0.5" stroke-dasharray="4 3"/>
+<line x1="70" y1="240" x2="590" y2="240" stroke="currentColor"/>
+<line x1="70" y1="40" x2="70" y2="240" stroke="currentColor"/>
+<rect x="100.0" y="196.0" width="70" height="44.0" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="135.0" y="190.0" font-size="12" text-anchor="middle">88 B</text>
+<text x="135.0" y="258" font-size="12" text-anchor="middle">중첩 0</text>
+<rect x="230.0" y="164.0" width="70" height="76.0" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="265.0" y="158.0" font-size="12" text-anchor="middle">152 B</text>
+<text x="265.0" y="258" font-size="12" text-anchor="middle">중첩 1</text>
+<text x="265.0" y="206.0" font-size="12" text-anchor="middle">+64</text>
+<rect x="360.0" y="108.0" width="70" height="132.0" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="395.0" y="102.0" font-size="12" text-anchor="middle">264 B</text>
+<text x="395.0" y="258" font-size="12" text-anchor="middle">중첩 2</text>
+<text x="395.0" y="178.0" font-size="12" text-anchor="middle">+112</text>
+<rect x="490.0" y="52.0" width="70" height="188.0" fill="#3f9a6b" fill-opacity="0.6" stroke="#3f9a6b"/>
+<text x="525.0" y="46.0" font-size="12" text-anchor="middle">376 B</text>
+<text x="525.0" y="258" font-size="12" text-anchor="middle">중첩 3</text>
+<text x="525.0" y="150.0" font-size="12" text-anchor="middle">+112</text>
+<text x="70" y="282" font-size="12">0단 = SysTick·PendSV 기본선. 1단 +64 (첫 프레임은 PSP에 쌓인다)</text>
+<text x="70" y="302" font-size="12">2·3단은 단마다 +112 (HW 프레임 32 + ISR 버퍼 64 + 호출 16)</text>
+</svg>
+```
+그림 6 — 예제 6의 실측. MSP는 중첩 단마다 프레임 + ISR 본문만큼 계단식으로 늘어난다. 태스크 스택은 이 몫을 지지 않는다.
+
+**출력에서 볼 것**:
+
+- **main의 `local[]`은 사라졌다**: 0x11111111… 대신 `20000fc4 20e5 20000e7c fffffffd`. 마지막 값 `0xfffffffd`는 EXC_RETURN(Thread 모드 · PSP로 복귀)이다 — 그 자리를 SVC·PendSV·ISR의 프레임이 쓰고 지나갔다. **main()의 지역 변수 주소를 태스크에 넘기면 안 되는** 정확한 이유다. 넘겨야 하면 `static`이나 전역으로 둔다. (Zephyr에서는 main이 스레드라서 이 함정이 없다.)
+- **0단 88 B**: 아무 인터럽트를 일부러 안 걸어도 SysTick(`xTaskIncrementTick`)과 PendSV(`vTaskSwitchContext`)가 MSP를 88 B 쓴다. 이것이 MSP의 기본선이다.
+- **1단 +64, 2·3단 +112씩**: 첫 IRQ는 태스크를 끊으므로 하드웨어 프레임이 **PSP에** 쌓인다(태스크 몫 ④). MSP에는 ISR 본문(버퍼 64 B + 호출)만 늘었다. 2단부터는 ISR이 ISR을 끊으므로 프레임 32 B까지 MSP에 쌓인다. 64 + 32 + 호출 약 16 = 112.
+- FPU를 쓰는 ISR이라면 단마다 프레임이 104 B가 된다(B1 예제 12, B6). 예제 5의 MSP 계산이 그 값을 썼다.
+- 이 랩의 MSP는 4 KB 중 376 B를 썼다. MSP 아래(0x203ff000 밑)는 newlib `_sbrk`용 빈 공간이라 넘쳐도 당장은 아무 일이 없다 — **실제 칩의 링커 스크립트에서는 MSP 바로 아래에 `.bss`나 힙이 오는 경우가 많다.** 자기 링커 스크립트에서 MSP 아래에 무엇이 있는지 확인해 두라(F8).
+
+### 5.3 MSP 크기를 정하는 법
+
+1. 우선순위 그룹(NVIC preempt priority)마다 **가장 깊은 ISR 하나**를 고른다. 같은 그룹의 ISR끼리는 서로 끊지 못하므로 중첩 깊이 = 그룹 수가 상한이다(B3, E2).
+2. 그 ISR마다 "본문 정적 경로(§3) + FromISR API 경로 + 프레임 32 / 104 B"를 합한다.
+3. 기본선(SysTick·PendSV, 이 랩 88 B)과 **fault 핸들러의 몫**을 더한다. fault 핸들러도 MSP에서 돈다 — 레지스터 덤프에 printf를 쓰면 그것도 수백 B다.
+4. 부팅 때 MSP 영역을 칠하고(스케줄러 시작 전, 지금 쓰는 영역은 피해서) 스트레스 뒤 HWM을 텔레메트리로 보낸다. Zephyr는 thread analyzer의 `ISR0` 줄이 그것이다.
+5. v8-M이면 MSPLIM을 MSP 바닥에 건다. FreeRTOS는 해 주지 않으므로 `main()`에서 직접 한다(예제 9 SCEN 6).
+
+---
+
+## 6. 탐지 ① — 소프트웨어 흔적 검사: FreeRTOS 방식 1·2, Zephyr 센티널
+
+```svg
+<svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="340" y="20" font-size="14" text-anchor="middle">언제 잡나 — 넘치는 순간부터 크래시까지의 시간축</text>
+<line x1="20" y1="70" x2="660" y2="70" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah3)"/>
+<circle cx="70" cy="70" r="5" fill="#d0564a"/>
+<text x="70" y="52" font-size="12" text-anchor="middle">넘치는 명령</text>
+<circle cx="230" cy="70" r="5" fill="#e08a3c"/>
+<text x="230" y="52" font-size="12" text-anchor="middle">함수 return</text>
+<circle cx="400" cy="70" r="5" fill="#e08a3c"/>
+<text x="400" y="52" font-size="12" text-anchor="middle">다음 컨텍스트 스위치</text>
+<circle cx="580" cy="70" r="5" fill="#888"/>
+<text x="580" y="52" font-size="12" text-anchor="middle">주기 점검 · 보고</text>
+<rect x="20" y="90" width="140" height="108" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="90" y="110" font-size="12" text-anchor="middle">PSPLIM / MSPLIM</text>
+<text x="90" y="128" font-size="12" text-anchor="middle">(v8-M, ex6)</text>
+<text x="90" y="150" font-size="12" text-anchor="middle">MPU 가드 리전</text>
+<text x="90" y="168" font-size="12" text-anchor="middle">(v7-M, F4)</text>
+<text x="90" y="188" font-size="12" text-anchor="middle">피해 0 ~ 수십 B</text>
+<rect x="170" y="90" width="120" height="108" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="230" y="110" font-size="12" text-anchor="middle">-fstack-protector</text>
+<text x="230" y="128" font-size="12" text-anchor="middle">카나리 (ex8)</text>
+<text x="230" y="150" font-size="12" text-anchor="middle">버퍼가 위로</text>
+<text x="230" y="168" font-size="12" text-anchor="middle">넘친 것만</text>
+<text x="230" y="188" font-size="12" text-anchor="middle">스택 넘침 ✗</text>
+<rect x="300" y="90" width="200" height="108" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="400" y="110" font-size="12" text-anchor="middle">FreeRTOS 방식 1 · 2</text>
+<text x="400" y="128" font-size="12" text-anchor="middle">Zephyr STACK_SENTINEL</text>
+<text x="400" y="150" font-size="12" text-anchor="middle">흔적 검사 (16 B / 4 B)</text>
+<text x="400" y="168" font-size="12" text-anchor="middle">지연 = 스위치까지</text>
+<text x="400" y="188" font-size="12" text-anchor="middle">ex2: 40 us ~ 30 ms</text>
+<rect x="510" y="90" width="150" height="108" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="585" y="110" font-size="12" text-anchor="middle">high water mark</text>
+<text x="585" y="128" font-size="12" text-anchor="middle">thread analyzer</text>
+<text x="585" y="150" font-size="12" text-anchor="middle">탐지가 아니라</text>
+<text x="585" y="168" font-size="12" text-anchor="middle">크기 산정용 측정</text>
+<text x="585" y="188" font-size="12" text-anchor="middle">넘친 뒤엔 거짓말</text>
+<rect x="20" y="214" width="640" height="130" fill="#d0564a" fill-opacity="0.08" stroke="#d0564a"/>
+<text x="30" y="234" font-size="13">이 노트에서 놓친 장면 (실측)</text>
+<text x="30" y="256" font-size="12">• 방식 1: 넘쳤다가 돌아온 뒤 스위치 (ex2 ②), ISR 프레임만 바닥 밑으로 (ex2 ①)</text>
+<text x="30" y="276" font-size="12">• 방식 2 · 센티널: 카나리를 건너뛴 넘침 (C9 ③) — 흔적이 안 남는다</text>
+<text x="30" y="296" font-size="12">• MPU 가드: 가드를 통째로 건너뛰어 그 아래만 쓰기 (ex7 SCEN 4, 이웃 132 B 파손)</text>
+<text x="30" y="316" font-size="12">• 카나리: 깊은 재귀 (ex8 ②, 이웃 101 B 파손) — 프레임마다 카나리는 멀쩡하다</text>
+<text x="30" y="336" font-size="12">• PSPLIM: 이 노트의 모든 SP 넘침을 잡았다. 단 SP를 안 움직이는 포인터 버그는 범위 밖</text>
+</svg>
+```
+그림 7 — 탐지 장치를 "넘친 뒤 언제 알아채나"로 줄 세웠다. 왼쪽일수록 피해가 작다. 아래 상자는 이 노트와 C9에서 실제로 놓친 장면이다.
+
+### 6.1 검사 조건 (C9 §5.1 요약)
+
+두 방식 모두 `vTaskSwitchContext()` 안의 `taskCHECK_FOR_STACK_OVERFLOW()`(`include/stack_macros.h`)에서 **나가는 태스크**를 본다. 방식 1은 저장된 SP(`pxTopOfStack`)가 `pxStack` 아래인지만, 방식 2는 거기에 바닥 16 B가 `0xa5a5a5a5` × 4 그대로인지를 더 본다. MPU 포트(`portUSING_MPU_WRAPPERS == 1`)에서는 둘 다 꺼진다. C9 예제 7이 "깊이 갔다 돌아옴 / 깊은 곳에서 블록 / 카나리 건너뛰기" 세 장면의 결과를 냈다. 여기서는 C9가 안 본 두 장면 — **ISR 프레임만 바닥 밑으로**, **넘친 뒤 오랫동안 스위치 없음** — 을 본다.
+
+### 6.2 예제 7 — ISR 프레임 하나, 그리고 30 ms의 공백
+
+**무엇을 확인하나**: 512 B 스택의 `victim`(우선순위 4, 가장 높음). SCEN 1: VLA로 SP를 바닥 16 B 위까지 내린 뒤 IRQ 8을 소프트웨어로 건다 — 하드웨어가 PSP에 32 B 프레임을 쌓으면 그중 16 B가 바닥 밑으로 간다. 그 함수 안에서는 다른 함수를 부르지 않는다(부르면 그 프레임도 바닥 밑으로 간다). SCEN 2: 600 B 배열로 넘친 뒤 돌아와서, 블록하지 않고 30 ms 동안 계산만 한다. 각각 방식 1·2로 빌드한다.
+
+```c
+/* ex2: 검사 방식 1 vs 2 — (1) ISR 하드웨어 프레임만 바닥 밑으로 (2) 넘친 뒤 30 ms 동안 스위치 없음 */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "board.h"
+#define NVIC_ISPR0 REG32(0xE000E200u)
+static volatile uint32_t t_ovf, irq_sp, sp_low;
+static uint32_t *pxStack;
+
+void vApplicationStackOverflowHook(TaskHandle_t t, char *name)
+{
+    (void)t;
+    board_printf_raw("  [%u us] HOOK task=%s  (overflow at %u us, delay %u us)  pxStack[0..1]=%x %x\n",
+                     board_now_us(), name, t_ovf, board_now_us() - t_ovf, pxStack[0], pxStack[1]);
+    board_exit(251);
+}
+void TIMER0_IRQHandler(void) { uint32_t sp; __asm volatile("mov %0, sp" : "=r"(sp)); irq_sp = sp; }
+
+#if SCEN == 1
+static __attribute__((noinline)) void near_bottom(void)
+{
+    uint32_t sp; __asm volatile("mov %0, sp" : "=r"(sp));
+    volatile uint8_t pad[sp - (uint32_t)pxStack - 16];  /* VLA: SP를 바닥 위 16 B 근처까지 */
+    pad[0] = 1; irq_sp = pad[0];
+    __asm volatile("mov %0, sp" : "=r"(sp_low));
+    t_ovf = board_now_us();
+    NVIC_ISPR0 = 1u << 8;                                /* 지금 IRQ → HW 프레임 32 B가 PSP에 쌓인다 */
+    __asm volatile("dsb\n isb");                        /* 여기서는 함수 호출 금지 (그것도 바닥 밑으로) */
+}
+#else
+static __attribute__((noinline)) void deep_then_busy(void)
+{
+    volatile uint8_t b[600];                             /* 512 B 스택에 600 B: 넘치고 돌아온다 */
+    for (unsigned i = 0; i < sizeof b; i++) b[i] = 0;
+    t_ovf = board_now_us();
+}
+#endif
+static void victim(void *pv)
+{
+    (void)pv;
+    pxStack = (uint32_t *)((uint32_t *)xTaskGetCurrentTaskHandle())[12];
+#if SCEN == 1
+    near_bottom();
+    board_printf_raw("  task SP was %x, pxStack=%x -> IRQ frame went down to %x\n", sp_low, (unsigned)pxStack, sp_low - 32);
+#else
+    deep_then_busy();
+    while (board_now_us() - t_ovf < 30000) { }           /* 최고 우선순위로 30 ms 계산 — 스위치 없음 */
+    board_printf_raw("  [%u us] victim: 30 ms busy done, now blocking\n", board_now_us());
+#endif
+    for (;;) vTaskDelay(1);
+}
+static void judge(void *pv) { (void)pv; vTaskDelay(60); board_printf_raw("  no hook in 60 ms\n"); board_exit(0); }
+
+int main(void)
+{
+    NVIC_IPR(8) = 0x40; NVIC_ISER0 = 1u << 8;
+    board_printf_raw("method=%d scenario=%d\n", configCHECK_FOR_STACK_OVERFLOW, SCEN);
+    (void)pvPortMalloc(512);
+    xTaskCreate(victim, "victim", 128, NULL, 4, NULL);
+    xTaskCreate(judge, "judge", 256, NULL, 2, NULL);
+    vTaskStartScheduler();
+}
+```
+
+```sh
+for s in 1 2; do for m in 1 2; do
+  TO=4 TAG=ex2_m${m}s$s ./run.sh fr ex2 EXTRA_CFLAGS="-DF3_STACK_METHOD=$m -DSCEN=$s" | grep -v board_exit
+done; done
+```
+
+```text
+method=1 scenario=1
+  task SP was 20001230, pxStack=20001220 -> IRQ frame went down to 20001210
+  no hook in 60 ms
+[rc=0]
+method=2 scenario=1
+  task SP was 20001230, pxStack=20001220 -> IRQ frame went down to 20001210
+  [197 us] HOOK task=victim  (overflow at 155 us, delay 42 us)  pxStack[0..1]=a5a5a5a5 109
+[rc=1]
+method=1 scenario=2
+  [30231 us] victim: 30 ms busy done, now blocking
+  no hook in 60 ms
+[rc=0]
+method=2 scenario=2
+  [30231 us] victim: 30 ms busy done, now blocking
+  [30259 us] HOOK task=victim  (overflow at 231 us, delay 30028 us)  pxStack[0..1]=0 0
+[rc=1]
+```
+
+**출력에서 볼 것**:
+
+- **ISR 프레임 하나도 넘침이다**: SP는 0x20001230, 바닥은 0x20001220. 함수 안에서는 넘치지 않았지만 인터럽트가 오는 순간 하드웨어가 0x20001210까지 프레임을 썼다. 프레임은 R0, R1, R2, R3, R12, LR, PC, xPSR 순서로 낮은 주소부터 놓이므로 바닥 16 B(`pxStack[0..3]`)에는 R12, **LR(=0x109, 코드 주소)**, PC, xPSR가 앉았다. R12 칸이 우연히 0xa5a5a5a5였지만 LR 칸이 깨져서 방식 2가 잡았다. 방식 1은 스위치 때 SP가 정상이라 놓쳤다. 이것이 §1의 ④를 스택 예산에 **반드시** 넣어야 하는 이유다 — "함수 경로만 합하면 딱 맞는" 스택은 인터럽트 하나에 넘친다.
+- **탐지 지연 = 다음 스위치까지**: SCEN 2에서 넘침은 231 us에 일어났고 훅은 30,259 us — **30 ms 뒤**다. victim이 가장 높은 우선순위라 tick이 와도 스위치가 없었다. 그 30 ms 동안 이웃은 망가진 채였다. 1 kHz rate loop라면 30번의 제어 주기다. 방식 1·2는 **"언젠가 범인 이름을 알려 주는" 장치**이지 피해를 막는 장치가 아니다.
+- 방식 2의 비용은 스위치마다 4워드 비교다(C2 §7에서 lean 대비 vTaskSwitchContext가 커진 측정이 있다). 개발·양산 모두 켜 두는 것이 기본이고, 하드웨어 가드(§8)와 **함께** 쓴다.
+
+### 6.3 Zephyr `CONFIG_STACK_SENTINEL` (C9 §11.4 요약)
+
+스택 가장 낮은 4 B에 0xF0F0F0F0을 쓰고 `z_check_stack_sentinel()`(`kernel/thread.c`)이 스위치 때, 스위치 없이 끝난 인터럽트 뒤, 스레드 return 때, `k_yield()` 때 확인한다. FreeRTOS 방식 2와 같은 흔적 검사이고, 4 B라 건너뛰기에 더 약하다. `MPU_STACK_GUARD`·`USERSPACE`와는 같이 켤 수 없다(Kconfig 의존성). Cortex-M에서는 `CONFIG_HW_STACK_PROTECTION`이 기본 선택지이고, 센티널은 MPU도 PSPLIM도 없는 코어(M0 등)의 대안이다.
+
+### 6.4 `configCHECK_FOR_STACK_OVERFLOW 3` — 있긴 한데 Cortex-M에는 없다
+
+V11.3.2 소스를 grep하면 값 3(`> 2`)을 쓰는 곳은 RISC-V 포트(GCC·IAR)와 PIC32 포트뿐이다. RISC-V `port.c`에서는 `configISR_STACK_SIZE_WORDS`를 정의했을 때 ISR 스택 바닥 20 B를 `portISR_STACK_FILL_BYTE`와 비교해 `configASSERT`로 멈춘다(훅이 아니다 — 주석: "the stack overflow hook is specific to a task stack"). 그런데 그 블록 첫 줄이 이렇다.
+
+```c
+    #warning "This path not tested, or even compiled yet."
+```
+
+즉 V11.3.2 기준으로 FreeRTOS의 ISR 스택 검사는 **Cortex-M에는 없고, RISC-V에서는 "테스트되지 않았다"고 스스로 밝힌 상태**다. FreeRTOS에서 ISR 스택(MSP)은 사용자가 직접 칠해서 재고(예제 6), v8-M이면 MSPLIM을 직접 거는 것(예제 9)이 현실적인 답이다.
+
+---
+
+## 7. 탐지 ② — 컴파일러 카나리 `-fstack-protector`는 다른 버그를 잡는다
+
+> 🔁 이 절은 Bare-Metal BM Q6(방어적 펌웨어 — 스택 카나리 부분)과 겹친다 (주인: 이 노트).
+
+### 7.1 이름이 같아서 헷갈리는 두 "카나리"
+
+| | FreeRTOS 방식 2 / Zephyr 센티널 | `-fstack-protector` (GCC) / Zephyr `CONFIG_STACK_CANARIES` |
+|---|---|---|
+| 지키는 것 | **스택 상자 전체의 바닥** (스택 넘침: 아래로) | **함수 프레임 하나의 복귀 주소** (버퍼 넘침: 지역 배열이 위로) |
+| 값 위치 | 스택 바닥 16 B / 4 B, 상자마다 하나 | 지역 배열과 저장된 LR 사이, **함수 호출마다** 하나 |
+| 검사 시점 | 컨텍스트 스위치 | 그 함수의 return 직전 |
+| 실패 시 | `vApplicationStackOverflowHook` / `K_ERR_STACK_CHK_FAIL` | `__stack_chk_fail()` (Zephyr도 `K_ERR_STACK_CHK_FAIL`) |
+| 원래 목적 | 신뢰성 (크기 부족) | **보안** (스택 스매싱으로 복귀 주소 덮어 코드 실행) |
+
+컴파일러 카나리의 동작: 함수 진입 때 전역 `__stack_chk_guard` 값을 지역 배열 **위**(높은 주소, 복귀 주소 쪽)에 복사해 두고, return 직전에 같은지 비교한다. 지역 배열이 위로 넘치면(`strcpy` 길이 초과) 복귀 주소보다 카나리를 먼저 덮으므로 return 전에 잡힌다. **스택 상자가 아래로 넘치는 것**과는 방향도, 대상도 다르다.
+
+### 7.2 예제 8 — 버퍼 넘침은 잡고, 깊은 재귀는 못 잡는다
+
+**무엇을 확인하나**: `-fstack-protector-strong`으로 빌드한 FreeRTOS 앱(스택 검사는 끔). SCEN 1: 런타임 문자열 28 B를 `char name[16]`에 `strcpy`. SCEN 2: 프레임마다 카나리가 붙는 재귀(32 B 지역 배열)를 21단 — 512 B 스택을 훌쩍 넘는다. 스택 바로 아래에 0x11로 채운 이웃을 둔다. `__stack_chk_guard`와 `__stack_chk_fail`은 앱이 정의한다.
+
+```c
+/* ex8: -fstack-protector 카나리 — 버퍼 넘침(위로)은 잡고, 스택 넘침(아래로, 깊은 재귀)은 못 잡는다 */
+#include <string.h>
+#include "FreeRTOS.h"
+#include "task.h"
+#include "board.h"
+uint32_t __stack_chk_guard = 0x5A3C0FE1u;               /* 실제 제품은 부팅 때 난수(TRNG)로 */
+static volatile uint32_t t_bug;
+void __stack_chk_fail(void)
+{
+    board_printf_raw("[%u us] __stack_chk_fail: canary smashed in task %s (bug at %u us)\n",
+                     board_now_us(), pcTaskGetName(NULL), t_bug);
+    board_exit(250);
+}
+#if SCEN == 1
+static __attribute__((noinline)) void set_name(const char *src)   /* 흔한 버그: 길이 검사 없는 복사 */
+{
+    char name[16];
+    strcpy(name, src);
+    board_printf_raw("  set_name: \"%s\" (%u bytes into char[16])\n", name, (unsigned)strlen(src));
+}
+#else
+static __attribute__((noinline)) uint32_t rec(int d)                /* 프레임마다 카나리가 있는 재귀 */
+{
+    volatile char buf[32];
+    buf[0] = (char)d; buf[31] = 0;
+    if (d == 0) return buf[31];
+    uint32_t r = rec(d - 1);                             /* 꼬리 호출이 아니게: 돌아와서 buf를 읽는다 */
+    return r + (uint32_t)buf[0];
+}
+#endif
+static struct { uint8_t below[512]; StackType_t vstack[128]; } m;   /* 스택 바로 아래 = 이웃 */
+static StaticTask_t vtcb;
+static volatile int depth = 20;
+static const char *volatile param = "ROLL_RATE_P_GAIN_OVERRIDE_V2";   /* 런타임 값 (28 B) */
+static void victim(void *pv)
+{
+    (void)pv;
+#if SCEN == 1
+    t_bug = board_now_us();
+    set_name(param);                                       /* 28 B + NUL → 16 B 배열 */
+    board_printf_raw("  returned normally?!\n");
+#else
+    t_bug = board_now_us();
+    uint32_t r = rec(depth);                                  /* 프레임 ≈ 48 B × 21 ≈ 1 KB > 512 B */
+    int bad = 0; for (int i = 0; i < 512; i++) bad += m.below[i] != 0x11;
+    board_printf_raw("  rec(20)=%u returned normally; bytes below the stack corrupted=%d\n", (unsigned)r, bad);
+#endif
+    board_exit(0);
+}
+int main(void)
+{
+    memset(m.below, 0x11, sizeof m.below);
+    board_printf_raw("scenario=%d below=%x..%x vstack=%x..%x\n", SCEN, (unsigned)m.below, (unsigned)m.below + 512,
+                     (unsigned)m.vstack, (unsigned)&m.vstack[128]);
+    xTaskCreateStatic(victim, "victim", 128, NULL, 2, m.vstack, &vtcb);
+    vTaskStartScheduler();
+}
+```
+
+```sh
+for s in 1 2; do TAG=ex8_s$s ./run.sh fr ex8 EXTRA_CFLAGS="-DF3_STACK_METHOD=0 -DSCEN=$s -fstack-protector-strong"; done
+arm-none-eabi-objdump -d --no-show-raw-insn /var/tmp/rtos/F3/ex8_s2/app.elf | grep -A28 "<rec>:"
+```
+
+```text
+scenario=1 below=200000d0..200002d0 vstack=200002d0..200004d0
+  set_name: "ROLL_RATE_P_GAIN_OVERRIDE_V2" (28 bytes into char[16])
+[174 us] __stack_chk_fail: canary smashed in task victim (bug at 145 us)
+[board_exit] code=250
+[rc=1]
+scenario=2 below=200000c8..200002c8 vstack=200002c8..200004c8
+  rec(20)=210 returned normally; bytes below the stack corrupted=101
+[board_exit] code=0
+[rc=0]
+```
+
+```asm
+000000c0 <rec>:
+      c0:	movs	r3, #0
+      c2:	push	{lr}
+      c4:	ldr	r2, [pc, #64]	@ (108 <rec+0x48>)
+      c6:	sub	sp, #44	@ 0x2c
+      c8:	ldr	r2, [r2, #0]
+      ca:	str	r2, [sp, #36]	@ 0x24
+      cc:	mov.w	r2, #0
+      ...
+      e2:	ldr	r3, [pc, #36]	@ (108 <rec+0x48>)
+      e4:	ldr	r2, [r3, #0]
+      e6:	ldr	r3, [sp, #36]	@ 0x24
+      e8:	eors	r2, r3
+      ea:	mov.w	r3, #0
+      ee:	bne.n	104 <rec+0x44>
+      f0:	add	sp, #44	@ 0x2c
+      f2:	ldr.w	pc, [sp], #4
+      ...
+     104:	bl	154 <__stack_chk_fail>
+     108:	.word	0x20000004
+```
+
+(objdump 출력의 중간 줄 일부는 `...`로 줄였다.)
+
+**출력에서 볼 것**:
+
+- **SCEN 1 — 잡았다, 그러나 return 때**: `set_name`은 망가진 `name`을 printf까지 하고 나서 return 직전에 `__stack_chk_fail`로 갔다(145 us → 174 us). 카나리는 "복귀 주소를 쓰기 전에" 막는 장치이지 "넘치는 순간" 막는 장치가 아니다.
+- **SCEN 2 — 못 잡았다**: 재귀 21단(프레임 48 B: `push {lr}` 4 + `sub sp, #44`)이 512 B 스택을 넘어 **이웃 101 B를 덮었는데** `rec(20)=210`이 정상으로 돌아왔다. 프레임마다 카나리는 자기 위치에서 멀쩡했기 때문이다. 컴파일러 카나리는 스택 상자의 크기를 모른다.
+- **생성 코드**: 진입 때 `ldr r2, [pc, #64]`(guard 주소 0x20000004) → `ldr r2, [r2]` → `str r2, [sp, #36]`(배열 `buf` 위에 저장), return 전 `ldr`·`ldr`·`eors`·`bne`로 비교. 함수당 약 9명령 + 4 B다. `mov.w r2, #0`은 레지스터에 guard 값이 남지 않게 지우는 코드다.
+- 처음 빌드에서는 `rec(20)`이 **컴파일 시점에 상수 210으로 접혀** 재귀 자체가 사라졌고, SCEN 1은 GCC가 `-Warray-bounds`로 컴파일 시점에 경고했다. 깊이를 `volatile`로, 문자열을 `volatile` 포인터로 바꿔서 런타임 버그로 만들었다 — 스택 실험은 생성 코드를 확인해야 한다(A4·C9의 같은 교훈).
+
+### 7.3 비용 — 세 수준
+
+```sh
+for f in "" -fstack-protector -fstack-protector-strong -fstack-protector-all; do
+  TAG=ex8_sz ./run.sh fr ex8 EXTRA_CFLAGS="-DF3_STACK_METHOD=0 -DSCEN=2 $f" >/dev/null 2>&1
+  printf "%-28s " "${f:-none}"; arm-none-eabi-size ex8_sz/app.elf | tail -1 | awk '{print "text="$1}'
+  echo -n "   chk_fail call sites: "; arm-none-eabi-objdump -d ex8_sz/app.elf | grep -c "bl.*<__stack_chk_fail>"
+done
+```
+
+```text
+none                         text=11240
+   chk_fail call sites: 0
+-fstack-protector            text=11492
+   chk_fail call sites: 3
+-fstack-protector-strong     text=11640
+   chk_fail call sites: 7
+-fstack-protector-all        text=13752
+   chk_fail call sites: 63
+```
+
+| 수준 | 보호하는 함수 (GCC 기준) | 이 앱 코드 크기 | 보호된 함수 |
+|---|---|---|---|
+| `-fstack-protector` | `char` 배열이 8 B 넘는 함수, `alloca` | +2.2% | 3 |
+| `-fstack-protector-strong` | 지역 배열이 있거나 지역 변수 주소를 쓰는 함수 | +3.6% | 7 |
+| `-fstack-protector-all` | 모든 함수 | +22% | 63 |
+
+`-strong`이 실무 기본값이다. 커널(FreeRTOS 소스 포함 전부)에 같이 적용된 값이다. 시간 비용은 보호된 함수 호출마다 약 9명령이라 1 kHz 루프에서는 무시할 수준이지만, 20 kHz FOC ISR 안의 작은 함수에는 `__attribute__((no_stack_protector))`(GCC 11+)나 파일 단위 옵션으로 뺀다.
+
+### 7.4 Zephyr에서는
+
+`CONFIG_STACK_CANARIES`(기본 수준), `_STRONG`, `_ALL`, `_EXPLICIT`(`stack_protect` 속성 함수만, Zephyr SDK 툴체인일 때) 중 하나를 고른다(`kernel/Kconfig`). 모두 `ENTROPY_GENERATOR` 또는 `TEST_RANDOM_GENERATOR`에 의존한다 — 부팅 때 `kernel/init.c`가 난수로 `__stack_chk_guard`를 채우기 때문이다(QEMU에서 켜려면 `CONFIG_TEST_RANDOM_GENERATOR=y`, 이 노트에서는 켜 보지 않았다). `__stack_chk_fail`은 `kernel/compiler_stack_protect.c`의 `_StackCheckHandler()` 별칭이고 `z_except_reason(K_ERR_STACK_CHK_FAIL)`을 부른다 — **스택 넘침과 같은 reason 코드 2**라서 fatal 핸들러만 보고는 어느 쪽인지 모른다. 로그의 fault 종류(MPU/USAGE FAULT vs 없음)로 구분한다. `CONFIG_STACK_CANARIES_TLS`를 켜면 스레드마다 다른 카나리를 쓴다.
+
+양산 판단: 카나리는 **외부 입력을 파싱하는 코드**(MAVLink, CAN 진단, 셸 명령, OTA 메타데이터)의 버퍼 넘침을 잡는 보안 장치다. 스택 크기 부족은 못 잡는다. 둘은 서로를 대체하지 않는다.
+
+---
+
+## 8. 탐지 ③ — 하드웨어: MPU 가드와 PSPLIM · MSPLIM
+
+> 🔁 이 절은 Bare-Metal BM C9(MPU bare-metal 용도 — 스택 가드 부분)와 겹친다 (주인: 이 노트).
+
+### 8.1 두 하드웨어 장치의 차이
+
+| | MPU 스택 가드 (Armv7-M, F4) | PSPLIM · MSPLIM (Armv8-M Mainline, B7 §4.4) |
+|---|---|---|
+| 무엇을 비교하나 | **메모리 접근 주소**가 가드 리전 안인가 | **SP 값**이 한계 아래로 내려가나 |
+| 언제 | 가드에 읽기·쓰기하는 그 명령 | SP를 바꾸는 그 명령(`sub sp`, `push`, 예외 진입 스태킹) |
+| 놓치는 것 | 가드를 **건너뛴** 접근 (큰 배열의 낮은 주소만 쓰기) | SP를 안 움직이는 잘못된 포인터 쓰기 |
+| 비용 | MPU 리전 하나 + 스위치 때 리전 교체 | 스위치 때 레지스터 하나 저장·복원 |
+| fault | MemManage (DACCVIOL 또는 MSTKERR) | UsageFault STKOF (CFSR = 0x00100000) |
+| 가드 크기 | Zephyr: 최소 리전이 32 B 이하면 64 B(`MPU_GUARD_ALIGN_AND_SIZE`), FPU 공유 시 더 큼 | 0 B — 경계 그 자체 |
+
+Zephyr `include/zephyr/arch/arm/arch.h` 주석이 가드 크기의 이유를 적어 두었다: 가드에서 fault가 나면 **예외 프레임(0x20 B)이 가드 안으로 쌓이므로** 가드가 그보다 커야 한다. MPU 리전 규칙(정렬, 2의 거듭제곱 크기, subregion)은 F4가 다룬다.
+
+### 8.2 예제 9 — Cortex-M33 + FreeRTOS: 태스크별 PSPLIM이 "그 명령"에서 잡는다
+
+**무엇을 확인하나**: B7 예제 7은 bare-metal로 PSPLIM 한 번을 보였다. 여기서는 **FreeRTOS ARM_CM33_NTZ 포트**(Secure 전용으로 실행 — QEMU an505가 Secure로 부팅)에서, 포트가 태스크마다 넣어 준 PSPLIM이 네 장면을 어떻게 다루는지 본다. SCEN 1: 600 B 배열 전체 쓰기. SCEN 3: 낮은 64 B만 쓰기(방식 2·센티널·MPU 가드가 놓친 모양). SCEN 5: SP를 바닥 16 B 위에 두고 IRQ — 예외 프레임만 넘침(예제 7 SCEN 1의 M33판). SCEN 6: MSPLIM을 `main()`에서 직접 걸고 ISR이 1200 B 지역 버퍼를 쓰기. 스택 검사 방식은 0으로 꺼서 하드웨어만 본다.
+
+하네스는 B7의 multi-core 하네스(semihosting 출력, 링커 스크립트 템플릿)를 F3 폴더로 복사해 고쳤다. fault 핸들러가 CFSR, 스택된 PC, PSP·PSPLIM·MSP·MSPLIM을 찍고, 앱이 정의한 `f3_fault_extra()`를 부른다.
+
+```c
+/* F3 M33(an505) 하네스: 벡터(+IRQ0..7) · 리셋 · fault 출력(CFSR, 스택된 PC, PSP/PSPLIM, MSP/MSPLIM) */
+#include "semi.h"
+extern uint32_t _sidata, _sdata, _edata, _sbss, _ebss, _estack;
+int main(void);
+void SysTick_Handler(void); void SVC_Handler(void); void PendSV_Handler(void);
+void Reset_Handler(void); void Fault_Handler(void);
+void IRQ0_Handler(void) __attribute__((weak, alias("Fault_Handler")));
+const char *f3_task_name(void) __attribute__((weak));
+const char *f3_task_name(void) { return "-"; }
+void f3_fault_extra(void) __attribute__((weak));
+void f3_fault_extra(void) { }
+__attribute__((used)) void f3_fault(uint32_t *fr, uint32_t exc_lr)
+{
+    uint32_t ipsr, psp, psplim, msp, msplim;
+    __asm volatile("mrs %0, ipsr\n mrs %1, psp\n mrs %2, psplim\n mrs %3, msp\n mrs %4, msplim"
+                   : "=r"(ipsr), "=r"(psp), "=r"(psplim), "=r"(msp), "=r"(msplim));
+    semi_printf("[fault] exception %u CFSR=0x%x HFSR=0x%x  task=%s EXC_RETURN=0x%x\n", ipsr,
+                REG32(0xE000ED28u), REG32(0xE000ED2Cu), f3_task_name(), exc_lr);
+    semi_printf("  PSP=0x%x PSPLIM=0x%x  MSP=0x%x MSPLIM=0x%x  frame@0x%x stacked PC=0x%x\n",
+                psp, psplim, msp, msplim, (uint32_t)fr, fr[6]);
+    f3_fault_extra();
+    semi_exit(255);
+}
+__attribute__((naked)) void Fault_Handler(void)
+{
+    __asm volatile("tst lr, #4\n ite eq\n mrseq r0, msp\n mrsne r0, psp\n mov r1, lr\n b f3_fault");
+}
+__attribute__((section(".isr_vector"), used))
+void (*const g_vectors[16 + 8])(void) = {
+    (void (*)(void))&_estack, Reset_Handler, Fault_Handler, Fault_Handler,
+    Fault_Handler, Fault_Handler, Fault_Handler, Fault_Handler, 0, 0, 0,
+    SVC_Handler, Fault_Handler, 0, PendSV_Handler, SysTick_Handler,
+    IRQ0_Handler, Fault_Handler, Fault_Handler, Fault_Handler, Fault_Handler, Fault_Handler, Fault_Handler, Fault_Handler,
+};
+void Reset_Handler(void)
+{
+    uint32_t *s = &_sidata, *d = &_sdata;
+    while (d < &_edata) *d++ = *s++;
+    for (d = &_sbss; d < &_ebss; ) *d++ = 0;
+    REG32(0xE000ED24u) |= (1u << 16) | (1u << 17) | (1u << 18);   /* SHCSR: MemManage/BusFault/UsageFault 따로 */
+    semi_exit(main());
+}
+void *memcpy(void *d, const void *s, unsigned n) { char *a = d; const char *b = s; while (n--) *a++ = *b++; return d; }
+void *memset(void *d, int c, unsigned n) { char *a = d; while (n--) *a++ = (char)c; return d; }
+```
+
+`FreeRTOSConfig.h`는 B7의 최소 설정(정적 할당, `configENABLE_MPU 0`, `configENABLE_TRUSTZONE 0`, `configRUN_FREERTOS_SECURE_ONLY 1`)에 `INCLUDE_uxTaskGetStackHighWaterMark`와 `configCHECK_FOR_STACK_OVERFLOW F3_STACK_METHOD`(기본 0)를 더했다. 앱이다.
+
+```c
+/* ex6: Cortex-M33 + FreeRTOS ARM_CM33_NTZ — 태스크별 PSPLIM이 스택 넘침을 "그 명령"에서 잡는다 */
+#include "FreeRTOS.h"
+#include "task.h"
+#define NVIC_ISER0 REG32(0xE000E100u)
+#define NVIC_ISPR0 REG32(0xE000E200u)
+static struct { uint32_t neighbor[64]; StackType_t stack[128]; } area;   /* 스택 바로 아래에 이웃 */
+static StaticTask_t tcbV, tcbJ; static StackType_t stkJ[256];
+const char *f3_task_name(void) { return pcTaskGetName(NULL); }
+void vApplicationStackOverflowHook(TaskHandle_t t, char *name) { (void)t; semi_printf("[hook] %s\n", name); semi_exit(251); }
+static volatile uint32_t sp_before_irq;
+void IRQ0_Handler(void)
+{
+#if SCEN == 6                                         /* ISR 하나가 MSP 1 KB 한도보다 큰 지역 버퍼 */
+    volatile uint8_t big[1200]; big[0] = 1; big[1] = big[0];
+#endif
+}
+void f3_fault_extra(void)
+{
+    int bad = 0; for (int i = 0; i < 64; i++) bad += area.neighbor[i] != 0x11111111u;
+    semi_printf("  neighbor words corrupted before the fault = %u, task SP before IRQ = 0x%x\n", (uint32_t)bad, sp_before_irq);
+}
+static __attribute__((noinline)) void deep(void)
+{
+#if SCEN == 5                                         /* ISR 하드웨어 프레임만 바닥 밑으로 */
+    uint32_t sp; __asm volatile("mov %0, sp" : "=r"(sp));
+    volatile uint8_t pad[sp - (uint32_t)area.stack - 16];   /* SP를 바닥 + 16 B 근처로 */
+    pad[0] = 1;
+    __asm volatile("mov %0, sp" : "=r"(sp_before_irq));
+    NVIC_ISPR0 = 1u; __asm volatile("dsb\n isb");        /* 여기서 IRQ0 → 32 B 프레임 */
+    (void)pad[0];
+#elif SCEN == 6
+    NVIC_ISPR0 = 1u; __asm volatile("dsb\n isb");
+#else
+    volatile uint8_t b[600];                          /* 512 B 스택에 600 B 지역 배열 */
+#if SCEN == 3
+    for (int i = 0; i < 64; i++) b[i] = 0;            /* 가장 낮은 64 B만 = 카나리·가드 건너뛰기 */
+#else
+    for (unsigned i = 0; i < sizeof b; i++) b[i] = 0;
+#endif
+    b[1] = b[0];
+#endif
+}
+static void victim(void *pv)
+{
+    (void)pv;
+    uint32_t lim; __asm volatile("mrs %0, psplim" : "=r"(lim));
+    semi_printf("victim: stack 0x%x..0x%x  PSPLIM=0x%x\n", (uint32_t)area.stack, (uint32_t)&area.stack[128], lim);
+    deep();
+    for (;;) vTaskDelay(1);
+}
+static void judge(void *pv)
+{
+    (void)pv; vTaskDelay(20);
+    int bad = 0; for (int i = 0; i < 64; i++) bad += area.neighbor[i] != 0x11111111u;
+    semi_printf("judge: no fault in 20 ms, neighbor words corrupted = %u\n", (uint32_t)bad);
+    semi_exit(0);
+}
+int main(void)
+{
+    for (int i = 0; i < 64; i++) area.neighbor[i] = 0x11111111u;
+    REG32(0xE000E400u) = 0x40; NVIC_ISER0 = 1u;       /* IRQ0 우선순위 0x40, 허용 */
+#if SCEN == 6
+    extern uint32_t _estack;                          /* FreeRTOS는 MSPLIM을 안 건드린다 → 직접 설정 */
+    __asm volatile("msr msplim, %0" : : "r"((uint32_t)&_estack - 1024u));
+#endif
+    semi_printf("scenario=%u stack-check method=%u\n", SCEN, configCHECK_FOR_STACK_OVERFLOW);
+    xTaskCreateStatic(victim, "victim", 128, NULL, 2, area.stack, &tcbV);
+    xTaskCreateStatic(judge, "judge", 256, NULL, 1, stkJ, &tcbJ);
+    vTaskStartScheduler();
+}
+```
+
+```sh
+#!/bin/bash
+# build.sh <out> <app.c> [CFL...] — FreeRTOS ARM_CM33_NTZ(Secure-only) 앱을 mps2-an505로 빌드·실행 (icount shift=5)
+out=$1; app=$2; shift 2
+K=/var/rtoslab/src/FreeRTOS-Kernel; P=$K/portable/GCC/ARM_CM33_NTZ/non_secure; H=/Users/donh/.rtos_scratch/F3/m33
+mkdir -p $out; sed -e "s/@FO@/0x10000000/;s/@FL@/4M/;s/@RO@/0x38000000/;s/@RL@/4M/" $H/mem.ld.in > $out/mem.ld
+arm-none-eabi-gcc -mthumb -mcpu=cortex-m33 -mfloat-abi=soft -O2 -g -std=gnu11 -Wall -Wextra -ffreestanding \
+  -ffunction-sections -fdata-sections -DCPU_HZ=20000000u -I$H -I$K/include -I$P "$@" $app $H/start33.c $H/semi.c \
+  $K/tasks.c $K/list.c $K/queue.c $P/port.c $P/portasm.c \
+  -nostdlib -T $out/mem.ld -Wl,--gc-sections -Wl,-Map=$out/app.map -lgcc -o $out/app.elf || exit 9
+timeout --foreground ${TO:-10} qemu-system-arm -machine mps2-an505 -nographic -monitor none -serial null \
+  -semihosting-config enable=on,target=native -icount shift=5,align=off,sleep=off -kernel $out/app.elf; echo "[rc=$?]"
+```
+
+```sh
+for s in 1 3 5 6; do ~/.rtos_scratch/F3/m33/build.sh /var/tmp/rtos/F3/m33_s$s ~/.rtos_scratch/F3/m33/ex6.c -DSCEN=$s; done
+arm-none-eabi-objdump -d --no-show-raw-insn /var/tmp/rtos/F3/m33_s1/app.elf | grep -A3 "<deep>:"
+arm-none-eabi-objdump -d --no-show-raw-insn /var/tmp/rtos/F3/m33_s6/app.elf | grep -A3 "<IRQ0_Handler>:"
+```
+
+```text
+scenario=1 stack-check method=0
+victim: stack 0x38000590..0x38000790  PSPLIM=0x38000590
+[fault] exception 6 CFSR=0x100000 HFSR=0x0  task=victim EXC_RETURN=0xfffffffd
+  PSP=0x38000760 PSPLIM=0x38000590  MSP=0x383fffa0 MSPLIM=0x0  frame@0x38000760 stacked PC=0x10000062
+  neighbor words corrupted before the fault = 0, task SP before IRQ = 0x0
+[rc=1]
+scenario=3 stack-check method=0
+victim: stack 0x38000590..0x38000790  PSPLIM=0x38000590
+[fault] exception 6 CFSR=0x100000 HFSR=0x0  task=victim EXC_RETURN=0xfffffffd
+  PSP=0x38000760 PSPLIM=0x38000590  MSP=0x383fffa0 MSPLIM=0x0  frame@0x38000760 stacked PC=0x10000062
+  neighbor words corrupted before the fault = 0, task SP before IRQ = 0x0
+[rc=1]
+scenario=5 stack-check method=0
+victim: stack 0x38000590..0x38000790  PSPLIM=0x38000590
+[fault] exception 6 CFSR=0x100000 HFSR=0x0  task=victim EXC_RETURN=0xfffffffd
+  PSP=0x38000590 PSPLIM=0x38000590  MSP=0x383fffa0 MSPLIM=0x0  frame@0x38000590 stacked PC=0xa5a5a5a5
+  neighbor words corrupted before the fault = 0, task SP before IRQ = 0x380005a0
+[rc=1]
+scenario=6 stack-check method=0
+victim: stack 0x38000590..0x38000790  PSPLIM=0x38000590
+[fault] exception 6 CFSR=0x100000 HFSR=0x0  task=victim EXC_RETURN=0xfffffff1
+  PSP=0x38000760 PSPLIM=0x38000590  MSP=0x383fff80 MSPLIM=0x383ffc00  frame@0x383fffc0 stacked PC=0x100000da
+  neighbor words corrupted before the fault = 0, task SP before IRQ = 0x0
+[rc=1]
+10000060 <deep>:
+10000060:	movs	r3, #0
+10000062:	sub.w	sp, sp, #600	@ 0x258
+10000066:	mov	r2, sp
+100000d8 <IRQ0_Handler>:
+100000d8:	movs	r2, #1
+100000da:	sub.w	sp, sp, #1200	@ 0x4b0
+100000de:	strb.w	r2, [sp]
+```
+
+(`task SP before IRQ`는 SCEN 5에서만 의미가 있고 나머지는 0이다.)
+
+**출력에서 볼 것**:
+
+- **포트가 PSPLIM = 스택 바닥을 넣었다**: `victim`의 `PSPLIM=0x38000590`이 `area.stack` 시작 주소와 같다. 사용자는 아무 코드도 쓰지 않았다(§9에서 포트 소스 확인).
+- **SCEN 1·3: `sub.w sp, sp, #600` 그 명령에서**: 스택된 PC 0x10000062가 objdump의 `sub.w sp, sp, #600`이다. SP(0x38000760)는 아직 안 바뀌었고 **이웃 0워드 손상**. 장면 ③(낮은 64 B만 쓰기)도 똑같이 잡혔다 — PSPLIM은 "어디에 쓰나"가 아니라 "SP가 어디로 가나"를 보므로, 쓰기 전에 SP를 내리는 순간 걸린다. C9에서 방식 2·센티널이 놓친 모양이고, §8.4에서 M3의 MPU 가드가 놓친 모양(가드 건너뛰기)도 같은 이유로 잡힌다.
+- **SCEN 5: 예외 진입 스태킹에서**: 태스크 SP는 0x380005a0(한계 16 B 위). IRQ가 32 B 프레임을 쌓으려는 순간 STKOF가 났다. fault 핸들러가 본 PSP는 **정확히 PSPLIM 값**이고, 그 자리의 "프레임"은 0xa5a5a5a5(FreeRTOS 채움값) 그대로 — 프레임이 정상으로 쌓이지 않았다. 즉 **이 경우 fault 핸들러는 스택된 PC를 믿으면 안 된다**. Zephyr도 같은 상황에서 "Stack overflow (context area not valid)"라고 찍는다(§8.4). 이 동작은 QEMU에서 관찰한 것이고, 실칩에서 같은 값이 남는지는 이 노트에서 확인하지 못했다.
+- **SCEN 6: MSPLIM**: FreeRTOS가 MSPLIM을 안 쓰므로 SCEN 1·3·5의 `MSPLIM=0x0`이다(0 = 한계 없음). `main()`에서 직접 `_estack − 1 KB`로 걸자 ISR의 `sub.w sp, sp, #1200`(PC 0x100000da)에서 잡혔다. EXC_RETURN 0xfffffff1 = Handler 모드에서 온 예외 — 즉 **ISR 안의** 넘침이다(task=victim은 "그때 돌던 태스크"일 뿐이다). 1 KB 한계라 fault 핸들러가 쓸 MSP 여유는 남아 있었다. 실무에서는 MSPLIM을 바닥에 바로 걸지 말고 **fault 핸들러가 쓸 만큼 위**에 걸거나, 핸들러가 스택을 거의 안 쓰게 만든다(B7 직접 해보기 4).
+- 네 장면 모두 CFSR = 0x00100000(UFSR bit 4 STKOF), HFSR = 0 — SHCSR에서 UsageFault를 켜 두었기 때문에 HardFault로 승격되지 않았다. 켜지 않으면 HardFault + HFSR.FORCED로 온다(M1).
+
+### 8.3 PSPLIM이 놓치는 것
+
+- SP를 움직이지 않는 잘못된 쓰기: `char *p = buf; p[-700] = x;`, 이웃 태스크 스택 주소를 가진 dangling 포인터. 이것은 스택 넘침이 아니라 메모리 오염이고 MPU 격리(F4·F5)의 몫이다.
+- **PendSV의 소프트웨어 문맥 저장**: FreeRTOS CM33 포트는 `stmdb r0!, {r2-r11}`처럼 PSP를 **범용 레지스터 r0에 복사해서** 그 아래에 쓴다. SP를 바꾸는 명령이 아니므로 PSPLIM 검사 대상이 아니다. 다만 그 직전 하드웨어 스태킹(예외 진입)이 이미 한계를 검사했고, 태스크 스택에 문맥 저장 몫(⑤)을 넣어 두었다면 문제가 없다. 산정에서 ⑤를 빼면 이 틈으로 넘친다.
+- Armv8-M **Baseline**(M23)의 Non-secure 쪽에는 PSPLIM이 없다. 포트 소스 주석: "Cortex-M23 does not have non-secure PSPLIM"(`portUSE_PSPLIM_REGISTER` 0, B7 §4.4).
+
+### 8.4 예제 10 — Zephyr: 같은 앱, M3(MPU 가드) vs M33(PSPLIM)
+
+**무엇을 확인하나**: 예제 4의 앱을 `mps2/an521/cpu0`(M33)에서도 돌린다. `CONFIG_HW_STACK_PROTECTION=y` 한 줄이 M3에서는 `MPU_STACK_GUARD`로, M33에서는 `BUILTIN_STACK_GUARD`(PSPLIM)로 풀린다(B7 예제 12). SCEN 1(300 B 버퍼 + printk — 산정 실수)과 SCEN 4(가드 건너뛰기)를 본다.
+
+```text
+=== mps2/an385 scen 1
+*** Booting Zephyr OS build v4.4.2 ***
+board=mps2/an385 scen=1 MPU_GUARD=1 BUILTIN_GUARD(PSPLIM)=0
+***** MPU FAULT *****
+  Stacking error (context area might be not valid)
+  Data Access Violation
+  MMFAR Address: 0x20000734
+r0/a1:  0x00000000  r1/a2:  0x00000000  r2/a3:  0x00000000
+r3/a4:  0x00000000 r12/ip:  0x00000000 r14/lr:  0x00000000
+ xpsr:  0x00000000
+Faulting instruction address (r15/pc): 0x00000000
+[fatal handler] reason=2 (K_ERR_STACK_CHK_FAIL=2) thread=worker
+main: worker unused=84 B, neighbor stk[0] corrupted bytes=0
+Thread analyze:
+ idle                : STACK: unused 208 usage 48 / 256 (18 %); CPU: 83 %
+ main                : STACK: unused 476 usage 548 / 1024 (53 %); CPU: 12 %
+ ISR0                : STACK: unused 3772 usage 324 / 4096 (7 %); CPU: 0 %
+=== mps2/an521/cpu0 scen 1
+*** Booting Zephyr OS build v4.4.2 ***
+board=mps2/an521/cpu0 scen=1 MPU_GUARD=0 BUILTIN_GUARD(PSPLIM)=1
+***** USAGE FAULT *****
+  Stack overflow (context area not valid)
+r0/a1:  0x38000758  r1/a2:  0x10003ed8  r2/a3:  0x3800078c
+r3/a4:  0x10000639 r12/ip:  0xaaaaaaaa r14/lr:  0x10000677
+ xpsr:  0x21000200
+Faulting instruction address (r15/pc): 0x10002636
+[fatal handler] reason=2 (K_ERR_STACK_CHK_FAIL=2) thread=worker
+main: worker unused=48 B, neighbor stk[0] corrupted bytes=0
+Thread analyze:
+ idle                : STACK: unused 208 usage 48 / 256 (18 %); CPU: 87 %
+ main                : STACK: unused 476 usage 548 / 1024 (53 %); CPU: 9 %
+ ISR0                : STACK: unused 3788 usage 308 / 4096 (7 %); CPU: 0 %
+=== mps2/an521/cpu0 scen 4
+*** Booting Zephyr OS build v4.4.2 ***
+board=mps2/an521/cpu0 scen=4 MPU_GUARD=0 BUILTIN_GUARD(PSPLIM)=1
+***** USAGE FAULT *****
+  Stack overflow (context area not valid)
+r0/a1:  0x00000000  r1/a2:  0x00000000  r2/a3:  0x00000000
+r3/a4:  0x00000000 r12/ip:  0xaaaaaaaa r14/lr:  0x10002b79
+ xpsr:  0x41000000
+Faulting instruction address (r15/pc): 0x10000544
+[fatal handler] reason=2 (K_ERR_STACK_CHK_FAIL=2) thread=worker
+main: worker unused=456 B, neighbor stk[0] corrupted bytes=0
+Thread analyze:
+ idle                : STACK: unused 208 usage 48 / 256 (18 %); CPU: 87 %
+ main                : STACK: unused 476 usage 548 / 1024 (53 %); CPU: 10 %
+ ISR0                : STACK: unused 3788 usage 308 / 4096 (7 %); CPU: 0 %
+```
+
+(thread analyzer의 `Total CPU cycles used` 줄은 생략했다.) fault PC를 찾아본다.
+
+```sh
+arm-none-eabi-addr2line -f -e /var/tmp/rtos/F3/z_mps2_an521_cpu0_s1/zephyr/zephyr.elf 0x10002636
+arm-none-eabi-objdump -d --no-show-raw-insn /var/tmp/rtos/F3/z_mps2_an521_cpu0_s4/zephyr/zephyr.elf | grep -B2 -A2 "10000544:"
+```
+
+```text
+vfprintf
+/var/rtoslab/zephyrproject/modules/lib/picolibc/newlib/libc/tinystdio/vfprintf.c:510
+10000540:	movs	r3, #0
+10000542:	push	{r4, lr}
+10000544:	sub.w	sp, sp, #600	@ 0x258
+10000548:	mov	r1, sp
+1000054a:	mov	r4, r3
+```
+
+
+
+| 장면 | M3 MPU 가드 (an385) | M33 PSPLIM (an521) |
+|---|---|---|
+| SCEN 1: 300 B + `printk` | 잡음 — 단, **예외 스태킹 중**(MSTKERR), PC = 0, 레지스터 전부 0 | 잡음 — `vfprintf` 안의 SP 감소 명령, 레지스터 유효 |
+| SCEN 4: 가드 건너뛰기 | **놓침**, 이웃 132 B 파손, analyzer "23%" (예제 4) | 잡음 — `work()`의 `sub.w sp, sp, #600`, 이웃 0 B |
+
+**출력에서 볼 것**:
+
+- **산정 실수(SCEN 1)는 흔하다**: 300 B 버퍼 + `printk` 하나가 512 B 스택을 넘었다. 예제 4의 160 B 버전이 404 B를 썼으니 300 B면 544 B — 산수로도 넘친다.
+- **MPU 가드의 fault는 정보가 적다**: M3에서는 SP가 가드 근처까지 내려간 상태에서 예외(아마 tick이나 PendSV)가 들어와 **프레임을 쌓다가** 가드에 걸렸다(`Stacking error`, MMFAR 0x20000734 = 스택 시작 0x20000740 아래 가드 안). 프레임이 안 쌓였으니 PC·레지스터가 모두 0이다. "어느 함수에서 넘쳤나"를 모른다. thread analyzer의 ISR0 사용량이 324 B로 커진 것은 fault 처리 자체가 ISR 스택을 쓴 흔적이다.
+- **PSPLIM은 명령 단위로 정확하다**: SCEN 1은 `vfprintf`(picolibc tinystdio — 이 Zephyr 빌드의 printk 백엔드) 안, SCEN 4는 `work()`의 `sub.w sp, sp, #600`. 두 경우 모두 이웃 0 B.
+- Zephyr는 PSPLIM으로 잡은 경우에도 "Stack overflow (**context area not valid**)"라고 찍는다. 예제 9 SCEN 5에서 본 것처럼, 스택 한계 fault에서는 스택된 프레임을 신뢰할 수 없다는 것을 커널이 알고 있다. 실제로 위 레지스터 덤프에는 `r12/ip: 0xaaaaaaaa`처럼 Zephyr 채움값(0xaa)이 섞여 있다. 이번에는 PC가 objdump와 맞았지만, 이런 덤프는 PSP·스레드 이름과 함께 조심해서 읽는다.
+- 세 경우 모두 `k_sys_fatal_error_handler`가 return하자 worker만 abort되고 main은 계속 돌았다(C9 §11.4와 같다).
+
+### 8.5 어떤 보호를 켜나 — 결정 표
+
+| 코어 | 1순위 | 보조 | 비고 |
+|---|---|---|---|
+| M0 / M0+ (v6-M) | 방식 2 / 센티널 | MPU가 있으면(M0+ 옵션) 가드 | 하드웨어 한계 레지스터 없음 |
+| M3 / M4 / M7 (v7-M) | MPU 가드 (Zephyr `MPU_STACK_GUARD`, FreeRTOS-MPU 포트는 F5) | 방식 2, 정적 산정 | 가드 건너뛰기에 약함 → 큰 지역 배열 금지 규칙 |
+| M33 / M55 / M85 (v8-M Main) | PSPLIM(포트가 자동) + **MSPLIM은 직접**(FreeRTOS) | 방식 2(값싼 이중 안전) | 가장 강함 |
+| M23 (v8-M Base) Non-secure | MPU 가드 | 방식 2 | NS 쪽 PSPLIM 없음 |
+| Cortex-R / RISC-V | MPU/PMP 가드 | 방식 2, RISC-V는 방식 3(미검증 경고) | B9, B10 |
+
+FreeRTOS 기본 포트(ARM_CM3/CM4F/CM7)에는 **MPU 가드가 없다**. MPU를 쓰는 FreeRTOS-MPU 포트(`portUSING_MPU_WRAPPERS == 1`)는 태스크 스택을 MPU 리전으로 감싸는 대신 방식 1·2를 끈다(stack_macros.h 조건). 그 설계는 F5에서 본다.
+
+---
+
+## 9. RTOS 커널 안에서는 무슨 일이 일어나나
+
+```svg
+<svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="170" y="20" font-size="14" text-anchor="middle">FreeRTOS V11.3.2</text>
+<text x="510" y="20" font-size="14" text-anchor="middle">Zephyr v4.4.2</text>
+<rect x="10" y="36" width="320" height="50" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="20" y="56" font-size="12">tasks.c prvInitialiseNewTask()</text>
+<text x="20" y="76" font-size="12">memset(pxStack, 0xa5) — 칠하기</text>
+<rect x="10" y="96" width="320" height="50" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="20" y="116" font-size="12">port pxPortInitialiseStack()</text>
+<text x="20" y="136" font-size="12">CM33: 첫 프레임에 PSPLIM = pxStack</text>
+<rect x="10" y="156" width="320" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="20" y="176" font-size="12">vTaskSwitchContext()</text>
+<text x="20" y="196" font-size="12">taskCHECK_FOR_STACK_OVERFLOW() → 훅</text>
+<rect x="10" y="216" width="320" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="20" y="236" font-size="12">portasm.c PendSV: mrs/msr psplim</text>
+<text x="20" y="256" font-size="12">태스크마다 PSPLIM 저장 · 복원</text>
+<rect x="10" y="276" width="320" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="20" y="296" font-size="12">uxTaskGetStackHighWaterMark()</text>
+<text x="20" y="316" font-size="12">→ prvTaskCheckFreeStackSpace() 0xa5 세기</text>
+<rect x="10" y="336" width="320" height="50" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="20" y="356" font-size="12">MSP = vector[0]로 재설정 (main 스택 재활용)</text>
+<text x="20" y="376" font-size="12">MSPLIM은 아무도 안 씀 (GCC 포트 0곳)</text>
+<rect x="350" y="36" width="320" height="50" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="360" y="56" font-size="12">kernel/thread.c 생성 시</text>
+<text x="360" y="76" font-size="12">INIT_STACKS 0xaa, SENTINEL 0xF0F0F0F0</text>
+<rect x="350" y="96" width="320" height="50" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="360" y="116" font-size="12">z_arm_interrupt_stack_setup()</text>
+<text x="360" y="136" font-size="12">MSP = z_interrupt_stacks, MSPLIM 설정</text>
+<rect x="350" y="156" width="320" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="360" y="176" font-size="12">z_check_stack_sentinel()</text>
+<text x="360" y="196" font-size="12">스위치 · ISR 끝 · return · k_yield</text>
+<rect x="350" y="216" width="320" height="50" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="360" y="236" font-size="12">스위치 때 PSPLIM(svc.S, arm-m-switch.c)</text>
+<text x="360" y="256" font-size="12">또는 MPU 가드 리전 교체 (F4)</text>
+<rect x="350" y="276" width="320" height="50" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="360" y="296" font-size="12">k_thread_stack_space_get()</text>
+<text x="360" y="316" font-size="12">thread_analyzer_print() — ISR 스택 포함</text>
+<rect x="350" y="336" width="320" height="50" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="360" y="356" font-size="12">z_fatal_error() → k_sys_fatal_error_handler</text>
+<text x="360" y="376" font-size="12">reason 2 = K_ERR_STACK_CHK_FAIL</text>
+</svg>
+```
+그림 8 — 스택 산정·탐지가 커널 소스의 어디에 있나. 파랑은 생성 때, 주황은 스위치 때, 회색은 측정, 빨강은 실패 경로다.
+
+### 9.1 예제 11 — 소스에서 직접 확인
+
+**무엇을 확인하나**: 이 노트의 사실 몇 가지를 V11.3.2·v4.4.2 소스로 다시 본다. "FreeRTOS는 MSPLIM을 쓰지 않는다", "CM33 포트는 PSPLIM을 저장·복원한다", "방식 3은 미검증", "Zephyr는 ISR 스택 바닥에 MSPLIM을 건다".
+
+```sh
+cd /var/rtoslab/src/FreeRTOS-Kernel
+echo "--- FreeRTOS: who writes MSPLIM?"; grep -rlis "msr *msplim" portable/GCC | wc -l
+echo "--- PSPLIM writes in ARM_CM33_NTZ portasm.c"; grep -n "msr *psplim" portable/GCC/ARM_CM33_NTZ/non_secure/portasm.c
+echo "--- method 3 (RISC-V)"; grep -n "warning \"This path" portable/GCC/RISC-V/port.c
+cd /var/rtoslab/zephyrproject/zephyr
+echo "--- Zephyr PSPLIM"; grep -rn "PSPLIM\|psplim\|MSPLIM\|msplim" arch/arm/core/cortex_m/*.S arch/arm/core/cortex_m/*.c arch/arm/include/cortex_m/*.h | grep -i "msr" | head -12
+grep -n "__set_MSPLIM" arch/arm/include/cortex_m/stack.h
+```
+
+```text
+--- FreeRTOS: who writes MSPLIM?
+0
+--- PSPLIM writes in ARM_CM33_NTZ portasm.c
+112:            "    msr psplim, r3                               \n"
+163:            "   msr  psplim, r1                                 \n" /* Set this task's PSPLIM value. */
+394:            "    msr psplim, r3                               \n"
+501:            "   msr psplim, r2                                  \n" /* Restore the PSPLIM register value for the task. */
+--- method 3 (RISC-V)
+108:    #warning "This path not tested, or even compiled yet."
+--- Zephyr PSPLIM
+arch/arm/core/cortex_m/reset.S:101:    msr MSPLIM, r0
+arch/arm/core/cortex_m/reset.S:102:    msr PSPLIM, r0
+arch/arm/core/cortex_m/svc.S:468:    msr PSPLIM, ip
+arch/arm/core/cortex_m/arm-m-switch.c:298:	__asm__ volatile("msr psplim, %0" ::"r"(splim));
+arch/arm/core/cortex_m/thread.c:714:		"msr  PSPLIM, %[_psplim]\n" /* __set_PSPLIM(_psplim) */
+47:	__set_MSPLIM((uint32_t)z_interrupt_stacks[0]);
+```
+
+**출력에서 볼 것**: FreeRTOS GCC 포트 전체에서 `msr msplim`은 **0곳**. PSPLIM은 CM33 포트 `portasm.c`에서 첫 태스크 시작(163행)과 PendSV 복원(501행) 등 네 곳에서 쓴다. Zephyr는 `reset.S`에서 두 레지스터를 0으로 지우고(이전 이미지가 남긴 값 제거), `z_arm_interrupt_stack_setup()`(stack.h 47행)에서 MSPLIM을 ISR 스택 바닥에, 스위치 경로(`svc.S`, `arm-m-switch.c`)와 스레드 시작(`thread.c`)에서 PSPLIM을 스레드마다 건다.
+
+### 9.2 FreeRTOS — 생성, 스위치, 측정
+
+- **생성**: `xTaskCreate()` → `prvCreateTask()`가 스택(`pvPortMallocStack`)을 먼저, TCB를 나중에 할당(스택이 아래로 자라는 포트) → `prvInitialiseNewTask()`가 `memset(pxNewTCB->pxStack, tskSTACK_FILL_BYTE, …)`(1835행, 0xa5) → `pxPortInitialiseStack()`. `portHAS_STACK_OVERFLOW_CHECKING == 1`인 포트(v8-M 계열, `portmacrocommon.h`)는 이 함수가 `pxEndOfStack` 인자를 더 받아 첫 프레임의 PSPLIM 칸에 넣는다(CM33 `port.c`: `*pxTopOfStack = ( StackType_t ) pxEndOfStack; /* Slot used to hold this task's PSPLIM value. */`). 스택이 아래로 자라면 이 값이 `pxStack`, 즉 바닥이다.
+- **스위치**: PendSV(`xPortPendSVHandler`, CM33은 `portasm.c`)가 문맥을 PSP 아래에 저장 → `vTaskSwitchContext()` 안에서 `taskCHECK_FOR_STACK_OVERFLOW()`(방식 1·2) → 다음 태스크 선택 → CM33은 `ldmia r0!, {r2-r11}` 후 `msr psplim, r2`로 새 태스크의 한계 복원.
+- **측정**: `uxTaskGetStackHighWaterMark()` → `prvTaskCheckFreeStackSpace()`(바닥부터 0xa5 세기, 6474행 근처). `vTaskListTasks()`·`uxTaskGetSystemState()`의 HWM 열도 같은 함수다.
+- **ISR 스택**: 커널이 관리하지 않는다. `prvPortStartFirstTask()`가 `0xE000ED08`(VTOR) → 벡터[0] → `msr msp, r0`으로 MSP를 처음 값으로 되돌릴 뿐이다(예제 6의 main 지역 변수 소멸).
+
+### 9.3 Zephyr — 스택 객체, 가드, fatal 경로
+
+- **스택 객체**: `K_THREAD_STACK_DEFINE`은 가드·정렬을 포함한 객체를 만든다. MPU 가드가 있으면 객체의 가장 낮은 `MPU_GUARD_ALIGN_AND_SIZE` 바이트가 가드이고 `stack_info.start`는 그 위다(예제 4: 객체 0x20000700 → start 0x20000740). PSPLIM 빌드에서는 가드 0 B, `stack_info.start`가 곧 PSPLIM 값이다.
+- **생성**: `kernel/thread.c`가 `CONFIG_INIT_STACKS`면 0xaa로 칠하고, `CONFIG_STACK_SENTINEL`이면 가장 낮은 워드에 0xF0F0F0F0을 쓴다(469행).
+- **스위치**: MPU 가드는 `z_arm_configure_dynamic_mpu_regions()`가 리전을 바꿔 끼우고(F4), PSPLIM은 위 grep의 경로로 복원한다.
+- **fatal 경로**: MPU/Usage fault → `z_arm_fault()` → `z_fatal_error()` → `k_sys_fatal_error_handler(reason, esf)`. 스택 넘침(가드·PSPLIM·센티널)과 컴파일러 카나리 모두 reason 2 `K_ERR_STACK_CHK_FAIL`이다.
+
+깊은 컨텍스트 스위치 경로는 C2, MPU 리전 교체는 F4, fault 레지스터 해독은 M1에서 본다.
+
+---
+
+## 10. 실무에서 다시 보기
+
+### 10.1 드론 비행 제어기 — MAVLink 파서와 텔레메트리 태스크
+
+예를 들어 STM32H7급 FC에서 태스크 셋이 IMU rate loop(1~8 kHz), 자세 제어, MAVLink 수신, 텔레메트리 송신, GNSS 파서, SD 로거라면, 스택 문제는 거의 항상 **MAVLink 수신과 텔레메트리**에서 난다.
+
+- **MAVLink 수신 태스크**는 메시지 ID로 핸들러 테이블을 부른다(예제 3 모양). 정적 분석은 테이블을 못 따라가고, 평상 비행에서는 드문 메시지(파라미터 대량 요청, 로그 다운로드, 미션 업로드)가 안 와서 HWM도 작게 나온다. 대책: 핸들러 테이블 주석 파일 + 지상국 시뮬레이터로 **모든 메시지 ID를 한 번씩** 쏘는 스트레스 테스트 뒤 HWM.
+- **텔레메트리 태스크**의 `snprintf("%.2f")` 하나가 700 B 안팎이다(예제 1). 실무 해법은 (1) 텔레메트리를 MAVLink 바이너리 구조체로 보내 문자열 포맷을 없애거나, (2) 문자열 디버그 로그는 낮은 우선순위 로거 태스크 하나로 모으고 그 태스크만 스택을 크게 준다.
+- 비행 중 HWM을 1 Hz로 `SYS_STATUS` 비슷한 메시지에 실어 보내면, 기체마다 "최소 여유"가 지상에 쌓인다. 여유가 정한 문턱(예: 128 B) 아래로 떨어진 기체가 나오면 그 펌웨어 빌드를 조사한다.
+
+```c
+/* 드론 FC 모양: 1 Hz 상태 태스크가 태스크별 최소 여유(B)를 텔레메트리에 싣는다 (설계 스케치, 컴파일만 확인) */
+void stack_report(void)
+{
+    static TaskStatus_t ts[12];
+    UBaseType_t n = uxTaskGetSystemState(ts, 12, NULL);
+    for (UBaseType_t i = 0; i < n; i++) {
+        uint32_t free_b = (uint32_t)ts[i].usStackHighWaterMark * sizeof(StackType_t);
+        telem_put_stack(ts[i].xTaskNumber, free_b);          /* 바이너리 필드, 문자열 포맷 없음 */
+        if (free_b < 128u) telem_flag(TELEM_FLAG_STACK_LOW);
+    }
+}
+```
+
+(이 스니펫은 설계 예시라 **컴파일만** 했다 — 템플릿 설정·`-Wall -Wextra`로 경고 0개, 링크·실행은 안 함. `uxTaskGetSystemState()`와 `usStackHighWaterMark`, `xTaskNumber`는 V11.3.2 `task.h`의 실제 API·필드이고, `telem_put_stack`, `telem_flag`는 선언만 둔 가상의 앱 함수다.)
+
+### 10.2 로봇 관절 모터 컨트롤러 — 20 kHz FOC ISR과 MSP
+
+FOC 전류 루프는 보통 ISR 안에서 돈다(F 연산, Clarke·Park 변환, PI). Cortex-M4F/M7이면 ISR이 FPU를 써서 프레임이 104 B가 되고, 그 ISR이 CAN 수신 ISR과 통신 타이머 ISR을 끊을 수 있다면 MSP 예산은 예제 5의 MSP 줄 그대로 계산한다. FOC ISR 안의 작은 수학 함수에는 `-fstack-protector-strong`의 카나리 비용(함수당 약 9명령)이 50 us 주기에서 의미 있을 수 있으니, 그 파일만 옵션을 빼고 대신 정적 분석으로 프레임 상한을 고정한다. v8-M MCU(예: Cortex-M33 기반 모터 MCU)라면 MSPLIM을 반드시 건다 — ISR 스택 넘침은 **모든** 태스크를 망가뜨린다(B1 §5).
+
+### 10.3 센서 허브 MCU — 정적 할당과 링커 맵
+
+Linux SoC 옆에서 IMU 타임스탬프를 담당하는 센서 허브는 태스크가 적고 고정적이다. `xTaskCreateStatic()` / `K_THREAD_STACK_DEFINE`으로 스택을 **정적 배열**로 두면 링커 맵에 스택 이름과 주소가 그대로 남는다 — 예제 2 같은 사고가 났을 때 "깨진 주소 바로 위의 배열이 누구 스택인가"를 맵 파일 한 번으로 안다. 그리고 각 스택 사이에 MPU 가드나 PSPLIM을 두면 이웃 손상 자체가 없다.
+
+### 10.4 Don의 SSD 컨트롤러 펌웨어와 나란히
+
+SSD 컨트롤러는 코어마다 스택이 하나인 executive 구조가 많아서 "태스크마다 스택"은 없었지만, 같은 원리가 있었다: 예외 스택 · IRQ 스택 · 메인 스택이 분리되고(Cortex-R의 모드별 SP, B9), 스택 끝에 패턴을 두고 주기적으로 확인하고, 양산 덤프에서 최고 수위를 본다. RTOS에서 달라지는 것은 상자의 개수(태스크 수만큼)와 **상자끼리 붙어 있다**는 점이다. SSD에서 "IRQ 스택이 넘쳐 메인 스택 데이터를 덮는다"를 한 번 겪었다면, RTOS에서는 그것이 태스크 쌍마다 일어날 수 있다고 보면 된다. 면접에서는 이 경험을 "패턴 검사는 사후 검사였고, 그래서 v8-M에서는 PSPLIM을, v7-M에서는 MPU 가드를 1순위로 둔다"로 연결해 말하면 좋다.
+
+---
+
+## 11. 흔한 실수와 증상
+
+| 실수 | 증상 | 원인 | 고치는 법 |
+|---|---|---|---|
+| 지역 버퍼 크기만 보고 스택을 정함 | 드문 경로에서 이웃 태스크 정지·HardFault | libc(`snprintf`) 내부 프레임 350~700 B 누락 (예제 1·2) | libc 실측 표 + 경로 합 (§3, §4.5) |
+| 정적 분석 도구 값을 그대로 믿음 | 도구는 "184 B", 실제 676 B | 함수 포인터·libc 미추적 (예제 3) | 간접 호출 주석, 모르는 것을 보고하는 도구 |
+| 평상 운용 중 HWM으로 크기 결정 | 드문 메시지·에러 경로에서 넘침 | HWM은 탄 경로만 잰다 (예제 3: 136 vs 676) | 최악 입력 스트레스 후 측정, 정적 값과 교차 |
+| 예외·문맥 프레임을 예산에 안 넣음 | 인터럽트 타이밍에 따라 가끔 넘침 | 첫 ISR 프레임 32/104 B, 문맥 64/204 B (예제 7) | §1.1의 ④⑤를 상수로 더함 |
+| 방식 1만 켬 / 방식 2만 믿음 | 훅 없이 이웃 손상, 또는 30 ms 뒤 훅 | 흔적 검사 = 스위치 때만 (예제 7) | 하드웨어 가드 + 방식 2 |
+| `-fstack-protector`를 스택 넘침 대책으로 앎 | 깊은 재귀가 이웃을 덮어도 무반응 | 카나리는 프레임 단위 버퍼 넘침용 (예제 8) | 목적별로 둘 다 |
+| main()의 지역 변수 주소를 태스크에 넘김 | 시작 직후 엉뚱한 값, EXC_RETURN 같은 값이 보임 | FreeRTOS가 MSP를 처음 값으로 되돌림 (예제 6) | `static`/전역, 또는 Zephyr처럼 main 스레드 |
+| v8-M에서 MSPLIM 안 걺 (FreeRTOS) | ISR 스택 넘침이 모든 태스크를 오염 | 포트가 MSPLIM을 안 씀 (예제 9·11) | `main()`에서 MSP 바닥 + 핸들러 여유 위에 MSPLIM |
+| MPU 가드만 믿고 큰 지역 배열 허용 | 가드 건너뛴 넘침, analyzer는 "23%" | 가드는 닿는 접근만 잡음 (예제 4·10) | 큰 버퍼는 static/풀, `-Wstack-usage=N`, v8-M이면 PSPLIM |
+| 스택 fault 핸들러가 스택된 PC를 그대로 신뢰 | 덤프의 PC가 0 또는 0xa5a5a5a5 | 스태킹 중 fault면 프레임이 안 쌓임 (예제 9 SCEN 5, 예제 10 M3) | CFSR의 MSTKERR·STKOF 확인 후 PC 대신 PSP·태스크 정보 기록 |
+
+---
+
+## 12. 면접에서 이렇게 말한다
+
+**Q.** How do you decide the stack size for an RTOS task?
+
+**A.** 세 가지를 합친다. `-fstack-usage`와 `-fcallgraph-info`로 태스크 entry부터 정적 최악 경로를 합하고(함수 포인터는 주석으로 풀고), 정적 분석이 못 보는 libc 경로는 칠해서 잰 값으로 채운다. 최악 입력으로 스트레스를 건 뒤 high water mark로 교차 확인한다. 거기에 첫 예외 프레임과 문맥 저장 프레임을 상수로 더하고 20~50% 여유를 준다. 한 번은 정적 도구가 184 B라고 한 파서 태스크가 실측 676 B였다.
+
+> I combine three sources. Static analysis: -fstack-usage plus the call graph from -fcallgraph-info, summed from the task entry along the worst path, with function-pointer targets annotated by hand because the tools can't follow them. Library code like snprintf has no .su data, so I fill that in with painted measurements — newlib-nano's snprintf alone is 350 to 700 bytes depending on the format. Then I run a worst-case input stress test and read the high-water mark to cross-check. On top I add the fixed costs — the first exception frame, 32 bytes or 104 with FPU, and the context-save frame — and a 20 to 50 percent margin depending on how well the two numbers agree. In one exercise, two static tools said 184 and 224 bytes for a parser task; the real worst case was 676.
+
+**꼬리 질문**: "Why not just give everyone 4 KB?" → 태스크 6개면 24 KB 대 5.4 KB(예제 5). 그리고 크게 줘도 탐지가 없으면 언젠가 넘친다 — 크기와 탐지는 별개다.
+
+**Q.** What happens when a task stack overflows on a Cortex-M3 running FreeRTOS?
+
+**A.** 하드웨어는 아무것도 모른다. 스택은 아래로 자라고 heap에서 TCB 바로 위에 다음 태스크 스택이 오므로, 넘친 바이트는 대개 먼저 만든 태스크의 TCB를 덮는다. 증상은 넘친 태스크가 아니라 이웃에서 나온다 — 실험에서 같은 버그가 버퍼 크기 8 B 차이로 tick ISR 안 HardFault, 제어 태스크만 조용히 정지, 시스템 전체 정지로 바뀌었다. 검사 방식 2를 켜면 다음 컨텍스트 스위치 때 범인 이름은 알려 주지만 피해는 이미 났다.
+
+> Nothing in hardware notices. Stacks grow down, and with heap_4 a task's stack sits right above the previously created task's TCB, so the overflow lands in the neighbor's TCB — its saved stack pointer and its list links. The symptom shows up somewhere else: in my test the same bug produced a HardFault inside the SysTick handler with BFAR equal to 0xA5A5A5A9 — the stack fill pattern used as a pointer — or the control task silently stopping, or the whole system idling forever, depending on an 8-byte change in buffer size. With configCHECK_FOR_STACK_OVERFLOW set to 2 the hook names the culprit at its next context switch, but by then the neighbor is already corrupted.
+
+**꼬리 질문**: "You see BFAR = 0xA5A5A5A9 in a field crash. What do you suspect?" → 0xa5는 FreeRTOS 스택 채움값이다. 커널이나 누군가가 스택의 안 쓴 영역을 포인터로 읽었다 — 스택 넘침이 이웃 TCB·리스트를 덮은 것을 1순위로 의심한다.
+
+**Q.** What's the difference between configCHECK_FOR_STACK_OVERFLOW 1 and 2, and what do they miss?
+
+**A.** 둘 다 컨텍스트 스위치 때 나가는 태스크를 본다. 1은 저장된 SP가 스택 밖인지만, 2는 바닥 16 B 패턴까지 본다. 1은 넘쳤다가 돌아온 뒤 스위치되거나 ISR 프레임만 바닥 밑으로 간 경우를 놓친다. 2는 패턴을 건너뛴 넘침을 놓친다. 그리고 둘 다 스위치까지 기다린다 — 최고 우선순위 태스크가 30 ms 동안 블록하지 않으면 훅도 30 ms 뒤에 온다.
+
+> Both run in vTaskSwitchContext on the task being switched out. Method 1 only checks whether the saved stack pointer is below the stack base, so it misses an overflow that returned before the switch, and it missed an interrupt frame pushed just below the base in my test. Method 2 also checks that the lowest 16 bytes still hold the 0xA5 fill, which catches those, but misses an overflow that skips over the pattern — a big local array where only the low end is written. And both are post-mortem: I measured a 30-millisecond gap between the overflow and the hook for a top-priority task that didn't block. So I keep method 2 on as a cheap name-the-culprit check, but the real protection is the MPU guard or PSPLIM.
+
+**Q.** Is -fstack-protector a stack overflow detector?
+
+**A.** 아니다. 함수 프레임마다 복귀 주소 앞에 카나리를 두고 return 전에 확인하는 **버퍼 넘침**(지역 배열이 위로) 탐지기, 즉 보안 장치다. 스택 상자가 아래로 넘치는 것은 프레임마다 카나리가 멀쩡해서 못 잡는다. 실험에서 strcpy 넘침은 잡았고, 깊은 재귀가 이웃 101 B를 덮은 것은 못 잡았다. 비용은 -strong 기준 코드 3.6%다.
+
+> No — it's a different bug class. The compiler puts a guard value between local arrays and the saved return address in each protected frame and checks it before returning, so it catches a local buffer overflowing upward, which is a security issue. A whole stack overflowing downward leaves every frame's canary intact. I tested both: a strcpy of 28 bytes into a 16-byte array was caught at return, while a 21-level recursion that overwrote 101 bytes below the task stack wasn't noticed at all. I use -fstack-protector-strong on code that parses external input — about 3.6 percent code size in my test — and separate mechanisms for stack depth.
+
+**Q.** Where do interrupts run in an RTOS on Cortex-M, and how do you size that stack?
+
+**A.** Cortex-M RTOS는 태스크를 PSP, ISR을 MSP에서 돌린다. 태스크 스택에는 첫 예외 프레임만 쌓이고, ISR 본문과 중첩은 전부 MSP가 진다. FreeRTOS는 시작 코드의 main 스택을 그대로 ISR 스택으로 재활용해서 main의 지역 변수가 덮이고, Zephyr는 `CONFIG_ISR_STACK_SIZE`로 따로 잡는다. 크기는 우선순위 그룹마다 가장 깊은 ISR의 경로 + 프레임(FPU면 104 B)을 중첩 수만큼 더하고 tick·PendSV 기본선과 fault 핸들러 몫을 더한다. 실측으로 확인한다 — 내 측정에서 기본선 88 B, 중첩 한 단마다 112 B였다.
+
+> On Cortex-M the tasks run on PSP and every handler runs on MSP, so a task stack only absorbs the first exception frame; nested ISRs, the tick and PendSV all land on the main stack. FreeRTOS reuses the startup stack for that — it resets MSP from the vector table when the scheduler starts, which is why a pointer to a local in main is garbage afterwards. Zephyr allocates a dedicated interrupt stack sized by CONFIG_ISR_STACK_SIZE. To size it I take, per preemption priority group, the deepest handler path plus its frame — 104 bytes with FPU context — sum across the possible nesting depth, and add the tick and PendSV baseline and the fault handler. Then I paint it and measure: in my FreeRTOS test the baseline was 88 bytes and each extra nesting level added 112.
+
+**Q.** How do PSPLIM and MSPLIM change this on Armv8-M?
+
+**A.** SP가 한계 아래로 내려가는 바로 그 명령에서 UsageFault STKOF가 난다. FreeRTOS v8-M 포트는 태스크마다 PSPLIM을 스택 바닥으로 넣고 스위치 때 저장·복원한다. 실험에서 600 B 배열은 `sub sp` 명령에서, 패턴을 건너뛴 넘침도, 예외 프레임 하나가 넘치는 경우도 이웃 0 B 손상으로 잡혔다. 다만 FreeRTOS는 MSPLIM을 안 걸어서 직접 걸어야 하고, 스태킹 중 fault면 프레임이 무효라 PC를 믿으면 안 된다.
+
+> The core faults on the exact instruction that would move SP below the limit — a UsageFault with STKOF set. The FreeRTOS Armv8-M ports put each task's stack base into its initial frame as the PSPLIM value and save and restore it on every switch, so you get it for free. On a Cortex-M33 under QEMU it caught a 600-byte local array at the sub sp instruction, an overflow that skipped the canary area, and an interrupt frame that didn't fit — all with zero bytes of the neighbor touched. Two caveats: the FreeRTOS GCC ports never write MSPLIM, so I set it myself in main, leaving room for the fault handler; and when the violation happens during exception stacking, the stacked frame isn't valid, so the fault handler shouldn't trust the stacked PC.
+
+**꼬리 질문**: "And on a Cortex-M4 without PSPLIM?" → MPU 가드 리전(Zephyr `MPU_STACK_GUARD`, 64 B 이상). 단 가드를 건너뛰는 큰 지역 배열은 못 잡으므로 큰 버퍼를 스택에 두지 않는 규칙과 정적 산정을 같이 쓴다.
+
+**Q.** Your high-water mark says a thread uses only 23% of its stack. Can it still overflow?
+
+**A.** 그렇다. HWM은 스택 **안**의 칠이 지워진 깊이만 본다. 큰 배열의 낮은 주소만 쓰는 넘침은 스택 밖에 쓰고 안쪽 칠은 남긴다 — Zephyr에서 이웃 132 B를 덮은 스레드를 analyzer가 23% 사용으로 보고했다. 그리고 최악 경로를 안 탔으면 작게 나온다. HWM은 크기 산정 도구이지 탐지기가 아니다.
+
+> Yes. The high-water mark only counts how much of the fill pattern inside the stack was disturbed. An overflow that drops SP far below the base and writes only there leaves the inside mostly untouched — on Zephyr I had a thread that corrupted 132 bytes of its neighbor while the thread analyzer reported 120 of 512 bytes used. It also under-reports whenever the test never exercised the worst path. So I treat it as a sizing measurement under stress, never as overflow detection.
+
+---
+
+## 13. 직접 해보기
+
+1. **개념**: 예제 2에서 태스크 생성 순서를 `telem` 먼저, `rate` 나중으로 바꾸면 telem이 넘쳤을 때 무엇이 덮이나? 그림 1을 다시 그려 보라.
+   정답/힌트: telem이 heap(`ucHeap`)의 첫 블록이 되므로, 넘치면 `ucHeap` 바로 앞에 링커가 놓은 `.bss` 변수를 덮는다(누구인지는 map 파일로 확인). rate TCB는 안전해진다. 생성 순서가 "누가 피해자인가"를 정한다 — 피해자를 예측하려면 생성 순서와 map 파일을 같이 봐야 한다.
+2. **계산**: Cortex-M4F에서 FPU를 쓰는 태스크가 정적 경로 300 B, `snprintf("%.1f")`를 부른다. 예제 1의 nano 값과 §1.1의 상수로 필요량과 30% 여유 크기(8 B 정렬)를 구하라. FreeRTOS `xTaskCreate()`에는 몇을 넣나?
+   정답/힌트: 300 + 704 + 204 = 1208 → × 1.3 = 1570.4 → 1576 B → 394 words.
+3. **코드**: 예제 3에 네 번째 핸들러 `h_mission_item`(재귀로 웨이포인트 트리를 도는 함수)을 넣고 `stk.py`가 무엇을 보고하는지 확인하라. 재귀 깊이를 상한 8로 강제하는 코드와, 그 상한을 반영하는 주석 형식을 만들어 보라.
+   정답/힌트: `RECURSION` 줄이 나온다. `=h_mission_item <프레임 × 8>`처럼 주석으로 크기를 고정하거나 재귀를 반복문 + 명시적 스택 배열로 바꾼다.
+4. **측정**: 예제 1에 `snprintf(gbuf, n, "%-20s|%08.3f", ...)`처럼 폭·정밀도가 붙은 포맷을 추가해 세 libc에서 재 보라. 정수 포맷 대비 몇 B 더 쓰나?
+   정답/힌트: 직접 재는 과제. float 경로가 지배적일 것으로 예상한다.
+5. **코드 (M33)**: 예제 9 SCEN 6에서 MSPLIM을 `_estack − 1024`가 아니라 MSP 실사용 바로 아래(예: `_estack − 160`)에 걸고 ISR의 버퍼를 줄여 보라. fault 핸들러 자체가 MSPLIM에 걸리는가? 어떻게 설계해야 하나?
+   정답/힌트: 핸들러의 `semi_printf`가 스택을 쓰므로 2차 STKOF → HardFault(또는 lockup)가 날 수 있다. MSPLIM은 "핸들러 여유" 위에, 또는 핸들러 진입 직후 MSPLIM을 0으로 풀고 최소 기록만 한다.
+6. **Zephyr**: 예제 4 앱에 `CONFIG_STACK_CANARIES_STRONG=y`와 `CONFIG_TEST_RANDOM_GENERATOR=y`를 켜고 `work()`에 16 B 배열 `strcpy` 버그를 넣어 보라. fatal 핸들러의 reason은 무엇이고, MPU/PSPLIM 넘침과 로그에서 어떻게 구별하나?
+   정답/힌트: reason은 같은 2(`K_ERR_STACK_CHK_FAIL`)일 것이다(`compiler_stack_protect.c`). 구별은 그 앞의 "MPU FAULT"/"USAGE FAULT" 줄 유무로.
+7. **설계**: 드론 FC가 Cortex-M7(v7-M, MPU 있음) + FreeRTOS 기본 포트다. MPU 가드가 기본 포트에는 없다. 태스크 스택 보호를 어떻게 하겠나? 선택지 셋과 각각의 비용을 쓰라.
+   정답/힌트: (a) 방식 2 + 정적 산정 + 큰 버퍼 금지(싸지만 사후), (b) PendSV 훅에서 현재 태스크 스택 바닥에 MPU 리전 하나를 옮겨 끼우는 직접 구현(트레이스 매크로 `traceTASK_SWITCHED_IN` 활용, 스위치당 수십 명령), (c) FreeRTOS-MPU 포트로 전환(F5, API 제약·코드 변경 큼).
+
+---
+
+## 14. 용어 사전
+
+| 용어 | 뜻 | 한 줄 설명 |
+|---|---|---|
+| stack overflow | 스택 넘침 | SP가 자기 스택 바닥 아래로 내려가 그 밑 메모리에 쓰는 것 |
+| buffer overflow | 버퍼 넘침 | 지역 배열이 자기 크기를 넘어 (위로) 쓰는 것 — 스택 넘침과 다른 버그 |
+| high water mark (HWM) | 최고 수위 | 칠하기로 잰 "지금까지 가장 깊이 썼을 때의 남은 여유" |
+| stack painting | 스택 칠하기 | 알려진 값(FreeRTOS 0xa5, Zephyr 0xaa)으로 채우고 지워진 깊이를 셈 |
+| `.su` | stack usage 파일 | `-fstack-usage` 출력, 함수 하나의 프레임 크기 |
+| `.ci` | call-graph info 파일 | `-fcallgraph-info=su` 출력, 호출 그래프 + 프레임 크기 |
+| indirect call | 간접 호출 | 함수 포인터 호출, 정적 분석이 대상을 모름 |
+| 방식 1 · 2 | FreeRTOS 스택 검사 | 스위치 때 저장 SP 검사 / + 바닥 16 B 패턴 검사 |
+| stack sentinel | 스택 센티널 | Zephyr, 바닥 4 B에 0xF0F0F0F0 |
+| stack canary | 스택 카나리 | 컴파일러가 프레임마다 복귀 주소 앞에 두는 값 (`__stack_chk_guard`) |
+| MPU stack guard | MPU 스택 가드 | 스택 바닥 아래 접근 금지 리전 (Zephyr 64 B 이상) |
+| PSPLIM / MSPLIM | 스택 한계 레지스터 | v8-M, SP가 이 값 아래로 가는 명령에서 STKOF |
+| STKOF | Stack overflow flag | UFSR bit 4, CFSR 0x00100000 |
+| MSTKERR | MemManage stacking error | 예외 진입 스태킹 중 MPU 위반 — 프레임 무효 |
+| ISR stack | 인터럽트 스택 | Cortex-M에서 MSP. FreeRTOS는 시작 스택 재활용, Zephyr는 `z_interrupt_stacks` |
+| context-save frame | 문맥 저장 프레임 | 선점·블록 때 태스크 스택에 쌓이는 레지스터 (CM3 64 B, CM4F+FPU 204 B) |
+| thread analyzer | 스레드 분석기 | Zephyr, 모든 스레드 + ISR 스택 사용량 출력 |
+| margin | 여유 | 산정값 위에 더하는 비율, 근거의 질에 따라 20~50% |
+
+---
+
+## 15. 요약 & 체크리스트
+
+스택 넘침이 현장 버그 1순위인 이유는 **증상이 범인에게서 나오지 않기** 때문이다. RTOS의 태스크 스택은 RAM에 붙어 있어서, 넘친 바이트는 바로 아래 이웃(대개 먼저 만든 태스크의 TCB)을 덮고, 그 결과는 tick ISR 안의 HardFault(BFAR에 채움값 0xa5a5a5a9), 제어 태스크만 조용히 정지, 시스템 전체 정지처럼 버퍼 크기 8 B 차이로 바뀐다(예제 2). 그래서 크기는 근거로 정한다: 태스크 스택 = 정적 최악 경로(간접 호출은 주석으로 풀고) + 정적 분석이 못 보는 libc 실측(`snprintf` 한 번 192~704 B) + 첫 예외 프레임(32/104 B) + 문맥 저장(64/204 B), 최악 입력 HWM과 교차 확인, 그 위에 20~50% 여유(예제 1·3·5). 정적 도구 둘은 184·224 B, 실측은 676 B였다. ISR 본문과 중첩은 MSP 하나가 지고(FreeRTOS는 시작 스택 재활용 — main 지역 변수가 사라진다, Zephyr는 `CONFIG_ISR_STACK_SIZE`), 기본선 88 B + 중첩 한 단마다 프레임 + 본문으로 정한다(예제 6). 탐지는 시점이 전부다: FreeRTOS 방식 1·2와 Zephyr 센티널은 다음 스위치 때(30 ms 지연을 실측), 컴파일러 카나리는 return 때이고 **버퍼 넘침**만 잡으며 깊은 재귀는 못 잡는다(예제 8), MPU 가드는 닿는 접근만, PSPLIM은 SP를 내리는 그 명령에서 잡는다(예제 9·10). FreeRTOS v8-M 포트는 PSPLIM을 태스크마다 자동으로 걸지만 MSPLIM은 아무도 안 쓰니 직접 건다. HWM은 산정 도구이지 탐지기가 아니며, 넘친 스레드가 "23% 사용"이라고 보고할 수도 있다.
+
+- [ ] 태스크 스택을 먹는 다섯 칸(지역, 호출, libc, 첫 예외 프레임, 문맥 저장)과 각 크기를 말할 수 있다
+- [ ] libc별 `snprintf` 스택 비용이 대략 얼마인지, float 포맷이 왜 무거운지 안다
+- [ ] 스택 넘침이 왜 이웃 태스크(먼저 만든 TCB)를 망가뜨리는지 heap 배치로 설명할 수 있다
+- [ ] 덤프에서 0xa5a5a5a5 / 0xaaaaaaaa를 보면 무엇을 의심할지 안다
+- [ ] `-fstack-usage` · `-fcallgraph-info`로 경로를 합하고, 간접 호출·재귀·VLA·libc가 왜 구멍인지 안다
+- [ ] HWM이 작게 나오는 두 경우(최악 경로 미실행, 이미 넘침)를 안다
+- [ ] 정적 + 동적 + 프레임 + 여유로 예산표를 만들고 FreeRTOS words / Zephyr bytes로 옮길 수 있다
+- [ ] MSP 크기를 우선순위 그룹과 중첩 깊이로 계산하고 칠해서 확인할 수 있다
+- [ ] FreeRTOS 방식 1·2가 놓치는 장면과 탐지 지연을 설명할 수 있다
+- [ ] 스택 카나리(`-fstack-protector`)와 스택 넘침 검사의 차이를 한 문장으로 말할 수 있다
+- [ ] MPU 가드와 PSPLIM이 각각 무엇을 비교하고 무엇을 놓치는지 안다
+- [ ] FreeRTOS v8-M 포트의 PSPLIM 처리와 MSPLIM 공백을 소스 위치로 말할 수 있다
+
+---
+
+## Bare-Metal 노트와의 관계
+
+| BM ID | BM 주제 | 이 노트의 해당 절 | Bare-Metal 쪽에 남길 내용 |
+|---|---|---|---|
+| BM C9 | MPU (bare-metal 용도) — 스택 가드 부분 | §8.1(가드 vs PSPLIM 비교, 가드 크기 이유), §8.4(가드의 fault 정보 손실, 건너뛰기), §8.5(코어별 선택) | RTOS 없는 단일 스택에서 가드 리전을 MSP 바닥에 거는 MPU 레지스터 설정 코드, 널 포인터 가드와 리전 번호 배분 |
+| BM Q6 | 방어적 펌웨어 — 스택 카나리 부분 | §7(`-fstack-protector` 원리·생성 코드·비용·한계, FreeRTOS/Zephyr 흔적 검사와의 차이), §6.4 | 부팅 RAM 자가 테스트와 묶은 카나리·스택 패턴 주기 점검, `__stack_chk_guard`를 TRNG로 초기화하는 순서(시작 코드에서 C 호출 전) |
+| BM M10 | 버그 패턴 사례집 — 스택 오버플로 행 | §2(증상 넷 실측, 채움값 단서), §11(실수 표) | super loop에서의 증상 → 원인 한 줄("`.bss` 변수가 가끔 바뀜 → 스택이 `.bss`를 덮음"), 링커 스크립트에서 스택 아래에 무엇을 두나 |
+
+---
+
+## 참고 자료
+
+- FreeRTOS Kernel V11.3.2 소스(랩 `/var/rtoslab/src/FreeRTOS-Kernel`): `tasks.c`(`tskSTACK_FILL_BYTE`, `tskSET_NEW_STACKS_TO_KNOWN_VALUE`, `prvInitialiseNewTask`, `prvTaskCheckFreeStackSpace`, `uxTaskGetStackHighWaterMark`/`2`, `portHAS_STACK_OVERFLOW_CHECKING` 분기), `include/stack_macros.h`(`taskCHECK_FOR_STACK_OVERFLOW` 방식 1·2), `include/portable.h`, `portable/GCC/ARM_CM3/port.c`(`prvPortStartFirstTask`, PendSV `stmdb r0!, {r4-r11}`), `portable/GCC/ARM_CM4F/port.c`(`vstmdbeq r0!, {s16-s31}`, `stmdb r0!, {r4-r11, r14}`), `portable/GCC/ARM_CM33_NTZ/non_secure/port.c`·`portasm.c`·`portmacrocommon.h`(PSPLIM, `portUSE_PSPLIM_REGISTER`), `portable/GCC/RISC-V/port.c`(방식 3, `configISR_STACK_SIZE_WORDS`)
+- FreeRTOS.org 문서: "Stack Usage and Stack Overflow Checking" 페이지(`configCHECK_FOR_STACK_OVERFLOW` 방식 설명) — https://www.freertos.org
+- Zephyr v4.4.2 소스(랩 `/var/rtoslab/zephyrproject/zephyr`): `kernel/Kconfig`(`ISR_STACK_SIZE`, `MAIN_STACK_SIZE`, `IDLE_STACK_SIZE`, `INIT_STACKS`, `THREAD_STACK_INFO`, `STACK_CANARIES*`), `kernel/thread.c`(`z_check_stack_sentinel`), `kernel/compiler_stack_protect.c`, `kernel/init.c`(`__stack_chk_guard` 초기화), `kernel/fatal.c`, `include/zephyr/arch/arm/arch.h`(`MPU_GUARD_ALIGN_AND_SIZE`), `arch/arm/include/cortex_m/stack.h`(`z_arm_interrupt_stack_setup`, MSPLIM), `arch/arm/core/cortex_m/reset.S`·`svc.S`·`arm-m-switch.c`·`thread.c`(PSPLIM), `subsys/debug/thread_analyzer/Kconfig`, `include/zephyr/debug/thread_analyzer.h`, `boards/arm/mps2/Kconfig.defconfig`(`ISR_STACK_SIZE` 4096)
+- Zephyr 문서: Thread Analyzer — https://docs.zephyrproject.org/latest/services/debugging/thread-analyzer.html , 그 밖의 스택·메모리 보호 설명은 docs.zephyrproject.org의 Kernel Services와 Hardware Stack Protection 항목
+- GCC 문서: Developer Options(`-fstack-usage`, `-fcallgraph-info`), Warning Options(`-Wstack-usage=`), Instrumentation Options(`-fstack-protector`, `-strong`, `-all`) — https://gcc.gnu.org/onlinedocs/gcc/
+- Arm, Armv8-M Architecture Reference Manual — stack limit checking(MSPLIM / PSPLIM), UFSR.STKOF
+- Arm, Cortex-M33 Devices Generic User Guide — MSPLIM, PSPLIM 레지스터
+- puncover — https://github.com/HBehrens/puncover (이 노트는 B11에서 만든 venv의 0.8.0 사용)
+- QEMU `mps2-an385` / `mps2-an505` 머신 — 이 노트의 모든 실행 환경, 동작은 실행 결과로만 확인
+- 관련 노트: A4 §5(스택 기본), B1 §5(MSP·PSP, ISR 중첩), B2(예외 프레임), B6(FPU 프레임), B7 §4.4·예제 12(PSPLIM, 보드별 스택 보호), B11 §3·§9(libc 크기, `-fstack-usage`, puncover), C2(컨텍스트 스위치), C9 §5·§11.4(방식 1·2 세 장면, 센티널 vs MPU 가드), E8(워치독 — 조용히 멈춘 태스크 잡기), F4(MPU), F5(FreeRTOS-MPU · userspace), F7(printf 재진입), F8(noinit 기록), M1(fault 해독), O(MISRA Rule 17.2)

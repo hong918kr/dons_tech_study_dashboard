@@ -1,0 +1,1679 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D2. 뮤텍스 — 열쇠 하나와 주인 이름표: 소유권 · 재귀 · 타임아웃 · ISR 금지 · 크리티컬 섹션과 고르기</title>
+<style>
+:root{
+  --bg:#faf9f7; --paper:#fff; --ink:#1c1b19; --muted:#6b6862; --line:#e3e0da;
+  --accent:#8a5a2b; --accent-soft:#f3ece2; --code-bg:#f6f4f0; --code-ink:#2a2724;
+  --mark:#fff3cd; --ok:#2f7d55; --warn:#b4541f;
+  --serif: Georgia, "Times New Roman", "Apple SD Gothic Neo", "Noto Serif KR", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+:root:not([data-theme=light]) { color-scheme: light; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme=light]){
+    --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+    --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+    --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+  }
+}
+:root[data-theme=dark]{
+  --bg:#16151a; --paper:#1d1c22; --ink:#e8e6e1; --muted:#a09c94; --line:#33313a;
+  --accent:#d9a441; --accent-soft:#2a2620; --code-bg:#14141a; --code-ink:#e3e0d8;
+  --mark:#4a3f1e; --ok:#63c08c; --warn:#e2895a; color-scheme: dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+     -webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+/* ---- top bar ---- */
+.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
+     backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:14px}
+.top a.home{text-decoration:none;color:var(--muted);font-size:13px;white-space:nowrap}
+.top a.home:hover{color:var(--accent)}
+.top .t{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.btn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--line);border-radius:999px;
+     background:var(--paper);color:var(--muted);cursor:pointer}
+.btn:hover{color:var(--accent);border-color:var(--accent)}
+.btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#bar{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;z-index:30}
+/* ---- layout ---- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:grid;
+      grid-template-columns:minmax(0,1fr) 250px;gap:44px;align-items:start}
+main{max-width:760px;padding:40px 0 100px}
+aside{position:sticky;top:64px;padding:40px 0;max-height:calc(100vh - 80px);overflow:auto}
+aside .lbl{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+aside ol{list-style:none;margin:0;padding:0;font-size:13px;line-height:1.5}
+aside li{margin:2px 0}
+aside li.l3{padding-left:14px;font-size:12.5px}
+aside a{display:block;padding:3px 8px;border-radius:6px;text-decoration:none;color:var(--muted);
+        border-left:2px solid transparent}
+aside a:hover{color:var(--ink);background:var(--accent-soft)}
+aside a.active{color:var(--accent);border-left-color:var(--accent);background:var(--accent-soft)}
+/* ---- article ---- */
+.hero{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:34px}
+.kicker{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+h1{font-family:var(--serif);font-size:34px;line-height:1.25;margin:0 0 12px;letter-spacing:-.01em}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+main h2{font-family:var(--serif);font-size:24px;margin:44px 0 14px;padding-top:10px;
+        border-top:1px solid var(--line);line-height:1.3}
+main h2:first-of-type{border-top:0}
+main h3{font-family:var(--serif);font-size:18.5px;margin:30px 0 10px;line-height:1.35}
+main p{font-family:var(--serif);font-size:17px;line-height:1.75;margin:0 0 16px}
+main li{font-family:var(--serif);font-size:16.5px;line-height:1.7;margin:5px 0}
+main ul,main ol{padding-left:22px;margin:0 0 16px}
+ul.tasks{list-style:none;padding-left:2px}
+li.task label{display:flex;gap:9px;align-items:flex-start;cursor:pointer}
+li.task label > span{flex:1;min-width:0}
+li.task input{margin-top:6px;accent-color:var(--accent)}
+li.task input:checked + *{opacity:.55}
+code{font-family:var(--mono);font-size:.875em;background:var(--code-bg);padding:1.5px 5px;
+     border-radius:4px;border:1px solid var(--line)}
+figure.code{position:relative;margin:0 0 20px;background:var(--code-bg);border:1px solid var(--line);
+            border-radius:10px;overflow:hidden}
+figure.code .lang{position:absolute;top:0;right:0;font-family:var(--mono);font-size:10px;
+     letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:5px 10px}
+figure.code pre{margin:0;padding:16px 18px;overflow-x:auto}
+figure.code code{background:none;border:0;padding:0;color:var(--code-ink);font-size:13px;line-height:1.6}
+blockquote{margin:0 0 20px;padding:14px 18px;background:var(--accent-soft);
+           border-left:3px solid var(--accent);border-radius:0 8px 8px 0}
+blockquote p{margin:0 0 8px;font-size:15.5px;line-height:1.65}
+blockquote p:last-child{margin:0}
+.tw{overflow-x:auto;margin:0 0 22px}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:14px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{border-bottom:1.5px solid var(--ink);font-size:12px;letter-spacing:.04em;
+         text-transform:uppercase;color:var(--muted)}
+tbody tr:hover{background:var(--accent-soft)}
+hr{border:0;border-top:1px solid var(--line);margin:34px 0}
+.anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
+h2:hover .anchor,h3:hover .anchor{opacity:1}
+.nav{display:flex;gap:12px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+.nav a{flex:1;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+       background:var(--paper)}
+.nav a:hover{border-color:var(--accent)}
+.nav .dir{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.nav .nm{font-family:var(--serif);font-size:15px;color:var(--ink);margin-top:4px;display:block}
+.nav a.next{text-align:right}
+/* ---- hub ---- */
+.hub{max-width:1180px;margin:0 auto;padding:44px 20px 90px}
+.hub h1{font-size:38px;margin-bottom:8px}
+.lead{font-family:var(--serif);font-size:17.5px;line-height:1.7;color:var(--muted);max-width:680px}
+.stats{display:flex;gap:26px;flex-wrap:wrap;margin:26px 0 8px;padding:16px 0;
+       border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat b{display:block;font-family:var(--serif);font-size:26px;line-height:1.1}
+.stat span{font-size:11.5px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+.tools{display:flex;gap:10px;align-items:center;margin:22px 0 6px;flex-wrap:wrap}
+#q{flex:1;min-width:220px;font:inherit;font-size:14px;padding:9px 13px;border:1px solid var(--line);
+   border-radius:999px;background:var(--paper);color:var(--ink)}
+#q:focus{outline:none;border-color:var(--accent)}
+.track{margin-top:38px}
+.track h2{font-family:var(--serif);font-size:23px;margin:0 0 4px}
+.track .sub{font-size:14px;color:var(--muted);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:16px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--paper);border:1px solid var(--line);
+      border-radius:14px;padding:18px 18px 16px;transition:border-color .15s,transform .15s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card .ic{font-size:22px;line-height:1}
+.card h3{font-family:var(--serif);font-size:17px;margin:10px 0 6px;line-height:1.35}
+.card p{font-size:13.5px;line-height:1.6;color:var(--muted);margin:0 0 12px;
+        display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--muted)}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.pill.pri{border-color:var(--accent);color:var(--accent)}
+.card.read{border-color:var(--ok)}
+.card.read .ic::after{content:" ✓";color:var(--ok);font-size:14px}
+.hide{display:none}
+figure.chart{margin:0 0 22px;padding:14px;background:var(--paper);border:1px solid var(--line);
+             border-radius:10px;text-align:center;color:var(--ink)}
+figure.chart svg{max-width:100%;height:auto;font-family:var(--sans)}
+figure.chart svg text{fill:currentColor}
+figure.chart .cap, figure.chart figcaption{font-size:13px;color:var(--muted);margin-top:6px}
+td.ok{background:color-mix(in srgb,var(--ok) 14%,transparent)}
+td.mid{background:color-mix(in srgb,#d4a017 16%,transparent)}
+td.gap{background:color-mix(in srgb,var(--warn) 14%,transparent)}
+@media (max-width:900px){
+  .wrap{grid-template-columns:minmax(0,1fr)} aside{display:none}
+  main{padding-top:28px} h1{font-size:28px} main p{font-size:16px}
+}
+@media print{
+  .top,aside,.nav,#bar{display:none} .wrap{display:block} main{max-width:none;padding:0}
+  body{background:#fff}
+}
+</style></head>
+<body data-note="D/2026-10-31_D2_mutex">
+<div id="bar"></div>
+<div class="top"><div class="top-in">
+  <a class="home" href="../index.html">← 대시보드</a>
+  <span class="t">D. 동기화 · 태스크 간 통신 · D2. 뮤텍스 — 열쇠 하나와 주인 이름표: 소유권 · 재귀 · 타임아웃 · ISR 금지 · 크리티컬 섹션과 고르기</span>
+  <button class="btn" id="readbtn">읽음 표시</button>
+  <button class="btn" id="theme">◐</button>
+</div></div>
+<div class="wrap">
+  <main>
+    <div class="hero">
+      <div class="kicker">D. 동기화 · 태스크 간 통신 · Sync &amp; IPC</div>
+      <h1>D2. 뮤텍스 — 열쇠 하나와 주인 이름표: 소유권 · 재귀 · 타임아웃 · ISR 금지 · 크리티컬 섹션과 고르기</h1>
+      <div class="meta"><span>186분 읽기</span><span>1985줄</span><span>49개 절</span></div>
+    </div>
+    <blockquote><p><strong>이 노트를 다 읽으면</strong>: 뮤텍스의 소유권 규칙을 FreeRTOS와 Zephyr에서 직접 깨 보고 각 커널이 어떻게 반응하는지(assert, <code>-EPERM</code>, 아무 일 없음) 말할 수 있다 · 재귀 뮤텍스가 정당한 경우와 설계 냄새를 구분하고 타임아웃 에러 경로를 설계할 수 있다 · ISR에서 뮤텍스가 금지인 세 가지 이유를 커널 소스 줄 번호로 보여 줄 수 있다 · 뮤텍스, 크리티컬 섹션, 스케줄러 잠금 중 무엇을 쓸지 측정 숫자(비용과 "누가 기다리나")로 고를 수 있다 <strong>왜 필요한가</strong>: 면접에서는 "mutex vs semaphore" 다음에 거의 반드시 "그럼 mutex vs critical section은? ISR에서 mutex를 쓰면?"이 나온다. 실무에서는 드론 FC의 I2C 버스 하나를 IMU · 기압계 · 자력계가 나눠 쓰고, 그 버스 뮤텍스를 잘못 잡은 한 줄이 1 kHz 제어 루프를 1 ms씩 밀어낸다 <strong>Don 기준 난이도</strong>: 공유 자원 중재(SSD의 NAND 채널 arbitration), 인터럽트 끄기는 이미 안다 / 새로 배울 부분은 "주인"이라는 개념이 커널 안에서 어떤 필드로 존재하는지(<code>xMutexHolder</code>, <code>owner</code>), 소유권 검사가 <strong>어디서</strong> 일어나는지(FreeRTOS는 API가 아니라 assert 하나), 경합 시 비용(수십 µs)과 그 비용을 <strong>누가</strong> 내는지 <strong>선행 노트</strong>: A5(API 로제타 — 재귀 기본값 비교), C1(커널 자료구조 — 리스트), C7(크리티컬 섹션 · 스케줄러 잠금 구현과 L 스윕), D1(세마포어), EL A8(pthread mutex 타입 · futex), EL F4(Linux <code>struct mutex</code>). 이어지는 노트: D3(우선순위 역전 · PIP · PCP), D7(게이트키퍼 태스크), D9(데드락 · 락 순서)</p></blockquote>
+<hr>
+<h2 id="0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가<a class="anchor" href="#0-큰-그림-이게-왜-필요한가" aria-label="link">#</a></h2>
+<p>펌웨어에는 "한 번에 한 명만 써야 하는 것"이 생각보다 많다. 드론 비행 제어기라면 IMU와 기압계가 같은 I2C 버스에 붙어 있고, 텔레메트리와 디버그 로그가 같은 UART로 나가고, 블랙박스 로거와 파라미터 저장이 같은 SPI 플래시를 쓴다. 이 자원을 만지는 코드가 <strong>태스크</strong> 여러 개에 흩어져 있고, 한 번 만지는 시간이 수백 µs ~ 수 ms라서 그동안 인터럽트를 꺼 둘 수도 없다. 이럴 때 쓰는 도구가 <strong>뮤텍스(mutex, mutual exclusion)</strong>다.</p>
+<p>직관은 이렇다. <strong>뮤텍스 = 열쇠 하나 + 주인 이름표.</strong> 열쇠를 가져간 태스크의 이름이 열쇠에 붙는다. 열쇠를 돌려줄 수 있는 것은 이름표의 주인뿐이다. 열쇠가 없어서 못 들어가는 태스크는 문 앞에서 <strong>잠든다</strong>(CPU를 다른 태스크에게 넘긴다). 그리고 이름표가 있으니 커널은 "지금 낮은 우선순위의 누군가가 열쇠를 쥐고 높은 우선순위가 기다린다"는 사실을 알 수 있고, 주인의 우선순위를 잠시 올려 준다(우선순위 상속, D3).</p>
+<figure class="chart"><svg viewBox="0 0 680 260" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="250" y="16" width="180" height="40" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340" y="41" font-size="13" text-anchor="middle">공유 I2C 버스 (자원)</text>
+<rect x="240" y="100" width="200" height="56" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="340" y="123" font-size="13" text-anchor="middle">imu 태스크 = 주인</text>
+<text x="340" y="143" font-size="12" text-anchor="middle">열쇠 + 이름표 "imu"</text>
+<line x1="340" y1="100" x2="340" y2="60" stroke="currentColor" marker-end="url(#ah1)"/>
+<rect x="465" y="100" width="200" height="56" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="565" y="123" font-size="13" text-anchor="middle">대기 줄 (우선순위 순)</text>
+<text x="565" y="143" font-size="12" text-anchor="middle">baro, log — 잠들어 기다림</text>
+<line x1="465" y1="128" x2="444" y2="128" stroke="currentColor" stroke-dasharray="4 3" marker-end="url(#ah1)"/>
+<text x="452" y="176" font-size="12" text-anchor="middle">give하면 다음 주인</text>
+<rect x="15" y="100" width="190" height="56" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="110" y="123" font-size="13" text-anchor="middle">ISR — 이름표를 못 단다</text>
+<text x="110" y="143" font-size="12" text-anchor="middle">잠들 수도, 상속받을 수도 없다</text>
+<line x1="150" y1="100" x2="246" y2="52" stroke="#d0564a" stroke-dasharray="4 3"/>
+<line x1="190" y1="68" x2="206" y2="84" stroke="#d0564a" stroke-width="2"/>
+<line x1="206" y1="68" x2="190" y2="84" stroke="#d0564a" stroke-width="2"/>
+<text x="20" y="206" font-size="13">규칙 1: 잠근 태스크만 푼다 (소유권)</text>
+<text x="20" y="226" font-size="13">규칙 2: 못 잡으면 잠든다 — 그동안 CPU는 다른 태스크가 쓴다</text>
+<text x="20" y="246" font-size="13">규칙 3: 주인이 낮은 우선순위면 잠시 올려 준다 (우선순위 상속, D3)</text>
+</svg></figure>
+<p>그림 1 — 뮤텍스의 직관. 열쇠(잠금)에 주인 이름표(owner)가 붙는다는 점이 세마포어(D1)와 다른 전부다. 이름표가 있어서 "주인만 푼다", "주인을 올려 준다"가 가능하고, 이름표를 달 수 없는 ISR은 뮤텍스를 쓸 수 없다.</p>
+<p><strong>Don 경험과 연결</strong>: SSD 컨트롤러에서 NAND 채널 하나에 다이(die) 여러 개가 붙어 있고, 여러 FTL 작업(호스트 읽기, GC, 웨어 레벨링)이 그 채널을 원한다. 채널 arbiter가 한 명령 시퀀스에게 채널을 주면, 그 시퀀스가 끝날 때까지(예: 명령 → 주소 → tR 대기 → 데이터 전송) 다른 시퀀스는 끼어들 수 없고, 채널을 반납하는 것도 그 시퀀스 자신이다. 이것이 정확히 뮤텍스다. 다른 점은 하나다. SSD 펌웨어에서는 tR(수십 µs) 동안 채널을 쥐고 <strong>다른 다이의 명령을 끼워 넣는</strong>(interleaving) 최적화를 직접 짰을 것이다. RTOS 뮤텍스로 옮기면 그 최적화는 "tR 대기 동안 뮤텍스를 놓는다"(§8.1의 좋은 설계)가 된다.</p>
+<h3 id="0-1-이-노트의-지도와-경계">0.1 이 노트의 지도와 경계<a class="anchor" href="#0-1-이-노트의-지도와-경계" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>절</th><th>내용</th><th>경계 (다른 노트가 주인)</th></tr></thead><tbody><tr><td>§1 소유권</td><td>누가 풀 수 있나, 어기면 FreeRTOS · Zephyr가 어떻게 반응하나</td><td>세마포어와의 차이 자체는 D1</td></tr><tr><td>§2 재귀 뮤텍스</td><td>카운터, 정당한 경우 vs 설계 냄새, API 섞기 버그</td><td>각 RTOS 기본값 비교표는 A5 §3.7</td></tr><tr><td>§3 타임아웃</td><td>예산 정하기, 에러 경로, <code>portMAX_DELAY</code>의 위험</td><td>데드락 탐지는 D9</td></tr><tr><td>§4 ISR 금지</td><td>세 가지 이유, 커널이 잡는 곳</td><td>ISR → 태스크 위임은 D7, FromISR 규칙은 E1</td></tr><tr><td>§5 고르기</td><td>뮤텍스 vs 크리티컬 섹션 vs 스케줄러 잠금: 비용과 "누가 기다리나"</td><td>크리티컬 섹션 구현과 길이 L 스윕은 C7</td></tr><tr><td>§6 상속 맛보기</td><td>한 문단 + 측정 한 줄</td><td>역전 · PIP · PCP 분석은 <strong>D3</strong></td></tr><tr><td>§7 커널 안</td><td><code>Queue_t</code> 안의 뮤텍스, <code>struct k_mutex</code>, 넘겨주기 방식 차이</td><td>리스트 구조는 C1</td></tr><tr><td>§8 실무</td><td>I2C 버스, UART 로거, SPI 플래시, SSD 채널</td><td>게이트키퍼 구현은 D7</td></tr></tbody></table></div>
+<p>Linux 쪽은 이미 공부했다. pthread mutex의 normal / errorcheck / recursive 타입과 futex는 EL A8 §2 · §8, 커널 <code>struct mutex</code>의 세 단계 경로(fast path, optimistic spinning, slow path)는 EL F4 §5에 있다. 이 노트는 그 개념을 다시 설명하지 않고 <strong>MCU RTOS에서 달라지는 점</strong>만 쓴다. 가장 큰 차이 세 가지를 먼저 적어 둔다.</p>
+<div class="tw"><table><thead><tr><th>항목</th><th>Linux (EL A8 / F4)</th><th>MCU RTOS (이 노트)</th></tr></thead><tbody><tr><td>소유자 검사</td><td>errorcheck 타입이면 <code>EPERM</code>, 커널은 디버그 옵션</td><td>FreeRTOS: API에는 없고 <strong>assert 하나</strong>뿐. Zephyr: <code>-EPERM</code>을 돌려주지만 Kconfig로 사라진다</td></tr><tr><td>우선순위 상속</td><td>기본 꺼짐 (<code>PTHREAD_PRIO_INHERIT</code>로 켬)</td><td>FreeRTOS · Zephyr 뮤텍스는 <strong>항상 켜짐</strong></td></tr><tr><td>경합 시 대기</td><td>futex로 커널 진입, SMP에서는 spin 먼저</td><td>단일 코어라 spin 의미 없음 → 바로 블록 + 컨텍스트 스위치 (수십 µs, §5)</td></tr></tbody></table></div>
+<h3 id="실습-환경-한-줄">실습 환경 한 줄<a class="anchor" href="#실습-환경-한-줄" aria-label="link">#</a></h3>
+<p>QEMU <code>mps2-an385</code>(Cortex-M3 @ 25 MHz)에서 FreeRTOS V11.3.2(ARM_CM3 포트, 랩 기본 <code>FreeRTOSConfig.h</code>: 1 kHz tick, <code>configASSERT</code> 켜짐)와 Zephyr v4.4.2(<code>mps2/an385</code>, 1 kHz tick, <code>CONFIG_QEMU_ICOUNT_SHIFT=5</code>)를 돌린다. 타이밍은 모두 icount(명령 1개 = 32 ns 가상 시간, 결정적)이고 시계는 FPGAIO COUNTER(0x40028018, 25 MHz, 1 카운트 = 40 ns)다. <strong>숫자는 QEMU icount 기준이며 실제 칩과 절대값은 다르다</strong>(캐시 · 플래시 wait state · 버스 · 예외 스태킹을 모델링하지 않음). 이 노트가 보이려는 것은 <strong>상대 비교와 모양</strong>이다.</p>
+<p>모든 FreeRTOS 예제가 쓰는 작은 헤더 <code>d2.h</code>와 빌드 스크립트다. 이 노트를 쓰는 동안 VM의 루트 파일시스템이 읽기 전용(emergency remount)이 되어 있어서 빌드 산출물을 평소 위치(<code>/var/tmp/rtos/D2</code>) 대신 tmpfs <code>/tmp/rtosD2</code>에 두었다. 명령의 모양은 같다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* d2.h — D2 helpers for QEMU mps2-an385 + FreeRTOS (cycle clock, TIMER0, spin) */
+#ifndef D2_H
+#define D2_H
+#include "board.h"
+#define CYC()        REG32(0x40028018u)            /* FPGAIO 25 MHz counter: 1 cyc = 40 ns */
+#define CYC_NS(c)    ((unsigned)((c) * 40u))
+static inline void timer0_start(uint32_t period, uint8_t prio)
+{
+    TIMER_CTRL(TIMER0_BASE) = 0;
+    TIMER_RELOAD(TIMER0_BASE) = period - 1;
+    TIMER_VALUE(TIMER0_BASE) = period - 1;
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    NVIC_IPR(8) = prio;
+    NVIC_ISER0 = 1u &lt;&lt; 8;
+    TIMER_CTRL(TIMER0_BASE) = 1u | 8u;             /* enable + IRQ */
+}
+static inline void timer0_stop(void) { TIMER_CTRL(TIMER0_BASE) = 0; }
+static inline uint32_t timer0_elapsed(void)       /* cycles since TIMER0 raised its IRQ */
+{
+    return TIMER_RELOAD(TIMER0_BASE) - TIMER_VALUE(TIMER0_BASE);
+}
+static inline void spin_cyc(uint32_t c) { uint32_t t = CYC(); while (CYC() - t &lt; c) { } }
+static inline void spin_us(uint32_t us) { spin_cyc(us * 25u); }
+#endif</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# run.sh &lt;name&gt; &lt;src...&gt; [-- extra cflags]   (inside VM) build into /tmp/rtosD2/&lt;name&gt; and run with ICOUNT=1
+n=$1; shift; srcs=""; while [ $# -gt 0 ] &amp;&amp; [ "$1" != "--" ]; do srcs="$srcs $1"; shift; done; [ "$1" = "--" ] &amp;&amp; shift
+make -s -f /var/rtoslab/templates/freertos-mps2/Makefile SRCS="$srcs" OUT=/tmp/rtosD2/$n \
+  EXTRA_CFLAGS="-I/Users/donh/.rtos_scratch/D2 -DINCLUDE_xSemaphoreGetMutexHolder=1 $*" &gt;/tmp/rtosD2/$n.build 2&gt;&amp;1 || { cat /tmp/rtosD2/$n.build; exit 9; }
+grep -i warn /tmp/rtosD2/$n.build
+ICOUNT=1 /var/rtoslab/bin/rtos-run-mps2 /tmp/rtosD2/$n/app.elf ${TMO:-20}; echo "[exit=$?]"</code></pre></figure>
+<p><code>INCLUDE_xSemaphoreGetMutexHolder=1</code>은 "지금 주인이 누구인가"를 묻는 <code>xSemaphoreGetMutexHolder()</code>를 켠다. 랩 기본 config에는 없어서, 처음 빌드하면 <code>implicit declaration of function 'xSemaphoreGetMutexHolder'</code> 에러가 난다. 디버깅 코드에서 자주 쓰는 함수라 켜 두는 것을 권한다. Zephyr 쪽은 <code>rtos-zbuild</code>를 감싼 <code>zrun.sh</code>로 빌드하고 <code>rtos-zrun</code>으로 실행했다(캐시 경로만 <code>/tmp</code>로 돌렸다).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>#!/bin/bash
+# zrun.sh &lt;name&gt; &lt;app_dir&gt; [extra west args...]  (inside VM) build Zephyr mps2/an385 into /tmp/rtosD2/&lt;name&gt; and run
+n=$1; a=$2; shift 2
+export XDG_CACHE_HOME=/tmp/rtosD2/xdg CCACHE_DIR=/tmp/rtosD2/ccache
+/var/rtoslab/bin/rtos-zbuild mps2/an385 $a /tmp/rtosD2/$n "$@" -- -DUSER_CACHE_DIR=/tmp/rtosD2/zcache ${ZARGS} || exit 9
+/var/rtoslab/bin/rtos-zrun /tmp/rtosD2/$n ${TMO:-8}</code></pre></figure>
+<hr>
+<h2 id="1-소유권-잠근-태스크만-푼다">1. 소유권 — 잠근 태스크만 푼다<a class="anchor" href="#1-소유권-잠근-태스크만-푼다" aria-label="link">#</a></h2>
+<h3 id="1-1-정의">1.1 정의<a class="anchor" href="#1-1-정의" aria-label="link">#</a></h3>
+<p><strong>뮤텍스</strong>는 값이 0 또는 1인 잠금에 <strong>소유자(owner, holder)</strong> 필드가 붙은 커널 객체다.</p>
+<ul><li><strong>take / lock</strong>: 비어 있으면 "주인 = 나"로 적고 바로 돌아온다. 차 있으면 주어진 시간(timeout)만큼 잠들어 기다린다.</li><li><strong>give / unlock</strong>: 주인만 할 수 있다. 주인 필드를 비우고(또는 다음 대기자로 바꾸고) 기다리던 태스크 중 우선순위가 가장 높은 것을 깨운다.</li><li>주인이 있기 때문에 <strong>우선순위 상속</strong>(§6, D3)과 <strong>재귀 잠금</strong>(§2)이 가능하다.</li></ul>
+<p>세마포어(D1)와의 차이는 "주인"이 있느냐 하나다. 그래서 세마포어는 "ISR이 주고 태스크가 받는" 신호용으로 쓰고, 뮤텍스는 "같은 태스크가 잡고 같은 태스크가 놓는" 상호 배제용으로만 쓴다.</p>
+<h3 id="1-2-api-한눈에">1.2 API 한눈에<a class="anchor" href="#1-2-api-한눈에" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>동작</th><th>FreeRTOS V11.3.2</th><th>Zephyr v4.4.2</th></tr></thead><tbody><tr><td>만들기</td><td><code>xSemaphoreCreateMutex()</code> / <code>xSemaphoreCreateMutexStatic(&amp;buf)</code></td><td><code>K_MUTEX_DEFINE(m)</code> / <code>k_mutex_init(&amp;m)</code></td></tr><tr><td>재귀용 만들기</td><td><code>xSemaphoreCreateRecursiveMutex()</code></td><td>따로 없음 — <code>k_mutex</code>는 항상 재귀</td></tr><tr><td>잡기</td><td><code>xSemaphoreTake(m, ticks)</code> → <code>pdTRUE</code> / <code>pdFALSE</code></td><td><code>k_mutex_lock(&amp;m, timeout)</code> → 0 / <code>-EBUSY</code> / <code>-EAGAIN</code></td></tr><tr><td>재귀 잡기</td><td><code>xSemaphoreTakeRecursive(m, ticks)</code></td><td><code>k_mutex_lock</code> 그대로</td></tr><tr><td>놓기</td><td><code>xSemaphoreGive(m)</code></td><td><code>k_mutex_unlock(&amp;m)</code> → 0 / <code>-EPERM</code> / <code>-EINVAL</code></td></tr><tr><td>재귀 놓기</td><td><code>xSemaphoreGiveRecursive(m)</code></td><td><code>k_mutex_unlock</code> 그대로</td></tr><tr><td>주인 묻기</td><td><code>xSemaphoreGetMutexHolder(m)</code> (<code>INCLUDE_xSemaphoreGetMutexHolder</code>)</td><td><code>m.owner</code> 필드 (공개 API 없음, 디버깅용)</td></tr><tr><td>필요한 설정</td><td><code>configUSE_MUTEXES 1</code>, 재귀는 <code>configUSE_RECURSIVE_MUTEXES 1</code></td><td>기본 포함</td></tr><tr><td>ISR에서</td><td><strong>금지</strong> (<code>semphr.h</code>: "Mutex type semaphores cannot be used from within interrupt service routines")</td><td><strong>금지</strong> (<code>kernel.h</code>: "Mutexes may not be locked in ISRs")</td></tr></tbody></table></div>
+<p>FreeRTOS의 뮤텍스 함수 이름이 전부 <code>xSemaphore...</code>인 이유는 §7에서 본다. FreeRTOS에서 뮤텍스는 "길이 1, 항목 크기 0인 큐"이고, 세마포어도 같은 큐다. 같은 함수가 큐의 종류를 보고 뮤텍스일 때만 주인을 기록한다.</p>
+<h3 id="1-3-예제-1-freertos-주인이-아닌-태스크가-give하면">1.3 예제 1 — FreeRTOS: 주인이 아닌 태스크가 give하면?<a class="anchor" href="#1-3-예제-1-freertos-주인이-아닌-태스크가-give하면" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: (1) 비어 있는 뮤텍스를 give하면, (2) A가 쥐고 잠든 사이 B(주인 아님)가 give하면 무슨 일이 일어나는지. 같은 소스를 랩 기본 config(<code>configASSERT</code> 켬)와 <code>configASSERT</code>를 지운 config(양산 빌드에서 흔한 모양)로 두 번 돌린다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex1 — FreeRTOS mutex ownership: who may give? (holder query, give-when-free, non-owner give) */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+static SemaphoreHandle_t m;
+static volatile int a_inside;                       /* 1 while task A believes it owns m */
+static const char *holder(void)
+{
+    TaskHandle_t h = xSemaphoreGetMutexHolder(m);
+    return h ? pcTaskGetName(h) : "(none)";
+}
+static void task_a(void *p)                          /* prio 2: the real owner */
+{
+    (void)p;
+    xSemaphoreTake(m, portMAX_DELAY);
+    a_inside = 1;
+    board_printf_raw("A: took m, holder=%s\n", holder());
+    vTaskDelay(10);                                  /* still inside the critical region */
+    board_printf_raw("A: woke up, holder=%s -&gt; giving\n", holder());
+    a_inside = 0;
+    BaseType_t r = xSemaphoreGive(m);
+    board_printf_raw("A: give returned %d, holder=%s\n", (int)r, holder());
+    board_exit(0);
+}
+static void task_b(void *p)                          /* prio 1: not the owner */
+{
+    (void)p;
+    board_printf_raw("B: holder=%s, give on a FREE mutex -&gt; %d\n", holder(), (int)xSemaphoreGive(m));
+    xTaskCreate(task_a, "A", 512, NULL, 2, NULL);   /* A preempts, takes m, sleeps */
+    board_printf_raw("B: holder=%s, now B (not owner) calls give...\n", holder());
+    BaseType_t r = xSemaphoreGive(m);
+    board_printf_raw("B: give returned %d, holder=%s\n", (int)r, holder());
+    if (xSemaphoreTake(m, 0) == pdTRUE)
+        board_printf_raw("B: took m too! A inside=%d -&gt; two tasks in the region\n", a_inside);
+    for (;;) vTaskDelay(100);
+}
+int main(void)
+{
+    m = xSemaphoreCreateMutex();
+    xTaskCreate(task_b, "B", 512, NULL, 1, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<p><code>configASSERT</code>를 지운 config는 랩 config를 감싸는 3줄짜리 <code>FreeRTOSConfig.h</code>다(앱 폴더의 config가 템플릿 것보다 먼저 잡힌다).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* wrapper: lab config with configASSERT removed (what a release build often ships) */
+#ifndef D2_NOASSERT_WRAP
+#define D2_NOASSERT_WRAP
+#include "/var/rtoslab/templates/freertos-mps2/FreeRTOSConfig.h"
+#undef configASSERT
+#endif</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D2; $S/run.sh ex1 $S/f1/ex1.c; $S/run.sh ex1n $S/f1n/ex1n.c'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>B: holder=(none), give on a FREE mutex -&gt; 0
+A: took m, holder=A
+B: holder=A, now B (not owner) calls give...
+
+[configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/tasks.c:6861
+[board_exit] code=253
+[exit=1]
+/var/rtoslab/src/FreeRTOS-Kernel/tasks.c:8564:17: warning: variable 'pxTCB' set but not used [-Wunused-but-set-variable]
+/var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:284:33: warning: unused variable 'pxVectorTable' [-Wunused-variable]
+B: holder=(none), give on a FREE mutex -&gt; 0
+A: took m, holder=A
+B: holder=A, now B (not owner) calls give...
+B: give returned 1, holder=(none)
+B: took m too! A inside=1 -&gt; two tasks in the region
+A: woke up, holder=B -&gt; giving
+A: give returned 1, holder=(none)
+[board_exit] code=0
+[exit=0]</code></pre></figure>
+<p>출력에서 볼 것은 세 가지다.</p>
+<ol class="tasks"><li><strong>비어 있는 뮤텍스에 give</strong> → <code>0</code>(<code>errQUEUE_FULL</code>). 뮤텍스는 길이 1 큐이고 비어 있는 뮤텍스 = "항목 1개가 들어 있는 큐"라서, give(= send)는 "큐가 가득 찼다"로 실패한다. 에러지만 해는 없다.</li><li><strong>assert 켬</strong>: B의 give가 <code>tasks.c:6861</code>에서 멈춘다. 이 줄은 API 입구가 아니라 <code>xTaskPriorityDisinherit()</code> 안의 <code>configASSERT( pxTCB == pxCurrentTCB )</code>다. 즉 FreeRTOS의 소유권 검사는 "<strong>give 경로가 우선순위 상속을 되돌리는 김에 주인이 지금 실행 중인 태스크인지 확인하는</strong>" 한 줄이 전부다.</li><li><strong>assert 끔</strong>: B의 give가 <strong>성공(1)</strong>한다. 주인 칸이 비고, B가 뮤텍스를 다시 잡는다. A는 아직 자기가 주인이라고 믿고 안에 있다(<code>A inside=1</code>). <strong>두 태스크가 동시에 임계 구역에 있다</strong> — 뮤텍스가 막으려던 바로 그 상황이다. 그리고 A가 깨어나서 give하면 그것도 성공한다(주인이 B인데). 양산 빌드에서 <code>configASSERT</code>를 끄면 소유권 규칙은 <strong>문서에만</strong> 남는다.</li></ol>
+<p>덤으로, <code>configASSERT</code>를 끄자 커널 소스 자체에서 경고 두 개가 나왔다(assert 안에서만 쓰던 변수가 남는다). 내 코드의 경고가 아니므로 이 config에서는 <code>-Wno-unused-variable -Wno-unused-but-set-variable</code>로 커널 경고를 따로 끄는 것이 보통이다.</p>
+<h3 id="1-4-예제-2-zephyr-에러-코드로-돌려준다">1.4 예제 2 — Zephyr: 에러 코드로 돌려준다<a class="anchor" href="#1-4-예제-2-zephyr-에러-코드로-돌려준다" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: Zephyr <code>k_mutex</code>의 소유권 · 재귀 · 타임아웃 에러 코드와, ISR에서 잠그면 무슨 일이 일어나는지. <code>CONFIG_ASSERT=y</code>로 빌드한다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex2 — Zephyr k_mutex: owner, lock_count, error codes, and k_mutex_lock from an ISR */
+#include &lt;zephyr/kernel.h&gt;
+static K_MUTEX_DEFINE(m);
+static void show(const char *who)
+{
+    printk("%-22s owner=%s lock_count=%u\n", who,
+           m.owner ? k_thread_name_get(m.owner) : "(none)", m.lock_count);
+}
+static void other_fn(void *a, void *b, void *c)          /* prio 3: never the owner */
+{
+    ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+    printk("other: unlock (not owner)   -&gt; %d\n", k_mutex_unlock(&amp;m));
+    show("other: after that");
+    printk("other: lock(K_NO_WAIT)      -&gt; %d\n", k_mutex_lock(&amp;m, K_NO_WAIT));
+    int64_t t0 = k_uptime_get();
+    int r = k_mutex_lock(&amp;m, K_MSEC(5));
+    printk("other: lock(K_MSEC(5))      -&gt; %d after %lld ms\n", r, k_uptime_get() - t0);
+    if (r == 0) { show("other: GOT it"); k_mutex_unlock(&amp;m); }
+}
+K_THREAD_DEFINE(other, 1024, other_fn, NULL, NULL, NULL, 3, 0, K_TICKS_FOREVER);
+static void isr_cb(struct k_timer *t)                    /* runs in the SysTick ISR */
+{
+    ARG_UNUSED(t);
+    printk("timer ISR: calling k_mutex_lock(K_NO_WAIT)...\n");
+    printk("timer ISR: returned %d\n", k_mutex_lock(&amp;m, K_NO_WAIT));
+    show("timer ISR: after lock");
+}
+static K_TIMER_DEFINE(tm, isr_cb, NULL);
+int main(void)
+{
+    k_thread_name_set(k_current_get(), "main");
+    k_thread_name_set(other, "other");
+#ifndef SKIP_FIRST
+    printk("main: unlock never-locked     -&gt; %d\n", k_mutex_unlock(&amp;m));
+#endif
+    k_mutex_lock(&amp;m, K_FOREVER);
+    k_mutex_lock(&amp;m, K_FOREVER);                         /* recursive: same owner */
+    show("main: locked twice");
+    k_thread_start(other);                               /* prio 3 &lt; main? main is 0 */
+    k_msleep(20);                                        /* let other run while we hold m */
+    k_mutex_unlock(&amp;m);
+    show("main: unlock #1");
+    k_mutex_unlock(&amp;m);
+    show("main: unlock #2");
+    k_timer_start(&amp;tm, K_MSEC(1), K_NO_WAIT);
+    k_msleep(5);
+    printk("main: done\n");
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>CONFIG_BOOT_BANNER=n
+CONFIG_ASSERT=y
+CONFIG_THREAD_NAME=y
+CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000
+CONFIG_QEMU_ICOUNT_SHIFT=5</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D2; $S/zrun.sh z1 $S/z1'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>main: unlock never-locked     -&gt; -22
+main: locked twice     owner=main lock_count=2
+other: unlock (not owner)   -&gt; -1
+other: after that      owner=main lock_count=2
+other: lock(K_NO_WAIT)      -&gt; -16
+other: lock(K_MSEC(5))      -&gt; -11 after 6 ms
+main: unlock #1        owner=main lock_count=1
+main: unlock #2        owner=(none) lock_count=0
+timer ISR: calling k_mutex_lock(K_NO_WAIT)...
+ASSERTION FAIL [!arch_is_in_isr()] @ WEST_TOPDIR/zephyr/kernel/mutex.c:115
+	mutexes cannot be used inside ISRs
+r0/a1:  0x00000004  r1/a2:  0x00000073  r2/a3:  0x00000000
+...</code></pre></figure>
+<p>출력에서 볼 것: Zephyr는 잘못된 사용을 <strong>반환값으로</strong> 알려 준다. 안 잠긴 뮤텍스 unlock은 <code>-EINVAL</code>(-22), 주인 아닌 unlock은 <code>-EPERM</code>(-1)이고 상태는 그대로다(<code>lock_count=2</code>). 기다리지 않으면 <code>-EBUSY</code>(-16), 기다리다 시간이 다 되면 <code>-EAGAIN</code>(-11). 5 ms를 줬는데 6 ms 뒤에 돌아온 것은 Zephyr가 "적어도 5 ms"를 보장하려고 tick 하나를 더 얹기 때문이다(§3.1). 마지막으로 타이머 콜백(= SysTick ISR 문맥)에서 <code>k_mutex_lock</code>을 부르자 <code>mutex.c:115</code>의 <code>__ASSERT(!arch_is_in_isr(), ...)</code>에 걸려 멈췄다.</p>
+<p>사이드 노트: 위 첫 시도에서는 <code>CONFIG_THREAD_NAME</code>이 없어서 주인 이름이 <code>(null)</code>로 찍혔고, tick이 보드 기본값(100 Hz)이라 5 ms 타임아웃이 20 ms 뒤에 돌아왔다. 1 kHz로 바꾼 뒤의 출력이 위 결과다. <strong>Zephyr의 타임아웃은 tick 단위로 올림된 뒤 +1 tick</strong>이므로, tick이 느린 보드에서는 짧은 타임아웃이 생각보다 훨씬 길어진다.</p>
+<h3 id="1-5-예제-2b-config_no_runtime_checks-y이면-eperm이-사라진다">1.5 예제 2b — <code>CONFIG_NO_RUNTIME_CHECKS=y</code>이면 <code>-EPERM</code>이 사라진다<a class="anchor" href="#1-5-예제-2b-config_no_runtime_checks-y이면-eperm이-사라진다" aria-label="link">#</a></h3>
+<p>Zephyr의 소유권 검사는 <code>CHECKIF()</code> 매크로로 쓰여 있다(<code>kernel/mutex.c:238</code>, <code>:246</code>). 이 매크로의 정의(<code>include/zephyr/sys/check.h</code>)는 Kconfig에 따라 세 가지로 바뀐다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>#if defined(CONFIG_ASSERT_ON_ERRORS)
+#define CHECKIF(expr) \
+	__ASSERT_NO_MSG(!(expr));   \
+	if (0)
+#elif defined(CONFIG_NO_RUNTIME_CHECKS)
+#define CHECKIF(...) \
+	if (0)
+#else
+#define CHECKIF(expr) \
+	if (expr)
+#endif</code></pre></figure>
+<p><code>CONFIG_NO_RUNTIME_CHECKS=y</code>이면 <code>CHECKIF(mutex-&gt;owner != _current) { return -EPERM; }</code>가 <code>if (0) { ... }</code>가 된다. 검사가 <strong>사라지고 unlock이 그대로 진행된다</strong>. 무엇을 확인하나: 같은 ex2를 <code>CONFIG_ASSERT=n</code>, <code>CONFIG_NO_RUNTIME_CHECKS=y</code>(<code>norc.conf</code>)로 다시 빌드한다. 첫 시도는 소스 그대로, 두 번째는 첫 줄(안 잠긴 뮤텍스 unlock)을 빼고(<code>-DSKIP_FIRST=1</code>, <code>CMakeLists.txt</code>에서 <code>target_compile_definitions(app PRIVATE SKIP_FIRST)</code>로 바꿔 준다).</p>
+<figure class="code"><span class="lang">text</span><pre><code>CONFIG_ASSERT=n
+CONFIG_NO_RUNTIME_CHECKS=y</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D2; ZARGS="-DEXTRA_CONF_FILE=norc.conf" $S/zrun.sh z1n $S/z1'
+limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D2; ZARGS="-DEXTRA_CONF_FILE=norc.conf -DSKIP_FIRST=1" $S/zrun.sh z1n $S/z1'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>***** MPU FAULT *****
+  Data Access Violation
+  MMFAR Address: 0xe
+r0/a1:  0x00000000  r1/a2:  0x0000000e  r2/a3:  0x0000000d
+...</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>main: locked twice     owner=main lock_count=2
+other: unlock (not owner)   -&gt; 0
+other: after that      owner=main lock_count=1
+other: lock(K_NO_WAIT)      -&gt; -16
+other: lock(K_MSEC(5))      -&gt; -11 after 6 ms
+main: unlock #1        owner=(none) lock_count=0
+main: unlock #2        owner=(none) lock_count=0
+timer ISR: calling k_mutex_lock(K_NO_WAIT)...
+timer ISR: returned 0
+timer ISR: after lock  owner=idle lock_count=1
+main: done</code></pre></figure>
+<p>출력에서 볼 것은 세 장면이다.</p>
+<ol><li><strong>안 잠긴 뮤텍스 unlock → MPU FAULT, 주소 0xe.</strong> 검사가 없으니 <code>adjust_owner_prio(mutex, mutex-&gt;owner_orig_prio)</code>까지 내려가 <code>mutex-&gt;owner-&gt;base.prio</code>를 읽는다. owner가 NULL이니 주소 0 + <code>offsetof(struct k_thread, base.prio)</code> = 0xe다. 이 보드는 NULL 포인터 검출이 꺼져 있어서(<code>CONFIG_NULL_POINTER_EXCEPTION_DETECTION_NONE=y</code>) 0xe <strong>읽기</strong>는 벡터 테이블의 한 바이트(0)를 읽고 지나간다. 그런데 <code>K_MUTEX_DEFINE</code>의 초기값이 <code>.owner_orig_prio = K_LOWEST_APPLICATION_THREAD_PRIO</code>라서 "우선순위가 다르다 → 바꾸자"로 판단하고 <code>z_thread_prio_set(NULL, ...)</code>이 0xe에 <strong>쓰려다가</strong> 플래시를 읽기 전용으로 잡은 MPU에 걸렸다(PC를 <code>addr2line</code>하면 <code>z_thread_prio_set</code>, <code>kernel/sched.c:787</code>). <code>-EINVAL</code> 한 줄이 NULL 역참조로 바뀐 것이다. 두 번째 실행의 <code>main: unlock #2</code>도 같은 NULL 경로를 지났지만, 그때는 <code>owner_orig_prio</code>가 main의 우선순위 0으로 바뀌어 있어서(읽은 바이트도 0) 쓰기가 일어나지 않고 <strong>조용히</strong> 지나갔다. 같은 버그가 상태에 따라 크래시도 되고 무증상도 된다.</li><li><strong>주인 아닌 unlock → 0(성공)</strong>, 그리고 주인의 <code>lock_count</code>가 2 → 1로 줄었다. main이 첫 unlock을 하자 주인이 사라진다. main은 아직 한 번 더 잡고 있다고 믿는데 뮤텍스는 이미 풀렸다 — 예제 1의 FreeRTOS assert-끔과 같은 종류의 오염이다.</li><li><strong>ISR에서 lock → 0(성공), 주인 = <code>idle</code>.</strong> ISR이 걸렸을 때 실행 중이던 스레드가 idle이었으니 <code>_current</code>가 idle이고, 뮤텍스의 주인이 idle 스레드로 기록됐다. ISR에서의 "주인"이 무의미하다는 것(§4)을 그대로 보여 준다.</li></ol>
+<h3 id="1-6-정리-규칙을-어기면-각-커널은-어떻게-반응하나">1.6 정리 — 규칙을 어기면 각 커널은 어떻게 반응하나<a class="anchor" href="#1-6-정리-규칙을-어기면-각-커널은-어떻게-반응하나" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>잘못</th><th>FreeRTOS (assert 켬)</th><th>FreeRTOS (assert 끔)</th><th>Zephyr 기본</th><th>Zephyr <code>NO_RUNTIME_CHECKS</code></th></tr></thead><tbody><tr><td>비어 있는 뮤텍스 give/unlock</td><td><code>pdFAIL</code>(0)</td><td><code>pdFAIL</code>(0)</td><td><code>-EINVAL</code></td><td>NULL 역참조 → MPU FAULT (예제 2b)</td></tr><tr><td>주인 아닌 태스크가 give/unlock</td><td>assert <code>tasks.c:6861</code></td><td><strong>성공</strong>, 두 태스크가 안에</td><td><code>-EPERM</code>, 상태 그대로</td><td><strong>성공</strong>, 주인의 <code>lock_count</code> 감소</td></tr><tr><td>주인 아닌 태스크가 재귀 give</td><td><code>pdFAIL</code> (assert 아님, §2)</td><td><code>pdFAIL</code></td><td>(재귀 구분 없음) <code>-EPERM</code></td><td>성공</td></tr><tr><td>ISR에서 take/lock</td><td>assert <code>port.c:438</code> (§4)</td><td>조용히 진행 (주인 = 끼어든 태스크)</td><td><code>CONFIG_ASSERT=y</code>면 assert <code>mutex.c:115</code>, 아니면 진행</td><td>진행, 주인 = <code>idle</code> (예제 2b)</td></tr><tr><td>같은 태스크가 일반 뮤텍스를 두 번 take</td><td>자기 자신을 기다림 (예제 3)</td><td>같음</td><td>재귀로 성공</td><td>재귀로 성공</td></tr></tbody></table></div>
+<p><strong>함정</strong>: "Zephyr는 <code>-EPERM</code>을 주니까 안전하다"는 반만 맞다. 반환값을 <strong>검사하지 않으면</strong> 의미가 없고(대부분의 코드가 <code>k_mutex_unlock(&amp;m);</code>로 버린다), 코드 크기를 줄이려고 <code>CONFIG_NO_RUNTIME_CHECKS</code>를 켜면 검사 자체가 없어진다. FreeRTOS 쪽은 "양산에서 <code>configASSERT</code>를 끈다"가 같은 효과다. 그래서 개발 · 시험 빌드에서는 assert를 반드시 켜 두고, 소유권 위반은 <strong>설계로</strong> 없앤다(뮤텍스를 다루는 코드를 한 모듈의 래퍼 함수 하나로 모은다, §3.4).</p>
+<hr>
+<h2 id="2-재귀-뮤텍스-같은-주인이-여러-번">2. 재귀 뮤텍스 — 같은 주인이 여러 번<a class="anchor" href="#2-재귀-뮤텍스-같은-주인이-여러-번" aria-label="link">#</a></h2>
+<h3 id="2-1-직관과-정의">2.1 직관과 정의<a class="anchor" href="#2-1-직관과-정의" aria-label="link">#</a></h3>
+<p><strong>재귀 뮤텍스(recursive mutex)</strong>는 주인이 이미 쥔 뮤텍스를 또 잡으면 막지 않고 <strong>카운터만 올린다</strong>. 놓을 때는 카운터를 내리고, 0이 되는 순간에만 진짜로 풀린다. "문을 세 번 잠근 주인은 세 번 열어야 나갈 수 있다."</p>
+<p>FreeRTOS에서는 생성 함수부터 다르다(<code>xSemaphoreCreateRecursiveMutex</code>). 카운터는 뮤텍스 안의 <code>uxRecursiveCallCount</code>다. Zephyr의 <code>k_mutex</code>는 <strong>항상 재귀</strong>이고 카운터는 <code>lock_count</code>다(예제 2의 <code>lock_count=2</code>). 각 RTOS의 기본값 비교는 A5 §3.7에 있다.</p>
+<h3 id="2-2-예제-3-일반-뮤텍스의-자기-교착-재귀-카운터-give-규칙-api-섞기">2.2 예제 3 — 일반 뮤텍스의 자기 교착, 재귀 카운터, give 규칙, API 섞기<a class="anchor" href="#2-2-예제-3-일반-뮤텍스의-자기-교착-재귀-카운터-give-규칙-api-섞기" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: (1) 일반 뮤텍스를 같은 태스크가 두 번 take하면, (2) 재귀 뮤텍스를 3번 잡고 1번씩 놓을 때 기다리던 B가 언제 깨어나는지, (3) 주인 아닌 B의 <code>xSemaphoreGiveRecursive</code>, (4) 재귀로 2번 잡고 <strong>일반 give</strong>로 놓으면. 카운터는 공개 API가 없어서, 정적 할당 버퍼(<code>StaticSemaphore_t</code>)의 더미 필드를 kernel-aware 디버거처럼 들여다본다(<code>pvDummy1[2]</code> = <code>xMutexHolder</code>, <code>u.uxDummy2</code> = <code>uxRecursiveCallCount</code>, 레이아웃은 §7.1 그림).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex3 — plain vs recursive mutex: self-deadlock, nested take count, give rules, API mixing */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+static StaticSemaphore_t rbuf;                      /* peek inside like a kernel-aware debugger */
+static SemaphoreHandle_t m, r;
+#define R_HOLDER() ((TaskHandle_t)rbuf.pvDummy1[2])  /* Queue_t.u.xSemaphore.xMutexHolder */
+#define R_COUNT()  ((unsigned)rbuf.u.uxDummy2)       /* Queue_t.u.xSemaphore.uxRecursiveCallCount */
+static const char *nm(TaskHandle_t h) { return h ? pcTaskGetName(h) : "(none)"; }
+static void peek(const char *s) { board_printf_raw("  %s: holder=%s count=%u\n", s, nm(R_HOLDER()), R_COUNT()); }
+static void task_b(void *p)                          /* prio 3: wants r, and tries a non-owner give */
+{
+    (void)p;
+    board_printf_raw("B: GiveRecursive (not owner) -&gt; %d\n", (int)xSemaphoreGiveRecursive(r));
+    TickType_t t0 = xTaskGetTickCount();
+    BaseType_t ok = xSemaphoreTakeRecursive(r, portMAX_DELAY);
+    board_printf_raw("B: got r=%d after %u ticks\n", (int)ok, (unsigned)(xTaskGetTickCount() - t0));
+    peek("B holding");
+    xSemaphoreGiveRecursive(r);
+    vTaskSuspend(NULL);
+}
+static void task_a(void *p)                          /* prio 2 */
+{
+    (void)p;
+    TickType_t t0 = xTaskGetTickCount();
+    xSemaphoreTake(m, portMAX_DELAY);
+    BaseType_t again = xSemaphoreTake(m, 5);         /* same task, plain mutex, 5-tick timeout */
+    board_printf_raw("A: plain mutex 2nd take -&gt; %d after %u ticks (self-deadlock)\n",
+                     (int)again, (unsigned)(xTaskGetTickCount() - t0));
+    xSemaphoreGive(m);
+    for (int i = 0; i &lt; 3; i++) xSemaphoreTakeRecursive(r, portMAX_DELAY);
+    peek("A took r x3");
+    xTaskCreate(task_b, "B", 512, NULL, 3, NULL);    /* B preempts and blocks on r */
+    for (int i = 3; i &gt; 0; i--) {
+        vTaskDelay(2);
+        xSemaphoreGiveRecursive(r);                  /* B wakes only on the last one */
+        peek("A gave 1");
+    }
+    board_printf_raw("A: extra GiveRecursive -&gt; %d\n", (int)xSemaphoreGiveRecursive(r));
+    /* API mixing: take recursively twice, then a PLAIN give */
+    xSemaphoreTakeRecursive(r, 0); xSemaphoreTakeRecursive(r, 0);
+    peek("A took r x2");
+    board_printf_raw("A: plain xSemaphoreGive(r) -&gt; %d\n", (int)xSemaphoreGive(r));
+    peek("A after plain give");
+    board_printf_raw("sizeof(StaticSemaphore_t)=%u\n", (unsigned)sizeof(StaticSemaphore_t));
+    board_exit(0);
+}
+int main(void)
+{
+    m = xSemaphoreCreateMutex();
+    r = xSemaphoreCreateRecursiveMutexStatic(&amp;rbuf);
+    xTaskCreate(task_a, "A", 512, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>A: plain mutex 2nd take -&gt; 0 after 5 ticks (self-deadlock)
+  A took r x3: holder=A count=3
+B: GiveRecursive (not owner) -&gt; 0
+  A gave 1: holder=A count=2
+  A gave 1: holder=A count=1
+B: got r=1 after 6 ticks
+  B holding: holder=B count=1
+  A gave 1: holder=(none) count=0
+A: extra GiveRecursive -&gt; 0
+  A took r x2: holder=A count=2
+A: plain xSemaphoreGive(r) -&gt; 1
+  A after plain give: holder=(none) count=2
+sizeof(StaticSemaphore_t)=84
+[board_exit] code=0
+[exit=0]</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ol><li><strong>일반 뮤텍스를 주인이 또 take</strong> → 5 tick 기다리다 실패. 자기가 쥔 열쇠를 자기가 기다렸다. <code>portMAX_DELAY</code>였다면 <strong>영원히</strong> 멈춘다(자기 교착, self-deadlock).</li><li><strong>재귀 카운터</strong>: 3번 잡으면 count=3, 한 번 놓을 때마다 2, 1. B는 <strong>세 번째 give에서야</strong> 깨어났다(<code>after 6 ticks</code> = 2 tick × 3). B의 줄이 A의 마지막 <code>peek</code>보다 먼저 찍힌 것은 B(우선순위 3)가 give 순간 A를 선점했기 때문이다.</li><li><strong>주인 아닌 <code>GiveRecursive</code> → 0</strong>, assert 없음. <code>xQueueGiveMutexRecursive()</code>는 처음부터 <code>xMutexHolder == xTaskGetCurrentTaskHandle()</code>을 직접 비교해서 아니면 <code>pdFAIL</code>을 돌려준다(<code>queue.c:759</code>~). 일반 <code>xSemaphoreGive</code>(§1.3)와 반응이 다르다 — 재귀 쪽이 오히려 더 친절하다.</li><li><strong>API 섞기 버그</strong>: 재귀로 2번 잡고 일반 <code>xSemaphoreGive</code>로 한 번 놓으면 <strong>뮤텍스가 통째로 풀리고(holder=none) 카운터는 2로 남는다</strong>. 일반 give는 카운터를 모른다. 다음 주인은 count=3에서 시작하므로 3번 놓아야 풀린다 — 아무도 3번 놓지 않으니 결국 영원히 잠긴 뮤텍스가 된다. <code>semphr.h</code>도 "This macro must not be used on mutexes created using xSemaphoreCreateMutex()"처럼 짝을 맞추라고 적어 둘 뿐 검사하지 않는다.</li></ol>
+<figure class="chart"><svg viewBox="0 0 680 240" xmlns="http://www.w3.org/2000/svg">
+<line x1="60" y1="190" x2="660" y2="190" stroke="currentColor"/>
+<line x1="60" y1="190" x2="60" y2="40" stroke="currentColor"/>
+<text x="50" y="194" font-size="12" text-anchor="end">0</text>
+<text x="50" y="154" font-size="12" text-anchor="end">1</text>
+<text x="50" y="114" font-size="12" text-anchor="end">2</text>
+<text x="50" y="74" font-size="12" text-anchor="end">3</text>
+<text x="10" y="30" font-size="12">카운터</text>
+<rect x="300" y="44" width="235" height="146" fill="#888" fill-opacity="0.12" stroke="#888" stroke-dasharray="4 3"/>
+<text x="417" y="60" font-size="12" text-anchor="middle">B는 여기서 잠들어 기다린다</text>
+<polyline points="60,190 100,190 100,150 140,150 140,110 180,110 180,70 380,70 380,110 460,110 460,150 535,150 535,190 560,190" fill="none" stroke="#4a7bd0" stroke-width="2"/>
+<polyline points="535,150 640,150" fill="none" stroke="#e08a3c" stroke-width="2"/>
+<text x="100" y="208" font-size="12" text-anchor="middle">take</text>
+<text x="140" y="208" font-size="12" text-anchor="middle">take</text>
+<text x="180" y="208" font-size="12" text-anchor="middle">take</text>
+<text x="380" y="208" font-size="12" text-anchor="middle">give</text>
+<text x="460" y="208" font-size="12" text-anchor="middle">give</text>
+<text x="535" y="208" font-size="12" text-anchor="middle">give</text>
+<text x="300" y="226" font-size="12" text-anchor="middle">B 생성 (우선순위 3)</text>
+<text x="600" y="140" font-size="12" text-anchor="middle">B count=1</text>
+<text x="240" y="90" font-size="12" text-anchor="middle">A count=3</text>
+<line x1="300" y1="190" x2="300" y2="214" stroke="currentColor" stroke-dasharray="2 2"/>
+</svg></figure>
+<p>그림 2 — 예제 3의 재귀 카운터(파랑 = A, 주황 = B). A가 3번 잡은 뒤 B가 생겨 기다린다. A가 2 tick마다 한 번씩 놓아 카운터가 0이 되는 순간에만 뮤텍스가 풀리고, 기다리던 B가 count=1로 이어받는다.</p>
+<h3 id="2-3-언제-정당하고-언제-설계-냄새인가">2.3 언제 정당하고, 언제 설계 냄새인가<a class="anchor" href="#2-3-언제-정당하고-언제-설계-냄새인가" aria-label="link">#</a></h3>
+<p>재귀 뮤텍스는 "이미 잡고 있는지 모르는 코드"를 위한 도구다. 그 자체가 신호다 — <strong>누가 언제 잠그는지 설계에서 정해지지 않았다</strong>.</p>
+<div class="tw"><table><thead><tr><th>상황</th><th>판단</th><th>대안</th></tr></thead><tbody><tr><td>공개 함수 <code>log_write()</code>가 잠그고, 내부에서 다시 공개 함수 <code>log_flush()</code>를 부르는데 그것도 잠근다</td><td>설계 냄새 (가장 흔함)</td><td>잠그는 공개 함수 + 잠그지 않는 내부 함수 <code>log_flush_locked()</code>로 나눈다</td></tr><tr><td>콜백을 등록받는 드라이버: 콜백 안에서 사용자가 같은 드라이버 API를 다시 부를 수 있다</td><td>정당할 수 있음</td><td>콜백을 잠금 밖에서 부른다 (잠금 → 상태 복사 → 풀기 → 콜백)</td></tr><tr><td>서드파티 스택(파일시스템, USB, lwIP)의 포팅 계층이 "재귀 뮤텍스를 달라"고 요구한다</td><td>정당 (선택권이 없음)</td><td>그 계층에만 쓰고 앱 코드로 퍼지지 않게 한다</td></tr><tr><td>재귀 호출하는 알고리즘(트리 순회)이 공유 자료구조를 만진다</td><td>설계 냄새</td><td>바깥에서 한 번 잠그고 내부 재귀 함수는 잠그지 않는다</td></tr><tr><td>Zephyr로 옮겼더니 원래 FreeRTOS에서 교착하던 코드가 "그냥 돈다"</td><td>위험</td><td>재귀가 숨긴 이중 잠금을 찾아서 고친다 (A5 §3.7)</td></tr></tbody></table></div>
+<p>재귀 뮤텍스가 위험한 이유는 두 가지다. 첫째, <strong>불변식(invariant)이 깨진 상태로 다시 들어간다.</strong> 바깥 함수가 자료구조를 반쯤 고친 상태에서 안쪽 함수가 같은 자료구조를 "온전하다"고 믿고 읽는다 — 뮤텍스가 막아 주지 않는 버그다. 둘째, <strong>풀었다고 생각했는데 안 풀린다.</strong> 어느 경로에서 take가 한 번 더 일어나면 바깥의 마지막 give 뒤에도 count=1로 남는다. 위 예제의 "API 섞기"가 그 변형이다.</p>
+<p><code>_locked()</code> 분리 패턴은 이렇게 생겼다(구조만 보이는 실행하지 않은 조각이다).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* not executed — the usual fix: public functions lock, *_locked() helpers assume the lock is held */
+static SemaphoreHandle_t log_mtx;                   /* plain mutex, not recursive */
+static void log_flush_locked(void) { /* drain ring to UART; caller holds log_mtx */ }
+void log_flush(void)
+{
+    xSemaphoreTake(log_mtx, portMAX_DELAY);
+    log_flush_locked();
+    xSemaphoreGive(log_mtx);
+}
+void log_write(const char *s)
+{
+    xSemaphoreTake(log_mtx, portMAX_DELAY);
+    /* append s to ring ... */
+    if (/* ring nearly full */ 0) log_flush_locked();   /* NOT log_flush(): no second take */
+    xSemaphoreGive(log_mtx);
+}</code></pre></figure>
+<p><strong>Don 경험과 연결</strong>: SSD 펌웨어에서 "이 함수는 채널 락을 쥔 상태로만 불러야 한다"를 함수 이름 접미사나 assert(<code>ASSERT(chan_lock_held(ch))</code>)로 표시했다면 같은 패턴이다. FreeRTOS에서는 <code>configASSERT(xSemaphoreGetMutexHolder(log_mtx) == xTaskGetCurrentTaskHandle())</code>를 <code>_locked()</code> 함수 첫 줄에 넣으면 된다.</p>
+<hr>
+<h2 id="3-타임아웃-기다림에-예산을-붙인다">3. 타임아웃 — 기다림에 예산을 붙인다<a class="anchor" href="#3-타임아웃-기다림에-예산을-붙인다" aria-label="link">#</a></h2>
+<h3 id="3-1-타임아웃-값은-어떻게-정하나">3.1 타임아웃 값은 어떻게 정하나<a class="anchor" href="#3-1-타임아웃-값은-어떻게-정하나" aria-label="link">#</a></h3>
+<p><code>xSemaphoreTake(m, ticks)</code>와 <code>k_mutex_lock(&amp;m, timeout)</code>의 두 번째 인자는 "최대 얼마나 기다릴지"다. 값은 감으로 정하지 않는다. <strong>다른 주인이 이 뮤텍스를 쥐는 최악 시간</strong>을 알면 예산이 나온다.</p>
+<ul><li>예산 = (다른 태스크들의 최악 보유 시간 중 최댓값) + (그 사이 선점해 들어올 수 있는 더 높은 태스크 · ISR의 시간) + 여유.</li><li>그리고 예산 &lt; <strong>내 마감까지 남은 시간</strong>이어야 한다. 1 kHz 루프에서 2 ms를 기다리면 기다리는 것만으로 주기를 놓친다(예제 4).</li><li>단위는 tick이다. FreeRTOS에서 <code>xSemaphoreTake(m, 2)</code>는 "tick 경계를 2번 지날 때까지"라서 실제로는 1~2 ms(1 kHz tick)다. Zephyr는 ms를 tick으로 <strong>올림</strong>하고 +1 tick을 더한다(예제 2: 5 ms → 6 ms). µs 단위 예산이 필요하면 뮤텍스 타임아웃이 아니라 설계(보유 시간을 줄이기)로 해결한다.</li></ul>
+<h3 id="3-2-예제-4-버스-주인이-멈췄을-때-타임아웃이-있는-태스크-vs-portmax_delay-태스크">3.2 예제 4 — 버스 주인이 멈췄을 때: 타임아웃이 있는 태스크 vs <code>portMAX_DELAY</code> 태스크<a class="anchor" href="#3-2-예제-4-버스-주인이-멈췄을-때-타임아웃이-있는-태스크-vs-portmax_delay-태스크" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 드론 FC의 I2C 버스 뮤텍스를 기압계 태스크가 잡은 채 <strong>오지 않는 I2C 완료 인터럽트를 영원히 기다리는</strong> 버그를 일부러 만든다. IMU 태스크(1 kHz, 예산 2 tick)는 타임아웃 에러 경로로 버티고, 로그 태스크(<code>portMAX_DELAY</code>)는 영원히 멈춘다. 감시(supervisor) 태스크가 40 ms 뒤에 상태를 본다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex4 — take with timeout: error path for a stuck bus owner vs a portMAX_DELAY waiter */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+static SemaphoreHandle_t bus;
+static TaskHandle_t h_imu, h_log;
+static volatile unsigned imu_ok, imu_timeout, imu_consec, log_writes;
+typedef enum { BUS_OK = 0, BUS_BUSY = -1 } bus_err_t;
+static bus_err_t bus_xfer(TickType_t budget, uint32_t work_us)   /* the only door to the bus */
+{
+    if (xSemaphoreTake(bus, budget) != pdTRUE) return BUS_BUSY;  /* never touch HW without it */
+    uint32_t t = board_now_us(); while (board_now_us() - t &lt; work_us) { }
+    xSemaphoreGive(bus);
+    return BUS_OK;
+}
+static void imu_task(void *p)                       /* prio 4, 1 kHz, budget 2 ticks */
+{
+    (void)p;
+    TickType_t last = xTaskGetTickCount();
+    for (;;) {
+        uint32_t t0 = board_now_us();
+        if (bus_xfer(2, 100) == BUS_OK) { imu_ok++; imu_consec = 0; }
+        else {
+            imu_timeout++;
+            if (++imu_consec == 1)
+                board_printf_raw("[%u ms] imu: bus timeout after %u us, holder=%s -&gt; use last sample\n",
+                                 (unsigned)xTaskGetTickCount(), (unsigned)(board_now_us() - t0),
+                                 pcTaskGetName(xSemaphoreGetMutexHolder(bus)));
+            if (imu_consec == 5) board_printf_raw("[%u ms] imu: 5 misses in a row -&gt; request bus recovery\n",
+                                                  (unsigned)xTaskGetTickCount());
+        }
+        xTaskDelayUntil(&amp;last, 1);
+    }
+}
+static void baro_task(void *p)                      /* prio 2: takes the bus, then hangs inside */
+{
+    (void)p;
+    vTaskDelay(10);
+    xSemaphoreTake(bus, portMAX_DELAY);
+    board_printf_raw("[%u ms] baro: took bus, waiting for an I2C IRQ that never comes...\n",
+                     (unsigned)xTaskGetTickCount());
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);       /* BUG: blocking forever while holding */
+}
+static void log_task(void *p)                       /* prio 1: uses portMAX_DELAY */
+{
+    (void)p;
+    for (;;) { xSemaphoreTake(bus, portMAX_DELAY); log_writes++; xSemaphoreGive(bus); vTaskDelay(3); }
+}
+static void sup_task(void *p)                       /* prio 5: supervisor */
+{
+    (void)p;
+    vTaskDelay(40);
+    static const char *st[] = { "Running", "Ready", "Blocked", "Suspended", "Deleted", "Invalid" };
+    board_printf_raw("[%u ms] sup: imu ok=%u timeout=%u | log writes=%u, log state=%s, imu state=%s\n",
+                     (unsigned)xTaskGetTickCount(), imu_ok, imu_timeout, log_writes,
+                     st[eTaskGetState(h_log)], st[eTaskGetState(h_imu)]);
+    board_printf_raw("[%u ms] sup: log is stuck forever (portMAX_DELAY); imu kept its 1 kHz loop\n",
+                     (unsigned)xTaskGetTickCount());
+    board_exit(0);
+}
+int main(void)
+{
+    bus = xSemaphoreCreateMutex();
+    xTaskCreate(imu_task, "imu", 512, NULL, 4, &amp;h_imu);
+    xTaskCreate(baro_task, "baro", 512, NULL, 2, NULL);
+    xTaskCreate(log_task, "log", 512, NULL, 1, &amp;h_log);
+    xTaskCreate(sup_task, "sup", 512, NULL, 5, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>[10 ms] baro: took bus, waiting for an I2C IRQ that never comes...
+[13 ms] imu: bus timeout after 2013 us, holder=baro -&gt; use last sample
+[21 ms] imu: 5 misses in a row -&gt; request bus recovery
+[40 ms] sup: imu ok=11 timeout=14 | log writes=4, log state=Blocked, imu state=Blocked
+[40 ms] sup: log is stuck forever (portMAX_DELAY); imu kept its 1 kHz loop
+[board_exit] code=0
+[exit=0]</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ol><li>IMU의 첫 타임아웃은 <strong>2013 µs</strong> 뒤에 돌아왔다(2 tick). 에러 경로가 주인 이름(<code>holder=baro</code>)을 찍었다 — 현장 로그에서 "누가 쥐고 안 놓나"를 바로 알려 주는 한 줄이다. <code>xSemaphoreGetMutexHolder</code>를 켜 두는 이유다.</li><li>5번 연속 실패는 13 ms → 21 ms, 즉 <strong>실패 한 번에 2 ms</strong>가 걸렸다. 1 kHz 루프에 2 tick 예산을 준 것이 잘못이다. 기다리는 동안 이미 다음 주기가 지나간다. 이 루프라면 예산은 0(<code>xSemaphoreTake(bus, 0)</code>, 못 잡으면 이번 주기는 건너뜀)이나 1 tick 미만이 맞다. <strong>예산 &lt; 주기</strong>를 지키지 않으면 타임아웃이 있어도 루프가 밀린다.</li><li>40 ms 동안 IMU는 ok 11 + timeout 14번 — <strong>살아서 돌았다</strong>. 로그 태스크는 4번 쓰고 <code>Blocked</code>에 멈췄고, 아무 흔적도 남기지 않는다. <code>portMAX_DELAY</code>로 기다리는 태스크는 주인이 돌아오지 않으면 <strong>영원히 아무 말 없이</strong> 멈춘다.</li></ol>
+<h3 id="3-3-portmax_delay-k_forever를-써도-되는-때">3.3 <code>portMAX_DELAY</code> / <code>K_FOREVER</code>를 써도 되는 때<a class="anchor" href="#3-3-portmax_delay-k_forever를-써도-되는-때" aria-label="link">#</a></h3>
+<p><code>portMAX_DELAY</code>(FreeRTOS에서 <code>INCLUDE_vTaskSuspend 1</code>이면 진짜 무한)와 <code>K_FOREVER</code>는 금지가 아니다. 쓸 수 있는 조건은 이렇다.</p>
+<ul><li>모든 주인의 보유 구간이 <strong>블로킹 없이 유한</strong>하다는 것이 코드로 보장된다(구간 안에 I/O 대기 · 큐 대기 · delay가 없다).</li><li>그래도 멈추면 잡아 줄 <strong>독립된 감시 수단</strong>이 있다 — 태스크별 체크인 기반 워치독(M 모듈), 감시 태스크의 <code>eTaskGetState</code>.</li><li>기다리는 태스크가 마감이 없는 배경 작업(로그, 통계)이고, 멈춰도 제어 루프에 영향이 없다.</li></ul>
+<p>반대로 <strong>마감이 있는 태스크</strong>(제어 루프, 통신 응답)는 항상 유한한 예산을 주고 반환값을 검사한다. 예산을 넘긴 것은 "버그가 났다"는 신호이므로, 에러 경로는 조용히 넘어가지 말고 <strong>세고(count), 남기고(log), 올린다(escalate)</strong>.</p>
+<div class="tw"><table><thead><tr><th>에러 경로 단계</th><th>예제 4에서</th><th>실무 예</th></tr></thead><tbody><tr><td>이번 주기 대처</td><td>지난 샘플 재사용</td><td>센서 퓨전에 "이번 IMU 샘플 없음" 표시, 예측만 진행</td></tr><tr><td>세기</td><td><code>imu_timeout++</code>, 연속 횟수 <code>imu_consec</code></td><td>헬스 카운터 → 텔레메트리로 송신</td></tr><tr><td>남기기</td><td>첫 실패에 주인 이름 출력</td><td>블랙박스 로그에 <code>holder</code>, tick, 연속 횟수</td></tr><tr><td>올리기</td><td>5연속이면 버스 복구 요청</td><td>I2C 버스 복구(SCL 9펄스 + STOP, J2), 센서 재초기화, 고장 모드 전환</td></tr></tbody></table></div>
+<h3 id="3-4-에러-경로에서-unlock을-잊지-않는-구조">3.4 에러 경로에서 unlock을 잊지 않는 구조<a class="anchor" href="#3-4-에러-경로에서-unlock을-잊지-않는-구조" aria-label="link">#</a></h3>
+<p>뮤텍스 버그의 큰 부분이 "에러로 일찍 return하면서 give를 빠뜨림"이다. 예제 4의 <code>bus_xfer()</code>처럼 <strong>뮤텍스를 만지는 코드를 한 함수(문)로 모으고, 그 함수의 출구를 하나로</strong> 만든다. C에서는 <code>goto out;</code> 패턴이 정석이다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* not executed — single-exit pattern: every path after a successful take reaches the give */
+int i2c_read_reg(uint8_t dev, uint8_t reg, uint8_t *val)
+{
+    int err;
+    if (xSemaphoreTake(i2c_mtx, pdMS_TO_TICKS(1)) != pdTRUE)
+        return -EBUSY;                          /* not taken: must NOT give */
+    err = i2c_hw_write(dev, &amp;reg, 1);
+    if (err) goto out;                          /* NACK, arbitration lost ... */
+    err = i2c_hw_read(dev, val, 1);
+out:
+    xSemaphoreGive(i2c_mtx);                    /* exactly one give per successful take */
+    return err;
+}</code></pre></figure>
+<p>규칙은 두 줄이다. <strong>take가 실패했으면 give하지 않는다</strong>(§1.3의 "비어 있는 뮤텍스 give"가 된다). <strong>take가 성공했으면 모든 경로가 give를 지난다.</strong> 리뷰할 때는 함수 안의 <code>return</code> 문마다 "이 시점에 뮤텍스를 쥐고 있나?"를 표시해 본다.</p>
+<hr>
+<h2 id="4-isr에서-뮤텍스가-금지인-이유">4. ISR에서 뮤텍스가 금지인 이유<a class="anchor" href="#4-isr에서-뮤텍스가-금지인-이유" aria-label="link">#</a></h2>
+<h3 id="4-1-세-가지-이유">4.1 세 가지 이유<a class="anchor" href="#4-1-세-가지-이유" aria-label="link">#</a></h3>
+<ol><li><strong>ISR은 주인이 될 수 없다.</strong> 뮤텍스의 주인은 "태스크(TCB)"다. ISR은 태스크가 아니라, 그 순간 실행 중이던 아무 태스크의 스택 위에서 잠깐 도는 코드다. ISR이 take하면 커널은 "지금 현재 태스크"(<code>pxCurrentTCB</code>, <code>_current</code>)를 주인으로 적는데, 그것은 <strong>우연히 끼어들림을 당한 태스크</strong>다(예제 2b의 <code>owner=idle</code>). 그 태스크는 자기가 주인인 줄도 모르고, give할 일도 없다.</li><li><strong>ISR은 잠들 수 없다.</strong> 뮤텍스가 차 있으면 기다려야 하는데, ISR은 블록할 수 없다(블록 = 이 실행 흐름을 멈추고 다른 태스크로 전환. ISR 위에는 전환할 "자기 태스크"가 없다). 기다리지 않는 <code>K_NO_WAIT</code> / 0 tick이면 실패를 받을 뿐인데, 그러면 ISR이 "자원을 못 썼다"를 어떻게 처리하나라는 문제가 남는다.</li><li><strong>우선순위 상속이 ISR을 올려 줄 수 없다.</strong> 태스크가 ISR이 쥔 뮤텍스를 기다리면, 상속은 주인의 <strong>스케줄러 우선순위</strong>를 올리는데, ISR의 우선순위는 NVIC 하드웨어 우선순위라 스케줄러가 바꿀 수 없다. 거꾸로 ISR이 태스크가 쥔 뮤텍스를 원해도 ISR은 기다릴 수 없으니 상속할 일도 없다. FreeRTOS <code>xTaskPriorityInherit()</code>의 첫 주석이 정확히 이것이다: "If the mutex is taken by an interrupt, the mutex holder is NULL. Priority inheritance is not applied in this scenario."</li></ol>
+<h3 id="4-2-예제-5-freertos에서-isr이-뮤텍스를-만지는-세-가지-방법">4.2 예제 5 — FreeRTOS에서 ISR이 뮤텍스를 만지는 세 가지 방법<a class="anchor" href="#4-2-예제-5-freertos에서-isr이-뮤텍스를-만지는-세-가지-방법" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: kernel-aware 우선순위(0x40)의 TIMER0 ISR에서 (MODE 1) 일반 <code>xSemaphoreTake</code>, (MODE 2) <code>xSemaphoreTakeFromISR</code> / <code>xSemaphoreGiveFromISR</code>, (MODE 3) 태스크가 쥔 뮤텍스를 <code>xSemaphoreGiveFromISR</code>로 놓기.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex5 — mutex from an ISR in FreeRTOS: MODE 1 Take, MODE 2 TakeFromISR/GiveFromISR, MODE 3 GiveFromISR on a held mutex */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "d2.h"
+#ifndef MODE
+#define MODE 1
+#endif
+static SemaphoreHandle_t m;
+static volatile int step;
+static const char *nm(TaskHandle_t h) { return h ? pcTaskGetName(h) : "(none)"; }
+void TIMER0_IRQHandler(void)                       /* prio 0x40: kernel-aware, may call FromISR */
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    BaseType_t w = pdFALSE, r;
+    switch (step) {
+    case 1: board_printf_raw("ISR: xSemaphoreTake(m, 0)...\n"); r = xSemaphoreTake(m, 0);
+            board_printf_raw("ISR: returned %d\n", (int)r); break;
+    case 2: r = xSemaphoreTakeFromISR(m, &amp;w);
+            board_printf_raw("ISR: TakeFromISR -&gt; %d, holder=%s\n", (int)r, nm(xSemaphoreGetMutexHolderFromISR(m))); break;
+    case 3: board_printf_raw("ISR: GiveFromISR, holder=%s\n", nm(xSemaphoreGetMutexHolderFromISR(m)));
+            r = xSemaphoreGiveFromISR(m, &amp;w); board_printf_raw("ISR: returned %d\n", (int)r); break;
+    default: break;
+    }
+    step = 0;
+    portYIELD_FROM_ISR(w);
+}
+static void task_t(void *p)                        /* prio 2 */
+{
+    (void)p;
+    timer0_start(25000, 0x40);                     /* 1 ms */
+#if MODE == 1
+    step = 1; vTaskDelay(3);
+#elif MODE == 2
+    step = 2; vTaskDelay(3);                       /* ISR "owns" it now (holder NULL) */
+    board_printf_raw("task: Take(m, 5) -&gt; %d (ISR took it)\n", (int)xSemaphoreTake(m, 5));
+    step = 3; vTaskDelay(3);                       /* ISR gives it back: allowed, holder is NULL */
+    board_printf_raw("task: Take(m, 5) -&gt; %d, holder=%s\n", (int)xSemaphoreTake(m, 5), nm(xSemaphoreGetMutexHolder(m)));
+#else
+    xSemaphoreTake(m, portMAX_DELAY);              /* the task owns it ... */
+    step = 3; vTaskDelay(3);                       /* ... and an ISR "releases" it */
+#endif
+    board_printf_raw("task: done\n");
+    board_exit(0);
+}
+int main(void)
+{
+    m = xSemaphoreCreateMutex();
+    xTaskCreate(task_t, "T", 512, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D2; for k in 1 2 3; do echo "== MODE $k"; $S/run.sh ex5_$k $S/f5/ex5.c -- -DMODE=$k; done'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>== MODE 1
+ISR: xSemaphoreTake(m, 0)...
+
+[configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/portable/GCC/ARM_CM3/port.c:438
+[board_exit] code=253
+[exit=1]
+== MODE 2
+ISR: TakeFromISR -&gt; 1, holder=(none)
+task: Take(m, 5) -&gt; 0 (ISR took it)
+ISR: GiveFromISR, holder=(none)
+ISR: returned 1
+task: Take(m, 5) -&gt; 1, holder=T
+task: done
+[board_exit] code=0
+[exit=0]
+== MODE 3
+ISR: GiveFromISR, holder=T
+
+[configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/queue.c:1360
+[board_exit] code=253
+[exit=1]</code></pre></figure>
+<p>출력에서 볼 것:</p>
+<ul class="tasks"><li><strong>MODE 1</strong> — <code>port.c:438</code>은 <code>vPortEnterCritical()</code>의 <code>configASSERT( ( portNVIC_INT_CTRL_REG &amp; portVECTACTIVE_MASK ) == 0 )</code>이다. ICSR의 VECTACTIVE(지금 처리 중인 예외 번호)가 0이 아니면 = ISR 안이면 멈춘다. 즉 일반 <code>xSemaphoreTake</code>를 막은 것은 뮤텍스 코드가 아니라 <strong>"FromISR이 아닌 API가 크리티컬 섹션에 들어가는 순간"</strong>의 검사다(C7 §3.5의 그 assert). 뮤텍스뿐 아니라 모든 비-FromISR API가 같은 곳에서 잡힌다.</li><li><strong>MODE 2</strong> — <code>xSemaphoreTakeFromISR</code>은 <strong>성공한다</strong>. <code>xQueueReceiveFromISR()</code>는 뮤텍스인지 보지 않고 카운트만 내리므로 주인은 NULL로 남는다. 태스크는 그동안 못 잡고(0), ISR이 <code>GiveFromISR</code>로 돌려주자 잡는다. 동작은 하지만 이것은 <strong>주인 없는 이진 세마포어</strong>를 쓴 것과 같다. 상속도, 소유권 검사도 없다. 이렇게 쓸 거라면 처음부터 세마포어(D1)를 쓴다.</li><li><strong>MODE 3</strong> — 태스크가 주인인 뮤텍스를 ISR이 놓으려 하자 <code>queue.c:1360</code>에서 멈췄다. <code>xQueueGiveFromISR()</code>의 <code>configASSERT( ... !( ( pxQueue-&gt;uxQueueType == queueQUEUE_IS_MUTEX ) &amp;&amp; ( pxQueue-&gt;u.xSemaphore.xMutexHolder != NULL ) ) )</code>이고, 바로 위 주석이 "priority inheritance makes no sense for an interrupt, only tasks"다.</li></ul>
+<h3 id="4-3-zephyr">4.3 Zephyr<a class="anchor" href="#4-3-zephyr" aria-label="link">#</a></h3>
+<p>Zephyr는 <code>z_impl_k_mutex_lock()</code>과 <code>z_impl_k_mutex_unlock()</code> 첫 줄에 <code>__ASSERT(!arch_is_in_isr(), "mutexes cannot be used inside ISRs")</code>를 둔다. <code>CONFIG_ASSERT=y</code>면 예제 2처럼 멈추고, 기본(<code>CONFIG_ASSERT</code>는 테스트 빌드가 아니면 기본 n)이면 <strong>아무 검사 없이 진행</strong>해서 예제 2b처럼 <code>owner=idle</code>이 된다. 경합 중이면 더 나쁘다. <code>K_FOREVER</code>로 부르면 ISR 안에서 <code>z_pend_curr()</code>가 현재 스레드를 대기 큐에 넣으려 한다. 그리고 Zephyr의 <code>k_timer</code> 만료 콜백은 <strong>ISR 문맥</strong>에서 돈다는 점이 함정이다. "타이머 콜백에서 로그 뮤텍스를 잡는" 코드가 FreeRTOS(타이머 서비스 태스크 문맥)에서는 돌다가 Zephyr로 옮기면 깨진다(A5 §3.4, D6).</p>
+<h3 id="4-4-isr이-공유-자원을-써야-한다면">4.4 ISR이 공유 자원을 써야 한다면<a class="anchor" href="#4-4-isr이-공유-자원을-써야-한다면" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th>하고 싶은 것</th><th>쓸 것</th><th>노트</th></tr></thead><tbody><tr><td>ISR이 데이터를 태스크와 나눈다 (몇 바이트)</td><td>크리티컬 섹션(태스크 쪽) + ISR은 그대로</td><td>C7</td></tr><tr><td>ISR이 고속으로 데이터를 넘긴다</td><td>락 없는 SPSC 링버퍼</td><td>D8</td></tr><tr><td>ISR이 "이벤트 났다"만 알린다</td><td>세마포어 · task notification (<code>...FromISR</code>)</td><td>D1, D5</td></tr><tr><td>ISR이 I2C · SPI처럼 뮤텍스로 보호되는 자원을 쓰고 싶다</td><td>일을 태스크로 넘긴다 → 그 태스크가 뮤텍스를 잡는다</td><td>D7 (<code>xTimerPendFunctionCallFromISR</code>, <code>k_work</code>)</td></tr></tbody></table></div>
+<hr>
+<h2 id="5-고르기-뮤텍스-vs-크리티컬-섹션-vs-스케줄러-잠금">5. 고르기 — 뮤텍스 vs 크리티컬 섹션 vs 스케줄러 잠금<a class="anchor" href="#5-고르기-뮤텍스-vs-크리티컬-섹션-vs-스케줄러-잠금" aria-label="link">#</a></h2>
+<p>C7 §5.2에 "무엇을 막아야 하나"에서 출발하는 결정표가 있고, C7 §6은 잠금 길이 L이 IRQ · 태스크 지연에 얼마를 더하는지 PRIMASK · BASEPRI · 스케줄러 잠금으로 쟀다. 이 절은 그 표의 <strong>뮤텍스 칸</strong>을 숫자로 채운다. (1) 잡고 놓는 데 드는 <strong>비용</strong>, (2) 같은 50 µs 구간을 지킬 때 <strong>누가 기다리나</strong>.</p>
+<h3 id="5-1-세-도구는-막는-대상이-다르다">5.1 세 도구는 막는 대상이 다르다<a class="anchor" href="#5-1-세-도구는-막는-대상이-다르다" aria-label="link">#</a></h3>
+<div class="tw"><table><thead><tr><th></th><th>크리티컬 섹션 (<code>taskENTER_CRITICAL</code> / <code>irq_lock</code>)</th><th>스케줄러 잠금 (<code>vTaskSuspendAll</code> / <code>k_sched_lock</code>)</th><th>뮤텍스</th></tr></thead><tbody><tr><td>막는 것</td><td>kernel-aware ISR 전부 + 모든 태스크 전환</td><td>모든 태스크 전환 (ISR은 돈다)</td><td><strong>같은 뮤텍스를 원하는 태스크만</strong></td></tr><tr><td>안에서 블록</td><td>금지</td><td>금지 (FreeRTOS: 블로킹 API는 assert)</td><td>가능 (단, 다른 대기자가 그만큼 기다린다)</td></tr><tr><td>ISR과 공유</td><td>가능</td><td>불가 (ISR은 막히지 않는다)</td><td>불가</td></tr><tr><td>주인 · 상속</td><td>없음</td><td>없음</td><td>있음</td></tr><tr><td>잘못 썼을 때 피해</td><td>시스템 전체 IRQ 지연</td><td>시스템 전체 태스크 지연</td><td>그 자원을 쓰는 태스크들 + 역전(D3)</td></tr><tr><td>적당한 길이</td><td>수 µs 이하</td><td>수~수십 µs</td><td>수십 µs ~ ms, I/O 포함</td></tr></tbody></table></div>
+<h3 id="5-2-예제-6-freertos-각-도구의-비용">5.2 예제 6 — FreeRTOS: 각 도구의 비용<a class="anchor" href="#5-2-예제-6-freertos-각-도구의-비용" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 경합 없는 take+give 쌍, 재귀 뮤텍스(첫 단계 / 이미 쥔 상태에서 중첩), <code>taskENTER_CRITICAL</code>/<code>taskEXIT_CRITICAL</code> 쌍, <code>vTaskSuspendAll</code>/<code>xTaskResumeAll</code> 쌍을 각각 1000번 돌린 평균. 그리고 <strong>경합 상황</strong>: 낮은 태스크(lo, 1)가 쥔 뮤텍스를 높은 태스크(hi, 3)가 take해서 블록하는 경로, lo의 give가 hi를 깨워 hi가 take에서 돌아오기까지의 넘겨주기(handoff) 경로를 200번씩 잰다. 빈 루프 비용은 뺐다. 측정 중 1 ms SysTick이 몇 번 끼어든 것은 평균에 섞여 있다(1000회 × 6 µs ≈ 6 ms → tick 6번).</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex6 — cost of each protection primitive (FreeRTOS V11.3.2, QEMU icount: 1 cyc = 40 ns) */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "d2.h"
+#define N 1000
+static SemaphoreHandle_t m, r;
+static TaskHandle_t hi;
+static volatile uint32_t t_block0, t_got, sink;
+#define MEASURE(label, body) do { uint32_t t0 = CYC(); for (int i = 0; i &lt; N; i++) { body; } \
+    uint32_t c = (CYC() - t0) - base; \
+    board_printf_raw("%s: %u ns\n", label, CYC_NS(c) / N); } while (0)
+static void hi_task(void *p)                        /* prio 3: the contender */
+{
+    (void)p;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        t_block0 = CYC();
+        xSemaphoreTake(m, portMAX_DELAY);           /* blocks: lo holds m */
+        t_got = CYC();
+        xSemaphoreGive(m);
+    }
+}
+static void lo_task(void *p)                        /* prio 1: measures */
+{
+    (void)p;
+    uint32_t base = 0, t0 = CYC();
+    for (int i = 0; i &lt; N; i++) { sink = i; }
+    base = CYC() - t0;
+    MEASURE("mutex take+give (uncontended)", { xSemaphoreTake(m, 0); xSemaphoreGive(m); });
+    MEASURE("recursive take+give (1st level)", { xSemaphoreTakeRecursive(r, 0); xSemaphoreGiveRecursive(r); });
+    xSemaphoreTakeRecursive(r, 0);
+    MEASURE("recursive take+give (nested)", { xSemaphoreTakeRecursive(r, 0); xSemaphoreGiveRecursive(r); });
+    xSemaphoreGiveRecursive(r);
+    MEASURE("taskENTER/EXIT_CRITICAL pair", { taskENTER_CRITICAL(); sink = i; taskEXIT_CRITICAL(); });
+    MEASURE("vTaskSuspendAll/xTaskResumeAll", { vTaskSuspendAll(); sink = i; (void)xTaskResumeAll(); });
+    uint64_t s_blk = 0, s_hand = 0; uint32_t mx_blk = 0, mx_hand = 0;
+    for (int i = 0; i &lt; 200; i++) {
+        xSemaphoreTake(m, portMAX_DELAY);
+        xTaskNotifyGive(hi);                        /* hi runs, blocks on m, PI boosts lo to 3 */
+        uint32_t t_back = CYC(), blk = t_back - t_block0;
+        UBaseType_t boosted = uxTaskPriorityGet(NULL);
+        uint32_t t_give = CYC();
+        xSemaphoreGive(m);                          /* disinherit + switch to hi */
+        uint32_t hand = t_got - t_give;
+        s_blk += blk; s_hand += hand; if (blk &gt; mx_blk) mx_blk = blk; if (hand &gt; mx_hand) mx_hand = hand;
+        if (i == 0) board_printf_raw("lo priority while hi waits: %u (base 1)\n", (unsigned)boosted);
+    }
+    board_printf_raw("contended: hi take -&gt; blocked -&gt; lo runs: avg %u ns max %u ns\n",
+                     CYC_NS((uint32_t)(s_blk / 200)), CYC_NS(mx_blk));
+    board_printf_raw("contended: lo give -&gt; hi returns from take: avg %u ns max %u ns\n",
+                     CYC_NS((uint32_t)(s_hand / 200)), CYC_NS(mx_hand));
+    board_exit(0);
+}
+int main(void)
+{
+    m = xSemaphoreCreateMutex();
+    r = xSemaphoreCreateRecursiveMutex();
+    xTaskCreate(hi_task, "hi", 512, NULL, 3, &amp;hi);
+    xTaskCreate(lo_task, "lo", 512, NULL, 1, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<p>같은 소스를 랩 config(assert 켬)와 예제 1의 assert-끔 config(<code>f6n/</code>)로 돌렸다.</p>
+<figure class="code"><span class="lang">text</span><pre><code>mutex take+give (uncontended): 5928 ns
+recursive take+give (1st level): 7242 ns
+recursive take+give (nested): 1217 ns
+taskENTER/EXIT_CRITICAL pair: 897 ns
+vTaskSuspendAll/xTaskResumeAll: 2179 ns
+lo priority while hi waits: 3 (base 1)
+contended: hi take -&gt; blocked -&gt; lo runs: avg 20360 ns max 22320 ns
+contended: lo give -&gt; hi returns from take: avg 12360 ns max 13840 ns
+[board_exit] code=0
+[exit=0]</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>mutex take+give (uncontended): 3813 ns
+recursive take+give (1st level): 4967 ns
+recursive take+give (nested): 1057 ns
+taskENTER/EXIT_CRITICAL pair: 577 ns
+vTaskSuspendAll/xTaskResumeAll: 1763 ns
+lo priority while hi waits: 3 (base 1)
+contended: hi take -&gt; blocked -&gt; lo runs: avg 16880 ns max 18880 ns
+contended: lo give -&gt; hi returns from take: avg 10680 ns max 12160 ns
+[board_exit] code=0
+[exit=0]</code></pre></figure>
+<p>출력에서 볼 것: 경합 없는 뮤텍스 쌍(5.9 µs)은 크리티컬 섹션 쌍(0.9 µs)의 약 <strong>6.6배</strong>, 스케줄러 잠금 쌍(2.2 µs)의 약 2.7배다. 뮤텍스 take 한 번은 내부에서 크리티컬 섹션에 들어가 큐 상태를 고치고 <code>pvTaskIncrementMutexHeldCount()</code>를 부르고, give는 <code>xQueueGenericSend</code> → <code>prvCopyDataToQueue</code> → <code>xTaskPriorityDisinherit</code>를 지나기 때문이다(§7.1). 재귀 첫 단계는 그 위에 주인 비교 · 카운터가 더해져 7.2 µs, <strong>중첩</strong>은 큐를 건드리지 않고 카운터만 바꾸므로 1.2 µs다. 그리고 진짜 비용은 <strong>경합</strong>이다. hi가 블록하는 경로 20.4 µs + 넘겨주기 12.4 µs = <strong>약 33 µs</strong>가 매 경합마다 든다. 그 사이 lo의 우선순위가 1 → 3으로 올라가 있었다(상속, §6). <code>configASSERT</code>를 끄면 항목에 따라 13~36% 빨라진다(뮤텍스 쌍 5.9 → 3.8 µs, 크리티컬 섹션 쌍 0.9 → 0.6 µs). assert는 공짜가 아니지만, 이 정도면 개발 빌드에서 켜 둘 가치가 충분하다.</p>
+<h3 id="5-3-예제-7-zephyr-같은-측정">5.3 예제 7 — Zephyr: 같은 측정<a class="anchor" href="#5-3-예제-7-zephyr-같은-측정" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 같은 보드에서 Zephyr <code>k_mutex</code>, <code>irq_lock</code>, <code>k_sched_lock</code>의 비용과 경합 넘겨주기. main(우선순위 5)이 측정하고 hi(2)가 경쟁자다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex7 — Zephyr v4.4.2 cost of k_mutex / irq_lock / k_sched_lock and a contended handoff */
+#include &lt;zephyr/kernel.h&gt;
+#define CYC()     (*(volatile uint32_t *)0x40028018u)      /* FPGAIO 25 MHz: 1 cyc = 40 ns */
+#define N 1000
+static K_MUTEX_DEFINE(m);
+static K_SEM_DEFINE(go, 0, 1);
+static volatile uint32_t t_block0, t_got, sink;
+#define MEASURE(label, body) do { uint32_t t0 = CYC(); for (int i = 0; i &lt; N; i++) { body; } \
+    uint32_t c = (CYC() - t0) - base; printk("%-34s %5u ns\n", label, c * 40u / N); } while (0)
+static void hi_fn(void *a, void *b, void *c)              /* prio 2: the contender */
+{
+    ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+    for (;;) {
+        k_sem_take(&amp;go, K_FOREVER);
+        t_block0 = CYC();
+        k_mutex_lock(&amp;m, K_FOREVER);                       /* blocks: main holds m */
+        t_got = CYC();
+        k_mutex_unlock(&amp;m);
+    }
+}
+K_THREAD_DEFINE(hi, 1024, hi_fn, NULL, NULL, NULL, 2, 0, 0);
+int main(void)
+{
+    k_thread_priority_set(k_current_get(), 5);
+    uint32_t base, t0 = CYC();
+    for (int i = 0; i &lt; N; i++) { sink = i; }
+    base = CYC() - t0;
+    MEASURE("k_mutex_lock+unlock (uncontended)", { k_mutex_lock(&amp;m, K_NO_WAIT); k_mutex_unlock(&amp;m); });
+    k_mutex_lock(&amp;m, K_NO_WAIT);
+    MEASURE("k_mutex lock+unlock (nested)", { k_mutex_lock(&amp;m, K_NO_WAIT); k_mutex_unlock(&amp;m); });
+    k_mutex_unlock(&amp;m);
+    MEASURE("irq_lock/irq_unlock pair", { unsigned k = irq_lock(); sink = i; irq_unlock(k); });
+    MEASURE("k_sched_lock/k_sched_unlock pair", { k_sched_lock(); sink = i; k_sched_unlock(); });
+    uint64_t s_blk = 0, s_hand = 0; uint32_t mx_blk = 0, mx_hand = 0;
+    for (int i = 0; i &lt; 200; i++) {
+        k_mutex_lock(&amp;m, K_FOREVER);
+        k_sem_give(&amp;go);                                   /* hi runs, blocks on m, PI boosts main */
+        uint32_t blk = CYC() - t_block0;
+        int boosted = k_thread_priority_get(k_current_get());
+        uint32_t t_give = CYC();
+        k_mutex_unlock(&amp;m);                                /* restore prio + switch to hi */
+        uint32_t hand = t_got - t_give;
+        s_blk += blk; s_hand += hand; if (blk &gt; mx_blk) mx_blk = blk; if (hand &gt; mx_hand) mx_hand = hand;
+        if (i == 0) printk("main prio while hi waits: %d (base 5)\n", boosted);
+    }
+    printk("contended: hi lock -&gt; blocked -&gt; main runs: avg %u ns max %u ns\n",
+           (uint32_t)(s_blk / 200) * 40u, mx_blk * 40u);
+    printk("contended: main unlock -&gt; hi returns from lock: avg %u ns max %u ns\n",
+           (uint32_t)(s_hand / 200) * 40u, mx_hand * 40u);
+    printk("sizeof(struct k_mutex)=%u\n", (unsigned)sizeof(struct k_mutex));
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>k_mutex_lock+unlock (uncontended)   2048 ns
+k_mutex lock+unlock (nested)        1600 ns
+irq_lock/irq_unlock pair             160 ns
+k_sched_lock/k_sched_unlock pair    1727 ns
+main prio while hi waits: 2 (base 5)
+contended: hi lock -&gt; blocked -&gt; main runs: avg 20800 ns max 20840 ns
+contended: main unlock -&gt; hi returns from lock: avg 21200 ns max 21240 ns
+sizeof(struct k_mutex)=20</code></pre></figure>
+<p>출력에서 볼 것: Zephyr의 경합 없는 <code>k_mutex</code> 쌍은 2.0 µs로 FreeRTOS(assert 끔 3.8 µs)보다 싸다 — 큐 범용 경로를 거치지 않고 전용 코드(<code>kernel/mutex.c</code>, 337줄)라서다. <code>irq_lock</code> 쌍은 <strong>160 ns</strong>(명령 5개 정도)로, 함수 호출이 아니라 인라인 <code>mrs</code>/<code>msr basepri</code>라서 FreeRTOS의 <code>vPortEnterCritical</code> 함수 호출(0.9 µs)보다 훨씬 싸다(C7 §8.1). 그러나 <strong>경합 경로는 두 커널 모두 20 µs대</strong>다. 블록 · 스위치(PendSV) · 대기 큐 조작은 어느 커널이든 피할 수 없는 일이고, Zephyr의 넘겨주기(21.2 µs)는 FreeRTOS(12.4 µs)보다 오히려 길었다. Zephyr는 unlock 안에서 다음 주인을 정하고(<code>z_unpend_first_thread</code>), 우선순위를 되돌리고(<code>adjust_owner_prio</code>), <code>z_reschedule</code>까지 한 번에 하기 때문이다(§7.2). 상속도 확인된다: main의 우선순위가 5 → 2로 올라갔다(Zephyr는 숫자가 작을수록 높다).</p>
+<figure class="chart"><svg viewBox="0 0 680 368" xmlns="http://www.w3.org/2000/svg">
+<rect x="10" y="12" width="12" height="12" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="28" y="23" font-size="12">FreeRTOS (configASSERT 켬)</text>
+<rect x="232.0" y="12" width="12" height="12" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+<text x="250" y="23" font-size="12">FreeRTOS (configASSERT 끔)</text>
+<rect x="454.0" y="12" width="12" height="12" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="472" y="23" font-size="12">Zephyr (CONFIG_ASSERT=n)</text>
+<text x="192" y="72" font-size="12" text-anchor="end">뮤텍스 take+give (경합 없음)</text>
+<rect x="200" y="52" width="113.2" height="10" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="317" y="61" font-size="12">5.9</text>
+<rect x="200" y="64" width="72.8" height="10" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+<text x="277" y="73" font-size="12">3.8</text>
+<rect x="200" y="76" width="39.1" height="10" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="243" y="85" font-size="12">2.0</text>
+<text x="192" y="118" font-size="12" text-anchor="end">재귀 뮤텍스 중첩 take+give</text>
+<rect x="200" y="98" width="23.2" height="10" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="227" y="107" font-size="12">1.2</text>
+<rect x="200" y="110" width="20.2" height="10" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+<text x="224" y="119" font-size="12">1.1</text>
+<rect x="200" y="122" width="30.5" height="10" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="235" y="131" font-size="12">1.6</text>
+<text x="192" y="164" font-size="12" text-anchor="end">크리티컬 섹션 쌍</text>
+<rect x="200" y="144" width="17.1" height="10" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="221" y="153" font-size="12">0.9</text>
+<rect x="200" y="156" width="11.0" height="10" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+<text x="215" y="165" font-size="12">0.6</text>
+<rect x="200" y="168" width="3.1" height="10" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="207" y="177" font-size="12">0.2</text>
+<text x="192" y="210" font-size="12" text-anchor="end">스케줄러 잠금 쌍</text>
+<rect x="200" y="190" width="41.6" height="10" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="246" y="199" font-size="12">2.2</text>
+<rect x="200" y="202" width="33.7" height="10" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+<text x="238" y="211" font-size="12">1.8</text>
+<rect x="200" y="214" width="33.0" height="10" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="237" y="223" font-size="12">1.7</text>
+<text x="192" y="256" font-size="12" text-anchor="end">경합: take → 블록 → 전환</text>
+<rect x="200" y="236" width="388.7" height="10" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="593" y="245" font-size="12">20.4</text>
+<rect x="200" y="248" width="322.3" height="10" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+<text x="526" y="257" font-size="12">16.9</text>
+<rect x="200" y="260" width="397.1" height="10" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="601" y="269" font-size="12">20.8</text>
+<text x="192" y="302" font-size="12" text-anchor="end">경합: give → 대기자 실행</text>
+<rect x="200" y="282" width="236.0" height="10" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="440" y="291" font-size="12">12.4</text>
+<rect x="200" y="294" width="203.9" height="10" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+<text x="408" y="303" font-size="12">10.7</text>
+<rect x="200" y="306" width="404.7" height="10" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="609" y="315" font-size="12">21.2</text>
+<line x1="200" y1="46" x2="200" y2="328" stroke="currentColor"/>
+<line x1="200" y1="328" x2="620" y2="328" stroke="currentColor"/>
+<line x1="200.0" y1="328" x2="200.0" y2="332" stroke="currentColor"/>
+<text x="200" y="345" font-size="12" text-anchor="middle">0</text>
+<line x1="295.5" y1="328" x2="295.5" y2="332" stroke="currentColor"/>
+<text x="295" y="345" font-size="12" text-anchor="middle">5</text>
+<line x1="390.9" y1="328" x2="390.9" y2="332" stroke="currentColor"/>
+<text x="391" y="345" font-size="12" text-anchor="middle">10</text>
+<line x1="486.4" y1="328" x2="486.4" y2="332" stroke="currentColor"/>
+<text x="486" y="345" font-size="12" text-anchor="middle">15</text>
+<line x1="581.8" y1="328" x2="581.8" y2="332" stroke="currentColor"/>
+<text x="582" y="345" font-size="12" text-anchor="middle">20</text>
+<text x="620" y="360" font-size="12" text-anchor="end">µs (QEMU icount, 1 명령 = 32 ns)</text>
+</svg></figure>
+<p>그림 3 — 보호 도구별 비용(예제 6 · 7, QEMU icount). 경합 없는 경우는 모두 수 µs 이하이고 크리티컬 섹션이 가장 싸다. 뮤텍스의 진짜 비용은 아래 두 줄, <strong>경합할 때의 블록 + 넘겨주기(합계 약 33~42 µs)</strong>다.</p>
+<p>그림 3 · 4 · 9의 막대 좌표는 예제 출력의 숫자를 그대로 옮겨 적은 작은 Python 스크립트(scratch의 <code>charts/gen.py</code>, VM에서 <code>python3 -I</code>로 실행)로 계산했다. 손으로 좌표를 찍지 않으므로 숫자와 막대 길이가 어긋나지 않는다.</p>
+<h3 id="5-4-예제-8-같은-50-µs-구간을-네-가지로-지키면-누가-기다리나">5.4 예제 8 — 같은 50 µs 구간을 네 가지로 지키면, 누가 기다리나<a class="anchor" href="#5-4-예제-8-같은-50-µs-구간을-네-가지로-지키면-누가-기다리나" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 낮은 태스크 lo(1)가 "잠금 → 50 µs 작업 → 풀기 → 10~40 µs(의사 난수) 쉬기"를 반복한다. 잠금 방법은 보호 없음 / 뮤텍스 / 크리티컬 섹션 / 스케줄러 잠금. 피해자 세 명의 최대 지연을 300개씩 잰다.</p>
+<ul><li><strong>kernel-aware ISR 진입</strong> — TIMER0(우선순위 0x40, 약 500 µs 주기)이 IRQ를 올린 뒤 ISR 첫 줄까지.</li><li><strong>무관한 높은 태스크</strong> — 그 ISR이 깨우는 hi(4). 공유 데이터를 <strong>만지지 않는다</strong>. IRQ → hi 실행까지.</li><li><strong>같은 자원을 원하는 태스크</strong> — DUALTIMER(0x40, 약 730 µs)가 깨우는 ct(3). 같은 방법으로 잠그고 2 µs 일한다. IRQ → 잠금 획득까지.</li></ul>
+<p>쉬는 시간을 난수로 섞은 이유는 C7 §6.1과 같다. icount는 결정적이라 주기가 맞물리면 IRQ가 늘 같은 위상에만 떨어진다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex8 — same 50 us section protected 4 ways: who pays? (kernel-aware ISR, unrelated hi task, contender) */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "d2.h"
+#define NS 300
+#define DT_LOAD REG32(0x40002000u)
+#define DT_VAL  REG32(0x40002004u)
+#define DT_CTRL REG32(0x40002008u)
+#define DT_CLR  REG32(0x4000200Cu)
+typedef struct { uint32_t n, max; } st_t;
+static st_t s_isr, s_hi, s_ct;
+static SemaphoreHandle_t m;
+static TaskHandle_t hi, ct;
+static volatile int method, running;
+static const char *names[] = { "none", "mutex", "critical", "sched_lock" };
+static void add(st_t *s, uint32_t v) { if (s-&gt;n &lt; NS) { s-&gt;n++; if (v &gt; s-&gt;max) s-&gt;max = v; } }
+static void lock(void)   { if (method == 1) xSemaphoreTake(m, portMAX_DELAY); else if (method == 2) taskENTER_CRITICAL(); else if (method == 3) vTaskSuspendAll(); }
+static void unlock(void) { if (method == 1) xSemaphoreGive(m); else if (method == 2) taskEXIT_CRITICAL(); else if (method == 3) (void)xTaskResumeAll(); }
+void TIMER0_IRQHandler(void)                        /* prio 0x40, ~500 us: wakes the UNRELATED hi task */
+{
+    uint32_t lat = timer0_elapsed(); TIMER_INTCLR(TIMER0_BASE) = 1;
+    if (!running) return;
+    add(&amp;s_isr, lat);
+    BaseType_t w = pdFALSE; vTaskNotifyGiveFromISR(hi, &amp;w); portYIELD_FROM_ISR(w);
+}
+void DUALTIMER_IRQHandler(void)                     /* prio 0x40, ~730 us: wakes the contender */
+{
+    DT_CLR = 1;
+    if (!running) return;
+    BaseType_t w = pdFALSE; vTaskNotifyGiveFromISR(ct, &amp;w); portYIELD_FROM_ISR(w);
+}
+static void hi_task(void *p)                        /* prio 4: never touches the shared data */
+{
+    (void)p;
+    for (;;) { ulTaskNotifyTake(pdTRUE, portMAX_DELAY); if (running) add(&amp;s_hi, timer0_elapsed()); }
+}
+static void ct_task(void *p)                        /* prio 3: needs the same shared data */
+{
+    (void)p;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        lock(); uint32_t v = DT_LOAD - DT_VAL; spin_us(2); unlock();
+        if (running) add(&amp;s_ct, v);
+    }
+}
+static void lo_task(void *p)                        /* prio 1: holds the section for L = 50 us */
+{
+    (void)p;
+    uint32_t seed = 1;
+    timer0_start(12500 + 7, 0x40);
+    DT_CTRL = 0; DT_LOAD = 18250 - 1; NVIC_IPR(10) = 0x40; NVIC_ISER0 = 1u &lt;&lt; 10; DT_CTRL = 0xE2;
+    for (method = 0; method &lt; 4; method++) {
+        s_isr = s_hi = s_ct = (st_t){0, 0}; running = 1;
+        while (s_isr.n &lt; NS || s_ct.n &lt; NS) {
+            lock(); spin_us(50); unlock();
+            seed = seed * 1103515245u + 12345u; spin_us(10 + (seed &gt;&gt; 16) % 30);
+        }
+        running = 0;
+        board_printf_raw("%s: ISR entry max %u ns | unrelated hi task max %u ns | contender max %u ns\n",
+                         names[method], CYC_NS(s_isr.max), CYC_NS(s_hi.max), CYC_NS(s_ct.max));
+    }
+    board_exit(0);
+}
+int main(void)
+{
+    m = xSemaphoreCreateMutex();
+    xTaskCreate(hi_task, "hi", 512, NULL, 4, &amp;hi);
+    xTaskCreate(ct_task, "ct", 512, NULL, 3, &amp;ct);
+    xTaskCreate(lo_task, "lo", 512, NULL, 1, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>none: ISR entry max 1800 ns | unrelated hi task max 13200 ns | contender max 26560 ns
+mutex: ISR entry max 3880 ns | unrelated hi task max 21000 ns | contender max 101800 ns
+critical: ISR entry max 51080 ns | unrelated hi task max 63000 ns | contender max 75120 ns
+sched_lock: ISR entry max 3680 ns | unrelated hi task max 60600 ns | contender max 69200 ns
+[board_exit] code=0
+[exit=0]</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 340" xmlns="http://www.w3.org/2000/svg">
+<rect x="60" y="12" width="12" height="12" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<text x="78" y="23" font-size="12">kernel-aware ISR 진입</text>
+<rect x="303" y="12" width="12" height="12" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="321" y="23" font-size="12">무관한 높은 태스크 깨어남</text>
+<rect x="491" y="12" width="12" height="12" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="509" y="23" font-size="12">같은 자원을 원하는 태스크</text>
+<line x1="60" y1="290.0" x2="56" y2="290.0" stroke="currentColor"/>
+<text x="52" y="294" font-size="12" text-anchor="end">0</text>
+<line x1="60" y1="246.4" x2="56" y2="246.4" stroke="currentColor"/>
+<text x="52" y="250" font-size="12" text-anchor="end">20</text>
+<line x1="60" y1="202.7" x2="56" y2="202.7" stroke="currentColor"/>
+<text x="52" y="207" font-size="12" text-anchor="end">40</text>
+<line x1="60" y1="159.1" x2="56" y2="159.1" stroke="currentColor"/>
+<text x="52" y="163" font-size="12" text-anchor="end">60</text>
+<line x1="60" y1="115.5" x2="56" y2="115.5" stroke="currentColor"/>
+<text x="52" y="119" font-size="12" text-anchor="end">80</text>
+<line x1="60" y1="71.8" x2="56" y2="71.8" stroke="currentColor"/>
+<text x="52" y="76" font-size="12" text-anchor="end">100</text>
+<line x1="60" y1="180.9" x2="660" y2="180.9" stroke="#888" stroke-dasharray="4 3"/>
+<text x="66" y="177" font-size="12">L = 50 µs</text>
+<rect x="83.0" y="286.1" width="32" height="3.9" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<text x="99" y="282" font-size="12" text-anchor="middle">1.8</text>
+<rect x="119.0" y="261.2" width="32" height="28.8" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="135" y="257" font-size="12" text-anchor="middle">13</text>
+<rect x="155.0" y="232.1" width="32" height="57.9" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="171" y="228" font-size="12" text-anchor="middle">27</text>
+<text x="135" y="308" font-size="13" text-anchor="middle">보호 없음</text>
+<rect x="233.0" y="281.5" width="32" height="8.5" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<text x="249" y="278" font-size="12" text-anchor="middle">3.9</text>
+<rect x="269.0" y="244.2" width="32" height="45.8" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="285" y="240" font-size="12" text-anchor="middle">21</text>
+<rect x="305.0" y="67.9" width="32" height="222.1" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="321" y="64" font-size="12" text-anchor="middle">102</text>
+<text x="285" y="308" font-size="13" text-anchor="middle">뮤텍스</text>
+<rect x="383.0" y="178.6" width="32" height="111.4" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<text x="399" y="175" font-size="12" text-anchor="middle">51</text>
+<rect x="419.0" y="152.5" width="32" height="137.5" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="435" y="149" font-size="12" text-anchor="middle">63</text>
+<rect x="455.0" y="126.1" width="32" height="163.9" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="471" y="122" font-size="12" text-anchor="middle">75</text>
+<text x="435" y="308" font-size="13" text-anchor="middle">크리티컬 섹션</text>
+<rect x="533.0" y="282.0" width="32" height="8.0" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<text x="549" y="278" font-size="12" text-anchor="middle">3.7</text>
+<rect x="569.0" y="157.8" width="32" height="132.2" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="585" y="154" font-size="12" text-anchor="middle">61</text>
+<rect x="605.0" y="139.0" width="32" height="151.0" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="621" y="135" font-size="12" text-anchor="middle">69</text>
+<text x="585" y="308" font-size="13" text-anchor="middle">스케줄러 잠금</text>
+<line x1="60" y1="40" x2="60" y2="290" stroke="currentColor"/>
+<line x1="60" y1="290" x2="660" y2="290" stroke="currentColor"/>
+<text x="14" y="44" font-size="12">최대 지연 µs</text>
+<text x="660" y="332" font-size="12" text-anchor="end">각 칸 = 300개 표본의 최댓값, QEMU icount</text>
+</svg></figure>
+<p>그림 4 — 같은 50 µs 구간을 네 가지로 지켰을 때 세 피해자의 최대 지연(예제 8). 크리티컬 섹션은 <strong>모두</strong>를 L만큼 늦추고, 스케줄러 잠금은 ISR만 풀어 주고, 뮤텍스는 <strong>경쟁자만</strong> 늦춘다 — 대신 경쟁자는 L보다 더 오래(약 102 µs) 기다린다.</p>
+<p>출력에서 볼 것 — 행마다 읽는다.</p>
+<ol><li><strong>보호 없음</strong>이 기준선이다. ISR 진입 1.8 µs, hi는 ISR + 스위치로 13.2 µs, ct는 hi가 먼저 도는 경우까지 26.6 µs.</li><li><strong>크리티컬 섹션</strong>: ISR 진입이 <strong>51.1 µs</strong> — 50 µs 구간이 끝나야 ISR이 들어온다. hi 63 µs, ct 75 µs. 무관한 태스크도, ISR도 전부 L을 낸다. A7 · C7에서 잰 "BASEPRI 50 µs 아래 kernel-aware IRQ 50.84 µs"와 거의 같은 값이다.</li><li><strong>스케줄러 잠금</strong>: ISR 진입은 3.7 µs로 풀려났다(ISR은 막지 않으니까). 그러나 ISR이 깨운 hi는 <strong>60.6 µs</strong>를 기다린다. 무관한 태스크도 L을 낸다.</li><li><strong>뮤텍스</strong>: ISR 3.9 µs, <strong>무관한 hi 21.0 µs</strong> — 기준선(13.2)보다 7.8 µs 늘었을 뿐 L과 무관하다(늘어난 몫은 뮤텍스 함수 안의 짧은 크리티컬 섹션과, 경합 처리 중 커널 경로). 대신 <strong>경쟁자 ct는 101.8 µs</strong>로 네 방법 중 가장 길다. 50 µs 구간의 남은 부분 + ct가 블록하는 경로(약 20 µs) + 넘겨주기(약 12 µs) + 그 사이 hi가 끼어든 시간(약 13~20 µs)이 쌓인 값이다.</li></ol>
+<p>결론은 하나의 문장이다. <strong>뮤텍스는 비용을 그 자원을 원하는 태스크에게만 몰아준다.</strong> 무관한 높은 태스크와 ISR의 지연을 지키는 것이 목적이면 뮤텍스가 정답이고, 경쟁자의 지연까지 짧아야 하면 구간 L 자체를 줄여야 한다(어느 도구도 경쟁자의 L을 없애 주지 않는다).</p>
+<h3 id="5-5-결정-흐름-측정-숫자를-붙여서">5.5 결정 흐름 — 측정 숫자를 붙여서<a class="anchor" href="#5-5-결정-흐름-측정-숫자를-붙여서" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 400" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="20" y="10" width="380" height="36" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="210" y="33" font-size="13" text-anchor="middle">ISR도 이 데이터를 만지나?</text>
+<rect x="430" y="6" width="240" height="44" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="550" y="25" font-size="12" text-anchor="middle">크리티컬 섹션 (C7)</text>
+<text x="550" y="42" font-size="12" text-anchor="middle">또는 락 없는 SPSC (D8)</text>
+<line x1="400" y1="28" x2="428" y2="28" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="414" y="22" font-size="12" text-anchor="middle">예</text>
+<line x1="210" y1="46" x2="210" y2="78" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="222" y="66" font-size="12">아니오</text>
+<rect x="20" y="80" width="380" height="36" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="210" y="103" font-size="13" text-anchor="middle">구간 안에서 블록하나? (I2C 완료, 큐, delay)</text>
+<rect x="430" y="76" width="240" height="44" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="550" y="95" font-size="12" text-anchor="middle">뮤텍스 — 유일한 선택</text>
+<text x="550" y="112" font-size="12" text-anchor="middle">(다른 둘은 안에서 블록 금지)</text>
+<line x1="400" y1="98" x2="428" y2="98" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="414" y="92" font-size="12" text-anchor="middle">예</text>
+<line x1="210" y1="116" x2="210" y2="148" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="222" y="136" font-size="12">아니오</text>
+<rect x="20" y="150" width="380" height="36" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="210" y="173" font-size="13" text-anchor="middle">구간이 1~2 µs 이하인가? (변수 몇 개 복사)</text>
+<rect x="430" y="146" width="240" height="44" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="550" y="165" font-size="12" text-anchor="middle">크리티컬 섹션</text>
+<text x="550" y="182" font-size="12" text-anchor="middle">쌍 0.9 µs, 뮤텍스 쌍의 1/6</text>
+<line x1="400" y1="168" x2="428" y2="168" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="414" y="162" font-size="12" text-anchor="middle">예</text>
+<line x1="210" y1="186" x2="210" y2="218" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="222" y="206" font-size="12">아니오</text>
+<rect x="20" y="220" width="380" height="36" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="210" y="243" font-size="13" text-anchor="middle">무관한 높은 태스크가 L만큼 늦어도 되나?</text>
+<rect x="430" y="216" width="240" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="550" y="235" font-size="12" text-anchor="middle">스케줄러 잠금 (쌍 2.2 µs)</text>
+<text x="550" y="252" font-size="12" text-anchor="middle">모든 태스크가 L만큼 지연</text>
+<line x1="400" y1="238" x2="428" y2="238" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="414" y="232" font-size="12" text-anchor="middle">예</text>
+<line x1="210" y1="256" x2="210" y2="288" stroke="currentColor" marker-end="url(#ah3)"/>
+<text x="222" y="276" font-size="12">아니오</text>
+<rect x="20" y="290" width="380" height="44" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="210" y="309" font-size="12" text-anchor="middle">뮤텍스 (쌍 5.9 µs, 경합마다 약 33 µs 추가)</text>
+<text x="210" y="326" font-size="12" text-anchor="middle">경쟁자만 기다린다 — 무관한 태스크 · ISR은 보호</text>
+<text x="20" y="366" font-size="12">숫자: FreeRTOS V11.3.2 assert 켬, QEMU icount (예제 6 · 8). 실칩 절대값은 다르다</text>
+<text x="20" y="386" font-size="12">어느 길이든 마지막 질문: 최악 보유 시간을 쟀나? 그 값이 경쟁자의 마감 안에 드나?</text>
+</svg></figure>
+<p>그림 5 — 뮤텍스 중심의 결정 흐름. C7 그림 6이 "무엇을 막아야 하나"에서 출발한다면, 이 그림은 뮤텍스를 쓸지 말지를 정하는 네 질문이다. 블로킹이 들어가면 고민할 것 없이 뮤텍스이고, 아주 짧으면 크리티컬 섹션이 6배 싸다.</p>
+<p>손익분기를 숫자로 말하면 이렇다. 구간이 1 µs인데 뮤텍스를 쓰면 보호 비용(5.9 µs)이 일의 6배다. 구간이 500 µs인 I2C 전송을 크리티컬 섹션으로 지키면 그동안 모든 kernel-aware ISR이 500 µs 늦는다 — 1 kHz IMU 루프의 절반이다. 그 사이 수십 µs 구간은 "무관한 높은 태스크를 지켜야 하나"로 갈린다.</p>
+<p><strong>함정 — 스케줄러 잠금 안의 뮤텍스</strong>: <code>vTaskSuspendAll()</code> 안에서 <code>xSemaphoreTake(m, 0이 아닌 값)</code>을 부르면 <code>queue.c</code>의 <code>configASSERT( !( ( xTaskGetSchedulerState() == taskSCHEDULER_SUSPENDED ) &amp;&amp; ( xTicksToWait != 0 ) ) )</code>에 걸린다. 스케줄러를 멈춘 채로는 블록할 수 없다. 크리티컬 섹션 안에서 뮤텍스를 잡는 것도 같은 이유로 금지다(C7 §7.2의 블로킹 실험).</p>
+<hr>
+<h2 id="6-우선순위-상속-맛보기만-본론은-d3">6. 우선순위 상속 — 맛보기만 (본론은 D3)<a class="anchor" href="#6-우선순위-상속-맛보기만-본론은-d3" aria-label="link">#</a></h2>
+<p>FreeRTOS와 Zephyr의 뮤텍스에는 <strong>우선순위 상속(priority inheritance)</strong>이 기본으로 들어 있다. 높은 태스크가 낮은 태스크가 쥔 뮤텍스를 기다리기 시작하면, 커널은 주인의 우선순위를 기다리는 태스크의 우선순위까지 잠시 올린다. 그러면 그 사이에 중간 우선순위 태스크가 끼어들어 주인을 굶기는 일("무한 역전")이 막히고, 주인은 빨리 일을 끝내 뮤텍스를 돌려준다. 돌려주는 순간 원래 우선순위로 내려간다. 이 노트에서 본 것은 그 현상의 증거 한 줄씩이다 — 예제 6의 <code>lo priority while hi waits: 3 (base 1)</code>, 예제 7의 <code>main prio while hi waits: 2 (base 5)</code>. 왜 이것이 필요한지(1997년 Mars Pathfinder), 상속이 못 막는 것(연쇄 블로킹, 전이적 상속, FreeRTOS가 "쥔 뮤텍스 개수"만 세서 생기는 한계), 그리고 대안인 priority ceiling(OCPP · ICPP)은 <strong>D3</strong>가 주인이다. 여기서는 한 가지만 기억한다. <strong>세마포어(D1)에는 주인이 없어서 상속이 없다.</strong> 상호 배제에 세마포어를 쓰면 안 되는 가장 큰 이유가 이것이다.</p>
+<hr>
+<h2 id="7-rtos-커널-안에서는-무슨-일이-일어나나">7. RTOS 커널 안에서는 무슨 일이 일어나나<a class="anchor" href="#7-rtos-커널-안에서는-무슨-일이-일어나나" aria-label="link">#</a></h2>
+<h3 id="7-1-freertos-뮤텍스는-길이-1-항목-크기-0-인-큐다">7.1 FreeRTOS — 뮤텍스는 "길이 1, 항목 크기 0"인 큐다<a class="anchor" href="#7-1-freertos-뮤텍스는-길이-1-항목-크기-0-인-큐다" aria-label="link">#</a></h3>
+<p><code>xSemaphoreCreateMutex()</code>는 매크로이고(<code>semphr.h:735</code>), 펼치면 <code>xQueueCreateMutex( queueQUEUE_TYPE_MUTEX )</code>다(재귀는 <code>queueQUEUE_TYPE_RECURSIVE_MUTEX</code> = 4, 일반은 1, <code>queue.h:74</code>, <code>:77</code>). <code>xQueueCreateMutex()</code>(<code>queue.c:647</code>)는 길이 1, 항목 크기 0인 큐를 만들고 <code>prvInitialiseMutex()</code>(<code>queue.c:617</code>)로 세 필드를 덮어쓴다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>            pxNewQueue-&gt;u.xSemaphore.xMutexHolder = NULL;
+            pxNewQueue-&gt;uxQueueType = queueQUEUE_IS_MUTEX;
+
+            /* In case this is a recursive mutex. */
+            pxNewQueue-&gt;u.xSemaphore.uxRecursiveCallCount = 0;
+
+            traceCREATE_MUTEX( pxNewQueue );
+
+            /* Start with the semaphore in the expected state. */
+            ( void ) xQueueGenericSend( pxNewQueue, NULL, ( TickType_t ) 0U, queueSEND_TO_BACK );</code></pre></figure>
+<p>마지막 줄이 재미있다. 뮤텍스는 <strong>"항목 1개가 들어 있는 큐" = 열린 상태</strong>로 시작해야 하므로, 만들자마자 자기 자신에게 빈 항목 하나를 send한다. take = 그 항목을 꺼냄(카운트 1 → 0), give = 다시 넣음(0 → 1). 예제 1의 "비어 있는 뮤텍스 give → <code>errQUEUE_FULL</code>"이 여기서 나온다.</p>
+<p><code>uxQueueType</code>은 진짜 필드가 아니라 <code>#define uxQueueType pcHead</code>, <code>#define queueQUEUE_IS_MUTEX NULL</code>(<code>queue.c:65</code>~<code>66</code>)이다. 뮤텍스는 저장 공간이 없으니 저장 영역 시작 포인터 <code>pcHead</code>가 필요 없고, 그 자리에 NULL을 넣어 "나는 뮤텍스"라는 표시로 쓴다. 그리고 큐의 <code>pcTail</code> · <code>pcReadFrom</code> 자리(union <code>u</code>)를 뮤텍스는 <code>xMutexHolder</code> · <code>uxRecursiveCallCount</code>로 쓴다. 메모리 한 바이트도 더 쓰지 않고 큐 구조체를 뮤텍스로 재활용한 것이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="20" y="20" font-size="13">Queue_t (뮤텍스로 쓸 때) — 32비트 오프셋</text>
+<rect x="60" y="30" width="300" height="26" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="70" y="48" font-size="12">pcHead = uxQueueType = NULL (뮤텍스 표시)</text>
+<text x="52" y="48" font-size="12" text-anchor="end">+0</text>
+<rect x="60" y="56" width="300" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="70" y="74" font-size="12">pcWriteTo (안 씀)</text>
+<text x="52" y="74" font-size="12" text-anchor="end">+4</text>
+<rect x="60" y="82" width="300" height="26" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="70" y="100" font-size="12">u.xSemaphore.xMutexHolder</text>
+<text x="52" y="100" font-size="12" text-anchor="end">+8</text>
+<rect x="60" y="108" width="300" height="26" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="70" y="126" font-size="12">u.xSemaphore.uxRecursiveCallCount</text>
+<text x="52" y="126" font-size="12" text-anchor="end">+12</text>
+<rect x="60" y="134" width="300" height="34" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="70" y="156" font-size="12">xTasksWaitingToSend (List_t, 20 B)</text>
+<text x="52" y="156" font-size="12" text-anchor="end">+16</text>
+<rect x="60" y="168" width="300" height="34" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="70" y="190" font-size="12">xTasksWaitingToReceive (List_t, 20 B)</text>
+<text x="52" y="190" font-size="12" text-anchor="end">+36</text>
+<rect x="60" y="202" width="300" height="26" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="70" y="220" font-size="12">uxMessagesWaiting: 1 = 열림, 0 = 잠김</text>
+<text x="52" y="220" font-size="12" text-anchor="end">+56</text>
+<rect x="60" y="228" width="300" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="70" y="246" font-size="12">uxLength = 1, uxItemSize = 0</text>
+<text x="52" y="246" font-size="12" text-anchor="end">+60</text>
+<rect x="60" y="254" width="300" height="26" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="70" y="272" font-size="12">cRxLock, cTxLock, ... ucQueueType</text>
+<text x="52" y="272" font-size="12" text-anchor="end">+68</text>
+<text x="70" y="298" font-size="12">합계 84 B = sizeof(StaticSemaphore_t) (예제 3)</text>
+<rect x="430" y="70" width="230" height="84" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="545" y="92" font-size="13" text-anchor="middle">TCB_t (주인 태스크)</text>
+<text x="545" y="112" font-size="12" text-anchor="middle">uxPriority (지금, 상속 포함)</text>
+<text x="545" y="129" font-size="12" text-anchor="middle">uxBasePriority (원래 값)</text>
+<text x="545" y="146" font-size="12" text-anchor="middle">uxMutexesHeld (쥔 개수)</text>
+<line x1="360" y1="95" x2="428" y2="105" stroke="currentColor" marker-end="url(#ah4)"/>
+<rect x="430" y="180" width="230" height="44" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="545" y="199" font-size="12" text-anchor="middle">기다리는 태스크들</text>
+<text x="545" y="216" font-size="12" text-anchor="middle">우선순위 순으로 정렬 (C1)</text>
+<line x1="360" y1="185" x2="428" y2="198" stroke="currentColor" marker-end="url(#ah4)"/>
+</svg></figure>
+<p>그림 6 — FreeRTOS 뮤텍스의 메모리 모습. 큐 구조체를 그대로 쓰되, 저장 영역 포인터 자리에 NULL(뮤텍스 표시)을, 읽기/쓰기 포인터 union 자리에 주인 포인터와 재귀 카운터를 넣는다. 주인 쪽 TCB에는 상속을 위한 두 필드(<code>uxBasePriority</code>, <code>uxMutexesHeld</code>, <code>tasks.c:417</code>~<code>418</code>)가 있다.</p>
+<p>한 번의 take와 give가 지나는 길은 이렇다.</p>
+<div class="tw"><table><thead><tr><th>단계</th><th>함수 (파일)</th><th>하는 일</th></tr></thead><tbody><tr><td>take, 열려 있음</td><td><code>xQueueSemaphoreTake()</code> (<code>queue.c:1659</code>)</td><td>크리티컬 섹션 안에서 <code>uxMessagesWaiting</code> 1 → 0, <code>xMutexHolder = pvTaskIncrementMutexHeldCount()</code> (현재 TCB를 돌려주며 <code>uxMutexesHeld++</code>, <code>tasks.c:7772</code>)</td></tr><tr><td>take, 잠겨 있음</td><td>같은 함수의 블록 경로</td><td><code>xTaskPriorityInherit(xMutexHolder)</code> (<code>tasks.c:6745</code>)로 주인 우선순위 올림 → <code>vTaskPlaceOnEventList(&amp;xTasksWaitingToReceive, ticks)</code> → <code>xTaskResumeAll()</code> + yield</td></tr><tr><td>take, 시간 초과</td><td>같은 함수</td><td>상속이 있었다면 <code>vTaskPriorityDisinheritAfterTimeout()</code> (<code>tasks.c:6942</code>) — 남은 대기자 중 최고 우선순위까지만 내림</td></tr><tr><td>give</td><td><code>xQueueGenericSend()</code> (<code>queue.c:949</code>) → <code>prvCopyDataToQueue()</code> (<code>queue.c:2395</code>)</td><td><code>xTaskPriorityDisinherit(xMutexHolder)</code> (<code>tasks.c:6848</code>) → <code>xMutexHolder = NULL</code> → 카운트 0 → 1 → 대기자 중 최고 우선순위를 ready로</td></tr><tr><td>give 안의 검사</td><td><code>xTaskPriorityDisinherit()</code></td><td><code>configASSERT( pxTCB == pxCurrentTCB )</code> (6861), <code>configASSERT( pxTCB-&gt;uxMutexesHeld )</code> (6862) — 소유권 검사의 전부</td></tr><tr><td>재귀 take / give</td><td><code>xQueueTakeMutexRecursive()</code> (<code>queue.c:818</code>) / <code>xQueueGiveMutexRecursive()</code> (<code>queue.c:759</code>)</td><td>주인 = 나면 카운터만, 아니면 일반 take로. give는 주인 아니면 <code>pdFAIL</code>, 카운터가 0이 될 때만 진짜 send</td></tr></tbody></table></div>
+<p>소스를 읽다 보면 놀라운 점 세 가지가 보인다.</p>
+<ol><li><strong>필드 이름은 <code>xMutexHolder</code>다.</strong> 예전 버전과 많은 블로그 글은 <code>pxMutexHolder</code>라고 쓰는데, V11의 <code>SemaphoreData_t</code>(<code>queue.c:74</code>~<code>78</code>) 필드는 <code>xMutexHolder</code>다. <code>xQueueGiveMutexRecursive()</code>의 주석에는 아직 옛 이름 <code>pxMutexHolder</code>가 남아 있다. kernel-aware 디버거 스크립트를 쓸 때 주의한다.</li><li><strong>소유권 검사는 API가 아니라 상속 해제 함수 안의 assert다.</strong> 그래서 <code>configASSERT</code>를 끄면 검사가 통째로 사라진다(예제 1). 반면 재귀 give는 API 안에서 직접 비교하므로 assert와 무관하게 <code>pdFAIL</code>이다(예제 3).</li><li><strong>TCB는 쥔 뮤텍스의 "목록"이 아니라 "개수"만 센다</strong>(<code>uxMutexesHeld</code>). 그래서 상속받은 우선순위는 <strong>쥔 뮤텍스를 전부 돌려줘야</strong> 원래대로 내려간다(<code>xTaskPriorityDisinherit</code>의 "Only disinherit if no other mutexes are held"). 그리고 태스크를 지울 때(<code>vTaskDelete</code>) 커널은 그 태스크가 어떤 뮤텍스를 쥐었는지 <strong>알 방법이 없다</strong> — 예제 9의 원인이다. 그 한계가 상속 정확도에 미치는 영향은 D3에서 본다.</li></ol>
+<h3 id="7-2-zephyr-전용-구조체-struct-k_mutex와-직접-넘겨주기">7.2 Zephyr — 전용 구조체 <code>struct k_mutex</code>와 직접 넘겨주기<a class="anchor" href="#7-2-zephyr-전용-구조체-struct-k_mutex와-직접-넘겨주기" aria-label="link">#</a></h3>
+<p><code>struct k_mutex</code>(<code>include/zephyr/kernel.h:3437</code>)는 네 필드다. <code>wait_q</code>(대기 큐), <code>owner</code>(<code>struct k_thread *</code>), <code>lock_count</code>(재귀 카운터), <code>owner_orig_prio</code>(상속 전 원래 우선순위). 예제 7의 <code>sizeof(struct k_mutex)=20</code>이 그 크기다 — FreeRTOS(84 B)의 약 1/4이다. 큐를 재활용하지 않고 뮤텍스 전용으로 만들었기 때문이다.</p>
+<figure class="chart"><svg viewBox="0 0 680 360" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<rect x="200" y="8" width="280" height="30" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340" y="28" font-size="13" text-anchor="middle">z_impl_k_mutex_lock(m, timeout)</text>
+<line x1="340" y1="38" x2="340" y2="56" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="160" y="58" width="360" height="30" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="340" y="78" font-size="12" text-anchor="middle">__ASSERT(!arch_is_in_isr()) — CONFIG_ASSERT일 때만</text>
+<line x1="340" y1="88" x2="340" y2="106" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="160" y="108" width="360" height="30" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340" y="128" font-size="12" text-anchor="middle">k_spin_lock 후: lock_count == 0 또는 owner == 나?</text>
+<line x1="520" y1="123" x2="538" y2="123" stroke="currentColor" marker-end="url(#ah5)"/>
+<text x="529" y="117" font-size="12" text-anchor="middle">예</text>
+<rect x="540" y="104" width="130" height="40" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="605" y="121" font-size="12" text-anchor="middle">lock_count++</text>
+<text x="605" y="137" font-size="12" text-anchor="middle">owner = 나 → 0</text>
+<line x1="340" y1="138" x2="340" y2="156" stroke="currentColor" marker-end="url(#ah5)"/>
+<text x="352" y="151" font-size="12">아니오</text>
+<rect x="160" y="158" width="360" height="30" rx="6" fill="#888" fill-opacity="0.12" stroke="#888"/>
+<text x="340" y="178" font-size="12" text-anchor="middle">timeout == K_NO_WAIT?</text>
+<line x1="520" y1="173" x2="538" y2="173" stroke="currentColor" marker-end="url(#ah5)"/>
+<text x="529" y="167" font-size="12" text-anchor="middle">예</text>
+<rect x="540" y="158" width="130" height="30" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="605" y="178" font-size="12" text-anchor="middle">-EBUSY</text>
+<line x1="340" y1="188" x2="340" y2="206" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="160" y="208" width="360" height="30" rx="6" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="340" y="228" font-size="12" text-anchor="middle">상속: adjust_owner_prio(owner를 내 우선순위로)</text>
+<line x1="340" y1="238" x2="340" y2="256" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="160" y="258" width="360" height="30" rx="6" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="340" y="278" font-size="12" text-anchor="middle">z_pend_curr(&amp;lock, key, &amp;m-&gt;wait_q, timeout) — 잠듦</text>
+<line x1="250" y1="288" x2="160" y2="310" stroke="currentColor" marker-end="url(#ah5)"/>
+<line x1="430" y1="288" x2="500" y2="310" stroke="currentColor" marker-end="url(#ah5)"/>
+<rect x="20" y="312" width="280" height="40" rx="6" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="160" y="329" font-size="12" text-anchor="middle">unlock이 나를 owner로 정하고 깨움</text>
+<text x="160" y="345" font-size="12" text-anchor="middle">→ 0 (다시 검사하지 않음)</text>
+<rect x="360" y="312" width="300" height="40" rx="6" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="510" y="329" font-size="12" text-anchor="middle">시간 초과: owner 우선순위를 되돌림</text>
+<text x="510" y="345" font-size="12" text-anchor="middle">(남은 대기자 기준) → -EAGAIN</text>
+</svg></figure>
+<p>그림 7 — Zephyr <code>z_impl_k_mutex_lock()</code>(<code>kernel/mutex.c:107</code>)의 흐름. 상속 관련 줄은 <code>#if (CONFIG_PRIORITY_CEILING &lt; K_LOWEST_THREAD_PRIO)</code> 안에 있다. 기본값 <code>CONFIG_PRIORITY_CEILING=-128</code>이면 켜져 있고, 이 값을 idle 우선순위 이상으로 올리면 상속이 꺼진다. 이름과 달리 이것은 priority ceiling 프로토콜(D3)이 아니라 "상속으로 올라갈 수 있는 상한"이다.</p>
+<p>unlock(<code>kernel/mutex.c:230</code>)에서 볼 것은 두 가지다.</p>
+<ul><li><code>lock_count &gt; 1</code>이면 카운터만 내리고 끝난다 — <strong>스핀락도 잡지 않는다</strong>(주인만 이 필드를 바꾸므로).</li><li>마지막 unlock은 <code>new_owner = z_unpend_first_thread(&amp;mutex-&gt;wait_q); mutex-&gt;owner = new_owner;</code>로 <strong>다음 주인을 unlock 안에서 정해 버린다.</strong> 기다리던 스레드는 깨어날 때 이미 주인이다(<code>lock_count</code>도 1 그대로 넘어간다). FreeRTOS는 다르다. give는 카운트를 1로 되돌리고 대기자를 ready로 옮길 뿐이고, 대기자는 깨어나서 <code>xQueueSemaphoreTake()</code>의 <code>for (;;)</code> 루프를 다시 돌며 take를 <strong>다시 시도</strong>한다.</li></ul>
+<p>이 차이가 드러나는 장면을 직접 본다.</p>
+<h3 id="7-3-예제-12-놓자마자-다시-잡으면-freertos는-새치기-zephyr는-이미-넘겨줌">7.3 예제 12 — 놓자마자 다시 잡으면: FreeRTOS는 "새치기", Zephyr는 "이미 넘겨줌"<a class="anchor" href="#7-3-예제-12-놓자마자-다시-잡으면-freertos는-새치기-zephyr는-이미-넘겨줌" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 우선순위가 <strong>높은</strong> 주인이 뮤텍스를 놓자마자(그 사이 CPU를 내주지 않고) 다시 잡으면, 기다리던 <strong>낮은</strong> 태스크는 어떻게 되나.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex12a — FreeRTOS: after give, can a HIGHER-prio giver take the mutex back before the waiter runs? */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+static SemaphoreHandle_t m;
+static const char *nm(TaskHandle_t h) { return h ? pcTaskGetName(h) : "(none)"; }
+static void waiter(void *p)                          /* prio 1 */
+{
+    (void)p;
+    board_printf_raw("W: waiting for m\n");
+    xSemaphoreTake(m, portMAX_DELAY);
+    board_printf_raw("W: finally got m at tick %u\n", (unsigned)xTaskGetTickCount());
+    board_exit(0);
+}
+static void giver(void *p)                           /* prio 3 */
+{
+    (void)p;
+    xSemaphoreTake(m, portMAX_DELAY);
+    xTaskCreate(waiter, "W", 512, NULL, 1, NULL);
+    vTaskDelay(1);                                   /* W runs and blocks on m */
+    xSemaphoreGive(m);                               /* W becomes ready, but G keeps the CPU */
+    BaseType_t again = xSemaphoreTake(m, 0);
+    board_printf_raw("G: give then take(0) -&gt; %d, holder=%s (barging)\n", (int)again, nm(xSemaphoreGetMutexHolder(m)));
+    vTaskDelay(3);
+    xSemaphoreGive(m);
+    board_printf_raw("G: gave again at tick %u\n", (unsigned)xTaskGetTickCount());
+    vTaskSuspend(NULL);
+}
+int main(void)
+{
+    m = xSemaphoreCreateMutex();
+    xTaskCreate(giver, "G", 512, NULL, 3, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex12b — Zephyr: k_mutex_unlock hands ownership straight to the waiter */
+#include &lt;zephyr/kernel.h&gt;
+static K_MUTEX_DEFINE(m);
+static void w_fn(void *a, void *b, void *c)              /* prio 7 (lower than main) */
+{
+    ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+    printk("W: waiting for m\n");
+    k_mutex_lock(&amp;m, K_FOREVER);
+    printk("W: got m at %lld ms\n", k_uptime_get());
+    k_mutex_unlock(&amp;m);
+}
+K_THREAD_DEFINE(w, 1024, w_fn, NULL, NULL, NULL, 7, 0, K_TICKS_FOREVER);
+int main(void)
+{
+    k_thread_name_set(w, "W");
+    k_thread_priority_set(k_current_get(), 3);
+    k_mutex_lock(&amp;m, K_FOREVER);
+    k_thread_start(w);
+    k_msleep(1);                                         /* W runs and blocks on m */
+    k_mutex_unlock(&amp;m);                                  /* W is now the owner, main still runs */
+    int r = k_mutex_lock(&amp;m, K_NO_WAIT);
+    printk("main: unlock then lock(K_NO_WAIT) -&gt; %d, owner=%s (handoff)\n", r,
+           m.owner ? k_thread_name_get(m.owner) : "(none)");
+    k_msleep(3);
+    return 0;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>W: waiting for m
+G: give then take(0) -&gt; 1, holder=G (barging)
+G: gave again at tick 4
+W: finally got m at tick 4
+[board_exit] code=0
+[exit=0]</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>W: waiting for m
+main: unlock then lock(K_NO_WAIT) -&gt; -16, owner=W (handoff)
+W: got m at 2 ms</code></pre></figure>
+<p>출력에서 볼 것: FreeRTOS에서는 G가 give 직후 take(0)에 <strong>성공</strong>했다. W는 ready 상태였지만 아직 실행되지 않았으니 뮤텍스는 "열려 있는" 상태였고, G가 새치기(barging)했다. W는 깨어나 다시 시도했다가 또 잠들고, G가 3 tick 뒤에 다시 놓은 뒤에야(tick 4) 얻었다. Zephyr에서는 unlock 순간 <strong>주인이 이미 W로 바뀌어 있어서</strong> main의 lock(K_NO_WAIT)은 <code>-EBUSY</code>였다.</p>
+<p>어느 쪽이 좋은가? 새치기 방식은 처리량이 좋다(높은 태스크가 연달아 쓸 때 스위치가 없다). 직접 넘겨주기는 공정하다(기다린 태스크가 반드시 다음 차례다). 실무 함의는 이것이다. FreeRTOS에서 높은 태스크가 <code>while (1) { take; 짧은 일; give; }</code>처럼 쉬지 않고 돌면 낮은 대기자는 <strong>영원히 못 얻을 수 있다</strong>(기아, D9). 그런 루프 안에는 give 뒤에 블록하는 지점(delay, 큐 대기)이 반드시 있어야 한다.</p>
+<h3 id="7-4-예제-11-코드-크기-뮤텍스-경로는-얼마나-큰가">7.4 예제 11 — 코드 크기: 뮤텍스 경로는 얼마나 큰가<a class="anchor" href="#7-4-예제-11-코드-크기-뮤텍스-경로는-얼마나-큰가" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 예제 6 · 7의 ELF에서 뮤텍스 관련 함수의 크기(바이트, <code>-O2</code>, Thumb-2).</p>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'cd /tmp/rtosD2; arm-none-eabi-nm --size-sort -S -t d ex6/app.elf | grep -E " (xQueueSemaphoreTake|xQueueGenericSend|xQueueTakeMutexRecursive|xQueueGiveMutexRecursive|xQueueCreateMutex|xTaskPriorityInherit|xTaskPriorityDisinherit|vTaskPriorityDisinheritAfterTimeout|pvTaskIncrementMutexHeldCount|vPortEnterCritical|vPortExitCritical|vTaskSuspendAll|xTaskResumeAll|prvCopyDataToQueue)$"; echo ---; arm-none-eabi-nm --size-sort -S -t d z2/zephyr/zephyr.elf | grep -E " (z_impl_k_mutex_lock|z_impl_k_mutex_unlock|k_sched_lock|k_sched_unlock|z_impl_k_mutex_init|adjust_owner_prio|new_prio_for_inheritance|z_thread_prio_set)$"'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>00003720 00000016 T vTaskSuspendAll
+00005680 00000020 T pvTaskIncrementMutexHeldCount
+00010516 00000052 T vPortExitCritical
+00007420 00000060 T xQueueCreateMutex
+00007480 00000072 T xQueueGiveMutexRecursive
+00010440 00000076 T vPortEnterCritical
+00008300 00000084 T xQueueTakeMutexRecursive
+00006312 00000120 t prvCopyDataToQueue
+00005096 00000172 T xTaskPriorityInherit
+00005476 00000204 T vTaskPriorityDisinheritAfterTimeout
+00005268 00000208 T xTaskPriorityDisinherit
+00007904 00000396 T xQueueSemaphoreTake
+00007016 00000404 T xQueueGenericSend
+00003736 00000428 T xTaskResumeAll
+---
+00006744 00000040 T k_sched_lock
+00006784 00000084 T k_sched_unlock
+00005524 00000160 T z_impl_k_mutex_unlock
+00006488 00000216 T z_thread_prio_set
+00005296 00000228 T z_impl_k_mutex_lock</code></pre></figure>
+<p>출력에서 볼 것: FreeRTOS에서 뮤텍스 take · give가 지나는 함수(<code>xQueueSemaphoreTake</code> 396 + <code>xQueueGenericSend</code> 404 + 상속 3종 584 + 기타)는 합쳐서 약 1.5 KB이고, 그중 큰 둘은 세마포어 · 큐와 <strong>공유</strong>한다. Zephyr는 lock 228 + unlock 160 = 388 B짜리 전용 코드에, 상속 시 <code>z_thread_prio_set</code>(216)을 부른다. <code>adjust_owner_prio</code>와 <code>new_prio_for_inheritance</code>는 심볼이 없다 — 인라인됐다. <code>vTaskSuspendAll</code>이 16 B인 것도 눈여겨본다. 스케줄러 잠금의 "잠그기"는 카운터 하나 올리는 것이고, 비용은 <code>xTaskResumeAll</code>(428 B, 밀린 tick · ready 목록 처리) 쪽에 있다(C7 §4.2).</p>
+<h3 id="7-5-그림으로-경합-한-번의-타임라인">7.5 그림으로 — 경합 한 번의 타임라인<a class="anchor" href="#7-5-그림으로-경합-한-번의-타임라인" aria-label="link">#</a></h3>
+<figure class="chart"><svg viewBox="0 0 680 230" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+<text x="10" y="46" font-size="13">hi (3)</text>
+<text x="10" y="96" font-size="13">lo (1)</text>
+<text x="10" y="146" font-size="13">커널 경로</text>
+<line x1="100" y1="170" x2="670" y2="170" stroke="currentColor" marker-end="url(#ah6)"/>
+<text x="660" y="188" font-size="12" text-anchor="end">시간</text>
+<rect x="100" y="78" width="110" height="28" fill="#3f9a6b" fill-opacity="0.12" stroke="#3f9a6b"/>
+<text x="155" y="97" font-size="12" text-anchor="middle">lo: m 쥠</text>
+<rect x="210" y="28" width="40" height="28" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="230" y="47" font-size="12" text-anchor="middle">hi</text>
+<rect x="250" y="128" width="150" height="28" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="325" y="147" font-size="12" text-anchor="middle">take 블록 20.4 µs</text>
+<rect x="400" y="78" width="100" height="28" fill="#e08a3c" fill-opacity="0.12" stroke="#e08a3c"/>
+<text x="450" y="97" font-size="12" text-anchor="middle">lo (1 → 3)</text>
+<rect x="500" y="128" width="90" height="28" fill="#d0564a" fill-opacity="0.12" stroke="#d0564a"/>
+<text x="545" y="147" font-size="12" text-anchor="middle">give 12.4 µs</text>
+<rect x="590" y="28" width="80" height="28" fill="#4a7bd0" fill-opacity="0.12" stroke="#4a7bd0"/>
+<text x="630" y="47" font-size="12" text-anchor="middle">hi: m 획득</text>
+<text x="230" y="20" font-size="12" text-anchor="middle">깨어남</text>
+<text x="325" y="122" font-size="12" text-anchor="middle">상속 + 대기 목록 + 스위치</text>
+<text x="545" y="122" font-size="12" text-anchor="middle">상속 해제 + 깨움</text>
+<line x1="500" y1="60" x2="500" y2="170" stroke="currentColor" stroke-dasharray="3 3"/>
+<text x="500" y="204" font-size="12" text-anchor="middle">xSemaphoreGive</text>
+<line x1="250" y1="60" x2="250" y2="170" stroke="currentColor" stroke-dasharray="3 3"/>
+<text x="250" y="204" font-size="12" text-anchor="middle">xSemaphoreTake</text>
+<text x="100" y="222" font-size="12">FreeRTOS V11.3.2, 예제 6 평균값 (QEMU icount). 길이는 눈금에 맞추지 않았다</text>
+</svg></figure>
+<p>그림 8 — 경합 한 번에 일어나는 일. hi의 take가 블록하는 경로(상속으로 lo를 3으로 올리고, hi를 대기 목록에 넣고, lo로 전환)와 lo의 give가 hi를 깨우는 경로(상속 해제, 대기자를 ready로, hi로 전환)가 각각 수십 µs급 커널 작업이다. 경합이 잦은 뮤텍스는 이 두 덩어리가 매번 붙는다.</p>
+<hr>
+<h2 id="8-실무에서-다시-보기">8. 실무에서 다시 보기<a class="anchor" href="#8-실무에서-다시-보기" aria-label="link">#</a></h2>
+<h3 id="8-1-드론-fc-imu와-기압계가-나눠-쓰는-i2c-버스-예제-10">8.1 드론 FC — IMU와 기압계가 나눠 쓰는 I2C 버스 (예제 10)<a class="anchor" href="#8-1-드론-fc-imu와-기압계가-나눠-쓰는-i2c-버스-예제-10" aria-label="link">#</a></h3>
+<p>예를 들어 드론 비행 제어기라면 IMU(1 kHz, 읽기 80 µs)와 기압계(100 Hz, "변환 시작 명령 50 µs → 변환 2 ms 대기 → 결과 읽기 300 µs")가 I2C 버스 하나를 쓴다. 기압계 드라이버를 쓰는 방법은 두 가지다.</p>
+<ul><li><strong>나쁜 설계</strong>: 버스를 잡고, 명령 보내고, <strong>잡은 채로</strong> 2 ms 기다리고, 읽고, 놓는다. 코드가 단순하고 "트랜잭션이 원자적"이라 안심이 된다.</li><li><strong>좋은 설계</strong>: 명령 보내고 <strong>놓고</strong>, 2 ms 기다리고, 다시 잡고 읽고 놓는다. 변환 중에는 버스가 놀고 있으니 다른 장치가 쓰게 둔다(SSD의 tR 동안 채널을 다른 다이에 주는 것과 같다).</li></ul>
+<p>무엇을 확인하나: IMU는 데이터 레디 인터럽트(TIMER0, 999.56 µs — tick과 위상이 조금씩 어긋나게)로 깨어나고, 버스 예산은 1 tick이다. 400 주기 동안 IMU가 버스를 기다린 시간의 분포를 두 설계로 잰다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex10 — drone FC: IMU (1 kHz) and baro share one I2C bus mutex; good vs bad baro design */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+#include "d2.h"
+#ifndef BAD
+#define BAD 0
+#endif
+#define NCYC 400
+static SemaphoreHandle_t i2c;
+static uint32_t hist[5], wmax, miss;                /* bins: &lt;10, &lt;100, &lt;400, &gt;=400 us, timeout */
+static uint64_t wsum;
+static void xfer(uint32_t us) { spin_us(us); }      /* stands in for a polled I2C transaction */
+static TaskHandle_t h_imu;
+void TIMER0_IRQHandler(void)                        /* IMU data-ready, ~1 kHz, not tick-aligned */
+{
+    TIMER_INTCLR(TIMER0_BASE) = 1;
+    BaseType_t w = pdFALSE; vTaskNotifyGiveFromISR(h_imu, &amp;w); portYIELD_FROM_ISR(w);
+}
+static void imu_task(void *p)                       /* prio 4: 80 us read, bus budget 1 tick */
+{
+    (void)p;
+    timer0_start(24989, 0x40);                       /* 999.56 us: phase drifts vs the 1 ms tick */
+    for (int n = 0; n &lt; NCYC; n++) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t t0 = CYC();
+        if (xSemaphoreTake(i2c, 1) != pdTRUE) { miss++; hist[4]++; continue; }
+        uint32_t w = (CYC() - t0) / 25;              /* us waited for the bus */
+        xfer(80);
+        xSemaphoreGive(i2c);
+        wsum += w; if (w &gt; wmax) wmax = w;
+        hist[w &lt; 10 ? 0 : w &lt; 100 ? 1 : w &lt; 400 ? 2 : 3]++;
+    }
+    board_printf_raw("%s: IMU wait avg %u us max %u us | &lt;10:%u &lt;100:%u &lt;400:%u &gt;=400:%u timeout:%u\n",
+                     BAD ? "BAD (hold across delay)" : "GOOD (release during conversion)",
+                     (unsigned)(wsum / (NCYC - miss)), wmax, hist[0], hist[1], hist[2], hist[3], hist[4]);
+    board_exit(0);
+}
+static void baro_task(void *p)                      /* prio 2: every 10 ms: start conversion, wait 2 ms, read */
+{
+    (void)p;
+    TickType_t last = xTaskGetTickCount();
+    for (;;) {
+        xTaskDelayUntil(&amp;last, 10);
+        xSemaphoreTake(i2c, portMAX_DELAY);
+        xfer(50);                                   /* write "start conversion" command */
+#if BAD
+        vTaskDelay(2);                              /* waits for the sensor WHILE holding the bus */
+#else
+        xSemaphoreGive(i2c);
+        vTaskDelay(2);                              /* bus is free during the conversion */
+        xSemaphoreTake(i2c, portMAX_DELAY);
+#endif
+        xfer(300);                                  /* read 24-bit pressure + temperature */
+        xSemaphoreGive(i2c);
+    }
+}
+int main(void)
+{
+    i2c = xSemaphoreCreateMutex();
+    xTaskCreate(imu_task, "imu", 512, NULL, 4, &amp;h_imu);
+    xTaskCreate(baro_task, "baro", 512, NULL, 2, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">sh</span><pre><code>limactl shell elinux -- bash -lc 'S=/Users/donh/.rtos_scratch/D2; $S/run.sh ex10g $S/f10/ex10.c; $S/run.sh ex10b $S/f10/ex10.c -- -DBAD=1'</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>GOOD (release during conversion): IMU wait avg 2 us max 304 us | &lt;10:398 &lt;100:1 &lt;400:1 &gt;=400:0 timeout:0
+[board_exit] code=0
+[exit=0]
+BAD (hold across delay): IMU wait avg 56 us max 1317 us | &lt;10:326 &lt;100:0 &lt;400:18 &gt;=400:21 timeout:35
+[board_exit] code=0
+[exit=0]</code></pre></figure>
+<figure class="chart"><svg viewBox="0 0 680 205" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="12" width="12" height="12" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+<text x="38" y="23" font-size="12">10 µs 미만</text>
+<rect x="127.2" y="12" width="12" height="12" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<text x="145" y="23" font-size="12">10–100</text>
+<rect x="210.4" y="12" width="12" height="12" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="228" y="23" font-size="12">100–400</text>
+<rect x="300.8" y="12" width="12" height="12" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<text x="319" y="23" font-size="12">400 µs 이상</text>
+<rect x="415.20000000000005" y="12" width="12" height="12" fill="#888" fill-opacity="0.7" stroke="#888"/>
+<text x="433" y="23" font-size="12">타임아웃</text>
+<text x="90" y="67" font-size="13" text-anchor="end">좋은 설계</text>
+<rect x="100.0" y="50" width="497.5" height="24" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+<text x="349" y="67" font-size="12" text-anchor="middle">398</text>
+<rect x="597.5" y="50" width="1.2" height="24" fill="#4a7bd0" fill-opacity="0.7" stroke="#4a7bd0"/>
+<rect x="598.8" y="50" width="1.2" height="24" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<text x="100" y="90" font-size="12">최대 304 µs</text>
+<text x="90" y="123" font-size="13" text-anchor="end">나쁜 설계</text>
+<rect x="100.0" y="106" width="407.5" height="24" fill="#3f9a6b" fill-opacity="0.7" stroke="#3f9a6b"/>
+<text x="304" y="123" font-size="12" text-anchor="middle">326</text>
+<rect x="507.5" y="106" width="22.5" height="24" fill="#e08a3c" fill-opacity="0.7" stroke="#e08a3c"/>
+<rect x="530.0" y="106" width="26.2" height="24" fill="#d0564a" fill-opacity="0.7" stroke="#d0564a"/>
+<text x="543" y="123" font-size="12" text-anchor="middle">21</text>
+<rect x="556.2" y="106" width="43.8" height="24" fill="#888" fill-opacity="0.7" stroke="#888"/>
+<text x="578" y="123" font-size="12" text-anchor="middle">35</text>
+<text x="100" y="146" font-size="12">최대 1317 µs, 35회 타임아웃</text>
+<line x1="100" y1="160" x2="600" y2="160" stroke="currentColor"/>
+<line x1="100.0" y1="160" x2="100.0" y2="164" stroke="currentColor"/>
+<text x="100" y="177" font-size="12" text-anchor="middle">0</text>
+<line x1="225.0" y1="160" x2="225.0" y2="164" stroke="currentColor"/>
+<text x="225" y="177" font-size="12" text-anchor="middle">100</text>
+<line x1="350.0" y1="160" x2="350.0" y2="164" stroke="currentColor"/>
+<text x="350" y="177" font-size="12" text-anchor="middle">200</text>
+<line x1="475.0" y1="160" x2="475.0" y2="164" stroke="currentColor"/>
+<text x="475" y="177" font-size="12" text-anchor="middle">300</text>
+<line x1="600.0" y1="160" x2="600.0" y2="164" stroke="currentColor"/>
+<text x="600" y="177" font-size="12" text-anchor="middle">400</text>
+<text x="600" y="198" font-size="12" text-anchor="end">IMU 주기 수 (각 설계 400 주기)</text>
+</svg></figure>
+<p>그림 9 — 예제 10, IMU 400 주기 동안 버스를 기다린 시간의 분포. 좋은 설계는 398번이 10 µs 미만이고 최악이 304 µs(= 기압계의 300 µs 읽기 하나와 겹친 경우)다. 나쁜 설계는 35번 타임아웃(IMU 샘플 손실)과 21번의 400 µs 이상 대기가 생긴다.</p>
+<p>출력에서 볼 것:</p>
+<ol><li>좋은 설계의 최악 대기 <strong>304 µs</strong>는 "다른 주인의 최장 보유 구간"(기압계 읽기 300 µs)과 정확히 같다. <strong>뮤텍스 대기의 최악값 = 다른 주인들의 최장 보유 구간 + 오버헤드</strong>다. 이 값이 IMU 주기(1 ms) 안에 들어가므로 이 설계는 안전하다. 더 줄이려면 기압계 읽기를 쪼개거나(300 µs → 짧은 트랜잭션 여러 번) DMA로 바꾼다.</li><li>나쁜 설계는 기압계가 2 ms 변환 대기 동안 버스를 쥐고 있어서, 그 구간에 걸린 IMU 주기는 1 tick 예산 안에 못 얻고 <strong>35번 샘플을 잃었다</strong>(10 ms마다 2~3 주기). 우선순위 상속은 여기서 아무 도움이 안 된다. 기압계는 잠들어(블록) 있으니 우선순위를 올려도 더 빨리 끝나지 않는다. <strong>뮤텍스를 쥔 채 블록하는 것</strong>은 상속이 해결하지 못하는 지연이다.</li></ol>
+<h3 id="8-2-공유-uart-로거-뮤텍스보다-게이트키퍼">8.2 공유 UART 로거 — 뮤텍스보다 게이트키퍼<a class="anchor" href="#8-2-공유-uart-로거-뮤텍스보다-게이트키퍼" aria-label="link">#</a></h3>
+<p>여러 태스크가 <code>printf</code>처럼 UART로 로그를 찍으면 문자가 섞인다. 가장 쉬운 고침은 UART 뮤텍스지만, 계산해 보면 문제가 보인다. 115200 bps 8N1에서 한 글자는 10 비트 = 86.8 µs이고, 80자 한 줄은 <strong>6.9 ms</strong>다. 폴링 방식 드라이버라면 로그 한 줄을 찍는 태스크가 6.9 ms 동안 뮤텍스를 쥔다. 제어 루프 태스크가 로그를 한 줄 찍으려다 다른 태스크의 로그 뒤에서 6.9 ms를 기다리면 1 kHz 루프가 7주기를 놓친다.</p>
+<p>그래서 로그는 <strong>게이트키퍼(gatekeeper) 태스크</strong>가 정석이다. UART를 만지는 태스크는 단 하나(낮은 우선순위)이고, 다른 태스크는 메시지를 큐에 넣고(복사 수 µs) 바로 돌아간다. 자원에 주인이 하나뿐이니 뮤텍스가 필요 없다. 구현과 큐가 찼을 때의 정책(버림, 카운트)은 D7, 큐 깊이 설계는 D4에서 다룬다. 뮤텍스는 "버스 트랜잭션처럼 <strong>호출한 태스크가 결과를 기다려야 하는</strong>" 자원에 남겨 둔다.</p>
+<h3 id="8-3-spi-플래시-장치-잠금과-버스-잠금-두-단계">8.3 SPI 플래시 — 장치 잠금과 버스 잠금, 두 단계<a class="anchor" href="#8-3-spi-플래시-장치-잠금과-버스-잠금-두-단계" aria-label="link">#</a></h3>
+<p>블랙박스 로거가 SPI 플래시에 쓰는데, 같은 SPI 버스에 IMU도 있다고 하자. 플래시 섹터 erase는 수십 ms 걸리고(데이터시트 값, 칩마다 다름), 그동안 플래시는 status 레지스터의 BUSY 비트만 응답한다.</p>
+<ul><li><strong>버스 뮤텍스</strong>는 SPI 트랜잭션 하나(수 µs ~ 수백 µs) 동안만 잡는다. erase 명령을 보낸 뒤 바로 놓는다.</li><li><strong>장치 뮤텍스</strong>(플래시 전용)는 erase가 끝날 때까지(BUSY 폴링 + <code>vTaskDelay</code>) 쥔다. 다른 태스크가 erase 중인 플래시에 읽기를 보내지 않게 막는 것은 버스가 아니라 장치의 일이다.</li><li>두 뮤텍스를 다 잡아야 할 때는 <strong>항상 같은 순서</strong>(장치 → 버스)로 잡는다. 순서가 엇갈리면 ABBA 데드락이다(D9, EL A8 §10).</li></ul>
+<figure class="code"><span class="lang">c</span><pre><code>/* not executed — two-level locking for an SPI NOR flash on a shared SPI bus */
+int flash_erase_sector(uint32_t addr)
+{
+    xSemaphoreTake(flash_mtx, portMAX_DELAY);       /* device: held for the whole erase (tens of ms) */
+    spi_cmd(CMD_WREN, 0);                           /* each spi_cmd() takes/gives spi_bus_mtx inside */
+    spi_cmd(CMD_SE, addr);
+    while (spi_read_status() &amp; SR_BUSY)             /* bus is free between polls */
+        vTaskDelay(pdMS_TO_TICKS(1));
+    xSemaphoreGive(flash_mtx);
+    return 0;
+}</code></pre></figure>
+<p>이 구조에서 IMU의 최악 버스 대기는 "SPI 트랜잭션 하나"이지 "erase 하나"가 아니다. 예제 10의 좋은 설계와 같은 원리다.</p>
+<h3 id="8-4-ssd-컨트롤러-펌웨어-don의-경험">8.4 SSD 컨트롤러 펌웨어 (Don의 경험)<a class="anchor" href="#8-4-ssd-컨트롤러-펌웨어-don의-경험" aria-label="link">#</a></h3>
+<p>SSD에서 NAND 채널 arbitration을 RTOS 언어로 옮기면 이렇게 대응한다.</p>
+<div class="tw"><table><thead><tr><th>SSD 펌웨어</th><th>RTOS 뮤텍스 설계</th></tr></thead><tbody><tr><td>채널 grant를 받은 명령 시퀀스만 채널을 놓는다</td><td>소유권 — 주인만 give</td></tr><tr><td>tR · tPROG 대기 동안 채널을 놓고 다른 다이 명령을 끼운다</td><td>블록하는 대기 동안 뮤텍스를 놓는다 (§8.1 좋은 설계)</td></tr><tr><td>호스트 읽기가 GC보다 먼저 grant를 받는다</td><td>대기 목록이 우선순위 순 + 상속</td></tr><tr><td>채널 grant 타임아웃 → 채널 리셋 · 명령 재시도</td><td>take 타임아웃 → 세고, 남기고, 버스 복구로 올림 (§3.3)</td></tr><tr><td>멀티코어 FW에서 HW 세마포어로 코어 간 자원 보호</td><td>단일 코어 RTOS에서는 뮤텍스. SMP RTOS에서는 커널이 스핀락을 함께 쓴다 (C10)</td></tr></tbody></table></div>
+<p>다른 점은 "누가 중재하나"다. SSD에서는 HW arbiter나 FW 스케줄러가 grant 순서를 <strong>명시적으로</strong> 정한다. RTOS 뮤텍스는 대기 목록의 우선순위 순서 + (FreeRTOS라면) 새치기(§7.3)로 <strong>암묵적으로</strong> 정해진다. 공정성이 중요한 자원(예: 여러 태스크가 같은 비율로 써야 하는 버스)이라면 뮤텍스 대신 게이트키퍼가 요청 순서를 명시적으로 정하는 편이 SSD 방식에 더 가깝다.</p>
+<h3 id="8-5-예제-9-뮤텍스를-쥔-태스크를-지우면">8.5 예제 9 — 뮤텍스를 쥔 태스크를 지우면<a class="anchor" href="#8-5-예제-9-뮤텍스를-쥔-태스크를-지우면" aria-label="link">#</a></h3>
+<p>무엇을 확인하나: 워커 W가 뮤텍스를 잡은 상태에서 <code>vTaskDelete(W)</code>. 그 뒤 idle 태스크가 W의 TCB를 해제하고, <strong>같은 크기</strong>의 새 태스크 X를 만들면 heap_4가 그 블록을 다시 준다.</p>
+<figure class="code"><span class="lang">c</span><pre><code>/* ex9 — deleting a task that holds a mutex: the mutex stays locked, and the holder pointer goes stale */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "semphr.h"
+static SemaphoreHandle_t m;
+static TaskHandle_t w, x;
+static void worker(void *p) { (void)p; xSemaphoreTake(m, portMAX_DELAY); for (;;) vTaskDelay(100); }
+static void newbie(void *p)                          /* never took m */
+{
+    (void)p;
+    board_printf_raw("X: am I the holder? %s -&gt; calling xSemaphoreGive(m)\n",
+                     xSemaphoreGetMutexHolder(m) == xTaskGetCurrentTaskHandle() ? "YES (!)" : "no");
+    BaseType_t r = xSemaphoreGive(m);
+    board_printf_raw("X: give returned %d\n", (int)r);
+    board_exit(0);
+}
+static void boss(void *p)                            /* prio 3 */
+{
+    (void)p;
+    xTaskCreate(worker, "W", 256, NULL, 2, &amp;w);
+    vTaskDelay(2);                                   /* W takes m */
+    board_printf_raw("boss: holder=%s (%x)\n", pcTaskGetName(xSemaphoreGetMutexHolder(m)),
+                     (unsigned)xSemaphoreGetMutexHolder(m));
+    vTaskDelete(w);                                  /* W dies with m locked */
+    vTaskDelay(5);                                   /* idle task frees W's TCB + stack */
+    TickType_t t0 = xTaskGetTickCount();
+    BaseType_t ok = xSemaphoreTake(m, 10);
+    board_printf_raw("boss: take after delete -&gt; %d after %u ticks, holder ptr still %x\n",
+                     (int)ok, (unsigned)(xTaskGetTickCount() - t0), (unsigned)xSemaphoreGetMutexHolder(m));
+    xTaskCreate(newbie, "X", 256, NULL, 1, &amp;x);      /* same size: heap_4 reuses W's block */
+    board_printf_raw("boss: new task X handle = %x\n", (unsigned)x);
+    vTaskDelay(5);
+    for (;;) vTaskDelay(100);
+}
+int main(void)
+{
+    m = xSemaphoreCreateMutex();
+    xTaskCreate(boss, "boss", 512, NULL, 3, NULL);
+    vTaskStartScheduler();
+    return 1;
+}</code></pre></figure>
+<figure class="code"><span class="lang">text</span><pre><code>boss: holder=W (20001cf0)
+boss: take after delete -&gt; 0 after 10 ticks, holder ptr still 20001cf0
+boss: new task X handle = 20001cf0
+X: am I the holder? YES (!) -&gt; calling xSemaphoreGive(m)
+
+[configASSERT] /var/rtoslab/src/FreeRTOS-Kernel/tasks.c:6862
+[board_exit] code=253
+[exit=1]</code></pre></figure>
+<p>출력에서 볼 것: W가 죽은 뒤에도 뮤텍스는 <strong>영원히 잠겨 있다</strong>(boss의 take가 10 tick 뒤 실패). 주인 포인터 0x20001cf0은 이미 해제된 메모리를 가리킨다. 그리고 새 태스크 X가 <strong>같은 주소</strong>를 받자, 커널 눈에는 X가 주인이 됐다. X가 give하자 첫 assert(<code>pxTCB == pxCurrentTCB</code>)는 <strong>통과</strong>했고, 두 번째 assert(<code>uxMutexesHeld</code>가 0이 아님, 6862)에서야 잡혔다 — X의 TCB는 새로 만들어져 쥔 개수가 0이었기 때문이다. assert가 꺼져 있었다면 <code>uxMutexesHeld</code>가 0에서 빼져 최댓값으로 넘어가고, 그 뒤 X의 상속 해제는 영원히 일어나지 않는다. Zephyr도 같다. <code>kernel/thread.c</code>와 <code>kernel/sched.c</code>에는 뮤텍스를 언급하는 줄이 하나도 없다 — 스레드를 abort해도 쥔 뮤텍스는 풀리지 않는다. <strong>규칙: 다른 태스크를 밖에서 지우지 않는다.</strong> 태스크가 끝나야 하면 플래그 · 통지로 "스스로 정리하고 끝내라"고 요청하고, 태스크는 쥔 것을 다 놓은 뒤 <code>vTaskDelete(NULL)</code>로 스스로 끝낸다.</p>
+<hr>
+<h2 id="9-흔한-실수와-증상">9. 흔한 실수와 증상<a class="anchor" href="#9-흔한-실수와-증상" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>실수</th><th>증상</th><th>원인</th><th>고치는 법</th></tr></thead><tbody><tr><td>뮤텍스를 쥔 채 블록 (I/O 완료 대기, <code>vTaskDelay</code>, 큐 대기)</td><td>높은 태스크가 주기적으로 ms 단위로 늦고 샘플을 잃는다 (예제 10: 35회)</td><td>주인이 잠들어 있으니 상속도 소용없다</td><td>대기 동안 놓는다. 트랜잭션 단위로만 잡는다 (§8.1, §8.3)</td></tr><tr><td>에러 경로에서 give를 빠뜨림</td><td>드물게 시스템 일부가 "그냥 멈춤", 디버거로 보면 대기 목록에 태스크가 줄 서 있음</td><td>일찍 <code>return</code></td><td>출구 하나(<code>goto out</code>), 모든 return에서 보유 여부 표시 (§3.4)</td></tr><tr><td>take 실패 후에도 give</td><td>assert 끔이면 다른 주인의 잠금을 풀어 두 태스크가 동시에 안에 (예제 1)</td><td>반환값 무시</td><td><code>if (xSemaphoreTake(...) != pdTRUE) return</code></td></tr><tr><td>ISR에서 take/give</td><td>assert <code>port.c:438</code> · <code>queue.c:1360</code>, Zephyr <code>mutex.c:115</code>. assert 끄면 주인이 엉뚱한 태스크 (예제 5, 2b)</td><td>ISR은 주인이 될 수 없고 블록할 수 없다</td><td>세마포어 · 통지로 태스크를 깨워 태스크가 잡는다 (§4.4, D7)</td></tr><tr><td>Zephyr <code>k_timer</code> 콜백에서 <code>k_mutex_lock</code></td><td>위와 같음 — 콜백이 ISR 문맥이라는 것을 모르고 씀</td><td>FreeRTOS 타이머(데몬 태스크)와 의미가 다름</td><td><code>k_work_submit()</code>으로 위임 (D6, D7)</td></tr><tr><td>같은 태스크가 일반 뮤텍스를 두 번 take</td><td><code>portMAX_DELAY</code>면 영구 정지, 타임아웃이면 이상한 실패 (예제 3)</td><td>자기 교착</td><td><code>_locked()</code> 함수 분리 (§2.3). 재귀 뮤텍스는 최후 수단</td></tr><tr><td>재귀 뮤텍스를 일반 give로 놓음</td><td>처음엔 동작하다가 다음 주인부터 영원히 안 풀림 (예제 3: count=2 잔존)</td><td>일반 give는 카운터를 모른다</td><td>Take/Give 짝을 맞춘다 (<code>...Recursive</code> 끼리)</td></tr><tr><td>뮤텍스를 쥔 태스크를 <code>vTaskDelete</code></td><td>뮤텍스 영구 잠김, 주인 포인터가 새 태스크를 가리켜 assert <code>tasks.c:6862</code> (예제 9)</td><td>커널은 쥔 뮤텍스 목록을 모른다</td><td>스스로 정리 후 <code>vTaskDelete(NULL)</code> (§8.5)</td></tr><tr><td>아주 짧은 구간(몇 줄)에 뮤텍스</td><td>CPU 사용률이 이유 없이 높음, 경합 시 수십 µs 지연</td><td>쌍 5.9 µs + 경합 33 µs (예제 6)</td><td>크리티컬 섹션 (쌍 0.9 µs)</td></tr><tr><td>상호 배제에 이진 세마포어</td><td>평소엔 동작, 부하 시 우선순위 역전으로 긴 지연</td><td>주인이 없어 상속이 없다</td><td>뮤텍스로 바꾼다 (D1, D3)</td></tr></tbody></table></div>
+<hr>
+<h2 id="10-면접에서-이렇게-말한다">10. 면접에서 이렇게 말한다<a class="anchor" href="#10-면접에서-이렇게-말한다" aria-label="link">#</a></h2>
+<p><strong>Q.</strong> What is the difference between a mutex and a binary semaphore?</p>
+<p><strong>A.</strong> 뮤텍스에는 주인이 있다. 잡은 태스크만 놓을 수 있고, 주인이 있으니 커널이 우선순위 상속을 할 수 있고 재귀 잠금도 가능하다. 이진 세마포어는 주인이 없는 깃발이라 ISR이 주고 태스크가 받는 신호용이다. 상호 배제에는 뮤텍스, 이벤트 신호에는 세마포어다.</p>
+<blockquote><p>A mutex has an owner: only the task that took it may give it back, and because the kernel knows the owner it can apply priority inheritance and support recursive locking. A binary semaphore has no owner; it is a flag, typically given by an ISR and taken by a task. I use mutexes for mutual exclusion and semaphores or task notifications for signalling.</p></blockquote>
+<p><strong>꼬리 질문</strong>: "FreeRTOS에서 주인이 아닌 태스크가 give하면?" → <code>configASSERT</code>가 켜져 있으면 <code>xTaskPriorityDisinherit</code> 안의 assert에 걸리고, 꺼져 있으면 성공해 버려서 두 태스크가 동시에 임계 구역에 들어간다(예제 1).</p>
+<p><strong>Q.</strong> Why can't you use a mutex in an ISR?</p>
+<p><strong>A.</strong> 세 가지다. ISR은 태스크가 아니라서 주인이 될 수 없다 — 커널은 끼어들림을 당한 태스크를 주인으로 적는다. ISR은 블록할 수 없어서 기다릴 수 없다. 그리고 우선순위 상속은 스케줄러 우선순위를 올리는 것인데 ISR의 우선순위는 NVIC 하드웨어라 올릴 수 없다. FreeRTOS는 <code>vPortEnterCritical</code>의 VECTACTIVE assert와 <code>xQueueGiveFromISR</code>의 assert로 잡고, Zephyr는 <code>CONFIG_ASSERT</code>에서 <code>arch_is_in_isr()</code> assert로 잡는다.</p>
+<blockquote><p>Three reasons. Ownership: an ISR is not a task, so the kernel would record whichever task was interrupted as the owner. Blocking: an ISR cannot sleep, so it cannot wait for a locked mutex. Inheritance: the kernel can raise a task's priority, but not an ISR's hardware priority. If an ISR needs a bus, it should signal a task with a semaphore or notification, or defer the work, and that task takes the mutex.</p></blockquote>
+<p><strong>Q.</strong> How do you choose between a mutex, a critical section and a scheduler lock?</p>
+<p><strong>A.</strong> "무엇을 막아야 하나"와 "구간 안에서 블록하나"로 고른다. ISR과 공유하면 크리티컬 섹션(또는 락 없는 구조). 블록이 들어가면 뮤텍스만 가능하다. 몇 줄짜리면 크리티컬 섹션이 가장 싸다 — 제가 잰 값으로 쌍이 0.9 µs, 뮤텍스 쌍은 5.9 µs다. 그 사이는 무관한 높은 태스크를 지켜야 하는지로 갈린다. 같은 50 µs 구간을 쟀을 때 크리티컬 섹션은 ISR까지 51 µs 늦췄고, 스케줄러 잠금은 무관한 태스크를 61 µs 늦췄고, 뮤텍스는 무관한 태스크를 21 µs로 지켰지만 경쟁자는 102 µs를 기다렸다.</p>
+<blockquote><p>I start from what must be excluded and whether the section blocks. Shared with an ISR: a short critical section or a lock-free structure. Contains blocking I/O: a mutex, nothing else is legal. A few instructions: a critical section, because it is about six times cheaper than a mutex pair. In between, the question is whether unrelated high-priority tasks may be delayed by the section length. A mutex only delays tasks that want the same resource, but those contenders pay the section plus roughly thirty microseconds of block-and-handoff overhead on a Cortex-M3 class part.</p></blockquote>
+<p><strong>Q.</strong> When is a recursive mutex justified?</p>
+<p><strong>A.</strong> 서드파티 스택이 요구하거나, 잠금을 쥔 채 사용자 콜백을 불러야 하는 드물게 정당한 경우뿐이다. 대부분은 "누가 언제 잠그는지 정하지 않은" 설계 냄새다. 공개 함수는 잠그고 내부 <code>_locked()</code> 함수는 잠그지 않게 나누는 것이 정석이다. 재귀는 불변식이 깨진 상태로 다시 들어가는 버그를 숨기고, Take/Give 짝이 틀리면 카운터가 남아 영원히 안 풀린다.</p>
+<blockquote><p>Rarely: when a third-party stack's porting layer demands it, or when a callback may re-enter the same API. Usually it is a design smell. I split public functions that lock from internal <code>_locked</code> helpers that assume the lock is held, and assert the holder in those helpers. Recursive locking can hide re-entering a data structure whose invariant is temporarily broken.</p></blockquote>
+<p><strong>Q.</strong> What timeout do you put on a mutex take, and what do you do when it expires?</p>
+<p><strong>A.</strong> 다른 주인들의 최악 보유 시간 + 선점 여유로 정하고, 내 주기보다 작아야 한다. 1 kHz 루프에 2 ms를 기다리면 기다리는 동안 주기를 놓친다. 시간 초과는 버그 신호라서 이번 주기 대처(지난 샘플), 카운트, 로그(주인 이름 포함), 연속이면 버스 복구 같은 상위 조치로 올린다. <code>portMAX_DELAY</code>는 마감 없는 배경 태스크에만 쓰고 워치독이 받쳐 줘야 한다.</p>
+<blockquote><p>I derive it from the worst-case hold time of the other owners plus preemption, and it must be shorter than my own period. On expiry I degrade for this cycle, count it, log the current holder, and escalate after consecutive failures, for example an I2C bus recovery. <code>portMAX_DELAY</code> is only for background tasks, backed by a task watchdog.</p></blockquote>
+<p><strong>Q.</strong> What happens if a task holding a mutex is deleted?</p>
+<p><strong>A.</strong> FreeRTOS도 Zephyr도 풀어 주지 않는다. FreeRTOS TCB는 쥔 뮤텍스의 개수만 세고 목록이 없다. 뮤텍스는 영원히 잠기고 주인 포인터는 해제된 TCB를 가리킨다. 제가 해 보니 같은 크기의 새 태스크가 그 메모리를 다시 받아서 커널이 그 태스크를 주인으로 착각했다. 그래서 태스크는 밖에서 지우지 않고, 스스로 정리하고 끝나게 한다.</p>
+<blockquote><p>Neither FreeRTOS nor Zephyr releases it. FreeRTOS only counts held mutexes per task, it has no list. The mutex stays locked forever and the holder pointer dangles; in my test a new task reused the freed TCB address and the kernel believed it was the owner. So tasks are asked to clean up and delete themselves rather than being deleted from outside.</p></blockquote>
+<p><strong>Q.</strong> Does a mutex in FreeRTOS hand ownership directly to the waiting task?</p>
+<p><strong>A.</strong> 아니다. give는 뮤텍스를 열고 대기자를 ready로 옮길 뿐이고, 대기자는 깨어나서 다시 take한다. 그래서 give한 태스크가 더 높은 우선순위면 바로 다시 잡을 수 있다(새치기). Zephyr의 <code>k_mutex_unlock</code>은 unlock 안에서 다음 주인을 정해 버려서, 놓자마자 다시 잡으면 <code>-EBUSY</code>다. 높은 태스크가 쉬지 않고 take/give를 반복하면 FreeRTOS에서는 낮은 대기자가 굶을 수 있다.</p>
+<blockquote><p>No. Give reopens the mutex and readies the highest-priority waiter, which then retries the take, so a higher-priority giver can immediately retake it. Zephyr's unlock picks the next owner inside unlock, so an immediate re-lock returns <code>-EBUSY</code>. In FreeRTOS that means a tight take/give loop in a high-priority task can starve a lower waiter.</p></blockquote>
+<hr>
+<h2 id="11-직접-해보기">11. 직접 해보기<a class="anchor" href="#11-직접-해보기" aria-label="link">#</a></h2>
+<ol class="tasks"><li><strong>개념</strong> — 예제 1의 assert-끔 빌드에서 A가 마지막 give를 했을 때 B의 TCB <code>uxMutexesHeld</code>는 몇이 되나? 정답/힌트: B가 take할 때 B의 개수가 1이 되고, A의 give는 주인(B)에 대해 <code>xTaskPriorityDisinherit</code>를 부르므로 B의 개수가 0이 된다. B는 쥐고 있다고 믿지만 커널 장부에서는 0개다.</li><li><strong>코드</strong> — 예제 3에 <code>xSemaphoreTakeRecursive(m, 0)</code>(일반 뮤텍스 <code>m</code>에 재귀 API)를 넣어 보라. 동작하나? 정답/힌트: <code>xQueueTakeMutexRecursive()</code>는 큐 타입을 검사하지 않고 주인 비교만 한다. 일반 뮤텍스도 재귀처럼 동작한다 — 그래서 더더욱 짝을 지켜야 한다.</li><li><strong>측정</strong> — 예제 6에 이진 세마포어(<code>xSemaphoreCreateBinary</code>) take+give 쌍과 task notification(<code>xTaskNotifyGive</code> + <code>ulTaskNotifyTake(pdTRUE, 0)</code>) 쌍을 추가해 뮤텍스 쌍과 비교하라. 정답/힌트(직접 재서 확인할 것): 세마포어는 같은 큐 경로이지만 주인 기록 · 상속 해제가 없으니 뮤텍스보다 조금 싸야 하고, 통지는 큐를 거치지 않으니 훨씬 싸야 한다(D5).</li><li><strong>측정</strong> — 예제 8에서 L을 10 µs와 200 µs로 바꿔 네 방법의 표를 다시 만들어라. 경쟁자 열에서 뮤텍스의 "고정 오버헤드"(L을 뺀 값)가 L과 무관하게 거의 일정한지 확인하라. 정답/힌트: 블록 경로 + 넘겨주기 + hi 끼어듦으로 수십 µs가 L과 무관하게 붙는다. L이 작을수록 뮤텍스가 상대적으로 손해다.</li><li><strong>코드</strong> — 예제 10의 나쁜 설계에서 IMU 예산을 <code>xSemaphoreTake(i2c, 0)</code>(기다리지 않음)으로 바꾸면 타임아웃 수와 IMU 루프의 지터는 어떻게 바뀌나? 정답/힌트: 못 잡는 주기는 바로 건너뛰므로 기다리느라 다음 주기를 밀어내는 일은 없어진다. 대신 손실 수는 버스가 막힌 시간 비율만큼 그대로 남는다 — 근본 해결은 설계(놓기)다.</li><li><strong>Zephyr</strong> — 예제 7을 <code>CONFIG_PRIORITY_CEILING=15</code>(idle 우선순위 이상)로 빌드하고 "main prio while hi waits"를 다시 보라. 정답/힌트: 상속 코드가 <code>#if</code>로 빠져서 main은 5 그대로다. 상속을 끈 커널에서 경쟁자 지연이 어떻게 나빠지는지는 D3의 실험 주제다.</li><li><strong>설계</strong> — 드론 FC에 IMU 2개(SPI1), 기압계 · 자력계(I2C1), 블랙박스 플래시(SPI1과 공유)가 있다. 필요한 뮤텍스 목록, 각 뮤텍스를 쥐는 최악 시간, 잡는 순서 규칙을 표로 만들어라. 정답/힌트: 버스마다 하나(SPI1, I2C1) + 플래시 장치 하나. 순서는 장치 → 버스로 고정. SPI1의 최악 보유는 플래시 page program 한 번(트랜잭션)이지 erase 전체가 아니다(§8.3).</li></ol>
+<hr>
+<h2 id="12-용어-사전">12. 용어 사전<a class="anchor" href="#12-용어-사전" aria-label="link">#</a></h2>
+<div class="tw"><table><thead><tr><th>용어</th><th>뜻</th><th>한 줄 설명</th></tr></thead><tbody><tr><td>mutex</td><td>상호 배제 잠금</td><td>주인 이름표가 붙은 열쇠 하나. 잡은 태스크만 놓는다</td></tr><tr><td>owner / holder</td><td>주인</td><td>뮤텍스를 쥔 태스크. FreeRTOS <code>xMutexHolder</code>, Zephyr <code>owner</code></td></tr><tr><td>recursive mutex</td><td>재귀 뮤텍스</td><td>주인이 또 잡으면 카운터만 올린다. 카운터가 0이 될 때 풀린다</td></tr><tr><td><code>uxRecursiveCallCount</code> / <code>lock_count</code></td><td>재귀 카운터</td><td>FreeRTOS / Zephyr의 재귀 깊이 필드</td></tr><tr><td>self-deadlock</td><td>자기 교착</td><td>자기가 쥔 뮤텍스를 자기가 기다림</td></tr><tr><td>timeout budget</td><td>대기 예산</td><td>take가 기다릴 최대 시간. 다른 주인의 최악 보유 시간으로 정한다</td></tr><tr><td>priority inheritance</td><td>우선순위 상속</td><td>기다리는 높은 태스크의 우선순위를 주인에게 잠시 빌려준다 (D3)</td></tr><tr><td><code>uxMutexesHeld</code></td><td>쥔 뮤텍스 개수</td><td>FreeRTOS TCB 필드. 목록이 아니라 개수라서 0이 될 때만 상속 해제</td></tr><tr><td><code>owner_orig_prio</code></td><td>원래 우선순위</td><td>Zephyr가 상속 전에 기억해 두는 주인의 우선순위</td></tr><tr><td>barging</td><td>새치기</td><td>give 직후 대기자가 실행되기 전에 다른 태스크가 다시 잡는 것 (FreeRTOS)</td></tr><tr><td>direct handoff</td><td>직접 넘겨주기</td><td>unlock이 다음 주인을 바로 정함 (Zephyr)</td></tr><tr><td>critical section</td><td>크리티컬 섹션</td><td>인터럽트(BASEPRI 이하)를 막아 구간을 보호 (C7)</td></tr><tr><td>scheduler lock</td><td>스케줄러 잠금</td><td>태스크 전환만 막는다. ISR은 돈다 (C7)</td></tr><tr><td>gatekeeper task</td><td>게이트키퍼 태스크</td><td>자원을 만지는 유일한 태스크. 다른 태스크는 큐로 요청 (D7)</td></tr><tr><td><code>CHECKIF</code></td><td>Zephyr 런타임 검사 매크로</td><td>Kconfig에 따라 <code>if</code>, assert, 또는 아무것도 아님으로 바뀐다</td></tr><tr><td>VECTACTIVE</td><td>ICSR 하위 8비트</td><td>지금 처리 중인 예외 번호. 0이 아니면 ISR 안</td></tr></tbody></table></div>
+<hr>
+<h2 id="13-요약-체크리스트">13. 요약 &amp; 체크리스트<a class="anchor" href="#13-요약-체크리스트" aria-label="link">#</a></h2>
+<p>뮤텍스는 "열쇠 하나 + 주인 이름표"다. 이름표 덕분에 주인만 놓을 수 있고(소유권), 주인이 또 잡을 수 있고(재귀), 커널이 주인을 올려 줄 수 있다(상속, D3). 그러나 이름표 검사는 생각보다 얇다. FreeRTOS는 give 경로의 assert 한 줄(<code>tasks.c:6861</code>)이 전부라 <code>configASSERT</code>를 끄면 두 태스크가 동시에 임계 구역에 들어가고, Zephyr는 <code>-EPERM</code>을 주지만 <code>CONFIG_NO_RUNTIME_CHECKS</code>면 사라지고 안 잠긴 뮤텍스 unlock이 NULL 역참조가 된다. ISR은 주인이 될 수 없고 블록할 수 없어서 뮤텍스를 쓸 수 없다. 타임아웃 예산은 다른 주인의 최악 보유 시간으로 정하고, 내 주기보다 짧아야 하며, 시간 초과는 세고 남기고 올린다. 비용은 경합 없는 쌍 5.9 µs(크리티컬 섹션의 6.6배), 경합마다 약 33 µs이고, 그 비용은 <strong>같은 자원을 원하는 태스크만</strong> 낸다 — 무관한 높은 태스크와 ISR은 지켜진다. 가장 흔한 실무 실수는 뮤텍스를 쥔 채 블록하는 것이고(예제 10: 샘플 35개 손실), 이것은 상속으로도 고쳐지지 않는다.</p>
+<ul class="tasks"><li class="task"><label><input type="checkbox" ><span>뮤텍스와 이진 세마포어의 차이를 "주인" 한 단어로 설명하고, 그 결과(상속 · 재귀 · ISR 금지)를 이어 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>FreeRTOS에서 주인 아닌 give가 어디서 잡히는지(<code>xTaskPriorityDisinherit</code>의 assert) 말하고, assert를 끄면 무슨 일이 생기는지 보였다</span></label></li><li class="task"><label><input type="checkbox" ><span>Zephyr <code>k_mutex_lock</code> / <code>unlock</code>의 반환값 다섯 가지(0, <code>-EBUSY</code>, <code>-EAGAIN</code>, <code>-EPERM</code>, <code>-EINVAL</code>)를 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>재귀 뮤텍스의 카운터 동작과 "일반 give로 놓으면 카운터가 남는" 버그를 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span><code>_locked()</code> 함수 분리로 재귀 뮤텍스를 없애는 패턴을 쓸 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>타임아웃 예산을 "다른 주인의 최악 보유 + 선점 &lt; 내 주기"로 정하고, 시간 초과의 에러 경로 네 단계를 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>ISR에서 뮤텍스가 금지인 세 가지 이유와, 대신 쓸 것(세마포어 · 통지 · 위임 · 크리티컬 섹션)을 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>뮤텍스 · 크리티컬 섹션 · 스케줄러 잠금이 각각 <strong>누구를</strong> 기다리게 하는지 측정 숫자로 말할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>FreeRTOS 뮤텍스가 큐(<code>queueQUEUE_TYPE_MUTEX</code>, 길이 1, 크기 0)이고 <code>pcHead</code> 자리가 뮤텍스 표시라는 것을 안다</span></label></li><li class="task"><label><input type="checkbox" ><span>FreeRTOS(새치기)와 Zephyr(직접 넘겨주기)의 give/unlock 차이와 기아 위험을 설명할 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>뮤텍스를 쥔 채 블록하는 버그를 찾아 "대기 동안 놓기"로 고칠 수 있다</span></label></li><li class="task"><label><input type="checkbox" ><span>뮤텍스를 쥔 태스크를 밖에서 지우면 안 되는 이유를 예제 9로 설명할 수 있다</span></label></li></ul>
+<hr>
+<h2 id="참고-자료">참고 자료<a class="anchor" href="#참고-자료" aria-label="link">#</a></h2>
+<ul class="tasks"><li>FreeRTOS Kernel V11.3.2 소스 (<code>/var/rtoslab/src/FreeRTOS-Kernel</code>): <code>queue.c</code>(<code>SemaphoreData_t</code>, <code>prvInitialiseMutex</code>, <code>xQueueCreateMutex</code>, <code>xQueueSemaphoreTake</code>, <code>xQueueTakeMutexRecursive</code> / <code>xQueueGiveMutexRecursive</code>, <code>xQueueGiveFromISR</code>, <code>prvCopyDataToQueue</code>), <code>tasks.c</code>(<code>xTaskPriorityInherit</code>, <code>xTaskPriorityDisinherit</code>, <code>vTaskPriorityDisinheritAfterTimeout</code>, <code>pvTaskIncrementMutexHeldCount</code>, TCB의 <code>uxBasePriority</code> · <code>uxMutexesHeld</code>), <code>include/semphr.h</code>, <code>include/queue.h</code>, <code>portable/GCC/ARM_CM3/port.c</code>(<code>vPortEnterCritical</code>), <code>History.txt</code>(V11.3.2 릴리스 2026-10-16)</li><li>Zephyr v4.4.2 소스 (<code>/var/rtoslab/zephyrproject/zephyr</code>): <code>kernel/mutex.c</code>, <code>include/zephyr/kernel.h</code>(<code>struct k_mutex</code>, <code>Z_MUTEX_INITIALIZER</code>, <code>k_mutex_lock</code> / <code>k_mutex_unlock</code> 문서 주석), <code>include/zephyr/sys/check.h</code>(<code>CHECKIF</code>), <code>kernel/Kconfig</code>(<code>PRIORITY_CEILING</code>), <code>kernel/sched.c</code>(<code>k_sched_lock</code>)</li><li>FreeRTOS 문서 — Mutexes: https://www.freertos.org/Real-time-embedded-RTOS-mutexes.html , Recursive mutexes: https://www.freertos.org/RTOS-Recursive-Mutexes.html</li><li>Zephyr 문서 — Mutexes: https://docs.zephyrproject.org/latest/kernel/services/synchronization/mutexes.html</li><li>Richard Barry, "Mastering the FreeRTOS Real Time Kernel" — Resource Management 장(뮤텍스, 게이트키퍼 태스크)</li><li>이 노트 세트: A5 §3.7(재귀 · PI 기본값), C7 §5 · §6(결정표, L 스윕), D1(세마포어), D3(우선순위 역전), D7(게이트키퍼 · 위임), D9(데드락), EL A8 §2(pthread mutex 타입), EL F4 §5(Linux <code>struct mutex</code>)</li></ul>
+    <div class="nav"><a class="prev" href="2026-10-31_D1_semaphore.html"><span class="dir">← 이전</span><span class="nm">D1. 세마포어 — ISR이 세우고 태스크가 내리는 깃발, N개를 세는 토큰 그릇</span></a><a class="next" href="2026-10-31_D3_priority_inversion.html"><span class="dir">다음 →</span><span class="nm">D3. 우선순위 역전 — 높은 태스크가 낮은 태스크를 기다리는 동안 중간 태스크가 끼어드는 문제: 재현 · PIP · OCPP/ICPP · Mars Pathfinder · FreeRTOS/Zephyr 구현의 한계</span></a></div>
+  </main>
+  <aside><div class="lbl">목차</div><ol><li class="l2"><a href="#0-큰-그림-이게-왜-필요한가">0. 큰 그림 — 이게 왜 필요한가</a></li><li class="l3"><a href="#0-1-이-노트의-지도와-경계">0.1 이 노트의 지도와 경계</a></li><li class="l3"><a href="#실습-환경-한-줄">실습 환경 한 줄</a></li><li class="l2"><a href="#1-소유권-잠근-태스크만-푼다">1. 소유권 — 잠근 태스크만 푼다</a></li><li class="l3"><a href="#1-1-정의">1.1 정의</a></li><li class="l3"><a href="#1-2-api-한눈에">1.2 API 한눈에</a></li><li class="l3"><a href="#1-3-예제-1-freertos-주인이-아닌-태스크가-give하면">1.3 예제 1 — FreeRTOS: 주인이 아닌 태스크가 give하면?</a></li><li class="l3"><a href="#1-4-예제-2-zephyr-에러-코드로-돌려준다">1.4 예제 2 — Zephyr: 에러 코드로 돌려준다</a></li><li class="l3"><a href="#1-5-예제-2b-config_no_runtime_checks-y이면-eperm이-사라진다">1.5 예제 2b — CONFIG_NO_RUNTIME_CHECKS=y이면 -EPERM이 사라진다</a></li><li class="l3"><a href="#1-6-정리-규칙을-어기면-각-커널은-어떻게-반응하나">1.6 정리 — 규칙을 어기면 각 커널은 어떻게 반응하나</a></li><li class="l2"><a href="#2-재귀-뮤텍스-같은-주인이-여러-번">2. 재귀 뮤텍스 — 같은 주인이 여러 번</a></li><li class="l3"><a href="#2-1-직관과-정의">2.1 직관과 정의</a></li><li class="l3"><a href="#2-2-예제-3-일반-뮤텍스의-자기-교착-재귀-카운터-give-규칙-api-섞기">2.2 예제 3 — 일반 뮤텍스의 자기 교착, 재귀 카운터, give 규칙, API 섞기</a></li><li class="l3"><a href="#2-3-언제-정당하고-언제-설계-냄새인가">2.3 언제 정당하고, 언제 설계 냄새인가</a></li><li class="l2"><a href="#3-타임아웃-기다림에-예산을-붙인다">3. 타임아웃 — 기다림에 예산을 붙인다</a></li><li class="l3"><a href="#3-1-타임아웃-값은-어떻게-정하나">3.1 타임아웃 값은 어떻게 정하나</a></li><li class="l3"><a href="#3-2-예제-4-버스-주인이-멈췄을-때-타임아웃이-있는-태스크-vs-portmax_delay-태스크">3.2 예제 4 — 버스 주인이 멈췄을 때: 타임아웃이 있는 태스크 vs portMAX_DELAY 태스크</a></li><li class="l3"><a href="#3-3-portmax_delay-k_forever를-써도-되는-때">3.3 portMAX_DELAY / K_FOREVER를 써도 되는 때</a></li><li class="l3"><a href="#3-4-에러-경로에서-unlock을-잊지-않는-구조">3.4 에러 경로에서 unlock을 잊지 않는 구조</a></li><li class="l2"><a href="#4-isr에서-뮤텍스가-금지인-이유">4. ISR에서 뮤텍스가 금지인 이유</a></li><li class="l3"><a href="#4-1-세-가지-이유">4.1 세 가지 이유</a></li><li class="l3"><a href="#4-2-예제-5-freertos에서-isr이-뮤텍스를-만지는-세-가지-방법">4.2 예제 5 — FreeRTOS에서 ISR이 뮤텍스를 만지는 세 가지 방법</a></li><li class="l3"><a href="#4-3-zephyr">4.3 Zephyr</a></li><li class="l3"><a href="#4-4-isr이-공유-자원을-써야-한다면">4.4 ISR이 공유 자원을 써야 한다면</a></li><li class="l2"><a href="#5-고르기-뮤텍스-vs-크리티컬-섹션-vs-스케줄러-잠금">5. 고르기 — 뮤텍스 vs 크리티컬 섹션 vs 스케줄러 잠금</a></li><li class="l3"><a href="#5-1-세-도구는-막는-대상이-다르다">5.1 세 도구는 막는 대상이 다르다</a></li><li class="l3"><a href="#5-2-예제-6-freertos-각-도구의-비용">5.2 예제 6 — FreeRTOS: 각 도구의 비용</a></li><li class="l3"><a href="#5-3-예제-7-zephyr-같은-측정">5.3 예제 7 — Zephyr: 같은 측정</a></li><li class="l3"><a href="#5-4-예제-8-같은-50-µs-구간을-네-가지로-지키면-누가-기다리나">5.4 예제 8 — 같은 50 µs 구간을 네 가지로 지키면, 누가 기다리나</a></li><li class="l3"><a href="#5-5-결정-흐름-측정-숫자를-붙여서">5.5 결정 흐름 — 측정 숫자를 붙여서</a></li><li class="l2"><a href="#6-우선순위-상속-맛보기만-본론은-d3">6. 우선순위 상속 — 맛보기만 (본론은 D3)</a></li><li class="l2"><a href="#7-rtos-커널-안에서는-무슨-일이-일어나나">7. RTOS 커널 안에서는 무슨 일이 일어나나</a></li><li class="l3"><a href="#7-1-freertos-뮤텍스는-길이-1-항목-크기-0-인-큐다">7.1 FreeRTOS — 뮤텍스는 "길이 1, 항목 크기 0"인 큐다</a></li><li class="l3"><a href="#7-2-zephyr-전용-구조체-struct-k_mutex와-직접-넘겨주기">7.2 Zephyr — 전용 구조체 struct k_mutex와 직접 넘겨주기</a></li><li class="l3"><a href="#7-3-예제-12-놓자마자-다시-잡으면-freertos는-새치기-zephyr는-이미-넘겨줌">7.3 예제 12 — 놓자마자 다시 잡으면: FreeRTOS는 "새치기", Zephyr는 "이미 넘겨줌"</a></li><li class="l3"><a href="#7-4-예제-11-코드-크기-뮤텍스-경로는-얼마나-큰가">7.4 예제 11 — 코드 크기: 뮤텍스 경로는 얼마나 큰가</a></li><li class="l3"><a href="#7-5-그림으로-경합-한-번의-타임라인">7.5 그림으로 — 경합 한 번의 타임라인</a></li><li class="l2"><a href="#8-실무에서-다시-보기">8. 실무에서 다시 보기</a></li><li class="l3"><a href="#8-1-드론-fc-imu와-기압계가-나눠-쓰는-i2c-버스-예제-10">8.1 드론 FC — IMU와 기압계가 나눠 쓰는 I2C 버스 (예제 10)</a></li><li class="l3"><a href="#8-2-공유-uart-로거-뮤텍스보다-게이트키퍼">8.2 공유 UART 로거 — 뮤텍스보다 게이트키퍼</a></li><li class="l3"><a href="#8-3-spi-플래시-장치-잠금과-버스-잠금-두-단계">8.3 SPI 플래시 — 장치 잠금과 버스 잠금, 두 단계</a></li><li class="l3"><a href="#8-4-ssd-컨트롤러-펌웨어-don의-경험">8.4 SSD 컨트롤러 펌웨어 (Don의 경험)</a></li><li class="l3"><a href="#8-5-예제-9-뮤텍스를-쥔-태스크를-지우면">8.5 예제 9 — 뮤텍스를 쥔 태스크를 지우면</a></li><li class="l2"><a href="#9-흔한-실수와-증상">9. 흔한 실수와 증상</a></li><li class="l2"><a href="#10-면접에서-이렇게-말한다">10. 면접에서 이렇게 말한다</a></li><li class="l2"><a href="#11-직접-해보기">11. 직접 해보기</a></li><li class="l2"><a href="#12-용어-사전">12. 용어 사전</a></li><li class="l2"><a href="#13-요약-체크리스트">13. 요약 &amp; 체크리스트</a></li><li class="l2"><a href="#참고-자료">참고 자료</a></li></ol></aside>
+</div><script>
+const KEY='eai_notes_read_v1', TKEY='eai_notes_theme', CKEY='eai_notes_check_v1';
+const readSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(KEY)||'[]'))}catch(e){return new Set()}};
+const saveSet=s=>{try{localStorage.setItem(KEY,JSON.stringify([...s]))}catch(e){}};
+(function(){
+  try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
+  const tb=document.getElementById('theme');
+  if(tb)tb.onclick=()=>{const d=document.documentElement;
+    const cur=d.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    const nx=cur==='dark'?'light':'dark'; d.dataset.theme=nx;
+    try{localStorage.setItem(TKEY,nx)}catch(e){}};
+  // 진행 바
+  const bar=document.getElementById('bar');
+  const onScroll=()=>{const h=document.body.scrollHeight-innerHeight;
+    bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
+  addEventListener('scroll',onScroll,{passive:true}); onScroll();
+  // 읽음 표시
+  const id=document.body.dataset.note, rb=document.getElementById('readbtn');
+  const sync=()=>{const s=readSet(); const on=s.has(id);
+    rb.classList.toggle('on',on); rb.textContent=on?'✓ 읽음':'읽음 표시';};
+  if(rb){rb.onclick=()=>{const s=readSet(); s.has(id)?s.delete(id):s.add(id); saveSet(s); sync();}; sync();}
+  // 체크박스 저장
+  let cs={}; try{cs=JSON.parse(localStorage.getItem(CKEY)||'{}')}catch(e){}
+  document.querySelectorAll('li.task input').forEach((el,i)=>{
+    const k=id+':'+i; if(cs[k])el.checked=true;
+    el.addEventListener('change',()=>{cs[k]=el.checked;
+      try{localStorage.setItem(CKEY,JSON.stringify(cs))}catch(e){}});
+  });
+  // TOC 하이라이트
+  const links=[...document.querySelectorAll('aside a')];
+  const map=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const heads=[...document.querySelectorAll('main h2[id],main h3[id]')];
+  if(heads.length){
+    const io=new IntersectionObserver(es=>{
+      es.forEach(e=>{ if(e.isIntersecting){ links.forEach(a=>a.classList.remove('active'));
+        const a=map.get(e.target.id); if(a)a.classList.add('active'); }});
+    },{rootMargin:'-80px 0px -70% 0px',threshold:0});
+    heads.forEach(h=>io.observe(h));
+  }
+  // 키보드: j/k 다음·이전 노트
+  addEventListener('keydown',e=>{
+    if(e.target.matches('input,textarea'))return;
+    if(e.key==='j'){const n=document.querySelector('.nav a.next'); if(n)location.href=n.href;}
+    if(e.key==='k'){const p=document.querySelector('.nav a.prev'); if(p)location.href=p.href;}
+  });
+})();
+</script></body></html>

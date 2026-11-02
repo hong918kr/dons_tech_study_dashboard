@@ -1,0 +1,63 @@
+### python3 -I gen_captures.py
+wrote cap_golden.txt (202 rows)
+wrote cap_b3_slow_rise.txt (202 rows)
+wrote cap_b4_stop_between.txt (190 rows)
+wrote cap_b5_glitch_arb.txt (88 rows)
+wrote cap_b7_stretch_timeout.txt (144 rows)
+### cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined i2c_capture_decode.c && run
+== cap_golden.txt  [mode fm, 400 kHz max]
+   case: golden -- Fm register read with repeated START, healthy edges
+   decode: S 48W A 0F A Sr 48R A B5 N P |
+   timing: fSCL(median) 397 kHz | tLOW min 1575 ns (>= 1300) | tHIGH min 800 ns (>= 600)
+           tr max 120 ns (<= 300) x0/50 | tf max 25 ns (<= 300) | tSU;DAT min 555 ns (>= 100) x0
+           tHD;STA min 700 (>= 600) | tSU;STA min 700 (>= 600) | tSU;STO min 750 (>= 600)
+   flags : (none)
+   diag  : OK
+   PASS (expect OK, got OK)
+
+== cap_b3_slow_rise.txt  [mode fm, 400 kHz max]
+   case: B3 -- fails only at 400 kHz: tr 700 ns, target data valid late
+   decode: S 48W A 0F A Sr 48R A B5? N(indeterminate bits mask 0xA5) P |
+   timing: fSCL(median) 299 kHz | tLOW min 1819 ns (>= 1300) | tHIGH min 800 ns (>= 600)
+           tr max 700 ns (<= 300) VIOL x50/50 | tf max 25 ns (<= 300) | tSU;DAT min -25 ns (>= 100) VIOL x4
+           tHD;STA min 700 (>= 600) | tSU;STA min 700 (>= 600) | tSU;STO min 994 (>= 600)
+   sample: 4 bit(s) had SDA between 30-70 % when SCL crossed 30 % rising -> value depends on the receiver
+   flags : SLOW_RISE TIMING
+   diag  : SLOW_RISE -- rise time over Table 11 limit -> fix Rp/Cb (or lower fSCL), measure at 30/70 %
+   PASS (expect SLOW_RISE, got SLOW_RISE)
+
+== cap_b4_stop_between.txt  [mode fm, 400 kHz max]
+   case: B4 -- read returns another register: STOP+START instead of Sr
+   decode: S 48W A 0F A P | S 48R A 00 N P |
+   timing: fSCL(median) 397 kHz | tLOW min 1575 ns (>= 1300) | tHIGH min 800 ns (>= 600)
+           tr max 120 ns (<= 300) x0/47 | tf max 25 ns (<= 300) | tSU;DAT min 700 ns (>= 100) x0
+           tHD;STA min 700 (>= 600) | tSU;STO min 750 (>= 600) | tBUF min 1500 (>= 1300)
+   read  : last read byte 0x00, expected 0xB5
+   flags : WRITE_STOP_READ READ_MISMATCH
+   diag  : WRITE_STOP_READ -- pointer write ended with STOP; device resets its pointer on STOP -> use repeated START (combined format)
+   PASS (expect WRITE_STOP_READ, got WRITE_STOP_READ)
+
+== cap_b5_glitch_arb.txt  [mode fm, 400 kHz max]
+   case: B5 -- single controller reports arbitration lost
+   glitch: SCL low pulse 60 ns @ t=34992 ns -> >= tSP 50 ns: spec input filters pass it, receivers COUNT it
+   decode: S 48W A <abandoned: byte 2 after 8 clocks, SDA=0 on last clock>
+   timing: fSCL(median) 397 kHz | tLOW min 1575 ns (>= 1300) | tHIGH min 800 ns (>= 600)
+           tr max 120 ns (<= 300) x0/20 | tf max 25 ns (<= 300) | tSU;DAT min 1105 ns (>= 100) x0
+           tHD;STA min 700 (>= 600)
+   flags : ARB_LOST_GLITCH SCL_GLITCH ABORT_MIDBYTE
+   diag  : ARB_LOST_GLITCH -- SCL glitch >= tSP counted by the target -> bit-count slip -> target drives SDA early -> controller sees 0 while sending 1
+   PASS (expect ARB_LOST_GLITCH, got ARB_LOST_GLITCH)
+
+== cap_b7_stretch_timeout.txt  [mode sm, 100 kHz max]
+   case: B7 -- sensor clock-stretches 12 ms, controller timeout 10 ms
+   decode: S 40W A E3 A Sr 40R A <abandoned: byte 2 after 1 clocks, SDA=0 on last clock> <SDA held low 17010.1 us at end, SCL=1>
+   timing: fSCL(median) 100 kHz | tLOW min 5496 ns (>= 4700) | tHIGH min 4200 ns (>= 4000)
+           tr max 300 ns (<= 1000) x0/35 | tf max 30 ns (<= 300) | tSU;DAT min 4770 ns (>= 250) x0
+           tHD;STA min 4500 (>= 4000) | tSU;STA min 5000 (>= 4700)
+   stretch: longest SCL low 12.000 ms before bit 1 of byte 2 | controller timeout 10.000 ms -> EXCEEDED | SMBus tTIMEOUT(min) 25 ms -> within
+   flags : STRETCH_TIMEOUT STUCK_SDA ABORT_MIDBYTE
+   diag  : STRETCH_TIMEOUT -- target stretches longer than the controller's SCL-low timeout -> controller aborts mid-byte -> bus left owned by target
+   PASS (expect STRETCH_TIMEOUT, got STRETCH_TIMEOUT)
+
+summary: 5 case(s), 0 FAIL
+exit=0
