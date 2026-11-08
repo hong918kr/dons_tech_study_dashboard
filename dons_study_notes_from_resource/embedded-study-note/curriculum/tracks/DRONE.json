@@ -1,0 +1,441 @@
+{
+  "id": "DRONE",
+  "intro": "드론 비행 제어기(FC)는 수 kHz 자이로 루프, 자세 추정, 캐스케이드 PID, 모터 믹싱, ESC/RC 프로토콜, 페일세이프가 한 MCU 위에서 결정론적으로 돌아가는 대표적인 하드 리얼타임 펌웨어다. PX4·ArduPilot·Betaflight의 구조를 직접 작은 코드로 재구현해 보면 Anduril·Skydio·Shield AI 같은 드론/방산 회사 면접에서 묻는 '루프 레이트, 지연, 프로토콜 비트 레벨, 실패 처리'를 한 번에 다질 수 있다.",
+  "goals": [
+    "FC 소프트웨어 구조(태스크·루프 레이트·uORB/스케줄러)를 설명하고 골격 코드를 짤 수 있다",
+    "IMU 보정·필터링·상보/Mahony/EKF 자세 추정을 직접 구현하고 검증할 수 있다",
+    "Rate→Attitude→Position 캐스케이드 PID와 모터 믹서를 구현하고 SITL에서 튜닝할 수 있다",
+    "PWM/OneShot/DShot, SBUS/CRSF, MAVLink, NMEA/UBX를 비트·CRC 수준에서 인코딩/파싱할 수 있다",
+    "비행 모드 상태 머신과 다층 페일세이프, 블랙박스 로깅을 설계·구현할 수 있다"
+  ],
+  "prereq": [
+    "SENS",
+    "DSP",
+    "RCTL",
+    "COMM"
+  ],
+  "refs": [
+    {
+      "title": "PX4 User & Developer Guide",
+      "url": "https://docs.px4.io/main/en/"
+    },
+    {
+      "title": "ArduPilot Developer Documentation",
+      "url": "https://ardupilot.org/dev/"
+    },
+    {
+      "title": "Betaflight Documentation",
+      "url": "https://betaflight.com/docs"
+    },
+    {
+      "title": "MAVLink Developer Guide",
+      "url": "https://mavlink.io/en/"
+    },
+    {
+      "title": "Beard & McLain, Small Unmanned Aircraft: Theory and Practice"
+    },
+    {
+      "title": "Mahony, Hamel, Pflimlin — Nonlinear Complementary Filters on the Special Orthogonal Group (IEEE TAC 2008)"
+    },
+    {
+      "title": "u-blox Interface Description (UBX protocol)"
+    }
+  ],
+  "items": [
+    {
+      "id": "DRONE-B01",
+      "level": "B",
+      "title": "FC 아키텍처: 태스크와 루프 레이트 골격",
+      "goal": "PX4/ArduPilot/Betaflight가 gyro·PID·RX·추정·로깅 태스크를 어떤 주기와 우선순위로 나누는지 이해한다",
+      "task": "8 kHz gyro, 4 kHz PID, 1 kHz attitude, 250 Hz estimator, 50 Hz RX 태스크를 가진 시뮬레이션 스케줄러를 C로 작성하고, 가짜 tick으로 각 태스크 실제 실행 주기·지터·오버런 횟수를 측정해 출력한다.",
+      "tags": [
+        "architecture",
+        "scheduler",
+        "loop-rate",
+        "px4",
+        "betaflight"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-B02",
+      "level": "B",
+      "title": "좌표계와 쿼터니언 기초 (NED/FRD, Euler)",
+      "goal": "드론에서 쓰는 NED·FRD 좌표계와 쿼터니언/오일러/DCM 변환을 손으로 구현할 수 있다",
+      "task": "쿼터니언 곱·정규화·벡터 회전·Euler(ZYX)↔quat↔DCM 변환 라이브러리를 C로 구현하고, 무작위 자세 왕복 변환 오차와 pitch=±90° gimbal lock 케이스를 단위 테스트로 검증한다.",
+      "tags": [
+        "quaternion",
+        "frames",
+        "math"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-B03",
+      "level": "B",
+      "title": "IMU 파이프라인: 스케일·바이어스·보드 회전",
+      "goal": "raw int16 IMU 값을 SI 단위로 바꾸고 바이어스/보드 장착 회전을 보정하는 표준 경로를 익힌다",
+      "task": "±2000 dps / ±16 g 설정의 raw gyro·accel 샘플을 rad/s, m/s²로 변환하고, 정지 상태 N초 평균으로 gyro 바이어스를 추정하며 board alignment(예: yaw 90°) 회전을 적용하는 코드를 작성해 합성 데이터로 검증한다.",
+      "tags": [
+        "imu",
+        "calibration",
+        "see:SENS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-B04",
+      "level": "B",
+      "title": "자이로 필터링: PT1 저역통과 + Biquad 노치",
+      "goal": "모터 진동 노이즈를 제거하는 FC 필터 체인과 그 위상 지연 비용을 이해한다",
+      "task": "PT1 LPF와 biquad notch를 C로 구현해 8 kHz 샘플 합성 gyro(실제 운동 + 200 Hz 모터 노이즈)에 적용하고, 노이즈 감쇠량과 50 Hz에서의 위상 지연(ms)을 계산·출력해 필터 컷오프 선택 트레이드오프를 설명한다.",
+      "tags": [
+        "filter",
+        "biquad",
+        "notch",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-B05",
+      "level": "B",
+      "title": "상보 필터(Complementary) 자세 추정",
+      "goal": "gyro 적분과 accel 중력 기준을 섞는 가장 단순한 attitude estimator를 구현한다",
+      "task": "roll/pitch 상보 필터를 구현하고, 시뮬레이션된 회전 + gyro 바이어스 + 가속 외란 데이터로 실제값 대비 RMS 오차를 alpha 값별로 비교한다.",
+      "tags": [
+        "attitude",
+        "complementary-filter",
+        "estimation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-B06",
+      "level": "B",
+      "title": "단일축 Rate PID (Betaflight 스타일)",
+      "goal": "D-on-measurement, D-term LPF, I-term 제한/relax, TPA 등 FC rate 루프 실무 요소를 구현한다",
+      "task": "deg/s setpoint를 받는 단일축 rate PID를 C로 구현하고(D-on-measurement, I-term anti-windup, throttle 기반 TPA 포함), 1축 관성+모터 지연 플랜트 시뮬레이션에서 스텝 응답 overshoot·settling time을 측정한다.",
+      "tags": [
+        "pid",
+        "rate-loop",
+        "see:RCTL"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-B07",
+      "level": "B",
+      "title": "모터 믹서: Quad-X 믹싱 행렬과 포화 처리",
+      "goal": "roll/pitch/yaw/throttle 명령을 모터 출력으로 바꾸는 믹서와 airmode 포화 처리 방식을 이해한다",
+      "task": "Quad-X 믹싱 행렬로 4개 모터 출력을 계산하고, 출력이 [0,1]을 벗어날 때 throttle을 이동시켜 자세 권한을 보존하는 airmode식 desaturation을 구현해 극단 입력 테스트 케이스로 검증한다.",
+      "tags": [
+        "mixer",
+        "motor",
+        "airmode"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-B08",
+      "level": "B",
+      "title": "ESC 신호: PWM / OneShot125 타이머 설정",
+      "goal": "아날로그 계열 ESC 프로토콜의 펄스 폭 규격과 타이머 설정 계산을 익힌다",
+      "task": "가상 타이머(클럭·prescaler·ARR·CCR 레지스터 mock)에 대해 표준 PWM(1000–2000 µs, 50/400 Hz)과 OneShot125(125–250 µs) 출력용 레지스터 값을 계산하는 드라이버를 작성하고, throttle→CCR 변환 분해능을 표로 비교한다.",
+      "tags": [
+        "esc",
+        "pwm",
+        "oneshot",
+        "timer"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-B09",
+      "level": "B",
+      "title": "RC 입력 1: SBUS 프레임 디코딩",
+      "goal": "25바이트 SBUS 프레임(16채널 11비트, 플래그 바이트)을 비트 단위로 언패킹할 수 있다",
+      "task": "100000 baud 8E2 반전 UART로 들어오는 SBUS 바이트 스트림 파서를 작성해 0x0F 헤더 동기화, 16채널 11-bit 언패킹, frame-lost/failsafe 플래그 처리를 구현하고, 직접 만든 인코더로 생성한 테스트 벡터로 검증한다.",
+      "tags": [
+        "sbus",
+        "rc-input",
+        "parser"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-M01",
+      "level": "M",
+      "title": "DShot 프레임 인코딩과 CRC",
+      "goal": "DShot150/300/600의 16비트 프레임(11비트 throttle + telemetry bit + 4비트 CRC)과 DMA 비트 버퍼 생성을 이해한다",
+      "task": "DShot 패킷 인코더(CRC = (v ^ v>>4 ^ v>>8) & 0xF, 특수 명령 0–47)와 DShot600용 타이머 DMA duty 버퍼 생성기를 C로 작성하고, 디코더로 왕복 검증 + 비트 타이밍 표(T0H/T1H)를 출력한다.",
+      "tags": [
+        "dshot",
+        "esc",
+        "crc",
+        "dma"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-M02",
+      "level": "M",
+      "title": "Bidirectional DShot: eRPM 텔레메트리 디코딩",
+      "goal": "반전 CRC와 GCR 인코딩으로 돌아오는 eRPM 텔레메트리를 해석할 수 있다",
+      "task": "bidirectional DShot 응답의 21비트 GCR 스트림을 디코딩(GCR→nibble, 반전 CRC 검사, 지수/가수 형식의 period→eRPM→RPM 변환)하는 함수를 작성하고, 인코더로 만든 정상·비트오류 벡터로 검증한다.",
+      "tags": [
+        "dshot",
+        "telemetry",
+        "gcr",
+        "rpm"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-M03",
+      "level": "M",
+      "title": "RC 입력 2: CRSF/ELRS 프로토콜 파서",
+      "goal": "ELRS/Crossfire의 CRSF 프레임(sync, len, type, payload, CRC8 0xD5)과 RC/링크통계 패킷을 다룬다",
+      "task": "CRSF 스트림 파서를 상태 머신으로 구현해 RC_CHANNELS_PACKED(16×11bit)와 LINK_STATISTICS를 디코딩하고, CRC8(poly 0xD5) 오류·잘린 프레임·잡음 바이트 주입 테스트를 통과시킨다.",
+      "tags": [
+        "crsf",
+        "elrs",
+        "rc-input",
+        "crc8"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-M04",
+      "level": "M",
+      "title": "추력 선형화와 배터리 전압 보상",
+      "goal": "모터 명령과 실제 추력의 비선형성·전압 강하를 보상해 루프 게인을 일정하게 만든다",
+      "task": "추력∝RPM² 모델과 배터리 전압 처짐을 가진 모터 시뮬레이터에서 thrust linearization과 vbat 보상을 구현해 배터리 100%→30% 구간에서 rate 루프 응답(오버슈트·상승시간) 변화가 줄어드는지 확인한다(Mahony AHRS는 see:SENS-A01).",
+      "tags": [
+        "drone",
+        "thrust",
+        "mixer",
+        "see:SENS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-M05",
+      "level": "M",
+      "title": "Angle→Rate 캐스케이드 자세 제어",
+      "goal": "외부 attitude 루프가 내부 rate 루프에 setpoint를 주는 캐스케이드 구조와 대역폭 분리를 이해한다",
+      "task": "쿼터니언 자세 오차 → P 제어로 body rate setpoint → B06 rate PID로 이어지는 3축 캐스케이드를 구현하고, 3축 강체 + 모터 1차 지연 시뮬레이션에서 큰 각도 명령(45°) 응답과 내부/외부 루프 대역폭 비율 영향을 실험한다.",
+      "tags": [
+        "cascade",
+        "attitude-control",
+        "pid"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-M06",
+      "level": "M",
+      "title": "MAVLink v2 파서와 메시지 송신",
+      "goal": "MAVLink 프레임 구조, CRC-16/MCRF4XX + CRC_EXTRA, 시퀀스 손실 검출을 구현한다",
+      "task": "MAVLink v2 바이트 스트림 파서(STX 0xFD, 페이로드 끝 0 트렁케이션, CRC_EXTRA 포함 체크섬)를 작성해 HEARTBEAT·ATTITUDE를 송수신하고, pymavlink로 생성한 프레임과 상호 검증하며 seq 기반 패킷 손실률을 계산한다.",
+      "tags": [
+        "mavlink",
+        "telemetry",
+        "crc16",
+        "parser"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-M07",
+      "level": "M",
+      "title": "GPS 파싱: NMEA GGA/RMC + UBX NAV-PVT",
+      "goal": "텍스트(NMEA)와 바이너리(UBX) GPS 프로토콜을 모두 견고하게 파싱한다",
+      "task": "NMEA 체크섬(XOR) 검증 + GGA/RMC 필드 파서와 UBX 프레임 파서(0xB5 0x62, class/id/len, Fletcher-8 CK_A/CK_B)로 NAV-PVT를 디코딩하는 코드를 작성하고, 섞인 스트림·깨진 체크섬·fix 상실 로그로 테스트한다.",
+      "tags": [
+        "gps",
+        "nmea",
+        "ubx",
+        "parser"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-M08",
+      "level": "M",
+      "title": "비행 모드 상태 머신과 Arming 체크",
+      "goal": "Disarmed/Armed/Stabilize/AltHold/PosHold/RTL/Land 전이 규칙과 pre-arm 체크를 설계한다",
+      "task": "비행 모드 상태 머신을 테이블 기반으로 구현하고(모드별 진입 조건: GPS fix, 센서 healthy, throttle low 등), 허용/거부 전이를 모두 커버하는 단위 테스트와 전이 다이어그램을 작성한다.",
+      "tags": [
+        "state-machine",
+        "flight-modes",
+        "arming"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-M09",
+      "level": "M",
+      "title": "다층 페일세이프: RC 손실·배터리·GPS·지오펜스",
+      "goal": "실패 원인별 감지 조건, 히스테리시스, 에스컬레이션 정책(Hold→RTL→Land)을 설계한다",
+      "task": "RC 링크 손실 타임아웃, 배터리 저전압 2단계, GPS 손실, 지오펜스 위반을 감지해 우선순위에 따라 비행 모드를 강제 전환하는 failsafe 매니저를 구현하고, 동시 다발 실패 시나리오 테스트로 정책을 검증한다.",
+      "tags": [
+        "failsafe",
+        "safety",
+        "geofence"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-M10",
+      "level": "M",
+      "title": "블랙박스 로깅: 고속 링버퍼 + 예측/가변길이 인코딩",
+      "goal": "kHz 단위 비행 로그를 플래시 대역폭 안에 넣기 위한 압축·버퍼링 기법을 익힌다",
+      "task": "Betaflight blackbox처럼 이전값 예측 + zigzag varint로 gyro/PID/motor 프레임을 인코딩하고 링버퍼→(mock) 플래시 페이지 쓰기 경로를 구현해, 2 kHz 로깅 시 압축률·필요 쓰기 대역폭·버퍼 오버플로 여부를 측정한다.",
+      "tags": [
+        "logging",
+        "blackbox",
+        "compression",
+        "ring-buffer"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-A01",
+      "level": "A",
+      "title": "위치 제어: Position→Velocity→Thrust 벡터→자세",
+      "goal": "PX4 멀티콥터 위치 제어기의 계층과 추력 벡터→자세 setpoint 변환을 구현한다",
+      "task": "위치 P → 속도 PID → 가속도 setpoint → (중력 보상) 추력 벡터 → yaw를 고려한 자세 쿼터니언 + 집합 추력 변환을 구현하고, 기울기 제한·추력 포화 처리를 넣어 6-DOF 시뮬레이터에서 웨이포인트 추종을 검증한다.",
+      "tags": [
+        "position-control",
+        "px4",
+        "cascade"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-A02",
+      "level": "A",
+      "title": "고도 추정: 기압계 + 가속도 칼만 융합",
+      "goal": "노이즈 큰 기압계와 드리프트하는 가속도계를 3-state 칼만 필터로 융합한다",
+      "task": "상태 [고도, 수직속도, accel 바이어스] 칼만 필터를 구현해 합성 기압(노이즈·프롭워시 오프셋) + 수직가속도 데이터로 고도 추정 성능을 상보 필터와 비교하고, Q/R 튜닝 효과를 그래프로 보여준다.",
+      "tags": [
+        "kalman",
+        "altitude",
+        "baro",
+        "fusion"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-A03",
+      "level": "A",
+      "title": "Error-State EKF 자세 추정 (PX4 EKF2 개념)",
+      "goal": "쿼터니언 + gyro 바이어스를 오차 상태로 추정하는 ESKF의 예측/갱신 구조를 이해한다",
+      "task": "명목 쿼터니언 + 6차원 오차상태(자세오차, gyro 바이어스) ESKF를 구현해 accel/mag 측정 갱신, 오차 주입·리셋을 수행하고, Mahony 대비 바이어스 추정과 공분산 일관성(NEES)을 검증한다.",
+      "tags": [
+        "ekf",
+        "eskf",
+        "estimation",
+        "ekf2"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-A04",
+      "level": "A",
+      "title": "RPM 기반 동적 노치 필터",
+      "goal": "bidirectional DShot eRPM으로 모터 고조파를 추적하는 RPM filter를 구현한다",
+      "task": "M02에서 얻은 모터별 RPM으로 1·2·3차 고조파 노치 중심주파수를 매 루프 갱신하는 biquad 뱅크를 구현하고, 스로틀 스윕 시뮬레이션에서 고정 노치 대비 노이즈 감쇠·위상 지연·CPU 사이클을 비교한다.",
+      "tags": [
+        "rpm-filter",
+        "notch",
+        "dshot",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-A05",
+      "level": "A",
+      "title": "SITL 구축: 6-DOF 쿼드 동역학 + 펌웨어 루프",
+      "goal": "펌웨어 제어 코드를 수정 없이 PC 시뮬레이터와 lockstep으로 돌리는 SITL 구조를 만든다",
+      "task": "모터 추력/토크 모델·강체 6-DOF·센서 노이즈 모델을 가진 쿼드 시뮬레이터를 작성하고, 앞에서 만든 추정기·제어기·믹서를 HAL 인터페이스 뒤에 두어 lockstep으로 실행, 이륙→호버→웨이포인트→착륙 시나리오를 자동 테스트로 만든다.",
+      "tags": [
+        "sitl",
+        "simulation",
+        "6dof",
+        "see:SIM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-A06",
+      "level": "A",
+      "title": "Rate 루프 시스템 식별과 자동 튜닝",
+      "goal": "chirp/스텝 응답으로 플랜트를 식별하고 PID 게인을 계산하는 autotune 흐름을 구현한다",
+      "task": "SITL에서 rate 축에 chirp 입력을 주어 주파수 응답(이득·위상)을 추정하고, 1차+지연 모델 피팅 → 위상여유 목표 기반 PID 게인 산출 → 재검증까지 자동으로 수행하는 스크립트를 작성한다.",
+      "tags": [
+        "autotune",
+        "system-id",
+        "bode"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-A07",
+      "level": "A",
+      "title": "루프 지연·지터가 안정성에 미치는 영향 분석",
+      "goal": "스케줄러 오버런, 필터 지연, ESC 지연이 위상여유를 얼마나 깎는지 정량화한다",
+      "task": "SITL에 센서→모터 지연(0.5–5 ms)과 랜덤 지터를 주입하는 옵션을 추가하고, 지연별 스텝 응답·진동 발생 임계값을 측정해 '지연 1 ms = 몇 도 위상 손실' 표와 예산 설계를 정리한다.",
+      "tags": [
+        "latency",
+        "jitter",
+        "stability",
+        "timing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DRONE-A08",
+      "level": "A",
+      "title": "시스템 설계: FC + 컴패니언 컴퓨터 자율 드론",
+      "goal": "Anduril/Skydio 스타일로 실시간 FC와 고수준 자율(컴패니언) 컴퓨터를 나누는 아키텍처를 설계한다",
+      "task": "FC(MCU, 제어·페일세이프)와 컴패니언(Linux, 인지·계획) 사이 MAVLink 오프보드 인터페이스, 하트비트 감시, 링크 손실 시 FC 단독 안전 동작, 시간 동기를 포함한 설계 문서와 오프보드 setpoint 감시 코드 경로를 작성하고 트레이드오프를 정리한다.",
+      "tags": [
+        "system-design",
+        "offboard",
+        "mavlink",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

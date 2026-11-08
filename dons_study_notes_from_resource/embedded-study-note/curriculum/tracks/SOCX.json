@@ -1,0 +1,618 @@
+{
+  "id": "SOCX",
+  "intro": "현대 SoC와 AI 가속기의 성능·전력·정확성은 코어보다 그 사이를 잇는 인터커넥트(AXI/CHI, 크로스바, NoC), SoC 수준 일관성·SMMU·인터럽트 패브릭, 그리고 칩렛 간 D2D 링크에서 결정되는 경우가 많다. NVIDIA·AMD·Tenstorrent·Apple·Rivian 같은 회사의 실리콘/펌웨어 면접은 'outstanding이 몇 개 필요한가', '이 라우팅은 데드락이 없나', 'nested walk 비용은?' 같은 질문을 수치로 답하길 요구하므로, 이 트랙은 모든 개념을 Mac에서 돌아가는 C/Python 모델로 직접 계산·검증한다.",
+  "goals": [
+    "AXI4/ACE/CHI를 버스트·ID·순서·응답·속성 수준에서 설명하고 변환기·체커를 구현한다",
+    "크로스바와 NoC(토폴로지, 라우팅, wormhole/VC, 크레딧, 데드락)를 사이클 시뮬레이터로 분석한다",
+    "SoC 스케일 일관성(snoop filter, CHI 흐름)과 SMMUv3·GICv3 ITS 같은 시스템 IP를 모델로 검증한다",
+    "칩렛 수율·UCIe D2D·CXL 패브릭·HBM 인터리빙을 비용·대역폭·지연 수치로 판단한다",
+    "QoS·전력·행 디버그를 포함한 SoC 성능 모델로 설계 결정을 근거 있게 내린다"
+  ],
+  "prereq": [
+    "ARCH",
+    "MEM",
+    "PCIE",
+    "SIM"
+  ],
+  "refs": [
+    {
+      "title": "Arm AMBA AXI and ACE Protocol Specification (IHI 0022)",
+      "url": "https://developer.arm.com/documentation/ihi0022/latest"
+    },
+    {
+      "title": "Arm AMBA CHI Architecture Specification (IHI 0050)",
+      "url": "https://developer.arm.com/documentation/ihi0050/latest"
+    },
+    {
+      "title": "Arm AMBA Low Power Interface Specification: Q-Channel and P-Channel (IHI 0068)",
+      "url": "https://developer.arm.com/documentation/ihi0068/latest"
+    },
+    {
+      "title": "Arm GICv3 and GICv4 Architecture Specification (IHI 0069)",
+      "url": "https://developer.arm.com/documentation/ihi0069/latest"
+    },
+    {
+      "title": "Arm SMMUv3 Architecture Specification (IHI 0070)",
+      "url": "https://developer.arm.com/documentation/ihi0070/latest"
+    },
+    {
+      "title": "Dally & Towles, Principles and Practices of Interconnection Networks"
+    },
+    {
+      "title": "Jerger, Krishna, Peh, On-Chip Networks (Synthesis Lectures on Computer Architecture)"
+    },
+    {
+      "title": "BookSim 2.0 interconnection network simulator",
+      "url": "https://github.com/booksim/booksim2"
+    },
+    {
+      "title": "UCIe Consortium Specifications",
+      "url": "https://www.uciexpress.org/specifications"
+    },
+    {
+      "title": "Compute Express Link (CXL) Consortium",
+      "url": "https://computeexpresslink.org/"
+    },
+    {
+      "title": "JEDEC JESD238 High Bandwidth Memory (HBM3)"
+    }
+  ],
+  "items": [
+    {
+      "id": "SOCX-B01",
+      "level": "B",
+      "title": "SoC 인터커넥트 지도: Shared Bus vs Crossbar vs NoC",
+      "goal": "마스터 수가 늘 때 버스·크로스바·링·메시가 면적·대역폭·지연에서 어떻게 갈리는지 수치로 설명한다.",
+      "task": "N=4–64 마스터/슬레이브에 대해 shared bus·full crossbar·ring·2D mesh의 crosspoint/링크 수, bisection 대역폭, 평균 홉 수를 계산하는 Python 도구를 작성하고, 평균 홉은 그래프 BFS 결과와 대조해 '몇 개 마스터부터 NoC가 이득인가'를 표로 정리한다(버스 기초는 see:ARCH-M13).",
+      "tags": [
+        "interconnect",
+        "topology",
+        "crossbar",
+        "noc",
+        "see:ARCH"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B02",
+      "level": "B",
+      "title": "AXI4 버스트 주소 계산: AxLEN/AxSIZE/AxBURST·WSTRB",
+      "goal": "INCR/WRAP/FIXED 버스트의 beat별 주소, 4KB 경계 규칙, narrow/unaligned 전송의 바이트 레인을 정확히 계산한다.",
+      "task": "AW/AR 속성(addr, len, size, burst)과 데이터 버스 폭을 받아 beat별 주소·활성 바이트 레인·WSTRB를 출력하는 C 함수와 4KB 경계·WRAP 길이(2/4/8/16) 위반 검사기를 작성하고, 스펙 예제 표와 무작위 속성 1e5개 참조 모델 비교로 검증한다(채널 핸드셰이크는 see:ARCH-M14).",
+      "tags": [
+        "axi4",
+        "burst",
+        "wstrb",
+        "4kb-boundary",
+        "see:ARCH"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B03",
+      "level": "B",
+      "title": "AXI 응답과 배타적 접근: EXOKAY와 Global Exclusive Monitor",
+      "goal": "OKAY/EXOKAY/SLVERR/DECERR 의미와 인터커넥트 수준 exclusive monitor 동작을 설명한다.",
+      "task": "AxLOCK 배타 읽기/쓰기를 처리하는 슬레이브 측 global exclusive monitor(마스터 ID별 예약 주소·크기)를 C로 구현하고, 두 마스터가 같은 락 변수를 경쟁하는 인터리빙 시나리오를 전수 열거해 EXOKAY/OKAY 결과와 락 상호배제가 지켜짐을 검증한다(코어 로컬 모니터는 see:ARM-M11).",
+      "tags": [
+        "axi4",
+        "exclusive-access",
+        "exokay",
+        "atomics",
+        "see:ARM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B04",
+      "level": "B",
+      "title": "메모리 속성과 Early Write Response: AxCACHE·AxPROT",
+      "goal": "Bufferable/Modifiable 속성이 인터커넥트의 조기 BRESP와 MMIO 순서 버그로 이어지는 과정을 설명한다.",
+      "task": "쓰기 버퍼를 가진 인터커넥트 모델(Bufferable이면 조기 BRESP, Device-nGnRE면 최종 슬레이브 응답)을 C로 만들어 '인터럽트 클리어 레지스터에 쓴 직후 IRQ unmask → 중복 인터럽트' 버그를 재현하고, read-back·DSB 위치에 따른 수정 효과를 사이클 로그로 비교한다.",
+      "tags": [
+        "axcache",
+        "axprot",
+        "write-buffer",
+        "mmio-ordering",
+        "see:ARM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B05",
+      "level": "B",
+      "title": "Outstanding 트랜잭션과 Little's Law 대역폭",
+      "goal": "지연이 큰 메모리 경로에서 목표 대역폭에 필요한 outstanding 수와 ID/버퍼 크기를 계산한다.",
+      "task": "대역폭 = outstanding × 바이트/트랜잭션 ÷ 왕복지연 모델로 'DDR 지연 150ns, 64B 버스트, 25.6GB/s 목표 → 필요 outstanding' 같은 문제를 푸는 계산기를 작성하고, outstanding 상한을 가진 마스터·고정지연 슬레이브 DES로 달성 대역폭 포화 곡선이 모델과 맞는지 확인한다(see:GPGPU-B05).",
+      "tags": [
+        "outstanding",
+        "littles-law",
+        "bandwidth",
+        "latency",
+        "see:GPGPU"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B06",
+      "level": "B",
+      "title": "버스 폭·프로토콜 변환기: AXI4 128b → AXI4-Lite/APB 32b",
+      "goal": "Downsizer/upsizer와 프로토콜 브리지가 버스트를 어떻게 쪼개고 WSTRB·응답을 재조립하는지 구현 수준으로 안다.",
+      "task": "128비트 AXI4 INCR 버스트를 32비트 AXI4-Lite 단일 전송 열로 분할하고 응답(최악 RESP 병합)을 재조립하는 width/protocol converter를 C로 구현해, 임의 size/len/주소 정렬 1e5개 요청에 대해 메모리 결과와 응답이 이상적 모델과 일치함을 검증하고 변환 후 처리량 손실을 계산한다.",
+      "tags": [
+        "width-converter",
+        "axi4-lite",
+        "apb",
+        "bridge"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B07",
+      "level": "B",
+      "title": "크로스바 주소 디코드와 TrustZone 보안 필터",
+      "goal": "다중 마스터 크로스바의 라우팅 테이블, DECERR 기본 슬레이브, AxPROT 기반 보안 영역 검사를 구현한다.",
+      "task": "마스터별 가시 주소 맵(부트 alias 리맵 포함)과 TZASC/TZC-400 스타일 영역(base/size/secure·non-secure R/W 권한) 필터를 가진 크로스바 디코더를 C로 작성하고, NS 마스터의 secure 영역 접근 → DECERR/인터럽트, 영역 겹침 시 우선순위 규칙을 테스트로 검증한다(단일 디코더는 see:ARCH-B11).",
+      "tags": [
+        "crossbar",
+        "address-decode",
+        "trustzone",
+        "tzasc",
+        "see:ARCH",
+        "see:SEC"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B08",
+      "level": "B",
+      "title": "NoC 기초 지표: Flit·Phit와 Zero-load 지연",
+      "goal": "패킷/플릿/phit 단위와 토폴로지별 직경·평균 홉·bisection으로 무부하 지연과 포화 처리량 상한을 계산한다.",
+      "task": "k×k mesh/torus, ring, fat-tree에 대해 직경·평균 홉·bisection 링크 수와 T0 = H·t_router + L/b(직렬화) 무부하 지연, uniform 트래픽 이론 포화 주입률을 계산하는 Python 도구를 만들고, 64B 캐시라인 패킷의 플릿 폭(64/128/256b)별 지연을 비교한다.",
+      "tags": [
+        "noc",
+        "flit",
+        "zero-load-latency",
+        "bisection"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B09",
+      "level": "B",
+      "title": "2D 메시 XY 라우팅 시뮬레이터",
+      "goal": "차원순서(XY) 라우팅을 구현하고 주입률-지연 곡선과 포화점을 직접 관찰한다.",
+      "task": "4×4/8×8 메시에서 XY 라우팅, 라우터 파이프라인 지연, 링크당 1플릿/사이클 제약을 가진 사이클 단위 C 시뮬레이터를 작성해 uniform·transpose·hotspot 트래픽의 주입률별 평균 지연 곡선을 그리고, 포화점이 B08의 bisection 상한과 어떻게 비교되는지 설명한다(멀티코어 NPU 매핑은 see:NPU-A05).",
+      "tags": [
+        "noc",
+        "xy-routing",
+        "mesh",
+        "simulation",
+        "see:NPU"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B10",
+      "level": "B",
+      "title": "GICv3 기초: INTID 분류와 Affinity 라우팅",
+      "goal": "SGI/PPI/SPI/LPI 범위, Distributor/Redistributor/CPU interface 역할, 그룹·우선순위·affinity 라우팅을 설명한다.",
+      "task": "GICD_ISENABLER/IPRIORITYR/IROUTER, GICR, ICC_IAR1/EOIR1 레지스터를 가진 GICv3 C 모델을 만들어 SPI의 affinity(Aff3.Aff2.Aff1.Aff0) 라우팅과 1-of-N 라우팅, running priority 기반 선점을 시뮬레이션하고 핸들러 순서를 기대 로그와 비교한다(NVIC형 모델은 see:ARCH-M09, QEMU GIC 설정은 see:ARM-A02).",
+      "tags": [
+        "gicv3",
+        "interrupt-controller",
+        "affinity-routing",
+        "see:ARCH",
+        "see:ARM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B11",
+      "level": "B",
+      "title": "저전력 인터페이스: AMBA Q-channel·P-channel 핸드셰이크",
+      "goal": "인터커넥트·IP의 클럭/파워 게이팅을 안전하게 하는 Q-channel(QREQn/QACCEPTn/QDENY/QACTIVE) 프로토콜을 구현한다.",
+      "task": "Q-channel 컨트롤러(클럭 컨트롤러 측)와 디바이스 측 FSM을 C로 구현해 outstanding 트랜잭션이 있을 때 QDENY, 유휴 시 QACCEPT 후 게이팅되는 흐름을 이벤트 시뮬레이션하고, 금지된 신호 전이를 잡는 프로토콜 체커로 결함 주입 테스트를 한다(도메인 시퀀싱은 see:ARCH-A09).",
+      "tags": [
+        "q-channel",
+        "p-channel",
+        "low-power",
+        "clock-gating",
+        "see:ARCH"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-B12",
+      "level": "B",
+      "title": "칩렛 경제학: 수율 모델과 Good-die 비용",
+      "goal": "다이 면적·결함 밀도로 수율을 계산하고 모놀리식 vs 칩렛 분할의 비용·D2D 오버헤드 trade-off를 정량화한다.",
+      "task": "Poisson/Murphy/negative-binomial 수율 모델, 웨이퍼당 다이 수, D2D PHY 면적 오버헤드, 패키징·KGD 테스트 비용을 넣은 Python 비용 모델을 작성해 800mm² 모놀리식 vs 4×200mm² 칩렛의 good-die당 비용을 비교하고, 결함 밀도별 손익분기 면적을 구한다.",
+      "tags": [
+        "chiplet",
+        "yield",
+        "cost-model",
+        "kgd"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M01",
+      "level": "M",
+      "title": "크로스바 HOL 블로킹과 VOQ",
+      "goal": "입력 FIFO 크로스바의 head-of-line 블로킹 포화(≈58.6%)를 재현하고 VOQ+매칭 알고리즘으로 개선한다.",
+      "task": "N×N 크로스바 사이클 시뮬레이터에서 단일 입력 FIFO와 VOQ(virtual output queue) + iSLIP 매칭을 구현해 uniform 트래픽 처리량을 측정하고, N이 커질 때 FIFO 포화율이 2−√2에 수렴함을 확인한다(중재기 자체는 see:ARCH-A10, see:SIM-M05).",
+      "tags": [
+        "crossbar",
+        "hol-blocking",
+        "voq",
+        "islip",
+        "see:ARCH",
+        "see:SIM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M02",
+      "level": "M",
+      "title": "ID 기반 순서와 Reorder Buffer 성능",
+      "goal": "같은 ID 내 순서 보장이 지연이 다른 슬레이브(DDR vs SRAM) 혼합 시 처리량을 어떻게 깎는지 분석한다.",
+      "task": "지연이 다른 두 슬레이브와 ID 수·outstanding 상한을 조절할 수 있는 인터커넥트 모델을 C로 만들어, 단일 ID·ID per slave·ID per transaction 정책별 처리량과 마스터 측 reorder buffer 크기 요구를 측정하고, 인터커넥트가 ID 재매핑으로 순서를 보존하는 방법을 구현한다.",
+      "tags": [
+        "axi-id",
+        "ordering",
+        "reorder-buffer",
+        "interconnect"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M03",
+      "level": "M",
+      "title": "인터커넥트 QoS: AxQOS와 대역폭/Outstanding 레귤레이터",
+      "goal": "디스플레이 같은 실시간 마스터를 대량 DMA로부터 보호하는 QoS 메커니즘을 설계·검증한다.",
+      "task": "디스플레이(주기적, 언더런 임계)·CPU(지연 민감)·DMA/NPU(대량) 마스터가 DDR 포트를 공유하는 DES에 AxQOS 우선순위 중재, 토큰 버킷 대역폭 레귤레이터, outstanding 제한을 각각 추가해 디스플레이 FIFO 언더런 횟수·CPU p99 지연·총 처리량을 비교한다(see:DISP-A03).",
+      "tags": [
+        "qos",
+        "axqos",
+        "regulator",
+        "token-bucket",
+        "see:DISP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M04",
+      "level": "M",
+      "title": "Wormhole 라우터와 Credit 기반 흐름 제어",
+      "goal": "가상 채널(VC) 라우터 파이프라인과 크레딧 왕복 지연에 따른 버퍼 깊이 요구를 이해한다.",
+      "task": "RC→VA→SA→ST 파이프라인, VC당 플릿 버퍼, 크레딧 반환 지연을 가진 wormhole 라우터를 B09 시뮬레이터에 넣고 버퍼 깊이 < 크레딧 RTT일 때 링크 활용률 저하를 측정해 '필요 버퍼 = RTT × 링크 대역폭' 식을 검증하며, VC 수 1/2/4별 포화 처리량을 비교한다(PCIe 크레딧은 see:PCIE-M11).",
+      "tags": [
+        "noc",
+        "wormhole",
+        "virtual-channel",
+        "credit-flow-control",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M05",
+      "level": "M",
+      "title": "NoC 라우팅 데드락: 채널 의존 그래프",
+      "goal": "Dally–Seitz 채널 의존 그래프(CDG)로 라우팅 함수의 데드락 자유성을 증명·반증한다.",
+      "task": "라우팅 함수(XY, 무제한 최소 경로, torus 기본 DOR)를 입력받아 CDG를 생성하고 사이클을 DFS로 찾는 Python 도구를 작성해 메시 XY는 비순환, torus 랩어라운드는 순환임을 보이고, dateline VC 2개 분리로 사이클이 사라짐을 확인한 뒤 시뮬레이터에서 실제 데드락을 재현·해소한다.",
+      "tags": [
+        "noc",
+        "deadlock",
+        "channel-dependency-graph",
+        "torus"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M06",
+      "level": "M",
+      "title": "적응 라우팅: Turn Model과 Odd-Even",
+      "goal": "데드락 없는 부분 적응 라우팅(west-first, odd-even)이 비균일 트래픽에서 XY보다 나은 이유를 측정한다.",
+      "task": "west-first·north-last·odd-even 라우팅을 시뮬레이터에 구현하고 M05 CDG 검사기로 데드락 자유성을 먼저 확인한 다음, transpose·bit-complement·hotspot 트래픽에서 XY 대비 포화 처리량과 평균 지연을 비교해 적응성의 이득과 순서 역전(out-of-order 도착) 비용을 정리한다.",
+      "tags": [
+        "noc",
+        "adaptive-routing",
+        "turn-model",
+        "odd-even"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M07",
+      "level": "M",
+      "title": "프로토콜 데드락과 메시지 클래스 분리",
+      "goal": "요청·응답·스누프가 같은 네트워크를 공유할 때 생기는 메시지 의존 데드락과 virtual network 분리 해법을 이해한다.",
+      "task": "요청을 받으면 응답을 보내야 소비가 끝나는 홈 노드 모델을 단일 VC 메시에 올려 버퍼 포화 시 프로토콜 데드락을 재현하고, REQ/RSP/SNP/DAT virtual network 분리(CHI 채널 구조와 대응)와 응답 예약 버퍼로 해소됨을 검증한다.",
+      "tags": [
+        "noc",
+        "protocol-deadlock",
+        "virtual-network",
+        "message-class"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M08",
+      "level": "M",
+      "title": "NIU: AXI 트랜잭션 → NoC 패킷화",
+      "goal": "Network Interface Unit이 AXI 버스트를 패킷으로 바꾸고 응답을 재조립하는 과정과 오버헤드를 구현한다.",
+      "task": "AXI AR/AW+W를 헤더 플릿(목적지, 트랜잭션 태그, 속성)+데이터 플릿으로 패킷화하고 응답 패킷을 AXI ID 순서 규칙에 맞게 재정렬하는 NIU 모델을 C로 작성해, 버스트 길이·플릿 폭별 헤더 오버헤드와 실효 대역폭을 계산하고 무작위 트래픽에서 순서 규칙 체커(see:ARCH-M14)를 통과시킨다.",
+      "tags": [
+        "niu",
+        "packetization",
+        "axi-to-noc",
+        "see:ARCH"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M09",
+      "level": "M",
+      "title": "ACE·ACE-Lite: 하드웨어 IO 일관성",
+      "goal": "스누프 채널(AC/CR/CD)과 ACE-Lite IO-coherent DMA가 소프트웨어 캐시 유지보수를 어떻게 대체하는지 설명한다.",
+      "task": "CPU 캐시 2개(MESI, see:ARCH-A04) + CCI 스타일 인터커넥트 + ACE-Lite DMA 마스터 모델을 만들어 DMA ReadOnce/WriteUnique가 CPU 캐시를 스누프하는 흐름을 구현하고, 비일관 DMA + clean/invalidate(see:ARCH-M12) 방식과 버퍼 크기별 지연·스누프 트래픽을 비교한다.",
+      "tags": [
+        "ace",
+        "ace-lite",
+        "io-coherency",
+        "snoop",
+        "see:ARCH"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M10",
+      "level": "M",
+      "title": "SoC 스케일 Snoop Filter: 크기와 Back-invalidation",
+      "goal": "포함형 snoop filter의 용량·연관도 부족이 back-invalidation으로 성능을 떨어뜨리는 메커니즘을 정량화한다.",
+      "task": "코어별 private 캐시 크기 합 대비 snoop filter 엔트리 수(0.5×–2×)와 연관도를 바꾸며 SF 축출 시 back-invalidation을 수행하는 모델을 트레이스 구동으로 작성해, 브로드캐스트 스누프 대비 스누프 메시지 감소와 back-invalidation으로 인한 추가 캐시 미스를 측정한다(디렉터리 기본은 see:MEM-M05).",
+      "tags": [
+        "snoop-filter",
+        "coherence",
+        "back-invalidation",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M11",
+      "level": "M",
+      "title": "AMBA CHI 트랜잭션 흐름: RN-F·HN-F·SN-F",
+      "goal": "CHI의 노드 유형, ReadShared/ReadUnique/CleanUnique/WriteBackFull 흐름, DCT/DMT와 retry(PCrdGrant)를 메시지 단위로 설명한다.",
+      "task": "RN-F 3개·HN-F(SF 포함)·SN-F로 구성된 CHI 메시지 시퀀스 모델을 Python으로 작성해 주요 트랜잭션의 메시지 순서와 최종 캐시 상태(UC/UD/SC/SD/I)를 검증하고, DCT/DMT 사용 여부에 따른 홉 수·지연과 HN 버퍼 부족 시 RetryAck→PCrdGrant 재시도 흐름을 재현한다.",
+      "tags": [
+        "chi",
+        "coherence",
+        "home-node",
+        "dct",
+        "retry"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M12",
+      "level": "M",
+      "title": "SMMUv3: StreamID → STE → CD와 2단계 변환",
+      "goal": "SMMUv3의 테이블 구조와 stage1+stage2 중첩 변환 워크 비용을 계산·구현한다.",
+      "task": "Stream Table(2-level)·Context Descriptor·stage1/stage2 4-level 페이지 테이블을 가진 SMMUv3 C 모델을 작성해 nested walk 메모리 접근 수가 최악 (4+1)×(4+1)−1=24임을 카운트로 확인하고, TLB/walk cache 유무별 평균 변환 지연과 fault 시 Event Queue 레코드 생성을 검증한다(IOMMU 기초는 see:PCIE-M15, 패스스루는 see:VIRT).",
+      "tags": [
+        "smmuv3",
+        "iommu",
+        "nested-translation",
+        "streamid",
+        "see:PCIE",
+        "see:VIRT"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-M13",
+      "level": "M",
+      "title": "GICv3 ITS: MSI → LPI 변환",
+      "goal": "ITS 명령 큐와 Device/ITT/Collection 테이블로 MSI 쓰기가 LPI로 변환·라우팅되는 경로를 구현한다.",
+      "task": "GITS_CBASER 명령 큐(MAPD/MAPC/MAPTI/INV/SYNC/MOVI)와 Device Table→ITT→Collection→Redistributor 변환, LPI pending/config 테이블을 가진 ITS C 모델을 작성해 GITS_TRANSLATER에 (DeviceID, EventID) 쓰기 시 올바른 CPU에 LPI가 뜨는지, MOVI 후 인터럽트 이동과 INV 누락 버그를 테스트한다(PCIe MSI-X는 see:PCIE-M10).",
+      "tags": [
+        "gicv3",
+        "its",
+        "lpi",
+        "msi",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-A01",
+      "level": "A",
+      "title": "UCIe Die-to-Die 링크 계산: 대역폭 밀도·에너지·지연",
+      "goal": "UCIe standard/advanced 패키지의 레인 수·데이터율·범프 피치로 shoreline 대역폭 밀도와 pJ/bit 전력을 계산한다.",
+      "task": "UCIe 모듈(x16/x64 레인, 4–32 GT/s, 범프 피치) 파라미터로 GB/s/mm shoreline·GB/s/mm² 밀도, 링크 전력(pJ/bit × BW), FDI/RDI 계층 지연 합을 계산하는 Python 모델을 작성해 '다이 가장자리 10mm로 2TB/s 양방향이 가능한가?' 같은 설계 질문에 답하고, PCIe/CXL PHY 기반 연결과 비교한다(see:PCIE-B02).",
+      "tags": [
+        "ucie",
+        "die-to-die",
+        "chiplet",
+        "bandwidth-density",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-A02",
+      "level": "A",
+      "title": "D2D 링크 계층: Flit CRC와 Replay 시뮬레이션",
+      "goal": "BER과 재전송 버퍼 크기가 die-to-die 실효 대역폭·꼬리 지연에 미치는 영향을 시뮬레이션으로 확인한다.",
+      "task": "256B flit + CRC 생성/검사, 시퀀스 번호, go-back-N replay 버퍼를 가진 D2D 링크 계층을 C로 구현해 BER 1e-15–1e-6 비트 오류 주입 하에서 실효 대역폭과 p99.99 지연을 측정하고, replay 버퍼 크기 < RTT×BW일 때의 처리량 손실을 확인한다(PCIe ACK/NAK은 see:PCIE-M11).",
+      "tags": [
+        "ucie",
+        "flit",
+        "crc",
+        "replay",
+        "link-layer",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-A03",
+      "level": "A",
+      "title": "멀티 다이 SoC 파티셔닝과 NUMA형 지연 모델",
+      "goal": "컴퓨트 칩렛 + IO/메모리 다이 구성에서 다이 경계 통과 트래픽이 지연·대역폭에 주는 영향을 정량화한다.",
+      "task": "컴퓨트 다이 4개 + IO 다이(메모리 컨트롤러) 구성의 다이 내 NoC·D2D 링크·DDR/HBM 경로 모델을 C로 만들어 주소 인터리빙(다이 로컬 vs 전역 interleave) 정책별 평균/꼬리 지연과 D2D 링크 포화 지점을 측정하고, 같은 워크로드의 모놀리식 대비 성능 손실을 보고한다(OS 측 NUMA는 see:MEM-M09).",
+      "tags": [
+        "chiplet",
+        "partitioning",
+        "numa",
+        "d2d",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-A04",
+      "level": "A",
+      "title": "다이 간 일관성: 홈 노드 배치와 원격 스누프 비용",
+      "goal": "칩렛 경계를 넘는 일관성 트랜잭션의 홉·지연과 홈 노드/스누프 필터 배치 전략을 비교한다.",
+      "task": "M11 CHI 모델을 두 다이로 확장(CHI C2C 개념)해 주소 해시 기반 홈 노드 분산, 다이별 로컬 홈 + 원격 SF 캐싱 두 방식에서 공유 데이터 생산자-소비자 트레이스의 원격 메시지 수·평균 미스 지연을 측정하고, 프로그래머에게 보이는 '다이 친화 배치' 지침을 도출한다.",
+      "tags": [
+        "coherence",
+        "chiplet",
+        "chi",
+        "home-node",
+        "multi-die"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-A05",
+      "level": "A",
+      "title": "HBM 채널·Pseudo-channel 인터리빙과 AI 텐서 접근",
+      "goal": "HBM3 스택/채널/pseudo-channel/bank 매핑이 텐서 stride 접근의 채널 불균형을 어떻게 만드는지 분석한다.",
+      "task": "HBM3 스택 N개 × 16채널 × 2 pseudo-channel 주소 매핑(선형/XOR 해시)을 가진 컨트롤러 측 모델에 GEMM 타일·KV 캐시 접근 트레이스를 넣어 채널별 요청 분포·뱅크 충돌·달성 대역폭을 측정하고, 해시 매핑으로 불균형을 해소함을 보인다(대역폭 계산은 see:MEM-A03, 매핑 기초는 see:MEM-M02).",
+      "tags": [
+        "hbm",
+        "pseudo-channel",
+        "address-interleaving",
+        "ai-accelerator",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-A06",
+      "level": "A",
+      "title": "CXL 패브릭: 스위치·메모리 풀링과 티어링",
+      "goal": "CXL 2.0/3.x 스위치 기반 메모리 풀링·공유와 지연 티어에 따른 페이지 배치 정책을 모델링한다.",
+      "task": "호스트 4개·CXL 스위치·Type 3 MLD 메모리 장치의 용량 할당(논리 장치 바인딩) 모델과, 로컬 DDR(~100ns) vs CXL(~250ns) 2티어 메모리에서 접근 빈도 기반 hot-page promotion/demotion 정책을 Python으로 시뮬레이션해 티어링 정책별 평균 메모리 지연과 마이그레이션 트래픽을 비교한다(CXL 기초·HDM은 see:PCIE-A10).",
+      "tags": [
+        "cxl",
+        "memory-pooling",
+        "tiering",
+        "cxl-switch",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-A07",
+      "level": "A",
+      "title": "SoC 유스케이스 대역폭 예산 모델",
+      "goal": "카메라·디스플레이·NPU·CPU·GPU 동시 시나리오가 DDR/NoC 대역폭과 지연 요구를 만족하는지 판정한다.",
+      "task": "4K60 녹화+프리뷰+NPU 검출 같은 동시 유스케이스의 마스터별 대역폭·지연 요구를 스프레드시트형 Python 예산 모델로 산출하고, 같은 트래픽을 M03 QoS DES에 넣어 평균 대역폭은 맞지만 버스트 겹침으로 실시간 마스터가 실패하는 경우를 찾아 버퍼 크기·QoS 설정을 권고한다(see:SIM-A06, see:CAM).",
+      "tags": [
+        "performance-model",
+        "bandwidth-budget",
+        "use-case",
+        "qos",
+        "see:SIM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-A08",
+      "level": "A",
+      "title": "인터커넥트 전력: 비트당 에너지와 NoC DVFS",
+      "goal": "홉당/비트당 에너지와 NoC 주파수 스케일링이 전력과 지연에 주는 영향을 정량화한다.",
+      "task": "링크·라우터·SRAM 버퍼의 pJ/bit/hop 파라미터와 NoC 전압-주파수 테이블을 가진 전력 모델을 B09 시뮬레이터에 붙여, 트래픽 부하에 따른 NoC DVFS·유휴 링크 클럭 게이팅(B11 Q-channel) 정책별 에너지와 지연 증가를 비교하고, 데이터 이동 에너지가 연산 에너지를 넘는 지점을 계산한다(see:NPU-A07).",
+      "tags": [
+        "noc",
+        "power",
+        "dvfs",
+        "energy-per-bit",
+        "see:NPU"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-A09",
+      "level": "A",
+      "title": "인터커넥트 행(hang) 디버그와 성능 모니터",
+      "goal": "실리콘에서 버스 행·타임아웃을 outstanding 테이블과 PMU 카운터로 원인 분석하는 방법을 익힌다.",
+      "task": "타임아웃 감지기·트랜잭션 트래커·지연 히스토그램/대역폭 PMU를 가진 인터커넥트 모델에 결함(슬레이브 무응답, 파워 게이팅된 도메인 접근, 크레딧 누수)을 주입하고, 행 시점의 outstanding 테이블 덤프만 보고 원인 블록을 지목하는 분석 스크립트를 작성한다(트리아지 일반론은 see:SIV-M10).",
+      "tags": [
+        "debug",
+        "hang",
+        "pmu",
+        "timeout",
+        "silicon-validation",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SOCX-A10",
+      "level": "A",
+      "title": "종합 설계: AI 가속기 칩렛 SoC 인터커넥트 아키텍처",
+      "goal": "토폴로지·일관성 도메인·D2D·HBM·SMMU·인터럽트 배치를 수치 근거로 결정하는 설계 리뷰를 수행한다.",
+      "task": "컴퓨트 칩렛 4개 + IO 다이 + HBM3 스택 4개 구성의 AI SoC에 대해 NoC 토폴로지, 일관성 도메인 경계, UCIe 링크 수, SMMU/ITS 위치, QoS 클래스를 결정하는 설계 문서를 작성하고, 앞선 B08·A01·A03·A05·A07 모델로 각 결정의 대역폭·지연 근거를 표로 제시한다(엣지 SoC 버전은 see:ARCH-A12).",
+      "tags": [
+        "design-review",
+        "chiplet",
+        "soc-architecture",
+        "interconnect",
+        "see:ARCH"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

@@ -1,0 +1,512 @@
+{
+  "id": "PLAT",
+  "intro": "플랫폼 소프트웨어는 SoC가 켜지는 순간부터 OS가 안정적으로 돌기까지의 '바닥층'(부트 체인, TF-A/PSCI, UEFI/ACPI, 전원·클럭, 코어 간 IPC, 업데이트·텔레메트리)을 책임진다. 실리콘·AI 가속기·로봇 SoC 회사의 플랫폼/펌웨어 팀 면접에서 자주 묻는 설계 감각을 직접 구현하며 익힌다.",
+  "goals": [
+    "BootROM부터 OS까지 부트 체인과 EL/보안 상태 전환을 설명·모델링한다",
+    "PSCI·SCMI·UEFI 같은 펌웨어 표준 인터페이스를 구현 수준으로 이해한다",
+    "클럭·리셋·핀먹스·PMIC와 DVFS/suspend/thermal 전원 관리를 설계한다",
+    "메일박스·vring 기반 코어 간 통신과 remoteproc 구조를 구현한다",
+    "A/B 업데이트, 크래시 덤프, 텔레메트리, 프로비저닝 같은 제품 수명주기 기능을 만든다"
+  ],
+  "prereq": [
+    "C",
+    "ARM",
+    "BM",
+    "ELX"
+  ],
+  "refs": [
+    {
+      "title": "Trusted Firmware-A documentation",
+      "url": "https://trustedfirmware-a.readthedocs.io/"
+    },
+    {
+      "title": "Arm Power State Coordination Interface (PSCI), DEN0022",
+      "url": "https://developer.arm.com/documentation/den0022/latest"
+    },
+    {
+      "title": "Arm System Control and Management Interface (SCMI), DEN0056",
+      "url": "https://developer.arm.com/documentation/den0056/latest"
+    },
+    {
+      "title": "UEFI & ACPI Specifications",
+      "url": "https://uefi.org/specifications"
+    },
+    {
+      "title": "Linux kernel: Power Management docs",
+      "url": "https://docs.kernel.org/power/index.html"
+    },
+    {
+      "title": "Linux kernel: Common Clock Framework",
+      "url": "https://docs.kernel.org/driver-api/clk.html"
+    },
+    {
+      "title": "Linux kernel: Remote Processor Framework",
+      "url": "https://docs.kernel.org/staging/remoteproc.html"
+    },
+    {
+      "title": "Interrupt blog by Memfault (firmware logging, coredumps, OTA)",
+      "url": "https://interrupt.memfault.com/"
+    }
+  ],
+  "items": [
+    {
+      "id": "PLAT-B01",
+      "level": "B",
+      "title": "SoC 부트 체인 지도: BootROM→BL1/BL2→BL31→BL33",
+      "goal": "각 부트 스테이지의 실행 위치(ROM/SRAM/DRAM), 권한 레벨, 넘겨주는 정보를 설명할 수 있다.",
+      "task": "가상 SoC 부트 체인 시뮬레이터(C)를 작성: 각 스테이지가 다음 이미지 헤더(magic, load_addr, size, entry, CRC32)를 검사해 '로드 후 점프'하고 hand-off 구조체(메모리 맵, 부트 소스)를 전달하며, 손상 이미지 주입 시 백업 슬롯으로 fallback하는지 테스트한다.",
+      "tags": [
+        "boot-chain",
+        "tf-a",
+        "bootrom",
+        "see:SEC"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-B02",
+      "level": "B",
+      "title": "부트 이미지 레이아웃: 파티션·헤더·정렬",
+      "goal": "부트 미디어(eMMC/QSPI/NVMe)에 이미지가 어떻게 배치되고 ROM이 어떻게 찾는지 이해한다.",
+      "task": "bootloader+kernel+dtb를 정렬된 오프셋으로 패킹하고 목차 헤더(TOC: 이름, 오프셋, 크기, 해시)를 생성하는 Python 이미지 패커와 C 언패커를 작성해 왕복(round-trip) 검증 및 오정렬/겹침 검출 테스트를 한다.",
+      "tags": [
+        "image-layout",
+        "fip",
+        "partition"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-B03",
+      "level": "B",
+      "title": "ARMv8 Exception Level·보안 상태와 SMC/ERET",
+      "goal": "펌웨어·하이퍼바이저·OS가 어느 EL에서 돌고 어떻게 전환되는지 설명한다.",
+      "task": "EL/보안 상태 전이를 C 상태머신으로 모델링하고 SMC 호출 시 EL3 디스패처가 NS 컨텍스트(x0–x7, ELR, SPSR)를 저장→서비스→복원하는 흐름을 구현, 잘못된 전이(EL0에서 SMC 등)가 거부되는지 테스트한다.",
+      "tags": [
+        "exception-level",
+        "smc",
+        "trustzone",
+        "see:ARM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-B04",
+      "level": "B",
+      "title": "PSCI 인터페이스: CPU_ON/OFF, SYSTEM_RESET",
+      "goal": "OS가 펌웨어에 CPU 전원 제어를 요청하는 표준 ABI를 이해한다.",
+      "task": "SMCCC function ID 인코딩(fast/yielding, 32/64, owner)을 디코드하고 PSCI 디스패처를 구현: 코어별 상태(ON/OFF/ON_PENDING), CPU_ON 중복 호출 시 ALREADY_ON, 잘못된 MPIDR 시 INVALID_PARAMS 반환을 단위 테스트로 검증한다.",
+      "tags": [
+        "psci",
+        "smccc",
+        "power"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-B05",
+      "level": "B",
+      "title": "클럭 트리 모델링: PLL, divider, mux, gate",
+      "goal": "Linux CCF와 유사한 클럭 프레임워크의 rate 전파·참조 카운트를 구현한다.",
+      "task": "clk 노드(PLL/divider/mux/gate)로 클럭 트리를 C로 구성하고 recalc_rate 전파, set_rate 시 최적 divider/parent 선택, enable/disable 참조 카운트(부모 자동 enable)를 구현해 clk_summary 형식으로 출력·검증한다.",
+      "tags": [
+        "clock",
+        "ccf",
+        "pll"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-B06",
+      "level": "B",
+      "title": "리셋·핀먹스 컨트롤러 추상화",
+      "goal": "주변장치 bring-up 시 reset 해제 순서와 핀 기능 충돌 관리를 설계한다.",
+      "task": "pin→function 테이블 기반 pinmux 요청/해제 API(충돌 검사, 소유자 기록)와 reset line assert/deassert API(지연, 의존 순서)를 mock 레지스터 위에 구현하고, UART+SPI 공유 핀 충돌 시나리오로 테스트한다.",
+      "tags": [
+        "pinmux",
+        "reset",
+        "pinctrl"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-B07",
+      "level": "B",
+      "title": "HAL 설계: ops 구조체와 벤더 포팅 레이어",
+      "goal": "벤더 독립적 HAL 인터페이스를 설계하고 다중 백엔드를 같은 테스트로 검증한다.",
+      "task": "UART HAL(init/tx/rx/irq 콜백) 인터페이스를 정의하고 레지스터 맵이 다른 가상 벤더 A/B 백엔드 두 개를 구현, 동일한 테스트 스위트가 두 백엔드 모두 통과하도록 하고 추상화 비용(간접 호출)을 논의한다.",
+      "tags": [
+        "hal",
+        "abstraction",
+        "portability"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-B08",
+      "level": "B",
+      "title": "펌웨어 버전·빌드 메타데이터 임베드",
+      "goal": "런타임에 정확한 펌웨어 정체(버전, 커밋, 빌드 ID)를 확인할 수 있게 한다.",
+      "task": "빌드 시 semver+git hash+dirty 플래그+build ID를 전용 섹션(.fw_info)에 넣는 스크립트/링커 설정을 만들고, 바이너리에서 이를 추출하는 호스트 툴과 버전 비교 함수(pre-release 포함) 단위 테스트를 작성한다.",
+      "tags": [
+        "versioning",
+        "build-id",
+        "linker-section"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-B09",
+      "level": "B",
+      "title": "보드 bring-up 체크리스트: 전원→클럭→메모리→콘솔",
+      "goal": "새 보드를 처음 켤 때의 단계별 검증 순서와 smoke test 코드를 만든다.",
+      "task": "가상 보드용 bring-up 계획서(전원 레일·리셋·클럭·DDR·UART first-light·JTAG 접속 체크)와 각 단계별 smoke-test 펌웨어 코드 경로(mock HW)를 작성하고, 단계 실패 시 다음 디버깅 액션을 표로 정리한다.",
+      "tags": [
+        "bring-up",
+        "checklist",
+        "board"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-B10",
+      "level": "B",
+      "title": "바이너리 로깅: 포맷 ID와 지연 포매팅",
+      "goal": "제한된 MCU에서 printf 비용 없이 풍부한 로그를 남기는 방법을 구현한다.",
+      "task": "로그 호출을 (포맷 문자열 ID + 인자) 바이너리 레코드로 링버퍼에 기록하는 인코더와, ELF의 문자열 테이블로 사람이 읽을 로그를 복원하는 호스트 디코더를 작성해 printf 대비 코드 크기·실행 시간을 측정한다.",
+      "tags": [
+        "logging",
+        "trace",
+        "deferred-formatting"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-B11",
+      "level": "B",
+      "title": "ACPI vs Device Tree: 하드웨어 기술 방식 비교",
+      "goal": "서버/PC(ACPI)와 임베디드(DT)의 하드웨어 기술 모델 차이를 설명한다.",
+      "task": "샘플 DSDT를 iasl로 디컴파일해 _HID/_CRS/_STA 의미를 정리하고 같은 장치(UART, I2C 센서)를 DTS로 다시 기술, 열거·전원 제어 방식 차이를 비교표로 작성한다.",
+      "tags": [
+        "acpi",
+        "device-tree",
+        "dsdt"
+      ],
+      "env": "mac",
+      "env_note": "iasl은 brew install acpica, dtc는 brew install dtc"
+    },
+    {
+      "id": "PLAT-M01",
+      "level": "M",
+      "title": "전원 상태 머신: Run/Idle/Sleep/Deep-sleep",
+      "goal": "저전력 상태 선택이 진입·복귀 지연과 에너지에 미치는 영향을 계산한다.",
+      "task": "상태별 전력·진입/복귀 지연·wakeup source를 가진 전력 관리 시뮬레이터를 작성하고 idle 구간 트레이스에 대해 break-even time 기반 상태 선택 정책을 구현해 에너지·지연을 비교한다.",
+      "tags": [
+        "power-management",
+        "cpuidle",
+        "low-power"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-M02",
+      "level": "M",
+      "title": "DVFS 거버너: OPP 테이블과 전압/주파수 전환 순서",
+      "goal": "DVFS 정책과 '올릴 땐 전압 먼저, 내릴 땐 주파수 먼저' 규칙을 구현한다.",
+      "task": "OPP 테이블과 부하 트레이스를 입력으로 ondemand/schedutil 유사 거버너를 구현하고 전환 순서 위반을 검출하는 regulator/clk mock을 둬서, 정책별 에너지(∝CV²f)와 마감 미스를 비교한다.",
+      "tags": [
+        "dvfs",
+        "opp",
+        "governor"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-M03",
+      "level": "M",
+      "title": "Suspend/Resume 경로: 디바이스 순서와 롤백",
+      "goal": "시스템 suspend 시 디바이스 의존성 순서와 실패 롤백을 설계한다.",
+      "task": "부모-자식 디바이스 트리에 대해 suspend(자식→부모)/resume(부모→자식) 프레임워크를 구현하고, 중간 디바이스 suspend 실패 시 이미 내려간 디바이스를 역순 resume하는 롤백과 wakeup 소스 처리를 테스트한다.",
+      "tags": [
+        "suspend",
+        "resume",
+        "dpm"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-M04",
+      "level": "M",
+      "title": "Thermal 관리: 센서→trip point→cooling device",
+      "goal": "온도 기반 쓰로틀링 정책과 히스테리시스를 구현한다.",
+      "task": "간단한 열 모델(RC) 위에서 trip point(passive/critical), step-wise와 PID 쓰로틀링 거버너를 구현하고 히스테리시스 유무에 따른 진동, 최대 온도, 성능 손실을 비교한다.",
+      "tags": [
+        "thermal",
+        "throttling",
+        "pid"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-M05",
+      "level": "M",
+      "title": "멀티코어 메일박스 IPC: 공유 메모리 + doorbell",
+      "goal": "이기종 코어(AP↔MCU/DSP) 간 메시지 프로토콜을 설계한다.",
+      "task": "두 스레드를 두 코어로 보고 공유 메모리 슬롯 + doorbell(인터럽트 대용 조건변수) 메일박스를 구현, 헤더(type, seq, len), ACK/타임아웃/재전송, 메모리 배리어 위치를 포함한 프로토콜을 스트레스 테스트한다.",
+      "tags": [
+        "ipc",
+        "mailbox",
+        "multicore"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-M06",
+      "level": "M",
+      "title": "remoteproc/rpmsg 개념과 virtio vring 구현",
+      "goal": "리눅스가 보조 코어 펌웨어를 로드·통신하는 표준 구조를 이해한다.",
+      "task": "virtio split vring(desc/avail/used, 인덱스 wrap)을 C로 구현해 두 프로세스(공유 메모리) 간 rpmsg 유사 엔드포인트 메시징을 만들고, remoteproc 리소스 테이블(carveout, vdev, trace) 파서도 작성한다.",
+      "tags": [
+        "remoteproc",
+        "rpmsg",
+        "virtio",
+        "vring"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-M07",
+      "level": "M",
+      "title": "펌웨어 업데이트: A/B 슬롯과 부트 카운터",
+      "goal": "업데이트 실패에도 벽돌이 되지 않는 슬롯 전환 상태머신을 설계한다.",
+      "task": "A/B 슬롯 메타데이터(active, trial, bootcount, good)와 부트로더 선택 로직, 앱의 mark-good을 구현하고, 각 단계 임의 지점 전원 차단 주입 테스트로 항상 부팅 가능한 슬롯이 남는지 검증한다.",
+      "tags": [
+        "fw-update",
+        "ab-slot",
+        "rollback",
+        "see:SEC",
+        "see:INFRA"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-M08",
+      "level": "M",
+      "title": "설정 저장소 운영: 스키마 버전·마이그레이션·공장 초기화",
+      "goal": "필드 장비의 설정 데이터를 펌웨어 버전이 바뀌어도 안전하게 유지한다",
+      "task": "버전 태그가 붙은 설정 레코드에 대해 구버전→신버전 마이그레이션 체인, 기본값 채우기, 공장 초기화·손상 시 폴백을 구현하고, 다운그레이드·마이그레이션 중 전원 차단 시나리오를 테스트한다(플래시 KV 저장 엔진은 see:DS-A10).",
+      "tags": [
+        "config",
+        "migration",
+        "see:DS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-M09",
+      "level": "M",
+      "title": "디바이스 텔레메트리: 카운터, 히스토그램, heartbeat",
+      "goal": "현장 디바이스의 상태를 저비용으로 수집하는 메트릭 체계를 만든다.",
+      "task": "펌웨어 메트릭 레지스트리(카운터/게이지/로그 스케일 히스토그램)와 주기적 heartbeat 스냅샷을 TLV로 직렬화하는 코드, 이를 파싱해 CSV로 내보내는 호스트 수집기를 작성한다.",
+      "tags": [
+        "telemetry",
+        "metrics",
+        "tlv",
+        "see:INFRA"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-M10",
+      "level": "M",
+      "title": "멀티코어 SoC 크래시 수집: 코어별 덤프와 업로드 큐",
+      "goal": "여러 코어·서브시스템의 크래시를 모아 리셋 이후 안전하게 전달하는 플랫폼 흐름을 설계한다",
+      "task": "앱 코어·실시간 코어·DSP 각각의 크래시 레코드를 공유 예약 메모리에 기록하는 프로토콜(시퀀스 번호·CRC·소유 플래그)과 재부팅 후 수집·영구 저장·업로드 큐를 구현해 동시 크래시·연쇄 리셋 시나리오를 테스트한다(단일 MCU 캡처는 see:BM-A09, 디코더는 see:TOOL-A05).",
+      "tags": [
+        "crash",
+        "multicore",
+        "see:BM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-M11",
+      "level": "M",
+      "title": "UEFI 기초: Boot/Runtime Services와 Hello UEFI 앱",
+      "goal": "UEFI 펌웨어가 OS 로더에 제공하는 서비스와 메모리 맵을 이해한다.",
+      "task": "gnu-efi(또는 EDK2 최소 앱)로 Hello UEFI 앱을 빌드해 QEMU+OVMF/AAVMF에서 실행하고 GetMemoryMap 결과와 UEFI 변수(BootOrder)를 출력, ExitBootServices 이후 사용 가능한 서비스 차이를 정리한다.",
+      "tags": [
+        "uefi",
+        "ovmf",
+        "boot-services"
+      ],
+      "env": "qemu",
+      "env_note": "QEMU + OVMF/AAVMF 펌웨어 이미지 + gnu-efi 크로스 빌드"
+    },
+    {
+      "id": "PLAT-M12",
+      "level": "M",
+      "title": "TF-A on QEMU: BL31 런타임 서비스와 커스텀 SiP SMC",
+      "goal": "실제 TF-A 코드에서 부트 스테이지와 SMC 핸들러 구조를 확인한다.",
+      "task": "TF-A를 qemu 플랫폼으로 빌드해 BL1/BL2/BL31 로그를 확인하고, BL31에 커스텀 SiP 서비스(SMC ID 하나)를 추가한 뒤 Linux 모듈에서 arm_smccc_smc로 호출해 반환값을 검증한다.",
+      "tags": [
+        "tf-a",
+        "bl31",
+        "smc",
+        "sip"
+      ],
+      "env": "qemu",
+      "env_note": "TF-A + U-Boot/kernel 크로스 빌드와 QEMU 랩 필요 (빌드 수십 분)"
+    },
+    {
+      "id": "PLAT-A01",
+      "level": "A",
+      "title": "측정 부트(Measured Boot)와 이벤트 로그 재생",
+      "goal": "각 부트 스테이지 해시를 PCR에 extend하고 원격 검증자가 재계산하는 흐름을 구현한다.",
+      "task": "SHA-256 기반 PCR extend(PCR = H(PCR || digest))와 TCG 스타일 이벤트 로그를 각 부트 스테이지 모델에 넣고, 이벤트 로그를 재생해 최종 PCR 값과 일치하는지/변조 시 불일치하는지 검증하는 verifier를 작성한다.",
+      "tags": [
+        "measured-boot",
+        "pcr",
+        "tpm",
+        "see:SEC"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-A02",
+      "level": "A",
+      "title": "SCMI: AP↔SCP 전원·클럭 제어 프로토콜",
+      "goal": "Arm SCMI 메시지 구조와 shared-memory transport를 구현한다.",
+      "task": "SCMI 헤더(protocol_id, message_id, token, type)와 shared memory 채널을 구현해 agent(AP)와 platform(SCP) 스레드 간 BASE/CLOCK/PERF 프로토콜 일부(rate get/set, 지원 목록)를 주고받게 하고 비동기 지연 응답도 처리한다.",
+      "tags": [
+        "scmi",
+        "scp",
+        "power"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-A03",
+      "level": "A",
+      "title": "멀티코어 부팅: spin-table vs PSCI, holding pen",
+      "goal": "secondary 코어를 깨우는 방식과 그 메모리 순서 요구사항을 이해한다.",
+      "task": "pthread로 코어를 흉내 내 holding pen(spin-table: release_addr 폴링) 방식과 PSCI CPU_ON 방식을 구현하고, release 값 쓰기 전후 배리어(DSB/SEV 대응) 누락 시 발생할 수 있는 문제를 주석과 테스트로 설명한다.",
+      "tags": [
+        "smp-boot",
+        "spin-table",
+        "psci",
+        "barrier"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-A04",
+      "level": "A",
+      "title": "제조·프로비저닝 흐름: 시리얼, 캘리브레이션, 키 주입",
+      "goal": "공장에서 디바이스 고유 데이터를 기록하고 잠그는 흐름을 설계한다.",
+      "task": "호스트 프로비저닝 툴(Python) ↔ 디바이스 mock(pty UART) 프로토콜을 만들어 시리얼·MAC·캘리브레이션 값·디바이스 키를 OTP 모델(1회 기록, 비트 0→1만 가능)에 쓰고, 검증 후 공장 모드 잠금까지 수행하며 중복/재시도 시나리오를 테스트한다.",
+      "tags": [
+        "provisioning",
+        "manufacturing",
+        "otp"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-A05",
+      "level": "A",
+      "title": "업데이트 전송 프로토콜: 청크, 재개, 무결성",
+      "goal": "느리고 끊기는 링크에서도 안전한 펌웨어 전송 프로토콜을 설계한다.",
+      "task": "Python 업데이터 ↔ C 디바이스 mock(소켓/pty) 간 청크 전송 프로토콜(청크 CRC, 오프셋 기반 재개, 윈도우 ACK, 최종 SHA-256)을 구현하고 패킷 손실·중복·연결 끊김 주입 테스트 후 A/B 슬롯 스왑까지 연결한다.",
+      "tags": [
+        "fw-update",
+        "protocol",
+        "resume"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-A06",
+      "level": "A",
+      "title": "리셋 원인 분석과 부트 루프 복구(safe mode)",
+      "goal": "반복 크래시를 감지해 안전 모드로 진입하는 플랫폼 정책을 구현한다.",
+      "task": "reset reason 레지스터(POR, WDT, SW, brownout, lockup) 디코더와 부트 이력 링버퍼를 구현하고, N분 내 M회 비정상 리셋 시 safe mode(최소 기능+업데이트 경로만) 진입·해제 정책을 시나리오 테스트한다.",
+      "tags": [
+        "reset-reason",
+        "boot-loop",
+        "safe-mode",
+        "see:TEST"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-A07",
+      "level": "A",
+      "title": "PMIC와 전원 시퀀싱 드라이버",
+      "goal": "레일 켜는 순서·램프·PGOOD 타임아웃을 펌웨어로 제어한다.",
+      "task": "I2C regmap mock 위에 가상 PMIC 드라이버를 작성해 데이터시트식 시퀀스 테이블(레일, 전압, 지연, 의존)로 power-up/down을 수행하고 PGOOD 타임아웃·과전류 폴트 주입 시 안전한 역순 shutdown을 검증한다.",
+      "tags": [
+        "pmic",
+        "power-sequencing",
+        "regulator"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PLAT-A08",
+      "level": "A",
+      "title": "Linux 클럭 provider 드라이버(CCF)",
+      "goal": "리눅스 Common Clock Framework에 실제 provider를 등록할 수 있다.",
+      "task": "fixed-rate + divider + gate로 구성된 가짜 클럭 컨트롤러 platform driver를 작성(clk_hw_register_*, of_clk_add_hw_provider)하고 소비자 드라이버가 clk_get/set_rate하는 모습을 /sys/kernel/debug/clk/clk_summary로 검증한다.",
+      "tags": [
+        "ccf",
+        "clock",
+        "linux-driver",
+        "see:ELX"
+      ],
+      "env": "qemu",
+      "env_note": "QEMU virt + 커스텀 DT 노드 (ELX 랩 재사용)"
+    },
+    {
+      "id": "PLAT-A09",
+      "level": "A",
+      "title": "종합: 가상 SoC 플랫폼 펌웨어 아키텍처 리뷰",
+      "goal": "부트·전원·IPC·업데이트·텔레메트리를 하나의 일관된 플랫폼 설계로 묶는다.",
+      "task": "가상 AI 가속기 SoC(AP+관리 MCU+NPU)의 플랫폼 펌웨어 설계 문서를 작성(부트 체인, PM 상태, 메일박스 프로토콜, A/B 업데이트, 크래시/텔레메트리 경로)하고 핵심 코드 경로 3개를 앞선 항목 코드로 연결, trade-off를 면접식으로 방어한다.",
+      "tags": [
+        "platform",
+        "architecture",
+        "capstone"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

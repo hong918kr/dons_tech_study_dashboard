@@ -1,0 +1,283 @@
+{
+  "id": "GFX",
+  "intro": "그래픽스 기초 수학(벡터·행렬·쿼터니언·투영)과 래스터화, 그리고 BVH·k-d tree·octree·half-edge 같은 3D 자료구조는 렌더링뿐 아니라 로봇 인지, LiDAR 포인트 클라우드, 충돌 검사, 시뮬레이션의 공통 기반이다. GPU/게임/로보틱스 면접(NVIDIA, Apple, Tesla, Anduril)에서는 삼각형 래스터화, ray-triangle 교차, BVH 구축, k-NN 질의를 직접 짜게 하는 문제가 자주 나온다. 본격 렌더링 기법은 REND 트랙에 맡기고, 여기서는 기초 수학과 자료구조를 손으로 구현하고 검증한다.",
+  "goals": [
+    "벡터·행렬·쿼터니언과 모델/뷰/투영 변환을 직접 구현하고 수치적으로 검증할 수 있다",
+    "직선·삼각형 래스터화, 클리핑, 무게중심 보간, z-buffer를 소프트웨어로 구현할 수 있다",
+    "메시 표현(indexed mesh, half-edge)과 메시 포맷을 다루고 위상 질의를 수행할 수 있다",
+    "BVH, octree, k-d tree, spatial hash를 구축·질의하고 성능을 브루트포스와 비교할 수 있다",
+    "부동소수점 견고성, 고정소수점 래스터화, 타일 기반 구조 등 하드웨어/임베디드 관점의 제약을 설명할 수 있다"
+  ],
+  "prereq": ["C", "DS", "ALGO"],
+  "refs": [
+    {"title": "Real-Time Rendering, 4th Edition (Akenine-Möller et al.)"},
+    {"title": "Real-Time Collision Detection (Christer Ericson)"},
+    {"title": "Physically Based Rendering: From Theory to Implementation, 4th Edition (online)", "url": "https://pbr-book.org/"},
+    {"title": "Fabian Giesen — A trip through the Graphics Pipeline 2011", "url": "https://fgiesen.wordpress.com/2011/07/09/a-trip-through-the-graphics-pipeline-2011-index/"},
+    {"title": "ssloy/tinyrenderer — software rasterizer 강의", "url": "https://github.com/ssloy/tinyrenderer"},
+    {"title": "Scratchapixel", "url": "https://www.scratchapixel.com/"},
+    {"title": "Garland & Heckbert — Surface Simplification Using Quadric Error Metrics (SIGGRAPH 1997)"}
+  ],
+  "items": [
+    {
+      "id": "GFX-B01",
+      "level": "B",
+      "title": "벡터 연산: Dot·Cross·Normalize와 기하 의미",
+      "goal": "내적·외적의 기하학적 의미(투영, 각도, 법선, 면적, 좌우 판정)를 코드로 확인한다",
+      "task": "vec2/vec3 라이브러리(dot, cross, length, normalize, project, reflect)를 C로 작성하고, 점이 직선 왼쪽/오른쪽인지 판정, 삼각형 면적·법선 계산, 0벡터 normalize 처리 등을 epsilon 비교 단위 테스트로 검증한다.",
+      "tags": ["math", "vector", "linear-algebra"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-B02",
+      "level": "B",
+      "title": "4x4 행렬 변환: Row/Column-Major와 합성 순서",
+      "goal": "translate/rotate/scale 합성 순서와 메모리 레이아웃(row/column-major) 혼동을 정리한다",
+      "task": "mat4 곱, translate/rotate(x,y,z)/scale 생성 함수를 column-major 저장으로 구현하고, T*R*S와 S*R*T가 점에 다른 결과를 주는 테스트와 row-major로 해석했을 때 전치 관계가 됨을 보이는 테스트를 작성한다.",
+      "tags": ["math", "matrix", "transform"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-B03",
+      "level": "B",
+      "title": "역행렬과 법선 변환(Inverse-Transpose)",
+      "goal": "일반 4x4 역행렬, affine 빠른 역행렬, 비균등 스케일에서 법선 변환 규칙을 익힌다",
+      "task": "cofactor 방식 일반 4x4 역행렬과 R|t 구조를 이용한 affine 빠른 역행렬을 구현해 M*M^-1 ≈ I를 검증하고, 비균등 스케일에서 법선을 M으로 변환하면 수직성이 깨지고 (M^-1)^T로는 유지됨을 테스트로 보인다.",
+      "tags": ["math", "matrix", "inverse", "normal"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-B04",
+      "level": "B",
+      "title": "쿼터니언 회전과 Slerp",
+      "goal": "쿼터니언의 합성, 벡터 회전, 행렬 변환, 보간과 짐벌락 회피 이유를 이해한다",
+      "task": "axis-angle → quat, quat 곱, 벡터 회전(q v q*), quat ↔ mat3 변환, slerp(가까운 경로 선택, 작은 각도 fallback)를 구현하고, 무작위 회전 1만 개에 대해 행렬 결과와의 일치와 정규화 드리프트를 측정한다.",
+      "tags": ["math", "quaternion", "rotation", "see:DRONE"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-B05",
+      "level": "B",
+      "title": "카메라와 투영: LookAt·Perspective·NDC·Viewport",
+      "goal": "월드 → 뷰 → 클립 → NDC → 화면 좌표로 가는 변환 체인을 직접 구현한다",
+      "task": "lookAt 뷰 행렬, perspective(fovy, aspect, near, far)와 orthographic 투영, perspective divide, viewport 변환을 구현하고, 알려진 3D 점들이 기대 픽셀 좌표와 깊이 값으로 매핑되는지 테스트하며 OpenGL(-1..1)과 Metal/D3D(0..1) 깊이 범위 차이를 반영한다.",
+      "tags": ["math", "projection", "camera", "pipeline"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-B06",
+      "level": "B",
+      "title": "클리핑: Cohen-Sutherland와 Sutherland-Hodgman",
+      "goal": "선분·다각형 클리핑 알고리즘과 동차 좌표 공간 클리핑의 필요성을 이해한다",
+      "task": "2D 사각형에 대한 Cohen-Sutherland 선분 클리핑과, 동차 좌표에서 near 평면 포함 6개 평면에 대한 Sutherland-Hodgman 다각형 클리핑을 구현하고, 카메라 뒤로 걸친 삼각형이 올바르게 잘리는지 테스트한다.",
+      "tags": ["clipping", "homogeneous", "rasterization"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-B07",
+      "level": "B",
+      "title": "Bresenham 직선·원 래스터화 (정수 전용)",
+      "goal": "곱셈·나눗셈 없이 정수 증분만으로 직선과 원을 그리는 고전 알고리즘을 익힌다",
+      "task": "8개 옥탄트를 모두 처리하는 Bresenham 직선과 midpoint 원 알고리즘을 정수 연산만으로 구현해 PPM으로 출력하고, float DDA 결과와 픽셀 단위로 비교하며 시작/끝점 대칭성(A→B와 B→A 동일 픽셀)을 검증한다.",
+      "tags": ["rasterization", "bresenham", "integer"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-B08",
+      "level": "B",
+      "title": "삼각형 래스터화: Edge Function과 Top-Left Rule",
+      "goal": "GPU 래스터라이저의 기본인 edge function 방식과 공유 에지 처리 규칙을 구현한다",
+      "task": "바운딩 박스 + edge function 방식 삼각형 래스터라이저를 작성하고 top-left fill rule을 적용해, 사각형을 두 삼각형으로 나눠 그렸을 때 모든 픽셀이 정확히 한 번만 칠해지는지(overdraw 카운트 버퍼) 검증한다.",
+      "tags": ["rasterization", "triangle", "edge-function"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-B09",
+      "level": "B",
+      "title": "무게중심 보간과 Perspective-Correct 보간",
+      "goal": "barycentric 좌표로 속성을 보간하고, 투영 후 선형 보간이 틀리는 이유를 이해한다",
+      "task": "래스터라이저에 barycentric 기반 색/UV 보간을 추가하고, 체커보드 텍스처를 입힌 기울어진 평면을 affine 보간과 1/w 기반 perspective-correct 보간으로 각각 렌더링해 왜곡 차이를 이미지로 비교한다.",
+      "tags": ["rasterization", "barycentric", "interpolation"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-M01",
+      "level": "M",
+      "title": "Z-Buffer와 깊이 정밀도: Reversed-Z",
+      "goal": "깊이 버퍼의 비선형 분포와 z-fighting 원인, reversed-Z의 효과를 수치로 확인한다",
+      "task": "z-buffer를 래스터라이저에 넣어 교차하는 삼각형을 올바르게 그리고, near/far 비율을 바꿔 가며 24비트 정수 깊이, float32 표준 깊이, float32 reversed-Z에서 구분 가능한 최소 거리 차이를 측정·그래프로 비교한다.",
+      "tags": ["z-buffer", "depth", "precision"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-M02",
+      "level": "M",
+      "title": "컬링: Backface·Frustum (AABB/Sphere vs Plane)",
+      "goal": "그리지 않을 것을 빠르게 걸러내는 기하 판정을 구현한다",
+      "task": "뷰-투영 행렬에서 6개 frustum 평면을 추출하는 함수, sphere/AABB vs frustum 판정(p-vertex/n-vertex 최적화), 화면 공간 winding 기반 backface 컬링을 구현하고, 무작위 객체 1만 개 장면에서 컬링 비율과 오판정(false negative 0) 여부를 검증한다.",
+      "tags": ["culling", "frustum", "aabb"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-M03",
+      "level": "M",
+      "title": "메시 포맷: OBJ/PLY 로더와 Indexed Mesh",
+      "goal": "메시 파일 포맷, 정점 중복 제거, 법선 계산 등 메시 전처리를 직접 구현한다",
+      "task": "OBJ(v/vt/vn, 다각형 fan 삼각분할)와 binary PLY 로더를 작성하고, 해시로 정점을 중복 제거해 indexed triangle mesh를 만든 뒤 면적 가중 정점 법선을 계산하며, 정점/인덱스 수와 메모리 크기를 원본과 비교한다.",
+      "tags": ["mesh", "file-format", "parsing", "hashing"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-M04",
+      "level": "M",
+      "title": "Half-Edge 메시 자료구조",
+      "goal": "인접성 질의를 O(1)로 처리하는 half-edge 구조와 경계·비다양체 처리를 익힌다",
+      "task": "indexed mesh에서 twin 매칭으로 half-edge 구조를 구축하고 정점 one-ring 순회, 면 인접 면, 경계 에지 검출, 비다양체 에지 거부를 구현해, 닫힌 메시에서 오일러 특성 V−E+F=2를 검증한다.",
+      "tags": ["mesh", "half-edge", "topology", "data-structure"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-M05",
+      "level": "M",
+      "title": "Ray-Triangle(Möller-Trumbore)과 Ray-AABB(Slab) 교차",
+      "goal": "레이캐스팅·피킹·충돌의 기본 교차 판정을 정확하고 빠르게 구현한다",
+      "task": "Möller-Trumbore ray-triangle 교차(t, u, v 반환)와 slab 방식 ray-AABB 교차(1/dir 사전계산, NaN/무한대 처리)를 구현하고, 무작위 레이와 해석적 정답 비교 테스트 및 평행 레이 같은 경계 케이스를 검증한다.",
+      "tags": ["ray-intersection", "geometry", "collision"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-M06",
+      "level": "M",
+      "title": "BVH 구축과 순회: Median Split vs SAH",
+      "goal": "가장 널리 쓰이는 공간 가속 구조인 BVH의 구축 휴리스틱과 순회 최적화를 익힌다",
+      "task": "삼각형 메시에 대해 median split과 binned SAH 두 방식으로 BVH를 구축해 평탄화된 배열 노드(32바이트 정렬)로 저장하고, 스택 기반 순회(가까운 자식 우선)로 레이 100만 개를 쏴서 브루트포스 대비 정답 일치와 노드 방문 수·속도를 비교한다.",
+      "tags": ["bvh", "sah", "acceleration-structure", "data-structure"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-M07",
+      "level": "M",
+      "title": "Octree: 포인트 클라우드 삽입·반경 질의·LOD",
+      "goal": "공간을 8분할하는 octree로 포인트 클라우드를 관리하고 질의·다운샘플링하는 방법을 익힌다",
+      "task": "버킷 크기와 최대 깊이를 갖는 포인트 octree를 구현해 삽입, 반경 질의, 레벨별 대표점(voxel 중심) LOD 생성을 지원하고, 100만 점 데이터에서 브루트포스 대비 질의 결과 일치와 속도, 메모리 사용량을 측정한다.",
+      "tags": ["octree", "point-cloud", "spatial-query", "see:AUTON"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-M08",
+      "level": "M",
+      "title": "k-d Tree: 구축과 k-최근접 이웃(k-NN) 질의",
+      "goal": "k-d tree의 분할 규칙과 가지치기 기반 최근접 탐색을 정확히 구현한다",
+      "task": "median 분할(nth_element)로 3D k-d tree를 구축하고 최대 힙을 쓰는 k-NN 질의(분할 평면 거리로 가지치기)를 구현해, 무작위 점·질의에 대해 브루트포스와 결과가 완전히 일치하는지와 k, 점 개수에 따른 속도를 측정한다.",
+      "tags": ["kd-tree", "nearest-neighbor", "point-cloud", "see:CV"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-M09",
+      "level": "M",
+      "title": "Spatial Hashing과 Uniform Grid: Broad-Phase 충돌",
+      "goal": "동적 객체가 많은 장면에서 해시 격자로 후보 쌍을 빠르게 찾는 방법을 익힌다",
+      "task": "셀 크기 기반 정수 좌표 해시(큰 소수 XOR) 공간 해시를 구현해 움직이는 구 1만 개의 충돌 후보 쌍을 매 프레임 계산하고, O(n²) 결과와 쌍 집합 일치 및 셀 크기에 따른 성능 변화를 측정한다.",
+      "tags": ["spatial-hash", "grid", "broad-phase", "see:PHYS"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-M10",
+      "level": "M",
+      "title": "정점 캐시 최적화와 인덱스 버퍼 재정렬",
+      "goal": "GPU post-transform 정점 캐시를 고려한 인덱스 순서 최적화로 정점 셰이딩 비용을 줄인다",
+      "task": "FIFO/LRU 정점 캐시 시뮬레이터로 ACMR(삼각형당 캐시 미스)을 측정하는 도구와 Forsyth 선형 속도 정점 캐시 최적화 알고리즘을 구현하고, 무작위 순서·원본·최적화 후 ACMR과 정점 버퍼 재정렬 후 fetch 지역성을 비교한다.",
+      "tags": ["mesh-optimization", "vertex-cache", "simulation"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-A01",
+      "level": "A",
+      "title": "고정소수점 래스터라이저와 Sub-pixel 정밀도",
+      "goal": "하드웨어 래스터라이저처럼 sub-pixel 고정소수점 좌표와 증분 edge 평가를 구현한다",
+      "task": "정점 좌표를 28.4 고정소수점으로 스냅하고 edge function을 증분 덧셈으로 평가하는 래스터라이저를 구현해, 오버플로 없는 최대 화면 크기를 계산·검증하고 float 래스터라이저와 픽셀 커버리지 차이 및 watertight(빈틈 없음) 특성을 테스트한다.",
+      "tags": ["rasterization", "fixed-point", "hardware"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-A02",
+      "level": "A",
+      "title": "타일 기반 렌더링(TBR) 비닝 모델",
+      "goal": "모바일 GPU(Apple, Mali, Adreno)의 타일 기반 지연 렌더링이 DRAM 대역폭을 줄이는 원리를 모델링한다",
+      "task": "화면을 32x32 타일로 나눠 삼각형을 타일 리스트에 비닝하는 단계와 타일별 on-chip 색/깊이 버퍼로 래스터화하는 단계를 구현하고, 즉시 모드 렌더링 대비 프레임버퍼 DRAM 읽기/쓰기 바이트와 비닝 메모리 오버헤드를 장면별로 비교한다.",
+      "tags": ["tbr", "binning", "mobile-gpu", "bandwidth", "see:GPUSYS"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-A03",
+      "level": "A",
+      "title": "Hierarchical Z 버퍼와 Occlusion Culling",
+      "goal": "깊이 피라미드로 가려진 객체를 대량으로 걸러내는 방법을 구현한다",
+      "task": "z-buffer에서 max-reduction mip 피라미드(HZB)를 생성하고, 객체 AABB의 화면 사각형 크기에 맞는 mip 레벨 하나로 가려짐을 판정하는 컬링을 구현해, 도시 장면에서 컬링 비율과 보수성(가시 객체를 절대 버리지 않음)을 검증한다.",
+      "tags": ["occlusion-culling", "hzb", "mipmap"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-A04",
+      "level": "A",
+      "title": "LBVH: Morton 코드 기반 병렬 BVH 구축과 Refit",
+      "goal": "GPU에서 쓰는 병렬 친화적 BVH 구축과 동적 장면용 refit을 이해한다",
+      "task": "프리미티브 중심을 30비트 Morton 코드로 변환·radix 정렬하고 Karras 방식으로 내부 노드를 구성하는 LBVH를 구현해 SAH BVH 대비 구축 시간과 순회 비용을 비교하며, 정점이 움직일 때 상향식 AABB refit과 품질 저하를 측정한다.",
+      "tags": ["bvh", "morton-code", "parallel", "see:GPGPU"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-A05",
+      "level": "A",
+      "title": "메시 단순화: Quadric Error Metrics",
+      "goal": "half-edge 위에서 에지 붕괴와 QEM으로 LOD 메시를 생성하는 알고리즘을 구현한다",
+      "task": "정점별 quadric 누적, 최적 붕괴 위치 계산, 우선순위 큐 기반 edge collapse(면 뒤집힘·위상 검사 포함)를 half-edge 메시에 구현하고, 삼각형 수 50%/10%/1%에서 Hausdorff 거리 근사 오차를 측정한다.",
+      "tags": ["mesh-simplification", "qem", "lod", "half-edge"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-A06",
+      "level": "A",
+      "title": "기하 견고성: Robust Predicate와 Watertight 교차",
+      "goal": "부동소수점 오차가 기하 알고리즘을 깨뜨리는 사례와 견고한 해결책을 익힌다",
+      "task": "naive orient2d가 거의 공선인 점에서 일관성 없는 결과를 내는 입력을 찾아 재현하고, 오차 한계 필터 + 확장 정밀도(또는 정수 좌표) 기반 robust orient2d와 watertight ray-triangle 교차를 구현해 공유 에지를 지나는 레이가 새지 않음을 검증한다.",
+      "tags": ["robustness", "floating-point", "geometry"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GFX-A07",
+      "level": "A",
+      "title": "메시 압축: 정점 양자화와 Octahedral 법선 인코딩",
+      "goal": "임베디드/스트리밍 환경에서 메시 메모리를 줄이는 양자화 기법과 오차를 분석한다",
+      "task": "AABB 기준 16비트 위치 양자화, octahedral 매핑 기반 2x8비트/2x16비트 법선 인코딩, half-float UV를 구현하고 원본 대비 위치 오차(최대·RMS), 법선 각도 오차, 메모리 절감률을 측정한다.",
+      "tags": ["compression", "quantization", "mesh", "memory"],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

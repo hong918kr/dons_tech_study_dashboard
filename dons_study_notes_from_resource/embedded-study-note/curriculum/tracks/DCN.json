@@ -1,0 +1,597 @@
+{
+  "id": "DCN",
+  "intro": "AI 학습 클러스터에서는 GPU 간 통신이 스텝 시간의 큰 몫을 차지해, 토폴로지·로드밸런싱·무손실 이더넷·혼잡 제어·collective 알고리즘을 이해하는 엔지니어 수요가 NVIDIA·Broadcom·Arista·Meta·Google 인프라 전반에서 크다. 이 트랙은 Clos/fat-tree 수학과 ECMP부터 RDMA verbs(Soft-RoCE), PFC/DCQCN/HPCC, all-reduce α-β 모델, NCCL·SHARP·UEC까지 시뮬레이터와 실제 코드로 구현해 수치로 설명할 수 있게 만든다.",
+  "goals": [
+    "Clos/fat-tree/dragonfly 토폴로지의 규모·bisection·oversubscription을 계산하고 생성기로 검증한다",
+    "ECMP 해시·극성화·flowlet/스프레이 부하 분산과 DC BGP 수렴을 시뮬레이션으로 비교한다",
+    "Soft-RoCE에서 RDMA verbs(QP 상태 전이, SEND/WRITE/READ)를 직접 프로그래밍하고 성능 패턴을 익힌다",
+    "PFC·ECN·DCQCN·TIMELY/Swift·HPCC의 동작과 PFC 데드락을 시뮬레이터로 재현한다",
+    "ring/tree/halving-doubling/계층적 all-reduce와 MoE all-to-all을 α-β 모델로 분석하고 NCCL 동작을 해석한다",
+    "스케일업 vs 스케일아웃, IB vs RoCE vs UEC, SHARP·광 링크를 근거로 대규모 AI 패브릭을 설계한다"
+  ],
+  "prereq": [
+    "NET",
+    "GPUSYS",
+    "PCIE"
+  ],
+  "refs": [
+    {
+      "title": "Al-Fares et al., A Scalable, Commodity Data Center Network Architecture (SIGCOMM 2008)"
+    },
+    {
+      "title": "RFC 7938 — Use of BGP for Routing in Large-Scale Data Centers",
+      "url": "https://www.rfc-editor.org/rfc/rfc7938"
+    },
+    {
+      "title": "RFC 8257 — Data Center TCP (DCTCP)",
+      "url": "https://www.rfc-editor.org/rfc/rfc8257"
+    },
+    {
+      "title": "Zhu et al., Congestion Control for Large-Scale RDMA Deployments (DCQCN, SIGCOMM 2015)"
+    },
+    {
+      "title": "Li et al., HPCC: High Precision Congestion Control (SIGCOMM 2019)"
+    },
+    {
+      "title": "Kumar et al., Swift: Delay is Simple and Effective for Congestion Control in the Datacenter (SIGCOMM 2020)"
+    },
+    {
+      "title": "Thakur, Rabenseifner, Gropp — Optimization of Collective Communication Operations in MPICH (2005)"
+    },
+    {
+      "title": "Kim et al., Technology-Driven, Highly-Scalable Dragonfly Topology (ISCA 2008)"
+    },
+    {
+      "title": "NVIDIA RDMA Aware Networks Programming User Manual"
+    },
+    {
+      "title": "linux-rdma/rdma-core (libibverbs, rdma_rxe)",
+      "url": "https://github.com/linux-rdma/rdma-core"
+    },
+    {
+      "title": "NCCL User Guide",
+      "url": "https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/index.html"
+    },
+    {
+      "title": "NVIDIA nccl-tests",
+      "url": "https://github.com/NVIDIA/nccl-tests"
+    },
+    {
+      "title": "Ultra Ethernet Consortium",
+      "url": "https://ultraethernet.org"
+    },
+    {
+      "title": "InfiniBand Architecture Specification (IBTA) Vol.1"
+    }
+  ],
+  "items": [
+    {
+      "id": "DCN-B01",
+      "level": "B",
+      "title": "DC 패브릭 지표: 지연 분해와 Bisection Bandwidth",
+      "goal": "데이터센터 네트워크 성능을 지연 구성요소와 bisection bandwidth로 정량화한다.",
+      "task": "패킷 하나의 종단 지연을 직렬화(크기/링크속도)·전파(m당 5ns)·스위치 처리·큐잉으로 분해하는 계산기를 Python으로 만들어 25/100/400/800G 링크와 홉 수별 표를 출력하고, 임의 그래프의 bisection bandwidth를 소규모 그래프에서 brute-force 최소 절단으로 계산해 검증한다.",
+      "tags": [
+        "latency-budget",
+        "bisection",
+        "serialization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-B02",
+      "level": "B",
+      "title": "Leaf-Spine(2단 Clos) 설계 계산기",
+      "goal": "스위치 radix와 uplink/downlink 비율로 leaf-spine 규모와 oversubscription을 계산한다.",
+      "task": "스위치 radix k, 포트 속도, 서버 NIC 속도, 목표 oversubscription을 입력받아 leaf/spine 개수·최대 서버 수·uplink 수·케이블 수를 출력하는 계산기를 구현하고, 64포트 400G 스위치로 3:1과 1:1 설계를 비교해 손으로 푼 값과 일치함을 확인한다.",
+      "tags": [
+        "clos",
+        "leaf-spine",
+        "oversubscription"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-B03",
+      "level": "B",
+      "title": "k-ary Fat-tree 생성기와 경로 수 검증",
+      "goal": "Al-Fares fat-tree의 구조(k³/4 호스트, 5k²/4 스위치)를 코드로 생성하고 검증한다.",
+      "task": "k-ary fat-tree(pod/edge/aggregation/core)를 그래프(networkx 또는 인접 리스트)로 생성해 호스트·스위치·링크 수 공식을 assert로 검증하고, 같은 edge/같은 pod/다른 pod 호스트 쌍의 최단 경로 수(1, k/2, (k/2)²)를 BFS로 세어 확인한다.",
+      "tags": [
+        "fat-tree",
+        "topology",
+        "graph"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-B04",
+      "level": "B",
+      "title": "Oversubscription과 트래픽 패턴: Max-flow 실측",
+      "goal": "토폴로지가 permutation·all-to-all 트래픽에서 실제로 내는 처리량을 계산한다.",
+      "task": "B03 생성기로 만든 fat-tree와 3:1 oversubscribed leaf-spine에 random permutation·all-to-all·rack-local 트래픽 행렬을 걸고 multi-commodity를 단순화한 max-flow(또는 ECMP 균등분할 부하 계산)로 링크 최대 부하와 호스트당 달성 처리량을 구해, oversubscription 비율과 패턴별 병목을 표로 정리한다.",
+      "tags": [
+        "oversubscription",
+        "max-flow",
+        "traffic-matrix"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-B05",
+      "level": "B",
+      "title": "ECMP 해시: 5-tuple → Next-hop 선택",
+      "goal": "ECMP가 플로우 단위로 경로를 고르는 원리와 해시 품질을 측정한다.",
+      "task": "5-tuple을 CRC32/CRC16/XOR-fold 해시 후 modulo N으로 next-hop을 고르는 ECMP 선택기를 C로 구현해 랜덤·순차 포트 플로우에서 버킷 분포의 카이제곱 값을 비교하고, elephant 플로우 M개가 N개 경로에서 충돌할 확률(생일 문제)을 해석식과 몬테카를로로 맞춘다.",
+      "tags": [
+        "ecmp",
+        "hashing",
+        "5-tuple"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-B06",
+      "level": "B",
+      "title": "ECMP 극성화(Polarization)와 Resilient Hashing",
+      "goal": "다단 ECMP에서 같은 해시가 부르는 경로 쏠림과 링크 장애 시 재해시 문제를 해결한다.",
+      "task": "leaf→spine→leaf 2단에서 두 단이 같은 해시 함수·시드를 쓰면 일부 경로만 쓰이는 polarization을 시뮬레이션으로 재현하고 스위치별 seed/필드 선택으로 해소하며, next-hop 하나가 죽을 때 modulo 해시와 resilient(consistent) 해시 테이블에서 재배치되는 플로우 비율을 측정한다.",
+      "tags": [
+        "ecmp",
+        "polarization",
+        "resilient-hashing",
+        "consistent-hashing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-B07",
+      "level": "B",
+      "title": "DC의 BGP: RFC 7938 eBGP 패브릭 시뮬레이션",
+      "goal": "데이터센터 L3 패브릭에서 eBGP(ASN 설계, path vector, ECMP multipath)가 동작하는 방식을 이해한다.",
+      "task": "leaf-spine에 RFC 7938 방식 ASN(spine 공용 ASN, leaf별 ASN)을 배정한 path-vector 라우팅 시뮬레이터를 Python으로 구현해 prefix 광고·AS_PATH loop 방지·multipath 선택을 보이고, 링크 장애 시 withdraw 전파 라운드 수와 BFD 유무에 따른 수렴 시간을 비교한다.",
+      "tags": [
+        "bgp",
+        "rfc7938",
+        "l3-fabric",
+        "convergence"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-B08",
+      "level": "B",
+      "title": "Incast: 다대일 동기 전송과 Goodput 붕괴",
+      "goal": "얕은 스위치 버퍼에서 incast가 TCP 타임아웃과 goodput 붕괴를 일으키는 메커니즘을 재현한다.",
+      "task": "N개 서버가 동시에 S바이트 블록을 한 클라이언트로 보내는 이산 이벤트 시뮬레이터(공유 출력 큐 B바이트, 단순화된 TCP 윈도우·RTO_min)를 만들어 N에 따른 goodput 곡선을 그리고, RTO_min 200ms→1ms·버퍼 증가·응답 크기 분할이 붕괴 지점을 어떻게 옮기는지 보인다 (TCP 기본 동작은 see:NET).",
+      "tags": [
+        "incast",
+        "tcp",
+        "shallow-buffer",
+        "see:NET"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-B09",
+      "level": "B",
+      "title": "RDMA 개념과 Verbs 객체: PD·MR·QP·CQ",
+      "goal": "RDMA verbs 객체 모델과 lkey/rkey 보호 모델을 Soft-RoCE에서 직접 확인한다.",
+      "task": "Lima VM에 rdma_rxe 디바이스를 만들고 ibv_devinfo -v로 속성(max_qp, max_mr_size 등)을 읽은 뒤, ibv_alloc_pd → ibv_reg_mr(접근 플래그별) → ibv_create_cq → ibv_create_qp를 호출하는 C 프로그램을 작성해 각 객체의 핸들·lkey/rkey를 출력하고 잘못된 접근 플래그로 원격 쓰기가 거부되는 경우를 정리한다.",
+      "tags": [
+        "rdma",
+        "verbs",
+        "soft-roce",
+        "memory-registration"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 Soft-RoCE 사용: sudo apt install rdma-core ibverbs-utils perftest librdmacm-dev; sudo modprobe rdma_rxe && sudo rdma link add rxe0 type rxe netdev eth0 (커널에 CONFIG_RDMA_RXE 없으면 모듈만 빌드). rxe는 CPU 에뮬레이션이라 지연·대역폭 절대값은 실 RNIC와 무관 → 상대 비교로 기록"
+    },
+    {
+      "id": "DCN-B10",
+      "level": "B",
+      "title": "RC QP 상태 전이와 SEND/RECV Ping-pong",
+      "goal": "RC QP를 RESET→INIT→RTR→RTS로 올리고 two-sided 메시지를 주고받는다.",
+      "task": "두 프로세스가 TCP 소켓으로 QPN·GID·PSN을 교환한 뒤 ibv_modify_qp로 RESET→INIT→RTR→RTS 전이를 수행하고 SEND/RECV ping-pong을 구현해 왕복 지연 히스토그램을 출력하며, RECV를 미리 post하지 않았을 때의 RNR NAK·재시도 동작을 관찰한다.",
+      "tags": [
+        "rdma",
+        "rc-qp",
+        "state-machine",
+        "send-recv"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 Soft-RoCE 사용: sudo apt install rdma-core ibverbs-utils perftest librdmacm-dev; sudo modprobe rdma_rxe && sudo rdma link add rxe0 type rxe netdev eth0 (커널에 CONFIG_RDMA_RXE 없으면 모듈만 빌드). rxe는 CPU 에뮬레이션이라 지연·대역폭 절대값은 실 RNIC와 무관 → 상대 비교로 기록"
+    },
+    {
+      "id": "DCN-B11",
+      "level": "B",
+      "title": "One-sided RDMA WRITE/READ vs SEND",
+      "goal": "one-sided 연산이 원격 CPU 개입 없이 동작하는 구조와 성능 특성을 비교한다.",
+      "task": "B10 코드에 원격 주소·rkey 교환을 추가해 RDMA WRITE, WRITE_WITH_IMM, READ를 구현하고 메시지 크기 8B~1MB에서 SEND와 지연·처리량을 측정한 뒤 perftest(ib_write_lat/ib_read_bw)와 대조하고, READ가 WRITE보다 느린 이유(왕복, outstanding READ 제한)를 설명한다.",
+      "tags": [
+        "rdma",
+        "one-sided",
+        "rdma-write",
+        "rdma-read",
+        "perftest"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 Soft-RoCE 사용: sudo apt install rdma-core ibverbs-utils perftest librdmacm-dev; sudo modprobe rdma_rxe && sudo rdma link add rxe0 type rxe netdev eth0 (커널에 CONFIG_RDMA_RXE 없으면 모듈만 빌드). rxe는 CPU 에뮬레이션이라 지연·대역폭 절대값은 실 RNIC와 무관 → 상대 비교로 기록"
+    },
+    {
+      "id": "DCN-M01",
+      "level": "M",
+      "title": "RDMA 전송 유형: RC·UC·UD와 연결 확장성",
+      "goal": "전송 유형별 신뢰성·연산 지원·QP 상태 비용 차이를 이해하고 대규모 클러스터 확장성 문제를 계산한다.",
+      "task": "UD QP로 Address Handle(GRH 포함)을 써서 데이터그램 SEND를 구현해 MTU 제한·순서 미보장을 확인하고, N노드×P프로세스 full-mesh RC 연결의 QP 수와 RNIC 컨텍스트 메모리를 계산해 UD·XRC·DCT(개념) 대안이 얼마나 줄이는지 표로 비교한다.",
+      "tags": [
+        "rdma",
+        "ud",
+        "rc",
+        "xrc",
+        "dct",
+        "scalability"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 Soft-RoCE 사용: sudo apt install rdma-core ibverbs-utils perftest librdmacm-dev; sudo modprobe rdma_rxe && sudo rdma link add rxe0 type rxe netdev eth0 (커널에 CONFIG_RDMA_RXE 없으면 모듈만 빌드). rxe는 CPU 에뮬레이션이라 지연·대역폭 절대값은 실 RNIC와 무관 → 상대 비교로 기록"
+    },
+    {
+      "id": "DCN-M02",
+      "level": "M",
+      "title": "RDMA 성능 패턴: Unsignaled·Inline·Doorbell Batching",
+      "goal": "RNIC 친화적인 verbs 사용 패턴으로 메시지율을 끌어올린다.",
+      "task": "작은 메시지 WRITE 스트림에서 매 WR signaled vs N개마다 signaled, IBV_SEND_INLINE, WR 체인으로 doorbell 한 번에 여러 WR post하기를 단계별로 적용해 메시지율 변화를 측정하고, 실 RNIC에서 PCIe MMIO/DMA 읽기 횟수 관점의 비용 모델(see:PCIE)로 개선 이유를 설명한다.",
+      "tags": [
+        "rdma",
+        "doorbell",
+        "inline",
+        "message-rate",
+        "see:PCIE"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 Soft-RoCE 사용: sudo apt install rdma-core ibverbs-utils perftest librdmacm-dev; sudo modprobe rdma_rxe && sudo rdma link add rxe0 type rxe netdev eth0 (커널에 CONFIG_RDMA_RXE 없으면 모듈만 빌드). rxe는 CPU 에뮬레이션이라 지연·대역폭 절대값은 실 RNIC와 무관 → 상대 비교로 기록"
+    },
+    {
+      "id": "DCN-M03",
+      "level": "M",
+      "title": "RoCEv2 패킷 해부: BTH·RETH·AETH와 ICRC",
+      "goal": "RoCEv2 헤더 스택(Eth/IP/UDP 4791/IB 전송 헤더)을 비트 단위로 파싱한다.",
+      "task": "RoCEv2 패킷 빌더/파서를 C로 구현해 BTH(opcode, P_Key, dest QP, PSN, AckReq), RETH(VA, rkey, len), AETH(syndrome, MSN)를 인코딩·디코딩하고 ICRC(불변 필드 마스킹 후 CRC32)를 계산해 테스트 벡터와 대조하며, Lima rxe 인터페이스에서 tcpdump로 잡은 pcap을 같은 파서로 디코드해 WRITE 첫/중간/끝 패킷의 opcode를 확인한다 (UDP/IP 파싱 기초는 see:COMM-A04).",
+      "tags": [
+        "roce",
+        "bth",
+        "icrc",
+        "packet-parser",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-M04",
+      "level": "M",
+      "title": "PFC(802.1Qbb) 무손실 이더넷과 헤드룸 계산",
+      "goal": "Priority Flow Control의 XOFF/XON 동작과 무손실을 보장하는 버퍼 헤드룸을 계산한다.",
+      "task": "케이블 길이·링크 속도·MTU·PAUSE 응답 시간으로 PFC 헤드룸을 계산하는 공식을 구현해 100G/400G·100m 링크 값을 구하고, 2단 스위치 이산 이벤트 시뮬레이터에서 우선순위별 XOFF/XON 임계값을 적용해 incast 시 무손실을 확인한 뒤 피해자 플로우의 HOL blocking·congestion spreading을 측정한다.",
+      "tags": [
+        "pfc",
+        "lossless",
+        "headroom",
+        "hol-blocking"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-M05",
+      "level": "M",
+      "title": "PFC 데드락: 순환 버퍼 의존성 탐지",
+      "goal": "PFC가 루프성 경로에서 만드는 순환 버퍼 의존(CBD)과 데드락을 재현하고 방지한다.",
+      "task": "링크 장애 후 재라우팅으로 leaf-spine-leaf-spine 경로가 생기는 시나리오를 시뮬레이션해 PFC 데드락을 재현하고, (스위치,입력포트,우선순위) 노드의 buffer dependency graph에서 사이클을 DFS로 탐지하는 검사기를 구현해 up-down 라우팅·홉별 우선순위 상승·PFC watchdog 대책의 효과를 비교한다.",
+      "tags": [
+        "pfc",
+        "deadlock",
+        "cbd",
+        "cycle-detection"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-M06",
+      "level": "M",
+      "title": "ECN 마킹과 DCTCP",
+      "goal": "큐 임계값 기반 ECN 마킹과 DCTCP의 α 기반 윈도우 감소로 낮은 큐 점유를 유지하는 원리를 구현한다.",
+      "task": "단일 병목 큐 시뮬레이터에 임계값 K 즉시 마킹과 DCTCP 송신자(α ← (1−g)α + gF, cwnd ← cwnd(1−α/2))를 구현해 Reno 대비 큐 길이 시계열과 처리량을 비교하고, RFC 8257의 K 하한(K > C·RTT/7) 근거를 실험으로 확인한다 (Reno/CUBIC 구현은 see:NET, 스위치 WRED/ECN 마킹 HW는 see:NETHW).",
+      "tags": [
+        "ecn",
+        "dctcp",
+        "congestion-control",
+        "see:NET",
+        "see:NETHW"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-M07",
+      "level": "M",
+      "title": "DCQCN: RoCE 혼잡 제어 시뮬레이터",
+      "goal": "DCQCN의 CP(스위치 마킹)·NP(CNP 생성)·RP(송신률 조절) 상태기계를 구현해 거동을 이해한다.",
+      "task": "RED식 확률 ECN 마킹 스위치, 50µs당 최대 1개 CNP를 내는 NP, rate decrease(Rc ← Rc(1−α/2))·fast recovery·additive/hyper increase를 갖는 RP를 이산 이벤트로 구현해 8→1 incast에서 큐 길이·송신률 수렴·공정성을 그리고, Kmin/Kmax/Pmax와 타이머 파라미터 민감도와 PFC와의 상호작용을 정리한다.",
+      "tags": [
+        "dcqcn",
+        "roce",
+        "cnp",
+        "congestion-control"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-M08",
+      "level": "M",
+      "title": "지연 기반 혼잡 제어: TIMELY와 Swift",
+      "goal": "RTT(지연) 신호를 쓰는 DC 혼잡 제어가 ECN 기반과 어떻게 다른지 비교한다.",
+      "task": "M07 시뮬레이터에 TIMELY(RTT gradient 기반 증감, Tlow/Thigh)와 Swift(fabric/host 지연 분리, target delay를 홉 수·플로우 수로 스케일링하는 AIMD)를 추가해 incast와 장거리 혼합 시나리오에서 큐 지연 p99·처리량·공정성을 DCQCN과 비교하고, 하드웨어 타임스탬프 정확도가 왜 전제인지 설명한다.",
+      "tags": [
+        "timely",
+        "swift",
+        "delay-based",
+        "congestion-control"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-M09",
+      "level": "M",
+      "title": "HPCC: INT 기반 정밀 혼잡 제어",
+      "goal": "스위치가 패킷에 싣는 큐 길이·전송률(INT)로 링크 이용률을 계산하는 HPCC를 구현한다.",
+      "task": "홉마다 (qlen, txBytes, timestamp, B)를 패킷에 추가하는 스위치 모델과 ACK로 받은 INT로 링크 이용률 U = qlen/(B·T) + txRate/B를 계산해 목표 η=0.95로 윈도우를 조정하는 HPCC 송신자를 구현하고, DCQCN 대비 큐 길이와 수렴 속도를 같은 시나리오에서 비교한다.",
+      "tags": [
+        "hpcc",
+        "int",
+        "congestion-control"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-M10",
+      "level": "M",
+      "title": "ECMP 너머의 부하 분산: Flowlet·Packet Spraying",
+      "goal": "플로우 단위 ECMP의 한계와 flowlet 스위칭·패킷 스프레이의 재정렬 비용을 정량화한다.",
+      "task": "leaf-spine 시뮬레이터에 플로우 ECMP, flowlet(유휴 간격 δ > 경로 지연 차) 재선택, 패킷 단위 스프레이+수신측 재정렬 버퍼를 구현해 웹서치/데이터마이닝 플로우 크기 분포에서 FCT p50/p99와 재정렬 깊이를 비교하고, 비대칭(링크 장애) 상황에서 CONGA식 혼잡 인지 선택의 이점을 보인다.",
+      "tags": [
+        "load-balancing",
+        "flowlet",
+        "packet-spraying",
+        "conga"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-M11",
+      "level": "M",
+      "title": "Dragonfly 토폴로지와 UGAL 적응 라우팅",
+      "goal": "저직경 Dragonfly의 규모 공식과 minimal/Valiant/UGAL 라우팅 성능을 비교한다.",
+      "task": "(a, p, h) 파라미터로 balanced dragonfly(a=2p=2h)를 생성해 그룹·라우터·노드 수와 직경을 검증하고, uniform·adversarial(그룹 i→i+1) 트래픽에서 minimal, Valiant, UGAL 라우팅의 처리량과 지연을 사이클 시뮬레이터로 비교해 fat-tree 대비 케이블·스위치 비용을 정리한다.",
+      "tags": [
+        "dragonfly",
+        "ugal",
+        "valiant",
+        "adaptive-routing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-M12",
+      "level": "M",
+      "title": "Collective α-β 비용 모델: Ring·Tree·Halving-Doubling",
+      "goal": "집합 통신 알고리즘들의 지연(α)·대역폭(β)·연산(γ) 항을 유도하고 메시지 크기별 최적 알고리즘을 고른다.",
+      "task": "all-reduce·reduce-scatter·all-gather·broadcast에 대해 ring, binary/double binary tree, recursive doubling, recursive halving-doubling(Rabenseifner)의 비용식을 유도해 계산기로 만들고, p=8~1024와 메시지 8B~1GB에서 최적 알고리즘 지도와 교차점을 그린다 (ring all-reduce 구현 기초는 see:GPUSYS-A02).",
+      "tags": [
+        "collectives",
+        "alpha-beta",
+        "all-reduce",
+        "see:GPUSYS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-M13",
+      "level": "M",
+      "title": "Recursive Halving-Doubling All-Reduce 구현",
+      "goal": "halving-doubling(Rabenseifner) all-reduce를 직접 구현하고 비(非) 2의 거듭제곱 처리를 익힌다.",
+      "task": "p개 스레드(또는 프로세스+소켓)로 recursive halving reduce-scatter + recursive doubling all-gather를 구현해 float 배열 합을 참조 결과와 비교 검증하고, p가 2의 거듭제곱이 아닐 때의 사전 축약 단계를 추가한 뒤 단계별 전송 바이트를 계측해 M12 비용식과 일치시킨다.",
+      "tags": [
+        "collectives",
+        "halving-doubling",
+        "rabenseifner",
+        "all-reduce"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-A01",
+      "level": "A",
+      "title": "계층적(2D) All-Reduce와 Rail-optimized 토폴로지",
+      "goal": "노드 내 NVLink와 노드 간 스케일아웃 네트워크를 함께 쓰는 계층적 collective를 모델링한다.",
+      "task": "노드 내 reduce-scatter(NVLink) → 레일별 노드 간 all-reduce(NIC) → 노드 내 all-gather 3단계 알고리즘을 구현·시뮬레이션해 flat ring 대비 시간을 비교하고, GPU i가 레일 i 스위치에 붙는 rail-optimized 배치와 일반 ToR 배치에서 노드 간 트래픽 홉 수·스위치 tier를 계산한다 (NVLink/PCIe 대역폭 값은 see:GPUSYS-A01).",
+      "tags": [
+        "hierarchical-allreduce",
+        "rail-optimized",
+        "nvlink",
+        "see:GPUSYS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-A02",
+      "level": "A",
+      "title": "MoE용 All-to-All: 알고리즘과 패브릭 부하",
+      "goal": "Expert parallelism의 all-to-all 통신량·알고리즘·네트워크 혼잡을 분석한다.",
+      "task": "토큰 라우팅 행렬(top-k, 불균형 계수 조절)에서 GPU 쌍별 바이트를 계산해 직접 pairwise 교환, 노드 내 집약 후 노드 간 전송하는 계층적 all-to-all의 시간을 α-β 모델로 비교하고, fat-tree 시뮬레이터에 트래픽을 실어 incast성 핫스팟과 링크 부하 분포를 측정한다 (병렬화별 통신량 산정은 see:AISYS).",
+      "tags": [
+        "all-to-all",
+        "moe",
+        "expert-parallel",
+        "see:AISYS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-A03",
+      "level": "A",
+      "title": "NCCL 내부 구조: 토폴로지 탐지·채널·프로토콜",
+      "goal": "NCCL이 토폴로지를 탐지해 ring/tree 채널과 LL/LL128/Simple 프로토콜을 고르는 과정을 해석한다.",
+      "task": "NCCL_DEBUG=INFO 로그와 NCCL_TOPO_DUMP_FILE 형식의 토폴로지 XML(공개 샘플 또는 직접 작성)을 파싱해 GPU-NIC-PCIe 스위치 트리, 채널별 ring 순서, 선택된 algo/proto를 표로 재구성하는 Python 도구를 만들고, nccl-tests의 algbw→busbw 변환식(all-reduce 2(n−1)/n 등)을 구현해 공개 결과표를 해석한다.",
+      "tags": [
+        "nccl",
+        "topology",
+        "busbw",
+        "collectives"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-A04",
+      "level": "A",
+      "title": "nccl-tests 실측과 α-β 모델 대조",
+      "goal": "실제 다중 GPU에서 collective 성능을 측정하고 모델과의 차이를 설명한다.",
+      "task": "클라우드 4~8 GPU 인스턴스에서 all_reduce_perf/all_gather_perf/alltoall_perf를 8B~4GB로 스윕하고 NCCL_ALGO(Ring/Tree)·NCCL_PROTO를 바꿔 busbw 곡선을 얻은 뒤, M12 α-β 모델에 측정 α·β를 피팅해 소형 메시지 지연 구간과 대역폭 포화 구간의 오차 원인을 정리한다.",
+      "tags": [
+        "nccl",
+        "nccl-tests",
+        "benchmark",
+        "alpha-beta"
+      ],
+      "env": "gpu",
+      "env_note": "NVIDIA GPU 4~8개가 NVLink/PCIe로 연결된 클라우드 인스턴스(예: 8×H100/A100) 1~2대, CUDA + NCCL + nccl-tests 빌드; 비용 때문에 짧은 세션으로 스윕 스크립트를 미리 준비"
+    },
+    {
+      "id": "DCN-A05",
+      "level": "A",
+      "title": "Scale-up vs Scale-out: NVLink·NVSwitch·UALink vs 이더넷/IB",
+      "goal": "스케일업 도메인과 스케일아웃 패브릭의 대역폭·지연·규모·비용 트레이드오프를 정량 비교한다.",
+      "task": "NVL72급 NVSwitch 도메인, UALink 스케일업, 400/800G RoCE·InfiniBand 스케일아웃을 GPU당 대역폭·도메인 크기·홉 지연·스위치 수·전력 파라미터로 표현한 모델을 만들고, tensor parallel 그룹이 스케일업 도메인 안/밖에 있을 때 층당 all-reduce 시간 차를 계산해 도메인 크기 선택 근거를 제시한다 (링크 대역폭 계산은 see:GPUSYS-A01).",
+      "tags": [
+        "scale-up",
+        "nvswitch",
+        "ualink",
+        "scale-out",
+        "see:GPUSYS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-A06",
+      "level": "A",
+      "title": "InfiniBand: 크레딧 흐름 제어와 Subnet Manager 라우팅",
+      "goal": "IB의 크레딧 기반 무손실 링크와 SM의 LID 할당·포워딩 테이블 계산을 구현한다.",
+      "task": "VL별 크레딧 기반 링크 흐름 제어를 시뮬레이션해 PFC(pause 기반)와 버퍼 요구량을 비교하고, fat-tree 그래프에서 SM처럼 LID를 할당하고 min-hop과 fat-tree(목적지 기반 분산) 라우팅으로 스위치별 LFT를 계산하는 mini SM을 구현해 모든 쌍 경로의 도달성·데드락 자유(채널 의존 그래프 무사이클)·링크 부하 균형을 검증한다.",
+      "tags": [
+        "infiniband",
+        "credit-flow-control",
+        "subnet-manager",
+        "lft"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-A07",
+      "level": "A",
+      "title": "손실 복구: Go-Back-N(RoCE) vs Selective Repeat(UEC)",
+      "goal": "RoCE RC의 go-back-N 재전송과 Ultra Ethernet 전송(패킷 스프레이·SACK·트리밍)의 손실 내성을 비교한다.",
+      "task": "손실률·RTT·BDP를 파라미터로 go-back-N, selective repeat+SACK, 패킷 트리밍(헤더만 전달해 빠른 NACK) 송수신 상태기계를 시뮬레이터로 구현해 손실률 10⁻⁶~10⁻²에서 goodput을 비교하고, 무손실(PFC) 의존을 버리는 UEC 설계 동기(out-of-order 배치, 일시적 연결)를 정리한다.",
+      "tags": [
+        "uec",
+        "ultra-ethernet",
+        "go-back-n",
+        "selective-repeat",
+        "packet-trimming"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-A08",
+      "level": "A",
+      "title": "SHARP: 스위치 내 리덕션(In-network Aggregation)",
+      "goal": "스위치가 리덕션을 수행할 때 all-reduce의 대역폭·지연 비용이 어떻게 바뀌는지 모델링한다.",
+      "task": "fat-tree 위 집계 트리(leaf→spine 스위치에서 부분합)를 시뮬레이션하는 all-reduce를 구현해 호스트당 송신량이 2(n−1)/n·S에서 S로 줄어드는 것을 확인하고, ring/tree 대비 시간·스위치 메모리 한계로 인한 청크 분할·부동소수 합산 순서(결정성)를 분석한다.",
+      "tags": [
+        "sharp",
+        "in-network-computing",
+        "all-reduce",
+        "aggregation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-A09",
+      "level": "A",
+      "title": "패브릭 텔레메트리: INT·카운터로 혼잡/PFC Storm 진단",
+      "goal": "INT·포트 카운터·PFC pause 통계로 패브릭 문제 지점을 찾아내는 파이프라인을 만든다.",
+      "task": "시뮬레이터가 내보내는 홉별 INT 메타데이터(스위치 ID, 큐 길이, 지연)와 포트 카운터(ECN 마킹, pause 송수신, drop)를 수집해 핫스팟 링크·혼잡 근원(root) 포트·PFC storm(고장 NIC의 지속 pause)을 자동 판정하는 분석기를 구현하고, 의도적으로 주입한 3가지 장애를 정확히 지목하는지 검증한다.",
+      "tags": [
+        "telemetry",
+        "int",
+        "pfc-storm",
+        "troubleshooting"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-A10",
+      "level": "A",
+      "title": "광 링크 기초: 모듈·도달거리·전력 예산",
+      "goal": "DC 광 인터커넥트(SR/DR/FR, PAM4 레인, LPO/CPO)의 링크 예산과 클러스터 전력·비용 영향을 계산한다.",
+      "task": "송신 출력·수신 감도·광섬유 손실(dB/km)·커넥터 손실·마진으로 링크 전력 예산 계산기를 만들어 400G-DR4/800G-DR8/FR4 사례를 검증하고, 32K GPU 클러스터의 트랜시버 수·모듈 전력(DSP vs LPO vs CPO)·DAC/AEC 대체 가능 구간을 산정한다 (PAM4/RS-FEC BER는 see:NETHW, see:SIV).",
+      "tags": [
+        "optics",
+        "link-budget",
+        "pam4",
+        "cpo",
+        "see:NETHW"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DCN-A11",
+      "level": "A",
+      "title": "설계 면접: 수만 GPU 학습 클러스터 패브릭",
+      "goal": "앞선 모델들을 엮어 대규모 AI 학습 패브릭을 설계하고 트레이드오프를 방어한다.",
+      "task": "16K~32K GPU 학습 클러스터에 대해 스케일업 도메인, rail-optimized 3단 Clos(또는 2단+멀티플레인) 스위치·광모듈 수, RoCE(DCQCN/PFC) vs IB vs UEC 선택, 장애 도메인과 링크 장애율로 인한 job 중단 빈도를 수치로 산출한 설계 문서와 계산 스크립트를 작성하고, 한 스텝의 통신 시간(DP all-reduce + TP + EP all-to-all) 예산을 A01·A02 모델로 검증한다.",
+      "tags": [
+        "system-design",
+        "ai-cluster",
+        "clos",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

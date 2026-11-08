@@ -1,6 +1,6 @@
 # Rivian — Staff Embedded Software Engineer, Silicon & Sensing Systems (Silicon Validation) · Context
 
-> **최종 갱신**: 2026-11-01 · **상태**: 💻 기술 스크린 **완료 (10-30 금, 45분, Manjiang Zhang [추정: 예정대로])** → 리크루터 연락 대기 (온사이트 4라운드 예상) · [온사이트 플랜](2026-10-31_rivian_onsite_plan.html) · [N01 PCIe/lspci](2026-10-31_N01_pcie_lspci_ltssm.html) · [N02 코딩 회고](2026-10-31_N02_screen_coding_retro.html) · [스크린 deck](2026-10-25_rivian_hm_screen_prep.html)
+> **최종 갱신**: 2026-11-04 · **상태**: 💻 HM 스크린 **완료 (10-30 금, 45분, Manjiang Zhang)** → **후보 비교 중** (리크루터 11-04: "다른 HM 스크린 몇 개를 다음 주에 마무리 후 진행할 후보 알려줌" → 결과 ~11-11 전후 [추정]) · [온사이트 플랜](2026-10-31_rivian_onsite_plan.html) · [N01 PCIe/lspci](2026-10-31_N01_pcie_lspci_ltssm.html) · [N02 코딩 회고](2026-10-31_N02_screen_coding_retro.html) · [스크린 deck](2026-10-25_rivian_hm_screen_prep.html)
 > **JD**: https://careers.rivian.com/careers-home/jobs/34042?lang=en-us · **위치**: Palo Alto, CA (607 Hansen Way) · onsite 추정 · **연봉 밴드**: base $186,000 – $232,000 (Bay Area) + bonus + equity
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
@@ -18,7 +18,8 @@
 - **핵심 어필**: ① pre-/post-silicon bring-up (Cortex-R8/R82/M0+, FPGA 프로토타입, RTL freeze 전 SoC verification) ② 페리페럴·고속 인터페이스(PCIe 3/4/5/6, I2C, SPI, DMA, DRAM, SPMI, RFFE) 루트코즈 ③ 테스트 인프라·자동화(Python, chamber 테스트 플랫폼 SDK, shmoo, factory test-node 설계) + perf 튜닝
 - **최대 갭/리스크**: **레벨** — Apple ICT3라고 밝힘 → Staff(RIV-6)가 아닌 Senior로 다운레벨 제안 위험. Solidigm Staff 타이틀 + Apple 현재 TC로 Staff 앵커링 필요. 그 외 Petalinux/Zynq, camera(MIPI CSI-2/ISP), "Why leave Apple after ~10 months"
 - **예상 인터뷰 포맷**: 리크루터 → HM 연결 → **Technical screen** → **Onsite 4라운드 (Technical 2 + Behavioral 2)** [확인됨: 리크루터 10-17]
-- **다음 액션 (10-31 갱신)**: 기술 스크린 완료 → 리크루터 콜에서 온사이트 형식·라운드 주제·레벨(Staff) 확인 → [온사이트 플랜](2026-10-31_rivian_onsite_plan.html) N01–N10 진행. 스크린에서 **RTL 불필요 · silicon + board validation · 주로 C** 확인 [확인됨]
+- **다음 액션 (11-04 갱신)**: 리크루터 Anne Haber 메일 [확인됨 11-04] — Manjiang과 "good call"이었다고 들음, **다른 후보 HM 스크린을 다음 주에 마무리 → 그 뒤 진행할 후보 통보**. ① 짧은 감사·관심 회신 (§6 초안) ② 결과 대기 동안 온사이트 준비는 유지하되 **N08 behavioral STAR 뱅크** 우선 ③ **11-12(수)까지 연락 없으면 follow-up** ④ 다음 단계가 온사이트 직행인지 별도 technical screen인지 확인 (10-17 안내는 "HM → technical screening → onsite"였고, 리크루터가 10-30 콜을 "HM screen"이라 부름 → **technical screen이 한 번 더 있을 수 있음** [추정])
+- ~~다음 액션 (10-31 갱신)~~: 기술 스크린 완료 → 리크루터 콜에서 온사이트 형식·라운드 주제·레벨(Staff) 확인 → [온사이트 플랜](2026-10-31_rivian_onsite_plan.html) N01–N10 진행. 스크린에서 **RTL 불필요 · silicon + board validation · 주로 C** 확인 [확인됨]
 - ~~다음 액션 (10-17)~~: ① 리크루터에게 레쥬메 전달(요청받음) + **타깃 레벨(Staff) 재확인** ② HM 콜 대비 60–90초 TMAY + "SoC 검증 경험" 2분 스토리 ③ 4.3 질문표 중 메모리 테스트·레지스터 드라이버·DMA·perf 벤치마크 C 코딩 우선 연습
 
 ---
@@ -273,6 +274,7 @@ Rivian Automotive(NASDAQ: RIVN) — 전기 픽업 R1T, SUV R1S, Amazon 등 상�
 | 2026-10-28 | 면접관 **다시 Manjiang Zhang으로 확정** (Iris 변경 취소) | deck을 Manjiang 기준으로 되돌림 (§1 Manjiang · §1B Iris 보관 · TMAY/§2/§9/§10은 Iris판을 접어서 보관). L1–L5·§5.5는 JD 우대사항이라 P1/P2로 유지 (L2 PCIe·L1 Zynq 우선) |
 | 2026-10-30 | **기술 스크린 완료** (45분) | 질문: PCIe/lspci/LTSSM·L0 4개 + C 니블 뒤집기. lspci는 "잘 모른다(Mac에서 사용)"고 답함, 코딩 로직은 정답. Don이 RTL 필요 여부 질문 → **필요 없음** [확인됨]. 역할 = silicon + board validation, 주로 C. "리크루터가 연락할 것" |
 | 2026-10-31 | 온사이트 준비 시작 | [온사이트 플랜](2026-10-31_rivian_onsite_plan.html) + N01(PCIe/lspci/LTSSM) · N02(코딩 회고) 작성, 코드 `onsitePrep/` ALL PASS. 다음: 리크루터 콜 → N03·N04·N08 |
+| 2026-11-04 | 리크루터 메일 (Anne Haber) | "I heard you had a good call with Manjiang yesterday. I hope the feeling is mutual :) We're wrapping up a few more HM screens over the next week, and then I should have an update on whom the team would like to move forward with." → 10-30 콜 = **HM 스크린**(리크루터 표현). 긍정 톤이지만 **다른 후보와 비교 중**, 결정은 ~1주 뒤 [추정 ~11-11]. "yesterday"는 10-30과 날짜가 안 맞음 → 메일이 늦게 작성됐거나 표현상 느슨한 것으로 보임 [추정] (11-03에 별도 콜이 있었다면 정정 필요) |
 | 2026-11-01 | LP 트랙 본문 완성 | [LP 트랙](2026-10-31_LP00_linux_pcie_track.html) §0.5 초보용 큰 그림 + 항목별 "쉽게 말하면" 추가 · [LP00A PCIe·Ethernet·MIPI 입문](2026-10-31_LP00A_io_primer_pcie_ethernet_mipi.html) · LP01–LP17 노트 17개(초보 설명·꼬리 질문·영어 답, Lima VM/QEMU 실제 출력·코드 `onsitePrep/lp02–lp16`). 다음: LP03·LP13·LP15 읽기 → LP18 Q 뱅크 |
 
 ---
@@ -286,6 +288,13 @@ Rivian Automotive(NASDAQ: RIVN) — 전기 픽업 R1T, SUV R1S, Amazon 등 상�
 - 잘한 점 / 아쉬운 점:
 - 다음 라운드에 반영할 것:
 -->
+
+### 2026-11-04 · 리크루터 업데이트 (메일)
+- 내용: Manjiang과 좋은 콜이었다고 전달받음 · 다른 HM 스크린 몇 개를 다음 주에 마무리 → 진행할 후보 통보 예정 [확인됨]
+- 해석: 탈락 통보가 아니라 **파이프라인 유지 + 비교 단계**. "good call" 피드백은 긍정 신호지만 확정은 아님 [추정]
+- 회신 초안 (짧게, 영어):
+  - "Hi Anne, thanks for the update! I really enjoyed the conversation with Manjiang. The team's work on validating the in-house SoC lines up closely with my pre-silicon bring-up and SoC validation background, and I'm very excited about the role. Looking forward to hearing from you. Best, Don"
+- 다음: 11-12까지 연락 없으면 follow-up · 다음 단계 형식(technical screen 추가 여부 · 온사이트 라운드 주제) 확인
 
 ### 2026-10-30 · 기술 스크린 (45분) · 면접관 Silicon Validation 매니저 (Manjiang Zhang 예정대로 [추정])
 - 받은 질문:

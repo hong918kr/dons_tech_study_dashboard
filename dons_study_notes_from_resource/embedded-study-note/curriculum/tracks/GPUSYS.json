@@ -1,0 +1,283 @@
+{
+  "id": "GPUSYS",
+  "intro": "GPU를 하나의 시스템으로 보면 드라이버 스택, 커맨드 버퍼와 링, 도어벨, GPU MMU, 컨텍스트 스위치·선점, GPU 내부 펌웨어 마이크로컨트롤러(GSP 등), 전력 관리, PCIe/NVLink 인터커넥트가 맞물린 거대한 펌웨어·드라이버 문제다. NVIDIA·AMD·Apple GPU 팀과 AI 가속기 회사의 시스템 소프트웨어/펌웨어 직무는 바로 이 층을 다루며, Don의 SSD 펌웨어(NVMe 큐·도어벨·DMA) 경험이 가장 직접적으로 전이되는 영역이다. 대부분 항목은 호스트 C로 GPU와 드라이버를 모델링해 검증한다.",
+  "goals": [
+    "애플리케이션 API에서 UMD·KMD·펌웨어·하드웨어까지 GPU 작업 제출 경로를 설명하고 모델로 구현할 수 있다",
+    "커맨드 버퍼 포맷, 링 버퍼·도어벨, 펜스, 인터럽트 링을 설계·구현할 수 있다",
+    "GPU MMU 페이지 테이블, 페이지 폴트, unified memory 마이그레이션을 모델링할 수 있다",
+    "스케줄링, 선점, 행(hang) 감지·복구, GPU 펌웨어 RPC를 설계할 수 있다",
+    "전력 관리, 텔레메트리, ECC/RAS, PCIe/NVLink·멀티 GPU 통신 비용을 정량적으로 분석할 수 있다"
+  ],
+  "prereq": ["OS", "PCIE", "MEM", "GPGPU"],
+  "refs": [
+    {"title": "Linux GPU Driver Developer's Guide (DRM, GEM, scheduler, dma-buf)", "url": "https://www.kernel.org/doc/html/latest/gpu/index.html"},
+    {"title": "NVIDIA open-gpu-kernel-modules (오픈소스 커널 드라이버, GSP RPC 참고)", "url": "https://github.com/NVIDIA/open-gpu-kernel-modules"},
+    {"title": "envytools — NVIDIA GPU 하드웨어 문서화 (nouveau)", "url": "https://envytools.readthedocs.io/"},
+    {"title": "NVML API Reference (NVIDIA Management Library)", "url": "https://docs.nvidia.com/deploy/nvml-api/"},
+    {"title": "Fabian Giesen — A trip through the Graphics Pipeline 2011", "url": "https://fgiesen.wordpress.com/2011/07/09/a-trip-through-the-graphics-pipeline-2011-index/"},
+    {"title": "AMD amdgpu driver documentation (kernel.org)", "url": "https://www.kernel.org/doc/html/latest/gpu/amdgpu/index.html"},
+    {"title": "NVIDIA Multi-Instance GPU (MIG) User Guide", "url": "https://docs.nvidia.com/datacenter/tesla/mig-user-guide/"}
+  ],
+  "items": [
+    {
+      "id": "GPUSYS-B01",
+      "level": "B",
+      "title": "GPU 소프트웨어 스택 지도: API → UMD → KMD → FW",
+      "goal": "커널 런치/드로우 호출이 사용자 모드 드라이버, 커널 드라이버, 펌웨어를 거쳐 하드웨어에 도달하는 경로를 이해한다",
+      "task": "UMD(커맨드 생성·버퍼 패치), KMD(ioctl 검증·메모리 상주화·제출), FW(큐 소비)를 함수 계층으로 나눈 C mock을 작성해 cudaLaunchKernel/vkQueueSubmit에 해당하는 호출 하나의 전 경로를 로그로 추적하고, 각 계층의 책임과 실패 지점을 표로 정리한다.",
+      "tags": ["driver-stack", "umd", "kmd", "architecture"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-B02",
+      "level": "B",
+      "title": "BAR와 MMIO: GPU 레지스터 접근 모델",
+      "goal": "PCIe BAR를 통한 레지스터 공간과 VRAM aperture 접근, Resizable BAR 개념을 이해한다",
+      "task": "BAR0(MMIO 레지스터)와 BAR1(VRAM aperture)을 가진 mock GPU 디바이스를 정의하고 volatile 접근 래퍼, 레지스터 읽기 부작용(read-to-clear), 쓰기 순서 보장(메모리 배리어 자리)을 구현해 테스트하며, aperture 크기 제한 시 VRAM 창을 이동하는 로직을 작성한다.",
+      "tags": ["pcie-bar", "mmio", "register", "see:PCIE"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-B03",
+      "level": "B",
+      "title": "커맨드 버퍼 패킷 인코딩과 검증기",
+      "goal": "GPU 커맨드 스트림 포맷(헤더·opcode·payload)과 드라이버 측 검증의 필요성을 이해한다",
+      "task": "PM4 유사 패킷 포맷(type, opcode, dword count)으로 SET_REG, DISPATCH, COPY, WRITE_FENCE, NOP 패킷 인코더와 디코더를 C로 구현하고, 범위 밖 레지스터 쓰기·잘린 패킷을 거부하는 KMD 검증기를 퍼즈 테스트한다.",
+      "tags": ["command-buffer", "packet", "encoding", "validation"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-B04",
+      "level": "B",
+      "title": "링 버퍼와 도어벨: 호스트-GPU 제출 큐",
+      "goal": "wptr/rptr 기반 링 버퍼 제출과 도어벨 쓰기, wraparound 처리를 GPU 맥락에서 구현한다",
+      "task": "공유 메모리 링(크기 2^n dword), 드라이버가 갱신하는 wptr, GPU 스레드가 갱신하는 rptr, 도어벨 MMIO 쓰기를 pthread로 모델링하고, 링 끝에서 패킷이 쪼개지지 않게 NOP 패딩하는 규칙과 가득 참 대기를 구현해 스트레스 테스트한다.",
+      "tags": ["ring-buffer", "doorbell", "submission", "see:DS", "see:PCIE"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-B05",
+      "level": "B",
+      "title": "펜스와 타임라인 세마포어",
+      "goal": "GPU가 메모리에 쓰는 시퀀스 번호로 완료를 추적하는 펜스와 타임라인 동기화를 구현한다",
+      "task": "GPU 모델이 패킷 처리 후 fence 주소에 seqno를 쓰도록 하고, 드라이버 측 fence_wait(timeout), signaled 판정(32비트 wraparound 안전 비교), 큐 간 의존성을 위한 타임라인 세마포어 wait/signal을 구현해 순서 보장 테스트를 작성한다.",
+      "tags": ["fence", "synchronization", "timeline-semaphore"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-B06",
+      "level": "B",
+      "title": "GPU 메모리 관리: Buffer Object와 서브할당",
+      "goal": "VRAM/GTT buffer object 할당, 정렬 요구, 서브할당자와 eviction을 이해한다",
+      "task": "VRAM 힙에서 정렬(4KB/64KB/2MB) 요구를 만족하는 BO 할당자와 작은 할당용 서브할당자(slab)를 구현하고, 메모리 부족 시 LRU BO를 시스템 메모리로 evict하는 정책을 넣어 단편화율과 eviction 횟수를 워크로드별로 측정한다.",
+      "tags": ["memory-management", "allocator", "eviction", "see:MEM"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-B07",
+      "level": "B",
+      "title": "GPU MMU: 다단계 페이지 테이블",
+      "goal": "GPU 가상 주소 공간과 다단계 페이지 테이블, 큰 페이지 매핑을 구현한다",
+      "task": "49비트 GPU VA를 4단계 테이블로 변환하는 페이지 테이블 모델(PTE 유효/쓰기/캐시 속성 비트, 64KB·2MB 큰 페이지 지원)을 C로 구현해 map/unmap/translate를 제공하고, 무작위 매핑에 대한 참조 해시맵과 변환 결과 일치 및 테이블 메모리 오버헤드를 측정한다.",
+      "tags": ["mmu", "page-table", "virtual-memory", "see:OS"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-B08",
+      "level": "B",
+      "title": "Unified Memory vs Discrete: Zero-copy 실측",
+      "goal": "Apple Silicon unified memory와 discrete GPU의 데이터 이동 비용 차이를 실측·모델로 비교한다",
+      "task": "Metal에서 shared/private/managed storage 버퍼로 같은 커널을 실행해 CPU 쓰기→GPU 읽기 지연과 처리량을 측정하고, PCIe Gen4 x16 discrete GPU의 복사 시간 모델(지연 + 크기/대역폭)과 비교해 어느 크기부터 복사 비용이 커널 시간을 넘는지 계산한다.",
+      "tags": ["unified-memory", "zero-copy", "metal", "pcie"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-M01",
+      "level": "M",
+      "title": "GPU 인터럽트와 IH 링 처리",
+      "goal": "GPU가 인터럽트 이벤트를 링에 기록하고 드라이버가 top/bottom half로 처리하는 구조를 구현한다",
+      "task": "GPU 모델이 이벤트(fence 완료, page fault, 에러)를 IH 링에 엔트리로 쓰고 MSI를 발생시키면, 드라이버 top half가 rptr만 읽어 워크큐로 넘기고 bottom half가 소스별 핸들러로 디스패치하는 구조를 구현해, 링 overflow 감지와 인터럽트 coalescing 효과를 측정한다.",
+      "tags": ["interrupt", "ih-ring", "msi", "driver"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-M02",
+      "level": "M",
+      "title": "GPU 작업 스케줄러: 우선순위와 타임슬라이스",
+      "goal": "여러 컨텍스트/큐가 GPU 엔진을 공유할 때의 스케줄링 정책과 공정성·지연 트레이드오프를 분석한다",
+      "task": "여러 프로세스의 작업 큐를 받아 엔진에 배정하는 스케줄러를 이벤트 시뮬레이션으로 구현해 FIFO, 우선순위, 라운드로빈 타임슬라이스, 우선순위+aging을 비교하고, 고우선순위(UI/실시간) 작업의 지연 p99와 처리량을 표로 정리한다.",
+      "tags": ["scheduling", "priority", "time-slicing", "see:RTOS"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-M03",
+      "level": "M",
+      "title": "컨텍스트 스위치와 선점 단위",
+      "goal": "draw/dispatch 경계, 스레드 블록, 명령어 수준 선점의 지연과 저장 비용 트레이드오프를 이해한다",
+      "task": "컨텍스트 상태 크기(레지스터 파일, shared memory, 큐 상태)와 선점 단위별 대기 시간을 파라미터로 한 선점 모델을 만들고, 긴 컴퓨트 커널 실행 중 실시간 작업 도착 시 각 방식의 선점 지연과 저장/복원 오버헤드를 시뮬레이션해 비교한다.",
+      "tags": ["context-switch", "preemption", "latency"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-M04",
+      "level": "M",
+      "title": "GPU 페이지 폴트와 Unified Memory 마이그레이션",
+      "goal": "replayable page fault, 온디맨드 페이지 이동, thrashing과 prefetch 힌트를 모델링한다",
+      "task": "B07 MMU에 미매핑 접근 시 fault 버퍼 기록 → 드라이버가 호스트 페이지를 VRAM으로 이동·매핑 → 재실행하는 흐름을 구현하고, VRAM 초과 워킹셋에서 thrashing을 재현한 뒤 2MB 단위 이동·prefetch·access counter 기반 정책별 이동 바이트와 시간을 비교한다.",
+      "tags": ["page-fault", "unified-memory", "migration", "thrashing"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-M05",
+      "level": "M",
+      "title": "GPU 펌웨어 마이크로컨트롤러 RPC (GSP 스타일)",
+      "goal": "드라이버 기능 다수를 GPU 내부 펌웨어로 옮긴 구조와 호스트-펌웨어 메시지 큐를 구현한다",
+      "task": "공유 메모리 기반 command/status 큐 쌍(헤더: 함수 ID, seq, 길이, 체크섬)과 펌웨어 측 이벤트 루프를 pthread로 구현해 동기 RPC(alloc_channel, set_clock)와 비동기 이벤트 알림을 처리하고, seq 불일치·타임아웃·펌웨어 무응답 시 드라이버의 복구 경로를 테스트한다.",
+      "tags": ["firmware", "gsp", "rpc", "message-queue"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-M06",
+      "level": "M",
+      "title": "GPU 펌웨어 로딩과 보안 부팅",
+      "goal": "서명된 펌웨어 이미지를 검증해 마이크로컨트롤러에 적재하고 reset을 해제하는 흐름을 이해한다",
+      "task": "헤더(매직, 버전, 섹션 테이블, 서명) + IMEM/DMEM 섹션 구조의 펌웨어 이미지 포맷을 정의하고, 해시 검증 → 섹션 DMA 적재 → 부팅 핸드셰이크(mailbox 레지스터) → 버전 다운그레이드 차단을 수행하는 로더를 구현해 변조 이미지 거부를 테스트한다.",
+      "tags": ["firmware-loading", "secure-boot", "falcon", "see:SEC"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-M07",
+      "level": "M",
+      "title": "GPU 행 감지와 복구 (TDR)",
+      "goal": "fence 진행 감시로 행을 감지하고 엔진 리셋·문제 컨텍스트 차단·작업 재제출로 복구하는 흐름을 설계한다",
+      "task": "fence 진행이 일정 시간 멈추면 행으로 판정하는 watchdog, 해당 엔진 소프트 리셋, 원인 컨텍스트 guilty 표시·차단, 무고한 작업 재제출을 구현하고, 무한 루프 커널 주입 시 다른 프로세스 작업이 계속 완료되는지와 복구 시간을 측정한다.",
+      "tags": ["hang-detection", "tdr", "reset", "recovery"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-M08",
+      "level": "M",
+      "title": "DMA Copy Engine과 연산 겹치기",
+      "goal": "전용 복사 엔진의 디스크립터 구조와 연산 엔진과의 병렬 실행·동기화를 구현한다",
+      "task": "1D/2D(pitch) 복사 디스크립터를 처리하는 copy engine 스레드와 compute engine 스레드를 모델링하고, 세마포어로 의존성을 건 업로드-연산-다운로드 3단계 파이프라인을 구성해 직렬 대비 처리량 향상을 측정한다.",
+      "tags": ["dma", "copy-engine", "overlap", "pipelining"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-M09",
+      "level": "M",
+      "title": "GPU 전력 관리: DVFS 거버너와 Power/Clock Gating",
+      "goal": "활용률 기반 주파수 결정, 전력 상한, 열 스로틀링, 게이팅 정책을 모델로 설계한다",
+      "task": "P = C·V²·f + 누설 전력 모델과 V-f 테이블을 가진 GPU 모델에 활용률 기반 DVFS 거버너, 전력 상한(TDP) 클램프, 온도 기반 스로틀, 유휴 시 power gating(진입/복귀 지연 포함)을 구현해 워크로드별 에너지와 성능 손실을 비교한다.",
+      "tags": ["power-management", "dvfs", "thermal", "gating"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-M10",
+      "level": "M",
+      "title": "텔레메트리와 성능 카운터 수집",
+      "goal": "GPU 활용률·전력·온도·ECC 카운터를 샘플링하고 wraparound를 처리하는 모니터링 계층을 구현한다",
+      "task": "32비트 누적 카운터(busy cycles, energy, ECC count)를 노출하는 mock 레지스터를 주기적으로 읽어 wraparound 안전 델타로 활용률·평균 전력을 계산하는 NVML 유사 API와 링 버퍼 로거를 작성하고, 샘플링 주기에 따른 측정 오차를 분석한다.",
+      "tags": ["telemetry", "counters", "monitoring", "nvml"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-A01",
+      "level": "A",
+      "title": "PCIe·NVLink 인터커넥트 대역폭 모델",
+      "goal": "링크 세대·폭·프로토콜 오버헤드로 실효 대역폭을 계산하고 실제 전송 시간을 예측한다",
+      "task": "PCIe Gen3–Gen6(인코딩, TLP 헤더, MPS, DLLP/ACK 오버헤드)와 NVLink 세대별 링크 수로 실효 단방향 대역폭을 계산하는 모델을 만들고, 전송 크기별 시간 곡선과 P2P vs 호스트 경유 복사 시간을 비교하며 공개 측정치와 대조한다.",
+      "tags": ["pcie", "nvlink", "bandwidth-model", "see:PCIE"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-A02",
+      "level": "A",
+      "title": "멀티 GPU Collective: Ring All-Reduce",
+      "goal": "분산 학습/추론의 핵심 통신인 all-reduce 알고리즘과 비용 모델을 구현한다",
+      "task": "N개 스레드를 GPU로 보고 reduce-scatter + all-gather 단계의 ring all-reduce를 구현해 결과 정확성을 검증하고, 각 GPU 전송량 2(N−1)/N·S 공식을 측정치와 맞춘 뒤 tree all-reduce와 지연·대역폭 항(α-β 모델)으로 비교한다.",
+      "tags": ["multi-gpu", "allreduce", "collective", "see:DIST"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-A03",
+      "level": "A",
+      "title": "GPU 메모리 RAS: ECC, 페이지 리타이어, Row Remap",
+      "goal": "HBM/GDDR 오류 처리 체계(정정/비정정 오류, 페이지 퇴역, row remapping)를 설계한다",
+      "task": "단일 비트(정정 가능)·다중 비트(정정 불가) 오류를 무작위 주입하는 메모리 모델에서 오류 카운터, 임계 초과 페이지 리타이어 목록(영구 저장), 예비 row 리매핑, 비정정 오류 시 해당 컨텍스트 종료 정책을 구현하고 시나리오별 가용 용량 변화를 보고한다.",
+      "tags": ["ecc", "ras", "hbm", "reliability", "see:MEM"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-A04",
+      "level": "A",
+      "title": "리눅스 GEM·dma-buf 버퍼 공유와 sync_file",
+      "goal": "리눅스에서 드라이버 간 버퍼를 공유하고 암묵적/명시적 펜스로 동기화하는 메커니즘을 실습한다",
+      "task": "vgem 드라이버로 GEM 버퍼를 만들어 PRIME으로 dma-buf fd를 export/import하고 두 프로세스에서 mmap 공유를 확인한 뒤, vgem fence와 sync_file을 사용해 생산자-소비자 동기화를 구현하고 drm 디버그 로그로 흐름을 추적한다.",
+      "tags": ["drm", "gem", "dma-buf", "linux"],
+      "env": "linux",
+      "env_note": "Lima VM에서 modprobe vgem, libdrm 필요"
+    },
+    {
+      "id": "GPUSYS-A05",
+      "level": "A",
+      "title": "GPU 가상화와 분할: SR-IOV·MIG 설계",
+      "goal": "GPU를 여러 테넌트에 격리 분할하는 방식(시분할, SR-IOV, MIG 공간 분할)의 트레이드오프를 설계한다",
+      "task": "SM·메모리 슬라이스·복사 엔진을 정해진 프로파일로 나누는 MIG 유사 파티셔너를 구현해 유효 조합 검증과 단편화를 다루고, 시분할 vGPU 대비 테넌트 간 간섭(지연 변동)과 격리 수준을 시뮬레이션해 설계 문서로 정리한다.",
+      "tags": ["virtualization", "sr-iov", "mig", "design"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-A06",
+      "level": "A",
+      "title": "nvidia-smi·NVML 실측과 모델 대조",
+      "goal": "실제 GPU에서 클럭·전력·온도·PCIe 링크 상태를 수집하고 앞서 만든 모델과 비교한다",
+      "task": "NVML(pynvml)로 클럭, 전력, 온도, 활용률, PCIe 링크 세대/폭, throttle reason을 100ms 주기로 기록하는 로거를 작성해 GEMM 부하 전후를 측정하고, M09 DVFS 모델과 A01 대역폭 모델의 예측을 실측과 대조한다.",
+      "tags": ["nvml", "telemetry", "measurement"],
+      "env": "gpu",
+      "env_note": "NVIDIA GPU + 드라이버(nvidia-smi, NVML) 필요, 클라우드 인스턴스 가능"
+    },
+    {
+      "id": "GPUSYS-A07",
+      "level": "A",
+      "title": "GPU 드라이버·펌웨어 검증 계획 설계",
+      "goal": "새 GPU 드라이버/펌웨어 bring-up 시 무엇을 어떻게 검증할지 체계적인 테스트 계획을 세운다",
+      "task": "지금까지 만든 GPU 시스템 모델(링, 펜스, MMU, 인터럽트, 펌웨어 RPC, TDR)을 대상으로 기능·스트레스·오류 주입·전력 상태 전환 테스트를 포함한 검증 계획을 작성하고, 그중 링 wraparound 스트레스, 펜스 순서, 페이지 폴트 폭주, 펌웨어 무응답 4개 테스트를 자동화해 실행한다.",
+      "tags": ["validation", "test-plan", "fault-injection", "see:SIV"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPUSYS-A08",
+      "level": "A",
+      "title": "종합: 미니 GPU 시스템 시뮬레이터",
+      "goal": "드라이버·펌웨어·엔진을 하나로 묶어 end-to-end 작업 제출 시스템을 완성한다",
+      "task": "B03~M08 구성요소를 통합해 다중 프로세스가 커맨드 버퍼를 제출하면 스케줄러·MMU·copy/compute 엔진·IH 링·펜스를 거쳐 완료되는 시뮬레이터를 만들고, 처리량·지연 통계와 이벤트 타임라인(Chrome trace JSON)을 출력해 병목을 분석한다.",
+      "tags": ["capstone", "simulator", "integration", "see:SIM"],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

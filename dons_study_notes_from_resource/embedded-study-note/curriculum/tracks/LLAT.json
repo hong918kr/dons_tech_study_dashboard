@@ -1,0 +1,387 @@
+{
+  "id": "LLAT",
+  "intro": "저지연 시스템은 '평균'이 아니라 p99·p99.9 꼬리 지연을 다루는 엔지니어링으로, HFT·로봇 제어·네트워크 장비·펌웨어 모두 같은 원리(캐시, 메모리 오더링, lock-free, 할당 제거, 코어 격리)를 쓴다. 이 트랙은 측정법부터 lock-free 큐, 오더북, 커널 바이패스까지 C++로 구현·계측해 quant SWE와 실시간 펌웨어 면접을 동시에 대비한다.",
+  "goals": [
+    "타이머 소스와 히스토그램/백분위수로 지연 분포를 올바르게 측정한다",
+    "캐시 레이아웃·false sharing·분기 예측이 지연에 미치는 영향을 실측한다",
+    "SPSC/MPMC/Disruptor 등 lock-free 큐를 구현하고 메모리 오더를 정당화한다",
+    "할당 없는 hot path와 오더북을 구현하고 메시지당 지연을 최적화한다",
+    "CPU 격리·커널 바이패스·io_uring·타임스탬핑으로 시스템 수준 꼬리 지연을 줄인다"
+  ],
+  "prereq": [
+    "ARCH",
+    "OS",
+    "MCPP"
+  ],
+  "refs": [
+    {
+      "title": "What Every Programmer Should Know About Memory (Ulrich Drepper)",
+      "url": "https://people.freebsd.org/~lstewart/articles/cpumemory.pdf"
+    },
+    {
+      "title": "LMAX Disruptor",
+      "url": "https://lmax-exchange.github.io/disruptor/"
+    },
+    {
+      "title": "Agner Fog — Optimization Manuals",
+      "url": "https://www.agner.org/optimize/"
+    },
+    {
+      "title": "HdrHistogram",
+      "url": "https://hdrhistogram.org"
+    },
+    {
+      "title": "DPDK Documentation",
+      "url": "https://doc.dpdk.org/guides/"
+    },
+    {
+      "title": "Lord of the io_uring",
+      "url": "https://unixism.net/loti/"
+    },
+    {
+      "title": "Carl Cook — When a Microsecond Is an Eternity (CppCon 2017)"
+    },
+    {
+      "title": "Nasdaq TotalView-ITCH 5.0 Specification"
+    }
+  ],
+  "items": [
+    {
+      "id": "LLAT-B01",
+      "level": "B",
+      "title": "시간 측정: 클럭 소스와 오버헤드",
+      "goal": "고해상도 타이머의 해상도·오버헤드·단조성을 측정한다.",
+      "task": "steady_clock, mach_absolute_time, clock_gettime_nsec_np, AArch64 cntvct_el0 직접 읽기(inline asm, isb 포함)의 해상도·호출 오버헤드·단조성을 측정하고, x86 rdtsc/rdtscp와의 차이(불변 TSC, 직렬화)를 정리한다.",
+      "tags": [
+        "timing",
+        "cntvct",
+        "rdtsc"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-B02",
+      "level": "B",
+      "title": "지연 분포: 히스토그램 & 백분위수",
+      "goal": "평균이 아닌 꼬리 지연을 측정하는 자료구조를 구현한다.",
+      "task": "HdrHistogram 방식(로그 버킷 + 선형 서브버킷) 히스토그램을 구현해 p50/p99/p99.9/max를 출력하고, coordinated omission이 있는 측정 루프와 보정 루프의 결과 차이를 보인다.",
+      "tags": [
+        "histogram",
+        "percentile",
+        "coordinated-omission"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-B03",
+      "level": "B",
+      "title": "마이크로벤치마크 방법론",
+      "goal": "컴파일러 최적화와 노이즈에 속지 않는 벤치마크를 작성한다.",
+      "task": "Google Benchmark로 같은 함수를 측정하며 DoNotOptimize/ClobberMemory 누락 시 결과가 0이 되는 사례, 워밍업·반복 횟수·P/E 코어 이동에 의한 분산을 재현하고 측정 체크리스트를 만든다.",
+      "tags": [
+        "benchmark",
+        "methodology"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-B04",
+      "level": "B",
+      "title": "Cold path 제거: 프리폴트·mlock·캐시 워밍",
+      "goal": "첫 요청이 느린 이유(페이지 폴트, 콜드 캐시, 지연 바인딩)를 찾아 없앤다",
+      "task": "hot path 버퍼를 사전 터치·mlock하고 캐시·분기 예측기를 워밍하는 초기화 루틴을 만들어 첫 1000개 요청의 지연 분포를 전후 비교하고, 남은 지연 원인을 정리한다(포인터 체이싱 지연 측정은 see:MEM-B10).",
+      "tags": [
+        "warmup",
+        "page-fault",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-B05",
+      "level": "B",
+      "title": "hot path 데이터 레이아웃: hot/cold 분리 & 패딩",
+      "goal": "메시지·주문 구조체를 캐시 라인 단위로 설계한다.",
+      "task": "주문 구조체를 hot 필드(가격·수량·id)와 cold 필드로 분리하고 offsetof/static_assert로 캐시 라인 배치를 고정, 처리 루프의 캐시 미스와 처리량 변화를 측정한다.",
+      "tags": [
+        "data-layout",
+        "cache-line",
+        "padding"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-B06",
+      "level": "B",
+      "title": "atomic 연산 비용: relaxed·acq_rel·seq_cst·CAS 경합",
+      "goal": "원자 연산 종류와 메모리 순서, 경합이 지연에 주는 비용을 수치로 안다",
+      "task": "fetch_add(각 memory_order)·CAS 루프·LSE 원자 명령(LDADD)의 단일 스레드 지연과 1~8스레드 경합 시 처리량을 M2에서 측정해 표로 만들고, hot path에서 원자 연산을 줄이는 기법을 정리한다(false sharing은 see:ARCH-M08).",
+      "tags": [
+        "atomics",
+        "latency",
+        "see:ARCH"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-B07",
+      "level": "B",
+      "title": "분기 예측 & branchless 코드",
+      "goal": "분기 미예측 비용을 측정하고 분기 없는 코드로 대체한다.",
+      "task": "정렬/비정렬 데이터 필터 벤치마크로 미예측 비용을 측정하고, csel 유도 branchless 버전·[[likely]]·룩업 테이블로 개선해 생성 어셈블리(-S)와 함께 비교한다.",
+      "tags": [
+        "branch-prediction",
+        "branchless",
+        "csel"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-B08",
+      "level": "B",
+      "title": "할당 없는 hot path",
+      "goal": "steady-state에서 동적 할당이 0회임을 보장·검증한다.",
+      "task": "operator new/malloc 후킹 카운터를 만들어 메시지 처리 루프의 할당을 찾아내고, 사전할당·객체 풀·고정 용량 컨테이너·string 대신 고정 버퍼로 교체해 할당 0회와 p99 개선을 보인다.",
+      "tags": [
+        "allocation-free",
+        "preallocation",
+        "pool"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-M01",
+      "level": "M",
+      "title": "SPSC 큐 지연 튜닝: 캐시된 인덱스·패딩·배치",
+      "goal": "기본 lock-free SPSC 큐를 지연 관점에서 단계별로 최적화하고 효과를 분리 측정한다.",
+      "task": "DS 트랙의 C11 SPSC 큐를 C++로 옮긴 기준선에서 시작해 인덱스 간 128B 패딩, 상대 인덱스 캐싱(rigtorp 방식), 배치 push/pop, 슬롯 내 시퀀스 플래그 방식을 하나씩 적용하며 처리량과 왕복 지연 p99 변화를 표로 기록한다.",
+      "tags": [
+        "spsc",
+        "lock-free",
+        "latency-tuning",
+        "see:DS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-M02",
+      "level": "M",
+      "title": "Seqlock: 단일 writer 스냅샷 공유",
+      "goal": "reader가 writer를 막지 않는 일관 스냅샷 공유를 구현한다.",
+      "task": "시장 데이터 스냅샷용 seqlock을 C++ 메모리 모델에 맞게(atomic 시퀀스, fence, 데이터 복사 방식) 구현하고 torn read 검출 스트레스 테스트와 rwlock 대비 reader 지연을 측정한다.",
+      "tags": [
+        "seqlock",
+        "memory-ordering"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-M03",
+      "level": "M",
+      "title": "lock-free 메모리 회수: Hazard Pointer",
+      "goal": "lock-free 구조에서 노드를 안전하게 해제하는 방법과 지연 영향을 이해한다.",
+      "task": "hazard pointer 기반 회수를 구현해 lock-free 연결 리스트(또는 Michael-Scott 큐)에 적용하고 ASan으로 use-after-free가 없음을 확인, OS 트랙의 epoch 기반 회수와 읽기 경로 지연·메모리 상한을 비교한다(MPMC 큐 구현 자체는 DS 트랙).",
+      "tags": [
+        "hazard-pointer",
+        "memory-reclamation",
+        "lock-free",
+        "see:OS",
+        "see:DS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-M04",
+      "level": "M",
+      "title": "LMAX Disruptor 패턴 구현",
+      "goal": "배치 처리와 sequence barrier로 파이프라인 단계를 연결한다.",
+      "task": "링 버퍼 + sequencer + 다단계 consumer(journal→replicate→business logic) 의존 barrier를 구현하고 배치 소비가 처리량·지연에 미치는 효과를 측정한다.",
+      "tags": [
+        "disruptor",
+        "ring-buffer",
+        "batching"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-M05",
+      "level": "M",
+      "title": "스레드 간 핸드오프 지연 (ping-pong)",
+      "goal": "코어 간 통신 지연과 코어 배치의 영향을 측정한다.",
+      "task": "두 스레드가 캐시 라인 하나로 ping-pong하는 벤치마크로 왕복 지연을 측정하고, macOS QoS 클래스(P/E 코어 유도)별 차이를 기록, Linux에서의 pthread_setaffinity_np 실험 계획과 비교한다.",
+      "tags": [
+        "core-to-core",
+        "latency",
+        "qos"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-M06",
+      "level": "M",
+      "title": "Busy polling vs blocking 대기",
+      "goal": "대기 방식별 wake-up 지연과 CPU 비용 트레이드오프를 측정한다.",
+      "task": "busy spin(yield/wfe 포함), condition_variable, atomic::wait, 하이브리드(spin-then-park) 대기를 구현해 이벤트→처리 시작 지연 히스토그램과 CPU 사용률을 비교하고 인터럽트 vs 폴링 펌웨어 설계와 연결한다.",
+      "tags": [
+        "polling",
+        "blocking",
+        "wake-up-latency"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-M07",
+      "level": "M",
+      "title": "CPU 격리 & 피닝: isolcpus·nohz_full·IRQ affinity",
+      "goal": "OS 노이즈를 제거한 전용 코어 구성을 실습한다.",
+      "task": "Linux VM에서 isolcpus/nohz_full/rcu_nocbs 부팅 옵션과 IRQ affinity를 설정하고, 격리 전후 busy loop의 인터럽션 지연(hiccup) 히스토그램을 측정한다.",
+      "tags": [
+        "isolcpus",
+        "cpu-pinning",
+        "nohz_full"
+      ],
+      "env": "linux",
+      "env_note": "Lima Ubuntu VM (Linux 커널 기능 필요); 부팅 파라미터 변경 가능한 VM, VM 내 측정은 하이퍼바이저 노이즈 포함됨을 명시"
+    },
+    {
+      "id": "LLAT-M08",
+      "level": "M",
+      "title": "오더북 1: 가격 레벨 & FIFO 매칭",
+      "goal": "지정가 주문장의 기본 연산과 자료구조를 구현한다.",
+      "task": "add/cancel/modify/execute를 지원하는 가격-시간 우선 오더북을 구현(가격 레벨 맵 + intrusive 리스트 + 주문 id 해시로 O(1) 취소)하고, 랜덤 주문 시퀀스로 참조 구현과 체결 결과를 대조한다.",
+      "tags": [
+        "order-book",
+        "matching-engine"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-M09",
+      "level": "M",
+      "title": "오더북 2: 캐시 친화 최적화 & ITCH 리플레이",
+      "goal": "실제 피드 형태로 오더북의 메시지당 지연을 최적화한다.",
+      "task": "ITCH 5.0 형식 메시지 생성기(또는 샘플 파일)로 피드를 리플레이하며, 가격 틱 인덱스 배열·풀 할당·hot/cold 분리를 적용해 메시지당 처리 지연 p50/p99를 단계별로 개선·기록한다.",
+      "tags": [
+        "order-book",
+        "itch",
+        "optimization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-A01",
+      "level": "A",
+      "title": "이진 프로토콜 제로카피 디코딩 (SBE 스타일)",
+      "goal": "복사·할당 없이 네트워크 메시지를 해석한다.",
+      "task": "고정 레이아웃 이진 메시지(엔디언, 정렬 안 된 필드)를 std::bit_cast/memcpy 기반 flyweight 뷰로 디코딩하는 코드 생성기 수준 API를 만들고, 구조체 복사·파싱 방식 대비 ns/메시지를 측정한다.",
+      "tags": [
+        "sbe",
+        "zero-copy",
+        "binary-protocol"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-A02",
+      "level": "A",
+      "title": "커널 바이패스: DPDK 폴링 모드",
+      "goal": "커널 네트워크 스택을 우회하는 구조와 비용 구조를 이해한다.",
+      "task": "Linux VM에서 DPDK를 빌드해 net_tap/af_packet 가상 디바이스로 testpmd와 간단한 rx→처리→tx 폴링 루프를 실행하고, 일반 소켓 recv 루프와 패킷당 지연·CPU 구조를 비교 정리한다.",
+      "tags": [
+        "dpdk",
+        "kernel-bypass",
+        "pmd"
+      ],
+      "env": "linux",
+      "env_note": "Lima Ubuntu VM (Linux 커널 기능 필요); hugepage 설정, DPDK 빌드(meson/ninja), 가상 NIC 사용"
+    },
+    {
+      "id": "LLAT-A03",
+      "level": "A",
+      "title": "io_uring 기반 저지연 I/O",
+      "goal": "submission/completion 링 구조와 SQPOLL을 실습한다.",
+      "task": "liburing으로 UDP echo 서버를 epoll 버전과 io_uring(일반/SQPOLL/registered buffer) 버전으로 구현해 요청당 지연 히스토그램과 syscall 수를 비교한다.",
+      "tags": [
+        "io_uring",
+        "async-io",
+        "epoll"
+      ],
+      "env": "linux",
+      "env_note": "Lima Ubuntu VM (Linux 커널 기능 필요); 커널 6.x + liburing"
+    },
+    {
+      "id": "LLAT-A04",
+      "level": "A",
+      "title": "타임스탬핑: HW vs SW, SO_TIMESTAMPING, PTP 개념",
+      "goal": "패킷 타임스탬프의 정확도 계층과 시계 동기화를 이해한다.",
+      "task": "SO_TIMESTAMPING으로 소프트웨어 rx/tx 타임스탬프를 수집해 애플리케이션 시각과의 차이를 측정하고, NIC 하드웨어 타임스탬프·PTP(linuxptp) 동기 구조를 정리해 거래소/센서 퓨전 적용 사례와 연결한다.",
+      "tags": [
+        "timestamping",
+        "ptp",
+        "so_timestamping"
+      ],
+      "env": "linux",
+      "env_note": "Lima Ubuntu VM (Linux 커널 기능 필요); 가상 NIC는 HW 타임스탬프 미지원 → 개념·SW 타임스탬프 위주"
+    },
+    {
+      "id": "LLAT-A05",
+      "level": "A",
+      "title": "꼬리 지연 원인 분석: page fault·TLB·인터럽트",
+      "goal": "p99.9 스파이크의 시스템 원인을 찾아 제거한다.",
+      "task": "hot loop에 의도적으로 첫 접근 page fault, 대용량 작업 집합(TLB 미스), 타이머 인터럽트를 유발해 지연 스파이크를 관찰하고 mlockall·prefault·huge page·perf/ftrace로 원인 귀속 후 개선한다.",
+      "tags": [
+        "tail-latency",
+        "page-fault",
+        "huge-pages",
+        "perf"
+      ],
+      "env": "linux",
+      "env_note": "Lima Ubuntu VM (Linux 커널 기능 필요); perf/ftrace 사용"
+    },
+    {
+      "id": "LLAT-A06",
+      "level": "A",
+      "title": "저지연 비동기 로거 (NanoLog 스타일)",
+      "goal": "hot path에서 ns 단위로 로그를 남기는 구조를 구현한다.",
+      "task": "포맷 문자열 id + 원시 인자만 SPSC 버퍼에 기록하고 백그라운드 스레드가 포맷팅하는 바이너리 로거를 구현해 printf/spdlog 대비 호출당 지연과 버퍼 가득 참 정책(drop/block)을 측정한다.",
+      "tags": [
+        "logging",
+        "nanolog",
+        "spsc"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "LLAT-A07",
+      "level": "A",
+      "title": "Tick-to-trade 파이프라인 설계 & 지연 예산",
+      "goal": "피드 수신부터 주문 송신까지 end-to-end 지연을 설계·측정한다.",
+      "task": "피드 디코더→오더북→단순 전략→주문 인코더를 단일 스레드/2스레드(SPSC) 구성으로 구현하고 단계별 타임스탬프로 지연 예산을 분해, 구성별 p99 tick-to-trade를 비교해 설계 문서로 정리한다.",
+      "tags": [
+        "tick-to-trade",
+        "pipeline",
+        "latency-budget"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

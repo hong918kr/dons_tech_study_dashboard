@@ -1,0 +1,414 @@
+{
+  "id": "DS",
+  "intro": "임베디드 자료구조는 '동적 할당 없이, 예측 가능한 시간으로, 인터럽트와 공존하며' 동작해야 한다는 점에서 일반 자료구조와 다르다. 링 버퍼·침입형 리스트·메모리 풀·비트맵·타이머 휠·lock-free 큐는 펌웨어 면접과 실무의 단골이다. 이 트랙은 각 구조를 C로 직접 구현하고 불변식 검사·스트레스 테스트로 검증한다.",
+  "goals": [
+    "링 버퍼·스택·큐·연결 리스트·해시·힙·트리를 malloc 없이 C로 구현하고 불변식을 테스트한다",
+    "Linux list_head 스타일 침입형 자료구조와 container_of 패턴을 자유롭게 쓴다",
+    "메모리 풀·슬랩·버디·TLSF 할당기의 결정성·단편화 트레이드오프를 설명한다",
+    "LRU·타이머 휠·비트맵 할당기 등 펌웨어 실무 구조를 설계 근거와 함께 구현한다",
+    "SPSC/MPMC lock-free 큐를 C11 atomics로 구현하고 TSan·스트레스로 검증한다",
+    "FTL 매핑·플래시 KV 저장소처럼 Don의 SSD 경험과 연결되는 구조를 설계한다"
+  ],
+  "prereq": ["C"],
+  "refs": [
+    {"title": "Introduction to Algorithms (CLRS)"},
+    {"title": "Linux kernel include/linux/list.h", "url": "https://github.com/torvalds/linux/blob/master/include/linux/list.h"},
+    {"title": "Linux kernel docs — Red-black Trees (rbtree)", "url": "https://docs.kernel.org/core-api/rbtree.html"},
+    {"title": "1024cores — Bounded MPMC queue (Dmitry Vyukov)", "url": "https://www.1024cores.net/home/lock-free-algorithms/queues/bounded-mpmc-queue"},
+    {"title": "Hashed and Hierarchical Timing Wheels (Varghese & Lauck, 1987)"},
+    {"title": "TLSF: a New Dynamic Memory Allocator for Real-Time Systems (Masmano et al., 2004)"},
+    {"title": "The Slab Allocator: An Object-Caching Kernel Memory Allocator (Bonwick, 1994)"}
+  ],
+  "items": [
+    {
+      "id": "DS-B01",
+      "level": "B",
+      "title": "고정 용량 벡터: malloc 없는 동적 배열",
+      "goal": "정적 저장소 위에 push/pop/insert/erase를 경계 검사와 함께 구현한다",
+      "task": "용량을 컴파일 타임에 정하는 fixed_vec(uint32_t)을 정적 배열로 구현하고 insert/erase 시 원소 이동, 가득 참 처리, 범위 밖 인덱스를 경계 테스트와 ASan으로 검증한다.",
+      "tags": ["array", "static-allocation"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B02",
+      "level": "B",
+      "title": "배열 기반 스택과 괄호·명령 검사",
+      "goal": "스택 ADT와 overflow/underflow 처리, 대표 응용을 구현한다",
+      "task": "배열 스택을 구현하고 이를 이용해 괄호 균형 검사기와 후위표기식 계산기(RPN)를 작성해 테스트 케이스 20개로 검증한다.",
+      "tags": ["stack", "basics"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B03",
+      "level": "B",
+      "title": "링 버퍼 기초: Full/Empty 판별 3가지 방식",
+      "goal": "count 변수, 한 칸 비우기, 미러 비트 방식의 장단점을 비교한다",
+      "task": "UART 수신용 바이트 링 버퍼를 세 가지 full/empty 판별 방식으로 구현하고, 무작위 push/pop 시퀀스를 참조 모델(큐)과 대조하는 랜덤 테스트로 검증한다.",
+      "tags": ["ring-buffer", "fifo", "uart"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B04",
+      "level": "B",
+      "title": "2의 거듭제곱 링 버퍼: 마스크 인덱스와 자유 증가 카운터",
+      "goal": "unsigned 래핑을 이용한 head/tail 자유 증가 방식이 왜 안전한지 증명한다",
+      "task": "크기 2^n, uint32_t head/tail을 계속 증가시키고 & (N-1)로 인덱싱하는 링 버퍼를 구현해, head가 UINT32_MAX를 넘는 경계에서도 len = head - tail이 맞음을 테스트로 확인한다.",
+      "tags": ["ring-buffer", "power-of-two", "wraparound"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B05",
+      "level": "B",
+      "title": "단일 연결 리스트: 삽입·삭제·뒤집기·사이클 검출",
+      "goal": "포인터 조작 면접 문제의 기본기를 다진다",
+      "task": "단일 연결 리스트의 head 삽입·정렬 삽입·값 삭제(이중 포인터 기법)·반복/재귀 뒤집기·Floyd 사이클 검출·중간 노드 찾기를 구현하고 ASan 하에 테스트한다.",
+      "tags": ["linked-list", "pointer", "interview"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B06",
+      "level": "B",
+      "title": "이중 연결 리스트와 Sentinel 노드",
+      "goal": "더미 헤드로 경계 조건을 없앤 O(1) 삽입/삭제를 구현한다",
+      "task": "원형 이중 연결 리스트를 sentinel 노드로 구현해 add_head/add_tail/remove/splice를 작성하고, 각 연산 후 prev/next 일관성 불변식 검사 함수로 랜덤 테스트한다.",
+      "tags": ["linked-list", "sentinel", "invariant"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B07",
+      "level": "B",
+      "title": "인덱스 링크 리스트: 정적 노드 풀",
+      "goal": "포인터 대신 배열 인덱스로 연결하는 메모리 절약형 리스트를 구현한다",
+      "task": "노드 64개 정적 배열과 uint8_t next 인덱스, free list를 가진 리스트를 구현해 할당/해제/순회를 테스트하고, 포인터 버전 대비 RAM 사용량을 sizeof로 비교한다.",
+      "tags": ["linked-list", "static-pool", "memory"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B08",
+      "level": "B",
+      "title": "비트맵(Bitset): 할당 상태 관리",
+      "goal": "워드 배열 기반 비트맵 연산과 빈 비트 탐색을 구현한다",
+      "task": "N비트 비트맵의 set/clear/test/find_first_zero/find_next_set/연속 k개 빈 비트 찾기를 구현하고, __builtin_ctz 활용 버전과 단순 루프 버전을 대조 테스트한다.",
+      "tags": ["bitmap", "allocator", "bitops"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B09",
+      "level": "B",
+      "title": "해시 함수 기초: FNV-1a, djb2, 분포 측정",
+      "goal": "해시 함수 품질(분포·충돌)을 실험으로 평가한다",
+      "task": "FNV-1a, djb2, 단순 합 해시를 구현해 센서 이름·명령어·순차 정수 키 집합에서 버킷 분포(카이제곱)와 충돌 수를 측정하고 결과를 표로 비교한다.",
+      "tags": ["hash", "distribution"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B10",
+      "level": "B",
+      "title": "해시 테이블: 분리 체이닝",
+      "goal": "버킷 + 연결 리스트 해시 테이블의 insert/find/delete를 구현한다",
+      "task": "문자열 키 → uint32_t 값 해시 테이블을 정적 노드 풀 기반 체이닝으로 구현하고, 같은 버킷 충돌·삭제 후 재삽입 시나리오와 참조 모델 대조 랜덤 테스트를 수행한다.",
+      "tags": ["hash-table", "chaining"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B11",
+      "level": "B",
+      "title": "해시 테이블: 오픈 어드레싱과 Tombstone",
+      "goal": "선형 탐사와 삭제 표시(tombstone)의 동작과 함정을 이해한다",
+      "task": "선형 탐사 해시 테이블을 구현해 tombstone 없이 삭제할 때 조회가 실패하는 버그를 재현한 뒤 tombstone 방식으로 고치고, 부하율별 평균 탐사 길이를 측정한다.",
+      "tags": ["hash-table", "open-addressing"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B12",
+      "level": "B",
+      "title": "이진 힙과 우선순위 큐",
+      "goal": "배열 기반 min-heap의 sift-up/down과 heapify를 구현한다",
+      "task": "(만료시각, 콜백 id) 원소의 min-heap 우선순위 큐를 고정 배열로 구현해 push/pop/peek/heapify를 작성하고, 매 연산 후 힙 속성 검사와 정렬 결과 비교로 검증한다.",
+      "tags": ["heap", "priority-queue", "timer"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B13",
+      "level": "B",
+      "title": "이진 탐색 트리: 삽입·삭제·순회",
+      "goal": "BST 삭제의 세 경우와 재귀/반복 순회를 정확히 구현한다",
+      "task": "정수 키 BST의 insert/find/delete(자식 0/1/2개)와 inorder/preorder/level-order 순회, 유효성 검사(min/max 범위)를 구현해 랜덤 삽입·삭제 테스트로 정렬 순서 유지를 확인한다.",
+      "tags": ["bst", "tree", "traversal"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-B14",
+      "level": "B",
+      "title": "트라이(Trie): 명령어 파서와 자동완성",
+      "goal": "문자 단위 트리로 접두사 검색을 구현한다",
+      "task": "디버그 셸 명령어 집합을 정적 노드 풀 트라이에 넣고 정확 일치, 고유 접두사 축약(\"st\" → \"status\"), 후보 목록 출력(탭 자동완성)을 구현해 테스트한다.",
+      "tags": ["trie", "string", "cli"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M01",
+      "level": "M",
+      "title": "침입형 리스트: Linux list_head 스타일",
+      "goal": "노드가 객체에 내장된 리스트와 container_of 순회를 구현한다",
+      "task": "list_head, list_add/del/move/splice, list_for_each_entry(_safe)를 구현하고, 하나의 task 객체가 ready 리스트와 all 리스트에 동시에 속하는 예제와 순회 중 삭제 테스트를 작성한다.",
+      "tags": ["intrusive-list", "container_of", "linux"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M02",
+      "level": "M",
+      "title": "고정 크기 메모리 풀: O(1) 할당/해제",
+      "goal": "블록 내부에 free list를 내장한 결정적 할당기를 구현한다",
+      "task": "블록 크기·개수 고정 풀을 구현하고 이중 해제·범위 밖 포인터 검출(디버그 모드), 사용량 하이워터마크 통계를 추가한 뒤 랜덤 할당/해제 스트레스 테스트와 ASan poisoning 연동을 한다.",
+      "tags": ["memory-pool", "allocator", "deterministic"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M03",
+      "level": "M",
+      "title": "간소화 슬랩 할당기",
+      "goal": "크기 클래스·객체 캐시·partial/full 슬랩 관리를 구현한다",
+      "task": "16/32/64/128B 크기 클래스와 4KB 슬랩, 슬랩별 free list와 partial/full/empty 리스트를 가진 할당기를 구현해 내부 단편화율과 할당 속도를 malloc 대비 측정한다.",
+      "tags": ["slab", "allocator", "see:OS"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M04",
+      "level": "M",
+      "title": "버디 할당기: 분할과 병합",
+      "goal": "2의 거듭제곱 블록 분할/버디 병합과 외부 단편화를 다룬다",
+      "task": "order 0~10 버디 할당기를 free list 배열과 비트맵으로 구현하고, 랜덤 할당/해제 후 모든 블록 해제 시 최대 블록 하나로 복원되는지와 단편화 지표를 검증한다.",
+      "tags": ["buddy", "allocator", "fragmentation"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M05",
+      "level": "M",
+      "title": "LRU 캐시: 해시 + 이중 연결 리스트",
+      "goal": "O(1) get/put LRU를 고정 메모리로 구현한다",
+      "task": "FTL 매핑 캐시를 가정한 LBA → PBA LRU 캐시를 침입형 이중 리스트 + 해시 테이블로 구현하고, 접근 트레이스(순차/랜덤/핫스팟)에서 hit rate와 참조 모델 일치를 검증한다.",
+      "tags": ["lru", "cache", "ftl"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M06",
+      "level": "M",
+      "title": "해시 타이머 휠",
+      "goal": "O(1) 타이머 등록/취소와 틱 처리 구조를 구현한다",
+      "task": "슬롯 256개 단일 레벨 + 라운드 카운터 방식 타이머 휠을 침입형 리스트로 구현하고, 수천 개 타이머 등록/취소/만료 순서를 min-heap 기반 참조 구현과 대조한다.",
+      "tags": ["timer-wheel", "timer", "see:RTOS"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M07",
+      "level": "M",
+      "title": "AVL 트리: 회전과 균형 유지",
+      "goal": "자가 균형 트리의 회전 4종과 높이 불변식을 구현한다",
+      "task": "AVL 삽입/삭제와 LL/RR/LR/RL 회전을 구현하고, 정렬된 순서 삽입에서도 높이가 O(log n)임을 측정하며 매 연산 후 균형 인자 검사 함수로 검증한다.",
+      "tags": ["avl", "balanced-tree"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M08",
+      "level": "M",
+      "title": "해시 테이블 리사이즈와 Robin Hood 해싱",
+      "goal": "부하율 관리, 점진적 리해싱, 탐사 길이 분산 감소 기법을 비교한다",
+      "task": "B11 테이블에 부하율 기반 리사이즈와 Robin Hood 삽입(backward-shift 삭제)을 추가하고, 부하율 0.5~0.95에서 평균/최대 탐사 길이를 선형 탐사와 비교한다.",
+      "tags": ["hash-table", "robin-hood", "resize"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M09",
+      "level": "M",
+      "title": "계층 비트맵: O(1) 최고 우선순위 탐색",
+      "goal": "2단계 비트맵과 CLZ로 상수 시간 탐색을 구현한다",
+      "task": "1024개 우선순위/블록을 32비트 상위 요약 + 32×32비트 하위 비트맵으로 관리하고 CLZ/CTZ로 최고 우선순위 set 비트를 O(1)에 찾는 구조를 구현해 단순 선형 탐색과 대조한다.",
+      "tags": ["bitmap", "clz", "o1", "see:RTOS"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M10",
+      "level": "M",
+      "title": "가변 길이 레코드 로그 링 버퍼",
+      "goal": "오래된 레코드를 덮어쓰는 가변 길이 트레이스 버퍼를 설계한다",
+      "task": "[len|type|timestamp|payload] 레코드를 바이트 링 버퍼에 기록하며 공간 부족 시 가장 오래된 레코드를 통째로 버리는 로거를 구현하고, 래핑 경계에 걸친 레코드 읽기와 덤프 파서를 테스트한다.",
+      "tags": ["ring-buffer", "logging", "trace"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M11",
+      "level": "M",
+      "title": "인덱스 우선순위 큐: Decrease-key와 취소",
+      "goal": "원소 위치 추적으로 임의 원소 갱신/삭제가 가능한 힙을 구현한다",
+      "task": "id → heap 위치 배열을 유지하는 indexed min-heap에 decrease_key/increase_key/remove(id)를 구현하고, 타이머 재설정·취소 시나리오와 Dijkstra(ALGO 트랙) 입력으로 검증한다.",
+      "tags": ["heap", "indexed-pq", "see:ALGO"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M12",
+      "level": "M",
+      "title": "희소 행렬 CSR과 SpMV",
+      "goal": "AI·그래프 워크로드의 기본인 압축 희소 표현을 구현한다",
+      "task": "COO → CSR 변환, CSR 희소 행렬-벡터 곱(SpMV), CSR 전치를 구현하고 밀집 행렬 결과와 대조하며, 희소도별 메모리/시간을 밀집 버전과 비교한다.",
+      "tags": ["sparse", "csr", "see:EML"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M13",
+      "level": "M",
+      "title": "기수 트리와 최장 접두사 매칭(LPM)",
+      "goal": "비트 단위 radix/Patricia 트리로 라우팅 테이블 조회를 구현한다",
+      "task": "IPv4 prefix/len → next-hop 엔트리를 이진 트라이 → 경로 압축(Patricia) 순으로 구현하고, 무작위 주소에 대한 LPM 결과를 선형 탐색 참조 구현과 대조한다.",
+      "tags": ["radix-tree", "lpm", "networking"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-M14",
+      "level": "M",
+      "title": "블룸 필터: 확률적 집합",
+      "goal": "거짓 양성률 공식과 실측을 비교하며 파라미터를 고른다",
+      "task": "k개 해시(더블 해싱)와 m비트 비트맵 블룸 필터를 구현해 n, m, k 조합별 실측 거짓 양성률을 이론식 (1-e^{-kn/m})^k 와 비교하고, 최적 k 선택을 검증한다.",
+      "tags": ["bloom-filter", "probabilistic", "bitmap"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A01",
+      "level": "A",
+      "title": "Lock-free SPSC 큐: C11 atomics",
+      "goal": "단일 생산자/소비자 큐를 acquire/release만으로 정확하고 빠르게 만든다",
+      "task": "head/tail을 캐시 라인 분리한 SPSC 링 큐를 memory_order_acquire/release로 구현해 두 스레드로 수억 개 메시지 순서·무손실을 검증(TSan 포함)하고, 인덱스 캐싱 최적화 전후 처리량을 측정한다.",
+      "tags": ["lock-free", "spsc", "atomics"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A02",
+      "level": "A",
+      "title": "ISR↔태스크 링 버퍼와 Bip Buffer(DMA 연속 영역)",
+      "goal": "인터럽트 생산자와 DMA 친화 연속 버퍼 할당을 설계한다",
+      "task": "단일 코어 ISR 생산자용 링 버퍼의 배리어 요건을 분석·주석화하고, DMA가 연속 메모리를 요구할 때 쓰는 bip buffer(reserve/commit/read/release)를 구현해 경계 래핑 시나리오로 검증한다.",
+      "tags": ["ring-buffer", "bip-buffer", "dma", "isr"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A03",
+      "level": "A",
+      "title": "Bounded MPMC 큐: Vyukov 시퀀스 방식",
+      "goal": "다중 생산자/소비자 lock-free 큐를 슬롯 시퀀스 번호로 구현한다",
+      "task": "슬롯별 sequence 카운터와 CAS로 enqueue/dequeue하는 MPMC 큐를 구현해 4×4 스레드 스트레스에서 모든 메시지가 정확히 한 번 소비됨을 검증하고, 뮤텍스 큐 대비 처리량을 측정한다.",
+      "tags": ["lock-free", "mpmc", "cas"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A04",
+      "level": "A",
+      "title": "Lock-free 스택과 ABA 문제",
+      "goal": "Treiber 스택의 ABA 버그를 재현하고 태그 포인터로 해결한다",
+      "task": "CAS 기반 Treiber 스택을 구현해 노드 재사용 풀과 함께 ABA로 리스트가 깨지는 상황을 강제 재현하고, (인덱스, 세대 태그) 64비트 packing 또는 128비트 CAS로 수정해 스트레스 테스트한다.",
+      "tags": ["lock-free", "aba", "treiber-stack"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A05",
+      "level": "A",
+      "title": "침입형 레드블랙 트리 (Linux rbtree 스타일)",
+      "goal": "삽입/삭제 재색칠·회전 케이스를 구현하고 불변식을 검증한다",
+      "task": "rb_node 내장형 레드블랙 트리의 insert/erase/next를 구현하고, 루트 검정·빨강 연속 금지·검정 높이 동일 불변식 검사기와 랜덤 연산 100만 회 테스트로 검증한다.",
+      "tags": ["rbtree", "intrusive", "balanced-tree"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A06",
+      "level": "A",
+      "title": "TLSF 할당기: 실시간 O(1) malloc",
+      "goal": "2단계 segregated fit과 비트맵으로 상수 시간 할당/병합을 구현한다",
+      "task": "FL/SL 2단계 인덱스와 비트맵, 물리적 인접 블록 병합을 가진 TLSF를 고정 힙 위에 구현하고, 랜덤 크기 스트레스에서 최악 연산 시간 분포와 단편화를 메모리 풀/malloc과 비교한다.",
+      "tags": ["tlsf", "allocator", "real-time"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A07",
+      "level": "A",
+      "title": "Cuckoo 해싱: 최악 O(1) 조회",
+      "goal": "실시간 경로에서 조회 시간 상한을 보장하는 해시 구조를 구현한다",
+      "task": "두 테이블·두 해시 함수의 cuckoo 해시를 구현해 삽입 시 축출 체인과 사이클 감지 후 리해시를 처리하고, 조회가 항상 2회 탐사 이내임과 부하율 한계를 측정한다.",
+      "tags": ["cuckoo-hash", "hash-table", "real-time"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A08",
+      "level": "A",
+      "title": "B+ 트리: 페이지 단위 인덱스",
+      "goal": "블록 디바이스 친화적인 고팬아웃 트리의 분할·병합·범위 스캔을 구현한다",
+      "task": "노드 = 4KB 페이지인 B+ 트리를 메모리 페이지 풀 위에 구현해 insert/search/delete(재분배·병합)/range scan을 작성하고, 무작위 연산 후 정렬·리프 연결 불변식을 검증한다.",
+      "tags": ["b-plus-tree", "index", "see:STOR"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A09",
+      "level": "A",
+      "title": "FTL 매핑 테이블과 GC 대상 선정 구조",
+      "goal": "SSD 펌웨어의 L2P 매핑·유효 페이지 비트맵·GC victim 선택을 설계한다",
+      "task": "페이지 매핑 L2P 배열, 블록별 valid 비트맵·valid count, greedy/cost-benefit GC victim을 고르는 indexed heap을 가진 FTL 모델을 구현해 랜덤 쓰기 워크로드에서 쓰기 증폭(WAF)을 측정한다.",
+      "tags": ["ftl", "ssd", "gc", "see:MEM"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A10",
+      "level": "A",
+      "title": "플래시 로그 구조 KV 저장소",
+      "goal": "NOR 플래시 제약(소거 단위, 비트 1→0만 쓰기) 하의 영속 KV를 설계한다",
+      "task": "섹터 소거·쓰기 횟수를 모사한 플래시 모델 위에 append-only KV(레코드 CRC, 섹터 상태 헤더, 컴팩션)를 구현하고, 임의 시점 전원 차단 주입 후 재마운트 시 일관성 복구를 검증한다.",
+      "tags": ["flash", "kv-store", "power-fail", "see:STOR"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DS-A11",
+      "level": "A",
+      "title": "캐시 친화 레이아웃: AoS vs SoA와 정렬",
+      "goal": "자료구조 메모리 레이아웃이 실제 성능에 주는 영향을 측정한다",
+      "task": "파티클/센서 레코드 배열을 AoS·SoA·AoSoA로 구현해 일부 필드만 읽는 루프와 전체 갱신 루프의 처리량을 M2에서 측정하고, 연결 리스트 vs 배열 순회 비용까지 비교해 설계 지침을 정리한다.",
+      "tags": ["cache-friendly", "soa", "layout", "see:ARCH"],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

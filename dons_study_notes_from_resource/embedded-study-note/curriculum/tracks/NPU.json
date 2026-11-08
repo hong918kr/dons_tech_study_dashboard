@@ -1,0 +1,357 @@
+{
+  "id": "NPU",
+  "intro": "NPU(AI 가속기)는 MAC 어레이·on-chip SRAM·DMA·명령 프로세서·펌웨어·컴파일러가 하나로 설계된 칩이며, 성능의 대부분은 '데이터를 얼마나 적게, 제때 옮기느냐'에서 결정된다. 이 트랙은 systolic array 사이클 시뮬레이터를 C로 직접 만들고, 그 위에 dataflow·타일링·DMA 더블 버퍼링·toy ISA·커맨드 큐 펌웨어·호스트 드라이버·그래프 컴파일러·golden model 검증까지 쌓아 올려 하나의 '나만의 NPU' 스택을 완성한다. Don의 SSD 펌웨어(큐·DMA·커맨드 처리)와 실리콘 검증 경험을 AI 가속기 펌웨어/아키텍처/검증 직무로 연결하는 핵심 트랙이다.",
+  "goals": [
+    "MAC 어레이와 systolic array(weight/output/row stationary dataflow)의 동작을 사이클 단위로 시뮬레이션하고 설명할 수 있다",
+    "on-chip SRAM 타일링, DMA 디스크립터, 더블 버퍼링으로 DRAM 트래픽과 stall을 최소화하는 스케줄을 설계할 수 있다",
+    "toy NPU ISA·커맨드 큐·펌웨어·호스트 드라이버 인터페이스를 설계·구현할 수 있다",
+    "그래프 lowering, 타일링, 스케줄링, 메모리 할당을 수행하는 미니 NPU 컴파일러를 만들 수 있다",
+    "int8/fp8/bf16/MX 데이터패스와 희소성의 수치·성능 특성을 구현 수준에서 다룰 수 있다",
+    "golden model 대비 bit-exact 검증, 성능 카운터, 검증 계획 등 NPU bring-up/validation 업무를 수행할 수 있다"
+  ],
+  "prereq": ["ARCH", "EML", "AIPERF"],
+  "refs": [
+    {"title": "Sze, Chen, Yang, Emer — Efficient Processing of Deep Neural Networks (Morgan & Claypool, 2020); 서베이판 arXiv 1703.09039", "url": "https://arxiv.org/abs/1703.09039"},
+    {"title": "Jouppi et al. — In-Datacenter Performance Analysis of a Tensor Processing Unit (arXiv 1704.04760)", "url": "https://arxiv.org/abs/1704.04760"},
+    {"title": "Chen et al. — Eyeriss: A Spatial Architecture for Energy-Efficient Dataflow for CNNs (ISCA 2016)"},
+    {"title": "Gemmini — Berkeley systolic array generator (Chipyard)", "url": "https://github.com/ucb-bar/gemmini"},
+    {"title": "NVDLA — NVIDIA Deep Learning Accelerator (오픈 하드웨어, 하드웨어/소프트웨어 문서)", "url": "http://nvdla.org/"},
+    {"title": "SCALE-Sim v2 — systolic array simulator", "url": "https://github.com/scalesim-project/scale-sim-v2"},
+    {"title": "Timeloop — DNN accelerator mapping/performance model (NVlabs)", "url": "https://github.com/NVlabs/timeloop"},
+    {"title": "Arm Ethos-U Vela compiler (PyPI)", "url": "https://pypi.org/project/ethos-u-vela/"},
+    {"title": "Micikevicius et al. — FP8 Formats for Deep Learning (arXiv 2209.05433)", "url": "https://arxiv.org/abs/2209.05433"},
+    {"title": "OCP Microscaling (MX) Formats Specification v1.0"}
+  ],
+  "items": [
+    {
+      "id": "NPU-B01",
+      "level": "B",
+      "title": "MAC 유닛 모델: int8×int8→int32 누산과 비트폭 분석",
+      "goal": "MAC 데이터패스의 곱·누산 비트폭과 오버플로가 나지 않는 최대 누산 길이를 계산한다",
+      "task": "부호 있는/없는 int8 곱과 N비트 누산기를 갖는 MAC을 C로 모델링해 최악 입력(-128×-128)에서 누산 가능한 최대 K를 공식과 실험으로 구하고, int32 누산기 포화 vs wraparound 동작과 int16 누산기가 왜 부족한지 테스트로 보인다.",
+      "tags": ["mac", "datapath", "accumulator", "overflow"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-B02",
+      "level": "B",
+      "title": "Systolic Array 개념: 데이터 스큐와 타이밍 표",
+      "goal": "systolic array에서 입력을 대각선으로 지연시켜 넣는 이유와 파형(wavefront) 전파를 이해한다",
+      "task": "4x4 어레이에서 A 행렬 행을 사이클마다 한 칸씩 스큐해 왼쪽에서, B 열을 위에서 넣을 때 각 PE가 어느 사이클에 어떤 a·b 쌍을 곱하는지 표를 생성하는 프로그램을 작성하고, 첫 출력과 마지막 출력 사이클을 (2N+K−2 형태) 공식과 대조한다.",
+      "tags": ["systolic-array", "skew", "wavefront"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-B03",
+      "level": "B",
+      "title": "Weight-Stationary Systolic Array 사이클 시뮬레이터 (C)",
+      "goal": "TPU 스타일 weight-stationary 어레이를 레지스터 수준 사이클 시뮬레이터로 구현한다",
+      "task": "PE마다 weight 레지스터·입력 전달 레지스터·부분합 전달 레지스터를 갖는 R×C WS 어레이를 2-phase(조합 계산 후 일괄 레지스터 갱신) 사이클 시뮬레이터로 C에 구현해, 무작위 int8 GEMM 결과를 레퍼런스와 비교하고 weight 로딩 포함 총 사이클이 해석 공식과 일치함을 검증한다.",
+      "tags": ["systolic-array", "weight-stationary", "cycle-simulator", "see:SIM"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-B04",
+      "level": "B",
+      "title": "Output-Stationary 시뮬레이터와 Dataflow 비교",
+      "goal": "같은 GEMM을 output-stationary로 수행할 때 사이클·레지스터 이동·버퍼 접근이 어떻게 달라지는지 비교한다",
+      "task": "B03 프레임워크에 OS 어레이(PE가 출력 누산기를 보유, A·B가 흐름)를 추가해 정답 일치를 검증하고, M×K×N 모양(정사각, K가 큰 경우, N=1 GEMV)별 사이클·SRAM 읽기 수·PE 간 이동 횟수를 WS와 표로 비교한다.",
+      "tags": ["systolic-array", "output-stationary", "dataflow"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-B05",
+      "level": "B",
+      "title": "Dataflow 분류: WS·OS·IS·Row-Stationary 접근 횟수 분석",
+      "goal": "Eyeriss 분류법으로 dataflow별 재사용 대상과 메모리 계층별 접근 횟수를 정량화한다",
+      "task": "conv 레이어 하나를 7중 루프로 쓰고 루프 순서·어떤 텐서를 PE 레지스터에 고정하는지에 따라 레지스터/글로벌 버퍼/DRAM 접근 횟수를 세는 Python 분석기를 작성해 WS/OS/IS/RS의 접근 수와 Horowitz 에너지 가중치 합을 비교한다.",
+      "tags": ["dataflow", "eyeriss", "row-stationary", "energy"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-B06",
+      "level": "B",
+      "title": "어레이 활용률: 레이어 Shape와 어레이 크기 매핑",
+      "goal": "레이어 차원이 어레이 크기의 배수가 아닐 때 생기는 낭비와 fold 횟수를 계산한다",
+      "task": "R×C 어레이에 GEMM(M,K,N)을 매핑할 때 fold 수, 패딩 낭비, 파이프라인 fill/drain을 포함한 실효 활용률을 계산하는 함수를 작성하고, 32×32와 128×128 어레이에서 MobileNetV2 각 레이어(특히 depthwise, 작은 채널)의 활용률을 표로 비교한다.",
+      "tags": ["utilization", "mapping", "array-size"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-B07",
+      "level": "B",
+      "title": "루프 네스트 타일링과 DRAM 트래픽",
+      "goal": "SRAM 용량 제약 하에서 타일 크기와 루프 순서가 DRAM 트래픽을 결정하는 원리를 익힌다",
+      "task": "GEMM과 conv를 타일 루프 + 내부 루프로 분해하고 타일 크기·루프 순서·버퍼 용량을 입력받아 텐서별 DRAM 읽기/쓰기 바이트를 계산하는 모델을 작성해, 몇 가지 타일링을 비교하고 최소 트래픽 하한(통신 하한)과의 차이를 확인한다.",
+      "tags": ["tiling", "loop-nest", "dram-traffic", "sram"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-B08",
+      "level": "B",
+      "title": "수 포맷 구현: int4·fp16·bf16·fp8(E4M3/E5M2)",
+      "goal": "NPU 데이터패스가 쓰는 저정밀 포맷의 비트 구조와 변환 규칙(RNE, 포화, 서브노멀, NaN)을 정확히 구현한다",
+      "task": "fp32 ↔ fp16/bf16/E4M3/E5M2 변환을 round-to-nearest-even, 포화 모드, 서브노멀, NaN/Inf 규칙대로 C로 구현하고, 모든 fp8/fp16 비트 패턴과 무작위 fp32 값에 대해 Python ml_dtypes 결과와 전수 비교한다.",
+      "tags": ["number-format", "fp8", "bf16", "rounding"],
+      "env": "mac",
+      "env_note": "pip install ml_dtypes (레퍼런스용)"
+    },
+    {
+      "id": "NPU-B09",
+      "level": "B",
+      "title": "NPU 블록 다이어그램과 Toy NPU 스펙 작성",
+      "goal": "공개 NPU 구조를 해부하고 이후 항목에서 쓸 나만의 toy NPU 아키텍처 스펙을 정의한다",
+      "task": "TPUv1, NVDLA, Ethos-U55, Gemmini의 구성요소(MAC 어레이, unified buffer, accumulator, activation unit, DMA, command processor)를 비교표로 정리하고, 16×16 int8 WS 어레이·256KB SRAM·DMA 2채널·벡터 유닛·명령 큐를 갖는 toy NPU의 블록도·메모리 맵·레지스터 맵 스펙 문서를 작성한다.",
+      "tags": ["architecture", "spec", "tpu", "nvdla"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M01",
+      "level": "M",
+      "title": "SRAM 타일 크기 탐색과 버퍼 분할",
+      "goal": "SRAM 용량을 입력·가중치·출력 버퍼에 나누고 타일 크기를 탐색해 DRAM 트래픽을 최소화한다",
+      "task": "toy NPU의 256KB SRAM에서 conv 레이어의 타일 크기(출력 H/W 타일, 입력/출력 채널 타일)와 버퍼 분할을 전수/휴리스틱 탐색해 DRAM 트래픽 최소 해를 찾는 도구를 작성하고, 선택된 타일링으로 B03 시뮬레이터를 돌려 정답 일치와 예측 트래픽을 검증한다.",
+      "tags": ["tiling", "sram", "search", "optimization"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M02",
+      "level": "M",
+      "title": "다차원 Strided DMA 엔진과 디스크립터 체인",
+      "goal": "NHWC 텐서 타일을 NPU 내부 레이아웃으로 옮기는 3D strided DMA와 디스크립터 체인을 구현한다",
+      "task": "src/dst 주소, 3차원 크기·stride, 버스트 크기, next 포인터, 완료 인터럽트 플래그를 갖는 디스크립터 포맷과 DMA 엔진 모델을 구현해 DRAM의 NHWC 타일을 SRAM의 채널 블록 레이아웃으로 이동하고, 경계 타일·정렬 위반·버스트 효율(바이트/트랜잭션)을 테스트한다.",
+      "tags": ["dma", "descriptor", "strided", "layout"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M03",
+      "level": "M",
+      "title": "더블 버퍼링: DMA와 연산 오버랩 스케줄",
+      "goal": "ping-pong 버퍼로 load-compute-store를 파이프라이닝하고 stall 원인을 분석한다",
+      "task": "DMA 대역폭·지연과 어레이 연산 시간을 가진 이벤트 시뮬레이터에서 단일 버퍼, 더블 버퍼, 트리플 버퍼 스케줄을 구현해 레이어별 총 시간·DMA stall·compute stall을 측정하고, 타일 크기 변화에 따라 병목이 DMA ↔ 연산으로 바뀌는 지점을 찾는다.",
+      "tags": ["double-buffering", "pipelining", "dma", "scheduling"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M04",
+      "level": "M",
+      "title": "Toy NPU ISA, 어셈블러와 기능 시뮬레이터",
+      "goal": "NPU 명령어 집합(LOAD/MATMUL/ACT/STORE/SYNC)을 설계하고 어셈블러·기능 시뮬레이터로 실행한다",
+      "task": "B09 스펙의 64비트 명령 인코딩(opcode, SRAM 주소, 크기, 플래그, 의존성 토큰)을 정의하고 텍스트 어셈블러와 명령 단위 기능 시뮬레이터를 작성해, 손으로 짠 tiled GEMM 프로그램이 레퍼런스와 일치하고 잘못된 의존성 토큰 시 데이터 해저드가 검출되는지 테스트한다.",
+      "tags": ["isa", "assembler", "functional-simulator"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M05",
+      "level": "M",
+      "title": "커맨드 큐와 NPU 펌웨어 디스패처",
+      "goal": "호스트가 제출한 작업을 NPU 내부 컨트롤러 펌웨어가 디코드·디스패치·완료 보고하는 흐름을 구현한다",
+      "task": "호스트 제출 링(작업 디스크립터 + 도어벨)과 완료 큐를 두고, 펌웨어 메인 루프(pthread로 내부 MCU 모델)가 작업을 꺼내 DMA·MAC·벡터 엔진 큐로 명령을 분배하고 완료 시 인터럽트·상태를 기록하게 구현하며, 잘못된 디스크립터·엔진 타임아웃·큐 overflow 처리 경로를 테스트한다.",
+      "tags": ["firmware", "command-queue", "doorbell", "dispatcher", "see:GPUSYS"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M06",
+      "level": "M",
+      "title": "호스트 드라이버 인터페이스: 모델 로드부터 Wait까지",
+      "goal": "사용자 API → 커널 드라이버 → 펌웨어 메일박스로 이어지는 NPU 소프트웨어 인터페이스를 설계·구현한다",
+      "task": "npu_open/load_model/alloc_buffer/submit/wait/close 사용자 API와 이를 처리하는 커널 드라이버 모델(ioctl 디스패치, 버퍼 핀·IOMMU 매핑 테이블, 펌웨어 메일박스 RPC, 완료 IRQ → waitqueue)을 C로 구현해, 다중 프로세스 제출과 프로세스 종료 시 자원 정리를 테스트한다.",
+      "tags": ["driver", "host-interface", "iommu", "ioctl", "see:OS"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M07",
+      "level": "M",
+      "title": "Requantization과 후처리 유닛 (Bit-exact)",
+      "goal": "누산 결과를 int8로 되돌리는 하드웨어 후처리(bias, per-channel 스케일, 시프트, 활성화 LUT)를 bit-exact로 구현한다",
+      "task": "int32 누산 → bias add → per-channel (multiplier, shift) requant → zero-point → clamp → 활성화 LUT(sigmoid/GELU 256-entry 또는 piecewise linear)를 하는 후처리 유닛 모델을 작성해, EML-B09 레퍼런스 및 TFLite 결과와 bit-exact 일치를 전수/무작위 테스트로 검증한다.",
+      "tags": ["requantization", "post-processing", "lut", "bit-exact", "see:EML"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M08",
+      "level": "M",
+      "title": "그래프 Lowering과 CPU Fallback 파티셔닝",
+      "goal": "모델 그래프를 NPU 명령 스트림으로 내리고 미지원 연산자를 CPU로 분할하는 컴파일러 앞단을 구현한다",
+      "task": "conv/relu/add/pool/softmax로 된 소형 그래프를 입력받아 NPU 지원 여부로 서브그래프를 분할하고, NPU 서브그래프는 M01 타일링 + M04 ISA 명령 시퀀스로 lowering, 나머지는 CPU 커널 호출로 바꾸는 컴파일러를 작성해 전체 실행 결과를 PyTorch와 비교한다.",
+      "tags": ["compiler", "lowering", "partitioning", "see:COMP"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M09",
+      "level": "M",
+      "title": "NPU 컴파일러 스케줄링·SRAM 할당·레이어 퓨전",
+      "goal": "타일 실행 순서, SRAM 버퍼 수명 기반 할당, 레이어 간 on-chip 유지(퓨전)로 DRAM 왕복을 줄인다",
+      "task": "M08 출력 명령 스트림에 대해 SRAM 버퍼를 구간 그래프 색칠(interval allocation)로 할당하고, 연속 conv 두 레이어를 타일 단위로 퓨전해 중간 활성화를 DRAM에 쓰지 않게 하는 패스를 구현해, 퓨전 전후 DRAM 트래픽·총 사이클·SRAM 피크를 비교한다.",
+      "tags": ["compiler", "scheduling", "memory-allocation", "layer-fusion"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M10",
+      "level": "M",
+      "title": "Golden Model 비교와 불일치 트리아지",
+      "goal": "NPU 결과를 레퍼런스와 비교하고 첫 불일치 지점과 원인(반올림, 포화, 레이아웃)을 빠르게 찾는 검증 흐름을 만든다",
+      "task": "numpy 정수 golden model과 NPU 시뮬레이터 출력을 레이어·타일 단위로 비교하는 하네스를 작성하고, 반올림 모드 차이·누산기 포화·채널 순서 오류·타일 경계 오프셋 버그를 일부러 주입해 첫 불일치 타일·원소 좌표·오차 패턴으로 원인을 자동 분류하는 리포트를 출력한다.",
+      "tags": ["validation", "golden-model", "bit-exact", "triage", "see:SIV"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M11",
+      "level": "M",
+      "title": "Systolic Array에 안 맞는 연산: Depthwise·Elementwise·Softmax",
+      "goal": "MAC 어레이 활용률이 낮은 연산을 벡터 유닛 등으로 매핑하는 설계 트레이드오프를 분석한다",
+      "task": "depthwise conv, elementwise add, softmax, layernorm을 (a) 어레이에 억지로 매핑할 때와 (b) SIMD 벡터 유닛(예: 16-lane)으로 처리할 때의 사이클을 모델링하고, MobileNetV2·소형 트랜스포머에서 이 연산들이 전체 시간에 차지하는 비율(Amdahl)과 벡터 유닛 폭 선택을 정리한다.",
+      "tags": ["vector-unit", "depthwise", "softmax", "utilization"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-M12",
+      "level": "M",
+      "title": "bf16/fp8 MAC 데이터패스와 누산 정밀도",
+      "goal": "부동소수점 저정밀 곱과 fp32 누산의 수치 특성, 누산 순서·정밀도가 결과에 주는 영향을 분석한다",
+      "task": "B08 포맷으로 bf16×bf16, E4M3×E4M3 곱을 정확히 계산해 fp32(또는 축소 정밀도) 누산기에 더하는 MAC 모델을 구현하고, GEMM K 크기별 fp32 레퍼런스 대비 상대 오차와, 누산기를 fp16으로 줄이거나 누산 순서를 바꿨을 때의 오차 증가를 측정한다.",
+      "tags": ["bf16", "fp8", "accumulation", "numerics"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-A01",
+      "level": "A",
+      "title": "2:4 구조적 희소성: 압축 포맷과 희소 MAC",
+      "goal": "4개 중 2개 0 패턴의 가중치 압축(값 + 2비트 인덱스)과 하드웨어 희소 MAC의 동작을 구현한다",
+      "task": "가중치를 2:4 패턴으로 가지치기·압축(값 배열 + 메타데이터)하는 함수와, 메타데이터로 활성화를 선택(mux)해 곱하는 희소 MAC/systolic 모델을 구현해 밀집 결과와 일치를 검증하고, 사이클 2배 이득과 메타데이터 대역폭 오버헤드를 정량화한다.",
+      "tags": ["sparsity", "structured-sparsity", "compression", "see:EML"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-A02",
+      "level": "A",
+      "title": "Microscaling(MX) 포맷: MXFP8·MXFP4·MXINT8",
+      "goal": "32원소 블록 공유 지수(E8M0) 기반 MX 포맷의 양자화·dot product와 오차 특성을 구현한다",
+      "task": "OCP MX 규칙(블록 32, E8M0 공유 스케일, 원소 E4M3/E2M1/int8)으로 quantize/dequantize와 블록 단위 dot product(블록별 스케일 곱 후 fp32 누산)를 구현하고, 실제 LLM 가중치·활성화에서 per-tensor fp8, int8 대비 오차와 비트당 품질을 비교한다.",
+      "tags": ["microscaling", "mx-format", "fp4", "quantization"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-A03",
+      "level": "A",
+      "title": "해석적 성능 모델 (Timeloop/SCALE-Sim lite)과 검증",
+      "goal": "사이클 시뮬레이터 없이 빠르게 설계 공간을 탐색할 해석 모델을 만들고 정확도를 검증한다",
+      "task": "어레이 크기·dataflow·SRAM 크기·DRAM 대역폭을 입력받아 레이어별 사이클과 DRAM 접근을 계산하는 Python 해석 모델을 작성해 B03/M03 시뮬레이터 및 SCALE-Sim 결과와 오차를 비교하고, 어레이 크기 × SRAM 크기 설계 공간의 성능/면적 대용 지표 파레토를 그린다.",
+      "tags": ["performance-model", "design-space-exploration", "scale-sim"],
+      "env": "mac",
+      "env_note": "pip install scalesim (비교용, 선택)"
+    },
+    {
+      "id": "NPU-A04",
+      "level": "A",
+      "title": "트랜스포머를 NPU에 매핑: Attention·KV Cache",
+      "goal": "LLM decode 한 스텝을 MAC 어레이·벡터 유닛·DRAM에 매핑하고 병목을 분석한다",
+      "task": "소형 트랜스포머 블록(QKV/출력 projection, attention, FFN, RMSNorm, softmax)을 toy NPU 자원에 매핑하는 스케줄을 작성하고, prefill과 decode(배치 1, KV cache DRAM 상주)의 레이어별 사이클·DRAM 바이트를 계산해 decode가 GEMV·KV 읽기로 memory-bound가 되는 것을 보이며 개선안(배치, KV 양자화, 가중치 스트리밍)을 비교한다.",
+      "tags": ["transformer", "llm", "mapping", "kv-cache", "see:AIPERF"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-A05",
+      "level": "A",
+      "title": "멀티코어 NPU와 NoC: 레이어 분할 전략",
+      "goal": "여러 NPU 코어에 작업을 공간 분할(데이터/모델) 또는 파이프라인 분할할 때의 통신·동기 비용을 분석한다",
+      "task": "4코어 toy NPU와 공유 L2 SRAM, 메시 NoC(링크 대역폭·홉 지연) 모델을 만들고, conv/GEMM을 출력 채널 분할, 공간(H) 분할(halo 교환), 레이어 파이프라인 분할로 나눠 실행 시간·NoC 트래픽·동기화 대기를 시뮬레이션해 레이어 유형별 최적 전략을 정리한다.",
+      "tags": ["multi-core", "noc", "partitioning", "parallelism"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-A06",
+      "level": "A",
+      "title": "성능 카운터(PMU)와 펌웨어 트레이싱",
+      "goal": "NPU 성능 문제를 진단할 수 있는 하드웨어 카운터와 펌웨어 트레이스 체계를 설계·구현한다",
+      "task": "MAC 활용 사이클, DMA 바이트, stall 원인별(DMA 대기, 의존성, SRAM 뱅크 충돌) 카운터를 시뮬레이터에 추가하고, 펌웨어가 작업 단위 이벤트를 링 버퍼에 기록·호스트가 수집해 Chrome trace 타임라인으로 변환하는 도구를 만들어 한 모델의 병목을 진단한 리포트를 작성한다.",
+      "tags": ["pmu", "performance-counters", "tracing", "firmware"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-A07",
+      "level": "A",
+      "title": "NPU 전력 관리: 클록 게이팅·파워 도메인·DVFS",
+      "goal": "NPU 펌웨어가 담당하는 전력 상태 전환과 워크로드 기반 DVFS 정책을 설계한다",
+      "task": "MAC 어레이·SRAM 뱅크·DMA를 별도 파워 도메인으로 갖는 toy NPU 전력 모델(동적/누설, 게이팅 진입·복귀 지연, SRAM retention)을 만들고, 유휴 감지 기반 게이팅과 레이어 특성(memory-bound면 저주파) 기반 DVFS 정책을 구현해 추론당 에너지와 지연 증가를 비교한다.",
+      "tags": ["power-management", "clock-gating", "dvfs", "firmware"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-A08",
+      "level": "A",
+      "title": "NPU 검증 계획: 다층 Golden 비교와 커버리지",
+      "goal": "NPU 실리콘/펌웨어 bring-up을 위한 체계적 검증 계획을 세우고 자동화한다",
+      "task": "연산자·레이어·네트워크·시스템(펌웨어, 드라이버, 전력 전환) 수준 검증 계획을 작성하고, 제약 무작위 연산자 파라미터 생성기 + golden 비교 + 기능 커버리지(shape 경계, 포화, 0 스케일 등 빈) 수집기를 구현해 시뮬레이터에서 커버리지 100%까지 회귀를 돌리고 발견된 버그를 기록한다.",
+      "tags": ["validation", "test-plan", "coverage", "constrained-random", "see:SIV"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NPU-A09",
+      "level": "A",
+      "title": "Systolic Array RTL과 Verilator 공동 시뮬레이션",
+      "goal": "C 사이클 모델을 RTL로 옮기고 같은 테스트 벡터로 RTL과 C golden을 비교한다",
+      "task": "4×4 int8 weight-stationary systolic array를 Verilog/SystemVerilog로 작성하고 Verilator C++ 테스트벤치에서 B03 C 모델과 같은 무작위 GEMM을 구동해 출력·사이클 수를 비교하며, 파형(VCD)으로 스큐·유효 신호 타이밍을 확인한다.",
+      "tags": ["rtl", "verilator", "co-simulation", "see:EMU"],
+      "env": "fpga",
+      "env_note": "Verilator(brew install verilator)로 맥에서도 시뮬레이션 가능; FPGA 보드는 선택"
+    },
+    {
+      "id": "NPU-A10",
+      "level": "A",
+      "title": "실제 NPU 툴체인: Arm Ethos-U Vela 컴파일러",
+      "goal": "상용 NPU 컴파일러가 모델을 어떻게 분할·스케줄·메모리 배치하는지 실제 출력으로 확인한다",
+      "task": "int8 TFLite 모델(MobileNetV2, KWS)을 Vela로 Ethos-U55/U65 구성별로 컴파일해 NPU/CPU 연산자 분할, SRAM/Flash 사용량, 예상 사이클 리포트를 수집하고, 자체 M08/M09 컴파일러와 A03 해석 모델의 예측을 비교해 차이 원인을 분석한다.",
+      "tags": ["vela", "ethos-u", "compiler", "toolchain"],
+      "env": "mac",
+      "env_note": "pip install ethos-u-vela"
+    },
+    {
+      "id": "NPU-A11",
+      "level": "A",
+      "title": "Apple Neural Engine 실측: Core ML Compute Units",
+      "goal": "실제 모바일 NPU(ANE)에서 연산자 지원·fallback·지연을 측정해 NPU 친화적 모델 설계를 체득한다",
+      "task": "coremltools로 CNN과 소형 트랜스포머를 Core ML로 변환해 computeUnits를 CPU_ONLY/CPU_AND_GPU/CPU_AND_NE/ALL로 바꿔 지연·전력(powermetrics ANE)을 측정하고, Xcode Core ML 성능 리포트로 ANE에서 fallback된 연산자를 찾아 모델 수정(레이아웃, 연산자 대체)으로 ANE 실행 비율을 높인다.",
+      "tags": ["ane", "coreml", "fallback", "measurement"],
+      "env": "mac",
+      "env_note": "pip install coremltools; Xcode Core ML performance report 사용"
+    },
+    {
+      "id": "NPU-A12",
+      "level": "A",
+      "title": "종합: 나만의 NPU 스택 End-to-End",
+      "goal": "시뮬레이터·펌웨어·드라이버·컴파일러·검증을 하나로 엮어 실제 모델을 돌리는 NPU 스택을 완성한다",
+      "task": "EML-M09의 int8 CNN을 M08/M09 컴파일러로 toy ISA로 컴파일하고, M06 드라이버 → M05 펌웨어 → B03/M03 사이클 시뮬레이터에서 실행해 golden과 bit-exact 일치, 총 사이클·DRAM 바이트·추정 에너지·PMU 타임라인을 출력하는 데모와 아키텍처 문서(면접 포트폴리오용)를 완성한다.",
+      "tags": ["capstone", "end-to-end", "portfolio", "see:CAP"],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

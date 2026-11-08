@@ -1,0 +1,439 @@
+{
+  "id": "BMC",
+  "intro": "BMC(Baseboard Management Controller)는 ASPEED AST2600 같은 SoC 위에서 OpenBMC(Linux + D-Bus 데몬)를 돌리며 서버의 전원·센서·팬·로그·펌웨어 업데이트·원격 콘솔을 호스트 CPU와 독립적으로 관리한다. Google·Meta·Microsoft·NVIDIA·AMD의 플랫폼/데이터센터 하드웨어 팀 면접에서는 IPMI/Redfish/PLDM/MCTP 메시지, 팬 PID, 전원 시퀀싱, 서명 이미지·RoT를 코드와 설계로 설명할 수 있는지를 보며, Don의 SSD·PCIe 경험과도 직접 연결된다.",
+  "goals": [
+    "BMC 하드웨어(AST2600)와 OpenBMC 소프트웨어 스택(D-Bus, systemd, bmcweb)을 설명하고 QEMU에서 다룰 수 있다",
+    "PMBus/SMBus 센서, IPMI 메시지·SDR·SEL, 임계값 이벤트를 구현할 수 있다",
+    "KCS 호스트 인터페이스, 전원 시퀀싱, PID 팬 제어, 워치독·호스트 복구를 구현할 수 있다",
+    "Redfish, MCTP, PLDM(모니터링·펌웨어 업데이트) 메시지와 상태 머신을 구현할 수 있다",
+    "서명 이미지·Root of Trust·SPDM과 플릿 단위 BMC 관리 시스템을 설계할 수 있다"
+  ],
+  "prereq": [
+    "COMM",
+    "ELX",
+    "PCIE",
+    "SEC"
+  ],
+  "refs": [
+    {
+      "title": "OpenBMC documentation",
+      "url": "https://github.com/openbmc/docs"
+    },
+    {
+      "title": "DMTF Redfish standards & mockups",
+      "url": "https://www.dmtf.org/standards/redfish"
+    },
+    {
+      "title": "DMTF PMCI (MCTP, PLDM, SPDM) specifications",
+      "url": "https://www.dmtf.org/standards/pmci"
+    },
+    {
+      "title": "Intelligent Platform Management Interface (IPMI) v2.0 Specification"
+    },
+    {
+      "title": "PMBus Specification Part I/II",
+      "url": "https://pmbus.org/"
+    },
+    {
+      "title": "QEMU Aspeed family boards documentation",
+      "url": "https://www.qemu.org/docs/master/system/arm/aspeed.html"
+    },
+    {
+      "title": "OCP Caliptra / Project Cerberus (Root of Trust)",
+      "url": "https://www.opencompute.org/"
+    }
+  ],
+  "items": [
+    {
+      "id": "BMC-B01",
+      "level": "B",
+      "title": "BMC의 역할과 OpenBMC를 QEMU에서 부팅하기",
+      "goal": "BMC 하드웨어 블록(AST2600: Cortex-A7 + 보조 코어, I2C, PWM/tach, LPC/eSPI, PCIe)과 OpenBMC 스택 구조를 직접 눈으로 확인한다",
+      "task": "QEMU의 ast2600-evb(또는 romulus-bmc) 머신으로 공개 OpenBMC 이미지를 부팅해 systemctl·busctl tree·journalctl로 주요 서비스(phosphor-*, bmcweb, ipmid)를 조사하고, 호스트 CPU와 독립 동작하는 BMC 블록 다이어그램과 서비스 지도를 작성한다.",
+      "tags": [
+        "openbmc",
+        "ast2600",
+        "architecture",
+        "qemu"
+      ],
+      "env": "qemu",
+      "env_note": "brew install qemu 후 qemu-system-arm -M ast2600-evb/romulus-bmc. OpenBMC 이미지는 공개 빌드 산출물 사용(Yocto 직접 빌드는 가이드만)."
+    },
+    {
+      "id": "BMC-B02",
+      "level": "B",
+      "title": "PMBus/SMBus 센서 읽기와 LINEAR11/16 변환",
+      "goal": "전원 레귤레이터·PSU 텔레메트리를 SMBus 트랜잭션과 PMBus 데이터 형식으로 다룬다",
+      "task": "PMBus LINEAR11·LINEAR16(VOUT_MODE 지수) 인코딩/디코딩과 SMBus PEC(CRC-8, poly 0x07)를 구현하고, mock VR 장치(READ_VIN/READ_IOUT/READ_TEMPERATURE_1, STATUS_WORD)를 상대로 read word 트랜잭션·PEC 오류·NACK 처리를 테스트한다.",
+      "tags": [
+        "pmbus",
+        "smbus",
+        "i2c",
+        "sensors",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-B03",
+      "level": "B",
+      "title": "IPMI 메시지 구조와 IPMB 체크섬",
+      "goal": "NetFn/LUN/Cmd/Completion Code 구조와 IPMB 프레임의 두 개 체크섬을 정확히 구현한다",
+      "task": "IPMB 요청/응답 프레임(rsSA, NetFn/rsLUN, 체크섬1, rqSA, rqSeq/rqLUN, Cmd, data, 체크섬2)의 인코더/디코더와 Get Device ID·Get Self Test Results 응답 핸들러를 작성하고, 체크섬 오류·알 수 없는 명령(C1h) 완료 코드를 테스트한다.",
+      "tags": [
+        "ipmi",
+        "ipmb",
+        "protocol"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-B04",
+      "level": "B",
+      "title": "SDR 파싱과 센서 값 변환 (M, B, R-exp, B-exp)",
+      "goal": "Full Sensor Record의 변환 공식 y = L[(M·x + B·10^Bexp)·10^Rexp]를 정확히 구현한다",
+      "task": "Type 01h Full Sensor Record 바이너리를 파싱(10비트 부호 M/B, 4비트 부호 지수, 센서 단위, 임계값 필드)하고 raw↔실제 값 변환 함수를 작성해, ipmitool sdr 출력 형식과 같은 표를 만들고 경계값 왕복 오차를 검증한다.",
+      "tags": [
+        "ipmi",
+        "sdr",
+        "sensor-conversion"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-B05",
+      "level": "B",
+      "title": "센서 임계값 엔진: 어서트/디어서트와 히스테리시스",
+      "goal": "LNR/LC/LNC/UNC/UC/UNR 6단계 임계값과 히스테리시스 기반 이벤트 생성 규칙을 구현한다",
+      "task": "센서 값 스트림을 받아 상·하한 각 3단계 임계 상태를 추적하고 양/음 히스테리시스를 적용해 어서트·디어서트 이벤트를 생성하는 엔진을 구현하고, 경계 부근 진동 입력에서 이벤트 폭주가 없음을 테스트한다.",
+      "tags": [
+        "thresholds",
+        "hysteresis",
+        "events"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-B06",
+      "level": "B",
+      "title": "SEL(System Event Log) 레코드와 로그 관리",
+      "goal": "16바이트 SEL 레코드 형식, 타임스탬프, 순환/가득참 정책, Clear SEL 예약 절차를 구현한다",
+      "task": "B05 이벤트를 16바이트 SEL 레코드(Record ID, 타입 02h, timestamp, Generator ID, EvM Rev, sensor type/number, event dir/type, event data 1–3)로 저장하는 로그 모듈과 Get SEL Entry·Reserve SEL·Clear SEL 처리를 구현해 가득참/순환 정책을 테스트한다.",
+      "tags": [
+        "ipmi",
+        "sel",
+        "logging"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-B07",
+      "level": "B",
+      "title": "팬 기초: PWM 듀티·타코 RPM·스텝 팬 커브",
+      "goal": "4-wire 팬의 PWM 제어와 타코미터 RPM 측정, 온도 기반 스텝 커브를 구현한다",
+      "task": "타코 펄스 카운트(팬당 2펄스/회전)→RPM 변환, mock PWM 레지스터 듀티 설정, 히스테리시스를 둔 온도→듀티 스텝 커브와 팬 고장(RPM 0, 응답 없음) 감지 시 나머지 팬 100% 정책을 구현해 테스트한다.",
+      "tags": [
+        "fan",
+        "pwm",
+        "tachometer"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-B08",
+      "level": "B",
+      "title": "섀시 전원 제어 상태 머신",
+      "goal": "호스트 전원 버튼·리셋·ACPI 상태와 BMC 전원 명령(on/off/cycle/reset/soft-off)의 상호작용을 구현한다",
+      "task": "Off/PoweringOn/On/GracefulOff/PoweringOff 상태와 PGOOD 입력, 전원 버튼 GPIO 펄스, 강제 종료(4초 홀드) 타이머, IPMI Chassis Control 명령을 처리하는 상태 머신을 구현하고 동시 이벤트(버튼 + 원격 명령) 테스트를 작성한다.",
+      "tags": [
+        "power-control",
+        "state-machine",
+        "chassis"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-B09",
+      "level": "B",
+      "title": "KCS 호스트 인터페이스 상태 머신",
+      "goal": "호스트 BIOS/OS가 BMC와 IPMI를 주고받는 KCS 레지스터(STATUS/CMD/DATA_IN/DATA_OUT) 프로토콜을 구현한다",
+      "task": "mock KCS 레지스터 모델 위에 호스트 측 드라이버와 BMC 측 상태 머신(IDLE/READ/WRITE/ERROR, IBF/OBF/C/D 비트, WRITE_START/WRITE_END/READ 제어 코드)을 구현하고, 정상 트랜잭션과 중단(abort)·오류 복구 시나리오를 테스트한다.",
+      "tags": [
+        "kcs",
+        "ipmi",
+        "host-interface"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-M01",
+      "level": "M",
+      "title": "Redfish 기초: 미니 Redfish 서비스 구현",
+      "goal": "Redfish 리소스 모델(ServiceRoot→Chassis/Systems/Managers, Sensors, Thermal)과 HTTP 의미론을 구현한다",
+      "task": "앞의 센서·전원 모델을 노출하는 Python Redfish 서버(@odata.id 링크, GET 컬렉션, PATCH 팬 모드, ComputerSystem.Reset 액션, ETag, 세션 인증)를 작성하고 curl과 DMTF Redfish-Service-Validator로 스키마 적합성을 확인한다.",
+      "tags": [
+        "redfish",
+        "rest",
+        "http"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-M02",
+      "level": "M",
+      "title": "전원 시퀀싱: 레일 순서·PGOOD·역순 셧다운",
+      "goal": "다중 전원 레일의 enable 순서, power-good 타임아웃, 실패 시 안전한 역순 차단을 구현한다",
+      "task": "의존 관계(예: P12V→P5V→P3V3→VCCIN→DDR)를 가진 레일 테이블을 읽어 mock GPIO로 enable하고 PGOOD 대기·타임아웃·지연을 처리하는 시퀀서를 구현하며, 중간 레일 실패 시 역순 셧다운과 실패 레일 SEL 기록을 테스트한다.",
+      "tags": [
+        "power-sequencing",
+        "gpio",
+        "pgood"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-M03",
+      "level": "M",
+      "title": "PID 팬 제어 (phosphor-pid-control 스타일)",
+      "goal": "열 존 단위로 온도 마진 PID → 팬 RPM setpoint → 팬 PID 캐스케이드와 failsafe를 구현한다",
+      "task": "서버 열 모델(CPU/DIMM/인렛 발열, 팬 RPM에 따른 냉각) 시뮬레이터 위에 존별 thermal PID(마진 기반, 최대값 선택)와 팬 RPM PID, 센서 누락 시 failsafe 듀티를 구현해 부하 스텝 시 온도 오버슈트·팬 소음(RPM 변동)을 측정한다.",
+      "tags": [
+        "fan-control",
+        "pid",
+        "thermal",
+        "openbmc"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-M04",
+      "level": "M",
+      "title": "OpenBMC D-Bus 아키텍처: 센서 객체와 ObjectMapper",
+      "goal": "OpenBMC가 데몬 간 통신을 D-Bus 객체/인터페이스/프로퍼티 신호로 하는 구조를 직접 다룬다",
+      "task": "Linux VM에서 xyz.openbmc_project.Sensor.Value 인터페이스(Value/Unit 프로퍼티, PropertiesChanged 신호)를 내보내는 Python(dbus-next) 서비스와, 그것을 찾아 구독하는 클라이언트를 작성하고 busctl introspect/monitor로 확인하며 ObjectMapper 역할을 미니 구현한다.",
+      "tags": [
+        "dbus",
+        "openbmc",
+        "ipc"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM의 Ubuntu에서 session/system D-Bus와 busctl 사용."
+    },
+    {
+      "id": "BMC-M05",
+      "level": "M",
+      "title": "MCTP 패킷: 분할·재조립과 EID",
+      "goal": "SMBus/I2C·PCIe VDM 위에 올라가는 MCTP 전송 헤더(EID, SOM/EOM, Pkt Seq, Tag Owner/Tag)를 구현한다",
+      "task": "MCTP 패킷 인코더와 메시지 분할(기본 64바이트 MTU)·재조립기(시퀀스 오류, 중복, 태그별 동시 메시지)를 구현하고, MCTP-over-SMBus 바인딩 헤더(목적지 주소, 명령 0x0F, PEC)를 씌워 왕복 테스트하며 Control 메시지(Get Endpoint ID 등)를 처리한다.",
+      "tags": [
+        "mctp",
+        "smbus",
+        "pcie-vdm",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-M06",
+      "level": "M",
+      "title": "PLDM Type 2: 플랫폼 모니터링 (PDR, GetSensorReading)",
+      "goal": "PLDM 기본 헤더와 Platform Monitoring & Control의 PDR 저장소·센서 읽기를 구현한다",
+      "task": "PLDM 헤더(Rq/D/Instance ID, Type, Command, Completion Code)와 Type 2 GetPDR·GetSensorReading 요청자/응답자를 M05 MCTP 위에서 구현하고, 가상 NIC/GPU 장치의 Numeric Sensor PDR을 읽어 센서 값을 BMC 센서 모델로 가져온다.",
+      "tags": [
+        "pldm",
+        "pdr",
+        "sensors"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-M07",
+      "level": "M",
+      "title": "IPMI over LAN (RMCP+)과 인증 세션",
+      "goal": "원격 관리 경로인 RMCP+/RAKP 세션 수립과 ipmitool lanplus 동작을 이해한다",
+      "task": "OpenIPMI ipmi_sim을 띄우고 ipmitool -I lanplus 트래픽을 캡처해 RMCP/ASF Presence Ping, Open Session, RAKP 1–4 메시지 필드를 해석하는 파서를 Python으로 작성하며, cipher suite 0의 위험성과 RAKP 해시 노출 문제를 정리한다.",
+      "tags": [
+        "ipmi",
+        "rmcp",
+        "lanplus",
+        "security"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM에 OpenIPMI(ipmi_sim)·ipmitool·tcpdump 설치."
+    },
+    {
+      "id": "BMC-M08",
+      "level": "M",
+      "title": "호스트 콘솔과 Serial-over-LAN",
+      "goal": "호스트 UART를 BMC가 가로채 여러 원격 클라이언트에 다중화하고 로그로 남기는 구조를 구현한다",
+      "task": "PTY를 호스트 UART로 가정해 콘솔 서버(obmc-console 유사)를 작성하고 Unix 소켓 다중 클라이언트 팬아웃, 쓰기 권한 1명 제한, 순환 콘솔 로그 버퍼, 접속 시 최근 로그 재생을 구현해 동시 접속 테스트를 수행한다.",
+      "tags": [
+        "sol",
+        "console",
+        "uart",
+        "pty"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-M09",
+      "level": "M",
+      "title": "BMC 워치독과 호스트 복구",
+      "goal": "IPMI Watchdog Timer와 부팅 단계별 감시로 멈춘 호스트를 자동 복구하는 정책을 구현한다",
+      "task": "Set/Get/Reset Watchdog Timer 명령(timer use, pre-timeout 인터럽트, timeout action: reset/power down/cycle)을 구현하고, BIOS POST 정지·OS 무응답 시나리오에서 재시도 횟수·대체 BIOS 이미지 부팅으로 에스컬레이션하는 복구 정책을 테스트한다.",
+      "tags": [
+        "watchdog",
+        "host-recovery",
+        "ipmi"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-M10",
+      "level": "M",
+      "title": "서버 부품 펌웨어 업데이트 관리자",
+      "goal": "BMC 자신(듀얼 SPI A/B), BIOS SPI 플래시(먹스 전환), 장치 펌웨어 업데이트를 하나의 흐름으로 관리한다",
+      "task": "업로드 이미지 헤더 파싱·대상 판별·검증→스테이징→적용→활성화 상태 머신을 구현하고, BMC A/B 슬롯 전환, 호스트 off 상태에서 SPI 먹스 전환 후 BIOS 플래시 쓰기(mock)를 처리하며, Redfish UpdateService(multipart push)로 진행 상태를 노출한다.",
+      "tags": [
+        "firmware-update",
+        "spi-flash",
+        "redfish",
+        "ab-update"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-A01",
+      "level": "A",
+      "title": "서명 이미지 검증과 BMC Secure Boot 체인",
+      "goal": "AST2600 Secure Boot(OTP 키 해시)부터 U-Boot·커널(FIT 서명)까지 신뢰 체인과 롤백 방지를 구현한다",
+      "task": "ROM(OTP에 공개키 해시) → 부트로더 → 커널 이미지로 이어지는 ECDSA/RSA 서명 검증 체인을 OpenSSL로 시뮬레이션하고, 보안 버전 카운터(OTP 퓨즈 모델) 기반 롤백 방지와 키 폐기 시나리오를 테스트한다.",
+      "tags": [
+        "secure-boot",
+        "signing",
+        "rollback",
+        "see:SEC"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-A02",
+      "level": "A",
+      "title": "Root of Trust와 SPDM 측정·인증",
+      "goal": "Caliptra/Cerberus 같은 플랫폼 RoT와 SPDM 인증서·측정 기반 장치 증명을 이해한다",
+      "task": "SPDM 핵심 흐름(GET_VERSION → GET_CAPABILITIES → NEGOTIATE_ALGORITHMS → GET_CERTIFICATE → CHALLENGE → GET_MEASUREMENTS)을 단순화한 요청자/응답자를 구현해 인증서 체인 검증과 서명된 측정값 비교를 수행하고, 측정 불일치 장치를 격리하는 정책을 설계한다.",
+      "tags": [
+        "rot",
+        "spdm",
+        "attestation",
+        "caliptra"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-A03",
+      "level": "A",
+      "title": "PLDM Type 5 펌웨어 업데이트 흐름",
+      "goal": "UA(BMC)와 FD(장치) 사이 PLDM 펌웨어 업데이트 상태 머신을 양쪽 모두 구현한다",
+      "task": "PLDM FW Update 패키지 헤더 파싱과 RequestUpdate → PassComponentTable → UpdateComponent → RequestFirmwareData(FD 주도 pull) → TransferComplete → VerifyComplete → ApplyComplete → ActivateFirmware 흐름을 UA·FD 양쪽 상태 머신으로 구현하고 전송 중단·검증 실패·취소를 테스트한다.",
+      "tags": [
+        "pldm",
+        "firmware-update",
+        "state-machine"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-A04",
+      "level": "A",
+      "title": "eSPI/LPC 호스트 연동: POST 코드와 부팅 진행 추적",
+      "goal": "BMC가 호스트 부팅 진행을 port 80 POST 코드와 virtual wire로 관찰하는 방법을 구현한다",
+      "task": "POST 코드 스누프 FIFO 모델과 링버퍼 히스토리, 코드→부팅 단계(SEC/PEI/DXE/BDS) 디코더, 일정 시간 같은 코드에 정체 시 hang 판정을 구현하고, M09 워치독 복구와 연동해 부팅 실패 원인 리포트를 생성한다.",
+      "tags": [
+        "espi",
+        "post-codes",
+        "boot-progress"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-A05",
+      "level": "A",
+      "title": "Redfish EventService와 텔레메트리",
+      "goal": "폴링 대신 구독·푸시로 센서 이벤트와 메트릭 리포트를 전달하는 Redfish 이벤트 모델을 구현한다",
+      "task": "M01 서버에 EventService 구독(POST /Subscriptions, 이벤트 필터)과 SSE 스트림, TelemetryService MetricReportDefinition(주기 집계 min/max/avg)을 추가하고, 구독자 다운·재시도·백프레셔 상황에서 메모리 상한을 지키는지 테스트한다.",
+      "tags": [
+        "redfish",
+        "eventing",
+        "telemetry",
+        "sse"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-A06",
+      "level": "A",
+      "title": "OpenBMC 스타일 센서 데몬 개발 (sdbusplus)",
+      "goal": "실제 OpenBMC 데몬처럼 C++ sdbusplus로 하드웨어 센서를 D-Bus에 게시하고 Redfish까지 이어지는 경로를 이해한다",
+      "task": "Linux VM에서 sdbusplus + boost::asio로 hwmon(또는 mock 파일) 값을 주기적으로 읽어 xyz.openbmc_project.Sensor.Value·Threshold 인터페이스로 게시하는 데몬을 작성하고 busctl로 검증한 뒤, bmcweb이 이를 Redfish Sensors로 노출하는 매핑을 코드 리딩으로 정리한다.",
+      "tags": [
+        "openbmc",
+        "sdbusplus",
+        "cpp",
+        "daemon"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM에서 meson으로 sdbusplus 빌드. QEMU OpenBMC 이미지에 올리는 것은 선택(SDK 크로스 빌드는 가이드만)."
+    },
+    {
+      "id": "BMC-A07",
+      "level": "A",
+      "title": "BMC 신뢰성: 자기 복구와 호스트 무중단",
+      "goal": "BMC 플래시 손상·데몬 크래시·BMC 재부팅이 호스트 서비스에 영향을 주지 않도록 설계한다",
+      "task": "골든 이미지 폴백 부트 셀렉터, systemd 스타일 데몬 재시작 정책(백오프, 크래시 루프 감지), BMC 재부팅 중에도 팬을 안전 듀티로 유지하는 하드웨어 기본값 설계, 상태 영속화를 구현/정리하고 결함 주입 테스트로 검증한다.",
+      "tags": [
+        "reliability",
+        "self-healing",
+        "golden-image"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BMC-A08",
+      "level": "A",
+      "title": "시스템 설계: 데이터센터 플릿 BMC 관리",
+      "goal": "수만 대 서버 BMC의 텔레메트리 수집·펌웨어 롤아웃·보안 관리를 하이퍼스케일러 면접 수준으로 설계한다",
+      "task": "10만 대 서버 대상 Redfish/이벤트 기반 텔레메트리 수집 파이프라인, 단계적(canary→wave) 펌웨어 롤아웃과 자동 롤백, 자격증명·인증서 회전, 대역외 네트워크 분리를 포함한 설계 문서를 작성하고 롤아웃 컨트롤러 핵심 로직을 코드로 구현한다.",
+      "tags": [
+        "system-design",
+        "fleet",
+        "datacenter",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

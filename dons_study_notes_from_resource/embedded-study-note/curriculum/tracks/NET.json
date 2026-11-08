@@ -1,0 +1,611 @@
+{
+  "id": "NET",
+  "intro": "리눅스 네트워크 스택은 데이터센터·AI 패브릭·SmartNIC·로봇 텔레메트리 어디서나 바닥에 깔린 공통 기반이다. 이 트랙은 맥에서 ARP·IP·ICMP·UDP·TCP를 유저스페이스(가상 와이어/utun)로 직접 구현해 원리를 몸으로 확인한 뒤, Lima VM에서 sk_buff·NAPI·오프로드·netfilter·tc·XDP/eBPF 같은 커널 경로를 계측한다. Meta/Google 프로덕션 엔지니어링, NVIDIA/Arista/Broadcom 네트워킹, 임베디드 리눅스 면접의 'TCP 동작 설명'과 '패킷 드롭 디버깅' 질문을 대비하며 DCN·NETHW 트랙의 선수 과정이다.",
+  "goals": [
+    "ARP·IPv4·ICMP·단편화·UDP를 직접 구현해 L2~L4 헤더와 규칙을 비트 수준으로 설명한다",
+    "TCP 상태 머신·재전송·흐름 제어·혼잡 제어(Reno/CUBIC/BBR)를 구현·시뮬레이션해 트레이드오프를 정량화한다",
+    "소켓 API 시맨틱(TIME_WAIT, half-close, Nagle/delayed ACK, 버퍼 튜닝)과 이벤트 루프 서버를 올바르게 작성한다",
+    "sk_buff·NAPI·GRO/GSO·RSS/RPS 등 리눅스 수신/송신 경로를 추적하고 성능 영향을 측정한다",
+    "netns/veth/bridge, nftables/conntrack, tc qdisc, XDP/tc-BPF로 토폴로지·정책·고속 패킷 처리를 구성한다",
+    "계층별 카운터와 드롭 사유로 '패킷이 사라진다' 문제를 체계적으로 진단한다"
+  ],
+  "prereq": [
+    "C",
+    "OS",
+    "COMM"
+  ],
+  "refs": [
+    {
+      "title": "TCP/IP Illustrated, Vol. 1, 2nd ed. (Kevin Fall, W. Richard Stevens)"
+    },
+    {
+      "title": "UNIX Network Programming, Vol. 1 (W. Richard Stevens)"
+    },
+    {
+      "title": "RFC 9293 — Transmission Control Protocol",
+      "url": "https://www.rfc-editor.org/rfc/rfc9293"
+    },
+    {
+      "title": "RFC 6298 — Computing TCP's Retransmission Timer",
+      "url": "https://www.rfc-editor.org/rfc/rfc6298"
+    },
+    {
+      "title": "RFC 5681 — TCP Congestion Control",
+      "url": "https://www.rfc-editor.org/rfc/rfc5681"
+    },
+    {
+      "title": "RFC 9438 — CUBIC for Fast and Long-Distance Networks",
+      "url": "https://www.rfc-editor.org/rfc/rfc9438"
+    },
+    {
+      "title": "BBR: Congestion-Based Congestion Control (Cardwell et al., ACM Queue 2016)"
+    },
+    {
+      "title": "Linux kernel networking documentation",
+      "url": "https://docs.kernel.org/networking/index.html"
+    },
+    {
+      "title": "Understanding Linux Network Internals (Christian Benvenuti)"
+    },
+    {
+      "title": "xdp-project/xdp-tutorial",
+      "url": "https://github.com/xdp-project/xdp-tutorial"
+    },
+    {
+      "title": "Cilium BPF and XDP Reference Guide",
+      "url": "https://docs.cilium.io/en/stable/bpf/"
+    },
+    {
+      "title": "packetdrill",
+      "url": "https://github.com/google/packetdrill"
+    }
+  ],
+  "items": [
+    {
+      "id": "NET-B01",
+      "level": "B",
+      "title": "가상 와이어 시뮬레이터와 pcap 기록 (Link Harness)",
+      "goal": "이후 모든 맥 실습의 기반이 되는 L2 링크 시뮬레이터와 pcap 출력기를 만든다.",
+      "task": "프레임 단위 send/recv API를 가진 인메모리 가상 와이어(점대점 + N포트 러닝 스위치)에 손실·지연·재정렬·복제·비트오류 주입 옵션을 넣고, 오가는 모든 프레임을 pcap(LINKTYPE_ETHERNET)으로 기록해 Wireshark로 열리는지 확인한다(프레임 파싱 자체는 see:COMM-A04).",
+      "tags": [
+        "link-sim",
+        "pcap",
+        "fault-injection",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-B02",
+      "level": "B",
+      "title": "인터넷 체크섬 심화: 고속 계산과 증분 갱신 (RFC 1071/1624)",
+      "goal": "1의 보수 합의 성질을 이용한 고속·증분 체크섬을 구현한다.",
+      "task": "32/64비트 누산 + 캐리 접기 고속 체크섬과 TTL 감소·NAT 주소/포트 변경 시의 증분 갱신(RFC 1624 식 HC' = ~(~HC + ~m + m'))을 구현해 무작위 패킷 1e6개에서 전체 재계산과 일치함을 검증하고, 0xFFFF/-0 코너 케이스와 UDP 체크섬 0의 의미를 테스트한다(기본 파서는 see:COMM-A04).",
+      "tags": [
+        "checksum",
+        "rfc1624",
+        "nat",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-B03",
+      "level": "B",
+      "title": "ARP: 캐시 상태, 대기 큐, Gratuitous ARP",
+      "goal": "IPv4 주소→MAC 해석과 이웃 캐시 상태 머신을 구현한다.",
+      "task": "B01 와이어 위 3호스트에서 ARP request/reply, INCOMPLETE→REACHABLE→STALE 캐시 상태와 만료, 해석 대기 중 패킷 큐(최대 N개, 초과 시 드롭), 재시도 3회 후 실패 처리를 구현하고, gratuitous ARP로 주소 중복 감지·캐시 갱신을 테스트한 뒤 IPv6 NDP(NS/NA)와의 차이를 정리한다.",
+      "tags": [
+        "arp",
+        "neighbor-cache",
+        "l2",
+        "ndp"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-B04",
+      "level": "B",
+      "title": "IPv4 송수신·포워딩과 라우팅 테이블 LPM",
+      "goal": "IP 계층 수신 검증, TTL, 최장 접두사 일치 라우팅을 구현한다.",
+      "task": "IPv4 입력 검증(버전/IHL/총길이/체크섬)과 출력 경로를 구현하고, 선형 탐색 vs 이진 트라이 LPM 라우팅 테이블(기본 경로·호스트 경로 포함)로 두 서브넷을 잇는 라우터 노드를 만들어 포워딩·TTL 감소·증분 체크섬 갱신을 검증하며 10만 경로에서 조회 속도를 비교한다(하드웨어 LPM/TCAM은 see:NETHW).",
+      "tags": [
+        "ipv4",
+        "routing",
+        "lpm",
+        "trie",
+        "see:NETHW"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-B05",
+      "level": "B",
+      "title": "ICMP: Echo 응답기, Time Exceeded, traceroute",
+      "goal": "ICMP 에러/질의 메시지의 생성 규칙과 ping/traceroute 원리를 익힌다.",
+      "task": "미니 스택에 echo reply와 라우터 노드의 Time Exceeded·Destination Unreachable 생성(원본 IP 헤더+8바이트 인용, 에러에 대한 에러 금지 규칙)을 구현하고, 맥에서 비특권 SOCK_DGRAM/IPPROTO_ICMP 소켓으로 ping과 UDP 기반 traceroute를 직접 작성해 실제 인터넷 경로로 검증한다.",
+      "tags": [
+        "icmp",
+        "ping",
+        "traceroute"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-B06",
+      "level": "B",
+      "title": "IP 단편화·재조립과 Path MTU Discovery",
+      "goal": "단편화 규칙과 재조립 버퍼(구멍 관리, 타임아웃)를 구현한다.",
+      "task": "MTU에 맞춰 8바이트 단위 오프셋으로 쪼개는 fragmenter와 RFC 815 hole-list 재조립기(순서 무작위·중복·겹침 조각 거부, 30초 타임아웃, 메모리 상한)를 구현해 무작위 순서 테스트로 원본 복원을 검증하고, DF 비트 + ICMP Fragmentation Needed로 PMTU를 낮추는 PMTUD와 ICMP 차단 시 블랙홀 현상을 재현한다.",
+      "tags": [
+        "fragmentation",
+        "reassembly",
+        "pmtud",
+        "mtu"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-B07",
+      "level": "B",
+      "title": "UDP 계층과 포트 디멀티플렉싱",
+      "goal": "소켓 조회 테이블과 UDP 수신 경로를 구현한다.",
+      "task": "(로컬 IP, 로컬 포트, 원격 IP, 원격 포트) 정확 일치 → 와일드카드 순 소켓 조회 해시 테이블, 에페메럴 포트 할당(충돌 회피, 범위 랩), 매칭 소켓이 없을 때 ICMP Port Unreachable 생성을 구현하고 연결형(connect된) UDP 소켓이 ICMP 에러를 받는 동작까지 테스트한다(신뢰성 UDP 프로토콜은 see:DIST-A06).",
+      "tags": [
+        "udp",
+        "demux",
+        "ephemeral-port",
+        "see:DIST"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-B08",
+      "level": "B",
+      "title": "utun으로 맥 커널과 미니 스택 연결 (TUN)",
+      "goal": "가상 L3 인터페이스로 유저스페이스 스택을 실제 OS 스택과 대화시킨다.",
+      "task": "PF_SYSTEM/SYSPROTO_CONTROL 소켓으로 utun 장치를 열고(4바이트 AF 헤더 처리) ifconfig로 점대점 주소를 부여한 뒤, B04~B07 미니 스택을 붙여 맥의 ping·nc -u가 미니 스택과 통신하는지 tcpdump -i utunN으로 확인하고, Linux TUN/TAP(L2 가능)와의 차이를 정리한다.",
+      "tags": [
+        "utun",
+        "tun-tap",
+        "userspace-stack"
+      ],
+      "env": "mac",
+      "env_note": "utun 생성과 ifconfig 설정에 sudo 필요"
+    },
+    {
+      "id": "NET-B09",
+      "level": "B",
+      "title": "소켓 API 수명주기: listen backlog, TIME_WAIT, half-close",
+      "goal": "TCP 소켓 시스템콜이 커널 상태와 어떻게 대응하는지 실험으로 확인한다.",
+      "task": "socket/bind/listen/accept/connect 서버·클라이언트를 작성해 SO_REUSEADDR 없을 때 TIME_WAIT로 인한 bind 실패, backlog 초과 시 연결 지연, shutdown(SHUT_WR) half-close, 읽지 않은 데이터가 남은 채 close 시 RST 전송, SO_LINGER{1,0} 강제 RST를 각각 재현하고 tcpdump·netstat 상태로 근거를 남긴다.",
+      "tags": [
+        "sockets",
+        "time-wait",
+        "half-close",
+        "rst"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-B10",
+      "level": "B",
+      "title": "TCP 바이트 스트림과 메시지 프레이밍",
+      "goal": "부분 read/write를 올바르게 다루는 프레이밍 코드를 작성한다.",
+      "task": "길이 접두(4바이트 BE) 프레이밍 송수신 라이브러리를 non-blocking 소켓용으로 작성(short write 이어쓰기, writev, 부분 헤더 수신 상태 유지)하고, 바이트를 1~7바이트 무작위 조각으로 쪼개 전달하는 결함 주입 프록시를 통과시켜 10만 메시지 무결성을 검증한다.",
+      "tags": [
+        "framing",
+        "partial-io",
+        "nonblocking",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-B11",
+      "level": "B",
+      "title": "TCP 헤더·옵션과 3-way handshake/종료 관찰",
+      "goal": "실제 캡처로 seq/ack, 옵션 협상, 종료 시퀀스를 해독한다.",
+      "task": "TCP 헤더와 옵션(MSS, Window Scale, SACK-Permitted, Timestamps, EOL/NOP 패딩)을 파싱하는 C 디코더를 B01 pcap 툴에 추가하고, lo0에서 tcpdump로 잡은 연결 설정·데이터·FIN/ACK 종료·RST 시나리오를 상대 seq/ack로 주석 단 래더 다이어그램으로 재구성한다.",
+      "tags": [
+        "tcp",
+        "options",
+        "handshake",
+        "tcpdump"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-B12",
+      "level": "B",
+      "title": "Classic BPF: tcpdump 필터 컴파일과 인터프리터",
+      "goal": "패킷 필터 VM의 원조인 cBPF를 직접 실행해 본다.",
+      "task": "tcpdump -d로 'tcp port 80 and host 10.0.0.1' 등 필터의 cBPF 바이트코드를 덤프하고, A/X 레지스터·스크래치 메모리·ld/jeq/ret 명령을 갖춘 cBPF 인터프리터를 C로 구현해 B01 pcap에 적용한 결과를 libpcap(pcap_offline_filter) 결과와 일치시킨다(eBPF 검증기 개념은 see:VM-A07).",
+      "tags": [
+        "cbpf",
+        "tcpdump",
+        "packet-filter",
+        "see:VM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-M01",
+      "level": "M",
+      "title": "TCP 상태 머신 (RFC 9293) 테이블 구현",
+      "goal": "11개 TCP 상태와 모든 전이를 테스트 가능한 형태로 구현한다.",
+      "task": "(상태, 이벤트: 수신 세그먼트 플래그/앱 호출/타이머) → (다음 상태, 동작) 테이블 기반 FSM을 작성하고 동시 open, 동시 close(CLOSING), TIME_WAIT 2MSL, SYN_RCVD에서 RST, 구 세그먼트 수용성 검사(acceptability test)를 packetdrill 스타일 스크립트 테스트로 검증한다.",
+      "tags": [
+        "tcp",
+        "state-machine",
+        "rfc9293",
+        "packetdrill"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-M02",
+      "level": "M",
+      "title": "미니 TCP 1: 신뢰 전송과 순서 재조립",
+      "goal": "seq/ack, 송수신 버퍼, out-of-order 큐로 신뢰 바이트 스트림을 만든다.",
+      "task": "M01 FSM 위에 송신 버퍼(SND.UNA/NXT/WND), 수신 버퍼와 out-of-order 세그먼트 큐, 누적 ACK, 32비트 seq 랩어라운드 비교(SEQ_LT)를 구현하고 B01 와이어(손실 5%, 재정렬, 복제)에서 10MB 전송 후 SHA-256 일치를 검증한다(GBN/SR 기초는 see:COMM-A02).",
+      "tags": [
+        "tcp",
+        "reliable-transfer",
+        "seq-wrap",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-M03",
+      "level": "M",
+      "title": "RTO 추정과 재전송 타이머 (RFC 6298) + Fast Retransmit",
+      "goal": "RTT 표본으로 재전송 타임아웃을 계산하고 손실을 빠르게 복구한다.",
+      "task": "SRTT/RTTVAR 갱신, Karn 알고리즘(재전송 세그먼트 표본 제외), 지수 백오프, 최소 RTO, Timestamps 옵션 기반 RTTM을 미니 TCP에 구현하고, 3 dup-ACK fast retransmit 유무에 따른 손실 복구 시간을 지연 변동 링크에서 측정해 spurious retransmission을 관찰한다.",
+      "tags": [
+        "tcp",
+        "rto",
+        "rtt",
+        "fast-retransmit"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-M04",
+      "level": "M",
+      "title": "흐름 제어: 수신 윈도, Window Scaling, Zero-Window Probe",
+      "goal": "느린 수신자 앞에서 송신자가 멈추고 재개하는 메커니즘을 구현한다.",
+      "task": "광고 윈도·window scale 옵션, 수신 앱이 멈췄을 때 zero window → persist 타이머 프로브 → window update 재개, 송수신 양측 SWS 회피(Clark/Nagle 기준)를 미니 TCP에 넣고, 느린 소비자 시나리오에서 데드락 없이 재개됨과 프로브 간격 백오프를 검증한다.",
+      "tags": [
+        "tcp",
+        "flow-control",
+        "window-scaling",
+        "persist-timer"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-M05",
+      "level": "M",
+      "title": "Nagle × Delayed ACK 상호작용과 TCP_NODELAY",
+      "goal": "작은 쓰기 패턴이 만드는 수십~수백 ms 지연을 재현하고 해결한다.",
+      "task": "write-write-read 요청 패턴의 RPC 클라이언트/서버로 Nagle과 delayed ACK가 겹쳐 생기는 지연(Linux 40ms / macOS delayed_ack 설정)을 재현해 요청당 지연 히스토그램을 그리고, TCP_NODELAY·writev 합치기·TCP_NOPUSH(맥)/TCP_CORK(리눅스)로 각각 해결한 결과를 비교한다.",
+      "tags": [
+        "nagle",
+        "delayed-ack",
+        "tcp-nodelay",
+        "latency"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-M06",
+      "level": "M",
+      "title": "혼잡 제어 1: Reno/NewReno (Slow Start, AIMD, Fast Recovery)",
+      "goal": "고전 TCP 혼잡 제어를 구현하고 cwnd 톱니파를 관찰한다.",
+      "task": "미니 TCP에 cwnd/ssthresh, slow start, congestion avoidance, fast recovery(Reno vs NewReno partial ACK 처리)와 RTO 시 cwnd=1을 구현하고, 병목 대역폭·버퍼 크기를 가진 B01 링크에서 cwnd-시간 그래프와 처리량을 기록해 다중 손실 시 Reno의 성능 붕괴를 보인다(RFC 5681/6582).",
+      "tags": [
+        "congestion-control",
+        "reno",
+        "newreno",
+        "aimd"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-M07",
+      "level": "M",
+      "title": "SACK 스코어보드와 손실 복구 (RFC 6675, RACK 개념)",
+      "goal": "선택 확인응답으로 한 RTT에 여러 손실을 복구한다.",
+      "task": "SACK 블록 생성(수신측)과 스코어보드·pipe 추정·NextSeg 선택(송신측)을 구현해 버스트 손실(한 윈도 3~10개)에서 NewReno 대비 복구 시간과 처리량을 비교하고, 시간 기반 손실 감지 RACK-TLP가 tail loss를 어떻게 줄이는지 시뮬레이션으로 확인한다.",
+      "tags": [
+        "sack",
+        "loss-recovery",
+        "rack",
+        "tcp"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-M08",
+      "level": "M",
+      "title": "혼잡 제어 2: CUBIC vs BBR 이산사건 시뮬레이션",
+      "goal": "현대 혼잡 제어의 처리량·큐 지연·공정성 트레이드오프를 정량화한다.",
+      "task": "병목 링크(대역폭, 전파 RTT, 버퍼 0.25~4 BDP) 이산사건 시뮬레이터에 Reno·CUBIC(W(t)=C(t-K)^3+Wmax)·BBRv1(BtlBw/RTprop 추정, pacing, ProbeBW 게인 주기) 모델을 구현해 처리량, 큐 지연(bufferbloat), RTT가 다른 흐름 간 Jain 공정성, 랜덤 손실 내성을 표와 그래프로 비교한다(데이터센터 CC DCQCN/HPCC는 see:DCN).",
+      "tags": [
+        "congestion-control",
+        "cubic",
+        "bbr",
+        "simulation",
+        "see:DCN"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-M09",
+      "level": "M",
+      "title": "이벤트 루프 서버 심화: 타이머 휠, 백프레셔, C10K",
+      "goal": "실서비스급 리액터에 필요한 타이머와 쓰기 백프레셔를 구현한다.",
+      "task": "OS-M12/M13 에코 서버(see:OS)를 확장해 kqueue/epoll 추상 리액터에 계층형 타이머 휠(유휴 연결 타임아웃), 연결별 쓰기 버퍼 high/low watermark 백프레셔(EVFILT_WRITE/EPOLLOUT 토글), HTTP/1.1 keep-alive 파서를 넣고 wrk로 1만 동시 연결 처리량·p99 지연·RSS를 측정한다.",
+      "tags": [
+        "event-loop",
+        "kqueue",
+        "epoll",
+        "timer-wheel",
+        "see:OS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-M10",
+      "level": "M",
+      "title": "netns·veth·bridge·VLAN 토폴로지 구성",
+      "goal": "리눅스 가상 네트워크 장치로 다중 호스트 토폴로지를 코드로 만든다.",
+      "task": "ip netns로 호스트 4개 + 라우터 1개를 만들고 veth 쌍, Linux bridge(vlan_filtering=1, 802.1Q VLAN 10/20 분리), 라우터 네임스페이스의 ip_forward와 VLAN 서브인터페이스로 inter-VLAN 라우팅을 구성하는 재실행 가능한 셸 스크립트를 작성해 ping 매트릭스와 bridge fdb/tcpdump로 검증한다(컨테이너 namespace 전반은 see:VIRT).",
+      "tags": [
+        "netns",
+        "veth",
+        "bridge",
+        "vlan",
+        "see:VIRT"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (root 필요, ip/bridge/tcpdump 기본 도구)"
+    },
+    {
+      "id": "NET-M11",
+      "level": "M",
+      "title": "netfilter/nftables: 훅, conntrack, NAT",
+      "goal": "패킷이 netfilter 훅을 지나는 경로와 상태 추적 NAT를 이해한다.",
+      "task": "M10 토폴로지에서 nftables로 stateful 방화벽(ct state established,related 허용), SNAT masquerade, DNAT 포트 포워딩을 구성하고 nft monitor trace로 prerouting→forward→postrouting 경로를 확인하며, conntrack -L 상태와 C로 만든 5-튜플 미니 conntrack(타임아웃, NAT 역변환, B02 증분 체크섬) 결과를 대조한다.",
+      "tags": [
+        "netfilter",
+        "nftables",
+        "conntrack",
+        "nat"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (nftables, conntrack-tools 설치)"
+    },
+    {
+      "id": "NET-M12",
+      "level": "M",
+      "title": "tc qdisc: netem·tbf·fq_codel과 bufferbloat",
+      "goal": "큐잉 규율로 지연·손실을 에뮬레이트하고 큐 지연을 제어한다.",
+      "task": "veth에 tbf로 10Mbit 병목, netem으로 지연/손실/재정렬을 걸고 부하 중 ping RTT를 pfifo vs fq_codel로 비교해 bufferbloat를 수치로 보이며, 토큰 버킷과 CoDel(target 5ms, interval 100ms, sqrt 제어 법칙)을 C로 구현해 같은 트레이스에서 tc 결과와 경향을 대조한다.",
+      "tags": [
+        "tc",
+        "qdisc",
+        "netem",
+        "fq_codel",
+        "bufferbloat"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (iproute2 tc, iperf3; 수치는 VM 노이즈 포함)"
+    },
+    {
+      "id": "NET-M13",
+      "level": "M",
+      "title": "소켓 버퍼 튜닝: BDP, autotuning, keepalive, user timeout",
+      "goal": "긴 지연 경로에서 처리량을 결정하는 소켓 파라미터를 측정으로 정한다.",
+      "task": "netem으로 RTT 10/50/200ms 경로를 만들고 SO_SNDBUF/SO_RCVBUF 고정값 vs tcp_rmem autotuning에서 처리량을 측정해 BDP 공식과 대조하며, ss -tin의 cwnd/rtt/rcv_space를 해석하고 TCP_KEEPIDLE/INTVL/CNT·TCP_USER_TIMEOUT으로 죽은 피어 감지 시간을 설계값대로 맞춘다.",
+      "tags": [
+        "socket-tuning",
+        "bdp",
+        "keepalive",
+        "ss"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (iproute2 tc/ss, iperf3)"
+    },
+    {
+      "id": "NET-A01",
+      "level": "A",
+      "title": "sk_buff 모델: headroom, push/pull, clone vs copy",
+      "goal": "커널 패킷 버퍼의 포인터 조작과 공유 규칙을 직접 구현해 이해한다.",
+      "task": "head/data/tail/end 포인터와 skb_reserve/put/push/pull, 참조 카운트 데이터 공유 clone vs 깊은 copy, frags 배열(scatter-gather)을 가진 sk_buff 유사 구조를 C로 구현해 미니 스택의 계층 간 헤더 추가/제거를 무복사로 바꾸고, Lima VM에서 pahole로 실제 struct sk_buff 레이아웃·크기를 대조한다.",
+      "tags": [
+        "sk_buff",
+        "zero-copy",
+        "kernel-internals"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NET-A02",
+      "level": "A",
+      "title": "수신 경로 추적: IRQ → NAPI poll → GRO → 프로토콜",
+      "goal": "리눅스 패킷 수신 경로와 NAPI 인터럽트 완화를 관찰하고 모델링한다.",
+      "task": "virtio-net에서 tracepoint(napi:napi_poll, net:netif_receive_skb, irq)와 bpftrace로 패킷당 경로·배치 크기·softirq CPU를 수집하고 /proc/net/softnet_stat(dropped, time_squeeze)을 해석하며, NAPI budget/weight와 인터럽트 재활성화 로직을 C 이산사건 모델로 만들어 부하별 인터럽트 수와 지연 트레이드오프를 그린다.",
+      "tags": [
+        "napi",
+        "softirq",
+        "rx-path",
+        "bpftrace"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (bpftrace, virtio-net; 실 NIC 대신 virtio 동작 기준)"
+    },
+    {
+      "id": "NET-A03",
+      "level": "A",
+      "title": "GSO/TSO/GRO 오프로드 효과 측정",
+      "goal": "세그먼트 오프로드가 CPU당 처리량을 어떻게 바꾸는지 측정한다.",
+      "task": "veth/virtio에서 ethtool -K로 tso/gso/gro를 켜고 끄며 iperf3 처리량·CPU 사용률·softirq 비율을 측정하고, tcpdump에 보이는 64KB 슈퍼패킷과 실제 와이어 세그먼트의 차이를 설명하며 GSO를 소프트웨어로 분할하는 C 함수(헤더 복제, seq/IP ID/체크섬 갱신)를 작성해 검증한다(NIC 하드웨어 오프로드는 see:NETHW).",
+      "tags": [
+        "gso",
+        "tso",
+        "gro",
+        "offload",
+        "see:NETHW"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (ethtool, iperf3)"
+    },
+    {
+      "id": "NET-A04",
+      "level": "A",
+      "title": "RSS Toeplitz 해시와 RPS/RFS/XPS",
+      "goal": "멀티큐 수신 분산의 해시 함수와 소프트웨어 스티어링을 구현한다.",
+      "task": "40바이트 키 Toeplitz 해시를 C로 구현해 Microsoft RSS 검증 벡터와 일치시키고, 인디렉션 테이블 큐 분산 균일도, 대칭(symmetric) 키로 양방향 흐름이 같은 큐에 가는지 검증한 뒤, Lima VM에서 rps_cpus/rps_flow_cnt/xps_cpus 설정 전후 softirq CPU 분포를 비교한다.",
+      "tags": [
+        "rss",
+        "toeplitz",
+        "rps",
+        "xps",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": "Toeplitz 구현·검증은 맥; RPS/XPS 설정 실습은 Lima VM 'elinux'"
+    },
+    {
+      "id": "NET-A05",
+      "level": "A",
+      "title": "XDP 패킷 필터와 BPF 맵 (eBPF)",
+      "goal": "드라이버 단계에서 패킷을 처리하는 XDP 프로그램을 작성한다.",
+      "task": "libbpf + clang -target bpf로 veth에 붙는 XDP 프로그램(특정 UDP 포트 XDP_DROP, 소스 IP별 per-CPU 카운터 맵, ICMP echo XDP_TX 반사)을 작성해 bpftool로 맵을 읽고, 같은 드롭을 nftables로 했을 때와 pps·CPU를 비교하며 검증기가 거부하는 경계 검사 누락 코드를 재현한다(cBPF는 B12, 검증기 개념은 see:VM-A07).",
+      "tags": [
+        "xdp",
+        "ebpf",
+        "libbpf",
+        "see:VM"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (clang/llvm, libbpf-dev, bpftool, 커널 BTF 필요)"
+    },
+    {
+      "id": "NET-A06",
+      "level": "A",
+      "title": "tc-BPF L4 로드밸런서 (Katran 스타일)",
+      "goal": "tc clsact eBPF로 패킷을 재작성하는 L4 로드밸런서를 만든다.",
+      "task": "VIP:port → 백엔드 맵과 5-튜플 해시(일관 해시 Maglev 테이블)로 백엔드를 고르고 목적지 주소를 재작성(bpf_l3_csum_replace/l4_csum_replace)하는 tc ingress 프로그램과 역방향 SNAT 경로를 M10 netns 토폴로지에 붙이고, 백엔드 하나 제거 시 기존 흐름이 유지되는 비율을 측정한다.",
+      "tags": [
+        "tc-bpf",
+        "load-balancer",
+        "maglev",
+        "ebpf"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (clang/llvm, libbpf, iproute2 tc clsact)"
+    },
+    {
+      "id": "NET-A07",
+      "level": "A",
+      "title": "accept 확장성: SO_REUSEPORT, EPOLLEXCLUSIVE, thundering herd",
+      "goal": "멀티코어 서버에서 연결 분산과 thundering herd 문제를 실험한다.",
+      "task": "N워커가 하나의 리슨 소켓을 공유하는 epoll 서버에서 thundering herd(불필요한 wakeup 수)를 측정하고, EPOLLEXCLUSIVE와 SO_REUSEPORT(커널 해시 분산, 워커 재시작 시 연결 유실)를 비교하며, SO_ATTACH_REUSEPORT_CBPF로 CPU 지역성 스티어링을 적용해 워커별 연결 분포와 p99를 기록한다.",
+      "tags": [
+        "so_reuseport",
+        "epoll",
+        "thundering-herd",
+        "accept"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (wrk 또는 자체 부하 생성기)"
+    },
+    {
+      "id": "NET-A08",
+      "level": "A",
+      "title": "제로카피 송수신: sendfile, splice, MSG_ZEROCOPY",
+      "goal": "사용자-커널 복사 제거 기법별 CPU 절감과 제약을 측정한다.",
+      "task": "1GB 파일 전송 서버를 read/write, sendfile, splice(pipe 경유), MSG_ZEROCOPY(SO_EE_ORIGIN_ZEROCOPY 완료 통지 처리)로 구현해 처리량·CPU·syscall 수를 비교하고, 작은 메시지에서 zerocopy가 오히려 느린 이유와 버퍼 재사용 시점 규칙을 정리한다(io_uring은 see:LLAT-A03, 커널 바이패스는 see:LLAT-A02).",
+      "tags": [
+        "zero-copy",
+        "sendfile",
+        "msg_zerocopy",
+        "see:LLAT"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'"
+    },
+    {
+      "id": "NET-A09",
+      "level": "A",
+      "title": "가상 netdev 드라이버: ndo_start_xmit과 NAPI",
+      "goal": "커널 네트워크 장치 드라이버의 송수신 계약을 직접 구현한다.",
+      "task": "veth처럼 쌍으로 연결된 가상 netdevice 커널 모듈을 작성해 ndo_open/stop/start_xmit, 링 버퍼 + NAPI poll 수신, netif_stop_queue/wake_queue 흐름 제어, rtnl_link_stats64·ethtool get_drvinfo를 구현하고 netns 두 개에 넣어 ping/iperf3과 ip -s link 카운터로 검증한다(모듈 기초는 see:ELX, HW NIC 디스크립터는 see:NETHW).",
+      "tags": [
+        "netdev",
+        "kernel-module",
+        "napi",
+        "see:ELX",
+        "see:NETHW"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (linux-headers, 커널 모듈 로드 권한)"
+    },
+    {
+      "id": "NET-A10",
+      "level": "A",
+      "title": "패킷 드롭 디버깅 방법론 (프로덕션 면접형)",
+      "goal": "'패킷이 사라진다'를 계층적으로 좁혀가는 진단 절차를 익힌다.",
+      "task": "netns 토폴로지에 rp_filter 비대칭 경로, MTU 불일치 PMTU 블랙홀, conntrack 테이블 포화, rmem 초과 UDP 드롭, nft 규칙 드롭, ARP 실패를 숨겨 넣는 장애 주입 스크립트를 만들고, ip -s link·nstat·ss -m·/proc/net/snmp·kfree_skb 드롭 사유(bpftrace/dropwatch)만으로 각 원인을 찾아내는 런북을 작성한다.",
+      "tags": [
+        "debugging",
+        "packet-drop",
+        "kfree_skb",
+        "runbook",
+        "interview"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (bpftrace, conntrack-tools, nftables)"
+    },
+    {
+      "id": "NET-A11",
+      "level": "A",
+      "title": "종합: 유저스페이스 TCP/IP 스택 상호운용",
+      "goal": "직접 만든 스택이 실제 OS TCP와 상호운용됨을 증명한다.",
+      "task": "B08 utun 위에 ARP를 제외한 IP/ICMP/UDP/TCP(M01~M07, A01 skb 모델) 미니 스택을 통합해 맥의 curl이 미니 스택 HTTP 서버에서 100MB를 내려받고 iperf 유사 전송이 손실 주입 하에서도 완료되게 하며, packetdrill 스타일 회귀 테스트 스위트와 tcptrace식 시퀀스 그래프로 동작을 문서화한다.",
+      "tags": [
+        "userspace-stack",
+        "tcp",
+        "interop",
+        "capstone"
+      ],
+      "env": "mac",
+      "env_note": "utun 사용에 sudo 필요"
+    }
+  ]
+}

@@ -1,0 +1,601 @@
+{
+  "id": "TOOL",
+  "intro": "펌웨어 엔지니어의 생산성은 툴체인을 얼마나 깊이 아느냐로 갈린다: 링크 에러 해석, 링커 스크립트와 맵 파일, 코드 크기 다이어트, 디버거·sanitizer·코어 덤프로 버그를 좁히는 능력. 이 트랙은 컴파일 단계부터 JTAG/SWD까지 각 도구를 실제 문제 상황에 적용해 본다.",
+  "goals": [
+    "전처리·컴파일·어셈블·링크 각 단계의 산출물을 직접 만들고 해석한다",
+    "링커 스크립트·맵 파일·섹션 배치를 이해해 메모리 예산을 관리한다",
+    "Make/CMake로 호스트 테스트와 크로스 빌드를 같은 트리에서 운용한다",
+    "lldb/gdb·ASan/UBSan/TSan·코어 덤프로 버그를 체계적으로 좁힌다",
+    "코드 크기·스택 사용량·빌드 재현성을 측정하고 최적화한다",
+    "JTAG/SWD·OpenOCD·GDB 원격 디버깅의 동작 원리를 모델과 QEMU로 익힌다"
+  ],
+  "prereq": [
+    "C"
+  ],
+  "refs": [
+    {
+      "title": "GCC online documentation",
+      "url": "https://gcc.gnu.org/onlinedocs/"
+    },
+    {
+      "title": "Clang documentation",
+      "url": "https://clang.llvm.org/docs/"
+    },
+    {
+      "title": "GNU ld manual (binutils)",
+      "url": "https://sourceware.org/binutils/docs/ld/"
+    },
+    {
+      "title": "GNU Make manual",
+      "url": "https://www.gnu.org/software/make/manual/"
+    },
+    {
+      "title": "CMake documentation",
+      "url": "https://cmake.org/cmake/help/latest/"
+    },
+    {
+      "title": "LLDB documentation",
+      "url": "https://lldb.llvm.org/"
+    },
+    {
+      "title": "Clang AddressSanitizer",
+      "url": "https://clang.llvm.org/docs/AddressSanitizer.html"
+    },
+    {
+      "title": "OpenOCD User's Guide",
+      "url": "https://openocd.org/doc/html/index.html"
+    },
+    {
+      "title": "git-bisect documentation",
+      "url": "https://git-scm.com/docs/git-bisect"
+    },
+    {
+      "title": "Linkers and Loaders (John R. Levine)"
+    }
+  ],
+  "items": [
+    {
+      "id": "TOOL-B01",
+      "level": "B",
+      "title": "컴파일 4단계 관찰: -E -S -c 링크",
+      "goal": "각 단계의 입력/출력과 그 단계에서만 나는 에러를 구분한다",
+      "task": "헤더·매크로·두 개 소스로 된 프로그램을 -E(.i), -S(.s), -c(.o), 링크 단계로 나눠 산출물을 만들고, 각 단계에서만 발생하는 에러(매크로/문법/심볼 미정의)를 하나씩 일부러 만들어 분류한다.",
+      "tags": [
+        "compile-stages",
+        "preprocessor",
+        "linker"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-B02",
+      "level": "B",
+      "title": "경고 플래그 기준선: -Wall -Wextra -Werror 외",
+      "goal": "버그를 잡아주는 경고 플래그 세트를 프로젝트 기준으로 정한다",
+      "task": "의도적 버그 12개(미초기화, 부호 비교, 섀도잉, 포맷 문자열, 암시적 변환 등)가 든 파일에 플래그를 하나씩 추가하며 어떤 경고가 어떤 버그를 잡는지 표로 만들고 권장 플래그 세트를 확정한다.",
+      "tags": [
+        "warnings",
+        "compiler-flags"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-B03",
+      "level": "B",
+      "title": "최적화 레벨 비교: -O0 -O1 -O2 -O3 -Os -Oz",
+      "goal": "최적화 레벨별 크기·속도·디버깅 가능성 차이를 측정한다",
+      "task": "벤치 프로그램을 6개 레벨로 빌드해 .text 크기와 실행시간을 표로 만들고, -O2에서 변수가 <optimized out>이 되는 디버깅 경험과 UB 코드의 동작 변화를 기록한다.",
+      "tags": [
+        "optimization",
+        "compiler-flags",
+        "size"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-B04",
+      "level": "B",
+      "title": "오브젝트 파일 해부: nm objdump readelf otool",
+      "goal": "섹션·심볼·리로케이션 정보를 도구로 읽어낸다",
+      "task": "같은 소스를 Mach-O(호스트)와 ELF(--target=aarch64-linux-gnu -c)로 만들어 nm/objdump -d -r/readelf -S -s/otool -l 출력에서 섹션 목록, 심볼 종류, 미해결 리로케이션을 찾아 설명한다.",
+      "tags": [
+        "elf",
+        "mach-o",
+        "binutils"
+      ],
+      "env": "mac",
+      "env_note": "brew install llvm (llvm-readelf, llvm-objdump)"
+    },
+    {
+      "id": "TOOL-B05",
+      "level": "B",
+      "title": "링크 에러 해결: undefined, multiple definition, weak",
+      "goal": "대표 링크 에러를 재현하고 원인별 해결책을 안다",
+      "task": "undefined reference, multiple definition(헤더 정의 변수), C/C++ 이름 맹글링 불일치, weak 심볼 기본 핸들러 덮어쓰기를 각각 재현·해결하고 nm 출력으로 근거를 남긴다.",
+      "tags": [
+        "linker",
+        "symbols",
+        "weak"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-B06",
+      "level": "B",
+      "title": "size로 섹션 크기 읽기: text data bss",
+      "goal": "코드 변경이 Flash/RAM 사용량에 주는 영향을 수치로 추적한다",
+      "task": "전역 배열 초기화 여부·const·문자열 리터럴·printf 사용을 바꿔가며 size(-A/-m) 결과 변화를 기록해 Flash = text+data, RAM = data+bss 공식을 확인한다 (thumbv7em 크로스 빌드 포함).",
+      "tags": [
+        "size",
+        "memory-budget",
+        "sections"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-B07",
+      "level": "B",
+      "title": "전처리기 활용: 조건부 컴파일과 빌드 변형",
+      "goal": "-D 매크로와 기능 플래그로 보드/빌드 변형을 관리한다",
+      "task": "BOARD_A/BOARD_B, DEBUG/RELEASE 조합을 -D로 빌드해 각 변형의 -E 출력과 -dM 매크로 덤프로 활성 코드 경로를 확인하고, #error로 잘못된 조합을 막는다.",
+      "tags": [
+        "preprocessor",
+        "build-variants"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-B08",
+      "level": "B",
+      "title": "Make 기초: 패턴 규칙·자동 변수·-MMD 의존성",
+      "goal": "증분 빌드가 정확한 다중 디렉터리 Makefile을 작성한다",
+      "task": "src/, include/, build/ 구조에 패턴 규칙과 -MMD -MP 의존성 자동 생성을 쓰는 Makefile을 작성하고, 헤더 하나를 touch했을 때 필요한 파일만 재컴파일되는지 make -n으로 검증한다.",
+      "tags": [
+        "make",
+        "build-system"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-B09",
+      "level": "B",
+      "title": "정적 라이브러리와 링크 순서",
+      "goal": "ar 아카이브 생성과 아카이브 링크 시 심볼 해석 순서를 이해한다",
+      "task": "두 개의 상호 의존 .a를 만들고 ld64와 GNU ld(ld.lld 또는 Lima)에서 링크 순서·--start-group 유무에 따른 결과 차이를 재현하며, 아카이브에서 필요한 .o만 끌려옴을 nm/맵으로 확인한다.",
+      "tags": [
+        "static-library",
+        "ar",
+        "link-order"
+      ],
+      "env": "mac",
+      "env_note": "GNU ld 동작 비교는 Lima VM 또는 brew lld"
+    },
+    {
+      "id": "TOOL-B10",
+      "level": "B",
+      "title": "디버거 기초: breakpoint·step·backtrace·print",
+      "goal": "lldb(gdb 명령 대응표 포함)로 버그를 재현하고 원인을 찾는다",
+      "task": "연결 리스트 삭제 버그로 크래시하는 프로그램을 lldb에서 breakpoint, step/next/finish, bt, frame variable로 추적해 원인을 찾고, gdb 동등 명령표를 함께 정리한다.",
+      "tags": [
+        "lldb",
+        "gdb",
+        "debugging"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-B11",
+      "level": "B",
+      "title": "AddressSanitizer로 메모리 버그 잡기",
+      "goal": "ASan 리포트를 읽고 heap/stack/global 오버플로·UAF를 진단한다",
+      "task": "heap-buffer-overflow, stack-buffer-overflow, use-after-free, double-free, 메모리 누수 5종을 만들어 -fsanitize=address 리포트의 스택 트레이스와 섀도 메모리 정보를 해석하고 수정한다.",
+      "tags": [
+        "asan",
+        "sanitizer",
+        "memory-bugs"
+      ],
+      "env": "mac",
+      "env_note": "누수 검출은 Apple clang에서 제한적 → brew llvm clang 또는 macOS leaks 도구 병행"
+    },
+    {
+      "id": "TOOL-B12",
+      "level": "B",
+      "title": "UBSan으로 정의되지 않은 동작 잡기",
+      "goal": "UBSan 체크 종류와 트랩 모드(펌웨어 적용 형태)를 익힌다",
+      "task": "signed overflow, shift, 정렬, 범위 밖 enum/bool, NULL 역참조를 -fsanitize=undefined로 검출하고, -fsanitize-trap=undefined 최소 런타임 모드의 코드 크기 비용을 측정한다.",
+      "tags": [
+        "ubsan",
+        "sanitizer",
+        "see:C"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-B13",
+      "level": "B",
+      "title": "컴파일 타임 제거 가능한 로그 매크로",
+      "goal": "__FILE__/__LINE__/레벨 필터를 갖춘 로깅을 만들고 크기 영향을 측정한다",
+      "task": "LOG_LEVEL에 따라 컴파일 시 완전히 사라지는 LOG_E/W/I/D 매크로와 printf 포맷 검사(__attribute__((format)))를 구현하고, 레벨별 바이너리 크기와 문자열 테이블 변화를 비교한다.",
+      "tags": [
+        "logging",
+        "macro",
+        "size"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-B14",
+      "level": "B",
+      "title": "맥에서 크로스 컴파일 첫걸음",
+      "goal": "clang --target과 arm-none-eabi-gcc로 여러 타깃 오브젝트를 만든다",
+      "task": "같은 C 파일을 aarch64-linux-gnu, thumbv7em-none-eabi(-mcpu=cortex-m4 -mfloat-abi=hard), riscv32로 컴파일해 readelf -h의 ABI/플래그와 디스어셈블리를 비교하고 sysroot/libc 부재로 링크가 실패하는 이유를 설명한다.",
+      "tags": [
+        "cross-compile",
+        "target-triple"
+      ],
+      "env": "mac",
+      "env_note": "brew install llvm arm-none-eabi-gcc (선택)"
+    },
+    {
+      "id": "TOOL-M01",
+      "level": "M",
+      "title": "링커 스크립트 기초: MEMORY·SECTIONS·VMA/LMA",
+      "goal": "MCU용 링커 스크립트를 작성해 Flash/RAM 배치를 제어한다",
+      "task": "FLASH 512K/RAM 128K MEMORY와 .isr_vector/.text/.rodata/.data(AT>FLASH)/.bss 섹션을 정의한 스크립트로 Cortex-M 오브젝트를 링크하고, readelf -l/-S로 .data의 VMA≠LMA를 확인한다.",
+      "tags": [
+        "linker-script",
+        "vma-lma",
+        "see:BM"
+      ],
+      "env": "mac",
+      "env_note": "arm-none-eabi-gcc 또는 clang + ld.lld (실행 불필요)"
+    },
+    {
+      "id": "TOOL-M02",
+      "level": "M",
+      "title": "맵 파일 분석기: 누가 메모리를 먹는가",
+      "goal": "맵 파일을 읽어 섹션·오브젝트·심볼별 크기를 집계한다",
+      "task": "-Wl,-Map으로 생성한 맵 파일을 파싱해 섹션별·오브젝트별·심볼별 Top-N 크기 보고서를 출력하는 Python 스크립트를 작성하고, 두 빌드 간 크기 diff 기능을 추가한다.",
+      "tags": [
+        "map-file",
+        "size",
+        "python"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-M03",
+      "level": "M",
+      "title": "커스텀 섹션으로 자동 등록 테이블 만들기",
+      "goal": "__attribute__((section))과 링커 경계 심볼로 initcall/명령 테이블을 구성한다",
+      "task": "매크로 하나로 등록되는 셸 명령 테이블을 커스텀 섹션에 모으고, ELF(__start_/__stop_ 또는 링커 스크립트 KEEP)와 Mach-O(section$start$) 양쪽에서 순회하는 코드를 작성해 테스트한다.",
+      "tags": [
+        "sections",
+        "linker",
+        "initcall"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-M04",
+      "level": "M",
+      "title": "CMake 기초: 타깃·라이브러리·옵션",
+      "goal": "타깃 중심(target_*) CMake로 라이브러리·실행파일·테스트를 구성한다",
+      "task": "TOOL-B08 프로젝트를 CMake로 옮겨 라이브러리/앱/테스트 타깃, PUBLIC/PRIVATE include, option()으로 기능 플래그를 정의하고 CTest로 단위 테스트를 실행한다.",
+      "tags": [
+        "cmake",
+        "build-system",
+        "ctest"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-M05",
+      "level": "M",
+      "title": "CMake 툴체인 파일로 크로스 빌드",
+      "goal": "같은 소스 트리에서 호스트 테스트 빌드와 타깃 펌웨어 빌드를 분리한다",
+      "task": "arm-none-eabi 툴체인 파일(컴파일러, CPU 플래그, 링커 스크립트, try_compile 설정)을 작성해 build-host/build-target 두 디렉터리로 빌드하고, 타깃 빌드에서 .elf/.bin/.map과 size 출력을 자동 생성한다.",
+      "tags": [
+        "cmake",
+        "toolchain-file",
+        "cross-compile"
+      ],
+      "env": "mac",
+      "env_note": "brew install arm-none-eabi-gcc cmake"
+    },
+    {
+      "id": "TOOL-M06",
+      "level": "M",
+      "title": "공유 라이브러리: -fPIC, dylib/so, rpath, 가시성",
+      "goal": "동적 링크 과정과 심볼 가시성 제어를 실습한다",
+      "task": "dylib를 빌드해 otool -L/install_name_tool로 rpath를 조정하고 -fvisibility=hidden + export 매크로로 공개 API만 내보낸 뒤, Lima에서 .so 버전(ldd, readelf -d, SONAME)과 비교한다.",
+      "tags": [
+        "shared-library",
+        "dynamic-linking",
+        "visibility"
+      ],
+      "env": "mac",
+      "env_note": "ELF .so 비교 부분은 Lima VM"
+    },
+    {
+      "id": "TOOL-M07",
+      "level": "M",
+      "title": "디버거 심화: 조건부 BP·워치포인트·스크립팅",
+      "goal": "메모리 오염 추적과 자료구조 덤프를 디버거로 자동화한다",
+      "task": "특정 조건에서만 값이 깨지는 버그를 하드웨어 워치포인트와 조건부 브레이크포인트로 잡고, 링 버퍼 구조체를 보기 좋게 출력하는 lldb Python 명령(또는 gdb pretty-printer)을 작성한다.",
+      "tags": [
+        "lldb",
+        "watchpoint",
+        "scripting"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-M08",
+      "level": "M",
+      "title": "git bisect run으로 회귀 커밋 자동 탐색",
+      "goal": "테스트 스크립트 기반 이분 탐색으로 회귀 원인을 빠르게 찾는다",
+      "task": "100개 커밋 중 하나가 성능/기능 회귀를 넣은 실습 저장소를 스크립트로 생성하고, 종료 코드 규약(0/1/125 skip)을 지키는 테스트 스크립트로 git bisect run을 돌려 원인 커밋을 찾는다.",
+      "tags": [
+        "git",
+        "bisect",
+        "regression"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-M09",
+      "level": "M",
+      "title": "ThreadSanitizer로 데이터 레이스 찾기",
+      "goal": "TSan 리포트를 읽고 레이스·잘못된 락 순서를 수정한다",
+      "task": "공유 카운터 레이스, 락 없이 읽는 플래그, 락 순서 역전(데드락 가능성) 3가지를 pthread로 만들어 -fsanitize=thread 리포트를 해석하고 뮤텍스/atomic으로 고친다.",
+      "tags": [
+        "tsan",
+        "data-race",
+        "sanitizer"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-M10",
+      "level": "M",
+      "title": "Valgrind 대안: leaks·MallocStackLogging·ASan",
+      "goal": "Apple Silicon에서 메모리 누수/오류를 찾는 도구 조합을 익힌다",
+      "task": "누수와 해제 후 쓰기가 있는 프로그램을 macOS leaks(MallocStackLogging=1), Guard Malloc(libgmalloc), ASan으로 각각 분석하고, Lima에서 valgrind memcheck 결과와 탐지 범위를 비교한다.",
+      "tags": [
+        "valgrind",
+        "leaks",
+        "memory-debugging"
+      ],
+      "env": "mac",
+      "env_note": "valgrind 비교 부분은 Lima VM"
+    },
+    {
+      "id": "TOOL-M11",
+      "level": "M",
+      "title": "코어 덤프 생성과 사후 분석",
+      "goal": "크래시 프로세스의 코어 덤프로 원인과 상태를 복원한다",
+      "task": "ulimit -c와 get-task-allow 서명으로 macOS 코어 덤프를 생성해 lldb -c로 스레드별 백트레이스·지역 변수·힙 객체를 조사하고, Lima에서 gdb core 분석 흐름과 비교한다.",
+      "tags": [
+        "core-dump",
+        "post-mortem",
+        "lldb"
+      ],
+      "env": "mac",
+      "env_note": "macOS: ulimit -c unlimited + codesign get-task-allow entitlement, /cores 쓰기 권한 필요"
+    },
+    {
+      "id": "TOOL-M12",
+      "level": "M",
+      "title": "정적 분석: clang-tidy·scan-build·cppcheck",
+      "goal": "정적 분석기의 체크를 선별·설정해 CI 기준선을 만든다",
+      "task": "버그 10개가 숨은 소규모 펌웨어 코드에 세 도구를 돌려 각 도구가 잡은/놓친 버그 매트릭스를 만들고, .clang-tidy 설정과 오탐 억제 방침을 정한다.",
+      "tags": [
+        "static-analysis",
+        "clang-tidy",
+        "ci"
+      ],
+      "env": "mac",
+      "env_note": "brew install llvm cppcheck"
+    },
+    {
+      "id": "TOOL-M13",
+      "level": "M",
+      "title": "코드 크기 다이어트: gc-sections·LTO·-Os",
+      "goal": "펌웨어 이미지 크기를 단계별로 줄이고 각 기법의 효과를 측정한다",
+      "task": "Cortex-M 타깃 데모 펌웨어에 -Os, -ffunction-sections -fdata-sections + --gc-sections, -flto, newlib-nano, printf 제거를 차례로 적용해 단계별 .text/.data 크기 표와 맵 파일 diff를 만든다.",
+      "tags": [
+        "size-optimization",
+        "lto",
+        "gc-sections"
+      ],
+      "env": "mac",
+      "env_note": "arm-none-eabi-gcc (newlib-nano 포함)"
+    },
+    {
+      "id": "TOOL-M14",
+      "level": "M",
+      "title": "디버그 정보와 심볼화: DWARF, strip, addr2line/atos",
+      "goal": "스트립된 바이너리의 크래시 주소를 소스 라인으로 되돌린다",
+      "task": "-g 레벨별 바이너리 크기를 비교하고, 심볼을 분리(dSYM/objcopy --only-keep-debug)한 뒤 스트립된 바이너리의 크래시 PC 목록을 atos/llvm-addr2line으로 함수:라인으로 심볼화하는 스크립트를 작성한다.",
+      "tags": [
+        "dwarf",
+        "symbolication",
+        "addr2line"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-A01",
+      "level": "A",
+      "title": "JTAG TAP 상태 머신 시뮬레이터",
+      "goal": "TMS/TDI/TDO로 움직이는 16상태 TAP과 IR/DR 스캔을 구현한다",
+      "task": "TAP 16상태 FSM과 IR/BYPASS/IDCODE 레지스터를 가진 디바이스 2개 체인을 모델링하고, TMS 비트열로 리셋 → IDCODE 읽기 → BYPASS 스캔을 수행하는 호스트 드라이버를 작성해 체인 길이·IDCODE를 자동 검출한다.",
+      "tags": [
+        "jtag",
+        "tap",
+        "simulator"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-A02",
+      "level": "A",
+      "title": "SWD 프로토콜 모델: 요청·ACK·패리티·DP/AP",
+      "goal": "SWD 패킷 구조와 MEM-AP를 통한 메모리 읽기 흐름을 구현한다",
+      "task": "SWD 요청 바이트(APnDP, RnW, A[2:3], 패리티) 인코더와 ACK(OK/WAIT/FAULT) 처리, DP SELECT → MEM-AP TAR/DRW로 대상 메모리를 읽는 시퀀스를 타깃 모델과 함께 구현하고 WAIT 재시도·패리티 오류를 테스트한다.",
+      "tags": [
+        "swd",
+        "debug-port",
+        "protocol"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-A03",
+      "level": "A",
+      "title": "GDB 원격 디버깅: QEMU gdbstub로 OpenOCD 흐름 익히기",
+      "goal": "gdb ↔ 디버그 서버 ↔ 타깃 구조와 load/reset/halt 흐름을 실습한다",
+      "task": "QEMU(-s -S)로 Cortex-M 펌웨어를 띄워 gdb에서 load, monitor 명령, 하드웨어 브레이크포인트, 레지스터/메모리 조작을 수행하고, 같은 작업을 실보드 OpenOCD(stlink + target cfg)로 할 때의 설정 파일을 작성해 대응표로 정리한다.",
+      "tags": [
+        "gdb",
+        "openocd",
+        "remote-debug"
+      ],
+      "env": "qemu",
+      "env_note": "qemu-system-arm + arm-none-eabi-gdb; 실보드 시 ST-Link + OpenOCD"
+    },
+    {
+      "id": "TOOL-A04",
+      "level": "A",
+      "title": "세미호스팅과 트레이스: SWO/ITM/RTT 개념",
+      "goal": "디버그 채널 기반 출력 방식들의 원리와 비용을 비교한다",
+      "task": "QEMU에서 세미호스팅 printf(BKPT 0xAB)를 직접 구현해 동작시키고, ITM 스티뮬러스 포트·SEGGER RTT 링 버퍼 방식의 구조와 지연/침습성을 비교하는 표와 RTT 유사 메모리 버퍼 구현을 작성한다.",
+      "tags": [
+        "semihosting",
+        "itm",
+        "rtt",
+        "trace"
+      ],
+      "env": "qemu",
+      "env_note": "qemu-system-arm -semihosting-config enable=on"
+    },
+    {
+      "id": "TOOL-A05",
+      "level": "A",
+      "title": "펌웨어 크래시 덤프 포맷 설계와 호스트 디코더",
+      "goal": "제한된 RAM/Flash에 저장할 코어덤프와 호스트 분석 도구를 설계한다",
+      "task": "레지스터·스택 일부·빌드 ID·폴트 레지스터를 담는 compact 덤프 구조(CRC 포함)를 정의하고, 덤프 바이너리를 ELF 심볼로 해석해 백트레이스와 폴트 원인을 출력하는 Python 디코더를 작성한다.",
+      "tags": [
+        "crash-dump",
+        "post-mortem",
+        "tooling"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-A06",
+      "level": "A",
+      "title": "재현 가능한 빌드와 빌드 ID 임베딩",
+      "goal": "같은 소스로 비트 단위 동일 바이너리를 만들고 버전을 추적한다",
+      "task": "git 해시·빌드 ID를 바이너리에 임베딩하고, __DATE__/절대경로 등 비결정 요소를 SOURCE_DATE_EPOCH·-ffile-prefix-map으로 제거해 두 디렉터리에서의 빌드 결과가 sha256 일치함을 확인한다.",
+      "tags": [
+        "reproducible-build",
+        "build-id",
+        "see:INFRA"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-A07",
+      "level": "A",
+      "title": "링커 스크립트 고급: RAM 함수·정렬·KEEP·ASSERT",
+      "goal": "Flash 저장 + RAM 실행 함수, 정렬 경계, 크기 검사를 링커에서 처리한다",
+      "task": ".ramfunc 섹션(LMA=Flash, VMA=RAM)과 복사 코드, 4KB 정렬 DMA 버퍼 섹션, 벡터 테이블 KEEP, 스택+힙 크기 ASSERT를 추가한 링커 스크립트를 작성하고 맵 파일과 의도적 초과 빌드 실패로 검증한다.",
+      "tags": [
+        "linker-script",
+        "ramfunc",
+        "assert"
+      ],
+      "env": "mac",
+      "env_note": "arm-none-eabi-gcc 또는 ld.lld"
+    },
+    {
+      "id": "TOOL-A08",
+      "level": "A",
+      "title": "스택 사용량 분석: -fstack-usage와 콜 그래프",
+      "goal": "정적 분석과 스택 페인팅으로 최악 스택 깊이를 산출한다",
+      "task": "-fstack-usage .su 파일과 콜 그래프(-fcallgraph-info 또는 objdump 파싱)로 태스크별 최악 스택을 계산하는 스크립트를 작성하고, 실행 시 스택 페인팅(0xDEADBEEF) 측정값과 비교한다.",
+      "tags": [
+        "stack-usage",
+        "static-analysis",
+        "see:RTOS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-A09",
+      "level": "A",
+      "title": "계측 프로파일러: -finstrument-functions",
+      "goal": "컴파일러 계측 훅으로 함수 호출 트리와 시간을 수집한다",
+      "task": "__cyg_profile_func_enter/exit 훅으로 호출 깊이·누적 시간을 기록하는 경량 프로파일러를 만들고, 주소를 심볼화해 상위 함수 표를 출력한 뒤 샘플링 방식(Instruments/sample)과 결과를 비교한다.",
+      "tags": [
+        "profiling",
+        "instrumentation",
+        "performance"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "TOOL-A10",
+      "level": "A",
+      "title": "최적화 리포트 읽기: -Rpass와 인라이닝·벡터화",
+      "goal": "컴파일러가 왜 인라인·벡터화를 했거나 못 했는지 리포트로 확인하고 코드를 고친다",
+      "task": "-Rpass=inline/loop-vectorize와 -Rpass-missed로 핫 루프 3개의 리포트를 모아 aliasing·함수 경계 때문에 벡터화가 막힌 원인을 restrict·static inline 등으로 해결하고, 어셈블리와 속도로 확인한다(퍼징은 see:TEST-M02).",
+      "tags": [
+        "optimization",
+        "compiler",
+        "clang"
+      ],
+      "env": "mac",
+      "env_note": "brew install llvm (Apple clang에는 libFuzzer 미포함)"
+    },
+    {
+      "id": "TOOL-A11",
+      "level": "A",
+      "title": "미니 readelf 구현: ELF 헤더·섹션·심볼 파싱",
+      "goal": "ELF 포맷을 직접 파싱해 도구 출력의 의미를 완전히 이해한다",
+      "task": "ELF32/ELF64 파일의 헤더, 섹션 헤더, 프로그램 헤더, 심볼 테이블을 출력하는 C 프로그램을 작성해 llvm-readelf 출력과 diff로 검증하고, 로더가 PT_LOAD를 메모리에 올리는 과정을 설명한다.",
+      "tags": [
+        "elf",
+        "parser",
+        "loader"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

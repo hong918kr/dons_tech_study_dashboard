@@ -1,0 +1,541 @@
+{
+  "id": "MCPP",
+  "intro": "임베디드 C++(CPP 트랙)이 '펌웨어에서 안전하게 쓰는 C++'라면, 이 트랙은 언어 자체의 깊은 메커니즘(값 범주, 템플릿, 타입 소거, 코루틴, 메모리 모델, ABI)을 직접 구현하며 익힌다. NVIDIA·Apple·Tesla·HFT 등 C++ 비중이 큰 면접에서 'unique_ptr/std::function을 구현해 보라', 'move가 왜 안 일어나나' 같은 질문에 코드로 답할 수 있게 하는 것이 목표다.",
+  "goals": [
+    "값 범주·move semantics·perfect forwarding을 컴파일러 관점에서 설명하고 계측 코드로 증명한다",
+    "템플릿·variadic·concepts로 타입 안전한 제네릭 라이브러리를 설계한다",
+    "unique_ptr·shared_ptr·std::function·expected를 직접 구현하며 표준 라이브러리 내부를 이해한다",
+    "코루틴·ranges·pmr 등 C++20 기능을 실제 문제에 적용한다",
+    "메모리 모델·UB·ODR/ABI 문제를 sanitizer와 도구로 재현하고 진단한다"
+  ],
+  "prereq": [
+    "CPP",
+    "DS"
+  ],
+  "refs": [
+    {
+      "title": "cppreference.com",
+      "url": "https://en.cppreference.com"
+    },
+    {
+      "title": "Effective Modern C++ (Scott Meyers)"
+    },
+    {
+      "title": "C++ Templates: The Complete Guide, 2nd ed. (Vandevoorde, Josuttis, Gregor)"
+    },
+    {
+      "title": "C++ Concurrency in Action, 2nd ed. (Anthony Williams)"
+    },
+    {
+      "title": "Lewis Baker — Asymmetric Transfer (coroutine 블로그)",
+      "url": "https://lewissbaker.github.io/"
+    },
+    {
+      "title": "Itanium C++ ABI",
+      "url": "https://itanium-cxx-abi.github.io/cxx-abi/abi.html"
+    },
+    {
+      "title": "C++ Core Guidelines",
+      "url": "https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines"
+    }
+  ],
+  "items": [
+    {
+      "id": "MCPP-B01",
+      "level": "B",
+      "title": "값 범주: lvalue / prvalue / xvalue 판별",
+      "goal": "모든 식(expression)의 값 범주를 정확히 분류하고 decltype 규칙을 설명한다.",
+      "task": "decltype((expr)) 기반 value_category<T> 트레이트를 작성하고, 20개 식(변수, std::move, 함수 반환, 멤버 접근, 삼항 연산 등)의 범주를 static_assert로 검증한다.",
+      "tags": [
+        "value-category",
+        "decltype"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B02",
+      "level": "B",
+      "title": "특수 멤버 함수 생성 규칙 & Rule of 0/3/5",
+      "goal": "어떤 선언이 복사/이동 생성자의 암시적 생성을 억제하는지 안다.",
+      "task": "호출을 기록하는 Tracer 클래스로 6가지 선언 조합(소멸자만, 복사만, =default 이동 등)에서 copy/move가 어떻게 선택되는지 표로 만들고 테스트로 고정한다.",
+      "tags": [
+        "rule-of-five",
+        "special-members"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B03",
+      "level": "B",
+      "title": "Move semantics 구현: 소유 버퍼 클래스",
+      "goal": "자원 소유 클래스의 copy/move를 올바르게 구현하고 noexcept의 영향을 이해한다.",
+      "task": "heap 배열을 소유하는 Buffer 클래스의 copy/move 생성·대입을 구현하고, move에 noexcept 유무에 따라 std::vector 재할당 시 copy vs move가 선택되는지 카운터로 검증한다.",
+      "tags": [
+        "move",
+        "noexcept",
+        "vector"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B04",
+      "level": "B",
+      "title": "Copy elision: RVO / NRVO / 보장된 생략",
+      "goal": "C++17 보장 생략과 NRVO 실패 조건을 구분한다.",
+      "task": "Tracer로 prvalue 반환, 분기 반환, return std::move(local), 매개변수 반환 케이스를 측정하고 -fno-elide-constructors 빌드와 비교해 결과 표를 작성한다.",
+      "tags": [
+        "rvo",
+        "copy-elision"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B05",
+      "level": "B",
+      "title": "참조 축약 & forwarding reference",
+      "goal": "템플릿 T&&에서 T가 어떻게 추론되는지와 참조 축약 4규칙을 체화한다.",
+      "task": "type_name<T>() 헬퍼로 lvalue/rvalue/const 인자별 T 추론 결과를 출력하고, 참조 축약 규칙과 auto&& 동작을 static_assert 세트로 증명한다.",
+      "tags": [
+        "forwarding-ref",
+        "reference-collapsing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B06",
+      "level": "B",
+      "title": "Perfect forwarding: make_unique / emplace 구현",
+      "goal": "std::forward의 필요성과 forward 누락 시 비용을 측정한다.",
+      "task": "my_make_unique<T>(Args&&...)와 단순 vector의 emplace_back을 구현하고, forward를 빼먹었을 때 추가 copy가 생기는 것을 Tracer 테스트로 보인다.",
+      "tags": [
+        "perfect-forwarding",
+        "variadic"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B07",
+      "level": "B",
+      "title": "템플릿 인자 추론 & 오버로드 해석",
+      "goal": "템플릿/비템플릿 오버로드, 부분 순서, 암시적 변환 우선순위를 예측한다.",
+      "task": "오버로드 해석 퀴즈 15개를 코드로 작성해 예상 출력과 실제 출력을 비교하고, 틀린 문항마다 표준 규칙 근거를 주석으로 단다.",
+      "tags": [
+        "overload-resolution",
+        "template-deduction"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B08",
+      "level": "B",
+      "title": "클래스 템플릿 & 조건부 trivial: optional<T> 구현",
+      "goal": "클래스 템플릿 설계, 부분 특수화, C++20 조건부 trivial 특수 멤버를 익힌다.",
+      "task": "union 저장소 기반 my::optional<T>를 구현하고 T가 trivially copyable이면 optional도 그렇게 되도록 requires 절로 특수 멤버를 조건부 =default 처리, optional<T&> 부분 특수화·CTAD guide를 static_assert와 수명 테스트로 검증한다.",
+      "tags": [
+        "class-template",
+        "optional",
+        "conditionally-trivial",
+        "see:CPP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B09",
+      "level": "B",
+      "title": "Variadic templates & fold expression",
+      "goal": "파라미터 팩 전개와 fold 식으로 타입 안전한 가변 인자 API를 만든다.",
+      "task": "타입 안전 print(fmt, args...)와 sum/all_of/any_of fold를 구현하고, 포맷 자리수와 인자 개수가 다르면 컴파일 에러가 나도록 만든다.",
+      "tags": [
+        "variadic",
+        "fold-expression"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B10",
+      "level": "B",
+      "title": "constexpr / consteval 기초: 컴파일 타임 문자열 해시",
+      "goal": "constexpr·consteval·constinit의 차이와 컴파일 타임 평가 조건을 안다.",
+      "task": "consteval FNV-1a 해시로 문자열 switch(명령어 디스패처)를 구현하고, 런타임 호출 시 컴파일 에러, constinit 전역 초기화 순서 문제 해결을 테스트로 보인다.",
+      "tags": [
+        "constexpr",
+        "consteval",
+        "constinit"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B11",
+      "level": "B",
+      "title": "예외 안전성 보장 & copy-and-swap",
+      "goal": "basic/strong/nothrow 보장을 구분하고 strong 보장을 구현한다.",
+      "task": "N번째 할당에서 throw하는 테스트 allocator로 컨테이너 대입 연산 중 예외를 주입하고, copy-and-swap 적용 전후로 객체 상태가 보존되는지 검증한다.",
+      "tags": [
+        "exception-safety",
+        "raii"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B12",
+      "level": "B",
+      "title": "람다 내부: 클로저 타입과 캡처 수명",
+      "goal": "람다가 컴파일러가 만든 functor임을 이해하고 캡처 수명 버그를 피한다.",
+      "task": "람다 5개를 손으로 쓴 functor로 바꿔 동작을 비교하고, 참조 캡처/this 캡처로 dangling을 만든 뒤 ASan으로 탐지, init-capture로 수정한다.",
+      "tags": [
+        "lambda",
+        "closure",
+        "asan"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-B13",
+      "level": "B",
+      "title": "string_view / span 수명 함정",
+      "goal": "비소유 뷰 타입의 수명 규칙과 흔한 dangling 패턴을 안다.",
+      "task": "임시 string에서 만든 string_view, 재할당된 vector의 span 등 6개 dangling 사례를 재현해 ASan으로 잡고, -Wdangling 경고와 API 설계 규칙을 정리한다.",
+      "tags": [
+        "string_view",
+        "span",
+        "lifetime"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M01",
+      "level": "M",
+      "title": "unique_ptr 구현: custom deleter & EBO",
+      "goal": "move-only 소유 포인터와 빈 기반 최적화를 구현한다.",
+      "task": "my::unique_ptr<T, D>를 [[no_unique_address]]로 구현해 기본 deleter일 때 sizeof==sizeof(T*)를 static_assert로 확인하고, 배열 특수화·release/reset·FILE* deleter를 테스트한다.",
+      "tags": [
+        "unique_ptr",
+        "ebo",
+        "smart-pointer"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M02",
+      "level": "M",
+      "title": "shared_ptr / weak_ptr 구현: control block",
+      "goal": "참조 카운트 제어 블록과 make_shared 단일 할당 구조를 이해한다.",
+      "task": "원자적 strong/weak 카운트를 갖는 my::shared_ptr·weak_ptr·make_shared를 구현하고, 순환 참조 누수를 weak_ptr로 해결, 멀티스레드 복사 테스트를 TSan으로 돌린다.",
+      "tags": [
+        "shared_ptr",
+        "weak_ptr",
+        "atomic",
+        "tsan"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M03",
+      "level": "M",
+      "title": "shared_ptr 고급: aliasing·shared_from_this",
+      "goal": "aliasing 생성자와 shared_from_this의 내부 동작과 비용을 안다.",
+      "task": "구현한 shared_ptr에 aliasing 생성자와 enable_shared_from_this를 추가하고, 비동기 콜백에서 this 수명 연장 패턴을 구현해 수명 테스트로 검증한다.",
+      "tags": [
+        "shared_ptr",
+        "enable_shared_from_this"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M04",
+      "level": "M",
+      "title": "type traits 직접 구현 & detection idiom",
+      "goal": "<type_traits>가 템플릿 특수화로 구현되는 원리를 익힌다.",
+      "task": "is_same, remove_cvref, conditional, is_convertible, is_detected(void_t)를 직접 구현해 std 버전과 static_assert로 비교하고, '멤버 함수 reset()이 있는가' 감지기를 만든다.",
+      "tags": [
+        "type-traits",
+        "void_t",
+        "metaprogramming"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M05",
+      "level": "M",
+      "title": "SFINAE → Concepts 마이그레이션",
+      "goal": "enable_if 기반 코드를 concepts/requires로 옮기고 subsumption을 이해한다.",
+      "task": "enable_if로 작성된 직렬화 오버로드 세트(정수/부동소수/컨테이너/사용자 타입)를 concepts로 재작성하고, 에러 메시지 길이와 오버로드 선택(subsumption)을 비교 기록한다.",
+      "tags": [
+        "sfinae",
+        "concepts",
+        "requires"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M06",
+      "level": "M",
+      "title": "자체 컨테이너 iterator & ranges 호환성",
+      "goal": "iterator concept 계층을 만족하는 사용자 정의 컨테이너를 만든다.",
+      "task": "링 형태 컨테이너에 random_access_iterator를 구현하고 std::random_access_iterator / std::ranges::range concept을 static_assert로 통과시킨 뒤 ranges::sort·views와 함께 동작시킨다.",
+      "tags": [
+        "iterator",
+        "concepts",
+        "ranges"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M07",
+      "level": "M",
+      "title": "Type erasure 1: std::function 구현 (SBO)",
+      "goal": "타입 소거와 small buffer optimization의 구조를 구현한다.",
+      "task": "my::function<R(Args...)>를 수동 vtable + SBO로 구현하고, operator new 카운터로 작은 람다는 할당 0회임을 검증, move_only_function 변형도 만든다.",
+      "tags": [
+        "type-erasure",
+        "std-function",
+        "sbo"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M08",
+      "level": "M",
+      "title": "Type erasure 2: 외부 다형성 (Sean Parent 스타일)",
+      "goal": "상속 없는 값 의미 다형성을 설계하고 가상 함수 방식과 비교한다.",
+      "task": "Drawable 개념을 만족하는 서로 무관한 타입들을 담는 값 타입 컬렉션을 구현하고, 가상 상속 버전과 메모리 사용량·순회 성능을 벤치마크로 비교한다.",
+      "tags": [
+        "type-erasure",
+        "value-semantics"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M09",
+      "level": "M",
+      "title": "std::variant & visit로 상태 머신",
+      "goal": "합 타입으로 상태/이벤트를 표현하고 visit 디스패치 비용을 이해한다.",
+      "task": "overloaded{} 패턴으로 통신 프로토콜 파서 상태 머신(Idle/Header/Payload/Crc)을 구현하고, valueless_by_exception 상황을 재현해 처리 방법을 테스트한다.",
+      "tags": [
+        "variant",
+        "visit",
+        "state-machine"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M10",
+      "level": "M",
+      "title": "예외의 내부 비용 vs std::expected monadic 체인",
+      "goal": "zero-cost 예외의 실제 구현(unwind 테이블, personality)과 expected 기반 전파를 비교한다.",
+      "task": "같은 설정 파일 파서를 예외 버전과 C++23 std::expected(and_then/transform/or_else) 버전으로 작성해 정상/에러 경로 지연, 바이너리 크기(__eh_frame/__unwind_info)를 측정하고, lldb로 __cxa_throw→unwind 경로를 추적해 정리한다.",
+      "tags": [
+        "exceptions",
+        "expected",
+        "unwinding",
+        "see:CPP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M11",
+      "level": "M",
+      "title": "Allocator & PMR: 할당 전략 교체",
+      "goal": "pmr로 컨테이너 할당 전략을 런타임에 교체하고 hot path 할당을 제거한다.",
+      "task": "로깅 memory_resource와 고정 arena resource를 직접 작성해 pmr::vector/pmr::string에 연결하고, monotonic/pool resource 대비 할당 횟수·속도를 측정, hot loop 할당 0회를 검증한다.",
+      "tags": [
+        "allocator",
+        "pmr",
+        "arena"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M12",
+      "level": "M",
+      "title": "Ranges & views: 커스텀 view adaptor",
+      "goal": "lazy view 파이프라인의 동작과 view 작성 규칙을 익힌다.",
+      "task": "stride/chunk 유사 커스텀 view와 파이프(|) adaptor를 구현하고, 원소 접근 횟수를 세어 lazy 평가를 증명, dangling iterator(borrowed_range) 규칙을 테스트한다.",
+      "tags": [
+        "ranges",
+        "views",
+        "lazy"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-M13",
+      "level": "M",
+      "title": "메모리 모델 규칙: fence·release sequence",
+      "goal": "happens-before를 만드는 표준 규칙(fence 동기화, RMW release sequence)을 코드로 설명한다.",
+      "task": "fence 기반 vs 연산 기반 동기화, RMW가 이어 주는 release sequence, atomic_ref 사용 예를 작성하고, 작은 SC 인터리빙 전수 탐색기를 만들어 data race가 있는 버전을 찾아낸 뒤 TSan 결과와 대조한다(실측 litmus는 OS 트랙).",
+      "tags": [
+        "memory-model",
+        "atomics",
+        "fences",
+        "see:OS",
+        "see:LLAT"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-A01",
+      "level": "A",
+      "title": "Coroutines 1: generator<T> 직접 구현",
+      "goal": "promise_type, awaitable, coroutine_handle의 상호작용을 이해한다.",
+      "task": "generator<T>를 처음부터 구현하고, operator new 오버로드로 코루틴 프레임 할당을 관찰하며, 예외 전파와 조기 파괴 시 소멸 순서를 테스트한다.",
+      "tags": [
+        "coroutine",
+        "generator"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-A02",
+      "level": "A",
+      "title": "Coroutines 2: Task<T> & 단일 스레드 이벤트 루프",
+      "goal": "비동기 Task와 스케줄러를 구현하고 symmetric transfer를 이해한다.",
+      "task": "Task<T>, sleep_for 타이머 awaitable, 단일 스레드 이벤트 루프를 구현해 센서 폴링 시나리오를 작성하고, 10만 단계 co_await 체인에서 스택 오버플로가 없음을 symmetric transfer로 보인다.",
+      "tags": [
+        "coroutine",
+        "event-loop",
+        "async"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-A03",
+      "level": "A",
+      "title": "atomic wait/notify로 동기화 프리미티브 구현",
+      "goal": "C++20 atomic wait/notify로 세마포어·래치를 만든다.",
+      "task": "counting_semaphore, latch, 단순 mutex를 std::atomic::wait/notify로 구현하고 스트레스 테스트(TSan)와 std 구현 대비 지연 시간을 비교한다.",
+      "tags": [
+        "atomics",
+        "synchronization",
+        "c++20"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-A04",
+      "level": "A",
+      "title": "Undefined Behavior 사냥",
+      "goal": "대표적 UB가 최적화 후 어떻게 나타나는지 보고 sanitizer로 잡는다.",
+      "task": "signed overflow, strict aliasing, 객체 수명 밖 접근, 미초기화, OOB, data race 등 10개 UB를 재현해 -O0/-O2 결과 차이를 기록하고 UBSan/ASan/TSan으로 탐지, std::bit_cast 등 올바른 대안으로 고친다.",
+      "tags": [
+        "undefined-behavior",
+        "sanitizers",
+        "strict-aliasing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-A05",
+      "level": "A",
+      "title": "ODR 위반·이름 맹글링·객체 레이아웃",
+      "goal": "링커 수준에서 C++ 심볼과 객체 레이아웃을 읽는다.",
+      "task": "두 TU에 서로 다른 inline 함수 정의로 ODR 위반을 만들어 링크 결과가 최적화 수준에 따라 바뀌는 것을 관찰하고, nm/c++filt로 맹글링 해독, -Xclang -fdump-record-layouts로 vtable·패딩을 확인한다.",
+      "tags": [
+        "odr",
+        "abi",
+        "name-mangling"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-A06",
+      "level": "A",
+      "title": "ABI 안정 라이브러리: pImpl & C 인터페이스",
+      "goal": "공유 라이브러리 버전 업 시 ABI가 깨지는 원인과 방지책을 안다.",
+      "task": "dylib v1→v2에서 멤버 추가로 ABI가 깨지는 데모를 만들고, pImpl·opaque handle C API·inline namespace 버저닝으로 재설계해 구 클라이언트 바이너리가 계속 동작함을 검증한다.",
+      "tags": [
+        "abi",
+        "pimpl",
+        "shared-library"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-A07",
+      "level": "A",
+      "title": "템플릿 메타프로그래밍: typelist & 컴파일 타임 검증",
+      "goal": "타입 리스트 연산과 consteval 검증으로 컴파일 타임에 오류를 잡는다.",
+      "task": "typelist(find/unique/transform/index_of)를 구현하고, consteval 포맷 문자열 검사기(인자 타입·개수 불일치를 컴파일 에러로)를 만들어 std::format 방식과 비교한다.",
+      "tags": [
+        "metaprogramming",
+        "typelist",
+        "consteval"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-A08",
+      "level": "A",
+      "title": "Expression templates: 임시 객체 없는 벡터 연산",
+      "goal": "식 템플릿으로 lazy 평가와 루프 융합을 구현한다.",
+      "task": "Vec 클래스에 a + b * c 형태의 expression template을 구현해 임시 객체 0개·단일 루프로 평가됨을 보이고, naive 구현 대비 성능과 어셈블리(-S)를 비교한다.",
+      "tags": [
+        "expression-templates",
+        "lazy-evaluation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-A09",
+      "level": "A",
+      "title": "빌드 시간 최적화: -ftime-trace & 인스턴스화 비용",
+      "goal": "헤더·템플릿 인스턴스화가 빌드 시간에 주는 영향을 측정·통제한다.",
+      "task": "중형 헤더 위주 프로젝트를 -ftime-trace(Perfetto/chrome://tracing)로 분석해 상위 병목 헤더·인스턴스화를 찾고, extern template·전방 선언·PCH·concepts 기반 제약 단순화로 전체/증분 빌드 시간을 줄여 전후 수치를 보고한다(코드 크기 bloat는 CPP 트랙).",
+      "tags": [
+        "build-time",
+        "ftime-trace",
+        "templates",
+        "see:CPP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MCPP-A10",
+      "level": "A",
+      "title": "C++20 Modules 실습",
+      "goal": "named module로 헤더 의존성을 대체하고 빌드 모델 차이를 이해한다.",
+      "task": "작은 라이브러리를 export module로 변환해 clang + CMake(3.28+)로 빌드하고, 헤더 버전 대비 재빌드 시간과 매크로/ODR 격리 효과를 비교한다.",
+      "tags": [
+        "modules",
+        "build"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

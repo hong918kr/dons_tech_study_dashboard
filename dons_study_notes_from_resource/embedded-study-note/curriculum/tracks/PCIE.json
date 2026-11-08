@@ -1,0 +1,595 @@
+{
+  "id": "PCIE",
+  "intro": "PCIe는 SSD·GPU·NPU·NIC를 SoC/호스트에 연결하는 표준 인터커넥트이고, NVMe는 그 위에서 가장 많이 쓰이는 스토리지 프로토콜이다. 실리콘 검증·SSD·가속기 펌웨어 면접에서는 config space/BAR/LTSSM/AER 같은 세부와 SQ/CQ·PRP 같은 NVMe 메커니즘을 '직접 디코드해봤는지'를 묻는다(예: Rivian HM 스크린의 lspci/LTSSM/L0 질문).",
+  "goals": [
+    "PCIe 3계층과 TLP/DLLP 포맷, ordering·flow control을 비트 수준으로 설명한다",
+    "config space·capability·BAR를 파싱하고 열거·리소스 할당 알고리즘을 구현한다",
+    "LTSSM·ASPM·AER를 근거로 링크 장애를 체계적으로 진단한다",
+    "NVMe 컨트롤러 초기화, SQ/CQ, PRP/SGL, admin·I/O 명령을 host/device 양쪽에서 구현한다",
+    "MSI-X, IOMMU, SR-IOV, NVMe-oF, CXL 등 고급 주제를 모델로 검증한다"
+  ],
+  "prereq": [
+    "C",
+    "ARCH",
+    "OS"
+  ],
+  "refs": [
+    {
+      "title": "PCI Express Technology 3.0 (Mike Jackson, Ravi Budruk / MindShare)"
+    },
+    {
+      "title": "PCI-SIG PCI Express Base Specification",
+      "url": "https://pcisig.com/specifications"
+    },
+    {
+      "title": "NVM Express Specifications (Base, Command Set, PCIe Transport, TCP Transport)",
+      "url": "https://nvmexpress.org/specifications/"
+    },
+    {
+      "title": "Linux kernel: PCI Bus Subsystem docs",
+      "url": "https://docs.kernel.org/PCI/index.html"
+    },
+    {
+      "title": "nvme-cli",
+      "url": "https://github.com/linux-nvme/nvme-cli"
+    },
+    {
+      "title": "SPDK documentation",
+      "url": "https://spdk.io/doc/"
+    },
+    {
+      "title": "Compute Express Link (CXL) Consortium",
+      "url": "https://computeexpresslink.org/"
+    }
+  ],
+  "items": [
+    {
+      "id": "PCIE-B01",
+      "level": "B",
+      "title": "PCIe 계층 구조: Transaction / Data Link / Physical",
+      "goal": "각 계층의 책임과 패킷이 아래로 내려가며 감싸지는 과정을 설명할 수 있다.",
+      "task": "Memory Read 요청 하나가 TLP(헤더+데이터+ECRC) → DLL(Sequence#+LCRC) → PHY(STP/END 프레이밍, 128b/130b)로 감싸지는 과정을 바이트 단위로 출력하는 Python 인코더를 작성하고, 각 필드가 어떤 계층의 책임인지 주석으로 표기한다.",
+      "tags": [
+        "pcie-layers",
+        "tlp",
+        "dllp",
+        "phy"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B02",
+      "level": "B",
+      "title": "링크 속도·폭과 실효 대역폭 계산: Gen1–Gen6",
+      "goal": "GT/s, 인코딩 오버헤드, TLP 오버헤드를 반영한 실제 처리량을 계산한다.",
+      "task": "Gen1–Gen6 × x1–x16에 대해 raw/인코딩 후 대역폭과 MPS(128/256/512B)·TLP 헤더·DLLP 오버헤드를 반영한 실효 쓰기 처리량을 계산하는 도구를 작성하고 'Gen4 x4 NVMe의 이론 최대 순차 읽기는?' 같은 질문에 답한다.",
+      "tags": [
+        "bandwidth",
+        "link-speed",
+        "mps"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B03",
+      "level": "B",
+      "title": "Configuration Space 해부: Type 0 헤더",
+      "goal": "Vendor/Device ID, Command/Status, Class Code, Header Type, Cap Pointer 의미를 안다.",
+      "task": "256B/4KB config space hex 덤프(lspci -xxxx 형식)를 입력받아 Type 0 헤더 필드를 디코드하는 C 파서를 작성하고, Command 레지스터의 Memory Space/Bus Master 비트가 꺼져 있을 때의 의미를 출력에 포함한다.",
+      "tags": [
+        "config-space",
+        "type0",
+        "parser"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B04",
+      "level": "B",
+      "title": "Capability 리스트 순회와 PCIe Capability 디코드",
+      "goal": "legacy/extended capability 연결 리스트와 Link Cap/Status 필드를 읽을 수 있다.",
+      "task": "파서를 확장해 0x34 legacy cap 리스트(PM, MSI, MSI-X, PCIe)와 0x100 extended cap 리스트(AER, LTR, L1SS 등)를 순회하고, PCIe Capability의 LnkCap/LnkCtl/LnkSta에서 최대·현재 속도/폭을 디코드하며 무한 루프 방지(방문 검사)를 구현한다.",
+      "tags": [
+        "capability",
+        "lnkcap",
+        "lnksta"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B05",
+      "level": "B",
+      "title": "BAR sizing과 디코드: all-1s 쓰기 알고리즘",
+      "goal": "BAR 종류(IO/Mem32/Mem64/prefetchable)와 크기 결정 절차를 정확히 구현한다.",
+      "task": "크기·타입이 다른 BAR 6개를 가진 mock 디바이스(쓰기 마스크 동작 구현)에 대해 save→0xFFFFFFFF 쓰기→read→복원 sizing 루틴을 작성하고 64비트 BAR 쌍 처리, 디코드 중 Memory Space 비활성화 이유까지 테스트로 검증한다.",
+      "tags": [
+        "bar",
+        "sizing",
+        "mmio"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B06",
+      "level": "B",
+      "title": "lspci·setpci 실전 해석: -tv, -vvv, -xxxx",
+      "goal": "lspci 출력에서 토폴로지·링크 상태·드라이버 바인딩을 읽어내고 레지스터를 직접 읽는다.",
+      "task": "Lima VM에서 lspci -tv/-vvv/-xxxx, setpci, /sys/bus/pci/devices/*/ 를 수집해 BDF, BAR, LnkCap/LnkSta, Kernel driver in use를 해석하고 자신이 만든 config 파서 출력과 대조한다; 실HW 샘플(Gen4 x4 다운트레이닝 사례)도 해석 문제로 답한다.",
+      "tags": [
+        "lspci",
+        "setpci",
+        "sysfs",
+        "interview"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM의 virtio PCI 장치로 충분, 물리 링크 정보(LnkSta)는 실제 HW 샘플 출력으로 학습"
+    },
+    {
+      "id": "PCIE-B07",
+      "level": "B",
+      "title": "Type 1 헤더와 브리지: bus number, memory window",
+      "goal": "브리지/스위치 포트가 버스 번호와 주소 윈도우로 트래픽을 라우팅하는 방식을 안다.",
+      "task": "Type 1 헤더(Primary/Secondary/Subordinate Bus, Memory Base/Limit, Prefetchable Base/Limit 64비트)를 디코드하고, 주어진 주소/버스 번호가 어느 다운스트림 포트로 라우팅되는지 판정하는 함수를 작성해 테스트한다.",
+      "tags": [
+        "type1",
+        "bridge",
+        "routing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B08",
+      "level": "B",
+      "title": "ECAM 주소 계산과 config 접근 방식",
+      "goal": "ECAM(MMCONFIG)과 legacy CF8/CFC 접근의 차이를 이해하고 구현한다.",
+      "task": "ECAM 오프셋(bus<<20 | dev<<15 | fn<<12 | reg)으로 mock ECAM 메모리 영역을 접근하는 cfg_read/write(8/16/32) API와 CF8/CFC 방식 에뮬레이션을 구현하고, 존재하지 않는 함수 읽기 시 0xFFFF 반환 처리를 테스트한다.",
+      "tags": [
+        "ecam",
+        "config-access",
+        "mmconfig"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B09",
+      "level": "B",
+      "title": "열거(Enumeration): DFS 버스 번호 할당",
+      "goal": "펌웨어/OS가 PCIe 트리를 탐색해 버스 번호를 할당하는 알고리즘을 구현한다.",
+      "task": "root port–switch(USP/DSP)–endpoint로 구성된 가상 토폴로지를 만들고 DFS 열거기를 구현해 secondary/subordinate 번호를 할당, multi-function 검사(Header Type bit7)와 결과 트리(lspci -tv 형식) 출력을 검증한다.",
+      "tags": [
+        "enumeration",
+        "dfs",
+        "topology"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B10",
+      "level": "B",
+      "title": "TLP 헤더 인코딩/디코딩: MRd, MWr, CplD",
+      "goal": "TLP 필드(Fmt/Type, Length, Requester ID, Tag, BE, Address)를 비트 단위로 다룬다.",
+      "task": "3DW/4DW MRd·MWr·CplD 헤더 인코더/디코더를 C로 작성하고, 임의 주소/길이 요청에 대한 First/Last DW BE 계산, 4KB 경계 분할, Completion의 Byte Count/Lower Address 계산을 테스트 벡터로 검증한다.",
+      "tags": [
+        "tlp",
+        "encoding",
+        "byte-enable"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B11",
+      "level": "B",
+      "title": "Posted/Non-posted/Completion과 Ordering 규칙",
+      "goal": "PCIe 트랜잭션 순서 규칙과 'read가 write를 flush한다'는 관용구의 근거를 안다.",
+      "task": "ordering 규칙 표(Relaxed Ordering, ID-based Ordering 포함)를 코드화해 트랜잭션 시퀀스의 재정렬 허용 여부를 판단하는 검사기를 만들고, MMIO write 후 read-back이 필요한 드라이버 예시를 설명한다.",
+      "tags": [
+        "ordering",
+        "posted",
+        "relaxed-ordering"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B12",
+      "level": "B",
+      "title": "NVMe 컨트롤러 레지스터: CAP/VS/CC/CSTS/AQA/ASQ/ACQ",
+      "goal": "NVMe BAR0 레지스터 맵과 CAP 필드 의미(MQES, DSTRD, TO, CSS)를 안다.",
+      "task": "NVMe BAR0 레지스터 맵을 C 구조체로 정의(static_assert로 오프셋 검증)하고 CAP/VS/CC/CSTS 디코더를 작성해 실제 장치 덤프 샘플을 해석한다.",
+      "tags": [
+        "nvme",
+        "registers",
+        "cap"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-B13",
+      "level": "B",
+      "title": "NVMe 컨트롤러 초기화 시퀀스: CC.EN과 CSTS.RDY",
+      "goal": "호스트 드라이버의 컨트롤러 reset/enable 절차를 정확한 순서로 구현한다.",
+      "task": "mock NVMe 컨트롤러(별도 스레드, CAP.TO 지연 반영)를 상대로 disable→RDY=0 대기→AQA/ASQ/ACQ 설정→CC(IOSQES/IOCQES, MPS) 설정→EN=1→RDY=1 대기(timeout) 시퀀스를 구현하고 CFS(치명적 상태) 주입 처리를 테스트한다.",
+      "tags": [
+        "nvme",
+        "init",
+        "controller-reset"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M01",
+      "level": "M",
+      "title": "SQ/CQ 링: head/tail, doorbell, Phase Tag",
+      "goal": "NVMe 큐 쌍의 생산자/소비자 프로토콜과 phase bit wrap을 정확히 구현한다.",
+      "task": "호스트 스레드와 컨트롤러 스레드로 SQ/CQ 링을 구현(doorbell stride 반영, SQ Head를 CQE로 전달, Phase Tag 토글)하고 큐 가득 참/wrap/동시 완료 상황을 수백만 명령 스트레스 테스트로 검증한다.",
+      "tags": [
+        "nvme",
+        "sq-cq",
+        "doorbell",
+        "phase-tag"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M02",
+      "level": "M",
+      "title": "Admin 명령: Identify Controller/Namespace 파싱",
+      "goal": "Identify 데이터 구조에서 드라이버가 꼭 읽어야 하는 필드를 안다.",
+      "task": "Identify Controller(MDTS, SQES/CQES, NN, VWC, OACS)와 Identify Namespace(NSZE, NCAP, FLBAS, LBAF) 4KB 구조를 파싱하는 C 코드를 작성해 nvme id-ctrl/id-ns 바이너리 덤프(-b)를 해석하고 MDTS로 최대 전송 크기를 계산한다.",
+      "tags": [
+        "nvme",
+        "identify",
+        "admin"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M03",
+      "level": "M",
+      "title": "I/O 큐 생성과 Read/Write 명령 경로",
+      "goal": "Create I/O CQ/SQ 후 실제 데이터 I/O까지의 전체 명령 흐름을 구현한다.",
+      "task": "mock 컨트롤러(RAM-disk 백엔드)에 Create I/O CQ/SQ admin 명령 처리를 추가하고 호스트에서 SLBA/NLB 기반 Read/Write를 제출·완료 처리해 랜덤 패턴 데이터 무결성과 상태 코드(Invalid NS, LBA Out of Range)를 검증한다.",
+      "tags": [
+        "nvme",
+        "io-queue",
+        "read-write"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M04",
+      "level": "M",
+      "title": "PRP 리스트 구성: 페이지 경계와 PRP2 해석",
+      "goal": "PRP1/PRP2/PRP List 규칙과 흔한 경계 버그를 이해한다.",
+      "task": "임의 버퍼(시작 오프셋, 길이, 비연속 물리 페이지)에 대해 PRP1/PRP2/PRP list(체인 포함)를 생성하는 호스트 함수와 컨트롤러 측 walker를 작성하고, 1페이지·2페이지·페이지 경계 걸침·리스트 체인 등 경계 케이스를 전수 테스트한다.",
+      "tags": [
+        "nvme",
+        "prp",
+        "dma"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M05",
+      "level": "M",
+      "title": "SGL 디스크립터와 PRP 비교",
+      "goal": "SGL(Data Block, Segment, Last Segment, Bit Bucket) 구조와 PRP 대비 장단을 안다.",
+      "task": "SGL 디스크립터 생성/파싱기를 구현해 같은 버퍼를 PRP와 SGL로 기술했을 때의 디스크립터 수·메모리 사용을 비교하고, 바이트 단위 정렬이 필요한 경우(NVMe-oF, 작은 메타데이터)에 SGL이 왜 유리한지 정리한다.",
+      "tags": [
+        "nvme",
+        "sgl",
+        "dma"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M06",
+      "level": "M",
+      "title": "Namespace와 LBA Format 관리",
+      "goal": "다중 namespace, LBA 크기/메타데이터 포맷, attach 개념을 다룬다.",
+      "task": "mock 컨트롤러에 Namespace Management(create/delete)·Attach·Format NVM을 구현하고 512B/4KB LBA 포맷 간 주소 변환과 NSID 유효성(0, 0xFFFFFFFF broadcast) 처리를 테스트한다.",
+      "tags": [
+        "nvme",
+        "namespace",
+        "lba-format"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M07",
+      "level": "M",
+      "title": "LTSSM 상태머신: Detect→Polling→Configuration→L0",
+      "goal": "링크 트레이닝 상태 흐름과 Recovery 진입 조건을 설명하고 시뮬레이션한다.",
+      "task": "LTSSM 시뮬레이터(Detect.Quiet/Active, Polling.Active/Config, Configuration 하위 상태, L0, Recovery, 타임아웃)를 작성해 TS1/TS2 교환을 모델링하고, 레인 고장 시 x4→x2 폭 협상·Gen 속도 변경 시 Recovery.Speed 경로를 로그로 재현한다.",
+      "tags": [
+        "ltssm",
+        "link-training",
+        "recovery",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M08",
+      "level": "M",
+      "title": "링크 장애 진단: 속도·폭 저하와 Recovery 루프",
+      "goal": "'링크가 L0에 안 올라간다/Gen1로 떨어진다' 류 질문에 체계적으로 답한다.",
+      "task": "LnkCap vs LnkSta 비교, LTSSM 상태 레지스터·AER 카운터를 읽어 다운트레이닝/recovery 루프를 판정하는 진단 스크립트를 작성하고, 원인 후보(신호 무결성, equalization, refclk, PERST# 타이밍)별 디버그 플레이북과 2분 답변 스크립트를 만든다.",
+      "tags": [
+        "link-debug",
+        "downtraining",
+        "equalization",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M09",
+      "level": "M",
+      "title": "ASPM과 L-states: L0s/L1/L1.1/L1.2, D-states",
+      "goal": "링크 전력 상태와 디바이스 전력 상태의 관계 및 latency 기반 enable 판단을 이해한다.",
+      "task": "링크/디바이스 전력 상태 전이 모델을 만들고 경로상 모든 링크의 L1 exit latency 합과 엔드포인트 허용 latency(DevCap)를 비교해 ASPM 활성화 여부를 결정하는 함수를 구현, LTR·L1SS 설정 예제로 검증한다.",
+      "tags": [
+        "aspm",
+        "l1ss",
+        "power",
+        "ltr"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M10",
+      "level": "M",
+      "title": "인터럽트: INTx vs MSI vs MSI-X",
+      "goal": "MSI-X 테이블/PBA 구조와 벡터 마스킹, 큐별 인터럽트 매핑을 구현한다.",
+      "task": "mock BAR에 MSI-X 테이블(주소/데이터/마스크)과 PBA를 구현하고, 마스크된 벡터의 pending 처리·unmask 시 전달, NVMe CQ→벡터 매핑(CPU 친화)까지 시뮬레이션해 INTx 공유 라인 대비 장점을 측정한다.",
+      "tags": [
+        "msi",
+        "msi-x",
+        "interrupts"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M11",
+      "level": "M",
+      "title": "Data Link Layer: 크레딧 흐름 제어와 ACK/NAK Replay",
+      "goal": "Flow Control 크레딧과 replay buffer가 신뢰성 있는 전송을 보장하는 방식을 안다.",
+      "task": "송신/수신 DLL 시뮬레이터를 작성해 크레딧 유형(PH/PD/NPH/NPD/CplH/CplD) 소모·UpdateFC 반환, Sequence#·LCRC, NAK 시 replay와 REPLAY_NUM rollover→Recovery 진입을 비트 오류 주입으로 검증한다.",
+      "tags": [
+        "flow-control",
+        "ack-nak",
+        "replay",
+        "dll"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M12",
+      "level": "M",
+      "title": "AER 에러 처리: Correctable, Non-fatal, Fatal",
+      "goal": "AER 레지스터를 해석하고 에러 등급별 복구 경로를 설계한다.",
+      "task": "AER capability(Uncorrectable/Correctable Status, Mask, Severity, Header Log, Root Error Status) 디코더를 작성해 샘플 에러 로그(Completion Timeout, Malformed TLP, Bad DLLP)를 해석하고 등급별 처리 정책(카운트, 링크 리셋, 드라이버 recovery 콜백)을 구현한다.",
+      "tags": [
+        "aer",
+        "error-handling",
+        "ras"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-M13",
+      "level": "M",
+      "title": "Linux PCI 드라이버: probe, BAR iomap, MSI, DMA",
+      "goal": "리눅스 pci_driver의 표준 초기화 순서를 실제 장치에 적용한다.",
+      "task": "QEMU edu 장치용 pci_driver를 작성(pci_enable_device, pci_request_regions, pci_iomap, dma_set_mask, pci_alloc_irq_vectors MSI)하여 factorial 계산 레지스터와 DMA 전송·완료 인터럽트를 검증하고, remove에서 역순 해제를 확인한다.",
+      "tags": [
+        "linux-pci",
+        "pci-driver",
+        "edu-device",
+        "see:ELX"
+      ],
+      "env": "qemu",
+      "env_note": "QEMU(x86_64 q35 또는 aarch64 virt) 게스트 + 크로스/네이티브 커널 모듈 빌드 (Lima VM 안에서 QEMU 실행 가능)"
+    },
+    {
+      "id": "PCIE-M14",
+      "level": "M",
+      "title": "Linux NVMe 툴링: nvme-cli와 sysfs",
+      "goal": "실제 리눅스에서 NVMe 장치를 조사·제어하는 도구를 능숙하게 쓴다.",
+      "task": "QEMU 에뮬 NVMe(-device nvme, 다중 namespace)로 nvme list/id-ctrl/id-ns/smart-log/get-feature/admin-passthru를 실행하고 /sys/class/nvme, 큐 개수(/sys/block/*/mq)를 확인해 앞서 만든 파서 결과와 대조한다.",
+      "tags": [
+        "nvme-cli",
+        "linux",
+        "sysfs"
+      ],
+      "env": "qemu",
+      "env_note": "QEMU(x86_64 q35 또는 aarch64 virt) 게스트 + 크로스/네이티브 커널 모듈 빌드 (Lima VM 안에서 QEMU 실행 가능)"
+    },
+    {
+      "id": "PCIE-M15",
+      "level": "M",
+      "title": "DMA와 IOMMU: IOVA 변환과 장치 격리",
+      "goal": "IOMMU가 DMA 주소를 변환·보호하는 방식과 ATS/PRI 개념을 이해한다.",
+      "task": "IOVA→PA 다단계 IOMMU 페이지 테이블과 IOTLB를 모델링하고, 장치별 도메인 격리·권한 위반 시 fault 레코드 생성·IOTLB invalidation 누락 버그를 시뮬레이션한다; swiotlb bounce buffer와 비교 정리한다.",
+      "tags": [
+        "iommu",
+        "dma",
+        "iova",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-A01",
+      "level": "A",
+      "title": "사용자공간 NVMe 드라이버: VFIO로 BAR 매핑 (SPDK 스타일)",
+      "goal": "커널 드라이버 없이 컨트롤러를 직접 초기화하고 I/O를 수행해 본다.",
+      "task": "QEMU NVMe를 vfio-pci에 바인딩하고 사용자공간에서 BAR0 mmap, DMA 메모리 매핑(VFIO_IOMMU_MAP_DMA), admin 큐 생성, Identify, I/O 큐 생성, Read 1블록까지 수행하는 최소 드라이버를 작성한다.",
+      "tags": [
+        "vfio",
+        "userspace-driver",
+        "spdk",
+        "nvme"
+      ],
+      "env": "qemu",
+      "env_note": "QEMU q35 + intel-iommu(또는 aarch64 virt + virtio-iommu)로 vIOMMU 구성 필요"
+    },
+    {
+      "id": "PCIE-A02",
+      "level": "A",
+      "title": "NVMe 성능 모델: QD, IOPS, Little's Law",
+      "goal": "QD·큐 수·인터럽트 coalescing이 IOPS/지연에 주는 영향을 정량화한다.",
+      "task": "서비스 시간 분포를 가진 다중 큐 SSD 시뮬레이터로 QD 1–256 IOPS/평균·p99 지연 곡선을 그리고 Little's Law로 검증, 인터럽트 coalescing(시간/개수 임계)과 polling 모드의 CPU 비용 trade-off를 분석한다.",
+      "tags": [
+        "performance",
+        "queue-depth",
+        "littles-law"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-A03",
+      "level": "A",
+      "title": "NVMe 에러·복구: 타임아웃, Abort, Controller Reset",
+      "goal": "명령 hang 시 드라이버의 단계적 복구 절차를 구현한다.",
+      "task": "mock 컨트롤러에 명령 무응답·CSTS.CFS 주입을 추가하고 호스트에 타임아웃 감시→Abort 명령→실패 시 controller reset→큐 재생성→in-flight 명령 재제출/실패 보고 경로를 구현해 데이터 손상 없이 복구되는지 검증한다.",
+      "tags": [
+        "nvme",
+        "error-recovery",
+        "timeout",
+        "reset"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-A04",
+      "level": "A",
+      "title": "End-to-End Protection(PI)과 데이터 무결성 명령",
+      "goal": "T10-DIF Type 1 보호 정보와 Flush/FUA/DSM(TRIM)의 의미를 구현으로 이해한다.",
+      "task": "PI Type 1(Guard CRC-16 T10-DIF, App Tag, Ref Tag=LBA 하위 32비트) 생성/검증을 구현해 mock 컨트롤러의 쓰기·읽기 경로에 넣고 비트플립·잘못된 LBA 주입 시 검출되는지 테스트하며, FUA/Flush/DSM Deallocate 처리도 추가한다.",
+      "tags": [
+        "nvme",
+        "pi",
+        "t10-dif",
+        "crc16",
+        "trim"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-A05",
+      "level": "A",
+      "title": "SSD 펌웨어 관점: Firmware Download/Commit, SMART 로그",
+      "goal": "호스트가 보는 NVMe 펌웨어 업데이트·헬스 인터페이스를 디바이스 측에서 구현한다.",
+      "task": "mock 컨트롤러에 Firmware Image Download(오프셋 청크)·Firmware Commit(CA 0–3, 슬롯)과 SMART/Health 로그(Critical Warning, 온도, Percentage Used, Media Errors)를 구현하고 nvme-cli 형식 출력과 비교한다.",
+      "tags": [
+        "nvme",
+        "fw-update",
+        "smart-log",
+        "ssd-firmware"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-A06",
+      "level": "A",
+      "title": "SR-IOV: PF/VF, VF RID 계산, ARI",
+      "goal": "가상화 환경에서 하나의 장치가 여러 기능으로 보이는 원리를 안다.",
+      "task": "SR-IOV extended capability(TotalVFs, NumVFs, First VF Offset, VF Stride, VF BAR) 디코더와 VF Routing ID 계산기(ARI 유무 비교)를 작성하고, NumVFs 변경 시 VF BAR 영역 배치를 시뮬레이션한다.",
+      "tags": [
+        "sr-iov",
+        "virtualization",
+        "ari"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-A07",
+      "level": "A",
+      "title": "Hot-plug, Surprise Removal, DPC",
+      "goal": "장치가 런타임에 사라지거나 추가될 때 열거·드라이버가 해야 할 일을 구현한다.",
+      "task": "열거 시뮬레이터에 슬롯 hot-add/remove 이벤트를 추가해 버스/리소스 재할당을 처리하고, 드라이버 측 surprise removal(MMIO 읽기 0xFFFFFFFF 감지→I/O 실패 처리)과 DPC(Downstream Port Containment) 트리거 시 흐름을 시나리오 테스트한다.",
+      "tags": [
+        "hotplug",
+        "surprise-removal",
+        "dpc"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-A08",
+      "level": "A",
+      "title": "리소스 할당기: 브리지 윈도우 정렬과 P2P/ACS",
+      "goal": "BAR와 브리지 윈도우에 주소 공간을 정렬 조건에 맞게 배분하는 알고리즘을 구현한다.",
+      "task": "토폴로지 bottom-up으로 각 브리지 윈도우 크기(1MB 정렬, prefetchable 분리)를 합산하고 top-down으로 주소를 할당하는 리소스 할당기를 구현, 실패 케이스(공간 부족)와 P2P DMA 경로에서 ACS 설정이 주는 영향을 정리한다.",
+      "tags": [
+        "resource-allocation",
+        "bar",
+        "p2p",
+        "acs"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-A09",
+      "level": "A",
+      "title": "NVMe-oF 기초: NVMe/TCP PDU와 mini target",
+      "goal": "NVMe 명령이 패브릭(TCP/RDMA) 위로 캡슐화되는 방식을 구현으로 이해한다.",
+      "task": "NVMe/TCP PDU(ICReq/ICResp, CapsuleCmd/CapsuleResp, H2CData/C2HData) 인코더/디코더를 작성하고 소켓 기반 mini target(RAM 백엔드)과 host로 Connect→Identify→Read/Write를 수행, RDMA 전송과의 차이를 정리한다.",
+      "tags": [
+        "nvme-of",
+        "nvme-tcp",
+        "fabrics"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "PCIE-A10",
+      "level": "A",
+      "title": "CXL 입문: CXL.io/.cache/.mem과 HDM 디코더",
+      "goal": "CXL 디바이스 유형(Type 1/2/3)과 메모리 확장 주소 디코드를 이해한다.",
+      "task": "CXL DVSEC 레지스터 디코더와 Type 3 메모리 확장기의 HDM decoder(base, size, interleave ways/granularity) 기반 HPA→DPA 주소 변환 계산기를 작성하고, 2/4-way 인터리빙 예제로 검증한다.",
+      "tags": [
+        "cxl",
+        "hdm-decoder",
+        "memory-expansion",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

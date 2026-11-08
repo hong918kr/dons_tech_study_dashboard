@@ -1,0 +1,429 @@
+{
+  "id": "AUTON",
+  "intro": "자율 시스템은 인지(perception) → 위치추정(localization) → 계획(planning) → 제어로 이어지는 스택과, 그 위를 감시하는 안전 모니터·시뮬레이션 검증으로 이루어진다. 저수준 제어(RCTL)와 미들웨어(ROS)는 다른 트랙에서 다루고, 여기서는 Scout AI·Anduril·Shield AI·Zoox 면접에서 자주 나오는 로컬라이제이션, 맵핑, 경로 계획, 행동 결정, 충돌 예측, 안전 아키텍처를 직접 구현한다.",
+  "goals": [
+    "자율 스택의 모듈 경계, 주기, 지연 예산을 설계하고 좌표 변환을 정확히 다룰 수 있다",
+    "오도메트리·EKF·파티클 필터·ICP로 위치를 추정하고 occupancy grid와 SLAM 개념을 구현할 수 있다",
+    "A*/Hybrid A*/RRT*/DWA/Frenet 계획기를 구현하고 비교할 수 있다",
+    "Behavior Tree·HSM으로 미션 로직을 짜고, 다중 객체 추적과 센서 퓨전·시간 동기를 처리할 수 있다",
+    "안전 모니터, 런타임 검증, 성능 저하 모드, 시뮬레이션 기반 시나리오 테스트를 설계할 수 있다"
+  ],
+  "prereq": [
+    "ALGO",
+    "SIM",
+    "RCTL",
+    "SENS"
+  ],
+  "refs": [
+    {
+      "title": "Thrun, Burgard, Fox — Probabilistic Robotics"
+    },
+    {
+      "title": "LaValle — Planning Algorithms",
+      "url": "http://lavalle.pl/planning/"
+    },
+    {
+      "title": "PythonRobotics (reference implementations)",
+      "url": "https://github.com/AtsushiSakai/PythonRobotics"
+    },
+    {
+      "title": "Colledanchise & Ögren — Behavior Trees in Robotics and AI"
+    },
+    {
+      "title": "Dolgov et al. — Path Planning for Autonomous Vehicles in Unknown Semi-structured Environments (Hybrid A*)"
+    },
+    {
+      "title": "Werling et al. — Optimal Trajectory Generation for Dynamic Street Scenarios in a Frenet Frame (ICRA 2010)"
+    },
+    {
+      "title": "UL 4600 Standard for Safety for the Evaluation of Autonomous Products"
+    }
+  ],
+  "items": [
+    {
+      "id": "AUTON-B01",
+      "level": "B",
+      "title": "자율 스택 구조와 지연 예산",
+      "goal": "perception→localization→planning→control 파이프라인의 주기·지연·데이터 흐름을 설계한다",
+      "task": "각 단계가 타임스탬프를 붙여 메시지를 넘기는 4단계 파이프라인 골격을 C++로 작성하고(스레드 + bounded 큐), 센서 획득부터 액추에이터 명령까지 end-to-end 지연 분포를 측정해 단계별 지연 예산 표와 비교한다.",
+      "tags": [
+        "architecture",
+        "latency-budget",
+        "pipeline"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-B02",
+      "level": "B",
+      "title": "좌표 변환: SE(2)/SE(3)와 센서 외부 파라미터",
+      "goal": "센서→차체→오도메트리→맵 프레임 변환 체인을 정확히 합성·역변환할 수 있다",
+      "task": "SE(2)/SE(3) 변환 클래스(합성, 역변환, 점 변환, 보간)를 구현하고, 외부 파라미터로 라이다 포인트를 맵 프레임으로 옮기는 테스트와 변환 순서를 뒤집었을 때 생기는 오류를 단위 테스트로 보인다.",
+      "tags": [
+        "transforms",
+        "se3",
+        "extrinsics"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-B03",
+      "level": "B",
+      "title": "휠 오도메트리와 오차 누적",
+      "goal": "차동 구동 오도메트리 적분과 노이즈에 의한 불확실성 성장을 체감한다",
+      "task": "엔코더 틱으로 차동 구동 로봇 자세를 적분하는 오도메트리를 작성하고, 바퀴 반경·트레드 오차와 슬립 노이즈를 넣은 몬테카를로 시뮬레이션으로 자세 오차 타원이 커지는 모습을 시각화한다.",
+      "tags": [
+        "odometry",
+        "dead-reckoning",
+        "uncertainty"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-B04",
+      "level": "B",
+      "title": "라이다 포인트 클라우드 전처리",
+      "goal": "voxel 다운샘플링, 지면 제거, 유클리드 클러스터링으로 장애물 후보를 뽑는다",
+      "task": "합성(또는 공개 KITTI 일부) 라이다 스캔에 voxel grid 다운샘플링, RANSAC 평면 지면 제거, KD-tree 기반 유클리드 클러스터링을 C++로 구현하고 클러스터별 3D 바운딩 박스와 처리 시간을 출력한다.",
+      "tags": [
+        "lidar",
+        "point-cloud",
+        "clustering",
+        "perception"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-B05",
+      "level": "B",
+      "title": "Occupancy Grid 매핑: log-odds + 레이 캐스팅",
+      "goal": "확률적 점유 격자 갱신과 Bresenham 레이 캐스팅으로 지도를 만든다",
+      "task": "알려진 자세에서 얻은 2D 라이다 스캔으로 log-odds occupancy grid를 갱신(빈 셀/점유 셀, 클램핑)하는 매퍼를 구현하고, 시뮬레이션 환경 지도를 재구성해 정답 지도와 셀 정확도를 비교한다.",
+      "tags": [
+        "occupancy-grid",
+        "mapping",
+        "bresenham"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-B06",
+      "level": "B",
+      "title": "코스트맵 계층: 정적·인플레이션·장애물 레이어",
+      "goal": "플래너가 쓰는 코스트맵을 레이어로 조합하는 구조를 익힌다",
+      "task": "B05 occupancy grid 위에 정적 지도·로봇 반경 인플레이션(지수 감쇠 비용)·실시간 장애물 레이어를 합성하는 코스트맵을 구현하고, ALGO-A01 A*가 레이어 변경에 따라 경로를 바꾸는지 테스트한다(A* 자체는 see:ALGO-A01).",
+      "tags": [
+        "costmap",
+        "planning",
+        "see:ALGO"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-B07",
+      "level": "B",
+      "title": "Behavior Tree 엔진 구현",
+      "goal": "Sequence/Fallback/Decorator 노드와 RUNNING 상태 tick 의미론을 정확히 구현한다",
+      "task": "C++로 작은 BT 엔진(Sequence, Fallback, Inverter, Retry, Timeout, Action/Condition 리프, blackboard)을 작성하고, '배터리 낮으면 귀환, 아니면 순찰' 트리를 tick 로그와 단위 테스트로 검증한다.",
+      "tags": [
+        "behavior-tree",
+        "decision-making"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-B08",
+      "level": "B",
+      "title": "계층적 상태 머신(HSM) 미션 관리",
+      "goal": "HSM과 BT의 장단점을 비교하고 미션 관리에 HSM을 적용한다",
+      "task": "Idle/Mission(Navigate, Inspect)/Recovery/Emergency를 가진 HSM(진입/퇴장 액션, 상위 상태 이벤트 위임)을 구현해 B07 BT와 같은 미션을 재작성하고, 기능 추가 시 변경량·가독성 트레이드오프를 정리한다.",
+      "tags": [
+        "state-machine",
+        "hsm",
+        "mission"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-B09",
+      "level": "B",
+      "title": "End-to-end 지연 추적: 센서→결정 타임스탬프 체인",
+      "goal": "파이프라인 단계별 지연을 측정해 B01 지연 예산을 검증한다",
+      "task": "센서 메시지에 원본 타임스탬프를 붙여 단계별(전처리→추적→계획) 처리 시각을 기록하는 추적 라이브러리를 만들고, 합성 파이프라인에서 단계별 지연 분포와 예산 초과율을 리포트한다(센서 시간 정렬은 see:SENS-M08).",
+      "tags": [
+        "latency",
+        "tracing",
+        "see:SENS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-M01",
+      "level": "M",
+      "title": "EKF 로컬라이제이션: 오도메트리 + 랜드마크",
+      "goal": "비선형 운동/측정 모델을 선형화하는 EKF로 위치를 추정한다",
+      "task": "차동 구동 운동 모델과 알려진 랜드마크 range-bearing 측정 모델로 EKF를 구현하고, 야코비안 수치 검증, 각도 정규화 처리, NEES 일관성 검사로 필터가 과신하지 않는지 확인한다.",
+      "tags": [
+        "ekf",
+        "localization",
+        "kalman"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-M02",
+      "level": "M",
+      "title": "파티클 필터 로컬라이제이션 (MCL)",
+      "goal": "멀티모달 분포를 다루는 Monte Carlo Localization과 리샘플링을 구현한다",
+      "task": "occupancy grid 위에서 likelihood field 측정 모델과 low-variance 리샘플링을 쓰는 MCL을 구현하고, 전역 위치추정(kidnapped robot 포함)에서 파티클 수에 따른 수렴 성공률과 계산 시간을 측정한다.",
+      "tags": [
+        "particle-filter",
+        "mcl",
+        "localization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-M03",
+      "level": "M",
+      "title": "스캔 매칭: 2D ICP",
+      "goal": "점 대응 + SVD 정합을 반복하는 ICP로 두 스캔 사이 상대 자세를 구한다",
+      "task": "KD-tree 최근접 대응, 이상치 거부, SVD 기반 rigid 정합을 반복하는 point-to-point ICP를 구현하고, 초기 자세 오차 크기별 수렴 영역과 point-to-line 변형의 수렴 속도 차이를 실험한다.",
+      "tags": [
+        "icp",
+        "scan-matching",
+        "registration"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-M04",
+      "level": "M",
+      "title": "다중 객체 추적: 데이터 연관 + 트랙 관리",
+      "goal": "검출을 트랙에 연관(헝가리안/GNN)하고 트랙 생성·확인·삭제 로직을 구현한다",
+      "task": "B04 클러스터 중심을 입력으로 등속 칼만 트랙, Mahalanobis 게이팅, 헝가리안 알고리즘 연관, M-of-N 트랙 확정/삭제를 구현하고, 교차 이동 시나리오에서 ID switch 수와 MOTA를 측정한다.",
+      "tags": [
+        "tracking",
+        "mot",
+        "hungarian",
+        "kalman"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-M05",
+      "level": "M",
+      "title": "라이다-카메라 융합: 투영과 연관",
+      "goal": "내부/외부 파라미터로 3D 점을 영상에 투영하고 2D 검출과 3D 클러스터를 연결한다",
+      "task": "핀홀 + 왜곡 모델로 라이다 점을 카메라 영상에 투영하는 함수를 구현하고, 2D 바운딩 박스 안에 들어온 3D 점으로 객체 거리를 추정하는 late fusion을 작성해 외부 파라미터 오차가 연관 정확도에 주는 영향을 측정한다.",
+      "tags": [
+        "sensor-fusion",
+        "lidar",
+        "camera",
+        "projection"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-M06",
+      "level": "M",
+      "title": "Hybrid A*: 차량 운동학 제약 계획",
+      "goal": "연속 상태 + 비홀로노믹 제약을 고려하는 Hybrid A*와 해석적 확장(Dubins/Reeds-Shepp)을 구현한다",
+      "task": "(x, y, θ) 이산 셀에 연속 상태를 저장하는 Hybrid A*와 최소 회전반경 기반 전·후진 동작, 목표 근처 Dubins 해석 확장을 구현하고, 주차 시나리오에서 그리드 A* 대비 실행 가능 경로를 보여준다.",
+      "tags": [
+        "hybrid-a-star",
+        "nonholonomic",
+        "path-planning"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-M07",
+      "level": "M",
+      "title": "RRT / RRT* 샘플링 기반 계획",
+      "goal": "고차원·연속 공간에서 쓰이는 샘플링 기반 계획과 점근적 최적성(RRT*)을 이해한다",
+      "task": "2D 다각형 장애물 환경에서 RRT와 RRT*(near 반경, rewire)를 구현하고, 반복 수에 따른 경로 비용 수렴과 실행 시간을 비교하며 goal bias·충돌 체크 해상도 영향을 실험한다.",
+      "tags": [
+        "rrt",
+        "rrt-star",
+        "sampling-planning"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-M08",
+      "level": "M",
+      "title": "로컬 플래너: Dynamic Window Approach",
+      "goal": "속도·가속 한계 안에서 궤적을 샘플링하고 비용 함수로 고르는 로컬 계획을 구현한다",
+      "task": "(v, ω) 동적 윈도우 샘플링, 궤적 전방 시뮬레이션, 목표 방향·장애물 거리·속도 비용 가중합으로 명령을 고르는 DWA를 구현하고, 전역 A* 경로를 따라가며 갑자기 나타난 장애물을 회피하는 시나리오로 검증한다.",
+      "tags": [
+        "dwa",
+        "local-planner",
+        "obstacle-avoidance"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-M09",
+      "level": "M",
+      "title": "동적 장애물 예측과 충돌 시간(TTC)",
+      "goal": "움직이는 물체의 궤적 예측과 두 궤적 간 최초 충돌 시각 계산을 정확하고 빠르게 구현한다",
+      "task": "등속·등각속도(원운동) 예측 모델을 구현하고, 두 원형 물체의 상대 운동에서 최초 충돌 시각을 해석적(2차 방정식)·수치적(근 찾기)으로 구하는 함수를 작성해 엣지 케이스(평행, 접선, 이미 겹침) 테스트를 통과시킨다.",
+      "tags": [
+        "prediction",
+        "ttc",
+        "collision-checking",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-M10",
+      "level": "M",
+      "title": "안전 모니터: Doer/Checker 아키텍처",
+      "goal": "복잡한 계획기와 독립된 단순 감시자가 명령을 검증·차단하는 구조를 구현한다",
+      "task": "계획기 출력을 받아 속도/가속 한계, 지오펜스, 최소 장애물 거리(TTC 기반), 입력 하트비트·데이터 신선도를 검사해 통과/제한/비상정지 명령으로 바꾸는 safety monitor를 구현하고, 버그 있는 플래너를 주입해 차단되는지 검증한다.",
+      "tags": [
+        "safety-monitor",
+        "doer-checker",
+        "safety"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-A01",
+      "level": "A",
+      "title": "포즈 그래프 SLAM: Gauss-Newton 최적화",
+      "goal": "오도메트리·루프 클로저 제약을 가진 포즈 그래프를 비선형 최소제곱으로 최적화한다",
+      "task": "2D 포즈 그래프(노드=자세, 엣지=상대 자세 + 정보 행렬) 최적화기를 Gauss-Newton + 희소 선형 풀이(Eigen)로 구현하고, 루프 클로저 추가 전후 궤적 오차와 잘못된 루프 클로저에 대한 robust kernel(Huber) 효과를 보인다.",
+      "tags": [
+        "slam",
+        "pose-graph",
+        "optimization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-A02",
+      "level": "A",
+      "title": "OOSM 처리: 지연 측정 버퍼-리플레이 융합",
+      "goal": "늦게 도착한(out-of-sequence) 측정을 올바르게 반영하는 융합 구조를 구현한다",
+      "task": "상태·공분산 히스토리 버퍼를 둔 EKF에서 지연된 측정이 오면 해당 시점으로 되돌아가 갱신 후 재전파하는 buffer-and-replay를 구현하고, 단순 무시/즉시 적용 방식과 추정 오차·계산량을 비교한다.",
+      "tags": [
+        "sensor-fusion",
+        "oosm",
+        "ekf",
+        "latency"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-A03",
+      "level": "A",
+      "title": "Frenet 좌표계 궤적 계획",
+      "goal": "기준 경로 기준 종/횡 다항식 궤적 샘플링과 비용 기반 선택으로 차선 변경·회피 궤적을 만든다",
+      "task": "기준선의 Frenet 변환을 구현하고 횡방향 5차·종방향 4차 다항식 궤적 집합을 생성해 저크·편차·속도 비용과 곡률·가속 제약, M09 충돌 검사로 최적 궤적을 고르는 계획기를 작성한다.",
+      "tags": [
+        "frenet",
+        "trajectory-planning",
+        "lattice"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-A04",
+      "level": "A",
+      "title": "런타임 검증: 시간 논리 모니터",
+      "goal": "STL/LTL 성질(예: '장애물 감지 후 0.5초 내 감속')을 온라인으로 검사하는 모니터를 구현한다",
+      "task": "bounded-response, always/eventually-within 연산자를 지원하는 스트리밍 모니터를 작성해 시뮬레이션 로그 위에서 위반 시점과 robustness 값을 출력하고, M10 safety monitor 규칙과 런타임 검증 규칙의 역할 차이를 정리한다.",
+      "tags": [
+        "runtime-verification",
+        "stl",
+        "monitoring"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-A05",
+      "level": "A",
+      "title": "시뮬레이션 시나리오 테스트 하네스",
+      "goal": "파라미터 스윕·무작위 시나리오로 자율 스택을 CI에서 회귀 테스트하는 체계를 만든다",
+      "task": "헤드리스 2D 시뮬레이터(로봇 + 동적 장애물)에 플래너·안전 모니터를 연결하고, 시나리오 파라미터(속도, 진입 각, 센서 노이즈)를 스윕/무작위 생성해 충돌·최소거리·목표 도달 지표를 집계하고 실패 시나리오를 재현 가능한 시드로 저장하는 하네스를 작성한다.",
+      "tags": [
+        "simulation",
+        "scenario-testing",
+        "ci",
+        "see:SIM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-A06",
+      "level": "A",
+      "title": "성능 저하 모드와 최소 위험 상태(MRC)",
+      "goal": "센서·연산 고장 시 능력을 단계적으로 줄이고 최소 위험 기동으로 가는 degradation manager를 설계한다",
+      "task": "센서별 health(신선도·일관성)와 ODD 조건을 입력으로 능력 레벨(Full/Reduced speed/Stop-in-lane/Pull-over)을 결정하는 degradation manager를 구현하고, 고장 조합 테이블 기반 테스트로 항상 안전한 방향으로만 전이하는지 검증한다.",
+      "tags": [
+        "degradation",
+        "mrc",
+        "odd",
+        "safety"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-A07",
+      "level": "A",
+      "title": "엣지 퍼셉션 파이프라인 실시간성 설계",
+      "goal": "가속기 오프로딩, 프레임 드롭 정책, 우선순위로 퍼셉션 지연 상한을 보장하는 방법을 설계한다",
+      "task": "카메라 프레임 → 전처리 → (가짜) 추론 → 추적 파이프라인을 bounded 큐 + drop-oldest 정책으로 구현하고, 추론 시간이 변동할 때 지연 백분위(p50/p99)와 처리량을 측정해 큐 깊이·드롭 정책·스레드 우선순위 선택 근거를 정리한다.",
+      "tags": [
+        "real-time",
+        "perception",
+        "pipeline",
+        "see:AIPERF"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AUTON-A08",
+      "level": "A",
+      "title": "다중 로봇 협조: 작업 할당과 충돌 회피",
+      "goal": "경매 기반 작업 할당과 우선순위 기반 다중 경로 계획으로 군집 로봇을 조율한다",
+      "task": "N대 로봇과 M개 목표에 대해 sequential single-item auction 작업 할당을 구현하고, 시공간 예약 테이블을 쓰는 우선순위 기반 다중 경로 계획(cooperative A*)으로 충돌 없이 실행됨을 시뮬레이션으로 검증하며, 통신 두절 시 처리 방식을 논의한다.",
+      "tags": [
+        "multi-robot",
+        "task-allocation",
+        "swarm"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

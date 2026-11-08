@@ -1,0 +1,496 @@
+{
+  "id": "AIPERF",
+  "intro": "AI 가속기 회사의 엔지니어는 'TOPS가 높으면 빠른가?'라는 질문에 숫자로 답할 수 있어야 한다. 이 트랙은 TOPS·TOPS/W·지연·처리량·TTFT·tokens/s 같은 지표의 정확한 정의부터 roofline·산술 강도·KV cache 크기·트랜스포머 FLOP 계산, MLPerf 방법론, 전력 측정까지를 직접 계산하고 맥에서 실측하며 익힌다. NPU 아키텍처·성능 엔지니어 면접에서는 '이 레이어는 이 칩에서 memory-bound인가?', '7B 모델 decode tokens/s 상한은?' 같은 봉투 뒷면 계산이 거의 항상 나온다.",
+  "goals": [
+    "TOPS, TOPS/W, 지연 백분위, 처리량, TTFT/TPOT, MFU/MBU 등 AI 성능 지표를 정확히 정의하고 계산할 수 있다",
+    "연산자·모델의 FLOP과 바이트를 세고 roofline으로 memory-bound/compute-bound를 판정할 수 있다",
+    "배치 크기, KV cache, 양자화, 시퀀스 길이가 LLM·CNN 성능에 미치는 영향을 정량 모델로 예측하고 실측과 대조할 수 있다",
+    "MLPerf Inference/Tiny 방법론과 통계적으로 신뢰할 수 있는 벤치마크·전력 측정 방법을 적용할 수 있다",
+    "가속기 스펙 시트를 비판적으로 읽고 실제 워크로드 성능을 추정·비교하는 보고서를 작성할 수 있다"
+  ],
+  "prereq": [
+    "ARCH",
+    "EML",
+    "GPGPU"
+  ],
+  "refs": [
+    {
+      "title": "Williams, Waterman, Patterson — Roofline: An Insightful Visual Performance Model (CACM 2009)"
+    },
+    {
+      "title": "MLCommons MLPerf Inference — GitHub",
+      "url": "https://github.com/mlcommons/inference"
+    },
+    {
+      "title": "MLCommons MLPerf Tiny — GitHub",
+      "url": "https://github.com/mlcommons/tiny"
+    },
+    {
+      "title": "STREAM memory bandwidth benchmark",
+      "url": "https://www.cs.virginia.edu/stream/"
+    },
+    {
+      "title": "How to Scale Your Model (JAX/Google scaling book)",
+      "url": "https://jax-ml.github.io/scaling-book/"
+    },
+    {
+      "title": "kipply — Transformer Inference Arithmetic",
+      "url": "https://kipp.ly/transformer-inference-arithmetic/"
+    },
+    {
+      "title": "Dao et al. — FlashAttention (arXiv 2205.14135)",
+      "url": "https://arxiv.org/abs/2205.14135"
+    },
+    {
+      "title": "Horowitz — Computing's Energy Problem (and what we can do about it), ISSCC 2014"
+    },
+    {
+      "title": "Sze, Chen, Yang, Emer — Efficient Processing of Deep Neural Networks (Morgan & Claypool, 2020)"
+    }
+  ],
+  "items": [
+    {
+      "id": "AIPERF-B01",
+      "level": "B",
+      "title": "지표 정의: FLOPs vs FLOPS, OPS, TOPS",
+      "goal": "MAC=2 ops 규칙, 정밀도별 피크, 희소성 배수 등 마케팅 숫자가 만들어지는 방식을 정확히 이해한다",
+      "task": "MAC 유닛 수·클럭·정밀도별 처리율·희소성 배수를 입력받아 피크 TOPS/TFLOPS를 계산하는 Python 도구를 작성하고, 공개 칩 3종(예: 모바일 NPU, Jetson, 데이터센터 GPU)의 발표 수치를 재현하며 'dense int8' 기준으로 정규화한 비교표를 만든다.",
+      "tags": [
+        "metrics",
+        "tops",
+        "flops",
+        "spec-sheet"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-B02",
+      "level": "B",
+      "title": "지연 vs 처리량과 백분위 지연",
+      "goal": "평균이 아니라 분포(p50/p99)로 지연을 보고하고, 처리량과 지연의 관계(Little's law)를 이해한다",
+      "task": "C로 작성한 행렬곱 추론 루프를 N회 실행해 지연 히스토그램, p50/p90/p99/max를 계산하고, 요청 도착률을 높여 가는 큐 시뮬레이션으로 처리량-지연 곡선(포화 시 지연 급증)을 그려 Little's law(L=λW)를 검증한다.",
+      "tags": [
+        "latency",
+        "throughput",
+        "percentile",
+        "queueing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-B03",
+      "level": "B",
+      "title": "연산자 FLOP·바이트 계산기",
+      "goal": "GEMM, conv, depthwise, pooling, attention의 연산량과 메모리 이동량을 공식으로 세는 능력을 기른다",
+      "task": "연산자 종류·shape·dtype을 받아 FLOP, 가중치/입력/출력 바이트, 산술 강도를 계산하는 Python 모듈을 작성하고, ResNet-50(약 4.1 GMAC)과 MobileNetV2(약 300 MMAC) 전체 합계를 공개 수치와 비교 검증한다.",
+      "tags": [
+        "flop-counting",
+        "arithmetic-intensity",
+        "model-analysis"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-B04",
+      "level": "B",
+      "title": "Roofline 대역폭 천장 정하기: STREAM 결과 해석",
+      "goal": "측정한 지속 대역폭을 roofline 천장과 LLM 토큰 속도 상한으로 바꾸는 법을 익힌다",
+      "task": "MEM-B11의 STREAM 측정(스레드 수·P/E 코어별)에서 roofline에 쓸 지속 대역폭 천장을 정하고, 이 값과 모델 크기·양자화 비트로 배치 1 디코딩의 tokens/s 상한을 계산해 llama.cpp 실측과 비교한다.",
+      "tags": [
+        "bandwidth",
+        "roofline",
+        "llm",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-B05",
+      "level": "B",
+      "title": "피크 연산 처리량 마이크로벤치마크",
+      "goal": "FMA 지연·처리율과 ILP로 CPU 코어의 실제 피크 FLOPS에 도달하는 방법을 이해한다",
+      "task": "독립 누산기 개수를 1~16으로 바꾸는 NEON FMA 루프로 단일 코어 GFLOPS를 측정해 FMA 지연×처리율로 필요한 누산기 수를 설명하고, 전체 코어(P/E 코어 구분) 피크와 이론치를 비교한다.",
+      "tags": [
+        "peak-flops",
+        "fma",
+        "ilp",
+        "microbenchmark"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-B06",
+      "level": "B",
+      "title": "Roofline 모델 구축과 커널 배치",
+      "goal": "피크 연산과 대역폭으로 roofline을 그리고 커널의 위치로 병목을 판정한다",
+      "task": "B04·B05 측정치로 M2 CPU roofline을 그리고, 벡터 덧셈·GEMV·블록 GEMM·conv 커널의 산술 강도와 실측 GFLOPS를 점으로 찍어 각 커널이 어느 천장에 막혔는지와 ridge point 의미를 설명하는 리포트를 생성한다.",
+      "tags": [
+        "roofline",
+        "bottleneck-analysis",
+        "visualization",
+        "see:GPGPU"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-B07",
+      "level": "B",
+      "title": "에너지 지표: TOPS/W와 데이터 이동 비용",
+      "goal": "연산보다 데이터 이동이 에너지를 지배하는 이유를 수치로 확인한다",
+      "task": "Horowitz 수치(int8 MAC, SRAM 읽기, DRAM 읽기의 pJ)를 사용해 한 conv 레이어의 MAC 에너지 vs SRAM/DRAM 접근 에너지 분해를 계산하는 모델을 만들고, 데이터 재사용(타일링) 정도에 따라 TOPS/W가 어떻게 달라지는지 그래프로 보인다.",
+      "tags": [
+        "energy",
+        "tops-per-watt",
+        "data-movement",
+        "see:NPU"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-B08",
+      "level": "B",
+      "title": "모델 메모리 풋프린트 계산",
+      "goal": "파라미터·활성화·작업 메모리를 정밀도별로 계산해 디바이스 적재 가능성을 판단한다",
+      "task": "모델 그래프로부터 파라미터 바이트(fp32/fp16/int8/int4), 피크 활성화 메모리(수명 기반), 런타임 오버헤드를 계산하는 도구를 작성해 MobileNetV2, ResNet-50, 1B/7B LLM이 512KB SRAM MCU, 8GB 모바일, 24GB 맥에 들어가는지 표로 판정한다.",
+      "tags": [
+        "memory-footprint",
+        "model-size",
+        "quantization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-B09",
+      "level": "B",
+      "title": "활용률 지표: MFU와 MBU",
+      "goal": "달성 성능을 피크 대비 비율(Model FLOPs Utilization, Memory Bandwidth Utilization)로 보고하는 법을 익힌다",
+      "task": "모델 FLOP·바이트 계산기와 실측 지연을 결합해 MFU/MBU를 산출하는 함수를 작성하고, 맥에서 측정한 CNN 추론과 LLM decode에 적용해 어떤 워크로드가 MFU가 낮고 MBU가 높은지 해석한다.",
+      "tags": [
+        "mfu",
+        "mbu",
+        "utilization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-M01",
+      "level": "M",
+      "title": "레이어별 Roofline 분석: 가상 NPU에서 CNN",
+      "goal": "같은 모델 안에서도 레이어마다 병목이 다르다는 것을 정량적으로 보인다",
+      "task": "가상 엣지 NPU(예: 4 TOPS int8, 8 GB/s DRAM, 1MB SRAM)를 정의하고 MobileNetV2·ResNet-50 각 레이어의 산술 강도로 예상 시간(max(연산시간, 메모리시간))을 계산해 memory-bound 레이어 비율과 총 지연, 실효 TOPS를 보고한다.",
+      "tags": [
+        "roofline",
+        "layer-analysis",
+        "cnn",
+        "npu"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-M02",
+      "level": "M",
+      "title": "배치 크기 효과: 가중치 재사용과 지연 비용",
+      "goal": "배치가 산술 강도를 높여 처리량을 올리지만 지연을 늘리는 트레이드오프를 정량화한다",
+      "task": "FC/GEMM 레이어에 대해 배치 1~256의 산술 강도·예상 시간을 roofline 모델로 계산하고, 맥에서 Accelerate GEMM으로 실측해 배치별 처리량·지연 곡선을 모델과 비교하며 지연 SLA(예: 10ms) 하 최적 배치를 구한다.",
+      "tags": [
+        "batching",
+        "throughput",
+        "latency",
+        "gemm"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-M03",
+      "level": "M",
+      "title": "트랜스포머 FLOP 계산: Prefill vs Decode",
+      "goal": "토큰당 약 2N FLOP 규칙과 attention 항, prefill/decode의 연산 특성 차이를 유도한다",
+      "task": "Llama 구조(hidden, layers, heads, kv_heads, FFN, vocab)를 입력받아 층별 GEMM·attention FLOP을 세는 계산기를 작성해 Llama-2-7B 파라미터 수와 토큰당 FLOP(≈2N)을 검증하고, 시퀀스 길이에 따라 attention FLOP 비중이 커지는 지점과 prefill/decode의 산술 강도를 비교한다.",
+      "tags": [
+        "transformer",
+        "flop-counting",
+        "prefill",
+        "decode",
+        "llm"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-M04",
+      "level": "M",
+      "title": "KV Cache 크기 계산과 동시 사용자 한도",
+      "goal": "KV cache 메모리 공식과 MHA/GQA/MQA, 정밀도, 시퀀스 길이에 따른 용량 한계를 계산한다",
+      "task": "KV bytes = 2 × layers × kv_heads × head_dim × bytes × seq_len × batch 계산기를 작성해 Llama-2-7B(MHA)·Llama-3-8B(GQA)에서 토큰당 KV 크기를 구하고, 24GB/80GB 메모리에서 모델 가중치를 뺀 공간으로 4K/32K 컨텍스트 동시 시퀀스 수를 계산하며 KV int8 양자화 효과를 보인다.",
+      "tags": [
+        "kv-cache",
+        "llm",
+        "memory",
+        "gqa"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-M05",
+      "level": "M",
+      "title": "LLM 지표 실측: TTFT·TPOT·Tokens/s",
+      "goal": "LLM 서빙 지표를 정확히 정의하고 llama.cpp로 실측해 prefill/decode로 분해한다",
+      "task": "llama.cpp(llama-bench, llama-server)로 소형 모델을 실행해 프롬프트 길이별 TTFT, TPOT(토큰 간 지연), 출력 tokens/s, 전체 지연을 측정하는 스크립트를 작성하고, prefill tokens/s와 decode tokens/s가 왜 수십 배 차이 나는지 M03 계산과 연결해 설명한다.",
+      "tags": [
+        "ttft",
+        "tpot",
+        "tokens-per-second",
+        "llama.cpp"
+      ],
+      "env": "mac",
+      "env_note": "llama.cpp brew 설치 또는 소스 빌드(Metal 백엔드), 1–3B GGUF 모델"
+    },
+    {
+      "id": "AIPERF-M06",
+      "level": "M",
+      "title": "Decode는 Memory-bound: Tokens/s 상한 예측",
+      "goal": "decode tokens/s ≈ 메모리 대역폭 / (토큰당 읽는 바이트) 모델로 성능을 예측하고 실측과의 차이를 분석한다",
+      "task": "모델 가중치 크기(양자화 포함)와 KV 읽기량으로 M2 GPU에서의 decode tokens/s 상한을 예측하고 llama.cpp 실측값과 비교해 달성 MBU를 구하며, 예측과 실측 차이의 원인(커널 효율, dequant 비용, 오버헤드)을 정리한다.",
+      "tags": [
+        "decode",
+        "memory-bound",
+        "performance-model",
+        "llm"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-M07",
+      "level": "M",
+      "title": "계층적 Roofline: L1/L2/DRAM",
+      "goal": "캐시 계층별 대역폭 천장을 그려 타일링 최적화의 효과를 해석한다",
+      "task": "작업 셋 크기를 바꾸는 대역폭 측정으로 L1/L2(SLC)/DRAM 대역폭 천장을 구해 계층적 roofline을 그리고, EML-B02 GEMM의 블로킹 크기별 성능 점을 찍어 어떤 계층 천장에 막혀 있는지 분석한다.",
+      "tags": [
+        "roofline",
+        "cache-hierarchy",
+        "tiling"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-M08",
+      "level": "M",
+      "title": "추론 프로파일링: 연산자별 타임라인",
+      "goal": "추론 시간을 연산자 단위로 분해하고 시각화해 최적화 대상을 고른다",
+      "task": "EML-M03 런타임에 연산자별 시작/종료 타임스탬프 계측을 넣어 Chrome trace(JSON)로 내보내고, ONNX Runtime 프로파일러 출력과 Instruments(Time Profiler/xctrace)로 같은 모델을 프로파일링해 상위 시간 연산자와 roofline 위치를 연결한 보고서를 작성한다.",
+      "tags": [
+        "profiling",
+        "timeline",
+        "tracing",
+        "instruments"
+      ],
+      "env": "mac",
+      "env_note": "Xcode Instruments(xctrace) 사용"
+    },
+    {
+      "id": "AIPERF-M09",
+      "level": "M",
+      "title": "전력 측정: powermetrics로 Energy per Inference",
+      "goal": "CPU/GPU/ANE 전력을 샘플링해 추론당 에너지와 TOPS/W를 실측하는 방법을 익힌다",
+      "task": "sudo powermetrics로 CPU/GPU/ANE 전력을 100ms 주기로 기록하면서 같은 모델을 CPU·GPU(Metal)·ANE(Core ML)에서 반복 실행하고, 유휴 전력을 빼 추론당 에너지(mJ)와 실효 TOPS/W를 계산해 백엔드별로 비교한다.",
+      "tags": [
+        "power-measurement",
+        "energy",
+        "powermetrics",
+        "ane"
+      ],
+      "env": "mac",
+      "env_note": "powermetrics는 sudo 필요"
+    },
+    {
+      "id": "AIPERF-M10",
+      "level": "M",
+      "title": "MLPerf Inference 방법론과 미니 LoadGen",
+      "goal": "SingleStream/MultiStream/Server/Offline 시나리오의 정의와 측정 규칙을 구현 수준으로 이해한다",
+      "task": "MLPerf 시나리오 규칙(Server: 포아송 도착 + p99 지연 제약, Offline: 최대 처리량, SingleStream: p90 지연)을 따르는 미니 LoadGen을 Python으로 구현해 자체 추론 엔진에 적용하고, Server 시나리오에서 지연 제약을 만족하는 최대 QPS를 이진 탐색으로 찾는다.",
+      "tags": [
+        "mlperf",
+        "loadgen",
+        "benchmark-methodology"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-M11",
+      "level": "M",
+      "title": "MLPerf Tiny 방법론: KWS 벤치마크 재현",
+      "goal": "MCU급 벤치마크의 지연·에너지·정확도 측정 규칙(EEMBC EnergyRunner 방식)을 이해한다",
+      "task": "MLPerf Tiny의 KWS(DS-CNN) 참조 모델을 받아 호스트에서 정확도 목표 충족을 확인하고, 반복 추론의 중앙값 지연 측정 절차를 규칙대로 재현하는 스크립트를 작성하며 실제 보드 제출 시 에너지 측정 구성(EnergyRunner, 전원 분리)을 정리한다.",
+      "tags": [
+        "mlperf-tiny",
+        "tinyml",
+        "benchmark-methodology"
+      ],
+      "env": "mac",
+      "env_note": "실제 에너지 측정은 MCU 보드 + EnergyRunner 장비 필요(정리만)"
+    },
+    {
+      "id": "AIPERF-M12",
+      "level": "M",
+      "title": "End-to-End 파이프라인 분석: 전처리·추론·후처리",
+      "goal": "모델 추론 외 구간(리사이즈, 정규화, NMS, 데이터 이동)이 전체 지연을 지배할 수 있음을 측정한다",
+      "task": "카메라 프레임 → 리사이즈·정규화 → 검출 모델 → NMS 파이프라인을 구성해 구간별 지연과 Amdahl 법칙에 따른 최대 가속비를 계산하고, 추론만 3배 빨라질 때와 전처리를 GPU로 옮길 때의 전체 fps 향상을 예측·실측 비교한다.",
+      "tags": [
+        "end-to-end",
+        "amdahl",
+        "pipeline",
+        "preprocessing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-A01",
+      "level": "A",
+      "title": "가속기 스펙 시트 비판적 분석",
+      "goal": "TOPS·메모리 대역폭·SRAM 수치만으로 실제 워크로드 성능을 추정하고 마케팅 수치의 함정을 짚는다",
+      "task": "공개 엣지 AI 칩 2–3종의 스펙(피크 TOPS, DRAM 대역폭, on-chip SRAM, 지원 정밀도)으로 ResNet-50 batch 1 지연과 7B LLM decode tokens/s를 roofline 기반으로 추정하고, 공개 벤치마크 결과와 비교해 utilization 차이와 원인을 1페이지 분석 보고서로 작성한다.",
+      "tags": [
+        "spec-analysis",
+        "performance-estimation",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-A02",
+      "level": "A",
+      "title": "Attention IO 복잡도: Naive vs FlashAttention",
+      "goal": "SRAM 크기에 따른 attention의 HBM 접근량을 유도하고 IO-aware 알고리즘의 이득을 정량화한다",
+      "task": "naive attention(Θ(Nd + N²) HBM 접근)과 tiled FlashAttention(Θ(N²d²/M) 접근)의 HBM 바이트를 시퀀스 길이 N, head_dim d, SRAM 크기 M에 대해 계산하는 모델을 만들고, GPGPU-A03 커널 실측 시간과 비교해 모델 정확도를 평가한다.",
+      "tags": [
+        "attention",
+        "flashattention",
+        "io-complexity",
+        "see:GPGPU"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-A03",
+      "level": "A",
+      "title": "LLM 서빙 스케줄링: Continuous Batching 시뮬레이션",
+      "goal": "정적 배칭 vs continuous batching, prefill/decode 혼합이 TTFT와 처리량에 주는 영향을 모델링한다",
+      "task": "요청 도착(포아송), 입력/출력 길이 분포, prefill·decode 단계 시간 모델(M03/M06 기반)을 가진 서빙 시뮬레이터를 작성해 static batching, continuous batching, chunked prefill을 비교하고 TTFT p99·TPOT·goodput 곡선을 그린다.",
+      "tags": [
+        "llm-serving",
+        "continuous-batching",
+        "simulation",
+        "goodput"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-A04",
+      "level": "A",
+      "title": "양자화의 성능-정확도 트레이드오프 실측",
+      "goal": "가중치 비트 수가 decode 속도(대역폭)와 품질(perplexity)에 주는 영향을 동시에 측정한다",
+      "task": "같은 모델을 F16, Q8_0, Q5_K, Q4_K, Q3_K로 양자화해 llama.cpp에서 tokens/s(prefill/decode)와 wikitext perplexity를 측정하고, 모델 바이트 대비 tokens/s가 M06 대역폭 모델을 따르는지와 품질 하락 곡선을 함께 그려 파레토 지점을 찾는다.",
+      "tags": [
+        "quantization",
+        "perplexity",
+        "llama.cpp",
+        "trade-off"
+      ],
+      "env": "mac",
+      "env_note": "llama.cpp의 llama-quantize, llama-perplexity 사용"
+    },
+    {
+      "id": "AIPERF-A05",
+      "level": "A",
+      "title": "분산 추론 통신 비용: Tensor/Pipeline Parallel",
+      "goal": "모델을 여러 칩에 나눌 때 통신량과 지연을 계산해 분할 전략을 고른다",
+      "task": "tensor parallel(층당 all-reduce 2회)과 pipeline parallel(스테이지 간 활성화 전송, 버블)을 링크 대역폭·지연 파라미터로 모델링해 7B/70B 모델의 decode 토큰 지연과 처리량을 칩 수 1~8에서 계산하고, 칩 간 링크가 느린 엣지 환경에서의 최적 분할을 제시한다.",
+      "tags": [
+        "distributed-inference",
+        "tensor-parallel",
+        "pipeline-parallel",
+        "see:GPUSYS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-A06",
+      "level": "A",
+      "title": "성능 회귀 감지: 노이즈와 통계 검정",
+      "goal": "벤치마크 노이즈를 통제하고 통계적으로 유의한 성능 회귀만 잡는 CI 게이트를 설계한다",
+      "task": "같은 바이너리 반복 측정으로 노이즈 분포(열, 백그라운드, 코어 배치)를 수집하고, 부트스트랩 신뢰구간과 Mann-Whitney U 검정으로 두 빌드 간 회귀를 판정하는 스크립트를 작성해 인위적 2%/5% 지연 주입을 검출력과 오탐률로 평가한다.",
+      "tags": [
+        "regression-testing",
+        "statistics",
+        "ci",
+        "see:INFRA"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-A07",
+      "level": "A",
+      "title": "열 스로틀링과 지속 성능",
+      "goal": "버스트 성능과 지속 성능의 차이, 측정 시간·온도 조건이 결과를 바꾸는 이유를 확인한다",
+      "task": "GPU/ANE 추론을 20분 이상 연속 실행하며 처리량·전력·(가능하면) 온도를 시계열로 기록해 스로틀링 시작 시점과 지속 성능 비율을 구하고, 벤치마크 보고 시 워밍업·쿨다운·환경 온도 조건을 명시하는 규칙을 정리한다.",
+      "tags": [
+        "thermal",
+        "sustained-performance",
+        "measurement"
+      ],
+      "env": "mac",
+      "env_note": "MacBook Air 등 팬리스 기기에서 차이가 뚜렷함"
+    },
+    {
+      "id": "AIPERF-A08",
+      "level": "A",
+      "title": "DVFS와 에너지 최적 동작점",
+      "goal": "race-to-idle vs 저주파 지속 실행 중 어느 쪽이 추론당 에너지가 낮은지 모델로 판단한다",
+      "task": "동적 전력(CV²f), 누설 전력, 유휴 전력, V-f 곡선, memory-bound 비율을 가진 모델로 주파수별 추론 지연·에너지를 계산해 compute-bound와 memory-bound 워크로드의 에너지 최적 주파수가 다름을 보이고, 데드라인 제약 하 최소 에너지 동작점을 찾는다.",
+      "tags": [
+        "dvfs",
+        "energy-efficiency",
+        "power-model",
+        "see:GPUSYS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "AIPERF-A09",
+      "level": "A",
+      "title": "설계 면접: 엣지 AI 칩 비교 벤치마크 스위트",
+      "goal": "두 엣지 AI 칩을 공정하게 비교하는 벤치마크 스위트와 보고 형식을 설계한다",
+      "task": "로봇/차량용 엣지 AI 칩 2종을 평가하는 벤치마크 스위트를 설계해 워크로드 선정(CNN, 트랜스포머, LLM decode), 정확도 게이트, 시나리오, 전력·열 조건, 통계 처리, 보고 지표를 문서화하고, 지금까지 만든 도구들로 맥 CPU/GPU/ANE를 '두 칩'으로 가정해 샘플 보고서를 생성한다.",
+      "tags": [
+        "benchmark-design",
+        "system-design",
+        "interview",
+        "capstone"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

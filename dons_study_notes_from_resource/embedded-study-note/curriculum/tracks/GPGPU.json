@@ -1,0 +1,283 @@
+{
+  "id": "GPGPU",
+  "intro": "GPU 연산은 AI 가속기 시대의 공용어다. SIMT 실행 모델, 워프/occupancy, 메모리 계층(global/shared/register), coalescing과 bank conflict를 이해해야 GEMM·reduction·softmax 같은 핵심 커널의 성능을 설명할 수 있고, NVIDIA·Apple·AI 칩 회사 면접에서 이 커널들을 직접 최적화하는 문제가 단골로 나온다. 이 트랙은 M2 맥의 Metal compute와 CPU 기반 SIMT 시뮬레이터로 대부분을 실습하고, CUDA 전용 내용은 gpu 환경 항목으로 분리한다.",
+  "goals": [
+    "SIMT 실행 모델(그리드/블록/워프, divergence, 지연 은닉)을 시뮬레이터로 재현하고 설명할 수 있다",
+    "메모리 계층과 coalescing, shared memory bank conflict, occupancy를 정량적으로 분석할 수 있다",
+    "reduction, scan, histogram, tiled GEMM, convolution, softmax 커널을 Metal로 구현·최적화할 수 있다",
+    "커널을 프로파일링해 memory-bound/compute-bound를 판정하고 피크 대비 효율을 보고할 수 있다",
+    "CUDA로 포팅해 Nsight 지표로 검증하고, 수치 결정성·혼합 정밀도 이슈를 다룰 수 있다"
+  ],
+  "prereq": ["C", "ARCH", "ALGO"],
+  "refs": [
+    {"title": "Programming Massively Parallel Processors, 4th Edition (Hwu, Kirk, El Hajj)"},
+    {"title": "CUDA C++ Programming Guide (NVIDIA)", "url": "https://docs.nvidia.com/cuda/cuda-c-programming-guide/"},
+    {"title": "CUDA C++ Best Practices Guide (NVIDIA)", "url": "https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/"},
+    {"title": "Apple Metal 개발자 문서", "url": "https://developer.apple.com/metal/"},
+    {"title": "Metal Shading Language Specification (Apple)"},
+    {"title": "GPU Gems 3, Ch.39 Parallel Prefix Sum (Scan) with CUDA", "url": "https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda"},
+    {"title": "Dao et al. — FlashAttention (arXiv 2205.14135)", "url": "https://arxiv.org/abs/2205.14135"}
+  ],
+  "items": [
+    {
+      "id": "GPGPU-B01",
+      "level": "B",
+      "title": "SIMT 실행 모델 CPU 시뮬레이터: Grid·Block·Warp",
+      "goal": "커널이 그리드/블록/스레드로 펼쳐지고 32-lane 워프 단위로 실행되는 구조를 직접 재현한다",
+      "task": "gridDim/blockDim/threadIdx를 제공하고 워프 단위(32 lane)로 커널 함수를 lockstep 실행하는 C 기반 SIMT 시뮬레이터를 작성해, vector add와 2D 인덱싱 커널을 돌려 CPU 레퍼런스와 결과를 비교하고 워프·블록 수를 출력한다.",
+      "tags": ["simt", "warp", "simulator", "execution-model"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-B02",
+      "level": "B",
+      "title": "Metal 첫 커널: Vector Add와 호스트 셋업",
+      "goal": "Metal compute의 디바이스·버퍼·파이프라인·커맨드 버퍼 흐름을 처음부터 끝까지 익힌다",
+      "task": "metal-cpp(또는 Objective-C/Swift)로 MTLDevice, MTLBuffer(shared storage), compute pipeline, dispatchThreads를 구성해 vector add 커널을 실행하고, CPU 결과와 비교하며 원소 수별 실행 시간(커맨드 버퍼 시작~완료)을 측정해 런치 오버헤드 구간을 확인한다.",
+      "tags": ["metal", "kernel", "host-api"],
+      "env": "mac",
+      "env_note": "Xcode Command Line Tools + metal 컴파일러(xcrun metal) 필요"
+    },
+    {
+      "id": "GPGPU-B03",
+      "level": "B",
+      "title": "2D 그리드 인덱싱과 경계 처리: 이미지 커널",
+      "goal": "2D threadgroup/grid 배치, 경계 체크, 비배수 크기 처리를 정확히 다룬다",
+      "task": "RGBA 이미지 그레이스케일 변환과 naive 행렬 전치 커널을 Metal로 구현하고, 너비·높이가 threadgroup 크기의 배수가 아닌 경우 경계 체크 유무에 따른 결과와 threadgroup 크기(8x8, 16x16, 32x8) 별 성능을 비교한다.",
+      "tags": ["metal", "indexing", "2d-grid"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-B04",
+      "level": "B",
+      "title": "워프 다이버전스와 재수렴 스택",
+      "goal": "분기 시 active mask로 경로가 직렬화되는 원리와 SIMD 효율 저하를 정량화한다",
+      "task": "B01 시뮬레이터에 active mask와 재수렴 스택(IPDOM)을 추가해 if/else·루프 분기를 처리하게 하고, 분기 패턴(lane 짝홀, 데이터 의존)별 SIMD 효율(활성 lane 비율)을 측정한 뒤 같은 패턴을 Metal에서 실행 시간으로 확인한다.",
+      "tags": ["divergence", "simt", "active-mask", "simulator"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-B05",
+      "level": "B",
+      "title": "지연 은닉과 Little's Law: 필요한 병렬도 계산",
+      "goal": "GPU가 많은 스레드로 메모리 지연을 숨기는 원리를 Little's law로 정량화한다",
+      "task": "메모리 지연(사이클), 목표 대역폭, 워프당 요청 바이트로 필요한 in-flight 워프 수를 계산하는 모델을 만들고, 시뮬레이터에서 동시 워프 수를 늘려 가며 달성 대역폭이 포화되는 지점이 모델 예측과 맞는지 확인한다.",
+      "tags": ["latency-hiding", "littles-law", "throughput"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-B06",
+      "level": "B",
+      "title": "메모리 대역폭 마이크로벤치마크 (M2 GPU)",
+      "goal": "GPU 메모리 대역폭의 실측치와 이론치 차이를 측정하는 방법을 익힌다",
+      "task": "Metal로 copy/scale/triad 커널을 작성해 버퍼 크기(캐시 내/외)별 달성 GB/s를 측정하고, M2 이론 대역폭(약 100GB/s) 대비 효율과 스레드당 처리 원소 수(1, 4, float4 벡터화)에 따른 차이를 그래프로 정리한다.",
+      "tags": ["bandwidth", "benchmark", "memory-hierarchy", "metal"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-B07",
+      "level": "B",
+      "title": "메모리 Coalescing: AoS vs SoA와 Stride 접근",
+      "goal": "워프의 메모리 접근 패턴이 트랜잭션 수와 대역폭을 결정하는 원리를 이해한다",
+      "task": "시뮬레이터에 워프 단위 주소를 128바이트 세그먼트로 묶어 트랜잭션 수를 세는 기능을 추가해 stride 1~32, AoS vs SoA 접근의 트랜잭션 수를 계산하고, 같은 패턴을 Metal에서 실측해 대역폭 저하가 예측과 맞는지 비교한다.",
+      "tags": ["coalescing", "memory-access", "aos-soa"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-B08",
+      "level": "B",
+      "title": "Occupancy 계산기 구현",
+      "goal": "레지스터·shared memory·블록 크기가 SM당 동시 워프 수를 어떻게 제한하는지 계산한다",
+      "task": "SM 사양(최대 워프, 레지스터 파일, shared memory, 최대 블록 수)과 커널 자원 사용량을 입력받아 제한 요인별 occupancy를 계산하는 Python 도구를 작성해 CUDA Occupancy Calculator 공개 예시와 결과를 맞추고, Metal의 maxTotalThreadsPerThreadgroup·threadExecutionWidth 조회 결과와 연결해 해석한다.",
+      "tags": ["occupancy", "registers", "shared-memory"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-B09",
+      "level": "B",
+      "title": "Atomic과 Barrier: 레이스와 동기화",
+      "goal": "threadgroup barrier와 atomic 연산의 의미, 경쟁 조건 재현과 해결을 익힌다",
+      "task": "전역 카운터를 일반 증가/atomic 증가로 구현해 결과 차이를 재현하고, threadgroup memory에 쓰고 읽는 커널에서 barrier를 빼면 생기는 오류를 재현한 뒤, atomic 경합 정도(주소 수 1~1024)에 따른 처리량을 측정한다.",
+      "tags": ["atomics", "barrier", "race-condition", "metal"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-M01",
+      "level": "M",
+      "title": "병렬 Reduction: 단계별 최적화",
+      "goal": "고전적 reduction 최적화 단계(divergence 제거, sequential addressing, SIMD 셔플)를 체득한다",
+      "task": "Metal로 sum reduction을 interleaved addressing → sequential addressing → 로드 시 첫 덧셈 → simd_sum(워프 셔플) → 다중 패스 순으로 최적화하며 각 버전의 GB/s를 측정하고, 피크 대역폭 대비 효율과 float 합산 오차를 기록한다.",
+      "tags": ["reduction", "optimization", "simd-shuffle", "metal"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-M02",
+      "level": "M",
+      "title": "Prefix Sum(Scan): Hillis-Steele vs Blelloch",
+      "goal": "병렬 스캔의 work-efficiency 차이와 대형 배열의 다중 블록 스캔 구조를 이해한다",
+      "task": "threadgroup 내 Hillis-Steele과 Blelloch(up-sweep/down-sweep) exclusive scan을 구현하고, 블록 합 스캔 후 더하는 3단계 방식으로 1억 원소 배열 스캔을 완성해 CPU 결과와 일치·처리량을 측정하며 decoupled look-back 단일 패스 방식의 원리를 설명한다.",
+      "tags": ["scan", "prefix-sum", "parallel-algorithm"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-M03",
+      "level": "M",
+      "title": "Histogram: Privatization과 Atomic 경합",
+      "goal": "atomic 경합을 threadgroup 지역 히스토그램으로 줄이는 privatization 기법을 익힌다",
+      "task": "256-bin 히스토그램을 전역 atomic 버전과 threadgroup 지역 히스토그램 + 최종 병합 버전으로 구현하고, 균일 분포와 한 bin에 몰린 편향 분포 입력에서 처리량을 비교한다.",
+      "tags": ["histogram", "atomics", "privatization"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-M04",
+      "level": "M",
+      "title": "Shared Memory Bank Conflict와 Padding 전치",
+      "goal": "bank 매핑 규칙과 conflict가 shared memory 처리량을 떨어뜨리는 원리를 정량화한다",
+      "task": "시뮬레이터에 32-bank shared memory 모델을 넣어 접근 패턴별 conflict degree를 계산하고, Metal로 타일 전치 커널을 naive / threadgroup 타일 / 타일+1 padding 세 버전으로 구현해 conflict 예측과 실측 대역폭을 비교한다.",
+      "tags": ["shared-memory", "bank-conflict", "transpose"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-M05",
+      "level": "M",
+      "title": "Tiled GEMM: Shared Memory 타일링과 Register Blocking",
+      "goal": "GEMM 성능을 데이터 재사용(arithmetic intensity) 관점에서 단계적으로 끌어올린다",
+      "task": "Metal로 SGEMM을 naive → threadgroup 타일링 → 스레드당 4x4 register blocking → float4 벡터 로드 순으로 구현해 단계별 GFLOPS와 산술 강도를 기록하고, Accelerate(cblas_sgemm)와 MPS 행렬곱 성능 대비 비율을 보고한다.",
+      "tags": ["gemm", "tiling", "register-blocking", "see:NPU"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-M06",
+      "level": "M",
+      "title": "2D Convolution: Halo 타일과 Separable 필터",
+      "goal": "스텐실/컨볼루션 커널에서 halo 영역 로딩과 분리 가능 필터 최적화를 익힌다",
+      "task": "KxK 2D 컨볼루션을 naive 전역 메모리 버전과 halo 포함 threadgroup 타일 버전으로 구현하고, 가우시안처럼 분리 가능한 필터는 행/열 두 패스로 나눠 K=3,7,15에서 성능과 결과 일치(허용 오차)를 비교한다.",
+      "tags": ["convolution", "stencil", "halo", "tiling"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-M07",
+      "level": "M",
+      "title": "Softmax: 수치 안정성과 Online Softmax",
+      "goal": "max 빼기 안정화와 한 번의 패스로 max·합을 갱신하는 online softmax를 구현한다",
+      "task": "행 단위 softmax를 3-pass(max, sum, normalize)와 online 2-pass(실행 중 max 갱신 시 합 재스케일) 방식으로 Metal에 구현하고, 큰 로짓(1e4) 입력에서 naive 버전의 overflow를 재현하며 행 길이별 메모리 트래픽과 성능을 비교한다.",
+      "tags": ["softmax", "numerical-stability", "online-algorithm"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-M08",
+      "level": "M",
+      "title": "Stream Compaction과 Radix Sort",
+      "goal": "scan을 빌딩 블록으로 쓰는 대표 병렬 알고리즘을 조립한다",
+      "task": "M02의 scan으로 predicate 기반 stream compaction을 구현하고, 4비트 digit 단위 LSD radix sort(블록 히스토그램 → 전역 scan → scatter)를 완성해 1천만 개 uint32 정렬 결과를 std::sort와 비교하고 안정성(stable)을 검증한다.",
+      "tags": ["radix-sort", "compaction", "scan"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-M09",
+      "level": "M",
+      "title": "비동기 실행과 파이프라이닝: Command Buffer와 Stream",
+      "goal": "CPU 인코딩·GPU 실행·데이터 이동을 겹쳐 처리량을 높이는 방법과 unified memory의 의미를 이해한다",
+      "task": "Metal에서 단일 command buffer 직렬 실행과 3개 in-flight command buffer + 세마포어로 CPU 준비·GPU 실행을 겹치는 버전을 구현해 처리량을 비교하고, M2 unified memory에서 shared vs private storage 차이와 CUDA stream·cudaMemcpyAsync 겹치기의 대응 관계를 정리한다.",
+      "tags": ["async", "pipelining", "command-buffer", "unified-memory"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-M10",
+      "level": "M",
+      "title": "커널 프로파일링과 병목 분류",
+      "goal": "커널별 달성 FLOPS·대역폭을 측정해 memory-bound/compute-bound/latency-bound를 판정한다",
+      "task": "지금까지 만든 커널들에 대해 FLOP 수와 바이트 수를 계산하고 실측 시간으로 달성 GFLOPS·GB/s를 구해 M2 GPU roofline 위에 표시하며, Xcode Metal GPU capture의 카운터로 한 커널의 병목을 확인해 보고서를 작성한다.",
+      "tags": ["profiling", "roofline", "bottleneck", "see:AIPERF"],
+      "env": "mac",
+      "env_note": "Xcode 설치 필요 (GPU frame capture / counters)"
+    },
+    {
+      "id": "GPGPU-A01",
+      "level": "A",
+      "title": "CUDA 포팅과 Nsight Compute 분석",
+      "goal": "Metal 커널을 CUDA로 옮기고 Nsight Compute 지표로 최적화 효과를 검증한다",
+      "task": "reduction·tiled GEMM·softmax를 CUDA로 포팅해 __shfl_down_sync, shared memory, cudaEvent 타이밍을 적용하고, ncu로 achieved occupancy, DRAM throughput, bank conflict, warp stall 원인을 수집해 Metal 결과와 비교한 분석 노트를 작성한다.",
+      "tags": ["cuda", "nsight", "porting", "profiling"],
+      "env": "gpu",
+      "env_note": "NVIDIA GPU + CUDA Toolkit + Nsight Compute (클라우드 GPU 인스턴스 가능)"
+    },
+    {
+      "id": "GPGPU-A02",
+      "level": "A",
+      "title": "행렬 유닛 GEMM: simdgroup_matrix / Tensor Core",
+      "goal": "GPU의 행렬 전용 유닛(Apple simdgroup_matrix, NVIDIA Tensor Core)을 쓰는 GEMM 구조를 익힌다",
+      "task": "Metal simdgroup_matrix(8x8) 로드/곱누적/저장으로 FP16 입력·FP32 누적 GEMM을 구현해 M05 스칼라 버전 대비 성능과 오차를 비교하고, 같은 구조가 CUDA WMMA/mma.sync의 fragment 개념과 어떻게 대응하는지 정리한다.",
+      "tags": ["matrix-unit", "tensor-core", "gemm", "fp16", "see:NPU"],
+      "env": "mac",
+      "env_note": "Metal simdgroup_matrix는 Apple Silicon에서 사용 가능; CUDA 비교는 선택(gpu)"
+    },
+    {
+      "id": "GPGPU-A03",
+      "level": "A",
+      "title": "Fused Attention 커널 (FlashAttention 스타일)",
+      "goal": "QK^T·softmax·V 곱을 타일 단위로 융합해 HBM 트래픽을 줄이는 FlashAttention 구조를 구현한다",
+      "task": "Q 블록당 K/V 블록을 순회하며 online softmax로 출력을 누적하는 fused attention 커널을 Metal로 구현하고, S=N×N 행렬을 materialize하는 naive 3-커널 버전과 결과(허용 오차)·메모리 사용량·시퀀스 길이별 성능을 비교한다.",
+      "tags": ["attention", "flashattention", "kernel-fusion", "see:AIPERF"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-A04",
+      "level": "A",
+      "title": "양자화 GEMM: INT8/FP16 Dequant-on-the-fly",
+      "goal": "가중치 양자화 GEMM에서 dequantize 위치와 정밀도가 성능·정확도에 주는 영향을 분석한다",
+      "task": "가중치를 per-channel int8(또는 4비트 그룹 양자화)로 저장하고 커널 안에서 FP16으로 dequantize해 곱하는 GEMV/GEMM을 Metal로 구현해, FP16 GEMM 대비 메모리 트래픽·속도(특히 batch=1 GEMV)와 출력 오차를 측정한다.",
+      "tags": ["quantization", "gemv", "mixed-precision", "see:EML"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-A05",
+      "level": "A",
+      "title": "불규칙 워크로드: SpMV(CSR)와 부하 분산",
+      "goal": "희소 행렬처럼 불균형한 작업에서 스레드 매핑 전략과 부하 분산을 설계한다",
+      "task": "CSR SpMV를 thread-per-row, simdgroup-per-row, nnz 기반 균등 분할(merge-path 유사) 세 가지로 구현하고, 행 길이 분포가 균일한 행렬과 power-law 행렬에서 성능과 SIMD 효율을 비교한다.",
+      "tags": ["spmv", "load-balancing", "sparse", "irregular"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-A06",
+      "level": "A",
+      "title": "커널 퓨전과 런치 오버헤드",
+      "goal": "작은 커널을 여러 번 띄우는 비용과 elementwise 연산 퓨전의 효과를 측정한다",
+      "task": "빈 커널 반복 디스패치로 런치·커맨드 제출 오버헤드를 측정하고, bias add → GELU → residual add 체인을 3개 커널과 1개 fused 커널로 구현해 텐서 크기별 시간과 메모리 트래픽 감소량을 비교한다.",
+      "tags": ["kernel-fusion", "launch-overhead", "elementwise"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "GPGPU-A07",
+      "level": "A",
+      "title": "GPU 수치 결정성과 결과 검증 하네스",
+      "goal": "병렬 합산 순서로 인한 비결정성과 허용 오차 기반 검증 방법을 정립한다",
+      "task": "atomic float 합산 reduction이 실행마다 다른 결과를 내는 것을 재현하고, 고정 트리 순서 reduction과 Kahan/pairwise 합산으로 결정적·정확한 버전을 만든 뒤, ULP·상대오차·NaN/Inf 검사를 포함한 GPU vs CPU 비교 하네스를 작성해 모든 커널에 적용한다.",
+      "tags": ["determinism", "floating-point", "validation", "see:SIV"],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

@@ -1,0 +1,313 @@
+{
+  "id": "CAM",
+  "intro": "카메라 파이프라인은 이미지 센서 → MIPI CSI-2 수신 → ISP → 3A 제어 → 버퍼/DMA → 드라이버(V4L2)로 이어지는, 펌웨어·하드웨어·신호처리가 한데 얽힌 대표 시스템이다. 자율주행·드론·로봇(Anduril, Tesla, Rivian, Apple 카메라 팀)에서는 센서 bring-up, 프레임 타이밍, ISP 파라미터 검증이 단골 면접 주제다. 이 트랙은 RAW 버퍼 위에서 ISP 단계를 직접 구현하며 각 단계의 의미와 하드웨어 구현 제약을 체득한다.",
+  "goals": [
+    "이미지 센서 동작(노출, 셔터 방식, Bayer CFA, 노이즈)을 수치 모델로 설명하고 시뮬레이션할 수 있다",
+    "MIPI CSI-2 패킷 구조(DI/WC/ECC/CRC)와 RAW 패킹 포맷을 파싱·검증할 수 있다",
+    "Black level → Demosaic → AWB → CCM → Gamma → NR → Sharpen ISP 파이프라인을 RAW 버퍼 위에서 구현하고 화질 지표로 평가할 수 있다",
+    "AE/AWB/AF 3A 제어 루프를 센서 지연을 고려해 설계·튜닝할 수 있다",
+    "프레임 버퍼 큐, DMA, 타임스탬프, 레지스터 래칭 등 카메라 드라이버의 시스템 측면을 설명하고 V4L2로 실제 캡처할 수 있다"
+  ],
+  "prereq": ["C", "DSP", "COMM"],
+  "refs": [
+    {"title": "MIPI CSI-2 Specification (MIPI Alliance)", "url": "https://www.mipi.org/specifications/csi-2"},
+    {"title": "Linux Media Subsystem / V4L2 Userspace API", "url": "https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/v4l2.html"},
+    {"title": "libcamera project (오픈소스 카메라 스택, IPA/3A 구조 참고)", "url": "https://libcamera.org/"},
+    {"title": "Raspberry Pi Camera Algorithm and Tuning Guide (ISP/3A 튜닝 설명)"},
+    {"title": "Malvar, He, Cutler — High-Quality Linear Interpolation for Demosaicing of Bayer-Patterned Color Images (ICASSP 2004)"},
+    {"title": "OpenCV Camera Calibration Tutorial", "url": "https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html"},
+    {"title": "Debevec & Malik — Recovering High Dynamic Range Radiance Maps from Photographs (SIGGRAPH 1997)"}
+  ],
+  "items": [
+    {
+      "id": "CAM-B01",
+      "level": "B",
+      "title": "이미지 센서 기초: 픽셀·Full Well·노이즈 모델",
+      "goal": "광자 → 전자 → DN 변환과 shot/read/dark 노이즈가 SNR을 어떻게 결정하는지 수치로 이해한다",
+      "task": "QE, full well, conversion gain, read noise, dark current 파라미터로 픽셀 응답을 시뮬레이션하는 C/Python 모델을 만들고, 노출 시간을 바꿔 가며 SNR 곡선을 그려 shot-noise 영역에서 SNR ∝ sqrt(signal)임을 검증한다.",
+      "tags": ["sensor", "noise", "snr", "photon-transfer"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-B02",
+      "level": "B",
+      "title": "Rolling Shutter vs Global Shutter 시뮬레이션",
+      "goal": "행 단위 순차 노출(rolling)과 동시 노출(global)의 차이와 skew 왜곡의 원인을 이해한다",
+      "task": "움직이는 막대 장면을 line time 기반으로 행마다 다른 시각에 샘플링하는 시뮬레이터를 작성해 rolling shutter skew 이미지를 생성하고, 측정된 기울기가 (속도 × line_time × 행 수) 예측값과 일치하는지 검증한다.",
+      "tags": ["sensor", "rolling-shutter", "global-shutter", "timing"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-B03",
+      "level": "B",
+      "title": "Bayer CFA 패턴과 RAW10/RAW12 패킹 포맷",
+      "goal": "RGGB/BGGR 등 Bayer 패턴과 MIPI 패킹 RAW 포맷의 메모리 레이아웃을 정확히 다룬다",
+      "task": "RGB 이미지를 4가지 Bayer 순서로 모자이크하는 함수와, MIPI RAW10(4픽셀/5바이트)·RAW12(2픽셀/3바이트) pack/unpack 함수를 C로 구현하고 왕복(roundtrip) 비트 일치를 단위 테스트로 검증한다.",
+      "tags": ["bayer", "raw-format", "bit-packing"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-B04",
+      "level": "B",
+      "title": "센서 레지스터 맵과 I2C 초기화 시퀀스",
+      "goal": "센서 bring-up 시 init 테이블, 지연, 프레임레이트 레지스터의 관계를 이해한다",
+      "task": "가상 센서(16비트 주소 I2C 레지스터 맵)를 mock으로 만들고 {reg, val, delay} 테이블 기반 초기화 드라이버를 작성해 readback 검증을 수행한 뒤, pixel clock·line_length_pck·frame_length_lines로 fps와 최대 노출 시간을 계산하는 함수를 테스트한다.",
+      "tags": ["sensor", "i2c", "bring-up", "register", "see:COMM"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-B05",
+      "level": "B",
+      "title": "MIPI CSI-2 패킷 구조: Short/Long Packet, ECC, CRC",
+      "goal": "CSI-2 패킷 헤더(Data ID, Word Count, ECC)와 페이로드 CRC를 비트 단위로 이해한다",
+      "task": "CSI-2 바이트 스트림에서 FS/FE/LS/LE short packet과 RAW10 long packet을 파싱하는 디코더를 작성하고, 6비트 헤더 ECC(단일 비트 정정)와 CRC-16 페이로드 체크를 구현해 비트 오류 주입 테스트로 정정/검출 동작을 검증한다.",
+      "tags": ["mipi-csi2", "packet", "ecc", "crc"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-B06",
+      "level": "B",
+      "title": "Black Level 보정과 Defect Pixel 보정",
+      "goal": "ISP 첫 단계인 OB clamp와 hot/dead pixel 처리를 RAW 도메인에서 구현한다",
+      "task": "Optical black 행의 평균으로 채널별 black level을 추정해 빼는 함수와, 같은 색 이웃 8개의 median과 비교해 결함 픽셀을 찾아 대체하는 DPC를 구현하고, 결함을 주입한 합성 RAW에서 검출률·오검출률을 측정한다.",
+      "tags": ["isp", "black-level", "dpc", "raw"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-B07",
+      "level": "B",
+      "title": "Demosaic 기초: Bilinear 보간",
+      "goal": "Bayer RAW에서 풀컬러 이미지를 복원하는 가장 단순한 방법과 그 한계(zipper, false color)를 본다",
+      "task": "RGGB RAW에 대해 bilinear demosaic을 경계 처리 포함으로 구현하고, 원본 RGB → 모자이크 → 복원 결과의 채널별 PSNR을 계산하며 에지 부근 false color 아티팩트를 확대 이미지로 확인한다.",
+      "tags": ["isp", "demosaic", "interpolation", "psnr"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-B08",
+      "level": "B",
+      "title": "화이트 밸런스: Gray World와 White Patch",
+      "goal": "조명 색온도에 따른 색 캐스트를 채널 게인으로 보정하는 원리를 이해한다",
+      "task": "Gray World와 White Patch(상위 백분위) AWB 게인 추정을 구현하고, 인위적으로 색 캐스트를 준 이미지에서 회색 패치의 R/G·B/G 비율이 1에 얼마나 가까워지는지 정량 비교한다.",
+      "tags": ["isp", "awb", "color"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-B09",
+      "level": "B",
+      "title": "CCM 색 보정 행렬과 감마 LUT (고정소수점)",
+      "goal": "센서 RGB를 표준 색공간으로 옮기는 3x3 CCM과 감마 인코딩을 하드웨어 친화적으로 구현한다",
+      "task": "3x3 CCM(행 합 = 1 제약)을 Q4.10 고정소수점으로 적용하는 함수와 sRGB 감마를 1024-entry LUT + 선형보간으로 구현하고, float 레퍼런스 대비 최대 오차(LSB)와 클리핑 처리를 테스트한다.",
+      "tags": ["isp", "ccm", "gamma", "fixed-point", "see:DSP"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-B10",
+      "level": "B",
+      "title": "프레임 버퍼 레이아웃: Stride, Plane, NV12/YUYV",
+      "goal": "ISP 출력 포맷의 메모리 배치(stride 정렬, planar/semi-planar/packed)를 정확히 계산한다",
+      "task": "width/height/format/정렬 요구(예: 64바이트)를 받아 plane별 offset·stride·전체 크기를 계산하는 함수와 NV12·YUYV·I420 간 변환기를 작성하고, 홀수 해상도와 패딩 영역을 포함한 테스트로 버퍼 오버런이 없음을 ASan으로 검증한다.",
+      "tags": ["buffer", "yuv", "stride", "see:DISP"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M01",
+      "level": "M",
+      "title": "고품질 Demosaic: Malvar-He-Cutler",
+      "goal": "그래디언트 보정 선형 보간으로 bilinear 대비 화질을 높이는 방법을 구현한다",
+      "task": "Malvar-He-Cutler 5x5 커널 demosaic을 정수 연산으로 구현하고, 같은 테스트 이미지에서 bilinear 대비 PSNR 향상과 zipper/false color 감소를 수치·이미지로 비교한다.",
+      "tags": ["isp", "demosaic", "filter"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M02",
+      "level": "M",
+      "title": "노이즈 제거: Bilateral 공간 NR과 Temporal NR",
+      "goal": "에지 보존 공간 필터와 움직임 적응 시간 필터의 원리와 트레이드오프를 이해한다",
+      "task": "LUT 기반 range weight를 쓰는 bilateral 필터와, 프레임 차이로 블렌딩 계수를 조절하는 motion-adaptive temporal NR을 구현하고, 합성 노이즈 영상 시퀀스에서 평탄 영역 노이즈 감소량과 움직이는 물체의 ghosting을 측정한다.",
+      "tags": ["isp", "noise-reduction", "bilateral", "temporal"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M03",
+      "level": "M",
+      "title": "샤프닝: Unsharp Mask와 Overshoot 제어",
+      "goal": "휘도 채널 샤프닝과 halo/노이즈 증폭 억제 방법을 구현한다",
+      "task": "Y 채널에 unsharp mask를 적용하되 노이즈 임계값(coring)과 로컬 min/max 기반 overshoot clamp를 넣어 구현하고, slanted edge에서 에지 기울기 증가와 halo 크기를 측정해 파라미터 영향을 표로 정리한다.",
+      "tags": ["isp", "sharpening", "edge"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M04",
+      "level": "M",
+      "title": "렌즈 셰이딩 보정(LSC)과 게인 그리드 보간",
+      "goal": "주변부 광량 저하(vignetting)와 color shading을 저해상도 게인 맵으로 보정하는 하드웨어 방식을 이해한다",
+      "task": "균일광(flat-field) RAW에서 채널별 17x13 게인 그리드를 추출하는 캘리브레이션 코드와, 그리드를 bilinear 보간해 픽셀별 게인을 적용하는 LSC 블록을 구현하고 보정 후 중심 대비 코너 밝기 편차를 측정한다.",
+      "tags": ["isp", "lsc", "calibration"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M05",
+      "level": "M",
+      "title": "렌즈 왜곡 보정: Brown-Conrady 모델과 Remap LUT",
+      "goal": "radial/tangential 왜곡 모델과 역매핑 기반 보정, LUT 압축을 이해한다",
+      "task": "Brown-Conrady(k1,k2,p1,p2) 모델로 왜곡 이미지를 만들고, 출력 픽셀마다 입력 좌표를 계산해 bilinear 샘플링하는 remap과 16x16 블록 단위로 압축한 좌표 LUT 버전을 구현해 직선 체커보드의 직선성 오차를 비교한다.",
+      "tags": ["lens", "distortion", "remap", "calibration", "see:CV"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M06",
+      "level": "M",
+      "title": "AE 자동 노출: 센서 지연을 고려한 제어 루프",
+      "goal": "휘도 통계 기반 노출/게인 제어와 N+2 프레임 적용 지연 하에서의 안정성을 이해한다",
+      "task": "장면 밝기가 계단 변화하는 시뮬레이터에서 가중 평균 휘도 → 목표 대비 오차 → 노출·아날로그 게인 분배를 하는 AE를 작성하고, 레지스터 적용 지연(2프레임)을 넣었을 때 진동 없이 수렴하도록 damping을 설계해 수렴 프레임 수와 overshoot를 측정한다.",
+      "tags": ["3a", "ae", "control-loop", "see:RCTL"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M07",
+      "level": "M",
+      "title": "AWB 고급: Gray Zone 통계와 CCT 기반 CCM 보간",
+      "goal": "실제 ISP의 AWB가 쓰는 블록 통계, gray zone 필터링, 색온도 추정 흐름을 구현한다",
+      "task": "이미지를 32x24 블록 통계(R,G,B 합)로 축약하고 플랑크 궤적 근처 gray zone 블록만 골라 게인을 추정한 뒤, 추정 CCT로 두 개의 캘리브레이션 CCM을 보간하는 AWB를 구현해 혼합 조명 장면에서 Gray World 대비 오차를 비교한다.",
+      "tags": ["3a", "awb", "cct", "statistics"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M08",
+      "level": "M",
+      "title": "AF 자동 초점: Contrast 측정과 Hill-Climb 탐색",
+      "goal": "초점 평가 함수와 렌즈 액추에이터 탐색 알고리즘, PDAF 개념을 이해한다",
+      "task": "렌즈 위치에 따라 가우시안 블러가 변하는 시뮬레이터에서 Tenengrad/Laplacian 분산 포커스 메트릭을 구현하고, coarse-to-fine hill-climb으로 피크를 찾는 AF를 작성해 이동 횟수와 최종 위치 오차를 측정하며 PDAF가 탐색 횟수를 어떻게 줄이는지 설명을 덧붙인다.",
+      "tags": ["3a", "af", "focus-metric", "search"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M09",
+      "level": "M",
+      "title": "라인 버퍼 스트리밍 ISP 파이프라인 통합",
+      "goal": "하드웨어 ISP처럼 프레임 전체가 아닌 N-line 버퍼로 동작하는 스트리밍 구조를 설계한다",
+      "task": "BLC→DPC→Demosaic→AWB→CCM→Gamma→CSC를 각 단계가 필요한 최소 라인 버퍼만 갖는 스트리밍 파이프라인(한 줄 입력 → 지연된 한 줄 출력)으로 재구현하고, 앞서 만든 프레임 기반 레퍼런스와 bit-exact 일치를 검증하며 총 라인 버퍼 SRAM 크기를 계산한다.",
+      "tags": ["isp", "pipeline", "line-buffer", "streaming", "bit-exact"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M10",
+      "level": "M",
+      "title": "CSI-2 수신기 모델: 레인 병합·Virtual Channel·에러 처리",
+      "goal": "D-PHY 다중 레인 바이트 분배와 수신기 상태 머신, 오류 시 프레임 처리 정책을 이해한다",
+      "task": "4-lane으로 바이트 분산된 CSI-2 스트림을 병합해 VC별로 프레임/라인을 재조립하는 수신기 상태 머신을 작성하고, ECC 오류·CRC 오류·누락된 FE·WC 불일치를 주입해 카운터 증가와 프레임 drop/복구 동작을 테스트한다.",
+      "tags": ["mipi-csi2", "d-phy", "state-machine", "error-handling"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M11",
+      "level": "M",
+      "title": "캡처 버퍼 큐와 DMA: qbuf/dqbuf 소유권 모델",
+      "goal": "드라이버·하드웨어·애플리케이션 사이 버퍼 소유권 이동과 버퍼 부족 시 drop 정책을 설계한다",
+      "task": "V4L2와 유사한 버퍼 상태(DEQUEUED/QUEUED/ACTIVE/DONE) 머신과 DMA 완료 인터럽트를 흉내내는 생산자 스레드를 C로 구현하고, 소비자가 느릴 때 마지막 버퍼 재사용/프레임 drop 정책, sequence 번호 공백 검출을 테스트한다.",
+      "tags": ["dma", "buffer-queue", "driver", "concurrency"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-M12",
+      "level": "M",
+      "title": "프레임 타임스탬프와 센서-IMU 시간 동기",
+      "goal": "SOF/EOF 타임스탬프로 노출 중심 시각과 행별 시각을 계산하고 다른 센서와 정렬한다",
+      "task": "SOF 인터럽트 시각, 노출 시간, line time, readout 시간으로 프레임의 노출 중심 시각과 행별 타임스탬프를 계산하는 함수를 작성하고, 드리프트가 있는 IMU 클럭과 선형 회귀로 오프셋·스큐를 추정해 정렬 오차를 측정한다.",
+      "tags": ["timestamp", "sync", "imu", "rolling-shutter", "see:AUTON"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-A01",
+      "level": "A",
+      "title": "V4L2 mmap 스트리밍 캡처 앱",
+      "goal": "실제 리눅스 V4L2 API로 버퍼 할당·큐잉·스트리밍을 수행하고 타이밍을 측정한다",
+      "task": "vivid 가상 카메라 드라이버에 대해 VIDIOC_QUERYCAP/S_FMT/REQBUFS/QBUF/DQBUF/STREAMON을 사용하는 mmap 캡처 프로그램을 작성하고, poll 기반 루프에서 fps, 버퍼 timestamp 간격 지터, sequence 누락을 로그로 분석한다.",
+      "tags": ["v4l2", "linux", "driver-api", "mmap"],
+      "env": "linux",
+      "env_note": "Lima VM 등 리눅스에서 modprobe vivid 필요 (v4l-utils 설치)"
+    },
+    {
+      "id": "CAM-A02",
+      "level": "A",
+      "title": "Media Controller와 V4L2 Subdev 파이프라인 구성",
+      "goal": "센서-CSI 수신기-ISP가 subdev 그래프로 연결되는 현대 카메라 드라이버 구조를 이해한다",
+      "task": "vimc 가상 드라이버에서 media-ctl로 토폴로지를 출력하고 링크·패드 포맷을 설정해 파이프라인을 구성한 뒤, 포맷 불일치 시 STREAMON 실패(EPIPE)를 재현하고 원인을 설명하는 스크립트와 노트를 작성한다.",
+      "tags": ["v4l2", "media-controller", "subdev", "linux"],
+      "env": "linux",
+      "env_note": "Lima VM에서 modprobe vimc, v4l-utils(media-ctl) 필요"
+    },
+    {
+      "id": "CAM-A03",
+      "level": "A",
+      "title": "HDR: 다중 노출 합성과 톤 매핑",
+      "goal": "다중 노출 HDR 합성, 톤 매핑, 그리고 센서 HDR 방식(DOL/staggered, DCG)의 차이를 이해한다",
+      "task": "선형 RAW 3장(노출비 1:4:16)을 가중치 기반으로 radiance 맵에 합성하고 움직임 영역 ghost 검출을 넣은 뒤, 글로벌 Reinhard와 로컬 톤 매핑을 구현해 결과를 비교하고 staggered HDR에서 노출 간 시간차가 만드는 아티팩트를 설명한다.",
+      "tags": ["hdr", "tone-mapping", "exposure-fusion"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-A04",
+      "level": "A",
+      "title": "ISP 파라미터 Per-frame 제어와 Shadow 레지스터 래칭",
+      "goal": "3A 결과가 정확히 어느 프레임에 적용되는지 보장하는 double-buffered 레지스터 설계를 익힌다",
+      "task": "ISP 레지스터를 shadow/active 이중 뱅크로 모델링하고 vsync에서만 래치되는 mock 하드웨어를 만든 뒤, 3A 펌웨어가 프레임 N 통계로 계산한 파라미터를 N+k에 원자적으로 적용하는 큐를 구현해 frame-ID 기반 테스트로 레이스(반쯤 적용된 파라미터)를 검출한다.",
+      "tags": ["isp", "register-latching", "firmware", "per-frame-control"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-A05",
+      "level": "A",
+      "title": "멀티 카메라 하드웨어 동기화 설계",
+      "goal": "스테레오/서라운드 카메라의 트리거, 마스터-슬레이브 동기, 드리프트 보정을 설계한다",
+      "task": "외부 트리거와 프리런 마스터-슬레이브 두 방식을 각 센서 클럭 오차(±50ppm)를 넣어 시뮬레이션하고, 프레임 간 시작 시각 차이 분포를 측정한 뒤 frame_length 미세 조정으로 드리프트를 보정하는 제어기를 구현해 설계 트레이드오프를 정리한다.",
+      "tags": ["multi-camera", "sync", "design", "see:AUTON"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-A06",
+      "level": "A",
+      "title": "ISP 화질 검증: Golden Model과 MTF/SNR 측정",
+      "goal": "고정소수점 구현과 레퍼런스 모델의 일치 검증, 표준 화질 지표 측정법을 익힌다",
+      "task": "float golden 파이프라인과 고정소수점 파이프라인 출력을 단계별 diff하는 검증 하네스를 만들고, slanted-edge 방법(ESF→LSF→FFT)으로 MTF50을 계산하는 코드와 평탄 패치 SNR 측정을 구현해 NR/샤프닝 파라미터 변화가 지표에 미치는 영향을 보고한다.",
+      "tags": ["validation", "golden-model", "mtf", "image-quality", "see:SIV"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CAM-A07",
+      "level": "A",
+      "title": "카메라 bring-up 디버깅 시나리오",
+      "goal": "프레임 미수신, CRC 오류, 색 이상, 줄무늬 등 실제 bring-up 증상을 원인별로 진단한다",
+      "task": "지금까지 만든 센서·CSI-2·ISP 시뮬레이터에 Bayer 순서 오류, 레인 수 불일치, RAW10 언패킹 오프셋, black level 미적용, stride 오설정 등 결함을 무작위 주입하는 하네스를 만들고, 각 증상에서 원인을 찾는 진단 트리와 자동 체크 스크립트를 작성한다.",
+      "tags": ["debug", "bring-up", "fault-injection", "interview"],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

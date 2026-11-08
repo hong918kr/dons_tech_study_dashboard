@@ -1,0 +1,215 @@
+/* DS-B02 배열 기반 스택과 괄호·명령 검사
+ * 빌드: cc -std=c11 -Wall -Wextra -Werror -O2 <파일>.c && ./a.out
+ * ASan: cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined <파일>.c && ./a.out
+ */
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+
+/* ---------------- 공통: 고정 용량 int32 스택 ---------------- */
+#define STACK_CAP 8
+typedef enum { ST_OK = 0, ST_OVERFLOW, ST_UNDERFLOW } st_status;
+
+typedef struct {
+    int32_t items[STACK_CAP];
+    size_t  top;        /* 들어 있는 개수 = 다음에 쓸 칸 (empty-ascending) */
+    size_t  high_water; /* 지금까지 가장 깊었던 순간의 개수 */
+} istack;
+
+static void   st_init(istack *s)        { s->top = 0; s->high_water = 0; }
+static size_t st_size(const istack *s)  { return s->top; }
+static bool   st_empty(const istack *s) { return s->top == 0; }
+
+/* ---------------- Part A: push / pop / peek + overflow·underflow ---------------- */
+static st_status st_push(istack *s, int32_t x) {
+    if (s->top == STACK_CAP) return ST_OVERFLOW;
+    s->items[s->top++] = x;
+    if (s->top > s->high_water) s->high_water = s->top;
+    return ST_OK;
+}
+static st_status st_pop(istack *s, int32_t *out) {
+    if (s->top == 0) return ST_UNDERFLOW;
+    *out = s->items[--s->top];
+    return ST_OK;
+}
+static st_status st_peek(const istack *s, int32_t *out) {
+    if (s->top == 0) return ST_UNDERFLOW;
+    *out = s->items[s->top - 1];
+    return ST_OK;
+}
+
+/* ---------------- Part B: 괄호 균형 검사 ---------------- */
+typedef enum { BR_OK = 0, BR_MISMATCH, BR_UNCLOSED, BR_EXTRA_CLOSE, BR_TOO_DEEP } br_result;
+
+/* 닫는 괄호에 짝이 되는 여는 괄호. 괄호가 아니면 0 */
+static char opener_of(char c) {
+    return c == ')' ? '(' : c == ']' ? '[' : c == '}' ? '{' : 0;
+}
+
+/* 스택에는 "여는 괄호의 위치"를 넣는다 → 문자도 s[pos] 로 알 수 있고 오류 위치도 보고할 수 있다.
+ * err_pos: MISMATCH/EXTRA_CLOSE → 닫는 괄호 위치, UNCLOSED → 가장 안쪽(마지막) 미닫힘 여는 괄호,
+ *          TOO_DEEP → 넘친 여는 괄호 위치 */
+static br_result check_brackets(const char *str, size_t *err_pos) {
+    istack st;
+    st_init(&st);
+    int32_t pos = 0;
+    for (size_t i = 0; str[i] != '\0'; i++) {
+        char c = str[i];
+        if (c == '(' || c == '[' || c == '{') {
+            if (st_push(&st, (int32_t)i) != ST_OK) { *err_pos = i; return BR_TOO_DEEP; }
+        } else if (opener_of(c)) {
+            if (st_pop(&st, &pos) != ST_OK) { *err_pos = i; return BR_EXTRA_CLOSE; }
+            if (str[pos] != opener_of(c))   { *err_pos = i; return BR_MISMATCH; }
+        }
+    }
+    if (st_peek(&st, &pos) == ST_OK) { *err_pos = (size_t)pos; return BR_UNCLOSED; }
+    return BR_OK;
+}
+
+/* ---------------- Part C: 후위표기식(RPN) 계산기 ---------------- */
+typedef enum {
+    RPN_OK = 0, RPN_ERR_EMPTY, RPN_ERR_TOKEN, RPN_ERR_UNDERFLOW,
+    RPN_ERR_STACK_FULL, RPN_ERR_DIV0, RPN_ERR_RANGE, RPN_ERR_LEFTOVER
+} rpn_status;
+
+/* [제공] 토큰 하나를 정수로: 선택적 '-' + 숫자들. 숫자가 아니면 RPN_ERR_TOKEN, int32 밖이면 RPN_ERR_RANGE */
+static rpn_status parse_number(const char *tok, size_t len, int32_t *out) {
+    size_t i = 0;
+    bool neg = false;
+    if (tok[0] == '-') { neg = true; i = 1; }
+    if (i == len) return RPN_ERR_TOKEN;
+    int64_t v = 0;
+    for (; i < len; i++) {
+        if (tok[i] < '0' || tok[i] > '9') return RPN_ERR_TOKEN;
+        v = v * 10 + (tok[i] - '0');
+        if (v > (int64_t)INT32_MAX + 1) return RPN_ERR_RANGE;   /* 더 커지기 전에 멈춘다 */
+    }
+    if (neg) v = -v;
+    if (v > INT32_MAX || v < INT32_MIN) return RPN_ERR_RANGE;
+    *out = (int32_t)v;
+    return RPN_OK;
+}
+
+/* 연산 하나: a op b. int64 로 계산해서 int32 범위를 확인한다 */
+static rpn_status apply_op(char op, int32_t a, int32_t b, int32_t *res) {
+    int64_t r;
+    switch (op) {
+    case '+': r = (int64_t)a + b; break;
+    case '-': r = (int64_t)a - b; break;
+    case '*': r = (int64_t)a * b; break;
+    case '/':
+        if (b == 0) return RPN_ERR_DIV0;
+        r = (int64_t)a / b;                 /* INT32_MIN / -1 = 2^31 → 아래에서 RANGE */
+        break;
+    default: return RPN_ERR_TOKEN;
+    }
+    if (r > INT32_MAX || r < INT32_MIN) return RPN_ERR_RANGE;
+    *res = (int32_t)r;
+    return RPN_OK;
+}
+
+/* 공백으로 구분된 RPN 식을 계산. 성공할 때만 *out 에 쓴다 */
+static rpn_status rpn_eval(const char *expr, int32_t *out) {
+    istack st;
+    st_init(&st);
+    size_t ntok = 0;
+    const char *p = expr;
+    for (;;) {
+        while (*p == ' ') p++;                       /* 토큰 사이 공백 건너뛰기 */
+        if (*p == '\0') break;
+        const char *tok = p;
+        while (*p != ' ' && *p != '\0') p++;
+        size_t len = (size_t)(p - tok);
+        ntok++;
+
+        if (len == 1 && (*tok == '+' || *tok == '-' || *tok == '*' || *tok == '/')) {
+            int32_t a, b, r;
+            if (st_pop(&st, &b) != ST_OK || st_pop(&st, &a) != ST_OK)   /* b 먼저! (오른쪽 피연산자) */
+                return RPN_ERR_UNDERFLOW;
+            rpn_status e = apply_op(*tok, a, b, &r);
+            if (e != RPN_OK) return e;
+            (void)st_push(&st, r);                   /* 방금 두 개 뺐으니 반드시 들어간다 */
+        } else {
+            int32_t v;
+            rpn_status e = parse_number(tok, len, &v);
+            if (e != RPN_OK) return e;
+            if (st_push(&st, v) != ST_OK) return RPN_ERR_STACK_FULL;
+        }
+    }
+    if (ntok == 0) return RPN_ERR_EMPTY;
+    if (st_size(&st) != 1) return RPN_ERR_LEFTOVER;
+    return st_pop(&st, out) == ST_OK ? RPN_OK : RPN_ERR_UNDERFLOW;
+}
+
+/* ---------------- 테스트 하네스 ---------------- */
+static int g_pass, g_total;
+#define CHECK(expr) do { g_total++; if (expr) { g_pass++; } \
+    else printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #expr); } while (0)
+
+static const char *br_name[] = { "OK", "MISMATCH", "UNCLOSED", "EXTRA_CLOSE", "TOO_DEEP" };
+static const char *rpn_name[] = { "OK", "EMPTY", "TOKEN", "UNDERFLOW", "STACK_FULL", "DIV0", "RANGE", "LEFTOVER" };
+
+int main(void) {
+    /* Part A: 스택 단위 테스트 */
+    istack s;
+    int32_t v = 0;
+    st_init(&s);
+    CHECK(st_empty(&s) && st_pop(&s, &v) == ST_UNDERFLOW && st_peek(&s, &v) == ST_UNDERFLOW);
+    CHECK(st_push(&s, 1) == ST_OK && st_push(&s, 2) == ST_OK && st_size(&s) == 2);
+    CHECK(st_peek(&s, &v) == ST_OK && v == 2 && st_size(&s) == 2);       /* peek 는 안 꺼낸다 */
+    CHECK(st_pop(&s, &v) == ST_OK && v == 2 && st_pop(&s, &v) == ST_OK && v == 1);   /* LIFO */
+    for (int32_t k = 0; k < STACK_CAP; k++) (void)st_push(&s, k * 10);
+    CHECK(st_size(&s) == STACK_CAP && st_push(&s, 999) == ST_OVERFLOW);
+    CHECK(st_peek(&s, &v) == ST_OK && v == 70);                           /* 실패한 push 는 흔적 없음 */
+    while (!st_empty(&s)) (void)st_pop(&s, &v);
+    CHECK(st_pop(&s, &v) == ST_UNDERFLOW && st_size(&s) == 0);
+    CHECK(s.high_water == STACK_CAP);                                     /* 비워도 최고 수위는 남는다 */
+
+    /* Part B: 괄호 검사 10 케이스 */
+    static const struct { const char *s; br_result want; size_t pos; } br[] = {
+        { "",                    BR_OK,          0 },
+        { "()[]{}",              BR_OK,          0 },
+        { "{[()()]}",            BR_OK,          0 },
+        { "led set(1) [on]",     BR_OK,          0 },   /* 괄호 아닌 글자는 무시 */
+        { "(]",                  BR_MISMATCH,    1 },
+        { "([)]",                BR_MISMATCH,    2 },
+        { "x = (a + b",          BR_UNCLOSED,    4 },
+        { "(()",                 BR_UNCLOSED,    0 },
+        { "())",                 BR_EXTRA_CLOSE, 2 },
+        { "((((((((()))))))))",  BR_TOO_DEEP,    8 },   /* 9단 > STACK_CAP 8 */
+    };
+    for (size_t k = 0; k < sizeof br / sizeof br[0]; k++) {
+        size_t pos = 999;
+        br_result r = check_brackets(br[k].s, &pos);
+        bool ok = (r == br[k].want) && (r == BR_OK || pos == br[k].pos);
+        CHECK(ok);
+        if (!ok) printf("   bracket case %zu \"%s\": got %s@%zu, want %s@%zu\n",
+                        k, br[k].s, br_name[r], pos, br_name[br[k].want], br[k].pos);
+    }
+
+    /* Part C: RPN 계산기 10 케이스 */
+    static const struct { const char *e; rpn_status want; int32_t val; } rc[] = {
+        { "3 4 +",                     RPN_OK,             7 },
+        { "5 1 2 + 4 * + 3 -",         RPN_OK,            14 },
+        { "-7 2 /",                    RPN_OK,            -3 },   /* C 나눗셈은 0 쪽으로 자름 */
+        { "   ",                       RPN_ERR_EMPTY,      0 },
+        { "4 -",                       RPN_ERR_UNDERFLOW,  0 },
+        { "1 2",                       RPN_ERR_LEFTOVER,   0 },
+        { "2 x +",                     RPN_ERR_TOKEN,      0 },
+        { "1 0 /",                     RPN_ERR_DIV0,       0 },
+        { "1 2 3 4 5 6 7 8 9",         RPN_ERR_STACK_FULL, 0 },
+        { "-2147483648 -1 /",          RPN_ERR_RANGE,      0 },   /* 유일하게 넘치는 나눗셈 */
+    };
+    for (size_t k = 0; k < sizeof rc / sizeof rc[0]; k++) {
+        int32_t out = 12345;                                       /* 실패 시 그대로여야 함 */
+        rpn_status r = rpn_eval(rc[k].e, &out);
+        bool ok = (r == rc[k].want) && (r == RPN_OK ? out == rc[k].val : out == 12345);
+        CHECK(ok);
+        if (!ok) printf("   rpn case %zu \"%s\": got %s (%d), want %s (%d)\n",
+                        k, rc[k].e, rpn_name[r], (int)out, rpn_name[rc[k].want], (int)rc[k].val);
+    }
+
+    printf("%d/%d passed\n", g_pass, g_total);
+    return g_pass == g_total ? 0 : 1;
+}

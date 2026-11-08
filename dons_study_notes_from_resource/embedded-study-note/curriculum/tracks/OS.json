@@ -1,0 +1,606 @@
+{
+  "id": "OS",
+  "intro": "범용 OS의 핵심 개념(프로세스, 가상 메모리, 동시성, 파일 시스템, I/O)은 임베디드 리눅스·플랫폼·드라이버 면접의 공통 언어다. OSTEP으로 개념을 익혔다면 이 트랙에서는 셸·malloc·락·페이지 테이블·파일 시스템·스케줄러를 직접 구현하고, Apple Silicon의 약한 메모리 모델 위에서 메모리 오더링을 실험하며, xv6 커널을 수정해 개념을 손에 붙인다.",
+  "goals": [
+    "fork/exec/pipe/signal/mmap 등 POSIX 시스템 콜로 프로세스·IPC 도구를 직접 만든다",
+    "페이지 테이블·TLB·페이지 교체를 시뮬레이터와 실측 벤치로 설명한다",
+    "malloc(free list, segregated, buddy/slab)을 구현하고 단편화·성능을 측정한다",
+    "mutex/condvar/rwlock/spinlock/atomics를 구현하고 메모리 오더링과 교착을 실험으로 이해한다",
+    "blocking/non-blocking/kqueue/epoll I/O 모델과 파일 시스템·크래시 일관성을 구현 수준에서 다룬다",
+    "xv6 커널에 시스템 콜·COW fork를 추가해 커널 내부 흐름을 경험한다"
+  ],
+  "prereq": [
+    "C",
+    "ARCH",
+    "DS"
+  ],
+  "refs": [
+    {
+      "title": "Remzi & Andrea Arpaci-Dusseau, Operating Systems: Three Easy Pieces (OSTEP)",
+      "url": "https://pages.cs.wisc.edu/~remzi/OSTEP/"
+    },
+    {
+      "title": "MIT 6.1810 xv6-riscv",
+      "url": "https://github.com/mit-pdos/xv6-riscv"
+    },
+    {
+      "title": "W. Richard Stevens & Stephen Rago, Advanced Programming in the UNIX Environment (3rd ed.)"
+    },
+    {
+      "title": "Bryant & O'Hallaron, Computer Systems: A Programmer's Perspective (malloc lab, ch. 9)"
+    },
+    {
+      "title": "Paul McKenney, Is Parallel Programming Hard, And, If So, What Can You Do About It?",
+      "url": "https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html"
+    },
+    {
+      "title": "Ulrich Drepper, Futexes Are Tricky",
+      "url": "https://www.akkadia.org/drepper/futex.pdf"
+    }
+  ],
+  "items": [
+    {
+      "id": "OS-B01",
+      "level": "B",
+      "title": "프로세스 생성: fork/exec/wait로 미니 셸",
+      "goal": "프로세스 생성·프로그램 교체·종료 상태 회수의 흐름과 좀비/고아 프로세스를 이해한다",
+      "task": "명령 파싱→fork→execvp→waitpid로 동작하는 미니 셸을 작성하고 종료 코드/시그널 종료 구분(WIFEXITED/WIFSIGNALED), 백그라운드 실행(&)과 SIGCHLD로 좀비 회수를 구현한다.",
+      "tags": [
+        "process",
+        "fork-exec",
+        "shell"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B02",
+      "level": "B",
+      "title": "파일 디스크립터·dup2·파이프: 파이프라인과 리다이렉션",
+      "goal": "fd 테이블 상속과 dup2로 셸 파이프라인이 만들어지는 원리를 구현한다",
+      "task": "미니 셸에 a | b | c 다단 파이프와 <, >, 2>&1 리다이렉션을 추가하고, 닫지 않은 파이프 fd 때문에 EOF가 오지 않아 hang되는 버그를 재현·수정한다.",
+      "tags": [
+        "file-descriptor",
+        "pipe",
+        "dup2"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B03",
+      "level": "B",
+      "title": "시스템 콜 비용 측정: 사용자↔커널 경계",
+      "goal": "시스템 콜·함수 호출·vDSO성 호출의 비용 차이를 실측으로 감 잡는다",
+      "task": "빈 함수 호출, getpid, read(0바이트), clock_gettime을 각각 수백만 회 반복해 호출당 ns를 측정하고(OSTEP 측정 과제), 결과 차이를 모드 전환·캐시 효과로 설명한다(리눅스에선 strace -c로 집계해 보기).",
+      "tags": [
+        "syscall",
+        "measurement",
+        "kernel-boundary"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B04",
+      "level": "B",
+      "title": "스레드 기초: pthread 생성과 공유 카운터 레이스",
+      "goal": "스레드가 주소 공간을 공유함과 비원자적 증가가 깨지는 이유를 어셈블리 수준에서 보인다",
+      "task": "스레드 N개가 공유 카운터를 각 100만 번 증가시키는 프로그램으로 레이스를 재현하고, counter++의 ldr/add/str 어셈블리를 보며 손실 원인을 설명한 뒤 ThreadSanitizer로 탐지한다.",
+      "tags": [
+        "threads",
+        "race-condition",
+        "tsan"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B05",
+      "level": "B",
+      "title": "뮤텍스: 레이스 해결과 경합 비용 측정",
+      "goal": "락 범위·세분성이 정확성과 성능에 주는 영향을 측정한다",
+      "task": "공유 카운터를 전역 락, 스레드 로컬 누적 후 합산(sloppy counter, OSTEP), atomic fetch_add로 각각 구현해 스레드 수 1~8에서 처리량을 비교하고 결과를 그래프로 정리한다.",
+      "tags": [
+        "mutex",
+        "contention",
+        "scalability"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B06",
+      "level": "B",
+      "title": "조건 변수: bounded buffer 생산자-소비자",
+      "goal": "조건 변수 사용 규칙(락 보유, while 재검사, signal vs broadcast)을 구현으로 체득한다",
+      "task": "pthread_cond로 bounded buffer를 구현하고, if로 검사하는 버전과 조건 변수 1개만 쓰는 버전이 생산자·소비자 여럿일 때 깨지는 시나리오를 재현(OSTEP 30장)한 뒤 올바른 버전으로 고친다.",
+      "tags": [
+        "condition-variable",
+        "producer-consumer",
+        "synchronization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B07",
+      "level": "B",
+      "title": "시그널: 핸들러, async-signal-safe, self-pipe",
+      "goal": "시그널 핸들러에서 할 수 있는 일의 제약과 안전한 처리 패턴을 익힌다",
+      "task": "SIGINT/SIGTERM/SIGCHLD 핸들러를 sigaction으로 설치하고, 핸들러에서 printf/malloc 호출이 위험한 이유를 설명한 뒤 volatile sig_atomic_t 플래그와 self-pipe trick으로 메인 루프에 이벤트를 전달하도록 구현한다.",
+      "tags": [
+        "signals",
+        "async-signal-safe",
+        "self-pipe"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B08",
+      "level": "B",
+      "title": "주소 공간 탐색: 텍스트·데이터·힙·스택과 ASLR",
+      "goal": "프로세스 가상 주소 공간 배치를 직접 관찰하고 ASLR 효과를 확인한다",
+      "task": "전역/정적/힙/스택/함수/공유 라이브러리 주소를 출력하는 프로그램을 여러 번 실행해 배치와 무작위화를 관찰하고, vmmap(macOS) 또는 /proc/self/maps(리눅스) 출력과 대조한다.",
+      "tags": [
+        "address-space",
+        "aslr",
+        "virtual-memory"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B09",
+      "level": "B",
+      "title": "mmap: 파일 매핑, 익명 매핑, MAP_SHARED vs PRIVATE",
+      "goal": "메모리 매핑 I/O와 COW private 매핑의 의미를 실험으로 확인한다",
+      "task": "파일을 MAP_SHARED/MAP_PRIVATE로 매핑해 쓰기가 파일에 반영되는지, fork 후 부모·자식 간 공유되는지를 표로 검증하고, mmap 기반 파일 복사와 read/write 복사의 속도를 비교한다.",
+      "tags": [
+        "mmap",
+        "cow",
+        "file-io"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B10",
+      "level": "B",
+      "title": "주소 변환 시뮬레이터: 단일 레벨 페이지 테이블",
+      "goal": "VPN/offset 분해, PTE 비트(valid, R/W/X, dirty, accessed), 페이지 폴트 조건을 구현한다",
+      "task": "주소 공간 크기·페이지 크기를 파라미터로 받는 선형 페이지 테이블 시뮬레이터를 작성해 가상→물리 변환·권한 위반·미할당 접근을 판정하고, OSTEP paging-linear-translate 결과와 대조한다.",
+      "tags": [
+        "paging",
+        "page-table",
+        "address-translation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B11",
+      "level": "B",
+      "title": "페이지 교체 시뮬레이터: FIFO/LRU/Clock/OPT",
+      "goal": "교체 정책별 히트율 차이와 Belady 이상 현상을 실험으로 확인한다",
+      "task": "참조 문자열과 프레임 수를 입력받는 교체 시뮬레이터를 작성해 정책별 히트율 곡선을 그리고, FIFO에서 프레임을 늘렸는데 폴트가 늘어나는 Belady 사례와 Clock의 LRU 근사 정도를 보인다.",
+      "tags": [
+        "page-replacement",
+        "lru",
+        "clock",
+        "belady"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B12",
+      "level": "B",
+      "title": "CPU 스케줄링 시뮬레이터: FCFS/SJF/RR/MLFQ",
+      "goal": "범용 OS 스케줄러의 목표(반환 시간 vs 응답 시간)와 MLFQ 규칙을 구현으로 이해한다",
+      "task": "작업 목록(도착, 실행 길이, I/O 패턴)을 입력받아 FCFS·SJF·STCF·RR·MLFQ(우선순위 부스트 포함)를 시뮬레이션하고 평균 반환/응답 시간을 비교한다(실시간 스케줄링은 see:RTOS).",
+      "tags": [
+        "scheduling",
+        "mlfq",
+        "simulation",
+        "see:RTOS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B13",
+      "level": "B",
+      "title": "파일 API와 원자적 저장: write→fsync→rename",
+      "goal": "버퍼 캐시·fsync 의미를 이해하고 크래시에도 깨지지 않는 설정 파일 저장을 구현한다",
+      "task": "임시 파일 쓰기→fsync(파일)→rename→디렉터리 fsync 패턴으로 설정 저장 함수를 만들고, 각 단계 직후 프로세스를 kill하는 테스트로 원본 또는 새 버전만 남음을 검증한다(macOS는 F_FULLFSYNC 차이도 정리).",
+      "tags": [
+        "file-system",
+        "fsync",
+        "atomic-rename",
+        "durability"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-B14",
+      "level": "B",
+      "title": "IPC 비교: 파이프·FIFO·Unix 소켓·공유 메모리",
+      "goal": "IPC 수단별 지연·처리량·사용 패턴의 차이를 측정한다",
+      "task": "같은 메시지 교환(핑퐁 지연, 대량 전송)을 pipe, named FIFO, Unix domain socket, shm_open+세마포어로 구현해 왕복 지연과 MB/s를 측정·비교하고 용도별 선택 기준을 정리한다.",
+      "tags": [
+        "ipc",
+        "shared-memory",
+        "unix-socket",
+        "benchmark"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M01",
+      "level": "M",
+      "title": "페이지 테이블 관리자: map/unmap/protect와 TLB 무효화",
+      "goal": "OS가 페이지 테이블을 '관리'하는 연산(매핑 생성·해제·권한 변경, 테이블 페이지 회수, TLB 무효화 시점)을 구현한다(워크·TLB 하드웨어 모델은 see:MEM, see:ARCH)",
+      "task": "4레벨 페이지 테이블에 map_range/unmap_range/protect_range를 구현하고 빈 하위 테이블 회수, unmap·권한 축소 시 필요한 TLB invalidate 호출(단일 VA vs ASID 전체)을 기록하는 mock TLB로 누락 없는지 테스트한다.",
+      "tags": [
+        "page-table",
+        "mmu-management",
+        "tlb-shootdown",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M02",
+      "level": "M",
+      "title": "컨텍스트 스위치 비용 측정: 파이프 핑퐁",
+      "goal": "프로세스·스레드 간 문맥 교환 비용을 측정하고 측정 오차 요인을 통제한다",
+      "task": "두 프로세스(그리고 두 스레드)가 파이프로 1바이트를 주고받는 핑퐁을 수십만 회 실행해 왕복당 시간을 측정하고(OSTEP 6장 과제), 시스템 콜 비용을 빼서 스위치 비용을 추정하며 코어 고정 불가(macOS) 등 오차 요인을 정리한다.",
+      "tags": [
+        "context-switch",
+        "measurement",
+        "process-vs-thread"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M03",
+      "level": "M",
+      "title": "COW fork와 페이지 폴트 관찰",
+      "goal": "fork 직후 메모리가 공유되고 쓰기 시점에 복사됨을 폴트 카운트로 확인한다",
+      "task": "큰 버퍼를 할당한 부모가 fork한 뒤 자식이 일부 페이지만 쓰도록 하고 getrusage의 ru_minflt 변화, 쓰기 페이지 수와의 비례 관계를 측정하며, vfork/posix_spawn을 쓰는 이유를 설명한다.",
+      "tags": [
+        "cow",
+        "fork",
+        "page-fault"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M04",
+      "level": "M",
+      "title": "malloc 구현 1: 암시적/명시적 free list, split·coalesce",
+      "goal": "할당기의 헤더/푸터, first/next/best fit, 분할·병합을 직접 구현한다",
+      "task": "sbrk 대신 큰 mmap 영역 위에서 boundary tag 명시적 free list 할당기(malloc/free/realloc)를 구현하고, 트레이스 기반 테스트로 정확성·처리량·공간 활용률(utilization)을 측정한다(CS:APP malloc lab 방식).",
+      "tags": [
+        "malloc",
+        "free-list",
+        "coalescing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M05",
+      "level": "M",
+      "title": "malloc 구현 2: segregated free lists와 단편화 측정",
+      "goal": "크기 클래스별 리스트로 속도를 높이고 내부/외부 단편화를 정량화한다",
+      "task": "이전 할당기를 크기 클래스 segregated list로 개선해 같은 트레이스에서 처리량·utilization을 비교하고, 내부 단편화와 외부 단편화를 각각 측정하는 계측 코드를 추가한다.",
+      "tags": [
+        "malloc",
+        "segregated-list",
+        "fragmentation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M06",
+      "level": "M",
+      "title": "스레드별 캐시 할당기: arena + tcache",
+      "goal": "멀티스레드 malloc이 락 경합을 피하는 구조(jemalloc/mimalloc 개념)를 이해한다",
+      "task": "M05 할당기에 스레드별 소형 객체 캐시(tcache)와 다중 arena를 추가해 8스레드 할당/해제 벤치에서 전역 락 버전 대비 처리량을 측정하고, 다른 스레드가 해제하는 경로(remote free)를 구현·테스트한다(slab/buddy 자체는 see:DS-M03/M04).",
+      "tags": [
+        "malloc",
+        "allocator",
+        "concurrency",
+        "see:DS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M07",
+      "level": "M",
+      "title": "스핀락 구현: TAS, TTAS, ticket lock",
+      "goal": "원자 명령으로 락을 만들고 캐시 일관성 트래픽이 성능에 주는 영향을 측정한다",
+      "task": "C11 atomics로 test-and-set, test-and-test-and-set(+백오프), ticket lock을 구현해 경합 스레드 수별 처리량과 공정성(스레드별 획득 횟수 분산)을 측정하고, M2에서 생성되는 LDAXR/STLXR 또는 LSE(CAS/SWP) 명령을 확인한다.",
+      "tags": [
+        "spinlock",
+        "atomics",
+        "ticket-lock",
+        "cache-coherence"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M08",
+      "level": "M",
+      "title": "C11 atomics 동기화 패턴: 메시지 패싱·DCLP",
+      "goal": "리트머스 결과를 실제 코드 패턴(플래그 전달, 지연 초기화)에 적용한다",
+      "task": "relaxed 플래그로 데이터를 넘기는 코드와 double-checked locking 지연 초기화의 버그를 M2에서 스트레스 테스트로 재현하고, release/acquire와 call_once 방식으로 고친 뒤 TSan으로 검증한다(하드웨어 리트머스 자체는 see:ARCH-A05).",
+      "tags": [
+        "atomics",
+        "memory-order",
+        "see:ARCH"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M09",
+      "level": "M",
+      "title": "reader-writer lock 구현과 writer starvation",
+      "goal": "읽기 다수 워크로드용 rwlock의 공정성 정책을 설계한다",
+      "task": "mutex+condvar로 reader-preferring과 writer-preferring rwlock을 구현해 읽기 95%/쓰기 5% 워크로드에서 처리량과 writer 최대 대기 시간을 측정하고, starvation을 재현·완화한다.",
+      "tags": [
+        "rwlock",
+        "fairness",
+        "starvation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M10",
+      "level": "M",
+      "title": "교착 상태: 식사하는 철학자와 4가지 조건",
+      "goal": "교착의 필요 조건을 이해하고 각 조건을 깨는 해법을 구현으로 비교한다",
+      "task": "식사하는 철학자를 그대로 구현해 교착을 재현한 뒤 (1) 전역 락 순서 (2) trylock+백오프 (3) 동시 착석 제한 세마포어로 각각 해결하고, 각 해법이 깨는 조건과 처리량 차이를 정리한다.",
+      "tags": [
+        "deadlock",
+        "dining-philosophers",
+        "lock-ordering"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M11",
+      "level": "M",
+      "title": "교착 탐지기: 락 순서 그래프 (mini lockdep)",
+      "goal": "실행 중 락 획득 순서를 기록해 잠재적 교착을 실제로 일어나기 전에 탐지한다",
+      "task": "pthread_mutex 래퍼로 '보유 중인 락 → 새로 잡는 락' 간선을 전역 그래프에 기록하고, 사이클 생성 시 두 경로의 호출 스택과 함께 경고하는 탐지기를 만들어 의도적 ABBA 버그로 검증한다.",
+      "tags": [
+        "deadlock-detection",
+        "lockdep",
+        "graph-cycle"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M12",
+      "level": "M",
+      "title": "I/O 모델 비교: blocking·non-blocking·select·kqueue 에코 서버",
+      "goal": "스레드-per-연결과 이벤트 루프 모델의 차이를 구현과 부하 테스트로 체감한다",
+      "task": "같은 TCP 에코 서버를 (1) 연결당 스레드 (2) select (3) kqueue 이벤트 루프로 구현하고, 동시 연결 1000개 부하 생성기로 처리량·메모리·지연을 비교한다.",
+      "tags": [
+        "io-models",
+        "kqueue",
+        "event-loop"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-M13",
+      "level": "M",
+      "title": "epoll 에코 서버: level vs edge triggered",
+      "goal": "리눅스 epoll의 LT/ET 의미와 ET에서 EAGAIN까지 읽어야 하는 이유를 확인한다",
+      "task": "kqueue 서버를 epoll로 포팅해 LT와 ET(EPOLLET) 모드로 각각 동작시키고, ET에서 한 번만 read해 데이터가 남아 멈추는 버그와 EPOLLONESHOT 멀티스레드 패턴을 실험한다.",
+      "tags": [
+        "epoll",
+        "edge-triggered",
+        "linux"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 등 리눅스(epoll은 리눅스 전용)"
+    },
+    {
+      "id": "OS-M14",
+      "level": "M",
+      "title": "파일 시스템 구현: VSFS (inode·비트맵·디렉터리)",
+      "goal": "디스크 이미지 위 파일 시스템의 온디스크 구조와 경로 탐색을 직접 구현한다",
+      "task": "블록 디바이스를 파일로 흉내 낸 디스크 이미지에 superblock·inode/데이터 비트맵·inode 테이블·디렉터리 엔트리를 갖춘 VSFS를 구현해 mkfs/create/write/read/ls/unlink를 지원하고 fsck 비슷한 일관성 검사기를 작성한다.",
+      "tags": [
+        "file-system",
+        "inode",
+        "vsfs"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-A01",
+      "level": "A",
+      "title": "futex 기반 뮤텍스 구현 (Drepper 방식)",
+      "goal": "커널 개입을 경합 시로만 제한하는 빠른 사용자 공간 락의 설계와 미묘한 버그를 이해한다",
+      "task": "FUTEX_WAIT/WAKE syscall로 Drepper 'Futexes Are Tricky'의 상태 0/1/2 뮤텍스를 구현하고, 순진한 버전의 lost wakeup·불필요한 syscall을 재현한 뒤 pthread_mutex와 경합별 성능을 비교한다.",
+      "tags": [
+        "futex",
+        "mutex",
+        "linux",
+        "syscall"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 등 리눅스(futex는 리눅스 전용; macOS 대응물은 os_unfair_lock/__ulock_wait로 비교만)"
+    },
+    {
+      "id": "OS-A02",
+      "level": "A",
+      "title": "디버거는 어떻게 동작하나: ptrace로 미니 디버거",
+      "goal": "ptrace·소프트웨어 브레이크포인트·싱글스텝으로 디버거의 원리를 직접 구현해 이해한다",
+      "task": "ptrace(PTRACE_TRACEME/PEEKTEXT/POKETEXT/SINGLESTEP)로 자식 프로세스를 실행·정지시키고, 지정 주소에 BRK/int3 명령을 심어 브레이크포인트·레지스터 출력·continue를 지원하는 미니 디버거를 작성해 테스트 프로그램에서 동작을 확인한다(lock-free ABA는 see:DS-A04).",
+      "tags": [
+        "ptrace",
+        "debugger",
+        "see:TOOL"
+      ],
+      "env": "linux",
+      "env_note": "ptrace 기능이 macOS에서 제한적 → Lima VM(Linux)에서 실습"
+    },
+    {
+      "id": "OS-A03",
+      "level": "A",
+      "title": "RCU 개념 구현: epoch 기반 메모리 회수",
+      "goal": "읽기 측 무락 접근과 grace period 후 해제라는 RCU 핵심 아이디어를 사용자 공간에서 구현한다",
+      "task": "읽기 다수 설정 테이블을 포인터 교체로 갱신하고, 리더의 epoch 진입/이탈 기록으로 grace period를 판단해 구 버전을 해제하는 EBR을 구현한 뒤 rwlock 대비 읽기 처리량과 ASan으로 use-after-free 부재를 검증한다.",
+      "tags": [
+        "rcu",
+        "epoch-reclamation",
+        "read-mostly"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-A04",
+      "level": "A",
+      "title": "CFS 개념 구현: vruntime과 nice 가중치",
+      "goal": "리눅스 CFS의 가상 실행 시간 기반 공정 스케줄링과 레이턴시 목표를 시뮬레이터로 구현한다",
+      "task": "nice→weight 테이블, vruntime 증가율, min-vruntime 선택(레드블랙트리 또는 min-heap), sched_latency/min_granularity를 갖춘 시뮬레이터를 작성해 nice 값별 CPU 점유 비율과 깨어난 태스크의 vruntime 보정 효과를 검증한다(EEVDF로의 변화는 개념 정리).",
+      "tags": [
+        "cfs",
+        "vruntime",
+        "scheduling",
+        "linux-concept"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-A05",
+      "level": "A",
+      "title": "work-stealing 스레드 풀: Chase-Lev deque",
+      "goal": "로드 밸런싱을 위한 작업 훔치기 스케줄러와 lock-free deque의 메모리 오더링을 구현한다(false sharing 측정은 see:MEM)",
+      "task": "워커별 Chase-Lev deque(소유자 push/pop, 도둑 steal CAS)와 스레드 풀을 구현해 재귀 병렬 합·fib 워크로드에서 전역 큐 대비 확장성을 측정하고, TSan과 스트레스 테스트로 오더링 버그가 없음을 검증한다.",
+      "tags": [
+        "work-stealing",
+        "thread-pool",
+        "lock-free",
+        "memory-ordering"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-A06",
+      "level": "A",
+      "title": "사용자 공간 페이지 폴트 처리: mprotect + SIGSEGV",
+      "goal": "보호 폴트를 가로채 지연 할당·쓰기 추적(dirty tracking)을 구현해 OS의 demand paging을 흉내 낸다",
+      "task": "PROT_NONE으로 예약한 영역 접근 시 SIGSEGV(macOS는 SIGBUS 포함) 핸들러에서 해당 페이지를 mprotect로 열어 지연 할당하고, 쓰기 감지로 dirty 페이지만 체크포인트하는 증분 스냅샷 기능을 구현한다.",
+      "tags": [
+        "page-fault",
+        "mprotect",
+        "demand-paging",
+        "sigsegv"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-A07",
+      "level": "A",
+      "title": "크래시 일관성: write-ahead 저널링 + 크래시 주입",
+      "goal": "메타데이터 저널링이 크래시 후 일관성을 어떻게 보장하는지 구현으로 증명한다",
+      "task": "VSFS에 트랜잭션 begin/log/commit/checkpoint 저널을 추가하고, 블록 쓰기 N번째마다 크래시를 주입해 재시작 시 replay 후 fsck가 항상 통과함을 전수 테스트로 검증한다(데이터 vs 메타데이터 저널링 비교 포함).",
+      "tags": [
+        "journaling",
+        "crash-consistency",
+        "wal",
+        "fault-injection"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-A08",
+      "level": "A",
+      "title": "로그 구조 FS와 FTL: 세그먼트 클리닝 시뮬레이터",
+      "goal": "LFS의 out-of-place 쓰기·클리닝과 SSD FTL GC의 공통점(쓰기 증폭)을 정량화한다",
+      "task": "세그먼트 기반 로그 구조 저장소 시뮬레이터에 greedy와 cost-benefit 클리닝 정책을 구현해 균일/hot-cold 워크로드에서 쓰기 증폭과 클리닝 비용을 측정하고, SSD FTL 경험과 연결해 정리한다(see:STOR).",
+      "tags": [
+        "lfs",
+        "ftl",
+        "garbage-collection",
+        "write-amplification",
+        "see:STOR"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "OS-A09",
+      "level": "A",
+      "title": "xv6 커널 해킹 1: 시스템 콜 추가 (trace, sysinfo)",
+      "goal": "사용자 공간→트랩→시스템 콜 디스패치→커널 구현까지 실제 커널 경로를 수정한다",
+      "task": "xv6-riscv에 trace(mask) 시스템 콜(호출 추적 출력, fork 상속)과 sysinfo(빈 메모리·프로세스 수)를 추가하고 user/ 테스트 프로그램과 make grade 스타일 테스트로 검증한다.",
+      "tags": [
+        "xv6",
+        "syscall",
+        "kernel-hacking",
+        "risc-v"
+      ],
+      "env": "qemu",
+      "env_note": "xv6-riscv + riscv64 툴체인(brew riscv-tools 또는 riscv64-elf-gcc) + qemu-system-riscv64"
+    },
+    {
+      "id": "OS-A10",
+      "level": "A",
+      "title": "xv6 커널 해킹 2: COW fork 구현",
+      "goal": "페이지 폴트 핸들러·참조 카운트·PTE 플래그를 다뤄 커널 메모리 관리를 직접 구현한다",
+      "task": "xv6의 uvmcopy를 COW로 바꾸고 RSW 비트로 COW 페이지를 표시, 저장 페이지 폴트(scause 15) 핸들러에서 복사, 물리 페이지 참조 카운트를 구현해 cowtest와 usertests를 통과시킨다.",
+      "tags": [
+        "xv6",
+        "cow",
+        "page-fault",
+        "kernel-hacking"
+      ],
+      "env": "qemu",
+      "env_note": "xv6-riscv + riscv64 툴체인(brew riscv-tools 또는 riscv64-elf-gcc) + qemu-system-riscv64"
+    },
+    {
+      "id": "OS-A11",
+      "level": "A",
+      "title": "종합: 멀티스레드 서비스 데몬",
+      "goal": "프로세스·스레드·I/O·메모리·시그널 개념을 하나의 견고한 서비스로 통합한다",
+      "task": "kqueue 이벤트 루프+워커 스레드 풀(bounded queue, condvar)+자체 슬랩 할당기+SIGTERM 그레이스풀 셧다운+원자적 설정 리로드(SIGHUP)를 갖춘 키-값 서버를 작성하고, TSan/ASan·부하 테스트·크래시 후 재시작 시나리오로 검증한다.",
+      "tags": [
+        "capstone",
+        "thread-pool",
+        "event-loop",
+        "graceful-shutdown"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

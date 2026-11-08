@@ -1,0 +1,541 @@
+{
+  "id": "HWLAB",
+  "intro": "보드 브링업과 계측은 실리콘·보드 검증 면접(Rivian, Apple, NVIDIA 등)에서 '스코프로 무엇을 어떻게 봤고 그 수치가 무엇을 의미하는가'를 묻는 영역이다. 회로도·데이터시트 읽기에서 출발해 스코프/LA 측정 원리, 전원·신호 무결성, eye diagram·지터 분해·BER bathtub까지를 합성 또는 실측 캡처(CSV/VCD/sigrok)를 직접 분석하는 코드로 다루고, 실제 장비가 필요한 항목은 최소한의 저가 장비로 한정한다.",
+  "goals": [
+    "회로도·넷리스트·데이터시트에서 bring-up 측정 지점과 인터페이스 위험을 수치로 뽑아낸다",
+    "스코프/LA 측정 체인(대역폭·프로브·샘플링·트리거)이 결과를 어떻게 왜곡하는지 설명하고 측정 알고리즘을 직접 구현한다",
+    "전원 레일 리플·load transient·PDN 임피던스·저전력 전류를 측정·판정한다",
+    "eye diagram, TIE/RJ/DJ 지터 분해, BER bathtub, 등화·CDR·JTOL을 캡처 분석 코드로 구현한다",
+    "간헐 장애를 아날로그·디지털 캡처 상관과 타이밍 마진 통계로 격리하고 브링업 계측 계획을 설계한다"
+  ],
+  "prereq": [
+    "C",
+    "DSP",
+    "COMM",
+    "SIV"
+  ],
+  "refs": [
+    {
+      "title": "High-Speed Digital Design: A Handbook of Black Magic (Howard Johnson, Martin Graham)"
+    },
+    {
+      "title": "Signal and Power Integrity — Simplified (Eric Bogatin)"
+    },
+    {
+      "title": "Principles of Power Integrity for PDN Design (Larry D. Smith, Eric Bogatin)"
+    },
+    {
+      "title": "Jitter, Noise, and Signal Integrity at High-Speed (Mike Peng Li)"
+    },
+    {
+      "title": "The Art of Electronics, 3rd ed. (Horowitz, Hill)"
+    },
+    {
+      "title": "IEEE Std 181 — Transitions, Pulses, and Related Waveforms"
+    },
+    {
+      "title": "sigrok wiki (libsigrok / libsigrokdecode / PulseView)",
+      "url": "https://sigrok.org/wiki/Main_Page"
+    },
+    {
+      "title": "sigrok Protocol decoder HOWTO",
+      "url": "https://sigrok.org/wiki/Protocol_decoder_HOWTO"
+    },
+    {
+      "title": "PyVISA documentation",
+      "url": "https://pyvisa.readthedocs.io/"
+    },
+    {
+      "title": "NIST ITS-90 Thermocouple Database",
+      "url": "https://srdata.nist.gov/its90/main/"
+    },
+    {
+      "title": "PCI-SIG PCI Express Base Specification (Lane Margining at Receiver)",
+      "url": "https://pcisig.com/specifications"
+    }
+  ],
+  "items": [
+    {
+      "id": "HWLAB-B01",
+      "level": "B",
+      "title": "회로도 넷리스트 감사: 레일·풀업·테스트 포인트 (Netlist Audit)",
+      "goal": "회로도를 bring-up 관점으로 읽어 측정 지점과 위험 요소를 기계적으로 뽑아낸다.",
+      "task": "KiCad 넷리스트(.net S-expression, 예제 보드 export 또는 합성)를 파싱해 전원 레일별 연결 부품·테스트포인트 유무, I2C/RESET/strap 넷의 풀업·풀다운 존재와 값, 단일 핀(미연결) 넷을 리포트하는 Python 감사 도구를 작성하고, 풀업 누락·TP 없는 레일을 심은 넷리스트로 검출되는지 확인한다.",
+      "tags": [
+        "schematic",
+        "netlist",
+        "kicad",
+        "bring-up",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": "KiCad(선택, brew install --cask kicad)로 예제 넷리스트 export 가능"
+    },
+    {
+      "id": "HWLAB-B02",
+      "level": "B",
+      "title": "데이터시트 로직 레벨: 노이즈 마진과 전압 도메인 호환성",
+      "goal": "VIH/VIL/VOH/VOL·절대최대정격으로 두 칩을 직결해도 되는지 수치로 판정한다.",
+      "task": "부품 JSON(VDDIO, VIH/VIL, VOH/VOL@IOH/IOL, 절대최대정격, 5V tolerant, ESD 다이오드 유무)으로 드라이버→리시버 쌍의 High/Low DC 노이즈 마진을 계산하고 1.8V↔3.3V 직결·open-drain 레벨시프트·전원 꺼진 칩으로의 back-powering 위험을 판정하는 검사기를 작성해 6개 인터페이스 조합 표로 검증한다.",
+      "tags": [
+        "datasheet",
+        "logic-level",
+        "noise-margin",
+        "back-powering"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-B03",
+      "level": "B",
+      "title": "I2C 풀업 저항 계산: 버스 커패시턴스·Rise Time",
+      "goal": "I2C 스펙 표에서 허용 풀업 저항 창을 유도하고 rise time을 파형에서 직접 측정한다.",
+      "task": "Sm/Fm/Fm+ 스펙(tr max, VOL=0.4V@3mA/20mA, Cb max)으로 Rp(min)=(VDD−VOL)/IOL, Rp(max)=tr/(0.8473·Cb)를 계산하는 함수와 RC 에지 합성 파형에서 30–70% rise time을 측정하는 코드를 작성해, Cb 50~400pF에서 허용 Rp 창이 닫히는 지점을 찾는다(디코드 측 증상은 see:SIV-A07, 프로토콜은 see:COMM-B06).",
+      "tags": [
+        "i2c",
+        "pull-up",
+        "rise-time",
+        "bus-capacitance",
+        "see:SIV",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-B04",
+      "level": "B",
+      "title": "파형 기본 측정 알고리즘: 상태 레벨·Rise/Fall·Overshoot (IEEE 181)",
+      "goal": "스코프 자동 측정값이 어떻게 계산되는지 직접 구현해 측정 함정을 이해한다.",
+      "task": "스코프 CSV(time,volt)에서 히스토그램 mode로 top/base 상태 레벨을 구하고 10–90% rise/fall time(선형 보간 교차), overshoot/undershoot %, 주파수·duty·펄스폭을 계산하는 측정 라이브러리를 작성해, 링잉·잡음을 넣은 합성 펄스에서 min/max 기반 순진한 방법과 오차를 비교한다.",
+      "tags": [
+        "oscilloscope",
+        "rise-time",
+        "overshoot",
+        "ieee181",
+        "measurement"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-B05",
+      "level": "B",
+      "title": "스코프 대역폭·프로브 부하·그라운드 리드 링잉",
+      "goal": "측정 체인(스코프·프로브·그라운드 리드)이 파형을 어떻게 왜곡하는지 정량화한다.",
+      "task": "tr_meas≈√(tr_sig²+tr_scope²+tr_probe²)와 BW≈0.35/tr로 1ns 에지를 3% 오차 이내로 보기 위한 대역폭을 계산하고, 10x 프로브(10MΩ‖~12pF) + 15cm 그라운드 리드(~150nH) RLC 모델을 시뮬레이션해 링잉 주파수 1/(2π√LC)와 overshoot가 스프링 팁(~10nH)에서 얼마나 줄어드는지 B04 도구로 측정한다.",
+      "tags": [
+        "probe",
+        "bandwidth",
+        "ground-lead",
+        "ringing",
+        "oscilloscope"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-B06",
+      "level": "B",
+      "title": "트리거 로직 구현: Edge·Pulse-width·Runt·Timeout",
+      "goal": "간헐 글리치를 잡는 스코프 트리거의 동작을 구현해 '어떻게 잡을지'를 설명할 수 있다.",
+      "task": "히스테리시스 edge 트리거, pulse-width(<,>), runt(두 임계 사이에서 되돌아오는 펄스), timeout 트리거를 샘플 스트림 상태기계로 구현하고, 10M 샘플 합성 캡처에 심어 둔 드문 runt/글리치 3개를 찾아 pre/post-trigger 윈도우로 잘라 저장한다.",
+      "tags": [
+        "trigger",
+        "glitch",
+        "runt",
+        "oscilloscope",
+        "intermittent"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-B07",
+      "level": "B",
+      "title": "LA 캡처 포맷과 샘플링률: sigrok .sr·CSV·VCD",
+      "goal": "로직 애널라이저 캡처를 공통 형식으로 다루고 샘플링률이 타이밍 측정을 어떻게 제한하는지 안다.",
+      "task": "sigrok .sr(zip: metadata + logic-1-N 청크)·Saleae식 CSV·VCD를 공통 transition 리스트로 읽는 로더를 작성하고(VCD 파서는 see:EMU-B07 재사용), 10MHz SPI를 20/50/100MS/s로 재샘플링했을 때 에지 위치 오차(±1 샘플)와 디코드 실패가 생기는 경계를 실험한다; sigrok-cli 데모 .sr과 왕복 비교한다.",
+      "tags": [
+        "logic-analyzer",
+        "sigrok",
+        "vcd",
+        "sample-rate",
+        "see:EMU"
+      ],
+      "env": "mac",
+      "env_note": "brew install sigrok-cli (선택: -d demo 로 데모 .sr 생성); 없으면 합성 캡처만으로 진행"
+    },
+    {
+      "id": "HWLAB-B08",
+      "level": "B",
+      "title": "전원 레일 측정: DC 정확도·리플·20MHz BW Limit",
+      "goal": "레일 리플을 '제대로' 측정하는 방법(BW limit, 스파이크 분리)을 수치로 체득한다.",
+      "task": "벅 출력 합성 캡처(DC + 스위칭 리플 + 고주파 스위칭 스파이크 + 잡음)에서 Vavg·pk-pk·RMS 리플을 계산하고, 20MHz BW limit을 Butterworth 필터로 흉내내 스파이크가 리플 수치를 얼마나 부풀리는지 비교한 뒤 레일 스펙(±3%, 30mVpp) pass/fail 리포트를 출력한다(시퀀싱 검사는 see:SIV-A06).",
+      "tags": [
+        "power-rail",
+        "ripple",
+        "bw-limit",
+        "buck",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-B09",
+      "level": "B",
+      "title": "첫 전원 인가: 단락 검사·Golden 보드 비교·Inrush",
+      "goal": "새 보드에 처음 전원을 넣기 전후의 smoke test를 데이터 기반으로 수행한다.",
+      "task": "레일별 GND 저항 측정표(DUT 1장 + golden 5장)에서 golden 분포 대비 비율/z-score로 단락·오픈 의심 레일을 표시하고, 전류 제한 벤치 전원 투입 합성 캡처에서 inrush 피크·지속시간·정상 전류를 측정해 전류 제한 설정값을 추천하는 smoke-test 스크립트를 작성한다(펌웨어 bring-up 순서는 see:PLAT-B09).",
+      "tags": [
+        "bring-up",
+        "smoke-test",
+        "short",
+        "inrush",
+        "golden-board",
+        "see:PLAT"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-B10",
+      "level": "B",
+      "title": "열 측정 기초: 열전대 냉접점 보상과 Tj 추정",
+      "goal": "열전대 측정과 열 파라미터(θJA, ΨJT)를 올바르게 써서 접합 온도를 추정한다.",
+      "task": "NIST ITS-90 K형 다항식으로 mV↔°C 변환과 냉접점 보상(CJC)을 구현해 CJC 생략 시 오차를 보이고, 케이스 온도·전력으로 Tj=Tc+P·ΨJT와 Tj=Ta+P·θJA 추정치를 비교해 실제 보드에서 θJA를 쓰면 왜 틀리는지 수치로 설명한다(throttling 검증은 see:SIV-A04).",
+      "tags": [
+        "thermal",
+        "thermocouple",
+        "cjc",
+        "junction-temp",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M01",
+      "level": "M",
+      "title": "전송선로 반사: Bounce Diagram·TDR 해석·종단",
+      "goal": "반사·종단을 계산으로 다루고 TDR 파형에서 임피던스 불연속을 찾아낸다.",
+      "task": "반사계수 ρ=(ZL−Z0)/(ZL+Z0) 기반 lattice(bounce) 시뮬레이터로 스텝 응답을 만들고, 합성 TDR 파형에서 불연속 위치(거리=v·t/2, v=c/√εeff)와 임피던스를 역산하는 해석기를 작성한 뒤, 15Ω 드라이버+50Ω 트레이스에서 직렬 종단 R을 sweep해 overshoot 최소점을 찾고 병렬/Thevenin/AC 종단의 전력·지연 trade-off를 표로 정리한다.",
+      "tags": [
+        "signal-integrity",
+        "transmission-line",
+        "tdr",
+        "termination",
+        "reflection"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M02",
+      "level": "M",
+      "title": "Load Transient 응답: Droop·Recovery·위상 마진 추정",
+      "goal": "부하 스텝 캡처에서 레귤레이터 안정성을 판정한다.",
+      "task": "2차 시스템으로 모델링한 레귤레이터에 부하 스텝(0.5→3A, 1A/µs)을 넣은 합성 캡처에서 droop 크기, 허용 밴드 복귀 시간, 링잉 주기를 측정하고, 로그 감쇠율→감쇠비 ζ→위상 마진 근사(PM≈100·ζ)를 추정해 보상 변경 전후 두 캡처 중 어느 쪽이 안정한지 판정한다.",
+      "tags": [
+        "power-integrity",
+        "load-transient",
+        "droop",
+        "phase-margin"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M03",
+      "level": "M",
+      "title": "PDN 타겟 임피던스와 디커플링 커패시터 선정",
+      "goal": "PDN 임피던스를 주파수 영역에서 계산해 디커플링 구성을 정량적으로 고른다.",
+      "task": "Ztarget=V·(허용 리플%)/ΔI를 계산하고, 커패시터(C, ESR, ESL) 병렬 네트워크의 |Z(f)|를 10kHz–1GHz에서 계산해 반공진 피크를 찾는 Python 도구를 작성한 뒤, 1/10/100µF 조합과 개수를 탐색해 목표 대역에서 Ztarget 이하가 되는 최소 BOM을 제시한다.",
+      "tags": [
+        "power-integrity",
+        "pdn",
+        "decoupling",
+        "target-impedance",
+        "anti-resonance"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M04",
+      "level": "M",
+      "title": "저전력 전류 프로파일 측정: 다이내믹 레인지·Burden 전압",
+      "goal": "µA~mA를 오가는 전류를 측정할 때 장비 사양이 결과를 어떻게 왜곡하는지 정량화한다.",
+      "task": "sleep 2µA ↔ active 15mA 버스트가 섞인 MCU 전류 파형을 합성해 샘플링률(1k/10k/100kS/s)·ADC 분해능·자동 레인지 전환 지연·션트 burden 전압(공급 전압 강하로 인한 brown-out)이 평균 전류·배터리 수명 추정에 주는 오차를 계산하고, 필요한 측정 장비 사양(PPK2/Joulescope급)을 도출한다(배터리 수명 모델은 see:RF-A04).",
+      "tags": [
+        "current-measurement",
+        "low-power",
+        "burden-voltage",
+        "dynamic-range",
+        "see:RF"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M05",
+      "level": "M",
+      "title": "LA 캡처 타이밍 컴플라이언스: SPI·UART vs 데이터시트",
+      "goal": "디코드를 넘어 캡처에서 타이밍 파라미터를 측정하고 데이터시트 한계와 비교한다.",
+      "task": "COMM-A10 디코더 위에 SPI tCSS/tCSH/tSU/tH·SCLK 주파수·duty와 UART 실제 baud(비트 폭 히스토그램)·inter-byte gap 측정을 추가해 데이터시트 min/max 표(JSON)와 비교한 위반 리포트를 내고, 샘플링 주기에 의한 측정 불확도(±1/fs)를 pass/fail 판정에 반영한다(see:COMM-A10).",
+      "tags": [
+        "logic-analyzer",
+        "timing",
+        "spi",
+        "uart",
+        "compliance",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M06",
+      "level": "M",
+      "title": "커스텀 sigrok 프로토콜 디코더 작성 (libsigrokdecode)",
+      "goal": "실무 LA 툴체인에 직접 디코더를 붙여 사내/벤더 프로토콜을 해석할 수 있다.",
+      "task": "WS2812(또는 가상의 1-wire 벤더 프로토콜) 디코더를 libsigrokdecode Python API(Decoder 클래스, wait() 조건, put annotation)로 작성해 합성 .sr에 sigrok-cli -P로 실행하고 B07 로더 기반 독립 구현과 출력이 일치하는지 검증하며, I2C 디코더 위에 쌓는 센서 레지스터 스택 디코더도 하나 추가한다.",
+      "tags": [
+        "sigrok",
+        "protocol-decoder",
+        "logic-analyzer",
+        "pulseview"
+      ],
+      "env": "mac",
+      "env_note": "brew install sigrok-cli (libsigrokdecode 포함)"
+    },
+    {
+      "id": "HWLAB-M07",
+      "level": "M",
+      "title": "클럭 지터 측정: Period·Cycle-to-Cycle·TIE",
+      "goal": "세 가지 지터 지표를 에지 타임스탬프에서 계산하고 관계를 설명한다.",
+      "task": "합성 클럭 캡처(RJ + 주기성 지터 + SSC)에서 보간 임계 교차로 에지 타임스탬프를 뽑아 period jitter, cycle-to-cycle jitter, TIE(최소제곱 주파수 추정 이상 클럭 대비)를 계산하고, c2c=period의 차분·period=TIE의 차분 관계와 SSC가 TIE를 지배하는 현상을 확인한다(PLL 추적은 see:DSP-A06, ppm 판정은 see:SIV-A06).",
+      "tags": [
+        "jitter",
+        "tie",
+        "clock",
+        "period-jitter",
+        "see:DSP",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M08",
+      "level": "M",
+      "title": "위상 잡음 → RMS 지터 적분과 레퍼런스 클럭 판정",
+      "goal": "오실레이터 위상 잡음 사양을 시간 영역 지터로 변환해 스펙 적합성을 판단한다.",
+      "task": "위상잡음 표 L(f)[dBc/Hz]를 로그 보간해 12kHz–20MHz 구간 적분으로 RMS 위상 지터 σ=√(2∫10^(L/10)df)/(2πf0)를 계산하고, PCIe refclk식 필터(CDR/PLL 전달함수)를 적용했을 때 수치 변화를 보여 두 후보 오실레이터 중 스펙을 만족하는 쪽을 고른다.",
+      "tags": [
+        "phase-noise",
+        "jitter",
+        "refclk",
+        "oscillator"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M09",
+      "level": "M",
+      "title": "Eye Diagram 생성: CDR 기준 폴딩·Eye Height/Width·마스크",
+      "goal": "고속 직렬 캡처에서 eye diagram을 직접 만들고 eye 지표·마스크 테스트를 계산한다.",
+      "task": "PRBS7 NRZ 신호에 채널 ISI(FIR)·잡음·지터를 넣은 긴 캡처를 만들고, golden PLL(1차, BW=bitrate/1667) 클럭 복원으로 UI 단위 폴딩해 2D 히스토그램 eye를 그린 뒤 eye height/width·crossing %·폴리곤 마스크 hit 수를 계산하고, 이상 클럭 vs golden PLL 폴딩 결과 차이를 비교한다(DDR DQ eye 트레이닝은 see:MEM-A04).",
+      "tags": [
+        "eye-diagram",
+        "serdes",
+        "mask-test",
+        "cdr",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M10",
+      "level": "M",
+      "title": "지터 분해: RJ/DJ(DDJ·PJ)와 Dual-Dirac TJ@BER",
+      "goal": "TIE를 성분별로 분해하고 dual-Dirac 모델로 목표 BER에서의 총 지터를 계산한다.",
+      "task": "M09 캡처의 TIE에서 반복 패턴 평균으로 DDJ, TIE 스펙트럼 FFT 피크로 PJ, 잔차 RMS로 RJ를 분리하고, 히스토그램 꼬리 가우시안 피팅으로 RJ·DJ(δδ)를 추정해 TJ(1e-12)=DJ(δδ)+2·7.034·RJ를 계산한 뒤 주입한 정답 성분과 비교해 분해 오차를 보고한다.",
+      "tags": [
+        "jitter-decomposition",
+        "rj",
+        "dj",
+        "dual-dirac",
+        "tie"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M11",
+      "level": "M",
+      "title": "BER Bathtub과 Q-scale 외삽",
+      "goal": "짧은 측정으로 낮은 BER에서의 eye 개방을 외삽하고 그 한계를 안다.",
+      "task": "샘플링 위상을 UI 전체에 sweep하며 BER을 계측(오류 카운트는 see:SIV-M06 PRBS checker 재사용)해 bathtub을 만들고, 1e-6까지만 측정한 데이터를 Q-scale 선형 피팅으로 1e-12 eye opening까지 외삽해 M10 dual-Dirac 예측·장시간 직접 측정과 비교하며 측정 시간·신뢰도 trade-off를 표로 정리한다.",
+      "tags": [
+        "ber",
+        "bathtub",
+        "q-scale",
+        "extrapolation",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-M12",
+      "level": "M",
+      "title": "채널 손실·ISI와 등화: TX FFE·CTLE·DFE",
+      "goal": "손실 채널의 ISI를 pulse response로 분석하고 등화기 단계별 효과를 측정한다.",
+      "task": "Nyquist에서 −15dB급 손실을 갖는 채널을 FIR로 모델링해 pulse response의 pre/post-cursor를 측정하고, 3-tap TX FFE(de-emphasis), 1-zero/2-pole CTLE, 1~3-tap DFE를 구현해 단계별 eye height/width 개선(M09 도구)과 DFE 오류 전파를 측정한다(PAM4·FEC는 see:NETHW).",
+      "tags": [
+        "isi",
+        "equalization",
+        "ctle",
+        "dfe",
+        "ffe",
+        "see:NETHW"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-A01",
+      "level": "A",
+      "title": "CDR 구현과 Jitter Tolerance(JTOL)·Jitter Transfer",
+      "goal": "CDR 루프 대역폭이 지터 내성과 전달 특성에 주는 trade-off를 측정으로 보인다.",
+      "task": "오버샘플 파형에 대한 bang-bang(Alexander) 위상검출기 + 2차 디지털 루프 CDR을 구현하고, 사인 지터 주파수·진폭을 sweep해 BER 임계에서의 JTOL 곡선을 그려 스펙 마스크(저주파 수 UI ~ 고주파 0.1UI 플로어)와 비교하며, 루프 대역폭 변경이 JTOL과 jitter transfer 피킹에 주는 영향을 설명한다.",
+      "tags": [
+        "cdr",
+        "jitter-tolerance",
+        "jtol",
+        "jitter-transfer",
+        "serdes"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-A02",
+      "level": "A",
+      "title": "In-system Lane Margining: 2D Eye 등고선과 마진 판정",
+      "goal": "링크 마지닝 로그로 레인별 마진을 계산하고 이상 레인을 자동으로 찾는다.",
+      "task": "PCIe Gen4+ Lane Margining at Receiver처럼 timing offset × voltage offset 단계별 오류 카운트 로그(합성: 레인 16개 × 온도 3개)를 파싱해 레인별 2D eye 등고선과 마진(L/R 타이밍 UI, U/D mV)을 계산하고, 스펙 최소 마진 미달·레인 간 이상치·온도에 따른 마진 감소를 자동 플래그하는 리포트를 작성한다(see:PCIE, see:SIV-M05).",
+      "tags": [
+        "lane-margining",
+        "pcie",
+        "eye-margin",
+        "validation",
+        "see:PCIE",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-A03",
+      "level": "A",
+      "title": "아날로그+디지털 캡처 상관: 레일 Droop ↔ 버스 오류 Root Cause",
+      "goal": "서로 다른 장비의 캡처를 정렬해 SI/PI 문제와 프로토콜 오류의 인과를 수치로 입증한다.",
+      "task": "샘플률·시간축이 다른 스코프 CSV(VDD_IO, 모터 PWM 전류)와 LA 캡처(SPI)를 공통 마커 에지 교차상관으로 정렬하고, SPI CRC 오류 시점과 레일 droop·PWM 에지의 조건부 발생률(오류 vs 정상)을 계산해 원인 가설을 뒷받침하며, aggressor 에지 동기 평균으로 크로스토크/그라운드 바운스 커플링 파형을 분리해 함께 검증한다.",
+      "tags": [
+        "root-cause",
+        "correlation",
+        "crosstalk",
+        "ground-bounce",
+        "mixed-signal"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-A04",
+      "level": "A",
+      "title": "열 RC 네트워크 피팅: 가열 곡선 → Foster 모델 → 펄스 부하 Tj",
+      "goal": "측정 가열 곡선에서 열 임피던스 모델을 추출해 과도 부하의 피크 온도를 예측한다.",
+      "task": "전력 스텝 인가 시 온도 상승 곡선(합성 또는 열전대 로그)을 3단 Foster 지수합으로 피팅해 Rth_i·τ_i를 추출하고 Zth(t)를 만든 뒤, 듀티사이클 펄스 부하에서 피크 Tj를 중첩 원리로 예측해 시간영역 시뮬레이션과 대조한다(throttling 정책은 see:SIV-A04).",
+      "tags": [
+        "thermal",
+        "foster-network",
+        "zth",
+        "curve-fit",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-A05",
+      "level": "A",
+      "title": "간헐 부팅 실패 Fault Isolation (면접형)",
+      "goal": "간헐 하드웨어 장애를 가설 트리와 타이밍 마진 통계로 체계적으로 격리한다.",
+      "task": "'저온에서 50번 중 1번 부팅 실패' 합성 데이터셋(보드·온도별 레일 ramp, PGOOD/RESET_N/PLL_LOCK 타이밍, 부트 로그)으로 가설 트리(시퀀싱 레이스, PLL 락 전 리셋 해제, 레일 미정착 중 strap 샘플링)를 세우고, 각 타이밍 마진 분포를 추정해 분포 꼬리 겹침으로 계산한 실패 확률을 관측 1/50과 대조해 원인을 지목하는 분석 스크립트와 리포트를 작성한다(시퀀싱 checker는 see:SIV-A06).",
+      "tags": [
+        "fault-isolation",
+        "intermittent",
+        "reset",
+        "power-sequencing",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HWLAB-A06",
+      "level": "A",
+      "title": "저가 LA 실캡처: fx2 LA + sigrok로 실보드 버스 분석",
+      "goal": "실제 장비 캡처에 지금까지 만든 분석 파이프라인을 적용해 시뮬레이션 가정과 비교한다.",
+      "task": "fx2lafw 호환 8ch LA(24MS/s)로 MCU 보드의 I2C·SPI·UART를 sigrok-cli로 캡처해 B07/M05/M06 파이프라인으로 디코드·타이밍 판정하고, SPI 클럭을 올려 가며 24MS/s 한계로 측정이 실패하는 지점이 B07 예측과 맞는지 확인한다.",
+      "tags": [
+        "logic-analyzer",
+        "sigrok",
+        "fx2lafw",
+        "real-capture"
+      ],
+      "env": "lab",
+      "env_note": "fx2 기반 저가 LA(~$10–15, sigrok fx2lafw 지원) 또는 Saleae 호환 LA + 신호원 MCU 보드(Raspberry Pi Pico ~$5 등); brew install sigrok-cli. 분석은 맥"
+    },
+    {
+      "id": "HWLAB-A07",
+      "level": "A",
+      "title": "보급형 DSO 자동화: SCPI 파형 획득과 실측 검증",
+      "goal": "스코프를 원격 제어해 파형을 수집하고 시뮬레이션 예측을 실측으로 검증한다.",
+      "task": "pyvisa(pyvisa-py)로 DSO 파형 preamble(x/y increment·origin·reference)을 읽어 바이트 파형을 초·볼트로 변환하는 획득 루프를 만들고, 벅 컨버터 eval 보드에서 그라운드 리드 vs 스프링 팁 링잉(B05), BW limit on/off 리플(B08), 부하 스텝 droop(M02)을 실측해 예측과 비교한다(RF 장비 SCPI는 see:RF-A05).",
+      "tags": [
+        "oscilloscope",
+        "scpi",
+        "pyvisa",
+        "automation",
+        "see:RF"
+      ],
+      "env": "lab",
+      "env_note": "엔트리 DSO(Rigol DHO804 / Siglent SDS1104X-E급, 70–100MHz, LAN/USB) + 10x 프로브·스프링 팁 + 벅 eval 보드와 스텝 부하(MOSFET+저항); 장비 전에는 mock VISA 백엔드로 개발"
+    },
+    {
+      "id": "HWLAB-A08",
+      "level": "A",
+      "title": "종합: 신규 보드 브링업·계측 계획서 (면접형)",
+      "goal": "보드 브링업을 측정 항목·장비·판정 기준·격리 트리까지 갖춘 실행 계획으로 설계한다.",
+      "task": "SoC + PMIC + LPDDR + PCIe + MIPI 카메라를 가진 가상 보드에 대해 DFT 요구(테스트포인트, 전류 측정 shunt/0Ω, 디버그 헤더), 단계별 측정 항목·장비·프로빙 방법·pass 기준(레일·시퀀스·클럭 지터·DDR/PCIe 마진), 실패 시 격리 트리, 일정을 담은 계획서를 쓰고 앞선 항목 도구를 CSV 입력 → MD/HTML 리포트를 내는 하나의 bring-up 리포트 파이프라인으로 묶는다(see:PLAT-B09, see:SIV-A09).",
+      "tags": [
+        "bring-up",
+        "dft",
+        "test-plan",
+        "capstone",
+        "see:PLAT",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

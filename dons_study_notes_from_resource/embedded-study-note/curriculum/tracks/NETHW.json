@@ -1,0 +1,613 @@
+{
+  "id": "NETHW",
+  "intro": "SmartNIC·DPU·스위치 ASIC은 데이터센터와 AI 패브릭의 패킷을 라인레이트로 처리하는 하드웨어다. NVIDIA(Mellanox/BlueField), Broadcom, Arista, Intel, AMD(Pensando), Marvell 면접에서는 pps 예산 계산, 디스크립터/큐/doorbell 같은 NIC 데이터패스, TCAM·LPM·match-action 파이프라인, 버퍼·스케줄러, 오프로드와 FEC를 '직접 모델링해 봤는지'를 묻는다. 펌웨어·SSD 경험을 NIC/DPU 펌웨어로 확장하는 트랙이다.",
+  "goals": [
+    "링크 속도에서 pps·패킷당 사이클·버스 폭 예산을 즉시 계산한다",
+    "멀티큐 링·doorbell·CQ·인터럽트 모더레이션·체크섬/TSO/RSS 오프로드를 mock NIC로 구현한다",
+    "파서·TCAM·LPM·exact-match·match-action 파이프라인과 P4를 구현·실행해 스위치 ASIC 구조를 설명한다",
+    "공유 버퍼·WRED/ECN·스케줄러를 시뮬레이션해 혼잡 시 동작을 정량화한다",
+    "virtio-net/vhost/vDPA, OVS 오프로드, SR-IOV eswitch, 인라인 암호, RDMA 엔진, DPU 스토리지 오프로드를 설계한다",
+    "64b/66b PCS, PAM4, RS-FEC를 수학과 코드로 검증하고 NIC 펌웨어 bring-up·복구를 설계한다"
+  ],
+  "prereq": [
+    "C",
+    "DS",
+    "COMM",
+    "PCIE",
+    "NET"
+  ],
+  "refs": [
+    {
+      "title": "Network Algorithmics (George Varghese) — LPM, 패킷 분류, 스위칭 알고리즘"
+    },
+    {
+      "title": "Forwarding Metamorphosis: Fast Programmable Match-Action Processing in Hardware for SDN (Bosshart et al., SIGCOMM 2013)"
+    },
+    {
+      "title": "P4_16 Language Specification",
+      "url": "https://p4.org/specs/"
+    },
+    {
+      "title": "p4lang/behavioral-model (bmv2)",
+      "url": "https://github.com/p4lang/behavioral-model"
+    },
+    {
+      "title": "p4lang/tutorials",
+      "url": "https://github.com/p4lang/tutorials"
+    },
+    {
+      "title": "Linux kernel networking docs (checksum/segmentation offloads, TLS offload, switchdev)",
+      "url": "https://docs.kernel.org/networking/index.html"
+    },
+    {
+      "title": "Virtual I/O Device (VIRTIO) Specification v1.2",
+      "url": "https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html"
+    },
+    {
+      "title": "Open vSwitch documentation",
+      "url": "https://docs.openvswitch.org/"
+    },
+    {
+      "title": "The Design and Implementation of Open vSwitch (Pfaff et al., NSDI 2015)"
+    },
+    {
+      "title": "DPDK Programmer's Guide (rte_lpm, rte_hash, rte_ring)",
+      "url": "https://doc.dpdk.org/guides/prog_guide/"
+    },
+    {
+      "title": "IEEE 802.3 Ethernet Standard (Clause 49 64b/66b PCS, Clause 91/119 RS-FEC)"
+    },
+    {
+      "title": "Intel 82599 / E810 Ethernet Controller Datasheets — 레지스터·디스크립터·RSS 참조"
+    }
+  ],
+  "items": [
+    {
+      "id": "NETHW-B01",
+      "level": "B",
+      "title": "Line-rate와 pps 계산: 64B 프레임, preamble·IFG",
+      "goal": "링크 속도에서 패킷당 시간 예산(ns·사이클)을 즉시 계산할 수 있다.",
+      "task": "10/25/100/400/800GbE에서 프레임 크기(64B~9KB)별 최대 pps와 패킷당 ns·코어 사이클 예산(preamble 8B + IFG 12B 포함)을 계산하는 도구를 작성하고, '100G 64B 라인레이트 = 148.8Mpps, 패킷당 6.72ns'를 유도해 3GHz 코어 몇 개가 필요한지 답한다.",
+      "tags": [
+        "line-rate",
+        "pps",
+        "budget",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-B02",
+      "level": "B",
+      "title": "NIC 데이터패스 해부: 와이어에서 소켓까지",
+      "goal": "패킷 하나가 NIC와 호스트를 지나는 단계와 각 단계의 PCIe 트랜잭션을 설명한다.",
+      "task": "MAC FCS 검사→필터→큐 선택→RX 디스크립터 fetch→DMA write→writeback→MSI-X→NAPI poll 순서를 이벤트 로그로 출력하는 Python mock NIC 모델을 작성하고, RX/TX 1패킷당 MMIO·DMA read/write 횟수를 세어 배치(batch) 크기에 따라 어떻게 줄어드는지 표로 만든다.",
+      "tags": [
+        "nic-datapath",
+        "dma",
+        "pcie-transactions",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-B03",
+      "level": "B",
+      "title": "Ethernet MAC: FCS, 패딩, runt/giant와 MIB 카운터",
+      "goal": "MAC 계층이 프레임을 검증·폐기하는 규칙과 통계 카운터 의미를 안다.",
+      "task": "TX(60B 패딩 + CRC-32 FCS 부착)와 RX(FCS 오류, runt <64B, giant >MTU/jumbo, VLAN 태그 길이 보정) 검사를 하는 C MAC 모델을 만들고, 오류 프레임 주입 테스트로 rx_crc_errors/rx_length_errors 등 MIB 카운터가 정확히 증가하는지 검증한다 (프레임 파싱 기초는 see:COMM-A04).",
+      "tags": [
+        "mac",
+        "fcs",
+        "crc32",
+        "mib-counters",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-B04",
+      "level": "B",
+      "title": "NIC 레지스터 맵 mock: CTRL/STATUS, ICR/IMS/IMC",
+      "goal": "NIC 레지스터의 접근 의미(read-to-clear, write-1-to-set/clear)와 리셋·초기화 순서를 구현한다.",
+      "task": "e1000 스타일 mock BAR(CTRL, STATUS, ICR read-to-clear, IMS write-1-to-set, IMC write-1-to-clear, RCTL/TCTL)를 C로 구현하고, 소프트 리셋→링크 대기→인터럽트 마스크 설정→RX/TX enable 드라이버 시퀀스와 'ICR을 두 번 읽으면 이벤트를 잃는' 버그를 재현하는 테스트를 작성한다.",
+      "tags": [
+        "register-map",
+        "mmio",
+        "interrupt-cause",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-B05",
+      "level": "B",
+      "title": "멀티큐 TX/RX 링과 Tail Doorbell 배치",
+      "goal": "큐별 링과 doorbell 쓰기 비용을 이해하고 배치로 MMIO를 줄인다.",
+      "task": "COMM-A08의 단일 디스크립터 링을 N개 TX/RX 큐로 확장해 큐별 head/tail, tail doorbell MMIO, 'xmit_more'식 doorbell 지연 배치를 구현하고, 배치 크기별 doorbell 횟수와 링 가득 참(netif_stop_queue/wake) 처리를 테스트한다 (기초는 see:COMM-A08).",
+      "tags": [
+        "multi-queue",
+        "doorbell",
+        "descriptor-ring",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-B06",
+      "level": "B",
+      "title": "Completion Queue와 Split Queue 모델",
+      "goal": "디스크립터 writeback 방식과 별도 CQ(owner/generation bit) 방식을 비교한다.",
+      "task": "(1) 같은 링에 DD 비트 writeback하는 방식과 (2) 버퍼 posting 큐와 completion 큐를 분리하고 CQE에 generation bit를 둔 split queue(mlx5/gve DQO 스타일)를 모두 구현해, 순서 밖 완료·CQ wrap·CQE 압축을 처리하는 드라이버 poll 루프를 테스트한다 (NVMe phase tag는 see:PCIE-M01).",
+      "tags": [
+        "completion-queue",
+        "cqe",
+        "split-queue",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-B07",
+      "level": "B",
+      "title": "체크섬 오프로드: CHECKSUM_PARTIAL/COMPLETE와 증분 갱신",
+      "goal": "커널-NIC 간 체크섬 오프로드 계약과 1의 보수 합의 성질을 구현으로 익힌다.",
+      "task": "TX csum_start/csum_offset 방식(CHECKSUM_PARTIAL)으로 L4 체크섬을 채우는 NIC 엔진과 RX 전체 1의 보수 합을 돌려주는 CHECKSUM_COMPLETE 검증 경로를 C로 구현하고, NAT로 IP/포트를 바꿀 때 RFC 1624 증분 갱신 결과가 전체 재계산과 일치하는지 랜덤 테스트한다 (헤더 체크섬 기초는 see:COMM-A04).",
+      "tags": [
+        "checksum-offload",
+        "rfc1624",
+        "csum-partial",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-B08",
+      "level": "B",
+      "title": "인터럽트 모더레이션: ITR, rx-usecs/rx-frames, adaptive",
+      "goal": "인터럽트 빈도와 지연의 trade-off를 정량화하고 적응형 정책을 설계한다.",
+      "task": "Poisson/버스트 트래픽 생성기와 NIC 인터럽트 coalescing 모델(타이머·프레임 임계·absolute vs packet timer)을 만들고 설정별 인터럽트/초·평균·p99 지연을 측정한 뒤, 부하에 따라 ITR을 바꾸는 adaptive 알고리즘(DIM 스타일)을 구현해 고정값 대비 개선을 보인다.",
+      "tags": [
+        "interrupt-moderation",
+        "coalescing",
+        "dim",
+        "latency"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-B09",
+      "level": "B",
+      "title": "Linux에서 NIC 관찰: ethtool -l/-g/-k/-c/-S",
+      "goal": "실제 드라이버가 노출하는 큐·링·오프로드·통계 설정을 읽고 데이터패스 모델에 대응시킨다.",
+      "task": "Linux VM의 virtio-net/veth에서 ethtool -l(채널), -g(링 크기), -k(오프로드 플래그), -c(coalescing), -S(통계)와 /proc/interrupts, /sys/class/net/*/queues를 수집하는 스크립트를 작성하고, 오프로드를 끄고 켤 때(tso/gro off) iperf3 처리량·CPU 사용률 변화를 기록해 각 항목을 B02 모델 단계에 매핑한다.",
+      "tags": [
+        "ethtool",
+        "offload-flags",
+        "linux",
+        "see:NET"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (aarch64 Linux); ethtool, iperf3 설치. 가상 NIC라 지원 기능이 제한적이므로 수치보다 경향과 플래그 의미 위주로 기록"
+    },
+    {
+      "id": "NETHW-B10",
+      "level": "B",
+      "title": "스위치 ASIC 기본: L2 MAC learning, aging, flooding, VLAN",
+      "goal": "브리징 ASIC의 FDB 학습·노화·플러딩 규칙을 구현한다.",
+      "task": "포트별 VLAN 멤버십(access/trunk, tagged/untagged)을 가진 L2 스위치 모델을 C로 구현해 source MAC 학습, aging 타이머, unknown unicast/broadcast flooding, MAC move 감지를 처리하고, 패킷 시나리오 스크립트로 기대 egress 포트 집합을 검증한다.",
+      "tags": [
+        "l2-switch",
+        "mac-learning",
+        "fdb",
+        "vlan"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-B11",
+      "level": "B",
+      "title": "패킷 파서: Parse Graph와 PHV",
+      "goal": "스위치/NIC 파서가 헤더를 추출해 Packet Header Vector로 만드는 구조를 이해한다.",
+      "task": "Ethernet→VLAN(QinQ)→IPv4/IPv6→TCP/UDP→VXLAN→inner Ethernet까지의 parse graph를 (상태, lookahead 필드 값)→다음 상태 테이블로 정의하는 table-driven C 파서를 작성하고, 추출 결과를 고정 슬롯 PHV에 담아 pcap 샘플로 검증하며 최대 파싱 깊이·예외(trap) 경로를 처리한다.",
+      "tags": [
+        "parser",
+        "parse-graph",
+        "phv",
+        "vxlan"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-B12",
+      "level": "B",
+      "title": "Ethernet PCS: 64b/66b 인코딩, 스크램블러, block lock",
+      "goal": "고속 이더넷 PCS 계층의 인코딩·동기 획득 방식을 구현한다.",
+      "task": "64b/66b 인코더(sync header 01/10, control block type), self-synchronizing 스크램블러(x^58+x^39+1)/디스크램블러, 그리고 sync header로 block lock을 획득·상실하는 상태기계를 C로 구현하고 비트 슬립·오류 주입 테스트로 lock 획득에 필요한 블록 수와 hi_ber 판정을 검증한다.",
+      "tags": [
+        "pcs",
+        "64b66b",
+        "scrambler",
+        "block-lock"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M01",
+      "level": "M",
+      "title": "TSO 세그멘테이션과 LRO 병합 엔진",
+      "goal": "TX 컨텍스트 디스크립터와 HW 세그멘테이션/병합 규칙을 비트 수준으로 구현한다.",
+      "task": "MSS·L2/L3/L4 헤더 길이(VXLAN 내부 오프셋 포함)를 담은 TX 컨텍스트 디스크립터를 받아 큰 버퍼를 세그먼트로 자르는 TSO 엔진(헤더 복제, IP ID 증가, TCP seq 진행, FIN/PSH는 마지막만, 체크섬 재계산)과 RX LRO 병합기(같은 flow·연속 seq·옵션 동일 조건)를 구현하고, LRO가 포워딩에서 문제를 일으키는 이유를 테스트로 보인다 (커널 GSO/GRO는 see:NET).",
+      "tags": [
+        "tso",
+        "lro",
+        "context-descriptor",
+        "see:NET"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M02",
+      "level": "M",
+      "title": "RSS 간접 테이블(RETA)과 Flow Director/ntuple 필터",
+      "goal": "NIC가 패킷을 큐로 분산·고정하는 HW 구조와 재조정 방법을 구현한다.",
+      "task": "Toeplitz 해시(see:NET) 결과의 하위 비트로 128/512엔트리 RETA를 인덱싱하는 큐 선택기와 RSS보다 우선하는 5-tuple perfect-match(ntuple) 필터 테이블을 구현하고, 큐 불균형 측정→RETA 재가중 알고리즘과 aRFS(앱 코어로 flow 고정) 시나리오를 시뮬레이션한다.",
+      "tags": [
+        "rss",
+        "reta",
+        "flow-director",
+        "ntuple",
+        "see:NET"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M03",
+      "level": "M",
+      "title": "TCAM 시뮬레이터: value/mask, 우선순위, range expansion",
+      "goal": "ACL/라우팅용 TCAM의 동작과 엔트리 비용을 정량화한다.",
+      "task": "value/mask/priority 엔트리와 priority encoder를 가진 TCAM 모델을 C로 구현하고, 포트 범위 [lo,hi]를 최소 prefix 집합으로 확장하는 알고리즘(최악 2W-2개)을 작성해 5-tuple ACL 규칙 세트의 TCAM 엔트리 수와 선형 참조 매처 대비 결과 일치를 검증한다.",
+      "tags": [
+        "tcam",
+        "acl",
+        "range-expansion",
+        "priority-encoder"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M04",
+      "level": "M",
+      "title": "하드웨어 LPM: DIR-24-8, multibit trie vs TCAM",
+      "goal": "라인레이트 LPM을 위한 메모리 접근 횟수·용량 trade-off를 비교한다.",
+      "task": "DS-M13의 이진/Patricia 트라이를 출발점으로 DIR-24-8(DPDK rte_lpm 스타일, 최대 2회 접근)과 stride 가변 multibit trie를 구현하고, 동일 IPv4 라우팅 테이블에서 조회 메모리 접근 수·메모리 사용량·업데이트 비용을 TCAM(prefix 길이 순 정렬) 방식과 표로 비교한다 (기초는 see:DS-M13).",
+      "tags": [
+        "lpm",
+        "dir-24-8",
+        "multibit-trie",
+        "see:DS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M05",
+      "level": "M",
+      "title": "ASIC exact-match 테이블: bucketed cuckoo + stash",
+      "goal": "SRAM 해시 테이블로 높은 점유율과 결정적 조회를 얻는 방법을 안다.",
+      "task": "DS-A07의 cuckoo 해싱을 4-way bucket × 2~4 해시 뱅크 + 소형 stash(CAM)로 확장한 exact-match 테이블을 구현하고, 달성 가능한 최대 부하율·삽입 시 축출 경로 길이 분포·stash 넘침 확률을 측정해 d-left 해싱과 비교한다 (기초는 see:DS-A07).",
+      "tags": [
+        "exact-match",
+        "cuckoo",
+        "hash-table",
+        "see:DS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M06",
+      "level": "M",
+      "title": "RMT match-action 파이프라인과 stage 할당",
+      "goal": "프로그래머블 스위치 파이프라인의 테이블 의존성과 stage 배치 제약을 이해한다.",
+      "task": "PHV를 입력으로 받는 N-stage match-action 시뮬레이터(stage별 테이블·action·PHV 수정)를 구현하고, 테이블 간 match/action/successor 의존성 그래프에서 stage 자원(SRAM/TCAM 블록, PHV 컨테이너) 제약을 만족하도록 테이블을 배치하는 greedy 컴파일러를 작성해 L3 라우터+ACL 프로그램의 필요 stage 수를 구한다.",
+      "tags": [
+        "rmt",
+        "match-action",
+        "pipeline",
+        "stage-allocation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M07",
+      "level": "M",
+      "title": "P4_16 L3 라우터: bmv2 simple_switch와 P4Runtime",
+      "goal": "P4 프로그램을 작성·컴파일하고 컨트롤 플레인으로 테이블을 채워 동작을 검증한다.",
+      "task": "parser·ipv4_lpm 테이블·TTL 감소·체크섬 갱신·ECMP 해시 액션을 가진 P4_16 프로그램을 p4c로 컴파일해 veth/netns 토폴로지의 bmv2 simple_switch_grpc에서 실행하고, Python P4Runtime 클라이언트로 엔트리를 설치한 뒤 scapy 패킷으로 포워딩·TTL 만료·미스 시 drop을 검증한다.",
+      "tags": [
+        "p4",
+        "bmv2",
+        "p4runtime",
+        "see:NET"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux' (aarch64 Linux); p4c·bmv2(behavioral-model)·p4runtime 파이썬 패키지 설치(패키지 또는 소스 빌드), scapy, netns/veth 권한(sudo) 필요"
+    },
+    {
+      "id": "NETHW-M08",
+      "level": "M",
+      "title": "공유 패킷 버퍼: Dynamic Threshold와 incast 흡수",
+      "goal": "스위치 공유 버퍼의 큐별 admission 정책이 버스트 흡수와 공정성에 미치는 영향을 정량화한다.",
+      "task": "포트/큐별 정적 분할 vs Choudhury-Hahne dynamic threshold(T = α·(B − 사용량)) 공유 버퍼 시뮬레이터를 작성하고, N:1 incast 버스트와 장기 혼잡 큐가 섞인 시나리오에서 α값별 drop률·버퍼 점유·다른 큐 기아(starvation)를 측정한다 (incast·PFC 패브릭 측면은 see:DCN).",
+      "tags": [
+        "shared-buffer",
+        "dynamic-threshold",
+        "incast",
+        "see:DCN"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M09",
+      "level": "M",
+      "title": "AQM: WRED와 ECN 마킹",
+      "goal": "평균 큐 길이 기반 확률적 drop/mark 알고리즘을 구현하고 파라미터 효과를 본다.",
+      "task": "EWMA 평균 큐 길이, min/max threshold, max_p, 카운트 보정을 포함한 RED/WRED(트래픽 클래스별 프로파일)와 ECN-capable 패킷은 drop 대신 CE 마킹하는 경로를 구현하고, DCTCP식 즉시 step 마킹(K threshold)과 큐 길이 진동·지연을 비교한다 (DCQCN 혼잡제어는 see:DCN).",
+      "tags": [
+        "wred",
+        "ecn",
+        "aqm",
+        "see:DCN"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M10",
+      "level": "M",
+      "title": "Egress 스케줄러: Strict Priority + DWRR + Token Bucket",
+      "goal": "다중 클래스 큐의 대역폭 분배와 shaping을 하드웨어 스케줄러 관점에서 구현한다.",
+      "task": "SP 위에 DWRR(quantum·deficit)을 얹은 계층형 스케줄러와 큐별/포트별 token bucket shaper(CIR/CBS), 그리고 policer(single-rate three-color)를 C로 구현하고, 가변 패킷 크기 트래픽에서 설정 가중치 대비 실제 대역폭 비율·최대 지연을 측정해 WRR 대비 공정성을 보인다.",
+      "tags": [
+        "scheduler",
+        "dwrr",
+        "token-bucket",
+        "qos"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M11",
+      "level": "M",
+      "title": "virtio-net 데이터패스: net header, packed ring, 알림 억제",
+      "goal": "virtio-net 장치/드라이버 계약과 오프로드 메타데이터 전달 방식을 구현한다.",
+      "task": "PLAT-M06의 split vring을 기반으로 virtio_net_hdr(flags, gso_type, csum_start/offset, num_buffers)와 mergeable RX 버퍼, packed virtqueue(avail/used wrap counter), VIRTIO_F_EVENT_IDX 알림 억제를 구현하고, 두 프로세스 간 공유 메모리로 패킷당 kick 횟수가 얼마나 줄어드는지 측정한다 (vring 기초는 see:PLAT-M06, 장치 에뮬레이션은 see:VIRT).",
+      "tags": [
+        "virtio-net",
+        "packed-ring",
+        "event-idx",
+        "see:PLAT",
+        "see:VIRT"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-M12",
+      "level": "M",
+      "title": "PAM4와 FEC 수학: pre-FEC BER → post-FEC 프레임 손실률",
+      "goal": "고속 SerDes 링크에서 FEC가 필요한 이유와 마진 계산법을 안다.",
+      "task": "NRZ vs PAM4 Gray 매핑·1/(1+D) precoding의 오류 전파 모델과, RS(528,514) KR4·RS(544,514) KP4에 대해 pre-FEC BER→심볼 오류율→코드워드 정정 실패 확률(이항 꼬리)→frame loss ratio를 계산하는 도구를 작성하고 Monte Carlo로 검증, 'KP4는 pre-FEC BER 2.4e-4를 견딘다'를 유도한다 (PRBS/BER 측정은 see:SIV-M06).",
+      "tags": [
+        "pam4",
+        "rs-fec",
+        "ber",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A01",
+      "level": "A",
+      "title": "vhost-user와 vDPA: virtio 데이터패스 오프로드",
+      "goal": "virtio 데이터 평면을 QEMU 밖(사용자 프로세스·하드웨어)으로 옮기는 구조를 구현으로 이해한다.",
+      "task": "vhost-user 메시지(SET_MEM_TABLE, SET_VRING_ADDR/KICK/CALL)를 받아 GPA→HVA 메모리 테이블 변환으로 게스트 vring을 직접 처리하는 백엔드 프로세스를 작성하고(kick/call은 pipe로 대체), 같은 ring 레이아웃을 NIC가 DMA로 처리하는 vDPA와 vhost-net/SR-IOV를 라이브 마이그레이션·성능 관점에서 비교 정리한다.",
+      "tags": [
+        "vhost-user",
+        "vdpa",
+        "virtio",
+        "see:VIRT"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A02",
+      "level": "A",
+      "title": "OVS 아키텍처: megaflow 캐시와 flow offload",
+      "goal": "소프트웨어 스위치의 다단계 캐시와 HW 오프로드 경로를 설계한다.",
+      "task": "OpenFlow 다중 테이블 slow path, wildcard megaflow 캐시(tuple space search), exact-match microflow 캐시(EMC)로 구성된 미니 OVS를 구현해 트래픽 분포별 캐시 적중률·조회 비용을 측정하고, megaflow 엔트리를 tc flower 스타일 HW 규칙으로 내리는 오프로드 정책(무엇을, 언제 내리고 회수할지)을 설계한다.",
+      "tags": [
+        "ovs",
+        "megaflow",
+        "tuple-space-search",
+        "flow-offload"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A03",
+      "level": "A",
+      "title": "SR-IOV eswitch: VF representor와 PF↔VF mailbox",
+      "goal": "SR-IOV NIC 내부 스위치와 PF/VF 드라이버 간 제어 프로토콜을 구현한다.",
+      "task": "PCIE-A06의 VF RID 모델 위에 VF별 MAC/VLAN anti-spoof 필터, VF 간·업링크 포워딩, representor 포트로의 미스 패킷 trap(switchdev 모드)을 가진 eswitch 모델과, VF가 MAC 설정·멀티캐스트 요청을 보내는 PF↔VF mailbox(메시지·ACK·타임아웃·악성 VF 거부)를 구현한다 (SR-IOV 기초는 see:PCIE-A06).",
+      "tags": [
+        "sr-iov",
+        "eswitch",
+        "switchdev",
+        "mailbox",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A04",
+      "level": "A",
+      "title": "RDMA NIC 엔진 내부: QP 컨텍스트, MTT/MPT, PSN",
+      "goal": "RNIC가 verbs 요청을 하드웨어에서 처리하는 자료구조와 재전송을 이해한다.",
+      "task": "WQE fetch→MPT(lkey/rkey 권한)·MTT(가상→물리 페이지) 변환→패킷 생성, 수신 측 PSN 검사·ACK/NAK·go-back-N 재전송을 하는 RNIC 모델을 C로 구현하고, QP 컨텍스트 캐시 미스가 많은 QP 수에서 성능을 떨어뜨리는 현상을 캐시 시뮬레이션으로 보인다 (verbs·RoCE 혼잡제어는 see:DCN).",
+      "tags": [
+        "rdma",
+        "rnic",
+        "mtt",
+        "psn",
+        "see:DCN"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A05",
+      "level": "A",
+      "title": "인라인 IPsec ESP 오프로드: SA 조회와 anti-replay",
+      "goal": "NIC 인라인 암호 엔진의 패킷 포맷·상태 관리를 구현한다.",
+      "task": "SPI→SA 해시 조회, ESP 헤더/트레일러(패딩·next header), AES-GCM(IV=seq 기반, AAD=SPI|seq) 암·복호화, 64/1024비트 sliding window anti-replay를 가진 인라인 엔진을 구현하고, crypto-only vs full packet offload에서 드라이버·NIC가 각각 맡는 일과 seq 오버플로·rekey 처리를 테스트한다 (AEAD 기초는 see:SEC-B09).",
+      "tags": [
+        "ipsec",
+        "esp",
+        "anti-replay",
+        "inline-crypto",
+        "see:SEC"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A06",
+      "level": "A",
+      "title": "kTLS TX 오프로드와 재전송 resync",
+      "goal": "TCP 재전송 시 NIC가 TLS 레코드 암호 상태를 복원해야 하는 문제를 해결한다.",
+      "task": "TLS 1.3 레코드 프레이밍(record seq→nonce)을 TCP 스트림 위에 올리고, NIC가 순서대로 들어오는 세그먼트만 인라인 암호화하는 모델에서 재전송·순서 밖 세그먼트가 오면 드라이버가 레코드 시작 위치를 찾아 resync 컨텍스트를 내려주는 경로를 구현해 모든 경우 출력 암호문이 소프트웨어 kTLS와 일치함을 검증한다.",
+      "tags": [
+        "ktls",
+        "tls-offload",
+        "resync",
+        "see:SEC"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A07",
+      "level": "A",
+      "title": "RS(544,514) KP4 FEC 디코더 구현",
+      "goal": "GF(2^10) Reed-Solomon 디코더를 직접 구현해 FEC 하드웨어 동작과 지연을 이해한다.",
+      "task": "MEM-A05의 GF(2^8) RS를 GF(2^10)·t=15로 확장해 인코더, 신드롬, Berlekamp-Massey, Chien search, Forney를 C로 구현하고, 무작위·버스트 심볼 오류 주입으로 15개까지 정정·16개 이상 검출(uncorrectable 플래그)을 확인한 뒤 400GbE 코드워드 시간과 디코더 지연 예산을 계산한다 (GF 기초는 see:MEM-A05).",
+      "tags": [
+        "rs-fec",
+        "berlekamp-massey",
+        "gf-arithmetic",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A08",
+      "level": "A",
+      "title": "패킷 프로세서 마이크로아키텍처 예산: 버스 폭·클럭·65B 문제",
+      "goal": "라인레이트를 맞추기 위한 데이터패스 폭·클럭·파이프라인 수를 설계 면접 수준으로 계산한다.",
+      "task": "12.8T/25.6T/51.2T 스위치와 400G NIC에 대해 클럭·버스 폭(64B/128B/256B)·파이프라인 수 조합별 처리 가능 pps를 계산하는 도구를 작성하고, 65B 패킷이 버스 2비트를 쓰는 worst-case 효율 저하와 패킷 패킹/세그먼트 버스 해법, 테이블 조회 메모리 대역폭 요구를 정리해 설계안을 정당화한다.",
+      "tags": [
+        "microarchitecture",
+        "bus-width",
+        "line-rate",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A09",
+      "level": "A",
+      "title": "스위치 SDK 테이블 프로그래밍: make-before-break와 warm boot",
+      "goal": "하드웨어 테이블 업데이트 중 트래픽 손실을 막고 재시작 후 상태를 재조정하는 방법을 구현한다.",
+      "task": "SAI 스타일 객체(route, next-hop, ECMP group) 위에 shadow 테이블과 HW 테이블 모델을 두고, ECMP 멤버 교체·경로 변경을 make-before-break 순서(참조 카운트·사용 중 객체 삭제 금지)로 적용하는 드라이버와, 프로세스 재시작 후 HW 테이블을 읽어 원하는 상태와 diff·재조정하는 warm boot 로직을 구현해 업데이트 중 블랙홀 패킷 0을 검증한다.",
+      "tags": [
+        "switch-sdk",
+        "sai",
+        "warm-boot",
+        "ecmp"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A10",
+      "level": "A",
+      "title": "NIC 펌웨어 인터페이스: Admin Queue, health, 리셋 복구",
+      "goal": "드라이버-펌웨어 명령 채널과 장애 감지·복구 상태기계를 설계·구현한다.",
+      "task": "mock NIC에 펌웨어 admin queue(명령 디스크립터·opcode·완료 상태·버전 협상)와 heartbeat 레지스터를 두고, 명령 타임아웃·펌웨어 크래시 주입 시 드라이버가 health 이상 감지→큐 정지→덤프 수집→FLR/펌웨어 리셋→재초기화→큐 재개를 수행하는 복구 상태기계(devlink health 스타일)를 구현해 진행 중 TX/RX 버퍼 누수가 없음을 검증한다.",
+      "tags": [
+        "nic-firmware",
+        "admin-queue",
+        "health",
+        "reset-recovery",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A11",
+      "level": "A",
+      "title": "DPU 스토리지 오프로드: NVMe 에뮬레이션 → NVMe-oF",
+      "goal": "호스트에는 로컬 NVMe처럼 보이고 실제로는 원격 스토리지로 가는 DPU 경로를 구현한다.",
+      "task": "PCIE-M01 SQ/CQ 모델을 'DPU가 노출하는 에뮬레이티드 NVMe 컨트롤러'로 재사용해, 호스트 SQ 엔트리를 DPU 측 서비스가 꺼내 PCIE-A09의 NVMe/TCP mini target으로 전달하고 완료를 호스트 CQ에 돌려주는 브리지를 구현하며, 큐 매핑·PRP DMA·타임아웃 전파와 추가 지연을 측정한다 (기초는 see:PCIE-A09).",
+      "tags": [
+        "dpu",
+        "nvme-emulation",
+        "nvme-of",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NETHW-A12",
+      "level": "A",
+      "title": "DPU/IPU 아키텍처 설계 면접: 무엇을 어디에 둘 것인가",
+      "goal": "Arm 코어·HW 가속기·eswitch로 구성된 DPU에서 기능 배치와 성능 예산을 근거로 설계한다.",
+      "task": "'베어메탈 클라우드 호스트를 위한 200G DPU'를 주제로 OVS/eswitch 오프로드, 보안(호스트 격리·secure boot), 스토리지(NVMe 에뮬레이션), 암호화·압축 가속기를 fast path(HW)/exception path(Arm 코어)에 배치하는 설계 문서를 작성하고, exception path 비율별 Arm 코어 수·PCIe 대역폭을 계산하는 예산 스크립트로 trade-off를 정당화한다.",
+      "tags": [
+        "dpu",
+        "ipu",
+        "architecture",
+        "design-interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

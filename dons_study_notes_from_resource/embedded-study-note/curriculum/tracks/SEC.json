@@ -1,0 +1,482 @@
+{
+  "id": "SEC",
+  "intro": "연결된 임베디드 디바이스(차량, 드론, 로봇, 방산 장비)는 물리적 접근이 가능한 공격자를 전제로 설계해야 하므로, 보안 부팅·키 관리·안전한 업데이트·사이드채널/글리치 방어가 펌웨어 엔지니어의 기본기가 되었다. 이 트랙은 C 메모리 안전 버그와 기본 암호 구현에서 출발해 chain of trust, TEE/MPU 하드닝, 공격 시뮬레이션까지 직접 만들어 보며 익힌다.",
+  "goals": [
+    "위협 모델링으로 보호 대상과 공격 표면을 정의한다",
+    "C 메모리 안전 버그를 재현·탐지·수정하고 컴파일러/MPU 하드닝을 적용한다",
+    "해시·HMAC·AES 모드·AEAD·서명·난수를 올바르게 사용하고 오용 결과를 체험한다",
+    "secure boot, 키 계층, anti-rollback, secure update, 디버그 잠금을 구현 수준으로 설계한다",
+    "타이밍·전력 사이드채널과 결함 주입 공격을 시뮬레이션하고 방어 코딩을 적용한다"
+  ],
+  "prereq": [
+    "C",
+    "ARM",
+    "BM",
+    "PLAT"
+  ],
+  "refs": [
+    {
+      "title": "The Hardware Hacking Handbook (Jasper van Woudenberg, Colin O'Flynn)"
+    },
+    {
+      "title": "Serious Cryptography, 2nd ed. (Jean-Philippe Aumasson)"
+    },
+    {
+      "title": "FIPS 180-4 Secure Hash Standard",
+      "url": "https://csrc.nist.gov/pubs/fips/180-4/upd1/final"
+    },
+    {
+      "title": "RFC 2104 HMAC",
+      "url": "https://www.rfc-editor.org/rfc/rfc2104"
+    },
+    {
+      "title": "RFC 8032 Edwards-Curve Digital Signature Algorithm (EdDSA)",
+      "url": "https://www.rfc-editor.org/rfc/rfc8032"
+    },
+    {
+      "title": "Mbed TLS",
+      "url": "https://www.trustedfirmware.org/projects/mbed-tls/"
+    },
+    {
+      "title": "OP-TEE documentation",
+      "url": "https://optee.readthedocs.io/"
+    },
+    {
+      "title": "SEI CERT C Coding Standard",
+      "url": "https://wiki.sei.cmu.edu/confluence/display/c/SEI+CERT+C+Coding+Standard"
+    },
+    {
+      "title": "ChipWhisperer (side-channel & fault injection tutorials)",
+      "url": "https://github.com/newaetech/chipwhisperer"
+    }
+  ],
+  "items": [
+    {
+      "id": "SEC-B01",
+      "level": "B",
+      "title": "위협 모델링: 자산, 공격 표면, STRIDE",
+      "goal": "보안 설계를 '무엇을 누구로부터 지키는가'에서 시작하는 습관을 들인다.",
+      "task": "Wi-Fi 연결 센서 디바이스(부트로더, 앱, OTA, 디버그 포트, 클라우드 API)의 DFD와 신뢰 경계를 그리고 STRIDE 위협 표(위협, 영향, 가능성, 완화책)를 작성해 상위 5개 위협과 대응 트랙 항목을 매핑한다.",
+      "tags": [
+        "threat-modeling",
+        "stride",
+        "attack-surface"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-B02",
+      "level": "B",
+      "title": "C 메모리 안전 버그 1: 스택 버퍼 오버플로",
+      "goal": "오버플로가 리턴 주소/인접 변수를 덮는 메커니즘을 관찰하고 안전하게 수정한다.",
+      "task": "고정 크기 버퍼에 길이 검사 없이 복사하는 명령 핸들러를 작성해 -fno-stack-protector 빌드에서 lldb로 인접 변수·저장된 레지스터가 덮이는 모습을 관찰하고, ASan 탐지 → bounded copy와 길이 검증으로 수정한 뒤 회귀 테스트를 추가한다.",
+      "tags": [
+        "buffer-overflow",
+        "stack",
+        "memory-safety"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-B03",
+      "level": "B",
+      "title": "C 메모리 안전 버그 2: 정수 오버플로, 부호 혼동, off-by-one",
+      "goal": "길이 계산 버그가 어떻게 메모리 손상으로 이어지는지 이해하고 방지 패턴을 익힌다.",
+      "task": "패킷 길이 필드 처리에서 흔한 취약 패턴 5종(len+hdr 오버플로, signed/unsigned 비교, size_t 언더플로, off-by-one, 곱셈 오버플로)을 재현하고 __builtin_add_overflow 등 checked arithmetic으로 수정해 경계 테스트로 검증한다.",
+      "tags": [
+        "integer-overflow",
+        "off-by-one",
+        "memory-safety"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-B04",
+      "level": "B",
+      "title": "C 메모리 안전 버그 3: UAF, double free, format string",
+      "goal": "힙 수명 관리 버그와 포맷 문자열 버그의 원인과 방지 규칙을 안다.",
+      "task": "use-after-free, double free, 사용자 입력을 포맷 문자열로 쓰는 로그 함수를 재현해 ASan/-Wformat-security로 탐지하고, 소유권 규칙·free 후 NULL·고정 포맷 사용으로 수정하며 펌웨어에서 정적 할당을 선호하는 이유를 정리한다.",
+      "tags": [
+        "use-after-free",
+        "format-string",
+        "memory-safety"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-B05",
+      "level": "B",
+      "title": "해시 함수 구현: SHA-256",
+      "goal": "Merkle–Damgård 구조와 패딩을 구현 수준에서 이해한다.",
+      "task": "SHA-256을 직접 구현(init/update/final 스트리밍 API, 빅엔디언 처리, 패딩)하고 NIST 테스트 벡터(빈 문자열, 'abc', 백만 'a')와 청크 분할 입력 일치를 검증한다.",
+      "tags": [
+        "sha256",
+        "hash",
+        "crypto"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-B06",
+      "level": "B",
+      "title": "메시지 인증: HMAC-SHA256과 길이 확장 공격",
+      "goal": "MAC이 필요한 이유와 H(key||msg)가 안전하지 않은 이유를 보인다.",
+      "task": "자신의 SHA-256으로 HMAC을 구현해 RFC 4231 벡터로 검증하고, H(secret||msg) 방식에 대한 length extension 공격을 실제로 구현해 위조 메시지가 검증을 통과함을 보인 뒤 HMAC에서는 실패함을 확인한다.",
+      "tags": [
+        "hmac",
+        "length-extension",
+        "crypto"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-B07",
+      "level": "B",
+      "title": "타이밍 안전 비교: constant-time memcmp",
+      "goal": "조기 종료 비교가 비밀을 누출하는 원리와 constant-time 코딩을 익힌다.",
+      "task": "memcmp 기반 MAC 비교의 일치 바이트 수에 따른 실행시간 차이를 통계(수만 샘플, 중앙값)로 측정하고 XOR-OR 누적 constant-time 비교를 구현, -O2 디스어셈블리에서 분기가 없는지 확인한다.",
+      "tags": [
+        "constant-time",
+        "timing",
+        "side-channel"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-B08",
+      "level": "B",
+      "title": "AES와 블록 암호 모드: ECB, CBC, CTR",
+      "goal": "모드별 특성과 오용(ECB 패턴 노출, IV/nonce 재사용)의 결과를 체험한다.",
+      "task": "Mbed TLS AES로 비트맵 이미지를 ECB/CBC/CTR 암호화해 ECB 패턴 노출을 확인하고, CTR nonce 재사용 시 두 평문 XOR이 드러나는 공격과 CBC 비트 플립 공격을 재현한 뒤 올바른 IV/nonce 관리 규칙을 정리한다.",
+      "tags": [
+        "aes",
+        "block-cipher-modes",
+        "nonce"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-B09",
+      "level": "B",
+      "title": "AEAD: AES-GCM / ChaCha20-Poly1305로 패킷 보호",
+      "goal": "기밀성+무결성을 함께 제공하는 AEAD를 프로토콜에 올바르게 적용한다.",
+      "task": "디바이스↔게이트웨이 패킷 포맷(헤더=AAD, 카운터 기반 nonce, 태그)을 설계하고 Mbed TLS/libsodium으로 구현, 태그 변조·리플레이·nonce 중복을 거부하는지 테스트한다.",
+      "tags": [
+        "aead",
+        "aes-gcm",
+        "chacha20-poly1305"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-B10",
+      "level": "B",
+      "title": "난수와 엔트로피: TRNG, DRBG, health test",
+      "goal": "약한 난수의 위험과 임베디드에서 안전한 난수 공급 구조를 안다.",
+      "task": "시간 시드 rand()로 생성한 키를 시드 범위 탐색으로 복원하는 데모를 만들고, CTR_DRBG(Mbed TLS) 기반 난수 API와 TRNG 원시 출력용 Repetition Count·Adaptive Proportion health test(SP 800-90B)를 구현한다.",
+      "tags": [
+        "rng",
+        "entropy",
+        "drbg"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-M01",
+      "level": "M",
+      "title": "디지털 서명: ECDSA P-256과 Ed25519",
+      "goal": "서명 생성/검증 흐름, 키·서명 인코딩, 알고리즘별 함정을 안다.",
+      "task": "Mbed TLS(ECDSA P-256)와 libsodium(Ed25519)으로 펌웨어 이미지 서명/검증 도구를 만들고 DER vs raw(r||s) 서명 포맷 변환, 공개키 해시 고정, ECDSA nonce 재사용 시 개인키가 복원되는 원리를 수식과 코드로 확인한다.",
+      "tags": [
+        "ecdsa",
+        "ed25519",
+        "signature"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-M02",
+      "level": "M",
+      "title": "Secure boot 검증 경로 구현",
+      "goal": "부트로더의 이미지 인증 로직을 실수 없이 구현하고 우회 케이스를 테스트한다.",
+      "task": "이미지 헤더(magic, 버전, 크기, 해시, 서명, 헤더 자체 범위)를 정의하고 부트로더 검증 함수(헤더 경계 검사→해시→서명→점프)를 구현, 변조 이미지·잘린 이미지·헤더 크기 조작·TOCTOU 시나리오 테스트 세트로 검증한다.",
+      "tags": [
+        "secure-boot",
+        "verification",
+        "see:PLAT"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-M03",
+      "level": "M",
+      "title": "Chain of trust와 키 계층: ROTPK, 인증서, 폐기",
+      "goal": "루트 키를 직접 쓰지 않고 위임·폐기 가능한 키 계층을 설계한다.",
+      "task": "OTP에 ROTPK 해시를 두고 root→content-signing 키 인증서 체인을 검증하는 코드를 구현, 키 폐기 비트(OTP fuse 모델)로 유출된 서명 키를 무효화하는 시나리오를 테스트한다.",
+      "tags": [
+        "chain-of-trust",
+        "rotpk",
+        "key-revocation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-M04",
+      "level": "M",
+      "title": "Anti-rollback: 보안 버전과 단조 카운터",
+      "goal": "취약한 구버전 펌웨어로의 다운그레이드 공격을 막는다.",
+      "task": "eFuse/OTP 단조 카운터 모델과 이미지의 security version을 비교하는 검사를 구현하고, A/B 업데이트에서 카운터를 '언제' 올려야 하는지(새 이미지 mark-good 이후) 잘못된 순서가 벽돌/우회를 만드는 시나리오로 검증한다.",
+      "tags": [
+        "anti-rollback",
+        "monotonic-counter",
+        "efuse"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-M05",
+      "level": "M",
+      "title": "Secure firmware update: 서명된 매니페스트와 암호화 페이로드",
+      "goal": "업데이트 패키지의 인증·기밀성·신선도·전원 차단 안전을 함께 설계한다.",
+      "task": "서명된 매니페스트(버전, 대상 하드웨어, 페이로드 해시, 암호화 키 래핑 정보)와 AES-GCM 암호화 페이로드로 업데이트 패키지를 만들고 디바이스 검증/설치 로직을 구현, TUF/SUIT 개념과 비교한다.",
+      "tags": [
+        "secure-update",
+        "manifest",
+        "suit",
+        "see:INFRA"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-M06",
+      "level": "M",
+      "title": "키 저장과 키 래핑: KEK, AES-KW, 보안 엘리먼트",
+      "goal": "평문 키를 플래시에 두지 않는 키 저장 계층을 설계한다.",
+      "task": "디바이스 고유 키(하드웨어 유도 KEK 모델)로 데이터 키를 AES-KW(RFC 3394)로 wrap/unwrap하는 코드를 구현해 RFC 벡터로 검증하고, OTP·보안 엘리먼트·TEE 키 저장 옵션별 위협 대응을 비교한다.",
+      "tags": [
+        "key-storage",
+        "aes-kw",
+        "kek"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-M07",
+      "level": "M",
+      "title": "TrustZone-A와 TEE: OP-TEE Trusted Application",
+      "goal": "Secure/Normal world 분리와 TA 호출 구조를 이해한다.",
+      "task": "OP-TEE QEMUv8 환경에서 hello_world TA와 클라이언트 앱을 빌드·실행하고(또는 가이드 따라 구조 분석), '키를 TA 밖으로 내보내지 않는 서명 서비스' TA 인터페이스(UUID, 명령 ID, 파라미터 타입)를 설계한다.",
+      "tags": [
+        "trustzone",
+        "tee",
+        "op-tee"
+      ],
+      "env": "qemu",
+      "env_note": "OP-TEE QEMUv8 빌드는 무거움 → 가이드 중심, 가능하면 Lima VM에서 빌드"
+    },
+    {
+      "id": "SEC-M08",
+      "level": "M",
+      "title": "MPU 권한 분리: 비특권 태스크 샌드박스와 SVC 게이트",
+      "goal": "MPU와 특권/비특권 모드로 태스크를 격리해 한 태스크의 버그가 시스템을 깨지 못하게 한다",
+      "task": "QEMU Cortex-M에서 비특권 thread 모드 태스크에 자기 스택·데이터 영역만 허용하는 MPU 영역을 컨텍스트 전환마다 바꿔 끼우고, 특권 서비스는 SVC 게이트로만 호출하게 만든 뒤 다른 태스크 메모리·주변장치 접근이 MemManage fault로 차단되는지 검증한다(기본 MPU 설정은 see:BM-A08).",
+      "tags": [
+        "mpu",
+        "privilege",
+        "isolation",
+        "see:BM"
+      ],
+      "env": "qemu",
+      "env_note": "QEMU(mps2-an385 등 Cortex-M) + arm-none-eabi 툴체인"
+    },
+    {
+      "id": "SEC-M09",
+      "level": "M",
+      "title": "컴파일러 하드닝: stack protector, FORTIFY, CFI, PIE",
+      "goal": "컴파일러/링커 보안 옵션이 생성 코드에 무엇을 추가하는지 안다.",
+      "task": "-fstack-protector-strong, _FORTIFY_SOURCE=2, -fsanitize=cfi, PIE/RELRO 각각의 효과를 디스어셈블리·readelf로 비교하고, bare-metal용 __stack_chk_guard(부팅 시 난수 초기화)와 __stack_chk_fail을 직접 구현한다.",
+      "tags": [
+        "hardening",
+        "stack-canary",
+        "cfi"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-M10",
+      "level": "M",
+      "title": "보안 통신: 임베디드 TLS 1.3과 mTLS",
+      "goal": "제한된 디바이스에서 상호 인증 TLS를 구성하고 비용을 측정한다.",
+      "task": "Mbed TLS로 디바이스 인증서 기반 mTLS 클라이언트/서버를 구성하고 인증서 핀닝·호스트명 검증을 구현, 핸드셰이크 시간·피크 RAM·코드 크기를 측정해 PSK 모드와 비교한다.",
+      "tags": [
+        "tls",
+        "mtls",
+        "mbedtls"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-M11",
+      "level": "M",
+      "title": "디버그 포트 잠금: JTAG/SWD와 readout protection",
+      "goal": "양산 디바이스의 디버그 접근 제어와 인증된 디버그 언락을 설계한다.",
+      "task": "RDP 레벨(0/1/2) 상태머신 모델(레벨 하향 시 전체 erase)과 challenge-response 인증 디버그 언락(디바이스 nonce + 서명된 응답, 디바이스 ID 바인딩)을 구현하고 리플레이·다른 디바이스 토큰 재사용을 거부하는지 테스트한다.",
+      "tags": [
+        "debug-lock",
+        "jtag",
+        "rdp",
+        "secure-debug"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-M12",
+      "level": "M",
+      "title": "펌웨어 바이너리 분석: 비밀 노출 찾기",
+      "goal": "공격자 관점에서 펌웨어 이미지를 분석해 하드코딩 비밀을 찾는다.",
+      "task": "API 키·비밀번호·개인키가 박힌 펌웨어 바이너리(직접 빌드)에서 strings, binwalk, 엔트로피 그래프, Ghidra 함수 참조로 비밀을 찾아내고, 빌드 파이프라인에서 비밀 스캔과 디바이스별 provisioning으로 대체하는 방안을 정리한다.",
+      "tags": [
+        "reverse-engineering",
+        "secrets",
+        "binwalk"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-A01",
+      "level": "A",
+      "title": "타이밍 사이드채널 공격 실습과 방어",
+      "goal": "작은 타이밍 차이를 통계로 증폭해 비밀을 복원할 수 있음을 체험한다.",
+      "task": "로컬 소켓 서버의 비-constant-time 토큰 검증에 대해 바이트별 후보 응답시간을 수천 샘플 수집·통계 검정해 토큰을 복원하는 공격 스크립트를 작성하고, constant-time 비교·rate limit 적용 후 공격이 실패함을 확인한다.",
+      "tags": [
+        "timing-attack",
+        "side-channel",
+        "statistics"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-A02",
+      "level": "A",
+      "title": "전력 분석 시뮬레이션: CPA로 AES 키 복원",
+      "goal": "Hamming weight 누출 모델과 상관 전력 분석의 원리를 구현한다.",
+      "task": "AES 첫 라운드 S-box 출력의 Hamming weight + 가우시안 노이즈로 합성 전력 트레이스를 만들고, 키 바이트 후보별 상관계수로 키를 복원하는 CPA를 구현해 노이즈 대비 필요 트레이스 수를 측정, 마스킹 적용 시 효과를 비교한다.",
+      "tags": [
+        "power-analysis",
+        "cpa",
+        "aes",
+        "side-channel"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-A03",
+      "level": "A",
+      "title": "결함 주입(글리칭) 방어 코딩",
+      "goal": "명령 스킵/비트플립 글리치로 보안 분기가 우회되는 것을 소프트웨어로 완화한다.",
+      "task": "명령 스킵·분기 반전·레지스터 비트플립을 흉내 내는 결함 시뮬레이터(검증 함수 실행 단계에 주입)를 만들고, 이중 검사·상보 상수 플래그(0x3CA5/0xC35A)·무작위 지연·루프 완료 카운터 검증으로 secure boot 분기를 하드닝해 우회율을 비교한다.",
+      "tags": [
+        "fault-injection",
+        "glitching",
+        "hardening"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-A04",
+      "level": "A",
+      "title": "제어 흐름 탈취와 완화: NX, ASLR, PAC/BTI",
+      "goal": "ROP 개념과 ARMv8.3 PAC·BTI가 이를 어떻게 막는지 이해한다.",
+      "task": "격리된 실습 프로그램에서 스택 오버플로로 리턴 주소를 다른 함수로 바꾸는 제어 흐름 탈취를 재현(보호 해제 빌드)하고, M2(arm64e)에서 -mbranch-protection=standard 빌드 시 PACIASP/AUTIASP 삽입과 탈취 실패를 디스어셈블리·실행으로 확인한다.",
+      "tags": [
+        "rop",
+        "pac",
+        "bti",
+        "exploit-mitigation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-A05",
+      "level": "A",
+      "title": "원격 증명(Remote Attestation)",
+      "goal": "디바이스가 자신의 펌웨어 상태를 서버에 증명하는 프로토콜을 구현한다.",
+      "task": "측정값(부트 스테이지 해시)과 서버 nonce를 포함한 증명 토큰(CBOR/EAT 유사)을 디바이스 키로 서명하고, 서버 검증기가 서명·nonce 신선도·허용 측정값 목록을 확인하도록 구현해 리플레이와 변조 펌웨어를 거부하는지 테스트한다.",
+      "tags": [
+        "attestation",
+        "eat",
+        "measured-boot",
+        "see:PLAT"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-A06",
+      "level": "A",
+      "title": "상태 기반 프로토콜 퍼징",
+      "goal": "단순 바이트 퍼징이 닿지 못하는 깊은 상태의 버그를 찾는다.",
+      "task": "인증→세션→명령 단계를 가진 디바이스 명령 프로토콜에 libFuzzer custom mutator(구조 인식, 메시지 시퀀스 생성)를 적용해 상태 커버리지를 높이고, 일반 퍼징 대비 도달 상태 수·발견 버그를 비교한다.",
+      "tags": [
+        "fuzzing",
+        "stateful",
+        "protocol",
+        "see:TEST"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-A07",
+      "level": "A",
+      "title": "메모리 안전 언어 비교: Rust no_std 파서",
+      "goal": "Rust가 어떤 버그 클래스를 컴파일 타임에 제거하는지 같은 과제로 비교한다.",
+      "task": "앞서 취약했던 TLV 패킷 파서를 Rust no_std(슬라이스·Result 기반)로 재작성하고 C 버전과 같은 퍼징 하네스(cargo-fuzz)를 돌려 버그 수·코드 크기·성능을 비교, C와 FFI로 공존시키는 경계 설계를 정리한다.",
+      "tags": [
+        "rust",
+        "memory-safety",
+        "no_std"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SEC-A08",
+      "level": "A",
+      "title": "종합: 디바이스 보안 아키텍처 리뷰",
+      "goal": "위협 모델부터 양산까지 일관된 보안 설계를 제시하고 방어한다.",
+      "task": "B01 위협 모델을 갱신해 보안 부팅·키 계층·anti-rollback·secure update·디버그 잠금·증명·로깅을 엮은 보안 아키텍처 문서를 작성하고, 자체 레드팀 체크리스트(각 위협에 대한 테스트 증거 링크)로 평가해 잔여 위험을 정리한다.",
+      "tags": [
+        "security-architecture",
+        "capstone",
+        "review"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

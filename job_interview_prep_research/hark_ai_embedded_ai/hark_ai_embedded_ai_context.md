@@ -1,9 +1,9 @@
 # Hark — Embedded AI Engineer · Context
 
-> **최종 갱신**: 2026-10-04 · **상태**: 🔍 조사중
+> **최종 갱신**: 2026-11-04 · **상태**: ⏸ 종료 · 미지원 (공고 내려감, Don 보고 11-04)
 > **JD**: https://job-boards.greenhouse.io/hark/jobs/4392090009 · **위치**: San Jose, CA / onsite 추정 · **연봉 밴드**: $200,000 – $450,000 base (+ equity 가능)
 > **사용 레쥬메**: `Resume_Firmware_Engineer_2026_Sep_DonHong.pdf`
-> **관련 포지션**: 같은 회사 [Embedded SWE, BSP](../hark_ai_embedded_swe/hark_ai_embedded_swe_context.md) (📞 리크루터 진행 중, 1순위) · 자리 비교는 [P03 임베디드 7자리 지도](../hark_ai_embedded_swe/2026-09-19_hark_study_notes/site/plan/P03_embedded_role_map.html)
+> **관련 포지션**: 같은 회사 [Embedded SWE, BSP](../hark_ai_embedded_swe/hark_ai_embedded_swe_context.md) (~~📞 리크루터 진행 중, 1순위~~ → ❌ 불합격 10-29) · 자리 비교는 [P03 임베디드 7자리 지도](../hark_ai_embedded_swe/2026-09-19_hark_study_notes/site/plan/P03_embedded_role_map.html)
 > **🧭 스터디 나침반**: [study_prep_list — 이 직군 공부 목록 (15모듈, 약 100개념)](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/site/compass/study_prep_list.html) — 2026-09-28 `dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/`로 이동
 > **📚 스터디 노트 사이트**: [노트 목록](../../dons_study_note_from_experience/embeddedAIPrepBasedOnHarkAIJD/site/index.html) — 진행: 모듈 A(A0–A6) · B(B1–B9) · C(C1–C8) · D(D1–D7) · E(E1–E9) · F(F1–F8) · G(G1–G7) · H(H1–H8) · I(I1–I6) · J(J1–J6) · K(K1–K5) · L(L1–L6) · M(M1–M4) · N(N1–N4) · O(O1–O3) — **A–O 전체 작성 완료** (97편), 이제 읽기 단계
 > 신뢰도: `[확인됨]` 공식/복수 출처 · `[추정]` 단일·2차 출처 또는 추론. 리크루터 공식 안내가 항상 우선.
@@ -14,6 +14,7 @@
 
 ## 0. TL;DR
 
+- **⏸ 종료 (2026-11-04)**: 지원한 적 없음. Don이 공고가 내려갔다고 보고해 추적 종료. 스터디 노트 97편은 회사와 무관하게 계속 유효.
 - **회사**: Figure AI 창업자 Brett Adcock가 세운 "personal intelligence" AI 랩 + 컨슈머 하드웨어 회사. 자체 multimodal 모델(speech·vision·memory)과 전용 기기를 같이 만든다. Series A $700M, post-money $6B (2026-05) [확인됨][1][2]. 첫 제품은 웹 에이전트 Handoff(2026-08), 하드웨어는 미공개 [확인됨][4]
 - **역할**: Hark 기기 위의 **AI 스택 전체**를 맡는다. 센서 데이터 수집 파이프라인 → 모델팀과 모델 구조 co-design → 벤더 툴체인/SDK/**새 가속기 bring-up** → C/C++/Rust 펌웨어에 추론 통합 → 메모리·전력·실시간 성능 프로파일링 → **실리콘 플랫폼(GPU/NPU) 선정** [확인됨][JD]
 - **적합도**: ⭐⭐ (2/5). 역할의 절반인 **임베디드 시스템·가속기 bring-up·성능/전력 프로파일링**은 Don의 본진이다. 하지만 필수 요건 1번이 **"5 years of ML engineering, 2+ years edge ML"**이고, TFLite/llama.cpp/QNN·모델 최적화·IMU/마이크 실무가 전부 없다. 필수 7개 중 ✅ 1 · 🟡 2 · ❌ 4
@@ -262,6 +263,7 @@
 | 2026-10-03 | **스터디 노트 모듈 M 완료** | M1 평가 기준·의사결정 · M2 칩 간 벤치마크 방법론 · M3 벤더 지형(출처 53개) · M4 데이터시트 해석(실제 브리프 7종) — 4편 약 4,600줄, SVG 27개. JD 6번 업무("Evaluate and select silicon platforms")를 직접 커버. 리서치에서 나온 최신 업계 소식: ADI의 Alif 인수 발표(2026-09-09, 8-K), Qualcomm Wear Elite(2026-03, always-on eNPU). 누적 90편 약 126,700줄. **다음: 모듈 N (도메인)** |
 | 2026-10-04 | **스터디 노트 모듈 N 완료** | N1 웨어러블 제약(폼팩터별 전력·열·노화) · N2 기존 제품 사례(출처 46개, Humane/Rabbit 실패 분석) · N3 로보틱스 센싱(제어 루프 시뮬, BC→DAgger, Figure Helix) · N4 always-listening UX — 4편 약 4,500줄, SVG 27개. JD 우대 "wearables, robotics" 커버. 2026-10-04 기준 Hark 하드웨어 공개 발표는 찾지 못함(N2). 누적 94편 약 131,200줄. **다음(마지막): 모듈 O (툴)** |
 | 2026-10-04 | **스터디 노트 모듈 O 완료 → 전체 A–O 완료** | O1 Python 파이프라인(export→quantize→bench→report, 캐시·로그 파싱) · O2 Linux/Android 온디바이스(NNAPI deprecated, 16 KB 페이지, fake NPU 드라이버) · O3 ML CI(통계적 정확도·지연 게이트, device farm) — 3편 약 3,900줄, SVG 15개. **최종: 97편 · 약 135,100줄 · SVG 702개 · 예제 약 1,310개**. 다음: A0부터 읽기 + 포트폴리오 실습 |
+| 2026-11-04 | **⏸ 종료 · 미지원** | Don 보고: 공고 내려감. 지원 이력 없음. 단, 같은 날 Greenhouse 확인 시 공고 페이지와 API(job 4392090009)는 아직 200으로 열려 있었음 [확인됨 11-04] → Don이 본 경로와 불일치, 재개하려면 다시 확인 |
 
 ---
 

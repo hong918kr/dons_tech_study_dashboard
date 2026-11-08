@@ -1,0 +1,513 @@
+{
+  "id": "DSP",
+  "intro": "FPU가 없거나 전력이 아까운 MCU에서 필터·FFT·제어를 정수 연산으로 정확하게 돌리는 기술이다. 오디오·모터 제어·센서·RF 펌웨어 면접에서 Q15 곱셈의 포화, biquad 구현, FFT 직접 구현, 고정소수점 오버플로 분석은 단골 문제다.",
+  "goals": [
+    "Q-format 변환·곱셈·반올림·포화를 비트 정확하게 구현하고 오차를 분석할 수 있다",
+    "FIR/IIR(biquad)/CIC/다상(polyphase) 필터를 부동·고정소수점으로 구현하고 주파수 응답으로 검증할 수 있다",
+    "radix-2 FFT를 직접 구현하고 윈도잉·스펙트럼 분석(SNR/THD/ENOB)을 할 수 있다",
+    "CORDIC·다항식 근사·LUT로 삼각함수·sqrt·atan2를 정확도/속도 trade-off에 맞게 구현할 수 있다",
+    "오버플로·동적범위 분석과 SIMD(NEON/CMSIS-DSP) 최적화로 실시간 DSP 파이프라인을 설계할 수 있다"
+  ],
+  "prereq": [
+    "C",
+    "ARCH"
+  ],
+  "refs": [
+    {
+      "title": "Understanding Digital Signal Processing, 3rd ed. (Richard G. Lyons)"
+    },
+    {
+      "title": "The Scientist and Engineer's Guide to Digital Signal Processing (S. W. Smith)",
+      "url": "https://www.dspguide.com/"
+    },
+    {
+      "title": "CMSIS-DSP Library (Arm)",
+      "url": "https://github.com/ARM-software/CMSIS-DSP"
+    },
+    {
+      "title": "Audio EQ Cookbook (R. Bristow-Johnson, W3C Note)",
+      "url": "https://www.w3.org/TR/audio-eq-cookbook/"
+    },
+    {
+      "title": "Discrete-Time Signal Processing (Oppenheim & Schafer)"
+    },
+    {
+      "title": "Digital Signal Processing: A Practical Guide for Engineers and Scientists (S. W. Smith)"
+    }
+  ],
+  "items": [
+    {
+      "id": "DSP-B01",
+      "level": "B",
+      "title": "Q-format 기초: Qm.n 변환·범위·해상도",
+      "goal": "고정소수점 표현의 범위·해상도·변환 반올림을 정확히 다룬다",
+      "task": "float↔Q15/Q31/Q7.8 변환 함수(round-to-nearest, truncate, 포화 포함)를 C로 구현하고 범위 끝값(-1.0, 1−2^-15, +1.0 입력)과 랜덤 값에 대해 최대 오차가 0.5 LSB 이내인지 테스트한다.",
+      "tags": [
+        "q-format",
+        "fixed-point",
+        "conversion"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B02",
+      "level": "B",
+      "title": "Q15 곱셈: 반올림·포화·-1×-1 코너",
+      "goal": "가장 자주 틀리는 Q15 곱셈의 정확한 구현을 익힌다",
+      "task": "q15_mul(a,b)를 32비트 곱 → 반올림 상수 0x4000 더하기 → >>15 → 포화 순서로 구현하고, 2^32개 전수 조합(또는 대표 샘플) 테스트로 float 기준 대비 오차와 -32768×-32768 오버플로 처리를 검증한다; ARM SMULBB/QDMULH 의미와 비교한다.",
+      "tags": [
+        "q15",
+        "saturation",
+        "rounding",
+        "exhaustive-test"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B03",
+      "level": "B",
+      "title": "포화 덧셈/뺄셈과 오버플로 검출",
+      "goal": "wrap-around 대신 포화가 필요한 이유와 효율적 구현을 익힌다",
+      "task": "분기 없는 포화 add/sub(int16/int32)를 구현하고 __builtin_add_overflow 버전과 결과를 전수/랜덤 비교; wrap되는 FIR 누산과 포화 누산의 출력 차이를 사인파 입력으로 보인다.",
+      "tags": [
+        "saturation",
+        "overflow",
+        "branchless"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B04",
+      "level": "B",
+      "title": "서로 다른 Q 형식의 혼합 연산",
+      "goal": "Qm.n 정렬, guard bit, 누산기 폭 결정을 손으로 계산할 수 있게 한다",
+      "task": "Q1.15×Q3.13 → Q4.28 → Q1.15 변환 체인, N개 Q15 곱 누산에 필요한 guard bit(ceil(log2 N)) 계산기를 작성하고, 누산기 폭이 부족할 때 오버플로가 나는 입력을 만들어 확인한다.",
+      "tags": [
+        "q-format",
+        "guard-bits",
+        "accumulator"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B05",
+      "level": "B",
+      "title": "샘플링·Aliasing·양자화 잡음(SQNR)",
+      "goal": "샘플링과 양자화의 기본 수식을 실험으로 확인한다",
+      "task": "사인파를 다양한 fs로 샘플링해 aliasing 주파수를 예측·확인하고, N비트(8~16) 양자화 후 SQNR을 측정해 6.02N+1.76dB와 비교; 입력 레벨이 낮을 때 SQNR이 떨어지는 것과 dither 효과를 보인다.",
+      "tags": [
+        "sampling",
+        "aliasing",
+        "quantization",
+        "sqnr"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B06",
+      "level": "B",
+      "title": "이동평균 필터: O(1) 구현과 주파수 응답",
+      "goal": "가장 흔한 필터인 이동평균을 효율적·정확하게 구현한다",
+      "task": "running sum + 원형 버퍼 이동평균을 정수로 구현(N=2^k일 때 shift 나눗셈)하고, 장시간 실행에서도 누산 오차가 없음을 확인; 계단·사인 sweep 입력으로 sinc 형태 주파수 응답과 null 위치를 측정한다.",
+      "tags": [
+        "moving-average",
+        "fir",
+        "circular-buffer"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B07",
+      "level": "B",
+      "title": "1차 IIR(EMA) 저역통과 필터",
+      "goal": "shift 기반 EMA의 시정수, DC 오차, 저입력 정체(dead band)를 이해한다",
+      "task": "y += (x − y) >> k 형태의 EMA를 구현하고 k별 시정수·-3dB 주파수를 계산·측정; 작은 입력 변화가 반영되지 않는 정체 현상을 재현하고 소수부 누산(상위 비트 확장)으로 해결한다.",
+      "tags": [
+        "iir",
+        "ema",
+        "low-pass"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B08",
+      "level": "B",
+      "title": "FIR 필터 직접 구현 (Q15 + 64비트 누산)",
+      "goal": "실무 FIR 구현(원형 버퍼, 누산기 폭, 출력 반올림)을 완성한다",
+      "task": "임의 탭 수 FIR을 float와 Q15(int64 누산, 최종 반올림·포화)로 구현하고 numpy.convolve 결과와 비교해 오차를 측정; 원형 버퍼 인덱싱 vs 지연선 복제(double-size buffer) 방식의 속도를 비교한다.",
+      "tags": [
+        "fir",
+        "q15",
+        "circular-buffer"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B09",
+      "level": "B",
+      "title": "DFT 직접 구현과 bin 해석",
+      "goal": "FFT 전에 DFT 정의와 주파수 bin의 의미를 손으로 확인한다",
+      "task": "O(N²) DFT를 C로 구현해 numpy.fft와 비교하고, bin 주파수 k·fs/N, 실수 신호의 켤레 대칭, 진폭 스케일(2/N), DC/Nyquist bin 특성을 테스트 신호로 확인한다.",
+      "tags": [
+        "dft",
+        "frequency-bin",
+        "spectrum"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B10",
+      "level": "B",
+      "title": "윈도잉과 스펙트럼 누설",
+      "goal": "윈도 선택이 누설·해상도·진폭 정확도에 미치는 영향을 정량화한다",
+      "task": "Rectangular/Hann/Hamming/Blackman/Flat-top 윈도를 구현하고 bin 사이 주파수 사인파로 누설(sidelobe), scalloping loss, ENBW를 측정해 표로 비교; 가까운 두 톤 분리 실험을 한다.",
+      "tags": [
+        "windowing",
+        "leakage",
+        "enbw"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B11",
+      "level": "B",
+      "title": "LUT 사인/코사인과 위상 누산기(NCO)",
+      "goal": "LUT 크기·보간 방식에 따른 정확도와 NCO 원리를 익힌다",
+      "task": "256/1024 엔트리 사인 LUT(1/4 파 대칭 활용)를 Q15로 만들고 nearest vs 선형보간 오차를 측정; 32비트 위상 누산기 NCO로 주파수 해상도 fs/2^32를 확인하고 SFDR을 FFT로 측정한다.",
+      "tags": [
+        "lut",
+        "nco",
+        "dds",
+        "interpolation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-B12",
+      "level": "B",
+      "title": "정수 sqrt와 Newton-Raphson 역수",
+      "goal": "나눗셈·제곱근이 비싼 MCU에서 쓰는 정수 알고리즘을 익힌다",
+      "task": "비트 단위 정수 sqrt(uint32→uint16)와 Q-format Newton-Raphson 역수/역제곱근(초기값 LUT + 2회 반복)을 구현해 전수 또는 대량 랜덤 테스트로 최대 오차를 측정하고 반복 횟수별 정확도를 비교한다.",
+      "tags": [
+        "sqrt",
+        "newton-raphson",
+        "reciprocal"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M01",
+      "level": "M",
+      "title": "Radix-2 DIT FFT 구현 (float)",
+      "goal": "면접 단골인 FFT를 비트 반전과 butterfly로 직접 구현한다",
+      "task": "in-place iterative radix-2 DIT FFT(비트 반전 재배열 + twiddle 테이블)를 C로 구현해 numpy.fft와 상대오차 1e-6 이내로 맞추고, N=64~65536에서 DFT 대비 실행시간이 N log N으로 증가함을 측정한다.",
+      "tags": [
+        "fft",
+        "radix-2",
+        "butterfly",
+        "bit-reversal"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M02",
+      "level": "M",
+      "title": "고정소수점 FFT와 Block Floating Point",
+      "goal": "Q15 FFT에서 단계별 스케일링이 왜 필요한지와 SNR 손실을 정량화한다",
+      "task": "M01을 Q15로 포팅해 (1) 매 단계 >>1 고정 스케일 (2) 오버플로 감지 시에만 스케일하는 block floating point를 구현하고, 입력 레벨별 출력 SNR을 float FFT 대비 측정해 비교한다.",
+      "tags": [
+        "fft",
+        "fixed-point",
+        "block-floating-point"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M03",
+      "level": "M",
+      "title": "Real FFT 트릭과 Goertzel",
+      "goal": "실수 입력 최적화와 단일 톤 검출의 효율적 방법을 익힌다",
+      "task": "N점 실수 FFT를 N/2점 복소 FFT + 후처리로 계산하는 split 알고리즘을 구현해 속도를 비교하고, Goertzel 알고리즘으로 DTMF 8개 톤을 검출하는 디코더를 만들어 합성 DTMF 신호(잡음 포함)로 검증한다.",
+      "tags": [
+        "real-fft",
+        "goertzel",
+        "dtmf"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M04",
+      "level": "M",
+      "title": "Biquad IIR: DF1 vs DF2T와 SOS 캐스케이드",
+      "goal": "IIR 필터의 표준 구현 구조와 계수 설계를 익힌다",
+      "task": "RBJ cookbook 공식으로 LPF/HPF/peaking 계수를 계산해 Direct Form I, Transposed Direct Form II biquad를 float로 구현하고 scipy.signal.sosfreqz 응답과 비교; 고차 필터를 SOS 캐스케이드로 쪼갤 때 순서·이득 분배가 중요한 이유를 실험한다.",
+      "tags": [
+        "biquad",
+        "iir",
+        "sos",
+        "df2t"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M05",
+      "level": "M",
+      "title": "고정소수점 Biquad: 계수 양자화·Limit Cycle",
+      "goal": "Q 형식 biquad에서 생기는 안정성·잡음 문제를 다룬다",
+      "task": "Q2.30 계수·Q31 상태 DF1 biquad를 구현해 저주파 LPF(fc=fs/1000)에서 계수 양자화로 극점이 이동하는 것을 계산하고, 무입력 limit cycle 재현과 error feedback(noise shaping)으로 개선을 측정한다.",
+      "tags": [
+        "biquad",
+        "fixed-point",
+        "limit-cycle",
+        "coefficient-quantization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M06",
+      "level": "M",
+      "title": "FIR 필터 설계와 계수 양자화",
+      "goal": "윈도 기반 FIR 설계와 Q15 양자화 후 스펙 충족 여부 확인 흐름을 익힌다",
+      "task": "windowed-sinc(Kaiser) 설계를 Python으로 직접 구현해 통과대역 리플·저지대역 감쇠 스펙을 만족하는 최소 탭 수를 찾고, Q15 양자화 후 응답 열화를 측정; 대칭 계수를 이용해 곱셈을 절반으로 줄인 C 구현을 작성한다.",
+      "tags": [
+        "fir-design",
+        "kaiser",
+        "quantization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M07",
+      "level": "M",
+      "title": "Decimation/Interpolation과 Polyphase",
+      "goal": "샘플률 변환에서 계산량을 줄이는 다상 구조를 구현한다",
+      "task": "M배 decimator와 L배 interpolator를 (1) 필터 후 다운샘플 (2) polyphase 구조로 각각 구현해 출력이 동일하고 연산량이 1/M임을 보이고, 안티에일리어싱 필터 유무에 따른 aliasing 성분을 FFT로 측정한다.",
+      "tags": [
+        "decimation",
+        "interpolation",
+        "polyphase"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M08",
+      "level": "M",
+      "title": "CIC 필터와 비트 성장",
+      "goal": "곱셈 없는 CIC decimator와 비트 폭 계산, 보상 필터를 익힌다",
+      "task": "N단 CIC decimator(R, M 파라미터)를 정수로 구현해 필요한 레지스터 폭 Bin + N·log2(RM)을 검증(모듈러 산술로 wrap되어도 결과가 맞음을 확인)하고, PDM 마이크 비트스트림 모델 → CIC → 보상 FIR로 PCM을 복원해 SNR을 측정한다.",
+      "tags": [
+        "cic",
+        "bit-growth",
+        "pdm"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M09",
+      "level": "M",
+      "title": "CORDIC: sin/cos/atan2/크기",
+      "goal": "곱셈기 없이 시프트·덧셈으로 삼각함수를 계산하는 CORDIC을 구현한다",
+      "task": "rotation 모드(sin/cos)와 vectoring 모드(atan2, magnitude)를 Q 형식 정수로 구현하고 게인 K 보정, 사분면 처리, 반복 횟수별 오차(비트당 약 1비트)를 측정해 libm과 비교한다.",
+      "tags": [
+        "cordic",
+        "atan2",
+        "fixed-point"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M10",
+      "level": "M",
+      "title": "다항식 근사: atan2·exp·log 빠른 계산",
+      "goal": "정확도 요구에 맞는 다항식/유리 근사를 설계하고 오차 예산을 맞춘다",
+      "task": "atan(x) on [0,1]을 Taylor vs minimax(Remez 또는 Chebyshev) 다항식으로 근사해 최대 오차를 비교하고, 사분면 확장으로 fast_atan2를 구현; exp2/log2는 지수부 분리 + 다항식으로 구현해 libm 대비 오차·속도를 측정한다.",
+      "tags": [
+        "approximation",
+        "minimax",
+        "atan2"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M11",
+      "level": "M",
+      "title": "오버플로·동적범위 분석",
+      "goal": "필터 내부 노드의 최악 오버플로를 수학적으로 경계 짓고 스케일링을 결정한다",
+      "task": "FIR의 L1 노름(Σ|h|) 기반 최악 이득과 IIR의 임펄스 응답 L1/L2 노름을 계산하는 도구를 만들고, 그 경계를 실제로 달성하는 적대적 입력(부호 정렬 입력)을 생성해 오버플로를 재현한 뒤 스케일링으로 해결한다.",
+      "tags": [
+        "overflow-analysis",
+        "l1-norm",
+        "scaling"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-M12",
+      "level": "M",
+      "title": "고정소수점 PID (가볍게)",
+      "goal": "제어 루프를 정수 연산으로 구현할 때의 스케일링·포화 문제를 익힌다",
+      "task": "Q16.16 또는 Q15 기반 이산 PID(적분 포화 제한, 출력 포화)를 구현하고 float 버전과 1차 플랜트 시뮬레이션 결과를 비교해 적분 누산 정밀도 부족으로 생기는 정상상태 오차를 보이고 개선한다(제어 이론은 see:RCTL).",
+      "tags": [
+        "pid",
+        "fixed-point",
+        "see:RCTL"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-A01",
+      "level": "A",
+      "title": "SIMD로 FIR/biquad 가속 (NEON on M2)",
+      "goal": "CMSIS-DSP의 SIMD 아이디어(dual MAC, 언롤링)를 실제 측정으로 체득한다",
+      "task": "Apple M2의 NEON intrinsics(vmlal_s16 등)로 Q15 FIR을 벡터화하고 스칼라 대비 속도를 측정; Cortex-M4 SMLAD(16비트 2개 MAC)와 어떻게 대응되는지, 데이터 정렬·tail 처리·biquad가 벡터화하기 어려운 이유를 정리한다.",
+      "tags": [
+        "simd",
+        "neon",
+        "smlad",
+        "cmsis-dsp"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-A02",
+      "level": "A",
+      "title": "CMSIS-DSP 함수로 Cortex-M 파이프라인 구성",
+      "goal": "실제 MCU DSP 라이브러리 API와 데이터 형식에 익숙해진다",
+      "task": "QEMU Cortex-M 타깃에서 CMSIS-DSP의 arm_fir_q15, arm_biquad_cascade_df1_q31, arm_rfft_q15를 사용해 블록 처리 파이프라인을 만들고, 출력이 직접 구현(B08/M05/M02)과 비트 단위로 일치하는지 비교한다.",
+      "tags": [
+        "cmsis-dsp",
+        "cortex-m",
+        "library"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi 툴체인 + QEMU mps2-an386 (사이클 수는 QEMU에서 정확하지 않음)"
+    },
+    {
+      "id": "DSP-A03",
+      "level": "A",
+      "title": "오디오 처리 파이프라인 (I2S DMA 블록 처리)",
+      "goal": "ping-pong DMA 버퍼 기반 블록 처리와 지연 예산을 설계한다",
+      "task": "I2S DMA half/full 완료 콜백을 흉내내는 host 시뮬레이터에서 WAV 입력을 블록 단위로 받아 EQ(biquad 3단)+게인+리미터를 Q31로 처리해 WAV로 출력하고, 블록 크기별 지연·연산 시간 예산 초과 시 underrun 검출을 구현한다.",
+      "tags": [
+        "audio",
+        "i2s",
+        "dma",
+        "ping-pong"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-A04",
+      "level": "A",
+      "title": "분수비 샘플률 변환 (44.1k→48k)",
+      "goal": "Farrow/다상 기반 비정수비 리샘플러를 구현하고 품질을 측정한다",
+      "task": "147/160 비율 다상 리샘플러 또는 Farrow 3차 보간 리샘플러를 구현해 1kHz 톤의 THD+N과 통과대역 평탄도를 측정, 구조별 연산량·메모리를 비교한다.",
+      "tags": [
+        "src",
+        "farrow",
+        "resampling"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-A05",
+      "level": "A",
+      "title": "적응 필터 LMS/NLMS",
+      "goal": "에코·잡음 제거의 기본인 적응 필터의 수렴과 고정소수점 이슈를 다룬다",
+      "task": "알려진 에코 경로(FIR)를 가진 echo cancellation 시나리오에서 LMS/NLMS를 float와 Q15로 구현해 스텝 크기별 수렴 속도·잔여 오차(ERLE)를 측정하고 고정소수점 stalling 문제를 재현·완화한다.",
+      "tags": [
+        "lms",
+        "adaptive-filter",
+        "echo-cancellation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-A06",
+      "level": "A",
+      "title": "디지털 PLL: 위상·주파수 추적",
+      "goal": "NCO + 위상검출기 + 루프 필터로 신호 위상을 추적하는 소프트웨어 PLL을 구현한다",
+      "task": "잡음 섞인 사인파의 위상·주파수를 추적하는 2차 디지털 PLL을 구현해 루프 대역폭·감쇠비에 따른 lock 시간·지터를 측정하고, 주파수 스텝 입력에서 cycle slip 조건을 찾는다(통신 응용은 see:RF).",
+      "tags": [
+        "pll",
+        "nco",
+        "loop-filter",
+        "see:RF"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-A07",
+      "level": "A",
+      "title": "ADC 스펙트럼 분석: SNR/SINAD/THD/ENOB",
+      "goal": "데이터시트 성능 지표를 캡처 데이터에서 직접 계산한다",
+      "task": "비선형성·잡음·지터를 넣은 ADC 모델 캡처(코히어런트 샘플링 조건 포함)에 대해 FFT 기반 SNR, THD(고조파 5개), SINAD, SFDR, ENOB=(SINAD−1.76)/6.02를 계산하는 도구를 만들고 Welch PSD로 잡음 바닥을 추정한다(see:SENS).",
+      "tags": [
+        "snr",
+        "thd",
+        "enob",
+        "welch",
+        "see:SENS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-A08",
+      "level": "A",
+      "title": "Bit-exact 검증 프레임워크",
+      "goal": "Python 골든 모델과 C 고정소수점 구현을 비트 단위로 맞추는 회귀 체계를 만든다",
+      "task": "numpy 정수 연산으로 C와 같은 반올림·포화를 재현한 골든 모델을 작성하고, 테스트 벡터 생성(경계·랜덤·적대적) → C 실행 → 비트 단위 diff → 첫 불일치 샘플 리포트 자동화를 FIR/biquad/FFT에 적용한다.",
+      "tags": [
+        "bit-exact",
+        "golden-model",
+        "regression"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "DSP-A09",
+      "level": "A",
+      "title": "MCU DSP 사이클 예산 설계",
+      "goal": "실시간 DSP 시스템의 블록 크기·메모리 배치·지연 trade-off를 설계한다",
+      "task": "100MHz Cortex-M7에서 48kHz 스테레오, 8단 biquad + 256탭 FIR + 리미터를 돌릴 때 샘플당 사이클 예산, 블록 크기별 오버헤드/지연, TCM vs 캐시 배치를 계산한 설계 메모를 쓰고, host 측정값으로 연산량 추정을 검증한다.",
+      "tags": [
+        "cycle-budget",
+        "real-time",
+        "design"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

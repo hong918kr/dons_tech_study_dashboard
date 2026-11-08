@@ -1,7 +1,7 @@
 # Rivian 온사이트 준비 플랜 + 스터디노트 로드맵
 <!-- theme: pastel -->
 
-> **상태**: 기술 스크린 완료 (10-30, 45분) → **리크루터 연락 대기** (면접관이 "리쿠르터가 연락할 것"이라고 함) · **온사이트 형식**: 4라운드 = Technical 2 + Behavioral 2 [확인됨: 리크루터 10-17] · **작성**: 2026-10-31 · **원본 컨텍스트**: [context](rivian_nstaff_silicon_validation_engineer_context.html)
+> **상태**: HM 스크린 완료 (10-30, 45분) → **후보 비교 중** (리크루터 11-04: 다른 HM 스크린을 다음 주에 마무리 후 진행 후보 통보, ~11-11 전후 [추정]; 별도 technical screen이 한 번 더 있을 수 있음 [추정]) · **온사이트 형식**: 4라운드 = Technical 2 + Behavioral 2 [확인됨: 리크루터 10-17] · **작성**: 2026-10-31 · **원본 컨텍스트**: [context](rivian_nstaff_silicon_validation_engineer_context.html)
 
 ## 0. TL;DR
 

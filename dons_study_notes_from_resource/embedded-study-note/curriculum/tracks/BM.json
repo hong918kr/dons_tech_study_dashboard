@@ -1,0 +1,597 @@
+{
+  "id": "BM",
+  "intro": "베어메탈은 OS 없이 리셋 벡터부터 main, 주변장치 레지스터, 인터럽트, 부트로더까지 펌웨어가 직접 책임지는 영역이다. '전원 켜면 main 전까지 무슨 일이 일어나나', 'HardFault 났을 때 어떻게 원인을 찾나', 'A/B 업데이트 중 전원이 나가면?' 같은 질문은 모든 펌웨어 면접의 핵심이며, 이 트랙은 mock 레지스터 맵으로 호스트에서 드라이버를 검증하고 실제 Cortex-M 부팅은 QEMU에서 확인한다.",
+  "goals": [
+    "벡터 테이블·리셋 핸들러·링커 스크립트로 리셋에서 main까지의 부팅 과정을 직접 구현한다",
+    "데이터시트 레지스터 설명만 보고 GPIO/UART/타이머/PWM/ADC/DMA 드라이버를 작성하고 mock 레지스터로 검증한다",
+    "NVIC 우선순위·크리티컬 섹션·SysTick·저전력·워치독을 올바르게 설정하고 함정을 설명한다",
+    "HardFault 스택 프레임과 CFSR을 해석해 크래시 원인을 찾는다",
+    "전원 차단에 안전한 부트로더와 A/B 펌웨어 업데이트를 설계·구현한다"
+  ],
+  "prereq": [
+    "C",
+    "ARCH",
+    "ARM",
+    "TOOL"
+  ],
+  "refs": [
+    {
+      "title": "Joseph Yiu, The Definitive Guide to ARM Cortex-M3 and Cortex-M4 Processors (3rd ed.)"
+    },
+    {
+      "title": "ARMv7-M Architecture Reference Manual (ARM DDI 0403)"
+    },
+    {
+      "title": "Memfault Interrupt blog — From Zero to main()",
+      "url": "https://interrupt.memfault.com/blog/zero-to-main-1"
+    },
+    {
+      "title": "Memfault Interrupt blog — How to debug a HardFault on an ARM Cortex-M MCU",
+      "url": "https://interrupt.memfault.com/blog/cortex-m-hardfault-debug"
+    },
+    {
+      "title": "CMSIS 6 (ARM-software)",
+      "url": "https://github.com/ARM-software/CMSIS_6"
+    },
+    {
+      "title": "MCUboot documentation",
+      "url": "https://docs.mcuboot.com"
+    },
+    {
+      "title": "QEMU Arm system emulator docs",
+      "url": "https://www.qemu.org/docs/master/system/target-arm.html"
+    }
+  ],
+  "items": [
+    {
+      "id": "BM-B01",
+      "level": "B",
+      "title": "벤더 헤더 읽기: CMSIS 디바이스 헤더와 _Pos/_Msk 관례",
+      "goal": "벤더가 제공하는 레지스터 헤더 구조를 읽고 그대로 드라이버 코드에 쓸 수 있다",
+      "task": "STM32 CMSIS 디바이스 헤더 발췌(구조체·_Pos/_Msk 매크로·주변장치 베이스 주소)를 읽고 offsetof static_assert로 레퍼런스 매뉴얼 오프셋 표와 일치를 확인한 뒤, 매크로만 써서 GPIO/USART 설정 함수를 작성해 mock 레지스터 값으로 검증한다(헤더 자동 생성은 see:SIV-B01).",
+      "tags": [
+        "cmsis",
+        "register",
+        "header",
+        "see:SIV"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-B02",
+      "level": "B",
+      "title": "Mock 주변장치 프레임워크: read/write 훅",
+      "goal": "레지스터 접근을 가로채 주변장치 동작(상태 비트 변화, W1C 등)을 호스트에서 흉내 내는 테스트 기반을 만든다",
+      "task": "REG_READ/REG_WRITE 매크로를 테스트 빌드에서 함수 훅으로 바꾸고, 주소별 콜백으로 TXE 플래그 자동 세트·RX 데이터 큐를 모델링하는 mock 프레임워크를 만들어 이후 드라이버 아이템에서 재사용한다.",
+      "tags": [
+        "mock",
+        "host-test",
+        "peripheral-model"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-B03",
+      "level": "B",
+      "title": "RCC: 주변장치 클럭 게이팅과 리셋 제어",
+      "goal": "주변장치를 쓰기 전 클럭 enable·리셋 해제가 필요한 이유와 '클럭 안 켜고 쓰기' 버그를 이해한다",
+      "task": "mock RCC+GPIO 모델에서 클럭이 꺼진 주변장치 레지스터 쓰기가 무시되도록 만들고, periph_clock_enable/reset_pulse API와 enable 직후 더미 읽기(버스 동기화) 필요성을 테스트로 보인다.",
+      "tags": [
+        "rcc",
+        "clock-gating",
+        "reset"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-B04",
+      "level": "B",
+      "title": "RMW 함정: BSRR set/reset 레지스터와 W1C 상태 비트",
+      "goal": "read-modify-write 레이스와 W1C(write-1-to-clear) 비트를 잘못 다룰 때 생기는 버그를 재현한다",
+      "task": "mock 모델에 W1C 상태 레지스터와 BSRR을 구현하고, |= 로 W1C를 지우다 다른 플래그까지 지우는 버그, ISR과 메인의 ODR RMW 레이스를 테스트로 재현한 뒤 올바른 접근으로 고친다.",
+      "tags": [
+        "rmw",
+        "w1c",
+        "atomicity",
+        "race"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-B05",
+      "level": "B",
+      "title": "MCU 메모리 맵과 섹션 배치: map 파일 읽기",
+      "goal": "Flash/RAM 사용량을 섹션별로 계산하고 .data가 Flash와 RAM 양쪽을 먹는 이유를 이해한다",
+      "task": "예제 펌웨어 .map/size 출력을 읽어 .text/.rodata/.data/.bss/스택/힙 예산표를 만들고, 큰 const 테이블이 RAM에 들어가는 실수(const 누락)를 찾아 고친다.",
+      "tags": [
+        "memory-map",
+        "sections",
+        "map-file",
+        "see:TOOL"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-B06",
+      "level": "B",
+      "title": "부트로더+앱 플래시 분할 레이아웃 설계",
+      "goal": "한 MCU 플래시를 부트로더·슬롯 A/B·메타데이터 영역으로 나누는 메모리 레이아웃을 링커 스크립트로 표현한다(스크립트 문법 기초는 see:TOOL)",
+      "task": "부트로더/앱 각각의 링커 스크립트를 공통 레이아웃 헤더(.ld include)에서 파생시키고, 공유 .noinit RAM 영역(부트 사유 전달)과 이미지 헤더 위치를 고정한 뒤 objdump -h와 맵 파일로 영역 겹침이 없음을 검증한다.",
+      "tags": [
+        "linker-script",
+        "memory-layout",
+        "bootloader",
+        "see:TOOL"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc/objdump만 필요(실행은 BM-A03에서 QEMU)"
+    },
+    {
+      "id": "BM-B07",
+      "level": "B",
+      "title": "Reset handler 구현 (호스트 시뮬레이션): .data 복사·.bss 제로화",
+      "goal": "C 런타임 초기화가 하는 일을 직접 코드로 작성하고 경계 오류를 테스트로 잡는다",
+      "task": "가짜 FLASH 이미지/RAM 배열과 링커 심볼 역할 포인터를 주고 reset_init()이 .data 복사·.bss 제로화·init_array 호출을 수행하도록 구현, 길이 0·홀수 길이·정렬 경계 케이스를 단위 테스트한다.",
+      "tags": [
+        "startup",
+        "reset-handler",
+        "crt0"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-B08",
+      "level": "B",
+      "title": "C로 쓴 startup으로 첫 부팅: QEMU에서 main까지",
+      "goal": "BM-B07의 리셋 핸들러를 실제 Cortex-M에 올려 C 배열 벡터 테이블·weak 기본 핸들러로 부팅한다(어셈블리 벡터 테이블은 see:ARM)",
+      "task": "C 배열 벡터 테이블(__attribute__((section(\".isr_vector\"))))과 weak alias 기본 핸들러, BM-B07 reset_init으로 QEMU 부팅에 성공하고, gdb로 .data 초기값·.bss 0을 확인한 뒤 CMSIS startup_*.s/system_*.c와 차이를 정리한다.",
+      "tags": [
+        "startup",
+        "vector-table",
+        "boot",
+        "see:ARM"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc(brew) + qemu-system-arm -M mps2-an385(Cortex-M3) 또는 lm3s6965evb, 디버깅은 -s -S + arm-none-eabi-gdb/lldb"
+    },
+    {
+      "id": "BM-B09",
+      "level": "B",
+      "title": "printf 리타겟팅: semihosting vs UART _write",
+      "goal": "newlib printf가 출력에 도달하는 경로(_write syscall)를 이해하고 두 방식의 트레이드오프를 비교한다",
+      "task": "QEMU에서 (1) semihosting(-semihosting)과 (2) UART0 데이터 레지스터 폴링 _write로 각각 printf를 동작시키고, 코드 크기·디버거 없을 때 semihosting이 멈추는 이유를 정리한다.",
+      "tags": [
+        "printf",
+        "newlib",
+        "semihosting",
+        "retarget"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + qemu-system-arm -M mps2-an385"
+    },
+    {
+      "id": "BM-B10",
+      "level": "B",
+      "title": "클럭 트리 계산기: PLL M/N/P와 버스 프리스케일러",
+      "goal": "PLL 입력/VCO/출력 범위 제약 아래 목표 SYSCLK과 AHB/APB 클럭을 계산한다",
+      "task": "HSE와 목표 SYSCLK를 받아 STM32F4 스타일 제약(VCO 범위, P∈{2,4,6,8}, APB1 ≤ 42MHz)을 만족하는 설정을 모두 찾는 C/python 함수를 작성하고, 플래시 wait state까지 결정해 테스트 벡터로 검증한다.",
+      "tags": [
+        "clock-tree",
+        "pll",
+        "prescaler"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-B11",
+      "level": "B",
+      "title": "GPIO 드라이버 (레지스터 직접): 모드·풀업·출력·입력",
+      "goal": "2비트/1비트 필드가 섞인 GPIO 레지스터를 정확히 설정하는 드라이버를 작성한다",
+      "task": "gpio_init(port, pin, mode, pull, speed)/write/read/toggle을 mock GPIO 모델 위에 구현하고, 다른 핀 설정을 건드리지 않는지·클럭 enable 선행 여부를 테스트한다.",
+      "tags": [
+        "gpio",
+        "driver",
+        "register"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-B12",
+      "level": "B",
+      "title": "폴링 UART 드라이버: baud divisor와 상태 플래그",
+      "goal": "분주값 계산과 TXE/TC/RXNE 플래그 폴링으로 가장 단순한 UART 드라이버를 만든다",
+      "task": "BRR 정수/소수부 계산 함수와 putc/getc/write를 mock UART 모델(TX 바이트 캡처, RX 주입)로 구현·테스트하고, TXE와 TC의 차이(전원 차단 전 대기)를 설명한다.",
+      "tags": [
+        "uart",
+        "polling",
+        "baud",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-B13",
+      "level": "B",
+      "title": "SysTick: reload 계산, ms tick, wrap-safe delay",
+      "goal": "SysTick 24비트 다운카운터 설정과 tick 오버플로에 안전한 시간 비교를 구현한다",
+      "task": "주어진 코어 클럭에서 1ms reload 값을 계산하는 함수와 tick ISR·delay_ms·timeout 체크((int32_t)(now-deadline) >= 0)를 구현하고, tick을 0xFFFFFFF0 근처에서 시작시켜 wrap 테스트를 한다.",
+      "tags": [
+        "systick",
+        "timebase",
+        "wraparound"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-B14",
+      "level": "B",
+      "title": "하드웨어 타이머: PSC/ARR 계산과 주기 인터럽트",
+      "goal": "16비트 타이머로 원하는 주기를 만드는 prescaler/auto-reload 조합과 오차를 계산한다",
+      "task": "타이머 클럭과 목표 주기를 받아 오차 최소 PSC/ARR을 찾는 함수와, mock 타이머 모델(카운트 진행·UIF 세트)로 업데이트 인터럽트 주기를 검증하는 테스트를 작성한다.",
+      "tags": [
+        "timer",
+        "prescaler",
+        "interrupt"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M01",
+      "level": "M",
+      "title": "NVIC 기초: ISER/ICER/IPR 비트 계산과 ISR 규칙",
+      "goal": "IRQ 번호에서 NVIC 레지스터 인덱스·비트·우선순위 바이트 위치를 계산하고 ISR 작성 규칙을 안다",
+      "task": "NVIC_EnableIRQ/DisableIRQ/SetPriority/SetPending을 mock NVIC 레지스터 배열 위에 구현해 IRQ 0~95 전체를 테스트하고, ISR에서 플래그 클리어 위치(늦은 클리어로 인한 재진입)를 설명한다.",
+      "tags": [
+        "nvic",
+        "interrupts",
+        "priority"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M02",
+      "level": "M",
+      "title": "시스템 IRQ 우선순위 설계와 선점 검증",
+      "goal": "여러 주변장치 IRQ의 우선순위·그룹을 근거(지연 요구, 공유 자원)로 정하고 실제 선점 동작을 확인한다(PRIMASK/BASEPRI 크리티컬 섹션 구현은 see:ARM)",
+      "task": "모터 PWM·UART·ADC·SysTick·PendSV가 있는 시스템의 우선순위 표와 그룹 설정을 설계하고, QEMU에서 소프트웨어 pending으로 IRQ를 겹쳐 발생시켜 선점/비선점 순서가 설계대로인지 로그로 검증한다.",
+      "tags": [
+        "nvic",
+        "priority-design",
+        "preemption",
+        "see:ARM"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + qemu-system-arm -M mps2-an385 (NVIC STIR/ISPR로 IRQ 발생)"
+    },
+    {
+      "id": "BM-M03",
+      "level": "M",
+      "title": "외부 인터럽트(EXTI)와 버튼 디바운스",
+      "goal": "엣지 인터럽트의 바운스 문제를 타이머 기반 상태 머신으로 해결한다",
+      "task": "채터링이 섞인 입력 타임라인(샘플 배열)을 주입해 인터럽트+타이머 재확인 방식과 주기 샘플링 방식 디바운서를 구현하고, 짧은 글리치 무시·롱프레스 검출을 테스트한다.",
+      "tags": [
+        "exti",
+        "debounce",
+        "state-machine"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M04",
+      "level": "M",
+      "title": "인터럽트 구동 UART: ISR + 링버퍼 TX/RX",
+      "goal": "폴링 UART를 인터럽트 구동으로 바꾸고 ISR-메인 간 단일 생산자/소비자 버퍼를 안전하게 쓴다",
+      "task": "mock UART 모델에서 RXNE/TXE 인터럽트를 시뮬레이션하는 이벤트 루프를 만들고, TXE 인터럽트 enable/disable 타이밍, 오버런 처리, 버퍼 가득 참 정책을 구현·테스트한다.",
+      "tags": [
+        "uart",
+        "interrupt-driven",
+        "ring-buffer",
+        "see:DS",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M05",
+      "level": "M",
+      "title": "PWM: 주파수·듀티 계산, edge/center-aligned, 데드타임",
+      "goal": "모터·LED 제어용 PWM 설정 계산과 상보 출력 데드타임을 이해한다",
+      "task": "타이머 모델에 CCR 비교 출력을 추가해 한 주기 파형 배열을 생성하고, 듀티 0%/100% 경계, center-aligned 시 주파수 절반, 상보 출력 데드타임 삽입을 파형으로 검증한다.",
+      "tags": [
+        "pwm",
+        "timer",
+        "dead-time",
+        "motor"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M06",
+      "level": "M",
+      "title": "입력 캡처: 주파수·펄스폭 측정과 오버플로 처리",
+      "goal": "캡처 타임스탬프 차이로 주파수를 구하고 카운터 랩어라운드를 올바르게 처리한다",
+      "task": "16비트 캡처 값과 오버플로 인터럽트 이벤트 시퀀스를 주입해 주기/듀티를 계산하는 드라이버를 구현하고, 캡처와 오버플로가 동시에 pending인 경계 케이스를 테스트한다.",
+      "tags": [
+        "input-capture",
+        "timer",
+        "overflow"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M07",
+      "level": "M",
+      "title": "ADC 드라이버: 스캔 변환, 샘플링 시간, 보정",
+      "goal": "다채널 ADC 시퀀스 설정과 샘플링 시간·소스 임피던스·보정의 의미를 안다",
+      "task": "mock ADC 모델(채널별 입력 전압→코드, EOC 플래그)을 만들고 스캔 시퀀스 설정·변환 결과 → mV 변환(Vref 보정 포함)·오버샘플링 평균을 구현해 기대값과 비교한다.",
+      "tags": [
+        "adc",
+        "driver",
+        "calibration"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M08",
+      "level": "M",
+      "title": "DMA 엔진 드라이버: 채널 설정, circular, HT/TC 인터럽트",
+      "goal": "DMA 디스크립터(소스/목적지/길이/증가 모드)를 설정하고 전송 완료 이벤트를 처리한다",
+      "task": "메모리↔주변장치 전송을 단계별로 진행시키는 DMA 모델을 만들고 normal/circular 모드, half-transfer/transfer-complete 플래그, NDTR 감소를 드라이버와 함께 테스트한다.",
+      "tags": [
+        "dma",
+        "driver",
+        "circular-buffer"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M09",
+      "level": "M",
+      "title": "ADC + DMA 더블 버퍼링 파이프라인",
+      "goal": "HT/TC 인터럽트로 반쪽 버퍼를 처리하는 연속 샘플링 구조와 처리 시간 예산을 이해한다",
+      "task": "ADC 모델이 DMA circular 버퍼를 채우는 동안 HT/TC 콜백에서 반쪽씩 평균·필터링하도록 구현하고, 처리 지연을 인위적으로 늘려 데이터 덮어쓰기(overrun)를 감지하는 로직을 테스트한다.",
+      "tags": [
+        "dma",
+        "adc",
+        "double-buffering",
+        "real-time"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M10",
+      "level": "M",
+      "title": "워치독 하드웨어: IWDG/WWDG 타임아웃·윈도우 계산",
+      "goal": "독립/윈도 워치독의 하드웨어 설정과 리셋 조건을 정확히 계산한다",
+      "task": "LSI 클럭·프리스케일러·reload로 IWDG 타임아웃 범위를, WWDG 윈도우 값으로 '너무 이른 킥' 리셋 조건을 계산하는 함수와 mock 워치독 모델을 작성하고, 디버그 정지(DBGMCU freeze)와 리셋 원인 플래그 확인까지 테스트한다(태스크 체크인 설계는 see:TEST-B09).",
+      "tags": [
+        "watchdog",
+        "see:TEST"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M11",
+      "level": "M",
+      "title": "저전력 모드: WFI/WFE, Stop/Standby, 슬립 진입 레이스",
+      "goal": "저전력 모드별 웨이크업 소스·복귀 지점 차이와 '조건 확인 후 WFI' 레이스를 이해한다",
+      "task": "전력 상태 머신 시뮬레이터로 duty cycle별 평균 전류를 계산하고, 인터럽트 비활성→조건 확인→WFI→활성 패턴이 웨이크업 이벤트 유실을 막는 이유를 이벤트 타이밍 테스트로 보인다.",
+      "tags": [
+        "low-power",
+        "wfi",
+        "sleep",
+        "race"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M12",
+      "level": "M",
+      "title": "RTC와 저전력 타임키핑: 알람 웨이크업·백업 도메인",
+      "goal": "슬립 중에도 시간을 유지하는 RTC 설정과 BCD 캘린더·알람·서브초 처리를 구현한다",
+      "task": "BCD 시간 레지스터·알람·쓰기 보호 해제 시퀀스를 가진 mock RTC 모델로 드라이버(set/get, epoch 변환, 알람 웨이크업)를 구현하고, 32.768kHz 프리스케일러 계산과 섀도 레지스터 읽기 일관성(두 번 읽기) 문제를 테스트한다.",
+      "tags": [
+        "rtc",
+        "low-power",
+        "timekeeping"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-M13",
+      "level": "M",
+      "title": "Fault 처리 정책: 세분 fault 활성화와 안전 상태 진입",
+      "goal": "HardFault 디코드 이후(see:ARM) 시스템 차원에서 fault를 어떻게 다룰지 설계한다",
+      "task": "SHCSR로 MemManage/BusFault/UsageFault를 분리 활성화하고 CCR의 DIV_0_TRP/UNALIGN_TRP를 켠 뒤, 각 핸들러가 출력 핀을 안전 상태로 두고 리셋 사유를 기록·리셋하도록 QEMU에서 구현해 재부팅 후 리셋 원인을 보고한다.",
+      "tags": [
+        "fault-handling",
+        "safe-state",
+        "shcsr",
+        "see:ARM"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + qemu-system-arm -M mps2-an385"
+    },
+    {
+      "id": "BM-A01",
+      "level": "A",
+      "title": "SystemInit 순서: FPU 활성화, VTOR 재배치, 클럭 전환",
+      "goal": "main 이전 초기화 순서가 왜 중요한지(FPU 미활성 시 UsageFault 등) 직접 확인한다",
+      "task": "CPACR로 FPU를 켜기 전 float 연산 시 fault가 나는 것을 Cortex-M4 타깃 QEMU에서 재현하고, 벡터 테이블을 RAM으로 복사해 VTOR를 바꾼 뒤 런타임 핸들러 교체가 동작함을 확인한다.",
+      "tags": [
+        "systeminit",
+        "fpu",
+        "vtor"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + qemu-system-arm -M mps2-an386(Cortex-M4) 또는 netduinoplus2"
+    },
+    {
+      "id": "BM-A02",
+      "level": "A",
+      "title": "플래시 드라이버 시뮬레이터: 섹터 erase/program 규칙",
+      "goal": "NOR 플래시의 1→0 프로그램, 섹터 단위 erase, 쓰기 단위·정렬 제약을 코드로 준수한다",
+      "task": "erase 전 재프로그램 시 비트가 AND되는 플래시 모델과 erase/program/verify 드라이버를 구현하고, 비정렬 쓰기·섹터 경계 넘는 쓰기·erase 중 전원 차단(일부 비트 미정) 케이스를 테스트한다.",
+      "tags": [
+        "flash",
+        "nor",
+        "driver",
+        "power-loss"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-A03",
+      "level": "A",
+      "title": "부트로더 → 앱 점프: VTOR, MSP, 주변장치 정리",
+      "goal": "부트로더에서 애플리케이션으로 안전하게 제어를 넘기는 절차를 구현한다",
+      "task": "부트로더와 앱 두 이미지를 별도 링커 스크립트로 빌드해 하나의 플래시 이미지로 합치고, 인터럽트 비활성·SysTick 정지·pending 클리어·VTOR/MSP 설정 후 앱 reset vector로 점프하는 것을 QEMU에서 검증한다.",
+      "tags": [
+        "bootloader",
+        "jump-to-app",
+        "vtor"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + qemu-system-arm -M mps2-an385 (-kernel에 합친 바이너리/ELF 로드)"
+    },
+    {
+      "id": "BM-A04",
+      "level": "A",
+      "title": "펌웨어 이미지 헤더 + CRC/SHA-256 검증",
+      "goal": "부트로더가 신뢰할 수 있는 이미지 포맷(magic, 버전, 크기, 해시)을 설계한다",
+      "task": "python 이미지 패키징 도구(헤더+페이로드+CRC32/SHA-256)와 C 검증 코드를 작성하고, 비트 플립·잘림·버전 롤백 이미지를 거부하는지 테스트한다(서명 검증은 see:SEC).",
+      "tags": [
+        "firmware-update",
+        "image-format",
+        "crc",
+        "see:SEC"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-A05",
+      "level": "A",
+      "title": "시리얼 부트로더: YMODEM 수신과 플래시 기록",
+      "goal": "UART로 펌웨어를 받아 안전하게 기록하는 부트로더 수신 경로를 구현한다",
+      "task": "YMODEM(128/1024 블록, CRC-16, ACK/NAK/CAN) 수신 상태 머신을 A02 플래시 시뮬레이터와 연결해 블록 단위 erase/program·재전송·중단 처리를 구현하고, 노이즈·타임아웃 주입 테스트로 검증한다(A/B 슬롯 결정 로직은 see:PLAT-M07).",
+      "tags": [
+        "bootloader",
+        "ymodem",
+        "uart",
+        "see:PLAT"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-A06",
+      "level": "A",
+      "title": "전원 차단 내성 업데이트: 모든 쓰기 지점 power-cut 주입",
+      "goal": "업데이트·스왑 도중 어느 시점에 전원이 끊겨도 부팅 가능한 이미지가 남도록 증명한다",
+      "task": "MCUboot 식 scratch 스왑(또는 이중 메타데이터+시퀀스 번호)을 플래시 모델에 구현하고, 플래시 쓰기/erase 호출 N번째마다 전원 차단을 주입하는 전수 테스트로 항상 유효 이미지로 부팅됨을 검증한다.",
+      "tags": [
+        "power-fail-safe",
+        "swap",
+        "fault-injection",
+        "mcuboot"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "BM-A07",
+      "level": "A",
+      "title": "스택 오버플로 탐지: 스택 페인팅과 high-water mark",
+      "goal": "스택 사용량을 측정하고 오버플로를 조기에 잡는 기법(패턴, 카나리, 스택 한계)을 비교한다",
+      "task": "스택을 0xDEADBEEF로 칠해 최대 사용량을 측정하는 함수와 재귀 함수로 오버플로를 일으키는 테스트를 QEMU에서 실행하고, -fstack-usage 정적 추정치와 비교한다.",
+      "tags": [
+        "stack",
+        "overflow-detection",
+        "high-water-mark"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + qemu-system-arm -M mps2-an385"
+    },
+    {
+      "id": "BM-A08",
+      "level": "A",
+      "title": "MPU 설정: NULL 트랩, 스택 가드, 실행 금지 RAM",
+      "goal": "ARMv7-M MPU 영역 크기/정렬 규칙과 서브리전을 이해하고 흔한 메모리 버그를 fault로 바꾼다",
+      "task": "주소 0 근처 no-access 영역, 스택 하단 32B 가드, RAM XN 영역을 설정하는 코드를 작성하고 QEMU에서 각각 위반 시 MemManage fault와 MMFAR 값이 기대대로 나오는지 확인한다.",
+      "tags": [
+        "mpu",
+        "memory-protection",
+        "memmanage"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + qemu-system-arm -M mps2-an385 (QEMU는 v7-M MPU 에뮬레이션 지원)"
+    },
+    {
+      "id": "BM-A09",
+      "level": "A",
+      "title": "크래시 덤프: .noinit RAM에 fault 기록, 리셋 후 보고",
+      "goal": "현장 장비에서 크래시 원인을 회수하는 사후 분석 체계를 만든다",
+      "task": "fault 핸들러가 레지스터·스택 일부·magic+CRC를 .noinit 섹션에 저장 후 리셋하고, 재부팅 시 유효성 검사 후 UART로 리포트하는 흐름을 QEMU에서 구현·검증한다(콜드 부트 쓰레기 값 구분 포함).",
+      "tags": [
+        "crash-dump",
+        "noinit",
+        "post-mortem",
+        "see:TOOL"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + qemu-system-arm -M mps2-an385 (system_reset은 AIRCR SYSRESETREQ)"
+    },
+    {
+      "id": "BM-A10",
+      "level": "A",
+      "title": "인터럽트 지연 측정: DWT CYCCNT, tail-chaining, late arrival",
+      "goal": "인터럽트 진입 지연(12사이클 등)과 tail-chaining 효과를 실측으로 확인한다",
+      "task": "GPIO 토글+DWT CYCCNT로 IRQ 발생→ISR 첫 명령까지의 사이클과 연속 IRQ의 tail-chaining 절감을 측정하고, 플래시 wait state·FPU lazy stacking이 지연에 주는 영향을 표로 정리한다.",
+      "tags": [
+        "interrupt-latency",
+        "dwt",
+        "measurement"
+      ],
+      "env": "board",
+      "env_note": "사이클 정확한 측정이 필요해 QEMU 불가: Cortex-M4/M7 보드(예: STM32 Nucleo) + 선택적으로 로직 애널라이저"
+    },
+    {
+      "id": "BM-A11",
+      "level": "A",
+      "title": "종합: 베어메탈 데이터 로거",
+      "goal": "링커 스크립트부터 인터럽트·워치독·fault 처리까지 직접 만든 부품으로 완결된 펌웨어를 구성한다",
+      "task": "자작 startup·링커 스크립트 위에 타이머 주기 샘플링, 인터럽트 UART 출력, 워치독, HardFault 덤프, 이미지 헤더 검증을 통합한 로거를 QEMU에서 동작시키고 메모리 사용량·모듈 구조를 문서화한다.",
+      "tags": [
+        "capstone",
+        "integration",
+        "bare-metal"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + qemu-system-arm -M mps2-an385"
+    }
+  ]
+}

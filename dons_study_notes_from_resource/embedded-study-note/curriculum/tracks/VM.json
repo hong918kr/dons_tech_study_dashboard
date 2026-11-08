@@ -1,0 +1,390 @@
+{
+  "id": "VM",
+  "intro": "바이트코드 VM, 가비지 컬렉터, JIT는 언어 런타임의 핵심이며 MicroPython·Lua·WASM처럼 임베디드 기기에도 직접 들어간다. 이 트랙은 스택/레지스터 VM부터 GC, 인라인 캐시, Apple Silicon JIT까지 C++로 구현해 메모리·성능 트레이드오프를 몸으로 익힌다.",
+  "goals": [
+    "스택 기반·레지스터 기반 바이트코드 VM을 구현하고 디스패치 기법별 성능을 측정한다",
+    "mark-sweep·copying·세대별·참조 카운팅 GC를 구현하고 일시정지 시간을 비교한다",
+    "hidden class와 inline cache 등 동적 언어 최적화 기법을 이해한다",
+    "Apple Silicon에서 W^X 규칙을 지키는 간단한 JIT를 만든다",
+    "WASM·MicroPython·Lua·eBPF 등 임베디드/샌드박스 런타임 설계를 분석한다"
+  ],
+  "prereq": [
+    "COMP",
+    "DS"
+  ],
+  "refs": [
+    {
+      "title": "Crafting Interpreters — Part III clox",
+      "url": "https://craftinginterpreters.com"
+    },
+    {
+      "title": "The Garbage Collection Handbook, 2nd ed. (Jones, Hosking, Moss)"
+    },
+    {
+      "title": "The Implementation of Lua 5.0 (Ierusalimschy et al.)",
+      "url": "https://www.lua.org/doc/jucs05.pdf"
+    },
+    {
+      "title": "Lua 5.4 Reference Manual",
+      "url": "https://www.lua.org/manual/5.4/"
+    },
+    {
+      "title": "WebAssembly Specification",
+      "url": "https://webassembly.github.io/spec/"
+    },
+    {
+      "title": "MicroPython Documentation",
+      "url": "https://docs.micropython.org"
+    },
+    {
+      "title": "Apple — Porting Just-In-Time Compilers to Apple Silicon",
+      "url": "https://developer.apple.com/documentation/apple-silicon/porting-just-in-time-compilers-to-apple-silicon"
+    }
+  ],
+  "items": [
+    {
+      "id": "VM-B01",
+      "level": "B",
+      "title": "스택 기반 바이트코드 VM",
+      "goal": "명령어 인코딩·피연산자 스택·명령어 포인터로 이루어진 VM 구조를 구현한다.",
+      "task": "push/pop/산술/비교/jmp/jz/print 명령을 갖는 스택 VM과 텍스트 어셈블러를 구현하고, 루프로 1..N 합과 fib(25)를 실행해 기대값과 비교한다.",
+      "tags": [
+        "bytecode",
+        "stack-vm"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-B02",
+      "level": "B",
+      "title": "바이트코드 컴파일러: AST → 스택 코드",
+      "goal": "고급 언어 구조를 바이트코드로 컴파일하는 방법을 익힌다.",
+      "task": "COMP 트랙의 TinyC 파서를 재사용해 지역 변수 슬롯, if/while 점프 백패칭, 함수 호출을 바이트코드로 생성하고 트리 인터프리터와 출력이 같은지 테스트한다.",
+      "tags": [
+        "compiler",
+        "backpatching",
+        "see:COMP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-B03",
+      "level": "B",
+      "title": "값 표현: tagged union vs NaN-boxing vs 포인터 태깅",
+      "goal": "동적 타입 값의 메모리 표현 기법과 트레이드오프를 안다.",
+      "task": "Value 타입을 tagged union과 NaN-boxing 두 방식으로 구현해 sizeof, 산술 벤치마크, 디버깅 난이도를 비교하고, 64-bit ARM 포인터 상위 비트(TBI) 활용 가능성을 정리한다.",
+      "tags": [
+        "value-representation",
+        "nan-boxing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-B04",
+      "level": "B",
+      "title": "콜 프레임 & 네이티브 함수 (FFI)",
+      "goal": "함수 호출 규약과 스택 오버플로 처리를 VM 수준에서 구현한다.",
+      "task": "CallFrame 스택, 인자/반환값 전달, 재귀 깊이 제한(stack overflow 에러), C++ 네이티브 함수 등록(clock, sqrt)을 구현하고 깊은 재귀·잘못된 인자 수 테스트를 작성한다.",
+      "tags": [
+        "call-frame",
+        "ffi"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-B05",
+      "level": "B",
+      "title": "디스패치: switch vs computed goto vs threading",
+      "goal": "인터프리터 루프의 분기 예측 특성과 디스패치 비용을 측정한다.",
+      "task": "같은 VM을 switch, computed goto(&&label), direct threading으로 구현해 M2에서 벤치마크하고, 명령어당 사이클과 분기 미스 경향을 비교한 표를 작성한다.",
+      "tags": [
+        "dispatch",
+        "computed-goto",
+        "branch-prediction"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-B06",
+      "level": "B",
+      "title": "레지스터 기반 VM (Lua 스타일)",
+      "goal": "스택 VM과 레지스터 VM의 명령어 수·코드 크기 차이를 이해한다.",
+      "task": "3-주소 형식(ADD A B C) 레지스터 VM과 컴파일러를 구현해 동일 프로그램에서 스택 VM 대비 실행 명령어 수, 바이트코드 크기, 실행 시간을 비교한다.",
+      "tags": [
+        "register-vm",
+        "lua"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-B07",
+      "level": "B",
+      "title": "힙 객체: 문자열 인터닝 & 해시 테이블",
+      "goal": "동적 언어 객체의 기본 구성 요소를 구현한다.",
+      "task": "힙 문자열 객체와 인터닝 테이블, open addressing 해시 테이블(전역 변수/객체 필드 저장)을 구현하고 문자열 동등성 비교가 포인터 비교로 바뀌는 효과를 측정한다.",
+      "tags": [
+        "string-interning",
+        "hash-table",
+        "see:DS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-B08",
+      "level": "B",
+      "title": "바이트코드 디스어셈블러 & 검증기",
+      "goal": "로드 시점 검증으로 잘못된 바이트코드를 거부한다 (JVM/WASM 방식).",
+      "task": "디스어셈블러와 함께 점프 대상 유효성, 스택 깊이 균형, 상수 인덱스 범위를 검사하는 정적 검증기를 구현하고, 변조된 바이트코드 퍼즈 입력에서 VM이 크래시 없이 거부하는지 확인한다.",
+      "tags": [
+        "verifier",
+        "disassembler",
+        "fuzzing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-M01",
+      "level": "M",
+      "title": "클로저 & upvalue",
+      "goal": "Lua 스타일 open/closed upvalue로 클로저를 효율적으로 구현한다.",
+      "task": "중첩 함수의 변수 캡처를 open upvalue 리스트와 close 동작으로 구현하고, 카운터 생성기·루프 변수 캡처 테스트로 의미론이 맞는지 검증한다.",
+      "tags": [
+        "closure",
+        "upvalue"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-M02",
+      "level": "M",
+      "title": "Mark-Sweep GC",
+      "goal": "루트 탐색과 추적 GC의 기본을 구현한다.",
+      "task": "VM 스택·전역·upvalue를 루트로 하는 mark-sweep GC를 구현하고, 매 할당마다 GC를 돌리는 stress 모드와 ASan으로 누락된 루트 버그가 없는지 검증한다.",
+      "tags": [
+        "gc",
+        "mark-sweep"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-M03",
+      "level": "M",
+      "title": "참조 카운팅 & 순환 수집",
+      "goal": "RC의 즉시 회수 장점과 순환 참조 문제의 해결책을 안다.",
+      "task": "참조 카운팅 GC를 구현한 뒤 trial deletion(Bacon-Rajan) 순환 수집기를 추가해 순환 구조가 회수됨을 테스트하고, mark-sweep 대비 처리량·지연을 비교한다.",
+      "tags": [
+        "gc",
+        "refcount",
+        "cycle-collection"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-M04",
+      "level": "M",
+      "title": "Copying GC (Cheney)",
+      "goal": "세미스페이스 복사 수집과 forwarding pointer를 구현한다.",
+      "task": "Cheney BFS 복사 GC를 구현해 할당을 bump pointer로 바꾸고, 생존율에 따른 GC 시간과 단편화 제거 효과를 mark-sweep과 비교 측정한다.",
+      "tags": [
+        "gc",
+        "copying",
+        "cheney"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-M05",
+      "level": "M",
+      "title": "세대별 GC & write barrier",
+      "goal": "약한 세대 가설과 세대 간 포인터 추적을 구현한다.",
+      "task": "nursery(copying) + old(mark-sweep) 2세대 GC와 card table write barrier를 구현하고, old→young 포인터 누락 시 버그를 테스트로 재현·수정하며 minor GC 일시정지 시간을 측정한다.",
+      "tags": [
+        "gc",
+        "generational",
+        "write-barrier"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-M06",
+      "level": "M",
+      "title": "증분 삼색 마킹 & 일시정지 시간",
+      "goal": "증분 GC와 불변식 유지를 위한 barrier를 이해한다.",
+      "task": "tri-color 증분 마킹(작업 단위 예산)을 구현하고 Dijkstra/Yuasa barrier로 불변식을 유지, GC 일시정지 히스토그램(p50/p99/max)을 stop-the-world 버전과 비교한다.",
+      "tags": [
+        "gc",
+        "incremental",
+        "tri-color",
+        "latency"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-M07",
+      "level": "M",
+      "title": "객체 모델: hidden class & inline cache",
+      "goal": "동적 속성 접근을 빠르게 만드는 shape와 IC를 구현한다.",
+      "task": "속성 추가 순서에 따른 shape 전이 트리와 monomorphic/polymorphic inline cache를 구현해, 속성 접근 벤치마크에서 해시 조회 대비 속도 향상과 megamorphic 전환을 측정한다.",
+      "tags": [
+        "hidden-class",
+        "inline-cache",
+        "object-model"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-M08",
+      "level": "M",
+      "title": "VM 수준 코루틴 & 예외 처리",
+      "goal": "실행 상태를 분리해 resume/yield와 예외 unwinding을 구현한다.",
+      "task": "Lua 스타일 코루틴(각자 값 스택 보유, resume/yield)과 try/throw 핸들러 스택을 구현하고, 생산자-소비자·중첩 예외 테스트를 통과시킨다.",
+      "tags": [
+        "coroutine",
+        "exceptions"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-M09",
+      "level": "M",
+      "title": "WASM 바이너리 파서 & 인터프리터",
+      "goal": "WebAssembly 모듈 구조와 구조적 제어 흐름을 이해한다.",
+      "task": ".wasm 바이너리(type/function/code/export 섹션, LEB128)를 파싱하고 i32 산술·local·block/loop/br_if·call을 실행하는 인터프리터를 구현해, wat2wasm으로 만든 테스트 모듈 결과를 검증한다.",
+      "tags": [
+        "wasm",
+        "leb128",
+        "interpreter"
+      ],
+      "env": "mac",
+      "env_note": "brew install wabt (wat2wasm)"
+    },
+    {
+      "id": "VM-A01",
+      "level": "A",
+      "title": "JIT 기초: Apple Silicon에서 기계어 실행",
+      "goal": "실행 가능 메모리와 W^X 규칙, 명령어 캐시 동기화를 이해한다.",
+      "task": "MAP_JIT 매핑과 pthread_jit_write_protect_np, sys_icache_invalidate를 사용해 AArch64 기계어(add/ret)를 직접 인코딩·실행하는 최소 JIT를 만들고, 각 단계 누락 시 발생하는 크래시를 재현한다.",
+      "tags": [
+        "jit",
+        "w^x",
+        "aarch64",
+        "apple-silicon"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-A02",
+      "level": "A",
+      "title": "템플릿 JIT: 바이트코드 → AArch64",
+      "goal": "바이트코드 명령별 기계어 템플릿으로 baseline JIT를 만든다.",
+      "task": "레지스터 VM의 산술·분기 명령을 AArch64 템플릿으로 변환하는 baseline JIT를 구현해 인터프리터와 결과 동일성 및 벤치마크 속도 향상을 측정한다.",
+      "tags": [
+        "jit",
+        "baseline-compiler"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-A03",
+      "level": "A",
+      "title": "프로파일 기반 티어링 & 핫 루프 감지",
+      "goal": "인터프리터→JIT 단계 전환(tier-up) 정책을 설계한다.",
+      "task": "함수 호출/back-edge 카운터로 핫 코드를 감지해 JIT로 승격하는 티어링을 구현하고, 임계값에 따른 워밍업 시간·최종 처리량 트레이드오프를 그래프로 보고한다.",
+      "tags": [
+        "tiering",
+        "profiling",
+        "jit"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-A04",
+      "level": "A",
+      "title": "WASM 런타임: 선형 메모리 샌드박싱",
+      "goal": "바운드 체크 전략과 호스트 함수 import로 안전한 샌드박스를 만든다.",
+      "task": "WASM 인터프리터에 선형 메모리를 명시적 바운드 체크 vs guard page(mmap PROT_NONE + 시그널) 두 방식으로 구현해 성능을 비교하고, 호스트 함수 import(로그, 센서 읽기)를 추가한다.",
+      "tags": [
+        "wasm",
+        "sandbox",
+        "guard-page"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-A05",
+      "level": "A",
+      "title": "MicroPython 내부 구조 분석 & C 모듈",
+      "goal": "MCU용 파이썬 VM의 메모리·GC·네이티브 모듈 구조를 이해한다.",
+      "task": "MicroPython unix 포트를 Mac에서 빌드해 C로 user module(가상 센서 드라이버)을 추가하고, gc.mem_free/heap 덤프로 객체 할당 패턴과 GC 동작을 관찰해 정리한다.",
+      "tags": [
+        "micropython",
+        "embedded-vm",
+        "native-module"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-A06",
+      "level": "A",
+      "title": "Lua 임베딩 & C API 샌드박스",
+      "goal": "호스트 애플리케이션에 스크립트 엔진을 안전하게 내장한다.",
+      "task": "Lua 5.4를 C++ 호스트에 임베딩해 센서 API를 노출하고, 커스텀 lua_Alloc으로 메모리 상한, instruction count hook으로 실행 시간 상한을 걸어 악성 스크립트가 호스트를 멈추지 못함을 테스트한다.",
+      "tags": [
+        "lua",
+        "embedding",
+        "sandbox"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-A07",
+      "level": "A",
+      "title": "eBPF 스타일 검증 VM",
+      "goal": "종료 보장·메모리 안전을 정적 검증하는 VM을 설계한다.",
+      "task": "레지스터 기반 소형 ISA와 검증기(유한 루프, 레지스터 타입·범위 추적, 맵 접근 경계)를 구현해 통과한 프로그램만 실행하고, 무한 루프·OOB 접근 프로그램이 로드 시 거부되는지 테스트한다.",
+      "tags": [
+        "ebpf",
+        "verifier",
+        "safety"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "VM-A08",
+      "level": "A",
+      "title": "MCU용 고정 메모리 스크립팅 VM 설계",
+      "goal": "malloc 없이 정해진 RAM 안에서 동작하는 VM을 설계·정당화한다.",
+      "task": "32KB 고정 힙에서 동작하는 VM(compacting GC, 정적 스택, 오류 시 안전 정지)을 설계·구현하고, 메모리 고갈·장시간 실행 테스트와 함께 MicroPython/Lua 대비 트레이드오프 문서를 작성한다.",
+      "tags": [
+        "embedded-vm",
+        "static-memory",
+        "design"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

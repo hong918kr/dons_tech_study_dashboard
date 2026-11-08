@@ -1,0 +1,534 @@
+{
+  "id": "SIV",
+  "intro": "실리콘이 처음 돌아온 날(first silicon)부터 양산까지, 칩이 스펙대로 동작하는지 C 펌웨어와 스크립트로 증명하는 기술이다. Rivian Silicon & Sensing, NVIDIA/Apple/Qualcomm의 post-silicon validation 직무는 레지스터 테스트 프레임워크, 링크 검증 플로우, shmoo/PVT, triage 능력을 직접 묻는다.",
+  "goals": [
+    "레지스터 기술(register description)에서 리셋값·접근속성·aliasing 테스트를 자동 생성하고 C로 실행할 수 있다",
+    "IP 블록 bring-up, 인터럽트·DMA 검증 시퀀스를 타임아웃·에러코드까지 갖춘 형태로 작성할 수 있다",
+    "PCIe/DDR/SerDes 링크 검증 흐름(LTSSM, training, PRBS/BER)을 설명하고 host 모델로 구현할 수 있다",
+    "PVT 코너·shmoo·스트레스 테스트를 설계하고 실패를 triage/bisect하는 자동화를 만들 수 있다",
+    "테스트 플랜·커버리지·ATE/SLT/시스템 검증의 역할 분담을 면접에서 구조적으로 설명할 수 있다"
+  ],
+  "prereq": [
+    "C",
+    "ARCH",
+    "PCIE",
+    "MEM",
+    "TEST"
+  ],
+  "refs": [
+    {
+      "title": "Post-Silicon Validation and Debug (P. Mishra, F. Farahmandi eds., Springer 2019)"
+    },
+    {
+      "title": "Accellera SystemRDL 2.0 Register Description Language",
+      "url": "https://www.accellera.org/downloads/standards/systemrdl"
+    },
+    {
+      "title": "IEEE 1685 IP-XACT (register/memory map description)"
+    },
+    {
+      "title": "IEEE 1149.1 JTAG Boundary-Scan Standard"
+    },
+    {
+      "title": "OpenOCD User's Guide",
+      "url": "https://openocd.org/doc/html/index.html"
+    },
+    {
+      "title": "PCI Express Base Specification (PCI-SIG) — LTSSM, Link Status registers"
+    },
+    {
+      "title": "JEDEC JESD79-4/5 DDR4/DDR5 SDRAM Standard — training & initialization"
+    }
+  ],
+  "items": [
+    {
+      "id": "SIV-B01",
+      "level": "B",
+      "title": "레지스터 기술서 파싱 → C 헤더 자동 생성",
+      "goal": "레지스터 맵을 단일 소스(JSON/YAML)로 관리하고 오프셋·마스크·리셋값을 코드로 생성하는 흐름을 익힌다",
+      "task": "IP 블록 하나(10~20개 레지스터, 필드·access·reset 포함)를 JSON으로 기술하고 Python으로 C 헤더(#define OFFSET/MASK/SHIFT/RESET)를 생성; 필드 겹침·폭 초과를 검사하는 lint도 추가해 잘못된 기술서를 거부하는지 테스트한다.",
+      "tags": [
+        "register",
+        "codegen",
+        "systemrdl"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B02",
+      "level": "B",
+      "title": "Mock MMIO 레지스터 파일과 접근 계층",
+      "goal": "실제 HW 없이 검증 코드를 개발할 수 있는 MMIO 추상화(reg_read32/reg_write32)를 만든다",
+      "task": "BM-B02 mock 주변장치 프레임워크 위에 access type(RW/RO/WO/W1C/W1S/RC) 시맨틱을 더한 레지스터 파일을 구현하고, 같은 테스트 코드가 함수 포인터 bus ops만 바꿔 실제 MMIO에도 붙도록 설계; 각 access type별 단위테스트로 동작을 검증한다.",
+      "tags": [
+        "hal",
+        "mmio",
+        "mock",
+        "see:BM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B03",
+      "level": "B",
+      "title": "리셋값 테스트 (Reset Value Test)",
+      "goal": "가장 기본적인 레지스터 검증인 리셋값 확인을 기술서 기반으로 자동화한다",
+      "task": "B01 기술서를 읽어 모든 레지스터의 리셋값을 읽고 (mask 적용, undefined/volatile 비트 제외) 기대값과 비교하는 C 테스트를 생성; mock에 리셋값 오류 2개를 주입해 레지스터·비트 단위 불일치 리포트가 나오는지 확인한다.",
+      "tags": [
+        "register",
+        "reset-value"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B04",
+      "level": "B",
+      "title": "Read/Write 테스트와 Access Type별 기대값",
+      "goal": "W1C·RO·WO 등 접근 속성에 따라 write-read 기대값이 달라지는 것을 정확히 모델링한다",
+      "task": "각 필드의 access type을 반영해 write 후 기대 read값을 계산하는 함수를 작성하고, 0x0/0xFFFFFFFF/0x5555/0xAAAA 패턴으로 R/W 테스트를 수행; RO 비트에 write가 먹는 결함과 W1C가 안 지워지는 결함을 mock에 주입해 검출한다.",
+      "tags": [
+        "register",
+        "access-type",
+        "w1c"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B05",
+      "level": "B",
+      "title": "Walking 1s / Walking 0s 비트 테스트",
+      "goal": "stuck-at 및 bit 간 short(coupling) 결함을 최소 패턴으로 찾는 원리를 이해한다",
+      "task": "32비트 RW 레지스터와 데이터 버스에 walking-1/walking-0 테스트를 구현하고, stuck-at-0, stuck-at-1, 인접 비트 short(OR/AND 결합) 결함 모델을 주입해 각 패턴이 어떤 결함을 잡는지 표로 정리한다.",
+      "tags": [
+        "walking-ones",
+        "stuck-at",
+        "data-bus"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B06",
+      "level": "B",
+      "title": "주소 디코드·Aliasing 테스트",
+      "goal": "주소선 결함이나 디코더 버그로 두 레지스터가 같은 셀을 가리키는 aliasing을 검출한다",
+      "task": "모든 RW 레지스터에 고유 패턴(예: 주소 해시)을 쓴 뒤 전체를 다시 읽어 덮어쓰기를 검사하는 테스트와 walking-address(2^n 오프셋) 테스트를 작성; 주소 비트 하나가 무시되는 mock 결함을 넣어 검출·원인 비트 추정까지 출력한다.",
+      "tags": [
+        "address-decode",
+        "aliasing",
+        "register"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B07",
+      "level": "B",
+      "title": "SRAM March 테스트 (March C-)",
+      "goal": "온칩 SRAM/버퍼 검증에 쓰는 March 알고리즘과 결함 커버리지를 이해한다",
+      "task": "March C- (⇑w0; ⇑r0w1; ⇑r1w0; ⇓r0w1; ⇓r1w0; ⇑r0)를 C로 구현하고 stuck-at, transition, coupling fault를 주입한 SRAM 모델에서 검출률을 측정; MATS+ 대비 시간 복잡도와 커버리지를 비교한다.",
+      "tags": [
+        "march-test",
+        "sram",
+        "fault-model",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B08",
+      "level": "B",
+      "title": "검증 테스트 프레임워크 골격",
+      "goal": "수백 개 테스트를 등록·선택 실행·결과 집계하는 경량 C 프레임워크를 만든다",
+      "task": "TEST() 매크로 기반 자동 등록(linker section 또는 constructor), CHECK_EQ/CHECK_MASK 매크로, 이름 필터 실행, JSON 결과 로그(test, status, duration, failing reg/expected/actual)를 출력하는 프레임워크를 작성하고 B03~B07 테스트를 이식한다.",
+      "tags": [
+        "test-framework",
+        "logging",
+        "see:TEST"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B09",
+      "level": "B",
+      "title": "Poll-with-Timeout 헬퍼와 에러 처리",
+      "goal": "HW 상태 대기에서 무한루프를 피하고 진단 가능한 에러를 남기는 패턴을 익힌다",
+      "task": "wait_for_field(reg, mask, value, timeout_us)를 구현해 타임아웃 시 마지막 읽은 값·경과시간·호출 위치를 기록; mock에서 N회 뒤 ready가 되는 경우/영원히 안 되는 경우/중간에 에러 비트가 서는 경우를 테스트한다.",
+      "tags": [
+        "polling",
+        "timeout",
+        "error-handling"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B10",
+      "level": "B",
+      "title": "IP 블록 Bring-up 시퀀스",
+      "goal": "클럭 enable → 리셋 해제 → ID/버전 확인 → 기본 기능 순서의 bring-up 절차를 코드로 표현한다",
+      "task": "가상의 UART IP에 대해 clock gate/reset controller/IP 레지스터를 mock으로 만들고, 단계별 체크포인트와 실패 시 원인 메시지(클럭 미인가, 리셋 미해제, ID 불일치)를 내는 bring-up 함수를 작성; 각 단계 결함 주입으로 진단이 정확한지 확인한다.",
+      "tags": [
+        "bring-up",
+        "clock",
+        "reset"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B11",
+      "level": "B",
+      "title": "인터럽트 검증 기초: Trigger-Check-Clear",
+      "goal": "IP 인터럽트의 raw/masked status, enable, W1C clear 경로를 빠짐없이 검증한다",
+      "task": "mock 인터럽트 컨트롤러+IP에서 각 인터럽트 소스를 강제 트리거(force/test 레지스터)하고 raw status, mask 적용 후 status, IRQ 라인, clear 후 해제를 확인하는 테스트 매트릭스를 생성; mask가 무시되는 결함을 주입해 검출한다.",
+      "tags": [
+        "interrupt",
+        "w1c",
+        "irq"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-B12",
+      "level": "B",
+      "title": "테스트 플랜 작성: Feature → Test Case → Pass Criteria",
+      "goal": "검증 면접 단골인 'IP 하나의 테스트 플랜을 써보라'에 구조적으로 답한다",
+      "task": "I2C 컨트롤러 IP 스펙(1페이지 요약)을 보고 feature list, 테스트 케이스(정상/경계/에러/스트레스), 필요한 장비·펌웨어, pass/fail 기준, 우선순위(P0/P1)를 담은 테스트 플랜 표를 작성하고, 그중 3개를 mock 위에서 실제 코드로 구현한다.",
+      "tags": [
+        "test-plan",
+        "design",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M01",
+      "level": "M",
+      "title": "ATE vs SLT vs 시스템 레벨 검증의 역할",
+      "goal": "결함 종류별로 어느 단계(scan/ATE, SLT, board/system validation)가 잡는지 판단한다",
+      "task": "20개 결함 시나리오(stuck-at gate, 타이밍 마진, PCIe 링크 간헐 실패, 열 의존 SRAM 오류, 펌웨어 errata 등)를 단계별로 분류하는 표를 작성하고, 테스트 시간·비용·커버리지 trade-off를 근거와 함께 설명하는 1페이지 설계 메모를 쓴다.",
+      "tags": [
+        "ate",
+        "slt",
+        "design"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M02",
+      "level": "M",
+      "title": "DMA 검증: 디스크립터 체인과 데이터 무결성",
+      "goal": "DMA 엔진 검증의 핵심인 경계 조건과 무결성 체크를 설계한다",
+      "task": "scatter-gather 디스크립터 체인을 처리하는 DMA 모델을 만들고 정렬/비정렬, 4KB 경계 교차, 길이 0/1/max, 체인 중간 에러 디스크립터를 랜덤+경계로 생성해 CRC32로 src/dst 비교; completion 인터럽트와 status 레지스터 일관성까지 확인한다.",
+      "tags": [
+        "dma",
+        "descriptor",
+        "crc",
+        "data-integrity"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M03",
+      "level": "M",
+      "title": "인터럽트 지연·유실 검출",
+      "goal": "인터럽트 latency 측정과 lost/spurious interrupt 검출 방법을 익힌다",
+      "task": "타이머 소스로 주기적 인터럽트를 발생시키는 이벤트 시뮬레이션에서 트리거 시각과 ISR 진입 시각을 기록해 latency 히스토그램을 만들고, 시퀀스 번호로 유실·중복·순서 뒤바뀜을 검출; 핸들러가 늦게 clear해 인터럽트가 합쳐지는 경우를 재현한다.",
+      "tags": [
+        "interrupt",
+        "latency",
+        "histogram"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M04",
+      "level": "M",
+      "title": "PCIe 링크 검증 플로우",
+      "goal": "링크 업, LTSSM 상태, 속도/폭 협상, retrain을 펌웨어 관점에서 검증하는 흐름을 구현한다",
+      "task": "PCIe config space 덤프(lspci -xxx 형식)를 파싱해 capability 체인을 따라 Link Capabilities/Status를 해석하고 기대 Gen/xN과 비교하는 checker를 작성; mock LTSSM 레지스터로 'Detect→Polling→Config→L0' 진행 감시, retrain 반복 N회 스트레스, 다운그레이드 검출을 구현한다.",
+      "tags": [
+        "pcie",
+        "ltssm",
+        "link",
+        "see:PCIE"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M05",
+      "level": "M",
+      "title": "DDR 검증: Training 결과와 메모리 스트레스",
+      "goal": "DDR bring-up 후 training 마진 확인과 패턴 스트레스 테스트를 이해한다",
+      "task": "training 결과 레지스터(per-byte-lane read/write DQS delay window)를 모델링해 eye 폭이 임계 미만인 lane을 경고하고, LFSR 의사난수 주소/데이터·row hammer 유사 접근·checkerboard 패턴 스트레스를 대용량 버퍼에 수행해 비트 단위 오류 맵(lane/bit/address)을 출력한다.",
+      "tags": [
+        "ddr",
+        "training",
+        "stress",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M06",
+      "level": "M",
+      "title": "SerDes PRBS 생성·검사와 BER 신뢰구간",
+      "goal": "고속 링크 검증의 PRBS/BER 측정과 통계적 의미를 정확히 계산한다",
+      "task": "PRBS7/15/31 generator와 self-synchronizing checker를 C로 구현하고 랜덤 비트 오류를 주입해 BER을 측정; 'BER<1e-12를 95% 신뢰도로 주장하려면 오류 0개에서 약 3e12 비트 필요'를 유도하고 링크 속도별 필요 측정 시간을 계산하는 도구를 만든다.",
+      "tags": [
+        "serdes",
+        "prbs",
+        "ber",
+        "statistics"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M07",
+      "level": "M",
+      "title": "Shmoo Plot 생성과 마진 분석",
+      "goal": "전압×주파수 sweep으로 동작 영역(shmoo)을 그리고 마진을 수치화한다",
+      "task": "온도·공정 파라미터를 가진 pass/fail 모델(지연 = f(V,T))에 대해 V(0.65~1.0V)×F 2차원 sweep을 자동화하고 ASCII/CSV shmoo 출력, 최소 동작 전압(Vmin) 탐색은 이진 탐색으로 최적화; 간헐 실패를 반복 측정으로 구분하는 로직도 넣는다.",
+      "tags": [
+        "shmoo",
+        "vmin",
+        "margin",
+        "pvt"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M08",
+      "level": "M",
+      "title": "PVT 코너 매트릭스와 테스트 시간 예산",
+      "goal": "공정·전압·온도 코너 조합을 현실적인 시간 안에 커버하는 계획을 세운다",
+      "task": "SS/TT/FF 칩 × 3전압 × 3온도 × 테스트 스위트(각 소요시간) 매트릭스를 입력받아 챔버 온도 변경 비용을 최소화하는 실행 순서와 총 소요시간을 계산하는 Python 스케줄러를 작성하고, 예산 초과 시 우선순위 기반으로 축소된 계획을 제안한다.",
+      "tags": [
+        "pvt",
+        "test-plan",
+        "scheduling"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M09",
+      "level": "M",
+      "title": "동시성 스트레스 테스트 설계",
+      "goal": "CPU·DMA·메모리 트래픽을 동시에 걸어 단독 테스트에서 안 보이는 버그를 노출한다",
+      "task": "pthread로 CPU 메모리 체커, DMA 모델, 인터럽트 소스를 동시에 돌리는 host 스트레스 하네스를 만들고 각 트래픽에 독립적인 checker(시그니처/CRC)를 붙여 장시간 실행; 공유 자원 경합 버그(일부러 넣은 race)를 몇 분 안에 잡아내는지 확인한다.",
+      "tags": [
+        "stress",
+        "concurrency",
+        "pthread"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M10",
+      "level": "M",
+      "title": "실패 로그 Triage와 시그니처 클러스터링",
+      "goal": "수천 개 실패 로그에서 고유 원인을 빠르게 묶는 triage 자동화를 익힌다",
+      "task": "야간 회귀 결과(JSON 로그 수천 건, 합성 생성)를 파싱해 실패 시그니처(테스트명+레지스터+비트 패턴+에러코드 정규화)로 클러스터링하고, 칩/보드/온도/펌웨어 버전별 상관을 표로 출력해 '특정 보드에만'과 '특정 온도 이상에서만'을 자동으로 구분한다.",
+      "tags": [
+        "triage",
+        "log-analysis",
+        "python"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M11",
+      "level": "M",
+      "title": "Bisect 자동화: 펌웨어 커밋과 파라미터",
+      "goal": "회귀를 일으킨 변경 또는 실패 경계 조건을 이진 탐색으로 좁힌다",
+      "task": "git bisect run으로 회귀 커밋을 찾는 스크립트(테스트 flaky 대비 3회 재시도 다수결 포함)와, 실패 경계(전압·주파수·버퍼 크기)를 bisect하는 일반화 함수를 작성; flaky 테스트에서 단순 bisect가 오답을 내는 사례를 재현하고 개선책을 비교한다.",
+      "tags": [
+        "bisect",
+        "git",
+        "flaky"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M12",
+      "level": "M",
+      "title": "Python 테스트 시퀀서",
+      "goal": "C 테스트를 상위 스크립트로 묶어 장비 제어·재시도·타임아웃을 관리하는 sequencer를 만든다",
+      "task": "YAML 테스트 리스트(테스트명, 파라미터, 타임아웃, 재시도, 사전조건)를 읽어 C 테스트 바이너리(또는 ctypes로 로드한 .dylib)를 실행하고, 전원/온도 장비는 mock 클래스로 추상화해 setup/teardown 시퀀스·결과 DB(SQLite) 저장·요약 리포트를 생성한다.",
+      "tags": [
+        "sequencer",
+        "python",
+        "automation",
+        "ctypes"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-M13",
+      "level": "M",
+      "title": "검증 커버리지 모델",
+      "goal": "'무엇을 얼마나 테스트했는가'를 functional coverage로 정량화한다",
+      "task": "레지스터 필드값·DMA 길이 구간·인터럽트 조합을 coverpoint/bin/cross로 정의하는 Python 커버리지 모델을 만들고 시퀀서 실행 로그로 샘플링해 hole 리포트를 출력; 랜덤 테스트 시드를 늘려가며 커버리지 수렴 곡선을 그린다.",
+      "tags": [
+        "coverage",
+        "functional-coverage",
+        "metrics"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-A01",
+      "level": "A",
+      "title": "Constrained-Random 테스트와 Scoreboard",
+      "goal": "랜덤 시퀀스 + 골든 참조 모델 비교로 사람이 생각 못 한 코너를 찾는다",
+      "task": "레지스터 쓰기/DMA 요청/인터럽트 이벤트를 제약 조건 하에 랜덤 생성하는 generator, 같은 입력을 받는 골든 모델, DUT 모델 출력을 비교하는 scoreboard를 구현; DUT 모델에 미묘한 버그(특정 순서에서만 status 갱신 누락)를 넣고 시드 재현성으로 디버그한다.",
+      "tags": [
+        "constrained-random",
+        "scoreboard",
+        "reference-model"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-A02",
+      "level": "A",
+      "title": "바운더리 스캔(EXTEST)으로 보드 연결 테스트",
+      "goal": "JTAG 바운더리 스캔으로 납땜·배선 결함을 찾는 보드 검증 흐름을 익힌다",
+      "task": "BSDL 일부(핀↔셀 매핑)와 넷리스트를 입력받아 EXTEST 패턴(walking-1, 카운팅 시퀀스)을 생성하고, open/short/stuck 결함을 심은 가상 보드의 응답을 비교해 결함 넷을 진단하는 도구를 작성한다(TAP 상태기계는 see:TOOL-A01).",
+      "tags": [
+        "jtag",
+        "boundary-scan",
+        "board",
+        "see:TOOL"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-A03",
+      "level": "A",
+      "title": "전력 특성화 자동화",
+      "goal": "워크로드별 레일 전력 측정과 누설(leakage) 온도 의존성 분석을 자동화한다",
+      "task": "INA226 유사 전력 모니터를 mock I2C로 읽는 드라이버(shunt/bus/power 레지스터 스케일링)를 만들고, 워크로드×온도 sweep 데이터에서 dynamic/leakage 전력을 분리(P = Pleak(T) + C·V²·f 회귀)하는 분석 스크립트를 작성한다.",
+      "tags": [
+        "power",
+        "characterization",
+        "ina226",
+        "regression"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-A04",
+      "level": "A",
+      "title": "열 특성화와 Throttling 검증",
+      "goal": "온도 센서·DVFS·throttle 동작이 스펙대로 반응하는지 검증한다",
+      "task": "SoC 열 RC 모델(see:SIM)에 워크로드를 넣어 온도 상승을 시뮬레이션하고 thermal trip/throttle 임계·hysteresis·DVFS 단계 전환을 검증하는 테스트를 작성; 센서 오프셋 오류가 있을 때 throttle 지연이 얼마나 위험한지 정량화한다.",
+      "tags": [
+        "thermal",
+        "dvfs",
+        "throttling",
+        "see:SIM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-A05",
+      "level": "A",
+      "title": "Errata 관리와 칩 리비전별 워크어라운드",
+      "goal": "실리콘 버그를 펌웨어로 우회하고 리비전별로 안전하게 적용하는 구조를 만든다",
+      "task": "chip ID/revision 레지스터를 읽어 errata 테이블(ID, 영향 리비전, 워크어라운드 함수, 검증 테스트)을 적용하는 프레임워크를 C로 구현하고, A0/B0 mock에서 각각 올바른 워크어라운드만 적용되는지·ECO 후 제거 가능한지 테스트한다.",
+      "tags": [
+        "errata",
+        "silicon-revision",
+        "workaround"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-A06",
+      "level": "A",
+      "title": "보드 레벨 검증: 전원 시퀀싱과 클럭",
+      "goal": "보드 bring-up의 전원 레일 순서·전압 허용오차·클럭 주파수 검증을 자동화한다",
+      "task": "레일별 ADC 샘플 로그(타임스탬프 포함)를 입력받아 전원 시퀀싱 순서·ramp time·허용오차(±5%)·glitch를 검사하는 checker와, 주파수 카운터 측정값으로 PLL/클럭 트리 출력 ppm 오차를 판정하는 테스트를 작성한다.",
+      "tags": [
+        "board-validation",
+        "power-sequencing",
+        "clock"
+      ],
+      "env": "mac",
+      "env_note": "실제 측정은 lab(오실로스코프/DAQ) 필요, 분석 로직은 합성 로그로 맥에서 검증"
+    },
+    {
+      "id": "SIV-A07",
+      "level": "A",
+      "title": "버스 인터페이스 실패 디버그 (LA 캡처 분석)",
+      "goal": "I2C/SPI 간헐 실패를 로직 애널라이저 데이터로 원인 분석한다",
+      "task": "로직 애널라이저 CSV(SCL/SDA 샘플)를 디코딩하는 I2C 프로토콜 파서를 작성해 NACK·clock stretching 타임아웃·setup/hold 위반·arbitration lost를 자동 표시하고, 합성 캡처 3종(풀업 약함, 타이밍 위반, 슬레이브 hang)의 원인을 리포트한다.",
+      "tags": [
+        "i2c",
+        "logic-analyzer",
+        "debug",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-A08",
+      "level": "A",
+      "title": "생산 연계: 수율·Binning 분석",
+      "goal": "검증 데이터가 양산 테스트·수율에 어떻게 연결되는지 이해한다",
+      "task": "웨이퍼별 다이 테스트 결과(합성: Vmin, Fmax, 누설, pass/fail 코드)로 수율·bin 분포·wafer map을 계산하고, 테스트 항목 순서를 'fail 확률/테스트 시간' 기준으로 재정렬해 평균 테스트 시간을 줄이는 최적화를 구현한다.",
+      "tags": [
+        "yield",
+        "binning",
+        "ate",
+        "optimization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SIV-A09",
+      "level": "A",
+      "title": "검증 캠페인 설계: 신규 센싱 SoC (면접형)",
+      "goal": "Staff급 면접의 '새 칩 검증을 처음부터 계획하라' 질문에 end-to-end로 답한다",
+      "task": "카메라(MIPI CSI-2)·레이더(SerDes)·PCIe·DDR를 가진 가상 센싱 SoC에 대해 검증 단계(pre-si 준비, Day-0 bring-up, feature, PVT, stress, 양산 이관), 인프라(시퀀서, 랩 자동화, 대시보드), triage 플로우, 일정·인력·지표를 담은 설계 문서를 쓰고 Day-0 bring-up 스크립트 골격을 구현한다.",
+      "tags": [
+        "validation-plan",
+        "design",
+        "interview",
+        "rivian"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

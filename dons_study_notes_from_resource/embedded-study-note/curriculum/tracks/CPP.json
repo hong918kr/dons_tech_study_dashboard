@@ -1,0 +1,581 @@
+{
+  "id": "CPP",
+  "intro": "펌웨어에서 C++는 '더 안전한 C'로 쓰인다: RAII로 락·인터럽트·칩셀렉트 해제를 보장하고, constexpr·템플릿으로 런타임 비용 없이 타입 안전 레지스터 접근과 HAL을 만든다. 예외·RTTI·힙 없이 빌드하는 제약 속에서 어떤 C++ 기능이 공짜이고 어떤 기능이 코드 크기·스택·사이클을 먹는지 직접 측정하는 것이 이 트랙의 핵심이며, Apple·Tesla·Anduril 등 C++ 펌웨어 팀 면접의 단골 주제다.",
+  "goals": [
+    "임베디드용 C++ 부분집합(-fno-exceptions/-fno-rtti, 힙 금지)으로 빌드하고 무엇이 깨지는지 설명한다",
+    "RAII로 크리티컬 섹션·락·주변장치 상태를 예외 없이 안전하게 관리한다",
+    "constexpr·템플릿·enum class로 타입 안전·제로 코스트 레지스터 맵과 HAL을 구현하고 어셈블리로 비용을 검증한다",
+    "CRTP vs virtual, move vs copy, 템플릿 bloat 등 기능별 코드 크기·성능 비용을 측정해 근거 있게 선택한다",
+    "placement new·고정 용량 컨테이너·정적 풀로 힙 없는 객체 수명 관리를 구현한다"
+  ],
+  "prereq": [
+    "C",
+    "TOOL"
+  ],
+  "refs": [
+    {
+      "title": "Christopher Kormanyos, Real-Time C++ (4th ed., Springer)"
+    },
+    {
+      "title": "Embedded Template Library (ETL)",
+      "url": "https://www.etlcpp.com"
+    },
+    {
+      "title": "C++ Core Guidelines",
+      "url": "https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines"
+    },
+    {
+      "title": "cppreference.com",
+      "url": "https://en.cppreference.com"
+    },
+    {
+      "title": "MISRA C++:2023 / AUTOSAR C++14 Guidelines"
+    },
+    {
+      "title": "Compiler Explorer (godbolt)",
+      "url": "https://godbolt.org"
+    }
+  ],
+  "items": [
+    {
+      "id": "CPP-B01",
+      "level": "B",
+      "title": "C에서 C++로: 펌웨어용 C++ 부분집합",
+      "goal": "C 드라이버를 C++로 컴파일할 때 생기는 차이(암시적 void* 변환, 지정 초기화, 문자열 리터럴 const)를 체득한다",
+      "task": "주어진 C 링버퍼·GPIO 드라이버를 clang++ -std=c++17 -fno-exceptions -fno-rtti로 빌드되게 고치고, C 빌드 대비 size(1) 출력과 objdump 결과가 같은지 비교한다.",
+      "tags": [
+        "cpp-subset",
+        "migration",
+        "codesize"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B02",
+      "level": "B",
+      "title": "extern \"C\"와 name mangling: C HAL과 링크",
+      "goal": "C HAL/ISR 심볼과 C++ 코드를 섞어 링크하는 규칙을 이해한다",
+      "task": "C로 된 mock HAL(.c)과 C++ 앱(.cpp)을 함께 링크하고, extern \"C\" 유무에 따른 링크 에러를 재현한 뒤 nm / c++filt로 맹글링된 심볼을 해석한다.",
+      "tags": [
+        "extern-c",
+        "linkage",
+        "abi"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B03",
+      "level": "B",
+      "title": "enum class와 고정 기저 타입으로 레지스터 필드 명명",
+      "goal": "enum class(scoped, underlying type 지정)가 C enum보다 안전한 이유와 비용 0임을 확인한다",
+      "task": "UART 모드/패리티 필드를 enum class : uint32_t로 정의하고 잘못된 enum 혼용이 컴파일 에러가 되는지, -O2 어셈블리가 C 버전과 동일한지 godbolt로 비교한다.",
+      "tags": [
+        "enum-class",
+        "type-safety",
+        "register"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B04",
+      "level": "B",
+      "title": "constexpr 기초: 컴파일타임 주소·마스크 계산",
+      "goal": "constexpr 함수/변수로 레지스터 주소와 비트마스크를 컴파일타임에 확정한다",
+      "task": "constexpr mask(offset,width)와 주변장치 base+offset 상수를 작성하고 static_assert로 값을 검증, objdump에서 런타임 계산 코드가 사라졌음을 확인한다.",
+      "tags": [
+        "constexpr",
+        "static_assert",
+        "register"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B05",
+      "level": "B",
+      "title": "const·volatile·참조로 레지스터 접근 모델링",
+      "goal": "읽기 전용 상태 레지스터, 쓰기 전용 데이터 레지스터를 타입으로 구분한다",
+      "task": "volatile const uint32_t& / volatile uint32_t&를 반환하는 접근자를 만들고, 읽기 전용 레지스터에 쓰기 시 컴파일 에러, 루프 내 volatile 읽기가 최적화로 사라지지 않음을 어셈블리로 검증한다.",
+      "tags": [
+        "volatile",
+        "const",
+        "mmio"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B06",
+      "level": "B",
+      "title": "RAII 기초: 인터럽트 비활성화 CriticalSection 가드",
+      "goal": "생성자/소멸자로 진입·해제를 짝지어 early return에서도 누락이 없게 한다",
+      "task": "mock PRIMASK 변수를 저장/복원하는 CriticalSection 클래스를 구현하고, 중첩·조기 return·여러 분기 경로에서 상태가 항상 복원됨을 단위 테스트로 검증한다.",
+      "tags": [
+        "raii",
+        "critical-section",
+        "interrupts"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B07",
+      "level": "B",
+      "title": "RAII 스코프 가드: SPI 칩셀렉트와 락",
+      "goal": "주변장치 자원(CS 핀, 버스 락)을 예외 없이 RAII로 관리하고 복사/이동을 금지한다",
+      "task": "ScopedChipSelect와 BusLock을 구현(copy ctor = delete)하고, mock GPIO 로그로 assert→전송→deassert 순서가 모든 경로에서 지켜지는지 테스트한다.",
+      "tags": [
+        "raii",
+        "spi",
+        "noncopyable"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B08",
+      "level": "B",
+      "title": "클래스 레이아웃과 sizeof: 패딩·빈 클래스·EBO",
+      "goal": "C++ 객체의 메모리 레이아웃을 예측하고 standard-layout/trivially-copyable 조건을 이해한다",
+      "task": "멤버 순서·virtual 유무·빈 베이스에 따라 sizeof/alignof/offsetof가 어떻게 바뀌는지 표로 예측한 뒤 static_assert와 std::is_standard_layout으로 검증한다.",
+      "tags": [
+        "layout",
+        "sizeof",
+        "ebo"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B09",
+      "level": "B",
+      "title": "정적 초기화: 전역 생성자와 .init_array",
+      "goal": "전역 객체 생성자가 언제 누가 호출하는지, static initialization order fiasco를 이해한다",
+      "task": "두 번역 단위의 전역 객체 초기화 순서 문제를 재현하고 constinit/constexpr 생성자로 정적 초기화(.data)로 옮겨 .init_array 엔트리가 사라지는 것을 objdump로 확인한다.",
+      "tags": [
+        "static-init",
+        "init-array",
+        "constinit"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B10",
+      "level": "B",
+      "title": "std::array로 C 배열 대체하기",
+      "goal": "std::array가 C 배열과 동일 코드를 만들면서 크기 정보·값 의미론을 제공함을 확인한다",
+      "task": "DMA 버퍼·룩업 테이블을 std::array로 바꾸고 at() 대신 static 범위 검증을 쓰는 이유를 설명, -O2 어셈블리를 C 배열 버전과 비교한다.",
+      "tags": [
+        "std-array",
+        "zero-cost"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B11",
+      "level": "B",
+      "title": "std::span으로 버퍼+길이 인터페이스 정리",
+      "goal": "(ptr, len) 쌍 API를 std::span으로 바꿔 길이 불일치 버그를 원천 차단한다",
+      "task": "uart_write(const uint8_t*, size_t) 계열 API를 std::span<const std::byte>로 바꾸고 subspan으로 프레임 헤더/페이로드를 파싱, 정적 extent span의 sizeof가 포인터 1개임을 검증한다.",
+      "tags": [
+        "std-span",
+        "api-design",
+        "cpp20"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B12",
+      "level": "B",
+      "title": "템플릿 기초: 폭별 레지스터 read/write",
+      "goal": "함수 템플릿과 static_assert로 8/16/32비트 레지스터 접근을 하나의 코드로 일반화한다",
+      "task": "template<typename T> T reg_read(uintptr_t)를 작성하되 T가 unsigned integral이 아니면 컴파일 에러가 나게 하고, mock 메모리 배열로 동작을 테스트한다.",
+      "tags": [
+        "templates",
+        "type-traits",
+        "register"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B13",
+      "level": "B",
+      "title": "-fno-exceptions / -fno-rtti 빌드의 실제 영향",
+      "goal": "예외·RTTI를 끄면 무엇이 줄고 무엇이 깨지는지 정량적으로 안다",
+      "task": "같은 프로그램을 플래그 조합 4가지로 빌드해 size/섹션(.eh_frame, .gcc_except_table, typeinfo) 차이를 표로 만들고, throw/dynamic_cast/typeid가 각각 어떤 에러를 내는지 확인한다.",
+      "tags": [
+        "no-exceptions",
+        "no-rtti",
+        "codesize"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-B14",
+      "level": "B",
+      "title": "힙 금지 강제: operator new 삭제와 링크 에러",
+      "goal": "펌웨어에서 의도치 않은 동적 할당을 빌드 단계에서 잡아낸다",
+      "task": "operator new/delete를 정의하지 않거나 =delete/abort 스텁으로 대체하고, std::vector·std::function·std::string 사용이 어떻게 걸리는지 테스트한다(호스트에서는 malloc 훅으로 할당 횟수 0 검증).",
+      "tags": [
+        "no-heap",
+        "operator-new",
+        "static-allocation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M01",
+      "level": "M",
+      "title": "타입 안전 레지스터 맵: Reg<Addr, T, Access>",
+      "goal": "주소·폭·접근 권한(RO/WO/RW)을 타입에 담아 잘못된 접근을 컴파일 에러로 만든다",
+      "task": "constexpr 주소 템플릿 Reg<Addr, uint32_t, RW>를 구현하고 테스트용으로 base 주소를 mock 배열로 치환 가능하게 설계, RO 레지스터 write가 컴파일 실패하는지 확인한다.",
+      "tags": [
+        "register-map",
+        "templates",
+        "constexpr"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M02",
+      "level": "M",
+      "title": "비트필드 대체: Field<Reg, Offset, Width> RMW",
+      "goal": "구현 정의 동작인 C 비트필드 대신 이식 가능한 타입 안전 필드 접근을 만든다",
+      "task": "Field 템플릿의 read/write/modify를 구현하고 범위 밖 값 static_assert, 여러 필드를 한 번의 RMW로 묶는 write(Field1=a, Field2=b)를 만든 뒤 mock 레지스터로 결과값을 검증한다.",
+      "tags": [
+        "bitfield",
+        "register-map",
+        "rmw"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M03",
+      "level": "M",
+      "title": "enum class 플래그 연산자: Flags<E>",
+      "goal": "enum class의 비트 OR/AND를 타입 안전하게 지원하는 플래그 타입을 만든다",
+      "task": "Flags<IrqFlag>에 |, &, ~, test()를 구현하고 다른 enum 플래그와 섞으면 컴파일 에러, 생성 코드가 uint32_t 연산과 동일함을 godbolt로 확인한다.",
+      "tags": [
+        "enum-class",
+        "flags",
+        "operator-overloading"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M04",
+      "level": "M",
+      "title": "제로 코스트 GPIO HAL: Pin<Port, N> 템플릿",
+      "goal": "템플릿 파라미터로 핀을 고정해 런타임 테이블 없이 단일 store 명령까지 줄인다",
+      "task": "Pin<PortA,5>::set()/toggle()을 구현해 mock 포트로 테스트하고, --target=thumbv7em-none-eabi -O2 오브젝트를 디스어셈블해 C의 직접 레지스터 쓰기와 명령 수가 같은지 비교한다.",
+      "tags": [
+        "hal",
+        "templates",
+        "zero-cost",
+        "gpio"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M05",
+      "level": "M",
+      "title": "CRTP 정적 다형성 드라이버 인터페이스",
+      "goal": "CRTP로 virtual 없는 인터페이스를 만들고 장단점(코드 중복, 이질 컨테이너 불가)을 이해한다",
+      "task": "UartBase<Derived> CRTP 인터페이스와 MockUart/Stm32Uart 구현을 작성하고, 같은 API의 virtual 버전과 코드 크기·호출 어셈블리(인라인 여부)를 비교한다.",
+      "tags": [
+        "crtp",
+        "static-polymorphism",
+        "hal"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M06",
+      "level": "M",
+      "title": "virtual의 실제 비용: vtable·간접호출·devirtualization",
+      "goal": "가상 함수가 플래시/RAM/사이클에 남기는 비용과 final·LTO의 효과를 측정한다",
+      "task": "드라이버 3종을 virtual로 구현해 vtable·typeinfo 심볼과 크기를 nm/size로 측정하고, final 및 -flto 적용 시 간접 호출이 직접 호출로 바뀌는지 어셈블리로 확인한다.",
+      "tags": [
+        "vtable",
+        "virtual",
+        "devirtualization",
+        "codesize"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M07",
+      "level": "M",
+      "title": "placement new와 정적 저장소 수명 관리",
+      "goal": "힙 없이 정해진 메모리에 객체를 생성·파괴하고 alignment·수명 규칙을 지킨다",
+      "task": "alignas(T) std::byte buf[sizeof(T)] 위에 placement new로 드라이버 객체를 지연 생성하는 StaticInstance<T>를 구현하고, 생성/소멸 카운터 타입으로 이중 생성·누락 파괴를 테스트한다.",
+      "tags": [
+        "placement-new",
+        "lifetime",
+        "alignment"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M08",
+      "level": "M",
+      "title": "클래스 전용 operator new + 정적 메모리 풀",
+      "goal": "특정 타입의 동적 생성을 고정 블록 풀로 돌려 결정적 할당을 만든다",
+      "task": "Message 클래스에 operator new/delete를 오버로드해 정적 풀(N블록)에서 할당하고, 고갈 시 nullptr 반환(nothrow) 동작과 재사용을 단위 테스트로 검증한다.",
+      "tags": [
+        "memory-pool",
+        "operator-new",
+        "static-allocation",
+        "see:DS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M09",
+      "level": "M",
+      "title": "move semantics의 비용: 고정 용량 버퍼에선 공짜가 아니다",
+      "goal": "move가 포인터 교환일 때와 요소별 복사일 때를 구분하고 펌웨어 객체 설계에 반영한다",
+      "task": "복사/이동 횟수를 세는 계측 타입으로 std::vector 이동과 인라인 저장 버퍼(std::array 멤버) 이동 비용을 비교하고, noexcept 이동 생성자 유무가 재배치에 주는 영향을 확인한다.",
+      "tags": [
+        "move-semantics",
+        "performance",
+        "noexcept"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M10",
+      "level": "M",
+      "title": "ETL 스타일 static_vector<T, N> 구현",
+      "goal": "힙 없는 고정 용량 컨테이너를 표준 컨테이너 인터페이스로 구현한다",
+      "task": "push_back/emplace_back/pop_back/erase/iterator를 갖춘 static_vector를 placement new로 구현하고, 생성/소멸 카운터 타입과 용량 초과 처리(assert/에러 반환)를 테스트한다.",
+      "tags": [
+        "etl",
+        "container",
+        "placement-new"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M11",
+      "level": "M",
+      "title": "예외 없는 에러 처리: Result<T, E> (expected 스타일)",
+      "goal": "예외를 끈 환경에서 에러를 값으로 전달하고 무시를 어렵게 만든다",
+      "task": "[[nodiscard]] Result<T,E>를 구현(또는 C++23 std::expected 사용)해 I2C 센서 읽기 API에 적용하고, 에러 전파 체인과 반환값 무시 시 경고가 나는지 테스트한다.",
+      "tags": [
+        "error-handling",
+        "expected",
+        "nodiscard"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M12",
+      "level": "M",
+      "title": "무힙 콜백: std::function 대신 delegate / function_ref",
+      "goal": "ISR·드라이버 콜백을 힙 할당 없이 멤버 함수까지 바인딩한다",
+      "task": "객체 포인터+함수 포인터 기반 Delegate를 구현해 타이머 콜백 테이블에 등록하고, std::function 버전과 sizeof·할당 횟수(malloc 훅)·호출 어셈블리를 비교한다.",
+      "tags": [
+        "callback",
+        "delegate",
+        "no-heap"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M13",
+      "level": "M",
+      "title": "constexpr 테이블 생성: CRC·sin LUT를 .rodata로",
+      "goal": "런타임 초기화 대신 컴파일타임에 테이블을 만들어 플래시에 배치한다",
+      "task": "constexpr 함수로 CRC-32 테이블과 Q15 sin LUT를 생성해 static_assert로 몇몇 값을 검증하고, objdump -s로 .rodata에 들어갔고 .init_array/.bss 초기화 코드가 없음을 확인한다.",
+      "tags": [
+        "constexpr",
+        "lut",
+        "rodata"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-M14",
+      "level": "M",
+      "title": "static_assert·type traits로 HAL 오용 차단",
+      "goal": "잘못된 핀-기능 조합, 범위 밖 설정을 컴파일타임 에러로 만든다",
+      "task": "핀별 허용 AF(alternate function) 테이블을 constexpr로 정의하고 configure<Pin, AF>()가 허용되지 않은 조합에서 읽기 쉬운 static_assert 메시지로 실패하게 만든다(개념적으로 concepts로 바꾸는 법은 see:MCPP).",
+      "tags": [
+        "static_assert",
+        "type-traits",
+        "hal",
+        "see:MCPP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-A01",
+      "level": "A",
+      "title": "Typestate 패턴: 설정 순서를 타입으로 강제",
+      "goal": "주변장치의 상태 전이(Disabled→Configured→Enabled)를 타입으로 표현해 오용을 컴파일 에러로 만든다",
+      "task": "SPI 드라이버를 Spi<Disabled>.configure()->Spi<Configured>.enable()->Spi<Enabled> 형태로 설계하고, enable 전 transfer 호출이 컴파일되지 않음과 런타임 비용 0을 검증한다.",
+      "tags": [
+        "typestate",
+        "templates",
+        "api-design"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-A02",
+      "level": "A",
+      "title": "ISR과 C++ 객체 연결: 정적 트램펄린 디스패치",
+      "goal": "벡터 테이블의 C 함수 포인터에서 C++ 드라이버 인스턴스 메서드로 안전하게 연결한다",
+      "task": "IRQ 번호→객체 포인터 테이블과 extern \"C\" 트램펄린을 구현하고, 호스트에서 가짜 IRQ 발생 루프로 여러 UART 인스턴스의 핸들러가 올바르게 호출되는지 테스트한다.",
+      "tags": [
+        "isr",
+        "dispatch",
+        "extern-c"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-A03",
+      "level": "A",
+      "title": "C++ 런타임 의존성 최소화: __cxa_* 심볼 추적",
+      "goal": "프리스탠딩 빌드에서 링커가 요구하는 C++ 런타임 심볼의 출처를 알고 제거한다",
+      "task": "clang --target=thumbv7em-none-eabi -ffreestanding으로 오브젝트를 만들어 nm으로 미정의 심볼(__cxa_guard_acquire, __cxa_pure_virtual, __cxa_atexit 등)을 찾고, -fno-threadsafe-statics·스텁 정의로 각각 제거한다.",
+      "tags": [
+        "freestanding",
+        "runtime",
+        "cxa"
+      ],
+      "env": "mac",
+      "env_note": "Apple clang의 ARM 타깃으로 -c 오브젝트까지만 생성(링크 불필요). nm은 macOS 기본 llvm-nm 사용, 필요시 brew llvm"
+    },
+    {
+      "id": "CPP-A04",
+      "level": "A",
+      "title": "std::atomic과 Cortex-M: lock-free 여부와 ISR 공유",
+      "goal": "ISR-메인 공유 변수에서 volatile과 atomic의 차이, 아키텍처별 lock-free 가능 여부를 안다",
+      "task": "std::atomic<uint32_t>/<uint64_t>의 fetch_add를 thumbv6m(M0)과 thumbv7m(M3)로 컴파일해 LDREX/STREX vs libatomic 호출 차이를 확인하고, is_always_lock_free를 static_assert로 검사하는 정책을 만든다.",
+      "tags": [
+        "atomic",
+        "memory-order",
+        "isr",
+        "see:OS"
+      ],
+      "env": "mac",
+      "env_note": "clang --target=thumbv6m-none-eabi / thumbv7m-none-eabi -S로 어셈블리만 비교"
+    },
+    {
+      "id": "CPP-A05",
+      "level": "A",
+      "title": "템플릿 bloat 다이어트: thin template 기법",
+      "goal": "템플릿 인스턴스 폭증으로 인한 코드 크기 증가를 측정하고 타입 비의존 코어로 분리한다",
+      "task": "static_vector<T,N>을 5개 타입×3개 N으로 인스턴스화해 size 증가를 측정한 뒤 바이트 단위 비템플릿 코어+얇은 템플릿 래퍼로 리팩터링하고 감소량을 보고한다(-ffunction-sections, --gc-sections 효과 포함).",
+      "tags": [
+        "codesize",
+        "templates",
+        "bloat"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-A06",
+      "level": "A",
+      "title": "컴파일타임 클럭 트리·보레이트 검증기",
+      "goal": "constexpr 계산으로 PLL/분주 설정과 보레이트 오차를 빌드 시점에 검증한다",
+      "task": "HSE·목표 SYSCLK로 PLL M/N/P를 탐색하는 constexpr 함수와, 주어진 클럭에서 UART BRR 오차가 2% 넘으면 static_assert 실패하는 템플릿을 작성하고 정상/실패 케이스를 확인한다.",
+      "tags": [
+        "constexpr",
+        "clock-tree",
+        "uart",
+        "see:BM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-A07",
+      "level": "A",
+      "title": "정적 할당 액티브 오브젝트 프레임워크",
+      "goal": "QP 스타일 이벤트 드리븐 구조(이벤트 큐+상태 머신)를 힙 없이 C++로 구현한다",
+      "task": "고정 크기 이벤트 풀, AO별 이벤트 큐, 계층 없는 상태 머신 디스패치를 구현하고 버튼→LED 블링크 시나리오를 호스트에서 이벤트 시퀀스로 테스트한다.",
+      "tags": [
+        "active-object",
+        "event-driven",
+        "state-machine",
+        "static-allocation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-A08",
+      "level": "A",
+      "title": "테스트 가능한 C++ 드라이버 설계: 의존성 주입 vs 링크 심",
+      "goal": "하드웨어 의존 코드를 호스트 단위 테스트 가능하게 만드는 C++ 기법들을 비교한다",
+      "task": "같은 센서 드라이버를 (1) 템플릿 파라미터 주입 (2) 인터페이스(virtual) 주입 (3) 링크 타임 대체로 각각 만들고 GoogleTest/doctest로 테스트, 코드 크기·테스트 편의성 트레이드오프를 정리한다.",
+      "tags": [
+        "testability",
+        "dependency-injection",
+        "unit-test",
+        "see:TEST"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-A09",
+      "level": "A",
+      "title": "MISRA C++/AUTOSAR 규칙 적용 리뷰",
+      "goal": "안전 필수 C++ 코딩 규칙이 금지하는 기능과 그 이유, 대안을 실전 코드에 적용한다",
+      "task": "의도적으로 위반이 섞인 펌웨어 코드에 clang-tidy(cppcoreguidelines-*, cert-*, hicpp-*) 검사를 돌려 위반을 분류하고, 각 위반을 규칙 근거와 함께 수정한 diff를 만든다.",
+      "tags": [
+        "misra",
+        "clang-tidy",
+        "safety",
+        "see:TEST"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "CPP-A10",
+      "level": "A",
+      "title": "종합: 정적 할당 C++ 센서 파이프라인",
+      "goal": "RAII·타입 안전 레지스터·static 컨테이너·Result를 엮어 힙 없는 드라이버 스택을 완성한다",
+      "task": "mock I2C 버스→IMU 드라이버→고정소수점 필터→텔레메트리 직렬화까지 힙 0·예외 0으로 구현하고, 단위 테스트와 함께 size 예산(예: .text 8KB) 준수를 보고한다.",
+      "tags": [
+        "capstone",
+        "driver-stack",
+        "static-allocation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

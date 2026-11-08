@@ -1,0 +1,565 @@
+{
+  "id": "NUM",
+  "intro": "로봇의 EKF·LQR·최소제곱, ML의 학습·추론, 퀀트의 가격결정·리스크는 모두 같은 수치해석·선형대수 위에 서 있고, 버그의 상당수는 알고리즘이 아니라 반올림 오차·조건수·불안정한 분해에서 나온다. 이 트랙은 부동소수점 오차 해석부터 LU/QR/SVD, 반복 해법, 최적화, 자동 미분까지 C/C++로 직접 구현하고 numpy/scipy를 기준 오라클로 대조해 '왜 이 방법이 안정한가'를 손으로 확인한다.",
+  "goals": [
+    "machine epsilon·ULP·조건수로 수치 오차를 정량화하고 cancellation을 수식 재구성으로 피한다",
+    "근 찾기·보간·수치 미분/적분을 구현하고 수렴 차수를 실측으로 확인한다",
+    "LU·Cholesky·QR·SVD·고유값 알고리즘을 구현하고 각 분해의 안정성과 용도를 구분한다",
+    "최소제곱·RLS·반복 해법(CG)·희소 직접법을 로봇/센서 문제에 적용한다",
+    "GD/Adam·L-BFGS·Gauss-Newton/LM·자동 미분으로 최적화 문제를 풀고 검증한다",
+    "칼만 필터·회전·고정소수점·혼합 정밀도에서 실제 임베디드 수치 안정성 문제를 다룬다"
+  ],
+  "prereq": [
+    "C",
+    "CPP",
+    "ARCH"
+  ],
+  "refs": [
+    {
+      "title": "Trefethen & Bau — Numerical Linear Algebra (SIAM, 1997)"
+    },
+    {
+      "title": "Golub & Van Loan — Matrix Computations (4th ed.)"
+    },
+    {
+      "title": "Higham — Accuracy and Stability of Numerical Algorithms (2nd ed., SIAM)"
+    },
+    {
+      "title": "Goldberg — What Every Computer Scientist Should Know About Floating-Point Arithmetic",
+      "url": "https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html"
+    },
+    {
+      "title": "Nocedal & Wright — Numerical Optimization (2nd ed.)"
+    },
+    {
+      "title": "Shewchuk — An Introduction to the Conjugate Gradient Method Without the Agonizing Pain",
+      "url": "https://www.cs.cmu.edu/~quake-papers/painless-conjugate-gradient.pdf"
+    },
+    {
+      "title": "LAPACK Users' Guide",
+      "url": "https://www.netlib.org/lapack/lug/"
+    },
+    {
+      "title": "NumPy Linear Algebra (numpy.linalg) Reference",
+      "url": "https://numpy.org/doc/stable/reference/routines.linalg.html"
+    },
+    {
+      "title": "Baydin et al. — Automatic Differentiation in Machine Learning: a Survey (JMLR 2018)",
+      "url": "https://www.jmlr.org/papers/v18/17-468.html"
+    },
+    {
+      "title": "Solà — Quaternion kinematics for the error-state Kalman filter",
+      "url": "https://arxiv.org/abs/1711.02508"
+    }
+  ],
+  "items": [
+    {
+      "id": "NUM-B01",
+      "level": "B",
+      "title": "부동소수점 오차 모델: Machine Epsilon과 ULP",
+      "goal": "반올림 오차를 ε·ULP 단위로 정량화하는 측정 도구를 만든다.",
+      "task": "float/double의 machine epsilon을 루프로 구하고 nextafter 기반 ULP 거리 함수(부호·±0·비정규수 처리)를 구현해, libm sinf/expf의 최대 ULP 오차를 long double(또는 Python mpmath) 오라클로 측정한다 (비트 분해는 see:ARCH-B03).",
+      "tags": [
+        "float",
+        "ulp",
+        "epsilon",
+        "see:ARCH"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B02",
+      "level": "B",
+      "title": "Catastrophic Cancellation과 수식 재구성",
+      "goal": "뺄셈에서 생기는 자릿수 손실을 알아보고 안정한 수식으로 바꾼다.",
+      "task": "근의 공식(b²≫4ac), 1−cos x, log(1+x)/exp(x)−1, 분산(naive one-pass vs two-pass vs Welford)을 naive/안정 버전으로 각각 구현하고, 입력 범위별 상대오차를 mpmath 오라클 기준으로 그려 잃어버린 유효 자릿수를 설명한다.",
+      "tags": [
+        "cancellation",
+        "welford",
+        "log1p",
+        "stability"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B03",
+      "level": "B",
+      "title": "합산 알고리즘: Naive·Pairwise·Kahan·Neumaier",
+      "goal": "합산 순서와 보정 기법이 누적 오차에 미치는 영향을 측정한다.",
+      "task": "1e7개 랜덤·악조건(큰 값과 작은 값 혼합) 수열의 합을 naive, pairwise, Kahan, Neumaier로 구현해 math.fsum 대비 오차와 속도를 비교하고, -ffast-math(재결합 허용)에서 Kahan 보정 항이 최적화로 사라지는 것을 어셈블리로 확인한다 (FMA·결정성 이슈는 see:PHYS-A04).",
+      "tags": [
+        "kahan",
+        "summation",
+        "fast-math",
+        "see:PHYS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B04",
+      "level": "B",
+      "title": "근 찾기: Bisection·Newton·Secant",
+      "goal": "근 찾기 알고리즘의 수렴 차수와 실패 모드, 안전한 종료 조건을 익힌다.",
+      "task": "세 방법과 bracket을 유지하는 safeguarded Newton(Newton 스텝이 구간을 벗어나면 bisection 폴백)을 구현해 반복별 오차로 수렴 차수(1, 2, 1.618)를 실측하고, 중근·순환·도함수 0 사례와 종료 조건(|f|, |Δx|, 최대 반복)을 테스트한다 (고정소수점 Newton 역수는 see:DSP-B12).",
+      "tags": [
+        "root-finding",
+        "newton",
+        "bisection",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B05",
+      "level": "B",
+      "title": "다항식 평가와 보간: Horner·Newton 차분·Runge 현상",
+      "goal": "다항식 보간의 구현법과 노드 선택이 오차에 미치는 영향을 이해한다.",
+      "task": "Horner 평가, Newton divided difference 보간, barycentric Lagrange 보간을 구현하고 등간격 vs Chebyshev 노드로 1/(1+25x²)를 보간해 차수별 최대 오차(Runge 현상)를 numpy.polynomial 결과와 비교한다 (minimax 근사는 see:DSP-M10).",
+      "tags": [
+        "interpolation",
+        "horner",
+        "chebyshev",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B06",
+      "level": "B",
+      "title": "3차 스플라인과 삼중대각 풀이 (Thomas)",
+      "goal": "O(n) 삼중대각 풀이로 매끄러운 보간 곡선을 만든다.",
+      "task": "Thomas 알고리즘으로 삼중대각 시스템을 O(n)에 풀어 natural/clamped cubic spline을 구현하고, 센서 보정 테이블·웨이포인트 보간에 적용해 scipy.interpolate.CubicSpline과 대조하며 Thomas가 피벗 없이 안정한 조건(대각 우세)을 확인한다 (선형 보간 LUT는 see:ALGO-B03).",
+      "tags": [
+        "spline",
+        "tridiagonal",
+        "thomas",
+        "see:ALGO"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B07",
+      "level": "B",
+      "title": "수치 미분: 스텝 크기 h의 절단·반올림 트레이드오프",
+      "goal": "유한차분 미분의 최적 스텝 크기를 이론과 실측으로 구한다.",
+      "task": "forward/central difference와 complex-step 미분을 구현해 h=1e-1..1e-16에서 오차를 log-log로 그리고, 최적 h ≈ √ε(forward), ∛ε(central) 이론치와 비교하며 complex-step이 뺄셈이 없어 기계 정밀도에 도달함을 보인다.",
+      "tags": [
+        "finite-difference",
+        "complex-step",
+        "derivative"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B08",
+      "level": "B",
+      "title": "수치 적분: Trapezoid·Simpson·Romberg·Gauss-Legendre",
+      "goal": "구적법의 수렴 차수와 함수 평가 비용을 비교한다.",
+      "task": "네 방법과 adaptive Simpson을 구현해 매끄러운/끝점 특이점이 있는 피적분 함수에서 함수 평가 횟수 대비 오차와 수렴 차수를 측정하고 scipy.integrate.quad와 비교한다 (ODE 적분기는 see:SIM-B06, PHYS-B01).",
+      "tags": [
+        "quadrature",
+        "simpson",
+        "gauss-legendre",
+        "see:SIM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B09",
+      "level": "B",
+      "title": "행렬 라이브러리 기초: 레이아웃·BLAS 레벨·노름",
+      "goal": "이후 항목에서 쓸 C 행렬 기반(stride, lda, BLAS 인터페이스)을 만든다.",
+      "task": "row/column-major와 leading dimension(lda)을 지원하는 C 행렬 타입에 BLAS 레벨 1/2/3 연산(axpy, dot, gemv, naive gemm)과 1/2/∞/Frobenius 노름을 구현해 numpy와 랜덤 대조 테스트하고, 레벨별 산술 강도(FLOP/byte)를 계산한다 (GEMM 블로킹 최적화는 see:EML-B02).",
+      "tags": [
+        "blas",
+        "matrix",
+        "norm",
+        "see:EML"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B10",
+      "level": "B",
+      "title": "가우스 소거와 부분 피벗 (Partial Pivoting)",
+      "goal": "피벗이 왜 필요한지 실패 사례로 확인하고 잔차와 오차를 구분한다.",
+      "task": "부분 피벗 가우스 소거로 Ax=b를 풀고, [[ε,1],[1,1]] 같은 행렬에서 피벗 없이 해가 무너지는 것을 재현하며, 성장 인자(growth factor)·잔차 ‖b−Ax‖·전진 오차를 numpy.linalg.solve 결과와 비교한다.",
+      "tags": [
+        "gaussian-elimination",
+        "pivoting",
+        "linear-system"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B11",
+      "level": "B",
+      "title": "LU 분해: PA=LU와 다중 우변 재사용",
+      "goal": "분해-대입 분리의 이점과 '역행렬을 만들지 말라'는 원칙을 실험으로 확인한다.",
+      "task": "in-place PA=LU(피벗 벡터 저장), 전진/후진 대입, 행렬식을 구현하고 우변 k개를 LU 1회로 푸는 비용을 측정하며, 역행렬을 구해 곱하는 방식보다 solve가 정확하고 빠름을 scipy.linalg.lu_factor/lu_solve와 대조해 보인다.",
+      "tags": [
+        "lu",
+        "factorization",
+        "determinant"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-B12",
+      "level": "B",
+      "title": "Cholesky 분해와 상관된 난수 생성",
+      "goal": "SPD 행렬 전용 분해를 구현하고 공분산 응용에 쓴다.",
+      "task": "LLᵀ와 LDLᵀ 분해를 구현해 SPD 판정(음/0 피벗 검출)과 해 풀이를 numpy.linalg.cholesky와 대조하고, 공분산 행렬로 상관 정규 난수를 생성해 표본 공분산이 목표값에 수렴함을 확인한다 (Monte Carlo 가격결정 응용은 see:QFIN).",
+      "tags": [
+        "cholesky",
+        "ldlt",
+        "covariance",
+        "see:QFIN"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M01",
+      "level": "M",
+      "title": "조건수와 오차 해석: Forward vs Backward Error",
+      "goal": "조건수로 해의 정확도 한계를 예측하고 backward stable의 의미를 이해한다.",
+      "task": "LU 기반 1-노름 조건수 추정기(Hager/Higham)를 구현해 numpy.linalg.cond와 비교하고, Hilbert·Vandermonde 행렬에서 b 섭동에 따른 해의 상대오차가 κ(A)·ε 한계를 따름과 '잔차가 작아도 해는 틀릴 수 있음'을 보인다.",
+      "tags": [
+        "condition-number",
+        "backward-error",
+        "hilbert"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M02",
+      "level": "M",
+      "title": "QR 1: Classical vs Modified Gram-Schmidt",
+      "goal": "Gram-Schmidt 변형별 직교성 손실을 조건수 함수로 측정한다.",
+      "task": "CGS, MGS, 재직교화 CGS2를 구현해 조건수 1e2..1e12 행렬에서 ‖QᵀQ−I‖를 측정하고, 직교성 손실이 κ², κ, ε 수준으로 각각 다르게 커지는 것을 로그 그래프로 확인한다.",
+      "tags": [
+        "qr",
+        "gram-schmidt",
+        "orthogonality"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M03",
+      "level": "M",
+      "title": "QR 2: Householder 반사와 Givens 회전",
+      "goal": "backward stable한 QR 구현과 행 추가 시 증분 갱신을 익힌다.",
+      "task": "Householder 벡터를 하삼각에 저장하는 Householder QR과 Givens 회전 QR을 구현해 numpy.linalg.qr과 대조하고(부호 정규화), 새 측정 행이 들어올 때 Givens로 R을 O(n²)에 갱신하는 스트리밍 QR 업데이트를 구현한다.",
+      "tags": [
+        "qr",
+        "householder",
+        "givens"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M04",
+      "level": "M",
+      "title": "선형 최소제곱: 정규방정식 vs QR vs SVD",
+      "goal": "최소제곱 풀이법별 정확도 차이와 정규방정식의 함정을 확인한다.",
+      "task": "다항식 피팅·센서 보정 문제를 정규방정식(Cholesky), Householder QR, SVD로 풀어 κ(AᵀA)=κ(A)²로 인한 정밀도 손실을 고차 다항식에서 재현하고, 가중 최소제곱(WLS)과 numpy.linalg.lstsq 결과를 비교한다 (응용은 see:RCTL-M11, SENS-M03).",
+      "tags": [
+        "least-squares",
+        "normal-equations",
+        "wls",
+        "see:RCTL",
+        "see:SENS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M05",
+      "level": "M",
+      "title": "재귀 최소제곱(RLS)과 망각 인자",
+      "goal": "온라인 파라미터 추정기를 구현하고 float32 수치 붕괴를 다룬다.",
+      "task": "망각 인자 λ를 갖는 RLS를 C로 구현해 시변 파라미터(예: 배터리 내부저항 드리프트)를 추적하고 배치 LS와 결과를 대조하며, float32 장시간 실행에서 P 행렬이 비대칭·비양정치로 무너지는 현상과 대칭화·공분산 리셋 대책을 시험한다 (Kalman과의 관계는 see:RCTL-M04).",
+      "tags": [
+        "rls",
+        "online-estimation",
+        "forgetting-factor",
+        "see:RCTL"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M06",
+      "level": "M",
+      "title": "고유값 1: Power·Inverse·Rayleigh Quotient Iteration",
+      "goal": "벡터 반복법의 수렴 속도를 고유값 간격으로 설명한다.",
+      "task": "power iteration, shift-inverse iteration(LU 재사용), Rayleigh quotient iteration을 구현해 |λ2/λ1| 비율에 따른 수렴 속도와 RQI의 3차 수렴을 측정하고, PageRank(마르코프 전이행렬) 예제로 numpy.linalg.eig와 대조한다.",
+      "tags": [
+        "eigenvalue",
+        "power-iteration",
+        "pagerank"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M07",
+      "level": "M",
+      "title": "고유값 2: Jacobi 회전과 대칭 QR 알고리즘",
+      "goal": "실제 라이브러리가 쓰는 대칭 고유값 알고리즘을 구현한다.",
+      "task": "대칭 행렬에 대해 cyclic Jacobi 고유값 법과, Householder 삼중대각화 + Wilkinson shift 암시적 QR 알고리즘을 구현해 numpy.linalg.eigh와 고유값·고유벡터(부호 정규화)를 대조하고 크기별 반복 횟수·시간을 비교한다.",
+      "tags": [
+        "eigenvalue",
+        "jacobi",
+        "qr-algorithm"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M08",
+      "level": "M",
+      "title": "SVD와 PCA, 저랭크 근사",
+      "goal": "SVD를 직접 구현하고 PCA·의사역행렬·저랭크 근사에 쓴다.",
+      "task": "one-sided Jacobi SVD를 구현해 numpy.linalg.svd와 대조하고, AᵀA 고유분해로 SVD를 구하면 작은 특이값이 사라지는 함정을 보이며, 센서 로그 PCA와 Eckart-Young 저랭크 근사·truncated pseudo-inverse를 적용한다 (SVD 응용은 see:CV-M07, AUTON-M03).",
+      "tags": [
+        "svd",
+        "pca",
+        "pseudo-inverse",
+        "see:CV",
+        "see:AUTON"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M09",
+      "level": "M",
+      "title": "반복 해법 1: Jacobi·Gauss-Seidel·SOR",
+      "goal": "고전 반복 해법의 수렴을 스펙트럼 반경으로 예측한다.",
+      "task": "2D 포아송(정상 상태 열전도 판) 5점 스텐실 시스템을 Jacobi, Gauss-Seidel, SOR(ω 스윕)로 풀어 반복 횟수를 반복 행렬 스펙트럼 반경 이론치·최적 ω와 비교하고, 대각 우세가 깨진 행렬에서 발산을 재현한다.",
+      "tags": [
+        "iterative-solver",
+        "gauss-seidel",
+        "sor",
+        "poisson"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M10",
+      "level": "M",
+      "title": "반복 해법 2: Conjugate Gradient와 전처리",
+      "goal": "대형 희소 SPD 시스템을 CG/PCG로 풀고 전처리 효과를 측정한다.",
+      "task": "CSR 기반 CG와 Jacobi/불완전 Cholesky(IC0) 전처리 PCG를 구현해 M09 포아송 문제에서 격자 크기별 반복 횟수(√κ 스케일링)를 측정하고 scipy.sparse.linalg.cg와 대조한다 (CSR/SpMV 기초는 see:DS-M12).",
+      "tags": [
+        "conjugate-gradient",
+        "preconditioner",
+        "sparse",
+        "see:DS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M11",
+      "level": "M",
+      "title": "희소 직접법: Fill-in과 재정렬 (RCM)",
+      "goal": "희소 분해에서 재정렬이 fill-in과 비용을 결정함을 확인한다.",
+      "task": "대역(banded)/skyline 저장 Cholesky를 구현해 격자·그래프 행렬의 fill-in을 세고, 직접 구현한 Reverse Cuthill-McKee 재정렬 전후의 대역폭·fill-in·시간을 scipy.sparse.csgraph.reverse_cuthill_mckee 결과와 비교한다 (포즈 그래프 희소 풀이 응용은 see:AUTON-A01).",
+      "tags": [
+        "sparse",
+        "fill-in",
+        "rcm",
+        "see:AUTON"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M12",
+      "level": "M",
+      "title": "연립 비선형 방정식: 다변수 Newton과 라인 서치",
+      "goal": "Jacobian 기반 Newton 법을 전역 수렴하도록 감쇠시킨다.",
+      "task": "해석/유한차분 Jacobian을 쓰는 다변수 Newton과 backtracking(Armijo) 감쇠를 구현해 UWB/GPS 거리 측정으로 위치를 구하는 삼변측량(trilateration)과 다이오드 회로 방정식에 적용하고, 초기값별 수렴 영역과 scipy.optimize.root 결과를 비교한다.",
+      "tags": [
+        "newton",
+        "jacobian",
+        "line-search",
+        "trilateration"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-M13",
+      "level": "M",
+      "title": "1차 최적화: GD·Momentum·Nesterov·Adam",
+      "goal": "경사 기반 최적화기의 수렴 속도를 조건수와 연결한다.",
+      "task": "네 가지 최적화기를 C로 구현해 조건수가 다른 2차 함수와 Rosenbrock에서 수렴 궤적·반복 수를 비교하고, 학습률 상한 2/L과 GD 수렴률 (κ−1)/(κ+1), momentum의 (√κ−1)/(√κ+1) 개선을 실측으로 확인한다.",
+      "tags": [
+        "optimization",
+        "gradient-descent",
+        "adam",
+        "momentum"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-A01",
+      "level": "A",
+      "title": "비선형 최소제곱: Gauss-Newton과 Levenberg-Marquardt",
+      "goal": "곡선·기하 피팅에 쓰는 GN/LM 솔버를 직접 구현한다.",
+      "task": "GN과 LM(λ 적응 갱신, 스텝 승인/거절)을 구현해 배터리 RC 모델 지수 곡선 피팅과 원·구 기하 거리 피팅(SENS-M03 대수적 해를 초기값으로)에 적용하고, scipy.optimize.least_squares와 해·반복 수·초기값 민감도를 비교한다 (응용은 see:CV-A01, AUTON-A01).",
+      "tags": [
+        "gauss-newton",
+        "levenberg-marquardt",
+        "curve-fitting",
+        "see:CV",
+        "see:AUTON",
+        "see:SENS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-A02",
+      "level": "A",
+      "title": "준뉴턴: BFGS와 L-BFGS",
+      "goal": "Hessian 없이 2차 수렴에 가까운 최적화기를 구현한다.",
+      "task": "강한 Wolfe 조건 라인 서치와 BFGS, two-loop recursion L-BFGS(m=3..20)를 구현해 고차원 Rosenbrock·로지스틱 회귀에서 반복 수·메모리를 GD/Newton과 비교하고 scipy.optimize.minimize(L-BFGS-B)와 대조한다.",
+      "tags": [
+        "bfgs",
+        "l-bfgs",
+        "line-search",
+        "optimization"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-A03",
+      "level": "A",
+      "title": "자동 미분 1: Forward Mode (Dual Number)",
+      "goal": "연산자 오버로딩으로 정확한 Jacobian을 자동 생성한다.",
+      "task": "C++ 템플릿 dual number 타입(사칙연산 + sin/exp/sqrt/atan2 규칙)을 구현해 EKF 운동·관측 모델의 Jacobian을 자동으로 구하고, 해석 미분·유한차분·complex-step(B07) 결과와 정확도·비용을 비교한다 (EKF는 see:RCTL-M05).",
+      "tags": [
+        "autodiff",
+        "dual-number",
+        "jacobian",
+        "see:RCTL"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-A04",
+      "level": "A",
+      "title": "자동 미분 2: Reverse Mode 테이프",
+      "goal": "역전파의 원리를 테이프 기반 reverse-mode AD로 구현한다.",
+      "task": "연산 그래프를 테이프에 기록하고 위상 역순으로 adjoint를 전파하는 reverse-mode AD(micrograd 스타일)를 C++로 구현해 작은 MLP/로지스틱 회귀를 M13 Adam으로 학습시키고, 유한차분 gradient check와 입력·출력 차원에 따른 forward vs reverse 비용을 측정한다.",
+      "tags": [
+        "autodiff",
+        "backprop",
+        "reverse-mode"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-A05",
+      "level": "A",
+      "title": "회전의 수치: 정규화 드리프트와 SO(3) Exp/Log",
+      "goal": "회전 표현의 수치적 함정(드리프트, 특이 근방)을 안정하게 처리한다.",
+      "task": "자이로 적분 시 쿼터니언/회전행렬의 정규성 드리프트를 측정해 재정규화(normalize vs SVD 직교 투영)를 비교하고, SO(3) exp/log map을 θ→0·π 근처 Taylor 분기로 안정하게 구현하며 쿼터니언 평균(Markley 고유벡터 법)을 scipy.spatial.transform과 대조한다 (기초 연산은 see:GFX-B04, PHYS-B08).",
+      "tags": [
+        "quaternion",
+        "so3",
+        "rotation",
+        "see:GFX",
+        "see:PHYS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-A06",
+      "level": "A",
+      "title": "칼만 필터 수치 안정성: Joseph Form과 Square-Root",
+      "goal": "공분산 갱신식 선택이 장시간 float32 필터 안정성을 좌우함을 보인다.",
+      "task": "표준 공분산 갱신, Joseph form, UD 분해(Bierman/Thornton) 또는 Cholesky square-root 갱신을 같은 필터에 구현해 float32 장시간 실행·매우 정확한 센서 조건에서 P의 대칭성·양정치성 붕괴를 재현하고 double 기준 대비 오차를 비교한다 (KF/EKF 기초는 see:RCTL-M04, AUTON-M01).",
+      "tags": [
+        "kalman",
+        "joseph-form",
+        "square-root-filter",
+        "see:RCTL",
+        "see:AUTON"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-A07",
+      "level": "A",
+      "title": "블록 LU와 LAPACK 호출 (Level-3 BLAS)",
+      "goal": "분해를 GEMM 위주로 재구성하는 이유를 성능으로 확인하고 LAPACK을 올바르게 호출한다.",
+      "task": "GEMM 업데이트를 쓰는 right-looking blocked LU를 구현해 B11 비블록 LU 대비 GFLOPS를 블록 크기별로 측정하고, Accelerate의 LAPACK dgetrf/dgesv·dpotrf를 column-major·lda·ipiv(1-based)·info 처리와 함께 호출해 결과와 성능을 대조한다 (GEMM 커널은 see:EML-B02, 루프라인은 see:AIPERF).",
+      "tags": [
+        "blocked-lu",
+        "lapack",
+        "blas3",
+        "see:EML",
+        "see:AIPERF"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-A08",
+      "level": "A",
+      "title": "혼합 정밀도와 반복 정제 (Iterative Refinement)",
+      "goal": "저정밀 분해 + 고정밀 잔차로 고정밀 해를 얻는 원리를 검증한다.",
+      "task": "float32(및 bf16 반올림 에뮬레이션)로 LU를 계산하고 double 잔차로 반복 정제해 double 수준 정확도에 도달하는 조건(κ·ε_low < 1)과 발산 경계를 실험으로 확인하고, GPU 텐서코어 HPL-MxP가 이 원리를 쓰는 이유를 FLOP·대역폭 관점에서 정리한다 (see:GPGPU).",
+      "tags": [
+        "mixed-precision",
+        "iterative-refinement",
+        "bf16",
+        "see:GPGPU"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "NUM-A09",
+      "level": "A",
+      "title": "고정소수점 vs 부동소수점: 임베디드 선형대수 선택",
+      "goal": "FPU 유무·동적 범위·오차 예산으로 수치 표현을 결정하는 기준을 세운다.",
+      "task": "3×3 행렬 곱·역행렬과 2상태 칼만 갱신을 Q31(64비트 누산, 블록 스케일링)과 float32로 각각 구현해 동적 범위·오버플로·누적 오차를 double 오라클과 비교하고, 명령 수 기반 Cortex-M0(FPU 없음) vs M4F 사이클 추정과 함께 선택 기준을 설계 메모로 정리한다 (Q-format 기초는 see:DSP-B01).",
+      "tags": [
+        "fixed-point",
+        "q31",
+        "float32",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

@@ -1,0 +1,620 @@
+{
+  "id": "COMM",
+  "intro": "펌웨어 엔지니어 업무의 절반은 칩과 칩, 보드와 보드를 잇는 통신이다: UART·SPI·I2C로 센서를 읽고, CAN으로 차량·로봇 노드를 잇고, 바이트 스트림 위에 프레이밍·CRC·재전송을 얹는다. 이 트랙은 버스를 비트 수준까지 소프트웨어로 시뮬레이션해 프로토콜 동작과 오류 상황(클럭 스트레칭, 버스 hang, 중재 패배, bus-off)을 맥에서 재현하고, 견고한 파서·드라이버 계층을 직접 설계한다.",
+  "goals": [
+    "UART/SPI/I2C/CAN의 전기적·프레임 수준 동작을 비트 단위 시뮬레이터로 설명·구현한다",
+    "I2C 클럭 스트레칭·버스 복구, CAN 중재·에러 상태 등 실제 현장 고장 모드를 재현하고 처리한다",
+    "CRC·SLIP·COBS·길이 기반 프레이밍과 재동기화 가능한 바이트 스트림 파서를 구현한다",
+    "HAL/버스/디바이스 드라이버 계층과 DMA 기반 비동기 전송, 타임아웃·재시도 정책을 설계한다",
+    "USB·Ethernet/MDIO·MIPI CSI-2의 기본 패킷 구조를 파싱하고 디버깅할 수 있다"
+  ],
+  "prereq": [
+    "C",
+    "DS",
+    "BM"
+  ],
+  "refs": [
+    {
+      "title": "NXP UM10204 I2C-bus specification and user manual",
+      "url": "https://www.nxp.com/docs/en/user-guide/UM10204.pdf"
+    },
+    {
+      "title": "Bosch CAN Specification 2.0 / ISO 11898-1 (CAN FD)"
+    },
+    {
+      "title": "Ross Williams, A Painless Guide to CRC Error Detection Algorithms"
+    },
+    {
+      "title": "CRC RevEng catalogue of parametrised CRC algorithms",
+      "url": "https://reveng.sourceforge.io/crc-catalogue/"
+    },
+    {
+      "title": "RFC 1055 — SLIP",
+      "url": "https://www.rfc-editor.org/rfc/rfc1055"
+    },
+    {
+      "title": "Cheshire & Baker, Consistent Overhead Byte Stuffing (IEEE/ACM ToN 1999)"
+    },
+    {
+      "title": "USB in a NutShell (Beyond Logic)",
+      "url": "https://www.beyondlogic.org/usbnutshell/usb1.shtml"
+    },
+    {
+      "title": "Linux SocketCAN documentation",
+      "url": "https://docs.kernel.org/networking/can.html"
+    }
+  ],
+  "items": [
+    {
+      "id": "COMM-B01",
+      "level": "B",
+      "title": "UART 프레임: start/data/parity/stop 비트 직렬화",
+      "goal": "UART 한 문자가 선로 위에서 어떤 비트열이 되는지 정확히 안다(LSB first, idle high)",
+      "task": "바이트+설정(8N1/7E1/8O2)을 비트 타임라인 배열로 바꾸는 송신기와 역변환 수신기를 작성하고, 패리티 계산과 여러 설정 조합을 왕복 테스트한다.",
+      "tags": [
+        "uart",
+        "framing",
+        "parity"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B02",
+      "level": "B",
+      "title": "UART 수신기 모델: 16x 오버샘플링과 에러 검출",
+      "goal": "start 비트 중앙 샘플링·다수결과 framing/parity/overrun/noise 에러가 생기는 원리를 구현한다",
+      "task": "16배 샘플 스트림을 입력받는 수신기 상태 머신을 구현하고, 글리치·stop 비트 0(framing error)·break 조건·읽기 지연으로 인한 overrun을 주입해 각 에러 플래그를 검증한다.",
+      "tags": [
+        "uart",
+        "oversampling",
+        "error-detection"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B03",
+      "level": "B",
+      "title": "Baud rate 오차 계산과 허용 한계",
+      "goal": "분주 반올림 오차가 송수신 클럭 차이로 누적돼 프레임이 깨지는 한계를 정량화한다",
+      "task": "클럭·목표 baud로 실제 baud와 % 오차를 계산하는 함수를 만들고, 앞의 수신기 모델에 클럭 편차를 넣어 몇 % 부터 마지막 비트 샘플링이 실패하는지 실험해 이론(약 ±2~5%)과 비교한다.",
+      "tags": [
+        "uart",
+        "baud",
+        "clock-tolerance"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B04",
+      "level": "B",
+      "title": "SPI 4가지 모드(CPOL/CPHA): 비트뱅 마스터+슬레이브 시뮬레이터",
+      "goal": "클럭 극성·위상에 따라 데이터를 언제 내보내고 언제 샘플하는지 정확히 안다",
+      "task": "SCLK/MOSI/MISO/CS 신호를 시간 스텝으로 시뮬레이션하는 비트뱅 마스터와 슬레이브 모델을 구현해 4개 모드 전이중 교환을 테스트하고, 모드 불일치 시 1비트 밀림을 재현한다.",
+      "tags": [
+        "spi",
+        "cpol-cpha",
+        "bit-bang"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B05",
+      "level": "B",
+      "title": "SPI 디바이스 접근: 명령/주소 포맷, burst, CS 타이밍",
+      "goal": "레지스터형 SPI 디바이스(IMU 등)의 읽기 비트·자동 증가·더미 바이트 규칙을 다룬다",
+      "task": "R/W 비트+주소+데이터 프로토콜을 가진 mock IMU 슬레이브를 만들고 단일/burst 읽기·쓰기 드라이버를 작성해, CS를 트랜잭션 중간에 해제하는 버그를 재현·수정한다.",
+      "tags": [
+        "spi",
+        "device-driver",
+        "burst"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B06",
+      "level": "B",
+      "title": "I2C 비트 수준: START/STOP, 주소+R/W, ACK/NACK",
+      "goal": "오픈드레인 wired-AND 버스에서 I2C 트랜잭션 구성 요소를 정확히 구현한다",
+      "task": "SDA/SCL을 여러 노드의 AND로 계산하는 버스 시뮬레이터와 비트뱅 마스터·슬레이브를 만들고, 주소 NACK·데이터 NACK·SCL high 중 SDA 변화(START/STOP) 규칙을 테스트한다.",
+      "tags": [
+        "i2c",
+        "open-drain",
+        "bit-bang"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B07",
+      "level": "B",
+      "title": "I2C 레지스터 읽기: repeated START와 센서 드라이버",
+      "goal": "write-주소 후 repeated START로 읽는 표준 레지스터 접근 시퀀스를 구현한다",
+      "task": "mock 온도 센서 슬레이브(레지스터 맵 포함)를 버스 시뮬레이터에 붙이고 i2c_write_read() 기반 드라이버로 ID 확인·설정·연속 읽기를 구현, STOP 후 START와 repeated START의 차이를 로그로 보인다.",
+      "tags": [
+        "i2c",
+        "repeated-start",
+        "sensor-driver"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B08",
+      "level": "B",
+      "title": "오류 검출 능력 실험: 체크섬 vs CRC",
+      "goal": "체크섬·Fletcher·CRC가 어떤 오류를 놓치는지 실험으로 비교해 프로토콜에 맞게 고른다",
+      "task": "랜덤 1~4비트 오류와 길이 L 버스트 오류를 수백만 회 주입해 합 체크섬, Fletcher-16, CRC-8, CRC-16, CRC-32의 미검출률을 측정하고 해밍 거리 이론과 비교한다(알고리즘 구현은 see:ALGO-B14/M01).",
+      "tags": [
+        "crc",
+        "checksum",
+        "error-detection",
+        "see:ALGO"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B09",
+      "level": "B",
+      "title": "하드웨어 CRC 유닛과 소프트웨어 CRC 맞추기",
+      "goal": "MCU CRC 주변장치의 reflect/init/xorout/워드 폭 설정을 소프트웨어 결과와 일치시킨다",
+      "task": "STM32 CRC 유닛 동작(32비트 워드 입력, 초기값, 입력/출력 반사 옵션)을 흉내낸 mock과 표준 CRC-32 소프트웨어 구현이 같은 값을 내도록 설정·바이트 순서를 찾는 테스트를 작성한다(테이블/slicing 가속은 see:ALGO-M02).",
+      "tags": [
+        "crc",
+        "peripheral",
+        "see:ALGO"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B10",
+      "level": "B",
+      "title": "길이 prefix + 체크섬 프레임 인코더/파서",
+      "goal": "바이트 스트림에서 SOF·길이·페이로드·CRC 프레임을 만들고 파싱한다",
+      "task": "[SOF][LEN][TYPE][PAYLOAD][CRC16] 포맷의 인코더와 바이트 단위 파서 상태 머신을 작성하고, 잘린 프레임·CRC 오류·LEN 과대값·스트림 중간 시작을 테스트한다.",
+      "tags": [
+        "framing",
+        "parser",
+        "state-machine"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B11",
+      "level": "B",
+      "title": "SLIP 인코더/디코더 (RFC 1055)",
+      "goal": "바이트 스터핑 기반 프레이밍(END/ESC)과 최악 오버헤드를 이해한다",
+      "task": "SLIP encode/decode를 구현하고 END·ESC 바이트가 섞인 페이로드, 연속 END, 잘못된 이스케이프 시퀀스를 테스트하며 최악 2배 오버헤드를 측정한다.",
+      "tags": [
+        "slip",
+        "byte-stuffing",
+        "framing"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B12",
+      "level": "B",
+      "title": "COBS 인코더/디코더 + 랜덤 왕복 테스트",
+      "goal": "0x00을 프레임 구분자로 쓰는 COBS의 고정 오버헤드(254바이트당 1) 원리를 구현한다",
+      "task": "COBS encode/decode를 구현해 길이 0~1000 랜덤 버퍼 왕복 테스트, 254/255바이트 경계 케이스, 손상 입력 거부를 검증하고 SLIP과 오버헤드를 비교한다.",
+      "tags": [
+        "cobs",
+        "framing",
+        "property-test"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B13",
+      "level": "B",
+      "title": "Modbus RTU 프레임: 함수 코드, CRC-16, 3.5문자 침묵",
+      "goal": "산업 현장 표준 시리얼 프로토콜의 프레임 경계(시간 기반)와 요청/응답 구조를 구현한다(바이트 직렬화 헬퍼는 see:C)",
+      "task": "타임스탬프가 붙은 바이트 스트림에서 3.5문자 침묵으로 프레임을 자르고 CRC-16/MODBUS를 검증하는 슬레이브를 구현해 Read Holding Registers(0x03)/Write Single Register(0x06)와 예외 응답을 테스트한다.",
+      "tags": [
+        "modbus",
+        "rs485",
+        "framing",
+        "see:C"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-B14",
+      "level": "B",
+      "title": "UART 커맨드 라인/AT 커맨드 파서",
+      "goal": "디버그 콘솔·모뎀 AT 명령처럼 줄 단위 텍스트 프로토콜을 안전하게 파싱한다",
+      "task": "백스페이스·CR/LF 혼용·최대 길이 초과를 처리하는 라인 에디터와 명령 테이블 디스패처(인자 토큰화, 숫자 범위 검사)를 구현하고 악성 입력 테스트를 작성한다.",
+      "tags": [
+        "uart",
+        "cli",
+        "parser"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M01",
+      "level": "M",
+      "title": "I2C 클럭 스트레칭 지원 마스터",
+      "goal": "슬레이브가 SCL을 low로 잡는 클럭 스트레칭을 마스터가 감지·대기·타임아웃 처리한다",
+      "task": "버스 시뮬레이터의 슬레이브가 ACK 후 SCL을 N스텝 붙잡게 만들고, SCL을 놓은 뒤 실제 high인지 읽어 확인하는 마스터와 스트레칭 최대 시간 초과 시 에러 반환을 구현·테스트한다.",
+      "tags": [
+        "i2c",
+        "clock-stretching",
+        "timeout"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M02",
+      "level": "M",
+      "title": "I2C 멀티마스터 중재 (arbitration lost)",
+      "goal": "두 마스터가 동시에 시작할 때 SDA wired-AND로 중재가 결정되는 과정을 재현한다",
+      "task": "두 마스터가 같은 시점에 다른 주소로 START하도록 시뮬레이션해 1을 보냈는데 0을 읽은 쪽이 물러나는지, 패배 마스터의 재시도 로직이 올바른지 검증한다.",
+      "tags": [
+        "i2c",
+        "arbitration",
+        "multi-master"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M03",
+      "level": "M",
+      "title": "I2C 버스 복구: SDA stuck-low에서 9클럭 + STOP",
+      "goal": "MCU 리셋 중 슬레이브가 SDA를 잡고 있는 버스 hang을 진단·복구한다",
+      "task": "읽기 도중 마스터가 리셋된 상황(슬레이브가 데이터 0 비트 출력 중)을 시뮬레이션하고, SCL 최대 9펄스 토글→SDA 해제 확인→STOP 생성 복구 루틴을 구현해 hang이 풀림을 테스트한다.",
+      "tags": [
+        "i2c",
+        "bus-recovery",
+        "fault-handling"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M04",
+      "level": "M",
+      "title": "CAN 프레임 구조: 비트 스터핑과 CRC-15",
+      "goal": "표준/확장 ID 데이터 프레임의 필드 배치와 스터핑 규칙을 비트 수준으로 구현한다",
+      "task": "ID·DLC·데이터로 SOF~EOF 비트열을 생성(CRC-15 포함)하고 5연속 동일 비트 후 스터프 비트를 삽입·제거하는 인코더/디코더를 작성해 알려진 프레임 비트열과 대조한다.",
+      "tags": [
+        "can",
+        "bit-stuffing",
+        "crc15"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M05",
+      "level": "M",
+      "title": "CAN 중재 시뮬레이션: 낮은 ID가 이기는 이유",
+      "goal": "dominant/recessive 비트의 wired-AND로 비파괴 중재가 일어나는 과정을 재현한다",
+      "task": "여러 노드가 동시에 송신을 시작하는 버스 시뮬레이터를 만들어 중재 패배 노드가 수신 모드로 전환·재시도하는 것을 보이고, 표준 vs 확장 ID(SRR/IDE) 경쟁 시 결과를 검증한다.",
+      "tags": [
+        "can",
+        "arbitration",
+        "simulation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M06",
+      "level": "M",
+      "title": "CAN 비트 타이밍 계산기: TQ, 세그먼트, 샘플 포인트",
+      "goal": "BRP·TSEG1·TSEG2·SJW로 비트레이트와 샘플 포인트를 설정하는 법을 익힌다",
+      "task": "CAN 클럭·목표 비트레이트·목표 샘플 포인트(예: 87.5%)로 가능한 BRP/TSEG 조합을 열거하고 오차 최소 설정을 고르는 계산기를 만들어 500k/1M 표준 설정과 비교한다.",
+      "tags": [
+        "can",
+        "bit-timing",
+        "sample-point"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M07",
+      "level": "M",
+      "title": "CAN 에러 처리: TEC/REC와 error-passive·bus-off",
+      "goal": "CAN 에러 카운터 규칙과 노드 상태 전이, bus-off 복구 절차를 구현한다",
+      "task": "에러 이벤트(송신 에러, 수신 에러, 성공 송신)에 따른 TEC/REC 증감과 error-active→passive→bus-off→(128×11 recessive) 복구 상태 머신을 구현하고 시나리오 테스트를 작성한다.",
+      "tags": [
+        "can",
+        "error-handling",
+        "fault-confinement"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M08",
+      "level": "M",
+      "title": "CAN FD: BRS, DLC→64바이트 매핑, 데이터 위상 비트레이트",
+      "goal": "Classic CAN과 CAN FD의 프레임·타이밍 차이를 이해하고 처리량을 계산한다",
+      "task": "DLC↔길이(0~8,12,16,20,24,32,48,64) 변환, FD 플래그(FDF/BRS/ESI) 처리, 중재/데이터 위상 비트레이트별 프레임 전송 시간과 버스 효율 계산기를 작성해 Classic CAN과 비교한다.",
+      "tags": [
+        "can-fd",
+        "throughput",
+        "dlc"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M09",
+      "level": "M",
+      "title": "SocketCAN 실습: vcan, candump, C 소켓 프로그램",
+      "goal": "리눅스 CAN 스택의 표준 인터페이스로 송수신·필터를 다룬다",
+      "task": "vcan0을 만들고 C로 raw CAN 소켓 송신/수신 프로그램과 ID 필터(CAN_RAW_FILTER)를 작성해 candump/cansend로 검증하고, CAN FD 소켓 옵션도 시험한다.",
+      "tags": [
+        "can",
+        "socketcan",
+        "linux"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 등 리눅스(vcan 커널 모듈, can-utils 설치)"
+    },
+    {
+      "id": "COMM-M10",
+      "level": "M",
+      "title": "견고한 패킷 파서: 재동기화·타임아웃·통계",
+      "goal": "노이즈·바이트 손실이 있는 실제 링크에서 다음 프레임으로 빠르게 재동기화하는 파서를 만든다",
+      "task": "MAVLink/UBX 유사 포맷 파서를 바이트 단위 상태 머신으로 구현하고, 프레임 간 바이트 타임아웃, 잘못된 SOF 후 버퍼 내 재검색, 에러 종류별 카운터를 추가해 랜덤 손상 스트림으로 복원율을 측정한다.",
+      "tags": [
+        "parser",
+        "resync",
+        "robustness"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M11",
+      "level": "M",
+      "title": "DMA 기반 UART 수신: circular DMA + idle line 감지",
+      "goal": "가변 길이 프레임을 바이트 인터럽트 없이 받는 DMA+IDLE 패턴과 경계 처리를 구현한다",
+      "task": "DMA circular 버퍼 모델(NDTR 감소)과 IDLE/HT/TC 이벤트를 시뮬레이션해, 마지막 처리 위치부터 현재 쓰기 위치까지를 파서로 넘기는 로직(랩어라운드 포함)을 구현·테스트한다.",
+      "tags": [
+        "dma",
+        "uart",
+        "idle-line",
+        "see:BM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M12",
+      "level": "M",
+      "title": "드라이버 계층화: 버스 추상화로 I2C/SPI 겸용 센서 드라이버",
+      "goal": "HAL·버스 드라이버·디바이스 드라이버·애플리케이션 API의 책임을 분리한다",
+      "task": "read_regs/write_regs 함수 포인터 기반 bus_ops 인터페이스를 정의해 같은 IMU 드라이버가 I2C와 SPI mock 버스 양쪽에서 동작하게 만들고, 계층별 에러 코드 변환 규칙을 문서화한다.",
+      "tags": [
+        "driver-layering",
+        "abstraction",
+        "api-design"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M13",
+      "level": "M",
+      "title": "공유 버스 트랜잭션 큐: 비동기 요청과 완료 콜백",
+      "goal": "한 SPI 버스를 여러 디바이스·컨텍스트가 공유할 때 직렬화와 우선순위를 설계한다",
+      "task": "트랜잭션 디스크립터(CS, tx/rx 버퍼, 콜백) 큐와 완료 인터럽트 시뮬레이션으로 다음 트랜잭션을 자동 시작하는 비동기 SPI 드라이버를 구현하고, 큐 포화·취소·타임아웃을 테스트한다.",
+      "tags": [
+        "spi",
+        "async",
+        "transaction-queue"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M14",
+      "level": "M",
+      "title": "재시도·타임아웃·백오프: stop-and-wait ARQ",
+      "goal": "손실 링크에서 ACK·시퀀스 번호·재전송으로 신뢰성을 만들고 에러를 분류한다",
+      "task": "패킷 손실·중복·지연을 주입하는 링크 시뮬레이터 위에 시퀀스 번호+ACK+타임아웃 재전송 프로토콜을 구현하고, 중복 수신 제거와 최대 재시도 후 실패 보고를 검증한다.",
+      "tags": [
+        "arq",
+        "retry",
+        "timeout",
+        "reliability"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-M15",
+      "level": "M",
+      "title": "USB 기초: 디스크립터 파싱과 enumeration 흐름",
+      "goal": "USB 디바이스/구성/인터페이스/엔드포인트 디스크립터 구조와 열거 과정을 이해한다",
+      "task": "실제 장치 디스크립터 바이트 덤프(예시 제공 또는 system_profiler/lsusb -v에서 확보)를 파싱해 사람이 읽을 수 있게 출력하는 툴을 작성하고, 엔드포인트 타입(control/bulk/interrupt/iso)별 용도를 정리한다.",
+      "tags": [
+        "usb",
+        "descriptors",
+        "enumeration"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-A01",
+      "level": "A",
+      "title": "USB 컨트롤 전송 상태 머신 + CDC-ACM 클래스 요청",
+      "goal": "SETUP/DATA/STATUS 단계를 처리하는 디바이스 측 EP0 로직을 구현한다",
+      "task": "호스트 요청 시퀀스(GET_DESCRIPTOR, SET_ADDRESS, SET_CONFIGURATION, SET_LINE_CODING)를 주입하는 시뮬레이터로 EP0 상태 머신과 표준·CDC 요청 핸들러를 구현하고, wLength보다 짧은 응답·ZLP 처리를 테스트한다.",
+      "tags": [
+        "usb",
+        "control-transfer",
+        "cdc-acm"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-A02",
+      "level": "A",
+      "title": "슬라이딩 윈도 신뢰 전송: Go-Back-N vs Selective Repeat",
+      "goal": "고지연·손실 링크(무선 텔레메트리 등)에서 처리량을 위한 윈도 프로토콜을 구현·비교한다",
+      "task": "손실률·RTT를 조절 가능한 링크 시뮬레이터에서 GBN과 SR을 구현하고, 윈도 크기·손실률별 처리량 곡선을 측정해 시퀀스 번호 공간 요구조건(SR: 2W)을 검증한다.",
+      "tags": [
+        "sliding-window",
+        "arq",
+        "throughput"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-A03",
+      "level": "A",
+      "title": "Ethernet PHY와 MDIO: Clause 22 레지스터와 링크 상태",
+      "goal": "MAC-PHY 관리 인터페이스로 링크·속도·오토네고 상태를 읽고 PHY 초기화를 수행한다",
+      "task": "MDIO 프레임(ST/OP/PHYAD/REGAD/TA) 비트뱅과 mock PHY(BMCR/BMSR/PHYID/ANAR/ANLPAR)를 구현하고, 소프트 리셋→오토네고 시작→링크업 폴링→협상 결과 해석 드라이버를 테스트한다.",
+      "tags": [
+        "ethernet",
+        "mdio",
+        "phy"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-A04",
+      "level": "A",
+      "title": "Ethernet/IPv4/UDP 프레임 파서와 체크섬",
+      "goal": "네트워크 스택 하단(L2~L4) 헤더 구조와 체크섬 계산을 직접 다룬다",
+      "task": "pcap 파일을 읽어 Ethernet(VLAN 태그 포함)→IPv4(헤더 체크섬 검증)→UDP(의사 헤더 체크섬)까지 파싱하는 C 툴을 작성하고 Wireshark 출력과 대조한다.",
+      "tags": [
+        "ethernet",
+        "ipv4",
+        "udp",
+        "checksum",
+        "pcap"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-A05",
+      "level": "A",
+      "title": "I3C 기초: 동적 주소 할당과 In-Band Interrupt",
+      "goal": "I2C 후속 규격 I3C의 동적 주소 할당과 IBI 흐름을 이해한다",
+      "task": "I3C 버스 시뮬레이터에서 ENTDAA로 48비트 Provisioned ID 기반 동적 주소 할당과 IBI 중재를 구현하고, 레거시 I2C 디바이스가 섞인 버스에서 주소 충돌 없이 동작함을 테스트한다(MIPI CSI-2는 see:CAM-B05).",
+      "tags": [
+        "i3c",
+        "mipi",
+        "bus"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-A06",
+      "level": "A",
+      "title": "SPI NOR 플래시 드라이버: JEDEC ID, WEL, 페이지 프로그램",
+      "goal": "가장 흔한 외부 저장장치 드라이버의 명령 시퀀스와 상태 폴링을 구현한다",
+      "task": "명령(0x9F, 0x06, 0x02, 0x20, 0x05, 0x03)을 해석하는 mock SPI NOR 모델(페이지 경계 wrap, busy 시간)을 만들고, 페이지 경계 분할 쓰기·erase·WIP 폴링·쓰기 보호 해제 드라이버를 테스트한다.",
+      "tags": [
+        "spi-nor",
+        "flash",
+        "driver"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-A07",
+      "level": "A",
+      "title": "ISO-TP (ISO 15765-2): CAN 위 분할·재조립과 흐름 제어",
+      "goal": "8바이트 CAN 프레임으로 큰 메시지를 보내는 전송 계층(SF/FF/CF/FC)을 구현한다",
+      "task": "송신·수신 ISO-TP 상태 머신(BlockSize, STmin, 시퀀스 번호 랩, N_Cr 타임아웃)을 구현해 4095바이트 메시지 왕복과 프레임 손실·FC Wait/Overflow 시나리오를 테스트한다(진단 UDS는 see:AUTO).",
+      "tags": [
+        "iso-tp",
+        "can",
+        "segmentation",
+        "see:AUTO"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-A08",
+      "level": "A",
+      "title": "제로카피 DMA 드라이버 설계: 디스크립터 링과 캐시 일관성",
+      "goal": "Ethernet/고속 링크에서 쓰는 DMA 디스크립터 링과 소유권 비트, 캐시 clean/invalidate 규칙을 설계한다",
+      "task": "OWN 비트를 가진 RX/TX 디스크립터 링과 DMA 엔진 모델을 구현하고, 버퍼 재활용·링 가득 참·캐시 라인 정렬 요구를 반영한 드라이버 코드 경로를 작성해 언제 clean/invalidate가 필요한지 주석으로 정당화한다.",
+      "tags": [
+        "dma",
+        "descriptor-ring",
+        "cache-coherency",
+        "zero-copy"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-A09",
+      "level": "A",
+      "title": "버스 트랜잭션 녹화·재생으로 드라이버 회귀 테스트",
+      "goal": "실제 하드웨어 없이 센서 드라이버 회귀를 잡는 record/replay 기법을 익힌다",
+      "task": "M12 버스 추상화에 트랜잭션 로거를 끼워 실보드(또는 합성) 로그를 저장하고, 재생 모드에서 드라이버가 같은 순서의 트랜잭션을 내는지와 응답 변형(NACK, 지연)에 견디는지 테스트한다(파서 퍼징은 see:TEST-M02).",
+      "tags": [
+        "testing",
+        "driver",
+        "i2c",
+        "spi",
+        "see:TEST"
+      ],
+      "env": "mac",
+      "env_note": "Apple clang에는 libFuzzer 런타임이 없으므로 brew install llvm의 clang -fsanitize=fuzzer 사용"
+    },
+    {
+      "id": "COMM-A10",
+      "level": "A",
+      "title": "로직 애널라이저 디코더: 샘플 캡처 → UART/SPI/I2C 디코드",
+      "goal": "실측 파형 캡처에서 프로토콜을 복원하는 도구를 만들어 버스 디버깅 능력을 기른다",
+      "task": "CSV/VCD 형태 디지털 샘플(타임스탬프+채널 값)을 읽어 UART(자동 baud 추정)·SPI(모드 지정)·I2C(START/STOP/ACK) 트랜잭션을 출력하는 디코더를 작성하고, 앞서 만든 시뮬레이터 출력으로 검증한다.",
+      "tags": [
+        "logic-analyzer",
+        "decoder",
+        "debugging",
+        "vcd"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "COMM-A11",
+      "level": "A",
+      "title": "종합: 센서 허브 통신 스택 + 장애 주입",
+      "goal": "여러 버스·프레이밍·재시도를 엮은 통신 스택을 설계하고 고장 상황에서의 동작을 검증한다",
+      "task": "I2C 센서 2개+SPI NOR 로그 저장+UART COBS 텔레메트리(ACK/재전송)로 된 허브를 시뮬레이터 위에 구현하고, 버스 hang·CRC 오류·센서 무응답을 주입하는 테스트로 복구 동작과 에러 통계를 보고한다.",
+      "tags": [
+        "capstone",
+        "fault-injection",
+        "integration"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

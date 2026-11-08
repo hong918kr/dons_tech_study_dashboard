@@ -1,0 +1,549 @@
+{
+  "id": "WCONN",
+  "intro": "카메라·IoT·로봇 기기의 연결성 엔지니어는 리눅스 위에서 Wi-Fi·Bluetooth·셀룰러를 붙이고, 수십만 대 fleet에서 '연결이 끊긴다'는 문제를 로그만으로 풀어야 한다. 이 트랙은 cfg80211/mac80211/nl80211, wpa_supplicant·hostapd, WPA2/WPA3 핸드셰이크, BlueZ/HCI/GATT, 펌웨어 로딩·크래시 복구, 연결 관리 데몬과 프로비저닝을 직접 구현·재현하며 익힌다. PHY·링크 레이어 펌웨어와 BLE 패킷 포맷은 RF 트랙을 기반으로 한다.",
+  "goals": [
+    "리눅스 무선 스택(nl80211→cfg80211→mac80211→드라이버)과 netlink 메시지를 직접 파싱·호출한다",
+    "WPA2 4-way handshake, WPA3-SAE, PMF, 802.1X를 테스트 벡터와 시뮬레이터로 구현·검증한다",
+    "mac80211_hwsim·BlueZ 가상 컨트롤러로 하드웨어 없이 재현 가능한 무선 테스트 랩을 만든다",
+    "스캔·로밍·절전·다중 링크 failover 정책을 정량적으로 설계한다",
+    "펌웨어 로딩·크래시 복구, BLE 프로비저닝, fleet 연결성 분석으로 실서비스 신뢰성 문제를 다룬다"
+  ],
+  "prereq": [
+    "C",
+    "ELX",
+    "RF",
+    "SEC"
+  ],
+  "refs": [
+    {
+      "title": "Linux Wireless documentation (wireless.docs.kernel.org)",
+      "url": "https://wireless.docs.kernel.org/"
+    },
+    {
+      "title": "Linux kernel: Linux 802.11 Drivers Guide (cfg80211/mac80211)",
+      "url": "https://docs.kernel.org/driver-api/80211/index.html"
+    },
+    {
+      "title": "hostapd / wpa_supplicant (w1.fi) 및 developer docs",
+      "url": "https://w1.fi/"
+    },
+    {
+      "title": "BlueZ (Linux Bluetooth stack) source & doc/",
+      "url": "https://github.com/bluez/bluez"
+    },
+    {
+      "title": "Bluetooth Core Specification",
+      "url": "https://www.bluetooth.com/specifications/specs/"
+    },
+    {
+      "title": "IEEE Std 802.11-2020 (Wireless LAN MAC and PHY)"
+    },
+    {
+      "title": "RFC 3549: Linux Netlink as an IP Services Protocol",
+      "url": "https://www.rfc-editor.org/rfc/rfc3549"
+    },
+    {
+      "title": "RFC 9383: SPAKE2+",
+      "url": "https://www.rfc-editor.org/rfc/rfc9383"
+    },
+    {
+      "title": "ModemManager / libqmi / libmbim",
+      "url": "https://modemmanager.org/"
+    },
+    {
+      "title": "Matter specification (Connectivity Standards Alliance)",
+      "url": "https://csa-iot.org/all-solutions/matter/"
+    }
+  ],
+  "items": [
+    {
+      "id": "WCONN-B01",
+      "level": "B",
+      "title": "802.11 MAC 헤더와 Radiotap 파싱",
+      "goal": "Frame Control·ToDS/FromDS·Address1–4·Sequence Control의 의미와 모니터 캡처의 radiotap 헤더를 비트 단위로 읽는다.",
+      "task": "monitor 모드 pcap(LINKTYPE 127) 바이트를 읽어 radiotap present 비트맵(확장 비트·정렬 규칙 포함)에서 채널·신호 세기·레이트를 뽑고, 802.11 헤더의 type/subtype·주소 역할(RA/TA/DA/SA/BSSID)·재전송 비트·seq/frag를 출력하는 C 파서를 작성해 공개 캡처와 Wireshark 결과로 검증한다(IE 파싱 기초는 see:RF-M09).",
+      "tags": [
+        "802.11",
+        "radiotap",
+        "pcap",
+        "frame-parsing",
+        "see:RF"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-B02",
+      "level": "B",
+      "title": "리눅스 무선 스택 지도: SoftMAC vs FullMAC",
+      "goal": "nl80211 → cfg80211 → mac80211 → 드라이버(ieee80211_ops / cfg80211_ops) 호출 경로와 SoftMAC·FullMAC 분업을 설명한다.",
+      "task": "mac80211_hwsim 위에서 iw list/iw phy 출력(지원 대역·암호·인터페이스 조합·feature flag)을 주석으로 해설하고, iw dev wlan0 scan 한 번이 거치는 커널 함수 경로를 ftrace function_graph로 기록해 SoftMAC(mac80211)와 FullMAC(brcmfmac 등, cfg80211_ops 직접 구현)의 경로 차이를 다이어그램으로 정리한다.",
+      "tags": [
+        "cfg80211",
+        "mac80211",
+        "nl80211",
+        "softmac",
+        "fullmac",
+        "see:ELX"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 sudo modprobe mac80211_hwsim radios=2(또는 3) — 모듈이 없으면 linux-modules-extra 설치; apt install iw hostapd wpasupplicant tcpdump; AP/STA는 별도 netns에 배치; ftrace 기본은 ELX-A01 참고"
+    },
+    {
+      "id": "WCONN-B03",
+      "level": "B",
+      "title": "Netlink TLV 파서: nlmsghdr·nlattr·중첩 속성",
+      "goal": "netlink 메시지 헤더, 4바이트 정렬 속성(TLV), NLA_F_NESTED, 멀티파트 dump와 NLMSG_DONE/ERROR를 정확히 다룬다.",
+      "task": "libnl 없이 nlmsghdr·genlmsghdr·nlattr를 순회하는 C 파서(NLA_ALIGN, 길이 검증, 중첩 재귀, 잘린 버퍼 거부)를 작성하고, 미리 저장한 nl80211 GET_INTERFACE/GET_STATION 응답 hex 덤프를 속성 이름까지 디코드해 iw 출력과 일치함을 확인한다. 잘못된 길이 필드를 넣은 퍼즈 입력으로 경계 검사를 테스트한다.",
+      "tags": [
+        "netlink",
+        "genetlink",
+        "tlv",
+        "parser",
+        "fuzz"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-B04",
+      "level": "B",
+      "title": "Generic Netlink로 nl80211 직접 호출",
+      "goal": "family id 조회부터 dump 요청·멀티캐스트 이벤트 구독까지 nl80211을 원시 소켓으로 다룬다.",
+      "task": "AF_NETLINK/NETLINK_GENERIC 소켓으로 CTRL_CMD_GETFAMILY(\"nl80211\")를 보내 family id와 멀티캐스트 그룹(scan, mlme)을 얻고, NL80211_CMD_GET_INTERFACE dump와 TRIGGER_SCAN → NEW_SCAN_RESULTS 이벤트 대기 → GET_SCAN dump를 B03 파서로 처리하는 mini-iw를 작성해 hwsim 환경에서 iw 결과와 비교한다(nlmon으로 메시지 캡처).",
+      "tags": [
+        "nl80211",
+        "genetlink",
+        "scan",
+        "multicast-events"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 sudo modprobe mac80211_hwsim radios=2(또는 3) — 모듈이 없으면 linux-modules-extra 설치; apt install iw hostapd wpasupplicant tcpdump; AP/STA는 별도 netns에 배치; sudo modprobe nlmon 후 ip link add nlmon0 type nlmon으로 netlink 캡처"
+    },
+    {
+      "id": "WCONN-B05",
+      "level": "B",
+      "title": "mac80211_hwsim 랩: hostapd AP + wpa_supplicant STA",
+      "goal": "실제 무선 하드웨어 없이 AP·STA·모니터를 갖춘 재현 가능한 Wi-Fi 테스트 환경을 만든다.",
+      "task": "hwsim 라디오 3개를 만들어 하나는 netns 안 hostapd(WPA2-PSK, 2.4GHz ch6) AP, 하나는 wpa_supplicant STA, 하나는 모니터로 쓰는 셋업 스크립트를 작성하고, 연결 후 DHCP 없이 정적 IP로 ping이 되는지, hwsim0 캡처에 Beacon→Auth→Assoc→EAPOL 1–4가 순서대로 보이는지 자동 검사한다.",
+      "tags": [
+        "mac80211_hwsim",
+        "hostapd",
+        "wpa_supplicant",
+        "netns",
+        "test-lab"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 sudo modprobe mac80211_hwsim radios=2(또는 3) — 모듈이 없으면 linux-modules-extra 설치; apt install iw hostapd wpasupplicant tcpdump; AP/STA는 별도 netns에 배치"
+    },
+    {
+      "id": "WCONN-B06",
+      "level": "B",
+      "title": "채널·주파수 변환과 규제 도메인(regdb)",
+      "goal": "2.4/5/6GHz 채널↔주파수 규칙과 국가별 허용 채널·최대 전력·DFS·NO-IR 제약을 코드로 표현한다.",
+      "task": "ieee80211_channel_to_frequency와 같은 변환(2.4GHz 2407+5ch·ch14=2484, 5GHz 5000+5ch, 6GHz 5950+5ch)을 구현하고, wireless-regdb의 db.txt를 파싱해 국가 코드와 채널 폭(20/40/80MHz)별 허용 채널·EIRP·DFS 여부를 출력하는 도구를 작성해 iw reg get 결과(US, KR, DE)와 비교한다. 두 도메인 교집합(AP 국가 IE vs 기기 설정) 계산도 테스트한다.",
+      "tags": [
+        "regulatory",
+        "regdb",
+        "channels",
+        "dfs",
+        "6ghz"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-B07",
+      "level": "B",
+      "title": "WPA2-PSK 키 유도: PBKDF2-HMAC-SHA1 → PMK",
+      "goal": "passphrase와 SSID에서 256비트 PMK가 만들어지는 과정을 직접 구현하고 테스트 벡터로 확인한다.",
+      "task": "SHA-1과 HMAC-SHA1(HMAC 구조는 see:SEC-B06)을 이용해 PBKDF2(passphrase, SSID, 4096, 32)를 C로 구현하고 IEEE 802.11 부록 테스트 벡터(passphrase \"password\", SSID \"IEEE\")와 wpa_passphrase 출력으로 검증한 뒤, 4096회 반복이 MCU에서 얼마나 걸리는지 측정해 PMK 캐싱이 필요한 이유를 정리한다.",
+      "tags": [
+        "wpa2",
+        "pbkdf2",
+        "pmk",
+        "hmac-sha1",
+        "test-vectors",
+        "see:SEC"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-B08",
+      "level": "B",
+      "title": "PTK 유도와 EAPOL-Key MIC 검증",
+      "goal": "PRF로 PTK(KCK/KEK/TK)를 만들고 EAPOL-Key 프레임의 MIC를 검증·생성할 수 있다.",
+      "task": "\"Pairwise key expansion\" PRF-384(min/max(AA,SPA) || min/max(ANonce,SNonce))로 PTK를 유도하고 KCK/KEK/TK를 분리한 뒤, 공개 WPA2 핸드셰이크 캡처의 메시지 2–4에서 MIC 필드를 0으로 지운 프레임에 HMAC-SHA1-128(descriptor v2)을 계산해 일치를 확인한다. 잘못된 passphrase로는 MIC가 틀리는 것을 보이고, 이것이 오프라인 사전 공격의 근거임을 설명한다.",
+      "tags": [
+        "wpa2",
+        "ptk",
+        "eapol",
+        "mic",
+        "prf"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-B09",
+      "level": "B",
+      "title": "HCI 패킷 기초: btsnoop 파서와 opcode/event 디코드",
+      "goal": "호스트–컨트롤러 경계의 HCI Command/Event/ACL/ISO 패킷 구조와 OGF/OCF 체계를 읽는다.",
+      "task": "btsnoop 파일(헤더 \"btsnoop\\0\", datalink 1002 H4 / 2001 Linux monitor)을 읽어 HCI Command(opcode=OGF<<10|OCF)·Command Complete/Status·LE Meta Event·ACL(handle, PB/BC 플래그)을 디코드하는 파서를 작성하고, btmon 캡처 예제로 Reset → Read Local Version → LE Set Scan Parameters 흐름을 재구성한다(LL/PDU 포맷은 see:RF-M04).",
+      "tags": [
+        "bluetooth",
+        "hci",
+        "btsnoop",
+        "parser",
+        "see:RF"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-B10",
+      "level": "B",
+      "title": "BlueZ 랩: 가상 컨트롤러와 btmon",
+      "goal": "하드웨어 없이 BlueZ 데몬·mgmt API·btmon을 띄우고 hciconfig 시대 도구와 현행 도구(btmgmt, bluetoothctl)를 구분한다.",
+      "task": "hci_vhci/btvirt로 가상 LE 컨트롤러 2개를 만들고 bluetoothd를 띄운 뒤 한쪽은 광고, 다른 쪽은 스캔·연결하도록 bluetoothctl 스크립트를 작성, btmon 출력에서 HCI ↔ mgmt ↔ D-Bus 계층이 각각 어떤 메시지를 주고받는지 표로 정리한다.",
+      "tags": [
+        "bluez",
+        "btmon",
+        "mgmt-api",
+        "vhci",
+        "test-lab"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에 실제 BT 컨트롤러가 없으므로 sudo modprobe hci_vhci + BlueZ 소스의 emulator/btvirt(빌드 필요)로 가상 LE 컨트롤러 2개 생성; apt install bluez bluez-tools; btmon으로 캡처"
+    },
+    {
+      "id": "WCONN-B11",
+      "level": "B",
+      "title": "커널 펌웨어 로딩: request_firmware 경로",
+      "goal": "무선 칩 펌웨어/NVRAM/보드 파일이 커널에서 어떻게 검색·로드·캐시되는지 이해한다.",
+      "task": "가상 플랫폼 드라이버 모듈에서 request_firmware()/firmware_request_nowarn()/request_firmware_nowait()로 /lib/firmware의 blob을 로드하고 헤더(magic, 버전, CRC)를 검증하는 코드를 작성한 뒤, 파일 누락·손상·initramfs 미포함 상황을 재현해 dmesg와 동작 차이를 기록하고 firmware_class.path 대체 경로를 테스트한다.",
+      "tags": [
+        "firmware-loading",
+        "request_firmware",
+        "kernel-module",
+        "see:ELX"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'(aarch64 Ubuntu)에서 커널 헤더/모듈 빌드 환경 필요"
+    },
+    {
+      "id": "WCONN-M01",
+      "level": "M",
+      "title": "4-way handshake 상태기계와 GTK 설치",
+      "goal": "Authenticator·Supplicant 양쪽 상태기계를 구현하며 replay counter, 재전송, 키 설치 시점의 함정을 이해한다.",
+      "task": "B08의 키 유도를 재사용해 메시지 1–4 교환(ANonce/SNonce, RSN IE 일치 확인, KEK로 GTK 언랩 AES-KW, Install 비트)을 수행하는 AP/STA 시뮬레이터를 작성하고, 메시지 손실·중복·replay counter 역행·MIC 실패 주입 테스트를 통과시킨다. 메시지 3 재전송 시 동일 키 재설치(KRACK)를 막는 가드를 넣고 그 근거를 설명한다.",
+      "tags": [
+        "4-way-handshake",
+        "gtk",
+        "replay-counter",
+        "krack",
+        "state-machine"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-M02",
+      "level": "M",
+      "title": "WPA3-SAE(Dragonfly) 개념 구현",
+      "goal": "SAE commit/confirm 교환이 PSK 대비 오프라인 사전 공격과 forward secrecy 문제를 어떻게 해결하는지 코드로 확인한다.",
+      "task": "P-256 위에서 password element 유도(hunting-and-pecking과 hash-to-element 두 방식), commit(scalar, element)·confirm 교환, PMK/PMKID 유도를 Python으로 구현해 양측이 같은 PMK를 얻는지 검증하고, hostapd 테스트의 SAE 벡터와 비교한다. hunting-and-pecking 반복 횟수가 비밀번호에 따라 달라지는 타이밍 누설(Dragonblood)과 H2E가 이를 막는 이유를 측정·정리한다.",
+      "tags": [
+        "wpa3",
+        "sae",
+        "dragonfly",
+        "ecc",
+        "h2e",
+        "side-channel",
+        "see:SEC"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-M03",
+      "level": "M",
+      "title": "PMF(802.11w)와 deauth 공격 방어",
+      "goal": "보호되지 않은 관리 프레임의 위험과 BIP·SA Query로 이를 막는 방법을 이해한다.",
+      "task": "Deauthentication/Disassociation 프레임에 MMIE(IE 76, KeyID, IPN, MIC)를 붙이는 BIP-CMAC-128 생성/검증과 IPN replay 검사를 구현하고, 위조 deauth 수신 시 SA Query 요청/응답으로 진위를 확인하는 STA 측 로직을 시뮬레이션한다. 이후 hwsim 랩(B05)에서 ieee80211w=2 설정으로 실제 hostapd/wpa_supplicant 동작을 확인한다.",
+      "tags": [
+        "pmf",
+        "802.11w",
+        "bip",
+        "deauth",
+        "sa-query"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-M04",
+      "level": "M",
+      "title": "wpa_supplicant 제어 인터페이스 클라이언트",
+      "goal": "커넥티비티 데몬이 wpa_supplicant를 제어하는 ctrl_iface 프로토콜(요청/응답 + 비동기 이벤트)을 직접 다룬다.",
+      "task": "Unix datagram 소켓으로 /run/wpa_supplicant/wlan0에 붙어 ATTACH, SCAN, SCAN_RESULTS 파싱, ADD_NETWORK/SET_NETWORK/ENABLE_NETWORK, STATUS를 수행하고, <N>CTRL-EVENT-CONNECTED/DISCONNECTED(reason)/SSID-TEMP-DISABLED 이벤트를 요청 응답과 분리해 처리하는 C 클라이언트를 작성한다. hwsim 랩에서 잘못된 PSK·AP 다운 시나리오의 이벤트 순서를 기록한다.",
+      "tags": [
+        "wpa_supplicant",
+        "ctrl_iface",
+        "unix-socket",
+        "events",
+        "daemon"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 sudo modprobe mac80211_hwsim radios=2(또는 3) — 모듈이 없으면 linux-modules-extra 설치; apt install iw hostapd wpasupplicant tcpdump; AP/STA는 별도 netns에 배치"
+    },
+    {
+      "id": "WCONN-M05",
+      "level": "M",
+      "title": "스캔 결과 평가와 BSS 선택 정책",
+      "goal": "동일 SSID 다수 AP 중 어디에 붙을지 결정하는 점수화와 스캔 비용(채널 dwell, active/passive)의 trade-off를 설계한다.",
+      "task": "스캔 결과 덤프(BSSID, 주파수, RSSI, RSN 능력, BSS Load IE의 채널 사용률·접속 수, 지원 폭)를 입력으로 대역 선호(6>5>2.4GHz 보정), 보안 수준, 혼잡도, 히스테리시스를 반영한 BSS 선택기를 구현하고, 채널 목록·dwell 시간별 전체 스캔 시간을 계산해 부분 스캔(이전 채널 우선) 정책과 비교한다.",
+      "tags": [
+        "scan",
+        "bss-selection",
+        "band-steering",
+        "bss-load"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-M06",
+      "level": "M",
+      "title": "로밍 결정 엔진: 트리거·히스테리시스·FT",
+      "goal": "언제 로밍할지와 얼마나 빨리 재연결하는지를 분리해 설계하고 802.11k/v/r의 역할을 설명한다.",
+      "task": "log-distance 경로 손실(see:RF-B02)로 이동하는 STA의 RSSI 궤적을 만들고, RSSI 임계값+히스테리시스+최소 체류시간 기반 로밍 트리거와 백그라운드 스캔을 구현해 ping-pong 횟수·연결 단절 시간을 측정한다. full auth(4-way 포함) vs 802.11r FT(over-the-air) 재연결 지연 모델을 넣어 비교하고, 11k neighbor report·11v BSS transition 요청을 반영한 버전도 만든다.",
+      "tags": [
+        "roaming",
+        "802.11r",
+        "802.11k",
+        "802.11v",
+        "hysteresis",
+        "see:RF"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-M07",
+      "level": "M",
+      "title": "Raw HCI 소켓으로 LE 스캔 구현",
+      "goal": "BlueZ를 거치지 않고 HCI 명령을 직접 보내 LE 스캔과 광고 리포트 수신을 구현한다.",
+      "task": "AF_BLUETOOTH/BTPROTO_HCI 소켓(HCI_CHANNEL_USER 또는 raw + 필터)으로 LE Set Scan Parameters/Enable(또는 Extended Scan) 명령을 보내고 Command Complete 확인 후 LE Advertising Report를 B09 파서로 디코드해 주소·RSSI·AD 구조를 출력하는 C 프로그램을 작성한다. 중복 필터·스캔 윈도/인터벌 조합별 리포트 수를 btvirt 광고자 대상으로 측정한다.",
+      "tags": [
+        "hci-socket",
+        "le-scan",
+        "advertising-report",
+        "bluez"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에 실제 BT 컨트롤러가 없으므로 sudo modprobe hci_vhci + BlueZ 소스의 emulator/btvirt(빌드 필요)로 가상 LE 컨트롤러 2개 생성; apt install bluez bluez-tools; btmon으로 캡처"
+    },
+    {
+      "id": "WCONN-M08",
+      "level": "M",
+      "title": "BlueZ D-Bus GATT 서버: 프로비저닝 서비스",
+      "goal": "BlueZ의 D-Bus API(GattManager1, LEAdvertisingManager1)로 주변기기 역할 GATT 서비스를 등록·광고한다.",
+      "task": "SSID 목록 읽기·자격증명 쓰기·상태 notify 특성 3개를 갖는 커스텀 GATT 서비스를 D-Bus 객체(GattService1/GattCharacteristic1)로 구현하고 광고를 등록한 뒤, 다른 가상 컨트롤러의 bluetoothctl/gatttool 클라이언트로 읽기·쓰기·notify를 검증한다. MTU를 넘는 자격증명의 분할 쓰기(Prepare/Execute Write)도 처리한다(ATT 서버 원리는 see:RF-M06).",
+      "tags": [
+        "bluez",
+        "dbus",
+        "gatt-server",
+        "provisioning",
+        "see:RF"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에 실제 BT 컨트롤러가 없으므로 sudo modprobe hci_vhci + BlueZ 소스의 emulator/btvirt(빌드 필요)로 가상 LE 컨트롤러 2개 생성; apt install bluez bluez-tools; btmon으로 캡처; python3-dbus/python3-gi 또는 sd-bus(C) 사용"
+    },
+    {
+      "id": "WCONN-M09",
+      "level": "M",
+      "title": "DHCP 클라이언트 상태기계와 연결 시간 측정",
+      "goal": "링크 업 이후 IP를 얻기까지의 상태기계와 lease 타이머(T1/T2)를 구현하고 time-to-connected를 분해한다.",
+      "task": "RFC 2131의 INIT→SELECTING→REQUESTING→BOUND→RENEWING→REBINDING 상태기계(지수 백오프 재전송, xid 검사, T1=0.5·T2=0.875 lease)와 옵션 TLV 인코더/파서를 구현하고 mock 서버로 offer 유실·NAK·lease 만료를 테스트한다. 연결 이벤트 타임라인(assoc→4-way→DHCP→첫 패킷)에서 각 구간 지연을 측정하는 계측을 넣는다(UDP/IP 구현 자체는 see:NET).",
+      "tags": [
+        "dhcp",
+        "state-machine",
+        "lease-timers",
+        "time-to-connect",
+        "see:NET"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-M10",
+      "level": "M",
+      "title": "연결 관리 데몬: 다중 링크 정책과 failover",
+      "goal": "Ethernet·Wi-Fi·LTE를 동시에 가진 기기에서 NetworkManager/connman처럼 우선순위·헬스체크·전환을 결정한다.",
+      "task": "링크별 상태(carrier, IP, 연결성 검사 HTTP 204 결과, 손실률)를 이벤트로 받아 route metric과 기본 경로를 바꾸는 정책 엔진을 구현하고, 히스테리시스·쿨다운으로 flapping을 막으며 LTE 데이터 비용을 고려한 '필요할 때만 LTE' 정책을 넣는다. netns + veth로 세 링크를 흉내 내고 링크 장애 주입 시 전환 시간과 끊김을 측정한다(라우팅/netns 상세는 see:NET).",
+      "tags": [
+        "connection-manager",
+        "failover",
+        "route-metric",
+        "connectivity-check",
+        "see:NET"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 ip netns/veth/tc netem으로 eth·wifi·lte 링크를 흉내 냄 (정책 엔진 로직은 맥에서 단위테스트 가능)"
+    },
+    {
+      "id": "WCONN-M11",
+      "level": "M",
+      "title": "리눅스 셀룰러: QMI/MBIM 메시지와 ModemManager 모델",
+      "goal": "AT 명령 이후 세대의 모뎀 제어 프로토콜(QMI/MBIM)과 raw-IP wwan 데이터 경로를 이해한다.",
+      "task": "QMUX 헤더(I/F type, length, service, client id) + QMI SDU(transaction id, message id) + TLV, 그리고 MBIM 메시지 헤더·Command(service UUID, CID) 인코더/파서를 구현해 libqmi/libmbim 문서의 예제 바이트를 디코드하고, ModemManager 상태(disabled→enabling→registered→connecting→connected)를 따라가는 mock 모뎀으로 신호 소실·재등록 시 bearer 재연결을 테스트한다(AT/URC 파서 기초는 see:RF-M08).",
+      "tags": [
+        "cellular",
+        "qmi",
+        "mbim",
+        "modemmanager",
+        "wwan",
+        "see:RF"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-A01",
+      "level": "A",
+      "title": "엔터프라이즈 Wi-Fi: 802.1X/EAP-TLS",
+      "goal": "EAP 상태기계와 인증서 기반 엔터프라이즈 인증이 4-way handshake와 어떻게 연결되는지 이해한다.",
+      "task": "hwsim 랩에서 hostapd 내장 EAP 서버로 WPA2/WPA3-Enterprise EAP-TLS를 구성(자체 CA·서버·디바이스 인증서)하고, 캡처한 EAP-Request/Response·TLS 단편화(L/M 비트)를 파서로 재조립해 흐름을 재구성한 뒤 MSK→PMK 유도와 만료 인증서·잘못된 CA·서버 이름 불일치 실패를 재현해 로그 시그니처를 정리한다(TLS 기초는 see:SEC-M10).",
+      "tags": [
+        "802.1x",
+        "eap-tls",
+        "enterprise",
+        "certificates",
+        "see:SEC"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 sudo modprobe mac80211_hwsim radios=2(또는 3) — 모듈이 없으면 linux-modules-extra 설치; apt install iw hostapd wpasupplicant tcpdump; AP/STA는 별도 netns에 배치; openssl로 테스트 CA 생성"
+    },
+    {
+      "id": "WCONN-A02",
+      "level": "A",
+      "title": "hwsim + wmediumd 로밍·장애 주입 통합 테스트",
+      "goal": "링크 품질을 프로그램으로 바꿀 수 있는 무선 매체 위에서 로밍·재연결을 자동 회귀 테스트한다.",
+      "task": "AP 2대(동일 SSID, 다른 채널, 802.11r 활성)와 STA 1대를 hwsim에 띄우고 wmediumd로 링크별 SNR/손실을 시간에 따라 바꿔 '이동'을 흉내 낸 뒤, pytest 하네스가 로밍 발생·단절 시간(마지막 성공 ping → 첫 성공 ping)·재인증 종류(FT vs full)를 로그에서 추출해 SLA를 판정하게 만든다. M06 엔진의 예측과 실측을 비교한다.",
+      "tags": [
+        "wmediumd",
+        "roaming",
+        "integration-test",
+        "pytest",
+        "fault-injection",
+        "see:TEST"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 sudo modprobe mac80211_hwsim radios=2(또는 3) — 모듈이 없으면 linux-modules-extra 설치; apt install iw hostapd wpasupplicant tcpdump; AP/STA는 별도 netns에 배치; wmediumd 소스 빌드 필요"
+    },
+    {
+      "id": "WCONN-A03",
+      "level": "A",
+      "title": "Wi-Fi 절전: PS-Poll·DTIM·U-APSD·TWT 모델링",
+      "goal": "배터리 카메라처럼 연결을 유지하며 대부분 잠드는 기기의 절전 메커니즘과 지연–전류 trade-off를 정량화한다.",
+      "task": "비콘 주기·DTIM·listen interval·keepalive(TCP/MQTT ping) 주기·버퍼링된 다운링크 도착을 입력으로 legacy PS-Poll, U-APSD, 802.11ax TWT 각각의 평균 전류와 다운링크 지연 분포를 이벤트 시뮬레이션으로 계산하고, AP의 NAT/세션 타임아웃 때문에 keepalive를 줄일 수 없는 상황에서 최적 설정을 찾는다(듀티사이클·배터리 모델은 see:RF-A04).",
+      "tags": [
+        "power-save",
+        "dtim",
+        "twt",
+        "u-apsd",
+        "keepalive",
+        "see:RF"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-A04",
+      "level": "A",
+      "title": "무선 펌웨어 크래시 감지·덤프·복구",
+      "goal": "칩 펌웨어 hang/crash를 감지하고 덤프를 남긴 뒤 연결을 자동 복원하는 드라이버·사용자공간 협업을 설계한다.",
+      "task": "가상 '무선 칩' 커널 모듈에 펌웨어 heartbeat 타임아웃·명령 응답 타임아웃을 감지하는 watchdog을 넣고 dev_coredumpv()로 덤프를 /sys/class/devcoredump에 노출한 뒤, 사용자공간 수집기가 덤프를 저장하고 칩 리셋 → 펌웨어 재로드(B11) → cfg80211 재등록 → 재연결을 수행하게 만든다. 복구 루프 폭주를 막는 재시도 예산과 iwlwifi/ath11k의 실제 recovery 흐름을 비교한다.",
+      "tags": [
+        "firmware-crash",
+        "devcoredump",
+        "recovery",
+        "watchdog",
+        "kernel-module",
+        "see:ELX"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'(aarch64 Ubuntu)에서 커널 헤더/모듈 빌드 환경 필요"
+    },
+    {
+      "id": "WCONN-A05",
+      "level": "A",
+      "title": "디바이스 프로비저닝 종합: BLE 온보딩 → Wi-Fi 연결",
+      "goal": "카메라/IoT 기기를 앱으로 처음 등록할 때의 보안 채널·자격증명 전달·실패 처리를 엔드투엔드로 구현한다.",
+      "task": "M08 GATT 서비스 위에 ECDH(X25519) + proof-of-possession(기기 라벨 PIN) 기반 세션 키 수립과 AES-GCM 자격증명 암호화를 얹고, 수신한 SSID/PSK를 M04 ctrl_iface로 적용해 연결 결과(잘못된 PSK, AP 없음, DHCP 실패)를 notify로 보고하는 온보딩 흐름을 구현한다. SoftAP·Wi-Fi Easy Connect(DPP)·QR 방식과 보안/UX를 비교하고 이후 클라우드 인증서 등록과의 연결을 설명한다(인증서 수명 관리는 see:SYSD-M08).",
+      "tags": [
+        "provisioning",
+        "onboarding",
+        "ble",
+        "ecdh",
+        "dpp",
+        "see:SYSD",
+        "see:SEC"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에 실제 BT 컨트롤러가 없으므로 sudo modprobe hci_vhci + BlueZ 소스의 emulator/btvirt(빌드 필요)로 가상 LE 컨트롤러 2개 생성; apt install bluez bluez-tools; btmon으로 캡처; Lima VM 'elinux'에서 sudo modprobe mac80211_hwsim radios=2(또는 3) — 모듈이 없으면 linux-modules-extra 설치; apt install iw hostapd wpasupplicant tcpdump; AP/STA는 별도 netns에 배치"
+    },
+    {
+      "id": "WCONN-A06",
+      "level": "A",
+      "title": "Matter·Thread 개요: SPAKE2+ 커미셔닝",
+      "goal": "Matter 기기 커미셔닝(PASE→CASE)과 Thread 메시(리더/라우터/border router)의 구조를 이해하고 핵심 암호를 구현한다.",
+      "task": "RFC 9383 SPAKE2+(P-256) 프로토콜을 Python으로 구현해 RFC 테스트 벡터로 검증하고, 이를 이용한 Matter PASE 세션 수립 → 운영 인증서(NOC) 설치 → CASE 세션 흐름을 메시지 시퀀스 다이어그램과 시뮬레이터로 재현한다. Thread 파티션·border router가 IPv6로 Wi-Fi/Ethernet과 연결되는 방식을 정리한다.",
+      "tags": [
+        "matter",
+        "thread",
+        "spake2plus",
+        "commissioning",
+        "ipv6"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-A07",
+      "level": "A",
+      "title": "Fleet 연결성 신뢰성 분석",
+      "goal": "수십만 대 기기의 연결 로그에서 연결 실패를 원인별로 분류하고 기기 측 문제와 네트워크 측 문제를 구분한다.",
+      "task": "합성 fleet 이벤트 로그(disconnect reason/status code, 4-way 타임아웃, DHCP 지연, RSSI, AP OUI·대역, 펌웨어 버전)를 생성하고, reason code 분류표·연결 성공률·time-to-reconnect SLO 대시보드 데이터를 계산하는 분석기를 작성한다. 특정 AP 벤더×펌웨어 버전 조합의 이상을 찾아내고(버전 회귀 통계 검정은 see:INFRA-A06), 조치(펌웨어 롤백 vs 설정 회피)를 제안하는 리포트를 만든다.",
+      "tags": [
+        "fleet",
+        "reliability",
+        "telemetry",
+        "reason-codes",
+        "slo",
+        "see:INFRA",
+        "see:DIST"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "WCONN-A08",
+      "level": "A",
+      "title": "Wi-Fi 연결 장애 트리아지 케이스 스터디",
+      "goal": "wpa_supplicant 디버그 로그·pcap·드라이버 로그만으로 연결 실패의 근본 원인을 체계적으로 좁힌다.",
+      "task": "hwsim 랩에서 잘못된 PSK(메시지 2 MIC 실패), AP 접속 수 초과(status 17), 비콘 손실, PMF 불일치, 규제 도메인 불일치로 인한 채널 미검출, DHCP 서버 무응답 6가지 장애를 재현해 로그·캡처를 수집하고, 이를 입력받아 원인과 근거 라인을 출력하는 규칙 기반 트리아지 도구를 작성해 면접식 '연결이 안 돼요' 질문에 답하는 디버그 순서도를 정리한다.",
+      "tags": [
+        "debug",
+        "triage",
+        "wpa_supplicant-logs",
+        "pcap",
+        "case-study"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM 'elinux'에서 sudo modprobe mac80211_hwsim radios=2(또는 3) — 모듈이 없으면 linux-modules-extra 설치; apt install iw hostapd wpasupplicant tcpdump; AP/STA는 별도 netns에 배치"
+    }
+  ]
+}

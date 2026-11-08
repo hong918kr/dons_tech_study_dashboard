@@ -1,0 +1,567 @@
+{
+  "id": "RTOS",
+  "intro": "RTOS는 '빠른' OS가 아니라 '예측 가능한' OS다: 우선순위 선점 스케줄링, 동기화 프리미티브, ISR 지연 처리로 데드라인을 보장한다. 펌웨어 면접에서는 컨텍스트 스위치 원리, 우선순위 역전과 상속, 세마포어 vs 뮤텍스, 스케줄 가능성 분석, 스택 크기 산정이 반복해서 나오므로, 이 트랙은 ucontext 기반 미니 커널을 직접 만들고 FreeRTOS POSIX 포트·QEMU Cortex-M으로 실제 커널 동작을 확인한다.",
+  "goals": [
+    "TCB·ready list·컨텍스트 스위치를 갖춘 미니 RTOS 커널을 직접 구현한다(호스트 ucontext → Cortex-M PendSV)",
+    "세마포어·뮤텍스·큐·이벤트 그룹·태스크 알림·소프트웨어 타이머를 상황에 맞게 선택하고 ISR 지연 처리를 올바르게 설계한다",
+    "우선순위 역전을 재현하고 우선순위 상속/천장 프로토콜로 해결한다",
+    "RMS/EDF 스케줄 가능성 분석과 응답시간 분석(RTA)으로 태스크 세트를 검증한다",
+    "스택 크기 산정·오버플로 탐지·RTOS 힙 전략·tickless idle·트레이싱으로 실전 문제를 진단한다",
+    "FreeRTOS 내부 구조를 읽고 Zephyr의 기본 모델과 비교한다"
+  ],
+  "prereq": [
+    "C",
+    "DS",
+    "ARM",
+    "BM"
+  ],
+  "refs": [
+    {
+      "title": "Richard Barry, Mastering the FreeRTOS Real Time Kernel",
+      "url": "https://www.freertos.org"
+    },
+    {
+      "title": "FreeRTOS-Kernel source (GitHub)",
+      "url": "https://github.com/FreeRTOS/FreeRTOS-Kernel"
+    },
+    {
+      "title": "Giorgio Buttazzo, Hard Real-Time Computing Systems (Springer)"
+    },
+    {
+      "title": "Liu & Layland, Scheduling Algorithms for Multiprogramming in a Hard-Real-Time Environment (JACM 1973)"
+    },
+    {
+      "title": "Jean Labrosse, MicroC/OS-III: The Real-Time Kernel"
+    },
+    {
+      "title": "Zephyr Project documentation",
+      "url": "https://docs.zephyrproject.org"
+    }
+  ],
+  "items": [
+    {
+      "id": "RTOS-B01",
+      "level": "B",
+      "title": "슈퍼루프에서 협력형 스케줄러로",
+      "goal": "슈퍼루프의 응답성 한계를 측정하고 run-to-completion 협력형 스케줄러로 개선한다",
+      "task": "주기가 다른 작업 3개를 슈퍼루프와 타임스탬프 기반 협력형 스케줄러(작업 테이블+주기+다음 실행 시각)로 각각 구현하고, 긴 작업 하나가 다른 작업의 지터를 얼마나 늘리는지 측정·비교한다.",
+      "tags": [
+        "superloop",
+        "cooperative",
+        "scheduler"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-B02",
+      "level": "B",
+      "title": "TCB 설계와 태스크 상태 전이",
+      "goal": "태스크 제어 블록 필드와 Ready/Running/Blocked/Suspended 전이 규칙을 정확히 정의한다",
+      "task": "TCB 구조체(스택 포인터, 우선순위, 상태, 지연 만료 시각, 대기 객체, 리스트 노드)와 상태 전이 함수들을 구현하고, 불법 전이(Blocked→Running 직행 등)를 assert로 막는 테스트를 작성한다.",
+      "tags": [
+        "tcb",
+        "task-state",
+        "kernel"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-B03",
+      "level": "B",
+      "title": "ucontext로 컨텍스트 스위치 체험",
+      "goal": "컨텍스트 스위치가 '레지스터+스택 포인터 저장/복원'임을 호스트에서 체득한다",
+      "task": "getcontext/makecontext/swapcontext로 별도 스택을 가진 두 태스크가 yield로 번갈아 실행되게 만들고, 각 태스크의 지역 변수·스택 주소가 보존되는지 출력으로 검증한다.",
+      "tags": [
+        "context-switch",
+        "ucontext",
+        "coroutine"
+      ],
+      "env": "mac",
+      "env_note": "macOS에서 ucontext는 deprecated: -D_XOPEN_SOURCE=600 -Wno-deprecated-declarations로 빌드"
+    },
+    {
+      "id": "RTOS-B04",
+      "level": "B",
+      "title": "미니 커널 1: 우선순위 비트맵 ready list (CLZ)",
+      "goal": "O(1) 최고 우선순위 태스크 선택을 비트맵+count-leading-zeros로 구현한다",
+      "task": "32 우선순위 ready 비트맵과 우선순위별 FIFO 리스트를 구현해 ucontext 미니 커널의 스케줄러로 쓰고, 동일 우선순위 FIFO 순서·최고 우선순위 선택을 단위 테스트한다.",
+      "tags": [
+        "scheduler",
+        "priority-bitmap",
+        "clz"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-B05",
+      "level": "B",
+      "title": "선점과 라운드 로빈: SIGALRM tick 시뮬레이션",
+      "goal": "주기 tick 인터럽트에 의한 선점과 동일 우선순위 time slicing을 구현한다",
+      "task": "setitimer(SIGALRM)를 tick 인터럽트로 삼아 미니 커널에 선점과 time slice를 추가하고, 무한 루프 태스크가 있어도 다른 태스크가 실행되는지·slice 길이별 문맥 교환 횟수를 측정한다.",
+      "tags": [
+        "preemption",
+        "round-robin",
+        "tick"
+      ],
+      "env": "mac",
+      "env_note": "시그널 핸들러에서 swapcontext 사용은 학습용(POSIX 비보장), 실제 Cortex-M 커널은 PendSV 방식(see RTOS-A01, ARM-A01)"
+    },
+    {
+      "id": "RTOS-B06",
+      "level": "B",
+      "title": "태스크 지연: Delay vs DelayUntil, tick wrap 안전 비교",
+      "goal": "상대 지연이 주기 드리프트를 만드는 이유와 절대 시각 기반 주기 실행을 구현한다",
+      "task": "미니 커널에 delayed list와 delay(ticks)/delay_until(&last, period)을 추가하고, 작업 시간이 들쭉날쭉할 때 두 방식의 주기 드리프트를 측정, tick 카운터 32비트 wrap 근처에서도 동작함을 테스트한다.",
+      "tags": [
+        "delay",
+        "periodic-task",
+        "wraparound"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-B07",
+      "level": "B",
+      "title": "FreeRTOS POSIX 포트 첫 실행: 태스크·우선순위·스택",
+      "goal": "실제 RTOS API로 태스크를 만들고 config 옵션의 의미를 익힌다",
+      "task": "FreeRTOSConfig.h를 직접 작성해 우선순위가 다른 태스크 3개를 실행하고, vTaskList/uxTaskGetSystemState로 상태·스택 여유를 출력해 우선순위 변경(vTaskPrioritySet) 효과를 관찰한다.",
+      "tags": [
+        "freertos",
+        "posix-port",
+        "config"
+      ],
+      "env": "mac",
+      "env_note": "FreeRTOS POSIX/GCC 포트를 macOS에서 빌드(pthread 기반, 실시간성은 없음 — 동작 순서 검증용)"
+    },
+    {
+      "id": "RTOS-B08",
+      "level": "B",
+      "title": "바이너리 세마포어: ISR → 태스크 신호",
+      "goal": "이벤트 신호용 바이너리 세마포어의 의미와 이벤트 유실 가능성을 이해한다",
+      "task": "타이머 스레드를 ISR 대용으로 써서 xSemaphoreGiveFromISR→처리 태스크 패턴을 구현하고, 처리보다 빠르게 신호가 올 때 이벤트가 합쳐져 유실되는 것을 재현해 카운팅 세마포어와 비교한다.",
+      "tags": [
+        "semaphore",
+        "isr",
+        "signaling"
+      ],
+      "env": "mac",
+      "env_note": "FreeRTOS POSIX/GCC 포트를 macOS에서 빌드(pthread 기반, 실시간성은 없음 — 동작 순서 검증용)"
+    },
+    {
+      "id": "RTOS-B09",
+      "level": "B",
+      "title": "카운팅 세마포어: 리소스 풀과 이벤트 카운트",
+      "goal": "카운팅 세마포어로 N개 자원 접근 제한과 누적 이벤트 처리를 구현한다",
+      "task": "미니 커널에 카운팅 세마포어(대기 리스트 포함)를 구현해 DMA 채널 3개를 5개 태스크가 공유하는 시나리오와 이벤트 카운트 시나리오를 테스트한다.",
+      "tags": [
+        "semaphore",
+        "counting",
+        "resource-pool"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-B10",
+      "level": "B",
+      "title": "뮤텍스 vs 세마포어: 소유권과 재귀 뮤텍스",
+      "goal": "뮤텍스가 소유권·우선순위 상속을 갖는 이유와 ISR에서 쓸 수 없는 이유를 안다",
+      "task": "FreeRTOS에서 다른 태스크가 뮤텍스를 give할 때의 동작, 재귀 뮤텍스 중첩 take/give, 세마포어로 상호배제했을 때의 문제를 각각 실험하고 결과를 표로 정리한다.",
+      "tags": [
+        "mutex",
+        "semaphore",
+        "ownership"
+      ],
+      "env": "mac",
+      "env_note": "FreeRTOS POSIX/GCC 포트를 macOS에서 빌드(pthread 기반, 실시간성은 없음 — 동작 순서 검증용)"
+    },
+    {
+      "id": "RTOS-B11",
+      "level": "B",
+      "title": "메시지 큐: 생산자-소비자, 타임아웃, 복사 vs 포인터",
+      "goal": "큐 기반 태스크 간 통신 설계와 데이터 복사 비용·소유권 문제를 이해한다",
+      "task": "센서 태스크→처리 태스크→로깅 태스크 파이프라인을 xQueue로 만들고, 큐 깊이·블로킹 타임아웃·큐 가득 참 정책을 실험하며, 큰 버퍼는 포인터+풀로 넘기는 버전과 비교한다.",
+      "tags": [
+        "queue",
+        "ipc",
+        "producer-consumer"
+      ],
+      "env": "mac",
+      "env_note": "FreeRTOS POSIX/GCC 포트를 macOS에서 빌드(pthread 기반, 실시간성은 없음 — 동작 순서 검증용)"
+    },
+    {
+      "id": "RTOS-B12",
+      "level": "B",
+      "title": "소프트웨어 타이머: one-shot·auto-reload·타이머 태스크",
+      "goal": "소프트웨어 타이머가 타이머 서비스 태스크 컨텍스트에서 실행된다는 점과 그 함의를 안다",
+      "task": "LED 블링크(auto-reload)와 통신 타임아웃(one-shot, 수신 시 reset)을 소프트웨어 타이머로 구현하고, 콜백에서 블로킹 호출 시 다른 타이머가 지연되는 문제와 타이머 태스크 우선순위 영향을 실험한다.",
+      "tags": [
+        "software-timer",
+        "timer-service",
+        "freertos"
+      ],
+      "env": "mac",
+      "env_note": "FreeRTOS POSIX/GCC 포트를 macOS에서 빌드(pthread 기반, 실시간성은 없음 — 동작 순서 검증용)"
+    },
+    {
+      "id": "RTOS-B13",
+      "level": "B",
+      "title": "이벤트 그룹: wait-all/any와 clear-on-exit",
+      "goal": "여러 조건의 조합을 기다리는 이벤트 플래그와 태스크 동기화(rendezvous)를 구현한다",
+      "task": "미니 커널에 이벤트 그룹(set/clear/wait with all|any, clear on exit)을 구현하고, 3개 초기화 태스크가 모두 끝나야 메인 태스크가 시작되는 시나리오와 경쟁 조건을 테스트한다.",
+      "tags": [
+        "event-group",
+        "synchronization",
+        "flags"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M01",
+      "level": "M",
+      "title": "태스크 알림: 세마포어·이벤트 그룹의 경량 대체",
+      "goal": "task notification의 동작(값 덮어쓰기/증가/비트 OR)과 성능 이점·제약(수신자 1명)을 안다",
+      "task": "앞의 ISR→태스크 신호와 이벤트 그룹 예제를 xTaskNotify/ulTaskNotifyTake로 다시 구현해 RAM 사용량·호출 횟수당 시간을 비교하고, 수신자가 둘 이상 필요한 경우 왜 안 되는지 설명한다.",
+      "tags": [
+        "task-notification",
+        "performance",
+        "freertos"
+      ],
+      "env": "mac",
+      "env_note": "FreeRTOS POSIX/GCC 포트를 macOS에서 빌드(pthread 기반, 실시간성은 없음 — 동작 순서 검증용)"
+    },
+    {
+      "id": "RTOS-M02",
+      "level": "M",
+      "title": "ISR 지연 처리: FromISR API와 yield 요청",
+      "goal": "ISR을 짧게 유지하고 작업을 태스크로 넘기는 설계와 portYIELD_FROM_ISR의 의미를 이해한다",
+      "task": "미니 커널에 'ISR 컨텍스트' 플래그와 give_from_isr(&higher_woken)을 구현해 ISR 종료 시점에만 스위치가 일어나게 하고, 블로킹 API를 ISR에서 호출하면 assert되게 만든다.",
+      "tags": [
+        "isr-deferral",
+        "from-isr",
+        "yield"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M03",
+      "level": "M",
+      "title": "우선순위 역전 재현: Mars Pathfinder 시나리오",
+      "goal": "Low가 자원을 잡고 Medium이 Low를 선점해 High가 무한정 막히는 현상을 재현한다",
+      "task": "미니 커널에서 H/M/L 태스크와 일반 세마포어로 unbounded priority inversion을 만들어 실행 타임라인(tick별 실행 태스크)을 출력하고, High의 대기 시간이 Medium 실행 길이에 비례함을 보인다.",
+      "tags": [
+        "priority-inversion",
+        "pathfinder",
+        "timeline"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M04",
+      "level": "M",
+      "title": "우선순위 상속 구현과 연쇄 상속",
+      "goal": "뮤텍스 소유자의 우선순위를 대기자 최고 우선순위로 올리고 해제 시 복원한다",
+      "task": "미니 커널 뮤텍스에 priority inheritance를 구현(다중 뮤텍스 보유 시 복원 우선순위 계산, A→B→C 연쇄 상속 포함)하고, 앞 시나리오의 High 대기 시간이 bounded됨을 타임라인으로 검증한다.",
+      "tags": [
+        "priority-inheritance",
+        "mutex",
+        "kernel"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M05",
+      "level": "M",
+      "title": "우선순위 천장 프로토콜(PCP/IPCP)과 교착 방지",
+      "goal": "천장 우선순위로 우선순위 역전과 교착을 동시에 막는 원리를 구현으로 확인한다",
+      "task": "Immediate Priority Ceiling 뮤텍스를 구현하고 두 뮤텍스를 반대 순서로 잡는 교착 시나리오가 상속 방식에선 교착, IPCP에선 회피됨을 보이며, 최대 블로킹 시간이 임계구역 1개로 제한됨을 설명한다.",
+      "tags": [
+        "priority-ceiling",
+        "deadlock",
+        "mutex"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M06",
+      "level": "M",
+      "title": "블로킹 큐 구현: 대기 리스트와 타임아웃",
+      "goal": "RTOS 큐의 내부(송신/수신 대기 리스트, 우선순위순 깨우기, 타임아웃 해제)를 직접 만든다",
+      "task": "미니 커널에 고정 크기 메시지 큐를 구현해 가득 참/빔 시 블로킹, 대기자 중 최고 우선순위부터 깨우기, 타임아웃 시 대기 리스트 제거를 구현하고 경쟁 시나리오를 테스트한다.",
+      "tags": [
+        "queue",
+        "wait-list",
+        "timeout",
+        "kernel"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M07",
+      "level": "M",
+      "title": "Tick 처리와 지연 리스트: 정렬 리스트 vs 타이머 휠",
+      "goal": "많은 지연 태스크·타이머를 tick마다 효율적으로 처리하는 자료구조를 비교한다",
+      "task": "만료 시각 정렬 리스트(FreeRTOS 방식, overflow 리스트 포함)와 hashed timing wheel을 구현해 타이머 1만 개에서 tick당 처리 비용과 삽입 비용을 측정·비교한다.",
+      "tags": [
+        "tick",
+        "delayed-list",
+        "timer-wheel",
+        "see:DS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M08",
+      "level": "M",
+      "title": "태스크 스택 예산: ISR 중첩·예외 프레임 포함 최악 스택",
+      "goal": "도구 결과에 RTOS 컨텍스트·인터럽트 중첩 비용을 더해 태스크별 스택 크기를 확정한다",
+      "task": "TOOL-A08의 함수별 스택 사용량에 컨텍스트 저장 프레임(FPU 지연 스태킹 포함)과 최대 ISR 중첩 깊이를 더한 태스크별 스택 예산표를 계산하고, FreeRTOS POSIX 포트의 uxTaskGetStackHighWaterMark 실측과 비교해 여유율 정책을 정한다.",
+      "tags": [
+        "stack",
+        "rtos",
+        "see:TOOL"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M09",
+      "level": "M",
+      "title": "스택 오버플로 탐지: 카나리와 패턴 검사",
+      "goal": "FreeRTOS configCHECK_FOR_STACK_OVERFLOW 방법 1·2의 원리와 한계를 구현으로 이해한다",
+      "task": "미니 커널 태스크 스택 끝에 패턴을 채우고 컨텍스트 스위치마다 SP 범위 검사(방법1)+끝 16바이트 패턴 검사(방법2)를 넣어, 큰 지역 배열 태스크의 오버플로를 잡는지와 놓치는 경우(가드 건너뛰기)를 보인다.",
+      "tags": [
+        "stack-overflow",
+        "canary",
+        "detection"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M10",
+      "level": "M",
+      "title": "RTOS 힙 전략: heap_1~heap_5 비교와 heap_4 coalescing",
+      "goal": "결정성·단편화 관점에서 RTOS 메모리 할당 전략을 선택한다",
+      "task": "heap_4 방식(주소 정렬 free list + 인접 블록 병합) 할당기를 구현하고, 무작위 할당/해제 워크로드에서 heap_2 방식(병합 없음) 대비 단편화·최대 할당 실패 시점을 측정한다(일반 malloc 설계는 see:OS).",
+      "tags": [
+        "heap",
+        "allocator",
+        "fragmentation",
+        "see:OS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M11",
+      "level": "M",
+      "title": "Rate Monotonic 분석: Liu-Layland 경계와 RTA",
+      "goal": "태스크 세트의 스케줄 가능성을 이용률 경계와 응답시간 분석으로 판정한다",
+      "task": "(C, T, D) 태스크 세트를 입력받아 RM 우선순위 할당, U ≤ n(2^(1/n)-1) 판정, 반복식 응답시간 분석 R = C + Σ⌈R/Tj⌉Cj를 계산하는 도구를 작성하고, 경계는 실패지만 RTA는 통과하는 예를 찾는다.",
+      "tags": [
+        "rms",
+        "rta",
+        "schedulability"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M12",
+      "level": "M",
+      "title": "EDF 스케줄링 시뮬레이터와 RM 비교",
+      "goal": "동적 우선순위 EDF가 U ≤ 1까지 스케줄 가능하다는 점과 과부하 시 붕괴 양상을 확인한다",
+      "task": "주기 태스크 세트를 하이퍼피리어드 동안 RM과 EDF로 시뮬레이션해 데드라인 미스·선점 횟수를 비교하고, U > 1 과부하에서 EDF의 연쇄 미스(domino effect)를 보인다.",
+      "tags": [
+        "edf",
+        "rms",
+        "simulation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M13",
+      "level": "M",
+      "title": "FreeRTOS 내부 읽기: xTaskCreate부터 vTaskSwitchContext까지",
+      "goal": "실제 커널 코드에서 TCB·리스트·스케줄러 결정 경로를 추적하는 법을 익힌다",
+      "task": "FreeRTOS-Kernel의 tasks.c/list.c/queue.c에서 태스크 생성→ready 리스트 삽입→xTaskIncrementTick→taskSELECT_HIGHEST_PRIORITY_TASK 경로를 따라가 호출 다이어그램을 그리고, 미니 커널과의 차이 5가지를 코드 근거로 정리한다.",
+      "tags": [
+        "freertos",
+        "source-reading",
+        "kernel-internals"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-M14",
+      "level": "M",
+      "title": "재진입성과 스레드 안전: 공유 라이브러리 함수 보호",
+      "goal": "strtok·정적 버퍼 함수·newlib malloc/printf처럼 재진입 불가한 코드를 태스크 간에 공유할 때의 버그와 보호 방법을 안다",
+      "task": "미니 커널에서 정적 버퍼를 쓰는 포맷 함수와 strtok을 두 태스크가 선점 하에 공유해 출력이 섞이는 버그를 재현하고, 재진입 버전(_r)·뮤텍스 래핑·태스크별 컨텍스트(newlib __malloc_lock/reent 개념)로 각각 수정한다.",
+      "tags": [
+        "reentrancy",
+        "thread-safety",
+        "newlib"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-A01",
+      "level": "A",
+      "title": "Cortex-M 미니 RTOS 완성: 우선순위 스케줄러 + 동기화",
+      "goal": "호스트에서 만든 미니 커널을 실제 Cortex-M 포트로 옮겨 완결된 RTOS를 만든다",
+      "task": "ARM-A01의 PendSV 스위처를 바탕으로 태스크 초기 스택 프레임 구성·SVC 첫 태스크 시작을 추가하고, SysTick·비트맵 스케줄러·세마포어·뮤텍스(상속)·delay를 QEMU에서 동작시키고, 우선순위 역전 시나리오와 크리티컬 섹션(BASEPRI) 처리를 데모로 검증한다.",
+      "tags": [
+        "mini-rtos",
+        "port",
+        "cortex-m",
+        "pendsv",
+        "see:ARM"
+      ],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + qemu-system-arm -M mps2-an385(Cortex-M3), gdb로 PSP/레지스터 확인"
+    },
+    {
+      "id": "RTOS-A02",
+      "level": "A",
+      "title": "Tickless idle: 다음 만료 계산과 tick 보정",
+      "goal": "저전력을 위해 tick을 멈추는 설계와 시간 드리프트 보정을 구현한다",
+      "task": "미니 커널 idle에서 다음 지연 만료까지 tick을 억제하고 단발 타이머로 깨어난 뒤 경과 tick을 보정하는 로직을 시뮬레이션 시간으로 구현하고, 조기 인터럽트 웨이크업·최대 억제 길이 제한 케이스를 테스트한다.",
+      "tags": [
+        "tickless",
+        "low-power",
+        "timekeeping"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-A03",
+      "level": "A",
+      "title": "WCET 측정과 지터 분석",
+      "goal": "측정 기반 WCET의 한계(캐시·분기·입력 의존)를 이해하고 지터 분포를 보고한다",
+      "task": "필터/제어 루프 함수를 다양한 입력으로 수만 회 실행하며 사이클(호스트는 mach_absolute_time, 보드는 DWT CYCCNT)을 측정해 히스토그램·최대값·백분위를 내고, 캐시 플러시·입력 경로 차이가 최악값에 주는 영향을 분석한다.",
+      "tags": [
+        "wcet",
+        "jitter",
+        "measurement"
+      ],
+      "env": "mac",
+      "env_note": "호스트 측정은 OS 노이즈 포함 — 원리 학습용, 정밀 측정은 보드 DWT로 확장 가능"
+    },
+    {
+      "id": "RTOS-A04",
+      "level": "A",
+      "title": "확장 RTA: 블로킹 시간·릴리즈 지터·ISR 부하 반영",
+      "goal": "실제 시스템의 공유 자원 블로킹과 인터럽트 부하를 포함한 응답시간 분석을 수행한다",
+      "task": "RTA 도구에 블로킹 항 B(천장 프로토콜 기준), 릴리즈 지터 J, ISR을 최고 우선순위 태스크로 모델링하는 기능을 추가하고, 시뮬레이터 결과와 대조해 분석이 보수적(안전)인지 확인한다.",
+      "tags": [
+        "rta",
+        "blocking",
+        "jitter",
+        "schedulability"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-A05",
+      "level": "A",
+      "title": "비주기 작업 서버: polling server vs sporadic server",
+      "goal": "주기 태스크의 보장을 깨지 않으면서 비주기 이벤트 응답 시간을 줄이는 기법을 비교한다",
+      "task": "스케줄링 시뮬레이터에 background 처리, polling server, sporadic server(예산 보충 규칙)를 구현해 비주기 요청 평균/최대 응답 시간과 주기 태스크 데드라인 준수를 비교한다.",
+      "tags": [
+        "aperiodic",
+        "server",
+        "scheduling"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-A06",
+      "level": "A",
+      "title": "RTOS 트레이싱: 훅으로 이벤트 기록 → 타임라인",
+      "goal": "SystemView/Tracealyzer 같은 도구의 원리를 구현해 스케줄링 문제를 눈으로 본다",
+      "task": "FreeRTOS traceTASK_SWITCHED_IN/OUT 등 트레이스 매크로로 타임스탬프 이벤트를 링버퍼에 기록하고, python으로 태스크별 실행 타임라인(SVG/HTML)과 CPU 점유율을 생성한다.",
+      "tags": [
+        "tracing",
+        "visualization",
+        "freertos"
+      ],
+      "env": "mac",
+      "env_note": "FreeRTOS POSIX/GCC 포트를 macOS에서 빌드(pthread 기반, 실시간성은 없음 — 동작 순서 검증용)"
+    },
+    {
+      "id": "RTOS-A07",
+      "level": "A",
+      "title": "Zephyr 기초: west 빌드, 스레드·k_sem·k_msgq",
+      "goal": "Zephyr의 빌드 시스템(Kconfig/devicetree/west)과 커널 API를 FreeRTOS와 비교한다",
+      "task": "Zephyr SDK로 qemu_cortex_m3 보드 대상 앱을 빌드해 생산자/소비자 스레드(k_msgq), k_sem, k_timer를 구현하고, 같은 앱의 FreeRTOS 버전과 API·설정 방식·이미지 크기를 비교한다.",
+      "tags": [
+        "zephyr",
+        "west",
+        "kconfig"
+      ],
+      "env": "qemu",
+      "env_note": "Zephyr SDK + west(macOS 지원) 설치, west build -b qemu_cortex_m3 && west build -t run"
+    },
+    {
+      "id": "RTOS-A08",
+      "level": "A",
+      "title": "SMP RTOS: 코어 친화성, 스핀락, 공유 ready list",
+      "goal": "멀티코어 MCU(RP2040, 듀얼 코어 Cortex-M 등)에서 RTOS가 달라지는 지점을 이해한다",
+      "task": "pthread 2개를 '코어'로 삼은 스케줄러 시뮬레이터에 전역 ready list+스핀락, 코어 친화성 마스크, 크로스 코어 yield(IPI 대용 시그널)를 구현하고, 단일 코어 가정(인터럽트 끄기=상호배제)이 깨지는 사례를 보인다.",
+      "tags": [
+        "smp",
+        "spinlock",
+        "affinity"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "RTOS-A09",
+      "level": "A",
+      "title": "데드라인 미스 사후 분석: 트레이스 케이스 스터디",
+      "goal": "주어진 트레이스에서 데드라인 미스의 근본 원인을 찾아내는 디버깅 사고를 훈련한다",
+      "task": "의도적으로 버그(우선순위 역전, ISR 과다 실행, 큐 포화로 인한 블로킹, 잘못된 우선순위 할당)를 심은 시스템 4개를 실행해 트레이스를 얻고, 각 원인을 트레이스 근거로 진단한 리포트와 수정을 작성한다.",
+      "tags": [
+        "debugging",
+        "deadline-miss",
+        "root-cause"
+      ],
+      "env": "mac",
+      "env_note": "FreeRTOS POSIX/GCC 포트를 macOS에서 빌드(pthread 기반, 실시간성은 없음 — 동작 순서 검증용)"
+    },
+    {
+      "id": "RTOS-A10",
+      "level": "A",
+      "title": "RTOS 시스템 설계: 모터 제어 + 통신 + 로깅",
+      "goal": "실제 면접형 설계 문제로 태스크 분할·우선순위·IPC·ISR 경계를 결정하고 정당화한다",
+      "task": "10kHz 전류 루프(ISR), 1kHz 속도 루프, CAN 명령 수신, 플래시 로깅, 워치독이 있는 컨트롤러의 태스크/ISR 구조, 우선순위, 큐 깊이, 스택 예산을 설계하고 RTA로 스케줄 가능성을 보인 뒤 핵심 경로를 미니 커널로 구현한다.",
+      "tags": [
+        "system-design",
+        "task-partitioning",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

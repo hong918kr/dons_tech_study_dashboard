@@ -1,0 +1,636 @@
+{
+  "id": "RTLDV",
+  "intro": "RTL 설계·검증은 AI 가속기·SoC·실리콘 검증 팀에서 펌웨어/검증 엔지니어에게도 요구되는 공통 언어다. NVIDIA·Tenstorrent·Rivian 같은 회사의 면접은 FIFO·CDC·skid buffer·아비터를 화이트보드로 그리게 하고, assertion·formal·UVM·커버리지로 '어떻게 검증했는지'를 묻는다. 이 트랙은 맥에서 오픈소스 툴(iverilog·Verilator·yosys·SymbiYosys·cocotb)만으로 그 전 과정을 직접 해본다.",
+  "goals": [
+    "합성 가능한 SystemVerilog로 조합·순차·FSM·FIFO·파이프라인·아비터를 정확히 작성하고 합성 결과로 확인한다",
+    "CDC(2-FF·펄스·핸드셰이크·비동기 FIFO)와 리셋 전략을 설계하고 정적/동적으로 검증한다",
+    "cocotb 기반 driver/monitor/scoreboard, constrained random, 기능·코드 커버리지로 검증 환경을 구성한다",
+    "SVA assertion과 SymbiYosys formal(BMC·induction·cover)로 프로토콜 속성을 증명한다",
+    "UVM 아키텍처·RAL·회귀/triage 흐름을 설명하고 Python(pyuvm)으로 구현해 본다",
+    "lint·gate-level sim·타이밍 클로저·저전력 기법 등 사인오프 관점의 개념을 실습으로 연결한다"
+  ],
+  "prereq": [
+    "ARCH",
+    "EMU"
+  ],
+  "refs": [
+    {
+      "title": "Digital Design and Computer Architecture (Harris & Harris)"
+    },
+    {
+      "title": "SystemVerilog for Verification (Chris Spear, Greg Tumbush)"
+    },
+    {
+      "title": "IEEE 1800 SystemVerilog Standard"
+    },
+    {
+      "title": "Clifford Cummings papers (Async FIFO, CDC, Nonblocking assignments)",
+      "url": "http://www.sunburst-design.com/papers/"
+    },
+    {
+      "title": "cocotb documentation",
+      "url": "https://docs.cocotb.org/"
+    },
+    {
+      "title": "Verilator User Guide",
+      "url": "https://verilator.org/guide/latest/"
+    },
+    {
+      "title": "Yosys documentation",
+      "url": "https://yosyshq.readthedocs.io/"
+    },
+    {
+      "title": "SymbiYosys (sby) documentation",
+      "url": "https://symbiyosys.readthedocs.io/"
+    },
+    {
+      "title": "YosysHQ OSS CAD Suite",
+      "url": "https://github.com/YosysHQ/oss-cad-suite-build"
+    },
+    {
+      "title": "ZipCPU blog (formal verification, AXI, skid buffer tutorials)",
+      "url": "https://zipcpu.com/"
+    },
+    {
+      "title": "pyuvm (Python UVM on cocotb)",
+      "url": "https://github.com/pyuvm/pyuvm"
+    },
+    {
+      "title": "PeakRDL-regblock (SystemRDL → CSR RTL)",
+      "url": "https://peakrdl-regblock.readthedocs.io/"
+    },
+    {
+      "title": "Accellera UVM standard",
+      "url": "https://www.accellera.org/downloads/standards/uvm"
+    }
+  ],
+  "items": [
+    {
+      "id": "RTLDV-B01",
+      "level": "B",
+      "title": "RTL 툴체인 셋업: iverilog·Verilator·GTKWave와 자기검사 TB",
+      "goal": "HDL 소스 → 시뮬레이션 → 파형 → lint로 이어지는 맥 로컬 RTL 개발 루프를 손에 익힌다.",
+      "task": "8비트 가산기(carry-out 포함)와 4:1 MUX를 Verilog로 작성하고, 전수 입력을 돌며 기대값과 비교해 PASS/FAIL을 출력하는 자기검사(self-checking) Verilog 테스트벤치를 iverilog로 실행·$dumpvars VCD를 GTKWave로 확인한 뒤 같은 RTL을 verilator --lint-only -Wall로 경고 0개로 만든다(C++ TB 방식은 see:EMU-B06).",
+      "tags": [
+        "toolchain",
+        "iverilog",
+        "verilator",
+        "self-checking-tb",
+        "see:EMU"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator gtkwave — 맥에서 HDL 시뮬레이터만 사용, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-B02",
+      "level": "B",
+      "title": "Blocking vs Non-blocking과 래치 추론 함정",
+      "goal": "always_ff/always_comb 코딩 규칙을 지키지 않을 때 생기는 sim-synth mismatch와 래치를 직접 재현한다.",
+      "task": "3단 시프트 레지스터를 '=' 와 '<=' 로 각각 작성해 시뮬레이션 결과 차이를 파형으로 보이고, if에 else가 빠진 always @(*) 블록과 불완전 sensitivity list 예제를 만들어 yosys 'proc; opt; stat'에서 $dlatch 셀이 추론되는 것과 RTL/게이트 시뮬레이션 불일치를 확인한 뒤 default 할당으로 수정한다.",
+      "tags": [
+        "blocking",
+        "nonblocking",
+        "latch",
+        "sim-synth-mismatch",
+        "yosys"
+      ],
+      "env": "fpga",
+      "env_note": "brew install yosys icarus-verilog — 맥에서 합성·시뮬레이션만 수행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-B03",
+      "level": "B",
+      "title": "조합 논리 RTL: 디코더·우선순위 인코더·One-hot MUX",
+      "goal": "case/unique/priority, 파라미터화된 조합 블록을 합성 가능한 형태로 작성한다.",
+      "task": "N비트 파라미터 우선순위 인코더(valid 출력 포함), 3-to-8 디코더, one-hot 선택 AND-OR MUX를 SystemVerilog로 작성하고 N=8/16에서 전수 테스트하며, unique case를 깨는 입력(두 비트 동시 on)에서 Verilator --assert 경고가 나는지 확인한다(C 진리표 모델은 see:ARCH-B05).",
+      "tags": [
+        "combinational",
+        "priority-encoder",
+        "unique-case",
+        "see:ARCH"
+      ],
+      "env": "fpga",
+      "env_note": "brew install verilator gtkwave — 맥에서 Verilator만 사용, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-B04",
+      "level": "B",
+      "title": "순차 로직 RTL: 카운터·LFSR·에지 검출·÷3 클럭 분주",
+      "goal": "플립플롭 기반 기본 블록과 '클럭 대신 enable' 원칙을 RTL로 체득한다.",
+      "task": "업/다운 카운터, 16비트 최대주기 LFSR(TB에서 주기 65535 확인), 상승/하강 에지 검출기, 50% duty ÷3 분주기(posedge+negedge 조합, 면접 단골)를 작성하고, 분주 클럭으로 다른 플롭을 구동하는 버전과 clock-enable 버전을 비교해 왜 생성 클럭 대신 enable을 써야 하는지 주석으로 정리한다(C 모델은 see:ARCH-B06).",
+      "tags": [
+        "sequential",
+        "lfsr",
+        "edge-detect",
+        "clock-divider",
+        "clock-enable",
+        "see:ARCH"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator gtkwave — 맥에서 HDL 시뮬레이터만 사용, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-B05",
+      "level": "B",
+      "title": "FSM 코딩 스타일: Moore/Mealy·인코딩 선택",
+      "goal": "2-process/3-process FSM 코딩과 binary·one-hot·gray 상태 인코딩의 트레이드오프를 설명한다.",
+      "task": "'1011'(겹침 허용) 시퀀스 검출기를 Moore/Mealy로, 그리고 UART TX(IDLE→START→DATA×8→STOP) FSM을 3-process 스타일로 작성해 TB로 검증하고, yosys fsm 패스로 상태 인코딩을 binary/one-hot으로 바꿔 셀 수를 비교하며 정의되지 않은 상태에서 IDLE 복귀(default)를 확인한다(C 버전은 see:ARCH-B07).",
+      "tags": [
+        "fsm",
+        "moore",
+        "mealy",
+        "one-hot",
+        "uart-tx",
+        "see:ARCH"
+      ],
+      "env": "fpga",
+      "env_note": "brew install yosys icarus-verilog — 맥에서 합성·시뮬레이션만 수행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-B06",
+      "level": "B",
+      "title": "리셋 전략: Sync/Async 리셋과 리셋 동기화기",
+      "goal": "비동기 assert·동기 deassert 리셋 동기화기와 리셋 없는 데이터패스 플롭의 이유를 설명한다.",
+      "task": "동기 리셋/비동기 리셋 카운터와 2-FF 리셋 동기화기(async assert, sync deassert)를 작성하고, iverilog에서 리셋 해제를 클럭 에지 ±수 ps 위치로 스윕하는 TB로 '동기화기 없을 때 플롭마다 해제 사이클이 갈리는' 상황을 모델링해 보이며, 데이터패스 플롭에서 리셋을 뺐을 때의 면적 차이를 yosys stat로 확인한다(리셋 원인 디코딩은 see:ARCH-B14).",
+      "tags": [
+        "reset",
+        "reset-synchronizer",
+        "async-reset",
+        "see:ARCH"
+      ],
+      "env": "fpga",
+      "env_note": "brew install yosys icarus-verilog — 맥에서 합성·시뮬레이션만 수행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-B07",
+      "level": "B",
+      "title": "SystemVerilog 구조화: parameter·generate·struct·interface",
+      "goal": "재사용 가능한 RTL을 위한 SV 문법과 Verilator/iverilog 지원 범위를 안다.",
+      "task": "packed struct로 패킷 헤더를 정의하고, generate for로 N입력 가산기 트리(파이프라인 레지스터 옵션 parameter)를, interface+modport로 valid/ready 버스를 정의해 하나의 top에서 연결한 뒤 N=4/8/16을 Verilator로 빌드·검증하고, 같은 코드를 iverilog -g2012로 돌려 지원되지 않는 구문 목록을 정리한다.",
+      "tags": [
+        "systemverilog",
+        "generate",
+        "interface",
+        "packed-struct",
+        "parameter"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator gtkwave — 맥에서 HDL 시뮬레이터만 사용, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-B08",
+      "level": "B",
+      "title": "동기 FIFO RTL: Full/Empty·Count·FWFT",
+      "goal": "포인터 여분 비트로 full/empty를 구분하는 동기 FIFO를 면접에서 바로 쓸 수 있게 만든다.",
+      "task": "DEPTH·WIDTH 파라미터 동기 FIFO를 (1) 포인터 MSB 확장 방식 (2) count 레지스터 방식으로 각각 작성하고 almost_full/almost_empty와 first-word-fall-through 옵션을 넣은 뒤, 큐 모델과 매 사이클 비교하는 Verilog TB로 동시 push/pop at full·empty, overflow/underflow 시도를 검증한다(링 버퍼 SW 버전은 see:DS).",
+      "tags": [
+        "fifo",
+        "sync-fifo",
+        "full-empty",
+        "fwft",
+        "see:DS"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator gtkwave — 맥에서 HDL 시뮬레이터만 사용, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-B09",
+      "level": "B",
+      "title": "cocotb 입문: Python 테스트벤치로 FIFO 구동",
+      "goal": "코루틴 기반 cocotb TB(Clock, RisingEdge, ReadOnly, 레퍼런스 모델)를 작성하고 시뮬레이터를 바꿔 실행한다.",
+      "task": "B08 동기 FIFO에 대해 cocotb 테스트 3개(기본 순서 보존, 랜덤 push/pop 1e4 사이클 + Python deque 모델 비교, 리셋 중 동작)를 작성하고 Makefile에서 SIM=icarus와 SIM=verilator로 각각 실행해 결과·속도를 비교하며, 실패 시 seed(RANDOM_SEED)로 재현하는 방법을 확인한다.",
+      "tags": [
+        "cocotb",
+        "python-tb",
+        "reference-model",
+        "fifo"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-B10",
+      "level": "B",
+      "title": "Valid/Ready 핸드셰이크 RTL 규칙과 레지스터 슬라이스",
+      "goal": "AXI-Stream류 핸드셰이크 규칙(valid는 ready에 의존 금지, valid 중 데이터 유지)을 RTL과 TB로 강제한다.",
+      "task": "valid/ready 1단 레지스터 슬라이스(forward-registered)를 작성하고 cocotb TB에서 소스 valid·싱크 ready를 랜덤으로 토글하며 데이터 손실/중복이 없음을 시퀀스 번호로 검증한 뒤, ready가 꺾이는 사이클에 data가 바뀌는 버그 버전을 만들어 TB 체커가 잡는지 확인한다(신호 vs 트랜잭션 모델은 see:EMU-B05, AXI 채널 C 모델은 see:ARCH-M14).",
+      "tags": [
+        "valid-ready",
+        "handshake",
+        "register-slice",
+        "axi-stream",
+        "see:EMU",
+        "see:ARCH"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-B11",
+      "level": "B",
+      "title": "합성 기초: yosys로 셀·면적·메모리 추론 읽기",
+      "goal": "RTL 한 줄이 어떤 하드웨어(LUT/FF/MUX/RAM)가 되는지 합성 결과로 확인하는 습관을 들인다.",
+      "task": "앞 아이템의 FIFO·FSM·가산기 트리를 yosys synth / synth_ice40으로 합성해 stat(LUT·FF·carry 수)을 표로 비교하고, FIFO 저장소가 SB_RAM40_4K로 추론되는 코딩 패턴과 비동기 읽기 때문에 FF로 풀리는 패턴을 비교하며 read-during-write 동작을 TB로 확인한다.",
+      "tags": [
+        "synthesis",
+        "yosys",
+        "memory-inference",
+        "area"
+      ],
+      "env": "fpga",
+      "env_note": "brew install yosys icarus-verilog — 맥에서 합성·시뮬레이션만 수행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M01",
+      "level": "M",
+      "title": "Skid Buffer: 등록된 Ready로 풀 스루풋 유지",
+      "goal": "ready를 레지스터로 끊으면서도 버블 없이 100% 처리량을 내는 2-entry skid buffer를 설계한다.",
+      "task": "B10 레지스터 슬라이스를 ready까지 등록하는 skid buffer로 확장하고 cocotb TB에서 (1) 상시 ready 시 1 beat/cycle (2) 랜덤 backpressure에서 손실·중복 0 (3) 단순 ready 등록 버전이 50% 처리량으로 떨어지는 것을 측정해 비교한다(Tenstorrent/NVIDIA RTL 면접 단골).",
+      "tags": [
+        "skid-buffer",
+        "valid-ready",
+        "throughput",
+        "pipeline"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M02",
+      "level": "M",
+      "title": "파이프라인 데이터패스: Stall·Flush·Bubble Collapse",
+      "goal": "valid/ready 다단 파이프라인에서 stall 전파와 bubble 제거, flush를 정확히 구현한다.",
+      "task": "3단 곱셈-누산 파이프라인을 (1) 전역 stall 방식 (2) 단별 valid/ready(bubble collapse) 방식으로 작성하고 cocotb로 동일 랜덤 입력·backpressure에서 처리량과 지연(cycle)을 측정하며, flush 입력이 들어오면 진행 중 결과를 폐기하는 동작을 Python 모델과 비교해 검증한다.",
+      "tags": [
+        "pipeline",
+        "stall",
+        "flush",
+        "bubble",
+        "latency"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M03",
+      "level": "M",
+      "title": "아비터 RTL: Fixed·Round-Robin·Weighted RR",
+      "goal": "마스크 기반 라운드로빈 아비터를 조합 깊이와 공정성까지 고려해 설계한다.",
+      "task": "N요청 fixed-priority, 마스크(또는 double-width 트릭) 라운드로빈, 가중 RR 아비터를 RTL로 작성하고 cocotb에서 grant one-hot·요청 없는 grant 금지·N사이클 내 무조건 서비스(starvation-free)를 체크하며, 각 방식의 yosys 셀 수와 논리 깊이를 비교한다(지연·대역폭 C 시뮬레이션은 see:ARCH-A10).",
+      "tags": [
+        "arbiter",
+        "round-robin",
+        "fairness",
+        "starvation",
+        "see:ARCH"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M04",
+      "level": "M",
+      "title": "고정소수점 데이터패스 RTL: Signed·확장·포화",
+      "goal": "signed/unsigned 혼용, 비트폭 확장, 반올림·포화에서 생기는 RTL 버그를 피한다.",
+      "task": "Q1.15 × Q1.15 → Q2.30 곱셈과 누산기(포화·round-to-nearest 옵션)를 SystemVerilog로 작성하고 cocotb에서 numpy 정수 모델과 경계값(-1×-1, 최대 누산 overflow) 포함 1e5 랜덤 벡터를 비교하며, $signed 누락·부호 확장 누락 버그를 일부러 넣어 어떤 입력에서 드러나는지 기록한다(Q-format 이론은 see:DSP).",
+      "tags": [
+        "fixed-point",
+        "signed",
+        "saturation",
+        "mac",
+        "see:DSP"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M05",
+      "level": "M",
+      "title": "CDC 1: 2-FF 동기화기·펄스 동기화·Req/Ack 핸드셰이크",
+      "goal": "단일 비트·펄스·멀티비트 신호를 클럭 도메인 사이로 안전하게 넘기는 3가지 표준 회로를 구현한다.",
+      "task": "2-FF 레벨 동기화기, 토글 기반 펄스 동기화기, 4-phase req/ack 멀티비트 버스 동기화기를 RTL로 작성하고 서로소 주기 두 클럭+랜덤 위상 cocotb TB에서 펄스 유실 0·데이터 일관성을 검증하며, 동기화기 출력에 랜덤 1사이클 지연을 주입하는 메타안정성 모델로 설계가 견디는지 확인하고 MTBF 식으로 2-FF vs 3-FF를 계산한다.",
+      "tags": [
+        "cdc",
+        "synchronizer",
+        "pulse-sync",
+        "handshake",
+        "mtbf"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M06",
+      "level": "M",
+      "title": "CDC 2: 비동기 FIFO RTL (Gray 포인터)",
+      "goal": "Cummings 스타일 비동기 FIFO의 full/empty 생성과 Gray 포인터 동기화를 RTL로 구현·검증한다.",
+      "task": "Gray 코드 읽기/쓰기 포인터와 2-FF 동기화로 full/empty를 생성하는 비동기 FIFO를 작성하고 클럭비(1:1, 3:7, 10:1)와 랜덤 지터를 바꿔가며 cocotb로 순서 보존·overflow/underflow 0을 검증하며, 이진 포인터를 그대로 넘기는 버그 버전이 실패하는 시드를 찾는다(C 이벤트 모델은 see:ARCH-A07).",
+      "tags": [
+        "async-fifo",
+        "gray-code",
+        "cdc",
+        "see:ARCH"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M07",
+      "level": "M",
+      "title": "Lint와 정적 CDC 검사: Verilator -Wall + 넷리스트 스크립트",
+      "goal": "lint 경고를 분류해 고치고, 간단한 구조적 CDC 검사를 직접 만들어 상용 CDC 툴이 무엇을 보는지 이해한다.",
+      "task": "WIDTH·UNOPTFLAT(조합 루프)·LATCH·MULTIDRIVEN·CASEINCOMPLETE 경고를 유발하는 RTL 모음을 만들어 verilator --lint-only -Wall로 잡고 수정한 뒤, yosys write_json 넷리스트를 Python으로 읽어 '다른 클럭 도메인 플롭이 동기화기 없이 직접 D로 들어가는 경로'와 '동기화 전 조합 로직(glitch)'을 찾아내는 CDC 체커를 작성해 M05/M06 RTL과 일부러 망가뜨린 버전에 적용한다.",
+      "tags": [
+        "lint",
+        "verilator",
+        "cdc-check",
+        "netlist",
+        "yosys"
+      ],
+      "env": "fpga",
+      "env_note": "brew install verilator yosys + python3 — 맥에서 정적 분석만, 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M08",
+      "level": "M",
+      "title": "SVA 기초: Immediate·Concurrent Assertion으로 프로토콜 체크",
+      "goal": "|->, |=>, ##[m:n], $rose/$stable/$past로 핸드셰이크·FIFO 규칙을 assertion으로 쓴다.",
+      "task": "B10/M01 valid/ready 인터페이스에 'valid && !ready 이면 다음 사이클에도 valid·data 유지', B08 FIFO에 'full일 때 push 금지', 'pop 후 count 감소'를 SVA로 작성해 bind 파일로 붙이고 Verilator --assert(또는 --timing)로 실행해 의도적 버그 3종이 각각 어느 assertion에서 몇 사이클에 걸리는지 리포트한다.",
+      "tags": [
+        "sva",
+        "assertion",
+        "bind",
+        "protocol-check",
+        "verilator"
+      ],
+      "env": "fpga",
+      "env_note": "brew install verilator gtkwave — 맥에서 Verilator만 사용, FPGA 보드 불필요; Verilator 5.x의 SVA 지원 범위 내에서 작성"
+    },
+    {
+      "id": "RTLDV-M09",
+      "level": "M",
+      "title": "Formal 입문: SymbiYosys BMC·k-Induction",
+      "goal": "assume/assert/cover와 BMC·induction의 차이를 알고 반례 트레이스를 읽는다.",
+      "task": "B08 동기 FIFO에 formal 속성(count ≤ DEPTH, empty⇔count==0, 넣은 데이터가 순서대로 나옴 — 2-심볼 트릭)을 작성해 sby로 bmc depth 20을 통과시키고, prove(k-induction)가 실패하는 경우 반례 VCD를 분석해 포인터-카운트 불변식을 추가로 assert해 증명을 완료하며 cover로 full 도달 트레이스를 생성한다.",
+      "tags": [
+        "formal",
+        "symbiyosys",
+        "bmc",
+        "k-induction",
+        "cover"
+      ],
+      "env": "fpga",
+      "env_note": "YosysHQ oss-cad-suite(darwin-arm64 tarball: yosys+sby+yices/boolector) 압축 해제만으로 맥에서 실행 — 보드 불필요. 오픈소스 yosys는 SVA 일부만 지원(immediate assert/assume/cover + 단순 concurrent)이므로 그 범위로 작성"
+    },
+    {
+      "id": "RTLDV-M10",
+      "level": "M",
+      "title": "cocotb 검증 구조화: Driver·Monitor·Scoreboard",
+      "goal": "UVM 없이도 트랜잭션 레벨 TB 구성요소를 분리해 재사용 가능한 검증 환경을 만든다.",
+      "task": "valid/ready 스트림 DUT(M02 파이프라인)에 대해 Transaction 클래스, 입력 Driver(랜덤 idle 삽입), 입출력 Monitor, 예상값 큐를 가진 Scoreboard를 cocotb로 분리 구현하고, 테스트 종료 시 drain·미매칭 트랜잭션 보고·타임아웃 watchdog를 넣은 뒤 같은 컴포넌트를 M01 skid buffer에 재사용한다(Python 모델 기반 scoreboard 개념은 see:SIV-A01).",
+      "tags": [
+        "cocotb",
+        "driver",
+        "monitor",
+        "scoreboard",
+        "see:SIV"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M11",
+      "level": "M",
+      "title": "Constrained Random 자극: 제약·분포·시드 재현",
+      "goal": "제약 기반 랜덤(rand/constraint/dist) 개념을 Python으로 쓰고 시드로 재현 가능한 랜덤 테스트를 만든다.",
+      "task": "패킷 트랜잭션(길이 1–256, 64B 정렬 주소, 4KB 경계 미횡단, 길이 분포 dist 10/80/10)을 pyvsc 제약으로 랜덤화해 M10 Driver에 연결하고, 제약 충돌 시 처리·solve-before에 해당하는 순서 제어를 실험하며, 실패 시 seed+트랜잭션 로그로 단일 실패 재현 테스트를 자동 생성한다(SV rand/constraint 문법과 1:1 대응표 포함).",
+      "tags": [
+        "constrained-random",
+        "pyvsc",
+        "seed",
+        "reproducibility"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog + pip install cocotb pyvsc (또는 cocotb-coverage의 crv) — 맥 시뮬레이션만, 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M12",
+      "level": "M",
+      "title": "기능·코드 커버리지: Covergroup·Cross·Hole 분석",
+      "goal": "기능 커버리지(bin/cross)와 코드 커버리지(line/toggle)를 구분해 측정하고 커버리지 클로저를 수행한다.",
+      "task": "B08 FIFO에 cocotb-coverage로 fill level bin, full/empty 전이, 'full에서 동시 push/pop'·'almost_full 경계' cross를 정의하고, Verilator --coverage로 line/toggle 커버리지를 함께 수집해 verilator_coverage로 annotate한 뒤, 랜덤만으로 못 채운 hole을 directed 테스트로 메워 커버리지 수렴 곡선을 그린다(Python 모델 커버리지는 see:SIV-M13).",
+      "tags": [
+        "functional-coverage",
+        "code-coverage",
+        "cross",
+        "coverage-closure",
+        "see:SIV"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb cocotb-coverage — 맥 시뮬레이션만, 보드 불필요"
+    },
+    {
+      "id": "RTLDV-M13",
+      "level": "M",
+      "title": "레지스터 블록 RTL 생성: SystemRDL → APB CSR",
+      "goal": "SystemRDL 기술서에서 CSR RTL·헤더를 생성하고 RW/RO/W1C/RC 필드를 RTL 레벨에서 검증한다.",
+      "task": "타이머 IP의 CTRL/LOAD/VALUE/INTSTS(W1C)/INTEN 레지스터를 SystemRDL로 기술해 PeakRDL-regblock으로 APB4 CSR RTL과 C 헤더를 생성하고, 하드웨어 측 hwset으로 인터럽트 비트를 세우는 카운터를 붙인 뒤 cocotb APB 드라이버로 리셋값·RW·W1C·sw-hw 동시 접근 우선순위를 검증한다(JSON 기술서→C 헤더 SW 흐름은 see:SIV-B01, see:EMU-B09).",
+      "tags": [
+        "csr",
+        "systemrdl",
+        "peakrdl",
+        "apb",
+        "w1c",
+        "see:SIV",
+        "see:EMU"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog + pip install cocotb peakrdl peakrdl-regblock — 맥 시뮬레이션만, 보드 불필요"
+    },
+    {
+      "id": "RTLDV-A01",
+      "level": "A",
+      "title": "UVM 아키텍처 실습: pyuvm Agent·Env·Sequence",
+      "goal": "UVM의 컴포넌트 계층·phase·sequence/sequencer·factory override를 직접 구성해 SV UVM 코드와 대응시킨다.",
+      "task": "M10 cocotb 컴포넌트를 pyuvm으로 옮겨 uvm_agent(sequencer/driver/monitor), uvm_env, uvm_scoreboard(analysis port 연결), base/random/backpressure sequence를 만들고, factory override로 에러 주입 driver로 교체하는 테스트를 작성한 뒤 각 클래스·phase를 SystemVerilog UVM 등가 코드 스니펫과 나란히 정리해 면접에서 UVM TB 구조를 화이트보드로 설명할 수 있게 한다.",
+      "tags": [
+        "uvm",
+        "pyuvm",
+        "agent",
+        "sequence",
+        "factory"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb pyuvm — 맥에서 Python UVM으로 실행(상용 SV UVM 시뮬레이터 불필요), 보드 불필요"
+    },
+    {
+      "id": "RTLDV-A02",
+      "level": "A",
+      "title": "UVM RAL: 레지스터 모델·Predictor·Mirror 검사",
+      "goal": "레지스터 추상화 계층(RAL)의 frontdoor/backdoor 접근, adapter, predictor, mirror 비교를 구현한다.",
+      "task": "M13에서 생성한 APB CSR 블록에 대해 pyuvm RAL(또는 직접 만든 미니 uvm_reg 계층)로 레지스터 모델·APB adapter·explicit predictor를 구성하고, hw_reset/bit_bash에 해당하는 내장 시퀀스와 mirror(check) 비교를 실행해 W1C 필드 access 정의를 틀리게 만든 모델 버그와 RTL 버그를 각각 구분해 잡는다(실리콘 측 리셋값·walking 테스트는 see:SIV-B03).",
+      "tags": [
+        "uvm-ral",
+        "register-model",
+        "predictor",
+        "bit-bash",
+        "see:SIV"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb pyuvm — 맥에서 Python UVM으로 실행(상용 SV UVM 시뮬레이터 불필요), 보드 불필요"
+    },
+    {
+      "id": "RTLDV-A03",
+      "level": "A",
+      "title": "회귀 인프라: 시드·테스트 리스트·커버리지 병합·Triage",
+      "goal": "수천 개 랜덤 시드 회귀를 돌리고 실패를 분류·재현하는 RTL 검증 회귀 파이프라인을 만든다.",
+      "task": "테스트×시드 매트릭스를 병렬 실행하는 Python 러너(결과 JSON, 타임아웃, 재실행 시 파형 덤프 on)를 작성하고 verilator_coverage로 회차별 커버리지를 병합, 실패 로그를 assertion명·메시지 정규화 시그니처로 묶어 'first failing seed + 재현 커맨드' 리포트를 생성하며, 일부러 넣은 저확률 버그가 몇 시드에서 처음 잡히는지 측정한다(실리콘 로그 triage는 see:SIV-M10, CI 파이프라인은 see:INFRA).",
+      "tags": [
+        "regression",
+        "seeds",
+        "triage",
+        "coverage-merge",
+        "see:SIV",
+        "see:INFRA"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb cocotb-coverage — 맥 시뮬레이션만, 보드 불필요"
+    },
+    {
+      "id": "RTLDV-A04",
+      "level": "A",
+      "title": "AXI4 버스트 슬레이브 RTL과 프로토콜 체커",
+      "goal": "INCR/WRAP/FIXED 버스트 주소 계산, 4KB 경계, ID별 응답 순서를 RTL로 구현하고 체커로 검증한다.",
+      "task": "AXI4 메모리 슬레이브(outstanding 2, WRAP 주소 계산, WSTRB, SLVERR 응답)를 SystemVerilog로 작성하고, AW/W/B/AR/R 각 채널 규칙(VALID 유지, WLAST 위치, 4KB 비횡단, 같은 ID 순서)을 SVA 프로토콜 체커로 bind해 cocotb 랜덤 마스터로 검증한다(채널 C 모델은 see:ARCH-M14, AXI-lite Verilator TB는 see:EMU-M01, 인터커넥트 수준 ordering은 see:SOCX).",
+      "tags": [
+        "axi4",
+        "burst",
+        "wrap",
+        "protocol-checker",
+        "sva",
+        "see:ARCH",
+        "see:EMU",
+        "see:SOCX"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요; Verilator --assert로 SVA 체커 실행"
+    },
+    {
+      "id": "RTLDV-A05",
+      "level": "A",
+      "title": "Formal 심화: AXI4-Lite 슬레이브 인터페이스 증명",
+      "goal": "인터페이스 속성 세트로 버스 슬레이브의 프로토콜 준수를 무한 깊이까지 증명하고 induction 실패를 해결한다.",
+      "task": "EMU-M01과 같은 AXI4-Lite 레지스터 슬레이브에 ZipCPU faxil_slave 스타일의 마스터 assume/슬레이브 assert 속성(outstanding 카운터, 응답 대기 상한)을 작성해 sby prove를 시도하고, 의도적으로 넣은 '동시 AW·W 도착 시 BVALID 누락' 버그의 반례를 확인·수정한 뒤 induction 실패를 내부 카운터 불변식으로 강화해 증명을 완료한다(see:EMU-M01).",
+      "tags": [
+        "formal",
+        "axi-lite",
+        "induction",
+        "symbiyosys",
+        "see:EMU"
+      ],
+      "env": "fpga",
+      "env_note": "YosysHQ oss-cad-suite(darwin-arm64 tarball: yosys+sby+yices/boolector) 압축 해제만으로 맥에서 실행 — 보드 불필요. 오픈소스 yosys는 SVA 일부만 지원(immediate assert/assume/cover + 단순 concurrent)이므로 그 범위로 작성"
+    },
+    {
+      "id": "RTLDV-A06",
+      "level": "A",
+      "title": "Gate-level 시뮬레이션과 X-전파 문제",
+      "goal": "RTL에선 통과하지만 게이트 넷리스트에서 실패하는 X-optimism/초기화 문제를 재현하고 고친다.",
+      "task": "리셋되지 않은 데이터패스 플롭과 if(x)/case(x)의 X-optimism을 가진 RTL을 yosys로 합성해 write_verilog 넷리스트를 iverilog로 gate-level 시뮬레이션하고, RTL 시뮬레이션과 출력이 갈리는 지점을 파형으로 추적하며, Verilator --x-assign/--x-initial unique 랜덤 초기화로 같은 문제를 RTL 단계에서 잡는 방법을 비교한다.",
+      "tags": [
+        "gate-level-sim",
+        "x-propagation",
+        "x-optimism",
+        "initialization",
+        "yosys"
+      ],
+      "env": "fpga",
+      "env_note": "brew install yosys icarus-verilog — 맥에서 합성·시뮬레이션만 수행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-A07",
+      "level": "A",
+      "title": "타이밍 클로저: 파이프라이닝·리타이밍과 등가성 검사",
+      "goal": "크리티컬 패스를 찾아 파이프라인/리타이밍으로 Fmax를 올리고, 변경이 기능을 바꾸지 않았음을 등가성 검사로 보인다.",
+      "task": "32비트 MAC과 우선순위 인코더 체인을 yosys+nextpnr-ice40으로 P&R해 타이밍 리포트에서 크리티컬 패스·Fmax를 읽고, 파이프라인 단 추가·리타이밍·one-hot 재인코딩으로 Fmax를 개선한 뒤 원본 대비 등가성(조합 변경은 yosys equiv_*, 지연 추가는 latency 보정 miter + sby)을 증명하며, multicycle/false path·SDC 제약 개념을 결과와 연결해 정리한다(setup/hold 산수는 see:ARCH-B13).",
+      "tags": [
+        "timing-closure",
+        "fmax",
+        "retiming",
+        "equivalence-check",
+        "nextpnr",
+        "see:ARCH"
+      ],
+      "env": "fpga",
+      "env_note": "YosysHQ oss-cad-suite(darwin-arm64: yosys + nextpnr-ice40/ecp5) — 보드 없이 P&R 타이밍 리포트(Fmax)만 사용"
+    },
+    {
+      "id": "RTLDV-A08",
+      "level": "A",
+      "title": "저전력 RTL: Clock Gating·Operand Isolation·Toggle 측정",
+      "goal": "enable 기반 클럭 게이팅 추론, operand isolation, 파워 도메인 isolation/retention 검증을 RTL 수준에서 다룬다.",
+      "task": "M04 MAC 데이터패스에 ICG 셀 모델(래치+AND) 기반 clock gating과 입력 operand isolation을 넣고 동일 워크로드 VCD의 toggle 수를 비교해 동적 전력 감소를 추정하며, 전원 차단 도메인 출력에 isolation clamp·retention 레지스터 모델을 넣고 'shutdown 중 출력은 clamp 값', 'restore 후 상태 복원'을 SVA로 검증한다(toggle→전력 추정은 see:EMU-A06, NPU 전력 관리는 see:NPU-A07).",
+      "tags": [
+        "low-power",
+        "clock-gating",
+        "operand-isolation",
+        "isolation",
+        "retention",
+        "see:EMU",
+        "see:NPU"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요"
+    },
+    {
+      "id": "RTLDV-A09",
+      "level": "A",
+      "title": "저지연 스트리밍 패킷 파서 RTL (64-bit AXI-Stream)",
+      "goal": "beat 경계를 가로지르는 헤더 필드를 라인레이트로 파싱하는 cut-through RTL을 설계한다.",
+      "task": "64비트 AXI-Stream(tkeep 포함)으로 들어오는 Ethernet/IPv4/UDP 프레임에서 dst MAC·IP·UDP 포트·페이로드 첫 8B를 추출하는 파서를 작성해 VLAN 유무로 바뀌는 오프셋을 처리하고, cocotb에서 scapy로 만든 패킷과 비교하며 첫 바이트 입력→필드 valid까지의 사이클 지연과 1 beat/cycle 유지를 측정한다(HFT FPGA 맥락은 see:QFIN, see:LLAT).",
+      "tags": [
+        "packet-parser",
+        "axi-stream",
+        "low-latency",
+        "cut-through",
+        "see:QFIN",
+        "see:LLAT"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb — 맥에서 시뮬레이터로만 실행, FPGA 보드 불필요 (scapy도 pip)"
+    },
+    {
+      "id": "RTLDV-A10",
+      "level": "A",
+      "title": "버그 헌팅: 파형·Assertion·Formal Cover로 RTL 결함 국소화",
+      "goal": "주어진 버그 RTL을 파형과 assertion, formal cover로 체계적으로 좁혀 근본 원인을 찾는 디버그 루틴을 만든다.",
+      "task": "앞서 만든 async FIFO·skid buffer·arbiter에 각각 은닉 버그(Gray 변환 비트 오류, skid 2번째 엔트리 덮어쓰기, RR 마스크 갱신 누락)를 넣은 버전을 서로 섞어 놓고, 실패 시드 → 파형 → assertion 추가 → sby cover/bmc로 최소 반례 트레이스 생성까지의 과정을 각 버그별 RCA 리포트(증상·근본원인·수정·재발 방지 assertion)로 작성한다(면접 '이 파형에서 버그를 찾아라' 대비).",
+      "tags": [
+        "debug",
+        "waveform",
+        "root-cause",
+        "formal-cover",
+        "assertion"
+      ],
+      "env": "fpga",
+      "env_note": "YosysHQ oss-cad-suite(darwin-arm64 tarball: yosys+sby+yices/boolector) 압축 해제만으로 맥에서 실행 — 보드 불필요. 오픈소스 yosys는 SVA 일부만 지원(immediate assert/assume/cover + 단순 concurrent)이므로 그 범위로 작성; iverilog/cocotb도 함께 사용"
+    },
+    {
+      "id": "RTLDV-A11",
+      "level": "A",
+      "title": "캡스톤: CSR·스트림·인터럽트를 갖춘 가속기 블록 설계·검증",
+      "goal": "스펙 → RTL → TB → formal → 커버리지 → 합성까지 한 IP 블록의 전체 설계·검증 사이클을 수행한다.",
+      "task": "APB CSR(M13 생성)·AXI-Stream 입출력·완료 인터럽트를 가진 CRC32/dot-product 가속기를 스펙 문서(레지스터 맵, 타이밍, 에러 처리)부터 작성해 RTL로 구현하고, pyuvm TB(A01/A02 재사용)·인터페이스 SVA·sby 인터페이스 증명·기능 커버리지 클로저·yosys 면적/Fmax 리포트를 갖춘 검증 사인오프 체크리스트로 마무리한다(systolic array RTL은 see:NPU-A09, DPI-C 참조모델은 see:EMU-M03).",
+      "tags": [
+        "capstone",
+        "accelerator",
+        "verification-signoff",
+        "csr",
+        "see:NPU",
+        "see:EMU"
+      ],
+      "env": "fpga",
+      "env_note": "brew install icarus-verilog verilator + pip install cocotb pyuvm — 맥에서 Python UVM으로 실행(상용 SV UVM 시뮬레이터 불필요), 보드 불필요; sby는 oss-cad-suite"
+    }
+  ]
+}

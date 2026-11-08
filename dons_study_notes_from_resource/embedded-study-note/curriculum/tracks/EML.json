@@ -1,0 +1,325 @@
+{
+  "id": "EML",
+  "intro": "디바이스 ML 추론은 학습된 모델을 MCU·SoC·NPU 위에서 제한된 메모리와 전력으로 정확하고 빠르게 돌리는 기술이다. 텐서 레이아웃, conv/GEMM 커널, int8 양자화, 메모리 플래닝, 연산자 퓨전을 직접 구현해 봐야 TFLite Micro·ONNX Runtime·llama.cpp 같은 런타임과 NPU 컴파일러가 왜 그렇게 설계됐는지 설명할 수 있다. AI 가속기·엣지 AI 펌웨어 면접에서는 'int8 conv를 C로 구현하고 레퍼런스와 bit-exact로 맞춰라' 같은 문제가 실제로 나온다.",
+  "goals": [
+    "텐서 shape/stride/레이아웃(NCHW/NHWC)을 다루고 conv·GEMM·pooling·activation 연산자를 C로 구현할 수 있다",
+    "int8 affine 양자화(per-tensor/per-channel), 정수 전용 requantization, 캘리브레이션을 구현하고 레퍼런스와 bit-exact로 맞출 수 있다",
+    "그래프 인터프리터, 텐서 수명 기반 메모리 아레나 플래닝, 연산자 퓨전을 직접 만들 수 있다",
+    "TFLite Micro, ONNX Runtime, llama.cpp의 구조와 모델 변환 파이프라인을 이해하고 활용할 수 있다",
+    "키워드 스포팅·소형 CNN·소형 트랜스포머를 end-to-end로 C에서 구동하고 정확도·지연·메모리를 벤치마크할 수 있다"
+  ],
+  "prereq": ["C", "DSP", "ARCH"],
+  "refs": [
+    {"title": "TensorFlow Lite for Microcontrollers (LiteRT Micro) — GitHub", "url": "https://github.com/tensorflow/tflite-micro"},
+    {"title": "ONNX Runtime documentation", "url": "https://onnxruntime.ai/docs/"},
+    {"title": "llama.cpp / ggml — GitHub", "url": "https://github.com/ggml-org/llama.cpp"},
+    {"title": "karpathy/llama2.c — 순수 C Llama 추론", "url": "https://github.com/karpathy/llama2.c"},
+    {"title": "Jacob et al. — Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference (arXiv 1712.05877)", "url": "https://arxiv.org/abs/1712.05877"},
+    {"title": "gemmlowp — low-precision GEMM (fixed-point requantization 참고)", "url": "https://github.com/google/gemmlowp"},
+    {"title": "CMSIS-NN — Arm Cortex-M 신경망 커널", "url": "https://github.com/ARM-software/CMSIS-NN"},
+    {"title": "Zhang et al. — Hello Edge: Keyword Spotting on Microcontrollers (arXiv 1711.07128)", "url": "https://arxiv.org/abs/1711.07128"},
+    {"title": "TinyML (Pete Warden & Daniel Situnayake, O'Reilly)"}
+  ],
+  "items": [
+    {
+      "id": "EML-B01",
+      "level": "B",
+      "title": "텐서 표현: Shape·Stride·Dtype와 NCHW/NHWC",
+      "goal": "텐서를 shape/stride/dtype 메타데이터 + 연속 버퍼로 표현하고 레이아웃 변환을 정확히 구현한다",
+      "task": "C로 tensor 구조체(dims, strides, dtype, data)와 다차원 인덱스→오프셋 계산, NCHW↔NHWC transpose, view(reshape/slice)를 구현하고, numpy의 transpose/reshape 결과를 파일로 저장해 원소 단위로 일치하는지 검증한다.",
+      "tags": ["tensor", "layout", "nchw", "nhwc"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-B02",
+      "level": "B",
+      "title": "CPU GEMM: Naive → Loop 순서 → Cache Blocking",
+      "goal": "모든 NN 연산의 핵심인 GEMM의 캐시 친화적 구현과 성능 변화를 체감한다",
+      "task": "SGEMM을 ijk naive, ikj 루프 순서, 캐시 블로킹(MC/KC/NC), 내부 4x4 레지스터 마이크로커널 순으로 구현해 행렬 크기별 GFLOPS를 측정하고 Accelerate cblas_sgemm 대비 비율을 기록한다.",
+      "tags": ["gemm", "cache-blocking", "performance", "see:GPGPU"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-B03",
+      "level": "B",
+      "title": "Fully Connected 층과 활성화 함수 구현",
+      "goal": "FC 층과 ReLU/ReLU6/sigmoid/tanh/GELU를 구현하고 근사식의 오차를 확인한다",
+      "task": "FC(y=Wx+b)와 활성화 함수(GELU tanh 근사, 빠른 exp 근사 포함)를 C로 구현하고, PyTorch로 생성한 입력·가중치·출력 파일을 로드해 최대 절대/상대 오차가 허용치 이내인지 검증하는 테스트 하네스를 만든다.",
+      "tags": ["fully-connected", "activation", "golden-test"],
+      "env": "mac",
+      "env_note": "python3 + torch(또는 numpy)로 레퍼런스 생성"
+    },
+    {
+      "id": "EML-B04",
+      "level": "B",
+      "title": "Conv2D 직접 구현: Padding·Stride·Dilation·Group",
+      "goal": "conv2d의 모든 하이퍼파라미터를 정확히 처리하는 레퍼런스 구현을 만든다",
+      "task": "NHWC 입력·OHWI 가중치로 padding(same/valid), stride, dilation, groups를 지원하는 direct conv2d를 C로 구현하고, 무작위 파라미터 조합 200개에 대해 PyTorch conv2d 결과와 일치를 검증하며 출력 크기 공식을 테스트한다.",
+      "tags": ["conv2d", "reference-kernel", "golden-test"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-B05",
+      "level": "B",
+      "title": "im2col + GEMM 컨볼루션",
+      "goal": "conv를 GEMM으로 바꾸는 im2col 변환과 그 메모리 비용을 이해한다",
+      "task": "im2col 변환 후 B02의 GEMM으로 conv를 계산하는 버전을 구현해 B04와 결과 일치를 확인하고, 레이어 크기별 im2col 버퍼 추가 메모리와 direct conv 대비 속도를 비교해 MCU에서 im2col이 부담되는 조건을 정리한다.",
+      "tags": ["im2col", "conv2d", "gemm", "memory"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-B06",
+      "level": "B",
+      "title": "Depthwise Separable Conv와 Pooling",
+      "goal": "MobileNet 계열의 depthwise/pointwise conv와 max/avg/global pooling을 구현하고 연산량 절감을 계산한다",
+      "task": "depthwise 3x3 conv, pointwise 1x1 conv, max/avg pool, global average pool을 구현해 PyTorch와 일치를 검증하고, 같은 입출력 채널에서 표준 conv 대비 MAC 수·파라미터 수 절감 비율을 공식과 실측으로 비교한다.",
+      "tags": ["depthwise-conv", "pooling", "mobilenet"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-B07",
+      "level": "B",
+      "title": "Softmax·LayerNorm과 BatchNorm 폴딩",
+      "goal": "정규화 연산을 구현하고 추론 시 BN을 conv 가중치에 접어 넣는 변환을 익힌다",
+      "task": "수치 안정 softmax, LayerNorm, BatchNorm(추론 모드)을 구현하고, conv+BN을 W'=W·γ/σ, b'=(b−μ)·γ/σ+β로 폴딩하는 함수를 작성해 폴딩 전후 출력이 허용 오차 내에서 같은지 검증한다.",
+      "tags": ["softmax", "layernorm", "batchnorm-folding"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-B08",
+      "level": "B",
+      "title": "int8 Affine 양자화 기초: Scale·Zero-point",
+      "goal": "실수 ↔ 정수 매핑(r = S·(q − Z))과 대칭/비대칭 양자화, 반올림·포화 규칙을 이해한다",
+      "task": "min/max로부터 scale·zero-point를 계산하는 함수(0.0이 정확히 표현되도록 nudging), quantize(round-half-away/RNE 선택, saturate)/dequantize를 구현하고, 가우시안·ReLU 출력 분포에서 대칭/비대칭 양자화의 MSE를 비교한다.",
+      "tags": ["quantization", "int8", "affine"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-B09",
+      "level": "B",
+      "title": "정수 전용 GEMM과 Requantization (Fixed-point Multiplier)",
+      "goal": "int8×int8→int32 누산 후 실수 스케일을 정수 곱+시프트로 적용하는 정수 전용 추론의 핵심을 구현한다",
+      "task": "M = S_a·S_w/S_out을 (int32 multiplier, shift)로 분해하는 함수와 SaturatingRoundingDoublingHighMul + RoundingDivideByPOT 기반 requantize를 구현하고, zero-point 보정항을 포함한 int8 GEMM 결과가 TFLite 레퍼런스 공식과 bit-exact로 일치하는지 검증한다.",
+      "tags": ["quantization", "requantization", "fixed-point", "bit-exact"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-B10",
+      "level": "B",
+      "title": "모델 파일 들여다보기: ONNX·TFLite 그래프 구조",
+      "goal": "모델 파일이 연산자 그래프, 텐서, 가중치, 양자화 파라미터를 어떻게 저장하는지 파악한다",
+      "task": "작은 CNN을 PyTorch로 만들어 ONNX와 int8 TFLite로 내보낸 뒤, Python(onnx 패키지, tflite 플랫버퍼 파서)으로 노드 목록·입출력 shape·가중치 크기·텐서별 scale/zero-point를 출력하는 스크립트를 작성하고 Netron으로 본 구조와 대조한다.",
+      "tags": ["onnx", "tflite", "model-format", "flatbuffers"],
+      "env": "mac",
+      "env_note": "pip install torch onnx tensorflow(또는 ai-edge-litert) 필요"
+    },
+    {
+      "id": "EML-M01",
+      "level": "M",
+      "title": "Per-channel 양자화와 캘리브레이션 (MinMax·Percentile·KL)",
+      "goal": "가중치 per-channel 양자화와 활성화 캘리브레이션 방법이 정확도에 미치는 영향을 측정한다",
+      "task": "소형 CNN(MNIST/CIFAR-10)에 대해 가중치 per-tensor vs per-channel, 활성화 MinMax/99.99 percentile/KL-divergence(엔트로피) 캘리브레이션을 구현해 조합별 int8 시뮬레이션 정확도를 FP32 대비 표로 비교한다.",
+      "tags": ["quantization", "per-channel", "calibration", "kl-divergence"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-M02",
+      "level": "M",
+      "title": "양자화 연산자: Add·Concat 재스케일과 Fused Activation",
+      "goal": "입력 scale이 다른 텐서의 덧셈·연결과 활성화 퓨전을 정수 도메인에서 처리한다",
+      "task": "서로 다른 scale의 int8 텐서를 공통 scale로 재스케일해 더하는 quantized add, concat 재양자화, ReLU6을 출력 clamp 범위로 흡수하는 fused activation, int8 avgpool(반올림 나눗셈)을 구현하고 TFLite 결과와 bit-exact 일치를 검증한다.",
+      "tags": ["quantization", "quantized-add", "fused-activation", "bit-exact"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-M03",
+      "level": "M",
+      "title": "미니 그래프 런타임: Op Registry와 인터프리터",
+      "goal": "TFLM과 유사한 정적 그래프 인터프리터의 구조(연산자 등록, prepare/invoke, 텐서 테이블)를 직접 만든다",
+      "task": "JSON/바이너리 그래프 기술(노드, 입출력 텐서 ID, 파라미터)을 로드해 op registry에서 커널을 찾고 위상 정렬 순서로 prepare(shape 추론, 스크래치 요청) → invoke를 수행하는 C 런타임을 작성해, 앞서 만든 커널들로 소형 CNN 추론이 PyTorch와 일치함을 검증한다.",
+      "tags": ["runtime", "interpreter", "graph", "op-registry"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-M04",
+      "level": "M",
+      "title": "메모리 플래닝: 텐서 수명과 Arena 오프셋 할당",
+      "goal": "중간 텐서 수명 분석으로 단일 아레나 안에서 메모리를 재사용하는 정적 플래너를 구현한다",
+      "task": "M03 그래프에서 텐서별 [첫 생성, 마지막 사용] 구간을 구하고 greedy-by-size, greedy-by-breadth 오프셋 할당과 in-place 연산 허용을 구현해, MobileNet류 그래프에서 naive 합계 대비 피크 아레나 크기를 비교하고 겹침 없음(수명 겹치는 텐서의 주소 비중첩)을 검증한다.",
+      "tags": ["memory-planning", "arena", "lifetime", "see:ALGO"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-M05",
+      "level": "M",
+      "title": "연산자 퓨전 패스: Conv+BN+ReLU, Elementwise 체인",
+      "goal": "그래프 수준 최적화 패스로 연산자를 합쳐 메모리 트래픽과 실행 시간을 줄인다",
+      "task": "M03 IR 위에서 conv→BN→ReLU 패턴 매칭·폴딩 패스와 연속 elementwise 연산 퓨전 패스를 구현하고, 패스 전후 출력 일치, 노드 수, 중간 텐서 바이트, 실행 시간을 비교한다.",
+      "tags": ["operator-fusion", "graph-optimization", "compiler-pass", "see:COMP"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-M06",
+      "level": "M",
+      "title": "TFLite Micro 해부: 호스트 빌드와 커스텀 연산자",
+      "goal": "TFLM의 MicroInterpreter, op resolver, tensor arena 구조를 실제 코드로 이해한다",
+      "task": "tflite-micro를 맥 호스트 타깃으로 빌드해 hello_world/person_detection 예제를 실행하고, MicroMutableOpResolver에 필요한 연산자만 등록해 바이너리 크기 변화를 측정하며, 아레나 크기를 이진 탐색으로 최소화하고 커스텀 연산자 하나를 등록·실행한다.",
+      "tags": ["tflite-micro", "runtime", "custom-op"],
+      "env": "mac",
+      "env_note": "tflite-micro 저장소 make 빌드 (TARGET=호스트)"
+    },
+    {
+      "id": "EML-M07",
+      "level": "M",
+      "title": "ONNX Runtime: 그래프 최적화와 Execution Provider",
+      "goal": "서버/엣지 런타임이 그래프 최적화와 하드웨어별 실행 공급자로 연산자를 분배하는 방식을 이해한다",
+      "task": "ONNX Runtime C/Python API로 모델을 실행하며 graph optimization level(basic/extended/all)별 최적화된 모델을 저장해 노드 변화를 비교하고, CPU EP와 CoreML EP에서 지연을 측정하며 CoreML EP로 넘어가지 못한 노드(파티션)를 로그로 확인한다.",
+      "tags": ["onnxruntime", "execution-provider", "graph-optimization"],
+      "env": "mac",
+      "env_note": "pip install onnxruntime (CoreML EP는 macOS 빌드 포함)"
+    },
+    {
+      "id": "EML-M08",
+      "level": "M",
+      "title": "End-to-End 키워드 스포팅: MFCC + DS-CNN int8 in C",
+      "goal": "오디오 전처리부터 int8 추론까지 실제 tinyML 애플리케이션을 처음부터 끝까지 구현한다",
+      "task": "Speech Commands로 DS-CNN을 학습·int8 양자화한 뒤 가중치를 C 헤더로 내보내고, C로 구현한 MFCC 프론트엔드(프레이밍, FFT, mel 필터, DCT)와 정수 추론 엔진으로 테스트셋 정확도를 Python 결과와 비교하며 지연·RAM·Flash 사용량을 보고한다.",
+      "tags": ["keyword-spotting", "mfcc", "tinyml", "end-to-end", "see:DSP"],
+      "env": "mac",
+      "env_note": "학습은 python3 + PyTorch/TensorFlow (CPU로 충분)"
+    },
+    {
+      "id": "EML-M09",
+      "level": "M",
+      "title": "순수 C int8 이미지 분류기: TFLite와 Bit-exact 일치",
+      "goal": "외부 런타임 없이 int8 CNN 전체를 C로 돌리고 레퍼런스 런타임과 비트 단위로 맞춘다",
+      "task": "int8 TFLite 소형 CNN(CIFAR-10)의 가중치·양자화 파라미터를 추출해 자체 C 엔진으로 실행하고, 모든 레이어 출력이 TFLite 인터프리터(intermediate tensor 덤프)와 bit-exact 일치하는지 레이어별로 검증하며 첫 불일치 레이어를 찾는 디버깅 도구를 만든다.",
+      "tags": ["int8", "bit-exact", "golden-model", "validation"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-M10",
+      "level": "M",
+      "title": "모델 변환 파이프라인: PyTorch → ONNX → TFLite int8",
+      "goal": "실무에서 가장 많이 막히는 모델 변환·PTQ 과정의 함정(미지원 연산자, 레이아웃, 정확도 하락)을 경험한다",
+      "task": "MobileNetV2를 PyTorch → ONNX(opset 고정) → TFLite(대표 데이터셋 기반 full-int8 PTQ)로 변환하는 스크립트를 작성해 각 단계 출력 차이와 top-1 정확도 하락을 측정하고, 변환 실패/불일치를 일으키는 연산자 사례와 해결책을 기록한다.",
+      "tags": ["model-conversion", "ptq", "onnx", "tflite"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-M11",
+      "level": "M",
+      "title": "SIMD 커널 최적화: NEON int8 Dot Product",
+      "goal": "Arm NEON의 SDOT/SMMLA 명령으로 int8 GEMM/conv 마이크로커널을 최적화한다",
+      "task": "M2의 NEON intrinsics(vdotq_s32, 가능하면 vmmlaq_s32)로 int8 GEMM 마이크로커널과 가중치 사전 패킹 레이아웃을 구현해 스칼라 버전 대비 GOPS와 bit-exact 결과를 확인하고, CMSIS-NN이 Cortex-M에서 같은 문제를 SMLAD로 푸는 방식과 비교 정리한다.",
+      "tags": ["simd", "neon", "int8", "microkernel", "see:ARM"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-M12",
+      "level": "M",
+      "title": "추론 벤치마크 하네스",
+      "goal": "신뢰할 수 있는 추론 성능 측정(워밍업, 반복, 백분위, 메모리 피크)을 표준화한다",
+      "task": "모델/런타임을 플러그인으로 받아 워밍업, N회 반복, p50/p90/p99 지연, 처리량, 피크 RSS, 콜드 스타트 시간을 측정하고 CSV/JSON으로 내보내는 C/Python 하네스를 작성해 자체 엔진·TFLite·ONNX Runtime을 같은 모델로 비교한다.",
+      "tags": ["benchmarking", "latency", "methodology", "see:AIPERF"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-A01",
+      "level": "A",
+      "title": "GGUF 포맷 파서 (llama.cpp)",
+      "goal": "LLM 엣지 추론의 사실상 표준 포맷인 GGUF의 메타데이터·텐서 레이아웃을 이해한다",
+      "task": "GGUF 헤더(magic, version, KV 메타데이터, 텐서 정보 테이블, 정렬)를 파싱하는 C 프로그램을 작성해 작은 모델 파일의 아키텍처 하이퍼파라미터, 텐서 이름·shape·양자화 타입·오프셋을 출력하고, mmap으로 특정 텐서를 읽어 llama.cpp gguf 도구 출력과 대조한다.",
+      "tags": ["llama.cpp", "gguf", "file-format", "llm"],
+      "env": "mac",
+      "env_note": "Hugging Face에서 소형 GGUF 모델(수백 MB 이하) 다운로드"
+    },
+    {
+      "id": "EML-A02",
+      "level": "A",
+      "title": "블록 양자화: Q8_0·Q4_0와 양자화 Dot Product",
+      "goal": "LLM 가중치 블록 양자화(블록당 scale) 포맷과 정수 dot product 커널을 구현한다",
+      "task": "32원소 블록당 fp16 scale을 갖는 Q8_0, Q4_0(4비트 니블 패킹) quantize/dequantize와 Q4_0×Q8_0 dot product를 C(가능하면 NEON)로 구현해 llama.cpp 구현과 결과 일치를 확인하고, 실제 가중치에서 RMSE와 메모리 크기를 FP16과 비교한다.",
+      "tags": ["quantization", "block-quantization", "int4", "llm"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-A03",
+      "level": "A",
+      "title": "C로 트랜스포머 추론: Attention과 KV Cache",
+      "goal": "소형 Llama 모델을 C로 돌리며 RMSNorm·RoPE·attention·KV cache·샘플링의 실제 구현을 익힌다",
+      "task": "llama2.c의 stories15M 체크포인트를 사용하는 추론 엔진을 직접 작성(또는 해부 후 재작성)해 KV cache 유무에 따른 토큰당 연산량과 속도를 비교하고, 레퍼런스 출력 토큰 시퀀스와 일치(greedy 디코딩)함을 검증한다.",
+      "tags": ["transformer", "kv-cache", "attention", "llm"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-A04",
+      "level": "A",
+      "title": "MCU 배포: Cortex-M에서 TFLM 실행",
+      "goal": "Flash/SRAM 제약이 있는 실제 MCU 메모리 맵에 모델과 아레나를 배치하고 사이클을 측정한다",
+      "task": "Cortex-M 타깃(QEMU mps2-an386 등)으로 TFLM + CMSIS-NN을 크로스 빌드해 KWS 모델을 실행하고, 링커 맵으로 가중치(.rodata in Flash)·아레나(SRAM) 배치를 확인하며 DWT 사이클 카운터(보드 시)나 명령 수 기반으로 레이어별 비용을 측정한다.",
+      "tags": ["mcu", "cortex-m", "tflite-micro", "cmsis-nn", "deployment"],
+      "env": "qemu",
+      "env_note": "arm-none-eabi-gcc + QEMU(mps2/mps3 머신); 정확한 사이클은 실제 보드(STM32 등) 권장"
+    },
+    {
+      "id": "EML-A05",
+      "level": "A",
+      "title": "빠른 컨볼루션: Winograd F(2x2,3x3)",
+      "goal": "곱셈 수를 줄이는 Winograd 변환과 그 수치 오차·양자화 친화성 문제를 이해한다",
+      "task": "Winograd F(2x2,3x3) 입력/필터/출력 변환 행렬을 사용한 conv를 구현해 direct conv와 결과를 비교하고, 곱셈 수 감소(36→16), FP32/FP16에서의 오차 증가, int8에서 변환 후 값 범위가 커지는 문제를 정량화한다.",
+      "tags": ["winograd", "fast-convolution", "numerics"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-A06",
+      "level": "A",
+      "title": "가지치기와 희소 추론: 언제 빨라지는가",
+      "goal": "magnitude pruning과 희소 행렬 커널의 실제 속도 이득이 나타나는 조건을 측정한다",
+      "task": "소형 MLP/CNN에 magnitude pruning(희소도 50~95%)을 적용해 정확도 변화를 측정하고, CSR 희소 GEMV와 밀집 GEMV를 C로 구현해 희소도별 속도 교차점(break-even)을 찾으며 구조적 희소성(블록/2:4)이 왜 하드웨어에 유리한지 정리한다.",
+      "tags": ["pruning", "sparsity", "sparse-gemm", "see:NPU"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-A07",
+      "level": "A",
+      "title": "혼합 정밀도와 층별 양자화 민감도 분석",
+      "goal": "어느 층이 양자화에 민감한지 찾아 일부만 고정밀도로 남기는 실무 기법을 익힌다",
+      "task": "MobileNetV2에서 층 하나씩만 int8로 양자화(나머지 FP32)해 정확도 하락을 측정하는 민감도 분석 스크립트를 작성하고, 상위 민감 층을 FP16/int16으로 남긴 혼합 정밀도 구성과 QAT(fake quant 몇 epoch) 결과를 PTQ와 비교한다.",
+      "tags": ["mixed-precision", "sensitivity", "qat", "quantization"],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "EML-A08",
+      "level": "A",
+      "title": "온디바이스 추론 런타임 시스템 설계",
+      "goal": "다중 모델·다중 가속기 환경의 추론 런타임을 면접 수준으로 설계하고 핵심 경로를 구현한다",
+      "task": "로봇 카메라 파이프라인(검출 30fps + 분류 + KWS 상시)을 CPU/GPU/NPU가 있는 SoC에서 돌리는 런타임을 설계해 모델 파티셔닝·NPU 미지원 연산자 CPU fallback·공유 아레나·우선순위 스케줄링·데드라인 미스 처리를 문서화하고, 스케줄러와 fallback 분배 로직을 C 시뮬레이션으로 구현한다.",
+      "tags": ["system-design", "runtime", "scheduling", "interview"],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

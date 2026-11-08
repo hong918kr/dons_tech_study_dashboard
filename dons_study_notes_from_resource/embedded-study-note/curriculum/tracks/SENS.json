@@ -1,0 +1,440 @@
+{
+  "id": "SENS",
+  "intro": "센서 값은 '읽으면 끝'이 아니라 스케일링·보정·필터링·타임스탬프·고장 감지를 거쳐야 믿을 수 있는 측정값이 된다. 로보틱스·드론·자동차·의료기기 펌웨어 면접은 IMU 드라이버, 2점 보정, 상보필터, 타임스탬프 동기, 전류 센싱을 실무 수준으로 묻는다.",
+  "goals": [
+    "ADC 코드를 공학 단위로 정확히 변환하고 오버샘플링·노이즈·불확도를 수치로 분석할 수 있다",
+    "I2C/SPI 센서(IMU, 온도, 압력) 드라이버를 FIFO·data-ready·에러 처리까지 포함해 작성할 수 있다",
+    "오프셋/게인·다항식·온도 보상·IMU/자력계 보정을 구현하고 결과를 검증할 수 있다",
+    "상보필터·AHRS로 자세를 추정하고 Allan variance로 IMU 잡음을 특성화할 수 있다",
+    "타임스탬핑·다중 센서 동기·데이터 로깅·고장 감지를 갖춘 측정 시스템을 설계할 수 있다"
+  ],
+  "prereq": [
+    "C",
+    "COMM",
+    "DSP"
+  ],
+  "refs": [
+    {
+      "title": "Analog Devices MT-003: Understand SINAD, ENOB, SNR, THD, THD+N, and SFDR"
+    },
+    {
+      "title": "IEEE Std 952 — Allan variance / IMU gyro noise specification"
+    },
+    {
+      "title": "JCGM 100:2008 GUM — Guide to the Expression of Uncertainty in Measurement"
+    },
+    {
+      "title": "S. Madgwick, 'An efficient orientation filter for inertial and inertial/magnetic sensor arrays' (2010)"
+    },
+    {
+      "title": "TDK InvenSense ICM-42688-P Datasheet (SPI IMU, FIFO, timestamp)"
+    },
+    {
+      "title": "Zephyr Project Sensor API documentation",
+      "url": "https://docs.zephyrproject.org/latest/hardware/peripherals/sensor/index.html"
+    }
+  ],
+  "items": [
+    {
+      "id": "SENS-B01",
+      "level": "B",
+      "title": "ADC 코드 → 공학 단위 변환",
+      "goal": "Vref·분압·증폭 체인을 거친 ADC 코드를 정수 연산으로 정확히 물리량으로 바꾼다",
+      "task": "12비트 ADC + 분압기 + 앰프 체인에서 코드→mV 변환을 float와 고정소수점(곱셈 후 시프트, 반올림)으로 구현하고 전 코드 범위 오차를 비교; LSB 크기, 단극/양극(two's complement) 입력, 기준전압 오차의 영향을 표로 정리한다.",
+      "tags": [
+        "adc",
+        "scaling",
+        "fixed-point"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-B02",
+      "level": "B",
+      "title": "오버샘플링·평균화와 디더",
+      "goal": "'4배 오버샘플링 = 1비트 향상'이 언제 성립하는지 실험으로 확인한다",
+      "task": "잡음 없는/있는 ADC 모델에서 4^n 샘플 평균 후 decimation으로 유효 비트가 늘어나는지 측정하고, 잡음이 LSB보다 작으면 효과가 없음(디더 필요)과 상관 잡음에서는 효과가 줄어드는 것을 보인다.",
+      "tags": [
+        "oversampling",
+        "dither",
+        "enob"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-B03",
+      "level": "B",
+      "title": "I2C 온도·압력 센서 드라이버",
+      "goal": "레지스터 기반 I2C 센서 드라이버의 표준 흐름을 mock 버스로 완성한다",
+      "task": "TMP117 유사 온도 센서와 BMP280 유사 압력 센서(보정 계수 읽기 + 데이터시트 보상 공식)를 mock I2C 버스 위에서 구현하고, ID 확인·설정·변환 대기·NACK 재시도·two's complement 변환을 테스트한다(I2C 프로토콜 자체는 see:COMM).",
+      "tags": [
+        "i2c",
+        "driver",
+        "temperature",
+        "pressure",
+        "see:COMM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-B04",
+      "level": "B",
+      "title": "SPI IMU 드라이버: 설정과 버스트 읽기",
+      "goal": "6축 IMU를 SPI로 설정하고 가속도·자이로를 단위 변환까지 읽는다",
+      "task": "ICM-42688 유사 레지스터 맵을 mock SPI 디바이스로 만들고 WHO_AM_I 확인, 소프트 리셋, ODR/FSR 설정, 14바이트 버스트 읽기(엔디안·부호 처리), LSB/g·LSB/dps 변환을 구현해 기대 값과 비교한다.",
+      "tags": [
+        "spi",
+        "imu",
+        "driver",
+        "burst-read"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-B05",
+      "level": "B",
+      "title": "2점 보정: 오프셋·게인",
+      "goal": "가장 기본적인 선형 보정과 보정 데이터 저장 구조를 만든다",
+      "task": "두 기준점 측정값으로 gain/offset을 계산해 고정소수점으로 적용하는 함수와, 보정값을 버전·CRC가 있는 구조체로 플래시 에뮬레이션 영역에 저장/로드하는 코드를 작성하고 CRC 손상 시 기본값 폴백을 테스트한다.",
+      "tags": [
+        "calibration",
+        "two-point",
+        "nvm",
+        "crc"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-B06",
+      "level": "B",
+      "title": "다항식 보정과 서미스터 선형화",
+      "goal": "비선형 센서를 최소제곱 다항식·Steinhart-Hart·LUT 보간으로 선형화한다",
+      "task": "NTC 서미스터 분압 회로의 ADC→온도 변환을 Steinhart-Hart, 3차 다항식 최소제곱 근사, 33포인트 LUT+선형보간 세 방식으로 구현해 -40~125°C 오차·코드 크기·연산 시간을 비교한다.",
+      "tags": [
+        "calibration",
+        "polynomial",
+        "thermistor",
+        "lut"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-B07",
+      "level": "B",
+      "title": "스파이크 제거: 메디안 필터와 이상치 처리",
+      "goal": "센서 글리치에 강한 비선형 필터를 효율적으로 구현한다",
+      "task": "3/5/7-점 메디안 필터(정렬 네트워크로 분기 최소화)를 구현하고 스파이크가 섞인 신호에서 이동평균과 비교; 변화율 제한(slew limit)과 결합한 이상치 제거기를 만든다(선형 필터는 see:DSP).",
+      "tags": [
+        "median-filter",
+        "outlier",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-B08",
+      "level": "B",
+      "title": "측정 불확도 계산과 오차 예산",
+      "goal": "Type A/B 불확도와 전파 법칙으로 측정 결과의 신뢰 범위를 계산한다",
+      "task": "션트 저항 전류 측정 체인(저항 공차·온도계수, 앰프 오프셋·게인 오차, ADC 양자화·잡음)의 불확도 예산 표를 작성하고, GUM 전파 법칙(RSS) 계산과 Monte Carlo 결과를 비교해 확장 불확도(k=2)를 보고한다.",
+      "tags": [
+        "uncertainty",
+        "error-budget",
+        "gum"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-B09",
+      "level": "B",
+      "title": "쿼드러처 엔코더 디코딩과 속도 추정",
+      "goal": "A/B 상 엔코더의 방향·카운트·속도 추정(M/T 방식)을 구현한다",
+      "task": "상태 전이 테이블 기반 x4 쿼드러처 디코더(잘못된 전이 에러 카운트 포함)를 구현하고, 카운트 기반(M법)·주기 기반(T법)·혼합(M/T법) 속도 추정을 저속/고속 시뮬레이션 신호로 비교한다.",
+      "tags": [
+        "encoder",
+        "quadrature",
+        "velocity-estimation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-B10",
+      "level": "B",
+      "title": "홀 센서 3상 디코딩",
+      "goal": "BLDC 홀 센서 신호로 섹터·방향·속도를 구하고 이상 상태를 검출한다",
+      "task": "3비트 홀 상태 → 6개 섹터 매핑과 방향 판정, 에지 간격 기반 전기 속도 계산, 무효 상태(000/111)·순서 오류 검출을 구현해 시뮬레이션 홀 신호(잡음/글리치 포함)로 검증한다.",
+      "tags": [
+        "hall-sensor",
+        "bldc",
+        "commutation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-M01",
+      "level": "M",
+      "title": "전류 센싱: 션트·앰프·PWM 동기 샘플링",
+      "goal": "모터/전원 전류 측정의 오프셋 보정과 샘플링 타이밍을 이해한다",
+      "task": "low-side/인라인 션트 + INA240 유사 앰프 모델에서 zero-current 오프셋 보정, PWM 중앙 정렬 시점 ADC 트리거(스위칭 링잉 회피)를 시뮬레이션하고, 잘못된 샘플링 시점에서 생기는 오차를 정량화한다.",
+      "tags": [
+        "current-sensing",
+        "shunt",
+        "pwm-sync"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-M02",
+      "level": "M",
+      "title": "가속도계 6면 보정과 자이로 바이어스",
+      "goal": "IMU의 바이어스·스케일 팩터를 현장에서 보정하는 절차를 구현한다",
+      "task": "합성 데이터(바이어스·스케일·축 비정렬 포함)에서 6방향 정지 측정으로 가속도계 바이어스/스케일을 최소제곱으로 추정하고, 정지 구간 검출 후 자이로 바이어스를 추정; 보정 전후 |a|=1g 오차를 비교한다.",
+      "tags": [
+        "imu-calibration",
+        "accelerometer",
+        "gyro-bias"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-M03",
+      "level": "M",
+      "title": "자력계 Hard/Soft Iron 보정",
+      "goal": "타원체 피팅으로 자력계 왜곡을 보정한다",
+      "task": "hard iron 오프셋과 soft iron 행렬로 왜곡된 합성 자력계 데이터(구면 샘플 + 잡음)에 대해 타원체 최소제곱 피팅을 구현해 보정 행렬을 추정하고, 보정 후 반지름 분산과 heading 오차를 비교한다.",
+      "tags": [
+        "magnetometer",
+        "ellipsoid-fit",
+        "calibration"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-M04",
+      "level": "M",
+      "title": "상보필터로 Pitch/Roll 추정",
+      "goal": "가속도계와 자이로의 장단점을 결합하는 가장 실용적인 융합을 구현한다",
+      "task": "합성 궤적(진값) 기반 IMU 데이터에서 가속도계 각도·자이로 적분·상보필터(α 튜닝)를 비교해 RMS 오차와 동적 가속 시 오차를 측정하고, 시정수 τ와 α=τ/(τ+dt) 관계를 설명한다(Kalman은 see:RCTL).",
+      "tags": [
+        "complementary-filter",
+        "sensor-fusion",
+        "attitude"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-M05",
+      "level": "M",
+      "title": "Allan Variance로 IMU 잡음 특성화",
+      "goal": "정적 IMU 로그에서 ARW·bias instability를 추출한다",
+      "task": "백색잡음+bias random walk+flicker 성분을 가진 장시간 합성 자이로 데이터에 대해 overlapping Allan deviation을 구현하고 기울기 -1/2 구간에서 ARW, 최소점에서 bias instability를 읽어 생성 파라미터와 비교한다.",
+      "tags": [
+        "allan-variance",
+        "imu-noise",
+        "arw"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-M06",
+      "level": "M",
+      "title": "센서 FIFO와 워터마크 인터럽트",
+      "goal": "고 ODR 센서를 FIFO 배치 읽기로 CPU 부하 없이 처리한다",
+      "task": "패킹된 프레임(헤더+accel+gyro+temp+timestamp)을 가진 mock IMU FIFO와 워터마크 인터럽트를 구현하고, 드라이버의 FIFO 카운트 읽기·버스트 파싱·불완전 프레임·오버플로 복구를 테스트한다.",
+      "tags": [
+        "fifo",
+        "watermark",
+        "imu",
+        "driver"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-M07",
+      "level": "M",
+      "title": "타임스탬핑과 클럭 드리프트 보정",
+      "goal": "샘플의 '언제'를 정확히 아는 것이 측정 품질의 절반임을 체득한다",
+      "task": "센서 ODR 클럭(±1% 오차)과 MCU 타이머가 다른 시뮬레이션에서 DRDY 인터럽트 시각 기록, FIFO 배치에서 샘플별 시각 역산, 선형 회귀로 드리프트를 추정해 인터럽트 지연 지터를 제거하는 타임스탬프 필터를 구현한다.",
+      "tags": [
+        "timestamp",
+        "clock-drift",
+        "regression"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-M08",
+      "level": "M",
+      "title": "다중 센서 시간 정렬",
+      "goal": "서로 다른 센서 스트림을 공통 시간축으로 맞춘다",
+      "task": "카메라(30Hz)·IMU(1kHz)·GPS(10Hz) 합성 스트림에 미지의 고정 오프셋을 넣고 상호상관으로 오프셋을 추정, 공통 시간축으로 보간(선형/SLERP)해 정렬 오차를 측정; 하드웨어 트리거 동기와의 차이를 정리한다.",
+      "tags": [
+        "sensor-sync",
+        "cross-correlation",
+        "interpolation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-M09",
+      "level": "M",
+      "title": "센서 데이터 로깅 포맷",
+      "goal": "현장 디버그를 가능하게 하는 견고한 바이너리 로그를 설계한다",
+      "task": "헤더(매직, 버전, 센서 설정)·레코드(타입, 길이, 타임스탬프, 페이로드, CRC)를 가진 로그 포맷과 C 로거(링 버퍼 → 플래시 블록), Python 디코더를 만들고 전원 손실(마지막 블록 절단)·스키마 버전 변경에서도 복구되는지 테스트한다.",
+      "tags": [
+        "data-logging",
+        "binary-format",
+        "crc",
+        "power-loss"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-M10",
+      "level": "M",
+      "title": "센서 고장 감지와 Plausibility 검사",
+      "goal": "센서 값이 '거짓말'하는지 판단하는 진단 로직을 만든다",
+      "task": "범위·변화율·stuck(분산 0)·잡음 증가·중복 센서 간 불일치(2oo3 투표) 검사를 구현하고, 결함 주입 시뮬레이션으로 검출 지연과 오경보율을 임계값별로 측정한다.",
+      "tags": [
+        "fault-detection",
+        "plausibility",
+        "voting"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-A01",
+      "level": "A",
+      "title": "Mahony/Madgwick AHRS (쿼터니언)",
+      "goal": "자이로 적분 + 가속도/자력계 보정의 쿼터니언 기반 자세 추정을 구현한다",
+      "task": "쿼터니언 자세 적분과 Mahony(PI 보정) 또는 Madgwick(경사하강) 필터를 C로 구현해 합성 9축 데이터에서 roll/pitch/yaw RMS 오차를 측정하고, 자기 교란 구간에서 mag 게인 조정 효과를 비교한다.",
+      "tags": [
+        "ahrs",
+        "quaternion",
+        "madgwick",
+        "mahony"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-A02",
+      "level": "A",
+      "title": "고분해능 ΣΔ ADC 측정 체인",
+      "goal": "24비트 ΣΔ ADC의 디지털 필터 지연·settling·50/60Hz 제거를 이해한다",
+      "task": "ADS1262 유사 ΣΔ ADC 모델(sinc 필터 차수, 데이터율)을 만들어 채널 전환 시 settling 지연, 50/60Hz 노치 효과, 데이터율별 잡음을 시뮬레이션하고 다채널 스캔 주기를 설계한다.",
+      "tags": [
+        "sigma-delta",
+        "adc",
+        "sinc-filter"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-A03",
+      "level": "A",
+      "title": "AC 전력 측정: RMS·유효전력·역률",
+      "goal": "샘플링된 전압·전류로 전력 품질 지표를 계산한다",
+      "task": "위상차·고조파를 가진 합성 전압/전류 파형에서 Vrms/Irms/유효전력/피상전력/역률을 계산하고, 두 채널 샘플링 시차를 보간으로 보정했을 때 역률 오차가 줄어드는 것을 측정한다.",
+      "tags": [
+        "power-measurement",
+        "rms",
+        "power-factor"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-A04",
+      "level": "A",
+      "title": "고속 ADC DMA 파이프라인 무손실 검증",
+      "goal": "타이머 트리거 + DMA 더블 버퍼로 100kSPS 연속 수집을 설계·검증한다",
+      "task": "타이머 트리거 ADC → DMA half/full 콜백 → 처리 큐 흐름을 host 이벤트 시뮬레이션으로 구현하고, 샘플 시퀀스 카운터로 누락·중복을 검증; 처리 시간이 버퍼 시간을 넘을 때 overrun 검출과 버퍼 크기 결정을 보인다.",
+      "tags": [
+        "adc",
+        "dma",
+        "double-buffer",
+        "throughput"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-A05",
+      "level": "A",
+      "title": "절대 엔코더(SSI/BiSS-C)와 sin/cos 보간",
+      "goal": "고정밀 위치 센서의 프레임 파싱과 아날로그 보간을 구현한다",
+      "task": "BiSS-C 유사 프레임(위치, 에러/경고 비트, CRC6) 파서와 sin/cos 아날로그 엔코더의 atan2 보간(오프셋·진폭 불일치 보정 포함)을 구현해 합성 신호에서 위치 오차를 측정한다.",
+      "tags": [
+        "absolute-encoder",
+        "biss-c",
+        "sincos-interpolation"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-A06",
+      "level": "A",
+      "title": "센서 특성화 자동화: 온도 sweep 보정",
+      "goal": "온도 챔버 데이터로 온도 계수를 피팅해 보정 테이블을 만든다",
+      "task": "여러 개체의 온도 sweep 합성 데이터(오프셋·게인의 온도 의존성)에 대해 개체별 다항 피팅, 잔차 분석, 이상 개체 검출, 펌웨어용 보정 테이블(계수 Q 형식) 생성까지 자동화하는 Python 파이프라인을 만든다.",
+      "tags": [
+        "characterization",
+        "temperature-compensation",
+        "automation"
+      ],
+      "env": "mac",
+      "env_note": "실제 데이터는 lab(온도 챔버) 필요, 파이프라인은 합성 데이터로 검증"
+    },
+    {
+      "id": "SENS-A07",
+      "level": "A",
+      "title": "센서 HAL/프레임워크 설계",
+      "goal": "여러 센서를 일관된 API로 다루는 드라이버 프레임워크를 설계한다",
+      "task": "Zephyr sensor API를 참고해 sample_fetch/channel_get, 트리거, 속성 설정, 단위 변환을 가진 C 센서 프레임워크를 설계·구현하고 B03/B04 드라이버를 이식; 동기 vs 비동기(RTIO 유사) 읽기의 trade-off를 정리한다.",
+      "tags": [
+        "sensor-hal",
+        "api-design",
+        "zephyr"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "SENS-A08",
+      "level": "A",
+      "title": "로드셀 측정 시스템 end-to-end 설계",
+      "goal": "브리지 센서부터 ADC·보정·필터까지 측정 시스템 전체를 설계한다",
+      "task": "휘트스톤 브리지 로드셀(mV/V 감도) + 계측 앰프 + 24비트 ADC 체인에서 nV/√Hz 잡음 밀도부터 유효 분해능까지 잡음 예산을 계산하고, 영점/스팬 보정·크리프 보상·필터 설계를 포함한 설계 문서와 핵심 코드 경로를 작성한다.",
+      "tags": [
+        "load-cell",
+        "noise-budget",
+        "design"
+      ],
+      "env": "mac",
+      "env_note": ""
+    }
+  ]
+}

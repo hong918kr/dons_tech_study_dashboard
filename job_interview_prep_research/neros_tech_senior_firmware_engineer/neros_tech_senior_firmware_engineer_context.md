@@ -1,6 +1,7 @@
 # Neros Technologies — Senior Firmware Engineer, Platform · Context
 
-> **최종 갱신**: 2026-10-23 · **상태**: ⏳ **온사이트 완료 (10-22) — 결과 대기**. 발표 잘 됨 (Don 자평), 1:1 세 개 진행: Adam = 보드 테스트 접근 · Michael Honar = Betaflight 최우선 task 찾기 + 전체 파이프라인(ground → TX → RX → FC) latency 측정 · Jon = 지난번 못 푼 패킷 문제 재도전(Python, 문제가 약간 달라 이해에 시간 → 접근을 말로 설명하고 끝남, 코드 미완). FW Test 팀은 막 만들어지는 중으로 보임. 다음: 결과 대기 + 오픈소스(Betaflight · ExpressLRS · PX4 · ArduPilot) 분석 — `onsiteKit/plan/2026-10-23_K05_open_source_study_map.md`
+> **최종 갱신**: 2026-11-04 · **상태**: ❌ 불합격 (온사이트 후, 11-04 문자 통보)
+> ~~(이전) 2026-10-23 · ⏳ 온사이트 완료 (10-22) — 결과 대기~~ 발표 잘 됨 (Don 자평), 1:1 세 개 진행: Adam = 보드 테스트 접근 · Michael Honar = Betaflight 최우선 task 찾기 + 전체 파이프라인(ground → TX → RX → FC) latency 측정 · Jon = 지난번 못 푼 패킷 문제 재도전(Python, 문제가 약간 달라 이해에 시간 → 접근을 말로 설명하고 끝남, 코드 미완). FW Test 팀은 막 만들어지는 중으로 보임. 다음: 결과 대기 + 오픈소스(Betaflight · ExpressLRS · PX4 · ArduPilot) 분석 — `onsiteKit/plan/2026-10-23_K05_open_source_study_map.md`
 > ~~(이전) 2026-10-14 · 🏢 온사이트 10-22 확정~~ **최종 갱신**: 2026-10-14 · **상태**: 🏢 **온사이트 10-22(목) 10:30~14:30 PDT 확정** [확인됨 10-14 코디네이터 Jazmin Vu 메일] — 1100 Knox St, Torrance. 투어(Michael Honar) → **패널 발표 11:00~12:00** (Balapranesh Elango · Michael Aguayo · Adam Kibit · Michael Honar · Gil Vargas · Jon Kotowski) → 점심(Michael Honar) → 1:1 **Adam 30분 · Michael Honar 45분 · Jon Kotowski 45분**. ⚠️ **발표 PDF/PPT 48시간 전 제출 필수(미제출 시 취소 가능) → 마감 10-20 11:00 PDT, 10-19 제출 목표**. 준비: `onsiteKit/index.html` (K01 일정 · 패널)
 > ✅ **2026-10-08 technical screen (1시간, Jon Kotowski)**: 시작하자마자 "Python or C?" → **C 선택**. Task 1 = 외부 버퍼를 받는 byte ring buffer (struct부터 직접, `rb_init(rb_t*, uint8_t *rb_buf, uint8_t capacity)`, is_empty/is_full, push_byte/pop_byte, **bulk push/pop all-or-nothing**, `rb_peek(rb, uint8_t offset, …)`). Task 2 (보너스) = `extract_packet` 함수 하나, 라이브러리로 `CRC.c` 제공. Don: 잘 풀었다고 느낌. 들은 정보: **FW 엔지니어 17명, Test 엔지니어 3명, + full stack (embedded를 테스트할 수 있는)** → §6. 재구성: `technicalScreenPrep/site/lecture/2026-10-09_L09_screen_recap.html`
 > 🧪 **2026-10-02 리크루터 연락: Michael Honor 인터뷰 잘 봤음 → 온사이트 전에 technical screen 1세션 추가.** 2026-10-08(목) 11:00, 1시간, **코딩 위주** 예상. 주제: **pytest · ring buffer · Python/C 둘 다 가능 · system design**. 면접관 **Jon Kotowski** — 공개 검색상 Neros Full Stack Engineer [추정, Datanyze 단일 출처 + ZoomInfo 스니펫]. 준비: `technicalScreenPrep/index.html` → §6
@@ -19,6 +20,7 @@
 
 ## 0. TL;DR
 
+- **❌ 최종 결과 (2026-11-04)**: 온사이트(10-22) 후 불합격, 문자로 통보받음. 회고는 §6 맨 끝 온사이트 노트 아래.
 - **회사**: 전직 드론 레이서들이 2023년에 세운 방산 드론 스타트업. 저가 소모형 FPV 공격 드론 **Archer**를 주당 ~1,200대 양산하고, 2026-08 Series C로 **$250M를 $2.5B 밸류**에 조달함. [1][2][4]
 - **역할**: Flight·Ground-station·Autonomy 팀이 모두 올라타는 **공통 firmware platform**을 책임지는 자리. 범위는 logging/telemetry/IPC/config 라이브러리, SDK, **Bazel 기반 cross-compile 빌드 시스템**이고, MCU와 Linux 타깃을 모두 다룸. "고객은 다른 엔지니어" [JD]
 - **적합도**: ⭐⭐⭐☆☆. embedded C, 크로스바운더리 디버깅, telemetry/SDK 경험은 잘 맞음. 다만 JD의 절반을 차지하는 **빌드 시스템(Bazel) 오너십**과 **embedded Linux**가 레쥬메에 없음.
@@ -349,6 +351,8 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 | 2026-10-14 | **📧 온사이트 확정 메일 (Jazmin Vu, Talent Coordinator)** | **10-22(목)** 10:30 투어(Michael Honar) · 11:00 패널 발표(Elango · Aguayo · Kibit · Honar · Vargas · Kotowski) · 12:00 점심(Honar) · 12:30 1:1 Adam(30분) · 13:00 1:1 Michael Honar(45분) · 13:45 1:1 Jon Kotowski(45분). 발표 PDF/PPT **48시간 전 제출 필수**(민감 정보면 30분 일찍 와서 그쪽 노트북으로). 식이 제한 회신 요청. 주소 1100 Knox Street, Torrance 90502 · 로비 앞 방문자 주차 · 키오스크 체크인(신분증 · 법적 이름). Devin 콜 대비 변화: Michael B(= Michael Aguayo)는 패널로, 1:1에 Jon 추가, Adam 30분. 면접관 공개 정보: LinkedIn 비로그인 조회는 대부분 차단(HTTP 999/404) — Michael Aguayo 공개 페이지만 열림(현재 Neros, UC Irvine 컴퓨터공학), Elango · Vargas는 공개 정보 없음. → `onsiteKit` K01 추가, 일정표 재조정 |
 | 2026-10-22 | **🏢 온사이트 완료** | 투어 → 패널 발표(잘 됨) → 점심 → 1:1 Adam(보드를 주고 어떻게 테스트하나) · Michael Honar(Betaflight 소스에서 최우선 task 찾기, 전체 latency 측정법) · Jon(지난 스크린 패킷 문제 재도전, Python으로 했는데 문제가 약간 달라 이해에 오래 걸림 → 말로 접근만 설명). FW Test 팀은 막 만들어지는 중. 결과 대기 |
 | 2026-10-23 | 온사이트 기록 + 오픈소스 지도 | 공고 109개 스캔(`research/job_board_snapshots/2026-10-23_neros_jobs.json`) → Betaflight 13 · PX4 10 · ArduPilot 10 · ExpressLRS/ELRS 6 · Yocto/Buildroot 5 · MAVLink 4 등. 분석 계획 `onsiteKit/plan/2026-10-23_K05_open_source_study_map.md` |
+| 2026-10-24 | 스터디 노트 `fteResearch/` R00–R10 | Gemini 자료를 소스로 확인해 드론 FTE 리서치 11단원 작성. 회사와 무관하게 재사용 가능 |
+| 2026-11-04 | **❌ 불합격 통보 (문자)** | 온사이트 13일 뒤. 사유는 전달받은 내용 없음. 종료 |
 
 ---
 
@@ -414,7 +418,7 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 - 아쉬운 점 / 기억할 것: (Don: 실제로 막혔던 곳 · Task 2를 어디까지 했는지 · 테스트를 보여 줬는지 — 기록 필요)
 - 다음 라운드에 반영: 온사이트 1:1에서 같은 ring buffer를 **ISR-safe(SPSC) · DMA · memcpy 두 조각**으로 확장하는 질문 대비, 패킷 파서(상태 머신 · CRC · resync) C로 한 번 더. 재구성 · 참고 풀이: `technicalScreenPrep/lecture/recap/` (테스트 통과)
 
-### 2026-10-22 · 온사이트 (투어 · 패널 발표 · 1:1 ×3) · 결과 대기
+### 2026-10-22 · 온사이트 (투어 · 패널 발표 · 1:1 ×3) · ❌ 불합격 (11-04 통보)
 - **발표**: 잘 됨 [Don 자평]. 10장 덱 (cover 제목 "Thorough validation builds great products")
 - **1:1 Adam Kibit (FW Director, 30분)** — 받은 질문: "보드를 주면 어떻게 테스트할 건가"
   - Don 답: 먼저 **무슨 보드인지** 묻는다 → 테스트 방법론: **입력 · 출력부터 확인** → test point / probe point로 신호를 잡아 직접 디코딩, JTAG가 있으면 활용
@@ -425,7 +429,19 @@ Neros Technologies는 "America's drone industrial base 재건"을 내건 방산 
 - **1:1 Jon Kotowski (45분)** — 지난 스크린에서 시간이 부족해 못 푼 **패킷 문제를 다시** → Don이 Python으로 해도 되냐고 해서 Python 버전을 받음. 문제가 약간 달라 **이해에 시간이 오래 걸림**, 결국 **어떻게 할지 말로 설명하고 끝남** (코드 완성 못 함)
 - **들은 인상**: FW Test 팀은 **지금 막 만들어지는 팀** → 해 볼 수 있는 일이 많아 보임
 - **아쉬운 점 / 다음에 반영**: 코딩에서 문제 이해에 시간이 걸림 → 첫 5분에 예시 입력/출력을 손으로 만들어 확인받는 습관. Betaflight · ExpressLRS 내부(스케줄러 · CRSF · 타이밍) 실습으로 보강
-- **결과**: 대기
+- **결과**: ~~대기~~ → ❌ 불합격 (2026-11-04 문자 통보)
+
+### 2026-11-04 · 최종 회고
+- **경과**: 리크루터 콜(09-16) → Adam 45분(09-18) → FW Test 트랙 전환(09-27) → Michael Honar(10-01) → Jon technical screen(10-08) → 온사이트(10-22) → 불합격(11-04)
+- **사유**: 전달받은 내용 없음. 아래 원인은 전부 [추정]
+- **가장 약했던 곳 [추정]**: Jon 코딩. 스크린에서 overflow case를 놓쳤고, 온사이트에서 같은 패킷 문제의 변형을 받아 코드를 끝내지 못함. 두 번 연속 같은 면접관 앞에서 코딩이 미완이었음
+- **잘 된 것**: 발표(Don 자평), HM 라운드 통과, 온사이트까지 네 단계 진행
+- **다음 회사에 가져갈 교훈**
+  - 지난 라운드에서 못 푼 문제는 다음 라운드 전에 **코드로 끝까지 완성**하고 변형까지 풀어 본다. 같은 문제가 다시 나왔음
+  - 처음 보는 변형을 받으면 첫 5분에 예시 입력/출력을 손으로 만들어 면접관에게 확인받는다
+  - JD의 nice-to-have 오픈소스도 온사이트 전에 소스를 열어 본다. Betaflight 코드 읽기가 실제로 나왔는데 본격 분석(K05)은 온사이트 뒤에 시작함
+  - "보드를 어떻게 테스트하나"는 안전 순서부터 답한다: 무전원 단락 → 전류 제한 전원 → 레일 → 클럭/리셋 → 입출력
+- **재사용 자산**: `onsiteKit/code/typealong/`(Python · C 코딩 7문제), 발표 덱, `fteResearch/`(드론 FTE 리서치 R00–R10), `firmwareTestEngineerPrep/`
 
 ### 리크루터 안내 온사이트 구성 (2026-09-16 Devin) [확인됨]
 1. **Tour 30분**

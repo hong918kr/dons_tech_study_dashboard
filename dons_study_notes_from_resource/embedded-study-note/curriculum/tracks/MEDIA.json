@@ -1,0 +1,528 @@
+{
+  "id": "MEDIA",
+  "intro": "카메라·드론·스마트 스피커·차량 영상 시스템의 펌웨어는 결국 비디오/오디오를 압축·포장·전송·재생하는 미디어 파이프라인으로 이어진다. 미디어 면접(Apple, NVIDIA, Qualcomm, Meta Reality Labs, Tesla 등)에서는 H.264 NAL/SPS 파싱, 움직임 추정, 레이트 컨트롤, 컨테이너·RTP, 지터 버퍼, I2S/PDM과 AEC 같은 주제를 '직접 비트 단위로 구현해봤는지'를 묻는다. ffmpeg를 참조 오라클 삼아 모든 파서·코덱 결과를 맥에서 검증한다.",
+  "goals": [
+    "변환·양자화·예측·엔트로피 코딩으로 이어지는 하이브리드 비디오 코덱 구조를 직접 구현한다",
+    "H.264/HEVC Annex B·NAL·SPS/PPS·slice header를 비트 수준으로 파싱하고 ffprobe와 대조한다",
+    "MP4·MPEG-TS 컨테이너와 RTP/RTSP·지터 버퍼·혼잡 제어 등 전송 계층을 구현한다",
+    "레이트 컨트롤·RDO·하드웨어 인코더 사이징 같은 설계 트레이드오프를 정량적으로 설명한다",
+    "I2S/TDM/PDM 오디오 인터페이스, ALSA, AEC·빔포밍, A/V 동기화를 구현·측정한다"
+  ],
+  "prereq": [
+    "C",
+    "DSP",
+    "CAM"
+  ],
+  "refs": [
+    {
+      "title": "ITU-T H.264 Advanced video coding for generic audiovisual services",
+      "url": "https://www.itu.int/rec/T-REC-H.264"
+    },
+    {
+      "title": "ITU-T H.265 High efficiency video coding",
+      "url": "https://www.itu.int/rec/T-REC-H.265"
+    },
+    {
+      "title": "The H.264 Advanced Video Compression Standard (Iain Richardson)"
+    },
+    {
+      "title": "ISO/IEC 14496-12 ISO Base Media File Format"
+    },
+    {
+      "title": "RFC 3550 RTP: A Transport Protocol for Real-Time Applications",
+      "url": "https://www.rfc-editor.org/rfc/rfc3550"
+    },
+    {
+      "title": "RFC 6184 RTP Payload Format for H.264 Video",
+      "url": "https://www.rfc-editor.org/rfc/rfc6184"
+    },
+    {
+      "title": "RFC 7826 Real-Time Streaming Protocol 2.0",
+      "url": "https://www.rfc-editor.org/rfc/rfc7826"
+    },
+    {
+      "title": "draft-ietf-rmcat-gcc: Google Congestion Control for Real-Time Communication",
+      "url": "https://datatracker.ietf.org/doc/html/draft-ietf-rmcat-gcc-02"
+    },
+    {
+      "title": "Linux V4L2 Memory-to-Memory Stateful Video Encoder Interface",
+      "url": "https://docs.kernel.org/userspace-api/media/v4l/dev-encoder.html"
+    },
+    {
+      "title": "ALSA project / alsa-lib PCM API",
+      "url": "https://www.alsa-project.org/"
+    },
+    {
+      "title": "FFmpeg documentation",
+      "url": "https://ffmpeg.org/documentation.html"
+    }
+  ],
+  "items": [
+    {
+      "id": "MEDIA-B01",
+      "level": "B",
+      "title": "디지털 비디오 기초: Raw 비트레이트와 압축비 계산",
+      "goal": "해상도·프레임률·비트 깊이·크로마 포맷으로 raw 대역폭과 픽셀당 비트 예산을 계산한다.",
+      "task": "1080p30/4K60, 8/10비트, 4:2:0/4:2:2/4:4:4 조합의 raw 비트레이트와 목표 비트레이트(예: 8 Mbps) 대비 압축비·bits-per-pixel을 계산하는 도구를 작성하고, ffmpeg로 만든 rawvideo/Y4M 파일 크기와 계산값이 일치함을 검증한다 (YUV 변환·서브샘플링 자체는 see:DISP-B05/B06, 버퍼 레이아웃은 see:CAM-B10).",
+      "tags": [
+        "video-basics",
+        "bitrate",
+        "chroma-format",
+        "see:DISP",
+        "see:CAM"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-B02",
+      "level": "B",
+      "title": "화질 지표: Y4M 리더와 PSNR·SSIM 구현",
+      "goal": "코덱 실험 전체에서 쓸 객관적 화질 측정 도구를 직접 만든다.",
+      "task": "Y4M 헤더(W/H/F/C 태그)와 FRAME 단위를 읽는 C 리더와 plane별 PSNR, 8x8 윈도 SSIM을 구현하고, ffmpeg -lavfi psnr/ssim 출력과 소수점 둘째 자리까지 일치하는지 비교한다.",
+      "tags": [
+        "psnr",
+        "ssim",
+        "y4m",
+        "quality-metric"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-B03",
+      "level": "B",
+      "title": "8x8 DCT-II/IDCT와 에너지 집중(Energy Compaction)",
+      "goal": "변환 부호화가 왜 압축에 유리한지 계수 분포로 확인한다.",
+      "task": "분리형 2D DCT-II/IDCT(직접 O(N^4)과 행·열 분리 O(N^3))를 구현해 왕복 오차가 1e-9 이하임을 확인하고, 자연 영상 블록에서 상위 k개 계수만 남겼을 때의 PSNR 곡선을 그려 에너지 집중을 정량화한다.",
+      "tags": [
+        "dct",
+        "transform-coding"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-B04",
+      "level": "B",
+      "title": "H.264 4x4 정수 변환과 양자화: QP와 Qstep",
+      "goal": "bit-exact 정수 변환과 QP 6 증가 시 Qstep 2배 규칙을 구현한다.",
+      "task": "H.264 4x4 core transform(1,2 계수)과 post-scaling을 합친 양자화(MF 테이블, qbits=15+QP/6)·역양자화를 정수로 구현해 QP 0–51에서 재구성 PSNR과 0이 아닌 계수 수 곡선을 측정하고, 변환 행렬이 정확한 DCT가 아니어도 인코더-디코더 drift가 없는 이유를 설명한다.",
+      "tags": [
+        "h264",
+        "integer-transform",
+        "quantization",
+        "qp"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-B05",
+      "level": "B",
+      "title": "JPEG Baseline 인코더: 지그재그·RLE·표준 허프만",
+      "goal": "DCT→양자화→지그재그→(run,size)→허프만으로 이어지는 완전한 코덱 하나를 끝까지 만든다.",
+      "task": "그레이스케일(가능하면 4:2:0 컬러) Baseline JPEG 인코더를 표준 양자화/허프만 테이블로 작성해 SOI/DQT/SOF0/DHT/SOS/EOI 마커와 0xFF 바이트 스터핑을 직접 쓰고, ffmpeg/미리보기로 디코드되는지와 품질 인자별 파일 크기·PSNR을 검증한다 (허프만 기초는 see:ALGO-A06).",
+      "tags": [
+        "jpeg",
+        "huffman",
+        "zigzag",
+        "rle",
+        "see:ALGO"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-B06",
+      "level": "B",
+      "title": "비트 리더/라이터와 Exp-Golomb ue(v)/se(v)",
+      "goal": "비디오 비트스트림 파싱의 기본 단위인 가변 길이 정수 코드를 구현한다.",
+      "task": "MSB-first 비트 리더/라이터(u(n), read_bits 경계 처리, more_rbsp_data, rbsp_trailing_bits)와 ue(v)/se(v) 인코더·디코더를 C로 작성하고, 0–2^31 범위 랜덤 왕복 테스트와 잘린 입력에서의 경계 검사를 ASan으로 검증한다.",
+      "tags": [
+        "exp-golomb",
+        "bitstream",
+        "bit-reader"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-B07",
+      "level": "B",
+      "title": "Annex B 바이트스트림과 NAL 헤더: Start Code·Emulation Prevention",
+      "goal": "H.264/HEVC 스트림을 NAL 유닛 단위로 쪼개고 RBSP로 복원한다.",
+      "task": "ffmpeg(libx264/libx265)로 만든 .h264/.hevc 파일에서 3/4바이트 start code로 NAL을 분리하고 0x000003 emulation prevention 바이트를 제거하는 파서를 작성해 nal_unit_type·nal_ref_idc(HEVC는 2바이트 헤더·layer/tid)를 출력, ffmpeg -bsf:v trace_headers 결과와 NAL 순서·타입이 일치함을 확인한다.",
+      "tags": [
+        "h264",
+        "hevc",
+        "nal",
+        "annex-b",
+        "emulation-prevention"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-B08",
+      "level": "B",
+      "title": "SPS/PPS 파서: Profile·Level·해상도·Cropping·VUI",
+      "goal": "SPS 필드로부터 해상도와 프레임률을 정확히 계산한다.",
+      "task": "H.264 SPS(profile_idc, level_idc, chroma_format_idc, log2_max_frame_num, pic_order_cnt_type, pic_width_in_mbs, frame_cropping, VUI timing_info)와 PPS(entropy_coding_mode_flag 등)를 파싱해 1080p의 1088→1080 cropping과 fps를 계산하고, ffprobe -show_streams 값과 여러 프로파일/해상도 샘플로 비교 검증한다.",
+      "tags": [
+        "h264",
+        "sps",
+        "pps",
+        "parser"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-B09",
+      "level": "B",
+      "title": "PCM 오디오 기초: WAV(RIFF) 파서/라이터와 샘플 포맷",
+      "goal": "PCM 샘플 포맷·인터리빙·dBFS 개념을 파일 포맷 수준에서 다룬다.",
+      "task": "RIFF/WAVE 청크(fmt, data, WAVE_FORMAT_EXTENSIBLE, 홀수 크기 패딩)를 읽고 쓰는 C 라이브러리로 S16/S24-in-S32/F32 변환(디더 없는 truncation vs TPDF 디더)과 인터리브/디인터리브를 구현하고, ffprobe 메타데이터와 1kHz −6 dBFS 톤의 RMS/피크 측정값으로 검증한다.",
+      "tags": [
+        "pcm",
+        "wav",
+        "sample-format",
+        "dbfs"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-B10",
+      "level": "B",
+      "title": "디지털 오디오 인터페이스: I2S·Left-Justified·TDM·PDM 프레이밍",
+      "goal": "MCLK/BCLK/LRCLK 관계와 포맷별 비트 정렬 차이를 비트 수준으로 이해한다.",
+      "task": "I2S(1비트 지연)·Left-Justified·DSP/TDM8(슬롯 32비트)·스테레오 PDM(한 데이터선, 상승/하강 에지 L/R) 직렬화기/역직렬화기를 비트 단위로 시뮬레이션해 VCD로 출력하고, 48 kHz에서 BCLK·MCLK(256fs) 비율 계산과 1비트 정렬 오류·슬롯 매핑 오류가 만드는 증상(채널 스왑, 6 dB 손실, 노이즈)을 재현한다.",
+      "tags": [
+        "i2s",
+        "tdm",
+        "pdm",
+        "audio-interface",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-M01",
+      "level": "M",
+      "title": "움직임 추정: Full Search SAD vs 고속 탐색",
+      "goal": "블록 매칭 움직임 추정의 정확도와 연산량 트레이드오프를 측정한다.",
+      "task": "16x16 블록에 대해 ±16 Full Search SAD와 Three-Step/Diamond 탐색, 그리고 6-tap 필터 half-pel 정제를 구현해 ffmpeg testsrc/패닝 시퀀스에서 잔차 에너지·SAD 연산 횟수·MV 필드를 비교하고, 탐색 범위가 메모리 대역폭에 미치는 영향을 계산한다.",
+      "tags": [
+        "motion-estimation",
+        "sad",
+        "block-matching",
+        "subpel"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-M02",
+      "level": "M",
+      "title": "Intra 예측과 SATD 모드 결정",
+      "goal": "H.264 4x4/16x16 intra 예측 모드와 Hadamard SATD 기반 모드 선택을 구현한다.",
+      "task": "4x4(V/H/DC/대각 일부)와 16x16(V/H/DC/Plane) intra 예측기를 구현하고 SAD vs Hadamard SATD 비용으로 모드를 고를 때 변환 후 잔차 비트 추정이 어떻게 달라지는지 측정하며, 이웃 블록 불가용(프레임 경계/슬라이스 경계) 처리를 테스트한다.",
+      "tags": [
+        "intra-prediction",
+        "satd",
+        "hadamard",
+        "mode-decision"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-M03",
+      "level": "M",
+      "title": "미니 하이브리드 코덱: I/P 프레임 Closed-loop 인코더+디코더",
+      "goal": "인코더가 반드시 재구성 프레임을 참조해야 하는 이유(drift)를 직접 확인한다.",
+      "task": "MEDIA-M01·M02·B04·B06을 묶어 I/P 프레임 인코더와 디코더(자체 비트스트림, Exp-Golomb)를 구현하고, 원본 프레임을 참조하는 open-loop 버전과 비교해 GOP 길이에 따른 drift PSNR 저하를 그래프로 보이며, 디코더 출력이 인코더 재구성과 bit-exact임을 MD5로 검증한다.",
+      "tags": [
+        "codec",
+        "closed-loop",
+        "drift",
+        "p-frame"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-M04",
+      "level": "M",
+      "title": "엔트로피 코딩: CAVLC 개념과 적응형 이진 산술 부호화(CABAC 원리)",
+      "goal": "가변 길이 부호와 문맥 적응 산술 부호화의 비트 절감 원리를 비교한다.",
+      "task": "잔차 계수에 대해 Exp-Golomb, CAVLC 스타일(coeff_token/TotalZeros 개념 단순화), 문맥 적응 이진 산술 부호화기(이진화 + 확률 상태 갱신 + range 정규화, CABAC M-coder 개념 모델)를 구현해 QP별 비트수를 비교하고, 산술 부호 디코더 왕복 bit-exact와 캐리 전파 코너를 테스트한다.",
+      "tags": [
+        "entropy-coding",
+        "cavlc",
+        "cabac",
+        "arithmetic-coding"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-M05",
+      "level": "M",
+      "title": "Slice Header·POC와 B-프레임 재정렬: 디코드 vs 표시 순서",
+      "goal": "POC 계산과 DPB로 디코드 순서와 표시 순서, PTS/DTS 관계를 설명한다.",
+      "task": "H.264 slice header(first_mb, slice_type, frame_num, pic_order_cnt_lsb, IDR)를 파싱해 POC type 0을 계산하고 DPB 출력(bumping) 모델로 표시 순서를 재구성하며, -bf 3으로 만든 x264 스트림의 ffprobe -show_frames PTS/DTS와 비교하고 필요한 최소 DTS 오프셋·DPB 크기를 도출한다.",
+      "tags": [
+        "h264",
+        "slice-header",
+        "poc",
+        "dpb",
+        "pts-dts",
+        "b-frame"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-M06",
+      "level": "M",
+      "title": "레이트 컨트롤: VBV/HRD 버퍼 모델과 QP 적응",
+      "goal": "CBR 스트림이 디코더 버퍼를 넘치거나 비지 않게 하는 제어 루프를 설계한다.",
+      "task": "프레임 복잡도 트레이스(ffmpeg -pass 1 통계 또는 합성)에 대해 R-Q 모델 기반 프레임 레벨 QP 결정과 VBV leaky bucket(초기 지연, 버퍼 크기, maxrate) 시뮬레이터를 구현해 underflow/overflow가 없음을 검증하고, CBR/VBR/CRF(x264) 결과의 비트레이트 변동과 PSNR을 비교한다.",
+      "tags": [
+        "rate-control",
+        "vbv",
+        "hrd",
+        "cbr",
+        "control-loop"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-M07",
+      "level": "M",
+      "title": "MP4(ISOBMFF) 박스 파서와 샘플 테이블",
+      "goal": "컨테이너가 프레임 위치·크기·시각을 어떻게 저장하는지 박스 수준에서 파악한다.",
+      "task": "ftyp/moov/trak/mdia/minf/stbl(stsd·avcC, stts, ctts, stsc, stsz, stco/co64, stss) 재귀 파서를 작성해 샘플 i의 파일 오프셋·크기·DTS/PTS·키프레임 여부를 계산하고, avcC의 length-prefixed NAL을 Annex B로 변환해 추출한 스트림이 ffmpeg -c copy -bsf h264_mp4toannexb 결과와 바이트 일치함을 검증한다 (fMP4 moof/traf는 확장).",
+      "tags": [
+        "mp4",
+        "isobmff",
+        "container",
+        "avcc"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-M08",
+      "level": "M",
+      "title": "MPEG-TS 디멀티플렉서: PAT/PMT·PES·PCR",
+      "goal": "방송/스트리밍용 전송 스트림의 패킷 구조와 클럭 복원을 구현한다.",
+      "task": "188바이트 TS 패킷(sync 0x47, PID, PUSI, adaptation field, continuity counter)을 파싱해 PAT→PMT→ES PID를 찾고 PES를 재조립해 PTS/DTS를 추출하며, PCR(27 MHz) 간격과 PTS 관계를 출력하고 CC 불연속을 주입해 검출되는지 ffprobe 결과와 함께 검증한다.",
+      "tags": [
+        "mpeg-ts",
+        "demux",
+        "pcr",
+        "pes"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-M09",
+      "level": "M",
+      "title": "RTP 패킷화: H.264 RFC 6184 (Single NAL·FU-A·STAP-A)",
+      "goal": "MTU 제약 아래에서 NAL을 RTP로 분할·재조립한다.",
+      "task": "Annex B 스트림을 RTP(90 kHz 타임스탬프, marker 비트, 시퀀스 16비트 wrap)로 패킷화하면서 MTU 초과 NAL은 FU-A로 분할, SPS/PPS는 STAP-A로 묶는 packetizer와 depacketizer를 작성하고, 재조립 스트림이 원본과 바이트 일치·유실 FU 조각 시 NAL 폐기 동작을 테스트한다 (일반 UDP/소켓은 see:NET).",
+      "tags": [
+        "rtp",
+        "rfc6184",
+        "fu-a",
+        "packetization",
+        "see:NET"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-M10",
+      "level": "M",
+      "title": "적응형 지터 버퍼: RFC 3550 지터 추정과 Playout Delay",
+      "goal": "네트워크 지연 변동 하에서 지연과 늦은 패킷 손실의 균형을 잡는다.",
+      "task": "RFC 3550 interarrival jitter 추정기와 재정렬·중복 제거·늦은 패킷 폐기를 하는 지터 버퍼를 구현하고, 지연/지터/버스트 손실 트레이스로 고정 vs 적응형(지터 배수, 백분위 기반) playout delay의 평균 지연·late-loss율을 비교한다 (재전송 프로토콜은 see:DIST-A06).",
+      "tags": [
+        "jitter-buffer",
+        "rtp",
+        "rfc3550",
+        "playout",
+        "see:DIST"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-M11",
+      "level": "M",
+      "title": "PDM 마이크 데시메이션 체인 설계: CIC + Half-band + 보상 FIR",
+      "goal": "3.072 MHz PDM에서 16/48 kHz PCM까지 다단 데시메이션을 사양 기반으로 설계한다.",
+      "task": "2차 시그마-델타 변조기로 PDM 비트스트림을 생성하고 CIC(R=16) → half-band ×2 → 보상 FIR ×2 체인을 통과대역 리플·저지대역 감쇠 사양으로 설계해 SNR·연산량(MACs/s)·메모리를 측정하며, 단일 단계 FIR 대비 연산량 절감을 표로 정리한다 (CIC 기초와 비트 성장은 see:DSP-M08, polyphase는 see:DSP-M07).",
+      "tags": [
+        "pdm",
+        "decimation",
+        "half-band",
+        "sigma-delta",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-M12",
+      "level": "M",
+      "title": "ALSA PCM 재생/캡처: hw_params·Period·XRUN 복구",
+      "goal": "리눅스 오디오 드라이버 경계의 버퍼/period 모델과 지연을 실측한다.",
+      "task": "snd-aloop 루프백 장치에서 alsa-lib로 hw_params(rate, format, period_size, buffer_size)를 협상하는 재생+캡처 프로그램을 작성해 왕복 지연을 측정하고, 처리 지연을 주입해 XRUN(-EPIPE)을 유발한 뒤 snd_pcm_recover로 복구하며 period 크기별 지연·XRUN 빈도를 기록한다.",
+      "tags": [
+        "alsa",
+        "pcm",
+        "xrun",
+        "latency",
+        "linux"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM elinux: sudo modprobe snd-aloop, sudo apt install libasound2-dev alsa-utils (aplay/arecord로 사전 확인)"
+    },
+    {
+      "id": "MEDIA-A01",
+      "level": "A",
+      "title": "V4L2 Stateful M2M 코덱 API: vicodec 인코더/디코더",
+      "goal": "하드웨어 비디오 코덱 드라이버의 OUTPUT/CAPTURE 큐 상태 머신을 유저공간에서 다룬다.",
+      "task": "vicodec 가상 드라이버에 대해 V4L2 stateful encoder/decoder 인터페이스(OUTPUT=입력, CAPTURE=출력 큐, S_FMT 순서, STREAMON, V4L2_ENC_CMD_STOP drain, V4L2_EVENT_SOURCE_CHANGE 해상도 변경)를 구현한 C 프로그램을 작성해 YUV→FWHT 인코드→디코드 왕복 PSNR과 drain 시 마지막 버퍼(V4L2_BUF_FLAG_LAST) 처리를 검증한다 (캡처 기초는 see:CAM-A01).",
+      "tags": [
+        "v4l2",
+        "m2m",
+        "vicodec",
+        "codec-driver",
+        "see:CAM"
+      ],
+      "env": "linux",
+      "env_note": "Lima VM elinux: sudo modprobe vicodec (CONFIG_VIDEO_VICODEC 없으면 모듈만 빌드), v4l-utils 설치, v4l2-ctl --list-devices로 확인"
+    },
+    {
+      "id": "MEDIA-A02",
+      "level": "A",
+      "title": "미니 RTSP 서버: SDP·RTP/RTCP와 Sender Report",
+      "goal": "스트리밍 세션 제어와 미디어 전송을 하나의 작은 서버로 통합한다.",
+      "task": "RTSP OPTIONS/DESCRIBE/SETUP/PLAY/TEARDOWN을 처리하고 SDP(sprop-parameter-sets, profile-level-id)를 생성하는 서버에서 MEDIA-M09 packetizer로 H.264 파일을 실시간 페이싱해 RTP/UDP로 보내고 RTCP SR(NTP↔RTP 타임스탬프 매핑)을 주기 전송하며, ffmpeg -rtsp_transport udp -i rtsp://... -c copy out.mp4로 수신된 스트림이 재생 가능한지 검증한다.",
+      "tags": [
+        "rtsp",
+        "sdp",
+        "rtcp",
+        "streaming-server"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    },
+    {
+      "id": "MEDIA-A03",
+      "level": "A",
+      "title": "A/V 동기화와 클럭 드리프트: 오디오 마스터 클럭과 비동기 SRC",
+      "goal": "서로 다른 클럭 도메인의 오디오·비디오를 장시간 동기 상태로 유지한다.",
+      "task": "오디오 클럭(I2S 수정자 +80 ppm)과 비디오/시스템 클럭이 다른 시뮬레이터에서 오디오 마스터 기준 비디오 프레임 drop/repeat 정책과, 버퍼 수위를 PI 제어로 추적하는 비동기 샘플률 변환(가변 비율 Farrow)을 구현해 1시간 재생 동안 lip-sync 오차를 ±40 ms 이내로 유지함을 보인다 (고정 비율 SRC는 see:DSP-A04, RTCP 매핑은 MEDIA-A02).",
+      "tags": [
+        "av-sync",
+        "clock-drift",
+        "asrc",
+        "lip-sync",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-A04",
+      "level": "A",
+      "title": "실시간 비디오의 손실 복구와 혼잡 제어: NACK·FEC·GCC",
+      "goal": "WebRTC류 저지연 영상 전송에서 손실·대역폭 변화에 적응하는 메커니즘을 시뮬레이션한다.",
+      "task": "트레이스 기반 링크 시뮬레이터 위에서 NACK 재전송, XOR FEC(ULPFEC 개념), PLI 키프레임 요청, 손실 slice의 오류 은닉(이전 프레임 복사/MV 보간)과 GCC 지연 기반 대역폭 추정(trendline 필터 + 과사용 검출 + AIMD)을 구현해 대역폭 단계 변화·2% 손실에서 목표 비트레이트 추종과 PSNR/지연을 측정한다.",
+      "tags": [
+        "webrtc",
+        "gcc",
+        "congestion-control",
+        "fec",
+        "nack",
+        "error-concealment"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-A05",
+      "level": "A",
+      "title": "음향 에코 제거(AEC): 주파수 영역 블록 NLMS와 Double-talk",
+      "goal": "실제 스피커폰/스마트 스피커 수준의 AEC 구성요소를 구현하고 ERLE로 평가한다.",
+      "task": "참조-마이크 간 벌크 지연을 GCC-PHAT 상관으로 추정하고, partitioned block frequency-domain NLMS(overlap-save)와 Geigel/상관 기반 double-talk 검출, 잔여 에코 억제(NLP)를 구현해 시변 에코 경로·double-talk 구간에서 ERLE와 근단 음성 왜곡을 측정한다 (시간 영역 LMS 기초는 see:DSP-A05).",
+      "tags": [
+        "aec",
+        "nlms",
+        "frequency-domain",
+        "double-talk",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-A06",
+      "level": "A",
+      "title": "마이크 어레이: Delay-and-Sum 빔포밍과 GCC-PHAT 방향 추정",
+      "goal": "다채널 마이크로 공간 필터링과 음원 방향(DOA) 추정을 구현한다.",
+      "task": "4채널 선형/원형 어레이의 합성 신호(분수 지연, 잔향 단순 모델, 잡음)를 생성해 분수 지연 FIR 기반 delay-and-sum 빔포머와 GCC-PHAT TDOA→DOA 추정기를 구현하고, 빔 패턴(주파수·각도별 이득)과 SNR 개선량, 마이크 간격에 따른 공간 aliasing을 측정한다.",
+      "tags": [
+        "beamforming",
+        "doa",
+        "gcc-phat",
+        "mic-array"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-A07",
+      "level": "A",
+      "title": "RDO와 HEVC CTU 쿼드트리 분할 결정",
+      "goal": "율-왜곡 최적화(J = D + λR)로 블록 분할을 결정하는 현대 코덱의 핵심 루프를 구현한다.",
+      "task": "64x64 CTU를 32/16/8로 재귀 분할하며 각 노드에서 예측+변환+양자화 후 왜곡(SSE)과 추정 비트(MEDIA-M04 엔트로피 모델)로 J를 계산해 분할을 고르는 RDO 탐색과 조기 종료 휴리스틱을 구현하고, λ–QP 관계에 따른 BD-rate 경향과 연산량 대비 이득을 측정한다 (HEVC/AV1/VVC 블록 구조 비교 표 포함).",
+      "tags": [
+        "rdo",
+        "hevc",
+        "ctu",
+        "quadtree",
+        "lambda"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "MEDIA-A08",
+      "level": "A",
+      "title": "하드웨어 비디오 인코더 설계·검증: 처리량·대역폭·Bit-exact",
+      "goal": "SoC 비디오 코덱 IP의 사이징과 검증 전략을 면접 수준으로 설계한다.",
+      "task": "4K60 4:2:0 인코딩을 목표로 MB/CTU 처리율, 클럭당 사이클 예산, 참조 프레임 DDR 대역폭(탐색 윈도 캐싱 유무), 라인 버퍼 SRAM 크기를 계산하는 모델을 작성하고, C golden model 대비 bit-exact 회귀 하네스(ffmpeg -f framemd5, 적합성 스트림, 랜덤 파라미터 시드)와 장애 분류 흐름을 설계한다 (RTL 검증 방법론은 see:RTLDV, 카메라→인코더 시스템은 see:SYSD-M05).",
+      "tags": [
+        "hw-encoder",
+        "bandwidth",
+        "bit-exact",
+        "verification",
+        "see:RTLDV",
+        "see:SYSD"
+      ],
+      "env": "mac",
+      "env_note": "brew install ffmpeg (ffmpeg/ffprobe를 샘플 생성·참조 오라클로 사용)"
+    }
+  ]
+}
