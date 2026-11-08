@@ -31,6 +31,7 @@ OUT = ROOT / "site"
 LESSONS = ROOT / "lessons"
 CUR = ROOT / "curriculum"
 LEVEL_NAME = {"B": "Basic", "M": "Mid", "A": "Advanced"}
+MARKS = [("doing", "in progress"), ("done", "done"), ("later", "later"), ("fix", "need to fix")]
 
 FENCE = re.compile(r"^(\s*)```\s*([\w+-]*)\s*$")
 HEAD = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
@@ -615,9 +616,11 @@ figure.chart text.f-warn{fill:var(--warn)} figure.chart text.f-mut{fill:var(--mu
 .nav a.next{text-align:right}
 .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:11.5px;color:var(--muted);white-space:nowrap}
 .pill.ready{border-color:var(--accent);color:var(--accent)}
+.pill.doing{border-color:var(--doing);color:var(--doing)} .pill.later{border-color:var(--later);color:var(--later)} .pill.fix{border-color:var(--fix);color:var(--fix)}
 .pill.done{border-color:var(--ok);color:var(--ok)}
 .pill.ext{border-color:var(--warn);color:var(--warn)}
 /* ---- hub ---- */
+:root{--doing:#f97316;--later:#eab308;--fix:#ef4444}
 .hub{max-width:1240px;margin:0 auto;padding:4px 20px 90px}
 .hub h1{font-size:34px;margin-bottom:6px}
 .lead{font-family:var(--serif);font-size:16.5px;line-height:1.7;color:var(--muted);max-width:760px;margin:0}
@@ -629,19 +632,20 @@ figure.chart text.f-warn{fill:var(--warn)} figure.chart text.f-mut{fill:var(--mu
 .tabs button.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
 .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin:0 0 14px;align-items:center}
 .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:5px}
-.sq{display:inline-block;width:13px;height:13px;border-radius:3px;margin:0 3px 3px 0;background:var(--mut);text-decoration:none;vertical-align:top}
+.sq{display:inline-block;width:12px;height:12px;border-radius:3px;margin:0 3px 0 0;flex:none;background:var(--mut);text-decoration:none;vertical-align:top}
+.sq.doing{background:var(--doing)} .sq.later{background:var(--later)} .sq.fix{background:var(--fix)}
 .sq.ready{background:var(--accent)} .sq.done{background:var(--ok)}
 .sq.ext{background:transparent;box-shadow:inset 0 0 0 1.5px var(--warn)}
 .sq:hover{outline:2px solid var(--ink);outline-offset:1px}
-.stage{margin:0 0 22px}
-.stage h2{font-family:var(--serif);font-size:19px;margin:0 0 8px}
-.stage h2 small{font-family:var(--sans);font-size:12px;color:var(--muted);font-weight:400;margin-left:8px}
-.trow{display:grid;grid-template-columns:210px minmax(0,1fr) 80px;gap:12px;align-items:start;padding:7px 0;border-bottom:1px dashed var(--line)}
-.trow .tn{font-size:13.5px} .trow .tn a{text-decoration:none;color:var(--ink)} .trow .tn a:hover{color:var(--accent)}
-.trow .tn small{display:block;color:var(--muted);font-size:11.5px}
-.trow .lv{display:flex;flex-wrap:wrap;align-items:center}
-.trow .lv b{font-size:10px;color:var(--muted);width:14px;margin-right:2px}
-.trow .lv .gap{width:10px}
+.stage{margin:0 0 12px}
+.stage h2{font-family:var(--serif);font-size:17px;margin:14px 0 4px;padding-bottom:3px;border-bottom:1px solid var(--line)}
+.tgrid{display:block}
+.trow{display:grid;grid-template-columns:230px minmax(0,1fr) 44px;gap:12px;align-items:center;padding:5px 0;border-bottom:1px dashed var(--line)}
+.trow .tn{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .trow .tn a{text-decoration:none;color:var(--ink)} .trow .tn a:hover{color:var(--accent)}
+.trow .tn small{color:var(--muted);font-size:11px;margin-left:5px}
+.trow .lv{display:flex;flex-wrap:nowrap;overflow:hidden;align-items:center}
+.trow .lv b{font-size:10px;color:var(--muted);width:12px;flex:none}
+.trow .lv .gap{width:10px;flex:none}
 .trow .cnt{font-size:12px;color:var(--muted);text-align:right}
 .browser{display:grid;grid-template-columns:230px minmax(0,1fr);gap:24px;align-items:start}
 .filters{position:sticky;top:60px;max-height:calc(100vh - 70px);overflow:auto;font-size:13px}
@@ -659,8 +663,26 @@ figure.chart text.f-warn{fill:var(--warn)} figure.chart text.f-mut{fill:var(--mu
 .card h3 a{color:var(--ink);text-decoration:none} .card h3 a:hover{color:var(--accent)}
 .card p{font-size:12.5px;line-height:1.55;color:var(--muted);margin:0 0 9px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .card .ft{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.card .chk{position:absolute;top:11px;right:12px;font-size:12px;color:var(--muted);display:flex;gap:5px;align-items:center;cursor:pointer}
-.card .chk input{accent-color:var(--ok)}
+.card{padding-left:18px;overflow:hidden}
+.card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:6px;background:var(--lvc)}
+.card.lv-B{--lvc:#06b6d4}.card.lv-M{--lvc:#6366f1}.card.lv-A{--lvc:#ec4899}
+.card.st-doing{border-color:var(--doing)}.card.st-later{border-color:var(--later)}.card.st-fix{border-color:var(--fix)}
+.card .mk{position:absolute;top:9px;right:10px;display:flex;gap:3px}
+.card .mk button{font:inherit;font-size:10.5px;padding:1px 7px;border-radius:999px;border:1px solid var(--line);background:var(--paper);color:var(--muted);cursor:pointer}
+.card .mk button.done.on{background:var(--ok);border-color:var(--ok);color:#fff}
+.card .mk button.doing.on{background:var(--doing);border-color:var(--doing);color:#fff}
+.card .mk button.later.on{background:var(--later);border-color:var(--later);color:#fff}
+.card .mk button.fix.on{background:var(--fix);border-color:var(--fix);color:#fff}
+.card .mk button:hover{border-color:var(--ink)}
+.mkbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:14px 0 0}
+.mkbar.bottom{margin:48px 0 0;padding:16px 18px;border:1px solid var(--line);border-radius:12px;background:var(--paper)}
+.mkbar .lbl{font-size:12.5px;color:var(--muted);margin-right:4px}
+.mkbar button{font:inherit;font-size:13px;padding:5px 14px;border-radius:999px;border:1px solid var(--line);background:var(--paper);color:var(--ink);cursor:pointer}
+.mkbar button:hover{border-color:var(--ink)}
+.mkbar button.doing.on{background:var(--doing);border-color:var(--doing);color:#fff}
+.mkbar button.done.on{background:var(--ok);border-color:var(--ok);color:#fff}
+.mkbar button.later.on{background:var(--later);border-color:var(--later);color:#fff}
+.mkbar button.fix.on{background:var(--fix);border-color:var(--fix);color:#fff}
 .more{margin:16px 0;text-align:center}
 .hide{display:none!important}
 #tip{position:fixed;z-index:50;max-width:340px;pointer-events:none;opacity:0;transition:opacity .08s;
@@ -709,6 +731,9 @@ table.items tr.lvrow th small{font-family:var(--sans);font-size:12px;color:var(-
 JS_COMMON = r"""
 const DKEY='esn_done_v1', TKEY='esn_theme';
 const doneSet=()=>{try{return new Set(JSON.parse(localStorage.getItem(DKEY)||'[]'))}catch(e){return new Set()}};
+const MK='esn_marks_v1';
+const marksGet=()=>{try{return JSON.parse(localStorage.getItem(MK)||'{}')}catch(e){return {}}};
+const marksSave=m=>{try{localStorage.setItem(MK,JSON.stringify(m))}catch(e){}};
 const saveDone=s=>{try{localStorage.setItem(DKEY,JSON.stringify([...s]))}catch(e){}};
 (function(){
   try{const t=localStorage.getItem(TKEY); if(t)document.documentElement.dataset.theme=t;}catch(e){}
@@ -724,9 +749,18 @@ JS_LESSON = r"""
   const bar=document.getElementById('bar');
   const onScroll=()=>{const h=document.body.scrollHeight-innerHeight; bar.style.width=(h>0?Math.min(100,scrollY/h*100):0)+'%';};
   addEventListener('scroll',onScroll,{passive:true}); onScroll();
-  const id=document.body.dataset.id, db=document.getElementById('donebtn');
-  const sync=()=>{const on=doneSet().has(id); db.classList.toggle('on',on); db.textContent=on?'✓ 완료':'완료 표시';};
-  db.onclick=()=>{const s=doneSet(); s.has(id)?s.delete(id):s.add(id); saveDone(s); sync();}; sync();
+  const id=document.body.dataset.id, st=document.getElementById('mkst');
+  const LAB={ready:'ready',doing:'in progress',done:'done',later:'later',fix:'need to fix'};
+  const cur=()=>doneSet().has(id)?'done':(marksGet()[id]||'ready');
+  const sync=()=>{const s=cur();
+    document.querySelectorAll('.mkbar button').forEach(b=>b.classList.toggle('on',b.dataset.k===s));
+    if(st){st.className='pill '+s; st.textContent=LAB[s];}};
+  document.querySelectorAll('.mkbar button').forEach(b=>b.onclick=()=>{
+    const k=b.dataset.k, was=cur()===k, d=doneSet(), m=marksGet();
+    d.delete(id); delete m[id];
+    if(!was){ if(k==='done')d.add(id); else m[id]=k; }
+    saveDone(d); marksSave(m); sync();});
+  addEventListener('storage',sync); sync();
   document.querySelectorAll('button.copy').forEach(b=>b.onclick=()=>{
     const txt=[...b.closest('figure').querySelectorAll('code.ln > span')].map(s=>s.textContent.replace(/^\d+/,'')).join('\n');
     navigator.clipboard.writeText(txt).then(()=>{b.textContent='복사됨'; setTimeout(()=>b.textContent='복사',1200)});
@@ -745,10 +779,16 @@ JS_LESSON = r"""
 
 JS_HUB = r"""
 (function(){
-  const done=doneSet();
-  const st=el=>{const s=el.dataset.st; return (s==='ready'&&done.has(el.dataset.id))?'done':s;};
-  document.querySelectorAll('.sq').forEach(q=>{const s=st(q); q.classList.remove('ready','ext','todo'); q.classList.add(s);});
-  const cnt=document.getElementById('donecount'); if(cnt)cnt.textContent=[...done].length;
+  const done=doneSet(), marks=marksGet();
+  const stOf=it=>it.st!=='ready'?it.st:(done.has(it.id)?'done':(marks[it.id]||'ready'));
+  const cnt=document.getElementById('donecount');
+  function paintMap(){
+    document.querySelectorAll('.sq').forEach(q=>{
+      const s=q.dataset.st!=='ready'?q.dataset.st:(done.has(q.dataset.id)?'done':(marks[q.dataset.id]||'ready'));
+      q.classList.remove('ready','ext','todo','done','later','fix','doing'); q.classList.add(s);});
+    if(cnt)cnt.textContent=done.size;
+  }
+  paintMap();
   // tabs
   const tabs=[...document.querySelectorAll('.tabs button')];
   const show=k=>{tabs.forEach(b=>b.classList.toggle('on',b.dataset.k===k));
@@ -761,50 +801,153 @@ JS_HUB = r"""
   const box=document.getElementById('cards'), q=document.getElementById('q');
   const sel=name=>new Set([...document.querySelectorAll(`input[name=${name}]:checked`)].map(x=>x.value));
   let limit=120;
-  const label={todo:'준비중',ready:'학습가능',done:'완료',ext:'외부환경필요'};
+  const label={todo:'todo',ready:'ready',done:'done',doing:'in progress',later:'later',fix:'need to fix',ext:'ext env'};
   function draw(){
     const tr=sel('tr'), lv=sel('lv'), ss=sel('st'), v=q.value.trim().toLowerCase();
-    const list=ITEMS.filter(it=>{const s=(it.st==='ready'&&done.has(it.id))?'done':it.st;
+    const list=ITEMS.filter(it=>{const s=stOf(it);
       return (!tr.size||tr.has(it.tr))&&(!lv.size||lv.has(it.lv))&&(!ss.size||ss.has(s))
         &&(!v||(it.id+' '+it.t+' '+it.g+' '+it.tags).toLowerCase().includes(v));});
     document.getElementById('nres').textContent=list.length;
-    box.innerHTML=list.slice(0,limit).map(it=>{const s=(it.st==='ready'&&done.has(it.id))?'done':it.st;
+    box.innerHTML=list.slice(0,limit).map(it=>{const s=stOf(it);
       const href=it.href||it.thref; const e=x=>x.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-      return `<div class="card ${s==='done'?'done':''}"><div class="id">${it.id} · ${it.lvn}</div>
-        ${it.st==='ready'?`<label class="chk"><input type="checkbox" data-id="${it.id}" ${s==='done'?'checked':''}>완료</label>`:''}
+      return `<div class="card lv-${it.lv} st-${s}"><div class="id">${it.id} · ${it.lvn}</div>
+        ${it.st==='ready'?`<span class="mk" data-id="${it.id}">${['doing','done','later','fix'].map(k=>`<button type="button" data-k="${k}" class="${s===k?'on ':''}${k}">${label[k]}</button>`).join('')}</span>`:''}
         <h3><a href="${href}">${e(it.t)}</a></h3><p>${e(it.g)}</p>
         <div class="ft"><span class="pill ${s}">${label[s]}</span><span class="pill">${it.tr}</span>${it.env!=='mac'?`<span class="pill ext">${it.env}</span>`:''}${it.time?`<span class="pill">${it.time}</span>`:''}</div></div>`;}).join('');
     document.getElementById('morebtn').classList.toggle('hide',list.length<=limit);
-    box.querySelectorAll('input[type=checkbox]').forEach(c=>c.onchange=()=>{c.checked?done.add(c.dataset.id):done.delete(c.dataset.id); saveDone(done); draw();
-      const sq=document.querySelector(`.sq[data-id="${c.dataset.id}"]`); if(sq){sq.classList.toggle('done',c.checked); sq.classList.toggle('ready',!c.checked);}
-      if(cnt)cnt.textContent=done.size;});
+    box.querySelectorAll('.mk button').forEach(b=>b.onclick=()=>{
+      const id=b.parentNode.dataset.id, k=b.dataset.k, was=b.classList.contains('on');
+      done.delete(id); delete marks[id];
+      if(!was){ if(k==='done')done.add(id); else marks[id]=k; }
+      saveDone(done); marksSave(marks); paintMap(); draw();});
   }
   document.querySelectorAll('.filters input').forEach(x=>x.addEventListener('change',()=>{limit=120;draw();}));
   q.addEventListener('input',()=>{limit=120;draw();});
   document.getElementById('morebtn').onclick=()=>{limit+=240;draw();};
-  document.getElementById('allready').onclick=()=>{document.querySelectorAll('input[name=st]').forEach(x=>x.checked=x.value==='ready'||x.value==='done'); draw();};
+  document.getElementById('allready').onclick=()=>{document.querySelectorAll('input[name=st]').forEach(x=>x.checked=['ready','doing','done','later','fix'].includes(x.value)); draw();};
   draw();
-  // 커리큘럼 맵 툴팁: 네모에 커서를 올리면 바로 id · 레벨 · 상태 · 제목 · 목표
-  const tip=document.getElementById('tip'), BY=new Map(ITEMS.map(it=>[it.id,it]));
-  const esc2=x=>String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  const place=(x,y)=>{const w=tip.offsetWidth,h=tip.offsetHeight;
-    let L=x+14, T=y+16; if(L+w>innerWidth-8)L=x-w-14; if(T+h>innerHeight-8)T=y-h-12;
-    tip.style.left=Math.max(8,L)+'px'; tip.style.top=Math.max(8,T)+'px';};
-  const showTip=(q,x,y)=>{const it=BY.get(q.dataset.id); if(!it)return;
-    const s=(it.st==='ready'&&done.has(it.id))?'done':it.st;
-    tip.innerHTML=`<div class="tid">${it.id} · ${it.lvn} · <span class="pill ${s}">${label[s]}</span>${it.env!=='mac'?` <span class="pill ext">${esc2(it.env)}</span>`:''}${it.time?` <span class="pill">${esc2(it.time)}</span>`:''}</div>
-      <b>${esc2(it.t)}</b>${it.g?`<p>${esc2(it.g)}</p>`:''}<div class="hint">${it.href?'클릭 → 레슨 열기':'클릭 → 트랙 표 (레슨 준비중)'}</div>`;
-    tip.classList.add('on'); place(x,y);};
-  document.querySelectorAll('.sq').forEach(q=>{
-    q.addEventListener('mouseenter',e=>showTip(q,e.clientX,e.clientY));
-    q.addEventListener('mousemove',e=>place(e.clientX,e.clientY));
-    q.addEventListener('mouseleave',()=>tip.classList.remove('on'));
-    q.addEventListener('focus',()=>{const r=q.getBoundingClientRect(); showTip(q,r.right,r.bottom);});
-    q.addEventListener('blur',()=>tip.classList.remove('on'));
-  });
-  addEventListener('scroll',()=>tip.classList.remove('on'),{passive:true});
 })();
 """
+
+JS_TIP = r"""
+(function(){
+  const tip=document.getElementById('tip'); if(!tip)return;
+  const ITEMS=JSON.parse(document.getElementById('items-json').textContent);
+  const by=Object.fromEntries(ITEMS.map(x=>[x.id,x]));
+  const LAB={todo:'준비중',ready:'ready',done:'done',doing:'in progress',later:'later',fix:'need to fix',ext:'외부환경필요'};
+  const e=x=>String(x||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const stOf=it=>{if(it.st!=='ready')return it.st; if(doneSet().has(it.id))return 'done'; return marksGet()[it.id]||'ready';};
+  const place=(x,y)=>{const r=tip.getBoundingClientRect(); let L=x+14, T=y+16;
+    if(L+r.width>innerWidth-8)L=x-r.width-14; if(T+r.height>innerHeight-8)T=y-r.height-12;
+    tip.style.left=Math.max(8,L)+'px'; tip.style.top=Math.max(8,T)+'px';};
+  const show=(q,x,y)=>{const it=by[q.dataset.id]; if(!it)return; const s=stOf(it);
+    tip.innerHTML=`<div class="tid">${e(it.id)} · ${e(it.lvn)} · <span class="pill ${s}">${LAB[s]||s}</span>`
+      +`${it.env&&it.env!=='mac'?' · '+e(it.env):''}${it.time?' · '+e(it.time):''}</div><b>${e(it.t)}</b>`
+      +(it.g?`<p>${e(it.g)}</p>`:'')+`<div class="hint">${it.href?'클릭 → 레슨 열기':'클릭 → 트랙 표 (레슨 준비중)'}</div>`;
+    tip.classList.add('on'); place(x,y);};
+  const hide=()=>tip.classList.remove('on');
+  document.querySelectorAll('.sq').forEach(q=>{
+    q.addEventListener('mouseenter',ev=>show(q,ev.clientX,ev.clientY));
+    q.addEventListener('mousemove',ev=>place(ev.clientX,ev.clientY));
+    q.addEventListener('mouseleave',hide);
+    q.addEventListener('focus',()=>{const r=q.getBoundingClientRect(); show(q,r.right,r.bottom);});
+    q.addEventListener('blur',hide);});
+  addEventListener('scroll',hide,{passive:true});
+})();
+"""
+
+
+JS_DOCST = r"""
+(function(){
+  const el=document.getElementById('st-json'); if(!el)return;
+  const S=JSON.parse(el.textContent);  // id -> [status, lessonHref, env, title]
+  const LAB={todo:'준비중',ready:'ready',doing:'in progress',done:'done',later:'later',fix:'need to fix'};
+  const KS=['ready','doing','done','later','fix'];
+  const e=x=>String(x||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const stOf=id=>{const x=S[id]; if(x[0]!=='ready')return 'todo'; if(doneSet().has(id))return 'done'; return marksGet()[id]||'ready';};
+  const re=/tracks\/[A-Za-z0-9]+\.html#([A-Z0-9]+-[BMA]\d+)$/;
+  const links=[], ctrls=[];
+  document.querySelectorAll('main a[href]').forEach(a=>{
+    const m=a.getAttribute('href').match(re); if(!m||!S[m[1]])return; const id=m[1];
+    a.dataset.iid=id; a.classList.add('ilink'); if(S[id][1])a.setAttribute('href',S[id][1]);
+    a.title=S[id][1]?'레슨 열기':'레슨 준비중 — 트랙 표로 이동';
+    links.push(a);
+    const td=a.closest('td');
+    if(td&&td.cellIndex===0&&td.querySelector('a')===a){
+      const c=document.createElement('span'); c.className='stc'; c.dataset.iid=id;
+      if(S[id][0]==='ready'){
+        const sel=document.createElement('select'); sel.className='stsel';
+        sel.innerHTML=KS.map(k=>`<option value="${k}">${LAB[k]}</option>`).join('');
+        sel.onchange=()=>setMark(id,sel.value); c.appendChild(sel);
+      } else c.innerHTML=`<span class="pill todo">준비중${S[id][2]!=='mac'?' · '+e(S[id][2]):''}</span>`;
+      td.appendChild(c); ctrls.push(c);
+    }
+  });
+  function setMark(id,k){const d=doneSet(),m=marksGet(); d.delete(id); delete m[id];
+    if(k==='done')d.add(id); else if(k!=='ready')m[id]=k; saveDone(d); marksSave(m); paint();}
+  // 섹션(h2)별 아이템 묶기 — 문서 순서
+  const secs=[]; let cur=null;
+  document.querySelectorAll('main h2, main a.ilink').forEach(n=>{
+    if(n.tagName==='H2'){cur={h:n,ids:new Set()}; secs.push(cur);} else if(cur)cur.ids.add(n.dataset.iid);});
+  const useSecs=secs.filter(x=>x.ids.size);
+  useSecs.forEach(x=>{const b=document.createElement('span'); b.className='secst'; x.h.appendChild(b); x.b=b;});
+  const hero=document.querySelector('main header.hero');
+  const box=document.createElement('section'); box.id='stsum'; hero.after(box);
+  const cnt=ids=>{const c={n:ids.length,ready:0,todo:0,doing:0,done:0,later:0,fix:0};
+    ids.forEach(id=>{const s=stOf(id); c[s]++; if(s!=='todo')c.lesson=(c.lesson||0)+1;}); c.lesson=c.lesson||0; return c;};
+  const lk=id=>`<a href="${S[id][1]||'#'}">${e(id)}</a> <span class="sm">${e(S[id][3])}</span>`;
+  function paint(){
+    links.forEach(a=>{const s=stOf(a.dataset.iid); a.className='ilink is-'+s;});
+    ctrls.forEach(c=>{const sel=c.querySelector('select'); if(sel){const s=stOf(c.dataset.iid); sel.value=s; sel.className='stsel '+s;}});
+    const all=Object.keys(S), c=cnt(all);
+    useSecs.forEach(x=>{const k=cnt([...x.ids]);
+      x.b.innerHTML=`레슨 ${k.lesson}/${k.n} · done ${k.done}`+(k.fix?` · <b class="fx">need to fix ${k.fix}</b>`:'')+(k.doing?` · in progress ${k.doing}`:'');});
+    const pct=(a,b)=>b?Math.round(a/b*100):0;
+    const list=(k,label)=>{const ids=all.filter(id=>stOf(id)===k);
+      return `<div class="sl ${k}"><div class="slh"><span class="pill ${k}">${label}</span> ${ids.length}</div>`+
+        (ids.length?`<ul>${ids.map(id=>`<li>${lk(id)}</li>`).join('')}</ul>`:'<p class="sm">없음</p>')+'</div>';};
+    const rows=useSecs.map(x=>{const k=cnt([...x.ids]);
+      const t=x.h.childNodes[0].textContent.trim();
+      return `<tr><td><a href="#${x.h.id}">${e(t)}</a></td><td>${k.n}</td><td>${k.lesson}</td><td>${k.n-k.lesson}</td>`+
+        `<td>${k.done}</td><td>${k.doing}</td><td class="${k.fix?'fx':''}">${k.fix}</td><td>${k.later}</td></tr>`;}).join('');
+    box.innerHTML=`<h2 class="sth">📋 아이템 현황 <small>이 브라우저에 저장된 표시 기준 · 실시간</small></h2>
+      <div class="stchips"><span>아이템 <b>${c.n}</b></span><span>레슨 준비됨 <b>${c.lesson}</b></span><span>준비중 <b>${c.todo}</b></span>
+      <span class="pill done">done ${c.done}</span><span class="pill doing">in progress ${c.doing}</span>
+      <span class="pill fix">need to fix ${c.fix}</span><span class="pill later">later ${c.later}</span></div>
+      <div class="stbar"><i class="b-done" style="width:${pct(c.done,c.n)}%"></i><i class="b-rd" style="width:${pct(c.lesson-c.done,c.n)}%"></i></div>
+      <div class="sm">초록 = done · 파랑 = 레슨은 준비됐고 아직 안 끝남 · 회색 = 레슨 준비중. 상태는 각 표 첫 칸의 선택 상자나 레슨 페이지 상태 바에서 바꾼다 (같은 저장소라 서로 반영됨).</div>
+      <div class="stlists">${list('fix','need to fix')}${list('doing','in progress')}${list('later','later')}</div>
+      <div class="tw"><table class="sttab"><thead><tr><th>섹션</th><th>아이템</th><th>레슨 준비</th><th>준비중</th><th>done</th><th>in progress</th><th>need to fix</th><th>later</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+  addEventListener('storage',paint); paint();
+})();
+"""
+
+DOC_CSS = """<style>
+#stsum{border:1px solid var(--line);border-radius:12px;padding:14px 18px 10px;margin:0 0 28px;background:var(--paper)}
+#stsum h2.sth{margin:0 0 10px;font-size:19px;border:0;padding:0}
+#stsum h2.sth small{font-size:12px;color:var(--muted);font-weight:400;margin-left:6px}
+#stsum .stchips{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;font-size:13.5px;margin-bottom:8px}
+#stsum .stbar{height:8px;border-radius:99px;background:var(--mut);overflow:hidden;display:flex;margin:6px 0}
+#stsum .stbar i{display:block;height:100%} #stsum .b-done{background:var(--ok)} #stsum .b-rd{background:var(--accent)}
+#stsum .sm,.sm{font-size:12px;color:var(--muted)}
+#stsum .stlists{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:10px 0}
+#stsum .sl{border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+#stsum .sl.fix{border-color:var(--fix)} #stsum .sl ul{margin:6px 0 0;padding-left:18px;font-size:13px} #stsum .sl p{margin:6px 0 0}
+#stsum table.sttab{font-size:13px;width:100%} #stsum td.fx,.secst b.fx{color:var(--fix)}
+#stsum .tw{overflow-x:auto}
+.secst{display:inline-block;margin-left:10px;font-size:12px;font-weight:400;color:var(--muted);font-family:var(--sans);vertical-align:middle}
+a.ilink{position:relative;padding-left:12px}
+a.ilink::before{content:"";position:absolute;left:0;top:50%;width:7px;height:7px;margin-top:-4px;border-radius:50%;background:var(--mut)}
+a.ilink.is-ready::before{background:var(--accent)} a.ilink.is-done::before{background:var(--ok)}
+a.ilink.is-doing::before{background:var(--doing)} a.ilink.is-fix::before{background:var(--fix)} a.ilink.is-later::before{background:var(--later)}
+a.ilink.is-todo{color:var(--muted)}
+.stc{display:block;margin-top:4px}
+select.stsel{font:inherit;font-size:11.5px;border:1px solid var(--accent);color:var(--accent);background:var(--paper);border-radius:999px;padding:1px 6px}
+select.stsel.done{border-color:var(--ok);color:var(--ok)} select.stsel.doing{border-color:var(--doing);color:var(--doing)}
+select.stsel.fix{border-color:var(--fix);color:var(--fix)} select.stsel.later{border-color:var(--later);color:var(--later)}
+</style>"""
+
 
 
 def shell(title, body, js, depth):
@@ -820,7 +963,7 @@ def shell(title, body, js, depth):
 
 def topbar(depth, crumb, extra=""):
     up = "../" * depth
-    return (f'<div class="top"><div class="top-in"><a class="home" href="{up}index.html">← 임베디드 스터디 노트</a>'
+    return (f'<div class="top"><div class="top-in"><a class="home" href="{up}index.html">← Embedded Study Note</a>'
             f'<span class="t">{crumb}</span>{extra}<button class="btn" id="theme" type="button">◐</button></div></div>')
 
 
@@ -848,13 +991,19 @@ def lesson_page(it, tracks, prev_it, next_it):
             f'<span class="nm">{esc(next_it["id"])} {esc(next_it["title"])}</span></a>' if next_it else "<span style='flex:1'></span>")
     nav += "</nav>"
     crumb = f'<a href="../../tracks/{it["track"]}.html">{esc(it["track"])} · {esc(tr["name"])}</a> / {esc(it["id"])}'
+
+    def mkbar(where):
+        return (f'<div class="mkbar {where}"><span class="lbl">{"내 상태" if where == "top" else "다 풀었으면 상태 표시"}</span>'
+                + "".join(f'<button type="button" data-k="{k}" class="{k}">{lab}</button>' for k, lab in MARKS)
+                + '</div>')
     html_body = (
-        topbar(2, crumb, '<button class="btn" id="donebtn" type="button">완료 표시</button>')
+        topbar(2, crumb, '<span class="pill" id="mkst">ready</span>')
         + '<div id="bar"></div><div class="wrap"><main>'
         + f'<header class="hero"><div class="kicker">Stage {it["stage"]} · {esc(tr["name"])} · {esc(it["id"])}</div>'
         + f'<h1>{esc(it["title"])}</h1><div class="meta">{meta}</div>'
-        + f'<div class="goalbox"><b>목표</b> {esc(it.get("goal", ""))}<br><b>과제</b> {esc(it.get("task", ""))}</div></header>'
-        + body + nav + '</main>'
+        + f'<div class="goalbox"><b>목표</b> {esc(it.get("goal", ""))}<br><b>과제</b> {esc(it.get("task", ""))}</div>'
+        + mkbar("top") + '</header>'
+        + body + mkbar("bottom") + nav + '</main>'
         + f'<aside class="toc"><div class="lbl">목차</div><ol>{toc_html}</ol></aside></div>')
     return shell(f'{it["id"]} {it["title"]}', (f' data-id="{attr(it["id"])}"', html_body), JS_LESSON, 2)
 
@@ -923,10 +1072,10 @@ def hub_page(stages, tracks, items, docs=()):
                 if sqs:
                     lvs.append(f'<b>{lv}</b>{"".join(sqs)}<span class="gap"></span>')
             nr = sum(1 for x in its if x["md"])
-            rows.append(f'<div class="trow"><div class="tn"><a href="tracks/{tid}.html">{esc(t["name"])}</a>'
-                        f'<small>{tid} · {esc(t["en"])}</small></div><div class="lv">{"".join(lvs)}</div>'
+            rows.append(f'<div class="trow"><div class="tn"><a href="tracks/{tid}.html">{esc(t["en"])}</a>'
+                        f'<small>{tid}</small></div><div class="lv">{"".join(lvs)}</div>'
                         f'<div class="cnt">{nr}/{len(its)}</div></div>')
-        mp.append(f'<section class="stage"><h2>{st["n"]}. {esc(st["name"])}<small>{esc(st["en"])}</small></h2>{"".join(rows)}</section>')
+        mp.append(f'<section class="stage"><h2>{st["n"]}. {esc(st["en"])}</h2><div class="tgrid">{"".join(rows)}</div></section>')
     # ---- 문제 브라우저 데이터
     data = []
     for it in items:
@@ -946,23 +1095,29 @@ def hub_page(stages, tracks, items, docs=()):
                            f'<small>{nr}/{len(its)}</small></label>')
     filters = ('<input id="q" placeholder="검색: id · 제목 · 태그">'
                '<h4>상태</h4>'
-               '<label><input type="checkbox" name="st" value="ready" checked>학습가능</label>'
-               '<label><input type="checkbox" name="st" value="done" checked>완료</label>'
-               '<label><input type="checkbox" name="st" value="todo">준비중</label>'
-               '<label><input type="checkbox" name="st" value="ext">외부환경필요</label>'
+               '<label><input type="checkbox" name="st" value="ready" checked>ready</label>'
+               '<label><input type="checkbox" name="st" value="doing" checked>in progress</label>'
+               '<label><input type="checkbox" name="st" value="done" checked>done</label>'
+               '<label><input type="checkbox" name="st" value="later" checked>later</label>'
+               '<label><input type="checkbox" name="st" value="fix" checked>need to fix</label>'
+               '<label><input type="checkbox" name="st" value="todo">todo</label>'
+               '<label><input type="checkbox" name="st" value="ext">ext env</label>'
                '<h4>레벨</h4>'
                + "".join(f'<label><input type="checkbox" name="lv" value="{k}">{v}</label>' for k, v in LEVEL_NAME.items())
                + '<h4>트랙</h4>' + tr_filters)
-    legend = ('<div class="legend"><span><i style="background:var(--mut)"></i>준비중</span>'
-              '<span><i style="background:var(--accent)"></i>학습가능</span>'
-              '<span><i style="background:var(--ok)"></i>완료</span>'
-              '<span><i style="box-shadow:inset 0 0 0 1.5px var(--warn)"></i>외부환경필요</span>'
-              '<span>· 네모에 마우스를 올리면 제목, 클릭하면 레슨(없으면 트랙 표)</span></div>')
+    legend = ('<div class="legend"><span><i style="background:var(--mut)"></i>todo</span>'
+              '<span><i style="background:var(--accent)"></i>ready</span>'
+              '<span><i style="background:var(--doing)"></i>in progress</span>'
+              '<span><i style="background:var(--ok)"></i>done</span>'
+              '<span><i style="background:var(--later)"></i>later</span>'
+              '<span><i style="background:var(--fix)"></i>need to fix</span>'
+              '<span><i style="box-shadow:inset 0 0 0 1.5px var(--warn)"></i>ext env</span>'
+              '<span>· click: lesson (marks from the problem browser sync here)</span></div>')
     js_data = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     lead = (f'{len(stages["stages"])}단계 · {len(tracks)}트랙 · 아이템 하나 = 인터뷰형 코딩 문제 하나. '
             'Basic → Mid → Advanced 순서로 직접 풀며 익힌다. 레슨마다 문제(Part A/B/C) · Problem · 시작 코드 · 힌트 · '
             '풀이 · 정답 코드(바뀐 줄 강조) · 실수 · 면접 Q&A · 추가 연습 · 핵심 정리.')
-    DOC_BTN = [("learning_roadmap", "🧭", "학습 로드맵", True), ("duplicates", "📝", "중복 검토", False)]
+    DOC_BTN = [("learning_roadmap", "🧭", "학습 로드맵", True), ("duplicates", "📝", "중복 검토", False), ("concurrency_practice", "🧵", "동시성 연습 가이드", False), ("hpc_learning", "⚡", "HPC 학습 가이드", False), ("ipc_learning", "🔀", "IPC 학습 가이드", False), ("quant_lowlevel", "📈", "퀀트 로우레벨 로드맵", False)]
 
     def doc_btn(title, href):
         for key, icon, label, pri in DOC_BTN:
@@ -972,7 +1127,7 @@ def hub_page(stages, tracks, items, docs=()):
         return (99, f'<a class="hbtn" href="{attr(href)}">📄 {esc(title)}</a>')
     btns = sorted(doc_btn(t, h) for t, h in docs)
     head = ('<div class="top"><div class="top-in hubtop">'
-            f'<a class="brand" href="index.html" title="{attr(lead)}">임베디드 스터디 노트</a>'
+            f'<a class="brand" href="index.html" title="{attr(lead)}">Embedded Study Note</a>'
             '<span class="hs"></span>'
             '<button class="btn" id="theme" type="button">◐</button></div></div>')
     stat = lambda v, l: f'<div class="stat"><b>{v}</b><span>{l}</span></div>'
@@ -986,27 +1141,32 @@ def hub_page(stages, tracks, items, docs=()):
            f'<p class="lead" style="margin-top:18px">{esc(lead)}</p>')
     body = (head
             + '<div class="hub">'
-            + '<div class="tabs"><button data-k="map" class="on">커리큘럼 맵</button><button data-k="browse">문제 브라우저</button><button data-k="docs">현황 · 자료</button></div>'
+            + '<div class="tabs"><button data-k="map" class="on">Overview</button><button data-k="browse">Browse</button><button data-k="docs">Pipeline / Resource</button></div>'
             + f'<div data-panel="map">{legend}{"".join(mp)}</div>'
             + '<div data-panel="browse" class="hide"><div class="browser">'
             + f'<div class="filters">{filters}</div>'
             + '<div><div class="legend"><span><b id="nres">0</b>개</span>'
-            + '<button class="btn" id="allready" type="button">학습가능만 보기</button></div>'
+            + '<button class="btn" id="allready" type="button">ready only</button></div>'
             + '<div class="cards" id="cards"></div><div class="more"><button class="btn" id="morebtn" type="button">더 보기</button></div></div>'
             + '</div></div>'
             + f'<div data-panel="docs" class="hide hubdocs">{res}</div></div>'
             + '<div id="tip" role="tooltip"></div>'
             + f'<script type="application/json" id="items-json">{js_data}</script>')
-    return shell("임베디드 스터디 노트", ("", body), JS_HUB, 0)
+    return shell("Embedded Study Note", ("", body), JS_HUB + JS_TIP, 0)
 
 
-def build_docs():
+def build_docs(items=()):
     """루트의 YYYY-MM-DD_*.md 검토 문서 → site/docs/<stem>.html (overview는 자체 HTML이 있어 제외)."""
     docs = []
     for md in sorted(ROOT.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*.md")):
         if "items_overview" in md.name:
             continue
-        lines = md.read_text(encoding="utf-8").split("\n")
+        text_md = md.read_text(encoding="utf-8")
+        lines = text_md.split("\n")
+        by_id = {x["id"]: x for x in items}
+        ref_ids = [i for i in dict.fromkeys(re.findall(r"tracks/[A-Za-z0-9]+\.html#([A-Z0-9]+-[BMA]\d+)", text_md)) if i in by_id]
+        stj = {i: [by_id[i]["status"], f'../lessons/{by_id[i]["track"]}/{i}.html' if by_id[i]["md"] else "",
+                   by_id[i].get("env", "mac"), by_id[i]["title"]] for i in ref_ids}
         h1 = next((l[2:].strip() for l in lines if l.startswith("# ")), md.stem)
         toc, used = [], set()
         body = render(lines, toc, used, {"dir": ROOT, "rel": "../../"})
@@ -1016,10 +1176,14 @@ def build_docs():
                 + f'<header class="hero"><div class="kicker">문서 · {esc(md.name)}</div><h1>{esc(h1)}</h1></header>'
                 + body + '</main>'
                 + f'<aside class="toc"><div class="lbl">목차</div><ol>{toc_html}</ol></aside></div>')
+        if len(stj) >= 5:
+            page += DOC_CSS + '<script type="application/json" id="st-json">' + json.dumps(stj, ensure_ascii=False).replace("</", "<\\/") + '</script>'
+        else:
+            stj = {}
         js = ("(function(){const bar=document.getElementById('bar');addEventListener('scroll',()=>{"
               "const h=document.body.scrollHeight-innerHeight;bar.style.width=(h>0?scrollY/h*100:0)+'%'},{passive:true});})();")
         (OUT / "docs").mkdir(exist_ok=True)
-        (OUT / "docs" / f"{md.stem}.html").write_text(shell(h1, ("", page), js, 1), encoding="utf-8")
+        (OUT / "docs" / f"{md.stem}.html").write_text(shell(h1, ("", page), js + (JS_DOCST if stj else ""), 1), encoding="utf-8")
         docs.append((h1, f"docs/{md.stem}.html"))
     return docs
 
@@ -1042,11 +1206,11 @@ def main():
             next_it = ready[k + 1] if k + 1 < len(ready) else None
             (d / f'{it["id"]}.html').write_text(lesson_page(it, tracks, prev_it, next_it), encoding="utf-8")
             n_pages += 1
-    docs = build_docs()
+    docs = build_docs(items)
     (OUT / "index.html").write_text(hub_page(stages, tracks, items, docs), encoding="utf-8")
     (ROOT / "index.html").write_text(
         '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=site/index.html">'
-        '<title>임베디드 스터디 노트</title><a href="site/index.html">site/index.html</a>', encoding="utf-8")
+        '<title>Embedded Study Note</title><a href="site/index.html">site/index.html</a>', encoding="utf-8")
     print(f"site/: {n_pages} lessons, {len(by_track)} tracks, {len(items)} items")
 
 

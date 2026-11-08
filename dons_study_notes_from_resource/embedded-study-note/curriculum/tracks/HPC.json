@@ -1,0 +1,523 @@
+{
+  "id": "HPC",
+  "intro": "HPC(고성능 컴퓨팅)는 '같은 하드웨어에서 더 빠르게, 더 많은 코어로 더 크게'를 숫자로 증명하는 분야다. AI 학습 클러스터, 과학 시뮬레이션, 칩 검증 팜이 모두 이 원리 위에서 돌고, NVIDIA·AMD·국립연구소·AI 인프라 면접에서 확장성·roofline·병렬 패턴 질문이 단골로 나온다. 이 트랙은 OpenMP(공유 메모리)와 MPI(분산 메모리)로 stencil·SpMV·N-body·FFT 같은 대표 문제를 직접 병렬화하고, strong/weak scaling과 roofline으로 결과를 설명하는 연습을 한다.",
+  "goals": [
+    "반복·통계를 갖춘 측정 하네스로 GFLOP/s·GB/s·speedup을 믿을 수 있게 보고한다",
+    "OpenMP로 루프·reduction·스케줄링을 다루고 부하 불균형과 재현성 문제를 해결한다",
+    "MPI 점대점·집합 통신, 영역 분할과 halo exchange, 통신-계산 오버랩을 구현한다",
+    "stencil·SpMV·N-body·CG·FFT·multigrid 대표 커널을 최적화하고 roofline으로 병목을 판정한다",
+    "strong/weak scaling, work-span, α-β 모델로 확장성 한계를 예측하고 실측과 대조한다",
+    "체크포인트·병렬 I/O·잡 스케줄러까지 포함한 HPC 미니앱과 확장성 리포트를 만든다"
+  ],
+  "prereq": [
+    "ARCH",
+    "MEM",
+    "OS",
+    "NUM"
+  ],
+  "refs": [
+    {
+      "title": "Hager & Wellein, Introduction to High Performance Computing for Scientists and Engineers (2nd ed.)"
+    },
+    {
+      "title": "Victor Eijkhout, The Art of HPC (무료 교재 시리즈)",
+      "url": "https://theartofhpc.com"
+    },
+    {
+      "title": "OpenMP API Specification",
+      "url": "https://www.openmp.org/specifications/"
+    },
+    {
+      "title": "MPI Standard (MPI Forum)",
+      "url": "https://www.mpi-forum.org/docs/"
+    },
+    {
+      "title": "Open MPI documentation",
+      "url": "https://www.open-mpi.org/doc/"
+    },
+    {
+      "title": "LLNL HPC Tutorials (OpenMP, MPI, Parallel Computing)",
+      "url": "https://hpc-tutorials.llnl.gov"
+    },
+    {
+      "title": "Williams, Waterman, Patterson — Roofline: An Insightful Visual Performance Model (CACM 2009)"
+    },
+    {
+      "title": "Kreutzer et al., A Unified Sparse Matrix Data Format for Efficient General SpMV on Modern Processors (SELL-C-σ, 2014)"
+    },
+    {
+      "title": "Daly, A higher order estimate of the optimum checkpoint interval for restart dumps (2006)"
+    },
+    {
+      "title": "Slurm Workload Manager documentation",
+      "url": "https://slurm.schedmd.com/documentation.html"
+    }
+  ],
+  "items": [
+    {
+      "id": "HPC-B01",
+      "level": "B",
+      "title": "성능 측정 하네스: 반복·워밍업·통계와 GFLOP/s·GB/s",
+      "goal": "HPC 실험의 기본기인 '믿을 수 있는 숫자'를 만드는 측정 하네스를 갖춘다.",
+      "task": "clock_gettime(CLOCK_MONOTONIC)·mach_absolute_time 해상도를 측정하고, 워밍업·N회 반복·중앙값·최소값·95% 신뢰구간·이상치 표시를 하는 C 하네스를 만들어 벡터 덧셈과 dot product의 GFLOP/s·GB/s를 보고한다. 컴파일러가 루프를 제거하지 못하게 하는 방법(결과 사용, asm volatile 배리어)도 검증한다.",
+      "tags": [
+        "benchmark",
+        "measurement",
+        "statistics",
+        "see:AIPERF"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HPC-B02",
+      "level": "B",
+      "title": "Strong vs Weak Scaling: Amdahl·Gustafson 실측과 Karp-Flatt",
+      "goal": "스레드 수를 늘릴 때의 확장성을 두 가지 방식으로 측정하고 직렬 비율을 역추정한다.",
+      "task": "직렬 구간 비율을 조절할 수 있는 병렬 적분 커널을 pthread로 만들고 1~P코어에서 strong scaling(문제 크기 고정)·weak scaling(코어당 크기 고정)을 측정해 speedup·효율 표와 그래프를 그린 뒤, Karp-Flatt 지표로 실측 직렬 비율을 구해 Amdahl·Gustafson 예측과 비교한다(모델 자체는 see:ARCH-A11).",
+      "tags": [
+        "scaling",
+        "amdahl",
+        "gustafson",
+        "karp-flatt",
+        "see:ARCH"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HPC-B03",
+      "level": "B",
+      "title": "OpenMP 입문: parallel for·데이터 공유 속성·reduction",
+      "goal": "OpenMP의 fork-join 모델과 shared/private/firstprivate, reduction 절을 정확히 쓴다.",
+      "task": "Apple clang + libomp로 빌드 환경을 만들고, 배열 합·히스토그램·행렬-벡터 곱을 OpenMP로 병렬화한다. 일부러 private 누락·reduction 누락 레이스를 만들어 TSan(또는 결과 불일치)으로 잡고, OMP_NUM_THREADS 1~P에서 속도와 결과를 검증한다.",
+      "tags": [
+        "openmp",
+        "parallel-for",
+        "reduction",
+        "data-sharing"
+      ],
+      "env": "mac",
+      "env_note": "brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-B04",
+      "level": "B",
+      "title": "OpenMP 스케줄링: static·dynamic·guided와 부하 불균형",
+      "goal": "반복마다 비용이 다른 루프에서 스케줄 정책과 chunk 크기가 성능에 주는 영향을 설명한다.",
+      "task": "Mandelbrot 집합(행마다 비용이 크게 다름)과 삼각 루프를 schedule(static), static,1, dynamic,c, guided로 실행해 스레드별 작업 시간 막대그래프로 부하 불균형을 시각화하고, 최적 chunk 크기와 스케줄링 오버헤드의 트레이드오프를 표로 정리한다.",
+      "tags": [
+        "openmp",
+        "scheduling",
+        "load-balance"
+      ],
+      "env": "mac",
+      "env_note": "brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-B05",
+      "level": "B",
+      "title": "Work-Span 모델: 병렬 reduction·prefix sum과 Brent 정리",
+      "goal": "병렬 알고리즘을 work·span·병렬도로 분석하고 실제 속도 향상의 상한을 예측한다.",
+      "task": "트리 reduction과 2-pass(블록 합→오프셋) prefix sum을 OpenMP로 구현해 work와 span을 식으로 쓰고, Brent 정리 T_P ≤ W/P + S로 예측한 시간과 실측을 비교한다. 순차 scan보다 work가 큰 알고리즘이 언제 이득인지 설명한다(GPU 버전은 see:GPGPU-M02).",
+      "tags": [
+        "work-span",
+        "prefix-sum",
+        "brent",
+        "parallel-algorithm",
+        "see:GPGPU"
+      ],
+      "env": "mac",
+      "env_note": "brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-B06",
+      "level": "B",
+      "title": "데이터 레이아웃: AoS vs SoA와 자동 벡터화",
+      "goal": "메모리 레이아웃이 캐시 활용과 SIMD 벡터화 가능성을 어떻게 바꾸는지 측정으로 보인다.",
+      "task": "입자(x,y,z,vx,vy,vz,m) 업데이트 커널을 AoS·SoA·AoSoA로 구현해 -O3 -Rpass=loop-vectorize / -Rpass-missed로 벡터화 여부를 확인하고, 사용 바이트/로드 바이트 비율과 실측 GB/s·입자/초를 비교한다(NEON 수동 코딩은 see:ARM-M06).",
+      "tags": [
+        "data-layout",
+        "soa",
+        "vectorization",
+        "see:ARM",
+        "see:TOOL"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HPC-B07",
+      "level": "B",
+      "title": "병렬 reduction의 비결정성: 스레드 수와 결과가 바뀌는 이유",
+      "goal": "부동소수점 덧셈의 비결합성이 병렬 결과의 재현성을 깨는 원리와 해결책을 안다.",
+      "task": "같은 1e7개 float 합을 OpenMP reduction으로 스레드 수 1~P에서 돌려 결과 비트 차이를 기록하고, 고정 블록 분할 + 결정적 트리 합, Kahan 보정 부분합(see:NUM-B03), double 누산을 비교해 '재현 가능한 병렬 reduction'의 비용과 정확도 표를 만든다.",
+      "tags": [
+        "reproducibility",
+        "floating-point",
+        "reduction",
+        "see:NUM"
+      ],
+      "env": "mac",
+      "env_note": "brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-B08",
+      "level": "B",
+      "title": "Stencil 1: 2D 열전도 방정식 Jacobi 반복 (직렬 기준 구현)",
+      "goal": "HPC의 대표 패턴인 stencil 계산을 정확히 구현하고 연산 강도를 계산한다.",
+      "task": "5-point stencil로 2D 열전도 방정식을 Jacobi 반복(이중 버퍼)으로 풀고, 해석해가 있는 경계 조건에서 오차 수렴을 확인한다. 셀당 FLOP·바이트로 연산 강도를 구해 M2 roofline에서 메모리 바운드임을 예측하고 실측 GB/s와 비교한다.",
+      "tags": [
+        "stencil",
+        "pde",
+        "jacobi",
+        "arithmetic-intensity"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HPC-B09",
+      "level": "B",
+      "title": "SpMV 1: CSR·COO·ELL 포맷과 대역폭 바운드 분석",
+      "goal": "희소 행렬-벡터 곱의 포맷별 메모리 접근과 성능 상한을 계산한다.",
+      "task": "2D 포아송 행렬과 무작위 희소 행렬을 생성해 COO·CSR·ELL로 SpMV를 구현하고, 정답(밀집 곱)과 비교 검증한다. nnz당 이동 바이트로 대역폭 바운드 상한 GFLOP/s를 계산해 실측과의 차이를 x 벡터 간접 접근(gather) 관점에서 설명한다.",
+      "tags": [
+        "spmv",
+        "sparse",
+        "csr",
+        "bandwidth-bound",
+        "see:NUM"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HPC-B10",
+      "level": "B",
+      "title": "MPI 입문: rank·Send/Recv·π 적분과 메시지 비용",
+      "goal": "분산 메모리 모델(프로세스마다 독립 메모리)과 MPI 점대점 통신의 기본을 익힌다.",
+      "task": "Open MPI로 mpirun -np 1~8 환경을 만들고, 구간 분할 π 적분(MPI_Reduce)과 ping-pong 벤치를 작성한다. 메시지 크기 8B~8MB의 지연·대역폭을 측정해 α(지연)·β(바이트당 시간)를 선형 회귀로 구하고, eager vs rendezvous 프로토콜 전환점이 보이는지 확인한다.",
+      "tags": [
+        "mpi",
+        "message-passing",
+        "ping-pong",
+        "alpha-beta"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내)"
+    },
+    {
+      "id": "HPC-M01",
+      "level": "M",
+      "title": "Stencil 2: 공간 블로킹·OpenMP 병렬화와 roofline 배치",
+      "goal": "stencil을 캐시 블로킹과 스레드 병렬화로 최적화하고 개선 원인을 roofline으로 설명한다.",
+      "task": "HPC-B08 커널을 (1) 루프 순서 정리 (2) 공간 타일링 (3) OpenMP 병렬화 (4) SIMD 친화 레이아웃 순으로 최적화해 단계별 MLUP/s와 GB/s를 측정하고, 각 단계를 roofline 위에 찍어 어떤 천장에 막혔는지 판정한다(행렬곱 타일링은 see:ARCH-M07·MEM-A08).",
+      "tags": [
+        "stencil",
+        "cache-blocking",
+        "openmp",
+        "roofline",
+        "see:MEM"
+      ],
+      "env": "mac",
+      "env_note": "brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-M02",
+      "level": "M",
+      "title": "이기종 코어 스케줄링: Apple Silicon P/E 코어와 부하 분산",
+      "goal": "성능이 다른 코어가 섞인 머신에서 정적 분할이 깨지는 이유와 대응을 측정으로 보인다.",
+      "task": "M2의 P코어·E코어 수를 sysctl(hw.perflevel*)로 확인하고, 같은 커널을 스레드 수와 QoS 클래스(pthread_set_qos_class_self_np)를 바꿔 실행해 스레드별 처리량 차이를 측정한다. static 분할 vs dynamic/work-stealing 분할의 완료 시간을 비교해 '가장 느린 코어가 전체를 결정'하는 현상을 정량화한다.",
+      "tags": [
+        "heterogeneous",
+        "big-little",
+        "qos",
+        "load-balance",
+        "see:OS"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HPC-M03",
+      "level": "M",
+      "title": "MPI 집합 통신: Bcast·Allreduce·Alltoall 실측과 α-β 적합",
+      "goal": "MPI 집합 통신 API를 쓰고 메시지 크기별 비용을 모델과 대조한다.",
+      "task": "MPI_Bcast·Reduce·Allreduce·Allgather·Alltoall을 프로세스 수 2~8, 메시지 크기 8B~16MB로 측정해 표를 만들고, DCN-M12의 α-β 비용 모델(ring/tree/halving-doubling)과 비교해 Open MPI가 크기별로 어떤 알고리즘을 고르는지 추정한다(알고리즘 직접 구현은 see:DCN-M13).",
+      "tags": [
+        "mpi",
+        "collectives",
+        "allreduce",
+        "alpha-beta",
+        "see:DCN"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내)"
+    },
+    {
+      "id": "HPC-M04",
+      "level": "M",
+      "title": "영역 분할과 Halo Exchange: MPI 2D 열전도",
+      "goal": "분산 메모리에서 격자를 나누고 경계(ghost cell)를 교환하는 표준 패턴을 구현한다.",
+      "task": "HPC-B08 문제를 MPI_Cart_create 2D 프로세스 격자로 분할하고, MPI_Sendrecv로 상하좌우 halo를 교환하는 버전을 만든다. 직렬 결과와 비트 단위로 일치하는지 검증하고, 1D(띠) vs 2D(블록) 분할의 표면적/부피 비와 통신량을 식으로 비교해 실측과 맞춘다.",
+      "tags": [
+        "mpi",
+        "domain-decomposition",
+        "halo-exchange",
+        "stencil"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내)"
+    },
+    {
+      "id": "HPC-M05",
+      "level": "M",
+      "title": "통신-계산 오버랩: Isend/Irecv와 내부/경계 분리",
+      "goal": "비블로킹 통신으로 통신 시간을 계산 뒤에 숨기는 방법과 그 한계를 측정한다.",
+      "task": "HPC-M04에 MPI_Isend/Irecv를 쓰고 '내부 셀 계산 → Waitall → 경계 셀 계산' 순서로 바꿔, 블로킹 버전과 반복당 시간을 비교한다. 인위적 통신 지연(큰 halo, 느린 rank)을 넣어 오버랩이 효과 있는 조건과 MPI 진행(progress) 문제로 숨겨지지 않는 경우를 보인다.",
+      "tags": [
+        "mpi",
+        "non-blocking",
+        "overlap",
+        "latency-hiding"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내)"
+    },
+    {
+      "id": "HPC-M06",
+      "level": "M",
+      "title": "SpMV 2: 병렬화와 행 길이 불균형, SELL-C-σ",
+      "goal": "희소 행렬의 행 길이 편차가 병렬 성능을 깨는 원리와 포맷 수준 해결책을 안다.",
+      "task": "멱법칙(power-law) 행 길이를 갖는 희소 행렬로 CSR SpMV를 OpenMP 행 분할(static·dynamic)과 nnz 균등 분할로 병렬화해 비교하고, SELL-C-σ(C행 묶음, σ 범위 정렬) 포맷을 구현해 패딩 비율·벡터화율·GFLOP/s를 표로 비교한다.",
+      "tags": [
+        "spmv",
+        "load-balance",
+        "sell-c-sigma",
+        "openmp"
+      ],
+      "env": "mac",
+      "env_note": "brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-M07",
+      "level": "M",
+      "title": "N-body 1: O(N²) 직접합의 SIMD·OpenMP 최적화",
+      "goal": "연산 바운드 커널을 레이아웃·벡터화·병렬화로 피크 FLOP에 가깝게 끌어올린다.",
+      "task": "중력 N-body 직접합(softening 포함)을 naive → SoA → rsqrt 근사/정밀 비교 → 블로킹(타일) → OpenMP 순으로 최적화해 단계별 상호작용/초와 GFLOP/s를 측정하고, 에너지 보존 오차로 정확성을 검증한다. 측정 GFLOP/s를 M2 피크와 비교해 남은 격차를 설명한다.",
+      "tags": [
+        "n-body",
+        "compute-bound",
+        "simd",
+        "openmp"
+      ],
+      "env": "mac",
+      "env_note": "brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-M08",
+      "level": "M",
+      "title": "병렬 정렬: Sample Sort (OpenMP → MPI)",
+      "goal": "분산 정렬의 핵심인 splitter 선택과 all-to-all 재분배를 구현한다.",
+      "task": "공유 메모리 sample sort(OpenMP)를 먼저 만들고, 같은 알고리즘을 MPI로 옮겨 로컬 정렬 → 샘플링 → splitter 브로드캐스트 → MPI_Alltoallv 재분배 → 로컬 병합 단계를 구현한다. 입력 분포(균등·편중)별 버킷 크기 불균형과 단계별 시간을 측정한다.",
+      "tags": [
+        "sorting",
+        "sample-sort",
+        "alltoall",
+        "mpi",
+        "see:ALGO"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내)"
+    },
+    {
+      "id": "HPC-M09",
+      "level": "M",
+      "title": "병렬 CG 솔버: dot product allreduce가 확장성을 막는 이유",
+      "goal": "Krylov 솔버를 분산 병렬화할 때 전역 동기화가 병목이 되는 구조를 이해한다.",
+      "task": "NUM-M10의 CG를 MPI로 분산(행 블록 SpMV + halo + MPI_Allreduce 2회/반복)하고, 프로세스 수를 늘리며 SpMV·halo·allreduce 시간을 분리 측정한다. 반복당 allreduce를 1회로 줄이는 pipelined/Chronopoulos-Gear CG를 구현해 수렴 동작과 시간을 비교한다.",
+      "tags": [
+        "conjugate-gradient",
+        "krylov",
+        "allreduce",
+        "mpi",
+        "see:NUM"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내)"
+    },
+    {
+      "id": "HPC-M10",
+      "level": "M",
+      "title": "Hybrid MPI + OpenMP: 프로세스×스레드 구성 탐색",
+      "goal": "노드 안은 스레드, 노드 사이는 프로세스로 나누는 하이브리드 구성의 장단점을 측정한다.",
+      "task": "HPC-M04 stencil을 MPI_Init_thread(MPI_THREAD_FUNNELED) + OpenMP 하이브리드로 바꾸고, 같은 총 코어 수에서 (rank, thread) = (8,1)·(4,2)·(2,4)·(1,8) 구성을 실행해 메모리 사용량·halo 통신량·반복 시간을 비교한다. 스레드 지원 수준(FUNNELED/SERIALIZED/MULTIPLE)의 의미를 정리한다.",
+      "tags": [
+        "hybrid",
+        "mpi",
+        "openmp",
+        "configuration"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내) · brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-M11",
+      "level": "M",
+      "title": "병렬 프로그램 프로파일링: 타임라인 계측과 불균형 지표",
+      "goal": "PMU 없이도 병렬 프로그램의 병목(불균형·동기화·통신)을 숫자로 찾는다.",
+      "task": "스레드/rank별로 구간 시작·끝 타임스탬프를 기록하는 경량 계측 라이브러리를 만들어 Chrome trace(JSON)로 출력하고, HPC-M04·M06 실행에서 load imbalance 지표(max/avg), 동기화 대기 비율, 통신 비율을 계산한다. 계측 오버헤드도 측정해 보고한다.",
+      "tags": [
+        "profiling",
+        "tracing",
+        "load-imbalance",
+        "chrome-trace",
+        "see:GAME"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HPC-A01",
+      "level": "A",
+      "title": "Stencil 3: Temporal Blocking·Wavefront로 메모리 천장 넘기",
+      "goal": "시간 축까지 블로킹해 메모리 바운드 stencil의 연산 강도를 올리는 고급 기법을 구현한다.",
+      "task": "HPC-M01 결과를 기준으로 시간 스텝 여러 개를 캐시 안에서 연속 처리하는 temporal blocking(사다리꼴 또는 wavefront 방식)을 구현하고, 정답 일치 검증 후 시간 블록 깊이별 유효 연산 강도와 MLUP/s를 측정해 roofline의 메모리 천장을 넘어서는지 보인다.",
+      "tags": [
+        "stencil",
+        "temporal-blocking",
+        "wavefront",
+        "roofline"
+      ],
+      "env": "mac",
+      "env_note": "brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-A02",
+      "level": "A",
+      "title": "N-body 2: Barnes-Hut 트리의 병렬 구축과 순회",
+      "goal": "O(N²)을 O(N log N)으로 줄이는 계층 근사와 그 병렬화의 어려움(불규칙성)을 다룬다.",
+      "task": "2D/3D Barnes-Hut 쿼드/옥트리를 Morton 코드 정렬 기반으로 병렬 구축하고, θ(열림 각) 기준 힘 계산을 OpenMP 동적 스케줄로 병렬화한다. HPC-M07 직접합 대비 오차-속도 곡선(θ별)을 그리고, 트리 순회의 불규칙 메모리 접근이 효율에 주는 영향을 측정한다(Morton/BVH는 see:GFX-A04).",
+      "tags": [
+        "n-body",
+        "barnes-hut",
+        "octree",
+        "irregular-parallelism",
+        "see:GFX"
+      ],
+      "env": "mac",
+      "env_note": "brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-A03",
+      "level": "A",
+      "title": "분산 2D FFT: Pencil/Slab 분해와 전치 All-to-All",
+      "goal": "다차원 FFT를 분산할 때 통신이 전치(all-to-all)로 바뀌는 구조를 구현으로 이해한다.",
+      "task": "1D FFT(see:DSP-M01)를 행 방향으로 적용 → MPI_Alltoall 전치 → 열 방향 FFT 순서의 slab 분해 2D FFT를 구현해 numpy.fft 결과와 비교 검증하고, 프로세스 수별 계산/전치 시간 비율을 측정한다. pencil 분해가 필요한 프로세스 수 한계를 설명한다.",
+      "tags": [
+        "fft",
+        "transpose",
+        "alltoall",
+        "mpi",
+        "see:DSP"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내)"
+    },
+    {
+      "id": "HPC-A04",
+      "level": "A",
+      "title": "Multigrid V-cycle 포아송 솔버",
+      "goal": "격자 크기와 무관한 반복 수로 수렴하는 multigrid의 원리와 병렬 구현 쟁점을 안다.",
+      "task": "2D 포아송 방정식에 대해 smoother(가중 Jacobi/red-black Gauss-Seidel), restriction, prolongation으로 V-cycle을 구현하고, 격자 크기를 키워도 반복 수가 거의 일정함을 Jacobi·CG(see:NUM-M10)와 비교해 보인다. 거친 격자에서 병렬 효율이 떨어지는 이유를 측정으로 설명한다.",
+      "tags": [
+        "multigrid",
+        "poisson",
+        "pde-solver",
+        "see:NUM"
+      ],
+      "env": "mac",
+      "env_note": "brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    },
+    {
+      "id": "HPC-A05",
+      "level": "A",
+      "title": "분산 동적 부하 분산: Master-Worker vs 분산 Work Stealing",
+      "goal": "작업 비용을 미리 모를 때 분산 메모리에서 일을 나누는 전략을 비교한다.",
+      "task": "비용이 편중된 작업 묶음(예: 적응형 적분, Mandelbrot 타일)을 MPI로 정적 블록 분할, master-worker(동적 분배), 무작위 피해자 선택 work stealing으로 구현해 프로세스 수별 완료 시간·master 병목·메시지 수를 비교한다(공유 메모리 work stealing은 see:OS-A05).",
+      "tags": [
+        "load-balance",
+        "master-worker",
+        "work-stealing",
+        "mpi",
+        "see:OS"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내)"
+    },
+    {
+      "id": "HPC-A06",
+      "level": "A",
+      "title": "체크포인트/재시작과 최적 주기: Young/Daly 공식",
+      "goal": "대규모 장시간 작업에서 장애를 견디는 체크포인트 전략을 수식과 실험으로 설계한다.",
+      "task": "HPC-M04 시뮬레이션에 상태 저장/복원(버전·체크섬 포함)을 넣고, 무작위 프로세스 강제 종료(MTBF 파라미터)를 주입하는 하네스로 체크포인트 주기를 바꿔 총 완료 시간을 측정한다. Young/Daly 최적 주기 √(2·C·MTBF) 예측과 비교하고, 노드 수가 늘 때 시스템 MTBF가 줄어드는 효과를 계산한다(see:TEST-B10).",
+      "tags": [
+        "checkpoint-restart",
+        "fault-tolerance",
+        "young-daly",
+        "mtbf",
+        "see:TEST"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내)"
+    },
+    {
+      "id": "HPC-A07",
+      "level": "A",
+      "title": "병렬 I/O: 파일당 프로세스 vs MPI-IO 집합 쓰기",
+      "goal": "수천 프로세스가 결과를 저장할 때의 I/O 패턴과 메타데이터 병목을 이해한다.",
+      "task": "HPC-M04 격자를 (1) rank마다 파일 하나 (2) rank 0으로 모아 쓰기 (3) MPI_File_write_at_all 집합 쓰기(하나의 공유 파일, subarray 데이터 타입)로 저장해 처리량과 파일 수를 비교하고, 재시작 시 다른 프로세스 수로 읽어 들이는 것이 가능한지 검증한다.",
+      "tags": [
+        "parallel-io",
+        "mpi-io",
+        "checkpoint",
+        "see:STOR"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내)"
+    },
+    {
+      "id": "HPC-A08",
+      "level": "A",
+      "title": "HPC 잡 스케줄러: Slurm 개념과 Backfill 시뮬레이터",
+      "goal": "클러스터 자원 관리자가 잡을 배치하는 방식과 사용자 쪽 잡 스크립트 작성을 안다.",
+      "task": "Slurm sbatch 스크립트(노드·태스크·스레드·시간 제한·job array) 예제를 작성해 각 지시어가 MPI/OpenMP 구성에 어떻게 대응하는지 정리하고, FCFS vs EASY backfill 스케줄러 시뮬레이터를 Python으로 만들어 합성 잡 트레이스에서 대기 시간·활용률을 비교한다.",
+      "tags": [
+        "slurm",
+        "job-scheduling",
+        "backfill",
+        "cluster",
+        "see:SYSD"
+      ],
+      "env": "mac",
+      "env_note": ""
+    },
+    {
+      "id": "HPC-A09",
+      "level": "A",
+      "title": "종합: 하이브리드 병렬 미니앱과 확장성 리포트",
+      "goal": "트랙 전체를 묶어 '측정하고 설명할 수 있는' HPC 미니앱과 성능 리포트를 만든다.",
+      "task": "2D 열전도(또는 shallow-water) 미니앱을 MPI 영역 분할 + OpenMP + SIMD 레이아웃 + 비블로킹 halo + 체크포인트로 완성하고, strong/weak scaling 그래프, roofline 배치, 구간별 시간 분해(계산·통신·I/O), 병목 분석과 다음 최적화 제안을 담은 2쪽 리포트를 작성한다. 면접에서 5분 안에 설명하는 스크립트도 포함한다.",
+      "tags": [
+        "capstone",
+        "mini-app",
+        "scaling-report",
+        "hybrid",
+        "interview"
+      ],
+      "env": "mac",
+      "env_note": "brew install open-mpi; mpicc + mpirun -np 4 (로컬 프로세스로 분산 메모리 흉내) · brew install libomp; clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp"
+    }
+  ]
+}

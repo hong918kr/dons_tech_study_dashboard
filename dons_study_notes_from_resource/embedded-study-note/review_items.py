@@ -562,7 +562,7 @@ def build_html(stages, tracks):
     table = ('<div class="tw"><table class="ov"><thead><tr><th>단계</th><th>트랙</th><th>Basic</th><th>Mid</th>'
              '<th>Adv</th><th>합계</th><th>외부</th><th>아이템 맵</th></tr></thead><tbody>'
              + "".join(rows) + '</tbody></table></div>')
-    head = ('<header><div class="hrow"><a class="back" href="site/index.html" title="커리큘럼 맵 · 문제 브라우저로 돌아가기">← 스터디 노트 홈</a>'
+    head = ('<header><div class="hrow"><a class="back" href="site/index.html" title="Overview · Browse로 돌아가기">← Embedded Study Note</a>'
             '<span class="brand"><i></i>한눈에 보기</span>'
             '<div class="tabs"><button data-view="all">전체 보기</button><button data-view="track">트랙별 보기</button><button data-view="env">실습환경</button></div>'
             '<span class="sp"></span><input id="q" placeholder="검색: id, 제목, 과제, 태그">'
@@ -573,7 +573,7 @@ def build_html(stages, tracks):
               f'<select id="tsel" aria-label="트랙 선택">{"".join(opts)}</select>'
               '<div id="thead"></div><div id="titems"></div></div></div>')
     return ('<!doctype html><html lang="ko"><head><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width,initial-scale=1"><title>임베디드 스터디 노트</title>'
+            '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Embedded Study Note</title>'
             f'<style>{CSS}</style></head><body data-view="all">{head}<main>{vall}{vtrack}{env_view(stages, tracks)}</main><div id="tip"></div>'
             f'<script type="application/json" id="data">{blob}</script><script>{JS}</script></body></html>\n')
 

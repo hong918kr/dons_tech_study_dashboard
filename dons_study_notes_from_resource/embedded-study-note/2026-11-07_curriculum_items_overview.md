@@ -2,7 +2,7 @@
 
 생성: `python3 review_items.py` (curriculum/tracks/*.json 에서 생성. 손으로 고치지 말 것)
 
-총 68개 트랙 · 2149개 아이템
+총 69개 트랙 · 2191개 아이템
 
 | 단계 | 트랙 | 이름 | B | M | A | 합계 | 외부환경 |
 |---|---|---|---|---|---|---|---|
@@ -16,7 +16,7 @@
 | 2 | BM | 베어메탈 프로그래밍 | 14 | 13 | 11 | 38 | 12 |
 | 2 | COMM | 통신 프로토콜 & 드라이버 | 14 | 15 | 11 | 40 | 1 |
 | 2 | RTOS | RTOS | 13 | 14 | 10 | 37 | 2 |
-| 2 | OS | 운영체제 & Core OS | 14 | 14 | 11 | 39 | 5 |
+| 2 | OS | 운영체제 & Core OS | 14 | 18 | 14 | 46 | 8 |
 | 2 | RUST | 임베디드 Rust | 10 | 13 | 7 | 30 | 4 |
 | 3 | ELX | 임베디드 리눅스 | 13 | 15 | 10 | 38 | 35 |
 | 3 | PLAT | 플랫폼 소프트웨어 | 11 | 12 | 9 | 32 | 3 |
@@ -26,7 +26,7 @@
 | 4 | SEC | 임베디드 보안 | 10 | 12 | 8 | 30 | 2 |
 | 4 | INFRA | 임베디드 인프라 · DevOps | 9 | 10 | 7 | 26 | 1 |
 | 4 | LPERF | 리눅스 성능 · 관측 | 10 | 12 | 7 | 29 | 27 |
-| 5 | SIV | 실리콘 검증 | 12 | 13 | 9 | 34 | 0 |
+| 5 | SIV | 실리콘 검증 | 14 | 14 | 11 | 39 | 0 |
 | 5 | HWLAB | 보드 브링업 · 계측 | 10 | 12 | 8 | 30 | 2 |
 | 5 | EMU | 에뮬레이션 · 프로토타이핑 | 9 | 10 | 7 | 26 | 8 |
 | 5 | SIM | 시뮬레이션 · 모델링 | 9 | 10 | 7 | 26 | 0 |
@@ -68,6 +68,7 @@
 | 11 | DCN | 데이터센터 네트워크 · AI 패브릭 | 11 | 13 | 11 | 35 | 6 |
 | 11 | NETHW | SmartNIC · DPU · 스위치 ASIC | 12 | 12 | 12 | 36 | 2 |
 | 11 | VIRT | 가상화 · 컨테이너 | 11 | 13 | 10 | 34 | 9 |
+| 11 | HPC | HPC · 병렬 컴퓨팅 | 10 | 11 | 9 | 30 | 0 |
 | 11 | AISYS | AI 학습 · 서빙 시스템 | 11 | 13 | 11 | 35 | 0 |
 | 12 | QPROB | 확률 · 퀀트 브레인티저 | 11 | 12 | 10 | 33 | 0 |
 | 12 | QFIN | 시장 미시구조 · 트레이딩 시스템 | 11 | 13 | 9 | 33 | 0 |
@@ -81,8 +82,8 @@
 
 | env | 이름 | 상태 | 아이템 | 어디서 |
 |---|---|---|---|---|
-| mac | 맥 로컬 | 바로 가능 | 1901 | 호스트 맥 그대로 |
-| linux | Linux VM (Lima) | 일부 준비됨 | 130 | Lima VM 'elinux' (vz, aarch64, 6 CPU / 12GiB / 100GiB) — 현재 Stopped |
+| mac | 맥 로컬 | 바로 가능 | 1940 | 호스트 맥 그대로 |
+| linux | Linux VM (Lima) | 일부 준비됨 | 133 | Lima VM 'elinux' (vz, aarch64, 6 CPU / 12GiB / 100GiB) — 현재 Stopped |
 | qemu | QEMU + 크로스 툴체인 | 준비 필요 | 69 | 맥 호스트에는 아직 없음 (qemu-system-*, arm-none-eabi-gcc 미설치). Linux VM 안의 /var/lab QEMU 랩은 ELX 항목에 재사용 가능 |
 | fpga | HDL 시뮬레이터 (Verilator · iverilog · yosys · cocotb) | 준비 필요 | 41 | 맥 호스트 (brew) — FPGA 보드는 필요 없음 |
 | board | 실제 MCU 보드 | 선택 | 2 | 구매 필요 (2개 항목뿐 — 나중에) |
@@ -104,6 +105,7 @@ Rust(RUST 트랙): curl https://sh.rustup.rs -sSf | sh && rustup target add thum
 수치·퀀트·AI(NUM/QPROB/QFIN/AISYS): python3 -m pip install numpy scipy mpmath torch  (torch는 AISYS — CPU/MPS, 분산은 gloo)
 미디어(MEDIA): brew install ffmpeg   # 비트스트림 파서 정답 오라클
 계측 분석(HWLAB): brew install sigrok-cli   # LA 캡처(.sr) 변환·디코드
+HPC(OpenMP/MPI): brew install libomp open-mpi  # OpenMP: clang -Xpreprocessor -fopenmp -I$(brew --prefix libomp)/include -L$(brew --prefix libomp)/lib -lomp · MPI: mpicc x.c && mpirun -np 4 ./a.out
 ```
 
 확인: `clang --version && echo 'int main(){return 0;}' | clang -x c - -o /tmp/t && /tmp/t && echo OK`
@@ -113,7 +115,7 @@ Rust(RUST 트랙): curl https://sh.rustup.rs -sSf | sh && rustup target add thum
 - VIRT Hypervisor.framework 미니 VMM: com.apple.security.hypervisor entitlement 필요 → codesign --sign - --entitlements hv.plist --force ./vmm (없으면 hv_vm_create = HV_DENIED)
 - NET utun 항목은 sudo 필요 (맥에는 TAP 없음 — L2/ARP는 시뮬레이션 링크에서)
 
-해당 아이템: 1901개 (전체 목록은 아래 트랙별 표)
+해당 아이템: 1940개 (전체 목록은 아래 트랙별 표)
 
 ### linux — Linux VM (Lima) (일부 준비됨)
 
@@ -148,6 +150,9 @@ MEDIA: sudo modprobe snd-aloop vicodec
 |---|---|---|
 | COMM | COMM-M09 SocketCAN 실습: vcan, candump, C 소켓 프로그램 | Lima VM 등 리눅스(vcan 커널 모듈, can-utils 설치) |
 | OS | OS-M13 epoll 에코 서버: level vs edge triggered | Lima VM 등 리눅스(epoll은 리눅스 전용) |
+| OS | OS-M15 POSIX 메시지 큐: mq_open·우선순위·mq_notify | macOS는 POSIX 메시지 큐(mq_open)를 지원하지 않음 → Lima VM elinux |
+| OS | OS-M17 프로세스 간 공유 동기화: PROCESS_SHARED 뮤텍스와 robust mutex | macOS는 robust mutex(pthread_mutexattr_setrobust) 미지원 → Lima VM elinux |
+| OS | OS-M18 알림용 fd IPC: eventfd·signalfd·pidfd를 epoll 하나로 | eventfd/signalfd/pidfd는 Linux 전용 → Lima VM elinux |
 | OS | OS-A01 futex 기반 뮤텍스 구현 (Drepper 방식) | Lima VM 등 리눅스(futex는 리눅스 전용; macOS 대응물은 os_unfair_lock/__ulock_wait로 비교만) |
 | OS | OS-A02 디버거는 어떻게 동작하나: ptrace로 미니 디버거 | ptrace 기능이 macOS에서 제한적 → Lima VM(Linux)에서 실습 |
 | ELX | ELX-B02 크로스 컴파일 기초: aarch64 툴체인과 sysroot | Lima VM에 gcc-aarch64-linux-gnu, qemu-user 설치 (x86 크로스 경험용으로 x86_64 타깃도 선택) |
@@ -1019,6 +1024,10 @@ RTOS는 '빠른' OS가 아니라 '예측 가능한' OS다: 우선순위 선점 �
 | OS-M12 | I/O 모델 비교: blocking·non-blocking·select·kqueue 에코 서버 | 같은 TCP 에코 서버를 (1) 연결당 스레드 (2) select (3) kqueue 이벤트 루프로 구현하고, 동시 연결 1000개 부하 생성기로 처리량·메모리·지연을 비교한다. | mac |
 | OS-M13 | epoll 에코 서버: level vs edge triggered | kqueue 서버를 epoll로 포팅해 LT와 ET(EPOLLET) 모드로 각각 동작시키고, ET에서 한 번만 read해 데이터가 남아 멈추는 버그와 EPOLLONESHOT 멀티스레드 패턴을 실험한다. | **linux** |
 | OS-M14 | 파일 시스템 구현: VSFS (inode·비트맵·디렉터리) | 블록 디바이스를 파일로 흉내 낸 디스크 이미지에 superblock·inode/데이터 비트맵·inode 테이블·디렉터리 엔트리를 갖춘 VSFS를 구현해 mkfs/create/write/read/ls/unlink를 지원하고 fsck 비슷한 일관성 검사기를 작성한다. | mac |
+| OS-M15 | POSIX 메시지 큐: mq_open·우선순위·mq_notify | mq_open/mq_send/mq_receive로 생산자 2·소비자 1 구조를 만들고, 메시지 우선순위 순서, 큐 가득 참 시 블로킹·O_NONBLOCK(EAGAIN), mq_timedreceive 타임아웃, mq_notify(시그널/스레드) 알림을 테스트한다. /proc/sys/fs/mqueue 한도와 파이프·Unix 소켓 대비 지연을 OS-B14 하네스로 비교한다. | **linux** |
+| OS-M16 | Unix 소켓 심화: fd 전달(SCM_RIGHTS)과 피어 자격 확인 | sendmsg/recvmsg의 보조 데이터(cmsg)로 열린 fd를 다른 프로세스에 넘겨 받은 쪽에서 읽기가 되는지 확인하고, 피어의 uid/pid를 getpeereid·LOCAL_PEERCRED(macOS)/SO_PEERCRED(Linux)로 확인하는 접근 제어를 넣는다. SOCK_STREAM vs SOCK_DGRAM의 메시지 경계 차이와 cmsg 버퍼 정렬(CMSG_SPACE) 실수를 테스트로 재현한다. | mac |
+| OS-M17 | 프로세스 간 공유 동기화: PROCESS_SHARED 뮤텍스와 robust mutex | shm_open + mmap 영역에 PTHREAD_PROCESS_SHARED 뮤텍스·조건변수를 두고 두 프로세스가 bounded buffer를 공유하게 만든 뒤, 락을 쥔 프로세스를 SIGKILL로 죽여 일반 뮤텍스는 영원히 막히고 robust mutex(PTHREAD_MUTEX_ROBUST)는 EOWNERDEAD → pthread_mutex_consistent로 복구됨을 보인다. | **linux** |
+| OS-M18 | 알림용 fd IPC: eventfd·signalfd·pidfd를 epoll 하나로 | eventfd(카운터·EFD_SEMAPHORE), signalfd(SIGCHLD·SIGTERM), pidfd_open(자식 종료)을 하나의 epoll 루프에 등록해 작업 스레드 완료 알림·종료 시그널·자식 프로세스 감시를 처리하는 데몬 뼈대를 만들고, self-pipe(OS-B07) 방식과 코드량·지연을 비교한다. | **linux** |
 | OS-A01 | futex 기반 뮤텍스 구현 (Drepper 방식) | FUTEX_WAIT/WAKE syscall로 Drepper 'Futexes Are Tricky'의 상태 0/1/2 뮤텍스를 구현하고, 순진한 버전의 lost wakeup·불필요한 syscall을 재현한 뒤 pthread_mutex와 경합별 성능을 비교한다. | **linux** |
 | OS-A02 | 디버거는 어떻게 동작하나: ptrace로 미니 디버거 | ptrace(PTRACE_TRACEME/PEEKTEXT/POKETEXT/SINGLESTEP)로 자식 프로세스를 실행·정지시키고, 지정 주소에 BRK/int3 명령을 심어 브레이크포인트·레지스터 출력·continue를 지원하는 미니 디버거를 작성해 테스트 프로그램에서 동작을 확인한다(lock-free ABA는 see:DS-A04). | **linux** |
 | OS-A03 | RCU 개념 구현: epoch 기반 메모리 회수 | 읽기 다수 설정 테이블을 포인터 교체로 갱신하고, 리더의 epoch 진입/이탈 기록으로 grace period를 판단해 구 버전을 해제하는 EBR을 구현한 뒤 rwlock 대비 읽기 처리량과 ASan으로 use-after-free 부재를 검증한다. | mac |
@@ -1030,6 +1039,9 @@ RTOS는 '빠른' OS가 아니라 '예측 가능한' OS다: 우선순위 선점 �
 | OS-A09 | xv6 커널 해킹 1: 시스템 콜 추가 (trace, sysinfo) | xv6-riscv에 trace(mask) 시스템 콜(호출 추적 출력, fork 상속)과 sysinfo(빈 메모리·프로세스 수)를 추가하고 user/ 테스트 프로그램과 make grade 스타일 테스트로 검증한다. | **qemu** |
 | OS-A10 | xv6 커널 해킹 2: COW fork 구현 | xv6의 uvmcopy를 COW로 바꾸고 RSW 비트로 COW 페이지를 표시, 저장 페이지 폴트(scause 15) 핸들러에서 복사, 물리 페이지 참조 카운트를 구현해 cowtest와 usertests를 통과시킨다. | **qemu** |
 | OS-A11 | 종합: 멀티스레드 서비스 데몬 | kqueue 이벤트 루프+워커 스레드 풀(bounded queue, condvar)+자체 슬랩 할당기+SIGTERM 그레이스풀 셧다운+원자적 설정 리로드(SIGHUP)를 갖춘 키-값 서버를 작성하고, TSan/ASan·부하 테스트·크래시 후 재시작 시나리오로 검증한다. | mac |
+| OS-A12 | 견고한 공유 메모리 IPC: 버전·백프레셔·상대 프로세스 장애 감지 | shm 링 버퍼(see:DS-A01) 위에 헤더(매직·버전·레이아웃 크기), 생산자/소비자 하트비트 카운터, 가득 참 시 정책(블록·드롭·최신 덮어쓰기), 시퀀스 번호로 유실 감지를 추가하고, 한쪽 프로세스를 임의 시점에 죽였다 재시작해도 상대가 감지·재동기화하는지 크래시 주입 테스트로 검증한다(제로카피 전송 자체는 see:ROS-A05). | mac |
+| OS-A13 | 미니 RPC 계층: 요청/응답·타임아웃·취소·스트리밍 | Unix 소켓 위에 길이 prefix 프레임 + 요청 ID + 메서드 ID + TLV 페이로드(see:DIST-B06) RPC를 구현해 동시 요청 다중화, 클라이언트 타임아웃과 취소, 서버 스트리밍 응답, 필드 추가 시 하위 호환을 지원하고, 서버 지연·종료 상황을 주입해 클라이언트가 멈추지 않음을 테스트한다. gRPC·D-Bus(see:BMC-M04)와 설계를 비교한다. | mac |
+| OS-A14 | macOS Mach 메시지와 XPC: 포트 권한 기반 IPC | mach_port_allocate로 receive right를 만들고 send right를 다른 스레드에 넘겨 mach_msg로 간단한 요청/응답을 주고받은 뒤, 같은 왕복을 pipe·Unix 소켓과 지연 비교한다. launchd가 서비스 이름→포트를 연결하는 방식과 XPC 연결(xpc_connection)·딕셔너리 메시지 구조를 다이어그램으로 정리하고, 리눅스 Binder와의 차이(단일 복사·객체 참조)를 비교한다. | mac |
 
 ### RUST — 임베디드 Rust (Embedded Rust)
 
@@ -1407,6 +1419,8 @@ PCIe는 SSD·GPU·NPU·NIC를 SoC/호스트에 연결하는 표준 인터커넥�
 | SIV-B10 | IP 블록 Bring-up 시퀀스 | 가상의 UART IP에 대해 clock gate/reset controller/IP 레지스터를 mock으로 만들고, 단계별 체크포인트와 실패 시 원인 메시지(클럭 미인가, 리셋 미해제, ID 불일치)를 내는 bring-up 함수를 작성; 각 단계 결함 주입으로 진단이 정확한지 확인한다. | mac |
 | SIV-B11 | 인터럽트 검증 기초: Trigger-Check-Clear | mock 인터럽트 컨트롤러+IP에서 각 인터럽트 소스를 강제 트리거(force/test 레지스터)하고 raw status, mask 적용 후 status, IRQ 라인, clear 후 해제를 확인하는 테스트 매트릭스를 생성; mask가 무시되는 결함을 주입해 검출한다. | mac |
 | SIV-B12 | 테스트 플랜 작성: Feature → Test Case → Pass Criteria | I2C 컨트롤러 IP 스펙(1페이지 요약)을 보고 feature list, 테스트 케이스(정상/경계/에러/스트레스), 필요한 장비·펌웨어, pass/fail 기준, 우선순위(P0/P1)를 담은 테스트 플랜 표를 작성하고, 그중 3개를 mock 위에서 실제 코드로 구현한다. | mac |
+| SIV-B13 | 실리콘 검증 개요: Pre-silicon vs Post-silicon | 버그 20개(RTL 로직 오류, 타이밍 마진, errata, 전원 시퀀스, PHY 마진 등)를 발견 단계(시뮬/에뮬/FPGA/first silicon/양산)별로 분류하고 단계별 가시성·속도·수정 비용을 표로 정리; 같은 레지스터 테스트(B03~B05)를 mock 백엔드와 '실보드' 백엔드 인터페이스(reg_read32/write32)로 실행하는 골격을 구현해 재사용 경로를 보인다. | mac |
+| SIV-B14 | 테스트 로깅과 Pass/Fail 리포트 | B08 프레임워크의 JSON 로그를 입력받아 pass/fail/skip 집계, 실패 상세(reg, expected, actual, 주소), 소요 시간 상위 N개를 담은 텍스트·Markdown 리포트와 종료 코드(0/1)를 만들고, 로그 레벨(INFO/ERR)·타임스탬프·시드/보드/FW 버전 헤더를 포함시킨다. 의도적 실패 3개로 리포트를 검증한다. | mac |
 | SIV-M01 | ATE vs SLT vs 시스템 레벨 검증의 역할 | 20개 결함 시나리오(stuck-at gate, 타이밍 마진, PCIe 링크 간헐 실패, 열 의존 SRAM 오류, 펌웨어 errata 등)를 단계별로 분류하는 표를 작성하고, 테스트 시간·비용·커버리지 trade-off를 근거와 함께 설명하는 1페이지 설계 메모를 쓴다. | mac |
 | SIV-M02 | DMA 검증: 디스크립터 체인과 데이터 무결성 | scatter-gather 디스크립터 체인을 처리하는 DMA 모델을 만들고 정렬/비정렬, 4KB 경계 교차, 길이 0/1/max, 체인 중간 에러 디스크립터를 랜덤+경계로 생성해 CRC32로 src/dst 비교; completion 인터럽트와 status 레지스터 일관성까지 확인한다. | mac |
 | SIV-M03 | 인터럽트 지연·유실 검출 | 타이머 소스로 주기적 인터럽트를 발생시키는 이벤트 시뮬레이션에서 트리거 시각과 ISR 진입 시각을 기록해 latency 히스토그램을 만들고, 시퀀스 번호로 유실·중복·순서 뒤바뀜을 검출; 핸들러가 늦게 clear해 인터럽트가 합쳐지는 경우를 재현한다. | mac |
@@ -1420,6 +1434,7 @@ PCIe는 SSD·GPU·NPU·NIC를 SoC/호스트에 연결하는 표준 인터커넥�
 | SIV-M11 | Bisect 자동화: 펌웨어 커밋과 파라미터 | git bisect run으로 회귀 커밋을 찾는 스크립트(테스트 flaky 대비 3회 재시도 다수결 포함)와, 실패 경계(전압·주파수·버퍼 크기)를 bisect하는 일반화 함수를 작성; flaky 테스트에서 단순 bisect가 오답을 내는 사례를 재현하고 개선책을 비교한다. | mac |
 | SIV-M12 | Python 테스트 시퀀서 | YAML 테스트 리스트(테스트명, 파라미터, 타임아웃, 재시도, 사전조건)를 읽어 C 테스트 바이너리(또는 ctypes로 로드한 .dylib)를 실행하고, 전원/온도 장비는 mock 클래스로 추상화해 setup/teardown 시퀀스·결과 DB(SQLite) 저장·요약 리포트를 생성한다. | mac |
 | SIV-M13 | 검증 커버리지 모델 | 레지스터 필드값·DMA 길이 구간·인터럽트 조합을 coverpoint/bin/cross로 정의하는 Python 커버리지 모델을 만들고 시퀀서 실행 로그로 샘플링해 hole 리포트를 출력; 랜덤 테스트 시드를 늘려가며 커버리지 수렴 곡선을 그린다. | mac |
+| SIV-M14 | ECC 검증: 오류 주입과 CE/UE 보고 확인 | SECDED(MEM-B07 코덱 재사용)가 붙은 mock 메모리 컨트롤러에서 ECC bypass/error-inject 레지스터로 1비트·2비트·체크비트 오류를 주입하고, 읽기 데이터 정정 여부, CE/UE 카운터, 신드롬·오류 주소 레지스터, 인터럽트를 확인하는 테스트 매트릭스를 작성; 정정을 안 하는 결함을 주입해 검출한다. | mac |
 | SIV-A01 | Constrained-Random 테스트와 Scoreboard | 레지스터 쓰기/DMA 요청/인터럽트 이벤트를 제약 조건 하에 랜덤 생성하는 generator, 같은 입력을 받는 골든 모델, DUT 모델 출력을 비교하는 scoreboard를 구현; DUT 모델에 미묘한 버그(특정 순서에서만 status 갱신 누락)를 넣고 시드 재현성으로 디버그한다. | mac |
 | SIV-A02 | 바운더리 스캔(EXTEST)으로 보드 연결 테스트 | BSDL 일부(핀↔셀 매핑)와 넷리스트를 입력받아 EXTEST 패턴(walking-1, 카운팅 시퀀스)을 생성하고, open/short/stuck 결함을 심은 가상 보드의 응답을 비교해 결함 넷을 진단하는 도구를 작성한다(TAP 상태기계는 see:TOOL-A01). | mac |
 | SIV-A03 | 전력 특성화 자동화 | INA226 유사 전력 모니터를 mock I2C로 읽는 드라이버(shunt/bus/power 레지스터 스케일링)를 만들고, 워크로드×온도 sweep 데이터에서 dynamic/leakage 전력을 분리(P = Pleak(T) + C·V²·f 회귀)하는 분석 스크립트를 작성한다. | mac |
@@ -1429,6 +1444,8 @@ PCIe는 SSD·GPU·NPU·NIC를 SoC/호스트에 연결하는 표준 인터커넥�
 | SIV-A07 | 버스 인터페이스 실패 디버그 (LA 캡처 분석) | 로직 애널라이저 CSV(SCL/SDA 샘플)를 디코딩하는 I2C 프로토콜 파서를 작성해 NACK·clock stretching 타임아웃·setup/hold 위반·arbitration lost를 자동 표시하고, 합성 캡처 3종(풀업 약함, 타이밍 위반, 슬레이브 hang)의 원인을 리포트한다. | mac |
 | SIV-A08 | 생산 연계: 수율·Binning 분석 | 웨이퍼별 다이 테스트 결과(합성: Vmin, Fmax, 누설, pass/fail 코드)로 수율·bin 분포·wafer map을 계산하고, 테스트 항목 순서를 'fail 확률/테스트 시간' 기준으로 재정렬해 평균 테스트 시간을 줄이는 최적화를 구현한다. | mac |
 | SIV-A09 | 검증 캠페인 설계: 신규 센싱 SoC (면접형) | 카메라(MIPI CSI-2)·레이더(SerDes)·PCIe·DDR를 가진 가상 센싱 SoC에 대해 검증 단계(pre-si 준비, Day-0 bring-up, feature, PVT, stress, 양산 이관), 인프라(시퀀서, 랩 자동화, 대시보드), triage 플로우, 일정·인력·지표를 담은 설계 문서를 쓰고 Day-0 bring-up 스크립트 골격을 구현한다. | mac |
+| SIV-A10 | LFSR BIST와 MISR 시그니처 | n비트 LFSR(원시 다항식)로 의사 랜덤 패턴을 만들어 작은 조합 회로 모델에 인가하고 MISR로 응답을 시그니처로 압축하는 C 모델을 작성; golden 시그니처와 비교해 stuck-at 결함 주입 후 검출률과 aliasing 확률(≈2^-n)을 실험으로 측정하고, 펌웨어에서 BIST 시작→완료 poll→시그니처 비교하는 시퀀스를 mock 레지스터로 구현한다. | mac |
+| SIV-A11 | 클럭·전원 도메인 검증 | mock SoC에서 도메인별 clock gate/power switch 시퀀스를 모델링해, 게이트된 도메인 접근 시 에러 응답, 전원 복귀 후 reset 값 vs retention 레지스터 보존, isolation 해제 순서, 클럭 enable 직후 첫 접근 안전성을 검사하는 테스트를 작성하고 순서 위반(retention 누락, isolation 조기 해제) 결함을 주입해 검출한다. | mac |
 
 ### HWLAB — 보드 브링업 · 계측 (Board Bring-up & Measurement)
 
@@ -2911,6 +2928,43 @@ SmartNIC·DPU·스위치 ASIC은 데이터센터와 AI 패브릭의 패킷을 �
 | VIRT-A08 | 혼합 임계 파티셔닝: 정적 파티션 하이퍼바이저와 캐시 컬러링 | Jailhouse/Bao/Xen dom0less 방식의 정적 파티션 설정(코어 핀닝, 메모리 영역, 디바이스·IRQ 할당) 검증기를 작성하고, LLC set 인덱스 비트 기반 캐시 컬러링 페이지 할당기와 공유 캐시 시뮬레이터로 Linux 파티션의 메모리 폭주가 RTOS 파티션 WCET에 주는 간섭을 컬러링·MemGuard식 대역폭 제한 유무별로 비교한다(ARINC 653 시간 분할은 see:AERO-M01, 안전 분석은 see:AUTO). | mac |
 | VIRT-A09 | Confidential Computing: Arm CCA Realm과 GPT | Granule Protection Table(물리 granule별 Non-secure/Secure/Realm/Root PAS)과 RMI GRANULE_DELEGATE/UNDELEGATE·DATA_CREATE 흐름, Realm 초기 측정(RIM) 해시 확장을 C로 모델링해 NS 하이퍼바이저의 Realm 페이지 접근이 GPF로 막히는지 테스트하고, AMD SEV-SNP(RMP)·Intel TDX와 비교표를 만든다(원격 증명 토큰은 see:SEC-A05, TrustZone은 see:SEC-M07). | mac |
 | VIRT-A10 | 종합: 엣지 AI·차량 SoC 가상화 플랫폼 설계 리뷰 | 8코어 Arm SoC + NPU + GPU에서 ASIL 제어 RTOS, Linux 인지 스택, 인포테인먼트 Android를 돌리는 플랫폼에 대해 하이퍼바이저 선택(pKVM/Xen/정적 파티션), 디바이스 할당(패스스루 vs virtio vs SR-IOV, GPU 분할은 see:GPUSYS-A05), 인터럽트 지연 예산, 메모리·캐시 격리, 보안 부팅·증명을 담은 설계서를 쓰고 핵심 경로(vIRQ 주입 지연 예산 계산기)를 코드로 검증한다. | mac |
+
+### HPC — HPC · 병렬 컴퓨팅 (High Performance & Parallel Computing)
+
+HPC(고성능 컴퓨팅)는 '같은 하드웨어에서 더 빠르게, 더 많은 코어로 더 크게'를 숫자로 증명하는 분야다. AI 학습 클러스터, 과학 시뮬레이션, 칩 검증 팜이 모두 이 원리 위에서 돌고, NVIDIA·AMD·국립연구소·AI 인프라 면접에서 확장성·roofline·병렬 패턴 질문이 단골로 나온다. 이 트랙은 OpenMP(공유 메모리)와 MPI(분산 메모리)로 stencil·SpMV·N-body·FFT 같은 대표 문제를 직접 병렬화하고, strong/weak scaling과 roofline으로 결과를 설명하는 연습을 한다.
+
+| ID | 제목 | 과제 | env |
+|---|---|---|---|
+| HPC-B01 | 성능 측정 하네스: 반복·워밍업·통계와 GFLOP/s·GB/s | clock_gettime(CLOCK_MONOTONIC)·mach_absolute_time 해상도를 측정하고, 워밍업·N회 반복·중앙값·최소값·95% 신뢰구간·이상치 표시를 하는 C 하네스를 만들어 벡터 덧셈과 dot product의 GFLOP/s·GB/s를 보고한다. 컴파일러가 루프를 제거하지 못하게 하는 방법(결과 사용, asm volatile 배리어)도 검증한다. | mac |
+| HPC-B02 | Strong vs Weak Scaling: Amdahl·Gustafson 실측과 Karp-Flatt | 직렬 구간 비율을 조절할 수 있는 병렬 적분 커널을 pthread로 만들고 1~P코어에서 strong scaling(문제 크기 고정)·weak scaling(코어당 크기 고정)을 측정해 speedup·효율 표와 그래프를 그린 뒤, Karp-Flatt 지표로 실측 직렬 비율을 구해 Amdahl·Gustafson 예측과 비교한다(모델 자체는 see:ARCH-A11). | mac |
+| HPC-B03 | OpenMP 입문: parallel for·데이터 공유 속성·reduction | Apple clang + libomp로 빌드 환경을 만들고, 배열 합·히스토그램·행렬-벡터 곱을 OpenMP로 병렬화한다. 일부러 private 누락·reduction 누락 레이스를 만들어 TSan(또는 결과 불일치)으로 잡고, OMP_NUM_THREADS 1~P에서 속도와 결과를 검증한다. | mac |
+| HPC-B04 | OpenMP 스케줄링: static·dynamic·guided와 부하 불균형 | Mandelbrot 집합(행마다 비용이 크게 다름)과 삼각 루프를 schedule(static), static,1, dynamic,c, guided로 실행해 스레드별 작업 시간 막대그래프로 부하 불균형을 시각화하고, 최적 chunk 크기와 스케줄링 오버헤드의 트레이드오프를 표로 정리한다. | mac |
+| HPC-B05 | Work-Span 모델: 병렬 reduction·prefix sum과 Brent 정리 | 트리 reduction과 2-pass(블록 합→오프셋) prefix sum을 OpenMP로 구현해 work와 span을 식으로 쓰고, Brent 정리 T_P ≤ W/P + S로 예측한 시간과 실측을 비교한다. 순차 scan보다 work가 큰 알고리즘이 언제 이득인지 설명한다(GPU 버전은 see:GPGPU-M02). | mac |
+| HPC-B06 | 데이터 레이아웃: AoS vs SoA와 자동 벡터화 | 입자(x,y,z,vx,vy,vz,m) 업데이트 커널을 AoS·SoA·AoSoA로 구현해 -O3 -Rpass=loop-vectorize / -Rpass-missed로 벡터화 여부를 확인하고, 사용 바이트/로드 바이트 비율과 실측 GB/s·입자/초를 비교한다(NEON 수동 코딩은 see:ARM-M06). | mac |
+| HPC-B07 | 병렬 reduction의 비결정성: 스레드 수와 결과가 바뀌는 이유 | 같은 1e7개 float 합을 OpenMP reduction으로 스레드 수 1~P에서 돌려 결과 비트 차이를 기록하고, 고정 블록 분할 + 결정적 트리 합, Kahan 보정 부분합(see:NUM-B03), double 누산을 비교해 '재현 가능한 병렬 reduction'의 비용과 정확도 표를 만든다. | mac |
+| HPC-B08 | Stencil 1: 2D 열전도 방정식 Jacobi 반복 (직렬 기준 구현) | 5-point stencil로 2D 열전도 방정식을 Jacobi 반복(이중 버퍼)으로 풀고, 해석해가 있는 경계 조건에서 오차 수렴을 확인한다. 셀당 FLOP·바이트로 연산 강도를 구해 M2 roofline에서 메모리 바운드임을 예측하고 실측 GB/s와 비교한다. | mac |
+| HPC-B09 | SpMV 1: CSR·COO·ELL 포맷과 대역폭 바운드 분석 | 2D 포아송 행렬과 무작위 희소 행렬을 생성해 COO·CSR·ELL로 SpMV를 구현하고, 정답(밀집 곱)과 비교 검증한다. nnz당 이동 바이트로 대역폭 바운드 상한 GFLOP/s를 계산해 실측과의 차이를 x 벡터 간접 접근(gather) 관점에서 설명한다. | mac |
+| HPC-B10 | MPI 입문: rank·Send/Recv·π 적분과 메시지 비용 | Open MPI로 mpirun -np 1~8 환경을 만들고, 구간 분할 π 적분(MPI_Reduce)과 ping-pong 벤치를 작성한다. 메시지 크기 8B~8MB의 지연·대역폭을 측정해 α(지연)·β(바이트당 시간)를 선형 회귀로 구하고, eager vs rendezvous 프로토콜 전환점이 보이는지 확인한다. | mac |
+| HPC-M01 | Stencil 2: 공간 블로킹·OpenMP 병렬화와 roofline 배치 | HPC-B08 커널을 (1) 루프 순서 정리 (2) 공간 타일링 (3) OpenMP 병렬화 (4) SIMD 친화 레이아웃 순으로 최적화해 단계별 MLUP/s와 GB/s를 측정하고, 각 단계를 roofline 위에 찍어 어떤 천장에 막혔는지 판정한다(행렬곱 타일링은 see:ARCH-M07·MEM-A08). | mac |
+| HPC-M02 | 이기종 코어 스케줄링: Apple Silicon P/E 코어와 부하 분산 | M2의 P코어·E코어 수를 sysctl(hw.perflevel*)로 확인하고, 같은 커널을 스레드 수와 QoS 클래스(pthread_set_qos_class_self_np)를 바꿔 실행해 스레드별 처리량 차이를 측정한다. static 분할 vs dynamic/work-stealing 분할의 완료 시간을 비교해 '가장 느린 코어가 전체를 결정'하는 현상을 정량화한다. | mac |
+| HPC-M03 | MPI 집합 통신: Bcast·Allreduce·Alltoall 실측과 α-β 적합 | MPI_Bcast·Reduce·Allreduce·Allgather·Alltoall을 프로세스 수 2~8, 메시지 크기 8B~16MB로 측정해 표를 만들고, DCN-M12의 α-β 비용 모델(ring/tree/halving-doubling)과 비교해 Open MPI가 크기별로 어떤 알고리즘을 고르는지 추정한다(알고리즘 직접 구현은 see:DCN-M13). | mac |
+| HPC-M04 | 영역 분할과 Halo Exchange: MPI 2D 열전도 | HPC-B08 문제를 MPI_Cart_create 2D 프로세스 격자로 분할하고, MPI_Sendrecv로 상하좌우 halo를 교환하는 버전을 만든다. 직렬 결과와 비트 단위로 일치하는지 검증하고, 1D(띠) vs 2D(블록) 분할의 표면적/부피 비와 통신량을 식으로 비교해 실측과 맞춘다. | mac |
+| HPC-M05 | 통신-계산 오버랩: Isend/Irecv와 내부/경계 분리 | HPC-M04에 MPI_Isend/Irecv를 쓰고 '내부 셀 계산 → Waitall → 경계 셀 계산' 순서로 바꿔, 블로킹 버전과 반복당 시간을 비교한다. 인위적 통신 지연(큰 halo, 느린 rank)을 넣어 오버랩이 효과 있는 조건과 MPI 진행(progress) 문제로 숨겨지지 않는 경우를 보인다. | mac |
+| HPC-M06 | SpMV 2: 병렬화와 행 길이 불균형, SELL-C-σ | 멱법칙(power-law) 행 길이를 갖는 희소 행렬로 CSR SpMV를 OpenMP 행 분할(static·dynamic)과 nnz 균등 분할로 병렬화해 비교하고, SELL-C-σ(C행 묶음, σ 범위 정렬) 포맷을 구현해 패딩 비율·벡터화율·GFLOP/s를 표로 비교한다. | mac |
+| HPC-M07 | N-body 1: O(N²) 직접합의 SIMD·OpenMP 최적화 | 중력 N-body 직접합(softening 포함)을 naive → SoA → rsqrt 근사/정밀 비교 → 블로킹(타일) → OpenMP 순으로 최적화해 단계별 상호작용/초와 GFLOP/s를 측정하고, 에너지 보존 오차로 정확성을 검증한다. 측정 GFLOP/s를 M2 피크와 비교해 남은 격차를 설명한다. | mac |
+| HPC-M08 | 병렬 정렬: Sample Sort (OpenMP → MPI) | 공유 메모리 sample sort(OpenMP)를 먼저 만들고, 같은 알고리즘을 MPI로 옮겨 로컬 정렬 → 샘플링 → splitter 브로드캐스트 → MPI_Alltoallv 재분배 → 로컬 병합 단계를 구현한다. 입력 분포(균등·편중)별 버킷 크기 불균형과 단계별 시간을 측정한다. | mac |
+| HPC-M09 | 병렬 CG 솔버: dot product allreduce가 확장성을 막는 이유 | NUM-M10의 CG를 MPI로 분산(행 블록 SpMV + halo + MPI_Allreduce 2회/반복)하고, 프로세스 수를 늘리며 SpMV·halo·allreduce 시간을 분리 측정한다. 반복당 allreduce를 1회로 줄이는 pipelined/Chronopoulos-Gear CG를 구현해 수렴 동작과 시간을 비교한다. | mac |
+| HPC-M10 | Hybrid MPI + OpenMP: 프로세스×스레드 구성 탐색 | HPC-M04 stencil을 MPI_Init_thread(MPI_THREAD_FUNNELED) + OpenMP 하이브리드로 바꾸고, 같은 총 코어 수에서 (rank, thread) = (8,1)·(4,2)·(2,4)·(1,8) 구성을 실행해 메모리 사용량·halo 통신량·반복 시간을 비교한다. 스레드 지원 수준(FUNNELED/SERIALIZED/MULTIPLE)의 의미를 정리한다. | mac |
+| HPC-M11 | 병렬 프로그램 프로파일링: 타임라인 계측과 불균형 지표 | 스레드/rank별로 구간 시작·끝 타임스탬프를 기록하는 경량 계측 라이브러리를 만들어 Chrome trace(JSON)로 출력하고, HPC-M04·M06 실행에서 load imbalance 지표(max/avg), 동기화 대기 비율, 통신 비율을 계산한다. 계측 오버헤드도 측정해 보고한다. | mac |
+| HPC-A01 | Stencil 3: Temporal Blocking·Wavefront로 메모리 천장 넘기 | HPC-M01 결과를 기준으로 시간 스텝 여러 개를 캐시 안에서 연속 처리하는 temporal blocking(사다리꼴 또는 wavefront 방식)을 구현하고, 정답 일치 검증 후 시간 블록 깊이별 유효 연산 강도와 MLUP/s를 측정해 roofline의 메모리 천장을 넘어서는지 보인다. | mac |
+| HPC-A02 | N-body 2: Barnes-Hut 트리의 병렬 구축과 순회 | 2D/3D Barnes-Hut 쿼드/옥트리를 Morton 코드 정렬 기반으로 병렬 구축하고, θ(열림 각) 기준 힘 계산을 OpenMP 동적 스케줄로 병렬화한다. HPC-M07 직접합 대비 오차-속도 곡선(θ별)을 그리고, 트리 순회의 불규칙 메모리 접근이 효율에 주는 영향을 측정한다(Morton/BVH는 see:GFX-A04). | mac |
+| HPC-A03 | 분산 2D FFT: Pencil/Slab 분해와 전치 All-to-All | 1D FFT(see:DSP-M01)를 행 방향으로 적용 → MPI_Alltoall 전치 → 열 방향 FFT 순서의 slab 분해 2D FFT를 구현해 numpy.fft 결과와 비교 검증하고, 프로세스 수별 계산/전치 시간 비율을 측정한다. pencil 분해가 필요한 프로세스 수 한계를 설명한다. | mac |
+| HPC-A04 | Multigrid V-cycle 포아송 솔버 | 2D 포아송 방정식에 대해 smoother(가중 Jacobi/red-black Gauss-Seidel), restriction, prolongation으로 V-cycle을 구현하고, 격자 크기를 키워도 반복 수가 거의 일정함을 Jacobi·CG(see:NUM-M10)와 비교해 보인다. 거친 격자에서 병렬 효율이 떨어지는 이유를 측정으로 설명한다. | mac |
+| HPC-A05 | 분산 동적 부하 분산: Master-Worker vs 분산 Work Stealing | 비용이 편중된 작업 묶음(예: 적응형 적분, Mandelbrot 타일)을 MPI로 정적 블록 분할, master-worker(동적 분배), 무작위 피해자 선택 work stealing으로 구현해 프로세스 수별 완료 시간·master 병목·메시지 수를 비교한다(공유 메모리 work stealing은 see:OS-A05). | mac |
+| HPC-A06 | 체크포인트/재시작과 최적 주기: Young/Daly 공식 | HPC-M04 시뮬레이션에 상태 저장/복원(버전·체크섬 포함)을 넣고, 무작위 프로세스 강제 종료(MTBF 파라미터)를 주입하는 하네스로 체크포인트 주기를 바꿔 총 완료 시간을 측정한다. Young/Daly 최적 주기 √(2·C·MTBF) 예측과 비교하고, 노드 수가 늘 때 시스템 MTBF가 줄어드는 효과를 계산한다(see:TEST-B10). | mac |
+| HPC-A07 | 병렬 I/O: 파일당 프로세스 vs MPI-IO 집합 쓰기 | HPC-M04 격자를 (1) rank마다 파일 하나 (2) rank 0으로 모아 쓰기 (3) MPI_File_write_at_all 집합 쓰기(하나의 공유 파일, subarray 데이터 타입)로 저장해 처리량과 파일 수를 비교하고, 재시작 시 다른 프로세스 수로 읽어 들이는 것이 가능한지 검증한다. | mac |
+| HPC-A08 | HPC 잡 스케줄러: Slurm 개념과 Backfill 시뮬레이터 | Slurm sbatch 스크립트(노드·태스크·스레드·시간 제한·job array) 예제를 작성해 각 지시어가 MPI/OpenMP 구성에 어떻게 대응하는지 정리하고, FCFS vs EASY backfill 스케줄러 시뮬레이터를 Python으로 만들어 합성 잡 트레이스에서 대기 시간·활용률을 비교한다. | mac |
+| HPC-A09 | 종합: 하이브리드 병렬 미니앱과 확장성 리포트 | 2D 열전도(또는 shallow-water) 미니앱을 MPI 영역 분할 + OpenMP + SIMD 레이아웃 + 비블로킹 halo + 체크포인트로 완성하고, strong/weak scaling 그래프, roofline 배치, 구간별 시간 분해(계산·통신·I/O), 병목 분석과 다음 최적화 제안을 담은 2쪽 리포트를 작성한다. 면접에서 5분 안에 설명하는 스크립트도 포함한다. | mac |
 
 ### AISYS — AI 학습 · 서빙 시스템 (AI Training & Serving Systems)
 
