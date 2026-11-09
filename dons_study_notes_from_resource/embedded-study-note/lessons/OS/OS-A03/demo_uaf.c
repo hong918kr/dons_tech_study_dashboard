@@ -29,12 +29,14 @@ static void wait_step(int s) { pthread_mutex_lock(&g_m); while (g_step < s) pthr
 
 static cfgdb_t g_demo;
 
+#if MODE == 0
 /* 버그 버전: 교체 → 즉시 free (RCU 없이 "포인터만 원자적으로 바꾸면 되겠지") */
 static void cfg_update_now(cfgdb_t *db, uint64_t v) {
     cfg_t *n = cfg_new(v);
     cfg_t *old = atomic_exchange_explicit(&db->cur, n, memory_order_seq_cst);
     cfg_free(old);                       /* 리더가 아직 old 를 쥐고 있을 수 있다 */
 }
+#endif
 
 static void *reader(void *arg) {
     (void)arg;

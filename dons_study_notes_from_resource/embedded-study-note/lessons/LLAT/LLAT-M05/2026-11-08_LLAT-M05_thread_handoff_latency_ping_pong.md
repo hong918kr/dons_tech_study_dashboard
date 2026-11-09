@@ -26,7 +26,7 @@ updated: 2026-11-08
   <text x="34" y="62" fill="currentColor" font-weight="bold">코어 A (핑)</text>
   <text x="34" y="82" fill="currentColor" font-family="monospace" font-size="12">stlr 2k-1 → [seq]</text>
   <text x="34" y="100" fill="currentColor" font-family="monospace" font-size="12">ldapr 돌기: == 2k ?</text>
-  <rect x="560" y="40" width="160" height="70" rx="6" class="f-ok" stroke="currentColor"/>
+  <rect x="555" y="40" width="178" height="70" rx="6" class="f-ok" stroke="currentColor"/>
   <text x="574" y="62" fill="currentColor" font-weight="bold">코어 B (퐁)</text>
   <text x="574" y="82" fill="currentColor" font-family="monospace" font-size="12">ldapr 돌기: == 2k-1 ?</text>
   <text x="574" y="100" fill="currentColor" font-family="monospace" font-size="12">stlr 2k → [seq]</text>
@@ -34,10 +34,10 @@ updated: 2026-11-08
   <text x="314" y="72" fill="currentColor">128 B 라인 [seq]</text>
   <text x="314" y="90" fill="currentColor" font-size="12">소유권은 한 코어만</text>
   <path d="M180 60 L300 60" stroke="currentColor" fill="none"/>
-  <path d="M440 60 L560 60" stroke="currentColor" fill="none"/>
+  <path d="M440 60 L555 60" stroke="currentColor" fill="none"/>
   <text x="196" y="54" fill="currentColor" font-size="12">① A 가 쓰려면 독점</text>
   <text x="452" y="54" fill="currentColor" font-size="12">② B 가 읽으면 이동</text>
-  <path d="M560 95 L440 95" stroke="currentColor" fill="none" stroke-dasharray="4 3"/>
+  <path d="M555 95 L440 95" stroke="currentColor" fill="none" stroke-dasharray="4 3"/>
   <path d="M300 95 L180 95" stroke="currentColor" fill="none" stroke-dasharray="4 3"/>
   <text x="452" y="112" fill="currentColor" font-size="12">③ B 가 2k 를 씀</text>
   <text x="196" y="112" fill="currentColor" font-size="12">④ A 가 읽으면 이동</text>
@@ -121,6 +121,7 @@ cc -std=c11 -Wall -Wextra -Werror -O2 -pthread demo_pingpong.c -o pp
 ./pp fs ui        # 각자 쓰는 두 카운터: 거리 8~256 B (P 코어)   ./pp fs bg  (E 코어가 끼게)
 ./pp map          # cpu 번호 → 코어 종류 추정 (빈 루프 속도, 1.5초)
 PP_SPLIT=1 ./pp rt spin one ui bg 3 2000 64     # 한 조합만, 코어 쌍 종류별로 나눠서
+cc -std=c11 -Wall -Wextra -O2 demo_wfe_probe.c -o wfe_probe && ./wfe_probe                    # 아무도 안 쓸 때 wfe 깨어나는 간격
 cc -std=c11 -Wall -Wextra -O2 -pthread demo_broken.c -o broken && ./broken 2000000           # relaxed 메일박스
 cc -std=c11 -g -O1 -fsanitize=thread -pthread demo_broken.c -o broken_tsan && ./broken_tsan 1000
 # 리눅스 (Lima VM elinux, /tmp/LLAT-M05_work 로 복사해서):
@@ -169,15 +170,8 @@ Apple M6
 2
 4
 6
-$ sysctl hw.cachelinesize hw.perflevel0.name hw.perflevel1.name hw.perflevel2.name
-hw.cachelinesize: 128
-hw.perflevel0.name: Super
-hw.perflevel1.name: Performance
-hw.perflevel2.name: Efficiency
-$ sysctl hw.perflevel0.cpusperl2 hw.perflevel1.cpusperl2 hw.perflevel2.cpusperl2
-hw.perflevel0.cpusperl2: 2
-hw.perflevel1.cpusperl2: 4
-hw.perflevel2.cpusperl2: 6
+$ sysctl hw.cachelinesize hw.perflevel{0,1,2}.name hw.perflevel{0,1,2}.cpusperl2     (출력을 한 줄로 모음)
+hw.cachelinesize: 128 | perflevel0 Super, 1 Performance, 2 Efficiency | cpusperl2: 2, 4, 6
 $ cc --version | head -1
 Apple clang version 21.0.0 (clang-2100.0.123.102)
 $ echo | cc -dM -E -x c - | grep DESTRUCTIVE
@@ -199,7 +193,9 @@ BACKGROUND      : cpu6 x76684 best 4083ns | cpu7 x87158 best 4083ns | cpu8 x113 
 
 ### Part A — 재는 법: 배치와 정확성
 
-`demo_pingpong.c` 는 핑이 `batch` 번 왕복을 `mach_absolute_time` 두 번 사이에 넣고(표본 하나), 앞 10% 표본을 버린다. 같은 조합(spin, seq 하나, ui/ui)을 batch 만 바꿔 쟀다:
+`demo_pingpong.c` 는 핑이 `batch` 번 왕복을 `mach_absolute_time` 두 번 사이에 넣고(표본 하나), 앞 10% 표본을 버린다. 같은 조합(spin, seq 하나, ui/ui)을 batch 만 바꿔 쟀다 (코드: 아래 마커, 리눅스판 `demo_linux_affinity.c`):
+
+<!-- code: demo_pingpong.c -->
 
 ```text
 $ ./pp suite      (load average 3.72 → 4.36, ns per round trip, 3 runs)
@@ -247,16 +243,9 @@ spin  one  bg /ui  | p50 250.0 ... E%100/  0 [ ES:1792@250 ... ] | p50 260.4 [ E
 spin  one  ui /ut  | p50  82.0 ... E%  0/  0 [ SS:1648@82 SP:146@80 PP:6@77 ] | p50 82.0 [ SS:1692@82 SP:108@79 ] | p50 82.0 [ SS:1384@82 SP:416@79 ]
 ```
 
-한 번 더 (같은 날, load average 4.45):
+같은 날 다시 돌린 run (load 4.45)에서는 ui/ui 85–90, bg/bg 156–171, ui/bg 247–257, ut/ut 77–82 ns 였다 (표에 포함).
 
-```text
-spin  one  ui /ui  | p50  89.8 E%  0/  0 [ SS:1800@90 ] | p50 85.3 E%  9/  0 [ ES:174@188 SS:1555@85 SP:28@80 PS:43@79 ] | p50 85.3 [ SS:1800@85 ]
-spin  one  bg /bg  | p50 160.8 E%100/100 [ EE:1800@161 ] | p50 156.2 [ EE:1800@156 ] | p50 170.6 [ EE:1800@171 ]
-spin  one  ui /bg  | p50 253.9 E%  0/100 [ SE:1800@254 ] | p50 256.5 [ SE:1798@257 ... ] | p50 246.7 [ SE:1782@247 ... ]
-spin  one  ut /ut  | p50  77.5 E%  0/  0 [ SS:4@83 SP:364@82 PS:1335@77 PP:97@77 ] | p50 81.4 [ SP:1294@81 ... ] | p50 82.0 [ SS:613@85 ... PP:139@72 ]
-```
-
-코어 쌍 종류별로 모으면 (위 두 번 + 앞선 시험 실행들, 표본 p50 범위):
+코어 쌍 종류별로 모으면 (위 + 다시 돌린 run + 앞선 시험 실행들, 표본 p50 범위):
 
 | 쌍 (핑–퐁) | 왕복 p50 | 메모 |
 |---|---|---|
@@ -271,8 +260,7 @@ spin  one  ut /ut  | p50  77.5 E%  0/  0 [ SS:4@83 SP:364@82 PS:1335@77 PP:97@77
 
 1. **클러스터를 건너면 비싸다.** P↔E 는 라인이 두 클러스터의 L2 사이를 오가야 한다 (L2 를 공유하지 않으므로 그 밑의 공유 계층을 거친다 — Apple 이 구조를 공개하지 않아서 "어디까지 내려가는지" 는 추정). 같은 P 쪽 안에서는 80 ns 안팎.
 2. **E–E 가 79 ns 인 run 도 있다.** 다른 세션이 E 코어를 바쁘게 쓰던 시점이라 E 클러스터 클럭이 올라가 있었다고 본다(추정). 같은 조합이 248 ns 일 때도 있었다. "E 코어끼리는 X ns" 라고 한 숫자로 말하면 틀린다.
-3. **QoS 는 고정이 아니다.** BACKGROUND 핑퐁은 모든 run 에서 표본 100% 가 E 코어였다 — 가장 믿을 만한 힌트. 반면 USER_INTERACTIVE 핑퐁이 부하가 있을 때 표본의 44%/78% 를 E 코어에서 보낸 run 이 있었고(`E% 44/ 78`), UTILITY 는 어떤 run 은 100% E, 어떤 run 은 0% E 였다. 그리고 `map` 에서는 BACKGROUND 빈 루프가 Super 코어에만 있었다. QoS 는 "이 일은 얼마나 급한가" 를 스케줄러에 알려 줄 뿐이다.
-4. **보고하는 법:** "왕복 80 ns" 가 아니라 "Super/P 끼리 77–90 ns, P↔E 200–400 ns, 코어 쌍은 기록해서 분리, load 4" 처럼 조건을 붙인다.
+3. **QoS 는 고정이 아니다.** BACKGROUND 핑퐁은 모든 run 에서 표본 100% 가 E 코어였다 — 가장 믿을 만한 힌트. 반면 USER_INTERACTIVE 핑퐁이 부하가 있을 때 표본의 44%/78% 를 E 코어에서 보낸 run 이 있었고(`E% 44/ 78`), UTILITY 는 어떤 run 은 100% E, 어떤 run 은 0% E 였다. 그리고 `map` 에서는 BACKGROUND 빈 루프가 E 코어를 한 번도 쓰지 않고 Super/Performance 에서만 돌았다. QoS 는 "이 일은 얼마나 급한가" 를 스케줄러에 알려 줄 뿐이다.
 
 ### Part B — 라인 배치: 같은 라인 vs 다른 라인
 
@@ -342,7 +330,7 @@ fs d=256  |  2.34 ns/op E%  0/ 32 |  2.32 ns/op E%  0/ 33 |  2.55 ns/op E%  0/ 3
   <text x="110" y="295" fill="currentColor" font-size="12">ui (P/Super 코어끼리): 64 B 부터 깨끗</text>
   <rect x="380" y="284" width="14" height="12" class="f-warn" stroke="currentColor"/>
   <text x="400" y="295" fill="currentColor" font-size="12">bg (E 코어가 낌): 120 B 까지 느림, 128 B 부터 깨끗</text>
-  <text x="90" y="314" fill="currentColor" font-size="12">초록 = 간섭 없음 (1.4–2.4 ns/op). 같은 블록 안이면 7–14배.</text>
+  <text x="90" y="314" fill="currentColor" font-size="12">초록 = 간섭 없음 (1.4–2.4 ns/op). 같은 블록 안이면 최대 약 8배.</text>
 </svg>
 ```
 
@@ -362,6 +350,8 @@ cond  one  ui /ui  | p50  2531.2 p99   4729.2 min 1937.5 | p50  2572.9 p99   452
 ulock one  bg /bg  | p50 10364.6 p99  22541.7 min 7156.2 | p50  9791.7 p99  18593.8 min  531.2 | p50  7416.7 p99  17395.8 min  875.0
 cond  one  bg /bg  | p50  7729.2 p99  19260.4 min 7104.2 | p50  7302.1 p99  20552.1 min 3864.6 | p50  7322.9 p99  19041.7 min 3875.0
 ```
+
+부하가 조금 낮을 때(load 3.46) 다시 돌린 값: spin P 74–85 ns, WFE 74 ns, P↔E 296–332 ns, ulock/cond ui 3.2–3.5 µs, cond bg 6.1–6.3 µs, ulock bg 16.9 µs. 절대값은 run 마다 ±30% 이상 흔들리지만 **스핀 : P↔E : 잠들기 ≈ 1 : 3–4 : 30–40** 비율은 유지됐다.
 
 ```svg
 <svg viewBox="0 0 740 400" xmlns="http://www.w3.org/2000/svg" font-size="13">
@@ -394,7 +384,7 @@ cond  one  bg /bg  | p50  7729.2 p99  19260.4 min 7104.2 | p50  7302.1 p99  2055
     <text x="498" y="221">≈ 2.5 µs</text><text x="534" y="249">≈ 3.9 µs</text><text x="590" y="277">≈ 7.3 µs</text>
     <text x="608" y="305">≈ 9 µs</text><text x="648" y="333">≈ 14.4 µs</text>
   </g>
-  <text x="10" y="390" fill="currentColor" font-size="12">초록 = 스핀(코어 2개를 100% 씀), 주황 = 잠들기, 노랑 = E 코어가 낌, 회색 = 리눅스 VM. VM 같은 vCPU 스핀 = 6 ms (축 밖).</text>
+  <text x="10" y="390" fill="currentColor" font-size="12">초록 = 스핀, 주황 = 잠들기, 노랑 = E 코어, 회색 = 리눅스 VM. VM 같은 vCPU 스핀 6 ms 는 축 밖.</text>
 </svg>
 ```
 
@@ -407,17 +397,10 @@ cond  one  bg /bg  | p50  7729.2 p99  19260.4 min 7104.2 | p50  7302.1 p99  2055
 
 - **스핀 vs 잠들기 ≈ 30배.** 잠드는 쪽은 커널 진입 → 스레드를 대기 큐에 → 다른 쪽이 깨우기 시스템 콜 → 스케줄러가 깨어날 코어를 고름(유휴 코어면 IPI) → 복귀. OS-M02 의 파이프 핑퐁(2.8 µs)과 같은 대다. 전달 수단(파이프 / 조건 변수 / wait-on-address)보다 잠들기 자체가 비싸다.
 - **ulock 의 min 531 ns** (bg run 2): 기다리는 쪽이 아직 잠들기 전에 값이 바뀐 왕복이다 — `os_sync_wait_on_address` 가 "값이 이미 다르면 잠들지 않는다" 를 지킨 결과. 그래서 실무 락/큐는 **잠깐 스핀 후 잠들기** (spin-then-park)를 쓴다 (glibc mutex adaptive, libc++ `atomic::wait` 의 스핀 단계 — MCPP-A03).
-- **WFE 가 스핀만큼 빠른 이유:** `ldaxr` 가 라인을 exclusive 모니터에 걸어 두면, 다른 코어가 그 라인에 쓸 때 모니터가 풀리며 이벤트가 생겨 `wfe` 가 깬다 (Arm ARM, "Wait for Event mechanism" / exclusive monitor 절 — 문서 기준). 리눅스 arm64 의 `smp_cond_load_acquire` 가 이 방식이다(`__cmpwait`, 문서·소스 기준 미검증). 이 맥 사용자 모드에서 `wfe` 는 트랩되지 않았다. 다만 아무도 안 써도 깨어나는 간격을 재 보니 **약 1.3 µs** 였다 (`wfe_probe`: 200 ms 동안 약 15만 번, 맥과 리눅스 VM 둘 다) — 깊이 잠드는 명령이 아니다. 원인(이벤트 스트림 설정인지 구현 특성인지)은 미확인. 덕분에 연습 3 의 마감 확인이 동작한다.
-- E 코어에서 잠드는 핸드오프는 7–10 µs — P 코어의 3–4배. 지연 민감 스레드를 BACKGROUND 로 두면 안 되는 이유.
+- **WFE 가 스핀만큼 빠른 이유:** `ldaxr` 가 라인을 exclusive 모니터에 걸어 두면, 다른 코어가 그 라인에 쓸 때 모니터가 풀리며 이벤트가 생겨 `wfe` 가 깬다 (Arm ARM, "Wait for Event mechanism" / exclusive monitor 절 — 문서 기준). 리눅스 arm64 의 `smp_cond_load_acquire` 가 이 방식이다(`__cmpwait`, 문서·소스 기준 미검증). 이 맥 사용자 모드에서 `wfe` 는 트랩되지 않았다. 다만 아무도 안 써도 깨어나는 간격을 재 보니 **약 1.3 µs** 였다 (`demo_wfe_probe.c`: 200 ms 동안 15만~15.8만 번, 맥과 리눅스 VM 둘 다) — 깊이 잠드는 명령이 아니다. 원인(이벤트 스트림 설정인지 구현 특성인지)은 미확인. 덕분에 연습 3 의 마감 확인이 동작한다.
+- E 코어에서 잠드는 핸드오프는 6–17 µs — P 코어의 2–5배. 지연 민감 스레드를 BACKGROUND 로 두면 안 되는 이유.
 
-asm (`cc -O2 -S practice.c`, 연습 3 의 루프, 실제 출력):
-
-```text
-	wfe
-	ldaxr	x8, [x20]
-	cmp	x8, #1
-	b.ne	LBB0_57
-```
+asm (`cc -O2 -S practice.c`, 연습 3 의 루프, 실제 출력): `wfe` → `ldaxr x8, [x20]` → `cmp x8, #1` → `b.ne LBB0_57`.
 
 ### Part B — 리눅스: `pthread_setaffinity_np` 실험 계획
 
@@ -436,11 +419,7 @@ asm (`cc -O2 -S practice.c`, 연습 3 의 루프, 실제 출력):
 Lima VM(`elinux`, aarch64 Ubuntu, 커널 7.0.0, vCPU 6개, gcc 15.2)에서 실제로 돌린 결과 — **"CPU" 는 vCPU(호스트의 스레드)이지 물리 코어가 아니다.** `lscpu -e` 가 보여 주는 토폴로지도 평평하다(클러스터 1개, 코어마다 L2 0):
 
 ```text
-$ lscpu -e
-CPU NODE CLUSTER CORE L1d:L1i:L2 ONLINE
-  0    0       0    0 0:0:0         yes
-  1    0       0    1 1:1:0         yes
-  ...
+$ lscpu -e          (CPU 0~5 모두 NODE 0, CLUSTER 0, L2 0 — 평평한 토폴로지)
 $ ./aff        (VM load average 0.10; 호스트 load ≈ 4.5)
 spin cpu0<->cpu1  p50      91.8  p99      108.7  min     90.5 ns/RT   (2000 x 64 RT, 13.3 ms)
 spin cpu0<->cpu2  p50      91.8  p99      111.3  min     90.5 ns/RT   (2000 x 64 RT, 14.9 ms)
@@ -458,37 +437,40 @@ cond cpu0<->cpu5  p50   14437.5  p99    17833.5  min  13979.2 ns/RT   (1000 x 4 
 ### Part C — 메일박스: 두 라인, release/acquire
 
 ```svg
-<svg viewBox="0 0 740 250" xmlns="http://www.w3.org/2000/svg" font-size="13">
+<svg viewBox="0 0 740 270" xmlns="http://www.w3.org/2000/svg" font-size="13">
   <text x="10" y="20" fill="currentColor" font-weight="bold">메일박스: 요청 라인은 클라이언트만, 응답 라인은 서버만 쓴다</text>
-  <rect x="20" y="40" width="150" height="160" rx="6" class="f-ok" stroke="currentColor"/>
+  <rect x="20" y="40" width="210" height="160" rx="6" class="f-ok" stroke="currentColor"/>
   <text x="32" y="62" fill="currentColor" font-weight="bold">코어 0 (클라이언트)</text>
   <text x="32" y="86" fill="currentColor" font-size="12">① cmd, arg[4] 쓰기</text>
   <text x="32" y="106" fill="currentColor" font-size="12">② req.seq = s (release)</text>
   <text x="32" y="126" fill="currentColor" font-size="12">⑥ rsp.seq == s ? (acquire)</text>
   <text x="32" y="146" fill="currentColor" font-size="12">⑦ result 읽기</text>
   <text x="32" y="166" fill="currentColor" font-size="12">→ 다음 요청은 ⑦ 뒤에만</text>
-  <rect x="570" y="40" width="150" height="160" rx="6" class="f-ok" stroke="currentColor"/>
-  <text x="582" y="62" fill="currentColor" font-weight="bold">코어 1 (서버)</text>
-  <text x="582" y="86" fill="currentColor" font-size="12">③ req.seq == last+1 ?</text>
-  <text x="582" y="106" fill="currentColor" font-size="12">④ payload 읽고 계산</text>
-  <text x="582" y="126" fill="currentColor" font-size="12">⑤ result 쓰고</text>
-  <text x="582" y="146" fill="currentColor" font-size="12">   rsp.seq = s (release)</text>
-  <rect x="250" y="44" width="240" height="60" rx="4" class="f-acc" stroke="currentColor"/>
-  <text x="262" y="66" fill="currentColor" font-family="monospace" font-size="12">req 라인 (128 B)</text>
-  <text x="262" y="86" fill="currentColor" font-family="monospace" font-size="12">seq | cmd | arg[0..3]</text>
-  <rect x="250" y="130" width="240" height="60" rx="4" class="f-warn" stroke="currentColor"/>
-  <text x="262" y="152" fill="currentColor" font-family="monospace" font-size="12">rsp 라인 (128 B)</text>
-  <text x="262" y="172" fill="currentColor" font-family="monospace" font-size="12">seq | status | result</text>
-  <path d="M170 80 L250 80 M490 80 L570 80" stroke="currentColor" fill="none"/>
-  <path d="M570 150 L490 150 M250 150 L170 150" stroke="currentColor" fill="none" stroke-dasharray="4 3"/>
-  <text x="20" y="226" fill="currentColor" font-size="12">MCU: RP2040 은 SIO FIFO + SEV/WFE, STM32H7 은 HSEM + 공유 SRAM(M7 D-cache 관리 필요), i.MX8M 은 MU(Messaging Unit).</text>
-  <text x="20" y="244" fill="currentColor" font-size="12">원리는 같다: payload 먼저, 순번/도어벨은 나중 (release), 받는 쪽은 순번 먼저 (acquire).</text>
+  <rect x="510" y="40" width="220" height="160" rx="6" class="f-ok" stroke="currentColor"/>
+  <text x="522" y="62" fill="currentColor" font-weight="bold">코어 1 (서버)</text>
+  <text x="522" y="86" fill="currentColor" font-size="12">③ req.seq == last+1 ?</text>
+  <text x="522" y="106" fill="currentColor" font-size="12">④ payload 읽고 계산</text>
+  <text x="522" y="126" fill="currentColor" font-size="12">⑤ result, status 쓰기</text>
+  <text x="522" y="146" fill="currentColor" font-size="12">   → rsp.seq = s (release)</text>
+  <rect x="260" y="44" width="220" height="60" rx="4" class="f-acc" stroke="currentColor"/>
+  <text x="272" y="66" fill="currentColor" font-family="monospace" font-size="12">req 라인 (128 B)</text>
+  <text x="272" y="86" fill="currentColor" font-family="monospace" font-size="12">seq | cmd | arg[0..3]</text>
+  <rect x="260" y="130" width="220" height="60" rx="4" class="f-warn" stroke="currentColor"/>
+  <text x="272" y="152" fill="currentColor" font-family="monospace" font-size="12">rsp 라인 (128 B)</text>
+  <text x="272" y="172" fill="currentColor" font-family="monospace" font-size="12">seq | status | result</text>
+  <path d="M230 80 L260 80 M480 80 L510 80" stroke="currentColor" fill="none"/>
+  <path d="M510 150 L480 150 M260 150 L230 150" stroke="currentColor" fill="none" stroke-dasharray="4 3"/>
+  <text x="20" y="224" fill="currentColor" font-size="12">MCU: RP2040 = SIO FIFO + SEV/WFE, STM32H7 = HSEM + 공유 SRAM (M7 D-cache 관리),</text>
+  <text x="20" y="242" fill="currentColor" font-size="12">i.MX8M = MU(Messaging Unit). 원리는 같다: payload 먼저, 순번/도어벨은 나중 (release),</text>
+  <text x="20" y="260" fill="currentColor" font-size="12">받는 쪽은 순번 먼저 (acquire).</text>
 </svg>
 ```
 
 - **왜 두 라인인가:** 각 라인의 writer 가 하나다. 요청 라인은 클라이언트만, 응답 라인은 서버만 쓴다. 한 라인에 두면 서버가 응답을 쓰는 동안 클라이언트의 다음 요청 쓰기와 같은 라인을 다툰다 (지금의 엄격한 번갈아 쓰기에서는 차이가 작지만 — 위 d8 결과 — 요청을 미리 쌓는 큐로 확장하면 바로 문제가 된다, LLAT-M01 SPSC).
 - **payload 가 평범한 변수여도 되는 이유:** 클라이언트의 payload 쓰기 → `req.seq` release store, 서버의 `req.seq` acquire load → payload 읽기. release/acquire 가 synchronizes-with 를 만들어 payload 쓰기가 읽기보다 happens-before 다 (C11 5.1.2.4). 다음 payload 쓰기는 `rsp.seq` acquire 뒤라서 서버의 이전 읽기와도 순서가 있다. 그래서 TSan 이 조용하다 (아래 검증).
 - **깨뜨리면:** `demo_broken.c` 는 네 개의 seq 연산을 전부 relaxed 로 바꿨다.
+
+<!-- code: demo_broken.c -->
 
 ```text
 $ ./broken 2000000        (load average 8.14)
@@ -552,7 +534,7 @@ cc -std=c11 -g -O1 -fsanitize=thread -pthread solution.c -o so_tsan && ./so_tsan
 |---|---|---|
 | 왕복마다 시계를 읽는다 | 41.67 ns 눈금 → min 0.0, p50 83.3 같은 tick 배수만 보임 | 64 왕복을 한 표본으로, ÷64 |
 | 첫 run 을 그대로 쓴다 | 시작 직후 `E% 100/100`, 150–187 ns | 0.1초 워밍업 버리기, run 여러 번 |
-| "QoS 로 P 코어에 고정했다" | ui 핑퐁이 표본 44%/78% 를 E 에서 보낸 run, bg 빈 루프가 Super 에만 | 코어 번호를 기록하고 쌍 종류별로 나눠 보고 |
+| "QoS 로 P 코어에 고정했다" | ui 핑퐁이 표본 44%/78% 를 E 에서 보낸 run, bg 빈 루프가 E 를 한 번도 안 씀 | 코어 번호를 기록하고 쌍 종류별로 나눠 보고 |
 | 깃발 패딩 64 B 면 충분 | E 코어가 끼면 64–120 B 도 8–20 ns/op | 128 B (`hw.cachelinesize`) 이상, C++ 은 256 |
 | 핑퐁 결과로 "패딩 효과 없음" 결론 | 번갈아 쓰기에서는 원래 차이가 없다 (d8 ≈ d128) | 동시에 각자 쓰는 경우(fs)로 따로 잰다 |
 | 코어보다 많은 스레드에서 순수 스핀 | VM 같은 vCPU: 왕복 6 ms (×65000) | spin-then-yield / spin-then-park |
@@ -560,16 +542,6 @@ cc -std=c11 -g -O1 -fsanitize=thread -pthread solution.c -o so_tsan && ./so_tsan
 | `os_sync_wait_on_address(p, want, ...)` | "이미 원하는 값이면 잠든다" — 반대 의미 | 방금 읽은 **현재 값 v** 를 넘긴다 |
 | wake 를 store 보다 먼저 | 깨어난 쪽이 옛 값을 보고 다시 잠듦 → 영원히 | store(release) → wake |
 | VM 숫자를 물리 코어 숫자로 인용 | 다른 vCPU cond 14.4 µs 는 가상 IPI 로 부풀려짐 | "vCPU" 라고 쓰고, 실기에서 다시 잰다 |
-
-고친 코드 (잠드는 대기, 정답에서):
-
-```c
-uint64_t v = atomic_load_explicit(p, memory_order_acquire);
-if (v == want) return true;
-/* ... 마감 계산 ... */
-os_sync_wait_on_address_with_timeout((void *)p, v, 8, OS_SYNC_WAIT_ON_ADDRESS_NONE,
-                                     OS_CLOCK_MACH_ABSOLUTE_TIME, left);   /* v: "아직 v 이면 자라" */
-```
 
 ## 8. 면접 Q&A
 
@@ -588,13 +560,13 @@ os_sync_wait_on_address_with_timeout((void *)p, v, 8, OS_SYNC_WAIT_ON_ADDRESS_NO
 <details>
 <summary>Q3. macOS 에서 스레드를 특정 코어에 고정할 수 있나요? QoS 는 무엇을 해 주나요?</summary>
 
-고정은 못 한다. `sched_setaffinity` 가 없고 Mach affinity tag 는 Apple Silicon 에서 `KERN_NOT_SUPPORTED` 다 (OS-M02 확인). `pthread_set_qos_class_self_np` 는 "얼마나 급한 일인가" 를 알리는 힌트다. 실측: BACKGROUND 핑퐁은 매번 표본 100% 가 E 코어였지만, USER_INTERACTIVE 핑퐁도 부하가 있으면 표본 44–78% 를 E 에서 보냈고, BACKGROUND 빈 루프는 Super 코어에서만 돌았다. 그래서 측정은 `pthread_cpu_number_np` 로 코어를 기록하고 쌍 종류별로 나눈다. 꼬리: "그 cpu 번호 → 코어 종류 매핑은?" → 빈 루프 속도로 추정(0–5 E, 6–7 Super, 8–11 Performance). 문서로 확인한 매핑이 아니고, 읽은 순간 이후에 옮겨질 수 있다.
+고정은 못 한다. `sched_setaffinity` 가 없고 Mach affinity tag 는 Apple Silicon 에서 `KERN_NOT_SUPPORTED` 다 (OS-M02 확인). `pthread_set_qos_class_self_np` 는 "얼마나 급한 일인가" 를 알리는 힌트다. 실측: BACKGROUND 핑퐁은 매번 표본 100% 가 E 코어였지만, USER_INTERACTIVE 핑퐁도 부하가 있으면 표본 44–78% 를 E 에서 보냈고, BACKGROUND 빈 루프는 E 코어를 한 번도 안 썼다. 그래서 측정은 `pthread_cpu_number_np` 로 코어를 기록하고 쌍 종류별로 나눈다. 꼬리: "그 cpu 번호 → 코어 종류 매핑은?" → 빈 루프 속도로 추정(0–5 E, 6–7 Super, 8–11 Performance). 문서로 확인한 매핑이 아니고, 읽은 순간 이후에 옮겨질 수 있다.
 </details>
 
 <details>
 <summary>Q4. 스핀 대기와 잠드는 대기, 언제 무엇을 쓰나요?</summary>
 
-실측 P 코어: 스핀 80 ns, `os_sync_wait_on_address`/조건 변수 2.5 µs (약 30배), E 코어에서 잠들기 7–10 µs. 스핀은 코어 두 개를 100% 태우고, 스레드가 코어보다 많으면 재앙이다 (리눅스 VM 같은 vCPU 에서 왕복 6 ms). 그래서: 코어를 전용으로 줄 수 있고 µs 미만이 필요하면 스핀(HFT 폴링 스레드, `isolcpus` 와 함께), 아니면 잠들기, 대부분은 **잠깐 스핀 후 잠들기** — 상대가 곧 올 확률이 높을 때 시스템 콜을 아낀다. 꼬리: "스핀의 전력을 줄이려면?" → arm64 는 `ldaxr` + `wfe` (라인이 바뀌면 이벤트로 깨어남, 이 맥에서 지연 79 ns 로 스핀과 같음), x86 은 `pause` / `umwait`. Cortex-M 듀얼 코어(RP2040)는 `SEV`/`WFE`.
+실측 P 코어: 스핀 80 ns, `os_sync_wait_on_address`/조건 변수 2.5–3.5 µs (30–40배), E 코어에서 잠들기 6–17 µs. 스핀은 코어 두 개를 100% 태우고, 스레드가 코어보다 많으면 재앙이다 (리눅스 VM 같은 vCPU 에서 왕복 6 ms). 그래서: 코어를 전용으로 줄 수 있고 µs 미만이 필요하면 스핀(HFT 폴링 스레드, `isolcpus` 와 함께), 아니면 잠들기, 대부분은 **잠깐 스핀 후 잠들기** — 상대가 곧 올 확률이 높을 때 시스템 콜을 아낀다. 꼬리: "스핀의 전력을 줄이려면?" → arm64 는 `ldaxr` + `wfe` (라인이 바뀌면 이벤트로 깨어남, 이 맥에서 지연 79 ns 로 스핀과 같음), x86 은 `pause` / `umwait`. Cortex-M 듀얼 코어(RP2040)는 `SEV`/`WFE`.
 </details>
 
 <details>
@@ -613,12 +585,6 @@ os_sync_wait_on_address_with_timeout((void *)p, v, 8, OS_SYNC_WAIT_ON_ADDRESS_NO
 <summary>Q7. 왕복 80 ns 를 41.67 ns 시계로 재면 무엇이 틀어지나요? 배치의 단점은?</summary>
 
 왕복 하나를 재면 값이 0·41.7·83.3·125 ns 로만 나온다 (실측 batch 1: min 0.0, p50 83.3). 64개를 묶으면 표본 5.5 µs, 해상도 0.65 ns/왕복으로 한 눈금 오차가 1% 아래. 단점: 표본이 64개의 평균이라 **꼬리가 눌린다** — 한 번 800 ns 걸린 왕복이 표본 안에서 +11 ns 로 희석된다. 꼬리를 보려면 cycle 카운터(리눅스 `perf_event`/`cntvct_el0` 직접, Cortex-M `DWT->CYCCNT`)나 히스토그램을 쓰고, 그래도 안 되면 "p99 는 배치 평균의 p99" 라고 밝힌다. 꼬리: "시계 읽기 비용은?" → `mach_absolute_time` 약 6 ns(OS-M02) — 64 왕복(5.5 µs) 대비 0.1%.
-</details>
-
-<details>
-<summary>Q8. 이 숫자로 실제로 무엇을 결정하나요?</summary>
-
-(1) 파이프라인을 몇 스레드로 나눌지: 단계마다 핸드오프가 80 ns(스핀) ~ 2.5 µs(잠들기)이면, 1 µs 짜리 작업을 스레드 둘로 나누는 건 잠들기 핸드오프에서는 손해다. (2) 코어 배치: 생산자–소비자를 같은 클러스터에 두면 P↔E 대비 3배 빠르다 — 리눅스는 affinity, 맥은 같은 QoS. (3) 배치 크기: 메시지당 2.5 µs 를 감당 못 하면 N 개씩 묶는다 (OS-M02 Part C). (4) 듀얼 코어 MCU: 코어 간 FIFO/메일박스 지연 + 인터럽트 진입이 제어 루프 주기에 들어가는지. 꼬리: "E 코어에 밀린 소비자는?" → 왕복 3–4배, 잠들기 7–10 µs. 지연 민감 스레드는 높은 QoS, 리눅스는 SCHED_FIFO + affinity.
 </details>
 
 ## 9. 추가 연습
@@ -715,9 +681,9 @@ cc -std=c11 -g -O1 -fsanitize=thread -pthread practice.c -o pr_tsan && ./pr_tsan
 ## 10. 핵심 정리
 
 - 핸드오프 = 캐시 라인 이동. 왕복 1번 = 이동 2번. 재는 법: seq 하나 핑퐁(핑 홀수 / 퐁 짝수, `==` 로 정확히 한 번), 64 왕복씩 묶어 ÷64 (41.67 ns 눈금), 워밍업 버림, min/p50/p99 + load.
-- Apple M6 실측 (load ≈ 4, 배수로 볼 것): Super/P 끼리 77–90 ns, E 끼리 79–250 ns (클럭 따라), P↔E 200–400 ns, WFE ≈ 스핀, 잠들기(`os_sync_wait_on_address`·cond) 2.5 µs (E 에서 7–10 µs).
+- Apple M6 실측 (load 3.5–4.5, 배수로 볼 것): Super/P 끼리 74–90 ns, E 끼리 79–250 ns (클럭 따라), P↔E 200–400 ns, WFE ≈ 스핀, 잠들기(`os_sync_wait_on_address`·cond) 2.5–3.5 µs (E 에서 6–17 µs).
 - macOS 는 고정 불가. QoS 는 힌트 — BACKGROUND → E 는 믿을 만했고, USER_INTERACTIVE 도 부하에 따라 E 로 갔다. cpu 번호를 기록해 쌍 종류별로 나눈다.
-- 번갈아 쓰는 핑퐁에서 패딩은 거의 무관. 각자 쓰면 같은 블록이 7–14배 느림 — 이 맥 경계 P 64 B / E 128 B → **128 B 이상** (C++ 256).
+- 번갈아 쓰는 핑퐁에서 패딩은 거의 무관. 각자 쓰면 같은 블록이 최대 약 8배 느림 — 이 맥 경계 P 64 B / E 128 B → **128 B 이상** (C++ 256).
 - 코어보다 많은 스레드에서 순수 스핀은 재앙 (VM 같은 vCPU 6 ms). spin-then-yield / spin-then-park.
 - 잠들기 API 에는 **방금 읽은 값** 을 넘기고(커널이 원자적으로 비교 → lost wakeup 없음), post 는 store 뒤 wake.
 - 메일박스: 요청/응답 라인 분리(라인당 writer 하나), payload → seq release / seq acquire → payload. relaxed 는 컴파일러가 먼저 깬다 (200만/200만).
@@ -727,12 +693,8 @@ cc -std=c11 -g -O1 -fsanitize=thread -pthread practice.c -o pr_tsan && ./pr_tsan
 
 - Apple `os/os_sync_wait_on_address.h` (MacOSX26.4.sdk, `__API_AVAILABLE(macos(14.4))`) — 원자적 compare-and-wait, EINTR/EFAULT 재시도 규칙, `_with_timeout`/`_with_deadline`, `os_sync_wake_by_address_any/all`
 - Apple `sys/qos.h`, `pthread/qos.h` (`pthread_set_qos_class_self_np`, `qos_class_self`), `pthread_cpu_number_np` (`pthread/pthread.h` 주석: 읽은 값은 곧 낡을 수 있음); *Energy Efficiency Guide for Mac Apps — Prioritize Work with Quality of Service Classes*: <https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/PrioritizeWorkAtTheTaskLevel.html>
-- `man sysctl` — `hw.cachelinesize`, `hw.nperflevels`, `hw.perflevelN.{name,physicalcpu,cpusperl2,l2cachesize}`
 - Arm Architecture Reference Manual for A-profile (DDI 0487) — WFE/SEVL 과 "Wait for Event mechanism", exclusive monitor 와 이벤트 생성, LDAPR/LDAR/STLR: <https://developer.arm.com/documentation/ddi0487/latest/>
-- C11 (N1570) 5.1.2.4 Multi-threaded executions and data races (synchronizes-with, happens-before), 7.17.3 Order and consistency: <https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf>
+- C11 (N1570) 5.1.2.4 (synchronizes-with, happens-before), 7.17.3: <https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf> · `man sysctl` (`hw.cachelinesize`, `hw.perflevelN.*`)
 - Linux `pthread_setaffinity_np(3)`, `sched_setaffinity(2)`, `taskset(1)`, `Documentation/admin-guide/cputopology.rst` (`/sys/devices/system/cpu/cpuN/topology/`): <https://man7.org/linux/man-pages/man3/pthread_setaffinity_np.3.html> · <https://docs.kernel.org/admin-guide/cputopology.html>
-- Linux arm64 `arch/arm64/include/asm/barrier.h` (`smp_cond_load_acquire` → `__cmpwait`), `arch/arm64/include/asm/cmpxchg.h`: <https://elixir.bootlin.com/linux/latest/source/arch/arm64/include/asm/barrier.h>
-- Paul E. McKenney, *Is Parallel Programming Hard...* — 3장 Hardware and its Habits (캐시 라인 이동 비용): <https://mirrors.edge.kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook.html>
-- RP2040 Datasheet — SIO: inter-processor FIFOs, spinlocks; SEV/WFE: <https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf>
-- ST AN5617 *STM32H745/755 and STM32H747/757 lines inter-processor communications* (HSEM, 공유 메모리, 캐시 유지): <https://www.st.com/resource/en/application_note/an5617-stm32h745755-and-stm32h747757-lines-interprocessor-communications-stmicroelectronics.pdf>
+- RP2040 Datasheet — SIO inter-processor FIFOs, SEV/WFE: <https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf> · Linux arm64 `asm/barrier.h` (`smp_cond_load_acquire`), `asm/cmpxchg.h` (`__cmpwait`): <https://elixir.bootlin.com/linux/latest/source/arch/arm64/include/asm/barrier.h>
 - 관련 레슨: OS-M02 (파이프 핑퐁, 시계, 코어 번호, affinity tag), LLAT-B06 (원자 연산 비용·경합), OS-M07 (스핀락 라인 핑퐁), OS-A01 (futex), MCPP-A03 (atomic wait/notify), LLAT-M02 (seqlock), LLAT-M01 (SPSC), C-A03 (release/acquire publish), C-A02 (컴파일러 배리어), ARM-M04 / ARM-M05 (LDXR/STXR, LDAR/LDAPR), ARCH-M08 (false sharing), OS-B06 (조건 변수), RTOS-A03 (DWT 사이클 측정)

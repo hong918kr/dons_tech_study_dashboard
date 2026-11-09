@@ -1,0 +1,48 @@
+#!/usr/bin/env bpftrace
+/* LPERF-M07 futex_wait.bt — 한 프로세스의 FUTEX_WAIT 를 uaddr·ustack·holder 별로 집계
+ *
+ * usage: sudo bpftrace futex_wait.bt <pid> <초>
+ *
+ * op 하위 7 비트: 0 = FUTEX_WAIT, 1 = FUTEX_WAKE (128 = FUTEX_PRIVATE_FLAG 는 마스크로 뗀다)
+ * glibc 의 일반 뮤텍스는 FUTEX_WAIT_PRIVATE 를 쓴다 (OS-A01 strace 확인).
+ * owner: 대기 시작 순간 pthread_mutex_t.__owner (uaddr + 8 바이트). glibc 내부 구조 — demo_server 가 offset 을 출력한다.
+ */
+BEGIN { @secs = $2; printf("tracing pid %d for %d s\n", $1, $2); }
+
+tracepoint:syscalls:sys_enter_futex
+/pid == $1/
+{
+    $cmd = args.op & 127;
+    if ($cmd == 0) {
+        @start[tid] = nsecs;
+        @uaddr[tid] = (uint64)args.uaddr;
+        @owner[tid] = *uptr(args.uaddr + 2);    /* u32 포인터 + 2 = +8 바이트 = __owner */
+    } else {
+        @start[tid] = 0;                        /* 앞선 WAIT 의 exit 이벤트를 놓쳤어도 여기서 지운다 */
+        if ($cmd == 1) {
+            /* holder 의 코드 위치: FUTEX_WAKE 를 부른 쪽 = 막 unlock 한 쪽 */
+            @waker[ustack(5), comm] = count();
+        }
+    }
+}
+
+tracepoint:syscalls:sys_exit_futex
+/@start[tid]/
+{
+    $d = nsecs - @start[tid];
+    $ua = @uaddr[tid];
+    if (args.ret == 0) {
+        @wait_ns[$ua] = sum($d);
+        @wait_cnt[$ua] = count();
+        @wait_us[$ua] = hist($d / 1000);
+        @by_stack[ustack(6)] = sum($d);
+        @holder_ns[$ua, (int32)@owner[tid]] = sum($d);
+    } else {
+        @not_slept[$ua, args.ret] = count();    /* -11 EAGAIN: 잠들기 전에 값이 바뀜 */
+    }
+    @start[tid] = 0;
+}
+
+interval:s:1 { @secs--; if (@secs <= 0) { exit(); } }
+
+END { clear(@start); clear(@uaddr); clear(@owner); clear(@secs); }

@@ -1,17 +1,18 @@
-char* my_strcpy(char* dst, char* src)
+// uint32_t rev_bits32_loop(uint32_t x);
+// uint32_t rev_bits32_fast(uint32_t x);
+
+
+
+uint32_t rev_bits32_loop(uint32_t x)
 {
-    char* d = dst;
-    while ((*d++ = *src++) != '\0');
-    return dst;
+    uint32_t res = 0;
+    while ()    
 }
 
-void *my_memcpy(void* dst, const void* src,  size_t n)
+
+int main ()
 {
-    uint8_t *d = dst;
-    const uint8_t *s = src;
-    while (n--)
-    {
-        *d++ = *s++;
-    }
-    return dst;
+    
+
+    return 0;
 }

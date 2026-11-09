@@ -206,6 +206,10 @@ release store 는 **앞의** 접근이 자기보다 먼저 보이게 할 뿐, **
 | 데이터 store 를 전부 release | ✔ | 각 데이터 store 앞의 홀수 store 가 먼저 보인다. 워드마다 `stlr` |
 | 전부 `seq_cst` 기본값 | ✔ | 맞지만 데이터 접근마다 `ldar`/`stlr` |
 
+<!-- code: demo_asm.cpp -->
+
+<!-- code: demo_asm_m4.c -->
+
 **실제 명령** — `demo_asm.cpp` 를 `c++ -std=c++20 -O2 -c` → `xcrun llvm-objdump -d` (데이터 4 워드로 줄인 판, 실측):
 
 ```text
@@ -258,6 +262,8 @@ B 가 쓰는 동안 seq 가 짝수(4)였으니 그 사이 reader 도 찢어진 �
 
 **진짜 스레드에서 찢어짐 비율** (`demo_torn.cpp`, writer 1(two_writers 는 2) + reader 3, 변형마다 1초, 실측 2회, load average 3.9–5.4):
 
+<!-- code: demo_torn.cpp -->
+
 | 변형 | 바꾼 것 | 받아들인 읽기 | torn (1회차) | torn (2회차) |
 |---|---|---|---|---|
 | correct | — | 1.56억 / 1.27억 | **0** | **0** |
@@ -276,11 +282,11 @@ B 가 쓰는 동안 seq 가 짝수(4)였으니 그 사이 reader 도 찢어진 �
 <path d="M300 40 L300 252 M430 40 L430 252 M560 40 L560 252 M690 40 L690 252" stroke="currentColor" stroke-dasharray="2 4" fill="none"/>
 <text x="10" y="62" fill="currentColor">correct</text><text x="180" y="62" fill="currentColor" font-size="12">0 (1.27억 중)</text>
 <text x="10" y="92" fill="currentColor">memcpy (UB)</text><text x="180" y="92" fill="currentColor" font-size="12">0 관찰 — 맞다는 뜻 아님</text>
-<text x="10" y="122" fill="currentColor">no_rd_fence</text><rect x="170" y="108" width="186" height="20" class="f-warn" stroke="currentColor"/><text x="362" y="123" fill="currentColor" font-size="12">0.038%</text>
-<text x="10" y="152" fill="currentColor">no_wr_fence</text><rect x="170" y="138" width="292" height="20" class="f-warn" stroke="currentColor"/><text x="468" y="153" fill="currentColor" font-size="12">0.30%</text>
-<text x="10" y="182" fill="currentColor">all_relaxed</text><rect x="170" y="168" width="249" height="20" class="f-warn" stroke="currentColor"/><text x="425" y="183" fill="currentColor" font-size="12">0.12%</text>
-<text x="10" y="212" fill="currentColor">no_odd</text><rect x="170" y="198" width="474" height="20" class="f-acc" stroke="currentColor"/><text x="650" y="213" fill="currentColor" font-size="12">4.4%</text>
-<text x="10" y="242" fill="currentColor">two_writers</text><rect x="170" y="228" width="537" height="20" class="f-acc" stroke="currentColor"/><text x="600" y="243" fill="currentColor" font-size="12">13.4%</text>
+<text x="10" y="122" fill="currentColor">no_rd_fence</text><rect x="170" y="108" width="75" height="20" class="f-warn" stroke="currentColor"/><text x="251" y="123" fill="currentColor" font-size="12">0.038%</text>
+<text x="10" y="152" fill="currentColor">no_wr_fence</text><rect x="170" y="138" width="192" height="20" class="f-warn" stroke="currentColor"/><text x="368" y="153" fill="currentColor" font-size="12">0.30%</text>
+<text x="10" y="182" fill="currentColor">all_relaxed</text><rect x="170" y="168" width="140" height="20" class="f-warn" stroke="currentColor"/><text x="316" y="183" fill="currentColor" font-size="12">0.12%</text>
+<text x="10" y="212" fill="currentColor">no_odd</text><rect x="170" y="198" width="344" height="20" class="f-acc" stroke="currentColor"/><text x="520" y="213" fill="currentColor" font-size="12">4.4%</text>
+<text x="10" y="242" fill="currentColor">two_writers</text><rect x="170" y="228" width="407" height="20" class="f-acc" stroke="currentColor"/><text x="583" y="243" fill="currentColor" font-size="12">13.4%</text>
 </svg>
 ```
 
@@ -291,6 +297,8 @@ B 가 쓰는 동안 seq 가 짝수(4)였으니 그 사이 reader 도 찢어진 �
 - 비율은 부하·스케줄에 따라 2–3배씩 흔들린다 (all_relaxed 0.39% → 0.12%). 0 이냐 아니냐만 믿는다.
 
 **TSan 이 보는 것** (`demo_tsan.cpp`, 실측):
+
+<!-- code: demo_tsan.cpp -->
 
 | 모드 | 무엇 | TSan |
 |---|---|---|
@@ -330,6 +338,8 @@ Part C stress: updates=600000 reads=842134/825501/845052 fresh=443312/440595/443
 ### 측정 — reader 지연: seqlock vs `pthread_rwlock_t` vs `std::mutex`
 
 `demo_bench.cpp`: 64 B 스냅샷, writer 1개를 목표 속도로 돌리고 reader R 개가 쉬지 않고 읽는다. 타이머(`clock_gettime_nsec_np(CLOCK_UPTIME_RAW)`)의 눈금이 41.7 ns 라서 읽기 1번(약 3 ns)을 따로 잴 수 없다 → **64번 연속 읽기의 평균** 을 표본 하나로 쓰고, 그 표본들의 p50/p99/p99.9 를 낸다 (그래서 p99 는 "가장 나쁜 64묶음의 평균" 이고 진짜 단일 읽기 꼬리는 더 길다). writer 표본은 쓰기 1번(락 대기 포함)을 직접 잰 값(눈금 41.7 ns 단위).
+
+<!-- code: demo_bench.cpp -->
 
 기계: `Apple M6`, perflevel0/1/2 = 2/4/6 코어 (Super/Performance/Efficiency), `Apple clang version 21.0.0 (clang-2100.0.123.102)`. 다른 작성 에이전트들의 벤치마크와 동시에 돌았다 (load average 5.86 → 5.87, 아래 표 실행 전후). **배수만 믿는다.** 코어 고정 불가 (macOS).
 
@@ -407,7 +417,7 @@ TSan 빌드가 조용한 이유는 "데이터까지 atomic 이라 race 가 없�
 | writer 2개가 단일 writer 코드 | `load → store(s+1)` 이 원자적이지 않다 → seq 역행, 찢어진 "안정" 상태 (실측 13%) | CAS 짝수→홀수, 또는 writer mutex + seqcount |
 | 복사한 스냅샷 안의 **포인터** 를 검증 전에 따라감 | 찢어진 값의 포인터는 쓰레기/해제된 메모리 → 검증 전에 segfault | 검증(s1 == s2) 뒤에만 사용. 포인터 대상의 수명은 RCU/EBR (OS-A03) |
 | writer 가 공유 데이터를 읽어 고치기 | 자기가 쓴 라인을 reader 에게서 다시 가져옴 + 단일 writer 가정이 흐려짐 | writer 전용 master 사본 → 게시만 |
-| latch 에서 홀수 store 를 relaxed 로 | latch reader 는 홀수일 때 **copy[1] 을 읽는다** → 직전 copy[1] 쓰기가 홀수보다 먼저 보여야 함. 연습 4 를 처음에 이렇게 짜서 스트레스가 5/5 실패 (torn 1–87 / 약 600만 읽기) | `seq.store(s+1, release); fence(release);` |
+| latch 에서 홀수 store 를 relaxed 로 | latch reader 는 홀수일 때 **copy[1] 을 읽는다** → 직전 copy[1] 쓰기가 홀수보다 먼저 보여야 함. 연습 4 를 처음에 이렇게 짜서 스트레스가 5/5 실패 (torn 1–87 / 약 520만–900만 읽기) | `seq.store(s+1, release); fence(release);` |
 | 재시도 루프에 상한·양보 없음 (실시간 경로) | writer 가 선점되거나 계속 쓰면 reader 가 무한정 돈다 | `sl_load_bounded` + 지난 값 사용, 또는 `read_seqbegin_or_lock` 식 폴백 |
 
 ## 8. 면접 Q&A

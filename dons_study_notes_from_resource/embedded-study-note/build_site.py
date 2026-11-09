@@ -201,7 +201,7 @@ def _tokens_sh(src):
     return toks
 
 
-LANG_ALIAS = {"c": "c", "h": "c", "cpp": "c", "c++": "c", "cc": "c", "hpp": "c", "cxx": "c",
+LANG_ALIAS = {"c": "c", "h": "c", "cpp": "c", "c++": "c", "cc": "c", "hpp": "c", "cxx": "c", "m": "c", "metal": "c",
               "bash": "sh", "sh": "sh", "shell": "sh", "zsh": "sh", "console": "sh"}
 
 

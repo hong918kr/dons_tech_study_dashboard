@@ -50,10 +50,10 @@ updated: 2026-11-08
   <rect x="600" y="194" width="120" height="30" rx="4" class="f-warn" stroke="currentColor"/>
   <text x="608" y="214" fill="currentColor" font-family="monospace">v8 @ e=4</text>
   <text x="470" y="244" fill="currentColor">v7: 3+2 ≤ 5 → 해제 가능</text>
-  <text x="470" y="262" fill="currentColor">v8: 4+2 &gt; 5 → R2 가 쥐고 있을 수 있음</text>
+  <text x="470" y="262" fill="currentColor">v8: 4+2 &gt; 5 → R2 가 쥐었을 수 있음</text>
   <g fill="currentColor">
     <text x="10" y="292">전진 규칙: 활동 중 슬롯이 모두 epoch == G 일 때만 G → G+1.  지금은 R2(4 ≠ 5) 가 막는다.</text>
-    <text x="10" y="314">리더: 슬롯에 (G&lt;&lt;1)|1 저장 → cur 읽기 → 사용 → 슬롯 0.  writer: 새 버전 → cur 교체 → 옛 것 limbo.</text>
+    <text x="10" y="314">리더: 슬롯 = (G&lt;&lt;1)|1 → cur 읽기 → 사용 → 슬롯 0.  writer: 새 버전 → cur 교체 → limbo.</text>
   </g>
 </svg>
 ```
@@ -310,7 +310,7 @@ ebr_read:                          ebr_read_ra:
 	dmb	sy
 ```
 
-seq_cst store 는 `dmb sy; str; dmb sy`, release store 는 `dmb sy; str` 뿐 — **store 와 load 사이의 `dmb sy` 하나** 가 SB 를 막는다. `swap_cur` 는 `dmb sy; ldrex; strex; bne` 루프 + `dmb sy` (Cortex-M4 에 LSE 없음).
+(위 두 열은 실제 출력의 두 함수를 나란히 놓은 것 — 명령 순서는 그대로.) seq_cst store 는 `dmb sy; str; dmb sy`, release store 는 `dmb sy; str` 뿐 — **store 와 load 사이의 `dmb sy` 하나** 가 SB 를 막는다. `swap_cur` 는 `dmb sy; ldrex; strex; bne` 루프 + `dmb sy` (Cortex-M4 에 LSE 없음).
 
 ### Part A — 실측: acquire/release 로 진입하면 UAF 창이 열리나
 
@@ -582,13 +582,13 @@ ASan+UBSan: `42/42 passed`, 보고 없음, exit 0 — 20 000 번 교체·해제�
 <details>
 <summary>Q3. 리더 진입에서 acquire/release 면 충분하지 않나요? 왜 seq_cst 죠?</summary>
 
-진입은 "내 슬롯 store → cur load", writer 는 "cur 교체 → 슬롯 load". 서로 store 한 뒤 상대 것을 load 하는 SB 모양이고, 금지해야 할 결과는 "리더는 옛 포인터 + writer 는 리더 못 봄" → 해제 → UAF. C11 release/acquire 는 store→load 순서를 주지 않는다. arm64 에서 acquire load 는 `ldapr`(RCpc)라 앞의 `stlr` 을 앞지를 수 있고, seq_cst load 는 `ldar`(RCsc)라 못 앞지른다 — 실제 기계어 차이는 한 글자다. 실측: rel/acq 양쪽 1 200 만 라운드 중 2 번 창이 열렸고 seq_cst 는 0. 대안: relaxed + 양쪽 `atomic_thread_fence(seq_cst)`(`dmb ish`), 또는 liburcu memb 처럼 리더 배리어를 없애고 writer 가 `membarrier()` 로 강제. 꼬리: "writer 쪽만 seq_cst 면?" — 실측 `RV=3 WV=0` 에서 3~33 건. SB 는 양쪽 다 막아야 한다.
+진입은 "내 슬롯 store → cur load", writer 는 "cur 교체 → 슬롯 load". 서로 store 한 뒤 상대 것을 load 하는 SB 모양이고, 금지해야 할 결과는 "리더는 옛 포인터 + writer 는 리더 못 봄" → 해제 → UAF. C11 release/acquire 는 store→load 순서를 주지 않는다. arm64 에서 acquire load 는 `ldapr`(RCpc)라 앞의 `stlr` 을 앞지를 수 있고, seq_cst load 는 `ldar`(RCsc)라 못 앞지른다 — 실제 기계어 차이는 한 글자다. 실측: rel/acq 양쪽 1 200 만 라운드 중 2 번 창이 열렸고 seq_cst 는 0. 대안: relaxed + 양쪽 `atomic_thread_fence(seq_cst)`(`dmb ish`), 또는 liburcu memb 처럼 리더 배리어를 없애고 writer 가 `membarrier()` 로 강제. 꼬리: "writer 쪽만 seq_cst 면?" — 실측 `RV=3 WV=0` 에서 6 회 모두 2~33 건. SB 는 양쪽 다 막아야 한다.
 </details>
 
 <details>
 <summary>Q4. rwlock 도 리더끼리는 안 막는데 왜 리더 2 명에서 17 배 느려지죠?</summary>
 
-"안 막는다" 와 "안 부딪친다" 는 다르다. `rdlock` 은 리더 수 카운터를 원자 RMW 로 올리고 `unlock` 이 내린다. 그 카운터가 있는 캐시 라인을 모든 리더가 **쓰기** 때문에 라인이 코어 사이를 오가며(Modified ↔ Invalid) 한 번에 수십~수백 ns 가 든다 — 실측 1 리더 176.9 → 2 리더 10.3 Mops/s. EBR 리더는 자기 라인(128 B 패딩)에만 쓰고 `cur`/`epoch` 은 읽기만 해서 모든 코어가 Shared 로 공유한다 → 10 리더까지 거의 선형 (7709 Mops/s, rwlock 대비 700~1100 배). 같은 이유로 "읽을 때마다 참조 카운트 ++/--" 방식(공유 refcount)도 확장이 안 된다. 꼬리: 슬롯 패딩을 빼면? 슬롯들이 한 라인에 모여 false sharing — ARCH-M08 에서 측정.
+"안 막는다" 와 "안 부딪친다" 는 다르다. `rdlock` 은 리더 수 카운터를 원자 RMW 로 올리고 `unlock` 이 내린다. 그 카운터가 있는 캐시 라인을 모든 리더가 **쓰기** 때문에 라인이 코어 사이를 오가며(Modified ↔ Invalid) 한 번에 수십~수백 ns 가 든다 (대표값, 이 레슨에서 라인 이동 비용 자체는 안 쟀다) — 실측 1 리더 176.9 → 2 리더 10.3 Mops/s. EBR 리더는 자기 라인(128 B 패딩)에만 쓰고 `cur`/`epoch` 은 읽기만 해서 모든 코어가 Shared 로 공유한다 → 10 리더까지 거의 선형 (7709 Mops/s, 리더 4 명 이상에서 rwlock 대비 470~1130 배). 같은 이유로 "읽을 때마다 참조 카운트 ++/--" 방식(공유 refcount)도 확장이 안 된다. 꼬리: 슬롯 패딩을 빼면? 슬롯들이 한 라인에 모여 false sharing 이 된다 (이 레슨에선 측정 안 함, ARCH-M08 참고).
 </details>
 
 <details>
@@ -689,7 +689,7 @@ cc -std=c11 -g -O1 -fsanitize=thread -pthread practice.c -o pr_tsan && ./pr_tsan
 - EBR: 슬롯 `(e<<1)|1`, "활동 중 슬롯 == G" 일 때만 전진, **`retire_epoch + 2 ≤ G`** 에서 해제. 1 칸 전진은 리더가 아직 쥔 상태에서도 일어난다.
 - 리더 진입 = SB 모양 → **seq_cst** (arm64 `stlr; ldar`, Cortex-M `str; dmb sy; ldr`). `ldapr` 면 실측 UAF 창 (1 200 만 중 2). QSBR 의 보고는 acquire/release 로 충분 (online 만 예외).
 - 교체 직후 free 는 ASan 없이 **체크섬 맞는 엉뚱한 버전** 을 읽는다 (malloc 재사용). 검증 = 강제 스케줄 + 독 칠하기 + ASan/TSan.
-- 실측 (M6, load ≈ 4): EBR 1 → 10 리더 1321 → 7709 Mops/s, rwlock 176.9 → 10 대 (공유 카운터 핑퐁), 700~1100 배 차이.
+- 실측 (M6, load ≈ 4): EBR 1 → 10 리더 1321 → 7709 Mops/s, rwlock 176.9 → 6~10 대 (공유 카운터 핑퐁), 리더 4 명 이상에서 470~1130 배 차이.
 - 약점: 멈춘 리더 1 명 = 전체 회수 정지 (200 ms × 7.6 k/s × 4 KB ≈ 6 MB). limbo 상한·역압, `blocker` 경보, 또는 hazard pointer(LLAT-M03).
 - 커널 대응: `rcu_read_lock/unlock` = enter/exit, `rcu_assign_pointer` = release 교체, `synchronize_rcu` = 기다림(구간 안 호출 = 교착), `call_rcu` = retire, 문맥 전환 = quiescent state.
 - 펌웨어: 정적 버퍼 3 개 + "모든 태스크가 루프 맨 위를 지남" (QSBR), 블록되는 태스크는 offline.
