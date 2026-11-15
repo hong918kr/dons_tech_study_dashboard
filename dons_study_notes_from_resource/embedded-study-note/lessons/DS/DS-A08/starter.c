@@ -18,11 +18,13 @@
  *
  * build: cc -std=c11 -Wall -Wextra -Werror -O2 solution.c -o so && ./so   (starter.c 도 같은 명령)
  */
+#define _POSIX_C_SOURCE 200809L
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static int g_pass, g_total;
 #define CHECK(e) do { g_total++; if (e) { g_pass++; printf("PASS %s\n", #e); } \
@@ -469,6 +471,28 @@ static void part_b_scenarios(bool *ok_out) {
     CHECK(bt_floor(&t, 45u, &k, &val) && k == 30u && val == 31u);
     CHECK(bt_floor(&t, 50u, &k, &val) && k == 50u && !bt_floor(&t, 9u, &k, &val));
 
+    /* 높이 3 — 내부 페이지: 오른쪽 내부 형제에서 빌리기 (구분키 10 이 내려오고 13 이 올라간다) */
+#define FRESH_ASC(n) do { bt_init(&t, g_pool, 256u, 4u, 4u); fill_ascending(&t, 1u, 1u, (n)); } while (0)
+    FRESH_ASC(24u);
+    bt_delete(&t, 1u); bt_delete(&t, 4u); bt_delete(&t, 2u);
+    CHECK(shape_is(&t, "(13: (7 10: [3 5 6] [7 8 9] [10 11 12]) (16 19 22: [13 14 15] [16 17 18] [19 20 21] [22 23 24]))") && t.merge_leaf == 1u && t.redist_r == 1u && tree_ok(&t));
+
+    /* 내부 페이지: 왼쪽 내부 형제에서 빌리기 */
+    bt_init(&t, g_pool, 256u, 4u, 4u);
+    fill_ascending(&t, 10u, 10u, 24u);
+    bt_insert(&t, 11u, 11u); bt_insert(&t, 12u, 12u); bt_insert(&t, 41u, 41u); bt_insert(&t, 42u, 42u);
+    { static const uint32_t ds[] = { 100u, 130u, 110u, 160u, 120u, 140u, 190u, 150u, 170u };
+      for (size_t i = 0; i < sizeof ds / sizeof ds[0]; i++) ok &= bt_delete(&t, ds[i]) && tree_ok(&t); }
+    CHECK(shape_is(&t, "(70: (20 40 50: [10 11 12] [20 30] [40 41 42] [50 60]) (100 220: [70 80 90] [180 200 210] [220 230 240]))") && t.merge_leaf == 3u && tree_ok(&t));
+
+    /* 내부 페이지 병합 → 루트 축소 (높이 3 → 2): 오른쪽 형제를 자기에게 / 왼쪽 형제로 */
+    FRESH_ASC(18u);
+    bt_delete(&t, 1u); bt_delete(&t, 4u); bt_delete(&t, 2u);
+    CHECK(shape_is(&t, "(7 10 13 16: [3 5 6] [7 8 9] [10 11 12] [13 14 15] [16 17 18])") && t.merge_node == 1u && t.collapses == 1u && t.height == 2u && tree_ok(&t));
+    FRESH_ASC(18u);
+    bt_delete(&t, 10u); bt_delete(&t, 13u); bt_delete(&t, 11u);
+    CHECK(shape_is(&t, "(4 7 10 16: [1 2 3] [4 5 6] [7 8 9] [12 14 15] [16 17 18])") && t.merge_node == 1u && t.height == 2u && tree_ok(&t));
+
     *ok_out = ok;
 }
 
@@ -711,7 +735,9 @@ static void part_c(void) {
 }
 
 int main(void) {
+    alarm(150);    /* 버그 있는 구현의 무한 루프(사슬 사이클 등)는 테스트 쪽에서 끊는다 */
     printf("== Part A: search / insert with split / range scan\n");
+    CHECK(sizeof(page_t) == 4096u && ((uintptr_t)g_pool & 4095u) == 0u);   /* 페이지 하나 = 4 KB, 풀은 페이지 정렬 */
     bool a_ok = part_a_units();
     CHECK(a_ok);
     if (a_ok) {
@@ -747,7 +773,7 @@ int main(void) {
         CHECK(all);
     } else {
         printf("SKIP delete scenarios, checker, stress: Part A failed\n");
-        g_total += 34;
+        g_total += 30;
     }
 
     printf("== Part C: LBA extent map on the tree\n");

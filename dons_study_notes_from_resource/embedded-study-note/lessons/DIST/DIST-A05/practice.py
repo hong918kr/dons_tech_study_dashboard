@@ -8,6 +8,7 @@
 """
 import importlib.util
 import os
+import signal
 import sys
 
 path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "solution.py")
@@ -222,7 +223,14 @@ def p5():
     check("P5 guarded shrink keeps the real stale read", len(good) == 2 and s.well_formed(good))
 
 
+def on_alarm(signum, frame):
+    print("FAIL watchdog: practice.py took more than 120s")
+    sys.exit(1)
+
+
 def main():
+    signal.signal(signal.SIGALRM, on_alarm)
+    signal.alarm(120)
     p1()
     p2()
     p3()

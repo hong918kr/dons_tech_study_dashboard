@@ -1,0 +1,86 @@
+(lldb) # ARM-B09 demo_crash.lldb — Part C: 페이지 끝 "" 에서 죽는 버그 판을 크래시 덤프처럼 읽고,
+(lldb) #                            register write 로 "시작 포인터가 1 크다" 가설을 재빌드 없이 확인
+(lldb) #   cc -g -O0 demo_debug.c starter.S -o dbg && lldb -b -s demo_crash.lldb dbg
+(lldb) settings set stop-disassembly-count 3
+(lldb) settings set stop-line-count-before 0
+(lldb) settings set stop-line-count-after 0
+(lldb) # ---- 1) 크래시 재현: 멈춘 곳 = 원인 명령, 주소 = 가드 페이지 첫 바이트 ----
+(lldb) process launch -- crash
+s=0x100027fff guard=0x100028000
+Process 21133 launched: '/tmp/ARM-B09_dbg' (arm64)
+Process 21133 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = EXC_BAD_ACCESS (code=2, address=0x100028000)
+    frame #0: 0x00000001000006ac ARM-B09_dbg`my_strlen + 4
+ARM-B09_dbg`my_strlen:
+->  0x1000006ac <+4>:  ldrb   w2, [x1, #0x1]!
+    0x1000006b0 <+8>:  cmp    w2, #0x0
+    0x1000006b4 <+12>: b.ne   0x1000006ac               ; <+4>
+Target 0: (ARM-B09_dbg) stopped.
+(lldb) thread info
+thread #1: tid = 0xa08028, 0x00000001000006ac ARM-B09_dbg`my_strlen + 4, queue = 'com.apple.main-thread', stop reason = EXC_BAD_ACCESS (code=2, address=0x100028000)
+
+(lldb) register read pc lr sp x0 x1 x2 cpsr
+      pc = 0x00000001000006ac  ARM-B09_dbg`my_strlen + 4
+      lr = 0x000000010000064c  ARM-B09_dbg`main + 264 at demo_debug.c:40:9
+      sp = 0x000000016fdfea10
+      x0 = 0x0000000100027fff
+      x1 = 0x0000000100027fff
+      x2 = 0x00000000000120a8
+    cpsr = 0x20000000
+(lldb) register read far esr
+     far = 0x0000000100028000
+     esr = 0x92000007
+(lldb) register read -f b cpsr
+    cpsr = 0b00100000000000000000000000000000
+(lldb) disassemble -s $pc -c 1
+ARM-B09_dbg`my_strlen:
+->  0x1000006ac <+4>: ldrb   w2, [x1, #0x1]!
+(lldb) image lookup -a $pc
+      Address: ARM-B09_dbg[0x00000001000006ac] (ARM-B09_dbg.__TEXT.__text + 436)
+      Summary: ARM-B09_dbg`my_strlen + 4
+(lldb) bt
+* thread #1, queue = 'com.apple.main-thread', stop reason = EXC_BAD_ACCESS (code=2, address=0x100028000)
+  * frame #0: 0x00000001000006ac ARM-B09_dbg`my_strlen + 4
+    frame #1: 0x000000010000064c ARM-B09_dbg`main(argc=2, argv=0x000000016fdff0f8) at demo_debug.c:40:29
+    frame #2: 0x000000018753e054 dyld`start + 6652
+(lldb) memory read -s1 -fx -c1 $x0
+0x100027fff: 0x00
+(lldb) memory read -s1 -fx -c1 $x1
+0x100027fff: 0x00
+(lldb) process kill
+Process 21133 exited with status = 9 (0x00000009) killed
+(lldb) # ---- 2) 가설 확인: my_strlen 첫 명령(mov x1, x0) 직후 x1 을 x0-1 로 바꿔 본다 ----
+(lldb) b my_strlen
+Breakpoint 1: where = ARM-B09_dbg`my_strlen, address = 0x00000001000006a8
+(lldb) process launch -- crash
+s=0x100027fff guard=0x100028000
+Process 21137 launched: '/tmp/ARM-B09_dbg' (arm64)
+Process 21137 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    frame #0: 0x00000001000006a8 ARM-B09_dbg`my_strlen
+ARM-B09_dbg`my_strlen:
+->  0x1000006a8 <+0>: mov    x1, x0
+    0x1000006ac <+4>: ldrb   w2, [x1, #0x1]!
+    0x1000006b0 <+8>: cmp    w2, #0x0
+Target 0: (ARM-B09_dbg) stopped.
+(lldb) si
+Process 21137 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = instruction step into
+    frame #0: 0x00000001000006ac ARM-B09_dbg`my_strlen + 4
+ARM-B09_dbg`my_strlen:
+->  0x1000006ac <+4>:  ldrb   w2, [x1, #0x1]!
+    0x1000006b0 <+8>:  cmp    w2, #0x0
+    0x1000006b4 <+12>: b.ne   0x1000006ac               ; <+4>
+Target 0: (ARM-B09_dbg) stopped.
+(lldb) register read x0 x1
+      x0 = 0x0000000100027fff
+      x1 = 0x0000000100027fff
+(lldb) register write x1 `$x0 - 1`
+(lldb) register read x1
+      x1 = 0x0000000100027ffe
+(lldb) breakpoint delete 1
+1 breakpoints deleted; 0 breakpoint locations disabled.
+(lldb) continue
+len=0
+Process 21137 resuming
+Process 21137 exited with status = 0 (0x00000000)

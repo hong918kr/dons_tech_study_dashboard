@@ -1,0 +1,155 @@
+
+===== 0. tools =====
+gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+Ubuntu clang version 21.1.8 (6ubuntu1)
+GNU ld (GNU Binutils for Ubuntu) 2.46
+GNU assembler (GNU Binutils for Ubuntu) 2.46
+
+===== 1. gcc -v -c main.c : cc1 and as are SEPARATE programs =====
+/usr/libexec/gcc/aarch64-linux-gnu/15/cc1 -quiet -v -imultiarch aarch64-linux-gnu main.c -D_FORTIFY_SOURCE=3 - ... (26 words)
+/usr/bin/aarch64-linux-gnu-as -v -EL -mabi=lp64 -o main.o /tmp/ccjuZvHO.s ... (7 words)
+
+===== 2. gcc -save-temps main.c util.c =====
+config.h
+fw
+fw-main.i
+fw-main.o
+fw-main.s
+fw-util.i
+fw-util.o
+fw-util.s
+main.c
+util.c
+util.h
+fw-main.i: C source, ASCII text, with very long lines (320)
+fw-main.s: assembler source, ASCII text
+fw-main.o: ELF 64-bit LSB relocatable, ARM aarch64, version 1 (SYSV), not stripped
+fw:        ELF 64-bit LSB pie executable, ARM aarch64, version 1 (SYSV), dynamically linked, interpreter /lib/
+[fw] boot
+fw 2.7: 1500 bytes -> 3 sectors, csum=0x43
+--- one file + -c: plain names
+main.c
+main.i
+main.o
+main.s
+--- first lines of gcc's main.i
+# 0 "main.c"
+# 0 "<built-in>"
+# 0 "<command-line>"
+lines: 860  linemarkers: 156
+
+===== 3. gcc -v link: collect2 -> ld =====
+ /usr/libexec/gcc/aarch64-linux-gnu/15/collect2 -plugin /usr/libexec/gcc/aarch64-linux-gnu/15/liblto_plugin.so -plugin-opt=/usr/libexec/gcc/ ... (55 words)
+
+===== 4. GNU ld diagnostics (gcc 15 + ld.bfd) =====
+--- gcc bad_undefined.c
+/usr/bin/aarch64-linux-gnu-ld.bfd: /tmp/ccsYk1w7.o: in function `main':
+bad_undefined.c:(.text+0xc): undefined reference to `flash_erase'
+--- gcc bad_dup_a.c bad_dup_b.c
+/usr/bin/aarch64-linux-gnu-ld.bfd: /tmp/ccxFhcqT.o:(.data+0x0): multiple definition of `g_boot_count'; /tmp/ccQlYnyw.o:(.bss+0x0): first defined here
+--- gcc bad_no_main.c
+/usr/bin/aarch64-linux-gnu-ld.bfd: <libdir>/Scrt1.o: in function `_start':
+(.text+0x1c): undefined reference to `main'
+/usr/bin/aarch64-linux-gnu-ld.bfd: (.text+0x20): undefined reference to `main'
+--- gcc main.c
+/usr/bin/aarch64-linux-gnu-ld.bfd: /tmp/ccFUGFVf.o: in function `main':
+main.c:(.text+0x1c): undefined reference to `sectors_for'
+/usr/bin/aarch64-linux-gnu-ld.bfd: main.c:(.text+0x30): undefined reference to `checksum8'
+/usr/bin/aarch64-linux-gnu-ld.bfd: main.c:(.text+0x40): undefined reference to `fw_version'
+--- same with ld.lld (clang -fuse-ld=lld)
+ld.lld: error: undefined symbol: flash_erase
+>>> referenced by bad_undefined.c
+>>>               /tmp/bad_undefined-807812.o:(main)
+ld.lld: error: duplicate symbol: g_boot_count
+>>> defined at bad_dup_a.c
+>>>            /tmp/bad_dup_a-ec0939.o:(g_boot_count)
+
+===== 5. inline asm: gcc -S copies the text, as(1) rejects it =====
+gcc -S rc=0
+12:	frobnicate x0, x1
+asm.s: Assembler messages:
+asm.s:12: Error: unknown mnemonic `frobnicate' -- `frobnicate x0,x1'
+as rc=1
+clang -S rc=1
+bad_asm_mnemonic.c:5:22: error: unrecognized instruction mnemonic
+clang -fno-integrated-as -S rc=0
+
+===== 6. C89 vs C11: where does a call to an undeclared function fail? =====
+bad_implicit.c:5:12: warning: implicit declaration of function ‘flash_init’ [-Wimplicit-function-declaration]
+gcc -std=c89 -Wall -c rc=0
+bad_implicit.c:(.text+0xc): undefined reference to `flash_init'
+bad_implicit.c:5:12: error: implicit declaration of function ‘flash_init’ [-Wimplicit-function-declaration]
+gcc -std=c11 -c rc=1
+
+===== 7. first_failing_stage (solution.sh) with CC=gcc and CC=clang in the VM =====
+input                        gcc-15     clang-21  
+bad_error.c                  preprocess preprocess
+bad_missing_header.c         preprocess preprocess
+bad_unterminated_if.c        preprocess preprocess
+bad_macro_args.c             preprocess preprocess
+bad_syntax.c                 compile    compile   
+bad_type.c                   compile    compile   
+bad_macro_paren.c            compile    compile   
+bad_implicit.c               compile    compile   
+bad_attr_error.c             compile    compile   
+bad_asm_mnemonic.c           assemble   compile   
+bad_asm_org.c                assemble   assemble  
+bad_undefined.c              link       link      
+bad_dup_a.c bad_dup_b.c      link       link      
+bad_no_main.c                link       link      
+main.c                       link       link      
+ok_single.c                  ok         ok        
+main.c util.c                ok         ok        
+--- gcc's message for bad_asm_mnemonic.c / bad_asm_org.c / bad_attr_error.c
+/tmp/TOOL-B01_work/vm/stage/bad_asm_mnemonic.s:12: Error: unknown mnemonic `frobnicate' -- `frobnicate x0,x1'
+/tmp/TOOL-B01_work/vm/stage/bad_asm_org.s:14: Error: attempt to move .org backwards
+bad_attr_error.c:7:5: error: call to ‘debug_dump’ declared with attribute error: debug_dump() must not be called in release builds
+--- gcc -fsyntax-only (front end only)
+gcc -fsyntax-only bad_attr_error.c rc=0
+gcc -fsyntax-only bad_asm_mnemonic.c rc=0
+gcc -fsyntax-only bad_asm_org.c rc=0
+--- gcc's first error line per front-end snippet
+bad_error.c            error: #error "BOARD_REV not set: build with -DBOARD_REV=2"
+bad_missing_header.c   fatal error: board_pins.h: No such file or directory
+bad_unterminated_if.c  error: unterminated #if
+bad_macro_args.c       error: macro ‘REG_FIELD’ requires 3 arguments, but only 2 given
+bad_syntax.c           error: expected ‘,’ or ‘;’ before ‘return’
+bad_type.c             error: incompatible types when initializing type ‘int’ using type ‘struct status’
+bad_macro_paren.c      error: expected ‘)’ before ‘;’ token
+
+===== 8. upstream clang: .s is NOT preprocessed (.S is) =====
++- 0: input, "x.s", assembler
+1: assembler, {0}, object
+---
+   +- 0: input, "x.S", assembler-with-cpp
++- 1: preprocessor, {0}, assembler
+2: assembler, {1}, object
+
+===== 9. the same 4 stages with the firmware cross compiler (arm-none-eabi-gcc, Cortex-M4) =====
+arm-none-eabi-gcc (15:14.2.rel1-1) 14.2.1 20241119
+util.c
+util.h
+util.i
+util.o
+util.s
+util.o: ELF 32-bit LSB relocatable, ARM, EABI5 version 1 (SYSV), not stripped
+--- util.s: sectors_for
+sectors_for:
+	@ args = 0, pretend = 0, frame = 0
+	@ frame_needed = 0, uses_anonymous_args = 0
+	@ link register save eliminated.
+	addw	r0, r0, #511
+	lsrs	r0, r0, #9
+	bx	lr
+--- link util.o alone (newlib crt0 wants main)
+undefined reference to `main'
+--- link main.c util.c with newlib-nano + nosys stubs
+warning: _close is not implemented and will always fail
+warning: _fstat is not implemented and will always fail
+warning: _isatty is not implemented and will always fail
+warning: _lseek is not implemented and will always fail
+warning: _read is not implemented and will always fail
+warning: _write is not implemented and will always fail
+fw.elf: ELF 32-bit LSB executable, ARM, EABI5 version 1 (SYSV), statically linked, with debug_info, 
+   text	   data	    bss	    dec	    hex	filename
+   7808	    108	    504	   8420	   20e4	fw.elf

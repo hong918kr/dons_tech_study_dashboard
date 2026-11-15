@@ -28,5 +28,5 @@ prepare() {
 boot() {
 	timeout --foreground "$2" qemu-system-aarch64 -machine virt -cpu cortex-a57 -smp 4 -m 512M \
 		-nographic -no-reboot -kernel "$IMAGE" -initrd "$WORK/i.gz" \
-		-append "console=ttyAMA0 loglevel=4 LAB_CMD=$1" </dev/null 2>&1
+		-append "console=ttyAMA0 loglevel=7 LAB_CMD=$1" </dev/null 2>&1
 }

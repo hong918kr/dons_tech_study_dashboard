@@ -69,6 +69,7 @@ G
 		spin_deadlock) echo "/stress run spin 100 0 1 4000000 1000 pin0" ;;
 		atomic_list) echo "/stress run atomic $T 1 $N $K $B"
 		             echo "/stress run atomic $T 1 $N $K $B" ;;
+		sleep_in_spin) echo "/stress sleep_in_spin" ;;
 		abba)        echo "/stress abba" ;;
 		recursive)   echo "/stress recursive" ;;
 		lockstat)    echo 'echo 0 > /proc/lock_stat'

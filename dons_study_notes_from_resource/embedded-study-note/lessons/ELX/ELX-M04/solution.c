@@ -13,6 +13,7 @@
  * the Lima VM's running kernel.
  */
 #include <linux/atomic.h>
+#include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/hardirq.h>
 #include <linux/hrtimer.h>
@@ -213,6 +214,11 @@ static void sd_abba(u32 order)
 		spin_lock(&sd.lock_a);
 		spin_unlock(&sd.lock_a);
 		spin_unlock(&sd.lock_b);
+		break;
+	case 4:		/* sleeping while holding a spinlock */
+		spin_lock(&sd.lock_a);
+		msleep(1);
+		spin_unlock(&sd.lock_a);
 		break;
 	case 2:		/* two instances, one class */
 		spin_lock(&sd.inst[0]);

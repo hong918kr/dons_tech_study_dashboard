@@ -30,15 +30,12 @@ int main() {
     (void)c;
 #elif SHOW_ERROR == 4
     struct Bigger : Sealed { int more[8]; };   // final → 파생 금지
-#elif SHOW_ERROR == 5
-    struct Wrong { static void* operator new(std::size_t) noexcept; };
-    // 선언은 noexcept, 정의는 아니면? (아래 Wrong2 참고)
 #endif
     Msg* ok = ::new (buf) Msg;            // :: 를 붙이면 전역 placement 를 직접 지명
     ok->~Msg();
     return 0;
 }
-#if SHOW_ERROR == 5
+#if SHOW_ERROR == 5   // 선언은 noexcept, 정의는 아니면?
 struct Wrong2 { static void* operator new(std::size_t) noexcept; };
 void* Wrong2::operator new(std::size_t) { return nullptr; }   // 예외 명세 불일치
 #endif

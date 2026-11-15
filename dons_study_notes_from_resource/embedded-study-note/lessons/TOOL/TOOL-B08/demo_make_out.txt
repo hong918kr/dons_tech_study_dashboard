@@ -1,0 +1,99 @@
+### 1. solution.mk: full build, .d file, -MMD vs -MD
+mkdir -p build
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -MMD -MP -c src/crc.c -o build/crc.o
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -MMD -MP -c src/filter.c -o build/filter.o
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -MMD -MP -c src/log.c -o build/log.o
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -MMD -MP -c src/main.c -o build/main.o
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -MMD -MP -c src/sensor.c -o build/sensor.o
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -MMD -MP -c src/uart.c -o build/uart.o
+cc  build/crc.o build/filter.o build/log.o build/main.o build/sensor.o build/uart.o -o build/app
+--- build/main.d
+build/main.o: src/main.c include/hal.h include/dsp.h include/board.h
+include/hal.h:
+include/dsp.h:
+include/board.h:
+--- -MD (system headers too) vs -MMD: dependency lines for main.c
+-MD : 59 headers, e.g. /Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk/usr/include/stdio.h
+-MMD: 3 headers (first line only)
+--- second make
+make: Nothing to be done for `all'.
+### 2. touch include/dsp.h -> make -n, then make -d (why)
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -MMD -MP -c src/crc.c -o build/crc.o
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -MMD -MP -c src/filter.c -o build/filter.o
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -MMD -MP -c src/main.c -o build/main.o
+cc  build/crc.o build/filter.o build/log.o build/main.o build/sensor.o build/uart.o -o build/app
+--- make -d | grep newer/must remake
+     Prerequisite `include/dsp.h' is newer than target `build/crc.o'.
+    Must remake target `build/crc.o'.
+     Prerequisite `include/dsp.h' is newer than target `build/filter.o'.
+    Must remake target `build/filter.o'.
+     Prerequisite `include/dsp.h' is newer than target `build/main.o'.
+    Must remake target `build/main.o'.
+   Prerequisite `build/crc.o' is newer than target `build/app'.
+   Prerequisite `build/filter.o' is newer than target `build/app'.
+   Prerequisite `build/main.o' is newer than target `build/app'.
+  Must remake target `build/app'.
+Must remake target `all'.
+### 3. make -p: how make sees the pattern rule and a .d-generated rule
+build/%.o: src/%.c | build
+#  commands to execute (from `Makefile', line 26):
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+	
+...
+build/main.o: src/main.c src/main.c include/hal.h include/dsp.h include/board.h | build
+include/hal.h:
+DEPFLAGS := -MMD -MP
+SRCS := src/crc.c src/filter.c src/log.c src/main.c src/sensor.c src/uart.c
+OBJS := build/crc.o build/filter.o build/log.o build/main.o build/sensor.o build/uart.o
+### 4. starter.mk bugs
+--- (a) touch include/hal.h; make
+make: Nothing to be done for `all'.
+--- (b) new file in build/ ; make -n
+  cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude  -c src/main.c -o build/main.o
+  cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude  -c src/uart.c -o build/uart.o
+  cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude  -c src/sensor.c -o build/sensor.o
+  cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude  -c src/log.c -o build/log.o
+  cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude  -c src/filter.c -o build/filter.o
+  cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude  -c src/crc.c -o build/crc.o
+  cc  build/main.o build/uart.o build/sensor.o build/log.o build/filter.o build/crc.o -o build/app
+--- (c) a file named clean; make clean
+make: `clean' is up to date.
+build
+### 5. -MMD without -MP: delete a header that is no longer included
+build/log.o: src/log.c include/hal.h include/version.h
+make: *** No rule to make target `include/version.h', needed by `build/log.o'.  Stop.
+exit=2
+--- same with -MP (solution.mk)
+build/log.o: src/log.c include/hal.h include/version.h
+include/hal.h:
+include/version.h:
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude -MMD -MP -c src/log.c -o build/log.o
+cc  build/crc.o build/filter.o build/log.o build/main.o build/sensor.o build/uart.o -o build/app
+exit=0
+### 6. stale object after a header change (starter.mk): FILTER_TAPS 4 -> 16
+[app] taps=4 samples=64 crc=0x8C7F
+cc -std=c11 -Wall -Wextra -Werror -O2 -Iinclude  -c src/filter.c -o build/filter.o
+cc  build/main.o build/uart.o build/sensor.o build/log.o build/filter.o build/crc.o -o build/app
+--- run (main.o still thinks mavg_t has 4 taps, filter.o writes 16)
+demo_make.sh: line 85: 38681 Bus error: 10           ./build/app
+exit=138
+0000000100008000 b _g_filt
+000000010000801c b _g_out
+* thread #1, queue = 'com.apple.main-thread', stop reason = EXC_BAD_ACCESS (code=2, address=0x1c7e48028)
+    frame #0: 0x000000010000076c app`mavg_push + 24
+->  0x10000076c <+24>: str    w1, [x0, x8, lsl #2]
+* thread #1, queue = 'com.apple.main-thread', stop reason = EXC_BAD_ACCESS (code=2, address=0x1c7e48028)
+  * frame #0: 0x000000010000076c app`mavg_push + 24
+--- clean rebuild
+[app] taps=16 samples=64 crc=0xD16B
+### 7. removing a source file does NOT relink (make tracks mtimes, not lists)
+000000010000085c T _watchdog_kick
+make: Nothing to be done for `all'.
+000000010000085c T _watchdog_kick
+--- make -B (or a link stamp of $(OBJS)) fixes it
+0
+### 8. make 3.81 timestamp resolution: same-second change is invisible
+in 1794784466.812428000
+out 1794784466.801750520
+make: `out' is up to date.
+rebuilt out

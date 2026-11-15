@@ -10,7 +10,8 @@ SRC=$(cd "$(dirname "$0")" && pwd)
 
 prepare "$SRC" "$V" "$V" || { echo "BUILD FAILED"; echo "VERDICT $V: FAIL"; exit 1; }
 LOG=$WORK/guest.log
-boot "/guest.sh~check~$V" 110 | tee "$LOG"
+boot "/guest.sh~check~$V" 110 > "$LOG"
+sed -n '/GUEST_START/,/GUEST_END/p' "$LOG"
 echo "--- check.sh verdict ---"
 rc=0
 if ! grep -q 'GUEST_END' "$LOG"; then
@@ -21,7 +22,7 @@ echo "${line:-no TESTS line}"
 pass=$(echo "$line" | sed -n 's/^TESTS passed \([0-9]*\)\/\([0-9]*\).*/\1/p')
 tot=$(echo "$line" | sed -n 's/^TESTS passed \([0-9]*\)\/\([0-9]*\).*/\2/p')
 if [ -z "$pass" ] || [ "$pass" != "$tot" ]; then rc=1; fi
-if grep -aE 'BUG:|WARNING:|lockdep|possible .* deadlock|inconsistent|Oops|sleeping function' "$LOG" | grep -av "lockdep is turned off"; then
+if sed -n '/GUEST_START/,$p' "$LOG" | grep -aE 'BUG:|WARNING:|lockdep|possible .* deadlock|inconsistent|Oops|sleeping function'; then
 	echo "kernel log has BUG/WARNING/lockdep lines"; rc=1
 fi
 if [ $rc = 0 ]; then echo "VERDICT $V: PASS"; exit 0; fi

@@ -13,6 +13,7 @@ Python 3.9 표준 라이브러리만 쓴다. 벽시계를 쓰지 않으므로 �
 import heapq
 import itertools
 import random
+import signal
 import sys
 from collections import namedtuple
 
@@ -215,6 +216,7 @@ class Call:
     def __init__(self, op_id, client, key, kind, val):
         self.id, self.client, self.key, self.kind, self.val = op_id, client, key, kind, val
         self.t_inv = 0
+        self.seq = 0                 # 클라이언트별 연산 번호 (전역 순서가 아니다)
         self.phase = 0
         self.replies = []
         self.done = False
@@ -229,6 +231,7 @@ class QuorumStore:
         self.replicas = [{} for _ in range(cfg.N)]
         self.down = set()
         self.history, self.next_val, self.next_id = [], 1, 1
+        self.client_seq = [0] * cfg.clients
         self.msgs = 0
         self.skew = [self.rng.randrange(-cfg.skew, cfg.skew + 1) for _ in range(cfg.clients)]
 
@@ -304,14 +307,15 @@ class QuorumStore:
         else:
             call = Call(self.next_id, client, key, "r", None)
         self.next_id += 1
-        call.t_inv, call.left = self.now, left
+        self.client_seq[client] += 1
+        call.t_inv, call.left, call.seq = self.now, left, self.client_seq[client]
         self.at(self.now + cfg.timeout, self.on_timeout, call)
         if call.kind == "r":
             self.broadcast(call, self.h_get(key), cfg.R, self.on_read_quorum)
         elif cfg.ts_mode == "query":
             self.broadcast(call, self.h_get(key), cfg.R, self.on_write_query_quorum)
         else:
-            ts = (self.now + self.skew[client], call.id)
+            ts = (self.now + self.skew[client], client + 1, call.seq)
             self.put_all(call, ts, call.val, cfg.W, self.finish)
 
     def on_read_quorum(self, call):
@@ -330,7 +334,7 @@ class QuorumStore:
     def on_write_query_quorum(self, call):
         """쓰기 첫 단계(ts 조회)가 R 개 응답을 모았다. 그보다 큰 타임스탬프로 쓴다."""
         counter = max(rv[0] for rv in call.replies)[0] + 1
-        ts = (counter, call.id if self.cfg.tie == "op" else call.client + 1)
+        ts = (counter, call.client + 1, call.seq) if self.cfg.tie == "op" else (counter, call.client + 1)
         self.put_all(call, ts, call.val, self.cfg.W, self.finish)
 
     def finish(self, call):
@@ -350,7 +354,7 @@ class QuorumStore:
 
     def next_op(self, call):
         if call.left > 1:
-            self.at(self.now + self.rng.randrange(self.cfg.think + 1),
+            self.at(self.now + 1 + self.rng.randrange(self.cfg.think + 1),      # 최소 1틱 뒤: 같은 클라이언트 연산이 겹치면 안 된다
                     self.start, call.client, call.left - 1)
 
     def run(self):
@@ -476,19 +480,34 @@ def worst_case(n):
 
 
 passed, total_checks = 0, 0
+CHECK_SECONDS = 60           # 틀린 구현이 무한 루프에 빠져도 하네스는 끝난다
+
+
+class CheckTimeout(Exception):
+    pass
+
+
+def on_alarm(signum, frame):
+    raise CheckTimeout()
 
 
 def check(name, fn):
     global passed, total_checks
     total_checks += 1
+    signal.alarm(CHECK_SECONDS)
     try:
         res = fn()
     except NotImplementedError:
         print("FAIL %s: TODO" % name)
         return
+    except CheckTimeout:
+        print("FAIL %s: timeout %ds" % (name, CHECK_SECONDS))
+        return
     except Exception as e:                        # 하네스는 끝까지 돈다
         print("FAIL %s: %s: %s" % (name, type(e).__name__, e))
         return
+    finally:
+        signal.alarm(0)
     if res is True:
         passed += 1
         print("PASS %s" % name)
@@ -629,6 +648,16 @@ def test_part_c():
         return QuorumStore(cfg, 7).run() == QuorumStore(cfg, 7).run()
     check("C same seed replays the identical history", replay)
 
+    def client_order():
+        hist = QuorumStore(cfg_named("R2W2 none"), 43).run()
+        last = {}
+        for op in sorted((o for o in hist if o.t_ret is not None), key=lambda o: o.t_inv):
+            if op.client in last and last[op.client] >= op.t_inv:
+                return "client %d ops overlap" % op.client
+            last[op.client] = op.t_ret
+        return True
+    check("C one client's completed ops never overlap", client_order)
+
     def finds(name):
         return lambda: len(sweep(cfg_named(name), seeds).violations) > 0
     check("C R1W1 no write-back violates", finds("R1W1 none"))
@@ -663,6 +692,7 @@ def test_part_c():
 
 
 def main():
+    signal.signal(signal.SIGALRM, on_alarm)
     test_part_a()
     test_part_b()
     test_part_c()

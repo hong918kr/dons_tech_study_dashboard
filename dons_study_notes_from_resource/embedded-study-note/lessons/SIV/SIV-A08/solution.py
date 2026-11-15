@@ -706,10 +706,11 @@ def run_tests():
         return (s["n"], s["good"], round(s["yield"], 6), s["by_wafer"][1], s["by_wafer"][2]) == (5, 3, 0.6, (3, 1), (2, 2))
     check("yield_summary: table-driven (5 dies, 3 good, W1 1/3, W2 2/2)", t_y)
     check("yield_summary: empty input -> yield 0.0", lambda: yield_summary([])["yield"] == 0.0)
-    check("yield_summary: L7K12 good count == dies with empty fail field in CSV", lambda: (
-        lambda a, b: (a == b, "%d" % a))(yield_summary(base)["good"], sum(
-            1 for line in open(lot_path("L7K12"), encoding="utf-8")
-            if line[0].isdigit() and line.rstrip("\n").endswith(","))))
+    def t_csv():
+        with open(lot_path("L7K12"), encoding="utf-8") as f:
+            empty = sum(1 for line in f if line[0].isdigit() and line.rstrip("\n").endswith(","))
+        return yield_summary(base)["good"] == empty, "good=%d" % empty
+    check("yield_summary: L7K12 good count == dies with empty fail field in CSV", t_csv)
     check("d0_from_yield: Y = exp(-A*D) round trip", lambda: abs(d0_from_yield(math.exp(-2.56 * 0.11), 2.56) - 0.11) < 1e-9)
     # 모델 회복: 실제 평균 결함 수 lambda / A 와 비교. 군집·비결함 fail 때문에 편향이 있어 15% 까지 허용 (md Part A)
     def t_d0():
@@ -766,7 +767,6 @@ def run_tests():
           lambda: wafer_map(mapd, 1) == "1 2 x\n3   -")
     check("wafer_map: unknown wafer -> empty string", lambda: wafer_map(mapd, 99) == "")
     def t_edge_hand():
-        ds = [mk(1, 0, 0)] * 3 + [mk(1, 4, 0, fails="MBIST")] * 2 + [mk(1, 4, 0)] * 2
         ds = [Die(1, 0, 0, 700.0, 2300.0, 90.0, 0)] * 8 + [Die(1, 10, 0, 700.0, 2300.0, 90.0, BIT["MBIST"])] * 4 + [
             Die(1, 10, 0, 700.0, 2300.0, 90.0, 0)] * 4
         s = edge_ring(ds, BIT["MBIST"], 0.8)
@@ -804,16 +804,16 @@ def run_tests():
         return True, "400 random instances, n=2..7"
     check("ratio_order == brute-force optimum (includes p=0, p=1)", t_brute)
     def t_naive():
-        p = {"F": 0.05, "S": 0.6}
-        tt = {"F": 10.0, "S": 100.0}
-        by_time = sorted(p, key=lambda n: tt[n])
-        by_prob = sorted(p, key=lambda n: -p[n])
-        p2 = {"F": 0.02, "S": 0.5, "M": 0.3}
-        tt2 = {"F": 5.0, "S": 400.0, "M": 30.0}
-        a = expected_time(sorted(p2, key=lambda n: -p2[n]), p2, tt2)
-        b = expected_time(ratio_order(p2, tt2), p2, tt2)
-        return b < a and expected_time(by_time, p, tt) > expected_time(ratio_order(p, tt), p, tt) - 1e-9
-    check("naive sort by p alone is worse than p/t on a concrete case", t_naive)
+        p1 = {"F": 0.02, "S": 0.5, "M": 0.3}
+        t1 = {"F": 5.0, "S": 400.0, "M": 30.0}
+        by_p = expected_time(sorted(p1, key=lambda n: -p1[n]), p1, t1)
+        opt1 = expected_time(ratio_order(p1, t1), p1, t1)
+        p2 = {"U": 0.0001, "X": 0.9}
+        t2 = {"U": 1.0, "X": 10.0}
+        by_t = expected_time(sorted(p2, key=lambda n: t2[n]), p2, t2)
+        opt2 = expected_time(ratio_order(p2, t2), p2, t2)
+        return opt1 < by_p and opt2 < by_t, "by_p %.1f vs %.1f; by_t %.2f vs %.2f" % (by_p, opt1, by_t, opt2)
+    check("naive sort by p alone / by t alone is worse than p/t", t_naive)
 
     print("-- Part B: 상관 · 순서 · early-stop · multi-site --")
     m_b = Lazy(lambda: marginals(base))
@@ -879,6 +879,26 @@ def run_tests():
         ok = abs(e["dp"] - d) < 1e-6 and e["dp"] <= e["greedy"] + 1e-9 and e["dp"] <= e["ratio"] + 1e-9 and e["dp"] < e["program"]
         return ok, " ".join("%s=%.1f" % (k, v) for k, v in e.items())
     check("L7K12: dp <= greedy/ratio and beats program order", t_order_rank)
+    def t_greedy_gap():
+        rng = random.Random(0xA0F)
+        names = list(TESTS[:5])
+        worse, gap, trials = 0, 0.0, 200
+        for _ in range(trials):
+            tt = {n: rng.uniform(5.0, 400.0) for n in names}
+            ds = []
+            for _ in range(200):
+                mask = 0
+                if rng.random() < 0.5:       # 공통 원인 하나가 항목 몇 개를 같이 깨뜨리게 해서 상관을 만든다
+                    for n in rng.sample(names, rng.randint(1, 3)):
+                        mask |= BIT[n]
+                ds.append(Die(1, 0, 0, 700.0, 2300.0, 90.0, mask))
+            g = empirical_time(ds, greedy_order(ds, tt), tt)
+            d = dp_order(ds, tt)[1]
+            if g > d + 1e-9:
+                worse += 1
+                gap = max(gap, (g - d) / d)
+        return worse > 0, "greedy > dp on %d/%d random correlated instances, max gap %.2f%%" % (worse, trials, gap * 100)
+    check("limit: conditional greedy is a heuristic -- strictly worse than dp on some instances", t_greedy_gap)
     def t_prec_hurts():
         free_dp = dp_order(base, t, ())[1]
         return free_dp <= dp_order(base, t, PRECEDENCE)[1] + 1e-9, "free=%.1f" % free_dp

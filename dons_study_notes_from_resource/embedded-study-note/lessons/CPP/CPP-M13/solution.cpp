@@ -407,7 +407,7 @@ int main() {
         auto l = img; write_le32(std::span<std::uint8_t>{l}.subspan(4, 4), 53u);
         CHECK(verify_image(l) == ImageStatus::BadLength);
         auto h = img; write_le32(std::span<std::uint8_t>{h}.subspan(4, 4), 0xFFFF'FFFFu);
-        CHECK(verify_image(h) == ImageStatus::BadLength);       // 덧셈 오버플로로 통과하면 안 된다
+        CHECK(verify_image(h) == ImageStatus::BadLength);       // 길이 과대 (32비트 타깃에선 덧셈 오버플로 주의: 본문 참고)
         auto c = img; c[8] ^= 0x80;
         CHECK(verify_image(c) == ImageStatus::BadCrc);
 

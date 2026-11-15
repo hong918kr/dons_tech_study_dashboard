@@ -338,22 +338,22 @@ SKIP 3 stress checks (Part C): unit checks failed
 <span class="hf">cc</span> <span class="hn">-std=c11</span> <span class="hn">-O2</span> <span class="hn">-pthread</span> <span class="hn">-DNTASK=12</span> demo_bench.c <span class="hn">-o</span> bench &amp;&amp; <span class="hf">./bench</span> <span class="hn">1000</span>   <span class="hc"># EBR/QSBR/rwlock/mutex 처리량</span>
 <span class="hf">cc</span> <span class="hn">-std=c11</span> <span class="hn">-O2</span> <span class="hn">-pthread</span> <span class="hn">-DCFG_N=1024</span> <span class="hn">-DLIMBO_CAP=100000</span> demo_stall.c <span class="hn">-o</span> stall &amp;&amp; <span class="hf">./stall</span>   <span class="hc"># 멈춘 리더의 메모리</span></code></pre></figure>
 <h2 id="4-힌트">4. 힌트<a class="anchor" href="#4-힌트" aria-label="link">#</a></h2>
-<p>&lt;details&gt;&lt;summary&gt;힌트 1 — 슬롯 한 워드에 두 정보&lt;/summary&gt;</p>
+<details><summary>힌트 1 — 슬롯 한 워드에 두 정보</summary>
 <p><code>active</code> 와 <code>epoch</code> 을 따로 두면 "active=1 을 썼는데 epoch 은 아직 옛것" 같은 중간 상태가 생긴다. 64 비트 한 워드 <code>(e &lt;&lt; 1) | 1</code> 로 묶으면 진입·이탈이 store 하나씩이고, writer 는 load 하나로 둘 다 본다. 64 비트 epoch 은 1 ns 마다 올려도 584 년 동안 넘치지 않는다 — 고전 구현의 <code>epoch % 3</code> 은 저장 공간 문제(연습 4)지 정확성 문제가 아니다.</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;힌트 2 — 진입의 순서: 무엇이 무엇보다 먼저 보여야 하나&lt;/summary&gt;</p>
+<details><summary>힌트 2 — 진입의 순서: 무엇이 무엇보다 먼저 보여야 하나</summary>
 <p>리더: "슬롯에 나 있음" store → <code>cur</code> load. writer: <code>cur</code> 교체 → 슬롯 load. 두 스레드가 <strong>각자 store 후 상대 것을 load</strong> — C-A03 · ARM-M05 의 SB(store buffering) 모양이다. 둘 다 상대의 store 를 못 보면 "리더는 옛 포인터, writer 는 리더 없음" → 해제 → UAF. release/acquire 는 SB 를 막지 않는다. 무엇을 써야 하나?</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;힌트 3 — 왜 +2 인가&lt;/summary&gt;</p>
+<details><summary>힌트 3 — 왜 +2 인가</summary>
 <p>리더가 epoch <code>e</code> 로 들어와 옛 포인터를 읽었다. writer 가 교체 후 기록한 retire epoch <code>r</code> 은 <code>e</code> 이상이다. 전진 규칙은 "활동 중 슬롯 == G" — 이 리더가 남아 있으면 <code>G = e → e+1</code> 은 <strong>된다</strong> (리더가 <code>e</code> 에 있으니). <code>e+1 → e+2</code> 는 안 된다. 그러면 <code>r + 1</code> 에서 해제하면? 강제 스케줄 테스트(<code>starter.c:350</code>)를 그대로 따라가 보라.</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;힌트 4 — limbo 가 꽉 찼을 때&lt;/summary&gt;</p>
+<details><summary>힌트 4 — limbo 가 꽉 찼을 때</summary>
 <p>선택지는 (1) 교체를 거절하고 호출자가 다시 시도(이 레슨), (2) <code>synchronize</code> 로 기다림(writer 블록), (3) 메모리를 더 할당(상한 없음 = 멈춘 리더 하나가 힙을 다 먹음). 거절 전에 <strong>한 번 더 전진·회수</strong> 를 시도해야 "방금 리더가 나갔는데 거절" 을 피한다.</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;힌트 5 — QSBR 은 왜 seq_cst 가 필요 없나&lt;/summary&gt;</p>
+<details><summary>힌트 5 — QSBR 은 왜 seq_cst 가 필요 없나</summary>
 <p>태스크가 루프 맨 위에서 <code>gp</code> 를 acquire 로 읽어 값 <code>g</code> 를 봤다면, writer 의 "교체 → <code>gp</code> 증가(release)" 가 그 전에 일어났다 → 그 뒤 <code>cur</code> load 는 새 포인터를 본다. writer 는 <code>seen ≥ g</code> 를 acquire 로 봐야만 재사용한다. SB 모양(서로의 store 를 못 보는 경우)이 생기려면 "태스크가 store 하고 곧바로 cur 를 읽는" 순서가 문제인데, QSBR 에서는 그 store 가 <strong>옛 것을 놓는다</strong> 는 뜻이라 늦게 보여도 보수적일 뿐이다. 예외: offline → online (연습 3).</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;힌트 6 — 정적 풀 크기&lt;/summary&gt;</p>
+<details><summary>힌트 6 — 정적 풀 크기</summary>
 <p>LIVE 1 개는 항상 있다. 교체 직후 옛 버퍼는 최소 한 "태스크 한 바퀴" 동안 묶인다. 3 개면 "게시 → 한 바퀴 안에 또 게시" 까지 버틴다. 그보다 빠른 갱신은 <code>-1</code> 로 거절해 <strong>최신값을 늦추는 쪽</strong> 을 택한다 (제어 루프는 1 주기 늦은 보정값보다 깨진 보정값이 훨씬 위험하다).</p>
 </details>
 <h2 id="5-풀이">5. 풀이<a class="anchor" href="#5-풀이" aria-label="link">#</a></h2>

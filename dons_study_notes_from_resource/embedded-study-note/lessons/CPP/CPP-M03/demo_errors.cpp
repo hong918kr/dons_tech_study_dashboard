@@ -1,7 +1,7 @@
 // CPP-M03 demo_errors.cpp — 컴파일 에러 실물 + "컴파일되어 버리는" 반례
 // 정상 빌드: c++ -std=c++20 -Wall -Wextra -Werror -O2 -fno-exceptions -fno-rtti demo_errors.cpp -o demo_errors && ./demo_errors
 // 에러 보기: c++ -std=c++20 -Wall -Wextra -Werror -O2 -fno-exceptions -fno-rtti -DSHOW_ERROR=1 -fsyntax-only demo_errors.cpp
-//            (SHOW_ERROR=1..10 각각 한 가지 에러)
+//            (SHOW_ERROR=1..12 각각 한 가지 에러)
 #include <cstdio>
 #include "flags_final.hpp"
 
@@ -77,10 +77,21 @@ int main() {
     TFlags<IrqFlag> t = IrqFlag::Rxne;
     auto e = t | IrqFlag::Txe;                              // E9: 템플릿 연산자는 추론에서 암시적 변환을 안 본다
 #elif defined(SHOW_ERROR) && SHOW_ERROR == 10
-    auto e = irq | dma;                                     // E10: clang -Wall 이 | 만은 잡아 준다 (-Wbitwise-instead-of-logical)
+    auto e = irq | dma;                                     // E10: clang -Wall 은 | 와 & 만 잡아 준다 (GCC 14 는 경고 없음)
 #else
     int e = 0;
 #endif
     (void)e;
     return 0;
 }
+
+#if defined(SHOW_ERROR) && SHOW_ERROR == 11
+// E11: 특수화 전에 concept 을 한 번 평가하면 그 결과가 캐시된다 (ill-formed NDR)
+enum class Late : std::uint32_t { A = 1 };
+static_assert(!fw::FlagEnum<Late>);
+template <> struct fw::flag_traits<Late> { static constexpr auto valid = fw::mask_of(Late::A); };
+static_assert(fw::FlagEnum<Late>);
+#elif defined(SHOW_ERROR) && SHOW_ERROR == 12
+// E12: bits_ 가 private 이라 Flags 는 구조적 타입이 아니고, NTTP 로 쓸 수 없다
+template <IrqSet V> struct Config {};
+#endif

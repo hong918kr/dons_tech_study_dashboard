@@ -1,5 +1,5 @@
 // CPP-M06 virtual의 실제 비용: vtable·간접호출·devirtualization
-// build: c++ -std=c++20 -Wall -Wextra -Werror -O2 -fno-exceptions -fno-rtti starter.cpp -o a && ./a
+// build: c++ -std=c++20 -Wall -Wextra -Werror -O2 -fno-exceptions -fno-rtti <이 파일> -o a && ./a
 //
 // 이 파일은 맥에서 도는 "논리와 회계" 부분이다. 실제 비용 측정(nm/size/objdump)은 multi-TU 데모:
 //   demo_bus.hpp / demo_uart.cpp / demo_spi.cpp / demo_i2c.cpp / demo_board.cpp / demo_app.cpp / demo_stubs.cpp + measure.sh

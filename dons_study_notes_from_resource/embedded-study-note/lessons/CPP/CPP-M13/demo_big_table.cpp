@@ -1,3 +1,4 @@
+// CPP-M13 demo_big_table.cpp — 표가 커지면 상수 평가 한도와 컴파일 시간은? (-DSZ=N, target_check.sh big)
 #include <array>
 #include <cstddef>
 #include <cstdint>

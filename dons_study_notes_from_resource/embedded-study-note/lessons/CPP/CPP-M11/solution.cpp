@@ -38,40 +38,55 @@ template <class E> Unexpected(E) -> Unexpected<E>;
 
 template <class T, class E> class Result;
 
+namespace detail {
+struct ErrTag {};
+
+// T, E 가 비자명할 때: 수명을 손으로 관리한다 (사용자 정의 특수 멤버)
+template <class T, class E, bool Trivial = std::is_trivially_copyable_v<T> && std::is_trivially_copyable_v<E>>
+struct ResultStorage {
+    union { T val_; E err_; };
+    bool has_;
+    constexpr ResultStorage(T v) : val_(std::move(v)), has_(true) {}
+    constexpr ResultStorage(ErrTag, E e) : err_(std::move(e)), has_(false) {}
+    constexpr ResultStorage(const ResultStorage& o)
+        requires (std::is_copy_constructible_v<T> && std::is_copy_constructible_v<E>) : has_(o.has_) {
+        if (has_) std::construct_at(std::addressof(val_), o.val_);
+        else      std::construct_at(std::addressof(err_), o.err_);
+    }
+    constexpr ResultStorage(ResultStorage&& o) : has_(o.has_) {
+        if (has_) std::construct_at(std::addressof(val_), std::move(o.val_));
+        else      std::construct_at(std::addressof(err_), std::move(o.err_));
+    }
+    constexpr ~ResultStorage() {
+        if (has_) std::destroy_at(std::addressof(val_));
+        else      std::destroy_at(std::addressof(err_));
+    }
+};
+
+// T, E 가 trivial 할 때: 특수 멤버를 하나도 선언하지 않는다 → AAPCS 에서 4바이트면 r0 반환 (md §5 실측)
 template <class T, class E>
-class [[nodiscard]] Result {
-    template <class, class> friend class Result;
-    static constexpr bool kTrivCopy = std::is_trivially_copy_constructible_v<T> && std::is_trivially_copy_constructible_v<E>;
-    static constexpr bool kTrivMove = std::is_trivially_move_constructible_v<T> && std::is_trivially_move_constructible_v<E>;
-    static constexpr bool kTrivDtor = std::is_trivially_destructible_v<T> && std::is_trivially_destructible_v<E>;
-    static constexpr bool kCopyable = std::is_copy_constructible_v<T> && std::is_copy_constructible_v<E>;
+struct ResultStorage<T, E, true> {
+    union { T val_; E err_; };
+    bool has_;
+    constexpr ResultStorage(T v) : val_(std::move(v)), has_(true) {}
+    constexpr ResultStorage(ErrTag, E e) : err_(std::move(e)), has_(false) {}
+};
+}  // namespace detail
+
+template <class T, class E>
+class [[nodiscard]] Result : private detail::ResultStorage<T, E> {
+    using Base = detail::ResultStorage<T, E>;
+    using Base::val_;
+    using Base::err_;
+    using Base::has_;
 
 public:
     using value_type = T;
     using error_type = E;
 
-    constexpr Result(T v) : val_(std::move(v)), has_(true) {}                  // return 값;
+    constexpr Result(T v) : Base(std::move(v)) {}                              // return 값;
     template <class G> requires std::convertible_to<G, E>
-    constexpr Result(Unexpected<G> u) : err_(std::move(u.error)), has_(false) {}   // return Unexpected{e};
-
-    // 특수 멤버: T, E 가 trivial 이면 trivial 로 남긴다 → AAPCS 레지스터 반환이 가능해진다 (P0848)
-    constexpr Result(const Result&) requires kTrivCopy = default;
-    constexpr Result(const Result& o) requires (!kTrivCopy && kCopyable) : has_(o.has_) {
-        if (has_) std::construct_at(std::addressof(val_), o.val_);
-        else      std::construct_at(std::addressof(err_), o.err_);
-    }
-    constexpr Result(Result&&) requires kTrivMove = default;
-    constexpr Result(Result&& o) requires (!kTrivMove) : has_(o.has_) {
-        if (has_) std::construct_at(std::addressof(val_), std::move(o.val_));
-        else      std::construct_at(std::addressof(err_), std::move(o.err_));
-    }
-    constexpr Result& operator=(const Result&) requires (kTrivCopy && kTrivDtor) = default;
-    constexpr Result& operator=(Result&&) requires (kTrivMove && kTrivDtor) = default;
-    constexpr ~Result() requires kTrivDtor = default;
-    constexpr ~Result() {
-        if (has_) std::destroy_at(std::addressof(val_));
-        else      std::destroy_at(std::addressof(err_));
-    }
+    constexpr Result(Unexpected<G> u) : Base(detail::ErrTag{}, std::move(u.error)) {}   // return Unexpected{e};
 
     constexpr bool has_value() const { return has_; }
     constexpr explicit operator bool() const { return has_; }
@@ -112,9 +127,6 @@ public:
     template <class F> constexpr auto map(F f)       const& { return Result(*this).map(std::move(f)); }
     template <class F> constexpr auto and_then(F f)  const& { return Result(*this).and_then(std::move(f)); }
 
-private:
-    union { T val_; E err_; };
-    bool has_;
 };
 
 // Result<void, E>: "성공/실패" 만 있는 쓰기·설정 함수의 반환형. C 의 int status 에 해당.

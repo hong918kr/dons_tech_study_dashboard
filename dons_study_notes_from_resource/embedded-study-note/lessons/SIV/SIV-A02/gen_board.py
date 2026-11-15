@@ -156,12 +156,12 @@ def netlist():
     for i in range(16):
         ln.append("DATA%d U1.%d U2.B%d pull=1" % (i, 10 + i, i + 1))
     for i in range(8):
-        ln.append("ADDR%d U1.%d U2.C%d U3.%d" % (i, 30 + i, i + 1, 12 - i))
+        ln.append("ADDR%d U1.%d U2.C%d U3.%d" % (i, 30 + i, i + 1, 5 + i))
     ln.append("nCS U1.40 U2.D1 R10.1 pull=1")
     ln.append("nWE U1.41 U2.D2 R11.1 pull=1")
     ln.append("nOE U1.42 U2.D3 R12.1 pull=1")
     for i in range(8):
-        ln.append("BUF%d U3.%d U2.E%d" % (i, 20 - i, i + 1))
+        ln.append("BUF%d U3.%d U2.E%d" % (i, 13 + i, i + 1))
     ln.append("IRQ_N U2.F1 U1.43 R21.1 pull=1")
     ln.append("RST_N U2.F2 U1.45 R22.1 pull=1")
     ln.append("PMIC_EN U1.44 U7.2")

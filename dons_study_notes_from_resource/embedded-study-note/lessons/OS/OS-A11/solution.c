@@ -1814,6 +1814,7 @@ static int scenario_free_now(void) {
     bool got = cl_line(fd, b, sizeof b);
     printf("scenario free-now: 응답 받음=%d, 내용=\"%s\"\n", got, b);
     close(fd); close(adm);
+    kill(h.pid, SIGTERM);
     int rc = srv_wait(&h, 3000);
     printf("scenario free-now: 서버 종료 코드 %d, 시그널 %s\n", rc, WIFSIGNALED(h.status) ? strsignal(WTERMSIG(h.status)) : "(없음)");
     return 0;
@@ -1850,7 +1851,7 @@ int main(int argc, char **argv) {
     bool a = false;
     printf("--- Part A: 서버 (이벤트 루프 + 워커) ---\n");
     if (a1 && a2) a = test_server_a();
-    else skip(24, "Part A 단위 실패");
+    else skip(22, "Part A 단위 실패");
 
     printf("--- Part B: drain ---\n");
     if (a) {

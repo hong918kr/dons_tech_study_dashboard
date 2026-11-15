@@ -21,6 +21,13 @@ extern "C" void scope_int() { static_vector<int, 4> v; sink(&v); }
 extern "C" void scope_nt()  { static_vector<NT, 4> v; sink(&v); }
 
 // ---- 비교 3: 전역 객체의 초기화 ----
-static_vector<int, 8> g_int;
-static_vector<NT, 4>  g_nt;
-extern "C" void* use_globals(int w) { return w ? static_cast<void*>(&g_int) : static_cast<void*>(&g_nt); }
+#if defined(GLOBAL_DEFAULT)
+static_vector<int, 8> g_v;                     // 기본 생성자 (저장소 미초기화, 비-constexpr)
+#elif defined(GLOBAL_CONSTINIT)
+constinit static_vector<int, 8> g_v(zero_init);// constinit
+#elif defined(GLOBAL_NT)
+static_vector<NT, 4> g_v;                      // 소멸자 있는 T
+#else
+static_vector<int, 8> g_v;                     // asm 모드 기본
+#endif
+extern "C" void* use_global() { return &g_v; }

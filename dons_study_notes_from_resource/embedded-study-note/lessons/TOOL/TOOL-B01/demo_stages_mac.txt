@@ -1,0 +1,232 @@
+
+===== 1. preprocess: cc -E  (.c -> .i) =====
+      14 main.c
+      17 util.c
+     643 main.i
+     297 util.i
+linemarker lines in main.i: 171
+--- first 3 lines of main.i
+# 1 "main.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+--- linemarkers for our own headers
+7:# 1 "main.c" 2
+568:# 3 "main.c" 2
+569:# 1 "./util.h" 1
+625:# 6 "./util.h" 2
+626:# 1 "./config.h" 1
+627:# 7 "./util.h" 2
+--- tail of main.i (macros are gone, LOG() expanded)
+# 4 "main.c" 2
+
+static const uint8_t boot_block[8] = { 0xEB, 0x3C, 0x90, 'F', 'W', '2', '7', 0x00 };
+
+int main(void)
+{
+    puts("[fw] " "boot");
+    printf("fw %s: 1500 bytes -> %u sectors, csum=0x%02x\n",
+           fw_version, (unsigned)sectors_for(1500u),
+           (unsigned)checksum8(boot_block, sizeof boot_block));
+    return 0;
+}
+--- util.i: FW_VERSION and SECTORS_FOR after expansion
+284:const char fw_version[] = "2" "." "7";
+288:    return (((bytes) + 512u - 1u) / 512u);
+--- no #define survives -E:  grep -c '#define' main.i = 0
+
+===== 2. compile: cc -S  (.i -> .s) =====
+      65 main.s
+      36 util.s
+     101 total
+2:	.section	__TEXT,__text,regular,pure_instructions
+3:	.globl	_main                           ; -- Begin function main
+5:_main:                                  ; @main
+18:	adrp	x0, l_.str@PAGE
+20:	add	x0, x0, l_.str@PAGEOFF
+21:	bl	_puts
+23:	bl	_sectors_for
+26:	adrp	x0, _boot_block@PAGE
+30:	bl	_checksum8
+33:	adrp	x8, _fw_version@GOTPAGE
+39:	adrp	x0, l_.str.1@PAGE
+41:	add	x0, x0, l_.str.1@PAGEOFF
+42:	bl	_printf
+54:	.section	__TEXT,__cstring,cstring_literals
+55:l_.str:                                 ; @.str
+58:l_.str.1:                               ; @.str.1
+61:	.section	__TEXT,__const
+
+===== 3. assemble: cc -c  (.s -> .o) =====
+main.o: Mach-O 64-bit object arm64
+util.o: Mach-O 64-bit object arm64
+--- nm main.o  (U = undefined here, to be filled in by the linker)
+00000000000000a0 s _boot_block
+                 U _checksum8
+                 U _fw_version
+0000000000000000 T _main
+                 U _printf
+                 U _puts
+                 U _sectors_for
+0000000000000068 s l_.str
+0000000000000072 s l_.str.1
+0000000000000000 t ltmp0
+0000000000000068 s ltmp1
+00000000000000a0 s ltmp2
+00000000000000a8 s ltmp3
+--- nm util.o
+000000000000000c T _checksum8
+0000000000000030 S _fw_version
+0000000000000000 T _sectors_for
+0000000000000000 t ltmp0
+0000000000000030 s ltmp1
+0000000000000038 s ltmp2
+--- relocations in main.o (the 'holes')
+
+main.o:	file format mach-o arm64
+
+RELOCATION RECORDS FOR [__text]:
+OFFSET           TYPE                     VALUE
+0000000000000050 ARM64_RELOC_BRANCH26     _printf
+000000000000004c ARM64_RELOC_PAGEOFF12    l_.str.1
+0000000000000048 ARM64_RELOC_PAGE21       l_.str.1
+000000000000003c ARM64_RELOC_GOT_LOAD_PAGEOFF12 _fw_version
+0000000000000038 ARM64_RELOC_GOT_LOAD_PAGE21 _fw_version
+0000000000000034 ARM64_RELOC_BRANCH26     _checksum8
+000000000000002c ARM64_RELOC_PAGEOFF12    _boot_block
+0000000000000028 ARM64_RELOC_PAGE21       _boot_block
+0000000000000020 ARM64_RELOC_BRANCH26     _sectors_for
+0000000000000018 ARM64_RELOC_BRANCH26     _puts
+0000000000000014 ARM64_RELOC_PAGEOFF12    l_.str
+0000000000000010 ARM64_RELOC_PAGE21       l_.str
+
+RELOCATION RECORDS FOR [__compact_unwind]:
+OFFSET           TYPE                     VALUE
+0000000000000000 ARM64_RELOC_UNSIGNED     __text
+
+===== 4. link: cc main.o util.o -> fw =====
+fw: Mach-O 64-bit executable arm64
+0000000100000524 T _checksum8
+00000001000005a0 S _fw_version
+00000001000004b0 T _main
+                 U _printf
+                 U _puts
+0000000100000518 T _sectors_for
+[fw] boot
+fw 2.7: 1500 bytes -> 3 sectors, csum=0x43
+exit=0
+
+===== 5. -save-temps (all intermediates in one go) =====
+config.h
+fw2
+main.bc
+main.c
+main.i
+main.o
+main.s
+util.bc
+util.c
+util.h
+util.i
+util.o
+util.s
+main.bc: LLVM bitcode, wrapper
+
+===== 6. -ccc-print-phases =====
+               +- 0: input, "main.c", c
+            +- 1: preprocessor, {0}, cpp-output
+         +- 2: compiler, {1}, ir
+      +- 3: backend, {2}, assembler
+   +- 4: assembler, {3}, object
+   |           +- 5: input, "util.c", c
+   |        +- 6: preprocessor, {5}, cpp-output
+   |     +- 7: compiler, {6}, ir
+   |  +- 8: backend, {7}, assembler
+   |- 9: assembler, {8}, object
++- 10: linker, {4, 9}, image
+11: bind-arch, "arm64", {10}, image
+
+===== 7. -### (driver prints the jobs, runs nothing) =====
+"<CLT>/usr/bin/clang" "-cc1" ... "-emit-obj" ... "-o" "$TMPDIR/main-a068a9.o" ... "main.c"   (146 args)
+"<CLT>/usr/bin/clang" "-cc1" ... "-emit-obj" ... "-o" "$TMPDIR/util-64dcfc.o" ... "util.c"   (146 args)
+"<CLT>/usr/bin/ld" "-demangle" "-lto_library" "<CLT>/usr/lib/libLTO.dylib" "-no_deduplicate" "-dynamic" "-arch" "arm64" "-platform_version" "macos" "26.4.0" "26.4" "-syslibroot" "<SDK>" "-O1" "-mllvm" "-enable-linkonceodr-outlining" "-o" "fw4" "$TMPDIR/main-a068a9.o" "$TMPDIR/util-64dcfc.o" "-lSystem" "<CLT>/usr/lib/clang/21/lib/darwin/libclang_rt.osx.a"
+   (23 args)
+
+===== 8. -v : include search list =====
+#include "..." search starts here:
+#include <...> search starts here:
+ <CLT>/usr/lib/clang/21/include
+ <SDK>/usr/include
+ <CLT>/usr/include
+ <SDK>/System/Library/Frameworks (framework directory)
+ <SDK>/System/Library/SubFrameworks (framework directory)
+End of search list.
+
+===== 9. -H : header tree for main.c (dots = include depth) =====
+. <SDK>/usr/include/stdio.h
+.. <SDK>/usr/include/_stdio.h
+... <SDK>/usr/include/_bounds.h
+.... <SDK>/usr/include/sys/cdefs.h
+..... <SDK>/usr/include/sys/_symbol_aliasing.h
+..... <SDK>/usr/include/sys/_posix_availability.h
+..... <CLT>/usr/lib/clang/21/include/ptrcheck.h
+... <SDK>/usr/include/Availability.h
+...
+43:. ./util.h
+44:.. <CLT>/usr/lib/clang/21/include/stdint.h
+45:... <SDK>/usr/include/stdint.h
+52:.. ./config.h
+total header opens: 52, distinct files: 49
+
+===== 10. -fsyntax-only (front end only) vs -S (front end + codegen) on every snippet =====
+file                     fsyntax-only   -S     first error at -S
+bad_asm_mnemonic.c       rc=0           rc=1   unrecognized instruction mnemonic
+bad_asm_org.c            rc=0           rc=0   
+bad_attr_error.c         rc=0           rc=1   call to 'debug_dump' declared with 'error' attribute: debug_
+bad_dup_a.c              rc=0           rc=0   
+bad_dup_b.c              rc=0           rc=0   
+bad_error.c              rc=1           rc=1   "BOARD_REV not set: build with -DBOARD_REV=2"
+bad_implicit.c           rc=1           rc=1   call to undeclared function 'flash_init'; ISO C99 and later 
+bad_macro_args.c         rc=1           rc=1   too few arguments provided to function-like macro invocation
+bad_macro_paren.c        rc=1           rc=1   expected ')'
+bad_missing_header.c     rc=1           rc=1   bad_missing_header.c:2:10: fatal error: 'board_pins.h' file 
+bad_no_main.c            rc=0           rc=0   
+bad_static_helper.c      rc=0           rc=0   
+bad_static_main.c        rc=0           rc=0   
+bad_syntax.c             rc=1           rc=1   expected ';' at end of declaration
+bad_type.c               rc=1           rc=1   initializing 'int' with an expression of incompatible type '
+bad_undefined.c          rc=0           rc=0   
+bad_unterminated_if.c    rc=1           rc=1   unterminated conditional directive
+ok_single.c              rc=0           rc=0   
+
+===== 11. ld64 diagnostics (Mac linker) =====
+--- cc bad_undefined.c
+Undefined symbols for architecture arm64:
+  "_flash_erase", referenced from:
+      _main in bad_undefined-14d4c0.o
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+--- cc bad_dup_a.c bad_dup_b.c
+duplicate symbol '_g_boot_count' in:
+    $TMPDIR/bad_dup_b-8f68dd.o
+    $TMPDIR/bad_dup_a-2037e6.o
+ld: 1 duplicate symbols
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+--- cc bad_no_main.c
+Undefined symbols for architecture arm64:
+  "_main", referenced from:
+      <initial-undefines>
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+--- cc main.c
+Undefined symbols for architecture arm64:
+  "_checksum8", referenced from:
+      _main in main-9921d4.o
+  "_fw_version", referenced from:
+      _main in main-9921d4.o
+  "_sectors_for", referenced from:
+      _main in main-9921d4.o
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+
+===== 12. staged (-E, -S, -c) object == one-shot (cc -c main.c) object? =====
+byte-identical: 1208 bytes

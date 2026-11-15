@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """SIV-A06 보드 레벨 검증: 전원 시퀀싱과 클럭 — Python 3.9 stdlib only.
 
-python3 -I solution.py            # 체크 실행
-python3 -I solution.py --report   # 보드별 리포트만 출력
+python3 -I <이 파일>            # 체크 실행
+python3 -I <이 파일> --report   # 보드별 리포트만 출력 (정답에서)
 보드/스펙/숫자는 모두 대표값(가정). 실제 값은 SoC 데이터시트 · PMIC OTP · 보드 스펙에서 온다.
 """
 import csv

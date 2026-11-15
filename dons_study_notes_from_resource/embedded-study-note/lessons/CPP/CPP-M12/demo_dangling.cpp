@@ -1,5 +1,6 @@
 // CPP-M12 demo: Delegate 는 객체 수명을 모른다 — ASan 으로 dangling 호출 보기
-//   c++ -std=c++20 -g -O1 -fno-exceptions -fno-rtti -fsanitize=address -fno-omit-frame-pointer demo_dangling.cpp -o d && ./d
+//   c++ -std=c++20 -g -O0 -fno-exceptions -fno-rtti -fsanitize=address -fno-omit-frame-pointer demo_dangling.cpp -o d && ./d
+//   (-O1 로 빌드하면 이 Mac 에서는 ASan 보고가 안 나왔다 — 본문 참고)
 //   반환으로 탈출하는 경우 컴파일러 경고:  c++ -std=c++20 -fsyntax-only -DSHOW_RETURN demo_dangling.cpp
 #define main solution_main
 #include "solution.cpp"

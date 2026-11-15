@@ -1,0 +1,245 @@
+################ MAC ################
+=== alias 속성은 Darwin 에서 안 된다 ===
+
+$ cc -c alias.c
+alias.c:2:51: error: aliases are not supported on darwin
+    2 | void USART1_IRQHandler(void) __attribute__((weak, alias("Default_Handler")));
+      |                                                   ^
+1 error generated.
+[rc=1]
+
+$ clang --target=thumbv7em-none-eabi -mcpu=cortex-m4 -c alias.c -o alias_elf.o && nm alias_elf.o
+00000000 T Default_Handler
+00000000 W USART1_IRQHandler
+[rc=0]
+
+=== s4 starter (Mach-O): 링크 성공, 인터럽트는 기본 핸들러로 ===
+
+$ cat SRCS
+startup.c events.c test_main.c uart.c
+[rc=0]
+
+$ ./app
+uart_rx=0 tim2=0 default_hits=3 last_unhandled=5
+[rc=0]
+
+$ nm startup.o | grep -E 'Handler'
+0000000000000000 T _Default_Handler
+0000000000000050 T _HardFault_Handler
+0000000000000028 T _NMI_Handler
+00000000000000f0 T _Reset_Handler
+0000000000000078 T _SysTick_Handler
+00000000000000c8 T _TIM2_IRQHandler
+00000000000000a0 T _USART1_IRQHandler
+[rc=0]
+
+$ nm -m startup.o | grep -E 'Handler'
+0000000000000000 (__TEXT,__text) external _Default_Handler
+0000000000000050 (__TEXT,__text) weak external _HardFault_Handler
+0000000000000028 (__TEXT,__text) weak external _NMI_Handler
+00000000000000f0 (__TEXT,__text) external _Reset_Handler
+0000000000000078 (__TEXT,__text) weak external _SysTick_Handler
+00000000000000c8 (__TEXT,__text) weak external _TIM2_IRQHandler
+00000000000000a0 (__TEXT,__text) weak external _USART1_IRQHandler
+[rc=0]
+
+$ nm -m app | grep -E 'IRQHandle'
+00000001000006b0 (__TEXT,__text) weak external _TIM2_IRQHandler
+00000001000007b8 (__TEXT,__text) external _USART1_IRQHandle
+0000000100000688 (__TEXT,__text) weak external _USART1_IRQHandler
+[rc=0]
+
+$ ./app
+uart_rx=1 tim2=2 default_hits=0 last_unhandled=-1
+[rc=0]
+
+$ nm -m app | grep -E 'IRQHandle'
+0000000100000770 (__TEXT,__text) external _TIM2_IRQHandler
+0000000100000768 (__TEXT,__text) external _USART1_IRQHandler
+[rc=0]
+
+=== 컴파일 단계 가드: -Wmissing-prototypes 는 오타를 잡는다 (빠진 파일은 못 잡는다) ===
+
+$ cc -std=c11 -Wall -Wextra -O2 -Wmissing-prototypes -c uart.c
+uart.c:5:6: warning: no previous prototype for function 'USART1_IRQHandle' [-Wmissing-prototypes]
+    5 | void USART1_IRQHandle(void)
+      |      ^
+uart.c:5:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+    5 | void USART1_IRQHandle(void)
+      | ^
+      | static 
+1 warning generated.
+[rc=0]
+
+=== 연습 1 의 버그 버전: TIM2 핸들러를 C++ 로 옮기면서 extern "C" 를 빼먹음 ===
+
+$ cat timer.cpp
+// timer.cpp (버그 버전)
+#include "events.h"
+void TIM2_IRQHandler(void) { event_post(EV_TIM2_TICK); }
+[rc=0]
+
+$ c++ startup.o events.o test_main.o uart.o timer.o -o app && ./app
+uart_rx=1 tim2=0 default_hits=2 last_unhandled=5
+[rc=0]
+
+$ nm timer.o | grep TIM2
+0000000000000000 T __Z15TIM2_IRQHandlerv
+[rc=0]
+
+$ nm timer.o | grep TIM2 | c++filt
+0000000000000000 T TIM2_IRQHandler()
+[rc=0]
+
+$ c++ -std=c++17 -Wall -Wextra -Wmissing-declarations -O2 -c timer.cpp
+[rc=0]
+
+$ c++ -std=c++17 -Wall -Wextra -Wmissing-prototypes -O2 -c timer.cpp
+timer.cpp:3:6: warning: no previous prototype for function 'TIM2_IRQHandler' [-Wmissing-prototypes]
+    3 | void TIM2_IRQHandler(void) { event_post(EV_TIM2_TICK); }
+      |      ^
+timer.cpp:3:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+    3 | void TIM2_IRQHandler(void) { event_post(EV_TIM2_TICK); }
+      | ^
+      | static 
+1 warning generated.
+[rc=0]
+
+=== 연습 3 c6: -undefined dynamic_lookup — 링크 에러를 런타임 크래시로 미룬다 ===
+
+$ cc main.o -o t6
+Undefined symbols for architecture arm64:
+  "_board_name", referenced from:
+      _main in main.o
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+[rc=1]
+
+$ cc main.o -Wl,-undefined,dynamic_lookup -o t6; echo link rc=$?; ./t6
+link rc=0
+demo_weak.sh: line 14: 37361 Segmentation fault: 11  ./t6
+[rc=139]
+
+$ dyld_info -fixups t6 2>/dev/null | grep -i board || true
+        __DATA          __la_symbol_ptr  0x100008000      lazy-bind  <flat-namespace>/_board_name
+[rc=0]
+
+################ VM elinux ################
+arm-none-eabi-gcc (15:14.2.rel1-1) 14.2.1 20241119
+=== startup.c 를 ELF 로: alias = 같은 주소의 또 다른 이름 ===
+
+$ arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -Os -std=c11 -c startup.c && arm-none-eabi-nm startup.o | grep Handler
+00000000 T Default_Handler
+00000000 W HardFault_Handler
+00000000 W NMI_Handler
+00000018 T Reset_Handler
+00000000 W SysTick_Handler
+00000000 W TIM2_IRQHandler
+00000000 W USART1_IRQHandler
+[rc=0]
+
+$ arm-none-eabi-readelf -s startup.o | grep -E 'Num|Handler'
+   Num:    Value  Size Type    Bind   Vis      Ndx Name
+    16: 00000001    24 FUNC    GLOBAL DEFAULT    1 Default_Handler
+    17: 00000001    24 FUNC    WEAK   DEFAULT    1 TIM2_IRQHandler
+    18: 00000001    24 FUNC    WEAK   DEFAULT    1 USART1_IRQHandler
+    19: 00000001    24 FUNC    WEAK   DEFAULT    1 SysTick_Handler
+    20: 00000001    24 FUNC    WEAK   DEFAULT    1 HardFault_Handler
+    21: 00000001    24 FUNC    WEAK   DEFAULT    1 NMI_Handler
+    22: 00000019     2 FUNC    GLOBAL DEFAULT    1 Reset_Handler
+[rc=0]
+
+=== s4 starter → fw.elf (arm-none-eabi-gcc 14.2, GNU ld) ===
+
+$ arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -Os -std=c11 -Wall -Wextra -ffreestanding -nostdlib -Wl,-e,Reset_Handler startup.c events.c  uart.c -o fw.elf
+[rc=0]
+
+$ arm-none-eabi-nm -n fw.elf | grep -E 'Handler|IRQHandle'
+00008000 T Default_Handler
+00008000 W HardFault_Handler
+00008000 W NMI_Handler
+00008000 W SysTick_Handler
+00008000 W TIM2_IRQHandler
+00008000 W USART1_IRQHandler
+00008018 T Reset_Handler
+00008058 T USART1_IRQHandle
+[rc=0]
+
+$ arm-none-eabi-objdump -s -j .rodata fw.elf | tail -2
+ 8060 19800000 01800000 01800000 01800000  ................
+ 8070 01800000 01800000                    ........        
+[rc=0]
+
+$ gcc -std=c11 -Wall -Wextra -O2 $(cat SRCS) -o app && ./app   # aarch64 Linux 네이티브, alias 버전
+uart_rx=0 tim2=0 default_hits=3 last_unhandled=5
+[rc=0]
+
+=== s4 solution → fw.elf (arm-none-eabi-gcc 14.2, GNU ld) ===
+
+$ arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -Os -std=c11 -Wall -Wextra -ffreestanding -nostdlib -Wl,-e,Reset_Handler startup.c events.c  uart.c timer.c -o fw.elf
+[rc=0]
+
+$ arm-none-eabi-nm -n fw.elf | grep -E 'Handler|IRQHandle'
+00008000 T Default_Handler
+00008000 W HardFault_Handler
+00008000 W NMI_Handler
+00008000 W SysTick_Handler
+00008018 T Reset_Handler
+00008058 T USART1_IRQHandler
+0000805e T TIM2_IRQHandler
+[rc=0]
+
+$ arm-none-eabi-objdump -s -j .rodata fw.elf | tail -2
+ 8064 19800000 01800000 01800000 01800000  ................
+ 8074 59800000 5f800000                    Y..._...        
+[rc=0]
+
+$ gcc -std=c11 -Wall -Wextra -O2 $(cat SRCS) -o app && ./app   # aarch64 Linux 네이티브, alias 버전
+uart_rx=1 tim2=2 default_hits=0 last_unhandled=-1
+[rc=0]
+
+=== strong 두 개면? (weak 는 '하나만 있으면' 조용히 진다, strong 끼리는 에러) ===
+
+$ arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -Os -std=c11 -Wall -Wextra -ffreestanding -nostdlib -Wl,-e,Reset_Handler startup.c events.c uart.c timer.c dup.c -o dup.elf
+/usr/lib/gcc/arm-none-eabi/14.2.1/../../../arm-none-eabi/bin/ld: /tmp/ccl8ngOE.o: in function `USART1_IRQHandler':
+dup.c:(.text+0x0): multiple definition of `USART1_IRQHandler'; /tmp/ccY7Jthy.o:uart.c:(.text+0x0): first defined here
+collect2: error: ld returned 1 exit status
+[rc=1]
+
+=== 연습 1 버그 버전을 g++ 로: GCC 는 -Wmissing-declarations 가 C++ 용 이름 ===
+
+$ g++ -std=c++17 -Wall -Wextra -Wmissing-declarations -O2 -c timer.cpp
+timer.cpp:2:6: warning: no previous declaration for ‘void TIM2_IRQHandler()’ [-Wmissing-declarations]
+    2 | void TIM2_IRQHandler(void) { event_post(EV_TIM2_TICK); }
+      |      ^~~~~~~~~~~~~~~
+[rc=0]
+
+=== 연습 3 의 c1~c5 를 GNU ld 로 ===
+
+$ gcc main.o liba.a libb.a -o t1 && ./t1
+A
+[rc=0]
+
+$ gcc main.o libb.a liba.a -o t2 && ./t2
+B
+[rc=0]
+
+$ gcc main2.o liba.a libb.a -o t3 && ./t3
+/usr/bin/aarch64-linux-gnu-ld.bfd: libb.a(b_name.o): in function `board_name':
+b_name.c:(.text+0x0): multiple definition of `board_name'; liba.a(a_name.o):a_name.c:(.text+0x0): first defined here
+collect2: error: ld returned 1 exit status
+[rc=1]
+
+$ gcc main2.o libb.a liba.a -o t4 && ./t4
+B rev2
+[rc=0]
+
+$ gcc main.o a_name.o b_name.o -o t5
+/usr/bin/aarch64-linux-gnu-ld.bfd: b_name.o: in function `board_name':
+b_name.c:(.text+0x0): multiple definition of `board_name'; a_name.o:a_name.c:(.text+0x0): first defined here
+collect2: error: ld returned 1 exit status
+[rc=1]
+
+$ gcc main.o -o t6 -Wl,--unresolved-symbols=ignore-all && ./t6
+bash: line 3: 561170 Illegal instruction        (core dumped) ./t6
+[rc=132]

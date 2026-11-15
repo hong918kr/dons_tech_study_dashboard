@@ -1,0 +1,99 @@
+### cc -std=c11 -g -O2 -fsanitize=undefined -fsanitize-trap=undefined driver.c starter.c
+adc_ok       exit 0   adc_scale(1000,3300,4095): got 805 want 805
+adc_mul_ovf  exit 133 
+adc_div0     exit 133 
+accum_sat    exit 133 
+mask_32      exit 133 
+pkt_seq      exit 133 
+duty_over    exit 2   duty_to_ccr(1.5,999): got 1498 want 999
+
+### is the runtime linked?  otool -L trap | grep -c ubsan
+0
+
+### objdump -d: the checks and their brk codes
+0000000100001170 <_adc_scale>:
+100001170:     	smull	x8, w0, w1
+100001174:     	cmp	x8, w8, sxtw
+100001178:     	b.ne	0x10000119c <_adc_scale+0x2c>
+10000117c:     	cmn	w2, #0x1
+100001180:     	mov	w9, #-0x80000000        ; =-2147483648
+100001184:     	ccmp	w8, w9, #0x0, eq
+100001188:     	cset	w9, ne
+10000118c:     	cbz	w2, 0x1000011a0 <_adc_scale+0x30>
+100001190:     	tbz	w9, #0x0, 0x1000011a0 <_adc_scale+0x30>
+100001194:     	sdiv	w0, w8, w2
+100001198:     	ret
+10000119c:     	brk	#0x550c
+1000011a0:     	brk	#0x5503
+
+00000001000011a4 <_accum_add>:
+1000011a4:     	adds	w0, w0, w1
+1000011a8:     	b.vs	0x1000011b0 <_accum_add+0xc>
+1000011ac:     	ret
+1000011b0:     	brk	#0x5500
+
+00000001000011b4 <_sample_mag>:
+1000011b4:     	tbz	w0, #0x1f, 0x1000011c0 <_sample_mag+0xc>
+1000011b8:     	negs	w0, w0
+1000011bc:     	b.vs	0x1000011c4 <_sample_mag+0x10>
+1000011c0:     	ret
+1000011c4:     	brk	#0x550d
+
+00000001000011c8 <_reg_mask>:
+1000011c8:     	cmp	w1, #0x1f
+1000011cc:     	b.hs	0x1000011f8 <_reg_mask+0x30>
+1000011d0:     	cmp	w0, #0x1f
+1000011d4:     	b.hi	0x1000011f8 <_reg_mask+0x30>
+1000011d8:     	mov	w8, #-0x1               ; =-1
+1000011dc:     	lsl	w8, w8, w1
+1000011e0:     	mvn	w8, w8
+1000011e4:     	mvn	w9, w0
+1000011e8:     	lsr	w9, w8, w9
+1000011ec:     	cbnz	w9, 0x1000011f8 <_reg_mask+0x30>
+1000011f0:     	lsl	w0, w8, w0
+1000011f4:     	ret
+1000011f8:     	brk	#0x5514
+### all distinct brk immediates in the binary
+   2 brk	#0x5500
+   1 brk	#0x5503
+   2 brk	#0x5505
+   2 brk	#0x550a
+   1 brk	#0x550c
+   1 brk	#0x550d
+   2 brk	#0x5512
+   4 brk	#0x5513
+   2 brk	#0x5514
+   1 brk	#0x5515
+   3 brk	#0x5516
+
+### lldb -b -s demo_trap.lldb -- trap adc_mul_ovf
+(lldb) target create "trap"
+Current executable set to 'trap' (arm64).
+(lldb) settings set -- target.run-args  "adc_mul_ovf"
+(lldb) command source -s 0 'demo_trap.lldb'
+Executing commands in '/Users/donh/workspace/dons_tech_study_dashboard/dons_study_notes_from_resource/embedded-study-note/lessons/TOOL/TOOL-B12/demo_trap.lldb'.
+(lldb) run
+warning: trap was compiled with optimization - stepping may behave oddly; variables may not be available.
+Process 55317 launched: 'trap' (arm64)
+Process 55317 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = Undefined Behavior Sanitizer: signed integer multiplication overflow in 'raw * num'
+    frame #1: 0x000000010000119c trap`adc_scale(raw=30000, num=100000, den=3) at starter.c:13:16 [opt]
+   10  	int32_t adc_scale(int32_t raw, int32_t num, int32_t den)
+   11  	{
+   12  	    /* TODO: signed multiply overflow, den == 0, INT32_MIN / -1 */
+-> 13  	    return raw * num / den;
+    	               ^
+   14  	
+   15  	
+   16  	
+Target 0: (trap) stopped.
+(lldb) bt
+* thread #1, queue = 'com.apple.main-thread', stop reason = Undefined Behavior Sanitizer: signed integer multiplication overflow in 'raw * num'
+    frame #0: 0x000000010000119c trap`__clang_trap_msg$Undefined Behavior Sanitizer$signed integer multiplication overflow in 'raw * num' at starter.c:0 [opt] [inlined]
+  * frame #1: 0x000000010000119c trap`adc_scale(raw=30000, num=100000, den=3) at starter.c:13:16 [opt]
+    frame #2: 0x0000000100000a4c trap`run(c="adc_mul_ovf") at driver.c:56:80 [opt] [inlined]
+    frame #3: 0x00000001000009f4 trap`main(argc=<unavailable>, argv=<unavailable>) at driver.c:110:12 [opt]
+    frame #4: 0x000000018753e054 dyld`start + 6652
+(lldb) disassemble -p -c 1
+trap`__clang_trap_msg$Undefined Behavior Sanitizer$signed integer multiplication overflow in 'raw * num':
+->  0x10000119c <+44>: brk    #0x550c

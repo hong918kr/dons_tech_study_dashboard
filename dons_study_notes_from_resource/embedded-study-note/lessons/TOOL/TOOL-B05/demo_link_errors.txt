@@ -1,0 +1,299 @@
+################ MAC: Apple clang 21 + ld64 ################
+=== s1 starter: undefined reference 4종 ===
+
+$ cat SRCS
+main.c sensor.c uart.c adc.c
+[rc=0]
+
+$ nm -u main.o
+_adc_read_mv
+_adc_read_raw
+_crc8
+_printf
+_sensor_selftest
+_uart_puts
+[rc=0]
+
+$ nm uart.o
+                 U _putchar
+0000000000000000 T _uart_put_char
+                 U _uart_putc
+0000000000000004 T _uart_puts
+0000000000000000 t ltmp0
+0000000000000038 s ltmp1
+[rc=0]
+
+$ nm adc.o
+0000000000000000 T _adc_read_mv
+0000000000000000 t ltmp0
+0000000000000008 s ltmp1
+[rc=0]
+
+$ cc -std=c11 -O0 -c adc.c -o adc_O0.o && nm adc_O0.o   # -O0: 인라인 안 됨
+0000000000000000 T _adc_read_mv
+0000000000000024 t _adc_read_raw
+0000000000000000 t ltmp0
+0000000000000030 s ltmp1
+[rc=0]
+
+$ cc main.o sensor.o uart.o adc.o -o app
+Undefined symbols for architecture arm64:
+  "_adc_read_raw", referenced from:
+      _main in main.o
+  "_crc8", referenced from:
+      _main in main.o
+  "_sensor_selftest", referenced from:
+      _main in main.o
+  "_uart_putc", referenced from:
+      _uart_puts in uart.o
+ld: symbol(s) not found for architecture arm64
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+[rc=1]
+
+=== s2 starter: 헤더에 정의한 전역 ===
+
+$ cc -### -c tick.c 2>&1 | tr ' ' '\n' | grep -i common
+"-fcommon"
+[rc=0]
+
+$ nm -m tick.o | grep g_
+0000000000000018 (__DATA,__data) external _g_log_level
+0000000000000008 (common) (alignment 2^3) external _g_ticks
+[rc=0]
+
+$ cc main.o tick.o log.o config.o -o app
+duplicate symbol '_g_log_level' in:
+    /private/tmp/TOOL-B05_demo/s2/config.o
+    /private/tmp/TOOL-B05_demo/s2/main.o
+    /private/tmp/TOOL-B05_demo/s2/tick.o
+    /private/tmp/TOOL-B05_demo/s2/log.o
+ld: 1 duplicate symbols
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+[rc=1]
+
+$ nm -m tick.o | grep g_
+0000000000000014 (__DATA,__data) external _g_log_level
+0000000000000038 (__DATA,__common) external _g_ticks
+[rc=0]
+
+$ cc main.o tick.o log.o config.o -o app   # -fno-common 로 컴파일한 .o
+duplicate symbol '_g_ticks' in:
+    /private/tmp/TOOL-B05_demo/s2/config.o
+    /private/tmp/TOOL-B05_demo/s2/log.o
+    /private/tmp/TOOL-B05_demo/s2/tick.o
+    /private/tmp/TOOL-B05_demo/s2/main.o
+duplicate symbol '_g_log_level' in:
+    /private/tmp/TOOL-B05_demo/s2/config.o
+    /private/tmp/TOOL-B05_demo/s2/log.o
+    /private/tmp/TOOL-B05_demo/s2/tick.o
+    /private/tmp/TOOL-B05_demo/s2/main.o
+ld: 2 duplicate symbols
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+[rc=1]
+
+=== s2 반쯤 고친 상태: g_log_level 만 extern + config.c, g_ticks/g_err_count 는 그대로 ===
+
+$ grep -E '^(extern|unsigned|static)' config.h
+extern int g_log_level;
+unsigned long g_ticks;           /* 초기값 없는 정의 (tentative definition) */
+static unsigned g_err_count;     /* "static 붙이면 에러 안 나던데?" */
+[rc=0]
+
+$ cc main.o tick.o log.o config.o -o app && ./app
+E[5] sensor timeout
+E[5] crc mismatch
+ticks=5 errs=0 level=2
+[rc=0]
+
+$ nm -m main.o | grep g_err_count; nm -m log.o | grep g_err_count
+0000000000000088 (__DATA,__bss) non-external _g_err_count
+[rc=0]
+
+$ cc main.o tick.o log.o config.o -o app   # -fno-common
+duplicate symbol '_g_ticks' in:
+    /private/tmp/TOOL-B05_demo/s2half/main.o
+    /private/tmp/TOOL-B05_demo/s2half/tick.o
+    /private/tmp/TOOL-B05_demo/s2half/log.o
+    /private/tmp/TOOL-B05_demo/s2half/config.o
+ld: 1 duplicate symbols
+clang: error: linker command failed with exit code 1 (use -v to see invocation)
+[rc=1]
+
+=== s3 starter: C++ 가 C 함수를 부름 (extern "C" 없음) ===
+
+$ nm ring.o | grep ring_
+0000000000000000 T _ring_init
+                 U _ring_overflow_hook
+0000000000000074 T _ring_pop
+0000000000000010 T _ring_push
+[rc=0]
+
+$ nm app.o | grep ring
+0000000000000000 T __Z18ring_overflow_hookP4ringh
+                 U __Z8ring_popP4ringPh
+                 U __Z9ring_initP4ringPhm
+                 U __Z9ring_pushP4ringh
+[rc=0]
+
+$ nm app.o | grep ring | c++filt
+0000000000000000 T ring_overflow_hook(ring*, unsigned char)
+                 U ring_pop(ring*, unsigned char*)
+                 U ring_init(ring*, unsigned char*, unsigned long)
+                 U ring_push(ring*, unsigned char)
+[rc=0]
+
+$ c++filt __Z9ring_pushP4ringh
+ring_push(ring*, unsigned char)
+[rc=0]
+
+$ c++ ring.o app.o -o app
+Undefined symbols for architecture arm64:
+  "ring_pop(ring*, unsigned char*)", referenced from:
+      _main in app.o
+      _main in app.o
+   NOTE: found '_ring_pop' in ring.o, declaration possibly missing 'extern "C"'
+  "ring_init(ring*, unsigned char*, unsigned long)", referenced from:
+      _main in app.o
+   NOTE: found '_ring_init' in ring.o, declaration possibly missing 'extern "C"'
+  "ring_push(ring*, unsigned char)", referenced from:
+      _main in app.o
+      _main in app.o
+      _main in app.o
+      _main in app.o
+      _main in app.o
+      _main in app.o
+   NOTE: found '_ring_push' in ring.o, declaration possibly missing 'extern "C"'
+  "_ring_overflow_hook", referenced from:
+      _ring_push in ring.o
+ld: symbol(s) not found for architecture arm64
+clang++: error: linker command failed with exit code 1 (use -v to see invocation)
+[rc=1]
+
+=== 링커 규칙 실험: common+정의, weak+weak(순서), weak+strong ===
+
+$ cc m.o common_x.o def_x.o w1.o -o a && ./a      # common + 초기값 정의
+x=5 f=1
+[rc=0]
+
+$ cc m.o def_x.o w1.o w2.o -o b && ./b             # weak w1 먼저
+x=5 f=1
+[rc=0]
+
+$ cc m.o def_x.o w2.o w1.o -o c && ./c             # weak w2 먼저
+x=5 f=2
+[rc=0]
+
+$ cc m.o def_x.o w1.o s3.o -o d && ./d             # weak + strong
+x=5 f=3
+[rc=0]
+
+################ VM elinux: gcc 15.2 + GNU ld (bfd) ################
+gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+GNU ld (GNU Binutils for Ubuntu) 2.46
+=== s1 starter (GNU ld) ===
+
+$ gcc main.o sensor.o uart.o adc.o -o app
+/usr/bin/aarch64-linux-gnu-ld.bfd: main.o: in function `main':
+main.c:(.text.startup+0x8): undefined reference to `sensor_selftest'
+/usr/bin/aarch64-linux-gnu-ld.bfd: main.c:(.text.startup+0x2c): undefined reference to `crc8'
+/usr/bin/aarch64-linux-gnu-ld.bfd: main.c:(.text.startup+0x44): undefined reference to `adc_read_raw'
+/usr/bin/aarch64-linux-gnu-ld.bfd: uart.o: in function `uart_puts':
+uart.c:(.text+0x40): undefined reference to `uart_putc'
+collect2: error: ld returned 1 exit status
+[rc=1]
+
+$ nm adc.o | grep adc_
+0000000000000000 T adc_read_mv
+[rc=0]
+
+$ gcc -std=c11 -O0 -c adc.c -o adc_O0.o && nm adc_O0.o | grep adc_
+0000000000000008 T adc_read_mv
+0000000000000000 t adc_read_raw
+[rc=0]
+
+=== s2 starter (gcc 기본 = -fno-common) ===
+
+$ gcc -std=c11 -Wall -Wextra -O2 -c tick.c
+In file included from tick.c:2:
+config.h:7:17: warning: ‘g_err_count’ defined but not used [-Wunused-variable]
+    7 | static unsigned g_err_count;     /* "static 붙이면 에러 안 나던데?" */
+      |                 ^~~~~~~~~~~
+[rc=0]
+
+$ nm tick.o | grep g_
+0000000000000000 D g_log_level
+0000000000000000 B g_ticks
+[rc=0]
+
+$ gcc main.o tick.o log.o config.o -o app
+/usr/bin/aarch64-linux-gnu-ld.bfd: tick.o:(.bss+0x0): multiple definition of `g_ticks'; main.o:(.bss+0x0): first defined here
+/usr/bin/aarch64-linux-gnu-ld.bfd: tick.o:(.data+0x0): multiple definition of `g_log_level'; main.o:(.data+0x0): first defined here
+/usr/bin/aarch64-linux-gnu-ld.bfd: log.o:(.bss+0x8): multiple definition of `g_ticks'; main.o:(.bss+0x0): first defined here
+/usr/bin/aarch64-linux-gnu-ld.bfd: log.o:(.data+0x0): multiple definition of `g_log_level'; main.o:(.data+0x0): first defined here
+/usr/bin/aarch64-linux-gnu-ld.bfd: config.o:(.bss+0x0): multiple definition of `g_ticks'; main.o:(.bss+0x0): first defined here
+/usr/bin/aarch64-linux-gnu-ld.bfd: config.o:(.data+0x0): multiple definition of `g_log_level'; main.o:(.data+0x0): first defined here
+collect2: error: ld returned 1 exit status
+[rc=1]
+
+=== s2 반쯤 고친 상태 (gcc) ===
+
+$ gcc main.o tick.o log.o config.o -o app
+/usr/bin/aarch64-linux-gnu-ld.bfd: tick.o:(.bss+0x0): multiple definition of `g_ticks'; main.o:(.bss+0x0): first defined here
+/usr/bin/aarch64-linux-gnu-ld.bfd: log.o:(.bss+0x8): multiple definition of `g_ticks'; main.o:(.bss+0x0): first defined here
+/usr/bin/aarch64-linux-gnu-ld.bfd: config.o:(.bss+0x0): multiple definition of `g_ticks'; main.o:(.bss+0x0): first defined here
+collect2: error: ld returned 1 exit status
+[rc=1]
+
+$ nm tick.o | grep g_   # -fcommon
+0000000000000008 C g_ticks
+[rc=0]
+
+$ gcc main.o tick.o log.o config.o -o app && ./app   # -fcommon 으로 다시 컴파일
+E[5] sensor timeout
+E[5] crc mismatch
+ticks=5 errs=0 level=2
+[rc=0]
+
+=== s3 starter (g++ / GNU ld) ===
+
+$ g++ ring.o app.o -o app
+/usr/bin/aarch64-linux-gnu-ld.bfd: app.o: in function `main':
+app.cpp:(.text.startup+0x34): undefined reference to `ring_init(ring*, unsigned char*, unsigned long)'
+/usr/bin/aarch64-linux-gnu-ld.bfd: app.cpp:(.text.startup+0x50): undefined reference to `ring_push(ring*, unsigned char)'
+/usr/bin/aarch64-linux-gnu-ld.bfd: app.cpp:(.text.startup+0x74): undefined reference to `ring_pop(ring*, unsigned char*)'
+/usr/bin/aarch64-linux-gnu-ld.bfd: ring.o: in function `ring_push':
+ring.c:(.text+0x60): undefined reference to `ring_overflow_hook'
+collect2: error: ld returned 1 exit status
+[rc=1]
+
+$ g++ ring.o app.o -o app -Wl,--no-demangle 2>&1 | grep -o "reference to .*"
+reference to `_Z9ring_initP4ringPhm'
+reference to `_Z9ring_pushP4ringh'
+reference to `_Z8ring_popP4ringPh'
+reference to `ring_overflow_hook'
+[rc=0]
+
+$ nm app.o | grep ring
+0000000000000000 T _Z18ring_overflow_hookP4ringh
+                 U _Z8ring_popP4ringPh
+                 U _Z9ring_initP4ringPhm
+                 U _Z9ring_pushP4ringh
+[rc=0]
+
+=== 링커 규칙 실험 (gcc -fcommon / GNU ld) ===
+
+$ gcc m.o common_x.o def_x.o w1.o -o a && ./a
+x=5 f=1
+[rc=0]
+
+$ gcc m.o def_x.o w1.o w2.o -o b && ./b
+x=5 f=1
+[rc=0]
+
+$ gcc m.o def_x.o w2.o w1.o -o c && ./c
+x=5 f=2
+[rc=0]
+
+$ gcc m.o def_x.o w1.o s3.o -o d && ./d
+x=5 f=3
+[rc=0]

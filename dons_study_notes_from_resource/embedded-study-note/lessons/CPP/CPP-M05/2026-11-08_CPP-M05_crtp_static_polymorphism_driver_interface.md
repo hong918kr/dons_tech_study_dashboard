@@ -209,7 +209,7 @@ $ c++ -std=c++20 -fsyntax-only -DSHOW_CXX17_HOLE demo_errors.cpp
 demo_errors.cpp:57:23: error: base class 'Guarded<Good>' has private default constructor
 ```
 
-C++17 코드베이스라면 `UartBase() {}` 처럼 user-provided 로 쓰면 aggregate 가 아니게 되어 구멍이 닫힌다 (이 줄은 표준 규칙에서 추론한 것이고, 이 레슨에서 별도로 돌리지는 않았다).
+C++17 코드베이스라면 `UartBase() {}` 처럼 user-provided 로 쓰면 aggregate 가 아니게 되어 구멍이 닫힌다 (Apple clang 21 `-std=c++17` 에서 `Wrong w{}` 가 private 생성자 에러로 거부되는 것을 확인했다).
 
 **방어 2: 구현 누락을 잡는다.** 세 방식의 실제 에러를 비교한다.
 
@@ -289,7 +289,7 @@ _Z11forgot_callR6Forgot:
     <path d="M120 84 L260 130"/><path d="M370 84 L370 130"/><path d="M620 84 L480 130"/>
   </g>
   <text x="10" y="198" fill="currentColor">결국 "간접 호출" 을 되찾는다: 이질 컨테이너가 필요한 순간 정적 다형성의 인라인 이득은 그 경계에서 끝난다.</text>
-  <text x="10" y="222" fill="currentColor" font-size="12">이질 배열 시도의 실제 에러: cannot initialize an array element of type 'Guarded&lt;A&gt; *' with an rvalue of type 'B *'</text>
+  <text x="10" y="222" fill="currentColor" font-size="12">이질 배열의 실제 에러: cannot initialize ... 'Guarded&lt;A&gt; *' with an rvalue of type 'B *'</text>
 </svg>
 ```
 
@@ -355,8 +355,18 @@ crtp_write 루프:                       virt_write 루프:
 
 표에서 읽어야 할 세 가지:
 
-1. **`virt_put_known`: 컴파일러가 구체 타입을 보면 virtual 도 인라인된다** (devirtualization, 두 컴파일러 모두 `bx`/`blx` 없음). "virtual 은 항상 간접 호출"은 틀린 말이다 (CPP-M06 참고).
-2. **gcc `-O2` 의 `virt_put` 이 40바이트로 커진 이유**: 단일 구현만 보이는 TU 에서 GCC 가 **추측성 devirtualization**(vtable 슬롯을 `Stm32UartV::put` 주소와 `cmp` 해서 같으면 인라인, 다르면 `bx r3`) 을 했다. 위 출력의 `cmp r3, r2` / `bne` 가 그 흔적이다.
+1. **`virt_put_known`: 컴파일러가 구체 타입을 보면 virtual 도 인라인된다** (devirtualization. 두 컴파일러 모두 vtable 로드와 간접 분기가 사라지고 `bx lr` 복귀만 남았다). "virtual 은 항상 간접 호출"은 틀린 말이다 (CPP-M06 참고).
+2. **gcc `-O2` 의 `virt_put` 이 40바이트로 커진 이유**: 단일 구현만 보이는 TU 에서 GCC 가 **추측성 devirtualization**(vtable 슬롯을 `Stm32UartV::put` 주소와 `cmp` 해서 같으면 인라인, 다르면 `bx r3`) 을 했다. 실제 출력 일부:
+
+   ```text
+   _Z8virt_putR5IUarth:        @ arm-none-eabi-g++ -O2
+   	ldr	r3, [r0]            @ vptr
+   	ldr	r2, .L25            @ Stm32UartV::put 주소 (literal pool)
+   	ldr	r3, [r3]            @ 슬롯
+   	cmp	r3, r2
+   	bne	.L15                @ 다르면 간접 분기 경로로
+   ```
+
 3. **`crtp_write` 가 clang `-O2` 에서 288바이트**: 인라인 + 루프 unroll 때문이다. 폴링 루프까지 4배로 펼쳐졌다. CRTP 라서 항상 작다는 것은 **틀렸다** — 빠를 수는 있어도 `-O2` 에서는 커질 수 있다. 펌웨어는 대개 `-Os` 나 파일별 최적화를 쓴다.
 
 사이클 수는 이 레슨에서 재지 않았다 (CPP-M06 참고: 맥에 DWT 없음).
@@ -386,7 +396,7 @@ CRTP, 공통 코드 hoist               260      332      476      764
 virtual, 구현 1개                    444      480      552      696
 ```
 
-`virtual` 의 `.rodata` 는 N=1 에서 `.text` 와 별도로 +12바이트(28 vs 16, vtable. `g_payload` 16바이트 포함) 다. vtable 회계는 CPP-M06 몫이다.
+위 표는 `.text` 만이다. `virtual` 은 `.rodata` 에 vtable 이 더 붙는다: N=1 `-Os` 에서 `.rodata` 28B vs CRTP 16B (양쪽 다 `g_payload` 16B 포함, 차이 12B). vtable 회계는 CPP-M06 몫이다.
 
 ```svg
 <svg viewBox="0 0 740 280" xmlns="http://www.w3.org/2000/svg" font-size="13">

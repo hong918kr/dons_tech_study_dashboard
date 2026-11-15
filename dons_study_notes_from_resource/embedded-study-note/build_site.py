@@ -43,6 +43,7 @@ CODE_MARK = re.compile(r"^\s*<!--\s*code:\s*(\S+)(?:\s+diff=(\S+))?\s*-->\s*$")
 COMMENT = re.compile(r"^\s*<!--.*-->\s*$")
 DETAILS = re.compile(r"^\s*</?details\b[^>]*>\s*$")
 SUMMARY = re.compile(r"^\s*<summary>(.*)</summary>\s*$")
+DETSUM = re.compile(r"^\s*(<details\b[^>]*>)\s*<summary>(.*)</summary>\s*$")
 
 
 def esc(s):
@@ -82,7 +83,9 @@ def inline(s):
     s = re.sub(r"(?<![\"'=])(https?://[^\s<)]+)", lambda m: ph(f'<a href="{attr(m.group(1))}">{m.group(1)}</a>'), s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<![A-Za-z0-9_*])\*([^*\s](?:[^*\n]*?[^*\s])?)\*(?![A-Za-z0-9_*])", r"<em>\1</em>", s)
-    s = re.sub(r"\x00(\d+)\x00", lambda m: keep[int(m.group(1))], s)
+    # placeholders can nest (e.g. `code` inside [link text](url)) → restore until none remain
+    while "\x00" in s:
+        s = re.sub(r"\x00(\d+)\x00", lambda m: keep[int(m.group(1))], s)
     return s
 
 
@@ -201,7 +204,7 @@ def _tokens_sh(src):
     return toks
 
 
-LANG_ALIAS = {"c": "c", "h": "c", "cpp": "c", "c++": "c", "cc": "c", "hpp": "c", "cxx": "c", "m": "c", "metal": "c",
+LANG_ALIAS = {"c": "c", "h": "c", "cpp": "c", "c++": "c", "cc": "c", "hpp": "c", "cxx": "c", "m": "c", "metal": "c", "s": "c", "asm": "c",
               "bash": "sh", "sh": "sh", "shell": "sh", "zsh": "sh", "console": "sh"}
 
 
@@ -246,8 +249,12 @@ def code_block(lesson_dir, fname, diff_from, rel_prefix):
     note = (f'<span class="dnote">{diff_from} 대비 바뀐 줄 {len(changed)}개 강조</span>'
             if diff_from else "")
     build = ""
-    if ext in ("c", "cpp"):
-        cc = ("c++ -std=c++20 -Wall -Wextra -Werror -O2 -fno-exceptions -fno-rtti"
+    envm = re.match(r"\s*/\*\s*ENV:\s*([\w-]+)", src[0] if src else "")
+    if ext in ("c", "cpp", "h", "ld", "s", "S") and envm and envm.group(1) != "mac":
+        build = (f'<span class="bcmd">ENV: {esc(envm.group(1))} — Mac에서 직접 빌드하지 않음 '
+                 f'(레슨 본문의 VM/QEMU 실행 명령 참고)</span>')
+    elif ext in ("c", "cpp"):
+        cc =("c++ -std=c++20 -Wall -Wextra -Werror -O2 -fno-exceptions -fno-rtti"
               if ext == "cpp" else "cc -std=c11 -Wall -Wextra -Werror -O2")
         build = f'<span class="bcmd">{esc(cc)} {esc(fname)} &amp;&amp; ./a.out</span>'
     href = attr(rel_prefix + fname)
@@ -266,7 +273,7 @@ def render(md_lines, toc, used_ids, ctx):
         L = md_lines[j]
         return (HEAD.match(L) or FENCE.match(L) or HR.match(L) or L.startswith(">")
                 or ULI.match(L) or OLI.match(L) or DETAILS.match(L) or SUMMARY.match(L)
-                or CODE_MARK.match(L) or COMMENT.match(L)
+                or DETSUM.match(L) or CODE_MARK.match(L) or COMMENT.match(L)
                 or L.lstrip().startswith("<svg")
                 or ("|" in L and j + 1 < n and TABLE_SEP.match(md_lines[j + 1])))
 
@@ -297,6 +304,11 @@ def render(md_lines, toc, used_ids, ctx):
 
         if DETAILS.match(line):
             out.append(line.strip())
+            i += 1
+            continue
+        m = DETSUM.match(line)                         # 한 줄짜리 <details><summary>..</summary>
+        if m:
+            out.append(f"{m.group(1)}<summary>{inline(m.group(2))}</summary>")
             i += 1
             continue
         m = SUMMARY.match(line)

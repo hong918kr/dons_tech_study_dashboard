@@ -27,7 +27,7 @@ arm_cxx() {  # arm_cxx <std> args...  thumbv7em + arm-none-eabi libstdc++ 헤더
         -isystem "$ARM_INC/c++/14.2.1/arm-none-eabi/thumb/v7e-m+fp/hard" -isystem "$ARM_INC" "$@"
 }
 std_of() { case $1 in 3|5) echo c++23 ;; *) echo c++20 ;; esac; }
-name_of() { case $1 in 1) echo "C code + out-param" ;; 2) echo "Result<i16,E16>" ;; 3) echo "expected<i16,E16>" ;; 4) echo "Result<i16,EWide>" ;; 5) echo "expected<i16,EWide>" ;; esac; }
+name_of() { case $1 in 1) echo "C code + out-param" ;; 2) echo "Result<i16,E16>" ;; 3) echo "expected<i16,E16>" ;; 4) echo "Result<i16,EWide>" ;; 5) echo "expected<i16,EWide>" ;; 6) echo "Result+constrained copy" ;; esac; }
 
 case "${1:-}" in
 nodiscard)
@@ -48,19 +48,20 @@ try)
     ;;
 size)
     need_arm_inc
-    for opt in -Os -O2; do
+    for opt in -Os -O2 "-Os -DINLINE_ALL"; do
         echo "--- clang++ thumbv7em-none-eabihf $opt, demo_size_chain.cpp (.text bytes / symbol bytes)"
         printf '%-3s %-22s %6s  %s\n' V variant text "read_reg  probe  read_centi  app_tick"
-        for v in 1 2 3 4 5; do
-            arm_cxx "$(std_of $v)" $opt -DVARIANT=$v -c demo_size_chain.cpp -o "$OUT/v$v$opt.o"
-            text=$($SIZE "$OUT/v$v$opt.o" | awk 'NR==2{print $1}')
+        for v in 1 2 3 4 5 6; do
+            o="$OUT/v$v$(echo "$opt" | tr -d ' =').o"
+            arm_cxx "$(std_of $v)" $opt -DVARIANT=$v -c demo_size_chain.cpp -o "$o"
+            text=$($SIZE "$o" | awk 'NR==2{print $1}')
             syms=""
             while read -r _addr sz _ty name _rest; do
                 d=$((16#$sz))
                 case "$name" in
                     read_reg*|probe*|read_centi*|app_tick*) syms="$syms ${name%%(*}=$d" ;;
                 esac
-            done < <($NM -S -C --defined-only "$OUT/v$v$opt.o")
+            done < <($NM -S -C --defined-only "$o")
             printf '%-3s %-22s %6s  %s\n' "$v" "$(name_of $v)" "$text" "$syms"
         done
     done
@@ -76,7 +77,7 @@ gcc)
 set -e
 CF="-Os -fno-exceptions -fno-rtti -mcpu=cortex-m4 -mthumb -ffunction-sections -fdata-sections"
 echo "--- arm-none-eabi-g++ -Os .o sizes (text)"
-for v in 1 2 3 4 5; do
+for v in 1 2 3 4 5 6; do
     case $v in 3|5) STD=c++23 ;; *) STD=c++20 ;; esac
     arm-none-eabi-g++ -std=$STD $CF -DVARIANT=$v -c demo_size_chain.cpp -o v$v.o
     arm-none-eabi-size v$v.o | tail -1 | awk -v v=$v '{printf "V%s text=%s\n", v, $1}'
@@ -85,10 +86,18 @@ for v in 1 2 3 4 5; do
     done < <(arm-none-eabi-nm -C --size-sort -S v$v.o)
 done
 echo "--- linked ELF (arm-none-eabi-g++ -Wl,--gc-sections, _start, stub i2c_xfer)"
-for v in 1 2 3 4 5; do
+for v in 1 2 3 4 5 6; do
     case $v in 3|5) STD=c++23 ;; *) STD=c++20 ;; esac
     arm-none-eabi-g++ -std=$STD $CF -DVARIANT=$v -DWITH_START -nostartfiles --specs=nosys.specs -Wl,--gc-sections demo_size_chain.cpp -o v$v.elf 2>/dev/null
     arm-none-eabi-size v$v.elf | tail -1 | awk -v v=$v '{printf "V%s text=%s data=%s bss=%s\n", v, $1, $2, $3}'
+done
+for opt in "-O2" "-Os -flto" "-Os -DINLINE_ALL"; do
+    echo "--- linked ELF, GCC $opt"
+    for v in 1 2 3 4 5 6; do
+        case $v in 3|5) STD=c++23 ;; *) STD=c++20 ;; esac
+        arm-none-eabi-g++ -std=$STD $opt -fno-exceptions -fno-rtti -mcpu=cortex-m4 -mthumb -ffunction-sections -fdata-sections -DVARIANT=$v -DWITH_START -nostartfiles --specs=nosys.specs -Wl,--gc-sections demo_size_chain.cpp -o t$v.elf 2>/dev/null
+        arm-none-eabi-size t$v.elf | tail -1 | awk -v v=$v '{printf "V%s text=%s\n", v, $1}'
+    done
 done
 echo "--- std::expected with .value() (VARIANT=3 -DUSE_VALUE): does the throw path pull anything?"
 arm-none-eabi-g++ -std=c++23 $CF -DVARIANT=3 -DUSE_VALUE -DWITH_START -nostartfiles --specs=nosys.specs -Wl,--gc-sections demo_size_chain.cpp -o v3v.elf 2>/dev/null

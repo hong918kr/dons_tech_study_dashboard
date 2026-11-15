@@ -8,7 +8,7 @@
 
 static const seg_t WL_PART[] = { {300000, 0.70} };
 
-static double t1 = 0;
+
 static void dt_stability(void) {
     printf("== T1: forward Euler stability (35 W step, 20 s sim, die temperature) ==\n");
     const therm_par_t *p = &PLANT_NOM;
@@ -122,7 +122,7 @@ static void guard_cost(void) {
     printf("\n== T6: cost of guard band (sustain 120 s, Ta=45; work = sum f*a*dt, normalized to thr=105) ==\n");
     static const int32_t thr[] = { 105000, 100000, 95000, 90000, 85000, 80000 };
     double w0 = 0;
-    printf("%8s %10s %8s %8s\n", "thr[C]", "work[%]", "peak", "minL");
+    printf("%8s %10s %8s %8s\n", "thr[C]", "work[%]", "peak", "maxL");
     for (int i = 0; i < 6; i++) {
         run_cfg_t rc = cfg_sustain(); rc.dur_ms = 120000; rc.gov.thr_mc = thr[i]; rc.gov.rel_mc = thr[i] - 6000; rc.gov.emg_mc = thr[i] + 8000; rc.gov.sd_mc = thr[i] + 15000;
         metrics_t m; sim_run(&rc, &g_tr); metrics_from_trace(&g_tr, 200000, &m);
@@ -145,17 +145,18 @@ static void burst_limit(void) {
 }
 static void chatter_table(void) {
     printf("\n== T8: level-direction reversals per 10 s, warm ambient scenario (limit CHAT_MAX=%d) ==\n", CHAT_MAX);
-    static const struct { const char *n; uint32_t bug; int32_t rel; } t[] = { {"good (hyst 6 C)", 0, 84000}, {"hysteresis sign bug", BUG_HYST_SIGN, 84000}, {"good but hyst 1 C", 0, 89000}, {"good but hyst 0.5 C", 0, 89500} };
+    static const struct { const char *n; uint32_t bug; int32_t rel; } t[] = { {"good (hyst 6 C)", 0, 84000}, {"hysteresis sign bug", BUG_HYST_SIGN, 84000}, {"good but hyst 1 C", 0, 89000}, {"good but hyst 0.5 C", 0, 89500}, {"good, Ta=62 (limit cycle)", 0, 84000} };
     printf("%-22s %8s %8s %8s\n", "case", "max_rev", "changes", "chatter");
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         run_cfg_t rc = cfg_warm(); rc.bugs = t[i].bug; rc.gov.rel_mc = t[i].rel;
+        if (i == 4) { rc.t_amb = 62; rc.dur_ms = 300000; rc.init = (therm_t){ {80, 79, 76} }; }
         report_t r; sim_run(&rc, &g_tr); rep_init(&r); check_policy(&g_tr, &SPEC_NOM, &r);
         uint32_t chg = 0; for (uint32_t k = 0; k < g_tr.n; k++) if (g_tr.row[k].lv_after != g_tr.row[k].lv_before) chg++;
         printf("%-22s %8d %8u %8u\n", t[i].n, max_rev_10s(&g_tr), chg, r.count[V_CHATTER]);
     }
 }
 int main(void) {
-    (void)t1;
+
     dt_stability();
     run_cfg_t s = cfg_sustain();
     offset_table("sustain a=1.0, Ta=45, from 45 C", s);

@@ -53,7 +53,7 @@ struct sd_selftest {
 #define SD_IOC_UPDATE	_IOW(SD_MAGIC, 2, __u32)		/* n updates, process path */
 #define SD_IOC_STOP	_IO(SD_MAGIC, 3)			/* stop the timer */
 #define SD_IOC_GET_STATS _IOR(SD_MAGIC, 4, struct sd_stats)	/* -EBUSY while timer runs */
-#define SD_IOC_ABBA	_IOW(SD_MAGIC, 5, __u32)		/* 0:A->B 1:B->A 2:same class 3:nested */
+#define SD_IOC_ABBA	_IOW(SD_MAGIC, 5, __u32)		/* 0:A->B 1:B->A 2:same class 3:nested 4:sleep in lock */
 #define SD_IOC_SELFTEST	_IOR(SD_MAGIC, 6, struct sd_selftest)
 
 #endif /* SYNCDRV_UAPI_H */

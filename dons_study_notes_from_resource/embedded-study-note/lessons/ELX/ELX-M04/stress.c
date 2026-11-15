@@ -4,7 +4,7 @@
  *   stress selftest
  *   stress run <none|mutex|spin|irqsave|atomic> <timer_us[h]> <with_list> <threads> <k> <batch> [check]
  *     timer_us: 0 = no IRQ path; suffix h = HRTIMER_MODE_REL_HARD ("500h")
- *   stress abba | stress recursive | stress nested
+ *   stress abba | stress recursive | stress nested | stress sleep_in_spin
  * Prints RESULT lines; with "check", also PASS:/FAIL: lines.
  */
 #define _GNU_SOURCE
@@ -173,6 +173,8 @@ int main(int argc, char **argv)
 		return do_abba(0, 1);
 	if (argc >= 2 && !strcmp(argv[1], "recursive"))
 		return do_abba(2, 2);
+	if (argc >= 2 && !strcmp(argv[1], "sleep_in_spin"))
+		return do_abba(4, 4);
 	if (argc >= 2 && !strcmp(argv[1], "nested")) {
 		int rc = do_abba(3, 3);
 

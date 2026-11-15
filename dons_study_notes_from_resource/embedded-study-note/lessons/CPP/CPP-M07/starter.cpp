@@ -1,5 +1,5 @@
 // CPP-M07 placement new와 정적 저장소 수명 관리
-// build: c++ -std=c++20 -Wall -Wextra -Werror -O2 -fno-exceptions -fno-rtti solution.cpp -o solution && ./solution
+// build: c++ -std=c++20 -Wall -Wextra -Werror -O2 -fno-exceptions -fno-rtti starter.cpp -o starter && ./starter
 //
 // 힙 없는 펌웨어의 "나중에 만드는 전역 드라이버":
 //   alignas(T) std::byte buf[sizeof(T)] (.bss) + ::new (buf) T(...)  (시점은 board_init 이 고른다)

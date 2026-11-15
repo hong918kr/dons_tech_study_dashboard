@@ -310,6 +310,7 @@ static void test_lat(void) {
 static void test_parse(void) {
     printf("== A3 bpftrace 줄 파싱 ==\n");
     bt_row_t r;
+    memset(&r, 0, sizeof r);
     CHECK(bt_parse_line("@wait_ns[187650912338240]: 913455\n", &r));
     CHECK(strcmp(r.map, "wait_ns") == 0 && r.uaddr == 187650912338240ull && r.key2 == -1 && r.value == 913455);
     CHECK(bt_parse_line("@holder_ns[187650912338240, 2231]: 77", &r));

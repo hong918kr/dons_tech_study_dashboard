@@ -1,0 +1,411 @@
+/* ENV: qemu */
+/* ELX-B04 추가 연습 — solution.c + P1..P5 (USR2 끄기, 종료 청소, rootfs 종류, 커널->init 인자, PID 1 시그널)
+ *   빌드 (Lima VM): gcc -std=c11 -Wall -Wextra -Werror -O2 -static practice.c -o init
+ *   실행: check.sh 가 cpio initramfs 를 만들고 QEMU virt 에서 rdinit=/init 으로 부팅한다.
+ *   커널 인자: B04_SCRIPT=/etc/selftest.sh -> 그 BusyBox sh 스크립트를 비대화식으로 실행
+ *              (없으면 /dev/console 에서 대화형 셸)      '-- b04arg' -> init 의 argv[1]
+ */
+#define _GNU_SOURCE
+#include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mount.h>
+#include <signal.h>
+#include <sys/reboot.h>
+#include <sys/statfs.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#ifndef TMPFS_MAGIC
+#define TMPFS_MAGIC 0x01021994
+#endif
+extern char **environ;
+static sigset_t g_oldmask;   /* P1: PID 1 이 막기 전의 마스크 -> 자식에게 되돌려 준다 */
+
+/* ---------------- Part A: 가상 파일시스템 + 콘솔 ---------------- */
+/* proc->/proc, sysfs->/sys, devtmpfs->/dev 를 마운트한다 (디렉터리가 없으면 mkdir 0755).
+ * 이미 마운트돼 있으면(EBUSY) 성공으로 친다. 성공한 개수(0..3)를 돌려준다. */
+static int mount_early(void)
+{
+	static const char *const fs[3][2] = {
+		{ "proc", "/proc" }, { "sysfs", "/sys" }, { "devtmpfs", "/dev" },
+	};
+	int ok = 0;
+
+	for (int i = 0; i < 3; i++) {
+		if (mkdir(fs[i][1], 0755) < 0 && errno != EEXIST)
+			continue;
+		if (mount(fs[i][0], fs[i][1], fs[i][0], MS_NOSUID, NULL) == 0 || errno == EBUSY)
+			ok++;
+	}
+	return ok;
+}
+
+/* fd 0/1/2 중 하나라도 닫혀 있으면(EBADF) /dev/console 을 열어 0,1,2 로 dup2 한다.
+ * 반환: 0 = 원래 정상, 1 = 고쳤다, -1 = 못 고쳤다 */
+static int fix_console(void)
+{
+	int bad = 0;
+
+	for (int i = 0; i < 3; i++)
+		if (fcntl(i, F_GETFD) < 0 && errno == EBADF)
+			bad = 1;
+	if (!bad)
+		return 0;
+	int fd = open("/dev/console", O_RDWR | O_NOCTTY);
+	if (fd < 0)
+		return -1;
+	for (int i = 0; i < 3; i++)
+		if (fd != i && dup2(fd, i) < 0)
+			return -1;
+	if (fd > 2)
+		close(fd);
+	return 1;
+}
+
+/* ---------------- Part B: 커널 명령줄 파싱 ---------------- */
+/* cmdline("/proc/cmdline" 내용, 공백 구분, 끝에 '\n' 가능)에서 key 의 값을 찾는다.
+ * 값은 "..." 로 감쌀 수 있다(따옴표는 떼고 안의 공백은 유지). 같은 key 가 여러 번이면 마지막이 이긴다.
+ * '=' 없이 key 만 있으면 val="" 로 찾은 것으로 친다.
+ * 반환: 1 = 찾음, 0 = 없음, -1 = val 버퍼(n)가 작음 (잘린 값 + NUL) */
+static int cmdline_get(const char *cmdline, const char *key, char *val, size_t n)
+{
+	size_t klen = strlen(key);
+	int found = 0;
+	const char *p = cmdline;
+
+	while (*p) {
+		while (*p && isspace((unsigned char)*p))
+			p++;
+		if (!*p)
+			break;
+		const char *tok = p;
+		int inq = 0;
+		while (*p && (inq || !isspace((unsigned char)*p))) {
+			if (*p == '"')
+				inq = !inq;
+			p++;
+		}
+		const char *end = p;
+		if ((size_t)(end - tok) < klen || strncmp(tok, key, klen) != 0)
+			continue;
+		const char *v = tok + klen;
+		if (v != end && *v != '=')
+			continue;                 /* "B04_SCRIPTX=..." 는 다른 key */
+		if (v != end)
+			v++;                      /* '=' 건너뛰기 */
+		size_t o = 0;
+		found = 1;
+		for (; v < end; v++) {
+			if (*v == '"')
+				continue;
+			if (o + 1 >= n) {
+				found = -1;
+				break;
+			}
+			val[o++] = *v;
+		}
+		if (n)
+			val[o] = '\0';
+	}
+	return found;
+}
+
+/* ---------------- Part C: 자식 거두기 · 스크립트 실행 · 끄기 ---------------- */
+/* 자식(입양된 고아 포함)을 모두 거둔다: 블로킹 waitpid(-1) 를 ECHILD 가 날 때까지.
+ * 거둔 개수를 돌려주고, 정상 종료 코드를 codes[] 에 (최대 max 개) 적는다. */
+static int reap_all(int *codes, int max)
+{
+	int n = 0, st;
+	pid_t r;
+
+	while ((r = waitpid(-1, &st, 0)) > 0 || (r < 0 && errno == EINTR)) {
+		if (r < 0)
+			continue;
+		if (n < max)
+			codes[n] = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+		n++;
+	}
+	return n;
+}
+
+/* argv[0] 을 실행하고 그 프로세스가 끝날 때까지 기다린다. ctty=1 이면 자식이 setsid() +
+ * TIOCSCTTY 로 콘솔을 제어 터미널로 잡는다(대화형 셸의 job control 용).
+ * 기다리는 동안 거둔 다른 자식(고아)은 *orphans 에 더한다.
+ * 반환: 종료 코드, 시그널로 죽으면 128+sig, fork 실패 -1 (exec 실패는 자식의 127) */
+static int spawn_wait(char *const argv[], int ctty, int *orphans)
+{
+	fflush(stdout);
+	pid_t pid = fork();
+	if (pid < 0)
+		return -1;
+	if (pid == 0) {
+		sigprocmask(SIG_SETMASK, &g_oldmask, NULL);   /* P1: 막힌 마스크는 fork/exec 로 상속된다 */
+		if (ctty) {
+			setsid();
+			ioctl(STDIN_FILENO, TIOCSCTTY, 1);
+		}
+		execv(argv[0], argv);
+		_exit(127);
+	}
+	for (;;) {
+		int st;
+		pid_t r = waitpid(-1, &st, 0);
+		if (r < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (r != pid) {
+			(*orphans)++;
+			continue;
+		}
+		return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+	}
+}
+
+/* PID 1 은 절대 return/exit 하면 안 된다: 버퍼를 비우고 reboot(RB_POWER_OFF) */
+static void power_off(void)
+{
+	printf("B04 init: power off\n");
+	fflush(stdout);
+	sync();
+	reboot(RB_POWER_OFF);
+}
+
+/* ---------------- 추가 연습 P1..P4 ---------------- */
+/* P1: SIGUSR2(poweroff)/SIGTERM(reboot) 를 미리 막아 두고(경쟁 없음) 나중에 sigwaitinfo 로 받는다.
+ *     BusyBox init 과 같은 약속: USR2 = poweroff, TERM = reboot, USR1 = halt */
+static void block_shutdown_signals(sigset_t *set)
+{
+	sigemptyset(set);
+	sigaddset(set, SIGUSR2);
+	sigaddset(set, SIGTERM);
+	sigprocmask(SIG_BLOCK, set, &g_oldmask);
+}
+
+/* P2: 끄기 전에 남은 프로세스를 모두 정리한다. kill(-1, sig) 는 PID 1 자신을 뺀 모두에게 간다. */
+static int kill_all(int sig)
+{
+	return kill(-1, sig);
+}
+
+/* P3: /proc/mounts 에서 마운트 지점 dir 의 파일시스템 종류를 buf 에 복사 */
+static const char *fstype_of(const char *dir, char *buf, size_t n)
+{
+	char line[512], d[256], t[64];
+	FILE *f = fopen("/proc/mounts", "r");
+	const char *res = NULL;
+
+	if (!f)
+		return NULL;
+	while (fgets(line, sizeof line, f))
+		if (sscanf(line, "%*s %255s %63s", d, t) == 2 && !strcmp(d, dir)) {
+			snprintf(buf, n, "%s", t);
+			res = buf;            /* 겹쳐 마운트되면 마지막 줄이 보이는 것 */
+		}
+	fclose(f);
+	return res;
+}
+
+/* P4: 커널이 준 환경 변수 중 우리가 넣은 PATH 를 뺀 개수 */
+static int count_kernel_env(void)
+{
+	int n = 0;
+	for (char **e = environ; *e; e++)
+		if (strncmp(*e, "PATH=", 5))
+			n++;
+	return n;
+}
+
+/* ---------------- 테스트 도우미 (TODO 아님) ---------------- */
+static int g_pass, g_total;
+#define CHECK(expr, name) do { g_total++; if (expr) { g_pass++; printf("PASS: %s\n", name); } \
+	else printf("FAIL: %s  (%s:%d)\n", name, __FILE__, __LINE__); } while (0)
+
+/* /proc/mounts 에 "<src> <dir> <type> ..." 줄이 있나 */
+static int mount_has(const char *dir, const char *type)
+{
+	char line[512], d[256], t[64];
+	FILE *f = fopen("/proc/mounts", "r");
+	int hit = 0;
+
+	if (!f)
+		return 0;
+	while (fgets(line, sizeof line, f))
+		if (sscanf(line, "%*s %255s %63s", d, t) == 2 && !strcmp(d, dir) && !strcmp(t, type))
+			hit = 1;
+	fclose(f);
+	return hit;
+}
+
+/* /proc/<pid>/stat 의 상태가 'Z' 인 프로세스 수. /proc 이 없으면 -1 */
+static int count_zombies(void)
+{
+	DIR *d = opendir("/proc");
+	struct dirent *e;
+	int z = 0;
+
+	if (!d)
+		return -1;
+	while ((e = readdir(d))) {
+		char path[300], buf[256];
+		if (!isdigit((unsigned char)e->d_name[0]))
+			continue;
+		snprintf(path, sizeof path, "/proc/%s/stat", e->d_name);
+		FILE *f = fopen(path, "r");
+		if (!f)
+			continue;
+		size_t len = fread(buf, 1, sizeof buf - 1, f);
+		fclose(f);
+		buf[len] = '\0';
+		char *rp = strrchr(buf, ')');
+		if (rp && rp[1] == ' ' && rp[2] == 'Z')
+			z++;
+	}
+	closedir(d);
+	return z;
+}
+
+static int read_file(const char *path, char *buf, size_t n)
+{
+	int fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return -1;
+	ssize_t r = read(fd, buf, n - 1);
+	close(fd);
+	if (r < 0)
+		return -1;
+	buf[r] = '\0';
+	return (int)r;
+}
+
+/* 자식은 손자를 만들고 바로 exit(7) -> 손자는 고아가 되어 PID 1 에 입양된 뒤 exit(42) */
+static pid_t make_orphan_pair(void)
+{
+	fflush(stdout);
+	pid_t c = fork();
+	if (c == 0) {
+		if (fork() == 0) {
+			while (getppid() != 1)
+				usleep(1000);
+			_exit(42);
+		}
+		_exit(7);
+	}
+	return c;
+}
+
+int main(int argc, char **argv)
+{
+	int mounted = mount_early();
+	int con = fix_console();
+	char cmdline[1024] = "", v[128];
+
+	setvbuf(stdout, NULL, _IONBF, 0);
+	setenv("PATH", "/sbin:/usr/sbin:/bin:/usr/bin", 0);   /* 커널은 PATH 를 주지 않는다 */
+	printf("B04 init: pid=%d mounts=%d console=%s argc=%d\n", (int)getpid(), mounted,
+	       con == 0 ? "ok" : con == 1 ? "repaired" : "broken", argc);
+
+	/* Part A */
+	struct stat so;
+	CHECK(getpid() == 1, "A1 running as PID 1");
+	CHECK(mounted == 3, "A2 mount_early() mounted proc+sysfs+devtmpfs");
+	CHECK(mount_has("/proc", "proc") && mount_has("/sys", "sysfs") && mount_has("/dev", "devtmpfs"),
+	      "A3 /proc/mounts lists proc, sysfs, devtmpfs");
+	CHECK(fstat(1, &so) == 0 && S_ISCHR(so.st_mode) && major(so.st_rdev) == 5 && minor(so.st_rdev) == 1,
+	      "A4 stdout is /dev/console (char 5:1)");
+	CHECK(con >= 0 && fcntl(0, F_GETFD) >= 0 && fcntl(2, F_GETFD) >= 0, "A5 fd 0/1/2 open");
+
+	/* Part B */
+	int r1 = cmdline_get("console=ttyAMA0 B04_SCRIPT=/etc/s.sh quiet\n", "B04_SCRIPT", v, sizeof v);
+	CHECK(r1 == 1 && !strcmp(v, "/etc/s.sh"), "B1 key=value, trailing newline");
+	CHECK(cmdline_get("XB04_SCRIPT=a B04_SCRIPTX=b", "B04_SCRIPT", v, sizeof v) == 0, "B2 no prefix match");
+	CHECK(cmdline_get("ro quiet panic=-1", "quiet", v, sizeof v) == 1 && v[0] == '\0', "B3 flag without =");
+	CHECK(cmdline_get("a=1 msg=\"hello world\" b=2", "msg", v, sizeof v) == 1 && !strcmp(v, "hello world"),
+	      "B4 quoted value keeps the space");
+	CHECK(cmdline_get("root=/dev/vda root=/dev/vdb", "root", v, sizeof v) == 1 && !strcmp(v, "/dev/vdb"),
+	      "B5 last one wins");
+	CHECK(cmdline_get("B04_SCRIPT=/etc/s.sh", "B04_SCRIPT", v, 4) == -1 && !strcmp(v, "/et"),
+	      "B6 small buffer -> -1, truncated");
+	read_file("/proc/cmdline", cmdline, sizeof cmdline);
+	char script[128] = "";
+	int have_script = cmdline_get(cmdline, "B04_SCRIPT", script, sizeof script) == 1 && script[0];
+	const char *env = getenv("B04_SCRIPT");
+	CHECK(!have_script || (env && !strcmp(env, script)), "B7 kernel copied B04_SCRIPT= into init's envp");
+	CHECK(argc >= 2 && !strcmp(argv[1], "b04arg"), "B8 word after '--' arrived as argv[1]");
+
+	/* Part C: reaping */
+	int codes[4] = { -1, -1, -1, -1 };
+	siginfo_t si;
+	pid_t c = make_orphan_pair();
+	waitid(P_PID, (id_t)c, &si, WEXITED | WNOWAIT);   /* 끝날 때까지 기다리되 거두지는 않는다 */
+	CHECK(count_zombies() >= 1, "C1 exited child is a zombie until PID 1 reaps it");
+	int n = reap_all(codes, 4);
+	CHECK(n == 2 && ((codes[0] == 7 && codes[1] == 42) || (codes[0] == 42 && codes[1] == 7)),
+	      "C2 reap_all() collected child(7) + adopted orphan(42)");
+	CHECK(count_zombies() == 0 && waitpid(-1, NULL, WNOHANG) < 0 && errno == ECHILD, "C3 no zombies, ECHILD");
+
+	/* P3, P4 */
+	char ft[64];
+	struct statfs sf;
+	CHECK(fstype_of("/", ft, sizeof ft) && !strcmp(ft, "rootfs"), "P3a / is 'rootfs' in /proc/mounts");
+	CHECK(statfs("/", &sf) == 0 && sf.f_type == TMPFS_MAGIC, "P3b rootfs is tmpfs (no root= given)");
+	CHECK(!getenv("b04.dot") && cmdline_get(cmdline, "b04.dot", v, sizeof v) == 1 && !strcmp(v, "1"),
+	      "P4a dotted key stays in /proc/cmdline, not in envp");
+	CHECK(count_kernel_env() == 3 && !strcmp(getenv("HOME"), "/") && !strcmp(getenv("TERM"), "linux"),
+	      "P4b envp = HOME, TERM, B04_SCRIPT");
+	CHECK(!strcmp(argv[0], "/init"), "P4c argv[0] is the rdinit path");
+
+	sigset_t sset;
+	block_shutdown_signals(&sset);
+	if (have_script) {
+		int orphans = 0;
+		char *sargv[] = { "/bin/sh", script, NULL };
+		int rc = spawn_wait(sargv, 0, &orphans);
+		printf("B04 init: %s exited %d, orphans reaped meanwhile %d\n", script, rc, orphans);
+		CHECK(rc == 3, "C4 script ran to the end (exit 3)");
+		/* practice.sh 는 'sleep 1000 &' 데몬을 남긴다 -> 여기서 블로킹 reap_all 하면 영원히 기다린다 */
+		CHECK(orphans == 0 && kill(-1, 0) == 0, "C5 script's leftover daemon is still running");
+		CHECK(count_zombies() == 0, "C6 no zombies after script");
+	} else {
+		puts("(practice needs B04_SCRIPT=)");
+	}
+	if (have_script) {
+		siginfo_t ss;
+		int sig = sigwaitinfo(&sset, &ss);    /* 스크립트가 이미 보냈어도 pending 이라 바로 돌아온다 */
+		printf("B04 init: got signal %d from pid %d\n", sig, (int)ss.si_pid);
+		CHECK(sig == SIGUSR2 && ss.si_pid > 1, "P1 SIGUSR2 (poweroff request) received race-free");
+		for (int i = 0; i < 4; i++)
+			codes[i] = -1;
+		kill_all(SIGTERM);
+		int swept = reap_all(codes, 4);
+		printf("B04 init: shutdown sweep reaped %d: %d %d %d\n", swept, codes[0], codes[1], codes[2]);
+		int has143 = 0, okcodes = swept >= 1;
+		for (int i = 0; i < swept && i < 4; i++) {
+			has143 |= codes[i] == 128 + SIGTERM;
+			okcodes &= codes[i] == 128 + SIGTERM || codes[i] == 5 || codes[i] == 0;
+		}
+		CHECK(okcodes && has143, "P2a kill(-1, SIGTERM) stopped the leftover 'sleep 1000'");
+		CHECK(count_zombies() == 0 && waitpid(-1, NULL, WNOHANG) < 0 && errno == ECHILD, "P2b nothing left");
+	} else {
+		int orphans = 0;
+		char *sh[] = { "/bin/sh", NULL };
+		printf("B04 init: no B04_SCRIPT= -> interactive shell, 'exit' powers off\n");
+		spawn_wait(sh, 1, &orphans);
+		reap_all(codes, 4);
+	}
+
+	printf("%d/%d passed\n", g_pass, g_total);
+	printf("INIT_DONE\n");
+	power_off();
+	return g_pass == g_total ? 0 : 1;   /* 여기까지 오면 커널 panic: Attempted to kill init! */
+}

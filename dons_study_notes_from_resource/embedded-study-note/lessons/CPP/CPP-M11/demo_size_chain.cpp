@@ -4,12 +4,20 @@
 //   VARIANT=3 std::expected<int16_t, DrvErr16>  (C++23; 필요시 -DUSE_VALUE 로 .value())
 //   VARIANT=4 Result<int16_t, DrvErrWide> (8바이트 → 숨은 포인터로 메모리 반환)
 //   VARIANT=5 std::expected<int16_t, DrvErrWide>
+//   VARIANT=6 Result<int16_t, DrvErr16> + C++20 constrained 복사 생성자 (requires = default / requires(!...) 쌍)
+//   -DINLINE_ALL: 중간 층을 static (인라인 허용) 으로
 // checks.sh size 가 ARM 타깃으로 빌드해 표를 만든다. (헤더 없이 쓰는 코드가 아니라 recipe (b)/(c) 필요)
 #include <cstdint>
+#include <memory>
+#include <type_traits>
 
 extern "C" int i2c_xfer(std::uint8_t addr, const std::uint8_t* w, unsigned nw, std::uint8_t* r, unsigned nr);
 
+#if defined(INLINE_ALL)
+#define NOINLINE static
+#else
 #define NOINLINE [[gnu::noinline]]
+#endif
 
 struct DrvErr16 {                        // 2바이트: [15:12]code [11:8]bus [7:0]reg
     std::uint16_t raw;
@@ -79,6 +87,13 @@ class [[nodiscard]] Result {
 public:
     constexpr Result(T v) : val_(v), has_(true) {}
     constexpr Result(Unexpected<E> u) : err_(u.error), has_(false) {}
+#if VARIANT == 6
+    static constexpr bool kC = std::is_trivially_copy_constructible_v<T> && std::is_trivially_copy_constructible_v<E>;
+    constexpr Result(const Result&) requires kC = default;
+    constexpr Result(const Result& o) requires (!kC) : has_(o.has_) {
+        if (has_) std::construct_at(&val_, o.val_); else std::construct_at(&err_, o.err_);
+    }
+#endif
     constexpr bool has_value() const { return has_; }
     constexpr T value() const { return val_; }
     constexpr const T& operator*() const { return val_; }
@@ -99,7 +114,7 @@ private:
     bool has_ = true;
 };
 
-#if VARIANT == 2
+#if VARIANT == 2 || VARIANT == 6
 using DE = DrvErr16;
 template <class T> using R = Result<T, DE>;
 template <class E> constexpr auto mk_err(E e) { return Unexpected<E>{e}; }

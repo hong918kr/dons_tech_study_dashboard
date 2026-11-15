@@ -503,36 +503,36 @@ FAIL starter.c:374  atomic_load(&amp;g_cfg) == U
 <p><strong>실수 6 — 숫자 하나로 결론.</strong> 같은 1 스레드 (c) 가 2859 / 4208, (a) 가 E 코어만이면 32–146 으로 흔들렸다. load average 를 같이 적고, 여러 번 재 중앙값, 그리고 <strong>곡선 모양과 배수</strong> 로 말한다. 코어 고정이 안 되는 맥에서는 E 코어 비율도 같이 기록한다.</p>
 <p><strong>실수 7 — invariant 만 보고 프로토콜이 맞다고 결론.</strong> 시작 코드의 빈 <code>mesi_write</code> 는 SWMR 을 한 번도 깨지 않는다 (아무것도 안 하니까). "나쁜 일이 안 일어났다" 와 "해야 할 일을 했다" 는 다른 검사다 — 개수 공식(liveness 쪽)과 불변식(safety 쪽)을 같이 둔다. ARCH-A04 의 데이터 값 불변식이 그 둘째 역할을 한다.</p>
 <h2 id="8-면접-q-a">8. 면접 Q&amp;A<a class="anchor" href="#8-면접-q-a" aria-label="link">#</a></h2>
-<p>&lt;details&gt;&lt;summary&gt;Q1. 코어 8개가 카운터 하나를 atomic_fetch_add 하면 처리량이 어떻게 되나요? 왜죠?&lt;/summary&gt;</p>
+<details><summary>Q1. 코어 8개가 카운터 하나를 atomic_fetch_add 하면 처리량이 어떻게 되나요? 왜죠?</summary>
 <p>1 스레드보다 <strong>떨어지고 그 뒤로 평평</strong> 하다. 이 맥 실측 720 → 171 Mops/s (k=2), k = 12 까지 161–185. RMW 는 라인을 M(독점)으로 가져야 하고 M 은 한 시점에 한 코어만 가질 수 있으니(SWMR), 총 처리량은 "라인 소유권이 넘어가는 속도" 가 상한이다. MESI 로 세면 round-robin 에서 연산마다 BusRdX 1 + cache-to-cache 1 + 무효화 1.</p>
 <p>꼬리질문: "그럼 어떻게 고치죠?" → 코어별 카운터(128 B 라인마다) + 읽을 때 합. 9.3배까지 늘었다. 대가는 읽기 쪽이 k 라인을 읽어야 하고, 읽는 순간 값이 근사라는 것. 리눅스 <code>percpu_counter</code>, <code>this_cpu_inc</code> 가 이 설계 (OS-B05, LLAT-B06 의 배치도 같은 생각).</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;Q2. MESI 에서 코어 하나가 S 상태 라인에 쓰기 하나를 하면 무슨 일이 일어나나요?&lt;/summary&gt;</p>
+<details><summary>Q2. MESI 에서 코어 하나가 S 상태 라인에 쓰기 하나를 하면 무슨 일이 일어나나요?</summary>
 <p>요청자는 데이터를 이미 갖고 있으므로 데이터 없이 <strong>BusUpgr</strong>(업그레이드/무효화 요청)를 낸다. S 사본을 가진 다른 코어는 모두 I 가 되고(응답/ack), 요청자는 S → M. 이후 같은 코어의 쓰기는 hit. 만약 요청자가 I 였다면 <strong>BusRdX (= RFO, read for ownership)</strong> — 데이터와 독점을 같이 요청하고, M 주인이 있으면 그 캐시가 데이터를 직접 준다(intervention). 내 모델 표: S → <code>upgr++, inval += 사본</code>, I → <code>rdx++, c2c 또는 mem, inval += 사본</code>.</p>
 <p>꼬리질문: "E 상태는 왜 있죠?" → 혼자 읽은 라인(E)에 쓰면 버스 없이 E→M. 모델에서 k = 1 패턴 a' (ldr + cas) 는 트랜잭션 1개뿐이다. MSI 였다면 BusRd 후 BusUpgr 로 2개 — private 데이터를 읽고 쓰는 흔한 경우를 공짜로 만든다 (MSI vs MESI 카운트 비교는 ARCH-A04).</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;Q3. 왜 CAS 루프가 fetch_add 보다 경합에서 훨씬 나쁘죠? 숫자로요.&lt;/summary&gt;</p>
+<details><summary>Q3. 왜 CAS 루프가 fetch_add 보다 경합에서 훨씬 나쁘죠? 숫자로요.</summary>
 <p><code>ldr</code> 로 읽을 때 한 번(S 로), <code>cas</code> 로 쓸 때 또 한 번(M 으로) 라인을 요청한다. 실패 없는 최선 스케줄에서도 연산당 2 트랜잭션 (모델 k=8: 1.999). 경합하면 읽기와 cas 사이에 뺏겨 실패하고, 실패한 시도도 라인을 가져온다 → 연산당 대략 2 + f. 실측 f = 0.6 (k=2) → 1.6 (k=12), 처리량은 <code>ldadd</code> 의 1/3.5 → 1/5.7. 모두가 동시에 읽고 동시에 cas 하는 최악 스케줄이면 성공 한 번에 약 2k−1 트랜잭션 (연습 2).</p>
 <p>꼬리질문: "LL/SC 는요?" → <code>stxr</code> 이 모니터가 깨지면 실패하는 구조라 비슷하게 재시도가 생긴다. ARMv8.1 LSE 가 들어온 이유. 세부 측정은 ARM-M04.</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;Q4. 모델은 연산마다 라인이 한 번 움직인다고 하는데, 실측과 맞나요?&lt;/summary&gt;</p>
+<details><summary>Q4. 모델은 연산마다 라인이 한 번 움직인다고 하는데, 실측과 맞나요?</summary>
 <p>곡선 모양(평평)은 맞았지만 이동 횟수는 아니다. <code>fetch_add</code> 가 돌려준 옛 값이 "내 직전 값 + 1" 이 아닌 비율을 재 보니 0.29–0.32 — 한 코어가 라인을 잡으면 평균 3.2번 연달아 증가했다. 그리고 연산당 5.85 ns 인데 LLAT-M05 의 P–P 왕복이 74–90 ns 이므로 매 연산 이동은 불가능하다. 이동 한 번 ≈ (5.85 − 1.39) / 0.3 ≈ 15 ns 로 역산된다(추정). 실제 칩은 스누핑 버스가 아니라 클러스터 L2 + 디렉터리/snoop filter 구조이고, 원자 연산을 홈 노드에서 실행(far atomic, CHI)할 가능성도 있다 — Apple 은 공개하지 않았다.</p>
 <p>꼬리질문: "그럼 모델이 쓸모 있나요?" → 설계 비교용으로는 그렇다. "패턴 b 는 n 과 무관하게 콜드 미스 k 번", "read-mostly 갱신 1번 = 무효화 R" 같은 <strong>비율과 스케일링</strong> 은 구조와 무관하게 성립한다.</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;Q5. 읽기 전용 공유 데이터는 왜 코어 수에 비례해서 빨라지나요? 그런데 가끔 갱신하면요?&lt;/summary&gt;</p>
+<details><summary>Q5. 읽기 전용 공유 데이터는 왜 코어 수에 비례해서 빨라지나요? 그런데 가끔 갱신하면요?</summary>
 <p>모든 코어가 같은 라인을 <strong>S</strong> 로 들고 각자 L1 에서 읽는다. 쓰는 코어가 없으니 무효화가 없다 (모델: 코어 × 라인당 BusRd 1번뿐). 실측 12 스레드 10.3배.</p>
 <p>갱신이 끼면: writer 의 쓰기 한 번이 reader 사본 R 개를 무효화하고, 각 reader 는 다음 읽기에서 다시 가져온다 (트랜잭션 1 + R). 읽기 중 버스를 쓰는 비율 = 1/every. 실측 (d) 에서는 writer 가 약 65–95 ns 마다 갱신해도 reader 처리량이 c 의 62% 였고, 대신 writer 가 reader 수에 따라 느려졌다 (15.1 → 10.8 갱신/µs).</p>
 <p>꼬리질문: "그럼 자주 바뀌는 큰 설정은?" → 버전 워드와 본문을 분리하고 seqlock(LLAT-M02) 또는 RCU(OS-A03) — 본문을 통째로 새로 만들고 포인터 하나만 바꾼다.</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;Q6. 12 코어인데 스레드별 카운터가 12배가 안 나와요. 일관성 때문인가요?&lt;/summary&gt;</p>
+<details><summary>Q6. 12 코어인데 스레드별 카운터가 12배가 안 나와요. 일관성 때문인가요?</summary>
 <p>아니다. 모델상 일관성 트래픽은 0 에 가깝다. 원인은 <strong>코어가 같지 않다</strong> 는 것: Super 2 + Performance 4 = 6개까지는 거의 선형(k=6 5.4배), k ≥ 7 은 E 코어가 끼는데 E 코어는 같은 루프를 P 코어의 1/3 속도로 돈다(BACKGROUND QoS 실측 217 vs 650 Mops/s). BACKGROUND 로 E 코어만 쓰면 k = 6 에서 곡선이 멈춘다 — E 코어가 6개뿐이라서. 거기에 다른 프로세스 부하(load 5–8), 클러스터 공유 L2 와 전력/클럭 공유가 더해진다.</p>
 <p>꼬리질문: "리눅스면 어떻게 확인하죠?" → <code>taskset</code>/<code>sched_setaffinity</code> 로 코어를 고정하고(맥은 불가, LLAT-M05), <code>perf stat</code> 으로 PMU 이벤트(Armv8 공통 이벤트 <code>L1D_CACHE_REFILL</code> 등)를 같이 본다. 어느 라인이 HITM(다른 코어의 M 에서 온 hit)을 많이 내는지는 <code>perf c2c</code> (LPERF-A03).</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;Q7. coherence 와 consistency 는 어떻게 다르죠? Part C 의 단조성 테스트는 어느 쪽인가요?&lt;/summary&gt;</p>
+<details><summary>Q7. coherence 와 consistency 는 어떻게 다르죠? Part C 의 단조성 테스트는 어느 쪽인가요?</summary>
 <p>coherence = <strong>한 주소</strong> 에 대한 약속: 모든 쓰기가 하나의 순서를 갖고, 모든 코어가 그 순서와 모순되지 않게 읽는다 (SWMR + 데이터 값 불변식). consistency(메모리 모델) = <strong>여러 주소</strong> 사이의 순서: x 를 쓰고 y 를 쓴 것을 다른 코어가 같은 순서로 보나. Part C 는 한 주소라 coherence 쪽이고, relaxed 로도 성립한다 (C11 5.1.2.4 의 read-read coherence). 서로 다른 주소의 순서는 ARM 에서 relaxed 로는 보장되지 않는다 — OS-M08 에서 relaxed 플래그 메시지 패싱이 실제로 깨졌고, ARCH-A05 / MEM-M07 이 그걸 리트머스로 다룬다.</p>
 <p>꼬리질문: "coherent 한 시스템인데 배리어가 왜 필요하죠?" → coherence 프로토콜은 "어느 라인이든 결국 한 값" 만 보장한다. 코어 안의 store buffer, 비순차 load 가 <strong>다른 주소들 사이의 순서</strong> 를 바꾼다 — 그걸 막는 게 <code>dmb</code>/<code>ldar</code>/<code>stlr</code> (ARM-M05).</p>
 </details>
-<p>&lt;details&gt;&lt;summary&gt;Q8. 실리콘 검증에서 캐시 일관성을 어떻게 스트레스 테스트하나요?&lt;/summary&gt;</p>
+<details><summary>Q8. 실리콘 검증에서 캐시 일관성을 어떻게 스트레스 테스트하나요?</summary>
 <p>이 레슨 Part A 의 판정이 그대로 쓰인다: 모든 코어가 같은 주소를 RMW 하고 <strong>(1) 최종 합 == 연산 수, (2) 돌려받은 옛 값들이 0..N−1 의 순열</strong> 인지 본다 — 중복은 lost update(일관성 위반), 빠진 값은 쓰기 유실. 여기에 false sharing 패턴(한 라인 안 서로 다른 워드), read-mostly 무효화 폭풍, eviction 을 강제하는 큰 작업 집합, DMA 등 코어가 아닌 에이전트를 섞는다. 판정은 결정적이어야 하고(타이밍 무관), 타이밍은 커버리지를 넓히는 데만 쓴다 (랜덤 지연, 코어 수 sweep). 성능 쪽은 PMU 로 refill/snoop 이벤트를 세어 모델 예측(연산당 이동 1)과 비교한다. 설계 방법은 SIV-M09 (동시성 스트레스), 프로토콜 검증 모델은 ARCH-A04 (불변식 + 돌연변이).</p>
 </details>
 <h2 id="9-추가-연습">9. 추가 연습<a class="anchor" href="#9-추가-연습" aria-label="link">#</a></h2>

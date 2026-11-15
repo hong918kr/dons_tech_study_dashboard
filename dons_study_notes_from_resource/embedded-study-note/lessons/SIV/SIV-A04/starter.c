@@ -50,8 +50,8 @@ static double soc_power_w(uint32_t v_mv, uint32_t f_mhz, double activity, double
     return dyn + LEAK_P0_W * v * exp(LEAK_K * (t_die - 25.0));
 }
 
-/* V 가 f 를 지탱할 수 있나: 같은 f 이상의 OPP 중 전압이 v 이하인 것이 있으면 안전 */
-static bool vf_safe(uint32_t v_mv, uint32_t f_mhz) {
+/* V 가 f 를 지탱할 수 있나: f 이상 중 가장 느린 OPP 의 전압 이상이면 안전 */
+__attribute__((unused)) static bool vf_safe(uint32_t v_mv, uint32_t f_mhz) {
     for (int i = NOPP - 1; i >= 0; i--)
         if (OPP[i].f_mhz >= f_mhz) return v_mv >= OPP[i].v_mv;
     return false;
@@ -199,6 +199,7 @@ static void sim_run(const run_cfg_t *rc, trace_t *tr) {
     s->data_q = (int32_t)floor((th.t[0] * 1000.0 + rc->sens.offset_mc) / TQ_MC + 0.5);
     gov_t g; memset(&g, 0, sizeof g);
     g.c = rc->gov; g.bugs = rc->bugs; g.seq_seen = 1;
+    g.last_ms = 0u - 3600000u;                         /* 부팅 직후엔 dwell 제약이 없도록 "1시간 전에 바꿨다"로 둔다 */
     tr->n = 0; tr->nvf = 0; tr->work = 0.0;
     uint32_t seq_last = s->seq, seq_ms = 0;
     for (uint32_t ms = 0; ms < rc->dur_ms; ms++) {
@@ -244,12 +245,12 @@ typedef struct { uint32_t count[V_COUNT]; viol_t first[V_COUNT]; } report_t;
 
 static void rep_init(report_t *r) { memset(r, 0, sizeof *r); }
 /* 코드별 첫 발생만 저장, count 는 전부 센다 */
-static void viol(report_t *r, vcode_t c, uint32_t t_ms, int from, int to, int32_t value_mc, int32_t limit_mc) {
+__attribute__((unused)) static void viol(report_t *r, vcode_t c, uint32_t t_ms, int from, int to, int32_t value_mc, int32_t limit_mc) {
     if (r->count[c]++ == 0) r->first[c] = (viol_t){ t_ms, from, to, value_mc, limit_mc };
 }
 static uint32_t rep_total(const report_t *r) { uint32_t n = 0; for (int i = 0; i < V_COUNT; i++) n += r->count[i]; return n; }
 /* 시간상 가장 먼저 발생한 위반 코드. 없으면 -1 */
-static int rep_first_code(const report_t *r) {
+__attribute__((unused)) static int rep_first_code(const report_t *r) {
     int best = -1;
     for (int i = 0; i < V_COUNT; i++)
         if (r->count[i] && (best < 0 || r->first[i].t_ms < r->first[best].t_ms)) best = i;
@@ -285,12 +286,24 @@ static void metrics_from_trace(const trace_t *tr, int32_t tj_max_mc, metrics_t *
     memset(m, 0, sizeof *m);
     /* TODO: 첫 d>0 행의 시각·true·read, 최대 true 와 그 시각, true>tj_max 시간(poll 단위, shut_before 인 행 제외), 첫 shut_after 시각 */
 }
-/* 스펙 구조(rel=thr-6, emg=thr+8, sd=thr+15 ℃)를 유지한 채 thr 를 tj_max - g 로 옮겼을 때(시나리오 초기 온도도 함께 이동: "thr 바로 아래에서
- * power virus" 를 항상 같은 상대 위치로 재현) peak true ≤ tj_max 가 되는 최소 guard band g 를 0.25 ℃ 격자에서 bisect 로 찾는다. 반환 mC, 40 ℃ 로도 안 되면 -1.
+
+/* 주어진 판정 함수: thr 를 tj_max - g 로 옮겨 시뮬레이션하고 peak true ≤ tj_max 인지 답한다.
+ * 스펙 구조(rel=thr-6, emg=thr+8, sd=thr+15 ℃)를 유지하고, 시나리오 초기 온도도 thr 를 따라 이동시킨다
+ * ("thr 바로 아래에서 power virus" 를 항상 같은 상대 위치로 재현). */
+static bool guard_safe(run_cfg_t rc, trace_t *tr, int32_t tj_max_mc, int32_t g_mc) {
+    int32_t thr = tj_max_mc - g_mc;
+    for (int k = 0; k < 3; k++) rc.init.t[k] += (thr - rc.gov.thr_mc) / 1000.0;   /* 초기 상태도 thr 를 따라 이동 */
+    rc.gov.thr_mc = thr; rc.gov.rel_mc = thr - 6000; rc.gov.emg_mc = thr + 8000; rc.gov.sd_mc = thr + 15000;
+    metrics_t m;
+    sim_run(&rc, tr);
+    metrics_from_trace(tr, tj_max_mc, &m);
+    return m.peak_true_mc <= tj_max_mc;
+}
+/* peak true ≤ tj_max 가 되는 최소 guard band g 를 0.25 ℃ 격자에서 bisect 로 찾는다. 반환 mC, 40 ℃ 로도 안 되면 -1.
  * 불변식: lo 는 unsafe, hi 는 safe. 전제: g 가 커지면 안전해진다(단조) — 테스트가 선형 탐색과 대조한다. */
 static int32_t guard_search(run_cfg_t rc, trace_t *tr, int32_t tj_max_mc) {
     (void)rc; (void)tr; (void)tj_max_mc;
-    return -2; /* TODO */
+    return -2; /* TODO: guard_safe 로 0 과 40000 을 먼저 확인한 뒤 TQ_MC 격자 bisect */
 }
 
 /* ======================= Part C: 안전 checker · 판정 · 리포트 ======================= */
@@ -393,7 +406,7 @@ static void test_part_a(void) {
     CHECK(fabs(therm_dt_limit(P) - 0.1) < 1e-12, "dt limit (Gershgorin) = 0.1 s");
     CHECK(DT_S * 50 <= therm_dt_limit(P), "DT_S=1 ms is at least 50x inside the limit");
 
-    /* 정상상태: Ta + P*ΣR, 허용오차 0.01 ℃ (2000 s ≫ 최장 시정수 ~90 s, 지수 잔차 < 1e-9) */
+    /* 정상상태: Ta + P*ΣR, 허용오차 0.01 ℃ (2000 s ≫ 최장 시정수 ~80 s, 지수 잔차 < 1e-9) */
     therm_t s = { {45, 45, 45} };
     for (int i = 0; i < 2000000; i++) therm_step(P, &s, 20.0, DT_S);
     CHECK(fabs(s.t[0] - 95.0) < 0.01 && fabs(s.t[1] - 85.0) < 0.01 && fabs(s.t[2] - 75.0) < 0.01,
@@ -440,7 +453,7 @@ static void test_part_a(void) {
     sim_run(&rc, &g_tr);
     rep_init(&r); check_policy(&g_tr, &SPEC_NOM, &r);
     maxl = 0; for (uint32_t i = 0; i < g_tr.n; i++) if (g_tr.row[i].lv_after > maxl) maxl = g_tr.row[i].lv_after;
-    CHECK(rep_total(&r) == 0 && maxl >= 3, "warm ambient: limit cycle visits L%d with 0 policy violations (got %u)", maxl, rep_total(&r));
+    CHECK(rep_total(&r) == 0 && maxl >= 3, "warm ambient: settles at L%d with 0 policy violations (got %u)", maxl, rep_total(&r));
 
     rc = cfg_fan();
     sim_run(&rc, &g_tr);

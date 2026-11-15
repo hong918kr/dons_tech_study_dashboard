@@ -24,12 +24,23 @@ strip_dir() { grep -v -E '^\s*(\.[a-z_]+|@ --|@ %bb|$)|^\s*\.(LCPI|Lfunc_end)' |
 case "${1:-asm}" in
 asm) cxx -O2 -DNDEBUG demo_target.cpp -S -o - | strip_dir ;;
 sections)
-    for o in -O2 -O0; do
-        echo "== $o"
-        cxx $o -DNDEBUG -c demo_target.cpp -o "$OUT/t$o.o"
-        xcrun llvm-objdump -h "$OUT/t$o.o" | grep -E 'init_array|\.bss|\.data'
-        xcrun llvm-nm -C "$OUT/t$o.o" | grep -E 'g_int|g_nt|__cxa_atexit|__aeabi_atexit|_GLOBAL__' || true
-    done ;;
+    for o in -O2 -O0; do for v in GLOBAL_DEFAULT GLOBAL_CONSTINIT GLOBAL_NT; do
+        echo "== clang $o $v"
+        cxx $o -DNDEBUG -D$v -c demo_target.cpp -o "$OUT/t.o"
+        xcrun llvm-objdump -h "$OUT/t.o" | awk '/ \.init_array| \.bss/{print "  " $2, $3}'
+        xcrun llvm-nm -C "$OUT/t.o" | grep -E '__cxa_atexit|__aeabi_atexit|_GLOBAL__' | sed 's/^ */  /' || true
+    done; done
+    limactl shell elinux -- bash -s "$PWD" <<'VM'
+set -e
+mkdir -p /tmp/CPP-M10 && cp "$1"/demo_static_vector.hpp "$1"/demo_target.cpp /tmp/CPP-M10/ && cd /tmp/CPP-M10
+for v in GLOBAL_DEFAULT GLOBAL_CONSTINIT GLOBAL_NT; do
+  echo "== arm-none-eabi-g++ -O2 $v"
+  arm-none-eabi-g++ -std=c++20 -O2 -DNDEBUG -fno-exceptions -fno-rtti -mcpu=cortex-m4 -mthumb -D$v -c demo_target.cpp -o t.o
+  arm-none-eabi-objdump -h t.o | awk '/ \.init_array| \.bss/{print "  " $2, $3}'
+  arm-none-eabi-nm -C t.o | grep -E '__aeabi_atexit|_GLOBAL__' | sed 's/^ */  /' || true
+done
+VM
+    ;;
 gcc)
     limactl shell elinux -- bash -c "mkdir -p /tmp/CPP-M10 && cp $PWD/demo_static_vector.hpp $PWD/demo_target.cpp /tmp/CPP-M10/ && cd /tmp/CPP-M10 && arm-none-eabi-g++ -std=c++20 -O2 -DNDEBUG -fno-exceptions -fno-rtti -mcpu=cortex-m4 -mthumb -S demo_target.cpp -o -" | strip_dir ;;
 link)
@@ -42,9 +53,10 @@ b kinds1_ndebug   -DKINDS=1 -DNDEBUG
 b kinds3_ndebug   -DKINDS=3 -DNDEBUG
 b kinds1_assert   -DKINDS=1
 b kinds1_trap_ndebug -DKINDS=1 -DNDEBUG -DPOLICY=TrapOnFull
+b kinds1_bkpt_ndebug -DKINDS=1 -DNDEBUG -DPOLICY=BkptOnFull
 echo "--- nm kinds3_ndebug (work)"; arm-none-eabi-nm -C --size-sort kinds3_ndebug.elf | grep -E ' work' || true
 echo "--- heap / assert symbols"
-for e in kinds1_ndebug kinds1_assert kinds1_trap_ndebug; do
+for e in kinds1_ndebug kinds1_assert kinds1_trap_ndebug kinds1_bkpt_ndebug; do
   printf '%-22s' $e; arm-none-eabi-nm -C $e.elf | grep -E ' (malloc|_malloc_r|operator new.*|__assert_func|fiprintf|_vfiprintf_r|abort)$' | awk '{print $3}' | tr '\n' ' '; echo
 done
 VM

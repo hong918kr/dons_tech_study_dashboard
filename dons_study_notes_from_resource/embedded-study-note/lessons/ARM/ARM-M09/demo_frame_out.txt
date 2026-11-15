@@ -1,0 +1,77 @@
+Reset_Handler () at shared_startup.c:88
+88	    for (uint32_t *s = _sidata, *d = _sdata; d < _edata; ) *d++ = *s++;
+
+=== (1) A1: svc #1 직전 (Thread, MSP) ===
+Breakpoint 1 at 0x1030: file solution.S, line 129.
+
+Breakpoint 1, svc_sentinel () at solution.S:129
+129	    svc     #1                  // 인코딩 0xDF01 (상위 바이트 0xDF, 하위 바이트 = 번호)
+=> 0x1030 <svc_sentinel+38>:	svc	1
+  r0=0xa0a0a0a0 r1=0xa1a1a1a1 r2=0xa2a2a2a2 r3=0xa3a3a3a3 r12=0xc12c12c1 lr=0x1ee71ee7 sp=0x2000ffa8
+
+=== (2) stepi 한 번 → SVC_Handler 첫 명령. 하드웨어가 8 워드를 쌓았다 ===
+SVC_Handler () at solution.S:24
+24	    tst     lr, #4              // EXC_RETURN bit2 (SPSEL): 0 = 프레임이 MSP 에, 1 = PSP 에
+=> 0xfc0 <SVC_Handler>:	tst.w	lr, #4
+  sp=0x2000ff88 lr(EXC_RETURN)=0xfffffff9 ipsr=11 msp=0x2000ff88 psp=0x00000000
+0x2000ff88:	0xa0a0a0a0	0xa1a1a1a1	0xa2a2a2a2	0xa3a3a3a3
+0x2000ff98:	0xc12c12c1	0x1ee71ee7	0x00001032	0x61000000
+  stacked pc=0x00001032 -> svc_sentinel + 40 in section .text
+  [stacked pc - 2] = 0xdf01  (svc #imm8 = 0xDFnn)
+
+=== (3) 스텁 5 명령: tst / ite / mrseq / mrsne(건너뜀) / mov ===
+25	    ite     eq
+26	    mrseq   r0, msp             // bit2 == 0 → 끊긴 코드가 MSP 를 쓰고 있었다
+27	    mrsne   r0, psp             // bit2 == 1 → Thread 가 PSP 를 쓰고 있었다
+28	    mov     r1, lr              // 둘째 인자 = EXC_RETURN
+29	    b       svc_handler_c       // b: lr(EXC_RETURN) 이 그대로 → C 의 return 이 곧 예외 복귀
+=> 0xfd0 <SVC_Handler+16>:	b.w	0x41c <svc_handler_c>
+  r0(frame)=0x2000ff88 r1(EXC_RETURN)=0xfffffff9
+
+=== (4) A3: SysTick 이 spin 루프를 끊은 순간 ===
+Breakpoint 2 at 0xfd4: file solution.S, line 37.
+
+Breakpoint 2, SysTick_Handler () at solution.S:37
+37	    tst     lr, #4
+  sp=0x2000ff98 lr(EXC_RETURN)=0xfffffff9 ipsr=15 msp=0x2000ff98 psp=0x00000000
+0x2000ff98:	0x20000098	0x00000000	0x001f062e	0x00000000
+0x2000ffa8:	0x2000ffb8	0x000005f1	0x0000105c	0x61000000
+  stacked pc=0x0000105c -> spin_until_change + 16 in section .text
+
+=== (5) B5: SVC 핸들러 안에서 중첩된 SysTick (lr == 0xfffffff1) ===
+Breakpoint 3 at 0xfd4: file solution.S, line 37.
+
+Breakpoint 3, SysTick_Handler () at solution.S:37
+37	    tst     lr, #4
+  sp=0x2000ff60 lr(EXC_RETURN)=0xfffffff1 ipsr=15 msp=0x2000ff60 psp=0x200005d0
+0x2000ff60:	0x00000003	0x00000000	0x002c4d2d	0x2000ff98
+0x2000ff70:	0x20000068	0x00000433	0x000003ca	0x6100000b
+  stacked pc=0x000003ca -> svc_dispatch + 30 in section .text
+
+=== (6) B6: SysTick 핸들러 안 svc → HardFault ===
+Breakpoint 4 at 0xfe8: file solution.S, line 53.
+
+Breakpoint 4, HardFault_Handler () at solution.S:53
+53	    mrs     r0, msp
+  sp=0x2000ff70 lr(EXC_RETURN)=0xfffffff1 ipsr=3 msp=0x2000ff70 psp=0x200005d0
+0x2000ff70:	0x00000001	0x00000002	0x001ce416	0x00000000
+0x2000ff80:	0x2000ffb8	0x0000026b	0x00000ff4	0x0100000f
+  stacked pc=0x00000ff4 -> sys_add + 2 in section .text
+  HFSR=0x40000000
+
+=== (7) C1: 비특권 PSP 태스크의 svc (lr == 0xfffffffd, CONTROL=3 이었던 쪽) ===
+Breakpoint 5 at 0xfc0: file solution.S, line 24.
+
+Breakpoint 5, SVC_Handler () at solution.S:24
+24	    tst     lr, #4              // EXC_RETURN bit2 (SPSEL): 0 = 프레임이 MSP 에, 1 = PSP 에
+  sp(MSP)=0x2000ffb0 lr=0xfffffffd psp=0x200005a0 control=1
+0x200005a0 <g_task_stack+976>:	0x12345678	0x0f0f0000	0x000000f0	0x00000001
+0x200005b0 <g_task_stack+992>:	0x00000007	0x00000191	0x00000ff8	0x21000000
+
+=== (8) 나머지 실행 → 펌웨어가 SYS_EXIT ===
+[Inferior 1 (process 1) exited normally]
+qemu exit=0
+--- firmware output (semihosting, last 3 lines) ---
+PASS line 344: t_ctrl_back == 2u && get_control() == 0u
+PASS line 346: info_is(g_tick.exc_return, fpu, 1, 0, 0) && info_is(g_hf.exc_return, fpu, 0, 0, 0)
+51/51 passed

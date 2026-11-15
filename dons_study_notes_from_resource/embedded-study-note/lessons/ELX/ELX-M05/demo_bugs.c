@@ -108,3 +108,4 @@ static void __exit demo_exit(void)
 module_init(demo_init);
 module_exit(demo_exit);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("ELX-M05 threaded IRQ failure demos");

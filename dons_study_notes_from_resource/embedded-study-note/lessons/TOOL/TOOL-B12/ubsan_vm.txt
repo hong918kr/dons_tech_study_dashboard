@@ -1,0 +1,146 @@
+### 1. GCC 15.2.0 -fsanitize=undefined (recover) on starter cases
+=== adc_mul_ovf
+starter.c:13:16: runtime error: signed integer overflow: 30000 * 100000 cannot be represented in type 'int'
+adc_scale(30000,100000,3): got -431655765 want 1000000000
+[exit 2]
+=== mask_31
+starter.c:35:27: runtime error: left shift of 1 by 31 places cannot be represented in type 'int'
+starter.c:35:37: runtime error: signed integer overflow: -2147483648 - 1 cannot be represented in type 'int'
+starter.c:35:42: runtime error: left shift of 2147483647 by 1 places cannot be represented in type 'int'
+reg_mask(1,31): got 0xFFFFFFFE want 0xFFFFFFFE
+[exit 0]
+=== align18
+starter.c:41:27: runtime error: shift exponent -2 is negative
+sample_to_u16(0x3FFFF,18): got 0x0 want 0xFFFF
+[exit 2]
+=== pkt_seq
+starter.c:51:16: runtime error: load of misaligned address 0xc314e9540b29 for type 'const uint32_t', which requires 4 byte alignment
+0xc314e9540b29: note: pointer points here
+ 00 00 00  10 ef be ad de 01 34 12  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00
+              ^ 
+pkt_parse(frame+0, n=8): rc 0 seq 0xDEADBEEF ack 1 len 0x1234 | want rc 0 seq 0xDEADBEEF ack 1 len 0x1234
+[exit 0]
+=== pkt_ack
+starter.c:52:16: runtime error: load of value 2, which is not a valid value for type '_Bool'
+starter.c:54:16: runtime error: load of misaligned address 0xbd10b9240b31 for type 'const uint16_t', which requires 2 byte alignment
+0xbd10b9240b31: note: pointer points here
+ 00 00 00  02 08 00 00 00 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00
+              ^ 
+pkt_parse(frame+3, n=8): rc 0 seq 0x00000001 ack 0 len 0x0008 | want rc -2
+[exit 2]
+=== mode_bad
+starter.c:64:24: runtime error: index 7 out of bounds for type 'char *[3]'
+starter.c:64:24: runtime error: load of address 0xc60e477afcf8 with insufficient space for an object of type 'const char *'
+0xc60e477afcf8: note: pointer points here
+ 00 00 00 00  01 00 00 00 00 00 00 00  3c 02 00 00 00 00 00 00  01 00 00 00 00 00 00 00  46 02 00 00
+              ^ 
+[exit 139]
+=== cal_null
+starter.c:70:17: runtime error: member access within null pointer of type 'const struct cal'
+[exit 139]
+=== temp_hot
+temp_to_centi(400.0): got -25536 want 32767
+[exit 2]
+=== duty_neg
+duty_to_ccr(-0.25,999): got 0 want 0
+[exit 0]
+
+### 2. GCC: float-cast-overflow is NOT in -fsanitize=undefined; add it explicitly
+=== temp_hot
+starter.c:89:28: runtime error: 40000 is outside the range of representable values of type 'short int'
+temp_to_centi(400.0): got -25536 want 32767
+[exit 2]
+=== duty_neg
+starter.c:98:28: runtime error: -249.75 is outside the range of representable values of type 'short unsigned int'
+duty_to_ccr(-0.25,999): got 0 want 0
+[exit 0]
+
+### 3. -fno-sanitize-recover=all exit code on Linux (gcc, clang)
+=== gcc   accum_sat
+starter.c:22:16: runtime error: signed integer overflow: 2147483000 + 1000 cannot be represented in type 'int'
+[exit 1]
+=== clang accum_sat
+starter.c:22:16: runtime error: signed integer overflow: 2147483000 + 1000 cannot be represented in type 'int32_t' (aka 'int')
+[exit 1]
+
+### 4. demo_lang.c with gcc as C and C++ (enum load check)
+=== gcc C11
+demo_lang.c:18:17: runtime error: left shift of 1 by 31 places cannot be represented in type 'int'
+is_stop=0 bit=-2147483648
+[exit 0]
+=== g++ C++17
+demo_lang.c:17:22: runtime error: load of value 7, which is not a valid value for type 'pwr_mode'
+is_stop=0 bit=-2147483648
+[exit 0]
+
+### 5. clang 21.1.8 minimal runtime (libclang_rt.ubsan_minimal), trap mode
+=== minimal adc_mul_ovf
+ubsan: mul-overflow by 0x0000c5e494f330d8
+adc_scale(30000,100000,3): got -431655765 want 1000000000
+[exit 2]
+=== minimal mask_32
+ubsan: shift-out-of-bounds by 0x0000bf3d7c2831cc
+reg_mask(0,32): got 0x0 want 0xFFFFFFFF
+[exit 2]
+=== minimal pkt_seq
+ubsan: type-mismatch by 0x0000beb14a223398
+pkt_parse(frame+0, n=8): rc 0 seq 0xDEADBEEF ack 1 len 0x1234 | want rc 0 seq 0xDEADBEEF ack 1 len 0x1234
+[exit 0]
+=== trap adc_mul_ovf
+[exit 133]
+
+### 6. own minimal handlers + addr2line (no-pie so the PC is a link address)
+[exit 1]
+adc_scale   -> -431655765
+accum_add   -> -2147454296
+reg_mask    -> 0x0
+therm       -> 6913
+adc_scale   -> -431655765  (same site again)
+--- ub log: 4 distinct site(s)
+  #0 mul_overflow         pc=0x400e94
+  #1 add_overflow         pc=0x400ee0
+  #2 shift_out_of_bounds  pc=0x400f88
+  #3 out_of_bounds        pc=0x401418
+(return address - 4 = the bl that called the handler)
+0x400e94 -> adc_scale /tmp/TOOL-B12_work/vm/starter.c:13
+0x400ee0 -> accum_add /tmp/TOOL-B12_work/vm/starter.c:22
+0x400f88 -> reg_mask /tmp/TOOL-B12_work/vm/starter.c:35
+0x401418 -> therm_lookup /tmp/TOOL-B12_work/vm/starter.c:81
+
+### 7. arm-none-eabi-gcc 14.2.1: Cortex-M4 object size, -Os
+--- solution.c   (arm-none-eabi-size, Berkeley)
+   text	   data	    bss	    dec	    hex	filename
+    453	      0	      0	    453	    1c5	solution-none.o
+    633	      0	      0	    633	    279	solution-trap.o
+    633	      0	      0	    633	    279	solution-trap2.o
+   1044	    697	      0	   1741	    6cd	solution-full.o
+    traps (udf) in solution-trap.o: 6
+--- starter.c   (arm-none-eabi-size, Berkeley)
+   text	   data	    bss	    dec	    hex	filename
+    219	      0	      0	    219	     db	starter-none.o
+    431	      0	      0	    431	    1af	starter-trap.o
+    431	      0	      0	    431	    1af	starter-trap2.o
+    909	    809	      0	   1718	    6b6	starter-full.o
+    traps (udf) in starter-trap.o: 9
+--- arm-none-eabi-objdump -d starter-trap.o, adc_scale
+00000000 <adc_scale>:
+   0:	smull	r3, r1, r0, r1
+   4:	cmp.w	r1, r3, asr #31
+   8:	beq.n	c <adc_scale+0xc>
+   a:	udf	#255	@ 0xff
+   c:	cmp.w	r3, #2147483648	@ 0x80000000
+  10:	it	eq
+  12:	cmpeq.w	r2, #4294967295	@ 0xffffffff
+  16:	beq.n	a <adc_scale+0xa>
+  18:	cmp	r2, #0
+  1a:	beq.n	a <adc_scale+0xa>
+  1c:	sdiv	r0, r3, r2
+  20:	bx	lr
+
+--- undefined handler symbols in solution-full.o (need libubsan: none for bare metal)
+         U __aeabi_ldivmod
+         U __ubsan_handle_out_of_bounds
+         U __ubsan_handle_pointer_overflow
+         U __ubsan_handle_shift_out_of_bounds
+         U __ubsan_handle_sub_overflow
+         U __ubsan_handle_type_mismatch_v1

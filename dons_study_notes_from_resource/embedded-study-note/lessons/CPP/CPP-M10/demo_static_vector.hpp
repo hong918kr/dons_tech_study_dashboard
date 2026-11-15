@@ -16,6 +16,9 @@
 struct ReturnOnFull { static void on_overflow() noexcept {} };                      // 호출자가 nullptr/false 를 확인
 struct TrapOnFull { [[noreturn]] static void on_overflow() noexcept { std::abort(); } };  // 펌웨어면 fault handler/BKPT
 
+struct zero_init_t {};                       // constinit 전역용 태그: 저장소를 0 으로 채우는 constexpr 생성자를 고른다
+inline constexpr zero_init_t zero_init{};
+
 // ---------------- Part A/B: static_vector ----------------
 template <typename T, std::size_t N, typename Overflow = ReturnOnFull>
 class static_vector {
@@ -64,6 +67,10 @@ private:
 public:
     // user-provided 라서 `static_vector<...> v{};` 가 저장소 전체를 0 으로 채우지 않는다
     static_vector() noexcept {}
+
+    // 기본 생성자는 저장소가 미초기화라 constinit 불가. 전역(ISR 이 init 전에 쓸 수 있는 객체)은 이쪽으로:
+    //   constinit static_vector<int, 8> g_rx(zero_init);   // .bss 에 놓이고 동적 초기화 없음 (CPP-B09 참고)
+    constexpr explicit static_vector(zero_init_t) noexcept : storage_{} {}
 
     static_vector(std::initializer_list<T> il) requires std::is_copy_constructible_v<T> {
         for (const T& x : il) if (!push_back(x)) break;
@@ -138,9 +145,10 @@ public:
     template <typename... Args>
         requires std::is_constructible_v<T, Args...>
     [[nodiscard]] T* emplace_back(Args&&... args) {
-        if (full()) { Overflow::on_overflow(); return nullptr; }
-        T* p = std::construct_at(slot_(size_), std::forward<Args>(args)...);
-        ++size_;
+        const size_type n = size_;                // T = int 면 저장이 size_ 와 별칭일 수 있어, 지역 복사로 재적재를 막는다
+        if (n == N) { Overflow::on_overflow(); return nullptr; }
+        T* p = std::construct_at(slot_(n), std::forward<Args>(args)...);
+        size_ = n + 1;
         return p;
     }
     [[nodiscard]] bool push_back(const T& x) requires std::is_copy_constructible_v<T> { return emplace_back(x) != nullptr; }

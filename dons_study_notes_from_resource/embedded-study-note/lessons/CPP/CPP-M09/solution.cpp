@@ -324,7 +324,7 @@ int main() {
         const MoveReport r = measure_move(src);
         CHECK(r.cost == (Cost{0, 0}));
         CHECK(r.buffer_stolen);
-        CHECK(r.src_size_after == 0);             // 표준 문구가 직접 보장하진 않는다(LWG 2321). libc++/libstdc++ 실측 결과
+        CHECK(r.src_size_after == 0);             // libc++/libstdc++ 실측 결과. 의존하지 말 것 (5절 참고)
     }
     struct InlineCase { std::size_t used; };
     for (const InlineCase& t : {InlineCase{0}, InlineCase{1}, InlineCase{8}, InlineCase{64}}) {

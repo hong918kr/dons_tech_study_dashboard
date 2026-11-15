@@ -1,7 +1,8 @@
 // CPP-M12 demo: std::function vs Delegate — sizeof + 전역 operator new 치환으로 할당 횟수 세기
 //   "malloc 훅"의 이식 가능한 대체: 전역 operator new/delete 는 표준이 허용하는 치환 지점이다 [replacement.functions]
 //   build (Mac libc++):  c++ -std=c++20 -O2 -fno-exceptions -fno-rtti demo_alloc.cpp -o demo_alloc && ./demo_alloc
-//   build (VM libstdc++): g++ -std=c++20 -O2 -fno-exceptions -fno-rtti demo_alloc.cpp -o demo_alloc && ./demo_alloc
+//   build (VM libstdc++): g++ -std=c++20 -O2 -fno-exceptions -fno-rtti -fno-assume-sane-operators-new-delete demo_alloc.cpp -o demo_alloc && ./demo_alloc
+//   (g++ 15 에서 이 플래그를 빼면 카운터가 잘못 읽혀 거짓 결과가 나온다 — 본문 참고)
 #define main solution_main
 #include "solution.cpp"
 #undef main

@@ -28,7 +28,7 @@ enum : u8 { STX = 0x02, ESC = 0x10 };
 #define FRAME_ATTR
 #endif
 
-// 프레임 본체를 "1바이트 송신 함수"에 대해 일반화한 공통 조각 (MODE 0/1/3 은 복사해서 씀)
+// 프레임 본체를 "1바이트 송신 함수"에 대해 일반화한 공통 조각
 #define FRAME_BODY(PUTB)                                                \
     if (n > 255) return false;                                          \
     if (!(PUTB)(STX)) return false;                                     \

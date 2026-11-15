@@ -11,6 +11,7 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.dont_write_bytecode = True  # solution.py 를 불러와도 __pycache__ 를 남기지 않는다
 _spec = importlib.util.spec_from_file_location("lperf_a03_solution", os.path.join(HERE, "solution.py"))
 sol = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sol)  # solution.py 의 Event/simulate/classify/parse_trace 를 재사용
