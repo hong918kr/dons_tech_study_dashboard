@@ -1,0 +1,98 @@
+### lldb -b -o run -k bt -k "frame variable" ./demo_trap   (-k = 멈춘 이유가 크래시일 때만)
+(lldb) run
+Process 42440 launched: '/tmp/TOOL-M07_work/demo/demo_trap' (arm64)
+Process 42440 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = EXC_BREAKPOINT (code=1, subcode=0x1000005f0)
+    frame #0: 0x00000001000005f0 demo_trap`q_check(r=0x0000000100008000) at demo_trap.c:12:5
+   9   	
+   10  	static void q_check(const struct ringbuf *r)
+   11  	{
+-> 12  	    ASSERT(r->count <= 16 && r->head == (r->tail + r->count) % 16);
+    	    ^
+   13  	}
+   14  	
+   15  	int main(void)
+Target 0: (demo_trap) stopped.
+(lldb) bt
+* thread #1, queue = 'com.apple.main-thread', stop reason = EXC_BREAKPOINT (code=1, subcode=0x1000005f0)
+  * frame #0: 0x00000001000005f0 demo_trap`q_check(r=0x0000000100008000) at demo_trap.c:12:5
+    frame #1: 0x0000000100000568 demo_trap`main at demo_trap.c:21:9
+    frame #2: 0x000000018753e054 dyld`start + 6652
+(lldb) frame variable
+(const ringbuf *) r = 0x0000000100008000
+### 같은 명령을 정상 종료 프로그램에: -k 는 실행 안 됨
+(lldb) run
+limits 15
+Process 42485 launched: '/tmp/TOOL-M07_work/demo/demo_wp' (arm64)
+Process 42485 exited with status = 0 (0x00000000)
+### 여러 줄 breakpoint command (소스 파일 안에서 DONE 으로 끝)
+(lldb) command source -s 0 'multi.lldb'
+Executing commands in '/tmp/TOOL-M07_work/demo/multi.lldb'.
+(lldb) breakpoint set -n rb_put_escaped -c 'rb->head == 15'
+Breakpoint 1: where = buggy`rb_put_escaped + 12 at buggy.c:58:18, address = 0x0000000100000a78
+(lldb) breakpoint command add 1
+(lldb) run
+(lldb)  p g_tick
+(uint32_t) 6800
+(lldb)  p rb->count
+(uint32_t) 2
+(lldb)  continue
+Process 42503 resuming
+Command #3 'continue' continued the target.
+(lldb)  p g_tick
+(uint32_t) 7342
+(lldb)  p rb->count
+(uint32_t) 1
+(lldb)  continue
+Process 42503 resuming
+Command #3 'continue' continued the target.
+tick 7343: bad link_state 0xdd
+ticks=7343 frames=658 bad_state=1
+Process 42503 launched: '/tmp/TOOL-M07_work/demo/buggy' (arm64)
+Process 42503 exited with status = 1 (0x00000001)
+### -i ignore count: rb_put_escaped 31번째 호출에서 멈춤
+Breakpoint 1: where = buggy`rb_put_escaped + 12 at buggy.c:58:18, address = 0x0000000100000a78
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+(uint32_t) 6880
+1: name = 'rb_put_escaped', locations = 1, resolved = 1, hit count = 31
+  1.1: where = buggy`rb_put_escaped + 12 at buggy.c:58:18, address = 0x0000000100000a78, resolved, hit count = 31 
+### 가설이 선 뒤의 빠른 길: 조건부 BP 로 그 순간까지 → 워치포인트 1번 → 범인 명령어 디스어셈블
+(lldb) p g_tick
+(uint32_t) 6800
+(lldb) watchpoint set expression -w write -s 4 -- &dev.link_state
+Watchpoint created: Watchpoint 1: addr = 0x10000802c size = 4 state = enabled type = w
+    watchpoint spec = '&dev.link_state'
+    watchpoint resources:
+       #0: addr = 0x10000802c size = 4
+Watchpoint 1 hit:
+    
+new value: 0x0000026000000001
+(lldb) continue
+
+Watchpoint 1 hit:
+old value: 0x0000026000000001
+new value: 0x00000260000000dc
+Process 42528 resuming
+Process 42528 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = watchpoint 1
+    frame #0: 0x0000000100000ae8 buggy`rb_put_escaped(rb=0x0000000100008010, b='\xc0') at buggy.c:62:17
+   59  	        return 0;
+   60  	    rb->buf[rb->head] = SLIP_ESC;
+   61  	    rb->buf[rb->head + 1] = (b == SLIP_END) ? SLIP_ESC_END : SLIP_ESC_ESC;
+-> 62  	    rb->head = (rb->head + 2) % RB_CAP;
+    	                ^
+   63  	    rb->count += 2;
+   64  	    return 1;
+   65  	}
+Target 0: (buggy) stopped.
+(lldb) disassemble -s '$pc-12' -c 4
+buggy`rb_put_escaped:
+    0x100000adc <+112>: mov    w8, #0x1                  ; =1 
+    0x100000ae0 <+116>: add    w11, w11, #0x1
+    0x100000ae4 <+120>: strb   w9, [x10, w11, uxtw]
+->  0x100000ae8 <+124>: ldr    x9, [sp, #0x10]
+(lldb) register read x8 x9 x10 x11
+      x8 = 0x0000000000000001
+      x9 = 0x00000000000000dc
+     x10 = 0x000000010000801c  buggy`dev + 12
+     x11 = 0x0000000000000010

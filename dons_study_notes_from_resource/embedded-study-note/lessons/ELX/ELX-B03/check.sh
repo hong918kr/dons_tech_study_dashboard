@@ -157,8 +157,8 @@ if [ "$V" = practice ]; then
 	[ "$G" = "$M" ] && pass "P3 count defconfig: $M" || fail "P3 count: grep '$G' mine '$M'"
 	# P4 vermagic explain: lab module vs the running guest kernel -> nothing to explain
 	E=$($PY explain "$VM_KO" "$VM_PY" 2>&1)
-	E2=$($PY explain "$VM_KO" "${VM_PY/6.18.55/6.18.55-b03}" 2>&1)
-	[ "$E" = "OK" ] && [ "$E2" = "release: module 6.18.55 != kernel 6.18.55-b03" ] &&
+	E2=$($PY explain "$VM_KO" "${VM_PY/6.18.55/6.18.55-sub}" 2>&1)
+	[ "$E" = "OK" ] && [ "$E2" = "release: module 6.18.55 != kernel 6.18.55-sub" ] &&
 		pass "P4 explain vermagic (match / release mismatch)" || fail "P4 explain: '$E' / '$E2'"
 	# P5 extract the embedded config from the Image file itself
 	"$KSRC/scripts/extract-ikconfig" "$IMAGE" >"$W/ik_real.config" 2>/dev/null

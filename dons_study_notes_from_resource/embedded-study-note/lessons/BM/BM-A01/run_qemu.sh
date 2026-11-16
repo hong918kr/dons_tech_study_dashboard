@@ -33,5 +33,34 @@ solution|starter)
 probe)
     build demo_probe.c demo_probe.elf || exit 1
     run demo_probe.elf ;;
+order)      # 결함 주입: Reset_Handler 순서를 바꾼 두 빌드. 둘 다 "잡혀야" (exit ≠ 0) 통과.
+    ok=0
+    echo "##### O1: fpu_enable() 을 생성자 뒤로 (-DINJECT_FPU_LATE) #####"
+    build solution.c o_fpu_late.elf -DINJECT_FPU_LATE || exit 1
+    run o_fpu_late.elf | grep -E "boot|FAIL|passed|qemu exit" > o1.log
+    cat o1.log
+    if grep -q "qemu exit=1" o1.log && grep -q "CFSR=0x00080000 HFSR=0x40000000" o1.log; then echo "O1 caught: NOCP at boot (HardFault FORCED)"; ok=$((ok+1)); fi
+    echo "##### O2: vtor_relocate() 를 .bss 0 채우기 앞으로 (-DINJECT_VTOR_EARLY) #####"
+    build solution.c o_vtor_early.elf -DINJECT_VTOR_EARLY || exit 1
+    run o_vtor_early.elf > o2.log 2>&1
+    grep -E "boot|FAIL|passed|Lockup|qemu exit|unexpected" o2.log | head -12
+    if ! grep -q "qemu exit=0" o2.log; then echo "O2 caught: table wiped by .bss zeroing"; ok=$((ok+1)); fi
+    echo "order injections caught: $ok/2"
+    [ $ok -eq 2 ] ;;
+disasm)     # 어떤 함수가 VFP 명령을 쓰나? (Reset_Handler / fault 경로에는 없어야 한다)
+    build solution.c solution.elf || exit 1
+    arm-none-eabi-objdump -d solution.elf > sol.dis
+    awk '/^[0-9a-f]+ <.*>:$/{fn=$2} /\tv[a-z]+(\.[a-z0-9]+)*\t/{c[fn]++} END{for(f in c) printf "%-28s %d VFP insns\n", f, c[f]}' sol.dis | sort
+    for f in Reset_Handler fault_c Fault_Entry; do
+        n=$(awk -v F="<$f>:" '$2==F{on=1;next} /^[0-9a-f]+ <.*>:$/{on=0} on && /\tv[a-z]+/' sol.dis | wc -l)
+        echo "$f: $n VFP instructions"
+    done
+    echo "--- ctor_gain_table ---"
+    awk '/<ctor_gain_table>:$/{on=1} on&&/^$/{exit} on' sol.dis | head -16
+    echo "--- symbols ---"
+    arm-none-eabi-nm -n solution.elf | grep -E ' (g_vectors|g_ram_vectors|g_vt_scratch|ctor_gain_table|g_ctor_scale|_sbss|_ebss|__init_array_start|pc_b1|pc_b2)$' ;;
+practice)   # practice.c 는 호스트 C — VM 의 cc 로 빌드·실행 (Mac 에선 cc 로)
+    cc -std=c11 -Wall -Wextra -Werror -O2 practice.c -o practice_host && ./practice_host
+    rc=$?; echo "practice exit=$rc"; exit $rc ;;
 *) echo "usage: $0 [solution|starter|practice|probe|order|disasm]"; exit 2 ;;
 esac

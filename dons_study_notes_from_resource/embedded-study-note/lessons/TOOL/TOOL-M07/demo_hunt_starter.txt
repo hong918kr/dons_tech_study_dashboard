@@ -1,0 +1,67 @@
+(lldb) command source -s 0 'starter.lldb'
+Executing commands in '/tmp/TOOL-M07_work/demo/starter.lldb'.
+(lldb) # TOOL-M07 starter.lldb — dev.link_state 를 망가뜨리는 범인 줄을 디버거만으로 찾는다
+(lldb) #   cc -std=c11 -g -O0 buggy.c -o buggy && cp starter.py ringbuf_cmd.py && lldb -b -s starter.lldb ./buggy
+(lldb) command script import ringbuf_cmd.py
+(lldb) breakpoint set -n main
+Breakpoint 1: where = buggy`main + 24 at buggy.c:131:20, address = 0x00000001000005b0
+(lldb) run
+Process 41572 launched: '/tmp/TOOL-M07_work/demo/buggy' (arm64)
+Process 41572 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = breakpoint 1.1
+    frame #0: 0x00000001000005b0 buggy`main at buggy.c:131:20
+   128 	
+   129 	int main(void)
+   130 	{
+-> 131 	    dev.link_state = LINK_IDLE;
+    	                   ^
+   132 	    for (g_tick = 1; g_tick <= 20000; g_tick++) {
+   133 	        link_task();
+   134 	        uart_tx_isr();
+Target 0: (buggy) stopped.
+(lldb) # ① 로깅 BP: 위험한 경로(마지막 칸 head == 15 에서 2바이트 escape)를 멈추지 않고 기록만 (-G = auto-continue)
+(lldb) breakpoint set -n rb_put_escaped -c 'rb->head == 15' -G true -C 'p g_tick' -C 'p *rb'
+Breakpoint 2: where = buggy`rb_put_escaped + 12 at buggy.c:58:18, address = 0x0000000100000a78
+(lldb) # ② 하드웨어 워치포인트: 이웃 필드에 "있을 수 없는 값"(0..3 밖)이 써지는 순간에만 멈춘다
+(lldb) watchpoint set variable dev.link_state
+Watchpoint created: Watchpoint 1: addr = 0x10000802c size = 4 state = enabled type = m
+    watchpoint spec = 'dev.link_state'
+    watchpoint resources:
+       #0: addr = 0x10000802c size = 4
+Watchpoint 1 hit:
+    
+new value: 0
+(lldb) # TODO(5): 이 워치포인트는 정상 상태 전이(0→1→2→0)에도 멈춘다. 한 줄로 고쳐라.
+(lldb) continue
+
+Watchpoint 1 hit:
+old value: 0
+new value: 1
+Process 41572 resuming
+Process 41572 stopped
+* thread #1, queue = 'com.apple.main-thread', stop reason = watchpoint 1
+    frame #0: 0x0000000100000718 buggy`link_task at buggy.c:91:9
+   88  	        if (rnd() % 4 == 0) {
+   89  	            frame_left = 4 + rnd() % 8;
+   90  	            dev.link_state = LINK_SENDING;
+-> 91  	        }
+    	        ^
+   92  	        break;
+   93  	    case LINK_SENDING:
+   94  	        for (int i = 0; i < 2 && frame_left > 0; i++) {
+Target 0: (buggy) stopped.
+(lldb) # ③ 멈춘 PC 는 쓰기 "다음" 명령어 → 범인은 PC 바로 앞 명령어
+(lldb) bt 3
+* thread #1, queue = 'com.apple.main-thread', stop reason = watchpoint 1
+  * frame #0: 0x0000000100000718 buggy`link_task at buggy.c:91:9
+    frame #1: 0x00000001000005e8 buggy`main at buggy.c:133:9
+    frame #2: 0x000000018753e054 dyld`start + 6652
+(lldb) image lookup -a $pc-4
+      Address: buggy[0x0000000100000714] (buggy.__TEXT.__text + 380)
+      Summary: buggy`link_task + 140 at buggy.c:90:28
+(lldb) p g_tick
+(uint32_t) 3
+(lldb) p/x dev.link_state
+(uint32_t) 0x00000001
+(lldb) rbdump rb
+error: rbdump: cannot evaluate 'rb'

@@ -8,7 +8,7 @@
  *           가드를 "건너뛰기" / -fstack-protector 함수 카나리.
  *   Part C: 출시 체크리스트 (reserved / measured / margin).
  * 대상: qemu-system-arm -M mps2-an385 (Cortex-M3), a07.ld, frames.c 와 함께 링크, su_gen.h 는 run_qemu.sh 가 생성.
- * 빌드/실행 (Lima VM elinux 안): bash run_qemu.sh solution|starter|practice|su|paintbug
+ * 빌드/실행 (Lima VM elinux 안): bash run_qemu.sh solution|starter|practice|su|paintbug|clash
  */
 #include <stddef.h>
 #include <stdint.h>

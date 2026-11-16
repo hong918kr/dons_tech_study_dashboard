@@ -57,7 +57,7 @@ updated: 2026-11-15
     <text x="482" y="176">28.7 ms</text><text x="478" y="210">26.2 ms</text><text x="481" y="244">28.0 ms</text>
     <text x="485" y="278">30.7 ms</text>
   </g>
-  <text x="10" y="310" fill="currentColor" font-size="12">크기는 7배 넘게 벌어지는데(344 B ~ 3084 B), -O1 이상 끼리의 시간 차이는 실행마다 바뀌는 잡음 수준이다.</text>
+  <text x="10" y="310" fill="currentColor" font-size="12">크기는 약 9배 벌어지는데(344 B ~ 3084 B), -O1 이상 끼리의 시간 차이는 실행마다 바뀌는 잡음 수준이다.</text>
   <text x="10" y="326" fill="currentColor" font-size="12">clang 의 -O2/-O3 는 루프 펼치기·벡터화로 커지고, gcc 는 같은 -O2 에서도 훨씬 보수적이다 (5. 풀이 Part A).</text>
 </svg>
 ```
@@ -218,7 +218,7 @@ Segment __DATA: 16384
 ```
 
 - `0xb5c` = 2908 바이트가 표의 `kernel.o`. `__literal16` (16바이트 상수 = NEON 벡터 상수)가 `-O2` 에서 생긴 것 자체가 **벡터화**의 흔적이다.
-- 실행 파일 `__text` 는 커널 + `main` + 타이밍 코드라 약 250~300 B 더 크다. 펌웨어 관점의 숫자는 오른쪽 `thumbv7em.o` (`llvm-size -A t.O2.o` 의 `.text`) 와 아래 VM 표다.
+- 실행 파일 `__text` 는 커널 + `main` + 타이밍 코드라 약 240~350 B 더 크다. 펌웨어 관점의 숫자는 오른쪽 `thumbv7em.o` (`llvm-size -A t.O2.o` 의 `.text`) 와 아래 VM 표다.
 - 시간은 **잡음이 크다** — 이 맥에서 다른 작업이 함께 돌았다. 같은 스크립트 4회 실행의 중앙값 범위: `-O0` 94–122 ms, `-O1` 30.4–34.8, `-O2` 27.9–31.3, `-O3` 24.9–29.0, `-Os` 26.2–33.1, `-Oz` 28.0–31.1, `-Og` 30.7–35.7. 결론은 범위로 말한다: **-O0 → 최적화 레벨 = 약 3~4배**, -O1 이상끼리는 이 벤치에선 ±15% 안에서 순위가 바뀐다.
 
 VM (`demo_bench.sh vm`, 실제 출력 — 펌웨어 숫자는 왼쪽 세 열):
@@ -247,7 +247,7 @@ level     text     data      bss aarch64.text  median_ms  speedup  checksum
 | gcc 는 `-O2` 에서도 532 B | GCC 의 `-O2` 는 펼치기를 거의 안 함(비용 모델이 보수적), `-O3` 에서 812 B |
 | `-Os` ≈ `-O1` 크기, 속도는 `-O2` 급 | 크기를 키우는 변환만 끈 `-O2`. 이 벤치에선 시간 손해가 잡음 수준 |
 | `-Oz` 가 가장 작음 (clang 344 B), gcc 는 `-Os` = `-Oz` (356) | clang `-Oz` 는 크기를 위해 속도를 더 포기한다. gcc 14 에서 이 코드는 두 레벨의 결과가 같았다 |
-| clang `-O1`+ 의 bss 9216 vs gcc 13312 | clang 이 쓰기만 하고 아무도 읽지 않는 `static int16_t g_out[2048]` (4096 B) 을 통째로 지웠다 (`llvm-nm t.O2.o` 에 `g_out` 없음, `-O0`/`-Oz` 엔 있음). 최적화는 **RAM** 도 바꾼다 |
+| clang thumb `.bss`: `-O1/-O2/-O3/-Os/-Og` 9216, `-O0`/`-Oz` 13312, gcc 는 모든 레벨 13312 | clang 이 `fir_q15` 를 인라인한 레벨에서 쓰기만 하고 아무도 읽지 않는 `static int16_t g_out[2048]` (4096 B) 를 통째로 지웠다 (`llvm-nm t.O2.o` 에 `g_out` 없음, `t.O0.o` 엔 있음). 최적화는 **RAM** 도 바꾼다 |
 | 체크섬이 14개 빌드 모두 `0x529a1652` | UB 없는 코드는 어느 레벨에서도 같은 답 — 이것이 Part B 의 목표 |
 
 `-Og` 를 clang 이 실제로 어떻게 다루나 (`cc -### -Og -c demo_bench.c`, 이 맥 Apple clang 21 과 VM 의 clang 21.1.8 둘 다):
@@ -332,36 +332,58 @@ $1 = 231                                     result = <optimized out>
 (gcc `-Og`: `sum = <optimized out>`, 나머지 `peak/avg/result` 는 값이 보였다.)
 
 ```svg
-<svg viewBox="0 0 740 260" xmlns="http://www.w3.org/2000/svg" font-size="13">
-  <text x="10" y="20" fill="currentColor" font-weight="bold">왜 sum 이 안 보이나: 변수의 "위치(location)" 가 기계어 주소 범위마다 다르다</text>
+<svg viewBox="0 0 740 270" xmlns="http://www.w3.org/2000/svg" font-size="13">
+  <text x="10" y="20" fill="currentColor" font-weight="bold">clang -O2 filter_block 의 DWARF 위치 목록 (.o 주소 0xc ~ 0x230, dwarfdump 실측)</text>
   <g fill="currentColor" font-family="monospace" font-size="12">
-    <text x="10" y="58">-O0  sum</text><text x="10" y="88">-O0  peak</text>
-    <text x="10" y="138">-O2  sum</text><text x="10" y="168">-O2  peak</text><text x="10" y="198">-O2  result</text>
+    <text x="10" y="58">x</text><text x="10" y="88">sum</text><text x="10" y="118">peak</text>
+    <text x="10" y="148">avg</text><text x="10" y="178">result</text>
   </g>
   <g stroke="currentColor">
-    <rect x="110" y="46" width="560" height="16" class="f-ok"/>
-    <rect x="110" y="76" width="560" height="16" class="f-ok"/>
-    <rect x="110" y="126" width="300" height="16" class="f-acc"/>
-    <rect x="110" y="156" width="300" height="16" class="f-acc"/>
-    <rect x="420" y="186" width="60" height="16" class="f-acc"/>
+    <rect x="110" y="46" width="527" height="16" class="f-ok"/>
+    <rect x="637" y="46" width="34" height="16" class="f-mut"/>
+    <rect x="135" y="76" width="449" height="16" class="f-mut"/>
+    <rect x="584" y="76" width="29" height="16" class="f-ok"/>
+    <rect x="135" y="106" width="449" height="16" class="f-mut"/>
+    <rect x="584" y="106" width="29" height="16" class="f-ok"/>
+    <rect x="633" y="136" width="20" height="16" class="f-ok"/>
   </g>
   <g fill="currentColor" font-size="12">
-    <text x="120" y="58">스택 슬롯 [sp+…] — 함수 전체에서 유효</text>
-    <text x="120" y="88">스택 슬롯 — 함수 전체에서 유효</text>
-    <text x="120" y="138">레지스터 (루프 동안만)</text>
-    <text x="120" y="168">레지스터 (루프 동안만)</text>
-    <text x="490" y="198">w0 에 잠깐 → 기록 없음</text>
+    <text x="120" y="58">W0 [0xc, 0x210)</text>
+    <text x="145" y="88">상수 0 [0x24, 0x1dc) — 벡터 루프 구간</text>
+    <text x="145" y="118">상수 INT32_MIN [0x24, 0x1dc)</text>
+    <text x="520" y="102">W10</text><text x="520" y="132">W11</text>
+    <text x="560" y="166">W20 [0x20c, 0x220)</text>
+    <text x="110" y="178">위치 정보 자체가 없음</text>
   </g>
-  <line x1="560" y1="34" x2="560" y2="212" stroke="currentColor" stroke-width="2" stroke-dasharray="5 3"/>
-  <text x="500" y="230" fill="currentColor" font-size="12">25행 브레이크포인트</text>
-  <text x="10" y="252" fill="currentColor" font-size="12">25행에선 sum/peak 의 레지스터가 이미 다른 값으로 재사용됨 → DWARF 위치 목록에 그 주소 범위가 없음 → "not available".</text>
+  <line x1="637" y1="34" x2="637" y2="190" stroke="currentColor" stroke-width="2" stroke-dasharray="5 3"/>
+  <text x="440" y="210" fill="currentColor" font-size="12">25행 BP = 0x210 (bl report)</text>
+  <text x="10" y="236" fill="currentColor" font-size="12">0x210 은 sum/peak 의 어떤 범위에도 없음 → not available. avg 는 W20 범위 안 → 19. x 는 entry_value 구간 → 복원 실패.</text>
+  <text x="10" y="256" fill="currentColor" font-size="12">-O0 은 모든 변수가 함수 전체에서 스택 슬롯 하나 — 그래서 언제 멈춰도 보인다.</text>
 </svg>
 ```
+
+같은 함수를 `-g -O2 -c` 로 만든 `.o` 의 DWARF (`bash demo_optout.sh mac` 끝부분, 실제 출력 발췌). 브레이크포인트 `filter_block + 516` = `.o` 주소 `0xc + 0x204 = 0x210` (`bl report`):
+
+```text
+DW_TAG_formal_parameter  x     [0x00c, 0x210): DW_OP_reg0 W0
+                               [0x210, 0x230): DW_OP_entry_value(DW_OP_reg0 W0), DW_OP_stack_value
+DW_TAG_variable          sum   [0x024, 0x1dc): DW_OP_lit0, DW_OP_stack_value
+                               [0x1dc, 0x1f8): DW_OP_reg10 W10
+DW_TAG_variable          peak  [0x024, 0x1dc): DW_OP_constu 0xffffffff80000000, DW_OP_stack_value
+                               [0x1dc, 0x1f8): DW_OP_reg11 W11
+DW_TAG_variable          avg   [0x20c, 0x220): DW_OP_reg20 W20
+DW_TAG_variable          result   (DW_AT_location 없음)
+     208:  sdiv w20, w10, w1     ; avg = sum / n  — sum(W10) 의 마지막 사용
+     20c:  add  w0, w20, w19    ; result 는 w0 에 잠깐
+     210:  bl   report          ; ← 25행
+```
+
+(주소는 실제 출력을 보기 좋게 줄였다: `0x0000000000000024` → `0x024`.)
 
 해석:
 
 - `-O0` 은 모든 지역 변수에 **스택 슬롯**을 하나씩 주고 함수 내내 그 자리에 둔다 → 언제 멈춰도 값이 보인다. 대신 느리고 크다.
-- 최적화 빌드는 변수를 **레지스터**에 두고, 마지막 사용 이후엔 그 레지스터를 다른 값에 재사용한다. 디버그 정보(DWARF)는 "주소 범위 A~B 동안 `sum` 은 `w9`" 같은 **위치 목록(location list)** 으로 기록하는데, 25행 주소가 어느 범위에도 없으면 lldb 는 `<variable not available>`, gdb 는 `<optimized out>` 이라 말한다. 값을 아예 계산하지 않고 상수로 접힌 경우도 같다.
+- 최적화 빌드는 변수를 **레지스터**에 두고, 마지막 사용 이후엔 그 레지스터를 다른 값에 재사용한다. 디버그 정보(DWARF)는 위처럼 "주소 범위 [0x1dc, 0x1f8) 동안 `sum` 은 `W10`" 같은 **위치 목록(location list)** 으로 기록하는데, 25행 주소가 어느 범위에도 없으면 lldb 는 `<variable not available>`, gdb 는 `<optimized out>` 이라 말한다. 값을 아예 계산하지 않고 상수로 접힌 경우도 같다.
 - `x=<unavailable>` / `DW_OP_entry_value`: 인자 `x` 는 첫 사용 후 레지스터 `x0` 이 덮였고, "호출 시점의 값" 으로 복원하는 DWARF 식(`DW_OP_entry_value`)도 호출 지점 정보가 없어 실패했다. gdb 의 `x=x@entry=0x461cd0` 은 그 복원이 **성공**한 경우다.
 - `-O0` 에서 `step-out` 후 `r = -191053608`: 아직 32행의 대입이 실행되기 **전**에 멈췄으므로 `r` 의 스택 슬롯은 쓰레기다(반환값은 `Return value: 37` 줄에 있다). `-O2` 는 반환 후 바로 33행으로 가서 `r = 37` (레지스터 `w0`). "-O0 이면 다 맞게 보인다" 도 사실이 아니다.
 - `-Og` (clang 21): 인자 `x` 와 `result` 는 살아났지만 루프 누적값 `sum/peak` 는 여전히 안 보였다. "-Og 면 다 보인다" 가 아니라 "-O2 보다 낫다" 정도로 기억한다.
@@ -544,7 +566,7 @@ if (__builtin_add_overflow(off, len, &end)) return false;   /* 맞음: GCC/Clang
 
 **5. for 루프 지연 + volatile 잘못 쓰기.** `for (i = 0; i < n; i++);` 은 `-O1` 부터 `ret` 한 줄이 된다. 결과만 `volatile` 변수에 저장해도(`g_sink = i`) 컴파일러는 `i == n` 을 계산해 저장만 하고 루프를 지운다(추가 연습 1). → 하드웨어 타이머(SysTick/DWT, BM-B13 · BM-A10), 꼭 필요하면 `volatile` 카운터.
 
-**6. 최적화 빌드 디버깅이 귀찮아 전체를 `-O0` 로 바꾼다.** 타이밍과 UB 가 바뀌어 버그가 사라지고(Heisenbug), Flash 가 넘칠 수도 있다(-O0 thumb 678 B vs -Os 526 B, 실제 프로젝트에선 더 큰 차이). → 의심 함수만 `optnone`/`optimize("O0")`, 파일 단위 `-Og`, 레지스터·디스어셈블 보기.
+**6. 최적화 빌드 디버깅이 귀찮아 전체를 `-O0` 로 바꾼다.** 타이밍과 UB 가 바뀌어 버그가 사라지고(Heisenbug), Flash 가 넘칠 수도 있다(-O0 thumb 678 B vs -Os 526 B — 큰 프로젝트에선 차이가 더 벌어지는 경우가 많다, 확인 권장). → 의심 함수만 `optnone`/`optimize("O0")`, 파일 단위 `-Og`, 레지스터·디스어셈블 보기.
 
 **7. 시간 한 번 재고 "-O3 가 12% 빠르다".** 이 맥에서 같은 바이너리 중앙값이 실행마다 15% 넘게 흔들렸다. → 여러 번, 중앙값/최솟값, 같은 조건(부하·클럭)에서. MCU 에선 DWT `CYCCNT` 로 사이클을 센다(ARM-M03, BM-A10).
 
@@ -615,7 +637,7 @@ GCC/Clang 에서 `-g` 는 생성 코드를 바꾸지 않는 것이 원칙이다(
 <details>
 <summary>답 보기</summary>
 
-`bash demo_delay.sh` 의 `-O2` 디스어셈블(실제): `_delay_plain: ret` / `_delay_sink: adrp x8, _g_sink; add; str w0, [x8]; ret` (루프 없음 — 결과만 volatile 은 오용) / `_delay_vcounter`: `ldr w8,[sp,#0xc]; cmp w8,w0; b.hs …; ldr; add; str; b` (매 반복 load/store) / `_delay_asm: cbz w0; subs w0, w0, #1; b.ne` (레지스터 카운터, 빈 asm 은 명령 0개지만 "지울 수 없는 문장" 이라 루프 유지). Cortex-M4 (`clang --target=thumbv7em-none-eabi -O2 -S`): `delay_plain: bx lr`, `delay_sink: movw/movt r1, g_sink; str r0, [r1]; bx lr`. `practice.c` 는 volatile 카운터를 택했고 check.sh 결과는 `delay_spin keeps its loop at -O2 (1 backward branch)`, `-Oz` 도 동일. 타이밍 검사는 이 맥에 다른 작업이 돌고 있어 "8배 반복이 2배 이상 오래" 로 느슨하게 잡았다(최솟값 7회, N 과 8N 교대 측정).
+`bash demo_delay.sh` 의 `-O2` 디스어셈블(실제): `_delay_plain: ret` / `_delay_sink: adrp x8, _g_sink; add; str w0, [x8]; ret` (루프 없음 — 결과만 volatile 은 오용) / `_delay_vcounter`: `ldr w8,[sp,#0xc]; cmp w8,w0; b.hs …; ldr; add; str; b` (매 반복 load/store) / `_delay_asm: cbz w0; subs w0, w0, #1; b.ne` (레지스터 카운터, 빈 asm 은 명령 0개지만 "지울 수 없는 문장" 이라 루프 유지). Cortex-M4 (`clang --target=thumbv7em-none-eabi -O2 -S`): `delay_plain: bx lr`, `delay_sink: movw/movt r1, g_sink; str r0, [r1]; bx lr`. `practice.c` 는 volatile 카운터를 택했고 check.sh 결과는 `delay_spin keeps its loop at -O2 (1 backward branch)`, `-Oz` 도 동일. 타이밍 검사는 부하에 흔들리지 않게 **하한**만 본다: 160만 번 volatile 반복이 100 µs 이상(실측 최솟값 약 0.25 ns/반복 → 약 400 µs, 루프가 지워지면 ≈ 0) 이고 20만 번보다 오래 걸릴 것. 부하는 실행을 느리게만 하므로 이 하한은 거짓 실패가 나지 않는다(처음엔 "8배 반복이 3배 이상" 비율로 검사했다가 다른 작업이 함께 돈 실행에서 2.8배가 나와 실패했다).
 
 </details>
 

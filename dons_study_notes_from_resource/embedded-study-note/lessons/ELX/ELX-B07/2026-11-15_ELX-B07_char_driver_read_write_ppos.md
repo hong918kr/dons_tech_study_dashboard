@@ -22,7 +22,7 @@ updated: 2026-11-15
 만들 장치는 `/dev/kecho` 하나다. 4096 바이트 커널 버퍼가 있고, `write` 한 내용을 `read` 로 돌려준다. 동작은 "크기가 4 KiB 로 막힌 작은 파일"과 같다.
 
 ```svg
-<svg viewBox="0 0 740 340" xmlns="http://www.w3.org/2000/svg" font-size="13">
+<svg viewBox="0 0 740 380" xmlns="http://www.w3.org/2000/svg" font-size="13">
 <text x="10" y="20" fill="currentColor" font-weight="bold">/dev/kecho: 번호 → cdev → fops → 공유 버퍼. f_pos 는 struct file 마다 하나</text>
 <rect x="10" y="40" width="200" height="44" class="f-mut" stroke="currentColor"/>
 <text x="20" y="58" fill="currentColor">프로세스 P: fd 3</text>
@@ -63,9 +63,11 @@ updated: 2026-11-15
 <line x1="170" y1="230" x2="200" y2="230" stroke="currentColor"/>
 <line x1="360" y1="230" x2="390" y2="230" stroke="currentColor"/>
 <line x1="550" y1="230" x2="580" y2="230" stroke="currentColor"/>
-<text x="10" y="285" fill="currentColor" font-size="12">private_data = container_of(inode-&gt;i_cdev, struct kecho_dev, cdev): 이후 read/write/llseek 는 번호 조회 없이 바로 이 구조체로 간다.</text>
-<text x="10" y="305" fill="currentColor" font-size="12">노드 이름은 의미가 없다: mknod /tmp/kalias c 510 0 으로 만든 노드도 같은 버퍼를 연다 (S2). rmmod 뒤에는 같은 노드가 ENXIO (S5).</text>
-<text x="10" y="325" fill="currentColor" font-size="12">모듈 참조 +2 = cdev_get() 의 try_module_get(cdev.owner) + fops_get() 의 fops-&gt;owner. 실측 /proc/modules: "kecho 20480 2".</text>
+<text x="10" y="285" fill="currentColor" font-size="12">private_data = container_of(inode-&gt;i_cdev, struct kecho_dev, cdev)</text>
+<text x="10" y="303" fill="currentColor" font-size="12">→ 이후 read/write/llseek 는 번호 조회 없이 이 구조체로 바로 간다.</text>
+<text x="10" y="325" fill="currentColor" font-size="12">노드 이름은 의미 없음: mknod /tmp/kalias c 510 0 도 같은 버퍼 (S2), rmmod 뒤엔 ENXIO (S5).</text>
+<text x="10" y="347" fill="currentColor" font-size="12">모듈 참조 +2 = cdev_get() (cdev.owner) + fops_get() (fops-&gt;owner)</text>
+<text x="10" y="367" fill="currentColor" font-size="12">실측 /proc/modules: kecho 20480 2</text>
 </svg>
 ```
 
@@ -119,7 +121,7 @@ updated: 2026-11-15
 limactl shell elinux -- bash /Users/donh/workspace/dons_tech_study_dashboard/dons_study_notes_from_resource/embedded-study-note/lessons/ELX/ELX-B07/check.sh starter
 ```
 
-starter 실측: `4/14 passed`, `RESULT: FAIL (starter)`, exit 1 (등록이 TODO 라 `/dev/kecho` 가 없어서 `FAIL: A0 open /dev/kecho O_RDWR` 에서 C 테스트가 멈추고, 셸 테스트도 대부분 FAIL). 약 13 초.
+starter 실측: `4/14 passed`, `RESULT: FAIL (starter)`, exit 1 (등록이 TODO 라 `/dev/kecho` 가 없어서 `FAIL: A0 open /dev/kecho O_RDWR` 에서 C 테스트가 멈추고, 셸 테스트도 대부분 FAIL). 약 10–13 초.
 
 <!-- code: Makefile -->
 
@@ -172,7 +174,7 @@ read 의 0 은 EOF 라는 약속이지만, write 의 0 은 "아무것도 못 썼
 `class_create` 는 6.4 부터 인자가 이름 하나다(랩 `include/linux/device/class.h:226` `struct class * __must_check class_create(const char *name);`). 6.18 의 devtmpfs 는 기본 모드 0600 으로 노드를 만든다(`drivers/base/devtmpfs.c` 주석 "owned by root and have a default mode of 0600"). 실측 `crw-------    1 0        0         510,   0 ... /dev/kecho`.
 
 ```svg
-<svg viewBox="0 0 740 250" xmlns="http://www.w3.org/2000/svg" font-size="13">
+<svg viewBox="0 0 740 270" xmlns="http://www.w3.org/2000/svg" font-size="13">
 <text x="10" y="20" fill="currentColor" font-weight="bold">init 은 위에서 아래로, 실패하면 그 위 단계만 아래에서 위로 되감는다 (fail_at=N 실측: 4개 모두 흔적 0)</text>
 <rect x="10" y="40" width="250" height="34" class="f-ok" stroke="currentColor"/>
 <text x="20" y="62" fill="currentColor">1 alloc_chrdev_region</text>
@@ -197,7 +199,8 @@ read 의 0 은 EOF 라는 약속이지만, write 의 0 은 "아무것도 못 썼
 <text x="520" y="106" fill="currentColor" font-size="12">fail_at=2 → err_region 부터</text>
 <text x="520" y="150" fill="currentColor" font-size="12">fail_at=3 → err_cdev 부터</text>
 <text x="520" y="194" fill="currentColor" font-size="12">fail_at=4 → err_class 부터</text>
-<text x="10" y="235" fill="currentColor" font-size="12">검사(S6): insmod 실패 + dmesg "injected failure at step N" + /sys/class/kecho, /proc/devices, /dev/kecho, /proc/modules 어디에도 kecho 없음</text>
+<text x="10" y="232" fill="currentColor" font-size="12">검사(S6): insmod 실패 + dmesg "injected failure at step N"</text>
+<text x="10" y="252" fill="currentColor" font-size="12">+ /sys/class/kecho, /proc/devices, /dev/kecho, /proc/modules 에 kecho 없음</text>
 </svg>
 ```
 
@@ -245,7 +248,7 @@ read 의 0 은 EOF 라는 약속이지만, write 의 0 은 "아무것도 못 썼
 <rect x="240" y="215" width="400" height="24" class="f-mut" stroke="currentColor"/>
 <text x="48" y="232" fill="currentColor" font-size="12">유효 100 B</text>
 <text x="250" y="232" fill="currentColor" font-size="12">PROT_NONE (200 B 요청분)</text>
-<text x="40" y="262" fill="currentColor" font-size="12">read → 96 (copy_to_user 16 B 단위로 멈춤), write → 52. 둘 다 f_pos == 반환값, -EFAULT 아님</text>
+<text x="40" y="262" fill="currentColor" font-size="12">read → 96 (copy_to_user 가 청크 단위로 멈춤), write → 52. 둘 다 f_pos == 반환값, -EFAULT 아님</text>
 <text x="40" y="284" fill="currentColor" font-size="12">write 52 뒤의 장치 바이트 52..299 는 그대로 (bounce 버퍼 덕분, §7 실수 3 은 여기가 0 이 된다)</text>
 </svg>
 ```
@@ -301,7 +304,7 @@ dd: error writing '/dev/kecho': No space left on device
 | `read(fd, p + 4096 - 100, 300)` | 100 바이트 뒤 PROT_NONE | **96** |
 | `write(fd, p + 4096 - 100, 300)` | 같은 경계 | **52** |
 
-왜 100 이 아니라 96, 52 인가? arm64 의 `copy_to_user` 는 `arch/arm64/lib/copy_to_user.S` + `copy_template.S` 로 16 바이트(`ldp/stp`) 이상 단위로 복사하고, 폴트가 나면 fixup 이 "목적지가 어디까지 갔나"로 `bytes not copied` 를 계산한다(`9998: sub x0, end, dst`). 바이트 단위 재시도는 **하나도 못 했을 때만** 1 바이트 해 본다. 그래서 반환값은 "적어도 이만큼은 확실히 복사했다"이지 최대치가 아니다. 데모 모듈에서는 구조체 배치가 달라 같은 read 가 **88** 을 돌려줬다 — 정렬에 따라 달라진다. 테스트는 그래서 `1..100` 범위 + `f_pos == 반환값` + 내용 일치로 판정한다.
+왜 100 이 아니라 96, 52 인가? arm64 의 `copy_to_user` 는 `arch/arm64/lib/copy_to_user.S` + `copy_template.S` 로 `ldp/stp` 등 여러 바이트 청크 단위로 복사하고, 폴트가 나면 fixup 이 "목적지가 어디까지 갔나"로 `bytes not copied` 를 계산한다(`9998: sub x0, end, dst`). 바이트 단위 재시도는 **하나도 못 했을 때만** 1 바이트 해 본다. 그래서 반환값은 "적어도 이만큼은 확실히 복사했다"이지 최대치가 아니다. 데모 모듈에서는 구조체 배치가 달라 같은 read 가 **88** 을 돌려줬다 — 정렬에 따라 달라진다. 테스트는 그래서 `1..100` 범위 + `f_pos == 반환값` + 내용 일치로 판정한다.
 
 **bounce 버퍼가 필요한 이유**: 랩 `include/linux/uaccess.h` 의 `_inline_copy_from_user()`:
 
@@ -373,7 +376,7 @@ DMESG_BAD=0
 RESULT: PASS (solution)
 ```
 
-3 회 연속 실행 모두 `84/84`, exit 0, 회당 약 18–21 초(빌드 포함, TCG). 게스트 콘솔 전체는 `log_solution_guest.txt`.
+3 회 연속 실행 모두 `84/84`, exit 0, 회당 약 9–21 초(빌드 포함, TCG, 공유 VM 부하에 따라 다름). 게스트 콘솔 전체는 `log_solution_guest.txt`.
 
 ## 6. 정답 코드
 
@@ -419,7 +422,7 @@ FAIL: B4 partial write: bytes after it NOT clobbered (line 248)
 65/68 passed
 ```
 
-`-EFAULT` 를 돌려줬는데 장치 앞 8 바이트(실제로는 16)가 0 이 됐다. `B4 partial read: bytes are right` 의 FAIL 도 같은 원인(모델과 장치가 이미 어긋남). 고친 코드: bounce 로 받고 도착한 만큼만 memcpy.
+`-EFAULT` 를 돌려줬는데 장치 앞 8 바이트가 0 이 됐다(출력은 8 바이트만 찍었지만, 소스상 `memset` 은 요청한 16 바이트 전체). `B4 partial read: bytes are right` 의 FAIL 도 같은 원인(모델과 장치가 이미 어긋남). 고친 코드: bounce 로 받고 도착한 만큼만 memcpy.
 
 **실수 4 — 끝에서 0 반환 (`demo write0`)**:
 
@@ -461,7 +464,7 @@ insmod: can't insert '/demo_bugs.ko': File exists
 
 `alloc_chrdev_region` 은 커널이 빈 major 를 고르고(이번 게스트에서는 510), `register_chrdev_region` 은 내가 정한 번호를 예약한다(이미 쓰이면 `-EBUSY`). 둘 다 **번호만** 예약하고 장치와 연결은 `cdev_add` 가 한다. `register_chrdev` 는 옛 한 방 API 로 minor 256 개 전체를 잡고 cdev 를 내부에서 만든다. 새 드라이버는 alloc + cdev, 또는 장치 하나면 misc device(P4).
 
-**꼬리질문: 왜 동적 major 인가?** 고정 번호는 `Documentation/admin-guide/devices.txt` 에 등록해야 하고 충돌하면 로드가 실패한다. 유저는 번호가 아니라 udev/devtmpfs 가 만든 이름으로 연다.
+**꼬리질문: 왜 동적 major 인가?** 고정 번호는 `Documentation/admin-guide/devices.txt`(랩 소스에 있음)에 등록해야 하고 충돌하면 로드가 실패한다. 유저는 번호가 아니라 udev/devtmpfs 가 만든 이름으로 연다.
 </details>
 
 <details><summary>Q2. read 의 *ppos 는 file->f_pos 와 같은가?</summary>
@@ -473,7 +476,7 @@ insmod: can't insert '/demo_bugs.ko': File exists
 
 <details><summary>Q3. copy_to_user 대신 그냥 포인터로 쓰면 안 되나요?</summary>
 
-안 된다. (1) 유저 주소는 유효성이 보장되지 않는다: 미매핑이면 커널 폴트가 oops 가 된다. `copy_*_user` 는 예외 테이블(fixup)로 폴트를 오류값으로 바꾼다. (2) arm64 의 PAN(Privileged Access Never)이 켜져 있으면 커널이 평범한 load/store 로 유저 메모리를 만지는 것 자체가 막힌다. `copy_to_user` 는 `sttr` 같은 unprivileged 명령을 쓴다(`arch/arm64/lib/copy_to_user.S`). (3) `access_ok()` 로 커널 주소를 막는다(테스트 `B3 read into kernel address -> -EFAULT`).
+안 된다. (1) 유저 주소는 유효성이 보장되지 않는다: 미매핑이면 커널 폴트가 oops 가 된다. `copy_*_user` 는 예외 테이블(fixup)로 폴트를 오류값으로 바꾼다. (2) PAN(Privileged Access Never)을 지원하는 CPU(ARMv8.1+, 랩 커널은 `CONFIG_ARM64_PAN=y`; QEMU cortex-a57 은 v8.0 이라 이 하드웨어 기능은 없다)에서는 커널이 평범한 load/store 로 유저 메모리를 만지는 것 자체가 막힌다. `copy_to_user` 는 `sttr` 같은 unprivileged 명령을 쓴다(`arch/arm64/lib/copy_to_user.S`). (3) `access_ok()` 로 커널 주소를 막는다(테스트 `B3 read into kernel address -> -EFAULT`).
 
 **꼬리질문: 반환값이 0 이 아니면?** "복사 못 한 바이트 수"다. 전부 실패면 `-EFAULT`, 일부면 그 일부를 반환. arm64 에서는 그 값이 바이트 단위로 정확하지 않다(실측 100 중 96, 52).
 </details>
@@ -553,13 +556,13 @@ insmod: can't insert '/demo_bugs.ko': File exists
 limactl shell elinux -- bash /Users/donh/workspace/dons_tech_study_dashboard/dons_study_notes_from_resource/embedded-study-note/lessons/ELX/ELX-B07/check.sh practice
 ```
 
-실측: `105/105 passed, dmesg bad lines: 0`, `RESULT: PASS (practice)`, exit 0, 약 13 초.
+실측: `105/105 passed, dmesg bad lines: 0`, `RESULT: PASS (practice)`, exit 0, 약 9–13 초.
 
 ## 10. 핵심 정리
 
 - 등록 = 번호(`alloc_chrdev_region`) → 연결(`cdev_add`) → 공개(`class_create` + `device_create` → devtmpfs 노드). 데이터는 `cdev_add` 전에 준비, 되감기는 정확한 역순.
 - read: `pos >= len` → 0(EOF), 아니면 있는 만큼(short read). write: 들어가는 만큼(short write), 하나도 안 들어가면 `-ENOSPC`, 절대 0 아님.
-- `copy_*_user` 반환 = 못 한 바이트 수. 전부 실패 → `-EFAULT`, 일부 → 그 일부만 반환하고 `*ppos` 도 그만큼. arm64 에서는 그 경계가 16 B 단위(실측 96, 52).
+- `copy_*_user` 반환 = 못 한 바이트 수. 전부 실패 → `-EFAULT`, 일부 → 그 일부만 반환하고 `*ppos` 도 그만큼. arm64 에서는 청크 단위라 바이트 정확하지 않다(실측 100 중 96, 52).
 - `copy_from_user` 는 실패한 꼬리를 목적지에서 0 으로 지운다 → 장치 버퍼에 바로 받지 말고 bounce.
 - read/write 는 `*ppos` 만 쓴다(`pread` 와 지역 복사본). `f_pos` 는 `struct file` 마다: 두 번 open 은 따로, `dup`/`fork` 는 같이.
 - 임계구역에 `copy_*_user` 가 있으면 mutex. 스핀락이면 `BUG: sleeping function called from invalid context`.
@@ -570,7 +573,7 @@ limactl shell elinux -- bash /Users/donh/workspace/dons_tech_study_dashboard/don
 
 - Linux 6.18.55 소스 (`/var/lab/src/linux-6.18.55`, 실제로 읽음): `fs/char_dev.c` (`alloc_chrdev_region`, `chrdev_open`, `cdev_get`, `cdev_del` 주석, `cdev_device_add`), `fs/read_write.c` (`ksys_write`, `vfs_write`, `rw_verify_area`, `ksys_lseek`, `default_llseek`, `generic_file_llseek_size`, `must_set_pos`), `fs/open.c` (`FMODE_ATOMIC_POS`), `fs/file.c` (`file_needs_f_pos_lock`), `fs/libfs.c` (`simple_write_to_buffer`), `block/fops.c` (`-ENOSPC`), `include/linux/uaccess.h` (`_inline_copy_from_user`), `arch/arm64/lib/copy_to_user.S`, `drivers/base/devtmpfs.c`, `drivers/char/misc.c`, `include/linux/device/class.h`
 - [LDD3 Chapter 3: Char Drivers](https://lwn.net/Kernel/LDD3/) — 구조는 그대로지만 API 가 오래됨(class_create 인자, `no_llseek` 등은 6.18 과 다름)
-- [Documentation/driver-api/basics — char devices](https://www.kernel.org/doc/html/latest/core-api/kernel-api.html#char-devices)
+- [Documentation/filesystems/vfs.rst](https://www.kernel.org/doc/html/latest/filesystems/vfs.html) — `struct file_operations` 각 멤버의 의미
 - [Documentation/admin-guide/devices.rst](https://www.kernel.org/doc/html/latest/admin-guide/devices.html) — 고정 major 목록
 - 이 사이트의 배경 노트: EmbeddedLinux `G_driver_model/2026-10-10_G4_char_device.md` (§1 dev_t, §5.1 llseek, §6 f_pos, §8 .owner), `E_kernel_basics` E6 (user/kernel 경계)
 - 레슨 교차 참조: ELX-B06 (모듈 기본, refcnt), ELX-B08 (이 kecho 에 ioctl 추가), ELX-B09 (sysfs 속성), ELX-M04 (락 선택: IRQ 와 공유할 때), OS-B 시리즈 (syscall, fd/struct file)

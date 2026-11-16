@@ -342,7 +342,7 @@ starter.c:89:12: runtime error: 40000 is outside the range of representable valu
 starter.c:89:12: runtime error: nan is outside the range of representable values of type 'short'
 starter.c:98:12: runtime error: -249.75 is outside the range of representable values of type 'unsigned short'
 
-(no sanitizer, -O2)
+(no sanitizer, -O2; 디스어셈블리는 명령만 한 줄로 요약)
 temp_to_centi(400.0): got 40000 want 32767          ← int16_t 함수가 40000 을 "반환"
 duty_to_ccr(-0.25,999): got 4294967047 want 0       ← uint16_t 함수가 0xFFFFFF07 을 "반환"
 <_temp_to_centi>:  fmul s0, s0, s1 ; fcvtzs w0, s0 ; ret     ← 16비트로 자르는 명령이 없음
@@ -376,7 +376,7 @@ pkt_seq      exit 133
 duty_over    exit 2   duty_to_ccr(1.5,999): got 1498 want 999
 ### is the runtime linked?  otool -L trap | grep -c ubsan
 0
-### all distinct brk immediates in the binary
+### all distinct brk immediates in the binary   (uniq -c 출력을 가로로 정리)
    2 brk #0x5500    1 brk #0x5503    2 brk #0x5505    2 brk #0x550a    1 brk #0x550c   1 brk #0x550d
    2 brk #0x5512    4 brk #0x5513    2 brk #0x5514    1 brk #0x5515    3 brk #0x5516
 ```
@@ -396,9 +396,9 @@ arm64 에서는 `brk` 의 하위 바이트가 **검사 종류**다. 실측 대�
 ->  0x10000119c <+44>: brk    #0x550c
 ```
 
-`__clang_trap_msg$...` 는 가짜 인라인 프레임이다 — 런타임 0 바이트로 메시지를 디버그 정보(DWARF)에만 넣었다. Flash 에는 안 들어가고 `.elf` 에만 남으니, 펌웨어에서 디버거를 붙이면 같은 정보를 얻는다.
+`__clang_trap_msg$...` 는 가짜 인라인 프레임이다 — 런타임 0 바이트로 메시지를 디버그 정보(DWARF)에만 넣었다. Flash 에는 안 들어가고 `.elf` 에만 남으니, 펌웨어에 디버거를 붙여도 같은 프레임 이름이 보일 것이다 (lldb 는 실측, gdb/OpenOCD 쪽 표시는 확인 권장 — TOOL-A03).
 
-Thumb(Cortex-M4)에서는 종류 번호가 없다: clang 은 `defe` (`udf #254`, objdump 는 `trap` 으로 표시), arm-none-eabi-gcc 는 `udf #255` 를 쓴다 (실측). 그리고 한 함수의 모든 체크가 **트랩 하나로 합쳐진다**(`-fsanitize-merge` 기본) — `adc_scale` 의 곱셈·0 나눗셈·`INT_MIN/-1` 세 분기가 모두 `2a: defe` 로 간다. `-fno-sanitize-merge` 를 주면 `2a: defe`, `2c: defe` 로 갈라져 PC 만으로 어느 체크인지 구분할 수 있다(실측, `size_m4.txt`).
+Thumb(Cortex-M4)에서는 종류 번호가 없다: clang 은 `defe` (`udf #254`, objdump 는 `trap` 으로 표시), arm-none-eabi-gcc 는 `udf #255` 를 쓴다 (실측). 그리고 한 함수의 모든 체크가 **트랩 하나로 합쳐진다**(`-fsanitize-merge` 기본) — starter 의 `adc_scale` 은 곱셈·0 나눗셈·`INT_MIN/-1` 세 분기가 모두 `2a: defe` 로 간다. `-fno-sanitize-merge` 면 곱셈은 `2a: defe`, 나눗셈 두 검사는 `2c: defe` 로 갈라져 PC 만으로 종류를 구분할 수 있다(실측, `size_m4.txt`).
 
 ```svg
 <svg viewBox="0 0 740 250" xmlns="http://www.w3.org/2000/svg" font-size="13">

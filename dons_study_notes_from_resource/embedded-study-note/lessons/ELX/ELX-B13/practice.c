@@ -159,13 +159,13 @@ static int run_daemon(const char *sensor, const char *hang_flag)
 	snprintf(msg, sizeof msg, "READY=1\nSTATUS=ready temp=%ld mC", milli);
 	notify_send(msg);
 	printf("esn_sensord: start-up done (temp=%ld mC)\n", milli);
-	pid_t helper = fork(); /* P5: a helper process that is NOT the main pid */
-	if (helper == 0) {
+	signal(SIGCHLD, SIG_IGN); /* P5: helper is reaped by the kernel, main loop never waits */
+	if (fork() == 0) {        /* P5: a helper process that is NOT the main pid */
 		snprintf(msg, sizeof msg, "STATUS=helper pid %d says hi", (int)getpid());
-		_exit(notify_send(msg) == 1 ? 0 : 1);
+		int r = notify_send(msg);
+		usleep(1000000); /* stay alive: PID 1 must still find this pid in our cgroup */
+		_exit(r == 1 ? 0 : 1);
 	}
-	if (helper > 0)
-		waitpid(helper, NULL, 0);
 
 	uint64_t samples = 0, samples_at_pet = 0, pets = 0, last_pet = now_usec();
 	while (!g_term) {

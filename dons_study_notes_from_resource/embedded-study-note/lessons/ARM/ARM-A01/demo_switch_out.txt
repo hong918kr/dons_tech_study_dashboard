@@ -1,0 +1,73 @@
+Reset_Handler () at shared_startup.c:100
+100	    for (uint32_t *s = _sidata, *d = _sdata; d < _edata; ) *d++ = *s++;
+
+=== (1) 첫 PendSV 진입 (A1, A 가 SysTick 에 끊김) ===
+Breakpoint 1 at 0xd28: file solution.S, line 59.
+
+Breakpoint 1, PendSV_Handler () at solution.S:59
+59	    mrs     r0, psp             // 나가는 태스크의 PSP (하드웨어 프레임 바로 아래)
+  lr(EXC_RETURN)=0xfffffffd msp=0x2000ff28 psp=0x20000ba8 control=0 g_cur=A
+  r4=04040404 r5=05050505 r6=06060606 r7=07070707 r8=08080808 r9=09090909 r10=0a0a0a0a r11=0b0b0b0b
+A 의 하드웨어 프레임 (r0 r1 r2 r3 r12 lr pc xpsr):
+0x20000ba8 <g_stk+992>:	0x20000074	0x01010101	0x02020202	0x03030303
+0x20000bb8 <g_stk+1008>:	0x0c0c0c0c	0x000015f1	0x0000158c	0x01000000
+  stacked pc -> task_regcheck in section .text
+
+=== (2) stmdb + str 뒤: A 의 저장 문맥 16 워드 (r4..r11 | 하드웨어 8) ===
+72	    mov     r0, lr              // os_schedule(EXC_RETURN)
+=> 0xd36 <PendSV_Handler+14>:	mov	r0, lr
+  r0(new A sp)=0x20000b88  A.sp in TCB=0x20000b88
+0x20000b88 <g_stk+960>:	0x04040404	0x05050505	0x06060606	0x07070707
+0x20000b98 <g_stk+976>:	0x08080808	0x09090909	0x0a0a0a0a	0x0b0b0b0b
+0x20000ba8 <g_stk+992>:	0x20000074	0x01010101	0x02020202	0x03030303
+0x20000bb8 <g_stk+1008>:	0x0c0c0c0c	0x000015f1	0x0000158c	0x01000000
+
+=== (3) bl os_schedule 를 넘기고 B 복원 직전까지 ===
+PendSV_Handler () at solution.S:74
+74	    bl      os_schedule         // r0 = 다음 TCB (g_cur 갱신됨) 또는 NULL
+75	    pop     {r3, lr}
+  os_schedule -> r0=0x20000020 (&T[1]=0x20000020) g_cur=B
+89	    bx      lr                  // 0xFFFFFFFD/0xFFFFFFED → 하드웨어가 새 PSP 에서 r0..xPSR 를 꺼낸다
+=> 0xd52 <PendSV_Handler+42>:	bx	lr
+  r4=04040404 r5=05050505 r6=06060606 r7=07070707 r8=08080808 r9=09090909 r10=0a0a0a0a r11=0b0b0b0b
+  psp=0x20000fa8  lr=0xfffffffd
+B 의 초기 하드웨어 프레임 (init_stack 이 만든 것):
+0x20000fa8 <g_stk+2016>:	0x20000168	0x01010101	0x02020202	0x03030303
+0x20000fb8 <g_stk+2032>:	0x0c0c0c0c	0x000015f1	0x0000158c	0x01000000
+
+=== (4) bx lr 한 명령 → B 의 첫 명령 ===
+SysTick_Handler () at shared_os.c:62
+62	    if (++g_wd_ticks > g_os.tick_limit + 2000u) {             /* 스위처가 main 으로 못 돌아오는 미완성 답 → 무한 대기 대신 종료 */
+  pc=0x00000e5c sp=0x2000ff28 psp=0x20000fa8 control=0 r0=0x20000020 (&RC[1]=0x20000168) lr=0xfffffffd
+SysTick_Handler in section .text
+
+=== (5) 첫 main 복귀: os_schedule 가 to_main 으로 (A1 끝) → PendSV 의 main 복귀 경로 ===
+Breakpoint 2 at 0xe2a: file shared_os.c, line 54.
+
+Breakpoint 2, os_schedule (exc_return=<optimized out>) at shared_os.c:54
+54	    SYST_CSR = 0u;                                            /* 먼저 SysTick 을 끄고 */
+PendSV_Handler () at solution.S:75
+75	    pop     {r3, lr}
+Value returned is $1 = (tcb *) 0x0 <g_vectors>
+=> 0xd3e <PendSV_Handler+22>:	ldmia.w	sp!, {r3, lr}
+  r0=0x00000000 (NULL → main 으로)  g_main_msp=0x2000ff28 msp=0x2000ff20
+PendSV_Handler () at solution.S:99
+99	    bx      lr                  // → os_start 의 svc 다음 명령, MSP, CONTROL.SPSEL = 0
+=> 0xd5e <PendSV_Handler+54>:	bx	lr
+  sp=0x2000ff50 lr=0xfffffff9
+  r4=44444444 r5=55555555 r6=66666666 r7=77777777 r8=88888888 r9=99999999 r10=aaaaaaaa r11=bbbbbbbb
+MSP 위에 남은 svc 하드웨어 프레임 (r0 r1 r2 r3 r12 lr pc xpsr):
+0x2000ff50:	0x2000ff98	0x00000002	0x000003e7	0x00000007
+0x2000ff60:	0x200017cc	0x00000f91	0x00001526	0x21000000
+  frame pc -> os_start + 38 in section .text
+os_start () at shared_tasks.S:44
+44	    movs    r0, #0
+  bx lr 뒤: pc=0x00001526 sp=0x2000ff70 control=0 ipsr=0 r4=0x44444444 r11=0xbbbbbbbb
+os_start + 38 in section .text
+
+=== (6) 나머지 실행 → 펌웨어가 SYS_EXIT ===
+[Inferior 1 (process 1) exited with code 01]
+qemu exit=1 (디버거로 멈춘 동안에도 호스트 시간이 흘러 틱이 밀린다 → 이 레인의 PASS 수는 의미 없음)
+--- firmware output (semihosting, last 2 lines) ---
+
+34/35 passed

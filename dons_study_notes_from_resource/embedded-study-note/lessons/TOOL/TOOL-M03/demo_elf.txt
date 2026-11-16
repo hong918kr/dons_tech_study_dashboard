@@ -1,0 +1,93 @@
+##### 1. 같은 solution.c / practice.c 를 ELF 로 (이식성 블록의 __ELF__ 분기)
+== gcc -O2
+section: 168 bytes, sizeof(entry) = 24, 7 entries
+26/26 passed
+initcall log: 0clock 1pinmux 1gpio 3sensor 3app 
+18/18 passed
+== gcc ASan+UBSan
+26/26 passed
+== clang -O2
+section: 168 bytes, sizeof(entry) = 24, 7 entries
+26/26 passed
+initcall log: 0clock 1gpio 1pinmux 3app 3sensor 
+18/18 passed
+== clang ASan+UBSan
+26/26 passed
+0000000000020078 D __start_shellcmds
+0000000000020120 D __stop_shellcmds
+  [25] shellcmds         PROGBITS        0000000000020078 010078 0000a8 00  WA  0   0  8
+== 점으로 시작하는 섹션 이름 (.shellcmds) 에 __start_shellcmds 를 기대하면 (demo_dotname.c)
+ld.bfd: cc.o: in function `main':
+demo_dotname.c:(.text.startup+0x0): undefined reference to `__start_shellcmds'
+
+##### 2. 한 TU 안의 순서: gcc 와 clang 이 다르다 (multi/cmd_sys.c: uptime 다음 reboot 정의)
+== gcc
+96 bytes, 4 entries: reboot(sys) uptime(sys) reboot(pwr) led(led)
+duplicate: reboot (sys, pwr)
+rc=3
+== clang
+96 bytes, 4 entries: uptime(sys) reboot(sys) reboot(pwr) led(led)
+duplicate: reboot (sys, pwr)
+rc=3
+== readelf -SW cmd_led.o (used 만 / used+retain)
+  [ 5] shellcmds         PROGBITS        0000000000000000 000050 000018 00  WA  0   0  8
+  [ 5] shellcmds         PROGBITS        0000000000000000 000050 000018 00 WAR  0   0  8
+
+##### 3. --gc-sections 행렬 (gcc -O2, 링크 순서 main sys pwr led)
+bfd  gc                          used   : 96 bytes, 4 entries: reboot(sys) uptime(sys) reboot(pwr) led(led)
+bfd  gc                          retain : 96 bytes, 4 entries: reboot(sys) uptime(sys) reboot(pwr) led(led)
+bfd  gc -Wl,-z,start-stop-gc     used   : 48 bytes, 2 entries: reboot(sys) uptime(sys)
+bfd  gc -Wl,-z,start-stop-gc     retain : 96 bytes, 4 entries: reboot(sys) uptime(sys) reboot(pwr) led(led)
+bfd  gc -Wl,-z,nostart-stop-gc   used   : 96 bytes, 4 entries: reboot(sys) uptime(sys) reboot(pwr) led(led)
+bfd  gc -Wl,-z,nostart-stop-gc   retain : 96 bytes, 4 entries: reboot(sys) uptime(sys) reboot(pwr) led(led)
+lld  gc                          used   : ld.lld: error: undefined symbol: __stop_shellcmds
+lld  gc                          retain : 96 bytes, 4 entries: reboot(sys) uptime(sys) reboot(pwr) led(led)
+lld  gc -Wl,-z,start-stop-gc     used   : ld.lld: error: undefined symbol: __stop_shellcmds
+lld  gc -Wl,-z,start-stop-gc     retain : 96 bytes, 4 entries: reboot(sys) uptime(sys) reboot(pwr) led(led)
+lld  gc -Wl,-z,nostart-stop-gc   used   : 96 bytes, 4 entries: reboot(sys) uptime(sys) reboot(pwr) led(led)
+lld  gc -Wl,-z,nostart-stop-gc   retain : 96 bytes, 4 entries: reboot(sys) uptime(sys) reboot(pwr) led(led)
+== bfd -z start-stop-gc: 어떤 입력 섹션이 남나 (순서 led pwr sys)
+ld.bfd: removing unused section 'shellcmds' in file 'cmd_pwr.o'
+ld.bfd: removing unused section 'shellcmds' in file 'cmd_sys.o'
+24 bytes, 1 entries: led(led)
+
+##### 4. 섹션 이름 오타 (main 만 SECT_ID=shellcmd)
+ld.bfd: main_typo.o: in function `main':
+main.c:(.text.startup+0x1c): undefined reference to `__stop_shellcmd'
+ld.lld: error: undefined symbol: __stop_shellcmd
+== 경계 심볼을 weak 로 선언하면? (오타가 조용히 빈 표가 된다 — Mach-O 와 같은 증상)
+table (nil)..(nil) = 0 bytes, 0 entries:
+rc=0
+== -DSHELL_GLOBAL: 같은 이름 두 번 = 링크 에러 (bfd)
+ld.bfd: g_cmd_pwr.o:(shellcmds+0x0): multiple definition of `shell_cmd_reboot'; g_cmd_sys.o:(shellcmds+0x0): first defined here
+collect2: error: ld returned 1 exit status
+== 정적 라이브러리 안의 등록 파일 (B09 와 같은 함정)
+48 bytes, 2 entries: reboot(sys) uptime(sys)
+72 bytes, 3 entries: reboot(sys) uptime(sys) led(led)
+
+##### 5. ASan 레드존: ELF 는? (demo_asan.c)
+== gcc -O1 -fsanitize=address
+sizeof=24  id-section: 72 bytes for 3 entries, gap x1->x2 = -24
+            dot-section: gap y1->y2 = -24
+== clang -O1 -fsanitize=address
+sizeof=24  id-section: 72 bytes for 3 entries, gap x1->x2 = 24
+            dot-section: gap y1->y2 = 64
+
+##### 6. initcall 레벨: SORT 가 있는 스크립트 조각 vs 없는 것
+9:        KEEP(*(.initcall.*))      /* SORT = SORT_BY_NAME: .initcall.0 < .initcall.1 < ... */
+== gcc: .o 안의 섹션 순서
+    .initcall.0     .initcall.1     .initcall.2     .initcall.3 
+== gcc + initcall_host.ld
+4 initcalls:   0 clock   1 gpio   2 uart   3 app 
+== gcc + nosort.ld
+4 initcalls:   0 clock   1 gpio   2 uart   3 app 
+== clang: .o 안의 섹션 순서
+    .initcall.3     .initcall.0     .initcall.2     .initcall.1 
+== clang + initcall_host.ld
+4 initcalls:   0 clock   1 gpio   2 uart   3 app 
+== clang + nosort.ld
+4 initcalls:   3 app   0 clock   2 uart   1 gpio 
+  [23] .initcalls        PROGBITS        0000000000020010 010010 000020 00  WA  0   0  8
+== 기본 링커 스크립트도 같은 방법을 쓴다 (ld --verbose 발췌)
+    KEEP (*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
+    KEEP (*(SORT_BY_INIT_PRIORITY(.fini_array.*) SORT_BY_INIT_PRIORITY(.dtors.*)))

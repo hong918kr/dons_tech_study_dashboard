@@ -324,9 +324,9 @@ def selftest():
                                                "I2C_STUB", "SERIAL_AMBA_PL011"])
     CHECK("P3 count defconfig", count_values(base) == "y=3295 m=1273 n=4951 other=117")
     CHECK("P4 release mismatch (real insmod error text)",
-          explain_vermagic("6.18.55-b03 SMP preempt mod_unload aarch64",
-                           "6.18.55 SMP preempt mod_unload aarch64") ==
-          ["release: module 6.18.55-b03 != kernel 6.18.55"])
+          explain_vermagic("6.18.55 SMP preempt mod_unload aarch64",
+                           "6.18.55-sub SMP preempt mod_unload aarch64") ==
+          ["release: module 6.18.55 != kernel 6.18.55-sub"])
     CHECK("P4 flags mismatch", explain_vermagic(
         "6.18.55 SMP preempt mod_unload modversions aarch64",
         "6.18.55 SMP preempt_rt mod_unload aarch64") ==

@@ -1,0 +1,188 @@
+gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0 | GNU ld (GNU Binutils for Ubuntu) 2.46 | ldd (Ubuntu GLIBC 2.43-2ubuntu2.7) 2.43 | aarch64
+
+===== 1. -fPIC on ELF: aarch64 vs x86_64 =====
+$ gcc -v 2>&1 | grep -o -- "--enable-default-pie"
+--enable-default-pie
+$ gcc -O2 -c ext.c -o ext_pie.o && readelf -rW ext_pie.o | grep -E "R_AARCH64" | grep -v PREL32 && gcc -shared ext_pie.o -o libext_pie.so && echo "default (-fPIE) object -> .so: linked"
+0000000000000000  0000000d00000137 R_AARCH64_ADR_GOT_PAGE 0000000000000000 ext + 0
+0000000000000004  0000000d00000138 R_AARCH64_LD64_GOT_LO12_NC 0000000000000000 ext + 0
+0000000000000000  0000000d00000101 R_AARCH64_ABS64        0000000000000000 ext + 0
+default (-fPIE) object -> .so: linked
+$ gcc -O2 -fno-pic -c ext.c -o ext_nopic.o && readelf -rW ext_nopic.o | grep -E "R_AARCH64" | grep -v PREL32
+0000000000000000  0000000c00000113 R_AARCH64_ADR_PREL_PG_HI21 0000000000000000 ext + 0
+0000000000000004  0000000c0000011d R_AARCH64_LDST32_ABS_LO12_NC 0000000000000000 ext + 0
+0000000000000000  0000000c00000101 R_AARCH64_ABS64        0000000000000000 ext + 0
+$ gcc -shared ext_nopic.o -o libext_nopic.so; echo rc=$?
+/usr/bin/aarch64-linux-gnu-ld.bfd: ext_nopic.o: relocation R_AARCH64_ADR_PREL_PG_HI21 against symbol `ext' which may bind externally can not be used when making a shared object; recompile with -fPIC
+ext_nopic.o: in function `get':
+ext.c:(.text+0x0): dangerous relocation: unsupported relocation
+collect2: error: ld returned 1 exit status
+rc=1
+$ gcc -O2 -fno-pic -c cnt.c -o cnt_nopic.o && gcc -shared cnt_nopic.o -o libcnt_nopic.so && echo "aarch64 -fno-pic, own global via ADRP (PC-relative): linked"
+aarch64 -fno-pic, own global via ADRP (PC-relative): linked
+$ x86_64-linux-gnu-gcc -O2 -fno-pic -c cnt.c -o cnt_x86.o && x86_64-linux-gnu-gcc -shared cnt_x86.o -o libcnt_x86.so; echo rc=$?
+/usr/bin/x86_64-linux-gnu-ld.bfd: cnt_x86.o: warning: relocation against `counter' in read-only section `.text'
+/usr/bin/x86_64-linux-gnu-ld.bfd: cnt_x86.o: relocation R_X86_64_PC32 against symbol `counter' can not be used when making a shared object; recompile with -fPIC
+/usr/bin/x86_64-linux-gnu-ld.bfd: final link failed: bad value
+collect2: error: ld returned 1 exit status
+rc=1
+$ x86_64-linux-gnu-gcc -O2 -fPIC -c cnt.c -o cnt_x86p.o && x86_64-linux-gnu-gcc -shared cnt_x86p.o -o libcnt_x86p.so && echo "x86_64 -fPIC: linked"
+x86_64 -fPIC: linked
+
+===== 2. real name / SONAME / linker name and who uses which =====
+$ gcc -std=c11 -Wall -Wextra -Werror -O2 -fPIC -fvisibility=hidden -I. -c foo.c foo_util.c
+$ gcc -shared -Wl,-soname,libfoo.so.1 foo.o foo_util.o -o build/libfoo.so.1.2.0
+$ ln -s libfoo.so.1.2.0 build/libfoo.so && /usr/sbin/ldconfig -n build && ls -l build | awk "NR>1 {print \$9, \$10, \$11}"
+libfoo.so -> libfoo.so.1.2.0
+libfoo.so.1 -> libfoo.so.1.2.0
+libfoo.so.1.2.0  
+$ gcc -std=c11 -Wall -Wextra -Werror -O2 -I. app.c app_util.c -Lbuild -lfoo -Wl,-rpath,'$ORIGIN' -o build/app
+$ readelf -dW build/libfoo.so.1.2.0 | grep -E "SONAME|NEEDED"
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x000000000000000e (SONAME)             Library soname: [libfoo.so.1]
+$ readelf -dW build/app | grep -E "NEEDED|RUNPATH|RPATH"
+ 0x0000000000000001 (NEEDED)             Shared library: [libfoo.so.1]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [ld-linux-aarch64.so.1]
+ 0x000000000000001d (RUNPATH)            Library runpath: [$ORIGIN]
+$ ldd build/app | sed "s/(0x[0-9a-f]*)//"
+	linux-vdso.so.1 
+	libfoo.so.1 => /tmp/TOOL-M06_demo_vm/src/build/libfoo.so.1 
+	libc.so.6 => /usr/lib/aarch64-linux-gnu/libc.so.6 
+	/lib/ld-linux-aarch64.so.1 
+$ cd build && LD_DEBUG=libs ./app 2>&1 | grep -E "find library=libfoo|search path|trying file|calling init: .*libfoo" | sed "s/^ *[0-9]*://"; cd ..
+	find library=libfoo.so.1 [0]; searching
+	 search path=/tmp/TOOL-M06_demo_vm/src/build		(RUNPATH from file ./app)
+	  trying file=/tmp/TOOL-M06_demo_vm/src/build/libfoo.so.1
+	 search path=/tmp/TOOL-M06_demo_vm/src/build		(RUNPATH from file ./app)
+	  trying file=/tmp/TOOL-M06_demo_vm/src/build/libc.so.6
+	  trying file=/usr/lib/aarch64-linux-gnu/libc.so.6
+	calling init: /tmp/TOOL-M06_demo_vm/src/build/libfoo.so.1
+
+===== 3. no SONAME: NEEDED records the file name the linker saw =====
+$ gcc -shared foo.o foo_util.o -o nosoname/libfoo.so.1.2.0 && ln -s libfoo.so.1.2.0 nosoname/libfoo.so
+$ gcc -std=c11 -Wall -Wextra -Werror -O2 -I. app.c app_util.c -Lnosoname -lfoo -o nosoname/app_l && gcc -std=c11 -Wall -Wextra -Werror -O2 -I. app.c app_util.c nosoname/libfoo.so.1.2.0 -o nosoname/app_path
+$ readelf -dW nosoname/app_l | grep "NEEDED.*foo"; readelf -dW nosoname/app_path | grep "NEEDED.*foo"
+ 0x0000000000000001 (NEEDED)             Shared library: [libfoo.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [nosoname/libfoo.so.1.2.0]
+
+===== 4. RPATH vs RUNPATH vs LD_LIBRARY_PATH (search order) =====
+$ gcc -fPIC -shared -Wl,-soname,libwho.so -x c - -o order/a/libwho.so <<< "const char *who(void){return \"a (rpath dir)\";}"
+$ gcc -fPIC -shared -Wl,-soname,libwho.so -x c - -o order/b/libwho.so <<< "const char *who(void){return \"b (LD_LIBRARY_PATH dir)\";}"
+$ gcc who.c -Lorder/a -lwho -Wl,-rpath,$PWD/order/a -Wl,--enable-new-dtags -o order/app_runpath
+$ gcc who.c -Lorder/a -lwho -Wl,-rpath,$PWD/order/a -Wl,--disable-new-dtags -o order/app_rpath
+$ readelf -dW order/app_runpath | grep -E "R(UN)?PATH" | sed "s|$PWD|\$PWD|"; readelf -dW order/app_rpath | grep -E "R(UN)?PATH" | sed "s|$PWD|\$PWD|"
+ 0x000000000000001d (RUNPATH)            Library runpath: [$PWD/order/a]
+ 0x000000000000000f (RPATH)              Library rpath: [$PWD/order/a]
+$ LD_LIBRARY_PATH=$PWD/order/b ./order/app_runpath
+b (LD_LIBRARY_PATH dir)
+$ LD_LIBRARY_PATH=$PWD/order/b ./order/app_rpath
+a (rpath dir)
+
+===== 4b. RUNPATH is not used for a library's own dependencies (RPATH is) =====
+$ cd tr && gcc -fPIC -shared -Wl,-soname,libb.so b.c -o lib/libb.so && gcc -fPIC -shared -Wl,-soname,liba.so a.c -Llib -lb -o lib/liba.so; cd ..
+$ cd tr && gcc m.c -Llib -la -Wl,-rpath-link,lib -Wl,-rpath,'$ORIGIN/lib' -Wl,--enable-new-dtags -o m_runpath && ./m_runpath; echo rc=$?; cd ..
+./m_runpath: error while loading shared libraries: libb.so: cannot open shared object file: No such file or directory
+rc=127
+$ cd tr && gcc m.c -Llib -la -Wl,-rpath-link,lib -Wl,-rpath,'$ORIGIN/lib' -Wl,--disable-new-dtags -o m_rpath && ./m_rpath; echo rc=$?; cd ..
+a()=3
+rc=0
+
+===== 5. interposition: an app symbol with the same name as a library internal =====
+lib built default: foo(2)=201 helper(2)=200 | foo calls: bl	480 <helper@plt>
+lib built hidden: foo(2)=7 helper(2)=200 | foo calls: bl	580 <helper>
+lib built nosemint: foo(2)=7 helper(2)=200 | foo calls: bl	5a0 <helper>
+lib built bsymbolic: foo(2)=7 helper(2)=200 | foo calls: bl	5a0 <helper>
+$ nm -D ip/app | grep -w helper
+0000000000000880 T helper
+
+===== 6. visibility: exported dynamic symbols =====
+$ gcc -fPIC -shared foo.c foo_util.c -I. -o libfoo_all.so 2>/dev/null; nm -D --defined-only libfoo_all.so | grep -E " T "
+0000000000000828 T foo_abi_check
+00000000000009e4 T foo_close
+00000000000009ac T foo_get_stats
+0000000000000898 T foo_open
+0000000000000910 T foo_push
+0000000000000a04 T foo_version
+0000000000000a88 T ring_put
+0000000000000a10 T round_div
+$ nm -D --defined-only build/libfoo.so.1.2.0 | grep -E " T "
+00000000000007c0 T foo_abi_check
+00000000000008e0 T foo_close
+00000000000008c4 T foo_get_stats
+0000000000000820 T foo_open
+0000000000000870 T foo_push
+00000000000008e4 T foo_version
+$ readelf -sW foo.o | grep -E "round_div|foo_open"
+    17: 0000000000000060    80 FUNC    GLOBAL DEFAULT    1 foo_open
+    21: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND round_div
+$ size libfoo_all.so build/libfoo.so.1.2.0
+   text	   data	    bss	    dec	    hex	filename
+   3015	    600	      8	   3623	    e27	libfoo_all.so
+   2489	    600	      8	   3097	    c19	build/libfoo.so.1.2.0
+
+===== 7. version script (symbol versioning) =====
+$ gcc -shared -Wl,-soname,libfoo.so.1 -Wl,--version-script=/Users/donh/workspace/dons_tech_study_dashboard/dons_study_notes_from_resource/embedded-study-note/lessons/TOOL/TOOL-M06/practice/foo.map foo.o foo_util.o -o vs_libfoo.so
+$ readelf --dyn-syms -W vs_libfoo.so | grep -E "foo_open|FOO_1"
+    11: 0000000000000944    12 FUNC    GLOBAL DEFAULT   12 foo_version@@FOO_1.0
+    12: 0000000000000820    92 FUNC    GLOBAL DEFAULT   12 foo_abi_check@@FOO_1.0
+    13: 0000000000000940     4 FUNC    GLOBAL DEFAULT   12 foo_close@@FOO_1.0
+    14: 0000000000000000     0 OBJECT  GLOBAL DEFAULT  ABS FOO_1.0
+    15: 00000000000008d0    84 FUNC    GLOBAL DEFAULT   12 foo_push@@FOO_1.0
+    16: 0000000000000924    20 FUNC    GLOBAL DEFAULT   12 foo_get_stats@@FOO_1.0
+    17: 0000000000000880    80 FUNC    GLOBAL DEFAULT   12 foo_open@@FOO_1.0
+$ gcc -std=c11 -Wall -Wextra -Werror -O2 -I. app.c app_util.c -Lvs -lfoo -o vs/app && readelf -V -W vs/app | grep -B1 FOO_1.0
+  000:   0 (*local*)       0 (*local*)       0 (*local*)       2 (GLIBC_2.34) 
+  004:   0 (*local*)       3 (GLIBC_2.17)    4 (FOO_1.0)       4 (FOO_1.0)    
+  008:   3 (GLIBC_2.17)    4 (FOO_1.0)       3 (GLIBC_2.17)    0 (*local*)    
+  00c:   5 (GLIBC_2.17)    3 (GLIBC_2.17)    4 (FOO_1.0)       0 (*local*)    
+  010:   4 (FOO_1.0)       4 (FOO_1.0)    
+--
+  0x0020: Version: 1  File: libfoo.so.1  Cnt: 1
+  0x0030:   Name: FOO_1.0  Flags: none  Version: 4
+$ readelf --dyn-syms -W vs/app | grep foo_open
+    17: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND foo_open@FOO_1.0 (4)
+$ gcc -shared -Wl,-soname,libfoo.so.1 -Wl,--version-script=old.map foo.o foo_util.o -o ov/libfoo.so.1
+$ LD_LIBRARY_PATH=nov ./vs/app | head -1; echo rc=$?
+./vs/app: nov/libfoo.so.1: no version information available (required by ./vs/app)
+libfoo 1.2.0 (app abi 1)
+rc=0
+$ LD_LIBRARY_PATH=ov ./vs/app; echo rc=$?
+./vs/app: ov/libfoo.so.1: version `FOO_1.0' not found (required by ./vs/app)
+rc=1
+
+===== 8. patchelf: repair a prebuilt ELF without relinking (counterpart of install_name_tool) =====
+$ gcc -std=c11 -Wall -Wextra -Werror -O2 -I. app.c app_util.c -Lnosoname -lfoo -Wl,-rpath,/tmp/TOOL-M06_demo_vm/src/nosoname -o pe/bin/app
+$ readelf -dW pe/bin/app | grep -E "NEEDED.*foo|RUNPATH"
+ 0x0000000000000001 (NEEDED)             Shared library: [libfoo.so]
+ 0x000000000000001d (RUNPATH)            Library runpath: [/tmp/TOOL-M06_demo_vm/src/nosoname]
+$ ./pe/bin/app 2>&1 | head -1
+libfoo 1.2.0 (app abi 1)
+$ patchelf --set-soname libfoo.so.1 pe/lib/libfoo.so.1.2.0 && ln -s libfoo.so.1.2.0 pe/lib/libfoo.so.1
+$ patchelf --replace-needed libfoo.so libfoo.so.1 --set-rpath '$ORIGIN/../lib' pe/bin/app
+$ readelf -dW pe/bin/app | grep -E "NEEDED.*foo|RUNPATH"
+ 0x0000000000000001 (NEEDED)             Shared library: [libfoo.so.1]
+ 0x000000000000001d (RUNPATH)            Library runpath: [$ORIGIN/../lib]
+$ mv pe pe_moved && ./pe_moved/bin/app | head -1
+libfoo 1.2.0 (app abi 1)
+
+===== 9. firmware tie: static link of the same objects, and what dynamic linking saves =====
+$ gcc -std=c11 -Wall -Wextra -Werror -O2 -I. app.c app_util.c foo.c foo_util.c -static -o app_static; echo rc=$?
+/usr/bin/aarch64-linux-gnu-ld.bfd: /tmp/cccR6RmF.o: in function `round_div':
+foo_util.c:(.text+0x0): multiple definition of `round_div'; /tmp/cciLTe3l.o:app_util.c:(.text+0x0): first defined here
+collect2: error: ld returned 1 exit status
+rc=1
+$ gcc -O2 hi.c -o hi_dyn && gcc -O2 -static hi.c -o hi_static && ls -l hi_dyn hi_static | awk "{print \$5, \$9}"
+70448 hi_dyn
+711880 hi_static
+$ ls -lL /lib/aarch64-linux-gnu/libc.so.6 | awk "{print \$5, \$9}"
+1788240 /lib/aarch64-linux-gnu/libc.so.6
+$ readelf -lW build/libfoo.so.1.2.0 | grep LOAD
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x000ba4 0x000ba4 R E 0x10000
+  LOAD           0x00fdd8 0x000000000001fdd8 0x000000000001fdd8 0x000258 0x000260 RW  0x10000
+$ gcc -shared -Wl,-soname,libfoo.so.1 -Wl,-z,max-page-size=4096 foo.o foo_util.o -o l4.so && gcc -shared -Wl,-soname,libfoo.so.1 -Wl,-z,max-page-size=4096 -s foo.o foo_util.o -o l4s.so
+$ ls -l build/libfoo.so.1.2.0 l4.so l4s.so | awk "{print \$5, \$9}"; getconf PAGESIZE
+70264 build/libfoo.so.1.2.0
+8824 l4.so
+6128 l4s.so
+4096

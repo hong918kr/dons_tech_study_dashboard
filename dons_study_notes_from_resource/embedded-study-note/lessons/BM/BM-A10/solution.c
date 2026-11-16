@@ -238,8 +238,8 @@ static int lat_correct(uint32_t raw, uint32_t calib, uint32_t *out)
  *   D,<id>,<idx>,<t0 8hex>,<t1 8hex>       표본 (idx 는 0 부터 연속)
  *   E,<total>,<sum 8hex>                   sum = core_hz + calib + Σ(t1−t0)  (mod 2^32)
  */
-#define MAX_SCN 16
-#define MAX_SAMP 4096
+#define MAX_SCN 32
+#define MAX_SAMP 32768   /* 보드 덤프 전체(약 15.8k 표본)가 들어가게 */
 typedef struct { char name[24]; uint32_t n_expected, first, count; } scn_t;
 typedef struct {
     uint32_t core_hz, calib, n_scn_hdr; int n_scn; scn_t scn[MAX_SCN];
@@ -401,7 +401,7 @@ static void bimodal_detect(const uint32_t *sorted, uint32_t n, uint32_t min_gap,
 }
 
 /* ---------- 합성 덤프 생성기 (주어짐) — 실측 아님 ---------- */
-typedef struct { const char *name; uint32_t model, model_miss, miss_permille, trig; } synth_scn_t;
+typedef struct { const char *name; uint32_t model, model_miss, miss_permille, offs; } synth_scn_t;   /* offs = 모델 밖 고정 오프셋(가정) */
 static size_t synth_dump(char *buf, size_t cap, uint32_t seed, uint32_t core_hz, uint32_t calib,
                          const synth_scn_t *sc, int ns, uint32_t n_per)
 {
@@ -417,7 +417,7 @@ static size_t synth_dump(char *buf, size_t cap, uint32_t seed, uint32_t core_hz,
         for (uint32_t i = 0; i < n_per; ++i) {
             uint32_t miss = (xs32() % 1000u) < sc[s].miss_permille;
             uint32_t jit = (xs32() % 10u) == 0;                        /* 10 % 확률 +1 사이클 */
-            uint32_t raw = calib + sc[s].trig + (miss ? sc[s].model_miss : sc[s].model) + jit;
+            uint32_t raw = calib + sc[s].offs + (miss ? sc[s].model_miss : sc[s].model) + jit;
             uint32_t t0 = (i % 50u == 7u) ? 0xFFFFFFF0u + (xs32() & 7u) : xs32();   /* 가끔 감김 직전 */
             EMIT("D,%d,%u,%08x,%08x\n", s, (unsigned)i, (unsigned)t0, (unsigned)(t0 + raw));
             sum += raw; ++total;
@@ -611,11 +611,11 @@ static void part_c(void)
         { "entry_ws0",       latency_model(p, &c0, SC_ENTRY, 0),  latency_model(p, &c0, SC_ENTRY, 0),  0,   2 },
         { "entry_ws5_art",   latency_model(p, &c5h, SC_ENTRY, 0), latency_model(p, &c5m, SC_ENTRY, 0), 200, 2 },
         { "entry_ws5_noart", latency_model(p, &c5m, SC_ENTRY, 0), latency_model(p, &c5m, SC_ENTRY, 0), 0,   2 },
-        { "tail_gap_ws0",    latency_model(p, &c0, SC_TAIL_GAP, 0), latency_model(p, &c0, SC_TAIL_GAP, 0), 0, 0 },
-        { "exit_ws0",        latency_model(p, &c0, SC_EXIT, 0),   latency_model(p, &c0, SC_EXIT, 0),   0,   0 },
+        { "tail_gap_ws0",    latency_model(p, &c0, SC_TAIL_GAP, 0), latency_model(p, &c0, SC_TAIL_GAP, 0), 0, 1 },
+        { "exit_ws0",        latency_model(p, &c0, SC_EXIT, 0),   latency_model(p, &c0, SC_EXIT, 0),   0,   1 },
         { "entry_fp_full",   latency_model(p, &fpn, SC_ENTRY, 0), latency_model(p, &fpn, SC_ENTRY, 0), 0,   2 },
         { "entry_fp_lazy",   latency_model(p, &fpl, SC_ENTRY, 0), latency_model(p, &fpl, SC_ENTRY, 0), 0,   2 },
-        { "lazy_stall",      latency_model(p, &fpl, SC_LAZY_STALL, 0), latency_model(p, &fpl, SC_LAZY_STALL, 0), 0, 0 },
+        { "lazy_stall",      latency_model(p, &fpl, SC_LAZY_STALL, 0), latency_model(p, &fpl, SC_LAZY_STALL, 0), 0, 1 },
     };
     const uint32_t calib = 1, n_per = 400;
     size_t L = synth_dump(g_buf, sizeof g_buf, 0xC0FFEEu, 168000000u, calib, S, 8, n_per);
@@ -650,7 +650,7 @@ static void part_c(void)
     CHECK(s0.n == 0 && s0.max == 0, "stats of empty set = zeros");
 
     /* 시나리오별 분석 + 비교 표 */
-    printf("   %-16s %5s %5s %5s | %4s %4s %4s %4s %7s | %s\n", "scenario", "model", "trig", "expect", "min", "p50", "p99", "max", "mean", "bimodal (lo/hi, hi share)");
+    printf("   %-16s %5s %5s %5s | %4s %4s %4s %4s %7s | %s\n", "scenario", "model", "offs", "expect", "min", "p50", "p99", "max", "mean", "bimodal (lo/hi, hi share)");
     int ok_p50 = 0, n_bimodal = 0, neg = 0;
     bimodal_t bm_art = { 0, 0, 0, 0 };
     for (int s = 0; s < g_d.n_scn; ++s) {
@@ -660,20 +660,20 @@ static void part_c(void)
         stats_t st; bimodal_t bm;
         stats_compute(g_vals, sc->count, g_tmp, &st);
         bimodal_detect(g_tmp, sc->count, 3, 50, &bm);
-        uint32_t expect = S[s].model + S[s].trig;
+        uint32_t expect = S[s].model + S[s].offs;
         if (st.p50 == expect) ++ok_p50;
         if (bm.bimodal) ++n_bimodal;
         if (s == 1) bm_art = bm;
-        printf("   %-16s %5u %5u %5u | %4u %4u %4u %4u %4u.%02u | ", sc->name, (unsigned)S[s].model, (unsigned)S[s].trig,
+        printf("   %-16s %5u %5u %5u | %4u %4u %4u %4u %4u.%02u | ", sc->name, (unsigned)S[s].model, (unsigned)S[s].offs,
                (unsigned)expect, (unsigned)st.min, (unsigned)st.p50, (unsigned)st.p99, (unsigned)st.max,
                (unsigned)(st.mean_x100 / 100), (unsigned)(st.mean_x100 % 100));
         if (bm.bimodal) printf("YES %u/%u, %u.%u%%\n", (unsigned)bm.lo, (unsigned)bm.hi, (unsigned)(bm.frac_hi_permille / 10), (unsigned)(bm.frac_hi_permille % 10));
         else printf("no\n");
     }
     CHECK(neg == 0, "no sample below calibration");
-    CHECK(ok_p50 == 8, "p50 - trig offset == model value for all 8 scenarios (pipeline end-to-end)");
+    CHECK(ok_p50 == 8, "p50 - offset == model value for all 8 scenarios (pipeline end-to-end)");
     CHECK(n_bimodal == 1 && bm_art.bimodal, "only entry_ws5_art is bimodal (ART hit vs miss)");
-    CHECK(bm_art.lo == S[1].model + 2 && bm_art.hi == S[1].model_miss + 2, "bimodal modes = hit and miss model values + trig");
+    CHECK(bm_art.lo == S[1].model + 2 && bm_art.hi == S[1].model_miss + 2, "bimodal modes = hit and miss model values + offset");
     CHECK(bm_art.frac_hi_permille >= 150 && bm_art.frac_hi_permille <= 250, "miss share near the generator's 20 %");
     /* 히스토그램: ART 시나리오 */
     {

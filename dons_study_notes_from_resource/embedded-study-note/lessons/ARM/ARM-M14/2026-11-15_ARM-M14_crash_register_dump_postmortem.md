@@ -503,7 +503,7 @@ arm64e 빌드는 프롤로그에서 `pacibsp` 로 LR 에 서명하고 `retab` �
 
 <details><summary>Q6. 해제 후 사용(UAF)은 덤프에서 어떻게 알아보나요? MallocScribble 이면 끝인가요?</summary>
 
-교과서 답은 "포인터/주소가 0x5555… 면 free 된 메모리" (MallocScribble, 새 할당은 0xAA). 하지만 이 맥(macOS 27.2)의 기본 할당자는 free 때 블록을 0 으로 지워서, `MallocScribble=1` 만으로는 0x55 가 안 보였고 `MallocZeroOnFree=0` 를 같이 줘야 했다. 기본 상태의 UAF 는 "NULL 역참조" 로 보인다. 그래서 베이스 레지스터의 출처를 한 칸 더 따라가 "그 NULL 을 담고 있던 객체가 왜 0 인가" 를 봐야 한다. 실제 해결 도구는 ASan(할당/해제 스택까지 출력)이고, Guard Malloc(`libgmalloc`)은 해제 페이지를 접근 불가로 만들어 첫 접근에서 죽게 한다.
+교과서 답은 "포인터/주소가 0x5555… 면 free 된 메모리" (MallocScribble, 새 할당은 0xAA). 하지만 이 맥(macOS 27.2)의 기본 할당자는 free 때 블록을 0 으로 지워서, `MallocScribble=1` 만으로는 0x55 가 안 보였고 `MallocZeroOnFree=0` 를 같이 줘야 했다. 기본 상태의 UAF 는 "NULL 역참조" 로 보인다. 그래서 베이스 레지스터의 출처를 한 칸 더 따라가 "그 NULL 을 담고 있던 객체가 왜 0 인가" 를 봐야 한다. 실제 해결 도구는 ASan(할당/해제 스택까지 출력)이고, Guard Malloc(`DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib`)은 해제 페이지를 접근 불가로 만들어 첫 접근에서 죽게 한다 — 이 데모에 실제로 걸어 보니 한 단계 **앞**인 `finish_req + 0` 의 `ldr x8, [x0, #0x18]` 에서 `address=0x12d253fe8` = r(`0x12d253fd0`) + 0x18 로 멈췄다 (해제된 객체 자체를 읽는 순간). 참고: 과제에 나온 `MallocPreScribble` 은 이 맥의 `man malloc` 에 없다 — 새 블록 0xAA 채우기는 `MallocScribble` 이 함께 한다.
 </details>
 
 <details><summary>Q7. lr 이 가리키는 줄과 bt 의 호출자 줄이 왜 다른가요?</summary>

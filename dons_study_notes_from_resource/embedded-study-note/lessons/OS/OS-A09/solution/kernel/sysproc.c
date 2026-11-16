@@ -1,0 +1,143 @@
+/* ENV: qemu (OS-A09 overlay on xv6-riscv fa2ddcb; built + booted by check.sh inside the Lima VM) */
+#include "types.h"
+#include "riscv.h"
+#include "defs.h"
+#include "param.h"
+#include "memlayout.h"
+#include "spinlock.h"
+#include "proc.h"
+#include "vm.h"
+#include "sysinfo.h"
+
+uint64
+sys_exit(void)
+{
+  int n;
+  argint(0, &n);
+  kexit(n);
+  return 0; // not reached
+}
+
+uint64
+sys_getpid(void)
+{
+  return myproc()->pid;
+}
+
+uint64
+sys_fork(void)
+{
+  return kfork();
+}
+
+uint64
+sys_wait(void)
+{
+  uint64 p;
+  argaddr(0, &p);
+  return kwait(p);
+}
+
+uint64
+sys_sbrk(void)
+{
+  uint64 addr;
+  int t;
+  int n;
+
+  argint(0, &n);
+  argint(1, &t);
+  addr = myproc()->sz;
+
+  if (t == SBRK_EAGER || n < 0) {
+    if (growproc(n) < 0) {
+      return -1;
+    }
+  } else {
+    // Lazily allocate memory for this process: increase its memory
+    // size but don't allocate memory. If the processes uses the
+    // memory, vmfault() will allocate it.
+    if (addr + n < addr)
+      return -1;
+    if (addr + n > TRAPFRAME)
+      return -1;
+    myproc()->sz += n;
+  }
+  return addr;
+}
+
+uint64
+sys_pause(void)
+{
+  int n;
+  uint ticks0;
+
+  argint(0, &n);
+  if (n < 0)
+    n = 0;
+  acquire(&tickslock);
+  ticks0 = ticks;
+  while (ticks - ticks0 < n) {
+    if (killed(myproc())) {
+      release(&tickslock);
+      return -1;
+    }
+    sleep_prepare(&ticks);
+    release(&tickslock);
+    sleep();
+    acquire(&tickslock);
+  }
+  release(&tickslock);
+  return 0;
+}
+
+uint64
+sys_kill(void)
+{
+  int pid;
+
+  argint(0, &pid);
+  return kkill(pid);
+}
+
+// return how many clock tick interrupts have occurred
+// since start.
+uint64
+sys_uptime(void)
+{
+  uint xticks;
+
+  acquire(&tickslock);
+  xticks = ticks;
+  release(&tickslock);
+  return xticks;
+}
+
+// OS-A09: trace(int mask) -- remember which syscalls to trace for this
+// process (and, via kfork, its children). Returns 0.
+uint64
+sys_trace(void)
+{
+  int mask;
+  argint(0, &mask);
+  myproc()->tracemask = mask;
+  return 0;
+}
+
+// OS-A09: sysinfo(struct sysinfo *) -- fill in free memory (bytes) and the
+// number of processes that are not UNUSED, copy it to the user pointer.
+// Returns 0, or -1 if the pointer is bad.
+uint64
+sys_sysinfo(void)
+{
+  uint64 uaddr;
+  struct sysinfo si;
+  struct proc *p = myproc();
+
+  argaddr(0, &uaddr); // just a number: copyout decides if it is writable
+  si.freemem = kfreemem();
+  si.nproc = nproc_active();
+  if (copyout(p->pagetable, p->sz, uaddr, (char *)&si, sizeof(si)) < 0)
+    return -1;
+  return 0;
+}

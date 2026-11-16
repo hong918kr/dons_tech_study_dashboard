@@ -492,8 +492,9 @@ static void part_a(uint32_t boot_faults) {
     pend_systick();
     CHECK(g_hit_systick_old == 1u && g_hit_systick_new == 1u);
     /* 런타임 핸들러 교체: 빈 IRQ 6 (mps2 에 장치 없음) */
-    CHECK(vtor_set_handler(16u + 6u, Irq6_New) == Default_Handler);
-    pend_irq(6u);
+    vector_t old6 = vtor_set_handler(16u + 6u, Irq6_New);
+    CHECK(old6 == Default_Handler);
+    if (old6 == Default_Handler) pend_irq(6u);           /* 교체 실패면 pend 하지 않는다 (Default_Handler = 종료) */
     sh_puts("  swap IRQ6: Irq6_New hits="); sh_dec(g_hit_irq6_new); sh_puts("\n");
     CHECK(g_hit_irq6_new == 1u);
     CHECK(vtor_set_handler(0u, Irq6_New) == 0 && vtor_set_handler(1u, Irq6_New) == 0);   /* SP/Reset 칸 거부 */
@@ -538,9 +539,9 @@ static void part_b(void) {
     CHECK(off < 64u && is_vfp_insn(f->insn));
     CHECK(gain_ok());
     /* B4: VTOR 정렬 위반 — 0x40 어긋난 주소를 쓰면 하위 7비트가 버려진다 → 엉뚱한 칸 */
-    vector_t saved_systick = g_ram_vectors[15];
+    uint32_t vtor_saved = SCB_VTOR;
     for (uint32_t i = 0; i < 128u; ++i) g_vt_scratch[i] = Wrong_Handler;
-    for (uint32_t i = 0; i < N_VECTORS; ++i) g_vt_scratch[16u + i] = g_ram_vectors[i];
+    for (uint32_t i = 0; i < N_VECTORS; ++i) g_vt_scratch[16u + i] = g_vectors[i];
     dsb();
     uint32_t want = (uint32_t)(uintptr_t)&g_vt_scratch[16];
     SCB_VTOR = want; dsb(); isb();
@@ -550,10 +551,11 @@ static void part_b(void) {
     sh_puts("  B4 VTOR write "); sh_hex(want); sh_puts(" -> reads "); sh_hex(got); sh_puts(", SysTick -> ");
     sh_puts(g_hit_wrong == w0 + 1u ? "Wrong_Handler (slot 15 of the masked base)\n" : "?\n");
     CHECK(got == (want & ~0x7Fu) && got != want);
+    CHECK(vtor_set_handler(15u, SysTick_New) == 0);     /* VTOR 이 RAM 테이블이 아니면 교체 거부 */
     CHECK(g_hit_wrong == w0 + 1u && g_hit_systick_old == s0);
     /* B5: 128 B 정렬이지만 256 B (필요한 정렬) 는 아님 — QEMU 는 VTOR + 4·exc 덧셈이라 "동작해 보인다" */
     for (uint32_t i = 0; i < 128u; ++i) g_vt_scratch[i] = Wrong_Handler;
-    for (uint32_t i = 0; i < N_VECTORS; ++i) g_vt_scratch[32u + i] = g_ram_vectors[i];
+    for (uint32_t i = 0; i < N_VECTORS; ++i) g_vt_scratch[32u + i] = g_vectors[i];
     dsb();
     want = (uint32_t)(uintptr_t)&g_vt_scratch[32];
     SCB_VTOR = want; dsb(); isb();
@@ -566,12 +568,16 @@ static void part_b(void) {
     sh_puts("; OR-concatenating HW would fetch slot "); sh_dec(slot); sh_puts(" = table entry "); sh_dec(slot - 32u);
     sh_puts(" (SysTick)\n");
     CHECK(got == want && g_hit_irq31 == 1u && g_hit_wrong == w0);       /* QEMU 관찰 (실칩 규칙 위반) */
-    SCB_VTOR = (uint32_t)(uintptr_t)g_ram_vectors; dsb(); isb();
-    g_ram_vectors[15] = SysTick_ExcRet; dsb();
+    /* B6: FP 를 쓴 스레드에서 들어간 예외의 EXC_RETURN (실험장 테이블, SysTick 만 기록용으로) */
+    for (uint32_t i = 0; i < N_VECTORS; ++i) g_vt_scratch[i] = g_vectors[i];
+    g_vt_scratch[15] = SysTick_ExcRet;
+    dsb();
+    SCB_VTOR = (uint32_t)(uintptr_t)g_vt_scratch; dsb(); isb();
     pend_systick();
-    sh_puts("  restored VTOR, SysTick EXC_RETURN="); sh_hex(g_last_excret); sh_puts("\n");
-    CHECK(g_last_excret == 0xFFFFFFE9u);
-    g_ram_vectors[15] = saved_systick; dsb();
+    SCB_VTOR = vtor_saved; dsb(); isb();                 /* 시험 전 VTOR 로 복구 */
+    sh_puts("  B6 SysTick after FP use: EXC_RETURN="); sh_hex(g_last_excret); sh_puts(", VTOR restored to ");
+    sh_hex(SCB_VTOR); sh_puts("\n");
+    CHECK(g_last_excret == 0xFFFFFFE9u && SCB_VTOR == vtor_saved);
 }
 
 static void show_clk(const char *tag, clk_rc_t rc) {
@@ -605,7 +611,9 @@ static void part_c(void) {
     CHECK(g_m.garbage == 0u && g_m.apb_viol == 0u && g_m.unknown == 0u && g_m.cfg_while_on == 0u);
     CHECK(g_m.t_lat_up != 0u && g_m.t_sw_pll != 0u && g_m.t_lat_up < g_m.t_sw_pll);
     CHECK(got.m == 4u && got.n == 168u && got.p == 2u && got.q == 7u);
-    uint32_t up_t = g_m.t;
+    uint32_t up_t = g_m.t, c1_hz = m_hclk(), c1_lat = g_m.lat_eff, c1_tlat = g_m.t_lat_up, c1_tsw = g_m.t_sw_pll;
+    clk_rc_t c1_rc = rc;
+    pll_cfg_t c1 = got;
     rc = clock_down();
     show_clk("  C2 clock_down correct order    ", rc);
     CHECK(rc == CLK_OK && ((g_m.cfgr >> 2) & 3u) == SW_HSI && g_m.lat_eff == 0u && g_core_hz == HSI_HZ);
@@ -659,8 +667,10 @@ static void part_c(void) {
     sh_puts("  C9 sweep HSE 4..26 MHz x 6 targets: runs="); sh_dec(runs); sh_puts(" ok="); sh_dec(ok);
     sh_puts(" no_pll="); sh_dec(nopll); sh_puts(" bad="); sh_dec(bad); sh_puts("\n");
     CHECK(bad == 0u && ok + nopll == runs && ok > 0u);
-    sh_puts("[boot] (4) clock  HSI 16 MHz -> PLL 168 MHz (M=4 N=168 P=2 Q=7), LATENCY 0->5 before SW, ");
-    sh_puts("APB1 /4 = 42 MHz, APB2 /2 = 84 MHz, "); sh_dec(up_t); sh_puts(" model accesses\n");
+    sh_puts("[boot] (4) clock  C1 rc="); sh_puts(k_rc[c1_rc]); sh_puts(": HSI 16 MHz -> PLL "); sh_dec(c1_hz / 1000000u);
+    sh_puts(" MHz (M="); sh_dec(c1.m); sh_puts(" N="); sh_dec(c1.n); sh_puts(" P="); sh_dec(c1.p); sh_puts(" Q="); sh_dec(c1.q);
+    sh_puts("), LATENCY ->"); sh_dec(c1_lat); sh_puts(" at access #"); sh_dec(c1_tlat); sh_puts(", SW=PLL at #"); sh_dec(c1_tsw);
+    sh_puts(", "); sh_dec(up_t); sh_puts(" model accesses\n");
 }
 
 __attribute__((noinline)) int main(void) {

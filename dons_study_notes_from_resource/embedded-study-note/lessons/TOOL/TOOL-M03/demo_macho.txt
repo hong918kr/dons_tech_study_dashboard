@@ -1,0 +1,88 @@
+##### 1. 누가 살아남나 (demo_survive.c)
+cc -O0:                entries: used global  (n=2)   typo-section n=0
+cc -O2:                entries: used global  (n=2)   typo-section n=0
+cc -O2 -Wl,-dead_strip: entries: used  (n=1)   typo-section n=0
+== -DPLAIN (static, 속성 없음) + -Werror
+demo_survive.c:13:25: error: unused variable 'c_plain' [-Werror,-Wunused-const-variable]
+   13 | static const struct cmd c_plain  SEC = { "plain", f, "h" };
+      |                         ^~~~~~~
+1 error generated.
+== otool -l: 진짜 섹션과 오타 섹션 (링커가 크기 0 섹션을 만들어 준다)
+  sectname __shellcmds
+   segname __DATA
+      addr 0x0000000100008000
+      size 0x0000000000000030
+  sectname __shelcmds
+   segname __DATA
+      addr 0x0000000100008030
+      size 0x0000000000000000
+
+##### 2. nm -m: 항목은 non-external, used 는 [no dead strip]
+00000000000020d8 (__DATA,__shellcmds) non-external [no dead strip] _shell_cmd_echo
+0000000000002150 (__DATA,__shellcmds) non-external [no dead strip] _shell_cmd_help
+00000000000020c0 (__DATA,__shellcmds) non-external [no dead strip] _shell_cmd_led
+0000000000002138 (__DATA,__shellcmds) non-external [no dead strip] _shell_cmd_reboot
+00000000000020f0 (__DATA,__shellcmds) non-external [no dead strip] _shell_cmd_sum
+0000000000002120 (__DATA,__shellcmds) non-external [no dead strip] _shell_cmd_uptime
+0000000000002108 (__DATA,__shellcmds) non-external [no dead strip] _shell_cmd_version
+00000000000020c0 (__DATA,__shellcmds) non-external ltmp3
+                 (undefined) external section$end$__DATA$__shellcmds
+
+##### 3. ASan 레드존 (demo_asan.c)
+== cc -O1 -fsanitize=address
+sizeof=24  id-section: 192 bytes for 3 entries, gap x1->x2 = 64
+            dot-section: gap y1->y2 = 64
+== cc -O1 -fsanitize=address -DFIX
+sizeof=24  id-section: 72 bytes for 3 entries, gap x1->x2 = 24
+            dot-section: gap y1->y2 = 24
+== cc -O1 
+sizeof=24  id-section: 72 bytes for 3 entries, gap x1->x2 = 24
+            dot-section: gap y1->y2 = 24
+== solution.c 에서 SHELL_NO_ASAN 을 비우고 ASan 빌드
+==PID==ERROR: AddressSanitizer: global-buffer-overflow on address 0x… at pc 0x… bp 0x… sp 0x…
+READ of size 8 at 0x… thread T0
+0x… is located 40 bytes before global variable 'shell_cmd_echo' defined in 'sol_noasanfix.c' (0x…) of size 24
+0x… is located 0 bytes after global variable 'shell_cmd_led' defined in 'sol_noasanfix.c' (0x…) of size 24
+SUMMARY: AddressSanitizer: global-buffer-overflow sol_noasanfix.c:319 in main
+rc=134
+
+##### 4. 어느 세그먼트에? (포인터가 든 const 표)
+== __TEXT,__shellcmds
+Illegal text-relocations:
+  text-relocation in '_c_used'+0x10 (seg-540fe8.o) to 'anon-3'
+  text-relocation in '_c_used'+0x8 (seg-540fe8.o) to '_f'
+== __DATA_CONST,__shellcmds
+entries: used global  (n=2)   typo-section n=0
+   segname __DATA_CONST
+== __DATA,__shellcmds
+entries: used global  (n=2)   typo-section n=0
+   segname __DATA
+
+##### 5. 여러 .c 파일 (multi/): 링크 순서 · 중복 · 정적 라이브러리 · dead_strip
+== cc main.o cmd_sys.o cmd_pwr.o cmd_led.o
+96 bytes, 4 entries: uptime(sys) reboot(sys) reboot(pwr) led(led)
+duplicate: reboot (sys, pwr)
+rc=3
+== cc main.o cmd_led.o cmd_pwr.o cmd_sys.o
+96 bytes, 4 entries: led(led) reboot(pwr) uptime(sys) reboot(sys)
+duplicate: reboot (pwr, sys)
+rc=3
+ranlib: warning: 'libcmds.a(cmd_led.o)' has no symbols
+== cc main.o cmd_sys.o -L. -lcmds
+48 bytes, 2 entries: uptime(sys) reboot(sys)
+rc=0
+== cc main.o cmd_sys.o -Wl,-force_load,libcmds.a
+72 bytes, 3 entries: uptime(sys) reboot(sys) led(led)
+rc=0
+== cc main.o cmd_sys.o cmd_led.o -Wl,-dead_strip
+72 bytes, 3 entries: uptime(sys) reboot(sys) led(led)
+rc=0
+== cc main.o nu_cmd_sys.o nu_cmd_led.o
+0 bytes, 0 entries:
+rc=0
+== -DSHELL_GLOBAL (항목을 외부 링키지로): 같은 이름 두 번 = 링크 에러
+duplicate symbol '_shell_cmd_reboot' in:
+    g_cmd_pwr.o
+    g_cmd_sys.o
+ld: 1 duplicate symbols
+clang: error: linker command failed with exit code 1 (use -v to see invocation)

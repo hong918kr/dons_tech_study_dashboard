@@ -1,0 +1,155 @@
+
+===== 1. -fPIC on arm64 macOS: always PIC (cc -### shows the cc1 relocation model) =====
+cc  -###: "-mrelocation-model" "pic" "-pic-level" "2" 
+cc -fPIC -###: "-mrelocation-model" "pic" "-pic-level" "2" 
+cc -fno-pic -###: "-mrelocation-model" "pic" "-pic-level" "2" 
+$ cmp a.o b.o && cmp a.o c.o && echo "default / -fPIC / -fno-pic objects: byte-identical"
+default / -fPIC / -fno-pic objects: byte-identical
+
+===== 2. default install name = the -o path (relative or absolute) =====
+$ cc -std=c11 -Wall -Wextra -Werror -O2 -dynamiclib -I. foo.c foo_util.c -o build/libfoo.dylib
+$ otool -D build/libfoo.dylib
+build/libfoo.dylib:
+build/libfoo.dylib
+$ cc -std=c11 -Wall -Wextra -Werror -O2 -I. app.c app_util.c -Lbuild -lfoo -o app_rel
+$ otool -L app_rel | grep libfoo
+	build/libfoo.dylib (compatibility version 0.0.0, current version 0.0.0)
+$ ./app_rel | head -1
+libfoo 1.2.0 (app abi 1)
+$ cd elsewhere && ./app_rel; echo "rc=$?"; cd ..
+dyld[15918]: Library not loaded: build/libfoo.dylib
+  Referenced from: <83659A0D-5004-32B1-987B-FA132D50D13D> /private/tmp/TOOL-M06_demo_mac/src/elsewhere/app_rel
+  Reason: tried: 'build/libfoo.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OSbuild/libfoo.dylib' (no such file), 'build/libfoo.dylib' (no such file)
+demo_mac.sh: line 15: 15918 Abort trap: 6           ./app_rel
+rc=134
+
+===== 3. the fix: @rpath install name + LC_RPATH relative to the binary =====
+$ cc -std=c11 -Wall -Wextra -Werror -O2 -fvisibility=hidden -dynamiclib -I. foo.c foo_util.c -install_name @rpath/libfoo.dylib -compatibility_version 1.0 -current_version 1.2.0 -o pkg/lib/libfoo.dylib
+$ cc -std=c11 -Wall -Wextra -Werror -O2 -I. app.c app_util.c -Lpkg/lib -lfoo -Wl,-rpath,@loader_path/../lib -o pkg/bin/app
+$ otool -l pkg/lib/libfoo.dylib | grep -A5 LC_ID_DYLIB
+          cmd LC_ID_DYLIB
+      cmdsize 48
+         name @rpath/libfoo.dylib (offset 24)
+   time stamp 1 Wed Dec 31 16:00:01 1969
+      current version 1.2.0
+compatibility version 1.0.0
+$ otool -l pkg/bin/app | grep -A5 "cmd LC_LOAD_DYLIB" | head -6
+          cmd LC_LOAD_DYLIB
+      cmdsize 48
+         name @rpath/libfoo.dylib (offset 24)
+   time stamp 2 Wed Dec 31 16:00:02 1969
+      current version 1.2.0
+compatibility version 1.0.0
+$ otool -l pkg/bin/app | grep -A3 LC_RPATH
+          cmd LC_RPATH
+      cmdsize 32
+         path @loader_path/../lib (offset 12)
+Load command 16
+$ DYLD_PRINT_SEARCHING=1 ./moved_pkg/bin/app 2>&1 | grep -A4 "find path \"@rpath"
+dyld[15957]: find path "@rpath/libfoo.dylib"
+dyld[15957]:   LC_RPATH "@loader_path/../lib" from "/private/tmp/TOOL-M06_demo_mac/src/moved_pkg/bin/app"
+dyld[15957]:   possible path(@path expansion): "/private/tmp/TOOL-M06_demo_mac/src/moved_pkg/bin/../lib/libfoo.dylib"
+dyld[15957]:   found: dylib-from-disk: "/private/tmp/TOOL-M06_demo_mac/src/moved_pkg/bin/../lib/libfoo.dylib"
+dyld[15957]: find path "/usr/lib/libSystem.B.dylib"
+
+===== 4. DYLD_LIBRARY_PATH / DYLD_PRINT_LIBRARIES and SIP on this machine =====
+$ csrutil status
+System Integrity Protection status: enabled (Apple Internal).
+$ DYLD_LIBRARY_PATH=$PWD/build ./elsewhere/app_rel | head -1
+libfoo 1.2.0 (app abi 1)
+$ DYLD_PRINT_LIBRARIES=1 ./moved_pkg/bin/app 2>&1 | head -3
+dyld[15963]: <AE20E02A-3468-3F1F-8900-4F0EF69C8F3E> /private/tmp/TOOL-M06_demo_mac/src/moved_pkg/bin/app
+dyld[15963]: <3E26A6FB-4249-3215-B451-4456B039C354> /private/tmp/TOOL-M06_demo_mac/src/moved_pkg/lib/libfoo.dylib
+dyld[15963]: <43D369AF-E21D-3E53-BEE6-77AE935B5F4D> /usr/lib/libSystem.B.dylib
+$ DYLD_LIBRARY_PATH=/x /bin/sh -c "echo \"inside /bin/sh: [\${DYLD_LIBRARY_PATH-unset}]\""
+inside /bin/sh: [/x]
+$ DYLD_PRINT_LIBRARIES=1 /usr/bin/true 2>&1 | head -2
+dyld[15967]: <F0BE3F1F-C8A6-397B-98CA-AD1E88811916> /usr/bin/true
+dyld[15967]: <43D369AF-E21D-3E53-BEE6-77AE935B5F4D> /usr/lib/libSystem.B.dylib
+
+===== 5. compatibility_version: recorded at link time, enforced at load time? =====
+$ cc -std=c11 -Wall -Wextra -Werror -O2 -dynamiclib -I. foo.c foo_util.c -install_name @rpath/libfoo.dylib -compatibility_version 2.0 -current_version 2.1 -o cv/lib/libfoo.dylib
+$ cc -std=c11 -Wall -Wextra -Werror -O2 -I. app.c app_util.c -Lcv/lib -lfoo -Wl,-rpath,@loader_path/../lib -o cv/bin/app
+$ otool -L cv/bin/app | grep libfoo
+	@rpath/libfoo.dylib (compatibility version 2.0.0, current version 2.1.0)
+$ cc -std=c11 -Wall -Wextra -Werror -O2 -dynamiclib -I. foo.c foo_util.c -install_name @rpath/libfoo.dylib -compatibility_version 1.0 -current_version 1.5 -o cv/lib/libfoo.dylib
+$ otool -L cv/lib/libfoo.dylib | sed -n 2p
+	@rpath/libfoo.dylib (compatibility version 1.0.0, current version 1.5.0)
+$ ./cv/bin/app | head -1; echo "rc=$?"
+libfoo 1.2.0 (app abi 1)
+rc=0
+
+===== 6. visibility: what -fvisibility=hidden does to the symbol table =====
+$ cc -std=c11 -Wall -Wextra -Werror -O2 -dynamiclib -I. foo.c foo_util.c -o vis_default.dylib
+$ nm -gU vis_default.dylib
+0000000000000410 T _foo_abi_check
+0000000000000534 T _foo_close
+0000000000000520 T _foo_get_stats
+000000000000047c T _foo_open
+00000000000004cc T _foo_push
+0000000000000538 T _foo_version
+000000000000056c T _ring_put
+0000000000000544 T _round_div
+$ nm -m moved_pkg/lib/libfoo.dylib | grep -E "round_div|ring_put|foo_open"
+000000000000047c (__TEXT,__text) external _foo_open
+000000000000056c (__TEXT,__text) non-external (was a private external) _ring_put
+0000000000000544 (__TEXT,__text) non-external (was a private external) _round_div
+$ dyld_info -exports moved_pkg/lib/libfoo.dylib
+moved_pkg/lib/libfoo.dylib [arm64]:
+    -exports:
+        offset      symbol
+        0x00000410  _foo_abi_check
+        0x00000534  _foo_close
+        0x00000520  _foo_get_stats
+        0x0000047C  _foo_open
+        0x000004CC  _foo_push
+        0x00000538  _foo_version
+
+===== 7. interposition: two-level namespace (default) vs -flat_namespace =====
+$ cc -O2 -dynamiclib ip_lib.c -install_name @rpath/libip.dylib -o ip/libip.dylib && cc -O2 ip_app.c -Lip -lip -Wl,-rpath,@loader_path -o ip/app && ./ip/app
+foo(2)=7 helper(2)=200
+$ otool -tV ip/libip.dylib | grep -A3 "^_foo:" | tail -2
+00000000000002e4	mov	x29, sp
+00000000000002e8	bl	_helper
+$ cc -O2 -dynamiclib ip_lib.c -install_name @rpath/libip.dylib -Wl,-flat_namespace -o ip/libip.dylib && ./ip/app
+foo(2)=201 helper(2)=200
+$ otool -hv ip/libip.dylib | tail -1
+MH_MAGIC_64    ARM64        ALL  0x00       DYLIB    15        896 DYLDLINK NO_REEXPORTED_DYLIBS
+
+===== 8. install_name_tool on a prebuilt binary =====
+$ cc -std=c11 -Wall -Wextra -Werror -O2 -fvisibility=hidden -dynamiclib -I. foo.c foo_util.c -o /tmp/TOOL-M06_demo_mac/src/fxbuild.dylib
+$ cc -std=c11 -Wall -Wextra -Werror -O2 -I. app.c app_util.c /tmp/TOOL-M06_demo_mac/src/fxbuild.dylib -Wl,-rpath,@loader_path/../lib -o fx/bin/app
+$ otool -L fx/bin/app | grep -E "fxbuild|libfoo"
+	/tmp/TOOL-M06_demo_mac/src/fxbuild.dylib (compatibility version 0.0.0, current version 0.0.0)
+$ codesign -dv fx/bin/app 2>&1 | grep -E "^CodeDirectory|^Signature"
+CodeDirectory v=20400 size=380 flags=0x20002(adhoc,linker-signed) hashes=9+0 location=embedded
+Signature=adhoc
+$ install_name_tool -change /tmp/TOOL-M06_demo_mac/src/fxbuild.dylib @rpath/libfoo.dylib -add_rpath @loader_path/../lib fx/bin/app; echo rc=$?
+error: /Library/Developer/CommandLineTools/usr/bin/install_name_tool: for: fx/bin/app (for architecture arm64) option "-add_rpath @loader_path/../lib" would duplicate path, file already has LC_RPATH for: @loader_path/../lib
+rc=1
+$ otool -L fx/bin/app | grep -E "fxbuild|libfoo"
+	/tmp/TOOL-M06_demo_mac/src/fxbuild.dylib (compatibility version 0.0.0, current version 0.0.0)
+$ install_name_tool -change /tmp/TOOL-M06_demo_mac/src/fxbuild.dylib @rpath/libfoo.dylib fx/bin/app; echo rc=$?
+rc=0
+$ install_name_tool -id @rpath/libfoo.dylib fx/lib/libfoo.dylib
+$ ./fx/bin/app | head -1
+libfoo 1.2.0 (app abi 1)
+$ codesign -v fx/bin/app && codesign -dv fx/bin/app 2>&1 | grep -E "^CodeDirectory|^Signature"
+CodeDirectory v=20400 size=380 flags=0x20002(adhoc,linker-signed) hashes=9+0 location=embedded
+Signature=adhoc
+
+===== 9. what a dylib costs: sizes =====
+$ ls -l moved_pkg/lib/libfoo.dylib moved_pkg/bin/app | awk "{print \$5, \$9}"
+33856 moved_pkg/bin/app
+33792 moved_pkg/lib/libfoo.dylib
+
+===== 10. @rpath of an indirect dependency: dyld also uses the main executable's LC_RPATH =====
+$ cd tr && cc -dynamiclib -install_name @rpath/libb.dylib b.c -o lib/libb.dylib && cc -dynamiclib -install_name @rpath/liba.dylib a.c -Llib -lb -o lib/liba.dylib && cc m.c -Llib -la -Wl,-rpath,@loader_path/lib -o m; cd ..
+$ otool -l tr/lib/liba.dylib | grep -c LC_RPATH
+0
+$ DYLD_PRINT_SEARCHING=1 ./tr/m 2>&1 | grep -A3 "find path \"@rpath/libb" ; ./tr/m
+dyld[16139]: find path "@rpath/libb.dylib"
+dyld[16139]:   LC_RPATH "@loader_path/lib" from "/private/tmp/TOOL-M06_demo_mac/src/tr/m"
+dyld[16139]:   possible path(@path expansion): "/private/tmp/TOOL-M06_demo_mac/src/tr/lib/libb.dylib"
+dyld[16139]:   found: dylib-from-disk: "/private/tmp/TOOL-M06_demo_mac/src/tr/lib/libb.dylib"
+a()=3

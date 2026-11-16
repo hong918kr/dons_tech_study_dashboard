@@ -5,8 +5,9 @@
  *  3) 타깃 빌드: 같은 sha256_compress 를 Cortex-M4 Thumb-2 로 컴파일해 명령어 수를 센다 (아래 명령)
  *
  *  호스트: cc -std=c11 -Wall -Wextra -Werror -O2 demo_cost.c -o demo_cost && ./demo_cost
- *  타깃:   clang --target=thumbv7em-none-eabi -mcpu=cortex-m4 -mthumb -O2 -ffreestanding -DTARGET_BUILD \
- *              -c demo_cost.c -o sha_m4.o && xcrun llvm-objdump -d --no-show-raw-insn sha_m4.o
+ *  타깃:   clang --target=thumbv7em-none-eabi -mcpu=cortex-m4 -mthumb -O2 -fno-unroll-loops -ffreestanding \
+ *              -DTARGET_BUILD -c demo_cost.c -o /tmp/BM-A04_m4.o && xcrun llvm-objdump -d --no-show-raw-insn /tmp/BM-A04_m4.o
+ *          → loop 별 명령어 수 × 반복 횟수를 손으로(또는 md 의 표대로) 더한다
  */
 #include <stdint.h>
 #include <stddef.h>
@@ -43,23 +44,26 @@ void sha256_compress(uint32_t h[8], const uint8_t blk[64]) {
     h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
 }
 
+/* ---- CRC-32 표 방식 (표는 호스트에선 crc_init 이 채움; 타깃 빌드에선 명령어 수만 본다) ---- */
+uint32_t crc_tab[256];
+uint32_t crc32_table(const uint8_t *p, size_t n);
+uint32_t crc32_table(const uint8_t *p, size_t n) {
+    uint32_t c = ~0u;
+    for (size_t i = 0; i < n; i++) c = crc_tab[(c ^ p[i]) & 0xFFu] ^ (c >> 8);
+    return ~c;
+}
+
 #ifndef TARGET_BUILD
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
-static uint32_t crc_tab[256];
 static void crc_init(void) {
     for (uint32_t i = 0; i < 256; i++) {
         uint32_t c = i;
         for (int k = 0; k < 8; k++) c = (c & 1u) ? (c >> 1) ^ 0xEDB88320u : c >> 1;
         crc_tab[i] = c;
     }
-}
-static uint32_t crc32_table(const uint8_t *p, size_t n) {
-    uint32_t c = ~0u;
-    for (size_t i = 0; i < n; i++) c = crc_tab[(c ^ p[i]) & 0xFFu] ^ (c >> 8);
-    return ~c;
 }
 static uint32_t crc32_bitwise(const uint8_t *p, size_t n) {     /* 표 1 KB 를 아끼는 대신 8 배 루프 */
     uint32_t c = ~0u;
@@ -117,6 +121,10 @@ int main(void) {
     printf("   payload                      모든 비트 → BAD_CRC (CRC-32 는 32 비트 이하 버스트를 전부 검출)\n");
 
     printf("\n3) 384 KB 를 SHA-256 하려면 블록 %u 개, CRC 는 바이트 %u 번\n", BUF / 64u, BUF);
+    printf("\n4) SHA-256 패딩: 메시지 n 바이트 → 압축 블록 수 = ceil((n + 9) / 64)\n   ");
+    static const unsigned ns[] = {0, 3, 55, 56, 63, 64, 119, 120, 256, 393216};
+    for (size_t i = 0; i < sizeof ns / sizeof ns[0]; i++) printf("n=%u→%u  ", ns[i], (ns[i] + 9u + 63u) / 64u);
+    printf("\n");
     return 0;
 }
 #endif

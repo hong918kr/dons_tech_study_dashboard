@@ -93,14 +93,15 @@ static void spin_times(uint32_t n, uint64_t *t1, uint64_t *t8)
 
 int main(void)
 {
-	/* 1: the loop really runs: 8x the count takes clearly longer (>= 2x;
-	 *    loose on purpose - other jobs share this machine) */
+	/* 1: the loop really runs: 1.6M volatile iterations need >= 100 us here
+	 *    (measured ~0.25 ns/iter at best -> ~400 us; a deleted loop -> ~0).
+	 *    Load only makes runs slower, so this lower bound is noise-proof. */
 	const uint32_t n = 200000u;
 	uint64_t t1, t8;
 	spin_times(n, &t1, &t8);
 	fprintf(stderr, "delay_spin: %u -> %llu ns, %u -> %llu ns\n", n,
 		(unsigned long long)t1, 8u * n, (unsigned long long)t8);
-	bool spin_scales = t1 > 0 && t8 >= 2u * t1;
+	bool spin_scales = t8 >= 100000u && t8 > t1;
 	CHECK_EQ(spin_scales, true);
 
 	/* 2: at least 2000 us (guaranteed by the deadline), and it did return */

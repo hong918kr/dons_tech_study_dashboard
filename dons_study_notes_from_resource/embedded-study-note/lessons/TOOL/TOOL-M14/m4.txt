@@ -1,0 +1,66 @@
+== arm-none-eabi-gcc (GCC) 16.2.0
+== -g level vs ELF file size vs what goes into Flash (.bin)
+level  elf_bytes debug_sz     text bin_bytes       
+-g0        5528        0      236      236
+-g1        7152     1210      236      236
+-g         8564     2477      236      236
+-g3       27696    21542      236      236
+   cmp fw-g0.bin fw-g3.bin: fw-g0.bin fw-g3.bin differ: char 81, line 1; differing bytes 81-100 (20 bytes)
+   build-id -g0 5b47fde7f50af8db0b21e13ec0dda551f6067083  -g3 2e6d3b2bad336c9d8348d899a1ca71afa8df18f5
+   only .isr_vector+.text: identical at every -g level
+
+== split the debug info (GNU way): --only-keep-debug / --strip-debug / --add-gnu-debuglink
+   fw.elf         8564 bytes  build-id f997728e3b6701be6f3276260518ea61e871dd7f   debug sections 8
+   fw.debug       8428 bytes  build-id f997728e3b6701be6f3276260518ea61e871dd7f   debug sections 8
+   fw.stripped    5588 bytes  build-id f997728e3b6701be6f3276260518ea61e871dd7f   debug sections 0
+   fw.stripall    4796 bytes  build-id f997728e3b6701be6f3276260518ea61e871dd7f   debug sections 0
+-- readelf -S fw.debug (code sections become NOBITS: addresses kept, bytes dropped)
+   [ 1] .isr_vector       NOBITS          08000000 001000 000040 00   A  0   0  4
+   [ 2] .note.gnu.build-id NOTE            08000040 001040 000024 00   A  0   0  4
+   [ 3] .text             NOBITS          08000064 001064 000088 00  AX  0   0  4
+   [ 4] .bss              NOBITS          20000000 002000 000008 00  WA  0   0  4
+   [ 5] .debug_info       PROGBITS        00000000 001064 0002a7 00      0   0  1
+   [10] .debug_line       PROGBITS        00000000 0015d3 0001dd 00      0   0  1
+-- objdump -s -j .gnu_debuglink fw.stripped (file name, pad to 4, CRC32 of fw.debug)
+    0000 66772e64 65627567 00000000 39dfc72a  fw.debug....9..*
+-- build-id lives in Flash: note section at 0x08000040, first bytes of fw.bin after the vector table:
+   00000040: 0400 0000 1400 0000 0300 0000 474e 5500  ............GNU.
+   00000050: f997 728e 3b67 01be 6f32 7626 0518 ea61  ..r.;g..o2v&...a
+   00000060: e871 dd7f                                .q..
+
+== objdump -d -l: sensor_task (bl = 4 bytes, return address = next insn)
+   080000ac <sensor_task>:
+   sensor_task():
+   fw_m4.c:38
+    80000ac:	b510      	push	{r4, lr}
+    80000ae:	4604      	mov	r4, r0
+   fw_m4.c:39
+    80000b0:	f7ff ffe2 	bl	8000078 <check_crc>
+   fw_m4.c:40
+    80000b4:	4620      	mov	r0, r4
+    80000b6:	f7ff ffed 	bl	8000094 <parse_frame>
+   fw_m4.c:41
+    80000ba:	4a02      	ldr	r2, [pc, #8]	@ (80000c4 <sensor_task+0x18>)
+    80000bc:	6853      	ldr	r3, [r2, #4]
+    80000be:	3301      	adds	r3, #1
+    80000c0:	6053      	str	r3, [r2, #4]
+   fw_m4.c:43
+    80000c2:	bd10      	pop	{r4, pc}
+    80000c4:	20000000 	.word	0x20000000
+   
+
+== a stacked lr of 0x80000bb (bl <parse_frame> at 0x80000b6, +4, Thumb bit set) looked up 3 ways
+   addr2line 0x80000bb  -> sensor_task fw_m4.c:41 
+   addr2line 0x80000ba  -> sensor_task fw_m4.c:41 
+   addr2line 0x80000b9  -> sensor_task fw_m4.c:40 
+== fault pc 0x800009a (inside the inlined rd_be16): -f -i -p, on fw.debug vs fw.stripped
+-- fw.debug:
+   rd_be16 at fw_m4.c:15
+    (inlined by) parse_frame at fw_m4.c:33
+-- fw.stripped:
+   rd_be16 at fw_m4.c:15
+    (inlined by) parse_frame at fw_m4.c:33
+-- fw.stripped after moving fw.debug away (the debuglink can't be followed):
+   parse_frame at ??:?
+-- fw.stripall:
+   ?? ??:0

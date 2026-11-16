@@ -227,8 +227,19 @@ def highlight_lines(src, lang):
     return lines
 
 
+# ------------------------------------------------------------------ 코드 접기(toggle)
+FOLD_MIN = 8   # 펜스 코드는 이 줄 수 이상이면 접는다 (파일 삽입은 항상 접음)
+
+def fold(html, title, depth, force=False, n=0):
+    """코드 블록을 기본 접힘 <details class=codefold> 로 감싼다. 이미 <details> 안이면 그대로."""
+    if depth > 0 or not (force or n >= FOLD_MIN):
+        return html
+    return (f'<details class="codefold"><summary>{title}<span class="lc">{n}줄</span></summary>'
+            f'{html}</details>')
+
+
 # ------------------------------------------------------------------ 코드 파일 삽입
-def code_block(lesson_dir, fname, diff_from, rel_prefix):
+def code_block(lesson_dir, fname, diff_from, rel_prefix, depth=0):
     p = lesson_dir / fname
     if not p.exists():
         return f'<p class="warn">⚠ 코드 파일 없음: {esc(fname)}</p>'
@@ -258,10 +269,11 @@ def code_block(lesson_dir, fname, diff_from, rel_prefix):
               if ext == "cpp" else "cc -std=c11 -Wall -Wextra -Werror -O2")
         build = f'<span class="bcmd">{esc(cc)} {esc(fname)} &amp;&amp; ./a.out</span>'
     href = attr(rel_prefix + fname)
-    return (f'<figure class="code file"><figcaption><b>{esc(fname)}</b>{note}'
+    fig = (f'<figure class="code file"><figcaption><b>{esc(fname)}</b>{note}'
             f'<span class="sp"></span><a href="{href}" target="_blank">원본</a>'
             f'<button class="copy" type="button">복사</button></figcaption>'
             f'<pre><code class="ln">{"".join(rows)}</code></pre>{build}</figure>')
+    return fold(fig, f"<b>{esc(fname)}</b>{note}", depth, force=True, n=len(src))
 
 
 # ------------------------------------------------------------------ 마크다운 렌더러
@@ -293,21 +305,24 @@ def render(md_lines, toc, used_ids, ctx):
                 continue
             label = f'<span class="lang">{esc(lang)}</span>' if lang else ""
             body = "\n".join(highlight_lines("\n".join(buf), lang))
-            out.append(f'<figure class="code">{label}<pre><code>{body}</code></pre></figure>')
+            fig = f'<figure class="code">{label}<pre><code>{body}</code></pre></figure>'
+            out.append(fold(fig, f'<b>코드</b> {esc(lang)}'.rstrip(), ctx.get("det", 0), n=len(buf)))
             continue
 
         m = CODE_MARK.match(line)
         if m:
-            out.append(code_block(ctx["dir"], m.group(1), m.group(2), ctx["rel"]))
+            out.append(code_block(ctx["dir"], m.group(1), m.group(2), ctx["rel"], ctx.get("det", 0)))
             i += 1
             continue
 
         if DETAILS.match(line):
+            ctx["det"] = max(0, ctx.get("det", 0) + (-1 if line.strip().startswith("</") else 1))
             out.append(line.strip())
             i += 1
             continue
         m = DETSUM.match(line)                         # 한 줄짜리 <details><summary>..</summary>
         if m:
+            ctx["det"] = ctx.get("det", 0) + 1
             out.append(f"{m.group(1)}<summary>{inline(m.group(2))}</summary>")
             i += 1
             continue
@@ -598,6 +613,11 @@ tbody tr:hover{background:var(--accent-soft)}
 hr{border:0;border-top:1px solid var(--line);margin:30px 0}
 .anchor{opacity:0;margin-left:8px;font-size:.6em;text-decoration:none;color:var(--muted)}
 h2:hover .anchor,h3:hover .anchor{opacity:1}
+details.codefold{padding:0;margin:0 0 14px;background:var(--gh-bg);border-color:var(--gh-line);border-radius:8px;overflow:hidden}
+details.codefold > summary{padding:8px 14px;font-family:var(--mono);font-size:12.5px;font-weight:500;background:var(--gh-cap);color:var(--gh-ink);border:0;margin:0}
+details.codefold[open] > summary{border-bottom:1px solid var(--gh-line);margin:0}
+details.codefold > summary .lc{float:right;color:var(--gh-ln);font-family:var(--sans)}
+details.codefold > figure.code{margin:0;border:0;border-radius:0}
 details{margin:0 0 12px;border:1px solid var(--line);border-radius:10px;background:var(--paper);padding:0 16px}
 details > summary{cursor:pointer;padding:11px 0;font-family:var(--sans);font-size:14.5px;font-weight:600;list-style:none}
 details > summary::-webkit-details-marker{display:none}

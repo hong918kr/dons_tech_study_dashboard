@@ -81,10 +81,12 @@ static uint32_t app_vector_ok(const uint32_t *vt) {
 }
 
 /* ================= TODO 2: SysTick 정지 =================
- * 카운터를 끄고(CTRL=0) "그 다음에" 이미 걸려 있는 SysTick pending 을 ICSR.PENDSTCLR 로 지운다.
+ * 카운터를 끄고(CTRL=0), CVR 에 아무 값이나 써서 카운터와 COUNTFLAG 를 지우고,
+ * "그 다음에" 이미 걸려 있는 SysTick pending 을 ICSR.PENDSTCLR 로 지운다.
  * (CTRL=0 은 pending 을 지우지 않는다 — demo_probe P2 실측) */
 static void systick_stop(void) {
     SYST_CSR = 0u;
+    SYST_CVR = 0u;
     SCB_ICSR = ICSR_PENDSTCLR;
     dsb();
 }
@@ -109,7 +111,7 @@ static void nvic_quiesce(void) {
  * VTOR = vtor → DSB/ISB → CONTROL = 0 (MSP·특권) → MSP = sp → PRIMASK = primask → ISB → BX pc.
  * MSP 를 바꾼 뒤에는 C 코드가 스택을 쓰면 안 되므로 마지막 부분은 한 덩어리의 인라인 asm 으로.
  * 계약: 앱은 PRIMASK = 0 (리셋 직후와 같은 상태)으로 시작한다 — 호출자가 primask 로 넘긴다. */
-static void boot_jump(uint32_t vtor, uint32_t sp, uint32_t pc, uint32_t primask) {
+__attribute__((noinline)) static void boot_jump(uint32_t vtor, uint32_t sp, uint32_t pc, uint32_t primask) {
     SCB_VTOR = vtor;
     dsb();
     isb();
@@ -140,6 +142,7 @@ static void handoff(uint32_t k, const uint32_t *vt) {
 
 /* ---------------- 부트로더가 "일을 한" 흔적: 점프 직전의 더러운 상태를 결정적으로 만든다 ---------------- */
 static void wait_countflag(void) {
+    (void)SYST_CSR;                                        /* 읽기 = COUNTFLAG 지움 → "새" wrap 을 기다린다 */
     for (uint32_t i = 0; i < 1000000u; ++i)
         if (SYST_CSR & SYST_COUNTFLAG) return;
 }
@@ -199,7 +202,7 @@ static void mailbox_arm(uint32_t k) {
 
 static int check_contract_ok(const result_t *r) {          /* NORMAL 단계: 앱이 본 상태 = 리셋 직후와 같다 */
     return r->e_vtor == APP_BASE && r->e_msp == r->app_sp && r->e_msp == APP_RAM_HI && r->e_primask == 0u &&
-           r->e_control == 0u && (r->e_syst_csr & SYST_ENABLE) == 0u && (r->e_icsr & ICSR_PENDSTSET) == 0u &&
+           r->e_control == 0u && r->e_syst_csr == 0u && (r->e_icsr & ICSR_PENDSTSET) == 0u &&
            r->e_iser0 == 0u && r->e_ispr0 == 0u && r->e_uart_ctrl == 0u && r->early_ticks == 0u &&
            r->early_irqs == 0u;
 }

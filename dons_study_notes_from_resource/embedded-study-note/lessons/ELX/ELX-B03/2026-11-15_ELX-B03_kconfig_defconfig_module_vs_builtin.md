@@ -274,7 +274,7 @@ limactl shell elinux -- bash -lc 'cd /var/lab/src/linux-6.18.55 && mkdir -p /var
 
 1. **`GPIO_SIM=m`** — 들어갔다. `drivers/gpio/Kconfig:2009` 의 `select IRQ_SIM / CONFIGFS_FS / DEV_SYNC_PROBE` 때문에 세 심볼의 **하한**이 m으로 올라간다. `DEV_SYNC_PROBE` 는 프롬프트 없는 tristate라 정확히 m이 되고, `IRQ_SIM` 은 bool이라 m이 y로 올림된다. `CONFIGFS_FS` 는 이미 y. diff에 `+DEV_SYNC_PROBE m`, `+IRQ_SIM y` 가 생긴 이유다 (`+` = 전에는 줄 자체가 없던 보이지 않는 심볼).
 2. **`DEBUG_INFO`** — `lib/Kconfig.debug:227` 의 `config DEBUG_INFO` 에는 **프롬프트가 없다** (`bool` 한 줄). 사용자가 정할 수 있는 값이 아니고, "Debug information" choice의 `DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT` 가 `select DEBUG_INFO` 한다. 그래서 n을 써 넣어도 다시 y. 고친 요청은 **choice 쪽**을 바꾼다 (`req_good.config`): `CONFIG_DEBUG_INFO_NONE=y` + `# CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT is not set`. 결과 diff는 17줄 — `DEBUG_INFO`, `DEBUG_INFO_REDUCED`, `GDB_SCRIPTS` 등 10개가 `-` 로 **사라진다**(의존 대상이 꺼져 보이지 않게 됨).
-3. **`IKCONFIG=m`** — 들어갔다. `IKCONFIG_PROC` 는 `depends on IKCONFIG && PROC_FS` 인 bool인데 그대로 y다. bool이 m짜리 의존을 가지면 y까지 허용된다 (`scripts/kconfig/symbol.c` 의 visibility 계산에서 bool의 `mod` 는 `yes` 로 올림). 대신 `/proc/config.gz` 는 `configs.ko` 가 올라와야 생긴다 (§C의 빌드 실측).
+3. **`IKCONFIG=m`** — 들어갔다. `IKCONFIG_PROC` 는 `depends on IKCONFIG && PROC_FS` 인 bool인데 그대로 y다 (실측: diff에 변화 없음). bool은 m 의존을 만나도 y로 남을 수 있다 — 이것은 결과로 확인한 것이고 `scripts/kconfig/symbol.c` 의 해당 줄까지 따라가 보지는 않았다. 대신 `/proc/config.gz` 는 `configs.ko` 가 올라와야 생긴다 (§C의 빌드 실측).
 
 `savedefconfig` 로 줄여서 보면 "내가 바꾼 것"만 남는다. 고친 요청(+`LOCALVERSION`)을 적용한 `.config` 와 순수 defconfig를 각각 `savedefconfig` 한 뒤 비교했다:
 
@@ -351,7 +351,74 @@ vermagic:       6.18.55 SMP preempt mod_unload aarch64
 
 `vermagic` 의 단어는 전부 `.config` 에서 온다: `SMP=y` → `SMP`, `PREEMPT=y` 가 `select PREEMPT_BUILD` → `preempt`, `MODULE_UNLOAD=y` → `mod_unload`, `MODVERSIONS` 는 n이라 없음, arm64 → `aarch64`. 로더는 `kernel/module/main.c` `check_modinfo()` 에서 `same_magic()`(`kernel/module/version.c`)으로 문자열 전체를 `strcmp` 하고, 다르면 `"%s: version magic '%s' should be '%s'"` 를 찍고 `-ENOEXEC`. 단 `MODVERSIONS` 로 CRC가 있으면 **첫 공백까지(release)는 건너뛰고** 비교한다.
 
-⟪BUILD⟫
+### C. 진짜 빌드 한 번 — `req_good` 커널 (1회, check.sh 밖)
+
+과제의 "빌드한 뒤 검증"을 위해 `defconfig + req_good.config`(GPIO_SIM=m, 디버그 정보 끔, IKCONFIG=m, `LOCALVERSION="-b03"`)로 **`make -j4 Image modules` 를 한 번** 돌렸다. VM을 다른 작업과 나눠 쓴 상태(nice 15)에서 벽시계 **18분 02초**, 사용자 CPU 2,951초. 매번 돌리기엔 너무 비싸서 check.sh에는 넣지 않았고, 결과 검사는 `demo_b03_build.sh` 로 묶어 한 번 실행해 `demo_b03_build.txt` 에 그대로 저장했다 (빌드 디렉터리가 있어야 다시 돈다. 공유 디스크를 위해 레슨 작성 후 `/var/tmp/ELX-B03_work` 는 지웠다 — 다시 보려면 스크립트 머리말의 빌드 명령부터).
+
+```bash
+limactl shell elinux -- bash /Users/donh/workspace/dons_tech_study_dashboard/dons_study_notes_from_resource/embedded-study-note/lessons/ELX/ELX-B03/demo_b03_build.sh
+```
+
+<!-- code: demo_b03_build.sh -->
+
+산출물 비교 (실측, 바이트):
+
+| 산출물 | 랩 트리 (defconfig + 랩 옵션, 디버그 정보 reduced) | b03 빌드 (디버그 정보 끔) | 볼 것 |
+|---|---|---|---|
+| `vmlinux` | 162,255,104, `.debug_*` 섹션 8개 | **51,216,504**, `.debug_*` 0개 | 디버그 정보는 vmlinux만 키운다 |
+| `arch/arm64/boot/Image` | 42,740,224 | 41,286,144 | Image에는 원래 디버그 정보가 없다 (`objcopy -S`). 1.4 MB 차이는 IKCONFIG·GPIO_SIM·DYNAMIC_DEBUG 등이 빠진 몫 |
+| `modules.order` / `modules.builtin` | 1,423 / 1,347 | 1,427 / 1,343 | `configs`, `gpio-sim`, `dev-sync-probe` 가 builtin → order 로 옮겨감 (+ OVERLAY_FS) |
+
+`modinfo` 가 Part B의 select 결과를 그대로 보여 준다 — `GPIO_SIM=m` 이 `select DEV_SYNC_PROBE` 로 그것도 m으로 만들었으니 의존 모듈이 생긴다:
+
+```text
+filename:       drivers/gpio/gpio-sim.ko
+depends:        dev-sync-probe
+intree:         Y
+name:           gpio_sim
+vermagic:       6.18.55-b03 SMP preempt mod_unload aarch64
+filename:       kernel/configs.ko
+description:    Echo the kernel .config file used to build the kernel
+vermagic:       6.18.55-b03 SMP preempt mod_unload aarch64
+### extract-ikconfig
+Image: rc=1 extract-ikconfig: Cannot find kernel config.
+configs.ko: CONFIG_LOCALVERSION="-b03" CONFIG_IKCONFIG=m CONFIG_GPIO_SIM=m
+```
+
+`IKCONFIG=m` 이면 설정 사본은 Image가 아니라 `configs.ko` 안에 있다. 이 커널을 자기 모듈(`modules_install INSTALL_MOD_PATH=…`, strip 후 78 MB)과 함께 부팅한 게스트 출력 (QEMU TCG cortex-a57 -smp 1):
+
+```text
+uname -r: 6.18.55-b03
+ls: /proc/config.gz: No such file or directory
+after modprobe configs:
+-r--r--r--    1 0        0            67904 … /proc/config.gz
+CONFIG_LOCALVERSION="-b03"
+CONFIG_IKCONFIG=m
+CONFIG_GPIO_SIM=m
+insmod: can't insert '/gpio-sim-raw.ko': unknown symbol in module or invalid parameter
+[    4.340553] gpio_sim: Unknown symbol dev_sync_probe_init (err -2)
+[    4.340705] gpio_sim: Unknown symbol dev_sync_probe_register (err -2)
+[    4.340769] gpio_sim: Unknown symbol dev_sync_probe_unregister (err -2)
+modprobe gpio-sim rc=0
+gpio_sim 28672 0 -
+dev_sync_probe 12288 1 gpio_sim,
+configs 77824 0 -
+```
+
+`insmod` 은 파일 하나만 올리므로 의존 모듈이 없으면 `Unknown symbol` 로 실패하고, `modprobe` 는 `modules.dep`(depmod 결과)를 보고 `dev_sync_probe` 를 먼저 올린다 (ELX-B06에서 자세히). 랩 커널에서는 둘 다 y라 이런 의존이 아예 없었다 (`gpio-aggregator` 의 `depends:` 가 빈 것도 같은 이유).
+
+**다른 커널의 모듈을 올리면?** 실측 두 가지 — 예상과 다른 쪽이 먼저 걸렸다:
+
+```text
+### guest 2: lab Image (6.18.55) + the b03 dev-sync-probe.ko
+insmod: can't insert '/dev-sync-probe.ko': invalid module format
+[    1.052939] module dev_sync_probe: .gnu.linkonce.this_module section size must match the kernel's built struct module size at run time
+### guest 3: lab Image-sub (6.18.55-sub, same struct module) + lab gpio-aggregator.ko (6.18.55)
+insmod: can't insert '/gpio-aggregator.ko': invalid module format
+[    0.806816] gpio_aggregator: version magic '6.18.55 SMP preempt mod_unload aarch64' should be '6.18.55-sub SMP preempt mod_unload aarch64'
+```
+
+guest 2에서는 vermagic까지 가지도 못했다. `load_module()` 은 `elf_validity_cache_copy()` 에서 모듈의 `.gnu.linkonce.this_module` 섹션 크기가 `sizeof(struct module)` 과 같은지 **먼저** 보고(`kernel/module/main.c:2108`), 그 다음 `early_mod_check()` 에서 vermagic을 본다. 두 설정의 차이 중 `DYNAMIC_DEBUG_CORE y -> n` 이 `include/linux/module.h:587` 의 `struct _ddebug_info dyndbg_info` 필드를 없애서 `struct module` 크기가 달라졌다. 설정 하나가 **모듈 ABI**를 바꾼다는 실물 증거다. guest 3(같은 구조체 크기, release만 다름)에서 비로소 교과서의 vermagic 메시지가 나왔다.
 
 ### C. bring-up 조각의 함정 셋
 
@@ -385,7 +452,7 @@ limactl shell elinux -- bash /Users/donh/workspace/dons_tech_study_dashboard/don
 | 두 defconfig 파일을 바로 `diff` | 원본 defconfig는 최소형도 정렬형도 아님 (1,824 vs 1,755줄) | 둘 다 `defconfig`→`savedefconfig` 를 거쳐 비교, 또는 전체 `.config` 를 `diffconfig` |
 | 콘솔 UART 드라이버를 `=m` | `PL011_CONSOLE` 이 `depends on …=y` 라 사라짐, 부팅 로그가 안 보임 | 부팅 필수 드라이버는 `y` |
 | `#ifdef CONFIG_FOO` 로 기능 분기 | `=m` 이면 `CONFIG_FOO_MODULE` 만 정의된다 | `IS_ENABLED(CONFIG_FOO)` (y 또는 m), `IS_BUILTIN`, `IS_MODULE` |
-| 다른 빌드 트리로 만든 `.ko` 를 올림 | vermagic 불일치 → `version magic … should be …`, 같아도 구조체 배치가 다를 수 있음 | 보드 커널과 **같은 빌드 트리**(`make -C <O=트리> M=$PWD`) |
+| 다른 빌드 트리로 만든 `.ko` 를 올림 | `struct module` 크기 불일치(`invalid module format`) 또는 vermagic 불일치(`version magic … should be …`), 둘 다 통과해도 구조체 배치가 다를 수 있음 | 보드 커널과 **같은 빌드 트리**(`make -C <O=트리> M=$PWD`) |
 | `LOCALVERSION` 없이 여러 커널 빌드 | 모두 `6.18.55` → `/lib/modules/6.18.55` 가 겹치고 vermagic도 같아 엉뚱한 모듈이 로드됨 | `CONFIG_LOCALVERSION="-b03"` 처럼 빌드마다 이름 |
 | 파서에서 `splitlines()` | `\x0c \x85` 등에서도 줄을 자름 | `split("\n")` + `rstrip("\r")` |
 
@@ -393,7 +460,7 @@ limactl shell elinux -- bash /Users/donh/workspace/dons_tech_study_dashboard/don
 
 <details><summary>Q1. vmlinux, Image, Image.gz는 무엇이 다른가요? 보드에는 무엇을 올리나요?</summary>
 
-`vmlinux` 는 링커가 만든 **ELF** 다 (랩 트리 162 MB, `with debug_info, not stripped`). 섹션·심볼·디버그 정보가 있어서 gdb, `addr2line`, crash, Oops 디코드에 쓰지만 부트로더가 바로 실행하지는 않는다. `Image` 는 `arch/arm64/boot/Makefile` 의 `OBJCOPYFLAGS_Image := -O binary -R .note -R .note.gnu.build-id -R .comment -S` 로 vmlinux에서 **메모리 이미지만 뽑은 raw 바이너리**다 (42.7 MB, `file`: "Linux kernel ARM64 boot executable Image"). 앞 64바이트에 arm64 boot header(text_offset, image_size, magic `ARM\x64`)가 있어 U-Boot `booti` 가 읽는다. `Image.gz` 는 그 gzip이고 arm64의 기본 `make` 타깃이다 (`KBUILD_IMAGE := $(boot)/Image.gz`, `EFI_ZBOOT` 가 꺼져 있을 때).
+`vmlinux` 는 링커가 만든 **ELF** 다 (랩 트리 162 MB, `with debug_info, not stripped`). 섹션·심볼·디버그 정보가 있어서 gdb, `addr2line`, crash, Oops 디코드에 쓰지만 부트로더가 바로 실행하지는 않는다. `Image` 는 `arch/arm64/boot/Makefile` 의 `OBJCOPYFLAGS_Image := -O binary -R .note -R .note.gnu.build-id -R .comment -S` 로 vmlinux에서 **메모리 이미지만 뽑은 raw 바이너리**다 (42.7 MB, `file`: "Linux kernel ARM64 boot executable Image"). 앞 64바이트가 arm64 boot header라 U-Boot `booti` 가 읽는다 — 랩 Image를 `xxd` 로 보면 0x00에 `MZ`(EFI stub), 0x10에 image_size `0x2980000`, 0x38에 magic `41 52 4d 64`(`ARM\x64`). `Image.gz` 는 그 gzip이고 arm64의 기본 `make` 타깃이다 (`KBUILD_IMAGE := $(boot)/Image.gz`, `EFI_ZBOOT` 가 꺼져 있을 때).
 
 **꼬리질문: vmlinux를 왜 보관하나요?** 필드에서 받은 Oops의 주소를 함수·줄로 바꾸려면 **그 빌드의** vmlinux(와 System.map, `.config`)가 있어야 한다. Image에는 심볼이 없다.
 </details>
@@ -428,7 +495,7 @@ limactl shell elinux -- bash /Users/donh/workspace/dons_tech_study_dashboard/don
 
 <details><summary>Q6. "version magic ... should be ..." 에러는 왜 나나요? vermagic만 맞으면 안전한가요?</summary>
 
-모듈의 `.modinfo` 에 박힌 `vermagic` 문자열(`UTS_RELEASE` + SMP/preempt/mod_unload/modversions + arch)을 로더가 자기 문자열과 `strcmp` 한다(`same_magic()`). release(LOCALVERSION 포함)나 선점 모델 등이 다르면 `-ENOEXEC`. **충분조건은 아니다**: 같은 문자열이어도 다른 `.config` 로 빌드했으면 구조체 배치가 달라 조용히 메모리를 깰 수 있다. `CONFIG_MODVERSIONS` 는 export 심볼마다 CRC를 붙여 그런 ABI 차이를 잡는다 (그때는 release 부분을 무시하고 비교).
+모듈의 `.modinfo` 에 박힌 `vermagic` 문자열(`UTS_RELEASE` + SMP/preempt/mod_unload/modversions + arch)을 로더가 자기 문자열과 `strcmp` 한다(`same_magic()`). release(LOCALVERSION 포함)나 선점 모델 등이 다르면 `-ENOEXEC` (실측: `version magic '6.18.55 SMP preempt mod_unload aarch64' should be '6.18.55-sub …'`). 6.18은 그보다 먼저 `struct module` 크기를 검사해서, `DYNAMIC_DEBUG_CORE` 하나만 달라도 `.gnu.linkonce.this_module section size must match …` 로 거부했다. **충분조건은 아니다**: 같은 문자열·같은 크기여도 다른 `.config` 로 빌드했으면 다른 구조체 배치가 달라 조용히 메모리를 깰 수 있다. `CONFIG_MODVERSIONS` 는 export 심볼마다 CRC를 붙여 그런 ABI 차이를 잡는다 (그때는 release 부분을 무시하고 비교).
 
 **꼬리질문: out-of-tree 드라이버는 어떻게 빌드해야 하나요?** 보드 커널을 만든 **바로 그 빌드 트리**에 `make -C <O=트리> M=$PWD modules` (ELX-B06). 그 트리의 `.config`, `Module.symvers`, 생성 헤더가 기준이 된다.
 </details>
@@ -476,7 +543,7 @@ arm64 defconfig: `y=3295 m=1273 n=4951 other=117` (합 9,636). check.sh가 `grep
 
 <details><summary>답</summary>
 
-첫 단어(release)를 비교하고, 나머지 단어는 집합 차로 "missing in module / extra in module". 실제 에러 문자열로 테스트한다 (§C 빌드 실측의 `version magic '6.18.55-b03 …' should be '6.18.55 …'`) → `release: module 6.18.55-b03 != kernel 6.18.55`.
+첫 단어(release)를 비교하고, 나머지 단어는 집합 차로 "missing in module / extra in module". 실제 에러 문자열로 테스트한다 (§C guest 3의 `version magic '6.18.55 …' should be '6.18.55-sub …'`) → `release: module 6.18.55 != kernel 6.18.55-sub`. 단 §C guest 2처럼 `struct module` 크기가 다르면 vermagic 이전에 `invalid module format` 으로 끝나므로, 이 설명이 나오기 전에 그 줄부터 본다.
 </details>
 
 **P5. extract-ikconfig 재구현.** 커널 Image 파일에서 `.config` 를 꺼내라.

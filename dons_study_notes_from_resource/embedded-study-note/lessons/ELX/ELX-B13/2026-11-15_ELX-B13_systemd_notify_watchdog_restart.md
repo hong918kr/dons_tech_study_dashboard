@@ -179,16 +179,16 @@ RESULT: FAIL (starter, 3 failed)
 `struct sockaddr_un` 은 `sun_family`(2바이트) + `sun_path[108]` 이다. aarch64 Linux에서 `offsetof(sun_path) = 2`.
 
 ```svg
-<svg viewBox="0 0 740 200" xmlns="http://www.w3.org/2000/svg" font-size="13">
+<svg viewBox="0 0 740 220" xmlns="http://www.w3.org/2000/svg" font-size="13">
 <text x="10" y="20" fill="currentColor" font-weight="bold">NOTIFY_SOCKET 값 → sockaddr_un 바이트 (addrlen이 이름의 끝을 정한다)</text>
 <text x="10" y="50" fill="currentColor" font-size="12" font-family="monospace">"/run/systemd/notify"</text>
 <rect x="200" y="36" width="50" height="22" class="f-mut" stroke="currentColor"/>
 <text x="206" y="52" fill="currentColor" font-size="12">AF_UNIX</text>
-<rect x="250" y="36" width="360" height="22" class="f-ok" stroke="currentColor"/>
+<rect x="250" y="36" width="310" height="22" class="f-ok" stroke="currentColor"/>
 <text x="258" y="52" fill="currentColor" font-size="12" font-family="monospace">/run/systemd/notify</text>
-<rect x="610" y="36" width="30" height="22" class="f-ok" stroke="currentColor"/>
-<text x="616" y="52" fill="currentColor" font-size="12" font-family="monospace">\0</text>
-<text x="650" y="52" fill="currentColor" font-size="12">len = 2+19+1 = 22</text>
+<rect x="560" y="36" width="30" height="22" class="f-ok" stroke="currentColor"/>
+<text x="566" y="52" fill="currentColor" font-size="12" font-family="monospace">\0</text>
+<text x="600" y="52" fill="currentColor" font-size="12">len = 2+19+1 = 22</text>
 <text x="10" y="100" fill="currentColor" font-size="12" font-family="monospace">"@esn/abc"</text>
 <rect x="200" y="86" width="50" height="22" class="f-mut" stroke="currentColor"/>
 <text x="206" y="102" fill="currentColor" font-size="12">AF_UNIX</text>
@@ -198,8 +198,9 @@ RESULT: FAIL (starter, 3 failed)
 <text x="288" y="102" fill="currentColor" font-size="12" font-family="monospace">esn/abc</text>
 <text x="450" y="102" fill="currentColor" font-size="12">len = 2+8 = 10 (뒤에 NUL 없음)</text>
 <text x="10" y="140" fill="currentColor" font-size="12">경로: 커널 unix_mkname_bsd()가 strlen으로 길이를 다시 잰다 → 넉넉한 len도 통한다.</text>
-<text x="10" y="160" fill="currentColor" font-size="12">추상: 이름 = sun_path[0] 이후 len까지 전부 → len+1 이면 "esn/abc\0" 라는 다른 이름 → ECONNREFUSED.</text>
-<text x="10" y="185" fill="currentColor" font-size="12">selftest가 두 길이(22, 10)를 그대로 검사한다: len == off + 19 + 1, len == off + 8</text>
+<text x="10" y="160" fill="currentColor" font-size="12">추상: 이름 = sun_path[0] 이후 len까지의 바이트 전부.</text>
+<text x="10" y="178" fill="currentColor" font-size="12">len+1 이면 "esn/abc\0" 라는 다른 이름 → ECONNREFUSED.</text>
+<text x="10" y="205" fill="currentColor" font-size="12">selftest가 두 길이(22, 10)를 그대로 검사: len == off + 19 + 1, len == off + 8</text>
 </svg>
 ```
 
@@ -257,7 +258,7 @@ after 6.5 s: MainPID=632917 NRestarts=0 StatusText=temp=23500 mC samples=50 pets
 **진행 조건**은 B2의 핵심이다. 아래 그림은 hang을 주입한 실제 실행의 journal 타임스탬프(`-o short-monotonic`)를 READY 시점 기준으로 다시 그린 것이다. ping 두 개(2.50, 5.00)는 로그를 남기지 않으므로 **코드에서 계산한 시각**이다.
 
 ```svg
-<svg viewBox="0 0 740 280" xmlns="http://www.w3.org/2000/svg" font-size="12">
+<svg viewBox="0 0 740 290" xmlns="http://www.w3.org/2000/svg" font-size="12">
 <text x="10" y="20" fill="currentColor" font-size="13" font-weight="bold">hang → Watchdog timeout → SIGABRT → 재시작 (실측, 0 = Started 349.242 s)</text>
 <line x1="40" y1="150" x2="720" y2="150" stroke="currentColor"/>
 <text x="40" y="170" fill="currentColor">0</text>
@@ -281,17 +282,17 @@ after 6.5 s: MainPID=632917 NRestarts=0 StatusText=temp=23500 mC samples=50 pets
 <rect x="290" y="185" width="251" height="18" class="f-warn" stroke="currentColor"/>
 <text x="350" y="198" fill="currentColor">WatchdogSec=5 (마지막 ping부터)</text>
 <circle cx="541" cy="150" r="6" class="f-warn" stroke="currentColor"/>
-<text x="470" y="40" fill="currentColor">+10.01 Watchdog timeout (limit 5s)!</text>
-<text x="470" y="56" fill="currentColor">→ Killing ... with signal SIGABRT</text>
-<text x="470" y="72" fill="currentColor">+10.10 status=6/ABRT, Result=watchdog</text>
+<text x="450" y="40" fill="currentColor">+10.01 Watchdog timeout (limit 5s)!</text>
+<text x="450" y="56" fill="currentColor">→ Killing ... with signal SIGABRT</text>
+<text x="450" y="72" fill="currentColor">+10.10 status=6/ABRT, Result=watchdog</text>
 <line x1="541" y1="78" x2="541" y2="144" stroke="currentColor"/>
 <circle cx="605" cy="150" r="5" class="f-acc" stroke="currentColor"/>
 <circle cx="620" cy="150" r="6" class="f-ok" stroke="currentColor"/>
-<text x="560" y="230" fill="currentColor">+11.30 Scheduled restart (counter 1)</text>
-<text x="560" y="248" fill="currentColor">+11.60 Started, 새 pid 653713</text>
-<line x1="610" y1="156" x2="610" y2="216" stroke="currentColor"/>
-<text x="40" y="230" fill="currentColor">RestartSec=1: 실패(+10.10) 뒤 약 1.2 s 후 재시작 job</text>
-<text x="40" y="248" fill="currentColor">hang 주입부터 kill까지 3.3 s — 기준은 hang이 아니라 "마지막 ping + 5 s"</text>
+<text x="440" y="222" fill="currentColor">+11.30 Scheduled restart (counter 1)</text>
+<text x="440" y="238" fill="currentColor">+11.60 Started, 새 pid 653713</text>
+<line x1="612" y1="156" x2="612" y2="208" stroke="currentColor"/>
+<text x="40" y="262" fill="currentColor">RestartSec=1: 실패(+10.10) 뒤 약 1.2 s 후 재시작 job</text>
+<text x="40" y="280" fill="currentColor">hang 주입부터 kill까지 3.3 s — 기준은 hang이 아니라 "마지막 ping + 5 s"</text>
 </svg>
 ```
 
@@ -414,9 +415,9 @@ RESULT: PASS (solution)            # 세 번 모두 exit 0, 한 번에 약 21–
 
 <details><summary>Q3. sd_notify는 내부적으로 뭘 하나? 왜 아무 프로세스나 보낼 수 없나?</summary>
 
-`$NOTIFY_SOCKET`(여기선 `/run/systemd/notify`)에 `AF_UNIX` `SOCK_DGRAM` 으로 `KEY=VALUE\n...` 텍스트 한 개를 보낼 뿐이다. 받는 쪽(PID 1)은 `SO_PASSCRED` 를 켜 두었으므로 커널이 메시지마다 **보낸 프로세스의 pid(tgid)·uid·gid** 를 붙인다(`unix_maybe_add_creds()`). 보내는 쪽이 위조할 수 없다. 기본 `NotifyAccess=main` 이면 MainPID가 보낸 것만 받는다. 스레드는 tgid가 같으니 괜찮고, fork한 자식은 거부된다 — 추가 연습 P5에서 자식의 `STATUS=` 가 무시되고(`StatusText=ready temp=23500 mC` 그대로), `NotifyAccess=all` 로 바꾸면 `StatusText=helper pid 625855 says hi` 로 바뀌는 것을 실측했다.
+`$NOTIFY_SOCKET`(여기선 `/run/systemd/notify`)에 `AF_UNIX` `SOCK_DGRAM` 으로 `KEY=VALUE\n...` 텍스트 한 개를 보낼 뿐이다. 받는 쪽(PID 1)은 `SO_PASSCRED` 를 켜 두었으므로 커널이 메시지마다 **보낸 프로세스의 pid(tgid)·uid·gid** 를 붙인다(`unix_maybe_add_creds()`). 보내는 쪽이 위조할 수 없다. 기본 `NotifyAccess=main` 이면 MainPID가 보낸 것만 받는다. 스레드는 tgid가 같으니 괜찮고, fork한 자식은 거부된다 — 추가 연습 P5에서 자식의 `STATUS=` 가 무시되고(`StatusText=ready temp=23500 mC` 그대로), `NotifyAccess=all` 로 바꾸면 `StatusText=helper pid 965776 says hi` 로 바뀌는 것을 실측했다.
 
-꼬리: "거부되면 journal에 남나?" → 이 VM(systemd 259 기본 로그 레벨)에서는 아무 줄도 안 남았다. 디버그 레벨에서는 찍는 것으로 알고 있다(미확인). 그래서 "STATUS가 안 바뀐다"는 증상으로 의심해야 한다.
+꼬리: "거부되면 journal에 남나?" → 이 VM(systemd 259 기본 로그 레벨)에서는 아무 줄도 안 남았다. 디버그 레벨에서는 찍는 것으로 알고 있다(미확인). 그래서 "STATUS가 안 바뀐다"는 증상으로 의심해야 한다. 꼬리2: "NotifyAccess=all 이면 다 받나?" → 보낸 프로세스가 PID 1이 읽기 전에 죽으면 버려질 수 있다(P5 함정, 실측 경주).
 </details>
 
 <details><summary>Q4. WatchdogSec=5 일 때 systemd는 정확히 언제, 무엇을 하나?</summary>
@@ -465,23 +466,25 @@ RESULT: PASS (solution)            # 세 번 모두 exit 0, 한 번에 약 21–
 
 <details><summary>P2. 보정이 6초 걸린다. TimeoutStartSec=4 는 그대로 두고 시작에 성공하라</summary>
 
-보정 중 1 s마다 `EXTEND_TIMEOUT_USEC=3000000` 을 보낸다(지금부터 3 s 안에 READY 또는 다음 연장이 오면 된다). 실측: `systemctl start rc=0 took 6.04 s`, journal에 `calibration done after 6000 ms`, `start operation timed out` 없음. selftest는 2500 ms 보정에서 EXTEND가 정확히 3개 온 뒤 READY가 오는지 센다.
+보정 중 1 s마다 `EXTEND_TIMEOUT_USEC=3000000` 을 보낸다(지금부터 3 s 안에 READY 또는 다음 연장이 오면 된다). 실측: `systemctl start rc=0 took 6.03 s` (3회 6.03–6.07 s), journal에 `calibration done after 6000 ms`, `start operation timed out` 없음. selftest는 2500 ms 보정에서 EXTEND가 정확히 3개 온 뒤 READY가 오는지 센다.
 </details>
 
 <details><summary>P3. 데몬이 스스로 고장을 감지하면 기다리지 말고 watchdog 동작을 일으켜라</summary>
 
 `<hang>.fault` 플래그 → `WATCHDOG=trigger\nSTATUS=sensor fault: self-triggered watchdog`. 실측 journal:
-`Watchdog request (last status: sensor fault: self-triggered watchdog)!` → `Killing process ... with signal SIGABRT.` → `Failed with result 'watchdog'.` → 재시작. 5 s 기다리지 않는다(trigger 0.0001 s 뒤 kill).
+`Watchdog request (last status: sensor fault: self-triggered watchdog)!` → `Killing process ... with signal SIGABRT.` → `Failed with result 'watchdog'.` → 재시작. 5 s 기다리지 않는다(실측: trigger 로그 301572.242028 → `Killing` 301572.242084, 0.1 ms 미만).
 </details>
 
 <details><summary>P4. 시그널 없이 데몬이 스스로 끝내기로 했다(설정에서 disabled). systemd에 알리고 깨끗이 끝내라</summary>
 
-`<hang>.quit` 플래그 → `STOPPING=1` 을 먼저 보내고 1.5 s 정리 후 exit 0. 실측: 정리하는 동안 `ActiveState=deactivating`(pid 살아 있음), 끝나면 `Deactivated successfully.`, exit 0이라 `Restart=on-failure` 는 재시작하지 않음. journal에서 `self stop`(397.263) → `Deactivated`(398.764) = 1.50 s — usleep이 끊기지 않았으니 systemd가 이 상태에서 SIGTERM을 보내지 않은 것으로 보인다(관찰에 근거한 추론, systemd 소스는 이 VM에 없어 확인 못 함).
+`<hang>.quit` 플래그 → `STOPPING=1` 을 먼저 보내고 1.5 s 정리 후 exit 0. 실측: 정리하는 동안 `ActiveState=deactivating`(pid 살아 있음), 끝나면 `Deactivated successfully.`, exit 0이라 `Restart=on-failure` 는 재시작하지 않음. journal에서 `self stop`(301579.582) → `Deactivated`(301581.083) = 1.50 s — usleep이 끊기지 않았으니 systemd가 이 상태에서 SIGTERM을 보내지 않은 것으로 보인다(관찰에 근거한 추론, systemd 소스는 이 VM에 없어 확인 못 함).
 </details>
 
 <details><summary>P5. fork한 도우미 프로세스가 STATUS=를 보내면? NotifyAccess로 비교하라</summary>
 
-READY 뒤 자식이 `STATUS=helper pid N says hi` 를 보낸다. 기본(main): `StatusText=ready temp=23500 mC` 그대로(거부). `NotifyAccess=all`(drop-in `zz-p5b.conf`): `StatusText=helper pid 625855 says hi  MainPID=625660` — pid가 다르다. selftest는 가짜 PID 1에서 자격증명 pid가 MainPID와 다르고 메시지 안의 pid와 같은지 확인한다. 자식은 `WATCHDOG_PID` 가 달라서 `watchdog_period_usec()` 도 0이다(Part B).
+READY 뒤 자식이 `STATUS=helper pid N says hi` 를 보낸다. 기본(main): `StatusText=ready temp=23500 mC` 그대로(거부). `NotifyAccess=all`(drop-in `zz-p5b.conf`): `StatusText=helper pid 965776 says hi  MainPID=965562` — pid가 다르다. selftest는 가짜 PID 1에서 자격증명 pid가 MainPID와 다르고 메시지 안의 pid와 같은지 확인한다. 자식은 `WATCHDOG_PID` 가 달라서 `watchdog_period_usec()` 도 0이다(Part B).
+
+**함정(실측)**: 처음 버전은 자식이 보내자마자 `_exit` 하고 부모가 `waitpid` 했다. 그러면 `NotifyAccess=all` 인데도 **3번 연속 StatusText가 안 바뀌었다**(그 전 두 번은 바뀜 — 경주). PID 1이 데이터그램을 읽을 때 보낸 pid가 이미 죽어 있으면 그 pid를 이 유닛(cgroup)에 연결하지 못해서 버리는 것으로 보인다(관찰에 근거한 추론, systemd 소스 미확인). 그래서 자식이 보낸 뒤 1 s 살아 있게 하고, 부모는 `SIGCHLD=SIG_IGN` 으로 기다리지 않게 고쳤다 → 3/3 PASS. "보내고 바로 죽는 도우미 스크립트의 notify가 가끔 사라진다"는 현장 증상의 정체다. 그래서 notify는 가능하면 MainPID가 직접 보내는 것이 정석이다.
 </details>
 
 ### 한 번에 검증
@@ -496,21 +499,21 @@ limactl shell elinux -- bash /Users/donh/workspace/dons_tech_study_dashboard/don
 
 ```text
 PASS: selftest (fake PID 1): 49/49 passed
-systemctl start rc=0 took 6.04 s
+systemctl start rc=0 took 6.03 s
 PASS: P2: journal shows 6000 ms calibration, no start timeout
 PASS: P5: NotifyAccess=main ignores STATUS= from the helper pid (StatusText=ready temp=23500 mC)
 PASS: P3: restarted after WATCHDOG=trigger (NRestarts=1, new MainPID)
 PASS: P3: journal 'Watchdog request (last status: sensor fault: self-triggered watchdog)!'
-PASS: P4: STOPPING=1 -> ActiveState=deactivating while pid 621708 still runs
+PASS: P4: STOPPING=1 -> ActiveState=deactivating while pid 962363 still runs
 PASS: P4: clean exit 0 -> inactive, not restarted (Restart=on-failure)
 PASS: P1: failed at once, NRestarts=0, ExecMainStatus=3, StatusErrno=19
 PASS: P5b: NotifyAccess=all -> StatusText from the helper pid shows up
-  StatusText=helper pid 625855 says hi  MainPID=625660
+  StatusText=helper pid 965776 says hi  MainPID=965562
 19/19 passed
 RESULT: PASS (practice)
 ```
 
-(일부 줄 생략 — 전체는 `check_practice.txt`. 약 27–30 s.)
+(일부 줄 생략 — 전체는 `check_practice.txt`. 연속 3회 PASS, 각 약 26 s.)
 
 ## 10. 핵심 정리
 

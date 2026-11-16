@@ -21,7 +21,7 @@ updated: 2026-11-15
 부팅은 릴레이 경주다. 각 주자는 자기가 아는 최소한만 초기화하고, 다음 주자를 **더 큰 메모리**에 올려 놓고 바통(인자)을 넘긴다. 아래 그림의 주소는 이번 레슨에서 캡처한 QEMU 로그와 TF-A/U-Boot 소스에서 확인한 값이다.
 
 ```svg
-<svg viewBox="0 0 760 400" xmlns="http://www.w3.org/2000/svg" font-size="12">
+<svg viewBox="0 0 760 420" xmlns="http://www.w3.org/2000/svg" font-size="12">
   <defs><marker id="b01-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
   <text x="10" y="20" fill="currentColor" font-weight="bold" font-size="14">누가 누구를 어디에 올리고 무엇을 넘기나 (QEMU virt secure=on 실측)</text>
   <g fill="currentColor" font-weight="bold"><text x="120" y="42">실행 위치 (이 랩)</text><text x="430" y="42">다음 단계에 넘기는 것</text></g>
@@ -68,7 +68,8 @@ updated: 2026-11-15
     <text x="430" y="338">모르는 cmdline 인자 → argv/envp</text>
     <text x="430" y="356" font-family="monospace">b01_from=uboot LAB_CMD=...</text>
   </g>
-  <text x="10" y="390" fill="currentColor" opacity=".8">합성 i.MX8MP 로그: SPL 이 DDR training 0.65 s, booti 가 Image 를 0x4048_0000 → 0x4060_0000 로 옮김, DTB 0x4300_0000.</text>
+  <text x="10" y="390" fill="currentColor" opacity=".8">합성 i.MX8MP 로그: SPL 이 DDR training 0.65 s,</text>
+  <text x="10" y="408" fill="currentColor" opacity=".8">booti 가 Image 를 0x4048_0000 → 0x4060_0000 로 옮김, DTB 0x4300_0000.</text>
 </svg>
 ```
 
@@ -221,7 +222,8 @@ U-Boot 카운트다운 줄의 실물은 `[  0.394029  0.052090] ESC[2K CR Hit an
   <g fill="currentColor" font-size="12">
     <text x="10" y="100">출력 없음</text><text x="10" y="116">(첫 줄까지 추정)</text>
     <text x="10" y="150" font-weight="bold">핸드오프 (이 줄의 시각 = 다음 단계 시작, 줄 자체는 앞 단계 소속)</text>
-    <text x="10" y="170" font-family="monospace">SPL→BL31 "BL1: Booting BL31" · U-Boot→kernel "Starting kernel ..." · kernel→init "Run /init as init process"</text>
+    <text x="10" y="168" font-family="monospace">SPL→BL31 "BL1: Booting BL31" · U-Boot→kernel "Starting kernel ..."</text>
+    <text x="10" y="184" font-family="monospace">kernel→init "Run /init as init process"</text>
     <text x="10" y="200" font-weight="bold">새 부팅</text>
     <text x="10" y="220">① 앞 단계 표지가 뒤에서 (kernel 다음 SPL)  ② 이미 본 배너 키 (TPL·SPL·TF-A·U-Boot·Linux)</text>
     <text x="10" y="240">③ printk 시각 역행 &gt; 0.1 s.   TF-A "ERROR: ..." 같은 표지 없는 줄은 현재 단계에 남는다</text>

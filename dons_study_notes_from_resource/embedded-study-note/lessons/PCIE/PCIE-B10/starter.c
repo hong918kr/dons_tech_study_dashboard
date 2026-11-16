@@ -1,0 +1,586 @@
+/* PCIE-B10 TLP 헤더 인코딩/디코딩: MRd, MWr, CplD
+ *
+ * 헤더는 "바이트 0 이 먼저" 인 big-endian DW 묶음이다 (스펙 그림 그대로: byte 0 = Fmt/Type).
+ *   DW0  byte0 = Fmt[2:0]<<5 | Type[4:0]
+ *        byte1 = TC[2:0]<<4 | Attr[2](IDO)<<2 | TH            (bit7 T9, bit3 T8, bit1 LN 은 이 레슨에서 0)
+ *        byte2 = TD<<7 | EP<<6 | Attr[1:0]<<4 (RO=bit5, NS=bit4) | AT<<2 | Length[9:8]
+ *        byte3 = Length[7:0]                                   (Length 는 DW 단위, 필드 0 = 1024 DW)
+ *   요청(MRd/MWr)  DW1 = Requester ID | Tag | Last DW BE<<4 | First DW BE
+ *                  DW2 = Addr[31:2]<<2 (3DW)  또는  DW2 = Addr[63:32], DW3 = Addr[31:2]<<2 (4DW)
+ *   완료(Cpl/CplD) DW1 = Completer ID | Status<<13 | BCM<<12 | Byte Count[11:0] (0 = 4096)
+ *                  DW2 = Requester ID | Tag | R | Lower Address[6:0]
+ *   byte0: MRd32 0x00, MRd64 0x20, MWr32 0x40, MWr64 0x60, Cpl 0x0A, CplD 0x4A.
+ *
+ * Part A: tlp_encode / tlp_decode (3DW·4DW MRd, MWr, Cpl, CplD) — 손으로 계산한 벡터 + 무작위 왕복
+ * Part B: tlp_check (BE 규칙, 4KB 경계, 4DW-iff-4GB, 필드 범위), tlp_be (주소·길이 → Length/BE),
+ *         tlp_split (4KB 경계 + MPS/MRRS 로 요청 분할) — 오류 주입 + 브루트포스 비교
+ * Part C: cpl_byte_count / cpl_lower_addr / cpl_split (RCB 64/128 로 나뉜 CplD 의 Byte Count·Lower Address),
+ *         tlp_describe (Linux AER "TLP Header" DW 로그 → 한 줄 해석), SSD 가 호스트 메모리를 읽는 시나리오
+ *
+ * 테스트: 손 계산 바이트 벡터, tlp_be 브루트포스 전수(시작 오프셋 0..15 × 길이 0..600),
+ *         고정 시드 xorshift32 무작위 헤더 4000개 왕복, 분할·완료 성질 검사.
+ * 빌드: cc -std=c11 -Wall -Wextra -Werror -O2 solution.c -o solution && ./solution
+ */
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Linux include/uapi/linux/pci_regs.h 의 이름·값 (Mac 에서도 빌드되게 직접 정의) */
+#define PCI_EXP_DEVCTL_PAYLOAD 0x00e0   /* MPS  = 128 << ((DEVCTL & 0x00e0) >> 5)  */
+#define PCI_EXP_DEVCTL_READRQ  0x7000   /* MRRS = 128 << ((DEVCTL & 0x7000) >> 12) */
+#define PCI_EXP_LNKCTL_RCB     0x0008   /* 0 = RCB 64B, 1 = RCB 128B               */
+
+#define TLP_TYPE_MEM 0x00u
+#define TLP_TYPE_CPL 0x0Au
+
+#define TLP_ATTR_NS  0x1u   /* Attr[0] No Snoop          → byte2 bit4 */
+#define TLP_ATTR_RO  0x2u   /* Attr[1] Relaxed Ordering  → byte2 bit5 */
+#define TLP_ATTR_IDO 0x4u   /* Attr[2] ID-based Ordering → byte1 bit2 */
+
+#define CPL_SC  0u          /* Successful Completion */
+#define CPL_UR  1u          /* Unsupported Request   */
+#define CPL_CRS 2u          /* Configuration Request Retry Status (최신 스펙 이름 RRS) */
+#define CPL_CA  4u          /* Completer Abort       */
+
+enum { TLP_OK = 0, TLP_E_CAP = -1, TLP_E_TRUNC = -2, TLP_E_UNSUP = -3, TLP_E_FIELD = -4,
+       TLP_E_ADDR = -5, TLP_E_BE = -6, TLP_E_4K = -7 };
+
+typedef enum { TLP_MRD, TLP_MWR, TLP_CPL, TLP_CPLD } tlp_kind;
+
+typedef struct {
+    tlp_kind kind;
+    bool     is4dw;       /* decode 가 채운다. encode 는 무시하고 addr 로 정한다 (Cpl/CplD 는 항상 3DW) */
+    uint8_t  tc;          /* 0..7 */
+    uint8_t  attr;        /* TLP_ATTR_* 조합 (0..7) */
+    bool     th, td, ep;
+    uint8_t  at;          /* 0..3 */
+    uint16_t len_dw;      /* MRd/MWr/CplD: 1..1024.  Cpl(데이터 없음): 0 (필드는 reserved, 0 으로 보냄) */
+    uint16_t req_id;      /* bus<<8 | dev<<3 | fn */
+    uint8_t  tag;
+    /* 요청 */
+    uint8_t  first_be, last_be;
+    uint64_t addr;        /* DW 정렬 (bit1:0 = 0) */
+    /* 완료 */
+    uint16_t cpl_id;
+    uint8_t  status;      /* CPL_SC / CPL_UR / CPL_CRS / CPL_CA */
+    bool     bcm;
+    uint16_t byte_count;  /* 1..4096 (필드 0 = 4096) */
+    uint8_t  lower_addr;  /* 0..0x7F */
+} tlp_hdr;
+
+typedef struct { uint64_t dw_addr; uint16_t len_dw; uint8_t first_be, last_be; } tlp_span;
+typedef struct { uint64_t addr; uint32_t len; } tlp_chunk;
+typedef struct { uint64_t addr; uint16_t len_dw, byte_count; uint8_t lower_addr; } cpl_chunk;
+
+static uint16_t bdf_id(unsigned bus, unsigned dev, unsigned fn) {
+    return (uint16_t)((bus & 0xFFu) << 8 | (dev & 0x1Fu) << 3 | (fn & 7u));
+}
+static void be32_put(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
+}
+static uint32_t be32_get(const uint8_t *p) {
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+static bool is_req(tlp_kind k) { return k == TLP_MRD || k == TLP_MWR; }
+static bool pow2_in(uint32_t v, uint32_t lo, uint32_t hi) { return v >= lo && v <= hi && (v & (v - 1u)) == 0; }
+static int  be_lo(uint8_t be) { for (int i = 0; i < 4; i++) if (be >> i & 1u) return i; return -1; }   /* 가장 낮은 켜진 바이트 */
+static int  be_hi(uint8_t be) { for (int i = 3; i >= 0; i--) if (be >> i & 1u) return i; return -1; }  /* 가장 높은 켜진 바이트 */
+
+/* ---------------- Part B: 규칙 검사 (encode·decode 가 같이 쓴다) ---------------- */
+
+/* 반환 TLP_OK 또는 TLP_E_FIELD / TLP_E_ADDR / TLP_E_4K / TLP_E_BE (is4dw 는 보지 않는다) */
+static int tlp_check(const tlp_hdr *h) {
+    (void)h;
+    return TLP_OK; /* TODO B1: 필드 범위(TC/Attr/AT/Length/Status/BC/LA) → 주소 정렬 → 4KB 경계 → BE 규칙
+                    *   (1 DW: Last BE 0 / 2 DW 이상: 둘 다 ≠0 / QW 정렬 2 DW 외에는 연속 BE) */
+}
+
+/* ---------------- Part A: 인코더 / 디코더 ---------------- */
+
+/* 헤더를 out 에 쓴다. 반환: 12(3DW) / 16(4DW) 또는 오류 (오류면 out 을 건드리지 않음).
+ * 요청은 addr > 0xFFFFFFFF 일 때만 4DW (64-bit 주소) 형식. */
+static int tlp_encode(const tlp_hdr *h, uint8_t *out, size_t cap) {
+    (void)h; (void)out; (void)cap; (void)tlp_check;
+    return TLP_E_CAP; /* TODO A1: tlp_check → 3DW/4DW 결정(addr > 4GB) → 용량 검사 → DW0 → 요청이면 RID/Tag/BE/주소,
+                       *          완료면 CplID/Status/BCM/BC, RID/Tag/LA (Length 1024·BC 4096 은 필드 0) */
+}
+
+/* in[0..n) 에서 헤더 하나를 읽는다. 반환: 헤더 바이트 수(12/16) 또는 오류 (오류면 *h 를 건드리지 않음). */
+static int tlp_decode(const uint8_t *in, size_t n, tlp_hdr *h) {
+    (void)in; (void)n; (void)h; (void)be32_get;
+    return TLP_E_UNSUP; /* TODO A2: 4바이트 보고 Fmt/Type → 종류·헤더 길이 → 잘림 검사 → 필드 → (4DW 상위 0 거부)
+                         *          → tlp_check → 성공일 때만 *h 에 쓴다 */
+}
+
+/* ---------------- Part B: BE 계산과 요청 분할 ---------------- */
+
+/* 바이트 범위 [addr, addr+len) → DW 정렬 주소, Length, First/Last DW BE.
+ * len == 0 → zero-length read/write (Length 1, BE 0000/0000). Length > 1024 이면 TLP_E_FIELD. */
+static int tlp_be(uint64_t addr, uint32_t len, tlp_span *o) {
+    (void)addr; (void)len;
+    memset(o, 0, sizeof *o);
+    return TLP_E_FIELD; /* TODO B2: DW 정렬 주소, Length = 끝 DW − 첫 DW + 1, First BE = 0xF<<(addr&3),
+                         *          Last BE = 0xF>>(…끝&3…); 1 DW 면 겹쳐서 First 에, len 0 = zero-length */
+}
+
+/* 긴 전송 [addr, addr+len) 을 TLP 하나에 담을 수 있는 조각으로 자른다 (앞에서부터 가장 크게).
+ * 조각 조건: 4KB 경계를 넘지 않음, DW 범위(Length×4) ≤ max_bytes (MWr 이면 MPS, MRd 이면 MRRS).
+ * 반환: 조각 수, 또는 TLP_E_FIELD (len == 0, max_bytes 가 128..4096 2의 거듭제곱 아님) / TLP_E_CAP. */
+static int tlp_split(uint64_t addr, uint64_t len, uint32_t max_bytes, tlp_chunk *out, size_t cap) {
+    (void)addr; (void)len; (void)max_bytes; (void)out; (void)cap; (void)pow2_in;
+    return 0; /* TODO B3: 조각 끝 = min(전체 끝, DW 정렬 시작 + max_bytes, 다음 4KB 경계) 를 반복 */
+}
+
+/* ---------------- Part C: Completion 의 Byte Count / Lower Address ---------------- */
+
+/* MRd 의 (Length, First BE, Last BE) → 첫 CplD 의 Byte Count (= 돌려줄 총 바이트 수) */
+static uint16_t cpl_byte_count(uint16_t len_dw, uint8_t first_be, uint8_t last_be) {
+    (void)len_dw; (void)first_be; (void)last_be;
+    return 0; /* TODO C1: Length 1 → 켜진 최고 바이트 − 최저 바이트 + 1 (BE 0 이면 1),
+               *          아니면 4·Length − (First BE 앞쪽 꺼진 바이트) − (Last BE 뒤쪽 꺼진 바이트) */
+}
+
+/* 첫 CplD 의 Lower Address = 첫 번째로 켜진 바이트 주소의 하위 7비트 (BE 0000 이면 DW 주소) */
+static uint8_t cpl_lower_addr(uint64_t dw_addr, uint8_t first_be) {
+    (void)dw_addr; (void)first_be;
+    return 0; /* TODO C1: (DW 주소 + 첫 번째 켜진 바이트 위치) & 0x7F */
+}
+
+/* MRd 하나에 대한 CplD 목록. 완료자 정책(이 레슨): 각 CplD 는 MPS 이하에서 가장 크게,
+ * 마지막이 아니면 RCB 정렬 주소에서 끝난다. 반환: CplD 수 또는 TLP_E_FIELD / TLP_E_CAP. */
+static int cpl_split(const tlp_hdr *rd, uint32_t rcb, uint32_t mps, cpl_chunk *out, size_t cap) {
+    (void)rd; (void)rcb; (void)mps; (void)out; (void)cap;
+    return 0; /* TODO C2: 입력 검사 → CplD 끝 = min(DW 끝, (cur + MPS) 를 RCB 로 내림),
+               *          BC = 마지막 바이트+1 − 이번 첫 유효 바이트, LA = 그 주소 & 0x7F */
+}
+
+/* 헤더 한 줄 요약 (AER 로그 해석용). 반환: 쓴 글자 수 또는 TLP_E_CAP (cap 이 모자람). 형식:
+ *   요청: "MRd32 01:00.0 tag=0x0c addr=0xf7c01004 len=3 be=c/3" + 플래그
+ *   완료: "CplD SC 00:00.0->01:00.0 tag=0x0c len=3 bc=8 la=0x06" + 플래그
+ *   플래그(있을 때만, 이 순서): " TC<n>" " RO" " NS" " IDO" " TH" " TD" " EP" " AT<n>" " BCM" */
+static int tlp_describe(const tlp_hdr *h, char *buf, size_t cap) {
+    (void)h; (void)buf; (void)cap;
+    return TLP_E_CAP; /* TODO C3: 위 형식대로 snprintf (임시 버퍼에 만들고, 들어가면 복사) */
+}
+
+/* ---------------- 테스트 하네스 ---------------- */
+
+static int g_pass, g_total;
+#define CHECK(expr) do { g_total++; if (expr) { g_pass++; } \
+    else printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #expr); } while (0)
+
+static uint32_t xs32(uint32_t *s) { uint32_t x = *s; x ^= x << 13; x ^= x >> 17; x ^= x << 5; return *s = x; }
+
+/* AER Header Log 처럼 DW 를 u32 로 찍은 값 → 와이어 바이트 (DW 의 bit31:24 = 바이트 0) */
+static void tlp_from_dws(const uint32_t *dw, size_t n, uint8_t *out) {
+    for (size_t i = 0; i < n; i++) be32_put(out + 4 * i, dw[i]);
+}
+
+static bool hdr_eq(const tlp_hdr *a, const tlp_hdr *b) {
+    if (a->kind != b->kind || a->tc != b->tc || a->attr != b->attr || a->th != b->th || a->td != b->td ||
+        a->ep != b->ep || a->at != b->at || a->len_dw != b->len_dw || a->req_id != b->req_id || a->tag != b->tag)
+        return false;
+    if (is_req(a->kind))
+        return a->first_be == b->first_be && a->last_be == b->last_be && a->addr == b->addr;
+    return a->cpl_id == b->cpl_id && a->status == b->status && a->bcm == b->bcm &&
+           a->byte_count == b->byte_count && a->lower_addr == b->lower_addr;
+}
+
+static void hex(const char *tag, const uint8_t *b, int n) {
+    printf("%s", tag);
+    for (int i = 0; i < n; i++) printf("%s%02X", (i && i % 4 == 0) ? " | " : " ", b[i]);
+    printf("\n");
+}
+
+static tlp_hdr mk_req(tlp_kind k, uint16_t rid, uint8_t tag, uint64_t addr, uint32_t len) {
+    tlp_hdr h; memset(&h, 0, sizeof h);
+    tlp_span sp; memset(&sp, 0, sizeof sp);
+    h.kind = k; h.req_id = rid; h.tag = tag;
+    if (tlp_be(addr, len, &sp) == TLP_OK) { h.addr = sp.dw_addr; h.len_dw = sp.len_dw; h.first_be = sp.first_be; h.last_be = sp.last_be; }
+    h.is4dw = h.addr > 0xFFFFFFFFull;
+    return h;
+}
+static tlp_hdr mk_cpl(tlp_kind k, uint16_t cid, uint8_t st, uint16_t rid, uint8_t tag, uint16_t len, uint16_t bc, uint8_t la) {
+    tlp_hdr h; memset(&h, 0, sizeof h);
+    h.kind = k; h.cpl_id = cid; h.status = st; h.req_id = rid; h.tag = tag; h.len_dw = len; h.byte_count = bc; h.lower_addr = la;
+    return h;
+}
+
+/* 브루트포스 BE: 바이트마다 "범위 안인가" 를 보고 첫/끝 DW 의 비트를 켠다 */
+static void be_brute(uint64_t addr, uint32_t len, tlp_span *o) {
+    o->dw_addr = addr & ~3ull;
+    if (len == 0) { o->len_dw = 1; o->first_be = o->last_be = 0; return; }
+    uint64_t d0 = addr >> 2, d1 = (addr + len - 1u) >> 2;
+    o->len_dw = (uint16_t)(d1 - d0 + 1u);
+    uint8_t f = 0, l = 0;
+    for (unsigned b = 0; b < 4; b++) {
+        uint64_t x = d0 * 4u + b, y = d1 * 4u + b;
+        if (x >= addr && x < addr + len) f |= (uint8_t)(1u << b);
+        if (y >= addr && y < addr + len) l |= (uint8_t)(1u << b);
+    }
+    o->first_be = f; o->last_be = o->len_dw == 1 ? 0 : l;
+}
+
+static tlp_hdr rand_hdr(uint32_t *s) {
+    tlp_kind k = (tlp_kind)(xs32(s) % 4u);
+    tlp_hdr h;
+    if (is_req(k)) {
+        uint64_t addr = xs32(s);
+        if (xs32(s) & 1u) addr |= (uint64_t)(xs32(s) | 1u) << 32;   /* 절반은 4GB 이상 */
+        uint32_t room = 4096u - (uint32_t)(addr & 0xFFFu);
+        h = mk_req(k, (uint16_t)xs32(s), (uint8_t)xs32(s), addr, xs32(s) % (room + 1u));
+    } else {
+        static const uint8_t sts[4] = { CPL_SC, CPL_UR, CPL_CRS, CPL_CA };
+        uint16_t len = k == TLP_CPLD ? (uint16_t)(1u + xs32(s) % 1024u) : 0;
+        h = mk_cpl(k, (uint16_t)xs32(s), sts[xs32(s) % 4u], (uint16_t)xs32(s), (uint8_t)xs32(s), len,
+                   (uint16_t)(1u + xs32(s) % 4096u), (uint8_t)(xs32(s) & 0x7Fu));
+        h.bcm = xs32(s) & 1u;
+    }
+    uint32_t r = xs32(s);
+    h.tc = r & 7u; h.attr = r >> 3 & 7u; h.th = r >> 6 & 1u; h.td = r >> 7 & 1u; h.ep = r >> 8 & 1u; h.at = r >> 9 & 3u;
+    return h;
+}
+
+int main(void) {
+    uint8_t b[32];
+    tlp_hdr h, d;
+    int rc;
+
+    /* ===== Part A: 손으로 계산한 벡터 ===== */
+    /* V1: MRd32 01:00.0 tag 0x0c, 바이트 0xF7C01006..0xF7C0100D (8B) → Length 3, First BE 1100, Last BE 0011 */
+    const uint8_t v1[12] = { 0x00,0x00,0x00,0x03, 0x01,0x00,0x0C,0x3C, 0xF7,0xC0,0x10,0x04 };
+    h = mk_req(TLP_MRD, bdf_id(1, 0, 0), 0x0C, 0xF7C01006u, 8);
+    memset(b, 0xEE, sizeof b);
+    rc = tlp_encode(&h, b, sizeof b);
+    hex("V1 MRd32 :", b, 12);
+    CHECK(rc == 12 && memcmp(b, v1, 12) == 0);
+    memset(&d, 0, sizeof d);
+    CHECK(tlp_decode(v1, 12, &d) == 12 && d.kind == TLP_MRD && !d.is4dw && d.addr == 0xF7C01004u &&
+          d.len_dw == 3 && d.first_be == 0xC && d.last_be == 0x3 && d.req_id == 0x0100 && d.tag == 0x0C);
+
+    /* V2: MWr64 03:00.0, addr 0x12_3456_7800, 4B, RO → 4DW, byte2 bit5 */
+    const uint8_t v2[16] = { 0x60,0x00,0x20,0x01, 0x03,0x00,0x00,0x0F, 0x00,0x00,0x00,0x12, 0x34,0x56,0x78,0x00 };
+    h = mk_req(TLP_MWR, bdf_id(3, 0, 0), 0x00, 0x1234567800ull, 4);
+    h.attr = TLP_ATTR_RO;
+    memset(b, 0xEE, sizeof b);
+    rc = tlp_encode(&h, b, sizeof b);
+    hex("V2 MWr64 :", b, 16);
+    CHECK(rc == 16 && memcmp(b, v2, 16) == 0);
+    memset(&d, 0, sizeof d);
+    CHECK(tlp_decode(v2, 16, &d) == 16 && d.kind == TLP_MWR && d.is4dw && d.addr == 0x1234567800ull &&
+          d.attr == TLP_ATTR_RO && d.len_dw == 1 && d.first_be == 0xF && d.last_be == 0);
+
+    /* V3: V1 에 대한 CplD (Root 00:00.0 → 01:00.0), Byte Count 8, Lower Address 0x06 */
+    const uint8_t v3[12] = { 0x4A,0x00,0x00,0x03, 0x00,0x00,0x00,0x08, 0x01,0x00,0x0C,0x06 };
+    h = mk_cpl(TLP_CPLD, bdf_id(0, 0, 0), CPL_SC, bdf_id(1, 0, 0), 0x0C, 3, 8, 0x06);
+    rc = tlp_encode(&h, b, sizeof b);
+    hex("V3 CplD  :", b, 12);
+    CHECK(rc == 12 && memcmp(b, v3, 12) == 0);
+    memset(&d, 0, sizeof d);
+    CHECK(tlp_decode(v3, 12, &d) == 12 && hdr_eq(&d, &h));
+
+    /* V4: Cpl(데이터 없음) UR — 없는 함수에 CfgRd → Root Port 00:01.0 이 UR, 요청자 00:00.0 tag 5, BC 4 */
+    const uint8_t v4[12] = { 0x0A,0x00,0x00,0x00, 0x00,0x08,0x20,0x04, 0x00,0x00,0x05,0x00 };
+    h = mk_cpl(TLP_CPL, bdf_id(0, 1, 0), CPL_UR, bdf_id(0, 0, 0), 0x05, 0, 4, 0x00);
+    rc = tlp_encode(&h, b, sizeof b);
+    hex("V4 Cpl UR:", b, 12);
+    CHECK(rc == 12 && memcmp(b, v4, 12) == 0);
+    memset(&d, 0, sizeof d);
+    CHECK(tlp_decode(v4, 12, &d) == 12 && d.kind == TLP_CPL && d.status == CPL_UR && d.len_dw == 0 && d.cpl_id == 0x0008);
+
+    /* V5: Length 1024 DW 는 필드 0, Byte Count 4096 도 필드 0 */
+    h = mk_req(TLP_MRD, bdf_id(1, 0, 0), 0x01, 0x80000000u, 4096);
+    rc = tlp_encode(&h, b, sizeof b);
+    CHECK(rc == 12 && b[0] == 0x00 && (b[2] & 3u) == 0 && b[3] == 0x00 && b[7] == 0xFF);
+    memset(&d, 0, sizeof d);
+    CHECK(tlp_decode(b, 12, &d) == 12 && d.len_dw == 1024);
+    h = mk_cpl(TLP_CPLD, 0, CPL_SC, bdf_id(1, 0, 0), 0x01, 64, 4096, 0x00);
+    rc = tlp_encode(&h, b, sizeof b);
+    CHECK(rc == 12 && (b[6] & 0x0Fu) == 0 && b[7] == 0 && b[3] == 64);
+    memset(&d, 0, sizeof d);
+    CHECK(tlp_decode(b, 12, &d) == 12 && d.byte_count == 4096);
+
+    /* 모든 필드 비트 위치: TC7, RO|NS|IDO, TH, TD, EP, AT 3 → DW0 = 70 07 FC 01 (위 V2 모양 4DW) */
+    h = mk_req(TLP_MWR, bdf_id(3, 0, 0), 0, 0x1234567800ull, 4);
+    h.tc = 7; h.attr = TLP_ATTR_RO | TLP_ATTR_NS | TLP_ATTR_IDO; h.th = true; h.td = true; h.ep = true; h.at = 3;
+    rc = tlp_encode(&h, b, sizeof b);
+    CHECK(rc == 16 && b[0] == 0x60 && b[1] == 0x75 && b[2] == 0xFC && b[3] == 0x01);
+
+    /* 무작위 왕복 4000개 (고정 시드) */
+    {
+        uint32_t s = 0xC0FFEEu; int bad = 0, n4 = 0;
+        for (int i = 0; i < 4000; i++) {
+            tlp_hdr r = rand_hdr(&s);
+            uint8_t o[16]; tlp_hdr q; memset(&q, 0, sizeof q);
+            int n = tlp_encode(&r, o, sizeof o);
+            int m = n > 0 ? tlp_decode(o, (size_t)n, &q) : n;
+            if (n <= 0 || m != n || !hdr_eq(&r, &q) || q.is4dw != r.is4dw) bad++;
+            if (n == 16) n4++;
+        }
+        printf("A random round trip: 4000 headers, 4DW=%d, bad=%d\n", n4, bad);
+        CHECK(bad == 0 && n4 > 500);
+    }
+
+    /* ===== Part B: 오류 주입 (decode) ===== */
+    CHECK(tlp_decode(v1, 11, &d) == TLP_E_TRUNC);                    /* 3DW 인데 11바이트 */
+    CHECK(tlp_decode(v1, 3, &d) == TLP_E_TRUNC);
+    CHECK(tlp_decode(v2, 12, &d) == TLP_E_TRUNC);                    /* Fmt=011 → 16바이트 필요 */
+    {
+        uint8_t x[16];
+        memcpy(x, v1, 12); x[0] = 0x80;  CHECK(tlp_decode(x, 12, &d) == TLP_E_UNSUP);   /* Fmt 100 = TLP Prefix */
+        memcpy(x, v1, 12); x[0] = 0x04;  CHECK(tlp_decode(x, 12, &d) == TLP_E_UNSUP);   /* CfgRd0: 이 코덱 범위 밖 */
+        memcpy(x, v3, 12); x[0] = 0x2A;  CHECK(tlp_decode(x, 16, &d) == TLP_E_UNSUP);   /* Cpl 은 4DW 없음 */
+        const uint8_t low4[16] = { 0x20,0x00,0x00,0x01, 0x01,0x00,0x00,0x0F, 0x00,0x00,0x00,0x00, 0x12,0x34,0x56,0x78 };
+        CHECK(tlp_decode(low4, 16, &d) == TLP_E_ADDR);              /* 4DW 인데 상위 32비트 0 */
+        const uint8_t x4k[12] = { 0x00,0x00,0x00,0x02, 0x01,0x00,0x00,0xFF, 0x00,0x00,0x0F,0xFC };
+        CHECK(tlp_decode(x4k, 12, &d) == TLP_E_4K);                 /* 0xFFC + 8B → 4KB 경계 넘음 */
+        const uint8_t l1[12] = { 0x00,0x00,0x00,0x01, 0x01,0x00,0x00,0xFF, 0x00,0x00,0x10,0x00 };
+        CHECK(tlp_decode(l1, 12, &d) == TLP_E_BE);                  /* Length 1 인데 Last BE ≠ 0 */
+        const uint8_t f0[12] = { 0x00,0x00,0x00,0x02, 0x01,0x00,0x00,0xF0, 0x00,0x00,0x10,0x00 };
+        CHECK(tlp_decode(f0, 12, &d) == TLP_E_BE);                  /* Length 2 인데 First BE = 0 */
+        const uint8_t nc3[12] = { 0x00,0x00,0x00,0x03, 0x01,0x00,0x00,0xF5, 0x00,0x00,0x10,0x00 };
+        CHECK(tlp_decode(nc3, 12, &d) == TLP_E_BE);                 /* Length 3, First BE 0101 불연속 */
+        const uint8_t qw2[12] = { 0x00,0x00,0x00,0x02, 0x01,0x00,0x00,0xA5, 0x00,0x00,0x10,0x08 };
+        CHECK(tlp_decode(qw2, 12, &d) == 12 && d.first_be == 0x5 && d.last_be == 0xA);   /* QW 정렬 2DW: 허용 */
+        memcpy(x, qw2, 12); x[11] = 0x04;
+        CHECK(tlp_decode(x, 12, &d) == TLP_E_BE);                   /* 같은 BE 인데 QW 정렬 아님 */
+        memcpy(x, v3, 12); x[6] = 0x60;
+        CHECK(tlp_decode(x, 12, &d) == TLP_E_FIELD);                /* Completion Status 011 = reserved */
+        const uint8_t big[12] = { 0x00,0x00,0x00,0x00, 0x01,0x00,0x07,0xFF, 0x80,0x00,0x00,0x04 };
+        CHECK(tlp_decode(big, 12, &d) == TLP_E_4K);                 /* 1024 DW 인데 시작이 4KB 정렬 아님 */
+    }
+    /* 오류 주입 (encode): 오류면 out 을 건드리지 않는다 */
+    {
+        tlp_hdr e = mk_req(TLP_MRD, 0x0100, 0, 0x1000, 4);
+        e.tc = 8;           CHECK(tlp_encode(&e, b, sizeof b) == TLP_E_FIELD);
+        e.tc = 0; e.len_dw = 0;    CHECK(tlp_encode(&e, b, sizeof b) == TLP_E_FIELD);
+        e.len_dw = 1025;           CHECK(tlp_encode(&e, b, sizeof b) == TLP_E_FIELD);
+        e.len_dw = 1; e.addr = 0x1002;  CHECK(tlp_encode(&e, b, sizeof b) == TLP_E_ADDR);
+        e = mk_req(TLP_MRD, 0x0100, 0, 0x1000, 4);
+        memset(b, 0xEE, sizeof b);
+        CHECK(tlp_encode(&e, b, 11) == TLP_E_CAP && b[0] == 0xEE);
+        e = mk_req(TLP_MWR, 0x0100, 0, 0x100000000ull, 4);
+        CHECK(tlp_encode(&e, b, 15) == TLP_E_CAP && b[0] == 0xEE && tlp_encode(&e, b, 16) == 16 && b[0] == 0x60);
+        tlp_hdr c = mk_cpl(TLP_CPLD, 0, CPL_SC, 0x0100, 0, 1, 4, 0x80);
+        CHECK(tlp_encode(&c, b, sizeof b) == TLP_E_FIELD);          /* Lower Address 는 7비트 */
+        c.lower_addr = 0; c.byte_count = 0;     CHECK(tlp_encode(&c, b, sizeof b) == TLP_E_FIELD);
+        c.byte_count = 4097;                    CHECK(tlp_encode(&c, b, sizeof b) == TLP_E_FIELD);
+        c = mk_cpl(TLP_CPL, 0, CPL_SC, 0x0100, 0, 3, 4, 0);
+        CHECK(tlp_encode(&c, b, sizeof b) == TLP_E_FIELD);          /* Cpl(데이터 없음) 에 Length */
+    }
+
+    /* tlp_be: 손 계산 + 브루트포스 전수 */
+    {
+        tlp_span sp; memset(&sp, 0, sizeof sp);
+        CHECK(tlp_be(0xF7C01006u, 8, &sp) == TLP_OK && sp.dw_addr == 0xF7C01004u && sp.len_dw == 3 && sp.first_be == 0xC && sp.last_be == 0x3);
+        CHECK(tlp_be(0x1000, 4, &sp) == TLP_OK && sp.len_dw == 1 && sp.first_be == 0xF && sp.last_be == 0);
+        CHECK(tlp_be(0x1001, 2, &sp) == TLP_OK && sp.len_dw == 1 && sp.first_be == 0x6 && sp.last_be == 0);
+        CHECK(tlp_be(0x1003, 2, &sp) == TLP_OK && sp.len_dw == 2 && sp.first_be == 0x8 && sp.last_be == 0x1);
+        CHECK(tlp_be(0x1002, 0, &sp) == TLP_OK && sp.dw_addr == 0x1000 && sp.len_dw == 1 && sp.first_be == 0 && sp.last_be == 0);
+        CHECK(tlp_be(0x1000, 4096, &sp) == TLP_OK && sp.len_dw == 1024 && sp.first_be == 0xF && sp.last_be == 0xF);
+        CHECK(tlp_be(0x1001, 4096, &sp) == TLP_E_FIELD);            /* 1025 DW */
+        CHECK(tlp_be(0x1000, 4097, &sp) == TLP_E_FIELD);
+        int bad = 0;
+        for (uint32_t off = 0; off < 16; off++)
+            for (uint32_t len = 0; len <= 600; len++) {
+                tlp_span a, e; memset(&a, 0, sizeof a);
+                be_brute(0x10000000u + off, len, &e);
+                if (tlp_be(0x10000000u + off, len, &a) != TLP_OK || a.dw_addr != e.dw_addr || a.len_dw != e.len_dw ||
+                    a.first_be != e.first_be || a.last_be != e.last_be) bad++;
+            }
+        CHECK(bad == 0);
+    }
+
+    /* tlp_split: 손 계산 벡터 */
+    {
+        tlp_chunk c[64];
+        CHECK(tlp_split(0xABCD0E70u, 1024, 512, c, 64) == 3 &&
+              c[0].addr == 0xABCD0E70u && c[0].len == 400 && c[1].addr == 0xABCD1000u && c[1].len == 512 &&
+              c[2].addr == 0xABCD1200u && c[2].len == 112);
+        CHECK(tlp_split(0x1002, 256, 256, c, 64) == 2 && c[0].len == 254 && c[1].addr == 0x1100 && c[1].len == 2);   /* MPS 함정 */
+        CHECK(tlp_split(0xFFE, 4, 4096, c, 64) == 2 && c[0].len == 2 && c[1].addr == 0x1000 && c[1].len == 2);
+        CHECK(tlp_split(0x1004, 4096, 256, c, 64) == 17 && c[15].addr == 0x1F04 && c[15].len == 252 && c[16].addr == 0x2000 && c[16].len == 4);
+        CHECK(tlp_split(0x1000, 4096, 256, c, 15) == TLP_E_CAP);     /* 16 조각인데 15칸 */
+        CHECK(tlp_split(0x1000, 0, 256, c, 64) == TLP_E_FIELD);
+        CHECK(tlp_split(0x1000, 64, 192, c, 64) == TLP_E_FIELD);     /* 2의 거듭제곱 아님 */
+        CHECK(tlp_split(0x1000, 64, 64, c, 64) == TLP_E_FIELD);      /* MPS/MRRS 최소 128 */
+    }
+    /* tlp_split: 성질 — 빈틈 없이 덮음, Length×4 ≤ max, 4KB 안 넘음, 각 조각이 진짜 TLP 로 인코딩됨, 앞에서부터 최대 */
+    {
+        static const uint32_t lens[] = { 1, 3, 4, 127, 128, 129, 511, 512, 513, 4095, 4096, 8192, 10000 };
+        static const uint32_t maxs[] = { 128, 256, 512, 4096 };
+        tlp_chunk c[128]; int bad = 0, cases = 0;
+        for (uint32_t off = 0; off < 4096; off += 13)
+            for (size_t li = 0; li < sizeof lens / sizeof lens[0]; li++)
+                for (size_t mi = 0; mi < 4; mi++) {
+                    uint64_t a = 0x7F0000000ull + off;   /* 4GB 이상 → 4DW 로 인코딩 */
+                    int n = tlp_split(a, lens[li], maxs[mi], c, 128);
+                    cases++;
+                    if (n <= 0) { bad++; continue; }
+                    uint64_t cur = a;
+                    for (int i = 0; i < n; i++) {
+                        tlp_span sp; memset(&sp, 0, sizeof sp);
+                        uint64_t e = c[i].addr + c[i].len;
+                        tlp_hdr q = mk_req(TLP_MWR, 0x0300, 0, c[i].addr, c[i].len);
+                        uint8_t o[16];
+                        bool maximal = (i == n - 1) || e == (c[i].addr & ~3ull) + maxs[mi] || (e & 0xFFFu) == 0;
+                        if (c[i].addr != cur || c[i].len == 0 || tlp_be(c[i].addr, c[i].len, &sp) != TLP_OK ||
+                            4u * sp.len_dw > maxs[mi] || (c[i].addr >> 12) != ((e - 1u) >> 12) ||
+                            tlp_encode(&q, o, sizeof o) != 16 || !maximal) bad++;
+                        cur = e;
+                    }
+                    if (cur != a + lens[li]) bad++;
+                }
+        printf("B split properties: %d cases, bad=%d\n", cases, bad);
+        CHECK(bad == 0);
+    }
+
+    /* ===== Part C: Completion Byte Count / Lower Address ===== */
+    CHECK(cpl_byte_count(1, 0xF, 0) == 4 && cpl_byte_count(1, 0x9, 0) == 4 && cpl_byte_count(1, 0x6, 0) == 2);
+    CHECK(cpl_byte_count(1, 0x0, 0) == 1 && cpl_byte_count(1, 0x8, 0) == 1 && cpl_byte_count(1, 0x7, 0) == 3);
+    CHECK(cpl_byte_count(3, 0xC, 0x3) == 8 && cpl_byte_count(2, 0x8, 0x1) == 2 && cpl_byte_count(1024, 0xF, 0xF) == 4096);
+    CHECK(cpl_lower_addr(0xF7C01004u, 0xC) == 0x06 && cpl_lower_addr(0x20000040u, 0) == 0x40 && cpl_lower_addr(0x3000010Cu, 0x8) == 0x0F);
+    {
+        int bad = 0;   /* 브루트포스: Length 1 전부, Length 2..5 × 연속 BE 조합 */
+        for (uint8_t f = 0; f < 16; f++) {
+            int lo = be_lo(f), hi = be_hi(f);
+            if (cpl_byte_count(1, f, 0) != (f ? hi - lo + 1 : 1)) bad++;
+        }
+        static const uint8_t fs[4] = { 0xF, 0xE, 0xC, 0x8 }, ls[4] = { 0x1, 0x3, 0x7, 0xF };
+        for (uint16_t len = 2; len <= 5; len++)
+            for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {
+                tlp_hdr q = mk_req(TLP_MRD, 0, 0, 0x1000, 4);
+                q.len_dw = len; q.first_be = fs[i]; q.last_be = ls[j];
+                int first = 0x1000 + be_lo(fs[i]), last = 0x1000 + 4 * (len - 1) + be_hi(ls[j]);
+                if (cpl_byte_count(len, fs[i], ls[j]) != last - first + 1) bad++;
+            }
+        CHECK(bad == 0);
+    }
+    {
+        cpl_chunk c[64];
+        tlp_hdr rd = mk_req(TLP_MRD, bdf_id(1, 0, 0), 0x00, 0xABCD0E70u, 400);
+        int n = cpl_split(&rd, 64, 256, c, 64);
+        CHECK(n == 2 && c[0].len_dw == 52 && c[0].byte_count == 400 && c[0].lower_addr == 0x70 &&
+              c[1].addr == 0xABCD0F40u && c[1].len_dw == 48 && c[1].byte_count == 192 && c[1].lower_addr == 0x40);
+        n = cpl_split(&rd, 128, 256, c, 64);
+        CHECK(n == 2 && c[0].len_dw == 36 && c[0].byte_count == 400 && c[0].lower_addr == 0x70 &&
+              c[1].addr == 0xABCD0F00u && c[1].len_dw == 64 && c[1].byte_count == 256 && c[1].lower_addr == 0x00);
+        rd = mk_req(TLP_MRD, bdf_id(1, 0, 0), 0x0C, 0xF7C01006u, 8);          /* V1: 한 번에 */
+        n = cpl_split(&rd, 64, 128, c, 64);
+        CHECK(n == 1 && c[0].len_dw == 3 && c[0].byte_count == 8 && c[0].lower_addr == 0x06);
+        rd = mk_req(TLP_MRD, 0x0100, 0, 0x20000040u, 0);                       /* zero-length read */
+        n = cpl_split(&rd, 64, 128, c, 64);
+        CHECK(n == 1 && c[0].len_dw == 1 && c[0].byte_count == 1 && c[0].lower_addr == 0x40);
+        rd = mk_req(TLP_MRD, 0x0100, 0, 0x30000107u, 154);                    /* BE 8 / 1, 40 DW */
+        CHECK(rd.len_dw == 40 && rd.first_be == 0x8 && rd.last_be == 0x1);
+        n = cpl_split(&rd, 64, 128, c, 64);
+        CHECK(n == 2 && c[0].len_dw == 31 && c[0].byte_count == 154 && c[0].lower_addr == 0x07 &&
+              c[1].len_dw == 9 && c[1].byte_count == 33 && c[1].lower_addr == 0x00);
+        rd = mk_req(TLP_MRD, 0x0100, 0, 0x80000000u, 4096);                   /* 1024 DW, RCB128, MPS256 → 16개 */
+        n = cpl_split(&rd, 128, 256, c, 64);
+        CHECK(n == 16 && c[0].byte_count == 4096 && c[1].byte_count == 3840 && c[15].byte_count == 256 && c[15].lower_addr == 0);
+        CHECK(cpl_split(&rd, 128, 256, c, 15) == TLP_E_CAP && cpl_split(&rd, 32, 256, c, 64) == TLP_E_FIELD &&
+              cpl_split(&rd, 64, 96, c, 64) == TLP_E_FIELD);
+        tlp_hdr wr = mk_req(TLP_MWR, 0x0100, 0, 0x1000, 4);
+        CHECK(cpl_split(&wr, 64, 128, c, 64) == TLP_E_FIELD);                 /* MWr 은 Completion 없음 (posted) */
+    }
+    /* 완료 성질 (무작위): 바이트 합 = BC0, 마지막 아니면 RCB 경계에서 끝, Length×4 ≤ MPS, LA 일치, "마지막" 판정식 */
+    {
+        uint32_t s = 0xBADC0DEu; int bad = 0;
+        for (int it = 0; it < 3000; it++) {
+            uint64_t a = xs32(&s);
+            uint32_t room = 4096u - (uint32_t)(a & 0xFFFu);
+            tlp_hdr rd = mk_req(TLP_MRD, 0x0100, 0, a, xs32(&s) % (room + 1u));
+            uint32_t rcb = (xs32(&s) & 1u) ? 128u : 64u, mps = 128u << (xs32(&s) % 3u);
+            cpl_chunk c[64];
+            int n = cpl_split(&rd, rcb, mps, c, 64);
+            if (n <= 0) { bad++; continue; }
+            uint32_t bc0 = cpl_byte_count(rd.len_dw, rd.first_be, rd.last_be), got = 0;
+            for (int i = 0; i < n; i++) {
+                uint64_t e = c[i].addr + 4u * c[i].len_dw;
+                bool last = c[i].byte_count <= 4u * c[i].len_dw - (c[i].lower_addr & 3u);   /* 요청자가 쓰는 판정식 */
+                uint32_t mine = last ? c[i].byte_count : 4u * c[i].len_dw - (c[i].lower_addr & 3u);
+                if (c[i].byte_count != bc0 - got || 4u * c[i].len_dw > mps || c[i].len_dw == 0 ||
+                    (i < n - 1 && (e % rcb) != 0) || last != (i == n - 1) ||
+                    c[i].lower_addr != (i == 0 ? cpl_lower_addr(rd.addr, rd.first_be) : (uint8_t)(c[i].addr & 0x7Fu)))
+                    bad++;
+                got += mine;
+            }
+            if (got != bc0) bad++;
+        }
+        CHECK(bad == 0);
+    }
+
+    /* AER "TLP Header" 로그 (DW 를 u32 로 찍은 값) → 해석 */
+    {
+        static const uint32_t L1[3] = { 0x4a000003, 0x00000008, 0x01000c06 };
+        static const uint32_t L2[4] = { 0x20000080, 0x0300ffff, 0x00000001, 0x23456000 };
+        static const uint32_t L3[3] = { 0x40004001, 0x0300000f, 0xfe001000 };
+        static const uint32_t L4[3] = { 0x0a000000, 0x00082004, 0x00000500 };
+        uint8_t x[16]; char s[160] = "";
+        tlp_from_dws(L1, 3, x); memset(&d, 0, sizeof d);
+        CHECK(tlp_decode(x, 12, &d) == 12 && tlp_describe(&d, s, sizeof s) > 0 &&
+              strcmp(s, "CplD SC 00:00.0->01:00.0 tag=0x0c len=3 bc=8 la=0x06") == 0);
+        printf("C AER L1: %s\n", s);
+        tlp_from_dws(L2, 4, x); memset(&d, 0, sizeof d);
+        CHECK(tlp_decode(x, 16, &d) == 16 && tlp_describe(&d, s, sizeof s) > 0 &&
+              strcmp(s, "MRd64 03:00.0 tag=0xff addr=0x123456000 len=128 be=f/f") == 0);
+        printf("C AER L2: %s\n", s);
+        tlp_from_dws(L3, 3, x); memset(&d, 0, sizeof d);
+        CHECK(tlp_decode(x, 12, &d) == 12 && tlp_describe(&d, s, sizeof s) > 0 &&
+              strcmp(s, "MWr32 03:00.0 tag=0x00 addr=0xfe001000 len=1 be=f/0 EP") == 0);
+        printf("C AER L3: %s\n", s);
+        tlp_from_dws(L4, 3, x); memset(&d, 0, sizeof d);
+        CHECK(tlp_decode(x, 12, &d) == 12 && tlp_describe(&d, s, sizeof s) > 0 &&
+              strcmp(s, "Cpl UR 00:01.0->00:00.0 tag=0x05 len=0 bc=4 la=0x00") == 0);
+        printf("C AER L4: %s\n", s);
+        h = mk_req(TLP_MWR, bdf_id(3, 0, 0), 0, 0x1234567800ull, 4);
+        h.tc = 7; h.attr = 7; h.th = h.td = h.ep = true; h.at = 3;
+        CHECK(tlp_describe(&h, s, sizeof s) > 0 &&
+              strcmp(s, "MWr64 03:00.0 tag=0x00 addr=0x1234567800 len=1 be=f/0 TC7 RO NS IDO TH TD EP AT3") == 0);
+        memset(s, 'Z', sizeof s);
+        CHECK(tlp_describe(&h, s, 20) == TLP_E_CAP && s[0] == 'Z');           /* 모자라면 안 씀 */
+    }
+
+    /* SSD 시나리오: NVMe 컨트롤러(03:00.0)가 호스트 메모리 0xABCD0E70 에서 1024B 를 읽는다.
+     * MRRS 512 → MRd 3개 (tag 0..2), 호스트 Root Complex 가 RCB 64 / MPS 256 으로 CplD 를 돌려준다. */
+    {
+        tlp_chunk rq[8]; cpl_chunk cp[16];
+        uint8_t seen[1024]; memset(seen, 0, sizeof seen);
+        int nr = tlp_split(0xABCD0E70u, 1024, 512, rq, 8), total_cpl = 0, bad = 0;
+        CHECK(nr == 3);
+        for (int i = 0; i < nr && i < 8; i++) {
+            tlp_hdr rd = mk_req(TLP_MRD, bdf_id(3, 0, 0), (uint8_t)i, rq[i].addr, rq[i].len);
+            uint8_t o[16]; memset(&d, 0, sizeof d);
+            int n = tlp_encode(&rd, o, sizeof o);
+            if (n != 12 || tlp_decode(o, 12, &d) != 12 || !hdr_eq(&d, &rd)) bad++;
+            if (n == 12) hex(i == 0 ? "C SSD MRd tag0:" : i == 1 ? "C SSD MRd tag1:" : "C SSD MRd tag2:", o, 12);
+            int nc = cpl_split(&rd, 64, 256, cp, 16);
+            uint64_t first = rq[i].addr;                        /* 요청자: tag → 요청 첫 바이트 주소 */
+            for (int k = 0; k < nc; k++) {
+                tlp_hdr cd = mk_cpl(TLP_CPLD, bdf_id(0, 0, 0), CPL_SC, bdf_id(3, 0, 0), (uint8_t)i,
+                                    cp[k].len_dw, cp[k].byte_count, cp[k].lower_addr);
+                uint8_t w[16]; tlp_hdr r; memset(&r, 0, sizeof r);
+                if (tlp_encode(&cd, w, sizeof w) != 12 || tlp_decode(w, 12, &r) != 12) { bad++; continue; }
+                /* 받은 CplD 만으로 위치 계산: 이 데이터의 첫 유효 바이트 = first + (BC0 − BC) */
+                uint64_t at = first + (rq[i].len - r.byte_count);
+                if ((at & 0x7Fu) != r.lower_addr) bad++;
+                uint32_t cnt = r.byte_count <= 4u * r.len_dw - (r.lower_addr & 3u) ? r.byte_count : 4u * r.len_dw - (r.lower_addr & 3u);
+                for (uint32_t j = 0; j < cnt; j++) {
+                    uint64_t off = at + j - 0xABCD0E70u;
+                    if (off >= 1024 || seen[off]++) bad++;
+                }
+                printf("C SSD   CplD tag%d len=%2u DW bc=%3u la=0x%02x\n", i, r.len_dw, r.byte_count, r.lower_addr);
+                total_cpl++;
+            }
+        }
+        int covered = 0;
+        for (int j = 0; j < 1024; j++) covered += seen[j] == 1;
+        CHECK(bad == 0 && total_cpl == 5 && covered == 1024);
+    }
+
+    printf("%d/%d passed\n", g_pass, g_total);
+    return g_pass == g_total ? 0 : 1;
+}

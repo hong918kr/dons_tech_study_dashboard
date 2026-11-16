@@ -757,7 +757,10 @@ static void test_part_c(void) {
                 flash_read(f, log_slot_addr(&m, m.cur, m.slot - 1), raw, LOG_REC);
                 torn_slot_skips += !log_unpack(raw, &s2, NULL);
             }
-            for (uint32_t i = 1; i <= 100; i++) { pay_of(m.seq + 1, d); if (log_append(&m, d) != FLASH_OK) fails++; }
+            for (uint32_t i = 1; i <= 100; i++) {                    /* 재부팅 뒤엔 새 내용 (같은 내용 재시도 아님) */
+                pay_of(m.seq + 1 + 1000000u, d);
+                if (log_append(&m, d) != FLASH_OK) fails++;
+            }
             log_t m2; uint32_t seq2 = 0;
             if (!log_mount(&m2, f, 0, 4, &seq2, NULL) || seq2 != seq + 100) fails++;
         }

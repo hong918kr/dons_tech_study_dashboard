@@ -1,0 +1,45 @@
+# arm-none-eabi.cmake — CMake toolchain file: bare-metal Cortex-M4 with arm-none-eabi-gcc.
+# Use:  cmake -S . -B build-target -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake
+# A toolchain file says HOW to compile for the target CPU. It is read before project()
+# and AGAIN inside every try_compile project, so it must be idempotent and set *_INIT only.
+
+# (1) target system: "Generic" = no OS. Setting it turns CMAKE_CROSSCOMPILING on.
+set(CMAKE_SYSTEM_NAME      Generic)
+set(CMAKE_SYSTEM_PROCESSOR arm)
+
+# (2) compilers (found on PATH; CMake derives objcopy/objdump/size... from the prefix)
+set(TOOLCHAIN_PREFIX arm-none-eabi-)
+set(CMAKE_C_COMPILER   ${TOOLCHAIN_PREFIX}gcc)
+set(CMAKE_ASM_COMPILER ${TOOLCHAIN_PREFIX}gcc)
+find_program(ARM_SIZE ${TOOLCHAIN_PREFIX}size REQUIRED)
+
+# (3) compiler checks build a static library, not an executable: there is no
+#     crt0/libc/linker script yet, so "link a test program" cannot work here.
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
+# (4) CPU flags -> *_INIT: CMake seeds the CMAKE_<LANG>_FLAGS cache entry from these on
+#     the FIRST configure (+ the CFLAGS env var). The cache entry stays the user's to edit.
+# P2: one toolchain file, several cores: -DFW_MCU=cortex-m4 (default) | cortex-m0plus.
+#     try_compile projects get a FRESH cache -> forward FW_MCU explicitly.
+if(NOT FW_MCU)
+    set(FW_MCU cortex-m4)
+endif()
+if(NOT "FW_MCU" IN_LIST CMAKE_TRY_COMPILE_PLATFORM_VARIABLES)   # file is read 3x: stay idempotent
+    list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES FW_MCU)
+endif()
+if(FW_MCU STREQUAL "cortex-m4")
+    set(CPU_FLAGS "-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16")
+elseif(FW_MCU STREQUAL "cortex-m0plus")
+    set(CPU_FLAGS "-mcpu=cortex-m0plus -mthumb -mfloat-abi=soft")   # ARMv6-M: no FPU, no SDIV
+else()
+    message(FATAL_ERROR "FW_MCU must be cortex-m4 or cortex-m0plus, got '${FW_MCU}'")
+endif()
+set(CMAKE_C_FLAGS_INIT   "${CPU_FLAGS} -ffreestanding -ffunction-sections -fdata-sections")
+set(CMAKE_ASM_FLAGS_INIT "${CPU_FLAGS}")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "")   # C flags (with CPU flags) are already on the link line
+
+# (5) find_*(): programs from the HOST, libraries/headers/packages only from the target root
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)

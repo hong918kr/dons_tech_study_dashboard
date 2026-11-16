@@ -1,0 +1,88 @@
+== E1. clang-tidy 23 built-in defaults (no .clang-tidy anywhere above /tmp)
+Checks:          'clang-diagnostic-*'
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*'
+SystemHeaders:   false
+
+== E2. 'clang-diagnostic-*' alone (compiler warnings only)
+Error: no checks enabled.
+USAGE: clang-tidy [options] <source0> [... <sourceN>]
+
+
+== E3. HeaderFilterRegex forms vs how -I is spelled (canary: include/canary.h, third_party/vendor_canary.h)
+  '<unset: 23 default .*>'   -I rel  -> reported: include/canary.h third_party/vendor_canary.h 
+  '<unset: 23 default .*>'   -I abs  -> reported: include/canary.h third_party/vendor_canary.h 
+  ''                         -I rel  -> reported: (nothing)
+  ''                         -I abs  -> reported: (nothing)
+  '.*/include/.*'            -I rel  -> reported: (nothing)
+  '.*/include/.*'            -I abs  -> reported: include/canary.h 
+  '(^|/)include/'            -I rel  -> reported: include/canary.h 
+  '(^|/)include/'            -I abs  -> reported: include/canary.h 
+
+== E4. analyzer knobs one at a time on fw_bugs.c (clang --analyze)
+  knobs: [default]
+    fw_bugs.c:55:18: warning: 2nd function call argument is an uninitialized value [core.CallAndMessage]
+    fw_bugs.c:105:18: warning: Value stored to 'tmp' during its initialization is never read [deadcode.DeadStores]
+    fw_bugs.c:224:55: warning: Use of memory after it is freed [unix.Malloc]
+    fw_bugs.c:272:9: warning: Value stored to 'err' during its initialization is never read [deadcode.DeadStores]
+  knobs: [-Xanalyzer -analyzer-max-loop -Xanalyzer 16]
+    fw_bugs.c:55:18: warning: 2nd function call argument is an uninitialized value [core.CallAndMessage]
+    fw_bugs.c:105:18: warning: Value stored to 'tmp' during its initialization is never read [deadcode.DeadStores]
+    fw_bugs.c:168:16: warning: Potential leak of memory pointed to by 'pkt' [unix.Malloc]
+    fw_bugs.c:224:55: warning: Use of memory after it is freed [unix.Malloc]
+    fw_bugs.c:272:9: warning: Value stored to 'err' during its initialization is never read [deadcode.DeadStores]
+  knobs: [-Xanalyzer -analyzer-config -Xanalyzer suppress-null-return-paths=false]
+    fw_bugs.c:55:18: warning: 2nd function call argument is an uninitialized value [core.CallAndMessage]
+    fw_bugs.c:105:18: warning: Value stored to 'tmp' during its initialization is never read [deadcode.DeadStores]
+    fw_bugs.c:217:52: warning: Access to field 'name' results in a dereference of a null pointer (loaded from variable 'cmd') [core.NullDereference]
+    fw_bugs.c:224:55: warning: Use of memory after it is freed [unix.Malloc]
+    fw_bugs.c:272:9: warning: Value stored to 'err' during its initialization is never read [deadcode.DeadStores]
+
+== E5. analyzer options via CheckOptions (clang-analyzer-<option>) vs ExtraArgs
+  --dump-config CheckOptions: CheckOptions:    {}
+  CheckOptions route, findings on line 217 (BUG01): 0
+  ExtraArgs route (practice.clang-tidy), findings on line 217: 1
+
+== E6. insecureAPI.DeprecatedOrUnsafeBufferHandling on fw_clean.c: macOS fortify headers hide the calls
+  [default macOS SDK] findings: 0
+  [-D_FORTIFY_SOURCE=0] findings: 2
+    fw_clean.c:167:9: warning: Call to function 'memcpy' is insecure as it does not provide security checks introduced in the C11 standard. Replace wi
+    fw_clean.c:271:13: warning: Call to function 'snprintf' is insecure as it does not provide security checks introduced in the C11 standard. Replace
+  preprocessed memcpy on the Mac:  __builtin___memcpy_chk (pkt->recs
+
+== E7. solution.clang-tidy WITHOUT that exclusion, fw_clean.c (target-like flags)
+fw_clean.c:167:9: error: Call to function 'memcpy' is insecure as it does not provide security checks introduced in the C11 standard. Replac
+fw_clean.c:271:13: error: Call to function 'snprintf' is insecure as it does not provide security checks introduced in the C11 standard. Rep
+
+== E8. rewrite the HAL idiom instead of suppressing it: (void)UART1->SR; (void)UART1->DR;
+  105:        (void)UART1->SR;
+  106:        (void)UART1->DR;
+  clang --analyze : 0 findings
+  clang-tidy sol  : 0 findings
+  cppcheck sol    : 0 findings
+  asm: 7:	ldr	w8, [x8, _uart1_sim@PAGEOFF]
+  asm: 23:	ldr	w19, [x8, _uart1_sim@PAGEOFF+4]
+  asm: 56:	ldr	wzr, [x8]
+  asm: 57:	ldr	wzr, [x8, #4]
+  asm: 59:	ldr	w9, [x8, _rx_overruns@PAGEOFF]
+  asm: 63:	ret
+
+== E9. cppcheck MISRA C:2012 addon on fw_clean.c (no rule texts installed: ids only; addon findings are 'style')
+  findings: 61  (distinct rules: 15)
+     14 misra-c2012-15.5
+     12 misra-c2012-8.4
+      7 misra-c2012-12.1
+      5 misra-c2012-21.3
+      4 misra-c2012-8.7
+      4 misra-c2012-17.7
+      3 misra-c2012-17.1
+      2 misra-c2012-8.9
+
+== E10. cost: wall time per tool on fw_bugs.c (median of 5 runs, parallel jobs on this Mac -> noisy)
+  cc -fsyntax-only -Wall -Wextra              133 ms
+  clang --analyze (default)                   152 ms
+  clang-tidy solution.clang-tidy              212 ms
+  clang-tidy practice.clang-tidy             2823 ms
+  clang-tidy '*'                              319 ms
+  cppcheck solution.cppcheck                  159 ms
+  cppcheck --check-level=exhaustive           188 ms
